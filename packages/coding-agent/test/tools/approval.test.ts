@@ -3,6 +3,7 @@ import { customToolToDefinition } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentTool, ToolApproval } from "@oh-my-pi/pi-agent-core";
 import {
 	type ApprovalMode,
+	canToolAllowAvoidPrompt,
 	denyError,
 	formatApprovalPrompt,
 	requestApproval,
@@ -510,6 +511,26 @@ describe("tool-owned dynamic approval declarations", () => {
 		});
 	});
 
+	it("matches multi-wildcard bash patterns in linear time on long commands", () => {
+		const settingsOverrides = { "bash.patterns": [{ match: "*git* *push* *:main", approval: "deny" }] };
+		const body = Array.from({ length: 120 }, (_, i) => `git push origin feature-${i}`).join("\n");
+		const command = `cat > pushes.txt <<'EOF'\n${body}\nEOF\necho done`;
+
+		// A `.*` regex took minutes here (#20591).
+		const start = performance.now();
+		expect(bashApproval(command, settingsOverrides)).toBe("exec");
+		expect(performance.now() - start).toBeLessThan(1000);
+		expect(bashApproval(`${command}\ngit push origin HEAD:main`, settingsOverrides)).toMatchObject({
+			policy: "deny",
+		});
+	});
+
+	it("keeps a middle glob literal from overlapping the anchored suffix", () => {
+		const settingsOverrides = { "bash.patterns": [{ match: "git *push*push", approval: "deny" }] };
+		expect(bashApproval("git push", settingsOverrides)).toBe("exec");
+		expect(bashApproval("git push && git push", settingsOverrides)).toMatchObject({ policy: "deny" });
+	});
+
 	it("keeps critical bash patterns prompt-gated unless explicitly denied", () => {
 		const settingsOverrides = {
 			"bash.patterns": [{ match: "*", approval: "allow" }],
@@ -865,6 +886,38 @@ describe("tool-owned dynamic approval declarations", () => {
 			"cargo bench --manifest-path layers/layer3/Cargo.toml --bench standardized_criterion -- --full '^layer3/write/file-wal/batch-(10|1000|10000)$'";
 
 		expect(bashApproval(command, settingsOverrides)).toEqual({ tier: "write", policy: "allow" });
+	});
+
+	it("does not treat spaces inside quoted prose or hyphen-prefixed bullets as -c/-e reinterpret flags", () => {
+		const settingsOverrides = {
+			"bash.allowCompoundCommands": true,
+			"bash.patterns": [
+				{ match: "git add*", approval: "allow" },
+				{ match: "git commit*", approval: "allow" },
+			],
+		};
+
+		for (const command of [
+			'git commit -m "docs: note limit" -m "Caps rendering at 50 per page; replacing inline math keeps it clean."',
+			'git commit -m "fix(stats): address review" -m "Restore indexing (~18:30-18:37 UTC)"',
+			'git add -A && git commit -m "fix(stats): address review" -m "- Route fork upserts so new outcomes merge"',
+		]) {
+			expect(bashApproval(command, settingsOverrides)).toEqual({ tier: "write", policy: "allow" });
+		}
+
+		// Genuine short-option clusters containing -c/-e still block a matching allow rule when paired with shell control chars.
+		const permissiveGitOverrides = {
+			"bash.allowCompoundCommands": true,
+			"bash.patterns": [{ match: "git *", approval: "allow" }],
+		};
+		for (const command of [
+			"git -c alias.x='!touch /tmp/pwn; printf ok' x",
+			"git -ec alias.x='!touch /tmp/pwn; printf ok' x",
+			"git add -A && git -c alias.x='!touch /tmp/pwn; printf ok' x",
+			"git -\\\nc alias.x='!touch /tmp/pwn; printf ok' x",
+		]) {
+			expect(bashApproval(command, permissiveGitOverrides)).toBe("exec");
+		}
 	});
 
 	it("opts into per-segment allows for literal && chains, including quoted arguments", () => {
@@ -1378,6 +1431,269 @@ describe("tool-owned dynamic approval declarations", () => {
 			"Allow tool: bash\nCommand: git status && bun test",
 		);
 	});
+
+	it("allows benign flags and quoted metacharacters without false -c/-e misfires", () => {
+		const settingsOverrides = {
+			"bash.allowCompoundCommands": true,
+			"bash.patterns": [
+				{ match: "go test*", approval: "allow" },
+				{ match: "git status*", approval: "allow" },
+				{ match: "git commit*", approval: "allow" },
+				{ match: "rg *", approval: "allow" },
+				{ match: "jq *", approval: "allow" },
+			],
+		};
+
+		for (const resolvedShell of ["/bin/bash", "/bin/zsh"]) {
+			for (const command of [
+				'go test -race -run "Test(A|B)"',
+				'go test -bench "Benchmark(A|B)"',
+				'go test -coverprofile=cov.out -run "Test(A|B)"',
+				'git status && go test -race -run "Test(A|B)"',
+				'git commit -m "fix -e flag (see foo; bar)"',
+				'git commit -m "add -c support; (edge)"',
+				String.raw`git commit -m $'fix(a): b\n\ndetails (c; d)'`,
+				'rg -e "(foo|bar)" src/',
+				"jq -c '.a | .b' file.json",
+			]) {
+				expect(bashApproval(command, settingsOverrides, resolvedShell)).toEqual({
+					tier: "write",
+					policy: "allow",
+				});
+			}
+		}
+	});
+
+	it("gates command-aware reinterpretable flags, malformed syntax, nested denials, and zsh glob qualifiers", () => {
+		const permissiveOverrides = {
+			"bash.patterns": [
+				{ match: "rm -rf /*", approval: "deny" },
+				{ match: "*", approval: "allow" },
+			],
+		};
+
+		for (const command of [
+			"git -c core.sshCommand=/tmp/evil fetch",
+			"git --config-env=core.sshCommand=EVIL fetch",
+			"git clone -c core.sshCommand=/tmp/evil https://example.com/repo.git",
+			"env git -c alias.x='!id' x",
+			'env -S"sh -c id"',
+			"sh -c 'id'",
+			"bash -lc 'echo hi'",
+			'bash -c"ls -la; id"',
+			"python3 -c 'import os'",
+			"node -e 'process.exit(1)'",
+			'node -e"1-1"',
+			"bun -e '1+1'",
+			'php -r"echo 1-1;"',
+			"find . -exec rm {} +",
+			"rg --pre /tmp/evil pattern",
+			"git {-c,core.sshCommand=/tmp/evil} fetch",
+			"git rebase -x 'id' HEAD~1",
+			"git submodule foreach 'id'",
+			"git bisect run id",
+			"node -r fs -e 'process.exit(1)'",
+			"bun --preload ./x.ts -e '1+1'",
+			"git -[c] alias.x='!id' x",
+			"git submodule --quiet foreach 'id'",
+			"node --import 'data:text/javascript,console.log(1)'",
+			"/bin/s[h] -c 'id'",
+			"env - sh -c 'id'",
+			"sudo -uroot sh -c 'id'",
+			"sudo -s 'id'",
+			"bash -euo pipefail -c 'id'",
+			"python3 -uW ignore -c 'import os'",
+			"ruby -W -e 'system(1)'",
+			"git ?ccore.fsmonitor=id* status",
+			"git grep -nOecho foo",
+			"git filter-branch --tree-filter 'id' HEAD",
+			"go test -exec /tmp/evil ./...",
+			"xargs sh -c",
+			"bun -c -e '1+1'",
+			"go t[e]st -exec /tmp/evil ./...",
+			"go build -toolexec=/tmp/evil ./...",
+			"go vet -vettool=/tmp/evil ./...",
+			"tar xIf /tmp/evil a.tar",
+			"tar --rsh-command=/tmp/evil -cf a.tar .",
+			"pwsh -co 'id'",
+			"powershell 'id'",
+			"go -C . test -exec /tmp/evil ./...",
+			"go -C=. vet -vettool=/tmp/evil ./...",
+			"git fetch --upload-pa=/tmp/evil origin",
+			"go run -exec 'sh -c id' .",
+			"python3 /safe/*.missing -c 'import os'",
+			"npx -c 'echo a | wc -l'",
+			"npm exec -c 'echo a | wc -l'",
+			"su -c 'id; whoami'",
+			"flock /tmp/l -c 'id; whoami'",
+			"script -qc 'id; whoami'",
+			"docker exec c sh -c 'id; whoami'",
+			"uv run bash -c 'id; whoami'",
+			"setsid sh -c 'x; y'",
+			"strace sh -c 'x; y'",
+			"chrt 1 sh -c 'x; y'",
+			"ionice sh -c 'x; y'",
+			"deno -A eval '1+1'",
+			"ruby -r json -e 'system(1)'",
+			"php -d x=1 -r 'system(1);'",
+			"bash -O extglob -c 'id'",
+			"env -iu FOO sh -c 'id'",
+			"timeout -vs KILL 5 python3 -c 'import os'",
+			"env env env env env env env env env sh -c 'id'",
+			"tar -I/tmp/evil -cf /tmp/a.tar .",
+			"git status 'unterminated",
+			"uv run -- bash -c 'id; whoami'",
+			"docker exec c -- sh -c 'id'",
+			"flock /tmp/l -- sh -c 'id'",
+			`make SHELL='sh -c "id; whoami"'`,
+			"sort --compress-prog=/tmp/evil f",
+			"tar -xf a.tar --to-com=/tmp/evil",
+			"tar -xf a.tar --use-comp=/tmp/evil",
+			"tar -cf host:/x --rmt-command=/tmp/evil .",
+			"env --split='sh -c id'",
+			"env --s='sh -c id'",
+			"sudo --sh id",
+			"git instaweb --httpd=/tmp/evil",
+		]) {
+			expect(bashApproval(command, permissiveOverrides, "/bin/bash")).toBe("exec");
+		}
+
+		expect(bashApproval("echo $(rm -rf /tmp/victim)", permissiveOverrides, "/bin/bash")).toEqual({
+			tier: "exec",
+			override: true,
+			policy: "deny",
+			reason: "Blocked by bash pattern: rm -rf /*",
+		});
+		expect(bashApproval("echo $(( $(rm -rf /tmp/victim) ))", permissiveOverrides, "/bin/bash")).toEqual({
+			tier: "exec",
+			override: true,
+			policy: "deny",
+			reason: "Blocked by bash pattern: rm -rf /*",
+		});
+
+		expect(bashApproval("echo *(e:'id':)", permissiveOverrides, "/bin/zsh")).toBe("exec");
+		expect(bashApproval("cat <<EOF\n'$(rm -rf /tmp/victim)'\nEOF", permissiveOverrides, "/bin/bash")).toEqual({
+			tier: "exec",
+			override: true,
+			policy: "deny",
+			reason: "Blocked by bash pattern: rm -rf /*",
+		});
+		expect(bashApproval("echo ${x:$(rm -rf /tmp/victim):1}", permissiveOverrides, "/bin/bash")).toEqual({
+			tier: "exec",
+			override: true,
+			policy: "deny",
+			reason: "Blocked by bash pattern: rm -rf /*",
+		});
+		expect(bashApproval("git -c core.sshCommand=/tmp/evil fetch", permissiveOverrides, "cmd.exe")).toBe("exec");
+		expect(
+			bashApproval("git fetch -u origin", { "bash.patterns": [{ match: "git *", approval: "allow" }] }, "/bin/bash"),
+		).toEqual({
+			tier: "write",
+			policy: "allow",
+		});
+		expect(
+			bashApproval(
+				"git commit -m '--upload-pack'",
+				{ "bash.patterns": [{ match: "git *", approval: "allow" }] },
+				"/bin/bash",
+			),
+		).toEqual({
+			tier: "write",
+			policy: "allow",
+		});
+		expect(
+			bashApproval(
+				"rg --glob='*.ts' foo src/*.rs",
+				{ "bash.patterns": [{ match: "rg *", approval: "allow" }] },
+				"/bin/bash",
+			),
+		).toEqual({
+			tier: "write",
+			policy: "allow",
+		});
+		expect(
+			bashApproval("rg -e '--pre' src", { "bash.patterns": [{ match: "rg *", approval: "allow" }] }, "/bin/bash"),
+		).toEqual({
+			tier: "write",
+			policy: "allow",
+		});
+		expect(
+			bashApproval(
+				"python3 -Wignore::DeprecationWarning script.py",
+				{ "bash.patterns": [{ match: "python3 *", approval: "allow" }] },
+				"/bin/bash",
+			),
+		).toEqual({
+			tier: "write",
+			policy: "allow",
+		});
+		expect(
+			bashApproval(
+				"git diff HEAD@{1}..HEAD@{0}",
+				{ "bash.patterns": [{ match: "git *", approval: "allow" }] },
+				"/bin/bash",
+			),
+		).toEqual({
+			tier: "write",
+			policy: "allow",
+		});
+		expect(
+			bashApproval(
+				"git push --force origin main # --dry-run",
+				{ "bash.patterns": [{ match: "git push * --dry-run", approval: "allow" }] },
+				"/bin/bash",
+			),
+		).toBe("exec");
+		expect(
+			bashApproval('rm -rf "/"', { "bash.patterns": [{ match: "rm *", approval: "allow" }] }, "/bin/bash"),
+		).toEqual({
+			tier: "exec",
+			override: true,
+			reason: "Critical pattern detected",
+		});
+		expect(
+			bashApproval(
+				"FOO=1 git 'status' && git diff",
+				{
+					"bash.allowCompoundCommands": true,
+					"bash.patterns": [
+						{ match: "FOO=1 git status", approval: "deny" },
+						{ match: "git *", approval: "allow", env: ["FOO"] },
+					],
+				},
+				"/bin/bash",
+			),
+		).toEqual({
+			tier: "exec",
+			override: true,
+			policy: "deny",
+			reason: "Blocked by bash pattern: FOO=1 git status",
+		});
+		expect(bashApproval("cmd /cwhoami", permissiveOverrides, "cmd.exe")).toBe("exec");
+		expect(bashApproval("cmd /rwhoami", permissiveOverrides, "cmd.exe")).toBe("exec");
+		expect(
+			bashApproval("git grep -eTODO", { "bash.patterns": [{ match: "git *", approval: "allow" }] }, "/bin/bash"),
+		).toEqual({
+			tier: "write",
+			policy: "allow",
+		});
+		expect(
+			bashApproval("git grep -e TODO", { "bash.patterns": [{ match: "git *", approval: "allow" }] }, "/bin/bash"),
+		).toEqual({
+			tier: "write",
+			policy: "allow",
+		});
+		expect(
+			bashApproval(
+				"powershell -File report.ps1 input.txt",
+				{ "bash.patterns": [{ match: "powershell *", approval: "allow" }] },
+				"/bin/bash",
+			),
+		).toEqual({
+			tier: "write",
+			policy: "allow",
+		});
+	});
 });
 
 describe("resolveApprovalFromContext fail-closed default", () => {
@@ -1419,5 +1735,21 @@ describe("resolveApprovalFromContext fail-closed default", () => {
 			}),
 		).toEqual({ approvalMode: "yolo", userPolicies: { bash: "deny" } });
 		expect(resolveApprovalFromContext({ autoApprove: true })).toEqual({ approvalMode: "yolo", userPolicies: {} });
+	});
+});
+
+describe("canToolAllowAvoidPrompt", () => {
+	const canAllow = (overrides: Record<string, unknown>) =>
+		canToolAllowAvoidPrompt("bash", "exec", { settings: Settings.isolated(overrides) });
+
+	it("is true only when an unmatched call prompts and a tool allow would skip it", () => {
+		expect(canAllow({ "tools.approvalMode": "write" })).toBe(true);
+		expect(canAllow({ "tools.approvalMode": "always-ask" })).toBe(true);
+		// Yolo already runs the unmatched call; a user `prompt` makes it ask, and a tool allow still wins.
+		expect(canAllow({ "tools.approvalMode": "yolo" })).toBe(false);
+		expect(canAllow({ "tools.approvalMode": "yolo", "tools.approval": { bash: "prompt" } })).toBe(true);
+		// A user `allow` never prompts; a user `deny` blocks even a tool allow.
+		expect(canAllow({ "tools.approvalMode": "write", "tools.approval": { bash: "allow" } })).toBe(false);
+		expect(canAllow({ "tools.approvalMode": "write", "tools.approval": { bash: "deny" } })).toBe(false);
 	});
 });

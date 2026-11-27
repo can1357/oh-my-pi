@@ -356,6 +356,32 @@ impl NativeSpawner {
 	/// non-UTF-8 on Windows). On Windows an extra fd reaches the child only
 	/// as the named pipe its `/dev/fd/N` argument becomes.
 	pub fn spawn(&self, spec: SpawnSpec<'_>) -> io::Result<Box<dyn ExtProc>> {
+		#[cfg(unix)]
+		{
+			imp::spawn(&self.shared, spec, false)
+		}
+		#[cfg(windows)]
+		imp::spawn(&self.shared, spec)
+	}
+
+	/// [`Self::spawn`] for a program whose resource usage is reported
+	/// (`time`). On Linux the program runs under a helper process, the
+	/// [`ExtProc`]'s process, so that its peak resident set size
+	/// ([`ExtProc::usage`]) is its own: a process exec'd straight from the
+	/// host keeps the host's peak as its own. The helper shares the
+	/// program's process group and exits as the program did; where it
+	/// cannot run, or the spawn signals the program's pid alone
+	/// ([`Sessions::Inherit`] outside job control), this is a plain spawn.
+	///
+	/// # Errors
+	///
+	/// As [`Self::spawn`].
+	pub fn spawn_measured(&self, spec: SpawnSpec<'_>) -> io::Result<Box<dyn ExtProc>> {
+		#[cfg(unix)]
+		{
+			imp::spawn(&self.shared, spec, true)
+		}
+		#[cfg(windows)]
 		imp::spawn(&self.shared, spec)
 	}
 

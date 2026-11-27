@@ -11,11 +11,7 @@
  * injections into one message.
  */
 import { prompt } from "@oh-my-pi/pi-utils";
-import {
-	ASYNC_NOTIFY_MESSAGE_TYPE,
-	type AsyncNotifyDetails,
-	type AsyncNotifyReport,
-} from "@oh-my-pi/pi-tui/chat/messages";
+import { ASYNC_NOTIFY_MESSAGE_TYPE, type AsyncNotifyDetails, type AsyncNotifyReport } from "./transcript/messages";
 import { NOTIFY_MAX_LINES, type NotifyBatch } from "../async/notify";
 import asyncNotifyTemplate from "../prompts/tools/async-notify.md" with { type: "text" };
 import { commandIdentity } from "./async-job-delivery";

@@ -29,8 +29,8 @@ import {
 } from "@oh-my-pi/pi-agent-core";
 import { toolWireSchema } from "@oh-my-pi/pi-ai";
 import { shellReservedCommandNames } from "@oh-my-pi/pi-natives";
-import { truncateHeadBytes } from "@oh-my-pi/pi-tui/tools/streaming-output";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { truncateHeadBytes } from "./streaming-output";
+import { ToolError } from "./tool-errors";
 import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 import { isEvalBridgeToolCall, isEvalBridgeToolCallable } from "../eval/tool-bridge-policy";
 import { renderToolHelp } from "../exec/tool-cli";
@@ -135,6 +135,25 @@ export interface ToolCommandState {
 	readonly resolve?: (name: string) => Tool | undefined;
 	/** Optional execution-only decorator, such as the ACP permission gate. */
 	decorateExecution?(tool: Tool): Tool;
+}
+
+/** Tool that hosts tool commands: mounted tools run as commands inside its shell. */
+const TOOL_COMMAND_HOST_NAME = "bash";
+
+/**
+ * Whether the session still has a tool that can run tool commands: the native built-in host,
+ * whether it holds the registry slot or sits behind a same-name extension replacement. A
+ * replacement never has to implement the transport — `RegisteredToolAdapter` routes a line made
+ * only of tool commands back to the native host, which dispatches exactly the tools a top-level
+ * call would have run — so it does not matter whether the replacement delegates. Without a native
+ * host (a session whose `bash` is only an extension tool) nothing can dispatch the commands, so
+ * the transport stays off and mountable tools present top-level (#18339).
+ */
+export function toolCommandHostAvailable(
+	builtInNames: ReadonlySet<string>,
+	hasNativeTool: ((name: string) => boolean) | undefined,
+): boolean {
+	return builtInNames.has(TOOL_COMMAND_HOST_NAME) || hasNativeTool?.(TOOL_COMMAND_HOST_NAME) === true;
 }
 
 /** Full-help character budget for system-prompt tool-command sections. */

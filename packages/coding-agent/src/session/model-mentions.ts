@@ -14,8 +14,8 @@ import {
 	modelMentionName,
 	modelMentionTag,
 	resolveModelMentionToken,
-} from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
-import { AUTO_THINKING, parseEffort } from "@oh-my-pi/pi-tui/thinking";
+} from "./model-mention-syntax";
+import { AUTO_THINKING, parseEffort } from "../thinking/levels";
 import type { SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 

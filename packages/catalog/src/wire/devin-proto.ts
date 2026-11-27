@@ -5,8 +5,14 @@
  * that already load the generated schemas.
  */
 
-import { gunzipSync } from "node:zlib";
+import type * as Zlib from "node:zlib";
 import { fromBinary, type MessageCodec, type ProtoMessage } from "../discovery/protobuf";
+
+let zlibCache: typeof Zlib | undefined;
+function gunzipSync(payload: Uint8Array): Buffer {
+	if (!zlibCache) zlibCache = require("node:zlib") as typeof Zlib;
+	return zlibCache.gunzipSync(payload);
+}
 
 /**
  * Decode a unary Devin Connect response. Edges variously return bare protobuf

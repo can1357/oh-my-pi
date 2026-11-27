@@ -9,6 +9,7 @@
  * a wire axis onto a model's compat record only when the model's API maps to
  * one of the axis's declared records.
  */
+import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import type { Effort } from "../effort";
 import { MODEL_KINDS, type ThinkingControlMode } from "../types";
 import { FACTORY_DROID_UPSTREAMS } from "../wire/factory-droid";
@@ -177,6 +178,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"synthetic-reasoning-content-fallback": wire("syntheticReasoningContentFallback", ["openai"]),
 	"requires-assistant-after-tool-result": wire("requiresAssistantAfterToolResult", ["openai"]),
 	"fold-user-after-tool-result": wire("foldUserAfterToolResult", OAI),
+	"split-tool-calls": wire("splitToolCalls", OAI),
 	"requires-assistant-content-for-tool-calls": wire("requiresAssistantContentForToolCalls", OAI),
 	"requires-mistral-tool-ids": wire("requiresMistralToolIds", ["openai"]),
 	"requires-reasoning-content-for-all-assistant-turns": wire("requiresReasoningContentForAllAssistantTurns", OAI),
@@ -229,7 +231,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		"chat-template",
 	]),
 	"thinking-keep": wire("thinkingKeep", ["openai"]),
-	"tool-schema-flavor": wire("toolSchemaFlavor", OAI, "scalar", ["moonshot-mfjs", "grammar", "none"]),
+	"tool-schema-flavor": wire("toolSchemaFlavor", OAI, "scalar", ["moonshot-mfjs", "grammar", "google", "none"]),
 	"tool-strict-mode": wire("toolStrictMode", ["openai"], "scalar", ["all_strict", "none", "mixed"]),
 	"uses-openai-tool-call-id-limit": wire("usesOpenAIToolCallIdLimit", OAI),
 	"when-thinking": wire("whenThinking", ["openai"], "object"),
@@ -769,10 +771,6 @@ function isPayloadScalar(value: unknown): value is string | number | boolean {
 	return typeof value === "string" || typeof value === "number" || typeof value === "boolean";
 }
 
-function isPayloadObject(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 /** JSON object payload → resolved JSON, with the KDL compiler's key rules (`extra-body` subtrees stay verbatim). */
 function payloadValue(directive: string, object: Record<string, unknown>, verbatim: boolean): Record<string, unknown> {
 	const resolved: Record<string, unknown> = {};
@@ -783,8 +781,7 @@ function payloadValue(directive: string, object: Record<string, unknown>, verbat
 		const value = object[name];
 		const key = verbatim ? name : axisPayloadKey(name);
 		if (isPayloadScalar(value)) resolved[key] = value;
-		else if (isPayloadObject(value))
-			resolved[key] = payloadValue(directive, value, verbatim || name === "extra-body");
+		else if (isRecord(value)) resolved[key] = payloadValue(directive, value, verbatim || name === "extra-body");
 		else throw new Error(`\`${directive}\`: payload key \`${name}\` must be a scalar or an object`);
 	}
 	return resolved;
@@ -809,7 +806,7 @@ function directiveValue(name: string, axis: AxisDef, value: unknown): unknown {
 			if (value.length === 0 && axis.emptyArray !== true) throw new Error(`\`${name}\` takes at least one value`);
 			return value.map(scalar);
 		case "object":
-			if (!isPayloadObject(value)) throw new Error(`\`${name}\` takes an object`);
+			if (!isRecord(value)) throw new Error(`\`${name}\` takes an object`);
 			return payloadValue(name, value, axis.verbatimKeys === true);
 	}
 }

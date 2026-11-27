@@ -53,10 +53,13 @@ const BUNDLED_PACKAGES: readonly BundledPackage[] = [
 		rootWildcard: null,
 	},
 	{ dir: "natives", npmDir: "pi-natives", identifier: "PiNatives", rootShim: null, rootWildcard: null },
-	// pi-tui keeps stateful singletons (`TERMINAL`, theme, figure settings) in
-	// root-level and nested modules; extensions must share the host's records.
-	{ dir: "tui", npmDir: "pi-tui", identifier: "PiTui", rootShim: "legacy-pi-tui-shim.ts", rootWildcard: "nested" },
+	// pi-tui keeps the reactive runtime, the current theme and painter registries
+	// in root-level and nested modules; extension nodes must share the host's.
+	{ dir: "ui", npmDir: "pi-tui", identifier: "PiUi", rootShim: null, rootWildcard: "nested" },
 	{ dir: "utils", npmDir: "pi-utils", identifier: "PiUtils", rootShim: null, rootWildcard: "flat" },
+	// Extensions import omptype for schema builders; they must share the host's lazy JIT
+	// runtime, and resolving it from the host keeps them off the install cache.
+	{ dir: "omptype", npmDir: "omptype", identifier: "OmpType", rootShim: null, rootWildcard: "flat" },
 ];
 
 const TYPEBOX_MODULE_KEY = "typebox";
@@ -222,6 +225,8 @@ export async function collectBundledPiEntries(layout: LegacyPiLayout = DEFAULT_L
 			if (rootWildcard && !pkg.rootWildcard) continue;
 
 			const sourceDir = path.join(packageRoot, pattern.sourcePrefix);
+			// A `.js` target names TypeScript sources: Bun resolves `x.js` to `x.ts` / `x.tsx`.
+			const sourceSuffixes = pattern.sourceSuffix === ".js" ? [".ts", ".tsx"] : [pattern.sourceSuffix];
 			try {
 				// Recursive on purpose: Node matches `*` in an `exports` pattern across
 				// `/`, so `./slash-commands/*` genuinely serves
@@ -229,7 +234,7 @@ export async function collectBundledPiEntries(layout: LegacyPiLayout = DEFAULT_L
 				// top level left every nested key out of the compiled registry, where
 				// it fell through to `Bun.resolveSync` and died under bunfs — so such
 				// an import worked from source and failed inside a binary.
-				const glob = new Bun.Glob(`**/*${pattern.sourceSuffix}`);
+				const glob = new Bun.Glob(pattern.sourceSuffix === ".js" ? "**/*.{ts,tsx}" : `**/*${pattern.sourceSuffix}`);
 				const matches: string[] = [];
 				for await (const match of glob.scan({ cwd: sourceDir, onlyFiles: true })) {
 					// Bun.Glob yields host separators; the export keys and generated
@@ -239,9 +244,10 @@ export async function collectBundledPiEntries(layout: LegacyPiLayout = DEFAULT_L
 				}
 				matches.sort();
 				for (const match of matches) {
-					if (!match.endsWith(pattern.sourceSuffix)) continue;
+					const suffix = sourceSuffixes.find(candidate => match.endsWith(candidate));
+					if (!suffix) continue;
 					if (rootWildcard && pkg.rootWildcard === "flat" && match.includes("/")) continue;
-					const basename = match.slice(0, match.length - pattern.sourceSuffix.length);
+					const basename = match.slice(0, match.length - suffix.length);
 					const segments = basename.split("/");
 					// Every directory on the way has to be importable too: a private or
 					// hidden folder is no more exported than a private file.

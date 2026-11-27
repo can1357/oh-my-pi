@@ -21,7 +21,9 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { fuzzyFilter } from "@oh-my-pi/pi-tui/fuzzy";
+import { resolveAgentModelPatterns } from "../config/model-resolver";
+import { MAX_THINKING_SUFFIX_OPTIONS, splitThinkingSuffix } from "../config/model-selector";
+import { fuzzyFilter } from "../utils/fuzzy";
 import { formatDuration, isEnoent, prompt } from "@oh-my-pi/pi-utils";
 import { AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { ensurePersistedRoster, sessionFileBelongsToRoot } from "../registry/persisted-agents";
@@ -29,8 +31,12 @@ import { IrcBus } from "../irc/bus";
 import { executeSend, isIrcEnabled } from "../irc/messaging";
 import { agentMesh } from "../irc/mesh";
 import { formatPeerAddress, type PeerAddress } from "../irc/mesh-protocol";
-import type { AgentSessionHandle } from "../session/agent-session-handle";
-import { cfgTaskCrossInstance } from "../task/settings";
+import type { AgentKindModelChange, AgentModelChange, AgentSessionHandle } from "../session/agent-session-handle";
+import { discoverAgents, getAgent } from "../task/discovery";
+import { cfgTaskAgentModelOverrides, cfgTaskCrossInstance, cfgTaskDisabledAgents } from "../task/settings";
+import { spawnDenial } from "../task/spawn-policy";
+import { CLI_THINKING_LEVELS, parseCliThinkingLevel } from "../thinking/levels";
+import type { ToolSession } from "../tools";
 import agentPromptDoc from "../prompts/internal-urls/agent.md" with { type: "text" };
 import agentProgressTemplate from "../prompts/tools/agent-url-progress.md" with { type: "text" };
 import agentSupersededTemplate from "../prompts/tools/agent-url-superseded.md" with { type: "text" };
@@ -203,6 +209,60 @@ function resolveRecipient(registry: AgentRegistryApi, senderId: string, named: s
 	return match && others.length === 0 ? match.id : named;
 }
 
+/** Find the live caller or one of its own direct children; a reused id never grants ownership. */
+function controlTarget(
+	session: ToolSession,
+	registry: AgentRegistryApi,
+	senderId: string,
+	targetId: string,
+): AgentSessionHandle {
+	const caller = session.getAgentSession?.();
+	const sender = registry.get(senderId);
+	if (!caller || sender?.session !== caller || session.isDisposed?.()) {
+		throw new Error("Agent model controls require a live, registered tool session.");
+	}
+	const ref = targetId === senderId ? sender : registry.get(targetId);
+	if (!ref || ref.kind === "advisor" || !ref.session) {
+		throw new Error(`Agent ${targetId} does not have a live session.`);
+	}
+	if (ref.session === caller) return caller;
+	const callerFile = session.getSessionFile();
+	const targetFile = ref.sessionFile;
+	// Restored refs have no runtime spawner identity; their transcript must belong to this parent.
+	const inParentTranscript = callerFile && targetFile && sessionFileBelongsToRoot(targetFile, callerFile);
+	const owned =
+		ref.parentId === senderId &&
+		(ref.parentSessionKey === undefined
+			? inParentTranscript
+			: ref.parentSessionKey === caller.instanceKey && (!callerFile || !targetFile || inParentTranscript));
+	if (!owned) throw new Error("Agent model controls can change only yourself or a direct child you spawned.");
+	return ref.session;
+}
+
+async function resolveModelChange(session: ToolSession, selector: string): Promise<AgentKindModelChange> {
+	const { base: kind, level } = splitThinkingSuffix(selector, -1, MAX_THINKING_SUFFIX_OPTIONS);
+	await session.settings.reloadFromDisk();
+	const denial = spawnDenial(session, kind);
+	if (denial) throw new Error(denial);
+	if (cfgTaskDisabledAgents.get(session.settings).includes(kind)) {
+		throw new Error(`Agent kind "${kind}" is disabled in settings.`);
+	}
+	const { agents } = await discoverAgents(session.cwd, undefined, session.effectiveExtensionRoots?.());
+	const agent = getAgent(agents, kind) ?? session.getSessionAgents?.().find(candidate => candidate.name === kind);
+	if (!agent) {
+		throw new Error(`Unknown agent kind "${kind}". Use a permitted task agent kind, optionally with :effort.`);
+	}
+	const overrides = cfgTaskAgentModelOverrides.get(session.settings);
+	const patterns = resolveAgentModelPatterns({
+		settings: session.settings,
+		settingsOverride: Object.hasOwn(overrides, kind) ? overrides[kind] : undefined,
+		agentModel: agent.model,
+		activeModelPattern: session.getActiveModelString?.(),
+		fallbackModelPattern: session.getModelString?.(),
+	});
+	return { patterns, kind, thinkingLevel: level, defaultThinkingLevel: agent.thinkingLevel };
+}
+
 /** Largest output still read whole to tell a whitespace-only one from content. */
 const BLANK_PROBE_BYTES = 4096;
 
@@ -268,12 +328,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		if (!session) throw new Error("agent:// messaging requires a tool session");
 		const registry = session.agentRegistry;
 		const senderId = session.getAgentId?.();
-		if (
-			!registry ||
-			!senderId ||
-			session.enableIrc === false ||
-			!isIrcEnabled(session.settings, session.taskDepth ?? 0)
-		) {
+		if (!registry || !senderId || session.enableIrc === false) {
 			throw new Error("Peer messaging is unavailable in this session.");
 		}
 		const pid = cfgTaskCrossInstance.get(session.settings) ? pidTarget(url) : undefined;
@@ -283,10 +338,42 @@ export class AgentProtocolHandler implements ProtocolHandler {
 				: formatPeerAddress(pid.address)
 			: url.rawHost || url.hostname;
 		if (!named) throw new Error("agent:// URL requires a recipient: agent://<id>");
-		if (pid ? pid.segments.length > 0 : hasPathExtraction(url)) {
+		const segments = pid?.segments ?? url.pathname.split("/").filter(Boolean).map(decodeSegment);
+		const [field] = segments;
+		const remote = pid !== undefined && !pid.local;
+		if (segments.length === 1 && (field === "model" || field === "effort")) {
+			if (remote || named === "all" || named === "peers" || url.search) {
+				throw new Error("Agent model controls require a local agent id and no query parameters.");
+			}
+			if (session.getPlanModeState?.()?.enabled) {
+				throw new Error("Agent model controls are unavailable in plan mode.");
+			}
+			const to = resolveRecipient(registry, senderId, named);
+			const target = controlTarget(session, registry, senderId, to);
+			const value = content.trim();
+			if (!value) throw new Error(`agent:// writes to /${field} require a non-empty value.`);
+			let change: AgentModelChange;
+			if (field === "model") {
+				change = await resolveModelChange(session, value);
+				if (controlTarget(session, registry, senderId, to) !== target) {
+					throw new Error(`Agent ${to} changed sessions before the write could be applied.`);
+				}
+			} else {
+				const effort = parseCliThinkingLevel(value);
+				if (!effort) throw new Error(`Unknown effort "${value}". Use ${CLI_THINKING_LEVELS.join(", ")}.`);
+				change = { effort };
+			}
+			context?.signal?.throwIfAborted();
+			const { model, effort } = await target.applyAgentModelChange(change);
+			return { content: [{ type: "text", text: `${to}: ${model} (effort: ${effort ?? "default"}).` }] };
+		}
+		if (!isIrcEnabled(session.settings, session.taskDepth ?? 0)) {
+			throw new Error("Peer messaging is unavailable in this session.");
+		}
+		if (pid ? segments.length > 0 : hasPathExtraction(url)) {
 			throw new Error("agent:// message target cannot have a JSON-path suffix.");
 		}
-		const to = pid && !pid.local ? named : resolveRecipient(registry, senderId, named);
+		const to = remote ? named : resolveRecipient(registry, senderId, named);
 		const progress = url.searchParams.has("progress");
 		if (progress && to === "all") throw new Error("agent://all broadcasts cannot be ?progress updates.");
 		if (!content.trim()) throw new Error("agent:// messages require non-empty content.");
@@ -306,8 +393,10 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		}
 		const result = await executeSend(
 			{ registry, senderId, sessionFileHint: session.getSessionFile?.() },
-			{ to, message: content, progress, remote: pid !== undefined && !pid.local },
+			{ to, message: content, progress, remote },
 		);
+		const toLabel = remote ? agentMesh()?.label(pid.address) : undefined;
+		const message = result.details;
 		return {
 			content: [
 				{
@@ -315,7 +404,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 					text: result.content.find(item => item.type === "text")?.text ?? "Message delivery failed.",
 				},
 			],
-			details: { message: result.details },
+			details: { message: message && toLabel ? { ...message, toLabel } : message },
 			isError: result.isError,
 		};
 	}
@@ -345,7 +434,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		const content =
 			peers.length === 0
 				? "No other omp instances in this project.\n"
-				: `${peers.map(peer => `- agent://${peer.pid} (${peer.status})`).join("\n")}\n\nRead agent://<pid>/<id> for a subagent's output; write agent://<pid> to message its main agent.\n`;
+				: `${peers.map(peer => `- agent://${peer.pid} (${peer.status})${peer.title ? `: ${peer.title}` : ""}`).join("\n")}\n\nRead agent://<pid>/<id> for a subagent's output; write agent://<pid> to message its main agent.\n`;
 		return {
 			url: url.href,
 			content,

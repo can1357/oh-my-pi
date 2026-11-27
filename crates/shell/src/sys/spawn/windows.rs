@@ -60,8 +60,8 @@ use bstr::{BStr, BString, ByteSlice};
 use parking_lot::{MappedMutexGuard, Mutex, MutexGuard};
 use windows_sys::Win32::{
 	Foundation::{
-		ERROR_INVALID_PARAMETER, ERROR_MORE_DATA, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
-		NTSTATUS, SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT,
+		ERROR_INVALID_PARAMETER, ERROR_MORE_DATA, FILETIME, HANDLE, HANDLE_FLAG_INHERIT,
+		INVALID_HANDLE_VALUE, NTSTATUS, SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT,
 	},
 	System::{
 		Console::{
@@ -76,12 +76,13 @@ use windows_sys::Win32::{
 			JobObjectBasicAccountingInformation, JobObjectBasicProcessIdList,
 			QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
 		},
+		ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS},
 		SystemInformation::GetSystemDirectoryW,
 		Threading::{
 			CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
 			CreateEventW, CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
-			GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList, OpenProcess,
-			PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
+			GetExitCodeProcess, GetProcessTimes, INFINITE, InitializeProcThreadAttributeList,
+			OpenProcess, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
 			PROCESS_INFORMATION, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 			PROCESS_SUSPEND_RESUME, QueryFullProcessImageNameW, ResumeThread, STARTF_USESTDHANDLES,
 			STARTUPINFOEXW, STARTUPINFOW, SetEvent, TerminateProcess, UpdateProcThreadAttribute,
@@ -92,7 +93,9 @@ use windows_sys::Win32::{
 
 use super::{Dir, Leftover, Sessions, Shared, child_end};
 use crate::{
-	bash::{EnvView, ExitStatus, ExtProc, OsHandle, PgroupSpec, Signal, SpawnSpec, StdioSpec},
+	bash::{
+		EnvView, ExitStatus, ExtProc, OsHandle, PgroupSpec, ProcUsage, Signal, SpawnSpec, StdioSpec,
+	},
 	sys::{
 		cmdline,
 		job::{self, JobOps, JobPause},
@@ -1228,6 +1231,46 @@ impl ExtProc for WinProc {
 	fn cont(&mut self) -> io::Result<()> {
 		let job = &self.inner.job;
 		job.pause.lock().resume(&Ops(job))
+	}
+
+	/// The process's CPU times and peak working set, read through the
+	/// process handle this keeps open (Windows counts no other `rusage`
+	/// fields; its page faults are all one kind).
+	fn usage(&mut self) -> Option<ProcUsage> {
+		if !self.tracker.lock().collected() {
+			return None;
+		}
+		let process = raw(&self.inner.process);
+		let [mut created, mut exited, mut kernel, mut user] = [FILETIME::default(); 4];
+		// SAFETY: our process handle; the four FILETIMEs are writable.
+		let timed = unsafe {
+			GetProcessTimes(process, &raw mut created, &raw mut exited, &raw mut kernel, &raw mut user)
+		} != 0;
+		// 100 ns ticks.
+		let ns =
+			|t: FILETIME| ((u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime)) * 100;
+		let size = size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+		let mut memory = PROCESS_MEMORY_COUNTERS { cb: size, ..PROCESS_MEMORY_COUNTERS::default() };
+		// SAFETY: our process handle; `memory` is a writable struct of `size`.
+		let counted = unsafe { K32GetProcessMemoryInfo(process, &raw mut memory, size) } != 0;
+		if !timed && !counted {
+			return None;
+		}
+		Some(ProcUsage {
+			user_ns: if timed { ns(user) } else { 0 },
+			sys_ns: if timed { ns(kernel) } else { 0 },
+			max_rss: if counted {
+				memory.PeakWorkingSetSize as u64
+			} else {
+				0
+			},
+			minor_faults: if counted {
+				u64::from(memory.PageFaultCount)
+			} else {
+				0
+			},
+			..ProcUsage::default()
+		})
 	}
 }
 

@@ -17,6 +17,8 @@
 //! **State.** Variables, functions, aliases, options, traps and the working
 //! directory live in the store and the root virtual process; every command
 //! runs on the root ([`VprocSel::Root`]), so they persist across commands.
+//! A host that wants each of its commands to start like a new `bash -c` sets
+//! [`RunOptions::reset_errexit`] on the command's first run.
 //! An `EXIT` trap is consumed when it fires at a run boundary; other traps
 //! remain installed.
 //! Each command starts with its own standard streams, even if an earlier
@@ -79,7 +81,7 @@ use crate::{
 		Budget, CallId, Cx, Engine, EngineConfig, EventMask, EventSink, Fs, ImageDiff, MemStore,
 		PipeTap, Profile, RestoreError, RestoreOpts, RunId, Script, Shell, ShellError, ShellInit,
 		Signal, StateStore, Step, ToolCall, UnitId, VprocSel,
-		store::{BlobSlot, Key, MiscKey, Record, Table},
+		store::{BlobSlot, Key, MiscKey, OptId, Record, Table},
 	},
 	commands::SessionCommands,
 	host::{PiHost, SpawnObserver, TERM_GRACE},
@@ -165,6 +167,11 @@ pub struct RunOptions {
 	/// observer receives units lazily, including persistent function bodies
 	/// only when this command executes them.
 	pub events:         Option<Arc<dyn EventSink>>,
+	/// Turn `errexit` off before the command, as a new `bash -c` starts. A
+	/// host running one command as several runs sets it on the first only,
+	/// so a `set -e` holds for the rest of that command but never stops a
+	/// later one ([`RunOutcome::errexit`] says one was left on).
+	pub reset_errexit:  bool,
 }
 
 impl RunOptions {
@@ -180,6 +187,7 @@ impl RunOptions {
 			commands:       None,
 			text_capture:   false,
 			events:         None,
+			reset_errexit:  false,
 		}
 	}
 }
@@ -195,6 +203,7 @@ impl std::fmt::Debug for RunOptions {
 			.field("speech", &self.speech)
 			.field("commands", &self.commands)
 			.field("events", &self.events.is_some())
+			.field("reset_errexit", &self.reset_errexit)
 			.finish()
 	}
 }
@@ -226,6 +235,8 @@ pub struct RunOutcome {
 	pub exited:    bool,
 	/// The shell's working directory after the command.
 	pub cwd:       BString,
+	/// `errexit` was on when the command ended.
+	pub errexit:   bool,
 }
 
 /// Failure of a [`Session`] call.
@@ -260,8 +271,9 @@ pub struct Children(Arc<ChildrenState>);
 struct ChildrenState {
 	/// A run is in flight.
 	active: AtomicBool,
-	/// Live pids in spawn order.
-	pids:   Mutex<Vec<u32>>,
+	/// Live pids in spawn order, each with whether it runs in a detached
+	/// (`nohup`) tree.
+	pids:   Mutex<Vec<(u32, bool)>>,
 }
 
 impl Children {
@@ -276,7 +288,21 @@ impl Children {
 			.pids
 			.lock()
 			.iter()
-			.filter_map(|&pid| i32::try_from(pid).ok())
+			.filter_map(|&(pid, _)| i32::try_from(pid).ok())
+			.collect()
+	}
+
+	/// Every live external the session holds, whether a run is in flight or
+	/// not, background jobs (`cmd &`, `nohup cmd &`) that outlived their run
+	/// included: its pid, and whether it runs in a detached (`nohup`) tree.
+	/// A held external is unreaped, so its pid cannot name another process.
+	pub fn held(&self) -> Vec<(i32, bool)> {
+		self
+			.0
+			.pids
+			.lock()
+			.iter()
+			.filter_map(|&(pid, detached)| Some((i32::try_from(pid).ok()?, detached)))
 			.collect()
 	}
 
@@ -286,13 +312,13 @@ impl Children {
 }
 
 impl SpawnObserver for Children {
-	fn spawned(&self, pid: u32) {
-		self.0.pids.lock().push(pid);
+	fn spawned(&self, pid: u32, detached: bool) {
+		self.0.pids.lock().push((pid, detached));
 	}
 
 	fn released(&self, pid: u32) {
 		let mut pids = self.0.pids.lock();
-		if let Some(i) = pids.iter().position(|&p| p == pid) {
+		if let Some(i) = pids.iter().position(|&(p, _)| p == pid) {
 			pids.remove(i);
 		}
 	}
@@ -897,7 +923,13 @@ impl Driver {
 			commands,
 			text_capture,
 			events,
+			reset_errexit,
 		} = options;
+		if reset_errexit {
+			self
+				.shell
+				.set_root_option(&mut self.store, OptId::Errexit, false);
+		}
 		self.host.set_speech(speech);
 		self.host.set_pipe_tap(pipe_tap);
 		self.host.set_commands(commands);
@@ -977,8 +1009,9 @@ impl Driver {
 		self.restore_overlay(saved);
 		self.image.publish(&mut self.store);
 		let cwd = store_cwd(&self.store);
+		let errexit = self.shell.root_option(&mut self.store, OptId::Errexit);
 		// The caller may have stopped waiting (dropped future).
-		let _ = reply.send(RunOutcome { status, cancelled: applied > 0, exited, cwd });
+		let _ = reply.send(RunOutcome { status, cancelled: applied > 0, exited, cwd, errexit });
 	}
 
 	/// Let the background work a command started reach its first wait (an
@@ -1015,7 +1048,8 @@ impl Driver {
 	/// host callout ([`ToolCalls::on_done`]); nothing else submits scripts.
 	fn on_done(&mut self, run: RunId, status: i32) {
 		let signal = self.shell.exec_signal(run);
-		self.tools.on_done(run, status, signal);
+		let usage = self.shell.run_usage(run);
+		self.tools.on_done(run, status, signal, usage);
 	}
 
 	/// Start a host callout ([`crate::bash::Resolved::Tool`]).
@@ -1992,6 +2026,24 @@ mod tests {
 		assert!(sh(&mut s, "exit 0").await.outcome.exited);
 		assert!(sh(&mut s, "set -e; false; echo no").await.outcome.exited);
 		assert!(!sh(&mut s, "set +e; (exit 4)").await.outcome.exited);
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn reset_errexit_turns_off_only_errexit_before_the_run() {
+		let mut s = session();
+		let c = sh(&mut s, "set -eu; false; echo no").await;
+		assert_eq!((c.stdout.as_str(), c.outcome.errexit), ("", true));
+		// Without the reset a later run keeps it, as a host's next segment must.
+		assert!(sh(&mut s, "(exit 4); echo no").await.outcome.exited);
+		let fresh = RunOptions {
+			reset_errexit: true,
+			..RunOptions::new("false; echo \"$-\"; echo \"$SHELLOPTS\"")
+		};
+		let c = capture(&mut s, fresh).await;
+		assert_eq!((c.outcome.status, c.outcome.errexit), (0, false));
+		let (flags, shellopts) = c.stdout.trim_end().split_once('\n').unwrap();
+		assert!(flags.contains('u') && !flags.contains('e'), "{flags}");
+		assert!(shellopts.contains("nounset") && !shellopts.contains("errexit"), "{shellopts}");
 	}
 
 	#[tokio::test(flavor = "multi_thread")]

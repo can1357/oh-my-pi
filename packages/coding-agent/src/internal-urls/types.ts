@@ -22,10 +22,10 @@ import type { AgentRegistryApi } from "../registry/agent-registry";
 import type { LocalProtocolOptions } from "./local-protocol";
 import type { SessionEntry } from "../session/session-entries";
 import type { ToolSession } from "../tools";
-import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
-import type { ProcReadDetails, ProcWriteDetails } from "@oh-my-pi/pi-tui/tools/proc-render";
-import type { CfgReadDetails, CfgWriteDetails } from "@oh-my-pi/pi-tui/tools/cfg-render";
-import type { SchemeWriteScope } from "@oh-my-pi/pi-tui/tools/url-scheme-host";
+import type { CoordinationDetails } from "../tools/details/wait";
+import type { ProcReadDetails, ProcWriteDetails } from "../tools/details/proc-render";
+import type { CfgReadDetails, CfgWriteDetails } from "../tools/details/cfg-render";
+import type { SchemeWriteScope } from "./url-scheme";
 
 /** Render state and prewalk facts a handler write attaches to the `write` tool result. */
 export interface InternalWriteDetails {
@@ -94,6 +94,13 @@ export interface SchemeWritePolicy {
 	tier(url: InternalUrl, content: string | undefined, session: ToolSession | undefined): ToolApprovalDecision;
 	/** Largest payload in UTF-8 bytes the scheme accepts; the shell refuses writes past it (EFBIG). Default: unbounded. */
 	maxBytes?: number;
+	/**
+	 * File-editing tools may patch this remote text through a local mirror, updating
+	 * existing files in place only: `edit` refuses creating, deleting, or moving such a
+	 * URL before its preview. Requires `via: "handler"`, `payload: "text"`, `backing:
+	 * "remote"`, and the handler's {@link ProtocolHandler.edit} hooks.
+	 */
+	edits?: "update";
 	/**
 	 * True when this URL's write only cancels background work (`proc://<id>/kill`), so it
 	 * passes the plan-mode gate like a `coordination`-scoped write. Approval
@@ -378,6 +385,60 @@ export interface WriteContext {
 }
 
 /**
+ * Where a remote file an edit targets lives: the destination its URL resolved
+ * to and the absolute path there (together the mirror's key), plus the canonical
+ * URL `read` shows in its tag and `edit` writes back through.
+ */
+export interface RemoteEditLocation {
+	/** `scheme://authority/<absolute path>`, the authority as written. */
+	url: string;
+	/**
+	 * Identity of the resolved destination (host, account, port, key), so one
+	 * URL that resolves to different hosts (per-project aliases) never shares a mirror,
+	 * and spellings that resolve to one destination (`Prod`, `prod`) always do.
+	 */
+	target: string;
+	/** Absolute path of the file on {@link target}. */
+	path: string;
+}
+
+/** Remote text fetched for an edit. */
+export interface RemoteEditSource extends RemoteEditLocation {
+	content: string;
+	/** Checksum of exactly the fetched bytes; {@link RemoteEditHooks.update} writes only while the file still matches it. */
+	checksum: string;
+}
+
+/**
+ * Hooks for remote text that `edit` patches through a local mirror
+ * (`spec.write.edits`). The mirror is keyed by the {@link RemoteEditLocation},
+ * so every spelling of one remote file shares its mirror and snapshot tag.
+ */
+export interface RemoteEditHooks {
+	/**
+	 * The file's {@link RemoteEditLocation}. With `localOnly`, never touches the
+	 * remote host and returns `undefined` when the answer would need it (a
+	 * home-relative path whose HOME is not cached yet).
+	 */
+	locate(
+		url: InternalUrl,
+		context?: ResolveContext,
+		options?: { localOnly?: boolean },
+	): Promise<RemoteEditLocation | undefined>;
+	/**
+	 * Fetch an existing regular file's text for an edit. Refuses a symbolic link
+	 * (naming it), a directory, a special file, binary content, and a missing
+	 * path (`RemoteEditMissingError`).
+	 */
+	fetch(url: InternalUrl, context?: ResolveContext): Promise<RemoteEditSource>;
+	/**
+	 * Replace the file's text in one remote operation, only while its bytes still
+	 * match `checksum` (`RemoteEditConflictError` otherwise; nothing is written).
+	 */
+	update(url: InternalUrl, content: string, checksum: string, context?: WriteContext): Promise<void>;
+}
+
+/**
  * Handler for a specific internal URL scheme (e.g., agent://, memory://, skill://).
  */
 export interface ProtocolHandler {
@@ -406,6 +467,8 @@ export interface ProtocolHandler {
 	 * N bytes" result and may carry transcript-only display details.
 	 */
 	write?(url: InternalUrl, content: string, context?: WriteContext): Promise<InternalWriteResult | void>;
+	/** Mirror-edit hooks: present exactly when `spec.write.edits` is set (the router enforces this at registration). */
+	readonly edit?: RemoteEditHooks;
 	/**
 	 * Optional autocomplete hook. Returns candidate completions for the
 	 * host/path portion of a `scheme://` URL while the user composes a prompt.

@@ -16,7 +16,7 @@ import type {
 	TextContent,
 	TSchema,
 } from "@oh-my-pi/pi-ai";
-import { isBuiltinComposerStyle, type KeyId } from "@oh-my-pi/pi-tui";
+import { type KeyId } from "../../config/keybindings/key-id";
 import { hasFsCode, isEacces, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { type ExtensionModule, extensionModuleCapability } from "../../capability/extension-module";
 import { type Hook, hookCapability } from "../../capability/hook";
@@ -30,6 +30,7 @@ import type { SendUserMessageOptions } from "../../session/agent-session";
 import type { CustomMessagePayload } from "../../session/messages";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
 import { isFilesystemSourcePath } from "../../tools/path-utils";
+import { NATIVE_TODO_BACKEND } from "../../tools/settings";
 import { InternalUrlRouter } from "../../internal-urls/router";
 import { EventBus } from "../../utils/event-bus";
 import * as TypeBox from "../legacy-typebox";
@@ -38,8 +39,9 @@ import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/leg
 import { getEnabledPlugins, resolvePluginExtensionPaths } from "../plugins/loader";
 
 import { resolvePath, withHostGuard } from "../utils";
-import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
-import { notifyTranscriptPresentersChanged } from "@oh-my-pi/pi-tui/chat/transcript-presentation";
+import { type ComposerShape, isBuiltinComposerShape } from "../../ui/styles/composer/shapes";
+import { sanitizeDisplayLine } from "../inventory/display-text";
+import { notifyTranscriptPresentersChanged } from "../../session/transcript/transcript-presentation";
 import type {
 	AssistantTextRenderer,
 	AssistantThinkingRenderer,
@@ -55,6 +57,7 @@ import type {
 	RegisteredCommand,
 	ShortcutConflict,
 	SourceInfo,
+	TodoBackendDefinition,
 	ToolDefinition,
 	ToolInfo,
 	TranscriptPresenter,
@@ -67,6 +70,8 @@ type LoadedExtensionModule = ExtensionFactory | { default?: ExtensionFactory };
 
 /** RFC 3986 scheme syntax, lowercased, two characters at least so `c` cannot capture `C:/` paths. */
 const LINK_SCHEME_PATTERN = /^[a-z][a-z0-9+.-]+$/;
+/** `todo.backend` ids: safe to print and to type in a config file. */
+const TODO_BACKEND_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 /** Standard schemes an extension may not claim: web, file and mail links. omp's internal URLs are refused too. */
 const STANDARD_LINK_SCHEMES: Readonly<Record<string, true>> = {
@@ -350,18 +355,48 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		if (!this.extension.linkSchemes.includes(normalized)) this.extension.linkSchemes.push(normalized);
 	}
 
-	registerComposerShape(definition: ComposerShapeDefinition): void {
-		const id = definition.style.id;
-		if (id.length === 0 || id !== id.trim()) {
+	registerComposerShape(shape: ComposerShape & { readonly label: string }): void {
+		const id = shape.id;
+		if (typeof id !== "string" || id.length === 0 || id !== id.trim()) {
 			throw new TypeError("Composer shape id must be a non-empty trimmed string");
 		}
-		if (definition.label.trim().length === 0) {
+		if (typeof shape.label !== "string" || shape.label.trim().length === 0) {
 			throw new TypeError(`Composer shape "${id}" must have a label`);
 		}
-		if (isBuiltinComposerStyle(id)) {
+		if (typeof shape.row !== "function" || typeof shape.sideWidth !== "function") {
+			throw new TypeError(
+				`Composer shape "${id}" must implement row() and sideWidth() (see the ComposerShape contract in docs/extensions.md)`,
+			);
+		}
+		if (isBuiltinComposerShape(id)) {
 			throw new Error(`Cannot replace built-in composer shape "${id}"`);
 		}
-		this.extension.composerShapes.set(id, definition);
+		this.extension.composerShapes.set(id, shape);
+	}
+
+	registerTodoBackend(definition: TodoBackendDefinition): void {
+		const id = definition.id;
+		if (typeof id !== "string" || !TODO_BACKEND_ID_PATTERN.test(id)) {
+			throw new TypeError(
+				'Todo backend id must be letters, digits, ".", "_" or "-", starting with a letter or digit',
+			);
+		}
+		if (id === NATIVE_TODO_BACKEND) {
+			throw new Error(`Todo backend id "${id}" is reserved for omp's own todo list`);
+		}
+		for (const field of ["label", "description"] as const) {
+			const text = definition[field];
+			// Blank once sanitized: a label of escape codes alone would draw as an empty row.
+			if (text !== undefined && (typeof text !== "string" || sanitizeDisplayLine(text).length === 0)) {
+				throw new TypeError(
+					`Todo backend "${id}" ${field} must be text that is not blank once control sequences are removed`,
+				);
+			}
+		}
+		if (typeof definition.replace !== "function") {
+			throw new TypeError(`Todo backend "${id}" must have a replace function`);
+		}
+		(this.extension.todoBackends ??= new Map()).set(id, definition);
 	}
 
 	getFlag(name: string): boolean | string | undefined {

@@ -1,4 +1,5 @@
-import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import { errorMessage } from "@oh-my-pi/pi-utils";
+import type { TodoItem, TodoPhase } from "../../tools/details/todo";
 import {
 	applyOpsToPhases,
 	getLatestTodoPhasesFromEntries,
@@ -7,16 +8,16 @@ import {
 	resolveTodoMarkdownPath,
 } from "../../tools/todo";
 import type { ParsedSlashCommand, SlashCommandResult, SlashCommandRuntime } from "../types";
-import { commandConsumed, errorMessage, parseSubcommand, usage } from "./parse";
+import { commandConsumed, parseSubcommand, usage } from "./parse";
 
 type TodoMutationVerb = "done" | "drop" | "rm";
 
 interface TodoTaskMatch {
-	task: { content: string; status: string };
+	task: TodoItem;
 	phase: TodoPhase;
 }
 
-function tokenize(input: string): string[] {
+export function tokenize(input: string): string[] {
 	const tokens: string[] = [];
 	let current = "";
 	let inQuote = false;
@@ -43,7 +44,7 @@ function tokenize(input: string): string[] {
 	return tokens;
 }
 
-function titleCaseWords(text: string): string {
+export function titleCaseWords(text: string): string {
 	return text
 		.split(/\s+/)
 		.filter(Boolean)
@@ -51,13 +52,14 @@ function titleCaseWords(text: string): string {
 		.join(" ");
 }
 
-function titleCaseSentence(text: string): string {
+/** Capitalize first letter only — keeps acronyms / casing in the rest of the sentence intact. */
+export function titleCaseSentence(text: string): string {
 	const trimmed = text.trim();
 	if (!trimmed) return trimmed;
 	return trimmed[0].toUpperCase() + trimmed.slice(1);
 }
 
-function findPhaseFuzzy(phases: TodoPhase[], query: string): TodoPhase | undefined {
+export function findPhaseFuzzy(phases: TodoPhase[], query: string): TodoPhase | undefined {
 	const normalizedQuery = query.trim().toLowerCase();
 	if (!normalizedQuery) return undefined;
 	const exact = phases.find(phase => phase.name.toLowerCase() === normalizedQuery);
@@ -69,7 +71,7 @@ function findPhaseFuzzy(phases: TodoPhase[], query: string): TodoPhase | undefin
 	return undefined;
 }
 
-function findTaskFuzzy(phases: TodoPhase[], query: string): TodoTaskMatch | undefined {
+export function findTaskFuzzy(phases: TodoPhase[], query: string): TodoTaskMatch | undefined {
 	const normalizedQuery = query.trim().toLowerCase();
 	if (!normalizedQuery) return undefined;
 	for (const phase of phases) {

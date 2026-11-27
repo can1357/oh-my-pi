@@ -6,6 +6,7 @@ import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { CustomToolAdapter } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/wrapper";
 import { MCPTool } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import type { MCPServerConnection } from "@oh-my-pi/pi-coding-agent/mcp/types";
@@ -35,7 +36,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import type { TuiSlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
-import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
+import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking/levels";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
@@ -139,13 +140,14 @@ describe("AgentSession prewalk", () => {
 			agentKind?: "main" | "sub";
 			sessionManager?: SessionManager;
 			extendedContext?: boolean;
+			primary?: Model;
 			target?: Model;
 			startupTarget?: Model;
 			tools?: AgentTool[];
 			registry?: Map<string, AgentTool>;
 		} = {},
 	) {
-		const primary = modelOrThrow("claude-sonnet-4-5");
+		const primary = options.primary ?? modelOrThrow("claude-sonnet-4-5");
 		const target = options.target ?? modelOrThrow("claude-sonnet-4-6");
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
@@ -156,6 +158,7 @@ describe("AgentSession prewalk", () => {
 		settings.setModelRole("smol", `anthropic/missing-model,${target.provider}/${target.id}:low`);
 		const mock = createMockModel({ responses });
 		const requested: string[] = [];
+		const requestedModels: Model[] = [];
 		const nudges: string[][] = [];
 		let requestNudges: string[] = [];
 		const agent = new Agent({
@@ -175,6 +178,7 @@ describe("AgentSession prewalk", () => {
 			},
 			streamFn: (model, context, streamOptions) => {
 				requested.push(model.id);
+				requestedModels.push(model);
 				nudges.push(requestNudges);
 				return mock.stream(model, context, streamOptions);
 			},
@@ -193,8 +197,62 @@ describe("AgentSession prewalk", () => {
 			agentKind: options.agentKind,
 		});
 		session = created;
-		return { session: created, primary, target, settings, requested, nudges };
+		return { session: created, primary, target, settings, requested, requestedModels, nudges };
 	}
+
+	it.each(["main", "sub"] as const)(
+		"hands off a route-only %s prewalk and journals the selected route",
+		async agentKind => {
+			const row = getBundledModel("openrouter", "z-ai/glm-4.7");
+			if (!row) throw new Error("Expected bundled OpenRouter model");
+			const source = parseModelPattern("openrouter/z-ai/glm-4.7@cerebras", [row]).model;
+			const target = parseModelPattern("openrouter/z-ai/glm-4.7@sambanova", [row]).model;
+			if (!source || !target) throw new Error("Expected routed prewalk models");
+			authStorage.keys.setRuntime("openrouter", "test-key");
+			const created = createLifecycleSession(
+				[toolCall("todo", "todo"), toolCall("write", "write"), { content: ["done"] }],
+				{ primary: source, target, agentKind },
+			);
+			created.session.setThinkingLevel(Effort.Low);
+
+			await created.session.prompt("implement the plan");
+
+			expect(created.requestedModels.map(model => model.compat)).toEqual([
+				source.compat,
+				source.compat,
+				target.compat,
+			]);
+			expect(created.session.model?.compat).toMatchObject({ openRouterRouting: { only: ["sambanova"] } });
+			expect(created.session.sessionManager.getSessionLocalModelChange()).toMatchObject({
+				model: "openrouter/z-ai/glm-4.7@sambanova",
+				role: "prewalk",
+			});
+			expect(created.session.getPrewalkState()).toBeUndefined();
+			expect(created.nudges.at(-1)).toContain("prewalk-checklist");
+		},
+	);
+
+	it("rejects a different upstream for an existing arm without partially restarting", async () => {
+		const row = getBundledModel("openrouter", "z-ai/glm-4.7");
+		if (!row) throw new Error("Expected bundled OpenRouter model");
+		const target = parseModelPattern("openrouter/z-ai/glm-4.7@cerebras", [row]).model;
+		const other = parseModelPattern("openrouter/z-ai/glm-4.7@sambanova", [row]).model;
+		if (!target || !other) throw new Error("Expected routed prewalk models");
+		const created = createLifecycleSession([], { target });
+		const active = created.session.getPrewalkState();
+		const notices: string[] = [];
+		created.session.subscribe(event => {
+			if (event.type === "notice" && event.source === "prewalk") notices.push(event.message);
+		});
+
+		expect(created.session.armPrewalk({ ...target }, Effort.Low)).toBe(true);
+		expect(created.session.armPrewalk(other, Effort.Low)).toBe(false);
+		expect(notices.at(-1)).toContain("@cerebras");
+		expect(await created.session.restartPrewalk(other, Effort.Medium, other, Effort.Low)).toBe("rejected");
+		expect(created.session.getPrewalkState()).toBe(active);
+		expect(created.session.model).toBe(created.primary);
+		expect(created.session.configuredThinkingLevel()).toBe(Effort.High);
+	});
 
 	it("/new restores the previous prewalk source and effort, then requires a fresh todo before handoff", async () => {
 		const created = createLifecycleSession([
@@ -383,14 +441,37 @@ describe("AgentSession prewalk", () => {
 		expect(manager.getLastModelChangeRole({ skipEphemeral: true })).toBe("slow");
 	});
 
-	it("keeps the arm when a session with a recorded handoff resumes on a different model", () => {
-		const target = modelOrThrow("claude-sonnet-4-6");
+	it("keeps the arm when a literal model ID looks like the recorded pin", () => {
+		const row = getBundledModel("openrouter", "z-ai/glm-4.7")!;
+		const selector = "openrouter/z-ai/glm-4.7@sambanova";
+		const target = parseModelPattern(selector, [row]).model!;
+		const literal = { ...row, id: `${row.id}@sambanova` };
 		const manager = SessionManager.inMemory(tempDir.path());
-		manager.appendModelChange(`${target.provider}/${target.id}`, "prewalk");
-		const created = createLifecycleSession([], { sessionManager: manager, target });
+		manager.appendModelChange(selector, "prewalk");
+		const created = createLifecycleSession([], { sessionManager: manager, primary: literal, target });
 
 		expect(created.session.model?.id).toBe(created.primary.id);
 		expect(created.session.getPrewalkState()?.target.id).toBe(target.id);
+	});
+
+	it.each([
+		["the bare model", "", false],
+		["a different pinned upstream", "@cerebras", true],
+	] as const)("handles a legacy bare prewalk journal restored on %s", (_case, restoredRoute, armed) => {
+		const row = getBundledModel("openrouter", "z-ai/glm-4.7");
+		if (!row) throw new Error("Expected bundled OpenRouter model");
+		const source = parseModelPattern(`openrouter/z-ai/glm-4.7${restoredRoute}`, [row]).model;
+		const target = parseModelPattern("openrouter/z-ai/glm-4.7@sambanova", [row]).model;
+		if (!source || !target) throw new Error("Expected routed prewalk models");
+		const manager = SessionManager.inMemory(tempDir.path());
+		manager.appendModelChange("openrouter/z-ai/glm-4.7", "prewalk");
+		const created = createLifecycleSession([], { sessionManager: manager, primary: source, target });
+
+		if (armed) {
+			expect(created.session.getPrewalkState()?.target.compat).toEqual(target.compat);
+		} else {
+			expect(created.session.getPrewalkState()).toBeUndefined();
+		}
 	});
 
 	it("/new restores the prewalk source and effort after automatic fallback and primary restoration", async () => {
@@ -553,7 +634,7 @@ describe("AgentSession prewalk", () => {
 			settings: created.settings,
 			collabGuest: false,
 			showStatus: vi.fn(),
-			editor: { setText: vi.fn() },
+			composer: { setText: vi.fn() },
 			refreshSlashCommandState: vi.fn(),
 		} as unknown as InteractiveModeContext;
 		expect(await executeBuiltinSlashCommand("/prewalk off", { ctx })).toBe(true);
@@ -1508,7 +1589,7 @@ describe("AgentSession prewalk", () => {
 			settings,
 			collabGuest: false,
 			showStatus,
-			editor: { setText: vi.fn() },
+			composer: { setText: vi.fn() },
 			refreshSlashCommandState: vi.fn(),
 		} as unknown as InteractiveModeContext;
 		const runtime = { ctx } satisfies TuiSlashCommandRuntime;
@@ -1611,7 +1692,7 @@ describe("AgentSession prewalk", () => {
 			settings,
 			collabGuest: false,
 			showStatus,
-			editor: { setText: vi.fn() },
+			composer: { setText: vi.fn() },
 			refreshSlashCommandState: vi.fn(),
 		} as unknown as InteractiveModeContext;
 		const runtime = { ctx } satisfies TuiSlashCommandRuntime;
@@ -1676,7 +1757,7 @@ describe("AgentSession prewalk", () => {
 			settings,
 			collabGuest: false,
 			showStatus,
-			editor: { setText: vi.fn() },
+			composer: { setText: vi.fn() },
 			refreshSlashCommandState: vi.fn(),
 		} as unknown as InteractiveModeContext;
 		return { session: created, settings, showStatus, runtime: { ctx } satisfies TuiSlashCommandRuntime };
@@ -1735,6 +1816,24 @@ describe("AgentSession prewalk", () => {
 		expect(session.getPrewalkState()?.target.id).toBe(target.id);
 		expect(showStatus.mock.calls.length).toBe(calls + 1);
 		expect(showStatus).toHaveBeenLastCalledWith(expect.stringContaining("Usage: /prewalk"));
+	});
+
+	it("/prewalk accepts ^ model references for into and from", async () => {
+		const primary = modelOrThrow("claude-sonnet-4-5");
+		const target = modelOrThrow("claude-sonnet-4-6");
+		const { session, showStatus, runtime } = createSelectorFixture(primary, { default: primary, smol: primary });
+		const from = `^${primary.provider}/${primary.id}:medium`;
+		const into = `^${target.provider}/${target.id}:high`;
+
+		expect(await executeBuiltinSlashCommand(`/prewalk ${into}`, runtime)).toBe(true);
+		expect(showStatus).toHaveBeenLastCalledWith(expect.stringContaining("Prewalk on"));
+		expect(session.getPrewalkState()?.target.id).toBe(target.id);
+		expect(session.getPrewalkState()?.thinkingLevel).toBe(Effort.High);
+
+		expect(await executeBuiltinSlashCommand(`/prewalk restart ${from} ${into}`, runtime)).toBe(true);
+		expect(showStatus).toHaveBeenLastCalledWith(expect.stringContaining("Prewalk restarted"));
+		expect(session.model?.id).toBe(primary.id);
+		expect(session.getPrewalkState()?.target.id).toBe(target.id);
 	});
 
 	it("requires a fresh todo before a later explicit prewalk can hand off", async () => {

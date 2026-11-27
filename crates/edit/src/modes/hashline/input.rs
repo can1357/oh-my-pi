@@ -4,39 +4,83 @@ use std::{
 	cell::OnceCell,
 	collections::HashMap,
 	path::{Path, PathBuf},
-	sync::LazyLock,
 };
-
-use regex::Regex;
 
 use super::{
 	clipboard::has_clipboard_edit,
-	format::{HL_FILE_HASH_EXAMPLES, HL_FILE_HASH_LENGTH},
+	format::{HL_FILE_HASH_EXAMPLES, HL_FILE_HASH_LENGTH, is_snapshot_tag},
 	messages::{
 		ABORT_MARKER, BEGIN_PATCH_MARKER, CLIPBOARD_INTERLEAVED_SECTIONS, END_PATCH_MARKER,
 		json_quote,
 	},
-	parser::{UNIFIED_HUNK_RE, parse_patch},
+	parser::{is_unified_hunk_header, parse_patch},
 	tokenizer::{Token, Tokenizer, header_path_has_orphan_bracket},
 	types::{Cursor, Edit, FileOp, PasteTarget},
 };
-use crate::error::EditError;
+use crate::{error::EditError, scan};
 
 /// Envelope and abort sentinels recognized when nested inside a header row.
 const ENVELOPE_MARKERS: [&str; 3] = [BEGIN_PATCH_MARKER, END_PATCH_MARKER, ABORT_MARKER];
 
-static APPLY_PATCH_PATH_NOISE_RE: LazyLock<Regex> = LazyLock::new(|| {
-	Regex::new(
-	r"(?i)^\*{0,3}\s*(?:(?:update|add|delete|move)[^A-Za-z0-9]*(?:file|to)?[^A-Za-z0-9]*:)?\s*\*{0,3}\s*",
-).expect("valid regex")
-});
-static RECOVERY_TAG_RE: LazyLock<Regex> =
-	LazyLock::new(|| Regex::new(r"#([0-9A-Fa-f]{4})\s*$").expect("valid regex"));
-/// A stand-in where the snapshot tag belongs (`#AUTO`, `#????`, `#0`, a bare
-/// `#`): one short word with no path characters, written for a file the model
-/// never got a tag for.
-static PLACEHOLDER_TAG_RE: LazyLock<Regex> =
-	LazyLock::new(|| Regex::new(r"#[^\s#./\\:\[\]]{0,16}\s*$").expect("valid regex"));
+/// Strip at most three leading framing asterisks and any following whitespace.
+fn strip_path_stars(path: &str) -> &str {
+	let stars = path
+		.bytes()
+		.take(3)
+		.take_while(|&byte| byte == b'*')
+		.count();
+	path[stars..].trim_start()
+}
+
+/// Strip an optional operation label such as `Update File:` from the path.
+fn path_after_label(path: &str) -> Option<&str> {
+	let verb = match path.as_bytes().first()?.to_ascii_lowercase() {
+		b'u' => "update",
+		b'a' => "add",
+		b'd' => "delete",
+		b'm' => "move",
+		_ => return None,
+	};
+	let label = scan::keyword(path, verb)?;
+	let split = label
+		.find(|c: char| c.is_ascii_alphanumeric())
+		.unwrap_or(label.len());
+	let (separator, target) = label.split_at(split);
+	if let Some(tail) = scan::keyword(target, "file").or_else(|| scan::keyword(target, "to")) {
+		let end = tail
+			.find(|c: char| c.is_ascii_alphanumeric())
+			.unwrap_or(tail.len());
+		if let Some(colon) = tail[..end].rfind(':') {
+			return Some(&tail[colon + 1..]);
+		}
+	}
+	Some(&label[separator.rfind(':')? + 1..])
+}
+
+/// Strip framing asterisks and an optional `apply_patch` label from a path.
+fn strip_apply_patch_path_noise(path: &str) -> &str {
+	let path = strip_path_stars(path);
+	strip_path_stars(path_after_label(path).map_or(path, str::trim_start))
+}
+
+/// Split the last `#TAG` suffix off a path, if any.
+fn split_header_tag(body: &str) -> Option<(&str, &str)> {
+	body.trim_end().rsplit_once('#')
+}
+
+/// Whether a short non-path tag is a placeholder, such as `#AUTO` or `#????`.
+fn is_placeholder_tag(tag: &str) -> bool {
+	if tag.len() > 16 * char::MAX_LEN_UTF8 {
+		return false;
+	}
+	let mut chars = tag.chars();
+	chars.by_ref().take(16).all(is_placeholder_tag_char) && chars.next().is_none()
+}
+
+/// Whether a character is allowed in a stand-in snapshot tag.
+const fn is_placeholder_tag_char(c: char) -> bool {
+	!c.is_whitespace() && !matches!(c, '#' | '.' | '/' | '\\' | ':' | '[' | ']')
+}
 
 /// Parsed edits, optional file operation, and parser warnings for one section.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -218,18 +262,16 @@ fn unquote(path: &str) -> &str {
 		.unwrap_or(path)
 }
 fn normalize_hashline_path(raw: &str, cwd: Option<&Path>) -> String {
-	let cleaned = APPLY_PATCH_PATH_NOISE_RE
-		.replace(unquote(raw.trim()), "")
-		.into_owned();
-	let path = Path::new(&cleaned);
+	let cleaned = strip_apply_patch_path_noise(unquote(raw.trim()));
+	let path = Path::new(cleaned);
 	let Some(cwd) = cwd else {
-		return cleaned;
+		return cleaned.to_owned();
 	};
 	// Shortening is lexical, so a rooted path counts even without a Windows
 	// drive prefix (`/repo/src/a.ts` under cwd `/repo`); a prefix mismatch
 	// simply fails `strip_prefix` below.
 	if !path.has_root() {
-		return cleaned;
+		return cleaned.to_owned();
 	}
 	let path = lexical_normalize(path);
 	let cwd = lexical_normalize(cwd);
@@ -239,7 +281,7 @@ fn normalize_hashline_path(raw: &str, cwd: Option<&Path>) -> String {
 			.replace(std::path::MAIN_SEPARATOR, "/");
 		return if text.is_empty() { ".".into() } else { text };
 	}
-	cleaned
+	cleaned.to_owned()
 }
 
 fn lexical_normalize(path: &Path) -> PathBuf {
@@ -287,20 +329,15 @@ fn parse_header_line(line: &str, cwd: Option<&Path>) -> Result<Option<RawSection
 
 fn recover_header(line: &str, cwd: Option<&Path>) -> Option<RawSection> {
 	let body = line.strip_circumfix('[', ']')?.trim();
-	let body = APPLY_PATCH_PATH_NOISE_RE.replace(body, "").into_owned();
+	let body = strip_apply_patch_path_noise(body);
 	if body.is_empty() {
 		return None;
 	}
-	let (path_text, file_hash, placeholder) = if let Some(captures) = RECOVERY_TAG_RE.captures(&body)
-	{
-		let whole = captures.get(0)?;
-		(&body[..whole.start()], Some(captures[1].to_ascii_uppercase()), false)
-	} else if let Some(placeholder) = PLACEHOLDER_TAG_RE.find(&body) {
-		// A placeholder is no tag: the section parses untagged, and staging
-		// answers it with the file's current tag, as for an unknown hex tag.
-		(&body[..placeholder.start()], None, true)
-	} else {
-		(body.trim_end(), None, false)
+	let (path_text, file_hash, placeholder) = match split_header_tag(body) {
+		Some((path, tag)) if is_snapshot_tag(tag) => (path, Some(tag.to_ascii_uppercase()), false),
+		// A placeholder is no tag: staging answers with the current tag.
+		Some((path, tag)) if is_placeholder_tag(tag) => (path, None, true),
+		_ => (body.trim_end(), None, false),
 	};
 	// Only a recovered tag disambiguates a `#` inside the path; untagged, it is
 	// a malformed tag (`a.ts#1A2B copied`), not part of a file name.
@@ -375,7 +412,7 @@ fn split_raw_sections(
 		.collect();
 	let first = lines.first().copied().unwrap_or("");
 	if parse_header_line(first, options.cwd)?.is_none() {
-		if is_unified_header(first.trim_end()) {
+		if is_unified_hunk_header(first.trim_end()) {
 			return Err(EditError::parse(
 				"unified-diff hunk header (`@@ -N,M +N,M @@`) is not valid in hashline. File sections \
 				 start with `[path#HASH]`; use `replace`, `delete`, or `insert` ops.",
@@ -484,7 +521,4 @@ fn merge_same_path_sections(sections: Vec<RawSection>) -> Result<Vec<RawSection>
 		result.push(section);
 	}
 	Ok(result)
-}
-fn is_unified_header(line: &str) -> bool {
-	UNIFIED_HUNK_RE.is_match(line)
 }

@@ -299,6 +299,43 @@ fn parked_waiters_report_each_external_its_own_exit() {
 	assert!(s.leftovers().unwrap().is_empty());
 }
 
+/// A measured spawn (`time`; on Linux the program runs under a helper)
+/// ends as the program did, takes group signals as it would, reports a
+/// usage, and fails like a plain spawn when the program is missing.
+#[test]
+fn measured_spawns_end_as_their_program() {
+	let env = EnvView::default();
+	for sessions in [Sessions::Detach, Sessions::Share] {
+		let s = spawner(sessions, Duration::from_secs(2));
+		for (script, status) in
+			[("exit 3", ExitStatus::Exited(3)), ("kill -USR1 $$", ExitStatus::Signaled(Signal::Usr1))]
+		{
+			let a = sh(script);
+			let mut p = s.spawn_measured(spec(&a, &env, NEW)).unwrap();
+			assert_eq!(wait(&mut p), status, "{sessions:?}: {script}");
+			assert!(p.usage().is_some_and(|u| u.max_rss > 0), "{sessions:?}: {script}");
+		}
+		let a = argv(&["/bin/sleep", "30"]);
+		let mut p = s.spawn_measured(spec(&a, &env, NEW)).unwrap();
+		#[cfg(target_os = "linux")]
+		{
+			let program = child_of(p.pid() as i32);
+			assert_eq!(program.name, "sleep", "the helper's child is the program");
+			assert_eq!(program.pgid, pgid(p.pid()), "in the helper's group");
+		}
+		p.signal(Signal::Term).unwrap();
+		assert_eq!(wait(&mut p), ExitStatus::Signaled(Signal::Term), "{sessions:?}");
+		drop(p);
+		assert!(s.leftovers().unwrap().is_empty(), "{sessions:?}");
+	}
+	let a = argv(&["/nonexistent/prog"]);
+	let err = NativeSpawner::default()
+		.spawn_measured(spec(&a, &env, NEW))
+		.err()
+		.unwrap();
+	assert_eq!(err.kind(), io::ErrorKind::NotFound);
+}
+
 #[test]
 fn missing_program_fails_with_not_found_on_both_paths() {
 	let env = EnvView::default();
@@ -796,6 +833,48 @@ fn abandoning_a_paused_job_still_terminates_it() {
 	until("stopped", || proc::info(pid).is_some_and(|i| i.state == ProcState::Stopped));
 	drop(p);
 	until("terminated", || proc::info(pid).is_none_or(|i| i.state == ProcState::Zombie));
+}
+
+/// KILLs (and continues) a stray process when a case ends, failed or not.
+struct KillOnDrop(proc::ProcInfo);
+
+impl Drop for KillOnDrop {
+	fn drop(&mut self) {
+		let _ = proc::signal_pinned(&self.0, Signal::Kill);
+		let _ = proc::signal_pinned(&self.0, Signal::Cont);
+	}
+}
+
+/// A debugger's inferior (lldb's, which outlived a timed-out job stopped
+/// and orphaned): a grandchild that moved to a session of its own and
+/// stopped itself is outside the external's session, and the cancel's TERM
+/// kills its parent and leaves it to init before the KILL. The cancel
+/// (TERM, then the drop) must still kill it.
+///
+/// Needs `/usr/bin/perl` (macOS and Debian-family Linux ship it) for `setsid`.
+#[test]
+fn cancel_kills_a_stopped_grandchild_in_a_session_of_its_own() {
+	let env = EnvView::default();
+	let grace = Duration::from_millis(300);
+	let s = spawner(Sessions::Detach, grace);
+	// It ignores TERM and HUP and sleeps on once continued: only the KILL
+	// after the grace ends it, when its parent is long dead.
+	let a = sh("/usr/bin/perl -e '$SIG{HUP} = $SIG{TERM} = q(IGNORE); use POSIX (); \
+	            POSIX::setsid() > 0 or die; kill(q(STOP), $$); sleep 30' & wait");
+	let mut p = s.spawn(spec(&a, &env, NEW)).unwrap();
+	let pid = p.pid() as i32;
+	let inferior = KillOnDrop(child_of(pid));
+	let ipid = inferior.0.pid;
+	until("grandchild stopped in its own session", || {
+		proc::info(ipid).is_some_and(|i| i.state == ProcState::Stopped && i.sid == ipid)
+	});
+	let start = Instant::now();
+	p.signal(Signal::Term).unwrap();
+	drop(p);
+	until("grandchild killed", || {
+		proc::info(ipid).is_none_or(|i| i.start != inferior.0.start || i.state == ProcState::Zombie)
+	});
+	assert!(start.elapsed() >= grace, "it ignores TERM: only the KILL ends it");
 }
 
 #[test]

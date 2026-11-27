@@ -7,17 +7,16 @@
  * `agent_start` via `ctx.clearPinnedError`. Aborts and normal stops must NOT
  * pin a banner.
  */
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, setSystemTime, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
-import { ErrorBannerComponent } from "@oh-my-pi/pi-tui/overlays/error-banner";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { Loader } from "@oh-my-pi/pi-tui";
-import { PREVIEW_LIMITS, TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
+import { workingMessage, type WorkingSpec } from "../src/ui/dock/working";
+import { initTheme } from "../src/ui/theme/service";
+import { blockText } from "./helpers/transcript-text";
+import { PREVIEW_LIMITS, TRUNCATE_LENGTHS } from "@oh-my-pi/pi-coding-agent/utils/render-utils";
 import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 
 import { cfgDisplaySmoothStreaming } from "@oh-my-pi/pi-coding-agent/modes/settings";
@@ -43,8 +42,8 @@ function makeAssistantMessage(overrides: Partial<AssistantMessage> = {}): Assist
 	};
 }
 
-beforeAll(async () => {
-	await initTheme(false);
+beforeAll(() => {
+	initTheme();
 });
 
 beforeEach(async () => {
@@ -54,25 +53,11 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+	setSystemTime();
 	resetSettingsForTest();
 });
 
 function createFixture(streamingMessage?: AssistantMessage) {
-	const componentCalls: string[] = [];
-	const streamingComponent = new AssistantMessageComponent();
-	const updateContentImpl = streamingComponent.updateContent.bind(streamingComponent);
-	vi.spyOn(streamingComponent, "updateContent").mockImplementation((message, opts) => {
-		componentCalls.push("update");
-		updateContentImpl(message, opts);
-	});
-	const setHideThinkingBlockImpl = streamingComponent.setHideThinkingBlock.bind(streamingComponent);
-	vi.spyOn(streamingComponent, "setHideThinkingBlock").mockImplementation(hide => {
-		componentCalls.push(`hide:${hide}`);
-		setHideThinkingBlockImpl(hide);
-	});
-	const setErrorPinned = vi.spyOn(streamingComponent, "setErrorPinned");
-	vi.spyOn(streamingComponent, "messagePersistenceKey").mockReturnValue("test-persistence-key");
-	vi.spyOn(streamingComponent, "applyRetryRecovery");
 	const sessionState = { isStreaming: false };
 	let hasDisplayableThinkingContent = false;
 	const noteDisplayableThinkingContent = vi.fn((message: AssistantMessage) => {
@@ -84,7 +69,6 @@ function createFixture(streamingMessage?: AssistantMessage) {
 		return true;
 	});
 	const ctx = createInteractiveModeContext({
-		streamingComponent: streamingMessage ? streamingComponent : undefined,
 		streamingMessage,
 		session: {
 			get isStreaming() {
@@ -99,7 +83,10 @@ function createFixture(streamingMessage?: AssistantMessage) {
 			return !hasDisplayableThinkingContent;
 		},
 	});
-	vi.spyOn(ctx.statusContainer, "disposeChildren");
+	// The streaming reply the turn ends on.
+	const streaming = ctx.presentAssistant();
+	if (streamingMessage) ctx.streaming = streaming;
+	const setErrorPinned = vi.spyOn(streaming.errorPinned, "set");
 
 	const showPinnedError = vi.spyOn(ctx, "showPinnedError");
 	const clearPinnedError = vi.spyOn(ctx, "clearPinnedError");
@@ -111,9 +98,8 @@ function createFixture(streamingMessage?: AssistantMessage) {
 		showPinnedError,
 		clearPinnedError,
 		showError,
-		streamingComponent,
+		streaming,
 		setErrorPinned,
-		componentCalls,
 		sessionState,
 	};
 }
@@ -317,7 +303,7 @@ describe("EventController error banner", () => {
 			errorMessage,
 			errorId: AIError.create(AIError.Flag.Transient),
 		});
-		const { controller, ctx, clearPinnedError, setErrorPinned, streamingComponent } = createFixture(message);
+		const { controller, ctx, clearPinnedError, setErrorPinned, streaming } = createFixture(message);
 
 		await controller.handleEvent({ type: "message_end", message } as Extract<
 			AgentSessionEvent,
@@ -326,6 +312,9 @@ describe("EventController error banner", () => {
 		clearPinnedError.mockClear();
 		setErrorPinned.mockClear();
 
+		// The retry row counts its delay down from the wall clock, which runs on between the retry's
+		// start and this render; hold the clock still so the row shows the whole delay on any machine.
+		setSystemTime(Date.now());
 		await controller.handleEvent({
 			type: "auto_retry_start",
 			attempt: 1,
@@ -336,7 +325,10 @@ describe("EventController error banner", () => {
 		} as Extract<AgentSessionEvent, { type: "auto_retry_start" }>);
 
 		expect(clearPinnedError).toHaveBeenCalledTimes(1);
-		const status = Bun.stripANSI(ctx.retryLoader!.render(200).join("\n"));
+		expect(ctx.working).toBe("retry");
+		const showWorking = ctx.showWorking as unknown as { mock: { calls: [string, WorkingSpec][] } };
+		const spec = showWorking.mock.calls.at(-1)![1];
+		const status = workingMessage(spec, spec.startedAt, key => key);
 		expect(status).toContain("Retrying (1/3) in 500ms · The socket connection was closed");
 
 		await controller.handleEvent({ type: "agent_start" } as Extract<AgentSessionEvent, { type: "agent_start" }>);
@@ -358,8 +350,8 @@ describe("EventController error banner", () => {
 			],
 		} as Extract<AgentSessionEvent, { type: "auto_retry_end" }>);
 
-		expect(streamingComponent.applyRetryRecovery).toHaveBeenCalledWith(retryRecovery);
-		const transcript = Bun.stripANSI(streamingComponent.render(120).join("\n"));
+		expect(streaming.message.peek()?.retryRecovery as unknown).toEqual(retryRecovery);
+		const transcript = blockText(streaming.block);
 		expect(transcript).not.toContain(errorMessage);
 		expect(transcript).toContain("error; retried");
 	});
@@ -405,19 +397,17 @@ describe("EventController error banner", () => {
 			type: "message_start",
 			message: initial,
 		} as Extract<AgentSessionEvent, { type: "message_start" }>);
-		const component = ctx.streamingComponent;
-		if (!(component instanceof AssistantMessageComponent)) {
-			throw new Error("Expected streaming assistant component");
-		}
+		const view = ctx.streaming;
+		if (!view) throw new Error("Expected the streaming reply");
 
-		component.updateContent(
+		view.message.set(
 			makeAssistantMessage({
 				content: [],
 				stopReason: "error",
 				errorMessage,
 			}),
 		);
-		const rendered = Bun.stripANSI(component.render(120).join("\n"));
+		const rendered = blockText(view.block);
 		expect(rendered).toContain("provider error detail line 29");
 		expect(rendered).not.toContain("more lines");
 	});
@@ -435,10 +425,8 @@ describe("EventController thinking visibility", () => {
 			type: "message_start",
 			message: initial,
 		} as Extract<AgentSessionEvent, { type: "message_start" }>);
-		const component = ctx.streamingComponent;
-		if (!(component instanceof AssistantMessageComponent)) {
-			throw new Error("Expected streaming assistant component");
-		}
+		const view = ctx.streaming;
+		if (!view) throw new Error("Expected the streaming reply");
 
 		await controller.handleEvent({
 			type: "message_update",
@@ -450,20 +438,14 @@ describe("EventController thinking visibility", () => {
 			},
 		} as Extract<AgentSessionEvent, { type: "message_update" }>);
 
-		expect(Bun.stripANSI(component.render(80).join("\n"))).toContain("server-side reasoning");
+		expect(blockText(view.block, 80)).toContain("server-side reasoning");
 	});
 });
 
-describe("EventController working loader reconciliation", () => {
-	it("restores the working loader after compaction clears status while the focused session streams", async () => {
+describe("EventController working row reconciliation", () => {
+	it("restores the working row after compaction while the focused session streams", async () => {
 		const { controller, ctx, sessionState } = createFixture();
-		const loader = new Loader(
-			ctx.ui,
-			text => text,
-			text => text,
-		);
-		const stop = vi.spyOn(loader, "stop");
-		ctx.autoCompactionLoader = loader;
+		ctx.showWorking("compaction", { label: "Compacting…", startedAt: 0, variant: { kind: "compaction" } });
 		sessionState.isStreaming = true;
 
 		await controller.handleEvent({
@@ -475,13 +457,13 @@ describe("EventController working loader reconciliation", () => {
 			skipped: true,
 		} as Extract<AgentSessionEvent, { type: "auto_compaction_end" }>);
 
-		expect(stop).toHaveBeenCalledTimes(1);
-		expect(ctx.statusContainer.disposeChildren).toHaveBeenCalledTimes(1);
+		expect(ctx.clearWorking).toHaveBeenCalledWith("compaction");
 		expect(ctx.flushCompactionQueue).toHaveBeenCalledWith({ willRetry: false });
-		expect(ctx.ensureLoadingAnimation).toHaveBeenCalledTimes(1);
+		expect(ctx.ensureWorkingRow).toHaveBeenCalledTimes(1);
+		expect(ctx.working).toBe("turn");
 	});
 
-	it("self-heals missing working loader on live tool updates", async () => {
+	it("self-heals a missing working row on live tool updates", async () => {
 		const { controller, ctx, sessionState } = createFixture();
 		sessionState.isStreaming = true;
 
@@ -491,20 +473,14 @@ describe("EventController working loader reconciliation", () => {
 			partialResult: {},
 		} as Extract<AgentSessionEvent, { type: "tool_execution_update" }>);
 
-		expect(ctx.ensureLoadingAnimation).toHaveBeenCalledTimes(1);
+		expect(ctx.ensureWorkingRow).toHaveBeenCalledTimes(1);
 	});
 
-	it("self-heals missing working loader when a task subagent finishes mid-turn (#3858)", async () => {
-		// `task` subagents run inside the parent's streaming turn. While the task is
-		// running a transient overlay (auto-compaction / auto-retry) can drop the
-		// working loader by clearing the status container, and the overlay's end
-		// handler is the only restorer keyed off the missing loader. If the task
-		// finishes between the overlay's start and end (or any other branch where
-		// the loader was nulled without a follow-up overlay-end), `tool_execution_end`
-		// is the next streaming event that lands and must heal the loader, mirroring
-		// the `tool_execution_update` reconciler. Without this the spinner stays
-		// gone for the remainder of the parent turn even though the agent keeps
-		// streaming (the user-visible regression in #3858).
+	it("self-heals a missing working row when a task subagent finishes mid-turn (#3858)", async () => {
+		// `task` subagents run inside the parent's streaming turn. A transient row
+		// (auto-compaction / auto-retry) can take the working row down while the
+		// task runs; `tool_execution_end` is the next streaming event that lands and
+		// must restore it, mirroring the `tool_execution_update` reconciler.
 		const { controller, ctx, sessionState } = createFixture();
 		sessionState.isStreaming = true;
 
@@ -516,17 +492,16 @@ describe("EventController working loader reconciliation", () => {
 			result: { content: [{ type: "text", text: "ok" }], details: {} },
 		} as Extract<AgentSessionEvent, { type: "tool_execution_end" }>);
 
-		expect(ctx.ensureLoadingAnimation).toHaveBeenCalledTimes(1);
+		expect(ctx.ensureWorkingRow).toHaveBeenCalledTimes(1);
 	});
 
-	it("does not restore the working loader while an overlay loader (auto-retry) owns the status container at tool_execution_end", async () => {
+	it("does not restore the working row while a retry countdown holds it at tool_execution_end", async () => {
 		const { controller, ctx, sessionState } = createFixture();
-		const loader = new Loader(
-			ctx.ui,
-			text => text,
-			text => text,
-		);
-		ctx.retryLoader = loader;
+		ctx.showWorking("retry", {
+			label: "Retrying",
+			startedAt: 0,
+			variant: { kind: "retry", attempt: 1, max: 3, delayMs: 1000 },
+		});
 		sessionState.isStreaming = true;
 
 		await controller.handleEvent({
@@ -537,18 +512,17 @@ describe("EventController working loader reconciliation", () => {
 			result: { content: [{ type: "text", text: "ok" }], details: {} },
 		} as Extract<AgentSessionEvent, { type: "tool_execution_end" }>);
 
-		expect(ctx.ensureLoadingAnimation).not.toHaveBeenCalled();
-		loader.stop();
+		expect(ctx.ensureWorkingRow).not.toHaveBeenCalled();
+		expect(ctx.working).toBe("retry");
 	});
 
-	it("keeps transient retry status exclusive while a retry loader is visible", async () => {
+	it("keeps the retry countdown exclusive on tool updates", async () => {
 		const { controller, ctx, sessionState } = createFixture();
-		const loader = new Loader(
-			ctx.ui,
-			text => text,
-			text => text,
-		);
-		ctx.retryLoader = loader;
+		ctx.showWorking("retry", {
+			label: "Retrying",
+			startedAt: 0,
+			variant: { kind: "retry", attempt: 1, max: 3, delayMs: 1000 },
+		});
 		sessionState.isStreaming = true;
 
 		await controller.handleEvent({
@@ -557,45 +531,27 @@ describe("EventController working loader reconciliation", () => {
 			partialResult: {},
 		} as Extract<AgentSessionEvent, { type: "tool_execution_update" }>);
 
-		expect(ctx.ensureLoadingAnimation).not.toHaveBeenCalled();
-		loader.stop();
+		expect(ctx.ensureWorkingRow).not.toHaveBeenCalled();
+		expect(ctx.working).toBe("retry");
 	});
 });
 
-describe("ErrorBannerComponent", () => {
-	it("caps an oversized multi-line error to a few rows and points at expansion", () => {
-		const huge = Array.from({ length: 50 }, (_, i) => `error detail line ${i}`).join("\n");
-		const banner = new ErrorBannerComponent(huge);
-		const rendered = Bun.stripANSI(banner.render(120).join("\n"));
-		const detailLines = rendered.split("\n").filter(line => line.includes("error detail line"));
-		expect(detailLines.length).toBe(4);
-		expect(rendered).toMatch(/\+46 more lines \(.+ to expand\)/);
-	});
-
-	it("wraps a long single-line error across rows instead of cutting it", () => {
-		const body = `400 ${JSON.stringify({ error: { message: "The requested model is not supported.", code: "model_not_supported", param: "model", type: "invalid_request_error" } })}`;
-		const banner = new ErrorBannerComponent(body);
-		const rendered = Bun.stripANSI(banner.render(60).join("\n"));
-		expect(rendered.replace(/\n\s*/g, "")).toContain('"type":"invalid_request_error"}}');
-		expect(rendered).not.toContain("more line");
-	});
-});
-
-describe("AssistantMessageComponent error pinning", () => {
+describe("assistant reply error pinning", () => {
 	it("hides the inline error while pinned and restores it afterwards", () => {
 		const message = makeAssistantMessage({
 			content: [],
 			stopReason: "error",
 			errorMessage: "400 invalid reasoning value",
 		});
-		const component = new AssistantMessageComponent(message);
+		const { ctx } = createFixture();
+		const view = ctx.presentAssistant(message);
 
-		expect(Bun.stripANSI(component.render(120).join("\n"))).toContain("Error: 400 invalid reasoning value");
+		expect(blockText(view.block)).toContain("400 invalid reasoning value");
 
-		component.setErrorPinned(true);
-		expect(Bun.stripANSI(component.render(120).join("\n"))).not.toContain("Error: 400 invalid reasoning value");
+		view.errorPinned.set(true);
+		expect(blockText(view.block)).not.toContain("400 invalid reasoning value");
 
-		component.setErrorPinned(false);
-		expect(Bun.stripANSI(component.render(120).join("\n"))).toContain("Error: 400 invalid reasoning value");
+		view.errorPinned.set(false);
+		expect(blockText(view.block)).toContain("400 invalid reasoning value");
 	});
 });
