@@ -11,6 +11,8 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AsyncJobManager } from "../../src/async/job-manager";
 import { ModelRegistry } from "../../src/config/model-registry";
+import { AgentProtocolHandler } from "../../src/internal-urls/agent-protocol";
+import { HistoryProtocolHandler } from "../../src/internal-urls/history-protocol";
 import { Settings } from "../../src/config/settings";
 import { AgentLifecycleManager } from "../../src/registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry } from "../../src/registry/agent-registry";
@@ -83,6 +85,8 @@ export interface AgentsProbe {
 	manages(): Promise<boolean>;
 	/** Register an external agent through the worker's registry proxy, settle it with `complete()`, and return its id. */
 	settleExternal(): Promise<string>;
+	/** Read an `agent://` or `history://` URL with this worker's handlers. */
+	readUrl(url: string): Promise<string>;
 }
 
 /** Test-only boot globals of the probe service. */
@@ -268,6 +272,10 @@ const probe: AgentsProbe = {
 		);
 		handle.complete({ status: "done", text: "remote result" });
 		return handle.id;
+	},
+	readUrl: async url => {
+		const handler = url.startsWith("history:") ? new HistoryProtocolHandler() : new AgentProtocolHandler();
+		return (await handler.resolve(new URL(url) as never)).content;
 	},
 };
 
