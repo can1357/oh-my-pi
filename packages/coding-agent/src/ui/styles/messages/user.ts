@@ -9,7 +9,7 @@
  *   top fill row (left and right, inside the padding).
  * - Tools and thumbnails are native-only.
  * - A one-row allocation shows the first content row (no zone marks).
- * - With prompt zones on, the bubble is an OSC 133 prompt zone.
+ * - With prompt zones on, the first content row is marked when it enters terminal history.
  * - An empty prompt draws nothing.
  */
 import type { UiNode } from "@oh-my-pi/pi-tui";
@@ -33,6 +33,7 @@ const BG = "userMessageBg";
 
 interface UserTerm {
 	zones?: boolean;
+	zoneKey?: object;
 	steered?: boolean;
 	reaction?: string;
 }
@@ -116,10 +117,10 @@ function glowKeywords(cx: PaintContext, text: string, keywords: readonly Glowing
 	return out + text.slice(at);
 }
 
-/** The first row holding text (the top fill row when none does). */
-function emergencyRow(rows: readonly string[]): string {
-	for (let i = 1; i < rows.length - 1; i++) if (stripEscapes(rows[i]!).trim()) return rows[i]!;
-	return rows[rows.length >= 3 ? 1 : 0]!;
+/** The index of the first row holding text (the top fill row when none does). */
+function firstContentRow(rows: readonly string[]): number {
+	for (let i = 1; i < rows.length - 1; i++) if (stripEscapes(rows[i]!).trim()) return i;
+	return rows.length >= 3 ? 1 : 0;
 }
 
 function paintUser(node: UiNode, cx: PaintContext): Block {
@@ -128,7 +129,7 @@ function paintUser(node: UiNode, cx: PaintContext): Block {
 	if (!prompt) return EMPTY_BLOCK;
 	const rows = bubbleRows(cx, prompt, cx.width);
 	if (rows.length === 0) return EMPTY_BLOCK;
-	if (cx.height === 1) return { rows: [emergencyRow(rows)] };
+	if (cx.height === 1) return { rows: [rows[firstContentRow(rows)]!] };
 	const term = termOf<UserTerm>(node);
 	if (term.steered || term.reaction !== undefined) {
 		const marker = term.steered ? theme.fg("accent", "*") : "";
@@ -136,11 +137,17 @@ function paintUser(node: UiNode, cx: PaintContext): Block {
 		const gap = Math.max(0, cx.width - 2 - visibleWidth(marker) - visibleWidth(emoji));
 		rows[0] = fillRow(theme, BG, ` ${marker}${" ".repeat(gap)}${emoji}`, cx.width);
 	}
-	if (term.zones) {
-		rows[0] = ZONE_START + rows[0]!;
-		rows[rows.length - 1] += ZONE_CLOSE;
-	}
-	return { rows };
+	return term.zones
+		? {
+				rows,
+				historyMark: {
+					key: term.zoneKey ?? node,
+					row: firstContentRow(rows),
+					before: ZONE_START,
+					after: ZONE_CLOSE,
+				},
+			}
+		: { rows };
 }
 
 /**
