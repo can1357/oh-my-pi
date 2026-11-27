@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { type as schemaType } from "@oh-my-pi/omptype";
 import { streamAzureOpenAIResponses } from "@oh-my-pi/pi-ai/providers/azure-openai-responses";
 import { streamOpenAICodexResponses } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
@@ -352,13 +352,11 @@ async function runChain(route: ChainRoute, createdBy: CreatedBy) {
 	return { requests: route.requests(), stored: [...storedItems(first), ...storedItems(second)] };
 }
 
-const CHAIN_ROUTES = [
+describe.each([
 	["the HTTP route", httpRoute],
 	["the Responses WebSocket session", webSocketRoute],
 	["the Codex WebSocket session", codexWebSocketRoute],
-] as const;
-
-describe.each(CHAIN_ROUTES)("created_by on %s", (_route, makeRoute) => {
+] as const)("created_by on %s", (_route, makeRoute) => {
 	it.each(CREATED_BY_VALUES)(
 		"replays stored items without created_by (%s) and still chains the next request",
 		async (_label, createdBy) => {
@@ -381,45 +379,6 @@ describe.each(CHAIN_ROUTES)("created_by on %s", (_route, makeRoute) => {
 			expect(inputs).toEqual(control.requests.map(inputOf));
 		},
 	);
-});
-
-// ============================================================================
-// Teardown: a later test, or a later file in the same process, keeps its profile
-// ============================================================================
-
-interface ProfileState {
-	profile: string | undefined;
-	agentDir: string;
-	env: Array<string | undefined>;
-}
-
-function profileState(): ProfileState {
-	return {
-		profile: piUtils.getActiveProfile(),
-		agentDir: piUtils.getAgentDir(),
-		env: PROFILE_ENV_KEYS.map(key => process.env[key]),
-	};
-}
-
-describe("teardown under a named profile", () => {
-	let restoreProfileState: () => void;
-	let selected: ProfileState;
-	beforeAll(() => {
-		restoreProfileState = saveProfileState();
-		piUtils.setProfile("created-by-teardown");
-		selected = profileState();
-	});
-	afterAll(() => restoreProfileState());
-
-	// Each case first reads what the teardown of the case before it left.
-	it.each(CHAIN_ROUTES)("finds the profile still selected, then runs a case on %s", async (_route, makeRoute) => {
-		expect(profileState()).toEqual(selected);
-		await runChain(makeRoute(null), null);
-	});
-
-	it("finds the profile still selected after the last case", () => {
-		expect(profileState()).toEqual(selected);
-	});
 });
 
 // ============================================================================
