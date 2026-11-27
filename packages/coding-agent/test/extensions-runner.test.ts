@@ -3843,6 +3843,23 @@ describe("ExtensionRunner", () => {
 				release.resolve();
 			});
 
+			it("a pending listing carries the call's live abort signal", async () => {
+				const turn = new AbortController();
+				let listed: Array<{ signal?: AbortSignal }> = [];
+				const select = vi.fn(async () => {
+					// An extension that connects during the dialog only has the listing to cancel its remote work.
+					listed = globalState.__extApproval!.ctx!.getPendingToolApprovals() as Array<{ signal?: AbortSignal }>;
+					expect(listed[0]?.signal?.aborted).toBe(false);
+					turn.abort();
+					return "Deny";
+				});
+				const { executed, run } = await setup({ select });
+				await expect(run("call-listed", { signal: turn.signal })).rejects.toThrow();
+				expect(listed).toHaveLength(1);
+				expect(listed[0]?.signal?.aborted).toBe(true);
+				expect(executed).not.toHaveBeenCalled();
+			});
+
 			it("an answer given while the turn is aborted does not run the call", async () => {
 				const { seen, executed, run } = await setup();
 				const turn = new AbortController();

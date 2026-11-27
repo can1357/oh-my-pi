@@ -24,25 +24,39 @@ export interface PendingPrompt<TAnswer> {
 }
 
 interface Entry<TEvent, TAnswer> {
+	/** The private copy, without `signal`: answers are checked against it and listings clone it. */
 	event: TEvent;
+	/** The emitted event's live `signal`, handed back with every listing (it cannot be cloned). */
+	eventSignal?: AbortSignal;
 	/** Normalizes an extension's answer, or rejects it with `undefined`. */
 	accept(answer: TAnswer): TAnswer | undefined;
 	settle(answer: TAnswer): void;
 	given?: TAnswer;
 }
 
-class PromptTable<TEvent, TAnswer> {
+class PromptTable<TEvent extends { signal?: AbortSignal }, TAnswer> {
 	readonly #entries = new Map<string, Entry<TEvent, TAnswer>>();
 
-	/** `signal` aborting closes the prompt, so an extension answering after the call was aborted gets false. */
+	/**
+	 * `event` is the emitted one; the table keeps a private copy without its `signal`, and lists it with that
+	 * live `signal` reattached. `signal` aborting closes the prompt, so an extension answering after the call
+	 * was aborted gets false.
+	 */
 	open(
 		id: string,
 		event: TEvent,
-		accept: (answer: TAnswer) => TAnswer | undefined,
+		accept: (copy: TEvent, answer: TAnswer) => TAnswer | undefined,
 		signal?: AbortSignal,
 	): PendingPrompt<TAnswer> {
 		const { promise, resolve } = Promise.withResolvers<TAnswer>();
-		const entry: Entry<TEvent, TAnswer> = { event, accept, settle: resolve };
+		const { signal: eventSignal, ...rest } = event;
+		const copy = structuredClone(rest) as TEvent;
+		const entry: Entry<TEvent, TAnswer> = {
+			event: copy,
+			eventSignal,
+			accept: answer => accept(copy, answer),
+			settle: resolve,
+		};
 		const close = () => {
 			signal?.removeEventListener("abort", close);
 			if (this.#entries.get(id) === entry) this.#entries.delete(id);
@@ -65,8 +79,13 @@ class PromptTable<TEvent, TAnswer> {
 		return true;
 	}
 
+	/** Clones of the pending events, each with its live `signal` so remote work can still be cancelled. */
 	list(): TEvent[] {
-		return [...this.#entries.values()].map(entry => structuredClone(entry.event));
+		return [...this.#entries.values()].map(entry => {
+			const listed = structuredClone(entry.event);
+			if (entry.eventSignal) listed.signal = entry.eventSignal;
+			return listed;
+		});
 	}
 }
 
@@ -89,13 +108,11 @@ export class PendingInteractions {
 	readonly #asks = new PromptTable<AskRequestedEvent, ExtensionAskAnswer>();
 
 	openApproval(event: ToolApprovalRequestedEvent, signal?: AbortSignal): PendingPrompt<ExtensionApprovalAnswer> {
-		// A private copy: the emitted event may be edited by handlers, and answers are checked against this one.
-		const { signal: _signal, ...rest } = event;
-		const listed = structuredClone(rest);
+		// Answers are checked against the table's private copy: handlers may edit the emitted event.
 		return this.#approvals.open(
 			event.approvalId,
-			listed,
-			answer => acceptedApprovalAnswer(listed.prompt, answer),
+			event,
+			(copy, answer) => acceptedApprovalAnswer(copy.prompt, answer),
 			signal,
 		);
 	}
@@ -114,11 +131,10 @@ export class PendingInteractions {
 		accept: (data: ExtensionAskData) => ExtensionAskData | undefined,
 		signal?: AbortSignal,
 	): PendingPrompt<ExtensionAskAnswer> {
-		const { signal: _signal, ...rest } = event;
 		return this.#asks.open(
 			event.askId,
-			structuredClone(rest),
-			answer => {
+			event,
+			(_copy, answer) => {
 				if (answer === "cancel") return answer;
 				if (
 					typeof answer !== "object" ||

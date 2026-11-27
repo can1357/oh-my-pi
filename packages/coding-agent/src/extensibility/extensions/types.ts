@@ -890,7 +890,10 @@ export interface ExtensionContext {
 	 * An answer given while the call's turn is being aborted is discarded and the call fails closed.
 	 */
 	resolveToolApproval(approvalId: string, answer: ExtensionApprovalAnswer): boolean;
-	/** Tool approvals still awaiting an answer, oldest first, as `tool_approval_requested` reported them. */
+	/**
+	 * Tool approvals still awaiting an answer, oldest first, as `tool_approval_requested` reported them,
+	 * including the live `signal`: an extension that connects mid-prompt can still cancel its remote work.
+	 */
 	getPendingToolApprovals(): ToolApprovalRequestedEvent[];
 	/**
 	 * Answer a pending `ask` form (see `ask_requested`) as if the user submitted `answer`; the host's
@@ -899,7 +902,7 @@ export interface ExtensionContext {
 	 * required field empty.
 	 */
 	resolveAsk(askId: string, answer: ExtensionAskAnswer): boolean;
-	/** `ask` forms still awaiting an answer, oldest first, as `ask_requested` reported them. */
+	/** `ask` forms still awaiting an answer, oldest first, as `ask_requested` reported them, live `signal` included. */
 	getPendingAsks(): AskRequestedEvent[];
 	/**
 	 * Open the interactive plan review on the newest plan file, like `/plan-review`, while the
