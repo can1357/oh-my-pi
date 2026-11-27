@@ -245,6 +245,7 @@ export async function initDb(): Promise<Database> {
 			cache_write_tokens INTEGER NOT NULL,
 			total_tokens INTEGER NOT NULL,
 			premium_requests REAL NOT NULL,
+			aiu_nano REAL,
 			cost_input REAL NOT NULL,
 			cost_output REAL NOT NULL,
 			cost_cache_read REAL NOT NULL,
@@ -506,6 +507,10 @@ export async function initDb(): Promise<Database> {
 	const messageColumns = db.query("PRAGMA table_info(messages)").all() as { name: string }[];
 	if (!messageColumns.some(column => column.name === "premium_requests")) {
 		db.run("ALTER TABLE messages ADD COLUMN premium_requests REAL NOT NULL DEFAULT 0");
+	}
+	// Server-reported Copilot AI credits (nano-AIU). NULL means unknown, never zero.
+	if (!messageColumns.some(column => column.name === "aiu_nano")) {
+		db.run("ALTER TABLE messages ADD COLUMN aiu_nano REAL");
 	}
 	if (!messageColumns.some(column => column.name === "cost_no_cache_input")) {
 		db.run("ALTER TABLE messages ADD COLUMN cost_no_cache_input REAL");
@@ -1069,6 +1074,10 @@ function* parsedRows<T>(
 	for (const result of results) yield* select(result);
 }
 
+function isValidAiuNano(value: unknown): value is number {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
 /**
  * Commit distinct transcripts' rows, reconciliation state, and cursors together; failure rolls back the batch.
  * `changes` counts stored rows inserted, updated or deleted (cursor bookkeeping excluded), so callers can
@@ -1332,6 +1341,7 @@ export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 			"cache_write_tokens",
 			"total_tokens",
 			"premium_requests",
+			"aiu_nano",
 			"cost_input",
 			"cost_output",
 			"cost_cache_read",
@@ -1349,6 +1359,7 @@ export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 			ttft = excluded.ttft,
 			purpose = excluded.purpose,
 			premium_requests = MAX(messages.premium_requests, excluded.premium_requests),
+			aiu_nano = excluded.aiu_nano,
 			cost_input = excluded.cost_input,
 			cost_output = excluded.cost_output,
 			cost_cache_read = excluded.cost_cache_read,
@@ -1362,6 +1373,8 @@ export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 		for (const s of stats) {
 			const { cost, unpriced } = resolveStoredCost(s);
 			const noCacheInputCost = calculateNoCacheInputCost(s.provider, s.model, s.usage, s.timestamp) ?? 0;
+			const reportedNano = s.usage.aiu?.nano;
+			const aiuNano = isValidAiuNano(reportedNano) ? reportedNano : null;
 			writer.add(
 				s.sessionFile,
 				[s.entryId, s.timestamp],
@@ -1383,6 +1396,7 @@ export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 					s.usage.cacheWrite,
 					s.usage.totalTokens,
 					s.usage.premiumRequests ?? 0,
+					aiuNano,
 					cost.input,
 					cost.output,
 					cost.cacheRead,
@@ -1441,6 +1455,7 @@ function rowToMessageStats(row: any): MessageStats {
 			cacheWrite: row.cache_write_tokens,
 			totalTokens: row.total_tokens,
 			premiumRequests: row.premium_requests ?? 0,
+			...(row.aiu_nano !== null && row.aiu_nano !== undefined ? { aiu: { nano: row.aiu_nano as number } } : {}),
 			cost: {
 				input: row.cost_input,
 				output: row.cost_output,

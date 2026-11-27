@@ -101,7 +101,7 @@ import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compa
 import type { AgentHubRegistry } from "../registry/agent-hub-types";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { isSessionTreeRef, registerPersistedSubagents } from "../registry/persisted-agents";
-import type { AgentCostSnapshot } from "./view-model/overlays/agent-hub-projection";
+import type { AgentCostSnapshot, AgentTreeSpend } from "./view-model/overlays/agent-hub-projection";
 import { sumSubagentTreeCost } from "./agent-hub-runtime";
 import {
 	type AgentSession,
@@ -111,6 +111,7 @@ import {
 	SHUTDOWN_CONSOLIDATE_BUDGET_MS,
 } from "../session/agent-session";
 import type { AgentSessionHandle, AgentViewSession } from "../session/agent-session-handle";
+import type { AiuTotals } from "../session/aiu-billing";
 import type { TranscriptEntryLike } from "../session/transcript/transcript-entry";
 import type { BashExecutionMessage, PythonExecutionMessage } from "../session/transcript/messages";
 import type { CompactMode } from "../session/compact-modes";
@@ -3970,6 +3971,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * a collab guest's registry mirrors host transcripts outside this root).
 	 */
 	#subagentTreeCost = 0;
+	#subagentTreeAiuKey = "";
 
 	syncRunningSubagentBadge(): boolean {
 		const registry = getRunningSubagentBadgeRegistry(this.collabGuest, AgentRegistry.global());
@@ -3991,21 +3993,27 @@ export class InteractiveMode implements InteractiveModeContext {
 		const inspectableChanged = inspectable !== this.#inspectableSubagentCount;
 		this.#inspectableSubagentCount = inspectable;
 		const agentsChanged = this.statusLine.setRunningSubagents(agentIds);
-		let treeCost = 0;
+		let tree: AgentTreeSpend | undefined;
 		if (!this.collabGuest) {
 			const rootSessionFile = this.sessionManager.getSessionFile() ?? undefined;
 			this.#hydratePersistedSubagentCosts(rootSessionFile);
-			treeCost = sumSubagentTreeCost({
+			tree = sumSubagentTreeCost({
 				refs: AgentRegistry.global().list(),
 				observers: this.#observerRegistry,
 				rootSessionFile,
 				sessionCosts: this.#subagentSessionCosts,
 			});
 		}
+		const treeCost = tree?.cost ?? 0;
 		const costChanged = this.#subagentTreeCost !== treeCost;
 		this.#subagentTreeCost = treeCost;
 		if (costChanged) this.statusLine.setModes({ subagentTreeCost: treeCost });
-		const changed = agentsChanged || costChanged || inspectableChanged;
+		// The status line reads the tree's credits from the session; a credits-only change still repaints it.
+		const aiuKey = tree ? `${tree.aiu.nano}:${tree.aiu.unknownCalls}` : "";
+		const aiuChanged = this.#subagentTreeAiuKey !== aiuKey;
+		this.#subagentTreeAiuKey = aiuKey;
+		if (aiuChanged && !costChanged) this.statusLine.refresh();
+		const changed = agentsChanged || costChanged || aiuChanged || inspectableChanged;
 		if (changed) this.#syncHudPills();
 		return changed;
 	}
@@ -8268,8 +8276,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#selectorController.showSettingsSelector();
 	}
 
-	showUsageDashboard(reports: UsageReport[]): void {
-		this.#selectorController.showUsageDashboard(reports);
+	showUsageDashboard(reports: UsageReport[], sessionAiu?: AiuTotals): void {
+		this.#selectorController.showUsageDashboard(reports, sessionAiu);
 	}
 
 	showAdvisorConfigure(): void {

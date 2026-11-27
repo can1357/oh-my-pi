@@ -12,6 +12,7 @@ import type { KeyId } from "../config/keybindings/key-id";
 import type { KeybindingsManager } from "../config/keybindings/keybindings";
 import type { SpaceHoldHandler } from "../config/keybindings/space-hold";
 import type { Settings } from "../config/settings";
+import type { AiuTotals } from "../session/aiu-billing";
 import type {
 	AutocompleteProviderFactory,
 	ExtensionCustomFactory,
@@ -1004,7 +1005,7 @@ export interface InteractiveModeContext {
 	// Selector handling
 	showSettingsSelector(): void;
 	/** Open the fullscreen `/usage` dashboard overlay for the given reports. */
-	showUsageDashboard(reports: UsageReport[]): void;
+	showUsageDashboard(reports: UsageReport[], sessionAiu?: AiuTotals): void;
 	showAdvisorConfigure(): void;
 	showHistorySearch(): void;
 	showExtensionsDashboard(): void;

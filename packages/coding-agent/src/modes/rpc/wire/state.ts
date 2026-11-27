@@ -314,6 +314,13 @@ export const stateDefs = {
 		total: "number.integer",
 	},
 	SessionCredits: { cost: "number", committedCost: "number", acuCost: "number" },
+	SessionAiu: {
+		nano: doc("number", "Reported charge in nano-AIU (1e9 = 1 AI credit)."),
+		unknownCalls: doc(
+			"number.integer",
+			"Calls whose billing frame never arrived; positive makes `nano` a lower bound.",
+		),
+	},
 	SessionStats: {
 		"sessionFile?": "string",
 		sessionId: "string",
@@ -326,6 +333,7 @@ export const stateDefs = {
 		premiumRequests: "number",
 		cost: "number",
 		"credits?": "SessionCredits",
+		"aiu?": doc("SessionAiu", "Server-reported AI credits of the session and its subagent tree."),
 		"routedModels?": "Record<string, number>",
 		"editRejections?": doc("Record<string, number>", "Failed edits by the engine's `errorKind`."),
 		"contextUsage?": "ContextUsage",

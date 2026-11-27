@@ -432,8 +432,9 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 				try {
 					const usage = session.sessionManager.getUsageStatistics();
 					const directCost = usage.cost - usage.subagentCost;
+					const directAiu = { nano: usage.aiuNano, unknownCalls: usage.aiuUnknownCalls };
 					if (Number.isFinite(directCost) && directCost >= 0) {
-						this.#registry.setHistory(id, { directCost }, ref.sessionFile ?? undefined);
+						this.#registry.setHistory(id, { directCost, directAiu }, ref.sessionFile ?? undefined);
 					}
 				} catch (error) {
 					logger.debug("AgentLifecycleManager.park: cost snapshot failed", { id, error: String(error) });

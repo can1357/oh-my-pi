@@ -2923,7 +2923,7 @@ export class AcpAgent implements Agent {
 			observers: this.#subagentObservers,
 			rootSessionFile,
 			sessionCosts: this.#subagentSessionCosts,
-		});
+		}).cost;
 		return Math.max(0, usage.cost - usage.subagentCost) + Math.max(treeCost, usage.subagentCost);
 	}
 
@@ -2957,6 +2957,8 @@ export class AcpAgent implements Agent {
 			premiumRequests: usage.premiumRequests,
 			cost: usage.cost,
 			subagentCost: usage.subagentCost,
+			aiuNano: usage.aiuNano,
+			aiuUnknownCalls: usage.aiuUnknownCalls,
 		};
 	}
 

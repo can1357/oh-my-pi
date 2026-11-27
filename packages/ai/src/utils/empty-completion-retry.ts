@@ -14,7 +14,7 @@
  * classifier and are separately bounded by the caller's policy.
  */
 import * as AIError from "../error";
-import type { AssistantMessage, AssistantMessageEvent, Context } from "../types";
+import type { AssistantMessage, AssistantMessageEvent, Context, DiscardedAttemptReason } from "../types";
 import { AssistantMessageEventStream } from "./event-stream";
 import { waitForRetry } from "./retry-wait";
 
@@ -61,6 +61,7 @@ interface StreamRetryOptions {
 	signal?: AbortSignal;
 	providerRetryWait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
 	acceptEmptyResponse?: boolean;
+	onDiscardedAttempt?: (message: AssistantMessage, reason: DiscardedAttemptReason) => void;
 }
 
 /**
@@ -191,6 +192,13 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 					}
 					return;
 				}
+				// The discarded attempt reached the provider and may be billed; report it before replacing
+				// it. Accounting never fails the request it accounts for.
+				const discarded = retryEmpty ? completedMessage : failedMessage;
+				try {
+					if (discarded)
+						options?.onDiscardedAttempt?.(discarded, retryEmpty ? "empty-completion" : "provider-error");
+				} catch {}
 				continue;
 			}
 

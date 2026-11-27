@@ -530,6 +530,9 @@ export type OpenAIResponseInclude =
 	| "reasoning.encrypted_content"
 	| "message.output_text.logprobs";
 
+/** Why a replay-safe retry discarded an attempt; see {@link StreamOptions.onDiscardedAttempt}. */
+export type DiscardedAttemptReason = "empty-completion" | "provider-error";
+
 export interface StreamOptions {
 	temperature?: number;
 	topP?: number;
@@ -783,6 +786,12 @@ export interface StreamOptions {
 	 * Optional retry delay hook for tests and transports that need custom scheduling.
 	 */
 	providerRetryWait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
+	/**
+	 * Receives each attempt a replay-safe retry discards (an empty completion, a
+	 * transient provider error) before the replacement request is sent. The
+	 * provider may have billed it; the delivered result never carries its usage.
+	 */
+	onDiscardedAttempt?: (message: AssistantMessage, reason: DiscardedAttemptReason) => void;
 	/**
 	 * Accept a normal provider stop with no visible text or tool call as a
 	 * successful completion. Passive callers and zero-output cache refreshes use

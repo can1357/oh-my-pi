@@ -14,6 +14,7 @@ import { type JSXNode, untrack } from "@oh-my-pi/pi-tui";
 import { formatDuration } from "@oh-my-pi/pi-utils";
 import type { TspSpan, TspTableColumn, TspText, TspTone } from "@oh-my-pi/pi-wire";
 import { sanitizeDisplayLine } from "../../../extensibility/inventory/display-text";
+import { formatAiuCredits } from "../../../session/aiu-billing";
 import {
 	collapseSharedUsageReports,
 	formatLimitTitle,
@@ -500,8 +501,28 @@ function Overview(props: { readonly model: UsageDashboardModel }): JSXNode {
 	const points = model.activity;
 	const calendar = points ? buildCalendar(points, CALENDAR_WEEKS, model.now()) : undefined;
 	const figures = points && calendar ? activityFigures(points, calendar) : undefined;
+	const sessionAiu = model.options.sessionAiu;
+	const sessionAiuSummary = sessionAiu ? (
+		<row key="session-aiu" role="omp.usage.session-aiu" wrap>
+			<StatTile
+				id="session-aiu"
+				label="Session AI Credits"
+				value={[{ t: formatAiuCredits(sessionAiu, 4) }]}
+				sub={dim(
+					sessionAiu.unknownCalls > 0
+						? `${sessionAiu.unknownCalls.toLocaleString()} call${sessionAiu.unknownCalls === 1 ? "" : "s"} without billing frame`
+						: "Reported this session",
+				)}
+				title={
+					sessionAiu.unknownCalls > 0
+						? `Lower bound; ${sessionAiu.unknownCalls.toLocaleString()} calls without a billing frame`
+						: "Server-reported session AI-credit charge"
+				}
+			/>
+		</row>
+	) : null;
 	const quiet = calendar !== undefined && calendar.totalCost <= 0 && calendar.totalRequests <= 0;
-	if (framed.length === 0 && quiet && !model.activityError && !model.syncError) {
+	if (framed.length === 0 && quiet && !model.activityError && !model.syncError && sessionAiu === undefined) {
 		return (
 			<col key="empty" role="omp.usage.empty" gap="sm" align="center">
 				<icon key="icon" name="gauge" />
@@ -528,7 +549,7 @@ function Overview(props: { readonly model: UsageDashboardModel }): JSXNode {
 	const meta = [`${framed.length} provider${framed.length === 1 ? "" : "s"}`];
 	if (accounts > framed.length) meta.push(`${accounts} accounts`);
 	return [
-		<Stats model={model} framed={framed} calendar={calendar} figures={figures} />,
+		<Stats key="stats" model={model} framed={framed} calendar={calendar} figures={figures} />,
 		<col key="quotas" role="omp.usage.quotas">
 			<SectionHead title="Quotas">
 				{framed.length > 0 && (
@@ -539,6 +560,7 @@ function Overview(props: { readonly model: UsageDashboardModel }): JSXNode {
 					/>
 				)}
 			</SectionHead>
+			{sessionAiuSummary}
 			{framed.map(card => (
 				<Provider model={model} card={card} />
 			))}

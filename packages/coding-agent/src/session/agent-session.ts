@@ -544,6 +544,9 @@ import { SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
+import { type AiuTotals, sessionAiu } from "./aiu-billing";
+import { sumSubagentTreeCost } from "../modes/agent-hub-runtime";
+import type { AgentCostSnapshot } from "../modes/view-model/overlays/agent-hub-projection";
 import { promptDigestOfEntry, SessionTools, type SessionToolsHost } from "./session-tools";
 import { resolveWebsocketPreference } from "./settings-stream-fn";
 import type { ShakeMode, ShakeResult } from "./shake-types";
@@ -1227,6 +1230,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	readonly #advisors: SessionAdvisors;
 	/** Resolves once the resume-time advisor spend backfill settles. */
 	#advisorCostRestore: Promise<void> = Promise.resolve();
+	/** Per-subagent spend reads the credit roll-up reuses between calls; see {@link getSessionAiu}. */
+	readonly #subagentSpend = new WeakMap<object, AgentCostSnapshot>();
 	#goalTurnCounter = 0;
 	#planReferenceSent = false;
 	#planReferencePath = "local://PLAN.md";
@@ -15971,7 +15976,27 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * Get session statistics.
 	 */
 	getSessionStats(): SessionStats {
-		return this.#stats.getSessionStats();
+		const stats = this.#stats.getSessionStats();
+		const aiu = this.getSessionAiu();
+		return aiu ? { ...stats, aiu } : stats;
+	}
+
+	/**
+	 * The session's server-reported AI credits: its own recorded calls (assistant messages and
+	 * `model_usage`, from the usage index) plus its subagent tree's, rolled up through the same
+	 * pipeline as the tree's dollars. Undefined until a call reported a charge or missed its frame.
+	 */
+	getSessionAiu(): AiuTotals | undefined {
+		const usage = this.sessionManager.getUsageStatistics();
+		const rootSessionFile = this.sessionFile;
+		const tree = rootSessionFile
+			? sumSubagentTreeCost({
+					refs: AgentRegistry.global().list(),
+					rootSessionFile,
+					sessionCosts: this.#subagentSpend,
+				}).aiu
+			: undefined;
+		return sessionAiu({ nano: usage.aiuNano, unknownCalls: usage.aiuUnknownCalls }, tree);
 	}
 
 	#goalUsage(): GoalTokenUsage {

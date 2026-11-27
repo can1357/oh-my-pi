@@ -26,6 +26,8 @@
 - Added Refuseless (`refuseless`) with abliterated and standard open-weight models, live model discovery from `https://api.refuseless.com/v1/models`, and `/login refuseless` (`REFUSELESS_API_KEY`)
 - Added the `kimi-code-global` provider for the global Kimi Code deployment (`https://auth.kimi.ai` / `https://api.kimi.ai/coding/v1`); `kimi-code` is now labeled "Kimi Code (China)" ([#15889](https://github.com/can1357/oh-my-pi/pull/15889) by [@z80dev](https://github.com/z80dev), [#20509](https://github.com/can1357/oh-my-pi/pull/20509) by [@digi4care](https://github.com/digi4care)). The global OAuth host honors `KIMI_GLOBAL_OAUTH_HOST` and `KIMI_GLOBAL_AUTH_HOST` overrides, falling back to the shared `KIMI_CODE_OAUTH_HOST` and `KIMI_OAUTH_HOST`; `KIMI_API_KEY` authenticates `kimi-code` at provider level and `KIMI_CODE_GLOBAL_API_KEY` authenticates `kimi-code-global`.
 - Added `/login google`, which stores a Google AI Studio Gemini API key for the `google` provider without setting `GEMINI_API_KEY` ([#3784](https://github.com/can1357/oh-my-pi/issues/3784))
+- Added the `device-bound` auth node (logins that depend on a key only this machine holds stay out of the auth broker) and the `sign-out hook="…"` node (forgets a removed login's secrets kept outside `agent.db` and revokes it upstream)
+- Added the `reports-aiu` catalog axis: hosts whose replies carry a server-reported AI-credit charge, so a reply without one counts as unknown spend; GitHub Copilot sets it for Messages and Responses ([#20667](https://github.com/can1357/oh-my-pi/issues/20667))
 
 ### Changed
 

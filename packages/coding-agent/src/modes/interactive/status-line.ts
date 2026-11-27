@@ -28,6 +28,7 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { type Accessor, computed, type Signal, signal } from "@oh-my-pi/pi-tui";
 import { getActiveProfile, getProjectDir } from "@oh-my-pi/pi-utils";
 import type { AgentViewSession } from "../../session/agent-session-handle";
+import type { AiuTotals } from "../../session/aiu-billing";
 import { latestJobWidget } from "../../tools/details/job-widget";
 import { BRAND_FADE_MS, type StatusFacts, type StatusLineSettings } from "../../ui/status/facts";
 import type { CollabStatus, StatusLineModel } from "../types";
@@ -73,6 +74,8 @@ interface StatusSessionExtras {
 		configured: boolean;
 		advisors: readonly { status: string; yielded: boolean }[];
 	};
+	/** Server-reported AI credits of the session and its subagent tree; see `AgentSession.getSessionAiu`. */
+	getSessionAiu?(): AiuTotals | undefined;
 }
 
 type StatusSession = AgentViewSession & StatusSessionExtras;
@@ -593,6 +596,7 @@ export class SessionStatusLine implements StatusLineModel {
 		const advisorOverview = session.getAdvisorStatusOverview?.();
 		const advisorStatuses = advisorOverview?.configured ? advisorOverview.advisors.map(a => a.status) : [];
 		const advisorCost = session.getAdvisorCost();
+		const aiu = session.getSessionAiu?.();
 		const vcsFacts = this.#vcsFacts(segments);
 		const goal = modes.goal ? session.getGoalModeState()?.goal : undefined;
 		const thinkingLevel = session.state.thinkingLevel;
@@ -649,6 +653,7 @@ export class SessionStatusLine implements StatusLineModel {
 				premiumRequests: stats.premiumRequests,
 				cost: stats.cost,
 				subagentCost: stats.subagentCost,
+				...(aiu ? { aiu } : {}),
 			},
 			usingSubscription: model ? session.modelRegistry.isUsingSubscription(model) : false,
 			...(this.#focusedAgentId === undefined && modes.subagentTreeCost

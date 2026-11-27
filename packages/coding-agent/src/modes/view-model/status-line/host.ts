@@ -3,6 +3,7 @@ import type { Tool, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
 import type { JobWidgetEntry } from "../../../tools/details/job-widget";
 import type { CompactionBoundaries } from "../../../session/context-usage";
+import type { AiuTotals } from "../../../session/aiu-billing";
 import type { StatusLineSettings, StatusResetExpiry } from "./types";
 
 export interface StatusAccountIdentity {
@@ -142,6 +143,8 @@ export interface StatusLineSession {
 	getGoalModeState(): { goal?: { status: string; tokensUsed: number; tokenBudget?: number } } | undefined;
 	getAdvisorStatusOverview?(): { configured: boolean; advisors: readonly { status: string; yielded: boolean }[] };
 	getAdvisorCost?(): number;
+	/** Server-reported AI credits of the session and its subagent tree; see `AgentSession.getSessionAiu`. */
+	getSessionAiu?(): AiuTotals | undefined;
 	isAdvisorUsingSubscription?(): boolean;
 	/**
 	 * What the next request finds in the prompt cache at `nowMs`; undefined when there is nothing to reason about.
