@@ -11,7 +11,7 @@ import {
 	STATUS_LINE_SEGMENT_IDS,
 	STATUS_LINE_SEPARATOR_VALUES,
 } from "../config/status-line-schema";
-import { WORD_COMPLETION_METHODS } from "./view-model/prompt/word-completion";
+import { WORD_COMPLETION_METHODS } from "./view-model/prompt/word-completion-methods";
 import { DEFAULT_MAX_FPS, parseMaxFps } from "../config/frame-rate";
 import { parseSpinnerInterval } from "../config/spinner-interval";
 import { formatKeyHint, formatKeyHints } from "../ui/keys/hints";
@@ -21,7 +21,7 @@ import {
 	DEFAULT_INLINE_IMAGE_COLUMNS,
 	DEFAULT_INLINE_IMAGE_ROWS,
 	setInlineImageLimits,
-} from "../ui/transcript/messages/image";
+} from "../ui/transcript/messages/image-limits";
 
 const EMPTY_UNKNOWN_RECORD: Record<string, unknown> = {};
 

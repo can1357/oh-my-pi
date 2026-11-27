@@ -47,16 +47,13 @@ export function openableImage(filePath: string | undefined): {
 	}
 }
 
-/** Default maximum width of a transcript image, in terminal columns. */
-export const DEFAULT_INLINE_IMAGE_COLUMNS = 100;
-
-/** Default maximum height of a transcript image, in terminal rows. */
-export const DEFAULT_INLINE_IMAGE_ROWS = 20;
-
-const inlineImageLimits = signal({ columns: DEFAULT_INLINE_IMAGE_COLUMNS, rows: DEFAULT_INLINE_IMAGE_ROWS });
-
-/** Set the process-wide transcript image limits. */
-export const setInlineImageLimits = inlineImageLimits.set;
+import {
+	DEFAULT_INLINE_IMAGE_COLUMNS,
+	DEFAULT_INLINE_IMAGE_ROWS,
+	inlineImageLimits,
+	setInlineImageLimits,
+} from "./image-limits";
+export { DEFAULT_INLINE_IMAGE_COLUMNS, DEFAULT_INLINE_IMAGE_ROWS, setInlineImageLimits };
 
 interface InlineImageBounds {
 	readonly maxColumns?: number;

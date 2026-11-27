@@ -26,7 +26,7 @@ import { detectTerminalId } from "@oh-my-pi/pi-tui/driver/caps/identity";
 import type { TerminalCapabilities, TerminalDriver } from "@oh-my-pi/pi-tui/driver/contract";
 import { colorHex, isLightColor, paletteHex } from "@oh-my-pi/pi-tui/theme/color";
 import { builtinThemes, listThemes, loadTheme, loadThemeJson, loadThemeJsonSync } from "@oh-my-pi/pi-tui/theme/loader";
-import { untrack } from "@oh-my-pi/pi-tui";
+import { untrack } from "@oh-my-pi/pi-tui/reactive";
 import {
 	currentTheme,
 	setCurrentTheme,
