@@ -381,6 +381,9 @@ describe("interactive /usage account visibility", () => {
 		fetchUsageReports?: () => Promise<UsageReport[] | null>,
 		warnings: string[] = [],
 		shell: Pick<InteractiveModeContext["shell"], "overlays" | "focus" | "size" | "native"> = rowsShell(),
+		sessionAiu: { nano: number; unreportedTurns: number } | undefined = fetchUsageReports
+			? { nano: 1_234_000_000, unreportedTurns: 2 }
+			: undefined,
 	): CommandController {
 		overlays = shell.overlays;
 		const ctx = {
@@ -390,6 +393,7 @@ describe("interactive /usage account visibility", () => {
 				modelRegistry: { authStorage },
 				fetchUsageReports,
 				getUsageReportingModelSelectors: () => [],
+				getSessionStats: () => ({ aiu: sessionAiu }),
 			},
 			shell,
 			showWarning: (message: string) => {
@@ -398,7 +402,7 @@ describe("interactive /usage account visibility", () => {
 			showError: () => {},
 		} as unknown as InteractiveModeContext;
 		const selector = new SelectorController(ctx);
-		ctx.showUsageDashboard = reports => selector.showUsageDashboard(reports);
+		ctx.showUsageDashboard = (reports, sessionAiu) => selector.showUsageDashboard(reports, sessionAiu);
 		return new CommandController(ctx);
 	}
 
@@ -459,6 +463,13 @@ describe("interactive /usage account visibility", () => {
 		expect(mounted()).toBeUndefined();
 	});
 
+	it("shows session AI credits when quota reporting is unavailable", async () => {
+		await command(undefined, [], rowsShell(), { nano: 0, unreportedTurns: 1 }).handleUsageCommand();
+
+		expect(display()).toContain("Session AI Credits");
+		expect(display()).toContain("0.0000+");
+	});
+
 	it("mounts /usage as a centered native sheet with a scrolling report and a Close footer", async () => {
 		await using ui = await nativeShell();
 		await command(async () => [], [], ui.shell).handleUsageCommand();
@@ -473,6 +484,8 @@ describe("interactive /usage account visibility", () => {
 			modal: true,
 		});
 		const body = ui.node("col", "overview");
+		expect(display()).toContain("Session AI Credits");
+		expect(display()).toContain("1.2340+");
 		const footer = ui.node("row", "actions");
 		// The renderer pads the direct content column and pins its last action row.
 		expect(sheet.c).toHaveLength(1);

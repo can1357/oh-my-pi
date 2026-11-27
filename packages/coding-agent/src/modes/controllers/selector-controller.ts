@@ -45,7 +45,7 @@ import type {
 	ResumeSessionOptions,
 	SubmittedUserInput,
 } from "../../modes/types";
-import type { SessionOAuthAccountList } from "../../session/agent-session-types";
+import type { SessionAiu, SessionOAuthAccountList } from "../../session/agent-session-types";
 import type { ResetCreditAccountStatus, ResetCreditRedeemOutcome } from "../../session/auth-storage";
 import { credentialStoreLabel } from "../../session/auth-broker-config";
 import {
@@ -482,7 +482,7 @@ export class SelectorController {
 	 * idiom): compact subscriptions grid + daily activity heatmap, with the
 	 * classic full report one keypress away. Takes no transcript space.
 	 */
-	showUsageDashboard(reports: UsageReport[]): void {
+	showUsageDashboard(reports: UsageReport[], sessionAiu?: SessionAiu): void {
 		// Checked here, not before the fetch: a repeat `/usage` whose fetch lands
 		// while the first dashboard is open focuses it instead of stacking a copy.
 		const kind = "usage-dashboard";
@@ -492,7 +492,7 @@ export class SelectorController {
 			collectStoredAccounts(authStorage),
 			provider => authStorage.usage.providerFor(provider) !== undefined,
 		);
-		if (reports.length === 0 && accounts.length === 0) {
+		if (reports.length === 0 && accounts.length === 0 && sessionAiu === undefined) {
 			this.ctx.showWarning("No usage data available.");
 			return;
 		}
@@ -510,6 +510,7 @@ export class SelectorController {
 		const dashboard = new UsageDashboardModel({
 			reports,
 			unavailableAccounts,
+			sessionAiu,
 			renderDetail: (width, current) =>
 				renderUsageReports(
 					current,

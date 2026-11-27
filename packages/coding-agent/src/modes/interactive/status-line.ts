@@ -647,6 +647,7 @@ export class SessionStatusLine implements StatusLineModel {
 				orchestrationInput: stats.orchestrationInput,
 				orchestrationOutput: stats.orchestrationOutput,
 				premiumRequests: stats.premiumRequests,
+				aiuNano: stats.aiuNano,
 				cost: stats.cost,
 				subagentCost: stats.subagentCost,
 			},

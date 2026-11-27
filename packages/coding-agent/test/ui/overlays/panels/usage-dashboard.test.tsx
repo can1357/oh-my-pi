@@ -1,4 +1,6 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
+import { beforeAll, describe, expect, it } from "bun:test";
+import { stripVTControlCharacters } from "node:util";
 import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 import { CORPUS_NOW } from "@oh-my-pi/pi-tui/testing/corpus";
 import {
@@ -8,6 +10,8 @@ import {
 } from "../../../../src/ui/overlays/panels/usage-dashboard-model";
 import { UsageDashboard } from "../../../../src/ui/overlays/panels/usage-dashboard";
 import { UsageRow, type UsageRowProps } from "../../../../src/ui/overlays/panels/usage-row";
+import { printRows } from "../../../../src/ui/print-rows";
+import { initTheme } from "../../../../src/ui/theme/service";
 import { type Driver, type Mounted, panelSuite } from "./harness";
 
 process.env.TZ = "UTC";
@@ -160,4 +164,30 @@ panelSuite({
 		if (!options) throw new Error(`unknown case ${caseName}`);
 		return mountDashboard(options);
 	},
+});
+
+describe("usage dashboard session spend", () => {
+	beforeAll(() => {
+		initTheme();
+	});
+
+	it("shows reported credits separately and marks the lower bound", async () => {
+		const model = new UsageDashboardModel({
+			reports: reports(),
+			sessionAiu: { nano: 1_234_000_000, unreportedTurns: 2 },
+			renderDetail: () => "",
+			loadActivity: async push => push(activity),
+			onClose: () => {},
+			terminalRows: () => 30,
+			now: () => NOW,
+		});
+		await model.loaded;
+		const output = printRows(() => <UsageDashboard model={model} />, 120)
+			.map(stripVTControlCharacters)
+			.join("\n");
+
+		expect(output).toContain("Session AI Credits");
+		expect(output).toContain("1.2340+");
+		expect(output).toContain("2 turns");
+	});
 });

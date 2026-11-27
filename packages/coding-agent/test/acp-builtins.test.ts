@@ -43,6 +43,7 @@ interface FakeAcpBuiltinSession {
 	isUltrafastModeEnabled(): boolean;
 	setForcedToolChoice(toolName: string): void;
 	fetchUsageReports?: () => Promise<unknown>;
+	getSessionStats(): { aiu: undefined };
 	getAsyncJobSnapshot: (opts?: { recentLimit?: number }) => { running: unknown[]; recent: unknown[] } | null;
 	getAsyncJobTree: () => AsyncJobTree | null;
 	requestJobCaptions: () => void;
@@ -123,6 +124,9 @@ function createRuntime() {
 		},
 		isUltrafastModeEnabled() {
 			return false;
+		},
+		getSessionStats() {
+			return { aiu: undefined };
 		},
 		setForcedToolChoice(toolName: string) {
 			this.forcedToolChoice = toolName;

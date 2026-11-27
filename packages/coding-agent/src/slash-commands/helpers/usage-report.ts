@@ -1,7 +1,12 @@
 import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
+import type { SessionAiu } from "../../session/agent-session-types";
 import type { OAuthAccountIdentity } from "../../session/auth-storage";
-import { collapseSharedUsageReports, summarizeUsageResetCredits } from "../../session/usage-display";
+import {
+	collapseSharedUsageReports,
+	formatSessionAiuCredits,
+	summarizeUsageResetCredits,
+} from "../../session/usage-display";
 import type { SlashCommandRuntime } from "../types";
 import { formatCodexUsageReportLabel, reportMatchesActiveAccount } from "./active-oauth-account";
 import { formatCoarseDuration, formatProviderName, renderAsciiBar } from "../../modes/view-model/chrome/format";
@@ -159,12 +164,22 @@ function renderUsageReports(
 	return ["```", ...lines, "```"].join("\n");
 }
 
+function formatSessionAiuSpend(aiu: SessionAiu | undefined): string[] {
+	if (!aiu) return [];
+	return [
+		"Session spend",
+		`AI credits (reported): ${formatSessionAiuCredits(aiu)}`,
+		...(aiu.unreportedTurns > 0 ? [`Turns without billing frame: ${aiu.unreportedTurns.toLocaleString()}`] : []),
+	];
+}
+
 /**
  * Build the `/usage` ACP-mode text. Prefers provider-reported limits when the
  * session exposes `fetchUsageReports`; otherwise falls back to the local
  * session-manager tallies.
  */
 export async function buildUsageReportText(runtime: SlashCommandRuntime): Promise<string> {
+	const sessionAiuLines = formatSessionAiuSpend(runtime.session.getSessionStats().aiu);
 	const provider = runtime.session as SlashCommandRuntime["session"] & {
 		fetchUsageReports?: () => Promise<UsageReport[] | null>;
 		getUsageReportingModelSelectors?: (reports: readonly UsageReport[]) => string[];
@@ -177,12 +192,13 @@ export async function buildUsageReportText(runtime: SlashCommandRuntime): Promis
 				? runtime.session.modelRegistry.authStorage.oauth.identity(currentProvider, runtime.session.sessionId)
 				: undefined;
 			const usageModelSelectors = provider.getUsageReportingModelSelectors?.(reports) ?? [];
-			return renderUsageReports(
+			const report = renderUsageReports(
 				reports,
 				Date.now(),
 				providerId => (providerId === currentProvider ? activeAccount : undefined),
 				usageModelSelectors,
 			);
+			return sessionAiuLines.length > 0 ? `${report}\n\n${sessionAiuLines.join("\n")}` : report;
 		}
 	}
 
@@ -196,7 +212,8 @@ export async function buildUsageReportText(runtime: SlashCommandRuntime): Promis
 		`Cache write tokens: ${stats.cacheWrite}`,
 		`Total tokens: ${stats.totalTokens}`,
 		...(orchestrationTokens > 0 ? [`Orchestration tokens: ${orchestrationTokens}`] : []),
-		`Premium requests: ${stats.premiumRequests}`,
+		...(stats.premiumRequests > 0 ? [`Premium requests: ${stats.premiumRequests}`] : []),
+		...sessionAiuLines,
 		`Cost: $${stats.cost.toFixed(6)}`,
 	].join("\n");
 }

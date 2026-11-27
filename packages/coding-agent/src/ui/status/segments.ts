@@ -460,6 +460,7 @@ function costSeg(input: SegInput): SegView | null {
 			subagentCost: Math.max(facts.subagentTreeCost ?? 0, facts.usage.subagentCost ?? 0),
 			usingSubscription: facts.usingSubscription,
 			premiumRequests: facts.usage.premiumRequests,
+			aiuNano: facts.usage.aiuNano,
 			digits: 2,
 			pricingPeriod: facts.pricingPeriod,
 			advisor: facts.advisorCost,

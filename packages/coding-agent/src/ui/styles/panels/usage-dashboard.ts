@@ -14,6 +14,7 @@ import { sliceCells, truncate, truncateMiddle, visibleWidth, wrap } from "@oh-my
 import { formatDuration } from "@oh-my-pi/pi-utils";
 import { colorLuma, hexToRgb, rgbToHex } from "@oh-my-pi/pi-utils/color";
 import { sanitizeDisplayLine } from "../../../extensibility/inventory/display-text";
+import { formatSessionAiuCredits } from "../../../session/usage-display";
 import {
 	activityErrorDetail,
 	activityTotals,
@@ -124,13 +125,22 @@ function cardLines(
 }
 
 function cardsGrid(theme: Theme, model: UsageDashboardModel, inner: number): string[] {
-	if (model.cards.length === 0) return [theme.fg("dim", "No usage data available.")];
+	const lines: string[] = [];
+	const sessionAiu = model.options.sessionAiu;
+	if (sessionAiu) {
+		lines.push(
+			`${theme.fg("muted", "Session AI Credits")}: ${theme.fg("text", formatSessionAiuCredits(sessionAiu))}`,
+		);
+		if (sessionAiu.unreportedTurns > 0)
+			lines.push(theme.fg("dim", `${sessionAiu.unreportedTurns.toLocaleString()} turns without billing frame`));
+		lines.push("");
+	}
+	if (model.cards.length === 0) return [...lines, theme.fg("dim", "No usage data available.")];
 	const active = model.cards.filter(card => !card.idle);
 	const idle = model.cards.filter(card => card.idle);
 	const columns = Math.max(1, Math.floor((inner + CARD_GUTTER) / (CARD_MIN_WIDTH + CARD_GUTTER)));
 	const cardWidth = Math.floor((inner - (columns - 1) * CARD_GUTTER) / columns);
 	const content = Math.max(1, cardWidth - 2);
-	const lines: string[] = [];
 	for (let start = 0; start < active.length; start += columns) {
 		const cards = active.slice(start, start + columns);
 		const windows = cards.map(card => card.windows.slice(0, CARD_MAX_WINDOWS));

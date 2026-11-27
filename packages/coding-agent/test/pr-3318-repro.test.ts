@@ -19,6 +19,7 @@ describe("PR 3318 repro", () => {
 		};
 		const text = await buildUsageReportText({
 			session: {
+				getSessionStats: () => ({ aiu: { nano: 1_250_000_000, unreportedTurns: 2 } }),
 				model: undefined,
 				fetchUsageReports: async () => [report],
 				getUsageReportingModelSelectors: () => ["test-provider/coding-plan-model"],
@@ -29,6 +30,10 @@ describe("PR 3318 repro", () => {
 		expect(text).not.toContain("account 1: 1.00 requests used");
 		expect(text).toContain("Models with usage data");
 		expect(text).toContain("test-provider/coding-plan-model");
+		expect(text).toContain("Session spend");
+		expect(text).toContain("AI credits (reported): 1.2500+");
+		expect(text).toContain("Turns without billing frame: 2");
+		expect(text.indexOf("Session spend")).toBeGreaterThan(text.indexOf("scoped-account"));
 	});
 	it("keeps Codex account and reset labels consistent with the live sanitized plan", async () => {
 		const report: UsageReport = {
@@ -46,12 +51,40 @@ describe("PR 3318 repro", () => {
 			resetCredits: { availableCount: 1 },
 		};
 		const text = await buildUsageReportText({
-			session: { model: undefined, fetchUsageReports: async () => [report] },
+			session: { model: undefined, fetchUsageReports: async () => [report], getSessionStats: () => ({}) },
 		} as never);
 		expect(text).toContain("user@example.test · plan: prolite forged: 1 saved rate-limit reset");
 		expect(text).toContain("user@example.test · plan: prolite forged: 20.00% used");
 		expect(text).not.toContain("prolite\nforged");
 		expect(text).not.toContain("(free)");
 		expect(text).not.toContain("workspace-id");
+	});
+
+	it("shows the session AI-credit lower bound in the local usage fallback", async () => {
+		const text = await buildUsageReportText({
+			session: {
+				model: undefined,
+				getSessionStats: () => ({ aiu: { nano: 0, unreportedTurns: 1 } }),
+				sessionManager: {
+					getUsageStatistics: () => ({
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						orchestrationInput: 0,
+						orchestrationOutput: 0,
+						orchestrationCacheRead: 0,
+						premiumRequests: 0,
+						cost: 0,
+						subagentCost: 0,
+					}),
+				},
+			},
+		} as never);
+
+		expect(text).toContain("Session spend");
+		expect(text).toContain("AI credits (reported): 0.0000+");
+		expect(text).toContain("Turns without billing frame: 1");
 	});
 });

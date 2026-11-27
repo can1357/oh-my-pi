@@ -70,6 +70,7 @@ export function footerSegs(facts: FooterFacts): FooterSeg[] {
 			cost: usage.cost,
 			usingSubscription: facts.usingSubscription,
 			premiumRequests: usage.premiumRequests,
+			aiuNano: usage.aiuNano,
 			digits: 3,
 		},
 		symbols,

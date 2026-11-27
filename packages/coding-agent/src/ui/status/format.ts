@@ -7,6 +7,7 @@ import * as path from "node:path";
 import type { SymbolSet } from "@oh-my-pi/pi-tui/theme/contract";
 import { formatNumber, normalizePremiumRequests } from "@oh-my-pi/pi-utils";
 import type { TspTone } from "@oh-my-pi/pi-wire";
+import { NANO_AIU_PER_CREDIT } from "../../session/usage-display";
 import { shortenPath } from "../../utils/render-utils";
 
 /** How full the context window reads. */
@@ -59,6 +60,8 @@ export interface Billing {
 	readonly cost: number;
 	readonly usingSubscription: boolean;
 	readonly premiumRequests: number;
+	/** Server-reported AI credits (nano-AIU), shown beside the premium-request count: the two are separate meters. */
+	readonly aiuNano?: number;
 	/** Decimals of the amounts (status line 2, footer 3). */
 	readonly digits: number;
 	readonly pricingPeriod?: "peak" | "off-peak";
@@ -73,6 +76,7 @@ export interface Billing {
  * and advisor spend. Undefined when there is nothing to bill.
  */
 export function billingSummary(billing: Billing, symbols: SymbolSet): string | undefined {
+	const aiuCredits = billing.aiuNano === undefined ? undefined : billing.aiuNano / NANO_AIU_PER_CREDIT;
 	const premium = normalizePremiumRequests(billing.premiumRequests);
 	const advisorCost = billing.advisor?.cost ?? 0;
 	const subagentCost = billing.subagentCost ?? 0;
@@ -82,6 +86,7 @@ export function billingSummary(billing: Billing, symbols: SymbolSet): string | u
 		!advisorCost &&
 		!billing.usingSubscription &&
 		!premium &&
+		aiuCredits === undefined &&
 		!billing.pricingPeriod
 	) {
 		return undefined;
@@ -101,6 +106,7 @@ export function billingSummary(billing: Billing, symbols: SymbolSet): string | u
 	if (subagentCost) parts.push(`(+${subagentCost.toFixed(billing.digits)})`);
 	if (billing.pricingPeriod) parts.push(billing.pricingPeriod === "peak" ? "↑" : "↓");
 	if (premium) parts.push(`★ ${formatNumber(premium)}`);
+	if (aiuCredits !== undefined) parts.push(`${aiuCredits.toFixed(2)} cr`);
 	if (advisorCost && billing.advisor) {
 		const usingSubscription = billing.advisor.usingSubscription;
 		const unit = shown === usingSubscription ? "" : usingSubscription ? subscriptionUnit : "$";

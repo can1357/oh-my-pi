@@ -113,6 +113,7 @@ import {
 	SHUTDOWN_CONSOLIDATE_BUDGET_MS,
 } from "../session/agent-session";
 import type { AgentSessionHandle, AgentViewSession } from "../session/agent-session-handle";
+import type { SessionAiu } from "../session/agent-session-types";
 import type { TranscriptEntryLike } from "../session/transcript/transcript-entry";
 import type { BashExecutionMessage, PythonExecutionMessage } from "../session/transcript/messages";
 import type { CompactMode } from "../session/compact-modes";
@@ -8207,8 +8208,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#selectorController.showSettingsSelector();
 	}
 
-	showUsageDashboard(reports: UsageReport[]): void {
-		this.#selectorController.showUsageDashboard(reports);
+	showUsageDashboard(reports: UsageReport[], sessionAiu?: SessionAiu): void {
+		this.#selectorController.showUsageDashboard(reports, sessionAiu);
 	}
 
 	showAdvisorConfigure(): void {

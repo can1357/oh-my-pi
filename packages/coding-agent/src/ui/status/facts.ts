@@ -39,6 +39,8 @@ export interface StatusUsage {
 	readonly orchestrationInput?: number;
 	readonly orchestrationOutput?: number;
 	readonly premiumRequests: number;
+	/** Server-reported Copilot AI credits in nano-AIU; undefined while no turn has reported one. */
+	readonly aiuNano?: number;
 	/** Spend, including completed subagent task results. */
 	readonly cost: number;
 	/** Part of `cost` carried by completed subagent task results. */

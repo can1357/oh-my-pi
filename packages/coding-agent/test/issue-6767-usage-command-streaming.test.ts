@@ -101,7 +101,8 @@ describe("issue #6767 /usage output during streaming", () => {
 		// into the transcript, mid-stream or otherwise — mounting above the
 		// growing live block is what duplicated in native scrollback (#6767).
 		expect(showDashboard).toHaveBeenCalledTimes(1);
-		expect(showDashboard).toHaveBeenCalledWith(usageReports);
+		// No Copilot credits were reported, so the dashboard receives no session spend.
+		expect(showDashboard).toHaveBeenCalledWith(usageReports, undefined);
 		expect(mode.shell.transcript.blocks()).toEqual([streamedReply]);
 
 		streaming = false;
