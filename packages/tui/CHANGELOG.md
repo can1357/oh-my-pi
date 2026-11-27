@@ -39,6 +39,7 @@
 - Stopped trusting an inherited `TERM_FEATURES` sync hint inside tmux/screen panes, which caused top-to-bottom redraw flashes while streaming in an inactive tmux 3.6 pane ([#20091](https://github.com/can1357/oh-my-pi/issues/20091))
 - Enabled kitty Unicode placeholder image rendering by default in Rex ([#19830](https://github.com/can1357/oh-my-pi/issues/19830))
 - Inline images inside tmux on terminals without Kitty Unicode placeholders (e.g. WezTerm) are no longer drawn at tmux's cursor; they use SIXEL when tmux renders it, else are skipped ([#19396](https://github.com/can1357/oh-my-pi/issues/19396))
+- Catppuccin, Rosé Pine, GitHub Dark and Celestial themes now draw composer and message text in their palette text color instead of the generic default ([#16374](https://github.com/can1357/oh-my-pi/issues/16374))
 
 ## [19.2.1] - 2026-11-25
 
