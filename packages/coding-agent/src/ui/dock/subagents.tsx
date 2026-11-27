@@ -21,7 +21,7 @@ import { type JSXNode, signal } from "@oh-my-pi/pi-tui";
 import { replaceTabs } from "@oh-my-pi/pi-tui/text/width";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { toolIntentLabel } from "@oh-my-pi/pi-wire";
-import { labelEchoesHandle } from "../../task/label";
+import { labelEchoesHandle } from "../../task/label-match";
 import type { ObservableSession } from "../../task/session-observer-registry";
 import { formatTaskId, isWaitingOnOwnWork } from "../../task/task-details";
 import { shortenEmbeddedPaths, shortenToolArgumentPaths } from "../../utils/render-utils";
