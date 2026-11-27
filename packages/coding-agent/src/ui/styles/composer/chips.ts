@@ -49,6 +49,27 @@ function centred(rows: readonly string[], columns: number): string[] {
 	});
 }
 
+/** A SIXEL or iTerm2 sequence: the pictures that draw at the cursor (see `anchor.ts` in pi-tui). */
+const SCREEN_IMAGE = /\x1bP|\x1b\]1337;/;
+
+/**
+ * A SIXEL/iTerm2 picture's rows centred in the card's interior. Its sequence rides on its last row,
+ * moves up to the first one, draws and restores the cursor; a one-row picture comes bare, so it gets
+ * the save and restore here (drawing moves the cursor). Every row then steps over the picture's
+ * cells (`CSI n C`) instead of writing blanks over its pixels, so the right border stays in place.
+ */
+function anchoredInterior(rows: readonly string[], columns: number): string[] {
+	const top = Math.floor((INNER_ROWS - rows.length) / 2);
+	const left = Math.floor((INNER_COLS - columns) / 2);
+	const step = `\x1b[${columns}C`;
+	return Array.from({ length: INNER_ROWS }, (_, i) => {
+		let row = rows[i - top];
+		if (row === undefined) return " ".repeat(INNER_COLS);
+		if (SCREEN_IMAGE.test(row) && !row.startsWith("\x1b7")) row = `\x1b7${row}\x1b8`;
+		return `${" ".repeat(left)}${row}${step}${" ".repeat(INNER_COLS - columns - left)}`;
+	});
+}
+
 /** One card's six rows. */
 function paintCard(node: UiNode, cx: PaintContext): string[] {
 	const theme = cx.theme;
@@ -80,8 +101,11 @@ function paintCard(node: UiNode, cx: PaintContext): string[] {
 		});
 	} else {
 		const picture = children.find(child => child.kind === "image");
-		const drawn = picture && pictureRows(picture.props() as TspImageProps, cx, { label: "", cells: true });
-		if (drawn?.state === "image") {
+		const drawn =
+			picture && pictureRows(picture.props() as TspImageProps, cx, { label: "", cells: true, anchored: true });
+		if (drawn?.state === "image" && SCREEN_IMAGE.test(drawn.rows.at(-1) ?? "")) {
+			interior = anchoredInterior(drawn.rows, drawn.columns);
+		} else if (drawn?.state === "image") {
 			interior = centred(drawn.rows, drawn.columns);
 		} else {
 			const glyph = theme.symbols.symbol(`chip.${kind}`);

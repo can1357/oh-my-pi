@@ -65,7 +65,7 @@ export interface Picture {
 export function pictureRows(
 	picture: Picture,
 	cx: PaintContext,
-	options: { readonly label: string; readonly cells?: boolean },
+	options: { readonly label: string; readonly cells?: boolean; readonly anchored?: boolean },
 ): ImageRows | undefined {
 	const fallback = truncate(options.label, cx.width);
 	const entry = picture.blob ? getBlob(picture.blob) : undefined;
@@ -85,6 +85,7 @@ export function pictureRows(
 			...(fits ? {} : { maxColumns, ...(Number.isFinite(maxRows) ? { maxRows } : {}) }),
 			fallback,
 			...(options.cells ? { cells: true } : {}),
+			...(options.anchored ? { anchored: true } : {}),
 		},
 	);
 }

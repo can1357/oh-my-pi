@@ -75,6 +75,11 @@ export interface ImageRequest extends ImageBounds {
 	 * one-row fallback, and the image is neither held nor transmitted.
 	 */
 	readonly cells?: boolean;
+	/**
+	 * With `cells`: also accept a SIXEL/iTerm2 sequence anchored on the image's last row (see
+	 * `anchor.ts`), for a caller that steps over the image's cells instead of writing over them.
+	 */
+	readonly anchored?: boolean;
 }
 
 /** What the rows show. */
@@ -216,7 +221,9 @@ export class TerminalImages {
 		}
 		const placeholders = protocol === "kitty" && this.#placeholders() && kittyPlaceholdersFit(box.columns, box.rows);
 		// Placements and SIXEL/iTerm2 sequences address the screen: nothing else can share their rows.
-		if (request.cells && !placeholders) return { rows: [label], columns: visibleWidth(label), state: "fallback" };
+		const anchored = request.anchored === true && (protocol === "sixel" || protocol === "iterm");
+		if (request.cells && !placeholders && !anchored)
+			return { rows: [label], columns: visibleWidth(label), state: "fallback" };
 		const entry = this.#acquire(source);
 		const fallback = (): ImageRows => ({
 			rows: [label, ...Array.from({ length: box.rows - 1 }, () => RESERVED_ROW)],

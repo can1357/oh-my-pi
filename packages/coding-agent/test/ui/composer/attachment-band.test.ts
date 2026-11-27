@@ -14,6 +14,7 @@ import { paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
 import { describeTree } from "@oh-my-pi/pi-tui/testing/corpus";
 import { CONSERVATIVE_EMOJI } from "@oh-my-pi/pi-tui/theme/contract";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { visibleWidth } from "@oh-my-pi/pi-tui/text/width";
 import { Composer, ComposerChips } from "../../../src/ui/composer";
 
 const PNG_1PX = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNgAAAAAgABSK+kcQAAAABJRU5ErkJggg==";
@@ -30,10 +31,10 @@ function nodes(root: NativeNode): NativeNode[] {
 	return [root, ...(root.c ?? []).flatMap(nodes)];
 }
 
-/** A composer holding one image chip (`📷 #1`, a 640×480 picture by its marker) and its band. */
-function attached(): { composer: Composer; band: UiNode } {
+/** A composer holding one image chip (`📷 #1`, a picture of `size` by its marker) and its band. */
+function attached(size = "640x480"): { composer: Composer; band: UiNode } {
 	const composer = new Composer();
-	composer.insertAtom(composer.chipLabel("image", 1), "[Image #1, 640x480]", {
+	composer.insertAtom(composer.chipLabel("image", 1), `[Image #1, ${size}]`, {
 		kind: "image",
 		image: { type: "image", data: PNG_1PX, mimeType: "image/png" },
 	});
@@ -103,6 +104,81 @@ describe("attachment band pictures", () => {
 			expect(images.takeSequences()).toContain("a=t");
 			dispose();
 		});
+	});
+
+	test("on SIXEL the card draws the picture anchored between its borders, stepping over its cells", async () => {
+		const { composer, band } = createRoot(() => attached());
+		const caps = signal<TerminalCapabilities>({
+			truecolor: true,
+			colors: 16_777_216,
+			synchronizedOutput: true,
+			hyperlinks: false,
+			images: "sixel",
+			kittyKeyboard: true,
+			bracketedPaste: true,
+			background: null,
+			dark: true,
+			cell: { w: 10, h: 20 },
+			multiplexer: null,
+			textSizing: false,
+			tsp: false,
+			emoji: CONSERVATIVE_EMOJI,
+		});
+		const images = new TerminalImages({
+			capabilities: caps,
+			placeholders: signal(false),
+			encodeSixel: async (_bytes, w, h) => `\x1bPq${w}x${h}\x1b\\`,
+		});
+		const env = staticEnvironment(currentTheme(), { images: driverImages(images, caps) });
+		const glyph = composer.chipLabel("image", 1).split(" ")[0]!;
+		const rows = (): readonly string[] => paintNode(env, band, 40).rows;
+
+		// Encoding: the glyph holds the card.
+		expect(rows().slice(1, 5).join("\n")).toContain(glyph);
+		await images.whenEncoded();
+		const drawn = rows();
+		// 10×4 cells: the last interior row moves up 3 rows and draws; every image row steps 10 cells.
+		const interior = drawn.slice(1, 5);
+		expect(interior.join("\n")).not.toContain(glyph);
+		expect(interior[3]).toMatch(/\x1b7\x1b\[3A\x1bPq\d+x\d+\x1b\\\x1b8/);
+		for (const row of interior) {
+			expect(row).toContain("\x1b[10C");
+			// The step stands for the picture's 10 cells: with it the row is as wide as the borders.
+			expect(visibleWidth(row) + 10).toBe(visibleWidth(drawn[0]!));
+		}
+	});
+
+	test("on SIXEL a one-row wide picture draws with the cursor saved and restored around it", async () => {
+		const { band } = createRoot(() => attached("1568x200"));
+		const caps = signal<TerminalCapabilities>({
+			truecolor: true,
+			colors: 16_777_216,
+			synchronizedOutput: true,
+			hyperlinks: false,
+			images: "sixel",
+			kittyKeyboard: true,
+			bracketedPaste: true,
+			background: null,
+			dark: true,
+			cell: { w: 10, h: 20 },
+			multiplexer: null,
+			textSizing: false,
+			tsp: false,
+			emoji: CONSERVATIVE_EMOJI,
+		});
+		const images = new TerminalImages({
+			capabilities: caps,
+			placeholders: signal(false),
+			encodeSixel: async (_bytes, w, h) => `\x1bPq${w}x${h}\x1b\\`,
+		});
+		const env = staticEnvironment(currentTheme(), { images: driverImages(images, caps) });
+		paintNode(env, band, 40);
+		await images.whenEncoded();
+		// 12×1 cells, centred on the second interior row. Drawing a SIXEL moves the cursor, so
+		// without the restore the rest of the row (the right border, the next cards) lands elsewhere.
+		const interior = paintNode(env, band, 40).rows.slice(1, 5);
+		expect(interior[1]).toMatch(/\x1b7\x1bPq\d+x\d+\x1b\\\x1b8\x1b\[12C/);
+		expect(interior.filter(row => row.includes("\x1bP"))).toHaveLength(1);
 	});
 });
 
