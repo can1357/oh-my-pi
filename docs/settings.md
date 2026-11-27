@@ -605,14 +605,14 @@ For the numeric sampling settings, a negative value (normally `-1`) means "use t
 
 #### Fast tiers and multiple accounts
 
-`/fast` toggles Fast (`priority`); `/ultrafast` toggles Ultrafast where supported. Selecting one replaces the other. `/session info` reports the selected speed mode, and the legacy `/fast ultra` still enables Ultrafast without toggling it off.
+`/fast` toggles Fast (`priority`); `/ultrafast` toggles Ultrafast where supported. Both accept explicit `on` and `off`. Selecting one replaces the other. `/session info` reports the selected speed mode, and the legacy `/fast ultra` still enables Ultrafast without toggling it off.
 
 With several credentials stored for one provider, a request that asks for a tier is routed to a credential that offers it; nothing needs pinning:
 
 - **Codex (`ultrafast`, `priority`)**: each logged-in ChatGPT account reports its own tier list per model. Ultrafast is a plan entitlement (Pro $500; Pro $200 for GPT-6.2 Sol only; eligible Enterprise/Edu workspaces), so `/ultrafast` goes to the accounts that list it, and the tier is omitted on a request another account ends up serving.
 - **Claude (`priority`, fast mode)**: an OAuth account qualifies when Claude's availability check allows fast mode (usage credits turned on; Team/Enterprise also need an owner to enable it) and its usage-credit cap is not spent. If no OAuth account qualifies, an API key serves fast requests instead, in the usual order: a `/login` key, the environment variable (`ANTHROPIC_API_KEY`), then another stored key. Keys are presumed to offer fast mode until the provider refuses it. `--api-key` and `models.yml` keys keep their normal precedence.
 
-An account that offers the tier keeps serving it for as long as it can, including on paid overage (Codex credits) and inside its usage reserve, because a tier you asked for is worth the spend; ordinary requests still avoid overage. Once it is blocked or refused the tier, requests balance across the remaining accounts at standard speed and return when it recovers. A refusal sidelines that credential for the tier for 30 minutes (an environment key, which has no stored row, for the rest of the process); toggling the tier off and back on re-checks immediately. An account you pinned explicitly keeps serving regardless.
+An account that offers the tier keeps serving it for as long as it can, including on paid overage (Codex credits) and inside its usage reserve, because a tier you asked for is worth the spend; ordinary requests still avoid overage. Once it is blocked or refused the tier, requests balance across the remaining accounts at standard speed and return when it recovers. A refusal sidelines that credential for the tier for 30 minutes (an environment key, which has no stored row, for the rest of the process); explicitly enabling the tier again re-checks immediately. An account you pinned explicitly keeps serving regardless.
 
 ### Retry and fallback
 

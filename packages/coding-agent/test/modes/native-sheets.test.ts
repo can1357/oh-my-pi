@@ -156,7 +156,7 @@ describe("sheets Tern draws", () => {
 
 	it("shows Fast and computer use together in the native /session info sheet", async () => {
 		await using ui = await nativeShell(mode.shell);
-		session.setFastMode(true);
+		await executeBuiltinSlashCommand("/fast on", { ctx: mode });
 		await executeBuiltinSlashCommand("/session info", { ctx: mode });
 
 		const { screen } = sheetOf(ui);

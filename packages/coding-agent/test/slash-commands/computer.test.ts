@@ -80,9 +80,22 @@ describe("/computer slash command", () => {
 		expect(h.output).toHaveBeenCalledWith("Computer use is unavailable in this session.");
 	});
 
-	it("rejects the old explicit on argument without toggling", async () => {
+	it("sets computer use explicitly instead of toggling when on or off is repeated", async () => {
+		const h = acpRuntime({ enabled: false });
+		for (const { arg, enabled } of [
+			{ arg: "on", enabled: true },
+			{ arg: "off", enabled: false },
+		]) {
+			await Reflect.apply(executeAcpBuiltinSlashCommand, undefined, [`/computer ${arg}`, h.runtime]);
+			expect(cfgComputerEnabled.get(h.settings)).toBe(enabled);
+			await Reflect.apply(executeAcpBuiltinSlashCommand, undefined, [`/computer ${arg}`, h.runtime]);
+			expect(cfgComputerEnabled.get(h.settings)).toBe(enabled);
+		}
+	});
+
+	it("rejects the old status argument without toggling", async () => {
 		const h = acpRuntime();
-		expect(await Reflect.apply(executeAcpBuiltinSlashCommand, undefined, ["/computer on", h.runtime])).toEqual({
+		expect(await Reflect.apply(executeAcpBuiltinSlashCommand, undefined, ["/computer status", h.runtime])).toEqual({
 			consumed: true,
 			failed: true,
 		});

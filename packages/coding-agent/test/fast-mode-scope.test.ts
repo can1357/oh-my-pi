@@ -277,13 +277,29 @@ describe("/fast targets the current model's service-tier family", () => {
 		expect(session.serviceTierByFamily).toEqual({});
 	});
 
-	it("keeps /fast ultra as an enable-only alias and rejects explicit /fast off", async () => {
-		const session = await createSessionForModel(codexModel(["ultrafast"]));
+	it("keeps explicit Fast controls and the enable-only /fast ultra alias", async () => {
+		const session = await createSessionForModel(codexModel(["priority", "ultrafast"]));
+		await runCommand(session, "/fast on");
+		await runCommand(session, "/fast on");
+		expect(session.serviceTierByFamily).toEqual({ openai: "priority" });
+		await runCommand(session, "/fast ultra");
 		await runCommand(session, "/fast ultra");
 		expect(session.serviceTierByFamily).toEqual({ openai: "ultrafast" });
-		await runCommand(session, "/fast ultra");
-		const { result } = await runCommand(session, "/fast off");
-		expect(result).toEqual({ consumed: true, failed: true });
+		await runCommand(session, "/fast off");
+		await runCommand(session, "/fast off");
+		expect(session.serviceTierByFamily).toEqual({});
+	});
+
+	it("sets Ultrafast explicitly without clearing Priority when Ultrafast is off", async () => {
+		const session = await createSessionForModel(codexModel(["priority", "ultrafast"]));
+		await runCommand(session, "/fast on");
+		await runCommand(session, "/ultrafast off");
+		expect(session.serviceTierByFamily).toEqual({ openai: "priority" });
+		await runCommand(session, "/ultrafast on");
+		await runCommand(session, "/ultrafast on");
 		expect(session.serviceTierByFamily).toEqual({ openai: "ultrafast" });
+		await runCommand(session, "/ultrafast off");
+		await runCommand(session, "/ultrafast off");
+		expect(session.serviceTierByFamily).toEqual({});
 	});
 });

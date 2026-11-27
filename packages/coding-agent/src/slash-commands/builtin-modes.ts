@@ -65,17 +65,32 @@ function resolveSessionModelSelector(
 	});
 }
 
+function modeToggleTarget(arg: string, enabled: boolean): boolean | undefined {
+	switch (arg) {
+		case "":
+			return !enabled;
+		case "on":
+			return true;
+		case "off":
+			return false;
+	}
+}
+
 /** Fast and Ultrafast toggle their own tier; the legacy `/fast ultra` always enables Ultrafast. */
 function speedToggle(name: "fast" | "ultrafast", description: string): SlashCommandSpec {
-	const hint = `Usage: /${name}\nCheck status with /session info.`;
+	const hint = `Usage: /${name} [on|off]\nCheck status with /session info.`;
 	function toggle(args: string, session: AgentSession): string | undefined {
-		const legacyUltra = name === "fast" && args.toLowerCase() === "ultra";
-		if (args && !legacyUltra) return undefined;
+		const arg = args.toLowerCase();
+		const legacyUltra = name === "fast" && arg === "ultra";
 		const ultra = name === "ultrafast" || legacyUltra;
 		const label = ultra ? "Ultrafast" : "Fast";
 		const ultrafastEnabled = session.isUltrafastModeEnabled();
-		const enable = ultra ? legacyUltra || !ultrafastEnabled : ultrafastEnabled || !session.isFastModeEnabled();
-		const applied = ultra ? session.setUltrafastMode(enable) : session.setFastMode(enable);
+		const enabled = ultra ? ultrafastEnabled : !ultrafastEnabled && session.isFastModeEnabled();
+		const enable = modeToggleTarget(legacyUltra ? "on" : arg, enabled);
+		if (enable === undefined) return undefined;
+		const applied = ultra
+			? (!enable && !ultrafastEnabled) || session.setUltrafastMode(enable)
+			: session.setFastMode(enable);
 		if (!applied) return `${label} mode is unavailable for the current model.`;
 		return `${label} mode ${enable ? "enabled" : "disabled"}.`;
 	}
@@ -162,9 +177,10 @@ function applyExtendedContextCommand(settings: Settings, args: string): string |
  * reconciles the prompt without a mid-session cache-busting rebuild.
  * The override is never persisted to settings.json.
  */
-function toggleComputerUse(session: AgentSession): string {
+function applyComputerUseCommand(args: string, session: AgentSession): string | undefined {
 	const previous = cfgComputerEnabled.get(session.settings);
-	const enable = !previous;
+	const enable = modeToggleTarget(args.toLowerCase(), previous);
+	if (enable === undefined) return undefined;
 	cfgComputerEnabled.override(session.settings, enable);
 	if (enable && !session.getEvalPreludes().some(definition => definition.name === "computer")) {
 		cfgComputerEnabled.override(session.settings, previous);
@@ -596,8 +612,9 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		description: "Toggle computer use for this session",
 		allowArgs: true,
 		handle: async (command, runtime) => {
-			if (command.args) return usage("Usage: /computer\nCheck status with /session info.", runtime);
-			await runtime.output(toggleComputerUse(runtime.session));
+			const message = applyComputerUseCommand(command.args, runtime.session);
+			if (message === undefined) return usage("Usage: /computer [on|off]\nCheck status with /session info.", runtime);
+			await runtime.output(message);
 			return commandConsumed();
 		},
 	},
