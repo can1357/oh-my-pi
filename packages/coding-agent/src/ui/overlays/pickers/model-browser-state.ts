@@ -26,8 +26,10 @@ import {
 	buildSearchAffinity,
 	formatCostDetail,
 	formatCostPair,
-	fuzzyHits,
+	type HeldRole,
+	hasTieredPerf,
 	heldRoles,
+	heldRolesByModel,
 	inProviderScope,
 	isFreeModel,
 	MODEL_PICKER_COLUMNS,
@@ -35,9 +37,12 @@ import {
 	type ModelBrowserPerf,
 	type ModelBrowserSource,
 	ModelItemRanker,
+	type ModelSearchIndex,
 	measuredPerf,
+	modelIdentityKey,
 	modelSearchText,
 	nextCreditRateNote,
+	nextPriceChange,
 	parseProviderScopedQuery,
 	pickerPrice,
 	providerMark,
@@ -45,9 +50,13 @@ import {
 	type RoleAssignments,
 	roleChipLabel,
 	type SearchAffinity,
+	sameItems,
+	type TieredPerf,
+	tieredPerf,
 	thinkingDotToken,
 } from "../../../modes/view-model/overlays/model-browser";
-import { fuzzyRank } from "../../../utils/fuzzy";
+import { connectedProviderName } from "../../../modes/view-model/chrome/format";
+import { fuzzyHits, fuzzyRank } from "../../../utils/fuzzy";
 import type { ConfiguredThinkingLevel } from "../../../utils/render-utils";
 import { editLine, type LineState } from "../settings/line-edit";
 import { matchesSelectCancel, selectKeyId } from "../../../config/keybindings/matchers";
@@ -75,6 +84,81 @@ export function formatTps(tps: number): string {
 export function formatTtft(ms: number): string {
 	const seconds = ms / 1000;
 	return seconds >= 10 ? `${Math.round(seconds)}s` : `${seconds.toFixed(1)}s`;
+}
+
+/** A model's measured perf, with the tier aggregate it came from. */
+type MeasuredPerf = { perf: ModelBrowserPerf; tier?: string };
+
+/** The perf column for `measured` (else the catalog's speed as `~80t/s`); `mode` is not `off`. */
+function perfText(item: ModelBrowserItem, measured: MeasuredPerf | undefined, mode: "tps" | "full"): string {
+	if (measured) {
+		const tps = formatTps(measured.perf.tps);
+		const tier = measured.tier ? ` ${measured.tier}` : "";
+		if (mode === "full" && measured.perf.ttftMs !== null) return `${formatTtft(measured.perf.ttftMs)} ${tps}${tier}`;
+		return `${tps}${tier}`;
+	}
+	const tps = item.model.tps;
+	return tps != null && Number.isFinite(tps) && tps > 0 ? `~${formatTps(tps)}` : "";
+}
+
+/** Every input a picker row reads besides its item (and the service tier, kept per row). */
+interface PickerRowKey {
+	readonly roles: RoleAssignments;
+	readonly perf: ReadonlyMap<string, ModelBrowserPerf>;
+	/** The source's preference store (role labels and visibility). */
+	readonly preferences: object;
+	readonly revision: number;
+	readonly pickerProvider: boolean;
+	/** Whether rows over the session's context are flagged (the tokens they compare against are kept per row). */
+	readonly markOverContext: boolean;
+}
+
+/** Picker rows per item for one {@link PickerRowKey}, valid until a price falls due. */
+interface PickerRowStore extends PickerRowKey {
+	/** The earliest price change among the stored rows (Unix ms): the store is dropped from then. */
+	until: number;
+	readonly held: Map<string, HeldRole[]>;
+	readonly tiers: TieredPerf;
+	/** Each row with the service tier its perf was looked up under and the session tokens it flags (0: none). */
+	readonly rows: Map<ModelBrowserItem, { row: TspPickerItem; tier: string | undefined; overContext: number }>;
+}
+
+/**
+ * The last row store built, shared by every browser: one reading the same
+ * inputs (a reopened picker over the same scope) adopts it and builds no rows.
+ */
+let sharedPickerRows: PickerRowStore | undefined;
+
+/** Whether `store` serves `key` now, its perf map aside (the clock is read only while a price change is pending). */
+function storeServes(store: PickerRowStore, key: PickerRowKey): boolean {
+	return (
+		store.roles === key.roles &&
+		store.preferences === key.preferences &&
+		store.revision === key.revision &&
+		store.pickerProvider === key.pickerProvider &&
+		store.markOverContext === key.markOverContext &&
+		(store.until === Number.POSITIVE_INFINITY || Date.now() < store.until)
+	);
+}
+
+/** Whether two perf maps hold equal aggregates under the same keys, in the same order. */
+function samePerf(a: ReadonlyMap<string, ModelBrowserPerf>, b: ReadonlyMap<string, ModelBrowserPerf>): boolean {
+	if (a === b) return true;
+	if (a.size !== b.size) return false;
+	const others = b.entries();
+	for (const [key, entry] of a) {
+		const next = others.next();
+		if (next.done) return false;
+		const [otherKey, other] = next.value;
+		if (
+			otherKey !== key ||
+			other.samples !== entry.samples ||
+			!Object.is(other.tps, entry.tps) ||
+			!Object.is(other.ttftMs, entry.ttftMs)
+		)
+			return false;
+	}
+	return true;
 }
 
 /** `200k` token count as rows show it. */
@@ -168,6 +252,7 @@ export interface PickerCatalogue {
 
 /** Options of a {@link ModelBrowserState}. */
 export interface ModelBrowserOptions {
+	readonly searchIndex?: ModelSearchIndex;
 	/** Rows lead with a dim `provider/` (default true). */
 	readonly showProvider?: boolean;
 	/** Session tokens: rows whose window is smaller are flagged (when {@link markOverContext}). */
@@ -202,12 +287,17 @@ export class ModelBrowserState {
 	readonly #contextTokens: number;
 	readonly #emptyText: (() => string | undefined) | undefined;
 	#affinity: SearchAffinity = { models: new Map(), providers: new Map() };
+	readonly #searchIndex?: ModelSearchIndex;
 	#ranker: { source: readonly BrowserRow[]; affinity: SearchAffinity; ranker: ModelItemRanker } | undefined;
 	/** When the earliest dated credit card of a listed model takes effect (the `free` search word follows it). */
 	#nextCreditChange = Number.POSITIVE_INFINITY;
 	/** The rows last sent whole as picker `items`, and the ids patched since. */
 	#pickerBase: readonly TspPickerItem[] | undefined;
 	readonly #pickerPatched = new Set<string>();
+	/** The row store serving this browser, and the perf map it was matched against. */
+	#pickerRows: { perf: ReadonlyMap<string, ModelBrowserPerf>; store: PickerRowStore } | undefined;
+	/** The rows of the last {@link pickerItems} call and the catalogue it returned. */
+	#pickerLast: { rows: readonly TspPickerItem[]; catalogue: PickerCatalogue } | undefined;
 
 	/** Enter, a click on the selected row, or a native pick. */
 	onActivate?: (item: ModelBrowserItem) => void;
@@ -218,6 +308,7 @@ export class ModelBrowserState {
 
 	constructor(source: ModelBrowserSource, options: ModelBrowserOptions = {}) {
 		this.source = source;
+		this.#searchIndex = options.searchIndex;
 		this.#showProvider = signal(options.showProvider ?? true);
 		this.#markOverContext = signal(options.markOverContext ?? false);
 		const tokens = options.currentContextTokens ?? 0;
@@ -534,23 +625,20 @@ export class ModelBrowserState {
 	// ─── Facts ──────────────────────────────────────────────────────────────
 
 	/** Measured perf of `item`, else nothing. */
-	measured(item: ModelBrowserItem): { perf: ModelBrowserPerf; tier?: string } | undefined {
-		return measuredPerf(this.#perf(), item, this.source.serviceTierFor?.(item.model));
+	measured(item: ModelBrowserItem): MeasuredPerf | undefined {
+		const perf = this.#perf();
+		// Only tier aggregates make the service tier matter: skip the lookup for the rest.
+		return measuredPerf(
+			perf,
+			item,
+			hasTieredPerf(perf, item.selector) ? this.source.serviceTierFor?.(item.model) : undefined,
+		);
 	}
 
 	/** The perf column: measured speed (`25t/s`, `0.5s 25t/s`, with its tier), else the catalog's as `~80t/s`. */
 	perfCell(item: ModelBrowserItem, mode: PerfMode): string {
 		if (mode === "off") return "";
-		const measured = this.measured(item);
-		if (measured) {
-			const tps = formatTps(measured.perf.tps);
-			const tier = measured.tier ? ` ${measured.tier}` : "";
-			if (mode === "full" && measured.perf.ttftMs !== null)
-				return `${formatTtft(measured.perf.ttftMs)} ${tps}${tier}`;
-			return `${tps}${tier}`;
-		}
-		const tps = item.model.tps;
-		return tps != null && Number.isFinite(tps) && tps > 0 ? `~${formatTps(tps)}` : "";
+		return perfText(item, this.measured(item), mode);
 	}
 
 	/** The detail line's facts after the name: badges, window, output, price, capabilities, speed, credits, blurb. */
@@ -666,20 +754,53 @@ export class ModelBrowserState {
 		return item.provider === "" || !this.#pickerProvider() ? item.id : item.selector;
 	}
 
-	/** One picker row. */
-	pickerItem(item: ModelBrowserItem): TspPickerItem {
+	/** The row store for the inputs as they are now: this browser's, the shared one, or a fresh one. */
+	#pickerRowStore(): PickerRowStore {
+		const perf = this.#perf();
+		const key: PickerRowKey = {
+			roles: this.#roles(),
+			perf,
+			preferences: this.source.preferences ?? this.source,
+			revision: this.source.revision,
+			pickerProvider: this.#pickerProvider(),
+			markOverContext: this.#markOverContext(),
+		};
+		const current = this.#pickerRows;
+		if (current && current.perf === perf && storeServes(current.store, key)) return current.store;
+		let store = sharedPickerRows;
+		if (!store || !storeServes(store, key) || !samePerf(store.perf, perf)) {
+			store = {
+				...key,
+				until: Number.POSITIVE_INFINITY,
+				held: heldRolesByModel(key.roles, this.source),
+				tiers: tieredPerf(perf),
+				rows: new Map(),
+			};
+			sharedPickerRows = store;
+		}
+		this.#pickerRows = { perf, store };
+		return store;
+	}
+
+	/** `item`'s row from `store`, built when missing or when the service tier picking its perf or its context flag moved. */
+	#pickerItem(item: ModelBrowserItem, store: PickerRowStore): TspPickerItem {
+		const tier = store.tiers.has(item.selector) ? this.source.serviceTierFor?.(item.model) : undefined;
+		const overContext = this.isOverContext(item) ? this.#contextTokens : 0;
+		const cached = store.rows.get(item);
+		if (cached && cached.tier === tier && cached.overContext === overContext) return cached.row;
 		const model = item.model;
+		store.until = Math.min(store.until, nextPriceChange(model));
 		const facts: Record<string, TspText | number> = {};
 		const int = intelligenceOf(model);
 		if (int !== undefined) facts.int = String(int);
-		const speed = this.perfCell(item, "tps")
+		const speed = perfText(item, measuredPerf(store.perf, item, tier, store.tiers), "tps")
 			.replace(/\s*t\/s\s*/, " ")
 			.trim();
 		if (speed) facts.speed = speed;
 		if (model.contextWindow) facts.ctx = model.contextWindow;
 		facts.price = pickerPrice(model);
 		const badges: { text: string; tone?: "accent" | "warning" | "success"; title?: string }[] = [];
-		if (this.isOverContext(item)) {
+		if (overContext) {
 			badges.push({
 				text: `ctx>${tokenCount(model.contextWindow ?? 0)}`,
 				tone: "warning",
@@ -689,7 +810,7 @@ export class ModelBrowserState {
 		if (model.isNew) badges.push({ text: "new", tone: "accent" });
 		if (model.isBeta) badges.push({ text: "beta", tone: "warning" });
 		if (isFreeModel(model)) badges.push({ text: "free", tone: "success" });
-		const chips = heldRoles(model, this.#roles(), this.source).map(({ role, assignment }) => {
+		const chips = (store.held.get(modelIdentityKey(model)) ?? []).map(({ role, assignment }) => {
 			const dot = thinkingDotToken(assignment.thinkingLevel);
 			return {
 				text: roleChipLabel(role, this.source),
@@ -701,10 +822,10 @@ export class ModelBrowserState {
 		// Quick-role rows (`@role`) name the role and trail the model they apply.
 		const quickRole = item.provider === "" && item.id.startsWith("@");
 		const title = [
-			...(this.#pickerProvider() || item.provider === "" ? [] : [item.provider]),
+			...(store.pickerProvider || item.provider === "" ? [] : [item.provider]),
 			...(model.int != null && Number.isFinite(model.int) ? [`Intelligence ${Math.round(model.int)}`] : []),
 		].join(" · ");
-		return {
+		const row: TspPickerItem = {
 			id: item.selector,
 			label: this.pickerLabel(item),
 			mark: providerMark(model.provider),
@@ -715,6 +836,8 @@ export class ModelBrowserState {
 			...(chips.length > 0 ? { chips } : {}),
 			...(title ? { title } : {}),
 		};
+		store.rows.set(item, { row, tier, overContext });
+		return row;
 	}
 
 	/**
@@ -723,12 +846,43 @@ export class ModelBrowserState {
 	 * `itemsDel`; a patched row stays in the patch), else it is sent whole.
 	 */
 	pickerItems(catalogue: readonly ModelBrowserItem[]): PickerCatalogue {
-		const rows = catalogue.map(item => this.pickerItem(item));
+		return this.#pickerItemsNow(catalogue);
+	}
+
+	/**
+	 * Builds the picker rows of `catalogue` into the shared row store ahead of
+	 * a picker reading them, a row per step; stops when the inputs move.
+	 */
+	*pickerItemsWork(catalogue: readonly ModelBrowserItem[]): Generator<void, void, undefined> {
+		const store = this.#pickerRowStore();
+		for (const item of catalogue) {
+			if (this.#pickerRowStore() !== store) return;
+			this.#pickerItem(item, store);
+			yield;
+		}
+	}
+
+	#pickerItemsNow(catalogue: readonly ModelBrowserItem[]): PickerCatalogue {
+		const store = this.#pickerRowStore();
+		const rows = catalogue.map(item => this.#pickerItem(item, store));
+		// The same rows again (a query or selection moved): the same patch.
+		const last = this.#pickerLast;
+		if (last && sameItems(last.rows, rows)) return last.catalogue;
+		const result = this.#pickerPatch(rows);
+		this.#pickerLast = { rows, catalogue: result };
+		return result;
+	}
+
+	#pickerPatch(rows: readonly TspPickerItem[]): PickerCatalogue {
 		const base = this.#pickerBase;
 		if (base) {
 			const baseById = new Map(base.map(row => [row.id, row]));
 			const listed = new Set(rows.map(row => row.id));
-			const add = rows.filter(row => this.#pickerPatched.has(row.id) || !Bun.deepEquals(baseById.get(row.id), row));
+			const add = rows.filter(row => {
+				if (this.#pickerPatched.has(row.id)) return true;
+				const sent = baseById.get(row.id);
+				return sent !== row && !Bun.deepEquals(sent, row);
+			});
 			const del: string[] = [];
 			for (const row of base) if (!listed.has(row.id)) del.push(row.id);
 			for (const id of this.#pickerPatched) if (!baseById.has(id) && !listed.has(id)) del.push(id);
@@ -784,7 +938,11 @@ export class ModelBrowserState {
 					const provider = (rest[start] as ModelBrowserItem).provider;
 					let end = start + 1;
 					while (end < rest.length && (rest[end] as ModelBrowserItem).provider === provider) end++;
-					order.push({ group: `provider:${provider}:${start}`, label: provider, count: end - start });
+					order.push({
+						group: `provider:${provider}:${start}`,
+						label: connectedProviderName(provider),
+						count: end - start,
+					});
 					push(rest.slice(start, end));
 					start = end;
 				}
@@ -857,7 +1015,7 @@ export class ModelBrowserState {
 	 * on its model when still listed).
 	 */
 	#syncCreditClock(): void {
-		if (Date.now() < this.#nextCreditChange) return;
+		if (this.#nextCreditChange === Number.POSITIVE_INFINITY || Date.now() < this.#nextCreditChange) return;
 		this.#trackCreditClock();
 		// The ranker memoizes `provider/model` haystacks, `free` word included.
 		this.#ranker = undefined;
@@ -884,8 +1042,10 @@ export class ModelBrowserState {
 	#rank(query: string): BrowserRow[] {
 		const items = this.#items.peek();
 		const models = items.filter((row): row is ModelBrowserItem => !isSeparator(row));
-		if (this.#preserveOrder.peek())
-			return this.#withSeparator(fuzzyRank(models, query, modelSearchText).map(r => r.item));
+		if (this.#preserveOrder.peek()) {
+			const matches = this.#searchIndex?.rank(models, query) ?? fuzzyRank(models, query, modelSearchText);
+			return this.#withSeparator(matches.map(r => r.item));
+		}
 		let cached = this.#ranker;
 		if (cached?.source !== items || cached.affinity !== this.#affinity) {
 			cached = {
@@ -899,7 +1059,7 @@ export class ModelBrowserState {
 			};
 			this.#ranker = cached;
 		}
-		return this.#withSeparator(cached.ranker.rank(query));
+		return this.#withSeparator(cached.ranker.rank(query, this.#searchIndex));
 	}
 
 	/** Recompute the visible rows; the selection lands on `preferred` when listed, else the first model. */

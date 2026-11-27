@@ -3,6 +3,17 @@
  * snapshot, recomputed when the viewed session emits an event, when the app
  * moves a mode or a badge, when a background read (git, usage quota, pull
  * request) lands, and on the wall clock while a segment shows time.
+ * Streaming deltas sample context usage and token rate; only changes propagate
+ * to the bar. Foreground tool progress samples the job badge, account status,
+ * speculation and rate without invalidating the transcript or compaction policy.
+ *
+ * Git/jj facts are read again when a run starts (edits made while idle) and
+ * when a turn ends (what its tools did), and after a user `!`/`$` command
+ * ({@link SessionStatusLine.refreshVcs}); nothing polls the repository. Those
+ * reads start at most {@link VCS_READ_INTERVAL_MS} apart: one skipped as too
+ * soon runs on a timer once the run yields, so the bar never stays stale.
+ * None of it happens while the terminal reads and shows the checkout itself
+ * ({@link SessionStatusLine.setCheckoutHomed}: Tern's `checkout` event).
  *
  * Session state is not reactive, so the session's events bump a revision the
  * snapshot reads; {@link SessionStatusLine.refresh} does the same for changes
@@ -17,6 +28,7 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { type Accessor, computed, type Signal, signal } from "@oh-my-pi/pi-tui";
 import { getActiveProfile, getProjectDir } from "@oh-my-pi/pi-utils";
 import type { AgentViewSession } from "../../session/agent-session-handle";
+import { type AiuTotals, sessionAiu } from "../../session/aiu-billing";
 import { latestJobWidget } from "../../tools/details/job-widget";
 import { BRAND_FADE_MS, type StatusFacts, type StatusLineSettings } from "../../ui/status/facts";
 import type { CollabStatus, StatusLineModel } from "../types";
@@ -29,8 +41,8 @@ import {
 } from "../view-model/overlays/codex-reset-fireworks";
 import { codexResetSnapshot, quotaFromReports } from "./status-quota";
 
-/** Git and jj status are refreshed at most this often (a HEAD move refreshes the branch at once). */
-const VCS_STATUS_TTL_MS = 5_000;
+/** Least time between the starts of two git/jj reads asked for by run starts, turn ends and user commands. */
+const VCS_READ_INTERVAL_MS = 5_000;
 /** Usage reports are fetched at most this often. */
 const USAGE_TTL_MS = 5 * 60_000;
 /** First usage fetch waits this long so startup paints first. */
@@ -66,6 +78,11 @@ interface StatusSessionExtras {
 
 type StatusSession = AgentViewSession & StatusSessionExtras;
 
+type SessionFacts = Omit<
+	StatusFacts,
+	"context" | "compaction" | "tokensPerSecond" | "promptCache" | "jobs" | "jobGlance" | "speculation" | "slowModeLabel"
+>;
+
 /** One viewed session's active-processing meter. */
 interface ActiveMeter {
 	/** Completed active windows since the last reset. */
@@ -87,6 +104,8 @@ export interface StatusModes {
 	recording?: boolean;
 	pinned?: boolean;
 	subagentTreeCost?: number;
+	/** AI credits of the subagent tree, from the same roll-up as {@link subagentTreeCost}. */
+	subagentTreeAiu?: AiuTotals;
 	vibeWorkerTokenRate?: () => number | null;
 }
 
@@ -102,6 +121,8 @@ interface VcsSnapshot {
 /** See the module docs. */
 export class SessionStatusLine implements StatusLineModel {
 	readonly #revision = signal(0);
+	readonly #streamRevision = signal(0);
+	readonly #toolRevision = signal(0);
 	/** Wall clock, advanced once a second while a segment shows time. */
 	readonly #clock = signal(Date.now());
 	readonly #saved: Signal<StatusLineSettings>;
@@ -119,13 +140,13 @@ export class SessionStatusLine implements StatusLineModel {
 	#session: StatusSession;
 	#focusedAgentId: string | undefined;
 	#unsubscribe: (() => void) | undefined;
-	#bumpQueued = false;
+	#bumpQueued: "session" | "tool" | undefined;
 	#streamBump: NodeJS.Timeout | undefined;
 	#clockTimer: NodeJS.Timeout | undefined;
 	/**
 	 * Active-processing time per viewed session (a focused subagent's turns never feed main's): the
 	 * completed windows since the last reset and the open one's start. A session whose file changed in
-	 * place (`/resume`, `/move`, a fork) starts a fresh meter.
+	 * place (`/resume`, `/move`, a fork) starts a fresh meter ({@link #meter}).
 	 */
 	readonly #meters = new WeakMap<AgentViewSession, ActiveMeter>();
 	/** The active model's next tariff change, and the wakeup repainting the cost at it. */
@@ -135,11 +156,18 @@ export class SessionStatusLine implements StatusLineModel {
 	#brandEdgeAt: number | undefined;
 	/** Drops {@link #brandEdgeAt} once its fade is over. */
 	#brandFade: NodeJS.Timeout | undefined;
-	#vcsFetchedAt = 0;
+	/** The git/jj facts are read again on the next paint; cleared when a read starts. */
+	#vcsStale = true;
+	/** When the last git/jj read started. */
+	#vcsReadAt = 0;
+	/** A read was skipped as too soon after the last one; paid by {@link #settleVcs}. */
+	#vcsOwed = false;
+	/** Pays an owed read once {@link VCS_READ_INTERVAL_MS} has passed. */
+	#vcsTimer: NodeJS.Timeout | undefined;
 	#vcsInFlight = false;
 	#vcsGeneration = 0;
-	#unwatchVcs: (() => void) | undefined;
-	#watchedRoot: string | undefined;
+	/** The terminal reads and shows this session's checkout itself (Tern): no git/jj read and no `gh` here. */
+	#checkoutHomed = false;
 	readonly #defaultBranches = new Map<string, string>();
 	/** Pull request lookups by `cwd\0branch`, each kept for {@link PR_TTL_MS}. */
 	readonly #prs = new Map<string, { at: number; pr: { number: number; url: string } | null }>();
@@ -161,7 +189,81 @@ export class SessionStatusLine implements StatusLineModel {
 
 	readonly settings: Accessor<StatusLineSettings> = computed(() => ({ ...this.#saved(), ...this.#preview() }));
 
-	readonly facts: Accessor<StatusFacts> = computed(() => this.#build());
+	readonly #sessionFacts = computed(() => this.#buildSessionFacts());
+	readonly #context = computed((previous: StatusFacts["context"] | undefined) => this.#readContext(previous));
+	readonly #jobs = computed((previous: Pick<StatusFacts, "jobs" | "jobGlance"> | undefined) => {
+		this.#revision();
+		this.#toolRevision();
+		const subagents = this.#subagents();
+		let jobs = 0;
+		for (const job of this.#session.getAsyncJobSnapshot({ recentLimit: 0 })?.running ?? []) {
+			if (job.type !== "task" || job.agentId === undefined || !subagents.has(job.agentId)) jobs++;
+		}
+		const jobGlance = jobs > 0 ? latestJobWidget(this.#session.getRunningJobWidgets?.() ?? [])?.view : undefined;
+		return previous?.jobs === jobs && previous.jobGlance === jobGlance
+			? previous
+			: { jobs, ...(jobGlance ? { jobGlance } : {}) };
+	});
+	// A long tool wait can cross a quota TTL or the active account's usage-limit reset.
+	readonly #accountLabel = computed(() => {
+		this.#sessionFacts();
+		this.#toolRevision();
+		const session = this.#session;
+		const model = session.state.model ?? session.model;
+		this.#syncUsage(model?.provider, model?.id);
+		return session.getAnthropicSlowModeLabel();
+	});
+	readonly #speculation = computed(() => {
+		this.#revision();
+		this.#toolRevision();
+		return this.#session.compactionSpeculation;
+	});
+	readonly #rate = computed(() => {
+		this.#revision();
+		this.#streamRevision();
+		this.#toolRevision();
+		this.#clock();
+		return this.#tokensPerSecond(this.#modes());
+	});
+
+	/** The composer's live meter, independent of whether any status-bar segment changed. */
+	readonly composerRate = computed(() => {
+		this.#revision();
+		this.#streamRevision();
+		this.#clock();
+		const rate = this.#session.tokenRate.rate();
+		return rate === null ? undefined : Math.round(rate * 10) / 10;
+	});
+	// Compaction boundaries depend on capacity, not on the growing token count.
+	readonly #contextWindow = computed(() => this.#context().window);
+	readonly #boundaries = computed(() => {
+		if (!this.#sessionFacts().autoCompact) return null;
+		const contextWindow = this.#contextWindow();
+		const session = this.#session;
+		return contextWindow > 0
+			? statusLineHost.computeCompactionBoundaries(session, contextWindow, session.state.model ?? session.model)
+			: null;
+	});
+
+	readonly facts: Accessor<StatusFacts> = computed(() => {
+		const sessionFacts = this.#sessionFacts();
+		const context = this.#context();
+		const boundaries = this.#boundaries();
+		const settings = this.settings();
+		const slowModeLabel = this.#accountLabel();
+		return {
+			...sessionFacts,
+			context,
+			...(boundaries ? { compaction: boundaries } : {}),
+			...this.#jobs(),
+			...(slowModeLabel ? { slowModeLabel } : {}),
+			speculation: this.#speculation(),
+			tokensPerSecond: this.#rate(),
+			...(settings.leftSegments?.includes("cache") || settings.rightSegments?.includes("cache")
+				? { promptCache: this.#session.getPromptCacheStatus?.(sessionFacts.now, context.tokens) }
+				: {}),
+		};
+	});
 
 	constructor(session: AgentViewSession) {
 		this.#session = session;
@@ -185,7 +287,37 @@ export class SessionStatusLine implements StatusLineModel {
 	}
 
 	refresh(): void {
+		clearTimeout(this.#streamBump);
+		this.#streamBump = undefined;
 		this.#revision.set(this.#revision.peek() + 1);
+	}
+
+	/** A job widget or the running job roster changed independently of the conversation. */
+	refreshJobs(): void {
+		this.#queueBump("tool");
+	}
+
+	refreshVcs(): void {
+		this.#markVcsStale();
+		// No run follows a user command to yield: settle now.
+		this.#settleVcs();
+		this.refresh();
+	}
+
+	/**
+	 * Follow whether the terminal reads and shows this session's checkout
+	 * itself (Tern's `checkout` event). While it does, git/jj and the branch's
+	 * pull request are read from it, so none is read here and the title's pull
+	 * request is released; turning it off reads again.
+	 */
+	setCheckoutHomed(homed: boolean): void {
+		if (homed === this.#checkoutHomed) return;
+		this.#checkoutHomed = homed;
+		this.#vcsGeneration++;
+		this.#vcs.set(undefined);
+		this.#lastPr = undefined;
+		this.#onPullRequest?.(undefined);
+		this.refresh();
 	}
 
 	/** Zero the viewed session's active time; a running window is dropped too (its end then finds the meter idle). */
@@ -246,9 +378,12 @@ export class SessionStatusLine implements StatusLineModel {
 		const session = this.#session;
 		const file = session.sessionFile;
 		let meter = this.#meters.get(session);
-		if (meter && file !== undefined && meter.file !== undefined && meter.file !== file) meter = undefined;
-		if (!meter) {
-			meter = { activeMs: 0, since: undefined, file };
+		if (!meter || (file !== undefined && meter.file !== undefined && meter.file !== file)) {
+			// An open window outlives a file change while the run goes on (a fork or `/wt` during a background
+			// wait), counted from this first read on the new file; its clock already ticks. A closed one
+			// stays closed: a run starting on the new file opens it.
+			const open = meter?.since !== undefined && session.runStartedAt !== undefined;
+			meter = { activeMs: 0, since: open ? Date.now() : undefined, file };
 			this.#meters.set(session, meter);
 		}
 		meter.file = file;
@@ -312,12 +447,15 @@ export class SessionStatusLine implements StatusLineModel {
 		this.#autoCompact.set(enabled);
 	}
 
-	/** The cwd moved: drop VCS state for the old checkout. */
-	applyCwdChange(): void {
+	/** The cwd or child-repository policy changed: discard facts and reads for the old checkout. */
+	invalidateVcs(): void {
 		this.#vcsGeneration++;
 		this.#vcs.set(undefined);
-		this.#vcsFetchedAt = 0;
-		this.#retireWatcher();
+		this.#vcsStale = true;
+		if (this.#lastPr) {
+			this.#lastPr = undefined;
+			this.#onPullRequest?.(undefined);
+		}
 		this.refresh();
 	}
 
@@ -339,7 +477,7 @@ export class SessionStatusLine implements StatusLineModel {
 		clearTimeout(this.#usageTimer);
 		clearTimeout(this.#pricingTimer);
 		clearTimeout(this.#brandFade);
-		this.#retireWatcher();
+		clearTimeout(this.#vcsTimer);
 	}
 
 	/** Wake at the shown cost's next time-based tariff change (peak/off-peak), idle or not, to repaint it. */
@@ -365,20 +503,35 @@ export class SessionStatusLine implements StatusLineModel {
 		this.#unsubscribe?.();
 		this.#unsubscribe = session.subscribe(event => {
 			// Every delta would rebuild the facts (account, context usage, compaction) hundreds of times a second.
-			if (event.type === "message_update") this.#queueStreamBump();
-			else this.#queueBump();
+			if (event.type === "message_update") {
+				this.#queueStreamBump();
+				return;
+			}
+			if (event.type === "tool_execution_update" || event.type === "tool_stream_update") {
+				this.#queueBump("tool");
+				return;
+			}
+			if (event.type === "agent_start" || event.type === "turn_end") this.#markVcsStale();
+			else if (event.type === "agent_end") this.#settleVcs();
+			this.#queueBump("session");
 		});
 		this.#quota.set(undefined);
 		this.#usageKey = "";
 	}
 
-	/** Coalesce a burst of session events (streaming deltas) into one recompute. */
-	#queueBump(): void {
-		if (this.#bumpQueued) return;
-		this.#bumpQueued = true;
+	/** A full session refresh also covers tool progress in the same event burst. */
+	#queueBump(kind: "session" | "tool"): void {
+		if (this.#bumpQueued) {
+			if (kind === "session") this.#bumpQueued = kind;
+			return;
+		}
+		this.#bumpQueued = kind;
 		queueMicrotask(() => {
-			this.#bumpQueued = false;
-			if (!this.#disposed) this.refresh();
+			const queued = this.#bumpQueued;
+			this.#bumpQueued = undefined;
+			if (this.#disposed) return;
+			if (queued === "tool") this.#toolRevision.set(this.#toolRevision.peek() + 1);
+			else this.refresh();
 		});
 	}
 
@@ -387,7 +540,7 @@ export class SessionStatusLine implements StatusLineModel {
 		if (this.#streamBump) return;
 		this.#streamBump = setTimeout(() => {
 			this.#streamBump = undefined;
-			this.#queueBump();
+			this.#streamRevision.set(this.#streamRevision.peek() + 1);
 		}, STREAM_REFRESH_MS);
 		this.#streamBump.unref?.();
 	}
@@ -409,16 +562,12 @@ export class SessionStatusLine implements StatusLineModel {
 		}
 	}
 
-	#build(): StatusFacts {
-		this.#revision();
-		const now = this.#clock();
+	#readContext(previous: StatusFacts["context"] | undefined): StatusFacts["context"] {
+		// Also re-read on full refreshes: a settings edit may change live tool metadata.
+		this.#sessionFacts();
+		this.#streamRevision();
 		const session = this.#session;
-		const settings = this.settings();
-		const modes = this.#modes();
 		const model = session.state.model ?? session.model;
-		const segments = [...(settings.leftSegments ?? []), ...(settings.rightSegments ?? [])];
-		const stats = session.sessionManager.getUsageStatistics();
-
 		const usage = session.getContextUsage();
 		let contextWindow = usage?.contextWindow ?? model?.contextWindow ?? 0;
 		let tokens = usage?.tokens ?? 0;
@@ -431,30 +580,39 @@ export class SessionStatusLine implements StatusLineModel {
 			tokens = override.tokens ?? tokens;
 			percent = override.percent ?? percent;
 		}
+		return previous?.tokens === tokens && previous.window === contextWindow && previous.percent === percent
+			? previous
+			: { tokens, window: contextWindow, percent };
+	}
+
+	#buildSessionFacts(): SessionFacts {
+		this.#revision();
+		const now = this.#clock();
+		const session = this.#session;
+		const settings = this.settings();
+		const modes = this.#modes();
+		const model = session.state.model ?? session.model;
+		const segments = [...(settings.leftSegments ?? []), ...(settings.rightSegments ?? [])];
+		const stats = session.sessionManager.getUsageStatistics();
+		const collab = this.#collab();
 		const autoCompact = this.#autoCompact();
-		const boundaries =
-			autoCompact && contextWindow > 0
-				? statusLineHost.computeCompactionBoundaries(session, contextWindow, model)
-				: null;
 
 		const advisorOverview = session.getAdvisorStatusOverview?.();
 		const advisorStatuses = advisorOverview?.configured ? advisorOverview.advisors.map(a => a.status) : [];
 		const advisorCost = session.getAdvisorCost();
+		// Own calls plus the subagent tree, pushed with its dollars so the tree is summed once.
+		const aiu = sessionAiu(
+			{ nano: stats.aiuNano ?? 0, unknownCalls: stats.aiuUnknownCalls ?? 0 },
+			this.#focusedAgentId === undefined ? modes.subagentTreeAiu : undefined,
+		);
 		const vcsFacts = this.#vcsFacts(segments);
 		const goal = modes.goal ? session.getGoalModeState()?.goal : undefined;
 		const thinkingLevel = session.state.thinkingLevel;
 		const sessionManager = session.sessionManager;
-		// A task job whose subagent the agents badge already shows is not counted again.
 		const subagents = this.#subagents();
-		const jobs =
-			session
-				.getAsyncJobSnapshot()
-				?.running.filter(job => job.type !== "task" || job.agentId === undefined || !subagents.has(job.agentId))
-				.length ?? 0;
 		const turnStartedAt = this.#meter().since;
 		const activeMs = this.activeMs(now);
 		this.#syncPricingTimer(segments.includes("cost") ? model?.cost : undefined, now);
-		this.#syncUsage(model?.provider, model?.id);
 
 		return {
 			...(model
@@ -462,6 +620,7 @@ export class SessionStatusLine implements StatusLineModel {
 						model: {
 							id: model.id,
 							...(model.name ? { name: model.name } : {}),
+							...(model.provider ? { provider: model.provider } : {}),
 							thinking: model.thinking !== undefined,
 							...(model.contextWindow ? { contextWindow: model.contextWindow } : {}),
 						},
@@ -473,7 +632,6 @@ export class SessionStatusLine implements StatusLineModel {
 				? { autoResolvedLevel: session.autoResolvedThinkingLevel() }
 				: {}),
 			...(session.isFastModeActive() ? { fastMode: true } : {}),
-			...(session.getAnthropicSlowModeLabel() ? { slowModeLabel: session.getAnthropicSlowModeLabel() } : {}),
 			...(advisorStatuses.length > 0
 				? {
 						advisor: {
@@ -503,6 +661,7 @@ export class SessionStatusLine implements StatusLineModel {
 				premiumRequests: stats.premiumRequests,
 				cost: stats.cost,
 				subagentCost: stats.subagentCost,
+				...(aiu ? { aiu } : {}),
 			},
 			usingSubscription: model ? session.modelRegistry.isUsingSubscription(model) : false,
 			...(this.#focusedAgentId === undefined && modes.subagentTreeCost
@@ -512,11 +671,7 @@ export class SessionStatusLine implements StatusLineModel {
 				? { advisorCost: { cost: advisorCost, usingSubscription: session.isAdvisorUsingSubscription() } }
 				: {}),
 			...(model?.cost ? { pricingPeriod: getTimeBasedPricingPeriod(model.cost, now) } : {}),
-			tokensPerSecond: this.#tokensPerSecond(modes),
-			context: { tokens, window: contextWindow, percent },
 			autoCompact,
-			...(boundaries ? { compaction: boundaries } : {}),
-			speculation: session.compactionSpeculation,
 			cwd: getProjectDir(),
 			home: os.homedir(),
 			...vcsFacts,
@@ -541,15 +696,12 @@ export class SessionStatusLine implements StatusLineModel {
 			...(modes.stream ? { stream: modes.stream } : {}),
 			...(modes.recording ? { recording: true } : {}),
 			subagents: subagents.size,
-			jobs,
-			...(jobs > 0 ? withJobGlance(session) : {}),
 			activeMs,
 			...(turnStartedAt !== undefined ? { turnStartedAt } : {}),
 			...(this.#brandEdgeAt !== undefined ? { brandEdgeAt: this.#brandEdgeAt } : {}),
 			...(this.#awaiting() ? { awaitingAnswer: true } : {}),
 			...(this.#focusedAgentId === undefined ? { treePosition: this.#treePosition() } : {}),
 			...(this.#quota() ? { quota: this.#quota() } : {}),
-			...(segments.includes("cache") ? { promptCache: session.getPromptCacheStatus?.(now, tokens) } : {}),
 			hooks: [...this.#hooks()].sort(([a], [b]) => a.localeCompare(b)).map(([, text]) => text),
 		};
 	}
@@ -570,13 +722,15 @@ export class SessionStatusLine implements StatusLineModel {
 
 	/** Git facts for the bar when a git segment shows; starts a refresh when the cached ones are stale. */
 	#vcsFacts(segments: readonly string[]): Pick<StatusFacts, "git" | "worktree" | "activeRepoRoot"> {
+		// Tern reads and shows the checkout itself: nothing to read here.
+		if (this.#checkoutHomed) return {};
 		const wantsGit = segments.includes("git") || segments.includes("pr");
 		const wantsPath = segments.includes("path");
 		if (!statusLineHost.gitEnabled() || (!wantsGit && !wantsPath)) return {};
 		const snapshot = this.#vcs();
 		const cwd = getProjectDir();
-		if (!this.#vcsInFlight && (snapshot?.cwd !== cwd || Date.now() - this.#vcsFetchedAt >= VCS_STATUS_TTL_MS)) {
-			void this.#refreshVcs(cwd, segments.includes("pr"));
+		if (!this.#vcsInFlight && (this.#vcsStale || snapshot?.cwd !== cwd)) {
+			void this.#readVcs(cwd, segments.includes("pr"));
 		}
 		if (!snapshot || snapshot.cwd !== cwd) return {};
 		return {
@@ -586,8 +740,34 @@ export class SessionStatusLine implements StatusLineModel {
 		};
 	}
 
-	async #refreshVcs(cwd: string, wantsPr: boolean): Promise<void> {
+	/** The repository may have changed: read again on the next paint, or owe the read when the last one started too recently. */
+	#markVcsStale(): void {
+		if (Date.now() - this.#vcsReadAt >= VCS_READ_INTERVAL_MS) this.#vcsStale = true;
+		else this.#vcsOwed = true;
+	}
+
+	/** Nothing will mark the facts stale for a while (the run yielded): pay an owed read once the interval has passed. */
+	#settleVcs(): void {
+		if (!this.#vcsOwed || this.#vcsTimer || this.#disposed) return;
+		this.#vcsTimer = setTimeout(
+			() => {
+				this.#vcsTimer = undefined;
+				if (this.#disposed) return;
+				this.#vcsStale = true;
+				this.refresh();
+			},
+			Math.max(0, this.#vcsReadAt + VCS_READ_INTERVAL_MS - Date.now()),
+		);
+		this.#vcsTimer.unref?.();
+	}
+
+	async #readVcs(cwd: string, wantsPr: boolean): Promise<void> {
 		this.#vcsInFlight = true;
+		this.#vcsStale = false;
+		this.#vcsReadAt = Date.now();
+		this.#vcsOwed = false;
+		clearTimeout(this.#vcsTimer);
+		this.#vcsTimer = undefined;
 		const generation = this.#vcsGeneration;
 		let next: VcsSnapshot | undefined;
 		try {
@@ -597,7 +777,6 @@ export class SessionStatusLine implements StatusLineModel {
 			if (!repository) {
 				next = { cwd, branch: null, status: null, pr: null };
 			} else {
-				this.#watch(repository);
 				const git = repository.asGit();
 				const headBranch = (head: ReturnType<NonNullable<typeof git>["headSync"]> | undefined) =>
 					head?.kind === "ref" ? (head.branch ?? head.refName ?? "HEAD") : head ? "detached" : null;
@@ -626,8 +805,10 @@ export class SessionStatusLine implements StatusLineModel {
 		} finally {
 			this.#vcsInFlight = false;
 		}
-		if (this.#disposed || generation !== this.#vcsGeneration) return;
-		this.#vcsFetchedAt = Date.now();
+		if (this.#disposed) return;
+		// Invalidated while this read ran (a turn ended, the cwd moved): read again.
+		if (this.#vcsStale) this.refresh();
+		if (generation !== this.#vcsGeneration) return;
 		const previous = this.#vcs.peek();
 		if (JSON.stringify(previous) !== JSON.stringify(next)) this.#vcs.set(next);
 		const pr = next.pr ?? undefined;
@@ -635,10 +816,6 @@ export class SessionStatusLine implements StatusLineModel {
 			this.#lastPr = pr;
 			this.#onPullRequest?.(pr);
 		}
-		// A watcher-less repository is polled through the TTL: wake once it expires.
-		setTimeout(() => {
-			if (!this.#disposed) this.refresh();
-		}, VCS_STATUS_TTL_MS).unref?.();
 	}
 
 	/** The repository's default branch (`main` until resolved), cached per directory. */
@@ -673,27 +850,6 @@ export class SessionStatusLine implements StatusLineModel {
 		} catch {
 			return null;
 		}
-	}
-
-	#watch(repository: NonNullable<ReturnType<typeof vcs.repo>>): void {
-		const root = repository.root();
-		if (this.#watchedRoot === root) return;
-		this.#retireWatcher();
-		this.#watchedRoot = root;
-		try {
-			this.#unwatchVcs = vcs.watch(repository, () => {
-				this.#vcsFetchedAt = 0;
-				this.refresh();
-			});
-		} catch {
-			this.#unwatchVcs = undefined;
-		}
-	}
-
-	#retireWatcher(): void {
-		this.#unwatchVcs?.();
-		this.#unwatchVcs = undefined;
-		this.#watchedRoot = undefined;
 	}
 
 	// ─── Usage quota ────────────────────────────────────────────────────────
@@ -765,10 +921,4 @@ export class SessionStatusLine implements StatusLineModel {
 			release();
 		}
 	}
-}
-
-/** The freshest live job widget among the running jobs, which the jobs badge glances at. */
-function withJobGlance(session: StatusSession): Pick<StatusFacts, "jobGlance"> {
-	const view = latestJobWidget(session.getRunningJobWidgets?.() ?? [])?.view;
-	return view ? { jobGlance: view } : {};
 }

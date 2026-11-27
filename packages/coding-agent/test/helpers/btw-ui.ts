@@ -104,6 +104,10 @@ export interface NoteView {
 	readonly folded: boolean;
 	/** The ids of its right-click entries. */
 	readonly menu: string[];
+	/** Its `outside` action: what Tern sends on a press outside it. */
+	readonly outside: string | undefined;
+	/** The roles of its parts whose click sends `act`, in tree order. */
+	clicks(act: string): (string | undefined)[];
 	press(act: BtwNoteAction): void;
 	text(width?: number): string;
 }
@@ -137,6 +141,18 @@ function noteView(block: TranscriptBlock): NoteView {
 		get menu() {
 			const menu = propsOf<{ actions?: { menu?: readonly TspMenuEntry[] } }>(current()).actions?.menu ?? [];
 			return menu.flatMap(entry => (typeof entry === "object" && "id" in entry ? [entry.id] : []));
+		},
+		get outside() {
+			return propsOf<{ actions?: { outside?: string } }>(current()).actions?.outside;
+		},
+		clicks(act) {
+			const roles: (string | undefined)[] = [];
+			const walk = (node: UiNode): void => {
+				if (propsOf<{ actions?: { click?: string } }>(node).actions?.click === act) roles.push(roleOf(node));
+				for (const child of node.children()) walk(child);
+			};
+			walk(current());
+			return roles;
 		},
 		press(act) {
 			current().handlers.onAction?.(act, { type: "action", key: "", act, mods: [] } as never);

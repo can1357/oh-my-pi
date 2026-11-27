@@ -32,6 +32,7 @@ import type { PlanModeState } from "../plan-mode/state";
 import type { CallContext, SpotlightSession } from "../spotlight/types";
 import type { AgentLifecycleApi } from "../registry/agent-lifecycle";
 import type { AgentRegistryApi } from "../registry/agent-registry";
+import type { AgentSessionHandle } from "../session/agent-session-handle";
 import type { ArtifactManagerApi } from "../session/artifacts";
 import type { PromptCacheEntry } from "../session/cache-warmer";
 import type { AsyncNotifyEntry, AsyncNotifySource } from "../session/async-notify";
@@ -61,6 +62,7 @@ import { DebugTool } from "./debug";
 import { EvalTool } from "./eval";
 import { resolveEvalBackends } from "./eval-backends";
 import { GithubTool } from "./gh";
+import { GitlabTool } from "./gl";
 import { GlobTool } from "./glob";
 import { GrepTool } from "./grep";
 import { isIrcEnabled } from "../irc/messaging";
@@ -91,6 +93,7 @@ import {
 	cfgCheckpointEnabled,
 	cfgDebugEnabled,
 	cfgGithubEnabled,
+	cfgGitlabEnabled,
 	cfgGlobEnabled,
 	cfgGrepEnabled,
 	cfgLaunchEnabled,
@@ -137,6 +140,7 @@ export * from "./eval-backends";
 export * from "./file-mutation-queue";
 export * from "./file-write-fallback";
 export * from "./gh";
+export * from "./gl";
 export * from "./glob";
 export * from "./grep";
 export * from "./jfind";
@@ -272,6 +276,14 @@ export interface ToolSession {
 	 * rebuilds (mid-session `/skillful` toggles ride the prompt, not the prefix).
 	 */
 	skillHintVisible?: boolean;
+	/**
+	 * Frozen `find` availability for the `grep`/`glob`/`bash` hints: snapshot
+	 * taken at the last system-prompt rebuild, so withdrawing `find` mid-session
+	 * (a judge rejection under `find.enabled: auto`) leaves the tool prefix
+	 * byte-stable. Undefined outside a managed session; tools then read
+	 * {@link isToolActive}.
+	 */
+	findHintVisible?: boolean;
 	/** Rediscover live session skills after a tool mutates their backing files. */
 	refreshSkills?: () => Promise<void>;
 	/** The session as the holder `skill://` rediscovers through when a skill's files are gone. */
@@ -367,7 +379,12 @@ export interface ToolSession {
 	 * cost ledger (`appendModelUsage`) without changing advisor-local IDs.
 	 */
 	sessionManager?: Pick<SessionManager, "appendCustomEntry" | "ensureOnDisk" | "flush" | "getBranch" | "getEntries"> &
-		Partial<Pick<SessionManager, "getSessionId" | "getLeafId" | "appendModelUsage" | "getArtifactsDir">>;
+		Partial<
+			Pick<
+				SessionManager,
+				"getSessionId" | "getLeafId" | "appendModelUsage" | "getArtifactsDir" | "branchNavigationRevision"
+			>
+		>;
 	/**
 	 * Session-owned raw SSE capture, shared with the `/debug` report. Optional:
 	 * helper and standalone contexts without one simply forgo `/debug` capture.
@@ -395,6 +412,8 @@ export interface ToolSession {
 	getMnemopiSessionState?: () => MnemopiSessionState | undefined;
 	/** Agent identity used for IRC routing. Returns the registry id (e.g. "Main", "AuthLoader"). */
 	getAgentId?: () => string | null;
+	/** Owning session identity for operations that change a live agent's state. */
+	getAgentSession?: () => AgentSessionHandle | undefined;
 	/** Parent cache identity for sibling sharing; the child stores it independently of its initial model, and each request consumes it only when its own model opts in. */
 	getPromptCacheKey?: () => string | undefined;
 	/** Prompt cache entry the session's latest main-loop request wrote, while still current (see `AgentSession.promptCacheEntry`). */
@@ -627,6 +646,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	debug: DebugTool.createIf,
 	eval: s => new EvalTool(s),
 	github: GithubTool.createIf,
+	gitlab: GitlabTool.createIf,
 	glob: s => new GlobTool(s, { rootPathAlias: true }),
 	grep: s => new GrepTool(s),
 	find: s => new FindTool(s),
@@ -816,6 +836,7 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 		if (name === "grep") return cfgGrepEnabled.get(session.settings);
 		if (name === "find") return isFindEnabled(session);
 		if (name === "github") return cfgGithubEnabled.get(session.settings);
+		if (name === "gitlab") return cfgGitlabEnabled.get(session.settings);
 		if (name === "ast_grep") return cfgAstGrepEnabled.get(session.settings);
 		if (name === "ast_edit") return cfgAstEditEnabled.get(session.settings);
 		if (name === "web_search") return cfgWebSearchEnabled.get(session.settings);
@@ -1008,3 +1029,11 @@ export type {
 	GhRunWatchFailedLogDetails,
 	GhRunWatchViewDetails,
 } from "./details/github";
+
+export type {
+	GlToolDetails,
+	GlMrCheckoutSummary,
+	GlPipelineWatchJobDetails,
+	GlPipelineWatchFailedLogDetails,
+	GlPipelineWatchViewDetails,
+} from "./details/gitlab";

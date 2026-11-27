@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import type { AgentHubRemote } from "./view-model/overlays/agent-hub";
 import type { AgentRecordLike } from "../registry/agent-hub-types";
-import { type AgentCostSnapshot, aggregateCost } from "./view-model/overlays/agent-hub-projection";
+import { type AgentCostSnapshot, type AgentTreeSpend, aggregateCost } from "./view-model/overlays/agent-hub-projection";
 import type { AgentTranscriptSource } from "./view-model/overlays/agent-transcript-viewer";
 import type { ObservableSession, SessionObserverRegistry } from "../task/session-observer-registry";
 import { AgentActivityIndex } from "../activity";
@@ -10,7 +10,7 @@ import type { Settings } from "../config/settings";
 import { IrcBus, type IrcBusApi } from "../irc/bus";
 import { type AgentLifecycleApi, AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "../registry/agent-registry";
-import { registerPersistedSubagents, sessionFileBelongsToRoot } from "../registry/persisted-agents";
+import { isSessionTreeRef, registerPersistedSubagents, sessionFileBelongsToRoot } from "../registry/persisted-agents";
 import { normalizeAssistantUsage, parseSessionEntries } from "../session/session-loader";
 import type { AgentHubProps } from "../ui/overlays/pickers/agent-hub";
 
@@ -52,7 +52,7 @@ export function createAgentHubRuntime(
 		// transcript paths never sit under the guest's replica session.
 		inSession:
 			rootSessionFile && !options.remote
-				? ref => !ref.sessionFile || sessionFileBelongsToRoot(ref.sessionFile, rootSessionFile) || copied.has(ref)
+				? ref => isSessionTreeRef(ref, rootSessionFile) || copied.has(ref)
 				: undefined,
 		lifecycle: () => options.lifecycle ?? AgentLifecycleManager.global(),
 		irc: options.irc ?? IrcBus.global(),
@@ -69,18 +69,19 @@ export function createAgentHubRuntime(
 }
 
 /**
- * Agent Hub cost total for the main session's subagent tree (descendants
- * included). Excludes the main session's own advisors, which the status line
- * bills separately. Refs with a transcript count only inside `rootSessionFile`'s
- * artifacts tree (the process-global registry keeps earlier sessions' agents);
- * file-less refs count only while this session's observer tracks them.
+ * Agent Hub spend (dollars and AI credits) for the main session's subagent tree
+ * (descendants included). Excludes the main session's own advisors, which the
+ * status line bills separately. Refs with a transcript count only inside
+ * `rootSessionFile`'s artifacts tree (the process-global registry keeps earlier
+ * sessions' agents); file-less refs count only while this session's observer
+ * tracks them, so without `observers` only transcript-backed refs count.
  */
 export function sumSubagentTreeCost(args: {
 	refs: readonly AgentRef[];
-	observers: SessionObserverRegistry;
+	observers?: SessionObserverRegistry;
 	rootSessionFile: string | undefined;
 	sessionCosts: WeakMap<object, AgentCostSnapshot>;
-}): number {
+}): AgentTreeSpend {
 	const { observers, rootSessionFile, sessionCosts } = args;
 	const rows: AgentRef[] = [];
 	const observedById = new Map<string, ObservableSession>();
@@ -92,7 +93,7 @@ export function sumSubagentTreeCost(args: {
 	for (const ref of args.refs) {
 		if (mainIds.has(ref.id)) continue;
 		if (ref.kind === "advisor" && mainIds.has(ref.parentId ?? MAIN_AGENT_ID)) continue;
-		const observed = observers.getSession(ref.id);
+		const observed = observers?.getSession(ref.id);
 		const inTree = ref.sessionFile
 			? rootSessionFile !== undefined && sessionFileBelongsToRoot(ref.sessionFile, rootSessionFile)
 			: observed !== undefined;

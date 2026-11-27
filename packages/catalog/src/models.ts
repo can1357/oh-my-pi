@@ -24,6 +24,12 @@ import type {
  * For runtime-aware resolution, use `createModelManager()` / `resolveProviderModels()`.
  */
 const catalog = openModelCatalog(modelsData);
+let bundledCatalogHash: string | undefined;
+
+/** Content identity of the generated catalog, independent of which providers have been decoded. */
+export function getBundledCatalogHash(): string {
+	return (bundledCatalogHash ??= Bun.hash(JSON.stringify(modelsData)).toString(36));
+}
 const bundledProviders: readonly KnownProvider[] = Object.freeze(getCatalogProviders(catalog) as KnownProvider[]);
 const bundledProviderSet = new Set<string>(bundledProviders);
 const modelRegistry = new Map<string, Map<string, Model<Api>>>();
@@ -71,6 +77,28 @@ export function getBundledModels(provider: GeneratedProvider): Model<Api>[] {
 	const models = getProviderModels(provider);
 	return models ? (Array.from(models.values()) as Model<Api>[]) : [];
 }
+
+const bundledSlices = new Map<string, readonly Model<Api>[]>();
+const sharedSlices = new WeakSet<object>();
+const emptySlice: readonly Model<Api>[] = Object.freeze([]);
+
+/** Stable read-only view for consumers that reuse a bundled provider's content identity. */
+export function getBundledModelSlice(provider: GeneratedProvider): readonly Model<Api>[] {
+	const cached = bundledSlices.get(provider);
+	if (cached) return cached;
+	const models = getProviderModels(provider);
+	if (!models) return emptySlice;
+	const slice = Object.freeze(Array.from(models.values()));
+	bundledSlices.set(provider, slice);
+	sharedSlices.add(slice);
+	return slice;
+}
+
+/** Only catalog-owned slices have immutable membership and shared read-only rows. */
+export function isBundledModelSlice(models: readonly unknown[]): boolean {
+	return sharedSlices.has(models);
+}
+
 /** Resolve display semantics without mistaking an absent rate card for a free model. */
 export function getModelPricingStatus(model: Pick<Model<Api>, "cost" | "pricingStatus">): ModelPricingStatus {
 	const cost = getEffectiveTokenCost(model.cost);
@@ -93,11 +121,14 @@ export interface FactoryDroidCreditRate {
  */
 export function getFactoryDroidCreditRate(
 	model: Pick<Model, "factoryDroidCredits" | "factoryDroidCreditCards">,
-	timestamp = Date.now(),
+	at?: number,
 ): FactoryDroidCreditRate | undefined {
 	const base = model.factoryDroidCredits;
 	if (base === undefined) return undefined;
 	const cards = model.factoryDroidCreditCards ?? [];
+	// The clock only matters with dated cards: rows without any skip reading it.
+	if (cards.length === 0) return { rate: base };
+	const timestamp = at ?? Date.now();
 	const rate = dueDatedCard(cards, timestamp)?.input ?? base;
 	let next: FactoryDroidCreditRate["next"];
 	for (const card of cards) {
@@ -116,8 +147,9 @@ export function getFactoryDroidCreditRate(
  * when the row was built while bundles, caches, and long sessions outlive it.
  * Applies no long-context tier or peak/off-peak multiplier.
  */
-export function getEffectiveTokenCost(cost: ModelCost, timestamp = Date.now()): TokenCost {
-	return resolveTokenCost(cost, 0, timestamp);
+export function getEffectiveTokenCost(cost: ModelCost, timestamp?: number): TokenCost {
+	// Only dated rate cards depend on the time: rows without any skip reading the clock.
+	return resolveTokenCost(cost, 0, cost.timeBased?.effectiveRates?.length ? (timestamp ?? Date.now()) : timestamp);
 }
 
 function resolveTokenCost(cost: ModelCost, promptInputTokens: number, timestamp: number | undefined): TokenCost {

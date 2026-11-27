@@ -28,6 +28,7 @@ import type { Api, Effort, KnownProvider, Model, ModelSpec } from "@oh-my-pi/pi-
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { roleDefaultModels } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { resolveBareVariantSelector, resolveVariantSelector } from "@oh-my-pi/pi-catalog/compat/collapse";
+import { cascadeRulesRevision, catalogAxisProviders } from "@oh-my-pi/pi-catalog/compat/cascade";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
 import { collapseVariantId, stripThinkingVariantSuffix } from "@oh-my-pi/pi-catalog/compat/taxonomy";
@@ -302,7 +303,7 @@ const BEDROCK_INFERENCE_PROFILE_ARN =
 	/^arn:aws(?:-[a-z]+)*:bedrock:[a-z0-9-]+:[0-9]*:(?:application-inference-profile|inference-profile)\/[a-z0-9][a-z0-9._:-]*$/i;
 
 function hasBedrockInferenceProfileThinkingSuffix(modelId: string): boolean {
-	const { base, level } = splitThinkingSuffix(modelId);
+	const { base, level } = splitThinkingSuffix(modelId, -1, MAX_THINKING_SUFFIX_OPTIONS);
 	return level !== undefined && BEDROCK_INFERENCE_PROFILE_ARN.test(base.trim());
 }
 
@@ -393,6 +394,8 @@ export function scopeAllowList(scoped: ReadonlyArray<{ model: Model<Api> }>): Mo
 	return markAllowList(scoped.map(entry => entry.model));
 }
 
+const kRevisionSuffixIndex = Symbol("model-resolver.revisionSuffixIndex");
+const kBareIdIndex = Symbol("model-resolver.bareIdIndex");
 const kProviderModelIndex = Symbol("model-resolver.providerIndex");
 const kProviderExactIndex = Symbol("model-resolver.providerExactIndex");
 const kProviderSpellingIndex = Symbol("model-resolver.providerSpellingIndex");
@@ -400,6 +403,12 @@ type ModelsWithProviderIndex = readonly Model<Api>[] & {
 	[kProviderModelIndex]?: Map<string, Model<Api> | null>;
 	[kProviderExactIndex]?: Map<string, Model<Api> | null>;
 	[kProviderSpellingIndex]?: Map<string, Model<Api> | null>;
+	[kBareIdIndex]?: Map<string, Model<Api>[]>;
+	[kRevisionSuffixIndex]?: {
+		revision: number;
+		candidates: Map<string, Model<Api>[]>;
+		indexes: Map<string, Map<string, Model<Api>>>;
+	};
 };
 
 /**
@@ -500,6 +509,57 @@ function getProviderWireRouteIndex(availableModels: readonly Model<Api>[]): Map<
 	return index;
 }
 
+/** Index only rows whose policy provider could assign a suffix (including custom providerType aliases). */
+function revisionSuffixMatch(pool: ModelsWithProviderIndex, provider: string, id: string): Model<Api> | undefined {
+	const revision = cascadeRulesRevision();
+	let cache = pool[kRevisionSuffixIndex];
+	if (cache?.revision !== revision) {
+		const scope = catalogAxisProviders("selectorRevisionSuffix");
+		const candidates = new Map<string, Model<Api>[]>();
+		for (const model of pool) {
+			if (scope && !scope.has(model.providerType ?? model.provider)) continue;
+			const key = model.provider.toLowerCase();
+			const models = candidates.get(key);
+			if (models) models.push(model);
+			else candidates.set(key, [model]);
+		}
+		cache = pool[kRevisionSuffixIndex] = { revision, candidates, indexes: new Map() };
+	}
+	let index = cache.indexes.get(provider);
+	if (!index) {
+		const models = cache.candidates.get(provider);
+		if (!models) return undefined;
+		index = new Map();
+		for (const model of models) {
+			const suffix = resolveCatalogPolicy(model).selectorRevisionSuffix;
+			if (typeof suffix !== "string" || !suffix) continue;
+			const modelId = model.id.toLowerCase();
+			const lowerSuffix = suffix.toLowerCase();
+			if (!modelId.endsWith(lowerSuffix)) continue;
+			const base = modelId.slice(0, -lowerSuffix.length);
+			if (!index.has(base)) index.set(base, model); // first candidate wins, even on a case collision
+		}
+		cache.indexes.set(provider, index);
+		cache.candidates.delete(provider);
+	}
+	return index.get(id);
+}
+
+/** Partition resolver candidates without changing the order of duplicates in any bucket. */
+export function groupModelCandidates(
+	models: readonly Model<Api>[],
+	field: "id" | "provider",
+): Map<string, Model<Api>[]> {
+	const groups = new Map<string, Model<Api>[]>();
+	for (const model of models) {
+		const key = model[field].toLowerCase();
+		const bucket = groups.get(key);
+		if (bucket) bucket.push(model);
+		else groups.set(key, [model]);
+	}
+	return groups;
+}
+
 export function resolveProviderModelReference(
 	provider: string,
 	modelId: string,
@@ -569,11 +629,7 @@ export function resolveProviderModelReference(
 	// Revision-pinned ids (Vertex `claude-opus-4-8@default`) are also named without
 	// the revision the catalog declares for them (`selector-revision-suffix`).
 	if (!normalizedModelId.includes("@")) {
-		const revisioned = availableModels.find(model => {
-			if (model.provider.toLowerCase() !== normalizedProvider) return false;
-			const suffix = resolveCatalogPolicy(model).selectorRevisionSuffix;
-			return typeof suffix === "string" && model.id.toLowerCase() === `${normalizedModelId}${suffix.toLowerCase()}`;
-		});
+		const revisioned = revisionSuffixMatch(availableModels, normalizedProvider, normalizedModelId);
 		if (revisioned) return revisioned;
 	}
 
@@ -868,8 +924,10 @@ function matchModel(
 	// whose named provider carries the id stays locked to that provider when its
 	// only exact-id matches live on a different provider (isProviderLockedCrossMatch).
 	const lowerPattern = modelPattern.toLowerCase();
-	const exactMatches = availableModels.filter(m => m.id.toLowerCase() === lowerPattern);
-	if (exactMatches.length > 0) {
+	const pool = availableModels as ModelsWithProviderIndex;
+	const byId = (pool[kBareIdIndex] ??= groupModelCandidates(pool, "id"));
+	const exactMatches = byId.get(lowerPattern);
+	if (exactMatches) {
 		const unlockedMatches = exactMatches.filter(m => !isProviderLockedCrossMatch(modelPattern, m));
 		if (unlockedMatches.length > 0) {
 			return pickPreferredModel(unlockedMatches, context);
@@ -890,8 +948,8 @@ function matchModel(
 	const bareAliasTargetId = bareAlias?.id ?? stripThinkingVariantSuffix(modelPattern);
 	if (bareAliasTargetId) {
 		const lowerAliasTarget = bareAliasTargetId.toLowerCase();
-		const aliasMatches = availableModels.filter(m => m.id.toLowerCase() === lowerAliasTarget);
-		if (aliasMatches.length > 0) {
+		const aliasMatches = byId.get(lowerAliasTarget);
+		if (aliasMatches) {
 			const preferred = bareAlias ? aliasMatches.filter(m => bareAlias.providers.includes(m.provider)) : [];
 			return pickPreferredModel(preferred.length > 0 ? preferred : aliasMatches, context);
 		}
@@ -2425,15 +2483,32 @@ export function resolveCliModel(options: CliModelOptions): ResolveCliModelResult
 	// can resolve directly from that single provider's chat catalog without
 	// materializing the full ~5k-model snapshot via `getAll()` / `getAvailable()`.
 	// Any miss, ambiguity, or non-exact selector falls through to the full path.
+	let available = preferredModels;
 	if (modelRegistry.getProviderModels) {
 		const fastResult = tryResolveExplicitProviderCliModel(cliProvider, cliModel, modelRegistry, disabled);
 		if (fastResult) return fastResult;
+
+		const alias = cliModel.trim();
+		const role = !cliProvider && alias !== DEFAULT_MODEL_ROLE_ALIAS && getModelRoleAlias(alias, settings);
+		const pattern = role && settings?.getModelRole(role)?.trim();
+		if (pattern && !/[,*?[\]]/.test(pattern) && modelRoleAliasPrefixLength(pattern) === undefined) {
+			const target = tryResolveExplicitProviderCliModel(undefined, pattern, modelRegistry, disabled)?.model;
+			if (target) {
+				// An authenticated flat id named "@role" or "pi/role" beats the
+				// role. Resolve in the preferred pool first, preserving that rule,
+				// role metadata, routing and model-specific thinking normalization.
+				available ??= modelRegistry.getAvailable();
+				const enabled = disabled.size ? available.filter(model => !disabled.has(model.provider)) : available;
+				const result = resolveCliModelInScope({ ...options, cliModel }, { all: enabled, available: enabled });
+				if (result.model) return result;
+			}
+		}
 	}
 
 	const scoped = { ...options, cliModel };
 	const scope: CliModelScope = {
 		all: modelRegistry.getAll(),
-		available: preferredModels ?? modelRegistry.getAvailable(),
+		available: available ?? modelRegistry.getAvailable(),
 	};
 	if (disabled.size === 0) return resolveCliModelInScope(scoped, scope);
 

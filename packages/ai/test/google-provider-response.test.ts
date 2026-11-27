@@ -1,6 +1,5 @@
 import { describe, expect, it } from "bun:test";
 import { streamGoogle } from "@oh-my-pi/pi-ai/providers/google";
-import { streamGoogleGeminiCli } from "@oh-my-pi/pi-ai/providers/google-gemini-cli";
 import { streamGoogleVertex } from "@oh-my-pi/pi-ai/providers/google-vertex";
 import type {
 	AssistantMessage,
@@ -39,21 +38,6 @@ const vertexModel: Model<"google-vertex"> = buildModel({
 	contextWindow: 200_000,
 	maxTokens: 32_000,
 });
-
-const cliModel: Model<"google-gemini-cli"> = buildModel({
-	id: "gemini-3-flash",
-	name: "Gemini 3 Flash (CLI)",
-	api: "google-gemini-cli",
-	provider: "google-gemini-cli",
-	baseUrl: "https://example.test",
-	reasoning: false,
-	input: ["text"],
-	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-	contextWindow: 200_000,
-	maxTokens: 32_000,
-});
-
-const cliAuth = JSON.stringify({ token: "token", projectId: "proj-123" });
 
 interface BodyState {
 	/** True once the provider, not the runtime's response prefetch, has read the answer bytes. */
@@ -273,85 +257,4 @@ describe("direct Google response observers", () => {
 		},
 		60_000,
 	);
-});
-
-describe("Cloud Code Assist response observers", () => {
-	it("tells the Gemini CLI observer about headers before the answer is read, and waits for that observer", async () => {
-		const state: BodyState = { delivered: false };
-		const { held, result } = await holdFirstNotification(state, onResponse =>
-			streamGoogleGeminiCli(cliModel, context, {
-				apiKey: cliAuth,
-				fetch: queue([trackedSse({ response: chunk("hello", "STOP") }, "cli-1", state)]),
-				onResponse,
-			}).result(),
-		);
-
-		expect(result.stopReason).toBe("stop");
-		expect(assistantText(result)).toBe("hello");
-		expect(state.delivered).toBe(true);
-		expect(held.modelId).toBe(cliModel.id);
-		expect(held.provider).toBe("google-gemini-cli");
-		expect(held.response.status).toBe(200);
-		expect(held.response.requestId).toBe("cli-1");
-		expect(held.response.headers["x-goog-request-id"]).toBe("cli-1");
-	});
-
-	it("tells the Gemini CLI observer about a resumed segment and skips a rejected resume", async () => {
-		const first: BodyState = { delivered: false };
-		const resume: BodyState = { delivered: false };
-		const seen: Array<{ status: number; requestId: string | null | undefined; delivered: boolean }> = [];
-		const entered = Promise.withResolvers<void>();
-		const gate = Promise.withResolvers<void>();
-		const resultPromise = streamGoogleGeminiCli(cliModel, context, {
-			apiKey: cliAuth,
-			maxRetryDelayMs: 0,
-			fetch: queue([
-				trackedSse({ response: chunk("Hello", "CONTINUATION", "seg-1") }, "cli-1", first),
-				new Response("busy", { status: 503, headers: { "x-goog-request-id": "cli-rejected" } }),
-				trackedSse({ response: chunk(" world", "STOP") }, "cli-2", resume, "request-id"),
-			]),
-			onResponse: async response => {
-				const body = response.requestId === "cli-2" ? resume : first;
-				seen.push({ status: response.status, requestId: response.requestId, delivered: body.delivered });
-				if (response.requestId !== "cli-2") return;
-				entered.resolve();
-				await gate.promise;
-			},
-		}).result();
-
-		try {
-			const winner = await Promise.race([
-				entered.promise.then(() => "notified" as const),
-				resultPromise.then(() => "done" as const),
-			]);
-			expect(winner).toBe("notified");
-			let finished = false;
-			void resultPromise.then(
-				() => {
-					finished = true;
-				},
-				() => {
-					finished = true;
-				},
-			);
-			for (let i = 0; i < 100; i++) await Promise.resolve();
-			expect(finished).toBe(false);
-			expect(resume.delivered).toBe(false);
-			gate.resolve();
-			const result = await resultPromise;
-
-			expect(result.stopReason).toBe("stop");
-			expect(assistantText(result)).toBe("Hello world");
-			expect(first.delivered).toBe(true);
-			expect(resume.delivered).toBe(true);
-			expect(seen).toEqual([
-				{ status: 200, requestId: "cli-1", delivered: false },
-				{ status: 200, requestId: "cli-2", delivered: false },
-			]);
-		} finally {
-			gate.resolve();
-			// Preserve an assertion or stream error while still leaving no pending work.
-			await resultPromise.catch(() => undefined);
-		}
-	});
 });

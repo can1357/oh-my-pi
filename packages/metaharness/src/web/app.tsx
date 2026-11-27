@@ -17,7 +17,7 @@ import { createRoot } from "react-dom/client";
 type RunRole = "baseline" | "variant" | "";
 
 interface RunRow {
-	benchmark: "harbor" | "edit" | "snapcompact";
+	benchmark: "harbor" | "edit" | "snapcompact" | "scope";
 	jobName: string;
 	dataset: string;
 	agent: string;
@@ -1902,6 +1902,7 @@ function LaunchForm({ onDone }: { onDone: () => void }) {
 				<option value="harbor">Harbor</option>
 				<option value="edit">TypeScript edit</option>
 				<option value="snapcompact">SnapCompact</option>
+				<option value="scope">Scope &amp; speed</option>
 			</select>
 			<input name="model" placeholder="model (required)" required className={input} />
 			<input name="dataset" placeholder="dataset (terminal-bench@2.0)" className={input} />

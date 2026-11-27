@@ -490,7 +490,8 @@ describe("countMessage replayed thinking", () => {
 
 	const opus = reader("anthropic", "claude-opus-5-5");
 	const bedrockOpus = reader("amazon-bedrock", "global.anthropic.claude-opus-5-5");
-	const openRouterOpus = reader("openrouter", "~anthropic/claude-opus-latest");
+	// OpenRouter's Muse Spark route filters reasoning history and rejects a synthetic item.
+	const openRouterMuse = reader("openrouter", "meta/muse-spark-1.3");
 
 	test.each([
 		["on the Claude API", opus, opus, VISIBLE, "toolUse"],
@@ -528,10 +529,10 @@ describe("countMessage replayed thinking", () => {
 	});
 
 	test("charges nothing for a filtered reader's own thinking, which its request never sends", () => {
-		// OpenRouter strips the turn's reasoning items from the request and its
+		// The route strips the turn's reasoning items from the request and its
 		// encoder drops the same-model thinking block outright, so neither the
 		// signature nor the thinking text is part of the reading model's input.
-		expect(new Tokenizer(openRouterOpus).countMessage(signedTurn(openRouterOpus, VISIBLE, SIGNATURE))).toBe(
+		expect(new Tokenizer(openRouterMuse).countMessage(signedTurn(openRouterMuse, VISIBLE, SIGNATURE))).toBe(
 			DONE_TOKENS,
 		);
 	});
@@ -643,7 +644,6 @@ describe("countMessage replayed thinking", () => {
 		["another Gemini model's turn to Gemini", gemini, reader("google", "gemini-3-flash-preview"), false],
 		["a Claude turn to Factory Gemini", factoryGemini, reader("anthropic", "claude-opus-5-5"), false],
 		["Factory Gemini's own turn", factoryGemini, { ...factoryGemini, api: "google-generative-ai" }, true],
-		["a Gemini CLI turn to Factory Gemini", factoryGemini, { ...gemini, api: "google-gemini-cli" }, true],
 		["another GLM's turn to a compatible Anthropic endpoint", glm, getBundledModel("zai", "glm-5.2") as Model, true],
 		[
 			"a MiniMax turn to a compatible Anthropic endpoint",
@@ -825,11 +825,13 @@ describe("replayed Responses reasoning", () => {
 	});
 
 	test("prices the thinking a filtered route rebuilds into a synthetic item for a tool-call turn", async () => {
-		// 42 OpenRouter Anthropic routes filter reasoning history out of the
-		// request, and all of them require reasoning content on tool calls while
-		// accepting a synthetic item. Their encoder therefore rebuilds the dropped
-		// reasoning item out of the turn's own thinking text.
-		const openRouter = bundledModel("openrouter", "anthropic/claude-sonnet-4.5");
+		// A route that filters reasoning history out of the request, requires
+		// reasoning content on tool calls, and accepts a synthetic item: its
+		// encoder rebuilds the dropped reasoning item out of the turn's own
+		// thinking text. OpenRouter's Claude routes require and accept it; the
+		// filter is set here since they now replay their reasoning natively.
+		const claude = bundledModel<"openrouter">("openrouter", "anthropic/claude-sonnet-4.5");
+		const openRouter = { ...claude, compat: { ...claude.compat, filterReasoningHistory: true } };
 		const thinkingText = "Read the guard, patch the branch, then rerun the suite. ".repeat(40).trim();
 		const toolTurn = responsesTurn(
 			openRouter,

@@ -12,6 +12,7 @@ import type { KeyId } from "../config/keybindings/key-id";
 import type { KeybindingsManager } from "../config/keybindings/keybindings";
 import type { SpaceHoldHandler } from "../config/keybindings/space-hold";
 import type { Settings } from "../config/settings";
+import type { AiuTotals } from "../session/aiu-billing";
 import type {
 	AutocompleteProviderFactory,
 	ExtensionCustomFactory,
@@ -38,6 +39,7 @@ import type { AgentSession } from "../session/agent-session";
 import type { AgentViewSession } from "../session/agent-session-handle";
 import type { DroppedPrompt } from "../session/agent-session-types";
 import type { CompactMode } from "../session/compact-modes";
+import type { ToolActivityMode } from "./settings";
 import type { ForeignSessionSource } from "../session/foreign-session-store";
 import type { HistoryStorage } from "../session/history-storage";
 import type { SessionContext } from "../session/session-context";
@@ -76,7 +78,7 @@ import type {
 } from "../ui/shell";
 import type { StatusFacts, StatusLineSettings } from "../ui/status/facts";
 import type { ExecRun } from "../ui/transcript/exec-run";
-import type { AssistantMessageModel } from "../ui/transcript/messages/assistant-message";
+import type { AssistantMessageModel, ToolResultMedia } from "../ui/transcript/messages/assistant-message";
 import type { ReadGroup } from "../ui/transcript/read-group";
 import type { ToolCall, ToolCallResult } from "../ui/transcript/tool-block";
 import type { EventBus } from "../utils/event-bus";
@@ -113,6 +115,8 @@ export type YieldCompaction = ConversationPosition & {
 
 export type SubmittedUserInput = {
 	text: string;
+	/** Submission time shared by the optimistic prompt bubble and its persisted turn. */
+	submittedAt?: number;
 	images?: ImageContent[];
 	imageLinks?: (string | undefined)[];
 	customType?: string;
@@ -180,11 +184,13 @@ export interface StatusLineView {
 
 /**
  * The status line's data: one {@link StatusFacts} snapshot the composer chrome and the footer
- * draw, recomputed from the viewed session, settings, git and quota watchers.
+ * draw, recomputed from the viewed session, settings, git and quota reads.
  */
 export interface StatusLineModel extends StatusLineView {
 	/** Re-read session-derived facts now (usage, model, context, modes). Replaces `statusLine.invalidate()`. */
 	refresh(): void;
+	/** Re-read the git/jj facts too: a user `!`/`$` command may have moved HEAD or edited the tree. */
+	refreshVcs(): void;
 	/** Restart the active-processing clock (new session, `/new`). */
 	resetActiveTime(): void;
 	/** A turn started (the active clock runs). */
@@ -252,8 +258,10 @@ export interface AssistantView {
 	readonly finalized: Signal<boolean>;
 	/** Session-resolved destinations of the reply's relative prose links. */
 	readonly linkTargets: Signal<ReadonlyMap<string, string>>;
-	/** Images grouped reads produced, by tool call id. */
-	readonly toolResultImages: Signal<ReadonlyMap<string, readonly ImageContent[]>>;
+	/** Media grouped reads produced, by tool call id. */
+	readonly toolResultMedia: Signal<ReadonlyMap<string, ToolResultMedia>>;
+	/** Record the latest media produced by a grouped read. */
+	setToolResultMedia(toolCallId: string, media: ToolResultMedia): void;
 	readonly cacheInvalidation: Signal<CacheInvalidation | undefined>;
 	readonly servedModelMismatch: Signal<ServedModelMismatch | undefined>;
 	readonly turnUsage: Signal<TurnUsageSummary | undefined>;
@@ -297,6 +305,8 @@ export interface ToolCallSpec {
 	readonly id: string;
 	/** Directory the call's relative paths resolve against. */
 	readonly cwd: string;
+	/** Wall-clock ms the model made the call (a replayed call's message time); defaults to now. */
+	readonly timestamp?: number;
 }
 
 /**
@@ -311,8 +321,8 @@ export interface PendingTool {
 	readonly call?: ToolCall;
 	readonly group?: ReadGroup;
 	readonly reply?: AssistantView;
-	/** Streamed (or final) args. */
-	updateArgs(args: unknown, toolCallId: string): void;
+	/** Streamed (or final) args; `timestamp` dates a read joining a group (wall-clock ms, default now). */
+	updateArgs(args: unknown, toolCallId: string, timestamp?: number): void;
 	/** The edit preview a streaming edit-like call pushes. */
 	updateStreamPreview(preview: unknown): void;
 	/** A progress frame (`partial`) or the final result. */
@@ -439,7 +449,8 @@ export interface InteractiveModeContext {
 	 * `insertTextAttachment`, `insertAtom`, `pendingImages`, `chips()`), history (`addToHistory`),
 	 * `submit()`, state (`setState`, `setFaint`, `setBorderColor`, `setDisableSubmit`, `setSlots`)
 	 * and extension hooks (`addKeyHandler` — runs before the composer's own bindings while it has
-	 * focus, the home of app editor actions —, `addDecorator`, `setSubmitTransform`, `setShape`).
+	 * focus, the home of app editor actions —, `addPasteHandler` — runs before the composer types
+	 * or collapses a paste —, `addDecorator`, `setSubmitTransform`, `setShape`).
 	 * `composer.field` is the node to focus for typing. Replaces `editor` / `editorContainer`.
 	 */
 	readonly composer: Composer;
@@ -599,14 +610,14 @@ export interface InteractiveModeContext {
 	isBashMode: boolean;
 	/**
 	 * Ctrl+O: tool output, read groups, `!`/`$` runs and expandable messages show in full.
-	 * Reactive like every display flag below ({@link hideToolActivity}, {@link hideThinkingBlock},
+	 * Reactive like every display flag below ({@link toolActivity}, {@link hideThinkingBlock},
 	 * {@link proseOnlyThinking}, {@link expandThinkingBlocks}): assigning it repaints every live
 	 * block that reads it; blocks already in terminal scrollback keep their rows until the
 	 * scrollback is rebuilt (`shell.host?.replayHistory()`). No walking blocks to push it.
 	 */
 	toolOutputExpanded: boolean;
-	/** Tool activity hidden (reactive, see {@link toolOutputExpanded}). */
-	hideToolActivity: boolean;
+	/** How tool activity shows: `display.toolActivity` (reactive, see {@link toolOutputExpanded}). */
+	toolActivity: ToolActivityMode;
 	todoExpanded: boolean;
 	planModeEnabled: boolean;
 	vibeModeEnabled: boolean;
@@ -711,7 +722,7 @@ export interface InteractiveModeContext {
 	playWelcomeIntro(): void;
 	/** Close and quit. Operator quits are cancellable by extensions; pass `cancellable: false` for forced closes. */
 	shutdown(options?: { cancellable?: boolean }): Promise<void>;
-	/** Tear down like {@link shutdown}, then relaunch the CLI with the original launch flags, resuming this session. */
+	/** Restart with the original launch flags, resuming this session. Refuse if the working directory was removed. */
 	restart(): Promise<void>;
 	/** Request graceful shutdown at the next fully settled boundary, including background turns. */
 	requestShutdown(): void;
@@ -719,7 +730,6 @@ export interface InteractiveModeContext {
 
 	// Extension UI integration
 	setToolUIContext(uiContext: ExtensionUIContext, hasUI: boolean): void;
-	initializeHookRunner(uiContext: ExtensionUIContext, hasUI: boolean): void;
 	/** Stack extension autocomplete behavior on top of the built-in editor provider. */
 	addAutocompleteProvider(factory: AutocompleteProviderFactory): void;
 
@@ -745,9 +755,10 @@ export interface InteractiveModeContext {
 	presentAssistant(message?: AssistantMessage, options?: PresentAssistantOptions): AssistantView;
 	/**
 	 * Replay `entries` into a transcript of their own, drawn by the session's block presenters (the
-	 * rewind page's turns). Dispose it when the page closes.
+	 * rewind page's turns). `clipped`: the entries are a later part of the session, so the run they
+	 * open in may have started above them. Dispose it when the page closes.
 	 */
-	createTranscriptReplica(entries: readonly TranscriptEntryLike[]): TranscriptReplica;
+	createTranscriptReplica(entries: readonly TranscriptEntryLike[], clipped: boolean): TranscriptReplica;
 	/**
 	 * Mount a tool call's block: a tool card, or a reply block for a built-in `write` to a reply
 	 * URL (`out://`). Wired to the display flags; registers nothing in {@link pendingTools}.
@@ -771,6 +782,8 @@ export interface InteractiveModeContext {
 	showSessionInfo(info: string, context?: ContextUsage): void;
 	/** Mount command output deferred by {@link presentCommandOutput}. */
 	flushPendingCommandOutput(): void;
+	/** Hide the deferred command output preview; the output still mounts at the settle. False when none is shown (Esc falls through). */
+	dismissDeferredCommandOutput(): boolean;
 	/**
 	 * Remove every transcript block (disposing their roots, so timers and subscriptions stop) and
 	 * forget the block maps. Used before a full rebuild.
@@ -783,6 +796,8 @@ export interface InteractiveModeContext {
 	showPinnedError(message: string): void;
 	clearPinnedError(): void;
 	showWarning(message: string, options?: { hideWithToolActivity?: boolean }): void;
+	/** The provider's `active-notice` line when the viewed session moves onto a new model of that provider. */
+	showActiveModelNotice(): void;
 	showNewVersionNotification(newVersion: string): void;
 	clearEditor(): void;
 	updatePendingMessagesDisplay(): void;
@@ -990,7 +1005,7 @@ export interface InteractiveModeContext {
 	// Selector handling
 	showSettingsSelector(): void;
 	/** Open the fullscreen `/usage` dashboard overlay for the given reports. */
-	showUsageDashboard(reports: UsageReport[]): void;
+	showUsageDashboard(reports: UsageReport[], sessionAiu?: AiuTotals): void;
 	showAdvisorConfigure(): void;
 	showHistorySearch(): void;
 	showExtensionsDashboard(): void;
@@ -1001,9 +1016,9 @@ export interface InteractiveModeContext {
 	/** Session-only switch to an already-resolved model (`/switch <selector>`); compacts first when over context. */
 	switchSessionModel(model: Model, thinkingLevel?: ConfiguredThinkingLevel): Promise<void>;
 	showPluginSelector(mode?: "install" | "uninstall"): Promise<void>;
-	showUserMessageSelector(startAt?: string): void;
-	showCopySelector(): void;
-	showTreeSelector(): void;
+	showUserMessageSelector(startAt?: string): Promise<void>;
+	showCopySelector(): Promise<void>;
+	showTreeSelector(): Promise<void>;
 	/** Open the `/effort` picker over the levels the current model accepts. */
 	showThinkingSelector(): void;
 	showSessionSelector(source?: ForeignSessionSource): void;

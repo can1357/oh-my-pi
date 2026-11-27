@@ -67,7 +67,8 @@ function reveal(offset: number, start: number, end: number, height: number): num
 function legendLine(theme: Theme, row: OverviewRow, selected: boolean, width: number): string {
 	const presentation = CONTEXT_PRESENTATION[row.id];
 	const glyph = theme.fg(presentation.color, theme.symbols.symbol(presentation.symbol));
-	const cursor = selected ? theme.fg("accent", "❯") : " ";
+	const cursorGlyph = theme.symbols.symbol("nav.cursor");
+	const cursor = selected ? theme.fg("accent", cursorGlyph) : " ".repeat(visibleWidth(cursorGlyph));
 	const prefix = `${cursor} ${row.child ? "  " : ""}${glyph} `;
 	const suffix = ` ${theme.fg(selected ? presentation.color : "text", row.tokenColumn)}${theme.fg(selected ? presentation.color : "dim", row.shareColumn)}`;
 	const budget = Math.max(0, width - visibleWidth(prefix) - visibleWidth(suffix));
@@ -210,6 +211,9 @@ function entryBody(theme: Theme, model: ContextViewerModel, width: number, heigh
 		...entryMetadata(entry, true).flatMap(line => wrap(theme.fg("dim", line), contentWidth)),
 		...body.split("\n").flatMap(line => (line ? wrap(line, contentWidth) : [""])),
 	];
+	// Scroll keys leave the tree unbuilt and `entryOffset` is a plain field: this read is what repaints the
+	// terminal when they move it (covered by the viewer's terminal scroll test).
+	void model.nativeScroll;
 	model.entryOffset = Math.max(0, Math.min(model.entryOffset, Math.max(0, lines.length - height)));
 	return scrolled(theme, lines, model.entryOffset, height, width);
 }

@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
+	applyTerminalCapabilities,
 	enableAutoTheme,
 	endThemePreview,
 	getAvailableThemesWithPaths,
@@ -18,9 +19,10 @@ import {
 	stopThemeWatcher,
 	type ThemeChange,
 } from "@oh-my-pi/pi-coding-agent/ui/theme/service";
+import { CONSERVATIVE_EMOJI } from "@oh-my-pi/pi-tui/theme/contract";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
-const DARK_TRUECOLOR = { truecolor: true, colors: 16_777_216, dark: true } as const;
+const DARK_TRUECOLOR = { truecolor: true, colors: 16_777_216, dark: true, emoji: CONSERVATIVE_EMOJI } as const;
 
 let changes: ThemeChange[];
 let unsubscribe: () => void;
@@ -54,7 +56,7 @@ describe("theme service", () => {
 		expect(currentTheme().dark).toBe(true);
 		expect(currentTheme().depth).toBe("truecolor");
 
-		initTheme({ capabilities: { truecolor: false, colors: 256, dark: false } });
+		initTheme({ capabilities: { truecolor: false, colors: 256, dark: false, emoji: CONSERVATIVE_EMOJI } });
 		expect(getCurrentThemeName()).toBe("light");
 		expect(currentTheme().dark).toBe(false);
 		expect(currentTheme().depth).toBe("256");
@@ -67,6 +69,16 @@ describe("theme service", () => {
 		// The same appearance again publishes nothing.
 		expect(await setTerminalAppearance("light")).toBe(false);
 		expect(changes).toHaveLength(1);
+	});
+
+	it("re-resolves emoji glyph forms when the terminal's emoji support changes", async () => {
+		expect(currentTheme().symbols.symbol("status.success")).toBe("✓");
+		expect(await applyTerminalCapabilities({ ...DARK_TRUECOLOR, emoji: { vs16Wide: true, bareFits: true } })).toBe(
+			true,
+		);
+		expect(currentTheme().symbols.symbol("status.success")).toBe("✔");
+		expect(currentTheme().symbols.symbol("tool.irc")).toBe("✉\uFE0F");
+		expect(changes).toEqual([{ cause: "terminal", ephemeral: true }]);
 	});
 
 	it("changes a slot's theme live in auto mode", async () => {

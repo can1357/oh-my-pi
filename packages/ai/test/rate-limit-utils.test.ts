@@ -13,7 +13,6 @@ import {
 	parseRateLimitReason,
 } from "@oh-my-pi/pi-ai/error/rate-limit";
 import { streamGoogle } from "@oh-my-pi/pi-ai/providers/google";
-import { streamGoogleGeminiCli } from "@oh-my-pi/pi-ai/providers/google-gemini-cli";
 import type { Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
@@ -32,7 +31,7 @@ function googleRpc429(
 		{
 			"@type": "type.googleapis.com/google.rpc.ErrorInfo",
 			reason,
-			domain: "cloudcode-pa.googleapis.com",
+			domain: "generativelanguage.googleapis.com",
 			...(quotaResetDelay === undefined ? {} : { metadata: { quotaResetDelay } }),
 		},
 	];
@@ -42,7 +41,7 @@ function googleRpc429(
 			retryDelay,
 		});
 	}
-	return `Cloud Code Assist API error (429): ${JSON.stringify({
+	return `Google API error (429): ${JSON.stringify({
 		error: {
 			code: 429,
 			message,
@@ -68,7 +67,7 @@ function googleRpcQuotaFailure429(
 			retryDelay,
 		});
 	}
-	return `Cloud Code Assist API error (429): ${JSON.stringify({
+	return `Google API error (429): ${JSON.stringify({
 		error: {
 			code: 429,
 			message,
@@ -88,7 +87,7 @@ function googleRpcRetryInfo429(
 			retryDelay,
 		},
 	];
-	return `Cloud Code Assist API error (429): ${JSON.stringify({
+	return `Google API error (429): ${JSON.stringify({
 		error: {
 			code: 429,
 			message,
@@ -100,9 +99,9 @@ function googleRpcRetryInfo429(
 
 describe("parseRateLimitReason", () => {
 	it("classifies Google Quota exceeded as QUOTA_EXHAUSTED", () => {
-		expect(
-			parseRateLimitReason("Cloud Code Assist API error (429): Quota exceeded for aiplatform.googleapis.com"),
-		).toBe("QUOTA_EXHAUSTED");
+		expect(parseRateLimitReason("Google API error (429): Quota exceeded for aiplatform.googleapis.com")).toBe(
+			"QUOTA_EXHAUSTED",
+		);
 	});
 
 	// ClinePass subscription windows and free-tier caps are account-local quota
@@ -122,9 +121,9 @@ describe("parseRateLimitReason", () => {
 	// "Resource has been exhausted (e.g. check quota)" is a quota/daily-limit error — long wait.
 	// Only the literal phrase "resource exhausted" (gRPC status name) is MODEL_CAPACITY.
 	it("classifies 'Resource has been exhausted (e.g. check quota)' as QUOTA_EXHAUSTED", () => {
-		expect(
-			parseRateLimitReason("Cloud Code Assist API error (429): Resource has been exhausted (e.g. check quota)."),
-		).toBe("QUOTA_EXHAUSTED");
+		expect(parseRateLimitReason("Google API error (429): Resource has been exhausted (e.g. check quota).")).toBe(
+			"QUOTA_EXHAUSTED",
+		);
 	});
 
 	it("classifies 'resource exhausted' (space phrase) as MODEL_CAPACITY_EXHAUSTED", () => {
@@ -313,19 +312,6 @@ describe("parseRateLimitReason", () => {
 		).toBe("QUOTA_EXHAUSTED");
 	});
 
-	it("classifies Antigravity capacity-exhausted as QUOTA_EXHAUSTED, not transient MODEL_CAPACITY", () => {
-		// Antigravity returns "You have exhausted your capacity on this model. Your
-		// quota will reset after 3h6m38s." The literal "capacity" used to win the
-		// classifier race and land in MODEL_CAPACITY_EXHAUSTED (45-75s backoff),
-		// blocking the agent from rotating to another OAuth account even though the
-		// "quota will reset" suffix is the long-wait, switch-account signal.
-		expect(
-			parseRateLimitReason(
-				"Cloud Code Assist API error (429): You have exhausted your capacity on this model. Your quota will reset after 3h6m38s.",
-			),
-		).toBe("QUOTA_EXHAUSTED");
-	});
-
 	it("uses structured QUOTA_EXHAUSTED before capacity message heuristics", () => {
 		const body = googleRpc429(
 			"QUOTA_EXHAUSTED",
@@ -361,7 +347,7 @@ describe("parseRateLimitReason", () => {
 		expect(isUsageLimitOutcome(429, body)).toBe(true);
 	});
 
-	it("classifies a headerless 30-minute CCA quotaResetDelay as rotatable, not billing", () => {
+	it("classifies a headerless 30-minute quotaResetDelay as rotatable, not billing", () => {
 		const body = googleRpc429("RATE_LIMIT_EXCEEDED", undefined, "Resets in 2s.", "30m");
 		expect(parseRateLimitReason(body)).toBe("QUOTA_EXHAUSTED");
 		expect(isUsageLimitOutcome(429, body)).toBe(true);
@@ -377,7 +363,7 @@ describe("parseRateLimitReason", () => {
 	});
 
 	it("falls back to existing text heuristics for non-JSON 429 bodies", () => {
-		const body = "Cloud Code Assist API error (429): Too many requests";
+		const body = "Google API error (429): Too many requests";
 		expect(parseRateLimitReason(body)).toBe("RATE_LIMIT_EXCEEDED");
 		expect(isUsageLimitOutcome(429, body)).toBe(false);
 	});
@@ -555,7 +541,7 @@ describe("parseRateLimitReason", () => {
 		expect(is(zeroEntitlement.errorId ?? 0, Flag.UsageLimit)).toBe(true);
 		expect(isUsageLimitOutcome(zeroEntitlement.errorStatus, zeroEntitlement.errorMessage)).toBe(true);
 	});
-	it("preserves in-band SSE error chunk details on streamGoogle and streamGoogleGeminiCli", async () => {
+	it("preserves in-band SSE error chunk details on streamGoogle", async () => {
 		const sseErrorPayload =
 			'data: {"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"MODEL_CAPACITY_EXHAUSTED","domain":"googleapis.com"}]}}\n\n';
 
@@ -570,7 +556,6 @@ describe("parseRateLimitReason", () => {
 			{ preconnect: globalThis.fetch.preconnect },
 		);
 
-		// 1. Test streamGoogle
 		const googleModel: Model<"google-generative-ai"> = buildModel({
 			id: "gemini-3-flash",
 			name: "Gemini 3 Flash",
@@ -588,29 +573,6 @@ describe("parseRateLimitReason", () => {
 		expect(googleResult.stopReason).toBe("error");
 		expect(parseRateLimitReason(googleResult.errorMessage ?? "")).toBe("MODEL_CAPACITY_EXHAUSTED");
 		expect(isUsageLimitOutcome(googleResult.errorStatus, googleResult.errorMessage)).toBe(false);
-
-		// 2. Test streamGoogleGeminiCli
-		const cliModel: Model<"google-gemini-cli"> = buildModel({
-			id: "gemini-2.5-flash",
-			name: "Gemini 2.5 Flash",
-			api: "google-gemini-cli",
-			provider: "google-gemini-cli",
-			baseUrl: "https://example.com",
-			reasoning: false,
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 200_000,
-			maxTokens: 8192,
-		});
-		const cliStream = streamGoogleGeminiCli(cliModel, context, {
-			apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
-			fetch: sseFetch,
-		});
-		const cliResult = await cliStream.result();
-		expect(cliResult.stopReason).toBe("error");
-		expect(cliResult.errorMessage).toBeDefined();
-		expect(parseRateLimitReason(cliResult.errorMessage ?? "")).toBe("MODEL_CAPACITY_EXHAUSTED");
-		expect(isUsageLimitOutcome(cliResult.errorStatus, cliResult.errorMessage)).toBe(false);
 	});
 });
 
@@ -639,31 +601,6 @@ describe("isUsageLimit", () => {
 		expect(parseRateLimitReason(message)).toBe("QUOTA_EXHAUSTED");
 		expect(isUsageLimitOutcome(429, message)).toBe(true);
 		expect(isUsageLimit(message)).toBe(true);
-	});
-
-	it("detects Antigravity capacity-exhausted message as a usage-limit error", () => {
-		// Without this branch `markUsageLimitReached` is never invoked, so the
-		// session sticks to the exhausted OAuth account instead of rotating —
-		// see `agent-session.ts` line 8314 and `auth-storage.ts` line 3457.
-		expect(
-			isUsageLimit(
-				"Cloud Code Assist API error (429): You have exhausted your capacity on this model. Your quota will reset after 3h6m38s.",
-			),
-		).toBe(true);
-	});
-
-	// Antigravity / Cloud Code Assist returns this phrasing for an exhausted
-	// project quota; `parseRateLimitReason` already maps it to QUOTA_EXHAUSTED
-	// via the generic `quota` substring, but `isUsageLimitError` decides
-	// whether the auth layer rotates to a sibling OAuth credential, so it
-	// must match too — otherwise the session stays pinned to the exhausted
-	// account (see issue #2198).
-	it("detects Antigravity 'Individual quota reached' as a credential-rotatable usage limit", () => {
-		expect(
-			isUsageLimit(
-				"Cloud Code Assist API error (429): Individual quota reached. Contact your administrator to enable overages.",
-			),
-		).toBe(true);
 	});
 
 	// Anthropic returns a `rate_limit_error` when the account's monthly spend
@@ -858,7 +795,7 @@ describe("isUsageLimitOutcome", () => {
 
 	it("keeps informative transient 429s in the upstream-backoff lane", () => {
 		// RATE_LIMIT_EXCEEDED — generic throttling.
-		expect(isUsageLimitOutcome(429, "Cloud Code Assist API error (429): Too many requests")).toBe(false);
+		expect(isUsageLimitOutcome(429, "Google API error (429): Too many requests")).toBe(false);
 		expect(isUsageLimitOutcome(429, "Requests per minute limit reached")).toBe(false);
 		// MODEL_CAPACITY_EXHAUSTED — provider overload, not account quota.
 		expect(isUsageLimitOutcome(429, "Service overloaded 529")).toBe(false);
@@ -981,6 +918,23 @@ describe("isUsageLimitOutcome", () => {
 		expect(isUsageLimitOutcome(undefined, devinTrailer)).toBe(true);
 		expect(isUsageLimit(devinTrailer)).toBe(true);
 		expect(isUsageLimitOutcome(403, "Forbidden")).toBe(false);
+	});
+
+	it("rotates on Devin's statusless daily and weekly allowance refusals", () => {
+		const weekly =
+			"Devin stream error failed_precondition: Your weekly usage quota has been exhausted. Visit https://app.devin.ai/settings/usage to purchase on-demand usage or turn on auto-reload.";
+		// The daily form without the "quota will reset" suffix older matchers relied on.
+		const daily = "Devin stream error failed_precondition: Your daily usage quota has been exhausted.";
+		for (const message of [weekly, daily]) {
+			expect(isUsageLimitOutcome(undefined, message)).toBe(true);
+			expect(isUsageLimit(message)).toBe(true);
+		}
+	});
+
+	it("does not rotate on a per-minute throttle worded like Devin's allowance refusal", () => {
+		const perMinute = "Usage quota has been exhausted for this per minute window. Please retry in 30 seconds.";
+		expect(isUsageLimitOutcome(429, perMinute)).toBe(false);
+		expect(isUsageLimit(perMinute)).toBe(false);
 	});
 
 	// A statusless per-minute reset-window transient ("Rate limit will reset in

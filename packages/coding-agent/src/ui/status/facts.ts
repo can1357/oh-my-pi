@@ -8,6 +8,7 @@ import type { StatusLineSettings } from "../../modes/view-model/status-line/type
 import type { JobWidgetView } from "../../tools/details/job-widget";
 import type { LoopConditionConfig, LoopLimitRuntime } from "../../modes/view-model/status-line/loop";
 import type { PromptCacheStatus, SessionTreePosition } from "../../modes/view-model/status-line/host";
+import type { AiuTotals } from "../../session/aiu-billing";
 
 export type { StatusLineSettings };
 
@@ -23,6 +24,8 @@ export interface StatusModel {
 	readonly id: string;
 	/** Display name (`Claude Opus`); the id stands in when absent. */
 	readonly name?: string;
+	/** Provider id, shown before the model under `segmentOptions.model.showProvider`. */
+	readonly provider?: string;
 	/** The model accepts a thinking level. */
 	readonly thinking: boolean;
 	readonly contextWindow?: number;
@@ -41,6 +44,8 @@ export interface StatusUsage {
 	readonly cost: number;
 	/** Part of `cost` carried by completed subagent task results. */
 	readonly subagentCost?: number;
+	/** Server-reported AI credits of the session and its subagent tree; undefined while no call reported or missed one. */
+	readonly aiu?: AiuTotals;
 }
 
 /** Context-window occupancy. */

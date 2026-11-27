@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/pi-tui",
-	"version": "19.1.1",
+	"version": "19.2.1",
 	"description": "TSP-first terminal UI: one component tree, rendered natively over the Tern Surface Protocol or as terminal rows",
 	"keywords": [
 		"cli",

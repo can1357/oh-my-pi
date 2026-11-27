@@ -44,36 +44,43 @@ import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { extractHttpStatusFromError, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { AdvisorConfig } from "../advisor/advisor-config-types";
 import {
-	ADVISOR_DEFAULT_BUDGET_PER_UPDATE,
-	ADVISOR_DEFAULT_TOOL_NAMES,
-	ADVISOR_MAX_BUDGET_PER_UPDATE,
 	ADVISOR_SYNC_BACKLOG_MODES,
-	AdviseTool,
-	type AdvisorAgent,
 	type AdvisorReviewMode,
-	AdvisorEmissionGuard,
-	type AdvisorHeldUpdates,
-	AdvisorLoopGuard,
+	type AdvisorRuntimeStatus,
+	type AdvisorSyncBacklog,
+	discoverAdvisorConfigs,
+	getOrCreateAdvisorProviderSessionId,
+	slugifyAdvisorName,
+} from "../advisor/config";
+import {
+	ADVISOR_DEFAULT_TOOL_NAMES,
+	AdviseTool,
 	type AdvisorMessageDetails,
 	type AdvisorNote,
-	AdvisorOutputQuarantinedError,
-	AdvisorRuntime,
-	type AdvisorRuntimeStatus,
 	type AdvisorSeverity,
-	type AdvisorSyncBacklog,
-	AdvisorTranscriptRecorder,
-	advisorTranscriptFilename,
-	buildAdvisorQuarantineSourceText,
 	compareAdvisorNotes,
 	formatAdvisorBatchContent,
-	getOrCreateAdvisorProviderSessionId,
 	isAdvisorInterruptImmuneTurnActive,
-	isClassifierRefusal,
 	meetsAdvisorSeverity,
-	quarantineAdvisorUnsafeOutput,
 	resolveAdvisorDeliveryChannel,
-	slugifyAdvisorName,
-} from "../advisor";
+} from "../advisor/advise-tool";
+import {
+	type AdvisorAgent,
+	type AdvisorHeldUpdates,
+	AdvisorOutputQuarantinedError,
+	AdvisorRuntime,
+	buildAdvisorQuarantineSourceText,
+	isClassifierRefusal,
+	quarantineAdvisorUnsafeOutput,
+} from "../advisor/runtime";
+import {
+	ADVISOR_DEFAULT_BUDGET_PER_UPDATE,
+	ADVISOR_MAX_BUDGET_PER_UPDATE,
+	AdvisorEmissionGuard,
+} from "../advisor/emission-guard";
+import { AdvisorLoopGuard } from "../advisor/loop-guard";
+import { advisorTranscriptFilename } from "../advisor/transcript-names";
+import type * as Recorder from "../advisor/transcript-recorder";
 import { evictStaleToolResults } from "../advisor/tool-result-eviction";
 import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
@@ -86,13 +93,13 @@ import {
 import { MODEL_ROLES } from "../config/model-roles";
 import { serviceTierForAllFamilies, serviceTierSettingToTier } from "../config/service-tier";
 import type { Settings } from "../config/settings";
-import { CursorExecHandlers, type CursorMcpResourceAdapter } from "../cursor";
-import { bridgeToolMap } from "../cursor-bridge-tools";
+import type { CursorMcpResourceAdapter } from "../cursor";
 import { estimateContextToolSchemaTokens } from "./context-usage";
 import type { PlanModeState } from "../plan-mode/state";
 import advisorBoundaryGuidance from "../prompts/advisor/boundary-guidance.md" with { type: "text" };
 import advisorSystemPrompt from "../prompts/advisor/system.md" with { type: "text" };
 import type { SecretObfuscator } from "../secrets/obfuscator";
+import type { ImageDescriptions } from "../utils/image-vision-fallback";
 import {
 	AUTO_THINKING,
 	concreteThinkingLevel,
@@ -325,7 +332,7 @@ interface ActiveAdvisor {
 	agent: Agent;
 	runtime: AdvisorRuntime;
 	adviseTool: AdviseTool;
-	recorder: AdvisorTranscriptRecorder;
+	recorder: Recorder.AdvisorTranscriptRecorder;
 	recorderClosed: Promise<void>;
 	agentUnsubscribe?: () => void;
 	/** Drops this advisor's tool state when its conversation restarts. */
@@ -493,9 +500,15 @@ export interface SessionAdvisorsOptions {
 	configs?: AdvisorConfig[];
 	/** WATCHDOG.yml problems found during discovery; surfaced once as a warning. */
 	configWarnings?: string[];
+	/** User configuration directory used for WATCHDOG.yml reloads. */
+	configDir?: string;
 	streamFn?: StreamFn;
 	/** Builds each advisor's provider request transform; called once per advisor agent. */
-	createTransformProviderContext?: () => (context: Context, model: Model) => Context | Promise<Context>;
+	createTransformProviderContext?: () => (
+		context: Context,
+		model: Model,
+		signal?: AbortSignal,
+	) => Context | Promise<Context>;
 }
 
 /** Options accepted when an advisor injects a primary-session message. */
@@ -514,6 +527,8 @@ export interface SessionAdvisorsHost {
 	modelRegistry: ModelRegistry;
 	yieldQueue: YieldQueue;
 	obfuscator(): SecretObfuscator | undefined;
+	/** Input-image descriptions; an advisor model that cannot see images reads them in its transcript. */
+	imageDescriptions: ImageDescriptions | undefined;
 	providerSessionState: Map<string, ProviderSessionState>;
 	/** Per-model WebSocket preference from the live transport settings (Codex and standard Responses). */
 	preferWebsockets(model: Model): boolean | undefined;
@@ -531,7 +546,7 @@ export interface SessionAdvisorsHost {
 	dropPendingAdvisorCards(): void;
 	preserveAdvisorCard(card: CustomMessage): void;
 	hasPendingNextTurnMessages(): boolean;
-	convertToLlmForSideRequest(messages: AgentMessage[]): Message[];
+	convertToLlmForSideRequest(messages: AgentMessage[], reader: Model): Message[];
 	effectiveServiceTier(model: Model): ServiceTier | undefined;
 	resolveContextPromotionTarget(
 		currentModel: Model,
@@ -594,10 +609,13 @@ export class SessionAdvisors {
 	#advisorContextPrompt: string | undefined;
 	#advisorMemoryPrompt: string | undefined;
 	#advisorStreamFn: StreamFn | undefined;
-	#createTransformProviderContext: (() => (context: Context, model: Model) => Context | Promise<Context>) | undefined;
+	#createTransformProviderContext:
+		| (() => (context: Context, model: Model, signal?: AbortSignal) => Context | Promise<Context>)
+		| undefined;
 	#advisors: ActiveAdvisor[] = [];
 	#advisorConfigs: AdvisorConfig[] | undefined;
 	#advisorConfigWarnings: string[];
+	readonly #advisorConfigDir: string | undefined;
 	#advisorStatuses = new Map<string, { name: string; status: AdvisorRuntimeStatus }>();
 	#advisorProviderSessionIds = new Map<string, string>();
 	#advisorCosts = new Map<string, number>();
@@ -666,6 +684,7 @@ export class SessionAdvisors {
 		this.#advisorMemoryPrompt = options.memoryPrompt;
 		this.#advisorConfigs = options.configs;
 		this.#advisorConfigWarnings = options.configWarnings ?? [];
+		this.#advisorConfigDir = options.configDir;
 		this.#advisorStreamFn = options.streamFn;
 		this.#createTransformProviderContext = options.createTransformProviderContext;
 		if (this.#advisorEnabled) this.#buildAdvisorRuntime();
@@ -1376,8 +1395,6 @@ export class SessionAdvisors {
 				emissionGuard,
 			);
 
-			// `#advisorWatchdogPrompt` already carries WATCHDOG.md + YAML shared
-			// instructions; `config.instructions` adds this advisor's specialization.
 			const systemPrompt = [prompt.render(advisorSystemPrompt, { max_notes_per_update: budgetPerUpdate })];
 			if (this.#advisorContextPrompt) systemPrompt.push(this.#advisorContextPrompt);
 			if (this.#advisorMemoryPrompt) systemPrompt.push(this.#advisorMemoryPrompt);
@@ -1452,25 +1469,31 @@ export class SessionAdvisors {
 			// swaps in a `replace` instance for the exec channel only — the
 			// advisor's own loop keeps the tool it was given — and only when
 			// `edit` was actually granted.
-			const advisorCursorExecHandlers = new CursorExecHandlers({
-				cwd: this.#host.sessionManager.getCwd(),
-				getCwd: () => this.#host.sessionManager.getCwd(),
-				tools: bridgeToolMap(advisorToolMap, slate?.createEditTool),
-				// Approval mode, per-tool policies and `autoApprove` live only on
-				// this context; without it every bridge tool fails closed to
-				// `always-ask`.
-				getToolContext: this.#advisorGetToolContext,
-				allowDirectFileMutation: advisorCanMutateFiles,
-				// Gated on the advisor's own grant: the factory builds a fresh
-				// tool, so handing it over unconditionally would give a roster
-				// without `grep` a search tool it was denied.
-				createGrepTool: advisorToolMap.has("grep") ? slate?.createGrepTool : undefined,
-				// Advisors share the session's live MCP connections, so their
-				// resource frames answer from the same catalog the primary sees.
-				// Not gated on a tool grant: reading what a server advertises is
-				// not the same permission as calling one of its tools.
-				mcpResources: this.#advisorMcpResources,
-			});
+			const advisorCursorExecHandlers = async () => {
+				const [{ CursorExecHandlers }, { bridgeToolMap }] = await Promise.all([
+					import("../cursor"),
+					import("../cursor-bridge-tools"),
+				]);
+				return new CursorExecHandlers({
+					cwd: this.#host.sessionManager.getCwd(),
+					getCwd: () => this.#host.sessionManager.getCwd(),
+					tools: bridgeToolMap(advisorToolMap, slate?.createEditTool),
+					// Approval mode, per-tool policies and `autoApprove` live only on
+					// this context; without it every bridge tool fails closed to
+					// `always-ask`.
+					getToolContext: this.#advisorGetToolContext,
+					allowDirectFileMutation: advisorCanMutateFiles,
+					// Gated on the advisor's own grant: the factory builds a fresh
+					// tool, so handing it over unconditionally would give a roster
+					// without `grep` a search tool it was denied.
+					createGrepTool: advisorToolMap.has("grep") ? slate?.createGrepTool : undefined,
+					// Advisors share the session's live MCP connections, so their
+					// resource frames answer from the same catalog the primary sees.
+					// Not gated on a tool grant: reading what a server advertises is
+					// not the same permission as calling one of its tools.
+					mcpResources: this.#advisorMcpResources,
+				});
+			};
 			const baseAdvisorStreamFn = this.#advisorStreamFn ?? streamSimple;
 			const advisorStreamFn: StreamFn = (requestModel, context, streamOptions) => {
 				if (
@@ -1484,17 +1507,16 @@ export class SessionAdvisors {
 					...streamOptions,
 					preferWebsockets: streamOptions?.preferWebsockets ?? this.#host.preferWebsockets(requestModel),
 				};
+				// The advisor bills its own lane, whose ledger counts delivered replies only: an attempt
+				// a retry discards stays out of it rather than landing in the primary session's journal.
+				options.onDiscardedAttempt ??= () => {};
 				if (requestModel.api === "openai-codex-responses") {
 					return baseAdvisorStreamFn(requestModel, context, {
 						...options,
 						codexSseMaxAttempts: ADVISOR_CODEX_SSE_MAX_ATTEMPTS,
 					});
 				}
-				if (
-					requestModel.api === "google-generative-ai" ||
-					requestModel.api === "google-gemini-cli" ||
-					requestModel.api === "google-vertex"
-				) {
+				if (requestModel.api === "google-generative-ai" || requestModel.api === "google-vertex") {
 					return baseAdvisorStreamFn(requestModel, context, { ...options, acceptEmptyResponse: true });
 				}
 				return baseAdvisorStreamFn(requestModel, context, options);
@@ -1528,7 +1550,7 @@ export class SessionAdvisors {
 				streamFn: advisorStreamFn,
 				// Maintenance installs compactionSummary messages; the core Agent's
 				// default converter drops custom roles and would discard their replay.
-				convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
+				convertToLlm: (messages, reader) => this.#host.convertToLlmForSideRequest(messages, reader),
 				onPayload: this.#host.onPayload,
 				onResponse: this.#host.onResponse,
 				onSseEvent: this.#host.onSseEvent,
@@ -1642,6 +1664,7 @@ export class SessionAdvisors {
 			// Persist this advisor's turns to `<session>/__advisor[.<slug>].jsonl`
 			// (resolved lazily so it follows session switches) for stats attribution
 			// and Agent Hub observability, without registering it as a peer.
+			const { AdvisorTranscriptRecorder }: typeof Recorder = require("../advisor/transcript-recorder");
 			const recorder = new AdvisorTranscriptRecorder(
 				() => this.#host.sessionManager.getSessionFile(),
 				() => this.#host.sessionManager.getCwd(),
@@ -1656,6 +1679,24 @@ export class SessionAdvisors {
 				snapshotMessages: () => this.#host.agent.state.messages,
 				maintainContext: (incoming, signal) => this.#maintainAdvisorContext(advisorRef, incoming, signal),
 				obfuscator: this.#host.obfuscator(),
+				// The advisor reads the transcript as text, where an image is only `[image]`: any description is
+				// better, so made ones always stand in, and new ones are made when the advisor or the primary
+				// cannot see images (the primary's requests carry them then anyway).
+				prepareImageDescriptions: async (messages, signal) => {
+					const descriptions = this.#host.imageDescriptions;
+					const describeFor = descriptions?.textOnlyModel(
+						advisorRef.agent.state.model,
+						this.#host.agent.state.model,
+					);
+					if (!descriptions || !describeFor) return;
+					try {
+						await descriptions.prepare(messages, describeFor, signal);
+					} catch (err) {
+						// An aborted review leaves undescribed images as `[image]`; the next batch describes them.
+						logger.debug("advisor image descriptions not prepared", { err: String(err) });
+					}
+				},
+				withImageDescriptions: message => this.#host.imageDescriptions?.withDescriptions(message) ?? message,
 				includeReasoning: descriptor.config.includeReasoning,
 				getModelIdentity: () => formatModelString(advisorRef.agent.state.model),
 				beginAdvisorUpdate: inProgress => {
@@ -2661,7 +2702,7 @@ export class SessionAdvisors {
 					signal,
 					{
 						thinkingLevel: advisorCompactionThinkingLevel,
-						convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
+						convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages, candidate),
 						isUserAuthored: isUserAuthoredMessage,
 						telemetry,
 						tools: agent.state.tools,
@@ -2884,6 +2925,17 @@ export class SessionAdvisors {
 	 */
 	get configWarnings(): readonly string[] {
 		return this.#advisorConfigWarnings;
+	}
+
+	/** Discover the current WATCHDOG.yml roster before applying it to the session. */
+	async reloadConfigs(): Promise<{ count: number; warnings: string[] }> {
+		const cwd = this.#host.sessionManager.getCwd();
+		const { advisors, sharedInstructions, sharedMaxNotesPerUpdate, warnings } = await discoverAdvisorConfigs(
+			cwd,
+			this.#advisorConfigDir,
+		);
+		const count = this.applyAdvisorConfigs(advisors, sharedInstructions, sharedMaxNotesPerUpdate);
+		return { count, warnings };
 	}
 
 	/**

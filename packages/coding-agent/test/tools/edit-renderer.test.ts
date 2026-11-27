@@ -1,7 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { $ } from "bun";
 import { editDiffString } from "@oh-my-pi/pi-natives";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import { visibleWidth } from "@oh-my-pi/pi-tui/text/width";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import { editToolPresenter } from "../../src/ui/tools/edit";
 import { printRows } from "../../src/ui/print-rows";
 import { ToolBlock, ToolCall, type ToolCallResult } from "../../src/ui/transcript/tool-block";
@@ -61,6 +64,45 @@ function resultRows(result: ToolCallResult, args: unknown, options: CardOptions 
 }
 
 describe("edit tool card", () => {
+	it("names the edited Git worktree when it differs from the session checkout", async () => {
+		using temp = TempDir.createSync("@omp-edit-checkout-");
+		const cwd = temp.join("main");
+		const linked = temp.join("linked");
+		await $`git init -qb main ${cwd}`.quiet();
+		await Bun.write(temp.join("main", "lesson.txt"), "before\n");
+		await $`git add lesson.txt`.cwd(cwd).quiet();
+		await $`git -c user.name=Test -c user.email=test@example.com -c core.hooksPath=/dev/null commit -qm initial`
+			.cwd(cwd)
+			.quiet();
+		await $`git -c core.hooksPath=/dev/null worktree add -qb preview ${linked}`.cwd(cwd).quiet();
+
+		const tool = new EditTool(
+			{
+				cwd,
+				hasUI: false,
+				enableLsp: false,
+				getSessionFile: () => null,
+				getSessionSpawns: () => "*",
+				getArtifactsDir: () => null,
+				settings: Settings.isolated({ "edit.enforceSeenLines": false }),
+			},
+			"replace",
+		);
+		const target = temp.join("linked", "lesson.txt");
+		const args = { path: target, old_string: "before", new_string: "after" };
+		const result = await tool.execute("cross-worktree", args);
+		const rendered = plain(resultRows(result, args, { editMode: "replace" })).join("\n");
+		expect(rendered).toContain("Edited worktree: preview (session: main)");
+		expect(await Bun.file(target).text()).toBe("after\n");
+		expect(await Bun.file(temp.join("main", "lesson.txt")).text()).toBe("before\n");
+
+		const local = { ...args, path: "lesson.txt" };
+		const localResult = await tool.execute("session-checkout", local);
+		const localRendered = plain(resultRows(localResult, local, { editMode: "replace" })).join("\n");
+		expect(localRendered).not.toContain("Edited worktree:");
+		expect(await Bun.file(temp.join("main", "lesson.txt")).text()).toBe("after\n");
+	});
+
 	it("shows the target path from partial JSON while edit args stream", () => {
 		const rendered = callText(
 			{ __partialJson: '{"path":"packages/coding-agent/src/edit/renderer.ts","old_string":"before' },

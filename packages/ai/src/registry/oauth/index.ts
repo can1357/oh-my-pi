@@ -242,6 +242,7 @@ export async function getOAuthApiKey(
 					expiresAt: creds.expires,
 					email: creds.email,
 					accountId: creds.accountId,
+					tokenBasedBilling: creds.tokenBasedBilling,
 				})
 			: creds.access;
 	return { newCredentials: creds, apiKey };

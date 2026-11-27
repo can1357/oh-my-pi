@@ -7,6 +7,8 @@
  * {@link KeyEvent} for keys its widget did not consume.
  */
 
+import type { TspPicture } from "@oh-my-pi/pi-wire";
+
 /** A semantic UI event, addressed to the node it names (`key` is that node's keypath in its root). */
 export type UiEvent =
 	| {
@@ -35,6 +37,8 @@ export type UiEvent =
 			readonly item: string;
 			readonly value: boolean | number | string | readonly string[] | null;
 	  }
+	/** An `image` node's annotated picture (Tern's annotator, on Done). */
+	| { readonly type: "change"; readonly key: string; readonly value: TspPicture }
 	/** An edit over the selection of an `editor`/`input` (see {@link TextEdit}). */
 	| ({ readonly type: "edit"; readonly key: string } & TextEdit)
 	/** Undo the last change to an `editor`/`input`'s text. */
@@ -81,6 +85,8 @@ export interface TextEdit {
 	readonly text: string;
 	readonly cursor: number;
 	readonly len: number;
+	/** The edit types a bracketed paste: content, not typing (no completion opens for it). */
+	readonly paste?: boolean;
 }
 
 /** One key press, release or repeat, as the driver decoded it. */

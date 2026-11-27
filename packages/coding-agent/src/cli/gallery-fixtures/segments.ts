@@ -8,11 +8,12 @@ import type { StatusLineSegmentOptions } from "../../modes/view-model/status-lin
 import { printRows } from "../../ui/print-rows";
 import type { StatusFacts } from "../../ui/status/facts";
 import { effectiveStatusSettings, segmentView } from "../../ui/status/segments";
-import { StatusLine } from "../../ui/status/status-line";
+import { createStatusLine } from "../../ui/status/status-line";
 import "../../ui/styles/composer";
 import "../../ui/styles/status";
 import {
 	GALLERY_BAR_PLACEMENT,
+	GALLERY_CONTEXT_WINDOW,
 	GALLERY_NOW,
 	GALLERY_PROMPT_CACHE,
 	galleryStatusFacts,
@@ -42,6 +43,15 @@ export function getSegmentGalleryInventory(): readonly StatusLineSegmentId[] {
 
 const LOOP_LIMIT = { kind: "iterations", initial: 10, remaining: 4 } as const;
 
+/** A model served through a gateway, for the `model` segment's provider and id options. */
+const GALLERY_ROUTED_MODEL: NonNullable<StatusFacts["model"]> = {
+	id: "anthropic/claude-sonnet-4.5",
+	name: "Claude Sonnet 4.5",
+	provider: "openrouter",
+	thinking: true,
+	contextWindow: GALLERY_CONTEXT_WINDOW,
+};
+
 function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
 	switch (id) {
 		case "pi":
@@ -69,6 +79,26 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
 				{ label: "advisor error", facts: { advisor: { status: "error", yielded: false } } },
 				{ label: "advisor idle", facts: { advisor: { status: "idle", yielded: false } } },
 				{ label: "advisor done (yielded)", facts: { advisor: { status: "running", yielded: true } } },
+				{
+					label: "provider prefix",
+					options: { model: { showProvider: true } },
+					facts: { model: GALLERY_ROUTED_MODEL },
+				},
+				{
+					label: "provider + model id",
+					options: { model: { showProvider: true, display: "id" } },
+					facts: { model: GALLERY_ROUTED_MODEL },
+				},
+				{
+					label: "model id + name",
+					options: { model: { display: "full" } },
+					facts: { model: GALLERY_ROUTED_MODEL },
+				},
+				{
+					label: "provider + model id, max length 24",
+					options: { model: { showProvider: true, display: "id", maxLength: 24 } },
+					facts: { model: GALLERY_ROUTED_MODEL },
+				},
 			];
 		case "mode": {
 			const goal = (status: NonNullable<StatusFacts["goal"]>["status"], paused = false): Partial<StatusFacts> => ({
@@ -91,7 +121,7 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
 		}
 		case "path":
 			return [
-				{ label: "workspace path" },
+				{ label: "workspace path", facts: { activeRepoRoot: "oh-my-pi" } },
 				{
 					label: "linked worktree",
 					options: { path: { stripWorkPrefix: true } },
@@ -225,7 +255,12 @@ function renderIsolatedSegment(id: StatusLineSegmentId, spec: SegmentVariantSpec
 	const shown = segmentView(id, facts, effectiveStatusSettings(settings)) !== null || facts.subagents > 0;
 	if (!shown) return [currentTheme().fg("dim", "  (hidden for this sample)")];
 	return printRows(
-		() => StatusLine({ settings: () => settings, facts: () => facts, placement: () => GALLERY_BAR_PLACEMENT }),
+		() =>
+			createStatusLine({
+				settings: () => settings,
+				facts: () => facts,
+				placement: () => GALLERY_BAR_PLACEMENT,
+			}).preview(undefined),
 		width,
 		{ now: GALLERY_NOW },
 	);

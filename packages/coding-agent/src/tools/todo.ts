@@ -326,6 +326,42 @@ function getTaskTargets(phases: TodoPhase[], entry: TodoOpEntryValue, errors: st
 	return [];
 }
 
+/**
+ * Whether a task entry is a JSON object/array rather than task text. The
+ * argument repair layer stringifies non-string entries of a string array (a
+ * phase object passed in `items`), so by the time they reach the tool they are
+ * JSON text; storing that as a task label makes the task unaddressable.
+ */
+function isEncodedContainer(content: string): boolean {
+	const trimmed = content.trim();
+	if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return false;
+	try {
+		const parsed: unknown = JSON.parse(trimmed);
+		return typeof parsed === "object" && parsed !== null;
+	} catch {
+		return false;
+	}
+}
+
+/** Reject task entries that are not plain text; returns whether any were found. */
+function rejectNonTextTasks(items: readonly string[], errors: string[]): boolean {
+	let rejected = false;
+	for (const content of items) {
+		if (!isEncodedContainer(content)) continue;
+		const preview = content.length > 80 ? `${content.slice(0, 80)}…` : content;
+		errors.push(
+			`Task entries must be plain strings, got ${preview}; group tasks into phases with list: [{phase, items: [...]}]`,
+		);
+		rejected = true;
+	}
+	return rejected;
+}
+
+const INIT_SHAPE_HINT =
+	'init wants list: [{"phase": "Name", "items": ["task", ...]}] or flat items: ["task", ...] (JSON arrays, not strings)';
+
+const TODO_FIELDS = new Set(["op", "list", "task", "phase", "items"]);
+
 /** Default phase name for flat `init` and `append` to an empty list. */
 const DEFAULT_INIT_PHASE = "Tasks";
 
@@ -338,7 +374,7 @@ function initPhases(entry: TodoOpEntryValue, errors: string[]): TodoPhase[] {
 	const flat = entry.items && entry.items.length > 0 ? [{ phase: entry.phase, items: entry.items }] : undefined;
 	const list = entry.list?.length ? entry.list : (flat ?? entry.list);
 	if (!list) {
-		errors.push("Missing list for init operation");
+		errors.push(`Missing list for init operation; ${INIT_SHAPE_HINT}`);
 		return [];
 	}
 	// An empty phase name cannot be explicitly targeted, so it gets the default.
@@ -348,6 +384,7 @@ function initPhases(entry: TodoOpEntryValue, errors: string[]): TodoPhase[] {
 	const seenPhases = new Set<string>();
 	const seenTasks = new Set<string>();
 	for (const listEntry of list) {
+		if (rejectNonTextTasks(listEntry.items, errors)) continue;
 		const name = listEntry.phase || DEFAULT_INIT_PHASE;
 		if (seenPhases.has(name)) {
 			errors.push(`Duplicate phase "${name}" in init list`);
@@ -375,6 +412,7 @@ function appendItems(phases: TodoPhase[], entry: TodoOpEntryValue, errors: strin
 		errors.push("Missing items for append operation");
 		return phases;
 	}
+	if (rejectNonTextTasks(entry.items, errors)) return phases;
 
 	// Validate the whole batch before mutating so a failing op reports every
 	// duplicate and leaves nothing half-applied.
@@ -494,6 +532,15 @@ function inferTodoOp(args: Record<string, unknown>, hasExistingPhases: boolean):
  * for a normal model retry.
  */
 function resolveTodoParams(raw: unknown, hasExistingPhases: boolean): TodoOpEntryValue | string {
+	// Undeclared keys are otherwise dropped silently, so `{op:"init", tasks:[...]}`
+	// would fail as "missing list" without telling the model which key was wrong.
+	if (isRecord(raw) && (raw.op === "init" || raw.op === "append")) {
+		const unknown = Object.keys(raw).filter(key => !TODO_FIELDS.has(key));
+		if (unknown.length > 0) {
+			const names = unknown.map(key => `"${key}"`).join(", ");
+			return `Invalid todo arguments: unknown field ${names}; ${raw.op === "init" ? INIT_SHAPE_HINT : 'append wants items: ["task", ...] and optional phase'}`;
+		}
+	}
 	const direct = todoSchema(raw);
 	if (!(direct instanceof type.errors)) return direct;
 	if (isRecord(raw) && raw.op === undefined) {

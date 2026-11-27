@@ -1,6 +1,6 @@
 /**
  * The extension inventory list: kind groups with headers (the unfiltered
- * ALL view), a provider's master switch (and `~/` opt-in) above its items,
+ * ALL view), a provider's master switch above its items,
  * or a flat list of search hits; the selection, its window, the search
  * field, and the row under the pointer.
  */
@@ -20,6 +20,7 @@ import {
 	type ExtensionProvider,
 	isShadowedExtension,
 } from "../../../extensibility/inventory/types";
+import { fuzzyHits } from "../../../utils/fuzzy";
 import { stableKey } from "../pickers/format";
 import {
 	isDiscoveredMcpServer,
@@ -37,7 +38,6 @@ export interface ExtensionListCallbacks {
 	onSelectionChange?: (extension: Extension | null) => void;
 	onToggle?: (extensionId: string, enabled: boolean) => void;
 	onMasterToggle?: (providerId: string) => void;
-	onUserSourceToggle?: (providerId: string) => void;
 	masterSwitchProvider?: string | null;
 	mcpSource?: MCPRuntimeSource;
 	toolSource?: ToolRuntimeSource;
@@ -46,12 +46,6 @@ export interface ExtensionListCallbacks {
 /** One row of the list. */
 export type ListRow =
 	| { readonly type: "master"; readonly providerId: string; readonly providerName: string; readonly enabled: boolean }
-	| {
-			readonly type: "user-source";
-			readonly providerId: string;
-			readonly providerName: string;
-			readonly enabled: boolean;
-	  }
 	| {
 			readonly type: "kind-header";
 			readonly kind: ExtensionKind;
@@ -81,8 +75,6 @@ function rowKey(row: ListRow): string {
 	switch (row.type) {
 		case "master":
 			return `master:${row.providerId}`;
-		case "user-source":
-			return `user-source:${row.providerId}`;
 		case "kind-header":
 			return `kind:${row.kind}`;
 		case "extension":
@@ -159,14 +151,6 @@ export class ExtensionListModel {
 				providerName,
 				enabled: provider?.enabled ?? true,
 			});
-			if (provider?.foreignUserSource) {
-				rows.push({
-					type: "user-source",
-					providerId: this.masterSwitchProvider,
-					providerName,
-					enabled: provider.userSourceEnabled,
-				});
-			}
 			for (const item of filtered) rows.push({ type: "extension", item });
 			return rows;
 		}
@@ -278,13 +262,11 @@ export class ExtensionListModel {
 
 	// ─── Input ──────────────────────────────────────────────────────────────
 
-	/** Toggle the selected row, or flip the provider's master switch / `~/` opt-in. */
+	/** Toggle the selected row, or flip the provider's master switch. */
 	activateSelected(): void {
 		const row = this.selectedRow();
 		if (row?.type === "master") this.callbacks.onMasterToggle?.(row.providerId);
-		else if (row?.type === "user-source") {
-			if (this.#provider(row.providerId)?.enabled !== false) this.callbacks.onUserSourceToggle?.(row.providerId);
-		} else if (row?.type === "extension") {
+		else if (row?.type === "extension") {
 			// A shadowed copy shares the winner's id: toggling it would flip the winner.
 			if (isShadowedExtension(row.item) || this.masterDisabled()) return;
 			this.callbacks.onToggle?.(row.item.id, row.item.state === "disabled");
@@ -385,10 +367,6 @@ export class ExtensionListModel {
 		const row = this.selectedRow();
 		if (!row || row.type === "kind-header") return undefined;
 		if (row.type === "master") return { on: row.enabled };
-		if (row.type === "user-source")
-			return this.#provider(row.providerId)?.enabled === false
-				? { on: row.enabled, blocked: "Provider disabled" }
-				: { on: row.enabled };
 		const on = row.item.state !== "disabled";
 		if (isShadowedExtension(row.item)) return { on, blocked: "Shadowed by another source" };
 		if (this.masterDisabled()) return { on, blocked: "Provider disabled" };
@@ -409,17 +387,6 @@ export class ExtensionListModel {
 				dot: row.enabled ? "success" : "muted",
 				badges: [{ text: "Master Switch", tone: "warning" }],
 				tone: row.enabled ? undefined : "muted",
-			};
-		}
-		if (row.type === "user-source") {
-			return {
-				id,
-				label: `Load ~/ ${sanitizeDisplayLine(row.providerName)} config`,
-				icon: "folder",
-				detail: "opt-in; project config always loads",
-				dot: row.enabled ? "success" : "muted",
-				tone: !row.enabled || masterOff ? "muted" : undefined,
-				disabled: masterOff ? "Provider disabled" : undefined,
 			};
 		}
 		const ext = row.item;
@@ -493,39 +460,6 @@ export class ExtensionListModel {
 			grouped,
 		};
 	}
-}
-
-/** Each query token's first substring in `label`, else its characters in order (the fuzzy matcher's shape). */
-export function fuzzyHits(label: string, query: string): [number, number][] | undefined {
-	const tokens = query
-		.toLowerCase()
-		.split(/\s+/)
-		.filter(token => token.length > 0);
-	if (tokens.length === 0) return undefined;
-	const lower = label.toLowerCase();
-	const marked = new Uint8Array(lower.length);
-	for (const token of tokens) {
-		const at = lower.indexOf(token);
-		if (at >= 0) {
-			marked.fill(1, at, at + token.length);
-			continue;
-		}
-		let from = 0;
-		for (const ch of token) {
-			const index = lower.indexOf(ch, from);
-			if (index < 0) break;
-			marked[index] = 1;
-			from = index + ch.length;
-		}
-	}
-	const ranges: [number, number][] = [];
-	for (let i = 0; i < marked.length; i++) {
-		if (!marked[i]) continue;
-		const start = i;
-		while (i < marked.length && marked[i]) i++;
-		ranges.push([start, i]);
-	}
-	return ranges.length > 0 ? ranges : undefined;
 }
 
 /** `offset` clamped to the rows a `height`-row window can start at. */

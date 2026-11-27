@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { Agent, AgentBusyError, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { KeybindingsManager, setKeybindings } from "@oh-my-pi/pi-coding-agent/config/keybindings/keybindings";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -25,7 +26,7 @@ import { planSaveFileName } from "@oh-my-pi/pi-coding-agent/plan-mode/plan-autos
 import type { SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { SILENT_ABORT_MARKER, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { convertToLlm, SILENT_ABORT_MARKER, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking/levels";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
@@ -891,6 +892,97 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(prompt).not.toHaveBeenCalled();
 	});
 
+	it("pausing plan mode closes an open review so it cannot approve the paused plan", async () => {
+		await mode.handlePlanModeCommand();
+		const planFilePath = mode.planModePlanFilePath;
+		if (!planFilePath) throw new Error("Plan mode did not set a plan path");
+		await Bun.write(
+			resolveLocalUrlToPath(planFilePath, {
+				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+				getSessionId: () => session.sessionManager.getSessionId(),
+			}),
+			"# Plan\n\nEdit files.",
+		);
+		const prompt = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+		vi.spyOn(mode, "showHookConfirm").mockResolvedValue(true);
+		const opened = Promise.withResolvers<void>();
+		const review = mode.handlePlanApproval(
+			{ planFilePath, planExists: true, title: "Plan" },
+			{ abortTurn: false, onOpened: () => opened.resolve() },
+		);
+		await opened.promise;
+		if (!mode.shell.overlays.open()) throw new Error("Plan review did not open");
+
+		await mode.handlePlanModeCommand();
+		// A late Enter on the stale review would otherwise pick "Approve and execute".
+		term.press("enter");
+		await review;
+
+		expect(mode.planModePaused).toBe(true);
+		expect(mode.shell.overlays.open()).toBe(false);
+		expect(prompt).not.toHaveBeenCalled();
+	});
+
+	it("a dismissed review cannot inject an approved plan after /plan pauses", async () => {
+		mode.stop();
+		await session.dispose();
+
+		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected claude-sonnet-4-5 to exist in registry");
+		const messageCounts: number[] = [];
+		session = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+				convertToLlm,
+				streamFn: (_model, context) => {
+					messageCounts.push(context.messages.length);
+					const response = assistantWithUsage({
+						content: [{ type: "text", text: "The plan has two steps." }],
+						model: model.id,
+					});
+					const stream = new AssistantMessageEventStream();
+					queueMicrotask(() => {
+						stream.push({ type: "start", partial: response });
+						stream.push({ type: "done", reason: "stop", message: response });
+					});
+					return stream;
+				},
+			}),
+			sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+		});
+		await mode.shell.stop();
+		term.dispose();
+		await createMode();
+
+		await mode.handlePlanModeCommand();
+		const planFilePath = mode.planModePlanFilePath;
+		if (!planFilePath) throw new Error("Plan mode did not set a plan path");
+		await Bun.write(
+			resolveLocalUrlToPath(planFilePath, {
+				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+				getSessionId: () => session.sessionManager.getSessionId(),
+			}),
+			"# Plan\n\nEdit files to answer a question.",
+		);
+		const opened = Promise.withResolvers<void>();
+		const review = mode.handlePlanApproval(
+			{ planFilePath, planExists: true, title: "Plan" },
+			{ abortTurn: false, onOpened: () => opened.resolve() },
+		);
+		await opened.promise;
+		if (!mode.shell.overlays.open()) throw new Error("Plan review did not open");
+		term.press("ctrl+c");
+		await review;
+		vi.spyOn(mode, "showHookConfirm").mockResolvedValue(true);
+		await mode.handlePlanModeCommand();
+		await session.prompt("What does the second step mean?");
+		expect(session.sessionManager.buildSessionContext().mode).toBe("plan_paused");
+		expect(messageCounts).toEqual([1]);
+	});
+
 	it("delivers a request to every extension before delivering its synchronous resolution", async () => {
 		const planFilePath = "local://PLAN.md";
 		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
@@ -1390,6 +1482,44 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(await saved.promise).toContain("Saved plan to");
 		expect(clear).not.toHaveBeenCalled();
 		expect(mode.planModeEnabled).toBe(true);
+	});
+
+	it("saves a typed path and shows the destination without dismissing the review", async () => {
+		const planFilePath = "local://PLAN.md";
+		const planContent = "# Draft plan\n\nSave a copy.\n";
+		await Bun.write(
+			resolveLocalUrlToPath(planFilePath, {
+				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+				getSessionId: () => session.sessionManager.getSessionId(),
+			}),
+			planContent,
+		);
+		mode.planModeEnabled = true;
+		mode.planModePlanFilePath = planFilePath;
+		vi.spyOn(session, "generateTitle").mockResolvedValue("Draft");
+
+		const approval = mode.handlePlanApproval({ planFilePath, planExists: true, title: "Draft" });
+		try {
+			await term.waitFor(rows => rows.some(row => row.includes("Plan mode - next step")));
+			for (let i = 0; i < 3; i++) term.press("down");
+			term.press("enter");
+			await term.waitFor(rows => rows.some(row => row.includes("Save plan")));
+			const fileName = "custom-review.md";
+			term.type(fileName);
+			term.press("enter");
+
+			await term.waitFor(rows => rows.some(row => row.includes("Saved plan to") && row.includes(fileName)));
+			expect(await Bun.file(path.join(tempDir.path(), fileName)).text()).toBe(planContent);
+			const screen = term.screen().join("\n");
+			expect(screen).toContain("Plan mode - next step");
+			expect(screen).not.toContain("Save plan");
+			pressKey(mode.shell, "escape");
+			await approval;
+			expect(mode.shell.overlays.open()).toBe(false);
+		} finally {
+			mode.stop();
+			await approval;
+		}
 	});
 
 	it("carries pre-approval local artifacts into the fresh approve-and-execute session", async () => {

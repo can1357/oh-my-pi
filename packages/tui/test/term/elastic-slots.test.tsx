@@ -30,6 +30,7 @@ const CAPABILITIES: TerminalCapabilities = {
 	multiplexer: null,
 	textSizing: false,
 	tsp: false,
+	emoji: { vs16Wide: false, bareFits: false },
 };
 
 type Listener = (columns: number, rows: number) => void;
@@ -342,6 +343,8 @@ describe("append-only contract of the stable head (§2.4, Lemma 4.6(i))", () => 
 		"a loose ordered list taking its next item": "1. one\n\n   continued\n\n2. two\n\nEnd\n",
 		"display math holding a blank line": "$$\nx = 1\n\ny = 2\n$$\n\nafter\n",
 		"indented code continuing after a blank line": "para\n\n    code\n\n    more code\n\nend\n",
+		"a code line growing into a longer closing fence": "```ts\nconst a = 1;\n``\n````\n\nafter\n",
+		"a code line that only starts like a closing fence": "```ts\nconst a = 1;\n```x\nconst b = 2;\n```\n",
 	};
 	for (const name in UNSOUND) {
 		it(`ES-03 never changes a row it reported stable: ${name}`, () => {
@@ -388,6 +391,24 @@ describe("append-only contract of the stable head (§2.4, Lemma 4.6(i))", () => 
 		expect(driver.transcript).toContain("2. two");
 		backend.stop();
 	});
+
+	// #13676: a fenced code block streamed taller than the screen showed none of its early lines,
+	// on screen or in scrollback, until the block ended. Models often open the fence right under
+	// their intro, with no blank line between them.
+	for (const intro of ["Intro.\n\n", "Intro.\n"]) {
+		it(`moves the finished lines of a fenced code block into history while it streams (${JSON.stringify(intro)})`, () => {
+			const code = lines("const v", 30);
+			const text = signal(`${intro}\`\`\`ts\n`);
+			const { driver, backend } = setup(() => <md key="answer" text={text} stream />);
+			for (const line of code) {
+				text.set(`${text()}${line}\n`);
+				backend.renderNow();
+			}
+			const reachable = driver.transcript.map(row => row.trim()).filter(row => row.startsWith("const v"));
+			expect(reachable).toEqual(code);
+			backend.stop();
+		});
+	}
 
 	// AppendStable is enabled only while D > h (§3.4): the separator rows written with the head's
 	// first rows relieve pressure too, and are not counted.

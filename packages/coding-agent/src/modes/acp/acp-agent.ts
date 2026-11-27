@@ -61,9 +61,6 @@ import { MCPManager } from "../../mcp/manager";
 import { reconnectMcpManagerServer } from "../../mcp/oauth-reauth";
 import type { MCPServerConfig } from "../../mcp/types";
 import { loadAllExtensions } from "../../modes/components/extensions/state-manager";
-import { AgentRegistry } from "../../registry/agent-registry";
-import { registerPersistedSubagents } from "../../registry/persisted-agents";
-import type { AgentCostSnapshot } from "../view-model/overlays/agent-hub-projection";
 import { normalizePlanTitle, type PlanApprovalDetails, resolveApprovedPlan } from "../../plan-mode/approved-plan";
 import { autosaveApprovedPlan } from "../../plan-mode/plan-autosave";
 import type { AgentSession, AgentSessionEvent } from "../../session/agent-session";
@@ -76,7 +73,6 @@ import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins
 import { buildAvailableSlashCommands, toAcpAvailableCommands } from "../../slash-commands/available-commands";
 import { DEFAULT_STT_MODEL_KEY, STT_MODELS } from "../../stt/models";
 import { refreshAgentDiscovery } from "../../task";
-import { sumSubagentTreeCost } from "../agent-hub-runtime";
 import { AUTO_THINKING, parseConfiguredThinkingLevel } from "../../thinking/levels";
 import {
 	choiceValue,
@@ -113,7 +109,6 @@ import { cfgDisabledExtensions, cfgExtensions } from "../../extensibility/settin
 import { cfgMcpStartupTimeoutMs } from "../../mcp/settings";
 import { cfgPlanEnabled } from "../../plan-mode/settings";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
-import { SessionObserverRegistry } from "../../task/session-observer-registry";
 import { extensionTheme } from "../../ui/extensions/render-output";
 
 const ACP_DEFAULT_MODE_ID = "default";
@@ -1017,10 +1012,6 @@ export class AcpAgent implements Agent {
 	#clientCapabilities: ClientCapabilities | undefined;
 	#cancelCleanupTimeoutMs = ACP_CANCEL_CLEANUP_TIMEOUT_MS;
 	#blobs = new BlobStore(getBlobsDir());
-	/** ACP has no Agent Hub, so tree costs read each subagent's live session directly. */
-	#subagentObservers = new SessionObserverRegistry();
-	#subagentSessionCosts = new WeakMap<object, AgentCostSnapshot>();
-	#subagentCostHydrations = new Map<string, Promise<void>>();
 
 	constructor(connection: AgentSideConnection, createSession: CreateAcpSession, initialSession?: AgentSession) {
 		this.#connection = connection;
@@ -1100,6 +1091,7 @@ export class AcpAgent implements Agent {
 	async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
 		this.#assertAbsoluteCwd(params.cwd);
 		const record = await this.#createNewSessionRecord(params.cwd, params.mcpServers);
+		await record.session.modelRegistry.awaitBackgroundRefresh();
 		const response: NewSessionResponse = {
 			sessionId: record.protocolSessionId,
 			configOptions: this.#buildConfigOptions(record.session),
@@ -1113,6 +1105,7 @@ export class AcpAgent implements Agent {
 		this.#assertAbsoluteCwd(params.cwd);
 		const record = await this.#loadManagedSession(params.sessionId, params.cwd, params.mcpServers);
 		await this.#replaySessionHistory(record);
+		await record.session.modelRegistry.awaitBackgroundRefresh();
 		const response: LoadSessionResponse = {
 			configOptions: this.#buildConfigOptions(record.session),
 			modes: this.#buildModeState(record.session),
@@ -1141,6 +1134,7 @@ export class AcpAgent implements Agent {
 	async resumeSession(params: ResumeSessionRequest): Promise<ResumeSessionResponse> {
 		this.#assertAbsoluteCwd(params.cwd);
 		const record = await this.#resumeManagedSession(params.sessionId, params.cwd, params.mcpServers ?? []);
+		await record.session.modelRegistry.awaitBackgroundRefresh();
 		const response: ResumeSessionResponse = {
 			configOptions: this.#buildConfigOptions(record.session),
 			modes: this.#buildModeState(record.session),
@@ -1152,6 +1146,7 @@ export class AcpAgent implements Agent {
 	async unstable_forkSession(params: ForkSessionRequest): Promise<ForkSessionResponse> {
 		this.#assertAbsoluteCwd(params.cwd);
 		const record = await this.#forkManagedSession(params);
+		await record.session.modelRegistry.awaitBackgroundRefresh();
 		const response: ForkSessionResponse = {
 			sessionId: record.protocolSessionId,
 			configOptions: this.#buildConfigOptions(record.session),
@@ -1406,7 +1401,7 @@ export class AcpAgent implements Agent {
 
 	async #runPromptOrCommand(record: ManagedSessionRecord, text: string, images: AgentImageContent[]): Promise<void> {
 		const promptTurn = record.promptTurn;
-		const skillResult = await this.#tryRunSkillCommand(record, text);
+		const skillResult = await this.#tryRunSkillCommand(record, text, images);
 		if (skillResult || promptTurn?.cancelRequested) {
 			return;
 		}
@@ -1511,7 +1506,11 @@ export class AcpAgent implements Agent {
 		}
 	}
 
-	async #tryRunSkillCommand(record: ManagedSessionRecord, text: string): Promise<boolean> {
+	async #tryRunSkillCommand(
+		record: ManagedSessionRecord,
+		text: string,
+		images: AgentImageContent[],
+	): Promise<boolean> {
 		if (!record.session.skillsSettings?.enableSkillCommands) {
 			return false;
 		}
@@ -1527,7 +1526,7 @@ export class AcpAgent implements Agent {
 		await record.session.promptCustomMessage(
 			{
 				customType: SKILL_PROMPT_MESSAGE_TYPE,
-				content: built.message,
+				content: images.length > 0 ? [{ type: "text", text: built.message }, ...images] : built.message,
 				display: true,
 				details: built.details,
 				attribution: "user",
@@ -2510,6 +2509,7 @@ export class AcpAgent implements Agent {
 	}
 
 	async #setModelById(session: AgentSession, modelId: string): Promise<void> {
+		await session.modelRegistry.awaitBackgroundRefresh();
 		const model = session.getAvailableModels().find(candidate => this.#toModelId(candidate) === modelId);
 		if (!model) {
 			throw new Error(`Unknown ACP model: ${modelId}`);
@@ -2531,14 +2531,14 @@ export class AcpAgent implements Agent {
 
 	#getAvailableModes(session: AgentSession): Array<{ id: string; name: string; description: string }> {
 		const modes = [{ id: ACP_DEFAULT_MODE_ID, name: "Default", description: "Standard ACP headless mode" }];
-		if (cfgPlanEnabled.get(session.settings)) {
+		// Plan mode ends by `propose`, which a --no-tools session does not register.
+		if (cfgPlanEnabled.get(session.settings) && !session.restrictToolNames) {
 			modes.push({
 				id: ACP_PLAN_MODE_ID,
 				name: "Plan",
 				description: "Read-only planning mode that drafts a plan to a markdown file before any code changes",
 			});
 		}
-		void session;
 		return modes;
 	}
 
@@ -2910,34 +2910,11 @@ export class AcpAgent implements Agent {
 	 * cost adds background children; the task-result sum stays its floor.
 	 */
 	async #sessionTreeCost(record: ManagedSessionRecord): Promise<number> {
-		const sessionManager = record.session.sessionManager;
-		const rootSessionFile = sessionManager.getSessionFile() ?? undefined;
-		await this.#hydratePersistedSubagentCosts(rootSessionFile, sessionManager.isSessionOnDisk());
-		const usage = sessionManager.getUsageStatistics();
-		const treeCost = sumSubagentTreeCost({
-			refs: AgentRegistry.global().list(),
-			observers: this.#subagentObservers,
-			rootSessionFile,
-			sessionCosts: this.#subagentSessionCosts,
-		});
+		// Persisted subagents first, so background spend from before a restart counts after `session/load`.
+		await record.session.hydratePersistedSubagents();
+		const usage = record.session.sessionManager.getUsageStatistics();
+		const treeCost = record.session.getSubagentTreeSpend().cost;
 		return Math.max(0, usage.cost - usage.subagentCost) + Math.max(treeCost, usage.subagentCost);
-	}
-
-	/**
-	 * Register a loaded session's persisted subagent transcripts (with usage
-	 * history) once per root, as the TUI does, so background spend from before a
-	 * restart still counts after `session/load`.
-	 */
-	#hydratePersistedSubagentCosts(rootSessionFile: string | undefined, onDisk: boolean): Promise<void> {
-		if (!rootSessionFile || !onDisk) return Promise.resolve();
-		let hydration = this.#subagentCostHydrations.get(rootSessionFile);
-		if (!hydration) {
-			hydration = registerPersistedSubagents(AgentRegistry.global(), rootSessionFile).catch(error => {
-				logger.warn("Persisted subagent cost hydration failed", { rootSessionFile, error: String(error) });
-			});
-			this.#subagentCostHydrations.set(rootSessionFile, hydration);
-		}
-		return hydration;
 	}
 
 	#cloneUsageStatistics(usage: UsageStatistics): UsageStatistics {
@@ -2953,6 +2930,8 @@ export class AcpAgent implements Agent {
 			premiumRequests: usage.premiumRequests,
 			cost: usage.cost,
 			subagentCost: usage.subagentCost,
+			aiuNano: usage.aiuNano,
+			aiuUnknownCalls: usage.aiuUnknownCalls,
 		};
 	}
 

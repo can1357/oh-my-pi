@@ -176,7 +176,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 				thinkingLevel: undefined,
 			},
 			`${model.provider}/${model.id}`,
-			{ pinFallback: true, apiKey: "test-key", signal: controller.signal },
+			{ pinFallback: true, apiKey: "test-key", signal: controller.signal, cause: { trigger: "request-error" } },
 		);
 
 		await fallbackApplied.promise;
@@ -227,7 +227,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 				thinkingLevel: undefined,
 			},
 			`${model.provider}/${model.id}`,
-			{ pinFallback: true, apiKey: "test-key" },
+			{ pinFallback: true, apiKey: "test-key", cause: { trigger: "request-error" } },
 		);
 
 		await fallbackApplied.promise;
@@ -273,7 +273,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 				thinkingLevel: undefined,
 			},
 			`${model.provider}/${model.id}`,
-			{ pinFallback: true, apiKey: "test-key", signal: controller.signal },
+			{ pinFallback: true, apiKey: "test-key", signal: controller.signal, cause: { trigger: "request-error" } },
 		);
 
 		await eventStarted.promise;
@@ -1619,5 +1619,20 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			]);
 			expect(new TurnRecovery(createHost(model, modelRegistry)).isRetryableReasonlessAbort(withOutput)).toBe(false);
 		});
+	});
+
+	it("does not inherit the main session's active fallback role for an explicitly unpinned owner (#15101)", () => {
+		const selector = `${model.provider}/${model.id}`;
+		const recovery = new TurnRecovery(
+			createHost(model, modelRegistry, {
+				fallbackChains: { default: ["openai/gpt-4o"], advisor: ["openai/gpt-4o-mini"] },
+				modelRoles: { advisor: selector },
+			}),
+			{ initialRetryFallback: { role: "default", originalSelector: selector, originalThinkingLevel: undefined } },
+		);
+		expect(recovery.retryFallbackChainKeys(selector, model, { pinnedRole: undefined, roleHint: "advisor" })).toEqual([
+			"advisor",
+		]);
+		expect(recovery.retryFallbackChainKeys(selector, model, { roleHint: "advisor" })).toEqual(["default", "advisor"]);
 	});
 });

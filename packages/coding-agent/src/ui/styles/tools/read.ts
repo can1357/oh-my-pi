@@ -10,21 +10,14 @@
  */
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import type { Block, PaintContext } from "@oh-my-pi/pi-tui/term/paint";
+import { displayLines } from "@oh-my-pi/pi-tui/text/sanitize";
 import { replaceTabs, wrap } from "@oh-my-pi/pi-tui/text/width";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { ReadTerm } from "../../tools/read";
 import { codeCellRows, markdownCellRows } from "./code-cell";
 import { fileLink } from "./file-common";
-import { frameInner, frameRows, outcomeBg, statusIcon, statusLine } from "./frame";
+import { bracketed, frameInner, frameRows, outcomeBg, statusIcon, statusLine } from "./frame";
 import { defineToolLook, isExpanded, toolProps } from "./look";
-
-/** Display lines of untrusted text: CR progress collapsed to its last segment, tabs expanded. */
-function displayLines(text: string): string[] {
-	return text.split(/\r?\n/).map(line => {
-		const at = line.lastIndexOf("\r");
-		return replaceTabs(sanitizeText(at < 0 ? line : line.slice(at + 1)));
-	});
-}
 
 function paintRead(node: UiNode, cx: PaintContext): Block {
 	const props = toolProps(node);
@@ -58,7 +51,9 @@ function paintRead(node: UiNode, cx: PaintContext): Block {
 		};
 	}
 	const correction = term?.correctedFrom ? ` ${theme.fg("dim", `(corrected from ${term.correctedFrom})`)}` : "";
-	const warnings = (term?.warnings ?? []).map(warning => theme.fg(warning.color, warning.text));
+	const warnings = (term?.warnings ?? []).map(warning =>
+		theme.fg(warning.color, bracketed(theme, replaceTabs(sanitizeText(warning.text)))),
+	);
 	const expanded = isExpanded(props);
 	if (phase === "image") {
 		const details = term?.content ? displayLines(term.content).map(line => theme.fg("toolOutput", line)) : [];
@@ -85,7 +80,7 @@ function paintRead(node: UiNode, cx: PaintContext): Block {
 	if (term?.summarySpans !== undefined)
 		title += ` (summary: ${term.summarySpans} elided span${term.summarySpans === 1 ? "" : "s"})`;
 	if (term?.conflicts)
-		title += ` ${theme.fg("warning", `(⚠ ${term.conflicts} conflict${term.conflicts === 1 ? "" : "s"})`)}`;
+		title += ` ${theme.fg("warning", `(${theme.symbols.symbol("status.warning")} ${term.conflicts} conflict${term.conflicts === 1 ? "" : "s"})`)}`;
 	const output = warnings.length > 0 ? warnings.join("\n") : undefined;
 	if (phase === "markdown") {
 		const md = node.children().find(child => child.kind === "md");

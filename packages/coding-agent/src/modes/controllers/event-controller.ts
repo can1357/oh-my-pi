@@ -2,6 +2,7 @@ import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { batch, isSettled, type Signal, signal } from "@oh-my-pi/pi-tui";
 import { notifyTerminal } from "@oh-my-pi/pi-tui/driver/session";
 import { formatDuration, isRecord, logger, sanitizeText } from "@oh-my-pi/pi-utils";
@@ -51,8 +52,10 @@ import { cfgSpeechEnabled, cfgSpeechMode } from "../../tts/settings";
 import { SpeechEnhancer } from "../../tts/speech-enhancer";
 import { vocalizer } from "../../tts/vocalizer";
 import type { TranscriptBlock } from "../../ui/shell";
+import { toolEditMode } from "../../ui/tools/edit";
 import { PREVIEW_LIMITS, previewLine, TRUNCATE_LENGTHS } from "../../utils/render-utils";
 import { type RunFlowStatus, setRunStatus } from "../../utils/run-status";
+import { reportProgramResume } from "../../utils/program-resume";
 import {
 	cfgCompletionNotify,
 	cfgDisplayCacheMissMarker,
@@ -221,13 +224,6 @@ function renderArgsWithIntent(args: unknown, intent: string | undefined): unknow
 	return { ...args, [INTENT_FIELD]: intent };
 }
 
-/** Edit-like calls whose card computes a diff preview the approval dialog waits for. */
-function hasEditPreview(toolName: string, tool: unknown): boolean {
-	if (toolName === "apply_patch") return true;
-	if (toolName !== "edit") return false;
-	return isRecord(tool) && tool.mode !== undefined;
-}
-
 /** Identity of a reply across retries: when it was sent, by which model, how it ended. */
 function messagePersistenceKey(view: AssistantView): string | undefined {
 	const message = view.message.peek();
@@ -247,6 +243,18 @@ function mergeRules(rules: readonly NotificationRule[], added: readonly Notifica
 	const merged = [...rules];
 	for (const rule of added) if (!merged.some(existing => existing.name === rule.name)) merged.push(rule);
 	return merged;
+}
+
+/**
+ * Human label for a classified account usage/quota limit. Providers often send
+ * these as generic `rate_limit_error` bodies, which read like a transient
+ * throttle; the raw text stays in the transcript message and logs.
+ */
+function usageLimitLabel(errorMessage: string, provider?: string, baseUrl?: string): string {
+	const subject = provider ? `${provider.charAt(0).toUpperCase()}${provider.slice(1)} account` : "Account";
+	const resetMs = extractProviderRetryHint(provider, errorMessage, baseUrl);
+	const reset = resetMs !== undefined && resetMs > 0 ? `; resets in ${formatDuration(resetMs)}` : "";
+	return `${subject} usage limit reached${reset}`;
 }
 
 export class EventController {
@@ -356,10 +364,17 @@ export class EventController {
 	// one persistent poll instead of a stack of "waiting on N jobs" frames —
 	// and sealed in place the moment anything else lands below it.
 	#displaceablePollComponent: PendingTool | undefined = undefined;
-	// Most recent successful `todo` snapshot in the active turn. It stays live
-	// across intervening tool output so a later `todo` update can replace the
-	// old full list; the turn boundary seals the final snapshot as history.
-	#displaceableTodoComponent: PendingTool | undefined = undefined;
+	// Most recent successful `todo` snapshot in the active turn, with the call id it completed
+	// under (a card streamed before its id keeps the placeholder it was created with). Its block
+	// settles like any final card: a live one would hold every later block out of terminal
+	// scrollback. A later `todo` update removes it while none of its rows reached scrollback, else
+	// seals it in place; the turn boundary seals the final snapshot.
+	#displaceableTodo: { readonly tool: PendingTool; readonly id: string } | undefined = undefined;
+	// Call ids of `todo` snapshots a later update found in terminal scrollback and kept there: a
+	// transcript rebuild keeps them too instead of collapsing to the newest snapshot. Cleared by
+	// `resetTranscriptAnchors()`: the rebuild after it rewrites scrollback anyway and collapses to
+	// the newest snapshot, as a resume in a fresh process does.
+	readonly #todoSnapshotsInHistory = new Set<string>();
 	// Most recent TTSR notification block. A new ttsr_triggered event merges its
 	// rules into this block while it is still the (live-region) transcript tail.
 	#lastTtsrNotification:
@@ -431,6 +446,7 @@ export class EventController {
 						settings: session.settings,
 						registry: session.modelRegistry,
 						getSessionProvider: () => session.model?.provider,
+						getSessionId: () => session.sessionId,
 					}
 				: null,
 		);
@@ -465,7 +481,7 @@ export class EventController {
 			agent_start: e => this.#handleAgentStart(e),
 			agent_pause: e => this.#handleAgentPause(e),
 			agent_end: e => this.#handleAgentEnd(e),
-			turn_start: async () => {},
+			turn_start: async () => this.#handleTurnStart(),
 			turn_end: async e => this.#handleTurnEnd(e),
 			message_start: e => this.#handleMessageStart(e),
 			message_update: e => this.#handleMessageUpdate(e),
@@ -506,6 +522,7 @@ export class EventController {
 			model_changed: async () => {
 				vocalizer.enforceProviderPolicy();
 				this.ctx.statusLine.refresh();
+				this.ctx.showActiveModelNotice();
 			},
 			// Header rebuild is owned by InteractiveMode's own session
 			// subscription (mirrors model_changed); nothing to do here.
@@ -640,8 +657,8 @@ export class EventController {
 			const entry = this.ctx.transcriptEntry(block);
 			if (entry?.kind !== "tool" || !entry.tool.call || isSettled(block.node)) continue;
 			const card = entry.tool;
-			// A card holding its final result is done, not orphaned: a displaceable `wait`/`todo`
-			// snapshot stays live on purpose until the next one replaces it.
+			// A card holding its final result is done, not orphaned: a waiting `wait` poll stays
+			// live on purpose until the next call replaces it.
 			if (card.call?.facts.result() !== undefined && !card.call.facts.partial()) continue;
 			const ids = idsByCard.get(card);
 			if (ids === undefined) {
@@ -752,7 +769,7 @@ export class EventController {
 
 	/** A new card for `toolCallId`: an edit-like call's approval waits for its diff preview. */
 	#trackPreview(toolCallId: string, toolName: string, tool: unknown): void {
-		if (hasEditPreview(toolName, tool) && !this.#previewPending.has(toolCallId)) {
+		if (toolEditMode(toolName, tool) && !this.#previewPending.has(toolCallId)) {
 			this.#previewPending.set(toolCallId, Promise.withResolvers<void>());
 		}
 	}
@@ -963,11 +980,7 @@ export class EventController {
 			}));
 		const mediaPath = readMediaPath(result.details);
 		if (images.length === 0 && !mediaPath) return false;
-		if (images.length > 0) {
-			const next = new Map(assistant.toolResultImages.peek());
-			next.set(toolCallId, images);
-			assistant.toolResultImages.set(next);
-		}
+		assistant.setToolResultMedia(toolCallId, { images, mediaPath });
 		// A media-only result (a model, a PDF) still settles through the read group.
 		return images.length > 0 && cfgTerminalShowImages.get(settings);
 	}
@@ -1249,7 +1262,8 @@ export class EventController {
 		this.#ircExpiryTimers.clear();
 		this.#liveIrcCards.clear();
 		this.#displaceablePollComponent = undefined;
-		this.#displaceableTodoComponent = undefined;
+		this.#displaceableTodo = undefined;
+		this.#todoSnapshotsInHistory.clear();
 		this.#lastTtsrNotification = undefined;
 		this.#streamingReveal.stop();
 		this.#toolArgsReveal.stop();
@@ -1362,6 +1376,8 @@ export class EventController {
 			this.#turnStartedAt = undefined;
 		}
 		this.#clearApprovalPreviewGates();
+		// A session that started on a plan model has had no switch to announce it.
+		this.ctx.showActiveModelNotice();
 		// A new turn cannot inherit a foreground tool execution. A dropped
 		// agent_end (for example after a renderer exception) otherwise leaves a
 		// live-only tool card without a persisted result; ordered transcript
@@ -1405,6 +1421,7 @@ export class EventController {
 		this.#setTerminalProgress(true);
 		this.ctx.ensureWorkingRow();
 		setRunStatus({ state: "working" });
+		reportProgramResume();
 	}
 
 	async #handleMessageStart(event: Extract<AgentSessionEvent, { type: "message_start" }>): Promise<void> {
@@ -1622,23 +1639,10 @@ export class EventController {
 		previous.seal();
 	}
 
-	#resolveDisplaceableTodo(nextToolName?: string): void {
-		const previous = this.#displaceableTodoComponent;
-		if (!previous) return;
-		const displaceable = displaceableBy(previous);
-		if (displaceable === undefined) {
-			this.#displaceableTodoComponent = undefined;
-			return;
-		}
-		if (displaceable === nextToolName) {
-			this.#displaceableTodoComponent = undefined;
-			previous.seal();
-			this.ctx.shell.transcript.remove(previous.block);
-			return;
-		}
-		if (nextToolName !== undefined) return;
-		this.#displaceableTodoComponent = undefined;
-		previous.seal();
+	/** The turn is over: the tracked `todo` snapshot is final. */
+	#resolveDisplaceableTodo(): void {
+		this.#displaceableTodo?.tool.seal();
+		this.#displaceableTodo = undefined;
 	}
 
 	/**
@@ -1654,11 +1658,10 @@ export class EventController {
 	takeDisplaceableComponents(): PendingTool[] {
 		const components: PendingTool[] = [];
 		if (this.#displaceablePollComponent) components.push(this.#displaceablePollComponent);
-		if (this.#displaceableTodoComponent && this.#displaceableTodoComponent !== this.#displaceablePollComponent) {
-			components.push(this.#displaceableTodoComponent);
-		}
+		const todo = this.#displaceableTodo?.tool;
+		if (todo && todo !== this.#displaceablePollComponent) components.push(todo);
 		this.#displaceablePollComponent = undefined;
-		this.#displaceableTodoComponent = undefined;
+		this.#displaceableTodo = undefined;
 		return components;
 	}
 
@@ -1671,8 +1674,15 @@ export class EventController {
 	 * Drops the candidate when it is no longer a displaceable todo.
 	 */
 	inheritDisplaceableTodo(tool: PendingTool | null | undefined): void {
-		this.#displaceableTodoComponent = tool && displaceableBy(tool) === "todo" ? tool : undefined;
+		// A rebuilt card is created under its persisted call id.
+		this.#displaceableTodo = tool?.call && displaceableBy(tool) === "todo" ? { tool, id: tool.call.id } : undefined;
 	}
+
+	/** Whether a later update kept the `todo` snapshot of `toolCallId` as history (its rows were in scrollback). */
+	keptTodoSnapshot(toolCallId: string): boolean {
+		return this.#todoSnapshotsInHistory.has(toolCallId);
+	}
+
 	/**
 	 * Adopt the rebuild's replayed user-prompt timestamp so a still-running turn
 	 * keeps its prompt→yield delta. Focus attach and mid-turn rebuilds reset the
@@ -1724,6 +1734,17 @@ export class EventController {
 		} else if (delta.type === "thinking_delta" && mode === "all") {
 			vocalizer.pushDelta(delta.delta);
 		}
+	}
+
+	/**
+	 * A new turn means a fresh model request: drop the previous turn's tool
+	 * intent (e.g. a lone `todo init`) so the row stops naming finished work
+	 * while the provider is still thinking.
+	 */
+	#handleTurnStart(): void {
+		if (this.#lastIntent === undefined || this.#showingAsyncWait) return;
+		this.#lastIntent = undefined;
+		this.ctx.setWorkingMessage();
 	}
 
 	/**
@@ -2153,7 +2174,19 @@ export class EventController {
 				this.#pinnedErrorComponent = lastAssistant;
 				this.#pinnedErrorMessage = event.message;
 				this.#restorePinnedErrorInline = !recoverableEmptyOutput;
-				if (!recoverableEmptyOutput) this.ctx.showPinnedError(event.message.errorMessage);
+				if (!recoverableEmptyOutput) {
+					const usageLimit = AIError.is(AIError.classifyMessage(event.message), AIError.Flag.UsageLimit);
+					const model = this.ctx.viewSession.model;
+					this.ctx.showPinnedError(
+						usageLimit
+							? usageLimitLabel(
+									event.message.errorMessage,
+									event.message.provider,
+									model?.provider === event.message.provider ? model.baseUrl : undefined,
+								)
+							: event.message.errorMessage,
+					);
+				}
 			}
 			this.ctx.statusLine.refresh();
 		}
@@ -2285,18 +2318,24 @@ export class EventController {
 		if (event.toolName === "read") this.#clearReadToolCall(event.toolCallId);
 		// Mirrors the displacement bookkeeping in `#handleToolExecutionEnd`:
 		// a successful snapshot supersedes the previous live panel.
-		if (event.toolName === "todo" && displaceableBy(component) === "todo") this.#adoptTodoSnapshot(component);
+		if (event.toolName === "todo" && displaceableBy(component) === "todo") {
+			this.#adoptTodoSnapshot(component, event.toolCallId);
+		}
 	}
 
-	/** A successful `todo` snapshot replaces the previous live one. */
-	#adoptTodoSnapshot(tool: PendingTool): void {
-		const previous = this.#displaceableTodoComponent;
-		if (previous && previous !== tool && displaceableBy(previous) !== undefined) {
-			this.#displaceableTodoComponent = undefined;
-			previous.seal();
-			this.ctx.shell.transcript.remove(previous.block);
+	/**
+	 * A successful `todo` snapshot (completed as `toolCallId`) replaces the previous one. Rows of
+	 * it already in scrollback stay as history: removing them would rewrite all of it.
+	 */
+	#adoptTodoSnapshot(tool: PendingTool, toolCallId: string): void {
+		const previous = this.#displaceableTodo;
+		if (previous && previous.tool !== tool && displaceableBy(previous.tool) !== undefined) {
+			previous.tool.seal();
+			const transcript = this.ctx.shell.transcript;
+			if (!transcript.retired(previous.tool.block)) transcript.remove(previous.tool.block);
+			else this.#todoSnapshotsInHistory.add(previous.id);
 		}
-		this.#displaceableTodoComponent = tool;
+		this.#displaceableTodo = { tool, id: toolCallId };
 	}
 
 	#applyToolCompletion(
@@ -2394,7 +2433,7 @@ export class EventController {
 					// Successful todo update supersedes the prior live snapshot. A failed
 					// follow-up never reaches this branch (errored results are not
 					// displaceable), so the last-good panel stays on screen.
-					this.#adoptTodoSnapshot(component);
+					this.#adoptTodoSnapshot(component, event.toolCallId);
 				}
 			} else if (!this.#toolTimelineComponents.has(event.toolCallId)) {
 				// No component yet: the async streamed-block handler lost the race
@@ -2510,6 +2549,7 @@ export class EventController {
 			if (!runActive) setRunStatus(this.#settledRunStatus(event));
 			await this.#finishAgentEnd(event);
 		}
+		reportProgramResume();
 		// This run may be extension-started while the main input loop remains
 		// asleep. Do not await session-idle from its own event.
 		if (this.ctx.shutdownRequested) this.ctx.requestShutdown();
@@ -2519,9 +2559,10 @@ export class EventController {
 	 * When the main session's run is paused waiting only on outside sources, the
 	 * working row says so and names the jobs and child agents, instead of
 	 * repeating the last tool call's intent. The label is live, so a job
-	 * cancelled without a wake (`/jobs kill`) leaves the row at once. A user
-	 * prompt's own completion may have torn its loader down, so mount one for
-	 * the wait; the next loop or the run's `agent_end` takes it over.
+	 * cancelled without a wake (`/jobs kill`) leaves the row at once. Shown
+	 * when the run yields into the wait (its `agent_pause`, a focus return), and
+	 * again by {@link restoreAsyncWait}; the next loop or the run's `agent_end`
+	 * takes it over.
 	 */
 	showAsyncWait(): void {
 		const session = this.ctx.session;
@@ -2529,6 +2570,15 @@ export class EventController {
 		this.#showingAsyncWait = true;
 		this.ctx.ensureWorkingRow();
 		this.ctx.setWorkingMessage(() => formatAsyncWaitLabel(session.wakeSources));
+	}
+
+	/**
+	 * Put the wait row back after another row (an error, a maintenance step, the
+	 * prompt's own settle) came down while a yielded run still waits. A gap the
+	 * run did not yield in (a continuation between its loops) gets no wait label.
+	 */
+	restoreAsyncWait(): void {
+		if (this.#showingAsyncWait) this.showAsyncWait();
 	}
 
 	/** The main run is paused waiting only on outside sources, and the interrupt key would end that wait. */
@@ -2752,11 +2802,28 @@ export class EventController {
 		// leaves no error in the transcript. The retry row names the reason;
 		// `auto_retry_end` marks the attempt recovered or superseded, or restores
 		// its error when the saga fails without accounting for it.
+		const model = this.ctx.viewSession.model;
+		const provider = this.#pinnedErrorMessage?.provider ?? model?.provider;
 		this.#pinnedErrorComponent = undefined;
 		this.#pinnedErrorMessage = undefined;
 		this.#restorePinnedErrorInline = true;
 		this.ctx.clearPinnedError();
-		const reason = previewLine(sanitizeText(event.errorMessage), TRUNCATE_LENGTHS.CONTENT);
+		const usageLimit =
+			event.errorId !== undefined
+				? AIError.is(event.errorId, AIError.Flag.UsageLimit)
+				: AIError.isUsageLimit(event.errorMessage);
+		const reason = previewLine(
+			sanitizeText(
+				usageLimit
+					? usageLimitLabel(
+							event.errorMessage,
+							provider,
+							model?.provider === provider ? model?.baseUrl : undefined,
+						)
+					: event.errorMessage,
+			),
+			TRUNCATE_LENGTHS.CONTENT,
+		);
 		// Replaces the turn's row with the countdown.
 		this.ctx.showWorking("retry", {
 			label: `Retrying (${event.attempt}/${event.maxAttempts})`,
@@ -2871,7 +2938,7 @@ export class EventController {
 			ttsrBlock(
 				rules,
 				() => this.ctx.toolOutputExpanded,
-				() => !this.ctx.hideToolActivity,
+				() => this.ctx.toolActivity !== "hidden",
 			),
 		);
 		this.#lastTtsrNotification = { block, rules };
@@ -2879,7 +2946,7 @@ export class EventController {
 
 	async #handleTodoReminder(event: Extract<AgentSessionEvent, { type: "todo_reminder" }>): Promise<void> {
 		const { todos, attempt, maxAttempts } = event;
-		this.ctx.present(() => todoReminderBlock(todos, attempt, maxAttempts, () => !this.ctx.hideToolActivity));
+		this.ctx.present(() => todoReminderBlock(todos, attempt, maxAttempts, () => this.ctx.toolActivity !== "hidden"));
 	}
 	async #handleTodoAutoClear(_event: Extract<AgentSessionEvent, { type: "todo_auto_clear" }>): Promise<void> {
 		await this.ctx.reloadTodos();

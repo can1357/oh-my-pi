@@ -8,6 +8,7 @@
  * Terminal look: `yield` (`src/ui/styles/tools/yield.ts`).
  */
 import type { JSXNode } from "@oh-my-pi/pi-tui";
+import { isRecord } from "@oh-my-pi/pi-utils";
 import type { ToolPresenter, ToolResult, ToolView } from "./contract";
 import { countText, ErrorText, NoteText } from "./agent-common";
 import { resultText } from "./default";
@@ -31,10 +32,6 @@ export interface YieldDetails {
 	readonly status?: string;
 	readonly error?: string;
 	readonly schemaOverridden?: boolean;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function sizeMeta(data: unknown): string | undefined {

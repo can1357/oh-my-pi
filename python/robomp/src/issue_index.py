@@ -13,12 +13,15 @@ Freshness comes from two directions:
 `parse_search_query` translates the GitHub-search-flavored tool query into the
 structured filters `Database.search_issue_index` takes, so the agent keeps one
 query language whether the lookup is served locally or remotely.
+`duplicate_candidates` runs the same index against a new issue's own text so
+the triage kickoff lists likely originals before the agent searches at all.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -28,6 +31,8 @@ from robomp.db import Database
 from robomp.github_backend import GitHubBackend
 from robomp.github_client import (
     GitHubError,
+    IssueIndexEntry,
+    IssueInfo,
     index_entry_from_issue_object,
     index_entry_from_pr_object,
 )
@@ -39,6 +44,12 @@ log = logging.getLogger(__name__)
 _SYNC_OVERLAP = timedelta(minutes=2)
 _PAGE_SIZE = 100
 _MAX_PAGES_PER_TICK = 30
+# Duplicate-candidate query: distinct words of the title plus the start of the
+# body. On oh-my-pi's backlog, 32 terms put the known original in the top 8 for
+# 53 of 60 duplicates; longer queries only added noise.
+_CANDIDATE_TERM_RE = re.compile(r"\w{3,}")
+_CANDIDATE_BODY_CHARS = 2000
+_CANDIDATE_MAX_TERMS = 32
 
 
 @dataclass(slots=True, frozen=True)
@@ -97,6 +108,31 @@ def parse_search_query(query: str) -> ParsedSearchQuery:
         label=label,
         author=author,
     )
+
+
+def entry_state(entry: IssueIndexEntry) -> str:
+    """Display state of an index row: `merged`, `closed (duplicate)`, `open`, …"""
+    if entry.is_pull_request and entry.merged_at:
+        return "merged"
+    if entry.state_reason:
+        return f"{entry.state} ({entry.state_reason})"
+    return entry.state
+
+
+def duplicate_candidates(db: Database, issue: IssueInfo, *, limit: int = 8) -> list[IssueIndexEntry] | None:
+    """Indexed issues/PRs whose text best matches `issue`, best first, excluding `issue` itself.
+
+    Returns `None` before the repo's first index backfill, when an empty list
+    would falsely claim there are no matches.
+    """
+    if db.issue_index_watermark(issue.repo) is None:
+        return None
+    text = f"{issue.title}\n{issue.body[:_CANDIDATE_BODY_CHARS]}".lower()
+    terms = tuple(dict.fromkeys(_CANDIDATE_TERM_RE.findall(text)))[:_CANDIDATE_MAX_TERMS]
+    if not terms:
+        return []
+    entries = db.search_issue_index(issue.repo, keywords=terms, limit=limit + 1)
+    return [e for e in entries if e.number != issue.number][:limit]
 
 
 def ingest_webhook_payload(db: Database, repo: str, event_type: str, payload: Mapping[str, object]) -> bool:
@@ -246,6 +282,8 @@ class IssueIndexSync:
 __all__ = [
     "IssueIndexSync",
     "ParsedSearchQuery",
+    "duplicate_candidates",
+    "entry_state",
     "ingest_webhook_payload",
     "parse_search_query",
 ]

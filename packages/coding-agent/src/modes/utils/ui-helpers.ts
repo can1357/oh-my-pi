@@ -3,6 +3,7 @@ import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { providerActiveNotice } from "@oh-my-pi/pi-catalog/compat/auth";
 import { jsx } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
 import { settings } from "../../config/settings";
@@ -23,6 +24,7 @@ import { ServedModelTracker } from "../../session/transcript/served-model-marker
 import {
 	isSettledJobFrame,
 	parksAsBackground,
+	readMediaPath,
 	settleWithJobFrame,
 	toolRenderName,
 } from "../../session/transcript/tool-execution";
@@ -36,7 +38,7 @@ import {
 import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
 import { parseSlashCommand } from "../../slash-commands/helpers/parse";
 import type { Shell, TranscriptBlock } from "../../ui/shell";
-import { NoticeLine, StatusNotice, StrippedToolCalls } from "../../ui/transcript/messages/notices";
+import { NoticeLine, StatusBlock, StatusNotice, StrippedToolCalls } from "../../ui/transcript/messages/notices";
 import { ToolActivity } from "../../ui/transcript/messages/panel";
 import { normalizeBlobExtension } from "../../utils/image-format";
 import { imageAttachmentSource } from "../../utils/image-source";
@@ -82,7 +84,7 @@ export type ReplayTarget = Pick<
 	| "statusLine"
 	| "updateEditorBorderColor"
 	| "settings"
-	| "hideToolActivity"
+	| "toolActivity"
 	| "transcriptBlocks"
 	| "present"
 	| "presentAssistant"
@@ -97,7 +99,13 @@ export type ReplayTarget = Pick<
 };
 
 /** What a history replay reads of a session context. */
-export type ReplayContext = Pick<SessionContext, "messages" | "cacheMissExplainedAt" | "nextCacheMissExplained">;
+export type ReplayContext = Pick<SessionContext, "messages" | "cacheMissExplainedAt" | "nextCacheMissExplained"> & {
+	/**
+	 * The messages are a later part of the session (a branch's tail, a sibling branch below its
+	 * fork): the run they open in may have started above them.
+	 */
+	readonly clipped?: boolean;
+};
 
 const TRANSCRIPT_RENDER_CHUNK_MESSAGES = 32;
 const TRANSCRIPT_RENDER_CHUNK_MS = 8;
@@ -241,6 +249,8 @@ export class UiHelpers {
 	#lastStatus: { readonly block: TranscriptBlock; readonly message: string } | undefined;
 	/** Status, warning and error lines: a keyed status updates in place only with these below it. */
 	readonly #notices = new WeakSet<TranscriptBlock>();
+	/** Session and model the last active-model notice named; cleared while no declaring provider serves. */
+	#activeModelNoticeKey: string | undefined;
 
 	constructor(private ctx: InteractiveModeContext) {}
 
@@ -281,12 +291,24 @@ export class UiHelpers {
 		}
 
 		const collapse = options?.collapse ?? true;
-		const last = this.#lastStatus;
-		if (collapse && last && transcript.blocks().at(-1) === last.block && !transcript.retired(last.block)) {
-			transcript.remove(last.block);
-		}
+		if (collapse) this.#withdrawLastStatus();
 		const block = this.#presentNotice(factory);
 		this.#lastStatus = collapse ? { block, message } : undefined;
+	}
+
+	/** Withdraw the last collapsible status (a progress line such as "Transcribing...") once it is moot. */
+	clearStatus(): void {
+		this.#withdrawLastStatus();
+		this.#lastStatus = undefined;
+	}
+
+	/** Remove the last collapsible status while nothing came after it in the transcript. */
+	#withdrawLastStatus(): void {
+		const transcript = this.ctx.shell.transcript;
+		const last = this.#lastStatus;
+		if (last && transcript.blocks().at(-1) === last.block && !transcript.retired(last.block)) {
+			transcript.remove(last.block);
+		}
 	}
 
 	#presentNotice(factory: () => ReturnType<typeof jsx>): TranscriptBlock {
@@ -454,6 +476,9 @@ export class UiHelpers {
 		// a run gets the turn's totals, and with them the native footer under its
 		// answer (`⧉ · 12.4s · 19K tok this turn`) whose Copy copies the answer.
 		const turnUsage = new TurnUsageTally();
+		// A clipped replay can open partway through a run: until a run starts in view, the tally would
+		// cover only the replayed part, so that run gets no totals.
+		let runStartUnseen = sessionContext.clipped === true;
 		const flushPendingUsage = () => {
 			if (!pendingUsage) return;
 			const usage = pendingUsage;
@@ -511,7 +536,10 @@ export class UiHelpers {
 			if (nextToolName === "todo") {
 				todoSnapshot = null;
 				previous.seal();
-				transcript.remove(previous.block);
+				// One a live update found in scrollback stayed there as history: the rebuild keeps it too.
+				const kept =
+					previous.call !== undefined && ctx.eventController?.keptTodoSnapshot(previous.call.id) === true;
+				if (!kept) transcript.remove(previous.block);
 				return;
 			}
 			if (nextToolName !== undefined) return;
@@ -580,7 +608,7 @@ export class UiHelpers {
 					if (renderToolName === "read" && readArgsCollapseIntoGroup(content.arguments)) {
 						if (errorMessage) {
 							const group = ensureReadGroup();
-							group.updateArgs(content.arguments, content.id);
+							group.updateArgs(content.arguments, content.id, message.timestamp);
 							group.updateResult(
 								{ content: [{ type: "text", text: errorMessage }], isError: true },
 								false,
@@ -588,7 +616,7 @@ export class UiHelpers {
 							);
 						} else if (afterToolSegment) {
 							const group = ensureReadGroup();
-							group.updateArgs(content.arguments, content.id);
+							group.updateArgs(content.arguments, content.id, message.timestamp);
 							ctx.pendingTools.set(content.id, group);
 							readToolCallAssistants.set(content.id, assistant);
 							if (ctx.viewSession.isStreaming)
@@ -622,6 +650,7 @@ export class UiHelpers {
 						tool,
 						id: content.id,
 						cwd: ctx.viewSession.sessionManager.getCwd(),
+						timestamp: message.timestamp,
 					});
 					// Persisted args are final: settle a reply's text now. Cards keep their own args-complete timing.
 					if (!partialJson && pending.reply) pending.setArgsComplete(content.id);
@@ -643,11 +672,14 @@ export class UiHelpers {
 				const strippedToolCalls = (message as AgentMessage & StrippedToolCallsMarker).strippedToolCalls ?? 0;
 				if (strippedToolCalls > 0) {
 					ctx.present(() =>
-						jsx(StrippedToolCalls, { count: strippedToolCalls, visible: () => !ctx.hideToolActivity }),
+						jsx(StrippedToolCalls, { count: strippedToolCalls, visible: () => ctx.toolActivity !== "hidden" }),
 					);
 				}
 				const turnSummary = turnUsage.add(message, turnStartedAt);
-				if (turnSummary) (lastSegment ?? assistant).turnUsage.set(turnSummary);
+				if (turnSummary && !runStartUnseen) (lastSegment ?? assistant).turnUsage.set(turnSummary);
+				// The tally starts over after a run's last reply, so the next run counts whole even when nothing
+				// marks its start (an agent-attributed custom message resets nothing below).
+				if (message.stopReason !== "toolUse") runStartUnseen = false;
 				pendingUsage =
 					cfgDisplayShowTokenUsage.get(ctx.settings) && assistantUsageIsBilled(message.usage)
 						? message.usage
@@ -673,10 +705,10 @@ export class UiHelpers {
 					const images: ImageContent[] = message.content.filter(
 						(content): content is ImageContent => content.type === "image",
 					);
-					if (images.length > 0 && assistant) {
-						const next = new Map(assistant.toolResultImages.peek());
-						next.set(message.toolCallId, images);
-						assistant.toolResultImages.set(next);
+					const mediaPath = readMediaPath(message.details);
+					if (images.length > 0 || mediaPath)
+						assistant?.setToolResultMedia(message.toolCallId, { images, mediaPath });
+					if (assistant && images.length > 0) {
 						const hasText = message.content.some(content => content.type === "text");
 						if (!hasText && cfgTerminalShowImages.get(settings)) {
 							if (pendingRead) {
@@ -692,7 +724,8 @@ export class UiHelpers {
 					if (!pending) {
 						const group = ensureReadGroup();
 						const args = readToolCallArgs.get(message.toolCallId);
-						if (args) group.updateArgs(args, message.toolCallId);
+						// The read joins the group with its result: dated by the result.
+						if (args) group.updateArgs(args, message.toolCallId, message.timestamp);
 						pending = group;
 					}
 					pending.updateResult(message, false, message.toolCallId);
@@ -725,6 +758,8 @@ export class UiHelpers {
 					}
 					if (isBackground && !settled) {
 						pending.parkAsBackground();
+						// The call has returned; only the job is still running.
+						transcript.settle(pending.block);
 						backgroundCallIds.add(message.toolCallId);
 					} else {
 						ctx.pendingTools.delete(message.toolCallId);
@@ -753,6 +788,7 @@ export class UiHelpers {
 				if (message.role === "user" && message.attribution !== "agent") {
 					turnStartedAt = message.timestamp;
 					turnUsage.reset();
+					runStartUnseen = false;
 				}
 				// A synthetic developer message initiates a fresh run (auto-continue,
 				// /goal, approved plan): replay must not inherit the preceding user
@@ -764,10 +800,12 @@ export class UiHelpers {
 					// turn's own prompt: anchor the delta to it instead of clearing.
 					turnStartedAt = message.userInitiated ? message.timestamp : undefined;
 					turnUsage.reset();
+					runStartUnseen = false;
 				}
 				if (message.role === "custom" && isUserTurnInitiator(message as CustomMessage)) {
 					turnStartedAt = message.timestamp;
 					turnUsage.reset();
+					runStartUnseen = false;
 				}
 				this.addMessageToChat(message, undefined, ctx);
 			}
@@ -779,10 +817,10 @@ export class UiHelpers {
 		sealReadGroup();
 		// A trailing waiting poll is final history on rebuild.
 		resolveWaitingPoll();
-		// A trailing todo snapshot is live state, not history: when the rebuild
-		// runs mid-turn, hand it back to the controller so a follow-up `todo`
-		// update keeps displacing instead of stacking. Idle rebuilds (resume /
-		// compaction) seal it so it retires as history.
+		// A trailing todo snapshot may still be replaced: when the rebuild runs
+		// mid-turn, hand it back to the controller so a follow-up `todo` update
+		// keeps displacing instead of stacking. Idle rebuilds (resume /
+		// compaction) seal it as final.
 		if (todoSnapshot && ctx.viewSession.isStreaming) {
 			ctx.eventController?.inheritDisplaceableTodo(todoSnapshot);
 			todoSnapshot = null;
@@ -1033,11 +1071,37 @@ export class UiHelpers {
 		this.#presentNotice(() => jsx(NoticeLine, { tone: "error", message: errorMessage }));
 	}
 
+	/**
+	 * The line a provider declares for its models (`active-notice`), such as "Using your Acme Pro
+	 * plan · Acme 2", once per model the viewed session switches to or first runs.
+	 */
+	showActiveModelNotice(): void {
+		const session = this.ctx.viewSession;
+		const model = session.model;
+		const notice = model ? providerActiveNotice(model.provider) : undefined;
+		const key =
+			model && notice ? `${session.sessionManager.getSessionId()}\n${model.provider}/${model.id}` : undefined;
+		if (key === this.#activeModelNoticeKey) return;
+		this.#activeModelNoticeKey = key;
+		if (!model || !notice) return;
+		const text = `${notice} · ${model.name}`;
+		this.#presentNotice(() =>
+			jsx(StatusBlock, {
+				rows: [
+					{
+						parts: [{ text, color: "dim" }],
+						native: { tone: "info", icon: `provider:${model.provider}`, message: [{ t: text, s: "dim" }] },
+					},
+				],
+			}),
+		);
+	}
+
 	showWarning(warningMessage: string, options?: { hideWithToolActivity?: boolean }): void {
 		const line = () => jsx(NoticeLine, { tone: "warning", message: warningMessage });
 		this.#presentNotice(
 			options?.hideWithToolActivity
-				? () => jsx(ToolActivity, { visible: () => !this.ctx.hideToolActivity, children: line() })
+				? () => jsx(ToolActivity, { visible: () => this.ctx.toolActivity !== "hidden", children: line() })
 				: line,
 		);
 	}

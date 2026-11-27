@@ -39,6 +39,7 @@ from robomp.sandbox import (
     _share_git_metadata_with_slots,
     _slot_pids,
     _slot_subprocess_kwargs,
+    _sweep_slot_tmp,
     make_branch,
     rename_workspace_branch,
     workspace_key,
@@ -710,10 +711,32 @@ def test_reap_slot_kills_slot_uid_on_linux_root(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr("robomp.sandbox.os.geteuid", lambda: 0)
     monkeypatch.setattr("robomp.sandbox._slot_pids", lambda _uid: (111, 222))
     monkeypatch.setattr("robomp.sandbox.os.kill", lambda pid, sig: calls.append((pid, sig)))
+    swept: list[int] = []
+    monkeypatch.setattr("robomp.sandbox._sweep_slot_tmp", swept.append)
 
     _reap_slot(2001)
 
     assert calls == [(111, signal.SIGKILL), (222, signal.SIGKILL)]
+    assert swept == [2001]
+
+
+def test_sweep_slot_tmp_removes_only_owner_entries_without_following_symlinks(tmp_path: Path) -> None:
+    shared_tmp = tmp_path / "tmp"
+    (shared_tmp / "draft-dir").mkdir(parents=True)
+    (shared_tmp / "c.md").write_text("stale draft", encoding="utf-8")
+    (shared_tmp / "draft-dir" / "pr-body.md").write_text("stale body", encoding="utf-8")
+    outside = tmp_path / "workspace"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("not in /tmp", encoding="utf-8")
+    (shared_tmp / "escape").symlink_to(outside, target_is_directory=True)
+
+    _sweep_slot_tmp(os.getuid() + 1, shared_tmp)
+    assert sorted(p.name for p in shared_tmp.iterdir()) == ["c.md", "draft-dir", "escape"]
+
+    _sweep_slot_tmp(os.getuid(), shared_tmp)
+    assert shared_tmp.is_dir()
+    assert list(shared_tmp.iterdir()) == []
+    assert (outside / "keep.txt").read_text(encoding="utf-8") == "not in /tmp"
 
 
 def test_prepare_slot_tmpdir_mkdirs_without_chown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

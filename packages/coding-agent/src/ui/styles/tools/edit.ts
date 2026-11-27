@@ -333,10 +333,11 @@ function partRows(state: PaintState, part: EditBodyPart, inner: number, width: n
 		case "files": {
 			const rows: string[] = [];
 			for (const file of part.files) {
-				if (!file.diff && !file.error) continue;
+				if (!file.diff && !file.error && !file.notice) continue;
 				// The rule's dim color opened on the blank rows before it: the rule itself reads plain.
 				rows.push(...(rows.length === 0 ? ["", ""] : [""]), `── ${headPath(file.path)} ──`);
 				if (file.error) rows.push(theme.fg("error", replaceTabs(file.error)));
+				else if (file.notice) rows.push(theme.fg("dim", replaceTabs(file.notice)));
 				else rows.push(...streamRows(theme, file.diff!, file.path, state.expanded, inner).slice(1));
 			}
 			return rows;

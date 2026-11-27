@@ -22,13 +22,23 @@ import {
 	createAcpExtensionUiContext,
 } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-agent";
 import type { PlanModeState } from "@oh-my-pi/pi-coding-agent/plan-mode/state";
+import { sumSubagentTreeCost } from "@oh-my-pi/pi-coding-agent/modes/agent-hub-runtime";
+import type {
+	AgentCostSnapshot,
+	AgentTreeSpend,
+} from "@oh-my-pi/pi-coding-agent/modes/view-model/overlays/agent-hub-projection";
 import { type AgentRef, AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { registerPersistedSubagents } from "@oh-my-pi/pi-coding-agent/registry/persisted-agents";
 import type {
 	AgentSession,
 	AgentSessionEvent,
 	UsageFallbackConfirmation,
 } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { SILENT_ABORT_MARKER, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
+import {
+	type CustomMessage,
+	SILENT_ABORT_MARKER,
+	USER_INTERRUPT_LABEL,
+} from "@oh-my-pi/pi-coding-agent/session/messages";
 import type { ClientBridge } from "@oh-my-pi/pi-coding-agent/session/client-bridge";
 import { closeSessionIndex } from "@oh-my-pi/pi-coding-agent/session/session-index";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -175,7 +185,7 @@ class FakeAgentSession {
 		}
 		return true;
 	}
-	customMessages: Array<{ customType: string; content: string; details?: unknown }> = [];
+	customMessages: Array<{ customType: string; content: CustomMessage["content"]; details?: unknown }> = [];
 	customMessageOptions: Array<{ streamingBehavior?: "steer" | "followUp"; queueChipText?: string } | undefined> = [];
 	skillsSettings = { enableSkillCommands: true };
 	skills: Array<{ name: string; description: string; filePath: string; baseDir: string; source: string }> = [];
@@ -214,9 +224,14 @@ class FakeAgentSession {
 		return this.sessionManager.getHeader()?.title ?? `Session ${this.sessionId}`;
 	}
 
-	get modelRegistry(): { getApiKey: (model: Model) => Promise<string>; authStorage?: AuthStorage } {
+	get modelRegistry(): {
+		getApiKey: (model: Model) => Promise<string>;
+		awaitBackgroundRefresh: () => Promise<void>;
+		authStorage?: AuthStorage;
+	} {
 		return {
 			getApiKey: async (_model: Model) => "test-key",
+			awaitBackgroundRefresh: async () => {},
 			...(this.authStorage ? { authStorage: this.authStorage } : {}),
 		};
 	}
@@ -318,7 +333,7 @@ class FakeAgentSession {
 	}
 
 	async promptCustomMessage(
-		message: { customType: string; content: string; details?: unknown },
+		message: { customType: string; content: CustomMessage["content"]; details?: unknown },
 		options?: { streamingBehavior?: "steer" | "followUp"; queueChipText?: string },
 	): Promise<void> {
 		this.customMessages.push(message);
@@ -344,6 +359,21 @@ class FakeAgentSession {
 
 	async refreshMCPTools(_tools: unknown[]): Promise<void> {}
 
+	#subagentSpend = new WeakMap<object, AgentCostSnapshot>();
+	#subagentHydration: Promise<void> | undefined;
+	hydratePersistedSubagents(): Promise<void> {
+		const rootSessionFile = this.sessionManager.getSessionFile();
+		if (!rootSessionFile || !this.sessionManager.isSessionOnDisk()) return Promise.resolve();
+		this.#subagentHydration ??= registerPersistedSubagents(AgentRegistry.global(), rootSessionFile);
+		return this.#subagentHydration;
+	}
+	getSubagentTreeSpend(): AgentTreeSpend {
+		return sumSubagentTreeCost({
+			refs: AgentRegistry.global().list(),
+			rootSessionFile: this.sessionManager.getSessionFile(),
+			sessionCosts: this.#subagentSpend,
+		});
+	}
 	getContextUsage(): undefined {
 		return undefined;
 	}
@@ -1395,14 +1425,14 @@ describe("ACP agent", () => {
 				speechSpeed: "speech.speed",
 			},
 			defaults: {
-				speechToTextModel: "local/parakeet-tdt-0.6b-v3",
+				speechToTextModel: "local/fluid-speech-pro",
 				textToSpeechModel: "local/phonon-31m",
 				voice: "harper",
 				speed: 1,
 			},
 			speechToText: {
 				setting: "modelRoles.dictation",
-				defaultValue: "local/parakeet-tdt-0.6b-v3",
+				defaultValue: "local/fluid-speech-pro",
 			},
 			textToSpeech: {
 				modelSetting: "modelRoles.speech",
@@ -2683,6 +2713,39 @@ describe("ACP agent", () => {
 		expect(customMessage.content).toContain(`[Skill directory: ${skillDir}]`);
 		expect(customMessage.content).toContain("User: extra context");
 		expect(session.customMessageOptions[0]).toEqual({ streamingBehavior: "steer" });
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("keeps prompt image blocks on a skill command's custom message", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId);
+		if (!session) throw new Error("expected ACP session to exist after newSession");
+		const skillDir = path.join(harness.cwdA, ".skills", "probe");
+		const skillPath = path.join(skillDir, "SKILL.md");
+		await fs.promises.mkdir(skillDir, { recursive: true });
+		await fs.promises.writeFile(skillPath, "---\ndescription: Probe skill\n---\n# Probe\nName the color.\n");
+		session.skills = [
+			{ name: "probe", description: "Probe skill", filePath: skillPath, baseDir: skillDir, source: "test" },
+		];
+
+		await harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000002",
+			prompt: [
+				{ type: "image", mimeType: "image/png", data: "cmVk" },
+				{ type: "text", text: "/skill:probe notes.ts. What color is the image?" },
+			],
+		} as PromptRequest);
+
+		expect(session.promptCalls).toEqual([]);
+		const content = session.customMessages[0]?.content;
+		if (!Array.isArray(content)) throw new Error("expected skill message content to carry the image block");
+		expect(content[0]).toMatchObject({ type: "text" });
+		expect(content[0]?.type === "text" && content[0].text).toContain("User: notes.ts. What color is the image?");
+		expect(content.slice(1)).toEqual([{ type: "image", mimeType: "image/png", data: "cmVk" }]);
 
 		harness.abortController.abort();
 		await Bun.sleep(0);

@@ -5,31 +5,26 @@ import type { CompactionPreparation } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ImageContent, Message, Model, SimpleStreamOptions, TextContent } from "@oh-my-pi/pi-ai";
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
-import type { ModelRegistry } from "../config/model-registry";
-import { formatModelString } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import { InternalUrlRouter, type LocalProtocolOptions } from "../internal-urls";
 import { deobfuscateSessionContext, obfuscateMessages } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import { stripPendingSecretPlaceholderSuffix } from "../secrets/placeholder";
 import { normalizeModelContextImages } from "../utils/image-loading";
+import type { ImageDescriptions } from "../utils/image-vision-fallback";
 import { imageAttachmentSource } from "../utils/image-source";
-import { describeAttachedImagesForTextModel, shouldDescribeImagesForTextModel } from "../utils/image-vision-fallback";
 import { blobExtensionForImageMimeType } from "../utils/image-format";
-import { type CustomMessage, convertToLlm } from "./messages";
-import { IMAGE_ATTACHMENT_DESCRIPTION_TYPE } from "./queued-messages";
+import { convertToLlm } from "./messages";
 import {
 	getReadableCompactionEntry,
 	type SessionContext,
 	type TranscriptSessionContextOptions,
 } from "./session-context";
-import type { CostGateApi } from "./cost-gate";
 import type { SessionManager } from "./session-manager";
 
 import {
 	cfgModelLoopGuardCheckAssistantContent,
 	cfgModelLoopGuardEnabled,
-	cfgProvidersAntigravityEndpoint,
 	cfgProvidersMaxInFlightRequests,
 	cfgProvidersOpenrouterVariant,
 	validateProviderMaxInFlightRequests,
@@ -42,14 +37,12 @@ export interface SessionProviderBoundaryHost {
 	agent: Agent;
 	sessionManager: SessionManager;
 	settings: Settings;
-	modelRegistry: ModelRegistry;
 	model(): Model | undefined;
-	sessionId(): string;
-	/** The session tree's current cost gate. */
-	costGate?(): CostGateApi | undefined;
 	localProtocolOptions(): LocalProtocolOptions;
+	/** Input-image descriptions for models that cannot see images; side requests carrying history as text use them. */
+	imageDescriptions: ImageDescriptions | undefined;
 	transformContext(messages: AgentMessage[], signal?: AbortSignal): AgentMessage[] | Promise<AgentMessage[]>;
-	convertToLlm(messages: AgentMessage[]): Message[] | Promise<Message[]>;
+	convertToLlm(messages: AgentMessage[], model: Model | undefined): Message[] | Promise<Message[]>;
 	onPayload: SimpleStreamOptions["onPayload"] | undefined;
 	onResponse: SimpleStreamOptions["onResponse"] | undefined;
 	onSseEvent: SimpleStreamOptions["onSseEvent"] | undefined;
@@ -212,17 +205,47 @@ export class SessionProviderBoundary {
 		return stripPendingSecretPlaceholderSuffix(deobfuscated);
 	}
 
-	/** Converts side-request messages through the session's secret boundary. */
-	convertToLlmForSideRequest(messages: AgentMessage[]): Message[] {
-		const converted = convertToLlm(messages);
+	/**
+	 * Converts side-request messages through the session's secret boundary. With `withImageDescriptions`, each
+	 * image with a description {@link prepareImageDescriptions} made is replaced by it, before obfuscation so
+	 * secrets read off an image are redacted too.
+	 */
+	convertToLlmForSideRequest(
+		messages: AgentMessage[],
+		reader: Model,
+		options?: { withImageDescriptions: boolean },
+	): Message[] {
+		let converted = convertToLlm(messages, reader);
+		const descriptions = this.#host.imageDescriptions;
+		if (options?.withImageDescriptions && descriptions) {
+			converted = converted.map(message => descriptions.withDescriptions(message));
+		}
 		const obfuscator = this.#host.obfuscator();
 		return obfuscator ? obfuscateMessages(obfuscator, converted) : converted;
 	}
 
+	/**
+	 * The model to describe images for when `reader` gets history as text (summaries): `reader` when it cannot
+	 * see images, else the session's model when that cannot, since the history was written for it. Undefined
+	 * when both see images.
+	 */
+	imageDescriptionModel(reader: Model | undefined): Model | undefined {
+		return this.#host.imageDescriptions?.textOnlyModel(reader, this.#host.model());
+	}
+
+	/** Describe the images of `messages` for `model`, a model that cannot see them. */
+	async prepareImageDescriptions(messages: AgentMessage[], model: Model, signal?: AbortSignal): Promise<void> {
+		await this.#host.imageDescriptions?.prepare(convertToLlm(messages), model, signal);
+	}
+
 	/** Converts session messages using the configured pre-LLM pipeline. */
-	async convertMessagesToLlm(messages: AgentMessage[], signal?: AbortSignal): Promise<Message[]> {
+	async convertMessagesToLlm(
+		messages: AgentMessage[],
+		model: Model | undefined,
+		signal?: AbortSignal,
+	): Promise<Message[]> {
 		const transformedMessages = await this.#host.transformContext(messages, signal);
-		return await this.#host.convertToLlm(transformedMessages);
+		return await this.#host.convertToLlm(transformedMessages, model);
 	}
 
 	/** Applies session-level stream hooks and provider defaults to a side request. */
@@ -237,13 +260,9 @@ export class SessionProviderBoundary {
 			openrouterRoutingPreset !== "default" && options.openrouterVariant === undefined
 				? openrouterRoutingPreset
 				: undefined;
-		const antigravityEndpointMode =
-			provider === "google-antigravity" ? cfgProvidersAntigravityEndpoint.get(this.#host.settings) : undefined;
-
 		const preparedOptions: SimpleStreamOptions = {
 			...options,
 			...(openrouterVariant !== undefined && { openrouterVariant }),
-			...(antigravityEndpointMode !== undefined && { antigravityEndpointMode }),
 			maxInFlightRequests: validateProviderMaxInFlightRequests(
 				options.maxInFlightRequests ?? cfgProvidersMaxInFlightRequests.get(this.#host.settings),
 			),
@@ -305,48 +324,6 @@ export class SessionProviderBoundary {
 	/** Normalizes image payloads for the active model. */
 	normalizeImagesForModel(images: ImageContent[] | undefined): Promise<ImageContent[] | undefined> {
 		return normalizeModelContextImages(images, { model: this.#host.model() });
-	}
-
-	/** Builds a hidden vision-model description for attachments sent to a text-only model. */
-	async buildImageDescriptionNotice(
-		normalizedImages: ImageContent[],
-		signal?: AbortSignal,
-	): Promise<CustomMessage | undefined> {
-		const model = this.#host.model();
-		if (!shouldDescribeImagesForTextModel(model, this.#host.settings)) return undefined;
-
-		let blocks: TextContent[];
-		try {
-			blocks = await describeAttachedImagesForTextModel(
-				normalizedImages,
-				{
-					activeModel: model,
-					modelRegistry: this.#host.modelRegistry,
-					settings: this.#host.settings,
-					localProtocolOptions: this.#host.localProtocolOptions(),
-					activeModelString: formatModelString(model),
-					telemetryConfig: this.#host.agent.telemetry,
-					sessionId: this.#host.sessionId(),
-					costGate: this.#host.costGate?.(),
-					usageLedger: this.#host.sessionManager,
-				},
-				signal,
-			);
-		} catch (error) {
-			logger.warn("image attachment vision fallback failed; image left undescribed", {
-				error: error instanceof Error ? error.message : String(error),
-			});
-			return undefined;
-		}
-		if (blocks.length === 0) return undefined;
-		return {
-			role: "custom",
-			customType: IMAGE_ATTACHMENT_DESCRIPTION_TYPE,
-			content: blocks,
-			display: false,
-			attribution: "user",
-			timestamp: Date.now(),
-		};
 	}
 
 	/** Normalizes every image embedded in an agent message. */

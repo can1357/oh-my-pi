@@ -167,6 +167,57 @@ dock keep the dock at the bottom. Those rows are not live rows: retirement and
 allocation never count them. A replay and a resize reset it; a fullscreen
 layer leaves the normal screen, and so the pinned viewport, as it was.
 
+### 2.2 Fullscreen screen mode
+
+`TermBackendOptions.screen` (`HostOptions.screen`; the coding agent's
+`tui.screen`) chooses where the session draws: `inline` (everything above) or
+`fullscreen`. A fullscreen frame is a `FramePlan.fullscreen` frame: the
+writer keeps the alternate screen for the whole session and the normal screen
+is left as it was.
+
+- The dock is painted as inline and pinned to the bottom row, also under a
+  short transcript; `main` fills the rows above it in a window. Blocks paint at
+  natural height (what inline history would hold): no allocation, no summary
+  row, no retirement, no history batch. Layers composite over the frame;
+  a fullscreen layer replaces it as it does inline.
+- The window follows the tail, or is anchored to a `main` node and a row of its
+  entry (its separator rows first). Output below an anchored window never moves
+  it. The scrollbar shows the position without taking a transcript row.
+  With the scrollbar off, its last row reads `↓ N lines below` if room allows.
+  Leading blank dock padding yields to transcript rows. An anchor whose rows from
+  there on fit (scrolled to the end, a taller screen, the blocks below
+  removed) follows the tail again; an anchor row past a block that shrank is
+  clamped; an anchor node that left `main` follows the tail.
+- `TermBackend.scroll(by)` (`Host.scroll`) moves it by a page (the window less
+  one row), a row count, to `start`, or to `end` (following). It returns false
+  when no window is on screen (inline, a fullscreen layer up, Tern) so the
+  caller's key goes elsewhere. Line, half-page and semantic user-prompt actions
+  use the same window. Wheel reports use automatic or fixed steps; modal
+  sheets keep their own input. The right-edge scrollbar tracks the viewport.
+- Fullscreen requests SGR button-motion and focus reports. Drag selects
+  transcript cells, double-click selects words, triple-click selects rows,
+  and holding at an edge extends the selection beyond the screen. Copy runs
+  through the app's clipboard sink (OSC 52 and local platform helpers).
+- `Host.openSearch()` opens incremental transcript find without putting query
+  text in the editor. Matches are highlighted; Enter and Shift+Enter cycle
+  them, Escape restores the reading position and draft. Inline and native
+  hosts decline transcript actions.
+- Nothing reaches history until the shutdown flush, which composes the usual
+  inline frame: the writer leaves the alternate screen and writes every block
+  after the commit frontier below where the session started. With
+  `tui.exitTranscript: false`, fullscreen exits without this flush. Emergency
+  restoration never invokes application painters: the crash reporter prints a
+  resume command after cleanup when the session reached durable storage.
+- The commit frontier survives switching modes at runtime: blocks committed
+  inline stay committed, a fullscreen stretch commits nothing, and the next
+  inline frame retires from the frontier on, so every block reaches history
+  once.
+- With only fullscreen frames so far (nothing of ours on the normal screen), a
+  settled resize repaints instead of replaying and a display reset repaints the
+  alternate screen whole instead of clearing: such a session never clears
+  native history. `Host.suspend()` does not reset the display on resume unless
+  history was written; the next frame enters the alternate screen again.
+
 ## 3. Reset and resize behavior
 
 `Host.replayHistory()` (`driver.resetDisplay()`) clears terminal history and the
@@ -277,7 +328,16 @@ records once why the pane stayed on rows. A supported-version
 reply switches `TUI` to `native/backend.ts`: components
 are described (`describe()`, or `rows` fallback from `render()`), reconciled
 into document ops (`native/reconcile.ts`) and sent as frames, paced by the
-terminal's acknowledgements instead of the render cadence. None of this
+terminal's acknowledgements instead of the render cadence. A frame that echoes
+user input (a key, a paste, or any UI event Tern reports for a node: a click, a
+toggle, an `edit`, …) may run two frames past the credits, counting only frames
+unacknowledged for less than 250 ms, so a controlled editor keeps echoing
+typing, and a clicked button's effect shows (a form it closes leaves the
+screen), while Tern is slow to acknowledge a streaming transcript. The
+allowance is a rate, not a total: while Tern stays silent, input sends at most
+`credits + 2` frames per 250 ms until
+the 5 s stall reset, and each echo carries every change held behind the
+credits. Other frames wait for an ack or that reset. None of this
 document's history, viewport, resize-replay or CPR machinery runs on that path;
 SIGWINCH only refreshes the width used by `rows` fallback nodes. While a surface
 is live the nerd symbol preset is forced process-locally, and icon glyphs are
@@ -368,6 +428,12 @@ viewport rows with the height-preserving text fallback. It does not replay
 history. An image already retained in terminal history may lose its pixels when
 demoted because historical rows are immutable.
 
+In a fullscreen transcript the viewport clips Kitty placements and SIXEL bands.
+OSC 1337 has no source rectangle: a clipped iTerm2 image keeps its space and
+reappears when fully visible. A sheet must not be punched through by a
+non-cell graphic underneath. Buffer switches invalidate alternate placements;
+the graceful transcript flush recreates eligible images on the normal screen.
+
 Never retransmit full base64 image data on every frame. Kitty Unicode
 placeholders remain capability-gated and can be overridden with the existing
 image environment settings.
@@ -386,7 +452,8 @@ image environment settings.
 5. Every active block keeps a viewport row while rows allow; overflow is
    summarized, never retired.
 6. Only explicit display resets, `rebuild` resizes and ledger mismatches
-   destructively clear native history.
+   destructively clear native history, and only once rows of ours are on the
+   normal screen (never in a session that drew only fullscreen frames).
 7. A failed write stops the writer; a graceful stop flushes the transcript.
 8. Width handling uses the shared ANSI-aware helpers and clamps rather than
    throwing in the render hot path. The renderer never probes scroll position.

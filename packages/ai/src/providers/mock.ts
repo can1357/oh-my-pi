@@ -98,6 +98,8 @@ export interface MockResponse {
 	usage?: Partial<Omit<Usage, "cost">> & { cost?: Partial<Usage["cost"]> };
 	/** Service tier the mock reports serving the turn, as a real provider's response echo would. */
 	serviceTier?: ServiceTier;
+	/** Model the mock reports serving the turn, as a router's reply would name it. */
+	upstreamModel?: string;
 	/** Pre-set responseId. */
 	responseId?: string;
 	/** If set, the stream emits a terminal error event instead of completing. */
@@ -416,6 +418,7 @@ async function runMock(
 	partial.errorMessage = response.errorMessage;
 	partial.usage = mergeUsage(response.usage);
 	partial.serviceTier = response.serviceTier;
+	partial.upstreamModel = response.upstreamModel;
 	partial.duration = performance.now() - perfStart;
 
 	if (reason === "aborted" || reason === "error") {

@@ -18,7 +18,7 @@ import {
 } from "../usage";
 import { isRecord } from "../utils";
 import { waitForRetry } from "../utils/retry-wait";
-import { buildClaudeOAuthHeaders, claudeOAuthBaseUrls } from "./claude-api";
+import { buildClaudeOAuthHeaders, claudeApiUrl, claudeOAuthBaseUrls } from "./claude-api";
 import { listClaudeResetCredits, parseClaudeResetCreditsFromUsagePayload } from "./claude-reset";
 import { HOUR_MS, parseIsoTimestamp, usageStatus, WEEK_MS } from "./shared";
 
@@ -37,6 +37,10 @@ const CLAUDE_SHARED_GATES = {
 const CLAUDE_SHARED_GATE_WINDOW_IDS = Object.keys(CLAUDE_SHARED_GATES) as (keyof typeof CLAUDE_SHARED_GATES)[];
 /** Report metadata key listing shared gates the live payload declared inactive. */
 const INACTIVE_SHARED_GATES_KEY = "inactiveSharedGates";
+/** Report metadata key holding Claude's own answer to "may this account use fast mode". */
+const FAST_MODE_KEY = "fastMode";
+/** Usage-credit ("extra usage") spend row; fast mode bills against nothing else. */
+const EXTRA_USAGE_LIMIT_ID = "anthropic:extra";
 
 /**
  * Shared gates the payload positively declares inactive: the bucket field is
@@ -427,17 +431,23 @@ const CLAUDE_ORGANIZATION_PLANS: Readonly<Record<string, string>> = {
 };
 
 /**
- * Subscription plan label for a `/profile` response: "Max 5x" / "Max 20x" from
- * the rate-limit tier (the $100 and $200 Max plans), else the organization
- * type ("Max", "Pro", "Team", "Enterprise"). Undefined when the profile names
- * no recognised plan.
+ * Subscription plan label for a `/profile` response: the organization type
+ * ("Max", "Pro", "Team", "Enterprise") followed by the rate-limit tier's
+ * multiplier when it has one ("Max 5x", "Max 20x", and "Team 5x" for a Team
+ * premium seat, which shares the Max tier). A multiplier with an unrecognised
+ * organization type reads as Max. Undefined when the profile names no
+ * recognised plan.
  */
 export function claudeProfilePlan(profile: unknown): string | undefined {
 	if (!isRecord(profile) || !isRecord(profile.organization)) return undefined;
 	const { rate_limit_tier: tier, organization_type: type } = profile.organization;
-	const maxMultiplier = typeof tier === "string" ? /max_(\d+x)/i.exec(tier)?.[1] : undefined;
-	if (maxMultiplier) return `Max ${maxMultiplier.toLowerCase()}`;
-	return typeof type === "string" ? CLAUDE_ORGANIZATION_PLANS[type.toLowerCase()] : undefined;
+	const multiplier = typeof tier === "string" ? /max_(\d+x)/i.exec(tier)?.[1]?.toLowerCase() : undefined;
+	const key = typeof type === "string" ? type.toLowerCase() : undefined;
+	const plan =
+		(key && Object.hasOwn(CLAUDE_ORGANIZATION_PLANS, key) ? CLAUDE_ORGANIZATION_PLANS[key] : undefined) ??
+		(multiplier ? "Max" : undefined);
+	if (!plan) return undefined;
+	return multiplier ? `${plan} ${multiplier}` : plan;
 }
 
 function extractProfileIdentity(profile: ClaudeProfile | null): { accountId?: string; email?: string } {
@@ -451,6 +461,49 @@ function extractProfileIdentity(profile: ClaudeProfile | null): { accountId?: st
 			(typeof profile.email === "string" && profile.email.trim() ? profile.email.trim() : undefined) ??
 			(typeof account?.email === "string" && account.email.trim() ? account.email.trim() : undefined),
 	};
+}
+
+/**
+ * Ask Claude whether this account may use fast mode (`speed: "fast"`). The
+ * account API owns the answer, since it folds in everything a request would be
+ * refused for: a plan without usage credits turned on, or a Team/Enterprise
+ * organization whose owner has not enabled fast mode. Claude Code makes the
+ * same check before offering `/fast`. `undefined` when the check does not
+ * answer, so the previous answer stands.
+ */
+async function fetchFastModeEnabled(
+	baseUrl: string,
+	accessToken: string,
+	ctx: UsageFetchContext,
+	signal?: AbortSignal,
+): Promise<boolean | undefined> {
+	if (signal?.aborted) return undefined;
+	try {
+		const response = await ctx.fetch(claudeApiUrl(baseUrl, "/api/claude_code_penguin_mode"), {
+			headers: buildClaudeOAuthHeaders(accessToken),
+			signal,
+		});
+		if (!response.ok) return undefined;
+		const payload = (await response.json()) as unknown;
+		return isRecord(payload) && typeof payload.enabled === "boolean" ? payload.enabled : undefined;
+	} catch (error) {
+		if (!isAbortError(error, signal)) {
+			ctx.logger?.debug("Claude fast mode availability check failed", { error: String(error) });
+		}
+		return undefined;
+	}
+}
+
+/**
+ * Whether the account behind a report may use fast mode: Claude's own
+ * availability answer, withdrawn while the usage-credit cap is spent because
+ * fast mode never draws on the plan's included usage. `undefined` until the
+ * availability check has answered.
+ */
+function claudeFastModeGate(report: UsageReport | null): boolean | undefined {
+	const enabled = report?.metadata?.[FAST_MODE_KEY];
+	if (typeof enabled !== "boolean") return undefined;
+	return enabled && !report?.limits.some(limit => limit.id === EXTRA_USAGE_LIMIT_ID && limit.status === "exhausted");
 }
 
 async function fetchProfile(
@@ -572,7 +625,7 @@ function buildClaudeExtraUsageLimit(payload: ClaudeUsageResponse): UsageLimit | 
 				? "exhausted"
 				: usageStatus(amount.usedFraction);
 	return {
-		id: "anthropic:extra",
+		id: EXTRA_USAGE_LIMIT_ID,
 		label: "Claude Extra Usage",
 		scope: {
 			provider: "anthropic",
@@ -762,8 +815,12 @@ async function fetchClaudeUsage(params: UsageFetchParams, ctx: UsageFetchContext
 	// Fetched every time: the plan can change under a long-lived credential
 	// (upgrade, downgrade), and `/usage` never reports it. A failed probe keeps
 	// the plan the previous report carried.
-	const profile = await fetchProfile(baseUrl, headers, ctx, params.signal);
+	const [profile, fastModeEnabled] = await Promise.all([
+		fetchProfile(baseUrl, headers, ctx, params.signal),
+		fetchFastModeEnabled(baseUrl, accessToken, ctx, params.signal),
+	]);
 	const plan = claudeProfilePlan(profile) ?? usageSubscriptionPlan(ctx.previousReport);
+	const fastMode = fastModeEnabled ?? ctx.previousReport?.metadata?.[FAST_MODE_KEY];
 	if (!accountId || !email) {
 		const profileIdentity = extractProfileIdentity(profile);
 		accountId ??= profileIdentity.accountId;
@@ -785,6 +842,7 @@ async function fetchClaudeUsage(params: UsageFetchParams, ctx: UsageFetchContext
 		...(email ? { email } : {}),
 		...(credential.orgId ? { orgId: credential.orgId } : {}),
 		...(plan ? { subscriptionPlan: plan } : {}),
+		...(typeof fastMode === "boolean" ? { [FAST_MODE_KEY]: fastMode } : {}),
 	};
 	return result;
 }
@@ -1044,6 +1102,10 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
 	 * own cache lifetimes are verified.
 	 */
 	stickyWarmMs: 60 * 60_000,
+	// Anthropic realizes `priority` as fast mode, which is an account entitlement.
+	tierGate(context) {
+		return context.serviceTier === "priority" ? claudeFastModeGate : undefined;
+	},
 	findWindowLimits(report, context) {
 		const primary = report.limits.find(limit => limit.id === "anthropic:5h");
 		const secondary = findClaudeSecondaryLimit(report, context);
@@ -1056,8 +1118,7 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
 	// a healthy candidate rather than serve until 100%.
 	scopeLimitsForReserve: scopeClaudeLimitsForModel,
 	/**
-	 * Fable/Mythos usage-limit errors map to a per-family tier scope, mirroring
-	 * the per-counter precedent in packages/ai/src/usage/google-antigravity.ts:466-497.
+	 * Fable/Mythos usage-limit errors map to a per-family tier scope.
 	 * The two scopes address one metered counter, which is why healing judges
 	 * both by the same scoped weekly row.
 	 */

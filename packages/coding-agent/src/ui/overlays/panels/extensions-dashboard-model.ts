@@ -1,8 +1,7 @@
 /**
  * The extension control center: provider tabs over the inventory list and
- * the inspector of the selected extension. Toggling an item, a provider
- * (its master switch) or a provider's `~/` opt-in goes through the runtime,
- * then the inventory reloads.
+ * the inspector of the selected extension. Toggling an item or a provider
+ * (its master switch) goes through the runtime, then the inventory reloads.
  *
  * Keys: Tab/Shift+Tab or ←/→ switch provider, ↑/↓ move, Space/Enter toggle,
  * PgUp/PgDn page the inspector (when it overflows), the expand key expands
@@ -111,7 +110,6 @@ export class ExtensionDashboardModel {
 				},
 				onToggle: (id, enabled) => this.#toggleExtension(id, enabled),
 				onMasterToggle: id => this.#toggleProvider(id),
-				onUserSourceToggle: id => this.#toggleUserSource(id),
 				masterSwitchProvider: null,
 				mcpSource: runtime.mcpSource,
 				toolSource,
@@ -202,22 +200,11 @@ export class ExtensionDashboardModel {
 		else void this.#reload();
 	}
 
-	#toggleUserSource(providerId: string): void {
-		if (!this.runtime.toggleUserSource(providerId)) void this.#disconnectMcp(providerId, "user");
-		else void this.#reload();
-	}
-
 	/** A disabled provider's MCP servers leave the session (its configs stay as they are). */
-	async #disconnectMcp(providerId: string, level?: "user" | "project"): Promise<void> {
+	async #disconnectMcp(providerId: string): Promise<void> {
 		const names = new Set(
 			this.extensions
-				.filter(
-					ext =>
-						ext.kind === "mcp" &&
-						ext.source.provider === providerId &&
-						(level === undefined || ext.source.level === level) &&
-						!isShadowedExtension(ext),
-				)
+				.filter(ext => ext.kind === "mcp" && ext.source.provider === providerId && !isShadowedExtension(ext))
 				.map(ext => ext.name),
 		);
 		for (const name of names) {

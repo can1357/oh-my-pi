@@ -14,7 +14,7 @@
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import type { Block, PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { styledText } from "@oh-my-pi/pi-tui/term/painters/layout";
-import { padTo, truncate, wrap } from "@oh-my-pi/pi-tui/text/width";
+import { padTo, truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { argsSummaryCells, visibleArgKeys } from "../../tools/args";
 import { ansiLines } from "@oh-my-pi/pi-tui/term/painters/ansi";
@@ -70,13 +70,14 @@ function bodyRows(card: DefaultCard, theme: Theme, content: number): string[] {
 	const rows: string[] = [];
 	const args = argsRecord(card.args);
 	if (!card.expanded && args && visibleArgKeys(args).length > 0) {
-		const budget = Math.max(MIN_SUMMARY, content - 4);
-		rows.push(` ${theme.fg("dim", "└─")} ${theme.fg("dim", argsSummaryCells(args, budget))}`);
+		const branch = theme.symbols.symbol("tree.last");
+		const budget = Math.max(MIN_SUMMARY, content - visibleWidth(branch) - 2);
+		rows.push(` ${theme.fg("dim", branch)} ${theme.fg("dim", argsSummaryCells(args, budget))}`);
 	}
 	if (card.expanded && card.args !== undefined) {
 		rows.push("", theme.fg("dim", "Args"));
 		const tree = jsonTreeRows(theme, card.args, undefined, ["i", "__partialJson"]);
-		for (const row of tree.rows) rows.push(...wrap(row, content));
+		for (const row of tree.rows) rows.push(truncate(row, content));
 		if (tree.truncated) rows.push(theme.fg("dim", "…"));
 		rows.push("");
 	}

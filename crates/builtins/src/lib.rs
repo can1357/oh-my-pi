@@ -4,8 +4,9 @@
 //! [`extras`].
 #![cfg_attr(unix, feature(process_setsid))]
 
-/// Atomic whole-file replacement behind `sponge FILE` and `sd`'s in-place edits.
-#[cfg(any(feature = "util.sd", feature = "util.sponge"))]
+/// Atomic whole-file replacement behind `sponge FILE` and the in-place edits
+/// of `sd` and `perl -i`.
+#[cfg(any(feature = "util.perl", feature = "util.sd", feature = "util.sponge"))]
 mod atomic_write;
 /// Output block sizes for `du` and `df`.
 #[cfg(any(feature = "util.du", feature = "util.df"))]
@@ -47,6 +48,7 @@ mod quoting_style;
 	feature = "util.file",
 	feature = "util.fswatch",
 	feature = "util.ls",
+	feature = "util.perl",
 	feature = "util.rsync",
 	feature = "util.tar",
 	feature = "util.touch",
@@ -55,6 +57,15 @@ mod quoting_style;
 mod time_zone;
 #[cfg(any(feature = "util.cp", feature = "util.mv"))]
 mod progress;
+/// Refusal of whole-disk walks, shared by the recursive search utilities.
+#[cfg(any(
+	feature = "util.ast-grep",
+	feature = "util.fd",
+	feature = "util.find",
+	feature = "util.grep",
+	feature = "util.rg"
+))]
+mod root_guard;
 
 // ── Utility builtins ──────────────────────────────────────────────────────────
 // Ports of the standalone command-line utilities the shell ships in-process.
@@ -185,6 +196,8 @@ mod od;
 mod open;
 #[cfg(feature = "util.paste")]
 mod paste;
+#[cfg(feature = "util.perl")]
+mod perl;
 #[cfg(feature = "util.pgrep")]
 mod pgrep;
 #[cfg(feature = "util.pidwait")]

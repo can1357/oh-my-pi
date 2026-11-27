@@ -555,6 +555,10 @@ function fakeSampler() {
 			starts++;
 		},
 		stop() {},
+		discard() {
+			drains++;
+			pending = [];
+		},
 		drain() {
 			drains++;
 			const out = pending;
@@ -615,9 +619,9 @@ describe("LoopWatchdog stack attribution", () => {
 					blockedMs: 310,
 					cpuMs: expect.any(Number),
 					phase: "unknown",
-					cause: "newHot (ui/src/new.ts:42)",
+					cause: "newHot (tui/src/new.ts:42)",
 					causeShare: 0.75,
-					top: ["main (coding-agent/src/main.ts:5) 100%", "render (ui/src/tui.ts:20) 100%"],
+					top: ["main (coding-agent/src/main.ts:5) 100%", "render (tui/src/tui.ts:20) 100%"],
 				},
 			],
 		]);
@@ -693,6 +697,28 @@ function blockLoopInSamplerProbe(ms: number): number {
 }
 
 describe("LoopWatchdog with the JSC sampler", () => {
+	test("keeps the sampling interval when the last watchdog pauses the profiler", async () => {
+		const samplerModule = Bun.resolveSync("@oh-my-pi/pi-tui/diag/loop-sampler", import.meta.dir);
+		const script = [
+			'import { spyOn } from "bun:test";',
+			'import * as jsc from "bun:jsc";',
+			`import { createJscLoopSampler } from ${JSON.stringify(samplerModule)};`,
+			'const start = spyOn(jsc, "startSamplingProfiler");',
+			'const pause = spyOn(jsc, "profile");',
+			"const first = createJscLoopSampler();",
+			"const second = createJscLoopSampler();",
+			"first.start(); second.start(); first.stop(); second.stop();",
+			"console.log(JSON.stringify([start.mock.calls, pause.mock.calls.map(call => call[1])]));",
+		].join("\n");
+		const proc = Bun.spawnSync([process.execPath, "--no-env-file", "--no-install", "--eval", script], {
+			env: { ...process.env, PI_LOOP_SAMPLER: "1" },
+		});
+		expect(proc.exitCode, proc.stderr.toString()).toBe(0);
+		const [starts, pauses] = JSON.parse(proc.stdout.toString());
+		expect(starts).toHaveLength(1);
+		expect(pauses).toEqual([starts[0][1]]);
+	});
+
 	test.skipIf(createJscLoopSampler() === null)("names the function that blocked the loop", () => {
 		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
 		let scheduled: (() => void) | undefined;
@@ -784,8 +810,8 @@ describe("summarizeBlock", () => {
 		const b = frame("b", "/work/pi/packages/tui/src/b.ts", 2);
 		const samples = [...samplesFrom(0, 100, () => [a]), ...samplesFrom(100, 50, () => [b])];
 
-		expect(summarizeBlock(samples, 30)).toEqual({ cause: "b (ui/src/b.ts:2)", share: 1, top: [] });
-		expect(summarizeBlock(samples, 1_000)?.cause).toBe("a (ui/src/a.ts:1)");
+		expect(summarizeBlock(samples, 30)).toEqual({ cause: "b (tui/src/b.ts:2)", share: 1, top: [] });
+		expect(summarizeBlock(samples, 1_000)?.cause).toBe("a (tui/src/a.ts:1)");
 	});
 
 	test("skips native frames for the cause, falling back to the innermost named frame", () => {
@@ -797,7 +823,7 @@ describe("summarizeBlock", () => {
 				100,
 			),
 		).toEqual({
-			cause: "spin (ui/src/spin.ts:12)",
+			cause: "spin (tui/src/spin.ts:12)",
 			share: 1,
 			top: [],
 		});
@@ -829,9 +855,9 @@ describe("summarizeBlock", () => {
 		]);
 
 		expect(summarizeBlock(samples, 100)).toEqual({
-			cause: "hot (ui/src/x.ts:10)",
+			cause: "hot (tui/src/x.ts:10)",
 			share: 1,
-			top: ["entry (ui/src/x.ts:50) 100%", "mid (ui/src/x.ts:30) 50%"],
+			top: ["entry (tui/src/x.ts:50) 100%", "mid (tui/src/x.ts:30) 50%"],
 		});
 	});
 
@@ -841,10 +867,10 @@ describe("summarizeBlock", () => {
 		const samples = samplesFrom(0, 2, () => names.map((name, line) => frame(name, url, line + 1)));
 
 		expect(summarizeBlock(samples, 100)?.top).toEqual([
-			"entry (ui/src/x.ts:7) 100%",
-			"c3 (ui/src/x.ts:4) 100%",
-			"c2 (ui/src/x.ts:3) 100%",
-			"c1 (ui/src/x.ts:2) 100%",
+			"entry (tui/src/x.ts:7) 100%",
+			"c3 (tui/src/x.ts:4) 100%",
+			"c2 (tui/src/x.ts:3) 100%",
+			"c1 (tui/src/x.ts:2) 100%",
 		]);
 	});
 });

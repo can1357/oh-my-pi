@@ -14,6 +14,7 @@ accepted = [
     "BSD-3-Clause",
     "ISC",
     "Unicode-3.0",
+    "Unicode-DFS-2016",
     "Zlib",
     "0BSD",
     "BSL-1.0",
@@ -23,11 +24,5 @@ accepted = [
 ]
 
 # Package-scoped reviews. No copyleft license is globally accepted.
-[inferno]
-accepted = ["CDDL-1.0"]
-
-[terminfo]
-accepted = ["WTFPL"]
-
 [uluru]
 accepted = ["MPL-2.0"]

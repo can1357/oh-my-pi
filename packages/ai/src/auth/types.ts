@@ -7,7 +7,7 @@ import type {
 	OAuthPrompt,
 	OAuthProviderId,
 } from "../registry/oauth/types";
-import type { Provider } from "../types";
+import type { Provider, ServiceTier } from "../types";
 import type {
 	ClientUsageIdentity,
 	ClientUsageReport,
@@ -198,8 +198,8 @@ export interface CredentialCompletionResult {
  * Credential payload handed to {@link CompletionProbe}. For API-key
  * credentials only the bytes are exposed; for OAuth, every identity field
  * carried by the refreshed credential is included so the probe can compose
- * provider-specific apiKey shapes (e.g. GitHub Copilot / Google Gemini CLI
- * expect a JSON blob with `token` + `projectId`, not the raw access token).
+ * provider-specific apiKey shapes (e.g. a JSON blob carrying the token and an
+ * account or project id instead of the raw access token).
  *
  * `refreshToken` may be {@link REMOTE_REFRESH_SENTINEL} when the credential
  * lives behind a broker; the chat endpoint never reads it, so the probe can
@@ -279,10 +279,11 @@ export const REMOTE_REFRESH_SENTINEL = "__remote__" as const;
 /** Opaque marker for OAuth refresh tokens retained by a broker. */
 export type RemoteRefreshSentinel = typeof REMOTE_REFRESH_SENTINEL;
 
-/** OAuth credential with refresh token replaced by the broker sentinel and refresh-capable client secrets removed. */
-export type RemoteOAuthCredential = Omit<OAuthCredential, "refresh" | "kiroClientSecret"> & {
+/** OAuth credential with refresh token replaced by the broker sentinel and refresh-capable secrets removed. */
+export type RemoteOAuthCredential = Omit<OAuthCredential, "refresh" | "kiroClientSecret" | "dpopKey"> & {
 	refresh: RemoteRefreshSentinel;
 	kiroClientSecret?: never;
+	dpopKey?: never;
 };
 
 /** Discriminated credential payload as published by the broker. */
@@ -349,6 +350,12 @@ export type AuthStorageOptions = {
 	/** Global reserve fallback for accounts without a matching reservePct policy. */
 	defaultReservePct?: number;
 	usageFetch?: typeof fetch;
+	/**
+	 * Learn an unknown GitHub Copilot billing mode with a background
+	 * `copilot_internal/user` probe (via `usageFetch`) when a key is resolved.
+	 * Default true; hermetic hosts and tests that hold fake tokens pass false.
+	 */
+	copilotBillingProbe?: boolean;
 	usageRequestTimeoutMs?: number;
 	usageLogger?: UsageLogger;
 	/**
@@ -497,6 +504,22 @@ export type AuthApiKeyOptions = {
 	 */
 	accountIds?: readonly string[];
 	/**
+	 * Service tier the request will ask for (`/fast`, `/fast ultra`). Selection
+	 * prefers a credential that offers it — an entitled OAuth account, kept even
+	 * on paid overage, else a stored or environment API key — and falls back to
+	 * ordinary balancing across the rest once those are blocked or refused the
+	 * tier. A resolution that could not honor it reports
+	 * {@link ResolvedApiKey.serviceTierUnavailable}.
+	 */
+	serviceTier?: ServiceTier;
+	/**
+	 * Discovery verdicts for `serviceTier` on `modelId`: {@link oauthAccountKey}
+	 * → whether that account's own catalog offers the tier (see
+	 * `serviceTierOffersByAccount`). Accounts discovery did not judge are
+	 * absent and fall back to the provider's usage-report gate.
+	 */
+	serviceTierAccounts?: Readonly<Record<string, boolean>>;
+	/**
 	 * Caller's cancel signal. Threaded into any broker-bound OAuth refresh so
 	 * `ESC` / request abort actually kills a hung broker fetch instead of
 	 * stranding the caller for `timeoutMs * (maxRetries + 1)`.
@@ -526,7 +549,7 @@ export type AuthApiKeyOptions = {
  * Identity that multi-account discovery records in `Model.accountAccess` and
  * that {@link AuthApiKeyOptions.accountIds} selection matches: the provider
  * account id (Codex `chatgpt_account_id`), else the login email for providers
- * whose credentials carry no account id (Antigravity), else the project id for
+ * whose credentials carry no account id, else the project id for
  * a login whose email lookup failed. Same precedence as the credential store's
  * identity key.
  */
@@ -585,6 +608,8 @@ export interface OAuthLoginIdentity {
 	accountId?: string;
 	orgId?: string;
 	orgName?: string;
+	/** The login is stored but lacks the provider's `required-scope`: signed in, provider off. */
+	accessOff?: boolean;
 }
 
 /** Failure while resolving access to one OAuth account. */
@@ -605,7 +630,7 @@ export interface OAuthAccessFailure {
  * Identity of the OAuth credential a session is currently routed to. Read-only
  * display/metadata shape: `accountId` is the provider's account UUID, `email`
  * the user-facing login, `projectId` the GCP-style project for providers that
- * key usage on it (Gemini CLI / Antigravity).
+ * key usage on it.
  */
 export interface OAuthAccountIdentity {
 	accountId?: string;
@@ -796,6 +821,28 @@ export type MarkUsageLimitOptions = {
 	signal?: AbortSignal;
 };
 
+/** Identify the credential that was refused a service tier, and for how long to stop preferring it. */
+export type MarkServiceTierUnavailableOptions = {
+	/**
+	 * Stored row that served the refused request
+	 * ({@link ResolvedApiKey.credentialId}). Omit when the bearer had no row
+	 * (environment variable, `--api-key`, `models.yml`): the refusal is then
+	 * held in this process against the provider's unstored key.
+	 */
+	credentialId?: number;
+	serviceTier: ServiceTier;
+	modelId: string;
+	/** Provider-stated cooldown; defaults to {@link SERVICE_TIER_BLOCK_MS}. */
+	retryAfterMs?: number;
+};
+
+/**
+ * How long a credential refused a service tier stays out of tier-preferring
+ * selection when the provider states no cooldown. Matches the pause Claude
+ * Code applies after a refused fast-mode request before probing again.
+ */
+export const SERVICE_TIER_BLOCK_MS = 30 * 60_000;
+
 /** Resolve a failed request to its credential and rotate if possible. */
 export type RotateCredentialOptions = {
 	error?: unknown;
@@ -815,13 +862,15 @@ export type RotateCredentialOptions = {
  * `switched` is `true` when a usable same-type sibling credential is available,
  * so the caller's next resolve hands it out. `afterSiblingWait` is `true` when
  * no sibling was free at the failure but rotation slept out a sibling's short
- * block (e.g. a Cloud Code Assist capacity 429 that resets in under a second);
+ * block (e.g. a capacity 429 that resets in under a second);
  * the freed credential may be one the caller already sent in this request, so
  * attempted-bearer dedupe must let it through once.
  */
 export interface CredentialRotation {
 	switched: boolean;
 	afterSiblingWait?: boolean;
+	/** Explanation when a restricted pool is blocked and includes an OAuth organization rejection. */
+	poolUnavailableReason?: string;
 }
 
 /** Filter saved reset credits by provider and session. */
@@ -1103,6 +1152,19 @@ export interface OAuthRefreshByIdOptions {
 	rejectedAccess?: string;
 }
 
+/** How {@link OAuthApi.signOut} removes a login. */
+export interface OAuthSignOutOptions {
+	signal?: AbortSignal;
+}
+
+/** Outcome of {@link OAuthApi.signOut}. */
+export interface OAuthSignOutResult {
+	/** `false` when no such login was stored. */
+	removed: boolean;
+	/** Why the provider's sign-out hook failed (a revocation it did not confirm); the login is removed regardless. */
+	signOutError?: string;
+}
+
 /** OAuth login, access, account identity, and refresh operations. */
 export interface OAuthApi {
 	/**
@@ -1112,6 +1174,12 @@ export interface OAuthApi {
 	 * login registered.
 	 */
 	login(provider: OAuthProviderId, ctrl: OAuthLoginController): Promise<OAuthLoginIdentity | undefined>;
+	/**
+	 * Remove one stored login. The provider's `sign-out` hook first revokes the
+	 * grant at the provider. The login is removed even when the hook fails;
+	 * {@link OAuthSignOutResult.signOutError} says why.
+	 */
+	signOut(provider: string, credentialId: number, options?: OAuthSignOutOptions): Promise<OAuthSignOutResult>;
 	/**
 	 * Resolve the OAuth credential for `provider`, refreshing through the same
 	 * pipeline as {@link AuthStorage.keys.get} but returning the refreshed
@@ -1323,6 +1391,11 @@ export interface UsageApi {
 	 */
 	providerFor(provider: Provider): UsageProvider | undefined;
 	/**
+	 * HTTP status (401/403) of the active usage failure cooldown for this stored
+	 * row's most recently collected report, including reports read from cache.
+	 */
+	authRejection(provider: Provider, credentialId: number): number | undefined;
+	/**
 	 * Return model ids whose live reports map to a quantitative usage scope.
 	 * Provider strategies supply model/tier mapping when available; otherwise
 	 * only explicitly matching model ids and account-wide shared limits count.
@@ -1431,6 +1504,24 @@ export interface LimitsApi {
 		sessionId: string | undefined,
 		options?: RotateCredentialOptions,
 	): Promise<CredentialRotation>;
+	/**
+	 * Record that the provider refused `serviceTier` on `modelId` for one
+	 * credential (fast mode not enabled, out of usage credits, fast-mode rate
+	 * limit). Until the block expires, tier-preferring selection treats that
+	 * credential as not offering the tier, so requests move to one that does or
+	 * run at standard speed; ordinary selection is unaffected. Resolves `false`
+	 * when the named stored row is gone or the refusal was already on record —
+	 * selection could not keep the tier away from this credential, so the
+	 * caller drops the tier itself.
+	 */
+	markServiceTierUnavailable(provider: string, options: MarkServiceTierUnavailableOptions): Promise<boolean>;
+	/**
+	 * Forget every recorded refusal of `serviceTier` on `modelId` for a provider
+	 * and drop its cached usage reports, so the next request probes each
+	 * credential for the tier again. For re-arming the tier (`/fast on`) once
+	 * the user has fixed what the provider refused.
+	 */
+	rearmServiceTier(provider: string, serviceTier: ServiceTier, modelId: string): Promise<void>;
 	/** Invalidate a credential matching an API key after authentication failure. */
 	invalidateMatching(
 		provider: string,

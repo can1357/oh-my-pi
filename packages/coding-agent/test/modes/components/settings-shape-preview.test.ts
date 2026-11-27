@@ -1,7 +1,6 @@
-import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { afterAll, describe, expect, it } from "bun:test";
 import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
-import { mountSettingsWindow, settingsScreen } from "../../helpers/settings-window";
+import { settingsScreen, setupSettingsWindow } from "../../helpers/settings-window";
 
 const restoreTheme = currentTheme();
 afterAll(() => setCurrentTheme(restoreTheme));
@@ -14,11 +13,7 @@ function previewRows(screen: string): string[] | undefined {
 }
 
 describe("settings shape previews", () => {
-	beforeEach(async () => {
-		resetSettingsForTest();
-		await Settings.init({ inMemory: true });
-	});
-	afterEach(() => resetSettingsForTest());
+	const mountSettingsWindow = setupSettingsWindow();
 
 	it("previews the highlighted composer shape under its menu, redrawn as the highlight moves", () => {
 		const term = mountSettingsWindow();

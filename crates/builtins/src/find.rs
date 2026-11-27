@@ -4307,46 +4307,54 @@ pub mod matchers {
 		}
 	}
 
+	/// Parses a decimal count, using the first sign for comparison and allowing a second sign.
+	fn parse_comparable_prefix(value: &str) -> Option<(ComparableValue, &str)> {
+		let unsigned = value.strip_prefix(['+', '-']).unwrap_or(value);
+		let digits = unsigned.strip_prefix(['+', '-']).unwrap_or(unsigned);
+		let end = digits.as_bytes().iter().take_while(|b| b.is_ascii_digit()).count();
+		let (number, suffix) = digits.split_at(end);
+		let val = number.parse().ok()?;
+		let comparison = match value.as_bytes()[0] {
+			b'+' => ComparableValue::MoreThan(val),
+			b'-' => ComparableValue::LessThan(val),
+			_ => ComparableValue::EqualTo(val),
+		};
+		Some((comparison, suffix))
+	}
+
+	/// Parses an entire optionally signed count such as `+10`.
 	fn convert_arg_to_comparable_value(
 		option_name: &str,
 		value_as_string: &str,
 	) -> Result<ComparableValue, Box<dyn Error>> {
-		let re = Regex::new(r"^([-+]?)[-+]?(\d+)$")?;
-		if let Some(groups) = re.captures(value_as_string)
-			&& let Ok(val) = groups[2].parse::<u64>()
-		{
-			return Ok(match &groups[1] {
-				"+" => ComparableValue::MoreThan(val),
-				"-" => ComparableValue::LessThan(val),
-				_ => ComparableValue::EqualTo(val),
-			});
+		if let Some((comparison, "")) = parse_comparable_prefix(value_as_string) {
+			return Ok(comparison);
 		}
 		Err(From::from(format!(
 			"Expected a decimal integer (with optional + or - prefix) argument to {option_name}, but \
-			 got `{value_as_string}'"
+				 got `{value_as_string}'"
 		)))
 	}
 
-	fn convert_arg_to_comparable_value_and_suffix(
+	/// Parses the first optionally signed count and its suffix on the final line.
+	fn convert_arg_to_comparable_value_and_suffix<'a>(
 		option_name: &str,
-		value_as_string: &str,
-	) -> Result<(ComparableValue, String), Box<dyn Error>> {
-		let re = Regex::new(r"([-+]?)[-+]?(\d+)(.*)$")?;
-		if let Some(groups) = re.captures(value_as_string)
-			&& let Ok(val) = groups[2].parse::<u64>()
-		{
-			return Ok((
-				match &groups[1] {
-					"+" => ComparableValue::MoreThan(val),
-					"-" => ComparableValue::LessThan(val),
-					_ => ComparableValue::EqualTo(val),
-				},
-				groups[3].to_string(),
-			));
+		value_as_string: &'a str,
+	) -> Result<(ComparableValue, &'a str), Box<dyn Error>> {
+		let line = value_as_string.rsplit_once('\n').map_or(value_as_string, |(_, line)| line);
+		let bytes = line.as_bytes();
+		if let Some(digit) = bytes.iter().position(u8::is_ascii_digit) {
+			let mut start = digit;
+			while start > digit.saturating_sub(2) && matches!(bytes[start - 1], b'+' | b'-') {
+				start -= 1;
+			}
+			if let Some(value) = parse_comparable_prefix(&line[start..]) {
+				return Ok(value);
+			}
 		}
 		Err(From::from(format!(
 			"Expected a decimal integer (with optional + or - prefix) and (optional suffix) argument to \
-			 {option_name}, but got `{value_as_string}'"
+				 {option_name}, but got `{value_as_string}'"
 		)))
 	}
 
@@ -4414,42 +4422,23 @@ pub mod matchers {
 		}
 	}
 
-	/// This function implements the function of matching substrings of
-	/// X and Y from the -newerXY string.
-	/// X and Y are constrained to a/B/c/m and t.
-	/// such as: "-neweraB" -> Some(a, B) "-neweraD" -> None
-	///
-	/// Additionally, there is support for the -anewer and -cnewer short arguments.
-	/// as follows:
-	/// 1. -anewer is equivalent to -neweram
-	/// 2. -cnewer is equivalent to - newercm
-	///
-	/// If -newer is used it will be resolved to -newermm.
-	fn parse_str_to_newer_args(input: &str) -> Option<(String, String)> {
-		if input.is_empty() {
-			return None;
+	/// Parses `-newerXY` time selectors or the `-anewer`, `-cnewer` and `-newer` aliases.
+	fn parse_str_to_newer_args(input: &str) -> Option<(&str, &str)> {
+		match input {
+			"-newer" => return Some(("m", "m")),
+			"-anewer" => return Some(("a", "m")),
+			"-cnewer" => return Some(("c", "m")),
+			_ => {},
 		}
-
-		if input == "-newer" {
-			return Some(("m".to_string(), "m".to_string()));
+		for at in memchr::memmem::find_iter(input.as_bytes(), b"-newer") {
+			let start = at + b"-newer".len();
+			if let Some([b'a' | b'B' | b'c' | b'm', b'a' | b'B' | b'c' | b'm' | b't']) =
+				input.as_bytes().get(start..start + 2)
+			{
+				return Some((&input[start..start + 1], &input[start + 1..start + 2]));
+			}
 		}
-
-		if input == "-anewer" {
-			return Some(("a".to_string(), "m".to_string()));
-		}
-
-		if input == "-cnewer" {
-			return Some(("c".to_string(), "m".to_string()));
-		}
-
-		let re = Regex::new(r"-newer([aBcm])([aBcmt])").unwrap();
-		if let Some(captures) = re.captures(input) {
-			let x = captures.get(1)?.as_str().to_string();
-			let y = captures.get(2)?.as_str().to_string();
-			Some((x, y))
-		} else {
-			None
-		}
+		None
 	}
 
 	/// Creates a file if it doesn't exist.
@@ -4656,7 +4645,7 @@ pub mod matchers {
 					}
 					let (size, unit) = convert_arg_to_comparable_value_and_suffix(args[i], args[i + 1])?;
 					i += 1;
-					Some(SizeMatcher::new(size, &unit)?.into_box())
+					Some(SizeMatcher::new(size, unit)?.into_box())
 				},
 				"-empty" => Some(EmptyMatcher::new().into_box()),
 				"-exec" | "-execdir" => {
@@ -4894,6 +4883,10 @@ pub mod matchers {
 					config.sorted_output = true;
 					Some(TrueMatcher.into_box())
 				},
+				"-allow-root" => {
+					config.allow_root = true;
+					Some(TrueMatcher.into_box())
+				},
 				"-maxdepth" => {
 					if i >= args.len() - 1 {
 						return Err(From::from(format!("missing argument to {}", args[i])));
@@ -4942,7 +4935,7 @@ pub mod matchers {
 							}
 							if y_option == "t" {
 								let time = args[i + 1];
-								let newer_time_type = NewerOptionType::from_str(x_option.as_str());
+								let newer_time_type = NewerOptionType::from_str(x_option);
 								// Convert args to unix timestamps. (expressed in numeric types)
 								let comparable_time = jiff::Timestamp::try_from(now).ok().and_then(|now| {
 									parse_date_str_to_timestamps(time, &now.to_zoned(shell_time_zone(host)))
@@ -4959,7 +4952,7 @@ pub mod matchers {
 								let file_path = args[i + 1];
 								i += 1;
 								Some(
-									NewerOptionMatcher::new(&x_option, &y_option, file_path, host)
+									NewerOptionMatcher::new(x_option, y_option, file_path, host)
 										.await?
 										.into_box(),
 								)
@@ -5047,8 +5040,14 @@ use std::{
 
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::OsStringValueParser};
 
-use crate::host::{AsyncUtility, Host, matches_parser};
+use crate::{
+	host::{AsyncUtility, Host, matches_parser},
+	root_guard,
+};
 use matchers::{Follow, WalkEntry};
+
+/// `find`'s spelling of the [`root_guard`] escape hatches.
+const ROOT_FLAGS: root_guard::Flags = root_guard::Flags { allow: "-allow-root", depth: Some("-maxdepth") };
 
 pub struct Config {
 	same_file_system:  bool,
@@ -5062,6 +5061,9 @@ pub struct Config {
 	no_leaf_dirs:      bool,
 	follow:            Follow,
 	new_paths:         Option<Vec<String>>,
+	/// `-allow-root`: permits walking a filesystem root deeper than
+	/// [`root_guard::SHALLOW_DEPTH`], which [`run_find`] otherwise refuses.
+	allow_root:        bool,
 	files0_argument:   Option<String>,
 	/// `-fprint`/`-fprintf`/`-fprint0`/`-fls` outputs, closed after the search.
 	output_files:      Vec<(String, omp_vfs::File)>,
@@ -5085,6 +5087,7 @@ impl Default for Config {
 			follow:            Follow::Never,
 			new_paths:         None, // This option exclusively for -files0-from argument.
 			files0_argument:   None, //This option also is used for file0-from
+			allow_root:        false,
 			output_files:      Vec::new(),
 		}
 	}
@@ -5397,6 +5400,14 @@ async fn run_find(
 		return 0;
 	}
 
+	if !config.allow_root
+		&& let Err(refusal) =
+			root_guard::check(paths.iter().map(|path| host.resolve(path)), Some(config.max_depth), ROOT_FLAGS)
+	{
+		let _ = writeln!(host.stderr, "find: {refusal}");
+		return 1;
+	}
+
 	let mut ret = 0;
 	let mut quit = false;
 	for path in paths {
@@ -5456,6 +5467,10 @@ Early alpha implementation. Currently the only expressions supported are
  -sorted
     a non-standard extension that sorts directory contents by name before
     processing them. Less efficient, but allows for deterministic output.
+ -allow-root
+    a non-standard extension that permits searching a filesystem root such
+    as / deeper than -maxdepth 2. Without it such searches are refused: a
+    whole-disk walk can take hours to days.
 "
 	);
 }
@@ -5873,6 +5888,26 @@ mod tests {
 				.await;
 		assert_eq!(code, 0, "stderr: {err}");
 		assert_eq!(out, "1 sub/d.txt\n");
+	}
+
+	/// Failure mode: `find /` walked the whole disk for hours. A filesystem
+	/// root, however it is spelled, is refused unless the walk stays within
+	/// `-maxdepth 2` or `-allow-root` is passed.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn filesystem_root_is_refused_unless_shallow_or_allowed() {
+		let (_dir, root) = fixture();
+		// `-quit` stops a regression at the first entry instead of walking the disk.
+		for (cwd, operand) in [(root.as_path(), "/"), (root.as_path(), "/usr/.."), (Path::new("/"), ".")] {
+			let (code, capture) =
+				run_async_util::<Find>(&[operand, "-maxdepth", "3", "-print", "-quit"], "", cwd).await;
+			assert_eq!((code, capture.out().as_str()), (1, ""), "operand: {operand}");
+			assert!(capture.err().contains("-allow-root"), "stderr: {}", capture.err());
+		}
+		for args in [&["/", "-maxdepth", "2", "-print", "-quit"][..], &["/", "-allow-root", "-print", "-quit"]] {
+			let (code, capture) = run_async_util::<Find>(args, "", &root).await;
+			assert_eq!((code, capture.out().as_str(), capture.err().as_str()), (0, "/\n", ""), "{args:?}");
+		}
 	}
 
 	#[tokio::test(flavor = "multi_thread")]

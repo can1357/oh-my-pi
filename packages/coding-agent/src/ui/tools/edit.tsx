@@ -16,16 +16,18 @@
  */
 import { editInspect } from "@oh-my-pi/pi-natives";
 import { parseCompactDiff } from "@oh-my-pi/pi-tui/text/diff";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import type { JSXNode } from "@oh-my-pi/pi-tui";
 import { splitMagicSections } from "../../edit/magic-sections";
-import type {
-	EditMode,
-	EditToolDetails,
-	EditToolPerFileResult,
-	Operation,
-	PerFileDiffPreview,
+import { normalizeEditMode } from "../../edit/settings";
+import {
+	diffStats,
+	type EditMode,
+	type EditToolDetails,
+	type EditToolPerFileResult,
+	type Operation,
+	type PerFileDiffPreview,
 } from "../../tools/details/edit";
 import {
 	HASHLINE_TAG_SUFFIX_RE,
@@ -69,7 +71,12 @@ export interface EditArgs {
 	}[];
 }
 
-type EditDiffPreview = { readonly diff?: string; readonly firstChangedLine?: number; readonly error?: string };
+type EditDiffPreview = {
+	readonly diff?: string;
+	readonly firstChangedLine?: number;
+	readonly error?: string;
+	readonly notice?: string;
+};
 
 /** What the transcript threads to an edit call (the host's preview computations). */
 interface EditContext {
@@ -322,17 +329,6 @@ function operationTitle(op: Operation | undefined): string {
 	return op === "create" ? "Create" : op === "delete" ? "Delete" : "Edit";
 }
 
-/** Added and removed lines of a diff. */
-export function diffStats(diff: string): { added: number; removed: number } {
-	let added = 0;
-	let removed = 0;
-	for (const line of diff ? diff.split("\n") : []) {
-		if (line.startsWith("+")) added++;
-		else if (line.startsWith("-")) removed++;
-	}
-	return { added, removed };
-}
-
 function statsMeta(added: number, removed: number): string | undefined {
 	const parts = [added > 0 ? `+${added}` : undefined, removed > 0 ? `−${removed}` : undefined].filter(Boolean);
 	return parts.length > 0 ? parts.join(" ") : undefined;
@@ -409,13 +405,14 @@ function contextOf(state: ToolViewState, defaultMode: EditMode | undefined): Edi
 	const only = files[0];
 	if (only?.diff)
 		return { ...context, mode, editDiffPreview: { diff: only.diff, firstChangedLine: only.firstChangedLine } };
-	return only?.error ? { ...context, mode, editDiffPreview: { error: only.error } } : { ...context, mode };
+	if (only?.error) return { ...context, mode, editDiffPreview: { error: only.error } };
+	return only?.notice ? { ...context, mode, editDiffPreview: { notice: only.notice } } : { ...context, mode };
 }
 
-/** Per-file previews worth showing (several files, some with a diff or an error). */
+/** Per-file previews worth showing (several files, some with a diff, an error or a notice). */
 function multiPreview(context: EditContext): readonly PerFileDiffPreview[] | undefined {
 	const multi = context.perFileDiffPreview;
-	return multi && multi.length > 1 && multi.some(p => p.diff || p.error) ? multi : undefined;
+	return multi && multi.length > 1 && multi.some(p => p.diff || p.error || p.notice) ? multi : undefined;
 }
 
 function hasPayload(args: EditArgs, context: EditContext): boolean {
@@ -504,6 +501,7 @@ function callView(args: EditArgs, state: ToolViewState, defaultMode: EditMode | 
 		else if (replacement) body.push({ k: "text", text: replacement });
 		else if (context.editStreamingFallback) body.push({ k: "raw", text: context.editStreamingFallback });
 		else if (context.editDiffPreview?.error) body.push({ k: "error", text: context.editDiffPreview.error });
+		else if (context.editDiffPreview?.notice) body.push({ k: "note", text: context.editDiffPreview.notice });
 		else if (context.editDiffPreview?.diff) {
 			body.push({ k: "stream", diff: context.editDiffPreview.diff, path: facts.rawPath });
 			footer = "preview";
@@ -547,6 +545,8 @@ function callView(args: EditArgs, state: ToolViewState, defaultMode: EditMode | 
 				>
 					{preview.error ? (
 						<ErrorText message={preview.error} />
+					) : preview.notice ? (
+						<NoteText message={preview.notice} />
 					) : (
 						<DiffNode diff={preview.diff ?? ""} path={preview.path} />
 					)}
@@ -568,6 +568,7 @@ function callView(args: EditArgs, state: ToolViewState, defaultMode: EditMode | 
 		} else if (context.editDiffPreview) {
 			const preview = context.editDiffPreview;
 			if (preview.error) body.push(<ErrorText message={preview.error} />);
+			else if (preview.notice) body.push(<NoteText message={preview.notice} />);
 			else if (preview.diff) {
 				diffText = preview.diff;
 				line = preview.firstChangedLine;
@@ -646,6 +647,8 @@ function fileParts(
 	const link = line ? { ...paths, line } : paths;
 
 	const body: JSXNode[] = [];
+	const checkoutNotice = details?.checkoutNotice && sanitizeText(details.checkoutNotice);
+	if (checkoutNotice) body.push(<NoteText message={checkoutNotice} />);
 	let errorText = "";
 	if (isError) {
 		const display = details && "displayErrorText" in details ? details.displayErrorText : undefined;
@@ -659,8 +662,12 @@ function fileParts(
 	if (diagnostics) body.push(<DiagnosticsSection diagnostics={diagnostics} />);
 	const stats = diffText ? diffStats(diffText) : { added: 0, removed: 0 };
 
-	// Terminal: a delete or move-only result is one status row; anything else a card.
-	const inline = !isError && !details?.diff && !details?.diagnostics && (op === "delete" || rename !== undefined);
+	const inline =
+		!isError &&
+		!checkoutNotice &&
+		!details?.diff &&
+		!details?.diagnostics &&
+		(op === "delete" || rename !== undefined);
 	let card: EditCard;
 	if (inline) {
 		card = {
@@ -675,6 +682,7 @@ function fileParts(
 		};
 	} else {
 		const parts: EditBodyPart[] = [];
+		if (checkoutNotice) parts.push({ k: "note", text: checkoutNotice });
 		const headerDiff = isError ? undefined : details?.diff || previewDiff;
 		if (isError) {
 			if (errorText) parts.push({ k: "error", text: errorText });
@@ -790,6 +798,19 @@ function editPresenter(defaultMode: EditMode | undefined): ToolPresenter<EditArg
 		call: (args, state) => callView(args ?? {}, state, defaultMode),
 		result: (result, state, args) => resultView(result, state, args, defaultMode),
 	};
+}
+
+/**
+ * The payload grammar a call to `toolName` streams, which the host threads to
+ * the call as `editMode`: apply_patch's own, the `edit` tool's `mode` getter
+ * (`undefined` for a bridge edit tool without one), none for other tools.
+ * Without it a hashline, sloppy or magic payload's target path stays unknown
+ * until the result arrives.
+ */
+export function toolEditMode(toolName: string, tool: unknown): EditMode | undefined {
+	if (toolName === "apply_patch") return "apply_patch";
+	if (toolName !== "edit" || !isRecord(tool) || typeof tool.mode !== "string") return undefined;
+	return normalizeEditMode(tool.mode);
 }
 
 export const editToolPresenter = editPresenter(undefined);

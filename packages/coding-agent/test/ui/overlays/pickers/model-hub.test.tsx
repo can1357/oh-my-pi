@@ -57,11 +57,11 @@ const registry: ModelHubRegistry = {
 	getError: () => undefined,
 	getAvailable: () => models,
 	getAll: () => models,
-	authStorage: { keys: { source: () => undefined } },
+	authStorage: { keys: { source: () => undefined }, credentials: { list: () => [] } },
 	getDiscoverableProviders: () => [],
 	getProviderDiscoveryState: () => undefined,
 	find: (provider, id) => models.find(model => model.provider === provider && model.id === id),
-	refresh: async () => {},
+	refreshIfStale: async () => false,
 	refreshProvider: async () => {},
 };
 

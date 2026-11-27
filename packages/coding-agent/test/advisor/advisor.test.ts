@@ -6,7 +6,10 @@ import {
 	createCompactionSummaryMessage,
 	defaultConvertToLlm,
 } from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import type { AssistantMessage, completeSimple, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import type {
 	ResponseFileSearchToolCall,
 	ResponseFunctionWebSearch,
@@ -36,11 +39,14 @@ import {
 	quarantineAdvisorUnsafeOutput,
 	resolveAdvisorDeliveryChannel,
 } from "../../src/advisor";
+import { Settings } from "../../src/config/settings";
 import { obfuscateMessages } from "../../src/secrets/message-transform";
 import { SecretObfuscator } from "../../src/secrets/obfuscator";
 import { getOpenAiRemoteCompactionPayload } from "../../src/session/session-context";
 import { formatSessionHistoryMarkdown } from "../../src/session/session-history-format";
 import { YieldQueue } from "../../src/session/yield-queue";
+import { type ImageDescriptionDeps, ImageDescriptions } from "../../src/utils/image-vision-fallback";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
 const restoreTheme = currentTheme();
@@ -1472,6 +1478,78 @@ describe("advisor", () => {
 			};
 		}
 
+		it("hands an advisor that cannot see images their descriptions instead of `[image]`", async () => {
+			const vision = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+			const textOnly = { ...vision, input: ["text" as const] };
+			const artifactsDir = await fs.mkdtemp(path.join(os.tmpdir(), "advisor-image-"));
+			const reply = (text: string): AssistantMessage => ({
+				role: "assistant",
+				content: [{ type: "text", text }],
+				api: vision.api,
+				provider: vision.provider,
+				model: vision.id,
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: Date.now(),
+			});
+			const completeImpl = (async () => reply("a single red pixel")) as unknown as typeof completeSimple;
+			const descriptions = new ImageDescriptions(() => ({
+				modelRegistry: {
+					getAvailable: () => [vision],
+					getAvailableForProviders: () => [vision],
+					getApiKey: async () => "test-key",
+					resolver: () => async () => "test-key",
+				} as unknown as ImageDescriptionDeps["modelRegistry"],
+				settings: Settings.isolated(),
+				localProtocolOptions: { getArtifactsDir: () => artifactsDir, getSessionId: () => "advisor-image" },
+				completeImpl,
+			}));
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const agent: AdvisorAgent = {
+				prompt: async input => {
+					promptInputs.push(input);
+					agent.state.messages.push(reply("no issues"));
+				},
+				abort: () => {},
+				reset: () => {},
+				state: { messages: [] },
+			};
+			const messages: AgentMessage[] = [
+				{
+					role: "user",
+					content: [
+						{ type: "text", text: "what is wrong here?" },
+						{ type: "image", mimeType: "image/png", data: "iVBORw0KGgoAAAANSUhEUg==" },
+					],
+					timestamp: 1,
+				},
+			];
+			const runtime = new AdvisorRuntime(agent, {
+				snapshotMessages: () => messages,
+				prepareImageDescriptions: (batch, signal) => descriptions.prepare(batch, textOnly, signal),
+				withImageDescriptions: message => descriptions.withDescriptions(message),
+			});
+			try {
+				runtime.onTurnEnd(messages);
+				await runtime.waitForCatchup(2_000, 1);
+
+				const sent = promptInputs.map(promptText).join("\n");
+				expect(sent).toContain("what is wrong here?");
+				expect(sent).toContain("a single red pixel");
+				expect(sent).not.toContain("[image]");
+			} finally {
+				runtime.dispose();
+				await removeWithRetries(artifactsDir);
+			}
+		});
+
 		it("coalesces multiple onTurnEnd calls while a prompt is in-flight", async () => {
 			const promptInputs: Array<string | AgentMessage[]> = [];
 			const { promise: firstPromptPromise, resolve: finishFirstPrompt } = Promise.withResolvers<void>();
@@ -1723,7 +1801,7 @@ describe("advisor", () => {
 			expect(firstReview).not.toContain("_thinking:_");
 
 			// Switch advisor model identity and verify includeReasoning: false stays enforced
-			currentModelIdentity = "google-antigravity/gemini-4-argon";
+			currentModelIdentity = "google/gemini-3-pro";
 			messages.push({
 				role: "assistant",
 				content: [

@@ -122,9 +122,9 @@ class IdentityFacts {
 
 /**
  * The id a spec resolves identity and rules under: its own, unless that names
- * no model and the row sends a model that does on the wire. A Devin Fusion
- * pairing runs only its lead, so the lead's reviewed rules (cache-write rate,
- * long-context tier) apply to it at build time.
+ * no model and the row sends a model that does on the wire. A custom alias
+ * (`review-alias` → `gpt-6-luna`) thereby gets the wire model's reviewed rules
+ * at build time.
  */
 function policyModelId(spec: CatalogPolicyInputs): string {
 	const wireId = spec.requestModelId;
@@ -591,6 +591,7 @@ function detectOpenAICompat(
 		streamFirstEventTimeoutMs: d.isLocalServingBackend ? 0 : undefined,
 		streamIdleTimeoutMs,
 		stripDeepseekSpecialTokens: false,
+		neutralizeDeepseekSpecialTokens: false,
 		// Present as a key so models.yml `compat` can set it; unset unless a rule assigns it.
 		stripThinkingHistory: undefined,
 		// URL-derived like the Responses field; unset off the official OpenAI API.
@@ -633,9 +634,11 @@ function detectStreamMarkupHealing(
 	baseUrl: string,
 ): ResolvedOpenAISharedCompat["streamMarkupHealingPattern"] {
 	// The dedicated Kimi grammar targets the K2 chat template; K3 and unranked
-	// Kimi ids keep the generic healer, matching the census.
+	// Kimi ids keep the generic healer, matching the census. The Kimi Code
+	// providers own the pattern in their provider rules instead
+	// (`stream-markup-healing-pattern "kimi"` in rules/providers/kimi-code*.kdl).
 	const isKimiK2 = facts.is("kimi") && facts.identity.family?.startsWith("k2") === true;
-	if (provider === "kimi-code" || provider === "moonshot" || isKimiK2) return "kimi";
+	if (provider === "moonshot" || isKimiK2) return "kimi";
 	if (facts.is("deepseek")) return "dsml";
 	if (isOfficialOpenAIEndpoint(provider, baseUrl)) return undefined;
 	return "thinking";
@@ -1005,19 +1008,14 @@ function resolveDevinPolicy(spec: ModelSpec<"devin-agent">, axes: ResolvedAxes):
 }
 
 function resolveGooglePolicy(
-	spec: ModelSpec<"google-generative-ai" | "google-vertex" | "google-gemini-cli">,
+	spec: ModelSpec<"google-generative-ai" | "google-vertex">,
 	axes: ResolvedAxes,
 ): ResolvedGoogleCompat {
 	const compat: ResolvedGoogleCompat = {
 		supportsFunctionPartId: false,
 		requiresSkipThoughtSignature: false,
 		requiresSkipThoughtSignatureOnFirstFunctionCall: false,
-		dropUnsignedThinking: false,
-		ccaLegacyParametersSchema: false,
 		multimodalFunctionResponse: false,
-		flashStreamLeakWorkaround: false,
-		claudeThinkingBetaHeader: false,
-		antigravityClaudeToolMode: false,
 		stripImageInput: false,
 		// Unset means "no image contract": images go out as sent. Keys exist so
 		// a KDL rule or a user `compat` block can declare one.
@@ -1063,7 +1061,6 @@ const FIREWORKS_THINKING_EFFORT_MAP: Readonly<Partial<Record<Effort, string>>> =
 function defaultThinkingMode<TApi extends Api>(spec: ModelSpec<TApi>, facts: IdentityFacts): ThinkingConfig["mode"] {
 	switch (spec.api) {
 		case "google-generative-ai":
-		case "google-gemini-cli":
 		case "google-vertex":
 			// Gemini 3+ `google-level` is a `thinking-mode` rule in classes/gemini.kdl.
 			return "budget";
@@ -1217,8 +1214,7 @@ function resolveThinkingPolicy<TApi extends Api>(
 			spec.api === "azure-openai-responses" ||
 			spec.api === "anthropic-messages" ||
 			spec.api === "google-generative-ai" ||
-			spec.api === "google-vertex" ||
-			spec.api === "google-gemini-cli";
+			spec.api === "google-vertex";
 		if ((spec.kind ?? "chat") !== "chat" || (!supportedApi && rule.unverified !== true)) return undefined;
 		return {
 			mode: rule.mode ?? defaultThinkingMode(spec, facts),
@@ -1280,7 +1276,28 @@ function mergeEffortMap(
 			: undefined;
 	const configured = readCompatEffortMap(compat);
 	if (detected === undefined && ruleMap === undefined && configured === undefined) return undefined;
-	return filterEffortMap({ ...detected, ...ruleMap, ...configured }, efforts);
+	const served = filterEffortMap({ ...detected, ...ruleMap, ...configured }, efforts);
+	const aliases = ruleMap === undefined ? undefined : effortAliases(ruleMap, efforts);
+	return aliases === undefined ? served : { ...served, ...aliases };
+}
+
+/**
+ * `thinking-effort-map` entries that send an unserved effort to a served tier
+ * (`medium "high"` on a low/high/max ladder); `clampThinkingLevelForModel`
+ * follows them instead of stepping down. Wire-value maps never alias.
+ */
+function effortAliases(
+	map: Partial<Record<Effort, string>>,
+	efforts: readonly Effort[],
+): Partial<Record<Effort, string>> | undefined {
+	let aliases: Partial<Record<Effort, string>> | undefined;
+	for (const effort of THINKING_EFFORTS) {
+		const target = effortValue(map[effort]);
+		if (efforts.includes(effort) || target === undefined || !efforts.includes(target)) continue;
+		aliases ??= {};
+		aliases[effort] = target;
+	}
+	return aliases;
 }
 
 /**
@@ -1406,11 +1423,7 @@ export function resolveModelPolicy(input: ModelSpec<Api>, route?: ResolveRoute):
 		compat = resolveOllamaPolicy(spec, axes);
 	} else if (specUsesApi(spec, "devin-agent")) {
 		compat = resolveDevinPolicy(spec, axes);
-	} else if (
-		specUsesApi(spec, "google-generative-ai") ||
-		specUsesApi(spec, "google-vertex") ||
-		specUsesApi(spec, "google-gemini-cli")
-	) {
+	} else if (specUsesApi(spec, "google-generative-ai") || specUsesApi(spec, "google-vertex")) {
 		compat = resolveGooglePolicy(spec, axes);
 	} else {
 		compat = undefined;

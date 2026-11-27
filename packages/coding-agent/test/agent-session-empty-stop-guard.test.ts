@@ -90,7 +90,7 @@ function emptyProviderResponse(): MockResponse {
 	return {
 		content: [{ type: "thinking", thinking: "I finished reasoning but omitted the final answer." }],
 		stopReason: "error",
-		errorMessage: "Cloud Code Assist API returned a thought-only response without final output",
+		errorMessage: "Gemini API returned a thought-only response without final output",
 	};
 }
 
@@ -269,7 +269,7 @@ describe("AgentSession empty stop guard", () => {
 		expect(emptyAssistantStops(session.agent.state.messages)).toHaveLength(0);
 	});
 
-	it("continues with an output reminder after a Cloud Code Assist empty response", async () => {
+	it("continues with an output reminder after a provider empty response", async () => {
 		const { session, mock } = await createHarness([
 			emptyProviderResponse(),
 			{ content: ["finished after provider-empty retry"], stopReason: "stop" },

@@ -17,11 +17,11 @@ import { formatCoarseDuration } from "../modes/view-model/chrome/format";
 import { shortenEmbeddedPaths } from "../utils/render-utils";
 import { truncateToWidth } from "../utils/text-width";
 import { buildJobTree, jobTreeGuide, jobTreeIndent } from "../modes/view-model/overlays/job-tree";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { errorMessage, sanitizeText } from "@oh-my-pi/pi-utils";
 import { handleMcpAcp } from "./helpers/mcp";
 import { markdownFenceFor } from "../utils/markdown-fence";
 import { openLocalFileInEditor } from "../modes/local-file-editor";
-import { commandConsumed, errorMessage, parseSubcommand, usage } from "./helpers/parse";
+import { commandConsumed, parseSubcommand, usage } from "./helpers/parse";
 import {
 	describeRedeemOutcome,
 	formatResetUsageAccountLine,
@@ -634,10 +634,10 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		name: "branch",
 		aliases: ["rewind"],
 		icon: "branch",
-		description: "Rewind to a previous message, keeping the old path as a branch",
-		handleTui: (_command, runtime) => {
-			runtime.ctx.showUserMessageSelector();
+		description: "Rewind to a previous message in a new session, keeping this one unchanged",
+		handleTui: async (_command, runtime) => {
 			clearSubmittedText(runtime);
+			await runtime.ctx.showUserMessageSelector();
 		},
 	},
 	{
@@ -684,9 +684,9 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		name: "tree",
 		icon: "tree",
 		description: "Navigate session tree (switch branches)",
-		handleTui: (_command, runtime) => {
-			runtime.ctx.showTreeSelector();
+		handleTui: async (_command, runtime) => {
 			clearSubmittedText(runtime);
+			await runtime.ctx.showTreeSelector();
 		},
 	},
 	{

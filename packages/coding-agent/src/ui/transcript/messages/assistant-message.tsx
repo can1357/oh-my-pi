@@ -29,6 +29,7 @@ import {
 	For,
 	type JSXNode,
 	nativeRendering,
+	nativeSupports,
 	onCleanup,
 	type Reactive,
 	read,
@@ -41,12 +42,7 @@ import { formatDuration, formatNumber, logger } from "@oh-my-pi/pi-utils";
 import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import type { TurnUsageSummary } from "../../../modes/view-model/overlays/usage-row";
 import type { CacheInvalidation } from "../../../session/transcript/cache-invalidation-marker";
-import {
-	chartFence,
-	hasChartTable,
-	lookupTableChart,
-	splitTableCharts,
-} from "../../../session/transcript/table-chart";
+import { chartFence, hasChartTable, lookupTableChart, splitTableCharts } from "../../../session/transcript/table-chart";
 import { splitReaction } from "../../../session/transcript/reaction";
 import type { ServedModelMismatch } from "../../../session/transcript/served-model-marker";
 import {
@@ -57,13 +53,24 @@ import {
 import { resolveAssistantErrorPresentation } from "../../../session/transcript/transcript-render-helpers";
 import type { AssistantTextRenderer, AssistantThinkingRenderer } from "../../../extensibility/extensions/render-types";
 import { extensionTheme, renderExtension } from "../../extensions/render-output";
-import { ImageNode } from "./image";
+import { type EmbedHost, EmbedFigure, parseEmbed } from "../figures/embed";
+import { figureSegments, mightHaveFigures, SvgFence } from "../figures/figure-markdown";
+import type { FigureCell } from "../figures/svg";
+import "../../styles/figures/figure";
+import { settledRevision } from "../../shell/transcript";
+import { ImageNode, InlineMedia } from "./image";
 import { rewriteLinkDestinations } from "./links";
 import { CacheMissMarker, ServedModelMarker } from "./markers";
 import { turnHoldEntries } from "./turn-actions";
 
 /** Wrapped rows an error keeps while collapsed. */
 export const ERROR_PREVIEW_ROWS = 8;
+
+/** Media from one grouped read, whether it returned image bytes, a file path, or both. */
+export interface ToolResultMedia {
+	readonly images: readonly ImageContent[];
+	readonly mediaPath?: string;
+}
 
 /** What an assistant block shows. Every field may be a signal the host moves. */
 export interface AssistantMessageModel {
@@ -81,12 +88,22 @@ export interface AssistantMessageModel {
 	readonly proseOnlyThinking?: boolean;
 	/** Assistant and tool-result images (default true). */
 	readonly showImages?: Reactive<boolean>;
+	/** Lift accepted SVG code fences out of assistant Markdown. */
+	readonly renderSvg?: Reactive<boolean>;
+	/** Lift standalone HTML image and page embeds out of assistant Markdown. */
+	readonly renderEmbeds?: Reactive<boolean>;
+	/** Embed paths and the terminal's iframe capture, supplied by the interactive session. */
+	readonly embedHost?: EmbedHost;
+	/** Terminal cell when it draws pictures; undefined from the accessor means a text-only terminal. */
+	readonly figureCell?: Reactive<FigureCell | undefined>;
+	/** Rows a figure may take (a share of the terminal's); undefined: as tall as it draws. */
+	readonly figureRows?: Reactive<number | undefined>;
 	/** Tool-result images (default true). */
 	readonly showToolResultImages?: Reactive<boolean>;
 	/** Tables get charts (default false; a focused subagent's do not): Tern is sent each chart after its table. */
 	readonly tableCharts?: Reactive<boolean>;
-	/** Images grouped reads produced, by tool call id. */
-	readonly toolResultImages?: Reactive<ReadonlyMap<string, readonly ImageContent[]>>;
+	/** Media grouped reads produced, by tool call id. */
+	readonly toolResultMedia?: Reactive<ReadonlyMap<string, ToolResultMedia>>;
 	/** Session-resolved destinations of relative prose links. */
 	readonly linkTargets?: Reactive<ReadonlyMap<string, string>>;
 	/** Tone of the reply's prose (`/live`'s spoken reply reads in the accent); undefined keeps the theme's text. */
@@ -156,8 +173,11 @@ type Part =
 			source: string;
 			native: string;
 			stream: boolean;
+			deferFigures?: boolean;
 			links?: ReadonlyMap<string, string>;
 	  }
+	| { kind: "svg"; source: string }
+	| { kind: "embed"; html: string }
 	| {
 			kind: "thinking";
 			index: number;
@@ -179,7 +199,8 @@ type Part =
 			thinkingIndex: number;
 			text: string;
 	  }
-	| { kind: "image"; image: ImageContent; tool: boolean }
+	| { kind: "image"; image: ImageContent; tool: boolean; path?: string }
+	| { kind: "media"; path: string }
 	| { kind: "error"; error: ErrorPart };
 
 /** The turn-ending error part. */
@@ -316,6 +337,11 @@ export function AssistantMessageBlock(props: { model: AssistantMessageModel }): 
 		});
 	};
 
+	const showFigureImages = computed(
+		() =>
+			flag(model.showImages, true) &&
+			(nativeRendering() || model.figureCell === undefined || read(model.figureCell) !== undefined),
+	);
 	const parts = computed((): ReadonlyMap<string, Part> => {
 		const out = new Map<string, Part>();
 		chartPicks();
@@ -327,7 +353,9 @@ export function AssistantMessageBlock(props: { model: AssistantMessageModel }): 
 		const hide = flag(model.hideThinking, false);
 		const expand = flag(model.expandThinking, false);
 		const showImages = flag(model.showImages, true);
-		const charts = showImages && flag(model.tableCharts, false);
+		const renderSvg = flag(model.renderSvg, false) && showFigureImages();
+		const renderEmbeds = flag(model.renderEmbeds, false);
+		const charts = showImages && flag(model.tableCharts, false) && nativeRendering();
 		const tail = finalized ? undefined : thinkingTail(answer);
 		const links = read(model.linkTargets);
 		const proseOnly = model.proseOnlyThinking ?? true;
@@ -370,41 +398,59 @@ export function AssistantMessageBlock(props: { model: AssistantMessageModel }): 
 								streaming,
 							)
 						: content.text;
-				const source = (streaming ? holdPartialTableRow(rendered) : rendered).trim();
-				const linked = (text: string, live: boolean): string =>
-					!live && links && links.size > 0 ? rewriteLinkDestinations(text, href => links.get(href)) : text;
-				if (!charts || !nativeRendering() || !hasChartTable(source)) {
-					out.set(`t${i}`, {
-						kind: "text",
-						// The terminal painter streams and rewrites links itself; extension text renderers apply to both.
-						source: rendered.trim(),
-						native: streaming ? speculativeStreamingSource(source) : linked(source, false),
-						stream: streaming,
-						links,
-					});
-					continue;
-				}
-				// Tern draws a chart after its table as an ```svg figure it colors: the prose splits around it.
 				let count = 0;
-				const segments = splitTableCharts(source, streaming);
-				segments.forEach((segment, at) => {
-					const slot = count++ === 0 ? `t${i}` : `t${i}.${count - 1}`;
-					if (segment.kind === "markdown") {
-						const live = streaming && at === segments.length - 1;
-						const text = segment.text.trim();
-						out.set(slot, {
+				const slot = (): string => (count++ === 0 ? `t${i}` : `t${i}.${count - 1}`);
+				const linked = (text: string): string =>
+					links?.size ? rewriteLinkDestinations(text, href => links.get(href)) : text;
+				const markdown = (text: string, stream: boolean, deferFigures = false): void => {
+					const source = (stream ? holdPartialTableRow(text) : text).trim();
+					if (!charts || !hasChartTable(source)) {
+						out.set(slot(), {
 							kind: "text",
-							source: text,
-							native: live ? speculativeStreamingSource(text) : linked(text, false),
-							stream: live,
+							// Terminal streaming and link rewriting use the original Markdown.
+							source: text.trim(),
+							native: stream ? speculativeStreamingSource(source) : linked(source),
+							stream,
+							deferFigures,
 							links,
 						});
 						return;
 					}
-					const chart = lookupTableChart(segment.table);
-					if (chart instanceof Promise) awaitChart(chart);
-					else if (chart) out.set(slot, { kind: "text", source: "", native: chartFence(chart), stream: false, links: undefined });
-				});
+					const segments = splitTableCharts(source, stream);
+					for (const [at, segment] of segments.entries()) {
+						if (segment.kind === "chart") {
+							const key = slot();
+							const chart = lookupTableChart(segment.table);
+							if (chart instanceof Promise) awaitChart(chart);
+							else if (chart)
+								out.set(key, { kind: "text", source: "", native: chartFence(chart), stream: false });
+						} else {
+							const tail = stream && at === segments.length - 1;
+							const prose = segment.text.trim();
+							out.set(slot(), {
+								kind: "text",
+								source: prose,
+								native: tail ? speculativeStreamingSource(prose) : linked(prose),
+								stream: tail,
+								links,
+							});
+						}
+					}
+				};
+				const candidate = mightHaveFigures(rendered, renderSvg, renderEmbeds);
+				if (!candidate || live) {
+					markdown(rendered, streaming, candidate);
+					continue;
+				}
+				const figures = figureSegments(rendered, { charts: false, showImages, renderSvg, renderEmbeds });
+				if (figures.every(figure => figure.kind === "md")) {
+					markdown(rendered, false);
+					continue;
+				}
+				for (const figure of figures) {
+					if (figure.kind === "md") markdown(figure.text, false);
+					else if (figure.kind !== "chart") out.set(`${figure.kind}:${slot()}`, figure);
+				}
 			} else if (content.type === "thinking") {
 				// A display message's thinking (`rawThinking` set) is already formatted: formatting it again
 				// would strip its fences a second time.
@@ -445,16 +491,34 @@ export function AssistantMessageBlock(props: { model: AssistantMessageModel }): 
 				out.set(`i${i}`, { kind: "image", image: content, tool: false });
 			}
 		}
-		if (showImages && flag(model.showToolResultImages, true)) {
-			for (const [id, images] of read(model.toolResultImages) ?? new Map<string, readonly ImageContent[]>()) {
+		const toolMedia = read(model.toolResultMedia);
+		if (toolMedia?.size && showImages && flag(model.showToolResultImages, true)) {
+			const showByPath = nativeSupports("media");
+			const shown = showByPath ? new Set<string>() : undefined;
+			if (shown) {
+				for (const [id, { mediaPath }] of toolMedia) {
+					if (!mediaPath || shown.has(mediaPath)) continue;
+					shown.add(mediaPath);
+					out.set(`r${id}`, { kind: "media", path: mediaPath });
+				}
+			}
+			for (const [id, { images, mediaPath }] of toolMedia) {
+				if (mediaPath && showByPath) continue;
 				images.forEach((image, n) => {
-					if (image.data && image.mimeType) out.set(`r${id}:${n}`, { kind: "image", image, tool: true });
+					if (image.data && image.mimeType)
+						out.set(`r${id}:${n}`, { kind: "image", image, tool: true, path: mediaPath });
 				});
 			}
 		}
 		const error = errorPart(displayed, model);
 		if (error) out.set("error", { kind: "error", error });
 		return out;
+	});
+
+	// Grouped reads may finish after the assistant's block has settled in the native host.
+	const revise = settledRevision();
+	effect(() => {
+		if (read(model.toolResultMedia)?.size) untrack(revise);
 	});
 
 	const answered = (): boolean => reply()?.answer.content.some(hasVisibleText) ?? false;
@@ -514,6 +578,10 @@ export function AssistantMessageBlock(props: { model: AssistantMessageModel }): 
 						slot={slot}
 						part={() => parts().get(slot)}
 						now={now}
+						figureCell={model.figureCell}
+						figureRows={model.figureRows}
+						embedHost={model.embedHost}
+						showFigureImages={showFigureImages}
 						rate={() => read(model.thinkingRate) ?? 0}
 						tone={() => read(model.tone)}
 						thinkingRenderers={() => read(model.thinkingRenderers) ?? []}
@@ -594,11 +662,16 @@ function ReplyPart(props: {
 	slot: string;
 	part: () => Part | undefined;
 	now: () => number;
+	figureCell?: Reactive<FigureCell | undefined>;
+	figureRows?: Reactive<number | undefined>;
+	embedHost?: EmbedHost;
+	showFigureImages: () => boolean;
 	rate: () => number;
 	tone: () => TspTone | undefined;
 	thinkingRenderers: () => readonly AssistantThinkingRenderer[];
 }): JSXNode {
-	const kind = untrack(props.part)?.kind;
+	const initial = untrack(props.part);
+	const kind = initial?.kind;
 	const slot = props.slot;
 	if (kind === "text") {
 		const text = (): Extract<Part, { kind: "text" }> | undefined => {
@@ -613,7 +686,40 @@ function ReplyPart(props: {
 				// Held before it was trimmed: a second hold would take the finished row for a partial one.
 				prepared={() => (text()?.stream ? true : undefined)}
 				tone={props.tone}
-				term={() => ({ source: text()?.source, links: text()?.links })}
+				term={() => ({ source: text()?.source, links: text()?.links, deferFigures: text()?.deferFigures })}
+			/>
+		);
+	}
+	if (kind === "svg") {
+		const source = computed(() => {
+			const part = props.part();
+			return part?.kind === "svg" ? part.source : "";
+		});
+		return (
+			<SvgFence
+				source={source}
+				nodeKey={slot}
+				cell={props.figureCell}
+				maxRows={props.figureRows}
+				theme={currentTheme}
+			/>
+		);
+	}
+	if (kind === "embed") {
+		const html = computed(() => {
+			const part = props.part();
+			return part?.kind === "embed" ? part.html : "";
+		});
+		const embed = computed(() => parseEmbed(html()));
+		return (
+			<EmbedFigure
+				embed={embed}
+				nodeKey={slot}
+				showImages={props.showFigureImages}
+				host={props.embedHost}
+				cell={props.figureCell}
+				maxRows={props.figureRows}
+				theme={currentTheme}
 			/>
 		);
 	}
@@ -699,15 +805,28 @@ function ReplyPart(props: {
 			</col>
 		);
 	}
-	if (kind === "image") {
-		const part = untrack(props.part);
-		if (part?.kind !== "image") return undefined;
+	if (initial?.kind === "media") {
+		return (
+			<InlineMedia
+				nodeKey={slot}
+				path={() => {
+					const part = props.part();
+					return part?.kind === "media" ? part.path : initial.path;
+				}}
+			/>
+		);
+	}
+	if (initial?.kind === "image") {
 		return (
 			<ImageNode
-				image={part.image}
+				image={initial.image}
 				nodeKey={slot}
-				alt={part.image.mimeType}
-				term={{ tool: part.tool, mime: part.image.mimeType }}
+				alt={initial.image.mimeType}
+				path={() => {
+					const current = props.part();
+					return current?.kind === "image" ? current.path : undefined;
+				}}
+				term={{ tool: initial.tool, mime: initial.image.mimeType }}
 			/>
 		);
 	}

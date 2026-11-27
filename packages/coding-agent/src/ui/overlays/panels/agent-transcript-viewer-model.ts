@@ -12,7 +12,9 @@
 import type * as fs from "node:fs";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import { type Accessor, signal, untrack } from "@oh-my-pi/pi-tui";
-import { logger } from "@oh-my-pi/pi-utils";
+import { formatDuration, logger } from "@oh-my-pi/pi-utils";
+import type { Settings } from "../../../config/settings";
+import { formatModelString } from "../../../config/model-resolver";
 import type { AgentHubRemote } from "../../../modes/view-model/overlays/agent-hub";
 import type {
 	AgentTranscriptEntry,
@@ -20,6 +22,7 @@ import type {
 } from "../../../modes/view-model/overlays/agent-transcript-viewer";
 import { type TurnUsageSummary, TurnUsageTally } from "../../../modes/view-model/overlays/usage-row";
 import { imageContent, type SessionMessageEntryLike, textContent } from "../../../session/transcript/transcript-entry";
+import { resolveEditToolMode } from "../../../utils/edit-mode";
 import { ToolCall, type ToolCallOptions, type ToolCallResult } from "../../transcript/tool-block";
 import type { LineValue } from "./common";
 import { getKeybindings } from "../../../config/keybindings/keybindings";
@@ -35,12 +38,12 @@ export interface ViewerAgentRef {
 }
 
 /**
- * The session's handlers of transcript controls (a prompt's copy and rewind,
+ * The session's handlers of transcript controls (a prompt's copy and edit,
  * a reply's copy, a turn's hold menu). The viewer's blocks run the same ones
  * as the session's own transcript.
  */
 export interface ViewerTranscriptActions {
-	/** A prompt bubble's control or hold-menu entry (`copy-message`, `rewind`, `edit-turn`, …). */
+	/** A prompt bubble's control or hold-menu entry (`copy-message`, `edit-turn`, `rewind-turn`, …). */
 	prompt(act: string, text: string, timestamp: number): void;
 	/** A reply's control or hold-menu entry (`copy-answer`, `retry-turn`, …). */
 	reply(act: string, message: AssistantMessage, copyText?: string): void;
@@ -62,7 +65,17 @@ export interface AgentTranscriptViewerDeps {
 	/** Collab guest: the host serves the transcript. */
 	readonly remote?: AgentHubRemote;
 	/** Progress snapshot source for the stats row. */
-	readonly observers?: { getSession(id: string): { readonly progress?: ViewerProgress } | undefined };
+	readonly observers?: {
+		getSession(id: string):
+			| {
+					/** `"active"` while the agent runs; its elapsed time then advances from {@link progressAt}. */
+					readonly status?: string;
+					readonly progress?: ViewerProgress;
+					/** `Date.now()` when {@link progress} arrived; its `durationMs` was current then. */
+					readonly progressAt?: number;
+			  }
+			| undefined;
+	};
 	/** Revive+prompt path of messageable local agents (lazy). */
 	readonly lifecycle?: () => {
 		ensureLive(
@@ -89,6 +102,12 @@ export interface AgentTranscriptViewerDeps {
 	readonly hour12?: Accessor<boolean | undefined>;
 	/** Opens the inspector of a bash card's command. */
 	readonly inspectShell?: ToolCallOptions["inspectShell"];
+	/**
+	 * Settings the agent ran under (a subagent reads `edit.*` through to its parent's). Each
+	 * reply's `edit` calls parse in the mode they select for the model that wrote it; without
+	 * them a hashline, sloppy or magic call shows no target path.
+	 */
+	readonly settings?: Settings;
 }
 
 /** One block of the transcript. */
@@ -234,7 +253,10 @@ export class AgentTranscriptViewerModel {
 
 	#metaSignature(): string {
 		const ref = this.ref();
-		return JSON.stringify([ref?.status, ref?.kind, ref?.parentId, ref?.sessionFile, this.progress()]);
+		const progress = this.progress();
+		// A running agent's time advances every poll: compare it as the stats row shows it, so the row redraws only when that text changes.
+		const shown = progress && { ...progress, durationMs: formatDuration(progress.durationMs) };
+		return JSON.stringify([ref?.status, ref?.kind, ref?.parentId, ref?.sessionFile, shown]);
 	}
 
 	touch(): void {
@@ -252,8 +274,12 @@ export class AgentTranscriptViewerModel {
 		return Boolean(this.deps.remote || this.deps.lifecycle);
 	}
 
+	/** The latest progress; a running agent's elapsed time advances from the snapshot's arrival, as snapshots that would only advance the clock are not sent. */
 	progress(): ViewerProgress | undefined {
-		return this.deps.observers?.getSession(this.deps.agentId)?.progress;
+		const session = this.deps.observers?.getSession(this.deps.agentId);
+		const progress = session?.progress;
+		if (!progress || session.status !== "active" || session.progressAt === undefined) return progress;
+		return { ...progress, durationMs: progress.durationMs + Math.max(0, Date.now() - session.progressAt) };
 	}
 
 	/** What the body says while there are no messages. */
@@ -527,6 +553,13 @@ export class AgentTranscriptViewerModel {
 							args: part.arguments,
 							...(this.deps.inspectShell ? { inspectShell: this.deps.inspectShell } : {}),
 						});
+						const settings = this.deps.settings;
+						if (settings && part.name === "edit") {
+							const model = formatModelString({ provider: message.provider, id: message.model });
+							call.setRenderContext({
+								editMode: resolveEditToolMode({ settings, getActiveModelString: () => model }),
+							});
+						}
 						call.setArgsComplete();
 						call.setExpanded(untrack(this.expanded));
 						this.#tools.set(part.id, call);

@@ -49,8 +49,11 @@ describe("legacy pi SettingsManager shim (issue #10397)", () => {
 			path.join(agentDir, "config.yml"),
 			YAML.stringify({ piVim: { mode: "normal" }, shellCommandPrefix: "export GLOBAL=1" }, null, 2),
 		);
-		fs.mkdirSync(path.join(projectDir, ".claude"), { recursive: true });
-		await Bun.write(path.join(projectDir, ".claude", "settings.json"), JSON.stringify({ piVim: { leader: "," } }));
+		fs.mkdirSync(getProjectAgentDir(projectDir), { recursive: true });
+		await Bun.write(
+			path.join(getProjectAgentDir(projectDir), "settings.json"),
+			JSON.stringify({ piVim: { leader: "," } }),
+		);
 
 		await Settings.init({ cwd: projectDir, agentDir });
 		const s = SettingsManager.create(projectDir);
@@ -95,10 +98,16 @@ describe("legacy pi SettingsManager shim (issue #10397)", () => {
 		// project. Its cwd must win over the global singleton session A initializes.
 		const projectB = tempDir.join("project-b");
 		fs.mkdirSync(getProjectAgentDir(projectB), { recursive: true });
-		fs.mkdirSync(path.join(projectDir, ".claude"), { recursive: true });
-		fs.mkdirSync(path.join(projectB, ".claude"), { recursive: true });
-		await Bun.write(path.join(projectDir, ".claude", "settings.json"), JSON.stringify({ piVim: { session: "a" } }));
-		await Bun.write(path.join(projectB, ".claude", "settings.json"), JSON.stringify({ piVim: { session: "b" } }));
+		fs.mkdirSync(getProjectAgentDir(projectDir), { recursive: true });
+		fs.mkdirSync(getProjectAgentDir(projectB), { recursive: true });
+		await Bun.write(
+			path.join(getProjectAgentDir(projectDir), "settings.json"),
+			JSON.stringify({ piVim: { session: "a" } }),
+		);
+		await Bun.write(
+			path.join(getProjectAgentDir(projectB), "settings.json"),
+			JSON.stringify({ piVim: { session: "b" } }),
+		);
 
 		const singleton = await Settings.init({ cwd: projectDir, agentDir });
 		const sessionB = await Settings.loadIsolated({ cwd: projectB, agentDir });
@@ -123,9 +132,9 @@ describe("legacy pi SettingsManager shim (issue #10397)", () => {
 				shellCommandPrefix: "export GLOBAL=1",
 			}),
 		);
-		fs.mkdirSync(path.join(projectDir, ".claude"), { recursive: true });
+		fs.mkdirSync(getProjectAgentDir(projectDir), { recursive: true });
 		await Bun.write(
-			path.join(projectDir, ".claude", "settings.json"),
+			path.join(getProjectAgentDir(projectDir), "settings.json"),
 			JSON.stringify({ shellCommandPrefix: "export PROJECT=1" }),
 		);
 

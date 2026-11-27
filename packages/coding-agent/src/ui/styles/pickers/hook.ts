@@ -12,6 +12,7 @@ import { boxBottom, boxRow, boxTop, definePickerLook, type PickerTerm } from "@o
 import { padTo, replaceTabs, truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { bindingGlyph, selectNavGlyphs } from "../panels/common";
+import { hangingWrap } from "../tools/frame";
 import { caretField, inlineMarkdown } from "./common";
 
 /** One visible option. */
@@ -60,13 +61,17 @@ function fillWith(theme: Theme, color: string, text: string): string {
 
 function sliderRows(theme: Theme, slider: NonNullable<HookLookTerm["slider"]>, width: number): string[] {
 	const { segments, index } = slider;
+	const symbols = theme.symbols;
+	const leftCap = symbols.symbol("sep.powerlineRight");
+	const rightCap = symbols.symbol("sep.powerlineLeft");
+	const separator = ` ${theme.style("statusLineSep", symbols.symbol("sep.powerlineThin"))} `;
 	let track = "";
 	segments.forEach((segment, i) => {
-		if (i > 0) track += i === index || i - 1 === index ? "  " : ` ${theme.style("statusLineSep", "┆")} `;
+		if (i > 0) track += i === index || i - 1 === index ? "  " : separator;
 		const color = SEGMENT_COLORS[i % SEGMENT_COLORS.length]!;
 		track +=
 			i === index
-				? `${theme.style(color, "◀")}${fillWith(theme, color, `${CHIP_TEXT}${theme.style("strong", ` ${segment.label} `)}`)}${theme.style(color, "▶")}`
+				? `${theme.style(color, leftCap)}${fillWith(theme, color, `${CHIP_TEXT}${theme.style("strong", ` ${segment.label} `)}`)}${theme.style(color, rightCap)}`
 				: theme.style(color, segment.label);
 	});
 	const left = theme.style(index > 0 ? "accent" : "dim", "◂");
@@ -74,11 +79,11 @@ function sliderRows(theme: Theme, slider: NonNullable<HookLookTerm["slider"]>, w
 	const caption = slider.caption ? `${theme.style("dim", slider.caption)}  ` : "";
 	const rows = wrap(`${caption}${left}  ${track}  ${right}`, width);
 	const detail = segments[index]?.detail;
-	if (detail) rows.push(...wrap(`  ${theme.style("dim", "↳")} ${theme.style("muted", detail)}`, width));
+	if (detail) rows.push(...hangingWrap(`  ${theme.style("dim", "↳")} `, "    ", theme.style("muted", detail), width));
 	return rows;
 }
 
-/** The rendered lines of one option (label, then its description). */
+/** The rendered rows of one option (label, then its description), hung under their prefixes within the list's padding. */
 function optionLines(
 	theme: Theme,
 	option: HookLookOption,
@@ -91,16 +96,23 @@ function optionLines(
 	let prefix: string;
 	if (option.marker?.kind === "radio") {
 		const color = option.disabled ? "dim" : selected ? "accent" : "dim";
-		prefix = theme.style(color, `${selected ? "◉" : "○"} `);
+		const marker = theme.symbols.symbol(selected ? "radio.selected" : "radio.unselected");
+		prefix = theme.style(color, `${marker} `);
 	} else if (option.marker?.kind === "checkbox") {
 		const color = option.disabled ? "dim" : selected ? "accent" : option.marker.checked ? "success" : "dim";
-		prefix = theme.style(color, `${option.marker.checked ? "☑" : "☐"} `);
-	} else prefix = selected ? theme.style(option.disabled ? "dim" : "accent", "❯ ") : "  ";
-	const lines = [prefix + label];
+		const marker = theme.symbols.symbol(option.marker.checked ? "checkbox.checked" : "checkbox.unchecked");
+		prefix = theme.style(color, `${marker} `);
+	} else if (selected) {
+		prefix = theme.style(option.disabled ? "dim" : "accent", `${theme.symbols.symbol("nav.cursor")} `);
+	} else {
+		prefix = "  ";
+	}
+	const inner = Math.max(1, width - 2);
+	const lines = hangingWrap(prefix, "  ", replaceTabs(label), inner);
 	if (option.description && descRows !== 0) {
 		const color = option.disabled ? "dim" : "muted";
 		const description = inlineMarkdown(theme, option.description, color);
-		if (descRows === "full") lines.push(`    ${description}`);
+		if (descRows === "full") lines.push(...hangingWrap("    ", "    ", replaceTabs(description), inner));
 		else {
 			const body = Math.max(1, width - 2 - 4);
 			const wrapped = wrap(description, body);
@@ -194,8 +206,8 @@ export function paintHookPanel(theme: Theme, width: number, term: HookLookTerm):
 	const rows = listRows(theme, term, inner);
 	const band = (text: string, highlight: boolean): string => (highlight ? theme.style("selectedBg", text) : text);
 	if (term.outline) {
-		const rule = theme.style("border", "─".repeat(inner));
-		const v = theme.style("border", "│");
+		const rule = theme.style("border", theme.symbols.box.horizontal.repeat(inner));
+		const v = theme.style("border", theme.symbols.box.vertical);
 		body.push(rule);
 		for (const row of rows)
 			for (const line of lineRows(row.text, inner, true))

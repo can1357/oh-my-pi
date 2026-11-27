@@ -1,7 +1,7 @@
 import { clearSubmittedText, runWithDetachedDraft } from "./helpers/draft";
 import * as path from "node:path";
 import { AgentBusyError } from "@oh-my-pi/pi-agent-core";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { errorMessage, prompt } from "@oh-my-pi/pi-utils";
 import {
 	formatModelString,
 	getModelMatchPreferences,
@@ -25,9 +25,10 @@ import { describeLoopLimitRuntime } from "../modes/loop-limit";
 import type { InteractiveModeContext } from "../modes/types";
 import ratchetKickoffPrompt from "../prompts/ratchet-kickoff.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
+import { modelMentionSelector } from "../session/model-mention-syntax";
 import { CLI_THINKING_LEVELS, getConfiguredThinkingLevelMetadata } from "../thinking/levels";
 import { noThinkingMessage, resolveThinkingArgument } from "./helpers/effort";
-import { commandConsumed, errorMessage, usage } from "./helpers/parse";
+import { commandConsumed, usage } from "./helpers/parse";
 import { handleSecurityCommand } from "./helpers/security";
 import type { SlashCommandSpec } from "./types";
 import {
@@ -50,9 +51,10 @@ export function refreshStatusLine(ctx: InteractiveModeContext): void {
 }
 
 /**
- * Resolve a `/model` / `/switch` selector the way `omp bench` and `--model`
- * do: exact `provider/id`, fuzzy ids (`opus`), role aliases (`@smol`, `smol`),
- * and `:level` thinking suffixes. Unqualified selectors prefer the session's
+ * Resolve a `/model` / `/switch` / `/prewalk` selector the way `omp bench` and
+ * `--model` do: exact `provider/id`, fuzzy ids (`opus`), role aliases (`@smol`,
+ * `smol`), and `:level` thinking suffixes. A leading `^` (the composer's model
+ * mention completion) is accepted. Unqualified selectors prefer the session's
  * `--models` scope, else the authenticated set, before the full catalog.
  */
 function resolveSessionModelSelector(
@@ -62,7 +64,7 @@ function resolveSessionModelSelector(
 ): ResolveCliModelResult {
 	const scoped = session.scopedModels.map(entry => entry.model);
 	return resolveCliModel({
-		cliModel: selector,
+		cliModel: modelMentionSelector(selector),
 		modelRegistry: session.modelRegistry,
 		availableModels: scoped.length > 0 ? scoped : undefined,
 		settings,
@@ -87,8 +89,16 @@ const FAST_USAGE = "Usage: /fast [on|ultra|off|status]";
 function runFastCommand(arg: string, session: AgentSession): string | undefined {
 	switch (arg) {
 		case "":
-		case "toggle":
-			return `Fast mode ${session.toggleFastMode() ? "enabled" : "disabled"}.`;
+		case "toggle": {
+			// toggleFastMode() cannot distinguish "toggled off" from "refused":
+			// route through setFastMode so a tier-less model reports
+			// unavailability instead of claiming success.
+			if (session.isFastModeEnabled()) {
+				session.setFastMode(false);
+				return "Fast mode disabled.";
+			}
+			return session.setFastMode(true) ? "Fast mode enabled." : "Fast mode is unavailable for the current model.";
+		}
 		case "on":
 			return session.setFastMode(true) ? "Fast mode enabled." : "Fast mode is unavailable for the current model.";
 		case "ultra":
@@ -97,8 +107,7 @@ function runFastCommand(arg: string, session: AgentSession): string | undefined 
 				? "Ultrafast mode enabled."
 				: "Ultrafast is unavailable for the current model.";
 		case "off":
-			session.setFastMode(false);
-			return "Fast mode disabled.";
+			return session.setFastMode(false) ? "Fast mode disabled." : "Fast mode is unavailable for the current model.";
 		case "status":
 			return `Fast mode is ${formatFastModeStatus(session)}.`;
 		default:

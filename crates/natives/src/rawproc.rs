@@ -86,7 +86,7 @@ fn errno_code(error: &io::Error) -> String {
 
 // --- spawnRaw -------------------------------------------------------------
 
-/// Options for `spawnRaw`.
+/// Options for `spawnRaw` and `spawnBreakaway`.
 #[napi(object)]
 pub struct SpawnRawOptions {
 	/// Executable name or path (resolved against `env.PATH`).
@@ -175,6 +175,64 @@ pub fn spawn_raw(env: &Env, options: SpawnRawOptions) -> Result<RawChild> {
 	}
 }
 
+// --- spawnBreakaway -------------------------------------------------------
+
+/// Start a detached Windows process outside this process's job objects.
+///
+/// Like Bun's `detached` spawn, the child gets no console (`DETACHED_PROCESS`),
+/// its own process group, and null stdio. Unlike it, the child also leaves
+/// every job this process belongs to (`CREATE_BREAKAWAY_FROM_JOB`), so a
+/// terminal host that terminates its job on close does not take the child
+/// down. A job that forbids breakaway makes `CreateProcessW` fail with
+/// `ERROR_ACCESS_DENIED`; the child is then started inside the job.
+///
+/// Returns the child's pid.
+///
+/// # Errors
+/// The spawn error, as a JS error whose `code` is errno-style; `ENOSYS` off
+/// Windows.
+#[napi]
+pub fn spawn_breakaway(env: &Env, options: SpawnRawOptions) -> Result<u32> {
+	#[cfg(windows)]
+	{
+		use std::os::windows::process::CommandExt;
+		const DETACHED_PROCESS: u32 = 0x0000_0008;
+		const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+		const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+		let spawn = |flags: u32| {
+			Command::new(&options.application)
+				.args(&options.args)
+				.env_clear()
+				.envs(&options.env)
+				.current_dir(&options.cwd)
+				.stdin(Stdio::null())
+				.stdout(Stdio::null())
+				.stderr(Stdio::null())
+				.creation_flags(flags)
+				.spawn()
+		};
+		let detached = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
+		let child = match spawn(detached | CREATE_BREAKAWAY_FROM_JOB) {
+			Err(error) if error.kind() == io::ErrorKind::PermissionDenied => spawn(detached),
+			spawned => spawned,
+		}
+		.map_err(|error| {
+			coded_error(
+				env,
+				&errno_code(&error),
+				format!("spawnBreakaway {}: {error}", options.application),
+			)
+		})?;
+		// Dropping `child` only closes its handles; the process runs on.
+		Ok(child.id())
+	}
+	#[cfg(not(windows))]
+	{
+		let _ = options;
+		Err(coded_error(env, "ENOSYS", "spawnBreakaway is Windows-only"))
+	}
+}
+
 #[cfg(unix)]
 fn set_nonblocking(fd: i32) -> io::Result<()> {
 	// SAFETY: fcntl on a caller-owned fd with scalar arguments.
@@ -204,9 +262,26 @@ pub struct RawExit {
 #[napi(ts_return_type = "Promise<RawExit>")]
 pub fn reap_child(env: &Env, pid: i32) -> Result<PromiseRaw<'_, RawExit>> {
 	task::future(env, "rawproc.reap_child", async move {
-		tokio::task::spawn_blocking(move || wait_child(pid))
-			.await
-			.map_err(|error| Error::from_reason(format!("reapChild task failed: {error}")))?
+		// Dedicated thread so long-lived child waiters never consume Tokio's
+		// bounded blocking pool.
+		let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+		let spawned = std::thread::Builder::new()
+			.name("pi-reap".into())
+			.stack_size(256 * 1024)
+			.spawn(move || {
+				let _ = done_tx.send(wait_child(pid));
+			});
+		let waited = match spawned {
+			Ok(_) => done_rx
+				.await
+				.map_err(|error| Error::from_reason(format!("reapChild task failed: {error}")))?,
+			// Giving up would leave the child a zombie once it exits; the shared
+			// pool can still queue the wait.
+			Err(_) => tokio::task::spawn_blocking(move || wait_child(pid))
+				.await
+				.map_err(|error| Error::from_reason(format!("reapChild task failed: {error}")))?,
+		};
+		waited
 			.map_err(|error| Error::new(Status::GenericFailure, format!("reapChild {pid}: {error}")))
 	})
 }

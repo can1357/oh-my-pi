@@ -20,6 +20,7 @@ import {
 	kittyVirtualPlace,
 } from "@oh-my-pi/pi-tui/driver/images/kitty";
 import { sixelBackground } from "@oh-my-pi/pi-tui/driver/images/sixel";
+import { CORPUS_DIR, hasCorpus } from "@oh-my-pi/pi-tui/testing/corpus";
 import { visibleWidth } from "@oh-my-pi/pi-tui/text/width";
 
 const tmux = (payload: string) => `\x1bPtmux;${payload.replaceAll("\x1b", "\x1b\x1b")}\x1b\\`;
@@ -128,7 +129,7 @@ describe("kitty Unicode placeholders", () => {
 	});
 
 	it("is enabled only for terminals that render virtual placements, with env overrides", () => {
-		for (const id of ["kitty", "ghostty", "rio", "otty", "tern"])
+		for (const id of ["kitty", "ghostty", "rio", "otty", "tern", "rex"])
 			expect(kittyPlaceholdersSupported(id, {})).toBe(true);
 		for (const id of ["wezterm", "warp", "base", "iterm2", "alacritty"]) {
 			expect(kittyPlaceholdersSupported(id, {})).toBe(false);
@@ -136,6 +137,8 @@ describe("kitty Unicode placeholders", () => {
 		expect(kittyPlaceholdersSupported("kitty", { PI_NO_KITTY_PLACEHOLDERS: "1" })).toBe(false);
 		expect(kittyPlaceholdersSupported("kitty", { PI_KITTY_PLACEHOLDERS: "off" })).toBe(false);
 		expect(kittyPlaceholdersSupported("wezterm", { PI_KITTY_PLACEHOLDERS: "1" })).toBe(true);
+		expect(kittyPlaceholdersSupported("rex", { PI_NO_KITTY_PLACEHOLDERS: "1" })).toBe(false);
+		expect(kittyPlaceholdersSupported("rex", { PI_KITTY_PLACEHOLDERS: "0" })).toBe(false);
 		expect(kittyPlaceholdersSupported("kitty", { PI_NO_KITTY_PLACEHOLDERS: "1", PI_KITTY_PLACEHOLDERS: "1" })).toBe(
 			false,
 		);
@@ -211,8 +214,8 @@ describe("anchored sequences", () => {
 	});
 });
 
-describe("corpus: id-less kitty images", () => {
-	const corpus = path.join(import.meta.dir, "..", "corpus");
+describe.skipIf(!hasCorpus())("corpus: id-less kitty images", () => {
+	const corpus = CORPUS_DIR;
 	const IMAGE_ROW = /^(?:\x1b7\x1b\[(\d+)A)?\x1b_Ga=T,f=100,q=2,C=1,c=(\d+),r=(\d+)/;
 
 	it("reproduces every transmit-and-display image the corpus captured", async () => {

@@ -22,6 +22,8 @@ const STARTUP_DEFAULTS: StartupPreferences = {
 	resizeScrollback: "rebuild",
 	autocompleteMaxVisible: 5,
 	vim: false,
+	imeSafeCursor: false,
+	screen: "inline",
 };
 
 /** Inputs available at the CLI prepaint boundary before command modules load. */
@@ -115,7 +117,9 @@ export function beginStartupComposer(options: PrepaintComposerOptions = {}): voi
 		intro: true,
 		vim: preferences.vim,
 		autocompleteMaxVisible: preferences.autocompleteMaxVisible,
+		imeSafeCursor: preferences.imeSafeCursor,
 	});
+	frame.screen.set(preferences.screen);
 	// Nothing would submit yet: the interactive mode lifts this once its pipeline exists.
 	frame.composer.setDisableSubmit(true);
 	// The bar and border a fresh session here will show; the interactive mode swaps in the live ones.
@@ -192,5 +196,8 @@ export function applyStartupComposerPreferences(update: PrepaintComposerPreferen
 	frame.setQuiet(preferences.quiet);
 	frame.composer.setVim(preferences.vim);
 	frame.composer.setAutocompleteMaxVisible(preferences.autocompleteMaxVisible);
+	frame.setImeSafeCursor(preferences.imeSafeCursor);
+	// A stale cached mode switches live: the commit frontier keeps every block written once.
+	frame.screen.set(preferences.screen);
 	current.cache?.write(current.cwd, preferences, theme);
 }

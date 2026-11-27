@@ -46,3 +46,13 @@ export function resolveEditMode(session: EditModeSessionLike): EditModeSetting {
 	}
 	return mode;
 }
+
+/**
+ * The grammar `edit` calls take under `session`, as an `EditTool` without a pinned mode reads
+ * them: `magic` applies its model-written batch through `replace`, and `none` keeps a valid
+ * schema until the next built-in reconcile unregisters the tool.
+ */
+export function resolveEditToolMode(session: EditModeSessionLike): EditMode {
+	const mode = resolveEditMode(session);
+	return mode === "none" || mode === "magic" ? "replace" : mode;
+}

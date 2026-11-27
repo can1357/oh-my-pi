@@ -1,3 +1,4 @@
+import { providerEntry } from "../compat/providers";
 import { CHARM_HYPER_API_BASE_URL, normalizeCharmHyperBaseUrl } from "../wire/charm-hyper";
 import { CODEX_BASE_URL } from "../wire/codex";
 import { getCodexClientVersion } from "../wire/codex-version";
@@ -11,6 +12,7 @@ import {
 	SINGULARITYAPI_TECH_API_BASE_URL,
 	normalizeSingularityApiBaseUrl,
 } from "../wire/singularityapi";
+import { OTARI_US_BASE_URL } from "../wire/otari";
 
 export interface ModelCacheProviderIdOptions extends AccountScope {
 	apiKey?: string;
@@ -18,6 +20,7 @@ export interface ModelCacheProviderIdOptions extends AccountScope {
 }
 
 const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = {
+	arkanecloud: true,
 	"opencode-go": true,
 	"opencode-zen": true,
 	"github-copilot": true,
@@ -32,6 +35,7 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	// Kimi Code's roster is plan-gated and discovery is authoritative, so a
 	// shared namespace would serve one plan's ids to another plan's credential.
 	"kimi-code": true,
+	"kimi-code-global": true,
 	// Otari's roster is the set of models one workspace enables, and discovery
 	// is authoritative, so a shared namespace would serve one workspace's ids,
 	// prices, and limits to another workspace's key for the full TTL.
@@ -50,6 +54,9 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	// A Modal proxy token is workspace-scoped and the roster is the endpoints it
 	// may call, so a shared namespace would serve one workspace's ids to another.
 	modal: true,
+	// A Refuseless key lists its account's private models and bills its
+	// account rates, and discovery is authoritative.
+	refuseless: true,
 };
 
 /**
@@ -78,8 +85,6 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 	switch (providerId) {
 		case "charm-hyper":
 			return CHARM_HYPER_API_BASE_URL;
-		case "kimi-code":
-			return "https://api.kimi.com/coding/v1";
 		case "meta":
 		case "muse-code":
 			return "https://api.meta.ai/v1";
@@ -89,8 +94,12 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 			return Bun.env.LITELLM_BASE_URL ?? "http://localhost:4000/v1";
 		case "modal":
 			return normalizeModalBaseUrl(Bun.env.MODAL_BASE_URL);
+		case "arkanecloud":
+			return "https://console.arkanecloud.com/api/v2";
 		case "otari":
-			return Bun.env.OTARI_BASE_URL?.trim() || "https://api.otari.ai/api/v1";
+			return Bun.env.OTARI_BASE_URL?.trim() || OTARI_US_BASE_URL;
+		case "refuseless":
+			return "https://api.refuseless.com/v1";
 		case "bifrost":
 			return Bun.env.BIFROST_BASE_URL?.trim() || "http://localhost:8080/v1";
 		case "opencode-go":
@@ -100,7 +109,7 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 		case "vllm":
 			return "http://127.0.0.1:8000/v1";
 		default:
-			return undefined;
+			return providerEntry(providerId)?.baseUrl;
 	}
 }
 
@@ -193,23 +202,28 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// `/v1`-suffixed one; both must land on one namespace.
 			return `charm-hyper:models-v1:${Bun.hash(normalizeCharmHyperBaseUrl(options.baseUrl)).toString(36)}`;
 		}
-		case "kimi-code": {
+		case "kimi-code":
+		case "kimi-code-global": {
 			// The `/coding/v1/models` roster depends on the subscription plan behind
 			// the credential, and discovery is authoritative: a namespace without the
 			// credential would serve the previous plan's roster for the full TTL,
 			// including ids the current plan cannot call. OAuth access tokens rotate on
 			// refresh, so the scope is the token's account subject, not the token.
+			// Both regional deployments share this scoping; the baseUrl differs.
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
 			const apiKey = options.apiKey ?? "";
 			const scope = `${jwtCredentialSubject(apiKey) ?? apiKey}\u0000${baseUrl}`;
-			return `kimi-code:models-v1:${Bun.hash(scope).toString(36)}`;
+			return `${providerId}:models-v1:${Bun.hash(scope).toString(36)}`;
 		}
 		// Per-key rosters (Otari: one workspace's enabled models; Bifrost: one
-		// virtual key's allowed models) behind a configurable endpoint: scope by
-		// both so switching either re-runs discovery.
+		// virtual key's allowed models; Refuseless: one account's private models
+		// and rates) behind a configurable endpoint: scope by both so switching
+		// either re-runs discovery.
 		case "muse-code":
 		case "otari":
-		case "bifrost": {
+		case "arkanecloud":
+		case "bifrost":
+		case "refuseless": {
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
 			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
 			return `${providerId}:models-v1:${Bun.hash(scope).toString(36)}`;
@@ -308,7 +322,9 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// `permission_denied: no API providers are available`.
 			// v3: rows cached before discovery read `ModelInfo.maxTokens` hold a
 			// 200K window on every model.
-			return "devin:models-v3";
+			// v4: rows cached before discovery dropped Fusion pairings and folded
+			// `-fast` lanes into `priorityLane` list 1000+ duplicate rows.
+			return "devin:models-v4";
 		default:
 			return providerId;
 	}

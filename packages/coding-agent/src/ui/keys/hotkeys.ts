@@ -87,6 +87,16 @@ export function hotkeyGroups(keybindings: KeybindingsManager): HotkeyGroup[] {
 				...exitRows,
 				{ keys: [act("app.suspend")], action: "Suspend to background" },
 				{ keys: [act("app.display.reset")], action: "Reset terminal display" },
+				{
+					keys: [act("app.transcript.pageUp"), { text: " / " }, act("app.transcript.pageDown")],
+					action: "Scroll the transcript a page (fullscreen screen)",
+				},
+				{
+					keys: [act("app.transcript.top"), { text: " / " }, act("app.transcript.bottom")],
+					action: "Transcript start / end and follow (fullscreen screen)",
+				},
+				{ keys: [act("app.transcript.search")], action: "Find text in the fullscreen transcript" },
+				{ keys: [act("app.transcript.copySelection")], action: "Copy selected fullscreen transcript text" },
 				{ keys: [act("app.thinking.cycle")], action: "Cycle thinking level" },
 				{ keys: [act("app.model.cycleForward")], action: "Cycle role models (slow/default/smol)" },
 				{ keys: [act("app.model.cycleBackward")], action: "Cycle role models (backward)" },
@@ -95,7 +105,7 @@ export function hotkeyGroups(keybindings: KeybindingsManager): HotkeyGroup[] {
 				{ keys: [act("app.plan.toggle")], action: "Toggle plan mode" },
 				{ keys: [act("app.history.search")], action: "Search prompt history" },
 				{ keys: [act("app.tools.expand")], action: "Toggle tool output expansion" },
-				{ keys: [act("app.tools.toggleVisibility")], action: "Toggle tool activity visibility" },
+				{ keys: [act("app.tools.toggleVisibility")], action: "Cycle tool activity (detailed, concise, hidden)" },
 				{
 					keys: [act("app.links.hint")],
 					action: "Pick an extension link on screen by its tag; press again to browse the whole transcript",

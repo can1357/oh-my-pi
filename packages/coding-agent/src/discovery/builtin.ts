@@ -5,11 +5,9 @@
  */
 import * as path from "node:path";
 import { getAgentDir, logger, normalizePathForComparison, parseFrontmatter, tryParseJson } from "@oh-my-pi/pi-utils";
-import { YAML } from "bun";
 import { getManagedSkillsDir, MANAGED_SKILLS_PROVIDER_ID } from "../autolearn/managed-skills";
 import { registerProvider } from "../capability";
 import { type ContextFile, contextFileCapability } from "../capability/context-file";
-import { type Extension, type ExtensionManifest, extensionCapability } from "../capability/extension";
 import { type ExtensionModule, extensionModuleCapability } from "../capability/extension-module";
 import { readDirEntries, readFile } from "../capability/fs";
 import { type Hook, hookCapability } from "../capability/hook";
@@ -34,13 +32,15 @@ import {
 	isForeignUserConfigRoot,
 	isUserConfigRoot,
 	loadFilesFromDir,
+	mergeLoadResults,
 	parseRequestIdFormat,
 	SOURCE_PATHS,
 	scanSkillsFromDir,
 } from "./helpers";
+import { NATIVE_PROVIDER_DISPLAY_NAME, NATIVE_PROVIDER_ID, readNativeSettingsFiles } from "./native-settings";
 
-const PROVIDER_ID = "native";
-const DISPLAY_NAME = "OMP";
+const PROVIDER_ID = NATIVE_PROVIDER_ID;
+const DISPLAY_NAME = NATIVE_PROVIDER_DISPLAY_NAME;
 const DESCRIPTION = "Native OMP configuration from ~/.omp and .omp/";
 const PRIORITY = 100;
 
@@ -330,10 +330,7 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 	});
 
 	const results = await Promise.all([...projectScans, userScan]);
-	return {
-		items: results.flatMap(r => r.items),
-		warnings: results.flatMap(r => r.warnings ?? []),
-	};
+	return mergeLoadResults(results);
 }
 
 // Managed skills (auto-learn) are a SEPARATE provider at the lowest skill
@@ -599,75 +596,6 @@ registerProvider<ExtensionModule>(extensionModuleCapability.id, {
 	load: loadExtensionModules,
 });
 
-// Extensions
-async function loadExtensions(ctx: LoadContext): Promise<LoadResult<Extension>> {
-	const items: Extension[] = [];
-	const warnings: string[] = [];
-
-	const configDirs = await getConfigDirs(ctx);
-	const entriesResults = await Promise.all(configDirs.map(({ dir }) => readDirEntries(path.join(dir, "extensions"))));
-
-	const manifestCandidates: Array<{
-		extDir: string;
-		manifestPath: string;
-		entryName: string;
-		level: "user" | "project";
-	}> = [];
-
-	for (let i = 0; i < configDirs.length; i++) {
-		const { dir, level } = configDirs[i];
-		const entries = entriesResults[i];
-		const extensionsDir = path.join(dir, "extensions");
-
-		for (const entry of entries) {
-			if (entry.name.startsWith(".")) continue;
-			// A linked extension package reports as a link, not a directory; the manifest
-			// probe below narrows it back to a real directory.
-			if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
-
-			const extDir = path.join(extensionsDir, entry.name);
-			manifestCandidates.push({
-				extDir,
-				manifestPath: path.join(extDir, "gemini-extension.json"),
-				entryName: entry.name,
-				level,
-			});
-		}
-	}
-
-	const manifestContents = await Promise.all(manifestCandidates.map(({ manifestPath }) => readFile(manifestPath)));
-
-	for (let i = 0; i < manifestCandidates.length; i++) {
-		const content = manifestContents[i];
-		if (!content) continue;
-
-		const { extDir, manifestPath, entryName, level } = manifestCandidates[i];
-		const manifest = tryParseJson<ExtensionManifest>(content);
-		if (!manifest) {
-			warnings.push(`Failed to parse ${manifestPath}`);
-			continue;
-		}
-
-		items.push({
-			name: manifest.name || entryName,
-			path: extDir,
-			manifest,
-			level,
-			_source: createSourceMeta(PROVIDER_ID, manifestPath, level),
-		});
-	}
-
-	return { items, warnings };
-}
-
-registerProvider<Extension>(extensionCapability.id, {
-	id: PROVIDER_ID,
-	displayName: DISPLAY_NAME,
-	description: DESCRIPTION,
-	priority: PRIORITY,
-	load: loadExtensions,
-});
-
 // Instructions
 async function loadInstructions(ctx: LoadContext): Promise<LoadResult<Instruction>> {
 	const items: Instruction[] = [];
@@ -887,50 +815,13 @@ registerProvider<CustomTool>(toolCapability.id, {
 async function loadSettings(ctx: LoadContext): Promise<LoadResult<Settings>> {
 	const items: Settings[] = [];
 	const warnings: string[] = [];
-
-	const parseYamlSettings = (content: string, filePath: string): Record<string, unknown> | null => {
-		try {
-			const data = YAML.parse(content);
-			if (!data || typeof data !== "object" || Array.isArray(data)) return {};
-			return data as Record<string, unknown>;
-		} catch {
-			warnings.push(`Failed to parse ${filePath}`);
-			return null;
-		}
-	};
-
 	for (const { dir, level } of await getConfigDirs(ctx)) {
-		const settingsPath = path.join(dir, "settings.json");
-		const settingsContent = await readFile(settingsPath);
-		if (settingsContent) {
-			const data = tryParseJson<Record<string, unknown>>(settingsContent);
-			if (data) {
-				items.push({
-					path: settingsPath,
-					data,
-					level,
-					_source: createSourceMeta(PROVIDER_ID, settingsPath, level),
-				});
-			} else {
-				warnings.push(`Failed to parse ${settingsPath}`);
-			}
+		const read = await readNativeSettingsFiles(dir);
+		warnings.push(...read.warnings);
+		for (const file of read.files) {
+			items.push({ ...file, level, _source: createSourceMeta(PROVIDER_ID, file.path, level) });
 		}
-
-		const configPath = path.join(dir, "config.yml");
-		const configContent = await readFile(configPath);
-		if (!configContent) continue;
-
-		const data = parseYamlSettings(configContent, configPath);
-		if (!data) continue;
-
-		items.push({
-			path: configPath,
-			data,
-			level,
-			_source: createSourceMeta(PROVIDER_ID, configPath, level),
-		});
 	}
-
 	return { items, warnings };
 }
 

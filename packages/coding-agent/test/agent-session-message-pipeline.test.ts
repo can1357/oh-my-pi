@@ -36,7 +36,6 @@ import {
 import { RegisteredToolAdapter } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import * as memoryBackend from "@oh-my-pi/pi-coding-agent/memory-backend";
-import * as imageVisionFallback from "@oh-my-pi/pi-coding-agent/utils/image-vision-fallback";
 import { MEMORY_RECALL_CHANGES_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/memory-backend/recall-entry";
 import type { MemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/types";
 import { type MnemopiSessionState, setMnemopiSessionState } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
@@ -44,12 +43,17 @@ import { createAgentSession, type ExtensionContext, type ExtensionFactory } from
 import { obfuscateProviderContext, SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { convertToLlm, wrapSteeringForModel } from "@oh-my-pi/pi-coding-agent/session/messages";
+import {
+	convertToLlm,
+	INTERRUPTED_THINKING_MESSAGE_TYPE,
+	wrapSteeringForModel,
+} from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { requestBodyText } from "@oh-my-pi/pi-ai/utils/request-body";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { createAssistantMessage } from "./helpers/agent-session-setup";
+import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { createTestImageDescriptions } from "./helpers/image-description";
 
 function createAgent(): Agent {
 	return new Agent({
@@ -683,68 +687,67 @@ describe("AgentSession message pipeline", () => {
 		expect(hookErrors).toHaveLength(3);
 	});
 
-	it("applies transformContext before convertToLlm", async () => {
-		const inputMessages: AgentMessage[] = [{ role: "user", content: "hello", timestamp: Date.now() }];
-		const transformedMessages: AgentMessage[] = [
-			...inputMessages,
-			{ role: "user", content: "injected context", timestamp: Date.now() },
-		];
-		const convertedMessages: Message[] = [
-			{
-				role: "user",
-				content: [{ type: "text", text: "converted" }],
-				attribution: "user",
-				timestamp: Date.now(),
-			},
-		];
-		const transformContext = vi.fn(async (messages: AgentMessage[], signal?: AbortSignal) => {
-			expect(signal).toBe(abortController.signal);
-			return [...messages, ...transformedMessages.slice(messages.length)];
-		});
-		const convertToLlm = vi.fn(async (_messages: AgentMessage[]) => {
-			return convertedMessages;
-		});
-		const abortController = new AbortController();
+	it("applies the destination's reasoning policy to notes added by a context transform", async () => {
+		using tempDir = TempDir.createSync("@pi-context-reader-");
+		const authStorage = createInMemoryAuthStorage();
+		const note: AgentMessage = {
+			role: "custom",
+			customType: INTERRUPTED_THINKING_MESSAGE_TYPE,
+			content: "interrupted reasoning",
+			display: false,
+			attribution: "agent",
+			timestamp: 1,
+		};
 		const session = new AgentSession({
-			agent: createAgent(),
-			sessionManager: SessionManager.inMemory(),
+			agent: new Agent({ initialState: { model: getBundledModel("openai", "gpt-4o-mini") } }),
+			sessionManager: SessionManager.inMemory(tempDir.path()),
 			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry: {} as never,
-			transformContext,
+			modelRegistry: new ModelRegistry(authStorage, tempDir.join("models.yml")),
+			transformContext: messages => [...messages, note],
 			convertToLlm,
 		});
-		sessions.push(session);
-
-		const result = await session.convertMessagesToLlm(inputMessages, abortController.signal);
-
-		expect(transformContext).toHaveBeenCalledWith(inputMessages, abortController.signal);
-		expect(convertToLlm).toHaveBeenCalledWith(transformedMessages);
-		expect(result).toEqual(convertedMessages);
-	});
-
-	it("marks queued user steers without changing the public queue text", async () => {
-		const session = new AgentSession({
-			agent: createAgent(),
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry: {} as never,
-		});
-		sessions.push(session);
-		// #queueUserMessage schedules an idle-queue drain that would agent.continue()
-		// and pop the steer before we can inspect it; stub it out to observe the queue.
-		vi.spyOn(session.agent, "continue").mockResolvedValue(undefined);
-
-		await session.sendUserMessage("raw <steer> &", { deliverAs: "steer" });
-
-		expect(session.getQueuedMessages().steering).toEqual(["raw <steer> &"]);
-		const queued = session.agent.popLastSteer();
-		if (queued?.role !== "user") {
-			throw new Error("Expected queued user steer");
+		try {
+			const history: AgentMessage[] = [{ role: "user", content: "continue", timestamp: 0 }];
+			const claude = getBundledModel("anthropic", "claude-sonnet-4-5");
+			const restricted = await session.convertMessagesToLlm(history, undefined, claude);
+			expect(restricted.map(getConvertedUserText)).toEqual(["continue"]);
+			expect(await session.convertMessagesToLlm(history)).toContainEqual(
+				expect.objectContaining({ role: "developer", content: [{ type: "text", text: note.content }] }),
+			);
+		} finally {
+			await session.dispose();
+			authStorage.close();
 		}
-		expect(queued.steering).toBe(true);
-		expect(queued.content).toEqual([{ type: "text", text: "raw <steer> &" }]);
-		session.clearQueue();
 	});
+
+	it.each([true, false])(
+		"marks queued user steers without changing the public queue text (in-call: %s)",
+		async inCall => {
+			const session = new AgentSession({
+				agent: createAgent(),
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry: {} as never,
+			});
+			sessions.push(session);
+			// #queueUserMessage schedules an idle-queue drain that would agent.continue()
+			// and pop the steer before we can inspect it; stub it out to observe the queue.
+			vi.spyOn(session.agent, "continue").mockResolvedValue(undefined);
+
+			if (inCall) session.activeVoiceCall = Symbol("live call");
+			await session.sendUserMessage("raw <steer> &", { deliverAs: "steer" });
+
+			expect(session.getQueuedMessages().steering).toEqual(["raw <steer> &"]);
+			const queued = session.agent.popLastSteer();
+			if (queued?.role !== "user") {
+				throw new Error("Expected queued user steer");
+			}
+			expect(queued.steering).toBe(true);
+			expect(queued.content).toEqual([{ type: "text", text: "raw <steer> &" }]);
+			expect(queued.duringLiveCall).toBe(inCall ? true : undefined);
+			session.clearQueue();
+		},
+	);
 
 	it("resolves image attachments from submitted messages, not tool-result images", () => {
 		const userImage: ImageContent = { type: "image", data: "user-image", mimeType: "image/png" };
@@ -1221,9 +1224,6 @@ describe("AgentSession message pipeline", () => {
 		["sends the image to a vision model", ["text", "image"]],
 		["describes the image for a text-only model", ["text"]],
 	] as const)("ephemeral prompt and history images: %s", async (_label, input) => {
-		const describe = vi
-			.spyOn(imageVisionFallback, "describeAttachedImagesForTextModel")
-			.mockResolvedValue([{ type: "text", text: "A red square." }]);
 		const model = buildModel({
 			id: "side-stream-model",
 			name: "Side Stream Model",
@@ -1243,37 +1243,58 @@ describe("AgentSession message pipeline", () => {
 			queueMicrotask(() => stream.push({ type: "done", reason: "stop", message: createAssistantMessage("Red") }));
 			return stream;
 		};
-		const agent = new Agent({
-			initialState: { model, systemPrompt: ["system prompt"], messages: [], tools: [] },
-		});
-		const session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry: createModelRegistryStub() as never,
-			sideStreamFn,
-		});
-		sessions.push(session);
-		const screenshot: ImageContent = { type: "image", data: "c2NyZWVuc2hvdA==", mimeType: "image/png" };
+		const vision = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const modelRegistry = {
+			...createModelRegistryStub(),
+			getAvailable: () => [vision],
+			getAvailableForProviders: () => [vision],
+		};
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		const artifacts = TempDir.createSync("@pi-ephemeral-image-");
+		try {
+			const descriptions = createTestImageDescriptions({
+				modelRegistry: modelRegistry as never,
+				settings,
+				artifactsDir: artifacts.path(),
+				description: "A red square.",
+			});
+			const agent = new Agent({
+				initialState: { model, systemPrompt: ["system prompt"], messages: [], tools: [] },
+				transformProviderContext: descriptions.transform,
+			});
+			const session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry: modelRegistry as never,
+				sideStreamFn,
+			});
+			sessions.push(session);
+			const screenshot: ImageContent = { type: "image", data: "c2NyZWVuc2hvdA==", mimeType: "image/png" };
+			const textOnly = input.length === 1;
+			const expectRequest = (context: Context | undefined) => {
+				const request = JSON.stringify(context?.messages);
+				expect(request.includes('"type":"image"')).toBe(!textOnly);
+				expect(request.includes("A red square.")).toBe(textOnly);
+			};
 
-		await session.runEphemeralTurn({ promptText: "What colour is this?", promptImages: [screenshot] });
+			await session.runEphemeralTurn({ promptText: "What colour is this?", promptImages: [screenshot] });
+			expectRequest(contexts[0]);
 
-		const request = JSON.stringify(contexts[0]?.messages);
-		expect(contexts[0]?.messages.at(-1)?.content).toContainEqual(expect.objectContaining({ type: "image" }));
-		expect(request.includes("A red square.")).toBe(input.length === 1);
-		expect(describe).toHaveBeenCalledTimes(input.length === 1 ? 1 : 0);
-
-		// A follow-up replays the image from history with the same handling.
-		await session.runEphemeralTurn({
-			promptText: "And the border?",
-			history: [
-				{ role: "user", content: [{ type: "text", text: "What colour is this?" }, screenshot], timestamp: 1 },
-				createAssistantMessage("Red"),
-			],
-		});
-		expect(JSON.stringify(contexts[1]?.messages).includes("A red square.")).toBe(input.length === 1);
-		expect(describe).toHaveBeenCalledTimes(input.length === 1 ? 2 : 0);
-		expect(agent.state.messages).toEqual([]);
+			// A follow-up replays the image from history with the same handling, reusing the description.
+			await session.runEphemeralTurn({
+				promptText: "And the border?",
+				history: [
+					{ role: "user", content: [{ type: "text", text: "What colour is this?" }, screenshot], timestamp: 1 },
+					createAssistantMessage("Red"),
+				],
+			});
+			expectRequest(contexts[1]);
+			expect(descriptions.calls).toHaveLength(textOnly ? 1 : 0);
+			expect(agent.state.messages).toEqual([]);
+		} finally {
+			artifacts.removeSync();
+		}
 	});
 
 	it.each(["anthropic-messages", "ollama-chat", "openai-responses"])(
@@ -1376,66 +1397,7 @@ describe("AgentSession message pipeline", () => {
 		expect(nextWire).toEqual(firstWire);
 	});
 
-	it("does not cache keyed side history beyond regenerated image descriptions", async () => {
-		const describe = vi
-			.spyOn(imageVisionFallback, "describeAttachedImagesForTextModel")
-			.mockResolvedValueOnce([{ type: "text", text: "A red square." }])
-			.mockResolvedValueOnce([{ type: "text", text: "A blue square." }]);
-		const model = buildModel({
-			id: "text-only-side-test",
-			name: "Text Only",
-			api: "anthropic-messages",
-			provider: "anthropic",
-			baseUrl: "https://api.anthropic.com",
-			reasoning: false,
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 200_000,
-			maxTokens: 8192,
-		});
-		const { session, bodies } = capturingAnthropicSideSession(model);
-		const image: ImageContent = { type: "image", data: "c2NyZWVuc2hvdA==", mimeType: "image/png" };
-		const stableHistory: Message[] = [
-			{ role: "user", content: [{ type: "text", text: "First question" }], timestamp: 1 },
-			{ ...createAssistantMessage("First answer"), model: model.id },
-		];
-		await expect(
-			session.runEphemeralTurn({
-				promptText: "Which color?",
-				promptImages: [image],
-				conversationKey: "btw:topic",
-				history: stableHistory,
-			}),
-		).rejects.toThrow();
-		await expect(
-			session.runEphemeralTurn({
-				promptText: "What next?",
-				conversationKey: "btw:topic",
-				history: [
-					...stableHistory,
-					{ role: "user", content: [{ type: "text", text: "Which color?" }, image], timestamp: 2 },
-					{ ...createAssistantMessage("Red"), model: model.id },
-				],
-			}),
-		).rejects.toThrow();
-
-		expect(describe).toHaveBeenCalledTimes(2);
-		expect(bodies).toHaveLength(2);
-		for (const [index, body] of bodies.entries()) {
-			const description = index === 0 ? "A red square." : "A blue square.";
-			const noticeIndex = body.messages.findIndex(message => JSON.stringify(message.content).includes(description));
-			const cached = body.messages.flatMap((message, index) =>
-				Array.isArray(message.content) && message.content.some(block => block.cache_control != null) ? [index] : [],
-			);
-			expect(noticeIndex).toBeGreaterThan(1);
-			expect(cached).toContain(1);
-			expect(cached.some(index => index > 1 && index < noticeIndex)).toBe(true);
-			expect(cached.every(index => index < noticeIndex)).toBe(true);
-		}
-	});
-
 	it.each([
-		["Antigravity fixed-profile transport", getBundledModel("google-antigravity", "claude-sonnet-4-6")],
 		...(["cursor-agent", "gitlab-duo-agent"] as const).map(
 			api =>
 				[
@@ -1507,9 +1469,9 @@ describe("AgentSession message pipeline", () => {
 			true,
 		],
 		[
-			"Antigravity",
+			"Gemini",
 			buildModel({
-				...getBundledModel("google-antigravity", "gemini-2.5-pro"),
+				...getBundledModel("google", "gemini-2.5-pro"),
 				thinking: { mode: "budget", efforts: [Effort.Medium] },
 			}),
 			false,
