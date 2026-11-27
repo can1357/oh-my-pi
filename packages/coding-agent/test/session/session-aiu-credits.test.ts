@@ -58,15 +58,8 @@ async function writeTranscript(file: string, lines: unknown[]): Promise<void> {
 
 const timestamp = new Date().toISOString();
 
-function header(id: string, cwd: string, inheritedThroughEntryId?: string): Record<string, unknown> {
-	return {
-		type: "session",
-		version: CURRENT_SESSION_VERSION,
-		id,
-		timestamp,
-		cwd,
-		...(inheritedThroughEntryId ? { inheritedThroughEntryId } : {}),
-	};
+function header(id: string, cwd: string): Record<string, unknown> {
+	return { type: "session", version: CURRENT_SESSION_VERSION, id, timestamp, cwd };
 }
 
 function userEntry(id: string): Record<string, unknown> {
@@ -143,21 +136,6 @@ describe("session AI-credit accounting", () => {
 		const reopened = await SessionManager.open(resetFile);
 		expect(credits(reopened)).toEqual({ nano: 1_000_000_000, unknownCalls: 0 });
 		await Promise.all([plain.close(), reset.close(), reopened.close()]);
-	});
-
-	it("counts every call when the header marks an entry the transcript does not hold", async () => {
-		using tempDir = TempDir.createSync("@omp-session-aiu-dangling-");
-		const cwd = path.join(tempDir.path(), "project");
-		const file = path.join(tempDir.path(), "sessions", "dangling.jsonl");
-		await writeTranscript(file, [
-			header("aiu-dangling", cwd, "rolled-away"),
-			userEntry("u1"),
-			replyEntry("a1", "u1", reply({ aiuNano: 2_000_000_000 })),
-		]);
-
-		const manager = await SessionManager.open(file);
-		expect(credits(manager)).toEqual({ nano: 2_000_000_000, unknownCalls: 0 });
-		await manager.close();
 	});
 });
 

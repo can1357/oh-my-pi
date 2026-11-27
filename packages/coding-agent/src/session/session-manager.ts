@@ -657,14 +657,6 @@ export class SessionEntryIndex {
 	 */
 	#withUserTurn = new Set<string>();
 	#treePositionMemo: { generation: number; position: SessionTreePosition | undefined } | undefined;
-	/** `SessionHeader.inheritedThroughEntryId` of the transcript being rebuilt, read at each rebuild. */
-	readonly #readInheritedThrough: () => string | undefined;
-	/** While a rebuild walks a reset fork's copied prefix: the entry id that ends it. */
-	#inheritedThrough: string | undefined;
-
-	constructor(inheritedThrough: () => string | undefined = () => undefined) {
-		this.#readInheritedThrough = inheritedThrough;
-	}
 
 	clear(): void {
 		this.#entriesById.clear();
@@ -679,17 +671,12 @@ export class SessionEntryIndex {
 
 	rebuild(entries: readonly SessionEntry[]): void {
 		this.clear();
-		// A marker naming no entry marks no prefix (fail open, as `inheritedMarkerWithin` does).
-		const marker = this.#readInheritedThrough();
-		this.#inheritedThrough = marker !== undefined && entries.some(entry => entry.id === marker) ? marker : undefined;
 		for (const entry of entries) this.insert(entry);
 		// A captured late-usage leaf can dangle after its target was rolled back or rewritten away.
 		if (this.#leaf !== null && !this.#entriesById.has(this.#leaf)) this.setLeaf(lastSelfSelectedLeafId(entries));
 	}
 
 	insert(entry: SessionEntry): void {
-		const inherited = this.#inheritedThrough !== undefined;
-		if (entry.id === this.#inheritedThrough) this.#inheritedThrough = undefined;
 		const previousLeaf = this.#leaf;
 		const isNew = !this.#entriesById.has(entry.id);
 		this.#entriesById.set(entry.id, entry);
@@ -734,8 +721,7 @@ export class SessionEntryIndex {
 		if (usage && entry.type === "message" && entry.message.role === "toolResult") {
 			this.#usage.subagentCost += usage.cost.total;
 		}
-		// Credits count only where calls are recorded; a reset fork's copied calls are its parent's.
-		if (inherited) return;
+		// Credits count only where calls are recorded; a reset fork's copies had theirs cleared.
 		const call: AiuCall | undefined =
 			entry.type === "model_usage"
 				? entry
@@ -1126,7 +1112,7 @@ export class SessionManager {
 	#titleUpdatedAt = "";
 	#hasTitleSlot = true;
 	#entries: SessionEntry[] = [];
-	#index = new SessionEntryIndex(() => this.#header?.inheritedThroughEntryId);
+	#index = new SessionEntryIndex();
 
 	/** File reflects all current entries; appends can go incrementally. */
 	#fileIsCurrent = false;

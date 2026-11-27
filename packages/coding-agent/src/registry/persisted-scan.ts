@@ -173,9 +173,6 @@ async function readPersistedAgentHistory(
 	let leafTimestamp: number | undefined;
 	let directCost = 0;
 	const directAiu: AiuTotals = { nano: 0, unknownCalls: 0 };
-	// Credits of a reset fork's copied prefix, kept apart until its marker shows up.
-	const prefixAiu: AiuTotals = { nano: 0, unknownCalls: 0 };
-	let inheritedThrough: string | undefined;
 	// Direct cost and credits mirror lifetime SessionManager usage; legacy metrics below stay leaf-scoped.
 	try {
 		await visitEntriesFromFileStream(
@@ -186,13 +183,6 @@ async function readPersistedAgentHistory(
 				const id = typeof record.id === "string" ? record.id : undefined;
 				if (!id) return;
 				const parentId = typeof record.parentId === "string" ? record.parentId : undefined;
-				if (record.type === "session") {
-					inheritedThrough =
-						typeof record.inheritedThroughEntryId === "string" ? record.inheritedThroughEntryId : undefined;
-				}
-				// A reset fork's copied calls bill to its parent (`SessionHeader.inheritedThroughEntryId`).
-				const inherited = inheritedThrough !== undefined;
-				if (id === inheritedThrough) inheritedThrough = undefined;
 				parents.set(id, parentId);
 				// Same replay rule as `sessionEntryLeafId`: an entry written off the active
 				// branch (late usage, a routed bash result) restores the leaf it captured
@@ -211,7 +201,7 @@ async function readPersistedAgentHistory(
 					const usage = recordOf(record.usage);
 					const cost = recordOf(usage?.cost);
 					directCost += finiteNumber(cost?.total);
-					addCallAiu(inherited ? prefixAiu : directAiu, callAiu(record));
+					addCallAiu(directAiu, callAiu(record));
 					return;
 				}
 				if (record.type === "model_change" && typeof record.model === "string") {
@@ -228,7 +218,7 @@ async function readPersistedAgentHistory(
 					const assistant = assistantMetrics(message);
 					assistantById.set(id, assistant);
 					directCost += assistant.cost;
-					addCallAiu(inherited ? prefixAiu : directAiu, callAiu(message));
+					addCallAiu(directAiu, callAiu(message));
 				}
 			},
 			// Advisor transcripts are the one file that can grow pathologically large
@@ -252,11 +242,6 @@ async function readPersistedAgentHistory(
 		return {};
 	}
 
-	// A marker naming no entry marks no prefix (fail open, as `SessionEntryIndex.rebuild` does).
-	if (inheritedThrough !== undefined) {
-		directAiu.nano += prefixAiu.nano;
-		directAiu.unknownCalls += prefixAiu.unknownCalls;
-	}
 	if (leafId !== undefined && !parents.has(leafId)) leafId = selfSelectedLeafId;
 	const metrics: AgentMetricsSummary = {
 		tokens: 0,
