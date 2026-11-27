@@ -5,7 +5,14 @@
  * Eligibility is lexical: ordinary prose never starts an asynchronous file
  * or model lookup. The provider owns ranking, lookup and application.
  */
+import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { AutocompleteProvider as LiveProvider } from "../../autocomplete/autocomplete";
+import type {
+	MentionCategoryId,
+	MentionItem,
+	MentionPaletteView,
+	UnifiedMentionSnapshot,
+} from "../../autocomplete/mentions";
 import {
 	extractAtFilePrefix,
 	extractPathPrefix,
@@ -43,6 +50,8 @@ export interface AutocompleteItem {
 export interface AutocompleteSuggestions {
 	readonly items: readonly AutocompleteItem[];
 	readonly prefix: string;
+	/** Present when suggestions come from the unified mention palette (`@`, `^`, `#<N>`). */
+	readonly mention?: MentionPaletteView;
 }
 
 /** The text after applying a completion, with the caret's line and column. */
@@ -79,6 +88,33 @@ export interface AutocompleteProvider extends Pick<
 	): AutocompleteResult;
 	/** Dim ghost text for the caret at its line end: the arguments still to type (`/git-sync ` → `[base branch]`). */
 	getInlineHint?(lines: string[], line: number, col: number): string | null;
+	/** Pre-warm background mention caches (non-blocking). */
+	warmMentions?(): void;
+	/** Synchronously resolve Tier 0 unified mention suggestions (`@`, `^`, `#<N>`). */
+	trySyncMentionCompletion?(
+		lines: string[],
+		line: number,
+		col: number,
+		pinnedScope?: MentionCategoryId | null,
+	): UnifiedMentionSnapshot | null;
+	/** Async streaming refinement for unified mention suggestions (`@`, `^`, `#<N>`). */
+	getMentionSuggestions?(
+		lines: string[],
+		line: number,
+		col: number,
+		pinnedScope: MentionCategoryId | null | undefined,
+		signal?: AbortSignal,
+		onPartial?: (snapshot: UnifiedMentionSnapshot) => void,
+	): Promise<UnifiedMentionSnapshot | null>;
+	/** Apply a unified mention item with an optional interactive thinking-effort override. */
+	applyMentionCompletion?(
+		lines: string[],
+		line: number,
+		col: number,
+		item: MentionItem,
+		prefix: string,
+		effortOverride?: Effort | "auto",
+	): AutocompleteResult;
 }
 
 /** An open popup. */
@@ -90,6 +126,14 @@ export interface Completion {
 	readonly chosen?: boolean;
 	/** The draft revision used by the provider, absent on a prediction or replacement picker. */
 	readonly revision?: number;
+	/** Structured palette metadata when showing unified `@` / `^` / `#<N>` mentions. */
+	readonly mention?: MentionPaletteView;
+	/** User-selected category scope from Shift+Tab or clicking a scope pill (`null` = All). */
+	readonly pinnedScope?: MentionCategoryId | null;
+	/** Interactive thinking-effort override chosen via Shift+←/→ or Tern's level slider. */
+	readonly effortOverride?: Effort | "auto";
+	/** Timestamp when the query last changed, for 120ms anti-thrash focus stability. */
+	readonly openedAt?: number;
 }
 
 /** Only a leading slash in the submitted prompt runs commands; later slash tokens look up skills. */

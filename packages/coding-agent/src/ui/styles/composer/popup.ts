@@ -13,7 +13,14 @@
  *   with a scrollbar in the last column while rows are hidden (accent thumb,
  *   muted track).
  */
-import type { TspText } from "@oh-my-pi/pi-wire";
+import type {
+	TspPickerGroup,
+	TspPickerItem,
+	TspPickerLevel,
+	TspPickerProps,
+	TspPickerScope,
+	TspText,
+} from "@oh-my-pi/pi-wire";
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import { type Block, defineRolePainter, EMPTY_BLOCK, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
@@ -192,3 +199,200 @@ function paintPopup(node: UiNode, cx: PaintContext): Block {
 }
 
 defineRolePainter("overlay", "omp.autocomplete", paintPopup);
+
+/** Terminal-only display data for the modeless unified mention picker (`omp.mention-picker`). */
+export type MentionPopupTerm = {
+	readonly maxLines: number;
+	readonly glyphs?: Readonly<Record<string, string>>;
+};
+
+function isPickerGroup(entry: string | TspPickerGroup): entry is TspPickerGroup {
+	return typeof entry !== "string";
+}
+
+function formatMentionTags(item: TspPickerItem, detail: string): string {
+	const parts: string[] = [];
+	const detailLower = detail.toLowerCase();
+	if (item.badges) {
+		for (const badge of item.badges) {
+			if (!detailLower.includes(badge.text.toLowerCase())) parts.push(badge.text);
+		}
+	}
+	if (item.chips) {
+		for (const chip of item.chips) parts.push(chip.text);
+	}
+	return parts.join(" ");
+}
+
+function factText(item: TspPickerItem, colId: string): string {
+	const val = item.facts?.[colId];
+	if (val === undefined) return "";
+	return typeof val === "number" ? String(val) : plain(val);
+}
+
+function renderScopeStrip(
+	cx: PaintContext,
+	scopes: readonly TspPickerScope[],
+	activeScope: string | undefined,
+	width: number,
+): string {
+	const parts: string[] = [];
+	for (const scope of scopes) {
+		const label = plain(scope.label);
+		const active = scope.id === activeScope;
+		const text = scope.loading && active ? `${label}…` : label;
+		parts.push(active ? cx.theme.fg("accent", text) : cx.theme.fg("dim", text));
+	}
+	const sep = cx.theme.fg("dim", " · ");
+	return truncate(`  ${parts.join(sep)}  ${cx.theme.fg("dim", "(⇧Tab)")}`, width, "");
+}
+
+function renderLevelFooter(cx: PaintContext, level: TspPickerLevel, width: number): string {
+	const steps = level.steps
+		.map(step =>
+			step.id === level.value ? cx.theme.fg("accent", `[${step.label}]`) : cx.theme.fg("muted", step.label),
+		)
+		.join(" ");
+	const line = `  ${cx.theme.fg("muted", `${level.label}:`)} ${steps}  ${cx.theme.fg("dim", "⇧←/→")}`;
+	return truncate(line, width, "");
+}
+
+function paintMentionPopup(node: UiNode, cx: PaintContext): Block {
+	// Role painter is registered solely on `picker` nodes.
+	const props = node.props() as TspPickerProps & { term?: MentionPopupTerm };
+	const items = props.items ?? [];
+	if (items.length === 0) return EMPTY_BLOCK;
+	const order = props.order ?? items.map(item => item.id);
+	const scopes = props.scopes ?? [];
+	const activeScope = props.scope;
+	const selectedId = props.selected ?? undefined;
+	const level = props.level ?? undefined;
+	const term = props.term ?? { maxLines: 10 };
+
+	const byId = new Map<string, TspPickerItem>();
+	for (const item of items) byId.set(item.id, item);
+
+	const rows: string[] = [];
+	if (scopes.length > 1) {
+		rows.push(renderScopeStrip(cx, scopes, activeScope, cx.width));
+	}
+
+	const marker = `${cx.theme.symbols.symbol("nav.cursor")} `;
+	const blank = " ".repeat(visibleWidth(marker));
+	const listBudget = Math.max(3, term.maxLines - (scopes.length > 1 ? 1 : 0) - (level ? 1 : 0));
+
+	const colGap = 2;
+	const colIds = (props.columns ?? []).map(col => col.id);
+	const contentWidth = Math.max(16, Math.min(cx.width - 1, 108));
+
+	// Measure aligned column widths across all visible items so every column lines up vertically.
+	let widestGlyph = 1;
+	let widestLabel = 0;
+	let widestDetail = 0;
+	let widestTags = 0;
+	const factWidths: number[] = colIds.map(() => 0);
+
+	for (const item of items) {
+		const g = term.glyphs?.[item.id] ?? (item.dot ? "●" : "·");
+		widestGlyph = Math.max(widestGlyph, visibleWidth(g));
+		widestLabel = Math.max(widestLabel, visibleWidth(plain(item.label)));
+		const detail = plain(item.detail);
+		widestDetail = Math.max(widestDetail, visibleWidth(detail));
+		widestTags = Math.max(widestTags, visibleWidth(formatMentionTags(item, detail)));
+		for (let i = 0; i < colIds.length; i++) {
+			factWidths[i] = Math.max(factWidths[i]!, visibleWidth(factText(item, colIds[i]!)));
+		}
+	}
+
+	const prefixWidth = visibleWidth(marker) + widestGlyph + 1;
+	const activeFacts = colIds
+		.map((id, i) => ({ id, width: Math.min(14, factWidths[i]!) }))
+		.filter(col => col.width > 0);
+	const factsTotal = activeFacts.reduce((sum, col) => sum + colGap + col.width, 0);
+	const tagsCol = widestTags > 0 ? Math.min(18, widestTags) : 0;
+	const tagsTotal = tagsCol > 0 ? colGap + tagsCol : 0;
+
+	const availForMain = Math.max(10, contentWidth - prefixWidth - factsTotal - tagsTotal);
+	const labelCol = Math.min(30, Math.max(10, Math.min(widestLabel, Math.floor(availForMain * 0.55))));
+	const remainingForDetail = availForMain - labelCol - colGap;
+	const detailCol = widestDetail > 0 && remainingForDetail >= 8 ? Math.min(36, widestDetail, remainingForDetail) : 0;
+
+	type PaintedEntry = { readonly line: string; readonly isSelected: boolean; readonly isHeader: boolean };
+	const painted: PaintedEntry[] = [];
+
+	for (const entry of order) {
+		if (isPickerGroup(entry)) {
+			const line = `${blank}${cx.theme.fg("dim", plain(entry.label))}`;
+			painted.push({ line: truncate(line, contentWidth, ""), isSelected: false, isHeader: true });
+			continue;
+		}
+		const item = byId.get(entry);
+		if (!item) continue;
+		const isSelected = item.id === selectedId;
+		const glyph = term.glyphs?.[item.id] ?? (item.dot ? "●" : "·");
+		const label = plain(item.label);
+		const detail = plain(item.detail);
+		const tags = formatMentionTags(item, detail);
+
+		const glyphPad = " ".repeat(Math.max(1, widestGlyph - visibleWidth(glyph) + 1));
+		const labelStr = truncate(label, labelCol, "…");
+		const hasRightCols = detailCol > 0 || tagsCol > 0 || activeFacts.length > 0;
+		const labelCell = hasRightCols
+			? `${labelStr}${" ".repeat(Math.max(0, labelCol - visibleWidth(labelStr)))}`
+			: labelStr;
+
+		const trailingCols: string[] = [];
+		if (detailCol > 0) {
+			const d = truncate(detail, detailCol, "…");
+			trailingCols.push(`${d}${" ".repeat(Math.max(0, detailCol - visibleWidth(d)))}`);
+		}
+		if (tagsCol > 0) {
+			const t = truncate(tags, tagsCol, "…");
+			trailingCols.push(`${t}${" ".repeat(Math.max(0, tagsCol - visibleWidth(t)))}`);
+		}
+		for (const col of activeFacts) {
+			const f = truncate(factText(item, col.id), col.width, "");
+			trailingCols.push(`${" ".repeat(Math.max(0, col.width - visibleWidth(f)))}${f}`);
+		}
+
+		const tail =
+			trailingCols.length > 0 ? `${" ".repeat(colGap)}${trailingCols.join(" ".repeat(colGap))}`.trimEnd() : "";
+		const line = isSelected
+			? cx.theme.fg("accent", `${marker}${glyph}${glyphPad}${labelCell}${tail}`)
+			: `${blank}${cx.theme.fg("muted", glyph)}${glyphPad}${labelCell}${tail ? cx.theme.fg("muted", tail) : ""}`;
+		painted.push({ line: truncate(line, contentWidth, ""), isSelected, isHeader: false });
+	}
+
+	// Window around the selected row, keeping its group header visible when right above it.
+	let selectedIdx = painted.findIndex(entry => entry.isSelected);
+	if (selectedIdx < 0) selectedIdx = 0;
+	const total = painted.length;
+	let start = 0;
+	if (total > listBudget) {
+		start = Math.max(0, Math.min(selectedIdx - Math.floor(listBudget / 2), total - listBudget));
+		if (start > 0 && painted[start - 1]?.isHeader && selectedIdx === start) start--;
+	}
+	const slice = painted.slice(start, start + listBudget);
+	const needsBar = total > listBudget;
+	const thumb = needsBar ? Math.max(1, Math.floor((listBudget * listBudget) / total)) : 0;
+	const at = needsBar ? Math.round((start / Math.max(1, total - listBudget)) * (slice.length - thumb)) : 0;
+
+	for (let i = 0; i < slice.length; i++) {
+		const line = slice[i]!.line;
+		if (!needsBar) {
+			rows.push(line);
+		} else {
+			const pad = " ".repeat(Math.max(0, contentWidth - visibleWidth(line)));
+			const bar = i >= at && i < at + thumb ? cx.theme.fg("accent", "█") : cx.theme.fg("muted", "│");
+			rows.push(`${line}${pad}${bar}`);
+		}
+	}
+
+	if (level) {
+		rows.push(renderLevelFooter(cx, level, cx.width));
+	}
+
+	return { rows };
+}
+
+defineRolePainter("picker", "omp.mention-picker", paintMentionPopup);

@@ -35,6 +35,7 @@ import { collapsesPaste } from "../../ui/composer/attachments";
 import { enabledMagicKeywords, magicKeywordDecorator } from "../../ui/composer/magic-keywords";
 import { attachQueueShorthand } from "../../ui/composer/queue-shorthand";
 import { combineAtomizers, FOCUS_ACTION } from "../../ui/composer/composer";
+import { mentionChipAtomizer } from "../../ui/composer/mention-chips";
 import { modelMentionAtomizer } from "../../ui/composer/model-mention-chips";
 import { skillAtomizer } from "../../ui/composer/skill-chips";
 import { getSkillSlashCommandName } from "../../extensibility/skills";
@@ -441,6 +442,7 @@ export class InputController {
 					selectorOf: agent => this.ctx.session.modelMentions.find(mention => mention.agent === agent)?.selector,
 					icon: () => currentTheme().symbols.symbol("icon.model"),
 				}),
+				mentionChipAtomizer(),
 			),
 		);
 		this.#keyHooks.push(() => composer.setAtomizer(undefined));
@@ -518,7 +520,7 @@ export class InputController {
 			void this.cycleRoleModel("forward");
 			return true;
 		}
-		if (km.matches(key, "app.thinking.cycle")) {
+		if (km.matches(key, "app.thinking.cycle") && !this.ctx.composer.completing()) {
 			this.cycleThinkingFromComposer();
 			return true;
 		}
@@ -3104,16 +3106,18 @@ export class InputController {
 
 	createAutocompleteProvider(commands: SlashCommand[], basePath: string): AutocompleteProvider {
 		void commandUsage.load();
+		const modelHost = {
+			source: createModelBrowserSource(this.ctx.settings, model => this.ctx.session.effectiveServiceTier(model)),
+			registry: this.ctx.session.modelRegistry,
+			scopedModels: () => this.ctx.session.scopedModels.map(s => s.model),
+		};
 		return createPromptActionAutocompleteProvider({
 			commands,
 			basePath,
 			commandUsage: name => commandUsage.get(name),
 			emojiAutocomplete: () => cfgEmojiAutocomplete.get(this.ctx.settings),
-			modelMentions: createModelMentionSource({
-				source: createModelBrowserSource(this.ctx.settings, model => this.ctx.session.effectiveServiceTier(model)),
-				registry: this.ctx.session.modelRegistry,
-				scopedModels: () => this.ctx.session.scopedModels.map(s => s.model),
-			}),
+			modelMentions: createModelMentionSource(modelHost),
+			mentionModels: modelHost,
 			// The interactive host uses the default registry; the receiving session can change with focus.
 			internalUrlCaller: () => {
 				const manager = this.ctx.viewSession.sessionManager;

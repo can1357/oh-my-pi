@@ -227,8 +227,10 @@ export function driverImages(images: Pick<PaintImages, "rows">, capabilities: ()
 const FULLSCREEN_KINDS: ReadonlySet<string> = new Set(["picker", "prefs"]);
 
 function isFullscreen(node: UiNode): boolean {
+	const props = node.props();
+	if (node.kind === "picker") return !("modal" in props && props.modal === false);
 	if (FULLSCREEN_KINDS.has(node.kind)) return true;
-	return node.kind === "overlay" && (node.props() as { size?: string }).size === "full";
+	return node.kind === "overlay" && "size" in props && props.size === "full";
 }
 
 /**

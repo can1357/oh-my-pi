@@ -805,6 +805,10 @@ export interface TspPickerScope {
 	disabled?: string | true;
 	/** Status dot: `success` ok, `warning` cached/empty, `error` unavailable, `muted` signed out. */
 	dot?: TspTone;
+	/** Async source still loading results for this scope. */
+	loading?: boolean;
+	/** Scope auto-locked by query syntax or intent arbiter. */
+	locked?: boolean;
 }
 
 /** A button of a picker's action bar. */
@@ -868,16 +872,21 @@ export interface TspPickerProps {
 	noun?: string;
 	size?: "md" | "lg" | "screen";
 	/**
-	 * Where the sheet sits: absent, its size's place in the layer; `"composer"`, rising from the program's composer
-	 * (its `composerPart: "composer"` column), left edges aligned — a drop-up for a picker acting on the draft, such as
-	 * the model switcher. Placed as if absent while no composer is drawn, and on a phone.
+	 * False for a modeless inline palette (no backdrop dim, editor retains keyboard focus, hides when pane/window
+	 * blurs). Default: true.
 	 */
-	anchor?: "composer";
+	modal?: boolean;
 	/**
-	 * Where the search sits: the head (default), or `"list"`: no head row, the query leading the column heads' row
-	 * (count and esc gone), head actions atop a `rail`. Ignored on a phone.
+	 * Where the sheet sits: absent, its size's place in the layer; `"composer"`, rising from the program's composer
+	 * (its `composerPart: "composer"` column), left edges aligned; `{ caret }`, rising from the composer aligned near
+	 * that editor's caret clamped to the composer bounds. Placed as if absent while no composer is drawn, and on a phone.
 	 */
-	search?: "head" | "list";
+	anchor?: "composer" | { caret: string };
+	/**
+	 * Where the search sits: the head (default), `"list"` (inline in the list head), or `"none"` (no search box;
+	 * query lives in the composer). Ignored on a phone.
+	 */
+	search?: "head" | "list" | "none";
 	/** How tall rows run: regular (default), or `"snug"`: 30px rows and 26px group headers, the chrome tightened to match. Ignored on a phone. */
 	density?: "regular" | "snug";
 	layout?: "rows" | "cards" | "timeline" | "tree";
@@ -888,8 +897,8 @@ export interface TspPickerProps {
 	placeholder?: string;
 	scopes?: readonly TspPickerScope[];
 	scope?: string;
-	/** How `scopes` draw: a labeled column (default), or `"rail"`: icons only, label and count as the tooltip, kept on narrow sheets. A `group` change draws a separator. */
-	scopeStyle?: "column" | "rail";
+	/** How `scopes` draw: a labeled column (default), `"rail"` (icons only), or `"pills"` (compact horizontal pill strip at the top of the sheet). A `group` change draws a separator. */
+	scopeStyle?: "column" | "rail" | "pills";
 	tabs?: readonly { id: string; label: TspText; count?: number }[];
 	tab?: string;
 	columns?: readonly TspPickerColumn[];

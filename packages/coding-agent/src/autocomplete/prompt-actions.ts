@@ -1,3 +1,4 @@
+import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { untilAborted } from "@oh-my-pi/pi-utils/abortable";
 import type { Keybinding } from "../config/keybindings/app-keybindings";
 import type { KeybindingsManager } from "../config/keybindings/keybindings";
@@ -27,6 +28,13 @@ import {
 	type ModelMentionCandidateSource,
 } from "./model-mention";
 
+import {
+	type MentionCategoryId,
+	type MentionItem,
+	type ModelsMentionHost,
+	UnifiedMentionEngine,
+	type UnifiedMentionSnapshot,
+} from "./mentions";
 import { getPromptActionPrefix } from "./tokens";
 
 let emojiAutocompleteEnabled = true;
@@ -58,6 +66,12 @@ interface PromptActionAutocompleteOptions {
 	internalUrlCaller?: () => InternalUrlCallerContext;
 	/** Session-scoped models available for `^` mentions. */
 	modelMentions?: ModelMentionCandidateSource;
+	/** Host powering the unified `@` / `^` / `#<N>` mention palette's models source. */
+	mentionModels?: ModelsMentionHost;
+	/** Recently accessed workspace files to boost in unified `@` mention results. */
+	recentFiles?: () => readonly string[];
+	/** Pre-configured unified mention engine (overrides default construction). */
+	unifiedMentions?: UnifiedMentionEngine;
 	emojiAutocomplete?: () => boolean;
 	keybindings: KeybindingsManager;
 	copyCurrentLine: () => void;
@@ -103,12 +117,17 @@ function applyGithubRefCompletion(
 	);
 }
 
+function isMentionItem(item: AutocompleteItem): item is MentionItem {
+	return "category" in item && "insertText" in item && "pickerItem" in item;
+}
+
 export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 	#commands: SlashCommand[];
 	#baseProvider: CombinedAutocompleteProvider;
 	#actions: PromptActionDefinition[];
 	#internalUrlCaller: () => InternalUrlCallerContext;
 	#modelMentions: ModelMentionCandidateSource | undefined;
+	readonly #unifiedMentions: UnifiedMentionEngine | undefined;
 	readonly #emojiAutocomplete: () => boolean;
 
 	constructor(
@@ -119,6 +138,11 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 		internalUrlCaller?: () => InternalUrlCallerContext,
 		modelMentions?: ModelMentionCandidateSource,
 		emojiAutocomplete: () => boolean = () => emojiAutocompleteEnabled,
+		mentionOptions?: {
+			mentionModels?: ModelsMentionHost;
+			recentFiles?: () => readonly string[];
+			unifiedMentions?: UnifiedMentionEngine;
+		},
 	) {
 		this.#commands = commands;
 		this.#baseProvider = new CombinedAutocompleteProvider(commands, basePath, { commandUsage });
@@ -126,6 +150,60 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 		this.#modelMentions = modelMentions;
 		this.#emojiAutocomplete = emojiAutocomplete;
 		this.#actions = actions;
+		this.#unifiedMentions =
+			mentionOptions?.unifiedMentions ??
+			(mentionOptions?.mentionModels
+				? new UnifiedMentionEngine({
+						getBasePath: () => this.#internalUrlCaller().cwd ?? basePath,
+						getCurrentSessionId: () => this.#internalUrlCaller().sessionId,
+						models: mentionOptions.mentionModels,
+						recentFiles: mentionOptions.recentFiles,
+					})
+				: undefined);
+	}
+
+	warmMentions(): void {
+		this.#unifiedMentions?.warm();
+	}
+
+	trySyncMentionCompletion(
+		lines: string[],
+		cursorLine: number,
+		cursorCol: number,
+		pinnedScope?: MentionCategoryId | null,
+	): UnifiedMentionSnapshot | null {
+		if (!this.#unifiedMentions) return null;
+		const textBeforeCursor = (lines[cursorLine] ?? "").slice(0, cursorCol);
+		if (this.#isInSlashCommandArguments(lines, cursorLine, textBeforeCursor)) return null;
+		return this.#unifiedMentions.querySync(lines, cursorLine, cursorCol, pinnedScope);
+	}
+
+	getMentionSuggestions(
+		lines: string[],
+		cursorLine: number,
+		cursorCol: number,
+		pinnedScope: MentionCategoryId | null | undefined,
+		signal?: AbortSignal,
+		onPartial?: (snapshot: UnifiedMentionSnapshot) => void,
+	): Promise<UnifiedMentionSnapshot | null> {
+		if (!this.#unifiedMentions) return Promise.resolve(null);
+		const textBeforeCursor = (lines[cursorLine] ?? "").slice(0, cursorCol);
+		if (this.#isInSlashCommandArguments(lines, cursorLine, textBeforeCursor)) return Promise.resolve(null);
+		return this.#unifiedMentions.queryAsync(lines, cursorLine, cursorCol, pinnedScope, signal, onPartial);
+	}
+
+	applyMentionCompletion(
+		lines: string[],
+		cursorLine: number,
+		cursorCol: number,
+		item: MentionItem,
+		prefix: string,
+		effortOverride?: Effort | "auto",
+	): { lines: string[]; cursorLine: number; cursorCol: number } {
+		if (!this.#unifiedMentions) {
+			return this.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
+		}
+		return this.#unifiedMentions.applyCompletion(lines, cursorLine, cursorCol, item, prefix, effortOverride);
 	}
 
 	async getSuggestions(
@@ -137,6 +215,19 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 	): Promise<{ items: AutocompleteItem[]; prefix: string } | null> {
 		if (signal?.aborted) return null;
 		const textBeforeCursor = (lines[cursorLine] || "").slice(0, cursorCol);
+		if (this.#unifiedMentions && !this.#isInSlashCommandArguments(lines, cursorLine, textBeforeCursor)) {
+			const snapshot = await this.#unifiedMentions.queryAsync(
+				lines,
+				cursorLine,
+				cursorCol,
+				undefined,
+				signal,
+				partial => onPartial?.({ items: [...partial.items], prefix: partial.prefix }),
+			);
+			if (snapshot) {
+				return snapshot.items.length > 0 ? { items: [...snapshot.items], prefix: snapshot.prefix } : null;
+			}
+		}
 		if (!this.#outranksModelMention(lines, cursorLine, textBeforeCursor)) {
 			const modelMention = await this.#modelMentionSuggestions(textBeforeCursor, signal, onPartial);
 			if (modelMention) return modelMention;
@@ -235,6 +326,9 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 		cursorCol: number;
 		onApplied?: () => void;
 	} {
+		if (this.#unifiedMentions && isMentionItem(item)) {
+			return this.#unifiedMentions.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
+		}
 		const githubRefCompletion = applyGithubRefCompletion(lines, cursorLine, cursorCol, item, prefix);
 		if (githubRefCompletion) return githubRefCompletion;
 		if (prefix.startsWith("#") && isPromptActionItem(item)) {
@@ -373,5 +467,12 @@ export function createPromptActionAutocompleteProvider(
 		options.internalUrlCaller,
 		options.modelMentions,
 		options.emojiAutocomplete,
+		options.mentionModels || options.unifiedMentions || options.recentFiles
+			? {
+					mentionModels: options.mentionModels,
+					recentFiles: options.recentFiles,
+					unifiedMentions: options.unifiedMentions,
+				}
+			: undefined,
 	);
 }
