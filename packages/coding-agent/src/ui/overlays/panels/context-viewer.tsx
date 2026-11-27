@@ -401,7 +401,7 @@ export class ContextViewerModel {
 	entryParent: "overview" | "category" = "overview";
 	/** Where the selected preview's head reveals natively. */
 	previewRevealAt: "nearest" | "start" = "nearest";
-	nativeScroll: ScrollRequest = { by: "start", n: 0 };
+	readonly #nativeScroll = signal<ScrollRequest>({ by: "start", n: 0 });
 	edgeReveal: { key: string; at: "start" | "end"; n: number } | undefined;
 	/** Terminal scroll of the full-content view, the legend and the previews (each moves as little as it can). */
 	entryOffset = 0;
@@ -432,6 +432,15 @@ export class ContextViewerModel {
 
 	touch(): void {
 		this.rev.set(untrack(this.rev) + 1);
+	}
+
+	/** The full-content view's scroll request; reading it subscribes, so a scroll repaints without rebuilding the tree. */
+	get nativeScroll(): ScrollRequest {
+		return this.#nativeScroll();
+	}
+
+	#scroll(by: ScrollRequest["by"]): void {
+		this.#nativeScroll.update(previous => ({ by, n: previous.n + 1 }));
 	}
 
 	/** Header summary rows shown (Overview only), cut to the terminal. */
@@ -505,16 +514,17 @@ export class ContextViewerModel {
 			return;
 		}
 		this.entryOffset = Math.max(0, this.entryOffset + delta);
-		this.nativeScroll = { by: delta > 0 ? "line-down" : "line-up", n: this.nativeScroll.n + 1 };
+		this.#scroll(delta > 0 ? "line-down" : "line-up");
 	}
 
 	page(direction: -1 | 1): void {
 		if (this.state !== "entry") return;
 		this.entryOffset = Math.max(0, this.entryOffset + direction * Math.max(1, this.bodyRows() - 1));
-		this.nativeScroll = { by: direction > 0 ? "page-down" : "page-up", n: this.nativeScroll.n + 1 };
+		this.#scroll(direction > 0 ? "page-down" : "page-up");
 	}
 
 	key(id: string): boolean {
+		const from = this.state;
 		switch (listKeyId(id)) {
 			case "escape":
 				this.back();
@@ -537,7 +547,8 @@ export class ContextViewerModel {
 			default:
 				return false;
 		}
-		this.touch();
+		// Scrolling an entry leaves the tree alone: a rebuild would replace the scrolled node and drop its request.
+		if (from !== "entry" || this.state !== "entry") this.touch();
 		return true;
 	}
 
@@ -776,7 +787,7 @@ function Entry(props: { readonly model: ContextViewerModel }): JSXNode {
 	const entry = model.entry!;
 	return [
 		<text spans={entryHeaderSpans(entry, model.category!.id)} />,
-		<col key={`entry-${entry.id}`} scroll={model.nativeScroll}>
+		<col key={`entry-${entry.id}`} scroll={() => model.nativeScroll}>
 			{entryMetadata(entry, true, model.terminal.hour12?.()).map(line => (
 				<text spans={[{ s: "dim", t: line }]} />
 			))}
