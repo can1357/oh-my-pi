@@ -3261,6 +3261,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				this.#maintenance.renderArchiveForModel(context.messages),
 			),
 		);
+		this.addDisposer(
+			this.agent.addBeforeModelCallHook((signal, context) => {
+				if (signal?.aborted || cfgMemoryBackend.get(this.settings) !== "mnemopi") return;
+				const pending = this.getMnemopiSessionState()?.preparePendingRecallNotice();
+				if (!pending?.commit() || !pending.notice) return;
+				const message = this.#createRecallChangeMessage(pending.notice);
+				context.messages.push(message);
+				this.#recordWithoutTurn([message]);
+			}),
+		);
 		// A session that moves to another file gets a new id for the same list: no list write tells the todo backend.
 		this.addDisposer(this.sessionManager.onPersistenceNotice(() => this.#mirrorTodoPhases()));
 		// A request past the cap mid-run stops the run before it is sent: no turn opens, nothing is billed.
@@ -5883,15 +5893,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 			for (;;) {
 				try {
-					if (!this.agent.state.isStreaming) {
-						onStart?.();
-						if (isAutomaticRetry && cfgMemoryBackend.get(this.settings) === "mnemopi") {
-							const pending = this.getMnemopiSessionState()?.preparePendingRecallNotice();
-							if (pending?.commit() && pending.notice) {
-								this.#recordWithoutTurn([this.#createRecallChangeMessage(pending.notice)]);
-							}
-						}
-					}
+					if (!this.agent.state.isStreaming) onStart?.();
 					await this.agent.continue(signal, { queuedOnly: request.options.queuedOnly });
 					return { status: "completed" };
 				} catch (error) {

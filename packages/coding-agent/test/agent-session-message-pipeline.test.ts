@@ -3016,6 +3016,7 @@ describe("AgentSession message pipeline", () => {
 		setMnemopiSessionState(session, {
 			aliasOf: undefined,
 			setSessionId(_sessionId: string) {},
+			preparePendingRecallNotice: () => undefined,
 			resetConversationTracking() {
 				remembered = false;
 			},
@@ -3110,6 +3111,7 @@ describe("AgentSession message pipeline", () => {
 		setMnemopiSessionState(session, {
 			aliasOf: undefined,
 			setSessionId(_sessionId: string) {},
+			preparePendingRecallNotice: () => undefined,
 			resetConversationTracking() {
 				remembered = false;
 			},
@@ -3208,6 +3210,7 @@ describe("AgentSession message pipeline", () => {
 		setMnemopiSessionState(session, {
 			aliasOf: undefined,
 			setSessionId(_sessionId: string) {},
+			preparePendingRecallNotice: () => undefined,
 			resetConversationTracking() {
 				remembered = false;
 			},

@@ -10,7 +10,7 @@
  */
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import type { Judge, Model } from "@oh-my-pi/pi-ai";
+import type { Judge, Model, UserMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -297,12 +297,16 @@ it("delivers a first request without stale recall after switching to Antigravity
 	}
 });
 
-it.each(["unchanged", "updated", "forgotten", "fallback"] as const)("restores cached recall (%s)", async change => {
+const recallSwitchCases = ["unchanged", "updated", "forgotten", "fallback", "manual retry", "bare resume"];
+
+it.each(recallSwitchCases)("restores cached recall (%s)", async change => {
 	const original = "The deploy host is alpha-7 on the internal network.";
 	const updated = "The deploy host is beta-9 on the internal network.";
 	const { dir, live, id, block, sessionFile } = await recalledTranscript(original);
 	if (change === "updated") expect(live.editScopedMemory("update", id, { content: updated }).status).toBe("updated");
-	if (change === "fallback") expect(live.editScopedMemory("forget", id).status).toBe("deleted");
+	const isManualContinuation = change === "manual retry" || change === "bare resume";
+	const failsOnAntigravity = change === "fallback" || isManualContinuation;
+	if (failsOnAntigravity) expect(live.editScopedMemory("forget", id).status).toBe("deleted");
 	if (!block) throw new Error("Expected the transcript to contain recalled memories");
 	const google = getBundledModel("google", "gemini-3-pro-preview");
 	const antigravity = getBundledModel("antigravity-cli", "gemini-4-hydrogen");
@@ -329,7 +333,7 @@ it.each(["unchanged", "updated", "forgotten", "fallback"] as const)("restores ca
 		initialState: { model: antigravity, systemPrompt: ["Base instructions"], tools: [] },
 		convertToLlm,
 	});
-	const seen: Array<{ provider: string; prompt: string; notices: string[] }> = [];
+	const seen: Array<{ provider: string; prompt: string; notices: string[]; users: UserMessage["content"][] }> = [];
 	const mock = createMockModel();
 	agent.streamFn = (model, context, options) => {
 		const notices: string[] = [];
@@ -341,9 +345,10 @@ it.each(["unchanged", "updated", "forgotten", "fallback"] as const)("restores ca
 					: message.content.flatMap(part => (part.type === "text" ? [part.text] : [])).join("\n");
 			if (text.includes("Long-term memories recalled at the start")) notices.push(text);
 		}
-		seen.push({ provider: model.provider, prompt: context.systemPrompt?.join("\n") ?? "", notices });
+		const users = context.messages.filter(message => message.role === "user").map(message => message.content);
+		seen.push({ provider: model.provider, prompt: context.systemPrompt?.join("\n") ?? "", notices, users });
 		mock.push(
-			change === "fallback" && model.provider === antigravity.provider
+			failsOnAntigravity && model.provider === antigravity.provider
 				? { throw: "overloaded_error: provider returned error 503" }
 				: { content: ["ok"] },
 		);
@@ -368,10 +373,17 @@ it.each(["unchanged", "updated", "forgotten", "fallback"] as const)("restores ca
 	const lookup = vi.spyOn(state, "collectScopedRecallResults");
 	try {
 		await session.sendUserMessage("Continue on Antigravity");
-		if (change === "fallback") {
+		if (failsOnAntigravity) {
+			if (isManualContinuation) {
+				await session.waitForIdle();
+				await session.setModel(google);
+				if (change === "manual retry") expect(await session.retry()).toBe(true);
+				else await session.resume();
+			}
 			await session.waitForIdle();
 			expect(seen.map(({ provider }) => provider)).toEqual(["antigravity-cli", "google"]);
 			expect(seen[0]!.prompt).not.toContain(block);
+			expect(seen[1]!.users).toEqual(seen[0]!.users);
 			expect(seen[0]!.notices).toEqual([]);
 			expect(seen[1]!.prompt).toContain(block);
 			expect(seen[1]!.notices).toHaveLength(1);
