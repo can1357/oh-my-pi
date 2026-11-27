@@ -530,26 +530,20 @@ impl Utf8Shape {
 	fn of(mut bytes: &[u8]) -> Self {
 		let mut shape = Self { multibyte: 0, invalid: 0, cut_tail: false };
 		loop {
-			let (valid, rest) = match str::from_utf8(bytes) {
+			let (valid, rest) = match xutf::decode(bytes) {
 				Ok(text) => (text, None),
-				Err(err) => {
-					// SAFETY: `valid_up_to` bytes are valid UTF-8.
-					let valid = unsafe { str::from_utf8_unchecked(&bytes[..err.valid_up_to()]) };
-					(valid, Some((err.valid_up_to(), err.error_len())))
+				Err(DecodeError::Invalid { valid_prefix, remaining_input, .. }) => {
+					(valid_prefix, Some(remaining_input))
+				},
+				Err(DecodeError::Incomplete { valid_prefix, .. }) => {
+					shape.cut_tail = true;
+					(valid_prefix, None)
 				},
 			};
 			shape.multibyte += valid.chars().filter(|ch| !ch.is_ascii()).count();
-			match rest {
-				None => return shape,
-				Some((_, None)) => {
-					shape.cut_tail = true;
-					return shape;
-				},
-				Some((start, Some(len))) => {
-					shape.invalid += 1;
-					bytes = &bytes[start + len..];
-				},
-			}
+			let Some(rest) = rest else { return shape };
+			shape.invalid += 1;
+			bytes = rest;
 		}
 	}
 }
