@@ -5,7 +5,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import { type FetchImpl, type ImageContent, type KeysApi, type TextContent } from "@oh-my-pi/pi-ai";
+import { type FetchImpl, getEnvApiKey, type ImageContent, type KeysApi, type TextContent } from "@oh-my-pi/pi-ai";
 import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
 import { resolveXaiBaseUrl, XAI_DEFAULT_BASE_URL } from "@oh-my-pi/pi-ai/providers/xai-base-url";
 import { notebookToEditableText, type ReaderRemoteBackend } from "@oh-my-pi/pi-natives";
