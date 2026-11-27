@@ -2,9 +2,13 @@
  * The escape sequences the frame writer emits, and row normalization.
  *
  * Rows reach the screen width-fitted (never wider than the screen, so with
- * autowrap off nothing wraps or scrolls by accident) and closed (SGR reset,
- * open OSC 8 hyperlink closed), so every row can be rewritten on its own.
+ * autowrap off nothing wraps or scrolls by accident), stripped of trailing
+ * unstyled default-background spaces (so `drawRow` clears to EOL with EL0
+ * instead of writing trailing spaces into the terminal cell buffer), and
+ * closed (SGR reset, open OSC 8 hyperlink closed), so every row can be
+ * rewritten on its own.
  */
+import { SgrState, sgrParams, tokens } from "../../text/ansi";
 import { textSizedRows } from "../../text/osc";
 import { replaceTabs, truncate, visibleWidth } from "../../text/width";
 
@@ -52,15 +56,93 @@ export function hasGraphics(row: string): boolean {
 }
 
 const LINE_BREAKS = /[\r\n]/g;
+const TRAILING_SPACES = / +$/;
+
+/**
+ * Strip trailing ASCII spaces that carry no visible cell styling (default background,
+ * no inverse, underline, strikethrough, overline, or open OSC 8 hyperlink).
+ * Rows containing only such spaces collapse to `""`, while escape-only rows with no
+ * spaces (such as `RESERVED_ROW` for anchored images) are preserved verbatim.
+ */
+export function stripTrailingBlankSpaces(text: string): string {
+	if (text.length === 0) return text;
+	if (!text.includes("\x1b")) {
+		return text.charCodeAt(text.length - 1) === 0x20 ? text.replace(TRAILING_SPACES, "") : text;
+	}
+	const sgr = new SgrState();
+	let inLink = false;
+	let hasVisible = false;
+	let trailingSpaces = false;
+	let sawUnstyledSpace = false;
+	let cleanEnd = 0;
+	let offset = 0;
+	for (const token of tokens(text)) {
+		const end = offset + token.text.length;
+		if (token.escape) {
+			const params = sgrParams(token.text);
+			if (params !== undefined) {
+				sgr.apply(params);
+				if (hasVisible && !trailingSpaces) cleanEnd = end;
+			} else if (token.text.startsWith("\x1b]8;")) {
+				const payload = token.text.slice(2);
+				const secondSemi = payload.indexOf(";", 2);
+				const uri = secondSemi >= 0 ? payload.slice(secondSemi + 1).replace(/(?:\x07|\x1b\\)$/, "") : "";
+				inLink = uri.length > 0;
+				if (hasVisible && !trailingSpaces) cleanEnd = end;
+			} else if (
+				token.text.startsWith("\x1b]66;") ||
+				token.text.startsWith("\x1b]1337;") ||
+				token.text.startsWith("\x1b_") ||
+				token.text.startsWith("\x1bP")
+			) {
+				// OSC 66 sized text, iTerm2 inline images, Kitty APC graphics, and SIXEL/tmux DCS draw visible cells.
+				hasVisible = true;
+				trailingSpaces = false;
+				cleanEnd = end;
+			} else if (hasVisible && !trailingSpaces) {
+				cleanEnd = end;
+			}
+			offset = end;
+			continue;
+		}
+		if (sgr.paintsBlank || inLink) {
+			hasVisible = true;
+			trailingSpaces = false;
+			cleanEnd = end;
+		} else {
+			let lastNonSpace = token.text.length - 1;
+			while (lastNonSpace >= 0 && token.text.charCodeAt(lastNonSpace) === 0x20) lastNonSpace--;
+			if (lastNonSpace < 0) {
+				trailingSpaces = true;
+				sawUnstyledSpace = true;
+			} else {
+				hasVisible = true;
+				if (lastNonSpace === token.text.length - 1) {
+					trailingSpaces = false;
+					cleanEnd = end;
+				} else {
+					trailingSpaces = true;
+					sawUnstyledSpace = true;
+					cleanEnd = offset + lastNonSpace + 1;
+				}
+			}
+		}
+		offset = end;
+	}
+	if (!hasVisible) return sawUnstyledSpace ? "" : text;
+	return trailingSpaces ? text.slice(0, cleanEnd) : text;
+}
 
 /**
  * `row` as the writer puts it on screen: tabs expanded, line breaks dropped,
- * cut to `width` cells, styles and hyperlinks closed at its end.
+ * cut to `width` cells, trailing unstyled spaces stripped, styles and
+ * hyperlinks closed at its end.
  */
 export function normalizeRow(row: string, width: number): string {
 	let text = replaceTabs(row);
 	if (text.includes("\n") || text.includes("\r")) text = text.replace(LINE_BREAKS, "");
 	if (visibleWidth(text) > width) text = truncate(text, width, "");
+	text = stripTrailingBlankSpaces(text);
 	if (!text.includes("\x1b")) return text;
 	if (text.includes("\x1b[") && !text.endsWith(SGR_RESET)) text += SGR_RESET;
 	if (text.lastIndexOf("\x1b]8;") > text.lastIndexOf(HYPERLINK_CLOSE)) text += HYPERLINK_CLOSE;

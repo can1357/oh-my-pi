@@ -154,7 +154,11 @@ export class SgrState {
 				if (head === 38) this.#fg = raw;
 				else if (head === 48) this.#bg = raw;
 				else if (head === 58) this.#underlineColor = raw;
-				else if (head === 4) this.#attributes.add(4);
+				else if (head === 4) {
+					const sub = Number(raw.slice(raw.indexOf(":") + 1));
+					if (sub === 0) this.#attributes.delete(4);
+					else this.#attributes.add(4);
+				}
 				continue;
 			}
 			const code = raw === "" ? 0 : Number(raw);
@@ -202,6 +206,17 @@ export class SgrState {
 	/** The SGR that sets the active background, or undefined when none is. */
 	get background(): string | undefined {
 		return this.#bg === undefined ? undefined : `\x1b[${this.#bg}m`;
+	}
+
+	/** Whether active SGR styling visibly paints a blank space cell (background, inverse, underline, strike, or overline). */
+	get paintsBlank(): boolean {
+		return (
+			this.#bg !== undefined ||
+			this.#attributes.has(4) ||
+			this.#attributes.has(7) ||
+			this.#attributes.has(9) ||
+			this.#attributes.has(53)
+		);
 	}
 
 	/** One SGR sequence re-establishing the whole state ("" when plain). */
