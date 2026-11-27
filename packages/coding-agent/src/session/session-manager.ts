@@ -511,6 +511,27 @@ function resetNestedTaskBilling(extractedToolData: Record<string, unknown[]> | u
 	for (const task of tasks) resetTaskResultBilling(task);
 }
 
+/**
+ * `SessionHeader.inheritedThroughEntryId` for a session holding only `kept` of `all`: the last kept
+ * entry at or before `marker` in `all`'s file order, so the inherited prefix still ends where it did.
+ */
+function inheritedMarkerWithin(
+	kept: readonly SessionEntry[],
+	all: readonly SessionEntry[],
+	marker: string | undefined,
+): string | undefined {
+	if (marker === undefined) return undefined;
+	const position = new Map(all.map((entry, index) => [entry.id, index]));
+	const markerAt = position.get(marker);
+	if (markerAt === undefined) return undefined;
+	let inherited: string | undefined;
+	for (const entry of kept) {
+		const at = position.get(entry.id);
+		if (at !== undefined && at <= markerAt) inherited = entry.id;
+	}
+	return inherited;
+}
+
 function isAssistantEntry(entry: SessionEntry): boolean {
 	return entry.type === "message" && entry.message.role === "assistant";
 }
@@ -2652,6 +2673,7 @@ export class SessionManager {
 			parentSession: parentSessionId,
 			providerPromptCacheKey: SessionManager.getInheritedProviderPromptCacheKey(this.#header),
 			taskPromptCacheKey: this.#header.taskPromptCacheKey,
+			inheritedThroughEntryId: this.#header.inheritedThroughEntryId,
 		};
 		this.#sessionName = this.#header.title;
 		this.#titleSource = this.#header.titleSource;
@@ -2912,6 +2934,7 @@ export class SessionManager {
 		manager.#additionalDirectories = [...this.#additionalDirectories];
 		manager.#header.additionalDirectories =
 			manager.#additionalDirectories.length > 0 ? [...manager.#additionalDirectories] : undefined;
+		manager.#header.inheritedThroughEntryId = this.#header.inheritedThroughEntryId;
 		manager.#entries = structuredClone(this.#entries);
 		manager.#index.rebuild(manager.#entries);
 		manager.#forceFileCreation = true;
@@ -4295,6 +4318,11 @@ export class SessionManager {
 			titleSource: this.#titleSource,
 			parentSession: this.#persist ? sourceSessionFile : undefined,
 			additionalDirectories: this.#additionalDirectories.length > 0 ? [...this.#additionalDirectories] : undefined,
+			inheritedThroughEntryId: inheritedMarkerWithin(
+				entriesToKeep,
+				this.#entries,
+				this.#header.inheritedThroughEntryId,
+			),
 		};
 
 		const labels: LabelEntry[] = [];
@@ -4441,6 +4469,10 @@ export class SessionManager {
 		);
 		manager.#header.title = sourceHeader?.title;
 		manager.#header.titleSource = sourceHeader?.titleSource;
+		// A reset makes everything copied the parent's; a plain copy keeps the source's own inherited prefix.
+		manager.#header.inheritedThroughEntryId = options?.resetInheritedCost
+			? history.at(-1)?.id
+			: sourceHeader?.inheritedThroughEntryId;
 		manager.#additionalDirectories = (sourceHeader?.additionalDirectories ?? []).filter(d => d !== path.resolve(cwd));
 		manager.#header.additionalDirectories =
 			manager.#additionalDirectories.length > 0 ? manager.#additionalDirectories : undefined;

@@ -60,7 +60,7 @@ function buildAssistantEntry(opts: AssistantOptions) {
 async function writeSessionFile(
 	folderSlug: string,
 	fileName: string,
-	header: { id: string; cwd: string; parentSession?: string },
+	header: { id: string; cwd: string; parentSession?: string; inheritedThroughEntryId?: string },
 	entries: unknown[],
 ): Promise<string> {
 	const sessionDir = path.join(getSessionsDir(), folderSlug);
@@ -73,6 +73,7 @@ async function writeSessionFile(
 		timestamp: new Date().toISOString(),
 		cwd: header.cwd,
 		...(header.parentSession ? { parentSession: header.parentSession } : {}),
+		...(header.inheritedThroughEntryId ? { inheritedThroughEntryId: header.inheritedThroughEntryId } : {}),
 	};
 	const lines = [headerEntry, ...entries].map(entry => JSON.stringify(entry)).join("\n");
 	await Bun.write(sessionFile, `${lines}\n`);
@@ -299,5 +300,39 @@ describe("stats sync deduplicates forked-session entries", () => {
 		const requests = getRecentRequests(10).filter(r => r.entryId === "asst01ab");
 		expect(requests).toHaveLength(1);
 		expect(requests[0].usage.premiumRequests).toBe(1);
+	});
+
+	it("leaves a reset fork's copied calls to the parent even when the fork syncs first", async () => {
+		const ts = new Date("2026-06-24T10:00:00.000Z").toISOString();
+		const userEntry = buildUserEntry("user01ab", ts, "hello");
+		const assistantEntry = buildAssistantEntry({ entryId: "asst01ab", parentId: "user01ab", timestamp: ts });
+		const parentFile = await writeSessionFile(
+			"--tmp--fork-dedup",
+			"01_parent.jsonl",
+			{ id: "parent00", cwd: "/tmp/project" },
+			[userEntry, assistantEntry],
+		);
+		// `forkFrom` with `resetInheritedCost` (a `/tan` clone) zeroes the copy's cost and marks the
+		// copied prefix; the clone then makes a call of its own.
+		const copied = structuredClone(assistantEntry);
+		copied.message.usage.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+		const ownTs = new Date("2026-06-24T10:05:00.000Z").toISOString();
+		const forkFile = await writeSessionFile(
+			"--tmp--fork-dedup",
+			"02_fork.jsonl",
+			{ id: "fork0000", cwd: "/tmp/project", parentSession: parentFile, inheritedThroughEntryId: "asst01ab" },
+			[userEntry, copied, buildAssistantEntry({ entryId: "asst02cd", parentId: "asst01ab", timestamp: ownTs })],
+		);
+
+		// The fork lands first, as a from-scratch sync of a fork newer than an idle parent does.
+		await syncAllSessions({ workers: 1, files: [forkFile, parentFile] });
+
+		const requests = getRecentRequests(10);
+		expect(requests.find(request => request.entryId === "asst01ab")?.sessionFile).toBe(parentFile);
+		expect(requests.find(request => request.entryId === "asst02cd")?.sessionFile).toBe(forkFile);
+		const overall = getOverallStats();
+		expect(overall.totalRequests).toBe(2);
+		// Without the marker the fork's zeroed copy claims the request and the parent's $0.003 is lost.
+		expect(overall.totalCost).toBeCloseTo(0.006, 8);
 	});
 });

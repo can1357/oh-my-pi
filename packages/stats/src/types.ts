@@ -99,6 +99,8 @@ export interface SessionHeader {
 	timestamp: string;
 	cwd: string;
 	title?: string;
+	/** Last entry a reset fork copied from its parent; model calls at or before it are the parent's. */
+	inheritedThroughEntryId?: string;
 }
 
 export interface SessionMessageEntry {

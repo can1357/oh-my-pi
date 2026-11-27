@@ -510,6 +510,78 @@ describe("SessionManager.forkFrom", () => {
 		await sourceManager.close();
 	});
 
+	it("marks the copied prefix of a reset fork and keeps it in sessions derived from it", async () => {
+		using tempDir = TempDir.createSync("@omp-session-fork-inherited-");
+		const cwd = path.join(tempDir.path(), "project");
+		const sessionDir = path.join(tempDir.path(), "sessions");
+		await fs.mkdir(sessionDir, { recursive: true });
+		const sourceFile = path.join(sessionDir, "source.jsonl");
+		const timestamp = new Date().toISOString();
+		const lines = [
+			{ type: "session", version: CURRENT_SESSION_VERSION, id: "inherited-source", timestamp, cwd },
+			{
+				type: "message",
+				id: "u1",
+				parentId: null,
+				timestamp,
+				message: { role: "user", content: "hi", timestamp: 1 },
+			},
+			{
+				type: "message",
+				id: "a1",
+				parentId: "u1",
+				timestamp,
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "ok" }],
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "claude",
+					stopReason: "stop",
+					timestamp: 2,
+					usage: {
+						input: 1,
+						output: 1,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 2,
+						cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 },
+					},
+				},
+			},
+		];
+		await Bun.write(sourceFile, `${lines.map(line => JSON.stringify(line)).join("\n")}\n`);
+		const headerOf = async (file: string | undefined) => {
+			if (!file) throw new Error("expected a session file");
+			const [header] = await loadEntriesFromFile(file);
+			return header?.type === "session" ? header : undefined;
+		};
+
+		const plain = await SessionManager.forkFrom(sourceFile, cwd, path.join(tempDir.path(), "plain"), undefined, {
+			suppressBreadcrumb: true,
+		});
+		expect((await headerOf(plain.getSessionFile()))?.inheritedThroughEntryId).toBeUndefined();
+
+		const reset = await SessionManager.forkFrom(sourceFile, cwd, path.join(tempDir.path(), "reset"), undefined, {
+			suppressBreadcrumb: true,
+			resetInheritedCost: true,
+		});
+		const resetFile = reset.getSessionFile();
+		expect((await headerOf(resetFile))?.inheritedThroughEntryId).toBe("a1");
+
+		// A plain copy of the reset fork still owes those calls to the original parent.
+		if (!resetFile) throw new Error("expected reset fork file");
+		const copy = await SessionManager.forkFrom(resetFile, cwd, path.join(tempDir.path(), "copy"), undefined, {
+			suppressBreadcrumb: true,
+		});
+		expect((await headerOf(copy.getSessionFile()))?.inheritedThroughEntryId).toBe("a1");
+
+		// A branch that ends before the marker keeps the inherited prefix ending at its last kept entry.
+		const branchedFile = reset.createBranchedSession("u1");
+		expect((await headerOf(branchedFile))?.inheritedThroughEntryId).toBe("u1");
+		await Promise.all([plain.close(), reset.close(), copy.close()]);
+	});
+
 	for (const { name, createStorage, padding } of [
 		{ name: "buffered file", createStorage: () => new FileSessionStorage(), padding: "" },
 		{ name: "streamed file", createStorage: () => new FileSessionStorage(), padding: "x".repeat(8 * 1024 * 1024) },

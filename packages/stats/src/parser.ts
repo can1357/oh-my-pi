@@ -661,14 +661,45 @@ function scanPrefixState(
 	bytes: Uint8Array,
 	spotlight: SpotlightCollector,
 	replies: ReplyTracker,
+	inherited: InheritedPrefix,
 ): ServiceTierByFamily | undefined {
 	let currentServiceTier: ServiceTierByFamily | undefined;
 	visitSessionEntriesLenient(bytes, entry => {
 		replies.visit(entry);
+		inherited.visit(entry);
 		if (isServiceTierChange(entry)) currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
 		else spotlight.visit(entry);
 	});
 	return currentServiceTier;
+}
+
+/**
+ * Tracks a reset fork's inherited prefix (`SessionHeader.inheritedThroughEntryId`): the model calls
+ * the fork copied from its parent. They are the parent's calls, so they become no request rows here.
+ * Fork copies keep their entry ids, so the parent's own rows win regardless of which file syncs first.
+ */
+class InheritedPrefix {
+	#through: string | undefined;
+
+	constructor(through?: string) {
+		this.#through = through;
+	}
+
+	get state(): string | undefined {
+		return this.#through;
+	}
+
+	/** Whether `entry` lies at or before the end of the inherited prefix. */
+	visit(entry: SessionEntry): boolean {
+		if (entry.type === "session") {
+			const through = "inheritedThroughEntryId" in entry ? entry.inheritedThroughEntryId : undefined;
+			this.#through = typeof through === "string" ? through : undefined;
+			return false;
+		}
+		if (this.#through === undefined) return false;
+		if ("id" in entry && entry.id === this.#through) this.#through = undefined;
+		return true;
+	}
 }
 export interface SessionParserState {
 	version: 1;
@@ -683,6 +714,8 @@ export interface SessionParserState {
 	spotlight?: SpotlightParserState;
 	/** Absent in cursors persisted before replies were tracked; such a cursor is rebuilt from the transcript prefix. */
 	pendingReplies?: Record<string, string>;
+	/** Set while the read stopped inside a reset fork's inherited prefix: the entry id that ends it. */
+	inheritedThrough?: string;
 }
 
 export interface ParseSessionResult {
@@ -750,10 +783,13 @@ export async function parseSessionFile(
 	const callsById = new Map<string, ToolCallStats>();
 	let spotlight = new SpotlightCollector(sessionPath, folder, emptySpotlightState());
 	let replies = new ReplyTracker();
+	let inherited = new InheritedPrefix();
 
 	// Reduce each entry immediately so full replays do not retain tool-output/message bodies.
 	const visit = (entry: SessionEntry): void => {
 		const answered = replies.visit(entry);
+		// The parent's copied calls bill to the parent, whichever transcript syncs first.
+		const inheritedCall = inherited.visit(entry);
 		spotlight.visit(entry);
 		if (isServiceTierChange(entry)) {
 			currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
@@ -797,12 +833,14 @@ export async function parseSessionFile(
 			return;
 		}
 		if (isModelUsage(entry)) {
-			const modelUsageStats = extractModelUsageStats(sessionPath, folder, entry, agentType);
+			const modelUsageStats = inheritedCall ? null : extractModelUsageStats(sessionPath, folder, entry, agentType);
 			if (modelUsageStats) stats.push(modelUsageStats);
 			return;
 		}
 		if (isAssistantMessage(entry)) {
-			const msgStats = extractStats(sessionPath, folder, entry, currentServiceTier, agentType);
+			const msgStats = inheritedCall
+				? null
+				: extractStats(sessionPath, folder, entry, currentServiceTier, agentType);
 			if (msgStats) stats.push(msgStats);
 			for (const call of extractToolCalls(sessionPath, folder, entry, agentType)) {
 				toolCalls.push(call);
@@ -848,9 +886,10 @@ export async function parseSessionFile(
 				currentServiceTier = state?.serviceTier ?? undefined;
 				spotlight = new SpotlightCollector(sessionPath, folder, state?.spotlight ?? emptySpotlightState());
 				replies = new ReplyTracker(state?.pendingReplies);
+				inherited = new InheritedPrefix(state?.inheritedThrough);
 			} else {
 				const prefix = new SpotlightCollector(sessionPath, folder, emptySpotlightState(), false);
-				currentServiceTier = scanPrefixState(bytes.subarray(0, start), prefix, replies);
+				currentServiceTier = scanPrefixState(bytes.subarray(0, start), prefix, replies, inherited);
 				spotlight = new SpotlightCollector(sessionPath, folder, prefix.state);
 			}
 			read = visitSessionEntriesLenient(bytes.subarray(start - readStart), visit);
@@ -904,6 +943,7 @@ export async function parseSessionFile(
 			serviceTier: currentServiceTier ?? null,
 			spotlight: spotlight.state,
 			pendingReplies: replies.state,
+			...(inherited.state === undefined ? {} : { inheritedThrough: inherited.state }),
 		},
 	};
 }

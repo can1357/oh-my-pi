@@ -271,7 +271,9 @@ const INGEST_TIERS_MS = [24 * 60 * 60 * 1000, 7 * 24 * 60 * 60 * 1000];
  * ownership of the entries the fork copied (first writer wins). The only
  * exception is a from-scratch ingest where a fork was touched more recently
  * than a parent idle for a day: the fork then owns the copied entries, which
- * changes per-session attribution but never totals.
+ * changes per-session attribution but never totals. A reset fork's copied calls
+ * never become its rows at all (`inheritedThroughEntryId`), since their cost was
+ * zeroed in the copy and would otherwise displace the parent's.
  */
 async function orderForIngest(files: string[]): Promise<string[]> {
 	const now = Date.now();
