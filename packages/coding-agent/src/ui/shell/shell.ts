@@ -138,6 +138,23 @@ export class Shell {
 		return this.#host;
 	}
 
+	/**
+	 * Resolves once the terminal renderer presents its next frame, which it schedules; at once when
+	 * nothing draws to a terminal.
+	 */
+	nextFrame(): Promise<void> {
+		const host = this.#host;
+		if (!host || host.native) return Promise.resolve();
+		const { promise, resolve } = Promise.withResolvers<void>();
+		const stop = host.onFrame(() => {
+			stop();
+			resolve();
+		});
+		// A change only schedules a frame when the last one read it: ask, whatever is on screen.
+		host.requestFrame();
+		return promise;
+	}
+
 	/** Set inline mouse reporting; a modal screen's override lasts until it closes. */
 	setInlineMouse(tracking: MouseTracking): void {
 		this.#inlineMouse.set(tracking);

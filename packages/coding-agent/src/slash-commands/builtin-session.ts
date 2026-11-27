@@ -638,9 +638,9 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		aliases: ["rewind"],
 		icon: "branch",
 		description: "Rewind to a previous message in a new session, keeping this one unchanged",
-		handleTui: (_command, runtime) => {
-			runtime.ctx.showUserMessageSelector();
+		handleTui: async (_command, runtime) => {
 			clearSubmittedText(runtime);
+			await runtime.ctx.showUserMessageSelector();
 		},
 	},
 	{
@@ -687,9 +687,9 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		name: "tree",
 		icon: "tree",
 		description: "Navigate session tree (switch branches)",
-		handleTui: (_command, runtime) => {
-			runtime.ctx.showTreeSelector();
+		handleTui: async (_command, runtime) => {
 			clearSubmittedText(runtime);
+			await runtime.ctx.showTreeSelector();
 		},
 	},
 	{

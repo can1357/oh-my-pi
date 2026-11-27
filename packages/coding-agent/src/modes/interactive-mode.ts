@@ -332,6 +332,7 @@ import {
 	cfgTuiAutoGraph,
 	cfgTuiMouse,
 	cfgTuiColorfulMarkdown,
+	cfgTuiShowLinkUrl,
 	cfgTuiRenderMermaid,
 	cfgTuiRenderEmbeds,
 	cfgTuiRenderSvg,
@@ -491,6 +492,7 @@ const cfgLiveUiSettings = combine({
 	"display.showTokenUsage": cfgDisplayShowTokenUsage,
 	"display.showTurnTime": cfgDisplayShowTurnTime,
 	"tui.colorfulMarkdown": cfgTuiColorfulMarkdown,
+	"tui.showLinkUrl": cfgTuiShowLinkUrl,
 	"tui.renderMermaid": cfgTuiRenderMermaid,
 	"tui.renderSvg": cfgTuiRenderSvg,
 	"tui.renderEmbeds": cfgTuiRenderEmbeds,
@@ -1712,7 +1714,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				"status.usage": showUsage,
 				"status.cache": () => void this.handleSessionCommand(),
 				"status.path": () => openPath(this.sessionManager.getCwd()),
-				"status.tree": () => this.showTreeSelector(),
+				"status.tree": () => void this.showTreeSelector(),
 				"thinking.cycle": () => this.#inputController.cycleThinkingFromComposer(),
 				"thinking.set": value => this.#inputController.setThinkingFromComposer(value),
 				"dictation.toggle": () => void this.#toggleComposerDictation(),
@@ -3534,6 +3536,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		setMarkdownLook({
 			colorful: cfgTuiColorfulMarkdown.get(this.settings),
 			mermaid: cfgTuiRenderMermaid.get(this.settings),
+			linkUrls: cfgTuiShowLinkUrl.get(this.settings),
 		});
 	}
 
@@ -3618,7 +3621,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		) {
 			rebuildChat = true;
 		}
-		if (any("tui.colorfulMarkdown", "tui.renderMermaid", "tui.renderSvg", "tui.renderEmbeds")) {
+		if (any("tui.colorfulMarkdown", "tui.showLinkUrl", "tui.renderMermaid", "tui.renderSvg", "tui.renderEmbeds")) {
 			this.#syncTranscriptDisplaySettings();
 			resetDisplay = true;
 		}
@@ -4049,17 +4052,21 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		this.transcriptBlocks = new WeakMap();
 		this.#frame.welcomeBlock = undefined;
-		transcript.retain(live);
-		this.#headerBlocks = [];
-		const anchor = transcript.blocks()[0];
-		transcript.setInsertionPoint(anchor);
-		try {
-			if (!cfgStartupQuiet.get(settings)) this.#frame.showWelcome();
-			this.#syncHeaderExtras();
-			this.renderSessionContext(context, { preservedLiveToolCallIds });
-		} finally {
-			transcript.setInsertionPoint(undefined);
-		}
+		// One update of the drawn regions for the removal and the whole replay, not one per block: in
+		// Tern each update walks the whole transcript.
+		batch(() => {
+			transcript.retain(live);
+			this.#headerBlocks = [];
+			const anchor = transcript.blocks()[0];
+			transcript.setInsertionPoint(anchor);
+			try {
+				if (!cfgStartupQuiet.get(settings)) this.#frame.showWelcome();
+				this.#syncHeaderExtras();
+				this.renderSessionContext(context, { preservedLiveToolCallIds });
+			} finally {
+				transcript.setInsertionPoint(undefined);
+			}
+		});
 		// `renderSessionContext` clears `pendingTools` at start and end so historical tool blocks
 		// don't leak into live tracking: restore the in-flight entries so the next streamed delta
 		// routes into the preserved block instead of stacking a duplicate below it.
@@ -7253,7 +7260,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#presenter.presentAssistant(message, options);
 	}
 
-	createTranscriptReplica(entries: readonly TranscriptEntryLike[]): TranscriptReplica {
+	createTranscriptReplica(entries: readonly TranscriptEntryLike[], clipped: boolean): TranscriptReplica {
 		return new TranscriptReplica(
 			{
 				mode: this,
@@ -7263,6 +7270,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				replaySteps: (target, context) => this.#uiHelpers.replaySteps(target, context),
 			},
 			entries,
+			clipped,
 		);
 	}
 
@@ -8227,16 +8235,16 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#selectorController.showPluginSelector(mode);
 	}
 
-	showUserMessageSelector(startAt?: string): void {
-		this.#selectorController.showUserMessageSelector(startAt);
+	showUserMessageSelector(startAt?: string): Promise<void> {
+		return this.#selectorController.showUserMessageSelector(startAt);
 	}
 
-	showCopySelector(): void {
-		this.#selectorController.showCopySelector();
+	showCopySelector(): Promise<void> {
+		return this.#selectorController.showCopySelector();
 	}
 
-	showTreeSelector(): void {
-		this.#selectorController.showTreeSelector();
+	showTreeSelector(): Promise<void> {
+		return this.#selectorController.showTreeSelector();
 	}
 
 	showThinkingSelector(): void {

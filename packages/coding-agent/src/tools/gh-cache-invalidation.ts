@@ -26,11 +26,13 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { parseGitUrl } from "../extensibility/plugins/git-url";
 import { formatRepoRef } from "./gh-common";
 import { invalidateAllForNumber, invalidateAllForRepo, invalidatePullRequestsForRepo } from "./github-cache";
+import { isGitlabHostSegment } from "./glab-mr";
 import { tokenizeShellSegments } from "./shell-tokenize";
 
 const PR_URL_PATTERN = /^https:\/\/([^/\s]+)\/([^/\s]+\/[^/\s]+)\/pull\/(\d+)(?:[/?#].*)?$/i;
 const ISSUE_URL_PATTERN = /^https:\/\/([^/\s]+)\/([^/\s]+\/[^/\s]+)\/issues\/(\d+)(?:[/?#].*)?$/i;
-
+const GLAB_MR_URL_PATTERN = /^https?:\/\/([^/\s]+)\/(.+?)\/-\/merge_requests\/(\d+)(?:[/?#].*)?$/i;
+const GLAB_ISSUE_URL_PATTERN = /^https?:\/\/([^/\s]+)\/(.+?)\/-\/issues\/(\d+)(?:[/?#].*)?$/i;
 /** Subcommands that mutate the rendered issue/PR view in any meaningful way. */
 const MUTATING_ISSUE_SUBCMDS: Record<string, true> = {
 	close: true,
@@ -56,6 +58,27 @@ const MUTATING_PR_SUBCMDS: Record<string, true> = {
 	review: true,
 	lock: true,
 	unlock: true,
+};
+
+const MUTATING_GLAB_MR_SUBCMDS: Record<string, true> = {
+	update: true,
+	note: true,
+	comment: true,
+	close: true,
+	reopen: true,
+	delete: true,
+	merge: true,
+	approve: true,
+	revoke: true,
+	rebase: true,
+};
+
+const MUTATING_GLAB_ISSUE_SUBCMDS: Record<string, true> = {
+	close: true,
+	reopen: true,
+	delete: true,
+	update: true,
+	note: true,
 };
 
 /**
@@ -101,6 +124,97 @@ const VALUE_TAKING_FLAGS: ReadonlySet<string> = new Set([
 	"--match-head-commit",
 	"--author-email",
 ]);
+
+const GLAB_VALUE_TAKING_FLAGS: ReadonlySet<string> = new Set([
+	...[...VALUE_TAKING_FLAGS].filter(flag => flag !== "-r"),
+	"-d",
+	"--description",
+	"--message",
+	"--unlabel",
+	"--reviewer",
+	"--target-branch",
+	"-s",
+	"--source-branch",
+	"--sha",
+	"--squash-commit-message",
+	"--merge-commit-message",
+	"--weight",
+	"--issue-type",
+]);
+
+function normalizeGlabRepoFlag(raw: string): string | undefined {
+	const trimmed = raw
+		.trim()
+		.replace(/\/+$/, "")
+		.replace(/\.git$/, "");
+	if (!trimmed) return undefined;
+	if (/^https?:\/\//i.test(trimmed)) {
+		try {
+			const parsed = new URL(trimmed);
+			const projectPath = parsed.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
+			return projectPath ? `${parsed.host.toLowerCase()}/${projectPath}` : undefined;
+		} catch {
+			return undefined;
+		}
+	}
+	const firstSlash = trimmed.indexOf("/");
+	if (firstSlash < 0) return undefined;
+	const hostPart = trimmed.slice(0, firstSlash);
+	const rest = trimmed.slice(firstSlash + 1);
+	if (!rest.includes("/")) return undefined;
+	if (isGitlabHostSegment(hostPart)) {
+		return `${hostPart.toLowerCase()}/${rest}`;
+	}
+	return undefined;
+}
+
+function detectGlabMutation(tokens: readonly string[]): { number?: number; repo?: string } | null {
+	const glabIdx = tokens.indexOf("glab");
+	if (glabIdx === -1) return null;
+	const subject = tokens[glabIdx + 1];
+	if (subject !== "mr" && subject !== "issue") return null;
+	const subcmd = tokens[glabIdx + 2];
+	if (!subcmd) return null;
+	const expected = subject === "mr" ? MUTATING_GLAB_MR_SUBCMDS : MUTATING_GLAB_ISSUE_SUBCMDS;
+	if (!expected[subcmd]) return null;
+
+	let repo: string | undefined;
+	for (let i = glabIdx + 3; i < tokens.length; i++) {
+		const token = tokens[i];
+		if (token === "-R" || token === "--repo") {
+			const next = tokens[i + 1];
+			if (next) repo = normalizeGlabRepoFlag(next);
+			i++;
+			continue;
+		}
+		if (token.startsWith("--repo=")) {
+			repo = normalizeGlabRepoFlag(token.slice("--repo=".length));
+		}
+	}
+	for (let i = glabIdx + 3; i < tokens.length; i++) {
+		const token = tokens[i];
+		if (token === "-R" || token === "--repo" || GLAB_VALUE_TAKING_FLAGS.has(token)) {
+			i++;
+			continue;
+		}
+		if (token.startsWith("-")) continue;
+		const numMatch = /^[!#]?(\d+)$/.exec(token);
+		if (numMatch) {
+			const direct = Number(numMatch[1]);
+			if (Number.isSafeInteger(direct) && direct > 0) {
+				return repo !== undefined ? { number: direct, repo } : { number: direct };
+			}
+		}
+		const urlMatch = (subject === "mr" ? GLAB_MR_URL_PATTERN : GLAB_ISSUE_URL_PATTERN).exec(token);
+		if (urlMatch) {
+			const num = Number(urlMatch[3]);
+			if (Number.isSafeInteger(num) && num > 0) {
+				return { number: num, repo: `${urlMatch[1].toLowerCase()}/${urlMatch[2]}` };
+			}
+		}
+	}
+	return repo !== undefined ? { repo } : {};
+}
 /**
  * Walk a single shell command's token stream looking for a top-level
  * `gh (issue|pr) <subcmd> [<id-or-url>]` invocation and return the
@@ -169,15 +283,16 @@ function detectGhMutation(tokens: readonly string[]): { number?: number; repo?: 
  * command does not touch GitHub state.
  */
 export function invalidateGithubCacheForBashCommand(command: string): void {
-	if (!command?.includes("gh")) return;
+	if (!command || (!command.includes("gh") && !command.includes("glab"))) return;
 	const segments = tokenizeShellSegments(command);
 	for (const segment of segments) {
-		const hit = detectGhMutation(segment);
-		if (!hit) continue;
-		if (hit.number !== undefined) {
-			invalidateAllForNumber(hit.number, hit.repo);
-		} else {
-			invalidateAllForRepo(hit.repo);
+		for (const hit of [detectGhMutation(segment), detectGlabMutation(segment)]) {
+			if (!hit) continue;
+			if (hit.number !== undefined) {
+				invalidateAllForNumber(hit.number, hit.repo);
+			} else {
+				invalidateAllForRepo(hit.repo);
+			}
 		}
 	}
 }

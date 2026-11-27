@@ -73,17 +73,25 @@ export function isUserRequestEntry(entry: TranscriptEntryLike | { type: string }
 /** How many trailing entries a transcript selector replays at open; older history loads on demand. */
 const RECENT_ENTRIES = 600;
 
+/** Whether `entry` opens a selector turn: any message but a tool result, which folds into the call before it. */
+function opensTurn(entry: TranscriptEntryLike): boolean {
+	// A custom message is checked without restoring it: restored, it is a `custom` message whenever it is one.
+	return entry.type === "message" ? entry.message.role !== "toolResult" : isCustomMessageContent(entry.content);
+}
+
 /**
- * The tail of a long branch for replay, starting at a user request so calls and their results
- * stay together; the whole branch when it is short or holds no request to start at.
+ * The tail of a long branch for replay: at most {@link RECENT_ENTRIES} entries, from the first
+ * that opens a turn, so calls and their results stay together. Only when the whole window is
+ * tool results does it reach back to the call they belong to; the whole branch when it is short.
  */
-export function recentTranscriptEntries<T extends TranscriptEntryLike>(
-	entries: readonly T[],
-	limit = RECENT_ENTRIES,
-): readonly T[] {
-	if (entries.length <= limit) return entries;
-	for (let index = entries.length - limit; index > 0; index--) {
-		if (isUserRequestEntry(entries[index]!)) return entries.slice(index);
+export function recentTranscriptEntries<T extends TranscriptEntryLike>(entries: readonly T[]): readonly T[] {
+	if (entries.length <= RECENT_ENTRIES) return entries;
+	const cut = entries.length - RECENT_ENTRIES;
+	for (let index = cut; index < entries.length; index++) {
+		if (opensTurn(entries[index]!)) return entries.slice(index);
+	}
+	for (let index = cut - 1; index > 0; index--) {
+		if (opensTurn(entries[index]!)) return entries.slice(index);
 	}
 	return entries;
 }

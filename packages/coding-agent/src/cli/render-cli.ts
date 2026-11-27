@@ -66,17 +66,6 @@ function transcriptRows(mode: InteractiveMode, width: number): string[] {
 	return rows;
 }
 
-/** Resolves with the next frame the terminal renderer presents. */
-function nextFrame(mode: InteractiveMode): Promise<void> {
-	const { promise, resolve } = Promise.withResolvers<void>();
-	const stop = mode.shell.host?.onFrame(() => {
-		stop?.();
-		resolve();
-	});
-	if (!stop) resolve();
-	return promise;
-}
-
 function formatMs(ms: number): string {
 	return `${ms.toFixed(0)} ms`;
 }
@@ -133,7 +122,7 @@ export async function runRenderCommand(args: RenderCommandArgs): Promise<number>
 		// Replay: transcript context build + block construction (the phase
 		// renderInitialMessages runs after /tree navigation and on resume).
 		const replayStart = performance.now();
-		const painted = nextFrame(mode);
+		const painted = mode.shell.nextFrame();
 		await mode.renderInitialMessages({ clearTerminalHistory: true });
 		const replayMs = performance.now() - replayStart;
 
@@ -155,7 +144,7 @@ export async function runRenderCommand(args: RenderCommandArgs): Promise<number>
 		for (let i = 0; i < (args.repaint ?? 0); i++) {
 			const start = performance.now();
 			const before = terminal.bytes();
-			const repainted = nextFrame(mode);
+			const repainted = mode.shell.nextFrame();
 			mode.shell.host?.replayHistory();
 			await repainted;
 			repaints.push({ ms: performance.now() - start, bytes: terminal.bytes() - before });

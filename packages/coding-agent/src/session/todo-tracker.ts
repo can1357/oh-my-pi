@@ -194,11 +194,9 @@ export class TodoTracker {
 			const trimmedPromptText = promptText.trimEnd();
 			if (trimmedPromptText.endsWith("?") || trimmedPromptText.endsWith("!")) return undefined;
 		}
-		const activeToolNames = this.#host.getActiveToolNames();
-		if (!activeToolNames.includes("todo")) {
-			logger.warn("Eager todo enforcement skipped because todo is not active", { activeToolNames });
-			return undefined;
-		}
+		// Subagents run without `todo` by design (todos are parent-owned), so a
+		// missing tool is an expected state here, not a misconfiguration.
+		if (!this.#host.getActiveToolNames().includes("todo")) return undefined;
 		const message: AgentMessage = {
 			role: "custom",
 			customType: EAGER_TODO_PRELUDE_MESSAGE_TYPE,
