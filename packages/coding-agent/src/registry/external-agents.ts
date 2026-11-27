@@ -80,6 +80,8 @@ export function registerExternalAgent(host: ExternalAgentHost, spec: ExternalAge
 	const startedAt = Date.now();
 	const outcome = Promise.withResolvers<string>();
 	const steer = spec.steer?.bind(spec);
+	// Set once it settled: a finished agent takes no more messages.
+	let settled = false;
 
 	const ref = registry.register({
 		id,
@@ -93,7 +95,12 @@ export function registerExternalAgent(host: ExternalAgentHost, spec: ExternalAge
 		// Async, so an extension's synchronous throw reaches callers as a rejection.
 		external: {
 			readTranscript: async (fromByte, signal) => spec.readTranscript(fromByte, signal),
-			steer: steer && (async text => steer(text, registry.get(id)?.status === "running" ? "steer" : "follow_up")),
+			steer:
+				steer &&
+				(async text => {
+					if (settled) throw new Error(`External agent ${id} has finished; register a new one to continue.`);
+					await steer(text, registry.get(id)?.status === "running" ? "steer" : "follow_up");
+				}),
 		},
 	});
 
@@ -139,7 +146,6 @@ export function registerExternalAgent(host: ExternalAgentHost, spec: ExternalAge
 		emitFrame(TASK_SUBAGENT_PROGRESS_CHANNEL, payload);
 	};
 
-	let settled = false;
 	const settle = (status: AgentStatus, frame?: SubagentLifecyclePayload["status"]): boolean => {
 		if (settled) return false;
 		settled = true;

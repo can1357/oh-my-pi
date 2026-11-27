@@ -287,6 +287,20 @@ describe("ExtensionContext.agents.registerExternal", () => {
 		]);
 	});
 
+	it("refuses messages once complete() settled it", async () => {
+		const ctx = await extensionContext();
+		const steered: string[] = [];
+		const agent = ctx.agents!.registerExternal(remoteAgent({ steer: async text => void steered.push(text) }));
+		agent.complete({ status: "done", text: "ok" });
+
+		const sent = await new WriteTool(toolSession()).execute("send", {
+			path: `agent://${agent.id}`,
+			content: "one more thing",
+		});
+		expect(sent.isError).toBe(true);
+		expect(steered).toEqual([]);
+	});
+
 	it("gives an agent registered from an advisor-scoped context to the session's agent", async () => {
 		await extensionContext();
 		const advisorCtx = session!.extensionRunner!.createContext(undefined, undefined, {
