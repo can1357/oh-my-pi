@@ -37,6 +37,7 @@
 
 ### Fixed
 
+- A local page embedded with a `#fragment` or `?query` (`<iframe src="demo/index.html#B">`) now opens at that fragment instead of failing with "No such file or directory"
 - Browser helper calls (`tab.goto`, `tab.click`, `tab.evaluate`, etc.) and tab reuse on Tern, WebKit, and cmux tabs no longer queue behind another tab's long-running `tab.run()`, and queued `tab.run()` timeouts now name the tab and agent holding the queue
 - `edit` on `ssh://` files no longer contacts the host before the call is approved, and refuses to overwrite a file that changed on the host after the edit fetched it. Writable RPC host URIs get the same check as a read just before the write, so a change landing between that read and the write is not caught ([#16631](https://github.com/can1357/oh-my-pi/pull/16631) by [@lHyperionl](https://github.com/lHyperionl))
 - `edit` refuses `ssh://` symbolic links instead of replacing them with a regular file, and refuses creating, deleting or moving `ssh://` files before its preview ([#16631](https://github.com/can1357/oh-my-pi/pull/16631) by [@lHyperionl](https://github.com/lHyperionl))
