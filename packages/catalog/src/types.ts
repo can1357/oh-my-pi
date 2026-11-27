@@ -319,6 +319,17 @@ export interface OpenAICompat {
 	/** Whether the provider supports the `developer` role (vs `system`). Default: auto-detected from URL. */
 	supportsDeveloperRole?: boolean;
 	/**
+	 * Literals the chat template reserves for a position other than free text,
+	 * which the endpoint rejects when they appear inside a message body. Each
+	 * occurrence in outgoing text gets a backslash prefix, which breaks the
+	 * tokenizer match without changing the words around it.
+	 *
+	 * Opt-in and per model: the host never carries knowledge of any template's
+	 * reserved tokens, and content is rewritten only where the operator lists
+	 * the exact literal (DeepSeek's image marker, for example).
+	 */
+	escapeTextTokens?: string[];
+	/**
 	 * Whether the provider's chat-completions endpoint accepts multiple
 	 * leading `system`/`developer` messages. When false, ordered system
 	 * prompts are coalesced into a single message joined by `\n\n` so
@@ -1131,6 +1142,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "supportsConfigurationUpdate"
 			| "supportsSteering"
 			| "stripImageInput"
+			| "escapeTextTokens"
 			| "whenThinking"
 		>
 	> & {
@@ -1138,6 +1150,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 		extraBody?: OpenAICompat["extraBody"];
 		cacheControlFormat?: OpenAICompat["cacheControlFormat"];
 		thinkingKeep?: OpenAICompat["thinkingKeep"];
+		escapeTextTokens?: OpenAICompat["escapeTextTokens"];
 		streamIdleTimeoutMs?: number;
 		stripThinkingHistory?: boolean;
 		/** The configured `baseUrl` is the official OpenAI API (provider `openai`); unset otherwise. */

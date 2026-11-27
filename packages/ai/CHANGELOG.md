@@ -4,6 +4,7 @@
 
 ### Added
 
+- Chat-completions requests honor `compat.escapeTextTokens`: each listed literal is backslash-prefixed in outgoing message text, so a template token that leaked into a tool result (DeepSeek's `<\｜deepseek_image\｜>`) no longer makes the endpoint reject every later turn. Opt-in per model, no default behavior change ([#16324](https://github.com/can1357/oh-my-pi/issues/16324))
 - Added encryption at rest to `SqliteAuthCredentialStore`: with `open(path, { encrypt: true })` (or `unlock({ encrypt: true })`) new credential rows are sealed with AES-256-GCM under a master key kept in the OS credential vault, each with its own salt; `encrypt: "auto"` keeps a store's current mode and encrypts a fresh one only when the vault answers without prompting; `openLocalAuthCredentialStore()` opens this machine's `agent.db` with `"auto"` unless `auth.encrypt`/`OMP_AUTH_ENCRYPT` forces it
 - Added xAI speech-to-text (`xai-stt`) transcription, including through the auth gateway ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 - Added an `upstreamModel` option to mock provider responses, so a mocked turn can report a model that served it other than the one requested ([#20466](https://github.com/can1357/oh-my-pi/pull/20466) by [@byhow](https://github.com/byhow))

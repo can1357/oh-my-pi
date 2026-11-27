@@ -3579,3 +3579,92 @@ describe("custom API OpenAI-completions compatibility", () => {
 		expect(model.compat).toBeUndefined();
 	});
 });
+
+describe("escapeTextTokens compat", () => {
+	// DeepSeek's template reserves this literal for an image part; inside free
+	// text the endpoint rejects the whole request. A tool result that quoted the
+	// template therefore poisons every later turn of the session.
+	const IMAGE_MARKER = "<\｜deepseek_image\｜>";
+	const toolCallId = "call_read_template";
+
+	function plainModel(): Model<"openai-completions"> {
+		return buildModel({ ...gpt4oMiniSpec, api: "openai-completions" } as ModelSpec<"openai-completions">);
+	}
+
+	/** The shape a quoted template arrives in: a tool call and its text result. */
+	function toolTurn(text: string): Context["messages"] {
+		const assistant: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: toolCallId, name: "read", arguments: {} }],
+			api: "openai-completions",
+			provider: "openai",
+			model: "gpt-4o-mini",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		};
+		const result: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId,
+			toolName: "read",
+			content: [{ type: "text", text }],
+			isError: false,
+			timestamp: Date.now(),
+		};
+		return [assistant, result];
+	}
+
+	it("leaves text byte-identical when the model does not opt in", () => {
+		const model = plainModel();
+		const quoted = `set IMG = "${IMAGE_MARKER}"`;
+		const messages = convertMessages(
+			model,
+			{ messages: [{ role: "user", content: `template: ${IMAGE_MARKER}`, timestamp: Date.now() }, ...toolTurn(quoted)] },
+			model.compat,
+		);
+		expect(messages.find(message => message.role === "user")?.content).toBe(`template: ${IMAGE_MARKER}`);
+		expect(messages.find(message => message.role === "tool")?.content).toBe(quoted);
+	});
+
+	it("prefixes every listed literal in user and tool text but keeps the words", () => {
+		const model = plainModel();
+		const messages = convertMessages(
+			model,
+			{
+				messages: [
+					{ role: "user", content: `template: ${IMAGE_MARKER}`, timestamp: Date.now() },
+					...toolTurn(`set IMG = "${IMAGE_MARKER}"`),
+				],
+			},
+			{ ...model.compat, escapeTextTokens: [IMAGE_MARKER] },
+		);
+		expect(messages.find(message => message.role === "user")?.content).toBe(`template: \\${IMAGE_MARKER}`);
+		expect(messages.find(message => message.role === "tool")?.content).toBe(`set IMG = "\\${IMAGE_MARKER}"`);
+	});
+
+	it("reaches the serialized request body", async () => {
+		const model = plainModel();
+		const quoting = { ...model.compat, escapeTextTokens: [IMAGE_MARKER] };
+		const payload = await captureOpenAICompletionsPayload(
+			{ ...model, compat: quoting } as Model<"openai-completions">,
+			{
+				messages: [
+					{ role: "user", content: `template: ${IMAGE_MARKER}`, timestamp: Date.now() },
+					...toolTurn(`set IMG = "${IMAGE_MARKER}"`),
+				],
+			},
+		);
+		const wire = getPayloadMessages(payload);
+		expect(wire.find(message => message.role === "user")?.content).toBe(`template: \\${IMAGE_MARKER}`);
+		expect(wire.find(message => message.role === "tool")?.content).toBe(`set IMG = "\\${IMAGE_MARKER}"`);
+		// The literal never appears unescaped, which is what the endpoint rejects.
+		expect(JSON.stringify(payload)).not.toContain(`"${IMAGE_MARKER}"`);
+	});
+});
