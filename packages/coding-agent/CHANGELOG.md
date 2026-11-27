@@ -65,6 +65,7 @@
 - Added `ctx.cancelAsyncJob(id)` to the extension context, so an extension can cancel the session's own background jobs (such as `task` workers) like `/jobs kill` ([#18033](https://github.com/can1357/oh-my-pi/issues/18033))
 - Added the `git.childRepoDiscovery` setting: set it to `false` to stop a session started outside a repository from scanning its direct child directories and adopting a single child checkout for the status line, git/PR lookup, and prompt context ([#18232](https://github.com/can1357/oh-my-pi/issues/18232))
 - `omp models --json` now reports each model's compat overrides under `compat` (`extraBody` values redacted) ([#17092](https://github.com/can1357/oh-my-pi/issues/17092))
+- Added an "Insert as editable text" choice to the large-paste menu that inserts the pasted text into the editor uncollapsed, so text pasted through a remote terminal can be edited without the host-clipboard raw-paste shortcut ([#17037](https://github.com/can1357/oh-my-pi/issues/17037))
 
 ### Changed
 

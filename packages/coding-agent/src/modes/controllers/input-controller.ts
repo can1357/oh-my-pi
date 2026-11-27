@@ -2995,13 +2995,16 @@ export class InputController {
 	/**
 	 * Present the large-paste menu and apply the chosen action: wrap in `<attachment>` tags (a text
 	 * chip that expands to the wrapped block on submit), save the text to a file and reference its
-	 * path so the agent can `read` it on demand, or paste inline (a text chip). Cancelling (Esc)
-	 * falls back to the inline chip, so the pasted content is never lost.
+	 * path so the agent can `read` it on demand, paste inline (a text chip), or insert the raw text
+	 * into the editor as ordinary editable text (useful when the clipboard lives on a remote client
+	 * and the host-clipboard raw-paste shortcut cannot reach it). Cancelling (Esc) falls back to the
+	 * inline chip, so the pasted content is never lost.
 	 */
 	async presentLargePasteMenu(text: string, lineCount: number): Promise<void> {
 		const WRAPPED_BLOCK = "Attach as a wrapped block";
 		const LOCAL_FILE = "Attach as local file";
 		const INLINE = "Paste inline";
+		const EDITABLE_TEXT = "Insert as editable text";
 
 		let choice: string | undefined;
 		try {
@@ -3014,6 +3017,7 @@ export class InputController {
 						description: "Save the text to a local://paste file",
 					},
 					{ label: INLINE, description: "Collapse the text to an inline chip" },
+					{ label: EDITABLE_TEXT, description: "Insert the raw text into the editor, uncollapsed" },
 				],
 				{
 					helpText: `${actionKey("tui.select.cancel", this.ctx.keybindings)} to paste inline`,
@@ -3033,6 +3037,9 @@ export class InputController {
 				break;
 			case INLINE:
 				this.ctx.composer.insertTextAttachment(text);
+				break;
+			case EDITABLE_TEXT:
+				this.ctx.composer.insertText(text);
 				break;
 			default:
 				// Esc / cancel: keep the original behavior — stage as a text-attachment chip.
