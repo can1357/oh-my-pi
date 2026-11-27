@@ -14,6 +14,7 @@ import { fitOutputTokensToContextWindow, type StreamFn, Tokenizer } from "@oh-my
 import { type Model, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
 import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
 import { serverSideFallbackModels } from "@oh-my-pi/pi-catalog/compat/server-side-fallback";
+import { logger } from "@oh-my-pi/pi-utils";
 import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { Settings } from "../config/settings";
 import { type AnthropicSlowModeLanes, anthropicSlowModeLanes } from "./anthropic-slow-mode";
@@ -23,6 +24,7 @@ import {
 	cfgModelLoopGuardEnabled,
 	cfgOmitThinking,
 	cfgProvidersAnthropicServerSideFallback,
+	cfgProvidersAnthropicServerSideFallbackModels,
 	cfgProvidersAnthropicSlowMode,
 	cfgProvidersAntigravityEndpoint,
 	cfgProvidersCacheRetention,
@@ -64,6 +66,35 @@ function timeoutSecondsToMs(value: number): number | undefined {
 	return Math.max(1, Math.trunc(value * 1000));
 }
 
+/** Anthropic `MessageCreateParams.fallbacks` accepts at most three entries. */
+const ANTHROPIC_MAX_FALLBACK_MODELS = 3;
+
+/**
+ * The wire chain from `providers.anthropic.serverSideFallbackModels`. The
+ * registry checks that the value is a list but not what it holds, so entries
+ * a hand edit left that are not model ids are dropped instead of throwing.
+ * The API answers more than three entries with a 400 instead of falling back,
+ * so the chain is capped. Either drop is logged once per configured list, not
+ * on every request.
+ */
+function configuredServerSideFallbackChain(configured: readonly unknown[], warned: { list?: string }): string[] {
+	const ids = configured.flatMap(id => (typeof id === "string" && id.trim() ? [id.trim()] : []));
+	const chain = ids.slice(0, ANTHROPIC_MAX_FALLBACK_MODELS);
+	if (chain.length < configured.length) {
+		const list = JSON.stringify(configured);
+		if (warned.list !== list) {
+			warned.list = list;
+			logger.warn("providers.anthropic.serverSideFallbackModels: dropping invalid or over-limit entries", {
+				configured: configured.length,
+				invalid: configured.length - ids.length,
+				kept: chain.length,
+				limit: ANTHROPIC_MAX_FALLBACK_MODELS,
+			});
+		}
+	}
+	return chain;
+}
+
 /** Session wiring for Anthropic subscription wrap-up and slow mode (`providers.anthropic.slowMode`), and server-side fallback opt-out. */
 export interface SettingsStreamSlowModeContext {
 	/** Defaults to the process-wide lane registry. */
@@ -97,6 +128,8 @@ export function createSettingsAwareStreamFn(
 	// per-message counts are reused across requests: its prices (images,
 	// replayed thinking and reasoning) belong to that model and request state.
 	const tokenizers = new Map<string, Tokenizer>();
+	// The configured fallback list last warned about, so the warning does not repeat per request.
+	const fallbackChainWarning: { list?: string } = {};
 	return (model, context, streamOptions) => {
 		const openrouterRoutingPreset = cfgProvidersOpenrouterVariant.get(settings);
 		const openrouterVariant =
@@ -116,13 +149,26 @@ export function createSettingsAwareStreamFn(
 		const streamIdleTimeoutMs = timeoutSecondsToMs(cfgProvidersStreamIdleTimeoutSeconds.get(settings));
 		// Server-side fallback (opt-in): when the user enables it, inject the
 		// catalog-owned `fallbacks` chain (`server-side-fallback-models` axis,
-		// authored for Fable/Mythos on first-party Anthropic). The provider
-		// layer picks it up, sends the beta header, and honors the response
-		// signals. Models without a rule-assigned chain are untouched.
-		const serverSideFallbackChain =
-			streamOptions?.fallbacks === undefined && cfgProvidersAnthropicServerSideFallback.get(settings)
+		// authored for Fable/Mythos on first-party Anthropic), or the configured
+		// chain in its place. The provider layer picks it up, sends the beta
+		// header, and honors the response signals. Models without a rule-assigned
+		// chain are untouched, and an empty configured chain follows the catalog.
+		const serverSideFallbackDisabled = slowModeContext?.disableServerSideFallback || cfgOffline.get(settings);
+		const catalogFallbackChain =
+			streamOptions?.fallbacks === undefined &&
+			!serverSideFallbackDisabled &&
+			cfgProvidersAnthropicServerSideFallback.get(settings)
 				? serverSideFallbackModels(model)
 				: [];
+		const configuredFallbackChain =
+			catalogFallbackChain.length > 0
+				? configuredServerSideFallbackChain(
+						cfgProvidersAnthropicServerSideFallbackModels.get(settings),
+						fallbackChainWarning,
+					)
+				: [];
+		const serverSideFallbackChain =
+			configuredFallbackChain.length > 0 ? configuredFallbackChain : catalogFallbackChain;
 		const fallbacks =
 			streamOptions?.fallbacks ??
 			(serverSideFallbackChain.length > 0 ? serverSideFallbackChain.map(id => ({ model: id })) : undefined);
@@ -192,9 +238,7 @@ export function createSettingsAwareStreamFn(
 			...(storeResponses !== undefined ? { storeResponses } : {}),
 			// A per-call worker never switches models: no fallback chain, including a
 			// caller-supplied one, and Factory drops its own refusal chain.
-			...(slowModeContext?.disableServerSideFallback || cfgOffline.get(settings)
-				? { fallbacks: undefined, disableServerSideFallback: true }
-				: {}),
+			...(serverSideFallbackDisabled ? { fallbacks: undefined, disableServerSideFallback: true } : {}),
 			...(codexAccessPrograms !== undefined ? { codexAccessPrograms } : {}),
 			...(slowModeHooks !== undefined ? { anthropicSlowMode: slowModeHooks } : {}),
 		};

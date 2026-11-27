@@ -19,6 +19,7 @@
 - Included `tool_approvals` in `omp gc` session statistics and purge handling.
 - Added `local/parakeet-tdt-0.6b-v2`, the most accurate local English dictation model.
 - Added Codex's 17 new live voices to `live.voice`: `aube`, `bubbie`, `haetsal`, `hanul`, `himari`, `leher`, `marin`, `miko`, `neer`, `porto`, `rindo`, `rio`, `rivage`, `selva`, `sonna`, `tinta`, and `viola`.
+- Added `providers.anthropic.serverSideFallbackModels` to choose the Anthropic server-side fallback chain, e.g. Fable 5 falling back to Opus 5 and then Opus 4.8, in place of the catalog's single Opus 5 hop; unset or empty keeps the catalog chain, and the API's limit of three entries applies ([#18346](https://github.com/can1357/oh-my-pi/pull/18346) by [@sjawhar](https://github.com/sjawhar))
 
 ### Changed
 
