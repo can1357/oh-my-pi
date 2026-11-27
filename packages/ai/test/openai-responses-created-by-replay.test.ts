@@ -58,26 +58,10 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-	// Last in, first out: a later override is undone before the one it saw.
-	for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+	for (const cleanup of cleanups.splice(0)) await cleanup();
 	global.WebSocket = originalWebSocket;
 	vi.restoreAllMocks();
 });
-
-/** The process-wide profile selection that `setAgentDir` and `setProfile` rewrite. */
-const PROFILE_ENV_KEYS = ["PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"] as const;
-
-/** Snapshot the profile env; the returned function puts it back and rebuilds the profile and dirs from it. */
-function saveProfileState(): () => void {
-	const saved = PROFILE_ENV_KEYS.map(key => [key, process.env[key]] as const);
-	return () => {
-		for (const [key, value] of saved) {
-			if (value === undefined) delete process.env[key];
-			else process.env[key] = value;
-		}
-		piUtils.__resetDirsFromEnvForTests();
-	};
-}
 
 function withCreatedBy<T extends Record<string, unknown>>(item: T, createdBy: CreatedBy): T {
 	return createdBy === undefined ? item : { ...item, created_by: createdBy };
@@ -287,13 +271,6 @@ class CodexStubSocket {
 }
 
 function codexWebSocketRoute(createdBy: CreatedBy): ChainRoute {
-	const restoreProfileState = saveProfileState();
-	const tempDir = piUtils.TempDir.createSync("@pi-created-by-replay-");
-	piUtils.setAgentDir(tempDir.path());
-	cleanups.push(() => {
-		restoreProfileState();
-		return tempDir.remove();
-	});
 	const requests: Array<Record<string, unknown>> = [];
 	global.WebSocket = class extends CodexStubSocket {
 		constructor(url: string) {
