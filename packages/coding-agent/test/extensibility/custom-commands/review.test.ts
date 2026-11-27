@@ -42,6 +42,8 @@ const SAMPLE_PR_DIFF = `diff --git a/src/pr.ts b/src/pr.ts
 +export const pr = true;
 `;
 
+const supportsReftable = (await $`git init -h`.quiet().nothrow().text()).includes("--ref-format");
+
 interface SelectCall {
 	title: string;
 	options: string[];
@@ -1095,7 +1097,7 @@ describe("ReviewCommand", () => {
 			await fs.writeFile(path.join(dir, "a.txt"), "one\n");
 			await repository.stageFiles(["a.txt"]);
 			const baseCommit = await repository.commitCreate("init", {});
-			await $`git tag -a v1 -m v1`.cwd(dir).quiet();
+			await vcs.tagCreate(dir, "v1", "v1");
 
 			await repository.checkoutNewBranch("feature");
 			await fs.writeFile(path.join(dir, "a.txt"), "two\n");
@@ -1107,6 +1109,30 @@ describe("ReviewCommand", () => {
 			expect(target.rangeBase).toBe(baseCommit);
 			expect(target.rangeHead).toBe(headCommit);
 			expect(target.rawDiff).toContain("+two");
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	it.skipIf(!supportsReftable)("peels annotated tags in reftable repositories", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-reftable-tag-"));
+		try {
+			await $`git init -q --ref-format=reftable --initial-branch=main`.cwd(dir).quiet();
+			const repository = vcs.requireGit(dir);
+			await $`git config user.email test@example.com`.cwd(dir).quiet();
+			await $`git config user.name Test`.cwd(dir).quiet();
+			await fs.writeFile(path.join(dir, "a.txt"), "one\n");
+			await $`git add a.txt`.cwd(dir).quiet();
+			await $`git commit -qm init`.cwd(dir).quiet();
+			const baseCommit = await repository.resolveRef("HEAD");
+			if (!baseCommit) throw new Error("reftable fixture must have a base commit");
+			await vcs.tagCreate(dir, "v1", "v1");
+
+			const tagObject = await repository.resolveRef("refs/tags/v1");
+			if (!tagObject) throw new Error("reftable fixture must have an annotated tag");
+			const details = await repository.commitDetails(`${tagObject}^{commit}`);
+
+			expect(details.sha).toBe(baseCommit);
 		} finally {
 			await removeWithRetries(dir);
 		}

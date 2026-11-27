@@ -139,8 +139,8 @@ export async function resolveBaseBranchTarget(
 	if (!baseObject) throw new Error(`Cannot resolve base ref \`${base}\``);
 	if (!headObject) throw new Error(`Cannot resolve head ref \`${head}\``);
 	const [baseCommit, headCommit] = await Promise.all([
-		repository.commitDetails(baseObject),
-		repository.commitDetails(headObject),
+		repository.commitDetails(`${baseObject}^{commit}`),
+		repository.commitDetails(`${headObject}^{commit}`),
 	]);
 	const baseSha = baseCommit.sha;
 	const headSha = headCommit.sha;

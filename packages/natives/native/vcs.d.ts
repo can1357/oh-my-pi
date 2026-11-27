@@ -75,6 +75,9 @@ export declare function clone(
 	signal?: AbortSignal,
 ): Promise<void>;
 
+/** Create an annotated tag in a Git checkout. */
+export declare function tagCreate(dir: string, name: string, message: string, ref?: string): Promise<void>;
+
 /** Sever a copied working tree from shared git metadata. */
 export declare function detachGitDir(
 	worktreeRoot: string,
