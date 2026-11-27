@@ -264,6 +264,23 @@ function formatSalvageSnippet(text: string, maxLength = 500): string {
 const STREAMING_THINKING: AgentStreaming = { kind: "thinking" };
 const STREAMING_TEXT: AgentStreaming = { kind: "text" };
 
+/** Whether two line lists hold the same lines in order. */
+function sameLines(a: readonly string[], b: readonly string[]): boolean {
+	if (a.length !== b.length) return false;
+	for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+	return true;
+}
+
+/** Whether two flat records hold the same keys with identical values. */
+function sameFields(a: object, b: object): boolean {
+	const aKeys = Object.keys(a);
+	if (aKeys.length !== Object.keys(b).length) return false;
+	for (const key of aKeys) {
+		if (!Object.hasOwn(b, key) || a[key as keyof typeof a] !== b[key as keyof typeof b]) return false;
+	}
+	return true;
+}
+
 /** Events the run monitor tracks: the core loop events plus the session's `agent_pause`. */
 type MonitoredEvent = AgentEvent | Extract<AgentSessionEvent, { type: "agent_pause" }>;
 
@@ -1760,8 +1777,17 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		return resolveSignalAbortReason();
 	};
 	const PROGRESS_COALESCE_MS = 150;
+	// A snapshot whose only change is the clock still goes out this often, so
+	// displays that draw elapsed time straight from `durationMs` keep advancing.
+	const PROGRESS_HEARTBEAT_MS = 5_000;
 	let lastProgressEmitMs = 0;
+	// When a snapshot was last built, emitted or dropped: coalescing counts from here, so a dropped
+	// clock-only snapshot still holds the next one back a full window instead of re-running every event.
+	let lastProgressCheckMs = 0;
 	let progressTimeoutId: NodeJS.Timeout | null = null;
+	// Shallow copy of the last emitted progress: a snapshot that differs from it only in `durationMs` is dropped.
+	// Sound because every progress field is replaced, never mutated in place, and only when its value changes.
+	let lastEmittedProgress: AgentProgress | undefined;
 
 	// Recompute progress.recentOutput from the capped tail. Deferred: text_delta
 	// appends only extend the tail and mark it dirty; the (up to 8KB) split/filter
@@ -1778,12 +1804,14 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				? recentOutputTail.slice(-RECENT_OUTPUT_TAIL_BYTES)
 				: recentOutputTail;
 		const filtered = tail.split("\n").filter(line => line.trim());
-		progress.recentOutput = filtered.slice(-8).reverse();
+		const next = filtered.slice(-8).reverse();
+		// Keep the current array when the lines are unchanged, so its identity marks a change.
+		if (!sameLines(progress.recentOutput, next)) progress.recentOutput = next;
 	};
 
 	/**
-	 * The tool call the model is writing, by its newest stream snapshot. Its preview is taken at the
-	 * emit boundary, as recentOutput is: a large edit's patch parses at most once per emit, not per delta.
+	 * The tool call the model is writing, by its newest stream snapshot. Its preview is taken at the emit
+	 * boundary, as recentOutput is: a large edit's patch parses at most once per coalescing window, not per delta.
 	 */
 	let streamingCall: ToolCall | undefined;
 	let streamingCallDirty = false;
@@ -1792,13 +1820,15 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		streamingCallDirty = false;
 		const { intent, strippedArgs } = extractIntent(isRecord(streamingCall.arguments) ? streamingCall.arguments : {});
 		const preview = previewToolArgs(streamingCall.name, strippedArgs);
-		progress.streaming = {
+		const next: AgentStreaming = {
 			kind: "call",
 			tool: streamingCall.name,
 			args: preview?.value,
 			argsKey: preview?.key,
 			intent,
 		};
+		// Keep the current preview when it is unchanged, so its identity marks a change.
+		if (!progress.streaming || !sameFields(progress.streaming, next)) progress.streaming = next;
 	};
 	/** What the model now produces, other than a call it is writing; undefined once nothing streams. */
 	const setStreaming = (state: AgentStreaming | undefined) => {
@@ -1816,14 +1846,38 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		return extractToolArgsPreview(args, toolName, editMode);
 	};
 
-	const emitProgressNow = () => {
+	/**
+	 * Whether progress differs from the last emitted snapshot in anything but `durationMs`.
+	 * Fields compare by identity: every update replaces a field's value, and the emit-time
+	 * rebuilds of `recentOutput` and `streaming` keep the current value when it is unchanged.
+	 */
+	const progressChangedSinceEmit = (): boolean => {
+		const last = lastEmittedProgress;
+		if (!last) return true;
+		let keys = 0;
+		for (const key in progress) {
+			keys++;
+			if (key !== "durationMs" && progress[key as keyof AgentProgress] !== last[key as keyof AgentProgress])
+				return true;
+		}
+		return keys !== Object.keys(last).length;
+	};
+
+	/** Publishes progress; unless forced, skips a snapshot whose only change is the clock until the heartbeat is due. */
+	const emitProgressNow = (force = false) => {
 		refreshRecentOutput();
 		refreshStreamingCall();
-		progress.durationMs = Date.now() - startTime;
-		onProgress?.({ ...progress });
+		const now = Date.now();
+		lastProgressCheckMs = now;
+		// The registry's liveness follows the agent's work, not the published cadence: a reasoning
+		// agent whose snapshots are dropped is still active now.
 		const activityGist =
 			progress.lastIntent ?? (progress.currentTool ? `running ${progress.currentTool}` : undefined);
 		if (activityGist && activeSession) AgentRegistry.global().setActivity(id, activityGist, activeSession);
+		if (!force && now - lastProgressEmitMs < PROGRESS_HEARTBEAT_MS && !progressChangedSinceEmit()) return;
+		progress.durationMs = now - startTime;
+		lastEmittedProgress = { ...progress };
+		onProgress?.({ ...progress });
 		const progressPayload = {
 			index,
 			agent: agent.name,
@@ -1837,6 +1891,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		};
 		emitSubagentFrame(args.eventBus, args.subagentEventBus, TASK_SUBAGENT_PROGRESS_CHANNEL, progressPayload);
 		lastProgressEmitMs = Date.now();
+		lastProgressCheckMs = lastProgressEmitMs;
 	};
 
 	const scheduleProgress = (flush = false) => {
@@ -1845,12 +1900,12 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				clearTimeout(progressTimeoutId);
 				progressTimeoutId = null;
 			}
-			emitProgressNow();
+			emitProgressNow(true);
 			return;
 		}
 		const now = Date.now();
-		const elapsed = now - lastProgressEmitMs;
-		if (lastProgressEmitMs === 0 || elapsed >= PROGRESS_COALESCE_MS) {
+		const elapsed = now - lastProgressCheckMs;
+		if (lastProgressCheckMs === 0 || elapsed >= PROGRESS_COALESCE_MS) {
 			if (progressTimeoutId) {
 				clearTimeout(progressTimeoutId);
 				progressTimeoutId = null;
@@ -1944,7 +1999,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	const resetRecentOutput = () => {
 		recentOutputTail = "";
 		recentOutputDirty = false;
-		progress.recentOutput = [];
+		if (progress.recentOutput.length > 0) progress.recentOutput = [];
 	};
 
 	const emitSubagentEvent = (event: AgentSessionEvent) => {
@@ -1953,10 +2008,8 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	};
 
 	const recordExtractedToolData = (toolName: string, data: unknown): void => {
-		progress.extractedToolData = progress.extractedToolData || {};
-		const existing = progress.extractedToolData[toolName] || [];
-		existing.push(data);
-		progress.extractedToolData[toolName] = existing;
+		const extracted = progress.extractedToolData;
+		progress.extractedToolData = { ...extracted, [toolName]: [...(extracted?.[toolName] ?? []), data] };
 		if (toolName === "yield") {
 			const item = isRecord(data) ? data : undefined;
 			const incremental = Array.isArray(item?.type) && item.type.length > 0;
@@ -2115,7 +2168,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				activeTools.delete(event.toolCallId);
 				if (finished) {
 					const changed = !event.isError && isEditTool(event.toolName) ? editResultStats(event.result) : undefined;
-					progress.recentTools.unshift({
+					const entry = {
 						tool: finished.tool,
 						args: finished.args ?? "",
 						argsKey: finished.argsKey,
@@ -2123,11 +2176,9 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 						isError: event.isError,
 						...changed,
 						endMs: now,
-					});
+					};
 					// Keep only last 5
-					if (progress.recentTools.length > 5) {
-						progress.recentTools.pop();
-					}
+					progress.recentTools = [entry, ...progress.recentTools].slice(0, 5);
 				}
 				if (args.onToolResult) {
 					const content: unknown = isRecord(event.result) ? event.result.content : undefined;
