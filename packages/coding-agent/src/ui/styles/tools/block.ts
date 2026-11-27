@@ -172,7 +172,7 @@ function headAndTail(block: Block, rows: number): Block | undefined {
 	if (tail.length === 0) return undefined;
 	tail.reverse();
 	// Where each source row lands; -1 when dropped.
-	const to = new Array<number>(total).fill(-1);
+	const to = new Int32Array(total).fill(-1);
 	for (let source = 0; source < head; source++) to[source] = source;
 	tail.forEach((source, at) => {
 		to[source] = head + at;

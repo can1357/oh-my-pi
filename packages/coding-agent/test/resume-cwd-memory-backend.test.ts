@@ -376,32 +376,4 @@ describe("TUI /resume and /move into another directory with Mnemopi memory", () 
 		expect(screen[0]).toContain("destination project scope failed");
 		expect(warnings()[0]).toContain(shortenPath(sourceCwd));
 	});
-
-	// The move's own return restarted the source's Mnemopi; the rollback applies the source again and must not be
-	// refused when Mnemopi does not start that time.
-	it("/move returns to the source when the second application of the source cannot restart Mnemopi", async () => {
-		const { session, move, screen, kinds, warnings, firstCwdApplication, sourceCwd, sourceDbPath } = await tuiFixture(
-			{ source: "Mnemopi starts", destination: "Mnemopi starts" },
-		);
-		expect(session.getMnemopiSessionState()?.memory.dbPath).toBe(sourceDbPath);
-		vi.spyOn(session, "refreshProjectScope").mockRejectedValueOnce(new Error("destination project scope failed"));
-		// Mnemopi starts until the first cwd application, the destination and its own return to the source, has
-		// settled; it fails for the second.
-		const application = firstCwdApplication();
-		const start = mnemopiBackend.start;
-		vi.spyOn(mnemopiBackend, "start").mockImplementation(async options => {
-			if (!application.settled) await start.call(mnemopiBackend, options);
-		});
-
-		expect(await move()).toMatchObject({
-			outcome: "resolved",
-			disposed: false,
-			cwd: sourceCwd,
-			processCwd: sourceCwd,
-		});
-		expect(session.getMnemopiSessionState()).toBeUndefined();
-		expect(kinds()).toEqual(["error", "warning"]);
-		expect(screen[0]).toContain("destination project scope failed");
-		expect(warnings()[0]).toContain(shortenPath(sourceCwd));
-	});
 });

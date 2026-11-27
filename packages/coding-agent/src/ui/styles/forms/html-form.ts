@@ -530,27 +530,15 @@ function openFieldLines(
 			if (room <= 0) lines.push(clip(head, width));
 			else {
 				let { text, cursor } = answer.text;
+				let selection = model.vim({ kind: "text", field: index })?.selection();
 				if (field.type === "password") {
-					// Count the mask and its caret in the same units, not UTF-16 offsets.
-					let offset = 0;
-					let bullets = 0;
-					let caret = 0;
-					for (const point of text) {
-						if (offset < cursor) caret++;
-						offset += point.length;
-						bullets++;
-					}
-					text = "•".repeat(bullets);
-					cursor = caret;
+					// One bullet per code point: map UTF-16 offsets onto the mask.
+					const masked = (offset: number) => Array.from(text.slice(0, offset)).length;
+					cursor = masked(cursor);
+					if (selection) selection = { from: masked(selection.from), to: masked(selection.to) };
+					text = "•".repeat(Array.from(text).length);
 				}
-				const line = caretLine(
-					theme,
-					text,
-					cursor,
-					field.placeholder || undefined,
-					model.vim({ kind: "text", field: index })?.selection(),
-					room,
-				);
+				const line = caretLine(theme, text, cursor, field.placeholder || undefined, selection, room);
 				lines.push(head + line);
 			}
 		}

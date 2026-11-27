@@ -83,7 +83,11 @@ describe("buildUsageReportText", () => {
 			],
 		};
 		const text = await buildUsageReportText({
-			session: { model: undefined, fetchUsageReports: async () => [report, secondReport] },
+			session: {
+				model: undefined,
+				fetchUsageReports: async () => [report, secondReport],
+				getSessionStats: () => ({}),
+			},
 		} as never);
 		expect(text).toContain("account 1: $0.00 left");
 		expect(text).toContain("account 1: 0.032 credits left");
