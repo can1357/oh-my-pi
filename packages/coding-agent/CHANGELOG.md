@@ -222,6 +222,7 @@
 - Fixed WebP tool results showing a text placeholder instead of the image, and enabled WebP and GIF image embeds in the terminal ([#20521](https://github.com/can1357/oh-my-pi/pull/20521) by [@shgew](https://github.com/shgew))
 - Extension transcript presenters' compact tool-call and read rows draw their `TspSpan` theme styles again, and consecutive compact tool, read, `!`/`$` run and message blocks pack without blank rows between them ([#20512](https://github.com/can1357/oh-my-pi/issues/20512)).
 - Restored `tui.imeSafeCursor`, which moves the prompt's bottom border to its own row so macOS IME preedit cannot displace it ([#20503](https://github.com/can1357/oh-my-pi/pull/20503) by [@SenCha930511](https://github.com/SenCha930511))
+- A tool card taller than the room left above the editor (a Task call with a long shared context) now shows its title and newest rows instead of collapsing to a two-row `╭─ Task · running` stub over blank space ([#20642](https://github.com/can1357/oh-my-pi/pull/20642) by [@Petyok](https://github.com/Petyok)).
 - Re-enabling advisors reloads `WATCHDOG.yml` and its imported rules from disk ([#20541](https://github.com/can1357/oh-my-pi/issues/20541)).
 - Renaming a session from `/resume` accepts keyboard input again and returns focus to the picker after saving or cancelling ([#20548](https://github.com/can1357/oh-my-pi/issues/20548)).
 - Custom composer shapes can add blank rows above the input and keep the caret on the text row ([#20532](https://github.com/can1357/oh-my-pi/issues/20532)).

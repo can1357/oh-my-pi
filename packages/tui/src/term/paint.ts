@@ -60,6 +60,12 @@ export interface Block {
 	 * children's.
 	 */
 	readonly covering?: number;
+	/**
+	 * Leading rows that name the block (a title that may wrap): a container
+	 * that shows only part of the block keeps them. Containers add their
+	 * offset.
+	 */
+	readonly heading?: number;
 }
 
 /** Every observable part of the block counts, including pointer routing when no cell changed. */
@@ -69,6 +75,7 @@ function sameBlock(a: Block, b: Block): boolean {
 		a.rows.length !== b.rows.length ||
 		a.stable !== b.stable ||
 		a.covering !== b.covering ||
+		a.heading !== b.heading ||
 		a.cursor?.row !== b.cursor?.row ||
 		a.cursor?.col !== b.cursor?.col
 	)
