@@ -456,6 +456,28 @@ describe("InputDecoder: win32-input-mode records", () => {
 		expect(events).toEqual([{ type: "paste", paste: { text: "a\rb" } }]);
 	});
 
+	it("decodes records inside a literal bracketed paste body", () => {
+		const { decoder, events } = win32();
+		decoder.process(`\x1b[200~${relay("D:\\")}\x1b[201~`);
+		expect(events).toEqual([{ type: "paste", paste: { text: "D:\\" } }]);
+	});
+
+	it("decodes CJK and surrogate-pair records inside a bracketed paste body", () => {
+		const { decoder, events } = win32();
+		// relay() walks code points, so hand-feed the surrogate pair unit by unit.
+		const astral = "𝕏";
+		const units = Array.from({ length: astral.length }, (_, i) => record(0, 0, astral.charCodeAt(i), 1, 0)).join("");
+		decoder.process(`\x1b[200~${relay("中文")}${units}\x1b[201~`);
+		expect(events).toEqual([{ type: "paste", paste: { text: "中文𝕏" } }]);
+	});
+
+	it("leaves a paste body verbatim when win32-input-mode is off", () => {
+		const { decoder, events } = setup();
+		const body = record(0, 0, 97, 1, 0);
+		decoder.process(`\x1b[200~${body}\x1b[201~`);
+		expect(events).toEqual([{ type: "paste", paste: { text: body } }]);
+	});
+
 	it("keeps Win32 Backspace before direct text in the same read", () => {
 		const { decoder, keys } = win32();
 		const backspace = record(8, 14, 8, 1, 0) + record(8, 14, 8, 0, 0);

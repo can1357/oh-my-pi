@@ -52,6 +52,18 @@ const NAV_KEYS: Readonly<Record<number, { readonly final?: string; readonly tild
 	123: { tilde: 24 },
 };
 
+/** Matches one win32-input-mode record within a larger string. */
+const RECORD_GLOBAL = /\x1b\[\d+;\d+;\d+;\d+;\d+;\d+_/g;
+
+/**
+ * Decode every win32-input-mode record in a paste body into the text it stands
+ * for: a console host can re-encode pasted characters as key records inside
+ * the bracketed paste, and undecoded records would reach the composer verbatim.
+ */
+export function decodeWin32PasteBody(text: string, records: Win32RecordDecoder): string {
+	return text.replace(RECORD_GLOBAL, match => records.decode(match));
+}
+
 /** Whether `seq` is one win32-input-mode record. */
 export function isWin32Record(seq: string): boolean {
 	return RECORD.test(seq);

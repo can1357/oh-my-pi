@@ -9,7 +9,7 @@ import { decodeMouse } from "./mouse";
 import { parseReply, type TerminalReply } from "./replies";
 import { InputTokenizer, type TokenizerOptions, type TokenSink } from "./tokenizer";
 import { parseTspMessage } from "./tsp";
-import { isWin32Record, Win32RecordDecoder } from "./win32";
+import { decodeWin32PasteBody, isWin32Record, Win32RecordDecoder } from "./win32";
 
 export interface DecoderSink {
 	input(event: InputEvent): void;
@@ -29,6 +29,7 @@ export class InputDecoder {
 	readonly #main: InputTokenizer;
 	readonly #relay: InputTokenizer;
 	readonly #records = new Win32RecordDecoder();
+	readonly #pasteRecords = new Win32RecordDecoder();
 	readonly #backspaceIsCtrl: boolean;
 	#kitty = false;
 	#processing = false;
@@ -42,7 +43,11 @@ export class InputDecoder {
 		this.#sink = sink;
 		this.#backspaceIsCtrl = options.backspaceIsCtrl ?? false;
 		const paste = (text: string): void => {
-			this.#sink.input({ type: "paste", paste: { text } });
+			// win32-input-mode: the console host can re-encode pasted characters as
+			// key records inside the bracketed paste; those must not reach the
+			// composer verbatim.
+			const body = this.#main.win32 ? decodeWin32PasteBody(text, this.#pasteRecords) : text;
+			this.#sink.input({ type: "paste", paste: { text: body } });
 			this.#afterPaste = this.#reading;
 		};
 		const tokens: TokenSink = {
