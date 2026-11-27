@@ -410,7 +410,7 @@ function printLinkPreview(pluginPath: string, json?: boolean): void {
 async function handleInstall(
 	manager: PluginManager,
 	packages: string[],
-	flags: { json?: boolean; force?: boolean; dryRun?: boolean; scope?: "user" | "project" },
+	flags: { json?: boolean; force?: boolean; dryRun?: boolean; local?: boolean; scope?: "user" | "project" },
 ): Promise<void> {
 	if (packages.length === 0) {
 		console.error(chalk.red(`Usage: ${APP_NAME} plugin install <source>[features] ...`));
@@ -426,6 +426,30 @@ async function handleInstall(
 	// Build known marketplace set for classification
 	const mktMgr = await makeMarketplaceManager();
 	const knownMarketplaces = new Set((await mktMgr.listMarketplaces()).map(m => m.name));
+
+	// Validate every spec before mutating anything: npm and local-path installs
+	// always land in the user plugin registry, so a project destination cannot be honored.
+	if (flags.local) {
+		console.error(
+			chalk.red(
+				`${currentTheme().symbols.symbol("status.error")} --local is not supported for install. Use --scope project with a marketplace install (name@marketplace).`,
+			),
+		);
+		process.exit(1);
+	}
+	if (flags.scope === "project") {
+		const unsupported = packages.filter(
+			spec => classifyInstallTarget(spec, knownMarketplaces).type !== "marketplace",
+		);
+		if (unsupported.length > 0) {
+			console.error(
+				chalk.red(
+					`${currentTheme().symbols.symbol("status.error")} --scope project is only supported for marketplace installs (name@marketplace). Unsupported: ${unsupported.join(", ")}`,
+				),
+			);
+			process.exit(1);
+		}
+	}
 
 	for (const spec of packages) {
 		const target = classifyInstallTarget(spec, knownMarketplaces);
@@ -474,13 +498,6 @@ async function handleInstall(
 			// Local paths route to link(): symlink the directory into the plugins
 			// node_modules tree so source edits show up without a reinstall. Matches
 			// `omp plugin link <path>` so users can use either verb interchangeably.
-			if (flags.scope) {
-				console.error(
-					chalk.yellow(
-						`Warning: --scope is only supported for marketplace installs (name@marketplace). Ignoring for ${spec}.`,
-					),
-				);
-			}
 			if (flags.force) {
 				console.error(
 					chalk.yellow(
@@ -511,15 +528,6 @@ async function handleInstall(
 				process.exit(1);
 			}
 			continue;
-		}
-
-		// --scope only applies to marketplace installs; warn when it would be silently no-op'd for npm.
-		if (flags.scope) {
-			console.error(
-				chalk.yellow(
-					`Warning: --scope is only supported for marketplace installs (name@marketplace). Ignoring for ${spec}.`,
-				),
-			);
 		}
 
 		// npm path

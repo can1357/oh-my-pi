@@ -212,6 +212,7 @@
 - Fixed split commits on Windows aborting with "Split commit plan missing staged files" after changelog entries were applied ([#17446](https://github.com/can1357/oh-my-pi/issues/17446))
 - Fixed Gemini web search ignoring `NODE_EXTRA_CA_CERTS` set in the agent `.env` ([#17811](https://github.com/can1357/oh-my-pi/issues/17811))
 - Fixed `omp completions` output repeating its first 8192 bytes when stdout is a pipe ([#17625](https://github.com/can1357/oh-my-pi/issues/17625))
+- `omp plugin install` now rejects `--local`, and `--scope project` for npm or local-path packages, before installing anything instead of silently writing to the user plugin registry ([#18112](https://github.com/can1357/oh-my-pi/issues/18112))
 
 ### Removed
 
