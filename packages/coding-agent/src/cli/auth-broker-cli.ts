@@ -34,6 +34,7 @@ import {
 import { AuthBrokerClient, DEFAULT_AUTH_BROKER_BIND, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
 import { refreshOAuthToken } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
+import { providerDeviceBound } from "@oh-my-pi/pi-catalog/compat/auth";
 import { $which, APP_NAME, getAgentDbPath, getConfigRootDir, logger, postmortem, VERSION } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { setTransports as setLoggerTransports } from "@oh-my-pi/pi-utils/logger";
@@ -335,7 +336,6 @@ async function runList(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 const CLIPROXY_TYPE_TO_PROVIDER: Record<string, string> = {
 	claude: "anthropic",
 	codex: "openai-codex",
-	antigravity: "google-antigravity",
 };
 
 interface CliProxyCredentialJson {
@@ -631,6 +631,15 @@ async function runMigrate(flags: AuthBrokerCommandArgs["flags"]): Promise<void> 
 				continue;
 			}
 			const identity = credentialIdentity(row.provider, row.credential);
+			if (providerDeviceBound(row.provider)) {
+				skipped.push({
+					source: "local-sqlite",
+					provider: row.provider,
+					identity,
+					reason: "login is bound to this machine's key and never leaves it",
+				});
+				continue;
+			}
 			if (row.credential.type === "oauth" && flags.includeOauth !== true) {
 				skipped.push({
 					source: "local-sqlite",

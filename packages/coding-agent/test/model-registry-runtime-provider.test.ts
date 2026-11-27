@@ -1695,4 +1695,57 @@ describe("ModelRegistry runtime provider registration", () => {
 		expect(configured.find(providerName, "glm-5.3")?.baseUrl).toBe("https://model-level.example/v1");
 		expect(configured.getProviderBaseUrl(providerName)).toBe("https://gateway.internal");
 	});
+	describe("auth-gated discovery and the model cache", () => {
+		const providerName = "gated-runtime-provider";
+		const fakeKey = "gated-fake-credential-abc123";
+		const gatedModel = { ...baseModel, id: "gated-model", name: "Gated Model" };
+
+		test("provider-scoped online refresh after login re-runs discovery past a fresh empty cache", async () => {
+			registry.registerProvider(
+				providerName,
+				{
+					baseUrl: "https://runtime.example.com/v1",
+					api: "openai-completions",
+					authHeader: true,
+					// Model appears only once the credential exists.
+					fetchDynamicModels: async (apiKey?: string) => (apiKey ? [gatedModel] : []),
+				},
+				"ext://runtime",
+			);
+
+			// Refresh before login: stores an authoritative empty runtime-provider cache
+			// entry with the 24h TTL (fetchDynamicModels returned [] unauthenticated).
+			await registry.refreshRuntimeProviders();
+			expect(registry.find(providerName, "gated-model")).toBeUndefined();
+
+			await authStorage.credentials.set(providerName, { type: "api_key", key: fakeKey });
+
+			// /login, /logout, sign-in, and RPC login run a provider-scoped online
+			// refresh. It must bypass the fresh authoritative empty row and re-invoke
+			// fetchDynamicModels with the new credential.
+			await registry.refreshProvider(providerName, "online");
+			expect(registry.find(providerName, "gated-model")).toBeDefined();
+		});
+
+		test("model cache does not serialize provider credentials", async () => {
+			// Provider config carries a literal credential + authHeader, mirroring an
+			// extension gateway. The dynamic factory itself never returns a credential.
+			registry.registerProvider(
+				providerName,
+				{
+					baseUrl: "https://runtime.example.com/v1",
+					api: "openai-completions",
+					apiKey: fakeKey,
+					authHeader: true,
+					fetchDynamicModels: async () => [gatedModel],
+				},
+				"ext://runtime",
+			);
+			await registry.refreshProvider(providerName, "online");
+
+			// The model cache is a plaintext SQLite file; it must not carry the API key.
+			const raw = fs.readFileSync(path.join(tempDir, "models.db"));
+			expect(raw.includes(fakeKey)).toBe(false);
+		});
+	});
 });

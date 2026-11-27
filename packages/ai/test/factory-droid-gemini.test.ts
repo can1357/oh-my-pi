@@ -77,7 +77,7 @@ function geminiToolChunks(): string[] {
 }
 
 describe("Factory Droid gemini wire — history replay", () => {
-	it.each(["google-generative-ai", "google-vertex", "google-gemini-cli"] as const)(
+	it.each(["google-generative-ai", "google-vertex"] as const)(
 		"drops unsigned thinking and preserves signed %s history",
 		async api => {
 			const { result, captured, contents } = await run({
@@ -116,8 +116,8 @@ describe("Factory Droid gemini wire — history replay", () => {
 			messages: [
 				{ role: "user", content: "hi", timestamp: 1 },
 				assistantMessage([{ type: "text", text: "other Gemini", textSignature: "other-model-sig" }], {
-					provider: "google-antigravity",
-					api: "google-gemini-cli",
+					provider: "google-vertex",
+					api: "google-vertex",
 					model: "gemini-3.8-flash",
 				}),
 				{ role: "user", content: "next", timestamp: 2 },
@@ -247,7 +247,7 @@ describe("Factory Droid gemini wire — history replay", () => {
 	});
 
 	it("keeps the newest signature of a thinking block signed more than once, as the other Google routes do", async () => {
-		// Live Factory and Antigravity thought parts arrive unsigned; Gemini validates
+		// Live Factory thought parts arrive unsigned; Gemini validates
 		// only function-call signatures, so this pins the rule rather than a wire need.
 		const { result } = await run("hi", [
 			JSON.stringify({

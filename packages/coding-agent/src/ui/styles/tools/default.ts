@@ -77,7 +77,7 @@ function bodyRows(card: DefaultCard, theme: Theme, content: number): string[] {
 	if (card.expanded && card.args !== undefined) {
 		rows.push("", theme.fg("dim", "Args"));
 		const tree = jsonTreeRows(theme, card.args, undefined, ["i", "__partialJson"]);
-		for (const row of tree.rows) rows.push(...wrap(row, content));
+		for (const row of tree.rows) rows.push(truncate(row, content));
 		if (tree.truncated) rows.push(theme.fg("dim", "…"));
 		rows.push("");
 	}

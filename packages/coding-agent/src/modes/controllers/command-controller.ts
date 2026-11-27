@@ -2656,8 +2656,8 @@ export function renderUsageReports(
 		for (const report of providerReports) {
 			for (const limit of report.limits) {
 				const windowId = limit.window?.id ?? limit.scope.windowId ?? "default";
-				// Distinct buckets can share a label and window (Antigravity's Gemini
-				// vs Gemini (Argon) weekly) and must stay separate rows instead of
+				// Distinct buckets can share a label and window (e.g. two weekly
+				// buckets both labelled "Gemini") and must stay separate rows instead of
 				// averaging into "50% free", so the id joins the key. Label and window
 				// stay in it too: some providers build ids positionally or per plan
 				// (kimi's `${index}`, copilot's allowance), where ids differ across

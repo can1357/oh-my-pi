@@ -297,12 +297,6 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"trust-explicit-thinking-only": wire("trustExplicitThinkingOnly", [...OAI, "devin"]),
 
 	// ── wire: google APIs ──
-	"antigravity-claude-tool-mode": wire("antigravityClaudeToolMode", ["google"]),
-	"antigravity-usage-label": wire("antigravityUsageLabel", ["google"]),
-	"cca-legacy-parameters-schema": wire("ccaLegacyParametersSchema", ["google"]),
-	"claude-thinking-beta-header": wire("claudeThinkingBetaHeader", ["google"]),
-	"drop-unsigned-thinking": wire("dropUnsignedThinking", ["google"]),
-	"flash-stream-leak-workaround": wire("flashStreamLeakWorkaround", ["google"]),
 	"multimodal-function-response": wire("multimodalFunctionResponse", ["google"]),
 	"requires-skip-thought-signature": wire("requiresSkipThoughtSignature", ["google"]),
 	"requires-skip-thought-signature-on-first-function-call": wire("requiresSkipThoughtSignatureOnFirstFunctionCall", [
@@ -577,7 +571,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"limits-patch": { key: "limitsPatch", set: "catalog", shape: "object" },
 	/** Seeds `maxTokens` only when the row reports none; applied after `limits-patch`. */
 	"max-tokens-fallback": { key: "maxTokensFallback", set: "catalog", shape: "scalar" },
-	/** Most output tokens the host serves: a larger reported `maxTokens` (and Antigravity per-SKU `maxOutputTokens`) is lowered to it; an unknown one stays unknown. */
+	/** Most output tokens the host serves: a larger reported `maxTokens` is lowered to it; an unknown one stays unknown. */
 	"max-tokens-ceiling": { key: "maxTokensCeiling", set: "catalog", shape: "scalar" },
 	"long-context-cost": { key: "longContext", set: "catalog", shape: "object" },
 	"prompt-cache": { key: "promptCache", set: "catalog", shape: "object" },
@@ -739,7 +733,6 @@ export const API_COMPAT_RECORDS: Readonly<Record<string, readonly CompatRecordNa
 	"devin-agent": ["devin"],
 	"google-generative-ai": ["google"],
 	"google-vertex": ["google"],
-	"google-gemini-cli": ["google"],
 };
 
 /** Axis assignments of one rule block, split by namespace and keyed by resolved field. */

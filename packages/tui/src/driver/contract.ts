@@ -54,6 +54,13 @@ export interface TerminalCapabilities {
 	readonly tsp: boolean;
 }
 
+/** Control sequences that must bracket one newly committed history row in the same write. */
+export interface HistoryRowMark {
+	readonly row: number;
+	readonly before: string;
+	readonly after: string;
+}
+
 /** A frame the terminal backend asks the writer to show. */
 export interface FramePlan {
 	/**
@@ -61,7 +68,13 @@ export interface FramePlan {
 	 * writer acknowledges after writing (`replay` replaces history after a
 	 * clear, see the renderer contract in docs/tui-core-renderer.md).
 	 */
-	readonly history?: { readonly id: number; readonly rows: readonly string[]; readonly kind?: "append" | "replay" };
+	readonly history?: {
+		readonly id: number;
+		readonly rows: readonly string[];
+		readonly kind?: "append" | "replay";
+		/** Marks for new rows only; omitted from the portion that replays old history. */
+		readonly marks?: readonly HistoryRowMark[];
+	};
 	/** The complete mutable screen image anchored below history (no row wider than the screen). */
 	readonly viewport: readonly string[];
 	/** Hardware cursor inside the viewport, or null to hide it. */
