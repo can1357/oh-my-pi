@@ -176,25 +176,59 @@ export function isSyntheticUser(message: SyntheticUserCarrier | null | undefined
  */
 export const kPerCallContextMessage = Symbol("agent.message.perCallContext");
 
+/**
+ * Marks a per-call context message that its transform rebuilt with the bytes
+ * the previous request sent at the same place. The message stays per-call
+ * ({@link kPerCallContextMessage}), so every reader of that mark treats it as
+ * before; prompt-cache placement alone reads this mark, as history: it does not
+ * cut the reusable prefix at the message, and never anchors a breakpoint on it,
+ * because its next copy may differ.
+ */
+export const kRepeatedPerCallContextMessage = Symbol("agent.message.perCallContext.repeated");
+
 /** Carries per-call context provenance without exposing a string-keyed property. */
-export type PerCallContextMessageCarrier = object & { [kPerCallContextMessage]?: true };
+export type PerCallContextMessageCarrier = object & {
+	[kPerCallContextMessage]?: true;
+	[kRepeatedPerCallContextMessage]?: true;
+};
 
 /** Marks a message as synthesized for the current provider call. */
 export function markPerCallContextMessage(message: PerCallContextMessageCarrier): void {
 	message[kPerCallContextMessage] = true;
 }
 
-/** Copies per-call context provenance to a converted or projected message. */
+/** Marks a per-call message as repeating the bytes the previous request sent at its place. */
+export function markRepeatedPerCallContextMessage(message: PerCallContextMessageCarrier): void {
+	message[kRepeatedPerCallContextMessage] = true;
+}
+
+/**
+ * Copies per-call context provenance to a converted or projected message. When several sources merge into one (a run
+ * of tool results becomes one request parameter), the target is per-call if any source is, and repeated only if every
+ * per-call source is: one source that changes per request makes the whole parameter volatile.
+ */
 export function copyPerCallContextMessage(
 	target: PerCallContextMessageCarrier,
 	source: PerCallContextMessageCarrier,
 ): void {
-	if (source[kPerCallContextMessage] === true) target[kPerCallContextMessage] = true;
+	if (source[kPerCallContextMessage] !== true) return;
+	const repeated = source[kRepeatedPerCallContextMessage] === true;
+	if (target[kPerCallContextMessage] !== true) {
+		target[kPerCallContextMessage] = true;
+		if (repeated) target[kRepeatedPerCallContextMessage] = true;
+	} else if (!repeated) {
+		delete target[kRepeatedPerCallContextMessage];
+	}
 }
 
 /** True when a message was synthesized for the current provider call. */
 export function isPerCallContextMessage(message: PerCallContextMessageCarrier | null | undefined): boolean {
 	return message?.[kPerCallContextMessage] === true;
+}
+
+/** True when a per-call message repeats the bytes the previous request sent at its place. */
+export function isRepeatedPerCallContextMessage(message: PerCallContextMessageCarrier | null | undefined): boolean {
+	return message?.[kRepeatedPerCallContextMessage] === true;
 }
 
 /**

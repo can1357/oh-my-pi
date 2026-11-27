@@ -81,6 +81,7 @@ import {
 	isConversationalUser,
 	isDemotedThinking,
 	isPerCallContextMessage,
+	isRepeatedPerCallContextMessage,
 	isSyntheticUser,
 	kConversationalUser,
 	kStreamingBlockIndex,
@@ -2320,9 +2321,9 @@ const streamAnthropicOnce = (
 			};
 			let { client, isOAuthToken } = resolveClient();
 			// Message threads: only for this provider's own client against a
-			// session. Per-call context messages are rebuilt next request, so a
-			// thread could never continue past them; such requests go without one
-			// and leave the session's thread as it was.
+			// session. Per-call context messages (repeated ones are per-call too)
+			// are rebuilt next request, so a thread could never continue past them;
+			// such requests go without one and leave the session's thread as it was.
 			const threadSessionId = options?.sessionId;
 			const threadTurn =
 				!transport &&
@@ -4569,6 +4570,11 @@ function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?:
 	for (let index = messageEnd; index >= 0; index--) {
 		const message = params.messages[index];
 		if (!message) continue;
+		// A per-call message rebuilt with the bytes the previous request sent at its
+		// place is history to the cache, so it does not cut the prefix; but its next
+		// copy may differ, so it is never a breakpoint and counts no conversational
+		// turn (no checkpoint lands on it). A turn-scoped message still cuts.
+		if (message.clear_at !== "next_user_message" && isRepeatedPerCallContextMessage(message)) continue;
 		if (message.clear_at === "next_user_message" || isPerCallContextMessage(message)) {
 			markIndex = index;
 			stableUserTurns = 0;
@@ -4583,7 +4589,14 @@ function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?:
 		// interior `Continue.` pad, none of which advance the user turn ordinal.
 		if (isConversationalUser(message)) stableUserTurns++;
 	}
-	const stableMessageEnd = markIndex === -1 ? messageEnd : markIndex - 1;
+	let stableMessageEnd = messageEnd;
+	if (markIndex !== -1) {
+		stableMessageEnd = markIndex - 1;
+		// The anchor behind the mark skips repeated per-call messages too.
+		while (stableMessageEnd >= 0 && isRepeatedPerCallContextMessage(params.messages[stableMessageEnd])) {
+			stableMessageEnd--;
+		}
+	}
 
 	// Decimation checkpoints are generated newest-first on demand instead of
 	// being materialized as index arrays: the newest sits `stableUserTurns %
@@ -4616,7 +4629,7 @@ function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?:
 		let turnsSinceCheckpoint = stableUserTurns % ANTHROPIC_DECIMATION_INTERVAL;
 		for (let index = stableMessageEnd; index >= 0 && appliedCount < messageBudget; index--) {
 			const message = params.messages[index];
-			if (!message || !isConversationalUser(message)) continue;
+			if (!message || !isConversationalUser(message) || isRepeatedPerCallContextMessage(message)) continue;
 			if (turnsSinceCheckpoint > 0) {
 				turnsSinceCheckpoint--;
 				continue;

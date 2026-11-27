@@ -16,7 +16,7 @@ import { describe, expect, it } from "bun:test";
 import type { MessageCreateParams, TextBlockParam } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { AssistantMessage, CacheRetention, Context, Message, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
-import { markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { markPerCallContextMessage, markRepeatedPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { requestBodyText } from "@oh-my-pi/pi-ai/utils/request-body";
 
@@ -313,6 +313,114 @@ describe("anthropic head caching (general API-key path)", () => {
 		// assistant 32, the newest message before the oldest mark; 81 = the
 		// rolling tail anchor.
 		expect(findCachedMessageIndices(body)).toEqual([28, 58, 63, 81]);
+	});
+
+	it("reads a repeated per-call message as history but never puts a breakpoint on it", async () => {
+		// A per-call note the previous request sent with the same bytes at the same place (the agent marks it
+		// repeated). Its bytes are in the cache, so it must not cut the prefix as a per-call message does; its next
+		// copy may differ, so no breakpoint may land on it either.
+		const repeatedNote = (): Message => {
+			const message: Message = { role: "user", content: "repeated note", timestamp: 97 };
+			markPerCallContextMessage(message);
+			markRepeatedPerCallContextMessage(message);
+			return message;
+		};
+		const turns = (count: number): Message[] => {
+			const messages: Message[] = [];
+			for (let i = 1; i <= count; i++) {
+				messages.push({ role: "user", content: `user ${i}`, timestamp: i * 2 });
+				messages.push(assistantMessage(`assistant ${i}`, i * 2 + 1));
+			}
+			return messages;
+		};
+		const breakpoints = async (messages: Message[]) =>
+			findCachedMessageIndices(
+				await captureWireBody(undefined, { ...CONTEXT, systemPrompt: [], tools: [], messages }),
+			);
+
+		// Before user 30 (index 58): 32 turns stay countable, so the checkpoints are user 15 (28) and user 30 (59),
+		// with the rolling anchors on user 32 (63) and assistant 32 (64). As a mark it would leave the checkpoint on
+		// user 15 and anchor 57; counted as a turn, the newer checkpoint would land on the note itself.
+		const beforeUser30 = turns(32);
+		beforeUser30.splice(58, 0, repeatedNote());
+		expect(await breakpoints(beforeUser30)).toEqual([28, 59, 63, 64]);
+
+		// Right before a per-call message that changed (after assistant 20, index 39): the anchor behind the mark
+		// goes back past the note to assistant 20.
+		const changed: Message = { role: "developer", content: "changed note", timestamp: 98 };
+		markPerCallContextMessage(changed);
+		const beforeChanged = turns(32);
+		beforeChanged.splice(40, 0, repeatedNote(), changed);
+		expect(await breakpoints(beforeChanged)).toEqual([28, 39, 64, 65]);
+
+		// The newest message: the rolling anchors go on the two messages before it.
+		expect(
+			await breakpoints([...turns(1), { role: "user", content: "user 2", timestamp: 4 }, repeatedNote()]),
+		).toEqual([1, 2]);
+	});
+
+	it("cuts at tool results merged into one parameter unless every one of them repeated", async () => {
+		// Consecutive tool results go out as one parameter. One changed per-call result makes it volatile, in either
+		// order, so it cuts the prefix as a per-call message does; only all-repeated results leave it history.
+		const result = (id: string, repeated: boolean): Message => {
+			const message: Message = {
+				role: "toolResult",
+				toolCallId: id,
+				toolName: "lookup",
+				isError: false,
+				content: [{ type: "text", text: `result ${id}` }],
+				timestamp: 99,
+			};
+			markPerCallContextMessage(message);
+			if (repeated) markRepeatedPerCallContextMessage(message);
+			return message;
+		};
+		const turns = (from: number, to: number): Message[] =>
+			Array.from({ length: to - from + 1 }, (_, n) => from + n).flatMap(i => [
+				{ role: "user", content: `user ${i}`, timestamp: i * 2 } as Message,
+				assistantMessage(`assistant ${i}`, i * 2 + 1),
+			]);
+		const toolCalls: Message = {
+			role: "assistant",
+			content: [
+				{ type: "toolCall", id: "a", name: "lookup", arguments: {} },
+				{ type: "toolCall", id: "b", name: "lookup", arguments: {} },
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: 98,
+		};
+		// Between assistant 20 and user 21: the tool calls, their two results (one parameter on the wire) and an
+		// answer.
+		const breakpoints = async (a: boolean, b: boolean) => {
+			const messages = [
+				...turns(1, 20),
+				toolCalls,
+				result("a", a),
+				result("b", b),
+				assistantMessage("answer", 100),
+				...turns(21, 32),
+			];
+			return findCachedMessageIndices(
+				await captureWireBody(undefined, { ...CONTEXT, systemPrompt: [], tools: [], messages }),
+			);
+		};
+
+		// The tool-call message before the results takes the breakpoint behind the cut (41).
+		expect(await breakpoints(true, false)).toEqual([28, 41, 66, 67]);
+		expect(await breakpoints(false, true)).toEqual([28, 41, 66, 67]);
+		// Both repeated: the parameter is history, nothing cuts, and the checkpoints count all 32 turns.
+		expect(await breakpoints(true, true)).toEqual([28, 62, 66, 67]);
 	});
 
 	it("adds no breakpoints when caching is disabled", async () => {

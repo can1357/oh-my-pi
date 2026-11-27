@@ -24,6 +24,7 @@ import type {
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import type { HarmonyAuditEvent } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import type { AppendOnlyContextManager } from "./append-only-context";
+import type { RepeatedPerCallMessages } from "./repeated-per-call-messages";
 import type { AgentRunCoverage, AgentRunSummary } from "./run-collector";
 import type { SentToolDefinitions } from "./sent-tool-definitions";
 import type { AgentTelemetryConfig } from "./telemetry";
@@ -289,6 +290,12 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 
 	/** Remembers sent tool definitions to fill {@link Context.inactiveTools}. */
 	sentToolDefinitions?: SentToolDefinitions;
+
+	/**
+	 * Marks a per-call message repeated when the previous main request the provider answered sent the same bytes at its
+	 * place, so prompt caching treats it like the rest of the history. Applied to main requests only.
+	 */
+	repeatedPerCallMessages?: RepeatedPerCallMessages;
 
 	/**
 	 * Resolves the API key or resolver for the current model before each LLM call.
