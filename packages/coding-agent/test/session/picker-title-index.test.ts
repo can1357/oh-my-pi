@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { closeSessionIndex } from "@oh-my-pi/pi-coding-agent/session/session-index";
+import { parseSessionFileName, resolveResumeTarget } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getConfigRootDir, removeSyncWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { makeAssistantMessage } from "../session-manager/helpers";
@@ -95,5 +96,22 @@ describe("resume picker title index", () => {
 		const resumed = await SessionManager.continueRecent(cwd);
 		expect(resumed.getSessionFile()).toBe(terminal);
 		await resumed.close();
+	});
+
+	it("still resumes a side panel chat by explicit id, from its project and from another", async () => {
+		process.env.PI_SESSION_ORIGIN = "chrome";
+		let panel: string;
+		try {
+			panel = await createSession("Panel chat");
+		} finally {
+			delete process.env.PI_SESSION_ORIGIN;
+		}
+		const id = parseSessionFileName(panel)?.id;
+		if (!id) throw new Error("session file name records no id");
+
+		expect((await resolveResumeTarget(id, cwd))?.session.path).toBe(panel);
+		const elsewhere = path.join(testAgentDir, "elsewhere");
+		fs.mkdirSync(elsewhere);
+		expect((await resolveResumeTarget(id, elsewhere))?.session.path).toBe(panel);
 	});
 });

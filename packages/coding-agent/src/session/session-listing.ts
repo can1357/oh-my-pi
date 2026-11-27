@@ -711,10 +711,17 @@ export async function listAllSessions(
 	storage: SessionStorage = new FileSessionStorage(),
 	sessionsRoot: string = getSessionsDir(),
 ): Promise<SessionInfo[]> {
+	return (await scanAllSessions(storage, sessionsRoot)).filter(session => !isForeignSession(session));
+}
+
+/** Every session across all project directories (newest first), {@link isForeignSession}s included. */
+async function scanAllSessions(
+	storage: SessionStorage,
+	sessionsRoot: string = getSessionsDir(),
+): Promise<SessionInfo[]> {
 	try {
 		const files = await dedupeRealPaths(await scanBucketFiles(sessionsRoot, "*.jsonl"));
-		const sessions = await collectSessionsFromFiles(files, storage, true);
-		return sessions.filter(session => !isForeignSession(session));
+		return await collectSessionsFromFiles(files, storage, true);
 	} catch {
 		return [];
 	}
@@ -1748,6 +1755,11 @@ function isSessionStorage(value: SessionStorage | ResolveResumableSessionOptions
 	return "listFilesSync" in value;
 }
 
+/**
+ * The session a resume key (an id, id prefix, or file name prefix) names: first in `sessionDir` (else `cwd`'s
+ * default session directory), then, without `sessionDir` or with `allowGlobalFallback`, in every project directory.
+ * An explicit key also opens {@link isForeignSession}s, which the listings hide.
+ */
 export async function resolveResumableSession(
 	sessionArg: string,
 	cwd: string,
@@ -1758,7 +1770,7 @@ export async function resolveResumableSession(
 	const storage = isSessionStorage(storageOrOptions) ? storageOrOptions : new FileSessionStorage();
 	const resolvedOptions = isSessionStorage(storageOrOptions) ? options : storageOrOptions;
 	const localSessionDir = sessionDir ?? (await computeDefaultSessionDirAsync(cwd, storage));
-	const localSessions = await listSessions(localSessionDir, storage);
+	const localSessions = await scanSessionDir(localSessionDir, storage, true);
 	const localMatch = localSessions.find(session => sessionMatchesResumeArg(session, sessionArg));
 	if (localMatch) {
 		return { session: localMatch, scope: "local" };
@@ -1768,7 +1780,7 @@ export async function resolveResumableSession(
 		return undefined;
 	}
 
-	const globalSessions = await listAllSessions(storage);
+	const globalSessions = await scanAllSessions(storage);
 	const globalMatch = globalSessions.find(session => sessionMatchesResumeArg(session, sessionArg));
 	if (!globalMatch) {
 		return undefined;
