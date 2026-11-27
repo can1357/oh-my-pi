@@ -19,8 +19,13 @@ fn run(program: &str, args: &[&str]) -> (Vec<u8>, Vec<u8>, Option<i32>) {
 	(out.stdout, out.stderr, out.status.code())
 }
 
+/// obash as `zsh`, without pi's extras: its commands come from `PATH`, as
+/// zsh's do.
 fn obash(args: &[&str]) -> (Vec<u8>, Vec<u8>, Option<i32>) {
-	run(env!("CARGO_BIN_EXE_obash"), args)
+	let args: Vec<&str> = std::iter::once("--no-extras")
+		.chain(args.iter().copied())
+		.collect();
+	run(env!("CARGO_BIN_EXE_obash"), &args)
 }
 
 fn have_zsh() -> bool {

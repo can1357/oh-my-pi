@@ -164,6 +164,7 @@ function endpointFetch(outcomes: {
 	userBody?: unknown;
 	billing?: number | Error;
 	internal: number | Error;
+	internalBody?: unknown;
 }): FetchImpl {
 	const respond = (outcome: number | Error, body: unknown): Response => {
 		if (outcome instanceof Error) throw outcome;
@@ -177,12 +178,15 @@ function endpointFetch(outcomes: {
 			return respond(outcomes.billing ?? 404, billingPayload([REQUEST_ITEM]));
 		}
 		if (url.endsWith("/copilot_internal/user")) {
-			return respond(outcomes.internal, {
-				copilot_plan: "individual",
-				quota_snapshots: {
-					premium_interactions: { entitlement: 300, remaining: 100, percent_remaining: 33, unlimited: false },
+			return respond(
+				outcomes.internal,
+				outcomes.internalBody ?? {
+					copilot_plan: "individual",
+					quota_snapshots: {
+						premium_interactions: { entitlement: 300, remaining: 100, percent_remaining: 33, unlimited: false },
+					},
 				},
-			});
+			);
 		}
 		return respond(outcomes.user ?? 200, "userBody" in outcomes ? outcomes.userBody : { login: "octocat" });
 	};
@@ -235,5 +239,77 @@ describe("github copilot usage provider — auth rejection (#17081)", () => {
 		] as const) {
 			expect(await fetchWith(credential, endpointFetch(outcomes))).toBeNull();
 		}
+	});
+});
+
+describe("github copilot usage provider — quota snapshot units", () => {
+	// Shape from a live Business account's `copilot_internal/user`: usage-based metering is flagged on the account
+	// and on each snapshot, and chat/completions are unlimited with a zero entitlement.
+	const tokenBilled = {
+		copilot_plan: "business",
+		quota_reset_date: "2026-12-01",
+		token_based_billing: true,
+		quota_snapshots: {
+			chat: { entitlement: 0, remaining: 0, percent_remaining: 100, unlimited: true, token_based_billing: true },
+			premium_interactions: {
+				entitlement: 50000,
+				remaining: 25183,
+				percent_remaining: 50.3,
+				unlimited: false,
+				overage_count: 12,
+				token_based_billing: true,
+			},
+		},
+	};
+
+	it("reports a usage-based account's allowance as AI credits", async () => {
+		const report = await fetchWith(OAUTH, endpointFetch({ internal: 200, internalBody: tokenBilled }));
+		const allowance = report?.limits.find(limit => limit.id === "copilot:premium");
+		expect(allowance?.label).toBe("AI Credits");
+		expect(allowance?.amount).toMatchObject({ unit: "credits", used: 24817, limit: 50000 });
+		expect(allowance?.notes).toContain("Overage: 12");
+	});
+
+	it("keeps request wording when neither the account nor the snapshot flags usage-based billing", async () => {
+		const report = await fetchWith(OAUTH, endpointFetch({ internal: 200 }));
+		const allowance = report?.limits.find(limit => limit.id === "copilot:premium");
+		expect(allowance?.label).toBe("Premium Requests");
+		expect(allowance?.amount.unit).toBe("requests");
+	});
+
+	it("trusts the account-level flag when a snapshot omits its own", async () => {
+		const body = {
+			...tokenBilled,
+			quota_snapshots: {
+				premium_interactions: { entitlement: 1500, remaining: 1000, percent_remaining: 66, unlimited: false },
+			},
+		};
+		const report = await fetchWith(OAUTH, endpointFetch({ internal: 200, internalBody: body }));
+		const allowance = report?.limits.find(limit => limit.id === "copilot:premium");
+		expect(allowance?.amount).toMatchObject({ unit: "credits", used: 500, limit: 1500 });
+	});
+
+	it("keeps a bounded chat snapshot in requests unless the snapshot itself is usage-billed", async () => {
+		const bounded = { entitlement: 100, remaining: 40, percent_remaining: 40, unlimited: false };
+		const accountOnly = {
+			...tokenBilled,
+			quota_snapshots: { chat: bounded },
+		};
+		const snapshotFlagged = {
+			...tokenBilled,
+			token_based_billing: false,
+			quota_snapshots: { chat: { ...bounded, token_based_billing: true } },
+		};
+		const chatOf = async (internalBody: unknown) =>
+			(await fetchWith(OAUTH, endpointFetch({ internal: 200, internalBody })))?.limits.find(
+				limit => limit.id === "copilot:chat",
+			);
+
+		const requests = await chatOf(accountOnly);
+		expect(requests?.label).toBe("Chat Requests");
+		expect(requests?.amount.unit).toBe("requests");
+		const credits = await chatOf(snapshotFlagged);
+		expect(credits?.label).toBe("Chat AI Credits");
+		expect(credits?.amount.unit).toBe("credits");
 	});
 });

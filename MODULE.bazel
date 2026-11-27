@@ -229,17 +229,10 @@ crate.annotation(
     crate = "tree-sitter",
 )
 
-# cargo-bazel omits workspace-local build dependencies from generated registry
-# build scripts; restore nix 0.28's edge to the patched cfg_aliases crate.
-crate.annotation(
-    build_script_deps = ["@@//crates/vendor/cfg_aliases:cfg_aliases"],
-    crate = "nix",
-    version = "0.28.0",
-)
-
-# Same for normal dependencies: grep-printer's edge to the vendored
-# grep-searcher (a workspace member via [patch.crates-io]) is dropped, so its
-# rustc invocation has no `--extern grep_searcher`.
+# cargo-bazel omits workspace-local dependencies from generated registry
+# crates: grep-printer's edge to the vendored grep-searcher (a workspace
+# member via [patch.crates-io]) is dropped, so its rustc invocation has no
+# `--extern grep_searcher`. Restore it.
 crate.annotation(
     crate = "grep-printer",
     deps = ["@@//crates/vendor/grep-searcher:grep-searcher"],

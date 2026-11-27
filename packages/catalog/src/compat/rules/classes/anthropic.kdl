@@ -42,6 +42,10 @@ class "anthropic" {
 		max-tokens 4784
 	}
 	family "opus" {
+		// The 8×16 grid improved English QA recall on both Opus 5.5 samples.
+		revision "=5.5" {
+			snapcompact-variant "8on16-bw"
+		}
 		revision "<4.7" {
 			image-tokenization {
 				regime "anthropic-patch"

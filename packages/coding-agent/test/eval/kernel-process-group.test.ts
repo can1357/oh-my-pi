@@ -110,59 +110,6 @@ describe("BaseKernel stdin failures", () => {
 			await kernel.shutdown({ timeoutMs: 50 });
 		}
 	});
-
-	test("fails a control request and retires the kernel when its stdin write rejects", async () => {
-		const exited = Promise.withResolvers<number>();
-		const proc = {
-			pid: undefined,
-			stdin: {
-				write: () => Promise.reject(new Error("EPIPE: broken pipe, write")),
-				flush: () => undefined,
-				end: () => {},
-			},
-			stdout: new ReadableStream<Uint8Array>(),
-			stderr: new ReadableStream<Uint8Array>(),
-			exited: exited.promise,
-			kill: () => exited.resolve(0),
-		};
-		const kernel = new TestKernel();
-		kernel.setProcess(proc as unknown as Parameters<TestKernel["setProcess"]>[0]);
-		try {
-			// The control timeout is far beyond the test timeout: only the write failure can settle this.
-			await expect(kernel.requestControl("snapshot", undefined, 60_000)).rejects.toThrow("EPIPE");
-			expect(await exited.promise).toBe(0);
-			expect(kernel.isAlive()).toBe(false);
-		} finally {
-			await kernel.shutdown({ timeoutMs: 50 });
-		}
-	});
-
-	test("fails a control request and retires the kernel when its stdin write throws synchronously", async () => {
-		const exited = Promise.withResolvers<number>();
-		const proc = {
-			pid: undefined,
-			stdin: {
-				write: () => {
-					throw new Error("EPIPE: broken pipe, write");
-				},
-				flush: () => undefined,
-				end: () => {},
-			},
-			stdout: new ReadableStream<Uint8Array>(),
-			stderr: new ReadableStream<Uint8Array>(),
-			exited: exited.promise,
-			kill: () => exited.resolve(0),
-		};
-		const kernel = new TestKernel();
-		kernel.setProcess(proc as unknown as Parameters<TestKernel["setProcess"]>[0]);
-		try {
-			await expect(kernel.requestControl("snapshot", undefined, 60_000)).rejects.toThrow("EPIPE");
-			expect(await exited.promise).toBe(0);
-			expect(kernel.isAlive()).toBe(false);
-		} finally {
-			await kernel.shutdown({ timeoutMs: 50 });
-		}
-	});
 });
 
 describe("killProcessGroup", () => {

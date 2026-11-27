@@ -1470,9 +1470,9 @@ describe("OpenRouter model discovery", () => {
 });
 
 describe("GitHub Copilot catalog corrections", () => {
-	it("prices Copilot Haiku 5.5 cache legs per tier without a second long-context tier", () => {
-		// `billing.token_prices` carries no cache prices for Haiku 5.5, so both
-		// discovered tiers arrive with $0 cache legs.
+	it("prices Copilot Haiku 5.5 cache legs and gives its -1m row no second long-context tier", () => {
+		// `billing.token_prices` carries no cache prices for Haiku 5.5, so the
+		// discovered default tier arrives with $0 cache legs.
 		const base = buildModel(
 			completionsSpec({
 				id: "claude-haiku-5.5",
@@ -1486,10 +1486,10 @@ describe("GitHub Copilot catalog corrections", () => {
 			completionsSpec({
 				id: "claude-haiku-5.5-1m",
 				provider: "github-copilot",
-				cost: { input: 0.5, output: 2.5, cacheRead: 0, cacheWrite: 0 },
+				cost: { input: 0.5, output: 2.5, cacheRead: 0.05, cacheWrite: 0.625 },
 			}),
 		);
-		expect(long.cost).toEqual({ input: 0.5, output: 2.5, cacheRead: 0.05, cacheWrite: 0.625 });
+		expect(long.cost.longContext).toBeUndefined();
 	});
 });
 

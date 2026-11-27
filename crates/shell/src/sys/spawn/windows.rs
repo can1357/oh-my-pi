@@ -525,8 +525,8 @@ impl Console {
 		let mut hpc: HPCON = 0;
 		// No `PSEUDOCONSOLE_INHERIT_CURSOR`: only with it does the console
 		// host query the cursor (`ESC[6n`) and wait for the reply before its
-		// clients run (the hang `omp-natives`' `pty.rs` answers for
-		// portable-pty, which sets it), so the discarded output needs none.
+		// clients run (the hang `omp-natives`' `pty.rs` answers for its
+		// pseudoconsole, which sets it), so the discarded output needs none.
 		// SAFETY: open handles (the console host duplicates them) and a
 		// writable `hpc`.
 		let hr =

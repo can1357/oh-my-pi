@@ -85,7 +85,13 @@ function stateMatches(state: string, expectedState: string): boolean {
  * conflict (issue #8814).
  */
 function ipv6LoopbackAvailable(): boolean {
-	const interfaces = os.networkInterfaces();
+	let interfaces: NodeJS.Dict<os.NetworkInterfaceInfo[]>;
+	try {
+		interfaces = os.networkInterfaces();
+	} catch {
+		// Android denies getifaddrs (EACCES) to apps; assume no IPv6 loopback (issue #16127).
+		return false;
+	}
 	for (const name in interfaces) {
 		const addresses = interfaces[name];
 		if (!addresses) continue;

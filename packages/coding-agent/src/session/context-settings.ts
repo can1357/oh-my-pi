@@ -163,7 +163,7 @@ export const cfgCompactionThresholdPercent = register({
 		label: "Compaction Threshold",
 		description: "Percent threshold for context maintenance; set to Default to use legacy reserve-based behavior",
 		options: [
-			{ value: "default", label: "Default", description: "Legacy reserve-based threshold" },
+			{ value: "default", label: "Default", description: "Window less its reserve, at most 690K tokens" },
 			{ value: "10", label: "10%", description: "Extremely early maintenance" },
 			{ value: "20", label: "20%", description: "Very early maintenance" },
 			{ value: "30", label: "30%", description: "Early maintenance" },
@@ -302,6 +302,14 @@ export const cfgCompactionReserveTokens = register({
 	default: undefined,
 });
 
+// No default: unset keeps the summary budget at min(0.8 × reserve, 16384),
+// the ceiling that keeps large-window summaries compressing (#7008).
+export const cfgCompactionSummaryMaxTokens = register({
+	id: "compaction.summaryMaxTokens",
+	type: "number",
+	default: undefined,
+});
+
 export const cfgCompactionKeepRecentTokens = register({
 	id: "compaction.keepRecentTokens",
 	type: "number",
@@ -412,6 +420,7 @@ export const cfgCompaction = combine({
 	thresholdPercent: cfgCompactionThresholdPercent,
 	thresholdTokens: cfgCompactionThresholdTokens,
 	reserveTokens: cfgCompactionReserveTokens,
+	summaryMaxTokens: cfgCompactionSummaryMaxTokens,
 	keepRecentTokens: cfgCompactionKeepRecentTokens,
 	midTurnEnabled: cfgCompactionMidTurnEnabled,
 	asyncEnabled: cfgCompactionAsyncEnabled,
@@ -531,9 +540,9 @@ export const cfgSnapcompactShape = register({
 	ui: {
 		tab: "context",
 		group: "Experimental",
-		label: "Snapcompact Shape",
+		label: "Snapcompact Frame Layout",
 		description:
-			"Frame shape snapcompact prints text with (compaction archive and inline imaging). Auto picks a shape tuned for the current model.",
+			"Grid layout for compaction archives and inline images. Auto picks a layout tuned for the current model. Imaging requires one installed font that covers the text.",
 		options: [
 			{
 				value: "auto",
@@ -543,8 +552,7 @@ export const cfgSnapcompactShape = register({
 			{
 				value: "8x8r-bw",
 				label: "8x8 repeated, black",
-				description:
-					"unscii square cell, black ink, every line printed twice with the copy on a pale highlight band.",
+				description: "Square cells in black ink; each line repeats on a pale highlight band.",
 			},
 			{
 				value: "8x8r-sent",
@@ -554,17 +562,17 @@ export const cfgSnapcompactShape = register({
 			{
 				value: "8x8u-bw",
 				label: "8x8, black",
-				description: "Plain unscii square cell, single-printed lines, black ink.",
+				description: "Square cells, single-printed lines, black ink.",
 			},
 			{
 				value: "8x8u-sent",
 				label: "8x8, sentence hues",
-				description: "Plain unscii square cell with sentence-hue ink.",
+				description: "Square cells with sentence-hue ink.",
 			},
 			{
 				value: "6x6u-bw",
 				label: "6x6 dense, black",
-				description: "unscii squeezed to 6x6 — densest readable cell, fewest frames — in black ink.",
+				description: "Dense 6x6 cells fit more characters per frame, in black ink.",
 			},
 			{
 				value: "6x6u-sent",
@@ -574,7 +582,7 @@ export const cfgSnapcompactShape = register({
 			{
 				value: "5x8-bw",
 				label: "5x8 legacy, black",
-				description: "Original X.org 5x8 glyphs on the 2576px frame, black ink.",
+				description: "Original 5x8 grid on the 2576px frame, black ink.",
 			},
 			{
 				value: "5x8-sent",
@@ -584,39 +592,37 @@ export const cfgSnapcompactShape = register({
 			{
 				value: "6x12-dim",
 				label: "6x12, dimmed stopwords",
-				description: "X.org 6x12 glyphs, black ink, function words dimmed gray.",
+				description: "6x12 cells, black ink, function words dimmed gray.",
 			},
 			{
 				value: "8x13-bw",
 				label: "8x13, black",
-				description: "X.org 8x13 glyphs, black ink.",
+				description: "8x13 cells, black ink.",
 			},
 			{
 				value: "8on16-bw",
-				label: "8x13 on 16px pitch, black",
-				description: "8x13 glyphs on an 8x16 cell (extra leading), black ink.",
+				label: "8x16, black",
+				description: "8x16 cells with extra line spacing, black ink.",
 			},
 			{
 				value: "8on22-bw",
-				label: "8x13 on 22px pitch (leading), black",
-				description:
-					"8x13 glyphs on an 8x22 cell — extra line spacing so rows don't crowd. Default for OpenAI/Google.",
+				label: "8x22 with extra leading, black",
+				description: "8x22 cells with extra line spacing so rows don't crowd. Default for OpenAI/Google.",
 			},
 			{
 				value: "11on16-bw",
-				label: "8x13 on 11px advance (tracking), black",
-				description:
-					"8x13 glyphs on an 11x16 cell — extra letter spacing so characters don't merge. Default for Anthropic.",
+				label: "11x16 with extra tracking, black",
+				description: "11x16 cells with extra spacing between characters. Default for Anthropic.",
 			},
 			{
-				value: "silver16-bw",
-				label: "Silver 16, CJK",
-				description: "Embedded Silver TrueType font on a 16px grid for CJK and other non-Latin text.",
+				value: "cjk16-bw",
+				label: "CJK 16x22, black",
+				description: "16px-wide cells with extra row spacing. Each wide character uses one cell.",
 			},
 			{
 				value: "doc-8on16-bw",
 				label: "Doc 8on16, black",
-				description: "Two word-wrapped newspaper columns of 8x13 glyphs on a 16px pitch, black ink.",
+				description: "Two word-wrapped columns of 8x16 cells, black ink.",
 			},
 			{
 				value: "doc-8on16-sent",

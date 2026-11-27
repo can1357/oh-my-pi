@@ -2702,12 +2702,13 @@ def test_gh_open_pr_rejects_wrong_identity_before_push_or_pr(db: Database, tmp_p
         _stop_loop(loop, thread)
 
 
-def test_gh_open_pr_scopes_identity_gate_to_requested_base(db: Database, tmp_path: Path) -> None:
+@pytest.mark.parametrize("tool_name", ["gh_open_pr", "gh_push_branch"])
+def test_publish_scopes_identity_gate_to_requested_base(db: Database, tmp_path: Path, tool_name: str) -> None:
     """`base` override: only commits beyond `origin/<base>` must be bot-authored.
 
     Gitflow repo: default `main`, integration branch `develop` carries a
-    maintainer commit. A bot fix on top of `develop` opened with
-    `base="develop"` must push and open the PR against `develop`.
+    maintainer commit. A bot fix on top of `develop` published with
+    `base="develop"` must push (and open the PR against `develop`).
     """
     import os
     import subprocess
@@ -2818,10 +2819,14 @@ def test_gh_open_pr_scopes_identity_gate_to_requested_base(db: Database, tmp_pat
             session_dir=str(ws.session_dir),
         )
         db.set_issue_classification(bindings.issue_key, "bug")
-        tool = next(x for x in build(bindings) if x.name == "gh_open_pr")
-        body = "## Repro\nrepro\n\n## Cause\ncause\n\n## Fix\nfix\n\n## Verification\nran tests\n\nFixes #42\n"
-        tool.execute({"title": "fix: x", "body": body, "base": "develop"}, _ctx())
-        assert pr_bases == ["develop"]
+        tool = next(x for x in build(bindings) if x.name == tool_name)
+        if tool_name == "gh_open_pr":
+            body = "## Repro\nrepro\n\n## Cause\ncause\n\n## Fix\nfix\n\n## Verification\nran tests\n\nFixes #42\n"
+            tool.execute({"title": "fix: x", "body": body, "base": "develop"}, _ctx())
+            assert pr_bases == ["develop"]
+        else:
+            tool.execute({"base": "develop"}, _ctx())
+            assert pr_bases == []
         pushed_parent = subprocess.run(
             ["git", "-C", str(bare), "rev-parse", f"refs/heads/{ws.branch}^"],
             capture_output=True,

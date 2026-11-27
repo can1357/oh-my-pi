@@ -1076,7 +1076,8 @@ export class CmuxTab implements InProcessRunTab {
 		return await this.#selectorAction<string[]>(selector, "select", { values: choices });
 	}
 
-	async extract(format: ReadableFormat = "markdown", opts?: ReadableExtractOptions): Promise<string> {
+	async extract(formatArg?: ReadableFormat | null, opts?: ReadableExtractOptions): Promise<string> {
+		const format = formatArg ?? "markdown";
 		const result = (await this.#request("browser.snapshot", { interactive: false })) as CmuxSnapshotResult;
 		const html = typeof result.page?.html === "string" ? result.page.html : "";
 		const url =

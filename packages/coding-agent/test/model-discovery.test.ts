@@ -21,6 +21,7 @@ import {
 } from "@oh-my-pi/pi-catalog/provider-models";
 import type { ModelKind, ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { CODEX_CLIENT_VERSION } from "@oh-my-pi/pi-catalog/wire/codex";
+import { encodeKiroCredential } from "@oh-my-pi/pi-catalog/wire/kiro";
 import {
 	DISCOVERY_DEFAULT_CONTEXT_WINDOW,
 	type DiscoveryProviderConfig,
@@ -246,6 +247,64 @@ describe("ModelRegistry runtime discovery", () => {
 
 		expect(modelListCalls).toBe(1);
 		expect(registry.find("gateway", "dynamic-model")).toBeDefined();
+	});
+
+	test("openai-models-list prices chat and embedding rows in their advertised units", async () => {
+		writeRawModelsJson({
+			relay: {
+				baseUrl: "http://127.0.0.1:9993",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "openai-models-list" },
+			},
+		});
+		const fetchMock: FetchImpl = async input => {
+			if (String(input) === "http://127.0.0.1:9993/v1/models") {
+				return Response.json({
+					data: [
+						{
+							id: "relay-priced",
+							pricing: { prompt: "0.000003", completion: "0.000015", input_cache_read: "0.0000003" },
+						},
+						{
+							id: "relay-per-million",
+							pricing: { unit: "per_million_tokens", prompt: "2", completion: "10", input_cache_read: "0.5" },
+						},
+						{
+							id: "relay-embedding",
+							output_modalities: ["embeddings"],
+							pricing: { prompt: "0.00000025" },
+						},
+						{ id: "relay-unpriced" },
+					],
+				});
+			}
+			return new Response("", { status: 404 });
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refreshDiscoverableProviders(["relay"], "online");
+
+		const priced = registry.find("relay", "relay-priced")?.cost;
+		expect(priced?.input).toBeCloseTo(3);
+		expect(priced?.output).toBeCloseTo(15);
+		expect(priced?.cacheRead).toBeCloseTo(0.3);
+		expect(priced?.cacheWrite).toBe(0);
+		expect(registry.find("relay", "relay-per-million")?.cost).toEqual({
+			input: 2,
+			output: 10,
+			cacheRead: 0.5,
+			cacheWrite: 0,
+		});
+		expect(registry.find("relay", "relay-embedding")).toMatchObject({
+			api: "openai-embeddings",
+			cost: { input: 0.25, output: 0, cacheRead: 0, cacheWrite: 0 },
+		});
+		expect(registry.find("relay", "relay-unpriced")?.cost).toEqual({
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+		});
 	});
 
 	test("does not coalesce or apply discovery across provider config changes", async () => {
@@ -2776,6 +2835,30 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(registry.getProviderDiscoveryState("vllm-long")?.status).toBe("ok");
 	});
 
+	test.each([true, false])("preserves the proxy offline roster (advertisedReasoning=%s)", advertisedReasoning => {
+		const provider = "cached-proxy";
+		const baseUrl = "https://proxy.example/v1";
+		writeRawModelsJson({
+			[provider]: {
+				baseUrl,
+				auth: "none",
+				api: "openai-completions",
+				discovery: { type: "proxy", advertisedReasoning },
+			},
+		});
+		const bundled = getBundledModels("openai")[0];
+		writeModelCache(
+			`${provider}:proxy-v2-${advertisedReasoning ? "" : "advertised-off-"}context-v6`,
+			Date.now(),
+			[{ ...bundled, provider, baseUrl, id: "offline-only" }],
+			true,
+			"",
+			cacheDbPath,
+		);
+		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+		expect(registry.find(provider, "offline-only")?.baseUrl).toBe(baseUrl);
+	});
+
 	test("configured openai-models-list discovery ignores rows cached under the bare provider namespace", async () => {
 		writeRawModelsJson({
 			"vllm-fast": {
@@ -5263,10 +5346,8 @@ describe("ModelRegistry runtime discovery", () => {
 	});
 
 	test("repeated Copilot cache hydration keeps the cached catalog with two signed-in accounts", async () => {
-		// Startup hydrates credential-scoped caches twice (CLI, then session
-		// creation). Discovery keys the Copilot cache on the account it peeks; a
-		// rotating pick read account A's row first, then account B's empty
-		// namespace, whose bundled fallback replaced A's cached `-1m` variants.
+		// Repeated offline reads must keep selecting the same account rather than
+		// rotating from account A's row to account B's empty namespace.
 		const bundledBase = getBundledModel("github-copilot", "gpt-5.6-sol");
 		if (!bundledBase?.headers) {
 			throw new Error("Expected bundled Copilot base to carry transport headers");
@@ -5296,6 +5377,89 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(registry.find("github-copilot", "gpt-5.6-sol-1m")?.headers).toEqual(bundledBase.headers);
 	});
 
+	test("launch cache hydration shares overlapping scopes and rechecks fresh inputs after settling", async () => {
+		const key = encodeKiroCredential({ kind: "api_key", token: "ksk_initial", region: "us-east-1" });
+		authStorage.keys.setRuntime("kiro", key);
+		authStorage.keys.setRuntime("github-copilot", "gho_copilot");
+		authStorage.keys.setRuntime("openrouter", "sk-or-unrelated");
+
+		const model = buildModel({
+			id: "scoped-kiro-model",
+			name: "Initial Kiro catalog",
+			api: "kiro-api",
+			provider: "kiro",
+			baseUrl: "https://q.us-east-1.amazonaws.com",
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 4096,
+		});
+		const cacheProviderId = resolveModelCacheProviderId("kiro", { apiKey: key });
+		const fingerprint = fingerprintStaticModels([], { authoritative: true });
+		expect(writeModelCache(cacheProviderId, Date.now(), [model], true, fingerprint, cacheDbPath)).toBe("written");
+		const peek = vi.spyOn(authStorage.keys, "peek");
+		const fetchMock = vi.fn(async () => new Response(null, { status: 500 }));
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		const hydrate = registry.createStartupModelCacheHydrator();
+		await Promise.all([hydrate(new Set(["GitHub-Copilot"])), hydrate(new Set(["github-copilot", "Kiro"]))]);
+
+		expect(peek.mock.calls.map(([provider]) => provider).sort()).toEqual(["github-copilot", "kiro"]);
+		expect(registry.find("kiro", model.id)?.name).toBe(model.name);
+		const cachedState = registry.getProviderDiscoveryState("kiro");
+		expect(cachedState?.status).toBe("cached");
+		const copilotBase = getBundledModel("github-copilot", "gpt-5.6-sol");
+		if (!copilotBase) throw new Error("Expected a bundled Copilot model");
+		const copilotId = "scoped-copilot-model";
+		expect(registry.find("github-copilot", copilotId)).toBeUndefined();
+		writeModelCache(
+			resolveModelCacheProviderId("github-copilot", { apiKey: "gho_copilot" }),
+			Date.now(),
+			[{ ...copilotBase, id: copilotId, requestModelId: copilotBase.id }],
+			true,
+			"",
+			cacheDbPath,
+			[copilotBase],
+		);
+		await hydrate(new Set(["github-copilot"]));
+		expect(registry.find("github-copilot", copilotId)?.name).toBe(copilotBase.name);
+
+		// An independent SQLite writer can replace the row without changing our
+		// auth/config or going through this process's model-cache invalidation.
+		const db = new Database(cacheDbPath);
+		try {
+			db.run("UPDATE model_cache SET models = replace(models, ?, ?) WHERE provider_id = ?", [
+				model.name,
+				"Rewritten Kiro catalog",
+				cacheProviderId,
+			]);
+		} finally {
+			db.close();
+		}
+		const kiroOnly = new Set(["kiro"]);
+		peek.mockClear();
+		await hydrate(kiroOnly);
+		expect(peek).toHaveBeenCalledTimes(1);
+		expect(registry.find("kiro", model.id)?.name).toBe(model.name);
+
+		await registry.hydrateCredentialScopedModelCaches(kiroOnly);
+		expect(registry.find("kiro", model.id)?.name).toBe("Rewritten Kiro catalog");
+		// A normal refresh superseded the launch's state; now cache this hit for
+		// the launch again and check the next call actually validates the key.
+		await hydrate(kiroOnly);
+
+		const rotatedKey = encodeKiroCredential({ kind: "api_key", token: "ksk_rotated", region: "us-east-1" });
+		const rotatedCacheId = resolveModelCacheProviderId("kiro", { apiKey: rotatedKey });
+		const rotated = { ...model, name: "Rotated Kiro catalog" };
+		expect(writeModelCache(rotatedCacheId, Date.now(), [rotated], true, fingerprint, cacheDbPath)).toBe("written");
+		authStorage.keys.setRuntime("kiro", rotatedKey);
+		peek.mockRejectedValueOnce(new Error("transient peek failure"));
+		await hydrate(kiroOnly);
+		expect(registry.find("kiro", model.id)?.name).toBe("Rewritten Kiro catalog");
+		await hydrate(kiroOnly);
+		expect(registry.find("kiro", model.id)?.name).toBe(rotated.name);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
 	test("Cursor startup hydration reads the row discovery wrote after the access token expired", async () => {
 		// Cursor rows are keyed on the token's account subject, so a rotated token
 		// keys the same row. Startup hydration reads offline, where peek drops an
@@ -5320,16 +5484,35 @@ describe("ModelRegistry runtime discovery", () => {
 		// Cursor discovery is authoritative: the row carries the manager's static fingerprint.
 		const fingerprint = fingerprintStaticModels(getBundledModels("cursor"), { authoritative: true });
 		writeModelCache(writeKey, Date.now(), [discovered], true, fingerprint, cacheDbPath);
-		await authStorage.credentials.set("cursor", {
-			type: "oauth",
-			access: expiredStoredToken,
-			refresh: "cursor-refresh",
-			expires: Date.now() - 60_000,
-		});
+		const authDbPath = path.join(tempDir, "startup-auth.db");
+		const reader = await AuthStorage.create(authDbPath);
+		authStorage.close();
+		authStorage = reader;
+		// Hydration must adopt credentials written through a separate connection
+		// after its auth store opened, before filtering key sources.
+		const writer = await AuthStorage.create(authDbPath);
+		try {
+			await writer.credentials.set("cursor", {
+				type: "oauth",
+				access: expiredStoredToken,
+				refresh: "cursor-refresh",
+				expires: Date.now() - 60_000,
+			});
+		} finally {
+			writer.close();
+		}
 
+		const poll = vi.spyOn(authStorage.credentials, "poll");
+		const peek = vi.spyOn(authStorage.keys, "peek");
 		const registry = new ModelRegistry(authStorage, modelsJsonPath);
-		await registry.hydrateCredentialScopedModelCaches();
+		await registry.hydrateCredentialScopedModelCaches(new Set());
+		await registry.hydrateCredentialScopedModelCaches(new Set(["openai", "cursor/not-a-provider"]));
+		expect(poll).not.toHaveBeenCalled();
+		expect(peek).not.toHaveBeenCalled();
 
+		await registry.hydrateCredentialScopedModelCaches(new Set(["CuRsOr"]));
+
+		expect(peek.mock.calls).toEqual([["cursor", undefined], ["cursor", { includeExpired: true }]]);
 		expect(registry.find("cursor", "claude-opus-5-5-1m")?.contextWindow).toBe(1_000_000);
 	});
 

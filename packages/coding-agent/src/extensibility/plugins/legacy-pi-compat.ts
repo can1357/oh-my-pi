@@ -61,11 +61,25 @@ interface ExtensionSpecifierReference {
 	readonly end: number;
 }
 
+/** Specifier of a `@jsxImportSource` pragma comment; offsets span the specifier text alone. */
+interface JsxImportSourcePragma {
+	readonly specifier: string;
+	readonly start: number;
+	readonly end: number;
+}
+
+/** Replacement text for a source range. */
+interface SourceEdit {
+	readonly start: number;
+	readonly end: number;
+	readonly text: string;
+}
+
 function parseExtensionSource(source: string, importerPath: string): ParseResult {
 	// Installing specifier hooks needs no parser; only a real source rewrite does.
 	const { parse: parseBabel }: typeof BabelParser = require("@babel/parser");
 	const extension = path.extname(importerPath).toLowerCase();
-	const plugins: ParserPlugin[] = ["decorators-legacy", "explicitResourceManagement"];
+	const plugins: ParserPlugin[] = ["decorators-legacy"];
 	if (extension === ".ts" || extension === ".mts" || extension === ".cts" || extension === ".tsx") {
 		plugins.push("typescript");
 	}
@@ -516,9 +530,7 @@ function collectExtensionSpecifierReferences(
 			}
 		} else if (node.type === "CallExpression") {
 			const callee = asAstNode(node.callee);
-			if (callee?.type === "Import") {
-				record("import", nodeArgument(node, 0));
-			} else if (isIdentifier(callee, "require") && !scopeHasBinding(scope, REQUIRE_BINDING)) {
+			if (isIdentifier(callee, "require") && !scopeHasBinding(scope, REQUIRE_BINDING)) {
 				record("require", nodeArgument(node, 0));
 			} else if (isCreateRequireInvocation(callee, createRequireBindings, moduleNamespaceBindings)) {
 				// `createRequire(base)(spec)` — pin the invoked bare dependency so it
@@ -538,15 +550,38 @@ function collectExtensionSpecifierReferences(
 	return references;
 }
 
-const EXTENSION_PARSE_CACHE_SCHEMA_VERSION = 3;
+const JSX_IMPORT_SOURCE_PRAGMA = /@jsxImportSource\s+(\S+)/g;
+
+/**
+ * Collect the `@jsxImportSource` pragmas Bun reads when transpiling JSX. Bun honors them in any
+ * comment, so every match is recorded; the runtime import it injects from them never passes
+ * through the specifier rewrite in {@link rewriteLegacyExtensionSource}.
+ */
+function collectJsxImportSourcePragmas(ast: ParseResult): JsxImportSourcePragma[] {
+	const pragmas: JsxImportSourcePragma[] = [];
+	for (const comment of ast.comments ?? []) {
+		if (typeof comment.start !== "number") continue;
+		// Both `//` and `/*` open the comment two characters before its value.
+		const valueStart = comment.start + 2;
+		for (const match of comment.value.matchAll(JSX_IMPORT_SOURCE_PRAGMA)) {
+			const specifier = match[1];
+			const start = valueStart + match.index + match[0].length - specifier.length;
+			pragmas.push({ specifier, start, end: start + specifier.length });
+		}
+	}
+	return pragmas;
+}
+
+const EXTENSION_PARSE_CACHE_SCHEMA_VERSION = 4;
 const CREATE_EXTENSION_PARSE_CACHE_TABLE =
-	"CREATE TABLE IF NOT EXISTS extension_parse_cache (cache_key TEXT PRIMARY KEY, source_type TEXT NOT NULL, [references] TEXT NOT NULL, commonjs_syntax INTEGER NOT NULL)";
+	"CREATE TABLE IF NOT EXISTS extension_parse_cache (cache_key TEXT PRIMARY KEY, source_type TEXT NOT NULL, [references] TEXT NOT NULL, jsx_import_sources TEXT NOT NULL, commonjs_syntax INTEGER NOT NULL)";
 const EXTENSION_PARSE_CACHE_MAX_BYTES = 8 * 1024 * 1024;
 const EXTENSION_PARSE_CACHE_MAX_ENTRIES = 10_000;
 
 interface ExtensionSourceAnalysis {
 	readonly sourceType: "script" | "module";
 	readonly references: readonly ExtensionSpecifierReference[];
+	readonly jsxImportSources: readonly JsxImportSourcePragma[];
 	/** Script source with an unshadowed `require(...)`, `exports`, or `module.exports` use. Always false for modules. */
 	readonly hasCommonJsSyntax: boolean;
 }
@@ -554,6 +589,7 @@ interface ExtensionSourceAnalysis {
 interface ExtensionParseCacheRow {
 	source_type: "script" | "module";
 	references: string;
+	jsx_import_sources: string;
 	commonjs_syntax: number;
 }
 
@@ -648,28 +684,35 @@ function parseCachedAnalysis(row: ExtensionParseCacheRow): ExtensionSourceAnalys
 	try {
 		if (row.source_type !== "script" && row.source_type !== "module") return null;
 		const references = JSON.parse(row.references) as unknown;
+		const jsxImportSources = JSON.parse(row.jsx_import_sources) as unknown;
 		if (
 			!Array.isArray(references) ||
 			!references.every(
-				reference =>
-					reference &&
-					typeof reference === "object" &&
-					(reference.kind === "import" || reference.kind === "require") &&
-					typeof reference.specifier === "string" &&
-					typeof reference.start === "number" &&
-					typeof reference.end === "number",
-			)
+				reference => isSourceSpan(reference) && (reference.kind === "import" || reference.kind === "require"),
+			) ||
+			!Array.isArray(jsxImportSources) ||
+			!jsxImportSources.every(isSourceSpan)
 		) {
 			return null;
 		}
 		return {
 			sourceType: row.source_type,
 			references: references as ExtensionSpecifierReference[],
+			jsxImportSources: jsxImportSources as JsxImportSourcePragma[],
 			hasCommonJsSyntax: row.commonjs_syntax === 1,
 		};
 	} catch {
 		return null;
 	}
+}
+
+function isSourceSpan(value: unknown): value is JsxImportSourcePragma & Record<string, unknown> {
+	return (
+		isRecord(value) &&
+		typeof value.specifier === "string" &&
+		typeof value.start === "number" &&
+		typeof value.end === "number"
+	);
 }
 
 function writeExtensionSourceAnalysis(cacheKey: string, analysis: ExtensionSourceAnalysis): void {
@@ -678,8 +721,14 @@ function writeExtensionSourceAnalysis(cacheKey: string, analysis: ExtensionSourc
 			const db = getExtensionParseCacheDb();
 			if (!db) return;
 			db.run(
-				"INSERT OR REPLACE INTO extension_parse_cache (cache_key, source_type, [references], commonjs_syntax) VALUES (?, ?, ?, ?)",
-				[cacheKey, analysis.sourceType, JSON.stringify(analysis.references), analysis.hasCommonJsSyntax ? 1 : 0],
+				"INSERT OR REPLACE INTO extension_parse_cache (cache_key, source_type, [references], jsx_import_sources, commonjs_syntax) VALUES (?, ?, ?, ?, ?)",
+				[
+					cacheKey,
+					analysis.sourceType,
+					JSON.stringify(analysis.references),
+					JSON.stringify(analysis.jsxImportSources),
+					analysis.hasCommonJsSyntax ? 1 : 0,
+				],
 			);
 			const count =
 				db.query<{ count: number }, []>("SELECT count(*) AS count FROM extension_parse_cache").get()?.count ?? 0;
@@ -703,7 +752,7 @@ function getExtensionSourceAnalysis(source: string, importerPath: string): Exten
 	try {
 		const row = db
 			?.query<ExtensionParseCacheRow, [string]>(
-				"SELECT source_type, [references], commonjs_syntax FROM extension_parse_cache WHERE cache_key = ?",
+				"SELECT source_type, [references], jsx_import_sources, commonjs_syntax FROM extension_parse_cache WHERE cache_key = ?",
 			)
 			.get(cacheKey);
 		if (row) {
@@ -724,6 +773,7 @@ function getExtensionSourceAnalysis(source: string, importerPath: string): Exten
 	const analysis: ExtensionSourceAnalysis = {
 		sourceType,
 		references: collectExtensionSpecifierReferences(source, importerPath, ast),
+		jsxImportSources: collectJsxImportSourcePragmas(ast),
 		hasCommonJsSyntax:
 			sourceType === "script" &&
 			collectScopedAstNodes(ast, node => node.type === "CallExpression" || node.type === "MemberExpression").some(
@@ -741,13 +791,14 @@ function getExtensionSourceAnalysis(source: string, importerPath: string): Exten
 	return analysis;
 }
 
-function applySpecifierReplacements(
-	source: string,
-	replacements: ReadonlyArray<ExtensionSpecifierReference & { readonly replacement: string }>,
-): string {
+function toSpecifierEdit(reference: ExtensionSpecifierReference & { readonly replacement: string }): SourceEdit {
+	return { start: reference.start, end: reference.end, text: JSON.stringify(reference.replacement) };
+}
+
+function applySourceEdits(source: string, edits: readonly SourceEdit[]): string {
 	let rewritten = source;
-	for (const reference of [...replacements].sort((left, right) => right.start - left.start)) {
-		rewritten = `${rewritten.slice(0, reference.start)}${JSON.stringify(reference.replacement)}${rewritten.slice(reference.end)}`;
+	for (const edit of [...edits].sort((left, right) => right.start - left.start)) {
+		rewritten = `${rewritten.slice(0, edit.start)}${edit.text}${rewritten.slice(edit.end)}`;
 	}
 	return rewritten;
 }
@@ -1210,7 +1261,8 @@ async function rewriteLegacyExtensionSource(
 	// Compiled mode completes the override map from the build-supplied module
 	// keys on first use; every rewrite path must see the full map.
 	await ensureLegacyPiOverridesReady();
-	const references = getExtensionSourceAnalysis(source, importerPath).references;
+	const analysis = getExtensionSourceAnalysis(source, importerPath);
+	const references = analysis.references;
 	const replacements: Array<ExtensionSpecifierReference & { replacement: string }> = [];
 	for (const reference of references) {
 		assertNoPiTuiImport(reference.specifier, importerPath);
@@ -1251,7 +1303,29 @@ async function rewriteLegacyExtensionSource(
 	// changes on every same-process reload and would force a Babel reparse.
 	// Import and require references never overlap, so one pass applies both.
 	replacements.push(...(await collectExtensionSpecifierReplacements(source, importerPath)));
-	return applySpecifierReplacements(source, replacements);
+	return applySourceEdits(source, [
+		...replacements.map(toSpecifierEdit),
+		...jsxImportSourceEdits(analysis.jsxImportSources),
+	]);
+}
+
+/**
+ * Point `@jsxImportSource` pragmas naming a host package at its bundled module. Bun appends
+ * `/jsx-runtime` (or `/jsx-dev-runtime`) to the pragma value and imports the result while it
+ * transpiles, after this rewrite, and compiled binaries fire no resolve hook for that import.
+ * A bundled virtual specifier keeps resolving with the suffix appended; source mode needs no
+ * edit because `installLegacyPiSpecifierShim()` still resolves the injected import there.
+ */
+function jsxImportSourceEdits(pragmas: readonly JsxImportSourcePragma[]): SourceEdit[] {
+	const edits: SourceEdit[] = [];
+	for (const pragma of pragmas) {
+		const remappedSpecifier = remapLegacyPiSpecifier(pragma.specifier);
+		const host = remappedSpecifier ? legacyPiPackageRootOverrides[remappedSpecifier] : undefined;
+		if (host && isBundledVirtualSpecifier(host)) {
+			edits.push({ start: pragma.start, end: pragma.end, text: host });
+		}
+	}
+	return edits;
 }
 
 /** Test seam for compiled-binary legacy extension source rewriting. */
@@ -2079,7 +2153,7 @@ function rewriteExtensionSpecifiersFromCache(source: string, importerPath: strin
 			replacements.push({ ...reference, replacement });
 		}
 	}
-	return applySpecifierReplacements(source, replacements);
+	return applySourceEdits(source, replacements.map(toSpecifierEdit));
 }
 
 /**
@@ -2530,9 +2604,9 @@ async function collectExtensionModules(entryRealPath: string): Promise<Extension
 		if (commonJsPaths.has(modulePath)) {
 			modules.set(
 				modulePath,
-				applySpecifierReplacements(
+				applySourceEdits(
 					source,
-					await collectExtensionSpecifierReplacements(source, modulePath, true, sources),
+					(await collectExtensionSpecifierReplacements(source, modulePath, true, sources)).map(toSpecifierEdit),
 				),
 			);
 		} else if (synchronousSourcePaths.has(modulePath)) {

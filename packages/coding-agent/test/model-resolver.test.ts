@@ -3531,6 +3531,12 @@ describe("filterAvailableModelsByEnabledPatterns", () => {
 		expect(resolveModelRoleValue(`amazon-bedrock/${profileArn}`, scope).model?.id).toBe(profileArn);
 	});
 
+	test("strips a :max thinking suffix from a Bedrock inference profile ARN", () => {
+		const scope = filterAvailableModelsByEnabledPatterns([createBedrockDefaultModel()], ["amazon-bedrock/*"]);
+		const profileArn = "arn:aws:bedrock:us-east-2:123456789012:inference-profile/global.anthropic.claude-haiku-5-5";
+		expect(resolveModelRoleValue(`amazon-bedrock/${profileArn}:max`, scope).model?.id).toBe(profileArn);
+	});
+
 	test("a scope constrains pins but not OpenRouter wire variants", () => {
 		const bare = mockOpenRouterModels[2];
 		const selector = `openrouter/${bare.id}`;

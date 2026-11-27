@@ -357,6 +357,11 @@ function rejectNonTextTasks(items: readonly string[], errors: string[]): boolean
 	return rejected;
 }
 
+const INIT_SHAPE_HINT =
+	'init wants list: [{"phase": "Name", "items": ["task", ...]}] or flat items: ["task", ...] (JSON arrays, not strings)';
+
+const TODO_FIELDS = new Set(["op", "list", "task", "phase", "items"]);
+
 /** Default phase name for flat `init` and `append` to an empty list. */
 const DEFAULT_INIT_PHASE = "Tasks";
 
@@ -369,7 +374,7 @@ function initPhases(entry: TodoOpEntryValue, errors: string[]): TodoPhase[] {
 	const flat = entry.items && entry.items.length > 0 ? [{ phase: entry.phase, items: entry.items }] : undefined;
 	const list = entry.list?.length ? entry.list : (flat ?? entry.list);
 	if (!list) {
-		errors.push("Missing list for init operation");
+		errors.push(`Missing list for init operation; ${INIT_SHAPE_HINT}`);
 		return [];
 	}
 	// An empty phase name cannot be explicitly targeted, so it gets the default.
@@ -527,6 +532,15 @@ function inferTodoOp(args: Record<string, unknown>, hasExistingPhases: boolean):
  * for a normal model retry.
  */
 function resolveTodoParams(raw: unknown, hasExistingPhases: boolean): TodoOpEntryValue | string {
+	// Undeclared keys are otherwise dropped silently, so `{op:"init", tasks:[...]}`
+	// would fail as "missing list" without telling the model which key was wrong.
+	if (isRecord(raw) && (raw.op === "init" || raw.op === "append")) {
+		const unknown = Object.keys(raw).filter(key => !TODO_FIELDS.has(key));
+		if (unknown.length > 0) {
+			const names = unknown.map(key => `"${key}"`).join(", ");
+			return `Invalid todo arguments: unknown field ${names}; ${raw.op === "init" ? INIT_SHAPE_HINT : 'append wants items: ["task", ...] and optional phase'}`;
+		}
+	}
 	const direct = todoSchema(raw);
 	if (!(direct instanceof type.errors)) return direct;
 	if (isRecord(raw) && raw.op === undefined) {
@@ -571,6 +585,8 @@ const STATUS_TO_MARKER: Record<TodoStatus, string> = {
 	abandoned: "-",
 };
 
+const TODO_CONTINUATION_INDENT = "  ";
+
 export function resolveTodoMarkdownPath(input: string, cwd: string): string {
 	const raw = normalizePathLikeInput(input) || "TODO.md";
 	return resolveToCwd(raw, cwd);
@@ -584,7 +600,13 @@ export function phasesToMarkdown(phases: TodoPhase[]): string {
 		if (i > 0) out.push("");
 		out.push(`# ${phases[i].name}`);
 		for (const task of phases[i].tasks) {
-			out.push(`- [${STATUS_TO_MARKER[task.status]}] ${task.content}`);
+			const [firstLine, ...continuations] = task.content.split("\n");
+			out.push(`- [${STATUS_TO_MARKER[task.status]}] ${firstLine}`);
+			for (const line of continuations) {
+				// Escape heading/list prefixes and mark blank lines that belong to the task.
+				const escaped = line.replace(/^(\s*)(?=[#*+\\-]|$)/, "$1\\");
+				out.push(`${TODO_CONTINUATION_INDENT}${escaped}`);
+			}
 		}
 	}
 	return `${out.join("\n")}\n`;
@@ -601,6 +623,10 @@ const MARKER_TO_STATUS: Record<string, TodoStatus> = {
 	"~": "abandoned",
 };
 
+const TODO_HEADING_PATTERN = /^#{1,6}\s+(.+?)\s*$/;
+// Some editors and Markdown serializers escape the checkbox brackets.
+const TODO_CHECKBOX_PATTERN = /^[-*+]\s*\\?\[(.?)\\?\](?:\s(.*))?$/s;
+
 /** Parse a Markdown checklist back into todo phases. */
 export function markdownToPhases(md: string): { phases: TodoPhase[]; errors: string[] } {
 	const errors: string[] = [];
@@ -614,33 +640,45 @@ export function markdownToPhases(md: string): { phases: TodoPhase[]; errors: str
 		const trimmed = raw.trim();
 		if (!trimmed) continue;
 
-		const headingMatch = /^#{1,6}\s+(.+?)\s*$/.exec(trimmed);
+		const headingMatch = TODO_HEADING_PATTERN.exec(trimmed);
 		if (headingMatch) {
 			currentPhase = { name: headingMatch[1].trim(), tasks: [] };
 			phases.push(currentPhase);
 			continue;
 		}
 
-		// Tolerate backslash-escaped brackets (`- \[x\]`): some editors and
-		// markdown serializers escape `[` (and `]`) when round-tripping, yet the
-		// line still renders as a normal `[x]` checkbox. Accept either form.
-		const taskMatch = /^[-*+]\s*\\?\[(.?)\\?\]\s+(.+?)\s*$/.exec(trimmed);
-		if (taskMatch) {
-			if (!currentPhase) {
-				currentPhase = { name: "Todos", tasks: [] };
-				phases.push(currentPhase);
-			}
-			const marker = taskMatch[1];
-			const status = MARKER_TO_STATUS[marker];
-			if (!status) {
-				errors.push(`Line ${lineNum + 1}: unknown status marker "[${marker}]" (use [ ], [x], [/], [-])`);
-				continue;
-			}
-			currentPhase.tasks.push({ content: taskMatch[2].trim(), status });
+		const taskMatch = TODO_CHECKBOX_PATTERN.exec(raw.trimStart());
+		const taskLine = lineNum + 1;
+		if (!taskMatch) {
+			errors.push(`Line ${taskLine}: unrecognized syntax "${trimmed}"`);
 			continue;
 		}
 
-		errors.push(`Line ${lineNum + 1}: unrecognized syntax "${trimmed}"`);
+		const contentLines = [taskMatch[2] ?? ""];
+		while (lines[lineNum + 1]?.startsWith(TODO_CONTINUATION_INDENT)) {
+			const line = lines[lineNum + 1].slice(TODO_CONTINUATION_INDENT.length);
+			// Preserve blank separators and indented headings and checkboxes.
+			const trimmedLine = line.trim();
+			if (!trimmedLine || TODO_HEADING_PATTERN.test(trimmedLine) || TODO_CHECKBOX_PATTERN.test(trimmedLine)) break;
+			contentLines.push(line.replace(/^(\s*)\\(?=[#*+\\-]|$)/, "$1"));
+			lineNum++;
+		}
+		const content = contentLines.length === 1 ? contentLines[0].trim() : contentLines.join("\n");
+		if (!content) {
+			errors.push(`Line ${taskLine}: unrecognized syntax "${trimmed}"`);
+			continue;
+		}
+		if (!currentPhase) {
+			currentPhase = { name: "Todos", tasks: [] };
+			phases.push(currentPhase);
+		}
+		const marker = taskMatch[1];
+		const status = MARKER_TO_STATUS[marker];
+		if (!status) {
+			errors.push(`Line ${taskLine}: unknown status marker "[${marker}]" (use [ ], [x], [/], [-])`);
+			continue;
+		}
+		currentPhase.tasks.push({ content, status });
 	}
 
 	normalizeInProgressTask(phases);

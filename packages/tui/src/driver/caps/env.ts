@@ -5,6 +5,7 @@
 import type { TerminalCapabilities } from "../contract";
 import { classifyMultiplexer, contractMultiplexer, type Env, hasMultiplexerSession, isSsh } from "../mux/detect";
 import { emojiSupportFor, type TerminalId, TERMINAL_PROFILES } from "./identity";
+import { kittyPlaceholdersSupported } from "../images/kitty";
 
 /** A user's explicit synchronized-output preference; opt-out beats force-on. */
 export function synchronizedOutputOverride(env: Env): boolean | null {
@@ -107,7 +108,8 @@ function imageProtocolFromTerm(id: TerminalId, env: Env): TerminalCapabilities["
 /**
  * The image protocol to use without probing: the terminal's own (Warp's only
  * off Windows), else what `TERM` says; none for hosts that draw no graphics
- * (Paseo, Herdr) and for Kitty graphics behind a tmux that drops passthrough.
+ * (Paseo, Herdr) and for Kitty graphics behind a tmux that drops passthrough
+ * or a client without Unicode placeholders.
  * Null means "none known" (the startup probe may still find SIXEL).
  */
 export function imageProtocolFromEnv(id: TerminalId, env: Env, context: ImageContext): TerminalCapabilities["images"] {
@@ -120,7 +122,10 @@ export function imageProtocolFromEnv(id: TerminalId, env: Env, context: ImageCon
 				: "kitty"
 			: (TERMINAL_PROFILES[id].images ?? imageProtocolFromTerm(id, env));
 	if (images === null || env.PASEO_TERMINAL_ID || hasMultiplexerSession("herdr", env)) return null;
-	if (images === "kitty" && env.TMUX && !context.tmuxPassthrough) return null;
+	// Through tmux a direct Kitty placement lands at tmux's outer cursor, not the pane's;
+	// only Unicode placeholders stay in place. Without them, leave SIXEL to the probe.
+	if (images === "kitty" && env.TMUX && (!context.tmuxPassthrough || !kittyPlaceholdersSupported(id, env)))
+		return null;
 	return images;
 }
 

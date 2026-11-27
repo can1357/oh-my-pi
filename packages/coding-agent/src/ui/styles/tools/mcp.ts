@@ -45,7 +45,7 @@ function paintMcp(node: UiNode, cx: PaintContext): Block {
 			);
 		}
 	}
-	if (!term.result) return { rows: callRows };
+	if (!term.result) return { rows: callRows, heading: callRows.length };
 	const glyph =
 		props.status === "running"
 			? spinnerGlyph(cx)
@@ -55,6 +55,7 @@ function paintMcp(node: UiNode, cx: PaintContext): Block {
 					? theme.fg("error", theme.symbols.symbol("status.error"))
 					: theme.fg("accent", theme.symbols.symbol("tool.mcp"));
 	const rows = [...callRows, ...wrap(`${glyph} ${title}`, cx.width)];
+	const heading = rows.length;
 	const expanded = props.collapsed === false;
 	const output: string[] = [];
 	let hint: string | undefined;
@@ -95,7 +96,7 @@ function paintMcp(node: UiNode, cx: PaintContext): Block {
 			: output;
 	for (const line of lines) rows.push(...(line === "" ? [""] : wrap(line, cx.width)));
 	if (hint) rows.push(...wrap(hint, cx.width));
-	return { rows };
+	return { rows, heading };
 }
 
 defineToolLook("mcp", { paint: paintMcp, boxed: true });

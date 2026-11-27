@@ -18,7 +18,6 @@ html-escape.workspace = true
 html5ever.workspace = true
 jiff.workspace = true
 memchr = "2.8"
-phf.workspace = true
 quick-xml = "0.41"
 regex.workspace = true
 serde_json.workspace = true

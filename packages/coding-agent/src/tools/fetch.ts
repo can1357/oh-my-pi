@@ -230,22 +230,25 @@ function shouldSkipBodyDownload(contentType: string): boolean {
 	return mime.startsWith("audio/") || mime.startsWith("video/");
 }
 
-function remoteReaderOptions(
+async function remoteReaderOptions(
 	settings: Settings,
 	storage: AgentStorageApi | null,
-): {
+): Promise<{
 	remote: ReaderRemoteBackend[];
 	preferRemote: boolean;
-} {
+}> {
 	const provider = cfgProvidersFetch.get(settings);
 	const remote: ReaderRemoteBackend[] = [];
-	const parallelKey = findParallelApiKey(storage);
+	const [parallelKey, firecrawlKey, jinaCredential] = await Promise.all([
+		findParallelApiKey(storage),
+		findFirecrawlApiKey(storage),
+		findCredential(storage, getEnvApiKey("jina"), "jina"),
+	]);
 	if (parallelKey) remote.push({ kind: "parallel", apiKey: parallelKey });
-	const firecrawlKey = findFirecrawlApiKey(storage);
 	if (firecrawlKey) {
 		remote.push({ kind: "firecrawl", apiKey: firecrawlKey, baseUrl: configuredFirecrawlBaseUrl() });
 	}
-	const jinaKey = findCredential(storage, getEnvApiKey("jina"), "jina")?.trim() || undefined;
+	const jinaKey = jinaCredential?.trim() || undefined;
 	if (jinaKey || cfgProvidersWebKeyless.get(settings)) {
 		remote.push({ kind: "jina", apiKey: jinaKey });
 	}
@@ -598,7 +601,7 @@ async function renderUrl(
 		apiUserAgent: USER_AGENT,
 		nowMs: Date.now(),
 		...(!raw && (await siteReaderOptions(url, settings, modelRegistry, signal))),
-		...(!raw && remoteReaderOptions(settings, storage)),
+		...(!raw && (await remoteReaderOptions(settings, storage))),
 		timeoutMs: timeout * 1000,
 		signal,
 		fetch: fetchOverride,

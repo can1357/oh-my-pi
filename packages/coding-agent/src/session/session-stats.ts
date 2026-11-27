@@ -49,7 +49,6 @@ export interface SessionStatsTrackerHost {
 	sessionManager: SessionManager;
 	modelRegistry: ModelRegistry;
 	model(): Model | undefined;
-	sessionId(): string;
 }
 
 function correctedPromptTokens(assistant: AssistantMessage): number {
@@ -248,7 +247,7 @@ export class SessionStatsTracker {
 		forEachActiveModelUsage(this.#host.sessionManager.getBranchView(), addUsage);
 		return {
 			sessionFile: this.#host.sessionManager.getSessionFile(),
-			sessionId: this.#host.sessionId(),
+			sessionId: this.#host.sessionManager.getSessionId(),
 			userMessages,
 			assistantMessages,
 			toolCalls,
