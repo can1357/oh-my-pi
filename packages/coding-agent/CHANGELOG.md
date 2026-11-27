@@ -171,6 +171,7 @@
 - Fixed `wait` guidance sending agents to ask the user to check back later on an outside condition (a CI run, a deploy): the tool description and the back-to-back wait reminder now name one async `bash` watcher that exits once the condition holds, then ending the turn or calling `wait`, and limit the `sleep` job rule to sleeping just to keep calling `wait` ([#18900](https://github.com/can1357/oh-my-pi/issues/18900))
 - RPC mode now writes a `notice` frame with `source: "session-model-restore"` before exiting when a startup `--continue`/`--resume` cannot restore the saved model, so hosts can tell the fail-closed exit from a crash and rebind via `open_session`/`switch_session` with an explicit model ([#17611](https://github.com/can1357/oh-my-pi/issues/17611))
 - Corrected the theme docs: markdown code fences render as `mdCodeBlockBorder`-colored fence rows, not `boxRound.*` frames ([#20111](https://github.com/can1357/oh-my-pi/issues/20111))
+- Fixed routine absolute-path `rm -f` and `rm -r` commands ignoring the bash allow policy in `write` mode; home directories and protected system roots still require approval ([#20241](https://github.com/can1357/oh-my-pi/issues/20241), [#20244](https://github.com/can1357/oh-my-pi/pull/20244) by [@roboomp](https://github.com/roboomp))
 
 ### Removed
 
