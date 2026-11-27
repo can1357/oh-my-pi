@@ -469,11 +469,11 @@ export class AgentTranscriptViewerModel {
 				const { complete } = splitComplete(result.text);
 				// A reset page is the whole transcript again: it replaces every block read so far.
 				this.#remoteBytes = (result.reset ? 0 : from) + Buffer.byteLength(complete, "utf-8");
+				// The rebuilt transcript names its own model: drop the old one before reading it.
+				if (result.reset) this.model = undefined;
 				const parsed = complete ? this.#messages(this.deps.transcript.parseEntries(complete)) : [];
-				if (result.reset) {
-					this.model = undefined;
-					this.#rebuild(parsed);
-				} else if (parsed.length > 0) this.#append(parsed);
+				if (result.reset) this.#rebuild(parsed);
+				else if (parsed.length > 0) this.#append(parsed);
 				else this.touch();
 			})
 			.catch((error: unknown) => {

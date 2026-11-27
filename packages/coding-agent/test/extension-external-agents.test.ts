@@ -180,8 +180,10 @@ describe("ExtensionContext.agents.registerExternal", () => {
 		const ctx = await extensionContext();
 		const entry = (id: string, text: string): string =>
 			`${JSON.stringify({ type: "message", id, parentId: null, timestamp: new Date(0).toISOString(), message: { role: "user", content: text, timestamp: 0 } })}\n`;
-		const first = entry("a", "first") + entry("b", "second");
-		const rebuilt = entry("c", "rebuilt");
+		const modelChange = (id: string, model: string): string =>
+			`${JSON.stringify({ type: "model_change", id, parentId: null, timestamp: new Date(0).toISOString(), model })}\n`;
+		const first = modelChange("m1", "openai/model-a") + entry("a", "first") + entry("b", "second");
+		const rebuilt = modelChange("m2", "openai/model-b") + entry("c", "rebuilt");
 		const pages: ExternalTranscriptPage[] = [
 			{ text: first, newSize: Buffer.byteLength(first) },
 			{ text: rebuilt, newSize: Buffer.byteLength(rebuilt), reset: true },
@@ -211,9 +213,12 @@ describe("ExtensionContext.agents.registerExternal", () => {
 
 		await until(() => shown().length === 2, "first page");
 		expect(shown()).toEqual(["first", "second"]);
+		expect(viewer.model).toBe("openai/model-a");
 		viewer.poll();
 		await until(() => shown()[0] === "rebuilt", "reset page");
 		expect(shown()).toEqual(["rebuilt"]);
+		// The rebuilt transcript's model_change names the model shown.
+		expect(viewer.model).toBe("openai/model-b");
 		viewer.poll();
 		await until(() => reads.length === 3, "read after the reset");
 		expect(reads).toEqual([0, Buffer.byteLength(first), Buffer.byteLength(rebuilt)]);
