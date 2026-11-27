@@ -6,8 +6,7 @@ import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-ca
 import { routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
 
-/** Thinking selectors accepted by CLI inputs, in display order. */
-export const CLI_THINKING_LEVELS: readonly ConfiguredThinkingLevel[] = ["off", ...THINKING_EFFORTS, "auto"];
+export { CLI_THINKING_LEVELS } from "./cli-levels";
 
 /**
  * Metadata used to render thinking selector values in the coding-agent UI.

@@ -21,3 +21,21 @@ test("normal CLI startup keeps computer worker modules lazy", async () => {
 	const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
 	expect(exitCode, stderr).toBe(0);
 });
+
+test("root --help stays addon-free", async () => {
+	using tempDir = TempDir.createSync("@omp-cli-help-no-addons-");
+	const cliUrl = new URL("../src/cli.ts", import.meta.url).href;
+	const probePath = tempDir.join("probe.ts");
+	await Bun.write(
+		probePath,
+		[
+			`import { runCli } from ${JSON.stringify(cliUrl)};`,
+			"process.stdout.write = () => true;",
+			'await runCli(["--help"]);',
+		].join("\n"),
+	);
+
+	const child = Bun.spawn([process.execPath, "--no-addons", probePath], { stdout: "pipe", stderr: "pipe" });
+	const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+	expect(exitCode, stderr).toBe(0);
+});
