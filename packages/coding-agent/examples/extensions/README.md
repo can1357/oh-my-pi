@@ -41,6 +41,7 @@ cp permission-gate.ts ~/.omp/agent/extensions/
 | `handoff.tsx`      | Transfer context to a new focused session via `/handoff <goal>`                |
 | `qna.tsx`          | Extracts questions from last response into editor via `ctx.ui.setEditorText()` |
 | `status-line.ts`   | Shows turn progress in footer via `ctx.ui.setStatus()` with themed colors      |
+| `copy-notice.ts`   | Shows "copied N chars to clipboard" above the editor via `ctx.ui.setWidget()` (Wayland + Hyprland) |
 | `thinking-note.tsx` | Adds a display-only pi-tui note below assistant thinking blocks                |
 | `snake.ts`         | Snake game with custom UI, keyboard handling, and session persistence          |
 
