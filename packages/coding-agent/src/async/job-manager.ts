@@ -4,7 +4,7 @@ import { isRecord, logger, truncate } from "@oh-my-pi/pi-utils";
 import { collapseCommand } from "../cli/ps-model";
 import type { StructuredSubagentOutput } from "../task/task-details";
 import type { OutputMeta } from "../tools/output-meta-format";
-import { enforceInlineByteCap } from "../tools/streaming-output";
+import { enforceInlineByteCap, type InlineByteCapOptions } from "../tools/streaming-output";
 import type { ShellTrace } from "@oh-my-pi/pi-wire";
 import { IrcBus } from "../irc/bus";
 import { yieldQueueStaleMessage } from "../session/yield-queue";
@@ -29,17 +29,17 @@ export function formatAsyncJobLabel(command: string): string {
 }
 
 /**
- * Run a job body whose text reaches the model verbatim, with its result or its failure's message cut to
- * `maxBytes` by {@link enforceInlineByteCap}, as `bash` caps the output it hands the model.
+ * Run a job body whose text reaches the model verbatim, with its result or its failure's message capped by
+ * {@link enforceInlineByteCap} under `cap`, as `bash` caps the output it hands the model.
  */
-export async function capAsyncJobOutcome(body: () => Promise<string>, maxBytes: number): Promise<string> {
+export async function capAsyncJobOutcome(body: () => Promise<string>, cap: InlineByteCapOptions): Promise<string> {
 	let text: string;
 	try {
 		text = await body();
 	} catch (error) {
-		throw new Error(await enforceInlineByteCap(error instanceof Error ? error.message : String(error), { maxBytes }));
+		throw new Error(await enforceInlineByteCap(error instanceof Error ? error.message : String(error), cap));
 	}
-	return await enforceInlineByteCap(text, { maxBytes });
+	return await enforceInlineByteCap(text, cap);
 }
 /**
  * A settled job row whose result was already consumed — auto-delivered to its

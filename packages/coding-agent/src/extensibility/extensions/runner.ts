@@ -47,7 +47,7 @@ import type { SessionManager } from "../../session/session-manager";
 import type { ApprovalRecordSink } from "../../session/tool-approval-records";
 import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-write-fallback";
 import { resolveInlineByteCapBudget } from "../../tools/output-meta";
-import { truncateTail } from "../../tools/streaming-output";
+import { type InlineByteCapOptions, truncateTail } from "../../tools/streaming-output";
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
 import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shared-events";
 import { ManagedTimers } from "./managed-timers";
@@ -611,6 +611,17 @@ interface TodoBackendList {
  */
 function extensionJobText(text: string): string {
 	return formatAsyncJobLabel(sanitizeDisplayLine(text));
+}
+
+/**
+ * The cap on an extension job's result or failure before the session keeps and delivers it: `bash`'s inline
+ * budget, with the full text saved as a session artifact the cap's `[raw output: …]` footer links.
+ */
+function extensionJobResultCap(settings: Settings | undefined, sessionManager: SessionManager): InlineByteCapOptions {
+	return {
+		maxBytes: resolveInlineByteCapBudget(settings),
+		saveArtifact: full => sessionManager.saveArtifact(full).catch(() => undefined),
+	};
 }
 
 /** Identity reported by a session that is not a subagent and received no explicit identity. */
@@ -2108,7 +2119,7 @@ export class ExtensionRunner {
 												signal,
 												reportProgress: text => reportProgress(truncateTail(text).content),
 											}),
-										resolveInlineByteCapBudget(this.settings),
+										extensionJobResultCap(this.settings, this.sessionManager),
 									),
 								{
 									ownerId: this.agent.id,
