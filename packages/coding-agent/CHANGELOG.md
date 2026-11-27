@@ -8,6 +8,9 @@
 - Removed the `cwd` argument of the eval `sh` helper; every `sh` command starts in the session cwd (use `cd <path> && …` inside the command)
 - The `providers.fetch` configuration values `native`, `trafilatura`, and `lynx` have been replaced by the single `local` value for the in-process reader engine.
 - Removed unused `parse*Args` and `print*Help` exports from the CLI configuration, grep, plugin, setup, shell, web-search, and update modules.
+- omp no longer reads other agents' user-level config (`~/.claude`, `~/.claude.json`, Claude Code plugins, `~/.codex`, `~/.config/opencode`, `~/.cursor`, `~/.codeium/windsurf`, `~/.copilot`); the `enabledProviders` setting, the `skills.enableClaudeUser`, `skills.enableCodexUser`, `commands.enableClaudeUser` and `commands.enableOpencodeUser` settings, and the dashboard's per-provider user toggle are gone. If you had opted in, the first launch offers to symlink or copy what you were inheriting into `~/.omp/agent`
+- Dropped discovery of GitHub Copilot (`.github/copilot-instructions.md`, `.github/instructions`, `.github/prompts`, `.github/skills`), Cursor (`.cursor/rules`, `.cursorrules`, `.cursor/mcp.json`), Windsurf (`.windsurf/`), VS Code (`.vscode/mcp.json`) and Cline (`.clinerules`) config
+- Project-level Claude Code, Codex and OpenCode config is limited to MCP servers, skills, commands and `.claude/CLAUDE.md`; `.claude/{tools,extensions,hooks,settings.json,SYSTEM.md}`, Codex commands, prompts, hooks, tools and settings, and OpenCode plugins and settings no longer load
 
 ### Added
 

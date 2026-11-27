@@ -10,7 +10,7 @@ import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { getModelPricingStatus, modelsAreEqual, routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import type { ModelKind } from "@oh-my-pi/pi-catalog/types";
-import { ensureSqliteLockShim, isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
+import { ensureSqliteLockShim, errorMessage, isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
 import { bindAgentMesh } from "./irc/mesh";
 import {
 	APP_NAME,
@@ -87,6 +87,7 @@ import {
 } from "./extensibility/plugins/marketplace-auto-update";
 import type { MCPManager } from "./mcp";
 import type { InteractiveMode } from "./modes/interactive-mode";
+import { offerForeignConfigMigration, pendingForeignConfigMigration } from "./modes/foreign-config-migration";
 import { formatSessionContinuationNotice } from "./modes/persistence-failure";
 import type { PrintModeOptions } from "./modes/print-mode";
 import type { RpcModeOptions } from "./modes/rpc/rpc-mode";
@@ -819,17 +820,23 @@ async function runInteractiveMode(
 		}
 		playStartupSplash = showStartupSplash && setupScenes.length === 0;
 		const offersStartupWorktree = !resuming && joinLink === undefined;
+		const foreignConfigTools = await pendingForeignConfigMigration([
+			settings.getGlobalSettings(),
+			settings.getProjectSettings(),
+		]);
 
 		await logger.time("InteractiveMode.init", () =>
 			mode.init({
 				suppressWelcomeIntro: resuming || setupScenes.length > 0 || playStartupSplash,
 				clearInitialTerminalHistory: true,
 				autoStartCollab: joinLink === undefined,
-				// Setup scenes and the startup worktree question wait on the user before any
-				// prompt runs, so they keep the boot `idle`. The worktree check runs before its
-				// async git check, so a folder where the question never shows also keeps `idle`.
+				// Setup scenes, the startup worktree question and the foreign-config offer wait on
+				// the user before any prompt runs, so they keep the boot `idle`. The worktree check
+				// runs before its async git check, so a folder where the question never shows also
+				// keeps `idle`.
 				startupRun:
 					setupScenes.length === 0 &&
+					foreignConfigTools.length === 0 &&
 					!(offersStartupWorktree && mode.mayAskForStartupWorktree()) &&
 					(startupGoal !== undefined || initialMessage !== undefined || initialMessages.length > 0),
 			}),
@@ -899,6 +906,14 @@ async function runInteractiveMode(
 
 		if (offersStartupWorktree) {
 			await mode.maybeAutoCreateWorktree();
+		}
+
+		if (foreignConfigTools.length > 0) {
+			try {
+				await offerForeignConfigMigration(mode, foreignConfigTools);
+			} catch (error) {
+				mode.showWarning(`Could not offer to keep inherited config: ${errorMessage(error)}`);
+			}
 		}
 
 		// `omp join <link>`: dispatch through the same builtin path as a typed

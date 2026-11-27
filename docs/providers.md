@@ -6,29 +6,19 @@ A **provider** is the account or backend namespace, such as `anthropic`, `openai
 
 This page covers how providers become available, how credentials are resolved, the provider/environment-variable map, local engines, disabling providers, and custom providers. For native Kiro authentication, model discovery, and streaming, see [Kiro](./kiro.md). For endpoint-specific request, reasoning, tool, stream, usage, and retry constraints, see [Provider endpoint constraints](./provider-endpoint-constraints.md). For model selection and the full `models.yml` schema, see [Model and Provider Configuration](./models.md). For config-file locations and merge precedence, see [Settings](./settings.md). For credential storage and login flows in depth, see [Secrets and credentials](./secrets.md). For the complete environment-variable reference, see [Environment variables](./environment-variables.md). For local engine setup, see [Local models](./local-models.md). For context-file discovery providers, see [Context files](./context-files.md).
 
-## Antigravity CLI
+## Google AI Ultra plan
 
-`antigravity-cli` runs Google's `agy acp` locally.
+The `google-ai-ultra` provider runs Gemini models from Google on your own Google AI Ultra plan. It needs a Google account with an active Google AI Ultra subscription; no API key is involved.
 
-1. Run `/login antigravity-cli` or `omp login antigravity-cli`.
-2. Complete agy's Google sign-in and paste the authorization code or callback URL.
-3. Select, for example, `antigravity-cli/gemini-4-carbon` or `antigravity-cli/claude-sonnet-5-5`.
+1. Run `/login google-ai-ultra` (listed as "Sign in with Google (AI Ultra)") or `omp login google-ai-ultra`.
+2. Approve the sign-in in your browser. A sign-in lasts 7 days, then sign in again.
+3. Select a model, for example `google-ai-ultra/gemini-4-hydrogen` (the default), and send a prompt.
 
-omp downloads agy from Google's release manifests, checks SHA-512, and keeps versioned executables under its data directory (normally `~/.omp/antigravity-cli/bin`). It checks for updates at most daily without changing your shell profiles. `PI_AGY_PATH` selects an existing executable instead. The CLI's IDE-tool transport requires `nc` (netcat) on `PATH`.
+Requests count against the plan's daily limits, which Google keeps separately for each model (Gemini 4 Hydrogen, Gemini 4 Neon, Gemini 4 Carbon, Gemini 3.5 Flash-Lite). When one model's daily limit is reached, `omp` reports when it resets and the other models stay available; it does not retry that model until the reset. With several signed-in Google accounts, a turn moves to the next account when one account has no eligible plan or has spent that model's daily limit. Each model exposes Google's own thinking levels (`xhigh` on Hydrogen and Neon, `minimal` on Flash-Lite).
 
-Login exports the resulting OAuth grant into omp's credential store so normal refresh and broker distribution can manage it. The ACP child uses a private, account-scoped native credential file rather than modifying your ordinary agy login. A child-only headless-auth environment selects agy's file storage. Do not copy access tokens into `--api-key`: the transport expects the structured OAuth credential produced by login.
+The sign-in belongs to the machine that started it. Google binds it to a key generated there, so the refresh token and that key stay in the OS credential vault (macOS Keychain, Windows Credential Manager, a Secret Service keyring on Linux; on hosts without one, an owner-only file under `~/.omp/agent/vault/`) and never reach a shared auth broker. On a remote machine or over SSH, run the login there: open the printed URL in your local browser, then paste the final `127.0.0.1` address from the browser's address bar back into `omp` (or forward the printed port with `ssh -L`). Copying credentials from another machine does not work.
 
-Abandoned login directories without a credential are removed after 24 hours. A directory that still holds a credential is kept for recovery.
-
-omp supplies the system prompt and tool schemas through ACP and an IDE MCP bridge. Tool names remain bare in omp; agy presents them to the model as `mcp_ide-tools_<name>`. The built-in agent prompt and coding tools are removed, but agy's `manage_task` and MCP resource tools remain internal to agy. Tool execution and approvals for the supplied tools stay with omp.
-
-Invalid tool arguments are returned to the model with the failing paths and the tool's expected schema, so the model can correct the call without ending the turn.
-
-The transport retains agy's conversation between model steps, including while omp executes a tool. Edits, branches and changed context restore a matching saved turn boundary when possible; otherwise the retained transcript is supplied to a fresh conversation. Native conversations and credentials are local to the machine running inference. agy's three-minute MCP timeout means longer tool operations require cancelling its waiting turn and delivering the completed result as a subsequent message.
-
-Routine OAuth refresh preserves the native conversation, even while a host tool is running. When broker-managed credentials require an agy restart, omp reloads the same conversation before sending the completed tool result. Checkpoints written by earlier omp versions still fall back to transcript replay if a fork is needed.
-
-The bundled roster follows agy 1.5.9's model picker; availability still depends on the signed-in account. ACP supports model and thinking-level selection, but not caller-specified temperature, stop sequences or output-token caps. Token totals arrive at native turn end; intermediate steps report occupied context rather than invented per-step billing. Google's account-policy warning is shown before sign-in.
+`/logout google-ai-ultra` offers two actions per account: **Sign out on this device** deletes the sign-in from this machine only, and **Disconnect Google Account** also revokes it at Google, ending it on every device. If Google cannot confirm the revocation, `omp` still deletes the local copy; remove `omp` at [Google Account Connections](https://myaccount.google.com/connections).
 
 ## Factory Droid
 
@@ -397,7 +387,7 @@ For the example above:
 - `anthropic` and `openai` are additionally disabled under `~/projects/sensitive`.
 - `openrouter` is additionally disabled under `~/work/client-a` and `~/work/client-b`.
 
-Path scopes are resolved **after** the settings merge. Because a higher-precedence layer replaces the whole array, a project-level `disabledProviders` array drops any scoped entries that only existed in the global array. `enabledModels` and `enabledProviders` also support this form. See [Settings](./settings.md) for details.
+Path scopes are resolved **after** the settings merge. Because a higher-precedence layer replaces the whole array, a project-level `disabledProviders` array drops any scoped entries that only existed in the global array. `enabledModels` also supports this form. See [Settings](./settings.md) for details.
 
 ## Provider IDs vs discovery provider IDs
 
@@ -409,9 +399,7 @@ Path scopes are resolved **after** the settings merge. Because a higher-preceden
 | Entry type            | Examples                                                                      | Effect                                                          |
 | --------------------- | ----------------------------------------------------------------------------- | --------------------------------------------------------------- |
 | Model provider ID     | `anthropic`, `openai`, `google`, `groq`, `openrouter`, `ollama`, `my-gateway` | Removes that provider's models from availability.               |
-| Discovery provider ID | `native`, `claude`, `codex`, `agents`, `github`                             | Stops that discovery source from contributing capability items. |
-
-`enabledProviders` controls opt-in user-level foreign discovery sources; it is not a model-provider allowlist. Project-level foreign sources have separate discovery behavior. Use model settings to narrow model selection.
+| Discovery provider ID | `native`, `claude`, `codex`, `agents`, `opencode`                           | Stops that discovery source from contributing capability items. |
 
 Watch the related names. The Google Gemini **API** models use the model provider ID `google`; discovery provider IDs such as `claude` or `codex` name config sources, not model providers. Use discovery IDs only when you intend to disable an entire config source. See [Context files](./context-files.md) for the discovery-provider side.
 

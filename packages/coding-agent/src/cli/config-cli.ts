@@ -216,7 +216,7 @@ async function handleList(flags: { json?: boolean }): Promise<void> {
 
 /**
  * The keys the `scope` layer sets, with the values as written: path-scoped arrays
- * (`enabledModels`, `enabledProviders`, `disabledProviders`) keep their `{ path, … }` entries
+ * (`enabledModels`, `disabledProviders`) keep their `{ path, … }` entries
  * unresolved, so a host can edit the layer's own value without dropping them. Defaults, other
  * layers and the environment are not consulted. Credentials are redacted as in `list`.
  */

@@ -437,16 +437,14 @@ import { cfgFollowUpMode } from "./modes/settings";
 import { cfgSteeringMode } from "./modes/settings";
 import {
 	cfgCommandsEnableClaudeProject,
-	cfgCommandsEnableClaudeUser,
 	cfgCommandsEnableOpencodeProject,
-	cfgCommandsEnableOpencodeUser,
 	cfgDisabledExtensions,
 	cfgExtensions,
 	cfgSkills,
 	type SkillsSettings,
 } from "./extensibility/settings";
 import { cfgTtsr } from "./export/ttsr-settings";
-import { cfgDisabledProviders, cfgEnabledModels, cfgEnabledProviders, cfgModelRoles } from "./config/model-settings";
+import { cfgDisabledProviders, cfgEnabledModels, cfgModelRoles } from "./config/model-settings";
 import { cfgEditRecoverInlineEdits } from "./edit/settings";
 import { cfgGoalEnabled } from "./goals/settings";
 import {
@@ -493,14 +491,11 @@ function intentTracingActive(settings: Settings): boolean {
 	return cfgToolsIntentTracing.isConfigured(settings) ? cfgToolsIntentTracing.get(settings) : isInteractiveHost();
 }
 
-/** Settings skill and file slash-command discovery reads (foreign sources gated by the provider lists). */
+/** Settings skill and file slash-command discovery reads (provider sources gated by `disabledProviders`). */
 const cfgSkillsAndCommandsDiscovery = combine({
 	skills: cfgSkills,
-	commandsClaudeUser: cfgCommandsEnableClaudeUser,
 	commandsClaudeProject: cfgCommandsEnableClaudeProject,
-	commandsOpencodeUser: cfgCommandsEnableOpencodeUser,
 	commandsOpencodeProject: cfgCommandsEnableOpencodeProject,
-	enabledProviders: cfgEnabledProviders,
 	disabledProviders: cfgDisabledProviders,
 });
 
@@ -5838,7 +5833,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		if (agentKind === "main") {
 			// Live skills/commands discovery settings: rediscover skills and file slash
 			// commands, rebuild the prompt, and notify command pickers (TUI/RPC/ACP).
-			// `enabledProviders`/`disabledProviders` gate foreign provider sources.
+			// `disabledProviders` gates provider sources.
 			cfgSkillsAndCommandsDiscovery.listen(session, () => session.refreshSkillsAndCommands());
 			// Project scope: extensions and file custom tools follow the session cwd (`/move`,
 			// cross-project resume) and the live `extensions` / `disabledExtensions` settings.

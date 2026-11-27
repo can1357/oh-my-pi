@@ -226,9 +226,9 @@ The agent remembers your codebase between sessions. It writes facts mid-run with
 
 Run omp inside Zed and you get the same agent you drive from the terminal — reading the buffer you're actually looking at, writing through the editor's save path, spawning shells in the editor's terminal. Destructive tools pause for a permission prompt you can answer once and forget. No bridge, no plugin, no second brain to keep in sync.
 
-### 15 · Inherits what your other tools already wrote
+### 15 · Works with what your repo already has
 
-Every other agent ships an importer and expects you to convert. omp reads the eight formats already on disk in their native shape — Cursor MDC, Cline .clinerules, Codex AGENTS.md, Copilot applyTo, and the rest. No migration script, no YAML-to-TOML port, no "supported subset" footnotes. The config your team wrote last quarter still works tonight.
+omp reads the project files your team already committed in their native shape — `AGENTS.md`, `CLAUDE.md`, `.claude/` skills, commands and MCP servers, Codex `.codex/config.toml` and skills, OpenCode `opencode.json`, and `.agents/`. Your home directory stays yours: omp never reads another tool's `~/` config, and if you used to opt into it, a one-time prompt offers to copy or symlink it into `~/.omp/agent`.
 
 ### 16 · omp commit: atomic splits, validated messages
 
@@ -352,7 +352,7 @@ Anthropic `oauth` · OpenAI · OpenAI Codex `oauth` · Google Gemini · Google V
 
 Subscription-routed. `/login` attaches the session.
 
-Cursor `oauth` · GitHub Copilot `oauth` · GitLab Duo · Devin `oauth` · Kiro `oauth` · Kimi Code `plan` · Moonshot · MiniMax Coding Plan `plan` · MiniMax Coding Plan CN `plan` · Alibaba Coding Plan `plan` · Qwen Portal `oauth` · Z.AI / GLM Coding Plan `plan` · Zhipu Coding Plan `plan` · Xiaomi MiMo · Qianfan · Umans `plan` · NanoGPT · Novita · Venice · Kilo · ZenMux · OpenCode Go · OpenCode Zen
+Cursor `oauth` · GitHub Copilot `oauth` · Google AI Ultra plan `oauth` · GitLab Duo · Devin `oauth` · Kiro `oauth` · Kimi Code `plan` · Moonshot · MiniMax Coding Plan `plan` · MiniMax Coding Plan CN `plan` · Alibaba Coding Plan `plan` · Qwen Portal `oauth` · Z.AI / GLM Coding Plan `plan` · Zhipu Coding Plan `plan` · Xiaomi MiMo · Qianfan · Umans `plan` · NanoGPT · Novita · Venice · Kilo · ZenMux · OpenCode Go · OpenCode Zen
 
 ### Run it yourself
 
@@ -576,7 +576,7 @@ An extension is a TypeScript module. Same tool API, same slash-command registry,
 
 ### Discovery
 
-On first run omp inherits whatever is already on disk: rules, skills, and MCP servers from `.claude`, `.cursor`, `.windsurf`, `.codex`, `.cline`, `.github/copilot`, and `.vscode`. No migration script.
+omp picks up project-level context, skills, commands, and MCP servers from `.claude`, `.codex`, `.opencode`/`opencode.json`, `.agents`, and standalone `AGENTS.md`/`CLAUDE.md`. Other tools' home-directory config is never read.
 
 ### Extensibility
 

@@ -47,7 +47,7 @@ function dashboardCommand(command: SlashCommand): Extension {
 	};
 }
 
-describe("Codex and OpenCode slash-command frontmatter", () => {
+describe("OpenCode and Claude slash-command frontmatter", () => {
 	let root = "";
 	let home = "";
 	let project = "";
@@ -74,36 +74,13 @@ describe("Codex and OpenCode slash-command frontmatter", () => {
 		await removeWithRetries(root);
 	});
 
-	async function loadProviderCommands(provider: "codex" | "opencode" | "claude"): Promise<SlashCommand[]> {
+	async function loadProviderCommands(provider: "opencode" | "claude"): Promise<SlashCommand[]> {
 		const result = await loadCapability<SlashCommand>(slashCommandCapability.id, {
 			cwd: project,
 			providers: [provider],
 		});
 		return result.items;
 	}
-
-	test("Codex keeps parsed description and argument hint after stripping frontmatter from content", async () => {
-		const file = path.join(project, ".codex", "commands", "deploy.md");
-		await fs.mkdir(path.dirname(file), { recursive: true });
-		await fs.writeFile(file, COMMAND_FILE);
-
-		const command = (await loadProviderCommands("codex")).find(item => item.name === "deploy");
-		expect(command).toBeDefined();
-		expect(command?.content.trim()).toBe("Deploy $ARGUMENTS");
-		expect(command?.content).not.toContain("description:");
-		expect(command?.description).toBe("Deploy a service");
-		expect(command?.argumentHint).toBe("<service>");
-
-		const ext = dashboardCommand(command!);
-		const data = commandInspectorData(ext);
-		expect(data.description).toBe("Deploy a service");
-		expect(data.argumentHint).toBe("<service>");
-		expect(data.body).toContain("Deploy $ARGUMENTS");
-		expect(data.body).not.toContain("description:");
-		expect(data.usesArguments).toBe(true);
-
-		expect(applyFilter([ext], "Deploy a service").map(item => item.name)).toEqual(["deploy"]);
-	});
 
 	test("OpenCode keeps parsed description and argument hint after stripping frontmatter from content", async () => {
 		const file = path.join(project, ".opencode", "commands", "deploy.md");
@@ -146,28 +123,21 @@ describe("Codex and OpenCode slash-command frontmatter", () => {
 		expect(applyFilter([ext], "Deploy a service").map(item => item.name)).toEqual(["deploy"]);
 	});
 
-	test("Codex and OpenCode side: true commands load as side commands; quoted true does not", async () => {
+	test("OpenCode side: true commands load as side commands; quoted true does not", async () => {
 		const sideFile = ["---", "description: Situation report", "side: true", "---", "Report status", ""].join("\n");
 		const quotedFile = ["---", "description: Quoted flag", 'side: "true"', "---", "Body", ""].join("\n");
-		for (const [dir, prefix] of [
-			[".codex", "codex"],
-			[".opencode", "opencode"],
-		] as const) {
-			const commandsDir = path.join(project, dir, "commands");
-			await fs.mkdir(commandsDir, { recursive: true });
-			await fs.writeFile(path.join(commandsDir, `${prefix}-sitrep.md`), sideFile);
-			await fs.writeFile(path.join(commandsDir, `${prefix}-quoted.md`), quotedFile);
-		}
+		const commandsDir = path.join(project, ".opencode", "commands");
+		await fs.mkdir(commandsDir, { recursive: true });
+		await fs.writeFile(path.join(commandsDir, "sitrep.md"), sideFile);
+		await fs.writeFile(path.join(commandsDir, "quoted.md"), quotedFile);
 
 		const commands = await loadSlashCommands({ cwd: project });
-		for (const prefix of ["codex", "opencode"]) {
-			const sitrep = commands.find(command => command.name === `${prefix}-sitrep`);
-			const quoted = commands.find(command => command.name === `${prefix}-quoted`);
-			expect(sitrep?.side).toBe(true);
-			expect(sitrep?.content.trim()).toBe("Report status");
-			expect(quoted).toBeDefined();
-			expect(quoted?.side).toBeUndefined();
-		}
+		const sitrep = commands.find(command => command.name === "sitrep");
+		const quoted = commands.find(command => command.name === "quoted");
+		expect(sitrep?.side).toBe(true);
+		expect(sitrep?.content.trim()).toBe("Report status");
+		expect(quoted).toBeDefined();
+		expect(quoted?.side).toBeUndefined();
 	});
 
 	test("frontmatter-only command preview keeps an empty body", () => {

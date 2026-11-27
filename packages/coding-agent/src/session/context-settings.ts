@@ -26,7 +26,6 @@ export const cfgWorkspaceAdditionalDirectories = register({
 const BUILTIN_CONTEXT_FILE_NAMES: Record<string, true> = {
 	"agents.md": true,
 	"claude.md": true,
-	"copilot-instructions.md": true,
 };
 
 /** Why `entry` is not a valid `contextFiles.extra` name; undefined for a plain, non-built-in file name. */

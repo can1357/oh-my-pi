@@ -8,7 +8,7 @@ Primary implementation files:
 
 - `packages/coding-agent/src/config/model-registry.ts` — loads built-in + custom models, provider overrides, runtime discovery, auth integration
 - `packages/coding-agent/src/config/model-resolver.ts` — parses model patterns and selects initial/smol/slow models
-- `packages/coding-agent/src/config/model-settings.ts` — model selection settings (`modelRoles`, `enabledModels`, `enabledProviders`/`disabledProviders`, `modelProviderOrder`, `cycleOrder`)
+- `packages/coding-agent/src/config/model-settings.ts` — model selection settings (`modelRoles`, `enabledModels`, `disabledProviders`, `modelProviderOrder`, `cycleOrder`)
 - `packages/coding-agent/src/session/settings.ts` — provider transport preferences (`providers.*`)
 - `packages/coding-agent/src/config/models-config.ts` and `models-config-schema-bundle.ts` — custom provider/model validation
 - `packages/coding-agent/src/session/auth-storage.ts` — re-exports `AuthStorage` from `@oh-my-pi/pi-ai`; credential precedence is implemented in `packages/ai/src/auth/cascade.ts`
@@ -809,8 +809,7 @@ When `OMP_AUTH_BROKER_URL` (or `auth.broker.url`) is set, the local SQLite crede
 - Availability excludes `disabledProviders` and requires a keyless provider or configured credential source. It does not execute secret commands or refresh OAuth tokens.
 
 A model can exist in the registry without being available, and a configured credential can still
-fail when resolved for a request. `enabledProviders` controls foreign configuration-source discovery,
-not an allowlist of model transports.
+fail when resolved for a request.
 
 ## Runtime model resolution
 
@@ -935,7 +934,7 @@ accept exact selectors, globs, and fuzzy matches. The resulting scope restricts 
 (Ctrl+P cycling, the startup model, chat roles in `/model`); judge, search, image, and speech
 models stay available for their roles, so entries naming them are accepted but have no effect.
 
-`enabledModels`, `enabledProviders`, and `disabledProviders` entries may also be scoped to a path prefix:
+`enabledModels` and `disabledProviders` entries may also be scoped to a path prefix:
 
 ```yaml
 enabledModels:
