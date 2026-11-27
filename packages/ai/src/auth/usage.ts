@@ -1,4 +1,10 @@
 import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
+import {
+	discoverGitHubCopilotAccount,
+	parseGitHubCopilotApiKey,
+	rememberCopilotTokenBilling,
+	resolveCopilotTokenBilling,
+} from "@oh-my-pi/pi-catalog/wire/github-copilot";
 import { $pickenv, logger } from "@oh-my-pi/pi-utils";
 import { getEnvApiKey } from "../env-api-key";
 import * as AIError from "../error";
@@ -19,6 +25,7 @@ import type {
 	UsageProvider,
 	UsageReport,
 } from "../usage";
+import { githubApiBaseUrlFor } from "../usage/github-copilot";
 import { DEFAULT_USAGE_PROVIDERS } from "../usage/registry";
 import { raceSignal } from "./abort";
 import type { SessionAffinity } from "./affinity";
@@ -141,6 +148,8 @@ export class UsageService implements UsageApi {
 	#usageRequestInFlight: Map<string, { refreshEpoch: number; promise: Promise<UsageReport | null> }> = new Map();
 	#usageHeaderIngestAt: Map<string, number> = new Map();
 	#usageReportsInFlight: Map<string, Promise<UsageReport[] | null>> = new Map();
+	/** Background Copilot billing-mode probes, one per token hash for the life of the process. */
+	#billingModeProbes: Map<string, Promise<void>> = new Map();
 	readonly fetch: typeof fetch;
 	readonly logger: UsageLogger;
 	readonly requestTimeoutMs: number;
@@ -258,6 +267,70 @@ export class UsageService implements UsageApi {
 		});
 	}
 
+	/**
+	 * Copy a report's account billing mode (`metadata.tokenBasedBilling`) onto
+	 * the stored OAuth row, so request keys built from it carry the mode. Writes
+	 * only when the mode changes. A report without the flag leaves a recorded
+	 * mode alone: GitHub omitting it says nothing, so it never clears a `true`.
+	 * Env and API-key Copilot tokens have no row; their mode is remembered for
+	 * this process instead.
+	 */
+	#recordBillingMode(provider: Provider, credential: UsageCredential, report: UsageReport): void {
+		const tokenBasedBilling = report.metadata?.tokenBasedBilling;
+		if (typeof tokenBasedBilling !== "boolean") return;
+		const token = credential.type === "oauth" ? credential.accessToken : credential.apiKey;
+		if (provider === "github-copilot" && token) {
+			rememberCopilotTokenBilling(parseGitHubCopilotApiKey(token).accessToken, tokenBasedBilling);
+		}
+		if (credential.type !== "oauth") return;
+		const credentialId = this.#deps.pool.findIdForUsageCredential(provider, credential);
+		if (credentialId === undefined) return;
+		const entry = this.#deps.pool.entries(provider).find(candidate => candidate.id === credentialId);
+		if (entry?.credential.type !== "oauth" || entry.credential.tokenBasedBilling === tokenBasedBilling) return;
+		this.#deps.pool.replaceById(provider, credentialId, { ...entry.credential, tokenBasedBilling });
+	}
+
+	/**
+	 * Learn a GitHub Copilot request key's unknown billing mode in the background,
+	 * once per token per process. Logins from before the mode was recorded and raw
+	 * `COPILOT_GITHUB_TOKEN`s otherwise keep the premium-request estimate until a
+	 * quota fetch happens to run, which a lone login in print/RPC/SDK runs never
+	 * triggers. A stored login's row keeps the result. Never fails: a failed probe
+	 * leaves the mode unknown. GitHub Enterprise logins are probed on their own
+	 * API host (as the usage provider does), never on public github.com.
+	 */
+	learnCopilotBillingMode(provider: string, resolved: { apiKey: string; credentialId?: number }): Promise<void> {
+		if (provider !== "github-copilot") return Promise.resolve();
+		const apiKey = parseGitHubCopilotApiKey(resolved.apiKey);
+		if (!apiKey.accessToken || resolveCopilotTokenBilling(apiKey) !== undefined) return Promise.resolve();
+		const probeKey = Bun.hash(apiKey.accessToken).toString(36);
+		const existing = this.#billingModeProbes.get(probeKey);
+		if (existing) return existing;
+		const { credentialId } = resolved;
+		const probe = (async () => {
+			const signal = AbortSignal.timeout(this.requestTimeoutMs);
+			const { tokenBasedBilling } = await discoverGitHubCopilotAccount(
+				apiKey.accessToken,
+				this.fetch,
+				signal,
+				githubApiBaseUrlFor(apiKey.enterpriseUrl),
+			);
+			if (tokenBasedBilling === undefined || credentialId === undefined) return;
+			const entry = this.#deps.pool.entries(provider).find(candidate => candidate.id === credentialId);
+			// The row may have been re-logged into another account while the probe ran.
+			if (
+				entry?.credential.type !== "oauth" ||
+				entry.credential.access !== apiKey.accessToken ||
+				entry.credential.tokenBasedBilling !== undefined
+			) {
+				return;
+			}
+			this.#deps.pool.replaceById(provider, credentialId, { ...entry.credential, tokenBasedBilling });
+		})().catch(error => this.logger.debug("Copilot billing mode probe failed", { error: String(error) }));
+		this.#billingModeProbes.set(probeKey, probe);
+		return probe;
+	}
+
 	/** Probe a provider endpoint, refreshing near-expiry OAuth tokens when possible. */
 	async #fetchUsageUncached(request: UsageRequestDescriptor, timeoutMs?: number): Promise<UsageReport | null> {
 		const providerImpl = this.providerFor(request.provider);
@@ -357,6 +430,7 @@ export class UsageService implements UsageApi {
 					};
 				}
 			}
+			if (report) this.#recordBillingMode(request.provider, params.credential, report);
 			return report;
 		} catch (error) {
 			if (error instanceof AIError.ProviderHttpError && (error.status === 401 || error.status === 403)) {

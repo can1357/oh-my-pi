@@ -3,12 +3,12 @@ import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { parseCopilotUsageFrame } from "@oh-my-pi/pi-ai/providers/github-copilot-billing";
 import type { ResponseStreamEvent } from "@oh-my-pi/pi-ai/providers/openai-responses-wire";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
-import { processResponsesStream } from "@oh-my-pi/pi-ai/providers/openai-shared";
+import { processResponsesStream, resolveOpenAIRequestSetup } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import type { AssistantMessage, Context, Model } from "@oh-my-pi/pi-ai/types";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { COPILOT_API_HEADERS } from "@oh-my-pi/pi-catalog/wire/github-copilot";
+import { COPILOT_API_HEADERS, rememberCopilotTokenBilling } from "@oh-my-pi/pi-catalog/wire/github-copilot";
 
 afterEach(() => {
 	vi.restoreAllMocks();
@@ -340,6 +340,62 @@ describe("Messages: copilot_usage on message_delta", () => {
 		expect(result.stopReason).toBe("error");
 		expect(result.usage.totalTokens).toBe(0);
 		expect(result.usage.aiuMissing).toBeUndefined();
+	});
+});
+
+describe("premium-request estimate follows the account's billing mode", () => {
+	const delta = { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } };
+	async function reply(tokenBasedBilling: boolean | undefined, messageDelta: Record<string, unknown>) {
+		const apiKey = JSON.stringify({
+			token: "ghu_test",
+			...(tokenBasedBilling === undefined ? {} : { tokenBasedBilling }),
+		});
+		const fetchMock = vi.fn(async () => messagesStream(messageDelta));
+		return streamAnthropic(makeCopilotClaudeModel(), context, {
+			apiKey,
+			fetch: fetchMock as unknown as typeof fetch,
+		}).result();
+	}
+
+	it("drops the estimate on a token-billed account even when the reply's frame is missing", async () => {
+		const result = await reply(true, delta);
+		expect(result.usage.premiumRequests).toBeUndefined();
+		expect(result.usage.aiu).toBeUndefined();
+		expect(result.usage.aiuMissing).toBe(true);
+	});
+
+	it("keeps the estimate on a request-billed account even when the reply carries a frame", async () => {
+		const result = await reply(false, { ...delta, copilot_usage: COPILOT_USAGE });
+		expect(result.usage.premiumRequests).toBe(1);
+		expect(result.usage.aiu?.nano).toBe(436_590_000);
+	});
+
+	it("keeps the estimate while the billing mode is unknown", async () => {
+		const result = await reply(undefined, { ...delta, copilot_usage: COPILOT_USAGE });
+		expect(result.usage.premiumRequests).toBe(1);
+	});
+
+	it("applies the same rule to Responses and Chat Completions requests", () => {
+		for (const model of [makeResponsesModel("github-copilot"), makeCopilotCompletionsModel()]) {
+			const estimate = (tokenBasedBilling: boolean) =>
+				resolveOpenAIRequestSetup(model, {
+					apiKey: JSON.stringify({ token: "ghu_test", tokenBasedBilling }),
+					messages: context.messages,
+				}).copilotPremiumRequests;
+			expect(estimate(true)).toBeUndefined();
+			expect(estimate(false)).toBe(1);
+		}
+	});
+
+	it("drops the estimate for a bare token whose account was learned as token-billed", () => {
+		const estimate = () =>
+			resolveOpenAIRequestSetup(makeCopilotCompletionsModel(), {
+				apiKey: "ghu_bare_env_token",
+				messages: context.messages,
+			}).copilotPremiumRequests;
+		expect(estimate()).toBe(1);
+		rememberCopilotTokenBilling("ghu_bare_env_token", true);
+		expect(estimate()).toBeUndefined();
 	});
 });
 

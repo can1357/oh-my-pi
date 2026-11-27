@@ -12,7 +12,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { calculateCost, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
-import { parseGitHubCopilotApiKey } from "@oh-my-pi/pi-catalog/wire/github-copilot";
+import { parseGitHubCopilotApiKey, resolveCopilotTokenBilling } from "@oh-my-pi/pi-catalog/wire/github-copilot";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import {
 	$env,
@@ -2010,6 +2010,7 @@ const streamAnthropicOnce = (
 						initiatorOverride: options?.initiatorOverride,
 						enterpriseUrl: copilotApiKey.enterpriseUrl,
 						cachedIntegrationId: copilotCached,
+						tokenBasedBilling: resolveCopilotTokenBilling(copilotApiKey),
 					})
 				: undefined;
 			if (copilotDynamicHeaders?.premiumRequests !== undefined) {

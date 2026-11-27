@@ -57,7 +57,8 @@ describe("discarded retry attempts", () => {
 	async function createSession(): Promise<AgentSession> {
 		const dir = TempDir.createSync("@omp-stream-retry-journal-");
 		cleanups.push(() => dir.removeSync());
-		const authStorage = await AuthStorage.create(path.join(dir.path(), "auth.db"));
+		// The fake Copilot token must not reach github.com through the background billing probe.
+		const authStorage = await AuthStorage.create(path.join(dir.path(), "auth.db"), { copilotBillingProbe: false });
 		cleanups.push(() => authStorage.close());
 		authStorage.keys.setRuntime("github-copilot", "ghu_test");
 		const { session } = await createAgentSession({

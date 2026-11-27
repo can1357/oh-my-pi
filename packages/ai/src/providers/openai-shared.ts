@@ -23,7 +23,7 @@ import {
 	hasCoreWeaveProjectHeader,
 	removeBlankCoreWeaveProjectHeaders,
 } from "@oh-my-pi/pi-catalog/wire/coreweave";
-import { parseGitHubCopilotApiKey } from "@oh-my-pi/pi-catalog/wire/github-copilot";
+import { parseGitHubCopilotApiKey, resolveCopilotTokenBilling } from "@oh-my-pi/pi-catalog/wire/github-copilot";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import {
 	$env,
@@ -314,6 +314,7 @@ export function resolveOpenAIRequestSetup(
 			enterpriseUrl: copilotApiKey.enterpriseUrl,
 			integrationId: resolveCopilotRequestIdentity(options.extraHeaders),
 			cachedIntegrationId: copilotCached,
+			tokenBasedBilling: resolveCopilotTokenBilling(copilotApiKey),
 		});
 		Object.assign(headers, copilot.headers);
 		copilotPremiumRequests = copilot.premiumRequests;
