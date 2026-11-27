@@ -22,7 +22,6 @@ import { key, sendKey } from "./ui/composer/harness";
 
 const KEYS: KeybindingsConfig = {
 	"app.display.reset": "alt+l",
-	"app.display.hold": "alt+s",
 	"app.stt.pushToTalk": "space",
 	"app.thinking.toggle": "ctrl+t",
 	"app.history.search": "ctrl+r",
@@ -49,8 +48,6 @@ function createContext() {
 	const keybindings = KeybindingsManager.inMemory({ ...KEYS });
 	let focused: UiNode | null = editor.field;
 	let overlayVisible = false;
-	let outputHold = false;
-	const holdNotices: (string | undefined)[] = [];
 	const writeRaw = vi.fn<(data: string) => void>();
 	const shellPaste = vi.fn<(text: string) => boolean>(() => true);
 	const replayHistory = vi.fn();
@@ -92,13 +89,6 @@ function createContext() {
 			overlays: { open: () => overlayVisible },
 			paste: shellPaste,
 			host: { replayHistory, driver: { writeRaw } },
-			getOutputHold: () => outputHold,
-			setOutputHold: (hold: boolean, notice?: string) => {
-				if (outputHold === hold) return false;
-				outputHold = hold;
-				holdNotices.push(notice);
-				return true;
-			},
 		},
 		syncIdleMaintenanceView: vi.fn(),
 		resetDisplayAfterAppearanceRefresh,
@@ -175,15 +165,13 @@ function createContext() {
 		editor,
 		input,
 		/** Press `id` through the shell's dispatch order. */
-		press: (id: string, init?: Partial<KeyEvent>) => input.press(ctx, id, init),
+		press: (id: string) => input.press(ctx, id),
 		setFocused(target: UiNode | null) {
 			focused = target;
 		},
 		setOverlayVisible(visible: boolean) {
 			overlayVisible = visible;
 		},
-		isOutputHeld: () => outputHold,
-		holdNotices,
 		setKeybinding(action: Keybinding, keys: KeyId[]) {
 			keybindings.setUserBindings({ ...KEYS, [action]: keys });
 		},
@@ -1570,50 +1558,5 @@ describe("InputController global tool-output expand (ctrl+o)", () => {
 
 		expect(context.press("ctrl+x")).toBe("global");
 		expect(context.ctx.toolOutputExpanded).toBe(true);
-	});
-});
-
-describe("app.display.hold", () => {
-	it("holds the screen with a resume hint and resumes on any other key", () => {
-		const { ctx, press, isOutputHeld, holdNotices } = createContext();
-		new InputController(ctx).setupKeyHandlers();
-
-		expect(press("alt+s")).toBe("intercepted");
-		expect(isOutputHeld()).toBe(true);
-		expect(holdNotices.at(-1)).toContain("any key resumes");
-
-		// Released before the key reaches its owner, so the repaint it schedules is the visible one.
-		expect(press("a")).not.toBe("intercepted");
-		expect(isOutputHeld()).toBe(false);
-	});
-
-	it("releases instead of re-holding when pressed while held", () => {
-		const { ctx, press, isOutputHeld } = createContext();
-		new InputController(ctx).setupKeyHandlers();
-
-		press("alt+s");
-		expect(press("alt+s")).toBe("intercepted");
-		expect(isOutputHeld()).toBe(false);
-	});
-
-	it("leaves the key to an open overlay and never starts a hold under it", () => {
-		const { ctx, press, setOverlayVisible, isOutputHeld } = createContext();
-		new InputController(ctx).setupKeyHandlers();
-
-		setOverlayVisible(true);
-		expect(press("alt+s")).not.toBe("intercepted");
-		expect(isOutputHeld()).toBe(false);
-	});
-
-	it("keeps the hold through a key release and drops it on a paste", () => {
-		const { ctx, input, press, isOutputHeld } = createContext();
-		new InputController(ctx).setupKeyHandlers();
-
-		press("alt+s");
-		// A release report is not the user asking to follow again.
-		press("a", { kind: "release" });
-		expect(isOutputHeld()).toBe(true);
-		input.paste(ctx, "hello");
-		expect(isOutputHeld()).toBe(false);
 	});
 });

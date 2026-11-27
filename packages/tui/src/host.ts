@@ -132,17 +132,6 @@ export interface Host {
 	redescribe(node: UiNode): void;
 	/** Route `event` to the focused node as if the terminal sent it (a paste the app recovered itself). */
 	dispatch(event: InputEvent): void;
-	/**
-	 * Hold the screen still: nothing is painted until the hold is released, so a
-	 * streaming turn stops scrolling the terminal while the user reads native
-	 * scrollback. Nothing is lost — the surface keeps changing and the release
-	 * paints the newest state in one frame. `notice` paints a one-line hint on
-	 * the last screen row without scrolling it. False when the state did not
-	 * change (or the renderer is between sizes).
-	 */
-	setOutputHold(hold: boolean, notice?: string): boolean;
-	/** Whether {@link setOutputHold} is holding the output. */
-	getOutputHold(): boolean;
 	/** Whether the terminal advertises TSP feature `name` (reactive; always false in the terminal renderer). */
 	feature(name: string): boolean;
 	/**
@@ -256,8 +245,6 @@ type Renderer = Pick<
 	| "replayHistory"
 	| "redescribe"
 	| "dispatch"
-	| "setOutputHold"
-	| "getOutputHold"
 	| "feature"
 	| "checkoutShown"
 	| "setMouse"
@@ -396,8 +383,6 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			replayHistory: () => {},
 			redescribe: node => backend.redescribe(node),
 			dispatch: event => backend.dispatch(event),
-			setOutputHold: hold => backend.setOutputHold(hold),
-			getOutputHold: () => backend.getOutputHold(),
 			feature: name => connection.hasFeature(name),
 			checkoutShown: () => connection.checkout(),
 			setMouse: tracking => driver.setMouse(tracking),
@@ -468,8 +453,6 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			replayHistory: () => driver.resetDisplay(),
 			redescribe: () => {},
 			dispatch: event => backend.dispatch(event),
-			setOutputHold: (hold, notice) => backend.setOutputHold(hold, notice),
-			getOutputHold: () => backend.getOutputHold(),
 			feature: () => false,
 			checkoutShown: () => false,
 			requestFrame: () => backend.requestRender(),
@@ -524,8 +507,6 @@ export async function startHost(options: HostOptions): Promise<Host> {
 		replayHistory: () => renderer.replayHistory(),
 		redescribe: node => renderer.redescribe(node),
 		dispatch: event => renderer.dispatch(event),
-		setOutputHold: (hold, notice) => renderer.setOutputHold(hold, notice),
-		getOutputHold: () => renderer.getOutputHold(),
 		feature: name => renderer.feature(name),
 		checkoutShown: () => renderer.checkoutShown(),
 		suspend: run => renderer.suspend(run),
