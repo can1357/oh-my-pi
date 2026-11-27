@@ -50,7 +50,7 @@ import { type EvalBackendsAllowance, resolveAdvertisedEvalBackends, resolveEvalB
 import { recordStatusEvent, type StatusEventLog } from "./details/eval";
 import { formatOutputNotice } from "./output-meta-format";
 import { resolveOutputMaxColumns, resolveOutputSinkArtifactMaxBytes, resolveOutputSinkHeadBytes } from "./output-meta";
-import { ToolAbortError, throwIfAborted } from "./tool-errors";
+import { renderError, ToolAbortError, throwIfAborted } from "./tool-errors";
 import { hasWaitTool } from "./wait";
 import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
@@ -285,6 +285,27 @@ function consumedJobFromEvent(event: EvalStatusEvent): EvalConsumedJob | undefin
 	if (isPersistedUsage(event.usage)) job.usage = event.usage;
 	if (typeof event.aiuUnreportedTurns === "number") job.aiuUnreportedTurns = event.aiuUnreportedTurns;
 	return job.usage || job.aiuUnreportedTurns !== undefined ? job : undefined;
+}
+
+/**
+ * Error result for a call that ends without a result of its own (aborted, or its run threw) after its
+ * cells consumed background jobs. A thrown error reaches the transcript with empty details, and the
+ * foreground job is discarded without a delivery, so the consumed rows must ride on a returned result.
+ */
+function consumedJobsErrorResult(
+	text: string,
+	latestDetails: EvalToolDetails | undefined,
+	languages: EvalLanguage[],
+	consumedJobs: EvalConsumedJob[],
+): AgentToolResult<EvalToolDetails> {
+	const details: EvalToolDetails = {
+		language: languages[0],
+		languages,
+		...latestDetails,
+		consumedJobs: [...consumedJobs],
+		isError: true,
+	};
+	return { content: [{ type: "text", text }], details, isError: true };
 }
 
 export class EvalTool implements AgentTool<typeof evalSchema> {
@@ -529,6 +550,9 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					onUpdate({ content: [{ type: "text", text }], details });
 				}
 			: undefined;
+		// Rows are recorded synchronously as cells consume jobs, outside the run, so a call that ends without
+		// a result (see `consumedJobsErrorResult`) still holds them; throttled progress frames could not.
+		const consumedJobs: EvalConsumedJob[] = [];
 		const run = async (
 			runSignal: AbortSignal | undefined,
 			emitUpdate: ((text: string, details: EvalToolDetails) => void) | undefined,
@@ -564,6 +588,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					sessionAbortController,
 					emitUpdate,
 					foreground,
+					consumedJobs,
 				}),
 			);
 			return session.trackEvalExecution?.(execution, sessionAbortController) ?? execution;
@@ -655,8 +680,10 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					latestText = message;
 					completion.resolve({ kind: "failed", error });
 					showJobFrame(message, latestDetails, runSignal.aborted ? "cancelled" : "failed");
+					// `latestDetails` only advances on throttled frames; the live rows hold a job consumed since.
 					await reportProgress(message, {
 						...latestDetails,
+						...(consumedJobs.length > 0 ? { consumedJobs: [...consumedJobs] } : {}),
 						async: { state: "failed", jobId, type: "eval" },
 					});
 					throw error;
@@ -698,12 +725,19 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		}
 		if (waitResult.kind === "failed") {
 			autoBgManager.releaseForegroundJob(jobId);
+			if (consumedJobs.length > 0) {
+				return consumedJobsErrorResult(renderError(waitResult.error), latestDetails, languages, consumedJobs);
+			}
 			throw waitResult.error;
 		}
 		if (waitResult.kind === "aborted") {
 			autoBgManager.cancel(jobId);
 			autoBgManager.releaseForegroundJob(jobId);
-			throw new ToolAbortError(latestText || "Eval cell aborted");
+			const abortText = latestText || "Eval cell aborted";
+			if (consumedJobs.length > 0) {
+				return consumedJobsErrorResult(abortText, latestDetails, languages, consumedJobs);
+			}
+			throw new ToolAbortError(abortText);
 		}
 		backgrounded = true;
 		autoBgManager.backgroundJob(jobId);
@@ -775,9 +809,21 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		emitUpdate?: (text: string, details: EvalToolDetails) => void;
 		/** Whether the call still waits on the cells; `out://` replies are drawn only then. */
 		foreground: () => boolean;
+		/** Rows of consumed background jobs, shared with the caller so they outlive a run that returns no result. */
+		consumedJobs: EvalConsumedJob[];
 	}): Promise<AgentToolResult<EvalToolDetails | undefined>> {
-		const { session, cells, languages, notice, excludeWebP, signal, sessionAbortController, emitUpdate, foreground } =
-			options;
+		const {
+			session,
+			cells,
+			languages,
+			notice,
+			excludeWebP,
+			signal,
+			sessionAbortController,
+			emitUpdate,
+			foreground,
+			consumedJobs,
+		} = options;
 		let outputSink: OutputSink | undefined;
 		let outputSummary: OutputSummary | undefined;
 		let outputDumped = false;
@@ -797,7 +843,6 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			const tailBuffer = new TailBuffer(DEFAULT_MAX_BYTES * 2);
 			const images: ImageContent[] = [];
 			const replies: string[] = [];
-			const consumedJobs: EvalConsumedJob[] = [];
 
 			const cellResults: EvalCellResult[] = cells.map(cell => ({
 				index: cell.index,

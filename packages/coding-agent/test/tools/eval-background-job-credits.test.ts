@@ -198,4 +198,118 @@ describe("credits of jobs consumed by an auto-backgrounded eval cell", () => {
 		expect(sessionManager.getUsageStatistics()).toMatchObject({ aiuNano: 43 });
 		await asyncJobManager.dispose();
 	});
+
+	it("a background cell that fails after its last live frame still carries a row consumed since", async () => {
+		const asyncJobManager = new AsyncJobManager({ onJobComplete: async () => {} });
+		const gate = Promise.withResolvers<void>();
+		let emit: StatusSink | undefined;
+		vi.spyOn(evalIndex.jsBackend, "execute").mockImplementation((async (
+			_code: string,
+			options: { onStatus?: StatusSink },
+		) => {
+			emit = options.onStatus;
+			emit?.({ op: EVAL_JOB_BILLING_OP, jobId: "Early", usage: chargedUsage(33), aiuUnreportedTurns: 1 });
+			await gate.promise;
+			return backendResult();
+		}) as never);
+		// The run fails after the cell loop already published its last frame; a wait() that settled during the
+		// teardown consumes its job in that gap, so only the live rows know it.
+		const session = {
+			...makeSession(
+				Settings.isolated({ "eval.autoBackground.enabled": true, "eval.autoBackground.thresholdMs": 10 }),
+				asyncJobManager,
+			),
+			trackEvalExecution: (execution: Promise<unknown>) =>
+				execution.then(() => {
+					emit?.({ op: EVAL_JOB_BILLING_OP, jobId: "Late", usage: chargedUsage(10) });
+					throw new Error("teardown failed");
+				}),
+		} as unknown as ToolSession;
+
+		const initial = await new EvalTool(session).execute("call-fail", { language: "js", code: "await wait(a)" });
+		const jobId = initial.details?.async?.jobId;
+		if (!jobId) throw new Error("expected an auto-backgrounded job id");
+		gate.resolve();
+		await asyncJobManager.getJob(jobId)?.promise.catch(() => undefined);
+		expect(asyncJobManager.getJob(jobId)?.status).toBe("failed");
+
+		const delivery = buildAsyncResultBatchMessage([
+			{ jobId, result: "teardown failed", job: asyncJobManager.getJob(jobId), durationMs: 1, epoch: 0 },
+		]);
+		if (!delivery) throw new Error("expected a delivery message");
+		const sessionManager = SessionManager.inMemory();
+		persistToolResult(sessionManager, initial, "eval", "call-fail");
+		sessionManager.appendMessage(delivery);
+		expect(sessionManager.getUsageStatistics()).toMatchObject({ aiuNano: 43 });
+		await asyncJobManager.dispose();
+	});
+
+	/**
+	 * A cell that consumes `Early`, then blocks until the test opens the gate. The call is aborted while it
+	 * blocks, before any throttled progress frame could have published the consumed row.
+	 */
+	async function abortWhileBlocked(consume: boolean): Promise<{
+		result: Awaited<ReturnType<EvalTool["execute"]>> | undefined;
+		error: unknown;
+	}> {
+		const asyncJobManager = new AsyncJobManager({ onJobComplete: async () => {} });
+		const gate = Promise.withResolvers<void>();
+		const blocked = Promise.withResolvers<void>();
+		vi.spyOn(evalIndex.jsBackend, "execute").mockImplementation((async (
+			_code: string,
+			options: { onStatus?: StatusSink },
+		) => {
+			if (consume) {
+				options.onStatus?.({
+					op: EVAL_JOB_BILLING_OP,
+					jobId: "Early",
+					usage: chargedUsage(33),
+					aiuUnreportedTurns: 1,
+				});
+			}
+			blocked.resolve();
+			await gate.promise;
+			return backendResult();
+		}) as never);
+		const tool = new EvalTool(
+			makeSession(
+				// High threshold: only the abort ends the foreground wait.
+				Settings.isolated({ "eval.autoBackground.enabled": true, "eval.autoBackground.thresholdMs": 60_000 }),
+				asyncJobManager,
+			),
+		);
+		const controller = new AbortController();
+		const call = tool.execute("call-abort", { language: "js", code: "await wait(a)" }, controller.signal);
+		await blocked.promise;
+		controller.abort();
+		try {
+			return { result: await call, error: undefined };
+		} catch (error) {
+			return { result: undefined, error };
+		} finally {
+			gate.resolve();
+			await asyncJobManager.dispose();
+		}
+	}
+
+	it("an abort after a wait consumed a job still returns the consumed rows to the session", async () => {
+		const { result, error } = await abortWhileBlocked(true);
+
+		expect(error).toBeUndefined();
+		expect(result?.isError).toBe(true);
+		expect(result?.details?.consumedJobs).toEqual([
+			{ jobId: "Early", usage: chargedUsage(33), aiuUnreportedTurns: 1 },
+		]);
+
+		const sessionManager = SessionManager.inMemory();
+		persistToolResult(sessionManager, result!, "eval", "call-abort");
+		expect(sessionManager.getUsageStatistics()).toMatchObject({ aiuNano: 33, cost: 0 });
+	});
+
+	it("an abort with nothing consumed still ends the call with the abort error", async () => {
+		const { result, error } = await abortWhileBlocked(false);
+
+		expect(result).toBeUndefined();
+		expect(error).toMatchObject({ name: "ToolAbortError" });
+	});
 });
