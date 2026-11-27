@@ -7,6 +7,27 @@ export type CodexRateLimit = {
 	resets_at?: number;
 };
 
+/**
+ * OpenAI's refusal once the ChatGPT plan's subscription-sharing cap for
+ * third-party apps is spent: `subscription_sharing_usage_limit_exceeded`,
+ * worded "…reached their Subscription Sharing usage limit…". Matches the code
+ * and the provider wording alike.
+ */
+const SUBSCRIPTION_SHARING_LIMIT_PATTERN = /subscription[\s_]+sharing[\s_]+usage[\s_]+limit/i;
+
+/**
+ * Shown instead of OpenAI's text, which names no meter, remedy, or reset. The
+ * cap is not one of the plan windows `/wham/usage` reports, so omp cannot tell
+ * when it clears.
+ */
+export const CODEX_SUBSCRIPTION_SHARING_LIMIT_MESSAGE =
+	"ChatGPT Subscription Sharing usage limit reached: the share of your ChatGPT plan that third-party apps such as omp may use is spent or disabled. This app limit is separate from the plan's 5-hour and weekly limits, so those can show usage left. Enable omp and raise its limit under ChatGPT Settings → Usage → App limits, or wait for that limit to reset; signing in again does not reset it.";
+
+/** Whether `text` (an error code, provider message, or formatted error) is the Codex subscription-sharing cap. */
+export function isCodexSubscriptionSharingLimit(text: string | undefined): boolean {
+	return text !== undefined && SUBSCRIPTION_SHARING_LIMIT_PATTERN.test(text);
+}
+
 export type CodexRateLimits = {
 	primary?: CodexRateLimit;
 	secondary?: CodexRateLimit;
@@ -70,7 +91,10 @@ export async function parseCodexError(response: Response): Promise<CodexErrorInf
 		const minutesUntil = (resetsAt: number | undefined): number | undefined =>
 			resetsAt ? Math.max(0, Math.round((resetsAt * 1000 - Date.now()) / 60000)) : undefined;
 
-		if (/usage_limit_reached|usage_not_included/i.test(code)) {
+		const errMessage = typeof err.message === "string" ? err.message : undefined;
+		if (isCodexSubscriptionSharingLimit(code) || isCodexSubscriptionSharingLimit(errMessage)) {
+			friendlyMessage = CODEX_SUBSCRIPTION_SHARING_LIMIT_MESSAGE;
+		} else if (/usage_limit_reached|usage_not_included/i.test(code)) {
 			const planType = (err as { plan_type?: string }).plan_type;
 			const plan = planType ? ` (${String(planType).toLowerCase()} plan)` : "";
 			const mins = minutesUntil(errResetsAt ?? primary.resets_at ?? secondary.resets_at);
@@ -92,7 +116,6 @@ export async function parseCodexError(response: Response): Promise<CodexErrorInf
 			friendlyMessage = `ChatGPT rate limit exceeded.${when}`.trim();
 		}
 
-		const errMessage = (err as { message?: string }).message;
 		message = errMessage || friendlyMessage || message;
 	} catch {
 		// raw body not JSON

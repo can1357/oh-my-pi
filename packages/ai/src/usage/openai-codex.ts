@@ -3,6 +3,8 @@ import { planRequirementFor, quotaTierFor } from "@oh-my-pi/pi-catalog/compat/be
 import { toNumber } from "@oh-my-pi/pi-catalog/utils";
 import { slugify, USER_AGENT } from "@oh-my-pi/pi-utils";
 import { ProviderHttpError } from "../error";
+import { calculateRateLimitBackoffMs } from "../error/rate-limit";
+import { isCodexSubscriptionSharingLimit } from "../providers/openai-codex/response-handler";
 import type {
 	CredentialRankingContext,
 	CredentialRankingStrategy,
@@ -917,6 +919,9 @@ function isCodexSparkRequest(context?: CredentialRankingContext): boolean {
 	return context?.modelId !== undefined && quotaTierFor("openai-codex", context.modelId) === "spark";
 }
 
+/** Backoff scope for the ChatGPT subscription-sharing cap, which no usage report measures. */
+const CODEX_SUBSCRIPTION_SHARING_BLOCK_SCOPE = "subscription-sharing";
+
 export const codexRankingStrategy: CredentialRankingStrategy = {
 	planGate(context) {
 		const requirement = resolveOpenAICodexPlanRequirement(context.modelId);
@@ -934,10 +939,20 @@ export const codexRankingStrategy: CredentialRankingStrategy = {
 	},
 	// "shared" is the scope earlier versions persisted under, and it meant "block
 	// everything", so it stays honoured by every request and healed by
-	// reconciliation. Without a context (reconciliation) this is the full set.
+	// reconciliation. Without a context (reconciliation) this is the healable set.
 	blockScopes(context) {
 		if (!context) return ["chat", "spark", "shared"];
-		return [isCodexSparkRequest(context) ? "spark" : "chat", "shared"];
+		return [isCodexSparkRequest(context) ? "spark" : "chat", "shared", CODEX_SUBSCRIPTION_SHARING_BLOCK_SCOPE];
+	},
+	// The subscription-sharing cap gates every model, yet `/wham/usage` carries
+	// only the plan windows, which can show headroom while the cap refuses. Its
+	// block expires by clock, never by a healthy report.
+	refusalBlock(message) {
+		if (!isCodexSubscriptionSharingLimit(message)) return undefined;
+		return {
+			blockScope: CODEX_SUBSCRIPTION_SHARING_BLOCK_SCOPE,
+			durationMs: calculateRateLimitBackoffMs("QUOTA_EXHAUSTED"),
+		};
 	},
 	// Heal each scope against its own meter, including the legacy shared block.
 	// Missing Spark metadata cannot establish recovery even if its limits are empty.

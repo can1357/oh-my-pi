@@ -805,6 +805,11 @@ export type MarkUsageLimitOptions = {
 	 * extending the block counts as provider timing regardless.
 	 */
 	providerTimed?: boolean;
+	/**
+	 * Backoff scope replacing the model's own quota scope, for a refusal that
+	 * spends a different meter ({@link CredentialRankingStrategy.refusalBlock}).
+	 */
+	blockScope?: string;
 	baseUrl?: string;
 	modelId?: string;
 	apiKey?: string;

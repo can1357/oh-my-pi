@@ -98,7 +98,11 @@ import {
 	planSteeredRequest,
 	toSteerInputItems,
 } from "./openai-codex/live-steering";
-import { CodexApiError } from "./openai-codex/response-handler";
+import {
+	CODEX_SUBSCRIPTION_SHARING_LIMIT_MESSAGE,
+	CodexApiError,
+	isCodexSubscriptionSharingLimit,
+} from "./openai-codex/response-handler";
 import { getCodexAttestationHeader } from "./openai-codex-attestation";
 export { createOpenAICodexCompactionRequestContext } from "./openai-codex-compaction";
 import { getOpenAICodexWebSocketEnvValue } from "./openai-codex-transport";
@@ -4693,9 +4697,12 @@ export function createCodexProviderStreamError(rawEvent: Record<string, unknown>
 	const code = nestedError?.code ?? nestedError?.type ?? event.code ?? "";
 	const message = event.message ?? "";
 	const formattedMessage =
-		event.type === "error"
-			? formatCodexErrorEvent(rawEvent, code, message)
-			: (formatCodexFailure(rawEvent) ?? "Codex response failed");
+		isCodexSubscriptionSharingLimit(code) ||
+		isCodexSubscriptionSharingLimit(nestedError?.message ?? event.message ?? event.response?.message)
+			? `${CODEX_SUBSCRIPTION_SHARING_LIMIT_MESSAGE}${code ? ` (code=${code})` : ""}`
+			: event.type === "error"
+				? formatCodexErrorEvent(rawEvent, code, message)
+				: (formatCodexFailure(rawEvent) ?? "Codex response failed");
 	// The nested error's headers are the specific source; the event's own apply when they carry no retry hint.
 	const nestedHeaders = getHeadersFromError(nestedError);
 	const headers =
