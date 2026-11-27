@@ -102,36 +102,52 @@ describe("interactive retained transcript", () => {
 		expect(handle.dispatchAction("0", "copy")).toBe(false);
 	});
 
-	it("resends settled native descriptions after invalidation and restores them on removal", () => {
+	it("invalidates only changed settled roots and restores originals on removal", () => {
 		const { shell, live } = scene();
-		const block = shell.transcript.append(() => <text text="reply" />);
+		const blocks = ["reply-1", "reply-2", "reply-3", "reply-4"].map((key, index) => shell.transcript.append(() => <text key={key} text={key} />, { compact: () => index >= 2 }));
+		for (const block of blocks) shell.transcript.settle(block);
+		const decorated = originals(live).map(node => derivedNode(node, props => ({ ...props, tone: "accent" })));
+		let selected = 0;
 		const surface = createSurface(() => ({ main: shell.transcript.nativeNodes }));
 		const reconciler = new Reconciler(surface, "s:live", { cols: () => 80, rows: () => 24, hasFeature: () => false }, () => {});
-		disposers.push(() => { shell.transcript.attach(undefined); reconciler.dispose(); surface.dispose(); });
-		shell.transcript.attach({ retired: () => false, replayHistory: () => {}, redescribe: node => reconciler.redescribe(node) });
-		shell.transcript.settle(block);
+		disposers.push(() => { reconciler.dispose(); surface.dispose(); for (const node of decorated) node.dispose(); });
+		const normal = shell.transcript.nativeNodes();
 		reconciler.reconcile();
-		const remove = live.decorate(blocks => blocks.flatMap(item => item.native()));
+		const untouchedId = reconciler.idOf(normal.at(-1)!);
+		if (!untouchedId) throw new Error("Expected a native compact run");
+		const remove = live.decorate(items => items.flatMap((item, index) => index === selected ? [decorated[index]!] : item.native()));
 		reconciler.reconcile();
 		live.invalidate();
-		expect(reconciler.dirty).toBe(true);
-		expect(reconciler.reconcile().ops.some(op => op[0] === "del")).toBe(true);
+		expect(reconciler.reconcile().ops).toEqual([]);
+		selected = 1;
+		live.invalidate();
+		const ops = reconciler.reconcile().ops;
+		expect(ops.some(op => op.length > 1 && op[1] === "main/reply-1")).toBe(true);
+		expect(ops.some(op => op.length > 1 && op[1] === "main/reply-2")).toBe(true);
+		expect(ops.some(op => op.length > 1 && op[1] === untouchedId)).toBe(false);
+		live.invalidate();
+		expect(reconciler.reconcile().ops).toEqual([]);
 		remove();
-		expect(reconciler.dirty).toBe(true);
-		reconciler.reconcile();
-		expect(shell.transcript.nativeNodes()).toEqual(block.native());
+		expect(reconciler.reconcile().ops.some(op => op.length > 1 && op[1] === untouchedId)).toBe(false);
+		expect(shell.transcript.nativeNodes()).toEqual(normal);
 	});
 
-	it("never decorates a plain terminal and recovers from a failed transform", () => {
+	it("never decorates a plain terminal and preserves compact grouping for no-op and failed transforms", () => {
 		const { shell, live, native, errors } = scene();
-		shell.transcript.append(() => <text text="reply" />);
+		shell.transcript.append(() => <text text="reply" />, { compact: () => true });
+		shell.transcript.append(() => <text text="next" />, { compact: () => true });
+		const normal = shell.transcript.nativeNodes();
+		const removeNoop = live.decorate(blocks => blocks.flatMap(block => block.native()));
+		expect(shell.transcript.nativeNodes()).toEqual(normal);
+		expect(normal[0]?.props()).toMatchObject({ role: "omp.compact", gap: "none" });
+		removeNoop();
 		native.set(false);
 		let calls = 0;
 		const remove = live.decorate(() => { calls++; throw new Error("bad decorator"); });
-		expect(shell.transcript.nativeNodes()).toEqual(originals(live));
+		expect(shell.transcript.nativeNodes()).toEqual(normal);
 		expect(calls).toBe(0);
 		native.set(true);
-		expect(shell.transcript.nativeNodes()).toEqual(originals(live));
+		expect(shell.transcript.nativeNodes()).toEqual(normal);
 		expect(errors).toHaveLength(1);
 		live.invalidate();
 		shell.transcript.nativeNodes();

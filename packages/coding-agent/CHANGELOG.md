@@ -143,6 +143,7 @@
 
 ### Fixed
 
+- Native transcript decorations preserve compact grouping and avoid redrawing unchanged or evicted blocks ([#20635](https://github.com/can1357/oh-my-pi/pull/20635) by [@BenjaminEriksen95](https://github.com/BenjaminEriksen95)).
 - The compiled extension module registry locates the current `packages/tui` workspace, retaining the canonical modern pi-tui root and shared reactive runtime for extension imports.
 - Passive extension overlays no longer block composer shortcuts or keyboard link hints.
 

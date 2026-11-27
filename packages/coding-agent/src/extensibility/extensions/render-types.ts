@@ -59,6 +59,7 @@ export interface ExtensionLiveBlock {
 export interface ExtensionLiveUi {
 	readonly native: boolean;
 	blocks(): readonly ExtensionLiveBlock[];
+	/** Replacement roots must retain explicit UiNode source provenance (derivedNode does this automatically). */
 	decorate(transform: (blocks: readonly ExtensionLiveBlock[]) => readonly UiNode[]): () => void;
 	invalidate(): void;
 	focused(): UiNode | null;

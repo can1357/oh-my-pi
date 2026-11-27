@@ -20,6 +20,7 @@
 
 ### Fixed
 
+- Derived native nodes settle and retire with their source nodes ([#20635](https://github.com/can1357/oh-my-pi/pull/20635) by [@BenjaminEriksen95](https://github.com/BenjaminEriksen95)).
 - Improved performance when editing large documents and updating or closing views with many reactive values.
 - Fixed pane resizing in Herdr to avoid repeated redraw loops.
 - Fixed SIXEL and iTerm2 images overflowing rows, scrolling the terminal unexpectedly, or rendering incorrectly when they extend beyond the visible screen.

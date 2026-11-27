@@ -181,6 +181,8 @@ export class UiNode<K extends UiKind = UiKind> {
 	readonly key: Accessor<string | undefined>;
 	readonly reveal: Accessor<RevealAt | Reveal | undefined>;
 	readonly scroll: Accessor<ScrollRequest | undefined>;
+	/** Explicit lifecycle provenance: a replacement's source, or the members of a grouped view. */
+	readonly source?: UiNode | Accessor<readonly UiNode[]>;
 	#disposers: (() => void)[] | null = null;
 	#disposed = false;
 
@@ -200,6 +202,7 @@ export class UiNode<K extends UiKind = UiKind> {
 		this.handlers = handlers;
 		if (source) {
 			this.fieldSelection = source.fieldSelection;
+			this.source = source.source;
 			this.props = source.props;
 			this.children = source.children;
 			this.key = source.key;
@@ -269,12 +272,14 @@ export class UiNode<K extends UiKind = UiKind> {
 /** What a derived node takes from the node it is a view of. */
 type DerivedSource<K extends UiKind> = Pick<UiNode<K>, "props" | "children" | "key" | "reveal" | "scroll"> & {
 	readonly fieldSelection?: FieldSelection;
+	readonly source?: UiNode | Accessor<readonly UiNode[]>;
 };
 
 /**
  * A view of `node` with its props mapped by `map` (a transient mark laid on a block built
  * elsewhere): a node of its own with `node`'s kind, key and children, and `handlers` (default:
  * `node`'s) on the event path. Describe one or the other, never both under one surface.
+ * Finality and native eviction follow the source; disposing the view never disposes the source.
  */
 export function derivedNode<K extends UiKind>(
 	node: UiNode<K>,
@@ -283,6 +288,7 @@ export function derivedNode<K extends UiKind>(
 ): UiNode<K> {
 	const props = computed(() => map(node.props()), { equals: shallowEqual });
 	return new UiNode(node.kind, handlers as Props, undefined, {
+		source: node,
 		props,
 		children: node.children,
 		key: node.key,

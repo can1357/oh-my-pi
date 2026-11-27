@@ -361,7 +361,7 @@ export class Reconciler {
 			const rec = this.#byId.get(id);
 			if (!rec?.node || rec.parent !== this.#main || !rec.settled) continue;
 			lost = true;
-			(this.#evicted ??= new WeakSet()).add(rec.node);
+			this.#evict(rec.node);
 			this.#release(rec, gone);
 			this.#ids.delete(id);
 		}
@@ -377,6 +377,26 @@ export class Reconciler {
 		// It is already absent: do not delete it or use it as a `before` sibling.
 		this.#main.kids = this.#main.kids.filter(kid => !kid.released);
 		this.#markDirty(this.#main);
+	}
+
+	/** Eviction belongs to source content, not the lifetime of a replacement view. */
+	#evict(node: UiNode): void {
+		const evicted = (this.#evicted ??= new WeakSet());
+		if (evicted.has(node)) return;
+		evicted.add(node);
+		const source = node.source;
+		if (typeof source === "function") for (const member of source()) this.#evict(member);
+		else if (source) this.#evict(source);
+		if (!node.disposed) for (const child of node.children()) this.#evict(child);
+	}
+
+	#isEvicted(node: UiNode): boolean {
+		const source = node.source;
+		if (typeof source === "function") {
+			const members = source();
+			return members.length > 0 && members.every(member => this.#isEvicted(member));
+		}
+		return source ? this.#isEvicted(source) : (this.#evicted?.has(node) ?? false);
 	}
 
 	/** Release every watcher. */
@@ -518,7 +538,7 @@ export class Reconciler {
 		const nodes = this.#sourceOf(rec);
 		for (let i = 0; i < nodes.length; i++) {
 			const node = nodes[i]!;
-			if (this.#evicted?.has(node)) continue;
+			if (this.#evicted && this.#isEvicted(node)) continue;
 			out.push({ node, owner: rec, seg: node.key() ?? String(i), hoisted: false });
 		}
 		return out;

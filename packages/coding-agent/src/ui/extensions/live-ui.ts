@@ -91,7 +91,7 @@ export function createExtensionLiveUi(
 		decorate: transform => {
 			let failed = false;
 			return shell.transcript.decorateNative(blocks => {
-				if (!shell.native()) return blocks.flatMap(block => block.native());
+				if (!shell.native()) return undefined;
 				try {
 					const nodes = transform(blocks.map(handle));
 					failed = false;
@@ -102,7 +102,7 @@ export function createExtensionLiveUi(
 						failed = true;
 						onError(error);
 					}
-					return blocks.flatMap(block => block.native());
+					return undefined;
 				}
 			});
 		},
