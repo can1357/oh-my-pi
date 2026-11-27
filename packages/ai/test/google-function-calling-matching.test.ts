@@ -15,14 +15,14 @@ const ZERO_USAGE: Usage = {
 function createGoogleModel(
 	id: string,
 	api: "google-generative-ai" | "google-vertex" = "google-generative-ai",
-	provider: "google" | "google-antigravity" | "google-vertex" = api === "google-vertex" ? "google-vertex" : "google",
+	provider: "google" | "google-vertex" = api === "google-vertex" ? "google-vertex" : "google",
 ): Model<typeof api> {
 	return buildModel({
 		id,
 		name: id,
 		api,
 		provider: provider,
-		baseUrl: provider === "google-antigravity" ? "https://daily-cloudcode-pa.googleapis.com" : "https://example.com",
+		baseUrl: "https://example.com",
 		reasoning: false,
 		input: ["text", "image"],
 		cost: {
@@ -31,21 +31,6 @@ function createGoogleModel(
 			cacheRead: 0,
 			cacheWrite: 0,
 		},
-		contextWindow: 200000,
-		maxTokens: 8192,
-	});
-}
-
-function createCloudCodeAssistModel(provider: "google-antigravity" | "google-gemini-cli"): Model<"google-gemini-cli"> {
-	return buildModel({
-		id: "gemini-3.5-flash",
-		name: "gemini-3.5-flash",
-		api: "google-gemini-cli",
-		provider,
-		baseUrl: "https://cloudcode-pa.googleapis.com",
-		reasoning: false,
-		input: ["text", "image"],
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 200000,
 		maxTokens: 8192,
 	});
@@ -146,18 +131,6 @@ describe("Google GenerateContent function response matching", () => {
 			},
 		]);
 	});
-
-	it("keeps Claude call IDs on non-Vertex Google-compatible endpoints", () => {
-		const model = createGoogleModel("claude-sonnet-4-5", "google-generative-ai", "google-antigravity");
-		const { functionCall, functionResponse } = functionCallAndResponse(
-			model,
-			contextWithToolResult("actual_tool_name"),
-		);
-
-		expect(functionCall?.id).toBe("call_12345_abc");
-		expect(functionResponse?.id).toBe("call_12345_abc");
-		expect(functionResponse?.name).toBe(functionCall?.name);
-	});
 });
 
 describe("Google GenerateContent parallel function response order", () => {
@@ -201,8 +174,6 @@ describe("Google GenerateContent parallel function response order", () => {
 	it.each([
 		{ route: "Gemini API, Gemini 2.5", model: createGoogleModel("gemini-2.5-flash") },
 		{ route: "Vertex", model: createGoogleModel("gemini-3.5-flash", "google-vertex") },
-		{ route: "Antigravity", model: createCloudCodeAssistModel("google-antigravity") },
-		{ route: "Gemini CLI", model: createCloudCodeAssistModel("google-gemini-cli") },
 		{ route: "Gemini API, Gemini 3.5", model: createGoogleModel("gemini-3.5-flash") },
 	])("sends same-name results in call order: $route", ({ model }) => {
 		const contents = convertMessages(model, contextWithResultsStoredOutOfOrder());

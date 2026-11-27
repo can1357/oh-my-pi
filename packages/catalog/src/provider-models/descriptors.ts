@@ -4,8 +4,8 @@
  * rows — is authored in `src/compat/rules/providers/<id>.kdl` and read from
  * the compiled entry (`src/compat/providers.ts`); this table holds only the
  * code half. Providers without a factory (`amazon-bedrock`, `azure`,
- * `gitlab-duo`, MiniMax, and the bespoke OAuth-driven managers
- * `google-antigravity` / `openai-codex` built by the
+ * `gitlab-duo`, MiniMax, and the bespoke OAuth-driven manager
+ * `openai-codex` built by the
  * coding-agent runtime) still have a KDL entry but no runtime discovery here.
  */
 import type { KnownProvider } from "../compat/provider-ids";
@@ -142,6 +142,7 @@ const MODEL_MANAGER_FACTORIES: Readonly<Partial<Record<KnownProvider, ModelManag
 	inception: config => inceptionModelManagerOptions(config),
 	kilo: config => kiloModelManagerOptions(config),
 	"kimi-code": config => kimiCodeModelManagerOptions(config),
+	"kimi-code-global": config => kimiCodeModelManagerOptions(config, "kimi-code-global"),
 	liquid: () => liquidModelManagerOptions(),
 	litellm: config => litellmModelManagerOptions(config),
 	local: () => localModelManagerOptions(),

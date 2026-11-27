@@ -2,8 +2,12 @@ import { describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cmdRecall, cmdRemember, cmdStats, runCli } from "@oh-my-pi/pi-mnemopi/cli";
+import { cmdRecall, cmdRemember, cmdStats, runCli, withMemory } from "@oh-my-pi/pi-mnemopi/cli";
 import { BeamMemory } from "@oh-my-pi/pi-mnemopi/core/beam";
+import {
+	type ResolvedMnemopiRuntimeOptions,
+	withMnemopiRuntimeOptions,
+} from "@oh-my-pi/pi-mnemopi/core/runtime-options";
 
 function tempRoot(): string {
 	return mkdtempSync(join(tmpdir(), "mnemopi-ts-cli-"));
@@ -27,6 +31,31 @@ function capture() {
 			return stderr;
 		},
 	};
+}
+
+/** Deterministic embedding provider: "alpha" texts map to `[1, 0, 0, 0]`, everything else to `[0, 0, 0, 1]`. */
+function fakeProvider() {
+	let callCount = 0;
+	const provider = {
+		// fastembed shape: async generator yielding batches of rows.
+		async *embed(texts: readonly string[]) {
+			callCount += 1;
+			yield texts.map(text => (text.toLowerCase().includes("alpha") ? [1, 0, 0, 0] : [0, 0, 0, 1]));
+		},
+	};
+	return { provider, calls: () => callCount };
+}
+
+function readEmbeddingRows(dbPath: string): { memory_id: string; embedding_json: string }[] {
+	const fresh = new BeamMemory({ dbPath });
+	try {
+		return fresh.db.query("SELECT memory_id, embedding_json FROM memory_embeddings").all() as {
+			memory_id: string;
+			embedding_json: string;
+		}[];
+	} finally {
+		fresh.close();
+	}
 }
 
 describe("CLI command handlers", () => {
@@ -166,6 +195,80 @@ describe("CLI command handlers", () => {
 			const badIo = capture();
 			expect(await runCli(["bank", "create", "bad/name"], badIo.context(root))).toBe(2);
 			expect(badIo.stderr).toContain("Invalid bank name");
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("CLI embedding drain on close", () => {
+	it("flushes pending embeddings before close so short-lived `mnemopi store` owners persist them", async () => {
+		// `cmdRemember` (via `withMemory`) closes the SQLite handle immediately after the
+		// synchronous `remember()` call. Without a drain, the background `embed()` lands
+		// on a closed DB and silently drops the row. Going through the real CLI handler
+		// pins `withMemory`'s flush-before-close invariant, not just `flushExtractions()`.
+		const { provider, calls } = fakeProvider();
+		const root = tempRoot();
+		const dbPath = join(root, "mnemopi.db");
+		const captured: string[] = [];
+		const stdout = { write: (s: string) => captured.push(s) };
+		const stderr = { write: (s: string) => captured.push(s) };
+		const runtimeOptions: ResolvedMnemopiRuntimeOptions = {
+			embeddings: { provider },
+		};
+
+		try {
+			await withMnemopiRuntimeOptions(runtimeOptions, async () => {
+				const exit = await cmdRemember(["alpha checklist for short-lived owner", "cli", "0.5"], {
+					dbPath,
+					stdout,
+					stderr,
+				});
+				expect(exit).toBe(0);
+			});
+
+			// Re-open as a separate session to verify the embedding survived `withMemory`'s close.
+			const rows = readEmbeddingRows(dbPath);
+			expect(rows).toHaveLength(1);
+			expect(JSON.parse(rows[0]?.embedding_json ?? "[]")).toEqual([1, 0, 0, 0]);
+			expect(calls()).toBeGreaterThanOrEqual(1);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("drains pending embeddings before close even when the CLI handler throws", async () => {
+		// A handler that calls remember() and then throws must still drain the in-flight
+		// embed() before `withMemory` closes its OWNED file-backed DB.
+		const { provider, calls } = fakeProvider();
+		const root = tempRoot();
+		const dbPath = join(root, "mnemopi.db");
+		const runtimeOptions: ResolvedMnemopiRuntimeOptions = {
+			embeddings: { provider },
+		};
+
+		try {
+			let thrown: unknown;
+			await withMnemopiRuntimeOptions(runtimeOptions, async () => {
+				try {
+					await withMemory({ dbPath }, async memory => {
+						memory.remember("alpha cli throw-path regression", { source: "test", importance: 0.5 });
+						throw new Error("simulated CLI handler failure");
+					});
+				} catch (error) {
+					thrown = error;
+				}
+			});
+			// The CLI reports a handler failure to the user, so `withMemory` must
+			// rethrow; assert that first, before the persistence check below.
+			expect(thrown).toBeInstanceOf(Error);
+			expect(thrown instanceof Error ? thrown.message : undefined).toBe("simulated CLI handler failure");
+
+			// Re-open as a separate session to verify the embedding survived the throw.
+			const rows = readEmbeddingRows(dbPath);
+			expect(rows).toHaveLength(1);
+			expect(JSON.parse(rows[0]?.embedding_json ?? "[]")).toEqual([1, 0, 0, 0]);
+			expect(calls()).toBeGreaterThanOrEqual(1);
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}

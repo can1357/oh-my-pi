@@ -12,6 +12,7 @@ import { boxBottom, boxRow, boxTop, definePickerLook, type PickerTerm } from "@o
 import { padTo, replaceTabs, truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { bindingGlyph, selectNavGlyphs } from "../panels/common";
+import { hangingWrap } from "../tools/frame";
 import { caretField, inlineMarkdown } from "./common";
 
 /** One visible option. */
@@ -78,11 +79,11 @@ function sliderRows(theme: Theme, slider: NonNullable<HookLookTerm["slider"]>, w
 	const caption = slider.caption ? `${theme.style("dim", slider.caption)}  ` : "";
 	const rows = wrap(`${caption}${left}  ${track}  ${right}`, width);
 	const detail = segments[index]?.detail;
-	if (detail) rows.push(...wrap(`  ${theme.style("dim", "↳")} ${theme.style("muted", detail)}`, width));
+	if (detail) rows.push(...hangingWrap(`  ${theme.style("dim", "↳")} `, "    ", theme.style("muted", detail), width));
 	return rows;
 }
 
-/** The rendered lines of one option (label, then its description). */
+/** The rendered rows of one option (label, then its description), hung under their prefixes within the list's padding. */
 function optionLines(
 	theme: Theme,
 	option: HookLookOption,
@@ -106,11 +107,12 @@ function optionLines(
 	} else {
 		prefix = "  ";
 	}
-	const lines = [prefix + label];
+	const inner = Math.max(1, width - 2);
+	const lines = hangingWrap(prefix, "  ", replaceTabs(label), inner);
 	if (option.description && descRows !== 0) {
 		const color = option.disabled ? "dim" : "muted";
 		const description = inlineMarkdown(theme, option.description, color);
-		if (descRows === "full") lines.push(`    ${description}`);
+		if (descRows === "full") lines.push(...hangingWrap("    ", "    ", replaceTabs(description), inner));
 		else {
 			const body = Math.max(1, width - 2 - 4);
 			const wrapped = wrap(description, body);

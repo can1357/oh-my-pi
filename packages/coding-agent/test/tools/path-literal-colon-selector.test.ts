@@ -560,3 +560,11 @@ describe("grep CLI subcommand leading-colon path (issue #5624)", () => {
 		expect(output).not.toMatch(/not found/i);
 	});
 });
+
+describe("non-string path input (issue #16618)", () => {
+	it("names the expected file path string instead of failing on a string method", () => {
+		// Browser helpers fed from eval code (`tab.pdf({ path: 123 })`) reach these with any value.
+		expect(() => resolveToCwd(123 as never, process.cwd())).toThrow("Expected a file path string; got number.");
+		expect(() => expandPath(null as never)).toThrow("Expected a file path string; got null.");
+	});
+});

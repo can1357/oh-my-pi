@@ -30,6 +30,7 @@ function capabilities(overrides: Partial<TerminalCapabilities> = {}): TerminalCa
 		multiplexer: null,
 		textSizing: false,
 		tsp: false,
+		emoji: { vs16Wide: false, bareFits: false },
 		...overrides,
 	};
 }

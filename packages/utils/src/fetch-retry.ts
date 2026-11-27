@@ -27,14 +27,7 @@ const WILL_RESET_AT_PATTERN =
 // a provider-specific offset (Z.AI/Zhipu Beijing time) is applied only through
 // `RetryHintOptions.naiveResetTimezoneOffset`, never inferred from the language.
 const CN_RESET_AT_PATTERN = /将在\s*([0-9]{4}-[0-9]{2}-[0-9]{2}\s+[0-9]{2}:[0-9]{2}:[0-9]{2})\s*重置/;
-// Google Cloud Code Assist structured RPC error timestamp ("quotaResetTimeStamp": "2026-10-31T20:38:36Z")
-const GOOGLE_RPC_RESET_TIMESTAMP_PATTERN =
-	/"quotaResetTimeStamp":\s*"([0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z)"/i;
-const RESET_AT_PATTERNS: readonly RegExp[] = [
-	WILL_RESET_AT_PATTERN,
-	CN_RESET_AT_PATTERN,
-	GOOGLE_RPC_RESET_TIMESTAMP_PATTERN,
-];
+const RESET_AT_PATTERNS: readonly RegExp[] = [WILL_RESET_AT_PATTERN, CN_RESET_AT_PATTERN];
 // "retry-after-ms=98497000" / "retry-after-ms: 7200000" / "retry-after-ms = 7200000"
 const RETRY_AFTER_MS_BODY_PATTERN = /\bretry-after-ms\s*[:=]\s*([0-9]+)\b/i;
 
@@ -70,7 +63,7 @@ export interface RetryHintOptions {
  *  - `"retryDelay": "34.074824224s"` / `"quotaResetDelay": "17h48m25.5s"` (JSON error detail fields)
  *  - `try again in 250ms` / `try again in 12s` / `try again in 5 min` / `try again in ~158 min`
  *  - `retry-after-ms=98497000` / `retry-after-ms: 7200000` / `retry-after-ms = 7200000`
- *  - `Your limit will reset at 2026-09-01 09:44:51` / `rests until 2026-11-25T14:30:00Z` / `将在 2026-09-01 09:44:51 重置` / `"quotaResetTimeStamp": "..."`
+ *  - `Your limit will reset at 2026-09-01 09:44:51` / `rests until 2026-11-25T14:30:00Z` / `将在 2026-09-01 09:44:51 重置`
  *    (a provider offset makes a naive wall clock authoritative; otherwise it
  *    resolves only when no relative signal is present)
  *

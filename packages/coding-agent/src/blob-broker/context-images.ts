@@ -38,9 +38,7 @@ export function supportsRemoteImageUrls(model: Model): boolean {
 	if (modelMatchesHost(model, "moonshotNative")) return false;
 	if (URL_CAPABLE_OPENAI_APIS[model.api]) return true;
 	if (model.api === "anthropic-messages") return model.provider === "anthropic";
-	// Antigravity's Cloud Code endpoint fetches arbitrary https fileUri;
 	// Vertex documents public https URLs for Gemini fileData.
-	if (model.api === "google-gemini-cli") return model.provider === "google-antigravity";
 	return model.api === "google-vertex";
 }
 

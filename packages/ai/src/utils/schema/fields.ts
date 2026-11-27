@@ -11,7 +11,7 @@
 
 /**
  * Google Generative AI unsupported schema fields.
- * Stripped during normalizeSchemaForGoogle / normalizeSchemaForCCA.
+ * Stripped during normalizeSchemaForGoogle.
  */
 export const UNSUPPORTED_SCHEMA_FIELDS: Record<string, true> = {
 	$schema: true,
@@ -52,11 +52,11 @@ export const UNSUPPORTED_SCHEMA_FIELDS: Record<string, true> = {
 	dependentRequired: true,
 	// MCP 2026-07-28 transport annotation (mirrors a param into an `Mcp-Param-*`
 	// HTTP header on the Streamable HTTP transport); not a JSON Schema keyword.
-	// Google Cloud Code Assist 400s on the unknown field name, so strip it from
+	// Google 400s on the unknown field name, so strip it from
 	// the wire schema. MCP transport/execution reads it from the raw tool schema.
 	"x-mcp-header": true,
-	// JSON Schema annotation keywords: pure metadata the Google/CCA wire
-	// schemas have no field for. protojson rejects unknown fields outright
+	// JSON Schema annotation keywords: pure metadata the Google wire
+	// schema has no field for. protojson rejects unknown fields outright
 	// ("Cannot find field"), so MCP servers annotating parameters with
 	// `deprecated` / `readOnly` / `writeOnly` (e.g. Stitch's screen tools)
 	// used to 400 the entire request.
@@ -140,10 +140,11 @@ export const NON_STRUCTURAL_SCHEMA_KEYS: Record<string, true> = {
 };
 
 /**
- * Cloud Code Assist type-specific allowed keys per JSON Schema type.
- * Used when collapsing mixed-type combiner variants for CCA Claude.
+ * Keywords that constrain only one JSON Schema type, per type. Used when a
+ * multi-type `type` array is split or scalarized, so each branch keeps only the
+ * keywords that apply to its type.
  */
-export const CLOUD_CODE_ASSIST_TYPE_SPECIFIC_KEYS: Record<string, Record<string, true>> = {
+export const TYPE_SPECIFIC_SCHEMA_KEYS: Record<string, Record<string, true>> = {
 	array: {
 		items: true,
 		prefixItems: true,
@@ -182,14 +183,15 @@ export const CLOUD_CODE_ASSIST_TYPE_SPECIFIC_KEYS: Record<string, Record<string,
 };
 
 /**
- * Flat set of every type-specific key across all CCA types.
- * Used to identify sibling keys that need filtering during mixed-type collapse.
+ * Flat set of every type-specific key across all types.
+ * Used to identify sibling keys that need filtering when a node's type narrows.
  */
-export const ALL_CCA_TYPE_SPECIFIC_KEYS: Record<string, true> = buildAllCcaTypeSpecificKeys();
+export const ALL_TYPE_SPECIFIC_SCHEMA_KEYS: Record<string, true> = buildAllTypeSpecificSchemaKeys();
 
-function buildAllCcaTypeSpecificKeys(): Record<string, true> {
+function buildAllTypeSpecificSchemaKeys(): Record<string, true> {
 	const all: Record<string, true> = {};
-	for (const typeKeys of Object.values(CLOUD_CODE_ASSIST_TYPE_SPECIFIC_KEYS)) {
+	for (const type in TYPE_SPECIFIC_SCHEMA_KEYS) {
+		const typeKeys = TYPE_SPECIFIC_SCHEMA_KEYS[type];
 		for (const key in typeKeys) {
 			all[key] = true;
 		}
@@ -198,49 +200,7 @@ function buildAllCcaTypeSpecificKeys(): Record<string, true> {
 }
 
 /**
- * Cloud Code Assist shared schema keys allowed on any type.
- * Used alongside CLOUD_CODE_ASSIST_TYPE_SPECIFIC_KEYS for CCA combiner collapsing.
- */
-export const CLOUD_CODE_ASSIST_SHARED_SCHEMA_KEYS: Record<string, true> = {
-	title: true,
-	description: true,
-	default: true,
-	examples: true,
-};
-
-/**
  * Combinator keys used across schema sanitization modules.
  * Defined once to avoid duplication in strict-mode.ts and normalize.ts.
  */
 export const COMBINATOR_KEYS = ["anyOf", "allOf", "oneOf"] as const;
-
-/**
- * Cloud Code Assist Claude unsupported schema fields.
- * Much smaller than UNSUPPORTED_SCHEMA_FIELDS (Google) because CCA supports
- * validation keywords like additionalProperties, minLength, pattern, etc.
- * Meta/reference keywords plus object-key validators that CCA cannot resolve are stripped.
- */
-export const CCA_UNSUPPORTED_SCHEMA_FIELDS: Record<string, true> = {
-	$schema: true,
-	$id: true,
-	$anchor: true,
-	$ref: true,
-	$defs: true,
-	$dynamicRef: true,
-	$dynamicAnchor: true,
-	propertyNames: true,
-	// Annotation keywords have no CCA Schema proto field; protojson rejects
-	// them with INVALID_ARGUMENT ("Cannot find field").
-	deprecated: true,
-	readOnly: true,
-	writeOnly: true,
-	$comment: true,
-	uniqueItems: true,
-	contains: true,
-	minContains: true,
-	maxContains: true,
-	additionalItems: true,
-	contentEncoding: true,
-	contentMediaType: true,
-	contentSchema: true,
-};

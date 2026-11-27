@@ -398,7 +398,7 @@ describe("wait and todo displacement", () => {
 
 	it("lets replies after a todo card hidden with tool activity reach scrollback at once", async () => {
 		vi.useFakeTimers();
-		fixture.ctx.hideToolActivity = true;
+		fixture.ctx.toolActivity = "hidden";
 		const { term } = attachTerminal(fixture);
 		try {
 			await run(fixture, "todo-1", "todo", { op: "done" }, todoResult(["plan", "read"], ["plan"]));

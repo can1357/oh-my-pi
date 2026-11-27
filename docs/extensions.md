@@ -132,7 +132,7 @@ Core methods:
 - `getActiveTools`, `getAllTools`, `setActiveTools`
 - `getCommands`
 - `getSessionName`, `setSessionName`
-- `setModel`, `getThinkingLevel`, `setThinkingLevel`
+- `setModel`, `getThinkingLevel`, `setThinkingLevel` (`getThinkingLevel()` returns `undefined` when no concrete effort applies, e.g. a model limited to off/auto with `auto` selected — not only before the session is initialized)
 - `getServiceTiers`, `setServiceTier`
 - `registerProvider`, `unregisterProvider`
 - `registerFileWriteFallback`, `registerFileDeleteFallback`
@@ -240,17 +240,17 @@ distinct from the built-in one so processes without the extension (older session
 
 Four fields let an extension replace parts of an existing provider without redefining its models. The models keep their `api`, so option mapping, credentials, and catalog policy behave as before:
 
-- `stream(model, context, options)`: handles every request to the provider's models instead of the built-in adapter for their api. `options` are already mapped for that api (for example `GoogleGeminiCliOptions`) and carry the provider's key.
+- `stream(model, context, options)`: handles every request to the provider's models instead of the built-in adapter for their api. `options` are already mapped for that api (for example `GoogleOptions`) and carry the provider's key.
 - `generateImage(model, request, options)`: handles image generation for the provider's image models.
 - `webSearch(params)`: runs the grounded search request for the provider's models. Availability checks and labels still come from the model's grounding backend.
 - `discoverModels({ accounts, baseUrl, fetch })`: fetches the provider's model list in place of its built-in discovery request. It runs once with all signed-in accounts (a configured key counts as one account). Return `null` to keep the cached catalog. The built-in discovery still caches the rows, merges them, and applies policy.
-- `rules`: KDL rule directives for every model of the provider, keyed by directive name, as a `provider "<id>" { … }` block would set them (`{ "prompt-perturbation": true }`). Unknown directives and invalid values fail `registerProvider`. A runtime rule wins ties with a bundled rule but still loses to a more specific one, such as a model-scoped rule.
+- `rules`: KDL rule directives for every model of the provider, keyed by directive name, as a `provider "<id>" { … }` block would set them (`{ "requires-native-tools": true }`). Unknown directives and invalid values fail `registerProvider`. A runtime rule wins ties with a bundled rule but still loses to a more specific one, such as a model-scoped rule.
 
 ```ts
 pi.registerProvider("google-generative-ai", {
 	stream: myGeminiStream,
 	generateImage: myImageGenerator,
-	rules: { "prompt-perturbation": true },
+	rules: { "requires-native-tools": true },
 });
 ```
 
@@ -438,6 +438,7 @@ Handlers and tool `execute` receive `ctx` with:
 - `localProtocolOptions` (optional calling-session `local://` root mapping for external tool bridges)
 - `getContextUsage()`
 - `getAsyncJobSnapshot()` returns the current session's read-only async-job snapshot, or `null` when no session owns the context
+- `cancelAsyncJob(id)` cancels a running async job (e.g. a background `task` worker) this session owns, like `/jobs kill <id>`; returns `false` when the session owns no running job by that id. To stop them all, loop over `getAsyncJobSnapshot()?.running`
 - `compact(instructionsOrOptions?)`: accepts summary focus text or `CompactOptions`, including one-off `mode: "soft" | "remote" | "snapcompact"`, `onComplete`, `onError`, and `suppressContinuation`
 - `isIdle()`, `hasPendingMessages()`, `abort()`
 - `shutdown()`
@@ -486,7 +487,7 @@ const { replyText } = await ctx.runEphemeralTurn({
 });
 ```
 
-For example, a Synadia/NATS bridge can answer another agent's question from the local context and stream the response back without injecting a live user message. **A side turn sends the current conversation snapshot to the configured model provider and returns its answer to the calling extension.** Bridge extensions must obtain user consent where appropriate, authenticate and authorize callers, and audit every remote request before using this API. Agent-to-agent consultation extensions can set `maxTokens` and a serialized, post-transform `maxContextBytes` cap (measured after secret obfuscation) before inference. Transports that omit or overwrite caller output-token limits, including Codex Responses, Cursor, GitLab Duo Workflow, Ollama Cloud discovery models, and Antigravity, reject `maxTokens` before inference instead of silently starting an uncapped request. Antigravity rejects requested caps conservatively across its transport because effort routing can select wire profiles with fixed output limits. A requested cap disables optional budget thinking, since those transports may otherwise raise the wire limit to fit a thinking budget; models that require budget thinking reject the cap. `tools: false` also rejects before inference on Cursor, whose transport exposes native tools independently of the supplied tool catalog. Both caps must be positive safe integers. Omit `maxTokens` only when an uncapped turn is acceptable, or choose an API that supports output limits. The extension owns transport, access controls, request limits, and cancellation (including shutdown); this API adds no network dependency. `onTextDelta` may return a promise: delivery is awaited in order, including the final flush, and a delivery error rejects the side turn and aborts the provider request instead of leaving it streaming.
+For example, a Synadia/NATS bridge can answer another agent's question from the local context and stream the response back without injecting a live user message. **A side turn sends the current conversation snapshot to the configured model provider and returns its answer to the calling extension.** Bridge extensions must obtain user consent where appropriate, authenticate and authorize callers, and audit every remote request before using this API. Agent-to-agent consultation extensions can set `maxTokens` and a serialized, post-transform `maxContextBytes` cap (measured after secret obfuscation) before inference. Transports that omit or overwrite caller output-token limits, including Codex Responses, Cursor, GitLab Duo Workflow, and Ollama Cloud discovery models, reject `maxTokens` before inference instead of silently starting an uncapped request. A requested cap disables optional budget thinking, since those transports may otherwise raise the wire limit to fit a thinking budget; models that require budget thinking reject the cap. `tools: false` also rejects before inference on Cursor, whose transport exposes native tools independently of the supplied tool catalog. Both caps must be positive safe integers. Omit `maxTokens` only when an uncapped turn is acceptable, or choose an API that supports output limits. The extension owns transport, access controls, request limits, and cancellation (including shutdown); this API adds no network dependency. `onTextDelta` may return a promise: delivery is awaited in order, including the final flush, and a delivery error rejects the side turn and aborts the provider request instead of leaving it streaming.
 
 Hooks may start a side turn, including from delayed callbacks. Only `context`, `before_provider_request`, and `after_provider_response` hooks reached _within_ a running side turn reject a nested `runEphemeralTurn` call, which bounds recursion; the caller's `onTextDelta` runs outside that guard. Side turns inherit the active event-handler signal (only while that handler is still running) and, for registered tools, the tool invocation’s abort signal. An explicit `options.signal` is combined with those signals; it does not replace them. `maxContextBytes` is checked before `before_provider_request` hooks run; a hook that replaces the payload is not re-measured.
 
@@ -730,9 +731,13 @@ and `/new`. Commands retain their explicit prefill and session-transition action
 
 - `mode_changed` reports `{ previous, state }` (the `ctx.sessionModes.getState()` shape) after a built-in mode change commits, whatever caused it: `ctx.sessionModes.set()`, a slash command, the goal tool, automatic goal completion, or session restore. A session switch reports once, after it settles, with the destination's restored modes. Goal token/time accounting is not part of the state, so it never fires the event. A handler may call `ctx.sessionModes.set()`; a call made while another transition is still running returns `busy` instead of waiting.
 
+### Agent view lifecycle
+
+- `agent_view_changed` reports `{ agentId, previousAgentId, sessionId }` when the interactive TUI switches the session it shows: focusing a subagent, hopping to another one (including its parent), or returning to the main session (explicitly, or because the focused agent was parked, aborted, or removed). `agentId`/`previousAgentId` are `undefined` for the main session, and `sessionId` is the id of the session now shown. It fires on the main session's extensions once the new view is attached, never for a focus request that is superseded or fails, and only in the interactive TUI. Use it to re-scope `ctx.ui.setStatus` content to the agent on screen.
+
 ### Subagent lifecycle
 
-- `before_subagent_spawn` → `{ model?: string | string[]; block?: boolean; reason?: string; note?: string }`. Fires in the parent session exactly once per spawned child (`task`, eval `agent()`, workpool workers), at dispatch before the child resolves its model — never during a frontend's validation preflight, so stateful routers (round-robin, quota) advance once per child. The event carries `agent`, `invocationKind`, `modelRole` (the pre-expansion role alias, when any), the expanded `patterns` core would use, and an optional stable `spawnKey`. A returned `model` replaces the spawn's attempt-ordered patterns while keeping the role identity, so the remaining entries become the child's retry fallback chain; handlers run in extension order and the last returned `model` wins, along with its `note`, which the task UI shows as the spawn's routing reason on live, async, and settled rows. `block: true` refuses the spawn with `reason`. Cancelling the spawn releases an awaiting handler (its result is discarded and pending `ctx.ui` dialogs close) instead of holding the spawn until the handler timeout.
+- `before_subagent_spawn` → `{ model?: string | string[]; block?: boolean; reason?: string; note?: string }`. Fires in the parent session exactly once per spawned child (`task`, eval `agent()`, workpool workers), at dispatch before the child resolves its model — never during a frontend's validation preflight, so stateful routers (round-robin, quota) advance once per child. The event carries `agent`, `invocationKind`, `modelRole` (the pre-expansion role alias, when any), the expanded `patterns` core would use, and an optional stable `spawnKey`; children dispatched by the `task` tool also carry `parentToolCallId` (that `task` call's id) and `itemIndex` (the item's position in `tasks[]`, 0 for the flat shape), so a decision made in `tool_call` can be matched to exactly its spawn. A returned `model` replaces the spawn's attempt-ordered patterns while keeping the role identity, so the remaining entries become the child's retry fallback chain; handlers run in extension order and the last returned `model` wins, along with its `note`, which the task UI shows as the spawn's routing reason on live, async, and settled rows. `block: true` refuses the spawn with `reason`. Cancelling the spawn releases an awaiting handler (its result is discarded and pending `ctx.ui` dialogs close) instead of holding the spawn until the handler timeout.
 
 ### Reliability/runtime signals
 
@@ -1072,7 +1077,8 @@ to remove a widget; setting a key again replaces it in place.
 calls `done`: one root node (it takes focus, so handle keys with its `onKey`) or a
 rows object (keys and pastes arrive at its `handleInput` as raw input).
 `{ overlay: true }` draws it over the transcript, `fullscreen: true` on the
-alternate screen; `onHandle` receives `{ closed, close() }`. The factory's `ui`
+alternate screen; `onHandle` receives `{ closed, close(), isFocused() }`
+(`isFocused()` is true while keyboard focus is on the overlay or a node inside it). The factory's `ui`
 argument offers `requestRender()` (repaint rows objects), `size()` and
 `suspend(run)` (hand the terminal to an external editor while `run` settles).
 
@@ -1503,7 +1509,7 @@ Chooses how each block of the main session's transcript is drawn, in the plain t
   - `{ type: "event", id, event }` for a TTSR rule hit (`ttsr_triggered`) or an incomplete-todo reminder (`todo_reminder`), shaped like the extension event of the same type. These exist only in the session that raised them; `id` is unique within the process.
 
   `args`, `result`, `message` and `event` are not copies: they are the live objects omp draws the block from, often the session's own message data, so never mutate them.
-- **Answers.** `undefined` defers to the next presenter. `"full"` is omp's own drawing. `"hidden"` draws nothing, as `display.hideToolActivity` does. `"compact"` is one row of omp's own summary. `{ compact: { label, rows } }` replaces that row's text with `label` and adds one row per entry of `rows` below it; both take `TspText` (a string or theme-token spans). Presenters answer synchronously and run while the transcript draws, so keep them cheap: any other value (a misspelt mode, the Promise of an `async` presenter) draws the block in full and is reported like a throw.
+- **Answers.** `undefined` defers to the next presenter. `"full"` is omp's own drawing. `"hidden"` draws nothing, as `display.toolActivity: hidden` does. `"compact"` is one row of omp's own summary. A tool call no presenter answers for draws as `display.toolActivity` says: under `concise`, one activity row (time, status, tool, intent). `{ compact: { label, rows } }` replaces that row's text with `label` and adds one row per entry of `rows` below it; both take `TspText` (a string or theme-token spans). Presenters answer synchronously and run while the transcript draws, so keep them cheap: any other value (a misspelt mode, the Promise of an `async` presenter) draws the block in full and is reported like a throw.
 - **Precedence.** Presenters are asked in extension load order and the first answer that is not `undefined` wins. A suspended extension's presenter is skipped. A presenter that throws answers `"full"` for that block: the block is drawn in full and later presenters are not asked for it. Its first failure (a throw or an unknown answer) is reported once through the extension error channel (event `transcript_presenter`). A block the user expanded, with `Ctrl+O` or its own toggle in Tern, is always drawn in full, and `display.hideToolActivity` still hides tool activity.
 - **Tern.** A compact tool call keeps its `tool` node as one inline, collapsed row; with `rows`, its body is one text node of those rows, all shown. Other blocks become an inline row with their full drawing folded below it. The row's toggle opens the full block.
 - **Spacing.** Consecutive compact blocks draw as tight rows, with no blank row between them in the terminal and no gap in Tern; blocks that draw nothing between them (hidden ones, a reply holding only tool calls) don't break the run. A block drawn in full keeps its blank row or gap on both sides. Extension message renderers can join a run too (see [Compact rows](#compact-rows)).

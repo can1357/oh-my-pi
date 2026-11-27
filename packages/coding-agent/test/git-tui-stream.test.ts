@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { DiffSide, DiffStream } from "@oh-my-pi/pi-natives";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
+import { CONSERVATIVE_EMOJI } from "@oh-my-pi/pi-tui/theme/contract";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { buildLineSelectionPatch, type DiffBuildOptions } from "@oh-my-pi/pi-coding-agent/cli/git-tui/model/diff-pane";
 import type { ChangedFile } from "@oh-my-pi/pi-coding-agent/cli/git-tui/model/state";
@@ -24,7 +25,11 @@ const GRAY_PNG = Buffer.from(
 );
 const LFS_POINTER_VERSION = "version https://git-lfs.github.com/spec/v1";
 beforeAll(() => {
-	initTheme({ dark: "dark", light: "dark", capabilities: { truecolor: true, colors: 16_777_216, dark: true } });
+	initTheme({
+		dark: "dark",
+		light: "dark",
+		capabilities: { truecolor: true, colors: 16_777_216, dark: true, emoji: CONSERVATIVE_EMOJI },
+	});
 });
 
 /** The git app's diff pane, painted in the terminal (no inline images: media sides draw their text). */

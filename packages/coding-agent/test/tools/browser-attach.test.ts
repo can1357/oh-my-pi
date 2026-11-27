@@ -13,15 +13,16 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
-import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
+import { createBrowserPrelude, resolveBrowserKind } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import {
 	attachPageWithTimeout,
+	buildSpawnArgs,
 	findFreeCdpPort,
 	findReusableCdp,
 	gracefulKillTreeOnce,
+	normalizeAppArgs,
 	pickElectronTarget,
 	probeCdpStatus,
-	resolveSpawnArgs,
 	waitForCdp,
 	waitForMainFrame,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
@@ -568,6 +569,26 @@ describe("pickElectronTarget", () => {
 		}
 	}, 10_000);
 
+	test("reuses an explicit app without launch defaults but requires explicitly requested switches", async () => {
+		const cdp = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("{}") });
+		const existing = await spawnDisposableExecutable([`--remote-debugging-port=${cdp.port}`]);
+		const reuse = (argv?: string[], insecure?: boolean) => {
+			const kind = resolveBrowserKind({ action: "open", app: existing.path, argv, insecure }, makeSession(), {});
+			if (kind.kind !== "spawned") throw new Error("Expected an executable app");
+			return findReusableCdp(kind.path, { appArgs: kind.args });
+		};
+		try {
+			expect(await reuse()).toEqual({ cdpUrl: `http://127.0.0.1:${cdp.port}`, pid: existing.pid });
+			await expect(reuse(["--allow-file-access-from-files"])).rejects.toThrow(
+				"without the requested args --allow-file-access-from-files",
+			);
+			await expect(reuse(undefined, true)).rejects.toThrow("without the requested args --ignore-certificate-errors");
+		} finally {
+			await existing.close();
+			cdp.stop(true);
+		}
+	});
+
 	test("does not reuse a live CDP endpoint belonging to a different profile", async () => {
 		const cdp = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("{}") });
 		const profile = path.join(os.tmpdir(), `omp-cdp-profile-${crypto.randomUUID()}`);
@@ -691,8 +712,6 @@ describe("pickElectronTarget", () => {
 				"--no-default-browser-check",
 				"--use-mock-keychain",
 				"--password-store=basic",
-				// `open` always adds this to a spawned app; without it the open keys a second browser.
-				"--allow-file-access-from-files",
 				...RENDERER_PRIORITY_ARGS,
 			];
 			const child = Bun.spawn(
@@ -768,8 +787,6 @@ describe("pickElectronTarget", () => {
 				"--no-first-run",
 				"--use-mock-keychain",
 				"--password-store=basic",
-				// `open` always adds this to a spawned app; without it the open keys a second browser.
-				"--allow-file-access-from-files",
 				...RENDERER_PRIORITY_ARGS,
 				`--user-data-dir=${profile}`,
 			];
@@ -1160,9 +1177,9 @@ describe("pickElectronTarget", () => {
 	});
 });
 
-describe("resolveSpawnArgs", () => {
+describe("spawned app arguments", () => {
 	test("normalizes separated and relative Chromium profiles into an absolute switch value", () => {
-		const args = resolveSpawnArgs(
+		const args = normalizeAppArgs(
 			"/usr/bin/google-chrome-stable",
 			["--user-data-dir", "profile", "--incognito"],
 			"/tmp",
@@ -1171,19 +1188,22 @@ describe("resolveSpawnArgs", () => {
 	});
 
 	test("isolates a Flatpak Chromium launcher without treating unrelated apps as browsers", () => {
-		const args = resolveSpawnArgs("/var/lib/flatpak/exports/bin/com.google.Chrome", []);
+		const args = buildSpawnArgs("/var/lib/flatpak/exports/bin/com.google.Chrome", []);
 		expect(args.some(arg => arg.startsWith("--user-data-dir="))).toBe(true);
-		expect(resolveSpawnArgs("/Applications/Slack.app/Contents/MacOS/Slack", ["--foo"])).toEqual(["--foo"]);
+		expect(buildSpawnArgs("/Applications/Slack.app/Contents/MacOS/Slack", ["--foo"])).toEqual([
+			"--foo",
+			"--allow-file-access-from-files",
+		]);
 	});
 
 	test("bypasses the OS keystore only for omp-owned Chromium profiles", () => {
-		const owned = resolveSpawnArgs("/usr/bin/google-chrome-stable", ["--password-store=gnome"]);
+		const owned = buildSpawnArgs("/usr/bin/google-chrome-stable", ["--password-store=gnome"]);
 		expect(owned).toContain("--use-mock-keychain");
 		expect(owned).toContain("--password-store=gnome");
 		expect(owned).not.toContain("--password-store=basic");
 
-		const borrowed = resolveSpawnArgs("/usr/bin/google-chrome-stable", ["--user-data-dir=/home/me/.config/chrome"]);
-		expect(borrowed).toEqual([`--user-data-dir=${path.resolve("/home/me/.config/chrome")}`]);
+		const borrowed = buildSpawnArgs("/usr/bin/google-chrome-stable", ["--user-data-dir=/home/me/.config/chrome"]);
+		expect(borrowed).toEqual(["--user-data-dir=/home/me/.config/chrome", "--allow-file-access-from-files"]);
 	});
 });
 describe("pickElectronTarget relay path", () => {
@@ -1349,6 +1369,30 @@ describe("pickElectronTarget relay path", () => {
 
 		expect(picked).toBe(openedPage);
 		expect(served).toBe(2);
+	});
+
+	it("waits for an explicitly targeted first page when neither /json nor Puppeteer lists one yet", async () => {
+		const targets: Array<Target & { _targetId: string }> = [];
+		const page = makePage([() => {}], RELAY_ENTRIES[1]!.url).page;
+		let served = 0;
+		relay.reload({
+			fetch: () => {
+				if (++served === 1) return Response.json([]);
+				targets.push(makeTarget("PAGE11", page).target);
+				return Response.json(RELAY_ENTRIES);
+			},
+		});
+		expect(await pickElectronTarget(makeBrowser(targets), { relayJson, matcher: "cart" })).toBe(page);
+		expect(served).toBe(2);
+	});
+
+	it("fails at once with recovery guidance when a connected relay lists no eligible tabs", async () => {
+		const listPages = vi.fn(() => Response.json([]));
+		relay.reload({ fetch: listPages });
+		await expect(pickElectronTarget(makeBrowser([]), { relayJson })).rejects.toThrow(
+			"The browser relay is connected but has no eligible tabs to adopt",
+		);
+		expect(listPages).toHaveBeenCalledTimes(1);
 	});
 
 	it("lists relay page ids with their URLs when a target id is missing", async () => {
