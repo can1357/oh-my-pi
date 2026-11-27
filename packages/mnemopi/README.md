@@ -89,7 +89,7 @@ Common environment fallbacks:
 - `MNEMOPI_NO_EMBEDDINGS=1`: force FTS-only recall.
 - `MNEMOPI_EMBEDDING_MODEL`: defaults to `BAAI/bge-small-en-v1.5`.
 - `MNEMOPI_EMBEDDING_API_URL` and `MNEMOPI_EMBEDDING_API_KEY`: OpenAI-compatible embedding endpoint.
-- `MNEMOPI_EMBEDDING_BATCH_SIZE`: texts per embedding API request, default `64`. Larger inputs are split into several requests. Set it lower for a provider with a smaller per-request limit, for example `10` for DashScope.
+- `MNEMOPI_EMBEDDING_BATCH_SIZE`: texts per embedding request, default `8` for local fastembed or `64` for hosted APIs. Larger inputs are split into separate requests. Lower it for a slow CPU or a provider with a smaller per-request limit (for example, `10` for DashScope). `embeddings.batchSize` overrides this fallback per runtime.
 - `MNEMOPI_EMBEDDING_QUERY_PREFIX`: text prepended to recall queries before embedding, for instruction-tuned embedders such as Qwen3-Embedding (`Instruct: …\nQuery: `) or E5 (`query: `). Stored memories are embedded unchanged. Runtime option: `embeddings.queryPrefix`.
 - `MNEMOPI_EMBEDDING_INPUT_TYPE=1`: send `input_type` (`query` for recall queries, `passage` for stored memories) with embedding API requests, as NVIDIA NIM asymmetric embedders require. Runtime option: `embeddings.inputType`.
 - `MNEMOPI_LLM_ENABLED=1`, `MNEMOPI_LLM_BASE_URL`, `MNEMOPI_LLM_API_KEY`, `MNEMOPI_LLM_MODEL`: OpenAI-compatible LLM endpoint.

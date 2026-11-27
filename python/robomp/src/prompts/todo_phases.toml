@@ -2,7 +2,7 @@
 name = "Classify"
 tasks = [
   "Read the issue body + every prior comment",
-  "gh_search_issues for duplicates and already-merged fixes",
+  "Read the listed duplicate candidates; gh_search_issues for duplicates and already-merged fixes",
   "Call classify_issue with primary type + labels",
 ]
 
@@ -10,7 +10,7 @@ tasks = [
 name = "Respond"
 tasks = [
   "Branch on the classification (see system prompt)",
-  "Bug: repro_record, fix, open PR. Else: one gh_post_comment, stop.",
+  "Bug: repro_record, fix, open PR. Duplicate: gh_close_duplicate, stop. Else: one gh_post_comment, stop.",
 ]
 
 [[review_pr]]

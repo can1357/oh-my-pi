@@ -929,7 +929,7 @@ exit 64
 		expect(raced.type).toBe("result");
 		if (raced.type === "result") {
 			expect(raced.result.cancelled).toBe(true);
-			expect(raced.result.output).toContain("Command cancelled");
+			expect(raced.result.output).toContain("[cancelled]");
 		}
 		expect(abortSpy).toHaveBeenCalled();
 
@@ -1144,10 +1144,9 @@ exit 64
 
 		expect(result.cancelled).toBe(true);
 		expect(result.output).toContain("streamed-before-timeout");
-		expect(result.output).toContain("Command timed out after 1 seconds");
 		// Watchdog-win path: native never returned, so the result must be
 		// distinguishable from a confirmed empty run (#10308).
-		expect(result.output).toContain("the shell backend did not respond");
+		expect(result.output).toContain("[timed out after 1s; shell unresponsive, output may be incomplete]");
 		expect(nativeSignal?.aborted).toBe(false);
 		expect(abortSpy).toHaveBeenCalledTimes(1);
 	});
@@ -1216,7 +1215,7 @@ exit 64
 		controller.abort();
 		const result = await promise;
 		expect(result.cancelled).toBe(true);
-		expect(result.output).toContain("Command cancelled");
+		expect(result.output).toContain("[cancelled]");
 		expect(result.output).not.toContain("done");
 	});
 
@@ -1601,7 +1600,7 @@ exit 64
 		const result = await promise;
 
 		expect(result.cancelled).toBe(true);
-		expect(result.output).toContain("Command cancelled");
+		expect(result.output).toContain("[cancelled]");
 		await expectMarkerNeverWritten(marker, release);
 	});
 
@@ -1669,7 +1668,7 @@ exit 64
 		const result = await promise;
 
 		expect(result.cancelled).toBe(true);
-		expect(result.output).toContain("Command cancelled");
+		expect(result.output).toContain("[cancelled]");
 		await expectMarkerNeverWritten(marker, release);
 	});
 	it("waits for native timeout teardown to flush piped output", async () => {
@@ -1709,9 +1708,9 @@ exit 64
 
 		expect(result.cancelled).toBe(true);
 		expect(result.output).toContain("flushed-during-timeout");
-		expect(result.output).toContain("Command timed out after 1 seconds");
-		// Native-confirmed timeout: no "backend did not respond" caveat.
-		expect(result.output).not.toContain("the shell backend did not respond");
+		expect(result.output).toContain("[timed out after 1s]");
+		// Native-confirmed timeout: no "shell unresponsive" caveat.
+		expect(result.output).not.toContain("shell unresponsive");
 		expect(nativeSignal?.aborted).toBe(false);
 		expect(abortSpy).not.toHaveBeenCalled();
 	});

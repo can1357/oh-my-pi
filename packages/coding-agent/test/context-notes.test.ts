@@ -189,6 +189,25 @@ describe("experimental context notes", () => {
 		const advisorBound = toolSession(settings, SessionManager.inMemory(), "advisor-session");
 		expect(ContextNotesTool.createIf(advisorBound)).toBeNull();
 	});
+	it("saves notes when the same branch advances while disk preparation is pending", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated({ "compaction.experimentalContextManagement": true });
+		const tool = ContextNotesTool.createIf(toolSession(settings, sessionManager));
+		if (!tool) throw new Error("expected context notes tool");
+		const pendingEnsure = Promise.withResolvers<void>();
+		const ensureSpy = vi.spyOn(sessionManager, "ensureOnDisk").mockImplementation(() => pendingEnsure.promise);
+		try {
+			const pendingWrite = tool.execute("same-branch", { text: "keep me" });
+			await Promise.resolve();
+			sessionManager.appendCustomEntry("test_branch_advance");
+			pendingEnsure.resolve();
+			await pendingWrite;
+			expect(getContextNotes(sessionManager.getBranch())).toMatchObject({ text: "keep me" });
+		} finally {
+			ensureSpy.mockRestore();
+		}
+	});
+
 	it("does not append notes when the branch changes while disk preparation is pending", async () => {
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated({ "compaction.experimentalContextManagement": true });
@@ -197,14 +216,37 @@ describe("experimental context notes", () => {
 		const pendingEnsure = Promise.withResolvers<void>();
 		const ensureSpy = vi.spyOn(sessionManager, "ensureOnDisk").mockImplementation(() => pendingEnsure.promise);
 		try {
+			const rootId = sessionManager.appendCustomEntry("test_root");
+			sessionManager.appendCustomEntry("test_leaf");
 			const pendingWrite = tool.execute("stale-branch", { text: "must not persist" });
 			await Promise.resolve();
+			sessionManager.branch(rootId);
 			sessionManager.appendCustomEntry("test_branch_change");
 			pendingEnsure.resolve();
 			await expect(pendingWrite).rejects.toThrow("session branch changed");
 			expect(getContextNotes(sessionManager.getBranch())).toBeUndefined();
 		} finally {
 			ensureSpy.mockRestore();
+		}
+	});
+
+	it("rejects a pending save when navigation selects an existing descendant", async () => {
+		const manager = SessionManager.inMemory();
+		const settings = Settings.isolated({ "compaction.experimentalContextManagement": true });
+		const tool = new ContextNotesTool(toolSession(settings, manager));
+		const root = manager.appendCustomEntry("root");
+		const child = manager.appendCustomEntry("child");
+		manager.branch(root);
+		const disk = Promise.withResolvers<void>();
+		const ensure = vi.spyOn(manager, "ensureOnDisk").mockReturnValue(disk.promise);
+		try {
+			const save = tool.execute("save", { text: "belongs to root" });
+			manager.branch(child);
+			disk.resolve();
+			await expect(save).rejects.toThrow("session branch changed");
+			expect(getContextNotes(manager.getBranch())).toBeUndefined();
+		} finally {
+			ensure.mockRestore();
 		}
 	});
 

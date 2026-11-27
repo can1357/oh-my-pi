@@ -1,7 +1,7 @@
 /**
  * `agents` module: the switchboard of the agent mesh (`irc/mesh-protocol.ts`).
  *
- * One unit per project scope is the room. Every omp instance in that project
+ * One global unit is the room. Every omp instance, whatever its project,
  * attaches one tunnel. The room fans out peer status to its members and
  * forwards `send`s to the recipient instance and its receipt back.
  * It holds no mailbox: an absent recipient fails the send at once.
@@ -26,7 +26,9 @@ const POLICY: UnitPolicy = { hold: "leases", idleMs: 0, onIdle: "stop", restart:
 
 interface Member {
 	tunnel: ModuleTunnel;
-	peer: MeshPeer;
+	pid: number;
+	/** Last advertised state; the member joins the roster with its first. */
+	peer?: MeshPeer;
 }
 
 /** A send forwarded to `toPid`, awaiting its receipt for `originPid`'s request `originId`. */
@@ -64,7 +66,7 @@ class RoomUnit implements ModuleUnit {
 
 	attach(tunnel: ModuleTunnel): void {
 		const pid = tunnel.client.pid;
-		const member: Member = { tunnel, peer: { pid, sessionFile: null, status: "unknown", agents: [] } };
+		const member: Member = { tunnel, pid };
 		// A reconnecting instance replaces its stale tunnel.
 		this.#members.get(pid)?.tunnel.close();
 		this.#members.set(pid, member);
@@ -87,10 +89,10 @@ class RoomUnit implements ModuleUnit {
 	}
 
 	#onMessage(member: Member, message: MeshUp): void {
-		if (this.#members.get(member.peer.pid) !== member) return;
+		if (this.#members.get(member.pid) !== member) return;
 		switch (message.t) {
 			case "state":
-				member.peer = { ...message.state, pid: member.peer.pid };
+				member.peer = { ...message.state, pid: member.pid };
 				for (const other of this.#members.values()) {
 					if (other !== member) emit(other.tunnel, { t: "peer", peer: member.peer });
 				}
@@ -105,7 +107,7 @@ class RoomUnit implements ModuleUnit {
 						receipt: {
 							to,
 							outcome: "failed",
-							error: `No omp instance with pid ${message.toPid} in this project.`,
+							error: `No live omp instance with pid ${message.toPid}.`,
 						},
 					});
 					return;
@@ -117,7 +119,7 @@ class RoomUnit implements ModuleUnit {
 				);
 				timer.unref();
 				this.#forwards.set(id, {
-					originPid: member.peer.pid,
+					originPid: member.pid,
 					originId: message.id,
 					toPid: message.toPid,
 					to,
@@ -126,7 +128,7 @@ class RoomUnit implements ModuleUnit {
 				emit(target.tunnel, {
 					t: "deliver",
 					id,
-					fromPid: member.peer.pid,
+					fromPid: member.pid,
 					from: message.from,
 					to,
 					body: message.body,
@@ -137,11 +139,11 @@ class RoomUnit implements ModuleUnit {
 			case "receipt": {
 				const forward = this.#forwards.get(message.id);
 				// Only the recipient may answer its delivery.
-				if (forward?.toPid === member.peer.pid) this.#settle(message.id, message.receipt);
+				if (forward?.toPid === member.pid) this.#settle(message.id, message.receipt);
 				return;
 			}
 			default:
-				logger.debug("agent mesh: unknown message", { pid: member.peer.pid });
+				logger.debug("agent mesh: unknown message", { pid: member.pid });
 		}
 	}
 
@@ -161,7 +163,7 @@ class RoomUnit implements ModuleUnit {
 	}
 
 	#broadcastRoster(): void {
-		const peers = [...this.#members.values()].map(member => member.peer);
+		const peers = [...this.#members.values()].flatMap(member => (member.peer ? [member.peer] : []));
 		for (const member of this.#members.values()) emit(member.tunnel, { t: "roster", peers });
 	}
 
@@ -174,7 +176,7 @@ class RoomUnit implements ModuleUnit {
 	}
 }
 
-/** Agent mesh switchboard, one project-scoped room unit (key: `AGENT_MESH_ROOM_KEY`). */
+/** Agent mesh switchboard, one global room unit (key: `AGENT_MESH_ROOM_KEY`). */
 export const agentsModule: DaemonModule = {
 	kind: AGENT_MESH_KIND,
 	version: AGENT_MESH_VERSION,

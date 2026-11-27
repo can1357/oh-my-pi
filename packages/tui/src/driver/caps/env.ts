@@ -4,7 +4,8 @@
  */
 import type { TerminalCapabilities } from "../contract";
 import { classifyMultiplexer, contractMultiplexer, type Env, hasMultiplexerSession, isSsh } from "../mux/detect";
-import { type TerminalId, TERMINAL_PROFILES } from "./identity";
+import { emojiSupportFor, type TerminalId, TERMINAL_PROFILES } from "./identity";
+import { kittyPlaceholdersSupported } from "../images/kitty";
 
 /** A user's explicit synchronized-output preference; opt-out beats force-on. */
 export function synchronizedOutputOverride(env: Env): boolean | null {
@@ -31,10 +32,12 @@ export function synchronizedOutputDefault(env: Env, id: TerminalId): boolean {
 	if (override !== null) return override;
 	// Herdr renders panes in its own grid and implements 2026 itself.
 	if (hasMultiplexerSession("herdr", env)) return true;
-	// TERM_FEATURES is a run of capability tokens (`ClSyTc`); `Sy` advertises 2026.
-	if (env.TERM_FEATURES?.match(/[A-Z][a-z0-9]*/g)?.includes("Sy")) return true;
 	const mux = classifyMultiplexer(env);
 	if ((mux !== null && mux !== "orca") || termFamilyIsMux(env)) return false;
+	// Outer-terminal hints are inherited into mux panes, so they are only trusted outside one.
+	// TERM_FEATURES is a run of capability tokens (`ClSyTc`); `Sy` advertises 2026.
+	if (env.TERM_FEATURES?.match(/[A-Z][a-z0-9]*/g)?.includes("Sy")) return true;
+	// A local Windows Terminal has its own profile; this covers a `WT_SESSION` forwarded over SSH.
 	if (env.WT_SESSION && (id === "trueColor" || id === "base")) {
 		return !env.TERM_PROGRAM || env.TERM_PROGRAM === "Windows_Terminal";
 	}
@@ -105,7 +108,8 @@ function imageProtocolFromTerm(id: TerminalId, env: Env): TerminalCapabilities["
 /**
  * The image protocol to use without probing: the terminal's own (Warp's only
  * off Windows), else what `TERM` says; none for hosts that draw no graphics
- * (Paseo, Herdr) and for Kitty graphics behind a tmux that drops passthrough.
+ * (Paseo, Herdr) and for Kitty graphics behind a tmux that drops passthrough
+ * or a client without Unicode placeholders.
  * Null means "none known" (the startup probe may still find SIXEL).
  */
 export function imageProtocolFromEnv(id: TerminalId, env: Env, context: ImageContext): TerminalCapabilities["images"] {
@@ -118,7 +122,10 @@ export function imageProtocolFromEnv(id: TerminalId, env: Env, context: ImageCon
 				: "kitty"
 			: (TERMINAL_PROFILES[id].images ?? imageProtocolFromTerm(id, env));
 	if (images === null || env.PASEO_TERMINAL_ID || hasMultiplexerSession("herdr", env)) return null;
-	if (images === "kitty" && env.TMUX && !context.tmuxPassthrough) return null;
+	// Through tmux a direct Kitty placement lands at tmux's outer cursor, not the pane's;
+	// only Unicode placeholders stay in place. Without them, leave SIXEL to the probe.
+	if (images === "kitty" && env.TMUX && (!context.tmuxPassthrough || !kittyPlaceholdersSupported(id, env)))
+		return null;
 	return images;
 }
 
@@ -139,6 +146,7 @@ export interface EnvCapabilityContext extends ImageContext {
 export function capabilitiesFromEnv(env: Env, context: EnvCapabilityContext): TerminalCapabilities {
 	const { id } = context;
 	const colorterm = env.COLORTERM?.toLowerCase();
+	// `WT_SESSION` also counts where the profile is not Windows Terminal's (SSH, a multiplexer inside it).
 	const truecolor =
 		TERMINAL_PROFILES[id].trueColor || colorterm === "truecolor" || colorterm === "24bit" || Boolean(env.WT_SESSION);
 	const colors = truecolor ? 16_777_216 : (env.TERM ?? "").includes("256") ? 256 : 16;
@@ -158,6 +166,7 @@ export function capabilitiesFromEnv(env: Env, context: EnvCapabilityContext): Te
 		cell: null,
 		multiplexer,
 		tsp: false,
+		emoji: emojiSupportFor(id, env),
 	};
 }
 

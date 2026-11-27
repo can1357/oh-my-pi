@@ -51,7 +51,6 @@ import {
 	UnsafeLspRootError,
 } from "./config";
 import {
-	BATCH_DIAGNOSTICS_WAIT_TIMEOUT_MS,
 	formatLocationWithContext,
 	hasRustWorkspaceAncestor,
 	isOnlyQueriedDeclaration,
@@ -511,7 +510,13 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				);
 			}
 
-			for (const target of targets) {
+			for (const [index, target] of targets.entries()) {
+				if (detailed && timeoutSignal.aborted && !callerSignal?.aborted) {
+					results.push(
+						`${statusSymbol("warning")} Deadline reached; unverified: ${targets.slice(index).join(", ")}`,
+					);
+					break;
+				}
 				throwIfAborted(signal);
 				const resolved = resolveToCwd(target, this.session.cwd);
 				const servers = getServersForFile(config, resolved);
@@ -530,7 +535,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				const unreportedServers: string[] = [];
 
 				// Query all applicable servers for this file
-				for (const [serverName, serverConfig] of servers) {
+				for (const [index, [serverName, serverConfig]] of servers.entries()) {
 					allServerNames.add(serverName);
 					totalServerAttempts++;
 					try {
@@ -574,11 +579,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						// budget, which would otherwise surface as a false "OK". An explicit
 						// diagnostics request can afford to wait: `lsp.requestTimeout`, or the
 						// call's `timeout`, bounded by the tool timeout.
-						const waitCapMs = detailed
-							? BATCH_DIAGNOSTICS_WAIT_TIMEOUT_MS
-							: isProjectAwareLspServer(serverConfig)
-								? waitMs
-								: SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS;
+						const waitCapMs = isProjectAwareLspServer(serverConfig) ? waitMs : SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS;
 						const timeoutMs = Math.min(waitCapMs, timeoutSec * 1000);
 						const diagnostics =
 							rebuildStatusSeq !== undefined && expectedDocumentVersion !== undefined
@@ -604,6 +605,10 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						succeededServers++;
 						reportedServers.push(serverName);
 					} catch (err) {
+						if (detailed && timeoutSignal.aborted && !callerSignal?.aborted) {
+							unreportedServers.push(...servers.slice(index).map(([name]) => name));
+							break;
+						}
 						rethrowAbort(err, serverName);
 						// Server failed; record it so a total failure is not reported as clean.
 						failedServers.push(serverName);
@@ -631,7 +636,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 
 				const notes: string[] = [];
 				if (unreportedServers.length > 0) {
-					const hint = detailed ? "query the file alone for a longer wait" : "retry once it finishes analyzing";
+					const hint = "retry once it finishes analyzing";
 					notes.push(
 						`${statusSymbol("warning")} ${relPath}: no diagnostics report yet from ${unreportedServers.join(", ")}; ${hint}`,
 					);

@@ -2,8 +2,8 @@
  * report_issue — automated QA backend for tracking unexpected tool behavior.
  *
  * The `report_issue` tool takes one string, `report`, in the form
- * `<tool>: <concise description>`; the system prompt tells the model to run
- * `report_issue '<tool>: <concise description>'` when auto-QA is enabled.
+ * `<tool-name>: <concise description>`; the system prompt tells the model to run
+ * `report_issue '<tool-name>: <concise description>'` when auto-QA is enabled.
  *
  * Enabled by default (`dev.autoqa` defaults to true); `PI_AUTO_QA=0` or an
  * explicit `dev.autoqa: false` short-circuits injection entirely. When the
@@ -51,7 +51,7 @@ import { cfgDevAutoqa, cfgDevAutoqaConsent, cfgDevAutoqaPushEndpoint, cfgDevAuto
 
 /** Accepted `report` shapes, appended to format errors. */
 const REPORT_ISSUE_USAGE =
-	"Expected `<tool>: <concise description>`, or the tool name on line 1 with the report body below.";
+	"Expected `<tool-name>: <concise description>`, or the tool name on line 1 with the report body below.";
 
 /** Whether a tool call runs `report_issue`, directly or as a `bash` command. */
 export function isReportIssueToolCall(toolCall: { name: string; arguments?: Record<string, unknown> }): boolean {
@@ -681,7 +681,7 @@ function recordToolIssue(session: ToolSession, tool: string, report: string): vo
 }
 
 const reportIssueSchema = type({
-	report: type("string").describe("Report in `<tool>: <concise description>` form."),
+	report: type("string").describe("Report in `<tool-name>: <concise description>` form."),
 	"+": "reject",
 });
 
@@ -699,14 +699,14 @@ async function reportToolIssue(session: ToolSession, text: string): Promise<Agen
 	return { content: [{ type: "text", text: "Noted, thanks!" }] };
 }
 
-/** The `report_issue` tool: `report_issue '<tool>: <concise description>'` files an Auto-QA report. */
+/** The `report_issue` tool: `report_issue '<tool-name>: <concise description>'` files an Auto-QA report. */
 export function createReportIssueTool(session: ToolSession): Tool {
 	const tool: AgentTool<typeof reportIssueSchema> = {
 		name: REPORT_ISSUE_COMMAND_NAME,
 		label: "Report Tool Issue",
 		summary: "Report unexpected tool behavior for automated QA",
 		description:
-			"Report unexpected tool behavior for automated QA as `<tool>: <concise description>`. A two-line form also works: tool name on line 1, report body below.",
+			"Report unexpected tool behavior for automated QA as `<tool-name>: <concise description>`. A two-line form also works: tool name on line 1, report body below.",
 		parameters: reportIssueSchema,
 		strict: true,
 		intent: "omit",

@@ -37,6 +37,7 @@ chmod/utimes its own cache root, which breaks any shared-cache scheme.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import logging
 import os
@@ -487,10 +488,12 @@ def _slot_pids(slot_uid: int, proc_root: Path = Path("/proc")) -> tuple[int, ...
 
 
 def _reap_slot(slot_uid: int | None) -> None:
-    """Kill any processes still running as a slot UID.
+    """Kill a slot UID's leftover processes, then delete its files in `/tmp`.
 
     Slot UIDs are reused. A previous task's straggler process must not survive
-    long enough to observe or interfere with the next task assigned to that UID.
+    long enough to observe or interfere with the next task assigned to that UID,
+    and its `/tmp` files must not outlive the task (see `_sweep_slot_tmp`).
+    Processes die first so none can recreate files behind the sweep.
     """
     if not _slot_permissions_active(slot_uid):
         return
@@ -502,6 +505,37 @@ def _reap_slot(slot_uid: int | None) -> None:
             continue
         except OSError as exc:
             log.warning("failed to kill slot user %s process %s: %s", slot_uid, pid, exc)
+    _sweep_slot_tmp(slot_uid)
+
+
+def _sweep_slot_tmp(slot_uid: int, tmp_root: Path = Path("/tmp")) -> None:
+    """Delete every entry `slot_uid` owns under the container-wide `/tmp`.
+
+    `TMPDIR` points slots at their workspace's `.omp-tmp`, but agents still
+    write literal `/tmp/<name>` paths. Left behind, such a file is readable by
+    every slot (umask 002) yet not overwritable (sticky `/tmp`), so a later
+    slot reusing the name silently reads the old content: a stale comment
+    draft was posted to the wrong issue exactly that way.
+
+    Walks with directory fds and never follows symlinks, so a running slot
+    cannot redirect this root-run sweep. Slot-owned directories are removed
+    only once empty, leaving other slots' files inside them untouched.
+    """
+    for _, dirnames, filenames, dirfd in os.fwalk(tmp_root, topdown=False, follow_symlinks=False):
+        for name in (*filenames, *dirnames):
+            try:
+                st = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
+                if st.st_uid != slot_uid:
+                    continue
+                if stat.S_ISDIR(st.st_mode):
+                    os.rmdir(name, dir_fd=dirfd)
+                else:
+                    os.unlink(name, dir_fd=dirfd)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                if exc.errno != errno.ENOTEMPTY:
+                    log.warning("failed to sweep slot user %s tmp entry %s: %s", slot_uid, name, exc)
 
 
 def _prepare_slot_tmpdir(workspace: Workspace, slot_uid: int | None) -> Path:

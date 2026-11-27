@@ -2,8 +2,6 @@
 
 This document covers how the coding agent discovers and loads extension modules at startup. Scanned native/configured directories auto-discover `.ts` and `.js`; explicitly named files and installed-plugin manifest entries may also use `.mjs` and `.cjs`.
 
-It does **not** cover [`gemini-extension.json` manifest extensions](./gemini-manifest-extensions.md), which are documented separately.
-
 ## What this subsystem does
 
 Extension loading builds an ordered list of module entry files, imports the modules concurrently with Bun, then binds their factories sequentially in path order. It returns:
@@ -123,7 +121,7 @@ Behavior split:
   `extensions:` settings and installed OMP extension packages are excluded from
   that sibling surface.
 - Executable custom tool and custom command modules follow the same
-  explicit-only contract: ambient `.omp/tools`, `.claude/tools`, `.codex/tools`,
+  explicit-only contract: ambient `.omp/tools`,
   marketplace and installed-plugin tools are not imported, and no custom
   command modules are loaded. Tools under explicitly named extension packages'
   `tools/` directories still load.
@@ -181,10 +179,12 @@ change of the session's working directory (`/move`, resuming a session from
 another project), re-scope settings-governed sources. Sources that leave the
 discovered set are suspended: their handlers, commands, tools, renderers,
 shortcuts, flags, and file fallbacks stop participating, and subagents spawned
-afterwards no longer inherit them. Returning sources resume, and newly
-discovered sources are imported and join the live session (their `session_start`
-handlers run then). A suspended override of a built-in tool restores the native
-tool. Modules are never unloaded or re-evaluated. Governed sources include those
+afterwards no longer inherit them. In the interactive UI, their editor widgets
+are hidden and updates from suspended extensions are ignored. Returning sources
+resume with their prior widgets; newly discovered sources are imported and join
+the live session (their `session_start` handlers run then). Suspension does not
+stop extension-owned timers. A suspended override of a built-in tool restores
+the native tool. Modules are never unloaded or re-evaluated. Governed sources include those
 discovered from every directory the session was scoped to. Inline and
 caller-preloaded sources outside the governed discovery set are left alone.
 Explicit-only sessions ignore these settings and directory changes.

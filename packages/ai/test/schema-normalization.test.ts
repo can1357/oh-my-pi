@@ -1,11 +1,7 @@
 import { describe, expect, it } from "bun:test";
-import { buildRequest } from "@oh-my-pi/pi-ai/providers/google-gemini-cli";
-import { convertTools } from "@oh-my-pi/pi-ai/providers/google-shared";
-import type { Context, Model, TJsonSchema, Tool } from "@oh-my-pi/pi-ai/types";
 import {
 	enforceStrictSchema,
 	mergeCompatibleEnumSchemas,
-	normalizeSchemaForCCA,
 	normalizeSchemaForFactoryDroid,
 	normalizeSchemaForGoogle,
 	normalizeSchemaForMCP,
@@ -13,31 +9,9 @@ import {
 	sanitizeSchemaForOpenAIResponses,
 	sanitizeSchemaForStrictMode,
 	schemaNeedsDraft202012Upgrade,
-	stripResidualCombiners,
 	tryEnforceStrictSchema,
 	upgradeJsonSchemaTo202012,
 } from "@oh-my-pi/pi-ai/utils/schema";
-import { buildModel } from "@oh-my-pi/pi-catalog/build";
-
-function createGoogleCliModel(id: string): Model<"google-gemini-cli"> {
-	return buildModel({
-		id,
-		name: id,
-		api: "google-gemini-cli",
-		provider: "google-antigravity",
-		baseUrl: "https://example.com",
-		reasoning: false,
-		input: ["text"],
-		cost: {
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-		},
-		contextWindow: 200000,
-		maxTokens: 8192,
-	});
-}
 
 // ---------------------------------------------------------------------------
 // mergeCompatibleEnumSchemas
@@ -224,27 +198,6 @@ describe("normalizeSchemaForGoogle", () => {
 		});
 	});
 
-	it("keeps CCA incompatibility passes out of literal defaults", () => {
-		const literal = {
-			nullable: true,
-			allOf: [{ type: "object" }],
-			oneOf: [{ type: "string" }, { type: "number" }],
-		};
-		expect(
-			normalizeSchemaForCCA({
-				type: "object",
-				properties: {
-					value: { oneOf: [{ type: "string" }, { type: "string" }] },
-				},
-				default: literal,
-			}),
-		).toEqual({
-			type: "object",
-			properties: { value: { type: "string" } },
-			default: literal,
-		});
-	});
-
 	it("sets object type while removing an object-valued enum converted from const", () => {
 		const sanitized = normalizeSchemaForGoogle({
 			const: { a: 1 },
@@ -343,7 +296,7 @@ describe("normalizeSchemaForGoogle", () => {
 	it("strips the MCP x-mcp-header transport annotation on the Google wire (issue #9016)", () => {
 		// `x-mcp-header` (MCP 2026-07-28) mirrors a param into an `Mcp-Param-*`
 		// HTTP header on the Streamable HTTP transport; it is not a JSON Schema
-		// keyword and Google Cloud Code Assist 400s on the unknown field name.
+		// keyword and Google 400s on the unknown field name.
 		const input = {
 			type: "object",
 			properties: {
@@ -359,7 +312,6 @@ describe("normalizeSchemaForGoogle", () => {
 		};
 
 		expect(normalizeSchemaForGoogle(input)).toEqual({ ...stripped, propertyOrdering: ["owner", "repo"] });
-		expect(normalizeSchemaForCCA(input)).toEqual(stripped);
 
 		// A property literally named `x-mcp-header` is a schema-map entry, not the
 		// annotation, and must survive on every wire.
@@ -375,8 +327,8 @@ describe("normalizeSchemaForGoogle", () => {
 
 	it("strips draft-2019 conditional keywords the OpenAPI-style wire cannot model", () => {
 		// `dependentSchemas`/`dependencies`/`dependentRequired` have no Google
-		// OpenAPI Schema representation and are not caught by residual checks, so
-		// they must be dropped before serialization on both transports.
+		// OpenAPI Schema representation, so they must be dropped before
+		// serialization.
 		const input = {
 			type: "object",
 			properties: { propertyValue: true },
@@ -386,7 +338,6 @@ describe("normalizeSchemaForGoogle", () => {
 		const expected = { type: "object", properties: { propertyValue: {} } };
 
 		expect(normalizeSchemaForGoogle(input)).toEqual(expected);
-		expect(normalizeSchemaForCCA(input)).toEqual(expected);
 
 		// MCP accepts native JSON Schema booleans, so it preserves them.
 		expect(
@@ -400,7 +351,7 @@ describe("normalizeSchemaForGoogle", () => {
 		});
 	});
 
-	it("strips uniqueItems and unsupported array/content validation keywords for Google and CCA", () => {
+	it("strips uniqueItems and unsupported array/content validation keywords for Google", () => {
 		const input = {
 			type: "object",
 			properties: {
@@ -432,34 +383,8 @@ describe("normalizeSchemaForGoogle", () => {
 			},
 			propertyOrdering: ["tags", "data"],
 		};
-		const ccaExpected = {
-			type: "object",
-			properties: {
-				tags: {
-					type: "array",
-					items: { type: "string" },
-					description: "List of tags\n\n{uniqueItems: true}",
-				},
-				data: {
-					type: "string",
-				},
-			},
-		};
 
 		expect(normalizeSchemaForGoogle(input)).toEqual(googleExpected);
-		expect(normalizeSchemaForCCA(input)).toEqual(ccaExpected);
-	});
-
-	it("falls back when a false subschema produces unsupported `not` on the CCA wire", () => {
-		const fallback = { type: "object", properties: {} };
-
-		expect(normalizeSchemaForCCA(false)).toEqual(fallback);
-		expect(normalizeSchemaForCCA({ type: "object", properties: { attributeValue: false } })).toEqual(fallback);
-		// A property named `not` is a schema-map entry, not the unsupported keyword.
-		expect(normalizeSchemaForCCA({ type: "object", properties: { not: { type: "string" } } })).toEqual({
-			type: "object",
-			properties: { not: { type: "string" } },
-		});
 	});
 
 	it("inlines local $ref / $defs entries for Google compatibility", () => {
@@ -921,345 +846,6 @@ describe("enforceStrictSchema and tryEnforceStrictSchema", () => {
 		expect(tupleObjectItem.additionalProperties).toBe(false);
 		expect(tupleObjectItem.required).toEqual(["id", "nickname"]);
 		expect(tupleProperties.nickname).toEqual({ anyOf: [{ type: "string" }, { type: "null" }] });
-	});
-});
-
-// ---------------------------------------------------------------------------
-// stripResidualCombiners
-// ---------------------------------------------------------------------------
-
-describe("stripResidualCombiners", () => {
-	it("collapses identical anyOf variants to the underlying type", () => {
-		const stripped = stripResidualCombiners({
-			anyOf: [
-				{ type: "string", minLength: 1 },
-				{ type: "string", minLength: 1 },
-			],
-			oneOf: [
-				{ type: "string", pattern: "^a" },
-				{ type: "string", pattern: "^a" },
-			],
-		}) as Record<string, unknown>;
-
-		expect(stripped.type).toBe("string");
-		expect(stripped.anyOf).toBeUndefined();
-		expect(stripped.oneOf).toBeUndefined();
-		expect(stripped.minLength).toBe(1);
-		expect(stripped.pattern).toBe("^a");
-	});
-
-	it("strips residual combiners to a fixpoint at the same node", () => {
-		const normalized = stripResidualCombiners({
-			anyOf: [
-				{ type: "string", description: "A" },
-				{ type: "string", description: "B" },
-			],
-			oneOf: [{ type: "number" }, { type: "number" }],
-		}) as Record<string, unknown>;
-
-		expect(normalized.anyOf).toBeUndefined();
-		expect(normalized.oneOf).toBeUndefined();
-	});
-
-	it("drops array-only keys when mixed-type collapse picks string from anyOf fixpoint", () => {
-		const stripped = stripResidualCombiners({
-			anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }],
-			description: "pr number, url, or branch",
-		}) as Record<string, unknown>;
-
-		expect(stripped.type).toBe("string");
-		expect(stripped.items).toBeUndefined();
-		expect(stripped.anyOf).toBeUndefined();
-		expect(stripped.description).toBe("pr number, url, or branch");
-	});
-});
-
-// ---------------------------------------------------------------------------
-// normalizeSchemaForCCA
-// ---------------------------------------------------------------------------
-
-describe("normalizeSchemaForCCA", () => {
-	it("collapses same-type anyOf variants when mixed-type collapse bails out", () => {
-		const prepared = normalizeSchemaForCCA({
-			type: "object",
-			properties: {
-				value: {
-					anyOf: [
-						{ type: "string", description: "first" },
-						{ type: "string", minLength: 2 },
-					],
-				},
-			},
-			required: ["value"],
-		}) as {
-			properties?: Record<string, Record<string, unknown>>;
-		};
-
-		const valueSchema = prepared.properties?.value;
-		expect(valueSchema?.type).toBe("string");
-		expect(valueSchema?.anyOf).toBeUndefined();
-	});
-
-	it("applies Google unsupported-key stripping before CCA-specific normalization", () => {
-		const sanitized = normalizeSchemaForCCA({
-			type: "object",
-			additionalProperties: false,
-			properties: {
-				config: {
-					type: "object",
-					additionalProperties: false,
-				},
-				name: {
-					type: "string",
-					minLength: 2,
-					pattern: "^[a-z]+$",
-				},
-			},
-			required: ["config", "name"],
-		});
-
-		expect(sanitized).toEqual({
-			type: "object",
-			properties: {
-				config: {
-					type: "object",
-					properties: {},
-				},
-				name: {
-					type: "string",
-					description: '{minLength: 2, pattern: "^[a-z]+$"}',
-				},
-			},
-			required: ["config", "name"],
-		});
-	});
-
-	it("strips annotation keywords (deprecated, readOnly, writeOnly, $comment) that Cloud Code Assist rejects", () => {
-		// MCP servers (e.g. Stitch's screen tools) annotate parameters with
-		// `deprecated: true`; CCA's protojson has no such Schema field and
-		// rejects the whole request with 400 "Cannot find field".
-		const sanitized = normalizeSchemaForCCA({
-			type: "object",
-			properties: {
-				projectId: { type: "string", deprecated: true, readOnly: true },
-				screenId: { type: "string", writeOnly: true, $comment: "internal id" },
-				name: { type: "string" },
-			},
-			required: ["name"],
-		});
-
-		expect(sanitized).toEqual({
-			type: "object",
-			properties: {
-				projectId: { type: "string" },
-				screenId: { type: "string" },
-				name: { type: "string" },
-			},
-			required: ["name"],
-		});
-	});
-
-	it("lifts stripped validation keywords into description", () => {
-		const normalized = normalizeSchemaForCCA({
-			type: "string",
-			pattern: "^\\d+$",
-			minLength: 1,
-			maxLength: 8,
-			description: "ID",
-		}) as Record<string, unknown>;
-
-		expect(normalized.pattern).toBeUndefined();
-		expect(normalized.minLength).toBeUndefined();
-		expect(normalized.maxLength).toBeUndefined();
-		expect(normalized.description).toBe('ID\n\n{pattern: "^\\\\d+$", minLength: 1, maxLength: 8}');
-	});
-
-	it("uses the same merged object output in shared and gemini-cli Antigravity paths", () => {
-		const parameters = {
-			anyOf: [
-				{
-					type: "object",
-					properties: {
-						shared: { type: "string" },
-						a: { type: "string" },
-					},
-					required: ["shared"],
-				},
-				{
-					type: "object",
-					properties: {
-						shared: { type: "string" },
-						b: { type: "number" },
-					},
-					required: ["shared"],
-				},
-			],
-		} as TJsonSchema;
-		const tools: Tool[] = [{ name: "merge_test", description: "Merge test", parameters }];
-
-		const sharedTools = convertTools(tools, createGoogleCliModel("claude-sonnet-4-5"));
-		const sharedDeclaration = sharedTools?.[0]?.functionDeclarations[0] as Record<string, unknown>;
-
-		const context: Context = {
-			messages: [{ role: "user", content: "hello", timestamp: 0 }],
-			tools,
-		};
-		const antigravityRequest = buildRequest(createGoogleCliModel("gemini-2.5-pro"), context, "project", {}, true);
-		const antigravityDeclaration = antigravityRequest.request.tools?.[0]?.functionDeclarations[0] as Record<
-			string,
-			unknown
-		>;
-
-		const expected = {
-			type: "object",
-			properties: {
-				shared: { type: "string" },
-				a: { type: "string" },
-				b: { type: "number" },
-			},
-			required: ["shared"],
-		};
-		expect(sharedDeclaration.parameters).toEqual(expected);
-		expect(antigravityDeclaration.parameters).toEqual(expected);
-		expect(antigravityDeclaration.parameters).toEqual(sharedDeclaration.parameters);
-		expect(antigravityDeclaration.parametersJsonSchema).toBeUndefined();
-	});
-
-	it("does not retain stale required keys after an object-union anyOf merge", () => {
-		const prepared = normalizeSchemaForCCA({
-			required: ["a"],
-			anyOf: [
-				{
-					type: "object",
-					properties: { a: { type: "string" } },
-					required: ["a"],
-				},
-				{
-					type: "object",
-					properties: { b: { type: "number" } },
-					required: ["b"],
-				},
-			],
-		}) as Record<string, unknown>;
-
-		expect(prepared).toEqual({
-			type: "object",
-			properties: {
-				a: { type: "string" },
-				b: { type: "number" },
-			},
-		});
-	});
-
-	it("preserves required intersection when merging object anyOf variants with overlapping keys", () => {
-		const schema = {
-			type: "object",
-			properties: {
-				profile: {
-					anyOf: [
-						{
-							type: "object",
-							properties: {
-								id: { type: "string" },
-								name: { type: "string" },
-							},
-							required: ["id", "name"],
-						},
-						{
-							type: "object",
-							properties: {
-								id: { type: "string" },
-								age: { type: "number" },
-							},
-							required: ["id", "age"],
-						},
-					],
-				},
-			},
-			required: ["profile"],
-		} as const;
-
-		const normalized = normalizeSchemaForCCA(schema) as {
-			properties?: {
-				profile?: {
-					type?: string;
-					properties?: Record<string, unknown>;
-					required?: string[];
-				};
-			};
-		};
-		const profile = normalized.properties?.profile;
-
-		expect(profile?.type).toBe("object");
-		expect(Object.keys(profile?.properties ?? {}).sort()).toEqual(["age", "id", "name"]);
-		expect(profile?.required).toEqual(["id"]);
-	});
-
-	it("does not recurse infinitely when preparing a schema with a circular object graph", () => {
-		const circular: Record<string, unknown> = {
-			type: "object",
-			properties: {},
-		};
-		(circular.properties as Record<string, unknown>).self = circular;
-
-		expect(normalizeSchemaForCCA(circular)).toEqual({
-			type: "object",
-			properties: {
-				self: {},
-			},
-		});
-	});
-
-	it("falls back to an empty object schema when the normalized schema is AJV-invalid", () => {
-		const ajvInvalid = {
-			type: "invalid-type-token",
-		} as Record<string, unknown>;
-
-		expect(normalizeSchemaForCCA(ajvInvalid)).toEqual({
-			type: "object",
-			properties: {},
-		});
-	});
-
-	it("strips array-only keys when mixed-type collapse picks a non-array type", () => {
-		// Regression: anyOf [{type:"string"}, {type:"array", items:{type:"string"}}]
-		// collapsed to {type:"string", items:{type:"string"}} which is invalid.
-		// The fix filters mergedVariantFields against the chosen type's allowed keys.
-		const normalized = normalizeSchemaForCCA({
-			anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }],
-			description: "pr number, url, or branch",
-		});
-
-		expect(normalized).toEqual({
-			type: "string",
-			description: "pr number, url, or branch",
-		});
-	});
-
-	it("keeps mixed unions when branch validation spill differs from the parent description", () => {
-		const normalized = normalizeSchemaForCCA({
-			anyOf: [{ type: "string" }, { type: "array", minItems: 1, items: { type: "string" } }],
-			description: "Optional result type",
-		}) as Record<string, unknown>;
-
-		expect(normalized.type).toBe("string");
-		expect(normalized.anyOf).toBeUndefined();
-		expect(normalized.description).toBe("Optional result type\n\n{minItems: 1}");
-	});
-
-	it("strips sibling type-specific keys copied from parent when mixed-type collapse picks opposing type", () => {
-		// Edge case: parent has a sibling `items` outside the anyOf,
-		// and the chosen type is string. The sibling must be stripped.
-		const normalized = normalizeSchemaForCCA({
-			anyOf: [{ type: "string" }, { type: "array", items: { type: "number" } }],
-			items: { type: "string" },
-			description: "pr number, url, or branch",
-		});
-
-		expect(normalized).toEqual({
-			type: "string",
-			description: "pr number, url, or branch",
-		});
 	});
 });
 

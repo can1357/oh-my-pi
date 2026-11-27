@@ -2,9 +2,7 @@
  * Effort-tier variant collapsing.
  *
  * Some providers expose one logical model as several effort- or
- * thinking-suffixed upstream ids (Antigravity CCA:
- * `gemini-3.5-flash-extra-low`/`-low`, `claude-*`/`claude-*-thinking` pairs;
- * aggregators: `X`/`X-thinking` twins). Collapsing replaces the member specs
+ * thinking-suffixed upstream ids (e.g. `X`/`X-thinking` twins). Collapsing replaces the member specs
  * with one logical spec whose `thinking.effortRouting` records the per-effort
  * upstream wire id; request-time code resolves the outbound id via
  * `resolveWireModelId` and everything local (selection, caching, usage
@@ -13,7 +11,7 @@
  * Families come from two sources:
  * - Reviewed `variant-family` nodes in `compat/rules/taxonomy/_collapse.kdl`
  *   (compiled into `rules.json`) for providers whose routing needs curation
- *   (Antigravity tier triplets, single-member renames, recycled ids). A
+ *   (tier triplets, single-member renames, recycled ids). A
  *   family whose ids carry `{rev}` is a template, instantiated for every
  *   revision the input advertises (`gemini-{rev}-flash` → `gemini-3.8-flash`).
  * - `deriveThinkingPairFamilies`: the global automatic rule — any live
@@ -36,7 +34,7 @@
  */
 import { buildModel } from "../build";
 import { Effort, THINKING_EFFORTS } from "../effort";
-import type { AntigravityModelWireProfile, Api, Model, ModelSpec, Provider, ThinkingConfig } from "../types";
+import type { Api, Model, ModelSpec, Provider, ThinkingConfig } from "../types";
 import { resolveModelPolicy } from "./resolve";
 import { parseRevision, parseRevisionConstraint, type RevisionTerm, revisionSatisfies } from "./revision";
 import { collapseVariantId, collapseVocabulary, stripThinkingVariantSuffix } from "./taxonomy";
@@ -101,7 +99,7 @@ export interface EffortVariantFamily {
 	suppressWhenOff?: boolean;
 	/**
 	 * Preserve non-off effort routes even when discovery omits the backing member.
-	 * Used for Cloud Code Assist `X`/`X-thinking` pairs where upstream accepts
+	 * Used for `X`/`X-thinking` pairs where upstream accepts
 	 * the `-thinking` wire id but the model-list endpoint may advertise only the
 	 * bare id.
 	 */
@@ -479,7 +477,7 @@ function deriveCursorEffortFamilies<TSpec extends VariantSpecLike>(specs: readon
 	return families;
 }
 
-/** Provider id → reviewed collapse table. The CCA providers diverge on thinking transport. */
+/** Provider id → reviewed collapse table. */
 const REVIEWED_COLLAPSE_TABLES: Readonly<Record<string, VariantCollapseTable>> = buildCompiledTables();
 
 /**
@@ -687,7 +685,7 @@ function refreshCollapsedThinking<TSpec extends VariantSpecLike>(
 	retired: ReadonlySet<string> | undefined,
 ): TSpec {
 	// Scope snapshot self-heal to families carrying a curated per-effort budget
-	// contract (Antigravity gemini-3.x). Their routing targets are all verified
+	// contract (e.g. tiered Gemini 3.x). Their routing targets are all verified
 	// live, so rebuilding routing here is safe; families without `effortBudgets`
 	// (derived `X`/`X-thinking` pairs, claude pairs, surface-less renames) keep
 	// their presence-filtered snapshot routing untouched.
@@ -845,37 +843,6 @@ function reconcileCursorMaxMode<TSpec extends VariantSpecLike>(spec: TSpec, memb
 }
 
 /**
- * Union the members' discovered Antigravity wire profiles, keyed by each
- * member's own wire id, so the collapsed row keeps the request constants of
- * every SKU it routes to (`...firstMember` alone keeps only the first tier's).
- * Returns `undefined` when no member carries a profile.
- */
-function antigravityWireProfilesOf<TSpec extends VariantSpecLike>(
-	memberSpecs: readonly TSpec[],
-): Record<string, AntigravityModelWireProfile> | undefined {
-	let profiles: Record<string, AntigravityModelWireProfile> | undefined;
-	for (const member of memberSpecs) {
-		if (member.antigravityWireProfiles === undefined) continue;
-		profiles = { ...profiles, ...member.antigravityWireProfiles };
-	}
-	return profiles;
-}
-
-/**
- * Merge live members' wire profiles over an already-collapsed snapshot, which
- * froze them (or none) when it was written. Returns `spec` by reference when no
- * member carries a profile.
- */
-function reconcileAntigravityWireProfiles<TSpec extends VariantSpecLike>(
-	spec: TSpec,
-	memberSpecs: readonly TSpec[],
-): TSpec {
-	const profiles = antigravityWireProfilesOf(memberSpecs);
-	if (profiles === undefined) return spec;
-	return { ...spec, antigravityWireProfiles: { ...spec.antigravityWireProfiles, ...profiles } };
-}
-
-/**
  * Collapse every family in `table` found in `specs`. Non-member specs pass
  * through verbatim (by reference), order preserved; the collapsed spec
  * replaces the first occurrence of its family.
@@ -946,10 +913,7 @@ function collapseWithTable<TSpec extends VariantSpecLike>(
 			// lowest tier.
 			replacement.set(
 				family.id,
-				reconcileAntigravityWireProfiles(
-					reconcileCursorMaxMode(reconcileDefaultMember(reconciled, family, new Set(rawPresent)), memberSpecs),
-					memberSpecs,
-				),
+				reconcileCursorMaxMode(reconcileDefaultMember(reconciled, family, new Set(rawPresent)), memberSpecs),
 			);
 			continue;
 		}
@@ -996,7 +960,6 @@ function collapseWithTable<TSpec extends VariantSpecLike>(
 		// which tier needed it, so the members' own markers are kept per wire id.
 		const cursorMaxMode = memberSpecs.some(spec => spec.cursorMaxMode === true) ? true : undefined;
 		const cursorMaxModeRoutes = cursorMaxModeRoutesOf(firstMember.provider, memberSpecs);
-		const antigravityWireProfiles = antigravityWireProfilesOf(memberSpecs);
 		const collapsed: TSpec = {
 			...firstMember,
 			id: family.id,
@@ -1007,7 +970,6 @@ function collapseWithTable<TSpec extends VariantSpecLike>(
 			maxTokens: maxOrNull(memberSpecs.map(spec => spec.maxTokens)),
 			...(cursorMaxMode === undefined ? {} : { cursorMaxMode }),
 			...(cursorMaxModeRoutes === undefined ? {} : { cursorMaxModeRoutes }),
-			...(antigravityWireProfiles === undefined ? {} : { antigravityWireProfiles }),
 		};
 		if (memberSpecs.some(spec => spec.isProviderDefault === true)) {
 			collapsed.isProviderDefault = true;

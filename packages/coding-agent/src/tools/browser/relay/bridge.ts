@@ -1912,7 +1912,12 @@ export class RelayBridge {
 				if (conn.autoAttach && created && !(await this.#ensureAttached(created)) && created.refusal) {
 					const refusal = created.refusal;
 					await this.#closeTab(createdKey, created.tabId, inst).catch(() => undefined);
-					this.#replyError(conn, msg, `Chrome refused to attach to the new tab: ${refusal}`);
+					// Chrome's text for a tab another debugger client holds: for one it just created, a client that takes
+					// every new tab.
+					const reason = /Another debugger is already attached/i.test(refusal)
+						? `${refusal.replace(/\.+$/, "")}. Something in this Chrome attaches a debugger to every new tab: an extension using chrome.debugger, a second copy of the omp extension included. Turn it off at chrome://extensions, or, when the user's session is not needed, open the tab in omp's own browser with app: "own"`
+						: refusal;
+					this.#replyError(conn, msg, `Chrome refused to attach to the new tab: ${reason}`);
 					return;
 				}
 				this.#reply(conn, msg, { targetId: pageTargetIdFromKey(createdKey) });

@@ -324,10 +324,13 @@ describe("libkitty end-to-end", () => {
 		term.type("LIVE_EDITOR_DRAFT");
 		await term.waitFor(() => viewport().some(row => row.includes("LIVE_EDITOR_DRAFT")));
 
-		// Alt+O is the configured app.tools.toggleVisibility binding from this test's keybinding manager.
+		// Alt+O is the configured app.tools.toggleVisibility binding from this test's keybinding manager:
+		// detailed → concise (the row still names the command) → hidden.
+		term.press("alt+o");
+		await term.waitFor(() => mode.toolActivity === "concise");
 		term.press("alt+o");
 		await term.waitFor(() => !buffer().some(row => row.includes(TOOL_MARKER)));
-		expect(mode.hideToolActivity).toBe(true);
+		expect(mode.toolActivity).toBe("hidden");
 		expect(buffer().some(row => row.includes(TOOL_MARKER))).toBe(false);
 		expect(viewport().some(row => row.includes("LIVE_EDITOR_DRAFT"))).toBe(true);
 	});

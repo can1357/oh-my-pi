@@ -1,6 +1,7 @@
 import { GitBranch } from "lucide-react";
 import { getRequestDetails } from "../api";
 import {
+	formatAiCredits,
 	formatCost,
 	formatDurationMs,
 	formatFolder,
@@ -139,6 +140,7 @@ function RequestDetailsBody({ details, aborted }: { details: RequestDetails; abo
 							label: "Premium requests",
 							value: formatInteger(Math.round((usage.premiumRequests ?? 0) * 100) / 100),
 						},
+						{ key: "aiu", label: "AI credits", value: formatAiCredits(usage.aiu?.nano) },
 					]}
 				/>
 			</section>

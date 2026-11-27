@@ -263,14 +263,28 @@ interface PendingFile {
 }
 
 /**
+ * Refuse a Git checkout colocated with Jujutsu: advancing Git HEAD directly leaves jj's snapshotted
+ * working-copy change behind as a duplicate head.
+ */
+export async function assertNotColocatedJj(gitRoot: string): Promise<void> {
+	const jjRoot = vcs.jj(gitRoot)?.root();
+	if (jjRoot && (await fs.realpath(jjRoot)) === (await fs.realpath(gitRoot))) {
+		throw new Error(
+			"Selective commits would leave a duplicate of Jujutsu's working-copy change in this colocated workspace; commit with `jj` instead (`jj commit`, `jj split`).",
+		);
+	}
+}
+
+/**
  * Build a draft of the repository's current changes for the agents in scope.
- * @throws when `cwd` is not inside a git checkout or the scope names an unknown agent.
+ * @throws when `cwd` is not inside a git checkout, is a Jujutsu workspace, or the scope names an unknown agent.
  */
 export async function createDraft(source: DraftSource): Promise<Draft> {
 	if (vcs.isPureJj(source.cwd)) throw new Error("Selective commits need git; this is a Jujutsu workspace.");
 	const repo = vcs.git(source.cwd);
 	if (!repo) throw new Error(`Not inside a git repository: ${source.cwd}`);
 	const root = repo.info().repoRoot;
+	await assertNotColocatedJj(root);
 	const [headSha, branch] = await Promise.all([repo.headSha(source.signal), repo.currentBranch(source.signal)]);
 	const head = headSha ?? null;
 
@@ -874,6 +888,7 @@ export class Draft {
 		}
 		const selected: string[] = [];
 		const review: string[] = [];
+		let firstReviewPath: string | undefined;
 		const otherAgents = new Map<string, number>();
 		/** Changed by nobody on record: nothing selected, nothing to review, no agent outside the scope. */
 		const unrecorded: FileChange[] = [];
@@ -881,13 +896,21 @@ export class Draft {
 			const counted = this.#describeFile(file);
 			if (counted.selected) selected.push(counted.selected);
 			review.push(...counted.review);
+			if (counted.review.length > 0) firstReviewPath ??= file.path;
 			for (const agent of counted.outOfScopeAgents) otherAgents.set(agent, (otherAgents.get(agent) ?? 0) + 1);
 			if (!counted.selected && counted.review.length === 0 && counted.outOfScopeAgents.size === 0) {
 				unrecorded.push(file);
 			}
 		}
 		lines.push(selected.length > 0 ? "Selected:" : "Selected: nothing", ...selected);
-		if (review.length > 0) lines.push("Review:", ...review);
+		if (firstReviewPath !== undefined) {
+			const target = JSON.stringify(firstReviewPath);
+			lines.push(
+				"Review:",
+				...review,
+				`  → show(${target}) lists unit ids; take(${target}, units) only the units your edits or commands (formatter, generator) produced.`,
+			);
+		}
 		if (otherAgents.size > 0) {
 			const parts = [...otherAgents].map(([agent, count]) => {
 				const running = this.agents.find(candidate => candidate.id === agent)?.running ? ", running" : "";
@@ -897,7 +920,7 @@ export class Draft {
 		}
 		if (unrecorded.length > 0) {
 			lines.push(
-				`Unrecorded: ${unrecorded.length} path(s) changed by other programs or by hand; take() the ones your commands produced.`,
+				`Unrecorded: ${unrecorded.length} path(s) changed by other programs or by hand; take(path) the ones your commands produced, or show(path) then take(path, units) for part of a file.`,
 			);
 			for (const file of unrecorded.slice(0, UNRECORDED_LIST_LIMIT)) {
 				const size = file.whole ? `whole ${wholeLabel(file)}` : `${formatCounts(file.counts)}${modeChange(file)}`;

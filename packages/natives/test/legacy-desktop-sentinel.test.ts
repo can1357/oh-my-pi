@@ -15,6 +15,9 @@ async function withCandidate(contents: string, test: (candidate: string) => void
 	}
 }
 
+const unusedCandidate =
+	"/home/u/.bun/install/global/node_modules/@oh-my-pi/pi-natives-linux-x64/pi_natives.linux-x64.node";
+
 function ctxFor(version: string) {
 	return { isWorkspaceLoad: false, packageVersion: version };
 }
@@ -22,6 +25,10 @@ function ctxFor(version: string) {
 function stamped(version: string): string {
 	const slot = `PI_NATIVES_VERSION_STAMP:${version}`;
 	return `${slot}${"\0".repeat(64 - slot.length)}`;
+}
+
+function reporting(version: string | null) {
+	return { __piNativesBuildVersion: () => version, grep: () => {} };
 }
 
 class LegacyDesktopSession {
@@ -78,5 +85,56 @@ describe("legacy native addon loading", () => {
 		await withCandidate("unstamped", candidate => {
 			expect(() => validateLoadedBindings(ctx, bindings, candidate)).toThrow("reinstall to re-sync");
 		});
+	});
+});
+
+describe("loaded addon release validation", () => {
+	it("accepts bindings that report the expected version", () => {
+		expect(() => validateLoadedBindings(ctxFor("16.3.11"), reporting("16.3.11"), unusedCandidate)).not.toThrow();
+	});
+
+	it("reports a mid-session upgrade (restart) only when disk has the expected stamp", async () => {
+		const ctx = ctxFor("16.3.11");
+		for (const resident of [reporting("16.3.10"), { __piNativesV16_3_10: () => {}, grep: () => {} }]) {
+			await withCandidate(stamped("16.3.11"), candidate => {
+				expect(() => validateLoadedBindings(ctx, resident, candidate)).toThrow("16.3.10");
+				expect(() => validateLoadedBindings(ctx, resident, candidate)).toThrow("restart omp");
+				expect(() => validateLoadedBindings(ctx, resident, candidate)).toThrow("Disk is already consistent");
+				expect(() => validateLoadedBindings(ctx, resident, candidate)).not.toThrow("reinstall to re-sync");
+			});
+		}
+	});
+
+	it("reports disk-stale (reinstall) when the file carries a prior stamp", async () => {
+		const ctx = ctxFor("16.3.11");
+		await withCandidate(stamped("16.3.10"), candidate => {
+			const stale = reporting("16.3.10");
+			expect(() => validateLoadedBindings(ctx, stale, candidate)).toThrow(
+				"from a different release than this loader",
+			);
+			expect(() => validateLoadedBindings(ctx, stale, candidate)).toThrow("reinstall to re-sync");
+			expect(() => validateLoadedBindings(ctx, stale, candidate)).not.toThrow("restart omp");
+		});
+	});
+
+	it("does not treat a longer version with the expected prefix as the expected stamp", async () => {
+		await withCandidate(stamped("16.3.110"), candidate => {
+			expect(() => validateLoadedBindings(ctxFor("16.3.11"), reporting("16.3.110"), candidate)).toThrow(
+				"reinstall to re-sync",
+			);
+		});
+	});
+
+	it("rejects an unstamped build as disk-stale", async () => {
+		await withCandidate(`PI_NATIVES_VERSION_STAMP:${"\0".repeat(39)}`, candidate => {
+			expect(() => validateLoadedBindings(ctxFor("16.3.11"), reporting(null), candidate)).toThrow(
+				"reports no release version",
+			);
+		});
+	});
+
+	it("skips validation entirely in workspace dev", () => {
+		const ctx = { ...ctxFor("16.3.11"), isWorkspaceLoad: true };
+		expect(() => validateLoadedBindings(ctx, { grep: () => {} }, unusedCandidate)).not.toThrow();
 	});
 });
