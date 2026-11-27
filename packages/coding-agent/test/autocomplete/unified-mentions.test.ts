@@ -11,6 +11,7 @@ import {
 	McpMentionSource,
 	SshMentionSource,
 	type MentionItem,
+	type MentionMesh,
 	type MentionQuery,
 	type MentionSource,
 	type MentionSourceMeta,
@@ -281,21 +282,31 @@ describe("AgentsMentionSource (local & foreign mesh subagents)", () => {
 					{ id: "ParkedOld", status: "parked", sessionFile: "/tmp/parked.jsonl" },
 				],
 			},
+			{ pid: 7001, project: "/work/stencil", title: "MENT", sessionFile: null, status: "idle", agents: [] },
 		];
+		const mesh: MentionMesh = {
+			project: "/work/app",
+			peers: options => (options?.allProjects ? peers : peers.filter(peer => peer.project === "/work/app")),
+		};
 
 		const source = new AgentsMentionSource({
 			registry: () => ({ list: () => localRefs }),
-			peers: () => peers,
+			mesh: () => mesh,
 		});
 
-		// Unlocked `@` omits parked agents and leads foreign subagents with their own `sub.id` (no clones).
+		// Unlocked `@` omits parked agents and other projects, and leads foreign subagents with their own `sub.id` (no clones).
 		const all = source.querySync({ trigger: "@", prefix: "@", query: "", rawBody: "" });
 		expect(all.available).toBe(true);
 		expect(all.items.map(i => i.insertText)).toEqual(["agent://Scout", "agent://4812/WorkerA", "agent://4812"]);
 		expect(all.items[1]!.label).toBe("WorkerA");
 		expect(all.items[1]!.pickerItem.badges?.some(b => b.text === "peer")).toBe(true);
 
-		// Explicit `@peer:` includes parked peers too.
+		// `@a:` reaches other projects' instances, tagged with their folder.
+		const locked = source.querySync(parseMentionQuery("@a:")!);
+		const other = locked.items.find(i => i.insertText === "agent://7001");
+		expect(other?.pickerItem.facts?.right).toBe("stencil · pid 7001");
+
+		// Explicit `@peer:` includes parked peers too; this project's rank before other projects'.
 		const peersOnly = source.querySync({
 			trigger: "@",
 			prefix: "@peer:",
@@ -307,6 +318,7 @@ describe("AgentsMentionSource (local & foreign mesh subagents)", () => {
 		expect(peersOnly.items.map(i => i.insertText)).toEqual([
 			"agent://4812/WorkerA",
 			"agent://4812",
+			"agent://7001",
 			"agent://4812/ParkedOld",
 		]);
 	});

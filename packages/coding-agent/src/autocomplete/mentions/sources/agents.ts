@@ -5,7 +5,10 @@
  * 100% synchronous Tier 0. Deduplicates strictly by target URL, leads foreign
  * subagent rows with their own `sub.id` (never truncating clones of a long
  * peer session title), and hides parked/aborted agents in unlocked `@` queries.
+ * Unlocked `@` lists peers of this project only; `@a:`/`@peer:` add every
+ * other project's, tagged with their folder name.
  */
+import * as path from "node:path";
 import type { TspTone } from "@oh-my-pi/pi-wire";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { agentMesh } from "../../../irc/mesh";
@@ -23,11 +26,19 @@ import {
 
 const MAX_AGENT_ITEMS = 25;
 
+/** The part of the mesh link (`AgentMesh`) the agents source reads. */
+export interface MentionMesh {
+	/** Canonical project directory of this instance. */
+	readonly project: string | undefined;
+	/** Other instances in this project, or in every project with `allProjects`. */
+	peers(options?: { allProjects?: boolean }): readonly MeshPeer[];
+}
+
 export interface AgentsMentionHost {
 	/** Local agent registry; defaults to `AgentRegistry.global()`. */
 	readonly registry?: () => { list(): AgentRef[] };
-	/** Foreign mesh peers in this project; defaults to `agentMesh()?.peers() ?? []` (other projects stay out of `@`). */
-	readonly peers?: () => readonly MeshPeer[];
+	/** Foreign mesh peers; defaults to `agentMesh()`. */
+	readonly mesh?: () => MentionMesh | undefined;
 }
 
 function statusTone(status: AgentStatus | "unknown"): TspTone {
@@ -74,7 +85,8 @@ function compactTitle(raw: string | undefined, fallback: string): string {
 interface CandidateRow {
 	readonly url: string;
 	readonly item: MentionItem;
-	readonly isForeign: boolean;
+	/** 0 local agent, 1 peer in this project, 2 peer in another project. */
+	readonly distance: number;
 	readonly statusRank: number;
 	readonly recency: number;
 	readonly score: number;
@@ -139,11 +151,16 @@ function buildLocalAgentItem(ref: AgentRef, tier: MatchTier): MentionItem {
 	};
 }
 
-function buildForeignMainItem(peer: MeshPeer, tier: MatchTier): MentionItem {
+/** `pid <n>`, led by the peer's folder name when `folder` is set (another project). */
+function peerPlace(peer: MeshPeer, folder: string | undefined): string {
+	return folder ? `${folder} · pid ${peer.pid}` : `pid ${peer.pid}`;
+}
+
+function buildForeignMainItem(peer: MeshPeer, folder: string | undefined, tier: MatchTier): MentionItem {
 	const url = `agent://${peer.pid}`;
 	const title = compactTitle(peer.title, `pid ${peer.pid}`);
 	const tone = statusTone(peer.status);
-	const pidFact = `pid ${peer.pid}`;
+	const pidFact = peerPlace(peer, folder);
 	const detail = peer.status === "unknown" ? pidFact : `${peer.status} · ${pidFact}`;
 	return {
 		category: "agents",
@@ -168,11 +185,16 @@ function buildForeignMainItem(peer: MeshPeer, tier: MatchTier): MentionItem {
 	};
 }
 
-function buildForeignSubagentItem(peer: MeshPeer, sub: MeshSubagent, tier: MatchTier): MentionItem {
+function buildForeignSubagentItem(
+	peer: MeshPeer,
+	sub: MeshSubagent,
+	folder: string | undefined,
+	tier: MatchTier,
+): MentionItem {
 	const url = `agent://${peer.pid}/${sub.id}`;
 	const peerName = compactTitle(peer.title, `pid ${peer.pid}`);
 	const tone = statusTone(sub.status);
-	const pidFact = `pid ${peer.pid}`;
+	const pidFact = peerPlace(peer, folder);
 	// Lead with `sub.id` so sibling subagents under one peer never truncate to identical clones.
 	return {
 		category: "agents",
@@ -214,7 +236,8 @@ export class AgentsMentionSource implements MentionSource {
 		const localRefs = (this.#host.registry?.() ?? AgentRegistry.global())
 			.list()
 			.filter(ref => ref.kind !== "advisor" && ref.id !== MAIN_AGENT_ID && (explicit || isLiveStatus(ref.status)));
-		const peers = this.#host.peers?.() ?? agentMesh()?.peers() ?? [];
+		const mesh = this.#host.mesh ? this.#host.mesh() : agentMesh();
+		const peers = mesh?.peers({ allProjects: explicit }) ?? [];
 		const livePeers = explicit
 			? peers
 			: peers.filter(peer => isLiveStatus(peer.status) || peer.agents.some(sub => isLiveStatus(sub.status)));
@@ -244,7 +267,7 @@ export class AgentsMentionSource implements MentionSource {
 				pushUnique({
 					url: `agent://${ref.id}`,
 					item: buildLocalAgentItem(ref, matched.tier),
-					isForeign: false,
+					distance: 0,
 					statusRank: statusOrder(ref.status),
 					recency: ref.lastActivity,
 					score: matched.score,
@@ -254,13 +277,16 @@ export class AgentsMentionSource implements MentionSource {
 
 		for (const peer of livePeers) {
 			const peerTitle = compactTitle(peer.title, `pid ${peer.pid}`);
+			const folder = peer.project === mesh?.project ? undefined : path.basename(peer.project);
+			const distance = folder ? 2 : 1;
+			const where = `peer ${peer.pid}${folder ? ` ${folder}` : ""}`;
 			if (explicit || isLiveStatus(peer.status)) {
-				const mainHit = scoreMatch(trimmed, fuzzyQuery, peerTitle, `peer ${peer.pid} ${peer.status}`, explicit);
+				const mainHit = scoreMatch(trimmed, fuzzyQuery, peerTitle, `${where} ${peer.status}`, explicit);
 				if (mainHit) {
 					pushUnique({
 						url: `agent://${peer.pid}`,
-						item: buildForeignMainItem(peer, mainHit.tier),
-						isForeign: true,
+						item: buildForeignMainItem(peer, folder, mainHit.tier),
+						distance,
 						statusRank: statusOrder(peer.status),
 						recency: 0,
 						score: mainHit.score,
@@ -271,18 +297,12 @@ export class AgentsMentionSource implements MentionSource {
 			for (const sub of peer.agents) {
 				if (sub.id === MAIN_AGENT_ID) continue;
 				if (!explicit && !isLiveStatus(sub.status)) continue;
-				const subHit = scoreMatch(
-					trimmed,
-					fuzzyQuery,
-					sub.id,
-					`${peerTitle} peer ${peer.pid} ${sub.status}`,
-					explicit,
-				);
+				const subHit = scoreMatch(trimmed, fuzzyQuery, sub.id, `${peerTitle} ${where} ${sub.status}`, explicit);
 				if (!subHit) continue;
 				pushUnique({
 					url: `agent://${peer.pid}/${sub.id}`,
-					item: buildForeignSubagentItem(peer, sub, subHit.tier),
-					isForeign: true,
+					item: buildForeignSubagentItem(peer, sub, folder, subHit.tier),
+					distance,
 					statusRank: statusOrder(sub.status),
 					recency: 0,
 					score: subHit.score,
@@ -314,7 +334,7 @@ export class AgentsMentionSource implements MentionSource {
 							icon: "users",
 						},
 					},
-					isForeign: false,
+					distance: 0,
 					statusRank: 5,
 					recency: 0,
 					score: allHit.score + 50,
@@ -326,7 +346,7 @@ export class AgentsMentionSource implements MentionSource {
 			(a, b) =>
 				a.item.tier - b.item.tier ||
 				a.statusRank - b.statusRank ||
-				Number(a.isForeign) - Number(b.isForeign) ||
+				a.distance - b.distance ||
 				a.score - b.score ||
 				b.recency - a.recency,
 		);

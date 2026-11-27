@@ -508,7 +508,7 @@ export const cfgTaskEnableLsp = register({
 	},
 });
 
-/** Allow interactive instances in the same folder to discover and message each other's agents. */
+/** Allow interactive instances on this machine to discover and message each other's agents. */
 export const cfgTaskCrossInstance = register({
 	id: "task.crossInstance",
 	type: "boolean",
@@ -517,7 +517,7 @@ export const cfgTaskCrossInstance = register({
 		tab: "tasks",
 		group: "Subagents",
 		label: "Cross-Instance Agent Messaging",
-		description: "Let other omp instances in this folder read agent outputs and send messages that can wake agents",
+		description: "Let other omp instances on this machine read agent outputs and send messages that can wake agents",
 	},
 });
 

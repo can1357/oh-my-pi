@@ -73,6 +73,7 @@
 
 ### Changed
 
+- Cross-instance agent messaging now spans projects: `agent://peers` still lists this folder's instances, `agent://peers?all` lists every project's, and `agent://<pid>` reads or messages an instance in any folder; `@a:`/`@peer:` mentions offer other projects' instances too, tagged with their folder, while bare `@` stays per-folder
 - The `@` mention palette and mention chips draw their icons from the symbol preset: Nerd Font glyphs under `nerd`, plain ASCII under `ascii`, and a single-width unicode set otherwise (themes can override the `mention.*` symbols)
 - The `@` mention palette is colored: icons take their category's color, or the status of the row (running/idle/aborted agent, dirty file, open/merged/closed PR), and status badges take their tone
 - Mention categories now use one-letter tokens: `@f:` files, `@m:` models, `@a:` agents, `@h:` sessions, `@g:` git, `@p:` PRs, `@i:` issues, `@r:` MCP resources, `@s:` SSH hosts; the long names still work, but `@s:` now means SSH instead of sessions
