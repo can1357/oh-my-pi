@@ -612,6 +612,12 @@ export interface OpenAICompat {
 	reasoningDeltasMayBeCumulative?: boolean;
 	/** Strip leaked DeepSeek chat-template special tokens from visible content deltas. Default: auto-detected. */
 	stripDeepseekSpecialTokens?: boolean;
+	/**
+	 * Break DeepSeek chat-template special tokens (`<｜…｜>`, `｜DSML｜`) quoted in outgoing
+	 * message text, so the encoder neither rejects them (V4.1's image-placeholder
+	 * guard) nor parses them as token IDs. Rule-owned: the DeepSeek class.
+	 */
+	neutralizeDeepseekSpecialTokens?: boolean;
 	/** Drop assistant thinking blocks from replayed chat-completions history. Default: false. */
 	stripThinkingHistory?: boolean;
 	/** Heal leaked chat-template/tool-call/thinking markup from visible content deltas. Default: auto-detected. */

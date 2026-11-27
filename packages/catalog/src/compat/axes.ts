@@ -200,6 +200,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"supports-steering": wire("supportsSteering", ["openai-responses"]),
 	"uncached-instructions": wire("uncachedInstructions", ["openai-responses"]),
 	"strip-deepseek-special-tokens": wire("stripDeepseekSpecialTokens", OAI),
+	"neutralize-deepseek-special-tokens": wire("neutralizeDeepseekSpecialTokens", ["openai"]),
 	"stream-markup-healing-pattern": wire("streamMarkupHealingPattern", OAI, "scalar", [
 		"kimi",
 		"dsml",

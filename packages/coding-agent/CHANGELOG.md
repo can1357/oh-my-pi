@@ -16,6 +16,7 @@
 
 ### Added
 
+- `models.yml` `compat.neutralizeDeepseekSpecialTokens` turns DeepSeek chat-template token breaking on or off for a custom provider's models (on by default for DeepSeek-class ids) ([#20832](https://github.com/can1357/oh-my-pi/pull/20832) by [@dany-on-demand](https://github.com/dany-on-demand))
 - Added `--preset <name>` to start a session on a saved model preset (`/modelpreset save`), applying its roles and default thinking level for that run only ([#20306](https://github.com/can1357/oh-my-pi/pull/20306) by [@nick-maderight](https://github.com/nick-maderight))
 - Credentials in `agent.db` can be encrypted with a master key kept in the OS credential vault (macOS Keychain, Windows Credential Manager, Secret Service): fresh installs encrypt when the vault answers without prompting (never on headless hosts), existing unencrypted stores stay as they are, and `auth.encrypt: true`/`false` (or `OMP_AUTH_ENCRYPT`) forces it on or off; `omp auth key` prints the master key and `omp auth key <key|->` installs one, re-encrypting stored credentials under it
 - Added OSC 7577 Program Resume Protocol reporting so supporting terminals (Tern, Rex, etc.) automatically restore open omp sessions with `--restore` and their launch flags after a crash or restart

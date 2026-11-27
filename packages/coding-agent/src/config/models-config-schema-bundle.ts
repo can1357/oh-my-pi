@@ -115,6 +115,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"supportsConfigurationUpdate?": "boolean",
 		"supportsSteering?": "boolean",
 		"stripImageInput?": "boolean",
+		"neutralizeDeepseekSpecialTokens?": "boolean",
 		// anthropic-messages compat flags (same `compat` slot, per-api interpretation)
 		"supportsContextManagement?": "boolean",
 		"supportsEagerToolInputStreaming?": "boolean",
