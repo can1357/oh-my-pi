@@ -597,7 +597,7 @@ describe("AgentSession owner-routed async delivery", () => {
 			expect(followUp).toContain(`Full output: local://${rawArtifactId}.log`);
 			// The raw capture holds only the stream; the exit notice the tool appended
 			// after it must survive in the preview's tail.
-			expect(followUp).toContain("Command exited with code 3");
+			expect(followUp).toContain("[exit code 3]");
 			const linkedPath = await store.getArtifactPath(rawArtifactId);
 			if (!linkedPath) throw new Error("Expected linked artifact on disk");
 			expect(await Bun.file(linkedPath).text()).toBe(expected);

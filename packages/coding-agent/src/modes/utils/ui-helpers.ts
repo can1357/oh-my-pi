@@ -288,12 +288,24 @@ export class UiHelpers {
 		}
 
 		const collapse = options?.collapse ?? true;
-		const last = this.#lastStatus;
-		if (collapse && last && transcript.blocks().at(-1) === last.block && !transcript.retired(last.block)) {
-			transcript.remove(last.block);
-		}
+		if (collapse) this.#withdrawLastStatus();
 		const block = this.#presentNotice(factory);
 		this.#lastStatus = collapse ? { block, message } : undefined;
+	}
+
+	/** Withdraw the last collapsible status (a progress line such as "Transcribing...") once it is moot. */
+	clearStatus(): void {
+		this.#withdrawLastStatus();
+		this.#lastStatus = undefined;
+	}
+
+	/** Remove the last collapsible status while nothing came after it in the transcript. */
+	#withdrawLastStatus(): void {
+		const transcript = this.ctx.shell.transcript;
+		const last = this.#lastStatus;
+		if (last && transcript.blocks().at(-1) === last.block && !transcript.retired(last.block)) {
+			transcript.remove(last.block);
+		}
 	}
 
 	#presentNotice(factory: () => ReturnType<typeof jsx>): TranscriptBlock {

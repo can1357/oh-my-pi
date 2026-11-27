@@ -370,6 +370,7 @@ import { goalContinuationActivity, goalFromModeData } from "../goals/state";
 import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "../plan-mode/settings";
 import { cfgStreamRedactPatterns } from "../stream/settings";
 import { cfgSttEnabled } from "../stt/settings";
+import { meterValue, voiceEnergy } from "../ui/apps/live-visualizer";
 import { combine, type SettingValueOf } from "../config/registry";
 import { cfgAdvisorEnabled, cfgAdvisorMaxNotesPerUpdate } from "../advisor/settings";
 import { cfgExtensionAssistantTextRenderers, cfgExtensionTranscriptPresenters } from "../extensibility/settings";
@@ -7054,8 +7055,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	async restart(): Promise<void> {
 		if (this.#isShuttingDown) return;
 		try {
-			// Bun can return a cached process.cwd() after the directory is unlinked.
-			await fs.realpath(".");
+			// Bun can return a cached process.cwd() after the directory is unlinked. Linux fails
+			// `realpath(".")`; macOS still resolves the removed path, so stat what it names.
+			await fs.stat(await fs.realpath("."));
 		} catch (error) {
 			if (!isEnoent(error)) throw error;
 			if (!this.#isShuttingDown) {
@@ -7124,15 +7126,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		return sessionId && sessionFile && this.sessionManager.isSessionOnDisk() ? sessionId : undefined;
 	}
 
-	/**
-	 * Claim the one-shot `shutdown()`/`restart()` close and acknowledge it before
-	 * any await: worktree exit planning, live commands, and BTW history writes can
-	 * all stall, and the user must see a reason for the pause.
-	 */
+	/** Claim the one-shot `shutdown()`/`restart()` close before any await. */
 	#beginClose(): AbortSignal {
 		this.#isShuttingDown = true;
 		this.#closeAttempt = new AbortController();
-		this.showStatus("Closing session…");
 		return this.#closeAttempt.signal;
 	}
 
@@ -7151,8 +7148,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#abortLoopCondition();
 		this.#cancelLoopAutoSubmit();
 
-		// `#beginClose()` already acknowledged the close; escalate only once the
-		// teardown itself lingers, so time spent in exit prompts never counts.
+		// Report progress only once the teardown itself lingers, so a fast close
+		// stays silent and time spent in exit prompts never counts.
 		const stillClosingTimer = setTimeout(() => {
 			this.showStatus("Still closing… (flushing memory backend / network)");
 		}, STILL_CLOSING_DELAY_MS);
@@ -8055,10 +8052,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		return {
 			showWarning: (msg: string) => this.showWarning(msg),
 			showStatus: (msg: string) => this.showStatus(msg),
+			clearStatus: () => this.#uiHelpers.clearStatus(),
+			onLevel: level => this.#frame.dictationLevel.set(meterValue(voiceEnergy(level))),
 			onStateChange: (state: SttState) => {
 				// Duck assistant speech while the user is talking (push-to-talk); restore after.
 				if (state === "recording") vocalizer.duck();
 				else vocalizer.unduck();
+				if (state !== "recording") this.#frame.dictationLevel.set(0);
 				if (this.#frame.dictation.peek() !== undefined) this.#frame.dictation.set(state);
 				if (state === "recording") {
 					this.#micCursor?.dispose();
