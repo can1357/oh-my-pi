@@ -6273,7 +6273,6 @@ dependencies = [
  "html5ever",
  "jiff",
  "memchr",
- "phf 0.14.0",
  "quick-xml",
  "regex",
  "serde_json",
