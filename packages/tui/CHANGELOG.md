@@ -49,6 +49,10 @@
 
 - Panes in a background Tern tab no longer log frame-acknowledgment stall warnings.
 
+### Fixed
+
+- Corrected the theme docs: markdown code fences draw plain fence lines, not `boxRound.*` frames ([#20111](https://github.com/can1357/oh-my-pi/issues/20111), [#20399](https://github.com/can1357/oh-my-pi/pull/20399) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [19.2.0] - 2026-11-25
 
 ### Added
