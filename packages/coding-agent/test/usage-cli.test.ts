@@ -1218,9 +1218,9 @@ describe("formatUsageBreakdown", () => {
 		// 10d-old grant: no countdown noise.
 		expect(text).not.toContain("fresh@example.test — re-login");
 		// 27d-old grant: 3 days left.
-		expect(text).toContain("⚠️ closing@example.test — re-login within 3d");
+		expect(text).toContain("⚠ closing@example.test — re-login within 3d");
 		// Past the lifetime: hard warning.
-		expect(text).toContain("⚠️ dead@example.test — grant is past Anthropic's ~30d lifetime; re-login now");
+		expect(text).toContain("⚠ dead@example.test — grant is past Anthropic's ~30d lifetime; re-login now");
 	});
 
 	it("times the warning by the server-stated grant end over the ~30d estimate", () => {
@@ -1242,7 +1242,7 @@ describe("formatUsageBreakdown", () => {
 				now,
 			),
 		);
-		expect(text).toContain("⚠️ stated@example.test — re-login within 2d (refresh token expires)");
+		expect(text).toContain("⚠ stated@example.test — re-login within 2d (refresh token expires)");
 	});
 
 	it("times a long-lived Anthropic login by its token expiry, not the ~30d grant", () => {
@@ -1263,8 +1263,8 @@ describe("formatUsageBreakdown", () => {
 			),
 		);
 		// Past the grant lifetime, months of token left: no warning.
-		expect(text).not.toContain("⚠️ year@example.test");
-		expect(text).toContain("⚠️ ending@example.test — re-login within 3d (access token expires)");
+		expect(text).not.toContain("⚠ year@example.test");
+		expect(text).toContain("⚠ ending@example.test — re-login within 3d (access token expires)");
 	});
 
 	it("renders provider-level notes once per provider, not duplicated per account or limit", () => {

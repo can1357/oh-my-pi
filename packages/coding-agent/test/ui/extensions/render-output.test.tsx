@@ -76,7 +76,7 @@ describe("extension render output", () => {
 				throw new Error("paint failed");
 			},
 		};
-		expect(screenOf(extensionOutput(rows, { onError }), 60)).toEqual(["⚠️ extension render failed: paint failed"]);
+		expect(screenOf(extensionOutput(rows, { onError }), 60)).toEqual(["⚠ extension render failed: paint failed"]);
 		expect(onError).toHaveBeenCalledTimes(1);
 	});
 

@@ -1,17 +1,17 @@
 {
 	"presets": {
 		"unicode": {
-			"status.success": "✔️",
+			"status.success": "✓",
 			"status.error": "✘",
-			"status.warning": "⚠️",
+			"status.warning": "⚠",
 			"status.info": "ⓘ",
 			"status.pending": "⏳",
 			"status.disabled": "⦸",
 			"status.enabled": "●",
 			"status.running": "⟳",
 			"status.shadowed": "○",
-			"status.aborted": "⏹️",
-			"status.done": "✔️",
+			"status.aborted": "■",
+			"status.done": "✓",
 			"nav.cursor": "❯",
 			"nav.selected": "➤",
 			"nav.expand": "▸",
