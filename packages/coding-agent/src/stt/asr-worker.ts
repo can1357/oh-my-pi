@@ -36,6 +36,7 @@ import {
 	type SherpaOnlineRecognizer,
 	type SherpaOnlineStream,
 	type SherpaRuntime,
+	type SherpaVadConfig,
 } from "./sherpa-runtime";
 
 const ASR_TASK = "automatic-speech-recognition";
@@ -52,6 +53,19 @@ const HF_RESOLVE_BASE = "https://huggingface.co";
 // Coalesce download progress so streaming a multi-hundred-MB model file doesn't
 // flood the IPC channel with one event per chunk.
 const PROGRESS_EMIT_BYTES = 4_000_000;
+// Silero VAD (MIT, ~2 MB) splits live audio into utterances for the non-streaming models.
+const SILERO_VAD_REPO = "istupakov/silero-vad-onnx";
+const SILERO_VAD_FILE = "silero_vad.onnx";
+// Speech probability gate, 0.5 s of silence ends an utterance, and utterances
+// stay within the ~30 s the transducers and Whisper windows are trained on.
+const SILERO_VAD_SETTINGS = {
+	threshold: 0.5,
+	minSilenceDuration: 0.5,
+	minSpeechDuration: 0.25,
+	windowSize: 512,
+	maxSpeechDuration: 20,
+} as const;
+const VAD_BUFFER_SECONDS = 60;
 
 const sttModelDevicePreference = resolveTinyModelDevicePreference();
 const sttModelDtypeOverride = resolveTinyModelDtypeOverride();
@@ -277,25 +291,51 @@ async function ensureSherpaModelFiles(
 	const resolved = {} as { encoder: string; decoder: string; joiner: string; tokens: string };
 	for (const role in spec.files) {
 		const key = role as keyof typeof spec.files;
-		const filename = spec.files[key];
-		const dest = path.join(dir, filename);
-		const present = await fs
-			.stat(dest)
-			.then(stats => stats.size > 0)
-			.catch(() => false);
-		if (!present) await downloadSherpaFile(spec.repo, filename, dest, modelKey, transport, requestId);
-		resolved[key] = dest;
+		resolved[key] = await ensureHubFile(spec.repo, dir, spec.files[key], modelKey, transport, requestId);
+	}
+	for (const filename of spec.externalData) {
+		await ensureHubFile(spec.repo, dir, filename, modelKey, transport, requestId);
 	}
 	return resolved;
 }
 
-async function loadSherpaModel(
-	spec: SherpaSttModelSpec,
+/** Cache path of one Hub file in `dir`, downloading it first when missing or empty. */
+async function ensureHubFile(
+	repo: string,
+	dir: string,
+	filename: string,
 	modelKey: SttModelKey,
 	transport: SttTransport,
 	requestId: string,
-): Promise<LoadedModel> {
-	const runtime = await sherpaRuntime.load(() =>
+): Promise<string> {
+	const dest = path.join(dir, filename);
+	const present = await fs
+		.stat(dest)
+		.then(stats => stats.size > 0)
+		.catch(() => false);
+	if (!present) await downloadSherpaFile(repo, filename, dest, modelKey, transport, requestId);
+	return dest;
+}
+
+// One VAD fetch per process: the model prefetch and a session start may both ask
+// for it, and two concurrent downloads would share one `.part` file.
+let vadModel: Promise<string> | undefined;
+function ensureVadModel(modelKey: SttModelKey, transport: SttTransport, requestId: string): Promise<string> {
+	if (!vadModel) {
+		const dir = path.join(getTinyModelsCacheDir(), SILERO_VAD_REPO);
+		const pending = fs
+			.mkdir(dir, { recursive: true })
+			.then(() => ensureHubFile(SILERO_VAD_REPO, dir, SILERO_VAD_FILE, modelKey, transport, requestId));
+		pending.catch(() => {
+			if (vadModel === pending) vadModel = undefined;
+		});
+		vadModel = pending;
+	}
+	return vadModel;
+}
+
+function loadSherpa(modelKey: SttModelKey, transport: SttTransport, requestId: string): Promise<SherpaRuntime> {
+	return sherpaRuntime.load(() =>
 		loadSherpaRuntime(phase =>
 			transport.send({
 				type: "progress",
@@ -304,6 +344,40 @@ async function loadSherpaModel(
 			}),
 		),
 	);
+}
+
+/** Whether a model decodes whole utterances and so needs the VAD endpointer for live sessions. */
+function needsEndpointer(spec: SttModel): boolean {
+	return !(spec.engine === "sherpa" && spec.mode === "online");
+}
+
+/** A Silero-VAD-driven endpointer for one live session (the detector holds per-stream state). */
+async function createEndpointer(
+	modelKey: SttModelKey,
+	transport: SttTransport,
+	requestId: string,
+): Promise<StreamEndpointer> {
+	const [runtime, model] = await Promise.all([
+		loadSherpa(modelKey, transport, requestId),
+		ensureVadModel(modelKey, transport, requestId),
+	]);
+	const config: SherpaVadConfig = {
+		sileroVad: { model, ...SILERO_VAD_SETTINGS },
+		sampleRate: ASR_SAMPLE_RATE,
+		numThreads: 1,
+		provider: "cpu",
+		debug: 0,
+	};
+	return new StreamEndpointer(new runtime.Vad(config, VAD_BUFFER_SECONDS));
+}
+
+async function loadSherpaModel(
+	spec: SherpaSttModelSpec,
+	modelKey: SttModelKey,
+	transport: SttTransport,
+	requestId: string,
+): Promise<LoadedModel> {
+	const runtime = await loadSherpa(modelKey, transport, requestId);
 	const files = await ensureSherpaModelFiles(spec, modelKey, transport, requestId);
 	const startedAt = performance.now();
 	const numThreads = Math.max(1, Math.min(4, os.availableParallelism()));
@@ -343,12 +417,15 @@ async function loadModel(modelKey: SttModelKey, transport: SttTransport, request
 	const cached = replayCachedReady(models, modelKey, transport, requestId, ASR_TASK, spec.repo);
 	if (cached) return cached;
 
-	const loading =
+	const loading = Promise.all([
 		spec.engine === "sherpa"
 			? loadSherpaModel(spec, modelKey, transport, requestId)
-			: loadTransformersModel(spec, modelKey, transport, requestId);
+			: loadTransformersModel(spec, modelKey, transport, requestId),
+		// Prefetch the live-session VAD with the model so the first recording never waits on it.
+		needsEndpointer(spec) && ensureVadModel(modelKey, transport, requestId),
+	]);
 	const loaded = loading.then(
-		model => {
+		([model]) => {
 			transport.send({
 				type: "progress",
 				id: requestId,
@@ -438,8 +515,9 @@ interface StreamingSession {
 	spec: SttModel;
 	language: string | undefined;
 	model: Promise<LoadedModel>;
-	endpointer: StreamEndpointer;
-	/** Online models consume each incoming chunk once, retaining one native stream. */
+	/** VAD endpointer for utterance models; native-online models endpoint themselves. */
+	endpointer: Promise<StreamEndpointer> | undefined;
+	/** Captured audio not yet consumed by the online stream or the endpointer. */
 	audioQueue: Float32Array[];
 	onlineStream?: SherpaOnlineStream;
 	lastPartial: string;
@@ -453,6 +531,8 @@ interface StreamingSession {
 	pumping: boolean;
 	cancelled: boolean;
 	ended: boolean;
+	/** The endpointer released its trailing utterance after Stop. */
+	flushed: boolean;
 }
 
 const sessions = new Map<string, StreamingSession>();
@@ -466,24 +546,21 @@ function startStreamingSession(
 		transport.send({ type: "error", id: request.id, error: `Unknown stt model: ${request.modelKey}` });
 		return;
 	}
+	// Defer loading until the session is registered; filter download callbacks too.
+	const sessionTransport: SttTransport = {
+		...transport,
+		send: message => {
+			if (!session.cancelled) transport.send(message);
+		},
+	};
 	const session: StreamingSession = {
 		id: request.id,
 		spec,
 		language: request.language,
-		// Defer loading until the session is registered; filter download callbacks too.
-		model: Promise.resolve().then(() =>
-			loadModel(
-				request.modelKey,
-				{
-					...transport,
-					send: message => {
-						if (!session.cancelled) transport.send(message);
-					},
-				},
-				request.id,
-			),
-		),
-		endpointer: new StreamEndpointer(),
+		model: Promise.resolve().then(() => loadModel(request.modelKey, sessionTransport, request.id)),
+		endpointer: needsEndpointer(spec)
+			? Promise.resolve().then(() => createEndpointer(request.modelKey, sessionTransport, request.id))
+			: undefined,
 		audioQueue: [],
 		lastPartial: "",
 		segmentQueue: [],
@@ -493,6 +570,7 @@ function startStreamingSession(
 		pumping: false,
 		cancelled: false,
 		ended: false,
+		flushed: false,
 	};
 	sessions.set(request.id, session);
 	// Observe load failures even if no audio arrives (or startup is cancelled).
@@ -567,7 +645,7 @@ async function pumpSession(session: StreamingSession, transport: SttTransport): 
 	if (session.pumping) return;
 	session.pumping = true;
 	try {
-		const model = await session.model;
+		const [model, endpointer] = await Promise.all([session.model, session.endpointer]);
 		if (model.engine === "sherpa" && model.mode === "online") {
 			// Audio or Stop can arrive while awaiting the model lock; drain again
 			// until neither queued audio nor an unfinished Stop remains.
@@ -577,7 +655,20 @@ async function pumpSession(session: StreamingSession, transport: SttTransport): 
 			}
 			return;
 		}
+		if (!endpointer) throw new Error(`stt: ${session.spec.key} session started without an endpointer`);
+		// Segmentation runs here rather than on message arrival: it needs the
+		// loaded VAD, and audio that lands mid-decode is picked up on the next pass.
 		while (!session.cancelled) {
+			if (session.audioQueue.length > 0) {
+				for (const audio of session.audioQueue.splice(0)) ingestStreamEvents(session, endpointer.push(audio));
+				continue;
+			}
+			if (session.ended && !session.flushed) {
+				session.flushed = true;
+				session.pendingPartial = null;
+				ingestStreamEvents(session, endpointer.flush());
+				continue;
+			}
 			if (session.segmentQueue.length > 0) {
 				const audio = session.segmentQueue.shift()!;
 				// A fresh segment supersedes any queued preview for the prior one.
@@ -596,8 +687,8 @@ async function pumpSession(session: StreamingSession, transport: SttTransport): 
 				const startedAt = performance.now();
 				const text = await runOnModel(() => decodeSegment(model, session.spec, audio, session.language));
 				if (session.cancelled) return;
-				session.endpointer.notePartialDecode(performance.now() - startedAt);
-				if (!session.endpointer.partialsEnabled) session.pendingPartial = null;
+				endpointer.notePartialDecode(performance.now() - startedAt);
+				if (!endpointer.partialsEnabled) session.pendingPartial = null;
 				// Skip a now-stale preview if a segment finalized mid-decode.
 				if (text.length > 0 && session.segmentQueue.length === 0) {
 					transport.send({ type: "partial", id: session.id, text });
@@ -606,7 +697,7 @@ async function pumpSession(session: StreamingSession, transport: SttTransport): 
 			}
 			break;
 		}
-		if (session.ended && !session.cancelled && session.segmentQueue.length === 0 && !session.pendingPartial) {
+		if (session.flushed && !session.cancelled && session.segmentQueue.length === 0 && !session.pendingPartial) {
 			transport.send({ type: "stream_done", id: session.id, text: session.committed.join(" ") });
 			sessions.delete(session.id);
 		}
@@ -631,20 +722,13 @@ function handleStreamMessage(
 	switch (message.type) {
 		case "stream_audio":
 			if (session.ended) return;
-			if (session.spec.engine === "sherpa" && session.spec.mode === "online") {
-				session.audioQueue.push(message.audio);
-			} else {
-				ingestStreamEvents(session, session.endpointer.push(message.audio));
-			}
+			session.audioQueue.push(message.audio);
 			void pumpSession(session, transport);
 			return;
 		case "stream_stop":
 			if (session.ended) return;
 			session.ended = true;
 			session.pendingPartial = null;
-			if (!(session.spec.engine === "sherpa" && session.spec.mode === "online")) {
-				ingestStreamEvents(session, session.endpointer.flush());
-			}
 			void pumpSession(session, transport);
 			return;
 		case "stream_cancel":
