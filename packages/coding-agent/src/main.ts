@@ -2662,7 +2662,12 @@ export async function runRootCommand(
 				// ACP sessions select their own workspace's model, so only the launch scope can name the provider.
 				const launchKey =
 					mode === "acp"
-						? await resolveAcpApiKeyProvider(parsedArgs, modelRegistry, settingsInstance, hydrateLaunchModelCaches)
+						? await resolveAcpApiKeyProvider(
+								parsedArgs,
+								modelRegistry,
+								settingsInstance,
+								hydrateLaunchModelCaches,
+							)
 						: { error: API_KEY_REQUIRES_MODEL };
 				if ("error" in launchKey) {
 					process.stderr.write(`${chalk.red(launchKey.error)}\n`);

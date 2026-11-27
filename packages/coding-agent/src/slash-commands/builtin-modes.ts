@@ -613,7 +613,8 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		allowArgs: true,
 		handle: async (command, runtime) => {
 			const message = applyComputerUseCommand(command.args, runtime.session);
-			if (message === undefined) return usage("Usage: /computer [on|off]\nCheck status with /session info.", runtime);
+			if (message === undefined)
+				return usage("Usage: /computer [on|off]\nCheck status with /session info.", runtime);
 			await runtime.output(message);
 			return commandConsumed();
 		},
