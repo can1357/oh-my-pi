@@ -661,7 +661,9 @@ export class FrameWriter {
 			!previousGraphics &&
 			!this.#shownGraphics &&
 			!past.some(hasGraphics);
-		const pen = shift ? this.#shifted(stream, past.length, viewport.length) : this.#rewritten(stream);
+		const pen = shift
+			? this.#shifted(stream, past.length, viewport.length)
+			: this.#rewritten(stream, previousGraphics || this.#shownGraphics);
 		body += pen.out;
 		const written = pen.out !== "" || past.length > 0;
 
@@ -692,12 +694,16 @@ export class FrameWriter {
 		return offered?.id;
 	}
 
-	/** Write the changed rows of `stream` from the viewport top down (history first). */
-	#rewritten(stream: readonly string[]): Pen {
+	/**
+	 * Write the changed rows of `stream` from the viewport top down (history first). With `graphics`
+	 * on screen or coming, an iTerm/SIXEL anchor row is also rewritten when a row it draws into is.
+	 */
+	#rewritten(stream: readonly string[], graphics: boolean): Pen {
 		const pen = new Pen(this.#cursorRow, this.#existing());
 		const shown = this.#shown;
+		const damaged = graphics ? rasterDamage(shown, stream) : undefined;
 		for (let k = 0; k < stream.length; k++) {
-			if (k < shown.length && k < pen.limit && shown[k] === stream[k]) continue;
+			if (k < shown.length && k < pen.limit && shown[k] === stream[k] && !damaged?.[k]) continue;
 			pen.goto(k);
 			pen.out += drawRow(stream[k]!, this.#columns, coveredCells(stream, k));
 		}

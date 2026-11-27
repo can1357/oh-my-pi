@@ -912,8 +912,9 @@ export class TermBackend {
 					firstHit: hits.length,
 				});
 			const fullscreenSession = !flush && screen === "fullscreen";
+			// Inline too: thumbnails share rows with text (the composer's cards), which composition slices.
 			const restore =
-				fullscreenSession && this.#options.images
+				!flush && this.#options.images
 					? maskOverlayImages(rows, top, block.rows.length, left, overlayCols, this.#options.images.cell().w)
 					: undefined;
 			composite(rows, block, top, left, width, fullscreenSession);

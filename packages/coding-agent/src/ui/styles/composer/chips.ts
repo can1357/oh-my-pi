@@ -5,8 +5,8 @@
  * top border carries the chip's token, the bottom one its caption, both
  * bold and centred. A text chip shows its first lines muted; an image or
  * video chip its picture centred, where the terminal draws images as cells
- * of text (kitty Unicode placeholders, the only form that fits between the
- * card's borders), else its glyph.
+ * of text (kitty Unicode placeholders, or SIXEL/iTerm2 drawn over blank
+ * cells: the forms that fit between the card's borders), else its glyph.
  */
 import type { TspImageProps, TspSpan, TspText } from "@oh-my-pi/pi-wire";
 import type { UiNode } from "@oh-my-pi/pi-tui";
@@ -80,7 +80,8 @@ function paintCard(node: UiNode, cx: PaintContext): string[] {
 		});
 	} else {
 		const picture = children.find(child => child.kind === "image");
-		const drawn = picture && pictureRows(picture.props() as TspImageProps, cx, { label: "", cells: true });
+		const drawn =
+			picture && pictureRows(picture.props() as TspImageProps, cx, { label: "", cells: true, anchored: true });
 		if (drawn?.state === "image") {
 			interior = centred(drawn.rows, drawn.columns);
 		} else {
