@@ -173,6 +173,7 @@
 - Corrected the theme docs: markdown code fences render as `mdCodeBlockBorder`-colored fence rows, not `boxRound.*` frames ([#20111](https://github.com/can1357/oh-my-pi/issues/20111))
 - Fixed routine absolute-path `rm -f` and `rm -r` commands ignoring the bash allow policy in `write` mode; home directories and protected system roots still require approval ([#20241](https://github.com/can1357/oh-my-pi/issues/20241), [#20244](https://github.com/can1357/oh-my-pi/pull/20244) by [@roboomp](https://github.com/roboomp))
 - `omp usage` no longer reports a disabled MCP OAuth login as `re-login to restore` after the server has been logged into again ([#20627](https://github.com/can1357/oh-my-pi/issues/20627))
+- Fixed extensions importing an old-API `@oh-my-pi/pi-tui` subpath (e.g. `@oh-my-pi/pi-tui/prompt/custom-editor`) failing with a misleading `Cannot find package` error, sometimes naming `@oh-my-pi/pi-natives`; the load error now names the unsupported import and the pi-tui migration guide ([#20517](https://github.com/can1357/oh-my-pi/issues/20517))
 
 ### Removed
 
