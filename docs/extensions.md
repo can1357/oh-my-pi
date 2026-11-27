@@ -640,7 +640,7 @@ Cancellation stops the host from waiting but cannot stop extension code or undo 
 
 - `input`
 - `before_agent_start`
-- `before_provider_request` — receives `{ payload }`; return the replacement payload itself (not `{ payload }`). Handlers chain. Provider transports must invoke `onPayload`; `devin-agent` does not.
+- `before_provider_request` — receives `{ payload }`; return the replacement payload itself (not `{ payload }`). Handlers chain. Provider transports must invoke `onPayload`; `devin-agent` does not. After a request whose handlers changed the payload (returned a replacement, or edited it in place), the next request treats every message a `context` handler adds as new to prompt caching.
 - `after_provider_response` — notification before response-body consumption: `{ status, headers, requestId?, metadata? }`. Provider request/response handlers receive the model used for that request in `ctx.model`.
 - `context` — receives conversation messages and may return `{ messages }`; replacements chain without rewriting persisted history. Messages are sent in the order the handlers build them. A message a handler adds with the same bytes, at the same place, as in the previous request the provider answered is history to prompt caching, whatever its `timestamp`; one whose bytes change ends the reusable cache prefix there
 - `agent_start` / `agent_end` — agent loop lifecycle notification; `agent_end` remains notification-only.

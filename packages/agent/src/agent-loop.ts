@@ -2043,8 +2043,20 @@ interface PreparedProviderCall {
 	/**
 	 * Records this call's per-call messages as the previous main request's; called as the provider reports its
 	 * response to the request (its `onResponse`), so a request stopped before it reached the provider is no record.
+	 * `rewritten`: a payload hook changed the payload the provider built, so the request records none.
 	 */
-	perCallMessagesSent?: () => void;
+	perCallMessagesSent?: (rewritten: boolean) => void;
+	/** Whether this call has per-call messages to record, so whether a payload hook's change matters to the record. */
+	perCallMessagesRecorded?: boolean;
+}
+
+/** `payload` as JSON, to see whether a payload hook edited it; `undefined` if it does not serialize. */
+function payloadJson(payload: unknown): string | undefined {
+	try {
+		return JSON.stringify(payload);
+	} catch {
+		return undefined;
+	}
 }
 
 /**
@@ -2159,11 +2171,13 @@ async function prepareProviderCall(
 	}
 	// After the provider-context transform, so the comparison reads the bytes the request sends: a host rewrites
 	// message content there (image descriptions, a secret obfuscator, a blob store's references).
-	let perCallMessagesSent: (() => void) | undefined;
+	let perCallMessagesSent: ((rewritten: boolean) => void) | undefined;
+	let perCallMessagesRecorded = false;
 	if (config.repeatedPerCallMessages) {
 		const settled = config.repeatedPerCallMessages.settle(llmContext.messages);
 		if (settled.messages !== llmContext.messages) llmContext = { ...llmContext, messages: settled.messages };
 		perCallMessagesSent = settled.sent;
+		perCallMessagesRecorded = settled.recorded;
 	}
 
 	let promptToolWireTools: Context["tools"];
@@ -2183,7 +2197,14 @@ async function prepareProviderCall(
 		// The transformed standby definitions, when no request has declared tools yet.
 		llmContext = config.sentToolDefinitions.withInactiveTools(llmContext, llmContext.inactiveTools);
 	}
-	return { model, context: llmContext, promptToolWireTools, ownedDialect, perCallMessagesSent };
+	return {
+		model,
+		context: llmContext,
+		promptToolWireTools,
+		ownedDialect,
+		perCallMessagesSent,
+		perCallMessagesRecorded,
+	};
 }
 
 /**
@@ -2297,9 +2318,30 @@ async function streamAssistantResponse(
 	let capturedHeaders: Readonly<Record<string, string>> | undefined;
 	const userOnResponse = config.onResponse;
 	const perCallMessagesSent = providerCall.perCallMessagesSent;
+	// The payload hook (an extension's `before_provider_request`) runs after placement has read the repeated marks,
+	// and can rewrite a note the comparison called repeated: by returning a replacement, or by editing the payload it
+	// was given. A request whose hook did either records no per-call message, so the next one compares with nothing.
+	// Only a request with per-call messages to record pays for the check, its payload's JSON before and after.
+	let payloadRewritten = false;
+	const userOnPayload = config.onPayload;
+	const captureOnPayload: AgentLoopConfig["onPayload"] =
+		perCallMessagesSent && providerCall.perCallMessagesRecorded && userOnPayload
+			? async (payload, payloadModel, payloadSignal) => {
+					const before = payloadJson(payload);
+					const replacement = await userOnPayload(payload, payloadModel, payloadSignal);
+					if (
+						(replacement !== undefined && replacement !== payload) ||
+						before === undefined ||
+						payloadJson(payload) !== before
+					) {
+						payloadRewritten = true;
+					}
+					return replacement;
+				}
+			: userOnPayload;
 	const captureOnResponse: AgentLoopConfig["onResponse"] = (response, modelInfo) => {
 		capturedHeaders = response.headers;
-		perCallMessagesSent?.();
+		perCallMessagesSent?.(payloadRewritten);
 		return userOnResponse?.(response, modelInfo);
 	};
 
@@ -2374,6 +2416,7 @@ async function streamAssistantResponse(
 				serviceTier: effectiveServiceTier,
 				cwd: effectiveCwd,
 				signal: finalRequestSignal,
+				onPayload: captureOnPayload,
 				onResponse: captureOnResponse,
 				cursorOnToolResult: collectCursorToolResult,
 				liveSteering: providerCall.liveSteering,

@@ -11,6 +11,10 @@
  * memory release of a disposed parked-subagent session all call it), so the record is replaced there; a request of the
  * conversation that ended records nothing for the next one, whether the reset lands while the request is out or while
  * it is still being prepared.
+ *
+ * And it must mean the bytes that request sent. A payload hook (an extension's `before_provider_request`) runs after
+ * placement has read the marks; a request whose hook changed the payload, by a replacement or by an edit in place,
+ * records no per-call message.
  */
 import { describe, expect, it } from "bun:test";
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
@@ -54,6 +58,58 @@ function gateway(): { fetch: FetchImpl; bodies: string[] } {
 		return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream", "request-id": "req" } });
 	};
 	return { fetch, bodies };
+}
+
+/** Rewrites, in place, every string inside `value` that holds `from`. */
+function rewriteInPlace(value: unknown, from: string, to: string): void {
+	if (value === null || typeof value !== "object") return;
+	const fields = value as Record<string, unknown>;
+	for (const [key, field] of Object.entries(fields)) {
+		if (typeof field === "string") fields[key] = field.replace(from, to);
+		else rewriteInPlace(field, from, to);
+	}
+}
+
+/**
+ * Four prompts with a note ahead of the history. The payload hook, an extension's `before_provider_request`, leaves
+ * the first two requests' payloads as it was given them (`keep`) and rewrites the note on the wire from the third on,
+ * differently on every request (`rewrite`).
+ */
+async function fourRequestsWithPayloadHook(
+	keep: (payload: unknown) => unknown,
+	rewrite: (payload: unknown, note: string) => unknown,
+): Promise<{ bodies: string[]; contexts: Context[] }> {
+	const server = gateway();
+	const contexts: Context[] = [];
+	let rewrites = 0;
+	const agent = new Agent({
+		initialState: { model },
+		getApiKey: () => "not-a-secret",
+		streamFn: (streamModel, context, options) => {
+			contexts.push(context);
+			return streamSimple(streamModel, context, { ...options, fetch: server.fetch });
+		},
+		onPayload: payload => (contexts.length <= 2 ? keep(payload) : rewrite(payload, `status: idle ${++rewrites}`)),
+		transformContext: async messages => {
+			const status: AgentMessage = { role: "user", content: "status: idle", timestamp: 0 };
+			markPerCallContextMessage(status);
+			return [status, ...messages];
+		},
+	});
+	for (const prompt of ["first", "second", "third", "fourth"]) await agent.prompt(prompt);
+	return { bodies: server.bodies, contexts };
+}
+
+function expectNothingRecordedFromTheRewrittenRequest({ bodies, contexts }: { bodies: string[]; contexts: Context[] }) {
+	expect(bodies).toHaveLength(4);
+	// Control: a hook that leaves the payload as it was given keeps the record, so the assertions below can fail.
+	expect(isRepeatedPerCallContextMessage(contexts[1]?.messages[0])).toBe(true);
+	// Precondition: the third request went out with the note the hook wrote.
+	expect(bodies[2]).toContain("status: idle 1");
+	// So the fourth compares with nothing.
+	expect(contexts[3]?.messages[0]?.content).toBe("status: idle");
+	expect(isPerCallContextMessage(contexts[3]?.messages[0])).toBe(true);
+	expect(isRepeatedPerCallContextMessage(contexts[3]?.messages[0])).toBe(false);
 }
 
 describe("the per-call record is the last request the provider answered", () => {
@@ -304,5 +360,38 @@ describe("the per-call record is the last request the provider answered", () => 
 		expect(contexts[3]?.messages.at(-1)?.content).toBe("status: idle");
 		expect(isPerCallContextMessage(contexts[3]?.messages.at(-1))).toBe(true);
 		expect(isRepeatedPerCallContextMessage(contexts[3]?.messages.at(-1))).toBe(false);
+	});
+
+	it("records no note from a request whose payload hook replaced the payload", async () => {
+		expectNothingRecordedFromTheRewrittenRequest(
+			await fourRequestsWithPayloadHook(
+				payload => payload,
+				(payload, note) => JSON.parse(JSON.stringify(payload).replace("status: idle", note)),
+			),
+		);
+	});
+
+	it("records no note from a request whose payload hook edited the payload in place and returned it", async () => {
+		expectNothingRecordedFromTheRewrittenRequest(
+			await fourRequestsWithPayloadHook(
+				payload => payload,
+				(payload, note) => {
+					rewriteInPlace(payload, "status: idle", note);
+					return payload;
+				},
+			),
+		);
+	});
+
+	it("records no note from a request whose payload hook edited the payload in place and returned nothing", async () => {
+		expectNothingRecordedFromTheRewrittenRequest(
+			await fourRequestsWithPayloadHook(
+				() => undefined,
+				(payload, note) => {
+					rewriteInPlace(payload, "status: idle", note);
+					return undefined;
+				},
+			),
+		);
 	});
 });

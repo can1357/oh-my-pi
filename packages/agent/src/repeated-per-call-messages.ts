@@ -78,6 +78,11 @@ function comparable(message: Message): Message | undefined {
  * record. An Agent used only with such providers marks nothing; but the record belongs to the Agent, not the provider,
  * so after a switch to one of them the record of the last answered request can still match.
  *
+ * The comparison reads the messages before the provider builds its request, and a payload hook (`onPayload`, an
+ * extension's `before_provider_request`) runs after placement has read the marks. A request whose hook changed the
+ * payload, by returning a replacement or by editing the one it was given, may have sent other bytes than the ones
+ * compared, so it records no per-call message, and the next request compares with nothing.
+ *
  * The record lives as long as the conversation: `Agent.reset` (which `newSession`, a cleared context and a disposed
  * session's memory release all call) replaces it with a new one. A run keeps the record it started with, so a
  * request of the conversation that ended, prepared or answered after the reset, settles against that one, and the
@@ -88,10 +93,11 @@ export class RepeatedPerCallMessages {
 
 	/**
 	 * `messages`, with each per-call message equal to the previous main request's at its place and ordinal marked
-	 * repeated, and `sent`, which makes them the previous main request's per-call messages once the provider answers
-	 * that request (the loop calls it from the request's `onResponse`).
+	 * repeated; `sent`, which makes them the previous main request's per-call messages once the provider answers that
+	 * request (the loop calls it from the request's `onResponse`), or records none with `rewritten` (a payload hook
+	 * changed the request); and `recorded`, whether `sent` has any to record, so whether `rewritten` changes anything.
 	 */
-	settle(messages: Message[]): { messages: Message[]; sent: () => void } {
+	settle(messages: Message[]): { messages: Message[]; sent: (rewritten: boolean) => void; recorded: boolean } {
 		const current: Place[] = [];
 		const matched = new Set<Place>();
 		let settled: Message[] | undefined;
@@ -138,9 +144,10 @@ export class RepeatedPerCallMessages {
 		}
 		return {
 			messages: settled ?? messages,
-			sent: () => {
-				this.#previous = current;
+			sent: rewritten => {
+				this.#previous = rewritten ? [] : current;
 			},
+			recorded: current.length > 0,
 		};
 	}
 }
