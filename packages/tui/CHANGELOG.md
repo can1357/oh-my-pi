@@ -36,6 +36,7 @@
 - Fixed pastes on Windows Terminal arriving as raw `[Vk;Sc;Uc;…_` key records instead of the pasted text, CJK and line breaks included ([#20718](https://github.com/can1357/oh-my-pi/issues/20718))
 - Fixed SIXEL and iTerm2 images losing their bottom cell row in terminals that clear image cells on line erase, such as xterm.js ([#20752](https://github.com/can1357/oh-my-pi/issues/20752))
 - Fixed code blocks drawn with `codeIndent: 0` putting their ``` fence rows one column right of the code; fences now sit at column 0 with it, so copying the whole block yields its markdown ([#20752](https://github.com/can1357/oh-my-pi/issues/20752))
+- Stopped trusting an inherited `TERM_FEATURES` sync hint inside tmux/screen panes, which caused top-to-bottom redraw flashes while streaming in an inactive tmux 3.6 pane ([#20091](https://github.com/can1357/oh-my-pi/issues/20091))
 
 ## [19.2.1] - 2026-11-25
 
