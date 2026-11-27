@@ -289,6 +289,7 @@
 - `/retry` in a focused subagent view now retries that agent's last failed turn, matching Alt+R, instead of being refused as a main-session command ([#7369](https://github.com/can1357/oh-my-pi/issues/7369))
 - A refused or failed turn that had emitted tool calls is now dropped from the model's context together with its placeholder tool results, instead of being replayed on the next prompt or retry ([#7932](https://github.com/can1357/oh-my-pi/issues/7932))
 - A long session no longer keeps every finished background job, with its full output, in memory after the job's result reaches the agent
+- Starting or resuming a session no longer prints a `Tool commands: added mcp__…` line listing every MCP tool; MCP tools mounted later are still shown ([#20643](https://github.com/can1357/oh-my-pi/pull/20643) by [@Petyok](https://github.com/Petyok)).
 
 ### Removed
 
