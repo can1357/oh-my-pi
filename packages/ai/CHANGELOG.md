@@ -28,6 +28,7 @@
 - Logging in again to an MCP OAuth server now clears the disabled credential left by its earlier refresh failure ([#20627](https://github.com/can1357/oh-my-pi/issues/20627))
 - Fixed GitHub Copilot Claude text replies arriving as a `msg_blocked` placeholder prefixed with "cached data for request … not found": Copilot Anthropic Messages requests now send the conversation id as `X-Client-Session-Id` ([#20678](https://github.com/can1357/oh-my-pi/issues/20678))
 - Fixed a `/session pin` made while an account selection was still running (such as the Codex connection prewarm at session start) being replaced by the account that selection picked ([#20634](https://github.com/can1357/oh-my-pi/issues/20634), [#20638](https://github.com/can1357/oh-my-pi/pull/20638) by [@roboomp](https://github.com/roboomp))
+- Fixed Anthropic rate limits sent inside a streaming response carrying no HTTP status: they now report 429 like a rate limit returned as an HTTP response, also after text has streamed, where they were treated as a dropped connection. An overload sent before the response starts now reports 529
 
 ### Changed
 
