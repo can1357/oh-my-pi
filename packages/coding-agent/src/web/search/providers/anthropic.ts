@@ -126,6 +126,7 @@ async function callSearch(
 	model: Model<Api>,
 	plan: AnthropicQueryPlan,
 	metadataUserId?: string,
+	sessionId?: string,
 	systemPrompt?: string,
 	maxTokens?: number,
 	temperature?: number,
@@ -144,6 +145,9 @@ async function callSearch(
 			"allowAnthropicHeaderOverrides" in model.compat &&
 			model.compat.allowAnthropicHeaderOverrides === true,
 		extraBetas: serverSideFallback ? [SERVER_SIDE_FALLBACK_BETA] : undefined,
+		provider: model.provider,
+		providerType: model.providerType,
+		sessionId,
 	});
 
 	const injectClaudeCodeInstruction =
@@ -391,6 +395,7 @@ export async function searchAnthropic(params: SearchParams): Promise<SearchRespo
 				params.model,
 				plan,
 				metadataUserId,
+				params.sessionId,
 				params.systemPrompt,
 				params.maxOutputTokens,
 				params.temperature,

@@ -49,6 +49,27 @@ function createCustomProviderFixture(headers?: Record<string, string>) {
 	return { authStorage, modelRegistry, model };
 }
 
+/** A GitHub Copilot-hosted Claude model, reached over Copilot's `/v1/messages` proxy. */
+function createCopilotFixture(headers?: Record<string, string>) {
+	const authStorage = createInMemoryAuthStorage();
+	authStorage.keys.setRuntime("github-copilot", "copilot-session-token");
+	const modelRegistry = new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true });
+	const model = buildModel({
+		id: "claude-sonnet-4.5",
+		name: "Copilot Claude Sonnet 4.5",
+		api: "anthropic-messages",
+		provider: "github-copilot",
+		baseUrl: "https://api.individual.githubcopilot.com",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: 16_384,
+		headers,
+	});
+	return { authStorage, modelRegistry, model };
+}
+
 function makeCaptureFetch(): {
 	fetch: FetchImpl;
 	body: () => Record<string, unknown> | undefined;
@@ -82,6 +103,50 @@ function makeCaptureFetch(): {
 		headers: () => capturedHeaders,
 	};
 }
+
+describe("Anthropic search session headers", () => {
+	// Copilot's `/v1/messages` proxy answers with a `msg_blocked` placeholder
+	// unless the Copilot CLI's session header is present (#20678).
+	it("sends X-Client-Session-Id for GitHub Copilot-hosted Claude", async () => {
+		const fixture = createCopilotFixture();
+		try {
+			const cap = makeCaptureFetch();
+			await searchAnthropic({
+				query: "copilot session header",
+				systemPrompt: "Use web search.",
+				sessionId: "session-20678",
+				authStorage: fixture.authStorage,
+				modelRegistry: fixture.modelRegistry,
+				model: fixture.model,
+				fetch: cap.fetch,
+			});
+
+			expect(cap.headers()?.get("x-client-session-id")).toBe("session-20678");
+		} finally {
+			fixture.authStorage.close();
+		}
+	});
+
+	it("keeps a configured X-Client-Session-Id over the session id", async () => {
+		const fixture = createCopilotFixture({ "x-client-session-id": "configured-session" });
+		try {
+			const cap = makeCaptureFetch();
+			await searchAnthropic({
+				query: "copilot session header",
+				systemPrompt: "Use web search.",
+				sessionId: "session-20678",
+				authStorage: fixture.authStorage,
+				modelRegistry: fixture.modelRegistry,
+				model: fixture.model,
+				fetch: cap.fetch,
+			});
+
+			expect(cap.headers()?.get("x-client-session-id")).toBe("configured-session");
+		} finally {
+			fixture.authStorage.close();
+		}
+	});
+});
 
 describe("Anthropic search request body", () => {
 	it("uses the selected model transport, custom-endpoint bearer credentials, and attribution", async () => {
