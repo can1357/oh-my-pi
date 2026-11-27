@@ -474,6 +474,8 @@ export class Agent {
 	#metadataResolver?: (provider: string) => Record<string, unknown> | undefined;
 	#modelResolver?: (model: Model) => Model;
 	#providerSessionState?: Map<string, ProviderSessionState>;
+	#activeModelCalls = 0;
+	#afterModelCall?: Array<() => void>;
 	#thinkingBudgets?: ThinkingBudgets;
 	#temperature?: number;
 	#topP?: number;
@@ -763,6 +765,12 @@ export class Agent {
 	 */
 	set providerSessionState(value: Map<string, ProviderSessionState> | undefined) {
 		this.#providerSessionState = value;
+	}
+
+	/** Run synchronously once no model call is in flight, before the next call can use provider state. */
+	runAfterModelCall(callback: () => void): void {
+		if (this.#activeModelCalls === 0) callback();
+		else (this.#afterModelCall ??= []).push(callback);
 	}
 
 	/**
@@ -2059,6 +2067,7 @@ export class Agent {
 		};
 
 		let requestModel: Model | undefined;
+		let modelCallActive = false;
 		const config: AgentLoopConfig = {
 			model,
 			reasoning,
@@ -2155,6 +2164,17 @@ export class Agent {
 			getModel: () => {
 				requestModel = this.#state.model ?? model;
 				return requestModel;
+			},
+			onModelCallStateChange: active => {
+				if (active === modelCallActive) return;
+				modelCallActive = active;
+				if (active) {
+					this.#activeModelCalls++;
+				} else if (--this.#activeModelCalls === 0) {
+					const callbacks = this.#afterModelCall;
+					this.#afterModelCall = undefined;
+					if (callbacks) for (const callback of callbacks) callback();
+				}
 			},
 			getReasoning: () => this.#state.thinkingLevel,
 			getDisableReasoning: () => this.#state.disableReasoning,
