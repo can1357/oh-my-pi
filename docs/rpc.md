@@ -1125,6 +1125,11 @@ message entries. Only complete newline-terminated records are consumed; reuse
 If `fromByte` exceeds the current file size, reading restarts at byte zero and
 reports `reset: true`.
 
+`get_subagent_messages` returns raw journal data. Its `messages` are not
+modified by `tool_result_prune` entries; a matching custom entry in `entries`
+lists the result entry ids, replacement notices and prune timestamps for a
+client that needs the pruned view.
+
 ### Cancelling subagents
 
 `cancel_subagent` hard-kills one subagent currently listed by `get_subagents`

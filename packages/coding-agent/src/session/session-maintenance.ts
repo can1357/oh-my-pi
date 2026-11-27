@@ -131,6 +131,7 @@ import type { SessionManager } from "./session-manager";
 import type { SessionProviderBoundary } from "./session-provider-boundary";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { resolveSpeculationLeadTokens, SPECULATION_LEAD_MIN_TOKENS } from "./speculation-lead";
+import { TOOL_RESULT_PRUNE_CUSTOM_TYPE, toToolResultPruneData } from "./tool-result-prunes";
 import experimentalContextNotesReminderPrompt from "../prompts/system/experimental-context-notes-reminder.md" with { type: "text" };
 import experimentalContextRolloverPrompt from "../prompts/system/experimental-context-rollover.md" with { type: "text" };
 import lengthStopRetryTemplate from "../prompts/system/length-stop-retry.md" with { type: "text" };
@@ -820,20 +821,25 @@ export class SessionMaintenance {
 	}
 
 	/**
-	 * Durably commit a prune pass, restoring the blanked results when the rewrite
-	 * fails so live context never diverges from the history its derived state
-	 * (advisor prefix, todo phases, provider sessions) was built from.
+	 * Commit a prune pass: append its `tool_result_prune` record, whose size
+	 * follows the pruned results rather than the transcript, then rebuild the
+	 * state derived from the pruned history. Resume and file-based forks
+	 * (`/fork`, `/tan`) replay the record, so they rebuild the live prefix and
+	 * keep the provider prompt cache warm.
 	 */
-	async #persistPrune(result: PruneResult): Promise<void> {
-		try {
-			await this.#host.sessionManager.rewriteEntries();
-		} catch (error) {
-			result.undo();
-			throw error;
-		}
+	#commitPrune(result: PruneResult, advisorRebaseReason: string): void {
+		this.#host.sessionManager.appendInPlaceUpdateRecord(
+			TOOL_RESULT_PRUNE_CUSTOM_TYPE,
+			toToolResultPruneData(result.pruned),
+		);
+		const sessionContext = this.#host.buildDisplaySessionContext();
+		this.#host.replaceMessagesFromSessionContext(sessionContext.messages);
+		this.#host.rebaseAdvisorPrefix(advisorRebaseReason);
+		this.#host.syncTodoPhasesFromBranch();
+		this.#host.closeCodexProviderSessionsForHistoryRewrite();
 	}
 
-	async #pruneToolOutputs(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
+	#pruneToolOutputs(): { prunedCount: number; tokensSaved: number } | undefined {
 		const branchEntries = this.#host.sessionManager.getBranchView();
 		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
 		const model = this.#host.model();
@@ -856,12 +862,7 @@ export class SessionMaintenance {
 			return undefined;
 		}
 
-		await this.#persistPrune(result);
-		const sessionContext = this.#host.buildDisplaySessionContext();
-		this.#host.replaceMessagesFromSessionContext(sessionContext.messages);
-		this.#host.rebaseAdvisorPrefix("prune-tool-outputs");
-		this.#host.syncTodoPhasesFromBranch();
-		this.#host.closeCodexProviderSessionsForHistoryRewrite();
+		this.#commitPrune(result, "prune-tool-outputs");
 		return result;
 	}
 
@@ -873,12 +874,11 @@ export class SessionMaintenance {
 	 * provider prompt cache is cold), so it is cheap to run every turn. Gated
 	 * on the `compaction.supersedeReads` and `compaction.dropUseless` settings.
 	 *
-	 * Persists via `rewriteEntries` like every other history rewrite — the
-	 * session file must match the live (pruned) context or file-based forks
-	 * (`/fork`, `/tan`) and resume rebuild a divergent prefix and cold-miss the
-	 * provider prompt cache.
+	 * Persists through `#commitPrune`: the pass fires on most turns of a
+	 * read→edit→read loop, so it appends a prune record instead of rewriting
+	 * the transcript.
 	 */
-	async #pruneStaleToolResults(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
+	#pruneStaleToolResults(): { prunedCount: number; tokensSaved: number } | undefined {
 		const { supersedeReads, dropUseless } = this.#compactionSettings;
 		if (!supersedeReads && !dropUseless) return undefined;
 		const branchEntries = this.#host.sessionManager.getBranchView();
@@ -906,12 +906,7 @@ export class SessionMaintenance {
 			return undefined;
 		}
 
-		await this.#persistPrune(result);
-		const sessionContext = this.#host.buildDisplaySessionContext();
-		this.#host.replaceMessagesFromSessionContext(sessionContext.messages);
-		this.#host.rebaseAdvisorPrefix("prune-stale-tool-results");
-		this.#host.syncTodoPhasesFromBranch();
-		this.#host.closeCodexProviderSessionsForHistoryRewrite();
+		this.#commitPrune(result, "prune-stale-tool-results");
 		return result;
 	}
 
@@ -3853,9 +3848,7 @@ export class SessionMaintenance {
 		// Stale-result pass runs every turn, before any threshold gating: it is
 		// cheap (bails when no candidate) and independent of the compaction
 		// setting.
-		const supersedeResult = this.#usesExperimentalContextManagement()
-			? undefined
-			: await this.#pruneStaleToolResults();
+		const supersedeResult = this.#usesExperimentalContextManagement() ? undefined : this.#pruneStaleToolResults();
 
 		const compactionSettings = this.#compactionSettings;
 		if (
@@ -3867,7 +3860,7 @@ export class SessionMaintenance {
 		// Case 4: Threshold - turn succeeded but context is getting large
 		// Skip if this was an error (non-overflow errors don't have usage data)
 		if (assistantMessage.stopReason === "error") return COMPACTION_CHECK_NONE;
-		const pruneResult = this.#usesExperimentalContextManagement() ? undefined : await this.#pruneToolOutputs();
+		const pruneResult = this.#usesExperimentalContextManagement() ? undefined : this.#pruneToolOutputs();
 		const maintenanceTokensFreed = (supersedeResult?.tokensSaved ?? 0) + (pruneResult?.tokensSaved ?? 0);
 		// `errorIsFromBeforeCompaction` (computed above) is the general
 		// "this assistant message predates the latest compaction" predicate here,

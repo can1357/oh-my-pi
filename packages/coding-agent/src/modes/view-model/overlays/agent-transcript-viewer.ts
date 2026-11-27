@@ -1,8 +1,12 @@
 import type * as fs from "node:fs";
+import type { ToolResultPruneRecord } from "../../../session/tool-result-prunes";
 import type { SessionMessageEntryLike } from "../../../session/transcript/transcript-entry";
 
-/** Parsed message and model metadata relevant to a transcript viewer. */
-export type AgentTranscriptEntry = SessionMessageEntryLike | { type: "model_change"; model: string };
+/** Parsed message, prune and model metadata relevant to a transcript viewer. */
+export type AgentTranscriptEntry =
+	| SessionMessageEntryLike
+	| { type: "model_change"; model: string }
+	| { type: "tool_result_prune"; results: readonly ToolResultPruneRecord[] };
 
 /** Local filesystem and session parsing capabilities supplied by the host. */
 export interface AgentTranscriptSource {

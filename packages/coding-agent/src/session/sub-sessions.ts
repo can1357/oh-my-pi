@@ -13,6 +13,7 @@ import { isAdvisorTranscriptName } from "../advisor/transcript-names";
 import { getAgentTombstonePath } from "../registry/agent-tombstone";
 import { resolveSessionLeafId, type SessionEntry, type SessionHeader } from "./session-entries";
 import { loadSessionFile, parseSessionContent, type SessionLoadResult } from "./session-loader";
+import { applyToolResultPrunes } from "./tool-result-prunes";
 
 const utf8Decoder = new TextDecoder();
 
@@ -80,6 +81,7 @@ export async function collectSubSessions(
 		// Empty files load as [] and are skipped; a corrupt or missing header is reported so exports do
 		// not look complete while omitting the transcript.
 		if (!invalidHeader && fileEntries.length > 0) {
+			applyToolResultPrunes(fileEntries);
 			const header = (fileEntries.find(e => e.type === "session") as SessionHeader | undefined) ?? null;
 			const entries = fileEntries.filter((e): e is SessionEntry => e.type !== "session");
 			result[found.key] = {

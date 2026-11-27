@@ -8,6 +8,7 @@ import { getProjectDir, isEnoent, pathIsWithin } from "@oh-my-pi/pi-utils";
 import { ANONYMIZED_REVIEW_NOTE, anonymizeSessionTranscripts } from "../session/session-anonymizer";
 import type { SessionEntry, SessionHeader } from "../session/session-entries";
 import { loadSessionFile } from "../session/session-loader";
+import { applyToolResultPrunes } from "../session/tool-result-prunes";
 import { resolveSessionFileArg } from "./session-arg";
 import { CliUsageError } from "./usage-error";
 
@@ -31,6 +32,8 @@ export async function runAnonymizeCommand(args: AnonymizeCommandArgs): Promise<v
 	const sourceReal = await fs.realpath(sourcePath);
 	if (!(await fs.stat(sourceReal)).isFile()) throw new CliUsageError(`${sourcePath} is not a session file`);
 	const { entries: records, malformedRecords } = await loadSessionFile(sourceReal);
+	// Export the context the session had: blank the tool results its prune records name.
+	applyToolResultPrunes(records);
 	// The loader returns [] for a file without a valid session header.
 	const header = records.find((record): record is SessionHeader => record.type === "session");
 	if (!header) throw new CliUsageError(`${sourcePath} is not a valid session file`);

@@ -34,6 +34,7 @@ import {
 	type SessionTitleUpdate,
 	titleUpdateFromSlot,
 } from "./session-title-slot";
+import { applyToolResultPrunes } from "./tool-result-prunes";
 
 const LF = new Uint8Array([0x0a]);
 
@@ -734,16 +735,18 @@ export function resolveBlobRefsInEntriesSync(entries: FileEntry[], blobStore: Bl
 
 /**
  * Read-only transcript view of a session file: load entries, migrate to the
- * current version, resolve blob refs, and build the display transcript along
- * the persisted leaf path (last entry). Uses transcript mode (collapsed to the
- * latest compaction) so failed/aborted tail turns stay visible, unlike the
- * provider-context builder which drops them. Does NOT create a writer or take
- * the session lock — safe to call against a file another session is writing.
+ * current version, apply prune records, resolve blob refs, and build the
+ * display transcript along the persisted leaf path (last entry). Uses
+ * transcript mode (collapsed to the latest compaction) so failed/aborted tail
+ * turns stay visible, unlike the provider-context builder which drops them.
+ * Does NOT create a writer or take the session lock — safe to call against a
+ * file another session is writing.
  */
 export async function loadSessionMessagesReadOnly(filePath: string): Promise<AgentMessage[]> {
 	const entries = await loadEntriesFromFile(filePath);
 	if (entries.length === 0) return [];
 	migrateToCurrentVersion(entries);
+	applyToolResultPrunes(entries);
 	for (const entry of entries) repairTruncatedSnapcompactFrames(entry);
 	const blobs = new BlobStore(getBlobsDir());
 	const sessionEntries = entries.filter((e): e is SessionEntry => e.type !== "session");
