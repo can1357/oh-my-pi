@@ -103,7 +103,7 @@ import {
 	type ComposerLease,
 	stopPendingStartupComposer,
 	takeStartupComposerLease,
-} from "./modes/startup-composer";
+} from "./modes/startup-frame";
 import type { SubmittedUserInput } from "./modes/types";
 import { createWarpEventBridgeExtension } from "./modes/warp-events";
 import { AgentLifecycleManager, type PersistedSubagentReviverFactory } from "./registry/agent-lifecycle";
@@ -2150,17 +2150,20 @@ export async function runRootCommand(
 		// Account routing must use the effective settings, including `--config` and
 		// `PI_CONFIG_FILES` overlays, rather than independently re-reading only the
 		// main config file during auth discovery.
-		const settingsPromise = deps.settings
-			? Promise.resolve(deps.settings)
-			: logger.time("settings:init", Settings.init, { cwd, configFiles: parsedArgs.config });
-		settingsPromise.catch(() => {});
-		const authStoragePromise = logger.time("discoverAuthStorage", async () =>
-			(deps.discoverAuthStorage ?? discoverAuthStorage)(undefined, { settings: await settingsPromise }),
-		);
-		authStoragePromise.catch(() => {});
+		let settingsInstance: Settings;
 		let authStorage: AuthStorage;
 		try {
-			authStorage = await authStoragePromise;
+			settingsInstance =
+				deps.settings ??
+				(await logger.time("settings:init", Settings.init, { cwd, configFiles: parsedArgs.config }));
+			authStorage = await logger.time(
+				"discoverAuthStorage",
+				deps.discoverAuthStorage ?? discoverAuthStorage,
+				undefined,
+				{
+					settings: settingsInstance,
+				},
+			);
 		} catch (error) {
 			const message = await describeAuthBrokerStartupError(error);
 			if (message === null) throw error;
@@ -2168,7 +2171,6 @@ export async function runRootCommand(
 			process.exit(1);
 		}
 
-		const settingsInstance = await settingsPromise;
 		if (parsedArgs.approvalMode) {
 			// Runtime override (not persisted): every `tools.approvalMode` read downstream
 			// sees this value. The wrapper still honours --auto-approve / --yolo on top of it.
@@ -2653,7 +2655,7 @@ export async function runRootCommand(
 			}
 		}
 
-		const sdk = await import("./sdk");
+		const sdk = await logger.time("loadStartupSdk", () => import("./sdk"));
 		const createAgentSessionImpl = deps.createAgentSession ?? sdk.createAgentSession;
 		const createSession = async (options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> => {
 			const result = await logger.time("createAgentSession", createAgentSessionImpl, options);

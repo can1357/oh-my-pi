@@ -14,7 +14,8 @@ import * as pluginHelpers from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { clearOmpExtensionCliRoots } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
 import { buildModelScopeNotification, runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { beginStartupComposer, stopPendingStartupComposer } from "@oh-my-pi/pi-coding-agent/modes/startup-composer";
+import { beginStartupComposer } from "@oh-my-pi/pi-coding-agent/modes/startup-composer";
+import { stopPendingStartupComposer } from "@oh-my-pi/pi-coding-agent/modes/startup-frame";
 import {
 	cfgMarketplaceAutoUpdate,
 	cfgStartupChangelogMode,

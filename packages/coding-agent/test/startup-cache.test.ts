@@ -9,11 +9,8 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getProjectDir, TempDir } from "@oh-my-pi/pi-utils";
 import * as startupCache from "../src/modes/interactive/startup-cache";
-import {
-	beginStartupComposer,
-	stopPendingStartupComposer,
-	takeStartupComposerLease,
-} from "../src/modes/startup-composer";
+import { beginStartupComposer } from "../src/modes/startup-composer";
+import { stopPendingStartupComposer, takeStartupComposerLease } from "../src/modes/startup-frame";
 import { getCurrentThemeName, initTheme } from "../src/ui/theme/service";
 import { StartupCache } from "../src/modes/interactive/startup-cache";
 import { predictedStatusLine, type StatusPrediction } from "../src/modes/interactive/status-prediction";

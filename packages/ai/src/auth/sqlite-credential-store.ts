@@ -422,6 +422,8 @@ export interface SqliteAuthCredentialStoreOptions {
 	cipher?: CredentialCipher;
 	/** Seal new writes with `cipher`; otherwise they are stored in plaintext. */
 	encrypt?: boolean;
+	/** Finalize this store's statements on close without closing the caller's database. */
+	borrowConnection?: boolean;
 }
 
 /**
@@ -438,6 +440,7 @@ export interface SqliteAuthCredentialStoreOptions {
  */
 export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	#db: Database;
+	readonly #borrowConnection: boolean;
 	#cipher: CredentialCipher | undefined;
 	#encrypt: boolean;
 	/** One warning per store for rows sealed under a key this machine does not hold. */
@@ -485,6 +488,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 
 	constructor(db: Database, options: SqliteAuthCredentialStoreOptions = {}) {
 		this.#db = db;
+		this.#borrowConnection = options.borrowConnection === true;
 		this.#cipher = options.cipher;
 		this.#encrypt = options.encrypt === true && options.cipher !== undefined;
 		this.#initializeSchema();
@@ -2464,6 +2468,6 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#releaseCredentialRefreshLeaseStmt.finalize();
 		this.#getCredentialStateStmt.finalize();
 		this.#holdsCredentialRefreshLeaseStmt.finalize();
-		this.#db.close();
+		if (!this.#borrowConnection) this.#db.close();
 	}
 }
