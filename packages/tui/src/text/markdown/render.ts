@@ -176,8 +176,14 @@ function renderBlock(r: Renderer, token: Token, width: number, ctx: InlineContex
 			const inline = text.tokens ? renderInline(r.inline, text.tokens, ctx) : ctx.text(text.text);
 			return wrap(inline, width);
 		}
-		case "heading":
-			return wrap(renderHeading(r, token as Tokens.Heading, ctx), width);
+		case "heading": {
+			const heading = token as Tokens.Heading;
+			const indent = Math.min(Math.max(0, heading.depth - 2), Math.max(0, width - 2));
+			const text = renderHeading(r, heading, ctx);
+			if (indent === 0) return wrap(text, width);
+			const pad = spaces(indent);
+			return wrap(text, width - indent).map(row => pad + row);
+		}
 		case "code":
 			return renderCode(r, token as Tokens.Code, width);
 		case "blockquote":
@@ -245,8 +251,7 @@ function renderHeading(r: Renderer, token: Tokens.Heading, ctx: InlineContext): 
 	const color = (text: string): string => styles.heading(token.depth, text);
 	const inner = renderInline(r.inline, token.tokens, ctx);
 	if (token.depth === 1) return color(styles.bold(styles.underline(inner)));
-	if (token.depth === 2) return color(styles.bold(inner));
-	return color(styles.bold(`${"#".repeat(token.depth)} ${inner}`));
+	return color(styles.bold(inner));
 }
 
 /** Scale of a sized H1: rows tall, and cells per cell of its text. */
@@ -458,8 +463,8 @@ function renderDisplayMath(r: Renderer, latex: string, width: number, ctx: Inlin
 	return rows.flatMap(row => wrap(row, width));
 }
 
-function listMarker(token: Tokens.List, index: number): string {
-	if (!token.ordered) return "- ";
+function listMarker(r: Renderer, token: Tokens.List, index: number): string {
+	if (!token.ordered) return `${r.options.theme.symbols.symbol("md.bullet") || "•"} `;
 	const start = token.start === "" ? 1 : token.start;
 	return `${start + index}. `;
 }
@@ -467,7 +472,7 @@ function listMarker(token: Tokens.List, index: number): string {
 function renderList(r: Renderer, token: Tokens.List, width: number, ctx: InlineContext): Row[] {
 	const out: Row[] = [];
 	token.items.forEach((item, index) => {
-		out.push(...renderListItem(r, item, listMarker(token, index), width, ctx));
+		out.push(...renderListItem(r, item, listMarker(r, token, index), width, ctx));
 	});
 	return out;
 }

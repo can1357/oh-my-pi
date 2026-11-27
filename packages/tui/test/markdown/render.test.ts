@@ -58,6 +58,23 @@ describe("blocks", () => {
 		expect(plain("a\n\n———", 12)).toEqual(["a", "", "—".repeat(12)]);
 	});
 
+	it("shows lower-level headings without syntax and aligns wrapped lines at their heading indent", () => {
+		expect(plain("## Two\n### Three\n#### Four\n##### Five\n###### Six", 20)).toEqual([
+			"Two",
+			"",
+			" Three",
+			"",
+			"  Four",
+			"",
+			"   Five",
+			"",
+			"    Six",
+		]);
+		expect(plain("#### Alpha beta gamma", 12)).toEqual(["  Alpha beta", "  gamma"]);
+		expect(plain("###### Hi", 1)).toEqual(["H", "i"]);
+		expect(plain("###### 界", 5)).toEqual(["   界"]);
+	});
+
 	it("caps rules at 80 cells", () => {
 		expect(plain("---", 120)).toEqual(["─".repeat(80)]);
 	});
@@ -80,15 +97,22 @@ describe("blocks", () => {
 
 describe("lists", () => {
 	it("hangs wrapped rows under the item text", () => {
-		expect(plain("- Alpha beta gamma delta epsilon", 16)).toEqual(["- Alpha beta", "  gamma delta", "  epsilon"]);
+		expect(plain("- Alpha beta gamma delta epsilon", 16)).toEqual(["• Alpha beta", "  gamma delta", "  epsilon"]);
 		expect(plain("10. Alpha beta gamma delta", 16)).toEqual(["10. Alpha beta", "    gamma delta"]);
+	});
+
+	it("uses the theme marker for every unordered list delimiter", () => {
+		const source = "- Hyphen\n\n* Asterisk\n\n+ Plus";
+		expect(plain(source, 30).filter(Boolean)).toEqual(["• Hyphen", "• Asterisk", "• Plus"]);
+		const ascii = loadThemeSync("dark", { symbolPreset: "ascii" });
+		expect(plain(source, 30, { theme: ascii }).filter(Boolean)).toEqual(["* Hyphen", "* Asterisk", "* Plus"]);
 	});
 
 	it("keeps task checkboxes in the marker and hangs rows under the task text", () => {
 		expect(plain("- [x] Ship the fix today\n- [ ] Add a regression test", 20)).toEqual([
-			"- [x] Ship the fix",
+			"• [x] Ship the fix",
 			"      today",
-			"- [ ] Add a",
+			"• [ ] Add a",
 			"      regression",
 			"      test",
 		]);
@@ -98,7 +122,7 @@ describe("lists", () => {
 		expect(plain("1. one\n2. two\n   - sub\n     1. deep\n3. three", 40)).toEqual([
 			"1. one",
 			"2. two",
-			"  - sub",
+			"  • sub",
 			"    1. deep",
 			"3. three",
 		]);
@@ -111,12 +135,12 @@ describe("lists", () => {
 	});
 
 	it("follows a paragraph directly when the list interrupts it without a blank line", () => {
-		expect(plain("Plan:\n- **one**\n- `two`\n\nNext", 40)).toEqual(["Plan:", "- one", "- two", "", "Next"]);
-		expect(plain("Plan:\n\n- one", 40)).toEqual(["Plan:", "", "- one"]);
+		expect(plain("Plan:\n- **one**\n- `two`\n\nNext", 40)).toEqual(["Plan:", "• one", "• two", "", "Next"]);
+		expect(plain("Plan:\n\n- one", 40)).toEqual(["Plan:", "", "• one"]);
 	});
 
 	it("stacks a loose item's blocks without blank rows", () => {
-		expect(plain("* one\n\n* two\n\n  more", 40)).toEqual(["- one", "- two", "  more"]);
+		expect(plain("* one\n\n* two\n\n  more", 40)).toEqual(["• one", "• two", "  more"]);
 	});
 
 	it("keeps rows within the width when the marker fills the row", () => {
@@ -143,7 +167,7 @@ describe("lists", () => {
 
 describe("quotes", () => {
 	it("borders every wrapped row and separates quoted blocks", () => {
-		expect(plain("> one two three four\n>\n> - item", 14)).toEqual(["▏ one two", "▏ three four", "▏", "▏ - item"]);
+		expect(plain("> one two three four\n>\n> - item", 14)).toEqual(["▏ one two", "▏ three four", "▏", "▏ • item"]);
 	});
 
 	it("draws quoted text in the quote style and inline styles inside it", () => {
