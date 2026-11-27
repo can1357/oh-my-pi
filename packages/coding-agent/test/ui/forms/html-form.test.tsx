@@ -381,6 +381,58 @@ test("Down reads text below a question's last option before leaving, and Up scro
 	}
 });
 
+test("arrow keys read a tall gap between fields in the same question before moving focus", () => {
+	const gap = Array.from(
+		{ length: 12 },
+		(_, i) => `<p>${i === 0 ? "GAP-START " : ""}gap context ${i + 1}${i === 11 ? " GAP-END" : ""}</p>`,
+	).join("");
+	const model = new HtmlFormModel(
+		parseHtmlForm(`<form><fieldset><legend>Question</legend>
+			<label><input type="radio" name="answer" value="a" checked> Alpha</label>
+			<label><input type="radio" name="answer" value="b"> Beta</label>
+			${gap}<label>Additional note <input name="note"></label>
+		</fieldset></form>`),
+		{ onSubmit: () => {}, onCancel: () => {} },
+	);
+	const last = model.rows(0).at(-1)!;
+	const term = createTestTerminal(() => ({ dock: <HtmlFormDialog model={model} terminalRows={() => 16} /> }), {
+		columns: 60,
+		rows: 16,
+	});
+	const shows = (text: string) =>
+		term
+			.screen()
+			.slice(-16)
+			.some(row => row.includes(text));
+	try {
+		term.focus(term.surface.dock()[0]!);
+		for (let presses = 0; presses < 3 && model.row() !== last; presses++) term.press("down");
+		expect(model.row()).toBe(last);
+		expect(shows("Other:")).toBe(true);
+		for (let presses = 0; presses < 60 && !shows("GAP-END"); presses++) {
+			term.press("down");
+			expect(model.active()).toBe(0);
+			expect(model.row()).toBe(last);
+		}
+		expect(shows("GAP-END")).toBe(true);
+		for (let presses = 0; presses < 60 && model.active() === 0; presses++) term.press("down");
+		expect(model.active()).toBe(1);
+		expect(shows("Additional note")).toBe(true);
+		expect(shows("GAP-START")).toBe(false);
+		for (let presses = 0; presses < 60 && !shows("GAP-START"); presses++) {
+			term.press("up");
+			expect(model.active()).toBe(1);
+		}
+		expect(shows("GAP-START")).toBe(true);
+		for (let presses = 0; presses < 60 && model.active() === 1; presses++) term.press("up");
+		expect(model.active()).toBe(0);
+		expect(model.row()).toBe(last);
+		expect(shows("Other:")).toBe(true);
+	} finally {
+		term.dispose();
+	}
+});
+
 test.each([12, 13])("a wrapped skip warning leaves a form row above %s dock rows", widgets => {
 	const model = new HtmlFormModel(
 		parseHtmlForm(`<form><fieldset><legend>Confirm</legend>

@@ -487,9 +487,13 @@ describe("TermBackend main surface", () => {
 			dock.set(lines("d", 1));
 			backend.renderNow();
 			expect(driver.viewport.slice(-(cover.length + 1))).toEqual([...cover, "d0"]);
-			expect(heights.at(-1)).toBeUndefined();
+			expect(heights.at(-1)).toBe(5);
 
 			dock.set(lines("d", 3));
+			backend.renderNow();
+			expect(driver.viewport.slice(-driver.rows)).toEqual([...lines("c", 3), ...lines("d", 3)]);
+			expect(heights.at(-1)).toBe(3);
+
 			backend.renderNow();
 			expect(driver.viewport.slice(-driver.rows)).toEqual([...lines("c", 3), ...lines("d", 3)]);
 			expect(heights.at(-1)).toBe(3);

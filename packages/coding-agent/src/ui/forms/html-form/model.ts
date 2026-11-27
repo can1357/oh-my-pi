@@ -213,7 +213,7 @@ export class HtmlFormModel {
 			});
 			this.#addVim(vim, { kind: "note" });
 		}
-		const reachable = form.fields.flatMap((_, index) => (this.#reachable(index) ? [index] : []));
+		const reachable = form.fields.flatMap((_, index) => (this.reachable(index) ? [index] : []));
 		this.sole = reachable.length === 1;
 		// Open where the answer is, so Enter accepts a preselected choice instead of overwriting it.
 		if (reachable.length > 0) this.#enter(reachable[0]!);
@@ -327,7 +327,7 @@ export class HtmlFormModel {
 	 * An empty required field is flagged only once the highlight has moved past it.
 	 */
 	error(index: number): string | undefined {
-		if (!this.#reachable(index)) return undefined;
+		if (!this.reachable(index)) return undefined;
 		const value = this.value(index);
 		const active = this.active();
 		if (isBlank(value) && active !== "submit" && active <= index) return undefined;
@@ -367,7 +367,7 @@ export class HtmlFormModel {
 
 	/** `2 of 5 answered`, for forms of two or more named questions the keyboard reaches. */
 	progress(): string | undefined {
-		const named = this.fields.flatMap((field, index) => (field.name && this.#reachable(index) ? [index] : []));
+		const named = this.fields.flatMap((field, index) => (field.name && this.reachable(index) ? [index] : []));
 		if (named.length < 2) return undefined;
 		return `${named.filter(index => this.answered(index)).length} of ${named.length} answered`;
 	}
@@ -427,14 +427,14 @@ export class HtmlFormModel {
 	}
 
 	/** Whether the keyboard can reach field `index`: a text field, or a choice with an enabled option or an Other answer. */
-	#reachable(index: number): boolean {
+	reachable(index: number): boolean {
 		return this.field(index).kind === "text" || this.rows(index).length > 0;
 	}
 
 	/** The reachable field after (`1`) or before (`-1`) field `from`; undefined past either end. */
 	#fieldFrom(from: number, delta: 1 | -1): number | undefined {
 		for (let index = from + delta; index >= 0 && index < this.fields.length; index += delta)
-			if (this.#reachable(index)) return index;
+			if (this.reachable(index)) return index;
 		return undefined;
 	}
 
@@ -465,7 +465,7 @@ export class HtmlFormModel {
 
 	/** Open field `index` at its answer; nothing for a field the keyboard cannot reach. */
 	open(index: number): void {
-		if (index >= 0 && index < this.fields.length && this.#reachable(index)) this.#enter(index);
+		if (index >= 0 && index < this.fields.length && this.reachable(index)) this.#enter(index);
 	}
 
 	/** The next field at its answer, or the Submit row after the last. */
@@ -501,11 +501,11 @@ export class HtmlFormModel {
 			this.active.set("submit");
 			return;
 		}
-		const field = groups[target]?.fields.find(index => this.#reachable(index));
+		const field = groups[target]?.fields.find(index => this.reachable(index));
 		if (field !== undefined) this.#enter(field);
 	}
 
-	/** The highlight moves a row: through the open field's rows, then onto the neighbouring field's nearest row. */
+	/** Move through the field's rows, scroll through the gap, then enter the neighbouring field's nearest row. */
 	#move(delta: 1 | -1): void {
 		const active = untrack(this.active);
 		if (active !== "submit") {
@@ -518,18 +518,20 @@ export class HtmlFormModel {
 				}
 			}
 			const group = this.layout.groups.find(g => g.fields.includes(active));
-			if (delta < 0 && group?.fields.find(i => this.#reachable(i)) === active) {
-				// Up scrolls through the text above the group first; at the top of the form the scroll stays.
+			if (delta < 0) {
+				// Up reads the gap before this field first; at the top of the form the scroll stays.
 				// Drawn for another field or row (keys ahead of the frame): scroll, which the painter clamps, rather than skip unseen text.
 				const here = this.#paintedHere();
 				const scroll = untrack(this.scroll);
 				const more = this.painted !== undefined && (!here || scroll < here.above);
 				if (more) this.scroll.set(scroll + 1);
-				this.#keepScroll = more || this.#fieldFrom(active, -1) === undefined;
+				this.#keepScroll =
+					more ||
+					(group?.fields.find(i => this.reachable(i)) === active && this.#fieldFrom(active, -1) === undefined);
 				if (this.#keepScroll) return;
 			}
-			if (delta > 0 && group?.fields.findLast(i => this.#reachable(i)) === active) {
-				// Down reads the text below the group's last control before leaving, including keys ahead of the frame.
+			if (delta > 0) {
+				// Down reads the gap after this field before leaving, including keys ahead of the frame.
 				const here = this.#paintedHere();
 				const scroll = untrack(this.scroll);
 				const more = this.painted !== undefined && (!here || scroll > -here.below);

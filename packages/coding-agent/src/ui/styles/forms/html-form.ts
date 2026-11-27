@@ -122,6 +122,7 @@ interface View {
 /** A column of rows, the highlighted row's range, and overlays to draw over it. */
 interface Column {
 	readonly lines: string[];
+	readonly fields: Map<number, { start: number; end: number }>;
 	/** First row of the open group. */
 	groupStart: number;
 	/** Row after the open group's last part. */
@@ -563,7 +564,7 @@ function buildColumn(
 	const theme = cx.theme;
 	const model = look.model;
 	const { intro, groups } = model.layout;
-	const column: Column = { lines: [], groupStart: 0, groupEnd: 0, focusStart: 0, focusEnd: 0 };
+	const column: Column = { lines: [], fields: new Map(), groupStart: 0, groupEnd: 0, focusStart: 0, focusEnd: 0 };
 	const lines = column.lines;
 	const focused = typeof view.active === "number" ? model.field(view.active) : undefined;
 	/** A blank row under the rows before the next ones (none when `tight`). */
@@ -593,8 +594,10 @@ function buildColumn(
 				part(keep !== undefined);
 				keep = undefined;
 				const index = model.form.fields.indexOf(block.field);
+				const start = lines.length;
 				if (block.field === focused) openFieldLines(theme, model, index, view, width, column, layouts);
 				else lines.push(...foldLines(theme, model, index, width));
+				column.fields.set(index, { start, end: lines.length });
 			}
 		}
 	};
@@ -724,7 +727,7 @@ function paintHtmlForm(node: UiNode, cx: PaintContext): Block {
 	}
 	const maxOffset = Math.max(0, lines.length - rows);
 	// Anchor the open group's top when it fits with the highlight; else the highlight on top
-	// (a note under it: the note on the bottom), then scroll toward either end of the group.
+	// (a note under it: the note on the bottom), then scroll toward the neighbouring fields or group edges.
 	let offset =
 		column.focusEnd - column.groupStart <= rows
 			? column.groupStart
@@ -732,11 +735,22 @@ function paintHtmlForm(node: UiNode, cx: PaintContext): Block {
 				? column.focusStart
 				: column.focusEnd - rows;
 	offset = Math.max(0, Math.min(offset, maxOffset));
+	let boundaryUp = column.groupStart;
+	let boundaryDown = column.groupEnd;
+	const active = view.active;
+	if (typeof active === "number") {
+		const group = model.layout.groups.find(g => g.fields.includes(active));
+		const activeAt = group?.fields.indexOf(active) ?? -1;
+		const previous = group?.fields.findLast((index, at) => at < activeAt && model.reachable(index));
+		const next = group?.fields.find((index, at) => at > activeAt && model.reachable(index));
+		if (previous !== undefined) boundaryUp = column.fields.get(previous)?.end ?? boundaryUp;
+		if (next !== undefined) boundaryDown = column.fields.get(next)?.start ?? boundaryDown;
+	}
 	model.painted = {
 		active: view.active,
 		row: view.row,
-		above: Math.max(0, offset - column.groupStart),
-		below: Math.max(0, Math.min(column.groupEnd, lines.length) - (offset + rows)),
+		above: Math.max(0, offset - boundaryUp),
+		below: Math.max(0, Math.min(boundaryDown, lines.length) - (offset + rows)),
 		upReveal: offset + rows - column.focusEnd,
 		downReveal: column.focusStart - offset,
 	};

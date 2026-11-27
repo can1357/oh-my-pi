@@ -59,6 +59,7 @@ const LAYOUTS: Record<string, string> = {
 	"inside-before": `<form>${question(1)}${question(2, { before: paragraphs("Q2CTX") })}${question(3)}</form>`,
 	"long-legend": `<form>${question(1)}${question(2)}${question(3, { legend: long("Q3LEG") })}${question(4)}${question(5)}</form>`,
 	"between-options": `<form>${question(1)}${question(2, { betweenOptions: `<p>${long("Q2MID")}</p>` })}${question(3)}</form>`,
+	"between-fields": `<form>${question(1)}${question(2, { after: `${paragraphs("GAPF")}<label>Q2 note <input name="q2note"></label>` })}${question(3)}</form>`,
 	"inside-after": `<form>${question(1)}${question(2, { after: paragraphs("Q2AFTER") })}${question(3)}</form>`,
 	trailing: `<form>${question(1)}${question(2)}${question(3)}${paragraphs("TAIL")}</form>`,
 	"checkbox-first": between("checkbox"),
