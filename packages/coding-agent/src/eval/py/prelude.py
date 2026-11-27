@@ -144,7 +144,7 @@ if "__omp_prelude_loaded__" not in globals():
             self.output = output
             self.exit_code = exit_code
 
-    def sh(command: str, cwd: str | Path | None = None, timeout: float | None = None) -> str:
+    def sh(command: str, timeout: float | None = None) -> str:
         """Run ``command`` on the embedded bash engine and return its output.
 
         The host side lives in ``eval/shell-bridge.ts``. Raises ShellError on a
@@ -153,8 +153,6 @@ if "__omp_prelude_loaded__" not in globals():
         if not isinstance(command, str):
             raise TypeError(f"sh() expects a command string (got {type(command).__name__})")
         args = {"command": command}
-        if cwd is not None:
-            args["cwd"] = str(cwd)
         if timeout is not None:
             args["timeout"] = timeout
         result = _bridge_call("__shell__", args)

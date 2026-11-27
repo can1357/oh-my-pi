@@ -23,6 +23,9 @@ export const LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE = "lsp-late-diagnostic";
 
 export const BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE = "background-tan-dispatch";
 
+/** `customType` of both rows a finished `/tan` leaves in its owner's session; see {@link TanResultDetails}. */
+export const TAN_RESULT_MESSAGE_TYPE = "tan-result";
+
 export const PREWALK_PLAN_MESSAGE_TYPE = "prewalk-plan";
 
 /** Custom message type for the transient Vibe mode directive. */
@@ -66,6 +69,20 @@ export interface BackgroundTanDispatchDetails {
 	work: string;
 	/** Forked clone session file, named `<agentId>.jsonl`; the Agent Hub reads its transcript. */
 	sessionFile: string;
+}
+
+/**
+ * Details on the rows a finished `/tan` leaves in its owner's session: a
+ * breadcrumb the user sees (kept out of context) and a hidden record that
+ * links the clone's output for the model.
+ */
+export interface TanResultDetails {
+	jobId: string;
+	/** The clone's agent id; `agent://` and `history://` resolve its output and transcript. */
+	agentId: string;
+	work: string;
+	failed: boolean;
+	durationMs: number;
 }
 
 export interface SkillPromptDetails {

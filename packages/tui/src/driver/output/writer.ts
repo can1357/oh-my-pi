@@ -232,6 +232,11 @@ export class FrameWriter {
 
 	/** The next inline frame clears screen and scrollback first (display reset, rebuild). */
 	#pendingClear = false;
+	/**
+	 * Rows of ours are on the normal screen (an inline frame was written since start). A session
+	 * drawing only fullscreen frames has none: resizes and display resets have nothing to rebuild there.
+	 */
+	#inlineWritten = false;
 	/** The next replay batch appends below retained history instead of replacing it. */
 	#replayAppends = false;
 	/** The normal screen reflowed under the writer: recover the anchor before painting it. */
@@ -311,6 +316,7 @@ export class FrameWriter {
 		this.#stale = false;
 		this.#anchoring = false;
 		this.#pendingClear = false;
+		this.#inlineWritten = false;
 		this.#replayAppends = false;
 		this.#deferred = undefined;
 		this.#pushed = [];
@@ -391,6 +397,12 @@ export class FrameWriter {
 	 * inline frame (which should carry the replay) so no blank screen shows.
 	 */
 	resetDisplay(): void {
+		if (this.#alt) this.#altShown = null;
+		if (this.#alt && this.#fullscreen && !this.#inlineWritten) {
+			// Only fullscreen frames so far: the normal screen holds nothing of ours to clear or replay.
+			this.#options.onInvalidate?.("repaint");
+			return;
+		}
 		this.#pendingClear = true;
 		this.#replayAppends = false;
 		this.#stale = false;
@@ -602,18 +614,30 @@ export class FrameWriter {
 			cursor = cursor && cursor.row >= this.#clipped ? { row: cursor.row - this.#clipped, col: cursor.col } : null;
 		}
 		let past = history ? history.rows.map(row => normalizeRow(row, width)) : [];
+		let skipped = 0;
 		if (this.#pushed.length > 0 && (this.#pendingClear || history?.kind === "replay")) this.#pushed = [];
 		if (this.#pushed.length > 0 && past.length > 0) {
 			// Rows a height shrink already pushed into scrollback are not written twice.
 			let same = 0;
 			while (same < past.length && same < this.#pushed.length && past[same] === this.#pushed[same]) same++;
 			this.#pushed = same === past.length ? this.#pushed.slice(same) : [];
-			past = past.slice(same);
+			skipped = same;
+			past = past.slice(skipped);
+		}
+		// Compare plain rows before adding one-shot control sequences: a resize
+		// can already have scrolled some of these rows beyond the writer's reach.
+		if (history?.marks) {
+			for (const { row, before, after } of history.marks) {
+				const index = row - skipped;
+				const text = past[index];
+				if (text !== undefined) past[index] = before + text + after;
+			}
 		}
 		// History under an empty viewport ends with the row the cursor parks on, made by a line feed like
 		// every row past the bottom: the next frame (or the shell) writes there, never over history.
 		if (past.length > 0 && viewport.length === 0) viewport = [""];
 		const stream = past.length > 0 ? [...past, ...viewport] : viewport;
+		if (stream.length > 0) this.#inlineWritten = true;
 		const shift =
 			!this.#options.synchronizedOutput() &&
 			this.#topKnown() &&
@@ -818,6 +842,15 @@ export class FrameWriter {
 		const ownsGrid = this.#options.hostOwnsGrid?.() ?? false;
 		const canReplay = this.#options.canReplay?.() ?? false;
 		const mode = this.#options.resizeScrollback ?? "preserve";
+		if (this.#alt && this.#fullscreen && !this.#inlineWritten) {
+			// Only fullscreen frames so far: nothing of ours on the normal screen to rebuild or re-anchor.
+			// The first inline frame (the shutdown flush) starts wherever the cursor is.
+			this.#stale = false;
+			this.#topLo = 0;
+			this.#topHi = this.#rows - 1;
+			this.#options.onInvalidate?.("repaint");
+			return;
+		}
 		let replay: "rebuild" | "append" | null = null;
 		if (!tx.inPlace && canReplay) {
 			if (ownsGrid) replay = "rebuild";

@@ -370,6 +370,27 @@ describe("auth grammar", () => {
 		).toThrow(/auth\/x\.kdl:3/);
 	});
 
+	test("connected-name and active-notice compile into auth policy; blank text is rejected", () => {
+		const compiled = compileAuth([
+			{
+				file: "auth/x.kdl",
+				text: 'auth "x" {\n\tname "Sign in to X"\n\tconnected-name "X plan"\n\tactive-notice "Using your X plan"\n}',
+			},
+			order(),
+		]);
+		expect(compiled.providers[0]).toMatchObject({
+			name: "Sign in to X",
+			connectedName: "X plan",
+			activeNotice: "Using your X plan",
+		});
+		expect(() =>
+			compileAuth([{ file: "auth/x.kdl", text: 'auth "x" {\n\tname "X"\n\tconnected-name " "\n}' }, order()]),
+		).toThrow(/auth\/x\.kdl:3/);
+		expect(() =>
+			compileAuth([{ file: "auth/x.kdl", text: 'auth "x" {\n\tname "X"\n\tactive-notice ""\n}' }, order()]),
+		).toThrow(/auth\/x\.kdl:3/);
+	});
+
 	test("auth identity and OAuth env policy preserve explicit false and reject empty token lists", () => {
 		const compiled = compileAuth([
 			{

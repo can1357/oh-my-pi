@@ -411,9 +411,9 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 	},
 	{
 		name: "logout",
-		doc: "Remove one stored credential; fails when it is no longer stored. `remainingSource` names auth that still applies.",
+		doc: "Remove one stored credential, revoking it at the provider when one supports it; fails when it is no longer stored. `remainingSource` names auth that still applies; `signOutError` says why the provider's sign-out failed (the credential is removed regardless).",
 		params: { providerId: "string", credentialId: "number.integer" },
-		result: { "remainingSource?": "string" },
+		result: { "remainingSource?": "string", "signOutError?": "string" },
 	},
 
 	{
