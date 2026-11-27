@@ -20,6 +20,7 @@ import { type Accessor, batch, computed, type JSXNode, type KeyEvent, signal } f
 import { lexMarkdown } from "@oh-my-pi/pi-tui/text/markdown/lexer";
 import type { TspPickerAction, TspPickerItem } from "@oh-my-pi/pi-wire";
 import { sanitizeDisplaySingleLine } from "../../../extensibility/inventory/display-text";
+import { cancelKbd } from "../../keys/hints";
 import { previewLine, TRUNCATE_LENGTHS } from "../../../utils/render-utils";
 import type { CopyBlock, CopyPickSource } from "../../../modes/view-model/overlays/copy-selector";
 import { commandFromToolCall } from "../../../modes/view-model/overlays/copy-targets";
@@ -621,7 +622,9 @@ export function CopySelector(props: CopySelectorProps): JSXNode {
 		if (at === undefined && blocks.length > 0) out.push(pickerAction("blocks", "Blocks", "right"));
 		if (focused?.href && props.onOpen) out.push(pickerAction("open-link", "Open link", "o"));
 		if (at === undefined && truncated()) out.push(pickerAction("earlier", "Earlier turns", "a"));
-		out.push(at !== undefined ? pickerAction("back", "Back", "left", { end: true }) : closeAction());
+		out.push(
+			at !== undefined ? pickerAction("back", "Back", ["left", ...cancelKbd()], { end: true }) : closeAction(),
+		);
 		return out;
 	};
 

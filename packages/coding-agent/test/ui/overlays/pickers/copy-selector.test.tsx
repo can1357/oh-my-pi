@@ -149,6 +149,29 @@ test("the native transcript picker previews the selected code block and hands of
 	ui.send({ ev: "activate", sf: ui.sf, id: ui.node("picker").id, item: secondRow.id });
 	expect(picked.map(({ content }) => content)).toEqual([second]);
 	expect(picked[0]?.source.block?.language).toBe("py");
+
+	// Tern binds bar actions by keycap: Esc must back out of the blocks, not close the picker.
+	const back = picker().actions!.find(action => action.id === "back")!;
+	expect(back.keys).toContain("esc");
+	ui.send({ ev: "action", sf: ui.sf, id: ui.node("picker").id, act: back.id });
+	expect(picker().items!.map(item => item.id)).toEqual(["turn", "other"]);
+});
+
+test("activating a turn without blocks accepts it at once", async () => {
+	await using ui = await nativeShell();
+	const picked: string[] = [];
+	ui.shell.overlays.show(() =>
+		fullscreenMenuView(
+			"annotate",
+			<CopySelector
+				entries={[entry("plain", null, { role: "user", content: "plain prose", timestamp: 1 })]}
+				onPick={content => picked.push(content)}
+				onCancel={noop}
+			/>,
+		),
+	);
+	ui.send({ ev: "activate", sf: ui.sf, id: ui.node("picker").id, item: "plain" });
+	expect(picked).toEqual(["plain prose"]);
 });
 
 pickerSuite({
