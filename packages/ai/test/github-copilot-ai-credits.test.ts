@@ -361,6 +361,7 @@ describe("premium-request estimate follows the account's billing mode", () => {
 		const result = await reply(true, delta);
 		expect(result.usage.premiumRequests).toBeUndefined();
 		expect(result.usage.aiu).toBeUndefined();
+		expect(result.usage.aiuMissing).toBe(true);
 	});
 
 	it("keeps the estimate on a request-billed account even when the reply carries a frame", async () => {
