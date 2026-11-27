@@ -18,6 +18,7 @@
 
 ### Added
 
+- Added `--prepaint=on|off|force` to control the composer drawn before startup finishes: `off` waits for the full interface, `force` draws it even for flags that would change it
 - Todo backends can define an optional `apply`: the selected backend is asked before the model's `todo` call commits, and returning `{ block: true, reason }` refuses the call with the list unchanged ([#20355](https://github.com/can1357/oh-my-pi/pull/20355) by [@Dangerboi](https://github.com/Dangerboi))
 - `models.yml` `compat.neutralizeDeepseekSpecialTokens` turns DeepSeek chat-template token breaking on or off per model (on by default for DeepSeek-class models on chat-completions) ([#20832](https://github.com/can1357/oh-my-pi/pull/20832) by [@dany-on-demand](https://github.com/dany-on-demand))
 - Added `--preset <name>` to start a session on a saved model preset (`/modelpreset save`), applying its roles and default thinking level for that run only ([#20306](https://github.com/can1357/oh-my-pi/pull/20306) by [@nick-maderight](https://github.com/nick-maderight))
@@ -78,6 +79,7 @@
 
 ### Changed
 
+- Launches with `--config` draw the composer before startup finishes unless an overlay sets a setting that frame shows (`tui.screen`, theme, symbols, composer shape, vim mode, quiet startup); `PI_CONFIG_FILES` overlays that set one now skip it too
 - OTLP export runs on OpenTelemetry JS SDK 3; `OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG`, `OTEL_BSP_*` and the span limit variables are no longer read (the documented `OTEL_*` variables work as before)
 - On public sites, browser `tab.console()` and `tab.errors()` record from the first call on a tab (the result's `captureStartedAt` marks when), so pages cannot detect the capture; local and dev pages still record from load
 - Interactive startup loads fewer modules, and reading settings or caches no longer unlocks stored credentials.

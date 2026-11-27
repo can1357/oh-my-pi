@@ -36,6 +36,7 @@ import { parseMotionMode } from "../config/motion-presets";
 import { parseSpinnerInterval } from "../config/spinner-interval";
 import type { ConfiguredThinkingLevel } from "../utils/render-utils";
 import type { Args } from "./args";
+import { PREPAINT_MODES, parsePrepaintMode } from "./prepaint";
 import { CliUsageError } from "./usage-error";
 
 /**
@@ -216,6 +217,15 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 			result.motion = parseMotionMode(value);
 		} catch (error) {
 			throw new CliUsageError(`--motion: ${(error as Error).message}`);
+		}
+	},
+	// `cli.ts` reads it before this parse (the first frame paints before the command loads);
+	// validated here so a bad value fails the launch.
+	"--prepaint": (result, value) => {
+		if (parsePrepaintMode(value) === undefined) {
+			result.invalidFlagValues.push(
+				`Invalid --prepaint value: ${JSON.stringify(value)}. Expected one of: ${PREPAINT_MODES.join(", ")}.`,
+			);
 		}
 	},
 	"--api-key": (result, value) => {
