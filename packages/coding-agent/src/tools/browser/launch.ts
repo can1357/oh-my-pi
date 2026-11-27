@@ -1540,7 +1540,10 @@ function stealthScriptsFor(probe: StealthProbe, platform: string): readonly stri
 	) {
 		scripts.push(stealthScreenScript);
 	}
-	if (probe.webdriver !== false) scripts.push(stealthBotdScript);
+	// `--disable-blink-features=AutomationControlled` already reports `webdriver: false`; the botd
+	// patch only adds a fabricated `chrome.runtime` plus permission shims, which its audit found
+	// more telling than native APIs. It stays available for tests but is not selected.
+	// if (probe.webdriver !== false) scripts.push(stealthBotdScript);
 	if (probe.hairlineHeight === 0) scripts.push(stealthHairlineScript);
 	if (!probe.focused) scripts.push(stealthActivityScript);
 	return [...new Set(scripts)];
