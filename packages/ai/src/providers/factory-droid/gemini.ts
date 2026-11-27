@@ -40,14 +40,20 @@ import { sanitizeFactoryDroidToolName } from "./tool-names";
 
 /** Factory's Gemini endpoint speaks native generateContent SSE at `/api/llm/g/v1/generate`. */
 
-/** OMP effort → Gemini thinkingLevel (low/minimal→LOW, medium→MEDIUM when supported, else HIGH). */
-function geminiThinkingLevel(effort: string | undefined, supportsMedium: boolean): "LOW" | "MEDIUM" | "HIGH" {
+/**
+ * OMP effort → Gemini thinkingLevel (low/minimal→LOW, medium→MEDIUM when
+ * supported, xhigh→the Gemini API's lowercase `xhigh`, else HIGH). `xhigh`
+ * arrives only for ladders that expose it (Gemini 4 Neon).
+ */
+function geminiThinkingLevel(effort: string | undefined, supportsMedium: boolean): "LOW" | "MEDIUM" | "HIGH" | "xhigh" {
 	switch (effort) {
 		case "low":
 		case "minimal":
 			return "LOW";
 		case "medium":
 			return supportsMedium ? "MEDIUM" : "HIGH";
+		case "xhigh":
+			return "xhigh";
 		default:
 			return "HIGH";
 	}

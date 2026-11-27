@@ -678,6 +678,19 @@ describe("Factory Droid gemini wire — native replay policy", () => {
 		});
 	});
 
+	it("sends xhigh as the Gemini API's lowercase thinking level", async () => {
+		const { captured } = await run(
+			"hi",
+			undefined,
+			{ requestPolicy: argonPolicy, reasoning: Effort.XHigh, thinkingDialect: "level-medium" },
+			{ ...argon(), id: "gemini-4-neon" },
+		);
+		expect(captured[0].body.generationConfig).toEqual({
+			maxOutputTokens: 65536,
+			thinkingConfig: { includeThoughts: true, thinkingLevel: "xhigh" },
+		});
+	});
+
 	it("replays its own turn as the native content Gemini streamed, call ids included", async () => {
 		const first = await run(
 			{ messages: [{ role: "user", content: "go", timestamp: 1 }], tools },
