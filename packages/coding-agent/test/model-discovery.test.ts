@@ -248,6 +248,45 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(registry.find("gateway", "dynamic-model")).toBeDefined();
 	});
 
+	test("openai-models-list reads OpenRouter-style per-token pricing", async () => {
+		writeRawModelsJson({
+			relay: {
+				baseUrl: "http://127.0.0.1:9993",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "openai-models-list" },
+			},
+		});
+		const fetchMock: FetchImpl = async input => {
+			if (String(input) === "http://127.0.0.1:9993/v1/models") {
+				return Response.json({
+					data: [
+						{
+							id: "relay-priced",
+							pricing: { prompt: "0.000003", completion: "0.000015", input_cache_read: "0.0000003" },
+						},
+						{ id: "relay-unpriced" },
+					],
+				});
+			}
+			return new Response("", { status: 404 });
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refreshDiscoverableProviders(["relay"], "online");
+
+		const priced = registry.find("relay", "relay-priced")?.cost;
+		expect(priced?.input).toBeCloseTo(3);
+		expect(priced?.output).toBeCloseTo(15);
+		expect(priced?.cacheRead).toBeCloseTo(0.3);
+		expect(priced?.cacheWrite).toBe(0);
+		expect(registry.find("relay", "relay-unpriced")?.cost).toEqual({
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+		});
+	});
+
 	test("does not coalesce or apply discovery across provider config changes", async () => {
 		writeRawModelsJson({
 			gateway: {

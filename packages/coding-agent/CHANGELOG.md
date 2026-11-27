@@ -239,6 +239,7 @@
 - Fixed `/usage` and `omp usage` showing nothing for an extension usage provider on a custom provider whose key is only set in `models.yml`; the quota is now fetched with that key ([#16081](https://github.com/can1357/oh-my-pi/issues/16081), reported by [@feihu-lgtm](https://github.com/feihu-lgtm))
 - Python browser helpers keep an explicit `None` before keyword options, so `tab.ariaSnapshot(None, interactive=True)` and `tab.extract(None, selector="main")` work; a non-string file path or a missing selector now fails with an error naming the expected value ([#16618](https://github.com/can1357/oh-my-pi/issues/16618))
 - Fixed `find` reporting a bare "no hits" when only the lexical shortlist was judged; it now states how many eligible files were judged and read so the result is not mistaken for an exhaustive search ([#15531](https://github.com/can1357/oh-my-pi/issues/15531))
+- Fixed `openai-models-list` discovery ignoring OpenRouter-style `pricing` on `/v1/models` rows (e.g. ModelRelay), which showed every model at $0 cost ([#15655](https://github.com/can1357/oh-my-pi/issues/15655))
 
 ### Removed
 

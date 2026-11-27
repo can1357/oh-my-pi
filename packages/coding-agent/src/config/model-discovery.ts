@@ -25,6 +25,7 @@ import {
 	OPENAI_COMPAT_DISCOVERY_DEFAULT_CONTEXT_WINDOW,
 	OPENAI_COMPAT_DISCOVERY_DEFAULT_MAX_TOKENS,
 	OPENROUTER_BASE_URL,
+	perTokenPricingCost,
 	resolveLiteLLMApi,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import {
@@ -1085,6 +1086,7 @@ type AdvertisedReasoning =
  */
 function extractAdvertisedReasoning(item: {
 	metadata?: unknown;
+	pricing?: unknown;
 	supported_reasoning_levels?: unknown;
 	default_reasoning_level?: unknown;
 	reasoning?: unknown;
@@ -1297,6 +1299,7 @@ export async function discoverOpenAIModelsList(
 						architecture?: unknown;
 						mode?: unknown;
 						metadata?: unknown;
+						pricing?: unknown;
 						supported_reasoning_levels?: unknown;
 						default_reasoning_level?: unknown;
 						reasoning?: unknown;
@@ -1408,9 +1411,9 @@ export async function discoverOpenAIModelsList(
 			input,
 			...(providerConfig.discovery.type === "lm-studio" ? { imageInputDecoder: "stb" as const } : {}),
 			// Proxy/gateway pricing is provider-specific and rarely matches
-			// upstream bundled catalogs, so keep costs local-unknown even
-			// when we successfully recover the upstream model identity.
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			// upstream bundled catalogs, so never inherit the reference cost;
+			// only a row's own OpenRouter-style `pricing` (USD per token) counts.
+			cost: perTokenPricingCost(item.pricing),
 			contextWindow,
 			// Cap a provider-advertised output limit or the reference's output limit at
 			// the discovered context window so a larger limit can never request more

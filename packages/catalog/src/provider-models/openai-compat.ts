@@ -560,7 +560,7 @@ function mapWithFeatureListMetadata<TApi extends Api>(
  * strings). Missing, zero, or negative legs (`-1` marks router-priced rows)
  * map to 0, which the model manager fills from its reference sources.
  */
-function perTokenPricingCost(pricing: unknown): TokenCost {
+export function perTokenPricingCost(pricing: unknown): TokenCost {
 	const rates = isRecord(pricing) ? pricing : {};
 	return {
 		input: toPositiveNumber(rates.prompt, 0) * 1_000_000,
