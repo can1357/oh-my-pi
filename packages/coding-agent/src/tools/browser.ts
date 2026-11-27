@@ -5,7 +5,7 @@ import type { EvalPreludeContext, HostEvalPreludeDefinition } from "../eval/prel
 import type { ToolSession } from "../sdk";
 import { enforceInlineByteCap } from "./streaming-output";
 import { CmuxUnavailableError, resolveCmuxKind } from "./browser/cmux/rpc";
-import { type CdpTarget, describeCdpTargets, listCdpTargets, resolveSpawnArgs } from "./browser/attach";
+import { type CdpTarget, describeCdpTargets, listCdpTargets, normalizeAppArgs } from "./browser/attach";
 import {
 	acquireBrowser,
 	browserKey,
@@ -51,7 +51,7 @@ import {
 	type TernTabSession,
 	ternBlocksTaken,
 } from "./browser/tab-supervisor";
-import { renderTabCall, tabCallBudgetSeconds } from "./browser/tab-call";
+import { parseTabCall, tabCallBudgetSeconds } from "./browser/tab-call";
 import { resolveToCwd } from "./path-utils";
 import { renderFunctionRun, renderStatusCallChain } from "./run-code";
 import { ToolAbortError, throwIfAborted } from "./tool-errors";
@@ -205,14 +205,12 @@ export function resolveBrowserKind(
 	}
 	if (app && !APP_KEYWORDS.includes(app)) {
 		const exe = resolveToCwd(app, session.cwd);
-		const args = resolveSpawnArgs(exe, params.argv, session.cwd);
-		if (params.insecure && !args.includes("--ignore-certificate-errors")) {
-			args.push("--ignore-certificate-errors");
-		}
-		if (!args.includes("--allow-file-access-from-files")) {
-			args.push("--allow-file-access-from-files");
-		}
-		return { kind: "spawned", path: exe, args };
+		const args = params.argv ?? [];
+		const required =
+			params.insecure && !args.includes("--ignore-certificate-errors")
+				? [...args, "--ignore-certificate-errors"]
+				: args;
+		return { kind: "spawned", path: exe, args: normalizeAppArgs(exe, required, session.cwd) };
 	}
 	const relayUrl = cfgBrowserRelayUrl.get(session.settings);
 	// Explicit app: "relay" wins over every setting; PI_BROWSER_RELAY stays the
@@ -934,7 +932,6 @@ async function closeBrowser(
 }
 
 function resolveBrowserRunCode(params: BrowserParams): string {
-	if (params.action === "call") return renderTabCall(params.chain ?? []);
 	const code = params.code?.trim();
 	const fn = params.fn?.trim();
 	if ((code === undefined || code.length === 0) === (fn === undefined || fn.length === 0)) {
@@ -954,20 +951,36 @@ async function runBrowser(
 	timeoutMs: number,
 	signal?: AbortSignal,
 ): Promise<AgentToolResult<unknown>> {
-	const code = resolveBrowserRunCode(params);
+	const callChain = params.action === "call" ? (params.chain ?? []) : undefined;
+	let code: string | undefined;
+	if (callChain !== undefined) {
+		parseTabCall(callChain);
+	} else {
+		code = resolveBrowserRunCode(params);
+	}
 	const tab = getTab(name);
 	if (tab) {
 		details.browser = tab.browser.kind.kind;
 		details.url = tab.info.url;
 	}
 
-	const { displays, returnValue, screenshots } = await runInTab(name, {
-		code,
-		timeoutMs,
-		signal,
-		session,
-		waitsForDownload: params.action === "call" && params.chain?.[0]?.method === "waitForDownload",
-	});
+	const { displays, returnValue, screenshots } = await runInTab(
+		name,
+		callChain !== undefined
+			? {
+					callChain,
+					timeoutMs,
+					signal,
+					session,
+					waitsForDownload: callChain[0]?.method === "waitForDownload",
+				}
+			: {
+					code: code!,
+					timeoutMs,
+					signal,
+					session,
+				},
+	);
 
 	if (screenshots.length) details.screenshots = screenshots;
 

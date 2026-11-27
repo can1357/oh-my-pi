@@ -35,7 +35,11 @@ use omp_xfs::{
 };
 use crate::bre;
 use crate::host::{AsyncUtility, Host, StdoutFile};
+use crate::root_guard;
 use crate::stdio;
+
+/// `grep`'s spelling of the [`root_guard`] escape hatch; it has no depth cap.
+const ROOT_FLAGS: root_guard::Flags = root_guard::Flags { allow: "--allow-root", depth: None };
 
 /// Exit status of a `grep` or `rg` run: 0 when a line was selected, 1 when
 /// none was, 2 on any error, except that under `-q` a match outranks errors.
@@ -349,6 +353,10 @@ struct GrepArgs {
 	/// Recursively search and follow every symbolic link.
 	#[arg(short = 'R', long = "dereference-recursive")]
 	dereference_recursive: bool,
+
+	/// Permit a recursive search of a filesystem root such as /.
+	#[arg(long = "allow-root")]
+	allow_root: bool,
 
 	/// Follow symbolic links named as command-line operands.
 	#[arg(short = 'O')]
@@ -1858,6 +1866,13 @@ impl AsyncUtility for Grep {
 			"-"
 		}));
 	}
+	if directory_action == DirectoryAction::Recurse
+		&& !cli.allow_root
+		&& let Err(refusal) = root_guard::check(files.iter().map(|file| host.resolve(file)), None, ROOT_FLAGS)
+	{
+		let _ = writeln!(host.stderr, "grep: {refusal}");
+		return 2;
+	}
 
 	let max_count = match resolve_max_count(&cli) {
 		Ok(max_count) => max_count,
@@ -2053,6 +2068,16 @@ mod tests {
 	async fn run(args: &[&str], stdin: &str) -> (i32, String, String) {
 		let (code, capture) = run_async_util::<Grep>(args, stdin, "/").await;
 		(code, capture.out(), capture.err())
+	}
+
+	/// Failure mode: `grep -r x /` walked the whole disk for hours.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn recursive_search_refuses_the_filesystem_root() {
+		// `-q` stops a regression at the first match instead of reading the disk.
+		let (code, out, err) = run(&["-rq", "e", "/"], "").await;
+		assert_eq!((code, out.as_str()), (2, ""));
+		assert!(err.starts_with("grep: refusing") && err.contains("--allow-root"), "stderr: {err}");
 	}
 
 	#[tokio::test(flavor = "multi_thread")]

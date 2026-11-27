@@ -18,7 +18,6 @@ import {
 } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { loadSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { getPluginsDir, removeWithRetries } from "@oh-my-pi/pi-utils";
-import { restoreEnvValue } from "../helpers/settings-test-state";
 import "@oh-my-pi/pi-coding-agent/discovery/agent-plugins";
 import "@oh-my-pi/pi-coding-agent/discovery/claude-plugins";
 import type { MCPServer } from "@oh-my-pi/pi-coding-agent/capability/mcp";
@@ -249,10 +248,9 @@ describe("parseAgentPluginMcp", () => {
 describe("agent-plugins discovery", () => {
 	let tempDir: string;
 	let pluginPath: string;
-	let originalClaudeConfigDir: string | undefined;
 
 	const writeRegistry = async (installPath: string, id = "std-plugin@market") => {
-		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const pluginsDir = path.join(tempDir, ".omp", "plugins");
 		await fs.mkdir(pluginsDir, { recursive: true });
 		await fs.writeFile(
 			path.join(pluginsDir, "installed_plugins.json"),
@@ -290,9 +288,6 @@ describe("agent-plugins discovery", () => {
 		clearClaudePluginRootsCache();
 		clearAgentPluginRootCache();
 		clearFsCache();
-		originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
-		delete process.env.CLAUDE_CONFIG_DIR;
-		delete Bun.env.CLAUDE_CONFIG_DIR;
 		tempDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "agent-plugins-test-")));
 		pluginPath = path.join(tempDir, "plugins", "std-plugin");
 		await fs.mkdir(pluginPath, { recursive: true });
@@ -304,7 +299,6 @@ describe("agent-plugins discovery", () => {
 		clearAgentPluginRootCache();
 		clearFsCache();
 		vi.restoreAllMocks();
-		restoreEnvValue("CLAUDE_CONFIG_DIR", originalClaudeConfigDir);
 		await removeWithRetries(tempDir);
 	});
 
@@ -621,7 +615,7 @@ describe("agent-plugins discovery", () => {
 			});
 		await fs.writeFile(path.join(pluginPath, "mcp.json"), mcpDoc("a"));
 		await fs.writeFile(path.join(otherPath, "mcp.json"), mcpDoc("b"));
-		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const pluginsDir = path.join(tempDir, ".omp", "plugins");
 		await fs.mkdir(pluginsDir, { recursive: true });
 		const entry = (installPath: string) => [
 			{
@@ -662,7 +656,7 @@ describe("agent-plugins discovery", () => {
 	});
 
 	test("namespaces colliding plugin skills by manifest name, stable across version bumps (#12151)", async () => {
-		const cacheRoot = path.join(tempDir, ".claude", "plugins", "cache", "market");
+		const cacheRoot = path.join(tempDir, "plugins", "cache", "market");
 		const install = async (plugin: string, version: string) => {
 			const root = path.join(cacheRoot, plugin, version);
 			await fs.mkdir(path.join(root, "skills", "tdd"), { recursive: true });
@@ -677,7 +671,7 @@ describe("agent-plugins discovery", () => {
 			return root;
 		};
 		const writeInstalls = async (entries: Record<string, [string, string]>) => {
-			const pluginsDir = path.join(tempDir, ".claude", "plugins");
+			const pluginsDir = path.join(tempDir, ".omp", "plugins");
 			await fs.mkdir(pluginsDir, { recursive: true });
 			const plugins: Record<string, unknown[]> = {};
 			for (const [id, [installPath, version]] of Object.entries(entries)) {

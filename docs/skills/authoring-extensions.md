@@ -78,7 +78,7 @@ export default function myExtension(pi: ExtensionAPI) {
 omp loads extension modules from these sources:
 
 1. Native `.omp` locations discovered through the capability system:
-   - project/ancestor `.omp/extensions/` directories within the discovery boundary
+   - `<cwd>/.omp/extensions/` (the launch directory only; ancestor `.omp/extensions/` directories are not scanned, so launch from that directory or pass a parent module explicitly with `--extension`)
    - `~/.omp/agent/extensions/`
    - legacy extension paths listed in `.omp/settings.json#extensions` or `~/.omp/agent/settings.json#extensions`
 2. Discovered JavaScript/TypeScript hook factories (`hooks/pre/` and `hooks/post/`), bound through the extension runner.

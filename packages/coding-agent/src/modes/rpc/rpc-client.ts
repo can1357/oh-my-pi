@@ -855,6 +855,15 @@ export class RpcClient {
 	}
 
 	/**
+	 * Clear the conversation in place (the TUI's `/clear`), keeping the session id and transcript file.
+	 * Rejects with `session_busy` while a response streams or a foreground bash/eval runs.
+	 */
+	async clearContext(): Promise<{ droppedCount: number }> {
+		const response = await this.#send({ type: "clear_context" });
+		return this.#getData(response);
+	}
+
+	/**
 	 * Get current session state.
 	 */
 	async getState(): Promise<RpcSessionState> {
@@ -1443,8 +1452,9 @@ export class RpcClient {
 	}
 
 	/**
-	 * Remove one stored credential. Rejects when it is no longer stored.
-	 * `remainingSource` names what still authenticates the provider (another stored credential, env var, config).
+	 * Remove one stored credential, revoking it at the provider when one supports it. Rejects when it is no
+	 * longer stored. `remainingSource` names what still authenticates the provider (another stored credential,
+	 * env var, config).
 	 */
 	async logout(providerId: string, credentialId: number): Promise<{ remainingSource?: string }> {
 		const response = await this.#send({ type: "logout", providerId, credentialId });

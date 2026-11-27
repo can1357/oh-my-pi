@@ -7,9 +7,12 @@ export interface ClaudePaths {
 	configFile: string;
 }
 
-/** Resolves Claude Code's user paths, honoring `CLAUDE_CONFIG_DIR`. */
-export function resolveClaudePaths(home: string = os.homedir()): ClaudePaths {
-	const override = process.env.CLAUDE_CONFIG_DIR?.trim();
+/** Resolves Claude Code's user paths, honoring `CLAUDE_CONFIG_DIR` in `env`. */
+export function resolveClaudePaths(
+	home: string = os.homedir(),
+	env: Readonly<Record<string, string | undefined>> = process.env,
+): ClaudePaths {
+	const override = env.CLAUDE_CONFIG_DIR?.trim();
 	if (override) {
 		const configDir = path.resolve(override);
 		return { configDir, configFile: path.join(configDir, ".claude.json") };

@@ -49,9 +49,7 @@ CustomTool.execute(toolCallId, params, onUpdate, ctx, signal)
 
 1. Capability providers (`toolCapability`), including:
    - Native OMP config (`<agentDir>/tools`, default `~/.omp/agent/tools`; `.omp/tools`)
-   - Claude config (`<Claude config dir>/tools`, default `~/.claude/tools`; `.claude/tools`)
-   - Codex config (`~/.codex/tools`, `.codex/tools`)
-   - OMP package roots and Claude marketplace plugins
+   - OMP package roots and marketplace plugins
 2. Enabled installed plugin manifests (user `~/.omp/plugins` and the active project `.omp/plugins` registry via the plugin loader; project packages shadow same-named user packages)
 3. Explicit configured paths passed to the loader
 
@@ -59,7 +57,6 @@ CustomTool.execute(toolCallId, params, onUpdate, ctx, signal)
 
 ### Important behavior
 
-- Foreign user directories are opt-in via `enabledProviders` (for example `"claude"` or `"codex"`); project directories remain discoverable unless the whole provider is disabled. `CLAUDE_CONFIG_DIR` also opts in the Claude user source.
 - Native user discovery follows the active profile and the supplied `agentDir`.
 - Duplicate resolved paths are deduplicated by discovery; `loadCustomTools` itself loads the supplied path list.
 - Filesystem tool name conflicts are rejected against the supplied built-in names and already-loaded custom tools. Configured paths are appended, not name overrides.

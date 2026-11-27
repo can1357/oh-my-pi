@@ -31,7 +31,7 @@ export class HelpProtocolHandler implements ProtocolHandler {
 		const session = context?.session;
 		if (!session) throw new ToolError("help:// requires a tool session.");
 		const target = parseHelpUrl(url.href);
-		if (!target) throw new ToolError(`Invalid help:// URL: ${url.href}. Use help://<tool>/<topic>.`);
+		if (!target) throw new ToolError(`Invalid help:// URL: ${url.href}. Use help://<tool-name>/<topic>.`);
 		const { tool, topic } = target;
 		if (!tool) throw new ToolError("help:// needs a tool and topic: use help://<tool>/<topic>.");
 		const content = topic === null ? this.#listTopics(session, tool) : this.#topic(session, tool, topic);

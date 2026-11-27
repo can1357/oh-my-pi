@@ -6,6 +6,7 @@ import { resolveExplicitModelRole } from "../config/model-resolver";
 import { assistantTurnProducedOutput, usageContextTokens } from "../session/messages";
 import { modelRoleOf } from "../session/session-entries";
 import { readSessionHeaderId, visitEntriesFromFileStream } from "../session/session-loader";
+import { type AiuTotals, addCallAiu, callAiu } from "../session/aiu-billing";
 import { loadBundledAgents } from "../task/agents";
 import { isReadOnlyAgent } from "../task/read-only-policy";
 import { persistedVibeChildIds } from "../vibe/lifecycle";
@@ -171,7 +172,8 @@ async function readPersistedAgentHistory(
 	let selfSelectedLeafId: string | undefined;
 	let leafTimestamp: number | undefined;
 	let directCost = 0;
-	// Direct cost mirrors lifetime SessionManager usage; legacy metrics below stay leaf-scoped.
+	const directAiu: AiuTotals = { nano: 0, unknownCalls: 0 };
+	// Direct cost and credits mirror lifetime SessionManager usage; legacy metrics below stay leaf-scoped.
 	try {
 		await visitEntriesFromFileStream(
 			transcript.sessionFile,
@@ -199,6 +201,7 @@ async function readPersistedAgentHistory(
 					const usage = recordOf(record.usage);
 					const cost = recordOf(usage?.cost);
 					directCost += finiteNumber(cost?.total);
+					addCallAiu(directAiu, callAiu(record));
 					return;
 				}
 				if (record.type === "model_change" && typeof record.model === "string") {
@@ -215,6 +218,7 @@ async function readPersistedAgentHistory(
 					const assistant = assistantMetrics(message);
 					assistantById.set(id, assistant);
 					directCost += assistant.cost;
+					addCallAiu(directAiu, callAiu(message));
 				}
 			},
 			// Advisor transcripts are the one file that can grow pathologically large
@@ -303,6 +307,7 @@ async function readPersistedAgentHistory(
 	if (contextTokens !== undefined) metrics.contextTokens = contextTokens;
 	return {
 		directCost,
+		directAiu,
 		...(metrics.requests > 0 ? { metrics } : {}),
 		...(resolvedModel ? { resolvedModel, resolvedModelIsFallback } : {}),
 		...(modelRole ? { modelRole } : {}),

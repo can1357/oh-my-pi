@@ -5,6 +5,13 @@ provider "github-copilot" {
 	env "COPILOT_GITHUB_TOKEN"
 	// The authenticated `/models` roster is the account's own list: a bundled model it omits is not offered.
 	dynamic-models-authoritative #true
+	// Terminal usage events carry a separate server-reported AI-credit charge.
+	// Observed on `/v1/messages` (`message_delta`) and `/responses`
+	// (`response.completed`); `/chat/completions` was never captured on this
+	// account, so it stays unmarked and is neither parsed nor counted as missing.
+	on-api "anthropic-messages" "openai-responses" {
+		reports-aiu #true
+	}
 
 	// Replaces the strict-mode provider whitelist entry.
 	supports-strict-mode #true
@@ -111,10 +118,20 @@ provider "github-copilot" {
 		}
 		max-context-window 1050000
 	}
+	// Live billing frames on a 300K-token prompt priced these long tiers at
+	// exactly 2x input, cache read and cache write, while
+	// `token_prices.long_context` reports neither cache leg. The list is
+	// evidence-limited to those frames: other `-1m` siblings (gpt-5.6-sol-1m,
+	// gpt-5.6-terra-1m, gpt-6-sol-1m, gpt-6.1-sol-1m, gpt-6-astra-1m,
+	// gpt-6.2-astra-1m) are unverified and keep their cache legs unscaled
+	// until a billing frame prices them.
+	models "gpt-6-luna-1m" "gpt-5.6-luna-1m" "gpt-6.1-terra-1m" "gpt-6.2-sol-1m" {
+		tier-cache-follows-input #true
+	}
 	// Claude Haiku 5.5: `billing.token_prices` reports its input/output rates
 	// but no cache legs, so discovered rows priced cache reads and writes at
 	// $0. Copilot's rate card bills $0.01 read / $0.125 write up to 100K and
-	// $0.05 / $0.625 on the long tier (the `-1m` sibling).
+	// 5x that on the long tier (the `-1m` sibling), the tier's input multiple.
 	// https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing
 	// Copilot serves that tier as the `-1m` row (promotion target of the base
 	// row), so both rows opt out of the class-wide 100K 5x band: the base row
@@ -129,10 +146,7 @@ provider "github-copilot" {
 		}
 	}
 	models "claude-haiku-5.5-1m" {
-		cost-patch {
-			cache-read 0.05
-			cache-write 0.625
-		}
+		tier-cache-follows-input #true
 		long-context-cost {
 		}
 	}

@@ -1083,7 +1083,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		]);
 
 		const transient429Bodies = [
-			"Cloud Code Assist API error (429): Too many requests",
+			"Google API error (429): Too many requests",
 			"Please retry in 5s",
 			"Service overloaded 529",
 		];

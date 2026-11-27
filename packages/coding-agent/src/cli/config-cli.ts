@@ -30,6 +30,8 @@ export interface ConfigCommandArgs {
 		json?: boolean;
 		/** `list` shows only the keys this layer sets, with the values as written. */
 		scope?: ConfigScope;
+		/** Extra `config.yml` overlays layered for `get`/`list`; `set`/`reset` always write global config. */
+		config?: string[];
 	};
 }
 // =============================================================================
@@ -119,7 +121,8 @@ export async function runConfigCommand(cmd: ConfigCommandArgs): Promise<void> {
 		console.error(chalk.red("--scope applies to `config list` only"));
 		process.exit(1);
 	}
-	await Settings.init();
+	const readsEffective = cmd.action === "get" || cmd.action === "list";
+	await Settings.init(readsEffective ? { configFiles: cmd.flags.config } : undefined);
 
 	switch (cmd.action) {
 		case "list":
@@ -216,7 +219,7 @@ async function handleList(flags: { json?: boolean }): Promise<void> {
 
 /**
  * The keys the `scope` layer sets, with the values as written: path-scoped arrays
- * (`enabledModels`, `enabledProviders`, `disabledProviders`) keep their `{ path, … }` entries
+ * (`enabledModels`, `disabledProviders`) keep their `{ path, … }` entries
  * unresolved, so a host can edit the layer's own value without dropping them. Defaults, other
  * layers and the environment are not consulted. Credentials are redacted as in `list`.
  */

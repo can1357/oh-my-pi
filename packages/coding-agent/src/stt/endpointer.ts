@@ -1,67 +1,83 @@
 /**
- * Energy-based speech endpointer for live transcription.
+ * Speech endpointer for live transcription with utterance models.
  *
- * The on-device ASR models we ship are non-streaming: the sherpa-onnx Parakeet
- * recognizer and the transformers.js Whisper pipelines both decode a complete
- * waveform in one shot. To transcribe *while the user is still speaking*, this
- * splits the continuous 16 kHz mono float stream into speech segments at natural
- * pauses — each segment is decoded and committed as it finalizes, and the
- * in-progress segment is re-decoded periodically for a volatile live preview.
- * Previews stop once decoding them cannot keep up with their cadence.
+ * The sherpa-onnx transducers (Fluid Speech Pro, Parakeet) and the
+ * transformers.js Whisper pipelines decode a complete waveform in one shot. To
+ * transcribe *while the user is still speaking*, this cuts the continuous
+ * 16 kHz mono stream into utterances at natural pauses: each utterance is
+ * decoded and committed once it ends, and the in-progress utterance is
+ * re-decoded periodically for a volatile live preview. Previews stop once
+ * decoding them cannot keep up with their cadence.
  *
- * Segmentation is pure short-time-energy VAD with an adaptive noise floor, so it
- * needs no extra model and is engine-agnostic (it runs the same way whether the
- * downstream model is sherpa or transformers). It is deliberately simple and
- * fully deterministic so it can be unit-tested with synthetic signals.
+ * Pause detection is delegated to a neural voice activity detector (Silero VAD
+ * through sherpa-onnx, see {@link SpeechDetector}). A loudness gate cannot do
+ * this job: it tracks energy rather than speech, so a quiet microphone or music
+ * in the room fragmented utterances into sub-second clips that decoded as noise.
+ * The endpointer keeps the raw audio itself and pads each detected utterance
+ * with pre-roll and tail so the first and last phonemes survive.
+ *
+ * Silero does not count singing as speech. A recording in which the detector
+ * never heard speech is therefore not discarded: on {@link StreamEndpointer.flush}
+ * it is committed whole, in fixed windows, skipping windows that are silent.
  */
 
-/** Tunable thresholds for {@link StreamEndpointer}. All durations in ms. */
+/** A finished utterance reported by a {@link SpeechDetector}. */
+export interface DetectedSpeech {
+	/** Absolute index of the first sample, counted from the detector's first input. */
+	start: number;
+	samples: Float32Array;
+}
+
+/** Voice activity detector the endpointer drives (sherpa-onnx `Vad`). */
+export interface SpeechDetector {
+	acceptWaveform(samples: Float32Array): void;
+	isEmpty(): boolean;
+	/** Whether the detector is currently inside an utterance. */
+	isDetected(): boolean;
+	front(enableExternalBuffer?: boolean): DetectedSpeech;
+	pop(): void;
+	/** Finish the utterance in progress, if any, so it becomes poppable. */
+	flush(): void;
+}
+
+/** Tunable padding and preview cadence for {@link StreamEndpointer}. All durations in ms. */
 export interface EndpointerConfig {
-	/** Input sample rate (the recorder always delivers 16 kHz mono). */
 	sampleRate: number;
-	/** Short-time analysis frame size. */
-	frameMs: number;
-	/** Trailing silence inside a segment that finalizes (commits) it. */
-	endSilenceMs: number;
-	/** Shortest speech run that is committed; shorter runs are discarded as noise. */
-	minSpeechMs: number;
-	/** Hard cap on segment length so long pause-free speech still commits periodically. */
-	maxSegmentMs: number;
-	/** Audio retained before onset so the first phoneme of a segment is never clipped. */
+	/** Audio kept before a detected onset so the first phoneme is never clipped. */
 	preRollMs: number;
-	/** Cadence of volatile partial emissions for the in-progress segment. */
+	/** Audio kept after a detected offset so the final word is never cut. */
+	tailMs: number;
+	/** How far before the moment the detector reports speech the live preview starts. */
+	onsetLookbackMs: number;
+	/** Cadence of volatile partial emissions for the in-progress utterance. */
 	partialIntervalMs: number;
-	/** Speech threshold is `max(minThreshold, noiseFloor * energyRatio)`. */
-	energyRatio: number;
-	/** EMA weight tracking the ambient noise floor on non-speech frames. */
-	floorAttack: number;
-	/** Absolute RMS floor so a near-silent room never trips speech detection. */
-	minThreshold: number;
+	/** Window length for committing a recording in which no speech was detected. */
+	fallbackWindowMs: number;
+	/** RMS below which a fallback window is silence and is not committed (decoding silence invites hallucinations). */
+	fallbackMinRms: number;
 }
 
 export const DEFAULT_ENDPOINTER_CONFIG: EndpointerConfig = {
 	sampleRate: 16_000,
-	frameMs: 30,
-	endSilenceMs: 600,
-	minSpeechMs: 200,
-	maxSegmentMs: 12_000,
 	preRollMs: 240,
+	tailMs: 120,
+	onsetLookbackMs: 500,
 	partialIntervalMs: 450,
-	energyRatio: 2.5,
-	floorAttack: 0.05,
-	minThreshold: 0.008,
+	fallbackWindowMs: 20_000,
+	// About −50 dBFS: below a quiet room heard through a desk microphone.
+	fallbackMinRms: 0.003,
 };
 
 /**
  * Emitted by {@link StreamEndpointer.push} / {@link StreamEndpointer.flush}.
- * `partial` is the volatile in-progress segment (decode and show as preview,
- * never commit); `segment` is a finalized run (decode and commit once).
+ * `partial` is the volatile in-progress utterance (decode and show as preview,
+ * never commit); `segment` is a finished utterance (decode and commit once).
  */
 export type EndpointerEvent = { kind: "partial"; audio: Float32Array } | { kind: "segment"; audio: Float32Array };
 
-/** Append-growable Float32 buffer (amortized O(1) push, no per-frame realloc). */
+/** Append-growable Float32 buffer that can release its oldest samples. */
 class FloatBuffer {
-	#data = new Float32Array(0);
+	#data = new Float32Array(1 << 14);
 	#len = 0;
 
 	get length(): number {
@@ -71,106 +87,63 @@ class FloatBuffer {
 	push(samples: Float32Array): void {
 		const needed = this.#len + samples.length;
 		if (needed > this.#data.length) {
-			const next = new Float32Array(Math.max(this.#data.length * 2, needed, 1 << 14));
+			const next = new Float32Array(Math.max(this.#data.length * 2, needed));
 			next.set(this.#data.subarray(0, this.#len));
 			this.#data = next;
 		}
 		this.#data.set(samples, this.#len);
-		this.#len += samples.length;
+		this.#len = needed;
 	}
 
-	/** Copy `[0, end)` into a fresh array the caller can retain. */
-	take(end = this.#len): Float32Array {
-		return this.#data.slice(0, Math.max(0, Math.min(end, this.#len)));
+	/** Copy `[start, end)` into a fresh array the caller can retain. */
+	slice(start: number, end: number): Float32Array {
+		return this.#data.slice(start, end);
 	}
 
-	reset(): void {
-		this.#len = 0;
+	/** Drop the oldest `count` samples. */
+	discard(count: number): void {
+		this.#data.copyWithin(0, count, this.#len);
+		this.#len -= count;
 	}
-}
-
-/** Fixed-capacity ring keeping the most recent `capacity` samples. */
-class FloatRing {
-	readonly #data: Float32Array;
-	#start = 0;
-	#len = 0;
-
-	constructor(capacity: number) {
-		this.#data = new Float32Array(capacity);
-	}
-
-	push(samples: Float32Array): void {
-		const cap = this.#data.length;
-		if (cap === 0) return;
-		if (samples.length >= cap) {
-			this.#data.set(samples.subarray(samples.length - cap));
-			this.#start = 0;
-			this.#len = cap;
-			return;
-		}
-		const pos = (this.#start + this.#len) % cap;
-		const first = Math.min(samples.length, cap - pos);
-		this.#data.set(samples.subarray(0, first), pos);
-		if (first < samples.length) this.#data.set(samples.subarray(first), 0);
-		const total = this.#len + samples.length;
-		if (total > cap) {
-			this.#start = (this.#start + total - cap) % cap;
-			this.#len = cap;
-		} else {
-			this.#len = total;
-		}
-	}
-
-	/** Append the retained samples, oldest first, to `target`. */
-	copyInto(target: FloatBuffer): void {
-		const cap = this.#data.length;
-		const end = this.#start + this.#len;
-		target.push(this.#data.subarray(this.#start, Math.min(end, cap)));
-		if (end > cap) target.push(this.#data.subarray(0, end - cap));
-	}
-
-	reset(): void {
-		this.#start = 0;
-		this.#len = 0;
-	}
-}
-
-function rms(frame: Float32Array): number {
-	let sum = 0;
-	for (let i = 0; i < frame.length; i += 1) sum += frame[i]! * frame[i]!;
-	return Math.sqrt(sum / Math.max(1, frame.length));
 }
 
 export class StreamEndpointer {
 	readonly #cfg: EndpointerConfig;
-	readonly #frameSamples: number;
-	readonly #preRollSamples: number;
+	readonly #detector: SpeechDetector;
+	readonly #preRoll: number;
+	readonly #tail: number;
+	readonly #lookback: number;
+	readonly #partialInterval: number;
+	readonly #fallbackWindow: number;
 
-	/** Partial frame carried to the next push; always shorter than one frame. */
-	readonly #leftover: Float32Array;
-	#leftoverLen = 0;
-	#inSpeech = false;
-	#noiseFloor: number;
-	#silenceMs = 0;
-	#segmentMs = 0;
-	#msSincePartial = 0;
-	#partialDirty = false;
+	/** Retained audio; `#base` is the absolute index of its first sample. */
+	readonly #audio = new FloatBuffer();
+	#base = 0;
+	/** Absolute end of the last committed utterance: later ones never re-include it. */
+	#committedEnd = 0;
+	/** Absolute start of the live preview, or -1 while the detector hears no speech. */
+	#onset = -1;
+	#samplesSincePartial = 0;
 	#slowPartials = 0;
+	/** Whether the detector committed any utterance; until then the whole recording is retained for the fallback. */
+	#heardSpeech = false;
 
-	readonly #segment = new FloatBuffer();
-	/** Ring of the most recent pre-onset samples, used as segment pre-roll. */
-	readonly #preRoll: FloatRing;
-
-	constructor(config: Partial<EndpointerConfig> = {}) {
+	constructor(detector: SpeechDetector, config: Partial<EndpointerConfig> = {}) {
 		this.#cfg = { ...DEFAULT_ENDPOINTER_CONFIG, ...config };
-		this.#frameSamples = Math.max(1, Math.round((this.#cfg.sampleRate * this.#cfg.frameMs) / 1000));
-		this.#preRollSamples = Math.max(0, Math.round((this.#cfg.sampleRate * this.#cfg.preRollMs) / 1000));
-		this.#leftover = new Float32Array(this.#frameSamples);
-		this.#preRoll = new FloatRing(this.#preRollSamples);
-		this.#noiseFloor = this.#cfg.minThreshold;
+		this.#detector = detector;
+		const samples = (ms: number) => Math.round((this.#cfg.sampleRate * ms) / 1000);
+		this.#preRoll = samples(this.#cfg.preRollMs);
+		this.#tail = samples(this.#cfg.tailMs);
+		this.#lookback = samples(this.#cfg.onsetLookbackMs);
+		this.#partialInterval = samples(this.#cfg.partialIntervalMs);
+		this.#fallbackWindow = samples(this.#cfg.fallbackWindowMs);
 	}
 
-	/** Whether previews are still produced: off after two consecutive decodes slower than their cadence (the first may be a cold model). */
+	/**
+	 * Whether previews are produced: off after two consecutive decodes slower than
+	 * their cadence (the first may be a cold model), back on when the utterance
+	 * commits, since the next preview starts short again.
+	 */
 	get partialsEnabled(): boolean {
 		return this.#slowPartials < 2;
 	}
@@ -183,137 +156,78 @@ export class StreamEndpointer {
 	/** Feed newly-captured samples; returns ordered partial/segment events. */
 	push(samples: Float32Array): EndpointerEvent[] {
 		const events: EndpointerEvent[] = [];
-		const frame = this.#frameSamples;
-		let offset = 0;
-		// Complete the carried-over partial frame first, then consume whole frames in place.
-		if (this.#leftoverLen > 0) {
-			const fill = Math.min(frame - this.#leftoverLen, samples.length);
-			this.#leftover.set(samples.subarray(0, fill), this.#leftoverLen);
-			this.#leftoverLen += fill;
-			offset = fill;
-			if (this.#leftoverLen < frame) return events;
-			this.#processFrame(this.#leftover, events);
-			this.#leftoverLen = 0;
+		this.#audio.push(samples);
+		this.#detector.acceptWaveform(samples);
+		this.#drain(events);
+		const end = this.#base + this.#audio.length;
+		if (!this.#detector.isDetected()) {
+			// The detector reports an onset at most the lookback window late, so older
+			// silence is dead once speech has been heard (before that, the fallback needs it).
+			this.#onset = -1;
+			if (this.#heardSpeech) this.#release(end - this.#lookback - this.#preRoll);
+			return events;
 		}
-		for (; offset + frame <= samples.length; offset += frame) {
-			this.#processFrame(samples.subarray(offset, offset + frame), events);
+		if (this.#onset < 0) {
+			this.#onset = Math.max(this.#committedEnd, end - this.#lookback);
+			this.#samplesSincePartial = 0;
 		}
-		if (offset < samples.length) {
-			this.#leftover.set(samples.subarray(offset));
-			this.#leftoverLen = samples.length - offset;
+		this.#samplesSincePartial += samples.length;
+		if (this.partialsEnabled && this.#samplesSincePartial >= this.#partialInterval) {
+			events.push({ kind: "partial", audio: this.#slice(this.#onset, end) });
+			this.#samplesSincePartial = 0;
 		}
 		return events;
 	}
 
-	/** End the stream; returns a trailing committed segment if one is pending. */
+	/**
+	 * End the stream; returns the trailing utterance if one is in progress, or the
+	 * whole recording in non-silent windows when no speech was ever detected.
+	 */
 	flush(): EndpointerEvent[] {
 		const events: EndpointerEvent[] = [];
-		if (this.#inSpeech && this.#leftoverLen > 0) {
-			this.#segment.push(this.#leftover.subarray(0, this.#leftoverLen));
-			this.#segmentMs += (this.#leftoverLen / this.#cfg.sampleRate) * 1000;
+		this.#detector.flush();
+		this.#drain(events);
+		this.#onset = -1;
+		if (this.#heardSpeech) return events;
+		const end = this.#base + this.#audio.length;
+		for (let from = this.#base; from < end; from += this.#fallbackWindow) {
+			const audio = this.#slice(from, Math.min(end, from + this.#fallbackWindow));
+			let energy = 0;
+			for (const sample of audio) energy += sample * sample;
+			if (Math.sqrt(energy / audio.length) >= this.#cfg.fallbackMinRms) events.push({ kind: "segment", audio });
 		}
-		this.#leftoverLen = 0;
-		if (this.#inSpeech) {
-			const speechMs = this.#segmentMs - this.#silenceMs;
-			if (speechMs >= this.#cfg.minSpeechMs) {
-				events.push({ kind: "segment", audio: this.#segment.take(this.#endpointKeep()) });
-			}
-		}
-		this.#reset();
+		this.#committedEnd = end;
+		this.#release(end);
 		return events;
 	}
 
-	#processFrame(frame: Float32Array, events: EndpointerEvent[]): void {
-		const energy = rms(frame);
-		const threshold = Math.max(this.#cfg.minThreshold, this.#noiseFloor * this.#cfg.energyRatio);
-		const voiced = energy > threshold;
-		// Track ambient noise on non-speech frames only, so loud speech never
-		// inflates the floor (which would make the tail of an utterance read as
-		// silence and clip the segment short).
-		if (!voiced) {
-			this.#noiseFloor = this.#noiseFloor * (1 - this.#cfg.floorAttack) + energy * this.#cfg.floorAttack;
+	/** Commit every utterance the detector finished, padded and clipped to unreleased audio. */
+	#drain(events: EndpointerEvent[]): void {
+		const end = this.#base + this.#audio.length;
+		while (!this.#detector.isEmpty()) {
+			const speech = this.#detector.front(false);
+			this.#detector.pop();
+			const from = Math.max(this.#committedEnd, this.#base, speech.start - this.#preRoll);
+			const to = Math.min(end, speech.start + speech.samples.length + this.#tail);
+			if (to <= from) continue;
+			events.push({ kind: "segment", audio: this.#slice(from, to) });
+			this.#committedEnd = to;
+			this.#onset = -1;
+			this.#slowPartials = 0;
+			this.#heardSpeech = true;
 		}
-
-		if (!this.#inSpeech) {
-			this.#preRoll.push(frame);
-			if (voiced) this.#beginSegment(frame);
-			return;
-		}
-
-		this.#segment.push(frame);
-		this.#segmentMs += this.#cfg.frameMs;
-		this.#msSincePartial += this.#cfg.frameMs;
-		if (voiced) {
-			this.#silenceMs = 0;
-			this.#partialDirty = true;
-		} else {
-			this.#silenceMs += this.#cfg.frameMs;
-		}
-
-		if (this.#silenceMs >= this.#cfg.endSilenceMs) {
-			this.#finalizeSegment(events);
-			return;
-		}
-		if (this.#segmentMs >= this.#cfg.maxSegmentMs) {
-			// Pause-free long speech: commit what we have and continue a fresh
-			// segment so output keeps flowing.
-			events.push({ kind: "segment", audio: this.#segment.take() });
-			this.#segment.reset();
-			this.#segmentMs = 0;
-			this.#silenceMs = 0;
-			this.#msSincePartial = 0;
-			this.#partialDirty = false;
-			return;
-		}
-		if (this.partialsEnabled && this.#partialDirty && this.#msSincePartial >= this.#cfg.partialIntervalMs) {
-			events.push({ kind: "partial", audio: this.#segment.take() });
-			this.#msSincePartial = 0;
-			this.#partialDirty = false;
-		}
+		this.#release(this.#committedEnd);
 	}
 
-	#beginSegment(onsetFrame: Float32Array): void {
-		this.#inSpeech = true;
-		this.#segment.reset();
-		this.#preRoll.copyInto(this.#segment);
-		this.#segment.push(onsetFrame);
-		this.#preRoll.reset();
-		this.#silenceMs = 0;
-		this.#segmentMs = (this.#segment.length / this.#cfg.sampleRate) * 1000;
-		this.#msSincePartial = 0;
-		this.#partialDirty = true;
+	/** Drop retained audio before absolute index `upTo`, and always before the commit point. */
+	#release(upTo: number): void {
+		const count = Math.max(this.#committedEnd, upTo) - this.#base;
+		if (count <= 0) return;
+		this.#audio.discard(count);
+		this.#base += count;
 	}
 
-	#finalizeSegment(events: EndpointerEvent[]): void {
-		const speechMs = this.#segmentMs - this.#silenceMs;
-		if (speechMs >= this.#cfg.minSpeechMs) {
-			events.push({ kind: "segment", audio: this.#segment.take(this.#endpointKeep()) });
-		}
-		this.#inSpeech = false;
-		this.#segment.reset();
-		this.#silenceMs = 0;
-		this.#segmentMs = 0;
-		this.#msSincePartial = 0;
-		this.#partialDirty = false;
-	}
-
-	/** Samples to keep when committing on silence: drop most of the trailing
-	 *  silence but leave a short tail so the final word is not cut. */
-	#endpointKeep(): number {
-		const tailMs = Math.min(this.#silenceMs, 120);
-		const dropMs = Math.max(0, this.#silenceMs - tailMs);
-		const drop = Math.round((this.#cfg.sampleRate * dropMs) / 1000);
-		return Math.max(0, this.#segment.length - drop);
-	}
-
-	#reset(): void {
-		this.#inSpeech = false;
-		this.#segment.reset();
-		this.#preRoll.reset();
-		this.#silenceMs = 0;
-		this.#segmentMs = 0;
-		this.#msSincePartial = 0;
-		this.#partialDirty = false;
-		this.#noiseFloor = this.#cfg.minThreshold;
+	#slice(from: number, to: number): Float32Array {
+		return this.#audio.slice(from - this.#base, to - this.#base);
 	}
 }

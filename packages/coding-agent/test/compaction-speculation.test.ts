@@ -8,7 +8,8 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { type CompactionMethod, resolveSpeculationMethod } from "@oh-my-pi/pi-coding-agent/session/compaction-methods";
+import type { CompactionMethod } from "@oh-my-pi/pi-coding-agent/session/compaction-method-ids";
+import { resolveSpeculationMethod } from "@oh-my-pi/pi-coding-agent/session/compaction-methods";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionMaintenance, type SessionMaintenanceHost } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -19,6 +20,7 @@ import * as snapcompactModule from "@oh-my-pi/snapcompact";
 import {
 	cfgCompaction,
 	cfgCompactionAsyncEnabled,
+	cfgCompactionKeepRecentTokens,
 	cfgCompactionMethodOrder,
 	cfgCompactionRemoteEndpoint,
 } from "@oh-my-pi/pi-coding-agent/session/context-settings";
@@ -1226,30 +1228,60 @@ describe("async speculative compaction", () => {
 		expect(entry?.type === "compaction" ? entry.summary : undefined).toContain("handoff plan 2");
 	});
 
-	it("retains and claims an armed handoff summary when post-snapshot growth fits comfortably within recovery band", async () => {
+	it("reuses an armed handoff across a lead band wider than the kept tail budget", async () => {
+		const contextWindow = 392_000;
+		const threshold = 196_000;
+		model = { ...model, contextWindow };
 		let handoffInvocation = 0;
 		const generateHandoffDocument = vi.fn(async () => ({ text: `handoff plan ${++handoffInvocation}` }));
 		maintenance = createMaintenance({
 			methodOrder: ["handoff"],
 			generateHandoffDocument,
 		});
+		cfgCompactionKeepRecentTokens.override(maintenanceSettings, 20_000);
 
-		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		maintenance.maybeStartSpeculativeCompaction(172_388, contextWindow);
 		await waitForState("armed");
 		expect(generateHandoffDocument).toHaveBeenCalledTimes(1);
 
-		// A modest assistant turn is committed after the snapshot leaf
-		sessionManager.appendMessage(assistantMessage("brief acknowledgment", model));
+		const addedUser = userMessage("post-snapshot request " + "growth ".repeat(21_000));
+		sessionManager.appendMessage(addedUser);
+		sessionManager.appendMessage(assistantMessage("post-snapshot reply", model));
+		agent.replaceMessages(sessionManager.buildSessionContext().messages);
+		maintenance.maybeStartSpeculativeCompaction(193_613, contextWindow);
+		await maintenance.speculationCompletion();
 
-		await maintenance.runAutoCompaction("threshold", false, { triggerContextTokens: THRESHOLD });
+		await maintenance.runAutoCompaction("threshold", false, { triggerContextTokens: threshold });
 
 		// The armed handoff summary is claimed without paying for another LLM generation
 		expect(generateHandoffDocument).toHaveBeenCalledTimes(1);
 		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
 		expect(entry?.type === "compaction" ? entry.summary : undefined).toContain("handoff plan 1");
+		expect(agent.state.messages).toContainEqual(addedUser);
 		expect(entry?.type === "compaction" ? entry.tokensAfter : undefined).toBe(
 			agent.tokenizer.countMessages(convertToLlm(agent.state.messages), { excludeEncryptedReasoning: true }),
 		);
+	});
+
+	it("re-summarizes a rewritten branch inside the lead band before reaching threshold", async () => {
+		let handoffInvocation = 0;
+		const generateHandoffDocument = vi.fn(async () => ({ text: `handoff plan ${++handoffInvocation}` }));
+		maintenance = createMaintenance({ methodOrder: ["handoff"], generateHandoffDocument });
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("armed");
+
+		const branch = sessionManager.getBranch();
+		sessionManager.branch(branch[branch.length - 2].id);
+		sessionManager.appendMessage(assistantMessage("rewritten reply", model));
+		agent.replaceMessages(sessionManager.buildSessionContext().messages);
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await maintenance.speculationCompletion();
+		expect(generateHandoffDocument).toHaveBeenCalledTimes(2);
+
+		await maintenance.runAutoCompaction("threshold", false, { triggerContextTokens: THRESHOLD });
+		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
+		expect(entry?.type === "compaction" ? entry.summary : undefined).toContain("handoff plan 2");
+		expect(generateHandoffDocument).toHaveBeenCalledTimes(2);
 	});
 });
 

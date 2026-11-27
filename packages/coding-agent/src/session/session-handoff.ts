@@ -16,7 +16,7 @@ import {
 	SummaryNumberCheck,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, Message, Model, ServiceTier, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
-import { logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { logger, ptree, Snowflake } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import { obfuscateProviderContext } from "../secrets/message-transform";
@@ -24,7 +24,11 @@ import type { SecretObfuscator } from "../secrets/obfuscator";
 import { journalCompletion } from "./model-usage-journal";
 import type { SessionManager } from "./session-manager";
 
-import { cfgCompactionHandoffSaveToDisk, cfgCompactionNumberCheck } from "./context-settings";
+import {
+	cfgCompactionHandoffSaveToDisk,
+	cfgCompactionHandoffTimeoutSeconds,
+	cfgCompactionNumberCheck,
+} from "./context-settings";
 
 function createHandoffFileName(date = new Date()): string {
 	const fileTimestamp = date.toISOString().replace(/[:.]/g, "-");
@@ -33,6 +37,13 @@ function createHandoffFileName(date = new Date()): string {
 
 function throwIfHandoffAborted(signal: AbortSignal): void {
 	if (signal.aborted) throw new CompactionCancelledError(undefined, { cause: signal.reason });
+}
+
+/** A fired deadline is a failure, not a cancel, so automatic maintenance moves on to its next method. */
+function throwIfHandoffTimedOut(deadline: AbortSignal | undefined, timeoutSeconds: number): void {
+	if (deadline?.aborted) {
+		throw new Error(`Handoff timed out after ${timeoutSeconds}s (compaction.handoffTimeoutSeconds)`);
+	}
 }
 
 /** Request snapshot and cancellation owned by the compaction pass. */
@@ -90,10 +101,15 @@ export class SessionHandoff {
 	 */
 	async generateDocument(
 		customInstructions: string | undefined,
-		{ model, signal, messages, autoTriggered, onAttempt }: HandoffGenerationOptions,
+		{ model, signal: cancelSignal, messages, autoTriggered, onAttempt }: HandoffGenerationOptions,
 	): Promise<HandoffDocument | undefined> {
+		const timeoutSeconds = cfgCompactionHandoffTimeoutSeconds.get(this.#host.settings);
+		const deadline = timeoutSeconds > 0 ? AbortSignal.timeout(timeoutSeconds * 1000) : undefined;
+		// Every request step observes the deadline; cancellation checks keep reading
+		// `cancelSignal` so only the caller's abort reports as a cancel.
+		const signal = ptree.combineSignals(cancelSignal, deadline) ?? cancelSignal;
 		try {
-			throwIfHandoffAborted(signal);
+			throwIfHandoffAborted(cancelSignal);
 
 			// Build the handoff request through the SAME pipeline a live turn uses
 			// (`runEphemeralTurn` / `/btw` share it) so the oneshot reads the
@@ -148,7 +164,7 @@ export class SessionHandoff {
 				},
 				model.provider,
 			);
-			throwIfHandoffAborted(signal);
+			throwIfHandoffAborted(cancelSignal);
 			// Checked in the provider's (obfuscated) text space: the document and its
 			// input are compared before deobfuscation.
 			const numberCheck = cfgCompactionNumberCheck.get(this.#host.settings) ? new SummaryNumberCheck() : undefined;
@@ -176,7 +192,9 @@ export class SessionHandoff {
 			);
 			const handoffText = this.#host.deobfuscateFromProvider(rawHandoffText);
 
-			throwIfHandoffAborted(signal);
+			throwIfHandoffAborted(cancelSignal);
+			// An aborted stream returns its partial text; never validate or commit it.
+			throwIfHandoffTimedOut(deadline, timeoutSeconds);
 			const failure = !handoffText?.trim()
 				? "no content"
 				: !/^## Goal[ \t]*\r?$/m.test(handoffText)
@@ -212,10 +230,11 @@ export class SessionHandoff {
 				}
 			}
 
-			throwIfHandoffAborted(signal);
+			throwIfHandoffAborted(cancelSignal);
 			return { text: handoffText, ...(numberCheck?.report ? { numberCheck: numberCheck.report } : {}) };
 		} catch (error) {
-			throwIfHandoffAborted(signal);
+			throwIfHandoffAborted(cancelSignal);
+			throwIfHandoffTimedOut(deadline, timeoutSeconds);
 			throw error;
 		}
 	}

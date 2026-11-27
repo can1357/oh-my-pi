@@ -193,6 +193,8 @@ Explicit compaction modes and focused instructions retain their existing behavio
   boundaries. Shared selectors work, for example
   `history://current/full:1-200` and `history://current/full:raw:1-200`.
   Queries, fragments, trailing slashes, and additional path components are rejected.
+  A model that refuses its own reasoning quoted back as text (Claude) gets the
+  view without assistant reasoning.
 - The full-history route is bound to the calling session's current branch. It
   never falls back to another registered agent or an on-disk session search.
   Existing `history://<id>` routes retain their concise transcript behavior.
@@ -370,6 +372,8 @@ Before dispatch, the handoff side request counts its prepared system prompt, too
 
 `/handoff [focus]` aliases `/compact handoff [focus]`. It prepares a handoff summary from a transcript snapshot without interrupting the live response or holding follow-ups. Once ready, it applies through the standard `CompactionEntry` commit at a tool-turn boundary or when idle. `firstKeptEntryId` stays anchored to the snapshot, so the current branch's recent history and all messages appended during generation survive verbatim. A reset, branch change that removes the snapshot, or newer compaction invalidates the result.
 
+Handoff output is capped at the summary budget (`MAX_SUMMARY_TOKENS`), so a server with no output limit of its own still ends a runaway document with `stopReason: "length"`, which fails the handoff. `compaction.handoffTimeoutSeconds` (default `0`, off) also bounds wall-clock time: when it expires the handoff fails rather than cancels, automatic maintenance tries the next configured method, and `/handoff` reports `Handoff timed out after Ns`. It is off by default because a slow local model can legitimately take many minutes to write a valid document.
+
 When `compaction.handoffSaveToDisk` is enabled, an **automatically triggered** handoff also writes `handoff-<ISO timestamp>.md` in the persisted session's artifact directory. Manual handoffs are not written by this setting, and non-persisted sessions have no artifact directory.
 
 ### Number check
@@ -490,7 +494,7 @@ Pre-compaction hook.
 
 Can:
 
-- cancel compaction (`{ cancel: true }`)
+- cancel compaction (`{ cancel: true }`): ends the whole attempt, skipping every remaining method in `methodOrder`; automatic attempts log the veto at debug level and report `aborted: true` on `auto_compaction_end`
 - provide full custom compaction payload (`{ compaction: CompactionResult }`)
 
 The hook's `customInstructions` carries only the public user focus. Internal summarizer guidance — currently the plan-mode "Approve and compact context" distillation prompt — travels a separate `internalGuidance` channel on `CompactOptions` that reaches only native summarization, never this hook or `session.compacting`; when both are set the summarizer uses `internalGuidance` while hooks still see the public `customInstructions` (issue #4359).
@@ -547,15 +551,17 @@ Defined in `packages/coding-agent/src/session/context-settings.ts`:
 - `compaction.methodOrder` = `["remote", "snapcompact", "handoff", "shake", "soft"]`. `remote` uses provider-native server compaction (OpenAI Responses compact, Anthropic compaction beta, including Bedrock Converse's Runtime side request) when available; unavailable or failed methods advance to the next preference.
 - `compaction.asyncEnabled` = `true`. Async (speculative) compaction: when context enters the pre-threshold band `[threshold − lead, threshold)` (lead = `clamp(threshold × 0.125, 8192, 32000)`), maintenance starts a background summarization for the first configured LLM-backed method (`remote`, `handoff`, or `soft`) off a branch snapshot, isolated from the live turn by a side session id. The armed result is committed instantly when the threshold is actually crossed, hiding summarization latency; post-snapshot turns are appended after the summary unchanged. Armed results are discarded when the branch prefix changes (new compaction, reset boundary, `/tree` navigation), when a provider-native replay payload is no longer readable by the active model, or when context grows past `keepRecentTokens` since compute (a fresh speculation replaces it). Speculation is skipped while an extension registers `session_before_compact`. The status line pulses the auto-compact icon while a speculation runs and holds it in accent when a result is armed.
 - `compaction.reserveTokens` is unset by default. The effective reserve is `max(floor(contextWindow × 0.15), configuredReserve ?? 16384)`. Budget checks use the proportional reserve when the unset default is impractical on a small window, or when the effective reserve reaches/exceeds the whole window. Explicit reserves otherwise retain the 15% floor.
+- `compaction.summaryMaxTokens` is unset by default, so a regular history summary may emit at most `min(floor(0.8 × reserve), 16384)` tokens. A positive value replaces that budget for regular summaries, clamped to the summarizer model's output limit (`maxTokens`); turn-prefix and provider-native (`remote`) summaries keep their defaults. Raise it when dense sessions stop compacting with an incomplete (length-capped) summary.
 - `compaction.keepRecentTokens` = `20000`. Preparation caps this budget so the compacted context lands in the recovery band (80% of the trigger): at most `0.8 × trigger − reserveFloor`, where `reserveFloor` is the smaller of the effective budget reserve and `compaction.reserveTokens` (or `16384` when unset), or half the band when the floor alone fills it. The cap applies before adjusting for measured usage, so a low trigger on a small or provider-capped window keeps less history instead of compacting again right away.
 - `compaction.autoContinue` = `true`
 - `compaction.midTurnEnabled` = `true`; a `false` value applies to the session that configured it, not to spawned subagents — each subagent keeps mid-run checks so its single-turn assignment still compacts at the configured threshold.
 - `compaction.handoffSaveToDisk` = `false`
+- `compaction.handoffTimeoutSeconds` = `0` (no limit; a positive value fails a handoff that generates for longer, so automatic maintenance tries the next method)
 - The `handoff` method generates a handoff document through the live-cache side-request pipeline and commits it on the current session. `/handoff` and `/compact handoff` select it manually.
 - `compaction.remoteEndpoint` = `undefined`
 - `compaction.remoteStreamingV2Enabled` = `true`
 - `compaction.v2RetainedMessageBudget` = `64000`
-- `compaction.thresholdPercent` = `-1` and `compaction.thresholdTokens` = `-1`; a positive fixed token limit takes precedence over percentage, and otherwise the reserve-based threshold is used.
+- `compaction.thresholdPercent` = `-1` and `compaction.thresholdTokens` = `-1`; a positive fixed token limit takes precedence over percentage, and otherwise the reserve-based threshold is used: the window less its reserve, at most `DEFAULT_THRESHOLD_CEILING_TOKENS` (690,000), so 1M-class windows compact at 690K.
 - `compaction.modelThresholds` = `{}`; `provider/model-id` or `provider/…*` prefix → a token base the threshold policy scales in place of the window (dropping a global `thresholdTokens`), a fixed trigger (`"f90000"`), or a percentage replacing both thresholds, while that model is active. Editable from the `/models` Roles view (`k`). See [Settings](./settings.md#context-compaction-and-memory).
 - `task.agentCompactionThresholdOverrides` = `{}`; exact-name task/eval agent → token count (`90000`) or percentage (`"80%"`) replacing both thresholds for that agent only. See [Settings](./settings.md#context-compaction-and-memory).
 - `compaction.idleEnabled` = `false`

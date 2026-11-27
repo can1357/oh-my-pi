@@ -15,6 +15,9 @@ import {
 	type OAuthProviderInfo,
 	PASTE_CODE_LOGIN_PROVIDERS,
 } from "@oh-my-pi/pi-ai";
+import { providerLoginNotice, providerManageUrl } from "@oh-my-pi/pi-catalog/compat/auth";
+import { APP_NAME } from "@oh-my-pi/pi-utils";
+import { connectedProviderName } from "../modes/view-model/chrome/format";
 import { openPath } from "../utils/open";
 
 /**
@@ -204,4 +207,30 @@ export function formatLoginIdentity(identity: OAuthLoginIdentity | undefined): s
 	const org = identity.orgName ?? identity.orgId;
 	if (base) return org ? `${base} (${org})` : base;
 	return org;
+}
+
+/**
+ * Lines `/login` and `omp login` print under their success line: why the
+ * provider is off when the sign-in did not grant its `required-scope`, else
+ * its `login-notice`; then its `manage-url`. `loginCommand` is how the caller's
+ * surface signs in again (`/login acme`).
+ */
+export function loginFollowUps(
+	providerId: string,
+	identity: OAuthLoginIdentity,
+	loginCommand: string,
+): { tone: "dim" | "warning"; text: string }[] {
+	const lines: { tone: "dim" | "warning"; text: string }[] = [];
+	const notice = providerLoginNotice(providerId);
+	if (identity.accessOff) {
+		lines.push({
+			tone: "warning",
+			text: `${connectedProviderName(providerId)} is off: the sign-in did not grant it. Run ${loginCommand} to turn it on.`,
+		});
+	} else if (notice) {
+		lines.push({ tone: "dim", text: notice });
+	}
+	const manageUrl = providerManageUrl(providerId);
+	if (manageUrl) lines.push({ tone: "dim", text: `Manage ${APP_NAME}'s access: ${manageUrl}` });
+	return lines;
 }

@@ -1,0 +1,1 @@
+`{{path}}` gets {{join keys ", "}} from the user's config files; a session change cannot remove entries configured there, so the user was not asked. To remove them from the global config, write `null` for them to `{{saveUrl}}`.
