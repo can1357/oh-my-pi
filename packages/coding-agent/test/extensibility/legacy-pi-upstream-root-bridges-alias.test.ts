@@ -78,22 +78,21 @@ describe("legacy aliased-scope roots resolve the upstream 1.1.0 bridges", () => 
 		expect(loaded.miss).toBeNull();
 	});
 
-	it.each(["@mariozechner/pi-tui", "@earendil-works/pi-tui/components/editor"])(
-		"rejects an import of %s with the pi-tui migration error",
-		async specifier => {
-			const entry = await writeFixtureExtension(
-				`import { Text } from "${specifier}";\nexport const probe = Text;\n`,
-			);
-			const error = await loadLegacyPiModule(entry).then(
-				() => undefined,
-				(caught: unknown) => caught,
-			);
-			expect(error).toBeInstanceOf(PiTuiImportError);
-			expect((error as PiTuiImportError).specifier).toBe(specifier);
-			expect((error as Error).message).toContain("@oh-my-pi/pi-tui");
-			expect((error as Error).message).toContain(PI_TUI_MIGRATION_DOC);
-		},
-	);
+	it.each([
+		"@mariozechner/pi-tui",
+		"@earendil-works/pi-tui/components/editor",
+		"@oh-my-pi/pi-tui/prompt/custom-editor",
+	])("rejects an import of %s with the pi-tui migration error", async specifier => {
+		const entry = await writeFixtureExtension(`import { Text } from "${specifier}";\nexport const probe = Text;\n`);
+		const error = await loadLegacyPiModule(entry).then(
+			() => undefined,
+			(caught: unknown) => caught,
+		);
+		expect(error).toBeInstanceOf(PiTuiImportError);
+		expect((error as PiTuiImportError).specifier).toBe(specifier);
+		expect((error as Error).message).toContain("@oh-my-pi/pi-tui");
+		expect((error as Error).message).toContain(PI_TUI_MIGRATION_DOC);
+	});
 
 	it("rejects pi-tui reached through a relative module and a require()", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-legacy-pi-tui-"));

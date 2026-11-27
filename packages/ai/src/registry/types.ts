@@ -14,6 +14,7 @@
 
 import type { Api, FetchImpl, Model, SimpleStreamOptions, StreamOptions } from "../types";
 import type { OAuthRefreshReason } from "../auth/types";
+import type { SignOutHook } from "./hooks/types";
 import type { OAuthController, OAuthCredentials } from "./oauth/types";
 
 /**
@@ -93,6 +94,8 @@ export interface ProviderDefinition {
 		reason?: OAuthRefreshReason,
 	) => Promise<OAuthCredentials>;
 	readonly getApiKey?: (credentials: OAuthCredentials) => string;
+	/** Forget a removed login's secrets kept outside `agent.db` and revoke it upstream (`sign-out hook=`). */
+	readonly signOut?: SignOutHook;
 	/** Store OAuth credentials under a different provider id (e.g. `openai-codex-device` ⇒ `openai-codex`). */
 	readonly storeCredentialsAs?: string;
 	// --- coding-agent login UX ---

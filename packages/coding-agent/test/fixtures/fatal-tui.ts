@@ -4,6 +4,7 @@ import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import { fatal, installProcessHandlers } from "@oh-my-pi/pi-utils/postmortem";
 
 const native = process.argv.includes("--native");
+const fullscreen = process.argv.includes("--fullscreen");
 if (native) installProcessHandlers();
 
 const theme = loadThemeSync("dark");
@@ -12,7 +13,8 @@ const surface = createSurface(() => ({
 	dock: jsx("text", { text: "╰─ " }),
 }));
 
-await startHost({
+const host = await startHost({
+	screen: () => (fullscreen ? "fullscreen" : "inline"),
 	surface,
 	theme: () => theme,
 	native,
@@ -24,3 +26,5 @@ await startHost({
 		return true;
 	},
 });
+
+if (fullscreen) host.setMouse("drag");

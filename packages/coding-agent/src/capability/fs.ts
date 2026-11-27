@@ -26,7 +26,7 @@ async function readFileWithCache(filePath: string, cache: Map<string, string | n
 
 	try {
 		// Gate on the file type first: discovery scans foreign config dirs
-		// (~/.claude, ~/.cursor, project trees), and reading a FIFO/socket/char
+		// (`.claude`, `.codex`, project trees), and reading a FIFO/socket/char
 		// device with `.text()` blocks until EOF — i.e. forever — hanging
 		// startup with zero output. `stat` follows symlinks, so symlinked
 		// context files (CLAUDE.md -> AGENTS.md) still resolve.

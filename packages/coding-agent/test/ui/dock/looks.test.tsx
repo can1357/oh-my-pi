@@ -377,6 +377,6 @@ test("deferred preview cuts long output", () => {
 		"usage 2",
 		"usage 3",
 		"usage 4",
-		"… 4 more rows — 1 command output shown in full when the agent pauses",
+		"… 4 more rows — 1 command output shown in full when the agent pauses · ⎋ to hide",
 	]);
 });

@@ -102,6 +102,8 @@ export interface AgentTurnEndContext {
 	additionalMessages?: AgentMessage[];
 	/** True when the current tool-loop batch is continuing without yielding to post-turn steering. */
 	willContinue: boolean;
+	/** Tool calls in `message` that resolved to no tool (unknown name), so nothing ran. */
+	unresolvedToolCallIds?: string[];
 }
 
 export interface AgentPreModelCallStop {
@@ -1125,7 +1127,7 @@ export type ToolLoadMode = "essential" | "discoverable";
  * - object form — adds a `reason` (shown in the prompt) and/or `override: true`
  *   (force-prompt even in modes that would otherwise auto-approve this tier).
  *   `policy: "deny"` blocks the call at the approval gate.
- * - function — dynamic, given parsed args. Returns either form above.
+ * - function — dynamic, given parsed args and an optional {@link ToolApprovalQuery}. Returns either form above.
  *
  * Omitted approvals are treated as "exec" by callers that enforce approvals.
  */
@@ -1137,7 +1139,19 @@ export type ToolApprovalDecision =
 			override?: boolean;
 			policy?: "allow" | "deny" | "prompt";
 	  };
-export type ToolApproval = ToolApprovalDecision | ((args: unknown, context?: AgentToolContext) => ToolApprovalDecision);
+export type ToolApproval =
+	| ToolApprovalDecision
+	| ((args: unknown, context?: AgentToolContext, query?: ToolApprovalQuery) => ToolApprovalDecision);
+
+/** How the caller of a dynamic {@link ToolApproval} uses its decision. */
+export interface ToolApprovalQuery {
+	/**
+	 * `false` when only `tier` and an explicit `policy` can affect the outcome: the gate
+	 * auto-approves every tier (yolo), or the caller reads just the tier. The tool may then
+	 * skip work that only feeds a prompt (`override`, `reason`). Absent means it may prompt.
+	 */
+	prompts?: boolean;
+}
 
 /**
  * Context passed to tool execution.

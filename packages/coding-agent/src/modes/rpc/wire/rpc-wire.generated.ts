@@ -1978,6 +1978,7 @@ export interface LogoutParams {
 
 export interface LogoutResult {
 	remainingSource?: string;
+	signOutError?: string;
 }
 
 export interface PredictWordParams {

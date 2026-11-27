@@ -15,6 +15,9 @@
 import { createTerminalDriver, type ProcessTerminalDriver, type TerminalDriverOptions } from "../driver";
 import { Emitter, MemoryStdin } from "./memory-terminal";
 
+/** The emoji width probe: a cursor report on each side of a U+FE0F sample. */
+const EMOJI_PROBE = "\x1b[6n\u2714\uFE0F\x1b[6n";
+
 class MemoryStdout extends Emitter {
 	columns = 80;
 	rows = 24;
@@ -36,8 +39,9 @@ export interface ProcessDriverTest {
 /**
  * Start a {@link ProcessTerminalDriver} on in-memory streams, answering its
  * startup probes with a bare DA1 each (preceded by `replies`, which may be
- * computed from the probes written so far) and its cursor query with the home
- * position. Defaults: empty env, darwin, no ConPTY, no tmux.
+ * computed from the probes written so far), the emoji width probe (if sent)
+ * with a two-cell advance, and its cursor query with the home position.
+ * Defaults: empty env, darwin, no ConPTY, no tmux.
  */
 export async function startProcessDriver(
 	options: ProcessDriverTestOptions = {},
@@ -60,7 +64,10 @@ export async function startProcessDriver(
 	const started = driver.start();
 	const answers = typeof replies === "string" ? replies : replies(output.join(""));
 	feed(`${answers}\x1b[?62c\x1b[?62c\x1b[?62c`);
-	for (let turn = 0; !output.some(chunk => chunk.includes("\x1b[6n")); turn++) {
+	const emojiProbe = output.some(chunk => chunk.includes(EMOJI_PROBE));
+	if (emojiProbe) feed("\x1b[1;1R\x1b[1;3R\x1b[?62c");
+	const expectedQueries = emojiProbe ? 3 : 1;
+	for (let turn = 0; output.join("").split("\x1b[6n").length - 1 < expectedQueries; turn++) {
 		if (turn > 1000) throw new Error("the driver never queried the cursor position");
 		await Promise.resolve();
 	}

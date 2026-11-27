@@ -3,7 +3,8 @@
  * and what that emulator is known to support.
  */
 import type { JamoWidth } from "../../text/width";
-import { type Env, insideMultiplexer } from "../mux/detect";
+import type { EmojiSupport } from "../../theme/contract";
+import { classifyMultiplexer, type Env, insideMultiplexer, isSsh } from "../mux/detect";
 
 /** Static facts about one emulator. */
 export interface TerminalProfile {
@@ -22,6 +23,13 @@ export interface TerminalProfile {
 	readonly progressKeepalive: boolean;
 	/** Draws OSC 66 sized text (Kitty's text-sizing protocol). */
 	readonly textSizing: boolean;
+	/**
+	 * How far a text-default emoji followed by U+FE0F advances: two cells (`wide`),
+	 * one (`narrow`), or unknown until measured at startup (`probe`).
+	 */
+	readonly emojiVs16: "wide" | "narrow" | "probe";
+	/** Whether a bare text-default emoji is drawn inside its one cell (`fits`) or overflows into the next (`spills`). */
+	readonly emojiBare: "fits" | "spills";
 }
 
 /** In-band notification sequence: a bare BEL, OSC 9 (one message line) or Kitty's OSC 99 (structured). */
@@ -42,7 +50,16 @@ export type TerminalId =
 	| "rio"
 	| "rex"
 	| "tern"
-	| "monstar";
+	| "monstar"
+	| "windowsTerminal";
+
+interface ProfileQuirks {
+	readonly jamoWidth?: JamoWidth;
+	readonly progressKeepalive?: boolean;
+	readonly textSizing?: boolean;
+	readonly emojiVs16?: TerminalProfile["emojiVs16"];
+	readonly emojiBare?: TerminalProfile["emojiBare"];
+}
 
 function profile(
 	id: TerminalId,
@@ -51,7 +68,7 @@ function profile(
 	hyperlinks: boolean,
 	synchronizedOutput: boolean,
 	notify: NotifyProtocol,
-	quirks: { readonly jamoWidth?: JamoWidth; readonly progressKeepalive?: boolean; readonly textSizing?: boolean } = {},
+	quirks: ProfileQuirks = {},
 ): TerminalProfile {
 	return {
 		id,
@@ -63,6 +80,8 @@ function profile(
 		jamoWidth: quirks.jamoWidth ?? "platform",
 		progressKeepalive: quirks.progressKeepalive ?? false,
 		textSizing: quirks.textSizing ?? false,
+		emojiVs16: quirks.emojiVs16 ?? "probe",
+		emojiBare: quirks.emojiBare ?? "spills",
 	};
 }
 
@@ -70,23 +89,41 @@ function profile(
 export const TERMINAL_PROFILES: Readonly<Record<TerminalId, TerminalProfile>> = {
 	base: profile("base", null, false, false, false, "bell"),
 	trueColor: profile("trueColor", null, true, false, false, "bell"),
-	kitty: profile("kitty", "kitty", true, true, true, "osc99", { textSizing: true }),
+	kitty: profile("kitty", "kitty", true, true, true, "osc99", {
+		textSizing: true,
+		emojiVs16: "wide",
+		emojiBare: "fits",
+	}),
 	// libghostty draws compatibility jamo wide and drops OSC 9;4 progress without a heartbeat.
-	ghostty: profile("ghostty", "kitty", true, true, true, "osc9", { jamoWidth: 2, progressKeepalive: true }),
-	wezterm: profile("wezterm", "kitty", true, true, true, "osc9"),
-	iterm2: profile("iterm2", "iterm", true, true, true, "osc9"),
-	vscode: profile("vscode", null, true, true, true, "bell"),
-	alacritty: profile("alacritty", null, true, true, true, "bell"),
+	ghostty: profile("ghostty", "kitty", true, true, true, "osc9", {
+		jamoWidth: 2,
+		progressKeepalive: true,
+		emojiVs16: "wide",
+		emojiBare: "fits",
+	}),
+	// U+FE0F advances one cell at WezTerm's default Unicode 9; the driver pushes Unicode 14 at start.
+	wezterm: profile("wezterm", "kitty", true, true, true, "osc9", { emojiVs16: "narrow", emojiBare: "fits" }),
+	// VS16 stays narrow on iTerm2's alternate screen.
+	iterm2: profile("iterm2", "iterm", true, true, true, "osc9", { emojiVs16: "narrow" }),
+	vscode: profile("vscode", null, true, true, true, "bell", { emojiVs16: "narrow" }),
+	alacritty: profile("alacritty", null, true, true, true, "bell", { emojiVs16: "narrow" }),
 	// Warp: Kitty graphics (macOS/Linux), no OSC 8; sync output left to the DECRQM probe.
 	warp: profile("warp", "kitty", true, false, false, "osc9", { jamoWidth: 1 }),
 	orca: profile("orca", null, true, false, false, "bell", { jamoWidth: 2 }),
 	otty: profile("otty", "kitty", true, true, false, "osc99"),
 	// rio parses OSC 9/777, but Windows silently drops its unpackaged toast; BEL keeps the D-Bus fallback on Linux.
-	rio: profile("rio", "kitty", true, true, false, "bell"),
+	rio: profile("rio", "kitty", true, true, false, "bell", { emojiVs16: "wide" }),
 	rex: profile("rex", "kitty", true, true, false, "bell"),
 	tern: profile("tern", "kitty", true, true, true, "osc99"),
 	// Built on libghostty: wide jamo; clears OSC 9;4 progress after 15 s without an update.
-	monstar: profile("monstar", "kitty", true, true, true, "osc9", { jamoWidth: 2, progressKeepalive: true }),
+	monstar: profile("monstar", "kitty", true, true, true, "osc9", {
+		jamoWidth: 2,
+		progressKeepalive: true,
+		emojiVs16: "wide",
+		emojiBare: "fits",
+	}),
+	// A local Windows Terminal session (see `isWindowsTerminal`): images come from its DA1 SIXEL bit.
+	windowsTerminal: profile("windowsTerminal", null, true, false, true, "bell", { emojiVs16: "wide" }),
 };
 
 const PROGRAM_IDS: Readonly<Record<string, TerminalId>> = {
@@ -130,6 +167,7 @@ export function detectTerminalId(env: Env, tmuxClientNames: readonly string[] = 
 	if (env.ALACRITTY_WINDOW_ID) return "alacritty";
 	const program = terminalIdFromProgram(env.TERM_PROGRAM);
 	if (program) return program;
+	if (isWindowsTerminal(env)) return "windowsTerminal";
 	// iTerm2 forwards LC_TERMINAL over SSH; inside a multiplexer its OSC 1337 has no passthrough.
 	if (env.LC_TERMINAL?.toLowerCase() === "iterm2" && !insideMultiplexer(env)) return "iterm2";
 	for (const name of tmuxClientNames) {
@@ -163,6 +201,28 @@ export function isParadevEmbedder(env: Env): boolean {
 export function resolveJamoWidth(id: TerminalId, env: Env): JamoWidth {
 	if (isParadevEmbedder(env) && !insideMultiplexer(env)) return 2;
 	return TERMINAL_PROFILES[id].jamoWidth;
+}
+
+/**
+ * A genuine local Windows Terminal session: `WT_SESSION` is set and `TERM_PROGRAM`
+ * names nothing else. Multiplexers and SSH sessions inherit `WT_SESSION` while
+ * another program owns the grid (or the terminal is on the far side of the hop).
+ */
+export function isWindowsTerminal(env: Env): boolean {
+	if (!env.WT_SESSION || isSsh(env) || classifyMultiplexer(env) !== null) return false;
+	return !env.TERM_PROGRAM || env.TERM_PROGRAM === "Windows_Terminal";
+}
+
+/**
+ * Emoji handling `id` implies before any reply. Inside a multiplexer its own
+ * grid decides the advance of U+FE0F forms and may disagree with the outer
+ * terminal, so they stay off; how a bare glyph draws is the outer terminal's.
+ */
+export function emojiSupportFor(id: TerminalId, env: Env): EmojiSupport {
+	const profile = TERMINAL_PROFILES[id];
+	const bareFits = profile.emojiBare === "fits";
+	if (insideMultiplexer(env)) return { vs16Wide: false, bareFits };
+	return { vs16Wide: profile.emojiVs16 === "wide", bareFits };
 }
 
 /** Tern names itself in `TERM_PROGRAM`; a multiplexer started in a Tern pane may leave it behind. */

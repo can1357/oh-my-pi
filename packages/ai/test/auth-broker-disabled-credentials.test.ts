@@ -85,6 +85,35 @@ describe("disabled credential tombstones", () => {
 		expect((await store!.listDisabledCredentials("anthropic"))[0]?.cause).toBe("original cause");
 	});
 
+	test("re-login to an identity-less MCP OAuth server purges its tombstone, never an identified one", async () => {
+		const provider = "mcp_oauth:profile:default:https://mcp.example.test/mcp";
+		const mintMcp = (tag: string): OAuthCredential => ({
+			type: "oauth",
+			access: `access-${tag}`,
+			refresh: `refresh-${tag}`,
+			expires: Date.now() + 60_000,
+		});
+		await storage!.credentials.set(provider, mintMcp("old"));
+		const [stale] = store!.listAuthCredentials(provider);
+		await store!.deleteAuthCredential(stale.id, "oauth refresh failed: Grant not found");
+		// An identified tombstone under the same provider is a different account.
+		await store!.saveOAuth(provider, mintOAuth("other@example.test"));
+		const [identified] = store!.listAuthCredentials(provider);
+		await store!.deleteAuthCredential(identified.id, "oauth refresh failed: Grant not found");
+
+		// Additive logins never purge an identity-less tombstone: a sibling
+		// identity-less login (e.g. a second Devin browser login) is not its replacement.
+		await store!.saveOAuth(provider, mintMcp("sibling"));
+		expect(await store!.listDisabledCredentials(provider)).toHaveLength(2);
+
+		// A full replacement (`/mcp reauth` → `credentials.set`) declares the provider's
+		// whole credential set, so it supersedes the identity-less tombstone.
+		await storage!.credentials.set(provider, mintMcp("new"));
+
+		const remaining = await store!.listDisabledCredentials(provider);
+		expect(remaining.map(summary => summary.email)).toEqual(["other@example.test"]);
+	});
+
 	test("client maps a broker without the endpoint (404) to an empty list", async () => {
 		const fetchImpl: typeof fetch = Object.assign(async () => new Response("not found", { status: 404 }), {
 			preconnect: fetch.preconnect,

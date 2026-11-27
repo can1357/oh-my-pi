@@ -701,10 +701,14 @@ fn top_frame(vp: &mut Vproc) -> &mut Frame {
 	vp.frames.last_mut().expect("ops run in a frame")
 }
 
-/// Start the next run or finish the current one; `false` when idle.
+/// Start the next run or finish the current one; `false` when idle. A
+/// nested shell has no run: the end of its input is its exit, and its EXIT
+/// trap starts here (once; `exit` may have started it already).
 fn run_boundary(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> bool {
 	let Some(run) = vp.runs.front_mut() else {
-		return false;
+		return vp.transient
+			&& super::nested::is_nested_root(cx.store, vp)
+			&& start_exit_trap_once(k, vp, cx);
 	};
 	if run.started && !run.exit_trap_started {
 		run.exit_trap_started = true;

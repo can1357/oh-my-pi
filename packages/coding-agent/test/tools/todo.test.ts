@@ -187,6 +187,30 @@ it("renders completed tasks as checked before revealing strikethrough", async ()
 });
 
 describe("TodoTool operations", () => {
+	it.each([
+		{
+			label: "flat items",
+			args: { op: "init", items: [{ phase: "Investigate", items: ["find usage"] }, "write issue"] },
+		},
+		{
+			label: "nested list items",
+			args: { op: "init", list: [{ phase: "Investigate", items: [{ task: "find usage" }, "write issue"] }] },
+		},
+	])("rejects non-string init task entries in $label", ({ args }) => {
+		const session = createSession();
+		const tool = new TodoTool(session);
+
+		expect(() =>
+			validateAgentToolArguments(tool, {
+				type: "toolCall",
+				id: "call-1",
+				name: "todo",
+				arguments: args,
+			}),
+		).toThrow("must be a string.");
+		expect(session.getTodoPhases?.()).toEqual([]);
+	});
+
 	it("jumps to a specific task out of order", async () => {
 		const tool = new TodoTool(createSession());
 		await tool.execute("call-1", {

@@ -11,6 +11,7 @@ import {
 	type BashExecutionMessage,
 	type PythonExecutionMessage,
 	type CustomMessage,
+	LIVE_DELEGATION_MESSAGE_TYPE,
 	type HookMessage,
 	type FileMentionMessage,
 	isUserInvokedSkillPrompt,
@@ -20,15 +21,18 @@ export {
 	SKILL_PROMPT_MESSAGE_TYPE,
 	LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE,
 	BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE,
+	TAN_RESULT_MESSAGE_TYPE,
 	PREWALK_PLAN_MESSAGE_TYPE,
 	VIBE_MODE_CONTEXT_MESSAGE_TYPE,
 	PLAN_MODE_CONTEXT_MESSAGE_TYPE,
 	DEFAULT_CUSTOM_MESSAGE_TYPE,
 	LIVE_DELEGATION_MESSAGE_TYPE,
+	LIVE_ENDED_MESSAGE_TYPE,
 	type CustomMessageContent,
 	type CustomMessagePayload,
 	type NormalizedCustomMessagePayload,
 	type BackgroundTanDispatchDetails,
+	type TanResultDetails,
 	type SkillPromptDetails,
 	SILENT_ABORT_MARKER,
 	isSilentAbort,
@@ -61,6 +65,7 @@ import { copyPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import { readerIncludesThinking } from "@oh-my-pi/snapcompact";
+import voiceRequestTemplate from "../live/prompts/voice-request.md" with { type: "text" };
 import userInterjectionTemplate from "../prompts/steering/user-interjection.md" with { type: "text" };
 import { cleanTinyMessage, formatTitleConversationContext, type TitleConversationTurn } from "../tiny/message-preproc";
 
@@ -72,6 +77,7 @@ export {
 	createCustomMessage,
 } from "@oh-my-pi/pi-agent-core/compaction/messages";
 
+import { formatExitCodeNotice } from "../tools/details/bash";
 import { formatOutputNotice } from "../tools/output-meta-format";
 import { titleTextFromSkillPrompt } from "./transcript/skill-title-input";
 
@@ -988,7 +994,7 @@ export function bashExecutionToText(msg: BashExecutionMessage): string {
 	if (msg.cancelled) {
 		text += "\n\n(command cancelled)";
 	} else if (msg.exitCode !== null && msg.exitCode !== undefined && msg.exitCode !== 0) {
-		text += `\n\nCommand exited with code ${msg.exitCode}`;
+		text += `\n\n${formatExitCodeNotice(msg.exitCode)}`;
 	}
 	text += formatOutputNotice(msg.meta);
 	return text;
@@ -1220,6 +1226,14 @@ function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
 						timestamp: m.timestamp,
 					},
 				];
+			}
+			// A spoken request: the model sees how its answer will reach the user; transcripts keep the request alone.
+			if (m.customType === LIVE_DELEGATION_MESSAGE_TYPE && typeof m.content === "string") {
+				const converted = convertMessageToLlm({
+					...m,
+					content: prompt.render(voiceRequestTemplate, { request: m.content }),
+				});
+				return converted ? [converted] : [];
 			}
 			const split = convertImageBearingCustomMessage(m);
 			if (split) return split;
