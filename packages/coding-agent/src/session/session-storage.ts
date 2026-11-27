@@ -637,6 +637,20 @@ function sessionLeasePath(sessionId: string, createDir: boolean): string {
 }
 
 /**
+ * A strict {@link FileSessionStorage.claimSession} could not take a session's ownership lease for a
+ * reason other than another process holding it (for example an unwritable owners directory), so it
+ * cannot tell whether another process owns the session.
+ */
+export class SessionLeaseUnavailableError extends Error {
+	readonly sessionId: string;
+	constructor(sessionId: string, cause: unknown) {
+		super(`The ownership lease of session "${sessionId}" is unavailable: ${toError(cause).message}`, { cause });
+		this.name = "SessionLeaseUnavailableError";
+		this.sessionId = sessionId;
+	}
+}
+
+/**
  * Take a session's ownership lease without waiting, or `null` while another
  * process holds it. A process writing the session holds it (see
  * `FileSessionStorage.claimSession`) until it exits; `omp gc` takes it to
@@ -1347,10 +1361,12 @@ export class FileSessionStorage implements SessionStorage {
 	 * The lease is an OS lock (named mutex on Windows, otherwise an OFD or
 	 * `flock` lock on a sidecar under ~/.omp/run/session-owners), so the kernel
 	 * drops a dead owner's claim.
-	 * Never throws: a lock that cannot be taken for another reason counts as
-	 * owned, so it never moves a session off its file.
+	 * Never throws by default: a lock that cannot be taken for another reason
+	 * counts as owned, so it never moves a session off its file. With
+	 * `options.strict` it throws {@link SessionLeaseUnavailableError} instead,
+	 * for a caller that must not act on a session it cannot prove is its own.
 	 */
-	claimSession(sessionId: string, sessionPath: string): (() => void) | null {
+	claimSession(sessionId: string, sessionPath: string, options?: { strict?: boolean }): (() => void) | null {
 		const onDisk = readSessionHeaderIdSync(sessionPath);
 		if (onDisk !== undefined && onDisk !== sessionId) return null;
 		let held = sessionLeases.get(sessionId);
@@ -1359,6 +1375,7 @@ export class FileSessionStorage implements SessionStorage {
 			try {
 				lease = tryAcquireSessionLease(sessionId);
 			} catch (err) {
+				if (options?.strict === true) throw new SessionLeaseUnavailableError(sessionId, err);
 				logger.debug("Session ownership lease unavailable", { sessionId, error: toError(err).message });
 				return () => {};
 			}

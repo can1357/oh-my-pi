@@ -693,10 +693,16 @@ async function scanSessionDirReadOnly(
 
 /**
  * List the terminal's sessions in a resolved session directory (newest first),
- * reading each file's lifecycle {@link SessionStatus}; {@link isForeignSession}s are skipped.
+ * reading each file's lifecycle {@link SessionStatus}; {@link isForeignSession}s are skipped
+ * unless `options.includeForeign` keeps them.
  */
-export async function listSessions(sessionDir: string, storage: SessionStorage): Promise<SessionInfo[]> {
-	return (await scanSessionDir(sessionDir, storage, true)).filter(session => !isForeignSession(session));
+export async function listSessions(
+	sessionDir: string,
+	storage: SessionStorage,
+	options: { includeForeign?: boolean } = {},
+): Promise<SessionInfo[]> {
+	const sessions = await scanSessionDir(sessionDir, storage, true);
+	return options.includeForeign === true ? sessions : sessions.filter(session => !isForeignSession(session));
 }
 
 /**
@@ -706,15 +712,19 @@ export function listSessionsReadOnly(sessionDir: string, storage: SessionStorage
 	return scanSessionDirReadOnly(sessionDir, storage, true);
 }
 
-/** List the terminal's sessions across all project directories (newest first); see {@link isForeignSession}. */
+/**
+ * List the terminal's sessions across all project directories (newest first); see {@link isForeignSession}.
+ * `options.includeForeign` keeps the sessions other clients started.
+ */
 export async function listAllSessions(
 	storage: SessionStorage = new FileSessionStorage(),
 	sessionsRoot: string = getSessionsDir(),
+	options: { includeForeign?: boolean } = {},
 ): Promise<SessionInfo[]> {
 	try {
 		const files = await dedupeRealPaths(await scanBucketFiles(sessionsRoot, "*.jsonl"));
 		const sessions = await collectSessionsFromFiles(files, storage, true);
-		return sessions.filter(session => !isForeignSession(session));
+		return options.includeForeign === true ? sessions : sessions.filter(session => !isForeignSession(session));
 	} catch {
 		return [];
 	}
@@ -1753,7 +1763,12 @@ function findResumeMatch(sessions: SessionInfo[], sessionArg: string, exactId: b
 export interface ResolveResumableSessionOptions {
 	/** Search default global session buckets after the active/custom session directory misses. */
 	allowGlobalFallback?: boolean;
-	/** Match only a session whose id is the key, never one whose id or file name starts with it. */
+	/**
+	 * Match only a session whose id is the key, never one whose id or file name starts with it.
+	 * Such a key names one session whatever client started it, so sessions another client
+	 * started ({@link isForeignSession}) match too: `--session-id` must find the session it
+	 * wrote under `PI_SESSION_ORIGIN`, or its next launch would write a second one under the id.
+	 */
 	exactId?: boolean;
 }
 
@@ -1770,8 +1785,9 @@ export async function resolveResumableSession(
 ): Promise<ResolvedSessionMatch | undefined> {
 	const storage = isSessionStorage(storageOrOptions) ? storageOrOptions : new FileSessionStorage();
 	const resolvedOptions = isSessionStorage(storageOrOptions) ? options : storageOrOptions;
+	const listing = { includeForeign: resolvedOptions.exactId === true };
 	const localSessionDir = sessionDir ?? computeDefaultSessionDir(cwd, storage);
-	const localSessions = await listSessions(localSessionDir, storage);
+	const localSessions = await listSessions(localSessionDir, storage, listing);
 	const localMatch = findResumeMatch(localSessions, sessionArg, resolvedOptions.exactId === true);
 	if (localMatch) {
 		return { session: localMatch, scope: "local" };
@@ -1781,7 +1797,7 @@ export async function resolveResumableSession(
 		return undefined;
 	}
 
-	const globalSessions = await listAllSessions(storage);
+	const globalSessions = await listAllSessions(storage, undefined, listing);
 	const globalMatch = findResumeMatch(globalSessions, sessionArg, resolvedOptions.exactId === true);
 	if (!globalMatch) {
 		return undefined;

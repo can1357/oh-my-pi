@@ -444,6 +444,71 @@ describe("runRootCommand — cross-project --resume", () => {
 		expect(resolveModelScope).toHaveBeenCalledTimes(1);
 		expect(resolveModelScope.mock.calls[0]?.[0]).toEqual(["model-resumed"]);
 	}, 15_000);
+
+	it("--session-id switches startup to the project of the stored session it resumes", async () => {
+		// Its own id: session ownership leases are keyed by id and shared across test processes.
+		const sessionId = crypto.randomUUID();
+		const stamp = new Date(0).toISOString();
+		const storedFile = path.join(
+			SessionManager.getDefaultSessionDir(resumedProject),
+			`1970-01-01T00-00-00-000Z_${sessionId}.jsonl`,
+		);
+		await Bun.write(
+			storedFile,
+			`${[
+				{ type: "session", version: 3, id: sessionId, cwd: resumedProject, timestamp: stamp },
+				{
+					type: "message",
+					id: "m1",
+					parentId: null,
+					timestamp: stamp,
+					message: { role: "user", content: "hi", timestamp: 0 },
+				},
+			]
+				.map(line => JSON.stringify(line))
+				.join("\n")}\n`,
+		);
+		const settings = Settings.isolated({ "marketplace.autoUpdate": "off" });
+		const reloadForCwd = vi.spyOn(settings, "reloadForCwd");
+		const preloadedCwds: (string | undefined)[] = [];
+		vi.spyOn(pluginHelpers, "preloadPluginRoots").mockImplementation(async (_home, cwd) => {
+			preloadedCwds.push(cwd);
+		});
+		const authStorage = await AuthStorage.create(path.join(root, "auth.db"));
+		const rawArgs = ["--session-id", sessionId, "--print"];
+		const parsed = parseArgs(rawArgs);
+		parsed.noExtensions = true;
+		parsed.noSkills = true;
+		parsed.noRules = true;
+		parsed.noTools = true;
+		parsed.noLsp = true;
+		let resumedManager: SessionManager | undefined;
+		let sessionOptionsCwd: string | undefined;
+
+		try {
+			await runRootCommand(parsed, rawArgs, {
+				discoverAuthStorage: async () => authStorage,
+				settings,
+				createAgentSession: async options => {
+					if (!options) throw new Error("Expected session options");
+					resumedManager = options.sessionManager;
+					sessionOptionsCwd = options.cwd;
+					throw new Error("stop after session options");
+				},
+			});
+		} catch (error) {
+			if (!(error instanceof Error) || error.message !== "stop after session options") throw error;
+		} finally {
+			authStorage.close();
+			await resumedManager?.close();
+		}
+
+		expect(resumedManager?.getSessionFile(), "the stored session was resumed").toBe(storedFile);
+		expect(getProjectDir(), "startup moved to the session's project").toBe(resumedProject);
+		expect(reloadForCwd).toHaveBeenCalledWith(resumedProject);
+		expect(preloadedCwds, "plugins were discovered for the session's project").toContain(resumedProject);
+		expect(sessionOptionsCwd, "the session runs in its project").toBe(resumedProject);
+	}, 15_000);
 });
 
 describe("createSessionManager — cross-project --resume relocation (moved worktree)", () => {

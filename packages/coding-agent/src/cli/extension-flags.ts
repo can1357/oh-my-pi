@@ -1,4 +1,5 @@
 import { type Args, parseArgs } from "./args";
+import { FLAGS_EXTENSIONS_CANNOT_SHADOW } from "./flag-tables";
 
 /**
  * Minimal extension-runner surface needed to resolve CLI flag values. The real
@@ -27,7 +28,10 @@ export interface ExtensionFlagSink {
  * a built-in-colliding flag (e.g. plan-mode's boolean `--plan`, which would
  * otherwise hit the built-in plan-model branch) is parsed with the extension's
  * semantics and surfaces in `unknownFlags` — without consuming the following
- * message or overwriting the built-in field. No built-in name list to maintain.
+ * message or overwriting the built-in field. No built-in name list to maintain,
+ * beyond {@link FLAGS_EXTENSIONS_CANNOT_SHADOW}: a flag the startup parse has
+ * already acted on is dropped from the set below, so this parse reads it as the
+ * built-in too and the extension's flag of that name gets no value.
  *
  * Returns `null` only when there is no sink. Once extensions have loaded, the
  * reparse always runs so `--tools` can be validated against their registered
@@ -35,7 +39,9 @@ export interface ExtensionFlagSink {
  */
 export function applyExtensionFlags(runner: ExtensionFlagSink | undefined, rawArgs: string[]): Args | null {
 	if (!runner) return null;
-	const parsed = parseArgs(rawArgs, runner.getFlags());
+	const flags = new Map(runner.getFlags());
+	for (const name of Object.keys(FLAGS_EXTENSIONS_CANNOT_SHADOW)) flags.delete(name);
+	const parsed = parseArgs(rawArgs, flags);
 	// `parseArgs` records extension flag values in `unknownFlags`.
 	for (const [name, value] of parsed.unknownFlags) {
 		runner.setFlagValue(name, value);

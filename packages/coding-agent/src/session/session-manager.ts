@@ -4387,11 +4387,14 @@ export class SessionManager {
 	}
 
 	/**
-	 * Create a new session under a launcher-chosen id, reserved for this process. The session claims
-	 * the id's ownership lease first, then asks `isHeld` whether a stored session already holds it,
-	 * and only then writes its header and records itself as the terminal's last session. So a second
-	 * launch under the id, in another live process, finds it taken, and a later one finds it stored.
-	 * Writes nothing when another live process owns the id or `isHeld` answers `true`.
+	 * Create a new session under a launcher-chosen id, reserved for this process. The session takes
+	 * the id's ownership lease first ({@link claimStoredSession}, strict), then asks `isHeld` whether
+	 * a stored session already holds it, and only then writes its header and records itself as the
+	 * terminal's last session. So a second launch under the id, in another live process, finds it
+	 * taken, and a later one finds it stored. Writes nothing when another live process owns the id or
+	 * `isHeld` answers `true`. Every outcome but `created` gives the lease up, also when `isHeld` or
+	 * the header write throws, so a launch that failed never keeps the id from another process.
+	 * @throws {SessionLeaseUnavailableError} when the lease cannot be taken at all.
 	 */
 	static async createWithSessionId(
 		cwd: string,
@@ -4400,17 +4403,34 @@ export class SessionManager {
 		isHeld: () => Promise<boolean>,
 	): Promise<SessionIdCreation> {
 		const manager = SessionManager.create(cwd, sessionDir, undefined, { sessionId, suppressBreadcrumb: true });
-		if (manager.#sessionOwnedElsewhere()) {
-			await manager.close();
-			return { status: "owned-elsewhere" };
+		let claim: (() => void) | null = null;
+		let created = false;
+		try {
+			const sessionFile = manager.#sessionFile;
+			if (!sessionFile) throw new Error(`Session "${sessionId}" has no session file to create.`);
+			claim = SessionManager.claimStoredSession(sessionFile, sessionId);
+			if (!claim) return { status: "owned-elsewhere" };
+			// The manager joins this process's lease and keeps it after `claim` is released below.
+			manager.#claimSession();
+			if (await isHeld()) return { status: "held" };
+			manager.#suppressBreadcrumb = false;
+			await manager.ensureOnDisk();
+			created = true;
+			return { status: "created", manager };
+		} finally {
+			claim?.();
+			if (!created) {
+				// Closing gives up the manager's share of the lease; a close error must not hide the outcome.
+				try {
+					await manager.close();
+				} catch (closeError) {
+					logger.warn("Could not close a session that was not created", {
+						sessionId,
+						error: toError(closeError).message,
+					});
+				}
+			}
 		}
-		if (await isHeld()) {
-			await manager.close();
-			return { status: "held" };
-		}
-		manager.#suppressBreadcrumb = false;
-		await manager.ensureOnDisk();
-		return { status: "created", manager };
 	}
 
 	/**
@@ -4419,9 +4439,11 @@ export class SessionManager {
 	 * live omp process owns before opening it changes anything. Returns the release callback, or
 	 * `null` while another live process owns the session. A manager that opens the session takes
 	 * its own claim at its first write or {@link isOwnedElsewhere}; release this one after that.
+	 * Strict: a lease that cannot be taken at all throws {@link SessionLeaseUnavailableError},
+	 * because the caller could not then tell whether another process owns the session.
 	 */
 	static claimStoredSession(sessionPath: string, sessionId: string): (() => void) | null {
-		return new FileSessionStorage().claimSession(sessionId, sessionPath);
+		return new FileSessionStorage().claimSession(sessionId, sessionPath, { strict: true });
 	}
 
 	/**
@@ -4651,6 +4673,7 @@ export class SessionManager {
 	 * Open a session whose recorded directory `recordedCwd` is gone and move it,
 	 * artifacts included, into `cwd` so it resumes from there.
 	 * @param sessionDir Target session directory; defaults to `cwd`'s.
+	 * @param options.throwIfMissing Propagate ENOENT instead of creating a new session at a missing path.
 	 * @throws {SessionMoveRefusedError} when another live omp process writes the session.
 	 */
 	static async openRelocated(
@@ -4658,12 +4681,16 @@ export class SessionManager {
 		recordedCwd: string,
 		cwd: string,
 		sessionDir?: string,
+		options?: { throwIfMissing?: boolean },
 	): Promise<SessionManager> {
 		// Anchor at the missing recorded cwd: `open` otherwise falls back to the
 		// launch cwd, which would make the `moveTo` below a no-op whenever the move
 		// target equals it. moveTo never chdirs, so the stale cwd is only the
 		// relocation source, not a directory we enter.
-		const manager = await SessionManager.open(sessionPath, sessionDir, undefined, { initialCwd: recordedCwd });
+		const manager = await SessionManager.open(sessionPath, sessionDir, undefined, {
+			initialCwd: recordedCwd,
+			throwIfMissing: options?.throwIfMissing,
+		});
 		try {
 			await manager.moveTo(cwd, sessionDir);
 		} catch (error) {

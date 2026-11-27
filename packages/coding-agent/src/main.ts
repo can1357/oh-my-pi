@@ -132,6 +132,7 @@ import {
 } from "./session/session-listing";
 import { CANONICAL_SESSION_ID_RE } from "./session/session-id-format";
 import { ForkSourceNotFoundError, SessionManager, SessionMoveRefusedError } from "./session/session-manager";
+import { SessionLeaseUnavailableError } from "./session/session-storage";
 import { forkIfMovedAway } from "./session/session-transfer";
 import { shouldShowStartupSplash } from "./startup-splash";
 import {
@@ -1071,6 +1072,7 @@ async function moveMissingCwdSessionIfNeeded(
 	cwd: string,
 	sessionDir: string | undefined,
 	askToMoveSession: SessionPrompt,
+	throwIfMissing = false,
 ): Promise<MissingCwdMoveResult> {
 	const sourceCwd = session.cwd;
 	if (!sourceCwd || fsSync.existsSync(sourceCwd)) {
@@ -1092,7 +1094,7 @@ async function moveMissingCwdSessionIfNeeded(
 			return { status: "declined" };
 		}
 	}
-	return { status: "moved", manager: await openRelocatedSession(session, cwd, sessionDir) };
+	return { status: "moved", manager: await openRelocatedSession(session, cwd, sessionDir, throwIfMissing) };
 }
 
 /** {@link SessionManager.openRelocated} into `cwd`, reporting a live-writer refusal as a CLI error. */
@@ -1100,9 +1102,10 @@ async function openRelocatedSession(
 	session: SessionInfo,
 	cwd: string,
 	sessionDir: string | undefined,
+	throwIfMissing = false,
 ): Promise<SessionManager> {
 	try {
-		return await SessionManager.openRelocated(session.path, session.cwd, cwd, sessionDir);
+		return await SessionManager.openRelocated(session.path, session.cwd, cwd, sessionDir, { throwIfMissing });
 	} catch (err) {
 		if (!(err instanceof SessionMoveRefusedError)) throw err;
 		// Its directory is gone, so it cannot be resumed in place either.
@@ -1376,7 +1379,9 @@ const SESSION_NOT_FOUND_HINT =
 /**
  * Open the session a resume key resolved to, as `--resume <key>` does: report a newer copy of its
  * conversation, offer to move a session whose recorded directory is gone, and fork a copy whose
- * conversation moved to another machine. `undefined` when the user declines the move.
+ * conversation moved to another machine. `undefined` when the user declines the move. With
+ * `throwIfMissing`, a transcript that is gone by now fails with ENOENT instead of being recreated
+ * at its path as a new session under a minted id.
  */
 async function openResumeTarget(
 	sessionArg: string,
@@ -1385,17 +1390,28 @@ async function openResumeTarget(
 	sessionDir: string | undefined,
 	askToMoveSession: SessionPrompt,
 	onSessionContinuation: ((continuation: SessionContinuation) => void) | undefined,
+	throwIfMissing = false,
 ): Promise<SessionManager | undefined> {
 	const { session, continuation } = target;
 	if (continuation) onSessionContinuation?.(continuation);
-	const moveResult = await moveMissingCwdSessionIfNeeded(sessionArg, session, cwd, sessionDir, askToMoveSession);
+	const moveResult = await moveMissingCwdSessionIfNeeded(
+		sessionArg,
+		session,
+		cwd,
+		sessionDir,
+		askToMoveSession,
+		throwIfMissing,
+	);
 	if (moveResult.status === "moved") {
 		return await forkIfMovedAway(moveResult.manager, sessionDir);
 	}
 	if (moveResult.status === "declined") {
 		return undefined;
 	}
-	return await forkIfMovedAway(await SessionManager.open(session.path, sessionDir), sessionDir);
+	return await forkIfMovedAway(
+		await SessionManager.open(session.path, sessionDir, undefined, { throwIfMissing }),
+		sessionDir,
+	);
 }
 
 function sessionOpenElsewhereError(sessionId: string): SessionResolutionError {
@@ -1405,10 +1421,22 @@ function sessionOpenElsewhereError(sessionId: string): SessionResolutionError {
 }
 
 /**
+ * What {@link openOrCreateSessionById} opened. `resumed`: a stored session held the id and was
+ * opened as `--resume <id>` opens it; `manager` is `undefined` when the user declined to move it.
+ * Otherwise a new session was created under the id.
+ */
+type SessionIdOpening =
+	| { resumed: true; manager: SessionManager | undefined }
+	| { resumed: false; manager: SessionManager };
+
+/**
  * `--session-id <id>`: resume the stored session that holds exactly this id, as `--resume <id>`
  * opens it, else start a new session under the id. Refused while another live omp process owns
  * the session: this process would then write its turns to a new sibling session under another
- * id, and the id the launcher recorded would no longer name the conversation.
+ * id, and the id the launcher recorded would no longer name the conversation. Refused too when
+ * the ownership lease cannot be taken at all, since nothing then shows the session is this
+ * process's, and when the transcript is removed while it opens, rather than writing a new
+ * session under another id at its path.
  */
 async function openOrCreateSessionById(
 	sessionId: string,
@@ -1416,46 +1444,64 @@ async function openOrCreateSessionById(
 	sessionDir: string | undefined,
 	askToMoveSession: SessionPrompt,
 	onSessionContinuation: ((continuation: SessionContinuation) => void) | undefined,
-): Promise<SessionManager | undefined> {
-	// The scopes and storage `--resume <id>` searches, matched by the exact id rather than a prefix.
-	const findHolder = () => resolveResumeTarget(sessionId, cwd, sessionDir, { exactId: true });
-	let target = await findHolder();
-	if (!target) {
-		const creation = await SessionManager.createWithSessionId(
-			cwd,
-			sessionDir,
-			sessionId,
-			async () => (await findHolder()) !== undefined,
-		);
-		if (creation.status === "created") return creation.manager;
-		if (creation.status === "owned-elsewhere") throw sessionOpenElsewhereError(sessionId);
-		// Another launch stored the session between the lookup and the claim: resume it.
-		target = await findHolder();
-		if (!target) {
-			throw new SessionResolutionError(`Session "${sessionId}" not found.`, SESSION_NOT_FOUND_HINT);
-		}
-	}
-	// Claimed before it is opened: opening records it as the terminal's last session, and a session
-	// another live omp process owns is refused with nothing written.
-	const claim = SessionManager.claimStoredSession(target.session.path, target.session.id);
-	if (!claim) throw sessionOpenElsewhereError(sessionId);
+): Promise<SessionIdOpening> {
 	try {
-		const manager = await openResumeTarget(
-			sessionId,
-			target,
-			cwd,
-			sessionDir,
-			askToMoveSession,
-			onSessionContinuation,
-		);
-		// The manager takes its own claim before this one is released, so the session stays this process's.
-		if (manager?.isOwnedElsewhere()) {
-			await manager.close();
-			throw sessionOpenElsewhereError(sessionId);
+		// The scopes and storage `--resume <id>` searches, matched by the exact id rather than a prefix.
+		const findHolder = () => resolveResumeTarget(sessionId, cwd, sessionDir, { exactId: true });
+		let target = await findHolder();
+		if (!target) {
+			const creation = await SessionManager.createWithSessionId(
+				cwd,
+				sessionDir,
+				sessionId,
+				async () => (await findHolder()) !== undefined,
+			);
+			if (creation.status === "created") return { resumed: false, manager: creation.manager };
+			if (creation.status === "owned-elsewhere") throw sessionOpenElsewhereError(sessionId);
+			// Another launch stored the session between the lookup and the claim: resume it.
+			target = await findHolder();
+			if (!target) {
+				throw new SessionResolutionError(`Session "${sessionId}" not found.`, SESSION_NOT_FOUND_HINT);
+			}
 		}
-		return manager;
-	} finally {
-		claim();
+		// Claimed before it is opened: opening records it as the terminal's last session, and a session
+		// another live omp process owns is refused with nothing written.
+		const claim = SessionManager.claimStoredSession(target.session.path, target.session.id);
+		if (!claim) throw sessionOpenElsewhereError(sessionId);
+		try {
+			let manager: SessionManager | undefined;
+			try {
+				manager = await openResumeTarget(
+					sessionId,
+					target,
+					cwd,
+					sessionDir,
+					askToMoveSession,
+					onSessionContinuation,
+					true,
+				);
+			} catch (error) {
+				if (!isEnoent(error) && !isEnotdir(error)) throw error;
+				throw new SessionResolutionError(
+					`Session "${sessionId}" was removed while omp opened it. Nothing was written.`,
+					"Run this command again to start a new session under this id.",
+				);
+			}
+			// The manager takes its own claim before this one is released, so the session stays this process's.
+			if (manager?.isOwnedElsewhere()) {
+				await manager.close();
+				throw sessionOpenElsewhereError(sessionId);
+			}
+			return { resumed: true, manager };
+		} finally {
+			claim();
+		}
+	} catch (error) {
+		if (!(error instanceof SessionLeaseUnavailableError)) throw error;
+		throw new SessionResolutionError(
+			`Session "${sessionId}" was not opened. ${error.message}. Nothing was written.`,
+			"omp opens a session under --session-id only while it holds the session's ownership lease.",
+		);
 	}
 }
 
@@ -1475,6 +1521,8 @@ function validateSessionPersistenceArgs(parsed: Pick<Args, "continue" | "noSessi
  * before extensions establish whether a built-in-named flag belongs to them.
  * `onSessionContinuation` hears when `--resume`, `--continue` or auto-resume
  * opens a newer copy of the chosen session's conversation instead of its file.
+ * A `--session-id` launch that finds its stored session sets `parsed.resume` to
+ * the id, as `--continue <id>` does, so the rest of startup treats it as that resume.
  */
 export async function createSessionManager(
 	parsed: Args,
@@ -1487,13 +1535,18 @@ export async function createSessionManager(
 	} = {},
 ): Promise<SessionManager | undefined> {
 	if (parsed.sessionId !== undefined) {
-		return await openOrCreateSessionById(
+		const opening = await openOrCreateSessionById(
 			parsed.sessionId,
 			cwd,
 			parsed.sessionDir,
 			askToMoveSession,
 			options.onSessionContinuation,
 		);
+		// The stored session opened as `--resume <id>` opens it, so startup must go on as that resume
+		// does: a declined move exits, the launch switches to the session's project, and the session
+		// keeps its model, thinking level and prewalk choice. A new session under the id is a fresh launch.
+		if (opening.resumed) parsed.resume = parsed.sessionId;
+		return opening.manager;
 	}
 	if (parsed.fork) {
 		if (parsed.noSession) {

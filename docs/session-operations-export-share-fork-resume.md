@@ -479,16 +479,26 @@ every later one. The value must be a UUID (`8-4-4-4-12` hex digits); omp
 lowercases it, as it mints ids, so `--session-id "$(uuidgen)"` works where
 `uuidgen` prints uppercase. Any other value, or the flag with no value, is a
 usage error raised while the arguments are parsed, so no other session flag
-acts first.
+acts first. An extension flag named `session-id` does not shadow it: the startup
+parse and the extension-aware reparse both read it as the built-in flag, and the
+extension's flag gets no value.
 
 `createSessionManager()` first looks for a stored session that holds the id, the
 way `--resume <id>` would find it (`resolveResumeTarget` with `exactId`: the same
 scopes and storage, matched by the exact id rather than a prefix, the
-unlisted-file probe included). It opens that one as `--resume <id>` does,
-continuations and the moved-directory prompt included. A session that was packed
-and moved to another machine (`omp session pack`) forks to a copy under a new id
-when it opens, as with `--resume <id>`, so on this machine the id no longer names
-the conversation that goes on.
+unlisted-file probe included). The exact match also finds a session another
+client started (header `origin`, set from `PI_SESSION_ORIGIN`), which the
+terminal's listings otherwise skip, so a launch under that origin finds the
+session it wrote before. It opens that one as `--resume <id>` does,
+continuations and the moved-directory prompt included, and the rest of startup
+treats the launch as `--resume <id>`: answering no to the move prompt exits with
+`Resume cancelled: session was not moved.`, a session from another project
+switches the launch to that project, and the session keeps its own model,
+thinking level and prewalk choice. A new session under the id starts as a fresh
+launch. A session that was packed and moved to another machine
+(`omp session pack`) forks to a copy under a new id when it opens, as with
+`--resume <id>`, so on this machine the id no longer names the conversation that
+goes on.
 
 When no stored session holds the id, `SessionManager.createWithSessionId()`
 creates the session object without touching the terminal's last-session record,
@@ -496,6 +506,7 @@ claims the id's ownership lease for this process, and asks again whether a store
 session holds the id. If one does now, the launch resumes it. Otherwise the
 session's header is written at once, rather than with its first entry, so a later
 launch under the same id finds it, and only then is the terminal's record updated.
+If the lookup or the header write fails, the lease is given up again.
 
 Either way the session must be this process's. While another live omp process
 owns it (holds its ownership lease), a resume would write this process's turns to
@@ -503,8 +514,15 @@ a new sibling session under another id (see `"open-elsewhere"` in
 [session storage](./session.md)), so the launch is refused instead, before any
 model call, with exit status 1 and
 `Session "<id>" is open in another running omp process. Stop that process, then run this command again to resume it.`
-A refused launch writes nothing: no session file, no change to the other
-process's file, and no change to the terminal's record that `--continue` reads.
+Other omp writers count a lease that cannot be taken at all (for example, an
+ownership-lease directory omp cannot use) as their own; `--session-id` does not,
+because then nothing shows that another process does not own the id. It exits 1
+with `Session "<id>" was not opened. The ownership lease of session "<id>" is unavailable: <reason>. Nothing was written.`
+A stored session whose file is removed after the lookup found it is refused with
+`Session "<id>" was removed while omp opened it. Nothing was written.`, instead of
+a new session under another id at that path. A refused launch writes nothing: no
+session file, no change to the other process's file, and no change to the
+terminal's record that `--continue` reads.
 
 `--session-id` selects its session itself, so it is refused beside every other
 session selector: `--resume`/`-r`/`--session`, `--restore`, `--continue`/`-c`,

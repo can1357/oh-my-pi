@@ -238,7 +238,8 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 		result.sessionDir = value;
 	},
 	// Thrown at parse time, unlike the deferred enum errors: a deferred error would let `--fork`,
-	// `--resume` or an import act before the launch is refused.
+	// `--resume` or an import act before the launch is refused. No extension flag shadows it
+	// (see UNSHADOWABLE_FLAGS), so the extension-aware reparse reads it the same way.
 	"--session-id": (result, value) => {
 		// Lowercased: omp mints lowercase ids, and macOS `uuidgen` prints uppercase.
 		const id = value.toLowerCase();
@@ -333,6 +334,16 @@ export const STRING_VALUE_FLAGS: ReadonlySet<string> = new Set(Object.keys(STRIN
  * flag-looking successor remains a fresh flag (`--plan --profile work`).
  */
 export const EXTENSION_SHADOWABLE_STRING_FLAGS: ReadonlySet<string> = new Set(["--plan"]);
+
+/**
+ * Built-in flags no extension flag of the same name shadows, by the name an extension registers
+ * (without the dashes). `--session-id` selects or creates the session in the startup parse, before
+ * extensions load, so an extension that could own the name would either fail that parse with its
+ * own value or have a session opened for a value it meant for itself. {@link applyExtensionFlags}
+ * drops such a name from the flag set it reparses with, so both parses read the built-in flag and
+ * the extension's flag gets no value.
+ */
+export const FLAGS_EXTENSIONS_CANNOT_SHADOW: Readonly<Record<string, true>> = { "session-id": true };
 
 /**
  * Derived from {@link OPTIONAL_FLAGS}. Same single-source contract as
