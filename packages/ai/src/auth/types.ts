@@ -23,7 +23,7 @@ import type {
 } from "../usage";
 
 /** Default remaining quota protected for accounts without an explicit policy override. */
-export const DEFAULT_USAGE_RESERVE_PCT = 10;
+export { DEFAULT_USAGE_RESERVE_PCT } from "../auth-defaults";
 
 /** Stored API key used by credential selection. */
 export type ApiKeyCredential = {

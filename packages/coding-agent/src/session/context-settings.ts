@@ -3,8 +3,8 @@ import {
 	validateModelCompactionThresholds,
 } from "../config/compaction-threshold";
 import { combine, register, type SettingValueOf } from "../config/registry";
+import { SHAPE_VARIANT_NAMES } from "@oh-my-pi/snapcompact/shape-variants";
 import { COMPACTION_METHOD_CHOICES, DEFAULT_COMPACTION_METHOD_ORDER } from "./compaction-method-ids";
-import { SHAPE_VARIANT_NAMES } from "@oh-my-pi/snapcompact";
 
 const EMPTY_STRING_ARRAY: string[] = [];
 const EMPTY_MODEL_COMPACTION_THRESHOLDS: Record<string, AgentCompactionThresholdOverride> = {};

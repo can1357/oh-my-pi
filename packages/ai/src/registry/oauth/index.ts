@@ -18,6 +18,8 @@ import type {
 export * from "./anthropic";
 export * from "./device-code";
 export type * from "./types";
+import { isProviderUnpaused, notePauseOverride, providerPauseRevision, setUnpausedProviders } from "./pause-state";
+export { providerPauseRevision, setUnpausedProviders };
 
 // A provider whose login carries an account risk (`login-warning`) says so in its label.
 // One turned off in its auth rules (`disabled "<reason>"`) is filtered out at list time,
@@ -32,39 +34,6 @@ const builtInOAuthProviders: OAuthProviderInfo[] = PROVIDER_REGISTRY.filter(
 }));
 
 const customOAuthProviders = new Map<string, OAuthProviderInterface>();
-
-/** Paused provider ids the end user turned back on (see {@link setUnpausedProviders}). */
-let unpausedProviders: ReadonlySet<string> = new Set();
-
-/** Bumped whenever {@link providerPauseReason} may answer differently for some id. */
-let pauseRevision = 0;
-
-/**
- * Counter that moves whenever which providers are paused may have changed: the
- * unpaused list, or an extension login taking or releasing a paused id. Caches
- * that filter on {@link providerPauseReason} compare it to know when to refilter.
- */
-export function providerPauseRevision(): number {
-	return pauseRevision;
-}
-
-/** Bumps {@link pauseRevision} when `provider` is one the auth rules pause. */
-function notePauseOverride(provider: string): void {
-	if (providerDisabledReason(provider) !== undefined) pauseRevision++;
-}
-
-/**
- * Turns paused providers back on: each listed id ignores its `disabled "<reason>"`
- * auth rule, so it is a login choice again and its stored or env credentials resolve.
- * Replaces the previous list; ids that are not paused are ignored. Loaded credential
- * pools pick the change up on their next read.
- */
-export function setUnpausedProviders(providers: Iterable<string>): void {
-	const next = new Set(providers);
-	if (next.size === unpausedProviders.size && [...next].every(provider => unpausedProviders.has(provider))) return;
-	unpausedProviders = next;
-	pauseRevision++;
-}
 
 /**
  * Register a custom OAuth provider.
@@ -95,7 +64,7 @@ export function getOAuthProvider(id: OAuthProviderId): OAuthProviderInterface | 
  * takes the id back: that is the end user's choice.
  */
 export function providerPauseReason(provider: string): string | undefined {
-	if (customOAuthProviders.has(provider) || unpausedProviders.has(provider)) return undefined;
+	if (customOAuthProviders.has(provider) || isProviderUnpaused(provider)) return undefined;
 	return providerDisabledReason(provider);
 }
 

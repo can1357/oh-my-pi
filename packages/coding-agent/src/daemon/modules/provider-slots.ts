@@ -19,12 +19,14 @@
  * @example
  * configureProviderSlotBroker(new DaemonProviderSlots());
  */
-import type { ProviderSlotBroker } from "@oh-my-pi/pi-ai/stream";
-import { getConfigRootDir, isBunTestRuntime, isRecord, logger, toError } from "@oh-my-pi/pi-utils";
+import type { ProviderSlotBroker } from "@oh-my-pi/pi-ai/provider-slots";
+import { getConfigRootDir } from "@oh-my-pi/pi-utils/dirs";
+import * as logger from "@oh-my-pi/pi-utils/logger";
+import { isRecord, toError } from "@oh-my-pi/pi-utils/type-guards";
 import { lineReader } from "../../irc/mesh-protocol";
-import { daemonClient, openTunnel } from "../client";
 import type { DaemonModule, ModuleTunnel, ModuleUnit } from "../module";
 import { type DaemonClient, type DaemonTunnel, GLOBAL_SCOPE, type UnitPolicy } from "../protocol";
+import { openTunnel } from "../tunnel";
 
 /** Unit kind and `caps` key. */
 export const PROVIDER_SLOTS_KIND = "provider-slots";
@@ -174,9 +176,9 @@ export const providerSlotsModule: DaemonModule = {
 /** What a {@link DaemonProviderSlots} uses of the daemon connection. */
 export type ProviderSlotsDaemon = Pick<DaemonClient, "welcome" | "open" | "release" | "attach" | "onReconnect">;
 
-/** How a {@link DaemonProviderSlots} reaches the daemon and whose slots it shares; the defaults suit production. */
+/** How a {@link DaemonProviderSlots} reaches the daemon and whose slots it shares. */
 export interface DaemonProviderSlotsOptions {
-	/** Reaches the daemon; default {@link daemonClient}, and none under the test runner. */
+	/** Reaches the daemon; injected at the runtime composition boundary (omitted defaults to no daemon). */
 	connect?: () => Promise<ProviderSlotsDaemon | undefined>;
 	/** Unit key naming the processes that share limits; default the config root. */
 	key?: () => string;
@@ -195,11 +197,6 @@ interface SlotsLink {
 	daemon: ProviderSlotsDaemon;
 	tunnel: DaemonTunnel;
 	lease: string | undefined;
-}
-
-/** The test runner must never reach, or spawn, the user's daemon. */
-async function connectDaemon(): Promise<ProviderSlotsDaemon | undefined> {
-	return isBunTestRuntime() ? undefined : daemonClient();
 }
 
 /**
@@ -223,7 +220,7 @@ export class DaemonProviderSlots implements ProviderSlotBroker {
 	readonly #requests = new Map<number, SlotRequest>();
 
 	constructor(options: DaemonProviderSlotsOptions = {}) {
-		this.#connect = options.connect ?? connectDaemon;
+		this.#connect = options.connect ?? (async () => undefined);
 		this.#key = options.key ?? getConfigRootDir;
 	}
 

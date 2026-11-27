@@ -12,6 +12,10 @@
  */
 import { fitOutputTokensToContextWindow, type StreamFn, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import { type Model, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
+import { configureProviderSlotBroker } from "@oh-my-pi/pi-ai/provider-slots";
+import { isBunTestRuntime } from "@oh-my-pi/pi-utils/env";
+import { daemonClient } from "../daemon/client";
+import { DaemonProviderSlots } from "../daemon/modules/provider-slots";
 import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
 import { serverSideFallbackModels } from "@oh-my-pi/pi-catalog/compat/server-side-fallback";
 import { cfgOffline } from "../config/auxiliary-model-policy";
@@ -38,6 +42,13 @@ import {
 	cfgTextVerbosity,
 	validateProviderMaxInFlightRequests,
 } from "./settings";
+
+// The limits bind every omp process of this config root, through the daemon.
+configureProviderSlotBroker(
+	new DaemonProviderSlots({
+		connect: async () => (isBunTestRuntime() ? undefined : daemonClient()),
+	}),
+);
 
 /** Apply each API's setting once; standard Responses preferences can only narrow it. */
 export function resolveWebsocketPreference(

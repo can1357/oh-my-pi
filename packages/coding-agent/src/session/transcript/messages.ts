@@ -1,3 +1,4 @@
+import type { AdvisorSeverity } from "../../advisor/advisor-constants";
 import type { AssistantMessage, ImageContent, MessageAttribution, TextContent } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
@@ -337,9 +338,7 @@ export function isUserTurnInitiator(message: CustomMessage): boolean {
 }
 
 /** Advisor note severities, weakest first; ranks severity thresholds such as `advisor.continueSeverity`. */
-export const ADVISOR_SEVERITIES = ["nit", "concern", "blocker"] as const;
-
-export type AdvisorSeverity = (typeof ADVISOR_SEVERITIES)[number];
+export { ADVISOR_SEVERITIES, type AdvisorSeverity } from "../../advisor/advisor-constants";
 
 /** One queued advice note. */
 export interface AdvisorNote {
