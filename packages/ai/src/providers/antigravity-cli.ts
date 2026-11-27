@@ -18,6 +18,8 @@ import { StepWriter } from "./antigravity-cli/step-writer";
 export interface AntigravityCliOptions extends StreamOptions {
 	/** Selected model's native `thought_level`. */
 	reasoning?: Effort;
+	/** Pass an empty managed workspace directory to `agy` instead of `cwd` (default: `true`). */
+	isolateWorkspace?: boolean;
 }
 
 interface RetainedHost {
@@ -66,6 +68,7 @@ async function runStep(
 		reasoning: options.reasoning,
 		signal: options.signal,
 		credentialVersion: agyCredentialVersion(options.apiKey),
+		isolateWorkspace: options.isolateWorkspace,
 	};
 	const sessions = options.providerSessionState;
 	const key = `antigravity-acp:${account}:${options.sessionId ?? "default"}`;
