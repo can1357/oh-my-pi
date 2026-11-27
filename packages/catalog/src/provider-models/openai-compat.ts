@@ -12,7 +12,7 @@ import {
 } from "../compat/behavior";
 import { resolveAnthropicApiVersion } from "../compat/anthropic";
 import { xaiResponsesReasoningEffortMap } from "../compat/openai";
-import { hasModelScopedEffortLadder, resolveModelPolicy } from "../compat/resolve";
+import { hasModelScopedEffortLadder, resolveCatalogAxes, resolveModelPolicy } from "../compat/resolve";
 import { compareRevision, parseRevision, revisionAtLeast } from "../compat/revision";
 import { providerBaseUrl, providerEntries, providerEntry, seedModels } from "../compat/providers";
 import { billingVariantPlain, classifyModel, discoveryVocabulary } from "../compat/taxonomy";
@@ -6958,22 +6958,21 @@ function isCopilotSelectableModel(entry: OpenAICompatibleModelRecord): boolean {
 }
 
 /**
- * Price a Copilot tier. `token_prices` reports no cache-write price per tier, and an omitted
- * `cache_price` is unknown, not free (an explicit `0` is free). Both cache legs carry over from the
- * row the tier derives from, scaled by the tier's input-price ratio: live billing frames on a
- * 300K-token prompt priced the long tier of `gpt-6-luna`, `gpt-5.6-luna`, `gpt-6.1-terra` and
- * `gpt-6.2-sol` at exactly 2x input, cache read and cache write, and Haiku 5.5's rate card scales
- * both legs 5x with input.
+ * Price a Copilot tier. `token_prices` reports no per-tier cache-write price and often no
+ * `cache_price`; an omitted leg is unknown, not free, so it carries over from the row the tier
+ * derives from. `scaleCacheWithInput` (the `tier-cache-follows-input` KDL axis) scales the
+ * carried legs by the tier's input-price ratio; a reported `cache_price` always wins.
  */
 function copilotTierCost(
 	tier: CopilotTokenPriceTier | undefined,
 	inherited: ModelSpec<Api>["cost"],
+	scaleCacheWithInput: boolean,
 ): ModelSpec<Api>["cost"] | undefined {
 	if (tier?.inputPrice === undefined || tier.outputPrice === undefined) {
 		return undefined;
 	}
 	const input = tier.inputPrice / 100;
-	const ratio = inherited.input > 0 ? input / inherited.input : 1;
+	const ratio = scaleCacheWithInput && inherited.input > 0 ? input / inherited.input : 1;
 	return {
 		input,
 		output: tier.outputPrice / 100,
@@ -7005,18 +7004,22 @@ function createCopilotLongContextVariant(
 	if (base.contextWindow === null || variantWindow <= base.contextWindow) {
 		return undefined;
 	}
-	const longCost = copilotTierCost(longContext, base.cost);
-	return {
+	const variant: ModelSpec<Api> = {
 		...base,
 		id: `${base.id}${COPILOT_LONG_CONTEXT_ID_SUFFIX}`,
 		requestModelId: base.id,
 		name: `${base.name}${COPILOT_LONG_CONTEXT_NAME_SUFFIX}`,
 		contextWindow: variantWindow,
-		// Long-context tier has its own token prices (Gemini/GPT bill ~2x above
-		// the default boundary); see copilotTierCost for the cache legs.
-		...(longCost && { cost: longCost }),
 		contextPromotionTarget: undefined,
 	};
+	// Long-context tier has its own token prices (Gemini/GPT bill ~2x above
+	// the default boundary); see copilotTierCost for the cache legs.
+	const scaleCache = resolveCatalogAxes(variant).tierCacheFollowsInput === true;
+	const longCost = copilotTierCost(longContext, base.cost, scaleCache);
+	if (longCost) {
+		variant.cost = longCost;
+	}
+	return variant;
 }
 
 export function githubCopilotModelManagerOptions(config?: GithubCopilotModelManagerConfig): ModelManagerOptions<Api> {
@@ -7206,7 +7209,7 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 								delete base.thinking.effortRouting;
 							}
 						}
-						const defaultCost = copilotTierCost(tokenPrices.defaultTier, base.cost);
+						const defaultCost = copilotTierCost(tokenPrices.defaultTier, base.cost, false);
 						if (defaultCost) {
 							base.cost = defaultCost;
 						}
