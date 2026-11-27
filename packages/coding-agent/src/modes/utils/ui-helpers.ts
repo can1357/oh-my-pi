@@ -803,7 +803,10 @@ export class UiHelpers {
 		// A replica shows history only.
 		const tip = replica || ctx.viewSession.isStreaming ? undefined : sessionManager.getConversationTip();
 		if (tip) {
-			const [recap] = listSessionRecaps({ sessionIds: [sessionManager.getSessionId()], limit: 1 });
+			const [recap] = listSessionRecaps(
+				{ sessionIds: [sessionManager.getSessionId()], limit: 1 },
+				sessionManager.getRecapJournalPath?.(),
+			);
 			// `createdAt` has second precision; a recap lands at least a second after the turn it follows.
 			if (recap && recap.createdAt * 1000 > Date.parse(tip.timestamp)) {
 				const text = previewLine(recap.recap, TRUNCATE_LENGTHS.RECAP);

@@ -1037,6 +1037,11 @@ export class SessionManager {
 	readonly #persist: boolean;
 	readonly #storage: SessionStorage;
 	readonly #blobs: BlobStore;
+	/**
+	 * history.db holding this session's idle recap journal; undefined: the
+	 * process agent dir's, resolved on every write. See {@link setRecapJournalPath}.
+	 */
+	#recapJournalPath: string | undefined;
 
 	#sessionId = "";
 	/**
@@ -3637,17 +3642,32 @@ export class SessionManager {
 	}
 
 	/**
-	 * Journal an idle recap for this session in history.db. Recaps never enter
-	 * the session file or LLM context; in-memory sessions are not journaled.
-	 * Every other store journals them, a `SqlSessionStorage` or
-	 * `RedisSessionStorage` as files do: the archive's recap views and a
-	 * resumed session's recap line read only this journal, so a store left
-	 * out would show no recap at all.
+	 * Journal an idle recap for this session in its recap journal
+	 * ({@link getRecapJournalPath}). Recaps never enter the session file or
+	 * LLM context; in-memory sessions are not journaled. Every other store
+	 * journals them, a `SqlSessionStorage` or `RedisSessionStorage` as files
+	 * do: the archive's recap views and a resumed session's recap line read
+	 * only this journal, so a store left out would show no recap at all.
 	 */
 	recordRecap(recap: string): void {
 		if (this.#persist && !(this.#storage instanceof MemorySessionStorage)) {
-			recordSessionRecap(this.#sessionId, this.#cwd, recap);
+			recordSessionRecap(this.#sessionId, this.#cwd, recap, this.#recapJournalPath);
 		}
+	}
+
+	/**
+	 * Keep this session's idle recaps in the history.db at `dbPath` instead of
+	 * the process agent dir's; `undefined` goes back to the process agent dir's.
+	 * `createAgentSession` sets it for a session rooted in an agent dir of its
+	 * own, so that session's recaps stay out of the default journal and archive.
+	 */
+	setRecapJournalPath(dbPath: string | undefined): void {
+		this.#recapJournalPath = dbPath;
+	}
+
+	/** history.db holding this session's recap journal; undefined: the process agent dir's. */
+	getRecapJournalPath(): string | undefined {
+		return this.#recapJournalPath;
 	}
 
 	/**

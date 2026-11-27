@@ -208,7 +208,13 @@ function transcriptRef(id: string, cwd: string): string {
 	return id.endsWith(".jsonl") ? resolveToCwd(id, cwd) : id;
 }
 
-async function archiveView(params: ArchiveParams, cwd: string, signal?: AbortSignal): Promise<ArchiveView<unknown>> {
+/** `recapJournal`: the history.db whose recap journal the views read; undefined, the process agent dir's. */
+async function archiveView(
+	params: ArchiveParams,
+	cwd: string,
+	recapJournal: string | undefined,
+	signal?: AbortSignal,
+): Promise<ArchiveView<unknown>> {
 	// A transcript is bounded by its character budget, not a record limit.
 	if (params.action === "transcript") {
 		return archiveTranscript(transcriptRef(params.id, cwd), {
@@ -222,17 +228,17 @@ async function archiveView(params: ArchiveParams, cwd: string, signal?: AbortSig
 	const count = params.limit ?? DEFAULT_LIMIT;
 	switch (params.action) {
 		case "projects":
-			return archiveProjects(count, resolveWindow(params));
+			return archiveProjects(count, resolveWindow(params), recapJournal);
 		case "sessions":
-			return archiveSessions(scopeOf(params, cwd, count));
+			return archiveSessions(scopeOf(params, cwd, count), recapJournal);
 		case "session":
-			return archiveSession(transcriptRef(params.id, cwd), count);
+			return archiveSession(transcriptRef(params.id, cwd), count, recapJournal);
 		case "prompts":
 			return archivePrompts(params.query, scopeOf(params, cwd, count));
 		case "search":
-			return archiveSearch(params.query, scopeOf(params, cwd, count));
+			return archiveSearch(params.query, scopeOf(params, cwd, count), recapJournal);
 		case "recaps":
-			return archiveRecaps(scopeOf(params, cwd, count));
+			return archiveRecaps(scopeOf(params, cwd, count), recapJournal);
 		case "calls":
 			return archiveCalls(
 				callFilterOf(params),
@@ -313,7 +319,9 @@ export function createArchivePrelude(session: ToolSession): HostEvalPreludeDefin
 			const parsed = paramsSchema(parameters);
 			if (parsed instanceof type.errors)
 				throw new ToolError(`archive received invalid arguments: ${parsed.summary}`);
-			const view = await archiveView(parsed, session.cwd, context.signal);
+			// A session rooted in an agent dir of its own reads that dir's recap journal.
+			const recapJournal = session.sessionManager?.getRecapJournalPath?.();
+			const view = await archiveView(parsed, session.cwd, recapJournal, context.signal);
 			return { content: [{ type: "text", text: view.text }], details: view.records };
 		},
 		status: describeArchiveCall,

@@ -195,6 +195,11 @@ export interface AgentViewSessionManager extends AgentSessionManagerHandle {
 	getLeafId(): string | null;
 	/** The newest entry that moves the conversation, when the active branch ends at it (`conversationTip`). */
 	getConversationTip(): SessionEntry | undefined;
+	/**
+	 * history.db holding the session's idle recap journal; undefined: the process agent dir's. Absent on a
+	 * session homed on a subagent worker, which the task executor creates under the process agent dir.
+	 */
+	getRecapJournalPath?(): string | undefined;
 	/** Append a custom entry (a worker-homed session appends on its home thread). */
 	appendCustomEntry(customType: string, data?: unknown): void;
 	/** Flush pending writes to disk. */

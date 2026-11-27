@@ -17,7 +17,9 @@
  * Holds its own lazily-opened connection instead of {@link HistoryStorage}'s
  * path-pinned singleton: the db path is re-resolved on every call so
  * `setAgentDir`/profile switches (and test isolation) transparently reopen
- * against the right file. Never versions the db — `PRAGMA user_version` is
+ * against the right file. A recap writer or reader that names a db path (the
+ * journal of a session rooted in an agent dir of its own) gets that file
+ * instead. Never versions the db — `PRAGMA user_version` is
  * owned by HistoryStorage's rebuild pass, which drops only its own tables.
  */
 import { Database, type SQLQueryBindings, type Statement } from "bun:sqlite";
@@ -75,13 +77,14 @@ function closeHandle(): void {
 	handle = undefined;
 }
 
-function openSessionIndex(): SessionIndexHandle | undefined {
+/** `journalPath`: the history.db to open; omitted, the process agent dir's, resolved now. */
+function openSessionIndex(journalPath?: string): SessionIndexHandle | undefined {
 	// A test run never writes the user's history.db: under the test runner the
 	// index opens only an agent dir the test chose (`setAgentDir` exports
-	// PI_CODING_AGENT_DIR). Otherwise every test naming a file-backed session
-	// leaves a title row behind in the real index.
-	if (isBunTestRuntime() && !process.env.PI_CODING_AGENT_DIR) return undefined;
-	const dbPath = getHistoryDbPath();
+	// PI_CODING_AGENT_DIR) or a db the caller names. Otherwise every test
+	// naming a file-backed session leaves a title row behind in the real index.
+	if (journalPath === undefined && isBunTestRuntime() && !process.env.PI_CODING_AGENT_DIR) return undefined;
+	const dbPath = journalPath ?? getHistoryDbPath();
 	// A quarantined history.db is unlinked and recreated at the same path, so
 	// the path alone still matches a handle pinned to the dead inode. Reopen
 	// unless the file behind the path is still the one this handle was opened
@@ -193,11 +196,12 @@ export function lookupSessionTitle(sessionId: string): string | undefined {
 }
 
 /**
- * Append an idle recap to the session's recap journal. Best-effort: a journal
+ * Append an idle recap to the session's recap journal: the history.db at
+ * `journalPath`, else the process agent dir's. Best-effort: a journal
  * failure must never disturb the recap display, so errors are logged and swallowed.
  */
-export function recordSessionRecap(sessionId: string, cwd: string, recap: string): void {
-	const index = openSessionIndex();
+export function recordSessionRecap(sessionId: string, cwd: string, recap: string, journalPath?: string): void {
+	const index = openSessionIndex(journalPath);
 	if (!index) return;
 	try {
 		index.insertRecap.run(sessionId, cwd, recap);
@@ -236,12 +240,13 @@ interface SessionRecapRow {
 }
 
 /**
- * Journaled recaps matching `query`, newest first. Best-effort like the
- * writers: an unavailable index or failed read yields an empty list.
+ * Journaled recaps matching `query` in the history.db at `journalPath`, else
+ * the process agent dir's, newest first. Best-effort like the writers: an
+ * unavailable index or failed read yields an empty list.
  */
-export function listSessionRecaps(query: SessionRecapQuery = {}): SessionRecap[] {
+export function listSessionRecaps(query: SessionRecapQuery = {}, journalPath?: string): SessionRecap[] {
 	if (query.sessionIds?.length === 0) return [];
-	const index = openSessionIndex();
+	const index = openSessionIndex(journalPath);
 	if (!index) return [];
 	// A damaged page can decode foreign bytes into these columns; never hand them to callers.
 	const where = ["typeof(recap) = 'text'", "typeof(cwd) = 'text'", "typeof(created_at) = 'integer'"];

@@ -6,7 +6,9 @@
  * Sources: session JSONL files under the sessions root (stat-ordered; only the
  * listed files get a bounded header/tail scan, never a full transcript read),
  * history.db (prompt history, the title index, and the recap journal), and
- * the transcript index (transcripts.db).
+ * the transcript index (transcripts.db). A view given a `recapJournal` reads
+ * idle recaps from that history.db instead: the journal of a session rooted
+ * in an agent dir of its own.
  * Each view returns plain records and a compact text rendering the prelude
  * prints. Records carry every declared key: an absent value is `null`, never
  * a missing key, so Python callers can index them directly.
@@ -148,10 +150,17 @@ const TRANSCRIPT_FRESH_MS = 30_000;
 const SHORT_ID_LENGTH = 13;
 
 /** Recent projects, newest activity first. */
-export async function archiveProjects(limit: number, window?: TimeWindow): Promise<ArchiveView<ArchiveProject[]>> {
+export async function archiveProjects(
+	limit: number,
+	window?: TimeWindow,
+	recapJournal?: string,
+): Promise<ArchiveView<ArchiveProject[]>> {
 	const projects = await listRecentProjects(limit, { window });
 	const latest = await withExactMessageCounts(projects.map(project => project.latest));
-	const recaps = latestRecaps(projects.map(project => project.latest.id));
+	const recaps = latestRecaps(
+		projects.map(project => project.latest.id),
+		recapJournal,
+	);
 	const records = projects.map((project, index) => ({
 		path: project.cwd,
 		sessions: project.sessionCount,
@@ -172,7 +181,10 @@ export async function archiveProjects(limit: number, window?: TimeWindow): Promi
 }
 
 /** Newest non-empty sessions of one project (`cwd`) or of every project. */
-export async function archiveSessions(scope: ArchiveScope): Promise<ArchiveView<ArchiveSession[]>> {
+export async function archiveSessions(
+	scope: ArchiveScope,
+	recapJournal?: string,
+): Promise<ArchiveView<ArchiveSession[]>> {
 	const sessions = await withExactMessageCounts(
 		await listRecentSessions({
 			limit: scope.limit,
@@ -180,7 +192,10 @@ export async function archiveSessions(scope: ArchiveScope): Promise<ArchiveView<
 			window: scope.window,
 		}),
 	);
-	const recaps = latestRecaps(sessions.map(session => session.id));
+	const recaps = latestRecaps(
+		sessions.map(session => session.id),
+		recapJournal,
+	);
 	const records = sessions.map(session => toArchiveSession(session, recaps.get(session.id)));
 	if (records.length === 0) return { text: `No sessions ${scopeLabel(scope)}.`, records };
 	const lines = [`Sessions ${scopeLabel(scope)}, newest first:`];
@@ -199,10 +214,14 @@ export async function archiveSessions(scope: ArchiveScope): Promise<ArchiveView<
  * index up to date first, answering from what it holds when that takes longer
  * than {@link TRANSCRIPT_SYNC_WAIT_MS}; the listing then says so.
  */
-export async function archiveSearch(query: string, scope: ArchiveScope): Promise<ArchiveView<ArchiveSearchHit[]>> {
+export async function archiveSearch(
+	query: string,
+	scope: ArchiveScope,
+	recapJournal?: string,
+): Promise<ArchiveView<ArchiveSearchHit[]>> {
 	const words = wordQuery(query);
 	const caughtUp = words ? await transcriptsCaughtUp() : true;
-	const records = words ? await searchSessions(words, scope) : [];
+	const records = words ? await searchSessions(words, scope, recapJournal) : [];
 	const subject = `${scopeLabel(scope)} matching ${JSON.stringify(query)}`;
 	const lines = records.length === 0 ? [`No sessions ${subject}.`] : [`Sessions ${subject}, newest first:`];
 	for (const hit of records) {
@@ -220,7 +239,11 @@ export async function archiveSearch(query: string, scope: ArchiveScope): Promise
 }
 
 /** The newest `scope.limit` sessions matching `words`, each with its matches. */
-async function searchSessions(words: WordQuery, scope: ArchiveScope): Promise<ArchiveSearchHit[]> {
+async function searchSessions(
+	words: WordQuery,
+	scope: ArchiveScope,
+	recapJournal: string | undefined,
+): Promise<ArchiveSearchHit[]> {
 	const { cwd, window, limit } = scope;
 	const matches = new Map<string, ArchiveMatch[]>();
 	const add = (session: string, match: ArchiveMatch) => {
@@ -231,7 +254,7 @@ async function searchSessions(words: WordQuery, scope: ArchiveScope): Promise<Ar
 	for (const [session, title] of listSessionTitles()) {
 		if (words.test(title)) add(session, { source: "title", text: title, at: null });
 	}
-	for (const recap of listSessionRecaps({ cwd, window }).map(toArchiveRecap)) {
+	for (const recap of listSessionRecaps({ cwd, window }, recapJournal).map(toArchiveRecap)) {
 		if (words.test(recap.text)) add(recap.session, { source: "recap", text: recap.text, at: recap.at });
 	}
 	const ids = transcriptSessionIds(words, cwd, window);
@@ -244,7 +267,7 @@ async function searchSessions(words: WordQuery, scope: ArchiveScope): Promise<Ar
 	for (const match of transcriptMatches(words, listed, SEARCH_MESSAGE_MATCHES, window)) {
 		add(match.sessionId, { source: match.role, text: match.snippet, at: new Date(match.at).toISOString() });
 	}
-	const recaps = latestRecaps(listed);
+	const recaps = latestRecaps(listed, recapJournal);
 	return sessions.map(session => ({
 		...toArchiveSession(session, recaps.get(session.id)),
 		matches: matches.get(session.id) ?? [],
@@ -274,12 +297,16 @@ async function transcriptsCaughtUp(): Promise<boolean> {
  *
  * @throws {ToolError} when no session or several sessions match, or the file is not a session.
  */
-export async function archiveSession(idOrFile: string, limit: number): Promise<ArchiveView<ArchiveSessionDetail>> {
+export async function archiveSession(
+	idOrFile: string,
+	limit: number,
+	recapJournal?: string,
+): Promise<ArchiveView<ArchiveSessionDetail>> {
 	const file = await resolveSessionFile(idOrFile);
 	const read = await readSessionInfo(file);
 	if (!read) throw new ToolError(`Not a readable session file: ${shortenPath(file)}`);
 	const [info] = await withExactMessageCounts([read]);
-	const recaps = listSessionRecaps({ sessionIds: [info.id] })
+	const recaps = listSessionRecaps({ sessionIds: [info.id] }, recapJournal)
 		.map(toArchiveRecap)
 		.reverse();
 	const prompts = HistoryStorage.open().getRecent(limit, { sessionId: info.id }).map(toArchivePrompt).reverse();
@@ -335,8 +362,10 @@ export function archivePrompts(query: string | undefined, scope: ArchiveScope): 
 }
 
 /** Journaled idle recaps in scope, newest first. */
-export function archiveRecaps(scope: ArchiveScope): ArchiveView<ArchiveRecap[]> {
-	const records = listSessionRecaps({ cwd: scope.cwd, window: scope.window, limit: scope.limit }).map(toArchiveRecap);
+export function archiveRecaps(scope: ArchiveScope, recapJournal?: string): ArchiveView<ArchiveRecap[]> {
+	const records = listSessionRecaps({ cwd: scope.cwd, window: scope.window, limit: scope.limit }, recapJournal).map(
+		toArchiveRecap,
+	);
 	if (records.length === 0) return { text: `No recaps ${scopeLabel(scope)}.`, records };
 	const lines = [`Recaps ${scopeLabel(scope)}, newest first:`];
 	for (const recap of records) {
@@ -418,10 +447,10 @@ function sessionLine(session: ArchiveSession, cwd: string | undefined): string {
 	return `- ${facts.join(" · ")}`;
 }
 
-/** Newest recap per session id. */
-function latestRecaps(sessionIds: string[]): Map<string, string> {
+/** Newest recap per session id, from the history.db at `recapJournal` (undefined: the process agent dir's). */
+function latestRecaps(sessionIds: string[], recapJournal: string | undefined): Map<string, string> {
 	const latest = new Map<string, string>();
-	for (const row of listSessionRecaps({ sessionIds })) {
+	for (const row of listSessionRecaps({ sessionIds }, recapJournal)) {
 		if (!latest.has(row.sessionId)) latest.set(row.sessionId, row.recap);
 	}
 	return latest;

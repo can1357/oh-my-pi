@@ -39,14 +39,16 @@ afterEach(() => {
 
 /**
  * A session whose two prompts were appended a minute before two recaps were journaled (the journal stamps rows
- * with SQLite's clock, so only the entries are backdated). Returns it with both prompts' entry ids.
+ * with SQLite's clock, so only the entries are backdated), in the history.db at `journalPath` when given (the
+ * session's own recap journal), else the process agent dir's. Returns it with both prompts' entry ids.
  */
-function sessionWithRecaps(): {
+function sessionWithRecaps(journalPath?: string): {
 	sessionManager: SessionManager;
 	firstId: string;
 	lastId: string;
 } {
 	const sessionManager = SessionManager.inMemory();
+	sessionManager.setRecapJournalPath(journalPath);
 	setSystemTime(Date.now() - 60_000);
 	let firstId: string;
 	let lastId: string;
@@ -64,8 +66,8 @@ function sessionWithRecaps(): {
 	} finally {
 		setSystemTime();
 	}
-	recordSessionRecap(sessionManager.getSessionId(), root, "first recap");
-	recordSessionRecap(sessionManager.getSessionId(), root, "latest recap");
+	recordSessionRecap(sessionManager.getSessionId(), root, "first recap", journalPath);
+	recordSessionRecap(sessionManager.getSessionId(), root, "latest recap", journalPath);
 	return { sessionManager, firstId, lastId };
 }
 
@@ -79,6 +81,14 @@ function replayRecaps(sessionManager: SessionManager): string[] {
 describe("idle recap across a transcript replay", () => {
 	it("re-shows only the newest journaled recap when it follows the conversation", () => {
 		const recaps = replayRecaps(sessionWithRecaps().sessionManager);
+		expect(recaps).toHaveLength(1);
+		expect(recaps[0]).toContain("latest recap");
+	});
+
+	it("reads the recap from the session's own journal, not the process agent dir's", () => {
+		const { sessionManager } = sessionWithRecaps(path.join(root, "scoped-agent", "history.db"));
+		recordSessionRecap(sessionManager.getSessionId(), root, "default journal recap");
+		const recaps = replayRecaps(sessionManager);
 		expect(recaps).toHaveLength(1);
 		expect(recaps[0]).toContain("latest recap");
 	});

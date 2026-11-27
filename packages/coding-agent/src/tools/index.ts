@@ -371,11 +371,17 @@ export interface ToolSession {
 	/** Get session file */
 	getSessionFile: () => string | null;
 	/**
-	 * Owning journal; full SDK managers also supply registered identity and the
-	 * cost ledger (`appendModelUsage`) without changing advisor-local IDs.
+	 * Owning journal; full SDK managers also supply registered identity, the
+	 * cost ledger (`appendModelUsage`) without changing advisor-local IDs, and
+	 * the recap journal the archive's recap views read (`getRecapJournalPath`).
 	 */
 	sessionManager?: Pick<SessionManager, "appendCustomEntry" | "ensureOnDisk" | "flush" | "getBranch" | "getEntries"> &
-		Partial<Pick<SessionManager, "getSessionId" | "getLeafId" | "appendModelUsage" | "getArtifactsDir">>;
+		Partial<
+			Pick<
+				SessionManager,
+				"getSessionId" | "getLeafId" | "appendModelUsage" | "getArtifactsDir" | "getRecapJournalPath"
+			>
+		>;
 	/**
 	 * Session-owned raw SSE capture, shared with the `/debug` report. Optional:
 	 * helper and standalone contexts without one simply forgo `/debug` capture.
