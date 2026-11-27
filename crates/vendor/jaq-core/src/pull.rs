@@ -39,7 +39,15 @@ pub enum Action<'a, T> {
     /// Leave a replay source suspended and start its consumer.
     ReplayScope(Replay<T>, Box<dyn Node<'a,T> + 'a>, Box<dyn Node<'a,T> + 'a>),
     /// Read an indexed item from a replay source in this evaluation.
-    Read(Replay<T>, usize),
+    Read {
+        /// Source shared among the fold's initial values and update branches.
+        replay: Replay<T>,
+        /// Absolute position in the input stream.
+        index: usize,
+        /// Keep this item for another branch. If false, no future read may
+        /// request this index or any previous one.
+        retain: bool,
+    },
     /// Stop the newest child and resume this node with `End`.
     Discard,
     /// Abandon the child this node last descended into and drive `child` instead.
@@ -211,14 +219,15 @@ pub struct FlatMap<'a, T, F> {
     outer_last: bool,
 }
 
-impl<'a, T: 'a, F: FnMut(T) -> Result<Box<dyn Node<'a, T> + 'a>, T> + 'a> FlatMap<'a, T, F> {
-    /// Create a node flat-mapping the items of `child` with `f`.
+impl<'a, T: 'a, F: FnMut(T, bool) -> Result<Box<dyn Node<'a, T> + 'a>, T> + 'a> FlatMap<'a, T, F> {
+    /// Create a node flat-mapping the items of `child` with `f`. The second
+    /// argument to `f` is true only for a known final child item.
     pub fn new(child: Box<dyn Node<'a, T> + 'a>, f: F) -> Self {
         Self { child, f, started: false, outer: true, outer_last: false }
     }
 }
 
-impl<'a, T: 'a, F: FnMut(T) -> Result<Box<dyn Node<'a, T> + 'a>, T> + 'a> Node<'a, T> for FlatMap<'a, T, F> {
+impl<'a, T: 'a, F: FnMut(T, bool) -> Result<Box<dyn Node<'a, T> + 'a>, T> + 'a> Node<'a, T> for FlatMap<'a, T, F> {
     fn last(&self, child_last: bool) -> bool { child_last && (self.outer || self.outer_last) }
 
     fn resume(&mut self, input: Input<T>) -> Action<'a, T> { self.resume_item(input,false) }
@@ -233,7 +242,7 @@ impl<'a, T: 'a, F: FnMut(T) -> Result<Box<dyn Node<'a, T> + 'a>, T> + 'a> Node<'
             Input::Start => Action::Continue,
             Input::Item(x) if self.outer => {
                 self.outer_last = last;
-                match (self.f)(x) {
+                match (self.f)(x, last) {
                     Ok(child) => { self.outer = false; Action::Descend(child) },
                     Err(x) => Action::Yield(x),
                 }
@@ -298,9 +307,10 @@ pub struct Replay<T>(Rc<RefCell<ReplayState<T>>>);
 
 struct ReplayState<T> {
     frame: Option<usize>,
-    items: Vec<T>,
+    first: usize,
+    items: VecDeque<T>,
     done: bool,
-    waiter: Option<(usize, usize)>,
+    waiter: Option<(usize, usize, bool)>,
     copy: fn(&T) -> T,
 }
 
@@ -311,7 +321,7 @@ impl<T> Clone for Replay<T> {
 impl<T> Replay<T> {
     /// Create an empty cache, with a copy operation for its items.
     pub fn new(copy: fn(&T) -> T) -> Self {
-        Self(Rc::new(RefCell::new(ReplayState { frame: None, items: Vec::new(), done: false, waiter: None, copy })))
+        Self(Rc::new(RefCell::new(ReplayState { frame: None, first: 0, items: VecDeque::new(), done: false, waiter: None, copy })))
     }
 }
 
@@ -330,12 +340,17 @@ pub fn with_replay<'a, T: 'a>(replay: Replay<T>, source: Box<dyn Node<'a,T> + 'a
     Box::new(Scope(Some((replay, source, body))))
 }
 
+const NO_FRAME: usize = usize::MAX;
+
 struct Frame<'a, T> {
     node: Box<dyn Node<'a, T> + 'a>,
     parent: usize,
     depth: usize,
     replay: Option<Replay<T>>,
-    children: Vec<usize>,
+    // Children form a stack of arena indices. A suspended producer needs
+    // only a link to its older sibling, not a separate Vec in each parent.
+    child: usize,
+    older: usize,
 }
 
 /// Drives a tree of [`Node`]s on the heap, yielding one item at a time.
@@ -354,7 +369,7 @@ impl<'a, T: 'a> Driver<'a, T> {
     /// Create a driver over the root node.
     pub fn new(root: Box<dyn Node<'a, T> + 'a>, too_deep: fn() -> T, limit: usize) -> Self {
         Self {
-            frames: Vec::from([Some(Frame { node: root, parent: 0, depth: 0, replay: None, children: Vec::new() })]),
+            frames: Vec::from([Some(Frame { node: root, parent: 0, depth: 0, replay: None, child: NO_FRAME, older: NO_FRAME })]),
             free: Vec::new(),
             discard: Vec::new(),
             active: 0,
@@ -380,7 +395,8 @@ impl<'a, T: 'a> Driver<'a, T> {
         } else {
             node
         };
-        let frame = Some(Frame { node, parent, depth, replay: None, children: Vec::new() });
+        let older = self.frame(parent).child;
+        let frame = Some(Frame { node, parent, depth, replay: None, child: NO_FRAME, older });
         let child = if let Some(child) = self.free.pop() {
             self.frames[child] = frame;
             child
@@ -389,16 +405,21 @@ impl<'a, T: 'a> Driver<'a, T> {
             self.frames.push(frame);
             child
         };
-        self.frame(parent).children.push(child);
+        self.frame(parent).child = child;
         child
     }
 
-    fn discard(&mut self, id: usize) {
-        self.discard.push(id);
-        while let Some(id) = self.discard.pop() {
+    fn discard(&mut self, mut id: usize) {
+        loop {
             let frame = self.frames[id].take().unwrap();
-            self.discard.extend(frame.children);
+            let mut child = frame.child;
+            while child != NO_FRAME {
+                self.discard.push(child);
+                child = self.frame(child).older;
+            }
             self.free.push(id);
+            let Some(next) = self.discard.pop() else { break };
+            id = next;
         }
     }
 
@@ -421,17 +442,20 @@ impl<'a, T: 'a> Driver<'a, T> {
                         return None;
                     }
                     let p = self.frame(i).parent;
-                    let siblings = &mut self.frame(p).children;
-                    if siblings.last() == Some(&i) {
-                        siblings.pop();
+                    let top = self.frame(p).child;
+                    let older = self.frame(i).older;
+                    if top == i {
+                        self.frame(p).child = older;
                     } else {
-                        debug_assert_eq!(siblings.first(), Some(&i));
-                        siblings.remove(0);
+                        // A replay scope has two children: its body and its
+                        // source. The source finishes while the body waits.
+                        debug_assert_eq!(self.frame(top).older, i);
+                        self.frame(top).older = older;
                     }
                     let target = if let Some(replay) = self.frame(i).replay.take() {
                         let mut replay = replay.0.borrow_mut();
                         replay.done = true;
-                        let (waiter, offset) = replay.waiter.take().unwrap();
+                        let (waiter, offset, _) = replay.waiter.take().unwrap();
                         self.replay_offset = offset;
                         waiter
                     } else { p };
@@ -445,16 +469,21 @@ impl<'a, T: 'a> Driver<'a, T> {
                     let frame = self.frames[i].as_ref().unwrap();
                     self.active = if let Some(replay) = &frame.replay {
                         let mut replay = replay.0.borrow_mut();
-                        let saved = (replay.copy)(&x);
-                        replay.items.push(saved);
-                        let (waiter, offset) = replay.waiter.take().unwrap();
+                        let (waiter, offset, retain) = replay.waiter.take().unwrap();
+                        if retain {
+                            let saved = (replay.copy)(&x);
+                            replay.items.push_back(saved);
+                        } else {
+                            debug_assert!(replay.items.is_empty());
+                            replay.first += 1;
+                        }
                         self.replay_offset = offset;
                         waiter
                     } else { frame.parent };
                     input = Input::Item(x);
                 },
                 Action::Continue => {
-                    self.active = *self.frame(i).children.last().expect("node continued without a child");
+                    self.active = self.frame(i).child;
                     input = Input::Start;
                 },
                 Action::ReplayScope(replay, source, body) => {
@@ -464,20 +493,33 @@ impl<'a, T: 'a> Driver<'a, T> {
                     self.active = self.descend(i, body);
                     input = Input::Start;
                 },
-                Action::Read(replay, pos) => {
+                Action::Read { replay, index, retain } => {
                     let mut replay = replay.0.borrow_mut();
-                    input = if let Some(x) = replay.items.get(pos) {
+                    let relative = index - replay.first;
+                    if !retain {
+                        // Nothing can restart at an earlier input. Release
+                        // the consumed prefix and transfer items to the sole
+                        // remaining branch instead of keeping another copy.
+                        if relative != 0 {
+                            replay.items.drain(..relative);
+                            replay.first = index;
+                        }
+                    }
+                    input = if !retain && !replay.items.is_empty() {
+                        replay.first += 1;
+                        Input::Item(replay.items.pop_front().unwrap())
+                    } else if let Some(x) = replay.items.get(index - replay.first) {
                         Input::Item((replay.copy)(x))
                     } else if replay.done {
                         Input::End
                     } else {
-                        debug_assert_eq!(pos, replay.items.len());
+                        debug_assert_eq!(index, replay.first + replay.items.len());
                         let source = replay.frame.unwrap();
                         let offset = (self.frame(i).depth + 1).saturating_sub(self.frame(source).depth);
                         if self.frame(source).depth + offset + self.replay_offset >= self.limit {
                             Input::Item((self.too_deep)())
                         } else {
-                            assert!(replay.waiter.replace((i, self.replay_offset)).is_none());
+                            assert!(replay.waiter.replace((i, self.replay_offset, retain)).is_none());
                             self.replay_offset += offset;
                             self.active = source;
                             Input::Start
@@ -490,25 +532,27 @@ impl<'a, T: 'a> Driver<'a, T> {
                 },
                 Action::Install(node) => {
                     let frame = self.frame(i);
-                    debug_assert!(frame.children.is_empty());
+                    debug_assert_eq!(frame.child, NO_FRAME);
                     frame.node = node;
                     input = Input::Start;
                 },
                 Action::TailBranch(child) => {
-                    let suspended = *self.frame(i).children.last().expect("tail call without a child");
+                    let suspended = self.frame(i).child;
                     let depth = self.frame(suspended).depth + 1;
                     self.active = self.descend_at(i, depth, child);
                     input = Input::Start;
                 },
                 Action::Replace(child) => {
-                    let old = self.frame(i).children.pop().expect("node replaced without a child");
+                    let old = self.frame(i).child;
+                    self.frame(i).child = self.frame(old).older;
                     let depth = self.frame(old).depth;
                     self.discard(old);
                     self.active = self.descend_at(i, depth, child);
                     input = Input::Start;
                 },
                 Action::Discard => {
-                    let old = self.frame(i).children.pop().expect("node discarded without a child");
+                    let old = self.frame(i).child;
+                    self.frame(i).child = self.frame(old).older;
                     self.discard(old);
                     input = Input::End;
                 },
