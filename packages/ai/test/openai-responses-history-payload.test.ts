@@ -53,9 +53,9 @@ function getOpenAIReasoningModel(provider: GeneratedProvider, id: string): Model
 	return model;
 }
 
-const ISSUE_5002_PATCH = "*** Begin Patch\n*** End Patch\n";
-const ISSUE_5002_TOOL_OUTPUT = "patch applied";
-const issue5002XaiOAuthModel = buildModel({
+const EMPTY_PATCH = "*** Begin Patch\n*** End Patch\n";
+const APPLY_PATCH_OUTPUT = "patch applied";
+const xaiOAuthModel = buildModel({
 	id: "grok-build",
 	name: "Grok Build",
 	api: "openai-responses",
@@ -68,7 +68,7 @@ const issue5002XaiOAuthModel = buildModel({
 	maxTokens: 64000,
 } satisfies ModelSpec<"openai-responses">);
 
-const issue5002ZeroUsage = {
+const zeroUsage = {
 	input: 0,
 	output: 0,
 	cacheRead: 0,
@@ -76,7 +76,7 @@ const issue5002ZeroUsage = {
 	totalTokens: 0,
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
-const issue5002EditTool: Tool = {
+const applyPatchTool: Tool = {
 	name: "edit",
 	customWireName: "apply_patch",
 	description: "Apply a hashline patch",
@@ -241,7 +241,7 @@ function selfHostedAssistantTurn(
 		api: plaintextReasoningModel.api,
 		provider: plaintextReasoningModel.provider,
 		model: plaintextReasoningModel.id,
-		usage: issue5002ZeroUsage,
+		usage: zeroUsage,
 		stopReason,
 		providerPayload: createOpenAIResponsesHistoryPayload(plaintextReasoningModel.provider, nativeItems),
 		timestamp: Date.now(),
@@ -278,7 +278,7 @@ function resumedEncryptedReasoningContext(model: Model<"openai-responses">): Con
 				api: model.api,
 				provider: model.provider,
 				model: model.id,
-				usage: issue5002ZeroUsage,
+				usage: zeroUsage,
 				stopReason: "stop",
 				providerPayload: createOpenAIResponsesHistoryPayload(model.provider, [
 					{ type: "reasoning", id: "rs_1", summary: [], encrypted_content: "enc_turn_1" },
@@ -395,7 +395,7 @@ function findResponsesInputItem(input: unknown[] | undefined, type: string): Rec
 	}) as Record<string, unknown> | undefined;
 }
 
-function isIssue5002Record(value: unknown): value is Record<string, unknown> {
+function isRecord(value: unknown): value is Record<string, unknown> {
 	if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
 	return true;
 }
@@ -406,7 +406,7 @@ function findResponsesInputItemByCallId(
 	callId: string,
 ): Record<string, unknown> | undefined {
 	for (const item of input) {
-		if (!isIssue5002Record(item)) continue;
+		if (!isRecord(item)) continue;
 		if (item.type === type && item.call_id === callId) return item;
 	}
 	return undefined;
@@ -415,7 +415,7 @@ function findResponsesInputItemByCallId(
 function listResponsesToolItems(input: unknown[] | undefined): Array<[unknown, unknown, unknown]> {
 	const tools: Array<[unknown, unknown, unknown]> = [];
 	for (const item of input ?? []) {
-		if (!isIssue5002Record(item)) continue;
+		if (!isRecord(item)) continue;
 		if (item.type === "function_call" || item.type === "function_call_output") {
 			tools.push([item.type, item.call_id, item.name]);
 		}
@@ -430,7 +430,7 @@ function collectResponsesInputImageDetails(input: unknown): string[] {
 			for (const child of node) visit(child);
 			return;
 		}
-		if (!isIssue5002Record(node)) return;
+		if (!isRecord(node)) return;
 		if (node.type === "input_image" && typeof node.detail === "string") details.push(node.detail);
 		for (const key in node) visit(node[key]);
 	};
@@ -570,14 +570,14 @@ describe("OpenAI responses history payload", () => {
 							type: "toolCall",
 							id: "call_apply",
 							name: "apply_patch",
-							arguments: { input: ISSUE_5002_PATCH },
+							arguments: { input: EMPTY_PATCH },
 							customWireName: "apply_patch",
 						},
 					],
 					api: "openai-responses",
 					provider: "openai",
 					model: "gpt-5-mini",
-					usage: issue5002ZeroUsage,
+					usage: zeroUsage,
 					stopReason: "toolUse",
 					timestamp: Date.now(),
 				},
@@ -585,31 +585,31 @@ describe("OpenAI responses history payload", () => {
 					role: "toolResult",
 					toolCallId: "call_apply",
 					toolName: "edit",
-					content: [{ type: "text", text: ISSUE_5002_TOOL_OUTPUT }],
+					content: [{ type: "text", text: APPLY_PATCH_OUTPUT }],
 					isError: false,
 					timestamp: Date.now(),
 				},
 			],
-			tools: [issue5002EditTool],
+			tools: [applyPatchTool],
 		};
 
 		const xaiInput = buildResponsesInput({
-			model: issue5002XaiOAuthModel,
+			model: xaiOAuthModel,
 			context,
 			strictResponsesPairing: false,
-			supportsImageDetailOriginal: issue5002XaiOAuthModel.compat.supportsImageDetailOriginal,
-			nativeHistory: { replay: true, filterReasoning: issue5002XaiOAuthModel.compat.filterReasoningHistory },
+			supportsImageDetailOriginal: xaiOAuthModel.compat.supportsImageDetailOriginal,
+			nativeHistory: { replay: true, filterReasoning: xaiOAuthModel.compat.filterReasoningHistory },
 		});
 		expect(findResponsesInputItemByCallId(xaiInput, "function_call", "call_apply")).toEqual({
 			type: "function_call",
 			call_id: "call_apply",
 			name: "edit",
-			arguments: JSON.stringify({ input: ISSUE_5002_PATCH }),
+			arguments: JSON.stringify({ input: EMPTY_PATCH }),
 		});
 		expect(findResponsesInputItemByCallId(xaiInput, "function_call_output", "call_apply")).toEqual({
 			type: "function_call_output",
 			call_id: "call_apply",
-			output: ISSUE_5002_TOOL_OUTPUT,
+			output: APPLY_PATCH_OUTPUT,
 		});
 		expect(JSON.stringify(xaiInput)).not.toContain("custom_tool_call");
 		expect(collectResponsesInputImageDetails(xaiInput)).toEqual(["auto"]);
@@ -626,12 +626,12 @@ describe("OpenAI responses history payload", () => {
 			type: "custom_tool_call",
 			call_id: "call_apply",
 			name: "apply_patch",
-			input: ISSUE_5002_PATCH,
+			input: EMPTY_PATCH,
 		});
 		expect(findResponsesInputItemByCallId(openaiInput, "custom_tool_call_output", "call_apply")).toEqual({
 			type: "custom_tool_call_output",
 			call_id: "call_apply",
-			output: ISSUE_5002_TOOL_OUTPUT,
+			output: APPLY_PATCH_OUTPUT,
 		});
 		expect(collectResponsesInputImageDetails(openaiInput)).toEqual(["original"]);
 	});
@@ -646,11 +646,11 @@ describe("OpenAI responses history payload", () => {
 					{ type: "input_image", detail: "original", image_url: "data:image/png;base64,ZmFrZQ==" },
 				],
 			},
-			{ type: "custom_tool_call", call_id: "call_native_apply", name: "apply_patch", input: ISSUE_5002_PATCH },
+			{ type: "custom_tool_call", call_id: "call_native_apply", name: "apply_patch", input: EMPTY_PATCH },
 			{
 				type: "custom_tool_call_output",
 				call_id: "call_native_apply",
-				output: ISSUE_5002_TOOL_OUTPUT,
+				output: APPLY_PATCH_OUTPUT,
 			},
 		];
 		const xaiContext: Context = {
@@ -660,8 +660,8 @@ describe("OpenAI responses history payload", () => {
 					content: [{ type: "text", text: "fallback should not be replayed" }],
 					api: "openai-responses",
 					provider: "xai-oauth",
-					model: issue5002XaiOAuthModel.id,
-					usage: issue5002ZeroUsage,
+					model: xaiOAuthModel.id,
+					usage: zeroUsage,
 					stopReason: "stop",
 					providerPayload: createOpenAIResponsesHistoryPayload("xai-oauth", nativeHistoryItems),
 					timestamp: Date.now(),
@@ -671,22 +671,22 @@ describe("OpenAI responses history payload", () => {
 		};
 
 		const xaiInput = buildResponsesInput({
-			model: issue5002XaiOAuthModel,
+			model: xaiOAuthModel,
 			context: xaiContext,
 			strictResponsesPairing: false,
-			supportsImageDetailOriginal: issue5002XaiOAuthModel.compat.supportsImageDetailOriginal,
-			nativeHistory: { replay: true, filterReasoning: issue5002XaiOAuthModel.compat.filterReasoningHistory },
+			supportsImageDetailOriginal: xaiOAuthModel.compat.supportsImageDetailOriginal,
+			nativeHistory: { replay: true, filterReasoning: xaiOAuthModel.compat.filterReasoningHistory },
 		});
 		expect(findResponsesInputItemByCallId(xaiInput, "function_call", "call_native_apply")).toEqual({
 			type: "function_call",
 			call_id: "call_native_apply",
 			name: "edit",
-			arguments: JSON.stringify({ input: ISSUE_5002_PATCH }),
+			arguments: JSON.stringify({ input: EMPTY_PATCH }),
 		});
 		expect(findResponsesInputItemByCallId(xaiInput, "function_call_output", "call_native_apply")).toEqual({
 			type: "function_call_output",
 			call_id: "call_native_apply",
-			output: ISSUE_5002_TOOL_OUTPUT,
+			output: APPLY_PATCH_OUTPUT,
 		});
 		expect(JSON.stringify(xaiInput)).not.toContain("custom_tool_call");
 		expect(collectResponsesInputImageDetails(xaiInput)).toEqual(["auto"]);
@@ -700,7 +700,7 @@ describe("OpenAI responses history payload", () => {
 					api: "openai-responses",
 					provider: "openai",
 					model: openaiModel.id,
-					usage: issue5002ZeroUsage,
+					usage: zeroUsage,
 					stopReason: "stop",
 					providerPayload: createOpenAIResponsesHistoryPayload("openai", nativeHistoryItems),
 					timestamp: Date.now(),
@@ -719,12 +719,12 @@ describe("OpenAI responses history payload", () => {
 			type: "custom_tool_call",
 			call_id: "call_native_apply",
 			name: "apply_patch",
-			input: ISSUE_5002_PATCH,
+			input: EMPTY_PATCH,
 		});
 		expect(findResponsesInputItemByCallId(openaiInput, "custom_tool_call_output", "call_native_apply")).toEqual({
 			type: "custom_tool_call_output",
 			call_id: "call_native_apply",
-			output: ISSUE_5002_TOOL_OUTPUT,
+			output: APPLY_PATCH_OUTPUT,
 		});
 		expect(collectResponsesInputImageDetails(openaiInput)).toEqual(["original"]);
 	});
@@ -1150,7 +1150,7 @@ describe("OpenAI responses history payload", () => {
 				api: model.api,
 				provider: model.provider,
 				model: model.id,
-				usage: issue5002ZeroUsage,
+				usage: zeroUsage,
 			} as const;
 			return {
 				messages: [
@@ -1240,7 +1240,7 @@ describe("OpenAI responses history payload", () => {
 						api: model.api,
 						provider: model.provider,
 						model: model.id,
-						usage: issue5002ZeroUsage,
+						usage: zeroUsage,
 						role: "assistant",
 						content: [
 							{ type: "thinking", thinking: "Open a.txt." },
@@ -1334,7 +1334,7 @@ describe("OpenAI responses history payload", () => {
 			provider: "github-copilot",
 			model: "gpt-5.6-sol",
 			stopReason: "stop",
-			usage: issue5002ZeroUsage,
+			usage: zeroUsage,
 			content: [
 				{
 					type: "thinking",
@@ -1375,7 +1375,7 @@ describe("OpenAI responses history payload", () => {
 				provider: "opencode-go",
 				model: "deepseek-v4-flash",
 				stopReason: "stop",
-				usage: issue5002ZeroUsage,
+				usage: zeroUsage,
 				content: [
 					{ type: "thinking", thinking: "Inspect bar.ts before editing." },
 					{ type: "text", text: "Edited bar.ts." },
@@ -1406,7 +1406,7 @@ describe("OpenAI responses history payload", () => {
 				provider: "anthropic",
 				model: "claude-sonnet-4-5",
 				stopReason: "stop",
-				usage: issue5002ZeroUsage,
+				usage: zeroUsage,
 				content: [
 					{ type: "thinking", thinking: "Cross-provider reasoning." },
 					{ type: "text", text: "Answer." },
@@ -1426,7 +1426,7 @@ describe("OpenAI responses history payload", () => {
 				provider: "opencode-go",
 				model: "deepseek-v4-flash",
 				stopReason: "stop",
-				usage: issue5002ZeroUsage,
+				usage: zeroUsage,
 				content: [{ type: "text", text: "Edited bar.ts." }],
 				timestamp: Date.now(),
 			};
@@ -1451,7 +1451,7 @@ describe("OpenAI responses history payload", () => {
 				provider: "opencode-go",
 				model: "deepseek-v4-flash",
 				stopReason: "stop",
-				usage: issue5002ZeroUsage,
+				usage: zeroUsage,
 				content: [
 					{ type: "thinking", thinking: "", itemId: "rs_upstream" },
 					{ type: "text", text: "Edited bar.ts." },
@@ -1488,7 +1488,7 @@ describe("OpenAI responses history payload", () => {
 				provider: "anthropic",
 				model: "claude-opus-4-5",
 				stopReason: "toolUse",
-				usage: issue5002ZeroUsage,
+				usage: zeroUsage,
 				content: [
 					{ type: "thinking", thinking: "Inspect bar.ts before editing.", thinkingSignature: "sig_anthropic" },
 					{ type: "toolCall", id: "toolu_read", name: "read", arguments: { path: "bar.ts" } },
@@ -1536,7 +1536,7 @@ describe("OpenAI responses history payload", () => {
 				provider: customDeepseek.provider,
 				model: customDeepseek.id,
 				stopReason: "stop",
-				usage: issue5002ZeroUsage,
+				usage: zeroUsage,
 				content: [{ type: "text", text: "Done." }],
 				providerPayload: createOpenAIResponsesHistoryPayload(
 					customDeepseek.provider,
@@ -2454,7 +2454,7 @@ describe("OpenAI responses history payload", () => {
 				repairOrphanOutputs: true,
 				requiresReasoningReplayForToolCalls: true,
 			});
-			expect(input.map(item => (isIssue5002Record(item) ? (item.type ?? item.role) : item))).toEqual([
+			expect(input.map(item => (isRecord(item) ? (item.type ?? item.role) : item))).toEqual([
 				"user",
 				"reasoning",
 				"message",
@@ -2683,7 +2683,7 @@ describe("OpenAI responses history payload", () => {
 					api: "openai-responses",
 					provider: "openai",
 					model: "gpt-5-mini",
-					usage: issue5002ZeroUsage,
+					usage: zeroUsage,
 					stopReason: "toolUse",
 					providerPayload: createOpenAIResponsesHistoryPayload(
 						"openai",
@@ -2768,7 +2768,7 @@ describe("OpenAI responses history payload", () => {
 			api: model.api,
 			provider: model.provider,
 			model: model.id,
-			usage: issue5002ZeroUsage,
+			usage: zeroUsage,
 			stopReason: "toolUse",
 			providerPayload: createOpenAIResponsesHistoryPayload(
 				model.provider,
