@@ -523,6 +523,8 @@ export interface ExecutorOptions {
 	journalTaskLabel?: CompletionJournal;
 	/** Set for a per-call `model`; every model the child sends to must stay approved by these grants. */
 	perCallModelGrants?: PerCallModelGrants;
+	/** The dispatched model pattern is the exact selector the caller supplied, not a spawn-hook replacement. */
+	callerSelectedModel?: boolean;
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Caller-requested coarse effort (`lo`/`med`/`hi`); maps onto the resolved model's supported thinking range and wins over {@link thinkingLevel}. */
 	effort?: TaskEffort;
@@ -5145,9 +5147,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			// `effort` and is the more precise of the two, so it wins; `:auto`
 			// names no level and leaves the hint in charge.
 			const perCallLevel =
-				options.perCallModelGrants !== undefined &&
-				explicitThinkingLevel &&
-				resolvedThinkingLevel !== AUTO_THINKING;
+				options.callerSelectedModel && explicitThinkingLevel && resolvedThinkingLevel !== AUTO_THINKING;
 			const effortLevel =
 				options.effort !== undefined && !perCallLevel
 					? resolveTaskEffortLevel(model, options.effort, spawnEffortCeiling)

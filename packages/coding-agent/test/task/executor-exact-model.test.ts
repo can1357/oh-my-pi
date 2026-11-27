@@ -36,6 +36,7 @@ async function runWorker(options: {
 	model: Model;
 	perCallModel: string;
 	effort?: TaskEffort;
+	spawnHookModel?: string;
 	settings?: Settings;
 	assignment?: string;
 	setup?: (modelRegistry: ModelRegistry) => void;
@@ -80,6 +81,7 @@ async function runWorker(options: {
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		getSessionAgents: () => [],
+		emitBeforeSubagentSpawn: options.spawnHookModel ? async () => ({ model: options.spawnHookModel }) : undefined,
 	} as unknown as ToolSession;
 	const execution = await runStructuredSubagent({
 		session,
@@ -193,17 +195,28 @@ describe("per-call exact selection after background discovery", () => {
 
 	it.each([
 		{ suffix: ":medium", reasoning: Effort.Medium },
+		{ suffix: "", hookSuffix: ":low", reasoning: Effort.High },
 		{ suffix: "", reasoning: Effort.High },
 		{ suffix: ":auto", reasoning: Effort.High },
-	])("lets a per-call '$suffix' level decide over effort: hi", async ({ suffix, reasoning }) => {
-		const model = Object.assign(
-			createMockModel({ id: "hinted", reasoning: true, handler: () => ({ content: ["Hinted answer."] }) }),
-			{ thinking: { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High] } satisfies ThinkingConfig },
-		);
-		const result = await runWorker({ model, perCallModel: `mock/${model.id}${suffix}`, effort: "hi" });
-		expect(result.exitCode).toBe(0);
-		expect(model.calls.map(call => call.options?.reasoning)).toEqual([reasoning]);
-	});
+	])(
+		"resolves caller suffix '$suffix' and effort: hi against routing hooks",
+		async ({ suffix, hookSuffix, reasoning }) => {
+			const model = Object.assign(
+				createMockModel({ id: "hinted", reasoning: true, handler: () => ({ content: ["Hinted answer."] }) }),
+				{
+					thinking: { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High] } satisfies ThinkingConfig,
+				},
+			);
+			const result = await runWorker({
+				model,
+				perCallModel: `mock/${model.id}${suffix}`,
+				spawnHookModel: hookSuffix ? `mock/${model.id}${hookSuffix}` : undefined,
+				effort: "hi",
+			});
+			expect(result.exitCode).toBe(0);
+			expect(model.calls.map(call => call.options?.reasoning)).toEqual([reasoning]);
+		},
+	);
 
 	it.each([
 		{ id: "coding-router", selector: "mock/coding-router:low", identity: "mock/coding-router", level: Effort.Low },
