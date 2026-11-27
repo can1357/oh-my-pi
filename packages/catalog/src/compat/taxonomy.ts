@@ -431,8 +431,10 @@ export function stripThinkingVariantSuffix(model: string): string | undefined {
  * Classifies a model into its structured identity: reviewed override first,
  * then suffix collapse, then class/family/revision ranks over the logical id.
  *
- * Results are memoized per (provider, model, lenient) — the rule tree is
- * static per process. Cached identities are frozen and each caller receives
+ * Results are memoized per (provider, model) — the rule tree is static per
+ * process. A successful strict classification also serves lenient tokenizer
+ * and discovery lookups. A lenient classification may have suppressed an
+ * ambiguity, so it never serves a strict lookup. Each caller receives
  * a shallow copy, so a consumer that mutates its copy (e.g. `buildModel`
  * storing `policy.identity` on the model) cannot poison the cache or any
  * other model classified under the same key. Calls with an explicit
@@ -442,19 +444,16 @@ export function stripThinkingVariantSuffix(model: string): string | undefined {
  * reviewed-pattern matches unless `opts.lenient`.
  */
 // LRU sized above the bundled catalog so catalog-wide passes stay hot (a full `clear()` thrashed them).
-const classifyMemo = new LRUCache<string, ModelIdentity>({ max: 16384 });
-
-function classifyMemoKey(provider: string, modelId: string, lenient: boolean): string {
-	return `${provider.length}:${provider}${modelId.length}:${modelId}${lenient ? 1 : 0}`;
-}
+const classifyMemo = new LRUCache<string, { identity: ModelIdentity; strict: boolean }>({ max: 16384 });
 
 export function classifyModel(provider: string, modelId: string, opts?: ClassifyOptions): ModelIdentity {
 	if (opts?.observedAtMs === undefined) {
-		const key = classifyMemoKey(provider, modelId, opts?.lenient === true);
+		const key = `${provider.length}:${provider}${modelId}`;
+		const lenient = opts?.lenient === true;
 		const cached = classifyMemo.get(key);
-		if (cached !== undefined) return { ...cached };
+		if (cached && (cached.strict || lenient)) return { ...cached.identity };
 		const identity = classifyModelUncached(provider, modelId, opts);
-		classifyMemo.set(key, Object.freeze(identity));
+		classifyMemo.set(key, { identity, strict: !lenient });
 		return { ...identity };
 	}
 	return classifyModelUncached(provider, modelId, opts);

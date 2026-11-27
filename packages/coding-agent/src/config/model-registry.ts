@@ -43,6 +43,7 @@ import {
 import { getBundledModelReferenceIndex } from "@oh-my-pi/pi-catalog/identity/bundled";
 import { applyCatalogMetrics, CatalogMetricsIndex, catalogMetricsOf } from "@oh-my-pi/pi-catalog/identity/metrics";
 import {
+	type CacheEntry,
 	type ComposedCatalogDescriptor,
 	getModelCacheWriteStats,
 	readComposedCatalog,
@@ -58,6 +59,7 @@ import {
 	fingerprintStaticModels,
 	type ModelManagerOptions,
 	type ModelRefreshStrategy,
+	resolveProviderModels,
 } from "@oh-my-pi/pi-catalog/model-manager";
 import {
 	getBundledCatalogHash,
@@ -270,8 +272,6 @@ interface CredentialScopedCacheDiscovery {
 	startup?: StartupModelCachePass;
 }
 
-type ModelManagerDiscoveryResult = BuiltInDiscoveryResult & { cachedState?: ProviderDiscoveryState };
-
 /** The manager namespace covers the credential and route; no fetch closure or bearer is retained. */
 function startupModelCacheInput(options: ModelManagerOptions<Api>): string {
 	return JSON.stringify([
@@ -400,6 +400,7 @@ interface HardcodedPolicyInputs {
 interface OverrideBuild {
 	override: object;
 	built: Model<Api>;
+	ruleRevision: number;
 	validUntil: number;
 }
 
@@ -414,6 +415,7 @@ interface DiscoveredMerge {
 	reference: Model<Api> | undefined;
 	override: ProviderOverride | undefined;
 	merged: Model<Api>;
+	ruleRevision: number;
 	validUntil: number;
 }
 
@@ -2252,16 +2254,18 @@ export class ModelRegistry {
 
 	/** `model`, a bundled row, rebuilt under its provider's models.yml override; memoized on the row. */
 	#overriddenBuiltInModel(model: Model<Api>, providerOverride: ProviderOverride, now: number): Model<Api> {
+		const ruleRevision = cascadeRulesRevision();
 		const memo = (model as TaggedModel)[kProviderOverrideBuild];
-		if (memo && memo.override === providerOverride && now < memo.validUntil) return memo.built;
+		if (memo && memo.override === providerOverride && memo.ruleRevision === ruleRevision && now < memo.validUntil) {
+			return memo.built;
+		}
 		// Measured before the build: a card falling due mid-build expires the memo at once.
 		const validUntil = nextBuildPriceChange(model.cost, now);
-		const withTransportOverride = this.#applyProviderTransportOverride(toModelSpec(model), providerOverride);
-		const built = buildModel({
-			...withTransportOverride,
-			compat: mergeCompat(model.compatConfig, providerOverride.compat),
-		} as ModelSpec<Api>);
-		tagModel(model, kProviderOverrideBuild, { override: providerOverride, built, validUntil });
+		const spec = toModelSpec(model);
+		this.#setProviderTransportOverride(spec, providerOverride);
+		spec.compat = mergeCompat(spec.compat, providerOverride.compat);
+		const built = buildModel(spec);
+		tagModel(model, kProviderOverrideBuild, { override: providerOverride, built, ruleRevision, validUntil });
 		return built;
 	}
 
@@ -2315,20 +2319,17 @@ export class ModelRegistry {
 			const override = this.#providerOverrides.get(model.provider);
 			// Custom composition already resolved headers and metadata. Reapply only
 			// the provider transport and its gateway URL, without rebuilding the model.
-			const merged = override?.transport
-				? this.#applyProviderTransportOverride(model, {
-						baseUrl: override.baseUrl,
-						transport: override.transport,
-					})
-				: model;
+			if (override?.transport) {
+				this.#setProviderTransportOverride(model, { baseUrl: override.baseUrl, transport: override.transport });
+			}
 			// An overlay that authors no window keeps the bundled row's window, so it
 			// keeps that row's policy tiers too; one that authors a window owns its own.
 			const inheritedTiers =
 				existingModel && customModel.contextWindow === undefined && customModel.maxContextWindow === undefined
 					? this.#policyWindowTiers.get(existingModel)
 					: undefined;
-			if (inheritedTiers) this.#policyWindowTiers.set(merged, inheritedTiers);
-			return merged;
+			if (inheritedTiers) this.#policyWindowTiers.set(model, inheritedTiers);
+			return model;
 		});
 	}
 
@@ -2507,11 +2508,10 @@ export class ModelRegistry {
 			const providerOverride = this.#providerOverrides.get(providerId);
 			const withCompat = providerOverride
 				? models.map(model => {
-						const spec = this.#applyProviderTransportOverride(toModelSpec(model), providerOverride);
-						return buildModel({
-							...spec,
-							compat: mergeCompat(model.compatConfig, providerOverride.compat),
-						});
+						const spec = toModelSpec(model);
+						this.#setProviderTransportOverride(spec, providerOverride);
+						spec.compat = mergeCompat(spec.compat, providerOverride.compat);
+						return buildModel(spec);
 					})
 				: models;
 			const resolved = this.#applyProviderModelOverrides(providerId, withCompat);
@@ -3267,14 +3267,21 @@ export class ModelRegistry {
 		override: ProviderOverride | undefined,
 	): Model<Api> {
 		const now = Date.now();
+		const ruleRevision = cascadeRulesRevision();
 		const memo = (model as TaggedModel)[kDiscoveredMerge];
-		if (memo && memo.reference === reference && memo.override === override && now < memo.validUntil) {
+		if (
+			memo &&
+			memo.reference === reference &&
+			memo.override === override &&
+			memo.ruleRevision === ruleRevision &&
+			now < memo.validUntil
+		) {
 			return memo.merged;
 		}
 		const merged = mergeDiscoveredModel(model, reference, override);
 		// Measured before the build: a card falling due mid-build expires the memo at once.
 		const validUntil = nextBuildPriceChange(model.cost, now);
-		return tagModel(model, kDiscoveredMerge, { reference, override, merged, validUntil }).merged;
+		return tagModel(model, kDiscoveredMerge, { reference, override, merged, ruleRevision, validUntil }).merged;
 	}
 
 	/**
@@ -3541,14 +3548,34 @@ export class ModelRegistry {
 				managerCounts.set(providerId, (managerCounts.get(providerId) ?? 0) + 1);
 			}
 		}
+		const tracksLaunchHit = (options: ModelManagerOptions<Api>) =>
+			Boolean(options.cacheProviderId) &&
+			managerCounts?.get(options.providerId) === 1 &&
+			!options.restoreCachedHeaders;
+		const pending = launchPass
+			? managerOptions.filter(
+					options => !tracksLaunchHit(options) || !this.#reuseStartupModelCache(options, launchPass),
+				)
+			: managerOptions;
+		// Read this pass's exact credential namespaces together. An absent member is a
+		// confirmed miss, not an instruction for its manager to query SQLite again.
+		const snapshots =
+			strategy === "offline" && pending.length > 1
+				? readModelCaches<Api>(
+						pending.map(options => options.cacheProviderId ?? options.providerId),
+						BUILT_IN_DISCOVERY_CACHE_TTL_MS,
+						Date.now,
+						this.#cacheDbPath,
+					)
+				: undefined;
 		const discoveries = await Promise.all(
-			managerOptions.map(options =>
-				launchPass &&
-				options.cacheProviderId &&
-				managerCounts?.get(options.providerId) === 1 &&
-				!options.restoreCachedHeaders
-					? this.#discoverStartupModelCache(options, launchPass)
-					: this.#discoverWithModelManager(options, strategy),
+			pending.map(options =>
+				this.#discoverWithModelManager(
+					options,
+					strategy,
+					snapshots,
+					launchPass && tracksLaunchHit(options) ? launchPass : undefined,
+				),
 			),
 		);
 		const writesAfter = getModelCacheWriteStats();
@@ -3568,7 +3595,6 @@ export class ModelRegistry {
 		const replaceRuntimeProviders = new Set<string>();
 		const models: Model<Api>[] = [];
 		for (const discovery of discoveries) {
-			if (!discovery) continue;
 			models.push(...discovery.models);
 			for (const provider of discovery.authoritativeProviders) {
 				authoritativeProviders.add(provider);
@@ -3882,10 +3908,7 @@ export class ModelRegistry {
 		};
 	}
 
-	#discoverStartupModelCache(
-		options: ModelManagerOptions<Api>,
-		startup: StartupModelCachePass,
-	): Promise<ModelManagerDiscoveryResult> | undefined {
+	#reuseStartupModelCache(options: ModelManagerOptions<Api>, startup: StartupModelCachePass): boolean {
 		const { providerId } = options;
 		const runtimeManager = this.#runtimeModelManagers.get(providerId)?.options;
 		const previous = startup.launch.hits.get(providerId);
@@ -3897,33 +3920,23 @@ export class ModelRegistry {
 			this.#landedStartupCacheStates.has(previous.state) &&
 			previous.fresh === startupModelCacheFresh(previous.state, options) &&
 			previous.input === startupModelCacheInput(options)
-		) {
-			return undefined;
-		}
+		)
+			return true;
 		startup.launch.hits.delete(providerId);
-		return this.#discoverWithModelManager(options, "offline").then(result => {
-			if (result.cachedState) {
-				startup.hits.push({
-					state: result.cachedState,
-					input: startupModelCacheInput(options),
-					revision: startup.revision,
-					runtimeManager,
-					fresh: startupModelCacheFresh(result.cachedState, options),
-				});
-			}
-			return result;
-		});
+		return false;
 	}
 
 	async #discoverWithModelManager(
 		options: ModelManagerOptions<Api>,
 		strategy: ModelRefreshStrategy,
-	): Promise<ModelManagerDiscoveryResult> {
+		snapshots: ReadonlyMap<string, CacheEntry<Api>> | undefined,
+		startup: StartupModelCachePass | undefined,
+	): Promise<BuiltInDiscoveryResult> {
+		const runtimeManager = startup ? this.#runtimeModelManagers.get(options.providerId)?.options : undefined;
 		let failure: string | undefined;
 		try {
-			const manager = createModelManager({ ...options, cacheDbPath: this.#cacheDbPath });
 			const result = await withModelDiscoveryTimeout(RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS, () =>
-				manager.refresh(strategy),
+				resolveProviderModels({ ...options, cacheDbPath: this.#cacheDbPath }, strategy, snapshots),
 			);
 			const models = result.models.map(model =>
 				model.provider === options.providerId ? model : { ...model, provider: options.providerId },
@@ -3961,12 +3974,16 @@ export class ModelRegistry {
 			if (result.source === "provider") {
 				replaceRuntimeProviders.add(options.providerId);
 			}
-			return {
-				models,
-				authoritativeProviders,
-				replaceRuntimeProviders,
-				cachedState: result.source === "cache" && failure === undefined ? state : undefined,
-			};
+			if (startup && result.source === "cache" && failure === undefined) {
+				startup.hits.push({
+					state,
+					input: startupModelCacheInput(options),
+					revision: startup.revision,
+					runtimeManager,
+					fresh: startupModelCacheFresh(state, options),
+				});
+			}
+			return { models, authoritativeProviders, replaceRuntimeProviders };
 		} catch (error) {
 			failure = error instanceof Error ? error.message : String(error);
 			const previous = this.#providerDiscoveryStates.get(options.providerId);
@@ -4038,21 +4055,14 @@ export class ModelRegistry {
 			transport: override.transport ?? baseOverride?.transport,
 		};
 	}
-	#applyProviderTransportOverride<
-		T extends {
-			api: Api;
-			baseUrl?: string;
-			headers?: Record<string, string>;
-			resolveHeaders?: Model<Api>["resolveHeaders"];
-			remoteCompaction?: RemoteCompactionConfig<Api>;
-		},
-	>(
-		entry: T,
+	/** Apply to a fresh spec or custom row owned by this composition, never its source model. */
+	#setProviderTransportOverride(
+		entry: ModelSpec<Api> | Model<Api>,
 		override: Pick<
 			ProviderOverride,
 			"baseUrl" | "baseUrlApis" | "headers" | "authHeader" | "apiKey" | "remoteCompaction" | "transport"
 		>,
-	): T {
+	): void {
 		const changesHeaders =
 			override.headers !== undefined || (override.authHeader === true && override.apiKey !== undefined);
 		const resolveHeaders = changesHeaders
@@ -4064,16 +4074,11 @@ export class ModelRegistry {
 					override.apiKey,
 				)
 			: entry.resolveHeaders;
-		return {
-			...entry,
-			baseUrl: resolveProviderBaseUrl(entry.api, entry.baseUrl, override),
-			headers: changesHeaders || entry.resolveHeaders ? undefined : entry.headers,
-			resolveHeaders,
-			// Preserve the model's existing transport when the override omits one;
-			// providers without a `transport` field keep the default per-API dispatch.
-			...(override.transport !== undefined ? { transport: override.transport } : {}),
-			remoteCompaction: mergeProviderRemoteCompactionConfig(entry.remoteCompaction, override.remoteCompaction),
-		};
+		entry.baseUrl = resolveProviderBaseUrl(entry.api, entry.baseUrl, override);
+		entry.headers = changesHeaders || entry.resolveHeaders ? undefined : entry.headers;
+		entry.resolveHeaders = resolveHeaders;
+		if (override.transport !== undefined) entry.transport = override.transport;
+		entry.remoteCompaction = mergeProviderRemoteCompactionConfig(entry.remoteCompaction, override.remoteCompaction);
 	}
 	#applyProviderTransportOverrideToModel(
 		model: Model<Api>,
@@ -4085,12 +4090,17 @@ export class ModelRegistry {
 		// Every projection rebuilds the rows of runtime-overridden providers; an
 		// unchanged row under the same override object reuses its last build.
 		const now = Date.now();
+		const ruleRevision = cascadeRulesRevision();
 		const memo = (model as TaggedModel)[kTransportOverrideBuild];
-		if (memo && memo.override === override && now < memo.validUntil) return memo.built;
+		if (memo && memo.override === override && memo.ruleRevision === ruleRevision && now < memo.validUntil) {
+			return memo.built;
+		}
 		// Measured before the build: a card falling due mid-build expires the memo at once.
 		const validUntil = nextBuildPriceChange(model.cost, now);
-		const built = buildModel(this.#applyProviderTransportOverride(toModelSpec(model), override));
-		tagModel(model, kTransportOverrideBuild, { override, built, validUntil });
+		const spec = toModelSpec(model);
+		this.#setProviderTransportOverride(spec, override);
+		const built = buildModel(spec);
+		tagModel(model, kTransportOverrideBuild, { override, built, ruleRevision, validUntil });
 		return built;
 	}
 

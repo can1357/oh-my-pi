@@ -860,13 +860,15 @@ export function readModelCache<TApi extends Api>(
 	return readCache(providerId, ttlMs, now, dbPath, "shared");
 }
 
-/** Read a snapshot whose header-omitted rows the resolver may attach credentials to in place. */
+/** Read resolver-owned header rows, optionally from this namespace's snapshot in the current offline batch. */
 export function readCacheForHeaderRestore<TApi extends Api>(
 	providerId: string,
 	ttlMs: number,
 	now: () => number,
 	dbPath?: string,
+	snapshots?: ReadonlyMap<string, CacheEntry<TApi>>,
 ): CacheEntry<TApi> | null {
+	if (snapshots) return forReader(withFreshness(snapshots.get(providerId) ?? null, ttlMs, now), "restoreHeaders");
 	return readCache(providerId, ttlMs, now, dbPath, "restoreHeaders");
 }
 

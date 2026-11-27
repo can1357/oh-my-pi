@@ -14,10 +14,11 @@ import { errorMessage, getBlobsDir, logger } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { Settings } from "../config/settings";
 import { daemonClient } from "../daemon/client";
-import { BLOB_APPEND_METHOD, BLOB_CALL_CHUNK_CHARS, BLOB_MODULE_VERSION } from "../daemon/modules/blob";
 import { canonicalProjectDir } from "../daemon/paths";
 import { type DaemonClient, type DaemonTunnel, projectScope } from "../daemon/protocol";
-import { type BlobBackend, isServeKind, LocalBlobBackend } from "./broker";
+import type * as LocalBroker from "./broker";
+import type { BlobBackend } from "./broker";
+import { isServeKind } from "./destinations";
 import {
 	contextHasImages,
 	contextHasImageUrls,
@@ -27,7 +28,10 @@ import {
 	supportsRemoteImageUrls,
 } from "./context-images";
 import {
+	BLOB_APPEND_METHOD,
 	BLOB_BROKER_KIND,
+	BLOB_CALL_CHUNK_CHARS,
+	BLOB_MODULE_VERSION,
 	BLOB_RENDER_CHANNEL,
 	type BlobBrokerCalls,
 	type BlobBrokerDoctorRequest,
@@ -569,6 +573,8 @@ export class ImageUrlService {
 				continue;
 			}
 			try {
+				// The daemon hosts these servers and uploaders unless the local fallback is needed.
+				const { LocalBlobBackend }: typeof LocalBroker = require("./broker");
 				backends.push(new LocalBlobBackend(config));
 			} catch (error) {
 				logger.warn("blob-broker: backend unavailable; trying next backend", {

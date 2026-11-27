@@ -3,8 +3,13 @@ import { logger, VERSION } from "@oh-my-pi/pi-utils";
 import { buildModel } from "./build";
 import { collapseBuiltVariants } from "./compat/collapse";
 import { applyCatalogMetrics, CatalogMetricsIndex } from "./identity/metrics";
-import { forEachInSlices, readCacheForHeaderRestore, writeModelCacheAsync } from "./model-cache";
-import { getBundledModelSlice, getBundledModelSliceHash, isBundledModelSlice } from "./models";
+import { type CacheEntry, forEachInSlices, readCacheForHeaderRestore, writeModelCacheAsync } from "./model-cache";
+import {
+	getBundledModelSlice,
+	getBundledModelSliceHash,
+	getBundledProviderModelHash,
+	isBundledModelSlice,
+} from "./models";
 import { TimeBasedCostShape } from "./pricing";
 import { type Api, type Model, modelKind, type ModelSpec, type Provider } from "./types";
 import { isRecord } from "./utils";
@@ -250,11 +255,14 @@ function restoreCachedModelHeaders<TApi extends Api>(
  * when at least one configured remote source did not refresh successfully.
  * After a network fetch, models are built, merged and persisted in
  * time-budgeted slices across event-loop turns; the returned promise settles
- * once the cache row is stored.
+ * once the cache row is stored. An offline batch can supply shared snapshots from
+ * the same cache database, keyed by the requested cache namespaces (unlisted rows
+ * are misses); live refreshes always read their own current row.
  */
 export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPayload = unknown>(
 	options: ModelManagerOptions<TApi, TModelsDevPayload>,
 	strategy: ModelRefreshStrategy = "online-if-uncached",
+	offlineSnapshots?: ReadonlyMap<string, CacheEntry<TApi>>,
 ): Promise<ModelResolutionResult<TApi>> {
 	if (options.alwaysRefetchDynamicModels && strategy === "online-if-uncached") {
 		strategy = "online";
@@ -264,16 +272,30 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const ttlMs = options.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
 	const dbPath = options.cacheDbPath;
 	const restorableHeaderFallback = options.restorableHeaderFallback;
-	const staticModels = options.staticModels
-		? materializeStaticModels<TApi>(options.staticModels)
-		: (getBundledModelSlice(options.providerId) as readonly Model<TApi>[]);
-	const additiveStatic = Boolean(options.modelsDev?.additiveOnly) && staticModels.length > 0;
-	const cache = readCacheForHeaderRestore<TApi>(cacheProviderId, ttlMs, now, dbPath);
+	const staticOverride = options.staticModels ? materializeStaticModels<TApi>(options.staticModels) : undefined;
+	const cache = readCacheForHeaderRestore<TApi>(
+		cacheProviderId,
+		ttlMs,
+		now,
+		dbPath,
+		strategy === "offline" ? offlineSnapshots : undefined,
+	);
+	// A matching cache needs bundled rows only to restore omitted headers. Use
+	// the generator's digest for the comparison; decode on the merge path instead.
+	const bundledHash =
+		staticOverride === undefined && strategy !== "online" && cache?.fresh && cache.headerOmittedModelIds.length === 0
+			? getBundledProviderModelHash(options.providerId)
+			: undefined;
+	const cacheStaticModels =
+		staticOverride ??
+		(bundledHash === undefined ? (getBundledModelSlice(options.providerId) as readonly Model<TApi>[]) : []);
+	const additiveStatic =
+		Boolean(options.modelsDev?.additiveOnly) && (bundledHash !== undefined || cacheStaticModels.length > 0);
 	const dynamicModelsAuthoritative = options.dynamicModelsAuthoritative ?? false;
 	const isAuthoritativeDynamicCache = dynamicModelsAuthoritative && (cache?.payloadAuthoritative ?? false);
 	const restoredCache = restoreCachedModelHeaders(
 		cache?.models ?? [],
-		staticModels,
+		cacheStaticModels,
 		cache?.headerOmittedModelIds ?? [],
 		cache?.unrestorableHeaderModelIds ?? [],
 		cache?.legacyHeaderRestoreMarkers ?? false,
@@ -287,10 +309,11 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const cacheDropIds = options.dropCachedModelIdsOnStaticMismatch;
 	// Additive mode is cache identity: a snapshot written while shared-catalog
 	// rows could replace bundled metadata must not match an additive resolver.
-	const staticCatalogFingerprint = fingerprintStaticModels(staticModels, {
-		authoritative: dynamicModelsAuthoritative,
-		additive: additiveStatic,
-	});
+	const policy = { authoritative: dynamicModelsAuthoritative, additive: additiveStatic };
+	const staticCatalogFingerprint =
+		bundledHash === undefined
+			? fingerprintStaticModels(cacheStaticModels, policy)
+			: staticFingerprintForHash(bundledHash, policy);
 	// Endpoint-migration policy is cache identity: adding an id must invalidate
 	// matching-static-catalog caches written by the prior resolver.
 	const staticFingerprint =
@@ -337,6 +360,10 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 		};
 	}
 
+	const staticModels =
+		bundledHash === undefined
+			? cacheStaticModels
+			: (getBundledModelSlice(options.providerId) as readonly Model<TApi>[]);
 	const modelsDevAdditiveStaticModelIds = additiveStatic ? new Set(staticModels.map(model => model.id)) : undefined;
 	// Same-id rows of a matching cache are live discovery merged over bundled
 	// rows, not shared-catalog overrides. Strip them only for a static mismatch.
@@ -690,9 +717,15 @@ export function fingerprintStaticModels<TApi extends Api>(
 	models: readonly (ModelSpec<TApi> | Model<TApi>)[],
 	policy: StaticFingerprintPolicy = {},
 ): string {
+	const hash =
+		models.length === 0
+			? "empty"
+			: (getBundledModelSliceHash(models) ?? Bun.hash(JSON.stringify(models)).toString(36));
+	return staticFingerprintForHash(hash, policy);
+}
+
+function staticFingerprintForHash(hash: string, policy: StaticFingerprintPolicy): string {
 	const policyKey = `${policy.authoritative ? ":authoritative" : ""}${policy.additive ? ":additive" : ""}`;
-	if (models.length === 0) return `${MODEL_CACHE_FINGERPRINT_VERSION}${policyKey}:empty`;
-	const hash = getBundledModelSliceHash(models) ?? Bun.hash(JSON.stringify(models)).toString(36);
 	return `${MODEL_CACHE_FINGERPRINT_VERSION}${policyKey}:${hash}`;
 }
 

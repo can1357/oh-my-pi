@@ -73,10 +73,11 @@ describe("classifyModel", () => {
 
 	test("only ties at the strongest class rank are ambiguous", () => {
 		const namespaces = "OpenAI/Cohere";
+		// A lenient lookup that swallowed a tie must not mask the strict error.
+		expect(classifyModel("test", `${namespaces}/foo`, { lenient: true })).toEqual({ class: "unknown" });
 		expect(() => classifyModel("test", `${namespaces}/foo`)).toThrow(
 			"ambiguous class for `openai/cohere/foo`: `cohere` and `openai` tie",
 		);
-		expect(classifyModel("test", `${namespaces}/foo`, { lenient: true })).toEqual({ class: "unknown" });
 		expect(classifyModel("test", `${namespaces}/claude-foo`).class).toBe("anthropic");
 	});
 

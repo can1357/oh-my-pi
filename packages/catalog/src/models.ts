@@ -105,6 +105,14 @@ export function isBundledModelSlice(models: readonly unknown[]): boolean {
 	return bundledSliceProvider(models) !== undefined;
 }
 
+/** Digest of a nonempty bundled slice, without decoding its rows. Empty and legacy slices use the normal resolver. */
+export function getBundledProviderModelHash(provider: string): string | undefined {
+	const hash = catalog.data.providerHashes?.[provider];
+	return typeof hash === "string" && catalog.data.providers.find(row => row[0] === provider)?.[2].length
+		? hash
+		: undefined;
+}
+
 /** Only unmodified generator-materialized slices have a precomputed content digest. */
 export function getBundledModelSliceHash(models: readonly unknown[]): string | undefined {
 	const provider = bundledSliceProvider(models);

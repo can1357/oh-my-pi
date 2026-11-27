@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -10,13 +10,15 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { defaultSupportedEffort } from "@oh-my-pi/pi-catalog/model-thinking";
 import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { fingerprintStaticModels, resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
-import { getBundledModel, getBundledModels, getBundledModelSlice } from "@oh-my-pi/pi-catalog/models";
+import * as bundled from "@oh-my-pi/pi-catalog/models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import {
 	deepinfraModelManagerOptions,
 	openrouterModelManagerOptions,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { Api, Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
+
+const { getBundledModel, getBundledModels, getBundledModelSlice } = bundled;
 
 function completionsSpec(overrides: Partial<ModelSpec<"openai-completions">> = {}): ModelSpec<"openai-completions"> {
 	return {
@@ -1513,6 +1515,41 @@ describe("model cache materialized round trip", () => {
 		expect(Object.isFrozen(shared)).toBe(true);
 		for (const policy of [{}, { additive: true }, { authoritative: true }, { authoritative: true, additive: true }]) {
 			expect(fingerprintStaticModels(shared, policy)).toBe(fingerprintStaticModels(copy, policy));
+		}
+	});
+
+	it("skips bundled rows for a matching scoped cache unless omitted headers need restoring", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-lazy-bundled-"));
+		const cacheDbPath = path.join(dir, "models.db");
+		const cacheProviderId = "copilot-test-scope";
+		const rows = getBundledModels("github-copilot");
+		const model = rows.find(row => row.headers)!;
+		const fingerprint = fingerprintStaticModels(rows, { authoritative: true, additive: true });
+		const options = {
+			providerId: "github-copilot",
+			cacheProviderId,
+			cacheDbPath,
+			now: () => 1_000,
+			dynamicModelsAuthoritative: true,
+			modelsDev: { additiveOnly: true, fetch: async () => [], map: () => [] },
+		};
+		const slice = spyOn(bundled, "getBundledModelSlice");
+		try {
+			writeModelCache(cacheProviderId, 1_000, [{ ...model, headers: undefined }], true, fingerprint, cacheDbPath);
+			const headerless = await resolveProviderModels(options, "offline");
+			expect(headerless.models.map(row => row.id)).toEqual([model.id]);
+			expect(headerless.models[0]?.headers).toBeUndefined();
+			expect(headerless.source).toBe("cache");
+			expect(slice).not.toHaveBeenCalled();
+
+			writeModelCache(cacheProviderId, 1_000, [model], true, fingerprint, cacheDbPath, rows);
+			const restored = await resolveProviderModels(options, "offline");
+			expect(restored.models.map(row => row.id)).toEqual([model.id]);
+			expect(restored.models[0]?.headers).toEqual(model.headers);
+			expect(slice).toHaveBeenCalledWith(options.providerId);
+		} finally {
+			slice.mockRestore();
+			await fs.rm(dir, { recursive: true, force: true });
 		}
 	});
 

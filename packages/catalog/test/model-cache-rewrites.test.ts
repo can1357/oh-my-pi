@@ -13,7 +13,7 @@ import {
 	staticCatalogSources,
 	writeModelCache,
 } from "@oh-my-pi/pi-catalog/model-cache";
-import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
+import { fingerprintStaticModels, resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { type GeneratedProvider, getBundledModels, getBundledProviders } from "@oh-my-pi/pi-catalog/models";
 import { modelsDevCatalogFallback } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl, Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
@@ -151,6 +151,49 @@ describe("model cache write churn", () => {
 		} finally {
 			db.close();
 		}
+	});
+
+	it("an offline batch restores tenant headers privately and honors each manager's TTL", async () => {
+		const providerId = "rewrite-test";
+		const source = model("shared-id");
+		const headers = { "X-Tenant": "seed" };
+		const stored = { ...source, headers };
+		const options = {
+			providerId,
+			staticModels: [source],
+			cacheDbPath: dbPath,
+			now: () => 2_000,
+			fetchDynamicModels: async () => null,
+		};
+		writeModelCache(
+			"tenant-a",
+			1_000,
+			[stored],
+			true,
+			fingerprintStaticModels(options.staticModels),
+			dbPath,
+			[],
+			headers,
+		);
+		const batch = readModelCaches<"openai-completions">(["tenant-a", "tenant-b"], TTL_MS, options.now, dbPath);
+		const stale = await resolveProviderModels(
+			{ ...options, cacheProviderId: "tenant-a", cacheTtlMs: 500, restorableHeaderFallback: { "X-Tenant": "a" } },
+			"offline",
+			batch,
+		);
+		const fresh = await resolveProviderModels(
+			{ ...options, cacheProviderId: "tenant-a", cacheTtlMs: 1_000, restorableHeaderFallback: { "X-Tenant": "b" } },
+			"offline",
+			batch,
+		);
+		const miss = await resolveProviderModels({ ...options, cacheProviderId: "tenant-b" }, "offline", batch);
+		expect(stale.stale).toBe(true);
+		expect(stale.models[0]?.headers).toEqual({ "X-Tenant": "a" });
+		expect(fresh.stale).toBe(false);
+		expect(fresh.models[0]?.headers).toEqual({ "X-Tenant": "b" });
+		expect(batch.get("tenant-a")?.models[0].headers).toBeUndefined();
+		expect(miss.source).toBe("bundled");
+		expect(miss.models[0]?.headers).toBeUndefined();
 	});
 
 	it("batch reads isolate corrupt rows, observe repairs and refresh side rows, and age preloaded entries", () => {
