@@ -985,6 +985,7 @@ export function transformMessages<TApi extends Api>(
 		if (msg.role === "assistant") {
 			const assistantMsg = msg as AssistantMessage;
 			const isSameModel = isSameModelTurn(assistantMsg, model);
+			const classifierSensitive = resolveCatalogPolicy(model).classifierCotExtraction === true;
 			// The same model on another host (or another id of the same model):
 			// its full plaintext reasoning replays natively where the target has
 			// a native slot, exactly as the target replays its own turns. Errored
@@ -1113,7 +1114,10 @@ export function transformMessages<TApi extends Api>(
 				const replaySignature =
 					candidateSignatureUntrustworthy && candidate.thinkingSignature ? undefined : candidate.thinkingSignature;
 				if (!replaySignature && (!candidate.thinking || candidate.thinking.trim() === "")) return false;
-				if (isSameModel && isSigningAnthropicTarget && (!replaySignature || replaySignature.trim() === "")) {
+				if (
+					(isSigningAnthropicTarget || classifierSensitive) &&
+					(!replaySignature || replaySignature.trim() === "")
+				) {
 					return false;
 				}
 				return true;
@@ -1122,11 +1126,13 @@ export function transformMessages<TApi extends Api>(
 			const dropsAllSameModelVisibleThinking =
 				isAnthropicReplay &&
 				isSameModel &&
-				isSigningAnthropicTarget &&
+				(isSigningAnthropicTarget || classifierSensitive) &&
 				hasVisibleAnthropicThinking &&
 				!assistantMsg.content.some(anthropicVisibleThinkingSurvivesReplay);
 
+			const omitForeignThinking = classifierSensitive && !isSameModel && !sameAnthropicDeployment;
 			const transformedContent = assistantMsg.content.flatMap((block, blockIndex) => {
+				if (omitForeignThinking && (block.type === "thinking" || block.type === "redactedThinking")) return [];
 				if (
 					thinkingBound &&
 					(block.type === "redactedThinking" || (block.type === "thinking" && !keepsBoundThinking))
@@ -1186,8 +1192,7 @@ export function transformMessages<TApi extends Api>(
 						// be dropped entirely — not demoted to text. Demotion would cause
 						// the reasoning_extraction safety classifier to refuse the response.
 						if (
-							isSameModel &&
-							isSigningAnthropicTarget &&
+							(classifierSensitive || (isSameModel && isSigningAnthropicTarget)) &&
 							(!sanitized.thinkingSignature || sanitized.thinkingSignature.trim() === "")
 						) {
 							return [];
@@ -1242,7 +1247,7 @@ export function transformMessages<TApi extends Api>(
 					// terminal assistant message whose text ends with whitespace.
 					return {
 						type: "text" as const,
-						text: renderDemotedThinking(model.id, sanitized.thinking),
+						text: renderDemotedThinking(model, sanitized.thinking),
 						[kDemotedThinking]: sanitized.thinking,
 					};
 				}

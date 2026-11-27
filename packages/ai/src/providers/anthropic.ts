@@ -6208,11 +6208,8 @@ function encodeAnthropicMessages(
 					}
 					if (hasSignedThinking) {
 						if (!block.thinkingSignature || block.thinkingSignature.trim().length === 0) {
-							if (block.thinking.trim().length === 0) continue;
-							blocks.push({
-								type: "text",
-								text: renderDemotedThinking(model.id, block.thinking),
-							});
+							const demoted = renderDemotedThinking(model, block.thinking);
+							if (demoted.trim().length > 0) blocks.push({ type: "text", text: demoted });
 							continue;
 						}
 						blocks.push({
@@ -6231,11 +6228,11 @@ function encodeAnthropicMessages(
 								signature: "",
 							});
 						} else if (!opts?.omitDemotedReasoning) {
-							demotedReasoningBlocks++;
-							blocks.push({
-								type: "text",
-								text: renderDemotedThinking(model.id, block.thinking),
-							});
+							const demoted = renderDemotedThinking(model, block.thinking);
+							if (demoted) {
+								demotedReasoningBlocks++;
+								blocks.push({ type: "text", text: demoted });
+							}
 						}
 					} else {
 						blocks.push({

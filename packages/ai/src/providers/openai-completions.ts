@@ -2792,14 +2792,13 @@ export function convertMessages(
 			} else if (nonEmptyThinkingBlocks.length > 0) {
 				if (compat.requiresThinkingAsText) {
 					const thinkingText = nonEmptyThinkingBlocks
-						.map(b => renderDemotedThinking(model.id, b.thinking))
+						.map(b => renderDemotedThinking(model, b.thinking))
+						.filter(Boolean)
 						.join(" ");
 					// `content` is a plain string at this point (set above) or null —
 					// never an array. Prepend the demoted thinking to the string form.
-					assistantMsg.content =
-						typeof assistantMsg.content === "string" && assistantMsg.content.length > 0
-							? `${thinkingText} ${assistantMsg.content}`
-							: thinkingText;
+					const visible = typeof assistantMsg.content === "string" ? assistantMsg.content : "";
+					assistantMsg.content = [thinkingText, visible].filter(Boolean).join(" ");
 				} else if (compat.requiresReasoningContentForToolCalls) {
 					// Use the streamed signature when the backend accepts whichever
 					// recognized field name was emitted (allowsSynthetic=true). Backends
