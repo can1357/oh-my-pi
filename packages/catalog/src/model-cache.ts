@@ -6,6 +6,7 @@ import type { Database } from "bun:sqlite";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import {
+	cloneJsonTree,
 	getDbBusyTimeoutMs,
 	getModelDbPath,
 	isSqliteBusyError,
@@ -48,13 +49,9 @@ const HEADER_RESTORE_VERSION = 1;
  * hash catches every KDL policy edit even when the package version is unchanged.
  */
 const MODEL_MATERIALIZATION_VERSION = 2;
-let cachedMaterializationPolicy: string | undefined;
-function materializationPolicy(): string {
-	if (cachedMaterializationPolicy === undefined) {
-		cachedMaterializationPolicy = `app-${VERSION}:builder-${MODEL_MATERIALIZATION_VERSION}:rules-${rules.version}-${rules.hash}`;
-	}
-	return cachedMaterializationPolicy;
-}
+const plainModelPolicy = `app-${VERSION}:builder-${MODEL_MATERIALIZATION_VERSION}:rules-${rules.version}-${rules.hash}`;
+// Old binaries must never mistake a compact compat reference for a resolved compat record.
+const compactModelPolicy = `${plainModelPolicy}:compat-ref-1`;
 
 interface CacheRowMeta {
 	provider_id: string;
@@ -133,12 +130,18 @@ const CACHE_ROW_FRESHNESS_COLUMNS = `
 const CACHE_ROW_COLUMNS = `m.provider_id, m.version, m.materialization_policy, m.updated_at, m.authoritative,
 		m.static_fingerprint, m.models_hash, m.header_omitted_model_ids, m.unrestorable_header_model_ids,
 		m.header_restore_version, ${CACHE_ROW_FRESHNESS_COLUMNS}`;
-const CACHE_ROW_FROM = `FROM model_cache m LEFT JOIN model_cache_freshness f
-		ON f.provider_id = m.provider_id AND f.materialization_policy = m.materialization_policy`;
-const SELECT_CACHE_ROW = `SELECT ${CACHE_ROW_COLUMNS},
-		CASE WHEN m.models_hash = ? THEN NULL ELSE m.models END AS models
-	${CACHE_ROW_FROM}
-	WHERE m.provider_id = ? AND m.materialization_policy = ? AND m.version = ${CACHE_SCHEMA_VERSION}`;
+// Pick a rowid entirely within the (provider_id, materialization_policy) index.
+// Probe plain only on a compact miss, even when the preferred row has an unreadable
+// version. Check that version on the winner, in the same snapshot as its payload.
+const PREFERRED_CACHE_ROW = `FROM wanted JOIN model_cache m ON m.rowid = COALESCE(
+	(SELECT rowid FROM model_cache WHERE provider_id = wanted.id AND materialization_policy = ?),
+	(SELECT rowid FROM model_cache WHERE provider_id = wanted.id AND materialization_policy = ?))`;
+const CACHE_ROW_FROM = `${PREFERRED_CACHE_ROW} LEFT JOIN model_cache_freshness f
+	ON f.provider_id = m.provider_id AND f.materialization_policy = m.materialization_policy`;
+const SELECT_CACHE_ROWS = `SELECT ${CACHE_ROW_COLUMNS},
+	CASE WHEN m.models_hash = wanted.hash AND m.materialization_policy = wanted.policy THEN NULL ELSE m.models END AS models
+	${CACHE_ROW_FROM} WHERE m.version = ${CACHE_SCHEMA_VERSION}`;
+const SELECT_CACHE_ROW = `WITH wanted(id, hash, policy) AS (VALUES (?,?,?)) ${SELECT_CACHE_ROWS}`;
 
 /** Cumulative model-cache write counters for this process. */
 export interface ModelCacheWriteStats {
@@ -529,16 +532,15 @@ export function staticCatalogSources(
 ): { identity: string; members: Map<string, string>; updatedAt: Map<string, number> } | undefined {
 	try {
 		return withModelCacheDb(dbPath, db => {
-			const rows = db
-				.query<CacheRowMeta, [string, number]>(`
-				SELECT m.provider_id, m.version, m.materialization_policy, m.models_hash, m.static_fingerprint, m.updated_at, m.authoritative,
-					m.header_omitted_model_ids, m.unrestorable_header_model_ids, m.header_restore_version,
-					${CACHE_ROW_FRESHNESS_COLUMNS}
-				FROM model_cache m LEFT JOIN model_cache_freshness f
-					ON f.provider_id=m.provider_id AND f.materialization_policy=m.materialization_policy
-				WHERE m.materialization_policy=? AND m.version=?`)
-				.all(materializationPolicy(), CACHE_SCHEMA_VERSION);
-			const byNamespace = new Map(rows.map(row => [row.provider_id, row]));
+			const byNamespace = new Map<string, CacheRowMeta>();
+			if (namespaces.length > 0) {
+				const stmt = db.query<CacheRowMeta, [string, string, string]>(`
+					WITH wanted(id) AS (SELECT value FROM json_each(?))
+					SELECT ${CACHE_ROW_COLUMNS} ${CACHE_ROW_FROM} WHERE m.version = ${CACHE_SCHEMA_VERSION}`);
+				for (const row of stmt.iterate(JSON.stringify(namespaces), compactModelPolicy, plainModelPolicy)) {
+					byNamespace.set(row.provider_id, row);
+				}
+			}
 			const updatedAt = new Map<string, number>();
 			const members = new Map<string, string>();
 			const identities = [];
@@ -557,7 +559,7 @@ export function staticCatalogSources(
 				identities.push([id, member]);
 			}
 			return {
-				identity: `${materializationPolicy()}:${Bun.hash(JSON.stringify(identities)).toString(36)}`,
+				identity: `${plainModelPolicy}:${Bun.hash(JSON.stringify(identities)).toString(36)}`,
 				members,
 				updatedAt,
 			};
@@ -771,11 +773,41 @@ function isMaterializedModel(value: unknown): value is PersistedModel<Api> {
 	return MaterializedModel.allows(value);
 }
 
-function parseMaterializedModels<TApi extends Api>(serialized: string): Model<TApi>[] | null {
+type CompatCopy = () => Record<string, unknown>;
+
+/** Resolved compat is mostly primitive flags. Find the mutable fields once per anchor. */
+function prepareCompatCopy(anchor: Record<string, unknown>): CompatCopy {
+	const nested: string[] = [];
+	for (const key in anchor) {
+		if (!Object.hasOwn(anchor, key)) continue;
+		const value = anchor[key];
+		if (value !== null && typeof value === "object") nested.push(key);
+	}
+	return () => {
+		const copy = { ...anchor };
+		// Even "__proto__" is already an own data property of the spread.
+		for (const key of nested) copy[key] = cloneJsonTree(anchor[key]);
+		return copy;
+	};
+}
+
+function parseMaterializedModels<TApi extends Api>(serialized: string, policy: string): Model<TApi>[] | null {
 	try {
 		const parsed: unknown = JSON.parse(serialized);
 		if (!Array.isArray(parsed)) return null;
-		for (const model of parsed) {
+		let copies: CompatCopy[] | undefined;
+		for (let i = 0; i < parsed.length; i++) {
+			const model = parsed[i];
+			const ref = model?.compat;
+			if (typeof ref === "number") {
+				if (policy !== compactModelPolicy || !Number.isInteger(ref) || ref < 0 || ref >= i) return null;
+				const compat = parsed[ref].compat;
+				if (compat === undefined) return null;
+				copies ??= [];
+				const copy = (copies[ref] ??= prepareCompatCopy(compat));
+				copies[i] = copy; // Backward references can themselves be referenced.
+				model.compat = copy();
+			}
 			if (!isMaterializedModel(model)) return null;
 			// JSON.parse owns these rows; restore the optional value in place rather
 			// than copying every property of every model into a second array.
@@ -792,13 +824,18 @@ function payloadHash(models: string): string {
 	return `${models.length.toString(36)}:${Bun.hash(models).toString(36)}`;
 }
 
-/** Legacy and externally edited rows have no trusted on-disk hash: hash the actual bytes on every read. */
-function parsePayload<TApi extends Api>(serialized: string, hash: string): Model<TApi>[] | null {
-	if (hash === "") hash = payloadHash(serialized);
-	const cached = parsedPayloads.get(hash);
+/** Include the encoding in the key: a numeric compat reference is invalid in a plain snapshot. */
+function payloadKey(serialized: string, hash: string, policy: string): string {
+	const digest = hash || payloadHash(serialized);
+	return policy === compactModelPolicy ? digest : `plain:${digest}`;
+}
+
+function parsePayload<TApi extends Api>(serialized: string, hash: string, policy: string): Model<TApi>[] | null {
+	const key = payloadKey(serialized, hash, policy);
+	const cached = parsedPayloads.get(key);
 	if (cached !== undefined) return cached as Model<TApi>[];
-	const models = parseMaterializedModels<TApi>(serialized);
-	if (models !== null) parsedPayloads.set(hash, models as Model<Api>[]);
+	const models = parseMaterializedModels<TApi>(serialized, policy);
+	if (models !== null) parsedPayloads.set(key, models as Model<Api>[]);
 	return models;
 }
 
@@ -868,8 +905,14 @@ function readCache<TApi extends Api>(
 			// Any commit (to any provider) bumps data_version. Revalidate the
 			// scalars and fetch the payload only on a hash miss, in one snapshot.
 			const row = db
-				.query<CacheRow, [string | null, string, string]>(SELECT_CACHE_ROW)
-				.get(cached?.meta?.models_hash || null, providerId, materializationPolicy());
+				.query<CacheRow, [string, string | null, string | null, string, string]>(SELECT_CACHE_ROW)
+				.get(
+					providerId,
+					cached?.meta?.models_hash || null,
+					cached?.meta?.materialization_policy ?? null,
+					compactModelPolicy,
+					plainModelPolicy,
+				);
 			return rememberRow<TApi>(db, key, providerId, cached, row, generation, ttlMs, now, use);
 		});
 	} catch {
@@ -888,23 +931,6 @@ function rememberRow<TApi extends Api>(
 	now: () => number,
 	use: CacheRead = "shared",
 ): CacheEntry<TApi> | null {
-	if (use === "restoreHeaders" && row?.models != null && row.header_omitted_model_ids !== "[]") {
-		const serialized = row.models;
-		const hash = row.models_hash || payloadHash(serialized);
-		if (!parsedPayloads.has(hash)) {
-			const owned = parseCacheRow<TApi>(db, providerId, row, ttlMs, now, undefined, parseMaterializedModels);
-			row.models = null;
-			// The first resolver owns the decoded rows. Keep only the headerless bytes for
-			// other readers, never the objects it is about to populate with credentials.
-			readRowCache.set(
-				key,
-				owned
-					? pendingHeaderlessRow(generation, row, owned, serialized, hash)
-					: { generation, meta: null, entry: null },
-			);
-			return owned;
-		}
-	}
 	const previous = row?.models === null ? (cached?.entry as CacheEntry<TApi> | null | undefined) : undefined;
 	const entry =
 		row?.models === null && previous && cached?.meta && cacheRowsEqual(cached.meta, row)
@@ -913,27 +939,6 @@ function rememberRow<TApi extends Api>(
 	if (row) row.models = null; // Never pin the serialized payload in the memo.
 	readRowCache.set(key, { generation, meta: entry ? row : null, entry: entry as CacheEntry<Api> | null });
 	return forReader(entry, use);
-}
-
-/** Materialize the validated headerless bytes only if another reader actually needs them. */
-function pendingHeaderlessRow(
-	generation: ReadGeneration | null,
-	meta: CacheRowMeta,
-	entry: CacheEntry<Api>,
-	serialized: string,
-	hash: string,
-): ReadRowCacheEntry {
-	// Retain the provenance but not a reference to the resolver-owned models.
-	const headerless: CacheEntry<Api> = { ...entry, models: [] };
-	return {
-		generation,
-		meta,
-		get entry(): CacheEntry<Api> {
-			headerless.models = parsePayload<Api>(serialized, hash)!;
-			Object.defineProperty(this, "entry", { value: headerless });
-			return headerless;
-		},
-	};
 }
 
 /**
@@ -969,19 +974,17 @@ export function readModelCaches<TApi extends Api>(
 					if (entry) entries.set(id, entry);
 				} else if (!pending.has(id)) {
 					pending.set(id, { key, cached });
-					bindings.push(id, cached?.meta?.models_hash || null);
+					bindings.push(id, cached?.meta?.models_hash || null, cached?.meta?.materialization_policy ?? null);
 				}
 			}
 			if (pending.size === 0) return entries;
 			// Stream instead of collecting all payload strings for a large catalog.
-			const values = "(?,?),".repeat(pending.size).slice(0, -1);
-			const stmt = db.prepare<CacheRow, (string | null)[]>(`
-				WITH wanted(id, hash) AS (VALUES ${values})
-				SELECT ${CACHE_ROW_COLUMNS}, CASE WHEN m.models_hash = wanted.hash THEN NULL ELSE m.models END AS models
-				${CACHE_ROW_FROM} JOIN wanted ON m.provider_id = wanted.id
-				WHERE m.materialization_policy = ? AND m.version = ${CACHE_SCHEMA_VERSION}`);
+			const values = "(?,?,?),".repeat(pending.size).slice(0, -1);
+			const stmt = db.prepare<CacheRow, (string | null)[]>(
+				`WITH wanted(id, hash, policy) AS (VALUES ${values}) ${SELECT_CACHE_ROWS}`,
+			);
 			try {
-				bindings.push(materializationPolicy());
+				bindings.push(compactModelPolicy, plainModelPolicy);
 				for (const row of stmt.iterate(...bindings)) {
 					const { key, cached } = pending.get(row.provider_id)!;
 					const entry = rememberRow<TApi>(db, key, row.provider_id, cached, row, generation, ttlMs, now);
@@ -1053,7 +1056,6 @@ function parseCacheRow<TApi extends Api>(
 	ttlMs: number,
 	now: () => number,
 	knownModels: Model<TApi>[] | undefined,
-	decode: (serialized: string, hash: string) => Model<TApi>[] | null = parsePayload<TApi>,
 ): CacheEntry<TApi> | null {
 	if (!row) return null;
 	const headerOmittedModelIds = parseModelIds(row.header_omitted_model_ids);
@@ -1062,7 +1064,7 @@ function parseCacheRow<TApi extends Api>(
 		row.models === null
 			? (knownModels ?? null)
 			: headerOmittedModelIds && unrestorableHeaderModelIds
-				? decode(row.models, row.models_hash)
+				? parsePayload<TApi>(row.models, row.models_hash, row.materialization_policy)
 				: null;
 	if (models === null || headerOmittedModelIds === null || unrestorableHeaderModelIds === null) {
 		// Fail closed on corrupt header provenance: treating malformed
@@ -1180,6 +1182,8 @@ class CacheRowBuilder<TApi extends Api> {
 	readonly #unrestorableHeaderModelIds: string[] = [];
 	readonly #rejectedModelIds: string[] = [];
 	readonly #serializedModels: string[] = [];
+	/** First persisted row carrying each byte-identical resolved compat record. */
+	readonly #compatAnchors = new Map<string, number>();
 
 	constructor(
 		staticHeaderSources: readonly Model<TApi>[],
@@ -1220,6 +1224,15 @@ class CacheRowBuilder<TApi extends Api> {
 				this.#unrestorableHeaderModelIds.push(model.id);
 			}
 		}
+		if (cachedModel.compat !== undefined) {
+			const bytes = JSON.stringify(cachedModel.compat);
+			const anchor = this.#compatAnchors.get(bytes);
+			if (anchor === undefined) this.#compatAnchors.set(bytes, this.#serializedModels.length);
+			else {
+				const encoded: { compat?: unknown } = cachedModel;
+				encoded.compat = anchor;
+			}
+		}
 		this.#serializedModels.push(JSON.stringify(cachedModel));
 	}
 
@@ -1231,8 +1244,7 @@ class CacheRowBuilder<TApi extends Api> {
 				models: this.#rejectedModelIds,
 			});
 		}
-		// Joined element-wise this is byte-identical to `JSON.stringify` of the
-		// whole array, so the hash matches rows serialized in one piece.
+		// References use row order, so identical snapshots retain a stable payload hash.
 		const models = `[${this.#serializedModels.join(",")}]`;
 		return {
 			providerId,
@@ -1263,7 +1275,7 @@ function matchingStoredRow(db: Database, write: CacheRowWrite): StoredRowState |
 		return stmt.get(
 			write.providerId,
 			CACHE_SCHEMA_VERSION,
-			materializationPolicy(),
+			compactModelPolicy,
 			write.staticFingerprint,
 			write.headerOmittedModelIds,
 			write.unrestorableHeaderModelIds,
@@ -1292,7 +1304,7 @@ function storedRowUnchanged(db: Database, write: CacheRowWrite): boolean {
  * drops the stale side row and prunes the provider's other policies.
  */
 function applyCacheRowWrite(db: Database, write: CacheRowWrite): "skipped" | "refreshed" | "written" {
-	const policy = materializationPolicy();
+	const policy = compactModelPolicy;
 	const authoritativeFlag = write.authoritative ? 1 : 0;
 	const stored = matchingStoredRow(db, write);
 	if (stored) {

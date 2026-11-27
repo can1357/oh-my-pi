@@ -6,16 +6,20 @@ import * as path from "node:path";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	getModelCacheWriteStats,
+	readCacheForHeaderRestore,
 	readModelCache,
 	readModelCaches,
 	retainModelCacheConnection,
+	staticCatalogSources,
 	writeModelCache,
 } from "@oh-my-pi/pi-catalog/model-cache";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { type GeneratedProvider, getBundledModels, getBundledProviders } from "@oh-my-pi/pi-catalog/models";
 import { modelsDevCatalogFallback } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl, Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
+import { VERSION } from "@oh-my-pi/pi-utils";
 import { removeWithRetries } from "../../utils/src/temp";
+import rules from "../src/compat/rules.json" with { type: "json" };
 
 const TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -278,6 +282,80 @@ describe("model cache write churn", () => {
 			db.close();
 		}
 	}
+
+	it("uses a plain snapshot offline until a compact refresh wins in every startup reader", () => {
+		const provider = "rewrite-test";
+		const legacyPolicy = `app-${VERSION}:builder-2:rules-${rules.version}-${rules.hash}`;
+		const db = new Database(dbPath);
+		try {
+			writeModelCache(provider, 1_000, [model("previous")], true, "fp", dbPath);
+			db.run("UPDATE model_cache SET materialization_policy = ?", [legacyPolicy]);
+			expect(readModelCache(provider, TTL_MS, () => 2_000, dbPath)?.models.map(m => m.id)).toEqual(["previous"]);
+			writeModelCache(provider, 2_000, [model("current-a"), model("current-b")], true, "fp", dbPath);
+			const ids = [provider, "absent"];
+			expect(
+				readModelCaches(ids, TTL_MS, () => 2_000, dbPath)
+					.get(provider)
+					?.models.map(m => m.id),
+			).toEqual(["current-a", "current-b"]);
+			expect(staticCatalogSources(ids, TTL_MS, 2_000, dbPath)?.updatedAt.get(provider)).toBe(2_000);
+			expect(
+				db.query("SELECT updated_at FROM model_cache WHERE materialization_policy = ?").get(legacyPolicy),
+			).toEqual({ updated_at: 1_000 });
+		} finally {
+			db.close();
+		}
+	});
+
+	it("restores independently writable and enumerable compat records through chained references", () => {
+		const rows = ["anchor", "sibling", "chained"].map(id =>
+			buildModel({
+				...spec(id),
+				headers: { "X-Route": "fixture" },
+				compat: { reasoningEffortMap: { high: "high-test" } },
+			}),
+		);
+		writeModelCache("rewrite-test", 1_000, rows, true, "fp", dbPath);
+		const db = new Database(dbPath);
+		try {
+			db.run(`UPDATE model_cache SET models = json_set(models,
+				'$[0].compat.__proto__', json('[{"effort":"original"}]'), '$[2].compat', 1)`);
+		} finally {
+			db.close();
+		}
+		const entry = readCacheForHeaderRestore<"openai-completions">("rewrite-test", TTL_MS, () => 1_000, dbPath);
+		if (!entry) throw new Error("missing compact models");
+		const [anchor, sibling, chained] = entry.models;
+		for (const row of [sibling, chained]) {
+			expect(Object.keys(row.compat)).toEqual(Object.keys(anchor.compat));
+			expect(JSON.stringify(row.compat)).toBe(JSON.stringify(anchor.compat));
+			expect(Object.getPrototypeOf(row.compat)).toBe(Object.prototype);
+		}
+		const settings = (row: typeof anchor) => Reflect.get(row.compat, "__proto__") as { effort: string }[];
+		anchor.compat.reasoningEffortMap.high = "anchor-only";
+		sibling.compat.reasoningEffortMap.high = "sibling-only";
+		settings(sibling)[0].effort = "sibling-only";
+		settings(chained).push({ effort: "chained-only" });
+		expect(chained.compat.reasoningEffortMap.high).toBe("high-test");
+		expect(settings(anchor)).toEqual([{ effort: "original" }]);
+		expect(settings(chained)[0].effort).toBe("original");
+		expect(settings(sibling)).toEqual([{ effort: "sibling-only" }]);
+	});
+
+	it("rejects a compat reference with no preceding anchor and reloads a repaired row", () => {
+		const provider = "rewrite-test";
+		writeModelCache(provider, 1_000, [model("only")], true, "fp", dbPath);
+		const db = new Database(dbPath);
+		try {
+			db.run("UPDATE model_cache SET models = json_set(models, '$[0].compat', 0)");
+			expect(readModelCache(provider, TTL_MS, () => 1_000, dbPath)).toBeNull();
+			expect(payloadRow(dbPath, provider)).toBeNull();
+			writeModelCache(provider, 2_000, [model("repaired")], true, "fp", dbPath);
+			expect(readModelCache(provider, TTL_MS, () => 2_000, dbPath)?.models[0]?.id).toBe("repaired");
+		} finally {
+			db.close();
+		}
+	});
 
 	it("keeps this build's row when another app version writes the same provider", () => {
 		writeModelCache("rewrite-test", 1_000, [model("a")], true, "fp", dbPath);
