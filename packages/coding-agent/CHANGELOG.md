@@ -41,6 +41,7 @@
 - The `logout` RPC response carries `signOutError` when the provider could not confirm revoking the login; the login is removed regardless
 - Esc hides the command output (`/mcp` and other slash commands) previewed above the editor while the agent streams, without interrupting the turn; the output still enters the transcript when the agent pauses ([#17954](https://github.com/can1357/oh-my-pi/issues/17954))
 - Added an uninstaller to the install scripts: `curl -fsSL https://omp.sh/install | sh -s -- --uninstall` (PowerShell: `-Uninstall`) removes the installed binary or bun/npm global package and keeps `~/.omp` unless you confirm the prompt or pass `--purge` (`-Purge`) ([#3351](https://github.com/can1357/oh-my-pi/issues/3351))
+- Added `tui.screen: fullscreen`, an opt-in screen mode that draws the session on the alternate screen with the composer, status line and HUD pinned to the bottom while the transcript scrolls inside omp (PageUp/PageDown, Ctrl+Home/Ctrl+End via the new `app.transcript.*` keybindings, and the mouse wheel), following new output unless scrolled back, and writes the whole transcript to the normal screen on exit without erasing the shell's scrollback; `inline` stays the default ([#2040](https://github.com/can1357/oh-my-pi/issues/2040), building on [#2103](https://github.com/can1357/oh-my-pi/pull/2103) by [@shoucandanghehe](https://github.com/shoucandanghehe))
 
 ### Changed
 

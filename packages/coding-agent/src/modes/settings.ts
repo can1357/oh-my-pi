@@ -391,6 +391,34 @@ export const cfgTuiResizeScrollback = register({
 	},
 });
 
+export const cfgTuiScreen = register({
+	id: "tui.screen",
+	type: "enum",
+	values: ["inline", "fullscreen"] as const,
+	default: "inline",
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Screen",
+		get description() {
+			const shift = formatKeyHint("shift");
+			return `Where the session draws in a plain terminal (Tern draws its own): inline keeps the transcript in terminal scrollback; fullscreen uses the alternate screen with the composer pinned to the bottom and the transcript scrolled in omp (PgUp/PgDn, Ctrl+Home/Ctrl+End, mouse wheel), written to the terminal when omp exits. Fullscreen reports the mouse wheel, so native text selection becomes ${shift}+drag (Option+drag in iTerm2); /copy picks text without the mouse`;
+		},
+		options: [
+			{
+				value: "inline",
+				label: "Inline",
+				description: "Draw below the shell prompt; settled output goes into terminal scrollback",
+			},
+			{
+				value: "fullscreen",
+				label: "Fullscreen",
+				description: "Alternate screen, composer pinned to the bottom, transcript scrolled in omp",
+			},
+		],
+	},
+});
+
 export const cfgTerminalShowProgress = register({
 	id: "terminal.showProgress",
 	type: "boolean",

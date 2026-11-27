@@ -178,6 +178,7 @@ import {
 	cfgThemeLight,
 	cfgTuiImeSafeCursor,
 	cfgTuiResizeScrollback,
+	cfgTuiScreen,
 	cfgTuiSpinnerInterval,
 	cfgTuiVimMode,
 	cfgTuiMaxFps,
@@ -2290,6 +2291,7 @@ export async function runRootCommand(
 			autocompleteMaxVisible: cfgAutocompleteMaxVisible.get(settingsInstance),
 			vim: cfgTuiVimMode.get(settingsInstance),
 			imeSafeCursor: cfgTuiImeSafeCursor.get(settingsInstance),
+			screen: cfgTuiScreen.get(settingsInstance),
 			theme: {
 				symbolPreset: cfgSymbolPreset.get(settingsInstance),
 				colorBlindMode: cfgColorBlindMode.get(settingsInstance),

@@ -232,6 +232,11 @@ export class FrameWriter {
 
 	/** The next inline frame clears screen and scrollback first (display reset, rebuild). */
 	#pendingClear = false;
+	/**
+	 * Rows of ours are on the normal screen (an inline frame was written since start). A session
+	 * drawing only fullscreen frames has none: resizes and display resets have nothing to rebuild there.
+	 */
+	#inlineWritten = false;
 	/** The next replay batch appends below retained history instead of replacing it. */
 	#replayAppends = false;
 	/** The normal screen reflowed under the writer: recover the anchor before painting it. */
@@ -311,6 +316,7 @@ export class FrameWriter {
 		this.#stale = false;
 		this.#anchoring = false;
 		this.#pendingClear = false;
+		this.#inlineWritten = false;
 		this.#replayAppends = false;
 		this.#deferred = undefined;
 		this.#pushed = [];
@@ -391,6 +397,12 @@ export class FrameWriter {
 	 * inline frame (which should carry the replay) so no blank screen shows.
 	 */
 	resetDisplay(): void {
+		if (this.#alt) this.#altShown = null;
+		if (this.#alt && this.#fullscreen && !this.#inlineWritten) {
+			// Only fullscreen frames so far: the normal screen holds nothing of ours to clear or replay.
+			this.#options.onInvalidate?.("repaint");
+			return;
+		}
 		this.#pendingClear = true;
 		this.#replayAppends = false;
 		this.#stale = false;
@@ -625,6 +637,7 @@ export class FrameWriter {
 		// every row past the bottom: the next frame (or the shell) writes there, never over history.
 		if (past.length > 0 && viewport.length === 0) viewport = [""];
 		const stream = past.length > 0 ? [...past, ...viewport] : viewport;
+		if (stream.length > 0) this.#inlineWritten = true;
 		const shift =
 			!this.#options.synchronizedOutput() &&
 			this.#topKnown() &&
@@ -829,6 +842,15 @@ export class FrameWriter {
 		const ownsGrid = this.#options.hostOwnsGrid?.() ?? false;
 		const canReplay = this.#options.canReplay?.() ?? false;
 		const mode = this.#options.resizeScrollback ?? "preserve";
+		if (this.#alt && this.#fullscreen && !this.#inlineWritten) {
+			// Only fullscreen frames so far: nothing of ours on the normal screen to rebuild or re-anchor.
+			// The first inline frame (the shutdown flush) starts wherever the cursor is.
+			this.#stale = false;
+			this.#topLo = 0;
+			this.#topHi = this.#rows - 1;
+			this.#options.onInvalidate?.("repaint");
+			return;
+		}
 		let replay: "rebuild" | "append" | null = null;
 		if (!tx.inPlace && canReplay) {
 			if (ownsGrid) replay = "rebuild";

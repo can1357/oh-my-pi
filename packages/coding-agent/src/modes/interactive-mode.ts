@@ -342,6 +342,7 @@ import {
 	cfgTuiRenderEmbeds,
 	cfgTuiRenderSvg,
 	cfgTuiResizeScrollback,
+	cfgTuiScreen,
 	cfgTuiTextSizing,
 	cfgTuiTight,
 	cfgTuiTitleSpinner,
@@ -509,6 +510,7 @@ const cfgLiveUiSettings = combine({
 	"tui.textSizing": cfgTuiTextSizing,
 	"tui.tight": cfgTuiTight,
 	"tui.hyperlinks": cfgTuiHyperlinks,
+	"tui.screen": cfgTuiScreen,
 	"tui.titleState": cfgTuiTitleState,
 	"tui.titleSpinner": cfgTuiTitleSpinner,
 	motion: cfgMotionResolved,
@@ -1782,9 +1784,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		};
 	}
 
-	/** `tui.maxFps`, `tui.hyperlinks` and `tui.textSizing` into the running renderer. */
+	/** `tui.maxFps`, `tui.hyperlinks`, `tui.textSizing` and `tui.screen` into the running renderer. */
 	#syncFrameSettings(): void {
 		this.#frame.frameInterval.set(1000 / cfgTuiMaxFps.get(this.settings));
+		this.#frame.screen.set(cfgTuiScreen.get(this.settings));
 		const hyperlinks = cfgTuiHyperlinks.get(this.settings);
 		this.#frame.hyperlinks.set(hyperlinks === "off" ? false : hyperlinks === "always" ? true : undefined);
 		this.#frame.textSizing.set(cfgTuiTextSizing.get(this.settings));
@@ -3660,6 +3663,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#syncFrameSettings();
 			resetDisplay = true;
 		}
+		if (any("tui.screen")) this.#syncFrameSettings();
 		if (any("tui.titleState")) setTerminalTitleStateEnabled(cfgTuiTitleState.get(this.settings));
 		if (any("tui.titleSpinner")) setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
 		if (any("terminal.programStatus")) setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));

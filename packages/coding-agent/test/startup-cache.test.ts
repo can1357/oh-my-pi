@@ -64,6 +64,25 @@ describe("startup cache status prediction", () => {
 		expect(store.read("/work/gamma").status?.facts.thinkingLevel).toBe("low");
 	});
 
+	it("remembers the screen mode for the next first frame; older entries start inline", () => {
+		const store = open();
+		const preferences: startupCache.StartupPreferences = {
+			quiet: false,
+			composerShape: "box",
+			resizeScrollback: "rebuild",
+			autocompleteMaxVisible: 5,
+			vim: false,
+			imeSafeCursor: false,
+			screen: "fullscreen",
+		};
+		store.write("/work/alpha", preferences, {});
+		expect(store.read("/work/alpha").preferences?.screen).toBe("fullscreen");
+		// An entry written before the setting existed carries no screen field.
+		const { screen: _screen, ...older } = preferences;
+		store.write("/work/gamma", JSON.parse(JSON.stringify(older)), {});
+		expect(store.read("/work/gamma").preferences?.screen).toBe("inline");
+	});
+
 	it("ignores a stored prediction that names segments the bar does not have", () => {
 		const store = open();
 		store.writeStatus("/work/alpha", {
