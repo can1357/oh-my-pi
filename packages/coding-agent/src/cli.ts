@@ -36,6 +36,7 @@ import {
 	SHELL_PROCESS_SELECTOR,
 } from "@oh-my-pi/pi-utils/worker-host";
 import { installSqliteLockShim } from "@oh-my-pi/pi-natives/sqlite-locks";
+import { IS_RUSSIAN_BUILD } from "@oh-my-pi/pi-utils/ui-language";
 import { isNativeShell, runNativeShell } from "./cli/native-shell";
 import { extractProfileFlags } from "./cli/profile-bootstrap";
 import {
@@ -345,6 +346,7 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 		return true;
 	}
 	if (arg === AUTO_UPDATE_WORKER_ARG) {
+		if (IS_RUSSIAN_BUILD) return true;
 		// Selector boundary keeps the updater graph out of ordinary startup. The worker
 		// downloads releases, so it needs the PI_PROXY handling ordinary commands get.
 		await installNetworkBootstrap();

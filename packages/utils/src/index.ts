@@ -6,6 +6,7 @@ export * from "./bytes";
 export * from "./color";
 export * from "./dirs";
 export * from "./env";
+export * from "./ui-language";
 export * from "./executable";
 export * from "./fetch-retry";
 export * from "./file-lock";

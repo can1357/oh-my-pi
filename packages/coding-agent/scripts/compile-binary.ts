@@ -57,6 +57,7 @@ export async function compileCodingAgent(options: CodingAgentCompileOptions): Pr
 			},
 			define: {
 				"process.env.PI_COMPILED": JSON.stringify("true"),
+				__OMP_RU_BUILD__: JSON.stringify(Bun.env.OMP_BUILD_FLAVOR === "ru"),
 				"process.env.PI_DOCS_EMBED": JSON.stringify((await buildDocsIndexPayload()).payload),
 			},
 			// Precompiled bytecode skips parsing the ~20 MB bundle at boot:
