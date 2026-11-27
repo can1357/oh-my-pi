@@ -61,21 +61,21 @@ function insertUnreadableRow(db: Database): void {
 	db.prepare("INSERT INTO working_memory (rowid, content) VALUES (?, ?)").run(UNREADABLE_ROWID, UNREADABLE_PAGE);
 }
 
-/** Inserts a working_memory row with a text id and the page as BLOB content, and returns its rowid. */
-function insertBlobContentRow(db: Database, id: string): number {
+/** Inserts a working_memory row with a text id and the page as BLOB content, and returns its rowid as decimal text. */
+function insertBlobContentRow(db: Database, id: string): string {
 	const insert = db.prepare("INSERT INTO working_memory (id, content) VALUES (?, ?)");
-	return Number(insert.run(id, UNREADABLE_PAGE).lastInsertRowid);
+	return String(insert.run(id, UNREADABLE_PAGE).lastInsertRowid);
 }
 
-const SKIPPED_ROW_WARNING = "mnemopi: embedding rebuild skipped a memory row that has no text id or no text";
+// A skipped-row warning names the row by its rowid as decimal text: a rowid is a signed 64-bit
+// integer, and a JS number rounds one past 2^53.
 const SKIPPED_ROW_FIELDS = {
 	table: "working_memory",
-	rowid: UNREADABLE_ROWID,
+	rowid: String(UNREADABLE_ROWID),
 	id: null,
 	idType: "null",
 	contentType: "blob",
 };
-const SKIPPED_ROWS_SUMMARY = "mnemopi: embedding rebuild skipped more memory rows that have no text id or no text";
 const REBUILT = [
 	{ memory_id: "ep-1", model: NEW_MODEL },
 	{ memory_id: "wm-1", model: NEW_MODEL },
@@ -97,7 +97,9 @@ function seedUnembeddedDb(): Database {
 
 /**
  * Opens a store on `db` with the new model and waits for its rebuild. Returns the fields of each
- * skipped-row warning and of each summary line it logged; a throw from `new Mnemopi()` propagates.
+ * warning that names a skipped row (it has a `rowid`) and of each warning that counts them (it has
+ * `skipped`), matched by those fields rather than the wording; a throw from `new Mnemopi()`
+ * propagates.
  */
 async function openAndRebuild(db: Database): Promise<{ rows: unknown[]; summaries: unknown[] }> {
 	const warn = spyOn(logger, "warn").mockImplementation(() => {});
@@ -105,10 +107,10 @@ async function openAndRebuild(db: Database): Promise<{ rows: unknown[]; summarie
 	try {
 		memory = new Mnemopi({ db, embeddings: { model: NEW_MODEL, provider: fakeEmbed() } });
 		await memory.flushExtractions();
-		const calls = warn.mock.calls;
+		const warned = warn.mock.calls.map(([, fields]) => fields ?? {});
 		return {
-			rows: calls.filter(([text]) => text === SKIPPED_ROW_WARNING).map(([, fields]) => fields),
-			summaries: calls.filter(([text]) => text === SKIPPED_ROWS_SUMMARY).map(([, fields]) => fields),
+			rows: warned.filter(fields => Object.hasOwn(fields, "rowid")),
+			summaries: warned.filter(fields => Object.hasOwn(fields, "skipped")),
 		};
 	} finally {
 		warn.mockRestore();
@@ -345,32 +347,14 @@ describe("reconcileEmbeddingModel on store open", () => {
 	it("opens the store and resumes the rebuild past a row with no text id or no text", async () => {
 		// The interrupted-rebuild branch runs inside the constructor. A BLOB row there used to
 		// throw out of `new Mnemopi()`, so the coding agent left the memory backend off.
-		const db = new Database(":memory:");
-		initBeam(db);
-		const ts = new Date().toISOString();
-		db.prepare(
-			"INSERT INTO working_memory (id, content, source, timestamp, session_id) VALUES (?, ?, 'test', ?, 'default')",
-		).run("wm-1", "alpha working memory", ts);
-		db.prepare(
-			"INSERT INTO episodic_memory (id, content, source, timestamp, session_id) VALUES (?, ?, 'test', ?, 'default')",
-		).run("ep-1", "beta episodic memory", ts);
-		insertUnreadableRow(db);
-
-		const warn = spyOn(logger, "warn").mockImplementation(() => {});
-		let memory: Mnemopi | undefined;
+		const db = seedUnembeddedDb();
 		try {
-			memory = new Mnemopi({ db, embeddings: { model: NEW_MODEL, provider: fakeEmbed() } });
-			await memory.flushExtractions();
-			const rows = memory.conn.query("SELECT memory_id, model FROM memory_embeddings ORDER BY memory_id").all();
-			expect(rows).toEqual([
-				{ memory_id: "ep-1", model: NEW_MODEL },
-				{ memory_id: "wm-1", model: NEW_MODEL },
-			]);
-			const skipped = warn.mock.calls.filter(([message]) => message === SKIPPED_ROW_WARNING);
-			expect(skipped.map(([, fields]) => fields)).toEqual([SKIPPED_ROW_FIELDS]);
+			insertUnreadableRow(db);
+			const logged = await openAndRebuild(db);
+			expect(storedEmbeddings(db)).toEqual(REBUILT);
+			expect(logged.rows).toEqual([SKIPPED_ROW_FIELDS]);
+			expect(logged.summaries).toEqual([]);
 		} finally {
-			warn.mockRestore();
-			memory?.close();
 			db.close();
 		}
 	});
@@ -379,23 +363,65 @@ describe("reconcileEmbeddingModel on store open", () => {
 		// The model-change branch rebuilds in the background. A BLOB row there aborted the whole
 		// rebuild, so every open kept the stale vectors and tried again.
 		const { db } = seedDb(OLD_MODEL);
-		insertUnreadableRow(db);
-
-		const warn = spyOn(logger, "warn").mockImplementation(() => {});
-		const memory = new Mnemopi({ db, embeddings: { model: NEW_MODEL, provider: fakeEmbed() } });
 		try {
-			await memory.flushExtractions();
-			const rows = memory.conn.query("SELECT memory_id, model FROM memory_embeddings ORDER BY memory_id").all();
-			expect(rows).toEqual([
-				{ memory_id: "ep-1", model: NEW_MODEL },
-				{ memory_id: "wm-1", model: NEW_MODEL },
-			]);
-			const skipped = warn.mock.calls.filter(([message]) => message === SKIPPED_ROW_WARNING);
-			expect(skipped.map(([, fields]) => fields)).toEqual([SKIPPED_ROW_FIELDS]);
+			insertUnreadableRow(db);
+			const logged = await openAndRebuild(db);
+			expect(storedEmbeddings(db)).toEqual(REBUILT);
+			expect(logged.rows).toEqual([SKIPPED_ROW_FIELDS]);
+			expect(logged.summaries).toEqual([]);
 		} finally {
-			warn.mockRestore();
-			memory.close();
 			db.close();
+		}
+	});
+
+	it("resumes past a row with a NULL id after other memories have active-model vectors", async () => {
+		// `NULL NOT IN (subquery)` is NULL, not true, once the subquery returns a row: a NOT IN
+		// anti-join dropped the NULL-id row unreported as soon as any memory had an active-model vector.
+		const db = seedUnembeddedDb();
+		try {
+			db.prepare("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, ?)").run(
+				"wm-1",
+				JSON.stringify([1, 0, 0, 0]),
+				NEW_MODEL,
+			);
+			insertUnreadableRow(db);
+			const logged = await openAndRebuild(db);
+			expect(storedEmbeddings(db)).toEqual(REBUILT);
+			expect(logged.rows).toEqual([SKIPPED_ROW_FIELDS]);
+		} finally {
+			db.close();
+		}
+	});
+
+	it("resumes every memory missing a vector when an active-model vector has a NULL memory_id", async () => {
+		// `memory_embeddings.memory_id` admits NULL too, and `x NOT IN (..., NULL)` is never true:
+		// one such vector made a NOT IN anti-join resume no memory at all.
+		const db = seedUnembeddedDb();
+		try {
+			db.prepare("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (NULL, ?, ?)").run(
+				JSON.stringify([1, 0, 0, 0]),
+				NEW_MODEL,
+			);
+			await openAndRebuild(db);
+			expect(storedEmbeddings(db)).toEqual([{ memory_id: null, model: NEW_MODEL }, ...REBUILT]);
+		} finally {
+			db.close();
+		}
+	});
+
+	it("names a skipped row by its exact rowid past 2^53, in both rebuild branches", async () => {
+		// For a row with a NULL id the rowid is the only locator, and a JS number reads 2^53 + 1 as 2^53.
+		const rowid = "9007199254740993";
+		for (const seed of [seedUnembeddedDb, () => seedDb(OLD_MODEL).db]) {
+			const db = seed();
+			try {
+				db.run(`INSERT INTO working_memory (rowid, content) VALUES (${rowid}, ?)`, [UNREADABLE_PAGE]);
+				const logged = await openAndRebuild(db);
+				expect(storedEmbeddings(db)).toEqual(REBUILT);
+				expect(logged.rows).toEqual([{ ...SKIPPED_ROW_FIELDS, rowid }]);
+			} finally {
+				db.close();
+			}
 		}
 	});
 
@@ -427,7 +453,7 @@ describe("reconcileEmbeddingModel on store open", () => {
 			const logged = await openAndRebuild(db);
 			expect(storedEmbeddings(db)).toEqual(REBUILT);
 			expect(logged.rows).toEqual([
-				{ table: "working_memory", rowid: UNREADABLE_ROWID, id: null, idType: "null", contentType: "text" },
+				{ table: "working_memory", rowid: String(UNREADABLE_ROWID), id: null, idType: "null", contentType: "text" },
 			]);
 			expect(logged.summaries).toEqual([]);
 		} finally {

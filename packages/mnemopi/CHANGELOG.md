@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed a memory store failing to open, or a model-change embedding rebuild stopping, when a memory row's content is not text: such rows, and rows without a text id, are now skipped with a warning ([#20613](https://github.com/can1357/oh-my-pi/pull/20613) by [@sjawhar](https://github.com/sjawhar))
+- Fixed an interrupted embedding rebuild resuming no memories when a stored embedding has no memory id ([#20613](https://github.com/can1357/oh-my-pi/pull/20613) by [@sjawhar](https://github.com/sjawhar))
 
 ### Removed
 

@@ -352,10 +352,14 @@ function rowToDict(row: Row): Row {
  *  embedding request instead of embedding the whole corpus in one call. */
 const EMBED_REBUILD_BATCH = 128;
 
-/** A live memory row as an embedding rebuild reads it, before its column types are checked. */
+/**
+ * A live memory row as an embedding rebuild reads it, before its column types are checked. The
+ * rowid is read as decimal text: it is a signed 64-bit integer, which a JS number rounds past 2^53,
+ * and for a row with no id it is the only locator.
+ */
 interface LiveMemoryRow {
 	readonly tableName: string;
-	readonly rowid: number;
+	readonly rowid: string;
 	readonly memoryId: unknown;
 	readonly content: unknown;
 }
@@ -463,10 +467,11 @@ export function reconcileEmbeddingModel(beam: BeamMemoryState): void {
 				const live = embeddableRows(
 					beam.db
 						.query(`
-							SELECT 'working_memory' AS tableName, rowid, id AS memoryId, COALESCE(embed_text, content) AS content
+							SELECT 'working_memory' AS tableName, CAST(rowid AS TEXT) AS rowid, id AS memoryId,
+								COALESCE(embed_text, content) AS content
 							FROM working_memory WHERE superseded_by IS NULL
 							UNION ALL
-							SELECT 'episodic_memory' AS tableName, rowid, id AS memoryId, content
+							SELECT 'episodic_memory' AS tableName, CAST(rowid AS TEXT) AS rowid, id AS memoryId, content
 							FROM episodic_memory WHERE superseded_by IS NULL
 						`)
 						.all() as LiveMemoryRow[],
@@ -537,17 +542,23 @@ export function reconcileEmbeddingModel(beam: BeamMemoryState): void {
 	// No stale embeddings, but a previously-interrupted rebuild (a failed embed or a process
 	// exit after the wipe) can leave live memories with no active-model embedding. Treating an
 	// empty/partial table as "reconciled" would strand them FTS-only, so re-enqueue any live
-	// row still missing an active-model embedding.
+	// row still missing an active-model embedding. The anti-join is NOT EXISTS, not NOT IN:
+	// `x NOT IN (subquery)` is NULL, never true, when x is NULL and the subquery returns a row, or
+	// when the subquery returns a NULL. It would drop a row with no id before embeddableRows()
+	// reports it, and one active-model vector with no memory_id would hide every missing memory.
 	const missing = embeddableRows(
 		beam.db
 			.query(`
-				SELECT 'working_memory' AS tableName, rowid, id AS memoryId, COALESCE(embed_text, content) AS content
-				FROM working_memory
-				WHERE superseded_by IS NULL AND id NOT IN (SELECT memory_id FROM memory_embeddings WHERE model = ?)
+				SELECT 'working_memory' AS tableName, CAST(m.rowid AS TEXT) AS rowid, m.id AS memoryId,
+					COALESCE(m.embed_text, m.content) AS content
+				FROM working_memory AS m
+				WHERE m.superseded_by IS NULL
+					AND NOT EXISTS (SELECT 1 FROM memory_embeddings AS e WHERE e.memory_id = m.id AND e.model = ?)
 				UNION ALL
-				SELECT 'episodic_memory' AS tableName, rowid, id AS memoryId, content
-				FROM episodic_memory
-				WHERE superseded_by IS NULL AND id NOT IN (SELECT memory_id FROM memory_embeddings WHERE model = ?)
+				SELECT 'episodic_memory' AS tableName, CAST(m.rowid AS TEXT) AS rowid, m.id AS memoryId, m.content
+				FROM episodic_memory AS m
+				WHERE m.superseded_by IS NULL
+					AND NOT EXISTS (SELECT 1 FROM memory_embeddings AS e WHERE e.memory_id = m.id AND e.model = ?)
 			`)
 			.all(active, active) as LiveMemoryRow[],
 	);
