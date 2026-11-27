@@ -40,8 +40,10 @@ provider "github-copilot" {
 	// Sol sessions often had blank `"auto"` blocks). gpt-6.2-astra went the
 	// other way (2 / 1395 vs 6 / 3598) and gpt-5.5 was not verified, so the
 	// default stays on the verified model; widen it only with evidence.
+	// residue: the verified model alone, plus its synthesized `-1m` long-context
+	// row (same wire model); `family`/`revision` would also take gpt-6.2-astra.
 	on-api "openai-responses" {
-		models "gpt-6.2-sol" {
+		models "gpt-6.2-sol" "gpt-6.2-sol-1m" {
 			reasoning-summary-default "detailed"
 		}
 	}

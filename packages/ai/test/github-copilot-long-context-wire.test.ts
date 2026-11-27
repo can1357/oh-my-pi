@@ -314,6 +314,12 @@ describe("GitHub Copilot Responses reasoning summary default", () => {
 		expect(await summaryOnWire(makeLongContextVariant(sol))).toBe("detailed");
 	});
 
+	it("sends `detailed` on Sol's synthesized long-context row, which keeps Sol's wire id", async () => {
+		const longSol = makeLongContextVariant({ ...sol, id: "gpt-6.2-sol-1m", name: "GPT-6.2 Sol (1M)" });
+		expect(longSol.requestModelId).toBe("gpt-6.2-sol");
+		expect(await summaryOnWire(longSol)).toBe("detailed");
+	});
+
 	it("lets an explicit caller level and an explicit omission win over the default", async () => {
 		const model = makeLongContextVariant(sol);
 		expect(await summaryOnWire(model, { reasoningSummary: "concise" })).toBe("concise");
