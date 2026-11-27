@@ -17,6 +17,7 @@ import {
 	setTerminalTitlePullRequest,
 	setTerminalTitleSpinnerStyle,
 	setTerminalTitleState,
+	TERMINAL_TITLE_SPINNER_STYLES,
 } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import { setNativeRenderingForTest as setNativeRendering } from "@oh-my-pi/pi-tui";
 import { isWsl, logger, setTerminalHeadless } from "@oh-my-pi/pi-utils";
@@ -979,9 +980,8 @@ describe("title generator", () => {
 
 const OSC_TITLE_RE = /\x1b\]0;([\s\S]*?)\x07/;
 
-// Braille spinner frames used by the `working` state (mirrors the module's
-// private TITLE_SPINNER_FRAMES); a clobbered override would surface one of these.
-const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+// Frames of the default `working` spinner; a clobbered override would surface one of these.
+const SPINNER_FRAMES = TERMINAL_TITLE_SPINNER_STYLES.centered;
 
 // The `working` separator is a spinner frame everywhere except WSL, where the title is
 // static `:` because no interval is ever scheduled. Assert the separator the host actually
@@ -1038,6 +1038,7 @@ describe("terminal title runtime", () => {
 		// teardown latched it off), clear any override + session base, and settle
 		// the run state to idle.
 		initTerminalTitleState();
+		setTerminalTitleSpinnerStyle("centered");
 		setSessionTerminalTitle(undefined);
 		setTerminalTitleState("idle");
 
@@ -1136,19 +1137,19 @@ describe("terminal title runtime", () => {
 				configurable: true,
 			});
 			setTerminalTitleSpinnerStyle("line");
-			setTerminalTitleSpinnerStyle("braille");
+			setTerminalTitleSpinnerStyle("centered");
 			setSessionTerminalTitle("windows-project");
 			resetEmitted();
 
 			setTerminalTitleState("working");
-			expect(emittedTitles()).toEqual(["π ⠋ windows-project"]);
+			expect(emittedTitles()).toEqual(["π ⠙ windows-project"]);
 
 			resetEmitted();
 			vi.advanceTimersByTime(DEFAULT_TITLE_SPINNER_INTERVAL_MS * 2);
 			const titles = emittedTitles();
 			expect(titles.length).toBeGreaterThan(0);
 			expect(titles.every(title => SPINNER_FRAMES.some(frame => title.includes(frame)))).toBe(true);
-			expect(titles.some(title => title !== "π ⠋ windows-project")).toBe(true);
+			expect(titles.some(title => title !== "π ⠙ windows-project")).toBe(true);
 		} finally {
 			Object.defineProperty(process, "platform", {
 				value: originalPlatform,

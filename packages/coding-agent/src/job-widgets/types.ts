@@ -11,7 +11,7 @@ import type { AsyncJob } from "../async/job-manager";
 export const TOOLS_SOURCE_ID = "tools";
 /**
  * What opens each tool call in the {@link TOOLS_SOURCE_ID} source
- * (`» <tool> <intent>`, then the result text): omp's marker, not output the
+ * (`» <tool-name> <intent>`, then the result text): omp's marker, not output the
  * subagent produced, so no widget rule may read it.
  */
 export const TOOL_CALL_MARK = "» ";

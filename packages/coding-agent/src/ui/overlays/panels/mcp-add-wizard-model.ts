@@ -1189,7 +1189,10 @@ export class MCPAddWizardModel {
 						...checking,
 						lines: [
 							{ text: "Running connection health check...", tone: "muted" },
-							{ text: "⚠ Health check failed (will still save config)", tone: "warning" },
+							{
+								text: `${this.terminal.theme().symbols.symbol("status.warning")} Health check failed (will still save config)`,
+								tone: "warning",
+							},
 							{ text: "" },
 							{ text: displayText(failure instanceof Error ? failure.message : String(failure)), tone: "muted" },
 						],

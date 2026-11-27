@@ -5,6 +5,7 @@ import { getModelDashboardStats } from "../api";
 import { type ChartSeries, Legend, Sparkline, TimeChart, useHiddenSeries } from "../charts";
 import { buildModelColorLookup, modelKey, OTHER_COLOR } from "../data/colors";
 import {
+	formatAiCredits,
 	formatCompact,
 	formatDurationMs,
 	formatErrorRate,
@@ -505,6 +506,7 @@ function ModelDetail({
 								label: "Premium requests",
 								value: formatInteger(Math.round(model.totalPremiumRequests * 100) / 100),
 							},
+							{ key: "aiu", label: "AI credits", value: formatAiCredits(model.totalAiuNano) },
 						]}
 					/>
 				</div>

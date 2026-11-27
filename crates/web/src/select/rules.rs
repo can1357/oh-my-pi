@@ -1,8 +1,3 @@
-//! Selectors from Trafilatura 2.0.0 (`xpaths.py`): marked article bodies (the
-//! first `BODY_XPATH` query) and comment sections (`COMMENTS_XPATH`).
-//! Copyright (c) 2024 Adrien Barbaresi; Apache-2.0 (see
-//! packages/natives/THIRD-PARTY-NOTICES.txt).
-
 use self::{Attribute::*, Match::*};
 use crate::dom::Element;
 

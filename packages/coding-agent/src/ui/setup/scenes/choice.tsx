@@ -18,9 +18,13 @@ export interface Choice<T extends string> {
 	readonly detail: string;
 }
 
-/** A key as the active glyph preset draws it (`enter` → `⏎`, or `Enter` in ASCII mode). */
+/**
+ * A key spelled out in words (`enter` → `Enter`, `escape` → `Esc`) whatever the
+ * glyph preset: setup runs before the user has picked glyphs their font can
+ * draw, so keycap glyphs could render as `?` exactly where the user needs them.
+ */
 export function keyLabel(key: string): string {
-	return formatKey(key, { preset: currentTheme().symbols.preset, platform: process.platform });
+	return formatKey(key, { preset: "ascii", platform: process.platform });
 }
 
 /** The list pointer of the glyphs in use now (a list keeps the one it was built with). */

@@ -254,7 +254,10 @@ export function normalizeRow(row: string, width: number): string {
  * Bytes that draw normalized `row` from column 0 of the cursor row and
  * erase what an older, wider row left after it. A row filling the width
  * needs no erase (with autowrap off the cursor rests on the last cell,
- * which an erase would clear).
+ * which an erase would clear). A graphics row is erased before it is drawn:
+ * its image covers cells past the cursor (an anchored image ends with the
+ * cursor restored to the start of its last row), and an erase after it
+ * would clear them.
  */
 export function drawRow(row: string, width: number, covered = 0): string {
 	// Under a scaled glyph a whitespace-only row (a container's indent) is a spacer: drawing spaces would erase it.
@@ -264,6 +267,7 @@ export function drawRow(row: string, width: number, covered = 0): string {
 		if (covered > 0) return `\r${SGR_RESET}${right(covered)}${ERASE_LINE_RIGHT}`;
 		return `\r${ERASE_LINE}`;
 	}
+	if (hasGraphics(row)) return `\r${ERASE_LINE}${row}`;
 	return visibleWidth(row) >= width ? `\r${row}` : `\r${row}${ERASE_LINE_RIGHT}`;
 }
 

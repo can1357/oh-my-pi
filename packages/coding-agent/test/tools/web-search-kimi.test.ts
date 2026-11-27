@@ -9,12 +9,29 @@ import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const originalMoonshotSearchApiKey = process.env.MOONSHOT_SEARCH_API_KEY;
 const originalKimiSearchApiKey = process.env.KIMI_SEARCH_API_KEY;
+const originalMoonshotApiKey = process.env.MOONSHOT_API_KEY;
+const originalKimiApiKey = process.env.KIMI_API_KEY;
+const originalKimiCodeGlobalApiKey = process.env.KIMI_CODE_GLOBAL_API_KEY;
 
 function restoreSearchApiKeyEnv(): void {
 	if (originalMoonshotSearchApiKey === undefined) delete process.env.MOONSHOT_SEARCH_API_KEY;
 	else process.env.MOONSHOT_SEARCH_API_KEY = originalMoonshotSearchApiKey;
 	if (originalKimiSearchApiKey === undefined) delete process.env.KIMI_SEARCH_API_KEY;
 	else process.env.KIMI_SEARCH_API_KEY = originalKimiSearchApiKey;
+	if (originalMoonshotApiKey === undefined) delete process.env.MOONSHOT_API_KEY;
+	else process.env.MOONSHOT_API_KEY = originalMoonshotApiKey;
+	if (originalKimiApiKey === undefined) delete process.env.KIMI_API_KEY;
+	else process.env.KIMI_API_KEY = originalKimiApiKey;
+	if (originalKimiCodeGlobalApiKey === undefined) delete process.env.KIMI_CODE_GLOBAL_API_KEY;
+	else process.env.KIMI_CODE_GLOBAL_API_KEY = originalKimiCodeGlobalApiKey;
+}
+
+function clearKimiCredentialEnv(): void {
+	delete process.env.MOONSHOT_SEARCH_API_KEY;
+	delete process.env.KIMI_SEARCH_API_KEY;
+	delete process.env.MOONSHOT_API_KEY;
+	delete process.env.KIMI_API_KEY;
+	delete process.env.KIMI_CODE_GLOBAL_API_KEY;
 }
 
 async function withLocalAuthStorage<T>(run: (authStorage: AuthStorage) => Promise<T>): Promise<T> {
@@ -35,8 +52,7 @@ describe("KimiProvider availability", () => {
 	});
 
 	it("does not advertise availability for a stored moonshot Open Platform credential", async () => {
-		delete process.env.MOONSHOT_SEARCH_API_KEY;
-		delete process.env.KIMI_SEARCH_API_KEY;
+		clearKimiCredentialEnv();
 		const available = await withLocalAuthStorage(async authStorage => {
 			// A Moonshot Open Platform key is a different credential system than the
 			// Kimi Code search endpoint (issue #5762) — it must not mark Kimi available.
@@ -47,8 +63,7 @@ describe("KimiProvider availability", () => {
 	});
 
 	it("advertises availability for a stored kimi-code credential", async () => {
-		delete process.env.MOONSHOT_SEARCH_API_KEY;
-		delete process.env.KIMI_SEARCH_API_KEY;
+		clearKimiCredentialEnv();
 		const available = await withLocalAuthStorage(async authStorage => {
 			await authStorage.credentials.set("kimi-code", { type: "api_key", key: "kimi-code-console-key" });
 			return new KimiProvider().isAvailable(authStorage);
@@ -72,8 +87,7 @@ describe("searchKimi credential resolution", () => {
 	});
 
 	it("sends the kimi-code credential to the Kimi Code search endpoint", async () => {
-		delete process.env.MOONSHOT_SEARCH_API_KEY;
-		delete process.env.KIMI_SEARCH_API_KEY;
+		clearKimiCredentialEnv();
 		let capturedUrl: string | undefined;
 		let capturedAuth: string | null | undefined;
 		const fetchMock: FetchImpl = (url, init) => {
@@ -97,9 +111,116 @@ describe("searchKimi credential resolution", () => {
 		expect(capturedAuth).toBe("Bearer kimi-code-console-key");
 	});
 
+	it("routes a stored kimi-code-global API key to the global Kimi Code search endpoint", async () => {
+		clearKimiCredentialEnv();
+		let capturedUrl: string | undefined;
+		let capturedAuth: string | null | undefined;
+		const fetchMock: FetchImpl = (url, init) => {
+			capturedUrl = String(url);
+			capturedAuth = new Headers(init?.headers).get("Authorization");
+			return Promise.resolve(
+				new Response(JSON.stringify({ search_results: [] }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				}),
+			);
+		};
+
+		await withLocalAuthStorage(async authStorage => {
+			await authStorage.credentials.set("kimi-code-global", {
+				type: "api_key",
+				key: "global-kimi-code-console-key",
+			});
+			const result = await searchKimi({ query: "kimi docs", authStorage, fetch: fetchMock });
+			expect(result.provider).toBe("kimi");
+		});
+
+		expect(capturedUrl).toBe("https://api.kimi.ai/coding/v1/search");
+		expect(capturedAuth).toBe("Bearer global-kimi-code-console-key");
+	});
+
+	it("routes a stored kimi-code-global OAuth login to the global Kimi Code search endpoint", async () => {
+		clearKimiCredentialEnv();
+		let capturedUrl: string | undefined;
+		let capturedAuth: string | null | undefined;
+		const fetchMock: FetchImpl = (url, init) => {
+			capturedUrl = String(url);
+			capturedAuth = new Headers(init?.headers).get("Authorization");
+			return Promise.resolve(
+				new Response(JSON.stringify({ search_results: [] }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				}),
+			);
+		};
+
+		await withLocalAuthStorage(async authStorage => {
+			await authStorage.credentials.set("kimi-code-global", {
+				type: "oauth",
+				access: "global-kimi-code-access-token",
+				refresh: "global-kimi-code-refresh-token",
+				expires: Date.now() + 60 * 60_000,
+			});
+			const result = await searchKimi({ query: "kimi docs", authStorage, fetch: fetchMock });
+			expect(result.provider).toBe("kimi");
+		});
+
+		expect(capturedUrl).toBe("https://api.kimi.ai/coding/v1/search");
+		expect(capturedAuth).toBe("Bearer global-kimi-code-access-token");
+	});
+
+	it("routes a global env credential to the global Kimi Code search endpoint", async () => {
+		clearKimiCredentialEnv();
+		process.env.KIMI_CODE_GLOBAL_API_KEY = "global-kimi-code-env-key";
+		let capturedUrl: string | undefined;
+		let capturedAuth: string | null | undefined;
+		const fetchMock: FetchImpl = (url, init) => {
+			capturedUrl = String(url);
+			capturedAuth = new Headers(init?.headers).get("Authorization");
+			return Promise.resolve(
+				new Response(JSON.stringify({ search_results: [] }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				}),
+			);
+		};
+
+		await withLocalAuthStorage(async authStorage => {
+			const result = await searchKimi({ query: "kimi docs", authStorage, fetch: fetchMock });
+			expect(result.provider).toBe("kimi");
+		});
+
+		expect(capturedUrl).toBe("https://api.kimi.ai/coding/v1/search");
+		expect(capturedAuth).toBe("Bearer global-kimi-code-env-key");
+	});
+
+	it("routes the China env credential to the mainland Kimi Code search endpoint", async () => {
+		clearKimiCredentialEnv();
+		process.env.KIMI_API_KEY = "mainland-kimi-code-env-key";
+		let capturedUrl: string | undefined;
+		let capturedAuth: string | null | undefined;
+		const fetchMock: FetchImpl = (url, init) => {
+			capturedUrl = String(url);
+			capturedAuth = new Headers(init?.headers).get("Authorization");
+			return Promise.resolve(
+				new Response(JSON.stringify({ search_results: [] }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				}),
+			);
+		};
+
+		await withLocalAuthStorage(async authStorage => {
+			const result = await searchKimi({ query: "kimi docs", authStorage, fetch: fetchMock });
+			expect(result.provider).toBe("kimi");
+		});
+
+		expect(capturedUrl).toBe("https://api.kimi.com/coding/v1/search");
+		expect(capturedAuth).toBe("Bearer mainland-kimi-code-env-key");
+	});
+
 	it("ignores a stored moonshot credential and reports missing Kimi Code credentials", async () => {
-		delete process.env.MOONSHOT_SEARCH_API_KEY;
-		delete process.env.KIMI_SEARCH_API_KEY;
+		clearKimiCredentialEnv();
 		const fetchMock: FetchImpl = () => {
 			throw new Error("fetch should not run without a Kimi Code credential");
 		};

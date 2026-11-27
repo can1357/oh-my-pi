@@ -160,6 +160,8 @@ async function startRpcServer(): Promise<RpcServer> {
 				XDG_CACHE_HOME: temp.join("cache"),
 				CI: "true",
 				PI_NO_TITLE: "1",
+				// Test runtime: keeps the child off the OS keychain.
+				PI_TEST_RUNTIME: "1",
 			},
 			stdin: "pipe",
 			stdout: "pipe",
@@ -306,6 +308,21 @@ describe("RPC Pi-compatible primitives (live server)", () => {
 			success: false,
 			error: "set_slow_mode requires boolean enabled",
 		});
+	}, 60000);
+
+	test("clear_context empties the conversation in place", async () => {
+		const { send, next } = server;
+		send({ type: "clear_context", id: "clear" });
+		expect(await next()).toEqual({
+			id: "clear",
+			type: "response",
+			command: "clear_context",
+			success: true,
+			data: { droppedCount: 0 },
+		});
+		send({ type: "get_state", id: "clear-after" });
+		const after = (await next()).data as { messageCount: number };
+		expect(after.messageCount).toBe(0);
 	}, 60000);
 
 	test("get_entries, get_tree, thinking levels, and command-discovery dialect", async () => {

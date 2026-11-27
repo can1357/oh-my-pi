@@ -211,7 +211,7 @@ async function spawnAndPark() {
 				settings,
 				enableLsp: false,
 			})(ref);
-			if (!reviver) throw new Error("Expected a persisted reviver");
+			if (typeof reviver !== "function") throw new Error("Expected a persisted reviver");
 			return localSession(await reviver(ref));
 		},
 		/** Wakes `session` with an IRC message, as a peer would, and returns the wake's first request. */

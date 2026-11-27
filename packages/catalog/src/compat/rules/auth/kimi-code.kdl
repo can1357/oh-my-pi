@@ -1,5 +1,6 @@
+// Mainland-China (kimi.com) Kimi Code deployment; global accounts use `kimi-code-global`.
 auth "kimi-code" {
-    name "Kimi Code"
+    name "Kimi Code (China)"
     login "device-code" {
         client-id "17e5f671-d194-4dfb-9706-5516cb48c098"
         base-url "https://auth.kimi.com" {

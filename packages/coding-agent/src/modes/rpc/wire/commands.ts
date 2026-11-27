@@ -87,6 +87,11 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 		result: "CancellationResult",
 	},
 	{
+		name: "clear_context",
+		doc: "Clear the conversation in place, as the TUI's `/clear` does: the session id, title, model, settings and transcript file survive. Fails with `session_busy` while a response streams or a foreground bash/eval runs.",
+		result: { droppedCount: "number" },
+	},
+	{
 		name: "open_session",
 		doc: "Continue the newest non-empty session in a directory, or start a fresh one there. Give provider and modelId together to override the saved model; otherwise an unavailable saved model fails the request.",
 		params: { sessionDir: "string", "provider?": "string", "modelId?": "string" },
@@ -411,9 +416,9 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 	},
 	{
 		name: "logout",
-		doc: "Remove one stored credential; fails when it is no longer stored. `remainingSource` names auth that still applies.",
+		doc: "Remove one stored credential, revoking it at the provider when one supports it; fails when it is no longer stored. `remainingSource` names auth that still applies; `signOutError` says why the provider's sign-out failed (the credential is removed regardless).",
 		params: { providerId: "string", credentialId: "number.integer" },
-		result: { "remainingSource?": "string" },
+		result: { "remainingSource?": "string", "signOutError?": "string" },
 	},
 
 	{

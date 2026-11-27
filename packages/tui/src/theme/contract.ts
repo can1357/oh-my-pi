@@ -19,6 +19,20 @@ export interface BoxGlyphs {
 	readonly cross: string;
 }
 
+/**
+ * How the terminal handles emoji-capable glyphs that default to text presentation
+ * (`✔ ⚠ ✉ ⚙ 🗑`): picks which form of such a glyph the symbol table emits.
+ */
+export interface EmojiSupport {
+	/** A glyph followed by U+FE0F advances two cells, as `Bun.stringWidth` counts it. */
+	readonly vs16Wide: boolean;
+	/** A bare glyph (no selector) is drawn inside its one cell instead of spilling into the next. */
+	readonly bareFits: boolean;
+}
+
+/** Nothing known about the terminal: no U+FE0F forms, one-cell slots use their fallbacks. */
+export const CONSERVATIVE_EMOJI: EmojiSupport = { vs16Wide: false, bareFits: false };
+
 /** Glyph sets that depend on the symbol preset (unicode, nerd, ascii). */
 export interface SymbolSet {
 	/** The preset the glyphs come from. */
