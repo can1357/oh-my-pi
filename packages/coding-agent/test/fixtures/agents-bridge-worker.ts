@@ -29,7 +29,7 @@ import { type RpcFrame, RpcLink } from "../../src/thread/rpc";
 import type { ThreadService } from "../../src/thread/services";
 import { agentsThreadService } from "../../src/thread/services/agents";
 import { identityThreadService } from "../../src/thread/services/identity";
-import { resolveInlineByteCapBudget } from "../../src/tools/output-meta";
+import { resolveArtifactSpillThreshold } from "../../src/tools/output-meta";
 
 /** What a worker-side peer handle reports about a session homed elsewhere. */
 export interface PeerReport {
@@ -268,7 +268,7 @@ const probe: AgentsProbe = {
 				jobs: new AsyncJobManager({}),
 				ownerId: "W-owner",
 				emitFrame: () => {},
-				resultCap: { maxBytes: resolveInlineByteCapBudget(undefined) },
+				resultCap: { maxBytes: resolveArtifactSpillThreshold(undefined) },
 			},
 			{
 				label: "remote run",

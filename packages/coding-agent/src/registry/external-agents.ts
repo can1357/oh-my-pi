@@ -9,7 +9,7 @@
  * subagent HUD and RPC subagent channels read.
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, untilAborted } from "@oh-my-pi/pi-utils";
 import {
 	ASYNC_JOB_MANAGER_SHUTDOWN_REASON,
 	type AsyncJobManagerApi,
@@ -253,13 +253,17 @@ const MAX_EXTERNAL_TRANSCRIPT_BYTES = 64 * 1024 * 1024;
 /**
  * An external agent's whole transcript, as `read agent://<id>` and `history://<id>` show it: paged from byte 0 until
  * a page adds no complete line. A reset page replaces what was read; a returned `error` fails the read like a thrown one.
+ * Every page gets the reader's `signal`, and its abort fails the read at once, also while a page is pending.
  */
-export async function readExternalTranscriptMessages(external: ExternalAgentControls): Promise<AgentMessage[]> {
+export async function readExternalTranscriptMessages(
+	external: ExternalAgentControls,
+	signal?: AbortSignal,
+): Promise<AgentMessage[]> {
 	let text = "";
 	let cursor = 0;
 	let read = 0;
 	while (read < MAX_EXTERNAL_TRANSCRIPT_BYTES) {
-		const page = await external.readTranscript(cursor);
+		const page = await untilAborted(signal, () => external.readTranscript(cursor, signal));
 		if (page.error) throw new Error(page.error);
 		const complete = page.text.slice(0, page.text.lastIndexOf("\n") + 1);
 		if (page.reset) text = "";

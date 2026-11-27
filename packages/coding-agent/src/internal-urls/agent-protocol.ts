@@ -126,6 +126,8 @@ interface OutputTarget {
 	remoteStatus?: string;
 	/** Transcript-backed progress source for a peer, including retained agents. */
 	remoteProgress?: () => Promise<ProgressSource | undefined>;
+	/** Caller's abort signal, for transcripts read through an extension. */
+	signal?: AbortSignal;
 }
 
 /** Upper bound on the ids a `Not found` error suggests. */
@@ -447,6 +449,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			segments: pid ? pid.segments : url.pathname.split("/").filter(Boolean).map(decodeSegment),
 			dirs: await this.#outputDirs(context),
 			registry,
+			signal: context?.signal,
 		});
 	}
 
@@ -518,7 +521,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			// registry `write agent://<id>` delivers to: answer with its progress.
 			const ref = registry?.get(outputId);
 			const progress = ref && ref.kind !== "advisor" ? ref : await target.remoteProgress?.();
-			if (progress) return this.#resolveProgress(url, progress, extraction);
+			if (progress) return this.#resolveProgress(url, progress, extraction, false, target.signal);
 			if (!scan) throw new Error("No session - agent outputs unavailable");
 			if (!scan.anyDirExists) throw new Error("No artifacts directory found");
 			const registered =
@@ -537,7 +540,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		if (!extraction && !rawContent.trim()) {
 			const ref = registry?.get(outputId);
 			const progress = ref && ref.kind !== "advisor" ? ref : await target.remoteProgress?.();
-			if (progress) return this.#resolveProgress(url, progress, false, true);
+			if (progress) return this.#resolveProgress(url, progress, false, true, target.signal);
 		}
 		const notes: string[] = target.remoteStatus === undefined ? [] : [`Status: ${target.remoteStatus}`];
 		let content = rawContent.trim()
@@ -622,6 +625,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		ref: ProgressSource,
 		extraction: boolean,
 		publishedEmpty = false,
+		signal?: AbortSignal,
 	): Promise<InternalResource> {
 		if (extraction) {
 			throw new Error(
@@ -637,7 +641,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			messages = await loadSessionMessagesReadOnly(ref.sessionFile);
 			source = "session file (read-only)";
 		} else if (ref.external) {
-			messages = await readExternalTranscriptMessages(ref.external);
+			messages = await readExternalTranscriptMessages(ref.external, signal);
 			source = "external transcript";
 		}
 		const sections = yieldSections(messages);

@@ -20,7 +20,7 @@ import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { collectIrcPeerRoster } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { resolveInlineByteCapBudget } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
+import { resolveArtifactSpillThreshold } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { AgentTranscriptViewerModel } from "@oh-my-pi/pi-coding-agent/ui/overlays/panels/agent-transcript-viewer-model";
@@ -57,7 +57,7 @@ describe("ExtensionContext.agents.registerExternal", () => {
 		AgentRegistry.resetGlobalForTests();
 	});
 
-	async function extensionContext(): Promise<ExtensionContext> {
+	async function extensionContext(settings = Settings.isolated()): Promise<ExtensionContext> {
 		const authStorage = createInMemoryAuthStorage();
 		authStorages.push(authStorage);
 		let seen: ExtensionContext | undefined;
@@ -66,7 +66,7 @@ describe("ExtensionContext.agents.registerExternal", () => {
 			agentDir: tempDir,
 			authStorage,
 			modelRegistry: new ModelRegistry(authStorage, path.join(tempDir, "models.yml")),
-			settings: Settings.isolated(),
+			settings,
 			sessionManager: SessionManager.inMemory(),
 			subagentEventBus,
 			disableExtensionDiscovery: true,
@@ -324,7 +324,7 @@ describe("ExtensionContext.agents.registerExternal", () => {
 		await bothDelivered.promise;
 		const manager = session!.asyncJobManager!;
 		for (const text of [manager.getJob(done.id)!.resultText!, manager.getJob(failed.id)!.errorText!]) {
-			expect(Buffer.byteLength(text)).toBeLessThanOrEqual(resolveInlineByteCapBudget(undefined));
+			expect(Buffer.byteLength(text)).toBeLessThanOrEqual(resolveArtifactSpillThreshold(undefined));
 			expect(text).toStartWith("remote output line 0\n");
 			expect(text).toContain("elided");
 			expect(text).toContain("remote output line 49999");
@@ -332,6 +332,56 @@ describe("ExtensionContext.agents.registerExternal", () => {
 			const artifactPath = await session!.sessionManager.getArtifactPath(artifactId!);
 			expect(await Bun.file(artifactPath!).text()).toBe(output);
 		}
+	});
+
+	it("caps complete() text at the configured spill threshold itself, which no output sink applied first", async () => {
+		const ctx = await extensionContext(Settings.isolated({ "tools.artifactSpillThreshold": 1 }));
+		const delivered = Promise.withResolvers<void>();
+		const enqueue = session!.yieldQueue.enqueueWithReceipt.bind(session!.yieldQueue);
+		vi.spyOn(session!.yieldQueue, "enqueueWithReceipt").mockImplementation((kind, entry) => {
+			if (kind !== "async-result") return enqueue(kind, entry);
+			delivered.resolve();
+			return Promise.resolve();
+		});
+		const agent = ctx.agents!.registerExternal(remoteAgent());
+		// About 2 KB: over a 1 KB threshold, under the threshold plus the slack `bash` adds.
+		agent.complete({
+			status: "done",
+			text: Array.from({ length: 100 }, (_, line) => `remote output line ${line}`).join("\n"),
+		});
+
+		await delivered.promise;
+		const text = session!.asyncJobManager!.getJob(agent.id)!.resultText!;
+		expect(Buffer.byteLength(text)).toBeLessThanOrEqual(1024);
+		expect(text).toContain("elided");
+	});
+
+	it("passes the reader's abort signal to readTranscript and stops a pending read on abort", async () => {
+		const ctx = await extensionContext();
+		const signals: (AbortSignal | undefined)[] = [];
+		let asked = Promise.withResolvers<void>();
+		const agent = ctx.agents!.registerExternal(
+			remoteAgent({
+				// A remote read that never answers.
+				readTranscript: (_fromByte, signal) => {
+					signals.push(signal);
+					asked.resolve();
+					return Promise.withResolvers<ExternalTranscriptPage>().promise;
+				},
+			}),
+		);
+
+		for (const handler of [new AgentProtocolHandler(), new HistoryProtocolHandler()]) {
+			asked = Promise.withResolvers<void>();
+			const controller = new AbortController();
+			const reading = handler.resolve(new URL(`${handler.scheme}://${agent.id}`) as never, {
+				signal: controller.signal,
+			});
+			await asked.promise;
+			controller.abort();
+			await expect(reading).rejects.toThrow();
+		}
+		expect(signals.map(signal => signal?.aborted)).toEqual([true, true]);
 	});
 
 	it("calls cancel when its job is cancelled or the Agent Hub kills it", async () => {

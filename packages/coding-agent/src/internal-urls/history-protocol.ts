@@ -533,7 +533,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 			messages = await loadSessionMessagesReadOnly(ref.sessionFile);
 			notes.push(`Source: session file (read-only, ${ref.status})`);
 		} else if (ref.external) {
-			messages = await readExternalTranscriptMessages(ref.external);
+			messages = await readExternalTranscriptMessages(ref.external, context?.signal);
 			notes.push(`Source: external transcript (${ref.status})`);
 		} else {
 			// No live session and no retained sessionFile — try the disk scan before

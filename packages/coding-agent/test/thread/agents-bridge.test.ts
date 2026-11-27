@@ -22,7 +22,7 @@ import type { ThreadService } from "../../src/thread/services";
 import { agentsThreadService } from "../../src/thread/services/agents";
 import { identityThreadService } from "../../src/thread/services/identity";
 import { SubagentWorker } from "../../src/thread/subagent-worker";
-import { resolveInlineByteCapBudget } from "../../src/tools/output-meta";
+import { resolveArtifactSpillThreshold } from "../../src/tools/output-meta";
 import { WriteTool } from "../../src/tools/write";
 import type { AgentsProbe, AgentsProbeGlobals } from "../fixtures/agents-bridge-worker";
 
@@ -386,7 +386,7 @@ describe("agent bridging across subagent workers", () => {
 				jobs: new AsyncJobManager({}),
 				ownerId: "Main",
 				emitFrame: () => {},
-				resultCap: { maxBytes: resolveInlineByteCapBudget(undefined) },
+				resultCap: { maxBytes: resolveArtifactSpillThreshold(undefined) },
 			},
 			{
 				label: "remote run",
