@@ -556,12 +556,13 @@ function mapWithFeatureListMetadata<TApi extends Api>(
 }
 
 /**
- * Rates from an OpenRouter-shaped `pricing` object (USD per token, as decimal
- * strings). Missing, zero, or negative legs (`-1` marks router-priced rows)
+ * Rates from an OpenRouter-shaped `pricing` object (USD per token unless the
+ * row declares its unit). Missing, zero, or negative legs (`-1` marks router-priced rows)
  * map to 0, which the model manager fills from its reference sources.
  */
 export function perTokenPricingCost(pricing: unknown): TokenCost {
-	const rates = isRecord(pricing) ? pricing : {};
+	if (isRecord(pricing) && pricing.unit === "per_million_tokens") return perMillionPricingCost(pricing);
+	const rates = isRecord(pricing) && (pricing.unit === undefined || pricing.unit === "per_token") ? pricing : {};
 	return {
 		input: toPositiveNumber(rates.prompt, 0) * 1_000_000,
 		output: toPositiveNumber(rates.completion, 0) * 1_000_000,
@@ -571,11 +572,13 @@ export function perTokenPricingCost(pricing: unknown): TokenCost {
 }
 
 /**
- * Rates from NanoGPT's detailed roster: prompt and completion are USD per
- * million tokens, the cache legs per thousand. Legs the row does not price
- * keep `fallback`.
+ * Declared USD-per-million prices. NanoGPT names its cache fields separately
+ * and quotes them per thousand tokens. Absent legs keep the supplied fallback.
  */
-function nanoGptPricingCost(pricing: unknown, fallback: TokenCost): TokenCost {
+function perMillionPricingCost(
+	pricing: unknown,
+	fallback: TokenCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+): TokenCost {
 	if (!isRecord(pricing) || pricing.unit !== "per_million_tokens") return fallback;
 	const perThousand = (value: unknown, fallbackRate: number): number => {
 		const rate = toPositiveNumber(value, 0);
@@ -584,8 +587,14 @@ function nanoGptPricingCost(pricing: unknown, fallback: TokenCost): TokenCost {
 	return {
 		input: toPositiveNumber(pricing.prompt, fallback.input),
 		output: toPositiveNumber(pricing.completion, fallback.output),
-		cacheRead: perThousand(pricing.cacheReadInputPer1kTokens, fallback.cacheRead),
-		cacheWrite: perThousand(pricing.cacheWriteInputPer1kTokens, fallback.cacheWrite),
+		cacheRead: perThousand(
+			pricing.cacheReadInputPer1kTokens,
+			toPositiveNumber(pricing.input_cache_read ?? pricing.input_cache_reads, fallback.cacheRead),
+		),
+		cacheWrite: perThousand(
+			pricing.cacheWriteInputPer1kTokens,
+			toPositiveNumber(pricing.input_cache_write ?? pricing.input_cache_writes, fallback.cacheWrite),
+		),
 	};
 }
 
@@ -6806,7 +6815,7 @@ export function nanoGptModelManagerOptions(
 							...mapped,
 							api: "openai-completions",
 							provider: "nanogpt",
-							cost: { ...mapped.cost, ...nanoGptPricingCost(entry.pricing, mapped.cost) },
+							cost: { ...mapped.cost, ...perMillionPricingCost(entry.pricing, mapped.cost) },
 						};
 					},
 					filterModel: (_entry, model) => {

@@ -261,6 +261,73 @@ describe("ModelRegistry runtime provider registration", () => {
 		expect(registry.find(provider, modelId)?.transport).toBe("pi-native");
 	});
 
+	test("fixed gateway re-registration keeps the URL, bearer and roster from the same registration", async () => {
+		const provider = "runtime-gateway";
+		const requests: Array<[string, string | null]> = [];
+		const fetch: FetchImpl = async (input, init) => {
+			const request = new Request(input instanceof Request ? input.url : String(input), init);
+			requests.push([request.url, request.headers.get("Authorization")]);
+			return Response.json({ models: [{ ...baseModel, id: "account-only", provider, api: "openai-completions" }] });
+		};
+		const register = (target: ModelRegistry, baseUrl: string, apiKey: string) =>
+			target.registerProvider(
+				provider,
+				{
+					baseUrl,
+					apiKey,
+					transport: "pi-native",
+					api: "openai-completions",
+					models: [baseModel],
+				},
+				"ext://runtime",
+			);
+
+		const firstUrl = "https://first-gateway.example";
+		const secondUrl = "https://second-gateway.example";
+		const first = new ModelRegistry(authStorage, modelsJsonPath, { fetch });
+		register(first, firstUrl, "first-key");
+		register(first, secondUrl, "second-key");
+		const fixed = first.find(provider, baseModel.id);
+		if (!fixed) throw new Error("Expected fixed gateway model");
+		expect(fixed.baseUrl).toBe(secondUrl);
+		expect(await first.getApiKey(fixed)).toBe("second-key");
+		await first.refreshProvider(provider, "online");
+		expect(requests).toEqual([[`${secondUrl}/v1/pi/models`, "Bearer second-key"]]);
+		expect(first.find(provider, "account-only")).toBeDefined();
+
+		const reopened = new ModelRegistry(authStorage, modelsJsonPath, { fetch });
+		register(reopened, secondUrl, "second-key");
+		await reopened.refreshProvider(provider, "offline");
+		expect(reopened.find(provider, "account-only")).toBeDefined();
+		register(reopened, secondUrl, "another-key");
+		await reopened.refreshProvider(provider, "offline");
+		expect(reopened.find(provider, "account-only")).toBeUndefined();
+		expect(requests).toHaveLength(1);
+	});
+
+	test("replacing a fixed gateway with an ordinary registration restores per-model URLs", () => {
+		const provider = "runtime-gateway";
+		const baseUrl = "https://new-provider.example/v1";
+		const modelUrl = "https://model.example/v1";
+		registry.registerProvider(provider, {
+			baseUrl: "https://old-gateway.example",
+			apiKey: "old-key",
+			api: "openai-completions",
+			transport: "pi-native",
+			models: [baseModel],
+		});
+		registry.getAll();
+		registry.registerProvider(provider, {
+			baseUrl,
+			apiKey: "new-key",
+			api: "openai-completions",
+			models: [baseModel, { ...baseModel, id: "special", baseUrl: modelUrl }],
+		});
+		expect(registry.find(provider, baseModel.id)?.baseUrl).toBe(baseUrl);
+		expect(registry.find(provider, "special")?.baseUrl).toBe(modelUrl);
+		expect(registry.find(provider, "special")?.transport).toBeUndefined();
+	});
+
 	test("config.models re-registration rebuilds inferred capability after a saved transport override", () => {
 		const providerName = "openai";
 		const modelId = "gpt-5.4";

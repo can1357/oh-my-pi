@@ -1374,7 +1374,7 @@ export async function discoverOpenAIModelsList(
 				reasoning: false,
 				input,
 				supportsTools: false,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				cost: perTokenPricingCost(task.kind === "embedding" ? item.pricing : undefined),
 				// Embeddings, judges, speech and transcription cap their input by
 				// context; image jobs carry no token window. None produces output tokens.
 				contextWindow: task.kind === "image" ? null : reportedContextWindow,
@@ -1412,7 +1412,7 @@ export async function discoverOpenAIModelsList(
 			...(providerConfig.discovery.type === "lm-studio" ? { imageInputDecoder: "stb" as const } : {}),
 			// Proxy/gateway pricing is provider-specific and rarely matches
 			// upstream bundled catalogs, so never inherit the reference cost;
-			// only a row's own OpenRouter-style `pricing` (USD per token) counts.
+			// only the row's own advertised rates count.
 			cost: perTokenPricingCost(item.pricing),
 			contextWindow,
 			// Cap a provider-advertised output limit or the reference's output limit at
