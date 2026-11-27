@@ -51,7 +51,7 @@ import { cfgDevAutoqa, cfgDevAutoqaConsent, cfgDevAutoqaPushEndpoint, cfgDevAuto
 
 /** Accepted `report` shapes, appended to format errors. */
 const REPORT_ISSUE_USAGE =
-	"Expected `<tool>: <concise description>`, or the tool name on line 1 with the report body below.";
+	"Expected `{tool}: <concise description>`, or the tool name on line 1 with the report body below.";
 
 /** Whether a tool call runs `report_issue`, directly or as a `bash` command. */
 export function isReportIssueToolCall(toolCall: { name: string; arguments?: Record<string, unknown> }): boolean {
@@ -681,7 +681,7 @@ function recordToolIssue(session: ToolSession, tool: string, report: string): vo
 }
 
 const reportIssueSchema = type({
-	report: type("string").describe("Report in `<tool>: <concise description>` form."),
+	report: type("string").describe("Report in `{tool}: <concise description>` form."),
 	"+": "reject",
 });
 
@@ -706,7 +706,7 @@ export function createReportIssueTool(session: ToolSession): Tool {
 		label: "Report Tool Issue",
 		summary: "Report unexpected tool behavior for automated QA",
 		description:
-			"Report unexpected tool behavior for automated QA as `<tool>: <concise description>`. A two-line form also works: tool name on line 1, report body below.",
+			"Report unexpected tool behavior for automated QA as `{tool}: <concise description>`. A two-line form also works: tool name on line 1, report body below.",
 		parameters: reportIssueSchema,
 		strict: true,
 		intent: "omit",

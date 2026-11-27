@@ -7,5 +7,5 @@ Run each as a command with the bash tool.{{#if hasCatalogOnlyTools}} Commands wi
 {{/each}}
 {{/if}}
 {{#if hasOmittedTools}}
-Additional mounted MCP tools omitted: prompt bounded. Further tools are mounted under their `mcp__<server>__<tool>` command names.
+Additional mounted MCP tools omitted: prompt bounded. Further tools are mounted under their `mcp__<server>__{tool}` command names.
 {{/if}}

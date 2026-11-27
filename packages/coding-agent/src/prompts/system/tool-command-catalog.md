@@ -3,4 +3,4 @@
 - `{{this.name}}` — {{this.summary}}
 {{/each}}
 
-Run `<tool> --help` before first use.
+Run `{tool} --help` before first use.

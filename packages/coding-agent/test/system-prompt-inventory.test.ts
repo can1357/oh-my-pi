@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { toolWireSchema } from "@oh-my-pi/pi-ai";
 import type { DelegationBias } from "@oh-my-pi/pi-catalog/compat/delegation";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { buildSystemPrompt as buildSdkSystemPrompt } from "@oh-my-pi/pi-coding-agent/sdk";
@@ -13,6 +14,8 @@ import {
 	type SystemPromptToolMetadata,
 } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { createTools, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { createReportIssueTool } from "@oh-my-pi/pi-coding-agent/tools/report-tool-issue";
+import { renderToolCommandPromptDocs } from "@oh-my-pi/pi-coding-agent/tools/tool-commands";
 import { cleanupTempHome } from "./helpers/temp-home-cleanup";
 
 const EMPTY_TREE = {
@@ -1038,5 +1041,37 @@ describe("system prompt tool inventory", () => {
 		const withoutRead = (await buildSystemPrompt({ ...opts, toolNames: ["bash"] })).systemPrompt.join("\n\n");
 		expect(withoutRead).not.toContain("help://read/urls");
 		expect(withoutRead).toContain("named service");
+	});
+
+	// OpenRouter's prompt-injection guardrail blocks requests containing role-tag-shaped placeholders such as `<tool>` (issue #18756).
+	it("emits no role-tag-shaped placeholders in default system prompt, mounted catalog, help reference, or report_issue tool", async () => {
+		const ROLE_TAG_RE = /<\s*(?:\/\s*)?(?:system|assistant|developer|tool|function)\s*\/?>/i;
+		const toolCommandDocs = renderToolCommandPromptDocs({
+			sections: [],
+			catalog: new Map([["lsp", "Language server queries"]]),
+		});
+		const { systemPrompt } = await buildSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [],
+			skills: [],
+			rules: [],
+			toolNames: ["bash"],
+			tools: TOOLS,
+			mountedCommands: [{ name: "lsp", summary: "Language server queries" }],
+			toolCommandDocs,
+			autoQaEnabled: true,
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+			nativeTools: true,
+			inlineToolDescriptors: false,
+		});
+		const rendered = systemPrompt.join("\n\n");
+		expect(rendered).toContain("{tool} --help");
+		expect(rendered).toContain("report_issue '{tool}:");
+		expect(rendered).toContain("help://{tool}/<topic>");
+		expect(rendered).not.toMatch(ROLE_TAG_RE);
+
+		const reportIssue = createReportIssueTool({ settings: Settings.isolated() } as ToolSession);
+		expect(reportIssue.description).not.toMatch(ROLE_TAG_RE);
+		expect(JSON.stringify(toolWireSchema(reportIssue))).not.toMatch(ROLE_TAG_RE);
 	});
 });

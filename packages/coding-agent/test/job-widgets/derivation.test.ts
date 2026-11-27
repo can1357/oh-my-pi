@@ -733,7 +733,7 @@ describe("job widget spec validation", () => {
 			tools,
 		);
 		expect(counted.ok).toBe(false);
-		expect(counted.ok ? [] : counted.errors[0]).toMatch(/^rules\[0\]: matches `» <tool> <intent>` lines/);
+		expect(counted.ok ? [] : counted.errors[0]).toMatch(/^rules\[0\]: matches `» \{tool\} <intent>` lines/);
 		// The same marker text in a command's own output is just output.
 		expect(
 			validateJobWidgetSpec(
