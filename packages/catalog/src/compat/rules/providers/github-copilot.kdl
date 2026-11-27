@@ -27,6 +27,14 @@ provider "github-copilot" {
 	request-encoding-rejection "invalid_request_body|[Ff]ailed to (?:parse|read) request"
 	// Replaces the provider-keyed strict Responses tool-call/result pairing.
 	strict-responses-pairing #true
+	// Copilot Business `/v1/messages` answers HTTP 200 with a `msg_blocked` reply
+	// and no server-reported usage when the request omits `X-Client-Session-Id`
+	// (#20678; controlled test: adding only this header restored normal replies
+	// for Sonnet 5.5 and Opus 5.5). A caller-set value wins; the generic
+	// `x-session-id` and Claude Code session headers are still sent.
+	on-api "anthropic-messages" {
+		session-header "x-client-session-id"
+	}
 	// Replaces the provider check that disabled reasoning params on chat completions.
 	on-api "openai-completions" {
 		supports-reasoning-params #false

@@ -154,7 +154,7 @@ import {
 import { prepareAnthropicImageContext } from "./anthropic-images";
 import { isAnthropicNarrationSignature, servedModelFromAnthropicSignature } from "./anthropic-signature";
 import { getOpenAIPromptCacheKey } from "./openai-shared";
-import { applyInferenceHeaders } from "./inference-headers";
+import { applyInferenceHeaders, applySessionHeader } from "./inference-headers";
 import { hasAnthropicMessageControls, redactSensitiveCredentials, transformMessages } from "./transform-messages";
 import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
 import {
@@ -4224,6 +4224,9 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 			sessionId,
 			parentSessionId,
 		});
+		// The Copilot host's own session header (KDL `session-header`). Applied
+		// after the generic identity headers so `x-session-id` keeps being sent.
+		applySessionHeader(defaultHeaders, model.compat, sessionId);
 
 		return {
 			isOAuthToken: false,
@@ -4298,6 +4301,9 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		sessionId,
 		parentSessionId,
 	});
+	// The host's own session header (KDL `session-header`), applied after the
+	// generic identity headers so `x-session-id` keeps being sent.
+	applySessionHeader(defaultHeaders, model.compat, sessionId);
 
 	if (model.provider === "cloudflare-ai-gateway") {
 		return {
