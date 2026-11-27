@@ -22,7 +22,7 @@ export interface HeaderBarProps {
 	readOnly: boolean;
 	subCount: number;
 	railOpen: boolean;
-	railControlsId?: string;
+	railControlsId: string;
 	onToggleRail(): void;
 	onLeave(): void;
 }
@@ -35,7 +35,7 @@ export const HeaderBar = memo(function HeaderBar({
 	readOnly,
 	subCount,
 	railOpen,
-	railControlsId = "agents-rail",
+	railControlsId,
 	onToggleRail,
 	onLeave,
 }: HeaderBarProps): ReactNode {
@@ -49,11 +49,13 @@ export const HeaderBar = memo(function HeaderBar({
 				? (usage.tokens / usage.contextWindow) * 100
 				: null);
 	}
+	const clampedPct = pct != null ? Math.min(100, Math.max(0, pct)) : null;
+	const railToggleLabel = `${railOpen ? "Hide" : "Show"} agents panel${subCount > 0 ? ` (${subCount} ${subCount === 1 ? "subagent" : "subagents"})` : ""}`;
 
 	return (
 		<header className="sh-header">
 			<div className="sh-header-left">
-				<span className="sh-brand" aria-label="omp collab">
+				<span className="sh-brand" role="img" aria-label="omp collab">
 					<OmpMark />
 					<span className="sh-brand-slash" aria-hidden="true">
 						/
@@ -86,20 +88,31 @@ export const HeaderBar = memo(function HeaderBar({
 				)}
 				{state?.model && <span className="sh-chip sh-chip-meta">{state.model.name}</span>}
 				{state?.thinkingLevel && <span className="sh-chip sh-chip-meta">{state.thinkingLevel}</span>}
-				{pct != null && (
+				{pct != null && clampedPct != null && (
 					<span
 						className={pct > 80 ? "sh-gauge sh-gauge-warn" : "sh-gauge"}
+						role="meter"
+						aria-label="Context usage"
+						aria-valuenow={Math.round(clampedPct)}
+						aria-valuemin={0}
+						aria-valuemax={100}
+						aria-valuetext={fmtPercent(pct)}
 						title={`context · ${fmtPercent(pct)}`}
-						aria-label={`Context usage ${fmtPercent(pct)}`}
 					>
 						<span className="sh-gauge-track" aria-hidden="true">
-							<span className="sh-gauge-fill" style={{ width: `${Math.min(100, Math.max(0, pct))}%` }} />
+							<span className="sh-gauge-fill" style={{ width: `${clampedPct}%` }} />
 						</span>
-						<span className="sh-gauge-pct">{fmtPercent(pct)}</span>
+						<span className="sh-gauge-pct" aria-hidden="true">
+							{fmtPercent(pct)}
+						</span>
 					</span>
 				)}
 				{state && state.participants.length > 0 && (
-					<span className="sh-avatars" aria-label={`${state.participants.length} participants`}>
+					<span
+						className="sh-avatars"
+						role="group"
+						aria-label={`${state.participants.length} ${state.participants.length === 1 ? "participant" : "participants"}`}
+					>
 						{state.participants.map((p, i) => (
 							<span
 								key={`${p.name}:${i}`}
@@ -117,13 +130,13 @@ export const HeaderBar = memo(function HeaderBar({
 					className={railOpen ? "sh-btn sh-btn-icon sh-btn-on" : "sh-btn sh-btn-icon"}
 					onClick={onToggleRail}
 					aria-expanded={railOpen}
-					aria-controls={railControlsId}
-					aria-label={railOpen ? "Hide agents panel" : "Show agents panel"}
+					aria-controls={railOpen ? railControlsId : undefined}
+					aria-label={railToggleLabel}
 					title={railOpen ? "hide agents" : "show agents"}
 				>
 					<PanelRight size={16} aria-hidden="true" />
 					{subCount > 0 && (
-						<span className="sh-badge" aria-label={`${subCount} subagents`}>
+						<span className="sh-badge" aria-hidden="true">
 							{subCount}
 						</span>
 					)}

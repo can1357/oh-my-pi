@@ -628,7 +628,7 @@
 .sh-ended {
 	position: fixed;
 	inset: 0;
-	z-index: 50;
+	z-index: 55;
 	display: grid;
 	place-items: center;
 	padding: 16px;

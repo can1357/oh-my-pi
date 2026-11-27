@@ -16,6 +16,8 @@ export interface TranscriptProps {
 	activeTools: ReadonlyMap<string, ActiveTool>;
 	working: boolean;
 	compact?: boolean; // dense variant for the agent drawer
+	/** Accessible label for the transcript log landmark. */
+	ariaLabel?: string;
 	/** Sub-session drill-down capabilities forwarded to tool renderers. */
 	host?: ToolRenderHost;
 	/** Main connection phase; absent for the agent drawer's compact transcript. */
@@ -282,7 +284,17 @@ const WINDOW = 100;
 const EARLIER_TRIGGER_PX = 200;
 
 export function Transcript(props: TranscriptProps): ReactNode {
-	const { entries, stream, streamDone, activeTools, working, compact, host, phase } = props;
+	const {
+		entries,
+		stream,
+		streamDone,
+		activeTools,
+		working,
+		compact,
+		ariaLabel = "Session transcript",
+		host,
+		phase,
+	} = props;
 
 	// null follows the tail. A number pins the first mounted entry while the
 	// reader is scrolled away from the bottom, so appended entries never
@@ -377,6 +389,8 @@ export function Transcript(props: TranscriptProps): ReactNode {
 
 	// While the snapshot downloads the banner reports progress; an empty transcript isn't "no activity".
 	const settled = phase === undefined || phase === "live";
+	// Pause live-region announcements while tokens are actively streaming.
+	const isStreaming = stream !== null && !streamDone;
 
 	return (
 		<div
@@ -385,7 +399,8 @@ export function Transcript(props: TranscriptProps): ReactNode {
 			role="log"
 			aria-live="polite"
 			aria-relevant="additions"
-			aria-label="Session transcript"
+			aria-busy={isStreaming ? true : undefined}
+			aria-label={ariaLabel}
 			onScroll={() => {
 				const el = rootRef.current;
 				if (el === null) return;
@@ -439,9 +454,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 			)}
 			{working && stream === null && activeTools.size === 0 && (
 				<Row kind="assistant" gutter="agent">
-					<div className="tr-shimmer" role="status">
-						thinking…
-					</div>
+					<div className="tr-shimmer">thinking…</div>
 				</Row>
 			)}
 		</div>

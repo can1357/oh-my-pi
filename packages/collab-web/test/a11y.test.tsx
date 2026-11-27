@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
-import type { AgentSnapshot, SessionEntry } from "@oh-my-pi/pi-wire";
+import type { AgentSnapshot, AssistantMessage, SessionEntry, SessionState } from "@oh-my-pi/pi-wire";
 import { renderToStaticMarkup } from "react-dom/server";
+import "./transcript-dom-shim";
 import { AgentDrawer } from "../src/components/agents/AgentDrawer";
 import { AgentsPanel } from "../src/components/agents/AgentsPanel";
 import { Banners } from "../src/components/shell/Banners";
@@ -56,11 +57,23 @@ describe("Accessibility — ConnectScreen", () => {
 });
 
 describe("Accessibility — HeaderBar", () => {
-	it("exposes h1 title, nav landmark, live status, and aria-expanded/aria-controls on agents toggle", () => {
+	const sampleState: SessionState = {
+		sessionName: "demo",
+		cwd: "/tmp/demo",
+		isStreaming: false,
+		queuedMessageCount: 0,
+		contextUsage: { tokens: 4200, contextWindow: 10000, percent: 42 },
+		participants: [
+			{ name: "alice", role: "host", readOnly: false },
+			{ name: "bob", role: "guest", readOnly: true },
+		],
+	};
+
+	it("exposes h1 title, nav landmark, meter/group roles, and conditional aria-controls on agents toggle", () => {
 		const closedHtml = renderToStaticMarkup(
 			<HeaderBar
 				header={null}
-				state={null}
+				state={sampleState}
 				phase="live"
 				readOnly={false}
 				subCount={2}
@@ -76,14 +89,24 @@ describe("Accessibility — HeaderBar", () => {
 		expect(queryAttr(closedHtml, "nav.sh-header-right", "aria-label")).toBe("Session controls");
 		expect(queryAttr(closedHtml, ".sh-status", "role")).toBe("status");
 		expect(queryAttr(closedHtml, ".sh-status", "aria-live")).toBe("polite");
-		expect(queryAttr(closedHtml, 'button[aria-controls="agents-rail"]', "aria-expanded")).toBe("false");
-		expect(queryAttr(closedHtml, 'button[aria-controls="agents-rail"]', "aria-label")).toBe("Show agents panel");
+		expect(queryAttr(closedHtml, ".sh-gauge", "role")).toBe("meter");
+		expect(queryAttr(closedHtml, ".sh-gauge", "aria-valuenow")).toBe("42");
+		expect(queryAttr(closedHtml, ".sh-gauge", "aria-valuemin")).toBe("0");
+		expect(queryAttr(closedHtml, ".sh-gauge", "aria-valuemax")).toBe("100");
+		expect(queryAttr(closedHtml, ".sh-avatars", "role")).toBe("group");
+		expect(queryAttr(closedHtml, ".sh-avatars", "aria-label")).toBe("2 participants");
+		expect(queryAttr(closedHtml, ".sh-badge", "aria-label")).toBeNull();
+		expect(queryAttr(closedHtml, ".sh-badge", "aria-hidden")).toBe("true");
+		expect(queryAttr(closedHtml, 'button[aria-expanded="false"]', "aria-controls")).toBeNull();
+		expect(queryAttr(closedHtml, 'button[aria-expanded="false"]', "aria-label")).toBe(
+			"Show agents panel (2 subagents)",
+		);
 		expect(hasElement(closedHtml, 'button[aria-label="Leave session"]')).toBe(true);
 
 		const openHtml = renderToStaticMarkup(
 			<HeaderBar
 				header={null}
-				state={null}
+				state={sampleState}
 				phase="live"
 				readOnly={false}
 				subCount={2}
@@ -94,7 +117,9 @@ describe("Accessibility — HeaderBar", () => {
 			/>,
 		);
 		expect(queryAttr(openHtml, 'button[aria-controls="agents-rail"]', "aria-expanded")).toBe("true");
-		expect(queryAttr(openHtml, 'button[aria-controls="agents-rail"]', "aria-label")).toBe("Hide agents panel");
+		expect(queryAttr(openHtml, 'button[aria-controls="agents-rail"]', "aria-label")).toBe(
+			"Hide agents panel (2 subagents)",
+		);
 	});
 });
 
@@ -121,7 +146,7 @@ describe("Accessibility — Banners and Toasts", () => {
 		expect(hasElement(endedHtml, "h2#sh-ended-title")).toBe(true);
 	});
 
-	it("marks error toasts with role=alert and accessible dismiss button", () => {
+	it("avoids nested live regions while marking error toasts with role=alert and info toasts with role=status", () => {
 		const html = renderToStaticMarkup(
 			<Toasts
 				notices={[
@@ -131,7 +156,7 @@ describe("Accessibility — Banners and Toasts", () => {
 			/>,
 		);
 
-		expect(queryAttr(html, ".sh-toasts", "aria-live")).toBe("polite");
+		expect(queryAttr(html, ".sh-toasts", "aria-live")).toBeNull();
 		expect(queryAttr(html, ".sh-toast-info", "role")).toBe("status");
 		expect(queryAttr(html, ".sh-toast-error", "role")).toBe("alert");
 		expect(queryAttr(html, "button.sh-toast-close", "aria-label")).toBe("Dismiss notification");
@@ -144,7 +169,7 @@ describe("Accessibility — AgentsPanel and AgentDrawer", () => {
 		kind: "sub",
 		displayName: "researcher",
 		status: "running",
-		hasSessionFile: false,
+		hasSessionFile: true,
 		createdAt: Date.now(),
 		lastActivity: Date.now(),
 	};
@@ -167,7 +192,7 @@ describe("Accessibility — AgentsPanel and AgentDrawer", () => {
 		expect(queryAttr(html, "button.ag-row", "aria-pressed")).toBe("true");
 	});
 
-	it("renders modal dialog semantics and labelled heading in AgentDrawer", () => {
+	it("renders modal dialog semantics, labelled heading, and distinct transcript aria-label in AgentDrawer", () => {
 		const html = renderToStaticMarkup(<AgentDrawer agent={sampleAgent} client={client} onClose={() => {}} />);
 
 		expect(queryAttr(html, "aside.ag-drawer", "role")).toBe("dialog");
@@ -176,11 +201,12 @@ describe("Accessibility — AgentsPanel and AgentDrawer", () => {
 		expect(labelledBy).toBeTruthy();
 		expect(queryAttr(html, "h2.ag-drawer-name", "id")).toBe(labelledBy);
 		expect(hasElement(html, 'button[aria-label="Close agent drawer"]')).toBe(true);
+		expect(queryAttr(html, ".tr-root", "aria-label")).toBe("researcher transcript");
 	});
 });
 
 describe("Accessibility — Transcript and ToolView", () => {
-	it("exposes log landmark on Transcript and aria-expanded on thinking toggle", () => {
+	it("exposes log landmark, sets aria-busy while streaming, and wires aria-expanded on thinking toggle", () => {
 		const entry: SessionEntry = {
 			type: "message",
 			id: "m1",
@@ -195,13 +221,27 @@ describe("Accessibility — Transcript and ToolView", () => {
 				timestamp: 1,
 			},
 		};
-		const html = renderToStaticMarkup(
+		const idleHtml = renderToStaticMarkup(
 			<Transcript entries={[entry]} stream={null} streamDone={true} activeTools={new Map()} working={false} />,
 		);
 
-		expect(queryAttr(html, ".tr-root", "role")).toBe("log");
-		expect(queryAttr(html, ".tr-root", "aria-live")).toBe("polite");
-		expect(queryAttr(html, "button.tr-think-head", "aria-expanded")).toBe("false");
+		expect(queryAttr(idleHtml, ".tr-root", "role")).toBe("log");
+		expect(queryAttr(idleHtml, ".tr-root", "aria-live")).toBe("polite");
+		expect(queryAttr(idleHtml, ".tr-root", "aria-busy")).toBeNull();
+		expect(queryAttr(idleHtml, "button.tr-think-head", "aria-expanded")).toBe("false");
+
+		const streamMsg: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "Streaming token..." }],
+			model: "test/model",
+			usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { total: 0 } },
+			stopReason: "stop",
+			timestamp: 2,
+		};
+		const streamingHtml = renderToStaticMarkup(
+			<Transcript entries={[entry]} stream={streamMsg} streamDone={false} activeTools={new Map()} working={true} />,
+		);
+		expect(queryAttr(streamingHtml, ".tr-root", "aria-busy")).toBe("true");
 	});
 
 	it("wires aria-expanded and aria-controls on ToolView disclosure button", () => {

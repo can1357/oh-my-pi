@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Improved mobile ergonomics and WCAG AA accessibility across the collab web UI, including keyboard focus trapping and restoration for modal panels, skip navigation, touch-friendly targets, accessible live-region and ARIA landmark semantics, and reduced-motion support.
+
 ## [19.1.0] - 2026-11-21
 
 ### Added

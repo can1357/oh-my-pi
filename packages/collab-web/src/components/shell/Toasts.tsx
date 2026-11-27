@@ -48,7 +48,7 @@ export function Toasts({ notices }: { notices: readonly Notice[] }): ReactNode {
 	};
 
 	return (
-		<div className="sh-toasts" aria-live="polite" aria-relevant="additions text">
+		<div className="sh-toasts">
 			{visible.map(n => (
 				<div key={n.id} className={`sh-toast sh-toast-${n.level}`} role={n.level === "error" ? "alert" : "status"}>
 					<span className="sh-toast-msg">{n.message}</span>

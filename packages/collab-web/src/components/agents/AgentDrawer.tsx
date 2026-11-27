@@ -3,6 +3,7 @@ import { OctagonX, RotateCcw, SendHorizontal, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { useEffect, useId, useRef, useState } from "react";
 import type { GuestClient } from "../../lib/client";
+import { useFocusTrap } from "../../lib/focus-trap";
 import { fmtCost, fmtDuration, fmtTokens } from "../../lib/format";
 import { decideTranscriptPoll } from "../../lib/transcript-poll";
 import type { TranscriptProps } from "../transcript/Transcript";
@@ -29,11 +30,17 @@ export function AgentDrawer(props: {
 	const [fetchError, setFetchError] = useState<string | null>(null);
 	const [draft, setDraft] = useState("");
 	const headingId = useId();
+	const drawerRef = useRef<HTMLElement | null>(null);
 	const closeBtnRef = useRef<HTMLButtonElement | null>(null);
 	/** Resumes a stopped poll loop; null while no loop is mounted. */
 	const resumePollingRef = useRef<(() => void) | null>(null);
 	const quiescentRef = useRef(false);
 	quiescentRef.current = agent.status !== "running";
+
+	useFocusTrap(drawerRef, {
+		active: true,
+		initialFocusRef: closeBtnRef,
+	});
 
 	useEffect(() => {
 		closeBtnRef.current?.focus();
@@ -144,7 +151,14 @@ export function AgentDrawer(props: {
 			: null;
 
 	return (
-		<aside className="ag-drawer" role="dialog" aria-modal="true" aria-labelledby={headingId}>
+		<aside
+			ref={drawerRef}
+			className="ag-drawer"
+			role="dialog"
+			aria-modal="true"
+			aria-labelledby={headingId}
+			tabIndex={-1}
+		>
 			<header className="ag-drawer-head">
 				<div className="ag-drawer-title">
 					<h2 id={headingId} className="ag-drawer-name">
@@ -216,6 +230,7 @@ export function AgentDrawer(props: {
 					<>
 						<Transcript
 							compact
+							ariaLabel={`${agent.displayName} transcript`}
 							entries={entries}
 							stream={null}
 							streamDone={false}

@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { MouseEvent, ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AgentDrawer } from "./components/agents/AgentDrawer";
 import { AgentsPanel } from "./components/agents/AgentsPanel";
@@ -9,6 +9,7 @@ import { HeaderBar } from "./components/shell/HeaderBar";
 import { Toasts } from "./components/shell/Toasts";
 import { Transcript } from "./components/transcript/Transcript";
 import { GuestClient } from "./lib/client";
+import { useFocusTrap } from "./lib/focus-trap";
 import { useGuestSnapshot } from "./lib/use-guest";
 import type { ToolRenderHost } from "./tool-render";
 import "./components/shell/shell.css";
@@ -145,6 +146,7 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
 	const [railOpen, setRailOpen] = useState(false);
 	const [selectedId, setSelectedId] = useState<string | null>(null);
 	const autoOpenedRef = useRef(false);
+	const mainRef = useRef<HTMLElement | null>(null);
 	const railRef = useRef<HTMLElement | null>(null);
 	const isMobileRail = useMediaQuery(MOBILE_RAIL_QUERY);
 
@@ -170,6 +172,14 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
 		}
 	}, [subCount, isMobileRail]);
 
+	// Close agent overlays when the session ends so the ended dialog is never obscured.
+	useEffect(() => {
+		if (snap.phase === "ended") {
+			setSelectedId(null);
+			if (isMobileRail) setRailOpen(false);
+		}
+	}, [snap.phase, isMobileRail]);
+
 	const title = snap.header?.title ?? snap.state?.sessionName ?? "session";
 	useEffect(() => {
 		document.title = `${title} · omp collab`;
@@ -179,6 +189,11 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
 	const toggleRail = useCallback(() => setRailOpen(open => !open), []);
 	const closeRail = useCallback(() => setRailOpen(false), []);
 	const closeDrawer = useCallback(() => setSelectedId(null), []);
+	const handleSkipToMain = useCallback((e: MouseEvent<HTMLAnchorElement>) => {
+		// Prevent mutating window.location.hash (which stores the room link).
+		e.preventDefault();
+		mainRef.current?.focus();
+	}, []);
 
 	// Close the mobile agents overlay on Escape (when no AgentDrawer is on top of it).
 	useEffect(() => {
@@ -190,16 +205,15 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
 		return () => window.removeEventListener("keydown", onKey);
 	}, [railOpen, isMobileRail, drawerAgent, closeRail]);
 
-	// Move focus into the mobile agents dialog when it opens.
-	useEffect(() => {
-		if (railOpen && isMobileRail) {
-			railRef.current?.focus();
-		}
-	}, [railOpen, isMobileRail]);
+	// Trap focus inside the mobile agents modal and restore focus to the trigger on close.
+	useFocusTrap(railRef, {
+		active: railOpen && isMobileRail,
+		paused: Boolean(drawerAgent),
+	});
 
 	return (
 		<div className="sh-app">
-			<a className="skip-link" href="#main-content">
+			<a className="skip-link" href="#main-content" onClick={handleSkipToMain}>
 				Skip to transcript
 			</a>
 			<div className="sh-ambient" aria-hidden="true" />
@@ -214,8 +228,8 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
 				onToggleRail={toggleRail}
 				onLeave={onLeave}
 			/>
-			<main id="main-content" className="sh-main" tabIndex={-1}>
-				<section className="sh-panel" data-rail={railOpen ? "true" : "false"} aria-label="Session transcript">
+			<main ref={mainRef} id="main-content" className="sh-main" tabIndex={-1}>
+				<section className="sh-panel" data-rail={railOpen ? "true" : "false"}>
 					<div className="sh-transcript">
 						<Transcript
 							entries={snap.entries}

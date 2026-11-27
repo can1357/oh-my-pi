@@ -1,6 +1,6 @@
 import { ArrowRight, Lock } from "lucide-react";
-import type { FormEvent, ReactNode } from "react";
-import { useId, useState } from "react";
+import type { FormEvent, MouseEvent, ReactNode } from "react";
+import { useId, useRef, useState } from "react";
 import { OmpMark } from "./OmpMark";
 import { ThemeToggle } from "./ThemeToggle";
 
@@ -14,8 +14,14 @@ export function ConnectScreen({ defaultName, error, onConnect }: ConnectScreenPr
 	const [link, setLink] = useState("");
 	const [name, setName] = useState(defaultName);
 	const [localError, setLocalError] = useState<string | null>(null);
+	const mainRef = useRef<HTMLElement | null>(null);
 	const hintId = useId();
 	const errorId = useId();
+
+	const handleSkipToMain = (e: MouseEvent<HTMLAnchorElement>): void => {
+		e.preventDefault();
+		mainRef.current?.focus();
+	};
 
 	const submit = (e: FormEvent<HTMLFormElement>): void => {
 		e.preventDefault();
@@ -32,7 +38,7 @@ export function ConnectScreen({ defaultName, error, onConnect }: ConnectScreenPr
 
 	return (
 		<div className="sh-connect">
-			<a className="skip-link" href="#main-content">
+			<a className="skip-link" href="#main-content" onClick={handleSkipToMain}>
 				Skip to main content
 			</a>
 			<div className="sh-ambient" aria-hidden="true" />
@@ -47,7 +53,7 @@ export function ConnectScreen({ defaultName, error, onConnect }: ConnectScreenPr
 				</div>
 				<ThemeToggle />
 			</header>
-			<main id="main-content" className="sh-connect-main" tabIndex={-1}>
+			<main ref={mainRef} id="main-content" className="sh-connect-main" tabIndex={-1}>
 				<form className="sh-connect-card" onSubmit={submit} noValidate>
 					<div className="sh-connect-head">
 						<h1 className="sh-connect-title">Join a live session</h1>
