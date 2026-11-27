@@ -38,6 +38,7 @@ import type {
 } from "../../extensibility/extensions/render-types";
 import type { AgentViewSession } from "../../session/agent-session-handle";
 import type { BashExecutionMessage, PythonExecutionMessage } from "../../session/transcript/messages";
+import type { ToolActivityMode } from "../settings";
 import { isReplyWrite, replyDisplayMessage } from "../../session/transcript/reply-write";
 import { messageBlock, readTranscriptPresentation } from "../../session/transcript/transcript-presentation";
 import { capturePage } from "../../tools/browser/page-shot";
@@ -85,7 +86,8 @@ import type {
 /** The view's display flags, as signals every block reads. */
 export interface DisplayFlags {
 	readonly toolOutputExpanded: Signal<boolean>;
-	readonly hideToolActivity: Signal<boolean>;
+	/** `display.toolActivity`. */
+	readonly toolActivity: Signal<ToolActivityMode>;
 	/** Thinking hidden (the effective state: the setting, or thinking off with nothing to reveal). */
 	readonly hideThinking: Signal<boolean>;
 	readonly proseOnlyThinking: Signal<boolean>;
@@ -306,7 +308,7 @@ export class TranscriptPresenter {
 			figureCell: display.figureCell,
 			figureRows: display.figureRows,
 			embedHost: { cwd: () => sessionManager.getCwd(), capturePage },
-			showToolResultImages: () => !display.hideToolActivity(),
+			showToolResultImages: () => display.toolActivity() !== "hidden",
 			tableCharts: display.tableCharts,
 			toolResultMedia: signals.toolResultMedia,
 			linkTargets: signals.linkTargets,
@@ -407,7 +409,7 @@ export class TranscriptPresenter {
 							presentation={presentation}
 							expanded={fold.expanded}
 							onToggle={fold.toggle}
-							activityVisible={() => !display.hideToolActivity()}
+							activityVisible={() => display.toolActivity() !== "hidden"}
 							packed={packed}
 						>
 							{face.face({ expanded: fold.expanded, onToggle: expanded => fold.toggle(!expanded) })}
@@ -417,7 +419,11 @@ export class TranscriptPresenter {
 			: face.face;
 		const own = face.compact;
 		const compact = presented ? (own ? () => packed() || own() : packed) : own;
-		const block = this.#mount(factory, { before: options?.before, ...(compact ? { compact } : {}) });
+		const block = this.#mount(factory, {
+			before: options?.before,
+			prompt: message.role === "user" && !message.synthetic && !message.parentIrc,
+			...(compact ? { compact } : {}),
+		});
 		this.register(block, { kind: "message", message });
 		if (!options?.live) this.#settle(block);
 		return block;
@@ -456,6 +462,7 @@ export class TranscriptPresenter {
 			shellVisualization: display.shellVisualization.peek(),
 			inspectShell: source => presentShellInspector(this.#host.shell, source),
 			mcpMarkdown: display.mcpMarkdown.peek(),
+			...(spec.timestamp !== undefined ? { timestamp: spec.timestamp } : {}),
 		});
 		const editMode = toolEditMode(spec.name, spec.tool);
 		if (editMode) call.setRenderContext({ editMode });
@@ -477,7 +484,7 @@ export class TranscriptPresenter {
 				untrack(() => call.setExpanded(value));
 			});
 			effect(() => {
-				const value = !display.hideToolActivity();
+				const value = display.toolActivity() !== "hidden";
 				untrack(() => call.setActivityVisible(value));
 			});
 			effect(() => {
@@ -497,7 +504,7 @@ export class TranscriptPresenter {
 				});
 			});
 			effect(() => {
-				const presentation = toolPresentation(answer());
+				const presentation = toolPresentation(answer(), display.toolActivity());
 				untrack(() => call.setPresentation(presentation));
 			});
 			this.#watchPresentation(() => block, answer);
@@ -582,7 +589,7 @@ export class TranscriptPresenter {
 			<SpotlightNotice
 				toolCallId={toolCallId}
 				spotlight={spotlight}
-				hidden={() => this.#host.display.hideToolActivity()}
+				hidden={() => this.#host.display.toolActivity() === "hidden"}
 				onOpen={() => this.#host.openSpotlight?.(spotlight, reduced)}
 			/>
 		);
@@ -602,7 +609,7 @@ export class TranscriptPresenter {
 			answers.set(read.id, key);
 			if (last !== undefined && last !== key && untrack(() => this.#host.shell.transcript.retired(block)))
 				this.#oweReplay();
-			return toolPresentation(answer);
+			return toolPresentation(answer, display.toolActivity());
 		});
 		const factory = () => {
 			effect(() => {
@@ -610,7 +617,7 @@ export class TranscriptPresenter {
 				untrack(() => group.setExpanded(value));
 			});
 			effect(() => {
-				const value = !display.hideToolActivity();
+				const value = display.toolActivity() !== "hidden";
 				untrack(() => group.setActivityVisible(value));
 			});
 			effect(() => {
@@ -626,7 +633,7 @@ export class TranscriptPresenter {
 		const pending: PendingTool = {
 			block,
 			group,
-			updateArgs: (args, id) => group.updateArgs(isRecord(args) ? args : {}, id),
+			updateArgs: (args, id, timestamp) => group.updateArgs(isRecord(args) ? args : {}, id, timestamp),
 			updateStreamPreview: () => {},
 			updateResult: (result, partial, id) => {
 				group.updateResult(result as ReadResult, partial, id);
@@ -725,7 +732,7 @@ export class TranscriptPresenter {
 				presentation={presentation}
 				expanded={run.expanded}
 				onToggle={collapsed => run.toggle(collapsed)}
-				activityVisible={() => !display.hideToolActivity()}
+				activityVisible={() => display.toolActivity() !== "hidden"}
 				{...(packed ? { packed } : {})}
 			>
 				<ExecRunBlock run={run} />
@@ -783,9 +790,13 @@ function PresentedBlockNode(props: {
 	);
 }
 
-/** A presenters' answer as a tool card's presentation (a string label or row loses its control sequences). */
-function toolPresentation(answer: TranscriptPresentation): ToolPresentation {
-	if (answer === undefined || answer === "full") return "full";
+/**
+ * A presenters' answer as a tool card's presentation (a string label or row loses its control
+ * sequences); without an answer the call draws as `display.toolActivity` says.
+ */
+function toolPresentation(answer: TranscriptPresentation, mode: ToolActivityMode): ToolPresentation {
+	if (answer === undefined) return mode === "concise" ? "concise" : "full";
+	if (answer === "full") return "full";
 	if (answer === "hidden" || answer === "compact") return answer;
 	const { label, rows } = answer.compact;
 	return {

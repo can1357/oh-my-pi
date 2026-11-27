@@ -48,7 +48,6 @@ The custom tool is registered only when `generate_image.enabled=true` (default `
    - `openai-images`: OpenAI-compatible `/images/generations` and `/images/edits` requests. OpenAI uses multipart uploads for edits; xAI and xAI OAuth use their own JSON format. Other providers receive JSON `images: [{ image_url: "data:…" }]`. A `404` from the edit endpoint retries the generation endpoint with the edit payload.
    - `openrouter-images`: OpenRouter's native `/images` endpoint, not chat completions. The catalog's request model id is sent directly, for example `google/gemini-3-pro-image` for selector `openrouter/google/gemini-3-pro-image`.
    - `google-generative-ai`: Gemini `:generateContent` with `responseModalities: ["IMAGE"]`.
-   - `google-gemini-cli`: Google Antigravity's internal SSE image endpoint, using the account-advertised image model when discovery provides one.
    - `openai-responses`: OpenAI hosted Responses image generation.
    - `openai-codex-responses`: ChatGPT/Codex hosted Responses image generation through a connected subscription.
    - `factory-droid-agent`: Factory Droid image models through Factory's proxy with the same client identity as chat. GPT Image models use Factory's `/images/generations`, or `/images/edits` with the reference images inline as JSON; Gemini 3 Pro Image uses Factory's Gemini route with `responseModalities: ["TEXT", "IMAGE"]` and Factory's generate or edit instruction.
@@ -88,7 +87,6 @@ The custom tool is registered only when `generate_image.enabled=true` (default `
 - No usable model in the resolved chain: the aggregate error lists attempted models and candidates skipped for unsupported transports, unavailable credentials, invalid credentials, or unavailable hosted carriers.
 - Invalid input: file not found, a non-regular file, file over 35 MiB, unsupported content-sniffed image type, missing `path`/`data`, empty image data, or raw base64 without `mime_type`.
 - Hosted image models without an available same-provider `hostedImage` carrier are skipped as `hosted chat carrier unavailable`; a carrier without usable credentials is skipped as `carrier credentials unavailable`.
-- Antigravity credentials that do not contain both an access token and `projectId` cause that candidate to be skipped as `invalid credentials`.
 - More than three xAI/xAI OAuth edit references: `<provider> image edits accept up to 3 reference images; got <N>`.
 - More than 16 Factory Droid edit references, a reference over 5 MiB, or a GPT Image reference that is not PNG, JPEG or WebP, is rejected before sending.
 - A Factory Droid response with no image (for example a Gemini prompt block) throws with the reason and ends the chain; a Factory HTTP rejection falls through like other providers.

@@ -1513,11 +1513,7 @@ export class SessionAdvisors {
 						codexSseMaxAttempts: ADVISOR_CODEX_SSE_MAX_ATTEMPTS,
 					});
 				}
-				if (
-					requestModel.api === "google-generative-ai" ||
-					requestModel.api === "google-gemini-cli" ||
-					requestModel.api === "google-vertex"
-				) {
+				if (requestModel.api === "google-generative-ai" || requestModel.api === "google-vertex") {
 					return baseAdvisorStreamFn(requestModel, context, { ...options, acceptEmptyResponse: true });
 				}
 				return baseAdvisorStreamFn(requestModel, context, options);

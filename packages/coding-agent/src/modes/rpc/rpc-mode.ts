@@ -3082,7 +3082,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				if (typeof command.providerId !== "string" || !Number.isInteger(command.credentialId)) {
 					return error(id, "logout", "providerId must be a string and credentialId an integer");
 				}
-				const { removed, remainingSource } = await logoutCredential(
+				const { removed, remainingSource, signOutError } = await logoutCredential(
 					session,
 					command.providerId,
 					command.credentialId,
@@ -3090,7 +3090,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				if (!removed) {
 					return error(id, "logout", `Credential ${command.credentialId} is not stored for ${command.providerId}`);
 				}
-				return success(id, "logout", { remainingSource });
+				return success(id, "logout", { remainingSource, ...(signOutError === undefined ? {} : { signOutError }) });
 			}
 
 			// =================================================================

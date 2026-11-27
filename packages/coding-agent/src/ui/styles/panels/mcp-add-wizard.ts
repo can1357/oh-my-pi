@@ -7,6 +7,7 @@ import { type Block, defineRolePainter } from "@oh-my-pi/pi-tui/term/paint";
 import { inputLine } from "@oh-my-pi/pi-tui/term/painters/prefs";
 import { wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
+import { hangingWrap } from "../tools/frame";
 import {
 	type AsyncLine,
 	displayText,
@@ -50,9 +51,15 @@ function stepParts(model: MCPAddWizardModel, theme: Theme, width: number): strin
 			const list = view.choices.flatMap((choice, index) => {
 				const label = choice.tag ? `${choice.label} (${choice.tag})` : choice.label;
 				if (index === model.selected)
-					return wrap(theme.fg("accent", `${theme.symbols.symbol("nav.cursor")} ${label}`), width);
-				const rows = wrap(`  ${label}`, width);
-				if (choice.description) rows.push(...wrap(`    ${theme.fg("dim", choice.description)}`, width));
+					return hangingWrap(
+						theme.fg("accent", `${theme.symbols.symbol("nav.cursor")} `),
+						"  ",
+						theme.fg("accent", label),
+						width,
+					);
+				const rows = hangingWrap("  ", "  ", label, width);
+				if (choice.description)
+					rows.push(...hangingWrap("    ", "    ", theme.fg("dim", choice.description), width));
 				return rows;
 			});
 			const footer = wrap(

@@ -331,7 +331,7 @@ function paintCard(node: UiNode, cx: PaintContext): Block {
 			rows.push(...quoteRows(theme, nodePlain(child), spine, expanded, message ? cx.width : undefined));
 		else if (childProps.role === "omp.tool.error") rows.push(errorDetail(theme, nodePlain(child)));
 		else if (nodeStyle(child) === "muted" && childProps.spans?.length === 1)
-			rows.push(theme.fg("muted", nodePlain(child)));
+			rows.push(`  ${theme.fg("muted", nodePlain(child))}`);
 		else rows.push(`  ${looseSpans(theme, childProps.spans ?? [])}`);
 	}
 	return { rows: rows.map(row => truncate(row, cx.width)) };

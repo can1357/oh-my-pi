@@ -12,6 +12,7 @@ import { TerminalImages } from "@oh-my-pi/pi-tui/driver/images/store";
 import { driverImages } from "@oh-my-pi/pi-tui/term/backend";
 import { paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
 import { describeTree } from "@oh-my-pi/pi-tui/testing/corpus";
+import { CONSERVATIVE_EMOJI } from "@oh-my-pi/pi-tui/theme/contract";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { bindEffects } from "../../../src/config/registry";
 import { Settings } from "../../../src/config/settings";
@@ -39,6 +40,7 @@ const caps: TerminalCapabilities = {
 	multiplexer: null,
 	textSizing: false,
 	tsp: false,
+	emoji: CONSERVATIVE_EMOJI,
 };
 
 let cleanup: (() => void) | undefined;

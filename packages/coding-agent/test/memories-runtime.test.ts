@@ -13,7 +13,7 @@ import {
 	startMemoryStartupTask,
 } from "@oh-my-pi/pi-coding-agent/memories";
 import * as memoryStorage from "@oh-my-pi/pi-coding-agent/memories/storage";
-import { getAgentDbPath, Snowflake, TempDir } from "@oh-my-pi/pi-utils";
+import { getAgentDbPath, logger, Snowflake, TempDir } from "@oh-my-pi/pi-utils";
 import { restoreEnvValue } from "./helpers/settings-test-state";
 
 interface SessionFixture {
@@ -250,6 +250,67 @@ describe("memories runtime", () => {
 			);
 		});
 	}
+
+	test("logs each failed stage1 claim with the underlying reason", async () => {
+		const fx = await createFixture({ "memories.maxRolloutsPerStartup": 4 });
+
+		// Seed a thread whose rolloutPath does not exist on disk -> Bun.file().text()
+		// throws ENOENT inside runStage1Job before the model is ever reached.
+		const missingRollout = path.join(fx.sessionDir, "thread-missing.jsonl");
+		const db = memoryStorage.openMemoryDb(getAgentDbPath(fx.agentDir));
+		memoryStorage.upsertThreads(db, [
+			{
+				id: "thread-missing",
+				updatedAt: Math.floor(Date.now() / 1000),
+				rolloutPath: missingRollout,
+				cwd: fx.agentDir,
+				sourceKind: "cli",
+			},
+		]);
+		memoryStorage.closeMemoryDb(db);
+
+		const completeSpy = vi.spyOn(ai, "completeSimple");
+		const errorSpy = vi.spyOn(logger, "error").mockImplementation(() => {});
+
+		startMemoryStartupTask({
+			session: fx.session,
+			settings: fx.settings,
+			modelRegistry: fx.modelRegistry,
+			agentDir: fx.agentDir,
+			taskDepth: 0,
+		});
+
+		// Wait until the failure is recorded in the DB so we know phase1 finished.
+		const start = Date.now();
+		let lastError: string | null = null;
+		while (Date.now() - start < 3000) {
+			const probe = memoryStorage.openMemoryDb(getAgentDbPath(fx.agentDir));
+			const row = probe
+				.prepare("SELECT last_error, status FROM jobs WHERE kind = 'memory_stage1' AND job_key = ?")
+				.get("thread-missing") as { last_error?: string; status?: string } | undefined;
+			memoryStorage.closeMemoryDb(probe);
+			if (row?.status === "error" && row.last_error) {
+				lastError = row.last_error;
+				break;
+			}
+			await Bun.sleep(20);
+		}
+
+		expect(lastError).not.toBeNull();
+		// The model was never invoked: this is a setup-time failure.
+		expect(completeSpy).not.toHaveBeenCalled();
+
+		// A logger.error call must surface the reason for this failed claim.
+		const matching = errorSpy.mock.calls.find(call => {
+			const ctx = call[1];
+			if (!ctx || typeof ctx !== "object") return false;
+			const record = ctx as Record<string, unknown>;
+			const threadId = record.threadId;
+			const reason = record.reason;
+			return threadId === "thread-missing" && typeof reason === "string" && reason.length > 0;
+		});
+		expect(matching).toBeDefined();
+	});
 
 	test("runs phase1 to phase2 and writes consolidated outputs", async () => {
 		const fx = await createFixture();

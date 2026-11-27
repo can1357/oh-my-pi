@@ -354,7 +354,12 @@ export type SettingsMirrorWrite =
 	| { readonly op: "setModelRole"; readonly role: string; readonly modelId: string | undefined }
 	| { readonly op: "setProjectModelRole"; readonly role: string; readonly modelId: string }
 	| { readonly op: "clearProjectModelRole"; readonly role: string }
-	| { readonly op: "overrideModelRoles"; readonly roles: ReadOnlyDict<string> };
+	| { readonly op: "overrideModelRoles"; readonly roles: ReadOnlyDict<string> }
+	| {
+			readonly op: "overrideModelRolesWhole";
+			readonly roles: ReadOnlyDict<string | null>;
+			readonly untrusted: boolean;
+	  };
 
 /** A disk or scope operation a worker mirror runs on its main-thread instance. */
 export type SettingsMirrorRefresh =
@@ -408,9 +413,8 @@ function settingsGroupOnlyPrefixes(): Readonly<Record<string, true>> {
 
 /**
  * Drop entries from capability-provided project settings whose non-object
- * value would shadow an entire settings group. `.claude/settings.json` is
- * shared with other tools, and a foreign leaf like `"tui": "fullscreen"`
- * deep-merges over omp's `tui` group, silently replacing every `tui.*`
+ * value would shadow an entire settings group. A leaf like `"tui": "fullscreen"`
+ * would deep-merge over omp's `tui` group, silently replacing every `tui.*`
  * setting for sessions rooted in that project. Values at schema leaves,
  * unknown keys, and well-formed nested objects pass through unchanged.
  */
@@ -762,7 +766,7 @@ export class Settings {
 	#configFiles: string[] = [];
 	/** Global settings from config.yml/config.yaml */
 	#global: RawSettings = {};
-	/** Project settings from .claude/settings.yml etc */
+	/** Project settings from .omp/config.yml etc */
 	#project: RawSettings = {};
 	/** Last successfully loaded native .omp/config.yml contents. */
 	#projectFileSettings: RawSettings = {};
@@ -827,7 +831,15 @@ export class Settings {
 	 * source-project value. Maps role → original override value (`undefined`
 	 * when the role had no runtime override).
 	 */
-	#savedRuntimeModelRoleOverrides = new Map<string, string | undefined>();
+	#savedRuntimeModelRoleOverrides = new Map<string, string | null | undefined>();
+	/**
+	 * Runtime model-role overrides seeded by {@link overrideModelRolesWhole} from an
+	 * untrusted source (a project config's preset): they route this process's session
+	 * but are excluded from {@link grantAuthority}, so an untrusted preset never widens
+	 * operator-owned model grants. Any later write through a role mutator removes the
+	 * role from this set, re-owning it.
+	 */
+	#untrustedRuntimeModelRoles = new Set<string>();
 
 	/** Legacy `lastChangelogVersion` captured from config.yml during migration (now a marker file). */
 	#legacyLastChangelogVersion?: string;
@@ -981,7 +993,20 @@ export class Settings {
 
 	/** Global, `--config` and runtime layers merged over an overlay parent's, skipping every project layer. */
 	#operatorLayers(): RawSettings {
-		const own = this.#mergeOwnLayers({ ...this.#ownLayers(), project: {} });
+		const layers = { ...this.#ownLayers(), project: {} };
+		if (this.#untrustedRuntimeModelRoles.size > 0) {
+			const roles = getByPath(this.#overrides, ["modelRoles"]);
+			if (isRecord(roles)) {
+				// A project preset's values route the session but never grant: drop them so the
+				// operator's own layers resurface in the authority view.
+				const operatorRoles: Record<string, unknown> = {};
+				for (const [role, value] of Object.entries(roles)) {
+					if (!this.#untrustedRuntimeModelRoles.has(role)) operatorRoles[role] = value;
+				}
+				layers.overrides = { ...this.#overrides, modelRoles: operatorRoles };
+			}
+		}
+		const own = this.#mergeOwnLayers(layers);
 		return this.#parent ? this.#deepMerge(this.#parent.#operatorLayers(), own) : own;
 	}
 
@@ -1394,6 +1419,7 @@ export class Settings {
 		if (this.#mirror) return this.#forward(this.#mirror, { op: "clearOverrideValue", id: setting.id });
 		if (setting === cfgModelRoles) {
 			this.#savedRuntimeModelRoleOverrides.clear();
+			this.#untrustedRuntimeModelRoles.clear();
 		}
 		this.#softPins.delete(setting);
 		if (getByPath(this.#overrides, setting.segments) === undefined) return;
@@ -1495,7 +1521,6 @@ export class Settings {
 			...MAIN_CONFIG_FILENAMES.map(filename => path.join(this.#agentDir, filename)),
 			path.join(projectConfigDir, "config.yml"),
 			path.join(projectConfigDir, "settings.json"),
-			path.join(projectCwd, ".claude", "settings.json"),
 			...this.#projectSourcePaths,
 			...this.#configFiles,
 		];
@@ -1614,6 +1639,7 @@ export class Settings {
 		const layers = { ...cloned.#ownLayers(), overrides: this.#buildOriginalOverrides() };
 		for (const setting of cloned.#settlePins(layers)) cloned.#softPins.delete(setting);
 		cloned.#overrides = layers.overrides;
+		cloned.#untrustedRuntimeModelRoles = new Set(this.#untrustedRuntimeModelRoles);
 		cloned.#rebuildMerged();
 		inheritWarnings(cloned, this);
 		cloned.#validateAll();
@@ -1809,7 +1835,7 @@ export class Settings {
 
 	/**
 	 * Re-scope this instance to a new working directory *in place*: reload the
-	 * project layer (`.claude/settings.yml` etc.) from `cwd`, re-resolve
+	 * project layer (`.omp/config.yml` etc.) from `cwd`, re-resolve
 	 * path-scoped settings against it, and notify listeners (and process-wide
 	 * effects: theme, symbols, …) of every value the new scope changes. Global
 	 * settings and runtime overrides are preserved.
@@ -1917,8 +1943,8 @@ export class Settings {
 	}
 
 	/**
-	 * Raw project settings layer (`.claude/settings.yml`, `.omp/config.yml`,
-	 * etc.), deep-cloned. Companion to {@link getGlobalSettings} for the legacy
+	 * Raw project settings layer (`.omp/config.yml`, `.omp/settings.json`),
+	 * deep-cloned. Companion to {@link getGlobalSettings} for the legacy
 	 * pi `SettingsManager` shim's `getProjectSettings()`; an {@link overlay}
 	 * likewise reports its parent's layer under its own.
 	 */
@@ -1954,9 +1980,9 @@ export class Settings {
 	/**
 	 * Provenance of the effective `extensions` array for extension-root
 	 * sub-discovery. `"project"` only when a project settings provider owns it
-	 * (any of `.omp/config.yml`, `.omp/settings.json`, `.claude/settings.json`,
-	 * … — all merged into the project layer) and no higher user-level layer (a
-	 * `--config` overlay or a runtime override) replaces it; otherwise `"user"`.
+	 * (`.omp/config.yml` or `.omp/settings.json`, both merged into the project
+	 * layer) and no higher user-level layer (a `--config` overlay or a runtime
+	 * override) replaces it; otherwise `"user"`.
 	 * Callers pass this into {@link EffectiveExtensionRoots.configuredLevel} so
 	 * discovery labels roots by the authority that produced them rather than
 	 * re-deriving provenance from a partial disk scan. An {@link overlay} whose
@@ -1998,22 +2024,40 @@ export class Settings {
 	 * capture invalidation independently of the whole-map replacement
 	 * semantics that `override("modelRoles", …)` carries.
 	 */
-	#setRuntimeModelRoleOverrides(next: Record<string, string>): void {
+	#setRuntimeModelRoleOverrides(next: Record<string, string | null>): void {
 		const prev = cfgModelRoles.get(this);
 		setByPath(this.#overrides, ["modelRoles"], next);
 		this.#rebuildMerged();
 		this.#fireIfChanged(cfgModelRoles, prev);
 	}
 
+	/** Runtime model-role override record for whole-map edits, keeping `null` tombstones. */
+	#runtimeModelRoleOverridesForEdit(): Record<string, string | null> {
+		const value = getByPath(this.#overrides, ["modelRoles"]);
+		const roles: Record<string, string | null> = {};
+		if (!isRecord(value)) return roles;
+		for (const role in value) {
+			if (!Object.hasOwn(value, role)) continue;
+			if (value[role] === null) {
+				roles[role] = null;
+				continue;
+			}
+			const modelId = modelRoleValueFromUnknown(value[role]);
+			if (modelId !== undefined) roles[role] = modelId;
+		}
+		return roles;
+	}
+
 	#updateRuntimeModelRoleOverride(role: ModelRole | string, modelId: string | undefined): void {
 		const runtimeOverrides = getByPath(this.#overrides, ["modelRoles"]);
 		if (!isRecord(runtimeOverrides) || !Object.hasOwn(runtimeOverrides, role)) return;
 
-		const nextRuntimeOverride = this.#modelRolesFromLayer(this.#overrides);
+		const nextRuntimeOverride = this.#runtimeModelRoleOverridesForEdit();
 		if (modelId === undefined) {
 			delete nextRuntimeOverride[role];
 		} else {
 			nextRuntimeOverride[role] = modelId;
+			this.#untrustedRuntimeModelRoles.delete(role);
 		}
 		this.#setRuntimeModelRoleOverrides(nextRuntimeOverride);
 	}
@@ -2028,7 +2072,7 @@ export class Settings {
 		if (this.#savedRuntimeModelRoleOverrides.has(role)) return;
 		const runtimeOverrides = getByPath(this.#overrides, ["modelRoles"]);
 		if (!isRecord(runtimeOverrides) || !Object.hasOwn(runtimeOverrides, role)) return;
-		this.#savedRuntimeModelRoleOverrides.set(role, this.#modelRolesFromLayer(this.#overrides)[role]);
+		this.#savedRuntimeModelRoleOverrides.set(role, this.#runtimeModelRoleOverridesForEdit()[role]);
 	}
 
 	/**
@@ -2290,14 +2334,41 @@ export class Settings {
 	 */
 	overrideModelRoles(roles: ReadOnlyDict<string>): void {
 		if (this.#mirror) return this.#forward(this.#mirror, { op: "overrideModelRoles", roles: { ...roles } });
-		const next = this.#modelRolesFromLayer(this.#overrides);
+		const next = this.#runtimeModelRoleOverridesForEdit();
 		for (const [role, modelId] of Object.entries(roles)) {
 			if (modelId) {
 				next[role] = modelId;
 				this.#savedRuntimeModelRoleOverrides.delete(role);
+				this.#untrustedRuntimeModelRoles.delete(role);
 			}
 		}
 		this.#setRuntimeModelRoleOverrides(next);
+	}
+
+	/**
+	 * Replace the runtime model-role override record wholesale (the `--preset`
+	 * launch path). `null` tombstones unset the roles the map omits, and later
+	 * per-role {@link overrideModelRoles} writes keep those tombstones, so the
+	 * roles stay unset for the run. With `untrusted` (a project config's preset)
+	 * the values route this process's session but stay out of
+	 * {@link grantAuthority}, so an untrusted preset never widens
+	 * operator-owned model grants.
+	 */
+	overrideModelRolesWhole(roles: ReadOnlyDict<string | null>, options: { untrusted?: boolean } = {}): void {
+		if (this.#mirror) {
+			return this.#forward(this.#mirror, {
+				op: "overrideModelRolesWhole",
+				roles: { ...roles },
+				untrusted: options.untrusted === true,
+			});
+		}
+		// Whole-map replacement supersedes any per-role capture, like `writeValue` on the override layer.
+		this.#savedRuntimeModelRoleOverrides.clear();
+		this.#untrustedRuntimeModelRoles = new Set(options.untrusted ? Object.keys(roles) : []);
+		const prev = cfgModelRoles.get(this);
+		setByPath(this.#overrides, ["modelRoles"], { ...roles });
+		this.#rebuildMerged();
+		this.#fireIfChanged(cfgModelRoles, prev);
 	}
 
 	// ─────────────────────────────────────────────────────────────────────────
@@ -2797,7 +2868,6 @@ export class Settings {
 		const projectConfigPath = path.join(projectConfigDir, "config.yml");
 		invalidateCapabilityFsCache(projectConfigPath);
 		invalidateCapabilityFsCache(path.join(projectConfigDir, "settings.json"));
-		invalidateCapabilityFsCache(path.join(discoveryCwd, ".claude", "settings.json"));
 		for (const sourcePath of this.#projectSourcePaths) invalidateCapabilityFsCache(sourcePath);
 		let projectItems: SettingsCapabilityItem[] = [];
 		let rejectedWarnings: string[] | undefined;
@@ -3307,6 +3377,26 @@ export class Settings {
 			raw["snapcompact.systemPrompt"] = raw["snapcompact.systemPrompt"] ? "all" : "none";
 		}
 
+		// display.hideToolActivity (boolean) -> display.toolActivity (detailed |
+		// concise | hidden): true hid tool calls, false drew full cards. Nested
+		// values win over quoted-dotted ones; an explicit new mode wins over both.
+		const displayObj = isRecord(raw.display) ? raw.display : undefined;
+		const legacyHideToolActivity =
+			typeof displayObj?.hideToolActivity === "boolean"
+				? displayObj.hideToolActivity
+				: typeof raw["display.hideToolActivity"] === "boolean"
+					? raw["display.hideToolActivity"]
+					: undefined;
+		if (displayObj) delete displayObj.hideToolActivity;
+		delete raw["display.hideToolActivity"];
+		if (
+			legacyHideToolActivity !== undefined &&
+			displayObj?.toolActivity === undefined &&
+			raw["display.toolActivity"] === undefined
+		) {
+			raw.display = { ...displayObj, toolActivity: legacyHideToolActivity ? "hidden" : "detailed" };
+		}
+
 		// inlineToolDescriptors: boolean -> enum (auto | on | off). The old
 		// `true`/`false` mapped directly onto inline-on/inline-off, so preserve
 		// the user's explicit choice; new installs get the `auto` default that
@@ -3768,7 +3858,7 @@ export class Settings {
 				const selector = bundledSelector(provider, model => model.webSearchModel);
 				return selector ? [selector] : [];
 			};
-			const geminiSelectors = (model: string): string[] => [`google-antigravity/${model}`, `google/${model}`];
+			const geminiSelectors = (model: string): string[] => [`google/${model}`];
 			const webSelectors = (provider: string, geminiModel: string): string[] => {
 				switch (provider) {
 					case "gemini":
@@ -3832,7 +3922,6 @@ export class Settings {
 			const legacyImageProviders: Record<string, string> = {
 				openai: "openai",
 				"openai-codex": "openai-codex",
-				antigravity: "google-antigravity",
 				xai: "xai",
 				gemini: "google",
 				deepinfra: "deepinfra",

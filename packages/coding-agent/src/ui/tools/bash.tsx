@@ -566,7 +566,6 @@ export function shellPresenter<TArgs>(config: ShellConfig<TArgs>): ToolPresenter
 /** Shell args of the `bash` tool. */
 export interface BashArgs {
 	readonly command?: string;
-	readonly cwd?: string;
 	readonly env?: Record<string, unknown>;
 	readonly timeout?: number;
 	readonly name?: string;
@@ -575,7 +574,6 @@ export interface BashArgs {
 export const bashPresenter = shellPresenter<BashArgs>({
 	title: args => (args?.name ? `Bash · ${String(args.name)}` : "Bash"),
 	command: args => args?.command,
-	cwd: args => args?.cwd,
 	env: args => args?.env,
 	header: false,
 });

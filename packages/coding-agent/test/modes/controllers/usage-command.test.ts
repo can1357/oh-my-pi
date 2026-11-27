@@ -146,17 +146,17 @@ describe("renderUsageReports content", () => {
 		expect(output).not.toContain("accts");
 	});
 
-	it("renders each marked Antigravity shared quota once in expanded details", () => {
+	it("renders each marked shared quota once in expanded details", () => {
 		const quota = (
 			counter: "google" | "anthropic" | "openai",
 			windowId: "5h" | "weekly",
 		): UsageReport["limits"][number] => {
 			const sharedGroup = counter === "google" ? undefined : `3p-${windowId}`;
 			return {
-				id: `google-antigravity:${counter}:default:${counter === "google" ? "gemini" : "3p"}-${windowId}`,
+				id: `google:${counter}:default:${counter === "google" ? "gemini" : "3p"}-${windowId}`,
 				label: counter === "google" ? "Gemini" : "Claude & GPT (shared)",
 				scope: {
-					provider: "google-antigravity",
+					provider: "google",
 					accountId: "account",
 					windowId,
 					...(sharedGroup !== undefined ? { shared: true, sharedGroup } : {}),
@@ -168,7 +168,7 @@ describe("renderUsageReports content", () => {
 		};
 		const reports: UsageReport[] = [
 			{
-				provider: "google-antigravity",
+				provider: "google",
 				fetchedAt: Date.now(),
 				limits: [
 					quota("google", "5h"),

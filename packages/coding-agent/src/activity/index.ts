@@ -1,4 +1,4 @@
-import { activityOneLine, compareActivityRows } from "../modes/view-model/overlays/agent-activity";
+import { activityOneLine, compareActivityRows, toolCallSummary } from "../modes/view-model/overlays/agent-activity";
 import type { AgentActivityRow, AgentActivityQuery } from "../modes/view-model/overlays/agent-activity";
 import {
 	defaultSessionStorage,
@@ -119,47 +119,6 @@ function searchTextOf(row: AgentActivityRow): string {
 		searchTextCache.set(row, text);
 	}
 	return text;
-}
-
-function firstString(value: Record<string, unknown>, ...keys: string[]): string | undefined {
-	for (const key of keys) {
-		const candidate = value[key];
-		if (typeof candidate === "string" && candidate.trim()) return activityOneLine(candidate);
-	}
-	return undefined;
-}
-
-function argumentsSummary(toolName: string, args: Record<string, unknown>): string {
-	const intent = firstString(args, "intent");
-	if (intent) return intent;
-	switch (toolName) {
-		case "read":
-			return firstString(args, "path") ?? "Read resource";
-		case "grep": {
-			const pattern = firstString(args, "pattern");
-			const path = firstString(args, "path");
-			return [pattern, path].filter(Boolean).join(" · ") || "Search text";
-		}
-		case "glob":
-			return firstString(args, "path") ?? "Map files";
-		case "bash":
-			return firstString(args, "command") ?? "Run command";
-		case "write":
-		case "edit":
-			return firstString(args, "path") ?? `${toolName === "write" ? "Write" : "Edit"} files`;
-		case "wait":
-			return "Waiting for background work or a peer";
-		default: {
-			const common = firstString(args, "path", "query", "name", "task", "title");
-			if (common) return common;
-			try {
-				const encoded = activityOneLine(JSON.stringify(args));
-				return encoded === "{}" ? toolName : encoded;
-			} catch {
-				return toolName;
-			}
-		}
-	}
 }
 
 function toolBlocks(content: unknown): Array<{ id: string; name: string; args: unknown }> {
@@ -464,16 +423,13 @@ export class AgentActivityIndex {
 					changed = true;
 				}
 				for (const call of toolBlocks(message.content)) {
-					const args = recordOf(call.args) ?? {};
-					const intent = firstString(args, "i");
 					const row: AgentActivityRow = {
 						id: `${agentId}:tool:${call.id}`,
 						agentId,
 						timestamp,
 						kind: "tool",
 						title: call.name,
-						summary: intent ?? argumentsSummary(call.name, args),
-						summaryIsToolIntent: intent !== undefined,
+						...toolCallSummary(call.name, call.args),
 						status: "pending",
 						entryId: entry.id,
 						toolCallId: call.id,

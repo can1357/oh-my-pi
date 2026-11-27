@@ -24,7 +24,7 @@ import {
 } from "../config/compaction-threshold";
 import { type ServiceTierInheritSettingValue, validateAgentServiceTierOverrides } from "../config/service-tier";
 import type { Settings } from "../config/settings";
-import { isProviderEnabled, isUserSourceEnabled } from "../capability";
+import { isProviderEnabled } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import { sessionLocalProtocolOptions } from "../internal-urls/context";
@@ -470,12 +470,7 @@ const inflightDiscovery = new Map<string, { fn: typeof discoverAgents; promise: 
 
 function discoverAgentsShared(cwd: string, extensionRoots?: EffectiveExtensionRoots): Promise<DiscoveryResult> {
 	const fn = discoverAgents;
-	const policy = [
-		isProviderEnabled("omp-plugins"),
-		isProviderEnabled("claude-plugins"),
-		isUserSourceEnabled("claude-plugins"),
-		isUserSourceEnabled("claude"),
-	].join(",");
+	const policy = [isProviderEnabled("omp-plugins"), isProviderEnabled("claude-plugins")].join(",");
 	const key = `${path.resolve(cwd)}\0${policy}\0${JSON.stringify(extensionRoots ?? null)}`;
 	const existing = inflightDiscovery.get(key);
 	if (existing && existing.fn === fn) return existing.promise;

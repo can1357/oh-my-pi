@@ -5,9 +5,8 @@
  * modelled as string literal unions so they pass through `JSON.stringify` and
  * `JSON.parse` unchanged.
  *
- * Keep this file in sync with the actual request/response surface of:
- *   - `POST {generativelanguage,aiplatform}.googleapis.com/.../models/{model}:streamGenerateContent?alt=sse`
- *   - The Cloud Code Assist endpoint used by `google-gemini-cli.ts`
+ * Keep this file in sync with the actual request/response surface of
+ * `POST {generativelanguage,aiplatform}.googleapis.com/.../models/{model}:streamGenerateContent?alt=sse`.
  */
 /** Mirror of `@google/genai`'s `FinishReason` string enum. */
 export type FinishReason =

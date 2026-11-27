@@ -125,8 +125,8 @@ function editorBox(input: UiNode, hint: UiNode, cx: PaintContext): string[] {
 	return [
 		accent(`${box.topLeft}${box.horizontal.repeat(inner)}${box.topRight}`),
 		`${accent(box.vertical)}${fill(promptRow)}${accent(box.vertical)}`,
-		// Hints wider than the box wrap, edges and all.
-		...wrap(`${muted(box.vertical)}${fill(hintRow)}${muted(box.vertical)}`, cx.width),
+		// Hints wider than the box wrap inside it; every row keeps both edges.
+		...wrap(hintRow, inner).map(row => `${muted(box.vertical)}${fill(row)}${muted(box.vertical)}`),
 		muted(`${box.bottomLeft}${box.horizontal.repeat(inner)}${box.bottomRight}`),
 	];
 }

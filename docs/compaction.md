@@ -192,6 +192,8 @@ Explicit compaction modes and focused instructions retain their existing behavio
   boundaries. Shared selectors work, for example
   `history://current/full:1-200` and `history://current/full:raw:1-200`.
   Queries, fragments, trailing slashes, and additional path components are rejected.
+  A model that refuses its own reasoning quoted back as text (Claude) gets the
+  view without assistant reasoning.
 - The full-history route is bound to the calling session's current branch. It
   never falls back to another registered agent or an on-disk session search.
   Existing `history://<id>` routes retain their concise transcript behavior.
@@ -369,6 +371,8 @@ Before dispatch, the handoff side request counts its prepared system prompt, too
 
 `/handoff [focus]` aliases `/compact handoff [focus]`. It prepares a handoff summary from a transcript snapshot without interrupting the live response or holding follow-ups. Once ready, it applies through the standard `CompactionEntry` commit at a tool-turn boundary or when idle. `firstKeptEntryId` stays anchored to the snapshot, so the current branch's recent history and all messages appended during generation survive verbatim. A reset, branch change that removes the snapshot, or newer compaction invalidates the result.
 
+Handoff output is capped at the summary budget (`MAX_SUMMARY_TOKENS`), so a server with no output limit of its own still ends a runaway document with `stopReason: "length"`, which fails the handoff. `compaction.handoffTimeoutSeconds` (default `0`, off) also bounds wall-clock time: when it expires the handoff fails rather than cancels, automatic maintenance tries the next configured method, and `/handoff` reports `Handoff timed out after Ns`. It is off by default because a slow local model can legitimately take many minutes to write a valid document.
+
 When `compaction.handoffSaveToDisk` is enabled, an **automatically triggered** handoff also writes `handoff-<ISO timestamp>.md` in the persisted session's artifact directory. Manual handoffs are not written by this setting, and non-persisted sessions have no artifact directory.
 
 ### File-operation context in summaries
@@ -539,6 +543,7 @@ Defined in `packages/coding-agent/src/session/context-settings.ts`:
 - `compaction.autoContinue` = `true`
 - `compaction.midTurnEnabled` = `true`; a `false` value applies to the session that configured it, not to spawned subagents — each subagent keeps mid-run checks so its single-turn assignment still compacts at the configured threshold.
 - `compaction.handoffSaveToDisk` = `false`
+- `compaction.handoffTimeoutSeconds` = `0` (no limit; a positive value fails a handoff that generates for longer, so automatic maintenance tries the next method)
 - The `handoff` method generates a handoff document through the live-cache side-request pipeline and commits it on the current session. `/handoff` and `/compact handoff` select it manually.
 - `compaction.remoteEndpoint` = `undefined`
 - `compaction.remoteStreamingV2Enabled` = `true`

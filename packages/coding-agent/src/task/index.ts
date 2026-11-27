@@ -177,6 +177,9 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		name: agent.name,
 		description: agent.description,
 		readOnly: isReadOnlyAgent(agent),
+		// Declared grant so the spawner routes on capability (e.g. no shell); unset = full toolset.
+		// `yield` is internal plumbing, never a capability the spawner routes on.
+		tools: agent.tools?.filter(tool => tool !== "yield"),
 		blocking: agent.blocking === true,
 		// Marked only while `task.structured` is off; with it on, every agent's result is structured.
 		structured: !options.structured && agent.structured === true,

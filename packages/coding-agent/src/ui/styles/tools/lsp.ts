@@ -12,7 +12,7 @@ import { languageFromPath } from "@oh-my-pi/pi-tui/text/lang";
 import { replaceTabs, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import type { LspDiagnostic, LspLocationFile, LspTerm } from "../../tools/lsp";
-import { expandHint, spinnerGlyph } from "./frame";
+import { expandHint, hangingWrap, spinnerGlyph } from "./frame";
 import { defineToolLook, toolProps } from "./look";
 import { moreItem, pathText, type TreeItem, treeRows } from "./search";
 
@@ -73,7 +73,9 @@ function paintLsp(node: UiNode, cx: PaintContext): Block {
 	if (term.facts && term.facts.length > 0) head += ` ${theme.fg("dim", term.facts.join(" · "))}`;
 	let body: string[] = [];
 	if (term.error !== undefined) {
-		body = term.error.split("\n").flatMap(line => wrap(`  ${theme.fg("error", replaceTabs(line))}`, cx.width));
+		body = term.error
+			.split("\n")
+			.flatMap(line => hangingWrap("  ", "  ", theme.fg("error", replaceTabs(line)), cx.width));
 	} else if (term.diagnostics) {
 		const all = term.diagnostics;
 		const shown = expanded || all.length <= COLLAPSED_DIAGNOSTICS ? all : all.slice(0, COLLAPSED_DIAGNOSTICS);

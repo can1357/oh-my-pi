@@ -1786,6 +1786,7 @@ class GetSessionLeaseResult:
 @dataclass(slots=True, frozen=True, kw_only=True)
 class LogoutResult:
     remaining_source: str | None = None
+    sign_out_error: str | None = None
 
 
 UserContent: TypeAlias = TextContent | ImageContent
@@ -3372,6 +3373,7 @@ def parse_logout_result(value: object, path: str = "LogoutResult") -> LogoutResu
     payload = expect_object(value, path)
     return LogoutResult(
         remaining_source=optional(payload, "remainingSource", decode_str, path),
+        sign_out_error=optional(payload, "signOutError", decode_str, path),
     )
 
 
@@ -3928,7 +3930,7 @@ class WireClient:
         return required(expect_object(self._command("get_logout_accounts", params), "get_logout_accounts"), "accounts", array(parse_logout_account), "get_logout_accounts")
 
     def logout(self, provider_id: str, credential_id: int) -> LogoutResult:
-        """Remove one stored credential; fails when it is no longer stored. `remainingSource` names auth that still applies."""
+        """Remove one stored credential, revoking it at the provider when one supports it; fails when it is no longer stored. `remainingSource` names auth that still applies; `signOutError` says why the provider's sign-out failed (the credential is removed regardless)."""
         params: dict[str, object] = {}
         params["providerId"] = provider_id
         params["credentialId"] = credential_id
