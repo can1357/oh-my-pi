@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed working memory growing past its configured limit and keeping expired memories in some recovered memory databases ([#20808](https://github.com/can1357/oh-my-pi/pull/20808) by [@sjawhar](https://github.com/sjawhar))
+
 ### Removed
 
 - Removed unused public configuration exports from @oh-my-pi/pi-mnemopi/config.
