@@ -33,7 +33,7 @@ export function hasBillableCost(cost: ModelSpec["cost"]): boolean {
 /**
  * Price zero-cost rows at their `pricing-peer` equivalents: the rule's alias
  * `peer-id` first, then the row's own id, across the peer providers in their
- * declared order (e.g. Antigravity Claude ids at Vertex before Anthropic).
+ * declared order.
  * Rows that are already billable, and ids without a billable peer, keep
  * their cost.
  */

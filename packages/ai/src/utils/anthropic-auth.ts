@@ -15,6 +15,7 @@ import {
 	resolveAnthropicCustomHeadersForBaseUrl,
 } from "../providers/anthropic-headers";
 import { normalizeAnthropicBaseUrl } from "../providers/anthropic-state";
+import { applyInferenceHeaders } from "../providers/inference-headers";
 import { isFoundryEnabled } from "./foundry";
 
 /** Auth configuration for Anthropic */
@@ -85,6 +86,17 @@ export interface AnthropicSearchHeaderOptions {
 	allowAnthropicHeaderOverrides?: boolean;
 	/** Request-specific betas sent alongside the web search beta. */
 	extraBetas?: readonly string[];
+	/**
+	 * The selected model's credential-bearing provider id. When set, the
+	 * Messages path's backend headers (`applyInferenceHeaders`) are added:
+	 * session headers when {@link sessionId} is set, otherwise only backend
+	 * attribution (e.g. Vercel AI Gateway).
+	 */
+	provider?: string;
+	/** The selected model's declared backend (`providerType`). */
+	providerType?: string;
+	/** Conversation id carried by the backend's session headers. */
+	sessionId?: string;
 }
 
 /**
@@ -99,7 +111,7 @@ export function buildAnthropicSearchHeaders(
 	auth: AnthropicAuthConfig,
 	options: AnthropicSearchHeaderOptions = {},
 ): Record<string, string> {
-	return buildAnthropicHeaders({
+	const headers = buildAnthropicHeaders({
 		apiKey: auth.apiKey,
 		baseUrl: auth.baseUrl,
 		isOAuth: auth.isOAuth,
@@ -108,6 +120,15 @@ export function buildAnthropicSearchHeaders(
 		modelHeaders: mergeHeaders(options.modelHeaders, resolveAnthropicCustomHeadersForBaseUrl(auth.baseUrl)),
 		allowAnthropicHeaderOverrides: options.allowAnthropicHeaderOverrides,
 	});
+	if (options.provider) {
+		applyInferenceHeaders(headers, {
+			provider: options.provider,
+			providerType: options.providerType,
+			protocol: "anthropic",
+			sessionId: options.sessionId,
+		});
+	}
+	return headers;
 }
 
 /**

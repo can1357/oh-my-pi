@@ -427,6 +427,9 @@ function isLaunchGlobalFlag(arg: string): boolean {
 	);
 }
 
+/** Non-launch subcommands that accept `--config` overlays, so a leading `--config` is forwarded (#17092). */
+const CONFIG_OVERLAY_COMMANDS: ReadonlySet<string> = new Set(["config", "models"]);
+
 /**
  * Drop recognized launch-global flags (and any value they consume) from the
  * leading segment before a hoisted non-launch subcommand. `--cwd` and friends
@@ -435,10 +438,16 @@ function isLaunchGlobalFlag(arg: string): boolean {
  * `node:util.parseArgs` error (#8891). Tokens the launch tables don't recognize
  * are kept, so a subcommand's own leading flags still reach it.
  */
-function stripLaunchGlobalFlags(leading: readonly string[]): string[] {
+function stripLaunchGlobalFlags(sub: string, leading: readonly string[]): string[] {
+	const keepsConfig = CONFIG_OVERLAY_COMMANDS.has(sub);
 	const kept: string[] = [];
 	for (let index = 0; index < leading.length; index += 1) {
 		const arg = leading[index];
+		if (keepsConfig && (arg === "--config" || arg.startsWith("--config="))) {
+			kept.push(arg);
+			if (arg === "--config" && index + 1 < leading.length) kept.push(leading[++index]);
+			continue;
+		}
 		if (isLaunchGlobalFlag(arg)) {
 			if (flagConsumesValue(arg, leading[index + 1])) index += 1;
 			continue;
@@ -476,7 +485,7 @@ export function resolveCliArgv(argv: string[]): ResolvedCliArgv {
 		const sub = argv[subIndex];
 		const leading = argv.slice(0, subIndex);
 		const trailing = argv.slice(subIndex + 1);
-		const forwardedLeading = LAUNCH_FLAG_COMMANDS[sub] === true ? leading : stripLaunchGlobalFlags(leading);
+		const forwardedLeading = LAUNCH_FLAG_COMMANDS[sub] === true ? leading : stripLaunchGlobalFlags(sub, leading);
 		return { argv: [sub, ...forwardedLeading, ...trailing] };
 	}
 	return { argv: ["launch", ...argv] };

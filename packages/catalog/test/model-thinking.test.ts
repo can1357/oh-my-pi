@@ -539,8 +539,8 @@ describe("model thinking derivation", () => {
 	it("maps minimal to LOW when a collapsed family aliases it onto the low wire id", () => {
 		const model = createModel({
 			id: "gemini-3.7-flash",
-			api: "google-gemini-cli",
-			provider: "google-antigravity",
+			api: "google-generative-ai",
+			provider: "google",
 			thinking: {
 				mode: "google-level",
 				efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
@@ -892,18 +892,16 @@ describe("model thinking derivation", () => {
 		expect(direct.compat.supportsTurnScopedSystem).toBe(true);
 	});
 
-	it("keeps Sonnet 5.5 binding controls and per-message effort off Vertex, which rejects both", () => {
-		const direct = createModel({ id: "claude-sonnet-5-5", api: "anthropic-messages", provider: "anthropic" });
-		const vertex = createModel({
-			id: "claude-sonnet-5-5@default",
-			api: "anthropic-messages",
-			provider: "google-vertex",
-		});
+	it("keeps Sonnet 5.5 and Fable 5.1+ binding controls and per-message effort off Vertex, which rejects both", () => {
+		for (const id of ["claude-sonnet-5-5", "claude-fable-5-1", "claude-fable-5-2"]) {
+			const direct = createModel({ id, api: "anthropic-messages", provider: "anthropic" });
+			const vertex = createModel({ id: `${id}@default`, api: "anthropic-messages", provider: "google-vertex" });
 
-		expect(direct.compat.supportsThinkingBindingControls).toBe(true);
-		expect(direct.compat.supportsPerMessageEffort).toBe(true);
-		expect(vertex.compat.supportsThinkingBindingControls).toBe(false);
-		expect(vertex.compat.supportsPerMessageEffort).toBe(false);
+			expect(direct.compat.supportsThinkingBindingControls).toBe(true);
+			expect(direct.compat.supportsPerMessageEffort).toBe(true);
+			expect(vertex.compat.supportsThinkingBindingControls).toBe(false);
+			expect(vertex.compat.supportsPerMessageEffort).toBe(false);
+		}
 	});
 
 	it("keeps mid-conversation tool changes off Vertex, which rejects tool_removal but accepts mid-conversation system", () => {

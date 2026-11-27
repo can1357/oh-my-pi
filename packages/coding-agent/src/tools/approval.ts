@@ -10,7 +10,13 @@ import { isRecord, prompt, relativePathWithinNormalizedRoot, sanitizeText } from
 import { replaceTabs } from "../utils/text-width";
 import { shortenPath } from "../utils/render-utils";
 import approvalFolderTemplate from "../prompts/tools/approval-folder.md" with { type: "text" };
-import type { AgentTool, AgentToolContext, ToolApprovalDecision, ToolTier } from "@oh-my-pi/pi-agent-core";
+import type {
+	AgentTool,
+	AgentToolContext,
+	ToolApprovalDecision,
+	ToolApprovalQuery,
+	ToolTier,
+} from "@oh-my-pi/pi-agent-core";
 import * as path from "node:path";
 import type { Settings } from "../config/settings";
 import type {
@@ -318,14 +324,18 @@ function normalizeDecision(value: unknown): Omit<ResolvedApproval, "policy"> & {
 	return { tier: "exec", override: false };
 }
 
+const PROMPTING_QUERY: ToolApprovalQuery = { prompts: true };
+const NON_PROMPTING_QUERY: ToolApprovalQuery = { prompts: false };
+
 function getToolDecision(
 	tool: ApprovalSubject,
 	args: unknown,
+	query: ToolApprovalQuery,
 	context?: AgentToolContext,
 ): Omit<ResolvedApproval, "policy"> & { policy?: ApprovalPolicy } {
 	const approval = tool.approval;
 	const decision: ToolApprovalDecision | undefined =
-		typeof approval === "function" ? approval(args, context) : approval;
+		typeof approval === "function" ? approval(args, context, query) : approval;
 	return normalizeDecision(decision);
 }
 
@@ -337,7 +347,7 @@ function getToolDecision(
  * argument-dependent tier instead of falling back to `exec`.
  */
 export function resolveToolTier(tool: ApprovalSubject, args: unknown, context?: AgentToolContext): ToolTier {
-	return getToolDecision(tool, args, context).tier;
+	return getToolDecision(tool, args, NON_PROMPTING_QUERY, context).tier;
 }
 
 function modeApprovesTier(mode: ApprovalMode, tier: ToolTier): boolean {
@@ -415,7 +425,8 @@ function resolvePolicy(
 	grants: ApprovalGrantStore | undefined,
 	context?: AgentToolContext,
 ): ResolvedApproval {
-	const decision = getToolDecision(tool, args, context);
+	// Yolo honours only a decision's explicit `policy`; every other mode may prompt on it.
+	const decision = getToolDecision(tool, args, mode === "yolo" ? NON_PROMPTING_QUERY : PROMPTING_QUERY, context);
 	const userPolicy = Object.hasOwn(userConfig, tool.name) ? normalizePolicy(userConfig[tool.name]) : undefined;
 
 	// Legacy-name fallback for renamed tools (e.g. MCP mints that gained digits).

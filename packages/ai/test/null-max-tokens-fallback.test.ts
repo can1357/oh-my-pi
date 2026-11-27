@@ -2,10 +2,8 @@ import { describe, expect, it } from "bun:test";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
-import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context, FetchImpl, ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { Effort } from "@oh-my-pi/pi-catalog/effort";
 
 const ctx: Context = {
 	systemPrompt: ["hi"],
@@ -42,21 +40,6 @@ function responsesSse(): Response {
 		status: 200,
 		headers: { "content-type": "text/event-stream" },
 	});
-}
-
-interface CapturedGoogleRequestBody {
-	request?: {
-		generationConfig?: {
-			maxOutputTokens?: number;
-			thinkingConfig?: {
-				thinkingBudget?: number;
-			};
-		};
-	};
-}
-
-function googleCliError(): Response {
-	return new Response('{"error":{"message":"bad request"}}', { status: 400 });
 }
 
 describe("null maxTokens fallback wire tests", () => {
@@ -151,39 +134,6 @@ describe("null maxTokens fallback wire tests", () => {
 
 		expect(capturedPayload).not.toBeNull();
 		expect(capturedPayload!.max_completion_tokens).toBe(64000);
-	});
-
-	it("keeps unknown Gemini CLI maxTokens at the finite fallback instead of shrinking to the thinking budget", async () => {
-		const spec: ModelSpec<"google-gemini-cli"> = {
-			id: "gemini-2.5-pro",
-			name: "Gemini 2.5 Pro",
-			api: "google-gemini-cli",
-			provider: "google-gemini-cli",
-			baseUrl: "https://cloudcode-pa.googleapis.com",
-			reasoning: true,
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 100000,
-			maxTokens: null, // unknown limit
-		};
-		const model = buildModel(spec);
-
-		let capturedPayload: CapturedGoogleRequestBody | null = null;
-		const mockFetch: FetchImpl = async (_url, init) => {
-			capturedPayload = JSON.parse(init?.body as string) as CapturedGoogleRequestBody;
-			return googleCliError();
-		};
-
-		await streamSimple(model, ctx, {
-			apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
-			reasoning: Effort.Medium,
-			fetch: mockFetch,
-		}).result();
-
-		expect(capturedPayload).not.toBeNull();
-		const generationConfig = capturedPayload!.request?.generationConfig;
-		expect(generationConfig?.maxOutputTokens).toBe(64000);
-		expect(generationConfig?.thinkingConfig?.thinkingBudget).toBe(8192);
 	});
 
 	it("verifies openai responses clamps to OPENAI_MAX_OUTPUT_TOKENS when maxTokens is null", async () => {

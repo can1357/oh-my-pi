@@ -22,6 +22,20 @@ export function providerEntry(provider: string): CompiledProvider | undefined {
 }
 
 /**
+ * The provider's own managed API base URL when its compiled entry declares
+ * one (`base-url` node in `providers/<id>.kdl`). Consumers that honor the
+ * declared override env resolve it against {@link providerBaseUrlEnv}.
+ */
+export function providerBaseUrl(provider: string): string | undefined {
+	return rules.providers[provider]?.baseUrl;
+}
+
+/** The override env var declared on a provider's `base-url` node, if any. */
+export function providerBaseUrlEnv(provider: string): string | undefined {
+	return rules.providers[provider]?.baseUrlEnv;
+}
+
+/**
  * The authored seed rows for one provider (empty when it has none). Rows are
  * the compiled JSON verbatim; callers that mutate must copy.
  */

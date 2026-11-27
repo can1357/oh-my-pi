@@ -61,23 +61,23 @@ function context() {
 	const ctx = createInteractiveModeContext({ settings: Settings.isolated() });
 	const helpers = new UiHelpers(ctx);
 	ctx.addMessageToChat = (message, options) => helpers.addMessageToChat(message, options);
-	return { ctx, helpers, hidden: contextDisplay(ctx).hideToolActivity };
+	return { ctx, helpers, toolActivity: contextDisplay(ctx).toolActivity };
 }
 
 describe("IRC tool activity visibility", () => {
 	it("hides live cards, including arrivals while hidden, without hiding conversation", async () => {
-		const { ctx, hidden } = context();
+		const { ctx, toolActivity } = context();
 		const controller = new EventController(ctx);
 		const render = () => renderTranscript(ctx).join("\n");
 		ctx.present(() => jsx("text", { text: "Conversation remains visible" }));
 		try {
 			await controller.handleEvent({ type: "irc_message", message: messages[0]! });
 			expect(render()).toContain(bodies[0]!);
-			hidden.set(true);
+			toolActivity.set("hidden");
 			for (const message of messages.slice(1)) await controller.handleEvent({ type: "irc_message", message });
 			expectCoordination(render(), false);
 			expect(render()).toContain("Conversation remains visible");
-			hidden.set(false);
+			toolActivity.set("detailed");
 			expectCoordination(render(), true);
 		} finally {
 			controller.dispose();
@@ -85,17 +85,17 @@ describe("IRC tool activity visibility", () => {
 	});
 
 	it("replays stored IRC cards hidden and reveals them on toggle", () => {
-		const { ctx, helpers, hidden } = context();
+		const { ctx, helpers, toolActivity } = context();
 		const render = () => renderTranscript(ctx).join("\n");
-		hidden.set(true);
+		toolActivity.set("hidden");
 		for (const message of messages) helpers.addMessageToChat(message);
 		expectCoordination(render(), false);
-		hidden.set(false);
+		toolActivity.set("detailed");
 		expectCoordination(render(), true);
 	});
 
 	it("shows a parent steer as an IRC card in the live transcript even when tool activity is hidden", () => {
-		const { ctx, helpers, hidden } = context();
+		const { ctx, helpers, toolActivity } = context();
 		const body = "Please check the build";
 		const steer: UserMessage = {
 			role: "user",
@@ -105,7 +105,7 @@ describe("IRC tool activity visibility", () => {
 			steering: true,
 			timestamp: Date.now(),
 		};
-		hidden.set(true);
+		toolActivity.set("hidden");
 		const [block] = helpers.addMessageToChat(steer);
 		if (!block) throw new Error("the steer drew no block");
 		const tree = JSON.stringify(describeTree(block.node, corpusEnvironment("dark"), 120));

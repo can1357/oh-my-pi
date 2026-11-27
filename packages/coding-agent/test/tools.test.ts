@@ -1058,6 +1058,22 @@ describe("Coding Agent Tools", () => {
 			expect(output).not.toContain("Use :3- to continue");
 		});
 
+		it("keeps an oversized jq line a partial preview below the spill threshold", async () => {
+			const target = path.join(testDir, "large.json");
+			await Bun.write(target, JSON.stringify("x".repeat(100 * 1024)));
+			const settings = Settings.isolated({ "tools.artifactSpillThreshold": 20 });
+			const tool = wrapToolWithMetaNotice(new ReadTool(createTestToolSession(testDir, settings)));
+			const context = { ...createTestToolContext(["read"]), settings };
+			const result = await tool.execute("query", { path: `${target}?q=.&raw=true` }, undefined, undefined, context);
+			expect(result.details?.meta?.truncation).toMatchObject({
+				partialLine: true,
+				outputBytes: 20 * 1024,
+				totalBytes: 100 * 1024,
+			});
+			expect(result.details?.meta?.truncation?.artifactId).toBeUndefined();
+			expect(getTextOutput(result)).toContain("partial, 20.0KB of 100.0KB");
+		});
+
 		it("pages oversized file reads at the spill threshold instead of eliding their middle (#16277)", async () => {
 			const testFile = path.join(testDir, "oversized-read.txt");
 			const row = (n: number) => `row-${String(n).padStart(4, "0")} ${"0123456789".repeat(20)}`;
@@ -2464,7 +2480,7 @@ function b() {
 		it("retains wall time and exit status for slow failed commands", async () => {
 			const result = await bashTool.execute("test-call-walltime-slow", { command: "sleep 1.1; echo wt; exit 7" });
 			expect(getTextOutput(result)).toContain("wt");
-			expect(getTextOutput(result)).toMatch(/Wall time: \d+\.\d{2} seconds/);
+			expect(getTextOutput(result)).toMatch(/\[took \d+\.\d{2}s\]/);
 			expect(result.details?.wallTimeMs).toBeGreaterThanOrEqual(1000);
 			expect(result.details?.exitCode).toBe(7);
 			expect(result.isError).toBe(true);
@@ -2605,7 +2621,7 @@ function b() {
 			const result = await bashTool.execute("test-call-9", { command: "exit 1" });
 			expect(result.isError).toBe(true);
 			expect(result.details?.exitCode).toBe(1);
-			expect(getTextOutput(result)).toContain("Command exited with code 1");
+			expect(getTextOutput(result)).toContain("[exit code 1]");
 		});
 
 		it("should keep short commands inline when auto-background is enabled", async () => {
@@ -2687,10 +2703,8 @@ function b() {
 			expect(result.details?.async?.state).toBe("running");
 			expect(result.details?.async?.type).toBe("bash");
 			// Auto-backgrounded after its foreground wait: the deadline counts the job's whole run, not time left.
-			expect(getTextOutput(result)).toContain("Backgrounded as job");
-			expect(getTextOutput(result)).toContain(
-				"(killed once it has run 3600s in total; `timeout: 0` disables the deadline)",
-			);
+			expect(getTextOutput(result)).toContain("[backgrounded as ");
+			expect(getTextOutput(result)).toContain("killed at 3600s total");
 
 			const jobId = result.details?.async?.jobId;
 			if (!jobId) {
@@ -2754,7 +2768,7 @@ function b() {
 			// The steer backgrounds the command instead of killing it: the call
 			// returns a running job and the command finishes on its own.
 			expect(result.details?.async?.state).toBe("running");
-			expect(getTextOutput(result)).toContain("Backgrounded early to handle an incoming message");
+			expect(getTextOutput(result)).toContain("(incoming message)");
 			const jobId = result.details?.async?.jobId;
 			if (!jobId) {
 				throw new Error("expected a steer-backgrounded job id");
@@ -2792,8 +2806,7 @@ function b() {
 			// backgrounded job hits its timeout in ~0.1s instead of a real
 			// wall-clock second. The auto-background-on-timeout decision path is
 			// unchanged; we assert the timeout-notice prefix rather than the
-			// rounded seconds (it reads "0" here only because the seam
-			// deliberately undercuts the 1s production floor).
+			// seconds (the seam deliberately undercuts the 1s production floor).
 			vi.spyOn(toolTimeouts, "clampTimeout").mockReturnValue(0.05);
 
 			const result = await autoBackgroundBashTool.execute("test-call-9-auto-timeout-background", {
@@ -2803,7 +2816,7 @@ function b() {
 
 			expect(result.details?.timeoutSeconds).toBe(0.05);
 			expect(result.details?.async?.state).toBe("running");
-			expect(getTextOutput(result)).toContain("Backgrounded as job");
+			expect(getTextOutput(result)).toContain("[backgrounded as ");
 			const jobId = result.details?.async?.jobId;
 			if (!jobId) {
 				throw new Error("expected an auto-backgrounded job id");
@@ -2814,7 +2827,7 @@ function b() {
 			await asyncJobManager.drainDeliveries({ timeoutMs: 1 });
 			expect(deliveries).toHaveLength(1);
 			expect(deliveries[0]?.jobId).toBe(jobId);
-			expect(deliveries[0]?.text).toContain("Command timed out after");
+			expect(deliveries[0]?.text).toContain("[timed out after");
 			await asyncJobManager.dispose();
 		});
 
@@ -2823,7 +2836,7 @@ function b() {
 
 			const output = getTextOutput(result);
 			expect(output).toContain("ok");
-			expect(output).toContain("Timeout clamped to 3600s (requested 7200s; allowed range 1-3600s).");
+			expect(output).toContain("[timeout clamped: 7200s → 3600s]");
 			expect(result.details?.timeoutSeconds).toBe(3600);
 			expect(result.details?.requestedTimeoutSeconds).toBe(7200);
 		});

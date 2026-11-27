@@ -644,6 +644,43 @@ export const cfgFindHitThreshold = register({
 	},
 });
 
+/** Bounds for {@link cfgFindTimeoutMs}, in milliseconds. */
+const FIND_TIMEOUT_MIN_MS = 1_000;
+const FIND_TIMEOUT_MAX_MS = 600_000;
+
+/**
+ * Wall-clock budget for one `find` tool call; a stalled judge ends it with the hits verified so far instead
+ * of blocking the turn. A slow or serial judge (one request at a time) needs a longer one. `omp find` is unbounded.
+ */
+export const cfgFindTimeoutMs = register({
+	id: "find.timeoutMs",
+	type: "number",
+	default: 20_000,
+	// The registry reads a non-number config value as the default, so quoted text must fail here.
+	validate: raw => {
+		if (raw === undefined || raw === null) return;
+		if (typeof raw !== "number" || !Number.isInteger(raw) || raw < FIND_TIMEOUT_MIN_MS || raw > FIND_TIMEOUT_MAX_MS) {
+			throw new Error(
+				`Invalid find.timeoutMs: expected an integer from ${FIND_TIMEOUT_MIN_MS} to ${FIND_TIMEOUT_MAX_MS} milliseconds, got ${Bun.inspect(raw)}.`,
+			);
+		}
+	},
+	ui: {
+		tab: "tools",
+		group: "Find",
+		label: "Find Timeout",
+		description:
+			"Wall-clock budget for one find tool call, in milliseconds (1000 to 600000). Raise it for a slow or serial judge; on expiry find returns the hits verified so far",
+		options: [
+			{ value: "20000", label: "20 seconds" },
+			{ value: "60000", label: "1 minute" },
+			{ value: "120000", label: "2 minutes" },
+			{ value: "300000", label: "5 minutes" },
+			{ value: "600000", label: "10 minutes" },
+		],
+	},
+});
+
 // Optional tools
 
 export const cfgDebugEnabled = register({
@@ -847,6 +884,32 @@ export const cfgImagesQuestionTimeoutMs = register({
 			{ value: "120000", label: "2 minutes" },
 			{ value: "180000", label: "3 minutes" },
 			{ value: "300000", label: "5 minutes" },
+		],
+	},
+});
+
+export const cfgImagesQuestionRouting = register({
+	id: "images.questionRouting",
+	type: "enum",
+	values: ["auto", "active"] as const,
+	default: "auto",
+	ui: {
+		tab: "tools",
+		group: "Execution",
+		label: "Image Question Routing",
+		description:
+			"Which model answers read's ?q= image questions. Auto tries the vision role, the default role and the active model, then any available vision model, possibly on another provider. Active only uses the active model and fails if it cannot read images.",
+		options: [
+			{
+				value: "auto",
+				label: "Auto",
+				description: "Vision role, default role, active model, then any vision model.",
+			},
+			{
+				value: "active",
+				label: "Active Model Only",
+				description: "Never send images to another model or provider.",
+			},
 		],
 	},
 });
@@ -1131,6 +1194,58 @@ export const cfgAsyncWidgets = register({
 			"Draw a live widget for each running background job (charts, bars, status grids derived from its output) in the wait card, the jobs pill and the jobs sheet, and caption long shell commands with one line on what they do. The `widget` model role (default: `smol`) writes one spec and at most one caption per job; updates need no further model calls",
 	},
 });
+
+/**
+ * `wait.idleTimeout`: how long a wait on the caller's own background jobs or services blocks with
+ * nothing new before it returns a still-running snapshot. `ladder` uses the wait tool's built-in
+ * windows, a duration one fixed window (milliseconds), `none` no window at all.
+ */
+export type WaitIdleTimeout = "ladder" | "none" | number;
+
+const WAIT_IDLE_DURATION = /^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/;
+const WAIT_IDLE_TIMEOUT_USAGE = "wait.idleTimeout takes ladder, none, or a duration such as 90s, 30m or 1h30m";
+
+/** `ladder`, `none`, or a positive duration such as `90s`, `30m`, `1h30m` (in milliseconds); `undefined` for anything else. */
+function parseWaitIdleTimeout(text: string): WaitIdleTimeout | undefined {
+	const value = text.trim().toLowerCase();
+	if (value === "ladder" || value === "none") return value;
+	const match = WAIT_IDLE_DURATION.exec(value);
+	if (!match) return undefined;
+	const [, hours = "0", minutes = "0", seconds = "0"] = match;
+	const ms = (Number(hours) * 3600 + Number(minutes) * 60 + Number(seconds)) * 1000;
+	return ms > 0 && Number.isSafeInteger(ms) ? ms : undefined;
+}
+
+export const cfgWaitIdleTimeout = register({
+	id: "wait.idleTimeout",
+	type: "string",
+	default: "ladder",
+	validate: raw => {
+		if (raw === undefined || raw === null) return;
+		if (typeof raw !== "string" || parseWaitIdleTimeout(raw) === undefined) {
+			throw new Error(`${WAIT_IDLE_TIMEOUT_USAGE}, got ${Bun.inspect(raw)}`);
+		}
+	},
+	ui: {
+		tab: "tools",
+		group: "Execution",
+		label: "Wait Idle Timeout",
+		description:
+			"How long `wait` blocks on the agent's own background jobs and services with nothing new before it returns a still-running snapshot. Ladder: 5s, then 4m for back-to-back waits. A duration: that one window every time. None: only a finished job or service, a message, steering, or an interrupt ends it. Waits for a reply keep the ladder",
+		options: [
+			{ value: "ladder", label: "Ladder", description: "Default; 5s, then 4m back-to-back" },
+			{ value: "1m", label: "1 minute" },
+			{ value: "5m", label: "5 minutes" },
+			{ value: "15m", label: "15 minutes" },
+			{ value: "30m", label: "30 minutes" },
+			{ value: "1h", label: "1 hour" },
+			{ value: "none", label: "None", description: "Block until a job or service finishes, or a message arrives" },
+		],
+	},
+});
+
+/** {@link cfgWaitIdleTimeout} parsed; `validate` rejects malformed values before they reach it. */
+export const waitIdleTimeout = cfgWaitIdleTimeout.map(value => parseWaitIdleTimeout(value) ?? "ladder");
 
 export const cfgToolsCommands = register({
 	id: "tools.commands",

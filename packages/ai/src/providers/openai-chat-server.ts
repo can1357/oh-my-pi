@@ -325,7 +325,7 @@ function buildAssistantMessage(
  */
 export function adoptReplayedGeminiSignatures(context: Context, model: Model): void {
 	const nativeGemini =
-		model.api === "google-generative-ai" || model.api === "google-vertex" || model.api === "google-gemini-cli";
+		model.api === "google-generative-ai" || model.api === "google-vertex" || model.api === "google-interactions";
 	for (const message of context.messages) {
 		if (message.role !== "assistant") continue;
 		if (!message.content.some(block => block.type === "toolCall" && block.thoughtSignature)) continue;

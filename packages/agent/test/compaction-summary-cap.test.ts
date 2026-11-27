@@ -117,6 +117,46 @@ describe("compaction summary output budget", () => {
 		}
 	});
 
+	test.each([
+		{ setting: 32_768, option: undefined, expected: 32_768 },
+		{ setting: undefined, option: 32_768, expected: 32_768 },
+		{ setting: 32_768, option: 24_576, expected: 24_576 },
+	])(
+		"resolves regular summary budget from setting $setting and option $option",
+		async ({ setting, option, expected }) => {
+			const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(createAssistantMessage("summary"));
+			const preparation: CompactionPreparation = {
+				firstKeptEntryId: "kept",
+				messagesToSummarize: messages,
+				turnPrefixMessages: [{ role: "user", content: "continue", timestamp: 2 }],
+				recentMessages: [{ role: "user", content: "recent", timestamp: 3 }],
+				isSplitTurn: true,
+				tokensBefore: 900_000,
+				fileOps: snapcompact.createFileOps(),
+				settings: {
+					...DEFAULT_COMPACTION_SETTINGS,
+					reserveTokens: 150_000,
+					summaryMaxTokens: setting,
+					remoteEnabled: false,
+				},
+			};
+
+			await compact(preparation, getModel(), "test-key", undefined, undefined, { summaryMaxTokens: option });
+
+			const budgets = spy.mock.calls.map(call => call[2]?.maxTokens).sort((a, b) => (a ?? 0) - (b ?? 0));
+			expect(budgets).toEqual([512, MAX_SUMMARY_TOKENS, expected]);
+		},
+	);
+
+	test("configured summaryMaxTokens is bounded by the model's output limit", async () => {
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(createAssistantMessage("summary"));
+		const model = { ...getModel(), maxTokens: 24_000 };
+		await generateSummary(messages, model, 16_384, "test-key", undefined, undefined, undefined, {
+			summaryMaxTokens: 100_000,
+		});
+		expect(spy.mock.calls[0]?.[2]?.maxTokens).toBe(24_000);
+	});
+
 	test("leaves a reserve smaller than the cap proportional", async () => {
 		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(createAssistantMessage("summary"));
 		await generateSummary(messages, getModel(), 10_000, "test-key");

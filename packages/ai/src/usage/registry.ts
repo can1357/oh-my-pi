@@ -10,8 +10,7 @@ import { cursorRankingStrategy, cursorUsageProvider } from "./cursor";
 import { devinRankingStrategy, devinUsageProvider } from "./devin";
 import { factoryDroidRankingStrategy, factoryDroidUsageProvider } from "./factory-droid";
 import { githubCopilotUsageProvider } from "./github-copilot";
-import { antigravityRankingStrategy, antigravityUsageProvider } from "./google-antigravity";
-import { kimiRankingStrategy, kimiUsageProvider } from "./kimi";
+import { kimiGlobalUsageProvider, kimiRankingStrategy, kimiUsageProvider } from "./kimi";
 import { kiroRankingStrategy, kiroUsageProvider } from "./kiro";
 import { museCodeUsageProvider } from "./muse-code";
 import { minimaxCodeUsageProvider } from "./minimax-code";
@@ -31,9 +30,9 @@ export const DEFAULT_USAGE_PROVIDERS: readonly UsageProvider[] = [
 	alibabaTokenPlanUsageProvider,
 	openaiCodexUsageProvider,
 	kimiUsageProvider,
+	kimiGlobalUsageProvider,
 	minimaxCodeUsageProvider,
 	museCodeUsageProvider,
-	antigravityUsageProvider,
 	ollamaUsageProvider,
 	factoryDroidUsageProvider,
 	ollamaCloudUsageProvider,
@@ -67,9 +66,9 @@ const DEFAULT_RANKING_STRATEGIES = new Map<Provider, CredentialRankingStrategy>(
 	["openai-codex", codexRankingStrategy],
 	["anthropic", claudeRankingStrategy],
 	["cursor", cursorRankingStrategy],
-	["google-antigravity", antigravityRankingStrategy],
 	["factory-droid", factoryDroidRankingStrategy],
 	["kimi-code", kimiRankingStrategy],
+	["kimi-code-global", kimiRankingStrategy],
 	["zai", zaiRankingStrategy],
 	["opencode-go", opencodeGoRankingStrategy],
 	["xai-oauth", xaiOauthRankingStrategy],

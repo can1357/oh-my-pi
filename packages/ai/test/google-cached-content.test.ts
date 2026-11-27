@@ -1,7 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { streamGoogle } from "@oh-my-pi/pi-ai/providers/google";
-import type { GoogleGeminiCliOptions } from "@oh-my-pi/pi-ai/providers/google-gemini-cli";
 import { buildGoogleGenerateContentParams, mapGoogleUsage } from "@oh-my-pi/pi-ai/providers/google-shared";
 import { streamGoogleVertex } from "@oh-my-pi/pi-ai/providers/google-vertex";
 import { parseRequest as parsePiNativeRequest } from "@oh-my-pi/pi-ai/providers/pi-native-server";
@@ -139,12 +138,7 @@ function capturingFetch(response: Response = sseStop()): {
 	return { fetch, calls: () => calls };
 }
 
-// Compile-time: cachedContent is only on GenerateContent / Vertex options, not Gemini CLI /
-// Antigravity (google-gemini-cli) or any other Google transport registration.
-type _GeminiCliLacksCachedContent = "cachedContent" extends keyof GoogleGeminiCliOptions ? never : true;
-true satisfies _GeminiCliLacksCachedContent;
-type _CliApiLacksCachedContent = "cachedContent" extends keyof ApiOptionsMap["google-gemini-cli"] ? never : true;
-true satisfies _CliApiLacksCachedContent;
+// Compile-time: cachedContent is on GenerateContent / Vertex options.
 type _GenerativeAiHasCachedContent = "cachedContent" extends keyof ApiOptionsMap["google-generative-ai"] ? true : never;
 true satisfies _GenerativeAiHasCachedContent;
 type _VertexHasCachedContent = "cachedContent" extends keyof ApiOptionsMap["google-vertex"] ? true : never;
@@ -357,7 +351,7 @@ describe("Google caller-owned cachedContent", () => {
 
 describe("mapGoogleUsage", () => {
 	it("never reports negative input when promptTokenCount is missing or below the cache count", () => {
-		// Antigravity usage seen in the wild: no promptTokenCount and a cache
+		// Usage seen in the wild: no promptTokenCount and a cache
 		// count larger than the prompt implied by the total.
 		const usage = mapGoogleUsage({
 			cachedContentTokenCount: 303_104,

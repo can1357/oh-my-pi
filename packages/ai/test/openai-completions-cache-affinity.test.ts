@@ -1,7 +1,15 @@
 import { describe, expect, it } from "bun:test";
 import { type OpenAICompletionsOptions, streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
-import type { AssistantMessage, Context, FetchImpl, Model, SimpleStreamOptions, Usage } from "@oh-my-pi/pi-ai/types";
+import type {
+	AssistantMessage,
+	Context,
+	FetchImpl,
+	Model,
+	SimpleStreamOptions,
+	ToolResultMessage,
+	Usage,
+} from "@oh-my-pi/pi-ai/types";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
@@ -144,12 +152,92 @@ describe("OpenAI Chat Completions explicit prompt cache policy", () => {
 		expect(body.prompt_cache_options).toEqual({ mode: "explicit", ttl: "30m" });
 		const messages = body.messages;
 		if (!Array.isArray(messages)) throw new Error("Expected Chat Completions messages");
-		expect(messages).toHaveLength(3);
-		expect(messages[0]).toMatchObject({
-			content: [{ type: "text", text: "stable history", prompt_cache_breakpoint: { mode: "explicit" } }],
+		expect(messages).toEqual([
+			{
+				role: "user",
+				content: [{ type: "text", text: "stable history", prompt_cache_breakpoint: { mode: "explicit" } }],
+			},
+			expect.objectContaining({ role: "assistant", content: "previous answer" }),
+			{
+				role: "user",
+				content: [{ type: "text", text: "current prompt", prompt_cache_breakpoint: { mode: "explicit" } }],
+			},
+		]);
+	});
+
+	describe("explicit boundaries in a tool loop", () => {
+		const toolRound = (round: number): [AssistantMessage, ToolResultMessage, ToolResultMessage] => [
+			{
+				role: "assistant",
+				content: [
+					{ type: "toolCall", id: `call_${round}a`, name: "read", arguments: { path: "a" } },
+					{ type: "toolCall", id: `call_${round}b`, name: "read", arguments: { path: "b" } },
+				],
+				api: "openai-completions",
+				provider: "openai",
+				model: "gpt-5.6",
+				usage: emptyUsage,
+				stopReason: "toolUse",
+				timestamp: round,
+			},
+			{
+				role: "toolResult",
+				toolCallId: `call_${round}a`,
+				toolName: "read",
+				content: [{ type: "text", text: `round ${round} a` }],
+				isError: false,
+				timestamp: round,
+			},
+			{
+				role: "toolResult",
+				toolCallId: `call_${round}b`,
+				toolName: "read",
+				content: [{ type: "text", text: `round ${round} b` }],
+				isError: false,
+				timestamp: round,
+			},
+		];
+		const loop = (rounds: number): Context => ({
+			systemPrompt: ["stable instructions"],
+			messages: [
+				{ role: "user", content: "read both files", timestamp: 0 },
+				...Array.from({ length: rounds }, (_, index) => toolRound(index + 1)).flat(),
+			],
 		});
-		expect(messages[1]).toMatchObject({ content: "previous answer" });
-		expect(messages[2]).toMatchObject({ content: "current prompt" });
+		const markedTexts = (messages: unknown) =>
+			[...JSON.stringify(messages).matchAll(/"text":"([^"]*)","prompt_cache_breakpoint"/g)].map(match => match[1]);
+		const send = async (context: Context) => {
+			const { body } = await captureSimpleRequest(
+				{ promptCache: { mode: "explicit" } },
+				openAI56CompletionsModel,
+				context,
+			);
+			if (!Array.isArray(body.messages)) throw new Error("Expected Chat Completions messages");
+			return body.messages;
+		};
+
+		it("marks the instructions, each user message and the end of each tool-result run", async () => {
+			const context = loop(2);
+			context.messages.push({ role: "user", content: "summarize", timestamp: 9 });
+
+			expect(markedTexts(await send(context))).toEqual([
+				"stable instructions",
+				"read both files",
+				"round 1 b",
+				"round 2 b",
+				"summarize",
+			]);
+		});
+
+		// Chat Completions resends the whole history: request N+1 must still mark
+		// every boundary request N wrote, or explicit mode never reads a cached prefix.
+		it("keeps every earlier marker byte-identical as the loop grows", async () => {
+			const first = await send(loop(1));
+			const next = await send(loop(2));
+
+			expect(next.slice(0, first.length)).toEqual(first);
+			expect(markedTexts(next)).toEqual([...markedTexts(first), "round 2 b"]);
+		});
 	});
 
 	it("leaves boundary selection automatic in implicit mode", async () => {
@@ -180,23 +268,14 @@ describe("OpenAI Chat Completions explicit prompt cache policy", () => {
 		expect(result.errorMessage).toContain("12h prompt caching is only available on the Responses API");
 	});
 
-	it("does not synthesize first-turn content or a caller-disabled breakpoint", async () => {
-		const firstTurn: Context = {
-			messages: [{ role: "user", content: "only prompt", timestamp: 0 }],
-		};
-		const first = await captureRequest({ promptCache: { mode: "explicit" } }, openAI56CompletionsModel, firstTurn);
-		const none = await captureRequest(
+	it("places no markers when the caller opts out", async () => {
+		const { body } = await captureRequest(
 			{ promptCache: { mode: "explicit", breakpoint: "none" } },
 			openAI56CompletionsModel,
 			historicalContext,
 		);
 
-		for (const body of [first.body, none.body]) {
-			const messages = body.messages;
-			if (!Array.isArray(messages)) throw new Error("Expected Chat Completions messages");
-			for (const message of messages) {
-				expect(message).not.toMatchObject({ content: [{ prompt_cache_breakpoint: { mode: "explicit" } }] });
-			}
-		}
+		expect(body.prompt_cache_options).toEqual({ mode: "explicit", ttl: "30m" });
+		expect(JSON.stringify(body.messages)).not.toContain("prompt_cache_breakpoint");
 	});
 });

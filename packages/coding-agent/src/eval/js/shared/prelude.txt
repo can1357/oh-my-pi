@@ -94,7 +94,7 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		if (Array.isArray(command) && Array.isArray(command.raw)) {
 			args = { command: templateCommand(command, rest) };
 		} else if (typeof command === "string") {
-			args = { ...optionsArg("sh", rest[0], rest.slice(1), ["cwd", "timeout"], "{ cwd, timeout }"), command };
+			args = { ...optionsArg("sh", rest[0], rest.slice(1), ["timeout"], "{ timeout }"), command };
 		} else {
 			throw new TypeError('sh() expects a command string or a template literal: sh("ls -la") or sh`ls ${dir}`');
 		}

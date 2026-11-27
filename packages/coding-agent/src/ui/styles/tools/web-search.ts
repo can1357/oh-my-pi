@@ -15,7 +15,7 @@ import { pluralize } from "@oh-my-pi/pi-utils";
 import { PREVIEW_LIMITS } from "../../../utils/render-utils";
 import type { WebSearchTerm, WebSearchTermSource } from "../../tools/web-search";
 import { webLink } from "./file-common";
-import { expandHint, type FrameSection, frameInner, frameRows } from "./frame";
+import { expandHint, type FrameSection, frameInner, frameRows, hangingWrap } from "./frame";
 import { defineToolLook, toolProps } from "./look";
 
 /** Query characters a pending call shows. */
@@ -88,7 +88,12 @@ function paintLines(cx: PaintContext, lines: readonly string[], expanded: boolea
 	if (hidden > 0) head += expandHint(theme);
 	const rows = wrap(head, cx.width);
 	const item = (last: boolean, text: string) =>
-		wrap(` ${theme.fg("dim", theme.symbols.symbol(last ? "tree.last" : "tree.branch"))} ${text}`, cx.width);
+		hangingWrap(
+			` ${theme.fg("dim", theme.symbols.symbol(last ? "tree.last" : "tree.branch"))} `,
+			last ? "    " : ` ${theme.fg("dim", theme.symbols.symbol("tree.vertical"))}  `,
+			text,
+			cx.width,
+		);
 	if (lines.length === 0)
 		return {
 			rows: [...rows, ...item(true, theme.fg("muted", "No response data"))],
