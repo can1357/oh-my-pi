@@ -24,7 +24,7 @@ import { getLogsDir, localDay } from "./dirs";
 import { RotatingFileSink } from "./logger/rotating-file";
 import { isPidAlive } from "./pid";
 import { setStderrRedirectTarget } from "./stderr-guard";
-import { drainModuleLoadEvents } from "./timing-buffer";
+import { drainModuleLoadEvents, type ModuleLoadEvent, stopModuleLoadTiming, timingModeIncludes } from "./timing-buffer";
 import { isRecord } from "./type-guards";
 /** Severity names accepted by the centralized logger. */
 export type LogLevel = "error" | "warn" | "info" | "debug";
@@ -649,31 +649,12 @@ interface Span {
 	children: Span[];
 	/** Marker / point event without a duration. */
 	point?: boolean;
-	/** Absolute module path for module-load spans. */
-	modulePath?: string;
-	/** Own top-level module body / TLA duration for module-load spans. */
-	moduleBodyMs?: number;
-	/** Resolved static imports for module-load spans. */
-	moduleImports?: string[];
 }
 const spanStorage = new AsyncLocalStorage<Span>();
 let gRootSpan: Span | undefined;
 let gRecordTimings = false;
 
-export function timingModeIncludes(option: "full" | "x"): boolean {
-	const value = process.env.PI_TIMING;
-	if (!value) return false;
-	if (value === option) return true;
-	let start = 0;
-	for (let i = 0; i <= value.length; i++) {
-		const code = i === value.length ? 44 : value.charCodeAt(i);
-		const separator = code === 44 || code === 58 || code === 59 || code === 43 || code <= 32;
-		if (!separator) continue;
-		if (i > start && value.slice(start, i) === option) return true;
-		start = i + 1;
-	}
-	return false;
-}
+let observedModules: ModuleLoadEvent[] = [];
 
 export function shouldExitAfterTimings(): boolean {
 	return timingModeIncludes("x") || timingModeIncludes("full");
@@ -681,56 +662,38 @@ export function shouldExitAfterTimings(): boolean {
 
 /**
  * Print collected timings as an indented tree.
- * Each span shows wall duration; parents with children also show "(self)" for unattributed time.
- * Sibling spans are sorted by start time. Spans whose intervals overlap with siblings ran in parallel.
+ * All offsets and the total use Bun's monotonic process clock. Overlap means overlapping
+ * wall intervals, not concurrent CPU work. Open spans are measured up to the snapshot.
  */
-export function printTimings(): void {
-	if (!gRecordTimings || !gRootSpan) {
+export function printTimings(endpoint = "report snapshot"): void {
+	const snapshot = performance.now();
+	const root = gRootSpan;
+	if (!root) {
 		console.error("\n--- Startup Timings ---\n(no markers)\n");
 		return;
 	}
 
-	gRootSpan.end = performance.now();
-	// Splice any preload-captured module-load events into the tree as root
-	// children and back-extend the root window over them, so the static-import
-	// phase that ran before the first explicit marker becomes visible (the
-	// `(modules)` summary below) instead of being lumped into the opaque
-	// `(before instrumentation)` figure.
-	spliceModuleLoadBuffer();
-	const lines: string[] = [];
-	lines.push("");
-	lines.push("--- Startup timings (hierarchical) ---");
-	// performance.now() shares the process-start origin, so the root span's start
-	// is the wall time before the first marker — runtime init plus any module
-	// loads not captured below. With the module-load preload active this shrinks
-	// to ~runtime init because the load phase is back-folded into the window.
-	if (gRootSpan.start > LOGGED_TIMING_THRESHOLD_MS) {
-		lines.push(`(before instrumentation): ${fmtMs(gRootSpan.start)} [runtime init + module load]`);
-	}
-	const work: Span[] = [];
-	const loads: Span[] = [];
-	for (const child of gRootSpan.children) {
-		if (isModuleLoadSpan(child)) loads.push(child);
-		else work.push(child);
-	}
-	for (const child of work.sort((a, b) => a.start - b.start)) {
-		printSpan(child, 0, lines);
-	}
-	if (loads.length > 0) {
-		printModuleLoadSummary(loads, 0, lines);
-	}
-	// Surface the root's own unattributed time so the gap between the visible
-	// top-level spans and Total isn't silently swallowed.
-	const rootSelf = selfTimeOf(gRootSpan);
-	if (gRootSpan.children.length > 0 && rootSelf > LOGGED_TIMING_THRESHOLD_MS) {
-		lines.push(`(unattributed self): ${fmtMs(rootSelf)}`);
-	}
-	const totalMs = (gRootSpan.end - gRootSpan.start).toFixed(1);
-	lines.push(`Total: ${totalMs}ms (since first marker)`);
-	lines.push("--------------------------------------");
-	lines.push("");
+	const lines = [
+		"",
+		"--- Startup timings (wall clock; overlapping rows are not additive) ---",
+		`Before app timing: ${fmtMs(root.start)} (not attributed)`,
+	];
+	for (const child of root.children) printSpan(child, snapshot, 0, lines);
+
+	const window = snapshot - root.start;
+	const covered = descendantCoverage(root, snapshot);
+	lines.push(`App timing window: ${fmtMs(window)} (${fmtMs(covered)} in spans; ${fmtMs(window - covered)} unmarked)`);
+	const events = drainModuleLoadEvents();
+	for (const event of events) observedModules.push(event);
+	if (observedModules.length > 0) printModuleTimings(observedModules, lines);
+	else if (timingModeIncludes("modules") || timingModeIncludes("full"))
+		lines.push("Modules: no completed instrumented TS/TSX modules observed");
+	lines.push(
+		`Total: ${snapshot.toFixed(1)}ms (Bun process clock → ${endpoint})`,
+		"--------------------------------------",
+		"",
+	);
 	console.error(lines.join("\n"));
-	gRootSpan.end = undefined;
 }
 
 /**
@@ -749,52 +712,6 @@ export function startTiming(): void {
 	gRecordTimings = true;
 }
 
-/**
- * Record an externally-measured span as a leaf child of the active span (or root
- * when no span is active). Used by {@link spliceModuleLoadBuffer} to fold
- * preload-captured module windows into the tree.
- */
-export function recordModuleLoadSpan(
-	path: string,
-	start: number,
-	durationMs: number,
-	bodyMs?: number,
-	imports: string[] = [],
-): void {
-	if (!gRecordTimings || !gRootSpan) return;
-	const parent = spanStorage.getStore() ?? gRootSpan;
-	const span: Span = {
-		op: `load:${shortenLoadPath(path)}`,
-		start,
-		end: start + durationMs,
-		parent,
-		children: [],
-		modulePath: path,
-		moduleBodyMs: bodyMs,
-		moduleImports: imports,
-	};
-	parent.children.push(span);
-}
-
-/**
- * Drain the preload's module-load buffer (see module-timer.ts) into the tree as
- * `load:` children of the root, then back-extend the root window to the earliest
- * captured read so the pre-marker load phase is counted in Total rather than
- * hidden as `(before instrumentation)`. No-op when nothing was captured (e.g. no
- * `--preload`, or a compiled binary where module reads are not interceptable).
- */
-function spliceModuleLoadBuffer(): void {
-	if (!gRootSpan) return;
-	const events = drainModuleLoadEvents();
-	if (events.length === 0) return;
-	let earliest = gRootSpan.start;
-	for (const event of events) {
-		recordModuleLoadSpan(event.path, event.start, event.durationMs, event.bodyMs, event.imports);
-		if (event.start < earliest) earliest = event.start;
-	}
-	gRootSpan.start = earliest;
-}
-
 function shortenLoadPath(p: string): string {
 	const cwd = process.cwd();
 	if (p.startsWith(`${cwd}/`)) return p.slice(cwd.length + 1);
@@ -809,6 +726,8 @@ function shortenLoadPath(p: string): string {
 export function endTiming(): void {
 	gRootSpan = undefined;
 	gRecordTimings = false;
+	observedModules = [];
+	stopModuleLoadTiming();
 }
 
 /**
@@ -834,35 +753,38 @@ export function openSpanPath(): string[] {
 	return ops;
 }
 
-function durationOf(span: Span): number {
-	if (span.point || span.end === undefined) return 0;
-	return span.end - span.start;
+interface Interval {
+	start: number;
+	end: number;
 }
 
-/** Self time = total - union of child intervals (handles parallel children correctly). */
-function selfTimeOf(span: Span): number {
-	const dur = durationOf(span);
-	if (span.children.length === 0 || span.point) return dur;
-	const intervals = span.children
-		.filter(c => !c.point && c.end !== undefined)
-		.map(c => [c.start, c.end as number] as const)
-		.sort((a, b) => a[0] - b[0]);
-	if (intervals.length === 0) return dur;
-	let union = 0;
-	let curStart = intervals[0][0];
-	let curEnd = intervals[0][1];
-	for (let i = 1; i < intervals.length; i++) {
-		const [s, e] = intervals[i];
-		if (s > curEnd) {
-			union += curEnd - curStart;
-			curStart = s;
-			curEnd = e;
-		} else if (e > curEnd) {
-			curEnd = e;
-		}
+/** Wall time covered at least once; gaps between intervals do not count. */
+function coveredWall(intervals: Interval[]): number {
+	intervals.sort((a, b) => a.start - b.start);
+	let covered = 0;
+	let until = -Infinity;
+	for (const { start, end } of intervals) {
+		if (end <= start || end <= until) continue;
+		covered += end - Math.max(start, until);
+		until = end;
 	}
-	union += curEnd - curStart;
-	return Math.max(0, dur - union);
+	return covered;
+}
+
+function descendantCoverage(span: Span, snapshot: number): number {
+	const intervals: Interval[] = [];
+	const end = span.end ?? snapshot;
+	// Detached tasks can outlive their enclosing span. Count their tails in the root
+	// window, but never charge a parent for a descendant outside the parent's lifetime.
+	const collect = (children: readonly Span[]): void => {
+		for (const child of children) {
+			if (child.point || child.start >= end) continue;
+			intervals.push({ start: Math.max(span.start, child.start), end: Math.min(end, child.end ?? snapshot) });
+			if (child.children.length) collect(child.children);
+		}
+	};
+	collect(span.children);
+	return coveredWall(intervals);
 }
 
 function fmtMs(ms: number): string {
@@ -871,178 +793,57 @@ function fmtMs(ms: number): string {
 	return `${ms.toFixed(0)}ms`;
 }
 
-const MODULE_LOAD_PREFIX = "load:";
-const MODULE_LOAD_VERBOSE_TOP = 10;
-const MODULE_TREE_MAX_DEPTH = 5;
-const MODULE_TREE_ROOT_TOP = 5;
-const MODULE_TREE_CHILD_TOP = 8;
-
-interface ModuleTimingNode {
-	span: Span;
-	children: ModuleTimingNode[];
-	parents: number;
-	body: number;
-}
-
-function isModuleLoadSpan(span: Span): boolean {
-	return span.op.startsWith(MODULE_LOAD_PREFIX);
-}
-
-function printSpan(span: Span, depth: number, lines: string[]): void {
+function printSpan(span: Span, snapshot: number, depth: number, lines: string[]): void {
 	const indent = "  ".repeat(depth);
 	if (span.point) {
-		lines.push(`${indent}• ${span.op}`);
+		lines.push(`${indent}• ${span.op} @${fmtMs(span.start)}`);
 		return;
 	}
-	const dur = durationOf(span);
-	if (dur < LOGGED_TIMING_THRESHOLD_MS && span.children.length === 0) return;
-	const parallel = isParallel(span);
-	const tag = parallel ? " [parallel]" : "";
-	const self = selfTimeOf(span);
-	const selfStr = span.children.length > 0 && self > LOGGED_TIMING_THRESHOLD_MS ? ` (self ${fmtMs(self)})` : "";
-	// Start offset from process origin: gaps between consecutive siblings are
-	// the parent's own (unspanned) work, which duration alone cannot locate.
-	lines.push(`${indent}${span.op}: ${fmtMs(dur)}${selfStr}${tag} @${span.start.toFixed(0)}ms`);
-
-	// Split children into work spans and module-load spans for summarization.
-	const work: Span[] = [];
-	const loads: Span[] = [];
-	for (const child of span.children) {
-		if (isModuleLoadSpan(child)) loads.push(child);
-		else work.push(child);
-	}
-	for (const child of work.sort((a, b) => a.start - b.start)) {
-		printSpan(child, depth + 1, lines);
-	}
-	if (loads.length > 0) {
-		printModuleLoadSummary(loads, depth + 1, lines);
-	}
+	const duration = (span.end ?? snapshot) - span.start;
+	if (duration < LOGGED_TIMING_THRESHOLD_MS && span.end !== undefined && span.children.length === 0) return;
+	const unmarked = span.children.length
+		? ` (${fmtMs(duration - descendantCoverage(span, snapshot))} outside child spans)`
+		: "";
+	const overlap = isParallel(span, snapshot) ? " [overlaps sibling]" : "";
+	const open = span.end === undefined ? " [open at snapshot]" : "";
+	lines.push(`${indent}${span.op}: ${fmtMs(duration)}${unmarked}${overlap}${open} @${fmtMs(span.start)}`);
+	for (const child of span.children) printSpan(child, snapshot, depth + 1, lines);
 }
 
-/** Render module-load spans as a dependency-aware DAG/tree. */
-function printModuleLoadSummary(loads: Span[], depth: number, lines: string[]): void {
-	const childIndent = "  ".repeat(depth);
-	const grandIndent = "  ".repeat(depth + 1);
-	let unionStart = Number.POSITIVE_INFINITY;
-	let unionEnd = 0;
-	for (const span of loads) {
-		if (span.end === undefined) continue;
-		if (span.start < unionStart) unionStart = span.start;
-		if (span.end > unionEnd) unionEnd = span.end;
-	}
-	const wall = unionEnd > unionStart ? unionEnd - unionStart : 0;
-	const nodes = buildModuleTimingGraph(loads);
-	lines.push(`${childIndent}(modules): ${loads.length} loaded, wall ${fmtMs(wall)}`);
-	if (nodes.length === 0) return;
+const MODULE_TOP = 10;
 
-	const showAll = timingModeIncludes("full");
-	const byBody = [...nodes].sort(compareModuleNodes);
-	const topBody = showAll ? byBody : byBody.slice(0, MODULE_LOAD_VERBOSE_TOP);
-	lines.push(`${grandIndent}top body/TLA:`);
-	for (const node of topBody) {
-		if (!showAll && node.body < LOGGED_TIMING_THRESHOLD_MS) break;
-		lines.push(`${grandIndent}  ${node.span.op}: body ${fmtMs(node.body)} (total ${fmtMs(durationOf(node.span))})`);
-	}
-	if (!showAll && byBody.length > MODULE_LOAD_VERBOSE_TOP) {
-		lines.push(`${grandIndent}  … ${byBody.length - MODULE_LOAD_VERBOSE_TOP} more (PI_TIMING=full to show all)`);
-	}
-
-	const roots = nodes.filter(node => node.parents === 0);
-	const treeRoots = (roots.length > 0 ? roots : nodes).sort((a, b) => durationOf(b.span) - durationOf(a.span));
-	const visibleRoots = showAll ? treeRoots : treeRoots.slice(0, MODULE_TREE_ROOT_TOP);
-	lines.push(`${grandIndent}tree:`);
-	const rendered = new Set<string>();
-	for (const node of visibleRoots) {
-		renderModuleTimingNode(node, depth + 2, lines, rendered, new Set<string>(), showAll);
-	}
-	if (!showAll && treeRoots.length > MODULE_TREE_ROOT_TOP) {
+/** Observed read and evaluation intervals, not dependency waits or an attribution of startup CPU. */
+function printModuleTimings(events: readonly ModuleLoadEvent[], lines: string[]): void {
+	const reads = coveredWall(events.map(event => ({ start: event.readStart, end: event.readEnd })));
+	const bodies = coveredWall(events.map(event => ({ start: event.bodyStart, end: event.bodyEnd })));
+	lines.push(
+		`Modules (instrumented; ${events.length} completed TS/TSX evaluations):`,
+		`  Source reads: ${fmtMs(reads)} covered; evaluation including top-level await: ${fmtMs(bodies)} covered.`,
+		"  Separate wall intervals; may overlap app spans and each other. Linking and dependency waits are not measured.",
+	);
+	const ranked = [...events].sort((a, b) => b.bodyEnd - b.bodyStart - (a.bodyEnd - a.bodyStart));
+	const limit = timingModeIncludes("full") ? ranked.length : Math.min(MODULE_TOP, ranked.length);
+	for (let i = 0; i < limit; i++) {
+		const event = ranked[i];
 		lines.push(
-			`${grandIndent}  … ${treeRoots.length - MODULE_TREE_ROOT_TOP} more roots (PI_TIMING=full to show all)`,
+			`  ${shortenLoadPath(event.path)}: eval ${fmtMs(event.bodyEnd - event.bodyStart)}, read ${fmtMs(event.readEnd - event.readStart)}`,
 		);
 	}
+	if (limit < ranked.length) lines.push(`  … ${ranked.length - limit} more (PI_TIMING=full to show all)`);
 }
 
-function buildModuleTimingGraph(loads: Span[]): ModuleTimingNode[] {
-	const nodes = new Map<string, ModuleTimingNode>();
-	for (const span of loads) {
-		if (!span.modulePath || span.end === undefined) continue;
-		nodes.set(span.modulePath, { span, children: [], parents: 0, body: span.moduleBodyMs ?? 0 });
-	}
-	for (const node of nodes.values()) {
-		for (const childPath of node.span.moduleImports ?? []) {
-			const child = nodes.get(childPath);
-			if (!child || child === node) continue;
-			node.children.push(child);
-			child.parents++;
-		}
-	}
-	for (const node of nodes.values()) {
-		node.children.sort(compareModuleNodes);
-	}
-	return [...nodes.values()];
-}
-
-function compareModuleNodes(a: ModuleTimingNode, b: ModuleTimingNode): number {
-	const bodyDiff = b.body - a.body;
-	if (Math.abs(bodyDiff) > 0.001) return bodyDiff;
-	return durationOf(b.span) - durationOf(a.span);
-}
-
-function renderModuleTimingNode(
-	node: ModuleTimingNode,
-	depth: number,
-	lines: string[],
-	rendered: Set<string>,
-	ancestors: Set<string>,
-	showAll: boolean,
-): void {
-	const path = node.span.modulePath;
-	if (!path) return;
-	const indent = "  ".repeat(depth);
-	const total = durationOf(node.span);
-	if (!showAll && total < LOGGED_TIMING_THRESHOLD_MS && node.children.length === 0) return;
-	const wait = Math.max(0, total - node.body);
-	const shared = node.parents > 1 ? " [shared]" : "";
-	const timing =
-		node.body > LOGGED_TIMING_THRESHOLD_MS || node.children.length > 0
-			? ` (body ${fmtMs(node.body)}, wait ${fmtMs(wait)})`
-			: "";
-	const alreadyRendered = rendered.has(path);
-	const cycle = ancestors.has(path);
-	const suffix = cycle ? " [cycle]" : alreadyRendered ? " [already shown]" : "";
-	lines.push(`${indent}${node.span.op}: ${fmtMs(total)}${timing}${shared}${suffix}`);
-	if (cycle || alreadyRendered) return;
-	rendered.add(path);
-	ancestors.add(path);
-	if (!showAll && ancestors.size >= MODULE_TREE_MAX_DEPTH) {
-		if (node.children.length > 0) {
-			lines.push(`${indent}  … ${node.children.length} imports deeper (PI_TIMING=full to show all)`);
-		}
-		ancestors.delete(path);
-		return;
-	}
-	const visibleChildren = showAll ? node.children : node.children.slice(0, MODULE_TREE_CHILD_TOP);
-	for (const child of visibleChildren) {
-		renderModuleTimingNode(child, depth + 1, lines, rendered, ancestors, showAll);
-	}
-	if (!showAll && node.children.length > MODULE_TREE_CHILD_TOP) {
-		lines.push(
-			`${indent}  … ${node.children.length - MODULE_TREE_CHILD_TOP} more imports (PI_TIMING=full to show all)`,
-		);
-	}
-	ancestors.delete(path);
-}
-
-/** A span is parallel if it overlaps a sibling that started before it. */
-function isParallel(span: Span): boolean {
-	const parent = span.parent;
-	if (!parent || span.end === undefined) return false;
-	for (const sibling of parent.children) {
-		if (sibling === span || sibling.end === undefined || sibling.point) continue;
-		// Overlap test: A overlaps B iff A.start < B.end && B.start < A.end
-		if (sibling.start < span.end && span.start < sibling.end) return true;
-	}
-	return false;
+/** Only other application spans at the same level can mark this row as overlapping. */
+function isParallel(span: Span, snapshot: number): boolean {
+	const end = span.end ?? snapshot;
+	if (!span.parent || span.start >= end) return false;
+	return span.parent.children.some(
+		sibling =>
+			sibling !== span &&
+			!sibling.point &&
+			sibling.start < (sibling.end ?? snapshot) &&
+			sibling.start < end &&
+			span.start < (sibling.end ?? snapshot),
+	);
 }
 
 /**

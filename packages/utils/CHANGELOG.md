@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- Startup timings now show elapsed wall time from Bun’s process clock, distinguish overlapping and unfinished spans, and report optional module reads and evaluations separately instead of attributing loader gaps to modules.
 - Fixed 429 retry guidance to honor quota reset timestamps in `rests until <ISO-8601>` responses.
 - Fixed `parseImageMetadata` failing to report dimensions for short lossless WebP (VP8L) headers.
 - Fixed requests using `NODE_EXTRA_CA_CERTS` (including remote MCP HTTP/SSE) dropping system CAs added by `NODE_USE_SYSTEM_CA=1`; the extra bundle now extends the runtime default trust store ([#18556](https://github.com/can1357/oh-my-pi/issues/18556))

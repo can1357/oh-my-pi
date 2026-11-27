@@ -3117,7 +3117,7 @@ export async function runRootCommand(
 				}
 
 				if ($env.PI_TIMING) {
-					logger.printTimings();
+					logger.printTimings("interactive handoff, before TUI");
 					if (logger.shouldExitAfterTimings()) {
 						process.exit(0);
 					}
@@ -3175,7 +3175,7 @@ export async function runRootCommand(
 					deadline: sessionOptions.deadline,
 				});
 				if ($env.PI_TIMING) {
-					logger.printTimings();
+					logger.printTimings("print batch complete, including prompts");
 				}
 				await disposeSessionQuietly(session);
 				stopThemeWatcher();
