@@ -11,6 +11,13 @@ const TMUX = "\x1bPtmux;";
 const ST = "\x1b\\";
 const DIRECT_KITTY = /\x1b_Ga=p,q=2,C=1,i=(\d+),p=(\d+),/;
 const DRAW = /\x1b(?:_Ga=[pT],|\]1337;File=|P(?:[\d;]*q|tmux;|\x1b(?:_G|\]1337;)))/;
+const DRAWS = new RegExp(DRAW.source, "g");
+const ANCHORS = new RegExp(ANCHOR.source, "g");
+/** What opens a saved drawing, right before it: the cursor save, and the move up of an anchored one. */
+const SAVED = /\x1b7(?:\x1b\[(\d+)A)?$/;
+/** `anchoredCellRows`' step back over the blank cells a drawing covers. */
+const STEP_BACK = /\x1b\[(\d+)D$/;
+const CHA = /\x1b\[(\d+)G$/;
 
 interface Anchored {
 	readonly row: number;
@@ -111,20 +118,26 @@ export function alternatePlacement(row: string, y: number): { row: string; delet
 	};
 }
 
+/** Rows above `row` its farthest-reaching anchored image draws into; -1 without one. */
+function reach(row: string): number {
+	let most = -1;
+	if (row.includes("\x1b7")) for (const anchor of row.matchAll(ANCHORS)) most = Math.max(most, Number(anchor[1]));
+	return most;
+}
+
 /** Dirty cells which row-string equality misses: an iTerm/SIXEL anchor draws into the rows above it. */
 export function rasterDamage(previous: readonly string[], next: readonly string[]): Uint8Array | undefined {
 	let damage: Uint8Array | undefined;
 	for (let y = 0; y < next.length; y++) {
 		const old = previous[y];
 		if (!old || old === next[y]) continue;
-		const match = ANCHOR.exec(old);
-		if (match) (damage ??= new Uint8Array(next.length)).fill(1, Math.max(0, y - Number(match[1])), y + 1);
+		const above = reach(old);
+		if (above >= 0) (damage ??= new Uint8Array(next.length)).fill(1, Math.max(0, y - above), y + 1);
 	}
 	for (let y = 0; y < next.length; y++) {
 		if (previous[y] !== next[y]) continue; // Already repainting this anchor.
-		const match = ANCHOR.exec(next[y]!);
-		if (!match) continue;
-		for (let r = Math.max(0, y - Number(match[1])); r < y; r++) {
+		const above = reach(next[y]!);
+		for (let r = Math.max(0, y - above); r < y; r++) {
 			if (previous[r] === next[r] && !damage?.[r]) continue;
 			(damage ??= new Uint8Array(next.length))[y] = 1;
 			break;
@@ -135,43 +148,66 @@ export function rasterDamage(previous: readonly string[], next: readonly string[
 
 interface Drawing {
 	readonly bytes: string;
-	readonly without: string;
 	readonly x: number;
 	readonly above: number;
+	/** Cells it covers, when it is drawn over blank cells (`anchoredCellRows`). */
+	readonly columns?: number;
 }
 
-/** Isolate the one non-cell image drawing on a row, leaving its surrounding chrome in place. */
-function drawing(row: string): Drawing | undefined {
+/**
+ * The non-cell image drawings on a row, and the row without them, their surrounding chrome left in
+ * place. The blank cells under an `anchoredCellRows` drawing stay; its step back and forth goes.
+ */
+function drawings(row: string): { readonly images: Drawing[]; readonly without: string } | undefined {
 	if (!row.includes("\x1b")) return undefined;
-	const draw = DRAW.exec(row);
-	if (!draw) return undefined;
-	const anchor = ANCHOR.exec(row);
-	const start = anchor?.index ?? draw.index;
-	const prefix = row.slice(0, start);
-	const cha = /\x1b\[(\d+)G$/.exec(prefix);
-	let end = anchor ? row.indexOf("\x1b8", draw.index) + 2 : draw.index + escapeLength(row, draw.index);
-	// GNU screen splits its DCS passthrough into chunks, including inner STs. The whole image is indivisible.
-	if (!anchor && row.startsWith("\x1bP\x1b", draw.index)) end = row.lastIndexOf(ST) + ST.length;
-	if (end <= draw.index) return undefined;
-	return {
-		bytes: row.slice(start, end),
-		without: (cha ? prefix.slice(0, cha.index) : prefix) + row.slice(end),
-		x: cha ? Number(cha[1]) - 1 : visibleWidth(prefix),
-		above: Number(anchor?.[1] ?? 0),
-	};
+	const images: Drawing[] = [];
+	let without = "";
+	let at = 0;
+	DRAWS.lastIndex = 0;
+	for (let draw = DRAWS.exec(row); draw; draw = DRAWS.exec(row)) {
+		const head = row.slice(at, draw.index);
+		const saved = SAVED.exec(head);
+		let prefix = saved ? head.slice(0, saved.index) : head;
+		let end = saved ? row.indexOf("\x1b8", draw.index) + 2 : draw.index + escapeLength(row, draw.index);
+		// GNU screen splits its DCS passthrough into chunks, including inner STs. The whole image is indivisible.
+		if (!saved && row.startsWith("\x1bP\x1b", draw.index)) end = row.lastIndexOf(ST) + ST.length;
+		if (end <= draw.index) break;
+		const bytes = row.slice(at + prefix.length, end);
+		const back = saved ? STEP_BACK.exec(prefix) : null;
+		const cha = back ? null : CHA.exec(prefix);
+		let x: number;
+		let columns: number | undefined;
+		if (back && row.startsWith(`\x1b[${back[1]}C`, end)) {
+			prefix = prefix.slice(0, back.index);
+			columns = Number(back[1]);
+			x = visibleWidth(without + prefix) - columns;
+			end += back[0].length;
+		} else if (cha) {
+			prefix = prefix.slice(0, cha.index);
+			x = Number(cha[1]) - 1;
+		} else {
+			x = visibleWidth(without + prefix);
+		}
+		without += prefix;
+		images.push({ bytes, x, above: Number(saved?.[1] ?? 0), ...(columns === undefined ? {} : { columns }) });
+		at = end;
+		DRAWS.lastIndex = end;
+	}
+	return images.length === 0 ? undefined : { images, without: without + row.slice(at) };
 }
 
-/** Add the scrollbar to a row without padding over the picture's pixels after drawing it. */
+/** Add the scrollbar to a row without padding over the pictures' pixels after drawing them. */
 export function withImageGutter(row: string, width: number, mark: string): string {
-	const image = drawing(row);
-	if (!image) return padTo(row, width) + mark;
-	return padTo(image.without, width) + mark + column(image.x) + image.bytes;
+	const found = drawings(row);
+	if (!found) return padTo(row, width) + mark;
+	return padTo(found.without, width) + mark + found.images.map(image => column(image.x) + image.bytes).join("");
 }
 
 /**
  * Remove graphics under a sheet before text composition: slicing a control string as text can leak
  * its payload, or leave a last-row anchor drawing upward through the sheet. A placement next to (not
  * under) it is drawn after the text at its original column so trailing padding cannot erase it.
+ * A row may carry several (thumbnails side by side): each is judged on its own.
  */
 export function maskOverlayImages(
 	rows: string[],
@@ -183,15 +219,28 @@ export function maskOverlayImages(
 ): (() => void) | undefined {
 	let kept: { row: number; bytes: string }[] | undefined;
 	for (let y = top; y < rows.length; ++y) {
-		const image = drawing(rows[y]!);
-		if (!image || y - image.above >= top + height) continue;
-		const cells = /(?:,c=|;width=)(\d+)/.exec(image.bytes);
-		const raster = cells ? null : /q"1;1;(\d+);/.exec(image.bytes);
-		const w = cells ? Number(cells[1]) : raster ? Math.ceil(Number(raster[1]) / cellWidth) : Infinity;
-		const covered = left < image.x + w && image.x < left + width;
-		if (!covered && y >= top + height) continue;
-		rows[y] = image.without;
-		if (!covered) (kept ??= []).push({ row: y, bytes: column(image.x) + image.bytes });
+		const found = drawings(rows[y]!);
+		if (!found) continue;
+		let strip = false;
+		let keep = "";
+		for (const image of found.images) {
+			const placed = column(image.x) + image.bytes;
+			if (y - image.above >= top + height) {
+				keep += placed;
+				continue;
+			}
+			const cells = /(?:,c=|;width=)(\d+)/.exec(image.bytes);
+			const raster = cells ? null : /q"1;1;(\d+);/.exec(image.bytes);
+			const w =
+				image.columns ??
+				(cells ? Number(cells[1]) : raster ? Math.ceil(Number(raster[1]) / cellWidth) : Number.POSITIVE_INFINITY);
+			const covered = left < image.x + w && image.x < left + width;
+			if (covered || y < top + height) strip = true;
+			if (!covered) keep += placed;
+		}
+		if (!strip) continue;
+		rows[y] = found.without;
+		if (keep) (kept ??= []).push({ row: y, bytes: keep });
 	}
 	if (kept)
 		return () => {

@@ -34,7 +34,7 @@ import type { TerminalCapabilities } from "../contract";
 import type { Screen } from "../output/writer";
 import { type Accessor, batch, getOwner, onCleanup, type Signal, signal } from "../../reactive";
 import { truncate, visibleWidth } from "../../text/width";
-import { anchoredRows, RESERVED_ROW, reservedRows } from "./anchor";
+import { anchoredCellRows, anchoredRows, RESERVED_ROW, reservedRows } from "./anchor";
 import { DEFAULT_CELL, fitImage, type ImageBounds, type ImageBox } from "./fit";
 import { itermImage } from "./iterm";
 import {
@@ -70,15 +70,13 @@ export interface ImageRequest extends ImageBounds {
 	/** Fallback label (already styled), cut to `maxColumns`. */
 	readonly fallback: string;
 	/**
-	 * Draw only as cells of text (kitty Unicode placeholders), which other text may share a row
-	 * with (a thumbnail inside a border). A terminal that draws images any other way gets the
-	 * one-row fallback, and the image is neither held nor transmitted.
+	 * Draw only as cells of text, which other text may share a row with (a thumbnail inside a
+	 * border): kitty Unicode placeholders, or with `anchored` also SIXEL/iTerm2 drawn over blank
+	 * cells (see `anchoredCellRows`). A terminal that draws images any other way gets the one-row
+	 * fallback, and the image is neither held nor transmitted.
 	 */
 	readonly cells?: boolean;
-	/**
-	 * With `cells`: also accept a SIXEL/iTerm2 sequence anchored on the image's last row (see
-	 * `anchor.ts`), for a caller that steps over the image's cells instead of writing over them.
-	 */
+	/** With `cells`: also accept SIXEL/iTerm2, drawn from a sequence over blank cells. */
 	readonly anchored?: boolean;
 }
 
@@ -220,8 +218,12 @@ export class TerminalImages {
 			}
 		}
 		const placeholders = protocol === "kitty" && this.#placeholders() && kittyPlaceholdersFit(box.columns, box.rows);
-		// Placements and SIXEL/iTerm2 sequences address the screen: nothing else can share their rows.
-		const anchored = request.anchored === true && (protocol === "sixel" || protocol === "iterm");
+		// Placements, and SIXEL/iTerm2 sequences outside the `anchored` cell form, address the screen:
+		// nothing else can share their rows.
+		const anchored =
+			request.cells === true && request.anchored === true && (protocol === "sixel" || protocol === "iterm");
+		const drawn = (sequence: string): string[] =>
+			anchored ? anchoredCellRows(sequence, box.columns, box.rows) : anchoredRows(sequence, box.rows);
 		if (request.cells && !placeholders && !anchored)
 			return { rows: [label], columns: visibleWidth(label), state: "fallback" };
 		const entry = this.#acquire(source);
@@ -259,7 +261,7 @@ export class TerminalImages {
 			}
 			case "iterm":
 				return {
-					rows: anchoredRows(itermImage(source.data, box.columns, box.rows, caps.multiplexer), box.rows),
+					rows: drawn(itermImage(source.data, box.columns, box.rows, caps.multiplexer)),
 					columns: box.columns,
 					state: "image",
 				};
@@ -267,7 +269,7 @@ export class TerminalImages {
 				const sequence = this.#sixel(entry, box, sixelBackground(caps))();
 				if (sequence === undefined) return { rows: reservedRows(box.rows), columns: box.columns, state: "pending" };
 				if (sequence === null) return fallback();
-				return { rows: anchoredRows(sequence, box.rows), columns: box.columns, state: "image" };
+				return { rows: drawn(sequence), columns: box.columns, state: "image" };
 			}
 		}
 	}

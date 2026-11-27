@@ -5,9 +5,11 @@
  * sits between the card's borders where images draw as cells of text, else the chip glyph does.
  */
 import { describe, expect, test } from "bun:test";
-import { createRoot, isUiNode, type JSXNode, signal, type UiNode } from "@oh-my-pi/pi-tui";
+import { type Accessor, createRoot, isUiNode, type JSXNode, signal, type UiNode } from "@oh-my-pi/pi-tui";
 import type { TerminalCapabilities } from "@oh-my-pi/pi-tui/driver/contract";
 import { TerminalImages } from "@oh-my-pi/pi-tui/driver/images/store";
+import { maskOverlayImages } from "@oh-my-pi/pi-tui/driver/images/viewport";
+import { drawRow } from "@oh-my-pi/pi-tui/driver/output/ansi";
 import { getBlob } from "@oh-my-pi/pi-tui/native/blobs";
 import { driverImages } from "@oh-my-pi/pi-tui/term/backend";
 import { paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
@@ -31,16 +33,54 @@ function nodes(root: NativeNode): NativeNode[] {
 	return [root, ...(root.c ?? []).flatMap(nodes)];
 }
 
-/** A composer holding one image chip (`📷 #1`, a picture of `size` by its marker) and its band. */
-function attached(size = "640x480"): { composer: Composer; band: UiNode } {
+/** A composer holding an image chip per size (`📷 #1`…, a picture of that size by its marker) and its band. */
+function attached(...sizes: string[]): { composer: Composer; band: UiNode } {
 	const composer = new Composer();
-	composer.insertAtom(composer.chipLabel("image", 1), `[Image #1, ${size}]`, {
-		kind: "image",
-		image: { type: "image", data: PNG_1PX, mimeType: "image/png" },
-	});
+	for (const [i, size] of (sizes.length > 0 ? sizes : ["640x480"]).entries()) {
+		composer.insertAtom(composer.chipLabel("image", i + 1), `[Image #${i + 1}, ${size}]`, {
+			kind: "image",
+			image: { type: "image", data: PNG_1PX, mimeType: "image/png" },
+		});
+	}
 	const band: JSXNode = ComposerChips({ composer });
 	if (!isUiNode(band)) throw new Error("the band is one node");
 	return { composer, band };
+}
+
+/** A truecolor terminal drawing `images`, with 10×20 px cells. */
+function capabilities(images: TerminalCapabilities["images"]): Accessor<TerminalCapabilities> {
+	return signal<TerminalCapabilities>({
+		truecolor: true,
+		colors: 16_777_216,
+		synchronizedOutput: true,
+		hyperlinks: false,
+		images,
+		kittyKeyboard: true,
+		bracketedPaste: true,
+		background: null,
+		dark: true,
+		cell: { w: 10, h: 20 },
+		multiplexer: null,
+		textSizing: false,
+		tsp: false,
+		emoji: CONSERVATIVE_EMOJI,
+	});
+}
+
+/** The band's chips on a SIXEL terminal whose encoder writes `w×h` as the picture, encodes awaited. */
+async function sixelBand(...sizes: string[]): Promise<{ rows: (width: number) => string[]; dispose: () => void }> {
+	const { band, dispose } = createRoot(dispose => ({ ...attached(...sizes), dispose }));
+	const caps = capabilities("sixel");
+	const images = new TerminalImages({
+		capabilities: caps,
+		placeholders: signal(false),
+		encodeSixel: async (_bytes, w, h) => `\x1bPq${w}x${h}\x1b\\`,
+	});
+	const env = staticEnvironment(currentTheme(), { images: driverImages(images, caps) });
+	const rows = (width: number): string[] => [...paintNode(env, band, width).rows];
+	rows(40);
+	await images.whenEncoded();
+	return { rows, dispose };
 }
 
 describe("attachment band pictures", () => {
@@ -68,22 +108,7 @@ describe("attachment band pictures", () => {
 	test("the card draws the picture between its borders as cells of text, and the chip glyph where the terminal has none", () => {
 		createRoot(dispose => {
 			const { composer, band } = attached();
-			const caps = signal<TerminalCapabilities>({
-				truecolor: true,
-				colors: 16_777_216,
-				synchronizedOutput: true,
-				hyperlinks: false,
-				images: "kitty",
-				kittyKeyboard: true,
-				bracketedPaste: true,
-				background: null,
-				dark: true,
-				cell: { w: 10, h: 20 },
-				multiplexer: null,
-				textSizing: false,
-				tsp: false,
-				emoji: CONSERVATIVE_EMOJI,
-			});
+			const caps = capabilities("kitty");
 			const placeholders = signal(false);
 			const images = new TerminalImages({ capabilities: caps, placeholders });
 			const env = staticEnvironment(currentTheme(), { images: driverImages(images, caps) });
@@ -106,79 +131,58 @@ describe("attachment band pictures", () => {
 		});
 	});
 
-	test("on SIXEL the card draws the picture anchored between its borders, stepping over its cells", async () => {
-		const { composer, band } = createRoot(() => attached());
-		const caps = signal<TerminalCapabilities>({
-			truecolor: true,
-			colors: 16_777_216,
-			synchronizedOutput: true,
-			hyperlinks: false,
-			images: "sixel",
-			kittyKeyboard: true,
-			bracketedPaste: true,
-			background: null,
-			dark: true,
-			cell: { w: 10, h: 20 },
-			multiplexer: null,
-			textSizing: false,
-			tsp: false,
-			emoji: CONSERVATIVE_EMOJI,
-		});
-		const images = new TerminalImages({
-			capabilities: caps,
-			placeholders: signal(false),
-			encodeSixel: async (_bytes, w, h) => `\x1bPq${w}x${h}\x1b\\`,
-		});
-		const env = staticEnvironment(currentTheme(), { images: driverImages(images, caps) });
-		const glyph = composer.chipLabel("image", 1).split(" ")[0]!;
-		const rows = (): readonly string[] => paintNode(env, band, 40).rows;
-
-		// Encoding: the glyph holds the card.
-		expect(rows().slice(1, 5).join("\n")).toContain(glyph);
-		await images.whenEncoded();
-		const drawn = rows();
-		// 10×4 cells: the last interior row moves up 3 rows and draws; every image row steps 10 cells.
-		const interior = drawn.slice(1, 5);
-		expect(interior.join("\n")).not.toContain(glyph);
-		expect(interior[3]).toMatch(/\x1b7\x1b\[3A\x1bPq\d+x\d+\x1b\\\x1b8/);
-		for (const row of interior) {
-			expect(row).toContain("\x1b[10C");
-			// The step stands for the picture's 10 cells: with it the row is as wide as the borders.
-			expect(visibleWidth(row) + 10).toBe(visibleWidth(drawn[0]!));
+	test("on SIXEL the card draws the picture over blank cells, as wide as the borders", async () => {
+		const band = await sixelBand();
+		try {
+			const drawn = band.rows(40);
+			// 10×4 cells: every interior row holds 10 blank cells for the picture; the last steps back over
+			// them, moves up 3 rows, draws and restores the cursor, then steps forward again.
+			const interior = drawn.slice(1, 5);
+			expect(interior[3]).toMatch(/ {10}\x1b\[10D\x1b7\x1b\[3A\x1bPq\d+x\d+\x1b\\\x1b8\x1b\[10C/);
+			expect(interior.filter(row => row.includes("\x1bP"))).toHaveLength(1);
+			for (const row of interior) expect(visibleWidth(row)).toBe(visibleWidth(drawn[0]!));
+		} finally {
+			band.dispose();
 		}
 	});
 
 	test("on SIXEL a one-row wide picture draws with the cursor saved and restored around it", async () => {
-		const { band } = createRoot(() => attached("1568x200"));
-		const caps = signal<TerminalCapabilities>({
-			truecolor: true,
-			colors: 16_777_216,
-			synchronizedOutput: true,
-			hyperlinks: false,
-			images: "sixel",
-			kittyKeyboard: true,
-			bracketedPaste: true,
-			background: null,
-			dark: true,
-			cell: { w: 10, h: 20 },
-			multiplexer: null,
-			textSizing: false,
-			tsp: false,
-			emoji: CONSERVATIVE_EMOJI,
-		});
-		const images = new TerminalImages({
-			capabilities: caps,
-			placeholders: signal(false),
-			encodeSixel: async (_bytes, w, h) => `\x1bPq${w}x${h}\x1b\\`,
-		});
-		const env = staticEnvironment(currentTheme(), { images: driverImages(images, caps) });
-		paintNode(env, band, 40);
-		await images.whenEncoded();
-		// 12×1 cells, centred on the second interior row. Drawing a SIXEL moves the cursor, so
-		// without the restore the rest of the row (the right border, the next cards) lands elsewhere.
-		const interior = paintNode(env, band, 40).rows.slice(1, 5);
-		expect(interior[1]).toMatch(/\x1b7\x1bPq\d+x\d+\x1b\\\x1b8\x1b\[12C/);
-		expect(interior.filter(row => row.includes("\x1bP"))).toHaveLength(1);
+		const band = await sixelBand("1568x200");
+		try {
+			// 12×1 cells, centred on the second interior row. Drawing a SIXEL moves the cursor, so
+			// without the restore the rest of the row (the right border, the next cards) lands elsewhere.
+			const interior = band.rows(40).slice(1, 5);
+			expect(interior[1]).toMatch(/ {12}\x1b\[12D\x1b7\x1bPq\d+x\d+\x1b\\\x1b8\x1b\[12C/);
+			expect(interior.filter(row => row.includes("\x1bP"))).toHaveLength(1);
+		} finally {
+			band.dispose();
+		}
+	});
+
+	test("two SIXEL cards filling the terminal keep their borders and are masked one by one under a sheet", async () => {
+		const band = await sixelBand("640x480", "640x480");
+		try {
+			// Two 14-cell cards two cells apart fill 30 columns exactly: no row is short of the width,
+			// so the writer adds no erase to the right that would take the last card's right border.
+			const rows = band.rows(30);
+			for (const row of rows) expect(visibleWidth(row)).toBe(30);
+			expect(rows.map(row => drawRow(row, 30)).filter(row => row.includes("\x1b[K"))).toEqual([]);
+			const anchor = rows[4]!;
+			expect(anchor.match(/\x1bPq/g)).toHaveLength(2);
+
+			// A sheet over the first card: its picture goes, the second is drawn again after composition
+			// at its own column, and the text under both stays as wide as before.
+			const masked = [...rows];
+			const restore = maskOverlayImages(masked, 0, rows.length, 0, 14, 10);
+			expect(masked[4]!.match(/\x1bPq/g)).toBeNull();
+			expect(visibleWidth(masked[4]!)).toBe(30);
+			restore?.();
+			expect(masked[4]!.match(/\x1bPq/g)).toHaveLength(1);
+			// The second card's left border is column 16; its 10-cell picture is centred one cell in.
+			expect(masked[4]).toContain(`\x1b[19G\x1b7\x1b[3A\x1bPq`);
+		} finally {
+			band.dispose();
+		}
 	});
 });
 

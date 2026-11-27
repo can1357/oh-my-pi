@@ -60,7 +60,8 @@ export interface Picture {
  * cells they span and whether they show the image, with `label` (styled) as
  * the text fallback. Undefined when there is nothing to ask the terminal for
  * (no image protocol, no registered blob, no pixel size). `cells` draws it
- * only as cells of text, for a caller that puts other text on its rows.
+ * only as cells of text, for a caller that puts other text on its rows;
+ * `anchored` adds SIXEL/iTerm2 drawn over blank cells to those forms.
  */
 export function pictureRows(
 	picture: Picture,
