@@ -231,4 +231,39 @@ describe("ModelRegistry lazy bundled composition", () => {
 		expect(modelKeys(allBeforeSelectiveQueries)).toEqual(modelKeys(allAfterSelectiveQueries));
 		expect(modelKeys(availableAfterAll)).toEqual(modelKeys(availableBeforeAll));
 	});
+
+	test("repeated hydrateCredentialScopedModelCaches skips redundant peeks until credentials change", async () => {
+		const tempDir = TempDir.createSync("@model-registry-hydrate-cache-");
+		tempDirs.push(tempDir);
+		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		authStorages.push(authStorage);
+		const expires = Date.now() + 3_600_000;
+		await authStorage.credentials.set("github-copilot", {
+			type: "oauth",
+			access: "gho_initial_token",
+			refresh: "refresh_token",
+			expires,
+		});
+		const peekSpy = spyOn(authStorage.keys, "peek");
+		spies.push(peekSpy);
+
+		const registry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+		await registry.hydrateCredentialScopedModelCaches();
+		const peeksAfterFirst = peekSpy.mock.calls.length;
+		expect(peeksAfterFirst).toBeGreaterThan(0);
+
+		// Second call with unchanged credentials/config should hit the synchronous fast path.
+		await registry.hydrateCredentialScopedModelCaches();
+		expect(peekSpy.mock.calls.length).toBe(peeksAfterFirst);
+
+		// Mutating stored credentials bumps generation and invalidates the fast path.
+		await authStorage.credentials.set("github-copilot", {
+			type: "oauth",
+			access: "gho_updated_token",
+			refresh: "refresh_token",
+			expires,
+		});
+		await registry.hydrateCredentialScopedModelCaches();
+		expect(peekSpy.mock.calls.length).toBeGreaterThan(peeksAfterFirst);
+	});
 });
