@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -293,6 +294,9 @@ function createCheckoutNotice(cwd: string): ((target: string) => string | undefi
 		const sessionRepo = vcs.git(cwd);
 		if (!sessionRepo) return undefined;
 		const session = sessionRepo.info();
+		// Git may record a linked worktree's gitdir through a resolved symlink (macOS `/var` → `/private/var`).
+		const sessionCommonDir = realpathSync(session.commonDir);
+		const sessionGitDir = realpathSync(session.gitDir);
 		const byDirectory = new Map<string, string | undefined>();
 		let sessionBranch: string | undefined;
 		return target => {
@@ -303,7 +307,12 @@ function createCheckoutNotice(cwd: string): ((target: string) => string | undefi
 			try {
 				const targetRepo = vcs.git(dir);
 				const checkout = targetRepo?.info();
-				if (targetRepo && checkout?.commonDir === session.commonDir && checkout.gitDir !== session.gitDir) {
+				if (
+					targetRepo &&
+					checkout &&
+					realpathSync(checkout.commonDir) === sessionCommonDir &&
+					realpathSync(checkout.gitDir) !== sessionGitDir
+				) {
 					if (sessionBranch === undefined) {
 						const sessionHead = sessionRepo.headSync();
 						sessionBranch = sessionHead.branch ?? sessionHead.commit?.slice(0, 8);
