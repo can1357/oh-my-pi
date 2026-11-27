@@ -5,7 +5,6 @@
  * Returns synthesized answers with citations and source metadata.
  */
 import {
-	type AnthropicAuthConfig,
 	type AnthropicSystemBlock,
 	type Api,
 	type ApiKey,
@@ -19,13 +18,27 @@ import {
 	stripClaudeToolPrefix,
 	withAuth,
 } from "@oh-my-pi/pi-ai";
-import { buildAnthropicSystemBlocks, wrapFetchForCch } from "@oh-my-pi/pi-ai/providers/anthropic";
+import {
+	buildAnthropicSystemBlocks,
+	buildGitHubCopilotAnthropicHeaders,
+	wrapFetchForCch,
+} from "@oh-my-pi/pi-ai/providers/anthropic";
+import { normalizeAnthropicBaseUrl } from "@oh-my-pi/pi-ai/providers/anthropic-state";
+import {
+	buildCopilotDynamicHeaders,
+	getCachedCopilotIntegrationId,
+	getCopilotIntegrationCacheKey,
+	resolveCopilotRequestIdentity,
+	resolveGitHubCopilotBaseUrl,
+	wrapFetchForCopilotFallback,
+} from "@oh-my-pi/pi-ai/providers/github-copilot-headers";
 import {
 	anthropicApiVersionAcceptsSamplingParams,
 	isOfficialAnthropicApiUrl,
 	resolveAnthropicApiVersion,
 } from "@oh-my-pi/pi-catalog/compat/anthropic";
 import { fallbackCreditTargets } from "@oh-my-pi/pi-catalog/compat/fallback-credit";
+import { parseGitHubCopilotApiKey } from "@oh-my-pi/pi-catalog/wire/github-copilot";
 import { $env } from "@oh-my-pi/pi-utils";
 // The model decides whether to search and answers from its weights when a query
 // reads as stable knowledge; a search backend must always search.
@@ -87,20 +100,20 @@ function planQuery(rawQuery: string, parsed: StructuredQuery): AnthropicQueryPla
 
 /**
  * Builds system instruction blocks for the Anthropic API request.
- * @param auth - Authentication configuration
+ * @param isOAuth - Whether the request uses Claude Code OAuth shaping
  * @param injectClaudeCodeInstruction - Catalog policy for OAuth system fingerprinting
  * @param systemPrompt - Optional system prompt for guiding response style
  * @returns Array of system blocks for the API request
  */
 function buildSystemBlocks(
-	auth: AnthropicAuthConfig,
+	isOAuth: boolean,
 	injectClaudeCodeInstruction: boolean,
 	systemPrompt?: string,
 ): AnthropicSystemBlock[] | undefined {
 	// Match the streaming path: the CC billing header + system instruction are
 	// an OAuth fingerprint and must not be claimed on API-key requests.
-	const includeClaudeCode = auth.isOAuth && injectClaudeCodeInstruction;
-	const extraInstructions = auth.isOAuth
+	const includeClaudeCode = isOAuth && injectClaudeCodeInstruction;
+	const extraInstructions = isOAuth
 		? ["You are a helpful AI assistant with web search capabilities.", searchInstruction]
 		: [searchInstruction];
 
@@ -110,31 +123,69 @@ function buildSystemBlocks(
 	});
 }
 
+/** Where and how one search request is sent for the selected model's backend. */
+interface AnthropicSearchEndpoint {
+	url: string;
+	/** Effective base URL; selects the API version that gates sampling parameters. */
+	baseUrl: string;
+	headers: Record<string, string>;
+	/** Claude Code OAuth shaping: system fingerprint and metadata.user_id. */
+	isOAuth: boolean;
+	/** Runs Anthropic's server-side refusal fallback chain. */
+	serverSideFallback: boolean;
+	fetch: FetchImpl;
+}
+
 /**
- * Calls the Anthropic API with web search tool enabled.
- * @param auth - Authentication configuration (API key or OAuth)
- * @param model - Selected catalog model
- * @param plan - Query text plus native domain filters derived from parsed directives
- * @param metadataUserId - Optional Anthropic Messages metadata.user_id (already shaped for OAuth)
- * @param systemPrompt - Optional system prompt for guiding response style
- * @returns Raw API response from Anthropic
- * @throws {SearchProviderError} If the API request fails
+ * Resolve the endpoint, headers and fetch for a search request. GitHub Copilot
+ * goes through the streaming path's Copilot helpers: its OAuth key is a JSON
+ * envelope carrying the token and the (enterprise) API endpoint, and its proxy
+ * rejects Anthropic's beta set and Claude Code fingerprint headers.
  */
-async function callSearch(
-	auth: AnthropicAuthConfig,
-	configuredHeaders: Record<string, string> | undefined,
+function resolveSearchEndpoint(
+	key: string,
 	model: Model<Api>,
-	plan: AnthropicQueryPlan,
-	metadataUserId?: string,
-	sessionId?: string,
-	systemPrompt?: string,
-	maxTokens?: number,
-	temperature?: number,
-	signal?: AbortSignal,
-	fetchImpl: FetchImpl = fetch,
-	timeoutMs?: number,
-): Promise<AnthropicApiResponse> {
-	const url = buildAnthropicUrl(auth);
+	configuredHeaders: Record<string, string> | undefined,
+	query: string,
+	sessionId: string | undefined,
+	fetchImpl: FetchImpl,
+): AnthropicSearchEndpoint {
+	if (model.provider === "github-copilot") {
+		const baseUrl =
+			normalizeAnthropicBaseUrl(resolveGitHubCopilotBaseUrl(model.baseUrl, key) ?? model.baseUrl) ?? model.baseUrl;
+		const cacheKey = getCopilotIntegrationCacheKey(key, baseUrl);
+		const cachedIntegrationId = getCachedCopilotIntegrationId(cacheKey);
+		const integrationId = resolveCopilotRequestIdentity();
+		// A search is a tool call the agent made, not a user turn.
+		const dynamicHeaders = buildCopilotDynamicHeaders({
+			messages: [{ role: "user", content: query }],
+			hasImages: false,
+			premiumMultiplier: model.premiumMultiplier,
+			headers: configuredHeaders,
+			integrationId,
+			initiatorOverride: "agent",
+			enterpriseUrl: parseGitHubCopilotApiKey(key).enterpriseUrl,
+			cachedIntegrationId,
+		});
+		return {
+			url: `${baseUrl}/v1/messages`,
+			baseUrl,
+			headers: buildGitHubCopilotAnthropicHeaders({
+				model,
+				apiKey: key,
+				baseUrl,
+				stream: false,
+				headers: configuredHeaders,
+				dynamicHeaders: dynamicHeaders.headers,
+				sessionId,
+			}),
+			isOAuth: false,
+			serverSideFallback: false,
+			fetch: wrapFetchForCopilotFallback(fetchImpl, true, integrationId, cacheKey, cachedIntegrationId ?? null),
+		};
+	}
+
+	const auth = buildAnthropicAuthConfig(key, model.baseUrl, { isOAuth: model.isOAuth });
 	// Only Anthropic's own endpoint runs the fallback chain, and only models with
 	// a refusal classifier have targets to fall back to (Haiku 5.5 has none).
 	const serverSideFallback = isOfficialAnthropicApiUrl(auth.baseUrl) && fallbackCreditTargets(model).length > 0;
@@ -149,12 +200,45 @@ async function callSearch(
 		providerType: model.providerType,
 		sessionId,
 	});
+	return {
+		url: buildAnthropicUrl(auth),
+		baseUrl: auth.baseUrl,
+		headers,
+		isOAuth: auth.isOAuth,
+		serverSideFallback,
+		// OAuth requests inject the CC billing header (buildSystemBlocks); patch its
+		// cch attestation like the streaming path instead of shipping `cch=00000`.
+		fetch: auth.isOAuth ? wrapFetchForCch(fetchImpl) : fetchImpl,
+	};
+}
 
+/**
+ * Calls the Anthropic API with web search tool enabled.
+ * @param endpoint - Resolved endpoint, headers and fetch for the selected backend
+ * @param model - Selected catalog model
+ * @param plan - Query text plus native domain filters derived from parsed directives
+ * @param metadataUserId - Optional Anthropic Messages metadata.user_id (already shaped for OAuth)
+ * @param systemPrompt - Optional system prompt for guiding response style
+ * @returns Raw API response from Anthropic
+ * @throws {SearchProviderError} If the API request fails
+ */
+async function callSearch(
+	endpoint: AnthropicSearchEndpoint,
+	model: Model<Api>,
+	plan: AnthropicQueryPlan,
+	metadataUserId?: string,
+	systemPrompt?: string,
+	maxTokens?: number,
+	temperature?: number,
+	signal?: AbortSignal,
+	timeoutMs?: number,
+): Promise<AnthropicApiResponse> {
+	const { url, headers, serverSideFallback } = endpoint;
 	const injectClaudeCodeInstruction =
 		model.compat === undefined ||
 		!("injectClaudeCodeInstruction" in model.compat) ||
 		model.compat.injectClaudeCodeInstruction !== false;
-	const systemBlocks = buildSystemBlocks(auth, injectClaudeCodeInstruction, systemPrompt);
+	const systemBlocks = buildSystemBlocks(endpoint.isOAuth, injectClaudeCodeInstruction, systemPrompt);
 
 	const body: Record<string, unknown> = {
 		model: model.id,
@@ -182,7 +266,7 @@ async function callSearch(
 		(model.compat === undefined ||
 			!("supportsSamplingParams" in model.compat) ||
 			model.compat.supportsSamplingParams !== false) &&
-		anthropicApiVersionAcceptsSamplingParams(resolveAnthropicApiVersion(auth.baseUrl))
+		anthropicApiVersionAcceptsSamplingParams(resolveAnthropicApiVersion(endpoint.baseUrl))
 	) {
 		body.temperature = temperature;
 	}
@@ -191,10 +275,7 @@ async function callSearch(
 		body.system = systemBlocks;
 	}
 
-	// OAuth requests inject the CC billing header (buildSystemBlocks); patch its
-	// cch attestation like the streaming path instead of shipping `cch=00000`.
-	const doFetch = auth.isOAuth ? wrapFetchForCch(fetchImpl) : fetchImpl;
-	const response = await doFetch(url, {
+	const response = await endpoint.fetch(url, {
 		method: "POST",
 		headers,
 		body: JSON.stringify(body),
@@ -375,8 +456,15 @@ export async function searchAnthropic(params: SearchParams): Promise<SearchRespo
 	const response = await withAuth(
 		keyOrResolver,
 		async key => {
-			const auth = buildAnthropicAuthConfig(key, params.model.baseUrl, { isOAuth: params.model.isOAuth });
 			const configuredHeaders = await params.modelRegistry.resolveModelHeaders(params.model, params.signal);
+			const endpoint = resolveSearchEndpoint(
+				key,
+				params.model,
+				configuredHeaders,
+				plan.query,
+				params.sessionId,
+				params.fetch ?? fetch,
+			);
 			// Mirror the main Messages path: OAuth requests need a Claude-Code-shaped
 			// metadata.user_id (`{session_id, account_uuid?, device_id}`) so the
 			// CC billing header + system fingerprint installed by
@@ -385,22 +473,19 @@ export async function searchAnthropic(params: SearchParams): Promise<SearchRespo
 			// forward the raw session id verbatim.
 			const metadataUserId = resolveAnthropicMetadataUserId(
 				params.sessionId,
-				auth.isOAuth,
+				endpoint.isOAuth,
 				params.sessionId,
 				accountId,
 			);
 			return callSearch(
-				auth,
-				configuredHeaders,
+				endpoint,
 				params.model,
 				plan,
 				metadataUserId,
-				params.sessionId,
 				params.systemPrompt,
 				params.maxOutputTokens,
 				params.temperature,
 				params.signal,
-				params.fetch,
 				params.timeoutMs,
 			);
 		},

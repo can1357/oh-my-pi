@@ -49,10 +49,18 @@ function createCustomProviderFixture(headers?: Record<string, string>) {
 	return { authStorage, modelRegistry, model };
 }
 
+/** The key a Copilot OAuth login resolves to: a JSON envelope, not a bare token. */
+const COPILOT_OAUTH_TOKEN = "tid=copilot-oauth-token";
+const COPILOT_OAUTH_KEY = JSON.stringify({
+	token: COPILOT_OAUTH_TOKEN,
+	enterpriseUrl: "ghe.example.test",
+	apiEndpoint: "https://copilot-api.ghe.example.test",
+});
+
 /** A GitHub Copilot-hosted Claude model, reached over Copilot's `/v1/messages` proxy. */
 function createCopilotFixture(headers?: Record<string, string>) {
 	const authStorage = createInMemoryAuthStorage();
-	authStorage.keys.setRuntime("github-copilot", "copilot-session-token");
+	authStorage.keys.setRuntime("github-copilot", COPILOT_OAUTH_KEY);
 	const modelRegistry = new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true });
 	const model = buildModel({
 		id: "claude-sonnet-4.5",
@@ -107,7 +115,7 @@ function makeCaptureFetch(): {
 describe("Anthropic search session headers", () => {
 	// Copilot's `/v1/messages` proxy answers with a `msg_blocked` placeholder
 	// unless the Copilot CLI's session header is present (#20678).
-	it("sends X-Client-Session-Id for GitHub Copilot-hosted Claude", async () => {
+	it("reaches GitHub Copilot-hosted Claude like streaming Messages does", async () => {
 		const fixture = createCopilotFixture();
 		try {
 			const cap = makeCaptureFetch();
@@ -121,7 +129,15 @@ describe("Anthropic search session headers", () => {
 				fetch: cap.fetch,
 			});
 
-			expect(cap.headers()?.get("x-client-session-id")).toBe("session-20678");
+			const headers = cap.headers();
+			expect(cap.url()).toBe("https://copilot-api.ghe.example.test/v1/messages");
+			expect(headers?.get("authorization")).toBe(`Bearer ${COPILOT_OAUTH_TOKEN}`);
+			expect(headers?.get("x-client-session-id")).toBe("session-20678");
+			expect(headers?.get("x-initiator")).toBe("agent");
+			expect(headers?.get("copilot-integration-id")).toBe("copilot-developer-cli");
+			// Copilot's proxy takes no Anthropic betas or Claude Code app headers.
+			expect(headers?.get("anthropic-beta")).toBeNull();
+			expect(headers?.get("x-app")).toBeNull();
 		} finally {
 			fixture.authStorage.close();
 		}

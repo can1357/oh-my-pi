@@ -88,8 +88,9 @@ export interface AnthropicSearchHeaderOptions {
 	extraBetas?: readonly string[];
 	/**
 	 * The selected model's credential-bearing provider id. When set, the
-	 * request gets the same backend session headers as the Messages path
-	 * (`applyInferenceHeaders`), e.g. Copilot's `X-Client-Session-Id`.
+	 * Messages path's backend headers (`applyInferenceHeaders`) are added:
+	 * session headers when {@link sessionId} is set, otherwise only backend
+	 * attribution (e.g. Vercel AI Gateway).
 	 */
 	provider?: string;
 	/** The selected model's declared backend (`providerType`). */
