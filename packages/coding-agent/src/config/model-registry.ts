@@ -48,6 +48,7 @@ import {
 	readComposedCatalog,
 	readComposedCatalogDescriptor,
 	readModelCache,
+	readModelCaches,
 	retainModelCacheConnection,
 	staticCatalogSources,
 	writeComposedCatalog,
@@ -204,6 +205,7 @@ const BUILT_IN_MODEL_MANAGER_PROVIDER_IDS: Readonly<Record<string, true>> = Obje
 const MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP: Readonly<Record<string, true>> = Object.freeze(
 	Object.fromEntries(MODELS_DEV_CATALOG_PROVIDER_IDS.map(providerId => [providerId, true as const])),
 );
+const PROVIDER_DESCRIPTOR_BY_ID = new Map(PROVIDER_DESCRIPTORS.map(descriptor => [descriptor.providerId, descriptor]));
 const UNAUTHENTICATED_BUILT_IN_DISCOVERY_PROVIDERS = new Set<string>(
 	PROVIDER_DESCRIPTORS.filter(
 		descriptor =>
@@ -2379,9 +2381,17 @@ export class ModelRegistry {
 			if (startup.policyInputs !== undefined && startup.policyInputs !== policy) this.#startupCatalog = undefined;
 			else startup.policyInputs = policy;
 		}
-		for (const providerId of providerIds) {
-			const cacheProviderId = this.#resolveStartupModelCacheProviderId(providerId);
-			const cache = readModelCache<Api>(cacheProviderId, STANDARD_MODEL_CACHE_TTL_MS, Date.now, this.#cacheDbPath);
+		const cacheProviderIds = providerIds.map(providerId => this.#resolveStartupModelCacheProviderId(providerId));
+		const cachesByProviderId = readModelCaches<Api>(
+			cacheProviderIds,
+			STANDARD_MODEL_CACHE_TTL_MS,
+			Date.now,
+			this.#cacheDbPath,
+		);
+		for (let index = 0; index < providerIds.length; index++) {
+			const providerId = providerIds[index];
+			const cacheProviderId = cacheProviderIds[index];
+			const cache = cachesByProviderId.get(cacheProviderId) ?? null;
 			const hasKey = this.#startupDiscoveryHasKey(providerId, cache !== null, disabledProviders);
 			if (startup) {
 				for (const model of cache?.models ?? []) {
@@ -2403,7 +2413,7 @@ export class ModelRegistry {
 				!disabledProviders.has(providerId) &&
 				hasKey;
 			if (!cache) {
-				const descriptor = PROVIDER_DESCRIPTORS.find(candidate => candidate.providerId === providerId);
+				const descriptor = PROVIDER_DESCRIPTOR_BY_ID.get(providerId);
 				const discoveryExpected =
 					!disabledProviders.has(providerId) &&
 					(sharedCatalogProvider ||

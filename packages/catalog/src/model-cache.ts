@@ -855,6 +855,98 @@ export function readModelCache<TApi extends Api>(
 	}
 }
 
+/**
+ * Batch variant of {@link readModelCache}: reads all requested providers in a
+ * single SQLite connection/data_version check and a single `IN (...)` query for
+ * cache misses, populating the per-provider read memo identically to
+ * {@link readModelCache}.
+ */
+export function readModelCaches<TApi extends Api>(
+	providerIds: readonly string[],
+	ttlMs: number,
+	now: () => number,
+	dbPath?: string,
+): Map<string, CacheEntry<TApi> | null> {
+	const results = new Map<string, CacheEntry<TApi> | null>();
+	if (providerIds.length === 0) return results;
+	const uniqueIds = [...new Set(providerIds)];
+	try {
+		const { resolvedPath, shared } = resolveCacheDb(dbPath);
+		runModelCacheDb(resolvedPath, shared, db => {
+			const dataVersion = shared ? dbDataVersion(db) : null;
+			const policy = materializationPolicy();
+			const missIds: string[] = [];
+			const metaCheckIds: Array<{ providerId: string; key: string; cached: ReadRowCacheEntry }> = [];
+			for (const providerId of uniqueIds) {
+				const key = readCacheKey(resolvedPath, providerId);
+				const cached = readRowCache.get(key);
+				if (dataVersion !== null && cached?.dataVersion === dataVersion) {
+					results.set(providerId, withFreshness(cached.entry as CacheEntry<TApi> | null, ttlMs, now));
+					continue;
+				}
+				if (cached?.entry && cached.meta) {
+					metaCheckIds.push({ providerId, key, cached });
+				} else {
+					missIds.push(providerId);
+				}
+			}
+			for (const { providerId, key, cached } of metaCheckIds) {
+				const meta = queryRow<CacheRowMeta>(db, SELECT_CACHE_ROW_META, providerId);
+				if (meta && cacheRowsEqual(cached.meta!, meta)) {
+					const entry = withFreshness(withRowState(cached.entry as CacheEntry<TApi>, meta), ttlMs, now);
+					if (readRowCache.size >= READ_ROW_CACHE_MAX) readRowCache.clear();
+					readRowCache.set(key, { dataVersion, meta, entry: entry as CacheEntry<Api> | null });
+					results.set(providerId, entry);
+				} else {
+					missIds.push(providerId);
+				}
+			}
+			if (missIds.length > 0) {
+				const rowsByProvider = new Map<string, CacheRow>();
+				// SQLite default SQLITE_MAX_VARIABLE_NUMBER is 999+; chunk conservatively at 500.
+				const CHUNK_SIZE = 500;
+				for (let offset = 0; offset < missIds.length; offset += CHUNK_SIZE) {
+					const chunk = missIds.slice(offset, offset + CHUNK_SIZE);
+					const placeholders = chunk.map(() => "?").join(", ");
+					const sql = `SELECT m.*, ${CACHE_ROW_FRESHNESS_COLUMNS}
+						FROM model_cache m
+						LEFT JOIN model_cache_freshness f
+							ON f.provider_id = m.provider_id AND f.materialization_policy = m.materialization_policy
+						WHERE m.materialization_policy = ? AND m.provider_id IN (${placeholders})`;
+					const stmt = db.query<CacheRow, string[]>(sql);
+					let rows: CacheRow[];
+					try {
+						rows = stmt.all(policy, ...chunk);
+					} finally {
+						stmt.finalize();
+					}
+					for (const row of rows) {
+						rowsByProvider.set(row.provider_id, row);
+					}
+				}
+				for (const providerId of missIds) {
+					const row = rowsByProvider.get(providerId) ?? null;
+					const entry = parseCacheRow<TApi>(db, providerId, row, ttlMs, now);
+					let meta: CacheRowMeta | null = null;
+					if (entry !== null && row !== null) {
+						const { models: _models, ...rowScalars } = row;
+						meta = rowScalars;
+					}
+					const key = readCacheKey(resolvedPath, providerId);
+					if (readRowCache.size >= READ_ROW_CACHE_MAX) readRowCache.clear();
+					readRowCache.set(key, { dataVersion, meta, entry: entry as CacheEntry<Api> | null });
+					results.set(providerId, entry);
+				}
+			}
+		});
+	} catch {
+		for (const providerId of uniqueIds) {
+			if (!results.has(providerId)) results.set(providerId, null);
+		}
+	}
+	return results;
+}
+
 /** This build's row for `providerId`; rows of other materialization policies are invisible. */
 function queryRow<T>(db: Database, sql: string, providerId: string): T | null {
 	const stmt = db.query<T, [string, string]>(sql);
