@@ -17,6 +17,7 @@
 - Added `MarkdownOptions.linkUrls` and `MarkdownLook.linkUrls` to control whether URLs are displayed after named OSC 8 hyperlinks.
 - Added `TextEdit.paste` to identify edits produced by bracketed paste operations.
 - Added `tool.gl` symbols to the Unicode, Nerd Font, and ASCII presets for the GitLab tool.
+- Terminal painters can attach one-shot marks to rows as they enter scrollback without re-emitting them on redraw.
 
 ### Fixed
 

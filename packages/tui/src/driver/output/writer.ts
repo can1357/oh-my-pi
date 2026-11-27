@@ -602,13 +602,24 @@ export class FrameWriter {
 			cursor = cursor && cursor.row >= this.#clipped ? { row: cursor.row - this.#clipped, col: cursor.col } : null;
 		}
 		let past = history ? history.rows.map(row => normalizeRow(row, width)) : [];
+		let skipped = 0;
 		if (this.#pushed.length > 0 && (this.#pendingClear || history?.kind === "replay")) this.#pushed = [];
 		if (this.#pushed.length > 0 && past.length > 0) {
 			// Rows a height shrink already pushed into scrollback are not written twice.
 			let same = 0;
 			while (same < past.length && same < this.#pushed.length && past[same] === this.#pushed[same]) same++;
 			this.#pushed = same === past.length ? this.#pushed.slice(same) : [];
-			past = past.slice(same);
+			skipped = same;
+			past = past.slice(skipped);
+		}
+		// Compare plain rows before adding one-shot control sequences: a resize
+		// can already have scrolled some of these rows beyond the writer's reach.
+		if (history?.marks) {
+			for (const { row, before, after } of history.marks) {
+				const index = row - skipped;
+				const text = past[index];
+				if (text !== undefined) past[index] = before + text + after;
+			}
 		}
 		// History under an empty viewport ends with the row the cursor parks on, made by a line feed like
 		// every row past the bottom: the next frame (or the shell) writes there, never over history.
