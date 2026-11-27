@@ -518,6 +518,9 @@ class RemoteUsage implements UsageApi {
 	providerFor(provider: Provider): UsageProvider | undefined {
 		return this.#remote.callSync("usage.providerFor", provider);
 	}
+	authRejection(provider: Provider, credential: AuthCredential): number | undefined {
+		return this.#remote.callSync("usage.authRejection", provider, credential);
+	}
 	reportingModelIds(provider: Provider, modelIds: readonly string[], reports: readonly UsageReport[]): string[] {
 		return this.#remote.callSync("usage.reportingModelIds", provider, modelIds, reports);
 	}

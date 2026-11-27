@@ -327,12 +327,15 @@ describe("OpenCode Go usage via the upstream endpoint", () => {
 			setSystemTime(new Date(nowMs));
 			const fresh = await transitionStorage.usage.reports();
 			expect(fresh?.some(candidate => candidate.provider === "opencode-go")).toBe(true);
+			const credential = { type: "api_key", key: "opencode-go-key" } as const;
+			expect(transitionStorage.usage.authRejection("opencode-go", credential)).toBeUndefined();
 
 			// Past the report TTL the next poll re-hits the endpoint and gets 401.
 			respondWith = "unauthorized";
 			setSystemTime(new Date(nowMs + 10 * 60_000));
 			const afterRevocation = await transitionStorage.usage.reports();
 			expect(afterRevocation?.some(candidate => candidate.provider === "opencode-go")).toBe(false);
+			expect(transitionStorage.usage.authRejection("opencode-go", credential)).toBe(401);
 		} finally {
 			transitionStorage.close();
 		}

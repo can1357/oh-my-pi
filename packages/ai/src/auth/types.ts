@@ -1389,6 +1389,12 @@ export interface UsageApi {
 	 */
 	providerFor(provider: Provider): UsageProvider | undefined;
 	/**
+	 * HTTP status (401/403) when this process's latest usage fetch for the stored
+	 * credential was rejected as unauthorized, so callers can point the user at
+	 * re-login instead of a bare "no usage data". Undefined otherwise.
+	 */
+	authRejection(provider: Provider, credential: AuthCredential): number | undefined;
+	/**
 	 * Return model ids whose live reports map to a quantitative usage scope.
 	 * Provider strategies supply model/tier mapping when available; otherwise
 	 * only explicitly matching model ids and account-wide shared limits count.

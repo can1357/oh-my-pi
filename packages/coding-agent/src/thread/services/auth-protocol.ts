@@ -257,6 +257,7 @@ export type AuthStorageProtocol = {
 	"usage.clientSummary": RpcMethod<[sinceMs: number], ClientUsageSummary>;
 	/** Sync hooks of the returned provider are `rpcSync` wrappers. */
 	"usage.providerFor": RpcMethod<[provider: Provider], UsageProvider | undefined>;
+	"usage.authRejection": RpcMethod<[provider: Provider, credential: AuthCredential], number | undefined>;
 	"usage.reportingModelIds": RpcMethod<
 		[provider: Provider, modelIds: readonly string[], reports: readonly UsageReport[]],
 		string[]

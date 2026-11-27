@@ -287,6 +287,7 @@ function serveAuthStorage(state: PeerAuthState): RpcServe<AuthStorage, AuthStora
 			const usageProvider = storage.usage.providerFor(provider);
 			return usageProvider ? usageProviderView(usageProvider) : undefined;
 		},
+		"usage.authRejection": (storage, provider, credential) => storage.usage.authRejection(provider, credential),
 		"usage.reportingModelIds": (storage, provider, modelIds, reports) =>
 			storage.usage.reportingModelIds(provider, modelIds, reports),
 		"usage.setProvider": (storage, provider, usageProvider, apiKey) =>

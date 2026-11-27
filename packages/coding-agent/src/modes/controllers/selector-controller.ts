@@ -73,6 +73,7 @@ import { toSessionPinAccounts } from "../../slash-commands/helpers/session-pin";
 import {
 	accountIdentityLabel,
 	collectStoredAccounts,
+	usageAuthRejectedHint,
 	collectUnreportedAccounts,
 	selectReportableAccounts,
 } from "../../slash-commands/helpers/usage-accounts";
@@ -499,7 +500,7 @@ export class SelectorController {
 		}
 		const unavailableAccounts = collectUnreportedAccounts(reports, accounts).map(account => ({
 			provider: account.provider,
-			label: accountIdentityLabel(account),
+			label: [accountIdentityLabel(account), usageAuthRejectedHint(account)].filter(Boolean).join(" — "),
 		}));
 		const currentProvider = this.ctx.session.model?.provider;
 		const activeAccount = currentProvider

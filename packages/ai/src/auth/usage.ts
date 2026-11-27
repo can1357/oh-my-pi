@@ -150,6 +150,8 @@ export class UsageService implements UsageApi {
 	#usageReportsInFlight: Map<string, Promise<UsageReport[] | null>> = new Map();
 	/** Background Copilot billing-mode probes, one per token hash for the life of the process. */
 	#billingModeProbes: Map<string, Promise<void>> = new Map();
+	/** HTTP status of the latest usage fetch the provider rejected as unauthorized, by `provider:usageCacheIdentity`. */
+	#usageAuthRejections: Map<string, number> = new Map();
 	readonly fetch: typeof fetch;
 	readonly logger: UsageLogger;
 	readonly requestTimeoutMs: number;
@@ -159,6 +161,11 @@ export class UsageService implements UsageApi {
 		this.fetch = deps.fetch;
 		this.logger = deps.logger;
 		this.requestTimeoutMs = deps.requestTimeoutMs;
+	}
+
+	authRejection(provider: Provider, credential: AuthCredential): number | undefined {
+		if (this.#usageAuthRejections.size === 0) return undefined;
+		return this.#usageAuthRejections.get(`${provider}:${usageCacheIdentity(buildUsageCredential(credential))}`);
 	}
 
 	/** Whether OAuth usage can be fetched via a provider or the store hook. */
@@ -431,9 +438,14 @@ export class UsageService implements UsageApi {
 				}
 			}
 			if (report) this.#recordBillingMode(request.provider, params.credential, report);
+			this.#usageAuthRejections.delete(`${request.provider}:${usageCacheIdentity(request.credential)}`);
 			return report;
 		} catch (error) {
 			if (error instanceof AIError.ProviderHttpError && (error.status === 401 || error.status === 403)) {
+				this.#usageAuthRejections.set(
+					`${request.provider}:${usageCacheIdentity(request.credential)}`,
+					error.status,
+				);
 				// Definitive auth failure (revoked key, lapsed subscription): purge
 				// the last-good report so #fetchUsageCached's failure branch can't
 				// keep rendering and ranking from stale quota the way it does for

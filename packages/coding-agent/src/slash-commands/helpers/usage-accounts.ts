@@ -17,6 +17,14 @@ export interface UsageAccountIdentity {
 	refreshExpires?: number;
 	/** Epoch ms the OAuth access token expires; a long-lived login's outlasts its ~30d grant. */
 	expires?: number;
+	/** HTTP status (401/403) of this credential's latest rejected usage fetch; a re-login restores usage. */
+	usageAuthRejected?: number;
+}
+
+/** Re-login hint for an account whose usage fetch the provider rejected as unauthorized. */
+export function usageAuthRejectedHint(account: UsageAccountIdentity): string | undefined {
+	if (account.usageAuthRejected === undefined) return undefined;
+	return `usage auth rejected (${account.usageAuthRejected}); re-login to restore usage`;
 }
 
 /** Flatten every stored credential (OAuth and API key) into identity rows for unreported-account detection. */
@@ -27,6 +35,7 @@ export function collectStoredAccounts(authStorage: AuthStorage): UsageAccountIde
 		const entry = all[provider];
 		const credentials = Array.isArray(entry) ? entry : [entry];
 		for (const credential of credentials) {
+			const usageAuthRejected = authStorage.usage.authRejection(provider, credential);
 			if (credential.type === "oauth") {
 				accounts.push({
 					provider,
@@ -40,9 +49,14 @@ export function collectStoredAccounts(authStorage: AuthStorage): UsageAccountIde
 					authorizedAt: credential.authorizedAt,
 					refreshExpires: credential.refreshExpires,
 					expires: credential.expires,
+					...(usageAuthRejected !== undefined ? { usageAuthRejected } : {}),
 				});
 			} else {
-				accounts.push({ provider, type: "api_key" });
+				accounts.push({
+					provider,
+					type: "api_key",
+					...(usageAuthRejected !== undefined ? { usageAuthRejected } : {}),
+				});
 			}
 		}
 	}
