@@ -7,20 +7,28 @@
  * OpenRouter sticky-routing / response caching behaves the same on advisor turns
  * (can1357/oh-my-pi#3639).
  */
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";
 import { type Context, type Model, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
 import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
+import * as catalogServerSideFallback from "@oh-my-pi/pi-catalog/compat/server-side-fallback";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { bindEffects } from "@oh-my-pi/pi-coding-agent/config/registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { cfgProvidersMuseCodeStoreResponses } from "@oh-my-pi/pi-coding-agent/session/settings";
+import {
+	cfgProvidersAnthropicServerSideFallbackModels,
+	cfgProvidersMuseCodeStoreResponses,
+} from "@oh-my-pi/pi-coding-agent/session/settings";
 import {
 	createSettingsAwareStreamFn,
 	resolveWebsocketPreference,
 } from "@oh-my-pi/pi-coding-agent/session/settings-stream-fn";
+import { logger, TempDir } from "@oh-my-pi/pi-utils";
+import { YAML } from "bun";
 
 /** Settings whose global (persisted) layer holds `storeResponses`; a runtime override would outrank the env var. */
 function persistedStore(value: boolean | undefined): Settings {
@@ -465,6 +473,126 @@ describe("createSettingsAwareStreamFn", () => {
 			});
 
 			expect(calls[0]?.options?.fallbacks).toEqual([{ model: "claude-sonnet-5" }]);
+		});
+
+		describe("with providers.anthropic.serverSideFallbackModels", () => {
+			afterEach(() => {
+				vi.restoreAllMocks();
+			});
+
+			/** The `logger.warn` context of each warning about the configured chain. */
+			function chainWarnings(): Array<Record<string, unknown> | undefined> {
+				const warnings: Array<Record<string, unknown> | undefined> = [];
+				vi.spyOn(logger, "warn").mockImplementation((message, context) => {
+					if (message.startsWith("providers.anthropic.serverSideFallbackModels")) warnings.push(context);
+				});
+				return warnings;
+			}
+
+			// Fable 5 allows ["claude-opus-4-8", "claude-opus-5"]; the catalog chain is
+			// only the first hop. An untrimmed id is an unknown model to the API.
+			it("sends the configured chain, trimmed and in order, in place of the catalog chain", () => {
+				const settings = Settings.isolated({
+					"providers.anthropic.serverSideFallback": true,
+					"providers.anthropic.serverSideFallbackModels": [" claude-opus-5 ", "claude-opus-4-8"],
+				});
+				const { fn: base, calls } = captureBase();
+
+				createSettingsAwareStreamFn(settings, base)(stubFableModel, stubContext, { apiKey: "k" });
+
+				expect(calls[0]?.options?.fallbacks).toEqual([{ model: "claude-opus-5" }, { model: "claude-opus-4-8" }]);
+			});
+
+			// A request the catalog gives no chain must not gain one: off first-party
+			// Anthropic the beta and the `fallbacks` field are rejected.
+			it("adds no chain to a model the catalog gives none", () => {
+				const settings = Settings.isolated({
+					"providers.anthropic.serverSideFallback": true,
+					"providers.anthropic.serverSideFallbackModels": ["claude-opus-5"],
+				});
+				const { fn: base, calls } = captureBase();
+				const wrapped = createSettingsAwareStreamFn(settings, base);
+
+				wrapped(stubBedrockFableModel, stubContext, { apiKey: "k" });
+				wrapped(stubOpusModel, stubContext, { apiKey: "k" });
+
+				expect(calls.map(call => call.options?.fallbacks)).toEqual([undefined, undefined]);
+			});
+
+			it.each([
+				["an empty list", [], []],
+				["a list with no model id", [1, null, "  "], [{ configured: 3, invalid: 3, kept: 0, limit: 3 }]],
+			])("follows the catalog chain for %s", (_label, configured, expectedWarnings) => {
+				const warnings = chainWarnings();
+				const settings = Settings.isolated({
+					"providers.anthropic.serverSideFallback": true,
+					"providers.anthropic.serverSideFallbackModels": configured,
+				});
+				const { fn: base, calls } = captureBase();
+
+				createSettingsAwareStreamFn(settings, base)(stubFableModel, stubContext, { apiKey: "k" });
+
+				expect(calls[0]?.options?.fallbacks).toEqual([{ model: "claude-opus-5" }]);
+				expect(warnings).toEqual(expectedWarnings);
+			});
+
+			// More than three entries is a 400, not a fallback. The warning names the
+			// drop once per configured list, and only for a request that sends it.
+			it("caps the chain at three entries, drops entries that are not model ids, and warns once per list", () => {
+				const warnings = chainWarnings();
+				const settings = Settings.isolated({
+					"providers.anthropic.serverSideFallback": true,
+					"providers.anthropic.serverSideFallbackModels": ["m1", 7, "m2", "m3", "m4"],
+				});
+				const { fn: base, calls } = captureBase();
+				const wrapped = createSettingsAwareStreamFn(settings, base);
+				const worker = createSettingsAwareStreamFn(settings, base, { disableServerSideFallback: true });
+
+				wrapped(stubFableModel, stubContext, { apiKey: "k", fallbacks: [{ model: "caller" }] });
+				worker(stubFableModel, stubContext, { apiKey: "k" });
+				expect(warnings).toEqual([]);
+
+				wrapped(stubFableModel, stubContext, { apiKey: "k" });
+				wrapped(stubFableModel, stubContext, { apiKey: "k" });
+				expect(calls[3]?.options?.fallbacks).toEqual([{ model: "m1" }, { model: "m2" }, { model: "m3" }]);
+				expect(warnings).toEqual([{ configured: 5, invalid: 1, kept: 3, limit: 3 }]);
+
+				cfgProvidersAnthropicServerSideFallbackModels.override(settings, ["n1", "n2", "n3", "n4"]);
+				wrapped(stubFableModel, stubContext, { apiKey: "k" });
+				expect(calls[4]?.options?.fallbacks).toEqual([{ model: "n1" }, { model: "n2" }, { model: "n3" }]);
+				expect(warnings).toEqual([
+					{ configured: 5, invalid: 1, kept: 3, limit: 3 },
+					{ configured: 4, invalid: 0, kept: 3, limit: 3 },
+				]);
+			});
+
+			// A hand edit of config.yml is not type-checked on load, so a bare id
+			// reaches the registry, which answers with the default. The chain must then
+			// be the model's catalog chain, whatever it is, not a list named in code:
+			// the catalog is moved here so the two cannot agree by coincidence.
+			it("follows a moved catalog chain when config.yml holds a value that is not a list", async () => {
+				const tempDir = TempDir.createSync("@pi-fallback-chain-");
+				try {
+					const agentDir = tempDir.join("agent");
+					fs.mkdirSync(agentDir, { recursive: true });
+					await Bun.write(
+						path.join(agentDir, "config.yml"),
+						YAML.stringify({
+							providers: { anthropic: { serverSideFallback: true, serverSideFallbackModels: "claude-opus-5" } },
+						}),
+					);
+					const settings = await Settings.loadReadOnly({ cwd: tempDir.join("project"), agentDir });
+					const moved = ["claude-opus-4-8", "claude-sonnet-5"];
+					vi.spyOn(catalogServerSideFallback, "serverSideFallbackModels").mockReturnValue(moved);
+					const { fn: base, calls } = captureBase();
+
+					createSettingsAwareStreamFn(settings, base)(stubFableModel, stubContext, { apiKey: "k" });
+
+					expect(calls[0]?.options?.fallbacks).toEqual(moved.map(model => ({ model })));
+				} finally {
+					tempDir.removeSync();
+				}
+			});
 		});
 	});
 

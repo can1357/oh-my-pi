@@ -38,6 +38,7 @@ import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMeta
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
 const EMPTY_STRING_ARRAYS_RECORD: Record<string, string[]> = {};
 const EMPTY_STRING_RECORD: Record<string, string> = {};
+const EMPTY_STRING_ARRAY: string[] = [];
 const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["wait"];
 
 /** Scope of the resume picker's current-folder list. */
@@ -1052,7 +1053,22 @@ export const cfgProvidersAnthropicServerSideFallback = register({
 		group: "Retry & Fallback",
 		label: "Anthropic Server-Side Fallback (Fable 5)",
 		description:
-			"When a Claude Fable 5 / Mythos 5 request is blocked by Anthropic's safety classifier, retry it on Claude Opus 5 server-side (Anthropic `server-side-fallback-2026-06-01` beta). Opt-in — leaving this off preserves the pre-fallback behavior for every request.",
+			"When a Claude Fable 5 / Mythos 5 request is blocked by Anthropic's safety classifier, retry it server-side on the fallback chain: Claude Opus 5 unless Anthropic Server-Side Fallback Chain names others (Anthropic `server-side-fallback-2026-06-01` beta). Opt-in — leaving this off preserves the pre-fallback behavior for every request.",
+	},
+});
+
+export const cfgProvidersAnthropicServerSideFallbackModels = register({
+	id: "providers.anthropic.serverSideFallbackModels",
+	type: "array",
+	// Empty follows the catalog: a model's chain is catalog policy (the
+	// `server-side-fallback-models` axis), so no model id is named here.
+	default: EMPTY_STRING_ARRAY,
+	ui: {
+		tab: "model",
+		group: "Retry & Fallback",
+		label: "Anthropic Server-Side Fallback Chain",
+		description:
+			'Ordered Anthropic model ids sent as the server-side fallback chain in place of the catalog\'s when Anthropic Server-Side Fallback is on, e.g. ["claude-opus-5", "claude-opus-4-8"]. Only models the catalog gives a chain use it, and each id must be a fallback the requested model allows. Empty follows the catalog chain. The API accepts at most three entries; longer lists send the first three.',
 	},
 });
 
