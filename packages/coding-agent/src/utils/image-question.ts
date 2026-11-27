@@ -18,7 +18,7 @@ import { ToolError } from "../tools/tool-errors";
 import type { LoadedImageInput } from "./image-loading";
 
 import { cfgImagesBlockImages } from "../modes/settings";
-import { cfgImagesQuestionTimeoutMs } from "../tools/settings";
+import { cfgImagesQuestionRouting, cfgImagesQuestionTimeoutMs } from "../tools/settings";
 
 /** Vision-capable model selected for an explicit image question. */
 export interface ResolvedImageQuestionModel {
@@ -35,7 +35,8 @@ export interface ImageQuestionResult {
 
 /**
  * Resolve the vision model used by `read <image>?q=<question>`. Offline mode
- * (`models.offline`) keeps every candidate on the active model's provider.
+ * (`models.offline`) keeps every candidate on the active model's provider;
+ * `images.questionRouting: active` allows only the active model.
  */
 export function resolveImageQuestionModel(session: ToolSession): ResolvedImageQuestionModel {
 	const modelRegistry = session.modelRegistry;
@@ -64,6 +65,21 @@ export function resolveImageQuestionModel(session: ToolSession): ResolvedImageQu
 	};
 
 	const activeModelPattern = session.getActiveModelString?.() ?? session.getModelString?.();
+	if (cfgImagesQuestionRouting.get(session.settings) === "active") {
+		const active = resolvePattern(activeModelPattern);
+		if (!active) {
+			throw new ToolError(
+				"Image questions are limited to the active model (images.questionRouting=active), and it could not be resolved.",
+			);
+		}
+		if (!sendsImageInputOnWire(active)) {
+			throw new ToolError(
+				`Active model ${active.provider}/${active.id} does not support image input, and images.questionRouting=active keeps image questions on the active model.`,
+			);
+		}
+		return { model: active, selectedPattern: activeModelPattern };
+	}
+
 	let model: Model<Api> | undefined;
 	let selectedPattern: string | undefined;
 	for (const pattern of ["@vision", "@default", activeModelPattern]) {

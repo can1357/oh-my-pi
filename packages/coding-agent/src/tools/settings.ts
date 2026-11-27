@@ -851,6 +851,32 @@ export const cfgImagesQuestionTimeoutMs = register({
 	},
 });
 
+export const cfgImagesQuestionRouting = register({
+	id: "images.questionRouting",
+	type: "enum",
+	values: ["auto", "active"] as const,
+	default: "auto",
+	ui: {
+		tab: "tools",
+		group: "Execution",
+		label: "Image Question Routing",
+		description:
+			"Which model answers read's ?q= image questions. Auto tries the vision role, the default role and the active model, then any available vision model, possibly on another provider. Active only uses the active model and fails if it cannot read images.",
+		options: [
+			{
+				value: "auto",
+				label: "Auto",
+				description: "Vision role, default role, active model, then any vision model.",
+			},
+			{
+				value: "active",
+				label: "Active Model Only",
+				description: "Never send images to another model or provider.",
+			},
+		],
+	},
+});
+
 export const cfgCheckpointEnabled = register({
 	id: "checkpoint.enabled",
 	type: "boolean",

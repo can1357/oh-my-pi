@@ -343,6 +343,44 @@ describe("read image questions", () => {
 		expect(stub.calls).toHaveLength(0);
 	});
 
+	it("refuses cross-provider image questions under active-only routing", async () => {
+		const otherProviderVision: Model<"openai-responses"> = { ...visionModel, provider: "other", id: "other-vision" };
+		const stub = createCompleteSimpleForbiddenStub();
+		const session = createSession(
+			testDir,
+			otherProviderVision,
+			"test-key",
+			Settings.isolated({ "images.questionRouting": "active" }),
+			{ activeModel: textOnlyModel, availableModels: [textOnlyModel, otherProviderVision] },
+		);
+
+		await expect(
+			new ReadTool(session, stub.fn).execute("call", { path: `${imagePath}?q=What is visible?` }),
+		).rejects.toThrow(/Active model openai\/gpt-4\.1 does not support image input/);
+		expect(stub.calls).toHaveLength(0);
+
+		const metadata = await new ReadTool(session).execute("call", { path: imagePath });
+		expect(textOf(metadata)).not.toContain("?q=");
+	});
+
+	it("answers with the active model instead of the vision role under active-only routing", async () => {
+		const otherProviderVision: Model<"openai-responses"> = { ...visionModel, provider: "other", id: "other-vision" };
+		const stub = createCompleteSimpleSuccessStub("Active answer");
+		const session = createSession(
+			testDir,
+			otherProviderVision,
+			"test-key",
+			Settings.isolated({ "images.questionRouting": "active" }),
+			{ activeModel: visionModel, availableModels: [otherProviderVision, visionModel] },
+		);
+
+		const result = await new ReadTool(session, stub.fn).execute("call", { path: `${imagePath}?q=What is visible?` });
+
+		expect(result.content).toEqual([{ type: "text", text: "Active answer" }]);
+		const selected = stub.calls[0]?.[0] as Model<"openai-responses"> | undefined;
+		expect(`${selected?.provider}/${selected?.id}`).toBe("openai/gpt-4o");
+	});
+
 	it("returns metadata and a question hint without pixels for text-only active models", async () => {
 		const session = createSession(testDir, visionModel, "test-key", Settings.isolated(), {
 			activeModel: textOnlyModel,
