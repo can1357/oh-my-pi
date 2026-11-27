@@ -20,8 +20,26 @@ function ceilingMiss(model: Model, ceiling: Effort): string {
 }
 
 /**
+ * The guard every request of a revived session is held to ({@link subagentDispatchAssertion}): offline mode's
+ * provider, a per-call worker's grants. It throws for a model the request may not go to.
+ */
+export type DispatchGuard = (model: Model) => void;
+
+/** Why `guard` refuses `model`, which `identity` names: its own message. Undefined where it passes the model. */
+export function dispatchRefusal(identity: string, model: Model, guard: DispatchGuard | undefined): string | undefined {
+	try {
+		guard?.(model);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		return `Model "${identity}" cannot be dispatched: ${message.replace(/\.$/, "")}`;
+	}
+	return undefined;
+}
+
+/**
  * Why `model`, which `identity` resolved to, cannot start a revive: the registry does not serve it, its provider has
- * no credential, or it cannot run at or below `ceiling`. Undefined where it can.
+ * no credential, `guard` refuses it (offline mode holds requests to another provider), or it cannot run at or below
+ * `ceiling`. Undefined where it can.
  */
 export function unusableModelReason(
 	models: RevivedModels,
@@ -29,9 +47,12 @@ export function unusableModelReason(
 	identity: string,
 	model: Model | undefined,
 	ceiling: Effort | undefined,
+	guard?: DispatchGuard,
 ): string | undefined {
 	if (!model) return models.notFoundMessage(identity);
 	if (!modelRegistry.hasConfiguredAuth(model)) return `Model "${identity}" has no credential`;
+	const refusal = dispatchRefusal(identity, model, guard);
+	if (refusal !== undefined) return refusal;
 	if (ceiling && !modelSupportsEffortCeiling(model, ceiling)) return ceilingMiss(model, ceiling);
 	return undefined;
 }
@@ -46,9 +67,10 @@ export interface ColdReviveModelChoice {
 /**
  * The model a cold revive starts on: the stored model where {@link unusableModelReason} finds none. Else the live
  * parent's model (`fallback`), with one warning that names the cause and both models. A spawn that held its named
- * model (`mayUseParent` false) is refused. A parent model that cannot run at or below the ceiling either still
- * revives the subagent, which stays resumable: at that model's lowest effort, with a `ceilingNotice` that names both
- * models and the ceiling.
+ * model (`mayUseParent` false) is refused, and so is a revive whose `guard` (offline mode's) refuses the parent's
+ * model too or finds none to hold. A parent model that cannot run at or below the ceiling either still revives the
+ * subagent, which stays resumable: at that model's lowest effort, which no later level replaces (`levelHeld`), with a
+ * `ceilingNotice` that names both models and the ceiling.
  */
 export async function chooseColdReviveModel(args: {
 	id: string;
@@ -59,11 +81,12 @@ export async function chooseColdReviveModel(args: {
 	ceiling: Effort | undefined;
 	fallback: Model | undefined;
 	mayUseParent: boolean;
+	guard: DispatchGuard | undefined;
 }): Promise<ColdReviveModelChoice> {
-	const { id, identity, fallback, ceiling } = args;
+	const { id, identity, fallback, ceiling, guard } = args;
 	if (identity === null) return { model: { kind: "model", model: undefined, thinkingLevel: args.level } };
 	const known = await args.models.resolve(identity);
-	const reason = unusableModelReason(args.models, args.modelRegistry, identity, known, ceiling);
+	const reason = unusableModelReason(args.models, args.modelRegistry, identity, known, ceiling, guard);
 	if (reason === undefined) return { model: { kind: "model", model: known, thinkingLevel: args.level } };
 	if (!args.mayUseParent) {
 		throw new Error(
@@ -71,11 +94,19 @@ export async function chooseColdReviveModel(args: {
 		);
 	}
 	const modelName = fallback ? formatModelStringWithRouting(fallback) : undefined;
+	if (guard) {
+		// The session would be refused at its first request: refuse it before it is built.
+		const refusal =
+			fallback && modelName ? dispatchRefusal(modelName, fallback, guard) : "the live parent has no model";
+		if (refusal !== undefined) {
+			throw new Error(`Cannot revive subagent "${id}": ${reason}, and ${refusal}. The agent was not revived.`);
+		}
+	}
 	if (fallback && ceiling && !modelSupportsEffortCeiling(fallback, ceiling)) {
 		const lowest = minimumSupportedEffort(fallback);
 		const ceilingNotice = `${reason}, and ${ceilingMiss(fallback, ceiling)}: subagent "${id}" runs on ${modelName} at its lowest effort, ${lowest}, above that ceiling.`;
 		logger.warn(ceilingNotice, { subagent: id, model: modelName });
-		return { model: { kind: "model", model: fallback, thinkingLevel: lowest }, ceilingNotice };
+		return { model: { kind: "model", model: fallback, thinkingLevel: lowest, levelHeld: true }, ceilingNotice };
 	}
 	logger.warn(reason, { subagent: id, model: modelName });
 	return { model: { kind: "model", model: fallback, thinkingLevel: args.level } };
@@ -83,11 +114,11 @@ export async function chooseColdReviveModel(args: {
 
 /**
  * The model a per-call worker resumes on: its saved model where the registry serves it, its provider has a
- * credential, `approve` (the grants as they are now) passes it and it can run at or below `ceiling`. A saved model
- * that fails any check but the grants falls back to the live parent's model (`fallback`), held to the same grants
- * and ceiling, with one warning that names the cause and both models, unless the spawn held its named model
- * (`mayUseParent` false). A grant refusal of the saved model holds, as does any refusal of the parent's model: the
- * worker is then refused.
+ * credential, `guard` (offline mode's) and `approve` (the grants as they are now) pass it and it can run at or below
+ * `ceiling`. A saved model that fails any check but the grants falls back to the live parent's model (`fallback`),
+ * held to the same guard, grants and ceiling, with one warning that names the cause and both models, unless the
+ * spawn held its named model (`mayUseParent` false). A grant refusal of the saved model holds, as does any refusal
+ * of the parent's model: the worker is then refused.
  */
 export async function choosePerCallModel(args: {
 	id: string;
@@ -99,12 +130,13 @@ export async function choosePerCallModel(args: {
 	ceiling: Effort | undefined;
 	fallback: Model | undefined;
 	mayUseParent: boolean;
+	guard: DispatchGuard | undefined;
 }): Promise<ExplicitBuildModel> {
-	const { id, identity, models, modelRegistry, approve, ceiling } = args;
+	const { id, identity, models, modelRegistry, approve, ceiling, guard } = args;
 	// Discovery a spawn started may still add the saved model.
 	await modelRegistry.awaitBackgroundRefresh();
 	const saved = await models.resolve(identity);
-	let reason = unusableModelReason(models, modelRegistry, identity, saved, undefined);
+	let reason = unusableModelReason(models, modelRegistry, identity, saved, undefined, guard);
 	if (saved && reason === undefined) {
 		try {
 			approve(saved);
@@ -118,11 +150,15 @@ export async function choosePerCallModel(args: {
 	}
 	const fallback = args.mayUseParent ? args.fallback : undefined;
 	if (!fallback) throw new PerCallModelError(`Cannot revive subagent "${id}": ${reason}. The agent was not revived.`);
+	const fallbackName = formatModelStringWithRouting(fallback);
+	const refusal = dispatchRefusal(fallbackName, fallback, guard);
+	if (refusal !== undefined) {
+		throw new PerCallModelError(
+			`Cannot revive subagent "${id}": ${reason}, and ${refusal}. The agent was not revived.`,
+		);
+	}
 	approve(fallback);
 	if (ceiling) assertModelSupportsEffortCeiling(fallback, ceiling);
-	logger.warn(reason ?? models.notFoundMessage(identity), {
-		subagent: id,
-		model: formatModelStringWithRouting(fallback),
-	});
+	logger.warn(reason ?? models.notFoundMessage(identity), { subagent: id, model: fallbackName });
 	return { kind: "model", model: fallback, thinkingLevel: args.level };
 }

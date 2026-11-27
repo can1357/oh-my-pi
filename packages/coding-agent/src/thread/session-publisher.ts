@@ -536,8 +536,12 @@ function localModel(session: AgentSession, model: Model): Model {
 	return session.modelRegistry.find(model.provider, model.id) ?? model;
 }
 
-/** Worker-side implementation of {@link SessionHostProtocol}; commands flush state before their result posts. */
-export const SESSION_HOST_SERVE: RpcServe<SessionPublisher, SessionHostProtocol> = {
+/**
+ * Worker-side implementation of {@link SessionHostProtocol} but for `subagentParentInputs`, which the agents service
+ * adds where it exports the host (`thread/services/agents.ts`): that command serves the revive subsystem, whose
+ * imports reach this module. Commands flush state before their result posts.
+ */
+export const SESSION_HOST_SERVE: Omit<RpcServe<SessionPublisher, SessionHostProtocol>, "subagentParentInputs"> = {
 	prompt: async (publisher, text, options) => settle(publisher, publisher.session.prompt(text, options)),
 	steer: async (publisher, text, images, options) => settle(publisher, publisher.session.steer(text, images, options)),
 	abort: async (publisher, options) => settle(publisher, publisher.session.abort(options)),
@@ -607,11 +611,6 @@ export const SESSION_HOST_SERVE: RpcServe<SessionPublisher, SessionHostProtocol>
 		publisher.session.exportToHtml(outputPath, useUserThemes),
 	enableIdleMaintenance: (publisher, options) => publisher.session.enableIdleMaintenance(options),
 	refreshIdleMaintenance: publisher => publisher.session.refreshIdleMaintenance(),
-	subagentParentInputs: async (publisher, id, descriptors) => {
-		// On demand: the revive subsystem stays out of session construction's import graph.
-		const { serveSubagentParentInputs } = await import("../task/revive-parent-inputs");
-		return serveSubagentParentInputs(publisher.session, id, descriptors);
-	},
 };
 
 async function settle<T>(publisher: SessionPublisher, pending: Promise<T>): Promise<T> {

@@ -16,6 +16,7 @@ import { RemoteAgentSession } from "../thread/remote-agent-session";
 import { isRpcProxy } from "../thread/rpc";
 import { type SessionSettingsSource, sessionSettingsSource, settingsFromSource } from "../thread/session-mirror";
 import { toWorkerCustomTool } from "../thread/services/integrations";
+import { mainSideTelemetryConfig } from "../thread/services/telemetry";
 import type { ToolSession } from "../tools";
 import type { EventBus } from "../utils/event-bus";
 import { definedEvalCustomTools, unavailableEvalCustomTool } from "./eval-tools";
@@ -165,8 +166,11 @@ export async function serveSubagentParentInputs(
 			asyncJobManager: mainObject(inputs.asyncJobManager),
 			mcpManager: mainObject(inputs.mcpManager),
 			parentArtifactManager: mainObject(inputs.parentArtifactManager),
-			parentHindsightSessionState: mainObject(inputs.parentHindsightSessionState),
-			parentMnemopiSessionState: mainObject(inputs.parentMnemopiSessionState),
+			parentHindsightSessionState: mainBackedState(inputs.parentHindsightSessionState),
+			parentMnemopiSessionState: mainBackedState(inputs.parentMnemopiSessionState),
+			// The hooks main gave this thread, not this thread's wrappers of them: a wrapper would carry a span the
+			// revived session starts on main to this thread, which cannot send it back.
+			parentTelemetry: inputs.parentTelemetry && mainSideTelemetryConfig(inputs.parentTelemetry),
 			eventBus: mainObject(inputs.eventBus),
 			subagentEventBus: mainObject(inputs.subagentEventBus),
 		},
@@ -179,6 +183,18 @@ export async function serveSubagentParentInputs(
 /** `value` where it is a main-thread object this thread imported, which reaches main as itself; else undefined. */
 function mainObject<T>(value: T | undefined): T | undefined {
 	return isRpcProxy(value) ? value : undefined;
+}
+
+/**
+ * The main-thread memory state behind `state`, a parent's: itself where this thread imported it, else the nearest
+ * state its alias chain reaches that this thread imported (a subagent homed here aliases its own parent's state
+ * on main in a state of this thread); undefined where the chain stays on this thread.
+ */
+function mainBackedState<T extends { readonly aliasOf?: T }>(state: T | undefined): T | undefined {
+	for (let at = state; at !== undefined; at = at.aliasOf) {
+		if (isRpcProxy(at)) return at;
+	}
+	return undefined;
 }
 
 /**

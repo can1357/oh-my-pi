@@ -3,12 +3,15 @@
  * does where the record is old, damaged or names a model the registry no longer serves.
  */
 import { afterEach, expect, it, vi } from "bun:test";
+import type { Model } from "@oh-my-pi/pi-ai";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { cfgOffline } from "@oh-my-pi/pi-coding-agent/config/auxiliary-model-policy";
 import { formatModelStringWithRouting } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { cfgEvalToolsEnabled } from "@oh-my-pi/pi-coding-agent/eval/settings";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { createEvalCustomTools } from "@oh-my-pi/pi-coding-agent/task/eval-tools";
+import { cfgTaskMaxEffort } from "@oh-my-pi/pi-coding-agent/task/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { logger } from "@oh-my-pi/pi-utils";
 import { localSession } from "../helpers/local-session";
@@ -20,6 +23,7 @@ import {
 	type ReviveEnv,
 	SPAWN_MODEL,
 	sessionInitRecords,
+	type SpawnOverrides,
 } from "./revive-harness";
 
 let env: ReviveEnv | undefined;
@@ -30,7 +34,7 @@ afterEach(async () => {
 });
 
 /** Opens a process with `settings`, spawns `id` with `extra` over the task spawn, and parks it. */
-async function spawnAndPark(id: string, settings: Readonly<Record<string, unknown>>, extra = {}) {
+async function spawnAndPark(id: string, settings: Readonly<Record<string, unknown>>, extra: SpawnOverrides = {}) {
 	const opened = await openReviveEnv(settings);
 	env = opened;
 	const root = opened.createLiveParent();
@@ -103,8 +107,8 @@ it("revives a subagent whose stored model is gone on the parent's model, unless 
 	opened.addModel("mock-named");
 	const root = opened.createLiveParent();
 	opened.installColdReviver(root);
-	const held = await opened.spawn(opened.taskSpawn(root, "HeldNamed", { modelOverride: "mock/mock-named" }));
-	const free = await opened.spawn(opened.taskSpawn(root, "FreeNamed", { modelOverride: "mock/mock-named" }));
+	const held = await opened.spawn(opened.taskSpawn(root, "HeldNamed", { model: "mock/mock-named" }));
+	const free = await opened.spawn(opened.taskSpawn(root, "FreeNamed", { model: "mock/mock-named" }));
 	for (const spawned of [held, free]) await opened.park(spawned.id);
 	// The hook a held named-model setting writes at the spawn.
 	await editStoredSpawnSpecs(held.sessionFile, spec => {
@@ -136,7 +140,7 @@ it("revives on the parent's model at its lowest effort, with a visible notice, w
 	opened.installColdReviver(root);
 	// An effort hint stores the live `task.maxEffort` as the spawn's ceiling.
 	const spawned = await opened.spawn(
-		opened.taskSpawn(root, "CeilingMiss", { modelOverride: "mock/mock-thinking", effort: "lo" }),
+		opened.taskSpawn(root, "CeilingMiss", { model: "mock/mock-thinking", effort: "lo" }),
 	);
 	await opened.park(spawned.id);
 	opened.removeModel("mock/mock-thinking");
@@ -165,7 +169,7 @@ it("keeps an effort set on the live subagent through both revives", async () => 
 	const root = opened.createLiveParent();
 	opened.installColdReviver(root);
 	const spawned = await opened.spawn(
-		opened.taskSpawn(root, "EffortChanged", { agent: fixtureAgent(), modelOverride: "mock/mock-thinking" }),
+		opened.taskSpawn(root, "EffortChanged", { agent: fixtureAgent(), model: "mock/mock-thinking" }),
 	);
 	const live = localSession(AgentRegistry.global().get(spawned.id)?.session);
 	expect(live.thinkingLevel).toBe(Effort.Low);
@@ -191,7 +195,7 @@ async function spawnThinking(id: string) {
 	opened.addModel("mock-thinking", { thinking: true });
 	const root = opened.createLiveParent();
 	opened.installColdReviver(root);
-	const spawned = await opened.spawn(opened.taskSpawn(root, id, { modelOverride: "mock/mock-thinking" }));
+	const spawned = await opened.spawn(opened.taskSpawn(root, id, { model: "mock/mock-thinking" }));
 	const live = localSession(AgentRegistry.global().get(spawned.id)?.session);
 	return { env: opened, spawned, live };
 }
@@ -251,4 +255,196 @@ it("keeps on the revive in memory the eval tools its spawn was given, after eval
 	const warm = await opened.revive(spawned.id);
 
 	expect(warm.build.options.customTools?.map(tool => tool.name)).toEqual(["lookup_rows"]);
+});
+
+/** `provider/id` of the model a session runs on; undefined where it runs on none. */
+function modelOf(session: { model?: Model }): string | undefined {
+	return session.model ? formatModelStringWithRouting(session.model) : undefined;
+}
+
+it("fails closed on a stored policy that lacks the spawn allowlist its spawn always writes", async () => {
+	// The fixture agent names no spawns, so its spawn allows none ("").
+	const { env, spawned } = await spawnAndPark("NoAllowlist", {});
+	expect(
+		await editStoredSpawnSpecs(spawned.sessionFile, spec => {
+			delete (spec.policy as Record<string, unknown>).spawns;
+		}),
+	).toBeGreaterThan(0);
+	env.dropWarmReviver(spawned.id);
+
+	const cold = await env.revive(spawned.id);
+
+	// An absent allowlist is one the SDK reads as "*": every agent.
+	expect(cold.session.evalToolSession?.getSessionSpawns?.()).toBe("");
+	expect(cold.build.options.spawns).toBe("");
+});
+
+it.each([
+	{ presentation: "a tool command", commands: true },
+	{ presentation: "a top-level tool", commands: false },
+])(
+	"keeps the stored tools on a cold revive after an MCP server gained $presentation while the subagent was parked",
+	async ({ commands }) => {
+		const opened = await openReviveEnv({ "tools.commands": commands });
+		env = opened;
+		opened.mcp.setFixtureTools(["lookup"]);
+		const root = opened.createLiveParent();
+		opened.installColdReviver(root);
+		const spawned = await opened.spawn(opened.taskSpawn(root, "ToolInstalled"));
+		await opened.park(spawned.id);
+		opened.mcp.setFixtureTools(["lookup", "installed"]);
+		opened.dropWarmReviver(spawned.id);
+
+		const cold = await opened.revive(spawned.id);
+		const request = await opened.wake(cold.session, spawned.id);
+
+		expect(cold.session.getEnabledToolNames()).not.toContain("mcp__fixture__installed");
+		expect(cold.session.getEnabledToolNames()).toContain("mcp__fixture__lookup");
+		expect(request.tools).toBe(spawned.lastRequest.tools);
+	},
+);
+
+it("keeps the parent's lowest effort past an effort the subagent set before the ceiling was lowered", async () => {
+	const opened = await openReviveEnv({ "task.maxEffort": "high" });
+	env = opened;
+	opened.addModel("mock-thinking", { thinking: true });
+	// The parent's model has no effort at or below the ceiling the revive will read.
+	const parentModel = opened.addModel("mock-high", { thinking: true, efforts: [Effort.Medium, Effort.High] });
+	const root = opened.createLiveParent({}, parentModel);
+	opened.installColdReviver(root);
+	// An effort hint stores the live `task.maxEffort`, high, as the spawn's ceiling.
+	const spawned = await opened.spawn(
+		opened.taskSpawn(root, "SavedHigh", { model: "mock/mock-thinking", effort: "lo" }),
+	);
+	// What `agent://<id>/effort` writes on the live session, under the ceiling of the time.
+	localSession(AgentRegistry.global().get(spawned.id)?.session).setThinkingLevel(Effort.High);
+	await opened.park(spawned.id);
+	cfgTaskMaxEffort.override(opened.settings, Effort.Low);
+	opened.removeModel("mock/mock-thinking");
+	opened.dropWarmReviver(spawned.id);
+
+	const cold = await opened.revive(spawned.id);
+
+	expect(modelOf(cold.session)).toBe("mock/mock-high");
+	expect(cold.session.thinkingLevel).toBe(Effort.Medium);
+	expect((await opened.wake(cold.session, spawned.id)).reasoning).toBe(Effort.Medium);
+});
+
+it("holds a per-call record that lacks its stored ceiling to the live task.maxEffort", async () => {
+	const opened = await openReviveEnv({
+		"task.perCallModel": "on",
+		"task.maxEffort": "high",
+		modelRoles: { default: SPAWN_MODEL, review: "mock/mock-thinking" },
+	});
+	env = opened;
+	opened.addModel("mock-thinking", { thinking: true });
+	const root = opened.createLiveParent();
+	opened.installColdReviver(root);
+	const spawned = await opened.spawn(
+		opened.taskSpawn(root, "PerCallNoCeiling", { perCallModel: "mock/mock-thinking:high" }),
+	);
+	await opened.park(spawned.id);
+	expect(
+		await editStoredSpawnSpecs(spawned.sessionFile, spec => {
+			delete spec.thinkingLevelCeiling;
+		}),
+	).toBeGreaterThan(0);
+	cfgTaskMaxEffort.override(opened.settings, Effort.Low);
+	opened.dropWarmReviver(spawned.id);
+
+	const cold = await opened.revive(spawned.id);
+
+	expect(cold.build.options.thinkingLevelCeiling).toBe(Effort.Low);
+	expect((await opened.wake(cold.session, spawned.id)).reasoning).toBe(Effort.Low);
+});
+
+it("keeps a per-call worker's unset effort where it resumes on a reasoning parent's model", async () => {
+	const opened = await openReviveEnv({
+		"task.perCallModel": "on",
+		modelRoles: { default: SPAWN_MODEL, review: "mock/plain" },
+	});
+	env = opened;
+	opened.addModel("plain");
+	const parentModel = opened.addModel("parent-thinking", { thinking: true });
+	const root = opened.createLiveParent({}, parentModel);
+	opened.installColdReviver(root);
+	// A model without thinking and no level: the spawn stores the unset selector, null.
+	const spawned = await opened.spawn(
+		opened.taskSpawn(root, "PerCallUnset", {
+			agent: fixtureAgent({ thinkingLevel: undefined }),
+			perCallModel: "mock/plain",
+		}),
+	);
+	const [record] = await sessionInitRecords(spawned.sessionFile);
+	expect((record?.spawnSpec as Record<string, unknown> | undefined)?.thinkingLevel).toBeNull();
+	await opened.park(spawned.id);
+	opened.removeModel("mock/plain");
+	opened.dropWarmReviver(spawned.id);
+
+	const cold = await opened.revive(spawned.id);
+
+	expect(modelOf(cold.session)).toBe("mock/parent-thinking");
+	expect(cold.session.configuredThinkingLevel()).toBeUndefined();
+});
+
+/** Opens a process whose registry also serves `remote/remote-model`, a model of another provider with a credential. */
+async function openWithRemoteModel() {
+	const opened = await openReviveEnv();
+	env = opened;
+	opened.authStorage.keys.setRuntime("remote", "test-key");
+	opened.addModel("remote-model", { provider: "remote" });
+	const root = opened.createLiveParent();
+	opened.installColdReviver(root);
+	return { env: opened, root };
+}
+
+it("revives an offline subagent on the parent's provider where its stored model is on another, unless its spawn held the model", async () => {
+	const { env, root } = await openWithRemoteModel();
+	const free = await env.spawn(env.taskSpawn(root, "OfflineFree", { model: "remote/remote-model" }));
+	const held = await env.spawn(env.taskSpawn(root, "OfflineHeld", { model: "remote/remote-model" }));
+	for (const spawned of [free, held]) await env.park(spawned.id);
+	await editStoredSpawnSpecs(held.sessionFile, spec => {
+		spec.parentFallbackHeld = true;
+	});
+	// Offline mode now holds every subagent request to the parent's provider, `mock`.
+	cfgOffline.override(env.settings, true);
+	for (const spawned of [free, held]) env.dropWarmReviver(spawned.id);
+
+	const revived = await env.revive(free.id);
+	expect(modelOf(revived.session)).toBe(SPAWN_MODEL);
+	expect((await env.wake(revived.session, free.id)).model).toBe(SPAWN_MODEL);
+
+	const builds = env.builds.length;
+	await expect(env.revive(held.id)).rejects.toThrow("Offline mode");
+	expect(env.builds.slice(builds).filter(build => build.options.agentId === held.id)).toEqual([]);
+});
+
+it("revives an offline subagent on its held model where a session-local switch is on another provider", async () => {
+	const { env, root } = await openWithRemoteModel();
+	const spawned = await env.spawn(env.taskSpawn(root, "OfflineSwitch"));
+	// What `agent://<id>/model` writes on the live session.
+	localSession(AgentRegistry.global().get(spawned.id)?.session).sessionManager.appendModelChange(
+		"remote/remote-model",
+		"temporary",
+	);
+	await env.park(spawned.id);
+	cfgOffline.override(env.settings, true);
+	env.dropWarmReviver(spawned.id);
+
+	const cold = await env.revive(spawned.id);
+
+	expect(modelOf(cold.session)).toBe(SPAWN_MODEL);
+	expect((await env.wake(cold.session, spawned.id)).model).toBe(SPAWN_MODEL);
+});
+
+it("refuses an offline revive of a record with no spawn spec whose model is on another provider", async () => {
+	const { env, root } = await openWithRemoteModel();
+	const spawned = await env.spawn(env.taskSpawn(root, "OfflineOlder", { model: "remote/remote-model" }));
+	await env.park(spawned.id);
+	await editSessionRecords(spawned.sessionFile, record => record.type === "session_init" && delete record.spawnSpec);
+	cfgOffline.override(env.settings, true);
+	env.dropWarmReviver(spawned.id);
+
+	await expect(env.revive(spawned.id)).rejects.toThrow("Offline mode");
+	expect(AgentRegistry.global().get(spawned.id)?.session ?? undefined).toBeUndefined();
 });

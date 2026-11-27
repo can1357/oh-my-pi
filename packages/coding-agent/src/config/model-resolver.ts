@@ -250,10 +250,11 @@ function resolveSpawnModelIdentityIn(identity: string, models: Model<Api>[]): Mo
 			if (formatModelStringWithRouting(routed) === identity) return routed;
 		}
 	}
-	// An OpenRouter route variant is cloned as the exact identity lookup clones it; the other
+	// An OpenRouter route variant is cloned as the exact identity lookup clones it, from a base row that can carry an
+	// upstream pin the identity does not name: only a clone of exactly this identity is the spawn's model. The other
 	// requested-id clones (a dated id) and inference profiles come from the provider reference lookup.
 	const variant = findOpenRouterRouteVariant(identity, models);
-	if (variant) return variant;
+	if (variant && formatModelStringWithRouting(variant) === identity) return variant;
 	const slashIndex = identity.indexOf("/");
 	if (slashIndex <= 0) return undefined;
 	const derived = resolveProviderModelReference(identity.slice(0, slashIndex), identity.slice(slashIndex + 1), models);

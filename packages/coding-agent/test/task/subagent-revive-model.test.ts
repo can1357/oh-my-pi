@@ -60,6 +60,7 @@ const coldChoice = (inputs: ModelInputs, mayUseParent: boolean, ceiling?: Effort
 		ceiling,
 		fallback,
 		mayUseParent,
+		guard: undefined,
 	});
 
 const cold = async (inputs: ModelInputs, mayUseParent: boolean, ceiling?: Effort, fallback: Model = parent) =>
@@ -81,6 +82,7 @@ const perCall = (
 		ceiling,
 		fallback,
 		mayUseParent,
+		guard: undefined,
 	});
 
 afterEach(() => {
@@ -171,7 +173,8 @@ describe("stored subagent model fallback", () => {
 			model: { kind: "model", model: parent, thinkingLevel: undefined },
 		});
 		const choice = await coldChoice(modelInputs(highOnly), true, Effort.Low, highParent);
-		expect(choice.model).toEqual({ kind: "model", model: highParent, thinkingLevel: Effort.Medium });
+		// The lowest effort holds: no level the transcript records replaces it.
+		expect(choice.model).toEqual({ kind: "model", model: highParent, thinkingLevel: Effort.Medium, levelHeld: true });
 		expect(choice.ceilingNotice).toBe(
 			'mock/saved has no supported thinking effort at or below task.maxEffort=low, and mock/parent has no supported thinking effort at or below task.maxEffort=low: subagent "cold" runs on mock/parent at its lowest effort, medium, above that ceiling.',
 		);
@@ -181,6 +184,7 @@ describe("stored subagent model fallback", () => {
 			kind: "model",
 			model: unordered,
 			thinkingLevel: Effort.Medium,
+			levelHeld: true,
 		});
 	});
 

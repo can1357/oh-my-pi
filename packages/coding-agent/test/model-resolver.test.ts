@@ -34,6 +34,7 @@ import {
 	scopeAllowList,
 	rolePriorityDefaults,
 	resolveProviderModelReference,
+	resolveSpawnModelIdentity,
 } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { DEFAULT_MODEL_ROLE_ALIAS, LEGACY_MODEL_ROLE_ALIAS_PREFIX } from "@oh-my-pi/pi-coding-agent/config/model-roles";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -1561,6 +1562,19 @@ describe("resolveExactModelIdentity", () => {
 		expect(
 			resolveExactModelIdentity("openrouter/z-ai/glm-4.7@cerebras:high", { getAvailable: () => allModels }),
 		).toBeUndefined();
+	});
+});
+
+describe("resolveSpawnModelIdentity", () => {
+	test("rebuilds an OpenRouter route variant only where the clone has the stored identity", () => {
+		const identity = "openrouter/z-ai/glm-4.7:nitro";
+		const base = allModels.find(model => formatModelStringWithRouting(model) === "openrouter/z-ai/glm-4.7");
+		const pinned = resolveExactModelIdentity("openrouter/z-ai/glm-4.7@cerebras", { getAvailable: () => allModels });
+		if (!base || !pinned) throw new Error("Expected the catalog's z-ai/glm-4.7 on OpenRouter");
+		const unpinnedVariant = resolveSpawnModelIdentity(identity, { getAll: () => [base] });
+		expect(unpinnedVariant && formatModelStringWithRouting(unpinnedVariant)).toBe(identity);
+		// A base row pinned to an upstream would make the clone a route the spawn did not run on.
+		expect(resolveSpawnModelIdentity(identity, { getAll: () => [pinned] })).toBeUndefined();
 	});
 });
 

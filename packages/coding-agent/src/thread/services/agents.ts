@@ -25,6 +25,7 @@ import { IrcBus } from "../../irc/bus";
 import { type AdoptOptions, type AgentReviver, AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import { AgentRegistry, type RegistryListener } from "../../registry/agent-registry";
 import { PromptDroppedError, SessionBusyError } from "../../session/agent-session";
+import { serveSubagentParentInputs } from "../../task/revive-parent-inputs";
 import type { WorkerThreadLink } from "../protocol";
 import { installPeerBridge } from "../peer-agent-session";
 import { RemoteAgentSession, SessionHostClient } from "../remote-agent-session";
@@ -384,7 +385,12 @@ function installWorker(link: WorkerThreadLink): void {
 	link.exportClass<SessionPublisher, SessionHostProtocol>(
 		AGENT_SESSION_HOST_KIND,
 		(value): value is SessionPublisher => value instanceof SessionPublisher,
-		SESSION_HOST_SERVE,
+		{
+			...SESSION_HOST_SERVE,
+			// A cold revive on main asks a parent homed here for its live inputs.
+			subagentParentInputs: (publisher, id, descriptors) =>
+				serveSubagentParentInputs(publisher.session, id, descriptors),
+		},
 	);
 }
 

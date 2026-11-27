@@ -4459,6 +4459,11 @@ export interface ExplicitBuildModel {
 	kind: "model";
 	model: Model | undefined;
 	thinkingLevel: ConfiguredThinkingLevel | undefined;
+	/**
+	 * The level is the lowest effort of a model that cannot run at or below the effort ceiling: a thinking level the
+	 * transcript records (an effort set under an earlier, higher ceiling) never replaces it.
+	 */
+	levelHeld?: boolean;
 }
 
 /** The patterns of a spawn that left the model to the session's own resolution: the spawn's first build only. */
@@ -4673,9 +4678,10 @@ export interface SubagentReviveInput {
 	/** Tool commands the session mounts. */
 	mountedToolNames: string[] | undefined;
 	/**
-	 * The tools the session is clamped to once it exists, with the tool commands it mounted: the tool list of an
-	 * older record, whose contract it is (`createAgentSession` can re-add extension or custom tools its run did not
-	 * carry). Undefined clamps none.
+	 * The tools the session is clamped to once it exists, with the tool commands it mounted: a revive from the stored
+	 * session passes the record's tool list (`session_init.tools`), its contract, since `createAgentSession` can add
+	 * extension, custom or MCP tools its run did not carry (a tool an MCP server gained while the subagent was
+	 * parked). Undefined clamps none.
 	 */
 	activeTools?: string[];
 	/**
@@ -4732,9 +4738,13 @@ export async function reviveSubagentSession(input: SubagentReviveInput): Promise
 		trackSubagentIrcRoster(session, cache.ircRenders);
 	}
 	if (held.blocks && !input.replayHeldPrompt) releaseHeldPromptAtFirstCall(session, held);
-	// Names the session does not have are ignored.
+	// Names the session does not have are ignored. The tool commands are the stored ones where the record names
+	// them: the build mounts a tool an MCP server gained while the subagent was parked as a command too.
 	if (input.activeTools) {
-		await session.setActiveToolsByName([...input.activeTools, ...session.getMountedToolCommandNames()]);
+		await session.setActiveToolsByName([
+			...input.activeTools,
+			...(input.mountedToolNames ?? session.getMountedToolCommandNames()),
+		]);
 	}
 	// The yield tool's schema carries the held batch's items; the replayed prefix must match it.
 	if (input.heldInit?.workPoolYieldItems) await session.setWorkPoolYieldItems(input.heldInit.workPoolYieldItems);
@@ -5284,11 +5294,12 @@ export function revivedThinkingLevel(
  * The model a revive whose build holds a model starts on: `held`, the one its session started on (a warm
  * revive) or the one a cold revive prepared from the spawn spec. A session-local switch since the spawn (a
  * prewalk handoff) owns the model and effort: the revive starts on the switched model where the registry
- * serves it, its provider has a credential and it fits the effort ceiling, else on the held one with a warning
- * that names the cause, and the transcript restores the effort. Without a switch, the level is
- * {@link revivedThinkingLevel}'s. The spawn's prewalk stays configured; the coordinator sees it was spent. A
- * per-call worker never switches models and keeps its stored effort. `discoveryRan`: an earlier step of the same
- * revive already ran the registry's discovery.
+ * serves it, its provider has a credential, the build's dispatch guard passes it (offline mode's provider) and it
+ * fits the effort ceiling, else on the held one with a warning that names the cause, and the transcript restores
+ * the effort. Without a switch, the level is {@link revivedThinkingLevel}'s, but for a held level
+ * (`levelHeld`: the lowest effort of a model above the ceiling), which stays. The spawn's prewalk stays
+ * configured; the coordinator sees it was spent. A per-call worker never switches models and keeps its stored
+ * effort. `discoveryRan`: an earlier step of the same revive already ran the registry's discovery.
  */
 export async function switchedOrHeldModel(
 	build: Pick<SubagentCreateInput, "spec" | "live" | "sessionManager">,
@@ -5298,12 +5309,15 @@ export async function switchedOrHeldModel(
 	const { spec, live, sessionManager } = build;
 	if (spec.perCallModel) return held;
 	const switched = sessionManager.getSessionLocalModelChange()?.model;
-	if (switched === undefined)
-		return { ...held, thinkingLevel: revivedThinkingLevel(sessionManager, held.thinkingLevel) };
+	if (switched === undefined) {
+		return held.levelHeld
+			? held
+			: { ...held, thinkingLevel: revivedThinkingLevel(sessionManager, held.thinkingLevel) };
+	}
 	const models = new RevivedModels(live.modelRegistry, live.settingsParent, discoveryRan);
 	const model = await models.resolve(switched);
 	const ceiling = liveEffortCeiling(spec.thinkingLevelCeiling, live.settingsParent);
-	const reason = unusableModelReason(models, live.modelRegistry, switched, model, ceiling);
+	const reason = unusableModelReason(models, live.modelRegistry, switched, model, ceiling, live.assertDispatchModel);
 	if (reason === undefined) return { kind: "model", model, thinkingLevel: undefined };
 	logger.warn(reason, {
 		subagent: spec.prompt.id,

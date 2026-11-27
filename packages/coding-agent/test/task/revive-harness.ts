@@ -1,5 +1,5 @@
 /**
- * Shared steps of the subagent revive tests. A test spawns a real subagent through `runSubprocess` on a
+ * Shared steps of the subagent revive tests. A test spawns a real subagent through `runStructuredSubagent` on a
  * scripted model, parks it, revives it warm through the lifecycle, drops the warm reviver as a subagent
  * worker's exit does, and revives the same stored session cold through the persisted reviver factory.
  * A call-through spy records every `createAgentSession` options object, and the scripted model records
@@ -23,7 +23,6 @@ import { type OverlayLayers, Settings } from "@oh-my-pi/pi-coding-agent/config/s
 import type { CustomTool } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
 import type { PreparedExtension } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
-import { sessionLocalProtocolOptions } from "@oh-my-pi/pi-coding-agent/internal-urls/context";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { MCPManager, type MCPToolScope } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { AgentLifecycleManager, type AgentReviver } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
@@ -33,13 +32,14 @@ import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import {
-	type ExecutorOptions,
-	type IrcWakeTurnMonitorOptions,
-	runSubprocess,
-} from "@oh-my-pi/pi-coding-agent/task/executor";
+import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
+import type { IrcWakeTurnMonitorOptions } from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
+import {
+	runStructuredSubagent,
+	type StructuredSubagentRequest,
+} from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ContextFileEntry, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import type { MCPToolDetails } from "@oh-my-pi/pi-coding-agent/tools/details/mcp";
@@ -126,8 +126,11 @@ export interface LiveParent {
 	readonly session: AgentSession;
 }
 
-/** What a parent's process allows its subagents; each is on where absent. */
-export type LivePolicy = Partial<Pick<ToolSession, "enableLsp" | "enableIrc" | "enableMCP">>;
+/** What a parent's process allows its subagents (each on where absent), and whether it is in plan mode. */
+export interface LivePolicy extends Partial<Pick<ToolSession, "enableLsp" | "enableIrc" | "enableMCP">> {
+	/** The parent is in plan mode: its spawns take the plan-mode contract, as a restricted spawn does. */
+	planMode?: boolean;
+}
 
 export interface SpawnedSubagent {
 	readonly id: string;
@@ -182,6 +185,8 @@ export interface ScriptedModelOptions {
 	thinking?: boolean;
 	/** The only efforts a thinking model takes, in place of {@link THINKING_LADDER}'s. */
 	efforts?: readonly Effort[];
+	/** The model's provider, `mock` by default; a test gives any other a credential itself. */
+	provider?: string;
 }
 
 /** A spawn's first request ends its run with a `yield` of `data`; every later request is answered with text. */
@@ -304,57 +309,14 @@ async function writeDiscoveryFixtures(cwd: string): Promise<DiscoveryFixtures> {
 	};
 }
 
-/** The `runSubprocess` options a spawner takes from the spawning session; a test adds the rest. */
-export type SpawnerOptions = Omit<ExecutorOptions, "agent" | "task" | "index" | "id">;
-
 /**
- * The `runSubprocess` options a spawner takes from the spawning session, as `buildExecutorOptions`
- * (`task/structured-subagent.ts`) takes them; a test adds the agent, the task and its own inputs.
+ * What a test gives {@link ReviveEnv.taskSpawn} over the request a task surface sends: every field of the
+ * production request but the ones the harness fills (the parent session and the reserved id), and the agent as a
+ * definition, which the harness serves to the spawn's own discovery.
  */
-export function spawnerOptions(session: ToolSession, restrictToolNames = false): SpawnerOptions {
-	const enableMCP = !restrictToolNames && (session.enableMCP ?? true);
-	return {
-		cwd: session.cwd,
-		costGate: session.costGate,
-		additionalDirectories: session.additionalDirectories,
-		getApiKey: session.getApiKey,
-		credentialSourceSessionId: session.getCredentialSourceSessionId?.(),
-		taskDepth: session.taskDepth ?? 0,
-		restrictToolNames,
-		// A spawner passes its session's LSP policy, off for a plan-mode spawn (the restricted contract here).
-		enableLsp: !restrictToolNames && (session.enableLsp ?? true),
-		eventBus: session.eventBus,
-		subagentEventBus: session.subagentEventBus,
-		authStorage: session.authStorage,
-		modelRegistry: session.modelRegistry,
-		settings: session.settings,
-		asyncJobManager: session.asyncJobManager,
-		inheritedSessionAgents: session.getSessionAgents?.(),
-		parentActiveProvider: session.getActiveModel?.()?.provider,
-		mcpManager: enableMCP ? (session.mcpManager ?? MCPManager.instance()) : undefined,
-		mcpToolScope: session.mcpToolScope,
-		enableMCP,
-		contextFiles: session.contextFiles,
-		noContextFiles: session.noContextFiles,
-		skills: [...(session.skills ?? [])],
-		workspaceTree: session.workspaceTree,
-		promptTemplates: session.promptTemplates,
-		rules: session.rules,
-		extensionRoots: session.effectiveExtensionRoots,
-		preloadedExtensionPaths: restrictToolNames ? [] : session.extensionPaths,
-		preloadedPreparedExtensions: session.preparedExtensions,
-		preloadedCustomToolPaths: restrictToolNames ? [] : session.customToolPaths,
-		localProtocolOptions: sessionLocalProtocolOptions(session),
-		parentArtifactManager: session.getArtifactManager?.() ?? undefined,
-		parentHindsightSessionState: session.getHindsightSessionState?.(),
-		parentMnemopiSessionState: session.getMnemopiSessionState?.(),
-		parentTelemetry: session.getTelemetry?.(),
-		parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
-		parentSessionKey: session.getAgentSession?.()?.instanceKey,
-		parentPromptCacheKey: session.getPromptCacheKey?.(),
-		parentServiceTier: session.getServiceTierByFamily ? (session.getServiceTierByFamily() ?? null) : undefined,
-	};
-}
+export type SpawnOverrides = Partial<Omit<StructuredSubagentRequest, "session" | "agent" | "identity">> & {
+	agent?: AgentDefinition;
+};
 
 interface ReviveEnvParts {
 	root: string;
@@ -391,6 +353,8 @@ export class ReviveEnv {
 	readonly #waiters: Array<(request: RecordedRequest) => void> = [];
 	/** Models the registry lists besides its catalog. */
 	readonly #models: Model<Api>[] = [];
+	/** Agent definitions the spawn's own discovery finds, by name; {@link taskSpawn} adds the one it spawns. */
+	readonly #agents = new Map<string, AgentDefinition>();
 	readonly #lifecycle: AgentLifecycleManager;
 	readonly #adopt: Mock<AgentLifecycleManager["adopt"]>;
 
@@ -427,6 +391,11 @@ export class ReviveEnv {
 		});
 		this.#lifecycle = localLifecycle();
 		this.#adopt = vi.spyOn(this.#lifecycle, "adopt");
+		// The fixture agents a spawn selects by name, in place of a disk scan of the temporary workspace.
+		vi.spyOn(discoveryModule, "discoverAgents").mockImplementation(async () => ({
+			agents: [...this.#agents.values()],
+			projectAgentsDir: null,
+		}));
 	}
 
 	get lifecycle(): AgentLifecycleManager {
@@ -434,11 +403,12 @@ export class ReviveEnv {
 	}
 
 	#scriptedModel(id: string, options: ScriptedModelOptions = {}): MockModel {
+		const provider = options.provider ?? "mock";
 		const model = createMockModel({
 			id,
-			provider: "mock",
+			provider,
 			reasoning: options.thinking,
-			handler: (context, streamOptions) => this.#answer(`mock/${id}`, context, streamOptions),
+			handler: (context, streamOptions) => this.#answer(`${provider}/${id}`, context, streamOptions),
 		});
 		if (!options.thinking) return model;
 		const thinking = options.efforts ? { mode: "effort" as const, efforts: [...options.efforts] } : THINKING_LADDER;
@@ -452,7 +422,7 @@ export class ReviveEnv {
 		return scriptedResponse(context, this.yieldData);
 	}
 
-	/** A scripted model the registry lists from now on, its requests recorded as `mock/<id>`. */
+	/** A scripted model the registry lists from now on, its requests recorded as `<provider>/<id>`. */
 	addModel(id: string, options: ScriptedModelOptions = {}): MockModel {
 		const model = this.#scriptedModel(id, options);
 		this.#models.push(model);
@@ -475,7 +445,8 @@ export class ReviveEnv {
 	/**
 	 * A live root session holding the discovery fixtures, on `model` ({@link spawnModel} by default): its tool session
 	 * is what a spawner reads, and `evalToolSession` exposes that same tool session on the root, where a cold revive
-	 * reads the live parent's inputs. `policy` is what the parent's process allows (each on by default).
+	 * reads the live parent's inputs. Its session file is the one whose directory a spawn leases for its artifacts.
+	 * `policy` is what the parent's process allows (each on by default) and whether it is in plan mode.
 	 */
 	createLiveParent(policy: LivePolicy = {}, model: Model = this.spawnModel): LiveParent {
 		const roots: EffectiveExtensionRoots = { explicit: [], mode: "merge", configured: [], configuredLevel: "user" };
@@ -487,7 +458,8 @@ export class ReviveEnv {
 			cwd: this.cwd,
 			hasUI: false,
 			settings: this.settings,
-			getSessionFile: () => null,
+			// `leaseArtifacts` takes the spawn's artifacts directory from this path, by dropping its extension.
+			getSessionFile: () => `${this.artifactsDir}.jsonl`,
 			getSessionSpawns: () => "*",
 			getAgentId: () => MAIN_AGENT_ID,
 			taskDepth: 0,
@@ -499,6 +471,14 @@ export class ReviveEnv {
 			enableMCP: policy.enableMCP ?? true,
 			enableLsp: policy.enableLsp ?? true,
 			...(policy.enableIrc === undefined ? {} : { enableIrc: policy.enableIrc }),
+			...(policy.planMode === undefined
+				? {}
+				: {
+						getPlanModeState: () => ({
+							enabled: policy.planMode === true,
+							planFilePath: path.join(this.cwd, "PLAN.md"),
+						}),
+					}),
 			additionalDirectories: workspaceRoots,
 			// A root session's tool session gives its own session id as a spawn's credential source.
 			getCredentialSourceSessionId: () => sessionId,
@@ -547,30 +527,38 @@ export class ReviveEnv {
 		this.#lifecycle.setPersistedSubagentReviverFactory(factory, () => 0);
 	}
 
-	/** The `runSubprocess` options of a task spawn of `id` by `parent`, with `extra` over them. */
-	taskSpawn(parent: LiveParent, id: string, extra: Partial<ExecutorOptions> = {}): ExecutorOptions {
-		const agent = extra.agent ?? fixtureAgent();
+	/**
+	 * The request a task surface sends to spawn `id` under `parent`, with `extra` over it. The agent of `extra` is
+	 * the definition the spawn's own discovery serves under its name, as a project agent would be.
+	 */
+	taskSpawn(parent: LiveParent, id: string, extra: SpawnOverrides = {}): StructuredSubagentRequest {
+		const { agent = fixtureAgent(), ...overrides } = extra;
+		this.#agents.set(agent.name, agent);
 		return {
-			...spawnerOptions(parent.toolSession, extra.restrictToolNames),
-			id,
-			agent,
-			task: SPAWN_TASK,
-			index: 0,
-			artifactsDir: this.artifactsDir,
-			modelOverride: SPAWN_MODEL,
-			// A spawner passes the agent definition's thinking level (`buildExecutorOptions`, `vibe/runtime.ts`).
-			thinkingLevel: agent.thinkingLevel,
-			...extra,
+			session: parent.toolSession,
+			invocationKind: "task",
+			assignment: SPAWN_TASK,
+			agent: agent.name,
+			identity: { id },
+			keepAlive: true,
+			// A per-call worker's model is its own selector, which no host model may accompany.
+			...(overrides.perCallModel === undefined ? { model: SPAWN_MODEL } : {}),
+			...overrides,
 		};
 	}
 
-	/** Run a kept-alive subagent to its result; its session stays live and adopted. */
-	async spawn(options: ExecutorOptions): Promise<SpawnedSubagent> {
-		const result = await runSubprocess(options);
-		if (result.exitCode !== 0) throw new Error(`Spawn of ${options.id} failed: ${result.error ?? result.stderr}`);
+	/**
+	 * Spawn a kept-alive subagent through the production entrypoint ({@link runStructuredSubagent}), so the build it
+	 * is revived against is the one `buildExecutorOptions` makes. Its session stays live and adopted.
+	 */
+	async spawn(request: StructuredSubagentRequest): Promise<SpawnedSubagent> {
+		const id = request.identity?.id;
+		if (!id) throw new Error("A fixture spawn names the id it reserves");
+		const { result } = await runStructuredSubagent(request);
+		if (result.exitCode !== 0) throw new Error(`Spawn of ${id} failed: ${result.error ?? result.stderr}`);
 		const lastRequest = this.requests.at(-1);
-		if (!lastRequest) throw new Error(`Spawn of ${options.id} sent no request`);
-		return { id: options.id, sessionFile: path.join(this.artifactsDir, `${options.id}.jsonl`), lastRequest };
+		if (!lastRequest) throw new Error(`Spawn of ${id} sent no request`);
+		return { id, sessionFile: path.join(this.artifactsDir, `${id}.jsonl`), lastRequest };
 	}
 
 	park(id: string): Promise<void> {
@@ -616,9 +604,9 @@ export class ReviveEnv {
 	 * Spawn, park, revive warm and wake, park, drop the warm reviver, revive cold and wake: one subagent revived from
 	 * memory and from its stored session with nothing changed between.
 	 */
-	async runParity(root: LiveParent, options: ExecutorOptions): Promise<ParityRun> {
+	async runParity(root: LiveParent, request: StructuredSubagentRequest): Promise<ParityRun> {
 		this.installColdReviver(root);
-		const spawned = await this.spawn(options);
+		const spawned = await this.spawn(request);
 		await this.park(spawned.id);
 		const warm = await this.revive(spawned.id);
 		const warmRequest = await this.wake(warm.session, spawned.id);

@@ -164,19 +164,31 @@ export function createEvalCustomTools(session: ToolSession, descriptors: EvalToo
 
 /**
  * The tools of `descriptors` that a kernel of `session` defines now, by name and language, built over it as
- * {@link createEvalCustomTools} builds them; a descriptor no kernel defines is left out. Runs on the thread
- * whose kernels `session` owns.
+ * {@link createEvalCustomTools} builds them; a descriptor no kernel defines is left out. Each kernel is asked only
+ * for the recorded names of its own language, so a name both kernels define, which a listing of every tool refuses,
+ * hides no tool. Runs on the thread whose kernels `session` owns.
  */
 export async function definedEvalCustomTools(
 	session: ToolSession,
 	descriptors: readonly EvalToolDescriptor[],
 ): Promise<CustomTool[]> {
-	if (descriptors.length === 0) return [];
-	// `listEvalTools`, not `describeEvalTools`, which throws on a name no kernel defines.
-	const defined = new Map((await listEvalTools(session)).map(tool => [tool.name, tool.language]));
+	if (descriptors.length === 0 || !evalToolsEnabled(session)) return [];
+	const recorded = (language: EvalToolDescriptor["language"]) =>
+		descriptors.filter(descriptor => descriptor.language === language).map(descriptor => descriptor.name);
+	const python = recorded("python");
+	const js = recorded("js");
+	// A query for no names lists every tool of the kernel.
+	const [pythonDefined, jsDefined] = await Promise.all([
+		python.length > 0 ? queryPythonTools(session, python) : undefined,
+		js.length > 0 ? queryJsTools(session, js) : undefined,
+	]);
+	const defined = new Set([
+		...(pythonDefined?.tools ?? []).map(tool => `python:${tool.name}`),
+		...(jsDefined?.tools ?? []).map(tool => `js:${tool.name}`),
+	]);
 	return createEvalCustomTools(
 		session,
-		descriptors.filter(descriptor => defined.get(descriptor.name) === descriptor.language),
+		descriptors.filter(descriptor => defined.has(`${descriptor.language}:${descriptor.name}`)),
 	);
 }
 

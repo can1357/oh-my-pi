@@ -259,6 +259,25 @@ describe("telemetry thread service", () => {
 		parent.end();
 	});
 
+	it("hands main its own hooks back, so a span a session on main starts reaches them", async () => {
+		// What a cold revive on main takes from a parent homed in the worker, as the revived session's parent telemetry.
+		const served = await probe.servedTelemetry();
+		const span = tracer.startSpan("revived on main");
+
+		served.onSpanStart?.({
+			kind: "invoke_agent",
+			model: undefined,
+			agent: { id: "child", name: "child" },
+			conversationId: "child-conversation",
+			span,
+		});
+		await link?.call("ping", 1);
+
+		expect(startedSpans).toContain(span);
+		span.end();
+		parent.end();
+	});
+
 	it("keeps the converted config usable in-process", () => {
 		const config = toWorkerTelemetryConfig({ tracer });
 		expect(config.tracer).toBeInstanceOf(BridgedTracer);

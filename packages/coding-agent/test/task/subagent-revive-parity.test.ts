@@ -1,18 +1,20 @@
 /**
  * A subagent revived from its stored session (cold) is built as one revived in memory (warm): each route spawns a
- * real subagent, parks it, revives it warm and wakes it, parks it again, drops the warm reviver as a worker's exit
- * does, and revives it cold and wakes it. Every option of the two revives' `createAgentSession` calls is compared,
- * and so are the first requests after each revive.
+ * real subagent through the production entrypoint (`runStructuredSubagent`, which builds its options with
+ * `buildExecutorOptions`), parks it, revives it warm and wakes it, parks it again, drops the warm reviver as a
+ * worker's exit does, and revives it cold and wakes it. Every option of the two revives' `createAgentSession` calls
+ * is compared, and so are the first requests after each revive.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { formatModelStringWithRouting } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import type { CreateAgentSessionOptions } from "@oh-my-pi/pi-coding-agent/sdk";
-import type { ExecutorOptions } from "@oh-my-pi/pi-coding-agent/task/executor";
+import type { StructuredSubagentRequest } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import {
 	fixtureAgent,
 	type LiveParent,
+	type LivePolicy,
 	openReviveEnv,
 	type ParityRun,
 	type ReviveEnv,
@@ -271,16 +273,18 @@ function compareOption(run: ParityRun, option: OptionName): { warm: unknown; col
 interface ParityRoute {
 	readonly title: string;
 	readonly settings?: Readonly<Record<string, unknown>>;
+	/** What the parent's process allows the spawn, and whether it is in plan mode. */
+	readonly policy?: LivePolicy;
 	/** The `data` of the spawn's `yield`, where its result must fit an output schema. */
 	readonly yieldData?: unknown;
-	options(env: ReviveEnv, root: LiveParent): ExecutorOptions;
+	request(env: ReviveEnv, root: LiveParent): StructuredSubagentRequest;
 }
 
 const ROUTES: ParityRoute[] = [
 	{
 		title: "a task subagent with an effort hint, a runtime limit, a spawn allowlist and IRC off",
 		settings: { "task.maxRuntimeMs": 120_000 },
-		options: (env, root) =>
+		request: (env, root) =>
 			env.taskSpawn(root, "EffortHint", {
 				agent: fixtureAgent({ spawns: ["explore"] }),
 				effort: "lo",
@@ -293,23 +297,19 @@ const ROUTES: ParityRoute[] = [
 	{
 		title: "a task subagent with an output schema",
 		yieldData: { verdict: "done" },
-		options: (env, root) =>
+		request: (env, root) =>
 			env.taskSpawn(root, "OutputSchema", {
 				outputSchema: { type: "object", properties: { verdict: { type: "string" } }, required: ["verdict"] },
-				outputSchemaMode: "permissive",
-				outputSchemaSource: "caller",
-				outputSchemaOverridesAgent: true,
+				schemaMode: "permissive",
 				parentToolCallId: "call-output-schema",
 			}),
 	},
 	{
+		// Plan mode is the production route to a restricted contract: it replaces the agent's tools, turns LSP and
+		// IRC off, and makes the spawn pass `restrictToolNames`.
 		title: "a plan-mode subagent with a restricted contract",
-		options: (env, root) =>
-			env.taskSpawn(root, "PlanMode", {
-				agent: fixtureAgent({ tools: ["read", "grep", "yield"] }),
-				restrictToolNames: true,
-				parentToolCallId: "call-plan-mode",
-			}),
+		policy: { planMode: true },
+		request: (env, root) => env.taskSpawn(root, "PlanMode", { parentToolCallId: "call-plan-mode" }),
 	},
 ];
 
@@ -325,8 +325,8 @@ for (const route of ROUTES) {
 		beforeAll(async () => {
 			env = await openReviveEnv(route.settings);
 			if (route.yieldData !== undefined) env.yieldData = route.yieldData;
-			const root = env.createLiveParent();
-			run = await env.runParity(root, route.options(env, root));
+			const root = env.createLiveParent(route.policy);
+			run = await env.runParity(root, route.request(env, root));
 		}, 60_000);
 
 		afterAll(async () => {

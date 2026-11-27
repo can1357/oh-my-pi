@@ -230,6 +230,8 @@ export function toWorkerTelemetryConfig(config: AgentTelemetryConfig): AgentTele
 
 /** Void hooks the worker fires without awaiting; their rejections (a closing link) must not go unhandled. */
 const DETACHED_HOOKS: readonly string[] = ["onSpanStart", "onSpanEnd", "onRunEnd", "onCostDelta", "onTelemetryWarning"];
+/** On a worker's wrapper of a detached hook: the main function it calls. */
+const kMainHook = Symbol("thread.telemetry.mainHook");
 
 const telemetryConfigCodec: RpcCodec<AgentTelemetryConfig> = {
 	kind: TELEMETRY_CONFIG_KIND,
@@ -246,18 +248,36 @@ const telemetryConfigCodec: RpcCodec<AgentTelemetryConfig> = {
 		for (const key of DETACHED_HOOKS) {
 			const hook: unknown = Reflect.get(data, key);
 			if (typeof hook !== "function") continue;
-			Reflect.set(data, key, (...args: unknown[]): void => {
+			const wrapper = (...args: unknown[]): void => {
 				const result: unknown = Reflect.apply(hook, undefined, args);
 				if (result instanceof Promise) {
 					result.catch((error: unknown) =>
 						logger.debug("Telemetry hook call to main failed", { error: String(error) }),
 					);
 				}
-			});
+			};
+			Reflect.set(wrapper, kMainHook, hook);
+			Reflect.set(data, key, wrapper);
 		}
 		return data;
 	},
 };
+
+/**
+ * `config`, a telemetry config this worker decoded from main (or a copy, such as a subagent's derived config), as
+ * main takes it back: each detached hook is main's own function again, not this thread's wrapper of it. Main calls a
+ * wrapper with spans it started itself, which cannot cross to the worker, so the hook never ran. The other members
+ * are proxies that reach main as the objects they stand for.
+ */
+export function mainSideTelemetryConfig(config: AgentTelemetryConfig): AgentTelemetryConfig {
+	const restored: AgentTelemetryConfig = { ...config };
+	for (const key of DETACHED_HOOKS) {
+		const hook: unknown = Reflect.get(restored, key);
+		const main: unknown = typeof hook === "function" ? Reflect.get(hook, kMainHook) : undefined;
+		if (main !== undefined) Reflect.set(restored, key, main);
+	}
+	return restored;
+}
 
 /** Spans a worker started and has not ended, so its exit can close them. */
 class PeerTelemetryState {

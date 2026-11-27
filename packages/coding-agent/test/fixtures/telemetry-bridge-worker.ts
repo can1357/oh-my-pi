@@ -13,7 +13,7 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { trace } from "@opentelemetry/api";
 import type { WorkerThreadLink } from "../../src/thread/protocol";
 import { type RpcFrame, RpcLink } from "../../src/thread/rpc";
-import { telemetryThreadService } from "../../src/thread/services/telemetry";
+import { mainSideTelemetryConfig, telemetryThreadService } from "../../src/thread/services/telemetry";
 import { RemoteSpan, RemoteTracer } from "../../src/thread/services/telemetry-remote";
 
 /** Span ids the worker observed, for comparison with main's exported spans. */
@@ -30,6 +30,8 @@ export interface TelemetryRunReport {
 export interface TelemetryProbe {
 	run(): Promise<TelemetryRunReport>;
 	startDangling(): Promise<string>;
+	/** The config a cold revive on main takes from a parent homed here (`serveSubagentParentInputs`). */
+	servedTelemetry(): Promise<AgentTelemetryConfig>;
 }
 
 /** Test-only boot globals. */
@@ -173,6 +175,7 @@ function buildProbe(parentTelemetry: AgentTelemetryConfig): TelemetryProbe {
 			if (!span) throw new Error("telemetry disabled");
 			return span.spanContext().spanId;
 		},
+		servedTelemetry: async () => mainSideTelemetryConfig(parentTelemetry),
 	};
 }
 

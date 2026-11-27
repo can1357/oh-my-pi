@@ -10,6 +10,7 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { restoreSession } from "@oh-my-pi/pi-coding-agent/task/restore";
+import type { SubagentSpawnSpec } from "@oh-my-pi/pi-coding-agent/task/spawn-spec";
 import type { SingleResult } from "@oh-my-pi/pi-coding-agent/task/task-details";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -57,6 +58,7 @@ async function writeSubagent(
 	id: string,
 	messages: Message[],
 	agent?: string,
+	spawnSpec?: Record<string, unknown>,
 ): Promise<string> {
 	const file = path.join(mainFile.slice(0, -6), `${id}.jsonl`);
 	const manager = await SessionManager.open(file, undefined, undefined, {
@@ -64,7 +66,13 @@ async function writeSubagent(
 		parentSession: mainFile,
 		suppressBreadcrumb: true,
 	});
-	manager.appendSessionInit({ systemPrompt: ["sub prompt"], task: `${id} task`, tools: ["read", "yield"], agent });
+	manager.appendSessionInit({
+		systemPrompt: ["sub prompt"],
+		task: `${id} task`,
+		tools: ["read", "yield"],
+		agent,
+		...(spawnSpec ? { spawnSpec: spawnSpec as unknown as SubagentSpawnSpec } : {}),
+	});
 	for (const message of messages) manager.appendMessage(message);
 	await manager.close();
 	return file;
@@ -139,5 +147,47 @@ describe("restoreSession (omp --restore)", () => {
 		await manager.getJob("Cut")!.promise;
 		await manager.drainDeliveries({ filter: { ownerId: MAIN_AGENT_ID } });
 		expect(delivered).toEqual(["Cut"]);
+	});
+
+	it("holds a restored subagent to the tighter of its stored and the live request budget", async () => {
+		tempDir = TempDir.createSync("@pi-restore-budget-");
+		const cwd = tempDir.path();
+		const main = SessionManager.create(cwd, path.join(cwd, "sessions"));
+		main.appendMessage({ role: "user", content: "fan out", timestamp: Date.now() });
+		const mainFile = main.getSessionFile();
+		if (!mainFile) throw new Error("Expected a persisted session file");
+		await main.close();
+		// A spawn parked under a 10-request budget; the live budget is the default 100.
+		await writeSubagent(mainFile, cwd, "Cut", cutOff, "task", {
+			v: 1,
+			prompt: { agentSystemPrompt: "sub prompt" },
+			wake: { agent: { name: "task", description: "", source: "bundled" }, softRequestBudget: 10 },
+		});
+		manager = new AsyncJobManager({});
+		const followUp = vi.spyOn(executorModule, "runSubagentFollowUpTurn").mockResolvedValue({
+			index: 0,
+			id: "Cut",
+			agent: "task",
+			agentSource: "bundled",
+			task: "Cut task",
+			exitCode: 0,
+			output: "finished after the restart",
+			stderr: "",
+			truncated: false,
+			durationMs: 5,
+			tokens: 0,
+			requests: 1,
+		});
+		const session = {
+			sessionManager: { getSessionFile: () => mainFile },
+			asyncJobManager: manager,
+			settings: Settings.isolated(),
+			restoreInterruptedTurn: vi.fn(async () => false),
+		} as unknown as AgentSession;
+
+		expect((await restoreSession(session)).subagents).toEqual(["Cut"]);
+		await manager.getJob("Cut")!.promise;
+
+		expect(followUp.mock.calls[0]![0]).toMatchObject({ id: "Cut", softRequestBudget: 10 });
 	});
 });

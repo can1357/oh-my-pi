@@ -86,9 +86,11 @@ async function restoreSubagents(session: AgentSession, options: RestoreOptions):
 		const sessionFileOfRef = ref.sessionFile;
 		const agentName = persistedAgentName(ref.displayName, init);
 		const steps = readStepProgress(sub.entries);
-		// The spawn's own wake inputs where the record stores them, its wake limit never looser than the live
-		// setting; a record an older omp wrote keeps the runtime-neutral agent and the live wake limit.
+		// The spawn's own wake inputs where the record stores them, its wake limits never looser than the live
+		// settings', as a revive from the stored session holds them; a record an older omp wrote keeps the
+		// runtime-neutral agent and the live wake limits.
 		const wake = readSpawnSpec(init).wake;
+		const liveBudget = softRequestBudgetFor(agentName, session.settings);
 		manager.register(
 			"task",
 			id,
@@ -110,7 +112,8 @@ async function restoreSubagents(session: AgentSession, options: RestoreOptions):
 					subagentEventBus: options.subagentEventBus,
 					artifactsDir: path.dirname(sessionFileOfRef),
 					maxRuntimeMs: tighterLimit(wake?.maxRuntimeMs, cfgTaskMaxRuntimeMs.get(session.settings)),
-					...softRequestBudgetFor(agentName, session.settings),
+					softRequestBudget: tighterLimit(wake?.softRequestBudget, liveBudget.softRequestBudget),
+					softRequestBudgetNotice: wake?.softRequestBudgetNotice ?? liveBudget.softRequestBudgetNotice,
 				});
 				const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
 				const structuredOutput = result.structuredOutput;

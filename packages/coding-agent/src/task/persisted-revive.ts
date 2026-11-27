@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { Model } from "@oh-my-pi/pi-ai";
+import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import { MAIN_AGENT_RULE_NAME, SUB_AGENT_RULE_NAME } from "../capability/rule";
 import { cfgOffline } from "../config/auxiliary-model-policy";
@@ -55,7 +56,7 @@ import {
 	PerCallModelUnavailableError,
 	parentModelGrantPattern,
 } from "./model-approval";
-import { chooseColdReviveModel, choosePerCallModel } from "./revive-model";
+import { chooseColdReviveModel, choosePerCallModel, dispatchRefusal } from "./revive-model";
 import {
 	type ColdReviveLiveInputs,
 	coldReviveCustomTools,
@@ -319,10 +320,16 @@ export async function prepareColdRevive(
 	// The model of the parent's live session, the root's where the parent ref holds none: the fallback of a stored
 	// model that cannot start the revive, and the provider offline mode holds every request to.
 	const parentModel = parentSession?.model ?? root.model;
+	// Offline mode holds every request to the live parent's provider, as the spawn held it to its parent's; a model
+	// it would refuse cannot start the revive, as it could not start a spawn.
+	const allowedProvider = cfgOffline.get(live.settingsParent) ? (parentModel?.provider ?? null) : undefined;
+	const guard = subagentDispatchAssertion(allowedProvider, undefined);
+	const perCall = isPerCallRecord(parts, init);
+	const ceiling = liveEffortCeiling(storedEffortCeiling(parts, perCall, settingsParent), settingsParent);
 	let model: ExplicitBuildModel | undefined;
 	let grants: PerCallGrantInputs | undefined;
 	let ceilingNotice: string | undefined;
-	if (isPerCallRecord(parts, init)) {
+	if (perCall) {
 		const identity = parts.model ? parts.model.model : init.perCallModelIdentity;
 		const level = parts.thinking ? parts.thinking.thinkingLevel : init.perCallThinkingLevel;
 		if (!identity || level === undefined) {
@@ -338,12 +345,10 @@ export async function prepareColdRevive(
 			models,
 			modelRegistry,
 			approve: perCallApproval(target, grants, settingsParent, modelRegistry),
-			ceiling: liveEffortCeiling(
-				parts.thinking ? parts.thinking.thinkingLevelCeiling : cfgTaskMaxEffort.get(settingsParent),
-				settingsParent,
-			),
+			ceiling,
 			fallback: parentModel,
 			mayUseParent: mayReviveUseParentModel(parts),
+			guard,
 		});
 	} else if (parts.model) {
 		const choice = await chooseColdReviveModel({
@@ -352,9 +357,10 @@ export async function prepareColdRevive(
 			level: parts.thinking?.thinkingLevel ?? undefined,
 			models,
 			modelRegistry,
-			ceiling: liveEffortCeiling(parts.thinking?.thinkingLevelCeiling, settingsParent),
+			ceiling,
 			fallback: parentModel,
 			mayUseParent: mayReviveUseParentModel(parts),
+			guard,
 		});
 		model = choice.model;
 		ceilingNotice = choice.ceilingNotice;
@@ -372,8 +378,6 @@ export async function prepareColdRevive(
 		}
 	}
 	const tools = coldReviveCustomTools(target.id, descriptors, parent?.customTools ?? []);
-	// Offline mode holds every request to the live parent's provider, as the spawn held it to its parent's.
-	const allowedProvider = cfgOffline.get(live.settingsParent) ? (parentModel?.provider ?? null) : undefined;
 	// The policy alone falls back to the root's, as the live inputs do: the custom tools of a parent that is not
 	// live are asked of no kernel, the root's included.
 	const rootTools = root.evalToolSession;
@@ -430,6 +434,15 @@ function coldReviveSettingsParent(
 /** Whether the subagent's model came from a per-call `model`: the spec's flag, else the record's. */
 function isPerCallRecord(parts: SpawnSpecParts, init: PersistedSessionInit): boolean {
 	return parts.model ? parts.model.perCallModel : init.perCallModel === true;
+}
+
+/**
+ * The spawn's effort ceiling as the record stores it. A per-call spawn always stores one, the live `task.maxEffort`
+ * it ran under, so a per-call record that holds none (an older record, or a thinking part without its ceiling) is
+ * held to the live `task.maxEffort`, never to no ceiling.
+ */
+function storedEffortCeiling(parts: SpawnSpecParts, perCall: boolean, settings: Settings): Effort | undefined {
+	return parts.thinking?.thinkingLevelCeiling ?? (perCall ? cfgTaskMaxEffort.get(settings) : undefined);
 }
 
 /** The agent the spawn selected, as the live discovery scope finds it now: what its grants rest on. */
@@ -550,12 +563,26 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 		settings: spawnSpec.settings,
 		expectedAgentRef: expectedRef,
 		heldInit: init,
-		// A record whose spec has no tools part keeps its own tool commands, and its tool list is its contract.
+		// A record whose spec has no tools part keeps its own tool commands. Every record's tool list is its
+		// contract: a tool the live process gained while the subagent was parked (an MCP server's new tool) is not.
 		mountedToolNames: parts.tools ? spawnSpec.tools.mountedToolNames : init.mountedTools,
-		activeTools: parts.tools ? undefined : (spawnSpec.tools.toolNames ?? []),
+		activeTools: init.tools,
 		// A record whose spec has no prompt part holds no prompt inputs to render another prompt from.
 		replayHeldPrompt: parts.prompt === undefined,
 	});
+	// Offline mode holds every request to the live parent's provider. A model the build resolved itself (a record
+	// with no spawn spec starts on its own patterns) that it would refuse leaves a session no request can leave.
+	const refusal =
+		session.model &&
+		dispatchRefusal(
+			formatModelStringWithRouting(session.model),
+			session.model,
+			subagentDispatchAssertion(prepared.allowedProvider, undefined),
+		);
+	if (refusal) {
+		await session.dispose();
+		throw new Error(`Cannot revive subagent "${spec.id}": ${refusal}. The agent was not revived.`);
+	}
 	if (spawnSpec.perCallModel) {
 		// A per-call worker runs only on the model its grants approved here, never a similarly named survivor.
 		const expected = model.kind === "model" && model.model ? formatModelStringWithRouting(model.model) : undefined;
@@ -566,8 +593,11 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 				`Cannot revive subagent "${spec.id}": its per-call model ${expected} is no longer available${identity ? ` (resolution found ${identity})` : ""}. The agent was not revived.`,
 			);
 		}
-		// An explicit unset selector must not inherit a new default while reviving.
-		if (!parts.thinking && init.perCallThinkingLevel === null) session.setThinkingLevel(undefined);
+		// An explicit unset selector (null, in a spec's thinking part as in an older record) must not inherit a new
+		// default while reviving.
+		if ((parts.thinking ? parts.thinking.thinkingLevel : init.perCallThinkingLevel) === null) {
+			session.setThinkingLevel(undefined);
+		}
 	}
 	// The ceiling notice holds only while the session runs on the model it names: a switch since the spawn passed
 	// the ceiling check.
@@ -665,12 +695,7 @@ function coldReviveSpawnSpec(
 		v: SPAWN_SPEC_VERSION,
 		model: parts.model?.model ?? null,
 		thinkingLevel: parts.thinking?.thinkingLevel ?? null,
-		// A per-call model keeps the live task.maxEffort ceiling the spawn ran under.
-		thinkingLevelCeiling: parts.thinking
-			? parts.thinking.thinkingLevelCeiling
-			: perCall
-				? cfgTaskMaxEffort.get(settingsParent)
-				: undefined,
+		thinkingLevelCeiling: storedEffortCeiling(parts, perCall, settingsParent),
 		perCallModel: perCall,
 		prewalk: parts.prewalk,
 		settings: parts.settings ?? legacySubagentSettings(id, init, settingsParent),

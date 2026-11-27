@@ -52,6 +52,8 @@ export interface HindsightSessionStateApi {
 	readonly banksSet: HindsightBankSet;
 	readonly lastRecallSnippet?: string;
 	readonly mentalModelsSnippet?: string;
+	/** The parent state a subagent alias reuses; absent on a primary state. */
+	readonly aliasOf?: HindsightSessionStateApi;
 }
 
 export interface HindsightSessionStateOptions {

@@ -459,24 +459,31 @@ function isTools(value: unknown): value is SpawnSpecTools {
 	);
 }
 
+/**
+ * A policy part as {@link spawnSpecFromSpawn} writes it: every spawn writes the members required here, so a part
+ * that lacks one is damaged and takes the fallback of a record with no spec. Read as present, an absent `spawns`
+ * would be the SDK's default `"*"`, and an absent `enableMCP` or `enableLsp` the live process's, each wider than
+ * the spawn's own.
+ */
 function isPolicy(value: unknown): value is SpawnSpecPolicy {
 	return (
 		isRecord(value) &&
 		hasShape(
 			value,
-			{},
 			{
 				cwd: isString,
-				additionalDirectories: isStringArray,
-				credentialSourceSessionId: isString,
-				noContextFiles: isBoolean,
 				enableLsp: isBoolean,
 				cacheWarming: isCacheWarmingMode,
-				enableIrc: isBoolean,
 				enableMCP: isBoolean,
 				skipPythonPreflight: isBoolean,
 				spawns: isString,
 				taskDepth: isNumber,
+			},
+			{
+				additionalDirectories: isStringArray,
+				credentialSourceSessionId: isString,
+				noContextFiles: isBoolean,
+				enableIrc: isBoolean,
 			},
 		)
 	);
