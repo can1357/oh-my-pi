@@ -256,12 +256,12 @@ describe("tools.guardRules", () => {
 		expect(sshRows.some(row => row.includes("cat id_rsa") && row.endsWith("(credential_read)"))).toBe(true);
 	});
 
-	it("decides a call whose `cwd` execution rejects instead of throwing", () => {
+	it("decides a call that first changes to an internal URL directory", () => {
 		const tool = new BashTool(createSession(temp.path(), { "bash.allowCompoundCommands": true }));
 		const approval = tool.approval as (args: unknown) => ToolApprovalDecision;
-		expect(approval({ command: "ls", cwd: "@local://notes" })).toBe("exec");
-		expect(ruleOf(approval({ command: "cat ~/.ssh/id_rsa", cwd: "@local://notes" }))).toBe("credential_read");
-		const rows = tool.formatApprovalDetails({ command: "ls && cat ~/.ssh/id_rsa", cwd: "@local://notes" });
+		expect(approval({ command: "cd @local://notes && ls" })).toBe("exec");
+		expect(ruleOf(approval({ command: "cd @local://notes && cat ~/.ssh/id_rsa" }))).toBe("credential_read");
+		const rows = tool.formatApprovalDetails({ command: "cd @local://notes && ls && cat ~/.ssh/id_rsa" });
 		expect(rows.some(row => row.includes("cat ~/.ssh/id_rsa") && row.endsWith("(credential_read)"))).toBe(true);
 	});
 });

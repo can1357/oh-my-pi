@@ -100,7 +100,7 @@ import {
 	tokenizeShellSegments,
 	withoutLeadingEnvironmentAssignments,
 } from "./shell-tokenize";
-import { findPipelineGuardHits, findShellGuardHit, type GuardHit, type GuardScope } from "./guard-rules";
+import { findPipelineGuardHits, findShellGuardHit, type GuardHit } from "./guard-rules";
 import { ToolAbortError } from "./tool-errors";
 import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
@@ -966,7 +966,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				}
 			}
 		}
-		const guardHit = this.#guardHit(command, input.cwd);
+		const guardHit = this.#guardHit(command);
 		if (guardHit) return { tier: "exec", override: true, reason: guardHit.reason };
 		// Each tool command passes its own approval when it runs; the line itself only reads.
 		if (isToolCommandLine(command, toolCommands)) return "read";
@@ -976,29 +976,13 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	/**
 	 * The fixed guard rule (`tools.guardRules`) `command` breaks over its top-level commands, or
 	 * `undefined`, as always with the setting off. The critical patterns are not among the rules:
-	 * they match the raw command line either way.
+	 * they match the raw command line either way. The rules see the call start in the session cwd
+	 * and follow a leading `cd` that execution hoists as part of the command.
 	 */
-	#guardHit(command: string, cwd: unknown): GuardHit | undefined {
+	#guardHit(command: string): GuardHit | undefined {
 		return cfgToolsGuardRules.get(this.session.settings)
-			? findShellGuardHit(command, this.#guardScope(cwd))
+			? findShellGuardHit(command, { cwd: this.session.cwd ?? process.cwd(), home: os.homedir() })
 			: undefined;
-	}
-	/**
-	 * Where the fixed guard rules see a call run: its `cwd` argument (resolved like execution
-	 * resolves it) or the session cwd. A `cwd` execution cannot resolve (`@local://notes`) is left
-	 * for execution to report, and the rules see the session cwd.
-	 */
-	#guardScope(cwd: unknown): GuardScope {
-		const sessionCwd = this.session.cwd ?? process.cwd();
-		let commandCwd = sessionCwd;
-		if (typeof cwd === "string" && cwd !== "" && !InternalUrlRouter.instance().canHandle(cwd)) {
-			try {
-				commandCwd = resolveToCwd(cwd, sessionCwd);
-			} catch {
-				commandCwd = sessionCwd;
-			}
-		}
-		return { cwd: commandCwd, home: os.homedir() };
 	}
 	/**
 	 * `bash.patterns` rules and env allowlist for the session (`session`) and for the operator layers
@@ -1029,7 +1013,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		};
 	}
 
-	#formatCompoundApprovalDetails(command: string, cwd: unknown): string[] | null {
+	#formatCompoundApprovalDetails(command: string): string[] | null {
 		if (!cfgBashAllowCompoundCommands.get(this.session.settings)) return null;
 		const dialect = bashApprovalDialect(this.session.settings.getShellConfig().shell);
 		if (!dialect) return null;
@@ -1070,9 +1054,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// the clauses before it leave. A hit no clause can carry (`size_limit`), or a parse with more
 		// pipelines than clauses, leaves the chain to the plain command row.
 		const segmentGuards = cfgToolsGuardRules.get(this.session.settings)
-			? findPipelineGuardHits(command, this.#guardScope(cwd))
+			? findPipelineGuardHits(command, { cwd: this.session.cwd ?? process.cwd(), home: os.homedir() })
 			: [];
-		if (segmentGuards.length > clauses.length || (!segmentGuards.some(Boolean) && this.#guardHit(command, cwd))) {
+		if (segmentGuards.length > clauses.length || (!segmentGuards.some(Boolean) && this.#guardHit(command))) {
 			return null;
 		}
 
@@ -1119,11 +1103,10 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	}
 
 	readonly formatApprovalDetails = (args: unknown): string[] => {
-		const input = args as Partial<BashToolInput>;
-		const rawCommand = input.command;
+		const rawCommand = (args as Partial<BashToolInput>).command;
 		const command = typeof rawCommand === "string" ? rawCommand : "(missing)";
 		if (typeof rawCommand === "string") {
-			const compound = this.#formatCompoundApprovalDetails(command, input.cwd);
+			const compound = this.#formatCompoundApprovalDetails(command);
 			if (compound) return compound;
 		}
 		return [`Command: ${truncateForPrompt(command)}`];
