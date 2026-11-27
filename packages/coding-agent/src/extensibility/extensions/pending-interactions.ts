@@ -26,8 +26,11 @@ export interface PendingPrompt<TAnswer> {
 interface Entry<TEvent, TAnswer> {
 	/** The private copy, without `signal`: answers are checked against it and listings clone it. */
 	event: TEvent;
-	/** The emitted event's live `signal`, handed back with every listing (it cannot be cloned). */
-	eventSignal?: AbortSignal;
+	/**
+	 * The live signal listings hand back (it cannot be cloned): the emitted event's `signal`, else the one
+	 * the prompt was opened with (the `ask` form is emitted without one and opened with the dialog's).
+	 */
+	listedSignal?: AbortSignal;
 	/** Normalizes an extension's answer, or rejects it with `undefined`. */
 	accept(answer: TAnswer): TAnswer | undefined;
 	settle(answer: TAnswer): void;
@@ -38,9 +41,9 @@ class PromptTable<TEvent extends { signal?: AbortSignal }, TAnswer> {
 	readonly #entries = new Map<string, Entry<TEvent, TAnswer>>();
 
 	/**
-	 * `event` is the emitted one; the table keeps a private copy without its `signal`, and lists it with that
-	 * live `signal` reattached. `signal` aborting closes the prompt, so an extension answering after the call
-	 * was aborted gets false.
+	 * `event` is the emitted one; the table keeps a private copy without its `signal`, and lists it with a
+	 * live signal reattached (see `listedSignal`). `signal` aborting closes the prompt, so an extension
+	 * answering after the call was aborted gets false.
 	 */
 	open(
 		id: string,
@@ -53,7 +56,7 @@ class PromptTable<TEvent extends { signal?: AbortSignal }, TAnswer> {
 		const copy = structuredClone(rest) as TEvent;
 		const entry: Entry<TEvent, TAnswer> = {
 			event: copy,
-			eventSignal,
+			listedSignal: eventSignal ?? signal,
 			accept: answer => accept(copy, answer),
 			settle: resolve,
 		};
@@ -83,7 +86,7 @@ class PromptTable<TEvent extends { signal?: AbortSignal }, TAnswer> {
 	list(): TEvent[] {
 		return [...this.#entries.values()].map(entry => {
 			const listed = structuredClone(entry.event);
-			if (entry.eventSignal) listed.signal = entry.eventSignal;
+			if (entry.listedSignal) listed.signal = entry.listedSignal;
 			return listed;
 		});
 	}

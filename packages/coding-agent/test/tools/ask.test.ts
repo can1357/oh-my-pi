@@ -859,8 +859,9 @@ describe("AskTool answered by an extension", () => {
 		const requested: AskRequestedEvent[] = [];
 		const resolved: AskResolvedEvent[] = [];
 		const extensionAsk: Channel = {
-			async open(event, accept) {
-				const prompt = pending.openAsk(event, accept);
+			async open(event, accept, signal) {
+				// As the runner's channel does: the dialog's signal closes the pending form.
+				const prompt = pending.openAsk(event, accept, signal);
 				requested.push(event);
 				if (answerOnOpen !== undefined) pending.resolveAsk(event.askId, answerOnOpen);
 				return prompt;
@@ -1086,6 +1087,34 @@ describe("AskTool answered by an extension", () => {
 		expect(ext.pending.resolveAsk(b!.askId, { data: { store: "sqlite" } })).toBe(true);
 		expect(text(await first)).toContain('"store": "redis"');
 		expect(text(await second)).toContain('"store": "sqlite"');
+	});
+
+	it("a pending listing carries the form's live signal", async () => {
+		const ext = channel();
+		const opened = Promise.withResolvers<void>();
+		const select = vi.fn<Select>(async (_title, _options, dialogOptions) => {
+			opened.resolve();
+			const closed = Promise.withResolvers<void>();
+			dialogOptions?.signal?.addEventListener("abort", () => closed.resolve());
+			await closed.promise;
+			return undefined;
+		});
+		const turn = new AbortController();
+		const outcome = new AskTool(createSession()).execute(
+			"call-listed",
+			{ html: DB_FORM },
+			turn.signal,
+			undefined,
+			withChannel(createContext({ select }), ext.extensionAsk),
+		);
+		await opened.promise;
+		// An extension that connects mid-form only has the listing to cancel its remote work.
+		const [listed] = ext.pending.pendingAsks();
+		expect(listed?.signal?.aborted).toBe(false);
+		turn.abort();
+		await outcome.catch(() => undefined);
+		expect(listed?.signal?.aborted).toBe(true);
+		expect(ext.pending.pendingAsks()).toEqual([]);
 	});
 
 	it("a timeout is reported as unanswered even when the form's values are valid", async () => {
