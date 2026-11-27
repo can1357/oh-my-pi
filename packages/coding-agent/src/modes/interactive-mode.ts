@@ -44,6 +44,7 @@ import {
 	type ResolvedModelRoleValue,
 	resolveExactModelIdentity,
 } from "../config/model-resolver";
+import { notifyTerminal } from "@oh-my-pi/pi-tui/driver/session";
 import { isSettingsInitialized, Settings, settings } from "../config/settings";
 import type {
 	AutocompleteProviderFactory,
@@ -352,6 +353,7 @@ import {
 	cfgTuiVimShowCommand,
 	cfgTuiVimStartMode,
 	cfgTuiVimYankToClipboard,
+	cfgCompletionNotify,
 	type ToolActivityMode,
 } from "./settings";
 import { pickTableChart } from "../auto-graph/planner";
@@ -5197,6 +5199,14 @@ export class InteractiveMode implements InteractiveModeContext {
 			mouse: "any",
 		});
 		this.syncIdleMaintenanceView();
+		if (cfgCompletionNotify.get(settings) !== "off") {
+			notifyTerminal({
+				title: this.sessionManager.getSessionName() || "omp",
+				body: "Plan ready for approval",
+				type: "completion",
+				actions: "focus",
+			});
+		}
 		return promise;
 	}
 

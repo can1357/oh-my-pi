@@ -1591,7 +1591,7 @@ export const cfgCompletionNotify = register({
 		tab: "interaction",
 		group: "Notifications",
 		label: "Completion Notification",
-		description: "Notify when the agent finishes a turn",
+		description: "Notify when the agent finishes a turn or a plan is ready for approval",
 	},
 });
 
