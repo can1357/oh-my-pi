@@ -1,4 +1,4 @@
-import { $env, isRecord } from "@oh-my-pi/pi-utils";
+import { $env } from "@oh-my-pi/pi-utils";
 import type { ResponseInput, ResponseInputItem } from "./providers/openai-responses-wire";
 import { isMalformedToolCallName, redactSensitiveCredentials } from "./providers/transform-messages";
 export { normalizeToolCallId } from "./providers/transform-messages";
@@ -111,8 +111,8 @@ export function stripOpenAIResponsesOutputOnlyStatusesForReplay<TItem extends { 
 	return sanitized ?? items;
 }
 
-function holdsCreatedBy(value: unknown): value is Record<string, unknown> & { created_by: unknown } {
-	return isRecord(value) && Object.hasOwn(value, "created_by");
+function holdsCreatedBy(value: unknown): value is object & { created_by: unknown } {
+	return typeof value === "object" && value !== null && Object.hasOwn(value, "created_by");
 }
 
 /**
