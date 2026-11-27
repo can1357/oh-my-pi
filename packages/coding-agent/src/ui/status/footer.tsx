@@ -89,7 +89,7 @@ export function footerSegs(facts: FooterFacts): FooterSeg[] {
 	let model = facts.model?.id || "no-model";
 	if (facts.model?.thinking) {
 		const level = facts.autoThinking
-			? (facts.autoResolvedLevel ?? `${symbols.symbol("thinking.autoPending")} auto`)
+			? `${symbols.symbol("thinking.autoPending")} ${facts.autoResolvedLevel ?? "auto"}`
 			: (facts.thinkingLevel ?? "off");
 		model += ` • ${level}`;
 	}

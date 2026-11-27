@@ -102,6 +102,7 @@
 - The eval `commit` draft summary now ends Review with a scoped recovery hint (`show(path)`, then `take(path, units)` for the units your edits or commands such as a formatter produced), and Unrecorded points to `take(path, units)` for part of a file ([#20556](https://github.com/can1357/oh-my-pi/issues/20556))
 - LSP servers now shut down after 15 minutes idle by default instead of staying alive for the whole session; set `idleTimeoutMs: 0` in `lsp.json` to keep them running ([#17477](https://github.com/can1357/oh-my-pi/issues/17477))
 - `omp plugin disable` and the Settings → Plugins enable toggle now note that running sessions keep the plugin until they restart ([#9722](https://github.com/can1357/oh-my-pi/issues/9722))
+- Status line keeps the auto indicator on an auto-resolved thinking effort (e.g. `⟳ high`) so it is distinguishable from a pinned level ([#5951](https://github.com/can1357/oh-my-pi/issues/5951))
 
 ### Fixed
 

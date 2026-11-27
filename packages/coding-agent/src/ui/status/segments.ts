@@ -104,15 +104,14 @@ export function thinkingWord(facts: StatusFacts): string | undefined {
 	return facts.thinkingLevel ?? "off";
 }
 
-/** Look pieces of the thinking display (`◒ high`, `⦸ off`, `⟳ auto`); empty when hidden. */
+/** Look pieces of the thinking display (`◒ high`, `⦸ off`, `⟳ auto`, `⟳ high`); empty when hidden. */
 function thinkingPieces(facts: StatusFacts, s: string): [] | [IconPiece, ...TextPiece[]] {
 	if (!facts.model?.thinking) return [];
 	if (facts.autoThinking) {
-		const resolved = facts.autoResolvedLevel;
-		if (resolved) return [{ icon: `thinking.${resolved}`, else: resolved, s, space: "none" }];
+		// Keep the auto indicator on a resolved level so it reads differently from a pinned one.
 		return [
 			{ icon: "thinking.autoPending", s },
-			{ t: "auto", s },
+			{ t: facts.autoResolvedLevel ?? "auto", s },
 		];
 	}
 	const level = facts.thinkingLevel ?? "off";
