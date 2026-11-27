@@ -594,6 +594,7 @@ export class ModelRegistry {
 	 */
 	#hydratedCredentialSignatures = new Map<string, string>();
 	#hydratedCredentialSourceKinds = new Map<string, string>();
+	#hydratedCredentialOAuthWindows = new Map<string, { hydratedAt: number; nextExpiry: number }>();
 	#hydratedCredentialAuthGeneration?: number;
 	#configuredDiscoveryInFlight: Map<
 		DiscoveryProviderConfig,
@@ -1105,10 +1106,10 @@ export class ModelRegistry {
 		if (this.#owner) return this.#owner.hydrateCredentialScopedModelCaches();
 		if (this.#credentialScopedCacheHydration) return this.#credentialScopedCacheHydration;
 		const candidates = this.#collectCredentialScopedHydrationCandidates();
-		if (candidates.length === 0 || this.#isCredentialScopedHydrationCurrent(candidates)) {
+		if (candidates.length === 0) {
 			return Promise.resolve();
 		}
-		const hydration = this.#runCredentialScopedCacheHydration(candidates)
+		const hydration = this.#hydrateCredentialScopedModelCaches(candidates)
 			.catch(error => {
 				logger.debug("credential-scoped model cache hydration failed", {
 					error: error instanceof Error ? error.message : String(error),
@@ -1121,6 +1122,21 @@ export class ModelRegistry {
 			});
 		this.#credentialScopedCacheHydration = hydration;
 		return hydration;
+	}
+
+	async #hydrateCredentialScopedModelCaches(candidates: readonly string[]): Promise<void> {
+		// Adopt credentials written by another process before trusting the local generation snapshot.
+		try {
+			await this.authStorage.credentials.poll?.();
+		} catch (error) {
+			logger.debug("credential-scoped model cache auth poll failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+		if (this.#isCredentialScopedHydrationCurrent(candidates)) {
+			return;
+		}
+		await this.#runCredentialScopedCacheHydration(candidates);
 	}
 
 	#collectCredentialScopedHydrationCandidates(): string[] {
@@ -1145,6 +1161,7 @@ export class ModelRegistry {
 	#isCredentialScopedHydrationCurrent(candidates: readonly string[]): boolean {
 		if (this.#hydratedCredentialAuthGeneration !== this.authStorage.credentials.generation) return false;
 		if (this.#hydratedCredentialSignatures.size === 0) return false;
+		const now = Date.now();
 		for (const providerId of candidates) {
 			const prevSignature = this.#hydratedCredentialSignatures.get(providerId);
 			if (prevSignature === undefined) return false;
@@ -1156,6 +1173,11 @@ export class ModelRegistry {
 			const sourceKind = source?.kind ?? "none";
 			if (this.#hydratedCredentialSourceKinds.get(providerId) !== sourceKind) return false;
 			if (sourceKind === "runtime" || sourceKind === "config") return false;
+			if (sourceKind === "oauth") {
+				const window = this.#hydratedCredentialOAuthWindows.get(providerId);
+				if (!window || now < window.hydratedAt || now >= window.nextExpiry) return false;
+				continue;
+			}
 			if (sourceKind === "env") {
 				const envKey = getEnvApiKey(providerId) ?? "";
 				if (prevSignature !== `${envKey}${suffix}`) return false;
@@ -1176,18 +1198,34 @@ export class ModelRegistry {
 	}
 
 	async #runCredentialScopedCacheHydration(candidates: readonly string[]): Promise<void> {
+		const hydratedAt = Date.now();
 		const authGeneration = this.authStorage.credentials.generation;
 		const pendingProviders = new Set<string>();
 		const nextSignatures = new Map<string, string>();
 		const nextSourceKinds = new Map<string, string>();
 		const sourceKinds: string[] = [];
+		const oauthWindows = new Map<string, { hydratedAt: number; nextExpiry: number }>();
 		// Only resolve offline credentials for providers that have any auth/keyless source;
 		// unauthenticated providers have no credential-scoped cache key unless a descriptor
 		// explicitly allows unauthenticated discovery or a shared catalog applies.
 		const keys = await Promise.all(
 			candidates.map((providerId, index) => {
 				const source = this.authStorage.keys.source(providerId);
-				sourceKinds[index] = source?.kind ?? "none";
+				const sourceKind = source?.kind ?? "none";
+				sourceKinds[index] = sourceKind;
+				if (sourceKind === "oauth") {
+					let nextExpiry = Number.POSITIVE_INFINITY;
+					for (const credential of getOAuthCredentialsForProvider(this.authStorage, providerId)) {
+						if (
+							Number.isFinite(credential.expires) &&
+							credential.expires > hydratedAt &&
+							credential.expires < nextExpiry
+						) {
+							nextExpiry = credential.expires;
+						}
+					}
+					oauthWindows.set(providerId, { hydratedAt, nextExpiry });
+				}
 				if (
 					!this.#keylessProviders.has(providerId) &&
 					source === undefined &&
@@ -1227,6 +1265,11 @@ export class ModelRegistry {
 		for (const [providerId, signature] of nextSignatures) {
 			this.#hydratedCredentialSignatures.set(providerId, signature);
 			this.#hydratedCredentialSourceKinds.set(providerId, nextSourceKinds.get(providerId) ?? "none");
+		}
+		for (const providerId of candidates) {
+			const window = oauthWindows.get(providerId);
+			if (window) this.#hydratedCredentialOAuthWindows.set(providerId, window);
+			else this.#hydratedCredentialOAuthWindows.delete(providerId);
 		}
 		if (this.authStorage.credentials.generation === authGeneration) {
 			this.#hydratedCredentialAuthGeneration = authGeneration;
@@ -1840,6 +1883,7 @@ export class ModelRegistry {
 		this.#commandConfigsByProvider.clear();
 		this.#hydratedCredentialSignatures.clear();
 		this.#hydratedCredentialSourceKinds.clear();
+		this.#hydratedCredentialOAuthWindows.clear();
 		this.#hydratedCredentialAuthGeneration = undefined;
 	}
 

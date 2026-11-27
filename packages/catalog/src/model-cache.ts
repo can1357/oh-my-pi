@@ -891,18 +891,21 @@ export function readModelCaches<TApi extends Api>(
 				}
 			}
 			for (const { providerId, key, cached } of metaCheckIds) {
-				const meta = queryRow<CacheRowMeta>(db, SELECT_CACHE_ROW_META, providerId);
-				if (meta && cacheRowsEqual(cached.meta!, meta)) {
-					const entry = withFreshness(withRowState(cached.entry as CacheEntry<TApi>, meta), ttlMs, now);
-					if (readRowCache.size >= READ_ROW_CACHE_MAX) readRowCache.clear();
-					readRowCache.set(key, { dataVersion, meta, entry: entry as CacheEntry<Api> | null });
-					results.set(providerId, entry);
-				} else {
-					missIds.push(providerId);
+				try {
+					const meta = queryRow<CacheRowMeta>(db, SELECT_CACHE_ROW_META, providerId);
+					if (meta && cacheRowsEqual(cached.meta!, meta)) {
+						const entry = withFreshness(withRowState(cached.entry as CacheEntry<TApi>, meta), ttlMs, now);
+						if (readRowCache.size >= READ_ROW_CACHE_MAX) readRowCache.clear();
+						readRowCache.set(key, { dataVersion, meta, entry: entry as CacheEntry<Api> | null });
+						results.set(providerId, entry);
+					} else {
+						missIds.push(providerId);
+					}
+				} catch {
+					results.set(providerId, null);
 				}
 			}
 			if (missIds.length > 0) {
-				const rowsByProvider = new Map<string, CacheRow>();
 				// SQLite default SQLITE_MAX_VARIABLE_NUMBER is 999+; chunk conservatively at 500.
 				const CHUNK_SIZE = 500;
 				for (let offset = 0; offset < missIds.length; offset += CHUNK_SIZE) {
@@ -914,28 +917,40 @@ export function readModelCaches<TApi extends Api>(
 							ON f.provider_id = m.provider_id AND f.materialization_policy = m.materialization_policy
 						WHERE m.materialization_policy = ? AND m.provider_id IN (${placeholders})`;
 					const stmt = db.query<CacheRow, string[]>(sql);
-					let rows: CacheRow[];
+					const seen = new Set<string>();
 					try {
-						rows = stmt.all(policy, ...chunk);
+						for (const row of stmt.iterate(policy, ...chunk)) {
+							const providerId = row.provider_id;
+							seen.add(providerId);
+							let entry: CacheEntry<TApi> | null = null;
+							let meta: CacheRowMeta | null = null;
+							let isolatedFailure = false;
+							try {
+								entry = parseCacheRow<TApi>(db, providerId, row, ttlMs, now);
+								if (entry !== null) {
+									const { models: _models, ...rowScalars } = row;
+									meta = rowScalars;
+								}
+							} catch {
+								isolatedFailure = true;
+							}
+							if (!isolatedFailure) {
+								const key = readCacheKey(resolvedPath, providerId);
+								if (readRowCache.size >= READ_ROW_CACHE_MAX) readRowCache.clear();
+								readRowCache.set(key, { dataVersion, meta, entry: entry as CacheEntry<Api> | null });
+							}
+							results.set(providerId, entry);
+						}
 					} finally {
 						stmt.finalize();
 					}
-					for (const row of rows) {
-						rowsByProvider.set(row.provider_id, row);
+					for (const providerId of chunk) {
+						if (seen.has(providerId)) continue;
+						const key = readCacheKey(resolvedPath, providerId);
+						if (readRowCache.size >= READ_ROW_CACHE_MAX) readRowCache.clear();
+						readRowCache.set(key, { dataVersion, meta: null, entry: null });
+						results.set(providerId, null);
 					}
-				}
-				for (const providerId of missIds) {
-					const row = rowsByProvider.get(providerId) ?? null;
-					const entry = parseCacheRow<TApi>(db, providerId, row, ttlMs, now);
-					let meta: CacheRowMeta | null = null;
-					if (entry !== null && row !== null) {
-						const { models: _models, ...rowScalars } = row;
-						meta = rowScalars;
-					}
-					const key = readCacheKey(resolvedPath, providerId);
-					if (readRowCache.size >= READ_ROW_CACHE_MAX) readRowCache.clear();
-					readRowCache.set(key, { dataVersion, meta, entry: entry as CacheEntry<Api> | null });
-					results.set(providerId, entry);
 				}
 			}
 		});
