@@ -8,12 +8,9 @@ import { resolveModelOverride } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import taskLabelSystemPrompt from "../prompts/system/task-label.md" with { type: "text" };
 import { generateSessionTitle, type TitleUsageReporter } from "../utils/title-generator";
-
-const TASK_LABEL_SYSTEM_PROMPT = prompt.render(taskLabelSystemPrompt);
-
 import { labelEchoesHandle } from "./label-match";
 
-export { labelEchoesHandle };
+const TASK_LABEL_SYSTEM_PROMPT = prompt.render(taskLabelSystemPrompt);
 
 /** Compresses a delegated assignment into a one-sentence UI label via the tiny title model — fired by the executor spawn path because the task wire schema no longer carries a `description`; null on empty input or failure. `onUsage` receives every request that ran, for the spawning session's usage journal. */
 export async function generateTaskLabel(

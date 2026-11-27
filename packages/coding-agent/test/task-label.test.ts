@@ -3,7 +3,8 @@ import type { Api, Model } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { generateTaskLabel, labelEchoesHandle } from "@oh-my-pi/pi-coding-agent/task/label";
+import { generateTaskLabel } from "@oh-my-pi/pi-coding-agent/task/label";
+import { labelEchoesHandle } from "@oh-my-pi/pi-coding-agent/task/label-match";
 
 function getModelOrThrow(id: string): Model<Api> {
 	const model = getBundledModel("anthropic", id);

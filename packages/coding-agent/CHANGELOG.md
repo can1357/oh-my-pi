@@ -22,6 +22,7 @@
 
 ### Changed
 
+- Improved interactive startup prepaint speed by decoupling the startup composer from settings, model-registry, LSP, and MCP modules ([#20734](https://github.com/can1357/oh-my-pi/pull/20734) by [@Quantum-Quasar](https://github.com/Quantum-Quasar)).
 - Redesigned the `/live` call panel in Tern: your voice as a moving wave in the call's color, the transcript as a caption, and the call's status beside Mute and End call.
 - Redesigned the composer's dictation control in Tern: while recording it shows a live wave of your voice and the time recorded beside a stop button.
 - Bash can now load approved `.envrc` files and opt-in `.env` files without requiring `direnv`, using the exact approved file contents.
