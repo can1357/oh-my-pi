@@ -154,7 +154,10 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"qwen-preserve-thinking": wire("qwenPreserveThinking", ["openai"]),
 	"reject-root-object-union": wire("rejectRootObjectUnion", OAI),
 	"retry-without-strict-on-grammar-error": wire("retryWithoutStrictOnGrammarError", OAI),
-	"session-header": wire("sessionHeader", OAI, "scalar", ["x-litellm-session-id"]),
+	"session-header": wire("sessionHeader", [...OAI, "anthropic"], "scalar", [
+		"x-litellm-session-id",
+		"x-client-session-id",
+	]),
 	"reasoning-content-field": wire("reasoningContentField", OAI, "scalar", [
 		"reasoning_content",
 		"reasoning",
@@ -216,6 +219,11 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"supports-reasoning-summary": wire("supportsReasoningSummary", ["openai-responses"]),
 	"store-responses": wire("storeResponses", ["openai-responses"]),
 	"tool-name-prefix": wire("toolNamePrefix", ["openai-responses"], "scalar", ["_"]),
+	"reasoning-summary-default": wire("reasoningSummaryDefault", ["openai-responses"], "scalar", [
+		"auto",
+		"detailed",
+		"concise",
+	]),
 	"supports-store": wire("supportsStore", ["openai"]),
 	"supports-strict-mode": wire("supportsStrictMode", OAI),
 	"supports-tool-choice": wire("supportsToolChoice", OAI),
@@ -608,6 +616,8 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	 * pre-warm request.
 	 */
 	"prompt-cache-prewarm": { key: "promptCachePrewarm", set: "catalog", shape: "scalar", values: [true, false] },
+	/** The provider reports a distinct server-side AI-credit charge on usage; read through session billing aggregation. */
+	"reports-aiu": { key: "reportsAiu", set: "catalog", shape: "scalar", values: [true, false] },
 	"long-usage-limit-fallback": { key: "longUsageLimitFallback", set: "catalog", shape: "scalar" },
 	"max-context-window": { key: "maxContextWindow", set: "catalog", shape: "scalar" },
 	/**

@@ -477,8 +477,12 @@ export interface OpenAICompat {
 	extraBody?: Record<string, unknown>;
 	/** Request-session header that should mirror the normalized prompt-cache key. Default: unset. */
 	promptCacheSessionHeader?: "x-grok-conv-id" | "x-session-id";
-	/** Request header carrying the conversation session id, independent of prompt caching. Default: unset. */
-	sessionHeader?: "x-litellm-session-id";
+	/**
+	 * Request header carrying the conversation session id, independent of prompt
+	 * caching. One vocabulary for the `session-header` axis across the OpenAI
+	 * and Anthropic compat records. Default: unset.
+	 */
+	sessionHeader?: "x-litellm-session-id" | "x-client-session-id";
 	/** Whether chat-completions payloads should include provider-specific prompt-cache markers. */
 	cacheControlFormat?: "anthropic" | undefined;
 	/**
@@ -1205,6 +1209,13 @@ export interface ResolvedOpenAIResponsesCompat extends ResolvedOpenAISharedCompa
 	 */
 	toolNamePrefix?: string;
 	/**
+	 * `reasoning.summary` level sent when reasoning is engaged and the caller did
+	 * not choose one. Rule-owned: hosts whose `"auto"` summaries come back mostly
+	 * empty (GitHub Copilot GPT models). Unset keeps `"auto"`. Ignored while
+	 * `supportsReasoningSummary` is false.
+	 */
+	reasoningSummaryDefault?: "auto" | "detailed" | "concise";
+	/**
 	 * Whether the host binds native history items (`encrypted_content`, item
 	 * ids) to the connection that issued them, so a new process must rebuild
 	 * prior turns from message content until its first successful response.
@@ -1265,6 +1276,12 @@ export type ResolvedAnthropicCompat = Required<
 	stripThinkingHistory?: AnthropicCompat["stripThinkingHistory"];
 	/** Fast-mode SKU; undefined behaves as false. */
 	fastMode?: AnthropicCompat["fastMode"];
+	/**
+	 * Request header carrying the conversation session id. Rule-owned: GitHub
+	 * Copilot's `/v1/messages` returns blocked replies without usage when it is
+	 * missing. Undefined sends none.
+	 */
+	sessionHeader?: OpenAICompat["sessionHeader"];
 	/**
 	 * Largest width or height a single image block may carry. Undefined defers
 	 * to the canonical Anthropic API limit applied by the request builder.
