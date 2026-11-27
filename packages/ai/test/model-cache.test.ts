@@ -5,7 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+import { readModelCache, readModelCaches, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { removeWithRetries } from "../../utils/src/temp";
 
@@ -153,6 +153,30 @@ describe("model cache migrations", () => {
 			.get();
 		verified.close();
 		expect(row?.count).toBe(0);
+	});
+
+	it("readModelCaches isolates a malformed row whose cleanup delete hits SQLITE_BUSY", () => {
+		const now = Date.now();
+		writeModelCache("alpha", now, [createModel("alpha-model", "Alpha Model")], true, "v1", dbPath);
+		writeModelCache("beta", now, [createModel("beta-model", "Beta Model")], true, "v1", dbPath);
+		writeModelCache("gamma", now, [createModel("gamma-model", "Gamma Model")], true, "v1", dbPath);
+
+		const corruptDb = new Database(dbPath);
+		corruptDb.run("UPDATE model_cache SET models = ? WHERE provider_id = ?", ["{not valid json", "alpha"]);
+		corruptDb.close();
+
+		// Hold a write transaction on a second connection so parseCacheRow's cleanup DELETE hits SQLITE_BUSY.
+		const locker = new Database(dbPath);
+		locker.run("BEGIN IMMEDIATE");
+		try {
+			const results = readModelCaches<"openai-completions">(["alpha", "beta", "gamma"], TTL_MS, () => now, dbPath);
+			expect(results.get("alpha")).toBeNull();
+			expect(results.get("beta")?.models.map(model => model.id)).toEqual(["beta-model"]);
+			expect(results.get("gamma")?.models.map(model => model.id)).toEqual(["gamma-model"]);
+		} finally {
+			locker.run("ROLLBACK");
+			locker.close();
+		}
 	});
 });
 

@@ -33,6 +33,7 @@
 
 ### Changed
 
+- Batched startup model-cache SQLite reads in `readModelCaches()` with streaming row parsing and per-provider failure isolation ([#20736](https://github.com/can1357/oh-my-pi/pull/20736) by [@Quantum-Quasar](https://github.com/Quantum-Quasar))
 - Seeded models now remain available even when their provider applies model exclusions.
 - Replaced the local `parakeet-tdt-0.6b-v3` dictation seed with `fluid-speech-pro`, now the default dictation model, and added `parakeet-tdt-0.6b-v2` (English).
 - Devin models now expose their fast lane through `/fast` instead of listing separate `-fast` model entries.

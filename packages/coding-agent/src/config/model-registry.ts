@@ -48,6 +48,7 @@ import {
 	readComposedCatalog,
 	readComposedCatalogDescriptor,
 	readModelCache,
+	readModelCaches,
 	retainModelCacheConnection,
 	staticCatalogSources,
 	writeComposedCatalog,
@@ -201,6 +202,15 @@ const BUILT_IN_MODEL_MANAGER_PROVIDER_IDS: Readonly<Record<string, true>> = Obje
 );
 const MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP: Readonly<Record<string, true>> = Object.freeze(
 	Object.fromEntries(MODELS_DEV_CATALOG_PROVIDER_IDS.map(providerId => [providerId, true as const])),
+);
+const PROVIDER_DESCRIPTOR_BY_ID = new Map(PROVIDER_DESCRIPTORS.map(descriptor => [descriptor.providerId, descriptor]));
+const UNAUTHENTICATED_BUILT_IN_DISCOVERY_PROVIDERS = new Set<string>(
+	PROVIDER_DESCRIPTORS.filter(
+		descriptor =>
+			descriptor.allowUnauthenticated ||
+			(MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP[descriptor.providerId] === true &&
+				!descriptor.dynamicModelsAuthoritative),
+	).map(descriptor => descriptor.providerId),
 );
 const SPECIAL_MODEL_MANAGER_PROVIDER_ID_LOOKUP: Readonly<Record<string, true>> = Object.freeze(
 	Object.fromEntries(SPECIAL_MODEL_MANAGER_PROVIDER_IDS.map(providerId => [providerId, true as const])),
@@ -583,6 +593,9 @@ export class ModelRegistry {
 	 * immediately if credentials or config change.
 	 */
 	#hydratedCredentialSignatures = new Map<string, string>();
+	#hydratedCredentialSourceKinds = new Map<string, string>();
+	#hydratedCredentialOAuthWindows = new Map<string, { hydratedAt: number; nextExpiry: number }>();
+	#hydratedCredentialAuthGeneration?: number;
 	#configuredDiscoveryInFlight: Map<
 		DiscoveryProviderConfig,
 		Map<ModelRefreshStrategy, Promise<ConfiguredModelDiscoveryResult>>
@@ -1089,26 +1102,44 @@ export class ModelRegistry {
 	 * The synchronous constructor cannot resolve credentials, so session startup
 	 * awaits this local-only, best-effort pass before validating model selectors.
 	 */
-	async hydrateCredentialScopedModelCaches(): Promise<void> {
+	hydrateCredentialScopedModelCaches(): Promise<void> {
 		if (this.#owner) return this.#owner.hydrateCredentialScopedModelCaches();
-		if (!this.#credentialScopedCacheHydration) {
-			this.#credentialScopedCacheHydration = this.#runCredentialScopedCacheHydration().catch(error => {
+		if (this.#credentialScopedCacheHydration) return this.#credentialScopedCacheHydration;
+		const candidates = this.#collectCredentialScopedHydrationCandidates();
+		if (candidates.length === 0) {
+			return Promise.resolve();
+		}
+		const hydration = this.#hydrateCredentialScopedModelCaches(candidates)
+			.catch(error => {
 				logger.debug("credential-scoped model cache hydration failed", {
 					error: error instanceof Error ? error.message : String(error),
 				});
+			})
+			.finally(() => {
+				if (this.#credentialScopedCacheHydration === hydration) {
+					this.#credentialScopedCacheHydration = undefined;
+				}
 			});
-		}
-		const hydration = this.#credentialScopedCacheHydration;
-		try {
-			await hydration;
-		} finally {
-			if (this.#credentialScopedCacheHydration === hydration) {
-				this.#credentialScopedCacheHydration = undefined;
-			}
-		}
+		this.#credentialScopedCacheHydration = hydration;
+		return hydration;
 	}
 
-	async #runCredentialScopedCacheHydration(): Promise<void> {
+	async #hydrateCredentialScopedModelCaches(candidates: readonly string[]): Promise<void> {
+		// Adopt credentials written by another process before trusting the local generation snapshot.
+		try {
+			await this.authStorage.credentials.poll?.();
+		} catch (error) {
+			logger.debug("credential-scoped model cache auth poll failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+		if (this.#isCredentialScopedHydrationCurrent(candidates)) {
+			return;
+		}
+		await this.#runCredentialScopedCacheHydration(candidates);
+	}
+
+	#collectCredentialScopedHydrationCandidates(): string[] {
 		const disabledProviders = getDisabledProviderIdsFromSettings(this.#settings);
 		const configuredDiscoveryProviders = new Set(this.#discoverableProviders.map(p => p.provider));
 		const candidates: string[] = [];
@@ -1124,18 +1155,80 @@ export class ModelRegistry {
 			}
 			candidates.push(providerId);
 		}
-		if (candidates.length === 0) return;
+		return candidates;
+	}
 
+	#isCredentialScopedHydrationCurrent(candidates: readonly string[]): boolean {
+		if (this.#hydratedCredentialAuthGeneration !== this.authStorage.credentials.generation) return false;
+		if (this.#hydratedCredentialSignatures.size === 0) return false;
+		const now = Date.now();
+		for (const providerId of candidates) {
+			const prevSignature = this.#hydratedCredentialSignatures.get(providerId);
+			if (prevSignature === undefined) return false;
+			const baseUrl = this.#descriptorBaseUrl(providerId) ?? "";
+			const hasRuntimeOverride = this.#runtimeModelManagers.has(providerId) ? "1" : "0";
+			const suffix = `\u0000${baseUrl}\u0000${hasRuntimeOverride}`;
+			if (!prevSignature.endsWith(suffix)) return false;
+			const source = this.authStorage.keys.source(providerId);
+			const sourceKind = source?.kind ?? "none";
+			if (this.#hydratedCredentialSourceKinds.get(providerId) !== sourceKind) return false;
+			if (sourceKind === "runtime" || sourceKind === "config") return false;
+			if (sourceKind === "oauth") {
+				const window = this.#hydratedCredentialOAuthWindows.get(providerId);
+				if (!window || now < window.hydratedAt || now >= window.nextExpiry) return false;
+				continue;
+			}
+			if (sourceKind === "env") {
+				const envKey = getEnvApiKey(providerId) ?? "";
+				if (prevSignature !== `${envKey}${suffix}`) return false;
+				continue;
+			}
+			if (sourceKind === "none") {
+				if (
+					this.#keylessProviders.has(providerId) ||
+					this.authStorage.keys.keyless(providerId) ||
+					getOAuthCredentialsForProvider(this.authStorage, providerId).length > 0
+				) {
+					return false;
+				}
+				if (prevSignature !== suffix) return false;
+			}
+		}
+		return true;
+	}
+
+	async #runCredentialScopedCacheHydration(candidates: readonly string[]): Promise<void> {
+		const hydratedAt = Date.now();
+		const authGeneration = this.authStorage.credentials.generation;
 		const pendingProviders = new Set<string>();
 		const nextSignatures = new Map<string, string>();
+		const nextSourceKinds = new Map<string, string>();
+		const sourceKinds: string[] = [];
+		const oauthWindows = new Map<string, { hydratedAt: number; nextExpiry: number }>();
 		// Only resolve offline credentials for providers that have any auth/keyless source;
 		// unauthenticated providers have no credential-scoped cache key unless a descriptor
 		// explicitly allows unauthenticated discovery or a shared catalog applies.
 		const keys = await Promise.all(
-			candidates.map(providerId => {
+			candidates.map((providerId, index) => {
+				const source = this.authStorage.keys.source(providerId);
+				const sourceKind = source?.kind ?? "none";
+				sourceKinds[index] = sourceKind;
+				if (sourceKind === "oauth") {
+					let nextExpiry = Number.POSITIVE_INFINITY;
+					for (const credential of getOAuthCredentialsForProvider(this.authStorage, providerId)) {
+						if (
+							Number.isFinite(credential.expires) &&
+							credential.expires > hydratedAt &&
+							credential.expires < nextExpiry
+						) {
+							nextExpiry = credential.expires;
+						}
+					}
+					oauthWindows.set(providerId, { hydratedAt, nextExpiry });
+				}
 				if (
 					!this.#keylessProviders.has(providerId) &&
-					this.authStorage.keys.source(providerId) === undefined &&
+					source === undefined &&
 					!this.authStorage.keys.keyless(providerId) &&
 					getOAuthCredentialsForProvider(this.authStorage, providerId).length === 0
 				) {
@@ -1150,15 +1243,38 @@ export class ModelRegistry {
 			const baseUrl = this.#descriptorBaseUrl(providerId) ?? "";
 			const hasRuntimeOverride = this.#runtimeModelManagers.has(providerId) ? "1" : "0";
 			const signature = `${apiKey ?? ""}\u0000${baseUrl}\u0000${hasRuntimeOverride}`;
-			if (this.#hydratedCredentialSignatures.get(providerId) !== signature) {
-				pendingProviders.add(providerId);
+			const previousSignature = this.#hydratedCredentialSignatures.get(providerId);
+			if (previousSignature !== signature) {
 				nextSignatures.set(providerId, signature);
+				nextSourceKinds.set(providerId, sourceKinds[i]);
+				if (
+					previousSignature !== undefined ||
+					isAuthenticated(apiKey) ||
+					this.#runtimeModelManagers.has(providerId) ||
+					UNAUTHENTICATED_BUILT_IN_DISCOVERY_PROVIDERS.has(providerId)
+				) {
+					pendingProviders.add(providerId);
+				}
+			} else {
+				this.#hydratedCredentialSourceKinds.set(providerId, sourceKinds[i]);
 			}
 		}
-		if (pendingProviders.size === 0) return;
-		await this.#refreshRuntimeDiscoveries("offline", pendingProviders);
+		if (pendingProviders.size > 0) {
+			await this.#refreshRuntimeDiscoveries("offline", pendingProviders);
+		}
 		for (const [providerId, signature] of nextSignatures) {
 			this.#hydratedCredentialSignatures.set(providerId, signature);
+			this.#hydratedCredentialSourceKinds.set(providerId, nextSourceKinds.get(providerId) ?? "none");
+		}
+		for (const providerId of candidates) {
+			const window = oauthWindows.get(providerId);
+			if (window) this.#hydratedCredentialOAuthWindows.set(providerId, window);
+			else this.#hydratedCredentialOAuthWindows.delete(providerId);
+		}
+		if (this.authStorage.credentials.generation === authGeneration) {
+			this.#hydratedCredentialAuthGeneration = authGeneration;
+		} else {
+			this.#hydratedCredentialAuthGeneration = undefined;
 		}
 	}
 
@@ -1766,6 +1882,9 @@ export class ModelRegistry {
 		this.#runtimeAuthoritativeProviders.clear();
 		this.#commandConfigsByProvider.clear();
 		this.#hydratedCredentialSignatures.clear();
+		this.#hydratedCredentialSourceKinds.clear();
+		this.#hydratedCredentialOAuthWindows.clear();
+		this.#hydratedCredentialAuthGeneration = undefined;
 	}
 
 	#knownStaticProviders(): string[] {
@@ -2309,9 +2428,17 @@ export class ModelRegistry {
 			if (startup.policyInputs !== undefined && startup.policyInputs !== policy) this.#startupCatalog = undefined;
 			else startup.policyInputs = policy;
 		}
-		for (const providerId of providerIds) {
-			const cacheProviderId = this.#resolveStartupModelCacheProviderId(providerId);
-			const cache = readModelCache<Api>(cacheProviderId, STANDARD_MODEL_CACHE_TTL_MS, Date.now, this.#cacheDbPath);
+		const cacheProviderIds = providerIds.map(providerId => this.#resolveStartupModelCacheProviderId(providerId));
+		const cachesByProviderId = readModelCaches<Api>(
+			cacheProviderIds,
+			STANDARD_MODEL_CACHE_TTL_MS,
+			Date.now,
+			this.#cacheDbPath,
+		);
+		for (let index = 0; index < providerIds.length; index++) {
+			const providerId = providerIds[index];
+			const cacheProviderId = cacheProviderIds[index];
+			const cache = cachesByProviderId.get(cacheProviderId) ?? null;
 			const hasKey = this.#startupDiscoveryHasKey(providerId, cache !== null, disabledProviders);
 			if (startup) {
 				for (const model of cache?.models ?? []) {
@@ -2333,7 +2460,7 @@ export class ModelRegistry {
 				!disabledProviders.has(providerId) &&
 				hasKey;
 			if (!cache) {
-				const descriptor = PROVIDER_DESCRIPTORS.find(candidate => candidate.providerId === providerId);
+				const descriptor = PROVIDER_DESCRIPTOR_BY_ID.get(providerId);
 				const discoveryExpected =
 					!disabledProviders.has(providerId) &&
 					(sharedCatalogProvider ||

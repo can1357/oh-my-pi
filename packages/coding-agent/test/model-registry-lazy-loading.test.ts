@@ -3,7 +3,7 @@ import * as path from "node:path";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
-import { litellmModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models";
+import { litellmModelManagerOptions, resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { cfgDisabledProviders } from "@oh-my-pi/pi-coding-agent/config/model-settings";
@@ -230,5 +230,152 @@ describe("ModelRegistry lazy bundled composition", () => {
 		expectSameModelObjects(availableAfterAll, allBeforeSelectiveQueries);
 		expect(modelKeys(allBeforeSelectiveQueries)).toEqual(modelKeys(allAfterSelectiveQueries));
 		expect(modelKeys(availableAfterAll)).toEqual(modelKeys(availableBeforeAll));
+	});
+
+	function seedCopilotCacheRow(dbPath: string, accessToken: string, modelId: string, now: number): void {
+		const cacheProviderId = resolveModelCacheProviderId("github-copilot", {
+			apiKey: JSON.stringify({ token: accessToken }),
+		});
+		writeModelCache(
+			cacheProviderId,
+			now,
+			[
+				buildModel({
+					id: modelId,
+					name: modelId,
+					api: "openai-completions",
+					provider: "github-copilot",
+					baseUrl: "https://api.individual.githubcopilot.com",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 128_000,
+					maxTokens: 8_192,
+				}),
+			],
+			true,
+			"",
+			dbPath,
+		);
+	}
+
+	test("replaces the credential-scoped roster when stored credentials change", async () => {
+		const tempDir = TempDir.createSync("@model-registry-hydrate-cache-");
+		tempDirs.push(tempDir);
+		const now = Date.now();
+		const modelsDbPath = path.join(tempDir.path(), "models.db");
+		seedCopilotCacheRow(modelsDbPath, "gho_account_a", "copilot-account-a-model", now);
+		seedCopilotCacheRow(modelsDbPath, "gho_account_b", "copilot-account-b-model", now);
+
+		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		authStorages.push(authStorage);
+		const expires = now + 3_600_000;
+		await authStorage.credentials.set("github-copilot", {
+			type: "oauth",
+			access: "gho_account_a",
+			refresh: "refresh_a",
+			expires,
+		});
+
+		const registry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+		await registry.hydrateCredentialScopedModelCaches();
+		expect(registry.find("github-copilot", "copilot-account-a-model")).toBeDefined();
+		expect(registry.find("github-copilot", "copilot-account-b-model")).toBeUndefined();
+
+		// Repeated hydration with unchanged credentials keeps the same account roster.
+		await registry.hydrateCredentialScopedModelCaches();
+		expect(registry.find("github-copilot", "copilot-account-a-model")).toBeDefined();
+		expect(registry.find("github-copilot", "copilot-account-b-model")).toBeUndefined();
+
+		// Replacing stored credentials exposes the new account's catalog and drops the old one.
+		await authStorage.credentials.set("github-copilot", {
+			type: "oauth",
+			access: "gho_account_b",
+			refresh: "refresh_b",
+			expires,
+		});
+		await registry.hydrateCredentialScopedModelCaches();
+		expect(registry.find("github-copilot", "copilot-account-b-model")).toBeDefined();
+		expect(registry.find("github-copilot", "copilot-account-a-model")).toBeUndefined();
+	});
+
+	test("adopts external auth-store credential replacements during repeat hydration", async () => {
+		const tempDir = TempDir.createSync("@model-registry-hydrate-external-auth-");
+		tempDirs.push(tempDir);
+		const now = Date.now();
+		const authDbPath = path.join(tempDir.path(), "auth.db");
+		const modelsDbPath = path.join(tempDir.path(), "models.db");
+		seedCopilotCacheRow(modelsDbPath, "gho_ext_a", "copilot-ext-a-model", now);
+		seedCopilotCacheRow(modelsDbPath, "gho_ext_b", "copilot-ext-b-model", now);
+
+		const authStorage = await AuthStorage.create(authDbPath);
+		authStorages.push(authStorage);
+		const externalAuthStorage = await AuthStorage.create(authDbPath);
+		authStorages.push(externalAuthStorage);
+
+		const expires = now + 3_600_000;
+		await authStorage.credentials.set("github-copilot", {
+			type: "oauth",
+			access: "gho_ext_a",
+			refresh: "refresh_a",
+			expires,
+		});
+
+		const registry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+		await registry.hydrateCredentialScopedModelCaches();
+		expect(registry.find("github-copilot", "copilot-ext-a-model")).toBeDefined();
+		expect(registry.find("github-copilot", "copilot-ext-b-model")).toBeUndefined();
+
+		// Another process replaces the credential in the shared SQLite auth store.
+		await externalAuthStorage.credentials.set("github-copilot", {
+			type: "oauth",
+			access: "gho_ext_b",
+			refresh: "refresh_b",
+			expires,
+		});
+
+		await registry.hydrateCredentialScopedModelCaches();
+		expect(registry.find("github-copilot", "copilot-ext-b-model")).toBeDefined();
+		expect(registry.find("github-copilot", "copilot-ext-a-model")).toBeUndefined();
+	});
+
+	test("switches cached roster when the active OAuth account expires and a sibling remains valid", async () => {
+		const tempDir = TempDir.createSync("@model-registry-hydrate-oauth-expiry-");
+		tempDirs.push(tempDir);
+		let fakeNow = Date.now();
+		const nowSpy = spyOn(Date, "now").mockImplementation(() => fakeNow);
+		spies.push(nowSpy);
+
+		const modelsDbPath = path.join(tempDir.path(), "models.db");
+		seedCopilotCacheRow(modelsDbPath, "gho_expiring_a", "copilot-expiring-a-model", fakeNow);
+		seedCopilotCacheRow(modelsDbPath, "gho_valid_b", "copilot-valid-b-model", fakeNow);
+
+		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		authStorages.push(authStorage);
+		await authStorage.credentials.set("github-copilot", [
+			{
+				type: "oauth",
+				access: "gho_expiring_a",
+				refresh: "refresh_a",
+				expires: fakeNow + 10_000,
+			},
+			{
+				type: "oauth",
+				access: "gho_valid_b",
+				refresh: "refresh_b",
+				expires: fakeNow + 60_000,
+			},
+		]);
+
+		const registry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+		await registry.hydrateCredentialScopedModelCaches();
+		expect(registry.find("github-copilot", "copilot-expiring-a-model")).toBeDefined();
+		expect(registry.find("github-copilot", "copilot-valid-b-model")).toBeUndefined();
+
+		// Advance the clock past account A's expiry while account B remains unexpired.
+		fakeNow += 20_000;
+		await registry.hydrateCredentialScopedModelCaches();
+		expect(registry.find("github-copilot", "copilot-valid-b-model")).toBeDefined();
+		expect(registry.find("github-copilot", "copilot-expiring-a-model")).toBeUndefined();
 	});
 });

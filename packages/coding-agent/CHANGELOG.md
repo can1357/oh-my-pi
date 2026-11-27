@@ -73,6 +73,7 @@
 
 ### Changed
 
+- Improved model registry startup latency by batching standard model-cache SQLite reads and fast-pathing unchanged credential-scoped cache hydration ([#20736](https://github.com/can1357/oh-my-pi/pull/20736) by [@Quantum-Quasar](https://github.com/Quantum-Quasar))
 - Cross-instance agent messaging now spans projects: `agent://peers` still lists this folder's instances, `agent://peers?all` lists every project's, and `agent://<pid>` reads or messages an instance in any folder; `@p2p:` includes local agents and peers from every project, labeled with their folder when different, while plain `@` searches only this folder's peers
 - The `@` mention palette and mention chips draw their icons from the symbol preset: Nerd Font glyphs under `nerd`, plain ASCII under `ascii`, and a single-width unicode set otherwise (themes can override the `mention.*` symbols)
 - The `@` mention palette is colored: icons take their category's color, or the status of the row (running/idle/aborted agent, dirty file, open/merged/closed PR), and status badges take their tone
