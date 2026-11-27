@@ -46,6 +46,7 @@ import { MAIN_AGENT_ID } from "../../registry/agent-registry";
 import type { SessionManager } from "../../session/session-manager";
 import type { ApprovalRecordSink } from "../../session/tool-approval-records";
 import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-write-fallback";
+import { truncateTail } from "../../tools/streaming-output";
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
 import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shared-events";
 import { ManagedTimers } from "./managed-timers";
@@ -2073,8 +2074,9 @@ export class ExtensionRunner {
 							asyncJobManager.register(
 								"extension",
 								extensionJobText(label),
+								// Bounded like a background `bash` job's output preview: job views paint the whole text.
 								({ jobId, signal, reportProgress }) =>
-									run({ jobId, signal, reportProgress: text => reportProgress(text) }),
+									run({ jobId, signal, reportProgress: text => reportProgress(truncateTail(text).content) }),
 								{
 									ownerId: this.agent.id,
 									intent: options?.intent ? extensionJobText(options.intent) : undefined,
