@@ -8,6 +8,7 @@ import { untrack } from "@oh-my-pi/pi-tui";
 import type { TerminalCapabilities } from "@oh-my-pi/pi-tui/driver/contract";
 import type { TerminalDriverOptions } from "@oh-my-pi/pi-tui/driver/index";
 import { getProjectDir } from "@oh-my-pi/pi-utils/dirs";
+import { exitProcess } from "@oh-my-pi/pi-utils/postmortem";
 import { initTheme } from "../ui/theme/service";
 import { composerBorderColor } from "./interactive/border-color";
 import { AppFrame } from "./interactive/frame";
@@ -31,7 +32,7 @@ const STARTUP_DEFAULTS: StartupPreferences = {
 export interface PrepaintComposerOptions {
 	/** Driver options (test streams). */
 	readonly driver?: TerminalDriverOptions;
-	/** Emergency exit before the interactive mode's keys take over (default: `process.exit`). */
+	/** Override the host's emergency exit before interactive keybindings take over. */
 	readonly exit?: (code: number) => void;
 	readonly version?: string;
 	readonly cwd?: string;
@@ -87,7 +88,8 @@ function startFrame(options: PrepaintComposerOptions) {
 			thinkingLevel: status?.facts.thinkingLevel ?? "off",
 		}),
 	);
-	const exit = options.exit ?? ((code: number) => process.exit(code));
+	// The keyboard belongs to the host even while a tool factory has guarded process.exit.
+	const exit = options.exit ?? ((code: number) => exitProcess(code, { emitExitEvent: true }));
 	// Until the interactive mode's keys exist: Ctrl+C clears a draft, then exits (130); Ctrl+D
 	// forward-deletes in a draft and exits (0) on an empty one, so a raw-mode user can always abort.
 	// Ahead of the focused composer, which takes both keys for its own editing.

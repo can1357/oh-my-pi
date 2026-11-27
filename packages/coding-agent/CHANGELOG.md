@@ -141,6 +141,7 @@
 - The bash tool's builtin `grep` rejects malformed basic regexes (`\(`, `[`, `a\{1`, `[z-a]`, a trailing `\`, …) with GNU's error and exit status 2 instead of silently reporting no match
 - The bash tool's builtin `head` now leaves redirected input where it stopped, so `{ head -n1; cat; } < file` prints the whole file and a second `head` continues on the next line instead of mid-file; `head` and `wc` errors no longer end with `(os error N)`
 - `tui.maxInlineImages` takes effect again: the configured number of inline images stays live as terminal graphics, `0` keeps every image, and changing it redraws the transcript under the new limit ([#20843](https://github.com/can1357/oh-my-pi/issues/20843))
+- Ctrl+C and Ctrl+D on an empty startup composer exit cleanly even while an extension or custom tool is loading.
 - Changing `tui.resizeScrollback` while a session runs (`/settings`, `cfg://`, a config reload) now applies to the next resize instead of only after a restart ([#20845](https://github.com/can1357/oh-my-pi/issues/20845))
 - Fixed `tui.autoGraph` charts not appearing below numeric tables in graphics-capable terminals outside Tern ([#20842](https://github.com/can1357/oh-my-pi/issues/20842)).
 - `tui.spinnerInterval` (`--spinner-interval`) and `tui.motion` apply to every spinner in the terminal UI again, not only the terminal title; `tui.motion: reduced`/`none` also stops decorative blink, fade, and pulse ([#20844](https://github.com/can1357/oh-my-pi/issues/20844))

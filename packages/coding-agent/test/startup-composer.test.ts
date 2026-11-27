@@ -57,6 +57,43 @@ afterEach(() => {
 	setInteractiveHost(savedInteractiveHost);
 });
 
+describe("guarded prepaint shutdown", () => {
+	it.each([
+		{ key: "Ctrl+C", input: "\x03", code: 130 },
+		{ key: "Ctrl+D", input: "\x04", code: 0 },
+	])("restores the terminal and exits on $key while an extension is loading", async ({ input, code }) => {
+		const child = Bun.spawn(
+			[
+				process.execPath,
+				"-e",
+				`import * as fs from "node:fs";
+				import { withHostGuard, ExtensionExitError } from "@oh-my-pi/pi-coding-agent/extensibility/utils";
+				import { beginStartupComposer } from "@oh-my-pi/pi-coding-agent/modes/startup-composer";
+				import { takeStartupComposerLease } from "@oh-my-pi/pi-coding-agent/modes/startup-frame";
+				import { memoryTerminal } from "@oh-my-pi/pi-tui/testing/memory-terminal";
+				const term = memoryTerminal({ columns: 80, rows: 24 });
+				beginStartupComposer({ driver: term.options, cache: false });
+				await takeStartupComposerLease().ready;
+				if (!term.options.stdin.isRaw) throw new Error("prepaint did not claim the terminal");
+				process.on("exit", () => fs.writeSync(1, JSON.stringify({ raw: term.options.stdin.isRaw })));
+				await withHostGuard(async () => {
+					try { process.exit(99); } catch (error) { if (!(error instanceof ExtensionExitError)) throw error; }
+					term.feed(${JSON.stringify(input)});
+				});
+				throw new Error("startup interrupt did not exit");`,
+			],
+			{ stdin: "ignore", stdout: "pipe", stderr: "pipe" },
+		);
+		const [status, stdout, stderr] = await Promise.all([
+			child.exited,
+			new Response(child.stdout).text(),
+			new Response(child.stderr).text(),
+		]);
+		expect(status, stderr).toBe(code);
+		expect(JSON.parse(stdout)).toEqual({ raw: false });
+	});
+});
+
 describe("outer startup collaboration gate", () => {
 	it.each(["completes", "fails"] as const)("keeps guest mutations gated until outer startup %s", async result => {
 		const originalProject = getProjectDir();
