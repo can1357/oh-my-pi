@@ -805,10 +805,6 @@ export interface TspPickerScope {
 	disabled?: string | true;
 	/** Status dot: `success` ok, `warning` cached/empty, `error` unavailable, `muted` signed out. */
 	dot?: TspTone;
-	/** Async source still loading results for this scope. */
-	loading?: boolean;
-	/** Scope auto-locked by query syntax or intent arbiter. */
-	locked?: boolean;
 }
 
 /** A button of a picker's action bar. */
@@ -903,8 +899,8 @@ export interface TspPickerProps {
 	placeholder?: string;
 	scopes?: readonly TspPickerScope[];
 	scope?: string;
-	/** How `scopes` draw: a labeled column (default), `"rail"` (icons only), or `"pills"` (compact horizontal pill strip at the top of the sheet). A `group` change draws a separator. */
-	scopeStyle?: "column" | "rail" | "pills";
+	/** How `scopes` draw: a labeled column (default) or `"rail"` (icons only). A `group` change draws a separator. */
+	scopeStyle?: "column" | "rail";
 	tabs?: readonly { id: string; label: TspText; count?: number }[];
 	tab?: string;
 	columns?: readonly TspPickerColumn[];
