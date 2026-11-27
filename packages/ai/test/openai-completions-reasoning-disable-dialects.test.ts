@@ -199,3 +199,117 @@ describe("Chat Completions reasoning-disable conflict policy (per dialect)", () 
 		expect(payload.reasoning).toEqual({ enabled: false });
 	});
 });
+
+// Kimi reasoning models reject `tool_choice 'specified' is incompatible with
+// thinking enabled`, and Anthropic rejects reasoning beside a forced tool choice.
+// Like Anthropic's `disableThinkingIfToolChoiceForced`, the forced turn drops
+// reasoning instead of dropping `tool_choice`.
+describe("forced tool_choice reasoning suppression by model family", () => {
+	function catalogModel(spec: Partial<ModelSpec<"openai-completions">>): Model<"openai-completions"> {
+		const base = getBundledModel("openai", "gpt-4o-mini");
+		return buildModel({
+			...base,
+			api: "openai-completions",
+			...spec,
+			compat: base.compatConfig,
+		} as ModelSpec<"openai-completions">);
+	}
+
+	function kimiOpencodeGoModel(): Model<"openai-completions"> {
+		return catalogModel({
+			provider: "opencode-go",
+			baseUrl: "https://opencode.ai/zen/v1",
+			id: "kimi-k2.6",
+			name: "Kimi K2.6",
+			reasoning: true,
+		});
+	}
+
+	async function captureToolChoicePayload(
+		model: Model<"openai-completions">,
+		options: Parameters<typeof streamOpenAICompletions>[2],
+	): Promise<Record<string, unknown>> {
+		const { promise, resolve } = Promise.withResolvers<unknown>();
+		streamOpenAICompletions(model, forcedToolContext(), {
+			...options,
+			apiKey: "test-key",
+			fetch: createMockFetch(),
+			signal: createAbortedSignal(),
+			onPayload: payload => resolve(payload),
+		});
+		return (await promise) as Record<string, unknown>;
+	}
+
+	it("strips reasoning_effort when toolChoice is forced on direct Kimi (Moonshot-style id)", async () => {
+		const body = await captureToolChoicePayload(kimiOpencodeGoModel(), { reasoning: "high", toolChoice: "any" });
+
+		// Forced choice still forwarded so the model must pick a tool…
+		expect(body.tool_choice).toBe("required");
+		// …but reasoning is suppressed to satisfy Kimi's "thinking incompatible with forced tool_choice" rule.
+		expect(body.reasoning_effort).toBeUndefined();
+	});
+
+	it("preserves reasoning_effort when toolChoice is auto", async () => {
+		const body = await captureToolChoicePayload(kimiOpencodeGoModel(), { reasoning: "high", toolChoice: "auto" });
+
+		expect(body.tool_choice).toBe("auto");
+		expect(body.reasoning_effort).toBe("high");
+	});
+
+	it("strips OpenRouter-shaped reasoning object on forced toolChoice for Kimi via OpenRouter", async () => {
+		const model = catalogModel({
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			id: "moonshotai/kimi-k2",
+			name: "Kimi K2 (OpenRouter)",
+			reasoning: true,
+		});
+		const body = await captureForcedToolPayload(model);
+
+		expect(body.tool_choice).toMatchObject({ type: "function", function: { name: "read" } });
+		expect(body.reasoning).toBeUndefined();
+		expect(body.reasoning_effort).toBeUndefined();
+	});
+
+	it("sends explicit thinking disabled for Moonshot Kimi K2.6 when a named tool is forced", async () => {
+		const model = catalogModel({
+			provider: "moonshot",
+			baseUrl: "https://api.moonshot.ai/v1",
+			id: "kimi-k2.6",
+			name: "Kimi K2.6",
+			reasoning: false,
+		});
+		const body = await captureToolChoicePayload(model, { toolChoice: { type: "tool", name: "read" } });
+
+		expect(body.tool_choice).toMatchObject({ type: "function", function: { name: "read" } });
+		expect(body.thinking).toEqual({ type: "disabled" });
+		expect(body.reasoning).toBeUndefined();
+		expect(body.reasoning_effort).toBeUndefined();
+	});
+
+	it("strips reasoning_effort for Anthropic Claude models served via openai-completions (e.g. LiteLLM/OpenRouter proxies)", async () => {
+		// LiteLLM / Vertex proxies often expose Claude through chat-completions; the
+		// Anthropic reasoning + forced tool_choice constraint follows the model
+		// when it's reached through the OpenAI shape.
+		const model = catalogModel({
+			provider: "litellm",
+			baseUrl: "http://localhost:4000/v1",
+			id: "claude-sonnet-4-6",
+			name: "Claude Sonnet 4.6 (LiteLLM)",
+			reasoning: true,
+		});
+		const body = await captureToolChoicePayload(model, { reasoning: "high", toolChoice: "any" });
+
+		expect(body.tool_choice).toBe("required");
+		expect(body.reasoning_effort).toBeUndefined();
+	});
+
+	it("does not strip reasoning on non-Kimi models even with forced tool_choice", async () => {
+		// OpenAI itself accepts forced tool_choice with reasoning.
+		const model = catalogModel({ id: "gpt-5-mini", reasoning: true });
+		const body = await captureToolChoicePayload(model, { reasoning: "high", toolChoice: "any" });
+
+		expect(body.tool_choice).toBe("required");
+		expect(body.reasoning_effort).toBe("high");
+	});
+});

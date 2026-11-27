@@ -167,6 +167,43 @@ dock keep the dock at the bottom. Those rows are not live rows: retirement and
 allocation never count them. A replay and a resize reset it; a fullscreen
 layer leaves the normal screen, and so the pinned viewport, as it was.
 
+### 2.2 Fullscreen screen mode
+
+`TermBackendOptions.screen` (`HostOptions.screen`; the coding agent's
+`tui.screen`) chooses where the session draws: `inline` (everything above) or
+`fullscreen`. A fullscreen frame is a `FramePlan.fullscreen` frame: the
+writer keeps the alternate screen for the whole session and the normal screen
+is left as it was.
+
+- The dock is painted as inline and pinned to the bottom row, also under a
+  short transcript; `main` fills the rows above it in a window. Blocks paint at
+  natural height (what inline history would hold): no allocation, no summary
+  row, no retirement, no history batch. Layers composite over the frame;
+  a fullscreen layer replaces it as it does inline.
+- The window follows the tail, or is anchored to a `main` node and a row of its
+  entry (its separator rows first). Output below an anchored window never moves
+  it; its last row then reads `↓ N lines below`. An anchor whose rows from
+  there on fit (scrolled to the end, a taller screen, the blocks below
+  removed) follows the tail again; an anchor row past a block that shrank is
+  clamped; an anchor node that left `main` follows the tail.
+- `TermBackend.scroll(by)` (`Host.scroll`) moves it by a page (the window less
+  one row), a row count, to `start`, or to `end` (following). It returns false
+  when no window is on screen (inline, a fullscreen layer up, Tern) so the
+  caller's key goes elsewhere. A wheel report no hit target took scrolls three
+  rows unless a modal sheet owns the pointer.
+- Nothing reaches history until the shutdown flush, which composes the usual
+  inline frame: the writer leaves the alternate screen and writes every block
+  after the commit frontier below where the session started.
+- The commit frontier survives switching modes at runtime: blocks committed
+  inline stay committed, a fullscreen stretch commits nothing, and the next
+  inline frame retires from the frontier on, so every block reaches history
+  once.
+- With only fullscreen frames so far (nothing of ours on the normal screen), a
+  settled resize repaints instead of replaying and a display reset repaints the
+  alternate screen whole instead of clearing: such a session never clears
+  native history. `Host.suspend()` does not reset the display on resume unless
+  history was written; the next frame enters the alternate screen again.
+
 ## 3. Reset and resize behavior
 
 `Host.replayHistory()` (`driver.resetDisplay()`) clears terminal history and the
@@ -278,11 +315,13 @@ reply switches `TUI` to `native/backend.ts`: components
 are described (`describe()`, or `rows` fallback from `render()`), reconciled
 into document ops (`native/reconcile.ts`) and sent as frames, paced by the
 terminal's acknowledgements instead of the render cadence. A frame that echoes
-user input (a key, a paste, an `edit`, `undo` or `send` event) may run two
-frames past the credits, counting only frames unacknowledged for less than
-250 ms, so a controlled editor keeps echoing typing while Tern is slow to
-acknowledge a streaming transcript. The allowance is a rate, not a total: while
-Tern stays silent, typing sends at most `credits + 2` frames per 250 ms until
+user input (a key, a paste, or any UI event Tern reports for a node: a click, a
+toggle, an `edit`, …) may run two frames past the credits, counting only frames
+unacknowledged for less than 250 ms, so a controlled editor keeps echoing
+typing, and a clicked button's effect shows (a form it closes leaves the
+screen), while Tern is slow to acknowledge a streaming transcript. The
+allowance is a rate, not a total: while Tern stays silent, input sends at most
+`credits + 2` frames per 250 ms until
 the 5 s stall reset, and each echo carries every change held behind the
 credits. Other frames wait for an ack or that reset. None of this
 document's history, viewport, resize-replay or CPR machinery runs on that path;
@@ -393,7 +432,8 @@ image environment settings.
 5. Every active block keeps a viewport row while rows allow; overflow is
    summarized, never retired.
 6. Only explicit display resets, `rebuild` resizes and ledger mismatches
-   destructively clear native history.
+   destructively clear native history, and only once rows of ours are on the
+   normal screen (never in a session that drew only fullscreen frames).
 7. A failed write stops the writer; a graceful stop flushes the transcript.
 8. Width handling uses the shared ANSI-aware helpers and clamps rather than
    throwing in the render hot path. The renderer never probes scroll position.

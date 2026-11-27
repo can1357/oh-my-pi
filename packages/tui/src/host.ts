@@ -24,9 +24,9 @@ import { LoopWatchdog } from "./diag/loop-watchdog";
 import type { KeyEvent } from "./events";
 import { encodeHelloQuery, NativeSurfaces, TspConnection } from "./native";
 import { isTernPane } from "./driver/caps/identity";
-import type { UiNode } from "./node";
+import type { ScrollRequest, UiNode } from "./node";
 import type { Surface } from "./surface";
-import { driverImages, TermBackend } from "./term/backend";
+import { driverImages, type ScreenMode, TermBackend } from "./term/backend";
 import type { Theme } from "./theme/contract";
 import type { FramePlan, InputEvent, TerminalDriver } from "./driver/contract";
 import type { MouseTracking } from "./driver/io";
@@ -70,6 +70,12 @@ export interface HostOptions {
 	readonly clock?: Accessor<number>;
 	/** Driver configuration (resize policy, image budget, test streams). */
 	readonly driver?: TerminalDriverOptions;
+	/**
+	 * Where the terminal renderer draws the session (may change at runtime): `inline` on the normal
+	 * screen, or `fullscreen` on the alternate screen with `main` scrolling above a pinned dock.
+	 * Native (Tern) rendering ignores it. Default `inline`.
+	 */
+	readonly screen?: Accessor<ScreenMode>;
 	/**
 	 * Called synchronously right before the in-process terminal renderer starts
 	 * (initial rows launch or optimistic-Tern fallback). Lets callers register
@@ -153,6 +159,12 @@ export interface Host {
 	 * the hovered hit, whose band no report would clear anymore.
 	 */
 	setMouse(tracking: MouseTracking): void;
+	/**
+	 * Scroll the fullscreen transcript window (a page, a line, its start or end, or a row count);
+	 * the end follows the tail again. False when no such window is on screen (inline mode, a
+	 * fullscreen page up, native rendering), so the caller's key can go elsewhere.
+	 */
+	scroll(by: ScrollRequest["by"] | number): boolean;
 	/** Stop rendering, close the native surface, restore the terminal. */
 	stop(): Promise<void>;
 }
@@ -227,6 +239,7 @@ type Renderer = Pick<
 	| "feature"
 	| "checkoutShown"
 	| "setMouse"
+	| "scroll"
 	| "suspend"
 	| "requestFrame"
 > & {
@@ -360,6 +373,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			feature: name => connection.hasFeature(name),
 			checkoutShown: () => connection.checkout(),
 			setMouse: tracking => driver.setMouse(tracking),
+			scroll: () => false,
 			requestFrame: () => {},
 			async suspend(run) {
 				backend.stop(false);
@@ -392,6 +406,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			...(options.hyperlinks ? { hyperlinks: options.hyperlinks } : {}),
 			...(options.textSizing ? { textSizing: options.textSizing } : {}),
 			...(options.clock ? { clock: options.clock } : {}),
+			...(options.screen ? { screen: options.screen } : {}),
 			...(options.onKey ? { onKey: options.onKey } : {}),
 			...(options.intercept ? { intercept: options.intercept } : {}),
 		});
@@ -422,6 +437,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
 				driver.setMouse(tracking);
 				if (tracking === "off") backend.clearHover();
 			},
+			scroll: by => backend.scroll(by),
 			async suspend(run) {
 				backend.renderNow();
 				backend.stop();
@@ -430,7 +446,9 @@ export async function startHost(options: HostOptions): Promise<Host> {
 					return await run();
 				} finally {
 					await driver.start();
-					driver.resetDisplay();
+					// A fullscreen session that never wrote history has nothing to redraw on the normal
+					// screen (a reset would clear it at exit): its next frame paints the alternate screen whole.
+					if ((options.screen?.() ?? "inline") === "inline" || backend.wroteHistory) driver.resetDisplay();
 					backend.start();
 				}
 			},
@@ -473,6 +491,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			return () => changeListeners.delete(listener);
 		},
 		setMouse: tracking => renderer.setMouse(tracking),
+		scroll: by => renderer.scroll(by),
 		async stop() {
 			if (stopped) return driver.stop();
 			stopped = true;
