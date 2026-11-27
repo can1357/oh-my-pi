@@ -16,6 +16,7 @@
 ### Fixed
 
 - Fixed Antigravity CLI models showing as free in the model browser: they now show as included in the Google AI plan, can be selected as the cheapest vision fallback when configured roles do not resolve, and report $0 instead of unavailable cost in OTLP telemetry. ([#20577](https://github.com/can1357/oh-my-pi/pull/20577) by [@SuperUserA](https://github.com/SuperUserA))
+- Fixed Google Antigravity models listed without capability details (e.g. Gemini 3.5 Flash-Lite) showing no thinking levels, text-only input and $0 pricing, and tiered Claude Opus/Sonnet 5.5 and Gemini 3.1 Pro rows showing $0 ([#19916](https://github.com/can1357/oh-my-pi/pull/19916) by [@Xytronix](https://github.com/Xytronix))
 
 ### Added
 ### Removed
