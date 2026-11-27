@@ -64,9 +64,9 @@
 - Added `codexResets.expirySalvage` (default `true`): set it to `false` to auto-redeem saved Codex resets only when an exhausted window blocks the account, never spending expiring credits early and forfeiting remaining weekly quota ([#18308](https://github.com/can1357/oh-my-pi/issues/18308))
 - Added `ctx.cancelAsyncJob(id)` to the extension context, so an extension can cancel the session's own background jobs (such as `task` workers) like `/jobs kill` ([#18033](https://github.com/can1357/oh-my-pi/issues/18033))
 - Added the `git.childRepoDiscovery` setting: set it to `false` to stop a session started outside a repository from scanning its direct child directories and adopting a single child checkout for the status line, git/PR lookup, and prompt context ([#18232](https://github.com/can1357/oh-my-pi/issues/18232))
-- `omp models --json` now reports each model's compat overrides under `compat` (`extraBody` values redacted) ([#17092](https://github.com/can1357/oh-my-pi/issues/17092))
+- `omp models --json` now reports each model's compat overrides under `compat`, redacting both default and thinking-only `extraBody` values ([#17092](https://github.com/can1357/oh-my-pi/issues/17092))
 - Added an "Insert as editable text" choice to the large-paste menu that inserts the pasted text into the editor uncollapsed, so text pasted through a remote terminal can be edited without the host-clipboard raw-paste shortcut ([#17037](https://github.com/can1357/oh-my-pi/issues/17037))
-- Added the `clear_context` RPC command (and `RpcClient.clearContext()`), which clears the conversation in place like the TUI's `/clear`, keeping the session id and transcript file ([#16686](https://github.com/can1357/oh-my-pi/issues/16686))
+- Added the `clear_context` RPC command (and `RpcClient.clearContext()`), which clears the conversation and earlier queued input, settles abandoned prompts, and keeps the transcript file and session ID ([#16686](https://github.com/can1357/oh-my-pi/issues/16686))
 - Added the `agent_view_changed` extension event, fired when the TUI focuses a subagent or returns to the main session, so extensions can re-scope their status to the agent on screen ([#16546](https://github.com/can1357/oh-my-pi/issues/16546))
 - Added `model` and `fallback` attributes to `task` result envelopes so the parent sees which model served each subagent ([#16017](https://github.com/can1357/oh-my-pi/issues/16017))
 - Added a terminal notification when a plan is ready for approval, controlled by `completion.notify` ([#7724](https://github.com/can1357/oh-my-pi/issues/7724))
@@ -108,6 +108,9 @@
 ### Fixed
 
 - Fixed web search with GitHub Copilot Claude models: it now uses the Copilot login's token and endpoint (Enterprise included) and sends the same Copilot and session headers as chat, so replies are no longer rejected or blocked ([#20678](https://github.com/can1357/oh-my-pi/issues/20678))
+- Re-registering a fixed-model gateway now pairs the replacement URL with its credential and does not reuse another credential’s cached model list.
+- Discovered chat and embedding prices now honor the advertised per-token or per-million unit.
+- Oversized jq results no longer label a truncated preview as the full output, and `write` rejects incomplete read projections when creating archive members.
 - Edit results now show the edited branch and the session branch when a file is changed in another linked Git worktree ([#20801](https://github.com/can1357/oh-my-pi/pull/20801) by [@Quantum-Quasar](https://github.com/Quantum-Quasar)).
 - A running subagent no longer publishes a task progress update when only its elapsed time changed: such updates now go out at most every 5 seconds, which keeps elapsed timers moving and cuts task update traffic to RPC clients, session observers and transcripts by about 8x ([#20810](https://github.com/can1357/oh-my-pi/pull/20810) by [@Xytronix](https://github.com/Xytronix))
 - Spotlight no longer cuts tool results in sessions without the `read` tool (such as an RPC host's own tools under `--no-tools`), where the agent could not read the hidden lines back
@@ -255,7 +258,7 @@
 - Defaulted the saved Codex/Claude reset prompt to "Not now" and split redeeming once from enabling auto-redeem, so a stray Enter no longer spends a reset or persists consent ([#13327](https://github.com/can1357/oh-my-pi/issues/13327))
 - Account usage-limit failures (e.g. an exhausted Anthropic subscription window reported as `rate_limit_error`) now show as "account usage limit reached; resets in …" in the error banner and retry row instead of the raw rate-limit body ([#10733](https://github.com/can1357/oh-my-pi/issues/10733))
 - Fixed the status-line session segment showing identical IDs for sessions created within about a minute by rendering 13 characters (the full UUIDv7 timestamp) ([#9572](https://github.com/can1357/oh-my-pi/issues/9572))
-- Fixed glob/batch `lsp diagnostics` reporting every file as failed on large workspaces by using the same per-file wait as single-file diagnostics instead of a 400ms cap ([#10701](https://github.com/can1357/oh-my-pi/issues/10701))
+- Glob and batch `lsp diagnostics` now wait as long for each file as single-file diagnostics, retain completed reports at the call deadline, and identify unverified files ([#10701](https://github.com/can1357/oh-my-pi/issues/10701))
 - Fixed bash `gh issue`/`gh pr` cache invalidation dropping the wrong row when a numeric flag value (e.g. `--parent 100`) preceded the target, and invalidating only the first of several targets ([#10626](https://github.com/can1357/oh-my-pi/issues/10626))
 - Fixed extensions crashing when they call `isFocused()` on the overlay handle from `ctx.ui.custom(..., { overlay: true, onHandle })`; the handle now reports whether the overlay holds keyboard focus ([#10664](https://github.com/can1357/oh-my-pi/issues/10664))
 - `/retry` in a focused subagent view now retries that agent's last failed turn, matching Alt+R, instead of being refused as a main-session command ([#7369](https://github.com/can1357/oh-my-pi/issues/7369))
