@@ -229,6 +229,11 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 			);
 		} else if (hits.length === 0) {
 			out.push(`no hits for "${query}"${where} (τ ${threshold.toFixed(2)})`);
+			if (stats.judged < stats.listed) {
+				out.push(
+					`not exhaustive: only the top ${stats.judged} of ${stats.listed} eligible files (lexical shortlist) were judged, and ${stats.filesRead} read; unjudged files may still match. Narrow \`path\` or use grep.`,
+				);
+			}
 		} else {
 			out.push(`${hits.length} hit(s) for "${query}"${where} (τ ${threshold.toFixed(2)}), strongest first`);
 		}
