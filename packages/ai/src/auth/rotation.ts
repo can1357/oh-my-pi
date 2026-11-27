@@ -506,7 +506,7 @@ export class RateLimits implements LimitsApi {
 	 *   (temporary block via its own backoff — default plus server usage-report
 	 *   reset; sticky left intact so the next resolve re-ranks around the block).
 	 * - exact model-entitlement denial (Codex ChatGPT account, Cursor plan,
-	 *   Anthropic model-not-found 404, or agy `Unknown model ID`) → temporarily
+	 *   Anthropic model-not-found 404, agy `Unknown model ID`, or Gemini per-user quota model refusal) → temporarily
 	 *   block only that requested model, then rotate. A denial naming another model or provider changes nothing.
 	 * - exact OAuth organization denial → persist a longer account-wide block.
 	 * - other account-scoped policy denial → temporarily block that account

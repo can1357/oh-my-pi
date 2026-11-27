@@ -564,6 +564,7 @@ const DIRECT_REPLAY_APIS: Record<KnownApi, boolean> = {
 	"bedrock-converse-stream": true,
 	"google-generative-ai": true,
 	"google-vertex": true,
+	"google-interactions": true,
 	"ollama-chat": true,
 	"apple-foundation-models": true,
 	"cursor-agent": false,

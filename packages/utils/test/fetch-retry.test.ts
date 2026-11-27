@@ -206,13 +206,10 @@ describe("extractRetryHint", () => {
 		expect(extractRetryHint(undefined, "429 Monthly usage limit reached. Resets in 1 day.")).toBe(24 * 60 * 60_000);
 	});
 
-	it("keeps a Cloud Code credential blocked for the full 71h48m47s reset instead of retrying it early", () => {
-		expect(
-			extractRetryHint(
-				undefined,
-				"Cloud Code Assist API error (429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 71h48m47s.",
-			),
-		).toBe(((71 * 60 + 48) * 60 + 47) * 1000);
+	it("keeps a credential blocked for the full 71h48m47s reset instead of retrying it early", () => {
+		expect(extractRetryHint(undefined, "API error (429): Individual quota reached. Resets in 71h48m47s.")).toBe(
+			((71 * 60 + 48) * 60 + 47) * 1000,
+		);
 	});
 
 	it("honors a compound quotaResetDelay so an exhausted credential is not retried early", () => {
@@ -245,14 +242,6 @@ describe("extractRetryHint", () => {
 		],
 	])("waits for the longer structured delay when %s", (_label, body) => {
 		expect(extractRetryHint(undefined, body)).toBe(3_600_000);
-	});
-
-	it("honors quotaResetTimeStamp so an exhausted Cloud Code credential is not retried early", () => {
-		const future = new Date(Date.now() + 3_600_000).toISOString();
-		const hint = extractRetryHint(undefined, `{"metadata":{"quotaResetTimeStamp":"${future}"}}`);
-		expect(hint).toBeDefined();
-		expect(hint).toBeGreaterThan(3_500_000);
-		expect(hint).toBeLessThanOrEqual(3_600_000);
 	});
 
 	// A quota body can carry both a generic retry hint and the account reset

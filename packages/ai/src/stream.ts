@@ -12,6 +12,7 @@ import {
 	GOOGLE_THINKING_BUDGETS,
 	mapEffortToAnthropicAdaptiveEffort,
 	mapEffortToGoogleThinkingLevel,
+	minimumSupportedEffort,
 	requireSupportedEffort,
 	resolveWireModelId,
 	withoutUnverifiedThinking,
@@ -47,6 +48,7 @@ import { type GitLabDuoWorkflowOptions, streamGitLabDuoWorkflow } from "./provid
 import type { GoogleOptions } from "./providers/google";
 import { perturbContext } from "./prompts/perturbation";
 import { getVertexAccessToken } from "./providers/google-auth";
+import type { GoogleInteractionsOptions } from "./providers/google-interactions";
 import type { GoogleVertexOptions } from "./providers/google-vertex";
 import { streamKimi } from "./providers/kimi";
 import type { KiroOptions } from "./providers/kiro/stream";
@@ -63,6 +65,7 @@ import {
 	streamCursor,
 	streamDevin,
 	streamGoogle,
+	streamGoogleInteractions,
 	streamGoogleVertex,
 	streamKiro,
 	streamOllama,
@@ -576,6 +579,13 @@ function streamDispatch<TApi extends Api>(
 		case "google-generative-ai":
 			return streamGoogle(providerModel as Model<"google-generative-ai">, context, providerOptions);
 
+		case "google-interactions":
+			return streamGoogleInteractions(
+				providerModel as Model<"google-interactions">,
+				context,
+				providerOptions as GoogleInteractionsOptions,
+			);
+
 		case "ollama-chat":
 			return streamOllama(providerModel as Model<"ollama-chat">, context, providerOptions as OllamaChatOptions);
 
@@ -689,13 +699,14 @@ function isRetryableUpstreamError(
 	if (AIError.isAuthRetryableError(error)) return true;
 	// Zen's free tier serves only the OpenCode app: every key 403s identically (#12306).
 	if (AIError.isOpenCodeFreeTierGateMessage(message)) return false;
+	if (AIError.isClientAccessDisabledMessage(message)) return false;
 	// 401 means the credential is bad; 403 is its valid-token twin (access
 	// denied by plan, model policy, or org restriction — a sibling account may
 	// not share it). Explicit account-scoped policy errors such as Codex
 	// `cyber_policy` are likewise rotatable. A denial of only the requested
 	// model (Codex ChatGPT account, Cursor plan, Anthropic model-not-found 404,
-	// agy `Unknown model ID`) is rotatable when its provider and requested model
-	// match.
+	// agy `Unknown model ID`, Gemini per-user quota model refusal) is rotatable
+	// when its provider and requested model match.
 	// Usage-limit phrasing (Codex's
 	// "You have hit your ChatGPT usage limit", Anthropic's "usage_limit_reached",
 	// Google's "resource_exhausted", OpenAI's "insufficient_quota") and 429s
@@ -1860,6 +1871,25 @@ function mapOptionsForApi<TApi extends Api>(
 				hideThinkingSummary: options?.hideThinkingSummary,
 				toolChoice: mapGoogleToolChoice(options?.toolChoice),
 				cachedContent: options?.cachedContent,
+			});
+		}
+
+		case "google-interactions": {
+			// Gemini cannot turn thinking off; reasoning-off maps to the model's lowest
+			// level. `max_output_tokens` is sent only when the caller asked for a cap:
+			// the row's 65,536 default would only restate the server's own.
+			const thinkingOff = !options?.reasoning || options.disableReasoning || options.forceReasoningOff;
+			const thinkingLevel = !model.reasoning
+				? undefined
+				: thinkingOff || !options?.reasoning
+					? minimumSupportedEffort(model)
+					: requireSupportedEffort(model, options.reasoning);
+			return castApi<"google-interactions">({
+				...base,
+				maxTokens: rawOptions?.maxTokens,
+				thinkingLevel,
+				hideThinkingSummary: options?.hideThinkingSummary,
+				toolChoice: mapGoogleToolChoice(options?.toolChoice),
 			});
 		}
 

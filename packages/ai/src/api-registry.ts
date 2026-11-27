@@ -26,6 +26,7 @@ const BUILTIN_API_IDS = [
 	"bedrock-converse-stream",
 	"google-generative-ai",
 	"google-vertex",
+	"google-interactions",
 	"kiro-api",
 	"ollama-chat",
 	"cursor-agent",

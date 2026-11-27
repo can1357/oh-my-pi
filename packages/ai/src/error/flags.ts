@@ -1006,6 +1006,25 @@ function isAntigravityCliUnknownModelError(error: unknown, provider: string, mod
 	return suffix === "" || THINKING_EFFORTS.some(effort => suffix === `-${effort}`);
 }
 
+// Gemini's per-user quota endpoint refuses a model the signed-in account has no
+// allowance for: "Model gemini-4-argon is not supported for per-user quota requests."
+const PER_USER_QUOTA_MODEL_DENIAL_PATTERN = /\bModel (\S+) is not supported for per-user quota requests\b/;
+
+/** Model id from a Gemini per-user quota model refusal. */
+function perUserQuotaDeniedModelId(error: unknown, depth = 0): string | undefined {
+	if (depth > 6) return undefined;
+	if (typeof error === "string") return PER_USER_QUOTA_MODEL_DENIAL_PATTERN.exec(error)?.[1];
+	if (!error || typeof error !== "object") return undefined;
+	for (const text of [
+		"errorMessage" in error ? error.errorMessage : undefined,
+		"message" in error ? error.message : undefined,
+	]) {
+		const id = typeof text === "string" ? PER_USER_QUOTA_MODEL_DENIAL_PATTERN.exec(text)?.[1] : undefined;
+		if (id !== undefined) return id;
+	}
+	return "cause" in error ? perUserQuotaDeniedModelId(error.cause, depth + 1) : undefined;
+}
+
 /** Whether Cursor returned a non-retryable plan entitlement denial for this account. */
 function isCursorPlanAccountPolicyError(error: unknown, provider: string, depth = 0): boolean {
 	if (provider !== "cursor" || depth > 6) return false;
@@ -1025,7 +1044,7 @@ function isCursorPlanAccountPolicyError(error: unknown, provider: string, depth 
 /**
  * Flags for a rejection that denies this credential only the requested model
  * (Codex ChatGPT-account entitlement, Cursor plan, Anthropic model-not-found
- * 404, agy `Unknown model ID`), or 0. A denial that names a model must match
+ * 404, agy `Unknown model ID`, Gemini per-user quota model refusal), or 0. A denial that names a model must match
  * `provider` and the requested `modelId`, so provider-controlled text cannot
  * block another model.
  */
@@ -1034,7 +1053,8 @@ export function modelEntitlementDenialKinds(error: unknown, provider: string, mo
 		return Flag.AccountPolicy | Flag.ContentBlocked;
 	}
 	return isAnthropicModelNotFoundError(error, provider, modelId) ||
-		isAntigravityCliUnknownModelError(error, provider, modelId)
+		isAntigravityCliUnknownModelError(error, provider, modelId) ||
+		(!!modelId && perUserQuotaDeniedModelId(error) === modelId)
 		? Flag.AccountPolicy
 		: 0;
 }
@@ -1056,7 +1076,8 @@ export function isMismatchedModelEntitlementDenial(
 	const namesModel =
 		codexChatGPTAccountPolicyModel(error) !== undefined ||
 		anthropicModelNotFoundId(error) !== undefined ||
-		(provider === "antigravity-cli" && antigravityCliUnknownModelId(error) !== undefined);
+		(provider === "antigravity-cli" && antigravityCliUnknownModelId(error) !== undefined) ||
+		perUserQuotaDeniedModelId(error) !== undefined;
 	return namesModel && !isModelEntitlementDenial(error, provider, modelId);
 }
 
@@ -1117,6 +1138,19 @@ const OPENCODE_FREE_TIER_GATE_PATTERN = /\bfree tier can only be used from withi
  */
 export function isOpenCodeFreeTierGateMessage(errorMessage: string | undefined): boolean {
 	return errorMessage !== undefined && OPENCODE_FREE_TIER_GATE_PATTERN.test(errorMessage);
+}
+
+/**
+ * omp's own copy for a provider that switched off the OAuth client or API a
+ * login uses ("Google has turned off Gemini access for this sign-in right
+ * now"). The outage is client-wide, not the account's: refreshing, rotating
+ * siblings, signing in again, or disabling the credential cannot help.
+ */
+const CLIENT_ACCESS_DISABLED_PATTERN = /\bhas turned off [^\n]{0,60}\baccess for this sign-in\b/i;
+
+/** Whether `errorMessage` is a transport's client-disabled copy (see {@link CLIENT_ACCESS_DISABLED_PATTERN}). */
+export function isClientAccessDisabledMessage(errorMessage: string | undefined): boolean {
+	return errorMessage !== undefined && CLIENT_ACCESS_DISABLED_PATTERN.test(errorMessage);
 }
 
 const GITHUB_COPILOT_POLICY_DENIAL_PATTERN = /GitHub Copilot access denied \(HTTP 403\)/;

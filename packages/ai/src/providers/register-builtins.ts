@@ -71,6 +71,17 @@ interface StreamLimits {
 	openAIIdleEnvFloorsFirstEvent?: boolean;
 }
 
+/**
+ * Gemini Interactions turns may run up to Google's 3600 s deadline, and a
+ * signature-only thought step can be the only event for minutes (Google's SSE
+ * keep-alive comments are not events), so both watchdogs default to that
+ * deadline. Env and caller overrides still win.
+ */
+const GOOGLE_INTERACTIONS_STREAM_LIMITS: StreamLimits = {
+	defaultFirstEventTimeoutMs: 3_600_000,
+	defaultIdleTimeoutMs: 3_600_000,
+};
+
 const PROVIDER_HANDLED_STREAM_TIMEOUTS: StreamLimits = {
 	providerHandlesStreamTimeouts: true,
 };
@@ -234,6 +245,13 @@ export const streamAzureOpenAIResponses = createLazyProviderStream(
 export const streamGoogle = createLazyProviderStream(
 	() => import("./google"),
 	mod => mod.streamGoogle,
+);
+
+/** Stream Gemini Interactions (per-user quota) through the shared watchdog. */
+export const streamGoogleInteractions = createLazyProviderStream(
+	() => import("./google-interactions"),
+	mod => mod.streamGoogleInteractions,
+	GOOGLE_INTERACTIONS_STREAM_LIMITS,
 );
 
 /** Stream the Vertex API through the shared watchdog. */

@@ -55,6 +55,7 @@ const KNOWN_APIS = [
 	"bedrock-converse-stream",
 	"google-generative-ai",
 	"google-vertex",
+	"google-interactions",
 	"kiro-api",
 	"ollama-chat",
 	"cursor-agent",

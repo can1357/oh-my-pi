@@ -57,6 +57,16 @@ function matchesSubscriptionCapText(errorMessage: string): boolean {
 	return SUBSCRIPTION_CAP_PATTERN.test(errorMessage) && !TRANSIENT_INTERVAL_RATE_LIMIT_PATTERN.test(errorMessage);
 }
 const OPENROUTER_DAILY_FREE_LIMIT_PATTERN = /\bfree[-_ ]models[-_ ]per[-_ ]day\b/i;
+// Daily caps worded as a rate limit: Gemini's per-user quota answers "Rate limit
+// exceeded for model … (tokens per day)" or "You've reached today's … limit
+// for …". The window reopens only at the daily reset, so it is quota
+// exhaustion, never a per-minute throttle.
+const DAILY_QUOTA_CAP_PATTERN = /\b(?:tokens|requests) per day\b|\breached today's\b[^\n]{0,80}\blimit\b/i;
+
+/** Whether an error message reports a daily quota cap (resets at the day boundary, not within minutes). */
+export function isDailyQuotaCapText(errorMessage: string): boolean {
+	return DAILY_QUOTA_CAP_PATTERN.test(errorMessage);
+}
 // ClinePass subscription-window exhaustion ("clinepass limit …") and free-tier
 // model caps ("free limit reached on model … try again in …") are account-local
 // quota exhaustion, not per-minute rate limiting.
@@ -333,6 +343,10 @@ export function parseRateLimitReason(errorMessage: string): RateLimitReason {
 		return "QUOTA_EXHAUSTED";
 	}
 
+	if (DAILY_QUOTA_CAP_PATTERN.test(errorMessage)) {
+		return "QUOTA_EXHAUSTED";
+	}
+
 	if (CLINE_PASS_QUOTA_PATTERN.test(errorMessage)) {
 		return "QUOTA_EXHAUSTED";
 	}
@@ -597,6 +611,7 @@ export function matchesUsageLimitText(errorMessage: string): boolean {
 		ACCOUNT_RATE_LIMIT_PATTERN.test(errorMessage) ||
 		matchesSubscriptionCapText(errorMessage) ||
 		OPENROUTER_DAILY_FREE_LIMIT_PATTERN.test(errorMessage) ||
+		DAILY_QUOTA_CAP_PATTERN.test(errorMessage) ||
 		ZERO_ALLOWANCE_PATTERN.test(errorMessage)
 	);
 }
