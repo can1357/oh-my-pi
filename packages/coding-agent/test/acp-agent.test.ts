@@ -224,9 +224,14 @@ class FakeAgentSession {
 		return this.sessionManager.getHeader()?.title ?? `Session ${this.sessionId}`;
 	}
 
-	get modelRegistry(): { getApiKey: (model: Model) => Promise<string>; authStorage?: AuthStorage } {
+	get modelRegistry(): {
+		getApiKey: (model: Model) => Promise<string>;
+		awaitBackgroundRefresh: () => Promise<void>;
+		authStorage?: AuthStorage;
+	} {
 		return {
 			getApiKey: async (_model: Model) => "test-key",
+			awaitBackgroundRefresh: async () => {},
 			...(this.authStorage ? { authStorage: this.authStorage } : {}),
 		};
 	}

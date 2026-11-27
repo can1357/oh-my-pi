@@ -80,6 +80,7 @@ interface FakeAcpBuiltinSession {
 	modelRegistry: {
 		getAll(): Array<{ provider: string; id: string; contextWindow?: number }>;
 		getAvailable(): Array<{ provider: string; id: string; contextWindow?: number }>;
+		awaitBackgroundRefresh(): Promise<void>;
 	};
 	setModel(model: unknown): Promise<void>;
 	setModelTemporary(model: unknown, thinkingLevel?: string): Promise<void>;
@@ -188,6 +189,7 @@ function createRuntime() {
 		modelRegistry: {
 			getAll: () => session.getAvailableModels(),
 			getAvailable: () => session.getAvailableModels(),
+			awaitBackgroundRefresh: async () => {},
 		},
 		async setModel(_model: unknown) {},
 		async setModelTemporary(_model: unknown, _thinkingLevel?: string) {},

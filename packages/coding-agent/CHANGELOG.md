@@ -199,6 +199,7 @@
 - Fixed `registerProvider` with a fixed `models` list ignoring the provider's `transport` ([#18960](https://github.com/can1357/oh-my-pi/issues/18960))
 - The `task.maxRecursionDepth` setting now states that `0` disables subagents entirely (it is labelled `Disabled`, not `None`) and `1` allows one generation, and `--tools task` names the setting when it removed `task` ([#19077](https://github.com/can1357/oh-my-pi/issues/19077))
 - Fixed `write` creating a new file from a truncated `read` result; content ending in a read truncation notice is now refused for missing targets too ([#18855](https://github.com/can1357/oh-my-pi/issues/18855))
+- Fixed the ACP model picker omitting background-discovered models (such as Copilot 1M variants) and rejecting their selection by waiting for in-flight model discovery before returning session config options or switching models ([#19127](https://github.com/can1357/oh-my-pi/issues/19127))
 
 ### Removed
 
