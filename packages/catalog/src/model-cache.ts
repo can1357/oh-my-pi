@@ -15,7 +15,7 @@ import {
 	VERSION,
 } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
-import ruleIndex from "./compat/rules-index.json" with { type: "json" };
+import rules from "./compat/rules.json" with { type: "json" };
 import type { Api, Model } from "./types";
 
 // Rows persist fully materialized Models so compatible warm-cache reads do not
@@ -51,7 +51,7 @@ const MODEL_MATERIALIZATION_VERSION = 2;
 let cachedMaterializationPolicy: string | undefined;
 function materializationPolicy(): string {
 	if (cachedMaterializationPolicy === undefined) {
-		cachedMaterializationPolicy = `app-${VERSION}:builder-${MODEL_MATERIALIZATION_VERSION}:rules-${ruleIndex.version}-${ruleIndex.hash}`;
+		cachedMaterializationPolicy = `app-${VERSION}:builder-${MODEL_MATERIALIZATION_VERSION}:rules-${rules.version}-${rules.hash}`;
 	}
 	return cachedMaterializationPolicy;
 }

@@ -7,7 +7,7 @@
  * compat per request.
  */
 
-import ruleIndex from "./compat/rules-index.json" with { type: "json" };
+import rules from "./compat/rules.json" with { type: "json" };
 import { resolveDiscoveryApi, resolveModelPolicy } from "./compat/resolve";
 import type { ModelIdentity } from "./compat/types";
 import { resolveModelTokenizer } from "./model-tokenizer";
@@ -428,7 +428,7 @@ export function buildDiscoveredModel(spec: ModelSpec<Api>, providerType: string)
  */
 export function nextBuildPriceChange(cost: ModelCost, now: number): number {
 	let next = Number.POSITIVE_INFINITY;
-	for (const instant of ruleIndex.priceChanges) {
+	for (const instant of rules.priceChanges) {
 		if (instant > now) {
 			next = instant;
 			break;
