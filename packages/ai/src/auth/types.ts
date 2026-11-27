@@ -1148,6 +1148,19 @@ export interface OAuthRefreshByIdOptions {
 	rejectedAccess?: string;
 }
 
+/** How {@link OAuthApi.signOut} removes a login. */
+export interface OAuthSignOutOptions {
+	signal?: AbortSignal;
+}
+
+/** Outcome of {@link OAuthApi.signOut}. */
+export interface OAuthSignOutResult {
+	/** `false` when no such login was stored. */
+	removed: boolean;
+	/** Why the provider's sign-out hook failed (a revocation it did not confirm); the login is removed regardless. */
+	signOutError?: string;
+}
+
 /** OAuth login, access, account identity, and refresh operations. */
 export interface OAuthApi {
 	/**
@@ -1157,6 +1170,13 @@ export interface OAuthApi {
 	 * login registered.
 	 */
 	login(provider: OAuthProviderId, ctrl: OAuthLoginController): Promise<OAuthLoginIdentity | undefined>;
+	/**
+	 * Remove one stored login. The provider's `sign-out` hook first forgets the
+	 * account's secrets kept outside the credential store and revokes the grant
+	 * at the provider. The login is removed even when the hook fails;
+	 * {@link OAuthSignOutResult.signOutError} says why.
+	 */
+	signOut(provider: string, credentialId: number, options?: OAuthSignOutOptions): Promise<OAuthSignOutResult>;
 	/**
 	 * Resolve the OAuth credential for `provider`, refreshing through the same
 	 * pipeline as {@link AuthStorage.keys.get} but returning the refreshed

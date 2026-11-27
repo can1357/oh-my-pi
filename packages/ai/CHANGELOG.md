@@ -7,6 +7,7 @@
 - Added xAI speech-to-text support, including use through the authentication gateway.
 - Added the `priority` service tier for Devin models, using the fast lane and corresponding fast pricing.
 - Added an `upstreamModel` option for mock provider responses so tests and integrations can report the model that actually served a request.
+- Added a `sign-out` provider hook and `OAuthApi.signOut`: removing a login runs the hook, which deletes the account's secrets kept outside the credential store and revokes the grant at the provider
 
 ### Changed
 

@@ -7929,6 +7929,7 @@ func (v *GetLogoutAccountsResult) decodeFrom(raw map[string]json.RawMessage) err
 
 type LogoutResult struct {
 	RemainingSource *string `json:"remainingSource,omitempty"`
+	SignOutError    *string `json:"signOutError,omitempty"`
 }
 
 func (v *LogoutResult) UnmarshalJSON(data []byte) error {
@@ -7939,6 +7940,7 @@ func (v *LogoutResult) decodeFrom(raw map[string]json.RawMessage) error {
 	var out LogoutResult
 	d := fieldDecoder{raw: raw, owner: "LogoutResult"}
 	d.optional("remainingSource", &out.RemainingSource)
+	d.optional("signOutError", &out.SignOutError)
 	if d.err != nil {
 		return d.err
 	}
@@ -8772,7 +8774,7 @@ type LogoutCommand struct {
 	CredentialID int64  `json:"credentialId"`
 }
 
-// Logout sends "logout": Remove one stored credential; fails when it is no longer stored. `remainingSource` names auth that still applies.
+// Logout sends "logout": Remove one stored credential, revoking it at the provider when one supports it; fails when it is no longer stored. `remainingSource` names auth that still applies; `signOutError` says why the provider's sign-out failed (the credential is removed regardless).
 func (c Commands) Logout(ctx context.Context, p LogoutCommand) (LogoutResult, error) {
 	var out LogoutResult
 	err := c.call(ctx, "logout", p, 0, &out)

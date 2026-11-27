@@ -3,6 +3,7 @@ import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { providerActiveNotice } from "@oh-my-pi/pi-catalog/compat/auth";
 import { jsx } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
 import { settings } from "../../config/settings";
@@ -37,7 +38,7 @@ import {
 import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
 import { parseSlashCommand } from "../../slash-commands/helpers/parse";
 import type { Shell, TranscriptBlock } from "../../ui/shell";
-import { NoticeLine, StatusNotice, StrippedToolCalls } from "../../ui/transcript/messages/notices";
+import { NoticeLine, StatusBlock, StatusNotice, StrippedToolCalls } from "../../ui/transcript/messages/notices";
 import { ToolActivity } from "../../ui/transcript/messages/panel";
 import { normalizeBlobExtension } from "../../utils/image-format";
 import { imageAttachmentSource } from "../../utils/image-source";
@@ -248,6 +249,8 @@ export class UiHelpers {
 	#lastStatus: { readonly block: TranscriptBlock; readonly message: string } | undefined;
 	/** Status, warning and error lines: a keyed status updates in place only with these below it. */
 	readonly #notices = new WeakSet<TranscriptBlock>();
+	/** Session and model the last active-model notice named; cleared while no declaring provider serves. */
+	#activeModelNoticeKey: string | undefined;
 
 	constructor(private ctx: InteractiveModeContext) {}
 
@@ -1064,6 +1067,32 @@ export class UiHelpers {
 
 	showError(errorMessage: string): void {
 		this.#presentNotice(() => jsx(NoticeLine, { tone: "error", message: errorMessage }));
+	}
+
+	/**
+	 * The line a provider declares for its models (`active-notice`), such as "Using your Acme Pro
+	 * plan · Acme 2", once per model the viewed session switches to or first runs.
+	 */
+	showActiveModelNotice(): void {
+		const session = this.ctx.viewSession;
+		const model = session.model;
+		const notice = model ? providerActiveNotice(model.provider) : undefined;
+		const key =
+			model && notice ? `${session.sessionManager.getSessionId()}\n${model.provider}/${model.id}` : undefined;
+		if (key === this.#activeModelNoticeKey) return;
+		this.#activeModelNoticeKey = key;
+		if (!model || !notice) return;
+		const text = `${notice} · ${model.name}`;
+		this.#presentNotice(() =>
+			jsx(StatusBlock, {
+				rows: [
+					{
+						parts: [{ text, color: "dim" }],
+						native: { tone: "info", icon: `provider:${model.provider}`, message: [{ t: text, s: "dim" }] },
+					},
+				],
+			}),
+		);
 	}
 
 	showWarning(warningMessage: string, options?: { hideWithToolActivity?: boolean }): void {

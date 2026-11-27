@@ -7605,6 +7605,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#uiHelpers.showWarning(message, options);
 	}
 
+	showActiveModelNotice(): void {
+		this.#uiHelpers.showActiveModelNotice();
+	}
+
 	#handleLspStartupEvent(event: LspStartupEvent): void {
 		if (event.type === "failed") {
 			this.showWarning(`LSP startup failed: ${event.error}. It will retry lazily on write.`);

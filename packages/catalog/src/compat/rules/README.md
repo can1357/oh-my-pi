@@ -399,7 +399,7 @@ auth "anthropic" {
         after-exchange hook="anthropic-identity"
         paste-key prefix="sk-or-" validate-url="https://…"   // manual input starting with prefix is an API key
     }
-    refresh {                                   // or `refresh "none"` / `refresh hook="name"`
+    refresh {                                   // or `refresh "none"` / `refresh hook="name"` (optionally `{ window-ms … }`)
         token url="…" body="json" { headers { User-Agent "…" } }   // defaults to the login token request
         require "projectId"
         scopes "user:profile" "user:inference"   // sent space-joined as `scope`; a 400 `invalid_scope` retries once without it
@@ -411,6 +411,8 @@ auth "anthropic" {
     store-as "openai-codex"                      // persist under another provider id
     callback-port 54545                          // defaults to the oauth-code callback port
     paste-code #true                             // defaults to #true for oauth-code logins
+    device-bound #true                           // logins need a key only this machine holds: kept out of the auth broker
+    sign-out hook="name"                          // runs when a login is removed: forgets local secrets and revokes the grant upstream
     api-key-format "structured"                  // bearer (default) | structured (JSON credential as API key)
     expiry "jwt-or-never"                        // session-JWT expiry policy
     result "api-key"                             // OAuth login persists only credentials.access as a plain API key
@@ -422,6 +424,8 @@ auth "anthropic" {
     show-in-login-list #false
     disabled "Why it is paused, shown to users"  // turns the provider off: no login, no credential reaches it
     login-warning "Account risk to accept"       // a new login asks the user to type "yes" first
+    connected-name "Acme Pro plan"               // what linked-account surfaces call the provider; `name` stays the `/login` label
+    active-notice "Using your Acme Pro plan"     // transcript line when a session starts using one of the provider's models
 }
 ```
 
@@ -432,6 +436,8 @@ auth "anthropic" {
 `disabled "<reason>"` turns a provider off without removing its code or anyone's stored credentials: it leaves the built-in login roster, `login` and token refresh refuse it, usage probes skip it, and no key source (runtime, `models.yml`, stored, broker, env) resolves for it, so nothing calls the provider; a request names the reason. An extension that registers its own OAuth login under the paused id takes the id back, since that is the end user's choice, as does listing the id in the coding agent's `auth.unpausedProviders` setting (`setUnpausedProviders` in `@oh-my-pi/pi-ai/oauth`). Delete the line to turn it back on for everyone — stored logins come back as they were.
 
 `login-warning "<text>"` keeps a provider usable but makes every new login accept a risk first: the login list marks it "(at your own risk)", and `login` shows the text and starts the flow only after the user types `yes`; any other answer or a cancel stores nothing. Stored logins, token refresh and requests are not asked again. An extension that registers its own OAuth login under the id owns that prompt instead.
+
+`connected-name "<text>"` names the provider on every surface after an account is linked — login success lines, model picker provider scopes, logout and account rows, usage and status output — while `name` stays the pre-sign-in label in the `/login` list. Absent, those surfaces keep showing the provider id (title-cased where they already did). `active-notice "<text>"` adds one dim transcript line, `<text> · <model name>`, when the session switches to one of the provider's models or first runs a turn on one; it shows once per model per session.
 
 Login kinds:
 
