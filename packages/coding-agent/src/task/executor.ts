@@ -1826,10 +1826,8 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 
 	/**
 	 * Whether progress differs from the last emitted snapshot in anything but `durationMs`.
-	 * Fields compare by identity, as updates replace a field's value. Two exceptions: the
-	 * emit-time rebuilds of `recentOutput` and `streaming` compare by value, and
-	 * `recentTools` and `extractedToolData` change in place only on `tool_execution_end`,
-	 * which always flushes.
+	 * Fields compare by identity, as updates replace a field's value; the emit-time rebuilds
+	 * of `recentOutput` and `streaming` compare by value.
 	 */
 	const progressChangedSinceEmit = (): boolean => {
 		const last = lastEmittedProgress;
@@ -2002,10 +2000,8 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	};
 
 	const recordExtractedToolData = (toolName: string, data: unknown): void => {
-		progress.extractedToolData = progress.extractedToolData || {};
-		const existing = progress.extractedToolData[toolName] || [];
-		existing.push(data);
-		progress.extractedToolData[toolName] = existing;
+		const extracted = progress.extractedToolData;
+		progress.extractedToolData = { ...extracted, [toolName]: [...(extracted?.[toolName] ?? []), data] };
 		if (toolName === "yield") {
 			const item = isRecord(data) ? data : undefined;
 			const incremental = Array.isArray(item?.type) && item.type.length > 0;
@@ -2164,7 +2160,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				activeTools.delete(event.toolCallId);
 				if (finished) {
 					const changed = !event.isError && isEditTool(event.toolName) ? editResultStats(event.result) : undefined;
-					progress.recentTools.unshift({
+					const entry = {
 						tool: finished.tool,
 						args: finished.args ?? "",
 						argsKey: finished.argsKey,
@@ -2172,11 +2168,9 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 						isError: event.isError,
 						...changed,
 						endMs: now,
-					});
+					};
 					// Keep only last 5
-					if (progress.recentTools.length > 5) {
-						progress.recentTools.pop();
-					}
+					progress.recentTools = [entry, ...progress.recentTools].slice(0, 5);
 				}
 				if (args.onToolResult) {
 					const content: unknown = isRecord(event.result) ? event.result.content : undefined;

@@ -549,6 +549,34 @@ describe("clock-only progress", () => {
 		for (let i = 1; i < durations.length; i++) expect(durations[i]).toBeGreaterThanOrEqual(durations[i - 1]);
 	});
 
+	it("leaves an emitted snapshot's recent tools unchanged when a later tool ends", async () => {
+		const { session } = createScriptedSession(async emit => {
+			for (const event of [...toolPair(0), ...toolPair(1)]) emit(event);
+			for (const event of yieldEvents()) emit(event);
+		});
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({ session } as CreateAgentSessionResult);
+		const snapshots: AgentProgress[] = [];
+
+		await runSubprocess({
+			cwd: "/tmp",
+			agent,
+			task: "recent tools scenario",
+			description: "recent tools snapshots",
+			index: 0,
+			id: `recent-tools-${Math.random().toString(36).slice(2)}`,
+			settings: Settings.isolated(),
+			modelRegistry: { refresh: async () => {} } as ModelRegistry,
+			enableLsp: false,
+			eventBus: new EventBus(),
+			onProgress: progress => {
+				snapshots.push(progress);
+			},
+		});
+
+		const first = snapshots.find(progress => progress.recentTools.length > 0);
+		expect(first?.recentTools).toHaveLength(1);
+	});
+
 	it("re-reads a streamed call's arguments at most once per coalescing window while its snapshots are dropped", async () => {
 		let clock = 10_000;
 		vi.spyOn(Date, "now").mockImplementation(() => clock);
