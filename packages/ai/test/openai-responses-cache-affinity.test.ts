@@ -356,31 +356,6 @@ describe("OpenAI Responses explicit prompt cache policy", () => {
 		expect(firstMessage.content[0]).not.toHaveProperty("prompt_cache_breakpoint");
 	});
 
-	it("marks one existing stable history block and leaves the current prompt unmodified", () => {
-		const params = buildParams(
-			openAI56ResponsesModel,
-			historicalContext,
-			{ sessionId: "cache-key", promptCache: { mode: "explicit" } },
-			undefined,
-		).params;
-
-		expect(params.prompt_cache_options).toEqual({ mode: "explicit", ttl: "30m" });
-		const [historical, current] = params.input ?? [];
-		if (
-			!historical ||
-			!current ||
-			!("content" in historical) ||
-			!Array.isArray(historical.content) ||
-			!("content" in current) ||
-			!Array.isArray(current.content)
-		) {
-			throw new Error("Expected Responses input message content");
-		}
-		expect(historical.content[0]).toMatchObject({ prompt_cache_breakpoint: { mode: "explicit" } });
-		expect(current.content[0]).not.toHaveProperty("prompt_cache_breakpoint");
-		expect(historicalContext.messages[0].content).toEqual([{ type: "text", text: "stable history" }]);
-	});
-
 	it("leaves boundary selection automatic in implicit mode", () => {
 		const params = buildParams(
 			openAI56ResponsesModel,
@@ -417,106 +392,87 @@ describe("OpenAI Responses explicit prompt cache policy", () => {
 		expect(params.prompt_cache_options).toEqual({ mode: "explicit", ttl: "30m" });
 	});
 
-	it("marks the latest eligible stable history block", () => {
-		const params = buildParams(
-			openAI56ResponsesModel,
+	describe("explicit boundaries in a tool loop", () => {
+		const usage = {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const toolRound = (round: number): [AssistantMessage, ToolResultMessage, ToolResultMessage] => [
 			{
-				messages: [
-					{ role: "user", content: [{ type: "text", text: "oldest stable history" }], timestamp: 0 },
-					{ role: "user", content: [{ type: "text", text: "newer stable history" }], timestamp: 1 },
-					{ role: "user", content: [{ type: "text", text: "current prompt" }], timestamp: 2 },
-				],
-			},
-			{ sessionId: "cache-key", promptCache: { mode: "explicit" } },
-			undefined,
-		).params;
-
-		expect(params.input).toEqual([
-			{ role: "user", content: [{ type: "input_text", text: "oldest stable history" }] },
-			{
-				role: "user",
+				role: "assistant",
 				content: [
-					{
-						type: "input_text",
-						text: "newer stable history",
-						prompt_cache_breakpoint: { mode: "explicit" },
-					},
+					{ type: "toolCall", id: `call_${round}a`, name: "read", arguments: { path: "a" } },
+					{ type: "toolCall", id: `call_${round}b`, name: "read", arguments: { path: "b" } },
 				],
+				api: "openai-responses",
+				provider: "openai",
+				model: "gpt-5.6",
+				usage,
+				stopReason: "toolUse",
+				timestamp: round,
 			},
-			{ role: "user", content: [{ type: "input_text", text: "current prompt" }] },
-		]);
-	});
-
-	it("marks an existing first-turn developer string without adding a message or changing its text", () => {
-		const firstTurnWithSystem: Context = {
+			{
+				role: "toolResult",
+				toolCallId: `call_${round}a`,
+				toolName: "read",
+				content: [{ type: "text", text: `round ${round} a` }],
+				isError: false,
+				timestamp: round,
+			},
+			{
+				role: "toolResult",
+				toolCallId: `call_${round}b`,
+				toolName: "read",
+				content: [{ type: "text", text: `round ${round} b` }],
+				isError: false,
+				timestamp: round,
+			},
+		];
+		const loop = (rounds: number): Context => ({
 			systemPrompt: ["stable developer instruction"],
-			messages: [{ role: "user", content: [{ type: "text", text: "only prompt" }], timestamp: 0 }],
-		};
-		const params = buildParams(
-			openAI56ResponsesModel,
-			firstTurnWithSystem,
-			{ promptCache: { mode: "explicit" } },
-			undefined,
-		).params;
+			messages: [
+				{ role: "user", content: "read both files", timestamp: 0 },
+				...Array.from({ length: rounds }, (_, index) => toolRound(index + 1)).flat(),
+			],
+		});
+		const markedTexts = (input: unknown) =>
+			[...JSON.stringify(input).matchAll(/"text":"([^"]*)","prompt_cache_breakpoint"/g)].map(match => match[1]);
 
-		expect(params.input).toEqual([
-			{
-				role: "developer",
-				content: [
-					{
-						type: "input_text",
-						text: "stable developer instruction",
-						prompt_cache_breakpoint: { mode: "explicit" },
-					},
-				],
-			},
-			{ role: "user", content: [{ type: "input_text", text: "only prompt" }] },
-		]);
-	});
+		it("marks the instructions, each user message and the end of each tool-output run", () => {
+			const context = loop(2);
+			context.messages.push({ role: "user", content: "summarize", timestamp: 9 });
+			const { input } = buildParams(
+				openAI56ResponsesModel,
+				context,
+				{ promptCache: { mode: "explicit" } },
+				undefined,
+			).params;
 
-	it("marks the latest function output as the stable boundary for a tool loop", () => {
-		const assistant: AssistantMessage = {
-			role: "assistant",
-			content: [{ type: "toolCall", id: "call_read", name: "read", arguments: { path: "README.md" } }],
-			api: "openai-responses",
-			provider: "openai",
-			model: "gpt-5.6",
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			stopReason: "toolUse",
-			timestamp: 1,
-		};
-		const toolResult: ToolResultMessage = {
-			role: "toolResult",
-			toolCallId: "call_read",
-			toolName: "read",
-			content: [{ type: "text", text: "file contents" }],
-			isError: false,
-			timestamp: 2,
-		};
-		const params = buildParams(
-			openAI56ResponsesModel,
-			{
-				messages: [
-					{ role: "user", content: "read README.md", timestamp: 0 },
-					assistant,
-					toolResult,
-					{ role: "user", content: "summarize it", timestamp: 3 },
-				],
-			},
-			{ promptCache: { mode: "explicit" } },
-			undefined,
-		).params;
+			expect(markedTexts(input)).toEqual([
+				"stable developer instruction",
+				"read both files",
+				"round 1 b",
+				"round 2 b",
+				"summarize",
+			]);
+			expect(context.messages[2]).toMatchObject({ content: [{ type: "text", text: "round 1 a" }] });
+		});
 
-		const output = params.input?.find(item => item.type === "function_call_output");
-		expect(output).toMatchObject({
-			output: [{ type: "input_text", text: "file contents", prompt_cache_breakpoint: { mode: "explicit" } }],
+		// Explicit mode only reads at markers the request carries: request N+1 must
+		// still mark every boundary request N wrote, or nothing is ever read back.
+		it("keeps every earlier marker byte-identical as the loop grows", () => {
+			const build = (rounds: number) =>
+				buildParams(openAI56ResponsesModel, loop(rounds), { promptCache: { mode: "explicit" } }, undefined).params
+					.input ?? [];
+			const first = build(1);
+			const next = build(2);
+
+			expect(next.slice(0, first.length)).toEqual(first);
+			expect(markedTexts(next)).toEqual([...markedTexts(first), "round 2 b"]);
 		});
 	});
 
@@ -536,31 +492,16 @@ describe("OpenAI Responses explicit prompt cache policy", () => {
 		});
 	});
 
-	it("does not manufacture a breakpoint on a first-turn prompt or when the caller opts out", () => {
-		const firstTurn: Context = {
-			messages: [{ role: "user", content: [{ type: "text", text: "only prompt" }], timestamp: 0 }],
-		};
-		const firstTurnParams = buildParams(
-			openAI56ResponsesModel,
-			firstTurn,
-			{ promptCache: { mode: "explicit" } },
-			undefined,
-		).params;
-		const noBreakpointParams = buildParams(
+	it("places no markers when the caller opts out", () => {
+		const params = buildParams(
 			openAI56ResponsesModel,
 			historicalContext,
 			{ promptCache: { mode: "explicit", breakpoint: "none" } },
 			undefined,
 		).params;
 
-		for (const params of [firstTurnParams, noBreakpointParams]) {
-			for (const item of params.input ?? []) {
-				if (!("content" in item) || !Array.isArray(item.content)) continue;
-				for (const block of item.content) {
-					expect(block).not.toHaveProperty("prompt_cache_breakpoint");
-				}
-			}
-		}
+		expect(params.prompt_cache_options).toEqual({ mode: "explicit", ttl: "30m" });
+		expect(JSON.stringify(params.input)).not.toContain("prompt_cache_breakpoint");
 	});
 
 	it("rejects explicit policy through streamSimple before sending unsupported Responses requests", () => {

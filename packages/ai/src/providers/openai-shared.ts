@@ -571,6 +571,62 @@ export function normalizeOpenRouterResponsesSessionId(sessionId: string | undefi
 	return normalizeOpenAIStableId(sessionId, 256, "session_");
 }
 
+/** Prompt items whose end can close an explicit prompt-cache boundary. */
+export type OpenAIPromptCacheBoundary = "instructions" | "user" | "output";
+
+/**
+ * Mark explicit prompt-cache breakpoints. Explicit mode reads a cached prefix
+ * only at a breakpoint the request itself carries, so every boundary a later
+ * request repeats keeps one: the end of the leading instruction run, each user
+ * message, and each run of tool outputs. Placement depends only on the items,
+ * so replayed history carries identical markers (stateful appends stay
+ * prefix-equal) and each request reads the prefix the previous one wrote.
+ *
+ * `classify` names an item's boundary kind (instructions count only in the
+ * leading run); `mark` returns a marked copy, or undefined when the item cannot
+ * carry a breakpoint, in which case an earlier item of the same run closes it.
+ */
+export function markOpenAIPromptCacheBoundaries<T>(
+	items: T[],
+	classify: (item: T) => OpenAIPromptCacheBoundary | undefined,
+	mark: (item: T) => T | undefined,
+): void {
+	let leading = true;
+	const boundaries = items.map(item => {
+		const boundary = classify(item);
+		if (boundary === "instructions") return leading ? boundary : undefined;
+		leading = false;
+		return boundary;
+	});
+	for (let end = 0; end < items.length; end++) {
+		const boundary = boundaries[end];
+		if (!boundary || (boundary !== "user" && boundaries[end + 1] === boundary)) continue;
+		for (let i = end; i >= 0 && boundaries[i] === boundary; i--) {
+			const marked = mark(items[i]!);
+			if (marked) {
+				items[i] = marked;
+				break;
+			}
+			if (boundary === "user") break;
+		}
+	}
+}
+
+/** A copy of `blocks` whose last `cacheable` block carries an explicit breakpoint; undefined when none qualifies. */
+export function withOpenAIPromptCacheBreakpoint<T extends object>(
+	blocks: readonly T[],
+	cacheable: (block: T) => boolean,
+): T[] | undefined {
+	for (let i = blocks.length - 1; i >= 0; i--) {
+		const block = blocks[i]!;
+		if (!cacheable(block)) continue;
+		const marked = blocks.slice();
+		marked[i] = { ...block, prompt_cache_breakpoint: { mode: "explicit" } };
+		return marked;
+	}
+	return undefined;
+}
+
 /** Resolve a prompt-cache identity, falling back to the provider session unless caching is disabled. */
 export function getOpenAIPromptCacheKey(options: OpenAICacheOptions | undefined): string | undefined {
 	if (resolveCacheRetention(options?.cacheRetention) === "none") return undefined;

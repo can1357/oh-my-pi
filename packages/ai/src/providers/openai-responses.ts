@@ -86,16 +86,11 @@ import type {
 	Tool as OpenAITool,
 	ReasoningEffort,
 	ResponseCreateParamsStreaming,
-	ResponseFunctionCallOutputItem,
 	ResponseInput,
 	ResponseInputContent,
 	ResponseStreamEvent,
 } from "./openai-responses-wire";
-import {
-	type StandardResponsesWebSocketLease,
-	type StandardResponsesWebSocketSession,
-	OpenAIResponsesTransportSessions,
-} from "./openai-responses-session";
+import { type StandardResponsesWebSocketLease, OpenAIResponsesTransportSessions } from "./openai-responses-session";
 import {
 	applyCommonResponsesSamplingParams,
 	applyOpenAIExtraBody,
@@ -120,7 +115,9 @@ import {
 	isOpenAIResponsesRefusedEncryptedReasoningError,
 	isOpenAIResponsesStalePreviousResponseError,
 	isStrictToolsDisabledForScope,
+	markOpenAIPromptCacheBoundaries,
 	readOpenRouterRawMetadata,
+	type OpenAIPromptCacheBoundary,
 	type OpenAIPromptCacheOptions,
 	type OpenAIStrictToolsScope,
 	type OpenAIStrictToolsState,
@@ -135,6 +132,7 @@ import {
 	shouldDropAutoToolChoiceForReasoning,
 	shouldRetryWithoutStrictTools,
 	throwOpenAIResponsesEventError,
+	withOpenAIPromptCacheBreakpoint,
 } from "./openai-shared";
 import { readOpenRouterGenerationError } from "./openrouter-generation";
 import {
@@ -492,7 +490,7 @@ export interface OpenAIResponsesChainState {
 	 * `previous_response_id`.
 	 */
 	lastParams?: OpenAIResponsesSamplingParams;
-	lastPromptCacheBreakpointPolicy?: "latest-stable-message" | "none";
+	lastPromptCacheBreakpointPolicy?: OpenAIPromptCacheOptions["breakpoint"];
 	lastResponseId?: string;
 	/** Output items of the last response, in replay-sanitized form (matches next-turn input). */
 	lastResponseItems?: ResponseInput;
@@ -577,28 +575,6 @@ function isOpenAIResponsesWebSocketChainEnabled(
 ): boolean {
 	if (options?.statefulResponses !== undefined) return options.statefulResponses;
 	return $flag("PI_OPENAI_STATEFUL", model.compat.statefulResponses ?? true);
-}
-
-/** Breakpoint policy of the request each WebSocket session last sent; gates its baseline like the HTTP chain. */
-const webSocketPromptCacheBreakpointPolicies = new WeakMap<
-	StandardResponsesWebSocketSession,
-	OpenAIResponsesChainState["lastPromptCacheBreakpointPolicy"]
->();
-
-/**
- * A socket-local chain appends only when the next input repeats the last sent
- * input, so prompt-cache markers come from that baseline as on the HTTP chain.
- */
-function getWebSocketPromptCacheBaseline(
-	lease: StandardResponsesWebSocketLease,
-	options: OpenAIResponsesOptions | undefined,
-	model: Model<"openai-responses">,
-	promptCacheBreakpointPolicy: OpenAIResponsesChainState["lastPromptCacheBreakpointPolicy"],
-): ResponseInput | undefined {
-	if (lease.chainDisabled || !isOpenAIResponsesWebSocketChainEnabled(options, model)) return undefined;
-	const policies = webSocketPromptCacheBreakpointPolicies;
-	if (!policies.has(lease.session) || policies.get(lease.session) !== promptCacheBreakpointPolicy) return undefined;
-	return lease.session.appendBaselineInput;
 }
 
 function getOpenAIResponsesChainState(
@@ -874,7 +850,7 @@ const streamOpenAIResponsesOnce = (
 			const strictToolsScope = getOpenAIStrictToolsScope(model, baseUrl);
 			const promptCacheBreakpointPolicy =
 				resolveCacheRetention(options?.cacheRetention) !== "none" && options?.promptCache?.mode === "explicit"
-					? (options.promptCache.breakpoint ?? "latest-stable-message")
+					? (options.promptCache.breakpoint ?? "message-boundaries")
 					: undefined;
 			if (
 				!useWebSocket &&
@@ -924,11 +900,6 @@ const streamOpenAIResponsesOnce = (
 					providerSessionState,
 					strictToolsScope,
 					disableStrictTools,
-					chainState?.canAppend
-						? chainState.lastParams?.input
-						: useWebSocket && webSocketLease
-							? getWebSocketPromptCacheBaseline(webSocketLease, options, model, promptCacheBreakpointPolicy)
-							: undefined,
 					attemptContext.dropEncryptedReasoning,
 				);
 				const { params, trailingScaffoldingItems } = builtParams;
@@ -1031,7 +1002,6 @@ const streamOpenAIResponsesOnce = (
 							throw new Error("OpenAI responses WebSocket requests do not support background: true");
 						}
 						const lease = webSocketLease!;
-						webSocketPromptCacheBreakpointPolicies.set(lease.session, promptCacheBreakpointPolicy);
 						return lease.session.events(requestParams, {
 							signal: requestSignal,
 							chain: isOpenAIResponsesWebSocketChainEnabled(options, model) && !lease.chainDisabled,
@@ -1240,7 +1210,6 @@ const streamOpenAIResponsesOnce = (
 								providerSessionState,
 								strictToolsScope,
 								forceDisableStrictTools,
-								undefined,
 								attemptContext.dropEncryptedReasoning,
 							);
 							const currentParams = currentBuilt.params;
@@ -1696,212 +1665,38 @@ function isResponsesPromptCacheableContentBlock(block: unknown): block is Respon
 	return block.type === "input_text" || block.type === "input_image" || block.type === "input_file";
 }
 
-type ResponsesPromptCacheableMessage = {
-	role: "assistant" | "developer" | "system" | "user";
-	content: ResponseInputContent[];
-};
-
-function isResponsesPromptCacheableMessage(item: unknown): item is ResponsesPromptCacheableMessage {
-	if (typeof item !== "object" || item === null || !("role" in item) || !("content" in item)) return false;
-	if (item.role !== "assistant" && item.role !== "developer" && item.role !== "system" && item.role !== "user")
-		return false;
-	return Array.isArray(item.content) && item.content.every(isResponsesPromptCacheableContentBlock);
+function responsesPromptCacheBoundary(item: ResponseInput[number]): OpenAIPromptCacheBoundary | undefined {
+	const role = "role" in item ? item.role : undefined;
+	if (role === "developer" || role === "system") return "instructions";
+	if (role === "user") return "user";
+	return item.type === "function_call_output" ? "output" : undefined;
 }
 
-type ResponsesStringInstruction = {
-	role: "developer" | "system";
-	content: string;
-};
-
-function isStableStringResponsesInstruction(item: unknown): item is ResponsesStringInstruction {
-	if (typeof item !== "object" || item === null || !("role" in item) || !("content" in item)) return false;
-	return (
-		(item.role === "developer" || item.role === "system") &&
-		typeof item.content === "string" &&
-		item.content.length > 0
-	);
+function markedResponsesText(text: string): ResponseInputContent[] | undefined {
+	return text ? [{ type: "input_text", text, prompt_cache_breakpoint: { mode: "explicit" } }] : undefined;
 }
 
-function matchesResponsesCacheContent(
-	baseline: (ResponseInputContent | ResponseFunctionCallOutputItem)[],
-	current: (ResponseInputContent | ResponseFunctionCallOutputItem)[],
-): boolean {
-	if (baseline.length !== current.length) return false;
-	for (let index = 0; index < baseline.length; index++) {
-		const baselineBlock = baseline[index];
-		const currentBlock = current[index];
-		if (!baselineBlock || !currentBlock) return false;
-		const breakpoint = baselineBlock.prompt_cache_breakpoint;
-		if (breakpoint) {
-			if (!Bun.deepEquals(baselineBlock, { ...currentBlock, prompt_cache_breakpoint: breakpoint })) return false;
-		} else if (!Bun.deepEquals(baselineBlock, currentBlock)) {
-			return false;
-		}
+/** A copy of `item` with its last cacheable block marked; undefined when nothing in it can carry a breakpoint. */
+function withResponsesItemBreakpoint(item: ResponseInput[number]): ResponseInput[number] | undefined {
+	if (item.type === "function_call_output") {
+		const output =
+			typeof item.output === "string"
+				? markedResponsesText(item.output)
+				: withOpenAIPromptCacheBreakpoint(item.output, isResponsesPromptCacheableContentBlock);
+		return output && { ...item, output };
 	}
-	return true;
-}
-
-function restoreResponsesCacheBreakpointsFromBaseline(
-	input: ResponseInput | undefined,
-	baseline: ResponseInput | undefined,
-): boolean {
-	if (!input || !baseline) return false;
-	let restored = false;
-	for (let i = 0; i < baseline.length && i < input.length; i++) {
-		const baselineMessage = baseline[i];
-		const message = input[i];
-		if (
-			baselineMessage?.type === "function_call_output" &&
-			message?.type === "function_call_output" &&
-			baselineMessage.call_id === message.call_id &&
-			Array.isArray(baselineMessage.output) &&
-			baselineMessage.output.some(block => block.prompt_cache_breakpoint !== undefined)
-		) {
-			const output =
-				typeof message.output === "string"
-					? [{ type: "input_text" as const, text: message.output }]
-					: message.output;
-			if (matchesResponsesCacheContent(baselineMessage.output, output)) {
-				message.output = baselineMessage.output.map(block => ({ ...block }));
-				restored = true;
-			}
-			continue;
-		}
-		if (!isResponsesPromptCacheableMessage(baselineMessage)) continue;
-
-		if (isStableStringResponsesInstruction(message)) {
-			const [baselineBlock] = baselineMessage.content;
-			if (
-				baselineMessage.role === message.role &&
-				baselineBlock?.type === "input_text" &&
-				baselineBlock.text === message.content &&
-				baselineBlock.prompt_cache_breakpoint
-			) {
-				Object.assign(message, {
-					content: [
-						{
-							type: "input_text",
-							text: message.content,
-							prompt_cache_breakpoint: baselineBlock.prompt_cache_breakpoint,
-						},
-					],
-				});
-				restored = true;
-			}
-			continue;
-		}
-
-		if (
-			!isResponsesPromptCacheableMessage(message) ||
-			baselineMessage.role !== message.role ||
-			!matchesResponsesCacheContent(baselineMessage.content, message.content)
-		)
-			continue;
-		for (let j = 0; j < baselineMessage.content.length; j++) {
-			const baselineBlock = baselineMessage.content[j];
-			const block = message.content[j];
-			if (!baselineBlock?.prompt_cache_breakpoint || !block) continue;
-			Object.assign(block, { prompt_cache_breakpoint: baselineBlock.prompt_cache_breakpoint });
-			restored = true;
-		}
-	}
-	return restored;
-}
-
-function hasResponsesCacheBreakpoint(input: ResponseInput | undefined): boolean {
-	return (
-		input?.some(message => {
-			if (
-				message.type === "function_call_output" &&
-				Array.isArray(message.output) &&
-				message.output.some(block => block.prompt_cache_breakpoint !== undefined)
-			)
-				return true;
-			return (
-				isResponsesPromptCacheableMessage(message) &&
-				message.content.some(block => block.prompt_cache_breakpoint !== undefined)
-			);
-		}) ?? false
-	);
-}
-
-function markLatestResponsesFunctionOutputBreakpoint(input: ResponseInput): boolean {
-	for (let i = input.length - 1; i >= 0; i--) {
-		const item = input[i];
-		if (item?.type !== "function_call_output") continue;
-		if (typeof item.output === "string") {
-			if (item.output.length === 0) continue;
-			item.output = [{ type: "input_text", text: item.output, prompt_cache_breakpoint: { mode: "explicit" } }];
-			return true;
-		}
-		for (let j = item.output.length - 1; j >= 0; j--) {
-			const block = item.output[j];
-			if (block.type !== "input_text" && block.type !== "input_image" && block.type !== "input_file") continue;
-			Object.assign(block, { prompt_cache_breakpoint: { mode: "explicit" } });
-			return true;
-		}
-	}
-	return false;
-}
-
-function markLatestStableResponsesCacheBreakpoint(
-	input: ResponseInput | undefined,
-	statefulBaseline?: ResponseInput,
-): boolean {
-	if (!input) return false;
-	// Stateful appends use a strict wire-prefix comparison. Retain the exact
-	// marker from that prefix rather than recomputing a newer boundary.
-	if (statefulBaseline) {
-		if (restoreResponsesCacheBreakpointsFromBaseline(input, statefulBaseline)) return true;
-		// A prior marker whose content no longer matches means chaining will
-		// reset to a full replay. Recompute a fresh boundary for that replay.
-		// Markerless baselines stay markerless so appends do not mutate them.
-		if (!hasResponsesCacheBreakpoint(statefulBaseline)) return false;
-	}
-	if (markLatestResponsesFunctionOutputBreakpoint(input)) return true;
-
-	let latestInputMessage = -1;
-	for (let i = input.length - 1; i >= 0; i--) {
-		const message = input[i];
-		if (!("role" in message)) continue;
-		if (message.role === "user" || message.role === "developer") {
-			latestInputMessage = i;
-			break;
-		}
-	}
-	if (latestInputMessage <= 0) return false;
-
-	for (let i = latestInputMessage - 1; i >= 0; i--) {
-		const message = input[i];
-		if (isStableStringResponsesInstruction(message)) {
-			const text = message.content;
-			Object.assign(message, {
-				content: [
-					{
-						type: "input_text",
-						text,
-						prompt_cache_breakpoint: { mode: "explicit" },
-					},
-				],
-			});
-			return true;
-		}
-		if (!isResponsesPromptCacheableMessage(message)) continue;
-		for (let j = message.content.length - 1; j >= 0; j--) {
-			const block = message.content[j];
-			if (!isResponsesPromptCacheableContentBlock(block)) continue;
-			Object.assign(block, { prompt_cache_breakpoint: { mode: "explicit" } });
-			return true;
-		}
-	}
-	return false;
+	if (!("role" in item) || item.role === "assistant" || !("content" in item)) return undefined;
+	const content =
+		typeof item.content === "string"
+			? markedResponsesText(item.content)
+			: withOpenAIPromptCacheBreakpoint(item.content, isResponsesPromptCacheableContentBlock);
+	return content && { ...item, content };
 }
 
 function applyOpenAIResponsesPromptCachePolicy(
 	params: OpenAIResponsesSamplingParams,
 	model: Model<"openai-responses">,
 	options: OpenAIResponsesOptions | undefined,
-	statefulCacheBaseline?: ResponseInput,
 ): void {
 	const cacheRetention = resolveCacheRetention(options?.cacheRetention);
 	if (cacheRetention === "none") return;
@@ -1923,8 +1718,8 @@ function applyOpenAIResponsesPromptCachePolicy(
 		mode: promptCache?.mode ?? "implicit",
 		ttl: ttl ?? model.compat.promptCacheBreakpointTtl,
 	};
-	if (promptCache?.mode === "explicit" && promptCache.breakpoint !== "none")
-		markLatestStableResponsesCacheBreakpoint(params.input, statefulCacheBaseline);
+	if (promptCache?.mode === "explicit" && promptCache.breakpoint !== "none" && params.input)
+		markOpenAIPromptCacheBoundaries(params.input, responsesPromptCacheBoundary, withResponsesItemBreakpoint);
 }
 
 export function buildParams(
@@ -1934,7 +1729,6 @@ export function buildParams(
 	providerSessionState: OpenAIResponsesProviderSessionState | undefined,
 	strictToolsScope?: OpenAIStrictToolsScope,
 	disableStrictToolsOverride = false,
-	statefulCacheBaseline?: ResponseInput,
 	dropEncryptedReasoning = false,
 ): {
 	params: OpenAIResponsesSamplingParams;
@@ -2127,7 +1921,7 @@ export function buildParams(
 	}
 
 	applyOpenAIExtraBody(params, options?.extraBody);
-	applyOpenAIResponsesPromptCachePolicy(params, model, options, statefulCacheBaseline);
+	applyOpenAIResponsesPromptCachePolicy(params, model, options);
 
 	let trailingScaffoldingItems = 0;
 	if (options?.forceReasoningOff && model.compat.requiresReasoningOffJuiceInstruction) {

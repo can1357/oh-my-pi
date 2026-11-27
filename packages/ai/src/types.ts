@@ -517,8 +517,13 @@ export interface OpenAIPromptCacheOptions {
 	 * `cacheRetention` resolves to `long`, otherwise `30m`.
 	 */
 	ttl?: "30m" | "12h";
-	/** By default, mark one existing block from stable history; `none` suppresses that marker. */
-	breakpoint?: "latest-stable-message" | "none";
+	/**
+	 * Explicit-mode marker placement. `message-boundaries` (default) marks the end
+	 * of the leading instructions, each user message, and each run of tool
+	 * outputs, so every request reads the prefix the previous one wrote; `none`
+	 * places no markers, leaving caching to markers the payload already carries.
+	 */
+	breakpoint?: "message-boundaries" | "none";
 }
 export type OpenAIResponseInclude =
 	| "file_search_call.results"
