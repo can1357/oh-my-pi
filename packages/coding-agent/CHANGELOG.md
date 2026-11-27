@@ -230,6 +230,7 @@
 - Fixed the setup sign-in step showing only a keycap glyph (`⎋`) for the key that continues; it now also spells out the key name (`⎋ (Esc)`), honoring custom `tui.select.cancel` bindings ([#16923](https://github.com/can1357/oh-my-pi/issues/16923))
 - Fixed `/usage reset` reporting "no saved resets usable right now" when loading an account's saved resets failed; it now shows the load error ([#16487](https://github.com/can1357/oh-my-pi/issues/16487))
 - Fixed the Mnemopi LLM Mode setting copy to say online mode uses the MEMORY role first, then TINY, then @smol ([#16408](https://github.com/can1357/oh-my-pi/issues/16408))
+- Fixed `mnemopi.embeddingApiKey` and `mnemopi.llmApiKey` sending an environment variable name literally instead of resolving it, matching `models.yml` `apiKey` ([#16334](https://github.com/can1357/oh-my-pi/issues/16334))
 
 ### Removed
 
