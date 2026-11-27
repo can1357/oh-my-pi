@@ -49,6 +49,7 @@
 - Fixed cancelled inference requests being sent when cancellation occurs while the request body is being prepared.
 - Fixed reasoning-loop detection for unspaced writing systems such as Chinese, Japanese, and Thai, avoiding false aborts while still detecting genuine loops.
 - Corrected Claude usage reporting to label Team premium seats as “Team 5x” rather than “Max 5x”.
+- OpenAI Responses requests that replay stored output items no longer fail with `400 Unknown parameter: input[N].created_by`: the `created_by` field the API sets on output items (tool calls and their outputs, compaction items, shell output entries) is now dropped from every replayed item, whatever its value, on the OpenAI, Azure, Codex and WebSocket routes ([#20617](https://github.com/can1357/oh-my-pi/pull/20617) by [@sjawhar](https://github.com/sjawhar))
 
 ## [19.2.1] - 2026-11-25
 

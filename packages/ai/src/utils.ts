@@ -111,13 +111,50 @@ export function stripOpenAIResponsesOutputOnlyStatusesForReplay<TItem extends { 
 	return sanitized ?? items;
 }
 
-/** Remove Codex-rejected backend metadata; preserve clean-item identity by default, or copy while keeping/dropping id. */
+function holdsCreatedBy(value: unknown): value is object & { created_by: unknown } {
+	return typeof value === "object" && value !== null && Object.hasOwn(value, "created_by");
+}
+
+/**
+ * Remove what Responses input refuses from a replayed item: Codex's
+ * `internal_chat_message_metadata_passthrough`, and `created_by` at any value
+ * (`null` too), which the API sets on output items and on each entry of a
+ * `shell_call_output` item's `output`. Preserve clean-item identity by default,
+ * or copy while keeping/dropping id.
+ */
 export function stripOpenAIResponsesInternalMetadataForReplay<
-	TItem extends { id?: unknown; internal_chat_message_metadata_passthrough?: unknown },
+	TItem extends {
+		id?: unknown;
+		type?: unknown;
+		output?: unknown;
+		created_by?: unknown;
+		internal_chat_message_metadata_passthrough?: unknown;
+	},
 >(item: TItem, mode: "preserve" | "copy" | "drop-id" = "preserve"): TItem {
-	if (mode === "preserve" && !Object.hasOwn(item, "internal_chat_message_metadata_passthrough")) return item;
-	const sanitized = { ...item };
+	const shellOutput: readonly unknown[] | undefined =
+		item.type === "shell_call_output" && Array.isArray(item.output) ? item.output : undefined;
+	const entriesHoldCreatedBy = shellOutput?.some(holdsCreatedBy) === true;
+	if (
+		mode === "preserve" &&
+		!Object.hasOwn(item, "internal_chat_message_metadata_passthrough") &&
+		!Object.hasOwn(item, "created_by") &&
+		!entriesHoldCreatedBy
+	) {
+		return item;
+	}
+	const sanitized =
+		shellOutput && entriesHoldCreatedBy
+			? {
+					...item,
+					output: shellOutput.map(entry => {
+						if (!holdsCreatedBy(entry)) return entry;
+						const { created_by: _createdBy, ...withoutCreatedBy } = entry;
+						return withoutCreatedBy;
+					}),
+				}
+			: { ...item };
 	delete sanitized.internal_chat_message_metadata_passthrough;
+	delete sanitized.created_by;
 	if (mode === "drop-id") delete sanitized.id;
 	return sanitized;
 }

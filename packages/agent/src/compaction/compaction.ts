@@ -35,7 +35,10 @@ import {
 	resolveOpenAICompatPolicy,
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { isSurvivingAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
-import { stripOpenAIResponsesOutputOnlyStatusesForReplay } from "@oh-my-pi/pi-ai/utils";
+import {
+	stripOpenAIResponsesInternalMetadataForReplay,
+	stripOpenAIResponsesOutputOnlyStatusesForReplay,
+} from "@oh-my-pi/pi-ai/utils";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
@@ -1762,8 +1765,10 @@ function buildOpenAiResponsesCompactionInput(
 		}
 		nativeInput.push(item);
 	}
+	// The previous compaction's replacement history holds output items as the API sent them.
+	const previousInput = previousReplacementHistory?.map(item => stripOpenAIResponsesInternalMetadataForReplay(item));
 	return stripOpenAIResponsesOutputOnlyStatusesForReplay(
-		previousReplacementHistory ? [...previousReplacementHistory, ...nativeInput] : nativeInput,
+		previousInput ? [...previousInput, ...nativeInput] : nativeInput,
 	);
 }
 
