@@ -170,12 +170,13 @@ function resolveSearchEndpoint(
 		return {
 			url: `${baseUrl}/v1/messages`,
 			baseUrl,
+			// The model's configured headers sit below the dynamic Copilot headers, as in
+			// streaming, so a catalog `Copilot-Integration-Id` cannot override the resolved one.
 			headers: buildGitHubCopilotAnthropicHeaders({
-				model,
+				model: { ...model, headers: configuredHeaders },
 				apiKey: key,
 				baseUrl,
 				stream: false,
-				headers: configuredHeaders,
 				dynamicHeaders: dynamicHeaders.headers,
 				sessionId,
 			}),

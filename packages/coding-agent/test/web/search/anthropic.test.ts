@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { COPILOT_API_HEADERS } from "@oh-my-pi/pi-catalog/wire/github-copilot";
 import { searchAnthropic } from "@oh-my-pi/pi-coding-agent/web/search/providers/anthropic";
 import { createInMemoryAuthStorage } from "../../helpers/agent-session-setup";
 import { rejectionOf } from "../../helpers/rejection";
@@ -58,9 +59,9 @@ const COPILOT_OAUTH_KEY = JSON.stringify({
 });
 
 /** A GitHub Copilot-hosted Claude model, reached over Copilot's `/v1/messages` proxy. */
-function createCopilotFixture(headers?: Record<string, string>) {
+function createCopilotFixture(headers?: Record<string, string>, key = COPILOT_OAUTH_KEY) {
 	const authStorage = createInMemoryAuthStorage();
-	authStorage.keys.setRuntime("github-copilot", COPILOT_OAUTH_KEY);
+	authStorage.keys.setRuntime("github-copilot", key);
 	const modelRegistry = new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true });
 	const model = buildModel({
 		id: "claude-sonnet-4.5",
@@ -138,6 +139,29 @@ describe("Anthropic search session headers", () => {
 			// Copilot's proxy takes no Anthropic betas or Claude Code app headers.
 			expect(headers?.get("anthropic-beta")).toBeNull();
 			expect(headers?.get("x-app")).toBeNull();
+		} finally {
+			fixture.authStorage.close();
+		}
+	});
+
+	it("keeps the resolved Copilot integration id over the catalog's", async () => {
+		// Bundled Copilot models carry `Copilot-Integration-Id: copilot-developer-cli`; chat
+		// resolves `copilot-chat` for a personal login, and search must send the same.
+		const personalKey = JSON.stringify({ token: COPILOT_OAUTH_TOKEN });
+		const fixture = createCopilotFixture({ ...COPILOT_API_HEADERS }, personalKey);
+		try {
+			const cap = makeCaptureFetch();
+			await searchAnthropic({
+				query: "copilot integration id",
+				systemPrompt: "Use web search.",
+				sessionId: "session-20678",
+				authStorage: fixture.authStorage,
+				modelRegistry: fixture.modelRegistry,
+				model: fixture.model,
+				fetch: cap.fetch,
+			});
+
+			expect(cap.headers()?.get("copilot-integration-id")).toBe("copilot-chat");
 		} finally {
 			fixture.authStorage.close();
 		}
