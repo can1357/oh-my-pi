@@ -2545,8 +2545,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	})();
 	const { ttsrManager, allRules } = discovered;
 	// Mutable so the mid-session prompt rebuild (on /clear and /new) can re-discover
-	// rules from disk, mirroring the context-file refresh below (issue #10940). The
-	// same `ttsrManager` is reused, so restored TTSR injection state survives.
+	// rules from disk, mirroring the context-file refresh below (issue #10940).
+	// Rebuilding alone preserves injection state; a new transcript resets it.
 	let rulebookRules = discovered.rulebookRules;
 	let alwaysApplyRules = discovered.alwaysApplyRules;
 

@@ -13035,6 +13035,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					...options,
 					additionalDirectories: cfgWorkspaceAdditionalDirectories.get(this.settings),
 				});
+				this.ttsrManager?.resetSession();
 				this.#bash.markSessionTransition(bashTransition);
 				// The new session owns the transcript from here, so the previous
 				// conversation's advisor spend is retired with it. Clearing at the commit
