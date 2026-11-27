@@ -223,7 +223,7 @@ describe("bash writes to handler-written URLs", () => {
 	it("fails the command with the handler's reason when it refuses a write, and refuses appends that would replace", async () => {
 		const missing = await run(": > proc://nope/kill");
 		expect(missing.isError).toBe(true);
-		expect(missing.text).toContain("Write to proc://nope/kill failed: Background job or service not found: nope");
+		expect(missing.text).toContain("[proc://nope/kill failed: Background job or service not found: nope]");
 
 		// A handler write replaces a stored target whole, so `>>` must not silently drop its content.
 		const appended = await run("echo true >> cfg://async/enabled; echo status=$?");

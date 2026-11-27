@@ -1126,11 +1126,12 @@ export interface TspMeterMark {
 	icon?: string;
 }
 
-/** A value drawn as a bar, ring or block grid (§8.2): context %, usage windows, agent context. */
+/** A value drawn as a bar, ring, block grid or wave (§8.2): context %, usage windows, agent context, a call's voice. */
 export interface TspMeterProps {
 	/** 0–1, or null for unknown. */
 	value: number | null;
-	style?: "bar" | "ring" | "blocks";
+	/** `wave`: bars that swing with the value, animated by the host (a live voice or audio level); terminals and older hosts draw a bar. */
+	style?: "bar" | "ring" | "blocks" | "wave";
 	/** `blocks` only: exactly this many cells in one row, `round(value × steps)` of them filled (e.g. the effort chip's fallback meter). */
 	steps?: number;
 	/** Stacked parts instead of one fill (context breakdown); values sum to ≤ 1. */

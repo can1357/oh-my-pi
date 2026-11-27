@@ -6,11 +6,12 @@ import {
 	resolveRuntimeModule,
 	type RuntimeInstallPhase,
 } from "@oh-my-pi/pi-utils";
+import type { SpeechDetector } from "./endpointer";
 
 /** Native speech package installed by the shared STT runtime loader. */
 export const SHERPA_PACKAGE = "sherpa-onnx-node";
 /** Pinned speech runtime version shared by installation and cache paths. */
-export const SHERPA_VERSION = "1.13.2";
+export const SHERPA_VERSION = "2.0.3";
 
 interface SherpaOfflineResult {
 	text?: string;
@@ -53,12 +54,30 @@ export interface SherpaOnlineRecognizer {
 	reset(stream: SherpaOnlineStream): void;
 }
 
+/** Silero voice activity detector settings (durations in seconds). */
+export interface SherpaVadConfig {
+	sileroVad: {
+		model: string;
+		threshold: number;
+		minSilenceDuration: number;
+		minSpeechDuration: number;
+		windowSize: number;
+		maxSpeechDuration: number;
+	};
+	sampleRate: number;
+	numThreads: number;
+	provider: string;
+	debug: number;
+}
+
 /** The native sherpa-onnx module surface used by the STT worker. */
 export interface SherpaRuntime {
 	OfflineRecognizer: {
 		createAsync(config: SherpaOfflineConfig): Promise<SherpaOfflineRecognizer>;
 	};
 	OnlineRecognizer: new (config: SherpaOfflineConfig & { enableEndpoint: boolean }) => SherpaOnlineRecognizer;
+	/** `bufferSizeInSeconds` bounds the detector's internal sample ring. */
+	Vad: new (config: SherpaVadConfig, bufferSizeInSeconds: number) => SpeechDetector;
 }
 
 /**

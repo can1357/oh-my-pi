@@ -4086,7 +4086,7 @@ async function executeToolCalls(
 			const approval = record.tool?.approval;
 			let decision: ToolApprovalDecision | undefined;
 			try {
-				decision = typeof approval === "function" ? approval(record.args) : approval;
+				decision = typeof approval === "function" ? approval(record.args, undefined, { prompts: false }) : approval;
 			} catch {
 				decision = undefined;
 			}
