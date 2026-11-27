@@ -30,6 +30,8 @@
 - Fixed a `/session pin` made while an account selection was still running (such as the Codex connection prewarm at session start) being replaced by the account that selection picked ([#20634](https://github.com/can1357/oh-my-pi/issues/20634), [#20638](https://github.com/can1357/oh-my-pi/pull/20638) by [@roboomp](https://github.com/roboomp))
 - GitHub Copilot Claude (Messages) and GPT (Responses) replies now record the server-reported AI-credit charge (`copilot_usage.total_nano_aiu` with its per-token-type split) on `usage.aiu`; a reply without a billing frame leaves it unset instead of 0 ([#20667](https://github.com/can1357/oh-my-pi/issues/20667))
 - Added the `onDiscardedAttempt` stream option: it receives each attempt a replay-safe retry throws away (an empty completion, a transient provider error), which the provider may still have billed ([#20667](https://github.com/can1357/oh-my-pi/issues/20667))
+- GitHub Copilot Claude (Messages) and GPT (Responses) replies now record the server-reported AI-credit charge (`copilot_usage.total_nano_aiu` with its per-token-type split) on `usage.aiu`; a reply without a billing frame leaves it unset instead of 0 ([#20667](https://github.com/can1357/oh-my-pi/issues/20667), [#20806](https://github.com/can1357/oh-my-pi/pull/20806) by [@wapenshaw](https://github.com/wapenshaw))
+- Added the `onDiscardedAttempt` stream option: it receives each attempt a replay-safe retry throws away (an empty completion, a transient provider error), which the provider may still have billed ([#20667](https://github.com/can1357/oh-my-pi/issues/20667), [#20806](https://github.com/can1357/oh-my-pi/pull/20806) by [@wapenshaw](https://github.com/wapenshaw))
 
 ### Changed
 
