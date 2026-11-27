@@ -11099,7 +11099,6 @@ SOFTWARE
 -------------------------------------------------------------------------------
 License: MIT License (MIT)
 Used by:
-- argmax 0.4.0 (https://github.com/sharkdp/argmax)
 - gix-actor 0.41.2 (https://github.com/GitoxideLabs/gitoxide)
 - gix-attributes 0.33.2 (https://github.com/GitoxideLabs/gitoxide)
 - gix-bitmap 0.3.3 (https://github.com/GitoxideLabs/gitoxide)

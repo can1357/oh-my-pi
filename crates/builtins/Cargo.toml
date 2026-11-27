@@ -40,7 +40,6 @@ parking_lot = "0.12.5"
 thiserror = "2.0.18"
 
 # ── Utility builtin dependencies ──────────────────────────────────────────────
-argmax = "0.4.0"
 # `ast-grep scan`: YAML rules on the ast-grep-core version omp-ast uses, and
 # their diagnostics in ast-grep's codespan layout.
 ast-grep-config = { version = "0.39.9", optional = true }

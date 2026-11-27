@@ -228,17 +228,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "argmax"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0144c58b55af0133ec3963ce5e4d07aad866e3bbcfdcddbf4590dbd7ad6ff557"
-dependencies = [
- "libc",
- "nix 0.30.1",
- "once_cell",
-]
-
-[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6007,7 +5996,6 @@ name = "omp-builtins"
 version = "19.2.1"
 dependencies = [
  "anyhow",
- "argmax",
  "ast-grep-config",
  "ast-grep-core",
  "async-trait",
