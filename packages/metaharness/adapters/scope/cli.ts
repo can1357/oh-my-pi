@@ -21,7 +21,8 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { parseArgs } from "node:util";
-import { CLI_THINKING_LEVELS, parseCliThinkingLevel } from "@oh-my-pi/pi-coding-agent/thinking/levels";
+import { CLI_THINKING_LEVELS } from "@oh-my-pi/pi-coding-agent/thinking/cli-levels";
+import { parseCliThinkingLevel } from "@oh-my-pi/pi-coding-agent/thinking/levels";
 import { postmortem } from "@oh-my-pi/pi-utils";
 import { discoverSharedInfra } from "@oh-my-pi/typescript-edit-benchmark/in-process-client";
 import { BENCH_SETTINGS } from "../../src/bench-settings";

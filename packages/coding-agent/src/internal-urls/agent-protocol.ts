@@ -35,7 +35,8 @@ import type { AgentKindModelChange, AgentModelChange, AgentSessionHandle } from 
 import { discoverAgents, getAgent } from "../task/discovery";
 import { cfgTaskAgentModelOverrides, cfgTaskCrossInstance, cfgTaskDisabledAgents } from "../task/settings";
 import { spawnDenial } from "../task/spawn-policy";
-import { CLI_THINKING_LEVELS, parseCliThinkingLevel } from "../thinking/levels";
+import { CLI_THINKING_LEVELS } from "../thinking/cli-levels";
+import { parseCliThinkingLevel } from "../thinking/levels";
 import type { ToolSession } from "../tools";
 import agentPromptDoc from "../prompts/internal-urls/agent.md" with { type: "text" };
 import agentProgressTemplate from "../prompts/tools/agent-url-progress.md" with { type: "text" };
