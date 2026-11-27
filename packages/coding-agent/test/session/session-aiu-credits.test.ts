@@ -39,7 +39,7 @@ function reply(opts: {
 		content: [{ type: "text", text: "ok" }],
 		api: "anthropic-messages",
 		provider: opts.provider ?? "github-copilot",
-		model: "claude-sonnet-5.5",
+		model: "claude-sonnet-4.5",
 		stopReason: opts.stopReason ?? "stop",
 		timestamp: 1,
 		usage: usage(opts.tokens ?? 10, opts.aiuNano, opts.missing),
@@ -145,6 +145,10 @@ describe("resumed session AI credits", () => {
 		await Promise.all(sessions.splice(0).map(session => session.dispose()));
 	});
 
+	// A session switch restores the transcript's model, which needs a credential.
+	const authStorage = createInMemoryAuthStorage();
+	authStorage.keys.setRuntime("github-copilot", "ghu_test");
+
 	async function resume(file: string): Promise<AgentSession> {
 		const model = getBundledModel("github-copilot", "claude-sonnet-4.5");
 		if (!model) throw new Error("Expected a bundled Copilot Claude model");
@@ -152,7 +156,7 @@ describe("resumed session AI credits", () => {
 			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
 			sessionManager: await SessionManager.open(file),
 			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry: new ModelRegistry(createInMemoryAuthStorage()),
+			modelRegistry: new ModelRegistry(authStorage),
 		});
 		sessions.push(session);
 		return session;
@@ -192,5 +196,37 @@ describe("resumed session AI credits", () => {
 		const session = await resume(file);
 		await session.hydratePersistedSubagents();
 		expect(session.getSessionStats().aiu).toEqual({ nano: 3_000_000_000, unknownCalls: 1 });
+	});
+
+	it("counts a root's persisted subagents again after switching away and back", async () => {
+		using tempDir = TempDir.createSync("@omp-session-aiu-switch-");
+		/** A root billed `own` nano-AIU whose subagent `Worker` (an id both roots use) billed `worker`. */
+		const writeRoot = async (name: string, own: number, worker: number): Promise<string> => {
+			const file = path.join(tempDir.path(), "sessions", `${name}.jsonl`);
+			await writeTranscript(file, [
+				header(`aiu-${name}`, tempDir.path()),
+				userEntry("u1"),
+				replyEntry("a1", "u1", reply({ aiuNano: own })),
+			]);
+			await writeTranscript(path.join(tempDir.path(), "sessions", name, "Worker.jsonl"), [
+				header(`aiu-${name}-worker`, tempDir.path()),
+				userEntry("w1"),
+				replyEntry("w2", "w1", reply({ aiuNano: worker })),
+			]);
+			return file;
+		};
+		const fileA = await writeRoot("a", 1_000_000_000, 2_000_000_000);
+		const fileB = await writeRoot("b", 4_000_000_000, 8_000_000_000);
+
+		const session = await resume(fileA);
+		await session.hydratePersistedSubagents();
+		expect(session.getSessionStats().aiu?.nano).toBe(3_000_000_000);
+		// B's scan re-targets the shared `Worker` id at B's transcript.
+		expect(await session.switchSession(fileB)).toBe(true);
+		await session.hydratePersistedSubagents();
+		expect(session.getSessionStats().aiu?.nano).toBe(12_000_000_000);
+		expect(await session.switchSession(fileA)).toBe(true);
+		await session.hydratePersistedSubagents();
+		expect(session.getSessionStats().aiu?.nano).toBe(3_000_000_000);
 	});
 });

@@ -109,7 +109,6 @@ import { cfgDisabledExtensions, cfgExtensions } from "../../extensibility/settin
 import { cfgMcpStartupTimeoutMs } from "../../mcp/settings";
 import { cfgPlanEnabled } from "../../plan-mode/settings";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
-import { SessionObserverRegistry } from "../../task/session-observer-registry";
 import { extensionTheme } from "../../ui/extensions/render-output";
 
 const ACP_DEFAULT_MODE_ID = "default";
@@ -1013,8 +1012,6 @@ export class AcpAgent implements Agent {
 	#clientCapabilities: ClientCapabilities | undefined;
 	#cancelCleanupTimeoutMs = ACP_CANCEL_CLEANUP_TIMEOUT_MS;
 	#blobs = new BlobStore(getBlobsDir());
-	/** ACP has no Agent Hub, so tree costs read each subagent's live session directly. */
-	#subagentObservers = new SessionObserverRegistry();
 
 	constructor(connection: AgentSideConnection, createSession: CreateAcpSession, initialSession?: AgentSession) {
 		this.#connection = connection;
@@ -2911,7 +2908,7 @@ export class AcpAgent implements Agent {
 		// Persisted subagents first, so background spend from before a restart counts after `session/load`.
 		await record.session.hydratePersistedSubagents();
 		const usage = record.session.sessionManager.getUsageStatistics();
-		const treeCost = record.session.getSubagentTreeSpend(this.#subagentObservers).cost;
+		const treeCost = record.session.getSubagentTreeSpend().cost;
 		return Math.max(0, usage.cost - usage.subagentCost) + Math.max(treeCost, usage.subagentCost);
 	}
 

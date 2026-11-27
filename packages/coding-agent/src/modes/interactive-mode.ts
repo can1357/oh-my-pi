@@ -101,6 +101,7 @@ import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compa
 import type { AgentHubRegistry } from "../registry/agent-hub-types";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { isSessionTreeRef } from "../registry/persisted-agents";
+import type { AgentTreeSpend } from "./view-model/overlays/agent-hub-projection";
 import {
 	type AgentSession,
 	type AgentSessionEvent,
@@ -1692,6 +1693,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.collabController = new CollabController(this);
 		this.session.setPromptDropped?.(prompt => this.restoreDroppedPrompt(prompt));
 		this.#observerRegistry = new SessionObserverRegistry();
+		this.session.attachSubagentObservers(this.#observerRegistry);
 		// The composer hint follows the ask above, running agents and the conversation's start.
 		this.#effect(() => this.composer.setPlaceholder(this.#composerHint()));
 		this.#effect(() => this.composer.setNativePlaceholder(this.#nativeComposerPlaceholder()));
@@ -3989,8 +3991,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		const inspectableChanged = inspectable !== this.#inspectableSubagentCount;
 		this.#inspectableSubagentCount = inspectable;
 		const agentsChanged = this.statusLine.setRunningSubagents(agentIds);
-		// The session hydrates a resumed root's persisted subagents once; registry changes re-sync the spend.
-		const tree = this.collabGuest ? undefined : this.session.getSubagentTreeSpend(this.#observerRegistry);
+		let tree: AgentTreeSpend | undefined;
+		if (!this.collabGuest) {
+			// Registers a resumed root's persisted subagents once per stay; the registry changes it makes re-sync this.
+			void this.session.hydratePersistedSubagents();
+			tree = this.session.getSubagentTreeSpend();
+		}
 		const treeCost = tree?.cost ?? 0;
 		const treeAiu = tree ? sessionAiu(tree.aiu) : undefined;
 		const costChanged = this.#subagentTreeCost !== treeCost;

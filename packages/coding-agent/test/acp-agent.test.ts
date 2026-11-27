@@ -29,7 +29,6 @@ import type {
 } from "@oh-my-pi/pi-coding-agent/modes/view-model/overlays/agent-hub-projection";
 import { type AgentRef, AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { registerPersistedSubagents } from "@oh-my-pi/pi-coding-agent/registry/persisted-agents";
-import type { SessionObserverRegistry } from "@oh-my-pi/pi-coding-agent/task/session-observer-registry";
 import type {
 	AgentSession,
 	AgentSessionEvent,
@@ -363,10 +362,9 @@ class FakeAgentSession {
 		this.#subagentHydration ??= registerPersistedSubagents(AgentRegistry.global(), rootSessionFile);
 		return this.#subagentHydration;
 	}
-	getSubagentTreeSpend(observers?: SessionObserverRegistry): AgentTreeSpend {
+	getSubagentTreeSpend(): AgentTreeSpend {
 		return sumSubagentTreeCost({
 			refs: AgentRegistry.global().list(),
-			observers,
 			rootSessionFile: this.sessionManager.getSessionFile(),
 			sessionCosts: this.#subagentSpend,
 		});
