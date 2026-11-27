@@ -17,6 +17,7 @@ import type { AsyncResultEntry } from "@oh-my-pi/pi-coding-agent/session/async-j
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { Snowflake } from "@oh-my-pi/pi-utils";
+import { resolveInlineByteCapBudget } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "@oh-my-pi/pi-coding-agent/tools/streaming-output";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
@@ -199,6 +200,32 @@ describe("ExtensionContext.asyncJobs", () => {
 		expect(progress.split("\n").length).toBeLessThanOrEqual(DEFAULT_MAX_LINES);
 		expect(progress).toEndWith("remote log line 19999");
 		gate.resolve("unused");
+	});
+
+	it("caps an oversized result and failure message the way a bash result is capped", async () => {
+		const ctx = await extensionContext();
+		let delivered = 0;
+		const bothDelivered = Promise.withResolvers<void>();
+		const enqueue = session!.yieldQueue.enqueueWithReceipt.bind(session!.yieldQueue);
+		vi.spyOn(session!.yieldQueue, "enqueueWithReceipt").mockImplementation((kind, entry) => {
+			if (kind !== "async-result") return enqueue(kind, entry);
+			if (++delivered === 2) bothDelivered.resolve();
+			return Promise.resolve();
+		});
+		const output = Array.from({ length: 50_000 }, (_, line) => `remote output line ${line}`).join("\n");
+		const done = ctx.asyncJobs!.register("remote build", async () => output);
+		const failed = ctx.asyncJobs!.register("remote test", async () => {
+			throw new Error(output);
+		});
+
+		await bothDelivered.promise;
+		const manager = session!.asyncJobManager!;
+		for (const text of [manager.getJob(done)!.resultText!, manager.getJob(failed)!.errorText!]) {
+			expect(Buffer.byteLength(text)).toBeLessThanOrEqual(resolveInlineByteCapBudget(undefined));
+			expect(text).toStartWith("remote output line 0\n");
+			expect(text).toContain("elided");
+			expect(text).toEndWith("remote output line 49999");
+		}
 	});
 
 	it("aborts the job's signal when the agent cancels it", async () => {
