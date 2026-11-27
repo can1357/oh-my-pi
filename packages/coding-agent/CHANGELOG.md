@@ -68,6 +68,7 @@
 - Added an "Insert as editable text" choice to the large-paste menu that inserts the pasted text into the editor uncollapsed, so text pasted through a remote terminal can be edited without the host-clipboard raw-paste shortcut ([#17037](https://github.com/can1357/oh-my-pi/issues/17037))
 - Added the `clear_context` RPC command (and `RpcClient.clearContext()`), which clears the conversation in place like the TUI's `/clear`, keeping the session id and transcript file ([#16686](https://github.com/can1357/oh-my-pi/issues/16686))
 - Added the `agent_view_changed` extension event, fired when the TUI focuses a subagent or returns to the main session, so extensions can re-scope their status to the agent on screen ([#16546](https://github.com/can1357/oh-my-pi/issues/16546))
+- Added `model` and `fallback` attributes to `task` result envelopes so the parent sees which model served each subagent ([#16017](https://github.com/can1357/oh-my-pi/issues/16017))
 
 ### Changed
 
