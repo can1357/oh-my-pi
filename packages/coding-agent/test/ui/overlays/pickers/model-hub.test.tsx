@@ -1,10 +1,14 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
 import { describe, expect, test } from "bun:test";
+import type { TspPickerProps } from "@oh-my-pi/pi-wire";
+import { createTheme } from "@oh-my-pi/pi-tui/theme/theme";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { ModelHubRegistry, ModelHubSource } from "../../../../src/modes/view-model/overlays/model-hub";
 import { ModelHub } from "../../../../src/ui/overlays/pickers/model-hub";
 import { ModelHubState } from "../../../../src/ui/overlays/pickers/model-hub-state";
+import { nativeShell } from "../../../helpers/native-shell";
 import { type Driver, keyFromRaw, pickerSuite } from "./harness";
 
 const mk = (id: string, provider: string, reasoning = false, input: ("text" | "image")[] = ["text"]): Model =>
@@ -138,6 +142,56 @@ describe("model hub flows the corpus does not record", () => {
 		press(hub, "\x1b");
 		expect(hub.strip).toBeNull();
 		hub.dispose();
+	});
+
+	test("native thinking strip labels use the active theme glyphs", async () => {
+		const previous = currentTheme();
+		const custom = createTheme({
+			...previous.json,
+			symbols: {
+				...previous.json.symbols,
+				overrides: {
+					...previous.json.symbols?.overrides,
+					"status.disabled": "@D",
+					"thinking.low": "@L low",
+					"thinking.autoPending": "@A auto",
+				},
+			},
+		});
+		setCurrentTheme(custom);
+		try {
+			await using ui = await nativeShell();
+			ui.shell.overlays.show(() => (
+				<ModelHub
+					source={source}
+					registry={registry}
+					scopedModels={models.map(model => ({ model }))}
+					callbacks={{ onAssign: () => true, onUnassign: () => {}, onCancel: () => {} }}
+					options={{ currentSelector: "anthropic/claude-sonnet-4-5" }}
+					terminalRows={() => 30}
+				/>
+			));
+			const picker = (): TspPickerProps => ui.node("picker").p;
+			const pickerNode = ui.node("picker");
+			ui.send({ ev: "activate", sf: ui.sf, id: pickerNode.id, item: selectorOf(models[0]!) });
+
+			const roleStrip = picker().strip;
+			expect(roleStrip).toBeDefined();
+			const slow = roleStrip?.items.find(
+				item => (typeof item.label === "string" ? item.label : item.label.map(span => span.t).join("")) === "slow",
+			);
+			expect(slow).toBeDefined();
+			ui.send({ ev: "action", sf: ui.sf, id: pickerNode.id, act: "strip", value: slow!.id });
+
+			const thinkingItems = picker().strip?.items ?? [];
+			const labels = thinkingItems.map(item =>
+				typeof item.label === "string" ? item.label : item.label.map(span => span.t).join(""),
+			);
+			expect(labels).toEqual(expect.arrayContaining(["@D off", "@L low", "@A auto"]));
+			expect(thinkingItems.every(item => item.dot === undefined)).toBe(true);
+		} finally {
+			setCurrentTheme(previous);
+		}
 	});
 
 	test("the Roles view edits the ctrl+p cycle and fallback order", () => {

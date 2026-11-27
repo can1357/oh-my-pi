@@ -115,6 +115,9 @@
 - The `/debug` menu takes keys again outside Tern; it no longer opens with every key ignored, leaving omp to be killed ([#20576](https://github.com/can1357/oh-my-pi/pull/20576) by [@FYWinds](https://github.com/FYWinds))
 - Bash tab completion preserves spaces in file and directory names ([#20604](https://github.com/can1357/oh-my-pi/pull/20604) by [@yyydddkkk](https://github.com/yyydddkkk)).
 - `bash.patterns` rules with several `*` wildcards no longer freeze the session and its subagents for minutes when checked against long commands ([#20591](https://github.com/can1357/oh-my-pi/issues/20591)).
+- Model and nested-task pickers now honor the active Unicode, Nerd Font, or custom theme symbols instead of emitting fixed Unicode glyphs.
+- Model and nested-task pickers now honor the active Unicode, Nerd Font, or custom theme symbols instead of emitting fixed Unicode glyphs ([#20693](https://github.com/can1357/oh-my-pi/pull/20693) by [@SuperUserA](https://github.com/SuperUserA))
+- Model picker, model hub, and nested task rows now honor the active Unicode, Nerd Font, or custom theme symbols instead of emitting fixed Unicode glyphs ([#20693](https://github.com/can1357/oh-my-pi/pull/20693) by [@SuperUserA](https://github.com/SuperUserA))
 - `/prewalk`, `/prewalk restart`, and `/switch` now accept `^provider/id[:level]` model references inserted by `^` completion ([#20564](https://github.com/can1357/oh-my-pi/issues/20564)).
 - Resuming or rewinding a session with an aborted task result no longer throws while the transcript renders; the card shows the cancellation text ([#20533](https://github.com/can1357/oh-my-pi/pull/20533) by [@g0spel](https://github.com/g0spel))
 - Save in Plan Review now accepts a custom path and shows where the plan was saved without requiring you to dismiss the review ([#20539](https://github.com/can1357/oh-my-pi/issues/20539)).

@@ -13,7 +13,6 @@
  */
 import type { JSXNode } from "@oh-my-pi/pi-tui";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
-import { presetSymbols } from "@oh-my-pi/pi-tui/theme/symbols";
 import { formatDuration, formatNumber, pluralize, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { TspAgentProps, TspPropNode, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import type { ConfiguredThinkingLevel } from "../../utils/render-utils";
@@ -428,9 +427,6 @@ export const taskPresenter: ToolPresenter<Partial<TaskParams>, TaskToolDetails> 
 
 registerToolPresenter("task", taskPresenter);
 
-/** Glyphs of nested rows sent natively (the terminal look draws its theme's). */
-const UNICODE_SYMBOLS = presetSymbols("unicode");
-
 /**
  * Settled child task snapshots as a tree of agent rows (the task card's
  * nested results; the `task` subprocess view): one `text` node, its rows as
@@ -442,7 +438,7 @@ export function NestedTaskResults(props: {
 	readonly expanded: boolean;
 }): JSXNode {
 	const cx: RowContext = {
-		glyph: key => UNICODE_SYMBOLS[key] ?? "",
+		glyph: key => currentTheme().symbols.symbol(key),
 		expandKey: () => expandKeyLabel(currentTheme()),
 		expanded: props.expanded,
 		nowMs: Date.now(),

@@ -319,13 +319,19 @@ function pickerStrip(hub: ModelHubState, strip: StripState): NonNullable<TspPick
 					: chip.action === "unassign" && assigned && !assigned.autoSelected
 						? assigned.thinkingLevel
 						: undefined;
-			const dot = level !== undefined ? thinkingDotToken(level) : undefined;
+			const thinking = strip.kind === "thinking";
+			const dot = !thinking && level !== undefined ? thinkingDotToken(level) : undefined;
 			const on =
 				chip.action === "unassign" ||
 				(strip.kind === "thinking" &&
 					chip.thinkingLevel !== undefined &&
 					chip.thinkingLevel === strip.initialThinkingLevel);
-			return { id: String(index), label: chip.label, ...(on ? { on: true } : {}), ...(dot ? { dot } : {}) };
+			return {
+				id: String(index),
+				label: thinking ? hub.chipSpans(chip) : chip.label,
+				...(on ? { on: true } : {}),
+				...(dot ? { dot } : {}),
+			};
 		}),
 		selected: String(strip.index),
 	};

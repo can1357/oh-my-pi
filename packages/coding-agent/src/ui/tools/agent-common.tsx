@@ -7,6 +7,7 @@
 import type { JSXNode } from "@oh-my-pi/pi-tui";
 import { stripControl } from "@oh-my-pi/pi-tui/text/sanitize";
 import { replaceTabs, truncateMiddle, visibleWidth } from "@oh-my-pi/pi-tui/text/width";
+import { thinkingLevelGlyph } from "../../utils/render-utils";
 
 /** Untrusted text as a row shows it: escapes and controls dropped, tabs expanded. */
 export function cleanText(text: string): string {
@@ -40,15 +41,6 @@ export function feedModel(identity: unknown, thinking: unknown, advisor: unknown
 		...(typeof thinking === "string" ? { thinking } : {}),
 		...(advisor === true ? { advisor: true } : {}),
 	};
-}
-
-/** The glyph of a thinking level: `status.disabled` for off, none for inherit, else the level symbol's first glyph. */
-export function thinkingLevelGlyph(glyph: (key: string) => string, level: string | undefined): string {
-	if (!level || level === "inherit") return "";
-	if (level === "off") return glyph("status.disabled");
-	const symbol = glyph(`thinking.${level === "auto" ? "autoPending" : level}`);
-	const space = symbol.indexOf(" ");
-	return space < 0 ? symbol : symbol.slice(0, space);
 }
 
 /**

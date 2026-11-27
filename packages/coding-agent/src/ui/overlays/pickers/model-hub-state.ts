@@ -44,10 +44,10 @@ import type {
 } from "../../../modes/view-model/overlays/model-hub";
 import { AUTO_THINKING, getConfiguredThinkingLevelMetadata } from "../../../thinking/levels";
 import { END_SLICE, runSlicedWork, type SlicedWork } from "../../../utils/sliced-work";
-import type { ConfiguredThinkingLevel } from "../../../utils/render-utils";
+import { thinkingLevelGlyph, type ConfiguredThinkingLevel } from "../../../utils/render-utils";
 import { hubGeometry } from "../../styles/pickers/hub-frame";
 import { editLine, type LineState } from "../settings/line-edit";
-import { glyph, ModelBrowserState, thinkingGlyph } from "./model-browser-state";
+import { glyph, ModelBrowserState } from "./model-browser-state";
 import { matchesSelectCancel, selectKeyId } from "../../../config/keybindings/matchers";
 
 /** A Roles-view row: a role, a model/wildcard chain header, a chain entry, or a "+ New …" row. */
@@ -624,7 +624,7 @@ export class ModelHubState {
 			case "scope":
 				return [{ s: chip.scope === "project" ? "accent" : "muted", t: chip.label }];
 			case "thinking": {
-				const level = chip.thinkingLevel === undefined ? "" : thinkingGlyph(chip.thinkingLevel);
+				const level = chip.thinkingLevel === undefined ? "" : thinkingLevelGlyph(symbol, chip.thinkingLevel);
 				return level ? [{ s: "accent", t: level }, { t: ` ${chip.label}` }] : [{ t: chip.label }];
 			}
 			default:

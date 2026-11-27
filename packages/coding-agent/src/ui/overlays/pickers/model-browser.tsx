@@ -27,6 +27,7 @@ import {
 	roleChipLabel,
 } from "../../../modes/view-model/overlays/model-browser";
 import { getConfiguredThinkingLevelMetadata } from "../../../thinking/levels";
+import { thinkingLevelGlyph } from "../../../utils/render-utils";
 import "../../styles/pickers/model-browser";
 import type { ModelBrowserTerm } from "../../styles/pickers/model-browser";
 import { applyEdit } from "../panels/common";
@@ -39,7 +40,6 @@ import {
 	isSeparator,
 	type ModelBrowserState,
 	type RoleChip,
-	thinkingGlyph,
 	tokenCount,
 } from "./model-browser-state";
 
@@ -54,7 +54,7 @@ export function roleChipSpans(current: boolean, roles: readonly RoleChip[]): Tsp
 				? { s: "dim", t: `${glyph("status.shadowed")} ${role.label}` }
 				: { s: role.color ?? "muted", t: `${glyph("status.enabled")} ${role.label}` },
 		);
-		const level = thinkingGlyph(role.level);
+		const level = thinkingLevelGlyph(glyph, role.level);
 		if (level) spans.push({ s: "dim", t: ` ${level}` });
 	}
 	return spans;

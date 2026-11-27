@@ -3,6 +3,8 @@ import * as os from "node:os";
 import { createRoot, isUiNode, type UiNode } from "@oh-my-pi/pi-tui";
 import { paintNode } from "@oh-my-pi/pi-tui/term/paint";
 import { firstCellDiff } from "@oh-my-pi/pi-tui/testing/cells";
+import { createTheme } from "@oh-my-pi/pi-tui/theme/theme";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { corpusEnvironment, describeTree, firstDiff, stageNative } from "@oh-my-pi/pi-tui/testing/corpus";
 import { stageTest } from "../deviations";
 import "../../../src/ui/styles/tools/task";
@@ -121,4 +123,68 @@ test("a saved task result without results paints the cancellation text", () => {
 	expect(rendered).toContain("~/.omp/settings.json");
 	expect(rendered).not.toContain(home);
 	expect(rendered).not.toContain("\t");
+});
+
+test("nested task rows use active theme status and tree glyphs in native spans", () => {
+	const previousTheme = currentTheme();
+	setCurrentTheme(
+		createTheme({
+			...previousTheme.json,
+			symbols: {
+				...previousTheme.json.symbols,
+				overrides: {
+					...previousTheme.json.symbols?.overrides,
+					"status.success": "@success@",
+					"tree.last": "@tree@",
+				},
+			},
+		}),
+	);
+	try {
+		createRoot(dispose => {
+			try {
+				const node = NestedTaskResults({
+					snapshots: [
+						{
+							projectAgentsDir: null,
+							results: [
+								{
+									index: 0,
+									id: "agent_1",
+									agent: "task",
+									agentSource: "bundled",
+									task: "inspect",
+									exitCode: 0,
+									output: "",
+									stderr: "",
+									truncated: false,
+									durationMs: 0,
+									tokens: 0,
+									requests: 0,
+								},
+							],
+							totalDurationMs: 0,
+						},
+					],
+					expanded: false,
+				});
+				if (!isUiNode(node)) throw new Error("nested task rows: node expected");
+				const props = node.props();
+				if (!("spans" in props) || !Array.isArray(props.spans)) throw new Error("nested task rows: spans expected");
+				const text = props.spans
+					.map(span => {
+						if (typeof span !== "object" || span === null || !("t" in span) || typeof span.t !== "string")
+							throw new Error("nested task rows: malformed span");
+						return span.t;
+					})
+					.join("");
+				expect(text).toContain("@success@");
+				expect(text).toContain("@tree@");
+			} finally {
+				dispose();
+			}
+		});
+	} finally {
+		setCurrentTheme(previousTheme);
+	}
 });

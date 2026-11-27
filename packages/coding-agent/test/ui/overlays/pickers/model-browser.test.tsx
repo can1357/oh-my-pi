@@ -1,4 +1,10 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
+import { expect, test } from "bun:test";
+import { createTheme } from "@oh-my-pi/pi-tui/theme/theme";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { describeTree } from "@oh-my-pi/pi-tui/testing/corpus";
+import { staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
+import { createTestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
 import {
 	buildBrowserItems,
 	resolveRoleAssignments,
@@ -88,4 +94,70 @@ pickerSuite({
 			},
 		};
 	},
+});
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function nativeText(node: unknown): string {
+	if (typeof node === "string") return node;
+	if (Array.isArray(node)) return node.map(nativeText).join("");
+	if (!isRecord(node)) return "";
+	let text = typeof node.t === "string" ? node.t : "";
+	const props = node.p;
+	if (isRecord(props)) {
+		const spans = props.spans;
+		if (Array.isArray(spans)) text += nativeText(spans);
+		text += nativeText(props.value);
+		text += nativeText(props.label);
+	}
+	const children = node.c;
+	return text + nativeText(children);
+}
+
+test("native model browser resolves glyphs from the active theme", () => {
+	const previous = currentTheme();
+	const custom = createTheme({
+		...previous.json,
+		symbols: {
+			...previous.json.symbols,
+			overrides: {
+				...previous.json.symbols?.overrides,
+				"status.enabled": "@ENABLED",
+				"icon.context": "@CONTEXT",
+				"icon.intelligence": "@INTELLIGENCE",
+			},
+		},
+	});
+	setCurrentTheme(custom);
+	try {
+		const browser = new ModelBrowserState(settings, {});
+		browser.setRoles(roles);
+		browser.setMruOrder(settings.mruOrder);
+		browser.setPerfStats(settings.modelPerf);
+		browser.setItems(items);
+		browser.setCurrentSelector("demo/demo");
+		browser.setMaxVisible(5);
+		const term = createTestTerminal(() => ({ main: <ModelBrowser browser={browser} /> }), {
+			columns: 100,
+			rows: 40,
+			theme: custom,
+		});
+		try {
+			const root = term.surface.main()[0];
+			expect(root).toBeDefined();
+			const text = nativeText(describeTree(root!, staticEnvironment(custom), 100));
+			expect(text).toContain("@ENABLED");
+			expect(text).toContain("@CONTEXT");
+			expect(text).toContain("@INTELLIGENCE");
+			expect(text).not.toContain(previous.symbols.symbol("status.enabled"));
+			expect(text).not.toContain(previous.symbols.symbol("icon.context"));
+			expect(text).not.toContain(previous.symbols.symbol("icon.intelligence"));
+		} finally {
+			term.dispose();
+		}
+	} finally {
+		setCurrentTheme(previous);
+	}
 });

@@ -11,7 +11,7 @@ import { cfgTaskShowResolvedModelBadge } from "../src/task/settings";
 import type { ToolSession } from "../src/tools";
 import type { EvalToolDetails } from "../src/tools/details/eval";
 import type { CoordinationDetails, JobSnapshot } from "../src/tools/details/wait";
-import { thinkingLevelGlyph } from "../src/ui/tools/agent-common";
+import { thinkingLevelGlyph } from "../src/utils/render-utils";
 import { toolText } from "./helpers/tool-text";
 
 const symbol = (key: string): string => currentTheme().symbols.symbol(key);

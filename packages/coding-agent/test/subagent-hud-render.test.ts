@@ -40,7 +40,7 @@ import { createTestTerminal, type TestTerminal } from "@oh-my-pi/pi-tui/testing/
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { StatusHud, SubagentHud, SubagentHudModel, subagentEntries, subagentLayout, TodoHud } from "../src/ui/dock";
-import { thinkingLevelGlyph } from "../src/ui/tools/agent-common";
+import { thinkingLevelGlyph } from "../src/utils/render-utils";
 import { setActiveTodoDescriptions } from "../src/ui/tools/todo";
 import { initTheme } from "../src/ui/theme/service";
 import { createModeTerminal, renderRows } from "./helpers/mode-terminal";
