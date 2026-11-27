@@ -5,6 +5,11 @@
 ### Added
 
 - Dictation now works with xAI speech-to-text models such as `xai-oauth/grok-voice-transcribe-2.0` ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+
+### Changed
+
+- Improved HTML session export viewer mobile ergonomics, responsive layout, and keyboard/screen-reader accessibility including skip-to-transcript navigation, modal and mobile drawer focus containment, and keyboard-accessible disclosure toggles and sidebar resizing ([#20534](https://github.com/can1357/oh-my-pi/pull/20534)).
+
 ## [19.2.1] - 2026-11-25
 
 ### Breaking Changes

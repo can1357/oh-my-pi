@@ -773,15 +773,44 @@
             div.appendChild(prefixSpan);
             div.appendChild(marker);
             div.appendChild(content);
-            const activateNode = () => {
-              navigateTo(row.navigationId || entry.id, 'target', null, row.anchorId);
-              if (isMobileLayout()) closeSidebar(false);
+            const activateNode = (viaKeyboard) => {
+              const navId = row.navigationId || entry.id;
+              const anchorId = row.anchorId;
+              navigateTo(navId, 'target', null, anchorId);
+              if (isMobileLayout()) {
+                closeSidebar(false);
+                const targetEl = document.getElementById(anchorId || `${sessionContext.idPrefix}${navId}`);
+                if (targetEl) {
+                  if (!targetEl.hasAttribute('tabindex')) targetEl.setAttribute('tabindex', '-1');
+                  targetEl.focus?.();
+                } else {
+                  hamburger?.focus?.();
+                }
+              } else if (viaKeyboard) {
+                const nodes = container.querySelectorAll('.tree-node');
+                let targetNode = null;
+                for (const n of nodes) {
+                  if (anchorId ? n.dataset.anchorId === anchorId : (n.dataset.pathId === pathId && !n.dataset.anchorId)) {
+                    targetNode = n;
+                    break;
+                  }
+                }
+                if (!targetNode) {
+                  for (const n of nodes) {
+                    if (n.dataset.pathId === pathId) {
+                      targetNode = n;
+                      break;
+                    }
+                  }
+                }
+                targetNode?.focus?.();
+              }
             };
-            div.addEventListener('click', activateNode);
+            div.addEventListener('click', () => activateNode(false));
             div.addEventListener('keydown', (e) => {
               if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault();
-                activateNode();
+                activateNode(true);
               }
             });
 
@@ -887,10 +916,11 @@
               previewHighlighted = escapeHtml(previewCode);
             }
 
-            return `<div class="tool-output expandable" tabindex="0" role="button" onclick="this.classList.toggle('expanded')">
-              <div class="output-preview"><pre><code class="hljs">${previewHighlighted}</code></pre>
-              <div class="expand-hint">... (${remaining} more lines)</div></div>
-              <div class="output-full"><pre><code class="hljs">${highlighted}</code></pre></div></div>`;
+            const expandLabel = `... (${remaining} more lines)`;
+            return `<div class="tool-output expandable">
+              <div class="output-preview"><pre><code class="hljs">${previewHighlighted}</code></pre></div>
+              <div class="output-full"><pre><code class="hljs">${highlighted}</code></pre></div>
+              <div class="expand-hint" role="button" tabindex="0" aria-expanded="false" data-collapsed-label="${escapeHtml(expandLabel)}" data-expanded-label="Show less">${escapeHtml(expandLabel)}</div></div>`;
           }
 
           return `<div class="tool-output"><pre><code class="hljs">${highlighted}</code></pre></div>`;
@@ -898,17 +928,19 @@
 
         // Plain text output
         if (remaining > 0) {
-          let out = '<div class="tool-output expandable" tabindex="0" role="button" onclick="this.classList.toggle(\'expanded\')">';
+          const expandLabel = `... (${remaining} more lines)`;
+          let out = '<div class="tool-output expandable">';
           out += '<div class="output-preview">';
           for (const line of displayLines) {
             out += `<div>${escapeHtml(replaceTabs(line))}</div>`;
           }
-          out += `<div class="expand-hint">... (${remaining} more lines)</div></div>`;
+          out += '</div>';
           out += '<div class="output-full">';
           for (const line of lines) {
             out += `<div>${escapeHtml(replaceTabs(line))}</div>`;
           }
-          out += '</div></div>';
+          out += '</div>';
+          out += `<div class="expand-hint" role="button" tabindex="0" aria-expanded="false" data-collapsed-label="${escapeHtml(expandLabel)}" data-expanded-label="Show less">${escapeHtml(expandLabel)}</div></div>`;
           return out;
         }
 
@@ -1263,8 +1295,8 @@
 
 
         if (entry.type === 'compaction') {
-          return `<div class="compaction" id="${entryId}" tabindex="0" role="button" onclick="this.classList.toggle('expanded')">
-            <div class="compaction-label">[compaction]</div>
+          return `<div class="compaction" id="${entryId}">
+            <div class="compaction-label" role="button" tabindex="0" aria-expanded="false">[compaction]</div>
             <div class="compaction-collapsed">Compacted from ${entry.tokensBefore.toLocaleString()} tokens</div>
             <div class="compaction-content"><strong>Compacted from ${entry.tokensBefore.toLocaleString()} tokens</strong>\n\n${escapeHtml(entry.summary)}</div>
           </div>`;
@@ -1380,8 +1412,8 @@
         if (!activeSessionKey && tools && tools.length > 0) {
           const namesHtml = tools.map(t => `<span class="tool-name-chip">${escapeHtml(t.name)}</span>`).join('');
           const fullHtml = tools.map(t => `<div class="tool-item"><span class="tool-item-name">${escapeHtml(t.name)}</span> - <span class="tool-item-desc">${escapeHtml(t.description)}</span></div>`).join('');
-          html += `<div class="tools-list collapsed" tabindex="0" role="button" onclick="this.classList.toggle('collapsed')">
-            <div class="tools-header">Available Tools (${tools.length})</div>
+          html += `<div class="tools-list collapsed">
+            <div class="tools-header" role="button" tabindex="0" aria-expanded="false">Available Tools (${tools.length})</div>
             <div class="tools-collapsed">${namesHtml}</div>
             <div class="tools-content">${fullHtml}</div>
           </div>`;
@@ -1587,29 +1619,28 @@
       }
 
       function getSidebarBounds() {
-        const rootStyles = typeof getComputedStyle === 'function' ? getComputedStyle(document.documentElement) : null;
-        const minWidth = (rootStyles ? parseFloat(rootStyles.getPropertyValue('--sidebar-min-width')) : NaN) || 240;
-        const maxWidth = (rootStyles ? parseFloat(rootStyles.getPropertyValue('--sidebar-max-width')) : NaN) || 840;
-        const viewportMaxWidth = (window.innerWidth || 1280) - MIN_CONTENT_WIDTH;
+        const rootStyles = getComputedStyle(document.documentElement);
+        const minWidth = parseFloat(rootStyles.getPropertyValue('--sidebar-min-width')) || 240;
+        const maxWidth = parseFloat(rootStyles.getPropertyValue('--sidebar-max-width')) || 840;
+        const viewportMaxWidth = window.innerWidth - MIN_CONTENT_WIDTH;
         return {
           minWidth,
           maxWidth: Math.max(minWidth, Math.min(maxWidth, viewportMaxWidth))
         };
       }
 
-      function clampSidebarWidth(width) {
-        const { minWidth, maxWidth } = getSidebarBounds();
-        return Math.max(minWidth, Math.min(maxWidth, width));
+      function clampSidebarWidth(width, bounds = getSidebarBounds()) {
+        return Math.max(bounds.minWidth, Math.min(bounds.maxWidth, width));
       }
 
       function applySidebarWidth(width) {
-        const { minWidth, maxWidth } = getSidebarBounds();
-        const clamped = Math.round(Math.max(minWidth, Math.min(maxWidth, width)));
+        const bounds = getSidebarBounds();
+        const clamped = Math.round(clampSidebarWidth(width, bounds));
         document.documentElement.style.setProperty('--sidebar-width', `${clamped}px`);
         if (sidebarResizer) {
           sidebarResizer.setAttribute('aria-valuenow', String(clamped));
-          sidebarResizer.setAttribute('aria-valuemin', String(Math.round(minWidth)));
-          sidebarResizer.setAttribute('aria-valuemax', String(Math.round(maxWidth)));
+          sidebarResizer.setAttribute('aria-valuemin', String(Math.round(bounds.minWidth)));
+          sidebarResizer.setAttribute('aria-valuemax', String(Math.round(bounds.maxWidth)));
         }
       }
 
@@ -1705,6 +1736,7 @@
 
         window.addEventListener('resize', () => {
           if (isMobileLayout()) return;
+          if (sidebar.classList.contains('open')) closeSidebar(false);
           applySidebarWidth(sidebar.getBoundingClientRect().width);
         });
       }
@@ -1712,11 +1744,70 @@
       setupSidebarResize();
 
       const sidebarCloseBtn = document.getElementById('sidebar-close');
+      const skipLink = document.querySelector('.skip-link');
+      const topbar = document.querySelector('.topbar');
+      const workspace = document.getElementById('workspace');
+      const imageModal = document.getElementById('image-modal');
+      const modalImage = document.getElementById('modal-image');
+      const imageModalClose = document.getElementById('image-modal-close');
+      let lastSidebarTrigger = null;
+      let lastImageTrigger = null;
+
+      const FOCUSABLE_SELECTOR = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+      function setInert(el, value) {
+        if (!el) return;
+        el.inert = value;
+        if (value) el.setAttribute('inert', '');
+        else el.removeAttribute('inert');
+      }
+
+      function syncModalInert() {
+        const modalOpen = Boolean(imageModal?.classList.contains('open'));
+        const drawerOpen = sidebar.classList.contains('open') && isMobileLayout();
+        setInert(skipLink, modalOpen || drawerOpen);
+        setInert(topbar, modalOpen || drawerOpen);
+        setInert(sidebarResizer, modalOpen || drawerOpen);
+        setInert(workspace, modalOpen || drawerOpen);
+        setInert(sidebar, modalOpen);
+      }
+
+      function getFocusableElements(root) {
+        if (!root) return [];
+        return Array.from(root.querySelectorAll(FOCUSABLE_SELECTOR)).filter(el => {
+          if (el.hidden || el.closest('[hidden], [inert]')) return false;
+          const style = getComputedStyle(el);
+          return style.display !== 'none' && style.visibility !== 'hidden';
+        });
+      }
+
+      function trapFocusInContainer(e, container) {
+        const focusables = getFocusableElements(container);
+        if (focusables.length === 0) {
+          e.preventDefault();
+          return;
+        }
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        const active = document.activeElement;
+        if (e.shiftKey) {
+          if (active === first || !container.contains(active)) {
+            e.preventDefault();
+            last.focus();
+          }
+        } else if (active === last || !container.contains(active)) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
 
       const openSidebar = () => {
+        lastSidebarTrigger = document.activeElement || hamburger;
         sidebar.classList.add('open');
         overlay.classList.add('open');
+        sidebar.setAttribute('aria-modal', 'true');
         hamburger.setAttribute('aria-expanded', 'true');
+        syncModalInert();
         sidebarCloseBtn?.focus?.();
       };
 
@@ -1724,10 +1815,13 @@
         const wasOpen = sidebar.classList.contains('open');
         sidebar.classList.remove('open');
         overlay.classList.remove('open');
+        sidebar.removeAttribute('aria-modal');
         hamburger.setAttribute('aria-expanded', 'false');
+        syncModalInert();
         if (restoreFocus && wasOpen && isMobileLayout()) {
-          hamburger.focus?.();
+          (lastSidebarTrigger || hamburger)?.focus?.();
         }
+        lastSidebarTrigger = null;
       };
 
       hamburger.addEventListener('click', () => {
@@ -1739,11 +1833,6 @@
       sidebarCloseBtn?.addEventListener('click', () => closeSidebar(true));
 
       // Image modal with focus management
-      const imageModal = document.getElementById('image-modal');
-      const modalImage = document.getElementById('modal-image');
-      const imageModalClose = document.getElementById('image-modal-close');
-      let lastImageTrigger = null;
-
       const openImageModal = (src, alt, triggerEl) => {
         if (!imageModal || !modalImage) return;
         lastImageTrigger = triggerEl || document.activeElement;
@@ -1751,6 +1840,7 @@
         modalImage.alt = alt || 'Expanded attachment';
         imageModal.classList.add('open');
         imageModal.setAttribute('aria-hidden', 'false');
+        syncModalInert();
         imageModalClose?.focus?.();
       };
 
@@ -1759,6 +1849,7 @@
         imageModal.classList.remove('open');
         imageModal.setAttribute('aria-hidden', 'true');
         if (modalImage) modalImage.src = '';
+        syncModalInert();
         lastImageTrigger?.focus?.();
         lastImageTrigger = null;
       };
@@ -1768,11 +1859,63 @@
         if (e.target === imageModal) closeImageModal();
       });
 
+      function findDirectChild(container, className) {
+        for (const child of container.children) {
+          if (child.classList.contains(className)) return child;
+        }
+        return null;
+      }
+
+      function setDisclosureExpanded(container, expanded) {
+        if (!container) return;
+        if (container.classList.contains('tool-output') && container.classList.contains('expandable')) {
+          container.classList.toggle('expanded', expanded);
+          const hint = findDirectChild(container, 'expand-hint');
+          if (hint) {
+            hint.setAttribute('aria-expanded', String(expanded));
+            const label = expanded ? hint.dataset.expandedLabel : hint.dataset.collapsedLabel;
+            if (label) hint.textContent = label;
+          }
+        } else if (container.classList.contains('compaction')) {
+          container.classList.toggle('expanded', expanded);
+          const label = findDirectChild(container, 'compaction-label');
+          if (label) label.setAttribute('aria-expanded', String(expanded));
+        } else if (container.classList.contains('tools-list')) {
+          container.classList.toggle('collapsed', !expanded);
+          const headerEl = findDirectChild(container, 'tools-header');
+          if (headerEl) headerEl.setAttribute('aria-expanded', String(expanded));
+        }
+      }
+
+      function toggleDisclosureContainer(container) {
+        if (!container) return;
+        if (container.classList.contains('tools-list')) {
+          setDisclosureExpanded(container, container.classList.contains('collapsed'));
+        } else {
+          setDisclosureExpanded(container, !container.classList.contains('expanded'));
+        }
+      }
+
       const contentEl = document.getElementById('content');
       contentEl?.addEventListener('click', (e) => {
         const img = e.target?.closest?.('.message-image');
         if (img) {
           openImageModal(img.src, img.alt, img);
+          return;
+        }
+        const expandHint = e.target?.closest?.('.expand-hint');
+        if (expandHint && expandHint.parentElement?.classList?.contains('expandable')) {
+          toggleDisclosureContainer(expandHint.parentElement);
+          return;
+        }
+        const compactionTrigger = e.target?.closest?.('.compaction-label, .compaction-collapsed');
+        if (compactionTrigger && compactionTrigger.parentElement?.classList?.contains('compaction')) {
+          toggleDisclosureContainer(compactionTrigger.parentElement);
+          return;
+        }
+        const toolsTrigger = e.target?.closest?.('.tools-header, .tools-collapsed');
+        if (toolsTrigger && toolsTrigger.parentElement?.classList?.contains('tools-list')) {
+          toggleDisclosureContainer(toolsTrigger.parentElement);
         }
       });
       contentEl?.addEventListener('keydown', (e) => {
@@ -1782,17 +1925,15 @@
         if (target.classList?.contains('message-image')) {
           e.preventDefault();
           openImageModal(target.src, target.alt, target);
-        } else if (
-          target.classList?.contains('tool-output') && target.classList?.contains('expandable')
-        ) {
+        } else if (target.classList?.contains('expand-hint') && target.parentElement?.classList?.contains('expandable')) {
           e.preventDefault();
-          target.classList.toggle('expanded');
-        } else if (target.classList?.contains('compaction')) {
+          toggleDisclosureContainer(target.parentElement);
+        } else if (target.classList?.contains('compaction-label') && target.parentElement?.classList?.contains('compaction')) {
           e.preventDefault();
-          target.classList.toggle('expanded');
-        } else if (target.classList?.contains('tools-list')) {
+          toggleDisclosureContainer(target.parentElement);
+        } else if (target.classList?.contains('tools-header') && target.parentElement?.classList?.contains('tools-list')) {
           e.preventDefault();
-          target.classList.toggle('collapsed');
+          toggleDisclosureContainer(target.parentElement);
         }
       });
 
@@ -1813,15 +1954,25 @@
       const toggleToolOutputs = () => {
         toolOutputsExpanded = !toolOutputsExpanded;
         document.querySelectorAll('.tool-output.expandable').forEach(el => {
-          el.classList.toggle('expanded', toolOutputsExpanded);
+          setDisclosureExpanded(el, toolOutputsExpanded);
         });
         document.querySelectorAll('.compaction').forEach(el => {
-          el.classList.toggle('expanded', toolOutputsExpanded);
+          setDisclosureExpanded(el, toolOutputsExpanded);
         });
       };
 
       // Keyboard shortcuts
       document.addEventListener('keydown', (e) => {
+        if (e.key === 'Tab') {
+          if (imageModal?.classList.contains('open')) {
+            trapFocusInContainer(e, imageModal);
+            return;
+          }
+          if (sidebar.classList.contains('open') && isMobileLayout()) {
+            trapFocusInContainer(e, sidebar);
+            return;
+          }
+        }
         if (e.key === 'Escape') {
           if (e.defaultPrevented || e.composedPath().some(node => node.tagName === 'OMP-SESSION-TRACE')) return;
           if (imageModal?.classList.contains('open')) {

@@ -825,7 +825,6 @@
       border-radius: var(--radius-card);
       padding: 12px 16px;
       margin-bottom: 16px;
-      cursor: pointer;
       min-width: 0;
       transition: border-color var(--dur-out) var(--ease-out);
     }
@@ -842,6 +841,11 @@
       text-transform: uppercase;
       color: var(--muted);
       margin-bottom: 8px;
+      cursor: pointer;
+    }
+
+    .tools-collapsed {
+      cursor: pointer;
     }
 
     .tools-list.collapsed .tools-header {
@@ -1195,7 +1199,6 @@
     }
 
     .tool-output.expandable {
-      cursor: pointer;
       transition: border-color var(--dur-out) var(--ease-out);
     }
 
@@ -1226,6 +1229,8 @@
       font-family: var(--font-sans);
       font-size: 12px;
       margin-top: 6px;
+      cursor: pointer;
+      display: inline-block;
     }
 
     /* ================= Meta entries ================= */
@@ -1250,7 +1255,6 @@
       border: 1px solid var(--hairline);
       border-radius: var(--radius-card);
       padding: 12px 16px;
-      cursor: pointer;
       transition: border-color var(--dur-out) var(--ease-out);
     }
 
@@ -1266,11 +1270,14 @@
       text-transform: uppercase;
       color: var(--customMessageLabel, var(--muted));
       margin-bottom: 3px;
+      cursor: pointer;
+      display: inline-block;
     }
 
     .compaction-collapsed {
       color: var(--customMessageText, var(--muted));
       font-size: 13px;
+      cursor: pointer;
     }
 
     .compaction-content {
