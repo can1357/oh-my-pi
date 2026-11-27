@@ -29,6 +29,7 @@ import { type RpcFrame, RpcLink } from "../../src/thread/rpc";
 import type { ThreadService } from "../../src/thread/services";
 import { agentsThreadService } from "../../src/thread/services/agents";
 import { identityThreadService } from "../../src/thread/services/identity";
+import { resolveInlineByteCapBudget } from "../../src/tools/output-meta";
 
 /** What a worker-side peer handle reports about a session homed elsewhere. */
 export interface PeerReport {
@@ -262,7 +263,13 @@ const probe: AgentsProbe = {
 	manages: async () => AgentLifecycleManager.global().manages(AgentRegistry.global()),
 	settleExternal: async () => {
 		const handle = registerExternalAgent(
-			{ registry: AgentRegistry.global(), jobs: new AsyncJobManager({}), ownerId: "W-owner", emitFrame: () => {} },
+			{
+				registry: AgentRegistry.global(),
+				jobs: new AsyncJobManager({}),
+				ownerId: "W-owner",
+				emitFrame: () => {},
+				resultMaxBytes: resolveInlineByteCapBudget(undefined),
+			},
 			{
 				label: "remote run",
 				execution: { backend: "queue", jobId: "q-1" },

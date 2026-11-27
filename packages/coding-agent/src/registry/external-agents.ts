@@ -10,7 +10,12 @@
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
-import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJobManagerApi, formatAsyncJobLabel } from "../async/job-manager";
+import {
+	ASYNC_JOB_MANAGER_SHUTDOWN_REASON,
+	type AsyncJobManagerApi,
+	capAsyncJobOutcome,
+	formatAsyncJobLabel,
+} from "../async/job-manager";
 import { sanitizeDisplayLine } from "../extensibility/inventory/display-text";
 import { parseSessionEntries } from "../session/session-loader";
 import { generateTaskName } from "../task/name-generator";
@@ -48,7 +53,10 @@ export interface ExternalAgentHandle {
 	readonly id: string;
 	/** Report its state, current activity, and observed model or reasoning level. Ignored once it settled. */
 	update(patch: { status?: "running" | "idle"; progress?: string; model?: string; thinking?: string }): void;
-	/** Settle it and deliver `text` to the owning agent. Only the first call counts, and none after a cancel. */
+	/**
+	 * Settle it and deliver `text` to the owning agent, cut to the inline output cap like an extension job's result.
+	 * Only the first call counts, and none after a cancel.
+	 */
 	complete(result: { status: "done" | "failed" | "cancelled"; text: string }): void;
 }
 
@@ -60,6 +68,8 @@ export interface ExternalAgentHost {
 	ownerId: string;
 	/** Publish a `task:subagent:*` frame on the session's buses. */
 	emitFrame(channel: string, payload: unknown): void;
+	/** Byte cap on the result or failure text `complete()` hands the owner, as on an extension job's. */
+	resultMaxBytes: number;
 }
 
 function displayLine(text: string): string {
@@ -72,7 +82,7 @@ function modelSelector(model: string | undefined, thinking: string | undefined):
 
 /** Register `spec` as an external agent of `host.ownerId`; throws when the running-job limit is reached. */
 export function registerExternalAgent(host: ExternalAgentHost, spec: ExternalAgentSpec): ExternalAgentHandle {
-	const { registry, jobs, ownerId, emitFrame } = host;
+	const { registry, jobs, ownerId, emitFrame, resultMaxBytes } = host;
 	const label = displayLine(spec.label);
 	const execution: ExternalAgentExecution = {
 		backend: displayLine(spec.execution.backend),
@@ -191,7 +201,7 @@ export function registerExternalAgent(host: ExternalAgentHost, spec: ExternalAge
 				};
 				if (signal.aborted) onAbort();
 				else signal.addEventListener("abort", onAbort, { once: true });
-				return outcome.promise;
+				return capAsyncJobOutcome(() => outcome.promise, resultMaxBytes);
 			},
 			{ id, ownerId, agentId: id },
 		);

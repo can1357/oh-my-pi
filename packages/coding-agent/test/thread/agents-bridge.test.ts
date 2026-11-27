@@ -22,6 +22,7 @@ import type { ThreadService } from "../../src/thread/services";
 import { agentsThreadService } from "../../src/thread/services/agents";
 import { identityThreadService } from "../../src/thread/services/identity";
 import { SubagentWorker } from "../../src/thread/subagent-worker";
+import { resolveInlineByteCapBudget } from "../../src/tools/output-meta";
 import { WriteTool } from "../../src/tools/write";
 import type { AgentsProbe, AgentsProbeGlobals } from "../fixtures/agents-bridge-worker";
 
@@ -380,7 +381,13 @@ describe("agent bridging across subagent workers", () => {
 		const { probe } = await startWorker();
 		const transcript = `${JSON.stringify({ type: "message", id: "a", parentId: null, timestamp: new Date(0).toISOString(), message: { role: "assistant", content: [{ type: "text", text: "final answer" }], timestamp: 0 } })}\n`;
 		const agent = registerExternalAgent(
-			{ registry: AgentRegistry.global(), jobs: new AsyncJobManager({}), ownerId: "Main", emitFrame: () => {} },
+			{
+				registry: AgentRegistry.global(),
+				jobs: new AsyncJobManager({}),
+				ownerId: "Main",
+				emitFrame: () => {},
+				resultMaxBytes: resolveInlineByteCapBudget(undefined),
+			},
 			{
 				label: "remote run",
 				execution: { backend: "queue", jobId: "q-1" },

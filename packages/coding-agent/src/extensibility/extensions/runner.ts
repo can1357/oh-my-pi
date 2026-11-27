@@ -2141,6 +2141,7 @@ export class ExtensionRunner {
 										jobs: asyncJobManager,
 										ownerId: this.agent.id,
 										emitFrame: this.#emitSubagentFrame,
+										resultMaxBytes: resolveInlineByteCapBudget(this.settings),
 									},
 									spec,
 								),

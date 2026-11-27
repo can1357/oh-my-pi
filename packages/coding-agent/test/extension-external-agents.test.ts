@@ -20,6 +20,7 @@ import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { collectIrcPeerRoster } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { resolveInlineByteCapBudget } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { AgentTranscriptViewerModel } from "@oh-my-pi/pi-coding-agent/ui/overlays/panels/agent-transcript-viewer-model";
@@ -302,6 +303,32 @@ describe("ExtensionContext.agents.registerExternal", () => {
 		await session!.asyncJobManager!.drainDeliveries({ timeoutMs: 1_000 });
 		expect(injected).toEqual([]);
 		expect(AgentRegistry.global().get(agent.id)?.status).toBe("idle");
+	});
+
+	it("caps an oversized result and failure text the way a bash result is capped", async () => {
+		const ctx = await extensionContext();
+		let delivered = 0;
+		const bothDelivered = Promise.withResolvers<void>();
+		const enqueue = session!.yieldQueue.enqueueWithReceipt.bind(session!.yieldQueue);
+		vi.spyOn(session!.yieldQueue, "enqueueWithReceipt").mockImplementation((kind, entry) => {
+			if (kind !== "async-result") return enqueue(kind, entry);
+			if (++delivered === 2) bothDelivered.resolve();
+			return Promise.resolve();
+		});
+		const output = Array.from({ length: 50_000 }, (_, line) => `remote output line ${line}`).join("\n");
+		const done = ctx.agents!.registerExternal(remoteAgent());
+		const failed = ctx.agents!.registerExternal(remoteAgent());
+		done.complete({ status: "done", text: output });
+		failed.complete({ status: "failed", text: output });
+
+		await bothDelivered.promise;
+		const manager = session!.asyncJobManager!;
+		for (const text of [manager.getJob(done.id)!.resultText!, manager.getJob(failed.id)!.errorText!]) {
+			expect(Buffer.byteLength(text)).toBeLessThanOrEqual(resolveInlineByteCapBudget(undefined));
+			expect(text).toStartWith("remote output line 0\n");
+			expect(text).toContain("elided");
+			expect(text).toEndWith("remote output line 49999");
+		}
 	});
 
 	it("calls cancel when its job is cancelled or the Agent Hub kills it", async () => {
