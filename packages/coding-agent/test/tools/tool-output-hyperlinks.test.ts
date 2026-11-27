@@ -487,6 +487,24 @@ describe("image placeholder OSC 8 links", () => {
 		expect(extractLinkUris(hiddenImageRows("bash", undefined))).toContain(fileUri(blobPath));
 	});
 
+	it("links the sized placeholder of a JPEG whose SOF sits behind large metadata", async () => {
+		const png = Buffer.from(TINY_PNG_BASE64, "base64");
+		const jpeg = Buffer.from(await new Bun.Image(png).resize(1200, 600).jpeg().bytes());
+		const icc = Buffer.alloc(2 + 0xffff);
+		icc.writeUInt16BE(0xffe2, 0);
+		icc.writeUInt16BE(0xffff, 2);
+		const data = Buffer.concat([jpeg.subarray(0, 2), icc, icc, jpeg.subarray(2)]).toString("base64");
+		const call = toolCall({
+			name: "custom_tool",
+			args: {},
+			result: { content: [{ type: "image", data, mimeType: "image/jpeg" }] } as never,
+			expanded: true,
+		});
+		const rows = printRows(() => ToolBlock({ call }), 120, { hyperlinks: true }).join("\n");
+		expect(rows).toContain("1200x600");
+		expect(extractLinkUris(rows)).toContain(fileUri(blobPath));
+	});
+
 	it("writes no blob and draws no link on a terminal without links", () => {
 		const before = writes;
 		expect(extractLinkUris(hiddenImageRows("custom_tool", undefined, false))).toEqual([]);
