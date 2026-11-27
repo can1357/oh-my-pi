@@ -67,7 +67,7 @@ describe("auth-gateway explicit OpenAI prompt cache controls", () => {
 
 			const nestedResponsesResponse = await fetch(`${handle.url}/v1/responses`, {
 				method: "POST",
-				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+				headers: { "Content-Type": "application/json", Authorization: "Bearer gw-test-token" },
 				body: JSON.stringify({
 					model: "gateway-prompt-cache",
 					input: [
