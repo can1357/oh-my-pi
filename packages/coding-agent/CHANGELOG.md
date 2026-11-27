@@ -3,11 +3,6 @@
 ## [Unreleased]
 
 ### Breaking Changes
-### Changed
-
-- Models configuration accepts `supportsPromptCacheBreakpoints` for custom OpenAI-compatible gateways ([#12880](https://github.com/can1357/oh-my-pi/pull/12880) by [@ZenAlexa](https://github.com/ZenAlexa)).
-
-## [18.2.11] - 2026-09-23
 
 - Removed the `cwd` parameter from the `bash` tool; a leading `cd <path> && …` still selects the working directory
 - Removed the `cwd` argument of the eval `sh` helper; every `sh` command starts in the session cwd (use `cd <path> && …` inside the command)
@@ -17,17 +12,6 @@
 - omp no longer reads other agents' user-level config (`~/.claude`, `~/.claude.json`, Claude Code plugins, `~/.codex`, `~/.config/opencode`, `~/.cursor`, `~/.codeium/windsurf`, `~/.copilot`); the `enabledProviders` setting, the `skills.enableClaudeUser`, `skills.enableCodexUser`, `commands.enableClaudeUser` and `commands.enableOpencodeUser` settings, and the dashboard's per-provider user toggle are gone. If you had opted in, the first launch offers to symlink or copy what you were inheriting into `~/.omp/agent`
 - Dropped discovery of GitHub Copilot (`.github/copilot-instructions.md`, `.github/instructions`, `.github/prompts`, `.github/skills`), Cursor (`.cursor/rules`, `.cursorrules`, `.cursor/mcp.json`), Windsurf (`.windsurf/`), VS Code (`.vscode/mcp.json`) and Cline (`.clinerules`) config
 - Project-level Claude Code, Codex and OpenCode config is limited to MCP servers, skills, commands and `.claude/CLAUDE.md`; `.claude/{tools,extensions,hooks,settings.json,SYSTEM.md}`, Codex commands, prompts, hooks, tools and settings, and OpenCode plugins and settings no longer load
-### Fixed
-
-- Fixed nested `eval` Todo updates not being reflected by the Todo tracker, including cases where a cell fails after committing an update.
-- Fixed strict-mode structured-output validation for JSON Schemas without a root `type`, preserving their `items` and `required` keywords.
-- Improved streamed TTSR whole-buffer matching to avoid repeated scans from the beginning of the buffer.
-- Fixed plural browser queries when compiled binaries provide shallow stack traces.
-- Fixed browser `tab.fill` timing out on pages whose animation frames stall.
-- Fixed the first LSP diagnostics request returning no results while a newly started language server is still analyzing.
-- `/shake thinking` now reports the number of tokens freed.
-
-## [18.2.10] - 2026-09-22
 
 ### Added
 
@@ -69,6 +53,7 @@
 ### Changed
 
 - Back-to-back idle `wait` calls on jobs and services stretch their top window to the session's prompt-cache lifetime less 1m (up to 30m) instead of a fixed 4m, as reply waits already did
+- Models configuration accepts `supportsPromptCacheBreakpoints` for custom OpenAI-compatible gateways ([#12880](https://github.com/can1357/oh-my-pi/pull/12880) by [@ZenAlexa](https://github.com/ZenAlexa)).
 - Updated task prompt to forbid full builds or test suites mid‑flight and allow quick scoped checks
 - The shell's `find`, `grep -r`, `rg`, `fd` and `ast-grep` refuse to search a filesystem root such as `/` and explain why; `find`, `rg` and `fd` still allow a shallow look (max depth 2), and `-allow-root` (`find`) or `--allow-root` searches the whole disk on purpose
 - The `grep`, `glob`, `ast_grep` and `ast_edit` tools refuse a search scope that resolves to a filesystem root (`/usr/..`, `../../..`, `C:\`) and explain why; a bare `/` still means the workspace

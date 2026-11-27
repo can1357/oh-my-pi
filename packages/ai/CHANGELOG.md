@@ -26,6 +26,7 @@
 
 ### Changed
 
+- OpenAI prompt-cache breakpoints now cover stable assistant, tool, and function-output boundaries, with nested gateway markers rejected ([#12880](https://github.com/can1357/oh-my-pi/pull/12880) by [@ZenAlexa](https://github.com/ZenAlexa)).
 - Expanded xAI text-to-speech support with configurable playback speed, PCM output, and inputs up to 60,000 characters.
 - Devin sessions now automatically switch to another stored login when the active login has exhausted its weekly quota and has no on-demand balance.
 - The tool-call loop guard now also detects consecutive tool calls whose arguments drift only in numbers, such as `echo merge-live-3` after `echo merge-live-2`, when the assistant's text repeats. Progress-bearing arguments (`grep`'s `skip`, `offset`, cursor keys) and digits inside path-like tokens of command strings keep their values. Legitimate pagination and sweeps over distinct files are not interrupted ([#13426](https://github.com/can1357/oh-my-pi/pull/13426) by [@nick-maderight](https://github.com/nick-maderight))
@@ -1237,11 +1238,6 @@
 - Added multi-account authentication and authorization for Codex cyber access programs, including automatic request replay after access-program rejections.
 - Added credential-aware authentication routing with per-account OAuth policies, deterministic account selection, protected quota reserves, persistent rate-limit tracking, automatic recovery, and sticky session-to-credential affinity.
 - Added deprecated `getApiKey` and `reload` methods for backward compatibility.
-
-## [18.2.11] - 2026-09-23
-### Changed
-
-- OpenAI prompt-cache breakpoints now cover stable assistant, tool, and function-output boundaries, with nested gateway markers rejected ([#12880](https://github.com/can1357/oh-my-pi/pull/12880) by [@ZenAlexa](https://github.com/ZenAlexa)).
 
 ## [18.2.11] - 2026-09-23
 
