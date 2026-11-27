@@ -2800,7 +2800,6 @@ function buildClinePassFallbackModel(id: string): ModelSpec<"openai-completions"
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: CLINEPASS_FALLBACK_CONTEXT_WINDOW,
 		maxTokens: CLINEPASS_FALLBACK_MAX_TOKENS,
-		compat: { supportsReasoningEffort: false },
 	};
 }
 
@@ -2922,7 +2921,9 @@ function buildClinePassSubscriptionModel(
 ): ModelSpec<"openai-completions"> {
 	const curated = buildCuratedClinePassModel(id, "subscription");
 	if (curated) return curated;
-	const base = references.get(id) ?? buildClinePassFallbackModel(id);
+	// Effort control comes from the ClinePass KDL rules (`trust-explicit-thinking-only`
+	// plus exact-id ladders), never from compat baked into an earlier bundle row.
+	const { compat: _bakedCompat, ...base } = references.get(id) ?? buildClinePassFallbackModel(id);
 	const reference = resolveModelReference(id, getBundledModelReferenceIndex());
 	// A reference pointing back at the ClinePass bundle means the last regen
 	// knew nothing about the id and encoded fallback constants — treat as none.
