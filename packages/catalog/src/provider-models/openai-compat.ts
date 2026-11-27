@@ -6957,16 +6957,28 @@ function isCopilotSelectableModel(entry: OpenAICompatibleModelRecord): boolean {
 	return typeof type !== "string" || type === "chat";
 }
 
+/**
+ * Price a Copilot tier. `token_prices` reports no cache-write price per tier, and an omitted
+ * `cache_price` is unknown, not free (an explicit `0` is free). Both cache legs carry over from the
+ * row the tier derives from, scaled by the tier's input-price ratio: live billing frames on a
+ * 300K-token prompt priced the long tier of `gpt-6-luna`, `gpt-5.6-luna`, `gpt-6.1-terra` and
+ * `gpt-6.2-sol` at exactly 2x input, cache read and cache write, and Haiku 5.5's rate card scales
+ * both legs 5x with input.
+ */
 function copilotTierCost(
 	tier: CopilotTokenPriceTier | undefined,
-): Omit<ModelSpec<Api>["cost"], "cacheWrite"> | undefined {
+	inherited: ModelSpec<Api>["cost"],
+): ModelSpec<Api>["cost"] | undefined {
 	if (tier?.inputPrice === undefined || tier.outputPrice === undefined) {
 		return undefined;
 	}
+	const input = tier.inputPrice / 100;
+	const ratio = inherited.input > 0 ? input / inherited.input : 1;
 	return {
-		input: tier.inputPrice / 100,
+		input,
 		output: tier.outputPrice / 100,
-		cacheRead: (tier.cachePrice ?? 0) / 100,
+		cacheRead: tier.cachePrice !== undefined ? tier.cachePrice / 100 : inherited.cacheRead * ratio,
+		cacheWrite: inherited.cacheWrite * ratio,
 	};
 }
 
@@ -6993,7 +7005,7 @@ function createCopilotLongContextVariant(
 	if (base.contextWindow === null || variantWindow <= base.contextWindow) {
 		return undefined;
 	}
-	const longCost = copilotTierCost(longContext);
+	const longCost = copilotTierCost(longContext, base.cost);
 	return {
 		...base,
 		id: `${base.id}${COPILOT_LONG_CONTEXT_ID_SUFFIX}`,
@@ -7001,8 +7013,8 @@ function createCopilotLongContextVariant(
 		name: `${base.name}${COPILOT_LONG_CONTEXT_NAME_SUFFIX}`,
 		contextWindow: variantWindow,
 		// Long-context tier has its own token prices (Gemini/GPT bill ~2x above
-		// the default boundary). cacheWrite is not reported per tier; inherit.
-		...(longCost && { cost: { ...longCost, cacheWrite: base.cost.cacheWrite } }),
+		// the default boundary); see copilotTierCost for the cache legs.
+		...(longCost && { cost: longCost }),
 		contextPromotionTarget: undefined,
 	};
 }
@@ -7194,10 +7206,9 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 								delete base.thinking.effortRouting;
 							}
 						}
-						const defaultCost = copilotTierCost(tokenPrices.defaultTier);
+						const defaultCost = copilotTierCost(tokenPrices.defaultTier, base.cost);
 						if (defaultCost) {
-							// Cache writes are not reported per tier; retain the bundled provider rate.
-							base.cost = { ...defaultCost, cacheWrite: base.cost.cacheWrite };
+							base.cost = defaultCost;
 						}
 						const variant = createCopilotLongContextVariant(
 							base,

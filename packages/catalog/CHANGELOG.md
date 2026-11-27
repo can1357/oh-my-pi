@@ -37,6 +37,7 @@
 ### Fixed
 
 - Fixed QwenCloud Token Plan (`alibaba-token-plan`) DeepSeek V4.1 Flash models (`deepseek-v4.1-flash`, `deepseek-v4.1-flash-1017`) dropping attached images as text-only; they now accept image input ([#20773](https://github.com/can1357/oh-my-pi/issues/20773))
+- Fixed GitHub Copilot `-1m` long-context rows pricing cache reads at $0 and cache writes at the default-tier rate when the tier's billing omits them, which understated dollar estimates; an omitted cache price now follows the base row, scaled by the tier's input price ([#20667](https://github.com/can1357/oh-my-pi/issues/20667))
 - Fixed Antigravity model display and pricing: models now appear as included with the Google AI plan, can serve as the cheapest configured vision fallback, and report zero cost in OTLP telemetry.
 - Fixed `google-vertex` Claude Fable 5.1+ requests failing their first attempt with 400 `thinking.adaptive.block_binding: Extra inputs are not permitted` ([#20765](https://github.com/can1357/oh-my-pi/issues/20765))
 
