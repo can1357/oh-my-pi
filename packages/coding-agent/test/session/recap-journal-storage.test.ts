@@ -168,60 +168,71 @@ describe("the idle recap journal", () => {
 	});
 });
 
+/** An SDK session `createAgentSession` roots in `<root>/scoped-agent`, kept by `storage`, with one turn on disk. */
+async function scopedSession(storage: SessionStorage) {
+	const agentDir = path.join(root, "scoped-agent");
+	const cwd = path.join(root, "app");
+	fs.mkdirSync(cwd, { recursive: true });
+	const sessionManager = SessionManager.create(
+		cwd,
+		SessionManager.getDefaultSessionDir(cwd, agentDir, storage),
+		storage,
+	);
+	const authStorage = await AuthStorage.create(path.join(root, "auth.db"));
+	authStorage.keys.setRuntime("managed-primary", "test-key");
+	const { session } = await createAgentSession({
+		cwd,
+		agentDir,
+		sessionManager,
+		authStorage,
+		modelRegistry: new ModelRegistry(authStorage, path.join(root, "models.yml")),
+		settings: Settings.isolated({ "compaction.enabled": false }),
+		model: buildModel({
+			id: "recap-journal-model",
+			name: "Recap Journal Model",
+			api: "openai-completions",
+			provider: "managed-primary",
+			baseUrl: "http://127.0.0.1:8080/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+		}),
+		disableExtensionDiscovery: true,
+		skills: [],
+		contextFiles: [],
+		promptTemplates: [],
+		slashCommands: [],
+		enableMCP: false,
+		enableLsp: false,
+		skipPythonPreflight: true,
+	});
+	addTurn(sessionManager);
+	await sessionManager.flush();
+	const dispose = async () => {
+		try {
+			await session.dispose();
+		} finally {
+			authStorage.close();
+		}
+	};
+	return { agentDir, cwd, session, sessionManager, dispose };
+}
+
 describe("the idle recap journal of a session with an agent dir of its own", () => {
 	for (const store of STORES) {
 		it(`journals in that agent dir's history.db, not the process agent dir's, under ${store.name}`, async () => {
-			const agentDir = path.join(root, "scoped-agent");
-			const cwd = path.join(root, "app");
-			fs.mkdirSync(cwd, { recursive: true });
-			const storage = await store.open();
-			const sessionManager = SessionManager.create(
-				cwd,
-				SessionManager.getDefaultSessionDir(cwd, agentDir, storage),
-				storage,
-			);
-			const authStorage = await AuthStorage.create(path.join(root, "auth.db"));
-			authStorage.keys.setRuntime("managed-primary", "test-key");
-			const { session } = await createAgentSession({
-				cwd,
-				agentDir,
-				sessionManager,
-				authStorage,
-				modelRegistry: new ModelRegistry(authStorage, path.join(root, "models.yml")),
-				settings: Settings.isolated({ "compaction.enabled": false }),
-				model: buildModel({
-					id: "recap-journal-model",
-					name: "Recap Journal Model",
-					api: "openai-completions",
-					provider: "managed-primary",
-					baseUrl: "http://127.0.0.1:8080/v1",
-					reasoning: false,
-					input: ["text"],
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-					contextWindow: 4096,
-					maxTokens: 1024,
-				}),
-				disableExtensionDiscovery: true,
-				skills: [],
-				contextFiles: [],
-				promptTemplates: [],
-				slashCommands: [],
-				enableMCP: false,
-				enableLsp: false,
-				skipPythonPreflight: true,
-			});
+			const { agentDir, cwd, session, sessionManager, dispose } = await scopedSession(await store.open());
 			const sessionId = sessionManager.getSessionId();
 			let listed: string[];
 			let listedByDefault: string[];
 			try {
-				addTurn(sessionManager);
-				await sessionManager.flush();
 				sessionManager.recordRecap(RECAP);
 				listed = await archiveRecaps(cwd, session.sessionManager);
 				listedByDefault = await archiveRecaps(cwd);
 			} finally {
-				await session.dispose();
-				authStorage.close();
+				await dispose();
 			}
 			expect({
 				own: recapsIn(getHistoryDbPath(agentDir), sessionId),
@@ -229,6 +240,27 @@ describe("the idle recap journal of a session with an agent dir of its own", () 
 				default: recapsIn(getHistoryDbPath(), sessionId),
 				listedByDefault,
 			}).toEqual({ own: [RECAP], listed: [RECAP], default: [], listedByDefault: [] });
+		});
+
+		it(`drops a deleted session's recaps from that agent dir's history.db under ${store.name}`, async () => {
+			const { agentDir, sessionManager, dispose } = await scopedSession(await store.open());
+			const sessionId = sessionManager.getSessionId();
+			const sessionFile = sessionManager.getSessionFile();
+			let beforeDelete: string[];
+			try {
+				sessionManager.recordRecap(RECAP);
+				beforeDelete = recapsIn(getHistoryDbPath(agentDir), sessionId);
+				// `/delete`: move to a new session, then drop the one it left.
+				await sessionManager.newSession({ drop: true });
+				if (sessionFile) await sessionManager.dropSession(sessionFile);
+			} finally {
+				await dispose();
+			}
+			expect({
+				sessionFile: typeof sessionFile,
+				beforeDelete,
+				afterDelete: recapsIn(getHistoryDbPath(agentDir), sessionId),
+			}).toEqual({ sessionFile: "string", beforeDelete: [RECAP], afterDelete: [] });
 		});
 	}
 });

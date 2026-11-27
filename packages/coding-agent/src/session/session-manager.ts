@@ -144,7 +144,8 @@ import {
 	normalizeSessionWorkspace,
 	normalizeWorkspaceDirectory,
 } from "./session-workspace";
-import { recordSessionRecap, recordSessionTitle } from "./session-index";
+import { sessionIdFromContent } from "./session-header-id";
+import { deleteSessionRecaps, recordSessionRecap, recordSessionTitle } from "./session-index";
 
 const JSONL_SUFFIX_LENGTH = ".jsonl".length;
 const DRAFT_ONLY_SESSION_MARKER = ".draft-only-session";
@@ -2616,14 +2617,28 @@ export class SessionManager {
 		return sessionFile;
 	}
 
-	/** Delete a session file and its artifact directory. ENOENT is treated as success. */
+	/**
+	 * Delete a session file and its artifact directory. ENOENT is treated as success.
+	 * The storage purges the session's rows from the process agent dir's history.db;
+	 * with a recap journal of its own ({@link setRecapJournalPath}) the session's
+	 * recaps are there instead, so they are dropped from that journal too.
+	 */
 	async dropSession(sessionPath: string): Promise<void> {
 		await this.#drainAndCloseWriter();
+		const journalPath = this.#recapJournalPath;
+		// The id comes from the transcript, which the delete removes.
+		let droppedId: string | undefined;
+		if (journalPath !== undefined) {
+			try {
+				droppedId = sessionIdFromContent(await this.#storage.readText(sessionPath));
+			} catch {}
+		}
 		try {
 			await this.#storage.deleteSessionWithArtifacts(sessionPath);
 		} catch (err) {
 			if (!isEnoent(err)) throw err;
 		}
+		if (droppedId !== undefined) deleteSessionRecaps(droppedId, journalPath);
 	}
 
 	/**

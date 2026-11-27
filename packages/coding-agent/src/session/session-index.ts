@@ -210,6 +210,21 @@ export function recordSessionRecap(sessionId: string, cwd: string, recap: string
 	}
 }
 
+/**
+ * Drop every journaled recap of `sessionId` from the history.db at
+ * `journalPath`, else the process agent dir's. Best-effort like the writers:
+ * a failed delete leaves the rows, logged.
+ */
+export function deleteSessionRecaps(sessionId: string, journalPath?: string): void {
+	const index = openSessionIndex(journalPath);
+	if (!index) return;
+	try {
+		index.db.run("DELETE FROM session_recaps WHERE session_id = ?", [sessionId]);
+	} catch (error) {
+		logger.debug("Session recap journal delete failed", { sessionId, error: String(error) });
+	}
+}
+
 /** One journaled idle recap. */
 export interface SessionRecap {
 	sessionId: string;
