@@ -75,6 +75,7 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
 import type { KeyEvent } from "@oh-my-pi/pi-tui";
+import type { MouseTracking } from "@oh-my-pi/pi-tui/driver/io";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import type { Keybinding } from "../../config/keybindings/app-keybindings";
 import type { AutocompleteItem, AutocompleteProvider } from "../../autocomplete/autocomplete";
@@ -303,6 +304,8 @@ export interface ExtensionCustomOptions {
 	overlay?: boolean;
 	/** Take the whole screen (the terminal's alternate screen) while the overlay is open. */
 	fullscreen?: boolean;
+	/** Terminal mouse reporting while the overlay is open; omitted inherits the underlying mode. */
+	mouse?: MouseTracking;
 	/** Invoked with the overlay handle once the overlay is open (overlay mode only). */
 	onHandle?: (handle: ExtensionOverlayHandle) => void;
 	/** Abort the custom UI and reject its promise. */

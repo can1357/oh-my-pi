@@ -1657,7 +1657,10 @@ export class ExtensionUiController {
 					handle = this.ctx.shell.overlays.show(
 						() => extensionOverlay((node = view()), options.fullscreen === true, this.ctx.shell.native()),
 						// A view that is its own sheet takes the keys on the screen inside it.
-						{ focus: root => (node && node !== root ? node : (root.children()[0] ?? root)) },
+						{
+							focus: root => (node && node !== root ? node : (root.children()[0] ?? root)),
+							mouse: options.mouse,
+						},
 					);
 					options.onHandle?.({
 						get closed() {
