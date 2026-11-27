@@ -2,6 +2,8 @@
 export interface AgentHubRemoteTranscript {
 	text: string;
 	newSize: number;
+	/** The transcript was rebuilt: `text` holds it from byte 0 and replaces everything read before. */
+	reset?: boolean;
 	/** Terminal read failure reported by the host; guests should surface it instead of retrying hot. */
 	error?: string;
 }

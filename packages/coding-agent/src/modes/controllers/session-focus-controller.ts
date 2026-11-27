@@ -95,6 +95,9 @@ export class SessionFocusController {
 	async focusAgent(id: string): Promise<void> {
 		if (this.ctx.collabGuest) throw new Error("Viewing agents is unavailable in a collab session.");
 		if (id === MAIN_AGENT_ID) return this.unfocus();
+		if (this.registry.get(id)?.kind === "external") {
+			throw new Error(`Agent ${id} runs outside this session; open it in the Agent Hub to read its transcript.`);
+		}
 		const request = ++this.#focusRequestSeq;
 		let session: AgentViewSession;
 		try {

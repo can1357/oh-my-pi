@@ -462,6 +462,7 @@ Handlers and tool `execute` receive `ctx` with:
 - `runEphemeralTurn(...)` (optional; see below)
 - `startLive(...)` (optional; interactive mode only; see below)
 - `asyncJobs` (optional; absent when the session has no async job manager; see below)
+- `agents` (optional; absent when the session has no async job manager; see below)
 - `memory` (optional structured memory runtime — status/search/save across the configured backend)
 - `annotations`: `/annotate` as an API, for boards and remote clients. `submit({ source, notes, deliver?, review?, focus? })` builds the feedback `/annotate` would and delivers it without any UI; `open({ source, deliver?, focus? })` mounts the annotation overlay on the source and resolves with the operator's notes (`undefined` when dismissed; `mode === "tui"` only). Text sources are `{ kind: "text", text, label? }`, `{ kind: "file", path }` (resolved against the live session cwd), or `{ kind: "last" }`; diff sources are `{ kind: "diff", diff, label? }`, `{ kind: "uncommitted" }`, or `{ kind: "pr", ref }` (`ref` is a GitHub PR or GitLab MR URL, `pr://owner/repo/N`, or `mr://<host>/<group>/<project>/N/diff`). `review`/`focus` apply to diff sources only (a type error on text sources). Text notes are `{ note, line?, quote? }` (1-based; whole-source when omitted, and the quoted line is filled in); diff notes are `{ path, note, line?, side?, occurrence?, rawLine? }` (`side` defaults to `"new"`; `rawLine` is the diff row including its `+`/`-`/space prefix). Notes that do not match their source reject rather than being dropped. `text` and `diff` sources are frozen snapshots of what you pass; `file`, `last`, `uncommitted`, and `pr` are re-read at call time and line numbers are matched against the current content, so pass `quote`/`rawLine` to reject a note (naming it) when that content drifted. `deliver` defaults to `"auto"`: pasteable notes go into the composer when the interactive TUI editor is available and are sent otherwise; an LLM review request (`review: true` on a diff) is always sent. Sending uses `pi.sendUserMessage` and queues as a follow-up while the agent is streaming. `"paste"`/`"send"` force a channel and `"none"` only returns `text`. The result is discriminated by `kind`: `"text"` carries `TextReviewAnnotation[]` and, after `open`, `editedText` when the operator replaced the source in the external editor (the feedback then refers to that text); `"diff"` carries `CodeReviewAnnotation[]` and `review` (whether `text` is an LLM review request). Both carry the rendered `text` and the `delivered` channel.
   Explicit paste requires `ctx.ui.supportsEditor === true`: the TUI and non-headless RPC expose composers; ACP and no-op UI contexts do not. Supplied diffs used for LLM review reject above 50,000 characters or 20 reviewable files before delivery, and `open` rejects such a patch before mounting the overlay; split larger patches into smaller requests. Notes-only submissions do not have this review-prompt bound.
@@ -565,6 +566,40 @@ pi.registerTool({
 ```
 
 `options.intent` is the one-line purpose job views show next to the label. The label and intent are each stripped of terminal escapes, collapsed to one line, and cut to 120 characters, since job views render them and every `wait` report repeats them; `reportProgress(text)` replaces the job's latest progress text, which job views show as its output while it runs. `register` throws when the session's running-job limit is reached.
+
+### External agents (`ctx.agents`)
+
+`ctx.agents.registerExternal(spec)` shows an agent that runs elsewhere (a remote host, a job queue) as a subagent of the session's agent (also when called from an advisor's tool hooks) and returns its handle at once. Use it instead of `ctx.asyncJobs` when the work is an agent with a transcript.
+
+```ts
+pi.registerTool({
+	name: "remote_agent",
+	// ...
+	async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+		if (!ctx.agents) throw new Error("This session cannot show external agents");
+		const run = await startRemoteAgent(params.task);
+		const agent = ctx.agents.registerExternal({
+			label: params.task,
+			execution: { backend: "remote", jobId: run.id, machine: run.host, model: run.model },
+			readTranscript: fromByte => run.transcript(fromByte),
+			steer: (text, mode) => run.send(text, mode),
+			cancel: () => run.cancel(),
+		});
+		run.onProgress(line => agent.update({ progress: line }));
+		run.onEnd(end => agent.complete({ status: end.ok ? "done" : "failed", text: end.summary }));
+		return { content: [{ type: "text", text: `Started ${agent.id}; its result arrives when it finishes.` }] };
+	},
+});
+```
+
+- `agent.id` is its registry id. It is listed in the Agent Hub (with its status, its host or backend, and its model), the subagent HUD, and RPC `get_subagents`, and counts as a running subagent. It has no local session, so it is never revived or focused; the Agent Hub opens its transcript instead.
+- The transcript viewer, RPC `get_subagent_messages`, and `read agent://<id>` page `readTranscript(fromByte)`. Return session JSONL lines (`message` entries carry its messages; a `model_change` entry sets the model shown), complete lines only, with `newSize` the cursor for the next read: `fromByte` plus the bytes returned. When the transcript was rebuilt, return all of it from byte 0 with `reset: true`, and readers replace what they read. Return `error` for a failure that will not go away (readers show it and stop polling); throw for a transient one (retried on the next poll).
+- It is backed by an `extension` job of the session's agent with the same id, so `wait` blocks on it and `cancel` and `proc://<id>` reach it. `complete({ status, text })` settles it and delivers `text` to the agent exactly once: `"done"` as its result, `"failed"` and `"cancelled"` as a failure. Only the first call counts.
+- `write agent://<id>` messages, Agent Hub chat, and RPC `steer_subagent` call `steer(text, mode)`, with `mode` `"steer"` while it runs and `"follow_up"` once it is idle. Without `steer`, it takes no messages.
+- Cancelling it (`cancel`, `proc://<id>/kill`, the Agent Hub kill, RPC `cancel_subagent`) marks it `aborted` and calls `cancel()` once. Session shutdown cancels nothing: the agent is marked `parked` and the remote work keeps running.
+- `update({ status, progress, model, thinking })` reports its state (`"running"` or `"idle"`), a one-line activity the roster and job views show, and the model and reasoning level it runs on. Updates after it settled are ignored.
+
+`label` and the `execution` fields are each stripped of terminal escapes, collapsed to one line, and cut to 120 characters. `registerExternal` throws when the session's running-job limit is reached.
 
 ### Model selection (`ctx.models`)
 

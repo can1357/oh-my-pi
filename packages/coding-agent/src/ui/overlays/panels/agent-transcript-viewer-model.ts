@@ -1,13 +1,14 @@
 /**
  * State of the Agent Hub transcript viewer: a parked subagent's, an
- * advisor's or a collab guest's transcript (no live in-view session).
+ * advisor's, a collab guest's or an external agent's transcript (no live
+ * in-view session).
  *
  * Local transcripts tail append-only growth: an unchanged file identity and
  * matching sentinel windows mean only new JSONL is parsed and appended; a
  * rewrite, truncation or rotation reloads the whole file. Remote (collab
- * guest) transcripts read the host's byte-capped increments. The message
- * draft revives a parked agent (or steers a live one) on send; advisors are
- * read-only.
+ * guest) and external transcripts read byte-capped increments from their
+ * host; a reset page replaces what was read. The message draft revives a
+ * parked agent (or steers a live one) on send; advisors are read-only.
  */
 import type * as fs from "node:fs";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
@@ -15,13 +16,14 @@ import { type Accessor, signal, untrack } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../../../config/settings";
 import { formatModelString } from "../../../config/model-resolver";
-import type { AgentHubRemote } from "../../../modes/view-model/overlays/agent-hub";
+import type { AgentHubRemote, AgentHubRemoteTranscript } from "../../../modes/view-model/overlays/agent-hub";
 import type {
 	AgentTranscriptEntry,
 	AgentTranscriptSource,
 } from "../../../modes/view-model/overlays/agent-transcript-viewer";
 import { type TurnUsageSummary, TurnUsageTally } from "../../../modes/view-model/overlays/usage-row";
 import { imageContent, type SessionMessageEntryLike, textContent } from "../../../session/transcript/transcript-entry";
+import type { ExternalAgentControls } from "../../../registry/agent-hub-types";
 import { resolveEditToolMode } from "../../../utils/edit-mode";
 import { ToolCall, type ToolCallOptions, type ToolCallResult } from "../../transcript/tool-block";
 import type { LineValue } from "./common";
@@ -35,6 +37,7 @@ export interface ViewerAgentRef {
 	readonly status: ViewerAgentStatus;
 	readonly parentId?: string;
 	readonly sessionFile?: string | null;
+	readonly external?: ExternalAgentControls;
 }
 
 /**
@@ -254,10 +257,14 @@ export class AgentTranscriptViewerModel {
 		return this.deps.registry.get(this.deps.agentId);
 	}
 
-	/** Advisors are read-only; every other agent revives on send. */
+	/**
+	 * Advisors are read-only, an external agent takes messages when its extension steers it,
+	 * and every other agent revives on send.
+	 */
 	get sendable(): boolean {
 		const ref = this.ref();
 		if (!ref || ref.kind === "advisor") return false;
+		if (ref.kind === "external") return ref.external?.steer !== undefined;
 		return Boolean(this.deps.remote || this.deps.lifecycle);
 	}
 
@@ -267,7 +274,7 @@ export class AgentTranscriptViewerModel {
 
 	/** What the body says while there are no messages. */
 	placeholder(): string {
-		if (this.deps.remote) {
+		if (this.#hosted) {
 			if (this.remoteError) return this.remoteError;
 			if (this.remoteUnavailable) return "Transcript lives on the host — not available.";
 			return this.hasRemoteData ? "No messages yet." : "Loading transcript from host…";
@@ -293,9 +300,14 @@ export class AgentTranscriptViewerModel {
 
 	// ─── Loading ──────────────────────────────────────────────────────────
 
+	/** Whether the transcript is served (a collab host's, an external agent's) rather than a local file. */
+	get #hosted(): boolean {
+		return this.deps.remote !== undefined || this.ref()?.external !== undefined;
+	}
+
 	#refresh(allowAsync: boolean): void {
 		if (this.#disposed) return;
-		if (this.deps.remote) {
+		if (this.#hosted) {
 			this.#fetchRemote();
 			return;
 		}
@@ -414,13 +426,15 @@ export class AgentTranscriptViewerModel {
 	}
 
 	#fetchRemote(): void {
-		const remote = this.deps.remote;
-		if (!remote || this.#remoteInFlight) return;
+		if (this.#remoteInFlight) return;
 		const from = this.#remoteBytes;
+		const read: Promise<AgentHubRemoteTranscript | null> | undefined = this.deps.remote
+			? this.deps.remote.readTranscript(this.deps.agentId, from)
+			: this.ref()?.external?.readTranscript(from);
+		if (!read) return;
 		const token = ++this.#remoteToken;
 		this.#remoteInFlight = true;
-		remote
-			.readTranscript(this.deps.agentId, from)
+		read
 			.then(result => {
 				if (token !== this.#remoteToken || this.#disposed) return;
 				this.#remoteInFlight = false;
@@ -439,7 +453,7 @@ export class AgentTranscriptViewerModel {
 					this.touch();
 					return;
 				}
-				if (result.newSize < from) {
+				if (result.newSize < from && !result.reset) {
 					// The host's transcript rotated: start over.
 					this.#remoteBytes = 0;
 					this.remoteError = "";
@@ -453,9 +467,13 @@ export class AgentTranscriptViewerModel {
 				this.remoteError = "";
 				this.hasRemoteData = true;
 				const { complete } = splitComplete(result.text);
-				this.#remoteBytes = from + Buffer.byteLength(complete, "utf-8");
+				// A reset page is the whole transcript again: it replaces every block read so far.
+				this.#remoteBytes = (result.reset ? 0 : from) + Buffer.byteLength(complete, "utf-8");
 				const parsed = complete ? this.#messages(this.deps.transcript.parseEntries(complete)) : [];
-				if (parsed.length > 0) this.#append(parsed);
+				if (result.reset) {
+					this.model = undefined;
+					this.#rebuild(parsed);
+				} else if (parsed.length > 0) this.#append(parsed);
 				else this.touch();
 			})
 			.catch((error: unknown) => {
@@ -605,6 +623,14 @@ export class AgentTranscriptViewerModel {
 		const id = this.deps.agentId;
 		if (this.deps.remote) {
 			this.deps.remote.chat(id, text);
+			return;
+		}
+		const steer = this.ref()?.external?.steer;
+		if (steer) {
+			steer(text).catch((error: unknown) => {
+				this.notice = error instanceof Error ? error.message : String(error);
+				this.touch();
+			});
 			return;
 		}
 		const lifecycle = this.deps.lifecycle;

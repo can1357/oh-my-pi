@@ -14,7 +14,7 @@ export function getRunningSubagentBadgeRegistry<T extends AgentHubRegistry>(
 export function getRunningSubagentBadgeAgentIds(registry: AgentHubRegistry): string[] {
 	return registry
 		.list()
-		.filter(ref => ref.kind === "sub" && ref.status === "running")
+		.filter(ref => (ref.kind === "sub" || ref.kind === "external") && ref.status === "running")
 		.map(ref => ref.id);
 }
 

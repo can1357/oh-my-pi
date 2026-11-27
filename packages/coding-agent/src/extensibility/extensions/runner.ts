@@ -42,7 +42,8 @@ import { extensionTheme } from "../../ui/extensions/render-output";
 import type { ComposerShape } from "../../ui/styles/composer/shapes";
 import { type AsyncJobManagerApi, formatAsyncJobLabel } from "../../async";
 import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/agent-session";
-import { MAIN_AGENT_ID } from "../../registry/agent-registry";
+import { type AgentRegistryApi, MAIN_AGENT_ID } from "../../registry/agent-registry";
+import { registerExternalAgent } from "../../registry/external-agents";
 import type { SessionManager } from "../../session/session-manager";
 import type { ApprovalRecordSink } from "../../session/tool-approval-records";
 import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-write-fallback";
@@ -652,6 +653,8 @@ export class ExtensionRunner {
 	#ephemeralTurnBlocker = new AsyncLocalStorage<string | undefined>();
 	#getAsyncJobSnapshotFn: () => AsyncJobSnapshot | null = () => null;
 	#asyncJobManager: AsyncJobManagerApi | undefined;
+	#agentRegistry: AgentRegistryApi | undefined;
+	#emitSubagentFrame: (channel: string, payload: unknown) => void = () => {};
 	#newSessionHandler: NewSessionHandler = async () => ({ cancelled: false });
 	#branchHandler: BranchHandler = async () => ({ cancelled: false });
 	#navigateTreeHandler: NavigateTreeHandler = async () => ({ cancelled: false });
@@ -1201,6 +1204,15 @@ export class ExtensionRunner {
 	/** Backs `ctx.asyncJobs` with the session's job manager; `undefined` leaves it off the context. */
 	setAsyncJobManager(manager: AsyncJobManagerApi | undefined): void {
 		this.#asyncJobManager = manager;
+	}
+
+	/**
+	 * Backs `ctx.agents` (with the job manager) with the session's agent registry and the buses its
+	 * `task:subagent:*` frames go out on.
+	 */
+	setAgentRegistry(registry: AgentRegistryApi, emitSubagentFrame: (channel: string, payload: unknown) => void): void {
+		this.#agentRegistry = registry;
+		this.#emitSubagentFrame = emitSubagentFrame;
 	}
 
 	/** Waits until the interactive transcript can show the tool call being approved. */
@@ -2010,6 +2022,7 @@ export class ExtensionRunner {
 		};
 		const getSessionModes = () => this.#sessionModes;
 		const asyncJobManager = this.#asyncJobManager;
+		const agentRegistry = this.#agentRegistry;
 		return {
 			ui: delegation?.extensionPath ? this.#uiForPath(delegation.extensionPath) : this.#uiContext,
 			mode: this.#mode,
@@ -2085,6 +2098,22 @@ export class ExtensionRunner {
 							),
 					}
 				: undefined,
+			agents:
+				asyncJobManager && agentRegistry
+					? {
+							// Owned by the session's agent for the same reason as `asyncJobs`.
+							registerExternal: spec =>
+								registerExternalAgent(
+									{
+										registry: agentRegistry,
+										jobs: asyncJobManager,
+										ownerId: this.agent.id,
+										emitFrame: this.#emitSubagentFrame,
+									},
+									spec,
+								),
+						}
+					: undefined,
 			localProtocolOptions: this.localProtocolOptions,
 			memory: this.#getMemoryFn?.(),
 			// A getter, not a value: `createHandlerContext` scopes a handler via `Object.create(ctx)`, and

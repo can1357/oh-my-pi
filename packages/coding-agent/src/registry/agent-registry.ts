@@ -13,18 +13,28 @@ import { logger } from "@oh-my-pi/pi-utils";
 import type { AgentSessionHandle } from "../session/agent-session-handle";
 import { AgentAwaits, type AgentAwaitsApi } from "./agent-awaits";
 import { oneLineLabel } from "../task/task-details";
-import { type AgentMetricsSummary, type AgentStatus, MAIN_AGENT_ID } from "./agent-hub-types";
+import {
+	type AgentMetricsSummary,
+	type AgentStatus,
+	type ExternalAgentControls,
+	type ExternalAgentExecution,
+	type ExternalTranscriptPage,
+	MAIN_AGENT_ID,
+} from "./agent-hub-types";
 import { noteAgentArrival } from "../ui/tools/agent-identity";
 export { MAIN_AGENT_ID };
-export type { AgentStatus, AgentMetricsSummary };
+export type { AgentStatus, AgentMetricsSummary, ExternalAgentControls, ExternalAgentExecution, ExternalTranscriptPage };
 
 /**
  * - `main`/`sub`: the user-facing agent tree (driving agent + task subagents).
  * - `advisor`: a passive review transcript persisted like a subagent for usage
  *   attribution and Agent Hub observability, but never a peer — hidden from
  *   agent-facing rosters (`proc://`, `history://`) and not messageable/revivable.
+ * - `external`: an agent an extension runs outside this process (a remote host,
+ *   a job queue). It has no local session: its transcript and messages go
+ *   through {@link AgentRef.external}, and it is never revived.
  */
-export type AgentKind = "main" | "sub" | "advisor";
+export type AgentKind = "main" | "sub" | "advisor" | "external";
 
 /**
  * Run lifecycle milestones, stamped as they happen and scoped to the CURRENT
@@ -84,6 +94,10 @@ export interface AgentRef {
 	history?: AgentHistorySummary;
 	/** Run lifecycle milestones (launch is {@link createdAt}). */
 	lifecycle?: AgentRunLifecycle;
+	/** Where an `external` agent runs. */
+	execution?: ExternalAgentExecution;
+	/** Transcript and message controls of an `external` agent. */
+	external?: ExternalAgentControls;
 }
 
 export type AgentRefExpectation = AgentRef | AgentSessionHandle;
@@ -134,6 +148,8 @@ export interface RegisterInput {
 	history?: AgentHistorySummary;
 	/** Run lifecycle milestones restored from persisted history, when known. */
 	lifecycle?: AgentRunLifecycle;
+	execution?: ExternalAgentExecution;
+	external?: ExternalAgentControls;
 }
 
 /** Public surface of the process-global agent registry, implemented locally on main and by a proxy in workers. */
@@ -235,11 +251,13 @@ export class AgentRegistry implements AgentRegistryApi {
 			activity: input.activity,
 			history: input.history,
 			lifecycle: input.lifecycle,
+			execution: input.execution,
+			external: input.external,
 		};
 		Object.defineProperty(ref, kMintedRef, { value: true });
 		this.#refs.set(ref.id, ref);
 		// Name colours follow arrival order; a re-registered or restored ref keeps its original `createdAt`.
-		if (ref.kind === "sub") noteAgentArrival(ref.id, ref.createdAt);
+		if (ref.kind === "sub" || ref.kind === "external") noteAgentArrival(ref.id, ref.createdAt);
 		this.#emit({ type: "registered", ref });
 		return ref;
 	}
@@ -467,11 +485,12 @@ export class AgentRegistry implements AgentRegistryApi {
 
 	/**
 	 * Whether a ref's claimed running state is corroborated by its attached live session:
-	 * its run is open, streaming or paused until a job, child or peer message resumes it.
+	 * its run is open, streaming or paused until a job, child or peer message resumes it. An
+	 * external agent has no local session; its backend reports its state.
 	 */
 	isRunning(ref: AgentRef): boolean {
 		if (ref.status !== "running") return false;
-		return ref.session?.runStartedAt !== undefined;
+		return ref.kind === "external" || ref.session?.runStartedAt !== undefined;
 	}
 
 	/** Mirror a session's authoritative run-state notifications into its owned registry ref. */

@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import { isEnoent } from "@oh-my-pi/pi-utils";
-import { type AgentRef, AgentRegistry } from "../../registry/agent-registry";
+import { type AgentRef, AgentRegistry, type ExternalAgentControls } from "../../registry/agent-registry";
 import type { AgentSessionHandle } from "../../session/agent-session-handle";
 import type { FileEntry, SessionMessageEntry } from "../../session/session-entries";
 import { parseSessionEntries } from "../../session/session-loader";
@@ -106,9 +106,39 @@ export async function readRpcSubagentTranscript(sessionFile: string, fromByte = 
 	};
 }
 
+/**
+ * Read an external agent's transcript from its extension the way
+ * {@link readRpcSubagentTranscript} reads a file. It has no session file, so
+ * `sessionFile` is empty; a page its extension rebuilt reports `reset: true`.
+ */
+export async function readRpcExternalTranscript(
+	external: ExternalAgentControls,
+	fromByte = 0,
+): Promise<RpcSubagentMessagesResult> {
+	const startByte = Number.isFinite(fromByte) ? Math.max(0, Math.trunc(fromByte)) : 0;
+	let page = await external.readTranscript(startByte);
+	// Past the end of a shorter transcript: read it again from the start.
+	if (!page.reset && page.newSize < startByte) page = { ...(await external.readTranscript(0)), reset: true };
+	if (page.error) throw new Error(page.error);
+	const lastNewline = page.text.lastIndexOf("\n");
+	const completeText = lastNewline >= 0 ? page.text.slice(0, lastNewline + 1) : "";
+	const entries = completeText.length > 0 ? parseSessionEntries(completeText) : [];
+	const base = page.reset ? 0 : startByte;
+	return {
+		sessionFile: "",
+		fromByte: base,
+		nextByte: base + Buffer.byteLength(completeText, "utf8"),
+		reset: page.reset === true,
+		entries,
+		messages: entries.filter(isSessionMessageEntry).map(entry => entry.message),
+	};
+}
+
 export class RpcSubagentRegistry {
 	#subagents = new Map<string, RpcSubagentSnapshot>();
 	#transcriptSessionFilesBySubagentId = new Map<string, string>();
+	/** Every subagent this registry saw start, so a finished external agent's transcript stays readable. */
+	#startedSubagentIds = new Set<string>();
 	#staleSubagentIds = new Set<string>();
 	#unsubscribers: Array<() => void> = [];
 	#eventUnsubscribe: (() => void) | undefined;
@@ -137,6 +167,7 @@ export class RpcSubagentRegistry {
 		this.#observabilityBus = undefined;
 		this.#subagents.clear();
 		this.#transcriptSessionFilesBySubagentId.clear();
+		this.#startedSubagentIds.clear();
 		this.#staleSubagentIds.clear();
 	}
 
@@ -149,6 +180,7 @@ export class RpcSubagentRegistry {
 		}
 		this.#subagents.clear();
 		this.#transcriptSessionFilesBySubagentId.clear();
+		this.#startedSubagentIds.clear();
 	}
 
 	setSubscriptionLevel(level: RpcSubagentSubscriptionLevel): void {
@@ -199,6 +231,7 @@ export class RpcSubagentRegistry {
 		if (!existing && payload.status !== "started") return;
 		if (payload.status === "started") {
 			this.#staleSubagentIds.delete(payload.id);
+			addPruned(this.#startedSubagentIds, payload.id, MAX_RETAINED_TRANSCRIPT_REFERENCES);
 		}
 		const sessionFile = payload.sessionFile ?? existing?.sessionFile;
 		const snapshot: RpcSubagentSnapshot = {
@@ -259,6 +292,13 @@ export class RpcSubagentRegistry {
 		this.#output({ type: "subagent_event", payload } satisfies RpcSubagentEventFrame);
 	}
 
+	/** Transcript controls of an external agent this registry saw start; see {@link readRpcExternalTranscript}. */
+	resolveExternalTranscript(subagentId: string): ExternalAgentControls | undefined {
+		if (!this.#startedSubagentIds.has(subagentId)) return undefined;
+		const ref = AgentRegistry.global().get(subagentId);
+		return ref?.kind === "external" ? ref.external : undefined;
+	}
+
 	resolveSessionFile(selector: RpcSubagentTranscriptSelector): string {
 		if (selector.subagentId) {
 			const snapshot = this.#subagents.get(selector.subagentId);
@@ -309,4 +349,17 @@ export function resolveOwnedLiveSubagent(
 		return undefined;
 	}
 	return { ref, session: ref.session };
+}
+
+/**
+ * Resolve a `get_subagents` id to the external agent it lists, or `undefined`
+ * for any other id. Cancelling and steering one goes through its extension.
+ */
+export function resolveListedExternalSubagent(
+	subagentRegistry: Pick<RpcSubagentRegistry, "getSubagents">,
+	subagentId: string,
+): AgentRef | undefined {
+	if (!subagentRegistry.getSubagents().some(candidate => candidate.id === subagentId)) return undefined;
+	const ref = AgentRegistry.global().get(subagentId);
+	return ref?.kind === "external" && (ref.status === "running" || ref.status === "idle") ? ref : undefined;
 }

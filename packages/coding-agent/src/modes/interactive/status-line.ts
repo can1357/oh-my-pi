@@ -194,7 +194,8 @@ export class SessionStatusLine implements StatusLineModel {
 		const subagents = this.#subagents();
 		let jobs = 0;
 		for (const job of this.#session.getAsyncJobSnapshot({ recentLimit: 0 })?.running ?? []) {
-			if (job.type !== "task" || job.agentId === undefined || !subagents.has(job.agentId)) jobs++;
+			// A job that runs a listed agent (a task, an external agent) counts as that agent only.
+			if (job.agentId === undefined || !subagents.has(job.agentId)) jobs++;
 		}
 		const jobGlance = jobs > 0 ? latestJobWidget(this.#session.getRunningJobWidgets?.() ?? [])?.view : undefined;
 		return previous?.jobs === jobs && previous.jobGlance === jobGlance

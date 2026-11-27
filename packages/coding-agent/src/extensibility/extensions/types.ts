@@ -101,6 +101,7 @@ import type * as PiCodingAgent from "../../index";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
 import type { LoopLimitConfig } from "../../modes/loop-limit";
 import type { MemoryRuntimeContext } from "../../memory-backend";
+import type { ExternalAgentHandle, ExternalAgentSpec } from "../../registry/external-agents";
 import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/agent-session";
 import type { EphemeralTurnOptions, EphemeralTurnResult } from "../../session/agent-session-types";
 import type { CompactMode } from "../../session/compact-modes";
@@ -854,6 +855,22 @@ export interface ExtensionAsyncJobs {
 	): string;
 }
 
+export type { ExternalAgentHandle, ExternalAgentSpec };
+
+/** Agents an extension runs outside this process; see {@link ExtensionContext.agents}. */
+export interface ExtensionAgents {
+	/**
+	 * Show an agent that runs elsewhere (a remote host, a job queue) as a subagent of this session's
+	 * agent and return its handle at once. It is listed in the Agent Hub, the subagent HUD and RPC
+	 * subagent channels; its transcript viewer pages `readTranscript`; `wait` blocks on it until
+	 * `complete()` delivers its result; `agent://<id>` writes reach `steer`; and cancelling it (`cancel`,
+	 * `proc://<id>/kill`, the Agent Hub) calls `cancel`. Session shutdown cancels nothing: the agent is
+	 * marked parked. `label` and the `execution` fields are each stripped of terminal escapes, collapsed
+	 * to one line, and cut to 120 characters. Throws when the session's running-job limit is reached.
+	 */
+	registerExternal(spec: ExternalAgentSpec): ExternalAgentHandle;
+}
+
 export interface ExtensionContext {
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
@@ -953,6 +970,11 @@ export interface ExtensionContext {
 	 * native ones. Optional: absent when the session has no async job manager.
 	 */
 	asyncJobs?: ExtensionAsyncJobs;
+	/**
+	 * Show agents an extension runs elsewhere as subagents of this session's agent. Optional: absent
+	 * when the session has no async job manager.
+	 */
+	agents?: ExtensionAgents;
 	/** Structured memory runtime for status/search/save across the configured backend. */
 	memory?: MemoryRuntimeContext;
 	/** `/annotate` as an API: build or collect annotation feedback on text and diffs. */

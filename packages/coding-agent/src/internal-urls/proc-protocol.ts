@@ -281,7 +281,7 @@ export class ProcProtocolHandler implements ProtocolHandler {
 			if (job.status === "running") {
 				const details = job.latestDetails;
 				if (typeof details?.output === "string") lines.push(details.output);
-				if (job.type === "task") lines.push(`agent://${job.agentId ?? job.id}`);
+				if (job.type === "task" || job.agentId !== undefined) lines.push(`agent://${job.agentId ?? job.id}`);
 				const artifact = details?.meta?.truncation?.artifactId;
 				if (artifact) lines.push(spillUrl(artifact));
 			} else if (job.type === "task") {

@@ -374,7 +374,7 @@ import { isAutoQaEnabled } from "./tools/report-tool-issue";
 import { queueResolveHandler } from "./tools/resolve";
 import { ttsTool } from "./tools/tts";
 import { resolveActiveRepoContext } from "./utils/active-repo-context";
-import { EventBus } from "./utils/event-bus";
+import { EventBus, emitSubagentFrame } from "./utils/event-bus";
 import { normalizeProviderContextImagesForModel } from "./utils/image-loading";
 import { ImageDescriptions } from "./utils/image-vision-fallback";
 import { formatLocalCalendarDate } from "./utils/local-date";
@@ -3993,6 +3993,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const trackUserWait: UserWaitTracker = dialog => (hasSession ? session.waitForUser(dialog) : dialog());
 		extensionRunner.setUserWaitTracker(trackUserWait);
 		extensionRunner.setAsyncJobManager(scopedAsyncJobManager);
+		extensionRunner.setAgentRegistry(agentRegistry, (channel, payload) =>
+			emitSubagentFrame(eventBus, subagentEventBus, channel, payload),
+		);
 
 		credentialDisabledTarget = extensionRunner;
 		for (const event of startupCredentialDisabledEvents.splice(0)) {
