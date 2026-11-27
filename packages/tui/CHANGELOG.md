@@ -5,6 +5,7 @@
 ### Breaking Changes
 
 - `MarkdownLook.linkUrls` is now required. Callers of `setMarkdownLook` must provide this field.
+- `TermBackendOptions.tickInterval` and `TermBackend.setReduceMotion()` are replaced by the `spinnerInterval` and `reduceMotion` options (also on `HostOptions`), and `SPINNER_INTERVAL_MS` by `DEFAULT_SPINNER_INTERVAL_MS` in `term/paint`; painters read `PaintContext.spinnerInterval` (0 = still spinners) through `spinnerIndex` ([#20844](https://github.com/can1357/oh-my-pi/issues/20844))
 
 ### Added
 

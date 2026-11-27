@@ -1785,9 +1785,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		});
 	}
 
-	/** Start the shell (unless a prepaint already did) on the process terminal. */
+	/** Start the shell on the process terminal (a prepaint may already have). */
 	async #startShell(clearHistory: boolean): Promise<void> {
-		this.#syncFrameSettings();
 		await this.#frame.start({
 			clearHistory,
 			resizeScrollback: cfgTuiResizeScrollback.get(this.settings),
@@ -1803,9 +1802,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		};
 	}
 
-	/** `tui.maxFps`, `tui.hyperlinks`, `tui.textSizing` and `tui.screen` into the running renderer. */
+	/** `tui.maxFps`, `tui.motion`, `tui.hyperlinks`, `tui.textSizing` and `tui.screen` into the running renderer. */
 	#syncFrameSettings(): void {
 		this.#frame.frameInterval.set(1000 / cfgTuiMaxFps.get(this.settings));
+		const motion = cfgMotionResolved.get(this.settings);
+		this.#frame.spinnerInterval.set(motion.spinnerInterval);
+		this.#frame.reduceMotion.set(!motion.effects);
 		this.#frame.screen.set(cfgTuiScreen.get(this.settings));
 		this.#frame.copyOnSelect.set(cfgTuiCopyOnSelect.get(this.settings));
 		this.#frame.wheelLines.set(cfgTuiWheelLines.get(this.settings));
@@ -2183,7 +2185,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Load initial todos
 		await logger.time("InteractiveMode.init:todos", () => this.#loadTodoList());
 
-		// A prepaint frame may already own the terminal.
+		// A prepaint frame may already own the terminal: settings reach its renderer either way.
+		this.#syncFrameSettings();
 		if (!this.#ownsStartedUi) {
 			await this.#startShell(options.clearInitialTerminalHistory === true);
 			this.#ownsStartedUi = true;
@@ -3708,7 +3711,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (any("tui.titleState")) setTerminalTitleStateEnabled(cfgTuiTitleState.get(this.settings));
 		if (any("tui.titleSpinner")) setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
 		if (any("terminal.programStatus")) setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
-		if (any("motion")) setTerminalTitleSpinnerInterval(next.motion.titleSpinnerInterval);
+		if (any("motion")) {
+			setTerminalTitleSpinnerInterval(next.motion.titleSpinnerInterval);
+			this.#syncFrameSettings();
+		}
 
 		if (
 			any(

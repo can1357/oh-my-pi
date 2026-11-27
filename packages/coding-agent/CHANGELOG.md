@@ -123,6 +123,7 @@
 - `tui.maxInlineImages` takes effect again: the configured number of inline images stays live as terminal graphics, `0` keeps every image, and changing it redraws the transcript under the new limit ([#20843](https://github.com/can1357/oh-my-pi/issues/20843))
 - Changing `tui.resizeScrollback` while a session runs (`/settings`, `cfg://`, a config reload) now applies to the next resize instead of only after a restart ([#20845](https://github.com/can1357/oh-my-pi/issues/20845))
 - Fixed `tui.autoGraph` charts not appearing below numeric tables in graphics-capable terminals outside Tern ([#20842](https://github.com/can1357/oh-my-pi/issues/20842)).
+- `tui.spinnerInterval` (`--spinner-interval`) and `tui.motion` apply to every spinner in the terminal UI again, not only the terminal title; `tui.motion: reduced`/`none` also stops decorative blink, fade, and pulse ([#20844](https://github.com/can1357/oh-my-pi/issues/20844))
 - Extensions whose `.tsx`/`.jsx` files use `/** @jsxImportSource @oh-my-pi/pi-tui */` load in the compiled omp binary instead of failing with `Cannot find package '@oh-my-pi/pi-tui'` ([#20840](https://github.com/can1357/oh-my-pi/issues/20840))
 - Fixed web search with GitHub Copilot Claude models: it now uses the Copilot login's token and endpoint (Enterprise included) and sends the same Copilot and session headers as chat, so replies are no longer rejected or blocked ([#20678](https://github.com/can1357/oh-my-pi/issues/20678))
 - Session mentions whose title carries a card icon no longer show a second session icon in front of it

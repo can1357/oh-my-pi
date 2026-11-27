@@ -44,7 +44,15 @@ import { type Accessor, type Reactive, signal } from "./reactive";
 /** Configuration of {@link startHost}. */
 export interface HostOptions extends Pick<
 	TermBackendOptions,
-	"screen" | "isPrompt" | "copySelection" | "copyOnSelect" | "wheelLines" | "scrollbar" | "exitTranscript"
+	| "screen"
+	| "isPrompt"
+	| "copySelection"
+	| "copyOnSelect"
+	| "wheelLines"
+	| "scrollbar"
+	| "exitTranscript"
+	| "spinnerInterval"
+	| "reduceMotion"
 > {
 	readonly surface: Surface;
 	readonly theme: Accessor<Theme>;
@@ -423,6 +431,8 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			...(options.hyperlinks ? { hyperlinks: options.hyperlinks } : {}),
 			...(options.textSizing ? { textSizing: options.textSizing } : {}),
 			...(options.clock ? { clock: options.clock } : {}),
+			...(options.spinnerInterval === undefined ? {} : { spinnerInterval: options.spinnerInterval }),
+			...(options.reduceMotion ? { reduceMotion: options.reduceMotion } : {}),
 			...(options.screen ? { screen: options.screen } : {}),
 			...(options.isPrompt ? { isPrompt: options.isPrompt } : {}),
 			...(options.copySelection ? { copySelection: options.copySelection } : {}),
