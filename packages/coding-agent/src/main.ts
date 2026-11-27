@@ -2852,6 +2852,10 @@ export async function runRootCommand(
 				deferredExtensionPaths: extensionsResult.deferredPaths,
 				// Validation waits for background refresh and the first interactive frame.
 				deferRetryFallbackValidation: true,
+				deferStartupModelCacheHydration:
+					isInteractive &&
+					deps.createAgentSession === undefined &&
+					!(cfgPlanEnabled.get(settingsInstance) && cfgPlanDefaultOnStartup.get(settingsInstance)),
 			};
 			let createdSession: CreateAgentSessionResult;
 			try {
@@ -2894,6 +2898,7 @@ export async function runRootCommand(
 				lspServers,
 				mcpManager,
 				startBackgroundModelDiscovery,
+				hydrateDeferredModelCaches,
 			} = createdSession;
 			if (isInteractive)
 				session.addDisposer(bindAgentMesh(sessionOptions.cwd ?? getProjectDir(), settingsInstance, session));
@@ -3001,16 +3006,29 @@ export async function runRootCommand(
 						.catch(error => logger.warn("Startup changelog failed", { error: String(error) }));
 				}
 				void session.loadDeferredExtensions();
-				session.startHintCompression();
-				modelRegistry.refreshInBackground();
-				session.validateRetryFallbackChains();
-				if (configuredScope.length > 0) {
-					// Must follow refreshInBackground: it waits on the in-flight refresh.
-					void rebuildScopedModelsAfterDiscovery(session, parsedArgs, modelRegistry, settingsInstance).catch(
-						error => logger.warn("Scoped model rebuild after discovery failed", { error: String(error) }),
-					);
+				const startCatalogDependentWork = () => {
+					session.startHintCompression();
+					session.validateRetryFallbackChains();
+					if (configuredScope.length > 0) {
+						// It waits on the tracked background refresh, including deferred offline reads.
+						void rebuildScopedModelsAfterDiscovery(session, parsedArgs, modelRegistry, settingsInstance).catch(
+							error => logger.warn("Scoped model rebuild after discovery failed", { error: String(error) }),
+						);
+					}
+					void startBackgroundModelDiscovery?.();
+				};
+				if (hydrateDeferredModelCaches) {
+					modelRegistry.refreshInBackgroundAfterStartup(async () => {
+						try {
+							await hydrateDeferredModelCaches();
+						} finally {
+							if (!session.isDisposed) startCatalogDependentWork();
+						}
+					});
+				} else {
+					modelRegistry.refreshInBackground();
+					startCatalogDependentWork();
 				}
-				void startBackgroundModelDiscovery?.();
 				if (cfgGcAutoCompress.get(settingsInstance)) {
 					const { scheduleGcAutoCompress } = require("./cli/gc-auto-compress") as typeof GcAutoCompress;
 					void scheduleGcAutoCompress(getAgentDir()).catch(error =>

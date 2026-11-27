@@ -91,6 +91,7 @@ import {
 	cfgAsyncEnabled,
 	cfgCheckpointEnabled,
 	cfgDebugEnabled,
+	cfgFindEnabled,
 	cfgGithubEnabled,
 	cfgGitlabEnabled,
 	cfgGlobEnabled,
@@ -665,7 +666,15 @@ export function isBuiltinTaskPlanned(
  * settings. Shared by {@link createTools} and the live settings reconcile so both
  * honor explicit lists, `restrictToolNames`, and task depth identically.
  */
-export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: string[]): Promise<BuiltinToolPlan> {
+export function resolveBuiltinToolPlan(session: ToolSession, toolNames?: string[]): Promise<BuiltinToolPlan> {
+	return buildBuiltinToolPlan(session, toolNames);
+}
+
+async function buildBuiltinToolPlan(
+	session: ToolSession,
+	toolNames?: string[],
+	resolveAutoFind?: CreateToolsOptions["resolveAutoFind"],
+): Promise<BuiltinToolPlan> {
 	const restrictToolNames = session.restrictToolNames === true;
 	const includeYield = session.requireYieldTool === true;
 	const enableLsp = session.enableLsp ?? true;
@@ -845,10 +854,21 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 		requestedTools.push("yield");
 	}
 
+	const initialAutoFind =
+		resolveAutoFind &&
+		(requestedTools === undefined || requestedTools.includes("find")) &&
+		cfgFindEnabled.get(session.settings) === "auto"
+			? await resolveAutoFind()
+			: undefined;
+	// An initial probe never overrides the live predicate used by reconcile.
+	const isAllowedForCreation =
+		initialAutoFind === undefined || cfgFindEnabled.get(session.settings) !== "auto"
+			? isToolAllowed
+			: (name: string) => (name === "find" ? initialAutoFind : isToolAllowed(name));
 	const names = requestedTools?.filter(
-		name => (name in BUILTIN_TOOLS || name in HIDDEN_TOOLS) && isToolAllowed(name),
+		name => (name in BUILTIN_TOOLS || name in HIDDEN_TOOLS) && isAllowedForCreation(name),
 	) ?? [
-		...Object.keys(BUILTIN_TOOLS).filter(isToolAllowed),
+		...Object.keys(BUILTIN_TOOLS).filter(isAllowedForCreation),
 		...(externalThinkingActive ? ["think"] : []),
 		...(includeYield ? ["yield"] : []),
 		...(goalModeActive ? ["goal"] : []),
@@ -875,12 +895,22 @@ export function createToolCommandState(
 	return state;
 }
 
+/** Options for initial built-in tool construction. */
+export interface CreateToolsOptions {
+	/** Resolve initial `find` in auto mode with the same eligibility as the live native-judge gate. */
+	resolveAutoFind?: () => Promise<boolean>;
+}
+
 /**
  * Create tools from BUILTIN_TOOLS registry.
  */
-export async function createTools(session: ToolSession, toolNames?: string[]): Promise<Tool[]> {
+export async function createTools(
+	session: ToolSession,
+	toolNames?: string[],
+	options?: CreateToolsOptions,
+): Promise<Tool[]> {
 	const restrictToolNames = session.restrictToolNames === true;
-	const { requestedTools, names } = await resolveBuiltinToolPlan(session, toolNames);
+	const { requestedTools, names } = await buildBuiltinToolPlan(session, toolNames, options?.resolveAutoFind);
 	const allTools: Record<string, ToolFactory> = { ...BUILTIN_TOOLS, ...HIDDEN_TOOLS };
 	const baseEntries = names.map(name => [name, allTools[name]] as const);
 

@@ -21,7 +21,7 @@ import {
 	rebuildScopedModels,
 	resolveScopedModels,
 } from "@oh-my-pi/pi-coding-agent/main";
-import { createAgentSession, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent/sdk";
+import { createAgentSession, type ExtensionFactory, loadSessionExtensions } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
@@ -38,6 +38,7 @@ import { getRestorableSessionModels } from "@oh-my-pi/pi-coding-agent/session/se
 import { EPHEMERAL_MODEL_CHANGE_ROLE } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { TurnRecovery, type TurnRecoveryHost } from "@oh-my-pi/pi-coding-agent/session/turn-recovery";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
@@ -1589,6 +1590,89 @@ describe("createAgentSession deferred model pattern resolution", () => {
 				prefetchSpy.mockRestore();
 				getApiKeySpy.mockRestore();
 				authStorage.close();
+			}
+		},
+	);
+
+	test.each(["no native judge", "cached-only native judge"] as const)(
+		"publishes the first interactive auto-find roster with %s",
+		async fixture => {
+			const cachedJudge = fixture === "cached-only native judge";
+			const authStorage = createInMemoryAuthStorage();
+			authStoragesToClose.push(authStorage);
+			const source = authStorage.keys.source.bind(authStorage.keys);
+			vi.spyOn(authStorage.keys, "source").mockImplementation((provider, options) => {
+				const auth = source(provider, options);
+				return auth?.kind === "env" ? undefined : auth;
+			});
+			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected a bundled startup chat model");
+			authStorage.keys.setRuntime(model.provider, "fixture-chat-key");
+			const judgeId = "cached-startup-judge";
+			const settings = Settings.isolated({
+				"find.enabled": "auto",
+				modelRoles: cachedJudge ? { judge: `opencode-go/${judgeId}` } : {},
+			});
+			if (cachedJudge) {
+				const bundledJudge = getBundledModel("opencode-go", "jev-1.13-free");
+				if (!bundledJudge) throw new Error("Expected a native judge cache reference");
+				const key = "fixture-judge-key";
+				authStorage.keys.setRuntime("opencode-go", key);
+				writeModelCache(
+					resolveModelCacheProviderId("opencode-go", { apiKey: key }),
+					Date.now(),
+					[{ ...bundledJudge, id: judgeId }],
+					true,
+					"",
+					path.join(tempDir, "models.db"),
+					[bundledJudge],
+				);
+			}
+			const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"), { settings });
+			expect(modelRegistry.find("opencode-go", judgeId)).toBeUndefined();
+			const eventBus = new EventBus();
+			const preloadedExtensions = await loadSessionExtensions(
+				{ disableExtensionDiscovery: true },
+				tempDir,
+				settings,
+				eventBus,
+			);
+			const hydrate = modelRegistry.createStartupModelCacheHydrator();
+			let offlineReadsFinished = false;
+			const { session, hydrateDeferredModelCaches } = await createAgentSession({
+				...buildSessionOptions(""),
+				authStorage,
+				modelRegistry,
+				settings,
+				model,
+				extensions: [],
+				eventBus,
+				preloadedExtensions,
+				hasUI: true,
+				deferStartupModelCacheHydration: true,
+				deferRetryFallbackValidation: true,
+				hydrateStartupModelCaches: async providers => {
+					await hydrate(providers);
+					if (!providers) offlineReadsFinished = true;
+				},
+				toolNames: ["grep", "find"],
+			});
+
+			try {
+				expect(session.getEnabledToolNames().includes("find")).toBe(cachedJudge);
+				expect(session.getFindHintVisible()).toBe(cachedJudge);
+				expect(offlineReadsFinished).toBe(cachedJudge);
+				if (cachedJudge) {
+					expect(modelRegistry.find("opencode-go", judgeId)?.api).toBe("typesafe");
+					expect(hydrateDeferredModelCaches).toBeUndefined();
+				} else {
+					if (!hydrateDeferredModelCaches) throw new Error("Expected the host's offline catalog callback");
+					await hydrateDeferredModelCaches();
+					expect(offlineReadsFinished).toBe(true);
+					expect(session.getFindHintVisible()).toBe(false);
+				}
+			} finally {
+				await session.dispose();
 			}
 		},
 	);

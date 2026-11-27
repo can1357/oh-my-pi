@@ -31,6 +31,7 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { resolveApiKeyOnce, withRequestServiceTier } from "@oh-my-pi/pi-ai/auth-retry";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
+import { isJudgmentApi } from "@oh-my-pi/pi-ai/judgment";
 import { anthropicHostRunsTool } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { prewarmModelConnection } from "@oh-my-pi/pi-ai/providers/connection-prewarm";
 import { isOpenAICodexWebSocketPreferred } from "@oh-my-pi/pi-ai/providers/openai-codex-transport";
@@ -47,6 +48,7 @@ import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { DEFAULT_FRAME_DATA_BYTES_BUDGET, frameDataBytesBudget } from "@oh-my-pi/snapcompact";
 import { discoverAdvisorConfigs } from "./advisor/config";
+import { cfgAdvisorEnabled } from "./advisor/settings";
 import {
 	discoverWatchdogFiles,
 	formatActiveRepoWatchdogPrompt,
@@ -187,6 +189,7 @@ import { mapPromptArguments } from "./mcp/prompt-args";
 import { MCP_CONNECTION_STATUS_EVENT_CHANNEL, type McpConnectionStatusEvent } from "./mcp/startup-events";
 import { resolveMCPToolAlias } from "./mcp/tool-bridge";
 import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memory-backend";
+import { cfgMemoryBackend } from "./memory-backend/settings";
 import { MEMORY_BACKEND_TOOL_NAMES } from "./memory-backend/tool-names";
 import type { MnemopiSessionStateApi } from "./mnemopi/state";
 import autolearnCaptureRefused from "./prompts/system/autolearn-capture-refused.md" with { type: "text" };
@@ -305,6 +308,7 @@ import {
 } from "./system-prompt";
 import type { AgentDefinition } from "./task/types";
 import { refreshAgentDiscovery } from "./task";
+import { modelGrantAdvertisementNeedsCatalog } from "./task/model-approval";
 import { AgentOutputManager } from "./task/output-manager";
 import { wrapStreamFnWithProviderConcurrency } from "./task/provider-concurrency";
 import { sessionDelegationBias } from "./task/prompt-policy";
@@ -374,6 +378,7 @@ import { createArchivePrelude } from "./archive/prelude-definition";
 import { ToolContextStore } from "./tools/context";
 import { isIrcEnabled } from "./irc/messaging";
 import { imageGenTool } from "./tools/image-gen";
+import { isFindEnabled } from "./tools/jfind";
 import { wrapToolWithMetaNotice } from "./tools/output-meta";
 import { isFilesystemSourcePath } from "./tools/path-utils";
 import { isAutoQaEnabled } from "./tools/report-tool-issue";
@@ -688,6 +693,8 @@ export interface CreateAgentSessionOptions {
 	deferRetryFallbackValidation?: boolean;
 	/** @internal Reuse catalog reads made while preparing this launch. */
 	hydrateStartupModelCaches?: HydrateStartupModelCaches;
+	/** @internal Interactive host starts any deferred offline catalog reads after its first live frame. */
+	deferStartupModelCacheHydration?: boolean;
 	/** Raw model pattern(s) (e.g. from --model CLI flag) to resolve after extensions load.
 	 * Used when model lookup is deferred because extension-provided models aren't registered yet. */
 	modelPattern?: string | string[];
@@ -1117,6 +1124,8 @@ export interface CreateAgentSessionResult {
 	lspServers?: LspStartupServerInfo[];
 	/** Start cache-aware online runtime model discovery after the first UI paint. */
 	startBackgroundModelDiscovery?: () => Promise<void>;
+	/** @internal Replay the remaining offline catalog before starting interactive background discovery. */
+	hydrateDeferredModelCaches?: () => Promise<void>;
 	/** Shared event bus for tool/extension communication */
 	eventBus: EventBus;
 	/** Root-scoped bus carrying this session tree's `task:subagent:*` frames. */
@@ -2398,10 +2407,44 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			});
 	}
 
-	// The tool plan (auto find/judgment, among others) and extension/session
-	// consumers can inspect the entire registry. Fill the remaining providers
-	// while skills and other startup discoveries finish, before those readers.
-	const remainingStartupModelCaches = hydrateFullStartupModelCaches();
+	// The terminal host can finish the catalog after paint on an ordinary
+	// fresh launch. Other hosts and startup code that can list models keep
+	// their complete offline snapshot before tool construction.
+	const canDeferModelCaches =
+		options.deferStartupModelCacheHydration === true &&
+		options.hasUI === true &&
+		options.modelRegistry !== undefined &&
+		options.preloadedExtensions?.extensions.length === 0 &&
+		options.preloadedExtensions.runtime.pendingProviderRegistrations.length === 0 &&
+		!options.deferredExtensionPaths?.length &&
+		!options.extensions?.length &&
+		!options.customTools?.length &&
+		!hasExistingSession &&
+		!fullStartupModelCaches &&
+		model !== undefined &&
+		!hasModelScope &&
+		!options.scopedModels?.length &&
+		!deferredPrewalk &&
+		!autoThinking &&
+		!modelRegistry.hasLazyRuntimeMetadata(model.provider) &&
+		!cfgAdvisorEnabled.get(settings) &&
+		cfgMemoryBackend.get(settings) === "off" &&
+		!modelGrantAdvertisementNeedsCatalog(settings);
+	const startupCatalog = (async () => {
+		if (canDeferModelCaches) {
+			const revision = settings.revision;
+			const generation = authStorage.credentials.generation;
+			const noNativeJudge = await logger.time("modelRegistry:ruleOutNativeJudge", () =>
+				modelRegistry.canRuleOutNativeJudgeAtStartup(isJudgmentApi),
+			);
+			if (noNativeJudge) {
+				return { revision, generation };
+			}
+		}
+		await hydrateFullStartupModelCaches();
+		return undefined;
+	})();
+	startupCatalog.catch(() => {});
 
 	// Re-derives the thinking level whenever startup settles on a different
 	// model than the one (possibly none) the level above was resolved against,
@@ -2902,12 +2945,28 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			parentPrefix: options.parentTaskPrefix,
 		});
 
-		// The built-in tool plan can read the full registry (for example, auto
-		// find considers cross-provider judge candidates).
-		await remainingStartupModelCaches;
+		const nativeJudgeAbsence = await startupCatalog;
+		const stillRulesOutNativeJudge = () =>
+			nativeJudgeAbsence !== undefined &&
+			nativeJudgeAbsence.revision === settings.revision &&
+			nativeJudgeAbsence.generation === authStorage.credentials.generation;
+		if (!stillRulesOutNativeJudge()) await hydrateFullStartupModelCaches();
 		if (!options.modelRegistry) modelRegistry.refreshInBackground();
-		// Create built-in tools (already wrapped with meta notice formatting)
-		await logger.time("createAllTools", createTools, toolSession, options.toolNames);
+		// Auto-find normally reads the ordered, cross-provider judge chain.
+		// A negative proof makes that read unnecessary, not a later roster fixup.
+		await logger.time(
+			"createAllTools",
+			createTools,
+			toolSession,
+			options.toolNames,
+			nativeJudgeAbsence && {
+				resolveAutoFind: async () => {
+					if (stillRulesOutNativeJudge()) return false;
+					await hydrateFullStartupModelCaches();
+					return isFindEnabled(toolSession);
+				},
+			},
+		);
 		const initialBrowserPreludeAvailable = shouldFilterBrowserMCPForPrelude({
 			restrictToolNames,
 			browserEnabled: cfgBrowserEnabled.get(settings),
@@ -3064,6 +3123,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// execution back through the parent — wrong for isolated tasks and for
 			// pending-action queueing.
 			customToolPaths = await (customToolPathsPromise ?? Promise.resolve<ToolPathWithSource[]>([]));
+			if (customToolPaths.length > 0) await hydrateFullStartupModelCaches();
 			const customToolsLoadResult = await logger.time("loadCustomTools", () =>
 				loadCustomTools(customToolPaths, cwd, builtInToolNames, action => queueResolveHandler(toolSession, action)),
 			);
@@ -3640,6 +3700,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// path-scoped `enabledModels` allow-list when configured. Skip when the
 		// user explicitly requested a model via --model that wasn't found.
 		if (!model && deferredModelPatterns.length === 0) {
+			await hydrateFullStartupModelCaches();
 			// Retry the configured default role against the current catalog,
 			// setting `model` (+ thinking level) when it resolves. Extension
 			// factories register providers AFTER the early `defaultRoleSpec`
@@ -5431,6 +5492,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			: undefined;
 		// Owned only when this session created the manager; subagents receive a
 		// parent's manager via `options.mcpManager` and MUST NOT disconnect it.
+		// Settings can opt into a synchronous startup reader while other setup yields.
+		if (!fullStartupModelCaches && (cfgAdvisorEnabled.get(settings) || modelGrantAdvertisementNeedsCatalog(settings))) {
+			await hydrateFullStartupModelCaches();
+		}
 		// Advisor spend recorded before this resume is restored off the critical
 		// path below (issue #9553): a large advisor transcript would otherwise
 		// block createAgentSession for tens of seconds while the whole file is
@@ -6468,6 +6533,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			modelFallbackMessage,
 			lspServers,
 			startBackgroundModelDiscovery: startRuntimeDiscovery,
+			hydrateDeferredModelCaches: fullStartupModelCaches === undefined ? hydrateFullStartupModelCaches : undefined,
 			eventBus,
 			subagentEventBus,
 		};

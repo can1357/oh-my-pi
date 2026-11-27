@@ -441,7 +441,12 @@ export function retainModelCacheConnection(dbPath: string | undefined): Disposab
 	};
 }
 
-function runModelCacheDb<T>(resolvedPath: string, shared: boolean, useDb: (db: Database) => T): T {
+function runModelCacheDb<T>(
+	resolvedPath: string,
+	shared: boolean,
+	useDb: (db: Database) => T,
+	recoverCorruption = true,
+): T {
 	if (shared && sharedDb && sharedDbPath !== resolvedPath) closeSharedDb();
 	const pin = shared ? undefined : pinnedDbs.get(resolvedPath);
 	const heldDb = shared ? sharedDb : pin?.db;
@@ -449,7 +454,7 @@ function runModelCacheDb<T>(resolvedPath: string, shared: boolean, useDb: (db: D
 		try {
 			return useDb(heldDb);
 		} catch (error) {
-			if (!isSqliteCorruptionError(error)) throw error;
+			if (!recoverCorruption || !isSqliteCorruptionError(error)) throw error;
 			// The opener owns recovery for new handles. Drop this stale handle
 			// first so its WAL cannot remain attached to the replacement.
 			if (pin) {
@@ -479,7 +484,7 @@ function runModelCacheDb<T>(resolvedPath: string, shared: boolean, useDb: (db: D
 			return result;
 		},
 		{
-			recoverCorruption: true,
+			recoverCorruption,
 			onCorruptionPreserved: () => invalidateReadPath(resolvedPath),
 		},
 	);
@@ -488,6 +493,31 @@ function runModelCacheDb<T>(resolvedPath: string, shared: boolean, useDb: (db: D
 function withModelCacheDb<T>(dbPath: string | undefined, useDb: (db: Database) => T): T {
 	const { resolvedPath, shared } = resolveCacheDb(dbPath);
 	return runModelCacheDb(resolvedPath, shared, useDb);
+}
+
+/**
+ * Whether none of the given namespaces has a payload for this build. Stale
+ * rows also count: an offline resolver can still use them. Never reads model
+ * bytes; false means a row exists or the database could not establish absence.
+ */
+export function areModelCacheRowsAbsent(providerIds: readonly string[], dbPath?: string): boolean {
+	if (providerIds.length === 0) return true;
+	try {
+		const { resolvedPath, shared } = resolveCacheDb(dbPath);
+		return runModelCacheDb(
+			resolvedPath,
+			shared,
+			db => {
+				const stmt = db.query<{ found: number }, [string, string, string]>(`
+					WITH wanted(id) AS (SELECT value FROM json_each(?))
+					SELECT 1 AS found ${PREFERRED_CACHE_ROW} WHERE m.version = ${CACHE_SCHEMA_VERSION} LIMIT 1`);
+				return stmt.get(JSON.stringify(providerIds), compactModelPolicy, plainModelPolicy) === null;
+			},
+			false, // An unreadable database does not establish absence.
+		);
+	} catch {
+		return false;
+	}
 }
 
 /** Descriptor only: constructing a registry for a scoped lookup never reads the large catalog blob. */

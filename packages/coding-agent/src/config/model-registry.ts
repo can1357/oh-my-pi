@@ -31,6 +31,7 @@ import { litellmUsageProvider } from "@oh-my-pi/pi-ai/usage/litellm";
 import { buildDiscoveredModel, buildModel, nextBuildPriceChange } from "@oh-my-pi/pi-catalog/build";
 import {
 	cascadeRulesRevision,
+	catalogAxisProviders,
 	hasRuntimeProviderRules,
 	setRuntimeProviderRule,
 } from "@oh-my-pi/pi-catalog/compat/cascade";
@@ -43,6 +44,7 @@ import {
 import { getBundledModelReferenceIndex } from "@oh-my-pi/pi-catalog/identity/bundled";
 import { applyCatalogMetrics, CatalogMetricsIndex, catalogMetricsOf } from "@oh-my-pi/pi-catalog/identity/metrics";
 import {
+	areModelCacheRowsAbsent,
 	type CacheEntry,
 	type ComposedCatalogDescriptor,
 	getModelCacheWriteStats,
@@ -1282,15 +1284,36 @@ export class ModelRegistry {
 		this.#startBackgroundRefresh(strategy);
 	}
 
-	#startBackgroundRefresh(strategy: ModelRefreshStrategy, options?: ModelRegistryRefreshOptions): void {
-		if (this.#backgroundRefresh) {
-			return;
-		}
+	/** Track the local CLI's deferred offline replay together with its normal background refresh. */
+	refreshInBackgroundAfterStartup(hydrateOffline: () => Promise<void>): void {
+		if (this.#owner) throw new Error("Deferred startup cache hydration belongs to the catalog owner");
+		this.#startBackgroundRefresh("online-if-uncached", undefined, hydrateOffline);
+	}
+
+	#startBackgroundRefresh(
+		strategy: ModelRefreshStrategy,
+		options?: ModelRegistryRefreshOptions,
+		hydrateOffline?: () => Promise<void>,
+	): void {
+		const previousRefresh = this.#backgroundRefresh;
+		if (previousRefresh && !hydrateOffline) return;
 		// `refresh()` synchronously reloads static config, which can reset startup
 		// discovery states. Start it on a microtask so a caller can validate
 		// against the hydrated startup catalog right after kicking the refresh off.
-		const refreshPromise = Promise.resolve()
-			.then(() => this.refresh(strategy, options))
+		const refresh = () => this.refresh(strategy, options);
+		const refreshPromise = (previousRefresh ?? Promise.resolve())
+			.then(
+				hydrateOffline
+					? async () => {
+							try {
+								await hydrateOffline();
+							} catch (error) {
+								logger.debug("Deferred startup model cache hydration failed", { error: String(error) });
+							}
+							await refresh();
+						}
+					: refresh,
+			)
 			.catch(error => {
 				logger.warn("background model refresh failed", {
 					error: error instanceof Error ? error.message : String(error),
@@ -1299,8 +1322,8 @@ export class ModelRegistry {
 			.finally(() => {
 				if (this.#backgroundRefresh === refreshPromise) {
 					this.#backgroundRefresh = undefined;
+					this.#markInitialRefreshSettled();
 				}
-				this.#markInitialRefreshSettled();
 			});
 		this.#backgroundRefresh = refreshPromise;
 	}
@@ -4602,6 +4625,105 @@ export class ModelRegistry {
 			}
 			return available;
 		};
+	}
+
+	/**
+	 * True only if the offline startup catalog cannot contain an available
+	 * native judge. An uninspected cache, opaque projection, or possible
+	 * native row needs the authoritative startup matcher instead.
+	 * @internal
+	 */
+	async canRuleOutNativeJudgeAtStartup(isNativeApi: (api: Api) => boolean): Promise<boolean> {
+		if (
+			this.#owner ||
+			(await this.#pollStartupCacheCredentials()) !== false ||
+			this.#backgroundRefresh ||
+			this.#configuredDiscoveryInFlight.size > 0 ||
+			this.#discoveryLandingTail ||
+			this.#configError ||
+			hasRuntimeProviderRules() ||
+			this.#modelModifierCanApply()
+		) {
+			return false;
+		}
+
+		const isAvailable = this.#createProviderAvailabilityCheck();
+		const foldedAvailable = new Set<string>();
+		for (const provider of this.#knownStaticProviders()) {
+			if (isAvailable(provider)) foldedAvailable.add(provider.toLowerCase());
+		}
+		// A single-provider lookup can group differently cased provider names.
+		// Including them here can only make us fall back to the real matcher.
+		const mayBeAvailable = (provider: string) => isAvailable(provider) || foldedAvailable.has(provider.toLowerCase());
+		const pending: string[] = [];
+		const configured = new Set<string>();
+		const apiProjections = new Set<string>();
+		const discoveryApiProviders = catalogAxisProviders("discoveryApi");
+		for (const config of this.#discoverableProviders) {
+			const { provider } = config;
+			configured.add(provider);
+			if (!mayBeAvailable(provider)) continue;
+			if (discoveryApiProviders === null || discoveryApiProviders.has(config.discovery.type)) {
+				apiProjections.add(provider);
+			}
+			// A configured cache already loaded by the constructor is covered
+			// by the rows below. An unread (including failed) load isn't proof
+			// of an absent payload.
+			if (this.#providerDiscoveryStates.get(provider)?.status !== "cached") {
+				pending.push(this.#configuredDiscoveryCacheProviderId(config));
+			}
+		}
+		for (const provider of STARTUP_MODEL_CACHE_PROVIDER_IDS) {
+			if (!mayBeAvailable(provider) || configured.has(provider)) continue;
+			if (isCredentialScopedModelCacheProvider(provider)) {
+				// The provider can be absent from #knownStaticProviders until
+				// its current account's roster lands. Without peeking the key
+				// we cannot name that namespace or prove it has no judge.
+				const transport =
+					this.#runtimeProviderOverrides.get(provider)?.transport ??
+					this.#providerOverrides.get(provider)?.transport;
+				if (transport !== "pi-native") return false;
+			} else if (
+				!this.#hasFullSnapshot &&
+				!this.#cachedStandardModelsByProvider.has(provider) &&
+				!this.#replacedCacheProviders.has(provider)
+			) {
+				pending.push(this.#resolveStartupModelCacheProviderId(provider));
+			}
+		}
+		for (const provider of this.#runtimeModelManagers.keys()) {
+			if (mayBeAvailable(provider)) return false;
+		}
+		for (const [provider, overrides] of this.#modelOverrides) {
+			if (!mayBeAvailable(provider)) continue;
+			for (const { api } of overrides.values()) if (api !== undefined && isNativeApi(api)) return false;
+		}
+		if (!areModelCacheRowsAbsent(pending, this.#cacheDbPath)) return false;
+
+		if (this.#hasFullSnapshot) {
+			return !this.#models.some(model => isNativeApi(model.api) && mayBeAvailable(model.provider));
+		}
+
+		const couldBeNative = ({ provider, api }: Pick<Model<Api>, "provider" | "api">) =>
+			(isNativeApi(api) || apiProjections.has(provider)) && mayBeAvailable(provider);
+		// Over-approximate: merges, header restoration, kind checks and
+		// authoritative rosters can remove candidates but cannot invent a
+		// native API outside the overrides and projections checked above.
+		for (const rows of [
+			this.#cachedDiscoverableModels,
+			this.#runtimeDiscoveredModels,
+			this.#customModelOverlays,
+			this.#runtimeModelOverlays,
+		]) {
+			if (rows.some(couldBeNative)) return false;
+		}
+		for (const [provider, rows] of this.#cachedStandardModelsByProvider) {
+			if (mayBeAvailable(provider) && rows.some(couldBeNative)) return false;
+		}
+		for (const provider of getBundledProviders()) {
+			if (mayBeAvailable(provider) && getBundledModelSlice(provider).some(couldBeNative)) return false;
+		}
+		return true;
 	}
 
 	/**

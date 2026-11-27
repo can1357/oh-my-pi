@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
+	areModelCacheRowsAbsent,
 	getModelCacheWriteStats,
 	readCacheForHeaderRestore,
 	readModelCache,
@@ -196,6 +197,20 @@ describe("model cache write churn", () => {
 		expect(miss.models[0]?.headers).toBeUndefined();
 	});
 
+	it("does not parse or discard an unreadable payload when checking its presence", () => {
+		const provider = "rewrite-test";
+		writeModelCache(provider, 1_000, [model("a")], true, "fp", dbPath);
+		const db = new Database(dbPath);
+		try {
+			db.run("UPDATE model_cache SET models = 'invalid' WHERE provider_id = ?", [provider]);
+		} finally {
+			db.close();
+		}
+		expect(areModelCacheRowsAbsent(["unrelated"], dbPath)).toBe(true);
+		expect(areModelCacheRowsAbsent(["unrelated", provider], dbPath)).toBe(false);
+		expect(payloadRow(dbPath, provider)?.models).toBe("invalid");
+	});
+
 	it("batch reads isolate corrupt rows, observe repairs and refresh side rows, and age preloaded entries", () => {
 		using _connection = retainModelCacheConnection(dbPath);
 		const ids = ["absent", "good", "bad", "good"];
@@ -331,8 +346,10 @@ describe("model cache write churn", () => {
 		const legacyPolicy = `app-${VERSION}:builder-2:rules-${rules.version}-${rules.hash}`;
 		const db = new Database(dbPath);
 		try {
+			expect(areModelCacheRowsAbsent([provider], dbPath)).toBe(true);
 			writeModelCache(provider, 1_000, [model("previous")], true, "fp", dbPath);
 			db.run("UPDATE model_cache SET materialization_policy = ?", [legacyPolicy]);
+			expect(areModelCacheRowsAbsent([provider, "absent"], dbPath)).toBe(false);
 			expect(readModelCache(provider, TTL_MS, () => 2_000, dbPath)?.models.map(m => m.id)).toEqual(["previous"]);
 			writeModelCache(provider, 2_000, [model("current-a"), model("current-b")], true, "fp", dbPath);
 			const ids = [provider, "absent"];
@@ -345,6 +362,12 @@ describe("model cache write churn", () => {
 			expect(
 				db.query("SELECT updated_at FROM model_cache WHERE materialization_policy = ?").get(legacyPolicy),
 			).toEqual({ updated_at: 1_000 });
+			// An unreadable preferred version still shadows the previous plain payload.
+			db.run("UPDATE model_cache SET version = version + 1 WHERE materialization_policy != ?", [legacyPolicy]);
+			expect(readModelCache(provider, TTL_MS, () => 2_000, dbPath)).toBeNull();
+			expect(readModelCaches(ids, TTL_MS, () => 2_000, dbPath).size).toBe(0);
+			expect(areModelCacheRowsAbsent(ids, dbPath)).toBe(true);
+			expect(staticCatalogSources(ids, TTL_MS, 2_000, dbPath)?.members.size).toBe(0);
 		} finally {
 			db.close();
 		}
