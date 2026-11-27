@@ -37,7 +37,7 @@ import { type CascadeResult, runCascade } from "./cascade";
 import { rankedHeat } from "./passages";
 import { resolveSearchRoot } from "./tree";
 
-import { cfgFindEnabled, cfgFindHitThreshold } from "../settings";
+import { cfgFindEnabled, cfgFindHitThreshold, cfgFindTimeoutMs } from "../settings";
 
 const findSchema = type({
 	query: "string",
@@ -49,9 +49,6 @@ export type FindToolInput = typeof findSchema.infer;
 
 /** Line ranges shown per hit in the model-facing text, strongest first. */
 const RANGES_SHOWN = 3;
-
-/** Wall-clock budget for one `find` call; a stalled judge ends it with the hits verified so far instead of blocking the turn. */
-export const FIND_TIMEOUT_MS = 20_000;
 
 /**
  * Resolve `find.enabled` for a session: `auto` enables `find` only when the
@@ -137,7 +134,8 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 		const verifyJudge = verifyModel ? resolveJudge({ ...judgeDeps, leadModel: verifyModel }) : undefined;
 		const experiment = this.session.spotlight;
 		const started = performance.now();
-		const deadline = AbortSignal.timeout(FIND_TIMEOUT_MS);
+		const timeoutMs = cfgFindTimeoutMs.get(this.session.settings);
+		const deadline = AbortSignal.timeout(timeoutMs);
 		// The phase the deadline interrupts, named when nothing was verified before it.
 		let phase = "lexical scan";
 		let result: CascadeResult | undefined;
@@ -165,7 +163,7 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 		}
 		if (!result) {
 			throw new ToolError(
-				`find timed out after ${formatDuration(FIND_TIMEOUT_MS)} at "${phase}", before any file was judged. Narrow \`path\` to a smaller tree, or use grep.`,
+				`find timed out after ${formatDuration(timeoutMs)} at "${phase}", before any file was judged. Narrow \`path\` to a smaller tree, or use grep.`,
 			);
 		}
 		const elapsedMs = performance.now() - started;
@@ -223,7 +221,7 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 			);
 		} else if (timeout?.passages === 0) {
 			out.push(
-				`find timed out after ${formatDuration(FIND_TIMEOUT_MS)} at "${phase}", before any passage was verified. This is not evidence of absence; narrow \`path\`, or use grep.`,
+				`find timed out after ${formatDuration(timeoutMs)} at "${phase}", before any passage was verified. This is not evidence of absence; narrow \`path\`, or use grep.`,
 			);
 		} else if (stats.listed === 0) {
 			out.push(
@@ -236,7 +234,7 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 		}
 		if (timeout && timeout.passages > 0) {
 			out.push(
-				`partial: timed out after ${formatDuration(FIND_TIMEOUT_MS)} with ${timeout.verified} of ${timeout.passages} passages verified; unverified files may still match. Narrow \`path\` for a complete search.`,
+				`partial: timed out after ${formatDuration(timeoutMs)} with ${timeout.verified} of ${timeout.passages} passages verified; unverified files may still match. Narrow \`path\` for a complete search.`,
 			);
 		}
 		if (coverage === "partial" && stats.failed > 0) {

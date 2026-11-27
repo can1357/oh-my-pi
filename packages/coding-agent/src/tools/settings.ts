@@ -644,6 +644,43 @@ export const cfgFindHitThreshold = register({
 	},
 });
 
+/** Bounds for {@link cfgFindTimeoutMs}, in milliseconds. */
+const FIND_TIMEOUT_MIN_MS = 1_000;
+const FIND_TIMEOUT_MAX_MS = 600_000;
+
+/**
+ * Wall-clock budget for one `find` tool call; a stalled judge ends it with the hits verified so far instead
+ * of blocking the turn. A slow or serial judge (one request at a time) needs a longer one. `omp find` is unbounded.
+ */
+export const cfgFindTimeoutMs = register({
+	id: "find.timeoutMs",
+	type: "number",
+	default: 20_000,
+	// The registry reads a non-number config value as the default, so quoted text must fail here.
+	validate: raw => {
+		if (raw === undefined || raw === null) return;
+		if (typeof raw !== "number" || !Number.isInteger(raw) || raw < FIND_TIMEOUT_MIN_MS || raw > FIND_TIMEOUT_MAX_MS) {
+			throw new Error(
+				`Invalid find.timeoutMs: expected an integer from ${FIND_TIMEOUT_MIN_MS} to ${FIND_TIMEOUT_MAX_MS} milliseconds, got ${Bun.inspect(raw)}.`,
+			);
+		}
+	},
+	ui: {
+		tab: "tools",
+		group: "Find",
+		label: "Find Timeout",
+		description:
+			"Wall-clock budget for one find tool call, in milliseconds (1000 to 600000). Raise it for a slow or serial judge; on expiry find returns the hits verified so far",
+		options: [
+			{ value: "20000", label: "20 seconds" },
+			{ value: "60000", label: "1 minute" },
+			{ value: "120000", label: "2 minutes" },
+			{ value: "300000", label: "5 minutes" },
+			{ value: "600000", label: "10 minutes" },
+		],
+	},
+});
+
 // Optional tools
 
 export const cfgDebugEnabled = register({

@@ -9,7 +9,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 import { InternalUrlFilesystem } from "@oh-my-pi/pi-coding-agent/internal-urls/url-filesystem";
 import { ChainJudge } from "@oh-my-pi/pi-coding-agent/judgment";
-import { FIND_TIMEOUT_MS, FindTool } from "@oh-my-pi/pi-coding-agent/tools/jfind";
+import { FindTool } from "@oh-my-pi/pi-coding-agent/tools/jfind";
 import {
 	type SpotlightClient,
 	SpotlightError,
@@ -27,9 +27,10 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/jfind/passages";
 import { readText, ReadTextError } from "@oh-my-pi/pi-coding-agent/tools/jfind/text";
 import { eligibleFile, renderTree, resolveSearchRoot } from "@oh-my-pi/pi-coding-agent/tools/jfind/tree";
+import { cfgFindTimeoutMs } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { resolveSearchResultPath } from "@oh-my-pi/pi-coding-agent/tools/path-utils";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { formatDuration, removeWithRetries } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 import { rejectionOf } from "../helpers/rejection";
 
@@ -520,6 +521,12 @@ describe("jfind cascade", () => {
 		expect(() => Settings.isolated({ "find.hitThreshold": 0 })).toThrow("Invalid find.hitThreshold");
 	});
 
+	it("rejects a find.timeoutMs outside its bounds or given as text", () => {
+		expect(() => Settings.isolated({ "find.timeoutMs": "60000" })).toThrow("Invalid find.timeoutMs");
+		expect(() => Settings.isolated({ "find.timeoutMs": 0 })).toThrow("Invalid find.timeoutMs");
+		expect(() => Settings.isolated({ "find.timeoutMs": 600_001 })).toThrow("Invalid find.timeoutMs");
+	});
+
 	it("counts unusable answers apart from failed requests", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-cascade-garbled-"));
 		try {
@@ -659,23 +666,21 @@ describe("jfind cascade", () => {
 		}
 	});
 
-	/** `find`'s 20 s budget as a controller the test fires. */
-	function stubDeadline(): AbortController {
+	/** `find`'s wall-clock budget (`find.timeoutMs`) as a controller the test fires. */
+	function stubDeadline(budgetMs = cfgFindTimeoutMs.default): AbortController {
 		const deadline = new AbortController();
 		const realTimeout = AbortSignal.timeout.bind(AbortSignal);
-		vi.spyOn(AbortSignal, "timeout").mockImplementation(ms =>
-			ms === FIND_TIMEOUT_MS ? deadline.signal : realTimeout(ms),
-		);
+		vi.spyOn(AbortSignal, "timeout").mockImplementation(ms => (ms === budgetMs ? deadline.signal : realTimeout(ms)));
 		return deadline;
 	}
 
-	function findTool(cwd: string): FindTool {
+	function findTool(cwd: string, overrides: Record<string, unknown> = {}): FindTool {
 		return new FindTool({
 			cwd,
 			hasUI: false,
 			getSessionFile: () => null,
 			getSessionSpawns: () => "*",
-			settings: Settings.isolated({ "find.enabled": "on" }),
+			settings: Settings.isolated({ "find.enabled": "on", ...overrides }),
 			modelRegistry: new ModelRegistry(createInMemoryAuthStorage()),
 		});
 	}
@@ -730,18 +735,23 @@ describe("jfind cascade", () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-deadline-early-"));
 		try {
 			await Bun.write(path.join(dir, "a.ts"), "export function refreshToken() { return 1; }\n");
-			const deadline = stubDeadline();
+			const deadline = stubDeadline(90_000);
 			vi.spyOn(ChainJudge.prototype, "judge").mockImplementation(async () => {
 				deadline.abort();
 				throw new Error("request aborted");
 			});
-			const result = await findTool(dir).execute("x", { query: "token refresh", grep_keywords: [] });
+			const result = await findTool(dir, { "find.timeoutMs": 90_000 }).execute("x", {
+				query: "token refresh",
+				grep_keywords: [],
+			});
 			expect(result.details?.timeout).toEqual({ verified: 0, passages: 0 });
 			expect(result.details?.lexicalFallback).toEqual([
 				{ rel: "a.ts", line: 1, snippet: "export function refreshToken() { return 1; }" },
 			]);
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
-			expect(text).toContain('at "filename ranking 0/1", before any passage was verified');
+			expect(text).toContain(
+				`timed out after ${formatDuration(90_000)} at "filename ranking 0/1", before any passage was verified`,
+			);
 			expect(text).toContain("unranked literal keyword matches (not semantically judged):");
 		} finally {
 			await removeWithRetries(dir);

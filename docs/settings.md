@@ -715,6 +715,8 @@ Individual built-in tools and Eval preludes are toggled by their own keys, e.g. 
 
 `find.hitThreshold` (a number above 0, up to 1; unset is `0.2`) is the verified-passage probability `find` needs before it reports a file as a hit, and the lowest probability of the line ranges it lists. The default suits TypeSafe Jev. Other decision models calibrate differently, and a judge that gives unrelated passages higher probabilities needs a higher value to keep its weak hits out (see [find](./tools/find.md)).
 
+`find.timeoutMs` (milliseconds, an integer from `1000` to `600000`; default `20000`) is the wall-clock budget of one `find` tool call; when it runs out, `find` returns the hits verified so far. Raise it for a slow or serial judge; the `omp find` CLI is not bounded by it (see [find](./tools/find.md)).
+
 `find.verifyModel` (an unset-by-default model selector, e.g. `openrouter/liquid/d1-ultra`) tries that model first for passage verification; filename and sketch ranking stay on the `judge` role. It resolves against the judge role's candidates, then falls back to the role chain without duplicates under the same fallback rules; a selector matching nothing logs a warning and leaves verification on the plain `judge` chain (see [find](./tools/find.md)). Empty or whitespace-only values are unset.
 
 ### Window-scoped computer use
