@@ -4159,7 +4159,7 @@ export function buildAnthropicSystemBlocks(
 
 /** Inputs for {@link buildGitHubCopilotAnthropicHeaders}. */
 export interface GitHubCopilotAnthropicHeaderArgs {
-	model: Pick<Model<"anthropic-messages">, "provider" | "providerType" | "headers">;
+	model: Pick<Model<Api>, "provider" | "providerType" | "headers" | "compat">;
 	/** Copilot credential: a bare token or the OAuth login's JSON envelope. */
 	apiKey: string;
 	/** Effective endpoint (`resolveAnthropicBaseUrl`); selects the `anthropic-version`. */
@@ -4205,6 +4205,10 @@ export function buildGitHubCopilotAnthropicHeaders(args: GitHubCopilotAnthropicH
 		sessionId: args.sessionId,
 		parentSessionId: args.parentSessionId,
 	});
+	// The host's own session header (KDL `session-header`), applied after the generic
+	// identity headers so `x-session-id` keeps being sent. Here, not in the callers, so
+	// streaming Messages and hosted web search both get it.
+	applySessionHeader(headers, model.compat, args.sessionId);
 	return headers;
 }
 
@@ -4290,9 +4294,6 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 			dropPromptCacheBetas,
 		});
 		const copilotApiKey = parseGitHubCopilotApiKey(apiKey).accessToken;
-		// The Copilot host's own session header (KDL `session-header`). Applied
-		// after the generic identity headers so `x-session-id` keeps being sent.
-		applySessionHeader(defaultHeaders, model.compat, sessionId);
 
 		return {
 			isOAuthToken: false,
