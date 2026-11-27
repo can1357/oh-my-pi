@@ -1,7 +1,11 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, type Mock, spyOn, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
+import { type KeyEvent, UiNode } from "@oh-my-pi/pi-tui";
 import { bubbleEvent } from "@oh-my-pi/pi-tui/dispatch";
+import type { MouseEvent } from "@oh-my-pi/pi-tui/driver/contract";
+import { memoryTerminal } from "@oh-my-pi/pi-tui/testing/memory-terminal";
 import type { TestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
 import type {
 	ExtensionAskDialogQuestion,
@@ -482,6 +486,57 @@ describe("ExtensionUiController custom view", () => {
 		expect(handle.closed).toBe(true);
 		expect(handle.isFocused()).toBe(false);
 		expect(harness.ctx.shell.overlays.open()).toBe(false);
+	});
+
+	it("captures wheel input for a fullscreen canvas and restores terminal mouse reporting on close", async () => {
+		const ctx = createInteractiveModeContext();
+		const term = memoryTerminal({ columns: 40, rows: 10 });
+		await ctx.shell.start({ theme: currentTheme, native: false, driver: term.options });
+		try {
+			const seen: MouseEvent[] = [];
+			const controller = new ExtensionUiController(ctx);
+			const start = term.output.length;
+			const shown = controller.showHookCustom<void>(
+				(_ui, _theme, _keys, done) =>
+					new UiNode("row", {
+						children: [
+							new UiNode("text", { text: "Nav", basis: 4 }),
+							new UiNode("canvas", {
+								basis: 20,
+								paint: () => ["Reader", "Pinned prompt"],
+								onMouse: (event: MouseEvent) => {
+									seen.push(event);
+									return true;
+								},
+							}),
+						],
+						onKey: (key: KeyEvent) => {
+							if (key.id !== "q") return false;
+							done();
+							return true;
+						},
+					}),
+				{ overlay: true, fullscreen: true, mouse: "click" },
+			);
+			await flushMicrotasks();
+			await ctx.shell.nextFrame();
+			expect(term.output.slice(start).join("")).toContain("\x1b[?1000h\x1b[?1006h");
+
+			// The centered two-row view starts at screen row 5; the canvas starts at column 5.
+			term.feed("\x1b[<69;1;6M");
+			term.feed("\x1b[<69;7;6M");
+			expect(seen).toEqual([{ action: "press", button: "wheel-down", row: 1, col: 2, mods: ["shift"] }]);
+
+			const closing = term.output.length;
+			term.feed("q");
+			await shown;
+			await ctx.shell.nextFrame();
+			expect(term.output.slice(closing).join("")).toContain("\x1b[?1000l\x1b[?1006l");
+		} finally {
+			ctx.shell.overlays.closeAll();
+			await ctx.shell.stop();
+			ctx.shell.surface.dispose();
+		}
 	});
 
 	it("rejects when a custom factory fails, leaving the composer in place", async () => {

@@ -664,7 +664,7 @@ export class Reconciler {
 			raw = rest;
 		}
 		if (rec.canvas) {
-			const { paint: _paint, ...common } = raw as Readonly<CanvasProps>;
+			const { paint: _paint, onMouse: _onMouse, ...common } = raw as Readonly<CanvasProps>;
 			return { ...common, cols: this.#env.cols(), lines: rec.canvas() };
 		}
 		if (rec.kind === "md" && "prepared" in raw) {

@@ -106,7 +106,7 @@ const rows = { render: (width: number) => lines.map(line => truncate(replaceTabs
 
 ### Keys
 
-In the terminal backend a key is offered to `onKey(key)` handlers from the focused node up the focus path (return `true` to stop it), then to the focused kind's widget (an `editor` turns it into `edit` events), then to the host's global `onKey`. `KeyEvent.id` is canonical (`ctrl+c`, `shift+enter`, `up`, `a`); `kind` is `press`, `repeat` or `release`. A rows object in `ctx.ui.custom` receives raw input in `handleInput(data)` instead.
+In the terminal backend a key is offered to `onKey(key)` handlers from the focused node up the focus path (return `true` to stop it), then to the focused kind's widget (an `editor` turns it into `edit` events), then to the host's global `onKey`. `KeyEvent.id` is canonical (`ctrl+c`, `shift+enter`, `up`, `a`); `kind` is `press`, `repeat` or `release`. A rows object in `ctx.ui.custom` receives raw key and paste input in `handleInput(data)` instead.
 
 ### Match app keybinding actions
 
@@ -119,6 +119,12 @@ Extension UI factories receive a `KeybindingsManager` (interactive mode; an in-m
 ### Built-in widgets follow the keymap
 
 pi-tui's terminal widgets (`picker`, `prefs`, `menu`, `button`/`buttons`, `editor`/`input`) read their keys from a widget keymap instead of fixed key ids: `select.up`/`down`/`pageUp`/`pageDown`/`confirm`/`cancel` and the `editor.*` motions and edits (`@oh-my-pi/pi-tui/term/keymap`). omp fills it from the user's `tui.select.*`, `tui.editor.*` and `tui.input.newLine` bindings when the keymap loads or reloads (`setWidgetKeymap`), so a list or text field in your UI honours remaps without matching keys itself. A picker action keyed `esc` (or `enter`) also runs on the other `select.cancel` (`select.confirm`) keys.
+
+### Mouse
+
+For wheel input in a terminal overlay, open it with `ctx.ui.custom(factory, { overlay: true, mouse: "click" })`. Use `"drag"` to also get button drags or `"any"` for all motion. `"off"` disables reporting; omission inherits the underlying mode. Closing the overlay restores that mode.
+
+A `<canvas>` receives reports over its painted rows through `onMouse(event)`. `row` and `col` are zero-based canvas coordinates. Wheel ticks use `button: "wheel-up"` or `"wheel-down"` (also `"wheel-left"` and `"wheel-right"`) with `action: "press"`. Return `true` to consume the report. Canvas `onMouse` is terminal-only; it does not run in Tern.
 
 ## Focus, overlays, and cursor
 

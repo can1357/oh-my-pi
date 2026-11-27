@@ -112,6 +112,7 @@
 - Re-registering a fixed-model gateway now pairs the replacement URL with its credential and does not reuse another credential’s cached model list.
 - Discovered chat and embedding prices now honor the advertised per-token or per-million unit.
 - Oversized jq results no longer label a truncated preview as the full output, and `write` rejects incomplete read projections when creating archive members.
+- Fullscreen extension overlays can scroll with the mouse wheel again by enabling mouse reporting in `ctx.ui.custom` and handling it on the canvas ([#20819](https://github.com/can1357/oh-my-pi/issues/20819)).
 - Edit results now show the edited branch and the session branch when a file is changed in another linked Git worktree ([#20801](https://github.com/can1357/oh-my-pi/pull/20801) by [@Quantum-Quasar](https://github.com/Quantum-Quasar)).
 - A running subagent no longer publishes a task progress update when only its elapsed time changed: such updates now go out at most every 5 seconds, which keeps elapsed timers moving and cuts task update traffic to RPC clients, session observers and transcripts by about 8x ([#20810](https://github.com/can1357/oh-my-pi/pull/20810) by [@Xytronix](https://github.com/Xytronix))
 - Spotlight no longer cuts tool results in sessions without the `read` tool (such as an RPC host's own tools under `--no-tools`), where the agent could not read the hidden lines back
