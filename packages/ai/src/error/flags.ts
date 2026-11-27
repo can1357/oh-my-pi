@@ -53,6 +53,13 @@ export const Flag = {
 	 * status value, so no raw status id can set it.
 	 */
 	CacheControlUnsupported: 0x0000_0800,
+	/**
+	 * The transport already spent its own retry budget on this transient status
+	 * (e.g. 503 backed off twice); every replay re-sends a request the provider
+	 * may already have charged for, so no later layer retries it. A low bit like
+	 * {@link Flag.CacheControlUnsupported}: 0x400 is 1024, above every HTTP status.
+	 */
+	RetriesExhausted: 0x0000_0400,
 	/** HTTP 413 byte/media rejection — token compaction cannot shrink bytes or media budgets (#9235). */
 	PayloadRejected: 0x8000_0000,
 } as const;
@@ -79,6 +86,7 @@ const KIND_MASK =
 	Flag.Grammar |
 	Flag.FastModeUnsupported |
 	Flag.CacheControlUnsupported |
+	Flag.RetriesExhausted |
 	Flag.OAuthExpiry;
 
 const RETRIABLE_KINDS =
@@ -494,6 +502,7 @@ const ERROR_KIND_LABELS: readonly [Flag, string][] = [
 	[Flag.SilentAbort, "silent-abort"],
 	[Flag.UserInterrupt, "user-interrupt"],
 	[Flag.Abort, "abort"],
+	[Flag.RetriesExhausted, "retries-exhausted"],
 ];
 
 const STATUS_MESSAGE_PATTERNS = [
@@ -517,6 +526,7 @@ export function is(id: number | undefined, flag: Flag): boolean {
 export function retriable(id: number | undefined, opts?: { replayUnsafe?: boolean }): boolean {
 	if (is(id, Flag.ContentBlocked)) return false;
 	if (is(id, Flag.PayloadRejected)) return false;
+	if (is(id, Flag.RetriesExhausted)) return false;
 	if (opts?.replayUnsafe) return false;
 	if (is(id, Flag.MalformedFunctionCall)) return true;
 	return ((id ?? 0) & RETRIABLE_KINDS) !== 0;
@@ -524,6 +534,11 @@ export function retriable(id: number | undefined, opts?: { replayUnsafe?: boolea
 
 function isClassified(id: number | undefined): boolean {
 	return ((id ?? 0) & Flag.Class) !== 0;
+}
+
+/** `id` with `flag` set; a raw-status id becomes a classified one carrying only `flag`. */
+export function addFlag(id: number | undefined, flag: Flag): number {
+	return isClassified(id) ? (id ?? 0) | flag : create(flag);
 }
 
 function statusFromId(id: number | undefined): number | undefined {
