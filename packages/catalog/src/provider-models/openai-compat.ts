@@ -69,7 +69,11 @@ import {
 } from "../wire/singularityapi";
 import { isXiaomiTokenPlanKey } from "../wire/xiaomi-token-plan";
 import { createBundledReferenceMap, createReferenceResolver, toModelSpec } from "./bundled-references";
-import { getDefaultModelDiscoveryBaseUrl, resolveModelCacheProviderId } from "./cache-provider-id";
+import {
+	getDefaultModelDiscoveryBaseUrl,
+	normalizeCloudRuBaseUrl,
+	resolveModelCacheProviderId,
+} from "./cache-provider-id";
 import { getClinePassModelMetadata } from "./cline-pass";
 import type { ModelManagerConfig } from "./descriptor-types";
 import { filterModelsDevCatalogRows } from "./models-dev-policies";
@@ -9083,7 +9087,6 @@ export function arkaneCloudModelManagerOptions(config?: ModelManagerConfig): Mod
 // Cloud.ru Foundation Models
 // ---------------------------------------------------------------------------
 
-export const CLOUD_RU_BASE_URL = "https://foundation-models.api.cloud.ru/v1";
 const CLOUD_RU_CHAT_ENDPOINT = "/v1/chat/completions";
 
 /** Cloud.ru Foundation Models discovery configuration. */
@@ -9148,12 +9151,14 @@ function mapCloudRuModel(
 export function cloudRuModelManagerOptions(
 	config?: CloudRuModelManagerConfig,
 ): ModelManagerOptions<"openai-completions"> {
+	const baseUrl = normalizeCloudRuBaseUrl(config?.baseUrl);
 	return createOpenAICompatibleModelManagerOptions({
 		api: "openai-completions",
 		providerId: "cloud-ru",
-		defaultBaseUrl: providerBaseUrl("cloud-ru") ?? CLOUD_RU_BASE_URL,
-		config: config?.baseUrl ? { ...config, baseUrl: config.baseUrl.trim().replace(/\/+$/, "") } : config,
-		dynamicModelsAuthoritative: true,
+		defaultBaseUrl: baseUrl,
+		config: { ...config, baseUrl },
+		cacheProviderId: resolveModelCacheProviderId("cloud-ru", { baseUrl }),
+		...(providerEntry("cloud-ru")?.dynamicModelsAuthoritative && { dynamicModelsAuthoritative: true }),
 		dynamicInputAuthoritative: true,
 		dynamicReasoningAuthoritative: true,
 		mapModel: mapCloudRuModel,

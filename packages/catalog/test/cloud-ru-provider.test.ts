@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
+import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models/cache-provider-id";
 import { cloudRuModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 
@@ -153,6 +158,18 @@ const NON_CHAT_ROWS = [
 		},
 	},
 	{
+		id: "custom/image-output-only",
+		object: "model",
+		context_length: 32768,
+		metadata: {
+			name: "Image Output Only",
+			type: "llm",
+			input_modalities: ["text"],
+			output_modalities: ["image"],
+			endpoints: [{ method: "POST", path: "/v1/chat/completions" }],
+		},
+	},
+	{
 		id: "custom/completions-only",
 		object: "model",
 		context_length: 32768,
@@ -241,5 +258,49 @@ describe("Cloud.ru discovery", () => {
 
 		expect(requests).toEqual([{ url: "https://proxy.example.com/v1/models", authorization: null }]);
 		expect(models[0]?.baseUrl).toBe("https://proxy.example.com/v1");
+	});
+
+	test("a warm cache for one endpoint does not serve another endpoint's roster", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-cloud-ru-"));
+		try {
+			const cacheDbPath = path.join(dir, "catalog.db");
+			const calls: string[] = [];
+			const fetchRows =
+				(data: Record<string, unknown>[]): FetchImpl =>
+				async (input: string | URL | Request) => {
+					const url = String(input);
+					if (url.includes("catalog.stencil.so")) return new Response(null, { status: 404 });
+					calls.push(url);
+					return Response.json({ object: "list", data });
+				};
+			const official = fetchRows([GIGACHAT_ROW]);
+			const proxy = fetchRows([DEEPSEEK_ROW]);
+			const resolve = (baseUrl: string | undefined, fetch: FetchImpl) =>
+				resolveProviderModels(
+					{ ...cloudRuModelManagerOptions({ apiKey: "key-id.key-secret", baseUrl, fetch }), cacheDbPath },
+					"online-if-uncached",
+				);
+
+			const warm = await resolve(undefined, official);
+			const switched = await resolve("https://proxy.example.com/v1/", proxy);
+			const back = await resolve(undefined, official);
+
+			expect(warm.models.map(model => model.id)).toEqual([GIGACHAT_ROW.id]);
+			expect(switched.models.map(model => model.id)).toEqual([DEEPSEEK_ROW.id]);
+			expect(back.models.map(model => model.id)).toEqual([GIGACHAT_ROW.id]);
+			expect(calls).toEqual([
+				"https://foundation-models.api.cloud.ru/v1/models",
+				"https://proxy.example.com/v1/models",
+			]);
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("startup and discovery agree on the cache namespace for a configured endpoint", () => {
+		const viaManager = cloudRuModelManagerOptions({ baseUrl: " https://proxy.example.com/v1/ " }).cacheProviderId;
+		expect(viaManager).toBe(resolveModelCacheProviderId("cloud-ru", { baseUrl: "https://proxy.example.com/v1" }));
+		expect(viaManager).not.toBe(resolveModelCacheProviderId("cloud-ru", {}));
+		expect(cloudRuModelManagerOptions().cacheProviderId).toBe(resolveModelCacheProviderId("cloud-ru", {}));
 	});
 });

@@ -2,8 +2,9 @@ auth "cloud-ru" {
 	name "Cloud.ru"
 	login "api-key" {
 		auth-url "https://console.cloud.ru"
-		instructions "Open AI Factory → Foundation Models → API Keys in the Cloud.ru console, create a key, and copy its Key Secret"
-		prompt "Paste your Cloud.ru Foundation Models API key" placeholder="<key-id>.<key-secret>"
+		// The console's Key Secret is already the whole bearer (`<base64 key id>.<secret>`).
+		instructions "Open AI Factory → Foundation Models → API Keys in the Cloud.ru console, create a key, and copy its Key Secret unchanged"
+		prompt "Paste your Cloud.ru Foundation Models Key Secret" placeholder="Key Secret"
 		normalize "strip-bearer"
 		// Validate against inference, not /v1/models: Cloud.ru's models listing is
 		// public and returns 200 for missing or bogus keys. Malformed keys fail
