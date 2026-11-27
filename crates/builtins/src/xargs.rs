@@ -87,6 +87,8 @@ trait CommandSizeLimiter {
 		cursor: LimiterCursor<'_>,
 	) -> Result<Argument, ExhaustedCommandSpace>;
 	fn dyn_clone(&self) -> Box<dyn CommandSizeLimiter>;
+	/// Whether no further argument can fit.
+	fn full(&self) -> bool { false }
 }
 
 /// A pointer to the next limiter. A limiter should *always* call the cursor's
@@ -121,6 +123,10 @@ impl LimiterCollection {
 	fn try_arg(&mut self, arg: Argument) -> Result<Argument, ExhaustedCommandSpace> {
 		let cursor = LimiterCursor { limiters: &mut self.limiters[..] };
 		cursor.try_next(arg)
+	}
+	/// Whether any limiter has filled this command line.
+	fn full(&self) -> bool {
+		self.limiters.iter().any(|limiter| limiter.full())
 	}
 }
 
@@ -176,6 +182,10 @@ impl CommandSizeLimiter for MaxCharsCommandSizeLimiter {
 	fn dyn_clone(&self) -> Box<dyn CommandSizeLimiter> {
 		Box::new(self.clone())
 	}
+
+	fn full(&self) -> bool {
+		self.max_chars.saturating_sub(self.current_size) <= self.per_arg_overhead
+	}
 }
 
 #[derive(Clone)]
@@ -209,6 +219,10 @@ impl CommandSizeLimiter for MaxArgsCommandSizeLimiter {
 
 	fn dyn_clone(&self) -> Box<dyn CommandSizeLimiter> {
 		Box::new(self.clone())
+	}
+
+	fn full(&self) -> bool {
+		self.current_args >= self.max_args
 	}
 }
 
@@ -247,6 +261,10 @@ impl CommandSizeLimiter for MaxLinesCommandSizeLimiter {
 
 	fn dyn_clone(&self) -> Box<dyn CommandSizeLimiter> {
 		Box::new(self.clone())
+	}
+
+	fn full(&self) -> bool {
+		self.current_line > self.max_lines
 	}
 }
 
@@ -296,6 +314,9 @@ fn command_outcome(
 	match status {
 		Ok(CommandStatus::Exited(0)) => Ok(CommandResult::Success),
 		Ok(CommandStatus::Exited(255)) => Err(CommandExecutionError::UrgentlyFailed),
+		Ok(CommandStatus::Exited(code)) if i32::from(code) == crate::host::SIGPIPE_EXIT_CODE => {
+			Err(CommandExecutionError::Killed { name: name.to_owned(), signal: 13 })
+		},
 		Ok(CommandStatus::Exited(_)) => Ok(CommandResult::Failure),
 		Ok(CommandStatus::Signaled(signal)) => {
 			Err(CommandExecutionError::Killed { name: name.to_owned(), signal })
@@ -469,25 +490,8 @@ impl CommandBuilder<'_> {
 			let _ = writeln!(host.stderr, "{line}");
 		}
 
-		match &self.options.action {
-			ExecAction::Command(_) => {
-				let argv = std::iter::once(entry_point.to_owned()).chain(final_args).collect();
-				jobs.spawn(host, argv)
-			},
-			ExecAction::Echo => {
-				let _ = writeln!(
-					host.stdout,
-					"{}",
-					self
-						.extra_args
-						.iter()
-						.map(|arg| arg.to_string_lossy())
-						.collect::<Vec<_>>()
-						.join(" ")
-				);
-				Ok(())
-			},
-		}
+		let argv = std::iter::once(entry_point.to_owned()).chain(final_args).collect();
+		jobs.spawn(host, argv)
 	}
 }
 
@@ -555,10 +559,13 @@ impl ArgumentReader for WhitespaceDelimitedArgumentReader {
 					if let Some(Escape::Quote(q)) = &escape {
 						return Err(io::Error::new(
 							io::ErrorKind::InvalidInput,
-							format!("Unterminated quote: {q}"),
+							format!(
+								"unmatched {} quote; by default quotes are special to xargs unless you use the -0 option",
+								if *q == b'\'' { "single" } else { "double" }
+							),
 						));
 					}
-					if i == 0 {
+					if result.is_empty() && i == 0 {
 						return Ok(None);
 					}
 					pending.clear();
@@ -747,8 +754,19 @@ fn launch_commands(
 ) -> Result<(), XargsError> {
 	let mut current_builder = CommandBuilder::new(builder_options);
 	let mut have_pending_command = false;
+	let mut saw_input = false;
 
-	while let Some(arg) = args.next(host)? {
+	loop {
+		let arg = match args.next(host) {
+			Ok(Some(arg)) => arg,
+			Ok(None) => break,
+			Err(error) => {
+				if have_pending_command {
+					current_builder.execute(host, jobs)?;
+				}
+				return Err(error.into());
+			},
+		};
 		// Stop launching new children once the host has cancelled the command.
 		if host.is_cancelled() {
 			return Ok(());
@@ -771,13 +789,19 @@ fn launch_commands(
 		}
 
 		have_pending_command = true;
+		saw_input = true;
+		if current_builder.limiters.full() {
+			current_builder.execute(host, jobs)?;
+			current_builder = CommandBuilder::new(builder_options);
+			have_pending_command = false;
+		}
 	}
 
 	if host.is_cancelled() {
 		return Ok(());
 	}
 
-	if have_pending_command || (!options.no_run_if_empty && builder_options.replace.is_none()) {
+	if have_pending_command || (!saw_input && !options.no_run_if_empty && builder_options.replace.is_none()) {
 		current_builder.execute(host, jobs)?;
 	}
 
@@ -1466,6 +1490,76 @@ mod tests {
 
 	async fn run_simple(argv: &[&str], stdin: &str) -> (i32, String, String) {
 		xargs_in(&std::env::temp_dir(), argv, stdin).await
+	}
+
+	// A full batch must start even while its input FIFO remains open.
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn full_batches_start_before_input_ends() {
+		use std::os::unix::ffi::OsStrExt;
+		use std::time::{Duration, Instant};
+
+		for mode in ["-n", "-L", "-I", "-s"] {
+			let dir = tempfile::TempDir::new().unwrap();
+			let fifo = dir.path().join("input");
+			let path = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+			assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+			let marker = dir.path().join("ready");
+			let writer_fifo = fifo.clone();
+			let writer_marker = marker.clone();
+			let writer = std::thread::spawn(move || {
+				let mut fifo = std::fs::OpenOptions::new().write(true).open(writer_fifo).unwrap();
+				fifo.write_all(b"a\n").unwrap();
+				let deadline = Instant::now() + Duration::from_secs(3);
+				while !writer_marker.exists() && Instant::now() < deadline {
+					std::thread::sleep(Duration::from_millis(10));
+				}
+				writer_marker.exists()
+			});
+			let fifo = fifo.to_str().unwrap();
+			let script = "touch ready";
+			let size = (exec_line::string_size(OsStr::new("sh"))
+				+ exec_line::string_size(OsStr::new("-c"))
+				+ exec_line::string_size(OsStr::new(script))
+				+ exec_line::string_size(OsStr::new("_"))
+				+ exec_line::string_size(OsStr::new("a"))).to_string();
+			let value = match mode { "-I" => "{}", "-s" => &size, _ => "1" };
+			let result = tokio::time::timeout(
+				Duration::from_secs(5),
+				xargs_in(dir.path(), &["-a", fifo, mode, value, "sh", "-c", script, "_"], ""),
+			).await.expect("xargs hung");
+			assert!(writer.join().unwrap(), "{mode} waited for EOF");
+			assert_eq!(result.0, 0, "{mode}: {}", result.2);
+		}
+	}
+
+	// An unmatched quote must not discard arguments parsed before it.
+	#[tokio::test]
+	async fn unmatched_quotes_run_preceding_arguments() {
+		for (input, quote) in [("a 'b", "single"), ("a \"b", "double")] {
+			let (code, out, err) = run_simple(&["echo"], input).await;
+			assert_eq!(code, 1);
+			assert_eq!(out, "a\n");
+			assert_eq!(err, format!("xargs: unmatched {quote} quote; by default quotes are special to xargs unless you use the -0 option\n"));
+		}
+	}
+
+	// A child killed by SIGPIPE must stop xargs with status 125.
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn sigpipe_signal_yields_125() {
+		let (code, _, err) = run_simple(&["sh", "-c", "kill -13 $$", "_"], "x\n").await;
+		assert_eq!(code, 125);
+		assert_eq!(err, "xargs: sh: terminated by signal 13\n");
+	}
+
+	// A builtin-style SIGPIPE exit must stop xargs with a signal diagnostic.
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn sigpipe_status_yields_125() {
+		let (code, _, err) = run_simple(&["sh", "-c", "exit 141", "_"], "x\n").await;
+		assert_eq!(code, 125);
+		assert_eq!(err, "xargs: sh: terminated by signal 13\n");
 	}
 
 	#[tokio::test]

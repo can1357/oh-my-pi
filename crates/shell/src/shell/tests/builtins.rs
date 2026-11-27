@@ -1902,7 +1902,7 @@ async fn xargs_parallel_signal_death_stops_scheduling() {
 #[tokio::test(flavor = "multi_thread")]
 async fn xargs_unlimited_parallel_observes_signal_before_next_launch() {
 	let (result, output) = execute_captured(
-		"{ printf 'first\\nsecond\\n'; sleep 1; printf 'third\\n'; } | xargs -n1 -P0 /bin/sh -c 'if \
+		"{ printf 'first\\n'; sleep 1; printf 'second\\nthird\\n'; } | xargs -n1 -P0 /bin/sh -c 'if \
 		 [ \"$1\" = first ]; then kill -9 $$; else echo unexpected; fi' _"
 			.into(),
 	)
@@ -2151,4 +2151,19 @@ async fn say_speaks_through_the_speech_host_of_its_run() {
 		.collect();
 	assert_eq!(spoken, ["hi", "piped\n", "subshell", "xargs"]);
 	assert_eq!(requests[0].rate, Some(200));
+}
+
+/// An external that `xargs` starts after the downstream reader exited wrote
+/// into a pump and exited 0, so `yes | xargs -n1 /bin/echo | head` never ended.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn external_started_after_reader_exit_gets_sigpipe() {
+	let command = "seq 1 3000 | xargs -n1 /bin/echo | head -2; echo \"PS=${PIPESTATUS[1]}\"";
+	let (_, output) = tokio::time::timeout(
+		std::time::Duration::from_secs(20),
+		execute_captured(command.to_owned()),
+	)
+	.await
+	.expect("xargs must stop once its output pipe is gone");
+	assert_eq!(output, "1\n2\nxargs: /bin/echo: terminated by signal 13\nPS=125\n");
 }
