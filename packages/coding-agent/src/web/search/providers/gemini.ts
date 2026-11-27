@@ -9,7 +9,7 @@ import { clampThinkingLevelForModel, resolveWireModelId } from "@oh-my-pi/pi-cat
 import { parseCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare";
 import { type ConfiguredThinkingLevel } from "../../../utils/render-utils";
 import { concreteThinkingLevel, toReasoningEffort } from "../../../thinking/levels";
-import { fetchWithRetry } from "@oh-my-pi/pi-utils";
+import { fetchWithRetry, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
 
 import type { SearchCitation, SearchResponse, SearchSource } from "../types";
 import type { ModelRegistry } from "../../../config/model-registry";
@@ -445,7 +445,7 @@ export async function searchGemini(params: GeminiSearchParams): Promise<SearchRe
 						code_execution: params.code_execution,
 						url_context: params.url_context,
 					},
-					params.fetch,
+					params.fetch ?? wrapFetchForExtraCa(fetch),
 					params.signal,
 					params.timeoutMs,
 				);

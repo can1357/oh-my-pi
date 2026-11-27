@@ -210,6 +210,7 @@
 - Fixed the `ask` form duplicating and shifting rows when a field `placeholder` spans several lines; its line breaks now collapse to spaces ([#18605](https://github.com/can1357/oh-my-pi/issues/18605))
 - A task's `effort` hint no longer overrides an explicit `:level` on the same spawn's per-call `model`; e.g. `model: "anthropic/claude-opus-5-5:xhigh"` with `effort: "hi"` now runs at `xhigh` instead of `max` ([#18597](https://github.com/can1357/oh-my-pi/issues/18597))
 - Fixed split commits on Windows aborting with "Split commit plan missing staged files" after changelog entries were applied ([#17446](https://github.com/can1357/oh-my-pi/issues/17446))
+- Fixed Gemini web search ignoring `NODE_EXTRA_CA_CERTS` set in the agent `.env` ([#17811](https://github.com/can1357/oh-my-pi/issues/17811))
 
 ### Removed
 
