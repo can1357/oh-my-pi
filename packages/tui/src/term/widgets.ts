@@ -33,8 +33,7 @@ export interface WidgetContext {
 export interface Widget {
 	key?(node: UiNode, key: KeyEvent, cx: WidgetContext): boolean;
 	paste?(node: UiNode, paste: PasteEvent, cx: WidgetContext): boolean;
-	/** A mouse event inside the node's block, in block coordinates. */
-	/** `at` is relative to the hit rect; `hit` names the item (tab, row, option) under the pointer. */
+	/** `at` is relative to the hit rectangle, with `hit.fieldRowOffset` applied; `hit` names its item or action. */
 	mouse?(node: UiNode, mouse: MouseEvent, at: Cell, cx: WidgetContext, hit: Hit): boolean;
 }
 

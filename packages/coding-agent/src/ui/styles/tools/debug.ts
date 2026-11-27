@@ -8,7 +8,7 @@ import type { UiNode } from "@oh-my-pi/pi-tui";
 import type { Block, PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { replaceTabs, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { DebugTerm } from "../../tools/debug";
-import { expandHint, type FrameSection, frameRows, spinnerGlyph } from "./frame";
+import { expandHint, type FrameSection, frameBlock, spinnerGlyph } from "./frame";
 import { defineToolLook, toolProps } from "./look";
 
 /** Output lines shown collapsed / expanded. */
@@ -56,13 +56,11 @@ function paintDebug(node: UiNode, cx: PaintContext): Block {
 		}
 	}
 	sections.push({ label: "Output", lines });
-	return {
-		rows: frameRows(theme, cx.width, {
-			head: `${glyph} Debug ${term.action}`,
-			sections,
-			border: failed ? "error" : props.status === "running" ? "accent" : "dim",
-		}),
-	};
+	return frameBlock(theme, cx.width, {
+		head: `${glyph} Debug ${term.action}`,
+		sections,
+		border: failed ? "error" : props.status === "running" ? "accent" : "dim",
+	});
 }
 
 defineToolLook("debug", { paint: paintDebug, margin: true, animated: true });

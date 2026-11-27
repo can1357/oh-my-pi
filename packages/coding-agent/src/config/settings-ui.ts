@@ -11,7 +11,7 @@ import {
 } from "../session/settings";
 import { cfgAutolearnEnabled } from "../autolearn/settings";
 import { cfgMemoryBackend } from "../memory-backend/settings";
-import { cfgComposerPredictions, cfgTuiVimMode } from "../modes/settings";
+import { cfgComposerPredictions, cfgTuiMode, cfgTuiVimMode, savedTuiMode } from "../modes/settings";
 import { cfgAdvisorEnabled } from "../advisor/settings";
 import { cfgContextFilesExtra } from "../session/context-settings";
 import { cfgTaskPerCallModelAllow } from "../task/settings";
@@ -46,8 +46,11 @@ const CONDITIONS: Record<string, () => boolean> = {
 	unpausedProvidersNotProject: whenSettings(s => cfgAuthUnpausedProviders.provenance(s) !== "project"),
 };
 
-/** Description suffix telling the panel user that an environment variable is in play. */
-function envNote(setting: AnySetting): string {
+/** Description suffix for a setting whose saved value may differ from this launch's. */
+function overrideNote(setting: AnySetting): string {
+	if (setting === cfgTuiMode && isSettingsInitialized() && settings.hasRuntimeOverride(setting)) {
+		return ` This session uses ${cfgTuiMode.get(settings)}. Changes here apply to launches without an override.`;
+	}
 	if (!setting.envName || setting.envValue() === undefined) return "";
 	return setting.envFallback
 		? ` Unset, it falls back to $${setting.envName}.`
@@ -65,7 +68,7 @@ export function createSettingsHost(): SettingsHost {
 		for (const setting of orderedSettings()) {
 			const ui = setting.ui;
 			if (ui?.tab !== tab) continue;
-			const note = envNote(setting);
+			const note = overrideNote(setting);
 			entries.push({
 				path: setting.id,
 				type: setting.type,
@@ -84,7 +87,7 @@ export function createSettingsHost(): SettingsHost {
 	};
 	return {
 		entries,
-		get: path => lookup(path)?.layered(settings),
+		get: path => (path === cfgTuiMode.id ? savedTuiMode(settings) : lookup(path)?.layered(settings)),
 		set: (path, value) => resolve(path).set(settings, value),
 		unset: path => resolve(path).unset(settings),
 		normalizeProviderLimits: normalizeProviderMaxInFlightRequests,

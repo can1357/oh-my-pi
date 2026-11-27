@@ -10,6 +10,7 @@ import { type Block, defineRolePainter } from "@oh-my-pi/pi-tui/term/paint";
 import { styledText } from "@oh-my-pi/pi-tui/term/painters/layout";
 import { truncate } from "@oh-my-pi/pi-tui/text/width";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
+import { RowText } from "../rendered-text";
 
 /** Terminal facts of the preview child. */
 interface PreviewTerm {
@@ -19,13 +20,13 @@ interface PreviewTerm {
 defineRolePainter("col", "omp.prefs.preview.status", (node, cx): Block => {
 	const line = (node.props() as { term?: PreviewTerm }).term?.line;
 	if (line) return { rows: [truncate(styledText(cx.theme, line), cx.width)] };
-	const rows: string[] = [];
-	for (const child of node.children()) rows.push(...cx.paint(child, cx.width).rows);
-	return { rows };
+	const out = new RowText();
+	for (const child of node.children()) out.block(cx.paint(child, cx.width));
+	return out.done();
 });
 
 defineRolePainter("col", "omp.prefs.editor", (node, cx): Block => {
-	const rows: string[] = [];
-	for (const child of node.children()) rows.push(...cx.paint(child, cx.width).rows);
-	return { rows };
+	const out = new RowText();
+	for (const child of node.children()) out.block(cx.paint(child, cx.width));
+	return out.done();
 });

@@ -9,7 +9,9 @@ import type { PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { highlightCode } from "@oh-my-pi/pi-tui/text/highlight";
 import { replaceTabs } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
-import { expandHint, frameInner, frameRows, hangingWrap, statusIcon } from "./frame";
+import type { RenderedText } from "@oh-my-pi/pi-tui/term/text-layout";
+import { RowText, sliceText, type TextRows } from "../rendered-text";
+import { expandHint, type FrameSection, frameBlock, frameInner, hangingWrap, statusIcon } from "./frame";
 
 /** A cell's state. */
 export type CellStatus = "pending" | "running" | "warning" | "complete" | "error";
@@ -107,23 +109,28 @@ export function cellFrame(status: CellStatus | undefined): { border: string; bg?
 	}
 }
 
-/** A cell's output section lines: the head `outputMaxLines` lines (all when expanded) and a hidden-line note. */
+/** A cell's output section lines: the head `outputMaxLines` lines (all when expanded) and a hidden-line note (decoration). */
 export function cellOutputLines(
 	theme: Theme,
 	output: string | undefined,
 	expanded: boolean,
 	maxLines: number,
-): string[] {
-	if (!output?.trim()) return [];
-	const lines = terminalLines(output).map(line => outputLine(theme, line));
-	if (expanded || lines.length <= maxLines) return lines;
-	const shown = lines.slice(0, Math.max(0, maxLines));
+): RowText {
+	const out = new RowText();
+	if (!output?.trim()) return out;
+	const lines = terminalLines(output);
+	const shown = expanded || lines.length <= maxLines ? lines : lines.slice(0, Math.max(0, maxLines));
+	for (const line of shown) {
+		const row = outputLine(theme, line);
+		out.wrapped(row, [row]);
+	}
 	const hidden = lines.length - shown.length;
-	return [...shown, theme.fg("dim", `${moreLines(hidden)} ${expandHint(theme)}`)];
+	if (hidden > 0) out.deco(theme.fg("dim", `${moreLines(hidden)} ${expandHint(theme)}`));
+	return out;
 }
 
-/** The source rows of a code cell at the frame's inner width. */
-export function codeCellLines(cx: PaintContext, cell: CodeCell, width: number): string[] {
+/** The source rows of a code cell at the frame's inner width: each source line copies whole, without its number. */
+export function codeCellLines(cx: PaintContext, cell: CodeCell, width: number): RowText {
 	const theme = cx.theme;
 	const codeMax = cell.codeMaxLines ?? 12;
 	const raw = terminalLines(replaceTabs(cell.code ?? ""));
@@ -142,48 +149,57 @@ export function codeCellLines(cx: PaintContext, cell: CodeCell, width: number): 
 		for (const n of numbers) if (n !== null && n !== undefined && n > max) max = n;
 		if (max > 0) gutter = Math.max(2, String(max).length);
 	}
-	const lines: string[] = [];
+	const lines = new RowText();
+	const pad = gutter > 0 ? " ".repeat(gutter + 1) : "";
+	const hint = cell.expanded ? "" : ` ${expandHint(theme)}`;
+	if (hidden > 0 && tail)
+		lines.deco(theme.fg("dim", `${pad}… ${hidden} earlier ${hidden === 1 ? "line" : "lines"}${hint}`));
 	if (gutter > 0 && numbers) {
 		for (let i = 0; i < code.length; i++) {
 			const n = numbers[i];
 			const label = n !== null && n !== undefined ? String(n).padStart(gutter, " ") : " ".repeat(gutter);
-			lines.push(...hangingWrap(theme.fg("dim", `${label} `), " ".repeat(gutter + 1), code[i]!, frameInner(width)));
+			const rows = hangingWrap(theme.fg("dim", `${label} `), pad, code[i]!, frameInner(width));
+			lines.prefixed(raw[start + i] ?? "", rows, `${label} `, pad);
 		}
-	} else lines.push(...code);
-	if (hidden > 0) {
-		const pad = gutter > 0 ? " ".repeat(gutter + 1) : "";
-		const hint = cell.expanded ? "" : ` ${expandHint(theme)}`;
-		if (tail) lines.unshift(theme.fg("dim", `${pad}… ${hidden} earlier ${hidden === 1 ? "line" : "lines"}${hint}`));
-		else lines.push(theme.fg("dim", `${pad}${moreLines(hidden)}${hint}`));
-	}
+	} else for (let i = 0; i < code.length; i++) lines.wrapped(raw[start + i] ?? "", [code[i]!]);
+	if (hidden > 0 && !tail) lines.deco(theme.fg("dim", `${pad}${moreLines(hidden)}${hint}`));
 	return lines;
 }
 
 /** A framed code cell at `width`. */
-export function codeCellRows(cx: PaintContext, cell: CodeCell, width: number): string[] {
+export function codeCellRows(
+	cx: PaintContext,
+	cell: CodeCell,
+	width: number,
+): { rows: string[]; text: () => RenderedText } {
 	const theme = cx.theme;
+	const code = codeCellLines(cx, cell, width);
 	const output = cellOutputLines(theme, cell.output, cell.expanded, cell.outputMaxLines ?? 6);
-	const sections: { label?: string; lines: readonly string[] }[] = [{ lines: codeCellLines(cx, cell, width) }];
-	if (output.length > 0) sections.push({ label: theme.fg("toolTitle", "Output"), lines: output });
-	return frameRows(theme, width, { head: cellHead(cx, cell), sections, ...cellFrame(cell.status) });
+	const sections: FrameSection[] = [{ lines: code.rows, text: code.text() }];
+	if (output.length > 0)
+		sections.push({ label: theme.fg("toolTitle", "Output"), lines: output.rows, text: output.text() });
+	return frameBlock(theme, width, { head: cellHead(cx, cell), sections, ...cellFrame(cell.status) });
 }
 
 /** A framed Markdown cell at `width`: the rendered rows (cut to `contentMaxLines` collapsed) and the output. */
 export function markdownCellRows(
 	cx: PaintContext,
 	cell: Omit<CodeCell, "code" | "language"> & {
-		readonly rendered: readonly string[];
+		/** The rendered Markdown at the frame's inner width, with its text when known. */
+		readonly rendered: TextRows;
 		readonly contentMaxLines?: number;
 	},
 	width: number,
-): string[] {
+): { rows: string[]; text: () => RenderedText } {
 	const theme = cx.theme;
 	const max = cell.contentMaxLines ?? 12;
-	const shown = cell.expanded ? [...cell.rendered] : cell.rendered.slice(0, max);
-	const hidden = cell.rendered.length - shown.length;
-	if (hidden > 0) shown.push(theme.fg("dim", `${moreLines(hidden)}${cell.expanded ? "" : ` ${expandHint(theme)}`}`));
+	const total = cell.rendered.rows.length;
+	const content = new RowText().block(cell.expanded ? cell.rendered : sliceText(cell.rendered, 0, max));
+	const hidden = total - content.length;
+	if (hidden > 0) content.deco(theme.fg("dim", `${moreLines(hidden)}${cell.expanded ? "" : ` ${expandHint(theme)}`}`));
 	const output = cellOutputLines(theme, cell.output, cell.expanded, cell.outputMaxLines ?? 6);
-	const sections: { label?: string; lines: readonly string[] }[] = [{ lines: shown }];
-	if (output.length > 0) sections.push({ label: theme.fg("toolTitle", "Output"), lines: output });
-	return frameRows(theme, width, { head: cellHead(cx, cell), sections, ...cellFrame(cell.status) });
+	const sections: FrameSection[] = [{ lines: content.rows, text: content.text() }];
+	if (output.length > 0)
+		sections.push({ label: theme.fg("toolTitle", "Output"), lines: output.rows, text: output.text() });
+	return frameBlock(theme, width, { head: cellHead(cx, cell), sections, ...cellFrame(cell.status) });
 }

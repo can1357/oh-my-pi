@@ -1,12 +1,14 @@
 /**
  * `tree`: nested nodes drawn with branch connectors (`├─`, `└─`, `│`). A node
  * with children shows `▾` when open (its children follow) and `▸` when
- * folded.
+ * folded. Text: each row as drawn, connectors included; a cut row as far as
+ * it shows.
  */
 import type { TspTreeNode, TspTreeProps } from "@oh-my-pi/pi-wire";
 import type { Theme } from "../../theme/contract";
 import { truncate } from "../../text/width";
 import { type Block, definePainter, EMPTY_BLOCK } from "../paint";
+import { lazyText, shownText } from "../text-layout";
 import { styledText } from "./layout";
 
 function treeRows(theme: Theme, nodes: readonly TspTreeNode[], indent: string, width: number, rows: string[]): void {
@@ -31,7 +33,16 @@ function treeRows(theme: Theme, nodes: readonly TspTreeNode[], indent: string, w
 definePainter("tree", (node, cx): Block => {
 	const nodes = (node.props() as TspTreeProps).nodes ?? [];
 	if (nodes.length === 0 || cx.width <= 0) return EMPTY_BLOCK;
+	const theme = cx.theme;
 	const rows: string[] = [];
-	treeRows(cx.theme, nodes, "", cx.width, rows);
-	return { rows };
+	treeRows(theme, nodes, "", cx.width, rows);
+	return {
+		rows,
+		text: lazyText(() => {
+			// The rows before they were cut to the width.
+			const whole: string[] = [];
+			treeRows(theme, nodes, "", Number.POSITIVE_INFINITY, whole);
+			return rows.map((row, i) => shownText(whole[i] ?? row, row));
+		}),
+	};
 });

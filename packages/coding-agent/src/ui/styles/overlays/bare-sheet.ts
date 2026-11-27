@@ -7,25 +7,30 @@
  */
 import { type Block, defineRolePainter, type Hit } from "@oh-my-pi/pi-tui/term/paint";
 import { padTo } from "@oh-my-pi/pi-tui/text/width";
+import { fitHeight, RowText } from "../rendered-text";
 
 defineRolePainter("overlay", "omp.sheet.bare", (node, cx): Block => {
-	const rows: string[] = [];
+	const out = new RowText();
 	const hits: Hit[] = [];
 	let cursor: Block["cursor"];
 	const children = node.children();
 	for (const child of children) {
 		const block = cx.paint(child, cx.width, children.length === 1 ? cx.height : undefined);
-		const at = rows.length;
+		const at = out.length;
 		if (block.cursor) cursor = { row: block.cursor.row + at, col: block.cursor.col };
 		for (const hit of block.hits ?? []) hits.push({ ...hit, row: hit.row + at });
 		// The sheet owns its whole width: cells a row leaves are blank, not what lies under it.
-		for (const row of block.rows) rows.push(padTo(row, cx.width));
+		out.block(
+			block,
+			0,
+			block.rows.map(row => padTo(row, cx.width)),
+		);
 	}
-	if (cx.height === undefined) return cursor ? { rows, hits, cursor } : { rows, hits };
-	rows.length = Math.min(rows.length, cx.height);
-	const lead = Math.floor((cx.height - rows.length) / 2);
-	rows.unshift(...Array.from({ length: lead }, () => ""));
-	while (rows.length < cx.height) rows.push("");
+	if (cx.height === undefined) return cursor ? { ...out.done(), hits, cursor } : { ...out.done(), hits };
+	const lead = Math.floor((cx.height - Math.min(out.length, cx.height)) / 2);
 	const placed = hits.map(hit => ({ ...hit, row: hit.row + lead }));
-	return cursor ? { rows, hits: placed, cursor: { row: cursor.row + lead, col: cursor.col } } : { rows, hits: placed };
+	const content = fitHeight(out.done(), cx.height, lead);
+	return cursor
+		? { ...content, hits: placed, cursor: { row: cursor.row + lead, col: cursor.col } }
+		: { ...content, hits: placed };
 });

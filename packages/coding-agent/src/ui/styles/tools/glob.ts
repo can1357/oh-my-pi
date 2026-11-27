@@ -12,7 +12,7 @@ import { truncate, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import type { GlobTerm } from "../../tools/glob";
 import { fileLink } from "./file-common";
-import { standaloneErrorRows } from "./frame";
+import { standaloneError } from "./frame";
 import { defineToolLook, toolProps } from "./look";
 import { moreItem, pathText, searchGlyph, searchHeadRows, type TreeItem, treeRows } from "./search";
 
@@ -34,7 +34,7 @@ function paintGlob(node: UiNode, cx: PaintContext): Block {
 	const props = toolProps(node);
 	const term = (props.term ?? { look: "glob" }) as GlobTerm;
 	const theme = cx.theme;
-	if (term.error !== undefined) return { rows: standaloneErrorRows(cx, term.error) };
+	if (term.error !== undefined) return standaloneError(cx, term.error);
 	if (!term.result) {
 		const meta = (props.meta ?? []).filter((fact): fact is string => typeof fact === "string");
 		return {

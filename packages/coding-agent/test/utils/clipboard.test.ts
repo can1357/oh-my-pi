@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import {
+	copyToClipboard,
+	copyToClipboardWithResult,
 	isClipboardTerminalLocal,
 	readImageFromClipboard,
 	readMacFileUrlsFromClipboard,
@@ -60,7 +62,16 @@ function restorePlatform(): void {
 	if (platformDescriptor) Object.defineProperty(process, "platform", platformDescriptor);
 }
 
-const ENV_KEYS = ["WSL_DISTRO_NAME", "WSL_INTEROP", "DISPLAY", "WAYLAND_DISPLAY", "TERMUX_VERSION"] as const;
+const ENV_KEYS = [
+	"WSL_DISTRO_NAME",
+	"WSL_INTEROP",
+	"DISPLAY",
+	"WAYLAND_DISPLAY",
+	"TERMUX_VERSION",
+	"SSH_CONNECTION",
+	"SSH_CLIENT",
+	"SSH_TTY",
+] as const;
 let savedEnv: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {};
 
 beforeEach(() => {
@@ -439,4 +450,100 @@ describe("isClipboardTerminalLocal", () => {
 		expect(isClipboardTerminalLocal({ ...ssh, DISPLAY: ":0", WAYLAND_DISPLAY: "wayland-0" })).toBe(false);
 		expect(isClipboardTerminalLocal({ DISPLAY: ":0" })).toBe(true);
 	});
+});
+
+describe("copyToClipboardWithResult", () => {
+	type WriteCallback = (error?: Error | null) => void;
+	const ttyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+
+	function osc52(text: string): string {
+		return `\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`;
+	}
+
+	/** Make stdout a TTY (or not) that records every write and reports it delivered. */
+	function fakeStdout(tty: boolean): string[] {
+		Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: tty });
+		const output: string[] = [];
+		vi.spyOn(process.stdout, "write").mockImplementation(
+			(
+				chunk: string | Uint8Array,
+				encodingOrCallback?: BufferEncoding | WriteCallback,
+				callback?: WriteCallback,
+			) => {
+				output.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString());
+				if (typeof encodingOrCallback === "function") encodingOrCallback();
+				else callback?.();
+				return true;
+			},
+		);
+		return output;
+	}
+
+	beforeEach(() => setPlatform("linux"));
+
+	afterEach(() => {
+		if (ttyDescriptor) Object.defineProperty(process.stdout, "isTTY", ttyDescriptor);
+		else Reflect.deleteProperty(process.stdout, "isTTY");
+	});
+
+	it("reports success when the native clipboard confirms the write", async () => {
+		fakeStdout(false);
+		const nativeCopy = vi.spyOn(native, "copyToClipboard").mockImplementation(() => {});
+
+		expect(await copyToClipboardWithResult("native payload")).toBe("success");
+		expect(nativeCopy).toHaveBeenCalledWith("native payload");
+	});
+
+	it("reports an OSC 52 write as unconfirmed when the native clipboard fails", async () => {
+		const output = fakeStdout(true);
+		vi.spyOn(native, "copyToClipboard").mockImplementation(() => {
+			throw new Error("clipboard unavailable");
+		});
+
+		expect(await copyToClipboardWithResult("terminal payload")).toBe("unconfirmed-terminal");
+		expect(output).toEqual([osc52("terminal payload")]);
+	});
+
+	it("reports failure when neither the terminal nor a native backend took the text", async () => {
+		const output = fakeStdout(false);
+		vi.spyOn(native, "copyToClipboard").mockImplementation(() => {
+			throw new Error("clipboard unavailable");
+		});
+
+		expect(await copyToClipboardWithResult("lost payload")).toBe("failed");
+		expect(output).toEqual([]);
+	});
+
+	it("keeps copyToClipboard best-effort for existing callers", async () => {
+		fakeStdout(false);
+		vi.spyOn(native, "copyToClipboard").mockImplementation(() => {
+			throw new Error("clipboard unavailable");
+		});
+
+		expect(await copyToClipboard("legacy payload")).toBeUndefined();
+	});
+
+	it.each([
+		{ platform: "linux", termux: false, tty: true, expected: "unconfirmed-terminal" },
+		{ platform: "darwin", termux: false, tty: true, expected: "unconfirmed-terminal" },
+		{ platform: "linux", termux: true, tty: true, expected: "unconfirmed-terminal" },
+		{ platform: "linux", termux: false, tty: false, expected: "failed" },
+	] as const)(
+		"never runs native backends over SSH ($platform, Termux=$termux, TTY=$tty)",
+		async ({ platform, termux, tty, expected }) => {
+			setPlatform(platform);
+			process.env.SSH_CONNECTION = "192.0.2.10 50000 192.0.2.20 22";
+			process.env.DISPLAY = ":0";
+			if (termux) process.env.TERMUX_VERSION = "fixture";
+			const output = fakeStdout(tty);
+			const nativeCopy = vi.spyOn(native, "copyToClipboard").mockImplementation(() => {});
+			const calls: SpawnCall[] = [];
+			spySpawn(calls, "");
+
+			expect(await copyToClipboardWithResult("ssh payload")).toBe(expected);
+			expect(nativeCopy).not.toHaveBeenCalled();
+			expect(calls).toEqual([]);
+			expect(output).toEqual(tty ? [osc52("ssh payload")] : []);
+		},
+	);
 });

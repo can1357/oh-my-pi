@@ -115,6 +115,19 @@ describe("launch without a terminal on stdin", () => {
 		expect(run.stderr).not.toContain(TTY_ERROR);
 	}, 30_000);
 
+	it.each(["--tui-mode", "--tui-mode=wide"])(
+		"rejects %s before interactive startup",
+		async flag => {
+			using tempDir = TempDir.createSync("@omp-invalid-tui-mode-");
+			const run = await launchWithoutTerminal(tempDir, [flag]);
+			expect(run.exitCode, run.stderr).toBe(2);
+			expect(run.stderr).toMatch(/Error: .*--tui-mode.*inline.*fullscreen/);
+			expect(run.stderr).not.toContain(TTY_ERROR);
+			expect(run.stdout).toBe("");
+		},
+		30_000,
+	);
+
 	it("delivers an extension-owned --mode before failing on the missing terminal", async () => {
 		using tempDir = TempDir.createSync("@omp-non-tty-ext-mode-");
 		const extensionPath = await writeFlagExtension(tempDir, "mode");

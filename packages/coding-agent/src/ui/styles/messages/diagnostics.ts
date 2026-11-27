@@ -22,7 +22,7 @@ function paintLateDiagnostics(node: UiNode, cx: PaintContext): Block {
 		file => theme.symbols.langIcon(languageFromPath(file)),
 		"Late diagnostics",
 	);
-	return { rows: paddedText(tree.join("\n"), cx.width) };
+	return paddedText(tree.join("\n"), cx.width).done();
 }
 
 defineRolePainter("card", "omp.diagnostics.late", paintLateDiagnostics);

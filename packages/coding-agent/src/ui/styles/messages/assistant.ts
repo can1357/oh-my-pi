@@ -36,6 +36,7 @@ import { formatNumber } from "@oh-my-pi/pi-utils";
 import { terminalPaddingX } from "../terminal-padding";
 import { expandKeyLabel } from "../../keys/hints";
 import { hexFg, paddedText, propsOf, termOf } from "./fill";
+import { RowText, sliceText, type TextRows } from "../rendered-text";
 import { imageLink } from "../tools/file-common";
 
 /** Facets of the hidden-thinking pulse. */
@@ -66,7 +67,7 @@ interface ErrorTerm {
 }
 
 /** Rows of a failed turn's message: `Error: ` + first line, every later row under a 2-cell hang. */
-export function errorRows(theme: Theme, message: string, width: number, maxRows: number): string[] {
+export function errorRows(theme: Theme, message: string, width: number, maxRows: number): RowText {
 	const lines = replaceTabs(message)
 		.split("\n")
 		.map(line => line.trim())
@@ -75,24 +76,29 @@ export function errorRows(theme: Theme, message: string, width: number, maxRows:
 	const paddingX = terminalPaddingX();
 	const pad = " ".repeat(paddingX);
 	const wrapWidth = Math.max(1, width - 2 * paddingX - 2);
-	const rows: string[] = [];
+	// Each message line copies whole (its hang is indentation).
+	const all = new RowText();
 	lines.forEach((line, index) => {
-		wrap(theme.fg("error", index === 0 ? `Error: ${line}` : line), wrapWidth).forEach((row, part) => {
-			if (rows.length === 0) rows.push(`${pad}${row}`);
-			// A wrapped continuation keeps the line's color through its hang; a new line's hang is plain.
-			else rows.push(`${pad}${part === 0 ? "  " : theme.fg("error", "  ")}${row}`);
-		});
+		const source = index === 0 ? `Error: ${line}` : line;
+		const parts = wrap(theme.fg("error", source), wrapWidth);
+		const rows = parts.map((row, part) =>
+			all.length === 0 && part === 0
+				? `${pad}${row}`
+				: // A wrapped continuation keeps the line's color through its hang; a new line's hang is plain.
+					`${pad}${part === 0 ? "  " : theme.fg("error", "  ")}${row}`,
+		);
+		all.wrapped(source, rows);
 	});
-	if (rows.length <= maxRows) return rows;
-	const hidden = rows.length - maxRows;
-	return [
-		...rows.slice(0, maxRows),
-		`${pad}${theme.fg("dim", `  … +${hidden} more line${hidden === 1 ? "" : "s"} (${expandKeyLabel(theme)} to expand)`)}`,
-	];
+	if (all.length <= maxRows) return all;
+	const hidden = all.length - maxRows;
+	return new RowText()
+		.block(sliceText(all.done(), 0, maxRows))
+		.deco(
+			`${pad}${theme.fg("dim", `  … +${hidden} more line${hidden === 1 ? "" : "s"} (${expandKeyLabel(theme)} to expand)`)}`,
+		);
 }
 
-interface ReplyFrame {
-	readonly rows: readonly string[];
+interface ReplyFrame extends TextRows {
 	readonly stable: number;
 	readonly hits?: readonly Hit[];
 }
@@ -159,10 +165,19 @@ function markdownRows(child: MarkdownNode, cx: PaintContext, thinking: boolean):
 		const rows = frame.rows.map((line, row) => {
 			const taken = takeExtensionLinks(line);
 			for (const link of taken.links)
-				hits.push({ row, col: link.start, width: link.end - link.start, height: 1, node: child, item: link.href });
+				hits.push({
+					row,
+					col: link.start,
+					width: link.end - link.start,
+					height: 1,
+					node: child,
+					item: link.href,
+					optionalTarget: "main",
+				});
 			return taken.row;
 		});
-		frame = { rows, stable: frame.stable, ...(hits.length > 0 ? { hits } : {}) };
+		// Removing link markers changes no cells, so the frame's logical text still describes its rows.
+		frame = { ...frame, rows, ...(hits.length > 0 ? { hits } : {}) };
 	}
 	if (cacheable) child[kCompleted] = { source, width, theme, paddingX, hyperlinks, textStyle, schemes, look, frame };
 	return frame;
@@ -198,19 +213,28 @@ function mixHex(from: string, to: string, share: number): string {
 	return `#${out.toString(16).padStart(6, "0")}`;
 }
 
-function imageRows(cx: PaintContext, image: UiNode): readonly string[] {
+function imageRows(cx: PaintContext, image: UiNode): TextRows {
 	const mime = termOf<{ mime: string }>(image).mime ?? propsOf<{ alt: string }>(image).alt ?? "image";
 	const label = cx.theme.fg("toolOutput", `[Image: ${mime}]`);
 	// The placeholder links to the image's file (a blob copy of its bytes).
 	if (!cx.images)
-		return [`${" ".repeat(terminalPaddingX())}${imageLink(cx, label, propsOf<{ blob?: string }>(image).blob)}`];
+		return {
+			rows: [`${" ".repeat(terminalPaddingX())}${imageLink(cx, label, propsOf<{ blob?: string }>(image).blob)}`],
+		};
 	const inner = Object.create(cx, { width: { value: Math.max(1, cx.width - 1), enumerable: true } }) as PaintContext;
-	return paintImage(image, inner, label).rows.map(row => ` ${row}`);
+	const picture = paintImage(image, inner, label);
+	return new RowText()
+		.block(
+			picture,
+			1,
+			picture.rows.map(row => ` ${row}`),
+		)
+		.done();
 }
 
 function paintAssistant(node: UiNode, cx: PaintContext): Block {
 	const theme = cx.theme;
-	const rows: string[] = [];
+	const out = new RowText();
 	const hits: Hit[] = [];
 	let stable = 0;
 	let rendered = false;
@@ -223,12 +247,16 @@ function paintAssistant(node: UiNode, cx: PaintContext): Block {
 		if (pulsed) return;
 		pulsed = true;
 		if (!dots) return;
-		if (rows.length > 0) rows.push("");
-		rows.push(pulseRow(cx, dots));
+		if (out.length > 0) out.deco("");
+		out.deco(pulseRow(cx, dots));
 	};
-	const streamed = (frame: { rows: readonly string[]; stable: number }, streaming: boolean): void => {
-		if (streaming) stable = rows.length + frame.stable;
-		rows.push(...frame.rows);
+	const streamed = (frame: ReplyFrame, streaming: boolean): void => {
+		if (streaming) stable = out.length + frame.stable;
+		out.block(frame);
+	};
+	// Blank rows between parts copy as paragraph breaks.
+	const gap = (): void => {
+		out.literal("");
 	};
 	for (const child of node.children()) {
 		const role = propsOf<{ role: string }>(child).role ?? "";
@@ -236,18 +264,18 @@ function paintAssistant(node: UiNode, cx: PaintContext): Block {
 		if (role === "omp.embed" || role === "omp.figure.svg" || role === "omp.figure.code") {
 			const figure = cx.paint(child, cx.width);
 			if (figure.rows.length > 0) {
-				if (rendered) rows.push("");
-				rows.push(...figure.rows);
+				if (rendered) gap();
+				out.block(figure);
 				rendered = true;
 				afterFigure = true;
 			}
 		} else if (child.kind === "md") {
 			const frame = markdownRows(child, cx, false);
-			if (afterFigure && frame.rows.length) rows.push("");
+			if (afterFigure && frame.rows.length) gap();
 			afterFigure = false;
 			// The streaming source is replaced by its figure, so its rows cannot retire yet.
-			if (termOf<ProseTerm>(child).deferFigures) deferredAt = Math.min(deferredAt, rows.length);
-			for (const hit of frame.hits ?? []) hits.push({ ...hit, row: rows.length + hit.row });
+			if (termOf<ProseTerm>(child).deferFigures) deferredAt = Math.min(deferredAt, out.length);
+			for (const hit of frame.hits ?? []) hits.push({ ...hit, row: out.length + hit.row });
 			streamed(frame, propsOf<{ stream: boolean }>(child).stream === true);
 			rendered ||= frame.rows.length > 0;
 		} else if (child.kind === "section" && role.startsWith("omp.thinking")) {
@@ -259,46 +287,49 @@ function paintAssistant(node: UiNode, cx: PaintContext): Block {
 				streamed(frame, propsOf<{ stream: boolean }>(body).stream === true);
 				rendered ||= frame.rows.length > 0;
 			}
-			if (term.spaceAfter) rows.push("");
+			if (term.spaceAfter) gap();
 		} else if (role === "omp.thinking.extension") {
 			// Extension thinking renderers draw under their thinking block.
-			const extension = cx.paint(child, cx.width).rows;
-			rows.push(...extension);
-			rendered ||= extension.length > 0;
+			const extension = cx.paint(child, cx.width);
+			out.block(extension);
+			rendered ||= extension.rows.length > 0;
 		} else if (child.kind === "image" && key.startsWith("i")) {
-			if (rendered) rows.push("");
-			rows.push(...imageRows(cx, child));
+			if (rendered) gap();
+			out.block(imageRows(cx, child));
 			rendered = true;
 		} else if (child.kind === "image") {
 			pulse();
-			if (!toolImages) rows.push("");
+			if (!toolImages) gap();
 			toolImages = true;
-			rows.push(...imageRows(cx, child));
+			out.block(imageRows(cx, child));
 		} else if (role === "omp.assistant.abort") {
 			pulse();
 			const text =
 				propsOf<{ spans: readonly { t: string }[] }>(child)
 					.spans?.map(span => span.t)
 					.join("") ?? "";
-			rows.push("", ...paddedText(theme.fg("error", text), cx.width));
+			gap();
+			out.block(paddedText(theme.fg("error", text), cx.width).done());
 		} else if (role === "omp.assistant.recovered") {
 			pulse();
-			rows.push("", ...paddedText(theme.fg("dim", termOf<{ note: string }>(child).note ?? ""), cx.width));
+			gap();
+			out.block(paddedText(theme.fg("dim", termOf<{ note: string }>(child).note ?? ""), cx.width).done());
 		} else if (role === "omp.error") {
 			pulse();
 			const term = termOf<ErrorTerm>(child);
 			if (term.hidden) continue;
 			const message = child.children().find(c => propsOf<{ role: string }>(c).role === "omp.error.message");
 			const lines = message ? propsOf<{ lines: number }>(message).lines : undefined;
-			rows.push("", ...errorRows(theme, term.preview ?? "", cx.width, lines ?? Number.POSITIVE_INFINITY));
+			gap();
+			out.block(errorRows(theme, term.preview ?? "", cx.width, lines ?? Number.POSITIVE_INFINITY).done());
 		} else if (role.startsWith("omp.marker.")) {
 			pulse();
-			rows.push(...cx.paint(child, cx.width).rows);
+			out.block(cx.paint(child, cx.width));
 		}
 	}
 	pulse();
 	stable = Math.min(stable, deferredAt);
-	return { rows, ...(stable > 0 ? { stable } : {}), ...(hits.length > 0 ? { hits } : {}) };
+	return { ...out.done(), ...(stable > 0 ? { stable } : {}), ...(hits.length > 0 ? { hits } : {}) };
 }
 
 defineRolePainter("col", "omp.assistant", paintAssistant);

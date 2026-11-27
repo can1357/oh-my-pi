@@ -59,11 +59,13 @@ definePainter("md", (node, cx) => {
 					height: 1,
 					node,
 					item: link.href,
+					optionalTarget: "main",
 				});
 			}
 			return taken.row;
 		});
 	}
 	const stable = stream && frame.stable > 0 ? frame.stable : undefined;
-	return { rows, ...(stable !== undefined && { stable }), ...(hits && { hits }) };
+	// Taking the link markers out keeps every row's visible text: the frame's text holds.
+	return { rows, text: frame.text, ...(stable !== undefined && { stable }), ...(hits && { hits }) };
 });

@@ -34,6 +34,7 @@ import { isServiceTierOpenAISettingValue, SERVICE_TIER_OPENAI_VALUES } from "../
 import { parseMaxFps } from "../config/frame-rate";
 import { parseMotionMode } from "../config/motion-presets";
 import { parseSpinnerInterval } from "../config/spinner-interval";
+import { isTuiMode } from "../modes/presentation-env";
 import type { ConfiguredThinkingLevel } from "../utils/render-utils";
 import type { Args } from "./args";
 import { CliUsageError } from "./usage-error";
@@ -148,6 +149,14 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 				`Invalid --mode value: ${JSON.stringify(value)}. Expected one of: text, json, rpc, rpc-ui, acp.`,
 			);
 		}
+	},
+	"--tui-mode": (result, value) => {
+		if (!isTuiMode(value)) {
+			throw new CliUsageError(
+				`Invalid --tui-mode value: ${JSON.stringify(value)}. Expected one of: inline, fullscreen.`,
+			);
+		}
+		result.tuiMode = value;
 	},
 	"--fork": (result, value) => {
 		result.fork = value;

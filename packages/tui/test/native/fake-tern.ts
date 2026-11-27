@@ -266,6 +266,7 @@ const CAPABILITIES: TerminalCapabilities = {
 	multiplexer: null,
 	textSizing: false,
 	tsp: true,
+	pixelMouse: false,
 };
 
 /** See the module docs. */

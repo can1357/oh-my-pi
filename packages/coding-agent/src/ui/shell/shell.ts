@@ -33,6 +33,12 @@ import {
 } from "@oh-my-pi/pi-tui";
 import type { InputEvent, TerminalDriverOptions } from "@oh-my-pi/pi-tui/driver/index";
 import type { MouseTracking } from "@oh-my-pi/pi-tui/driver/io";
+import type {
+	ScrollMark,
+	SelectionClipboardResult,
+	TermPresentation,
+	TranscriptPointer,
+} from "@oh-my-pi/pi-tui/term/backend";
 import { staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
 import { renderBlock } from "@oh-my-pi/pi-tui/term/render";
 
@@ -72,6 +78,23 @@ export interface ShellStartOptions {
 	readonly textSizing?: Accessor<boolean>;
 	/** The terminal clock painters read (scripted replays); default the wall clock. */
 	readonly clock?: Accessor<number>;
+	/**
+	 * How the terminal renderer presents the transcript (`tui.mode`); inline by default. `null`
+	 * holds paint pending the startup mode, without suspending input or native rendering.
+	 */
+	readonly presentation?: Accessor<TermPresentation | null>;
+	/** The fullscreen scrollbar's prompt marks. */
+	readonly marks?: Accessor<readonly ScrollMark[]>;
+	/** How fullscreen uses the mouse (`tui.fullscreenMouse`); `select` by default. */
+	readonly pointer?: Accessor<TranscriptPointer>;
+	/** Copy a fullscreen transcript selection when the mouse is released (`tui.copyOnRelease`); default true. */
+	readonly copyOnRelease?: Accessor<boolean>;
+	/** Puts a fullscreen transcript selection on the clipboard; absent: copying is unavailable. */
+	readonly copyText?: (text: string) => Promise<SelectionClipboardResult>;
+	/** The copy key as copy-failure feedback names it (`Alt+C`). */
+	readonly copyShortcutLabel?: Accessor<string | undefined>;
+	/** Enable session shortcuts such as subagent and link clicks, including before fullscreen text selection (`tui.mouse`). */
+	readonly activateTargets?: Accessor<boolean>;
 }
 
 /**
@@ -155,7 +178,10 @@ export class Shell {
 		return promise;
 	}
 
-	/** Set inline mouse reporting; a modal screen's override lasts until it closes. */
+	/**
+	 * Set inline mouse reporting. Fullscreen tracks drags unless the terminal owns selection;
+	 * a modal screen can override either policy until it closes.
+	 */
 	setInlineMouse(tracking: MouseTracking): void {
 		this.#inlineMouse.set(tracking);
 	}
@@ -179,16 +205,37 @@ export class Shell {
 			...(options.hyperlinks ? { hyperlinks: options.hyperlinks } : {}),
 			...(options.textSizing ? { textSizing: options.textSizing } : {}),
 			...(options.clock ? { clock: options.clock } : {}),
+			...(options.presentation ? { presentation: options.presentation } : {}),
+			...(options.marks ? { marks: options.marks } : {}),
+			...(options.pointer ? { pointer: options.pointer } : {}),
+			...(options.copyOnRelease ? { copyOnRelease: options.copyOnRelease } : {}),
+			...(options.copyText ? { copyText: options.copyText } : {}),
+			...(options.copyShortcutLabel ? { copyShortcutLabel: options.copyShortcutLabel } : {}),
+			...(options.activateTargets ? { activateTargets: options.activateTargets } : {}),
 			beforeTerminalRenderer: ensureTerminalStylesLoaded,
 		});
 		this.#host = host;
-		this.#unwatchMouse = createRoot(dispose => {
-			effect(() => host.setMouse(this.overlays.mouse() ?? this.#inlineMouse()));
-			return dispose;
-		});
 		this.#theme = options.theme;
+		// Before the mouse follows the presentation: a Tern surface never takes the fullscreen mapping.
 		this.#native.set(host.native);
 		this.#hour12.set(host.hour12);
+		const presentation = options.presentation ?? INLINE;
+		const pointer = options.pointer ?? SELECT;
+		this.#unwatchMouse = createRoot(dispose => {
+			effect(() => {
+				const override = this.overlays.mouse();
+				// Tern draws the transcript natively: the presentation is the terminal renderer's alone.
+				const fullscreen = !this.#native() && presentation() === "fullscreen";
+				// `native` hands the transcript's mouse to the terminal: no reporting, and no alternate
+				// scroll either, which would turn wheel ticks into arrow keys for the composer.
+				const released = fullscreen && override === undefined && pointer() === "native";
+				const inline = this.#inlineMouse();
+				// Fullscreen reads drags at least (wheel, scrollbar, selection); `any` keeps hover.
+				const tracking = released ? "off" : fullscreen && inline !== "any" ? "drag" : inline;
+				host.setMouse(override ?? tracking, released ? false : undefined);
+			});
+			return dispose;
+		});
 		// An unconfirmed optimistic Tern start falls back to rows; its reply may carry the clock.
 		this.#unwatchHost = host.onChange(() => {
 			this.#native.set(host.native);
@@ -294,6 +341,9 @@ export class Shell {
 		if (wasHome || this.surface.focused() === null) this.surface.focus(node);
 	}
 }
+
+const INLINE: Accessor<TermPresentation> = () => "inline";
+const SELECT: Accessor<TranscriptPointer> = () => "select";
 
 function register<T>(list: T[], item: T): () => void {
 	list.push(item);

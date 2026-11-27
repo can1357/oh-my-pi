@@ -96,9 +96,13 @@ A settled borrowed-buffer resize then applies `ResizeScrollbackMode`. `rebuild` 
 
 A shrink can make the terminal itself push live viewport rows into scrollback before the app hears about the resize. The writer computes which rows it pushed (blank rows below the cursor are dropped first, then top rows go), confirms that with the cursor report of the anchor recovery, and skips them when the next history batch starts with the same rows, so a transcript block retired after the shrink is not written twice. The screen itself always converges to exactly one copy. Likewise, when a history append overflows the screen, the writer first erases the old live viewport region so a scroll can only push committed rows and blanks into scrollback, never an unfinished frame.
 
+In the fullscreen presentation every frame is drawn on the alternate buffer, so a settled resize just repaints: the transcript window keeps its reading anchor (a block and one of its rows, found again by content at the new width) and nothing is replayed into scrollback.
+
 ## Explicit display reset
 
 `Host.replayHistory()` (`driver.resetDisplay()`) is destructive and user-driven. It is reserved for session replacement, tree/resume replacement, the display-reset action (Alt+L by default), removing or redrawing a block with rows in history, and settings that rebuild the semantic transcript. The next frame carries a replay of the committed ledger under a fresh monotonic history id; it does not rewind the commit frontier. The backend replays on its own only when history no longer matches the ledger: a block inserted above committed blocks, or a streaming head whose history rows changed. Ordinary rendering, animation, and tool finalization cannot reach it.
+
+While the presentation is fullscreen the reset is owed instead of run: the alternate buffer is not the display it would clear. It runs before the first inline frame after a switch back.
 
 Theme or visibility changes that affect only current/future output repaint the mutable viewport; already-retired history remains immutable.
 
@@ -120,4 +124,6 @@ native frames. See [native rendering](./tui-core-renderer.md#native-rendering-te
 ## Shutdown
 
 `Host.stop()` flushes before handing the terminal back: `TermBackend.flush()` composes one last frame that writes every live `main` block as it is now (settled or not: frozen), after the ledger a pending replay still owes, into history, with the dock as the viewport. Overlays and fullscreen layers are not part of it. When the writer cannot write inline yet (a resize borrow or quiet resize, an anchor probe), or the driver skipped it for an output backlog, the writer keeps that frame and writes it from the viewport top in `FrameWriter.stop()`, which then leaves any alternate buffer, places the shell cursor directly after the visible content, and restores autowrap and the cursor before the driver restores terminal modes. `Host.suspend()` does not flush; the backend replays history when it starts again after the external program returns.
+
+In the fullscreen presentation the flush writes nothing: `FrameWriter.stop()` leaves the alternate buffer and the normal screen shows what it held before the program started drawing there.
 

@@ -21,7 +21,7 @@ import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { formatDuration } from "@oh-my-pi/pi-utils";
 import { nodePlain, nodeStyle } from "./agent-common";
 import { diagnosticsRows, fileLink, sectionDiagnostics, wrapGutterRow } from "./file-common";
-import { bracketed, expandHint, frameInner, frameRows, isActive, spinnerGlyph, statusIcon } from "./frame";
+import { bracketed, expandHint, frameBlock, frameInner, isActive, spinnerGlyph, statusIcon } from "./frame";
 import { defineToolLook, type ToolProps, toolProps } from "./look";
 
 /** Lines a collapsed result shows. */
@@ -150,15 +150,13 @@ function paintWrite(node: UiNode, cx: PaintContext): Block {
 			: "toolSuccessBg";
 	const source = children.find(child => child.kind === "code");
 	const foot = term.call && term.streaming && source ? theme.fg("dim", "streaming") : undefined;
-	return {
-		rows: frameRows(theme, width, {
-			head: fileHead(cx, props, term),
-			sections: lines.length > 0 ? [{ lines }] : [],
-			foot,
-			border: failed ? "error" : "borderMuted",
-			bg,
-		}),
-	};
+	return frameBlock(theme, width, {
+		head: fileHead(cx, props, term),
+		sections: lines.length > 0 ? [{ lines }] : [],
+		foot,
+		border: failed ? "error" : "borderMuted",
+		bg,
+	});
 }
 
 defineToolLook("write", { paint: paintWrite, margin: true, animated: true });

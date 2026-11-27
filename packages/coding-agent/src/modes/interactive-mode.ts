@@ -170,7 +170,7 @@ import { hasSpotlightOriginal } from "./view-model/overlays/spotlight-sheet";
 import { vocalizer } from "../tts/vocalizer";
 
 import { formatStartupChangelogSummary, type StartupChangelogSelection } from "../utils/changelog";
-import { copyToClipboard, readTextFromClipboard } from "../utils/clipboard";
+import { copyToClipboard, copyToClipboardWithResult, readTextFromClipboard } from "../utils/clipboard";
 import type { EventBus } from "../utils/event-bus";
 import { getEditorCommand, openInEditor } from "../utils/external-editor";
 
@@ -325,12 +325,16 @@ import {
 	cfgSymbolPreset,
 	cfgTerminalProgramStatus,
 	cfgTerminalShowImages,
+	cfgTuiCopyOnRelease,
+	cfgTuiFullscreenMouse,
 	cfgTuiHyperlinks,
 	cfgTuiMaxFps,
 	cfgTuiImeSafeCursor,
 	cfgTuiMaxInlineImages,
 	cfgTuiAutoGraph,
 	cfgTuiMouse,
+	cfgTuiMode,
+	savedTuiMode,
 	cfgTuiColorfulMarkdown,
 	cfgTuiShowLinkUrl,
 	cfgTuiRenderMermaid,
@@ -440,8 +444,11 @@ import { AppFrame } from "./interactive/frame";
 import { SessionStatusLine } from "./interactive/status-line";
 import type { MessageFaceEnv } from "./interactive/messages";
 import { type DisplayFlags, TranscriptPresenter } from "./interactive/transcript";
+import { showTranscriptFind } from "./interactive/transcript-find";
+import { transcriptMarks } from "./interactive/transcript-marks";
 import { TranscriptReplica } from "./interactive/transcript-replica";
 import { WorkingRows } from "./interactive/working";
+import { routeTranscriptKeys } from "./interactive/fullscreen";
 import { resolveComposerHint } from "./view-model/prompt/composer-hints";
 import { WordCompletionProvider } from "./view-model/prompt/word-completion";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
@@ -522,6 +529,15 @@ const cfgLiveUiSettings = combine({
 	"tier.advisor": cfgTierAdvisor,
 });
 type LiveUiSettings = SettingValueOf<typeof cfgLiveUiSettings>;
+
+/** How the terminal renderer presents the transcript: the frame's presentation signals follow it. */
+const cfgPresentationSettings = combine({
+	mode: cfgTuiMode,
+	pointer: cfgTuiFullscreenMouse,
+	copyOnRelease: cfgTuiCopyOnRelease,
+	activateTargets: cfgTuiMouse,
+});
+type PresentationSettings = SettingValueOf<typeof cfgPresentationSettings>;
 
 const STILL_CLOSING_DELAY_MS = 3_000;
 const JUDGMENT_BATCH_PROGRESS_RETAIN_MS = 1_000;
@@ -1397,6 +1413,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	readonly #wordCompletion = new WordCompletionProvider(textPredictionBackend);
 	/** Bumped when state the composer hint reads (running agents, the conversation) may have changed. */
 	readonly #composerHintRevision = signal(0);
+	/** Whether the viewed session runs (its run state): the fullscreen scrollbar's running prompt. */
+	readonly #viewRunning = signal(false);
 	/** Agents the hub can show, running or not: keeps the HUD agents segment up after the last one finishes. */
 	#inspectableSubagentCount = 0;
 	#agentRegistryUnsubscribe?: () => void;
@@ -1486,6 +1504,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			}),
 		);
 		setExtensionLinkClicksProvider(() => this.#extensionLinkClicksAvailable());
+		// The frame presents as `tui.mode` says (`PI_TUI_MODE` for this launch); changes apply at once.
+		this.#applyPresentationSettings(cfgPresentationSettings.get(this.settings));
+		this.#eventBusUnsubscribers.push(
+			cfgPresentationSettings.listen(this.settings, next => this.#applyPresentationSettings(next)),
+			this.#cacheSavedMode(),
+		);
 
 		this.statusLine = new SessionStatusLine(session);
 		this.statusLine.onPullRequest = pr => setTerminalTitlePullRequest(pr?.number);
@@ -1694,6 +1718,26 @@ export class InteractiveMode implements InteractiveModeContext {
 		// A started frame (the startup frame's predicted bar) redraws the bar's slots at once.
 		this.#attachStatusLine();
 		this.#predictStatusForNextLaunch();
+		// Fullscreen: the scrollbar marks each prompt with its turn's outcome; the reading keys scroll.
+		this.#watchViewRunState();
+		this.#frame.setMarks(
+			transcriptMarks({
+				nodes: this.shell.transcript.nodes,
+				blockOf: node => this.shell.transcript.blockOf(node),
+				entry: block => this.#presenter.transcriptEntry(block),
+				running: this.#viewRunning,
+			}),
+		);
+		this.#eventBusUnsubscribers.push(
+			routeTranscriptKeys({
+				shell: this.shell,
+				presentation: this.#frame.presentation,
+				field: () => (this.#editorAreaDialog ? undefined : this.composer.field),
+				completing: () => this.composer.completing(),
+				keybindings: () => this.keybindings,
+				openFind: scroller => showTranscriptFind(this, scroller, this.#frame.presentation),
+			}),
+		);
 		// The composer's dictation control shows while speech-to-text is on.
 		const syncDictation = (enabled: boolean): void =>
 			this.#frame.dictation.set(enabled ? (this.#sttController?.state ?? "idle") : undefined);
@@ -1751,6 +1795,49 @@ export class InteractiveMode implements InteractiveModeContext {
 		createRoot(dispose => {
 			effect(fn);
 			this.#eventBusUnsubscribers.push(dispose);
+		});
+	}
+
+	/** Follow the viewed session's run state into {@link #viewRunning}, across focus switches. */
+	#watchViewRunState(): void {
+		let watched: AgentViewSession | undefined;
+		let stop: (() => void) | undefined;
+		this.#effect(() => {
+			// The status facts refresh when the view switches sessions.
+			this.statusLine.facts();
+			const session = untrack(() => this.viewSession);
+			if (session === watched) return;
+			stop?.();
+			watched = session;
+			this.#viewRunning.set(session.runStartedAt !== undefined);
+			stop = session.subscribeRunState(state => this.#viewRunning.set(state === "running"));
+		});
+		this.#eventBusUnsubscribers.push(() => stop?.());
+	}
+
+	/** `tui.mode`, `tui.fullscreenMouse`, `tui.copyOnRelease` and `tui.mouse` into the frame. */
+	#applyPresentationSettings(settings: PresentationSettings): void {
+		batch(() => {
+			this.#frame.presentation.set(settings.mode);
+			this.#frame.pointer.set(settings.pointer);
+			this.#frame.copyOnRelease.set(settings.copyOnRelease);
+			this.#frame.activateTargets.set(settings.activateTargets);
+		});
+	}
+
+	/**
+	 * Keep the next launch's prediction on the configured mode, even when a launch flag
+	 * or environment variable masks a `/settings` change.
+	 */
+	#cacheSavedMode(): () => void {
+		const cache = sharedStartupCache();
+		if (!cache) return () => {};
+		let saved = savedTuiMode(this.settings);
+		return this.settings.onLayersChange(() => {
+			const mode = savedTuiMode(this.settings);
+			if (mode === saved) return;
+			saved = mode;
+			cache.writeMode(getProjectDir(), mode);
 		});
 	}
 
@@ -1900,11 +1987,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#onPromptAction(act: string, text: string, timestamp: number): void {
 		switch (act) {
 			case "copy-message":
-				copyToClipboard(text).then(
-					() => this.showStatus("Copied to clipboard"),
-					(error: unknown) =>
-						this.showWarning(`Copy failed: ${error instanceof Error ? error.message : String(error)}`),
-				);
+				void this.#copyToClipboardWithStatus(text);
 				return;
 			case "edit-turn":
 			case "retry-turn":
@@ -7303,6 +7386,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#presenter.transcriptEntry(block);
 	}
 
+	registerTranscriptEntry(block: TranscriptBlock, entry: TranscriptEntry): void {
+		this.#presenter.register(block, entry);
+	}
+
 	showWorking(kind: WorkingKind, spec: WorkingSpec): void {
 		this.#working.show(kind, spec);
 		this.#syncComposerState();
@@ -7491,13 +7578,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		);
 	}
 
+	/** Copy `text` and say how far it got: OSC 52 alone (over SSH, say) reaches the terminal unconfirmed. */
 	async #copyToClipboardWithStatus(text: string): Promise<void> {
-		try {
-			await copyToClipboard(text);
-			this.showStatus("Copied to clipboard");
-		} catch (error) {
-			this.showWarning(`Failed to copy: ${error instanceof Error ? error.message : String(error)}`);
-		}
+		const result = await copyToClipboardWithResult(text);
+		if (result === "success") this.showStatus("Copied to clipboard");
+		else if (result === "unconfirmed-terminal") this.showStatus("Sent to the terminal clipboard (unconfirmed)");
+		else this.showWarning("Failed to copy to clipboard");
 	}
 
 	/**
@@ -7580,13 +7666,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#uiHelpers.showStatus(message, options);
 	}
 
-	showError(message: string): void {
+	showError(message: string, options?: { failsTurn?: boolean }): void {
 		this.#pendingSubmittedInput = undefined;
 		this.#pendingSubmissionPreservesDraft = false;
 		this.clearOptimisticUserMessage();
 		this.#working.setMessage();
 		this.clearWorking("turn");
-		this.#uiHelpers.showError(message);
+		this.#uiHelpers.showError(message, options);
 	}
 
 	showPinnedError(message: string): void {

@@ -16,61 +16,67 @@ import { stack } from "@oh-my-pi/pi-tui/term/painters/layout";
 import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
 import { replaceTabs, wrap } from "@oh-my-pi/pi-tui/text/width";
 import { propsOf, termOf } from "./fill";
+import { RowText, shiftText, sliceText, type TextRows } from "../rendered-text";
 
-/** A block's rows; bare `text` and `md` blocks one cell in from both edges. */
-export function blockRows(cx: PaintContext, node: UiNode): readonly string[] {
+/** A block's rows and text; bare `text` and `md` blocks one cell in from both edges. */
+export function blockRows(cx: PaintContext, node: UiNode): TextRows {
 	const bare = (node.kind === "text" || node.kind === "md") && propsOf<{ role: string }>(node).role === undefined;
-	if (!bare) return cx.paint(node, cx.width).rows;
-	return cx.paint(node, Math.max(1, cx.width - 2)).rows.map(row => ` ${row}`);
+	if (!bare) return cx.paint(node, cx.width);
+	const painted = cx.paint(node, Math.max(1, cx.width - 2));
+	return { rows: painted.rows.map(row => ` ${row}`), text: shiftText(painted, 1) };
 }
 
 function blank(row: string): boolean {
 	return stripEscapes(row).trim() === "";
 }
 
-/** `rows` without leading and trailing blank rows. */
-function trimBlankEdges(rows: readonly string[]): readonly string[] {
+/** `block` without leading and trailing blank rows. */
+function trimBlankEdges(block: TextRows): TextRows {
+	const rows = block.rows;
 	let start = 0;
 	let end = rows.length;
 	while (start < end && blank(rows[start]!)) start++;
 	while (end > start && blank(rows[end - 1]!)) end--;
-	return rows.slice(start, end);
+	return start === 0 && end === rows.length ? block : sliceText(block, start, end);
 }
 
 function paintTranscript(node: UiNode, cx: PaintContext): Block {
-	const rows: string[] = [];
+	const out = new RowText();
 	let previousCompact = false;
 	for (const child of node.children()) {
 		const block = trimBlankEdges(blockRows(cx, child));
-		if (block.length === 0) continue;
+		if (block.rows.length === 0) continue;
 		const compact = termOf<{ compact: boolean }>(child).compact === true;
-		if (rows.length > 0 && !(compact && previousCompact)) rows.push("");
-		rows.push(...block);
+		// The gap between blocks copies as a paragraph break.
+		if (out.length > 0 && !(compact && previousCompact)) out.literal("");
+		out.block(block);
 		previousCompact = compact;
 	}
-	return { rows };
+	return out.done();
 }
 
 function paintActivity(node: UiNode, cx: PaintContext): Block {
-	return { rows: node.children().flatMap(child => blockRows(cx, child)) };
+	const out = new RowText();
+	for (const child of node.children()) out.block(blockRows(cx, child));
+	return out.done();
 }
 
 function paintPanel(node: UiNode, cx: PaintContext): Block {
-	const rows: string[] = [""];
+	const out = new RowText().deco("");
 	for (const child of node.children()) {
 		if (propsOf<{ role: string }>(child).role === "omp.panel.footer") {
-			const footer = termOf<{ footer: string }>(child).footer ?? "";
-			rows.push(...wrap(replaceTabs(footer), cx.width));
+			const footer = replaceTabs(termOf<{ footer: string }>(child).footer ?? "");
+			out.wrapped(footer, wrap(footer, cx.width));
 			continue;
 		}
 		const section = stack(
-			child.children().map(member => ({ rows: blockRows(cx, member) })),
+			child.children().map(member => blockRows(cx, member)),
 			0,
 		);
 		if (section.rows.length === 0) continue;
-		rows.push(...section.rows, "");
+		out.block(section).deco("");
 	}
-	return { rows };
+	return out.done();
 }
 
 defineRolePainter("col", "omp.transcript", paintTranscript);

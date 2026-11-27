@@ -1,10 +1,10 @@
 /**
  * Speculative state for the next launch's first frame, kept in one SQLite store
  * (`~/.omp/agent/cache/composer.db`): the resolved theme inputs and the
- * composer preferences the prepaint frame is built with before settings load
- * (kind `ui`), the background the terminal last reported (kind `terminal`), and
- * the status bar a fresh session will show (kind `status`, see
- * {@link StatusPrediction}).
+ * composer preferences the prepaint frame is built with before settings load,
+ * the saved `tui.mode` among them (kind `ui`), the background the terminal
+ * last reported (kind `terminal`), and the status bar a fresh session will show
+ * (kind `status`, see {@link StatusPrediction}).
  *
  * Each row is one JSON payload keyed by project (the resolved cwd) and kind;
  * it is also written under the empty project, so a folder that never ran omp
@@ -21,6 +21,7 @@ import type { Database, Statement } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ResizeScrollback } from "@oh-my-pi/pi-tui/driver/index";
+import type { TermPresentation } from "@oh-my-pi/pi-tui/term/backend";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { getComposerCacheDbPath } from "@oh-my-pi/pi-utils/dirs";
 import { isBunTestRuntime } from "@oh-my-pi/pi-utils/env";
@@ -31,7 +32,7 @@ import type { ComposerThemePreferences } from "../view-model/prompt/composer-cac
 import { parseStatusPrediction, type StatusPrediction } from "./status-prediction";
 
 /** Bump whenever a payload format changes; older stores are cleared on open. */
-const FORMAT_VERSION = 3;
+const FORMAT_VERSION = 4;
 /** Project key of rows that serve every project lacking its own. */
 const ANY_PROJECT = "";
 
@@ -55,6 +56,8 @@ export interface StartupPreferences {
 	readonly autocompleteMaxVisible: number;
 	readonly vim: boolean;
 	readonly imeSafeCursor: boolean;
+	/** Last configured `tui.mode`, never an environment or CLI override. Not authority to paint inline. */
+	readonly mode: TermPresentation;
 }
 
 /** What the cache knows for a project. */
@@ -95,7 +98,8 @@ function parseUi(
 	value: unknown,
 ): { readonly preferences: StartupPreferences; readonly theme: ComposerThemePreferences } | undefined {
 	if (!isRecord(value) || !isRecord(value.preferences) || !isRecord(value.theme)) return undefined;
-	const { quiet, composerShape, resizeScrollback, autocompleteMaxVisible, vim, imeSafeCursor } = value.preferences;
+	const { quiet, composerShape, resizeScrollback, autocompleteMaxVisible, vim, imeSafeCursor, mode } =
+		value.preferences;
 	const scrollback = typeof resizeScrollback === "string" ? RESIZE_SCROLLBACK[resizeScrollback] : undefined;
 	if (
 		typeof quiet !== "boolean" ||
@@ -103,7 +107,8 @@ function parseUi(
 		!scrollback ||
 		typeof autocompleteMaxVisible !== "number" ||
 		typeof vim !== "boolean" ||
-		(typeof imeSafeCursor !== "boolean" && imeSafeCursor !== undefined)
+		(typeof imeSafeCursor !== "boolean" && imeSafeCursor !== undefined) ||
+		(mode !== "inline" && mode !== "fullscreen")
 	) {
 		return undefined;
 	}
@@ -124,6 +129,7 @@ function parseUi(
 			autocompleteMaxVisible,
 			vim,
 			imeSafeCursor: imeSafeCursor === true,
+			mode,
 		},
 		theme: { symbolPreset, colorBlindMode, darkTheme, lightTheme } as ComposerThemePreferences,
 	};
@@ -211,6 +217,15 @@ export class StartupCache {
 	/** The resolved preferences and theme for the next prepaint; a failed write only costs that speculation. */
 	write(cwd: string, preferences: StartupPreferences, theme: ComposerThemePreferences): void {
 		this.#put("ui", cwd, JSON.stringify({ preferences, theme }));
+	}
+
+	/**
+	 * A saved `tui.mode` changed while running: refresh the next launch's prediction.
+	 * The rest of the cached preferences stay; with none cached the next startup writes them all.
+	 */
+	writeMode(cwd: string, mode: TermPresentation): void {
+		const { preferences, theme } = this.read(cwd);
+		if (preferences && theme && preferences.mode !== mode) this.write(cwd, { ...preferences, mode }, theme);
 	}
 
 	/** The background the terminal reported, for the next prepaint's theme. */

@@ -26,7 +26,14 @@ import { encodeHelloQuery, NativeSurfaces, TspConnection } from "./native";
 import { isTernPane } from "./driver/caps/identity";
 import type { UiNode } from "./node";
 import type { Surface } from "./surface";
-import { driverImages, TermBackend } from "./term/backend";
+import {
+	driverImages,
+	type ScrollMark,
+	type SelectionClipboardResult,
+	TermBackend,
+	type TermPresentation,
+	type TranscriptPointer,
+} from "./term/backend";
 import type { Theme } from "./theme/contract";
 import type { FramePlan, InputEvent, TerminalDriver } from "./driver/contract";
 import type { MouseTracking } from "./driver/io";
@@ -76,6 +83,66 @@ export interface HostOptions {
 	 * terminal-only painters lazily so native Tern sessions never load them.
 	 */
 	readonly beforeTerminalRenderer?: () => void;
+	/**
+	 * How the terminal renderer draws `main`: `inline` (default) flows it into terminal history;
+	 * `fullscreen` scrolls it inside the program on the alternate screen above the pinned dock
+	 * and never writes history (see {@link Host.scroller}). `null` captures input without painting
+	 * rows until the launch mode is known. Native surfaces do not use this option.
+	 */
+	readonly presentation?: Accessor<TermPresentation | null>;
+	/** Marks on the fullscreen transcript's marks lane (main nodes, one per turn). */
+	readonly marks?: Accessor<readonly ScrollMark[]>;
+	/** What the pointer does over the fullscreen transcript. Default `select`. */
+	readonly pointer?: Accessor<TranscriptPointer>;
+	/** Copy a fullscreen selection when the drag ends. Default true. */
+	readonly copyOnRelease?: Accessor<boolean>;
+	/** Write selected transcript text to the clipboard; absent: copying is unavailable. */
+	readonly copyText?: (text: string) => Promise<SelectionClipboardResult>;
+	/** Display name of the copy key, named by copy-failure feedback (`Alt+C`). */
+	readonly copyShortcutLabel?: Accessor<string | undefined>;
+	/** Offer fullscreen transcript clicks to hits before selecting. False also disables optional main and dock shortcuts. */
+	readonly activateTargets?: Accessor<boolean>;
+}
+
+/** Where the fullscreen transcript's window stands (see {@link TranscriptScroller.state}). */
+export interface TranscriptScrollState {
+	/** The window follows the tail. */
+	readonly following: boolean;
+	/** Document row at the window's top. */
+	readonly offset: number;
+	/** Rows in the whole transcript. */
+	readonly totalRows: number;
+	/** True once idle height indexing finishes. Until then, `offset` and `totalRows` are provisional. */
+	readonly metricsReady: boolean;
+	/** Rows the window shows. */
+	readonly height: number;
+	/** Detached, and output arrived below the window since. */
+	readonly unseen: boolean;
+	/** A selection is highlighted. */
+	readonly highlight: boolean;
+}
+
+/** Reading controls of the fullscreen transcript (terminal renderer); inactive in inline presentation. */
+export interface TranscriptScroller {
+	/** The window's state (reactive). */
+	readonly state: Accessor<TranscriptScrollState>;
+	/** Scroll by `rows` (negative: up); reaching the tail resumes following. */
+	scrollBy(rows: number): boolean;
+	/** Scroll a window height less one row. */
+	page(direction: -1 | 1): boolean;
+	toTop(): boolean;
+	/** Back to the tail; resumes following. */
+	toBottom(): boolean;
+	/** Bring the previous mark above the window's top, or the next one below it, to the top. */
+	seekMark(direction: -1 | 1): boolean;
+	/** Find the next or previous literal, case-insensitive match, wrapping at the ends. False if absent or canceled. */
+	findText(query: string, direction: -1 | 1): Promise<boolean>;
+	/** Cancel any pending search and remove its highlight without moving the window or changing the selection. */
+	clearFind(): void;
+	/** Start copying the selection (feedback shows on the indicator row); false when there is none. */
+	copyHighlight(): boolean;
+	/** Drop the selection; false when there is none. */
+	dropHighlight(): boolean;
 }
 
 /** A running surface. */
@@ -114,8 +181,18 @@ export interface Host {
 	 * repaint (always false natively, where nothing retires).
 	 */
 	retired(node: UiNode): boolean;
-	/** Redraw terminal history from the current main region (its retired rows changed or went away). */
+	/**
+	 * Redraw terminal history from the current main region (its retired rows changed or went away).
+	 * While the terminal renderer presents fullscreen this waits until the presentation turns inline:
+	 * the shell's scrollback is never cleared under it.
+	 */
 	replayHistory(): void;
+	/**
+	 * Fullscreen transcript reading controls (terminal renderer); undefined natively. Methods return
+	 * false while the presentation is inline or nothing moved. Named `scroller` so it never reads
+	 * like the Shell's `transcript` (a block list).
+	 */
+	readonly scroller: TranscriptScroller | undefined;
 	/**
 	 * The settled main block holding `node` changed after it was final: a Tern terminal, which
 	 * dropped its description, gets it again (a plain terminal replays history instead).
@@ -149,10 +226,10 @@ export interface Host {
 	 */
 	requestFrame(): void;
 	/**
-	 * Set the terminal's mouse reporting (the driver's `setMouse`). Turning it off also forgets
-	 * the hovered hit, whose band no report would clear anymore.
+	 * Set mouse reporting. On the terminal renderer the policy survives a suspend and can override
+	 * alternate scroll (1007); omitting that override releases it. Leaving motion tracking clears hover.
 	 */
-	setMouse(tracking: MouseTracking): void;
+	setMouse(tracking: MouseTracking, alternateScroll?: boolean): void;
 	/** Stop rendering, close the native surface, restore the terminal. */
 	stop(): Promise<void>;
 }
@@ -229,6 +306,7 @@ type Renderer = Pick<
 	| "setMouse"
 	| "suspend"
 	| "requestFrame"
+	| "scroller"
 > & {
 	/** Stop rendering and release the renderer (not the driver). */
 	stop(): void;
@@ -355,6 +433,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			},
 			retired: () => false,
 			replayHistory: () => {},
+			scroller: undefined,
 			redescribe: node => backend.redescribe(node),
 			dispatch: event => backend.dispatch(event),
 			feature: name => connection.hasFeature(name),
@@ -394,6 +473,13 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			...(options.clock ? { clock: options.clock } : {}),
 			...(options.onKey ? { onKey: options.onKey } : {}),
 			...(options.intercept ? { intercept: options.intercept } : {}),
+			...(options.presentation ? { presentation: options.presentation } : {}),
+			...(options.marks ? { marks: options.marks } : {}),
+			...(options.pointer ? { pointer: options.pointer } : {}),
+			...(options.copyOnRelease ? { copyOnRelease: options.copyOnRelease } : {}),
+			...(options.copyText ? { copyText: options.copyText } : {}),
+			...(options.copyShortcutLabel ? { copyShortcutLabel: options.copyShortcutLabel } : {}),
+			...(options.activateTargets ? { activateTargets: options.activateTargets } : {}),
 		});
 		debug?.start({
 			surface: options.surface,
@@ -408,19 +494,29 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			backend.stop();
 		};
 		backend.start();
+		// stop() hands both modes back to the terminal. Keep the desired policy across that handoff.
+		let tracking: MouseTracking = "off";
+		let alternateScroll: boolean | undefined;
 		return {
 			native: false,
 			hour12: undefined,
 			retired: node => backend.retired(node),
-			replayHistory: () => driver.resetDisplay(),
+			// Fullscreen defers the reset until the presentation turns inline.
+			replayHistory: () => backend.resetDisplay(),
+			scroller: backend.scroller,
 			redescribe: () => {},
 			dispatch: event => backend.dispatch(event),
 			feature: () => false,
 			checkoutShown: () => false,
 			requestFrame: () => backend.requestRender(),
-			setMouse(tracking) {
+			setMouse(next, alternate) {
+				if (next === "off" || (tracking === "any" && next !== "any")) backend.clearHover();
+				tracking = next;
 				driver.setMouse(tracking);
-				if (tracking === "off") backend.clearHover();
+				if (alternate !== alternateScroll) {
+					alternateScroll = alternate;
+					driver.setAlternateScroll(alternate);
+				}
 			},
 			async suspend(run) {
 				backend.renderNow();
@@ -430,12 +526,15 @@ export async function startHost(options: HostOptions): Promise<Host> {
 					return await run();
 				} finally {
 					await driver.start();
-					driver.resetDisplay();
+					driver.setMouse(tracking);
+					if (alternateScroll !== undefined) driver.setAlternateScroll(alternateScroll);
+					backend.resetDisplay();
 					backend.start();
 				}
 			},
 			stop() {
-				// Graceful shutdown: the whole transcript goes into terminal history before the terminal is handed back.
+				// Graceful shutdown: the whole transcript goes into terminal history before the terminal is handed back
+				// (inline only: the fullscreen presentation leaves the shell's scrollback as it was).
 				try {
 					backend.flush();
 				} finally {
@@ -458,6 +557,10 @@ export async function startHost(options: HostOptions): Promise<Host> {
 		driver,
 		retired: node => renderer.retired(node),
 		replayHistory: () => renderer.replayHistory(),
+		get scroller() {
+			revision();
+			return renderer.scroller;
+		},
 		redescribe: node => renderer.redescribe(node),
 		dispatch: event => renderer.dispatch(event),
 		feature: name => renderer.feature(name),
@@ -472,7 +575,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			changeListeners.add(listener);
 			return () => changeListeners.delete(listener);
 		},
-		setMouse: tracking => renderer.setMouse(tracking),
+		setMouse: (tracking, alternateScroll) => renderer.setMouse(tracking, alternateScroll),
 		async stop() {
 			if (stopped) return driver.stop();
 			stopped = true;

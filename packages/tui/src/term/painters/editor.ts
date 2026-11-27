@@ -287,6 +287,14 @@ export function lastLayout(node: UiNode): readonly EditorRow[] {
 	return layoutField(node, text, lastWrapWidth(node) ?? Number.MAX_SAFE_INTEGER);
 }
 
+/** First visible wrapped row: keep the stored scroll position unless the caret no longer fits there. */
+export function fieldWindowTop(node: UiNode, count: number, caretRow: number, limit: number): number {
+	if (count <= limit) return 0;
+	const stored = widgetState(node).get("scroll")?.() as number | undefined;
+	const top = Math.max(0, Math.min(stored ?? 0, count - limit));
+	return caretRow < top ? caretRow : Math.max(top, caretRow - limit + 1);
+}
+
 // ─── Props ──────────────────────────────────────────────────────────────────
 
 /** A terminal-only styled range of an editor's text. */
@@ -573,13 +581,7 @@ export function paintField(node: UiNode, cx: PaintContext, options?: { wrap?: bo
 
 	// Visible window: every row, or `maxLines`/the fixed height around the caret.
 	const limit = Math.min(props.maxLines ?? Number.POSITIVE_INFINITY, cx.height ?? Number.POSITIVE_INFINITY);
-	let top = 0;
-	if (rows.length > limit) {
-		const stored = widgetState(node).get("scroll")?.() as number | undefined;
-		top = Math.max(0, Math.min(stored ?? 0, rows.length - limit));
-		if (caretRow < top) top = caretRow;
-		else if (caretRow >= top + limit) top = caretRow - limit + 1;
-	}
+	const top = fieldWindowTop(node, rows.length, caretRow, limit);
 	const bottom = Math.min(rows.length, top + (Number.isFinite(limit) ? limit : rows.length));
 
 	const placeholder =

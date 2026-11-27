@@ -11,6 +11,7 @@ import type { UiNode } from "@oh-my-pi/pi-tui";
 import { type Block, defineRolePainter, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { truncate, visibleWidth } from "@oh-my-pi/pi-tui/text/width";
 import { termOf } from "./fill";
+import { RowText } from "../rendered-text";
 
 /** Terminal facts of a divider. */
 export interface DividerTerm {
@@ -22,20 +23,27 @@ export interface DividerTerm {
 	truncateWhenNarrow?: boolean;
 }
 
-/** The divider line of `term` at `width`. */
-export function dividerLine(cx: PaintContext, term: Partial<DividerTerm>): string {
+/** The divider line of `term` at `width`; its label copies, the rule and glyph are chrome. */
+export function dividerLine(cx: PaintContext, term: Partial<DividerTerm>): RowText {
 	const theme = cx.theme;
 	const glyph = term.glyph ? theme.symbols.icon(term.glyph) : "";
-	const label = glyph ? `${glyph} ${term.label ?? ""}` : (term.label ?? "");
+	const text = term.label ?? "";
+	const label = glyph ? `${glyph} ${text}` : text;
+	const lead = glyph ? `${Bun.stripANSI(glyph)} ` : "";
 	const painted = theme.fg(term.labelColor ?? "dim", label);
 	const rule = Math.min(term.ruleWidth ?? 10, cx.width - visibleWidth(label) - 1);
 	// A label that runs past the width is cut there either way: rows never exceed it.
-	if (rule < 1) return truncate(painted, cx.width);
-	return `${theme.fg(term.ruleColor ?? "dim", theme.symbols.box.horizontal.repeat(rule))} ${painted}`;
+	if (rule < 1) return new RowText().prefixed(text, [truncate(painted, cx.width)], lead);
+	const line = theme.symbols.box.horizontal.repeat(rule);
+	return new RowText().prefixed(text, [`${theme.fg(term.ruleColor ?? "dim", line)} ${painted}`], `${line} ${lead}`);
 }
 
 function paintDivider(node: UiNode, cx: PaintContext): Block {
-	return { rows: ["", dividerLine(cx, termOf<DividerTerm>(node)), ""] };
+	return new RowText()
+		.deco("")
+		.block(dividerLine(cx, termOf<DividerTerm>(node)).done())
+		.deco("")
+		.done();
 }
 
 defineRolePainter("rule", "omp.divider", paintDivider);

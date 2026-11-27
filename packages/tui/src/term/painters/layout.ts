@@ -9,6 +9,20 @@ import type { CanvasProps, UiNode } from "../../node";
 import type { Theme } from "../../theme/contract";
 import { padTo, replaceTabs, truncate, visibleWidth, wrap } from "../../text/width";
 import { type Block, type Cell, definePainter, EMPTY_BLOCK, type Hit, type PaintContext } from "../paint";
+import {
+	blockText,
+	clipRenderedText,
+	decorationText,
+	lazyText,
+	mapWrappedText,
+	offsetRenderedText,
+	type RenderedText,
+	type RenderedTextRow,
+	type RenderedTextSpan,
+	shownText,
+	sliceRenderedText,
+	withSpans,
+} from "../text-layout";
 
 /** Blank rows a spacing step stands for. */
 export function spaceRows(space: TspSpace | undefined): number {
@@ -41,14 +55,25 @@ export function offsetBlock(block: Block, rows: number, cols: number): { cursor?
 	return { cursor, hits };
 }
 
+/** Logical text of stacked `blocks` (all non-empty) with `gap` decoration rows between them. */
+function stackText(blocks: readonly Block[], gap: number): RenderedText {
+	const text: (RenderedTextRow | undefined)[] = [];
+	for (const block of blocks) {
+		if (text.length > 0) for (let i = 0; i < gap; i++) text.push(undefined);
+		for (const row of blockText(block)) text.push(row);
+	}
+	return text;
+}
+
 /**
  * Stack child blocks vertically with `gap` blank rows between non-empty ones.
  * The stack's stable head runs through every leading child that is wholly
  * stable plus the stable head of the first that is not (a child without
- * `stable` promises nothing).
+ * `stable` promises nothing). Its text is the children's, gap rows decoration.
  */
 export function stack(blocks: readonly Block[], gap: number): Block {
 	const rows: string[] = [];
+	const shown: Block[] = [];
 	let cursor: Cell | undefined;
 	let hits: Hit[] | undefined;
 	let stable = 0;
@@ -56,6 +81,7 @@ export function stack(blocks: readonly Block[], gap: number): Block {
 	let covering = 0;
 	for (const block of blocks) {
 		if (block.rows.length === 0) continue;
+		shown.push(block);
 		covering += block.covering ?? 0;
 		if (rows.length > 0) for (let i = 0; i < gap; i++) rows.push("");
 		const top = rows.length;
@@ -70,12 +96,15 @@ export function stack(blocks: readonly Block[], gap: number): Block {
 		}
 	}
 	if (rows.length === 0) return EMPTY_BLOCK;
+	const only = shown.length === 1 ? shown[0]! : undefined;
 	return {
 		rows,
 		...(stable > 0 ? { stable } : {}),
 		...(covering > 0 ? { covering } : {}),
 		...(cursor ? { cursor } : {}),
 		...(hits ? { hits } : {}),
+		// One child: its text as is (no copy).
+		text: only ? (only.text ?? (() => blockText(only))) : lazyText(() => stackText(shown, gap)),
 	};
 }
 
@@ -162,7 +191,73 @@ function paintRow(node: UiNode, cx: PaintContext): Block {
 		if (shifted.hits) hits.push(...shifted.hits);
 		col += widths[i]! + between;
 	}
-	return { rows, ...(cursor ? { cursor } : {}), ...(hits.length > 0 ? { hits } : {}) };
+	return {
+		rows,
+		...(cursor ? { cursor } : {}),
+		...(hits.length > 0 ? { hits } : {}),
+		text: lazyText(() => rowText(blocks, widths, lead, between, height)),
+	};
+}
+
+/**
+ * Logical text of a `row`: each row shows its children's runs. Runs that sit
+ * alone on the row (a key beside its value) share one line, in order; a run
+ * whose line goes on over other rows (a wrapped paragraph beside a gutter)
+ * keeps it, and the runs beside it are left out of the text.
+ */
+function rowText(
+	blocks: readonly Block[],
+	widths: readonly number[],
+	lead: number,
+	between: number,
+	height: number,
+): RenderedText {
+	const texts = blocks.map(blockText);
+	const columns: number[] = [];
+	let col = lead;
+	for (let i = 0; i < blocks.length; i++) {
+		columns.push(col);
+		col += widths[i]! + between;
+	}
+	const place = (row: RenderedTextRow, child: number): RenderedTextRow | undefined => {
+		const placed = offsetRenderedText(row, columns[child]!);
+		return child < blocks.length - 1 ? clipRenderedText(placed, columns[child]! + widths[child]!) : placed;
+	};
+	const out: (RenderedTextRow | undefined)[] = [];
+	for (let r = 0; r < height; r++) {
+		const runs: { row: RenderedTextRow; child: number }[] = [];
+		for (let i = 0; i < texts.length; i++) {
+			const row = texts[i]![r];
+			if (row) runs.push({ row, child: i });
+		}
+		// Blank lines beside text are padding.
+		const content = runs.length > 1 ? runs.filter(run => run.row.line.text !== "") : runs;
+		const chosen = content.length > 0 ? content : runs.slice(0, 1);
+		if (chosen.length <= 1) {
+			out.push(chosen[0] && place(chosen[0].row, chosen[0].child));
+			continue;
+		}
+		const spanning = chosen.find(
+			({ row, child }) => texts[child]![r - 1]?.line === row.line || texts[child]![r + 1]?.line === row.line,
+		);
+		if (spanning) {
+			out.push(place(spanning.row, spanning.child));
+			continue;
+		}
+		let line = "";
+		const spans: RenderedTextSpan[] = [];
+		for (let k = 0; k < chosen.length; k++) {
+			const { row, child } = chosen[k]!;
+			if (k > 0) line += " ";
+			const base = line.length;
+			line += row.line.text;
+			const placed = place(row, child)!;
+			for (const span of placed.spans ?? [placed])
+				spans.push({ start: base + span.start, end: base + span.end, column: span.column });
+		}
+		out.push(withSpans({ text: line }, spans));
+	}
+	return out;
 }
 
 function paintSpacer(node: UiNode): Block {
@@ -176,13 +271,18 @@ function paintRule(node: UiNode, cx: PaintContext): Block {
 	const theme = cx.theme;
 	const line = theme.symbols.box.horizontal;
 	const text = styledText(theme, label);
-	if (!text) return { rows: [theme.fg("border", line.repeat(cx.width))] };
+	if (!text) return { rows: [theme.fg("border", line.repeat(cx.width))], text: decorationText(1) };
 	const lead = line.repeat(3);
 	const room = cx.width - 5;
-	if (room < 1) return { rows: [theme.fg("border", line.repeat(cx.width))] };
-	const fitted = ` ${truncate(text, room)} `;
+	if (room < 1) return { rows: [theme.fg("border", line.repeat(cx.width))], text: decorationText(1) };
+	const shown = truncate(text, room);
+	const fitted = ` ${shown} `;
 	const rest = Math.max(0, cx.width - 3 - visibleWidth(fitted));
-	return { rows: [`${theme.fg("border", lead)}${fitted}${theme.fg("border", line.repeat(rest))}`] };
+	return {
+		rows: [`${theme.fg("border", lead)}${fitted}${theme.fg("border", line.repeat(rest))}`],
+		// The label is content; the line around it is not.
+		text: lazyText(() => [offsetRenderedText(shownText(text, shown), 4)]),
+	};
 }
 
 interface TextProps {
@@ -198,17 +298,37 @@ function paintText(node: UiNode, cx: PaintContext): Block {
 	const content = props.spans ?? props.text;
 	const styled = replaceTabs(styledText(cx.theme, content));
 	if (styled === "") return EMPTY_BLOCK;
-	let rows =
-		props.wrap === "none" || props.truncate !== undefined
-			? styled.split("\n").map(line => truncate(line, cx.width, cx.theme.symbols.ellipsis))
-			: wrap(styled, cx.width);
+	const ellipsis = cx.theme.symbols.ellipsis;
+	const cut = props.wrap === "none" || props.truncate !== undefined;
+	const drawn = cut ? styled.split("\n").map(line => truncate(line, cx.width, ellipsis)) : wrap(styled, cx.width);
+	let rows = drawn;
 	if (props.lines !== undefined && rows.length > props.lines) {
 		rows = rows.slice(0, props.lines);
 		const last = rows.length - 1;
-		if (last >= 0)
-			rows[last] = truncate(`${rows[last]}${cx.theme.symbols.ellipsis}`, cx.width, cx.theme.symbols.ellipsis);
+		if (last >= 0) rows[last] = truncate(`${rows[last]}${ellipsis}`, cx.width, ellipsis);
 	}
-	return { rows };
+	return { rows, text: lazyText(() => paragraphText(styled, drawn, rows, cut, ellipsis)) };
+}
+
+/**
+ * Logical text of a `text` node: its lines as wrapped (or cut one row each),
+ * limited to what `rows` keeps of `drawn`, its last row re-cut for the
+ * ellipsis; cut lines keep only what is shown.
+ */
+function paragraphText(
+	styled: string,
+	drawn: readonly string[],
+	rows: readonly string[],
+	cut: boolean,
+	ellipsis: string,
+): RenderedText {
+	const full = cut
+		? styled.split("\n").map((line, i) => shownText(line, drawn[i]!))
+		: [...mapWrappedText(styled, drawn)];
+	if (rows === drawn) return full;
+	const last = rows.length - 1;
+	if (last >= 0) full[last] = clipRenderedText(full[last], visibleWidth(rows[last]!) - visibleWidth(ellipsis));
+	return sliceRenderedText(full, 0, rows.length);
 }
 
 function paintCanvas(node: UiNode, cx: PaintContext): Block {

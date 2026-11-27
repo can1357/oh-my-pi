@@ -33,6 +33,7 @@ function capabilities(overrides: Partial<TerminalCapabilities> = {}): TerminalCa
 		multiplexer: null,
 		textSizing: false,
 		tsp: false,
+		pixelMouse: false,
 		...overrides,
 	};
 }

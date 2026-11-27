@@ -16,7 +16,7 @@ import type { TspProgressProps, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import { splitUrlScheme } from "../../../internal-urls/url-scheme";
 import type { FindTerm } from "../../tools/find";
 import { fileLink, uriLink } from "./file-common";
-import { standaloneErrorRows } from "./frame";
+import { standaloneError } from "./frame";
 import { defineToolLook, toolProps } from "./look";
 import { moreItem, pathText, searchGlyph, searchHeadRows, type TreeItem, treeRows } from "./search";
 
@@ -75,7 +75,7 @@ function paintFind(node: UiNode, cx: PaintContext): Block {
 	const props = toolProps(node);
 	const term = (props.term ?? { look: "find" }) as FindTerm;
 	const theme = cx.theme;
-	if (term.error !== undefined) return { rows: standaloneErrorRows(cx, term.error) };
+	if (term.error !== undefined) return standaloneError(cx, term.error);
 	const target = term.query ? `"${term.query}"` : undefined;
 	const meta = [...(term.facts ?? [])];
 	if (!term.result) {

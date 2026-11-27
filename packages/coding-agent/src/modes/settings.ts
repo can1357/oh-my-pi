@@ -3,6 +3,7 @@ import type { Settings } from "../config/settings";
 import { MOTION_MODES, MOTION_PRESETS } from "../config/motion-presets";
 import { cfgReadToolResultPreview } from "../tools/settings";
 import { MAGIC_KEYWORDS, type MagicKeywordId } from "./magic-keywords";
+import { isTuiMode, PRESENTATION_ENV, parsePresentationEnv } from "./presentation-env";
 import { TREE_FILTER_MODES } from "./view-model/overlays/tree-selector";
 import {
 	CONTEXT_LINE_MODE_VALUES,
@@ -646,6 +647,81 @@ export const cfgTuiHyperlinks = register({
 		label: "Terminal Hyperlinks",
 		description:
 			"Wrap paths and URLs in OSC 8 hyperlinks for terminal-native click-to-open (auto: detect support; off: never; always: unconditional)",
+	},
+});
+
+export const cfgTuiMode = register({
+	id: "tui.mode",
+	type: "enum",
+	values: ["fullscreen", "inline"] as const,
+	default: "inline",
+	env: { name: PRESENTATION_ENV, parse: parsePresentationEnv },
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Terminal Mode",
+		description: "Choose how the transcript uses the terminal",
+		options: [
+			{
+				value: "fullscreen",
+				label: "Fullscreen",
+				description: "Keep the composer fixed while scrolling the transcript inside OMP",
+			},
+			{
+				value: "inline",
+				label: "Inline",
+				description: "Keep transcript history in the terminal scrollback",
+			},
+		],
+	},
+});
+
+/** The configured presentation beneath launch overrides, for `/settings` and the next launch's cache. */
+export function savedTuiMode(settings: Settings): "inline" | "fullscreen" {
+	if (!settings.hasRuntimeOverride(cfgTuiMode)) return cfgTuiMode.layered(settings);
+	const configured = settings.underlyingValue(cfgTuiMode);
+	return isTuiMode(configured) ? configured : cfgTuiMode.default;
+}
+
+export const cfgTuiFullscreenMouse = register({
+	id: "tui.fullscreenMouse",
+	type: "enum",
+	values: ["select", "wheel", "native"] as const,
+	default: "select",
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Fullscreen Mouse",
+		description: "How fullscreen mode uses the mouse; Shift+drag always selects natively in the terminal",
+		options: [
+			{
+				value: "select",
+				label: "Select",
+				description: "Wheel, scrollbar, and drag to select transcript text",
+			},
+			{
+				value: "wheel",
+				label: "Wheel",
+				description: "Wheel and scrollbar only; drags are ignored",
+			},
+			{
+				value: "native",
+				label: "Native",
+				description: "The terminal keeps the mouse: plain drag selects natively; scroll with the keyboard",
+			},
+		],
+	},
+});
+
+export const cfgTuiCopyOnRelease = register({
+	id: "tui.copyOnRelease",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Copy on Release",
+		description: "In fullscreen, copy a transcript selection when the mouse is released",
 	},
 });
 

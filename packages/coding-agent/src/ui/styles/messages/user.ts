@@ -16,7 +16,9 @@ import type { UiNode } from "@oh-my-pi/pi-tui";
 import { type Block, defineRolePainter, EMPTY_BLOCK, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { styledText } from "@oh-my-pi/pi-tui/term/painters/layout";
 import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
-import { renderMarkdownFrame } from "@oh-my-pi/pi-tui/text/markdown/index";
+import { type MarkdownFrame, renderMarkdownFrame } from "@oh-my-pi/pi-tui/text/markdown/index";
+import type { RenderedText } from "@oh-my-pi/pi-tui/term/text-layout";
+import { RowText, sliceText } from "../rendered-text";
 import { truncate, visibleWidth } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { fgSgr } from "@oh-my-pi/pi-tui/theme/color";
@@ -72,7 +74,7 @@ export function bubbleMarkdown(
 		/** The terminal draws OSC 8 links: chips link to their files. */
 		hyperlinks?: boolean;
 	},
-): readonly string[] {
+): MarkdownFrame {
 	const padding = options.padding ?? 0;
 	return renderMarkdownFrame(colorChips(theme, text, options.chips ?? [], options.hyperlinks === true), width, {
 		// A terminal-default text color reads as the theme's contrast fallback on the fill.
@@ -80,21 +82,26 @@ export function bubbleMarkdown(
 		paddingX: padding,
 		paddingY: padding,
 		textStyle: options.synthetic ? "dim" : "userMessageText",
-	}).rows;
+	});
 }
 
 /** The bubble's rows: Markdown with its padding, filled (chips linked on a terminal that draws links). */
-export function bubbleRows(cx: PaintContext, prompt: UiNode, width: number): string[] {
+export function bubbleRows(
+	cx: PaintContext,
+	prompt: UiNode,
+	width: number,
+): { rows: string[]; text?: () => RenderedText } {
 	const theme = cx.theme;
 	const term = termOf<PromptTerm>(prompt);
 	const text = glowKeywords(cx, term.display ?? propsOf<{ text: string }>(prompt).text ?? "", term.keywords ?? []);
-	const rows = bubbleMarkdown(theme, text, width, {
+	const frame = bubbleMarkdown(theme, text, width, {
 		chips: term.chips,
 		synthetic: term.synthetic,
 		padding: 1,
 		hyperlinks: cx.hyperlinks,
 	});
-	return rows.map(row => fillRow(theme, BG, row, width));
+	// The fill adds escapes and padding only: the frame's text still describes the rows.
+	return { rows: frame.rows.map(row => fillRow(theme, BG, row, width)), text: frame.text };
 }
 
 /**
@@ -116,19 +123,23 @@ function glowKeywords(cx: PaintContext, text: string, keywords: readonly Glowing
 	return out + text.slice(at);
 }
 
-/** The first row holding text (the top fill row when none does). */
-function emergencyRow(rows: readonly string[]): string {
-	for (let i = 1; i < rows.length - 1; i++) if (stripEscapes(rows[i]!).trim()) return rows[i]!;
-	return rows[rows.length >= 3 ? 1 : 0]!;
+/** The index of the first row holding text (the top fill row when none does). */
+function emergencyRow(rows: readonly string[]): number {
+	for (let i = 1; i < rows.length - 1; i++) if (stripEscapes(rows[i]!).trim()) return i;
+	return rows.length >= 3 ? 1 : 0;
 }
 
 function paintUser(node: UiNode, cx: PaintContext): Block {
 	const theme = cx.theme;
 	const prompt = node.children().find(child => child.kind === "md");
 	if (!prompt) return EMPTY_BLOCK;
-	const rows = bubbleRows(cx, prompt, cx.width);
+	const bubble = bubbleRows(cx, prompt, cx.width);
+	const rows = bubble.rows;
 	if (rows.length === 0) return EMPTY_BLOCK;
-	if (cx.height === 1) return { rows: [emergencyRow(rows)] };
+	if (cx.height === 1) {
+		const at = emergencyRow(rows);
+		return sliceText(bubble, at, at + 1);
+	}
 	const term = termOf<UserTerm>(node);
 	if (term.steered || term.reaction !== undefined) {
 		const marker = term.steered ? theme.fg("accent", "*") : "";
@@ -140,7 +151,8 @@ function paintUser(node: UiNode, cx: PaintContext): Block {
 		rows[0] = ZONE_START + rows[0]!;
 		rows[rows.length - 1] += ZONE_CLOSE;
 	}
-	return { rows };
+	// The top row is padding (the marker and reaction are chrome); zone marks are escapes.
+	return bubble;
 }
 
 /**
@@ -152,10 +164,10 @@ function paintSynthetic(node: UiNode, cx: PaintContext): Block {
 	if (!props.collapsible) return paintUser(node, cx);
 	const theme = cx.theme;
 	const summary = `${styledText(theme, props.head)}${theme.symbols.symbol("sep.dot")}${expandKeyLabel(theme)}`;
-	const rows = [` ${theme.fg("dim", truncate(stripEscapes(summary), Math.max(10, cx.width - 1)))}`];
+	const out = new RowText().deco(` ${theme.fg("dim", truncate(stripEscapes(summary), Math.max(10, cx.width - 1)))}`);
 	const prompt = node.children().find(child => child.kind === "md");
-	if (prompt && !props.collapsed) rows.push(...bubbleRows(cx, prompt, cx.width));
-	return { rows };
+	if (prompt && !props.collapsed) out.block(bubbleRows(cx, prompt, cx.width));
+	return out.done();
 }
 
 defineRolePainter("card", "omp.user", paintUser);

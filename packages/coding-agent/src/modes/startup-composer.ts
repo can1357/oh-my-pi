@@ -1,18 +1,20 @@
 /**
- * The prepaint frame: the interactive UI started before the command modules
- * load, built from the preferences the last launch cached, so the first frame
- * (welcome card, composer) shows at once and typing lands in the composer.
- * Submitting waits for the interactive mode, which adopts the started frame.
+ * Start the real interactive frame and its input driver before the command modules load.
+ * Cached preferences can predict the welcome card and composer, but cannot authorize writing
+ * over the shell. Until the terminal presentation is known, only native or alternate-screen
+ * frames may paint. The interactive mode adopts the same composer, draft and input handlers.
  */
-import { untrack } from "@oh-my-pi/pi-tui";
+import { batch, untrack } from "@oh-my-pi/pi-tui";
 import type { TerminalCapabilities } from "@oh-my-pi/pi-tui/driver/contract";
 import type { TerminalDriverOptions } from "@oh-my-pi/pi-tui/driver/index";
+import type { TermPresentation, TranscriptPointer } from "@oh-my-pi/pi-tui/term/backend";
 import { getProjectDir } from "@oh-my-pi/pi-utils/dirs";
 import { initTheme } from "../ui/theme/service";
 import { composerBorderColor } from "./interactive/border-color";
 import { AppFrame } from "./interactive/frame";
 import { type StartupCache, type StartupPreferences, sharedStartupCache } from "./interactive/startup-cache";
 import { predictedStatusLine, type StatusPrediction } from "./interactive/status-prediction";
+import { PRESENTATION_ENV, parsePresentationEnv } from "./presentation-env";
 import type { ComposerThemePreferences } from "./view-model/prompt/composer-cache";
 
 /** The preferences a frame starts with when nothing is cached. */
@@ -23,6 +25,7 @@ const STARTUP_DEFAULTS: StartupPreferences = {
 	autocompleteMaxVisible: 5,
 	vim: false,
 	imeSafeCursor: false,
+	mode: "inline",
 };
 
 /** Inputs available at the CLI prepaint boundary before command modules load. */
@@ -33,6 +36,8 @@ export interface PrepaintComposerOptions {
 	readonly exit?: (code: number) => void;
 	readonly version?: string;
 	readonly cwd?: string;
+	/** Authoritative `--tui-mode` for this launch only. */
+	readonly tuiMode?: TermPresentation;
 	readonly preferences?: Partial<StartupPreferences>;
 	readonly theme?: ComposerThemePreferences;
 	/** The background to paint for until the terminal reports it; the last report by default. */
@@ -42,20 +47,31 @@ export interface PrepaintComposerOptions {
 	readonly cache?: boolean;
 }
 
-/** Final settings pushed into the live frame after Settings and the theme resolve. */
+/**
+ * Final settings pushed into the live frame after Settings and the theme resolve. `mode` is the
+ * saved `tui.mode` the cache keeps for the next first frame; `presentation` is this launch's.
+ */
 export interface PrepaintComposerPreferences extends StartupPreferences {
+	/** Presentation after applying CLI and environment overrides. */
+	readonly presentation: TermPresentation;
+	/** `tui.fullscreenMouse`. */
+	readonly pointer: TranscriptPointer;
+	/** `tui.copyOnRelease`. */
+	readonly copyOnRelease: boolean;
 	readonly theme: ComposerThemePreferences;
 }
 
 interface PendingFrame {
 	readonly frame: AppFrame;
-	/** Settles once the frame drew its first frame. */
+	/** Settles once the host is running, even when its first ANSI paint still awaits settings. */
 	readonly started: Promise<void>;
 	readonly cwd: string;
 	/** Speculation store to refresh; `undefined` when caching is off or unavailable. */
 	readonly cache: StartupCache | undefined;
 	/** Drops the prepaint key handler (emergency Ctrl+C / Ctrl+D). */
 	readonly releaseKeys: () => void;
+	/** An inline launch clears exactly once, whichever resolves first: settings or the host. */
+	needsInlineClear: boolean;
 }
 
 let pending: PendingFrame | undefined;
@@ -63,7 +79,7 @@ let pending: PendingFrame | undefined;
 /** Ownership token that transfers one started frame to InteractiveMode. */
 export class ComposerLease {
 	readonly frame: AppFrame;
-	/** Settles once the frame drew its first frame (the interactive mode adopts a started frame). */
+	/** Settles once the host is running and can be adopted. */
 	readonly ready: Promise<void>;
 	readonly #releaseKeys: () => void;
 	#adopted = false;
@@ -88,7 +104,7 @@ export class ComposerLease {
 	dispose(): void {
 		if (this.#adopted) return;
 		this.#releaseKeys();
-		void this.frame.shell.stop();
+		stopStartupFrame(this.frame, this.ready);
 	}
 }
 
@@ -120,6 +136,10 @@ export function beginStartupComposer(options: PrepaintComposerOptions = {}): voi
 	});
 	// Nothing would submit yet: the interactive mode lifts this once its pipeline exists.
 	frame.composer.setDisableSubmit(true);
+	// Even an empty cache may belong to a saved fullscreen launch. A mistaken alternate frame
+	// is reversible; a mistaken inline frame (including its ED3) is not.
+	const override = options.tuiMode ?? parsePresentationEnv(Bun.env[PRESENTATION_ENV] ?? "");
+	frame.presentation.set(override ?? (preferences.mode === "fullscreen" ? "fullscreen" : null));
 	// The bar and border a fresh session here will show; the interactive mode swaps in the live ones.
 	const status = options.status ?? cached.status;
 	if (status) frame.setStatusLine(predictedStatusLine(status, cwd), null);
@@ -147,14 +167,38 @@ export function beginStartupComposer(options: PrepaintComposerOptions = {}): voi
 		exit(0);
 		return true;
 	});
-	const started = frame.start({
-		clearHistory: true,
-		resizeScrollback: preferences.resizeScrollback,
-		...(options.driver ? { driver: options.driver } : {}),
-	});
-	// Remember the background the terminal reports (OSC 11), so the next launch paints for it.
-	if (cache) void started.then(() => rememberAppearance(frame, cache, cwd));
-	pending = { frame, started, cwd, cache, releaseKeys };
+	const current: PendingFrame = {
+		frame,
+		cwd,
+		cache,
+		releaseKeys,
+		needsInlineClear: true,
+		started: frame.start({ resizeScrollback: preferences.resizeScrollback, driver: options.driver }).then(() => {
+			clearInlineOnce(current);
+			if (cache) rememberAppearance(frame, cache, cwd);
+		}),
+	};
+	pending = current;
+}
+
+function clearInlineOnce(current: PendingFrame): void {
+	const { frame } = current;
+	if (!current.needsInlineClear || frame.presentation.peek() !== "inline" || !frame.shell.host) return;
+	current.needsInlineClear = false;
+	frame.shell.host.replayHistory();
+}
+
+function stopStartupFrame(frame: AppFrame, started: Promise<void>): void {
+	if (frame.shell.host) {
+		void frame.shell.stop();
+	} else {
+		// The handshake may still be in flight. Do not let a late renderer paint or keep stdin.
+		frame.presentation.set(null);
+		void started.then(
+			() => frame.shell.stop(),
+			() => {},
+		);
+	}
 }
 
 /** Cache each appearance the terminal reports for the frame's lifetime (its driver's). */
@@ -180,20 +224,30 @@ export function takeStartupComposerLease(): ComposerLease | undefined {
 export function stopPendingStartupComposer(): void {
 	if (!pending) return;
 	pending.releaseKeys();
-	void pending.frame.shell.stop();
+	stopStartupFrame(pending.frame, pending.started);
 	pending = undefined;
 }
 
-/** Apply the resolved settings to the pending frame and cache them for the next first frame. */
+/**
+ * Apply the resolved settings to the pending frame and cache them for the next first frame: the
+ * saved `tui.mode`, never this launch's override.
+ */
 export function applyStartupComposerPreferences(update: PrepaintComposerPreferences): void {
 	const current = pending;
 	if (!current) return;
-	const { theme, ...preferences } = update;
+	const { theme, presentation, pointer, copyOnRelease, ...preferences } = update;
 	const { frame } = current;
 	frame.setShape(preferences.composerShape);
 	frame.setQuiet(preferences.quiet);
 	frame.composer.setVim(preferences.vim);
 	frame.composer.setAutocompleteMaxVisible(preferences.autocompleteMaxVisible);
 	frame.setImeSafeCursor(preferences.imeSafeCursor);
+	batch(() => {
+		frame.presentation.set(presentation);
+		frame.pointer.set(pointer);
+		frame.copyOnRelease.set(copyOnRelease);
+	});
+	if (presentation === "inline") clearInlineOnce(current);
+	else current.needsInlineClear = false;
 	current.cache?.write(current.cwd, preferences, theme);
 }

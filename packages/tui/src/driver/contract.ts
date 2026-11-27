@@ -14,6 +14,10 @@ export interface MouseEvent {
 	readonly button: "left" | "middle" | "right" | "wheel-up" | "wheel-down" | "wheel-left" | "wheel-right" | "none";
 	readonly action: "press" | "release" | "move" | "drag";
 	readonly mods: readonly ("shift" | "alt" | "ctrl")[];
+	/** Position inside the cell's height, in [0, 1); present only under SGR-pixel reporting. */
+	readonly rowFraction?: number;
+	/** Position inside the cell's width, in [0, 1); present only under SGR-pixel reporting. */
+	readonly colFraction?: number;
 }
 
 /** Everything the driver decodes from stdin. */
@@ -52,6 +56,12 @@ export interface TerminalCapabilities {
 	readonly multiplexer: "tmux" | "zellij" | "screen" | null;
 	/** A Tern terminal answered the TSP hello: native rendering is possible. */
 	readonly tsp: boolean;
+	/**
+	 * Mouse tracking also turns on SGR-pixel reporting (DECSET 1016), so mouse
+	 * events carry `rowFraction`/`colFraction`: a terminal whose pixel units
+	 * are verified confirmed the mode, and its cell size is known.
+	 */
+	readonly pixelMouse: boolean;
 }
 
 /** A frame the terminal backend asks the writer to show. */

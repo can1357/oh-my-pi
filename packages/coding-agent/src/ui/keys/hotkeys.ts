@@ -30,7 +30,7 @@ function cell(part: HotkeyPart): string {
 	return `\`${part.keys.length > 0 ? formatKeyHints(part.keys) : "Disabled"}\``;
 }
 
-/** The shortcut groups (Navigation, Editing, Other), built from the effective bindings. */
+/** The shortcut groups (Navigation, Editing, Fullscreen transcript, Other), built from the effective bindings. */
 export function hotkeyGroups(keybindings: KeybindingsManager): HotkeyGroup[] {
 	const isMac = keyHintPlatform() === "darwin";
 	const act = (action: Keybinding): HotkeyPart => ({ keys: keybindings.keysFor(action) });
@@ -76,6 +76,29 @@ export function hotkeyGroups(keybindings: KeybindingsManager): HotkeyGroup[] {
 				{ keys: [keys("ctrl+k")], action: "Delete to end of line" },
 				{ keys: [act("app.clipboard.copyLine")], action: "Copy current line" },
 				{ keys: [act("app.clipboard.copyPrompt")], action: "Copy whole prompt" },
+			],
+		},
+		{
+			title: "Fullscreen transcript",
+			rows: [
+				{
+					keys: [act("app.transcript.pageUp"), { text: " / " }, act("app.transcript.pageDown")],
+					action: "Scroll a page up / down",
+				},
+				{
+					keys: [act("app.transcript.lineUp"), { text: " / " }, act("app.transcript.lineDown")],
+					action: "Scroll a row up / down",
+				},
+				{
+					keys: [act("app.transcript.top"), { text: " / " }, act("app.transcript.bottom")],
+					action: "Read from the start / back to live output",
+				},
+				{
+					keys: [act("app.transcript.previousUser"), { text: " / " }, act("app.transcript.nextUser")],
+					action: "Previous / next prompt",
+				},
+				{ keys: [act("app.transcript.copyHighlight")], action: "Copy the transcript selection" },
+				{ keys: [act("app.transcript.find")], action: "Find in transcript" },
 			],
 		},
 		{

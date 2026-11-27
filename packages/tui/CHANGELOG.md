@@ -17,9 +17,17 @@
 - Added `MarkdownOptions.linkUrls` and `MarkdownLook.linkUrls` to control whether URLs are displayed after named OSC 8 hyperlinks.
 - Added `TextEdit.paste` to identify edits produced by bracketed paste operations.
 - Added `tool.gl` symbols to the Unicode, Nerd Font, and ASCII presets for the GitLab tool.
+- Added a fullscreen presentation to the terminal renderer (`HostOptions.presentation`): `main` scrolls inside the program on the alternate screen above the pinned `dock`, following new output or holding the reading position through streaming and resizes, with a marks lane and thin scrollbar (`marks`), accelerated wheel scrolling (ported from pi), text selection with copy on release (`pointer`, `copyOnRelease`, `copyText`), and reading controls on `Host.scroller`. Terminal history is never written while it is active ([#20766](https://github.com/can1357/oh-my-pi/pull/20766) by [@camjac251](https://github.com/camjac251))
+- `Host.scroller.findText()` finds and highlights literal text in the fullscreen transcript, including matches that wrap across screen rows ([#20766](https://github.com/can1357/oh-my-pi/pull/20766) by [@camjac251](https://github.com/camjac251))
+- Painters may describe the logical text of their rows (`Block.text`, `term/text-layout`), so a selection copies wrapped lines as one line without borders, gutters or padding ([#20766](https://github.com/can1357/oh-my-pi/pull/20766) by [@camjac251](https://github.com/camjac251))
+- Added SGR-pixel mouse reporting (DECSET 1016) on kitty, Ghostty, and WezTerm when they confirm support: events keep cell `row`/`col` and gain `rowFraction`/`colFraction`. Kitty pointer-leave reports are ignored ([#20766](https://github.com/can1357/oh-my-pi/pull/20766) by [@camjac251](https://github.com/camjac251))
+- Added `ProcessTerminalDriver.setAlternateScroll()` (DECSET 1007); stop and crash restore put back the terminal's own setting and now also reset 1002 and 1016 ([#20766](https://github.com/can1357/oh-my-pi/pull/20766) by [@camjac251](https://github.com/camjac251))
+- `writeTerminalSequence(data, { awaitDelivery: true })` resolves whether the sequence reached the terminal ([#20766](https://github.com/can1357/oh-my-pi/pull/20766) by [@camjac251](https://github.com/camjac251))
+- SIXEL images cut by a fullscreen window draw only their visible rows; other anchored images wait until they are wholly in view ([#20766](https://github.com/can1357/oh-my-pi/pull/20766) by [@camjac251](https://github.com/camjac251))
 
 ### Fixed
 
+- Kitty images now transmit to the alternate screen after the terminal switches to it, so images visible on entry are drawn there ([#20766](https://github.com/can1357/oh-my-pi/pull/20766) by [@camjac251](https://github.com/camjac251))
 - Improved performance when editing large documents and updating or closing views with many reactive values.
 - Fixed pane resizing in Herdr to avoid repeated redraw loops.
 - Fixed SIXEL and iTerm2 images overflowing rows, scrolling the terminal unexpectedly, or rendering incorrectly when they extend beyond the visible screen.

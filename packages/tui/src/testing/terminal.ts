@@ -84,6 +84,7 @@ const BASE_CAPABILITIES: TerminalCapabilities = {
 	multiplexer: null,
 	textSizing: false,
 	tsp: false,
+	pixelMouse: false,
 };
 
 /** Printable text of a bare key id (`a`, `space`, `shift+a`), if it produces any. */

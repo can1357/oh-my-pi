@@ -260,7 +260,7 @@ describe("EventController error banner", () => {
 
 		expect(showPinnedError).not.toHaveBeenCalled();
 		expect(setErrorPinned).toHaveBeenCalledWith(false);
-		expect(showError).toHaveBeenCalledWith(`Retry failed after 1 attempts: ${finalError}`);
+		expect(showError).toHaveBeenCalledWith(`Retry failed after 1 attempts: ${finalError}`, { failsTurn: true });
 	});
 
 	it("shows a failed retry banner when no terminal assistant error exists", async () => {
@@ -275,6 +275,7 @@ describe("EventController error banner", () => {
 
 		expect(showError).toHaveBeenCalledWith(
 			"Retry failed after 3 attempts: Assistant returned empty stop after retry cap",
+			{ failsTurn: true },
 		);
 	});
 

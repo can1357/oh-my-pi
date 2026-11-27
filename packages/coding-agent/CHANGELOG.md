@@ -19,6 +19,10 @@
 - Included `tool_approvals` in `omp gc` session statistics and purge handling.
 - Added `local/parakeet-tdt-0.6b-v2`, the most accurate local English dictation model.
 - Added Codex's 17 new live voices to `live.voice`: `aube`, `bubbie`, `haetsal`, `hanul`, `himari`, `leher`, `marin`, `miko`, `neer`, `porto`, `rindo`, `rio`, `rivage`, `selva`, `sonna`, `tinta`, and `viola`.
+- Added opt-in fullscreen mode (`tui.mode: fullscreen`, `omp --tui-mode fullscreen`, or `PI_TUI_MODE=fullscreen`). The prompt stays at the bottom while you read earlier output, even as new text streams or the terminal resizes. Quitting restores the original screen without writing the transcript to shell history ([#20766](https://github.com/can1357/oh-my-pi/pull/20766) by [@camjac251](https://github.com/camjac251))
+- Fullscreen has a thin scrollbar with one mark per prompt, colored by how the turn ended; click a mark to jump to it. Scroll with the wheel, PageUp/PageDown, Alt+Home/End, and Alt+K/J; jump between your prompts with Alt+PageUp/PageDown. Each of these keys gives way to your own binding of it ([#20766](https://github.com/can1357/oh-my-pi/pull/20766) by [@camjac251](https://github.com/camjac251))
+- Press `Alt+/` to find text in the fullscreen transcript without replacing your draft. `Enter` and `Shift+Enter` move between matches; `Escape` returns to the composer ([#20766](https://github.com/can1357/oh-my-pi/pull/20766) by [@camjac251](https://github.com/camjac251))
+- Fullscreen transcript text can be selected by dragging (double-click a word, triple-click a line) and is copied on release with wrapped lines joined. Set `tui.copyOnRelease: false` to copy with Alt+C instead, or `tui.fullscreenMouse: wheel`/`native` to limit mouse use; Shift+drag still selects natively, Ctrl+C, Escape, and right-click keep their meanings, and with `tui.mouse` on, clicking a subagent card or an extension link in the transcript activates it ([#20766](https://github.com/can1357/oh-my-pi/pull/20766) by [@camjac251](https://github.com/camjac251))
 
 ### Changed
 
@@ -93,6 +97,8 @@
 - Custom composer shapes can add blank rows above the input and keep the caret on the text row ([#20532](https://github.com/can1357/oh-my-pi/issues/20532)).
 - Fixed ACP and RPC `/mcp` commands to respect project-server precedence, enable/disable overrides, and the session working directory. ([#20499](https://github.com/can1357/oh-my-pi/pull/20499) by [@eggpeat](https://github.com/eggpeat))
 - Fixed `bash.patterns` approval false positives on benign flags (`go test -race`, `rg -e`, `jq -c`, quoted commit messages with `-e`/`-c`, ANSI-C `$'...'` strings) by parsing commands with omp's native Bash/Zsh parser and a command-aware argument guard ([#20686](https://github.com/can1357/oh-my-pi/pull/20686) by [@asuffield](https://github.com/asuffield))
+- Resumed sessions now explain when a saved `/clear` boundary hides earlier messages and how to show them without restoring model context ([#20766](https://github.com/can1357/oh-my-pi/pull/20766) by [@camjac251](https://github.com/camjac251))
+- Copying over SSH no longer changes the remote host's clipboard or reports that write as delivery to your local clipboard; copy messages now say when delivery could not be confirmed ([#20766](https://github.com/can1357/oh-my-pi/pull/20766) by [@camjac251](https://github.com/camjac251))
 
 ### Removed
 

@@ -213,6 +213,8 @@ export class FrameWriter {
 	/** Cursor row/column relative to the viewport top (column -1: unknown). */
 	#cursorRow = 0;
 	#cursorCol = 0;
+	/** The shell left a partial line. Only an inline paint may advance it. */
+	#partialShellLine = false;
 	/** Rows clipped from the start of the last inline frame. */
 	#clipped = 0;
 	/** Bounds on the viewport top's screen row; equal when known. */
@@ -315,14 +317,9 @@ export class FrameWriter {
 		this.#deferred = undefined;
 		this.#pushed = [];
 		this.#pushedCursor = undefined;
+		this.#partialShellLine = (cursor?.col ?? 0) > 0;
 		if (cursor) {
-			let row = Math.min(Math.max(0, cursor.row), this.#rows - 1);
-			if (cursor.col > 0) {
-				// Leave a partial line the shell left behind.
-				this.#send("\r\n");
-				row = Math.min(row + 1, this.#rows - 1);
-			}
-			this.#topLo = this.#topHi = row;
+			this.#topLo = this.#topHi = Math.min(Math.max(0, cursor.row), this.#rows - 1);
 		} else {
 			this.#topLo = 0;
 			this.#topHi = this.#rows - 1;
@@ -505,6 +502,11 @@ export class FrameWriter {
 		}
 		let out = "";
 		if (this.#alt) out += this.#leaveAlt();
+		if (this.#partialShellLine) {
+			// No inline frame took the shell's cursor. Even CR would change where its next output lands.
+			this.#send(`${out}${AUTOWRAP_ON}${CURSOR_SHOW}`);
+			return;
+		}
 		const content = this.#shown.findLastIndex(row => row !== "");
 		if (this.#stale) {
 			// Mid-resize: the cursor sits where the reflow left it.
@@ -575,25 +577,29 @@ export class FrameWriter {
 	#paintInline(frame: FramePlan, prefix: string): number | undefined {
 		const width = this.#columns;
 		const height = this.#rows;
-		let body = prefix;
+		let body = "";
 		const offered = frame.history;
 		const history = offered && offered.id > this.#written ? offered : undefined;
 		if (history?.kind === "replay") {
 			if (this.#replayAppends) this.#replayAppends = false;
 			else this.#pendingClear = true;
 		}
-		let lead = "";
+		let lead = prefix;
 		if (this.#pendingClear) {
 			// The erase goes before the image sequences: it frees images without a placement.
-			lead = body + CLEAR_ALL;
-			body = "";
+			lead += CLEAR_ALL;
 			this.#options.images?.cleared?.();
 			this.#pendingClear = false;
 			this.#shown = [];
 			this.#cursorRow = 0;
 			this.#topLo = this.#topHi = 0;
 			this.#extent = height;
+		} else if (this.#partialShellLine) {
+			lead += "\r\n";
+			this.#topLo = Math.min(this.#topLo + 1, height - 1);
+			this.#topHi = Math.min(this.#topHi + 1, height - 1);
 		}
+		this.#partialShellLine = false;
 		const previousGraphics = this.#shown.length > 0 && this.#shownGraphics;
 		this.#clipped = Math.max(0, frame.viewport.length - height);
 		let viewport = this.#normalizeViewport(frame.viewport, width, this.#clipped);
@@ -740,8 +746,8 @@ export class FrameWriter {
 	}
 
 	#paintAlternate(rows: readonly string[], cursor: FramePlan["cursor"], prefix: string, fullscreen: boolean): void {
-		let body = prefix;
-		if (!this.#alt) body += this.#enterAlt();
+		const lead = this.#alt ? prefix : prefix + this.#enterAlt();
+		let body = "";
 		this.#fullscreen = fullscreen;
 		const height = this.#rows;
 		const width = this.#columns;
@@ -756,7 +762,7 @@ export class FrameWriter {
 		this.#altShown = next;
 		const show = cursor !== null && cursor.row >= 0 && cursor.row < height;
 		const park = show ? position(cursor.row, Math.min(cursor.col, width - 1)) : body ? position(height - 1, 0) : "";
-		this.#write(body, park, show);
+		this.#write(body, park, show, lead);
 	}
 
 	/** The viewport tail, bottom-anchored on the borrowed alternate screen. */

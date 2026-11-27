@@ -17,6 +17,8 @@ import { renderMarkdownFrame } from "@oh-my-pi/pi-tui/text/markdown/index";
 import { replaceTabs, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { fillRow, propsOf, termOf } from "./fill";
+import type { RenderedText } from "@oh-my-pi/pi-tui/term/text-layout";
+import { RowText, shiftText, type TextRows } from "../rendered-text";
 
 interface FrameTerm {
 	glyph?: string;
@@ -26,22 +28,29 @@ interface FrameTerm {
 	collapseAfterLines?: number;
 }
 
-/** Rows of `content` inside a rounded outline in `border` around a `bg` fill with one cell of padding. */
+/**
+ * Rows of `content` inside a rounded outline in `border` around a `bg` fill with one cell of
+ * padding: the outline is decoration, content copies two cells in.
+ */
 export function outlinedRows(
 	theme: Theme,
-	content: readonly string[],
+	content: TextRows,
 	width: number,
 	border: string,
 	bg: string,
-): string[] {
+): { rows: string[]; text: () => RenderedText } {
 	const box = theme.symbols.box;
 	const inner = Math.max(0, width - 2);
 	const edge = theme.fg(border, box.vertical);
-	return [
-		theme.fg(border, `${box.topLeft}${box.horizontal.repeat(inner)}${box.topRight}`),
-		...content.map(row => `${edge}${fillRow(theme, bg, row === "" ? "" : ` ${row}`, inner)}${edge}`),
-		theme.fg(border, `${box.bottomLeft}${box.horizontal.repeat(inner)}${box.bottomRight}`),
-	];
+	return new RowText()
+		.deco(theme.fg(border, `${box.topLeft}${box.horizontal.repeat(inner)}${box.topRight}`))
+		.block(
+			content,
+			2,
+			content.rows.map(row => `${edge}${fillRow(theme, bg, row === "" ? "" : ` ${row}`, inner)}${edge}`),
+		)
+		.deco(theme.fg(border, `${box.bottomLeft}${box.horizontal.repeat(inner)}${box.bottomRight}`))
+		.done();
 }
 
 function paintFrameCard(node: UiNode, cx: PaintContext): Block {
@@ -49,11 +58,15 @@ function paintFrameCard(node: UiNode, cx: PaintContext): Block {
 	const props = propsOf<{ head: unknown; collapsed: boolean }>(node);
 	const term = termOf<FrameTerm>(node);
 	const contentWidth = Math.max(1, cx.width - 4);
-	const content: string[] = [""];
+	const content = new RowText().deco("");
 	if (props.head !== undefined) {
 		const glyph = term.glyph ?? (term.icon ? theme.symbols.icon(term.icon) : "");
-		const tag = glyph ? `${glyph} ${term.tag ?? ""}` : (term.tag ?? "");
-		content.push(...wrap(theme.fg("customMessageLabel", `\x1b[1m${tag}\x1b[22m`), contentWidth), "");
+		const label = term.tag ?? "";
+		const rows = wrap(
+			theme.fg("customMessageLabel", `\x1b[1m${glyph ? `${glyph} ${label}` : label}\x1b[22m`),
+			contentWidth,
+		);
+		content.prefixed(label, rows, glyph ? `${Bun.stripANSI(glyph)} ` : "", "").deco("");
 	}
 	const body = node.children().find(child => child.kind === "md");
 	let text = body ? (propsOf<{ text: string }>(body).text ?? "") : "";
@@ -64,17 +77,16 @@ function paintFrameCard(node: UiNode, cx: PaintContext): Block {
 		folded = lines.length > fold;
 		if (folded) text = lines.slice(0, fold).join("\n");
 	}
-	const { rows } = renderMarkdownFrame(replaceTabs(text), contentWidth, {
-		theme,
-		textStyle: "customMessageText",
-		hyperlinks: cx.hyperlinks,
-	});
-	content.push(...rows);
-	if (folded) content.push("…");
-	content.push("");
-	return {
-		rows: outlinedRows(theme, content, cx.width, term.border ?? "borderMuted", "customMessageBg"),
-	};
+	content.block(
+		renderMarkdownFrame(replaceTabs(text), contentWidth, {
+			theme,
+			textStyle: "customMessageText",
+			hyperlinks: cx.hyperlinks,
+		}),
+	);
+	if (folded) content.deco("…");
+	content.deco("");
+	return outlinedRows(theme, content.done(), cx.width, term.border ?? "borderMuted", "customMessageBg");
 }
 
 function paintFrameCustom(node: UiNode, cx: PaintContext): Block {
@@ -83,12 +95,15 @@ function paintFrameCustom(node: UiNode, cx: PaintContext): Block {
 		node.children().map(child => {
 			// A rows object owns its columns, as the old frame drew its component.
 			if (child.kind === "canvas") return cx.paint(child, cx.width);
-			const { rows } = cx.paint(child, inner);
-			return { rows: rows.map(row => (row === "" ? row : ` ${row}`)) };
+			const painted = cx.paint(child, inner);
+			return {
+				rows: painted.rows.map(row => (row === "" ? row : ` ${row}`)),
+				text: shiftText(painted, 1),
+			};
 		}),
 		0,
 	);
-	return { rows: block.rows };
+	return { rows: block.rows, ...(block.text ? { text: block.text } : {}) };
 }
 
 for (const role of ["omp.custom", "omp.custom.delegation", "omp.hook"]) {

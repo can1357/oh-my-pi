@@ -27,7 +27,7 @@ import type {
 	TerminalInput,
 	TerminalPort,
 } from "../io";
-import { isTernPane, TERMINAL_PROFILES } from "../caps/identity";
+import { isTernPane, TERMINAL_PROFILES, type TerminalId } from "../caps/identity";
 import {
 	type Env,
 	hasMultiplexerSession,
@@ -141,6 +141,21 @@ let nextNotifyProbe = 1;
 /** DECSCUSR parameters (steady shapes; 0 hands the shape back to the terminal's configuration). */
 const CURSOR_SHAPES: Readonly<Record<CursorShape, number>> = { default: 0, block: 2, underline: 4, bar: 6 };
 const MOUSE_MODES: Readonly<Record<Exclude<MouseTracking, "off">, number>> = { click: 1000, drag: 1002, any: 1003 };
+/**
+ * Stop and crash restore turn off every mouse mode the driver can set, whoever
+ * set it (clearing an unset mode is harmless): SGR-pixel, SGR, any, drag, click.
+ */
+const MOUSE_RESET = "\x1b[?1016l\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l";
+/**
+ * Terminals whose SGR-pixel reports (DECSET 1016) are verified to be device
+ * pixels matching the reported cell size. DECRQM confirms the mode, not its
+ * units (iTerm2 reports logical points).
+ */
+const PIXEL_MOUSE_TERMINALS: Readonly<Partial<Record<TerminalId, true>>> = {
+	kitty: true,
+	ghostty: true,
+	wezterm: true,
+};
 /** Mode 2031 notifications coalesce into one OSC 11 re-query. */
 const SCHEME_DEBOUNCE_MS = 100;
 /** Windows Terminal has no Mode 2031; its background is polled instead. */
@@ -217,6 +232,14 @@ export class ProcessTerminalInput implements TerminalInput {
 	#inBandResize = false;
 	#colorSchemeReports = false;
 	#restoreModes: number[] = [];
+	/** The alternate-scroll state (1007) this session set; undefined: untouched. */
+	#alternateScroll: boolean | undefined;
+	/** The terminal's own 1007 state from DECRQM; null when it did not say. */
+	#alternateScrollOriginal: boolean | null = null;
+	/** DECRQM answered 1016 as a mode it knows (set or reset). */
+	#pixelMouseReported = false;
+	/** SGR-pixel reporting is on (only ever with mouse tracking). */
+	#pixelMouse = false;
 	#mouse: MouseTracking = "off";
 	#titlePushed = false;
 	/** Re-assert bracketed paste before input and output: some hosts reset it (iTerm2's state toggle, tmux panes). */
@@ -480,6 +503,11 @@ export class ProcessTerminalInput implements TerminalInput {
 		this.#colorSchemeReports = false;
 		this.#restoreModes = [];
 		this.#mouse = "off";
+		this.#pixelMouse = false;
+		this.#pixelMouseReported = false;
+		this.#decoder.pixelMouse = null;
+		this.#alternateScroll = undefined;
+		this.#alternateScrollOriginal = null;
 		this.#titlePushed = false;
 		this.#sixelAdvertised = false;
 		this.#sixelGeometry = false;
@@ -504,11 +532,22 @@ export class ProcessTerminalInput implements TerminalInput {
 	}
 
 	setMouse(tracking: MouseTracking): void {
-		if (!this.#started || tracking === this.#mouse) return;
-		let out = this.#mouse === "off" ? "" : `\x1b[?${MOUSE_MODES[this.#mouse]}l`;
-		out += tracking === "off" ? "\x1b[?1006l" : `\x1b[?${MOUSE_MODES[tracking]}h\x1b[?1006h`;
-		this.#mouse = tracking;
-		this.#port.write(out);
+		if (!this.#started) return;
+		this.#applyMouse(tracking);
+	}
+
+	setAlternateScroll(enabled: boolean | undefined): void {
+		if (!this.#started) return;
+		if (enabled === undefined) {
+			// Back to the terminal's own state: a stop then has nothing of this session's to undo.
+			if (this.#alternateScroll === undefined) return;
+			this.#alternateScroll = undefined;
+			this.#port.write((this.#alternateScrollOriginal ?? true) ? "\x1b[?1007h" : "\x1b[?1007l");
+			return;
+		}
+		if (enabled === this.#alternateScroll) return;
+		this.#alternateScroll = enabled;
+		this.#port.write(enabled ? "\x1b[?1007h" : "\x1b[?1007l");
 	}
 
 	refreshAppearance(): void {
@@ -609,7 +648,6 @@ export class ProcessTerminalInput implements TerminalInput {
 
 	#restoreSequence(): string {
 		let out = this.#progress ? PROGRESS_CLEAR : "";
-		if (this.#mouse !== "off") out += `\x1b[?${MOUSE_MODES[this.#mouse]}l\x1b[?1006l`;
 		if (this.#kittyFlags !== null) out += "\x1b[<u";
 		if (this.#modifyOtherKeys) out += "\x1b[>4;0m";
 		if (this.#win32Input) out += "\x1b[?9001l";
@@ -620,8 +658,12 @@ export class ProcessTerminalInput implements TerminalInput {
 		out += "\x1b[?2004l\x1b[?5522l";
 		// The user's own cursor shape: a Vim Normal-mode block must not outlive the session in their shell.
 		if (this.#cursorShape !== undefined && this.#cursorShape !== "default") out += "\x1b[0 q";
-		// Mouse reporting off whoever turned it on: a program that shared the terminal may have left it set.
-		out += `\x1b[?1006l\x1b[?1003l\x1b[?1000l${NORMAL_KEYS}`;
+		// Mouse reporting off whoever turned it on (a program that shared the terminal may have left it set),
+		// then the terminal's own alternate scroll back; unreported, it is on by convention.
+		out += MOUSE_RESET;
+		if (this.#alternateScroll !== undefined)
+			out += (this.#alternateScrollOriginal ?? true) ? "\x1b[?1007h" : "\x1b[?1007l";
+		out += NORMAL_KEYS;
 		if (this.#titlePushed) out += "\x1b[23;0t";
 		return out;
 	}
@@ -657,6 +699,8 @@ export class ProcessTerminalInput implements TerminalInput {
 	}
 
 	readonly #onOsResize = (): void => {
+		// A font zoom changes the cell's pixel size; without in-band reports carrying it, ask again.
+		if (this.#started && this.#pixelMouse && !this.#inBandResize) this.#port.write("\x1b[16t");
 		this.#resize(this.#osSize());
 	};
 
@@ -712,10 +756,51 @@ export class ProcessTerminalInput implements TerminalInput {
 	}
 
 	#update(patch: Partial<TerminalCapabilities>): void {
-		const next = { ...this.#capabilities, ...patch };
+		const merged = { ...this.#capabilities, ...patch };
+		const next = { ...merged, pixelMouse: this.#pixelMouseAvailable(merged.cell) };
 		if (sameCapabilities(next, this.#capabilities)) return;
 		this.#capabilities = next;
+		// A new cell size or a pixel-mode verdict takes effect on running mouse tracking at once.
+		if (this.#started) this.#applyMouse(this.#mouse);
 		for (const listener of this.#capabilityListeners) listener(next);
+	}
+
+	/** SGR-pixel reporting may accompany mouse tracking: verified units, DECRQM confirmed 1016, a known cell size. */
+	#pixelMouseAvailable(cell: TerminalCapabilities["cell"]): boolean {
+		return (
+			PIXEL_MOUSE_TERMINALS[this.#identity.id] === true &&
+			this.#pixelMouseReported &&
+			cell !== null &&
+			cell.w > 0 &&
+			cell.h > 0
+		);
+	}
+
+	/**
+	 * Move mouse reporting to `tracking`, with SGR-pixel reporting on top
+	 * wherever `pixelMouse` holds. 1006 and 1016 select one coordinate
+	 * encoding between them: resetting 1016 falls back to X10, so SGR is
+	 * re-asserted, and 1016 goes after every 1006 set.
+	 */
+	#applyMouse(tracking: MouseTracking): void {
+		const cell = this.#capabilities.cell;
+		const pixel = tracking !== "off" && this.#capabilities.pixelMouse && cell !== null;
+		let out = "";
+		if (this.#pixelMouse && !pixel) out += "\x1b[?1016l";
+		if (tracking !== this.#mouse) {
+			if (this.#mouse !== "off") out += `\x1b[?${MOUSE_MODES[this.#mouse]}l`;
+			out += tracking === "off" ? "\x1b[?1006l" : `\x1b[?${MOUSE_MODES[tracking]}h\x1b[?1006h`;
+		} else if (this.#pixelMouse && !pixel) {
+			out += "\x1b[?1006h";
+		}
+		if (pixel && (!this.#pixelMouse || tracking !== this.#mouse)) out += "\x1b[?1016h";
+		this.#mouse = tracking;
+		this.#pixelMouse = pixel;
+		// Herdr panes number pixels from 0 as well, whatever terminal hosts them.
+		const zeroBased =
+			this.#identity.id === "kitty" || this.#identity.id === "ghostty" || this.#identity.multiplexer === "herdr";
+		this.#decoder.pixelMouse = pixel && cell ? { w: cell.w, h: cell.h, origin: zeroBased ? 0 : 1 } : null;
+		if (out) this.#port.write(out);
 	}
 
 	#onInput(event: InputEvent): void {
@@ -757,8 +842,8 @@ export class ProcessTerminalInput implements TerminalInput {
 
 	#modeQueries(): string {
 		// DECRQM: synchronized output, in-band resize, color-scheme reports, bracketed paste,
-		// xterm scroll-to-bottom on output/keypress.
-		let out = "\x1b[?2026$p\x1b[?2048$p\x1b[?2031$p\x1b[?2004$p\x1b[?1010$p\x1b[?1011$p";
+		// xterm scroll-to-bottom on output/keypress, alternate scroll (restored on stop), SGR-pixel mouse.
+		let out = "\x1b[?2026$p\x1b[?2048$p\x1b[?2031$p\x1b[?2004$p\x1b[?1010$p\x1b[?1011$p\x1b[?1007$p\x1b[?1016$p";
 		// XTVERSION and the cell size in pixels.
 		out += "\x1b[>0q\x1b[16t";
 		// XTSMGRAPHICS (SIXEL geometry), when no protocol is known: the one image upgrade a probe makes.
@@ -1054,6 +1139,15 @@ export class ProcessTerminalInput implements TerminalInput {
 					this.#restoreModes.push(mode);
 					this.#port.write(`\x1b[?${mode}l`);
 				}
+				return;
+			case 1007:
+				// The state a stop puts back. Asked before any change of ours, so it is the terminal's own.
+				if (status >= 1 && status <= 4) this.#alternateScrollOriginal = status === 1 || status === 3;
+				return;
+			case 1016:
+				// Set or reset: the terminal knows SGR-pixel reporting (0 unrecognized, 4 permanently reset).
+				this.#pixelMouseReported = on;
+				this.#update({});
 				return;
 		}
 	}

@@ -22,7 +22,9 @@ import {
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { memoryTerminal } from "@oh-my-pi/pi-tui/testing/memory-terminal";
-import { getProjectDir, isInteractiveHost, setInteractiveHost, setProjectDir } from "@oh-my-pi/pi-utils";
+import { getProjectDir, isInteractiveHost, setInteractiveHost, setProjectDir, TempDir } from "@oh-my-pi/pi-utils";
+import { prepaintOptionsForArgv } from "../src/cli";
+import * as startupCache from "../src/modes/interactive/startup-cache";
 import type { StartupPreferences } from "../src/modes/interactive/startup-cache";
 import type { StatusPrediction } from "../src/modes/interactive/status-prediction";
 import { initTheme } from "../src/ui/theme/service";
@@ -41,19 +43,25 @@ import {
 	cfgStartupSetupWizard,
 	cfgStartupShowSplash,
 	cfgTuiImeSafeCursor,
+	cfgTuiMode,
 	cfgTuiResizeScrollback,
 	cfgTuiVimMode,
 } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 let savedInteractiveHost: boolean;
+let savedPresentationEnv: string | undefined;
 beforeEach(() => {
 	savedInteractiveHost = isInteractiveHost();
+	savedPresentationEnv = Bun.env.PI_TUI_MODE;
+	delete Bun.env.PI_TUI_MODE;
 });
 
 // `runRootCommand` registers the CLI's extension roots (`--no-extensions` → explicit-only) process-wide.
 afterEach(() => {
 	clearOmpExtensionCliRoots();
 	setInteractiveHost(savedInteractiveHost);
+	if (savedPresentationEnv === undefined) delete Bun.env.PI_TUI_MODE;
+	else Bun.env.PI_TUI_MODE = savedPresentationEnv;
 });
 
 describe("outer startup collaboration gate", () => {
@@ -255,6 +263,7 @@ describe("startup prepaint frame", () => {
 			autocompleteMaxVisible: cfgAutocompleteMaxVisible.get(settings),
 			vim: cfgTuiVimMode.get(settings),
 			imeSafeCursor: cfgTuiImeSafeCursor.get(settings),
+			mode: "inline",
 		};
 	});
 
@@ -265,12 +274,55 @@ describe("startup prepaint frame", () => {
 		resetSettingsForTest();
 	});
 
+	it.each(["--tui-mode=fullscreen", "--tui-mode inline"])(
+		"carries %s through the early CLI and resolved Settings without saving it",
+		async flag => {
+			using dir = TempDir.createSync("@omp-launch-mode-");
+			const cache = startupCache.StartupCache.open(path.join(dir.path(), "composer.db"));
+			vi.spyOn(startupCache, "sharedStartupCache").mockReturnValue(cache);
+			vi.spyOn(pluginHelpers, "preloadPluginRoots").mockResolvedValue(undefined);
+			const expected = flag.endsWith("fullscreen") ? "fullscreen" : "inline";
+			const saved = expected === "fullscreen" ? "inline" : "fullscreen";
+			cfgTuiMode.set(settings, saved);
+			Bun.env.PI_TUI_MODE = saved;
+			const argv = ["--no-session", "--no-extensions", ...flag.split(" ")];
+			const early = prepaintOptionsForArgv(argv);
+			expect(early).toEqual({ tuiMode: expected });
+			term = createModeTerminal({ columns: 80, rows: 24 });
+			beginStartupComposer({ ...early, driver: term.memory.options, cwd: dir.path() });
+			const wasTTY = process.stdin.isTTY;
+			Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
+			const done = new Error("observed startup settings");
+			try {
+				const firstPaint = expected === "fullscreen" ? "\x1b[?1049h" : "\x1b[3J";
+				await term.waitFor(() => term.memory.output.join("").includes(firstPaint));
+				await expect(
+					runRootCommand(parseArgs(argv), argv, {
+						settings,
+						discoverAuthStorage: async () => {
+							expect(cfgTuiMode.get(settings)).toBe(expected);
+							expect(cache.read(dir.path()).preferences?.mode).toBe(saved);
+							expect(Bun.env.PI_TUI_MODE).toBe(saved);
+							expect(settings.underlyingValue(cfgTuiMode) ?? cfgTuiMode.default).toBe(saved);
+							throw done;
+						},
+					}),
+				).rejects.toBe(done);
+			} finally {
+				stopPendingStartupComposer();
+				cache.close();
+				Object.defineProperty(process.stdin, "isTTY", { value: wasTTY, configurable: true });
+			}
+		},
+	);
+
 	/** Start the prepaint frame on an in-memory terminal (`columns`×`rows`) and take its lease. */
 	async function prepaint(
 		options: {
 			columns?: number;
 			rows?: number;
 			version?: string;
+			tuiMode?: StartupPreferences["mode"];
 			preferences?: Partial<StartupPreferences>;
 			status?: StatusPrediction;
 			/** Answer the TSP hello: the frame renders natively, as under Tern. */
@@ -284,6 +336,7 @@ describe("startup prepaint frame", () => {
 			version: options.version ?? "test",
 			cache: false,
 			exit,
+			tuiMode: options.tuiMode ?? (options.tern ? undefined : "inline"),
 			preferences: { ...config, ...options.preferences },
 			...(options.status ? { status: options.status } : {}),
 		});
@@ -627,12 +680,13 @@ describe("startup prepaint frame", () => {
 		}
 	});
 
-	it("hands a natively drawn predicted bar to the live one with the rate readout on", async () => {
+	it.each([undefined, "fullscreen"] as const)("adopts the native predicted bar with TUI mode %s", async tuiMode => {
 		// Tern mirrors the bar's slots the moment they change: the rate readout reads the viewed
 		// session while the mode is still being built.
 		cfgComposerTokenRate.set(settings, true);
 		const lease = await prepaint({
 			tern: true,
+			tuiMode,
 			status: {
 				settings: { preset: "default" },
 				facts: {
@@ -645,9 +699,15 @@ describe("startup prepaint frame", () => {
 			},
 		});
 		const testSession = await createTestSession({ inMemory: true });
+		if (tuiMode) cfgTuiMode.override(testSession.session.settings, tuiMode);
 		try {
 			expect(lease.frame.shell.native()).toBe(true);
 			const mode = adopt(lease, testSession.session);
+			expect(mode.shell.native()).toBe(true);
+			expect(lease.frame.presentation.peek()).toBe(tuiMode ?? "inline");
+			const output = term.memory.output.join("");
+			expect(output).not.toContain("\x1b[?1049h");
+			expect(output).not.toContain("\x1b[3J");
 			mode.stop();
 		} finally {
 			await lease.frame.shell.stop();
@@ -662,11 +722,20 @@ describe("startup prepaint frame", () => {
 			driver: term.memory.options,
 			version: "9.9.9",
 			cache: false,
+			tuiMode: "inline",
 			preferences: { ...config, quiet: false },
 		});
 		await term.waitFor(rows => rows.some(row => row.includes("v9.9.9")));
 
-		applyStartupComposerPreferences({ ...config, quiet: true, composerShape: "box", theme: {} });
+		applyStartupComposerPreferences({
+			...config,
+			quiet: true,
+			composerShape: "box",
+			presentation: "inline",
+			pointer: "select",
+			copyOnRelease: true,
+			theme: {},
+		});
 		await term.waitFor(rows => !rows.some(row => row.includes("v9.9.9")));
 
 		term.type("still editable");

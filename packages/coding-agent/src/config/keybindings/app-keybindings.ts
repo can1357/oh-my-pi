@@ -11,6 +11,16 @@ interface AppKeybindings {
 	"app.exit": true;
 	"app.suspend": true;
 	"app.display.reset": true;
+	"app.transcript.pageUp": true;
+	"app.transcript.pageDown": true;
+	"app.transcript.top": true;
+	"app.transcript.bottom": true;
+	"app.transcript.lineUp": true;
+	"app.transcript.lineDown": true;
+	"app.transcript.previousUser": true;
+	"app.transcript.nextUser": true;
+	"app.transcript.copyHighlight": true;
+	"app.transcript.find": true;
 	"app.thinking.cycle": true;
 	"app.thinking.toggle": true;
 	"app.model.cycleForward": true;
@@ -91,6 +101,51 @@ export const KEYBINDINGS = {
 	"app.display.reset": {
 		defaultKeys: "alt+l",
 		description: "Reset terminal display",
+	},
+	// Fullscreen transcript reading keys. Every default gives way to a user binding of the same
+	// chord (`YIELDING_DEFAULTS`); Alt chords avoid the Ctrl chords terminals reserve.
+	"app.transcript.pageUp": {
+		defaultKeys: "pageUp",
+		description: "Scroll transcript up one page",
+	},
+	"app.transcript.pageDown": {
+		defaultKeys: "pageDown",
+		description: "Scroll transcript down one page",
+	},
+	"app.transcript.top": {
+		defaultKeys: "alt+home",
+		description: "Scroll to transcript start",
+	},
+	"app.transcript.bottom": {
+		defaultKeys: "alt+end",
+		description: "Scroll to latest transcript output",
+	},
+	"app.transcript.lineUp": {
+		// Keeps terminal prompt/command navigation and the editor's dequeue shortcuts intact.
+		defaultKeys: "alt+k",
+		description: "Scroll transcript up one line",
+	},
+	"app.transcript.lineDown": {
+		defaultKeys: "alt+j",
+		description: "Scroll transcript down one line",
+	},
+	"app.transcript.previousUser": {
+		defaultKeys: "alt+pageUp",
+		description: "Jump to the previous user message",
+	},
+	"app.transcript.nextUser": {
+		defaultKeys: "alt+pageDown",
+		description: "Jump to the next user message",
+	},
+	"app.transcript.copyHighlight": {
+		// ESC c is distinct even without an enhanced keyboard protocol.
+		defaultKeys: "alt+c",
+		description: "Copy transcript selection",
+	},
+	"app.transcript.find": {
+		// Ctrl+F moves the caret, and Ctrl+Shift+F extends that motion's selection.
+		defaultKeys: "alt+/",
+		description: "Find in transcript",
 	},
 	"app.thinking.cycle": {
 		defaultKeys: "shift+tab",

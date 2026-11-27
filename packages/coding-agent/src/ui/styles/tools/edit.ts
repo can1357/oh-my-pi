@@ -12,6 +12,8 @@
  */
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import type { Block, PaintContext } from "@oh-my-pi/pi-tui/term/paint";
+import { mapWrappedText, type RenderedText } from "@oh-my-pi/pi-tui/term/text-layout";
+import { mapPrefixed, relineText, RowText } from "../rendered-text";
 import { renderDiff, wrapDiffRow } from "@oh-my-pi/pi-tui/text/diff";
 import { languageFromPath } from "@oh-my-pi/pi-tui/text/lang";
 import { shortenHome } from "@oh-my-pi/pi-tui/text/sanitize";
@@ -177,16 +179,19 @@ function trimDiff(
 
 /** A result's diff rows: whole when expanded, else trimmed to {@link COLLAPSED_LINES} rows with a remainder note. */
 function diffRows(theme: Theme, diff: string, path: string, expanded: boolean, inner: number): string[] {
-	if (expanded) return renderDiff(diff, { theme, path }).flatMap(row => wrapDiffRow(row, inner));
+	// Lines stay unwrapped (the card wraps them) so a wrapped line copies whole.
+	if (expanded) return renderDiff(diff, { theme, path });
 	const trimmed = trimDiff(diff, COLLAPSED_HUNKS, COLLAPSED_LINES);
 	const rendered = renderDiff(trimmed.text, { theme, path });
 	const rows: string[] = [];
+	let used = 0;
 	let complete = 0;
 	for (const line of rendered) {
 		const wrapped = wrapDiffRow(line, inner);
-		const room = COLLAPSED_LINES - rows.length;
+		const room = COLLAPSED_LINES - used;
 		if (wrapped.length <= room) {
-			rows.push(...wrapped);
+			rows.push(line);
+			used += wrapped.length;
 			complete++;
 			continue;
 		}
@@ -381,10 +386,39 @@ const PHASE_BG: Record<EditCard["phase"], string> = {
 	error: "toolErrorBg",
 };
 
-function cardRows(state: PaintState, card: EditCard, width: number): string[] {
+/** A gutter as `renderDiff` draws it: optional marker and number, then its rule. */
+const DIFF_GUTTER = /^(\s*[+-]?\s*\d*)([|│])(.*)$/s;
+/** Leading indentation a diff row draws as dim `·` / `→`. */
+const SHOWN_INDENT = /^[ ·→]+/;
+
+/**
+ * The logical text of one drawn body line wrapped into `rows`: a diff row copies its content
+ * without the gutter or marker (its indentation glyphs as spaces); notes and markers (`…`) are
+ * decoration; anything else reads as written.
+ */
+function lineText(line: string, rows: readonly string[]): RenderedText {
+	const plain = Bun.stripANSI(line).trimEnd();
+	if (plain.trimStart().startsWith("…")) return rows.map(() => undefined);
+	const gutter = DIFF_GUTTER.exec(plain);
+	if (gutter && gutter[1] !== "" && (gutter[2] === "│" || /^[+\-\s]\s*\d+$/.test(gutter[1]!))) {
+		const prefix = `${gutter[1]}${gutter[2]}`;
+		const continuation = `${" ".repeat(visibleWidth(prefix) - 1)}${gutter[2]}`;
+		return relineText(mapPrefixed(gutter[3]!, rows, prefix, continuation), text =>
+			text.replace(SHOWN_INDENT, indent => " ".repeat(indent.length)),
+		);
+	}
+	if (plain.startsWith("+") || plain.startsWith("-")) return mapPrefixed(plain.slice(1), rows, plain[0]!, "");
+	return mapWrappedText(plain, rows);
+}
+
+function cardRows(state: PaintState, card: EditCard, width: number, out: RowText): void {
 	const theme = state.cx.theme;
 	const head = headRow(state, card, width);
-	if (card.kind === "inline") return [truncate(head, width)];
+	const fill = (row: string): string => fillRow(theme, PHASE_BG[card.phase], truncate(row, width, ""), width);
+	if (card.kind === "inline") {
+		out.literal(truncate(head, width));
+		return;
+	}
 	const inner = Math.max(1, width - 2);
 	const lines: string[] = [];
 	for (const part of card.body) lines.push(...partRows(state, part, inner, width));
@@ -393,21 +427,25 @@ function cardRows(state: PaintState, card: EditCard, width: number): string[] {
 	const border = card.phase === "error" ? "error" : "borderMuted";
 	const box = theme.symbols.box;
 	const v = theme.fg(border, box.vertical);
-	const rows = [edgeRow(theme, width, box.topLeft, box.topRight, head, border)];
-	for (const line of lines)
-		for (const row of line === "" ? [""] : wrapDiffRow(line, inner))
-			rows.push(`${v}${padTo(truncate(row, inner), inner)}${v}`);
-	rows.push(
-		edgeRow(
-			theme,
-			width,
-			box.bottomLeft,
-			box.bottomRight,
-			card.footer ? theme.fg("dim", card.footer) : undefined,
-			border,
+	out.deco(fill(edgeRow(theme, width, box.topLeft, box.topRight, head, border)));
+	for (const line of lines) {
+		const rows = line === "" ? [""] : wrapDiffRow(line, inner);
+		const shown = rows.map(row => fill(`${v}${padTo(truncate(row, inner), inner)}${v}`));
+		if (line === "") out.deco(...shown);
+		else out.block({ rows, text: () => lineText(line, rows) }, 1, shown);
+	}
+	out.deco(
+		fill(
+			edgeRow(
+				theme,
+				width,
+				box.bottomLeft,
+				box.bottomRight,
+				card.footer ? theme.fg("dim", card.footer) : undefined,
+				border,
+			),
 		),
 	);
-	return rows.map(row => fillRow(theme, PHASE_BG[card.phase], truncate(row, width, ""), width));
 }
 
 function paintEdit(node: UiNode, cx: PaintContext): Block {
@@ -417,24 +455,24 @@ function paintEdit(node: UiNode, cx: PaintContext): Block {
 	if (!edit) return { rows: [] };
 	const state: PaintState = { cx, expanded: term.expanded === true, spinning: term.spinning === true };
 	const width = cx.width;
-	const rows: string[] = [];
+	const out = new RowText();
 	edit.cards.forEach((card, index) => {
-		if (index > 0) rows.push("");
-		rows.push(...cardRows(state, card, width));
+		if (index > 0) out.deco("");
+		cardRows(state, card, width, out);
 	});
 	const pending = edit.pending ?? 0;
 	if (pending > 0) {
-		if (rows.length > 0) rows.push("");
+		if (out.length > 0) out.deco("");
 		const theme = cx.theme;
 		const glyph = state.spinning && !cx.reduceMotion ? `${spinnerGlyph(cx)} ` : "";
-		rows.push(
+		out.literal(
 			truncate(
 				`${glyph}${theme.fg("accent", "Edit")}: ${theme.fg("muted", theme.fg("dim", `${pending} more file${pending > 1 ? "s" : ""} pending…`))}`,
 				width,
 			),
 		);
 	}
-	return { rows };
+	return out.done();
 }
 
 defineToolLook("edit", { paint: paintEdit, margin: true, animated: true });

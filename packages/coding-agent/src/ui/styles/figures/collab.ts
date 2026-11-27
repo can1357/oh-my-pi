@@ -14,13 +14,16 @@ import { truncate, visibleWidth } from "@oh-my-pi/pi-tui/text/width";
 import type { CollabPromptTerm, CollabQrTerm } from "../../transcript/figures/collab";
 import { bubbleRows } from "../messages/user";
 import { termOf } from "../messages/fill";
+import { RowText } from "../rendered-text";
 
 function paintCollabPrompt(node: UiNode, cx: PaintContext): Block {
 	const theme = cx.theme;
 	const sender = termOf<CollabPromptTerm>(node).sender ?? "guest";
 	const head = ` ${theme.fg("accent", `\x1b[1m«${sender}»\x1b[22m ›`)}`;
 	const prompt = node.children().find(child => child.kind === "md");
-	return { rows: [truncate(head, cx.width), ...(prompt ? bubbleRows(cx, prompt, cx.width) : [])] };
+	const out = new RowText().literal(truncate(head, cx.width));
+	if (prompt) out.block(bubbleRows(cx, prompt, cx.width));
+	return out.done();
 }
 
 const QR_OPEN = "\x1b[47m\x1b[30m";

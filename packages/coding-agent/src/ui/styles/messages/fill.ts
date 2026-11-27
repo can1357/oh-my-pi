@@ -6,6 +6,7 @@ import type { UiNode } from "@oh-my-pi/pi-tui";
 import { padTo, replaceTabs, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { terminalPaddingX } from "../terminal-padding";
+import { RowText } from "../rendered-text";
 
 const BG_RESET = /\x1b\[(?:0|49)m/g;
 
@@ -84,12 +85,20 @@ export function hexFg(hex: string, text: string): string {
 
 /**
  * Styled text wrapped with the terminal's standard horizontal padding,
- * every row padded to the full width.
+ * every row padded to the full width; its lines copy whole.
  */
-export function paddedText(text: string, width: number): string[] {
-	if (text === "") return [];
+export function paddedText(text: string, width: number): RowText {
+	const out = new RowText();
+	if (text === "") return out;
 	const paddingX = terminalPaddingX();
 	const inner = Math.max(1, width - paddingX * 2);
 	const pad = " ".repeat(paddingX);
-	return wrap(replaceTabs(text), inner).map(line => padTo(`${pad}${line}`, width));
+	const source = replaceTabs(text);
+	const rows = wrap(source, inner);
+	return out.wrapped(
+		source,
+		rows,
+		paddingX,
+		rows.map(line => padTo(`${pad}${line}`, width)),
+	);
 }

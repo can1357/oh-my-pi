@@ -9,7 +9,7 @@ import type { UiNode } from "@oh-my-pi/pi-tui";
 import type { Block, PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { MemoryTerm } from "../../tools/memory";
-import { expandHint, standaloneErrorRows } from "./frame";
+import { expandHint, standaloneError } from "./frame";
 import { defineToolLook, toolProps } from "./look";
 
 /** Retained memories listed while collapsed. */
@@ -22,7 +22,7 @@ function paintMemory(node: UiNode, cx: PaintContext): Block {
 	const term = props.term as MemoryTerm | undefined;
 	if (!term) return { rows: [] };
 	const theme = cx.theme;
-	if (term.error !== undefined) return { rows: standaloneErrorRows(cx, term.error) };
+	if (term.error !== undefined) return standaloneError(cx, term.error);
 	const expanded = props.collapsed === false;
 	const glyph = !term.result
 		? theme.fg("muted", theme.symbols.symbol("status.pending"))

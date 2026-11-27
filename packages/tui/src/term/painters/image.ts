@@ -14,6 +14,7 @@ import type { UiNode } from "../../node";
 import { type BlobEntry, getBlob } from "../../native/blobs";
 import { truncate } from "../../text/width";
 import { type Block, definePainter, type PaintContext } from "../paint";
+import { decorationText } from "../text-layout";
 
 const kBase64 = Symbol("pi-tui.image.base64");
 
@@ -80,7 +81,15 @@ export function pictureRows(
 	// Natural size when it fits; else the caps (the store scales to fit both, either way).
 	const fits = Math.ceil(picture.w / cell.w) <= maxColumns && Math.ceil(picture.h / cell.h) <= maxRows;
 	return cx.images.rows(
-		{ key: picture.blob, data: base64Of(entry), mime: entry.mime, widthPx: picture.w, heightPx: picture.h },
+		{
+			key: picture.blob,
+			get data() {
+				return base64Of(entry);
+			},
+			mime: entry.mime,
+			widthPx: picture.w,
+			heightPx: picture.h,
+		},
 		{
 			...(fits ? {} : { maxColumns, ...(Number.isFinite(maxRows) ? { maxRows } : {}) }),
 			fallback,
@@ -94,7 +103,8 @@ export function pictureRows(
  * text shown when it cannot be drawn.
  */
 export function paintPicture(picture: Picture, cx: PaintContext, label: string): Block {
-	return { rows: pictureRows(picture, cx, { label })?.rows ?? [truncate(label, cx.width)] };
+	const rows = pictureRows(picture, cx, { label })?.rows ?? [truncate(label, cx.width)];
+	return { rows, text: decorationText(rows.length) };
 }
 
 /** How image `node` draws at this size, when the terminal can try its blob. */
@@ -102,9 +112,10 @@ export function imageRows(node: UiNode, cx: PaintContext, label: string): ImageR
 	return pictureRows(node.props() as TspImageProps, cx, { label });
 }
 
-/** The rows of image `node` at the context's size (`label`: its fallback text, styled). */
+/** The rows of image `node` at the context's size (`label`: its fallback text, styled); all decoration. */
 export function paintImage(node: UiNode, cx: PaintContext, label = imageLabel(node, cx)): Block {
-	return { rows: imageRows(node, cx, label)?.rows ?? [truncate(label, cx.width)] };
+	const rows = imageRows(node, cx, label)?.rows ?? [truncate(label, cx.width)];
+	return { rows, text: decorationText(rows.length) };
 }
 
 definePainter("image", (node, cx) => paintImage(node, cx));

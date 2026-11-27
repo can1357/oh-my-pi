@@ -13,10 +13,11 @@
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import type { Block, PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { languageFromPath } from "@oh-my-pi/pi-tui/text/lang";
-import { renderMarkdown } from "@oh-my-pi/pi-tui/text/markdown/index";
-import { truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
+import { renderMarkdownFrame } from "@oh-my-pi/pi-tui/text/markdown/index";
+import { visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
 import { styledText } from "@oh-my-pi/pi-tui/term/painters/layout";
 import { terminalPaddingX } from "../terminal-padding";
+import { RowText } from "../rendered-text";
 import {
 	READ_PREVIEW_LINES,
 	type ReadGroupTerm,
@@ -24,7 +25,7 @@ import {
 	type ReadTermPreview,
 	type ReadTermRow,
 } from "../../transcript/read-group";
-import { paintPresenterRows } from "../figures/presented";
+import { compactPresenterBlock } from "../tools/block";
 import { codeCellRows, markdownCellRows } from "../tools/code-cell";
 import { fileLink, webLink } from "../tools/file-common";
 import { frameInner, hangingWrap, statusIcon } from "../tools/frame";
@@ -68,42 +69,56 @@ function title(cx: PaintContext): string {
 	return cx.theme.fg("toolTitle", bold("Read"));
 }
 
-function previewRows(cx: PaintContext, preview: ReadTermPreview, width: number): string[] {
+function previewRows(cx: PaintContext, preview: ReadTermPreview, width: number, out: RowText): void {
 	const theme = cx.theme;
 	const head = preview.head.path ? `Read ${readPath(cx, preview.head)}` : "Read";
 	const status = preview.status === "success" ? "complete" : preview.status;
-	const rows = preview.markdown
-		? markdownCellRows(
-				cx,
-				{
-					rendered: preview.text.trim() ? renderMarkdown(preview.text, frameInner(width), { theme }) : [],
-					title: head,
-					status,
-					expanded: preview.expanded,
-					contentMaxLines: READ_PREVIEW_LINES,
-				},
-				width,
-			)
-		: codeCellRows(
-				cx,
-				{
-					code: preview.text,
-					language: languageFromPath(preview.path),
-					title: head,
-					status,
-					expanded: preview.expanded,
-					...(preview.expanded ? {} : { codeMaxLines: READ_PREVIEW_LINES }),
-					...(preview.startLine !== undefined ? { codeStartLine: preview.startLine } : {}),
-					...(preview.lineNumbers ? { codeLineNumbers: preview.lineNumbers } : {}),
-				},
-				width,
-			);
+	out.block(
+		preview.markdown
+			? markdownCellRows(
+					cx,
+					{
+						rendered: preview.text.trim()
+							? renderMarkdownFrame(preview.text, frameInner(width), { theme })
+							: { rows: [] },
+						title: head,
+						status,
+						expanded: preview.expanded,
+						contentMaxLines: READ_PREVIEW_LINES,
+					},
+					width,
+				)
+			: codeCellRows(
+					cx,
+					{
+						code: preview.text,
+						language: languageFromPath(preview.path),
+						title: head,
+						status,
+						expanded: preview.expanded,
+						...(preview.expanded ? {} : { codeMaxLines: READ_PREVIEW_LINES }),
+						...(preview.startLine !== undefined ? { codeStartLine: preview.startLine } : {}),
+						...(preview.lineNumbers ? { codeLineNumbers: preview.lineNumbers } : {}),
+					},
+					width,
+				),
+	);
 	if (preview.usage) {
 		const paddingX = terminalPaddingX(3);
 		const pad = " ".repeat(paddingX);
-		rows.push(...wrap(theme.fg("dim", preview.usage), Math.max(1, width - 2 * paddingX)).map(row => pad + row));
+		const rows = wrap(theme.fg("dim", preview.usage), Math.max(1, width - 2 * paddingX));
+		out.wrapped(
+			preview.usage,
+			rows,
+			paddingX,
+			rows.map(row => pad + row),
+		);
 	}
-	return rows;
+}
+
+/** Rows of `content` behind a styled lead (padding and a glyph): each maps past the lead. */
+function markedRows(out: RowText, lead: string, content: string, width: number): void {
+	out.prefixed(content, wrap(`${lead}${content}`.trimEnd(), width), Bun.stripANSI(lead), "");
 }
 
 function paintReadGroup(node: UiNode, cx: PaintContext): Block {
@@ -117,45 +132,44 @@ function paintReadGroup(node: UiNode, cx: PaintContext): Block {
 			compact.label !== undefined
 				? styledText(theme, compact.label)
 				: `${title(cx)}${compact.path ? theme.fg("muted", ` ${compact.path}`) : ""}`;
-		return { rows: [truncate(`${mark} ${label}`, width), ...paintPresenterRows(compact.rows, cx)] };
+		return compactPresenterBlock(cx, mark, label, compact.rows);
 	}
+	const out = new RowText();
 	const bullet = theme.symbols.symbol("format.bullet");
 	const pad = " ".repeat(terminalPaddingX());
 	const indent = `${pad}  `;
-	const previews = (term.previews ?? []).flatMap(preview => previewRows(cx, preview, width));
-	if (!term.count) return { rows: wrap(`${pad}${bullet} ${title(cx)}`, width) };
+	if (!term.count) {
+		markedRows(out, `${pad}${bullet} `, title(cx), width);
+		return out.done();
+	}
 	if (term.count === 1) {
-		const rows: string[] = [];
 		const single = term.single;
 		if (single) {
-			rows.push(...wrap(`${pad}${glyph(cx, single.status)} ${title(cx)} ${readPath(cx, single)}`.trimEnd(), width));
-			for (const usage of single.usage) rows.push(...wrap(theme.fg("dim", indent + usage), width));
+			markedRows(out, `${pad}${glyph(cx, single.status)} `, `${title(cx)} ${readPath(cx, single)}`, width);
+			for (const usage of single.usage) out.wrapped(usage, wrap(theme.fg("dim", indent + usage), width));
 		}
-		return { rows: [...rows, ...previews] };
+	} else {
+		markedRows(out, `${pad}${bullet} `, `${title(cx)}${theme.fg("dim", ` (${term.count})`)}`, width);
+		const tree = term.tree ?? [];
+		const branch = theme.symbols.symbol("tree.branch");
+		const last = theme.symbols.symbol("tree.last");
+		const vertical = theme.symbols.symbol("tree.vertical");
+		tree.forEach((row, index) => {
+			const end = index === tree.length - 1;
+			const connector = end ? last : branch;
+			const continuation = end
+				? " ".repeat(visibleWidth(connector))
+				: `${vertical}${" ".repeat(Math.max(0, visibleWidth(connector) - visibleWidth(vertical)))}`;
+			const status = row.status === "success" ? "" : `${glyph(cx, row.status)} `;
+			const rest = `${indent}${continuation} `;
+			const path = readPath(cx, row);
+			const rows = hangingWrap(`${indent}${theme.fg("dim", connector)} `, rest, `${status}${path}`, width);
+			out.prefixed(path, rows, `${indent}${connector} ${Bun.stripANSI(status)}`, rest);
+			for (const usage of row.usage) out.prefixed(usage, wrap(theme.fg("dim", `${rest}${usage}`), width), rest, "");
+		});
 	}
-	const rows = wrap(`${pad}${bullet} ${title(cx)}${theme.fg("dim", ` (${term.count})`)}`, width);
-	const tree = term.tree ?? [];
-	const branch = theme.symbols.symbol("tree.branch");
-	const last = theme.symbols.symbol("tree.last");
-	const vertical = theme.symbols.symbol("tree.vertical");
-	tree.forEach((row, index) => {
-		const end = index === tree.length - 1;
-		const connector = end ? last : branch;
-		const continuation = end
-			? " ".repeat(visibleWidth(connector))
-			: `${vertical}${" ".repeat(Math.max(0, visibleWidth(connector) - visibleWidth(vertical)))}`;
-		const status = row.status === "success" ? "" : `${glyph(cx, row.status)} `;
-		rows.push(
-			...hangingWrap(
-				`${indent}${theme.fg("dim", connector)} `,
-				`${indent}${continuation} `,
-				`${status}${readPath(cx, row)}`,
-				width,
-			),
-		);
-		for (const usage of row.usage) rows.push(...wrap(theme.fg("dim", `${indent}${continuation} ${usage}`), width));
-	});
-	return { rows: [...rows, ...previews] };
+	for (const preview of term.previews ?? []) previewRows(cx, preview, width, out);
+	return out.done();
 }
 
 defineToolLook("read-group", { paint: paintReadGroup, animated: true });

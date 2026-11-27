@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Buffer } from "node:buffer";
 import { copyToClipboard } from "@oh-my-pi/pi-coding-agent/utils/clipboard";
 import * as natives from "@oh-my-pi/pi-natives/clipboard";
@@ -38,7 +38,21 @@ type SpawnCall = { cmd: string[]; stdin: string; env: Record<string, string | un
  * whatever the developer has on the pasteboard.
  */
 describe("copyToClipboard local backend order", () => {
+	// Over SSH native backends never run; the order under test is the local one.
+	const sshKeys = ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"] as const;
+	const savedSsh = new Map<string, string | undefined>();
+	beforeEach(() => {
+		for (const key of sshKeys) {
+			savedSsh.set(key, process.env[key]);
+			delete process.env[key];
+		}
+	});
+
 	afterEach(() => {
+		for (const [key, value] of savedSsh) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
 		vi.restoreAllMocks();
 		if (platformDescriptor) Object.defineProperty(process, "platform", platformDescriptor);
 	});

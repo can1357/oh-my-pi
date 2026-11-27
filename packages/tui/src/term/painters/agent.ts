@@ -7,6 +7,8 @@
 import type { TspAgentProps } from "@oh-my-pi/pi-wire";
 import { truncate, wrap } from "../../text/width";
 import { type Block, definePainter, EMPTY_BLOCK, type PaintContext } from "../paint";
+import { blockText, lazyText, mapWrappedText, offsetRenderedText, type RenderedTextRow } from "../text-layout";
+import { headText } from "./card";
 import { formatDuration } from "./elapsed";
 import { styledText } from "./layout";
 import { spinnerFrame } from "./spinner";
@@ -49,27 +51,36 @@ definePainter("agent", (node, cx): Block => {
 	if (cx.width <= 0) return EMPTY_BLOCK;
 	const props = node.props() as TspAgentProps;
 	const theme = cx.theme;
-	let head = `${glyph(props, cx)} ${theme.style("strong", props.name)}`;
-	if (props.agent) head += ` ${theme.fg("dim", `⟦${props.agent}⟧`)}`;
-	for (const badge of props.badges ?? []) head += ` ${theme.fg(badge.tone ?? "muted", `[${badge.text}]`)}`;
-	if (props.task !== undefined) head += ` ${theme.fg("muted", styledText(theme, props.task))}`;
+	// The glyph (the spinner while it runs) is chrome: the head's text stays put as it turns.
+	const chrome = `${glyph(props, cx)} `;
+	let label = theme.style("strong", props.name);
+	if (props.agent) label += ` ${theme.fg("dim", `⟦${props.agent}⟧`)}`;
+	for (const badge of props.badges ?? []) label += ` ${theme.fg(badge.tone ?? "muted", `[${badge.text}]`)}`;
+	if (props.task !== undefined) label += ` ${theme.fg("muted", styledText(theme, props.task))}`;
 	const meta = facts(props);
-	if (meta.length > 0) head += ` ${theme.fg("dim", meta.join(" · "))}`;
-	const rows = [truncate(head, cx.width)];
-	if (props.retry)
-		rows.push(
-			...wrap(
-				theme.fg(
-					"warning",
-					`  retry ${props.retry.attempt}/${props.retry.max}${props.retry.error ? ` · ${props.retry.error}` : ""}`,
-				),
-				cx.width,
-			),
-		);
+	if (meta.length > 0) label += ` ${theme.fg("dim", meta.join(" · "))}`;
+	const rows = [truncate(`${chrome}${label}`, cx.width)];
+	const retry = props.retry
+		? theme.fg(
+				"warning",
+				`  retry ${props.retry.attempt}/${props.retry.max}${props.retry.error ? ` · ${props.retry.error}` : ""}`,
+			)
+		: "";
+	const retryRows = retry ? wrap(retry, cx.width) : [];
+	rows.push(...retryRows);
+	const blocks: Block[] = [];
 	if (!props.collapsed) {
 		for (const child of node.children()) {
-			for (const row of cx.paint(child, Math.max(1, cx.width - 2)).rows) rows.push(`  ${row}`);
+			const block = cx.paint(child, Math.max(1, cx.width - 2));
+			blocks.push(block);
+			for (const row of block.rows) rows.push(`  ${row}`);
 		}
 	}
-	return { rows };
+	const text = lazyText(() => {
+		const out: (RenderedTextRow | undefined)[] = [headText(chrome, label, rows[0]!, 0)];
+		out.push(...mapWrappedText(retry, retryRows));
+		for (const block of blocks) for (const row of blockText(block)) out.push(offsetRenderedText(row, 2));
+		return out;
+	});
+	return { rows, text };
 });

@@ -63,28 +63,77 @@ export function terminalCapabilities(): TerminalCapabilities {
 	return active?.capabilities ?? environmentTerminal().capabilities;
 }
 
+/** Options of {@link writeTerminalSequence}. */
+export interface TerminalSequenceOptions {
+	/** Resolve whether the bytes reached a terminal (the running driver's output, or stdout's write callback). */
+	readonly awaitDelivery?: boolean;
+	/** Without a running driver, write only to a TTY stdout (a redirected stdout resolves false). */
+	readonly ttyOnly?: boolean;
+}
+
 /**
  * Write an out-of-band escape sequence: through the running driver, else
  * straight to stdout (best-effort; a closed stdout never throws into the
  * caller). A worker thread cannot reach the main thread's driver and would
  * write around its frames, so off the main thread nothing is written.
+ *
+ * With `awaitDelivery` it resolves true once the bytes reached the running
+ * driver's output, or once stdout's write callback reports no error. It
+ * resolves false off the main thread, when stdout is closed or fails, and,
+ * with `ttyOnly`, when stdout is not a TTY. Delivery is not the terminal
+ * acting on the bytes. `ttyOnly` never bypasses a running driver.
  */
-export function writeTerminalSequence(data: string): void {
-	if (!Bun.isMainThread) return;
+export function writeTerminalSequence(data: string): void;
+export function writeTerminalSequence(
+	data: string,
+	options: TerminalSequenceOptions & { readonly awaitDelivery: true },
+): Promise<boolean>;
+export function writeTerminalSequence(data: string, options?: TerminalSequenceOptions): void | Promise<boolean>;
+export function writeTerminalSequence(data: string, options?: TerminalSequenceOptions): void | Promise<boolean> {
+	const awaited = options?.awaitDelivery === true;
+	if (!Bun.isMainThread) return awaited ? Promise.resolve(false) : undefined;
 	if (active) {
-		active.writeRaw(data);
-		return;
+		if (!awaited) {
+			active.writeRaw(data);
+			return;
+		}
+		try {
+			return Promise.resolve(active.writeRaw(data));
+		} catch {
+			return Promise.resolve(false);
+		}
 	}
+	if (options?.ttyOnly && !process.stdout.isTTY) return awaited ? Promise.resolve(false) : undefined;
 	// An `error` listener keeps EPIPE/EIO on a closed stdout from crashing the process.
 	if (!stdoutErrorsHandled) {
 		stdoutErrorsHandled = true;
 		process.stdout.on("error", () => {});
 	}
-	try {
-		process.stdout.write(data);
-	} catch {
-		// Best-effort.
+	if (!awaited) {
+		try {
+			process.stdout.write(data);
+		} catch {
+			// Best-effort.
+		}
+		return;
 	}
+	const { promise, resolve } = Promise.withResolvers<boolean>();
+	// A failed write reports through its callback, the stream's `error` event, or both.
+	const onError = (): void => {
+		process.stdout.off("error", onError);
+		resolve(false);
+	};
+	process.stdout.on("error", onError);
+	try {
+		process.stdout.write(data, error => {
+			process.stdout.off("error", onError);
+			resolve(!error);
+		});
+	} catch {
+		process.stdout.off("error", onError);
+		resolve(false);
+	}
+	return promise;
 }
 
 /** Raise a desktop notification through the terminal (see `notify.ts`). */

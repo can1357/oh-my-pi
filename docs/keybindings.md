@@ -55,6 +55,16 @@ app.history.search: []
 | `app.clipboard.copyPrompt`   | `Alt+Shift+C`                                                         | Copy the whole prompt                                                                                                                                  |
 | `app.clipboard.pasteTextRaw` | `Ctrl+Shift+V`, `Alt+Shift+V`                                         | Paste clipboard text without collapsing it                                                                                                             |
 | `app.clipboard.pasteImage`   | Linux: `Ctrl+V`; macOS: `Ctrl+V`, `Cmd+V`; Windows: `Ctrl+V`, `Alt+V` | Paste from the clipboard (image preferred, text fallback)                                                                                              |
+| `app.transcript.pageUp`      | `PageUp`                                                              | Scroll the fullscreen transcript up one page                                                                                                           |
+| `app.transcript.pageDown`    | `PageDown`                                                            | Scroll the fullscreen transcript down one page                                                                                                         |
+| `app.transcript.top`         | `Alt+Home`                                                            | Read from the beginning of the fullscreen transcript                                                                                                   |
+| `app.transcript.bottom`      | `Alt+End`                                                             | Return to live output and resume following                                                                                                             |
+| `app.transcript.lineUp`      | `Alt+K`                                                               | Scroll the fullscreen transcript up one row                                                                                                            |
+| `app.transcript.lineDown`    | `Alt+J`                                                               | Scroll the fullscreen transcript down one row                                                                                                          |
+| `app.transcript.previousUser` | `Alt+PageUp`                                                         | Jump to the previous prompt in the fullscreen transcript                                                                                               |
+| `app.transcript.nextUser`    | `Alt+PageDown`                                                        | Jump to the next prompt in the fullscreen transcript                                                                                                   |
+| `app.transcript.copyHighlight` | `Alt+C`                                                             | Copy the fullscreen transcript selection (for `tui.copyOnRelease: false`, or to retry a failed copy)                                                  |
+| `app.transcript.find`        | `Alt+/`                                                               | Find text in the fullscreen transcript without changing the draft |
 | `app.stt.pushToTalk`         | `Space`                                                               | Hold to record and release to transcribe. Remap this action or set it to `[]` to disable push-to-talk without disabling speech-to-text.                |
 | `app.stt.toggle`             | Unbound                                                               | Start or stop speech-to-text recording with each press; independent of push-to-talk.                                                                   |
 | `app.live.toggle`            | `Ctrl+L`                                                              | Start or stop live voice mode (same as `/live`)                                                                                                        |
@@ -81,6 +91,18 @@ With `stt.enabled` on, the native composer shows a microphone beside Send. Click
 Dictation started with this button stays in the draft, regardless of `stt.submitTrigger`. Review or edit the text, then press Enter or click Send. While dictation is recording or transcribing into the draft, Enter and Send do nothing.
 
 For live English transcription, select **Nemotron 0.6B (live streaming, English)** in `omp setup speech`, or set `modelRoles.dictation` to `local/nemotron-streaming-en-0.6b`. Words appear in the draft while you speak. The first recording waits for the model to load before opening the microphone; start speaking when the button says **Recording · Stop**. Later recordings reuse the loaded model. See [local speech models](local-models.md#speech-to-text) for download and language details.
+
+## Fullscreen history
+
+With `tui.mode: fullscreen`, the transcript shortcuts above scroll omp's own transcript. They avoid `Ctrl` chords on purpose: terminals such as Windows Terminal commonly bind `Ctrl+Up/Down` and `Ctrl+Home/End` to their own shell marks and scrollback, and those keys never reach omp there.
+
+Press `Alt+/` and type or paste a phrase to find it in the transcript. Search ignores case and treats punctuation literally. `Enter` moves to the next match and `Shift+Enter` to the previous one, wrapping at either end. `Escape` closes search and returns to your draft at the current reading position. Use `Alt+End` to resume following live output.
+
+On macOS the Alt shortcuts need the terminal to send Option as Meta: enable **Use Option as Meta key** in Terminal.app (Settings → Profiles → Keyboard), or set the Option key to **Esc+** in iTerm2 (Settings → Profiles → Keys). Otherwise Option types characters such as `˚` instead. PageUp/PageDown, the wheel, and the scrollbar work either way, and every transcript action can be remapped in `keybindings.yml`.
+
+Transcript shortcuts give way to your own bindings: binding a key they use by default, such as `Alt+K`, to another action removes it from that transcript action, which keeps its other keys.
+
+With `tui.fullscreenMouse: select` (the default), dragging over transcript text selects it and, by default, copies it on release (`tui.copyOnRelease`). Ctrl+C, Escape, and right-click keep their prompt meanings and are never used for copying. Shift+drag still makes a native terminal selection. `/copy` covers whole blocks. Choose `tui.mode: inline` for native scrollback, shell marks, and ordinary terminal selection.
 
 ## Recover a cleared prompt
 

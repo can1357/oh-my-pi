@@ -117,6 +117,7 @@ class FakeInput {
 		multiplexer: null,
 		textSizing: false,
 		tsp: false,
+		pixelMouse: false,
 	};
 	identity = { id: "kitty", multiplexer: null, ssh: false, conpty: false, version: null };
 	async start() {}
