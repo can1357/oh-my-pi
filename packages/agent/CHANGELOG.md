@@ -4,11 +4,11 @@
 
 ### Breaking Changes
 
-- Removed `PruneResult.undo()` from `pruneToolOutputs` and `pruneSupersededToolResults`; persist `PruneResult.pruned` instead of rolling the prune back when saving it fails.
+- Removed `PruneResult.undo()` from `pruneToolOutputs` and `pruneSupersededToolResults`; persist `PruneResult.pruned` instead of rolling the prune back when saving it fails ([#20759](https://github.com/can1357/oh-my-pi/pull/20759) by [@sjawhar](https://github.com/sjawhar)).
 
 ### Added
 
-- Added `PruneResult.pruned`, a list of exported `ToolResultPrune` records (each blanked tool result's entry id, notice, `prunedAt`, and the content it replaced), and `blankToolResult()`, which applies one record to a loaded copy of its tool result.
+- Added `PruneResult.pruned`, a list of exported `ToolResultPrune` records (each blanked tool result's entry id, notice, `prunedAt`, and the content it replaced), and `blankToolResult()`, which applies one record to a loaded copy of its tool result ([#20759](https://github.com/can1357/oh-my-pi/pull/20759) by [@sjawhar](https://github.com/sjawhar)).
 
 ### Fixed
 

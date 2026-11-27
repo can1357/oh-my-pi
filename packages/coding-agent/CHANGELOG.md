@@ -34,7 +34,7 @@
 - Updated the local speech runtimes to sherpa-onnx 2.0.3 and Transformers.js 4.3.2; they reinstall on first use.
 - Shortened and bracketed bash's notices, e.g. `[next call: cwd → …, set -e off]`, `[timeout clamped: 7200s → 3600s]`, `[backgrounded as bg_3, killed at 300s total; …]`, `[took 1.23s]`, `[exit code 3]`, `[timed out after 30s]`, `[cancelled]`; eval's notices follow suit, e.g. `[Python kernel restarted; earlier state gone]`, `[timed out after 30s; kernel interrupted, state kept]`.
 - `cfg://` writes to map settings such as `modelRoles` now change only the entries they name (`null` removes one), so approval prompts and transcripts show just those entries instead of the whole map, and saving one entry keeps the others in your config.
-- When saving pruned tool output fails, the pruning now stays applied in the live context, and the session file catches up on the next successful save.
+- When saving pruned tool output fails, the pruning now stays applied in the live context, and the session file catches up on the next successful save ([#20759](https://github.com/can1357/oh-my-pi/pull/20759) by [@sjawhar](https://github.com/sjawhar)).
 
 ### Fixed
 
@@ -88,7 +88,7 @@
 - Custom composer shapes can add blank rows above the input and keep the caret on the text row ([#20532](https://github.com/can1357/oh-my-pi/issues/20532)).
 - Fixed ACP and RPC `/mcp` commands to respect project-server precedence, enable/disable overrides, and the session working directory. ([#20499](https://github.com/can1357/oh-my-pi/pull/20499) by [@eggpeat](https://github.com/eggpeat))
 - Fixed `bash.patterns` approval false positives on benign flags (`go test -race`, `rg -e`, `jq -c`, quoted commit messages with `-e`/`-c`, ANSI-C `$'...'` strings) by parsing commands with omp's native Bash/Zsh parser and a command-aware argument guard ([#20686](https://github.com/can1357/oh-my-pi/pull/20686) by [@asuffield](https://github.com/asuffield))
-- Stopped long sessions from rewriting their entire session file on every turn that prunes tool output (superseded reads, useless results, or the context-size prune), so the disk writes of those turns no longer grow with session length unless a pruned result is over 4 MiB.
+- Stopped long sessions from rewriting their entire session file on every turn that prunes tool output (superseded reads, useless results, or the context-size prune), so the disk writes of those turns no longer grow with session length unless a pruned result is over 4 MiB ([#20759](https://github.com/can1357/oh-my-pi/pull/20759) by [@sjawhar](https://github.com/sjawhar)).
 
 ### Removed
 
