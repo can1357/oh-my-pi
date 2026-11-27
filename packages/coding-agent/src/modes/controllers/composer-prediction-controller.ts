@@ -274,8 +274,12 @@ export class ComposerPredictionController {
 				return;
 			}
 		}
-		if (this.#automaticRun && this.#ctx.composer.text()) {
-			this.#stopAutomatic("a composer draft was entered");
+		// A draft blocks the request in either mode: the ghost shows over a prefix of the prediction, so
+		// with text in the composer there is nothing it could add, and an automatic run ends here rather
+		// than paying for a reply nobody would read. (The guard was automatic-run-only for a while, and
+		// the suite's "does not request while ... drafted" case caught it: two billed requests over drafts.)
+		if (this.#ctx.composer.text()) {
+			if (this.#automaticRun) this.#stopAutomatic("a composer draft was entered");
 			return;
 		}
 		if (!model) {
