@@ -1,10 +1,23 @@
 import { promisify } from "node:util";
-import * as zlib from "node:zlib";
+import type * as Zlib from "node:zlib";
 import { ArchiveError } from "../error";
 import { type ByteSource, decodeByteSource, STREAM_CHUNK_SIZE } from "../source";
 
-const gzipAsync = promisify(zlib.gzip);
-const gunzipAsync = promisify(zlib.gunzip);
+let zlibCache: typeof Zlib | undefined;
+let gzipAsyncCache: ((buf: Zlib.InputType, options?: Zlib.ZlibOptions) => Promise<Buffer>) | undefined;
+let gunzipAsyncCache: ((buf: Zlib.InputType, options?: Zlib.ZlibOptions) => Promise<Buffer>) | undefined;
+function getZlib(): typeof Zlib {
+	if (!zlibCache) zlibCache = require("node:zlib") as typeof Zlib;
+	return zlibCache;
+}
+function gzipAsync(buf: Zlib.InputType, options?: Zlib.ZlibOptions): Promise<Buffer> {
+	if (!gzipAsyncCache) gzipAsyncCache = promisify(getZlib().gzip);
+	return gzipAsyncCache(buf, options);
+}
+function gunzipAsync(buf: Zlib.InputType, options?: Zlib.ZlibOptions): Promise<Buffer> {
+	if (!gunzipAsyncCache) gunzipAsyncCache = promisify(getZlib().gunzip);
+	return gunzipAsyncCache(buf, options);
+}
 
 /** gzip magic: 0x1f 0x8b. */
 export function isGzip(bytes: Uint8Array): boolean {
@@ -22,7 +35,7 @@ export async function gzipDecompress(bytes: Uint8Array, maxOutput: number): Prom
 
 /** Decompress a gzip source as a stream of chunks, bounded to `maxOutput` bytes, for output too large to hold at once. */
 export function gzipDecompressStream(source: ByteSource, maxOutput: number): AsyncGenerator<Uint8Array> {
-	return decodeByteSource(source, zlib.createGunzip({ chunkSize: STREAM_CHUNK_SIZE }), maxOutput);
+	return decodeByteSource(source, getZlib().createGunzip({ chunkSize: STREAM_CHUNK_SIZE }), maxOutput);
 }
 
 /** Compress bytes as one gzip stream (tar.gz writing). */

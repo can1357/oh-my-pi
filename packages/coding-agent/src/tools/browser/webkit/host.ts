@@ -12,7 +12,7 @@
  * visible, focused window either way.
  */
 import * as path from "node:path";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../../tool-errors";
 import { logger, readLines } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
 import { ToolAbortError } from "../../tool-errors";

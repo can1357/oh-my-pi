@@ -1,7 +1,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
+import { replaceTabs, truncateToWidth } from "../../../../utils/text-width";
+import { shortenPath, TRUNCATE_LENGTHS } from "../../../../utils/render-utils";
 import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 import { findScopedSettings } from "../../../../config/settings";
 import type { CustomCommand, CustomCommandAPI } from "../../../../extensibility/custom-commands/types";
@@ -142,7 +143,7 @@ function parseMrSchemeRef(text: string): ReviewPrRef | undefined {
 	if (!text.startsWith("mr://")) return undefined;
 	try {
 		const parsed = parseMrUrl(parseInternalUrl(text));
-		if (!parsed.project) return undefined;
+		if (parsed.kind === "list" || !parsed.project) return undefined;
 		return { forge: "gitlab", repo: parsed.project, number: parsed.iid, raw: text, kind: "mr-url" };
 	} catch {
 		return undefined;

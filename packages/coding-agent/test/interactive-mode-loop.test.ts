@@ -7,7 +7,6 @@ import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/inp
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import * as loopCondition from "@oh-my-pi/pi-coding-agent/modes/loop-condition";
 import type { LoopConditionVerdict } from "@oh-my-pi/pi-coding-agent/modes/loop-condition";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -15,6 +14,8 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 import { cfgLoopMode } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { initTheme } from "../src/ui/theme/service";
+import { createModeTerminal } from "./helpers/mode-terminal";
 
 async function flushMicrotasks(): Promise<void> {
 	await Promise.resolve();
@@ -45,14 +46,21 @@ describe("InteractiveMode loop auto-submit", () => {
 			settings: Settings.isolated(),
 			modelRegistry,
 		});
-		mode = new InteractiveMode(session, "test");
-		mode.ui.requestRender = vi.fn();
+		mode = new InteractiveMode(
+			session,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			createModeTerminal().frame,
+		);
 	});
 
 	beforeEach(() => {
 		cfgLoopMode.set(settings, "prompt");
 		vi.spyOn(mode, "addMessageToChat").mockReturnValue([]);
-		vi.spyOn(mode, "ensureLoadingAnimation").mockImplementation(() => {});
+		vi.spyOn(mode, "ensureWorkingRow").mockImplementation(() => {});
 	});
 
 	afterEach(async () => {
@@ -220,34 +228,34 @@ describe("InteractiveMode loop auto-submit", () => {
 	});
 
 	it("reports waiting, running, paused, resumed, and disabled loop states", async () => {
-		const setLoopModeStatus = vi.spyOn(mode.statusLine, "setLoopModeStatus");
+		const loopStatus = () => mode.statusLine.facts().loop;
 
 		await mode.handleLoopCommand("3");
-		expect(setLoopModeStatus).toHaveBeenLastCalledWith({
+		expect(loopStatus()).toEqual({
 			state: "waiting",
 			limit: { kind: "iterations", initial: 3, remaining: 3 },
 		});
 
 		mode.setLoopPrompt("repeat this");
-		expect(setLoopModeStatus).toHaveBeenLastCalledWith({
+		expect(loopStatus()).toEqual({
 			state: "running",
 			limit: { kind: "iterations", initial: 3, remaining: 3 },
 		});
 
 		mode.pauseLoop();
-		expect(setLoopModeStatus).toHaveBeenLastCalledWith({
+		expect(loopStatus()).toEqual({
 			state: "paused",
 			limit: { kind: "iterations", initial: 3, remaining: 3 },
 		});
 
 		mode.setLoopPrompt("resume this");
-		expect(setLoopModeStatus).toHaveBeenLastCalledWith({
+		expect(loopStatus()).toEqual({
 			state: "running",
 			limit: { kind: "iterations", initial: 3, remaining: 3 },
 		});
 
 		mode.disableLoopMode();
-		expect(setLoopModeStatus).toHaveBeenLastCalledWith(undefined);
+		expect(loopStatus()).toBeUndefined();
 	});
 
 	describe("continue condition", () => {
@@ -495,7 +503,7 @@ describe("InteractiveMode loop auto-submit", () => {
 		pendingInput = mode.getUserInput();
 		void pendingInput.then(input => resolved.push(input));
 
-		await mode.editor.onSubmit?.("/skill:recap go");
+		await mode.composer.onSubmit?.("/skill:recap go");
 
 		expect(promptCustomMessage).toHaveBeenCalledTimes(1);
 		expect(mode.loopPrompt).toBe("/skill:recap go");

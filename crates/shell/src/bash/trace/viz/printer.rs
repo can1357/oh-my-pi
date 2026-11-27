@@ -1086,7 +1086,7 @@ impl<S: VizSource> Printer<'_, S> {
 			})
 		});
 		if all_simple {
-			// One row per pipeline: `and`/`or` lead each continuation row, so a
+			// One row per pipeline: `&&`/`||` lead each continuation row, so a
 			// chain reads down the page and every command keeps its own status.
 			let mut lead = Vec::new();
 			if let Some(op) = after {
@@ -1280,12 +1280,6 @@ impl<S: VizSource> Printer<'_, S> {
 				true,
 			));
 		}
-		if idioms && self.builtin(c.key(id)) && name == "cd" && words.len() == 2 {
-			let mut seg = self.segment(c, id, span, format!("cwd {}", values[1]), "badge", true);
-			seg.expanded = Some(c.text(span));
-			out.push(seg);
-			return out;
-		}
 		if idioms && self.builtin(c.key(id)) && name == "set" && words.len() == 2 {
 			let meaning = match values[1].as_str() {
 				"-e" => Some("stop on first error"),
@@ -1423,7 +1417,7 @@ impl<S: VizSource> Printer<'_, S> {
 					out.push(seg);
 				} else if self.options.layers.unwrap {
 					if let (Some(language), Some(value)) = (language, literal(w)) {
-						if value.contains('\n') || value.len() > 64 {
+						if moves_below(&value) {
 							let mut seg = self.segment(
 								c,
 								w.id(),
@@ -2095,7 +2089,7 @@ impl<S: VizSource> Printer<'_, S> {
 					c,
 					and_or.id(),
 					and_or.span(),
-					if op == AndOrOp::And { " and " } else { " or " },
+					if op == AndOrOp::And { " && " } else { " || " },
 					"op",
 					false,
 				));
@@ -2342,16 +2336,19 @@ impl<S: VizSource> Printer<'_, S> {
 				if self.options.layers.unwrap
 					&& let (Some(language), Some(value)) =
 						(embedded::argument_language(&words, i), literal(w))
-					&& (value.contains('\n') || value.len() > 64)
+					&& moves_below(&value)
 				{
+					// The line's chip names the language; the program's rows follow
+					// it directly, without the newlines that usually open and close
+					// it.
 					self.document(
-						&value,
+						value.trim_matches('\n'),
 						language,
 						c,
 						w.id(),
 						Some(w.span()),
 						depth + 1,
-						Some("inline argument"),
+						None,
 					);
 				}
 			}
@@ -2608,11 +2605,11 @@ fn style_for(style: &str, color: bool) -> Option<String> {
 	};
 	(!text.is_empty()).then_some(text)
 }
-/// Pseudo word drawn for a chain operator.
+/// Operator leading a chain continuation row.
 const fn connector(op: AndOrOp) -> &'static str {
 	match op {
-		AndOrOp::And => "and ",
-		AndOrOp::Or => "or ",
+		AndOrOp::And => "&& ",
+		AndOrOp::Or => "|| ",
 	}
 }
 /// The operator opening `bytes` after blanks — `&&`/`||` (`Some`), which
@@ -3412,6 +3409,12 @@ fn is_simple(c: Command<'_>, name: &str, arg: Option<&str>) -> bool {
 			Some(a) => words.len() == 2 && words.get(1).and_then(literal).as_deref() == Some(a),
 			None => words.len() > 1,
 		}
+}
+/// Whether an embedded-language argument is drawn below its command as a
+/// document, leaving a `⟦lang ↓⟧` chip in the line. Only multi-line programs
+/// move: a one-liner, however long, stays highlighted where it is read.
+fn moves_below(value: &str) -> bool {
+	value.contains('\n')
 }
 fn timeout_duration(value: &str) -> bool {
 	let digits = value.bytes().take_while(u8::is_ascii_digit).count();

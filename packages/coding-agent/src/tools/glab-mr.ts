@@ -1,5 +1,5 @@
 import { isEnoent, logger } from "@oh-my-pi/pi-utils";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "./tool-errors";
 import type { Settings } from "../config/settings";
 import { CwdLookupMemo } from "../utils/forge-cli";
 import { gitlab } from "../utils/gitlab";
@@ -21,6 +21,11 @@ export function formatGitlabProjectArg(project: string): string {
 export const GITLAB_PATH_SEGMENT_PATTERN = /^[A-Za-z0-9_.-]+$/;
 /** A GitLab host with optional port; rejects userinfo, paths, and control characters. */
 export const GITLAB_HOST_PATTERN = /^[A-Za-z0-9.-]+(?::\d+)?$/;
+
+/** Whether the first segment of a `[host/]group/project` ref names a host (dotted, ported, or `localhost`). */
+export function isGitlabHostSegment(segment: string): boolean {
+	return segment.includes(".") || segment.includes(":") || segment === "localhost";
+}
 
 /** Parse a GitLab project web URL into a `<host>/<namespace…>/<project>` ref. */
 export function parseGitlabProjectWebUrl(webUrl: string): string | undefined {
@@ -44,10 +49,14 @@ export function parseGitlabProjectWebUrl(webUrl: string): string | undefined {
  * the configured default host, a host in glab's config, or the host of the
  * checkout's own GitLab remote.
  */
-async function assertGitlabHostTrustedForEnvToken(host: string, cwd: string, signal?: AbortSignal): Promise<void> {
+export async function assertGitlabHostTrustedForEnvToken(
+	host: string,
+	cwd: string,
+	signal?: AbortSignal,
+): Promise<void> {
 	if (!GITLAB_TOKEN_ENV_VARS.some(name => process.env[name])) return;
 	const trusted = new Set(["gitlab.com"]);
-	for (const name of ["GITLAB_HOST", "GITLAB_URI", "GL_HOST"]) {
+	for (const name of ["GITLAB_HOST", "GITLAB_URI", "GITLAB_URL", "GL_HOST"]) {
 		const value = process.env[name]?.trim();
 		if (!value) continue;
 		try {

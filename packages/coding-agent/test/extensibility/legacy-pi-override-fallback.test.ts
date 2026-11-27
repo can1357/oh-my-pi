@@ -1,8 +1,12 @@
-import { describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it } from "bun:test";
 import {
 	__resolveTypeBoxShimPath,
 	__validateLegacyPiPackageRootOverrides,
 } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 // Regression for issue #2168: in compiled-binary mode the package-root
 // override branch of `resolveCanonicalPiSpecifier` returned a bunfs path

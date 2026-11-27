@@ -514,13 +514,18 @@ export interface OpenAICompat {
 	 * grammar converter reads them as closed/open-object semantics, and
 	 * `additionalProperties: false` pins the strict object shape.
 	 *
+	 * `"google"` rewrites schemas into Google's Gemini dialect
+	 * (`normalizeSchemaForGoogle`: scalar `type`, `nullable`, no unsupported
+	 * keywords) for Gemini models behind an OpenAI-compatible host (GitHub
+	 * Copilot), which 400s on JSON Schema `type` arrays.
+	 *
 	 * Default: auto-detected — `"moonshot-mfjs"` on Moonshot native hosts
 	 * (api.moonshot.ai / api.kimi.com) and Kimi-family model ids on any host,
 	 * since proxies (OpenRouter, custom gateways) forward schemas to Moonshot
 	 * verbatim; `"grammar"` on local OpenAI-compatible backends. Set `"none"`
 	 * to opt a host out.
 	 */
-	toolSchemaFlavor?: "moonshot-mfjs" | "grammar" | "none";
+	toolSchemaFlavor?: "moonshot-mfjs" | "grammar" | "google" | "none";
 	/**
 	 * Stream-watchdog first-event timeout in ms.
 	 * Set to `0` to allow unbounded prompt processing. Default: auto-detected
@@ -1547,6 +1552,16 @@ export interface ModelCost extends TokenCost {
 	timeBased?: TimeBasedCost;
 }
 
+/** A model's fast lane on a host that serves it under separate wire ids; see {@link Model.priorityLane}. */
+export interface PriorityLane {
+	/** Logical id the lane was listed under; `buildModel` prices it under this id's catalog rules. */
+	id: string;
+	/** Standard wire id → the same model's fast-lane wire id. Wire ids without an entry run at standard speed. */
+	routes: Readonly<Record<string, string>>;
+	/** Lane rate card. */
+	cost: ModelCost;
+}
+
 /**
  * Exact local content tokenizer family for a model.
  *
@@ -1582,6 +1597,14 @@ export interface ModelAccountAccess {
 	 * account's values when multi-account rosters are unioned.
 	 */
 	antigravityWireProfiles?: Readonly<Record<string, AntigravityModelWireProfile>>;
+	/**
+	 * Service-tier ids this account's own catalog advertised for the model
+	 * (Codex `service_tiers[].id`). Tier entitlements differ per account
+	 * (Ultrafast is plan-gated), while {@link Model.serviceTiers} is the union
+	 * across accounts, so requests and credential selection read this list for
+	 * the account in hand. Absent when the account's catalog listed no tiers.
+	 */
+	serviceTiers?: readonly string[];
 }
 
 /** One Cursor `RequestedModel.parameters` entry recovered from rich discovery. */
@@ -1664,6 +1687,13 @@ export interface Model<TApi extends Api = Api> {
 	 * everything local (selection, caching, usage attribution) keys on `id`.
 	 */
 	requestModelId?: string;
+	/**
+	 * Fast lane served under its own wire ids rather than a request field
+	 * (Devin's `-fast` / `-priority` / `-lightning` uids). Discovery folds the
+	 * lane's row into this one; the `priority` service tier (`/fast`) sends the
+	 * routed wire id and bills the lane's card.
+	 */
+	priorityLane?: PriorityLane;
 	/**
 	 * `reasoning.mode` to send on OpenAI Responses-family requests. Set on
 	 * generated pro aliases (`gpt-5.6-*-pro` on `openai`/`openai-codex`) that

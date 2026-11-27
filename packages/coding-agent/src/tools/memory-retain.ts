@@ -1,4 +1,4 @@
-import type { MemoryRetainDetails } from "@oh-my-pi/pi-tui/tools/memory";
+import type { MemoryRetainDetails } from "./details/memory";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { prompt, withLoopPhase } from "@oh-my-pi/pi-utils";

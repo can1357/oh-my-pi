@@ -1,7 +1,15 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { MessageChannel, type MessagePort, receiveMessageOnPort } from "node:worker_threads";
+import type * as WorkerThreads from "node:worker_threads";
+import type { MessagePort } from "node:worker_threads";
+
+// Lazy loader: keeps node:worker_threads off CLI startup until the Bun Worker fallback spawns.
+let workerThreadsCache: typeof WorkerThreads | undefined;
+function workerThreads(): typeof WorkerThreads {
+	if (!workerThreadsCache) workerThreadsCache = require("node:worker_threads") as typeof WorkerThreads;
+	return workerThreadsCache;
+}
 import { isRecord, logger, Snowflake, workerHostEntry } from "@oh-my-pi/pi-utils";
 import {
 	createWorkerHandle,
@@ -12,7 +20,7 @@ import {
 import { registerOnBoard } from "../../daemon/client";
 import type { ToolSession } from "../../tools";
 import { ToolAbortError } from "../../tools/tool-errors";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../../tools/tool-errors";
 import { safeSend as safeSendIpc } from "../../utils/ipc";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../bridge-timeout";
 import { getEnabledEvalPreludes } from "../preludes";
@@ -30,7 +38,8 @@ import type { EvalShadowCellSession } from "../speculation/cell-session";
 import { getActiveEvalShadowCell } from "../speculation/runtime-context";
 import type { ShadowPlan } from "../speculation/types";
 import type { EvalDisplayOutput, EvalToolDescriptor, EvalToolInvokeResult } from "../types";
-import { type ShadowSnapshot, shadowSnapshotDigest } from "./shared/runtime";
+import { BUN_STUB_MESSAGE, jsKernelEnv } from "./kernel-env";
+import { type ShadowSnapshot, shadowSnapshotDigest } from "./shared/shadow-snapshot";
 import { projectJavaScriptShadowPlan } from "./speculation";
 import { callSessionTool, type JsStatusEvent } from "./tool-bridge";
 // Coding-agent binary/bundle workers route through the CLI entrypoint with a
@@ -512,9 +521,57 @@ export async function smokeTestJsEvalWorker(): Promise<void> {
 		if (worker.mode !== "process") {
 			throw new Error("JS eval worker smoke fell back from the isolated subprocess");
 		}
+		// `bun` in the kernel must be a real bun or the stub that says bun is missing, never
+		// this executable: in a compiled omp with no bun on PATH, Bun's shell would otherwise
+		// resolve `bun` to omp (kernel-env.ts). `--version` is the only word that ever follows
+		// `bun` here, so a regression prints omp's version, never starts an agent.
+		const output = await smokeRun(session, {
+			runId: "smoke-bun",
+			code: "const r = await Bun.$`bun --version`.nothrow().quiet(); console.log(JSON.stringify({ exitCode: r.exitCode, stdout: r.stdout.toString().trim(), stderr: r.stderr.toString().trim() }));",
+		});
+		const probe: unknown = JSON.parse(output.trim().split("\n").at(-1) ?? "null");
+		const realBun =
+			isRecord(probe) &&
+			probe.exitCode === 0 &&
+			typeof probe.stdout === "string" &&
+			/^\d+\.\d+\.\d+/.test(probe.stdout);
+		const stub =
+			isRecord(probe) &&
+			probe.exitCode === 127 &&
+			typeof probe.stderr === "string" &&
+			probe.stderr.includes(BUN_STUB_MESSAGE);
+		if (!realBun && !stub) {
+			throw new Error(
+				`JS eval worker smoke: \`bun --version\` in the kernel reached neither bun nor the bun stub: ${JSON.stringify(probe)}`,
+			);
+		}
 	} finally {
 		await worker.terminate().catch(() => undefined);
 	}
+}
+
+/** Run one cell in a smoke session and return what it printed; the worker speaks the run protocol directly. */
+function smokeRun(session: JsSession, run: { runId: string; code: string }): Promise<string> {
+	const { promise, resolve, reject } = Promise.withResolvers<string>();
+	let text = "";
+	const unsubscribe = session.worker.onMessage(msg => {
+		if (msg.type === "text" && msg.runId === run.runId) {
+			text += msg.chunk;
+			return;
+		}
+		if (msg.type !== "result" || msg.runId !== run.runId) return;
+		unsubscribe();
+		if (msg.ok) resolve(text);
+		else reject(errorFromPayload(msg.error));
+	});
+	session.worker.send({
+		type: "run",
+		runId: run.runId,
+		code: run.code,
+		filename: `${run.runId}.ts`,
+		snapshot: { cwd: session.cwd, sessionId: session.sessionId },
+	});
+	return raceWithTimeout(promise, WORKER_INIT_TIMEOUT_MS, "JS eval worker smoke cell timed out");
 }
 
 function javascriptPreludeSources(session: ToolSession): EvalPreludeSource[] {
@@ -1047,9 +1104,12 @@ function bundledHostEntry(): string | null {
 function spawnBunWorker(): JsEvalWorkerHandle {
 	try {
 		const hostEntry = workerHostEntry() ?? bundledHostEntry();
+		// Both variants run model code under `jsKernelEnv`: the compiled binary's `bun` stub (kernel-env.ts).
+		const env = jsKernelEnv(workerEnvFromParent());
 		const worker = hostEntry
-			? new Worker(hostEntry, { type: "module", argv: ["__omp_worker_js_eval"] })
-			: new Worker(SOURCE_WORKER_ENTRY.href, { type: "module" });
+			? new Worker(hostEntry, { type: "module", argv: ["__omp_worker_js_eval"], env })
+			: new Worker(SOURCE_WORKER_ENTRY.href, { type: "module", env });
+		const { MessageChannel } = workerThreads();
 		const channel = new MessageChannel();
 		const outbox: WorkerOutboxMessage = { type: "outbox", port: channel.port2 };
 		worker.postMessage(outbox, [channel.port2]);
@@ -1065,7 +1125,7 @@ function spawnBunWorker(): JsEvalWorkerHandle {
 function spawnJsProcess(sessionId?: string): JsEvalWorkerHandle {
 	const spawned = createWorkerSubprocess<WorkerOutbound>({
 		spawnCommand: resolveWorkerSpawnCmd(JS_EVAL_PROCESS_ARG, { sameBuild: true }),
-		env: workerEnvFromParent(),
+		env: jsKernelEnv(workerEnvFromParent()),
 		exitLabel: "JS eval worker",
 		detached: shouldDetachKernel(process.platform),
 		reportCleanExit: true,
@@ -1196,6 +1256,7 @@ function wrapBunWorker(worker: Worker, outbox: MessagePort): JsEvalWorkerHandle 
 			worker.terminate();
 			if (!outboxOpen) return;
 			outboxOpen = false;
+			const { receiveMessageOnPort } = workerThreads();
 			for (let received = receiveMessageOnPort(outbox); received; received = receiveMessageOnPort(outbox)) {
 				deliver(received.message);
 			}

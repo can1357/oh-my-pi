@@ -98,6 +98,30 @@ impl Stop {
 	pub const fn on_drop(self) -> StopOnDrop {
 		StopOnDrop(self)
 	}
+
+	/// Runs `fut` with this flag as the scope stop of every parallel walk
+	/// and search started while it is polled, alongside each walk's own
+	/// flag. Walks only read it: one walk ending does not set it for the
+	/// others.
+	///
+	/// For a runtime that hosts walks it may need to cancel: the walkers keep
+	/// its workers in syscalls that rarely yield, so with enough walks running
+	/// no worker is left to poll an aborted task and drop it, and the walks
+	/// run to completion after their caller gave up. Setting this flag from
+	/// outside that runtime ends them at their next directory or file.
+	pub async fn scope<F: Future>(self, fut: F) -> F::Output {
+		SCOPE_STOP.scope(self, fut).await
+	}
+
+	/// The scope stop of the task polling the caller, if any.
+	pub(crate) fn scoped() -> Option<Self> {
+		SCOPE_STOP.try_with(Clone::clone).ok()
+	}
+}
+
+tokio::task_local! {
+	/// See [`Stop::scope`].
+	static SCOPE_STOP: Stop;
 }
 
 /// Two handles are the same flag, not two flags that happen to agree.
