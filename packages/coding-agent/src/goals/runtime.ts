@@ -21,7 +21,6 @@ export interface GoalRuntimeHost {
 
 export interface GoalTurnSnapshot {
 	turnId: string;
-	baselineUsage: GoalTokenUsage;
 	activeGoalId?: string;
 }
 
@@ -77,7 +76,7 @@ export function goalTokenDelta(current: GoalTokenUsage, baseline: GoalTokenUsage
 	);
 }
 
-export function renderGoalPrompt(kind: GoalPromptKind, goal: Goal): string {
+export function renderGoalPrompt(kind: GoalPromptKind, goal: Goal, options?: { vibe?: boolean }): string {
 	const template =
 		kind === "active"
 			? goalModeActivePrompt
@@ -90,6 +89,7 @@ export function renderGoalPrompt(kind: GoalPromptKind, goal: Goal): string {
 		tokenBudget: budgetValue(goal),
 		remainingTokens: remainingValue(goal),
 		timeUsedSeconds: String(goal.timeUsedSeconds),
+		vibe: options?.vibe === true,
 	});
 }
 
@@ -123,6 +123,14 @@ export class GoalRuntime {
 	readonly #host: GoalRuntimeHost;
 	#turnSnapshot: GoalTurnSnapshot | undefined;
 	#wallClock: GoalWallClockSnapshot;
+	/**
+	 * Last usage totals charged to the goal. Unlike a per-turn baseline this
+	 * persists across turn boundaries, so usage that accrues while the main
+	 * agent is idle between turns (e.g. vibe worker turns settling) is still
+	 * counted at the next flush instead of being absorbed into the next
+	 * turn's baseline snapshot.
+	 */
+	#lastFlushedUsage: GoalTokenUsage | undefined;
 	#budgetReportedFor: string | undefined;
 	#accountingTail: Promise<void> = Promise.resolve();
 
@@ -133,9 +141,7 @@ export class GoalRuntime {
 
 	get snapshot(): GoalRuntimeSnapshot {
 		return {
-			turnSnapshot: this.#turnSnapshot
-				? { ...this.#turnSnapshot, baselineUsage: { ...this.#turnSnapshot.baselineUsage } }
-				: undefined,
+			turnSnapshot: this.#turnSnapshot ? { ...this.#turnSnapshot } : undefined,
 			wallClock: { ...this.#wallClock },
 			budgetReportedFor: this.#budgetReportedFor,
 		};
@@ -187,14 +193,17 @@ export class GoalRuntime {
 		if (resetWallClock || this.#wallClock.activeGoalId !== goal.id) {
 			this.#wallClock = { lastAccountedAt: this.#now(), activeGoalId: goal.id };
 		}
+		// Charge only usage accrued from this point on: usage recorded before the
+		// goal existed (or under a previous goal) is not this goal's spend.
+		this.#lastFlushedUsage = { ...this.#host.getCurrentUsage() };
 		if (this.#turnSnapshot) {
 			this.#turnSnapshot.activeGoalId = goal.id;
-			this.#turnSnapshot.baselineUsage = { ...this.#host.getCurrentUsage() };
 		}
 	}
 
 	#clearActiveAccounting(): void {
 		this.#wallClock = { lastAccountedAt: this.#now() };
+		this.#lastFlushedUsage = undefined;
 		if (this.#turnSnapshot) {
 			this.#turnSnapshot.activeGoalId = undefined;
 		}
@@ -206,13 +215,19 @@ export class GoalRuntime {
 		this.#budgetReportedFor = undefined;
 	}
 
-	onTurnStart(turnId: string, baselineUsage: GoalTokenUsage): void {
-		this.#turnSnapshot = { turnId, baselineUsage: { ...baselineUsage } };
+	onTurnStart(turnId: string): void {
+		this.#turnSnapshot = { turnId };
 		const state = this.#host.getState();
 		if (state?.enabled && isAccountingStatus(state.goal)) {
 			this.#turnSnapshot.activeGoalId = state.goal.id;
 			if (this.#wallClock.activeGoalId !== state.goal.id) {
 				this.#wallClock = { lastAccountedAt: this.#now(), activeGoalId: state.goal.id };
+			}
+			// Normally armed by goal create/replace/resume; a session reconstructed
+			// around an already-active goal (tests, journal replay) arms lazily so
+			// the goal still charges only usage from this turn onward.
+			if (this.#lastFlushedUsage === undefined) {
+				this.#lastFlushedUsage = { ...this.#host.getCurrentUsage() };
 			}
 		}
 	}
@@ -332,16 +347,23 @@ export class GoalRuntime {
 		if (!state?.enabled || !isAccountingStatus(state.goal)) return;
 		if (this.#turnSnapshot?.activeGoalId !== state.goal.id && this.#wallClock.activeGoalId !== state.goal.id) return;
 
-		let usage: GoalTokenUsage | undefined;
-		let tokenDelta = 0;
-		if (this.#turnSnapshot?.activeGoalId === state.goal.id) {
-			usage = currentUsage ?? this.#host.getCurrentUsage();
-			tokenDelta = goalTokenDelta(usage, this.#turnSnapshot.baselineUsage);
-		}
+		const usage = currentUsage ?? this.#host.getCurrentUsage();
+		// Never move the baseline down. A dip (a worker aggregate that briefly
+		// disappears, or vibe toggling the worker fold off) is not a refund;
+		// storing the lower sample would charge that same spend again when the
+		// total recovers.
+		const baseline = this.#lastFlushedUsage ?? usage;
+		const tokenDelta = goalTokenDelta(usage, baseline);
 		const wallSeconds =
 			this.#wallClock.activeGoalId === state.goal.id
 				? Math.max(0, Math.floor((this.#now() - this.#wallClock.lastAccountedAt) / 1000))
 				: 0;
+		this.#lastFlushedUsage = {
+			input: Math.max(baseline.input, usage.input),
+			output: Math.max(baseline.output, usage.output),
+			cacheRead: Math.max(baseline.cacheRead, usage.cacheRead),
+			cacheWrite: Math.max(baseline.cacheWrite, usage.cacheWrite),
+		};
 		if (tokenDelta <= 0 && wallSeconds <= 0) return;
 
 		state.goal.tokensUsed += tokenDelta;
@@ -352,9 +374,6 @@ export class GoalRuntime {
 			state.goal.status = "budget-limited";
 		}
 
-		if (usage && this.#turnSnapshot?.activeGoalId === state.goal.id) {
-			this.#turnSnapshot.baselineUsage = { ...usage };
-		}
 		if (this.#wallClock.activeGoalId === state.goal.id && wallSeconds > 0) {
 			this.#wallClock.lastAccountedAt += wallSeconds * 1000;
 		}
@@ -513,10 +532,10 @@ export class GoalRuntime {
 			: undefined;
 	}
 
-	buildContinuationPrompt(): string | undefined {
+	buildContinuationPrompt(options?: { vibe?: boolean }): string | undefined {
 		const state = this.#host.getState();
 		return state?.enabled && state.goal.status === "active"
-			? renderGoalPrompt("continuation", state.goal)
+			? renderGoalPrompt("continuation", state.goal, options)
 			: undefined;
 	}
 

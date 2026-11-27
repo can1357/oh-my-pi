@@ -1,5 +1,7 @@
 # Changelog
 
+# Changelog
+
 ## [Unreleased]
 
 ### Breaking Changes
@@ -14,6 +16,7 @@
 
 ### Added
 
+- Combined goal mode with vibe mode: `/goal` and `/vibe` compose in either order, keeping the `goal` tool in the director's set while workers drive the objective. Worker-result delivery owns director wake-ups (goal continuation fires only when every worker is idle), goal state rides in the vibe `mode_change` journal entry so one record rehydrates both on resume, exiting vibe pauses an active goal, and a goal's `token_budget` now covers director plus worker spend through record-level usage accounting that survives worker park/revive and process restarts.
 - Credentials in `agent.db` can be encrypted with a master key kept in the OS credential vault (macOS Keychain, Windows Credential Manager, Secret Service): fresh installs encrypt when the vault answers without prompting (never on headless hosts), existing unencrypted stores stay as they are, and `auth.encrypt: true`/`false` (or `OMP_AUTH_ENCRYPT`) forces it on or off; `omp auth key` prints the master key and `omp auth key <key|->` installs one, re-encrypting stored credentials under it
 - Added OSC 7577 Program Resume Protocol reporting so supporting terminals (Tern, Rex, etc.) automatically restore open omp sessions with `--restore` and their launch flags after a crash or restart
 - Added a concise tool display mode, `display.toolActivity: concise`: each model tool call draws as one row with its time, status, tool and intent (`Ctrl+O`, or unfolding a row in Tern, opens the full card, and a failure keeps its last error line on the row); `display.toolActivity` (`detailed`, `concise`, `hidden`) replaces `display.hideToolActivity`, whose saved values migrate, and `Ctrl+Shift+O` now cycles the three modes ([#2785](https://github.com/can1357/oh-my-pi/issues/2785))
@@ -46,6 +49,7 @@
 
 ### Changed
 
+- Goal budget accounting uses a persistent last-flushed usage baseline instead of a per-turn snapshot, so token spend accruing between turns (for example vibe worker turns settling while the main agent is idle) is charged to the goal instead of being absorbed into the next turn's baseline.
 - Updated task prompt to forbid full builds or test suites mid‑flight and allow quick scoped checks
 - The shell's `find`, `grep -r`, `rg`, `fd` and `ast-grep` refuse to search a filesystem root such as `/` and explain why; `find`, `rg` and `fd` still allow a shallow look (max depth 2), and `-allow-root` (`find`) or `--allow-root` searches the whole disk on purpose
 - The `grep`, `glob`, `ast_grep` and `ast_edit` tools refuse a search scope that resolves to a filesystem root (`/usr/..`, `../../..`, `C:\`) and explain why; a bare `/` still means the workspace
@@ -68,6 +72,7 @@
 
 ### Fixed
 
+- Entering vibe while a goal is paused keeps that objective, and worker spend from an earlier vibe session is not charged again when the goal resumes.
 - Spotlight no longer cuts tool results in sessions without the `read` tool (such as an RPC host's own tools under `--no-tools`), where the agent could not read the hidden lines back
 - Fixed a handoff model that never stops streaming holding automatic compaction indefinitely: handoff output is now capped like a summary, and the new `compaction.handoffTimeoutSeconds` setting (off by default) fails a handoff that runs too long so automatic compaction moves on to the next method and `/handoff` reports the timeout ([#18031](https://github.com/can1357/oh-my-pi/issues/18031))
 - Fixed the tool-call loop guard never stopping a model that keeps calling nonexistent tools (`wri`, `ed`, `ba`) with varying names or arguments; it now redirects after `model.toolCallLoopGuard.threshold` such turns in a row, while a single typo followed by a valid call is unaffected ([#10876](https://github.com/can1357/oh-my-pi/issues/10876))
@@ -169,7 +174,6 @@
 - Fixed unsupported `ANTHROPIC_SEARCH_BASE_URL` from appearing in `omp --help`, and improved the error shown when `bun` is unavailable in compiled JavaScript evaluation.
 - Removed the paused Google Antigravity provider (`google-antigravity`) and the Gemini CLI (Cloud Code Assist) transport (`google-gemini-cli` api); Gemini remains available through a Gemini API key and Vertex AI
 - omp no longer reads Gemini CLI's `~/.gemini` and `.gemini/` config (MCP servers, `GEMINI.md`, system prompts, extensions, settings); the `gemini` discovery provider id is gone.
-
 ## [19.2.1] - 2026-11-25
 
 ### Breaking Changes

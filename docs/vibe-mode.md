@@ -15,7 +15,7 @@ Toggle it with the `/vibe` slash command:
 - Entering activates a parent-session worker scope, installs the vibe tools, reduces the active toolset to `read`, optional parent-owned `todo`, and the vibe tools, and injects the director instructions.
 - An inline prompt (`/vibe <prompt>`) enters the mode and submits that prompt as the first directive.
 - Exiting aborts any running director turn, suppresses queued-message replay during teardown, restores the prior toolset, cancels in-flight worker turns, and persists terminal lifecycle records for every worker in the scope.
-- Vibe mode is mutually exclusive with both active **and paused** plan/goal modes; exit those modes first.
+- Vibe mode combines with goal mode: `/goal <objective>` inside vibe (or `/vibe` while a goal is active) keeps the `goal` tool in the director set and runs the objective autonomously — the director dispatches workers toward the goal, verifies their output with `read`, and continuation between turns is driven by worker-result delivery, with goal continuation firing only when every worker is idle. Worker token spend counts against the goal's token budget. Exiting vibe pauses an active goal (continue it solo with `/goal resume`). Plan mode remains exclusive with both.
 - Starting, deleting, forking, moving (including `/wt`), or handing off the session is rejected while vibe mode is active. Reset-style `/loop` actions are also blocked.
 - The status line shows a `Vibe` indicator while the mode is on; its token-rate display aggregates generating workers even while the director is idle.
 
@@ -63,3 +63,12 @@ Worker ids are scoped to the owning agent and parent session; a worker from anot
 7. Use `vibe_kill` for a finished/stuck worker. Exiting the mode kills the entire remaining scope.
 
 The director remains responsible for the final outcome: worker completion means the turn settled, not that its claims are correct.
+
+## Combining with goal mode
+
+`/vibe` and `/goal` compose in either order. The combined mode turns the director into an autonomous goal runner:
+
+- The director toolset is `read`, optional parent-owned `todo`, `goal`, and the vibe tools. Evidence gathering routes through workers (verification briefs, test runs) plus the director's own `read`; `goal({op:"complete"})` still demands direct current-state evidence for every deliverable.
+- Wake-ups are event-driven: a settled worker turn self-delivers its result into the director conversation and starts the next director turn. Goal continuation (the hidden `goal-continuation` message) only fires when the goal is active, no worker turn is in flight, nothing is queued, and the previous continuation made progress — it is strictly the all-idle fallback, so the two mechanisms never race to start turns.
+- The session journal's latest `mode_change` entry is the canonical carrier while combined: vibe entries carry `goal` state alongside `previousTools`, so resume rehydrates both the worker scope and the goal from one record. Exiting vibe journals a bare `goal_paused` tail.
+- A goal's `token_budget` covers the whole combined mode: the director's turns plus every worker's cumulative usage (parked or revived workers keep their recorded spend).

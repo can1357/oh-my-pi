@@ -120,7 +120,7 @@ describe("goal runtime", () => {
 			state: { enabled: true, mode: "active", goal: createGoal() },
 		});
 
-		harness.runtime.onTurnStart("turn-1", createUsage());
+		harness.runtime.onTurnStart("turn-1");
 		harness.advance(2_500);
 		harness.setUsage(createUsage({ input: 1 }));
 		await harness.runtime.flushUsage("suppressed");
@@ -147,7 +147,7 @@ describe("goal runtime", () => {
 			state: { enabled: true, mode: "active", goal: createGoal() },
 		});
 
-		harness.runtime.onTurnStart("turn-1", createUsage());
+		harness.runtime.onTurnStart("turn-1");
 		harness.advance(2_500);
 		// Flush wall-clock time without any token usage changes.
 		await harness.runtime.flushUsage("suppressed");
@@ -162,7 +162,7 @@ describe("goal runtime", () => {
 			state: { enabled: true, mode: "active", goal: createGoal() },
 		});
 
-		harness.runtime.onTurnStart("turn-1", createUsage());
+		harness.runtime.onTurnStart("turn-1");
 		harness.advance(2_500);
 		await harness.runtime.onTaskAborted({ reason: "internal" });
 
@@ -182,7 +182,7 @@ describe("goal runtime", () => {
 			state: { enabled: true, mode: "active", goal },
 		});
 
-		harness.runtime.onTurnStart("turn-1", createUsage());
+		harness.runtime.onTurnStart("turn-1");
 		harness.setState(undefined);
 		harness.advance(10_000);
 		harness.setState({ enabled: true, mode: "active", goal });
@@ -202,7 +202,7 @@ describe("goal runtime", () => {
 			state: { enabled: true, mode: "active", goal },
 		});
 
-		harness.runtime.onTurnStart("turn-1", createUsage());
+		harness.runtime.onTurnStart("turn-1");
 		harness.setState(undefined);
 		harness.runtime.clearAccounting();
 		harness.advance(10_000);
@@ -225,7 +225,7 @@ describe("goal runtime", () => {
 			},
 		});
 
-		harness.runtime.onTurnStart("turn-1", createUsage());
+		harness.runtime.onTurnStart("turn-1");
 		harness.setUsage({ input: 2 });
 		await harness.runtime.flushUsage("allowed");
 		expect(harness.getState()?.goal.status).toBe("budget-limited");
@@ -291,7 +291,7 @@ describe("goal runtime", () => {
 			state: { enabled: true, mode: "active", goal: createGoal() },
 		});
 
-		harness.runtime.onTurnStart("turn-1", createUsage());
+		harness.runtime.onTurnStart("turn-1");
 		harness.advance(1_000);
 		harness.setUsage({ output: 4 });
 		await harness.runtime.onTaskAborted({ reason: "interrupted" });
@@ -395,7 +395,7 @@ describe("goal runtime", () => {
 			},
 		});
 
-		harness.runtime.onTurnStart("turn-1", createUsage());
+		harness.runtime.onTurnStart("turn-1");
 		harness.advance(1_000);
 		harness.setUsage({ input: 12 });
 
@@ -409,5 +409,55 @@ describe("goal runtime", () => {
 		expect(next.goal.timeUsedSeconds).toBe(0);
 		expect(next.goal.id).not.toBe("goal-1");
 		expect(harness.persists.at(-1)?.state?.goal.objective).toBe("Second");
+	});
+
+	it("counts usage that accrues while the agent is idle between turns", async () => {
+		const harness = createHarness({
+			state: { enabled: true, mode: "active", goal: createGoal({ tokenBudget: 100 }) },
+		});
+
+		harness.runtime.onTurnStart("turn-1");
+		harness.setUsage({ input: 10 });
+		await harness.runtime.flushUsage("suppressed");
+		expect(harness.getState()?.goal.tokensUsed).toBe(10);
+
+		// Idle stretch: usage grows with no turn in flight (vibe worker turns
+		// settling while the director idles). A per-turn baseline would rebase at
+		// the next turn start and lose this delta; the persistent baseline must
+		// keep charging it to the goal.
+		harness.setUsage({ input: 30 });
+		await harness.runtime.onAgentEnd({});
+		await harness.runtime.flushUsage("suppressed");
+		expect(harness.getState()?.goal.tokensUsed).toBe(30);
+
+		harness.runtime.onTurnStart("turn-2");
+		harness.setUsage({ input: 45 });
+		await harness.runtime.flushUsage("suppressed");
+		expect(harness.getState()?.goal.tokensUsed).toBe(45);
+	});
+
+	it("does not re-charge usage that dips below the last flushed baseline", async () => {
+		const harness = createHarness({
+			state: { enabled: true, mode: "active", goal: createGoal({ tokenBudget: 100 }) },
+		});
+
+		harness.runtime.onTurnStart("turn-1");
+		harness.setUsage({ input: 40, output: 10 });
+		await harness.runtime.flushUsage("suppressed");
+		expect(harness.getState()?.goal.tokensUsed).toBe(50);
+
+		// A lower sample (worker aggregate disappeared) must not move the baseline down.
+		harness.setUsage({ input: 10, output: 0 });
+		await harness.runtime.flushUsage("suppressed");
+		expect(harness.getState()?.goal.tokensUsed).toBe(50);
+
+		// Recovery up to the old high-water is not new spend.
+		harness.setUsage({ input: 40, output: 10 });
+		await harness.runtime.flushUsage("suppressed");
+		expect(harness.getState()?.goal.tokensUsed).toBe(50);
+
+		harness.setUsage({ input: 45, output: 12 });
+		await harness.runtime.flushUsage("suppressed");
+		expect(harness.getState()?.goal.tokensUsed).toBe(57);
 	});
 });

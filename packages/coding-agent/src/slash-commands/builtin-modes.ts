@@ -329,7 +329,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		getTuiAutocompleteDescription: runtime => {
 			if (runtime.ctx.vibeModeEnabled) return "Vibe: on";
 			if (runtime.ctx.planModeEnabled) return "Vibe: blocked by plan mode";
-			if (runtime.ctx.goalModeEnabled) return "Vibe: blocked by goal mode";
+			if (runtime.ctx.goalModeEnabled) return "Vibe: off (goal active — /vibe combines with it)";
 			return "Vibe: off";
 		},
 		handleTui: async (command, runtime) => {

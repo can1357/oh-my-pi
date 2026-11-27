@@ -803,7 +803,7 @@ describe("InteractiveMode vibe mode toggle", () => {
 		expect(String(exitError)).toContain("journal atomic publish failed");
 
 		expect(mode.vibeModeEnabled).toBe(true);
-		expect(session.getVibeModeState()).toEqual({ enabled: true });
+		expect(session.getVibeModeState()).toEqual({ enabled: true, previousTools: expect.any(Array) });
 		expect(session.getActiveToolNames()).toEqual(activeTools);
 		expect(vibeModeEntryCount(session.sessionManager)).toBe(1);
 

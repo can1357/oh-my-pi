@@ -247,7 +247,7 @@ import {
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import { hasLiveOwnedService } from "../launch/services";
 import { USER_AWAIT_ID } from "../registry/agent-awaits";
-import { type AgentRef, AgentRegistry, type AgentRegistryApi } from "../registry/agent-registry";
+import { MAIN_AGENT_ID, type AgentRef, AgentRegistry, type AgentRegistryApi } from "../registry/agent-registry";
 import { cfgSecretsEnabled } from "../secrets/settings";
 import { releaseSharpshooterSession } from "../sharpshooter/backend";
 import { flushSharpshooterExtraction } from "../sharpshooter/extract";
@@ -321,6 +321,7 @@ import {
 } from "../utils/title-card";
 import { generateSessionTitle, nerdGlyphsActive } from "../utils/title-generator";
 import { buildNamedToolChoice, isToolChoiceActive } from "../utils/tool-choice";
+import { aggregateVibeWorkerUsage } from "../vibe/runtime";
 import type { VibeModeState } from "../vibe/state";
 import type { AgentSessionEvent, AgentSessionEventListener, WakeSources } from "./agent-session-events";
 import {
@@ -3007,8 +3008,21 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				}
 			},
 			persist: (mode, state) => {
+				// Combined goal+vibe mode: the session's `mode_change` journal is
+				// latest-wins, so while vibe is active the vibe entry is the canonical
+				// carrier and goal state rides in its data. A bare "goal"/"none" entry
+				// here would shadow vibe's previousTools and break resume rehydration.
+				if (this.#vibeModeState?.enabled) {
+					const data: Record<string, unknown> = { previousTools: this.#vibeModeState.previousTools };
+					if (state) {
+						data.goal = state.goal;
+						data.goalEnabled = state.enabled;
+					}
+					this.sessionManager.appendModeChange("vibe", data);
+					return;
+				}
 				if (mode === "none") {
-					this.sessionManager.appendModeChange("none");
+					this.appendGoalModeExit();
 				} else if (state) {
 					this.sessionManager.appendModeChange(mode, { goal: state.goal });
 				}
@@ -5152,7 +5166,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 		if (event.type === "turn_start") {
 			this.#advisors.onPrimaryTurnStart();
-			this.#goalRuntime.onTurnStart(`turn-${++this.#goalTurnCounter}`, this.#goalUsage());
+			this.#goalRuntime.onTurnStart(`turn-${++this.#goalTurnCounter}`);
 		}
 
 		if (event.type === "tool_execution_start") {
@@ -8699,6 +8713,28 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#vibeModeState;
 	}
 
+	/**
+	 * Vibe-runtime hook: one worker turn settled, before its result delivers.
+	 * Flush goal usage now so worker spend is charged to an active goal's budget
+	 * as a delta instead of vanishing into the next turn's baseline.
+	 */
+	async onVibeWorkerTurnSettled(): Promise<void> {
+		await this.#goalRuntime.flushUsage("allowed");
+	}
+
+	/**
+	 * Journal a goal-mode exit through the vibe carrier: while vibe is active a
+	 * bare `none` would become the latest mode_change and drop the director
+	 * scope on resume, so the tail must stay a vibe entry (without goal state).
+	 */
+	appendGoalModeExit(): void {
+		if (this.#vibeModeState?.enabled) {
+			this.sessionManager.appendModeChange("vibe", { previousTools: this.#vibeModeState.previousTools });
+		} else {
+			this.sessionManager.appendModeChange("none");
+		}
+	}
+
 	setVibeModeState(state: VibeModeState | undefined): void {
 		this.#vibeModeState = state;
 		if (state?.enabled) return;
@@ -9058,6 +9094,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			customType: VIBE_MODE_CONTEXT_MESSAGE_TYPE,
 			content: prompt.render(vibeModeActivePrompt, {
 				todoAvailable: this.getActiveToolNames().includes("todo"),
+				goalAvailable: this.getActiveToolNames().includes("goal"),
 			}),
 			display: false,
 			attribution: "agent",
@@ -15976,7 +16013,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	#goalUsage(): GoalTokenUsage {
 		const { input, output, cacheRead, cacheWrite } = this.#stats.getTokenTotals();
-		return { input, output, cacheRead, cacheWrite };
+		// Vibe workers spend through their own sessions, invisible to #stats. Fold
+		// their cumulative totals in even while vibe is off: a goal armed between
+		// vibe sessions must baseline whatever spend is still recorded, or the
+		// next /vibe presents that same total as a fresh delta.
+		const workers = aggregateVibeWorkerUsage(this.#agentId ?? MAIN_AGENT_ID);
+		return {
+			input: input + workers.input,
+			output: output + workers.output,
+			cacheRead: cacheRead + workers.cacheRead,
+			cacheWrite: cacheWrite + workers.cacheWrite,
+		};
 	}
 
 	/**
