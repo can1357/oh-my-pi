@@ -420,9 +420,6 @@ resvg = { version = "0.48", default-features = false, features = ["svgz", "text"
 # JPEG decoder compiles — zune-jpeg 0.5.15's no-log stub macros are not
 # expression-safe and the crate fails to build without it.
 zune-jpeg = { version = "0.5", default-features = false, features = ["log"] }
-# Not used directly: pins tinyvec to fixed 1.13.3 because 1.13.0 was published broken
-# (cannot find macro `vec` in alloc-only context).
-tinyvec = "=1.13.3"
 png = "0.18"
 # Oniguruma, not fancy-regex: onig is already linked (omp-builtins), and its
 # compiled grammar regexes are ~5x smaller and faster (TS+TSX warm: 29 vs 149 MB

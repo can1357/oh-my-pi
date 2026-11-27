@@ -112,7 +112,7 @@ toml = { workspace = true, optional = true }
 tokio-util = "0.7"
 xutf.workspace = true
 libc = "0.2.172"
-uutils_term_grid = "0.8"
+term_grid = { package = "uutils_term_grid", version = "0.8" }
 
 [dependencies.uucore]
 version = "0.8.0"
