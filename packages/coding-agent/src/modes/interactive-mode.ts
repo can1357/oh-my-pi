@@ -301,6 +301,7 @@ import {
 	cfgDisplayShowTurnTime,
 	cfgDisplaySubagentLivePreview,
 	cfgDisplayToolActivity,
+	cfgGitChildRepoDiscovery,
 	cfgGitEnabled,
 	cfgLoopConditionTimeoutMs,
 	cfgLoopMode,
@@ -530,6 +531,7 @@ const cfgLiveUiSettings = combine({
 	"statusLine.segmentOptions": cfgStatusLineSegmentOptions,
 	"statusLine.compactThinkingLevel": cfgStatusLineCompactThinkingLevel,
 	"statusLine.contextLine": cfgStatusLineContextLine,
+	"git.childRepoDiscovery": cfgGitChildRepoDiscovery,
 	"git.enabled": cfgGitEnabled,
 	"advisor.enabled": cfgAdvisorEnabled,
 	"advisor.maxNotesPerUpdate": cfgAdvisorMaxNotesPerUpdate,
@@ -2681,7 +2683,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			return false;
 		}
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
-		this.statusLine.applyCwdChange();
+		this.statusLine.invalidateVcs();
 		return true;
 	}
 
@@ -3718,6 +3720,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		) {
 			this.statusLine.reloadSettings();
 		}
+		if (any("git.childRepoDiscovery")) this.statusLine.invalidateVcs();
 		if (any("statusLine.sessionAccent")) this.#handleSessionAccentInputsChanged();
 		// Advisor runtime start/stop has no session event; repaint its status segment.
 		if (any("advisor.enabled", "advisor.maxNotesPerUpdate", "tier.advisor")) this.statusLine.refresh();

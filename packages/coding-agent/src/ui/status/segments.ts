@@ -192,10 +192,20 @@ function modelSeg(input: SegInput): SegView {
 	const showLevel = input.options.model?.showThinkingLevel !== false;
 	const thinking = showLevel ? thinkingPieces(facts, look) : [];
 	const compact = input.compactThinking && thinking.length > 0;
-	const pieces: LookPiece[] = [
-		thinking.length > 0 && compact ? { ...thinking[0], lead: true, space: "after" } : { icon: "model", s: look },
-		{ t: name, s: look },
-	];
+	const pieces: LookPiece[] = [];
+	if (thinking.length > 0 && compact) {
+		const resolved = facts.autoThinking ? facts.autoResolvedLevel : undefined;
+		pieces.push({ ...thinking[0], lead: true, space: resolved ? "none" : "after" });
+		if (resolved) {
+			pieces.push({
+				icon: resolved === "off" ? "status.disabled" : `thinking.${resolved}`,
+				else: `${resolved} `,
+				lead: true,
+				s: look,
+			});
+		}
+	} else pieces.push({ icon: "model", s: look });
+	pieces.push({ t: name, s: look });
 	const spans: TspSpan[] = [span(name, native)];
 	const advisor = facts.advisor;
 	if (advisor) {

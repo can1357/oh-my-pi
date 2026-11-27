@@ -447,11 +447,15 @@ export class SessionStatusLine implements StatusLineModel {
 		this.#autoCompact.set(enabled);
 	}
 
-	/** The cwd moved: drop VCS state for the old checkout. */
-	applyCwdChange(): void {
+	/** The cwd or child-repository policy changed: discard facts and reads for the old checkout. */
+	invalidateVcs(): void {
 		this.#vcsGeneration++;
 		this.#vcs.set(undefined);
 		this.#vcsStale = true;
+		if (this.#lastPr) {
+			this.#lastPr = undefined;
+			this.#onPullRequest?.(undefined);
+		}
 		this.refresh();
 	}
 
