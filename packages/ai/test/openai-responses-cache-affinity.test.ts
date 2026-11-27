@@ -462,6 +462,32 @@ describe("OpenAI Responses explicit prompt cache policy", () => {
 			expect(context.messages[2]).toMatchObject({ content: [{ type: "text", text: "round 1 a" }] });
 		});
 
+		it("marks only the final custom-tool output in a mixed output run", () => {
+			const [calls, read, edit] = toolRound(1);
+			calls.content[1] = {
+				type: "toolCall",
+				id: edit.toolCallId,
+				name: "edit",
+				customWireName: "apply_patch",
+				arguments: { input: "*** Begin Patch\n*** End Patch" },
+			};
+			edit.toolName = "edit";
+			const { input } = buildParams(
+				openAI56ResponsesModel,
+				{ messages: [...historicalContext.messages, calls, read, edit] },
+				{ promptCache: { mode: "explicit" } },
+				undefined,
+			).params;
+
+			expect(input?.slice(-2)).toMatchObject([
+				{ type: "function_call_output", output: "round 1 a" },
+				{
+					type: "custom_tool_call_output",
+					output: [{ type: "input_text", text: "round 1 b", prompt_cache_breakpoint: { mode: "explicit" } }],
+				},
+			]);
+		});
+
 		// Explicit mode only reads at markers the request carries: request N+1 must
 		// still mark every boundary request N wrote, or nothing is ever read back.
 		it("keeps every earlier marker byte-identical as the loop grows", () => {

@@ -1665,31 +1665,37 @@ function isResponsesPromptCacheableContentBlock(block: unknown): block is Respon
 	return block.type === "input_text" || block.type === "input_image" || block.type === "input_file";
 }
 
+function isResponsesToolOutputBoundary(item: ResponseInput[number]) {
+	return item.type === "function_call_output" || item.type === "custom_tool_call_output";
+}
+
 function responsesPromptCacheBoundary(item: ResponseInput[number]): OpenAIPromptCacheBoundary | undefined {
 	const role = "role" in item ? item.role : undefined;
 	if (role === "developer" || role === "system") return "instructions";
 	if (role === "user") return "user";
-	return item.type === "function_call_output" ? "output" : undefined;
+	return isResponsesToolOutputBoundary(item) ? "output" : undefined;
 }
 
-function markedResponsesText(text: string): ResponseInputContent[] | undefined {
-	return text ? [{ type: "input_text", text, prompt_cache_breakpoint: { mode: "explicit" } }] : undefined;
+function markedResponsesContent<T extends object>(content: string | T[]): ResponseInputContent[] | T[] | undefined {
+	if (typeof content !== "string") {
+		return withOpenAIPromptCacheBreakpoint(content, isResponsesPromptCacheableContentBlock);
+	}
+	return content ? [{ type: "input_text", text: content, prompt_cache_breakpoint: { mode: "explicit" } }] : undefined;
 }
 
 /** A copy of `item` with its last cacheable block marked; undefined when nothing in it can carry a breakpoint. */
 function withResponsesItemBreakpoint(item: ResponseInput[number]): ResponseInput[number] | undefined {
+	// The SDK's two tool output types allow different input_file fields.
+	if (item.type === "custom_tool_call_output") {
+		const output = markedResponsesContent(item.output);
+		return output && { ...item, output };
+	}
 	if (item.type === "function_call_output") {
-		const output =
-			typeof item.output === "string"
-				? markedResponsesText(item.output)
-				: withOpenAIPromptCacheBreakpoint(item.output, isResponsesPromptCacheableContentBlock);
+		const output = markedResponsesContent(item.output);
 		return output && { ...item, output };
 	}
 	if (!("role" in item) || item.role === "assistant" || !("content" in item)) return undefined;
-	const content =
-		typeof item.content === "string"
-			? markedResponsesText(item.content)
-			: withOpenAIPromptCacheBreakpoint(item.content, isResponsesPromptCacheableContentBlock);
+	const content = markedResponsesContent(item.content);
 	return content && { ...item, content };
 }
 
