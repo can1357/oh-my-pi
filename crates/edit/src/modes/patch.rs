@@ -19,7 +19,6 @@ use crate::{
 		SequenceSearchResult, find_closest_sequence_match, find_context_line, find_match,
 		seek_sequence,
 	},
-	notebook::is_notebook_path,
 	store::EditStore,
 	stream_json::{ArgSnapshot, EditEntry},
 	text::{
@@ -1457,10 +1456,10 @@ fn validate_rename(
 		return Ok(None);
 	};
 	let destination = files.resolve(rename, false)?;
-	if destination.absolute == source.absolute {
+	if destination.location == source.location {
 		return Err(EditError::apply("rename path is the same as source path"));
 	}
-	if files.exists(&destination.absolute) {
+	if files.exists(&destination.location) {
 		return Err(EditError::apply(format!(
 			"Cannot rename {} to {rename}: destination already exists.",
 			input.path
@@ -1506,7 +1505,7 @@ fn stage_from_parts(
 		Some(text) => Some(read.as_ref().unwrap().persist(text)?),
 		None => None,
 	};
-	let mut staged = StagedFile::new(resolved.display.clone(), resolved.absolute, op);
+	let mut staged = StagedFile::new(resolved.display.clone(), resolved.location, op);
 	staged.move_to = move_to;
 	staged.existed = read.is_some();
 	staged.before_raw = read.as_ref().map(|value| value.raw.clone());
@@ -1712,7 +1711,7 @@ fn preview_entry(
 				}
 			},
 			_ => {
-				if is_notebook_path(&entry.resolved.absolute) {
+				if entry.resolved.location.is_notebook() {
 					persist_new(&entry.resolved, text)?;
 				}
 			},
@@ -1842,10 +1841,10 @@ impl ModeEngine for PatchEngine {
 			let input = entry_input(path, entry, self.first_match)?;
 			if let Some(rename) = input.rename {
 				let destination = files.resolve(rename, false)?;
-				if destination.absolute == initial_resolved.absolute {
+				if destination.location == initial_resolved.location {
 					return Err(EditError::apply("rename path is the same as source path"));
 				}
-				if files.exists(&destination.absolute) {
+				if files.exists(&destination.location) {
 					return Err(EditError::apply(format!(
 						"Cannot rename {path} to {rename}: destination already exists."
 					)));

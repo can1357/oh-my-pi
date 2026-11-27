@@ -231,6 +231,31 @@ describe("AgentSession Gemini header-runaway interrupt", () => {
 		expect(replaysHeaders).toBe(false);
 	});
 
+	it("lets the reasoning run after the reminder finish instead of interrupting it again", async () => {
+		let call = 0;
+		buildSession((model, _context, options) => {
+			call++;
+			if (call === 1) return headerRunawayStream(model, options);
+			if (call === 2) return headerRunawayStream(model, options, "Answered after long reasoning.");
+			return successStream(model, "Restarted after a repeat interrupt.");
+		});
+		const notices: Array<Extract<AgentSessionEvent, { type: "notice" }>> = [];
+		session?.subscribe(event => {
+			if (event.type === "notice") notices.push(event);
+		});
+
+		await session?.prompt("Analyze this statically, without tools");
+		await session?.waitForIdle();
+
+		expect(call).toBe(2);
+		expect(notices.filter(n => n.source === "loop-guard")).toHaveLength(1);
+		const assistants = (session?.agent.state.messages ?? []).filter(
+			(m): m is AssistantMessage => m.role === "assistant",
+		);
+		expect(assistants).toHaveLength(1);
+		expect(assistants[0].content.at(-1)).toEqual({ type: "text", text: "Answered after long reasoning." });
+	});
+
 	it("does not interrupt when the tool-call reminder setting is off", async () => {
 		let call = 0;
 		buildSession(

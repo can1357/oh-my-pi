@@ -256,7 +256,7 @@ function buildRequestBody(params: SearchParams): Record<string, unknown> {
 }
 
 /** Credentialed request context for one xAI Responses call. */
-export type XAIRequest = Pick<
+type XAIRequest = Pick<
 	SearchParams,
 	"model" | "modelRegistry" | "authStorage" | "sessionId" | "signal" | "timeoutMs" | "fetch"
 >;
@@ -527,14 +527,13 @@ function parseResponse(
 
 /**
  * POST one Responses request with `request.model`'s provider credentials,
- * resolved through the model registry. Shared by xAI search and the X reader
- * (`web/scrapers/twitter.ts`).
+ * resolved through the model registry.
  *
  * @throws SearchProviderError when the model is not an xAI model, when official
  * xAI OAuth credentials would reach a custom endpoint, on HTTP errors, and on
  * invalid JSON.
  */
-export async function requestXAIResponses(
+async function requestXAIResponses(
 	request: XAIRequest,
 	body: Record<string, unknown>,
 ): Promise<{ response: XAIResponsesResponse; authMode: "api_key" | "oauth" }> {

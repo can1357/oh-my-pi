@@ -1,6 +1,6 @@
+import { renderHtml } from "@oh-my-pi/pi-natives";
 import type * as DomNs from "@oh-my-pi/pi-utils/dom";
 import type * as ReadabilityNs from "@oh-my-pi/pi-utils/readability";
-import { htmlToBasicMarkdown } from "../../web/scrapers/types";
 
 export type ReadableFormat = "text" | "markdown";
 
@@ -288,7 +288,7 @@ async function markdownContent(
 	htmlContent: string | null | undefined,
 	options: ReadableExtractOptions,
 ): Promise<string | undefined> {
-	let processedMarkdown = normalize(await htmlToBasicMarkdown(htmlContent ?? "")) ?? text;
+	let processedMarkdown = normalize((await renderHtml(htmlContent ?? "", { mode: "full" })).trim()) ?? text;
 	if (!processedMarkdown) return undefined;
 	if (options.filter) processedMarkdown = normalize(filterMarkdownSections(processedMarkdown, options.filter));
 	if (!processedMarkdown) return undefined;

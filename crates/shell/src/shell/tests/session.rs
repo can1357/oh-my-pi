@@ -633,15 +633,17 @@ async fn one_shot_completion_aborts_internal_background_jobs() {
 	);
 }
 
-/// A background builtin started in a subshell ends with the subshell, as an
-/// external one does. Left running it was out of reach — no process for
-/// `pkill`, no job for `kill %N` — and spun for the life of the host.
+/// A background builtin started in a subshell ends with the subshell. Left
+/// running it was out of reach — no process for `pkill`, no job for `kill
+/// %N` — and spun for the life of the host. The group keeps `yes` the
+/// builtin: a lone `yes &` runs `PATH`'s program, which runs on as its own
+/// process, as in bash.
 #[tokio::test(flavor = "multi_thread")]
 async fn subshell_exit_ends_its_background_builtins() {
 	let _guard = shell_test_lock().lock().await;
 	let output = tempfile::NamedTempFile::new().expect("output file");
 	let shell = Shell::new(None);
-	let command = format!("(yes > {} &)", quote_arg(&output.path().to_string_lossy()));
+	let command = format!("({{ yes; }} > {} &)", quote_arg(&output.path().to_string_lossy()));
 
 	shell
 		.run(ShellRunOptions { command, ..Default::default() }, None, CancelToken::default())
@@ -652,13 +654,14 @@ async fn subshell_exit_ends_its_background_builtins() {
 }
 
 /// `kill %N` ends a background job running inside the shell, which has no
-/// process to deliver the signal to.
+/// process to deliver the signal to. The group keeps `yes` the builtin (a
+/// lone `yes &` runs `PATH`'s program).
 #[tokio::test(flavor = "multi_thread")]
 async fn kill_jobspec_ends_in_process_background_job() {
 	let _guard = shell_test_lock().lock().await;
 	let output = tempfile::NamedTempFile::new().expect("output file");
 	let shell = Shell::new(None);
-	let command = format!("yes > {} & kill %1", quote_arg(&output.path().to_string_lossy()));
+	let command = format!("{{ yes; }} > {} & kill %1", quote_arg(&output.path().to_string_lossy()));
 
 	let result = shell
 		.run(ShellRunOptions { command, ..Default::default() }, None, CancelToken::default())
@@ -969,7 +972,8 @@ async fn persistent_shell_reaps_early_exiting_background_pipeline_stage() {
 }
 
 /// `exit` and errexit end the command, not the session: later runs keep
-/// the variables, functions, and options set before them.
+/// the variables and functions set before them. Errexit itself ends with
+/// the command that turned it on.
 #[tokio::test(flavor = "multi_thread")]
 async fn exit_and_errexit_keep_session_state() {
 	let _guard = shell_test_lock().lock().await;
@@ -987,12 +991,41 @@ async fn exit_and_errexit_keep_session_state() {
 	};
 	let state_intact = "test \"$PI_KEPT\" = kept && pi_kept_fn";
 
-	assert_eq!(exit_code("set -e; PI_KEPT=kept; pi_kept_fn() { true; }").await, Some(0));
-	assert_eq!(exit_code("false; true").await, Some(1), "errexit stops the command");
+	let set_state = "set -e; PI_KEPT=kept; pi_kept_fn() { true; }; false; true";
+	assert_eq!(exit_code(set_state).await, Some(1), "errexit stops the command");
 	assert_eq!(exit_code(state_intact).await, Some(0), "state lost after errexit");
+	assert_eq!(exit_code("false; true").await, Some(0), "errexit carried into a later command");
 	assert_eq!(exit_code("exit 3").await, Some(3));
 	assert_eq!(exit_code(state_intact).await, Some(0), "state lost after exit");
-	assert_eq!(exit_code("false; exit 0").await, Some(1), "errexit option lost");
+}
+
+/// A command's `set -e` holds across every run of its segmented chain, and
+/// the next command starts without it; the result says what the command left
+/// behind (errexit on, another directory).
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn errexit_and_cd_last_one_segmented_command() {
+	let _guard = shell_test_lock().lock().await;
+	let root = tempfile::tempdir().expect("minimizer directory");
+	let minimizer = printf_minimizer(&root.path().join("minimizer.toml"), None);
+	let shell = Shell::new(Some(ShellOptions { minimizer: Some(minimizer), ..Default::default() }));
+	let start = root.path().to_string_lossy().into_owned();
+	let run = async |command: String| {
+		let options = ShellRunOptions { command, cwd: Some(start.clone()), ..Default::default() };
+		shell
+			.run(options, None, CancelToken::default())
+			.await
+			.expect("run")
+	};
+	let repeated = format!("printf '{}'", "hello\\n".repeat(200));
+
+	let left = run(format!("{repeated}; set -e; cd /; false; {repeated}")).await;
+	let filter = left.minimized.as_ref().map(|m| m.filter.as_str());
+	assert_eq!(filter, Some("chain"), "the command must run segment by segment");
+	assert_eq!((left.exit_code, left.moved_cwd, left.errexit), (Some(1), true, true));
+
+	let fresh = run(format!("{repeated}; false; {repeated}")).await;
+	assert_eq!((fresh.exit_code, fresh.moved_cwd, fresh.errexit), (Some(0), false, false));
 }
 
 /// An EXIT trap belongs to one run, while signal traps persist in the session.

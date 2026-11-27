@@ -72,12 +72,15 @@ export async function transcribeXai(
 		const { text, ...rest } = word;
 		words.push({ ...rest, word: text });
 	}
+	// xAI bills the audio duration; report it as usage seconds for per-second pricing.
+	const decoded = decodeTranscriptionUsage(model, { seconds: parsed.duration });
 	return {
 		text: parsed.text,
 		...(parsed.language !== undefined && { language: parsed.language }),
 		...(parsed.duration !== undefined && { duration: parsed.duration }),
 		...(parsed.words !== undefined && { words }),
-		usage: decodeTranscriptionUsage(model, undefined).usage,
+		...(decoded.seconds !== undefined && { seconds: decoded.seconds }),
+		usage: decoded.usage,
 	};
 }
 

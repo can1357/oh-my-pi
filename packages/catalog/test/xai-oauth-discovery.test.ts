@@ -1,14 +1,13 @@
 import { describe, expect, test, vi } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { isExcludedModel } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
-import { filterModelsDevCatalogRows } from "@oh-my-pi/pi-catalog/provider-models/models-dev-policies";
 import {
 	buildXaiOAuthStaticSeed,
 	xaiOAuthModelManagerOptions,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
+import { mergePreviousSnapshotModels } from "../scripts/generate-models";
 
 // Regression for https://github.com/can1357/oh-my-pi/issues/12697: xAI's
 // OAuth /v1/models returns bare `{id}` rows with no reasoning, limits, or
@@ -70,14 +69,16 @@ describe("xai-oauth grok-4.7 discovery", () => {
 		});
 	});
 
-	test("the grok-voice- exclusion spares the authored transcriber seed at generation", () => {
+	test("a previous snapshot cannot resurrect excluded grok-voice ids alongside the seeded transcriber", () => {
 		const seed = buildXaiOAuthStaticSeed().find(model => model.id === "grok-voice-transcribe-2.0");
 		if (!seed) throw new Error("Expected the grok-voice-transcribe-2.0 seed row");
-		const discovered = { ...seed, id: "grok-voice-transcribe-3.0" };
-		const realtime = { ...seed, id: "grok-voice-latest" };
-		expect(isExcludedModel("xai-oauth", seed.id)).toBe(true);
-		expect(filterModelsDevCatalogRows([seed, discovered, realtime]).map(model => model.id)).toEqual([
-			"grok-voice-transcribe-2.0",
-		]);
+		const chat = buildModel({ ...seed, id: "grok-4.7" });
+		const realtime = buildModel({ ...seed, id: "grok-voice-latest" });
+		const merged = mergePreviousSnapshotModels(
+			[seed],
+			{ "xai-oauth": { [chat.id]: chat, [realtime.id]: realtime, [seed.id]: buildModel(seed) } },
+			new Set(),
+		);
+		expect(merged.map(model => model.id)).toEqual(["grok-voice-transcribe-2.0", "grok-4.7"]);
 	});
 });

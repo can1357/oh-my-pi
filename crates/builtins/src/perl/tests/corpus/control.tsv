@@ -1,0 +1,38 @@
+# Perl corpus: control. Format and regeneration: crates/builtins/src/perl/tests.rs.
+continue-block	{print 'first'} continue {print "|second\n"}	first|second␊
+continue-for	for (1..3) {next if $_==2; print $_} continue {print '!'} print "\n";	1!!3!␊
+continue-while	my $i=0; while ($i<3) {print "B$i"} continue {print 'C'; ++$i} print "\n";	B0CB1CB2C␊
+data-section	while (<DATA>) {print}␊__DATA__␊first␊second	first␊second␊
+do-until	my $i=0; do {print $i} until ++$i==3; print "\n";	012␊
+do-while	my $i=3; do {print $i} while --$i; print "\n";	321␊
+elsif	if (0) {print "bad\n"} elsif (1) {print "middle\n"} else {print "bad\n"}	middle␊
+end-lifo	END { print "first\n" }␊END { print "second\n" }␊print "main\n";	main␊second␊first␊
+end-section	while (<DATA>) {print}␊__END__␊first␊second	first␊second␊
+for-c	my @a; for (my $i=1; $i<4; ++$i) {push @a,$i*$i} print "@a\n";	1 4 9␊
+for-expression	for ((1,3),5) {print} print "\n";	135␊
+for-list	for my $i (1,4,9) {print $i} print "\n";	149␊
+for-omitted	my $i=1; for (;;) {print $i; last if ++$i>3} print "\n";	123␊
+for-topic	print for qw(red green blue); print "\n";	redgreenblue␊
+goto-expression	my $where='DONE'; goto $where; print 'skipped'; DONE: print "target\n";	target␊
+goto-label	print 'start|'; goto FINISH; print 'skipped'; FINISH: print "finish\n";	start|finish␊
+goto-sub-caller	sub target { (caller(0))[3] } sub via {goto &target} print via(),"\n";	main::target␊
+goto-sub	sub final {join('|',@_)} sub via {$_[0]*=2; goto &final} my $x=4; print via($x,7),"|$x\n";	8|7|8␊
+if-else	if (0) {print "bad\n"} else {print "otherwise\n"}	otherwise␊
+if-modifier	print 'yes' if 1; print 'no' if 0; print "\n";	yes␊
+if-true	if (1) {print "yes\n"} else {print "no\n"}	yes␊
+label-last	OUT: for my $a (1..3) {for (1..3) {last OUT if $a==2; print "$a$_ "}} print "\n";	11 12 13 ␊
+label-next	OUT: for my $a (1..3) {for (1..3) {next OUT if $_==2; print "$a$_ "}} print "\n";	11 21 31 ␊
+label-redo	my $redo=0; OUT: for my $a (1..2) {for (1..2) {print "$a$_ "; redo OUT if $a==1 && $_==2 && !$redo++}} print "\n";	11 12 11 12 21 22 ␊
+last-bare	{print 'before'; last; print 'after'} print "\n";	before␊
+last	for (1..5) { last if $_>3; print } print "\n";	123␊
+next	for (1..5) { next if $_%2; print } print "\n";	24␊
+phases	print "main\n";␊END { print "end\n" }␊INIT { print "init\n" }␊CHECK { print "check\n" }␊BEGIN { print "begin\n" }	begin␊check␊init␊main␊end␊
+pod	print "start\n";␊␊=pod␊␊not Perl␊␊=cut␊␊print "after\n";	start␊after␊
+redo	my $seen=0; for (1..3) {print; redo if $_==2 && !$seen++} print "\n";	1223␊
+unless-modifier	print 'yes' unless 0; print 'no' unless 1; print "\n";	yes␊
+unless	unless (0) {print "yes\n"}	yes␊
+until-modifier	my $i=0; print $i until $i++ == 3; print "\n";	123␊
+until	my $x=0; until($x>=3) { print ++$x } print "\n";	123␊
+while-defined	my @a=(2,0,1); while (defined(my $x=shift @a)) { print $x } print "\n";	201␊
+while-modifier	my $i=3; print $i while $i--; print "\n";	210␊
+while	my $x=0; while($x<3) { print ++$x } print "\n";	123␊

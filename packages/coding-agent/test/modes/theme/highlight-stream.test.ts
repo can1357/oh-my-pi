@@ -1,25 +1,19 @@
-import { beforeAll, describe, expect, it } from "bun:test";
-import { stripVTControlCharacters } from "node:util";
-import { Markdown } from "@oh-my-pi/pi-tui";
-import { Settings } from "../../../src/config/settings";
-import { getMarkdownTheme, getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
+import { afterAll, describe, expect, it } from "bun:test";
+import { plainRows } from "@oh-my-pi/pi-tui/testing/cells";
+import { renderMarkdown } from "@oh-my-pi/pi-tui/text/markdown/index";
+import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
-beforeAll(async () => {
-	await Settings.init({ inMemory: true });
-	const theme = await getThemeByName("dark");
-	if (!theme) throw new Error("theme unavailable");
-	setThemeInstance(theme);
-});
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 describe("markdown highlight stream", () => {
 	it("renders a streaming lua fence without aborting", () => {
-		const markdown = new Markdown("```lua\nlocal x = 1\nmore", 0, 0, getMarkdownTheme());
-		markdown.transientRenderCache = true;
-		let lines: readonly string[] = [];
+		const theme = loadThemeSync("dark");
+		let rows: readonly string[] = [];
 		expect(() => {
-			lines = markdown.render(80);
+			rows = renderMarkdown("```lua\nlocal x = 1\nmore", 80, { theme, stream: true });
 		}).not.toThrow();
-		const plain = stripVTControlCharacters(lines.join("\n"));
-		expect(plain).toContain("local x = 1");
+		expect(plainRows(rows).join("\n")).toContain("local x = 1");
 	});
 });

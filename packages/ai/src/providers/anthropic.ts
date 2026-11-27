@@ -900,6 +900,8 @@ export type AnthropicClientOptionsArgs = {
 	fetch?: FetchImpl;
 	maxRetryDelayMs?: number;
 	sessionId?: string;
+	/** Parent conversation of a side request; routes OpenCode's `x-opencode-session` (see `applyInferenceHeaders`). */
+	parentSessionId?: string;
 	/** Working-identity cache key for this credential+host; undefined off the Copilot path. */
 	copilotCacheKey?: string;
 	/**
@@ -2307,6 +2309,7 @@ const streamAnthropicOnce = (
 						options?.sessionId ??
 						extractClaudeMetadataSessionId(options?.metadata?.user_id) ??
 						options?.promptCacheKey,
+					parentSessionId: options?.parentSessionId,
 					disableStrictTools,
 					dropPromptCacheBetas: dropCacheControl || dropCacheControlOptions,
 				};
@@ -2828,6 +2831,8 @@ const streamAnthropicOnce = (
 					let response: Response;
 					let requestId: string | null;
 					let recordsRawSseEvents: boolean;
+					// Cleared here, not per retry rung: an attempt that throws before its response must not keep the last one's id.
+					output.requestId = undefined;
 					try {
 						({
 							events: anthropicStream,
@@ -2843,6 +2848,7 @@ const streamAnthropicOnce = (
 					} finally {
 						if (requestTimeout !== undefined) clearTimeout(requestTimeout);
 					}
+					output.requestId = requestId ?? undefined;
 					await notifyProviderResponse(options, response, sourceModel, requestId);
 					if (slowMode) {
 						const slowSignal = parseAnthropicSlowModeHeaders(response.headers);
@@ -4134,6 +4140,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		omitClaudeCodeAppHeaders,
 		maxRetryDelayMs,
 		sessionId,
+		parentSessionId,
 		disableStrictTools: disableStrictToolsOverride,
 		dropPromptCacheBetas = false,
 		copilotCacheKey,
@@ -4214,6 +4221,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 			providerType: model.providerType,
 			protocol: "anthropic",
 			sessionId,
+			parentSessionId,
 		});
 
 		return {
@@ -4287,6 +4295,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		providerType: model.providerType,
 		protocol: "anthropic",
 		sessionId,
+		parentSessionId,
 	});
 
 	if (model.provider === "cloudflare-ai-gateway") {

@@ -7,7 +7,7 @@ import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text
 import midRunTodoNudgePrompt from "../prompts/system/mid-run-todo-nudge.md" with { type: "text" };
 import { toolWireName } from "../tools/builtin-names";
 import { getLatestTodoPhasesFromEntries, isTodoPhase } from "../tools/todo";
-import { type TodoItem, type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import { type TodoItem, type TodoPhase } from "../tools/details/todo";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { SessionManager } from "./session-manager";
@@ -98,9 +98,13 @@ export interface TodoTrackerHost {
 	getEnabledToolNames(): string[];
 	toolRegistry(): Map<string, AgentTool>;
 	planModeEnabled(): boolean;
+	/** Whether the active goal's token budget is spent; the runtime has told the model to stop new work. */
+	goalBudgetLimited(): boolean;
 	/** Whether prewalk will hand off after its plan nudge owns todo creation. */
 	prewalkWillHandoff(): boolean;
 	consumeLastServedToolChoiceLabel(): string | undefined;
+	/** Called after every write to the list. */
+	phasesChanged?(): void;
 }
 
 /** Owns canonical todo state, eager preludes, and completion reminders. */
@@ -128,6 +132,7 @@ export class TodoTracker {
 		// bridged call — so the nudge budget re-arms on the progress it
 		// rations. Views, failed batches, and unchanged reads never arrive.
 		this.#midRunNudgeCount = 0;
+		this.#host.phasesChanged?.();
 	}
 
 	/** Rehydrates todo phases from the current transcript branch. */
@@ -189,11 +194,9 @@ export class TodoTracker {
 			const trimmedPromptText = promptText.trimEnd();
 			if (trimmedPromptText.endsWith("?") || trimmedPromptText.endsWith("!")) return undefined;
 		}
-		const activeToolNames = this.#host.getActiveToolNames();
-		if (!activeToolNames.includes("todo")) {
-			logger.warn("Eager todo enforcement skipped because todo is not active", { activeToolNames });
-			return undefined;
-		}
+		// Subagents run without `todo` by design (todos are parent-owned), so a
+		// missing tool is an expected state here, not a misconfiguration.
+		if (!this.#host.getActiveToolNames().includes("todo")) return undefined;
 		const message: AgentMessage = {
 			role: "custom",
 			customType: EAGER_TODO_PRELUDE_MESSAGE_TYPE,
@@ -248,7 +251,7 @@ export class TodoTracker {
 	/** Checks a terminal assistant turn and schedules continuation for incomplete todos. */
 	async checkCompletion(message: AssistantMessage): Promise<boolean> {
 		if (this.#host.consumeLastServedToolChoiceLabel() === "user-force") return false;
-		if (this.#host.planModeEnabled()) return false;
+		if (this.#host.planModeEnabled() || this.#host.goalBudgetLimited()) return false;
 		if (this.#reminderAwaitingProgress) {
 			logger.debug("Todo completion: prior reminder still awaiting agent action; staying silent", {
 				attempt: this.#reminderCount,

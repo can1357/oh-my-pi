@@ -15,7 +15,7 @@
  *
  * Kept apart from the thread service so importing it never evaluates the service list.
  */
-import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
+import type { SingleResult } from "../task/task-details";
 import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionHandle } from "../session/agent-session-handle";
 import {

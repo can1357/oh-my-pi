@@ -10,8 +10,8 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { getConflictHistory } from "@oh-my-pi/pi-coding-agent/tools/conflict-detect";
 import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
-import { formatTruncationMetaNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
-import { DEFAULT_MAX_BYTES } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { formatTruncationMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta-format";
+import { DEFAULT_MAX_BYTES } from "@oh-my-pi/pi-coding-agent/tools/streaming-output";
 import { writeArchive } from "@oh-my-pi/pi-utils/ar";
 
 function getTextOutput(result: { content: Array<{ type: string; text?: string }> }): string {

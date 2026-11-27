@@ -18,9 +18,9 @@
 //! `-u`, `NAME=VALUE`) apply in the subshell before the command, in order.
 //!
 //! The subshell's stdin is what the utility asks for (the null device by
-//! default; `env`'s own stdin is the caller's fd 0); stdout and stderr are the
-//! caller's, which the utility writes to as well, so their output interleaves
-//! in order. Each subshell carries the call's lineage label, so a signal to
+//! default; `env`'s own stdin is the caller's fd 0). Stdout is the caller's
+//! unless the utility overrides it, and stderr is always inherited.
+//! Each subshell carries the call's lineage label, so a signal to
 //! the utility's job reaches its commands too. Externals replace their
 //! subshell through `exec`, so their actual signal deaths reach the utility
 //! as [`CommandStatus::Signaled`], distinct from an ordinary exit of `128+n`.
@@ -157,6 +157,7 @@ impl Extra {
 				turn.config,
 			);
 			invocation.cancel = Some(cancel.clone());
+			invocation.source_snapshot = call.source_snapshot;
 			let lookup = Lookup {
 				path:   invocation.env.get("PATH").cloned(),
 				cwd:    invocation.cwd.clone(),
@@ -272,6 +273,8 @@ fn signal_tree(turn: &Turn<'_>, label: u32, signal: Signal) {
 /// with none).
 fn script(mut command: ShellCommand, program: &Program, env_names: &[BString]) -> Script {
 	let stdin = child_stdin(command.take_stdin());
+	let stdout = child_output(command.take_stdout());
+	let stderr = child_output(command.take_stderr());
 	let mut source = Vec::new();
 	let mut foreign_env = Vec::new();
 	let mut unexport_env = Vec::new();
@@ -353,13 +356,14 @@ fn script(mut command: ShellCommand, program: &Program, env_names: &[BString]) -
 	let mut script = Script::command(source);
 	script.foreign_env = foreign_env;
 	script.unexport_env = unexport_env;
+	script.source_snapshot = command.take_source_snapshot();
 	script.args = Some(args);
 	// The working directory is logical, as after `cd`: `-execdir` hands over
 	// `<root>/./sub`, and the command's `$PWD` is `<root>/sub`.
 	script.cwd = command
 		.dir()
 		.map(|dir| os_bytes(omp_vfs::normalize_lexically(dir).as_os_str()));
-	script.vproc = VprocSel::NewSubshellWithStdio([stdin, RunStdio::Inherit, RunStdio::Inherit]);
+	script.vproc = VprocSel::NewSubshellWithStdio([stdin, stdout, stderr]);
 	script
 }
 
@@ -375,6 +379,17 @@ fn child_stdin(stdin: Option<Fd>) -> RunStdio {
 		Some(Fd::Closed) => return RunStdio::Closed,
 	};
 	file.map_or(RunStdio::Closed, |file| RunStdio::File(Box::new(StdFile::new(file))))
+}
+
+/// fd 1 or 2 of a command: the caller's descriptor unless the utility
+/// overrides it with a host descriptor or closes it. A provider file inherits
+/// the caller's descriptor.
+fn child_output(fd: Option<Fd>) -> RunStdio {
+	match fd {
+		Some(Fd::File(file)) => RunStdio::File(Box::new(StdFile::new(file))),
+		Some(Fd::Closed) => RunStdio::Closed,
+		Some(Fd::Vfs(_)) | None => RunStdio::Inherit,
+	}
 }
 
 fn os_bytes(s: &OsStr) -> BString {

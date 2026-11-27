@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { ValidationError } from "@oh-my-pi/pi-ai/error";
-import { isTranscriptionApi, TranscriptionApiError, transcribeAudio } from "@oh-my-pi/pi-ai/transcription";
+import { TranscriptionApiError, transcribeAudio } from "@oh-my-pi/pi-ai/transcription";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { Api, FetchImpl, Model } from "@oh-my-pi/pi-catalog/types";
 
@@ -61,12 +61,6 @@ function upstream(response: () => Response): { fetch: FetchImpl; calls: Captured
 }
 
 describe("xai-stt transcription runner", () => {
-	it("is a dispatchable transcription API", () => {
-		expect(isTranscriptionApi("xai-stt")).toBe(true);
-		expect(isTranscriptionApi("openai-transcriptions")).toBe(true);
-		expect(isTranscriptionApi("xai-tts")).toBe(false);
-	});
-
 	it("posts model and language before the file and maps xAI words", async () => {
 		const { fetch, calls } = upstream(() =>
 			Response.json({
@@ -105,6 +99,7 @@ describe("xai-stt transcription runner", () => {
 			text: "Hello brave world.",
 			language: "en",
 			duration: 1.62,
+			seconds: 1.62,
 			words: [
 				{ word: "Hello", start: 0.1, end: 0.42 },
 				{ word: "brave", start: 0.42, end: 0.8, speaker: 0 },
@@ -129,6 +124,7 @@ describe("xai-stt transcription runner", () => {
 		]);
 		expect(result.text).toBe("hi");
 		expect(result.words).toBeUndefined();
+		expect(result.seconds).toBeUndefined();
 	});
 
 	it("rejects OpenAI-only options before dispatch", async () => {
