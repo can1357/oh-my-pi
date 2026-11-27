@@ -8,9 +8,9 @@ import {
 	readingQuestions,
 } from "@oh-my-pi/pi-coding-agent/auto-graph/planner";
 import type { ChainJudge, JudgeKind } from "@oh-my-pi/pi-coding-agent/judgment";
-import { planChart } from "@oh-my-pi/pi-tui/charts/chart-plan";
-import { analyzeTable } from "@oh-my-pi/pi-tui/charts/table-data";
-import type { TableChartRequest } from "@oh-my-pi/pi-tui/chat/table-chart";
+import { planChart } from "@oh-my-pi/pi-coding-agent/auto-graph/chart-plan";
+import { analyzeTable } from "@oh-my-pi/pi-coding-agent/auto-graph/table-data";
+import type { TableChartRequest } from "@oh-my-pi/pi-coding-agent/session/transcript/table-chart";
 
 /** A smart-mode request for a table given as rows of cells, header first. */
 function request(rows: string[][]): TableChartRequest {

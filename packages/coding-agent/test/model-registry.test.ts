@@ -20,7 +20,7 @@ import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { finalizeCustomModel } from "@oh-my-pi/pi-coding-agent/config/custom-models";
 import { applyModelPatch, mergeDiscoveredModel } from "@oh-my-pi/pi-coding-agent/config/model-patch";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { resolveRoleChain } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import { resolveRoleChain, resolveSessionModelSelector } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { roleCandidatePool } from "@oh-my-pi/pi-coding-agent/config/model-roles";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -723,6 +723,27 @@ describe("ModelRegistry", () => {
 			expect(registry.find("openai-codex", kept.id)?.transport).toBe("pi-native");
 			expect(registry.find("openai-codex", pruned.id)).toBeUndefined();
 			expect(registry.find("openai-codex", otherProvider.id)).toBeUndefined();
+		});
+
+		test("provider base URL ignores a judge row's own endpoint after discovery (#20581)", async () => {
+			// OpenCode Go seeds its Jev judge on the Console System One endpoint and
+			// discovery lists that seed ahead of the chat rows. The usage probe reads
+			// the provider base URL; answering with the judge's URL sent it to
+			// `/inference/systemone/v1/usage`, which 404s.
+			authStorage.keys.setRuntime("opencode-go", "go-key");
+			const fetchMock: FetchImpl = async input => {
+				const url = input instanceof Request ? input.url : String(input);
+				if (url === "https://opencode.ai/inference/go/v1/models") {
+					return Response.json({ object: "list", data: [{ id: "kimi-k2.7-code", object: "model" }] });
+				}
+				return new Response("Not Found", { status: 404 });
+			};
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+
+			await registry.refreshProvider("opencode-go", "online");
+
+			expect(registry.find("opencode-go", "jev-1.13-free")?.baseUrl).toBe("https://opencode.ai/inference/systemone");
+			expect(registry.getProviderBaseUrl("opencode-go")).toBe("https://opencode.ai/inference/go/v1");
 		});
 	});
 
@@ -2624,6 +2645,59 @@ describe("ModelRegistry", () => {
 					.filter(model => model.provider === "github-copilot")
 					.map(model => model.id),
 			).toEqual(["claude-sonnet-4.5", "gpt-4o", "gpt-4o-mini"]);
+		});
+
+		test("keeps a discovered Copilot 1M model restorable during background refresh without models.yml", async () => {
+			const provider = "github-copilot";
+			const baseId = "claude-opus-5.5";
+			const variantId = `${baseId}-1m`;
+			await authStorage.credentials.set(provider, {
+				type: "oauth",
+				access: "ghu_business_token",
+				refresh: "ghu_business_token",
+				expires: Date.now() + 60_000,
+				apiEndpoint: "https://api.business.githubcopilot.com",
+			});
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+				fetch: async input => {
+					const url = input instanceof Request ? input.url : String(input);
+					if (url !== "https://api.business.githubcopilot.com/models") return new Response(null, { status: 503 });
+					return Response.json({
+						data: [
+							{
+								id: baseId,
+								capabilities: {
+									type: "chat",
+									limits: { max_context_window_tokens: 1_000_000, max_output_tokens: 64_000 },
+								},
+								billing: {
+									token_prices: {
+										default: { context_max: 200_000 },
+										long_context: { context_max: 936_000 },
+									},
+								},
+							},
+						],
+					});
+				},
+			});
+			await registry.refreshDiscoverableProviders([provider], "online");
+			expect(registry.getAvailableForProviders(new Set([provider])).some(model => model.id === variantId)).toBe(
+				true,
+			);
+
+			registry.refreshInBackground();
+			try {
+				// The refresh has started, but its async discovery cannot have published a new catalog yet.
+				await Promise.resolve();
+				expect(resolveSessionModelSelector(registry, `${provider}/${variantId}`)?.model).toMatchObject({
+					id: variantId,
+					requestModelId: baseId,
+					contextWindow: 1_000_000,
+				});
+			} finally {
+				await registry.awaitBackgroundRefresh();
+			}
 		});
 	});
 

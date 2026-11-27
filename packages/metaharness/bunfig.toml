@@ -1,0 +1,3 @@
+[test]
+# Scope-benchmark fixtures carry their own (deliberately slow or failing) suites.
+pathIgnorePatterns = ["adapters/scope/tasks/**"]

@@ -2,7 +2,7 @@
  * Content helpers shared by every whole-file writer: the `write` tool's file
  * pipeline and handler-owned writes that splice files directly (conflict://).
  */
-import { formatHashlineHeader, stripHashlinePrefixes } from "@oh-my-pi/pi-tui/tools/hashline-format";
+import { formatHashlineHeader, stripHashlinePrefixes } from "./hashline-format";
 import { normalizeToLF } from "../edit/normalize";
 import { getEditStore } from "../edit/store";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";

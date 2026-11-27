@@ -10,7 +10,7 @@ import type { Tool, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
-import type { EvalToolDetails } from "@oh-my-pi/pi-tui/tools/eval";
+import type { EvalToolDetails } from "@oh-my-pi/pi-coding-agent/tools/details/eval";
 import { $which, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "../helpers/settings-test-state";
 

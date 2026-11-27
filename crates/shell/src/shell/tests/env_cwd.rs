@@ -19,7 +19,7 @@ fn session_with(vars: HashMap<String, String>, cwd: &std::path::Path) -> ShellSe
 		output_decoding: None,
 	})
 	.expect("start session");
-	ShellSessionCore { session, slot, filesystem: Fs::native(), cwd }
+	ShellSessionCore { session, slot, filesystem: Fs::native(), cwd, errexit: false }
 }
 
 /// The shell starts in, and a run's requested working directory moves it

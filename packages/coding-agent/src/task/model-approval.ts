@@ -15,8 +15,8 @@
  * models its exact, configured `@role` or glob entries match.
  */
 import type { Api, Model } from "@oh-my-pi/pi-ai";
-import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
-import { MAX_THINKING_SUFFIX_OPTIONS, splitThinkingSuffix } from "@oh-my-pi/pi-tui/overlays/model-selector";
+import type { AgentSource } from "./task-details";
+import { MAX_THINKING_SUFFIX_OPTIONS, splitThinkingSuffix } from "../config/model-selector";
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	findOpenRouterRouteVariant,

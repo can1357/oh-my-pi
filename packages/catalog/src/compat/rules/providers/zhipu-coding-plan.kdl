@@ -6,8 +6,15 @@ provider "zhipu-coding-plan" {
 	dynamic-models-authoritative #true
 	discovery label="Zhipu Coding Plan"
 	// The coding-plan upstream snapshot omits FlashX although the served SKU
-	// has the same limits and mandatory-thinking ladder as GLM-5.3-Flash.
+	// has the same limits and mandatory-thinking ladder as GLM-5.3-Flash. It
+	// also predates GLM-5.4 (2026-11-23, Coding Plan-only, 1M, native vision).
 	seed api="openai-completions" base-url="https://open.bigmodel.cn/api/coding/paas/v4" bundle="always" {
+		model "glm-5.4" name="GLM-5.4" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=1000000 max-tokens=131072
+		}
 		model "glm-5.3-flashx" name="GLM-5.3-FlashX" {
 			reasoning #true
 			input "text" "image"
@@ -40,6 +47,15 @@ provider "zhipu-coding-plan" {
 	// residue: taxonomy ranks and exact globs do not isolate these models.
 	models "*5" "glm-4.6" {
 		thinking-efforts "minimal" "low" "medium" "high"
+	}
+	// GLM-5.4 mirrors zai.kdl: `/models` lists only the id, so pin its native
+	// image input and 1M/131K limits for discovered rows.
+	models "glm-5.4" {
+		input-modalities "text" "image"
+		limits-patch {
+			context-window 1000000
+			max-tokens 131072
+		}
 	}
 	// residue: taxonomy ranks and exact globs do not isolate these models.
 	models "glm-4.5-air" {

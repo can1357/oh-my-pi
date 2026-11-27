@@ -11,6 +11,7 @@ import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { AgentBusyError, extractIntent, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import type { Api, AssistantMessageEvent, Model, ServiceTierByFamily, ToolCall, Usage } from "@oh-my-pi/pi-ai";
+import { SERVICE_TIER_FAMILIES } from "@oh-my-pi/pi-ai/types";
 import { isCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import {
 	isRecord,
@@ -31,14 +32,10 @@ import {
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { ModelRegistry } from "../config/model-registry";
-import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
-import {
-	previewLine,
-	replaceTabs,
-	shortenToolArgumentPaths,
-	TRUNCATE_LENGTHS,
-} from "@oh-my-pi/pi-tui/render/render-utils";
-import { type EditMode, getEditInputPaths } from "@oh-my-pi/pi-tui/tools/edit";
+import { formatModelSelectorValue } from "../config/model-selector";
+import { previewLine, shortenToolArgumentPaths, TRUNCATE_LENGTHS } from "../utils/render-utils";
+import { replaceTabs } from "../utils/text-width";
+import { diffStats, type EditMode, getEditInputPaths } from "../tools/details/edit";
 import {
 	formatModelStringWithRouting,
 	resolveAgentAdvisorRolePattern,
@@ -51,7 +48,6 @@ import {
 } from "../config/model-resolver";
 import type { PromptTemplate } from "../config/prompt-templates";
 import {
-	buildServiceTierByFamily,
 	isServiceTierForFamily,
 	resolveAgentServiceTierOverride,
 	resolveSubagentServiceTier,
@@ -100,21 +96,21 @@ import { INTERRUPTED_TURN_ERROR } from "../session/exit-diagnostics";
 import { SKILL_PROMPT_MESSAGE_TYPE, usageContextTokens } from "../session/messages";
 import type { CompletionJournal } from "../session/model-usage-journal";
 import { hasConversationalHistory, SessionManager } from "../session/session-manager";
-import { truncateTail } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { truncateTail } from "../tools/streaming-output";
 import {
 	AUTO_THINKING,
 	assertModelSupportsEffortCeiling,
-	type ConfiguredThinkingLevel,
 	clampThinkingLevelToCeiling,
 	prewalkWouldBeNoop,
 	resolveTaskEffortLevel,
 	type TaskEffort,
-} from "@oh-my-pi/pi-tui/thinking";
+} from "../thinking/levels";
+import { type ConfiguredThinkingLevel } from "../utils/render-utils";
 import type { ContextFileEntry, ToolSession } from "../tools";
 import { resolveEvalBackends } from "../tools/eval-backends";
 import { isIrcEnabled } from "../irc/messaging";
-import { LIST_STATUS_ORDER } from "@oh-my-pi/pi-tui/tools/irc";
-import { DEFAULT_PEER_ROSTER_LIMIT } from "@oh-my-pi/pi-tui/tools/irc";
+import { LIST_STATUS_ORDER } from "../irc/irc-types";
+import { DEFAULT_PEER_ROSTER_LIMIT } from "../irc/irc-types";
 import { normalizeSchema } from "../tools/jtd-to-json-schema";
 import { buildOutputValidator, summarizeValidationFailure } from "../tools/output-schema-validator";
 import { ToolAbortError } from "../tools/tool-errors";
@@ -155,10 +151,10 @@ import {
 	type StructuredSubagentSchemaSource,
 	type TaskToolDetails,
 	type YieldItem,
-} from "@oh-my-pi/pi-tui/tools/task";
+} from "./task-details";
 import { yieldSectionShapes } from "./yield-assembly";
 import { assertPerCallModelApproved, PerCallModelError, type PerCallModelGrants } from "./model-approval";
-import { assembleYieldResult } from "@oh-my-pi/pi-tui/tools/task-yield-assembly";
+import { assembleYieldResult } from "./yield-sections";
 import {
 	cfgTaskPrewalk,
 	cfgTaskAgentPrewalk,
@@ -176,12 +172,11 @@ import {
 } from "./settings";
 import {
 	cfgTierSubagent,
-	cfgTierGoogle,
-	cfgTierAnthropic,
-	cfgTierOpenai,
+	cfgTiers,
 	cfgRetryFallbackChains,
 	cfgDefaultThinkingLevel,
 	cfgPrewalkAutoTarget,
+	PREWALK_INITIAL_TARGET,
 } from "../session/settings";
 import { type AutoPrewalkDecision, classifyAutoPrewalk } from "../auto-prewalk/classifier";
 import { type JudgmentUsage, journalJudgmentUsage, type NativeJudgmentDeps } from "../judgment";
@@ -194,7 +189,7 @@ import {
 	cfgCompactionThresholdTokens,
 } from "../session/context-settings";
 
-export type { YieldItem } from "@oh-my-pi/pi-tui/tools/task";
+export type { YieldItem } from "./task-details";
 
 const TASK_ABORT_CLEANUP_GRACE_MS = 10_000;
 
@@ -655,6 +650,8 @@ export interface ExecutorOptions {
 	 * passes its own `getAgentId()`).
 	 */
 	parentAgentId?: string;
+	/** Runtime identity of the spawning session; names alone can collide across roots. */
+	parentSessionKey?: string;
 	/** Same-type siblings share a cache route without sharing conversation state. */
 	parentPromptCacheKey?: string;
 	/**
@@ -945,6 +942,17 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 	return { rawOutput, exitCode, stderr, abortedViaYield, hasYield, structuredOutput };
 }
 
+/** Whether `toolName` edits files by a payload naming them (`edit`, `apply_patch`). */
+function isEditTool(toolName: string): boolean {
+	return toolName === "edit" || toolName === "apply_patch";
+}
+
+/** Lines an edit call's result added and removed, by its diff; undefined when it changed nothing. */
+function editResultStats(result: unknown): { added: number; removed: number } | undefined {
+	const details = isRecord(result) ? result.details : undefined;
+	return isRecord(details) && typeof details.diff === "string" && details.diff ? diffStats(details.diff) : undefined;
+}
+
 function formatToolArgsPreview(value: string, key: string): { value: string; key: string } {
 	const safe = shortenToolArgumentPaths(replaceTabs(sanitizeText(value)), key);
 	return { value: previewLine(safe, TRUNCATE_LENGTHS.CONTENT), key };
@@ -962,7 +970,7 @@ function extractToolArgsPreview(
 ): { value: string; key: string } | undefined {
 	// Priority order for preview
 	const previewKeys = ["command", "file_path", "path", "pattern", "query", "url", "task", "prompt"];
-	const isEdit = toolName === "edit" || toolName === "apply_patch";
+	const isEdit = isEditTool(toolName);
 	if (isEdit && typeof args.input === "string") {
 		const paths = getEditInputPaths(args.input, editMode);
 		if (paths.length > 0) return formatToolArgsPreview(paths.join(", "), "path");
@@ -1195,14 +1203,10 @@ function inheritedSubagentServiceTiers(
 	inheritedServiceTier?: ServiceTierByFamily | null,
 ): ServiceTierByFamily {
 	if (inheritedServiceTier === undefined) {
-		return buildServiceTierByFamily(
-			cfgTierOpenai.get(baseSettings),
-			cfgTierAnthropic.get(baseSettings),
-			cfgTierGoogle.get(baseSettings),
-		);
+		return cfgTiers.get(baseSettings);
 	}
 	const tiers: ServiceTierByFamily = {};
-	for (const family of ["openai", "anthropic", "google"] as const) {
+	for (const family of SERVICE_TIER_FAMILIES) {
 		const tier = inheritedServiceTier?.[family];
 		if (isServiceTierForFamily(family, tier)) tiers[family] = tier;
 	}
@@ -1289,6 +1293,7 @@ export function createSubagentSettings(
 			"tier.openai": subagentTiers.openai ?? "none",
 			"tier.anthropic": subagentTiers.anthropic ?? "none",
 			"tier.google": subagentTiers.google ?? "none",
+			"tier.devin": subagentTiers.devin ?? "none",
 			// Async jobs and bash/eval auto-backgrounding are inherited from the parent:
 			// background jobs are owner-routed to the subagent's own session, and
 			// the run driver's quiescence barrier + teardown reap guarantee no
@@ -2109,12 +2114,14 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				const finished = activeTools.get(event.toolCallId);
 				activeTools.delete(event.toolCallId);
 				if (finished) {
+					const changed = !event.isError && isEditTool(event.toolName) ? editResultStats(event.result) : undefined;
 					progress.recentTools.unshift({
 						tool: finished.tool,
 						args: finished.args ?? "",
 						argsKey: finished.argsKey,
 						intent: finished.intent,
 						isError: event.isError,
+						...changed,
 						endMs: now,
 					});
 					// Keep only last 5
@@ -5174,10 +5181,12 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				unconditionalPattern === undefined && !perCallModelGrants && !restrictToolNames
 					? cfgTaskAgentPrewalkAuto.get(settings)[agent.name]?.trim()
 					: undefined;
+			const autoTarget = cfgPrewalkAutoTarget.get(settings);
 			const autoPattern = autoEntry
 				? resolveAgentPrewalkPattern({
 						settingsOverride: autoEntry,
-						agentPrewalk: cfgPrewalkAutoTarget.get(settings),
+						// A subagent never moves to a planner, so there is no starting model to hand back to.
+						agentPrewalk: autoTarget === PREWALK_INITIAL_TARGET ? cfgPrewalkAutoTarget.default : autoTarget,
 					})
 				: undefined;
 			const prewalkPattern = unconditionalPattern ?? autoPattern;
@@ -5305,6 +5314,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					parentTaskPrefix: id,
 					asyncJobManager: options.asyncJobManager,
 					parentAgentId: options.parentAgentId,
+					parentSessionKey: options.parentSessionKey,
 					agentId: id,
 					agentDisplayName: agent.name,
 					agentName: agent.name,

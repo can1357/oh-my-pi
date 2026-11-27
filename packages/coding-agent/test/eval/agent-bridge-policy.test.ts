@@ -23,7 +23,11 @@ import * as taskExecutor from "../../src/task/executor";
 import * as isolationRunner from "../../src/task/isolation-runner";
 import { AgentOutputManager } from "../../src/task/output-manager";
 import type { AgentDefinition } from "../../src/task/types";
-import type { AgentProgress, SingleResult, StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
+import type {
+	AgentProgress,
+	SingleResult,
+	StructuredSubagentOutput,
+} from "@oh-my-pi/pi-coding-agent/task/task-details";
 import type { ToolSession } from "../../src/tools";
 
 const taskAgent = {

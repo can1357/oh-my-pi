@@ -2,9 +2,9 @@ import { expect, it } from "bun:test";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
-it("native restart preserves the active profile and reopens its persisted session", async () => {
+async function runRestart(scenario: "profile" | "deleted-cwd"): Promise<string> {
 	using tempDir = TempDir.createSync("@omp-restart-profile-");
-	const child = Bun.spawn([process.execPath, path.join(import.meta.dir, "fixtures/restart-profile.ts")], {
+	const child = Bun.spawn([process.execPath, path.join(import.meta.dir, "fixtures/restart-profile.ts"), scenario], {
 		cwd: tempDir.path(),
 		env: {
 			...process.env,
@@ -23,6 +23,7 @@ it("native restart preserves the active profile and reopens its persisted sessio
 		stdin: "ignore",
 		stdout: "pipe",
 		stderr: "pipe",
+		signal: AbortSignal.timeout(10_000),
 	});
 	const [stdout, stderr, exitCode] = await Promise.all([
 		new Response(child.stdout).text(),
@@ -30,7 +31,11 @@ it("native restart preserves the active profile and reopens its persisted sessio
 		child.exited,
 	]);
 	expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
-	const result = JSON.parse(stdout.trim());
+	return stdout.trim();
+}
+
+it("native restart preserves the active profile and reopens its persisted session", async () => {
+	const result = JSON.parse(await runRestart("profile"));
 	expect(result.profile).toBe("restart-work");
 	expect(result.entries).toEqual(
 		expect.arrayContaining([
@@ -41,3 +46,13 @@ it("native restart preserves the active profile and reopens its persisted sessio
 		]),
 	);
 }, 30_000);
+
+it.skipIf(process.platform === "win32")(
+	"refuses restart from a removed working directory without closing the session",
+	async () => {
+		const result = JSON.parse(await runRestart("deleted-cwd"));
+		expect(result.transcript).toContain("/move <dir>");
+		expect(result.disposed).toBe(false);
+	},
+	30_000,
+);

@@ -8,7 +8,7 @@
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/task.md`
 - Key collaborators:
    - `packages/coding-agent/src/task/types.ts` — dynamic schema, agent definitions, output caps.
-   - `packages/tui/src/tools/task.ts` — progress/result and tool-details types.
+   - `packages/coding-agent/src/ui/tools/task.tsx` / `packages/coding-agent/src/task/task-details.ts` — progress/result rendering and tool-details types.
    - `packages/coding-agent/src/task/structured-subagent.ts` — shared task/eval preflight, model/schema policy, artifact retention, execution.
    - `packages/coding-agent/src/task/isolation-runner.ts` — isolation capture, merge, recovery, and lifecycle ownership.
    - `packages/coding-agent/src/task/eval-tools.ts` — expose parent-kernel tools to a child.
@@ -32,7 +32,7 @@
 
 ## Inputs
 
-The wire schema is shape-swapped by `task.batch` (default on). One unit of work is `{ name?, agent?, model?, task, solutionSpace, effort?, outputSchema?, schemaMode?, tools?, isolated? }`. `isolated` exists only when `task.isolation.enabled` is true **and plan mode is disabled**; `effort` requires `task.enableEffort=true` (default off), and `tools` requires `eval.tools.enabled` (default on).
+The wire schema is shape-swapped by `task.batch` (default on). One unit of work is `{ name?, agent?, model?, task, solutionSpace, effort?, outputSchema?, schemaMode?, tools?, isolated? }`. `isolated` exists only when `task.isolation.enabled` is true **and plan mode is disabled**; `effort` requires `task.enableEffort=true` (default off), and `tools` requires `eval.tools.enabled` (default off).
 
 `task.steps` (default off) swaps `task` for `steps: string[]` in the wire schema and tool description, in either shape: the model sees only one of the two. Runtime accepts either (internal callers, stale transcripts) but rejects an item carrying both.
 

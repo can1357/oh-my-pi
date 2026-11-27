@@ -12,9 +12,8 @@
 import { type as arkType } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
-import { TERMINAL } from "@oh-my-pi/pi-tui";
-import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
-import { editorKey, editorKeys } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
+import { notifyTerminal } from "@oh-my-pi/pi-tui/driver/session";
+import { actionKey, formatKeyHint } from "../ui/keys/hints";
 import {
 	choiceValue,
 	defaultFormData,
@@ -26,19 +25,12 @@ import {
 	type OptionNote,
 	OTHER_LABEL,
 	textValue,
-} from "@oh-my-pi/pi-tui/html-form/data";
-import {
-	type ChoiceField,
-	type HtmlForm,
-	parseHtmlForm,
-	spansText,
-	type TextField,
-} from "@oh-my-pi/pi-tui/html-form/parse";
-import { shiftImageMarkers } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
-import { disambiguateDisplayLabels } from "@oh-my-pi/pi-tui/render/render-utils";
-import { theme } from "@oh-my-pi/pi-tui/theme";
-import type { AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+} from "./html-form/data";
+import { type ChoiceField, type HtmlForm, parseHtmlForm, spansText, type TextField } from "./html-form/parse";
+import { shiftImageMarkers } from "../modes/view-model/prompt/composer-attachments";
+import { disambiguateDisplayLabels } from "../utils/render-utils";
+import type { AskToolDetails } from "./details/ask";
+import { ToolError } from "./tool-errors";
 import { isRecord, logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import type {
 	ExtensionFormDialogResult,
@@ -58,6 +50,7 @@ import { vocalizer } from "../tts/vocalizer";
 import { describeAttachedImagesForTextModel, shouldDescribeImagesForTextModel } from "../utils/image-vision-fallback";
 import type { ToolSession } from ".";
 import { ToolAbortError } from "./tool-errors";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
 /** Returned to a headless fork's model instead of aborting its run. */
 const HEADLESS_FORK_ASK_ERROR = prompt.render(askHeadlessForkMessage);
@@ -254,7 +247,7 @@ async function askChoice(
 		[],
 	);
 	const preselected = new Set(field.options.flatMap((option, index) => (option.checked ? [index] : [])));
-	const helpText = `${editorKeys("tui.select.up", "tui.select.down")} navigate  ${formatKeyHint("enter")} select  ${editorKey("tui.select.cancel")} cancel`;
+	const helpText = `${actionKey("tui.select.up")}/${actionKey("tui.select.down")} navigate  ${formatKeyHint("enter")} select  ${actionKey("tui.select.cancel")} cancel`;
 	const otherRow = field.other ? disambiguateDisplayLabels([OTHER_ROW], labels)[0] : undefined;
 	const choiceRows = otherRow === undefined ? labels : [...labels, otherRow];
 
@@ -288,7 +281,10 @@ async function askChoice(
 		}
 	}
 
-	const doneLabel = disambiguateDisplayLabels([`${theme.status.success} Done selecting`], choiceRows)[0]!;
+	const doneLabel = disambiguateDisplayLabels(
+		[`${currentTheme().symbols.symbol("status.success")} Done selecting`],
+		choiceRows,
+	)[0]!;
 	const checked = new Set(preselected);
 	let other: string | undefined;
 	let cursor = Math.max(
@@ -449,7 +445,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		if (!this.session.hasUI) return;
 		const method = cfgAskNotify.get(this.session.settings);
 		if (method === "off") return;
-		TERMINAL.sendNotification({
+		notifyTerminal({
 			title: "omp",
 			body: "Waiting for input",
 			type: "ask",
