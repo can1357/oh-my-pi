@@ -5,6 +5,7 @@
 		"lib": ["ES2024", "DOM.AsyncIterable"],
 		"moduleResolution": "Bundler",
 		"moduleDetection": "force",
+		"jsx": "react-jsx",
 		"strict": true,
 		"noImplicitOverride": true,
 		"noFallthroughCasesInSwitch": true,

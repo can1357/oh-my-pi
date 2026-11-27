@@ -311,6 +311,46 @@ describe("error-id classification", () => {
 		expect(AIError.is(AIError.classifyMessage(oversized), AIError.Flag.AccountPolicy)).toBe(false);
 	});
 
+	it("treats agy's unknown-model rejection as a denial of only the requested antigravity-cli model", async () => {
+		const provider = "antigravity-cli";
+		const agy = (errorMessage: string, model = "gemini-4-neon") =>
+			message({ api: "antigravity-acp", provider, model, errorMessage });
+
+		// The provider finalizes the ACP RequestError; its text must survive unchanged.
+		const finalized = await AIError.finalize(new Error("Unknown model ID: gemini-4-neon"), {
+			api: "antigravity-acp",
+			provider,
+			model: "gemini-4-neon",
+		});
+		const denial = agy(finalized.message);
+		expect(AIError.modelEntitlementDenialKinds(denial, provider, "gemini-4-neon")).toBe(AIError.Flag.AccountPolicy);
+		expect(AIError.isModelEntitlementDenial(denial, provider, "gemini-4-neon")).toBe(true);
+		expect(AIError.isMismatchedModelEntitlementDenial(denial, provider, "gemini-4-neon")).toBe(false);
+
+		// agy may be asked for the effort-suffixed roster value.
+		const suffixed = agy("Unknown model ID: gemini-4-neon-high");
+		expect(AIError.isModelEntitlementDenial(suffixed, provider, "gemini-4-neon")).toBe(true);
+
+		// A different model, a non-effort suffix, another provider or other wording must not block this model.
+		for (const [error, modelId, errorProvider] of [
+			[agy("Unknown model ID: gemini-4-neon"), "gemini-3.8-flash", provider],
+			[agy("Unknown model ID: gemini-4-neon-preview"), "gemini-4-neon", provider],
+			[agy("Unknown model ID: gemini-4-neon"), "gemini-4-neon", "google-antigravity"],
+		] as const) {
+			expect(AIError.isModelEntitlementDenial(error, errorProvider, modelId)).toBe(false);
+		}
+		expect(
+			AIError.isMismatchedModelEntitlementDenial(
+				agy("Unknown model ID: gemini-4-neon"),
+				provider,
+				"gemini-3.8-flash",
+			),
+		).toBe(true);
+		expect(AIError.isModelEntitlementDenial(agy("model gemini-4-neon is unknown"), provider, "gemini-4-neon")).toBe(
+			false,
+		);
+	});
+
 	it("classifies Anthropic permission and oauth organization policy denials as account policy without content blocked", () => {
 		const errorMessage =
 			'403 {"type":"error","error":{"type":"permission_error","message":"OAuth authentication is currently not allowed for this organization.","details":{"error_code":"oauth_not_allowed_for_organization"}},"request_id":"req_011CfDQosvzzsyor4jWjLsz8"}';

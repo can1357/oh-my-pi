@@ -198,7 +198,7 @@ export class EvalRunner {
 		const previousRelease = this.#pendingKernelRelease;
 		const release = (async () => {
 			await previousRelease;
-			const idle = await this.#waitForIdleUnlessDisposing();
+			const idle = await this.waitForIdleUnlessDisposing();
 			this.#staleKernelReleaseQueued = false;
 			if (!idle) return;
 			// Selection runs synchronously inside both calls, before any eval work can start.
@@ -238,7 +238,7 @@ export class EvalRunner {
 	}
 
 	/** Resolves true once no eval work is active, or false as soon as disposal begins. */
-	async #waitForIdleUnlessDisposing(): Promise<boolean> {
+	async waitForIdleUnlessDisposing(): Promise<boolean> {
 		while (this.#activeExecutions.size > 0 && !this.#disposing) {
 			await Promise.race([Promise.allSettled(Array.from(this.#activeExecutions)), this.#disposeStarted.promise]);
 		}

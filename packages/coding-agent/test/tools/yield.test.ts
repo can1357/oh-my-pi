@@ -11,7 +11,7 @@ import { buildOutputValidator } from "@oh-my-pi/pi-coding-agent/tools/output-sch
 import { YieldTool } from "@oh-my-pi/pi-coding-agent/tools/yield";
 import { buildWorkPoolOutputSchema } from "../../src/task/workpool-yield";
 import { yieldSectionShapes } from "../../src/task/yield-assembly";
-import { assembleYieldResult } from "@oh-my-pi/pi-tui/tools/task-yield-assembly";
+import { assembleYieldResult } from "@oh-my-pi/pi-coding-agent/task/yield-sections";
 
 function createSession(overrides: Partial<ToolSession> = {}): ToolSession {
 	return {

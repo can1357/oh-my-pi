@@ -4,7 +4,6 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
@@ -12,6 +11,8 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 import { cfgPlanEnabled } from "@oh-my-pi/pi-coding-agent/plan-mode/settings";
+import { initTheme } from "../src/ui/theme/service";
+import { createModeTerminal } from "./helpers/mode-terminal";
 
 describe("issue #816 — plan mode pendingModelSwitch leak", () => {
 	let tempDir: TempDir;
@@ -47,7 +48,15 @@ describe("issue #816 — plan mode pendingModelSwitch leak", () => {
 			settings: Settings.isolated(),
 			modelRegistry,
 		});
-		mode = new InteractiveMode(session, "test");
+		mode = new InteractiveMode(
+			session,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			createModeTerminal().frame,
+		);
 	});
 
 	afterEach(async () => {

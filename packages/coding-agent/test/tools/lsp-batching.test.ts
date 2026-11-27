@@ -5,7 +5,7 @@ import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createLspWritethrough } from "@oh-my-pi/pi-coding-agent/lsp";
-import { FileFormatResult } from "@oh-my-pi/pi-tui/tools/lsp";
+import { FileFormatResult } from "@oh-my-pi/pi-coding-agent/tools/details/lsp";
 import * as lspConfig from "@oh-my-pi/pi-coding-agent/lsp/config";
 import type { LinterClient, ServerConfig } from "@oh-my-pi/pi-coding-agent/lsp/types";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";

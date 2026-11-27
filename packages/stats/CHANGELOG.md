@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the `omp stats` dashboard missing live updates when a sessions directory is unreadable or agents write continuously, and running full syncs back to back while idle. ([#20682](https://github.com/can1357/oh-my-pi/pull/20682) by [@Xytronix](https://github.com/Xytronix))
+### Added
+
+- Indexed `tool_approval_requested` and `tool_approval_resolved` session entries into a `tool_approvals` table in `stats.db` so prompted tool calls and their approval outcomes can be queried across sessions ([#20294](https://github.com/can1357/oh-my-pi/pull/20294) by [@asuffield](https://github.com/asuffield)).
+
 ## [19.1.1] - 2026-11-23
 
 ### Added

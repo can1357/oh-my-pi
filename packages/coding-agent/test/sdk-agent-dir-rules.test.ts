@@ -45,7 +45,8 @@ async function writeFile(filePath: string, content: string): Promise<void> {
 	await fs.writeFile(filePath, content);
 }
 
-async function createScopedSession(agentDir: string) {
+/** `discovery` turns on ambient extension discovery; agentDir `tools/` load only then. */
+async function createScopedSession(agentDir: string, { discovery = false } = {}) {
 	const cwd = tempDir.join("project");
 	await fs.mkdir(cwd, { recursive: true });
 	const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
@@ -58,7 +59,7 @@ async function createScopedSession(agentDir: string) {
 		modelRegistry: new ModelRegistry(authStorage, tempDir.join("models.yml")),
 		settings: Settings.isolated({ "compaction.enabled": false }),
 		model: buildLocalModel(),
-		disableExtensionDiscovery: true,
+		disableExtensionDiscovery: !discovery,
 		skills: [],
 		contextFiles: [],
 		promptTemplates: [],
@@ -126,7 +127,7 @@ describe("createAgentSession with agentDir", () => {
 		const agentDir = tempDir.join("scoped-agent");
 		await writeFile(path.join(agentDir, "tools", "scoped.ts"), toolSource("scoped_agent_dir_tool"));
 		await writeFile(tempDir.join("default-agent", "tools", "default.ts"), toolSource("default_agent_dir_tool"));
-		const { session, authStorage } = await createScopedSession(agentDir);
+		const { session, authStorage } = await createScopedSession(agentDir, { discovery: true });
 
 		try {
 			const toolNames = session.getAllToolNames();

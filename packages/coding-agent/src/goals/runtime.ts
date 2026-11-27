@@ -2,7 +2,7 @@ import { escapeXmlText, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import goalBudgetLimitPrompt from "../prompts/goals/goal-budget-limit.md" with { type: "text" };
 import goalContinuationPrompt from "../prompts/goals/goal-continuation.md" with { type: "text" };
 import goalModeActivePrompt from "../prompts/goals/goal-mode-active.md" with { type: "text" };
-import type { Goal } from "@oh-my-pi/pi-tui/tools/goal";
+import type { Goal } from "../tools/details/goal";
 import type { GoalBudgetSteering, GoalModeState, GoalRuntimeEvent, GoalTokenUsage } from "./state";
 
 export interface GoalRuntimeHost {
@@ -113,6 +113,10 @@ function validateTokenBudget(tokenBudget: number | undefined): void {
 
 function isAccountingStatus(goal: Goal): boolean {
 	return goal.status === "active" || goal.status === "budget-limited";
+}
+
+function isBudgetExhausted(goal: Goal): boolean {
+	return goal.tokenBudget !== undefined && goal.tokensUsed >= goal.tokenBudget;
 }
 
 export class GoalRuntime {
@@ -300,7 +304,7 @@ export class GoalRuntime {
 			state.goal.tokenBudget = newBudget;
 			state.goal.updatedAt = this.#now();
 			let shouldSteer = false;
-			if (newBudget !== undefined && state.goal.tokensUsed >= newBudget) {
+			if (newBudget !== undefined && isBudgetExhausted(state.goal)) {
 				if (state.goal.status === "active") {
 					state.goal.status = "budget-limited";
 					shouldSteer = true;
@@ -343,10 +347,7 @@ export class GoalRuntime {
 		state.goal.tokensUsed += tokenDelta;
 		state.goal.timeUsedSeconds += wallSeconds;
 		state.goal.updatedAt = this.#now();
-		const flippedToBudgetLimited =
-			state.goal.tokenBudget !== undefined &&
-			state.goal.tokensUsed >= state.goal.tokenBudget &&
-			state.goal.status === "active";
+		const flippedToBudgetLimited = state.goal.status === "active" && isBudgetExhausted(state.goal);
 		if (flippedToBudgetLimited) {
 			state.goal.status = "budget-limited";
 		}
@@ -433,7 +434,8 @@ export class GoalRuntime {
 			state.enabled = true;
 			state.mode = "active";
 			state.reason = undefined;
-			state.goal.status = "active";
+			// A spent budget stays spent across pause/resume: only raising it (`onBudgetMutated`) reactivates.
+			state.goal.status = isBudgetExhausted(state.goal) ? "budget-limited" : "active";
 			state.goal.updatedAt = this.#now();
 			this.#budgetReportedFor = undefined;
 			this.#markActiveAccounting(state.goal);

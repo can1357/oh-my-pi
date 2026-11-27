@@ -1,0 +1,1828 @@
+{
+	"working": {
+		"k": "row",
+		"p": {
+			"align": "center",
+			"gap": "sm",
+			"role": "omp.working"
+		},
+		"c": [
+			{
+				"k": "spinner",
+				"key": "spinner",
+				"p": {
+					"style": "starburst",
+					"tone": "accent"
+				}
+			},
+			{
+				"k": "elapsed",
+				"key": "elapsed",
+				"p": {
+					"age": 1500,
+					"format": "short"
+				}
+			},
+			{
+				"k": "text",
+				"key": "sep",
+				"p": {
+					"role": "omp.working.sep",
+					"text": "·"
+				}
+			},
+			{
+				"k": "shimmer",
+				"key": "label",
+				"p": {
+					"mode": "classic",
+					"palette": {
+						"high": "accent",
+						"low": "dim",
+						"mid": "muted"
+					},
+					"role": "omp.working.label",
+					"spans": [
+						{
+							"s": "muted",
+							"t": "Working…"
+						}
+					]
+				}
+			},
+			{
+				"k": "row",
+				"key": "fill",
+				"p": {
+					"grow": 1
+				}
+			},
+			{
+				"k": "row",
+				"key": "stop",
+				"p": {
+					"actions": {
+						"click": "interrupt"
+					},
+					"align": "center",
+					"gap": "xs",
+					"role": "omp.working.stop",
+					"title": "Stop  esc"
+				},
+				"c": [
+					{
+						"k": "kbd",
+						"p": {
+							"keys": ["escape"]
+						}
+					},
+					{
+						"k": "text",
+						"p": {
+							"text": "Stop"
+						}
+					}
+				]
+			}
+		]
+	},
+	"workingAccent": {
+		"k": "row",
+		"p": {
+			"align": "center",
+			"gap": "sm",
+			"role": "omp.working"
+		},
+		"c": [
+			{
+				"k": "spinner",
+				"key": "spinner",
+				"p": {
+					"style": "starburst",
+					"tone": "accent"
+				}
+			},
+			{
+				"k": "elapsed",
+				"key": "elapsed",
+				"p": {
+					"age": 1500,
+					"format": "short"
+				}
+			},
+			{
+				"k": "text",
+				"key": "sep",
+				"p": {
+					"role": "omp.working.sep",
+					"text": "·"
+				}
+			},
+			{
+				"k": "shimmer",
+				"key": "label",
+				"p": {
+					"mode": "classic",
+					"palette": {
+						"high": "accent",
+						"low": "dim",
+						"mid": "accent"
+					},
+					"role": "omp.working.label",
+					"spans": [
+						{
+							"s": "accent",
+							"t": "Working…"
+						}
+					]
+				}
+			},
+			{
+				"k": "row",
+				"key": "fill",
+				"p": {
+					"grow": 1
+				}
+			},
+			{
+				"k": "row",
+				"key": "stop",
+				"p": {
+					"actions": {
+						"click": "interrupt"
+					},
+					"align": "center",
+					"gap": "xs",
+					"role": "omp.working.stop",
+					"title": "Stop  esc"
+				},
+				"c": [
+					{
+						"k": "kbd",
+						"p": {
+							"keys": ["escape"]
+						}
+					},
+					{
+						"k": "text",
+						"p": {
+							"text": "Stop"
+						}
+					}
+				]
+			}
+		]
+	},
+	"compaction": {
+		"k": "row",
+		"p": {
+			"align": "center",
+			"gap": "sm",
+			"role": "omp.working"
+		},
+		"c": [
+			{
+				"k": "spinner",
+				"key": "spinner",
+				"p": {
+					"style": "starburst",
+					"tone": "accent"
+				}
+			},
+			{
+				"k": "elapsed",
+				"key": "elapsed",
+				"p": {
+					"age": 3000,
+					"format": "short"
+				}
+			},
+			{
+				"k": "text",
+				"key": "sep",
+				"p": {
+					"role": "omp.working.sep",
+					"text": "·"
+				}
+			},
+			{
+				"k": "shimmer",
+				"key": "label",
+				"p": {
+					"mode": "classic",
+					"palette": {
+						"high": "accent",
+						"low": "dim",
+						"mid": "muted"
+					},
+					"role": "omp.working.label",
+					"spans": [
+						{
+							"s": "muted",
+							"t": "Compacting context…"
+						}
+					]
+				}
+			},
+			{
+				"k": "row",
+				"key": "fill",
+				"p": {
+					"grow": 1
+				}
+			},
+			{
+				"k": "progress",
+				"key": "progress",
+				"p": {
+					"value": null
+				}
+			},
+			{
+				"k": "row",
+				"key": "stop",
+				"p": {
+					"actions": {
+						"click": "interrupt"
+					},
+					"align": "center",
+					"gap": "xs",
+					"role": "omp.working.stop",
+					"title": "Stop  esc"
+				},
+				"c": [
+					{
+						"k": "kbd",
+						"p": {
+							"keys": ["escape"]
+						}
+					},
+					{
+						"k": "text",
+						"p": {
+							"text": "Stop"
+						}
+					}
+				]
+			}
+		]
+	},
+	"retry": {
+		"k": "row",
+		"p": {
+			"align": "center",
+			"gap": "sm",
+			"role": "omp.working"
+		},
+		"c": [
+			{
+				"k": "meter",
+				"key": "countdown",
+				"p": {
+					"size": "sm",
+					"style": "ring",
+					"value": 0.75
+				}
+			},
+			{
+				"k": "elapsed",
+				"key": "elapsed",
+				"p": {
+					"age": 1000,
+					"format": "short"
+				}
+			},
+			{
+				"k": "text",
+				"key": "sep",
+				"p": {
+					"role": "omp.working.sep",
+					"text": "·"
+				}
+			},
+			{
+				"k": "shimmer",
+				"key": "label",
+				"p": {
+					"mode": "classic",
+					"palette": {
+						"high": "accent",
+						"low": "dim",
+						"mid": "muted"
+					},
+					"role": "omp.working.label",
+					"spans": [
+						{
+							"s": "muted",
+							"t": "Retrying · attempt 1 of 3 · 529 Overloaded"
+						}
+					]
+				}
+			},
+			{
+				"k": "row",
+				"key": "fill",
+				"p": {
+					"grow": 1
+				}
+			},
+			{
+				"k": "row",
+				"key": "stop",
+				"p": {
+					"actions": {
+						"click": "interrupt"
+					},
+					"align": "center",
+					"gap": "xs",
+					"role": "omp.working.stop",
+					"title": "Cancel  esc"
+				},
+				"c": [
+					{
+						"k": "kbd",
+						"p": {
+							"keys": ["escape"]
+						}
+					},
+					{
+						"k": "text",
+						"p": {
+							"text": "Cancel"
+						}
+					}
+				]
+			}
+		]
+	},
+	"noInterrupt": {
+		"k": "row",
+		"p": {
+			"align": "center",
+			"gap": "sm",
+			"role": "omp.working"
+		},
+		"c": [
+			{
+				"k": "spinner",
+				"key": "spinner",
+				"p": {
+					"style": "starburst",
+					"tone": "accent"
+				}
+			},
+			{
+				"k": "elapsed",
+				"key": "elapsed",
+				"p": {
+					"age": 0,
+					"format": "short"
+				}
+			},
+			{
+				"k": "text",
+				"key": "sep",
+				"p": {
+					"role": "omp.working.sep",
+					"text": "·"
+				}
+			},
+			{
+				"k": "shimmer",
+				"key": "label",
+				"p": {
+					"mode": "classic",
+					"palette": {
+						"high": "accent",
+						"low": "dim",
+						"mid": "muted"
+					},
+					"role": "omp.working.label",
+					"spans": [
+						{
+							"s": "muted",
+							"t": "Compacting context…"
+						}
+					]
+				}
+			},
+			{
+				"k": "row",
+				"key": "fill",
+				"p": {
+					"grow": 1
+				}
+			},
+			{
+				"k": "progress",
+				"key": "progress",
+				"p": {
+					"value": null
+				}
+			}
+		]
+	},
+	"retryHint": {
+		"k": "row",
+		"p": {
+			"align": "center",
+			"gap": "sm",
+			"role": "omp.hint.retry"
+		},
+		"c": [
+			{
+				"k": "icon",
+				"p": {
+					"name": "loop",
+					"tone": "muted"
+				}
+			},
+			{
+				"k": "kbd",
+				"key": "key",
+				"p": {
+					"keys": ["f5"]
+				}
+			},
+			{
+				"k": "text",
+				"p": {
+					"spans": [
+						{
+							"s": "muted",
+							"t": "to retry"
+						}
+					]
+				}
+			}
+		]
+	},
+	"queue": {
+		"k": "col",
+		"p": {
+			"gap": "xs",
+			"role": "omp.queue"
+		},
+		"c": [
+			{
+				"k": "row",
+				"key": "Steering/0",
+				"p": {
+					"align": "center",
+					"gap": "sm",
+					"role": "omp.queue.item",
+					"title": "Steering"
+				},
+				"c": [
+					{
+						"k": "icon",
+						"key": "icon",
+						"p": {
+							"name": "corner-down-right"
+						}
+					},
+					{
+						"k": "text",
+						"key": "text",
+						"p": {
+							"grow": 1,
+							"text": "also update the README",
+							"truncate": "end",
+							"wrap": "none"
+						}
+					},
+					{
+						"k": "badge",
+						"key": "count",
+						"p": {
+							"role": "omp.queue.count",
+							"text": "2 queued",
+							"title": "2 messages queued"
+						}
+					},
+					{
+						"k": "row",
+						"key": "edit",
+						"p": {
+							"actions": {
+								"click": "queue.edit"
+							},
+							"align": "center",
+							"gap": "xs",
+							"role": "omp.queue.edit",
+							"title": "Edit  ⌥↑"
+						},
+						"c": [
+							{
+								"k": "kbd",
+								"p": {
+									"keys": ["alt", "up"]
+								}
+							},
+							{
+								"k": "text",
+								"p": {
+									"text": "Edit"
+								}
+							}
+						]
+					}
+				]
+			},
+			{
+				"k": "row",
+				"key": "After yield/0",
+				"p": {
+					"align": "center",
+					"gap": "sm",
+					"role": "omp.queue.item",
+					"title": "After yield"
+				},
+				"c": [
+					{
+						"k": "icon",
+						"key": "icon",
+						"p": {
+							"name": "corner-down-right"
+						}
+					},
+					{
+						"k": "text",
+						"key": "text",
+						"p": {
+							"grow": 1,
+							"text": "then summarize ↵ the diff",
+							"truncate": "end",
+							"wrap": "none"
+						}
+					},
+					{
+						"k": "row",
+						"key": "edit",
+						"p": {
+							"actions": {
+								"click": "queue.edit"
+							},
+							"align": "center",
+							"gap": "xs",
+							"role": "omp.queue.edit",
+							"title": "Edit  ⌥↑"
+						},
+						"c": [
+							{
+								"k": "kbd",
+								"p": {
+									"keys": ["alt", "up"]
+								}
+							},
+							{
+								"k": "text",
+								"p": {
+									"text": "Edit"
+								}
+							}
+						]
+					}
+				]
+			}
+		]
+	},
+	"queueOne": {
+		"k": "col",
+		"p": {
+			"gap": "xs",
+			"role": "omp.queue"
+		},
+		"c": [
+			{
+				"k": "row",
+				"key": "Steering/0",
+				"p": {
+					"align": "center",
+					"gap": "sm",
+					"role": "omp.queue.item",
+					"title": "Steering"
+				},
+				"c": [
+					{
+						"k": "icon",
+						"key": "icon",
+						"p": {
+							"name": "corner-down-right"
+						}
+					},
+					{
+						"k": "text",
+						"key": "text",
+						"p": {
+							"grow": 1,
+							"text": "one",
+							"truncate": "end",
+							"wrap": "none"
+						}
+					},
+					{
+						"k": "row",
+						"key": "edit",
+						"p": {
+							"actions": {
+								"click": "queue.edit"
+							},
+							"align": "center",
+							"gap": "xs",
+							"role": "omp.queue.edit",
+							"title": "Edit  ⌥↑"
+						},
+						"c": [
+							{
+								"k": "kbd",
+								"p": {
+									"keys": ["alt", "up"]
+								}
+							},
+							{
+								"k": "text",
+								"p": {
+									"text": "Edit"
+								}
+							}
+						]
+					}
+				]
+			}
+		]
+	},
+	"track": {
+		"k": "row",
+		"p": {
+			"align": "center",
+			"gap": "sm",
+			"role": "omp.track"
+		},
+		"c": [
+			{
+				"k": "text",
+				"key": "0",
+				"p": {
+					"role": "omp.track.item",
+					"spans": [
+						{
+							"s": "accent",
+							"t": "smol"
+						}
+					],
+					"wrap": "none"
+				}
+			},
+			{
+				"k": "text",
+				"key": "1",
+				"p": {
+					"role": "omp.track.item",
+					"spans": [
+						{
+							"s": "success",
+							"t": "default"
+						}
+					],
+					"wrap": "none"
+				}
+			},
+			{
+				"k": "text",
+				"key": "2",
+				"p": {
+					"role": "omp.track.active",
+					"spans": [
+						{
+							"s": "warning",
+							"t": "slow"
+						}
+					],
+					"wrap": "none"
+				}
+			}
+		]
+	},
+	"judge": {
+		"k": "col",
+		"p": {
+			"role": "omp.hud.judge"
+		},
+		"c": [
+			{
+				"k": "row",
+				"key": "b1",
+				"p": {
+					"align": "center",
+					"gap": "sm",
+					"justify": "end",
+					"role": "omp.hud.progress"
+				},
+				"c": [
+					{
+						"k": "text",
+						"p": {
+							"shrink": 1,
+							"spans": [
+								{
+									"s": "dim",
+									"t": "Grade answers"
+								}
+							],
+							"truncate": "end",
+							"wrap": "none"
+						}
+					},
+					{
+						"k": "progress",
+						"p": {
+							"max": {
+								"w": "18ch"
+							},
+							"value": 0.3
+						}
+					},
+					{
+						"k": "text",
+						"p": {
+							"spans": [
+								{
+									"s": "strong",
+									"t": "3/10"
+								},
+								{
+									"s": "dim",
+									"t": " · $0.031"
+								},
+								{
+									"s": "warning",
+									"t": " · 1 failed"
+								}
+							],
+							"wrap": "none"
+						}
+					}
+				]
+			},
+			{
+				"k": "row",
+				"key": "b2",
+				"p": {
+					"align": "center",
+					"gap": "sm",
+					"justify": "end",
+					"role": "omp.hud.progress"
+				},
+				"c": [
+					{
+						"k": "text",
+						"p": {
+							"shrink": 1,
+							"spans": [
+								{
+									"s": "dim",
+									"t": "Rank"
+								}
+							],
+							"truncate": "end",
+							"wrap": "none"
+						}
+					},
+					{
+						"k": "progress",
+						"p": {
+							"max": {
+								"w": "18ch"
+							},
+							"value": 0
+						}
+					},
+					{
+						"k": "text",
+						"p": {
+							"spans": [
+								{
+									"s": "strong",
+									"t": "0/4"
+								}
+							],
+							"wrap": "none"
+						}
+					}
+				]
+			}
+		]
+	},
+	"downloads": {
+		"k": "col",
+		"p": {
+			"role": "omp.hud.downloads"
+		},
+		"c": [
+			{
+				"k": "row",
+				"key": "1",
+				"p": {
+					"align": "center",
+					"gap": "sm",
+					"justify": "end",
+					"role": "omp.hud.progress"
+				},
+				"c": [
+					{
+						"k": "text",
+						"p": {
+							"shrink": 1,
+							"spans": [
+								{
+									"s": "dim",
+									"t": "SmolLM2-135M · model.safetensors"
+								}
+							],
+							"truncate": "end",
+							"wrap": "none"
+						}
+					},
+					{
+						"k": "progress",
+						"p": {
+							"max": {
+								"w": "18ch"
+							},
+							"value": 0.25
+						}
+					},
+					{
+						"k": "text",
+						"p": {
+							"spans": [
+								{
+									"s": "strong",
+									"t": "976.6KB / 3.8MB"
+								}
+							],
+							"wrap": "none"
+						}
+					}
+				]
+			},
+			{
+				"k": "row",
+				"key": "2",
+				"p": {
+					"align": "center",
+					"gap": "sm",
+					"justify": "end",
+					"role": "omp.hud.progress"
+				},
+				"c": [
+					{
+						"k": "text",
+						"p": {
+							"shrink": 1,
+							"spans": [
+								{
+									"s": "dim",
+									"t": "yt-dlp"
+								}
+							],
+							"truncate": "end",
+							"wrap": "none"
+						}
+					},
+					{
+						"k": "text",
+						"p": {
+							"spans": [
+								{
+									"t": "working…"
+								}
+							],
+							"wrap": "none"
+						}
+					}
+				]
+			},
+			{
+				"k": "row",
+				"key": "3",
+				"p": {
+					"align": "center",
+					"gap": "sm",
+					"justify": "end",
+					"role": "omp.hud.progress"
+				},
+				"c": [
+					{
+						"k": "text",
+						"p": {
+							"shrink": 1,
+							"spans": [
+								{
+									"s": "dim",
+									"t": "mlx"
+								}
+							],
+							"truncate": "end",
+							"wrap": "none"
+						}
+					},
+					{
+						"k": "text",
+						"p": {
+							"spans": [
+								{
+									"s": "warning",
+									"t": "failed: network down"
+								}
+							],
+							"wrap": "none"
+						}
+					}
+				]
+			}
+		]
+	},
+	"compactionBeside": {
+		"k": "col",
+		"p": {
+			"role": "omp.hud.compaction"
+		},
+		"c": [
+			{
+				"k": "row",
+				"key": "run",
+				"p": {
+					"align": "center",
+					"gap": "sm",
+					"justify": "end",
+					"role": "omp.hud.progress"
+				},
+				"c": [
+					{
+						"k": "text",
+						"p": {
+							"shrink": 1,
+							"spans": [
+								{
+									"s": "dim",
+									"t": "Compacting context in the background (⎋ to cancel)"
+								}
+							],
+							"truncate": "end",
+							"wrap": "none"
+						}
+					},
+					{
+						"k": "progress",
+						"p": {
+							"max": {
+								"w": "18ch"
+							},
+							"value": null
+						}
+					},
+					{
+						"k": "elapsed",
+						"p": {
+							"age": 2000,
+							"format": "short"
+						}
+					}
+				]
+			}
+		]
+	},
+	"trayAgent": {
+		"k": "col",
+		"key": "239i0r0ug8gzs",
+		"p": {
+			"acted": 1699999999900,
+			"aria": "Anna, running",
+			"item": "agent",
+			"ref": "Anna",
+			"role": "omp.tray.card",
+			"status": "running",
+			"tone": "accent"
+		},
+		"c": [
+			{
+				"k": "row",
+				"key": "head",
+				"p": {
+					"align": "center",
+					"gap": "xs",
+					"role": "omp.tray.head"
+				},
+				"c": [
+					{
+						"k": "text",
+						"key": "dot",
+						"p": {
+							"role": "omp.tray.dot",
+							"spans": [
+								{
+									"fx": "pulse",
+									"s": "accent",
+									"t": "●"
+								}
+							],
+							"wrap": "none"
+						}
+					},
+					{
+						"k": "text",
+						"key": "name",
+						"p": {
+							"grow": 1,
+							"role": "omp.tray.name",
+							"text": "Anna",
+							"truncate": "end",
+							"wrap": "none"
+						}
+					},
+					{
+						"k": "badge",
+						"key": "unread",
+						"p": {
+							"role": "omp.tray.unread",
+							"text": "2",
+							"tone": "warning"
+						}
+					},
+					{
+						"k": "elapsed",
+						"key": "time",
+						"p": {
+							"age": 65000,
+							"format": "short",
+							"role": "omp.tray.time"
+						}
+					},
+					{
+						"k": "row",
+						"key": "tools",
+						"p": {
+							"align": "center",
+							"role": "omp.tray.tools"
+						},
+						"c": [
+							{
+								"k": "text",
+								"key": "count",
+								"p": {
+									"spans": [
+										{
+											"s": "dim",
+											"t": "/"
+										},
+										{
+											"t": "6"
+										}
+									],
+									"wrap": "none"
+								}
+							},
+							{
+								"k": "icon",
+								"key": "icon",
+								"p": {
+									"name": "gear",
+									"tone": "muted"
+								}
+							}
+						]
+					}
+				]
+			},
+			{
+				"k": "row",
+				"key": "doing",
+				"p": {
+					"align": "center",
+					"gap": "sm",
+					"role": "omp.tray.doing"
+				},
+				"c": [
+					{
+						"k": "text",
+						"key": "call",
+						"p": {
+							"grow": 1,
+							"role": "omp.tray.call",
+							"shrink": 1,
+							"spans": [
+								{
+									"s": "strong",
+									"t": "Edit"
+								},
+								{
+									"t": " greet.ts"
+								}
+							],
+							"truncate": "end",
+							"wrap": "none"
+						}
+					},
+					{
+						"k": "text",
+						"key": "outcome",
+						"p": {
+							"role": "omp.tray.outcome",
+							"shrink": 0,
+							"spans": [
+								{
+									"s": "success mono",
+									"t": "+42"
+								},
+								{
+									"t": " "
+								},
+								{
+									"s": "error mono",
+									"t": "−12"
+								}
+							],
+							"wrap": "none"
+						}
+					}
+				]
+			},
+			{
+				"k": "row",
+				"key": "meta",
+				"p": {
+					"align": "center",
+					"gap": "sm",
+					"role": "omp.tray.meta"
+				},
+				"c": [
+					{
+						"k": "text",
+						"key": "model",
+						"p": {
+							"grow": 1,
+							"role": "omp.tray.model",
+							"shrink": 1,
+							"text": "opus-4.5",
+							"truncate": "end",
+							"wrap": "none"
+						}
+					},
+					{
+						"k": "text",
+						"key": "stats",
+						"p": {
+							"role": "omp.tray.stats",
+							"text": "22%",
+							"wrap": "none"
+						}
+					}
+				]
+			}
+		]
+	},
+	"trayJob": {
+		"k": "col",
+		"key": "1tzatl6th57a9",
+		"p": {
+			"aria": "bun test, failed",
+			"item": "job",
+			"look": false,
+			"ref": "j1",
+			"role": "omp.tray.card",
+			"status": "failed",
+			"tone": "error"
+		},
+		"c": [
+			{
+				"k": "row",
+				"key": "head",
+				"p": {
+					"align": "center",
+					"gap": "xs",
+					"role": "omp.tray.head"
+				},
+				"c": [
+					{
+						"k": "text",
+						"key": "dot",
+						"p": {
+							"role": "omp.tray.dot",
+							"spans": [
+								{
+									"s": "error",
+									"t": "●"
+								}
+							],
+							"wrap": "none"
+						}
+					},
+					{
+						"k": "text",
+						"key": "name",
+						"p": {
+							"grow": 1,
+							"role": "omp.tray.name",
+							"text": "bun test",
+							"truncate": "end",
+							"wrap": "none"
+						}
+					},
+					{
+						"k": "text",
+						"key": "id",
+						"p": {
+							"role": "omp.tray.id",
+							"text": "j1",
+							"wrap": "none"
+						}
+					},
+					{
+						"k": "elapsed",
+						"key": "time",
+						"p": {
+							"age": 9000,
+							"format": "short",
+							"role": "omp.tray.time",
+							"stopped": 9000
+						}
+					}
+				]
+			},
+			{
+				"k": "text",
+				"key": "out",
+				"p": {
+					"role": "omp.tray.out",
+					"text": "b\nc",
+					"tone": "error",
+					"wrap": "none"
+				}
+			}
+		]
+	},
+	"trayDone": {
+		"k": "col",
+		"key": "1wqf036wuz9ox",
+		"p": {
+			"aria": "2 finished agents",
+			"item": "done",
+			"ref": "done",
+			"role": "omp.tray.card",
+			"status": "done",
+			"tone": "success"
+		},
+		"c": [
+			{
+				"k": "row",
+				"key": "head",
+				"p": {
+					"align": "center",
+					"gap": "xs",
+					"role": "omp.tray.head"
+				},
+				"c": [
+					{
+						"k": "text",
+						"key": "dot",
+						"p": {
+							"role": "omp.tray.dot",
+							"spans": [
+								{
+									"s": "success",
+									"t": "●"
+								}
+							],
+							"wrap": "none"
+						}
+					},
+					{
+						"k": "text",
+						"key": "name",
+						"p": {
+							"grow": 1,
+							"role": "omp.tray.name",
+							"text": "2 done",
+							"truncate": "end",
+							"wrap": "none"
+						}
+					}
+				]
+			},
+			{
+				"k": "text",
+				"key": "doing",
+				"p": {
+					"role": "omp.tray.doing",
+					"spans": [
+						{
+							"t": "Bob, Cy"
+						}
+					],
+					"truncate": "end",
+					"wrap": "none"
+				}
+			}
+		]
+	},
+	"peekAgent": {
+		"k": "col",
+		"key": "peek",
+		"p": {
+			"ref": "Anna",
+			"role": "omp.tray.peek"
+		},
+		"c": [
+			{
+				"k": "row",
+				"key": "head",
+				"p": {
+					"align": "center",
+					"gap": "xs",
+					"role": "omp.tray.peek.head"
+				},
+				"c": [
+					{
+						"k": "text",
+						"key": "dot",
+						"p": {
+							"role": "omp.tray.dot",
+							"spans": [
+								{
+									"fx": "pulse",
+									"s": "accent",
+									"t": "●"
+								}
+							],
+							"wrap": "none"
+						}
+					},
+					{
+						"k": "text",
+						"key": "name",
+						"p": {
+							"role": "omp.tray.name",
+							"shrink": 1,
+							"text": "Anna",
+							"truncate": "end",
+							"wrap": "none"
+						}
+					},
+					{
+						"k": "text",
+						"key": "meta",
+						"p": {
+							"grow": 1,
+							"role": "omp.tray.peek.meta",
+							"shrink": 1,
+							"text": "explore · opus-4.5 · 6 tools · 22%",
+							"truncate": "end",
+							"wrap": "none"
+						}
+					},
+					{
+						"k": "elapsed",
+						"key": "time",
+						"p": {
+							"age": 65000,
+							"format": "short",
+							"role": "omp.tray.time"
+						}
+					},
+					{
+						"k": "button",
+						"key": "open",
+						"p": {
+							"actions": {
+								"click": "tray.open=Anna"
+							},
+							"keys": ["enter"],
+							"size": "sm",
+							"text": "Open"
+						}
+					},
+					{
+						"k": "button",
+						"key": "stop",
+						"p": {
+							"actions": {
+								"click": "tray.stop=Anna"
+							},
+							"size": "sm",
+							"text": "Stop",
+							"tone": "error"
+						}
+					},
+					{
+						"k": "button",
+						"key": "close",
+						"p": {
+							"actions": {
+								"click": "tray.peek="
+							},
+							"aria": "Close",
+							"icon": "x",
+							"size": "sm",
+							"text": "",
+							"title": "Close"
+						}
+					}
+				]
+			},
+			{
+				"k": "text",
+				"key": "task",
+				"p": {
+					"role": "omp.tray.peek.task",
+					"text": "Audit callers",
+					"truncate": "end",
+					"wrap": "none"
+				}
+			},
+			{
+				"k": "col",
+				"key": "tail",
+				"p": {
+					"role": "omp.tray.tail"
+				},
+				"c": [
+					{
+						"k": "row",
+						"key": "0",
+						"p": {
+							"align": "center",
+							"gap": "xs",
+							"role": "omp.tray.ev",
+							"state": "ok"
+						},
+						"c": [
+							{
+								"k": "text",
+								"key": "tool",
+								"p": {
+									"role": "omp.tray.ev.tool",
+									"text": "read",
+									"wrap": "none"
+								}
+							},
+							{
+								"k": "text",
+								"key": "text",
+								"p": {
+									"grow": 1,
+									"role": "omp.tray.ev.text",
+									"text": "src/a.ts",
+									"truncate": "end",
+									"wrap": "none"
+								}
+							}
+						]
+					},
+					{
+						"k": "row",
+						"key": "1",
+						"p": {
+							"align": "center",
+							"gap": "xs",
+							"role": "omp.tray.ev",
+							"state": "run"
+						},
+						"c": [
+							{
+								"k": "text",
+								"key": "tool",
+								"p": {
+									"role": "omp.tray.ev.tool",
+									"text": "grep",
+									"wrap": "none"
+								}
+							},
+							{
+								"k": "text",
+								"key": "text",
+								"p": {
+									"grow": 1,
+									"role": "omp.tray.ev.text",
+									"text": "greet(",
+									"truncate": "end",
+									"wrap": "none"
+								}
+							},
+							{
+								"k": "elapsed",
+								"key": "time",
+								"p": {
+									"age": 6200,
+									"format": "short",
+									"role": "omp.tray.time"
+								}
+							}
+						]
+					}
+				]
+			}
+		]
+	},
+	"peekJob": {
+		"k": "col",
+		"key": "peek",
+		"p": {
+			"ref": "j1",
+			"role": "omp.tray.peek"
+		},
+		"c": [
+			{
+				"k": "row",
+				"key": "head",
+				"p": {
+					"align": "center",
+					"gap": "xs",
+					"role": "omp.tray.peek.head"
+				},
+				"c": [
+					{
+						"k": "text",
+						"key": "dot",
+						"p": {
+							"role": "omp.tray.dot",
+							"spans": [
+								{
+									"s": "error",
+									"t": "●"
+								}
+							],
+							"wrap": "none"
+						}
+					},
+					{
+						"k": "text",
+						"key": "name",
+						"p": {
+							"role": "omp.tray.name",
+							"shrink": 1,
+							"text": "bun test",
+							"truncate": "end",
+							"wrap": "none"
+						}
+					},
+					{
+						"k": "text",
+						"key": "meta",
+						"p": {
+							"grow": 1,
+							"role": "omp.tray.peek.meta",
+							"shrink": 1,
+							"text": "bun test --watch",
+							"truncate": "end",
+							"wrap": "none"
+						}
+					},
+					{
+						"k": "elapsed",
+						"key": "time",
+						"p": {
+							"age": 9000,
+							"format": "short",
+							"role": "omp.tray.time",
+							"stopped": 9000
+						}
+					},
+					{
+						"k": "button",
+						"key": "open",
+						"p": {
+							"actions": {
+								"click": "tray.open=j1"
+							},
+							"keys": ["enter"],
+							"size": "sm",
+							"text": "Open"
+						}
+					},
+					{
+						"k": "button",
+						"key": "dismiss",
+						"p": {
+							"actions": {
+								"click": "tray.dismiss=j1"
+							},
+							"size": "sm",
+							"text": "Dismiss"
+						}
+					},
+					{
+						"k": "button",
+						"key": "close",
+						"p": {
+							"actions": {
+								"click": "tray.peek="
+							},
+							"aria": "Close",
+							"icon": "x",
+							"size": "sm",
+							"text": "",
+							"title": "Close"
+						}
+					}
+				]
+			},
+			{
+				"k": "text",
+				"key": "out",
+				"p": {
+					"role": "omp.tray.out",
+					"text": "a\nb\nc",
+					"tone": "error",
+					"wrap": "none"
+				}
+			}
+		]
+	},
+	"peekDone": {
+		"k": "col",
+		"key": "peek",
+		"p": {
+			"ref": "done",
+			"role": "omp.tray.peek"
+		},
+		"c": [
+			{
+				"k": "row",
+				"key": "head",
+				"p": {
+					"align": "center",
+					"gap": "xs",
+					"role": "omp.tray.peek.head"
+				},
+				"c": [
+					{
+						"k": "text",
+						"key": "dot",
+						"p": {
+							"role": "omp.tray.dot",
+							"spans": [
+								{
+									"s": "success",
+									"t": "●"
+								}
+							],
+							"wrap": "none"
+						}
+					},
+					{
+						"k": "text",
+						"key": "name",
+						"p": {
+							"role": "omp.tray.name",
+							"shrink": 1,
+							"text": "2 done",
+							"truncate": "end",
+							"wrap": "none"
+						}
+					},
+					{
+						"k": "button",
+						"key": "close",
+						"p": {
+							"actions": {
+								"click": "tray.peek="
+							},
+							"aria": "Close",
+							"icon": "x",
+							"size": "sm",
+							"text": "",
+							"title": "Close"
+						}
+					}
+				]
+			},
+			{
+				"k": "col",
+				"key": "done",
+				"p": {
+					"role": "omp.tray.done"
+				},
+				"c": [
+					{
+						"k": "row",
+						"key": "1rosg4sibnvqr",
+						"p": {
+							"actions": {
+								"click": "tray.open=Bob"
+							},
+							"align": "center",
+							"aria": "Bob, done, opus · 4m, All good",
+							"gap": "xs",
+							"ref": "Bob",
+							"role": "omp.tray.done.item",
+							"status": "done"
+						},
+						"c": [
+							{
+								"k": "text",
+								"key": "dot",
+								"p": {
+									"role": "omp.tray.dot",
+									"spans": [
+										{
+											"s": "success",
+											"t": "●"
+										}
+									],
+									"wrap": "none"
+								}
+							},
+							{
+								"k": "text",
+								"key": "name",
+								"p": {
+									"role": "omp.tray.name",
+									"shrink": 1,
+									"text": "Bob",
+									"truncate": "end",
+									"wrap": "none"
+								}
+							},
+							{
+								"k": "text",
+								"key": "meta",
+								"p": {
+									"role": "omp.tray.meta",
+									"spans": [
+										{
+											"s": "dim",
+											"t": "opus · 4m"
+										}
+									],
+									"wrap": "none"
+								}
+							},
+							{
+								"k": "text",
+								"key": "line",
+								"p": {
+									"grow": 1,
+									"role": "omp.tray.line",
+									"shrink": 1,
+									"text": "All good",
+									"truncate": "end",
+									"wrap": "none"
+								}
+							}
+						]
+					},
+					{
+						"k": "row",
+						"key": "3c9idkal5934p",
+						"p": {
+							"align": "center",
+							"aria": "Cy, failed",
+							"gap": "xs",
+							"ref": "Cy",
+							"role": "omp.tray.done.item",
+							"status": "failed"
+						},
+						"c": [
+							{
+								"k": "text",
+								"key": "dot",
+								"p": {
+									"role": "omp.tray.dot",
+									"spans": [
+										{
+											"s": "error",
+											"t": "●"
+										}
+									],
+									"wrap": "none"
+								}
+							},
+							{
+								"k": "text",
+								"key": "name",
+								"p": {
+									"role": "omp.tray.name",
+									"shrink": 1,
+									"text": "Cy",
+									"truncate": "end",
+									"wrap": "none"
+								}
+							}
+						]
+					},
+					{
+						"k": "text",
+						"key": "more",
+						"p": {
+							"role": "omp.tray.done.more",
+							"text": "+1 earlier",
+							"wrap": "none"
+						}
+					}
+				]
+			}
+		]
+	}
+}

@@ -11,6 +11,7 @@ import {
 	type UsageResetCredit,
 } from "@oh-my-pi/pi-ai";
 import { AuthBrokerClient, RemoteAuthCredentialStore, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
+import { OAUTH_ORG_POLICY_BLOCK_SCOPE } from "@oh-my-pi/pi-ai/auth-storage";
 import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { __resetDirsFromEnvForTests, setAgentDir, TempDir, withFileLock } from "@oh-my-pi/pi-utils";
 import {
@@ -34,11 +35,10 @@ import {
 	type UsageAccountIdentity,
 } from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/usage-accounts";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
-import { ResetUsageSelectorComponent } from "@oh-my-pi/pi-tui/overlays/reset-usage-selector";
-import { formatUsageResetWindow } from "@oh-my-pi/pi-tui/overlays/usage-display";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { formatUsageResetWindow } from "@oh-my-pi/pi-coding-agent/session/usage-display";
+import type { TestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
-import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
+import { attachTerminal, createInteractiveModeContext } from "./helpers/interactive-mode-context";
 
 const HOUR = 3_600_000;
 const FIVE_HOURS = 5 * HOUR;
@@ -1244,6 +1244,50 @@ describe("formatUsageBreakdown", () => {
 		expect(text).toContain("⚠ dead@example.test — grant is past Anthropic's ~30d lifetime; re-login now");
 	});
 
+	it("times the warning by the server-stated grant end over the ~30d estimate", () => {
+		const now = Date.now();
+		const DAY = 24 * HOUR;
+		const text = stripVTControlCharacters(
+			formatUsageBreakdown(
+				[],
+				[
+					{
+						provider: "anthropic",
+						type: "oauth",
+						email: "stated@example.test",
+						// The ~30d estimate alone would leave 20 days and stay silent.
+						authorizedAt: now - 10 * DAY,
+						refreshExpires: now + 2 * DAY,
+					},
+				],
+				now,
+			),
+		);
+		expect(text).toContain("⚠ stated@example.test — re-login within 2d (refresh token expires)");
+	});
+
+	it("times a long-lived Anthropic login by its token expiry, not the ~30d grant", () => {
+		const now = Date.now();
+		const DAY = 24 * HOUR;
+		const longLived = (email: string, ageDays: number, expiresInDays: number): UsageAccountIdentity => ({
+			provider: "anthropic",
+			type: "oauth",
+			email,
+			authorizedAt: now - ageDays * DAY,
+			expires: now + expiresInDays * DAY,
+		});
+		const text = stripVTControlCharacters(
+			formatUsageBreakdown(
+				[],
+				[longLived("year@example.test", 40, 325), longLived("ending@example.test", 362, 3)],
+				now,
+			),
+		);
+		// Past the grant lifetime, months of token left: no warning.
+		expect(text).not.toContain("⚠ year@example.test");
+		expect(text).toContain("⚠ ending@example.test — re-login within 3d (access token expires)");
+	});
+
 	it("renders provider-level notes once per provider, not duplicated per account or limit", () => {
 		const providerNote = "Usage data can be delayed by up to five minutes.";
 		const multiAccount = [
@@ -1891,7 +1935,7 @@ describe("omp usage accounts", () => {
 	});
 });
 
-describe("omp usage --json account policy", () => {
+describe("omp usage account policy", () => {
 	let tempDir: TempDir;
 
 	beforeEach(() => {
@@ -1983,6 +2027,80 @@ describe("omp usage --json account policy", () => {
 		expect(codex).toBeDefined();
 		expect(codex).not.toHaveProperty("policy");
 		expect(stdout.includes("main@example.test")).toBe(!redact);
+	});
+
+	it.each([
+		{ json: false, redact: false },
+		{ json: false, redact: true },
+		{ json: true, redact: false },
+		{ json: true, redact: true },
+	])("shows active org policy rejections without usage or reserve policy (%p)", async ({ json, redact }) => {
+		const authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), {
+			usageFetch: Object.assign(async () => new Response("not found", { status: 404 }), {
+				preconnect: fetch.preconnect,
+			}),
+		});
+		const now = Date.now();
+		const blockedUntilMs = now + HOUR;
+		const email = "shared@example.test";
+		const orgName = "Restricted Workspace";
+		const oauth = (orgId: string): OAuthCredential => ({
+			type: "oauth",
+			access: `token-for-${orgId}`,
+			refresh: `refresh-for-${orgId}`,
+			expires: now + HOUR,
+			email,
+			orgId,
+			...(orgId === "restricted-org" ? { orgName } : {}),
+		});
+		await authStorage.credentials.set("anthropic", [
+			oauth("restricted-org"),
+			oauth("expired-org"),
+			oauth("meter-limited-org"),
+		]);
+		for (const { id, credential } of authStorage.credentials.list("anthropic")) {
+			if (credential.type !== "oauth") throw new Error("Expected OAuth credential");
+			authStorage.blocks.upsert({
+				credentialId: id,
+				providerKey: "anthropic:oauth",
+				blockScope: credential.orgId === "meter-limited-org" ? "tier:fable" : OAUTH_ORG_POLICY_BLOCK_SCOPE,
+				blockedUntilMs: credential.orgId === "expired-org" ? now - 1 : blockedUntilMs,
+			});
+		}
+		vi.spyOn(Settings, "loadReadOnly").mockResolvedValue(Settings.isolated({}));
+		vi.spyOn(sdkModule, "discoverAuthStorage").mockResolvedValue(authStorage);
+		let stdout = "";
+		vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+			stdout += String(chunk);
+			return true;
+		});
+
+		await runUsageCommand({ json, redact, noExtensions: true });
+
+		expect(stdout.match(/rejected by org policy/g)).toHaveLength(1);
+		expect(stdout.includes(email)).toBe(!redact);
+		expect(stdout.includes(orgName)).toBe(!redact);
+		expect(stdout).not.toContain("token-for-restricted-org");
+		if (json) {
+			const payload = JSON.parse(stdout);
+			expect(payload.reports).toEqual([]);
+			expect(payload.orgPolicyRejectedAccounts).toEqual([
+				{
+					provider: "anthropic",
+					type: "oauth",
+					email: redact ? "sh*" : email,
+					orgId: redact ? "re*" : "restricted-org",
+					orgName: redact ? "Re*" : orgName,
+					status: "rejected by org policy",
+					eligible: false,
+					blockedUntilMs,
+				},
+			]);
+		} else {
+			const text = stripVTControlCharacters(stdout);
+			expect(text).toContain("no usage data");
+			expect(text).toContain(`${redact ? "sh* · Re*" : `${email} · ${orgName}`} — rejected by org policy`);
+		}
 	});
 });
 
@@ -2461,11 +2579,10 @@ describe("omp usage reset", () => {
 
 		/** Opens the real `/usage reset` selector over the stubbed endpoints, recording every redeem it makes. */
 		async function openResetSelector(): Promise<{
-			selector: ResetUsageSelectorComponent;
+			term: TestTerminal;
 			redeems: Promise<unknown>[];
 			targets: ResetCreditTarget[];
 		}> {
-			await initTheme();
 			const redeems: Promise<unknown>[] = [];
 			const targets: ResetCreditTarget[] = [];
 			const ctx = createInteractiveModeContext({
@@ -2478,36 +2595,39 @@ describe("omp usage reset", () => {
 						return redeem;
 					},
 				},
-				ui: { getFocused: () => null },
 			});
+			const term = attachTerminal(ctx, { columns: 400, rows: 40 });
 			await new SelectorController(ctx).showResetUsageSelector();
-			const selector = ctx.editorContainer.children[0];
-			if (!(selector instanceof ResetUsageSelectorComponent)) throw new Error("expected the reset selector");
-			return { selector, redeems, targets };
+			if (!ctx.shell.overlays.open()) throw new Error("expected the reset selector");
+			return { term, redeems, targets };
 		}
 
 		it("lists each grant in the /usage reset selector and spends only the one Claude offers next", async () => {
-			const { selector, redeems, targets } = await openResetSelector();
-			// Move off the offered full reset to the Fable grant and try to confirm it.
-			selector.handleInput("\x1b[B");
-			selector.handleInput("\r");
-			selector.handleInput("\r");
-			await Promise.all(redeems);
+			const { term, redeems, targets } = await openResetSelector();
+			try {
+				// Move off the offered full reset to the Fable grant and try to confirm it.
+				term.press("down");
+				term.press("enter");
+				term.press("enter");
+				await Promise.all(redeems);
 
-			expect(redeems).toHaveLength(0);
-			expect(consumes()).toEqual([]);
-			const shown = stripVTControlCharacters(selector.render(400).join("\n"));
-			expect(shown).toContain("full-reset-2611");
-			expect(shown).toContain("launch-2610-fable");
+				expect(redeems).toHaveLength(0);
+				expect(consumes()).toEqual([]);
+				const shown = term.screen().join("\n");
+				expect(shown).toContain("full-reset-2611");
+				expect(shown).toContain("launch-2610-fable");
 
-			// Back on the offered full reset, confirming spends exactly that grant.
-			selector.handleInput("\x1b[A");
-			selector.handleInput("\r");
-			selector.handleInput("\r");
-			await Promise.all(redeems);
+				// Back on the offered full reset, confirming spends exactly that grant.
+				term.press("up");
+				term.press("enter");
+				term.press("enter");
+				await Promise.all(redeems);
 
-			expect(targets.map(target => target.creditId)).toEqual(["full-reset-2611"]);
-			expect(consumes().map(request => request.body?.grant_id)).toEqual(["full-reset-2611"]);
+				expect(targets.map(target => target.creditId)).toEqual(["full-reset-2611"]);
+				expect(consumes().map(request => request.body?.grant_id)).toEqual(["full-reset-2611"]);
+			} finally {
+				term.dispose();
+			}
 		});
 
 		it("refuses to pick one when no credit id is given, listing the command for each", async () => {
