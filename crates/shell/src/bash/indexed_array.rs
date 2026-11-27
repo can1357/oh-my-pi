@@ -1,7 +1,8 @@
 //! Sparse indexed shell arrays shared across forked process images.
 //!
-//! Cloning an image shares the element storage; the first write to a shared
-//! copy clones the vector (copy-on-write).
+//! Cloning an image shares the element list; the first write to a shared copy
+//! clones the list of element pointers (copy-on-write), never the elements,
+//! so a fork keeps the very elements its parent appends after.
 
 use std::{
 	ops::{Index, IndexMut},
@@ -14,7 +15,7 @@ use serde::{Deserialize, Serialize};
 /// Sorted, sparse indexed elements; cloning shares the existing elements.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct IndexedArray(Arc<Vec<(i64, BString)>>);
+pub struct IndexedArray(Arc<Vec<Arc<(i64, BString)>>>);
 
 impl IndexedArray {
 	/// Number of set elements.
@@ -29,22 +30,22 @@ impl IndexedArray {
 
 	/// First set element.
 	pub fn first(&self) -> Option<&(i64, BString)> {
-		self.0.first()
+		self.0.first().map(|item| &**item)
 	}
 
 	/// Last set element.
 	pub fn last(&self) -> Option<&(i64, BString)> {
-		self.0.last()
+		self.0.last().map(|item| &**item)
 	}
 
 	/// Element at a position in index order.
 	pub fn get(&self, position: usize) -> Option<&(i64, BString)> {
-		self.0.get(position)
+		self.0.get(position).map(|item| &**item)
 	}
 
 	/// Elements in ascending index order.
 	pub fn iter(&self) -> impl DoubleEndedIterator<Item = &(i64, BString)> + ExactSizeIterator {
-		self.0.iter()
+		self.0.iter().map(|item| &**item)
 	}
 
 	/// Locate an index in the sorted sequence.
@@ -67,7 +68,7 @@ impl IndexedArray {
 
 	/// Append an element greater than every current index.
 	pub fn push(&mut self, item: (i64, BString)) {
-		Arc::make_mut(&mut self.0).push(item);
+		Arc::make_mut(&mut self.0).push(Arc::new(item));
 	}
 
 	/// Insert at a sorted position, appending when it is the end.
@@ -78,7 +79,7 @@ impl IndexedArray {
 		if position == self.len() {
 			self.push(item);
 		} else {
-			Arc::make_mut(&mut self.0).insert(position, item);
+			Arc::make_mut(&mut self.0).insert(position, Arc::new(item));
 		}
 	}
 
@@ -102,19 +103,19 @@ impl IndexedArray {
 
 impl From<Vec<(i64, BString)>> for IndexedArray {
 	fn from(value: Vec<(i64, BString)>) -> Self {
-		Self(Arc::new(value))
+		Self(Arc::new(value.into_iter().map(Arc::new).collect()))
 	}
 }
 
 impl FromIterator<(i64, BString)> for IndexedArray {
 	fn from_iter<I: IntoIterator<Item = (i64, BString)>>(iter: I) -> Self {
-		Self(Arc::new(iter.into_iter().collect()))
+		Self(Arc::new(iter.into_iter().map(Arc::new).collect()))
 	}
 }
 
 impl Extend<(i64, BString)> for IndexedArray {
 	fn extend<I: IntoIterator<Item = (i64, BString)>>(&mut self, iter: I) {
-		Arc::make_mut(&mut self.0).extend(iter);
+		Arc::make_mut(&mut self.0).extend(iter.into_iter().map(Arc::new));
 	}
 }
 
@@ -128,6 +129,6 @@ impl Index<usize> for IndexedArray {
 
 impl IndexMut<usize> for IndexedArray {
 	fn index_mut(&mut self, index: usize) -> &mut Self::Output {
-		&mut Arc::make_mut(&mut self.0)[index]
+		Arc::make_mut(&mut Arc::make_mut(&mut self.0)[index])
 	}
 }
