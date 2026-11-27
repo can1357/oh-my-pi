@@ -46,7 +46,7 @@ fn preview_update(read: &FileRead, after: &str, streaming: bool) -> PreviewFile 
 
 fn staged_file(read: &FileRead, op: FileOp) -> StagedFile {
 	let mut file =
-		StagedFile::new(read.resolved.display.clone(), read.resolved.absolute.clone(), op);
+		StagedFile::new(read.resolved.display.clone(), read.resolved.location.clone(), op);
 	file.before_raw = Some(read.raw.clone());
 	file.before.clone_from(&read.text);
 	file

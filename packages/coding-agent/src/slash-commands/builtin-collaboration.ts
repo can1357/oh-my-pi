@@ -603,8 +603,8 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 		handleTui: async (command, runtime) => {
 			const arg = command.args.trim().toLowerCase();
 			if (!arg) {
-				runtime.ctx.showCopySelector();
 				clearSubmittedText(runtime);
+				await runtime.ctx.showCopySelector();
 				return;
 			}
 			if (arg === "code") {

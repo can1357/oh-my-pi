@@ -96,6 +96,8 @@ export interface AssistantMessageModel {
 	readonly embedHost?: EmbedHost;
 	/** Terminal cell when it draws pictures; undefined from the accessor means a text-only terminal. */
 	readonly figureCell?: Reactive<FigureCell | undefined>;
+	/** Rows a figure may take (a share of the terminal's); undefined: as tall as it draws. */
+	readonly figureRows?: Reactive<number | undefined>;
 	/** Tool-result images (default true). */
 	readonly showToolResultImages?: Reactive<boolean>;
 	/** Tables get charts (default false; a focused subagent's do not): Tern is sent each chart after its table. */
@@ -577,6 +579,7 @@ export function AssistantMessageBlock(props: { model: AssistantMessageModel }): 
 						part={() => parts().get(slot)}
 						now={now}
 						figureCell={model.figureCell}
+						figureRows={model.figureRows}
 						embedHost={model.embedHost}
 						showFigureImages={showFigureImages}
 						rate={() => read(model.thinkingRate) ?? 0}
@@ -660,6 +663,7 @@ function ReplyPart(props: {
 	part: () => Part | undefined;
 	now: () => number;
 	figureCell?: Reactive<FigureCell | undefined>;
+	figureRows?: Reactive<number | undefined>;
 	embedHost?: EmbedHost;
 	showFigureImages: () => boolean;
 	rate: () => number;
@@ -691,7 +695,15 @@ function ReplyPart(props: {
 			const part = props.part();
 			return part?.kind === "svg" ? part.source : "";
 		});
-		return <SvgFence source={source} nodeKey={slot} cell={props.figureCell} theme={currentTheme} />;
+		return (
+			<SvgFence
+				source={source}
+				nodeKey={slot}
+				cell={props.figureCell}
+				maxRows={props.figureRows}
+				theme={currentTheme}
+			/>
+		);
 	}
 	if (kind === "embed") {
 		const html = computed(() => {
@@ -706,6 +718,7 @@ function ReplyPart(props: {
 				showImages={props.showFigureImages}
 				host={props.embedHost}
 				cell={props.figureCell}
+				maxRows={props.figureRows}
 				theme={currentTheme}
 			/>
 		);

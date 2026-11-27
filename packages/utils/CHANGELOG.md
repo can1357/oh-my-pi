@@ -2,16 +2,19 @@
 
 ## [Unreleased]
 
-### Added
-
-- Added `getBunStubDir()`, the cache directory holding the `bun` stub a compiled omp appends to its JS eval kernel's PATH ([#19241](https://github.com/can1357/oh-my-pi/pull/19241) by [@mccraigmccraig](https://github.com/mccraigmccraig))
-- Added `initializeSqliteSchema(db, apply)`, which runs an idempotent schema initializer and takes the write lock only when the schema needs a change ([#17968](https://github.com/can1357/oh-my-pi/pull/17968) by [@sjawhar](https://github.com/sjawhar))
 ### Breaking Changes
 
-- Removed the unused `getToolsDir()` export. Custom tool discovery is unchanged.
+- Removed the unused `getToolsDir()` export; custom tool discovery is unchanged.
+
+### Added
+
+- Added `getBunStubDir()` to expose the cache directory used for the `bun` executable stub in compiled applications.
+- Added `initializeSqliteSchema(db, apply)`, which runs an idempotent schema initializer and takes the write lock only when the schema needs a change ([#17968](https://github.com/can1357/oh-my-pi/pull/17968) by [@sjawhar](https://github.com/sjawhar))
+
 ### Fixed
 
-- Fixed `parseImageMetadata` omitting the dimensions of lossless WebP (VP8L) headers shorter than 30 bytes ([#20521](https://github.com/can1357/oh-my-pi/pull/20521) by [@shgew](https://github.com/shgew))
+- Fixed 429 retry guidance to honor quota reset timestamps in `rests until <ISO-8601>` responses.
+- Fixed `parseImageMetadata` failing to report dimensions for short lossless WebP (VP8L) headers.
 
 ## [19.2.1] - 2026-11-25
 

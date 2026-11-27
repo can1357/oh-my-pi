@@ -19,12 +19,14 @@ export type EditMode = "replace" | "patch" | "hashline" | "apply_patch" | "slopp
 /** Filesystem operation represented by an edit. */
 export type Operation = "create" | "delete" | "update";
 
-/** Computed streaming diff or preview error for one file. */
+/** Computed streaming diff, preview error, or notice for one file. */
 export interface PerFileDiffPreview {
 	path: string;
 	diff?: string;
 	firstChangedLine?: number;
 	error?: string;
+	/** Why the file has no diff yet, when that is not a failure (a remote file fetched only once the edit runs). */
+	notice?: string;
 }
 
 type EditDiffPreview =
