@@ -67,7 +67,7 @@ import { createModelBrowserSource } from "../model-browser-source";
 import {
 	cfgBareExitOnEmptySession,
 	cfgBareSlashCommands,
-	cfgDisplayHideToolActivity,
+	cfgDisplayToolActivity,
 	cfgDoubleEscapeAction,
 	cfgEmojiAutocomplete,
 	cfgImagesAutoResize,
@@ -75,6 +75,7 @@ import {
 	cfgPasteLargeMenuThreshold,
 	cfgSpellingAutocorrect,
 	cfgSpellingTypoDetection,
+	TOOL_ACTIVITY_MODES,
 } from "../settings";
 import { type ConversationPosition, continuesConversation, conversationPosition } from "../utils/conversation-position";
 import { materializeImageChipLinks } from "../utils/ui-helpers";
@@ -565,8 +566,8 @@ export class InputController {
 		const actions: [Keybinding, () => void][] = [
 			["app.plan.toggle", () => void this.ctx.handlePlanModeCommand()],
 			["app.session.new", () => void this.ctx.handleNewCommand()],
-			["app.session.tree", () => this.ctx.showTreeSelector()],
-			["app.session.fork", () => this.ctx.showUserMessageSelector()],
+			["app.session.tree", () => void this.ctx.showTreeSelector()],
+			["app.session.fork", () => void this.ctx.showUserMessageSelector()],
 			["app.session.resume", () => this.ctx.showSessionSelector()],
 			["app.message.followUp", () => void this.handleFollowUp()],
 			["app.stt.toggle", () => void this.ctx.handleSTTToggle()],
@@ -658,7 +659,7 @@ export class InputController {
 			return true;
 		}
 		if (km.matches(key, "app.tools.toggleVisibility")) {
-			this.toggleToolActivityVisibility();
+			this.cycleToolActivity();
 			return true;
 		}
 		if (km.matches(key, "app.display.reset")) {
@@ -899,9 +900,9 @@ export class InputController {
 				const now = Date.now();
 				if (now - this.ctx.lastEscapeTime < 500) {
 					if (doubleEscapeAction === "tree") {
-						this.ctx.showTreeSelector();
+						void this.ctx.showTreeSelector();
 					} else {
-						this.ctx.showUserMessageSelector();
+						void this.ctx.showUserMessageSelector();
 					}
 					this.ctx.lastEscapeTime = 0;
 				} else {
@@ -3194,7 +3195,7 @@ export class InputController {
 	}
 
 	toggleToolOutputExpansion(): void {
-		if (this.ctx.hideToolActivity) {
+		if (this.ctx.toolActivity === "hidden") {
 			const visibilityKey = actionKey("app.tools.toggleVisibility", this.ctx.keybindings);
 			const visibilityHint = visibilityKey ? `${visibilityKey} or /settings` : "/settings";
 			this.ctx.showStatus(`Tool activity is hidden — show it with ${visibilityHint} before expanding`);
@@ -3204,14 +3205,18 @@ export class InputController {
 		this.ctx.showStatus(`Tool output expansion: ${this.ctx.toolOutputExpanded ? "enabled" : "disabled"}`);
 	}
 
-	toggleToolActivityVisibility(): void {
-		this.ctx.hideToolActivity = !this.ctx.hideToolActivity;
-		cfgDisplayHideToolActivity.set(this.ctx.settings, this.ctx.hideToolActivity);
-		if (!this.ctx.hideToolActivity) this.ctx.toolOutputExpanded = false;
-		// Live blocks follow the flag; tool rows already retired to terminal history change only
+	/** `app.tools.toggleVisibility`: tool activity detailed → concise → hidden → detailed. */
+	cycleToolActivity(): void {
+		const next =
+			TOOL_ACTIVITY_MODES[(TOOL_ACTIVITY_MODES.indexOf(this.ctx.toolActivity) + 1) % TOOL_ACTIVITY_MODES.length]!;
+		this.ctx.toolActivity = next;
+		cfgDisplayToolActivity.set(this.ctx.settings, next);
+		// A new mode starts folded: Ctrl+O left on would draw every concise row as its full card.
+		this.ctx.toolOutputExpanded = false;
+		// Live blocks follow the mode; tool rows already retired to terminal history change only
 		// when the scrollback is rebuilt.
 		this.ctx.shell.host?.replayHistory();
-		this.ctx.showStatus(`Tool activity: ${this.ctx.hideToolActivity ? "hidden" : "visible"}`);
+		this.ctx.showStatus(`Tool activity: ${next}`);
 	}
 
 	setToolsExpanded(expanded: boolean): void {
@@ -3276,7 +3281,7 @@ export class InputController {
 			this.#extensionShortcuts.set(id, () => {
 				// Bound once at startup; a live `disabledExtensions` edit may have suspended the owner since.
 				if (!runner.isExtensionActive(shortcut.extensionPath)) return;
-				const ctx = runner.createCommandContext();
+				const ctx = runner.createCommandContext(shortcut.extensionPath);
 				try {
 					runner.runScoped(() => shortcut.handler(ctx));
 				} catch (err) {

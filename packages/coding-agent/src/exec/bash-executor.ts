@@ -19,6 +19,7 @@ import {
 } from "@oh-my-pi/pi-natives";
 import { isShellTrace, type ShellTrace } from "@oh-my-pi/pi-wire";
 import { logger } from "@oh-my-pi/pi-utils";
+import { formatTimeoutNotice } from "../tools/details/bash";
 import { formatRawOutputNotice } from "../tools/output-meta-format";
 import { $env } from "@oh-my-pi/pi-utils/env";
 import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
@@ -744,18 +745,14 @@ async function executeUserShellPty(run: {
 			exitCode: undefined,
 			cancelled: true,
 			timedOut: true,
-			...(await run.dump(
-				run.timeoutMs !== undefined
-					? `Command timed out after ${Math.round(run.timeoutMs / 1000)} seconds`
-					: "Command timed out",
-			)),
+			...(await run.dump(formatTimeoutNotice(run.timeoutMs))),
 		};
 	}
 	if (result.cancelled) {
 		return {
 			exitCode: undefined,
 			cancelled: true,
-			...(await run.dump("Command cancelled")),
+			...(await run.dump("cancelled")),
 		};
 	}
 	return {
@@ -868,7 +865,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		return {
 			exitCode: undefined,
 			cancelled: true,
-			...(await dump("Command cancelled")),
+			...(await dump("cancelled")),
 		};
 	}
 
@@ -1046,16 +1043,14 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			if (winner.kind === "abort") {
 				trackAbortedShell(options?.sessionKey, runPromise, cleanupPromise);
 			}
-			let notice = "Command cancelled";
+			let notice = "cancelled";
 			if (winner.kind === "timeout" && deadlineTimeoutMs !== undefined) {
-				const seconds = Math.round(deadlineTimeoutMs / 1000);
 				// With an explicit timeout the native shell owns enforcement and
 				// this JS timer is only a backstop. If it still wins, the native
 				// run never returned — any output is stuck in the undrained pipe,
 				// so this is not a confirmed empty run (#10308).
-				notice = nativeOwnsTimeout
-					? `Command timed out after ${seconds} seconds; the shell backend did not respond, so any output above may be incomplete`
-					: `Command timed out after ${seconds} seconds`;
+				notice = formatTimeoutNotice(deadlineTimeoutMs);
+				if (nativeOwnsTimeout) notice += "; shell unresponsive, output may be incomplete";
 			}
 			return {
 				exitCode: undefined,
@@ -1072,9 +1067,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 
 		// Handle timeout
 		if (winner.result.timedOut) {
-			const annotation = options?.timeout
-				? `Command timed out after ${Math.round(options.timeout / 1000)} seconds`
-				: "Command timed out";
+			const annotation = formatTimeoutNotice(options?.timeout || undefined);
 			return {
 				exitCode: undefined,
 				cancelled: true,
@@ -1092,7 +1085,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				cancelled: true,
 				...settleTrace(),
 				...(await settleFork()),
-				...(await dump("Command cancelled")),
+				...(await dump("cancelled")),
 			};
 		}
 

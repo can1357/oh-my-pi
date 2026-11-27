@@ -10,7 +10,15 @@
  * while the session loads; the interactive mode adopts it. Otherwise the mode
  * builds its own.
  */
-import { type Accessor, computed, type JSXNode, type Signal, signal, type UiNode } from "@oh-my-pi/pi-tui";
+import {
+	type Accessor,
+	computed,
+	type JSXNode,
+	nativeRendering,
+	type Signal,
+	signal,
+	type UiNode,
+} from "@oh-my-pi/pi-tui";
 import type { ResizeScrollback, TerminalDriverOptions } from "@oh-my-pi/pi-tui/driver/index";
 import { staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
 import { renderBlock } from "@oh-my-pi/pi-tui/term/render";
@@ -302,11 +310,31 @@ export class AppFrame {
 						actions={state === "transcribing" ? undefined : click("dictation.toggle")}
 					>
 						{busy ? (
-							<spinner key="pending" label={state === "starting" ? "Starting…" : "Transcribing…"} />
+							<spinner
+								key="pending"
+								style="orbit"
+								label={state === "starting" ? "Starting…" : "Transcribing…"}
+							/>
 						) : (
 							[
 								<icon key="icon" name={state === "recording" ? "stop" : "mic"} />,
-								state === "recording" && <text key="label" text="Recording · Stop" wrap="none" />,
+								state === "recording" &&
+									(nativeRendering() ? (
+										// Natively the voice as a wave and the time recorded say "recording".
+										[
+											<meter
+												key="wave"
+												role="omp.composer.dictation.wave"
+												value={() => this.dictationLevel()}
+												style="wave"
+												size="sm"
+												tone="error"
+											/>,
+											<elapsed key="time" age={0} format="clock" />,
+										]
+									) : (
+										<text key="label" text="Recording · Stop" wrap="none" />
+									)),
 							]
 						)}
 					</row>
@@ -321,6 +349,8 @@ export class AppFrame {
 	 * control). The interactive mode follows its speech-to-text state here.
 	 */
 	readonly dictation: Signal<DictationState | undefined> = signal(undefined);
+	/** The microphone's loudness while dictation records, as the wave meter's value (0–1, in its steps). */
+	readonly dictationLevel: Signal<number> = signal(0);
 	/** The prepaint's emergency key handler, held from adoption until the mode's own keys exist. */
 	#startupKeys: (() => void) | undefined;
 

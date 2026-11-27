@@ -451,13 +451,35 @@ function statSeg(input: SegInput, value: number, icon: string, color: string): S
 	);
 }
 
+/** The session's own spend and its subagent tree's, as the cost segment bills them. */
+function sessionSpend(facts: SegInput["facts"]): { own: number; subagents: number } {
+	return {
+		own: Math.max(0, facts.usage.cost - (facts.usage.subagentCost ?? 0)),
+		subagents: Math.max(facts.subagentTreeCost ?? 0, facts.usage.subagentCost ?? 0),
+	};
+}
+
+/**
+ * Everything the session spent, split by billing: `paid` in dollars, `subscription` on a plan
+ * (the session and its subagents bill as the session does, an advisor as itself). Hosts with
+ * little room (Tern's phone) show one total from these rather than the cost segment's text.
+ */
+export function spendTotals(facts: SegInput["facts"]): { paid: number; subscription: number } {
+	const { own, subagents } = sessionSpend(facts);
+	const totals = { paid: 0, subscription: 0 };
+	totals[facts.usingSubscription ? "subscription" : "paid"] += own + subagents;
+	const advisor = facts.advisorCost;
+	if (advisor) totals[advisor.usingSubscription ? "subscription" : "paid"] += advisor.cost;
+	return totals;
+}
+
 function costSeg(input: SegInput): SegView | null {
 	const { facts, symbols } = input;
-	const own = Math.max(0, facts.usage.cost - (facts.usage.subagentCost ?? 0));
+	const { own, subagents } = sessionSpend(facts);
 	const text = billingSummary(
 		{
 			cost: own,
-			subagentCost: Math.max(facts.subagentTreeCost ?? 0, facts.usage.subagentCost ?? 0),
+			subagentCost: subagents,
 			usingSubscription: facts.usingSubscription,
 			premiumRequests: facts.usage.premiumRequests,
 			digits: 2,

@@ -776,17 +776,34 @@ export const cfgDisplaySmoothStreaming = register({
 	},
 });
 
-export const cfgDisplayHideToolActivity = register({
-	id: "display.hideToolActivity",
-	type: "boolean",
-	default: false,
+/** How the transcript shows model-initiated tool calls, in `app.tools.toggleVisibility` cycle order. */
+export const TOOL_ACTIVITY_MODES = ["detailed", "concise", "hidden"] as const;
+
+export const cfgDisplayToolActivity = register({
+	id: "display.toolActivity",
+	type: "enum",
+	values: TOOL_ACTIVITY_MODES,
+	default: "detailed",
 	ui: {
 		tab: "appearance",
 		group: "Display",
-		label: "Hide Tool Activity",
-		description: "Hide model-initiated tool calls and results from the transcript",
+		label: "Tool Activity",
+		description:
+			"How model-initiated tool calls show in the transcript (concise draws one status row per call; the tool-output toggle opens the full card)",
+		options: [
+			{ value: "detailed", label: "Detailed", description: "Full tool cards with arguments and output previews" },
+			{
+				value: "concise",
+				label: "Concise",
+				description: "One row per call: time, status, tool and intent; no arguments or output",
+			},
+			{ value: "hidden", label: "Hidden", description: "Hide tool calls and results from the transcript" },
+		],
 	},
 });
+
+/** {@link cfgDisplayToolActivity}'s value. */
+export type ToolActivityMode = (typeof TOOL_ACTIVITY_MODES)[number];
 
 export const cfgDisplayShowTokenUsage = register({
 	id: "display.showTokenUsage",
@@ -857,7 +874,7 @@ export const cfgDisplayAdvisorCollapsedLines = register({
 });
 /** Transcript display preferences the shell applies to its tool, message and image blocks. */
 export const cfgTranscriptDisplay = combine({
-	hideToolActivity: cfgDisplayHideToolActivity,
+	toolActivity: cfgDisplayToolActivity,
 	shellVisualization: cfgDisplayShellVisualization,
 	readToolResultPreview: cfgReadToolResultPreview,
 	showImages: cfgTerminalShowImages,

@@ -19,7 +19,14 @@
  * focused kind's widget (an editor turns them into `edit` events); clicks
  * resolve through the last frame's hit regions.
  */
-import type { FramePlan, InputEvent, MouseEvent, TerminalCapabilities, TerminalDriver } from "../driver/contract";
+import type {
+	FramePlan,
+	HistoryRowMark,
+	InputEvent,
+	MouseEvent,
+	TerminalCapabilities,
+	TerminalDriver,
+} from "../driver/contract";
 import { dropCutImages } from "../driver/images/anchor";
 import { DEFAULT_CELL } from "../driver/images/fit";
 import { bubbleEvent, bubbleKey, bubblePaste, keypathOf, pathTo } from "../dispatch";
@@ -92,12 +99,11 @@ export interface TermBackendOptions {
 
 /** A history batch offered to the driver until it acknowledges the id. */
 interface PendingBatch {
-	readonly id: number;
-	readonly rows: readonly string[];
+	readonly history: NonNullable<FramePlan["history"]>;
+	/** Marks offered with this batch; they are spent only when the driver acknowledges it. */
+	readonly marked?: ReadonlyMap<object, HistoryRowMark>;
 	/** Live main nodes the batch writes whole (committed on acknowledgement). */
 	readonly nodes: readonly UiNode[];
-	/** The batch replaces history: the committed ledger, then whatever retired with it. */
-	readonly replay: boolean;
 	/** A streaming node's stable head moved into history: its emitted rows after this batch. */
 	readonly head?: { readonly node: UiNode; readonly rows: readonly string[]; readonly count: number };
 	/** The last non-empty block whose rows this batch writes. */
@@ -316,6 +322,8 @@ export class TermBackend {
 	/** The `main` list the frontier was last checked against. */
 	#frontierChecked: readonly UiNode[] | undefined;
 	#pending: PendingBatch | undefined;
+	/** Written marks stay spent even if a resize or transcript edit replays their rows. */
+	readonly #marked = new WeakSet<object>();
 	/** The last non-empty main block with rows in history (what the first live block is separated from). */
 	#historyTail: UiNode | undefined;
 	/** Rows of live main nodes already moved into history (streaming heads), not repainted in the viewport. */
@@ -482,7 +490,9 @@ export class TermBackend {
 		// A frame whose history the driver did not write was not drawn inline either: the screen is as it was.
 		if (!plan.history || written === plan.history.id) this.#pin = this.#nextPin;
 		const pending = this.#pending;
-		if (pending && written === pending.id) {
+		if (pending && written === pending.history.id) {
+			const replay = pending.history.kind === "replay";
+			if (pending.marked) for (const key of pending.marked.keys()) this.#marked.add(key);
 			for (const node of pending.nodes) {
 				this.#committed.add(node);
 				this.#emitted.delete(node);
@@ -496,10 +506,10 @@ export class TermBackend {
 					verified: undefined,
 				});
 			}
-			if (pending.replay || pending.last) this.#historyTail = pending.last;
+			if (replay || pending.last) this.#historyTail = pending.last;
 			this.#pending = undefined;
 			this.#frontierChecked = undefined;
-			if (pending.replay) this.#replay = false;
+			if (replay) this.#replay = false;
 			// What became eligible while the batch waited retires in the next frame.
 			this.requestRender();
 		}
@@ -762,7 +772,7 @@ export class TermBackend {
 		let aboveLive = ledger
 			? ledgerLast
 			: pending
-				? (pending.last ?? (pending.replay ? undefined : this.#historyTail))
+				? (pending.last ?? (pending.history.kind === "replay" ? undefined : this.#historyTail))
 				: this.#historyTail;
 		if (pending) {
 			const retiring = new Set(pending.nodes);
@@ -838,11 +848,23 @@ export class TermBackend {
 		let live = 0;
 		let history: FramePlan["history"];
 		if (pending) {
-			history = { id: pending.id, rows: pending.rows, ...(pending.replay ? { kind: "replay" as const } : {}) };
+			history = pending.history;
 		} else if (boundary >= 0 || ledger) {
 			const retired: UiNode[] = [];
 			const rows: string[] = ledger ?? [];
 			let last = ledgerLast;
+			let marked: Map<object, HistoryRowMark> | undefined;
+			const appendRows = (block: Block, from: number, to: number): void => {
+				const mark = block.historyMark;
+				if (mark && mark.row >= from && mark.row < to && !this.#marked.has(mark.key) && !marked?.has(mark.key)) {
+					(marked ??= new Map()).set(mark.key, {
+						row: rows.length + mark.row - from,
+						before: mark.before,
+						after: mark.after,
+					});
+				}
+				for (let i = from; i < to; i++) rows.push(block.rows[i]!);
+			};
 			/** Move the rest of block `live` into history: it is committed with the batch. */
 			const retireWhole = (): void => {
 				const node = main[first + live]!;
@@ -853,7 +875,7 @@ export class TermBackend {
 					// The separator may depend on whether the block above retires (it just did, in this batch).
 					leads[live] = undefined;
 					for (let i = leadAt(live); i > 0; i--) rows.push("");
-					for (let i = skip; i < block.rows.length; i++) rows.push(block.rows[i]!);
+					appendRows(block, skip, block.rows.length);
 				}
 				if (block.rows.length > 0) last = node;
 				this.#retiring.add(node);
@@ -885,7 +907,7 @@ export class TermBackend {
 					else if (take > 0 || lead > 0) {
 						for (let i = lead; i > 0; i--) rows.push("");
 						const stop = Math.min(skip + take, block.rows.length);
-						for (let i = skip; i < stop; i++) rows.push(block.rows[i]!);
+						appendRows(block, skip, stop);
 						head = { node, rows: block.rows, count: stop };
 						skips[live] = stop;
 						leads[live] = 0;
@@ -894,10 +916,20 @@ export class TermBackend {
 				}
 			}
 			if (rows.length > 0 || ledger) {
-				const id = this.#nextHistoryId++;
-				const replay = ledger !== undefined;
-				this.#pending = { id, rows, nodes: retired, replay, ...(head ? { head } : {}), last, width };
-				history = { id, rows, ...(replay ? { kind: "replay" as const } : {}) };
+				history = {
+					id: this.#nextHistoryId++,
+					rows,
+					...(ledger ? { kind: "replay" } : {}),
+					...(marked ? { marks: [...marked.values()] } : {}),
+				};
+				this.#pending = {
+					history,
+					nodes: retired,
+					...(marked ? { marked } : {}),
+					...(head ? { head } : {}),
+					last,
+					width,
+				};
 			} else {
 				// Nothing to write: the blocks stay live (committed with the next batch that has rows).
 				leads[live] = undefined;

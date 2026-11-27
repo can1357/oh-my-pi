@@ -7,7 +7,12 @@ Nothing you started running and no answer owed? Returns at once; so does a wait 
 - Result in, other jobs still running? SHOULD act on it before waiting again.
 {{#if endTurn}}
 - Nothing left but waiting on your own jobs/services or an owed reply? End your turn instead: each of their results and messages starts your next turn.
-{{else}}
+{{else if untilNews}}
+- A wait on your own jobs/services returns only once one finishes or a message arrives.
+- A wait for a reply returned with nothing new and nothing else is left? Call `wait` right away with no other tool call.
+{{else if ladder}}
 - A wait returned with nothing new and nothing else is left? Call `wait` right away with no other tool call: it then blocks up to {{longest}}, longer for a reply.
+{{else}}
+- A wait returned with nothing new and nothing else is left? Call `wait` right away with no other tool call: it then blocks up to {{longest}} on your jobs/services.
 {{/if}}
 Results and messages auto-deliver. NEVER poll while work remains.

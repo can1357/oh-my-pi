@@ -1,8 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { builtinThemes, createTheme, type ThemeJson } from "@oh-my-pi/pi-tui/theme/index";
+import { builtinThemes, createTheme, presetSymbols, type ThemeJson } from "@oh-my-pi/pi-tui/theme/index";
 
 const dark = createTheme(builtinThemes().dark!);
 const light = createTheme(builtinThemes().light!);
+/** Unicode status marks: one-cell text glyphs in the theme color, exempt from emoji presentation. */
+const STATUS_MARKS = ["status.success", "status.warning", "status.aborted", "status.done"];
 
 describe("fg / bg", () => {
 	it("keeps the outer color after a nested color ends", () => {
@@ -134,14 +136,42 @@ describe("symbols", () => {
 
 	it("resolves icons by key, icon name and slash-command name", () => {
 		const { symbols } = dark;
-		expect(symbols.icon("status.success")).toBe("✔");
-		expect(symbols.icon("warning")).toBe("⚠");
+		expect(symbols.icon("status.success")).toBe("✓");
+		expect(symbols.icon("warning")).toBe("⚠️");
 		expect(symbols.icon("jobs")).toBe(symbols.symbol("icon.job"));
 		expect(symbols.icon("gear")).toBe(symbols.symbol("cmd.gear"));
 		expect(symbols.icon("no-such-icon")).toBe("");
 		expect(symbols.langIcon("ts")).toBe(symbols.symbol("lang.typescript"));
 		expect(symbols.langIcon("weird")).toBe("⌘");
 		expect(symbols.symbol("status.done")).toBe(symbols.symbol("status.success"));
+	});
+
+	it("gives every emoji-capable unicode icon emoji presentation, so terminals and stringWidth both count 2 cells", () => {
+		// Without U+FE0F, emoji-font fallback draws e.g. `✉` two cells wide over a one-cell advance,
+		// covering the next character. Layout glyphs (separators, checkbox pair) are not icons.
+		const table = presetSymbols("unicode");
+		const bare = Object.entries(table).filter(([key, glyph]) => {
+			if (!/^(status|icon|cmd|tab|tool|lang|chip)\./.test(key) || STATUS_MARKS.includes(key)) return false;
+			const chars = [...glyph];
+			return chars.some(
+				(char, i) =>
+					/\p{Extended_Pictographic}/u.test(char) &&
+					!/\p{Emoji_Presentation}/u.test(char) &&
+					chars[i + 1] !== "\uFE0F",
+			);
+		});
+		expect(bare).toEqual([]);
+	});
+
+	it("keeps unicode status marks one-cell text glyphs that take the theme color", () => {
+		// Emoji ignore fg color; status marks sit in aligned columns.
+		const table = presetSymbols("unicode");
+		const marks = STATUS_MARKS.map(key => ({
+			key,
+			width: Bun.stringWidth(table[key]!),
+			emoji: table[key]!.includes("\uFE0F"),
+		}));
+		expect(marks).toEqual(STATUS_MARKS.map(key => ({ key, width: 1, emoji: false })));
 	});
 
 	it("switches glyphs and spinners with the preset", () => {

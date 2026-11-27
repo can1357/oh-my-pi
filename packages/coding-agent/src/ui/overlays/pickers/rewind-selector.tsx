@@ -9,6 +9,9 @@
  * `f` opens a word filter (whole Latin words, substrings in other scripts);
  * stepping then visits only matching turns.
  *
+ * A long branch starts on its tail: `a`, a filter query, or stepping above
+ * the oldest turn held loads the rest.
+ *
  * The node is the bar (`omp.rewind.bar`): the counter, the filter field, the
  * key hints and the Cancel / Rewind buttons. A terminal fills the screen
  * with the branch above it, drawn by the transcript's own blocks (prompt
@@ -19,8 +22,7 @@
  * turn's blocks carry the `pick` mark under a caption saying what ⏎ does and
  * drops, the blocks a rewind would drop carry `drop`, and a click on a turn
  * outlines it. At a fork the rest of the branch and each sibling branch stand
- * side by side in a strip. A long branch replays its tail first: `a`, the
- * filter, or stepping above the oldest replayed turn loads the rest.
+ * side by side in a strip.
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import {
@@ -46,6 +48,7 @@ import type { BranchVariantPath } from "../../../modes/view-model/overlays/rewin
 import {
 	isUserTurnEntry,
 	recentTranscriptEntries,
+	type SessionMessageEntryLike,
 	type TranscriptEntryLike,
 	userTurnLabel,
 } from "../../../session/transcript/transcript-entry";
@@ -80,9 +83,10 @@ export interface RewindSelectorProps {
 	/**
 	 * Replays entries as the session's own blocks. Given, the screen is Tern's rewind page (see
 	 * the module docs) and yields the turns' nodes before the bar; absent, the terminal look
-	 * draws the turns.
+	 * draws the turns. `clipped`: the entries are a later part of the session (the branch's tail,
+	 * a sibling branch below its fork), so the run they open in may have started above them.
 	 */
-	replica?(entries: readonly TranscriptEntryLike[]): TranscriptReplica;
+	replica?(entries: readonly TranscriptEntryLike[], clipped: boolean): TranscriptReplica;
 	onSelect(entryId: string): void;
 	onCancel(): void;
 }
@@ -112,23 +116,36 @@ function textOf(content: unknown): string {
 	return parts.join("\n");
 }
 
+/** An entry that is a rewind point of its own: a prompt or a reply (a tool result joins the reply before it). */
+type RewindPointEntry = SessionMessageEntryLike & {
+	readonly message: Extract<AgentMessage, { role: "user" | "assistant" }>;
+};
+
+function isRewindPoint(entry: TranscriptEntryLike): entry is RewindPointEntry {
+	return entry.type === "message" && (entry.message.role === "user" || entry.message.role === "assistant");
+}
+
+/** Whether `entries` hold a rewind point, without building the targets (a long branch has thousands). */
+export function hasRewindPoint(entries: readonly TranscriptEntryLike[]): boolean {
+	return entries.some(isRewindPoint);
+}
+
 /** The rewind points of `entries`: one per user prompt and per assistant reply (tool results join the reply, which rewinds onto its last result). */
-export function rewindTargets(entries: readonly TranscriptEntryLike[]): RewindTarget[] {
+function rewindTargets(entries: readonly TranscriptEntryLike[]): RewindTarget[] {
 	const targets: RewindTarget[] = [];
 	for (const entry of entries) {
-		if (entry.type !== "message") continue;
-		const message = entry.message;
-		if (message.role === "user" || message.role === "assistant") {
-			const text = textOf(message.content);
+		if (isRewindPoint(entry)) {
+			const message = entry.message;
 			targets.push({
 				entryId: entry.id,
 				turnId: entry.id,
 				isUserTurn: message.role === "user",
-				text,
+				text: textOf(message.content),
 				messages: [message],
 			});
-		} else if (message.role === "toolResult" && targets.length > 0) {
+		} else if (entry.type === "message" && entry.message.role === "toolResult" && targets.length > 0) {
 			// The reply's rewind point moves onto its trailing result: rewinding keeps the tool output.
+			const message = entry.message;
 			const last = targets.pop()!;
 			targets.push({
 				...last,
@@ -139,6 +156,18 @@ export function rewindTargets(entries: readonly TranscriptEntryLike[]): RewindTa
 		}
 	}
 	return targets;
+}
+
+/**
+ * The entries the terminal look opens on: the branch's recent tail, reaching back to the newest
+ * prompt or reply when the tail holds none (a long run of `!` commands), so it opens on a point
+ * to rewind to. The look draws only prompts and replies: the entries it reaches over draw nothing.
+ */
+function termTail(entries: readonly TranscriptEntryLike[]): readonly TranscriptEntryLike[] {
+	const tail = recentTranscriptEntries(entries);
+	if (tail.some(isRewindPoint)) return tail;
+	const newest = entries.findLastIndex(isRewindPoint);
+	return newest < 0 ? tail : entries.slice(newest);
 }
 
 /** Word patterns of a filter query, matched against lowercased text: whole Latin words, substrings otherwise. */
@@ -276,19 +305,20 @@ export function RewindSelector(props: RewindSelectorProps): JSXNode {
 	onCleanup(() => {
 		for (const replica of replicas) replica.dispose();
 	});
-	const laneOf = (entries: readonly TranscriptEntryLike[]): TurnLane => {
+	const laneOf = (entries: readonly TranscriptEntryLike[], clipped: boolean): TurnLane => {
 		if (!replay) return termLane(rewindTargets(entries));
-		const replica = keep(() => replay(entries));
+		const replica = keep(() => replay(entries, clipped));
 		replica.expanded.set(expanded);
 		replicas.add(replica);
 		return pageLane(replica);
 	};
 
-	// A page replays the branch's tail; the terminal look draws rows on demand and takes it whole.
-	const tail = replay ? recentTranscriptEntries(props.entries) : props.entries;
-	const main = signal(laneOf(tail));
+	// The page and the terminal look both start on the branch's tail: each turn they hold costs at
+	// open, however far above the screen it stands.
+	const tail = replay ? recentTranscriptEntries(props.entries) : termTail(props.entries);
 	/** Older history is not replayed yet. */
 	const truncated = signal(tail.length < props.entries.length);
+	const main = signal(laneOf(tail, truncated.peek()));
 	const selected = signal(Math.max(0, main.peek().turns.length - 1));
 	/** 0: the current path; n: the n-th sibling branch of the selected turn. */
 	const variant = signal(0);
@@ -303,7 +333,7 @@ export function RewindSelector(props: RewindSelectorProps): JSXNode {
 		if (!truncated.peek()) return;
 		const previous = main.peek();
 		const turnId = previous.turns[selected.peek()]?.turnId;
-		const next = laneOf(props.entries);
+		const next = laneOf(props.entries, false);
 		const restored = turnId === undefined ? -1 : next.turns.findIndex(turn => turn.turnId === turnId);
 		batch(() => {
 			main.set(next);
@@ -340,7 +370,8 @@ export function RewindSelector(props: RewindSelectorProps): JSXNode {
 			found = untrack(() => siblingPaths(turn.turnId))
 				.filter(path => path.entries.length > 0)
 				.map(path => {
-					const lane = laneOf(path.entries);
+					// A sibling branch below a fork leaves the turns above it out.
+					const lane = laneOf(path.entries, path.entries[0]!.parentId !== null);
 					const firstUser = path.entries.find(isUserTurnEntry);
 					const label = replay
 						? (firstUser && userTurnLabel(firstUser)) || path.rootId
@@ -420,22 +451,26 @@ export function RewindSelector(props: RewindSelectorProps): JSXNode {
 		const shown = matches().filter(index => !userTurnsOnly || turns[index]!.isUserTurn);
 		const next = delta < 0 ? shown.findLast(index => index < selected()) : shown.find(index => index > selected());
 		if (next !== undefined) selected.set(next);
+		else if (delta < 0 && truncated()) {
+			// An open filter without a query still steps above the replayed tail.
+			loadFull();
+			stepFiltered(delta, userTurnsOnly);
+		}
 	};
 	const rewind = (): void => {
 		const target = filter() ? (matches().includes(selected()) ? main().turns[selected()] : undefined) : outlined();
 		if (target) props.onSelect(target.entryId);
 	};
-	const openFilter = (): void => {
-		// The filter searches the whole branch, not just the replayed tail.
-		loadFull();
+	const openFilter = (): void =>
 		batch(() => {
 			filter.set({ text: "", cursor: 0 });
 			variant.set(0);
 			siblingSelected.set(0);
 		});
-	};
 	/** A typed query: an outline the query no longer matches rests on the newest match above it. */
-	const setFilter = (line: LineState): void =>
+	const setFilter = (line: LineState): void => {
+		// A query searches the whole branch, not just the replayed tail.
+		if (line.text.trim()) loadFull();
 		batch(() => {
 			const changed = line.text !== filter()?.text;
 			filter.set(line);
@@ -444,6 +479,7 @@ export function RewindSelector(props: RewindSelectorProps): JSXNode {
 			if (!shown.includes(selected()))
 				selected.set(shown.findLast(index => index < selected()) ?? shown.at(-1) ?? selected());
 		});
+	};
 	const toggleExpanded = (): void => {
 		views.toggleExpanded();
 		expanded = !expanded;
@@ -564,6 +600,7 @@ export function RewindSelector(props: RewindSelectorProps): JSXNode {
 			counter: line ? counter() : { t: `${selected() + 1}/${targets.length}`, s: "dim" },
 			filter: line,
 			sideLabel: !line && columns().length > 0 ? "branches" : "user turns",
+			truncated: truncated(),
 			rows: props.terminalRows?.(),
 		};
 		if (line) {
@@ -840,7 +877,9 @@ export function RewindSelector(props: RewindSelectorProps): JSXNode {
 							// The terminal's own edit of the field: the query changes, the outline stays.
 							const line = filter.peek();
 							const next = line && applyEdit(line, edit);
-							if (next) filter.set(next);
+							if (!next) return;
+							if (next.text.trim()) loadFull();
+							filter.set(next);
 						}}
 					/>
 				) : null

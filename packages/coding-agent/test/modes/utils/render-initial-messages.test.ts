@@ -15,10 +15,20 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { kStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type {
+	ExtensionActions,
+	ExtensionCommandContextActions,
+	ExtensionContextActions,
+	ExtensionRunner,
+	ExtensionUIContext,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
+import type { ToolActivityMode } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { SessionContext, StrippedToolCallsMarker } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { normalizeCustomMessagePayload } from "@oh-my-pi/pi-coding-agent/session/transcript/messages";
 import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { contextDisplay, createInteractiveModeContext, renderTranscript } from "../../helpers/interactive-mode-context";
@@ -96,7 +106,7 @@ interface RenderHarness {
 /** A context over `transcript` whose replay methods run through one real {@link UiHelpers}. */
 function makeRenderCtx(
 	transcript: SessionContext,
-	{ showImages = true, hideToolActivity = false }: { showImages?: boolean; hideToolActivity?: boolean } = {},
+	{ showImages = true, toolActivity = "detailed" }: { showImages?: boolean; toolActivity?: ToolActivityMode } = {},
 ): RenderHarness {
 	const transcriptSpy = vi.fn((_options?: { collapseCompactedHistory?: boolean }) => transcript);
 	const ctx = createInteractiveModeContext({
@@ -106,7 +116,7 @@ function makeRenderCtx(
 			getQueuedMessages: () => ({ steering: [], followUp: [], liveSteered: 0 }),
 		},
 	});
-	contextDisplay(ctx).hideToolActivity.set(hideToolActivity);
+	contextDisplay(ctx).toolActivity.set(toolActivity);
 	const helpers = new UiHelpers(ctx);
 	Object.assign(ctx, {
 		addMessageToChat: helpers.addMessageToChat.bind(helpers),
@@ -167,6 +177,65 @@ describe("UiHelpers.renderInitialMessages — transcript source", () => {
 		expect(harness.transcriptSpy).toHaveBeenCalledWith(expect.objectContaining({ collapseCompactedHistory: true }));
 		expect(harness.llmContextSpy).not.toHaveBeenCalled();
 		expect(renderSpy).toHaveBeenCalledWith(transcript, { updateFooter: true });
+	});
+});
+
+describe("UiHelpers.renderInitialMessages — Cursor exec-channel tool calls", () => {
+	// The Cursor provider synthesizes `toolCall` blocks for native exec-channel
+	// tools (bash/read/...) with the bridge's mapped names, so persisted turns
+	// rebuild into tool cards that own their results instead of orphan `⎿` lines.
+	it("renders bash toolResult inside its tool card, not as an orphan `⎿` line", async () => {
+		const assistant: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "text", text: "Reading and listing:" },
+				{ type: "toolCall", id: "tc-read", name: "read", arguments: { path: "src/foo.ts" } },
+				{ type: "toolCall", id: "tc-bash", name: "bash", arguments: { command: "ls -1" } },
+			],
+			api: "cursor-agent",
+			provider: "cursor",
+			model: "cursor-composer-2.5",
+			usage: emptyUsage,
+			stopReason: "toolUse",
+			timestamp: 1,
+		};
+		const harness = makeRenderCtx(
+			transcriptWith([
+				assistant,
+				{
+					role: "toolResult",
+					toolCallId: "tc-read",
+					toolName: "read",
+					content: [{ type: "text", text: "READ_RESULT_MARKER content of foo.ts" }],
+					isError: false,
+					timestamp: 2,
+				},
+				{
+					role: "toolResult",
+					toolCallId: "tc-bash",
+					toolName: "bash",
+					content: [{ type: "text", text: "BASH_RESULT_MARKER file1\nfile2" }],
+					isError: false,
+					timestamp: 3,
+				},
+			]),
+		);
+
+		await harness.helpers.renderInitialMessages();
+
+		// Without the synthesized blocks both results would fall through
+		// `addMessageToChat` (a no-op for `toolResult`) and vanish.
+		const rendered = harness.text();
+		expect(rendered).toContain("Reading and listing:");
+		// Bash result is fully surfaced inside the bash card —
+		// header carries the command, body carries the output.
+		expect(rendered).toContain("ls -1");
+		expect(rendered).toContain("BASH_RESULT_MARKER");
+		// Read result flows into the read group. Its file-content preview is gated
+		// by the `read.toolResultPreview` setting (off in this harness), so assert on
+		// the pairing signal: the read call appears with its path, only reachable
+		// when the toolResult attaches.
+		expect(rendered).toContain("Read src/foo.ts");
 	});
 });
 
@@ -406,13 +475,13 @@ describe("UiHelpers.renderInitialMessages — image replay", () => {
 					timestamp: 2,
 				},
 			]),
-			{ hideToolActivity: true },
+			{ toolActivity: "hidden" },
 		);
 
 		await harness.helpers.renderInitialMessages();
 
 		expect(harness.text()).not.toContain(IMAGE_LABEL);
-		contextDisplay(harness.ctx).hideToolActivity.set(false);
+		contextDisplay(harness.ctx).toolActivity.set("detailed");
 		expect(harness.text()).toContain(IMAGE_LABEL);
 	});
 
@@ -491,7 +560,7 @@ describe("UiHelpers.renderInitialMessages — hidden tool activity", () => {
 			},
 		]);
 
-		const hidden = makeRenderCtx(transcript, { hideToolActivity: true });
+		const hidden = makeRenderCtx(transcript, { toolActivity: "hidden" });
 		await hidden.helpers.renderInitialMessages();
 		const hiddenRender = hidden.text();
 		expect(hiddenRender).toContain(narrationMarker);
@@ -542,14 +611,14 @@ describe("UiHelpers.renderInitialMessages — hidden tool activity", () => {
 			},
 		]);
 
-		const harness = makeRenderCtx(transcript, { hideToolActivity: true });
+		const harness = makeRenderCtx(transcript, { toolActivity: "hidden" });
 		await harness.helpers.renderInitialMessages();
 		const hiddenRender = harness.text();
 		expect(hiddenRender).not.toContain("ASYNC_JOB_MARKER");
 		expect(hiddenRender).not.toContain("LATE_DIAGNOSTIC_MARKER");
 		expect(hiddenRender).not.toContain("LAUNCH_COMPLETION_MARKER");
 
-		contextDisplay(harness.ctx).hideToolActivity.set(false);
+		contextDisplay(harness.ctx).toolActivity.set("detailed");
 		const visibleRender = harness.text();
 		expect(visibleRender).toContain("ASYNC_JOB_MARKER");
 		expect(visibleRender).toContain("LATE_DIAGNOSTIC_MARKER");
@@ -557,14 +626,14 @@ describe("UiHelpers.renderInitialMessages — hidden tool activity", () => {
 	});
 
 	it("keeps normal warnings visible and hides warnings tied to tool activity", () => {
-		const hidden = makeRenderCtx(makeEmptyContext(), { hideToolActivity: true });
+		const hidden = makeRenderCtx(makeEmptyContext(), { toolActivity: "hidden" });
 		hidden.helpers.showWarning("NORMAL_WARNING_MARKER");
 		hidden.helpers.showWarning("TODO_WARNING_MARKER", { hideWithToolActivity: true });
 		const hiddenRender = hidden.text();
 		expect(hiddenRender).toContain("NORMAL_WARNING_MARKER");
 		expect(hiddenRender).not.toContain("TODO_WARNING_MARKER");
 
-		contextDisplay(hidden.ctx).hideToolActivity.set(false);
+		contextDisplay(hidden.ctx).toolActivity.set("detailed");
 		expect(hidden.text()).toContain("TODO_WARNING_MARKER");
 	});
 
@@ -580,12 +649,12 @@ describe("UiHelpers.renderInitialMessages — hidden tool activity", () => {
 			timestamp: 1,
 			strippedToolCalls: 2,
 		};
-		const harness = makeRenderCtx(transcriptWith([strippedAssistant]), { hideToolActivity: true });
+		const harness = makeRenderCtx(transcriptWith([strippedAssistant]), { toolActivity: "hidden" });
 		await harness.helpers.renderInitialMessages();
 		expect(harness.text()).not.toContain("elided — no result on this branch");
 
 		// A live reveal must restore the placeholder without a transcript rebuild.
-		contextDisplay(harness.ctx).hideToolActivity.set(false);
+		contextDisplay(harness.ctx).toolActivity.set("detailed");
 		expect(harness.text()).toContain("2 tool calls elided — no result on this branch");
 	});
 });
@@ -727,5 +796,221 @@ describe("UiHelpers.renderInitialMessages — prompt history isolation", () => {
 		await harness.helpers.renderInitialMessages();
 
 		expect(addToHistory).not.toHaveBeenCalled();
+	});
+});
+
+interface ExtensionDisplayHarness {
+	ctx: InteractiveModeContext;
+	helpers: UiHelpers;
+	controller: ExtensionUiController;
+	sessionManager: SessionManager;
+	getActions: () => ExtensionActions | undefined;
+}
+
+function createExtensionDisplayHarness(): ExtensionDisplayHarness {
+	let capturedActions: ExtensionActions | undefined;
+	const fakeRunner = {
+		initialize: (
+			a: ExtensionActions,
+			_ca: ExtensionContextActions,
+			_cca: ExtensionCommandContextActions,
+			_ui: ExtensionUIContext,
+		) => {
+			capturedActions = a;
+		},
+		onError: () => {},
+		emit: async () => undefined,
+		getMessageRenderer: () => undefined,
+		getAssistantThinkingRenderers: () => undefined,
+		getAssistantTextRenderers: () => [],
+		getComposerShapes: () => [],
+	};
+
+	const sessionManager = SessionManager.inMemory();
+	const messages: AgentMessage[] = [];
+	const ctx = createInteractiveModeContext({
+		sessionManager,
+		initialChatRendered: false,
+		setToolUIContext: vi.fn(),
+		session: {
+			messages,
+			extensionRunner: fakeRunner as unknown as ExtensionRunner,
+			buildTranscriptSessionContext: () => sessionManager.buildSessionContext(),
+			/**
+			 * Mirror `AgentSession.sendCustomMessage` non-streaming
+			 * `deliverAs: "nextTurn"` / no-trigger path: persist the message as a
+			 * `custom_message` session entry and append it to the session messages
+			 * (silently — no event, no render), reporting it delivered.
+			 */
+			sendCustomMessage: async payload => {
+				const msg = normalizeCustomMessagePayload(payload);
+				sessionManager.appendCustomMessageEntry(msg.customType, msg.content, msg.display, undefined, "agent");
+				messages.push({
+					role: "custom",
+					customType: msg.customType,
+					content: msg.content,
+					display: msg.display,
+					attribution: "agent",
+					timestamp: Date.now(),
+				});
+				return true;
+			},
+		},
+	});
+	const helpers = new UiHelpers(ctx);
+	ctx.renderSessionContext = (context, options) => helpers.renderSessionContext(context, options);
+	ctx.renderSessionContextIncrementally = (context, options, renderChunk) =>
+		helpers.renderSessionContextIncrementally(context, options, renderChunk);
+	ctx.addMessageToChat = message => helpers.addMessageToChat(message);
+	ctx.rebuildChatFromMessages = () => {
+		ctx.shell.transcript.clear();
+		helpers.renderSessionContext(sessionManager.buildSessionContext());
+	};
+
+	return {
+		ctx,
+		helpers,
+		controller: new ExtensionUiController(ctx),
+		sessionManager,
+		getActions: () => capturedActions,
+	};
+}
+
+function seed(harness: ExtensionDisplayHarness, prefix: string, count: number): void {
+	for (let index = 0; index < count; index++) {
+		harness.sessionManager.appendCustomMessageEntry(
+			"display-probe",
+			[{ type: "text", text: `${prefix}_${index}_END` }],
+			true,
+			undefined,
+			"agent",
+		);
+	}
+}
+
+/** Let the `.then(applyCustomMessageDisplay)` chain queued by `actions.sendMessage` run. */
+async function drainMicrotasks(): Promise<void> {
+	for (let i = 0; i < 10; i++) await Promise.resolve();
+}
+
+describe("UiHelpers.renderInitialMessages — extension sendMessage(display:true)", () => {
+	it("renders the custom message exactly once after the initial transcript render", async () => {
+		const marker = "display-marker-text";
+		const harness = createExtensionDisplayHarness();
+		await harness.controller.initHooksAndCustomTools();
+
+		const actions = harness.getActions();
+		expect(actions).toBeDefined();
+
+		// Simulate the extension's session_start handler firing
+		// `pi.sendMessage({ display: true, ... })`.
+		actions!.sendMessage(
+			{
+				customType: "display-probe",
+				content: [{ type: "text", text: marker }],
+				display: true,
+				attribution: "agent",
+			},
+			{ deliverAs: "nextTurn" },
+		);
+
+		// Drain the `.then(applyCustomMessageDisplay)` microtask chain queued by
+		// `actions.sendMessage` before the host's renderInitialMessages fires.
+		await drainMicrotasks();
+
+		// Mirror main.ts: after `mode.init()` returns, the host renders the
+		// initial transcript while preserving anything previously added to chat.
+		await harness.helpers.renderInitialMessages({ preserveExistingChat: true });
+
+		const rendered = renderTranscript(harness.ctx).join("\n");
+		const occurrences = countOccurrences(rendered, marker);
+		expect(occurrences).toBe(1);
+	});
+
+	it("after the initial render, sendMessage(display:true) still renders the message", async () => {
+		const marker = "display-late-marker";
+		const harness = createExtensionDisplayHarness();
+		await harness.controller.initHooksAndCustomTools();
+
+		// Establish the initial render — the host's `renderInitialMessages`
+		// flips `initialChatRendered` so subsequent extension sends can rebuild.
+		await harness.helpers.renderInitialMessages({ preserveExistingChat: true });
+
+		const actions = harness.getActions();
+		actions!.sendMessage(
+			{
+				customType: "display-probe",
+				content: [{ type: "text", text: marker }],
+				display: true,
+				attribution: "agent",
+			},
+			{ deliverAs: "nextTurn" },
+		);
+		await drainMicrotasks();
+
+		const rendered = renderTranscript(harness.ctx).join("\n");
+		expect(countOccurrences(rendered, marker)).toBe(1);
+	});
+
+	it("defers display rebuilds that arrive during the incremental initial replay", async () => {
+		const initialMarker = "INITIAL_ENTRY_127_END";
+		const lateMarker = "LATE_EXTENSION_MESSAGE_END";
+		const harness = createExtensionDisplayHarness();
+		seed(harness, "INITIAL_ENTRY", 128);
+		await harness.controller.initHooksAndCustomTools();
+		const actions = harness.getActions();
+		expect(actions).toBeDefined();
+
+		const initialReplay = harness.helpers.renderInitialMessages({
+			preserveExistingChat: true,
+			clearTerminalHistory: true,
+		});
+		expect(harness.ctx.initialChatRendered).toBe(false);
+		actions!.sendMessage(
+			{
+				customType: "display-probe",
+				content: [{ type: "text", text: lateMarker }],
+				display: true,
+				attribution: "agent",
+			},
+			{ deliverAs: "nextTurn" },
+		);
+		await initialReplay;
+
+		const rendered = renderTranscript(harness.ctx).join("\n");
+		expect(countOccurrences(rendered, initialMarker)).toBe(1);
+		expect(countOccurrences(rendered, lateMarker)).toBe(1);
+		expect(rendered.indexOf(initialMarker)).toBeLessThan(rendered.indexOf(lateMarker));
+	});
+
+	it("defers display rebuilds that arrive during a later incremental replay", async () => {
+		const existingMarker = "EXISTING_ENTRY_127_END";
+		const lateMarker = "LATE_DURING_REPLAY_END";
+		const harness = createExtensionDisplayHarness();
+		seed(harness, "EXISTING_ENTRY", 128);
+		await harness.controller.initHooksAndCustomTools();
+		await harness.helpers.renderInitialMessages({ clearTerminalHistory: true });
+		const actions = harness.getActions();
+		expect(actions).toBeDefined();
+
+		const replay = harness.helpers.renderInitialMessages({
+			clearTerminalHistory: true,
+		});
+		expect(harness.ctx.initialChatRendered).toBe(false);
+		actions!.sendMessage(
+			{
+				customType: "display-probe",
+				content: [{ type: "text", text: lateMarker }],
+				display: true,
+				attribution: "agent",
+			},
+			{ deliverAs: "nextTurn" },
+		);
+		await replay;
+
+		const rendered = renderTranscript(harness.ctx).join("\n");
+		expect(countOccurrences(rendered, existingMarker)).toBe(1);
+		expect(countOccurrences(rendered, lateMarker)).toBe(1);
+		expect(rendered.indexOf(existingMarker)).toBeLessThan(rendered.indexOf(lateMarker));
 	});
 });

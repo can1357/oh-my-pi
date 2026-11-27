@@ -76,13 +76,13 @@ describe("mcp/startup-events — connection-status cross-module contract", () =>
 				{
 					serverName: "broken",
 					error: `ENOENT ${"missing executable ".repeat(10)}`,
-					sourcePath: `${os.homedir()}/.codex/config.toml`,
+					sourcePath: `${os.homedir()}/.omp/agent/mcp.json`,
 				},
 			],
 		});
 
 		expect(message).not.toContain(os.homedir());
-		expect(message).toContain("broken [config: ~/.codex/config.toml]: ENOENT");
+		expect(message).toContain("broken [config: ~/.omp/agent/mcp.json]: ENOENT");
 		expect(message).toContain("…");
 	});
 
@@ -92,7 +92,7 @@ describe("mcp/startup-events — connection-status cross-module contract", () =>
 		const script = `
 			import os from "node:os";
 			import { formatMCPConnectionStatusMessage } from ${JSON.stringify(moduleUrl)};
-			const sourcePath = os.homedir() + "/.codex/config.toml";
+			const sourcePath = os.homedir() + "/.omp/agent/mcp.json";
 			process.stdout.write(formatMCPConnectionStatusMessage({
 				pendingServers: [],
 				connectedServers: [],
@@ -107,7 +107,7 @@ describe("mcp/startup-events — connection-status cross-module contract", () =>
 
 		expect(result.exitCode).toBe(0);
 		expect(message).not.toContain(homeDir);
-		expect(message).toContain("broken [config: ~/.codex/config.toml]: ENOENT");
+		expect(message).toContain("broken [config: ~/.omp/agent/mcp.json]: ENOENT");
 	});
 
 	it("sanitizes server names before rendering them in status text", () => {

@@ -295,12 +295,12 @@ import {
 	cfgDisplayAdvisorCollapsedLines,
 	cfgDisplayCacheMissMarker,
 	cfgDisplayCollapseCompacted,
-	cfgDisplayHideToolActivity,
 	cfgDisplayPinnedAgents,
 	cfgDisplayShellVisualization,
 	cfgDisplayShowTokenUsage,
 	cfgDisplayShowTurnTime,
 	cfgDisplaySubagentLivePreview,
+	cfgDisplayToolActivity,
 	cfgGitEnabled,
 	cfgLoopConditionTimeoutMs,
 	cfgLoopMode,
@@ -347,6 +347,7 @@ import {
 	cfgTuiVimShowCommand,
 	cfgTuiVimStartMode,
 	cfgTuiVimYankToClipboard,
+	type ToolActivityMode,
 } from "./settings";
 import { pickTableChart } from "../auto-graph/planner";
 import { hasNativeJudge } from "../judgment";
@@ -370,6 +371,7 @@ import { goalContinuationActivity, goalFromModeData } from "../goals/state";
 import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "../plan-mode/settings";
 import { cfgStreamRedactPatterns } from "../stream/settings";
 import { cfgSttEnabled } from "../stt/settings";
+import { meterValue, voiceEnergy } from "../ui/apps/live-visualizer";
 import { combine, type SettingValueOf } from "../config/registry";
 import { cfgAdvisorEnabled, cfgAdvisorMaxNotesPerUpdate } from "../advisor/settings";
 import { cfgExtensionAssistantTextRenderers, cfgExtensionTranscriptPresenters } from "../extensibility/settings";
@@ -479,7 +481,7 @@ const cfgLiveUiSettings = combine({
 	"composer.predictionAlternatives": cfgComposerPredictionAlternatives,
 	"compaction.enabled": cfgCompactionEnabled,
 	"compaction.methodOrder": cfgCompactionMethodOrder,
-	"display.hideToolActivity": cfgDisplayHideToolActivity,
+	"display.toolActivity": cfgDisplayToolActivity,
 	"display.shellVisualization": cfgDisplayShellVisualization,
 	"terminal.showImages": cfgTerminalShowImages,
 	"terminal.programStatus": cfgTerminalProgramStatus,
@@ -689,7 +691,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** The view's display flags as signals the blocks read (the fields below write them). */
 	readonly #display: DisplayFlags = {
 		toolOutputExpanded: signal(false),
-		hideToolActivity: signal(false),
+		toolActivity: signal<ToolActivityMode>("detailed"),
 		hideThinking: signal(false),
 		proseOnlyThinking: signal(true),
 		expandThinkingBlocks: signal(false),
@@ -714,11 +716,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	set toolOutputExpanded(expanded: boolean) {
 		this.#display.toolOutputExpanded.set(expanded);
 	}
-	get hideToolActivity(): boolean {
-		return this.#display.hideToolActivity();
+	get toolActivity(): ToolActivityMode {
+		return this.#display.toolActivity();
 	}
-	set hideToolActivity(hidden: boolean) {
-		this.#display.hideToolActivity.set(hidden);
+	set toolActivity(mode: ToolActivityMode) {
+		this.#display.toolActivity.set(mode);
 	}
 	todoExpanded = false;
 	planModeEnabled = false;
@@ -1525,7 +1527,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.hud.status.onInterrupt = () => this.interruptFromPointer();
 		this.#messageEnv = {
 			expanded: () => this.#display.toolOutputExpanded(),
-			activityVisible: () => !this.#display.hideToolActivity(),
+			activityVisible: () => this.#display.toolActivity() !== "hidden",
 			advisorCollapsedLines: () => cfgDisplayAdvisorCollapsedLines.get(this.settings),
 			renderer: customType => this.viewSession.extensionRunner?.getMessageRenderer(customType),
 			onRenderError: (customType, error) =>
@@ -1599,8 +1601,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.hud.subagents.onToggle = () => this.#togglePinnedHudExpanded();
 		this.hud.queue.onEdit = () => this.handleDequeue();
 
-		this.#display.hideToolActivity.set(cfgDisplayHideToolActivity.get(settings));
-		this.#hideThinkingBlock = cfgHideThinkingBlock.get(settings);
+		this.#display.toolActivity.set(cfgDisplayToolActivity.get(settings));
 		this.#display.proseOnlyThinking.set(cfgProseOnlyThinking.get(settings));
 		this.#display.expandThinkingBlocks.set(cfgExpandThinkingBlocks.get(settings));
 		this.#syncTranscriptDisplaySettings();
@@ -1662,6 +1663,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#liveCommandController = new LiveCommandController(this);
 		this.#selectorController = new SelectorController(this);
 		this.#focusController = new SessionFocusController(this);
+		// Through the setter: the blocks read the synced signal, and its effective value needs the view session.
+		this.hideThinkingBlock = cfgHideThinkingBlock.get(settings);
 		this.#inputController = new InputController(this);
 		this.collabController = new CollabController(this);
 		this.session.setPromptDropped?.(prompt => this.restoreDroppedPrompt(prompt));
@@ -1714,7 +1717,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				"status.usage": showUsage,
 				"status.cache": () => void this.handleSessionCommand(),
 				"status.path": () => openPath(this.sessionManager.getCwd()),
-				"status.tree": () => this.showTreeSelector(),
+				"status.tree": () => void this.showTreeSelector(),
 				"thinking.cycle": () => this.#inputController.cycleThinkingFromComposer(),
 				"thinking.set": value => this.#inputController.setThinkingFromComposer(value),
 				"dictation.toggle": () => void this.#toggleComposerDictation(),
@@ -2259,12 +2262,15 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		// Initialize hooks with TUI-based UI context
 		await logger.time("InteractiveMode.init:hooks", () => this.initHooksAndCustomTools());
-		// A live `disabledExtensions` edit suspends or resumes extensions: drop (or restore) their link
-		// schemes and renderers from the transcript.
+		// A live `disabledExtensions` edit hides or restores widgets, link schemes and renderers.
 		const extensionRunner = this.session.extensionRunner;
 		if (extensionRunner) {
+			const syncWidgets = () =>
+				this.hud.widgets.setOwnerVisibility(owner => !extensionRunner.isExtensionSuspended(owner));
+			syncWidgets();
 			this.#eventBusUnsubscribers.push(
 				extensionRunner.onSuspensionChange(() => {
+					syncWidgets();
 					this.#applyExtensionLinks();
 					this.#redrawExtensionLinks();
 					this.#syncTranscriptPresenters();
@@ -3578,10 +3584,11 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		// Field comparisons skip effects the keybinding toggles already applied. The blocks read
 		// these flags reactively; rows already in scrollback change only with a replay.
-		const hideToolActivity = cfgDisplayHideToolActivity.get(this.settings);
-		if (any("display.hideToolActivity") && hideToolActivity !== this.hideToolActivity) {
-			this.hideToolActivity = hideToolActivity;
-			if (!hideToolActivity) this.toolOutputExpanded = false;
+		const toolActivity = cfgDisplayToolActivity.get(this.settings);
+		if (any("display.toolActivity") && toolActivity !== this.toolActivity) {
+			this.toolActivity = toolActivity;
+			// A new mode starts folded: Ctrl+O left on would draw every concise row as its full card.
+			this.toolOutputExpanded = false;
 			resetDisplay = true;
 		}
 		if (any("terminal.showImages", "display.shellVisualization")) this.#syncTranscriptDisplaySettings();
@@ -7054,8 +7061,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	async restart(): Promise<void> {
 		if (this.#isShuttingDown) return;
 		try {
-			// Bun can return a cached process.cwd() after the directory is unlinked.
-			await fs.realpath(".");
+			// Bun can return a cached process.cwd() after the directory is unlinked. Linux fails
+			// `realpath(".")`; macOS still resolves the removed path, so stat what it names.
+			await fs.stat(await fs.realpath("."));
 		} catch (error) {
 			if (!isEnoent(error)) throw error;
 			if (!this.#isShuttingDown) {
@@ -7124,15 +7132,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		return sessionId && sessionFile && this.sessionManager.isSessionOnDisk() ? sessionId : undefined;
 	}
 
-	/**
-	 * Claim the one-shot `shutdown()`/`restart()` close and acknowledge it before
-	 * any await: worktree exit planning, live commands, and BTW history writes can
-	 * all stall, and the user must see a reason for the pause.
-	 */
+	/** Claim the one-shot `shutdown()`/`restart()` close before any await. */
 	#beginClose(): AbortSignal {
 		this.#isShuttingDown = true;
 		this.#closeAttempt = new AbortController();
-		this.showStatus("Closing session…");
 		return this.#closeAttempt.signal;
 	}
 
@@ -7151,8 +7154,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#abortLoopCondition();
 		this.#cancelLoopAutoSubmit();
 
-		// `#beginClose()` already acknowledged the close; escalate only once the
-		// teardown itself lingers, so time spent in exit prompts never counts.
+		// Report progress only once the teardown itself lingers, so a fast close
+		// stays silent and time spent in exit prompts never counts.
 		const stillClosingTimer = setTimeout(() => {
 			this.showStatus("Still closing… (flushing memory backend / network)");
 		}, STILL_CLOSING_DELAY_MS);
@@ -7259,7 +7262,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#presenter.presentAssistant(message, options);
 	}
 
-	createTranscriptReplica(entries: readonly TranscriptEntryLike[]): TranscriptReplica {
+	createTranscriptReplica(entries: readonly TranscriptEntryLike[], clipped: boolean): TranscriptReplica {
 		return new TranscriptReplica(
 			{
 				mode: this,
@@ -7269,6 +7272,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				replaySteps: (target, context) => this.#uiHelpers.replaySteps(target, context),
 			},
 			entries,
+			clipped,
 		);
 	}
 
@@ -7601,6 +7605,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	showWarning(message: string, options?: { hideWithToolActivity?: boolean }): void {
 		this.#uiHelpers.showWarning(message, options);
+	}
+
+	showActiveModelNotice(): void {
+		this.#uiHelpers.showActiveModelNotice();
 	}
 
 	#handleLspStartupEvent(event: LspStartupEvent): void {
@@ -8054,10 +8062,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		return {
 			showWarning: (msg: string) => this.showWarning(msg),
 			showStatus: (msg: string) => this.showStatus(msg),
+			clearStatus: () => this.#uiHelpers.clearStatus(),
+			onLevel: level => this.#frame.dictationLevel.set(meterValue(voiceEnergy(level))),
 			onStateChange: (state: SttState) => {
 				// Duck assistant speech while the user is talking (push-to-talk); restore after.
 				if (state === "recording") vocalizer.duck();
 				else vocalizer.unduck();
+				if (state !== "recording") this.#frame.dictationLevel.set(0);
 				if (this.#frame.dictation.peek() !== undefined) this.#frame.dictation.set(state);
 				if (state === "recording") {
 					this.#micCursor?.dispose();
@@ -8233,16 +8244,16 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#selectorController.showPluginSelector(mode);
 	}
 
-	showUserMessageSelector(startAt?: string): void {
-		this.#selectorController.showUserMessageSelector(startAt);
+	showUserMessageSelector(startAt?: string): Promise<void> {
+		return this.#selectorController.showUserMessageSelector(startAt);
 	}
 
-	showCopySelector(): void {
-		this.#selectorController.showCopySelector();
+	showCopySelector(): Promise<void> {
+		return this.#selectorController.showCopySelector();
 	}
 
-	showTreeSelector(): void {
-		this.#selectorController.showTreeSelector();
+	showTreeSelector(): Promise<void> {
+		return this.#selectorController.showTreeSelector();
 	}
 
 	showThinkingSelector(): void {

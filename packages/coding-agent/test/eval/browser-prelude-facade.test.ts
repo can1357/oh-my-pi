@@ -272,6 +272,22 @@ describe("browser JavaScript facade", () => {
 		expect(
 			await runInContext("(async () => (await tab.console()).entries.map(entry => entry.text))()", context),
 		).toEqual(["low disk"]);
+		await expect(runInContext("(async () => tab.wait(1500))()", context)).rejects.toThrow("await Bun.sleep(ms)");
+		await expect(
+			runInContext(
+				'(async () => tab.wait({ loadState: "networkidle", timeout: 15000 }).catch(() => {}))()',
+				context,
+			),
+		).rejects.toThrow(
+			"tab.wait() does not exist; pause with await Bun.sleep(ms); wait for the page with tab.waitFor(selector)",
+		);
+		await expect(runInContext('(async () => tab.waitForURL("**/done"))()', context)).rejects.toThrow(
+			"did you mean tab.waitForUrl(pattern)?",
+		);
+		await expect(runInContext("(async () => tab.setExtraHTTPHeaders({ a: 'b' }))()", context)).rejects.toThrow(
+			"did you mean tab.emulate({ headers })?",
+		);
+		expect(runInContext("Object.keys(tab).includes('wait')", context)).toBe(false);
 		// The members it adds stay out of JSON: the result serialises as the host sent it.
 		expect(JSON.parse(await runInContext("(async () => JSON.stringify(await tab.console()))()", context))).toEqual({
 			entries: [{ seq: 1, type: "console", level: "warn", text: "low disk" }],
@@ -282,6 +298,18 @@ describe("browser JavaScript facade", () => {
 });
 
 describe("browser facade in real Eval runtimes", () => {
+	it("says where page code runs when the cell's own code reaches for a page global", async () => {
+		const session = makeSession(() => []);
+		const result = await executeJs("const title = document.title;", {
+			cwd: process.cwd(),
+			sessionId: `browser-facade-page-global-${crypto.randomUUID()}`,
+			session,
+		});
+		expect(result.exitCode).toBe(1);
+		expect(result.output).toContain("ReferenceError: document is not defined");
+		expect(result.output).toContain("run page code in a browser tab with tab.evaluate(() => …)");
+	});
+
 	it("unwraps values, displays host text, and preserves JavaScript helper chains", async () => {
 		const calls: unknown[] = [];
 		let definitions: readonly EvalPreludeDefinition[] = [];
