@@ -11,6 +11,8 @@
  * under its tool name.
  */
 import { ToolError } from "../tools/tool-errors";
+import { bashInterception } from "../tools/bash-interceptor";
+import { extractLeadingCdTarget } from "../tools/shell-tokenize";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { shellChangeSnapshots } from "../commit/selective/journal";
 import { executeBash, sessionShellEnv } from "../exec/bash-executor";
@@ -66,6 +68,19 @@ export async function runEvalShell(args: unknown, options: EvalShellBridgeOption
 	let truncated = false;
 	const names = toolCommandNames(session);
 	const toolContext = session.getToolContext?.();
+	// Same redirect-to-dedicated-tool guidance the bash tool gives; surfaces as a ShellError.
+	const interception = bashInterception(
+		session.settings,
+		command,
+		extractLeadingCdTarget(command)?.rest ?? command,
+		undefined,
+		toolContext?.toolNames ?? [],
+		new Set(names),
+	);
+	if (interception) {
+		options.emitStatus?.({ op: "run", cmd: command, code: 1, output: interception, hasError: true });
+		return { output: interception, exitCode: 1 };
+	}
 	const commands =
 		names.length === 0
 			? undefined

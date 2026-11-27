@@ -73,7 +73,7 @@ import { type BashInteractiveResult, runInteractiveBashPty } from "./bash-intera
 import type { ShellTrace } from "@oh-my-pi/pi-wire";
 import { applyPatchShellInput } from "./bash-apply-patch";
 import { hostCommandUrls, urlBacking } from "./bash-host-urls";
-import { checkBashInterception } from "./bash-interceptor";
+import { bashInterception } from "./bash-interceptor";
 import { rewriteGitWorktreeAdd } from "./bash-worktree-rewrite";
 import { canUseInteractiveBashPty } from "./bash-pty-selection";
 import { resolveEvalBackends } from "./eval-backends";
@@ -125,8 +125,6 @@ import {
 	cfgBashDirenv,
 	cfgBashDirenvLoadTimeoutMs,
 	cfgBashGitGuard,
-	cfgBashInterceptorEnabled,
-	cfgBashInterceptorPatterns,
 	cfgBashPatterns,
 } from "../exec/settings";
 import { cfgDisplayShellVisualization } from "../modes/settings";
@@ -785,12 +783,6 @@ function invokedToolCommand(command: string, names: ReadonlySet<string>): string
 	return undefined;
 }
 
-/** Whether the first simple command of `command` is a session tool command. */
-function startsWithToolCommand(command: string, names: ReadonlySet<string>): boolean {
-	const first = tokenizeShellSegments(command)[0]?.[0];
-	return first !== undefined && names.has(first);
-}
-
 /** Operators that may join the commands of a line made only of tool commands. */
 const TOOL_COMMAND_LINE_OPERATORS: Record<string, true> = {
 	"": true,
@@ -866,28 +858,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	/** Bash reads `skill://` paths through its shell filesystem, including as a working directory. */
 	readonly readsSkillUris = true;
 	/**
-	 * The interceptor message for a call, checking the raw command and the one after a leading
-	 * `cd … &&` so the wrapper hides neither shell-navigation rules nor the dedicated-tool command.
-	 * A command led by a session tool command is that tool's own call and is never intercepted.
-	 */
-	#interception(
-		rawCommand: string,
-		command: string,
-		name: string | undefined,
-		toolNames: string[],
-		toolCommands: ReadonlySet<string>,
-	): string | undefined {
-		if (!cfgBashInterceptorEnabled.get(this.session.settings)) return undefined;
-		const rules = cfgBashInterceptorPatterns.get(this.session.settings).filter(rule => !name || rule.tool !== "bash");
-		for (const commandToCheck of rawCommand === command ? [command] : [rawCommand, command]) {
-			if (startsWithToolCommand(commandToCheck, toolCommands)) continue;
-			const interception = checkBashInterception(commandToCheck, toolNames, rules, rawCommand);
-			if (interception.block) return interception.message ?? "Command blocked";
-		}
-		return undefined;
-	}
-
-	/**
 	 * Whether this line is pure tool-command traffic: every simple command is a mounted tool
 	 * command (or a special command), joined only by `;`, `&&`, `||`, `|` and newlines, with no
 	 * redirection, expansion, substitution or assignment — see {@link isToolCommandLine}. Such a
@@ -907,7 +877,14 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const cwdCommand = extractLeadingCdTarget(command)?.rest ?? command;
 		const name = typeof input.name === "string" ? blankToUndefined(input.name) : undefined;
 		const toolCommands = new Set(toolCommandNames(this.session));
-		const interception = this.#interception(command, cwdCommand, name, ctx?.toolNames ?? [], toolCommands);
+		const interception = bashInterception(
+			this.session.settings,
+			command,
+			cwdCommand,
+			name,
+			ctx?.toolNames ?? [],
+			toolCommands,
+		);
 		if (interception) {
 			return { tier: "exec", override: true, policy: "deny", reason: interception.replace(/^Blocked:\s*/u, "") };
 		}
@@ -2008,7 +1985,14 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 
 		const toolCommandNameList = toolCommandNames(this.session);
 		const toolCommands = new Set(toolCommandNameList);
-		const interception = this.#interception(rawCommand, command, name, ctx?.toolNames ?? [], toolCommands);
+		const interception = bashInterception(
+			this.session.settings,
+			rawCommand,
+			command,
+			name,
+			ctx?.toolNames ?? [],
+			toolCommands,
+		);
 		if (interception) throw new ToolError(interception);
 		// Tool commands exist only in the embedded shell: a line naming one never leaves it.
 		const invokedCommand = invokedToolCommand(command, toolCommands);
