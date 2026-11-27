@@ -3,14 +3,15 @@
  * prune pass blanked in place.
  *
  * The per-turn prune passes blank stale tool results in memory and append one
- * record listing them ({@link toToolResultPruneData}), instead of republishing
- * the whole transcript. The original result line stays in the file, so every
- * reader that loads a whole session file calls {@link applyToolResultPrunes}:
- * `SessionManager` resume and `forkFrom`, `loadSessionMessagesReadOnly`
- * (`history://` and `agent://`), `omp anonymize`, `collectSubSessions` (HTML
- * export, `/dump`, subagent restore), and the Agent Hub viewer. Where the
- * reader migrates and resolves blobs, it applies the records after migration
- * and before blob resolution, so a pruned result's blobs are never read.
+ * record listing them (`SessionManager.appendToolResultPrunes`), instead of
+ * republishing the whole transcript. The original result line stays in the
+ * file, so every reader that loads a whole session file calls
+ * {@link applyToolResultPrunes}: `SessionManager` resume and `forkFrom`,
+ * `loadSessionMessagesReadOnly` (`history://` and `agent://`), `omp anonymize`,
+ * `collectSubSessions` (HTML export, `/dump`, subagent restore), and the Agent
+ * Hub viewer. Where the reader migrates and resolves blobs, it applies the
+ * records after migration and before blob resolution, so a pruned result's
+ * blobs are never read.
  *
  * The collab-web transcript and RPC subagent messages expose raw byte-offset
  * entries. They keep a result's original content and carry the prune record
@@ -23,17 +24,14 @@ import { blankToolResult, type ToolResultPrune } from "@oh-my-pi/pi-agent-core/c
 import { logger } from "@oh-my-pi/pi-utils";
 import type { FileEntry, SessionEntry } from "./session-entries";
 
+/** `customType` of the custom entry a prune pass appends; reserved for core (see `docs/session.md`). */
 export const TOOL_RESULT_PRUNE_CUSTOM_TYPE = "tool_result_prune";
 
-/** One blanked tool result as persisted in a prune record. */
-export interface ToolResultPruneRecord {
-	/** Id of the `toolResult` message entry to blank. */
-	readonly entryId: string;
-	/** Placeholder text that replaces the result's content. */
-	readonly notice: string;
-	/** `prunedAt` stamped on the result. */
-	readonly prunedAt: number;
-}
+/**
+ * One blanked tool result as persisted in a prune record: the fields of
+ * agent-core's {@link ToolResultPrune} that replay needs.
+ */
+export type ToolResultPruneRecord = Pick<ToolResultPrune, "entryId" | "notice" | "prunedAt">;
 
 /** `data` of a `tool_result_prune` custom entry. */
 export interface ToolResultPruneData {
@@ -62,6 +60,7 @@ function isToolResultPruneRecord(value: unknown): value is ToolResultPruneRecord
 	);
 }
 
+/** Whether `value` is a well-formed `tool_result_prune` record's `data`; readers skip a record that is not. */
 export function isToolResultPruneData(value: unknown): value is ToolResultPruneData {
 	return (
 		typeof value === "object" &&

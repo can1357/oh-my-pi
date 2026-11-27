@@ -21,6 +21,7 @@ import type {
 	AgentTranscriptSource,
 } from "../../../modes/view-model/overlays/agent-transcript-viewer";
 import { type TurnUsageSummary, TurnUsageTally } from "../../../modes/view-model/overlays/usage-row";
+import type { ToolResultPruneRecord } from "../../../session/tool-result-prunes";
 import { imageContent, textContent } from "../../../session/transcript/transcript-entry";
 import { resolveEditToolMode } from "../../../utils/edit-mode";
 import { ToolCall, type ToolCallOptions, type ToolCallResult } from "../../transcript/tool-block";
@@ -475,7 +476,7 @@ export class AgentTranscriptViewerModel {
 		this.#append(entries);
 	}
 
-	#applyPrunes(results: readonly { entryId: string; notice: string }[]): void {
+	#applyPrunes(results: readonly ToolResultPruneRecord[]): void {
 		for (const result of results) {
 			const call = this.#toolResults.get(result.entryId);
 			const current = call?.facts.result();

@@ -131,7 +131,6 @@ import type { SessionManager } from "./session-manager";
 import type { SessionProviderBoundary } from "./session-provider-boundary";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { resolveSpeculationLeadTokens, SPECULATION_LEAD_MIN_TOKENS } from "./speculation-lead";
-import { TOOL_RESULT_PRUNE_CUSTOM_TYPE, toToolResultPruneData } from "./tool-result-prunes";
 import experimentalContextNotesReminderPrompt from "../prompts/system/experimental-context-notes-reminder.md" with { type: "text" };
 import experimentalContextRolloverPrompt from "../prompts/system/experimental-context-rollover.md" with { type: "text" };
 import lengthStopRetryTemplate from "../prompts/system/length-stop-retry.md" with { type: "text" };
@@ -828,10 +827,7 @@ export class SessionMaintenance {
 	 * keep the provider prompt cache warm.
 	 */
 	#commitPrune(result: PruneResult, advisorRebaseReason: string): void {
-		this.#host.sessionManager.appendInPlaceUpdateRecord(
-			TOOL_RESULT_PRUNE_CUSTOM_TYPE,
-			toToolResultPruneData(result.pruned),
-		);
+		this.#host.sessionManager.appendToolResultPrunes(result.pruned);
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.replaceMessagesFromSessionContext(sessionContext.messages);
 		this.#host.rebaseAdvisorPrefix(advisorRebaseReason);

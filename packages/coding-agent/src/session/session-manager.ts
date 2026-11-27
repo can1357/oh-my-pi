@@ -145,7 +145,8 @@ import {
 	normalizeWorkspaceDirectory,
 } from "./session-workspace";
 import { recordSessionRecap, recordSessionTitle } from "./session-index";
-import { applyToolResultPrunes } from "./tool-result-prunes";
+import { applyToolResultPrunes, TOOL_RESULT_PRUNE_CUSTOM_TYPE, toToolResultPruneData } from "./tool-result-prunes";
+import type { ToolResultPrune } from "@oh-my-pi/pi-agent-core/compaction/pruning";
 
 const JSONL_SUFFIX_LENGTH = ".jsonl".length;
 const DRAFT_ONLY_SESSION_MARKER = ".draft-only-session";
@@ -922,7 +923,7 @@ interface AtomicEntryBatch {
  * The state a full-file body was serialized from, cheap to compare against
  * the live state. Entries change only by append, array replacement, or an
  * in-place update announced through `rewriteEntries()` or
- * `appendInPlaceUpdateRecord()` (which bump the revision); the title slot and
+ * `appendToolResultPrunes()` (which bump the revision); the title slot and
  * header are small and compared by value.
  */
 interface SessionBodyStamp {
@@ -3488,7 +3489,7 @@ export class SessionManager {
 	}
 
 	/**
-	 * Bumped when entries are rewritten in place (`rewriteEntries`, `appendInPlaceUpdateRecord`, replay
+	 * Bumped when entries are rewritten in place (`rewriteEntries`, `appendToolResultPrunes`, replay
 	 * sanitizing); appends do not bump it.
 	 */
 	get bodyRevision(): number {
@@ -3874,15 +3875,15 @@ export class SessionManager {
 	}
 
 	/**
-	 * Make in-place entry updates durable by appending a custom record that
-	 * loaders replay (a `tool_result_prune` record), instead of rewriting the
-	 * file. Bumps {@link bodyRevision} as {@link rewriteEntries} does, so
-	 * readers that mirror entries resend the updated ones; the file keeps the
-	 * old lines until a later full rewrite.
+	 * Make a prune pass durable: append one `tool_result_prune` record naming
+	 * the results it blanked in place, which loaders replay, instead of
+	 * rewriting the file. Bumps {@link bodyRevision} as {@link rewriteEntries}
+	 * does, so readers that mirror entries resend the blanked ones; the file
+	 * keeps the original result lines until a later full rewrite.
 	 */
-	appendInPlaceUpdateRecord(customType: string, data?: unknown): string {
+	appendToolResultPrunes(pruned: readonly ToolResultPrune[]): string {
 		this.#bodyRevision++;
-		return this.appendCustomEntry(customType, data);
+		return this.appendCustomEntry(TOOL_RESULT_PRUNE_CUSTOM_TYPE, toToolResultPruneData(pruned));
 	}
 
 	/**
