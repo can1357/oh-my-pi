@@ -283,8 +283,8 @@ impl CommandResult {
 
 #[derive(Debug)]
 enum CommandExecutionError {
-	// exit code 255
-	UrgentlyFailed,
+	/// The command exited 255, which stops xargs (GNU: status 124).
+	UrgentlyFailed { name: OsString },
 	Killed { name: OsString, signal: i32 },
 	CannotRun(io::Error),
 	/// Nothing runs under this command name (GNU: status 127).
@@ -294,7 +294,7 @@ enum CommandExecutionError {
 impl Display for CommandExecutionError {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
-			Self::UrgentlyFailed => write!(f, "Command exited with code 255"),
+			Self::UrgentlyFailed { name } => write!(f, "{}: exited with status 255; aborting", name.to_string_lossy()),
 			Self::Killed { name, signal } => {
 				write!(f, "{}: terminated by signal {signal}", name.to_string_lossy())
 			},
@@ -313,7 +313,7 @@ fn command_outcome(
 ) -> Result<CommandResult, CommandExecutionError> {
 	match status {
 		Ok(CommandStatus::Exited(0)) => Ok(CommandResult::Success),
-		Ok(CommandStatus::Exited(255)) => Err(CommandExecutionError::UrgentlyFailed),
+		Ok(CommandStatus::Exited(255)) => Err(CommandExecutionError::UrgentlyFailed { name: name.to_owned() }),
 		Ok(CommandStatus::Exited(_)) => Ok(CommandResult::Failure),
 		Ok(CommandStatus::Signaled(signal)) => {
 			Err(CommandExecutionError::Killed { name: name.to_owned(), signal })
@@ -1131,7 +1131,7 @@ impl Utility for Xargs {
 				let _ = writeln!(host.stderr, "xargs: {error}");
 				if let XargsError::CommandExecution(command_error) = error {
 					match command_error {
-						CommandExecutionError::UrgentlyFailed => 124,
+						CommandExecutionError::UrgentlyFailed { .. } => 124,
 						CommandExecutionError::Killed { .. } => 125,
 						CommandExecutionError::CannotRun(_) => 126,
 						CommandExecutionError::NotFound(_) => 127,
@@ -1550,13 +1550,12 @@ mod tests {
 		assert_eq!(err, "xargs: sh: terminated by signal 13\n");
 	}
 
-	// A builtin-style SIGPIPE exit must stop xargs with a signal diagnostic.
+	// An external that merely exits 141 failed; only a real signal stops xargs.
 	#[cfg(unix)]
 	#[tokio::test]
-	async fn sigpipe_status_yields_125() {
+	async fn exit_141_is_an_ordinary_failure() {
 		let (code, _, err) = run_simple(&["sh", "-c", "exit 141", "_"], "x\n").await;
-		assert_eq!(code, 125);
-		assert_eq!(err, "xargs: sh: terminated by signal 13\n");
+		assert_eq!((code, err.as_str()), (123, ""));
 	}
 
 	#[tokio::test]
@@ -1634,7 +1633,7 @@ mod tests {
 	async fn exit_255_child_yields_124() {
 		let (code, _, err) = run_simple(&["sh", "-c", "exit 255", "_"], "x\n").await;
 		assert_eq!(code, 124);
-		assert!(err.contains("255"), "got: {err:?}");
+		assert_eq!(err, "xargs: sh: exited with status 255; aborting\n");
 	}
 
 	#[cfg(unix)]

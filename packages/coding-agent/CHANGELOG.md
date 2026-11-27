@@ -144,6 +144,8 @@
 - The bash tool's builtin `xargs` starts each batch as soon as it is full instead of waiting for end of input, reports commands killed by a signal as GNU does (exit 125), and still runs the arguments before an unmatched quote
 - Commands the bash tool's builtins start after the downstream reader exited now get SIGPIPE on their first write instead of exiting 0, so `yes | xargs -n1 /bin/echo | head` ends
 - The bash tool's builtin `sort -c` names stdin as `-` instead of an internal temp file
+- The bash tool's builtin `cut` reports bad `-b`/`-c`/`-f` lists in GNU's words (`fields are numbered from 1`) with the `--help` hint, `tr` adds that hint to operand errors, `sort` file errors no longer end with `(os error N)`, and `xargs` words a 255 exit as GNU does (`sh: exited with status 255; aborting`)
+- `xargs` treats an external command that exits 141 as an ordinary failure (status 123), as GNU does; only a command really ended by SIGPIPE stops it with status 125
 - The bash tool's builtin `head` now leaves redirected input where it stopped, so `{ head -n1; cat; } < file` prints the whole file and a second `head` continues on the next line instead of mid-file; `head` and `wc` errors no longer end with `(os error N)`
 - `tui.maxInlineImages` takes effect again: the configured number of inline images stays live as terminal graphics, `0` keeps every image, and changing it redraws the transcript under the new limit ([#20843](https://github.com/can1357/oh-my-pi/issues/20843))
 - Ctrl+C and Ctrl+D on an empty startup composer exit cleanly even while an extension or custom tool is loading.

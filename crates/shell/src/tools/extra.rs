@@ -84,11 +84,11 @@ enum Request {
 
 /// A command's subshell, still running.
 struct Run {
-	id:    RunId,
-	reply: Reply,
+	id:      RunId,
+	reply:   Reply,
 	/// The id and label of a command the utility may signal: its tree has a
 	/// label of its own.
-	own:   Option<(u64, u32)>,
+	own:     Option<(u64, u32)>,
 	/// Whether it runs a builtin in-engine ([`Program::Builtin`]).
 	builtin: bool,
 }

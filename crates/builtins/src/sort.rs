@@ -11,7 +11,7 @@ use std::{
 	thread,
 };
 
-use crate::host::ChildEnv;
+use crate::host::{ChildEnv, strip_errno};
 
 /// The `--compress-program` used for external-sort temporary files, together
 /// with the shell context its children inherit.
@@ -3513,12 +3513,6 @@ use crate::{
 };
 
 type SortResult<T> = Result<T, SortError>;
-
-fn strip_errno(error: &std::io::Error) -> String {
-	error
-		.raw_os_error()
-		.map_or_else(|| error.to_string(), |code| std::io::Error::from_raw_os_error(code).to_string())
-}
 
 macro_rules! show_error {
 	($stderr:expr, $($args:tt)+) => {{
@@ -7161,6 +7155,14 @@ mod tests {
 		let (code, capture) = run_util::<Sort>(&["-C"], "beta\nalpha\n", "/");
 		assert_eq!(code, 1);
 		assert_eq!(capture.err(), "");
+	}
+
+	// Failure: a missing file ended with Rust's ` (os error 2)` after GNU's text.
+	#[test]
+	fn missing_file_reports_plain_strerror() {
+		let (code, capture) = run_util::<Sort>(&["/nonexistent_zz"], "", "/");
+		assert_eq!(code, 2);
+		assert_eq!(capture.err(), "sort: cannot read: /nonexistent_zz: No such file or directory\n");
 	}
 
 	// Check diagnostics must name the input, not the temporary stdin spool.
