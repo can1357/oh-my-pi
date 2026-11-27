@@ -191,6 +191,13 @@ function isCurrent(cached: ApprovalCacheKey | undefined, settings: Settings, reg
 
 type AdvertisedGrants = Omit<PerCallModelAdvertisement, "parentModelWithheld"> & { allowlists: string[][] };
 
+/** Whether startup prompt metadata must resolve a bare operator-granted model against the catalog. */
+export function modelGrantAdvertisementNeedsCatalog(settings: Settings): boolean {
+	return configuredRoleGrantPatterns(settings.grantAuthority()).some(({ patterns }) =>
+		patterns.some(pattern => !/[*?]/.test(pattern) && !pattern.includes("/")),
+	);
+}
+
 const advertisementCache = new WeakMap<Settings, ApprovalCacheKey & AdvertisedGrants>();
 
 /**

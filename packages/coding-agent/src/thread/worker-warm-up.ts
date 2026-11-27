@@ -17,6 +17,7 @@
 import { getAgentDir, logger } from "@oh-my-pi/pi-utils";
 import { discoverAdvisorConfigs } from "../advisor/config";
 import { discoverWatchdogFiles } from "../advisor/watchdog";
+import { cfgGitChildRepoDiscovery } from "../modes/settings";
 import { AgentRegistry } from "../registry/agent-registry";
 import { createAgentSession, discoverPromptTemplates, discoverSlashCommands } from "../sdk";
 import { SessionManager } from "../session/session-manager";
@@ -37,7 +38,7 @@ export async function warmUpSubagentWorker({ cwd, settings, modelRegistry }: Sub
 		discoverPromptTemplates(cwd, agentDir),
 		discoverWatchdogFiles(cwd, agentDir),
 		discoverAdvisorConfigs(cwd, agentDir),
-		resolveActiveRepoContext(cwd),
+		settings && !cfgGitChildRepoDiscovery.get(settings) ? null : resolveActiveRepoContext(cwd),
 	]);
 	for (const result of results) {
 		if (result.status === "rejected") logger.debug("Subagent worker warm-up step failed", { err: result.reason });

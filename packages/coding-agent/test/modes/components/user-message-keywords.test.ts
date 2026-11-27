@@ -79,7 +79,7 @@ describe("user message bubble", () => {
 				text: 'ask <model agent="m1" name="Fast"/> about [Image #1, 800x600] and [Video #2]',
 			});
 			expect(text).toContain(
-				`${nerd["icon.model"]} Fast about ${nerd["chip.image"]} #1 and ${nerd["chip.video"]} #2`,
+				`${nerd["mention.model"]} Fast about ${nerd["chip.image"]} #1 and ${nerd["chip.video"]} #2`,
 			);
 		} finally {
 			setCurrentTheme(restoreTheme);

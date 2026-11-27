@@ -6,44 +6,6 @@ A **provider** is the account or backend namespace, such as `anthropic`, `openai
 
 This page covers how providers become available, how credentials are resolved, the provider/environment-variable map, local engines, disabling providers, and custom providers. For native Kiro authentication, model discovery, and streaming, see [Kiro](./kiro.md). For endpoint-specific request, reasoning, tool, stream, usage, and retry constraints, see [Provider endpoint constraints](./provider-endpoint-constraints.md). For model selection and the full `models.yml` schema, see [Model and Provider Configuration](./models.md). For config-file locations and merge precedence, see [Settings](./settings.md). For credential storage and login flows in depth, see [Secrets and credentials](./secrets.md). For the complete environment-variable reference, see [Environment variables](./environment-variables.md). For local engine setup, see [Local models](./local-models.md). For context-file discovery providers, see [Context files](./context-files.md).
 
-## Google AI Ultra plan
-
-The `google-ai-ultra` provider runs Gemini models from Google on your own Google AI Ultra plan. It needs a Google account with an active Google AI Ultra subscription; no API key is involved.
-
-1. Run `/login google-ai-ultra` (listed as "Sign in with Google (AI Ultra)") or `omp login google-ai-ultra`.
-2. Approve the sign-in in your browser. A sign-in lasts 7 days, then sign in again.
-3. Select a model, for example `google-ai-ultra/gemini-4-hydrogen` (the default), and send a prompt.
-
-Requests count against the plan's daily limits, which Google keeps separately for each model (Gemini 4 Hydrogen, Gemini 4 Neon, Gemini 4 Carbon, Gemini 3.5 Flash-Lite). When one model's daily limit is reached, `omp` reports when it resets and the other models stay available; it does not retry that model until the reset. With several signed-in Google accounts, a turn moves to the next account when one account has no eligible plan or has spent that model's daily limit. Each model exposes Google's own thinking levels (`xhigh` on Hydrogen and Neon, `minimal` on Flash-Lite).
-
-The sign-in belongs to the machine that started it. Google binds it to a key generated there, so the refresh token and that key stay in the OS credential vault (macOS Keychain, Windows Credential Manager, a Secret Service keyring on Linux; on hosts without one, an owner-only file under `~/.omp/agent/vault/`) and never reach a shared auth broker. On a remote machine or over SSH, run the login there: open the printed URL in your local browser, then paste the final `127.0.0.1` address from the browser's address bar back into `omp` (or forward the printed port with `ssh -L`). Copying credentials from another machine does not work.
-
-`/logout google-ai-ultra` offers two actions per account: **Sign out on this device** deletes the sign-in from this machine only, and **Disconnect Google Account** also revokes it at Google, ending it on every device. If Google cannot confirm the revocation, `omp` still deletes the local copy; remove `omp` at [Google Account Connections](https://myaccount.google.com/connections).
-
-## Factory Droid
-
-The `factory-droid` provider uses Factory's Droid subscription gateway directly. No `droid` binary, daemon, or SDK subprocess is needed for login or inference.
-
-1. Run `omp login factory-droid` or `/login factory-droid` in an interactive session.
-2. Open the printed `auth.factory.ai/device` link in your browser, enter the displayed device code, and approve the login.
-3. Select a model, for example `factory-droid/kimi-k3`, and send a prompt. The stored WorkOS session refreshes automatically. `omp auth-broker login factory-droid` supports broker-backed credentials.
-
-Use subscription OAuth for this provider. It does not discover credentials from an installed Droid CLI or read `FACTORY_API_KEY`; Factory's separate API-key products are not part of this integration.
-
-The roster ships as KDL (`packages/catalog/src/compat/rules/providers/factory-droid.kdl`, with each model's wire and billing pool in `rules/runtime/behavior.kdl`), maintained by hand against the Droid CLI version pinned by `FACTORY_DROID_CLIENT_VERSION` (`packages/catalog/src/wire/factory-droid.ts`). It contains concrete CLI models, not the Factory Auto Model router or app-only Flex variants. Account feature flags, hard-deprecation gates, organization policy (including explicit opt-in requirements), and serving region narrow it live; new model IDs require a catalog update. Until discovery has succeeded online, feature-gated and consent-gated models stay hidden. Offline or failed discovery can retain a cached snapshot, which is not a guarantee of current entitlement.
-
-The roster includes Factory's `generate_image` models (`gpt-image-2.6-sunburst`, `gpt-image-2.6-flare`, `gpt-image-2.5-sunburst`, `gpt-image-2.5-flare`, `gemini-3-pro-image-preview`), which close the `image` role's defaults so a Factory login alone can generate images. They appear only after discovery reads the organization's managed settings: `imageGenerationEnabled: false` hides all of them, and `imageGenerationAllowedModelIds` narrows them (an empty list hides all). Image calls bill to the Standard Credits pool.
-
-Organization identity and residency travel with the credential serving each request, including account rotation, and each account/residency scope has its own model cache. Residency chooses the API host; the independent inference region (`global`, `us`, or `eu`) constrains upstream eligibility.
-
-Claude requests on Anthropic's own upstream offer Factory's server-side refusal fallback (Opus 5 for Fable and Opus 5.5) only when discovery found the fallback model in the account's roster. A request served by another organization's credential than discovery saw offers none; a Factory model OMP did not discover (one defined in `models.yml`) offers every fallback its rules name, as before discovery tracked them.
-
-`/usage` and `omp usage` report Standard Credits and Droid Core quota windows when the account uses token-rate-limit billing. Accounts whose billing response explicitly disables that mode remain visible with a note that no quota windows are exposed; OMP does not invent a remaining balance. The model browser shows each model's credit rate in force now, including Factory's dated credit promotions, and the model details name the next scheduled rate and its date; dollar figures are upstream list-price references, not Factory billing, and include no promotions. Models without a dollar reference display their credit rate rather than `free`. Extra balance alone does not establish that overage billing is enabled.
-
-If account rotation would narrow the selected model's context window, OMP stops before sending that retry rather than guessing whether the existing conversation fits. Refresh discovery with `omp models refresh factory-droid` and select the region-appropriate model before retrying.
-
-Factory's native context limits hold even when extended context is disabled. Factory GPT and Gemini routes omit output-token caps, so bounded ephemeral turns reject a `maxTokens` request instead of silently running uncapped.
-
 ## How `omp` decides a provider is available
 
 The model registry composes these sources:
@@ -79,6 +41,10 @@ When a provider needs an API key, `omp` resolves it in this order (first match w
 7. **Other stored API key**: for example, a broker-migrated key. This is a last resort so an explicit environment variable wins.
 
 Local credentials live in the active auth store (default: `~/.omp/agent/agent.db`); broker mode uses the configured shared auth broker. Named profiles and Linux XDG layouts can relocate the store. In the default profile, `PI_CODING_AGENT_DIR` overrides the agent directory. See [Settings](./settings.md) and [Secrets and credentials](./secrets.md) for path resolution.
+
+### Credential storage
+
+Credentials in `agent.db` can be encrypted (AES-256-GCM, a fresh salt per credential) under a master key kept in the OS credential vault: macOS Keychain, Windows Credential Manager, or a Secret Service keyring on Linux. By default a store keeps its mode: an existing unencrypted store stays unencrypted, an encrypted one keeps encrypting, and a fresh store encrypts when the vault answers without prompting. Headless hosts (SSH sessions, CI, Linux without a display) never use the vault on their own. Set `auth.encrypt: true` in `config.yml` (or `OMP_AUTH_ENCRYPT=1`) to encrypt new credentials, or `false` to stop; credentials already encrypted stay readable while the vault holds the key. Copying `agent.db` to another machine leaves its encrypted credentials unreadable there unless that machine gets the same key: `omp auth key` prints it, and `omp auth key -` reads one from stdin, stores it in the vault, and re-encrypts the machine's credentials under it (`omp auth key | ssh host omp auth key -`). In broker mode, the broker host encrypts its own store.
 
 ### OAuth vs API key, and provider-scoped logins
 
@@ -171,7 +137,7 @@ The variables below supply credentials after runtime/config overrides and stored
 | `huggingface`                    | `HUGGINGFACE_HUB_TOKEN`, then `HF_TOKEN`                                            |
 | `inception`                      | `INCEPTION_API_KEY`                                                                 |
 | `kiro`                           | `KIRO_API_KEY` (`ksk_…`); `KIRO_API_REGION` pins its region                         |
-| `moonshot`                       | `MOONSHOT_API_KEY`, then `KIMI_API_KEY`                                             |
+| `moonshot`                       | `MOONSHOT_API_KEY`                                                                  |
 | `stepfun`                        | `STEPFUN_API_KEY`                                                                   |
 | `helmcode`                       | `HELMCODE_API_KEY`                                                                  |
 | `meta`                           | `MODEL_API_KEY`, then `META_API_KEY`                                                |
@@ -251,7 +217,7 @@ SingularityAPI sells two unrelated products behind one brand, so OMP models them
 
 For Mistral, set `MISTRAL_API_KEY` to a key created on the Mistral console, or run `/login mistral` to sign in through the browser the way the Mistral Vibe CLI does. The browser sign-in mints a regular API key tied to your Mistral plan: its usage counts against the plan's Vibe Code quota instead of pay-as-you-go API credits. OMP stores it as a plain API key; there is nothing to refresh.
 
-OAuth-backed providers such as `anthropic`, `openai-codex`, `github-copilot`, `cursor`, `muse-code`, `ollama-cloud`, `qwen-portal`, `kimi-code`, `xai-oauth`, `wafer-serverless`, `devin`, and the GitLab providers (`gitlab-duo`, `gitlab-duo-agent`) are normally reached through `/login` rather than an environment variable. Interactive API-key logins exist too: `/login baseten`, `/login coreweave`, `/login modal`, `/login sakana`, `/login singularityapi-dev`, and `/login singularityapi-tech` prompt for a dashboard/API key (`coreweave` additionally requires `COREWEAVE_PROJECT` for the `OpenAI-Project` header). See [Environment variables](./environment-variables.md) for search-tool and configuration variables not listed here.
+OAuth-backed providers such as `anthropic`, `openai-codex`, `github-copilot`, `cursor`, `muse-code`, `ollama-cloud`, `qwen-portal`, `kimi-code-global` (Kimi Code, kimi.ai), `kimi-code` (Kimi Code mainland China, kimi.com), `xai-oauth`, `wafer-serverless`, `devin`, and the GitLab providers (`gitlab-duo`, `gitlab-duo-agent`) are normally reached through `/login` rather than an environment variable; the two Kimi Code providers additionally accept API-key auth via `KIMI_API_KEY` (`kimi-code`) or `KIMI_CODE_GLOBAL_API_KEY` (`kimi-code-global`). Interactive API-key logins exist too: `/login baseten`, `/login coreweave`, `/login modal`, `/login sakana`, `/login singularityapi-dev`, and `/login singularityapi-tech` prompt for a dashboard/API key (`coreweave` additionally requires `COREWEAVE_PROJECT` for the `OpenAI-Project` header). See [Environment variables](./environment-variables.md) for search-tool and configuration variables not listed here.
 
 `/login kiro` signs in with AWS IAM Identity Center, a Builder ID, a `ksk_…` API key, or a Google or GitHub account. Google and GitHub use Kiro's device sign-in, which shows a link to `app.kiro.dev` and a one-time code, so it also works over SSH. See [Kiro](./kiro.md) for details.
 

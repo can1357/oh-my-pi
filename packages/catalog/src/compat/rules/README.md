@@ -220,6 +220,8 @@ One object axis carries a computed form: `long-context-cost` accepts either the 
 
 `context-window-authoritative #true` preserves a host's supplied context window through runtime model selection instead of applying inferred expansion or reference-price-tier caps. Explicit user context overrides still apply afterward. It applies to rows materialized through `buildModel` (discovery and regenerated bundles). See [`providers/factory-droid.kdl`](providers/factory-droid.kdl).
 
+`tier-cache-follows-input #true` marks a host's long-context tier as billing cache reads and writes at the same multiple of its source row as input. GitHub Copilot discovery scales the cache legs `billing.token_prices` omits on a synthesized `-1m` row by that input ratio; a reported `cache_price` wins, and unmarked tiers carry the source row's cache legs unscaled. See [`providers/github-copilot.kdl`](providers/github-copilot.kdl).
+
 `long-context-window-uncapped #true` keeps a model's `long-context-cost` tier from capping its runtime context window while extended context is off: the coding agent normally lowers the window to the tier's input threshold so compaction fires before a request crosses into premium pricing. Use it where the tier is an API-equivalent estimate on a subscription host (`xai-oauth`) or where the model is served at its full window regardless (GPT-5.4, except on GitHub Copilot). `buildModel` materializes it as `Model.longContextWindowUncapped`; explicit user context overrides still apply.
 
 `thinking-effort-map` maps served efforts to wire values. An entry for an effort the ladder does not serve whose value is a served effort is an alias instead: clamping a request for that effort follows it rather than stepping down to the next lower tier (Refuseless sends `medium` to `high` on its `low|high|max` ladder). `reasoning-effort-map` entries never alias.
@@ -254,6 +256,8 @@ One object axis carries a computed form: `long-context-cost` accepts either the 
 - OpenCode Go (`providerType ?? provider` is `opencode-go`) sends any explicit prompt-cache key as `x-opencode-session`, so siblings, forks, and their parent share one gateway cache. Without an explicit key the header keeps the conversation id. Credentials and response state stay per conversation.
 
 Opted in: Muse Code `muse-spark-1.3`, `muse-spark-1.3-contributor`, and the four Wonder variants over `openai-responses` (Meta documents shared-prefix `prompt_cache_key` routing; sibling reuse measured on Spark 1.3 Contributor). OpenCode Go `muse-spark-1.3-contributor`, `muse-spark-1.2-contributor`, `gpt-5.6-luna`, `gpt-6-luna`, and `grok-4.6` over `openai-responses`, and `deepseek-v4-pro` and `omen-alpha` over `openai-completions`. A Go lane qualifies only when a cold / different-family / same-family probe warms on the repeated key and stays cold under the different key; [`providers/opencode-go.kdl`](providers/opencode-go.kdl) records the per-lane tallies and the lanes that warmed under any key (and so gain nothing). The standard Go `muse-spark-1.3`/`1.2` ids stay off: the gateway answers "Model is unavailable". Custom providers opt in only by declaring a matching `providerType`.
+
+`kimi-code-endpoint #true` marks a Kimi Code managed `/coding/v1` deployment (declared at the provider root of [`providers/kimi-code.kdl`](providers/kimi-code.kdl) and [`providers/kimi-code-global.kdl`](providers/kimi-code-global.kdl)). The AI runtime reads it through `isKimiCodeEndpoint` and routes these streams through the dedicated Kimi stream dispatcher, prepends the shared Kimi CLI client headers on the OpenAI-completions transport, and sends the shared prompt-cache affinity identity on the Anthropic transport so both transports warm one cache. The provider's regional base URL and its override env name come from the same files' `base-url` node via `providerBaseUrl` / `providerBaseUrlEnv`; consumers keep env override resolution and any gateway/proxy-specific behavior in code. Unassigned keeps generic dispatch.
 
 `image-max-edge` is the longest image edge, in pixels, a host passes to the model; it downscales larger images to fit first (Cursor: 1024 for Claude and GPT). Snapcompact reads it through `resolveImageMaxEdge` and renders frames no wider, so their glyphs reach the model at the size they were drawn; unassigned means the host keeps the image's size.
 
@@ -411,7 +415,7 @@ auth "anthropic" {
     callback-port 54545                          // defaults to the oauth-code callback port
     paste-code #true                             // defaults to #true for oauth-code logins
     device-bound #true                           // logins need a key only this machine holds: kept out of the auth broker
-    sign-out hook="name"                          // runs when a login is removed: forgets local secrets and revokes the grant upstream
+    sign-out hook="name"                          // runs when a login is removed: revokes the grant upstream
     api-key-format "structured"                  // bearer (default) | structured (JSON credential as API key)
     expiry "jwt-or-never"                        // session-JWT expiry policy
     result "api-key"                             // OAuth login persists only credentials.access as a plain API key
@@ -425,6 +429,9 @@ auth "anthropic" {
     login-warning "Account risk to accept"       // a new login asks the user to type "yes" first
     connected-name "Acme Pro plan"               // what linked-account surfaces call the provider; `name` stays the `/login` label
     active-notice "Using your Acme Pro plan"     // transcript line when a session starts using one of the provider's models
+    login-notice "Requests follow Acme's terms"  // shown once after each successful sign-in
+    manage-url "https://acme.example/apps"       // the host page where the user turns this app's access on or off
+    required-scope "acme.inference"              // a login without this scope stays signed in with the provider off
 }
 ```
 
@@ -437,6 +444,8 @@ auth "anthropic" {
 `login-warning "<text>"` keeps a provider usable but makes every new login accept a risk first: the login list marks it "(at your own risk)", and `login` shows the text and starts the flow only after the user types `yes`; any other answer or a cancel stores nothing. Stored logins, token refresh and requests are not asked again. An extension that registers its own OAuth login under the id owns that prompt instead.
 
 `connected-name "<text>"` names the provider on every surface after an account is linked — login success lines, model picker provider scopes, logout and account rows, usage and status output — while `name` stays the pre-sign-in label in the `/login` list. Absent, those surfaces keep showing the provider id (title-cased where they already did). `active-notice "<text>"` adds one dim transcript line, `<text> · <model name>`, when the session switches to one of the provider's models or first runs a turn on one; it shows once per model per session.
+
+`login-notice "<text>"` adds a dim line under the login success line. `manage-url "<url>"` is the host's page where the user turns the app's access on or off: login and logout output link it, and the model picker's provider pane opens it (F6). `required-scope "<scope>"` names the OAuth scope a login must hold to serve requests; a login whose granted `scope` lacks it is kept, and login output, logout rows and the model picker show the provider as off instead of signing the user out.
 
 Login kinds:
 
@@ -455,6 +464,9 @@ The root `provider "<id>"` node of `providers/<id>.kdl` carries the catalog entr
 provider "sakana" {
     default-model "fugu"                          // required for a catalog entry
     env "SAKANA_API_KEY" "FUGU_API_KEY"           // runtime API-key env fallback, in order
+    base-url "https://api.sakana.ai/v1" {         // optional managed deployment URL (chat,
+        env "SAKANA_BASE_URL"                     // discovery, usages, search); optional override env
+    }
     dynamic-models-authoritative #true            // discovery replaces bundled rows
     allow-unauthenticated #true                   // runtime manager without a key
     skip-cross-provider-reference-fills #true     // generator never backfills from same-id rows elsewhere

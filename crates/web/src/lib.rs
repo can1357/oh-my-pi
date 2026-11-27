@@ -4,6 +4,7 @@
 pub mod decode;
 pub mod dom;
 pub mod embedded;
+pub mod entities;
 pub mod facts;
 pub mod feed;
 pub mod reader;

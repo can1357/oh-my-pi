@@ -96,6 +96,8 @@ describe("executeJs workflow helpers", () => {
 				premiumRequests: 0,
 				cost: 0,
 				subagentCost: 0,
+				aiuNano: 0,
+				aiuUnknownCalls: 0,
 			}),
 		});
 		const result = await executeJs(

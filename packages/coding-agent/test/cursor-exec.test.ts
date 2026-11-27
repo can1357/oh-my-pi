@@ -45,7 +45,8 @@ import { TodoTool } from "@oh-my-pi/pi-coding-agent/tools/todo";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import type { TruncationMeta } from "@oh-my-pi/pi-coding-agent/tools/output-meta-format";
 import type { TodoPhase } from "@oh-my-pi/pi-coding-agent/tools/details/todo";
-import { removeWithRetries, spillFileName, spillUrl } from "@oh-my-pi/pi-utils";
+import { initWorktreeFixture } from "./helpers/git-worktree";
+import { removeWithRetries, spillFileName, spillUrl, TempDir } from "@oh-my-pi/pi-utils";
 import { AdviseTool } from "../src/advisor/advise-tool";
 
 function yoloToolContext(): AgentToolContext {
@@ -2806,5 +2807,68 @@ describe("CursorExecHandlers passive tool context", () => {
 			// The carrier is symbol-keyed and never reaches serialized history.
 			expect(JSON.stringify(result)).not.toContain("tool context");
 		}
+	});
+});
+
+describe("CursorExecHandlers.write edit materialization worktree notice", () => {
+	it("attaches checkoutNotice on details and content when materializing an edit into a sibling worktree", async () => {
+		using temp = TempDir.createSync("@omp-cursor-worktree-");
+		const { cwd, paths } = await initWorktreeFixture(temp, [{ name: "linked", branch: "preview" }]);
+
+		const writeTool = new WriteTool(createTestSession(cwd));
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map([["write", writeTool as unknown as AgentTool]]),
+			getToolContext: yoloToolContext,
+		});
+
+		const siblingTarget = path.join(paths.linked, "lesson.txt");
+		const crossResult = await handlers.write(
+			{
+				toolCallId: "cursor-cross",
+				path: siblingTarget,
+				fileText: "after\n",
+				returnFileContentAfterWrite: false,
+				fileBytes: new Uint8Array(),
+			},
+			{ editMaterialization: true },
+		);
+		expect(crossResult.isError).toBe(false);
+		expect(crossResult.details).toMatchObject({ checkoutNotice: "Edited worktree: preview (session: main)" });
+		const crossText = crossResult.content.map(c => (c.type === "text" ? c.text : "")).join("\n");
+		expect(crossText).toContain("Edited worktree: preview (session: main)");
+
+		// Wrapped path header that WriteTool unwraps into details.resolvedPath
+		const wrappedResult = await handlers.write(
+			{
+				toolCallId: "cursor-wrapped",
+				path: "[../linked/lesson.txt#ABCD]",
+				fileText: "wrapped\n",
+				returnFileContentAfterWrite: false,
+				fileBytes: new Uint8Array(),
+			},
+			{ editMaterialization: true },
+		);
+		expect(wrappedResult.isError).toBe(false);
+		expect(wrappedResult.details).toMatchObject({
+			path: siblingTarget,
+			checkoutNotice: "Edited worktree: preview (session: main)",
+		});
+		const wrappedText = wrappedResult.content.map(c => (c.type === "text" ? c.text : "")).join("\n");
+		expect(wrappedText).toContain("Edited worktree: preview (session: main)");
+
+		const localResult = await handlers.write(
+			{
+				toolCallId: "cursor-local",
+				path: "lesson.txt",
+				fileText: "after\n",
+				returnFileContentAfterWrite: false,
+				fileBytes: new Uint8Array(),
+			},
+			{ editMaterialization: true },
+		);
+		expect(localResult.isError).toBe(false);
+		expect(localResult.details).toBeDefined();
+		expect(localResult.details).not.toHaveProperty("checkoutNotice");
 	});
 });

@@ -49,7 +49,7 @@ export async function compileCompatRules(rulesDir: string): Promise<CompiledComp
 	]);
 	const behaviorSource = runtime.find(source => source.file === "runtime/behavior.kdl");
 	const files = [...taxonomy, ...classes, ...providers, ...runtime, ...auth].map(source => source.file).sort();
-	return {
+	const policy = {
 		version: 1,
 		files,
 		taxonomy: compileTaxonomy(taxonomy),
@@ -57,7 +57,17 @@ export async function compileCompatRules(rulesDir: string): Promise<CompiledComp
 		behavior: compileBehavior(behaviorSource),
 		auth: compileAuth(auth),
 		providers: compileProviders(providers),
-	};
+	} satisfies Omit<CompiledCompatRules, "hash" | "priceChanges">;
+
+	const dates = new Set<number>();
+	const json = JSON.stringify(policy, (key, value: unknown) => {
+		if (key === "effectiveFrom" && typeof value === "string") {
+			const instant = Date.parse(value);
+			if (Number.isFinite(instant)) dates.add(instant);
+		}
+		return value;
+	});
+	return { ...policy, hash: Bun.hash(json).toString(36), priceChanges: [...dates].sort((a, b) => a - b) };
 }
 
 /**

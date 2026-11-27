@@ -962,7 +962,7 @@ describe("Anthropic cache_control rejection fallback", () => {
 /**
  * Residual of the opaque-client anchor, reported on review: such a client's
  * state lives in a `WeakMap` that `clearAnthropicFastModeFallback` cannot walk,
- * so a `/fast on` re-arm used to leave the client silently demoted for the rest
+ * so a fast-mode re-arm used to leave the client silently demoted for the rest
  * of the session — the user toggled it and nothing happened. The anchor now
  * carries a re-arm generation the state picks up on its next request.
  *
@@ -980,7 +980,7 @@ describe("Anthropic fast-mode re-arm through an opaque injected client", () => {
 		const client = createOpaqueClient("https://opaque-fast.example/v1", createFastModeRejectingFetch(capture));
 
 		await runPriorityTurn(client, states);
-		// `/fast on` after the turn above auto-disabled it. The sweep cannot reach
+		// Re-arm after the turn above auto-disabled fast mode. The sweep cannot reach
 		// this client's state, so only something the next request consults can
 		// carry the toggle through to the wire.
 		clearAnthropicFastModeFallback(states);

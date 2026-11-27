@@ -9,6 +9,7 @@ import type {
 	AnthropicFallbackCreditHandle,
 	AssistantMessage,
 	AssistantMessageEventStream,
+	Context,
 	Message,
 } from "../src/types";
 import {
@@ -253,6 +254,42 @@ describe("Factory Droid anthropic wire (Claude)", () => {
 			expect(request.headers["anthropic-beta"] ?? "").not.toContain("extended-cache-ttl-2025-04-11");
 		},
 	);
+
+	it("sends no system block for a caller block that held only OMP's identity sentence", async () => {
+		const captured: CapturedRequest[] = [];
+		await streamFactoryDroid(
+			factoryModel("claude-opus-4-6"),
+			{
+				systemPrompt: ["You are omp's trusted coding assistant.", "# Engineering\nCorrectness first."],
+				messages: [{ role: "user", content: "hello", timestamp: 1 }],
+			},
+			{ apiKey: WORKOS_TOKEN, fetch: captureFetch(captured, anthropicChunks("OK")) },
+		).result();
+
+		const system = captured[0]!.body.system as Array<{ text: string }>;
+		expect(system.map(block => block.text)).toEqual([
+			"You are Droid, an AI software engineering agent built by Factory.",
+			"# Engineering\nCorrectness first.",
+		]);
+	});
+
+	it("keeps a legacy single-string system prompt as one block without OMP's identity sentence", async () => {
+		const captured: CapturedRequest[] = [];
+		const legacy = {
+			systemPrompt: "You are omp's trusted coding assistant.\n\n# Engineering\nCorrectness first.",
+			messages: [{ role: "user", content: "hello", timestamp: 1 }],
+		} as unknown as Context;
+		await streamFactoryDroid(factoryModel("claude-opus-4-6"), legacy, {
+			apiKey: WORKOS_TOKEN,
+			fetch: captureFetch(captured, anthropicChunks("OK")),
+		}).result();
+
+		const system = captured[0]!.body.system as Array<{ text: string }>;
+		expect(system.map(block => block.text)).toEqual([
+			"You are Droid, an AI software engineering agent built by Factory.",
+			"# Engineering\nCorrectness first.",
+		]);
+	});
 
 	it.each([
 		["required", () => ({ type: "any" })],

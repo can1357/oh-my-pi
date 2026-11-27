@@ -852,7 +852,8 @@ describe("PluginManager.install with git sources", () => {
 			const omp = async (...args: string[]) => {
 				const proc = Bun.spawn([process.execPath, cliEntry, ...args], {
 					cwd: home,
-					env: { HOME: home, PATH: gitOnlyBin, NO_COLOR: "1" },
+					// Test runtime: keeps the child off the OS keychain.
+					env: { HOME: home, PATH: gitOnlyBin, NO_COLOR: "1", PI_TEST_RUNTIME: "1" },
 					stdin: "ignore",
 					stdout: "pipe",
 					stderr: "pipe",

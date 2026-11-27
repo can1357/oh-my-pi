@@ -45,6 +45,7 @@ import type { InteractiveModeContext } from "../../modes/types";
 import { continuesConversation } from "../utils/conversation-position";
 import { computeSessionContextBreakdown } from "../../session/context-usage-runtime";
 import { buildSessionContextView } from "../../session/context-view";
+import { sessionModeRows } from "../../slash-commands/helpers/session-modes";
 import { buildToolsMarkdown } from "../../slash-commands/helpers/tools-markdown";
 import type { AsyncJobSnapshotItem } from "../../session/agent-session";
 import { buildJobTree, jobTreeGuide, jobTreeIndent } from "../view-model/overlays/job-tree";
@@ -93,6 +94,7 @@ import { openPath } from "../../utils/open";
 import { resumeCommand } from "../../utils/resume-command";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
 import { collapseSharedUsageReports, formatLimitTitle, summarizeUsageResetCredits } from "../../session/usage-display";
+import { formatAiuCredits } from "../../session/aiu-billing";
 import { formatRemainingOnlyTotal, isUsedOnlyAbsoluteAmount } from "../../slash-commands/helpers/usage-amounts";
 import type { UnavailableUsageAccount } from "../view-model/overlays/usage-dashboard";
 
@@ -325,8 +327,10 @@ export class CommandController {
 		this.showCommandReport({ title, body: () => markdownView(markdown.trim()) });
 	}
 
+	/** Roll a failed move back, applying each cwd through `applyCwdChange` as a return to where the session was. */
 	async #restoreAfterMoveFailure(
 		previousState: Parameters<InteractiveModeContext["sessionManager"]["rollbackMove"]>[0],
+		applyCwdChange: (cwd: string, restore: boolean) => Promise<boolean>,
 		initialError?: unknown,
 	): Promise<void> {
 		if (initialError !== undefined) {
@@ -341,7 +345,7 @@ export class CommandController {
 			const actual = this.ctx.sessionManager.getCwd();
 			let realigned = false;
 			try {
-				realigned = await this.ctx.applyCwdChange(actual);
+				realigned = await applyCwdChange(actual, true);
 			} catch {}
 			if (!realigned) {
 				this.ctx.showError(
@@ -358,14 +362,14 @@ export class CommandController {
 
 		let sourceRestored = false;
 		try {
-			sourceRestored = await this.ctx.applyCwdChange(previousState.cwd);
+			sourceRestored = await applyCwdChange(previousState.cwd, true);
 		} catch {}
 		if (sourceRestored) return;
 
 		const actual = this.ctx.sessionManager.getCwd();
 		let realigned = false;
 		try {
-			realigned = await this.ctx.applyCwdChange(actual);
+			realigned = await applyCwdChange(actual, true);
 		} catch {}
 		if (!realigned) {
 			this.ctx.showError(`Failed to restore source workspace after rollback: workspace remains at ${actual}`);
@@ -620,6 +624,10 @@ export class CommandController {
 		if (!sameRuntimeIdentity(builds[builds.length - 1], running)) {
 			info += `${currentTheme().fg("dim", "Running:")} ${replaceTabs(sanitizeText(formatRuntimeIdentity(running)))}\n`;
 		}
+		info += `\n${bold("Modes")}\n`;
+		for (const [label, value] of sessionModeRows(this.ctx.session)) {
+			info += `${currentTheme().fg("dim", `${label}:`)} ${replaceTabs(sanitizeText(value))}\n`;
+		}
 		info += `\n${bold("Provider")}\n`;
 		const model = this.ctx.session.model;
 		if (!model) {
@@ -695,10 +703,16 @@ export class CommandController {
 			}
 		}
 
-		if (stats.cost > 0 || normalizedPremiumRequests > 0 || stats.credits !== undefined) {
+		if (stats.cost > 0 || normalizedPremiumRequests > 0 || stats.credits !== undefined || stats.aiu !== undefined) {
 			info += `\n${bold("Cost")}\n`;
 			if (stats.cost > 0) {
 				info += `${currentTheme().fg("dim", "Total:")} ${stats.cost.toFixed(4)}\n`;
+			}
+			if (stats.aiu !== undefined) {
+				info += `${currentTheme().fg("dim", "AI Credits (reported):")} ${formatAiuCredits(stats.aiu, 4)}\n`;
+				if (stats.aiu.unknownCalls > 0) {
+					info += `${currentTheme().fg("dim", "Calls without billing frame:")} ${stats.aiu.unknownCalls.toLocaleString()}\n`;
+				}
 			}
 			if (normalizedPremiumRequests > 0) {
 				info += `${currentTheme().fg("dim", "Premium Requests:")} ${normalizedPremiumRequests.toLocaleString()}\n`;
@@ -947,7 +961,9 @@ export class CommandController {
 		if (!usageReports) {
 			const provider = this.ctx.session as { fetchUsageReports?: () => Promise<UsageReport[] | null> };
 			if (!provider.fetchUsageReports) {
-				this.ctx.showWarning("Usage reporting is not configured for this session.");
+				const sessionAiu = this.ctx.session.getSessionStats().aiu;
+				if (sessionAiu) this.ctx.showUsageDashboard([], sessionAiu);
+				else this.ctx.showWarning("Usage reporting is not configured for this session.");
 				return;
 			}
 			try {
@@ -957,7 +973,7 @@ export class CommandController {
 			}
 		}
 
-		this.ctx.showUsageDashboard(usageReports ?? []);
+		this.ctx.showUsageDashboard(usageReports ?? [], this.ctx.session.getSessionStats().aiu);
 	}
 
 	async handleChangelogCommand(args = ""): Promise<void> {
@@ -1865,21 +1881,38 @@ export class CommandController {
 			this.ctx.showError(`Move failed: ${err instanceof Error ? err.message : String(err)}`);
 			return false;
 		}
-		let applied = false;
+		// A failed move applies the source cwd again after rolling the session file back. Only the last
+		// application's memory warning names where the session ends up, so it shows once they all settled.
+		let memoryWarning: string | undefined;
+		const applyCwdChange = (cwd: string, restore: boolean): Promise<boolean> => {
+			memoryWarning = undefined;
+			return this.ctx.applyCwdChange(cwd, {
+				restore,
+				onWarning: warning => {
+					memoryWarning = warning;
+				},
+			});
+		};
 		try {
-			applied = await this.ctx.applyCwdChange(resolvedPath);
-		} catch (error) {
-			await this.#restoreAfterMoveFailure(previousState, error);
-			return false;
-		}
-		if (!applied) {
-			await this.#restoreAfterMoveFailure(previousState);
-			return false;
-		}
+			let applied = false;
+			try {
+				applied = await applyCwdChange(resolvedPath, false);
+			} catch (error) {
+				await this.#restoreAfterMoveFailure(previousState, applyCwdChange, error);
+				return false;
+			}
+			if (!applied) {
+				await this.#restoreAfterMoveFailure(previousState, applyCwdChange);
+				return false;
+			}
 
-		this.ctx.updateEditorBorderColor();
-		await this.ctx.reloadTodos();
-		return true;
+			this.ctx.updateEditorBorderColor();
+			await this.ctx.reloadTodos();
+			return true;
+		} finally {
+			// A rollback that ended in shutdown disposed the session; nothing is left to warn about.
+			if (memoryWarning && !this.ctx.session.isDisposed) this.ctx.showWarning(memoryWarning);
+		}
 	}
 
 	async handleRenameCommand(title: string): Promise<void> {

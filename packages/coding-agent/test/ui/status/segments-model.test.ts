@@ -65,6 +65,39 @@ describe("status line model segment", () => {
 		expect(text(bare, { showProvider: true })).toBe("Opus 4.8");
 	});
 
+	it("distinguishes Fast and Ultrafast in both terminal text and native spans", () => {
+		const priority: StatusFacts = { ...opus, fastTier: "priority" };
+		const ultrafast: StatusFacts = { ...opus, fastTier: "ultrafast" };
+		expect(text(priority)).not.toBe(text(ultrafast));
+		const env = staticEnvironment(loadThemeSync("dark", { symbolPreset: "ascii" }));
+		const settings: StatusLineSettings = {
+			preset: "custom",
+			leftSegments: ["model"],
+			rightSegments: [],
+			segmentOptions: { model: { showThinkingLevel: false } },
+		};
+		createRoot(dispose => {
+			try {
+				const facts = signal(priority);
+				const { preview } = createStatusLine({
+					settings: () => settings,
+					facts,
+					placement: () => ({ bar: "full", gap: false, autocomplete: false }),
+				});
+				for (const { tier, suffix } of [
+					{ tier: priority, suffix: ">>" },
+					{ tier: ultrafast, suffix: ">>>" },
+				]) {
+					facts.set(tier);
+					const row = Bun.stripANSI(paintNode(env, preview(undefined), 80).rows.join("\n")).trim();
+					expect(row).toEndWith(`Opus 4.8 ${suffix}`);
+				}
+			} finally {
+				dispose();
+			}
+		});
+	});
+
 	it("keeps a model id with newlines and tabs on one row", () => {
 		const dirty: StatusFacts = {
 			...opus,

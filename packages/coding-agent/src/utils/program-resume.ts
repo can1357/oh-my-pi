@@ -24,8 +24,11 @@ import { getActiveProfile, isTerminalHeadless } from "@oh-my-pi/pi-utils";
 import { restartArgv } from "../cli/flag-tables";
 import { resolveRestartCmd } from "../subprocess/worker-client";
 
-/** Environment variable carrying the per-terminal OSC 7577 token. */
-export const OSC_7577_TOKEN_ENV = "OSC7577_TOKEN";
+import {
+	captureProgramResumeToken,
+	getProgramResumeToken,
+	resetProgramResumeTokenForTests,
+} from "./program-resume-token";
 
 const OSC_7577 = "\x1b]7577;";
 const ST = "\x1b\\";
@@ -33,8 +36,6 @@ const ST = "\x1b\\";
 const MAX_SEQUENCE_BYTES = 2048;
 /** Protocol minimum `argv` element count limit. */
 const MAX_ARGV_ELEMENTS = 64;
-/** Token grammar: 22 to 64 characters of `[A-Za-z0-9_-]`. */
-const TOKEN_PATTERN = /^[A-Za-z0-9_-]{22,64}$/;
 /** Whether `text` contains a control character forbidden by OSC 7577 (U+0000–U+001F, U+007F, U+0080–U+009F). */
 function hasControlChar(text: string): boolean {
 	for (let i = 0; i < text.length; i++) {
@@ -59,8 +60,6 @@ export interface ProgramResumeSource {
 }
 
 const runtime: {
-	/** Captured per-terminal token, never left in `process.env`. */
-	token: string | undefined;
 	/** Live source queried to build the current resume command. */
 	source: ProgramResumeSource | undefined;
 	/** Semantic key of the last report written (argv + cwd), for dedup. */
@@ -70,36 +69,11 @@ const runtime: {
 	/** Latched at teardown so late callbacks cannot write into the parent shell. */
 	disposed: boolean;
 } = {
-	token: undefined,
 	source: undefined,
 	reportedKey: undefined,
 	active: false,
 	disposed: false,
 };
-
-/**
- * Capture `OSC7577_TOKEN` from `process.env` into memory and immediately delete
- * it from `process.env` so no child process inherits it. Safe to call multiple
- * times; a newly set env value replaces any previously captured token.
- */
-export function captureProgramResumeToken(): string | undefined {
-	const raw = process.env[OSC_7577_TOKEN_ENV];
-	if (raw !== undefined) {
-		try {
-			delete process.env[OSC_7577_TOKEN_ENV];
-		} catch {}
-		runtime.token = TOKEN_PATTERN.test(raw) ? raw : undefined;
-	}
-	return runtime.token;
-}
-
-/**
- * Returns the captured OSC 7577 token solely so an in-place `/restart` can
- * pass it to the replacement omp process sharing the same PTY.
- */
-export function getProgramResumeToken(): string | undefined {
-	return runtime.token;
-}
 
 /**
  * Build the argv to relaunch/resume omp with its current flags, active profile,
@@ -173,9 +147,10 @@ export function formatResumeClear(token: string, options?: { pid?: number; time?
 }
 
 function writeClearNow(): void {
-	if (!runtime.active || !runtime.token) return;
+	const token = getProgramResumeToken();
+	if (!runtime.active || !token) return;
 	if (!process.stdout.isTTY || isTerminalHeadless()) return;
-	const seq = formatResumeClear(runtime.token);
+	const seq = formatResumeClear(token);
 	runtime.active = false;
 	runtime.reportedKey = undefined;
 	if (seq) writeTerminalSequence(seq);
@@ -199,7 +174,8 @@ export function initProgramResume(source: ProgramResumeSource): void {
  * represented within protocol rules, sends `clear=1` so no stale record stays.
  */
 export function reportProgramResume(): void {
-	if (runtime.disposed || !runtime.token || !runtime.source) return;
+	const token = getProgramResumeToken();
+	if (runtime.disposed || !token || !runtime.source) return;
 	if (!process.stdout.isTTY || isTerminalHeadless()) return;
 	const sessionFile = runtime.source.sessionFile();
 	const cwd = path.resolve(runtime.source.cwd());
@@ -210,7 +186,7 @@ export function reportProgramResume(): void {
 	const key = JSON.stringify({ argv, cwd });
 	if (key === runtime.reportedKey) return;
 
-	const seq = formatResumeReport(argv, cwd, runtime.token);
+	const seq = formatResumeReport(argv, cwd, token);
 	if (!seq) {
 		// Protocol: when the new command cannot be reported, clear any earlier record.
 		writeClearNow();
@@ -253,7 +229,7 @@ export function disposeProgramResume(): void {
 
 /** Reset module state for unit tests. */
 export function resetProgramResumeForTests(): void {
-	runtime.token = undefined;
+	resetProgramResumeTokenForTests();
 	runtime.source = undefined;
 	runtime.reportedKey = undefined;
 	runtime.active = false;

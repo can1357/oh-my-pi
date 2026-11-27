@@ -392,6 +392,38 @@ describe("settings registry", () => {
 		}
 	});
 
+	it("subscribes an effect declared during bind once, even if its immediate apply throws", async () => {
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const seen: number[] = [];
+		let removeLate: (() => void) | undefined;
+		const settings = Settings.isolated({ temperature: 0.25 });
+		const remove = effect(cfgTemperature, next => {
+			if (next !== 0.25 || removeLate) return;
+			removeLate = effect(cfgTemperature, value => {
+				seen.push(value);
+				if (value === 0.25) throw new Error("immediate apply");
+				return Promise.reject(new Error("change apply"));
+			});
+		});
+		const release = bindEffects(settings);
+		try {
+			expect(seen).toEqual([0.25]);
+			cfgTemperature.override(settings, 0.5);
+			expect(seen).toEqual([0.25, 0.5]);
+			await tick();
+			expect(warn.mock.calls.filter(([message]) => message === "Settings: listener failed")).toHaveLength(2);
+
+			removeLate?.();
+			cfgTemperature.override(settings, 0.75);
+			expect(seen).toEqual([0.25, 0.5]);
+		} finally {
+			removeLate?.();
+			remove();
+			release();
+			warn.mockRestore();
+		}
+	});
+
 	it("restores effect-owned state to the defaults on test reset", () => {
 		let current: number | undefined;
 		const removeEffect = effect(cfgTemperature, value => {

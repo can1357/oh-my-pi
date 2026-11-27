@@ -13,6 +13,8 @@ The terminal backend never interprets messages, tools or transcript blocks: it s
 
 `startHost()` starts the driver, negotiates TSP, and renders the program's `Surface` natively (Tern) or with the `TermBackend`. The coding agent's frame puts the transcript blocks in `main` and live chrome in `dock`.
 
+`HostOptions.screen` (the coding agent's `tui.screen`, also cached for the prepaint frame) picks the terminal backend's screen mode: `inline` (below) or `fullscreen`, where every frame is an alternate-screen frame with the dock pinned to the bottom and `main` scrolled in an app-owned window (see [fullscreen screen mode](./tui-core-renderer.md#22-fullscreen-screen-mode)). It may change at runtime; Tern ignores it. In fullscreen the shell requests drag and focus reports (or hover reports with `tui.mouse`) so selection and wheel input reach the window, unless `tui.fullscreenMouse` is disabled. The composer routes `app.transcript.*` actions ahead of the editor (the completion popup keeps its own paging); submitting a prompt follows the tail again.
+
 Each terminal frame (`TermBackend.#compose`):
 
 1. Paint the dock; the rest of the screen height is the room for `main`.
@@ -104,7 +106,7 @@ Theme or visibility changes that affect only current/future output repaint the m
 
 ## Overlays and images
 
-Fullscreen overlays use the alternate buffer and never append history. Normal overlays composite over the mutable viewport only.
+Fullscreen overlays use the alternate buffer and never append history. Normal overlays composite over the mutable viewport only (over the whole frame in fullscreen screen mode, where pages and pickers switch frames without toggling the buffer).
 
 Inline image data and purge commands are emitted before row placements. Active images may remain graphical in the viewport; finalized history uses textual fallback unless the protocol can account for stable physical rows.
 
@@ -119,5 +121,5 @@ native frames. See [native rendering](./tui-core-renderer.md#native-rendering-te
 
 ## Shutdown
 
-`Host.stop()` flushes before handing the terminal back: `TermBackend.flush()` composes one last frame that writes every live `main` block as it is now (settled or not: frozen), after the ledger a pending replay still owes, into history, with the dock as the viewport. Overlays and fullscreen layers are not part of it. When the writer cannot write inline yet (a resize borrow or quiet resize, an anchor probe), or the driver skipped it for an output backlog, the writer keeps that frame and writes it from the viewport top in `FrameWriter.stop()`, which then leaves any alternate buffer, places the shell cursor directly after the visible content, and restores autowrap and the cursor before the driver restores terminal modes. `Host.suspend()` does not flush; the backend replays history when it starts again after the external program returns.
+`Host.stop()` flushes before handing the terminal back (in fullscreen too, unless `tui.exitTranscript` is disabled: the flush frame is inline, so the transcript lands on the normal screen below where the session started): `TermBackend.flush()` composes one last frame that writes every live `main` block as it is now (settled or not: frozen), after the ledger a pending replay still owes, into history, with the dock as the viewport. Overlays and fullscreen layers are not part of it. When the writer cannot write inline yet (a resize borrow or quiet resize, an anchor probe), or the driver skipped it for an output backlog, the writer keeps that frame and writes it from the viewport top in `FrameWriter.stop()`, which then leaves any alternate buffer, places the shell cursor directly after the visible content, and restores autowrap and the cursor before the driver restores terminal modes. `Host.suspend()` does not flush; the backend replays history when it starts again after the external program returns.
 

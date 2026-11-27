@@ -48,10 +48,11 @@ import {
 } from "./cli/worker-selectors";
 import { DAEMON_WORKER_ARG } from "./daemon/protocol";
 import { MNEMOPI_EMBED_WORKER_ARG } from "./mnemopi/embed-protocol";
+import { stopPendingStartupComposer } from "./modes/startup-frame";
 import type * as JsProcessEntry from "./eval/js/process-entry";
 import type { WorkerInbound as JsWorkerInbound, WorkerOutbound as JsWorkerOutbound } from "./eval/js/worker-protocol";
 import { startParentWatchdog } from "./subprocess/parent-watchdog";
-import { captureProgramResumeToken } from "./utils/program-resume";
+import { captureProgramResumeToken } from "./utils/program-resume-token";
 
 // Capture OSC7577_TOKEN into memory and remove it from process.env before any
 // subprocess, worker, or tool can inherit it.
@@ -591,7 +592,7 @@ export async function runCli(argv: string[]): Promise<void> {
 		// Intentional exception to the static-import convention: this latency boundary
 		// keeps the TUI graph out of worker, subcommand, help, and version launches.
 		// Loading it statically would erase the measured cold-start improvement.
-		const { beginStartupComposer, stopPendingStartupComposer } = await import("./modes/startup-composer");
+		const { beginStartupComposer } = await import("./modes/startup-composer");
 		beginStartupComposer({ version: VERSION });
 		stopStartupComposer = stopPendingStartupComposer;
 	}

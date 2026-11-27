@@ -45,12 +45,12 @@
   "devDependencies": {
     "@napi-rs/cli": "catalog:",
     "@types/bun": "catalog:",
-    "cli-truncate": "6.1.1",
-    "gpt-tokenizer": "4.0.0",
+    "cli-truncate": "6.2.0",
+    "gpt-tokenizer": "4.1.2",
     "mitata": "1.0.34",
-    "slice-ansi": "9.0.0",
-    "string-width": "8.2.2",
-    "wrap-ansi": "10.0.0"
+    "slice-ansi": "10.0.1",
+    "string-width": "9.0.0",
+    "wrap-ansi": "10.0.2"
   },
   "engines": {
     "bun": ">=1.4.4"

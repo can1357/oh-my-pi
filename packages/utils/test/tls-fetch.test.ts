@@ -63,8 +63,10 @@ describe("wrapFetchForExtraCa", () => {
 		const ca = calls[0].tls?.ca;
 		expect(ca).toContain(SAMPLE_PEM);
 		// Default trust must remain — Bun's tls.ca REPLACES the system store
-		// when set, so the wrapper has to prepend tls.rootCertificates.
-		expect((ca as string[]).slice(0, tls.rootCertificates.length)).toEqual([...tls.rootCertificates]);
+		// when set, so the wrapper has to prepend tls.getCACertificates("default").
+		expect((ca as string[]).slice(0, tls.getCACertificates("default").length)).toEqual([
+			...tls.getCACertificates("default"),
+		]);
 	});
 
 	it("accepts an extensionless path per Node's NODE_EXTRA_CA_CERTS contract", async () => {

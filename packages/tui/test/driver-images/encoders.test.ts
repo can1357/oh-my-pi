@@ -129,7 +129,7 @@ describe("kitty Unicode placeholders", () => {
 	});
 
 	it("is enabled only for terminals that render virtual placements, with env overrides", () => {
-		for (const id of ["kitty", "ghostty", "rio", "otty", "tern"])
+		for (const id of ["kitty", "ghostty", "rio", "otty", "tern", "rex"])
 			expect(kittyPlaceholdersSupported(id, {})).toBe(true);
 		for (const id of ["wezterm", "warp", "base", "iterm2", "alacritty"]) {
 			expect(kittyPlaceholdersSupported(id, {})).toBe(false);
@@ -137,6 +137,8 @@ describe("kitty Unicode placeholders", () => {
 		expect(kittyPlaceholdersSupported("kitty", { PI_NO_KITTY_PLACEHOLDERS: "1" })).toBe(false);
 		expect(kittyPlaceholdersSupported("kitty", { PI_KITTY_PLACEHOLDERS: "off" })).toBe(false);
 		expect(kittyPlaceholdersSupported("wezterm", { PI_KITTY_PLACEHOLDERS: "1" })).toBe(true);
+		expect(kittyPlaceholdersSupported("rex", { PI_NO_KITTY_PLACEHOLDERS: "1" })).toBe(false);
+		expect(kittyPlaceholdersSupported("rex", { PI_KITTY_PLACEHOLDERS: "0" })).toBe(false);
 		expect(kittyPlaceholdersSupported("kitty", { PI_NO_KITTY_PLACEHOLDERS: "1", PI_KITTY_PLACEHOLDERS: "1" })).toBe(
 			false,
 		);

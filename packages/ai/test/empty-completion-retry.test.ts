@@ -519,4 +519,90 @@ describe("withReplaySafeStreamRetry", () => {
 		expect(events.some(e => e.type === "toolcall_end")).toBe(true);
 		expect(result.stopReason).toBe("error");
 	});
+
+	it("reports each discarded attempt, and none when an abort delivers it instead", async () => {
+		// The discarded attempts were billed: a consumer that loses them under-counts the turn.
+		const discarded: Array<{ reason: string; message: AssistantMessage }> = [];
+		let attempts = 0;
+		const failed = assistant();
+		failed.stopReason = "error";
+		failed.errorMessage = "The socket connection was closed unexpectedly";
+		failed.usage.input = 12;
+		failed.usage.totalTokens = 12;
+		const stream = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{
+				providerRetryWait: async () => {},
+				onDiscardedAttempt: (message, reason) => void discarded.push({ reason, message }),
+			},
+			() => {
+				attempts++;
+				if (attempts === 1) return eosOnlyAttempt();
+				if (attempts === 2)
+					return streamFromEvents([
+						{ type: "start", partial: failed },
+						{ type: "error", reason: "error", error: failed },
+					]);
+				return contentAttempt();
+			},
+			{ retryEmptyCompletion: true, retryProviderErrors: true, maxProviderErrorRetries: 1 },
+		);
+		await drain(stream);
+		expect(discarded.map(entry => entry.reason)).toEqual(["empty-completion", "provider-error"]);
+		expect(discarded[0]?.message.usage.output).toBe(1);
+		expect(discarded[1]?.message).toBe(failed);
+
+		const controller = new AbortController();
+		const delivered: AssistantMessage[] = [];
+		const aborted = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{
+				signal: controller.signal,
+				providerRetryWait: async () => {
+					controller.abort();
+					throw new Error("aborted");
+				},
+				onDiscardedAttempt: message => void delivered.push(message),
+			},
+			() => emptyAttempt(),
+			{ retryEmptyCompletion: true },
+		);
+		await drain(aborted);
+		// The aborted backoff delivers the attempt as the result, so it is not reported a second time.
+		expect(delivered).toEqual([]);
+	});
+
+	it("skips a discarded attempt that billed nothing, but reports a tokenless one that carried a charge", async () => {
+		const failure = (aiuNano?: number): AssistantMessage => {
+			const message = assistant();
+			message.stopReason = "error";
+			message.errorMessage = "The socket connection was closed unexpectedly";
+			if (aiuNano !== undefined) message.usage.aiu = { nano: aiuNano };
+			return message;
+		};
+		const bare = failure();
+		const charged = failure(5_000);
+		const discarded: AssistantMessage[] = [];
+		let attempts = 0;
+		const stream = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{ providerRetryWait: async () => {}, onDiscardedAttempt: message => void discarded.push(message) },
+			() => {
+				attempts++;
+				const failed = attempts === 1 ? bare : attempts === 2 ? charged : undefined;
+				if (!failed) return contentAttempt();
+				return streamFromEvents([
+					{ type: "start", partial: failed },
+					{ type: "error", reason: "error", error: failed },
+				]);
+			},
+			{ retryProviderErrors: true, maxProviderErrorRetries: 2 },
+		);
+		await drain(stream);
+		expect(attempts).toBe(3);
+		expect(discarded).toEqual([charged]);
+	});
 });

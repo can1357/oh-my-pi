@@ -279,10 +279,11 @@ export const REMOTE_REFRESH_SENTINEL = "__remote__" as const;
 /** Opaque marker for OAuth refresh tokens retained by a broker. */
 export type RemoteRefreshSentinel = typeof REMOTE_REFRESH_SENTINEL;
 
-/** OAuth credential with refresh token replaced by the broker sentinel and refresh-capable client secrets removed. */
-export type RemoteOAuthCredential = Omit<OAuthCredential, "refresh" | "kiroClientSecret"> & {
+/** OAuth credential with refresh token replaced by the broker sentinel and refresh-capable secrets removed. */
+export type RemoteOAuthCredential = Omit<OAuthCredential, "refresh" | "kiroClientSecret" | "dpopKey"> & {
 	refresh: RemoteRefreshSentinel;
 	kiroClientSecret?: never;
+	dpopKey?: never;
 };
 
 /** Discriminated credential payload as published by the broker. */
@@ -349,6 +350,12 @@ export type AuthStorageOptions = {
 	/** Global reserve fallback for accounts without a matching reservePct policy. */
 	defaultReservePct?: number;
 	usageFetch?: typeof fetch;
+	/**
+	 * Learn an unknown GitHub Copilot billing mode with a background
+	 * `copilot_internal/user` probe (via `usageFetch`) when a key is resolved.
+	 * Default true; hermetic hosts and tests that hold fake tokens pass false.
+	 */
+	copilotBillingProbe?: boolean;
 	usageRequestTimeoutMs?: number;
 	usageLogger?: UsageLogger;
 	/**
@@ -497,7 +504,7 @@ export type AuthApiKeyOptions = {
 	 */
 	accountIds?: readonly string[];
 	/**
-	 * Service tier the request will ask for (`/fast`, `/fast ultra`). Selection
+	 * Service tier the request will ask for (`/fast`, `/ultrafast`). Selection
 	 * prefers a credential that offers it — an entitled OAuth account, kept even
 	 * on paid overage, else a stored or environment API key — and falls back to
 	 * ordinary balancing across the rest once those are blocked or refused the
@@ -601,6 +608,8 @@ export interface OAuthLoginIdentity {
 	accountId?: string;
 	orgId?: string;
 	orgName?: string;
+	/** The login is stored but lacks the provider's `required-scope`: signed in, provider off. */
+	accessOff?: boolean;
 }
 
 /** Failure while resolving access to one OAuth account. */
@@ -1166,9 +1175,8 @@ export interface OAuthApi {
 	 */
 	login(provider: OAuthProviderId, ctrl: OAuthLoginController): Promise<OAuthLoginIdentity | undefined>;
 	/**
-	 * Remove one stored login. The provider's `sign-out` hook first forgets the
-	 * account's secrets kept outside the credential store and revokes the grant
-	 * at the provider. The login is removed even when the hook fails;
+	 * Remove one stored login. The provider's `sign-out` hook first revokes the
+	 * grant at the provider. The login is removed even when the hook fails;
 	 * {@link OAuthSignOutResult.signOutError} says why.
 	 */
 	signOut(provider: string, credentialId: number, options?: OAuthSignOutOptions): Promise<OAuthSignOutResult>;
@@ -1383,6 +1391,11 @@ export interface UsageApi {
 	 */
 	providerFor(provider: Provider): UsageProvider | undefined;
 	/**
+	 * HTTP status (401/403) of the active usage failure cooldown for this stored
+	 * row's most recently collected report, including reports read from cache.
+	 */
+	authRejection(provider: Provider, credentialId: number): number | undefined;
+	/**
 	 * Return model ids whose live reports map to a quantitative usage scope.
 	 * Provider strategies supply model/tier mapping when available; otherwise
 	 * only explicitly matching model ids and account-wide shared limits count.
@@ -1505,8 +1518,7 @@ export interface LimitsApi {
 	/**
 	 * Forget every recorded refusal of `serviceTier` on `modelId` for a provider
 	 * and drop its cached usage reports, so the next request probes each
-	 * credential for the tier again. For re-arming the tier (`/fast on`) once
-	 * the user has fixed what the provider refused.
+	 * credential for the tier again after the user fixes the reason for refusal.
 	 */
 	rearmServiceTier(provider: string, serviceTier: ServiceTier, modelId: string): Promise<void>;
 	/** Invalidate a credential matching an API key after authentication failure. */

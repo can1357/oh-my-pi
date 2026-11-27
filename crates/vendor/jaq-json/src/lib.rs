@@ -13,10 +13,14 @@ extern crate std;
 
 mod funs;
 mod num;
+mod update;
 pub mod msg;
 #[macro_use]
 pub mod write;
 pub mod read;
+
+#[cfg(all(test, feature = "std"))]
+mod tests;
 
 use alloc::{borrow::ToOwned, boxed::Box, string::String, vec::Vec};
 use bstr::{BStr, ByteSlice};
@@ -25,7 +29,7 @@ use core::cmp::Ordering;
 use core::fmt;
 use core::hash::{Hash, Hasher};
 use jaq_core::box_iter::box_once;
-use jaq_core::{load, ops, path, val, Exn};
+use jaq_core::{load, ops, path, val};
 
 pub use funs::{bytes_valrs, funs};
 pub use num::Num;
@@ -57,9 +61,9 @@ pub enum Val {
     /// replace invalid UTF-8 by the Unicode replacement character.
     TStr(Box<Bytes>),
     /// Array
-    Arr(Rc<Vec<Val>>),
+    Arr(ArrData),
     /// Object
-    Obj(Rc<Map<Val, Val>>),
+    Obj(ObjData),
 }
 
 #[cfg(feature = "sync")]
@@ -76,6 +80,165 @@ const _: () = {
 
 /// Order-preserving map
 pub type Map<K = Val, V = K> = indexmap::IndexMap<K, V, foldhash::fast::RandomState>;
+
+/// Storage of an array value.
+///
+/// This dereferences to the `Rc<Vec<Val>>` it wraps, so array operations can
+/// share and copy-on-write the underlying vector as before. Unlike a plain
+/// `Rc`, dropping it frees nested values iteratively, so freeing a deeply
+/// nested value never recurses on the native stack.
+#[derive(Clone, Debug, Default)]
+pub struct ArrData(Rc<Vec<Val>>);
+
+impl core::ops::Deref for ArrData {
+    type Target = Rc<Vec<Val>>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl core::ops::DerefMut for ArrData {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl From<Vec<Val>> for ArrData {
+    fn from(v: Vec<Val>) -> Self {
+        Self(Rc::new(v))
+    }
+}
+
+impl FromIterator<Val> for ArrData {
+    fn from_iter<T: IntoIterator<Item = Val>>(iter: T) -> Self {
+        Self(Rc::new(iter.into_iter().collect()))
+    }
+}
+
+impl Hash for ArrData {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.hash(state)
+    }
+}
+
+impl ArrData {
+    /// Consume `self` and return the vector, cloning it first if it is shared.
+    fn into_vec(mut self) -> Vec<Val> {
+        take_contents(&mut self.0)
+    }
+}
+
+impl Drop for ArrData {
+    fn drop(&mut self) {
+        if let Some(v) = Rc::get_mut(&mut self.0) {
+            if !v.is_empty() {
+                drop_values(Work::Arr(core::mem::take(v)));
+            }
+        }
+    }
+}
+
+/// Storage of an object value; see [`ArrData`].
+#[derive(Clone, Debug, Default)]
+pub struct ObjData(Rc<Map<Val, Val>>);
+
+impl core::ops::Deref for ObjData {
+    type Target = Rc<Map<Val, Val>>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl core::ops::DerefMut for ObjData {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl From<Map<Val, Val>> for ObjData {
+    fn from(m: Map<Val, Val>) -> Self {
+        Self(Rc::new(m))
+    }
+}
+
+impl ObjData {
+    /// Consume `self` and return the map, cloning it first if it is shared.
+    fn into_map(mut self) -> Map<Val, Val> {
+        take_contents(&mut self.0)
+    }
+}
+
+impl Drop for ObjData {
+    fn drop(&mut self) {
+        if let Some(m) = Rc::get_mut(&mut self.0) {
+            if !m.is_empty() {
+                drop_values(Work::Obj(core::mem::take(m)));
+            }
+        }
+    }
+}
+
+/// Moves uniquely owned contents out without allocating a replacement `Rc`.
+fn take_contents<T: Clone + Default>(storage: &mut Rc<T>) -> T {
+    if let Some(contents) = Rc::get_mut(storage) {
+        core::mem::take(contents)
+    } else if Rc::strong_count(storage) == 1 {
+        // Weak references prevent get_mut but need not force a full copy.
+        Rc::unwrap_or_clone(core::mem::take(storage))
+    } else {
+        (**storage).clone()
+    }
+}
+
+/// A container whose children still need to be dropped (see [`Val`]'s drop).
+enum Work {
+    Arr(Vec<Val>),
+    Obj(Map<Val, Val>),
+}
+
+/// Free `w` and every container nested in it without recursing on the stack.
+fn drop_values(mut w: Work) {
+    let mut stack = Vec::new();
+    loop {
+        match w {
+            Work::Arr(vs) => {
+                for v in vs {
+                    take_container(v, &mut stack);
+                }
+            }
+            Work::Obj(m) => {
+                for (k, v) in m {
+                    take_container(k, &mut stack);
+                    take_container(v, &mut stack);
+                }
+            }
+        }
+        let Some(next) = stack.pop() else { return };
+        w = next;
+    }
+}
+
+/// If `v` uniquely owns a container, move its children onto `stack` so that
+/// [`drop_values`] frees them iteratively; otherwise `v` merely drops.
+fn take_container(v: Val, stack: &mut Vec<Work>) {
+    match v {
+        Val::Arr(mut a) => {
+            if let Some(vs) = Rc::get_mut(&mut a.0) {
+                if !vs.is_empty() {
+                    stack.push(Work::Arr(core::mem::take(vs)));
+                }
+            }
+        }
+        Val::Obj(mut o) => {
+            if let Some(m) = Rc::get_mut(&mut o.0) {
+                if !m.is_empty() {
+                    stack.push(Work::Obj(core::mem::take(m)));
+                }
+            }
+        }
+        _ => {}
+    }
+}
 
 /// Error that can occur during filter execution.
 pub type Error = jaq_core::Error<Val>;
@@ -100,13 +263,6 @@ const MAX_ARRAY_INDEX: i64 = (i32::MAX >> 2) as i64;
 
 /// A comparison descended deeper than allowed.
 struct TooDeep;
-
-// This is part of the Rust standard library since 1.76:
-// <https://doc.rust-lang.org/std/rc/struct.Rc.html#method.unwrap_or_clone>.
-// However, to keep MSRV low, we reimplement it here.
-fn rc_unwrap_or_clone<T: Clone>(a: Rc<T>) -> T {
-    Rc::try_unwrap(a).unwrap_or_else(|a| (*a).clone())
-}
 
 fn err(msg: impl fmt::Display) -> Error {
     Error::str(msg)
@@ -252,16 +408,16 @@ impl jaq_core::ValT for Val {
     fn key_values(self) -> Box<dyn Iterator<Item = Result<(Val, Val), Error>>> {
         let arr_idx = |(i, x)| Ok((Self::from(i as isize), x));
         match self {
-            Self::Arr(a) => Box::new(rc_unwrap_or_clone(a).into_iter().enumerate().map(arr_idx)),
-            Self::Obj(o) => Box::new(rc_unwrap_or_clone(o).into_iter().map(Ok)),
+            Self::Arr(a) => Box::new(a.into_vec().into_iter().enumerate().map(arr_idx)),
+            Self::Obj(o) => Box::new(o.into_map().into_iter().map(Ok)),
             _ => box_once(Err(iter_err(&self))),
         }
     }
 
     fn values(self) -> Box<dyn Iterator<Item = ValR>> {
         match self {
-            Self::Arr(a) => Box::new(rc_unwrap_or_clone(a).into_iter().map(Ok)),
-            Self::Obj(o) => Box::new(rc_unwrap_or_clone(o).into_iter().map(|(_k, v)| Ok(v))),
+            Self::Arr(a) => Box::new(a.into_vec().into_iter().map(Ok)),
+            Self::Obj(o) => Box::new(o.into_map().into_iter().map(|(_k, v)| Ok(v))),
             _ => box_once(Err(iter_err(&self))),
         }
     }
@@ -276,113 +432,19 @@ impl jaq_core::ValT for Val {
         self.get_slice(Some(start), Some(end), None)
     }
 
-    fn map_values<'a, I: Iterator<Item = ValX<'a>>>(
-        self,
-        opt: path::Opt,
-        f: impl Fn(Self) -> I,
-    ) -> ValX<'a> {
-        // like jq's `_modify`, use the first output of `f` and
-        // delete the child if there is none
-        match self {
-            Self::Arr(a) => {
-                let mut out = Vec::with_capacity(a.len());
-                for x in rc_unwrap_or_clone(a) {
-                    out.extend(f(x).next().transpose()?);
-                }
-                Ok(Self::Arr(out.into()))
-            }
-            Self::Obj(o) => {
-                let mut out = Map::with_capacity_and_hasher(o.len(), Default::default());
-                for (k, v) in rc_unwrap_or_clone(o) {
-                    if let Some(y) = f(v).next().transpose()? {
-                        out.insert(k, y);
-                    }
-                }
-                Ok(Self::obj(out))
-            }
-            v => opt.fail(v, |v| Exn::from(iter_err(&v))),
-        }
+    fn update_values(self, opt: path::Opt) -> jaq_core::ValR<update::Cursor, Self> {
+        update::values(self, opt)
     }
 
-    fn map_index<'a, I: Iterator<Item = ValX<'a>>>(
-        mut self,
-        index: &Self,
-        opt: path::Opt,
-        f: impl Fn(Self) -> I,
-    ) -> ValX<'a> {
-        match (&mut self, index) {
-            (Val::Arr(_) | Val::TStr(_) | Val::BStr(_) | Val::Null, Val::Obj(o)) => {
-                let start = o.get(&Val::utf8_str("start"));
-                let end = o.get(&Val::utf8_str("end"));
-                self.map_slice(start, end, Some(index), opt, f)
-            }
-            (Val::Obj(o), Val::TStr(_) | Val::BStr(_)) => {
-                use indexmap::map::Entry::{Occupied, Vacant};
-                match Rc::make_mut(o).entry(index.clone()) {
-                    Occupied(mut e) => {
-                        let v = core::mem::take(e.get_mut());
-                        match f(v).next().transpose()? {
-                            Some(y) => {
-                                e.insert(y);
-                            }
-                            None => {
-                                e.shift_remove();
-                            }
-                        };
-                    }
-                    Vacant(e) => {
-                        if let Some(y) = f(Val::Null).next().transpose()? {
-                            e.insert(y);
-                        }
-                    }
-                }
-                Ok(self)
-            }
-            (Val::Arr(a), Val::Num(n)) if !n.is_nan() => {
-                let d = n.as_f64();
-                let i = int_index(d);
-                let len = a.len() as i64;
-                let read = if i < 0 { i + len } else { i };
-                // jq deletes a negative index counted from the end,
-                // so `-0.5` reads index 0, but deletes nothing
-                let del = if d < 0.0 { len + i } else { i };
-                let x = match usize::try_from(read).ok().filter(|r| *r < a.len()) {
-                    Some(r) if r as i64 == del => core::mem::take(&mut Rc::make_mut(a)[r]),
-                    Some(r) => a[r].clone(),
-                    None => Val::Null,
-                };
-                match f(x).next().transpose()? {
-                    Some(y) => array_set(Rc::make_mut(a), i, y)?,
-                    None => {
-                        if (0..len).contains(&del) {
-                            Rc::make_mut(a).remove(del as usize);
-                        }
-                    }
-                }
-                Ok(self)
-            }
-            _ => {
-                let v = match self.clone().get(index) {
-                    Ok(v) => v,
-                    Err(e) => return opt.fail(self, |_| Exn::from(e)),
-                };
-                match f(v).next().transpose()? {
-                    Some(y) => Ok(self.set(index, y)?),
-                    None => Ok(self.dels(core::slice::from_ref(index))?),
-                }
-            }
-        }
+    fn update_index(self, index: &Self, opt: path::Opt) -> jaq_core::ValR<update::Cursor, Self> {
+        update::index(self, index, opt)
     }
 
-    fn map_range<'a, I: Iterator<Item = ValX<'a>>>(
-        self,
-        range: val::Range<&Self>,
-        opt: path::Opt,
-        f: impl Fn(Self) -> I,
-    ) -> ValX<'a> {
+    fn update_range(self, range: val::Range<&Self>, opt: path::Opt) -> jaq_core::ValR<update::Cursor, Self> {
         let null = Val::Null;
-        let (start, end) = (range.start.unwrap_or(&null), range.end.unwrap_or(&null));
-        self.map_slice(Some(start), Some(end), None, opt, f)
+        let start = range.start.unwrap_or(&null);
+        let end = range.end.unwrap_or(&null);
+        update::slice(self, Some(start), Some(end), None, opt)
     }
 
     /// True if the value is neither null nor false.
@@ -421,10 +483,7 @@ impl jaq_core::ValT for Val {
 impl jaq_std::ValT for Val {
     fn into_seq<S: FromIterator<Self>>(self) -> Result<S, Self> {
         match self {
-            Self::Arr(a) => match Rc::try_unwrap(a) {
-                Ok(a) => Ok(a.into_iter().collect()),
-                Err(a) => Ok(a.iter().cloned().collect()),
-            },
+            Self::Arr(a) => Ok(a.into_vec().into_iter().collect()),
             _ => Err(self),
         }
     }
@@ -512,21 +571,74 @@ fn array_set(a: &mut Vec<Val>, i: i64, v: Val) -> Result<(), Error> {
 }
 
 /// Deep-merge `r` into `l`, as jq's `jv_object_merge_recursive`.
-fn obj_merge(l: &mut Rc<Map>, r: Rc<Map>, depth: usize) -> Result<(), Error> {
-    if depth > MAX_MERGE_DEPTH {
-        return Err(err("Object merge too deep"));
+///
+/// Nested objects are merged through an explicit stack, so deeply nested
+/// objects never recurse on the native stack. It fails with
+/// `Object merge too deep` below nesting depth `MAX_MERGE_DEPTH`.
+fn obj_merge(l: ObjData, r: ObjData, depth0: usize) -> Result<ObjData, Error> {
+    /// One object being merged and its remaining right-hand entries.
+    struct Frame {
+        map: Map<Val, Val>,
+        rhs: indexmap::map::IntoIter<Val, Val>,
+        depth: usize,
+        /// For a nested merge, the key to store the result under in the
+        /// frame below.
+        ret_key: Option<Val>,
     }
-    let l = Rc::make_mut(l);
-    for (k, v) in rc_unwrap_or_clone(r) {
-        match (l.get_mut(&k), v) {
-            (Some(Val::Obj(l)), Val::Obj(r)) => obj_merge(l, r, depth + 1)?,
-            (Some(l), r) => *l = r,
-            (None, r) => {
-                l.insert(k, r);
+    let mut stack = Vec::new();
+    stack.push(Frame {
+        map: l.into_map(),
+        rhs: r.into_map().into_iter(),
+        depth: depth0,
+        ret_key: None,
+    });
+    loop {
+        // Merge right-hand entries into the top frame until either it
+        // descends into a nested object or it is done.
+        let nested = {
+            let top = stack.last_mut().expect("obj_merge stack is never empty");
+            let mut nested = None;
+            while let Some((k, v)) = top.rhs.next() {
+                match (top.map.get_mut(&k), v) {
+                    (Some(slot @ Val::Obj(_)), Val::Obj(r)) => {
+                        let Val::Obj(l) = core::mem::replace(slot, Val::Null) else {
+                            unreachable!()
+                        };
+                        nested = Some((k, l, r, top.depth + 1));
+                        break;
+                    }
+                    (Some(slot), v) => *slot = v,
+                    (None, v) => {
+                        top.map.insert(k, v);
+                    }
+                }
+            }
+            nested
+        };
+        match nested {
+            Some((k, child_l, child_r, depth)) => {
+                if depth > MAX_MERGE_DEPTH {
+                    return Err(err("Object merge too deep"));
+                }
+                stack.push(Frame {
+                    map: child_l.into_map(),
+                    rhs: child_r.into_map().into_iter(),
+                    depth,
+                    ret_key: Some(k),
+                });
+            }
+            None => {
+                let done = stack.pop().expect("obj_merge stack is never empty");
+                match done.ret_key {
+                    None => return Ok(done.map.into()),
+                    Some(k) => {
+                        let parent = stack.last_mut().expect("obj_merge stack is never empty");
+                        parent.map.insert(k, Val::Obj(done.map.into()));
+                    }
+                }
             }
         }
     }
-    Ok(())
 }
 
 /// jq's `jv_kind` ranks, by which values of different kinds are ordered.
@@ -569,7 +681,7 @@ impl Val {
         err(format_args!("{} is not {typ}", msg::describe(self)))
     }
 
-    fn as_arr(&self) -> Result<&Rc<Vec<Self>>, Error> {
+    fn as_arr(&self) -> Result<&ArrData, Error> {
         match self {
             Self::Arr(a) => Ok(a),
             _ => Err(self.type_error_str("an array")),
@@ -587,93 +699,242 @@ impl Val {
     /// With `nan_less`, NaN is smaller than any number, even NaN,
     /// as for jq's `<`; otherwise NaN equals NaN.
     fn cmp_at(&self, other: &Self, depth: usize, max: usize, nan_less: bool) -> Result<Ordering, TooDeep> {
-        if depth > max {
-            return Err(TooDeep);
+        /// One comparison in progress: two containers and how far they are
+        /// compared.
+        enum Frame<'a> {
+            Arr {
+                x: &'a [Val],
+                y: &'a [Val],
+                i: usize,
+                depth: usize,
+            },
+            /// Two objects: first their sorted keys as sequences, then their
+            /// values by those keys.
+            Obj {
+                x: &'a Map<Val, Val>,
+                y: &'a Map<Val, Val>,
+                kx: Vec<&'a Val>,
+                ky: Vec<&'a Val>,
+                i: usize,
+                /// `false` while comparing keys, `true` while comparing values.
+                vals: bool,
+                depth: usize,
+            },
         }
-        let (ka, kb) = (kind_rank(self), kind_rank(other));
-        if ka != kb {
-            return Ok(ka.cmp(&kb));
-        }
-        let seq = |x: &mut dyn Iterator<Item = &Val>, y: &mut dyn Iterator<Item = &Val>, depth| loop {
-            match (x.next(), y.next()) {
-                (None, None) => return Ok(Ordering::Equal),
-                (None, Some(_)) => return Ok(Ordering::Less),
-                (Some(_), None) => return Ok(Ordering::Greater),
-                (Some(a), Some(b)) => match a.cmp_at(b, depth, max, nan_less)? {
-                    Ordering::Equal => (),
-                    o => return Ok(o),
-                },
-            }
-        };
-        Ok(match (self, other) {
-            (Self::Num(x), Self::Num(y)) if nan_less => x.jq_cmp(y),
-            (Self::Num(x), Self::Num(y)) => x.total_cmp(y),
-            (Self::BStr(x) | Self::TStr(x), Self::BStr(y) | Self::TStr(y)) => x[..].cmp(&y[..]),
-            (Self::Arr(x), Self::Arr(y)) => seq(&mut x.iter(), &mut y.iter(), depth + 1)?,
-            (Self::Obj(x), Self::Obj(y)) => {
-                // compare the sorted keys as arrays, then the values by key
-                if depth + 1 > max {
+        let mut stack: Vec<Frame> = Vec::new();
+        let mut cur: Option<(&Self, &Self, usize)> = Some((self, other, depth));
+        loop {
+            if let Some((a, b, d)) = cur.take() {
+                if d > max {
                     return Err(TooDeep);
                 }
-                let mut kx: Vec<&Val> = x.keys().collect();
-                let mut ky: Vec<&Val> = y.keys().collect();
-                kx.sort();
-                ky.sort();
-                match seq(&mut kx.iter().copied(), &mut ky.iter().copied(), depth + 2)? {
-                    Ordering::Equal => {
-                        for k in kx {
-                            match x[k].cmp_at(&y[k], depth + 1, max, nan_less)? {
-                                Ordering::Equal => (),
-                                o => return Ok(o),
+                let (ka, kb) = (kind_rank(a), kind_rank(b));
+                if ka != kb {
+                    return Ok(ka.cmp(&kb));
+                }
+                match (a, b) {
+                    (Self::Num(x), Self::Num(y)) => {
+                        let ord = if nan_less { x.jq_cmp(y) } else { x.total_cmp(y) };
+                        if ord != Ordering::Equal {
+                            return Ok(ord);
+                        }
+                    }
+                    (Self::BStr(x) | Self::TStr(x), Self::BStr(y) | Self::TStr(y)) => {
+                        let ord = x[..].cmp(&y[..]);
+                        if ord != Ordering::Equal {
+                            return Ok(ord);
+                        }
+                    }
+                    (Self::Arr(x), Self::Arr(y)) => {
+                        let (x, y): (&[Val], &[Val]) = (x, y);
+                        match (x.is_empty(), y.is_empty()) {
+                            (true, true) => {}
+                            (true, false) => return Ok(Ordering::Less),
+                            (false, true) => return Ok(Ordering::Greater),
+                            (false, false) => {
+                                stack.push(Frame::Arr { x, y, i: 0, depth: d });
+                                cur = Some((&x[0], &y[0], d + 1));
+                                continue;
                             }
                         }
-                        Ordering::Equal
                     }
-                    o => o,
+                    (Self::Obj(x), Self::Obj(y)) => {
+                        if d + 1 > max {
+                            return Err(TooDeep);
+                        }
+                        let mut kx: Vec<&Val> = x.keys().collect();
+                        let mut ky: Vec<&Val> = y.keys().collect();
+                        kx.sort();
+                        ky.sort();
+                        match (kx.is_empty(), ky.is_empty()) {
+                            (true, true) => {}
+                            (true, false) => return Ok(Ordering::Less),
+                            (false, true) => return Ok(Ordering::Greater),
+                            (false, false) => {
+                                let (first_x, first_y) = (kx[0], ky[0]);
+                                stack.push(Frame::Obj { x, y, kx, ky, i: 0, vals: false, depth: d });
+                                cur = Some((first_x, first_y, d + 2));
+                                continue;
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
-            _ => Ordering::Equal,
-        })
+            // The current comparison came out equal; resume the parent.
+            loop {
+                {
+                    let Some(frame) = stack.last_mut() else { return Ok(Ordering::Equal) };
+                    match frame {
+                        Frame::Arr { x, y, i, depth } => {
+                            let j = *i + 1;
+                            match (j < x.len(), j < y.len()) {
+                                (true, true) => {
+                                    *i = j;
+                                    cur = Some((&x[j], &y[j], *depth + 1));
+                                    break;
+                                }
+                                (true, false) => return Ok(Ordering::Greater),
+                                (false, true) => return Ok(Ordering::Less),
+                                (false, false) => {}
+                            }
+                        }
+                        Frame::Obj { x, y, kx, ky, i, vals, depth } => {
+                            let j = *i + 1;
+                            if !*vals {
+                                match (j < kx.len(), j < ky.len()) {
+                                    (true, true) => {
+                                        *i = j;
+                                        let (p, q) = (kx[j], ky[j]);
+                                        cur = Some((p, q, *depth + 2));
+                                        break;
+                                    }
+                                    (true, false) => return Ok(Ordering::Greater),
+                                    (false, true) => return Ok(Ordering::Less),
+                                    (false, false) => {
+                                        // Keys are equal: compare values by key.
+                                        *vals = true;
+                                        *i = 0;
+                                        let first = kx[0];
+                                        cur = Some((&x[first], &y[first], *depth + 1));
+                                        break;
+                                    }
+                                }
+                            } else if j < kx.len() {
+                                *i = j;
+                                let k = kx[j];
+                                cur = Some((&x[k], &y[k], *depth + 1));
+                                break;
+                            }
+                        }
+                    }
+                }
+                stack.pop();
+            }
+        }
     }
 
     /// Equality as jq's `jvp_equal`, failing below nesting depth `max`.
     fn eq_at(&self, other: &Self, depth: usize, max: usize) -> Result<bool, TooDeep> {
-        if depth > max {
-            return Err(TooDeep);
+        /// One equality check in progress.
+        enum Frame<'a> {
+            Arr {
+                x: &'a [Val],
+                y: &'a [Val],
+                i: usize,
+            },
+            /// Comparing the values of `x` with those of `y`, by key.
+            Obj {
+                y: &'a Map<Val, Val>,
+                it: indexmap::map::Iter<'a, Val, Val>,
+            },
         }
-        Ok(match (self, other) {
-            (Self::Null, Self::Null) => true,
-            (Self::Bool(x), Self::Bool(y)) => x == y,
-            (Self::Num(x), Self::Num(y)) => x == y,
-            (Self::BStr(x) | Self::TStr(x), Self::BStr(y) | Self::TStr(y)) => x == y,
-            (Self::Arr(x), Self::Arr(y)) => {
-                if x.len() != y.len() {
-                    return Ok(false);
+        let mut stack: Vec<Frame> = Vec::new();
+        let mut cur: Option<(&Self, &Self, usize)> = Some((self, other, depth));
+        loop {
+            if let Some((a, b, d)) = cur.take() {
+                if d > max {
+                    return Err(TooDeep);
                 }
-                if Rc::ptr_eq(x, y) {
-                    return Ok(true);
+                match (a, b) {
+                    (Self::Null, Self::Null) => {}
+                    (Self::Bool(x), Self::Bool(y)) => {
+                        if x != y {
+                            return Ok(false);
+                        }
+                    }
+                    (Self::Num(x), Self::Num(y)) => {
+                        if x != y {
+                            return Ok(false);
+                        }
+                    }
+                    (Self::BStr(x) | Self::TStr(x), Self::BStr(y) | Self::TStr(y)) => {
+                        if x != y {
+                            return Ok(false);
+                        }
+                    }
+                    (Self::Arr(x), Self::Arr(y)) => {
+                        if x.len() != y.len() {
+                            return Ok(false);
+                        }
+                        if !Rc::ptr_eq(&x.0, &y.0) && !x.is_empty() {
+                            let (x, y): (&[Val], &[Val]) = (x, y);
+                            stack.push(Frame::Arr { x, y, i: 0 });
+                            cur = Some((&x[0], &y[0], d + 1));
+                            continue;
+                        }
+                    }
+                    (Self::Obj(x), Self::Obj(y)) => {
+                        if !Rc::ptr_eq(&x.0, &y.0) {
+                            if x.len() != y.len() {
+                                return Ok(false);
+                            }
+                            if !x.is_empty() {
+                                let mut it = x.iter();
+                                let (k, a0) = it.next().expect("object is not empty");
+                                match y.get(k) {
+                                    Some(b0) => {
+                                        stack.push(Frame::Obj { y, it });
+                                        cur = Some((a0, b0, d + 1));
+                                        continue;
+                                    }
+                                    None => return Ok(false),
+                                }
+                            }
+                        }
+                    }
+                    _ => return Ok(false),
                 }
-                for (a, b) in x.iter().zip(y.iter()) {
-                    if !a.eq_at(b, depth + 1, max)? {
-                        return Ok(false);
+            }
+            // The current values are equal; resume the parent.
+            loop {
+                let frames = stack.len();
+                {
+                    let Some(frame) = stack.last_mut() else { return Ok(true) };
+                    match frame {
+                        Frame::Arr { x, y, i } => {
+                            let j = *i + 1;
+                            if j < x.len() {
+                                *i = j;
+                                cur = Some((&x[j], &y[j], depth + frames));
+                                break;
+                            }
+                        }
+                        Frame::Obj { y, it } => match it.next() {
+                            Some((k, a)) => match y.get(k) {
+                                Some(b) => {
+                                    cur = Some((a, b, depth + frames));
+                                    break;
+                                }
+                                None => return Ok(false),
+                            },
+                            None => {}
+                        },
                     }
                 }
-                true
+                stack.pop();
             }
-            (Self::Obj(x), Self::Obj(y)) => {
-                if Rc::ptr_eq(x, y) {
-                    return Ok(true);
-                }
-                for (k, a) in x.iter() {
-                    match y.get(k) {
-                        Some(b) if a.eq_at(b, depth + 1, max)? => (),
-                        _ => return Ok(false),
-                    }
-                }
-                x.len() == y.len()
-            }
-            _ => false,
-        })
+        }
     }
 
     /// `self | .[k]`, as jq's `jv_get`.
@@ -736,62 +997,13 @@ impl Val {
         }
     }
 
-    /// Update `self | .[start:end]` with the first output of `f`.
-    fn map_slice<'a, I: Iterator<Item = ValX<'a>>>(
-        self,
-        start: Option<&Val>,
-        end: Option<&Val>,
-        key: Option<&Val>,
-        opt: path::Opt,
-        f: impl Fn(Self) -> I,
-    ) -> ValX<'a> {
-        let key = || key.cloned().unwrap_or_else(|| slice_key(start, end));
-        match self {
-            Val::Null => match f(Val::Null).next().transpose()? {
-                Some(y) => Ok(Val::Null.set(&key(), y)?),
-                None => Ok(Val::Null),
-            },
-            Val::Arr(mut a) => {
-                let (s, e) = match parse_slice(a.len(), start, end) {
-                    Ok(se) => se,
-                    Err(e) => return opt.fail(Val::Arr(a), |_| Exn::from(e)),
-                };
-                let sub = Val::Arr(a[s..e].to_vec().into());
-                match f(sub).next().transpose()? {
-                    Some(Val::Arr(y)) => {
-                        Rc::make_mut(&mut a).splice(s..e, y.iter().cloned());
-                    }
-                    Some(_) => return Err(err("A slice of an array can only be assigned another array"))?,
-                    None => {
-                        Rc::make_mut(&mut a).drain(s..e);
-                    }
-                }
-                Ok(Val::Arr(a))
-            }
-            t @ (Val::TStr(_) | Val::BStr(_)) => {
-                let sub = match t.clone().get_slice(start, end, Some(&key())) {
-                    Ok(sub) => sub,
-                    Err(e) => return opt.fail(t, |_| Exn::from(e)),
-                };
-                match f(sub).next().transpose()? {
-                    Some(_) => Err(err("Cannot update string slices"))?,
-                    None => Err(err("Cannot delete fields from string"))?,
-                }
-            }
-            t => {
-                let e = index_err(&t, &key());
-                opt.fail(t, |_| Exn::from(e))
-            }
-        }
-    }
-
     /// `self | .[k] = v`, as jq's `jv_set`.
     pub fn set(self, k: &Self, v: Self) -> ValR {
         match (self, k) {
             (t @ (Val::Obj(_) | Val::Null), Val::TStr(_) | Val::BStr(_)) => {
                 let mut o = match t {
                     Val::Obj(o) => o,
-                    _ => Rc::default(),
+                    _ => ObjData::default(),
                 };
                 Rc::make_mut(&mut o).insert(k.clone(), v);
                 Ok(Val::Obj(o))
@@ -802,7 +1014,7 @@ impl Val {
             (t @ (Val::Arr(_) | Val::Null), Val::Num(n)) => {
                 let mut a = match t {
                     Val::Arr(a) => a,
-                    _ => Rc::default(),
+                    _ => ArrData::default(),
                 };
                 array_set(Rc::make_mut(&mut a), int_index(n.as_f64()), v)?;
                 Ok(Val::Arr(a))
@@ -810,7 +1022,7 @@ impl Val {
             (t @ (Val::Arr(_) | Val::Null), Val::Obj(o)) => {
                 let mut a = match t {
                     Val::Arr(a) => a,
-                    _ => Rc::default(),
+                    _ => ArrData::default(),
                 };
                 let start = o.get(&Val::utf8_str("start"));
                 let end = o.get(&Val::utf8_str("end"));
@@ -966,27 +1178,87 @@ impl Val {
 
     /// Delete sorted `paths` that all are longer than `start`,
     /// as jq's `delpaths_sorted`.
-    fn delpaths_sorted(mut self, paths: &[&[Val]], start: usize) -> ValR {
-        let mut delkeys = Vec::new();
-        let mut i = 0;
-        while i < paths.len() {
-            let key = &paths[i][start];
-            let mut j = i + 1;
-            while j < paths.len() && paths[j][start].eq_at(key, 0, MAX_EQUAL_DEPTH).unwrap_or(false) {
-                j += 1;
-            }
-            if paths[i].len() == start + 1 {
-                delkeys.push(key.clone());
-            } else {
-                let sub = self.clone().get(key)?;
-                if !matches!(sub, Val::Null) {
-                    let sub = sub.delpaths_sorted(&paths[i..j], start + 1)?;
-                    self = self.set(key, sub)?;
+    ///
+    /// The deletion descends through an explicit stack, so deeply nested
+    /// paths never recurse on the native stack.
+    fn delpaths_sorted(self, paths: &[&[Val]], start: usize) -> ValR {
+        /// One node of the deletion tree.
+        struct Frame<'a> {
+            node: Val,
+            /// paths to delete in `node`, all longer than `start`
+            paths: &'a [&'a [Val]],
+            start: usize,
+            /// index of the next group of `paths` to process
+            next: usize,
+            /// keys of `node` to delete once its children are done
+            delkeys: Vec<Val>,
+            /// the key to store the result under in the frame below
+            ret_key: Option<Val>,
+        }
+        let mut stack = Vec::new();
+        stack.push(Frame {
+            node: self,
+            paths,
+            start,
+            next: 0,
+            delkeys: Vec::new(),
+            ret_key: None,
+        });
+        loop {
+            // Process the top frame until it must descend into a child.
+            let mut descend = None;
+            {
+                let f = stack.last_mut().expect("delpaths stack is never empty");
+                while f.next < f.paths.len() {
+                    let i = f.next;
+                    let key = &f.paths[i][f.start];
+                    let mut j = i + 1;
+                    while j < f.paths.len()
+                        && f.paths[j][f.start].eq_at(key, 0, MAX_EQUAL_DEPTH).unwrap_or(false)
+                    {
+                        j += 1;
+                    }
+                    if f.paths[i].len() == f.start + 1 {
+                        f.delkeys.push(key.clone());
+                        f.next = j;
+                    } else {
+                        let paths = f.paths;
+                        let start = f.start;
+                        let key = key.clone();
+                        f.next = j;
+                        descend = Some((paths, i, j, start, key));
+                        break;
+                    }
                 }
             }
-            i = j;
+            match descend {
+                Some((paths, i, j, start, key)) => {
+                    let node = stack.last().expect("delpaths stack is never empty").node.clone();
+                    let sub = node.get(&key)?;
+                    if !matches!(sub, Val::Null) {
+                        stack.push(Frame {
+                            node: sub,
+                            paths: &paths[i..j],
+                            start: start + 1,
+                            next: 0,
+                            delkeys: Vec::new(),
+                            ret_key: Some(key),
+                        });
+                    }
+                }
+                None => {
+                    let f = stack.pop().expect("delpaths stack is never empty");
+                    let res = f.node.dels(&f.delkeys)?;
+                    match f.ret_key {
+                        None => return Ok(res),
+                        Some(key) => {
+                            let parent = stack.last_mut().expect("delpaths stack is never empty");
+                            parent.node = parent.node.clone().set(&key, res)?;
+                        }
+                    }
+                }
+            }
         }
-        self.dels(&delkeys)
     }
 }
 
@@ -1029,7 +1301,7 @@ impl From<val::Range<Val>> for Val {
 
 impl FromIterator<Self> for Val {
     fn from_iter<T: IntoIterator<Item = Self>>(iter: T) -> Self {
-        Self::Arr(Rc::new(iter.into_iter().collect()))
+        Self::Arr(iter.into_iter().collect())
     }
 }
 
@@ -1111,10 +1383,7 @@ impl core::ops::Mul for Val {
         match (self, rhs) {
             (Num(x), Num(y)) => Ok(Val::from(x.as_f64() * y.as_f64())),
             (TStr(s) | BStr(s), Num(n)) | (Num(n), TStr(s) | BStr(s)) => repeat(&s, n.as_f64()),
-            (Obj(mut l), Obj(r)) => {
-                obj_merge(&mut l, r, 0)?;
-                Ok(Obj(l))
-            }
+            (Obj(l), Obj(r)) => Ok(Obj(obj_merge(l, r, 0)?)),
             (l, r) => Err(msg::type_error2(&l, &r, "cannot be multiplied")),
         }
     }

@@ -1,21 +1,20 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
 import { describe, expect, test } from "bun:test";
 import { createRoot, isUiNode, type JSXNode, type UiNode } from "@oh-my-pi/pi-tui";
-import { paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
+import { DEFAULT_SPINNER_INTERVAL_MS, paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
 import "@oh-my-pi/pi-tui/term/painters/index";
 import { formatDuration } from "@oh-my-pi/pi-tui/term/painters/elapsed";
-import { SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-tui/term/painters/spinner";
 import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
 import { visibleWidth } from "@oh-my-pi/pi-tui/text/width";
 import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 
 const theme = loadThemeSync("dark");
 
-function paint(jsx: JSXNode, width: number, now = 0, reduceMotion = false): string[] {
+function paint(jsx: JSXNode, width: number, now = 0, spinnerInterval?: number): string[] {
 	return createRoot(dispose => {
 		try {
 			if (!isUiNode(jsx)) throw new Error("expected one node");
-			const env = staticEnvironment(theme, { now, reduceMotion });
+			const env = staticEnvironment(theme, { now, ...(spinnerInterval === undefined ? {} : { spinnerInterval }) });
 			return [...paintNode(env, jsx as UiNode, width).rows].map(stripEscapes);
 		} finally {
 			dispose();
@@ -96,10 +95,11 @@ describe("generic painters", () => {
 		]);
 	});
 
-	test("spinner frames follow the clock; reduced motion holds the first", () => {
+	test("spinner frames follow the clock at the spinner interval; a 0 interval holds the first", () => {
 		const frames = theme.symbols.spinnerFrames;
-		expect(paint(<spinner />, 10, SPINNER_INTERVAL_MS * 3)).toEqual([frames[3]!]);
-		expect(paint(<spinner />, 10, SPINNER_INTERVAL_MS * 3, true)).toEqual([frames[0]!]);
+		expect(paint(<spinner />, 10, DEFAULT_SPINNER_INTERVAL_MS * 3)).toEqual([frames[3]!]);
+		expect(paint(<spinner />, 10, 250 * 2, 250)).toEqual([frames[2]!]);
+		expect(paint(<spinner />, 10, DEFAULT_SPINNER_INTERVAL_MS * 3, 0)).toEqual([frames[0]!]);
 	});
 
 	test("elapsed counts on from the age it first painted", () => {

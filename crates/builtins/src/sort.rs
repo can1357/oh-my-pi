@@ -5716,6 +5716,7 @@ fn uu_sort(host: &mut Host, matches: &ArgMatches, legacy_warnings: &[LegacyKeyWa
 
 	// check whether user specified a zero terminated list of files for input,
 	// otherwise read files from args
+	let mut check_name = None;
 	let mut files: Vec<OsString> = if matches.contains_id(options::FILES0_FROM) {
 		let files0_arg = matches
 			.get_one::<OsString>(options::FILES0_FROM)
@@ -5759,6 +5760,9 @@ fn uu_sort(host: &mut Host, matches: &ArgMatches, legacy_warnings: &[LegacyKeyWa
 				_ => {},
 			}
 
+			if check_name.is_none() {
+				check_name = Some(OsString::from(f));
+			}
 			files.push(host.resolve(OsStr::new(f)).into_os_string());
 		}
 		if files.is_empty() {
@@ -5771,6 +5775,9 @@ fn uu_sort(host: &mut Host, matches: &ArgMatches, legacy_warnings: &[LegacyKeyWa
 			.map(|values| {
 				values
 					.map(|file| {
+						if check_name.is_none() {
+							check_name = Some(file.clone());
+						}
 						if file == OsStr::new(STDIN_FILE) {
 							file.clone()
 						} else {
@@ -6018,6 +6025,15 @@ fn uu_sort(host: &mut Host, matches: &ArgMatches, legacy_warnings: &[LegacyKeyWa
 	settings.init_precomputed();
 
 	exec(&fs, &stdin_operand, &mut files, &settings, output, &mut tmp_dir, host.stderr_clone())
+		.map_err(|error| match error {
+			SortError::Disorder { line_number, line, silent, .. } => SortError::Disorder {
+				file: check_name.unwrap_or_else(|| OsString::from(STDIN_FILE)),
+				line_number,
+				line,
+				silent,
+			},
+			error => error,
+		})
 }
 
 fn uu_app() -> Command {
@@ -7143,6 +7159,26 @@ mod tests {
 		assert!(capture.err().contains("disorder"));
 
 		let (code, capture) = run_util::<Sort>(&["-C"], "beta\nalpha\n", "/");
+		assert_eq!(code, 1);
+		assert_eq!(capture.err(), "");
+	}
+
+	// Check diagnostics must name the input, not the temporary stdin spool.
+	#[test]
+	fn check_reports_original_operand_name() {
+		for args in [&["-c"][..], &["-c", "-"][..]] {
+			let (code, capture) = run_util::<Sort>(args, "1\n3\n2\n", "/");
+			assert_eq!(code, 1);
+			assert_eq!(capture.err(), "sort: -:3: disorder: 2\n");
+		}
+
+		let dir = tempfile::tempdir().expect("temp dir");
+		std::fs::write(dir.path().join("input"), "1\n3\n2\n").expect("fixture");
+		let (code, capture) = run_util::<Sort>(&["-c", "input"], "", dir.path());
+		assert_eq!(code, 1);
+		assert_eq!(capture.err(), "sort: input:3: disorder: 2\n");
+
+		let (code, capture) = run_util::<Sort>(&["-C"], "1\n3\n2\n", "/");
 		assert_eq!(code, 1);
 		assert_eq!(capture.err(), "");
 	}

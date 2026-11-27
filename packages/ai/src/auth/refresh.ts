@@ -144,6 +144,7 @@ export function mergeRefreshedCredential<T extends OAuthCredential>(current: T, 
 		enterpriseUrl: refreshed.enterpriseUrl ?? current.enterpriseUrl,
 		apiEndpoint: refreshed.apiEndpoint ?? current.apiEndpoint,
 		kiroProfileArn: refreshed.kiroProfileArn ?? current.kiroProfileArn,
+		dpopNonce: refreshed.dpopNonce ?? current.dpopNonce,
 		...mergeRefreshedOrganizationScope(current, refreshed),
 		authorizedAt: refreshed.authorizedAt ?? current.authorizedAt,
 		// Login states when the grant ends. A refresh may report a per-rotation

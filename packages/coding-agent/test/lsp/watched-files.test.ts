@@ -404,6 +404,43 @@ describe("WatchedFilesForwarder", () => {
 		},
 	);
 
+	// Windows watches through the native DirectoryWatcher, which `fs.watch` cannot stand in for.
+	it.skipIf(process.platform === "win32")(
+		"rescans after the watcher lost changes, reporting only files touched since its last change",
+		async () => {
+			const { root, sent, forwarder } = setup();
+			const deep = path.join(root, "src", "deep");
+			await fs.mkdir(deep, { recursive: true });
+			const untouched = path.join(deep, "untouched.ts");
+			fsSync.writeFileSync(untouched, "export {};\n");
+			const hourAgo = new Date(Date.now() - 3_600_000);
+			fsSync.utimesSync(untouched, hourAgo, hourAgo);
+			// Every watcher is muted, so only the rescan can report anything.
+			let lose: (() => void) | undefined;
+			const watch = fsSync.watch;
+			const spy = spyOn(fsSync, "watch").mockImplementation((...args: unknown[]) => {
+				const listener = args[2];
+				if (args[0] === root && typeof listener === "function") {
+					lose = () => Reflect.apply(listener, undefined, ["rename", null]);
+				}
+				args[2] = () => {};
+				return Reflect.apply(watch, fsSync, args);
+			});
+			cleanups.push(() => spy.mockRestore());
+			await forwarder.register("ts", {
+				watchers: [{ globPattern: { baseUri: fileToUri(root), pattern: "**/*.ts" } }],
+			});
+
+			const changed = path.join(deep, "changed.ts");
+			fsSync.writeFileSync(changed, "export {};\n");
+			expect(lose).toBeDefined();
+			lose?.();
+			await waitForEvent(sent, { uri: fileToUri(changed), type: FileChangeType.Created });
+			await Bun.sleep(QUIET_MS);
+			expect(sent.filter(change => change.uri === fileToUri(untouched))).toEqual([]);
+		},
+	);
+
 	it("does not report a file created and removed within one batch as existing", async () => {
 		const { root, sent, forwarder } = setup();
 		await forwarder.register("ts", { watchers: [{ globPattern: { baseUri: fileToUri(root), pattern: "**/*.ts" } }] });

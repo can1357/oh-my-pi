@@ -19,6 +19,7 @@ import { nodeState } from "@oh-my-pi/pi-tui/term/painters/state";
 import { defineRoleWidget } from "@oh-my-pi/pi-tui/term/widgets";
 import { padTo, sliceColumns, truncate, visibleWidth } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
+import { segmentGraphemes } from "@oh-my-pi/pi-utils/graphemes";
 import { bindingGlyph, keyGlyph } from "../panels/common";
 import { appExternalEditorKeys, appFollowUpKeys } from "../../../config/keybindings/matchers";
 import { canonicalKeyId } from "../../../config/keybindings/key-id";
@@ -270,8 +271,6 @@ interface TextRow {
 	readonly last: boolean;
 }
 
-const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
-
 /**
  * Word-wrap `text` to `width` cells. Blanks and every wide (CJK) grapheme are
  * break opportunities; blanks at a break vanish into it; a word wider than a
@@ -285,7 +284,7 @@ function layoutEditorText(text: string, width: number): TextRow[] {
 		const line = lines[l]!;
 		// Runs of blanks, runs of narrow non-blanks, and each wide grapheme alone.
 		const tokens: { start: number; end: number; width: number; blank: boolean; wide: boolean }[] = [];
-		for (const { segment, index } of graphemeSegmenter.segment(line)) {
+		for (const { segment, index } of segmentGraphemes(line)) {
 			const cells = Bun.stringWidth(segment);
 			const blank = /^\s+$/.test(segment);
 			const wide = !blank && cells >= 2;
@@ -323,7 +322,7 @@ function layoutEditorText(text: string, width: number): TextRow[] {
 				textEnd = token.end;
 				continue;
 			}
-			for (const { segment, index } of graphemeSegmenter.segment(line.slice(token.start, token.end))) {
+			for (const { segment, index } of segmentGraphemes(line.slice(token.start, token.end))) {
 				const cells = Bun.stringWidth(segment);
 				const at = token.start + index;
 				if (rowWidth + cells > width && rowWidth > 0) close(at === token.start ? textEnd : at, at);

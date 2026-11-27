@@ -679,6 +679,9 @@ pub(super) fn run(argv: &[OsString], host: &mut Host) -> i32 {
 	let bytes: Vec<_> = argv.iter().map(|arg| os_bytes_lossy(arg)).collect();
 	#[cfg(not(unix))]
 	let args: Vec<&[u8]> = bytes.iter().map(Cow::as_ref).collect();
+	// `%SIG{PIPE}` decides what a closed reader does ([`Interp::broken_pipe`]),
+	// not the host's emulated SIGPIPE.
+	host.ignore_sigpipe();
 	match startup(argv, &args, host) {
 		Ok(status) => status,
 		Err((message, status)) => {

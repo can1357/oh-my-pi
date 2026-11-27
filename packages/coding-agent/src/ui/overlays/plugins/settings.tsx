@@ -501,7 +501,7 @@ export function createPluginSettings(
 			{
 				id: "__enabled__",
 				label: "Enabled",
-				description: "Enable or disable this plugin",
+				description: "Enable or disable this plugin; running sessions keep it until restart",
 				value: plugin.enabled ? "true" : "false",
 				toggle: true,
 			},
@@ -578,7 +578,7 @@ export function createPluginSettings(
 			{
 				id: "__enabled__",
 				label: "Enabled",
-				description: "Enable or disable this marketplace plugin",
+				description: "Enable or disable this marketplace plugin; running sessions keep it until restart",
 				value: marketplaceEnabled(summary) ? "true" : "false",
 				toggle: true,
 			},

@@ -7,6 +7,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	acquireModelRoleMutation,
 	applyModelPreset,
+	applyModelPresetOverrides,
 	deleteModelPreset,
 	getModelPreset,
 	getModelPresetNames,
@@ -160,6 +161,56 @@ describe("model presets", () => {
 		expect({ ...settings.getModelRoles() }).toEqual({ default: OPUS });
 		expect(settings.getProjectModelRole("slow")).toBeUndefined();
 		expect(session.model?.id).toBe("claude-opus-4-5");
+	});
+
+	it("--preset style overrides replace the runtime roles without persisting", async () => {
+		const settings = await projectSettings({ project: `modelRoles:\n  slow: ${SONNET_46}\n` });
+		cfgModelPresets.setEntry(settings, "lean", {
+			modelRoles: { default: OPUS, smol: SONNET },
+			defaultThinkingLevel: Effort.Low,
+		});
+		settings.overrideModelRoles({ plan: SONNET_46 });
+
+		const result = applyModelPresetOverrides(settings, "lean");
+
+		expect(result).toEqual({ kind: "applied", defaultThinkingLevel: Effort.Low });
+		expect({ ...settings.getModelRoles() }).toEqual({ default: OPUS, smol: SONNET });
+		expect(cfgDefaultThinkingLevel.get(settings)).toBe(Effort.Low);
+		expect(settings.getGlobalModelRole("default")).toBeUndefined();
+		expect(settings.getProjectModelRole("slow")).toBe(SONNET_46);
+
+		// A later per-role flag (`--smol`) layers on top without resurrecting the hidden roles.
+		settings.overrideModelRoles({ smol: SONNET_46 });
+		expect({ ...settings.getModelRoles() }).toEqual({ default: OPUS, smol: SONNET_46 });
+	});
+
+	it("--preset reports a missing or malformed preset", async () => {
+		const settings = await projectSettings({ project: "modelPresets:\n  broken:\n    modelRoles: 5\n" });
+
+		expect(applyModelPresetOverrides(settings, "nope")).toEqual({ kind: "missing" });
+		expect(applyModelPresetOverrides(settings, "broken").kind).toBe("invalid");
+	});
+
+	it("--preset from a project config routes the run but never grants", async () => {
+		const settings = await projectSettings({
+			project: `modelPresets:\n  sneaky:\n    modelRoles:\n      default: ${OPUS}\n      review: ${SONNET_46}\n`,
+		});
+
+		expect(applyModelPresetOverrides(settings, "sneaky").kind).toBe("applied");
+		expect(settings.getModelRole("review")).toBe(SONNET_46);
+		expect(settings.grantAuthority().getModelRole("review")).toBeUndefined();
+
+		// An operator write to the role re-owns it, so it grants again.
+		settings.overrideModelRoles({ review: SONNET });
+		expect(settings.grantAuthority().getModelRole("review")).toBe(SONNET);
+	});
+
+	it("--preset from the global config grants like any operator override", async () => {
+		const settings = await projectSettings({});
+		cfgModelPresets.setEntry(settings, "deep", { modelRoles: { default: OPUS, review: SONNET_46 } });
+
+		expect(applyModelPresetOverrides(settings, "deep").kind).toBe("applied");
+		expect(settings.grantAuthority().getModelRole("review")).toBe(SONNET_46);
 	});
 
 	it("replaces --model style runtime role overrides like a model hub edit", async () => {

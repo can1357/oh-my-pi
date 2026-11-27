@@ -503,6 +503,29 @@ describe("provider catalog grammar", () => {
 		);
 	});
 
+	test("provider base-url compiles with an optional environment override", () => {
+		const compiled = compileProviders([
+			{
+				file: "providers/p.kdl",
+				text: provider("p", [
+					'\tdefault-model "m"',
+					'\tbase-url "https://api.example/v1" {\n\t\tenv "P_BASE_URL"\n\t}',
+				]),
+			},
+			{
+				file: "providers/q.kdl",
+				text: provider("q", ['\tdefault-model "m"', '\tbase-url "https://other.example/v1"']),
+			},
+		]);
+
+		expect(compiled.p).toMatchObject({
+			baseUrl: "https://api.example/v1",
+			baseUrlEnv: "P_BASE_URL",
+		});
+		expect(compiled.q).toMatchObject({ baseUrl: "https://other.example/v1" });
+		expect(compiled.q.baseUrlEnv).toBeUndefined();
+	});
+
 	test("runner seeds and per-kind APIs compile without entering the cascade", () => {
 		const model = (id: string, name: string, api?: string) =>
 			[
@@ -659,6 +682,8 @@ describe("committed rules.json", () => {
 	test("matches a fresh compile of rules/ (run `bun run gen:compat` after editing KDL)", async () => {
 		const fresh = await compileCompatRules(RULES_DIR);
 		expect(fresh).toEqual(committed);
+		const { hash, priceChanges: _dates, ...policy } = fresh;
+		expect(hash).toBe(Bun.hash(JSON.stringify(policy)).toString(36));
 		expect(await Bun.file(AUTH_IDS_PATH).text()).toBe(renderAuthIds(fresh.auth));
 	});
 });

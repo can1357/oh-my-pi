@@ -720,29 +720,34 @@ describe("AgentSession message pipeline", () => {
 		}
 	});
 
-	it("marks queued user steers without changing the public queue text", async () => {
-		const session = new AgentSession({
-			agent: createAgent(),
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry: {} as never,
-		});
-		sessions.push(session);
-		// #queueUserMessage schedules an idle-queue drain that would agent.continue()
-		// and pop the steer before we can inspect it; stub it out to observe the queue.
-		vi.spyOn(session.agent, "continue").mockResolvedValue(undefined);
+	it.each([true, false])(
+		"marks queued user steers without changing the public queue text (in-call: %s)",
+		async inCall => {
+			const session = new AgentSession({
+				agent: createAgent(),
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry: {} as never,
+			});
+			sessions.push(session);
+			// #queueUserMessage schedules an idle-queue drain that would agent.continue()
+			// and pop the steer before we can inspect it; stub it out to observe the queue.
+			vi.spyOn(session.agent, "continue").mockResolvedValue(undefined);
 
-		await session.sendUserMessage("raw <steer> &", { deliverAs: "steer" });
+			if (inCall) session.activeVoiceCall = Symbol("live call");
+			await session.sendUserMessage("raw <steer> &", { deliverAs: "steer" });
 
-		expect(session.getQueuedMessages().steering).toEqual(["raw <steer> &"]);
-		const queued = session.agent.popLastSteer();
-		if (queued?.role !== "user") {
-			throw new Error("Expected queued user steer");
-		}
-		expect(queued.steering).toBe(true);
-		expect(queued.content).toEqual([{ type: "text", text: "raw <steer> &" }]);
-		session.clearQueue();
-	});
+			expect(session.getQueuedMessages().steering).toEqual(["raw <steer> &"]);
+			const queued = session.agent.popLastSteer();
+			if (queued?.role !== "user") {
+				throw new Error("Expected queued user steer");
+			}
+			expect(queued.steering).toBe(true);
+			expect(queued.content).toEqual([{ type: "text", text: "raw <steer> &" }]);
+			expect(queued.duringLiveCall).toBe(inCall ? true : undefined);
+			session.clearQueue();
+		},
+	);
 
 	it("resolves image attachments from submitted messages, not tool-result images", () => {
 		const userImage: ImageContent = { type: "image", data: "user-image", mimeType: "image/png" };

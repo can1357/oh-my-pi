@@ -168,4 +168,23 @@ describe("OAuthCallbackFlow loopback address families", () => {
 		expect(flow.lastRedirectUri).toBe(`http://localhost:${port}/callback`);
 		expect(progress.some(msg => msg.includes("unavailable"))).toBe(false);
 	});
+
+	it("serves IPv4 loopback when interface enumeration is denied", async () => {
+		// Android blocks getifaddrs for apps, so networkInterfaces() throws (issue #16127).
+		vi.spyOn(os, "networkInterfaces").mockImplementation(() => {
+			throw Object.assign(new Error("A system error occurred: getifaddrs returned an error"), {
+				code: "ERR_SYSTEM_ERROR",
+			});
+		});
+
+		const port = freeLoopbackPort();
+		const cancel = new AbortController();
+		const flow = new TestCallbackFlow(
+			{ onAuth: () => cancel.abort("advertised"), signal: cancel.signal },
+			{ preferredPort: port },
+		);
+
+		await expect(flow.login()).rejects.toThrow();
+		expect(flow.lastRedirectUri).toBe(`http://localhost:${port}/callback`);
+	});
 });

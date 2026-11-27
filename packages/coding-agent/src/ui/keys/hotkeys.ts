@@ -87,6 +87,16 @@ export function hotkeyGroups(keybindings: KeybindingsManager): HotkeyGroup[] {
 				...exitRows,
 				{ keys: [act("app.suspend")], action: "Suspend to background" },
 				{ keys: [act("app.display.reset")], action: "Reset terminal display" },
+				{
+					keys: [act("app.transcript.pageUp"), { text: " / " }, act("app.transcript.pageDown")],
+					action: "Scroll the transcript a page (fullscreen screen)",
+				},
+				{
+					keys: [act("app.transcript.top"), { text: " / " }, act("app.transcript.bottom")],
+					action: "Transcript start / end and follow (fullscreen screen)",
+				},
+				{ keys: [act("app.transcript.search")], action: "Find text in the fullscreen transcript" },
+				{ keys: [act("app.transcript.copySelection")], action: "Copy selected fullscreen transcript text" },
 				{ keys: [act("app.thinking.cycle")], action: "Cycle thinking level" },
 				{ keys: [act("app.model.cycleForward")], action: "Cycle role models (slow/default/smol)" },
 				{ keys: [act("app.model.cycleBackward")], action: "Cycle role models (backward)" },
