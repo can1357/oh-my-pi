@@ -55,7 +55,7 @@ export interface ExternalAgentHandle {
 	/** Report its state, current activity, and observed model or reasoning level. Ignored once it settled. */
 	update(patch: { status?: "running" | "idle"; progress?: string; model?: string; thinking?: string }): void;
 	/**
-	 * Settle it and deliver `text` to the owning agent, cut to the inline output cap like an extension job's result.
+	 * Settle it and deliver `text` to the owning agent, cut to `tools.artifactSpillThreshold` like an extension job's result.
 	 * Only the first call counts, and none after a cancel.
 	 */
 	complete(result: { status: "done" | "failed" | "cancelled"; text: string }): void;
