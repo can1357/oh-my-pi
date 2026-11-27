@@ -10,10 +10,11 @@ import { createDraft } from "@oh-my-pi/pi-coding-agent/commit/selective/draft";
 import { ChangeJournal, type JournalRecord } from "@oh-my-pi/pi-coding-agent/commit/selective/journal";
 import { createCommitPrelude } from "@oh-my-pi/pi-coding-agent/commit/selective/prelude-definition";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { getEnabledEvalPreludes } from "@oh-my-pi/pi-coding-agent/eval/preludes";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { $which, removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const tempDirs: string[] = [];
 
@@ -37,6 +38,21 @@ async function git(cwd: string, args: readonly string[], extraEnv: Record<string
 		proc.exited,
 	]);
 	if (code !== 0) throw new Error(`git ${args.join(" ")} failed (${code}): ${err}`);
+	return out;
+}
+
+const jjBinary = $which("jj");
+
+async function jj(cwd: string, args: readonly string[]): Promise<string> {
+	if (!jjBinary) throw new Error("jj skip guard failed");
+	const env = { ...process.env, JJ_CONFIG: path.join(cwd, ".git", "omp-jj.toml") };
+	const proc = Bun.spawn([jjBinary, ...args], { cwd, env, stdout: "pipe", stderr: "pipe" });
+	const [out, err, code] = await Promise.all([
+		new Response(proc.stdout).text(),
+		new Response(proc.stderr).text(),
+		proc.exited,
+	]);
+	if (code !== 0) throw new Error(`jj ${args.join(" ")} failed (${code}): ${err}`);
 	return out;
 }
 
@@ -81,10 +97,12 @@ async function installSubjectRewriteHook(root: string): Promise<void> {
 const CHANGELOG = "# Changelog\n\n## [Unreleased]\n\n### Fixed\n\n- Fixed an old bug\n";
 
 /** Repository without commits, and a writer that edits files the way agent edit tools do: journaled. */
-async function emptyRepo() {
-	const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-selective-"));
+async function emptyRepo(parent?: string) {
+	const root = await fs.mkdtemp(path.join(parent ?? os.tmpdir(), "omp-selective-"));
 	const artifacts = await fs.mkdtemp(path.join(os.tmpdir(), "omp-selective-artifacts-"));
-	tempDirs.push(root, artifacts);
+	// A nested repository is cleaned up with its parent.
+	if (!parent) tempDirs.push(root);
+	tempDirs.push(artifacts);
 	await git(root, ["init", "-q", "-b", "main"]);
 	await git(root, ["config", "user.email", "test@example.com"]);
 	await git(root, ["config", "user.name", "Test"]);
@@ -162,6 +180,56 @@ async function sharedWorkspace() {
 }
 
 describe("selective commit flow", () => {
+	it.skipIf(!jjBinary)("refuses snapshotted colocated JJ changes but still commits in nested Git", async () => {
+		const { root, artifacts, journal, write } = await emptyRepo();
+		await Bun.write(path.join(root, "a.txt"), "one\n");
+		await git(root, ["add", "a.txt"]);
+		await git(root, ["commit", "-qm", "base"]);
+		await write("Main", undefined, "a.txt", "one\ntwo\n");
+		await journal.flush();
+		const staleDraft = await createDraft({ cwd: root, journal, caller: "Main" });
+		expect(staleDraft.selection()).toHaveLength(1);
+		const session: ToolSession = {
+			cwd: root,
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => null,
+			getArtifactsDir: () => artifacts,
+			getAgentId: () => "Main",
+			settings: Settings.isolated({ "commit.enabled": true }),
+		};
+		const prelude = createCommitPrelude(session);
+		expect(getEnabledEvalPreludes([prelude])).toEqual([prelude]);
+
+		await Bun.write(path.join(root, ".git", "omp-jj.toml"), '[user]\nname = "Test"\nemail = "test@example.com"\n');
+		await jj(root, ["git", "init", "--colocate", "."]);
+		await jj(root, ["status"]);
+		expect((await jj(root, ["--ignore-working-copy", "diff", "-r", "@", "--name-only"])).trim()).toBe("a.txt");
+		const before = (await git(root, ["rev-parse", "HEAD"])).trim();
+
+		expect(getEnabledEvalPreludes([prelude])).toEqual([]);
+		await expect(createDraft({ cwd: root, journal, caller: "Main" })).rejects.toThrow(/Jujutsu.*`jj`/);
+		await expect(
+			commitSelection(staleDraft, { subject: "describe the edit" }, { journal, agent: { agent: "Main" } }),
+		).rejects.toThrow(/Jujutsu.*`jj`/);
+		expect((await git(root, ["rev-parse", "HEAD"])).trim()).toBe(before);
+
+		const nested = await emptyRepo(root);
+		const nestedPrelude = createCommitPrelude({ ...session, cwd: nested.root });
+		expect(getEnabledEvalPreludes([nestedPrelude])).toEqual([nestedPrelude]);
+		await nested.write("Main", undefined, "b.txt", "independent\n");
+		await nested.journal.flush();
+		const draft = await createDraft({ cwd: nested.root, journal: nested.journal, caller: "Main" });
+		const result = await commitSelection(
+			draft,
+			{ subject: "commit in the nested Git repository" },
+			{ journal: nested.journal, agent: { agent: "Main" } },
+		);
+		expect((await git(nested.root, ["rev-parse", "HEAD"])).trim()).toBe(result.sha);
+		expect(await git(nested.root, ["show", "HEAD:b.txt"])).toBe("independent\n");
+		expect((await git(root, ["rev-parse", "HEAD"])).trim()).toBe(before);
+	});
+
 	it("commits an inserted statement before a return changed only in the worktree", async () => {
 		const { root, journal, write } = await emptyRepo();
 		const file = "value.luau";

@@ -9,7 +9,7 @@ import { resolveOutputMaxColumns } from "../../tools/output-meta";
 import { resolveToCwd } from "../../tools/path-utils";
 import { cfgCommitEnabled } from "../../tools/settings";
 import { commitSelection } from "./apply";
-import { createDraft, type Draft, type ScopeSpec } from "./draft";
+import { createDraft, type Draft, isJujutsuSelectiveWorkspace, type ScopeSpec } from "./draft";
 import { ChangeJournal } from "./journal";
 // @ts-expect-error Bun imports this JavaScript source as text instead of evaluating its module shape.
 import commitJavascript from "./prelude.js" with { type: "text" };
@@ -185,7 +185,7 @@ export function createCommitPrelude(session: ToolSession): HostEvalPreludeDefini
 		javascript: commitJavascript,
 		python: commitPython,
 		exports: ["commit"],
-		enabled: () => cfgCommitEnabled.get(session.settings) === true,
+		enabled: () => cfgCommitEnabled.get(session.settings) === true && !isJujutsuSelectiveWorkspace(session.cwd),
 		approval: parameters => {
 			const parsed = paramsSchema(parameters);
 			return parsed instanceof type.errors || parsed.action === "commit" ? "exec" : "read";

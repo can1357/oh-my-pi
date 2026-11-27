@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Selective commits now direct agents to use `jj` in Jujutsu workspaces instead of leaving duplicate working-copy changes in colocated repositories ([#19815](https://github.com/can1357/oh-my-pi/issues/19815), reported by [@adamcstephens](https://github.com/adamcstephens)) ([#20462](https://github.com/can1357/oh-my-pi/pull/20462) by [@J4ck1e2000](https://github.com/J4ck1e2000)).
 ### Breaking Changes
 
 - Removed the `cwd` parameter from the `bash` tool; a leading `cd <path> && …` still selects the working directory

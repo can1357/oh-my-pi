@@ -1,5 +1,6 @@
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { errorMessage, prompt } from "@oh-my-pi/pi-utils";
+import { assertGitSelectiveWorkspace } from "../commit/selective/draft";
 import { draftFor } from "../commit/selective/prelude-definition";
 import commitRequestTemplate from "../prompts/commit-request.md" with { type: "text" };
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
@@ -18,10 +19,11 @@ export const BUILTIN_COMMIT_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		inlineHint: "[instructions]",
 		allowArgs: true,
 		handle: async (command, runtime) => {
-			if (!runtime.session.getAdvertisedEvalPreludes().some(prelude => prelude.name === "commit")) {
-				return usage("/commit needs the eval tool and the `commit.enabled` setting.", runtime);
-			}
 			try {
+				assertGitSelectiveWorkspace(runtime.cwd);
+				if (!runtime.session.getAdvertisedEvalPreludes().some(prelude => prelude.name === "commit")) {
+					return usage("/commit needs the eval tool and the `commit.enabled` setting.", runtime);
+				}
 				const draft = await draftFor({
 					cwd: runtime.cwd,
 					artifactsDir: runtime.sessionManager.getArtifactsDir(),

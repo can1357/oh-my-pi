@@ -13,6 +13,7 @@
  * Scope: by default the calling agent plus its subagents; `"self"` for the caller alone, `"*"`
  * for every agent of the session, or agent ids (each with its own subagents).
  */
+import { realpathSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { VcsGitRepo } from "@oh-my-pi/pi-natives";
@@ -262,12 +263,31 @@ interface PendingFile {
 	finish(cleaned: readonly Uint8Array[]): Promise<FileChange | undefined>;
 }
 
+/** The nearest workspace owns the working copy, including equal-root Git/Jujutsu ties. */
+export function isJujutsuSelectiveWorkspace(cwd: string): boolean {
+	let directory = cwd;
+	try {
+		// Native JJ discovery walks lexical parents; follow symlinks into the owning workspace.
+		directory = realpathSync.native(cwd);
+	} catch {
+		// Let VCS discovery handle paths that cannot be resolved.
+	}
+	return vcs.repoForDisplay(directory)?.kind() === "jj";
+}
+
+/** A direct Git HEAD update cannot preserve a snapshotted Jujutsu working-copy change. */
+export function assertGitSelectiveWorkspace(cwd: string): void {
+	if (isJujutsuSelectiveWorkspace(cwd)) {
+		throw new Error("Selective commits cannot preserve a Jujutsu working copy; use `jj` to commit in this workspace.");
+	}
+}
+
 /**
  * Build a draft of the repository's current changes for the agents in scope.
- * @throws when `cwd` is not inside a git checkout or the scope names an unknown agent.
+ * @throws when `cwd` is outside Git, is owned by Jujutsu, or the scope names an unknown agent.
  */
 export async function createDraft(source: DraftSource): Promise<Draft> {
-	if (vcs.isPureJj(source.cwd)) throw new Error("Selective commits need git; this is a Jujutsu workspace.");
+	assertGitSelectiveWorkspace(source.cwd);
 	const repo = vcs.git(source.cwd);
 	if (!repo) throw new Error(`Not inside a git repository: ${source.cwd}`);
 	const root = repo.info().repoRoot;
