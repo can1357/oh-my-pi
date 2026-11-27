@@ -64,18 +64,16 @@ const COALESCE_MIN_CHARS = 400;
 /** Bounded rewrite concurrency across utterances. */
 const MAX_REWRITES_IN_FLIGHT = 2;
 
+/**
+ * How long a cloud speech model that failed permanently (missing key, 4xx) is
+ * skipped. Bounded rather than session-long so a fixed key or `models.yml` takes
+ * effect without a restart, while a broken model costs one request per window.
+ */
+const CLOUD_FAILURE_COOLDOWN_MS = 5 * 60_000;
+
 /** Registry surface the vocalizer resolves the speech role and cloud credentials through. */
 export interface VocalizerRegistry extends ModelBrowserRegistry {
 	resolver(model: Model<Api>, sessionId?: string): ApiKeyResolver;
-	/** Credential snapshot; a new generation (login, key change) lifts session exclusions. */
-	readonly authStorage: { readonly credentials: { readonly generation: number } };
-}
-
-/** Permanently failed cloud models and the configuration they failed under. */
-interface CloudExclusions {
-	readonly catalog: object | undefined;
-	readonly credentials: number;
-	readonly labels: Set<string>;
 }
 
 export interface VocalizerModelSource {
@@ -87,13 +85,9 @@ export interface VocalizerModelSource {
 
 /** Resolve the first speech-role candidate that the local streaming worker can run. */
 export function resolveLocalSpeechModelId(source: VocalizerModelSource): string {
-	const pool = roleCandidatePool("speech", source.settings, source.registry);
-	const local = resolveRoleChain("speech", source.settings, pool).find(
-		candidate =>
-			candidate.model.api === "local-inference" &&
-			(!cfgOffline.get(source.settings) || candidate.model.provider === source.getSessionProvider?.()),
+	return (
+		resolveVocalizerSpeechChain(source).find(model => model.api === "local-inference")?.id ?? TTS_LOCAL_MODELS[0].key
 	);
-	return local?.model.id ?? TTS_LOCAL_MODELS[0].key;
 }
 
 /**
@@ -157,12 +151,8 @@ export class Vocalizer {
 	#enhancer: SpeechEnhancer | null = null;
 	/** Live per-session settings and registry used to resolve the speech role. */
 	#modelSource: VocalizerModelSource | null = null;
-	/**
-	 * Cloud speech models (`provider/id`) that failed permanently in this session,
-	 * with the catalog revision and credential generation they failed under.
-	 * Reset with the model source, and when either of those changes.
-	 */
-	#cloudExclusions: CloudExclusions | null = null;
+	/** Cloud speech models (`provider/id`) that failed permanently, mapped to when they may be tried again. */
+	#cloudCooldowns = new Map<string, number>();
 	/** Fires when the delta stream goes quiet mid-sentence; speaks the partial. */
 	#idleTimer: NodeJS.Timeout | null = null;
 	/** Abort controllers of every not-yet-finished utterance; all aborted on {@link clear}. */
@@ -193,23 +183,7 @@ export class Vocalizer {
 	setModelSource(source: VocalizerModelSource | null): void {
 		this.clear();
 		this.#modelSource = source;
-		this.#cloudExclusions = null;
-	}
-
-	/**
-	 * Permanent-failure exclusions for the registry's current configuration: a
-	 * catalog reload (fixed `models.yml`) or a credential change (login, new key)
-	 * can repair a model, so either one starts a fresh set. The returned object is
-	 * also the epoch token a request records before it is sent.
-	 */
-	#currentExclusions(registry: VocalizerRegistry): CloudExclusions {
-		const catalog = registry.catalogRevision;
-		const credentials = registry.authStorage.credentials.generation;
-		const current = this.#cloudExclusions;
-		if (current && current.catalog === catalog && current.credentials === credentials) return current;
-		const next: CloudExclusions = { catalog, credentials, labels: new Set() };
-		this.#cloudExclusions = next;
-		return next;
+		this.#cloudCooldowns.clear();
 	}
 
 	/** Stop any active local synthesis when the session provider no longer permits it. */
@@ -463,8 +437,14 @@ export class Vocalizer {
 		const sessionSettings = source?.settings ?? settings;
 		const voice = cfgSpeechVoice.get(sessionSettings) || DEFAULT_TTS_VOICE;
 		const speed = cfgSpeechSpeed.get(sessionSettings);
-		const chain = source ? resolveVocalizerSpeechChain(source) : [];
+		const now = Date.now();
+		const chain = source
+			? resolveVocalizerSpeechChain(source).filter(
+					model => (this.#cloudCooldowns.get(`${model.provider}/${model.id}`) ?? 0) <= now,
+				)
+			: [];
 		const first = chain[0];
+		// A local head streams through the worker; a cloud head synthesizes per segment.
 		const handle =
 			source && first && first.api !== "local-inference"
 				? createCloudSpeechStream({
@@ -472,15 +452,8 @@ export class Vocalizer {
 						resolveApiKey: model => source.registry.resolver(model, source.sessionId),
 						localVoice: voice,
 						localSpeed: speed,
-						excluded: {
-							has: label => this.#currentExclusions(source.registry).labels.has(label),
-							epoch: () => this.#currentExclusions(source.registry),
-							add: (label, epoch) => {
-								// A failure sent under an older configuration says nothing about the repaired one.
-								const current = this.#currentExclusions(source.registry);
-								if (current === epoch) current.labels.add(label);
-							},
-						},
+						onPermanentFailure: model =>
+							this.#cloudCooldowns.set(`${model.provider}/${model.id}`, Date.now() + CLOUD_FAILURE_COOLDOWN_MS),
 						signal: abort.signal,
 					})
 				: ttsClient.synthesizeStream(first?.id ?? TTS_LOCAL_MODELS[0].key, { voice, speed, signal: abort.signal });

@@ -1,23 +1,15 @@
 /**
- * Cloud speech session for the vocalizer: the same {@link TtsStreamHandle}
- * contract as the local worker stream, backed by the speech role chain.
+ * Cloud speech session for the vocalizer: the {@link TtsStreamHandle} contract
+ * of the local worker stream, backed by the vocalizer's speech chain.
  *
- * Each pushed segment is synthesized as WAV through the active candidate and
- * decoded to PCM, strictly in push order. A failing candidate is dropped for
- * the rest of the utterance and the segment retries on the next one; a
- * `local-inference` candidate later in the chain synthesizes on-device. A
- * permanent failure (missing key, 4xx other than 408/425/429, audio that is not
- * WAV) is also recorded in the caller's `excluded` set, so later utterances
- * skip that model instead of paying its latency again; other failures (network,
- * 5xx, 408, 425, 429, a request the model rejected before sending it) are
- * retried on the next utterance. A JSON error body sent with a 2xx status
- * arrives from pi-ai as a `ProviderHttpError` and is classified the same way.
- * When every candidate has failed the stream closes, so playback ends instead
- * of stalling.
+ * Segments are synthesized as WAV through the active candidate in push order;
+ * synthesis of the next segment overlaps playback of the current one. A failing
+ * candidate is dropped for the rest of the utterance and the segment moves on to
+ * the next one; a `local-inference` candidate synthesizes on-device. When every
+ * candidate has failed the stream closes, so playback ends instead of stalling.
  *
- * The player runs at one rate per utterance, so every chunk is resampled to
- * the rate of the utterance's first chunk when fail-over lands on a model
- * that returns another rate.
+ * The player runs at one rate per utterance, so every chunk is resampled to the
+ * rate of the utterance's first chunk.
  */
 import type { Api, ApiKeyResolver, Model } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
@@ -27,24 +19,15 @@ import { AudioChunkChannel, type TtsAudio, type TtsStreamHandle, ttsClient } fro
 import { decodeWav, resamplePcm } from "./wav";
 
 export interface CloudSpeechStreamOptions {
-	/** Vocalizer chain in attempt order: cloud speech models, optionally followed by local ones. */
+	/** Candidates in attempt order: cloud speech models, optionally followed by local ones. */
 	chain: readonly Model<Api>[];
 	resolveApiKey(model: Model<Api>): ApiKeyResolver;
-	/** Local voice/speed for a local candidate reached by fail-over. */
+	/** Voice and speed for a local candidate. */
 	localVoice: string;
 	localSpeed: number;
-	/** Models that failed permanently earlier in the session; this stream adds to it. */
-	excluded: SpeechModelExclusions;
+	/** A cloud model failed in a way that retrying cannot fix without a configuration change. */
+	onPermanentFailure(model: Model<Api>): void;
 	signal: AbortSignal;
-}
-
-/** Speech models skipped after a permanent failure, keyed by `provider/id`. */
-export interface SpeechModelExclusions {
-	has(label: string): boolean;
-	/** Token for the configuration (catalog and credentials) a request is sent under. */
-	epoch(): object;
-	/** Exclude `label` unless the configuration changed since `epoch`, which may have repaired it. */
-	add(label: string, epoch: object): void;
 }
 
 /** Thrown when a candidate answered with audio the vocalizer cannot decode. */
@@ -52,102 +35,100 @@ class UndecodableSpeechError extends Error {
 	override readonly name = "UndecodableSpeechError";
 }
 
-/** HTTP statuses that may succeed when the same request is sent again. */
+/** Client statuses that may succeed when the same request is sent again. */
 const TRANSIENT_CLIENT_STATUSES = new Set([408, 425, 429]);
 
-/** Whether retrying `error` on a later utterance cannot succeed without a configuration change. */
+/**
+ * Missing key, undecodable audio, or a non-transient 4xx. A `ValidationError`
+ * is not permanent: it can come from one segment (a length limit), not the model.
+ */
 function isPermanentSpeechFailure(error: unknown): boolean {
-	// A ValidationError is left out: it can come from one segment (a length limit) rather than the model.
 	if (error instanceof AIError.MissingApiKeyError || error instanceof UndecodableSpeechError) return true;
-	const status = error instanceof AIError.ProviderHttpError ? error.status : undefined;
-	return status !== undefined && status >= 400 && status < 500 && !TRANSIENT_CLIENT_STATUSES.has(status);
+	if (!(error instanceof AIError.ProviderHttpError)) return false;
+	return error.status >= 400 && error.status < 500 && !TRANSIENT_CLIENT_STATUSES.has(error.status);
 }
 
+const modelLabel = (model: Model<Api>): string => `${model.provider}/${model.id}`;
+
 export function createCloudSpeechStream(options: CloudSpeechStreamOptions): TtsStreamHandle {
-	const { chain, excluded, signal } = options;
+	const { chain, signal } = options;
+	const channel = new AudioChunkChannel(() => signal.removeEventListener("abort", close));
 	let active = 0;
 	let index = 0;
-	let closed = false;
 	let sampleRate: number | undefined;
 	let tail = Promise.resolve();
-	const close = (): void => {
-		closed = true;
+	function close(): void {
 		channel.close();
-	};
-	const channel = new AudioChunkChannel(() => signal.removeEventListener("abort", close));
+	}
 	if (signal.aborted) close();
 	else signal.addEventListener("abort", close, { once: true });
 
+	const synthesizeWith = async (model: Model<Api>, text: string): Promise<TtsAudio> => {
+		if (model.api === "local-inference") {
+			const audio = await ttsClient.synthesize(model.id, text, {
+				voice: options.localVoice,
+				speed: options.localSpeed,
+				signal,
+			});
+			if (!audio) throw new Error("local synthesis returned no audio");
+			return audio;
+		}
+		const { audio } = await synthesizeSpeech(
+			model,
+			{ text, format: "wav" },
+			{ apiKey: options.resolveApiKey(model), signal },
+		);
+		try {
+			return decodeWav(audio);
+		} catch (error) {
+			throw new UndecodableSpeechError(error instanceof Error ? error.message : String(error));
+		}
+	};
+
 	const synthesizeSegment = async (text: string): Promise<TtsAudio | null> => {
-		let attempted = false;
 		for (; active < chain.length; active += 1) {
 			const model = chain[active]!;
-			const label = `${model.provider}/${model.id}`;
-			if (excluded.has(label)) continue;
-			attempted = true;
-			const epoch = excluded.epoch();
 			try {
-				if (model.api === "local-inference") {
-					const audio = await ttsClient.synthesize(model.id, text, {
-						voice: options.localVoice,
-						speed: options.localSpeed,
-						signal,
-					});
-					if (audio) return audio;
-					throw new Error("local synthesis returned no audio");
-				}
-				const result = await synthesizeSpeech(
-					model,
-					{ text, format: "wav" },
-					{ apiKey: options.resolveApiKey(model), signal },
-				);
-				try {
-					return decodeWav(result.audio);
-				} catch (error) {
-					throw new UndecodableSpeechError(error instanceof Error ? error.message : String(error));
-				}
+				return await synthesizeWith(model, text);
 			} catch (error) {
 				if (signal.aborted) return null;
 				const message = error instanceof Error ? error.message : String(error);
 				if (model.api !== "local-inference" && isPermanentSpeechFailure(error)) {
-					excluded.add(label, epoch);
-					logger.warn("vocalizer: speech model failed permanently; skipping it for this session", {
-						model: label,
-						error: message,
-					});
+					options.onPermanentFailure(model);
+					logger.warn("vocalizer: speech model failed permanently", { model: modelLabel(model), error: message });
 				} else {
-					logger.debug("vocalizer: speech candidate failed", { model: label, error: message });
+					logger.debug("vocalizer: speech candidate failed", { model: modelLabel(model), error: message });
 				}
 			}
 		}
-		// Exhaustion caused only by models already excluded this session was reported when they failed.
-		if (attempted) {
-			logger.warn("vocalizer: every speech model failed; the rest of the utterance is silent", {
-				chain: chain.map(model => `${model.provider}/${model.id}`),
-			});
-		}
+		logger.warn("vocalizer: every speech model failed; the rest of the utterance is silent", {
+			chain: chain.map(modelLabel),
+		});
 		return null;
 	};
 
 	return {
 		push(text: string): void {
-			if (closed) return;
+			if (signal.aborted || active >= chain.length) return;
 			const segmentIndex = index++;
 			tail = tail.then(async () => {
-				if (closed) return;
+				if (signal.aborted || active >= chain.length) return;
 				const audio = await synthesizeSegment(text);
-				if (closed) return;
 				if (!audio) {
 					close();
 					return;
 				}
 				sampleRate ??= audio.sampleRate;
-				const pcm = resamplePcm(audio.pcm, audio.sampleRate, sampleRate);
-				channel.push({ index: segmentIndex, text, pcm, sampleRate });
+				channel.push({
+					index: segmentIndex,
+					text,
+					pcm: resamplePcm(audio.pcm, audio.sampleRate, sampleRate),
+					sampleRate,
+				});
 			});
 		},
 		end(): void {
-			tail = tail.then(() => channel.close());
+			tail = tail.then(close);
 		},
 		chunks: channel.iterator(),
 	};

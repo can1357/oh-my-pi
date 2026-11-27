@@ -78,25 +78,15 @@ export function resolveSpeechCandidates(
 }
 
 /**
- * Rewrite `outputPath` to a sibling ending in `.${codec}` when it names another
- * container, flagged so the tool result can note the substitution.
+ * `outputPath`, or its sibling ending in `.${codec}` when it names another
+ * container. Local output is always WAV (no MP3 encoder is bundled).
  */
-export function resolveCodecPath(outputPath: string, codec: TtsCodec): { path: string; substituted: boolean } {
-	if (outputPath.toLowerCase().endsWith(`.${codec}`)) return { path: outputPath, substituted: false };
+function resolveCodecPath(outputPath: string, codec: TtsCodec): string {
+	if (outputPath.toLowerCase().endsWith(`.${codec}`)) return outputPath;
 	const slash = Math.max(outputPath.lastIndexOf("/"), outputPath.lastIndexOf("\\"));
 	const dot = outputPath.lastIndexOf(".");
 	const base = dot > slash ? outputPath.slice(0, dot) : outputPath;
-	return { path: `${base}.${codec}`, substituted: true };
-}
-
-/**
- * Resolve the on-disk path for local synthesis. Local output is always WAV (no
- * MP3 encoder is bundled), so an `.mp3` (or any non-`.wav`) request is rewritten
- * to a sibling `.wav` and flagged so the tool result can note the substitution.
- */
-export function resolveLocalWavPath(outputPath: string): { wavPath: string; substituted: boolean } {
-	const { path, substituted } = resolveCodecPath(outputPath, "wav");
-	return { wavPath: path, substituted };
+	return `${base}.${codec}`;
 }
 
 /**
@@ -104,7 +94,7 @@ export function resolveLocalWavPath(outputPath: string): { wavPath: string; subs
  * model returns it, else the other codec the tool writes (a wav-only Gemini TTS
  * asked for MP3 returns WAV), else `undefined` when it returns neither.
  */
-export function resolveCloudCodec(model: Model, requested: TtsCodec): TtsCodec | undefined {
+function resolveCloudCodec(model: Model, requested: TtsCodec): TtsCodec | undefined {
 	if (speechModelSupportsFormat(model, requested)) return requested;
 	const other: TtsCodec = requested === "mp3" ? "wav" : "mp3";
 	return speechModelSupportsFormat(model, other) ? other : undefined;
@@ -185,7 +175,8 @@ async function synthesizeLocal(
 		};
 	}
 
-	const { wavPath, substituted } = resolveLocalWavPath(outputPath);
+	const wavPath = resolveCodecPath(outputPath, "wav");
+	const substituted = wavPath !== outputPath;
 	const wav = encodeWav(audio.pcm, audio.sampleRate);
 	assertNotHeldOpen(wavPath);
 	await Bun.write(wavPath, wav);
@@ -248,10 +239,10 @@ export const ttsTool: CustomTool<typeof ttsSchema, TtsToolDetails> = {
 				if (model.api === "xai-tts" || model.api === "openai-speech") {
 					const modelCodec = resolveCloudCodec(model, codec);
 					if (!modelCodec) {
-						failures.push(`${model.provider}/${model.id}: returns only ${model.speechFormats?.join(", ")}`);
+						failures.push(`${model.provider}/${model.id}: returns neither MP3 nor WAV`);
 						continue;
 					}
-					const cloudPath = modelCodec === codec ? outputPath : resolveCodecPath(outputPath, modelCodec).path;
+					const cloudPath = modelCodec === codec ? outputPath : resolveCodecPath(outputPath, modelCodec);
 					return await synthesizeCloud(
 						model,
 						params,
