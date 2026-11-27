@@ -94,7 +94,7 @@ import {
 	cfgToolsCommandNotices,
 } from "../tools/settings";
 import type { LocalProtocolOptions } from "../internal-urls";
-import { SPECIAL_TOOL_NAMES, specialToolApplies } from "../tools";
+import { SPECIAL_TOOL_NAMES, specialToolApplies } from "../tools/special-tools";
 
 /**
  * Registered tools a mode may activate mid-session that `active` leaves out, for {@link Agent.setStandbyTools}:

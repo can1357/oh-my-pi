@@ -62,7 +62,15 @@ describe("startup composer prepaint graph", () => {
 			/coding-agent\/src\/sdk\.ts$/,
 			/coding-agent\/src\/tools\/index\.ts$/,
 		]);
-		expectGraphExcludes(await importedModules("src/sdk.ts"), featureOnly);
+		expectGraphExcludes(await importedModules("src/sdk.ts"), [
+			...featureOnly,
+			// Session construction needs built-in factories and owner hooks, not the public
+			// tools barrel, the browser action evaluator, or the optional desktop supervisor.
+			/coding-agent\/src\/tools\/index\.ts$/,
+			/tools\/browser\/actions\.ts$/,
+			/tools\/browser\/aria\/aria-snapshot\.bundle\.txt$/,
+			/tools\/computer\/supervisor\.ts$/,
+		]);
 		expectGraphExcludes(await importedModules("src/cursor.ts"), [/coding-agent\/src\/(sdk|tools\/index)\.ts$/]);
 	});
 });

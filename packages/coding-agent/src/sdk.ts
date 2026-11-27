@@ -96,8 +96,8 @@ import type { CursorMcpResourceAdapter } from "./cursor";
 import type * as CursorBridgeTools from "./cursor-bridge-tools";
 import { daemonMutex } from "./daemon/modules/mutex";
 import "./discovery";
-import { resolveProviderFileCredential } from "./blob-broker/provider-files";
-import { LiveImageUrlService } from "./blob-broker/service";
+import { LiveImageUrlService } from "./blob-broker/live-service";
+import { resolveProviderFileCredential } from "./blob-broker/provider-file-credential";
 import { wrapStreamFnWithBlobUrlFallback } from "./blob-broker/stream-fallback";
 import { initializeWithSettings } from "./discovery";
 import { setInvocationConfiguredExtensions, withOmpExtensionRootScope } from "./discovery/omp-extension-roots";
@@ -322,44 +322,42 @@ import {
 	toReasoningEffort,
 } from "./thinking/levels";
 import { type ConfiguredThinkingLevel } from "./utils/render-utils";
+import { EditTool } from "./edit";
+import { discoverStartupLspServers, type LspStartupServerInfo, warmupLspServers } from "./lsp/servers";
+import { TaskTool } from "./task";
+import { WebSearchTool } from "./web/search";
+import { BashTool } from "./tools/bash";
+import { releaseComputerSessionsForOwner } from "./tools/computer/owner-state";
+import { defaultLoadModeForToolName } from "./tools/essential-tools";
+import { EvalTool } from "./tools/eval";
+import { GlobTool } from "./tools/glob";
+import { GrepTool } from "./tools/grep";
+import { ReadTool } from "./tools/read";
 import {
-	BashTool,
 	BUILTIN_TOOLS,
 	createTools,
-	createVibeTools,
 	createToolCommandState,
 	type DeferredDiagnosticsEntry,
-	defaultLoadModeForToolName,
-	discoverStartupLspServers,
-	EditTool,
-	EvalTool,
-	GlobTool,
-	GrepTool,
 	HIDDEN_TOOLS,
 	isBuiltinTaskPlanned,
-	isMountableAsToolCommand,
-	type LspStartupServerInfo,
-	listToolCommands,
-	planToolCommandPromptDocs,
-	ReadTool,
-	releaseComputerSessionsForOwner,
-	renderToolCommandPromptDocs,
 	resolveBuiltinToolPlan,
-	resolveMountedToolCommandExecutable,
 	SETTINGS_GATED_BUILTIN_TOOL_NAMES,
-	SPECIAL_TOOL_NAMES,
-	specialToolApplies,
-	supportsExternalThinking,
 	type Tool,
 	type ToolSession,
-	TaskTool,
-	ToolConversationState,
-	WebSearchTool,
-	WriteTool,
-	warmupLspServers,
+} from "./tools/registry";
+import { SPECIAL_TOOL_NAMES, specialToolApplies } from "./tools/special-tools";
+import { supportsExternalThinking } from "./tools/think";
+import {
+	isMountableAsToolCommand,
+	listToolCommands,
+	planToolCommandPromptDocs,
+	renderToolCommandPromptDocs,
+	resolveMountedToolCommandExecutable,
 	toolCommandEntries,
 	toolCommandHostAvailable,
-} from "./tools";
+} from "./tools/tool-commands";
+import { ToolConversationState } from "./tools/tool-state";
+import { WriteTool } from "./tools/write";
 import {
 	createModelJobCaptionWriter,
 	createModelJobWidgetAuthor,
@@ -369,9 +367,8 @@ import {
 	type ModelJobWidgetAuthorOptions,
 	resolveToolCallIntent,
 } from "./job-widgets";
-import { createBrowserPrelude } from "./tools/browser";
+import { createBrowserPrelude } from "./tools/browser/host-prelude";
 import { isMCPToolName, normalizeToolNames, presentationOrder } from "./tools/builtin-names";
-import { createComputerPrelude } from "./tools/computer";
 import { createRatchetPrelude } from "./ratchet/prelude-definition";
 import { createArchivePrelude } from "./archive/prelude-definition";
 import { ToolContextStore } from "./tools/context";
@@ -2839,7 +2836,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				builtins.push(browserPrelude);
 			}
 			if (cfgComputerEnabled.get(settings)) {
-				computerPrelude ??= createComputerPrelude(toolSession);
+				if (!computerPrelude) {
+					const { createComputerPrelude } = require("./tools/computer") as typeof import("./tools/computer");
+					computerPrelude = createComputerPrelude(toolSession);
+				}
 				builtins.push(computerPrelude);
 			}
 			if (cfgRatchetEnabled.get(settings)) {
@@ -5512,7 +5512,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			createThinkTool: async () => (await HIDDEN_TOOLS.think(toolSession)) ?? null,
 			createVibeTools:
 				(options.taskDepth ?? 0) === 0 && !options.parentTaskPrefix
-					? () => createVibeTools(toolSession)
+					? () => {
+							const { createVibeTools } = require("./tools/vibe") as typeof import("./tools/vibe");
+							return createVibeTools(toolSession);
+						}
 					: undefined,
 			builtInToolNames: builtInRegistryToolNames,
 			hasNativeTool: name => extensionRunner.hasNativeTool(name),

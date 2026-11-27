@@ -475,11 +475,7 @@ function staticMemberPropertyName(node: StructuralAstNode): string | null {
 	return null;
 }
 
-function collectExtensionSpecifierReferences(
-	source: string,
-	importerPath: string,
-	ast: ParseResult = parseExtensionSource(source, importerPath),
-): ExtensionSpecifierReference[] {
+function collectExtensionSpecifierReferences(nodes: readonly ScopedAstNode[]): ExtensionSpecifierReference[] {
 	const references: ExtensionSpecifierReference[] = [];
 	const record = (kind: ExtensionSpecifierReference["kind"], literal: unknown): void => {
 		const node = asAstNode(literal);
@@ -494,7 +490,8 @@ function collectExtensionSpecifierReferences(
 	};
 	const createRequireBindings = new Set<string>();
 	const moduleNamespaceBindings = new Set<string>();
-	for (const { node } of collectScopedAstNodes(ast, candidate => candidate.type === "ImportDeclaration")) {
+	for (const { node } of nodes) {
+		if (node.type !== "ImportDeclaration") continue;
 		const source = asAstNode(node.source);
 		if (source?.type !== "StringLiteral" || (source.value !== "node:module" && source.value !== "module")) continue;
 		for (const value of Array.isArray(node.specifiers) ? node.specifiers : []) {
@@ -514,7 +511,7 @@ function collectExtensionSpecifierReferences(
 			}
 		}
 	}
-	for (const { node, scope } of collectScopedAstNodes(ast, isSpecifierReferenceNode)) {
+	for (const { node, scope } of nodes) {
 		if (
 			node.type === "ImportDeclaration" ||
 			node.type === "ExportNamedDeclaration" ||
@@ -549,6 +546,11 @@ function collectExtensionSpecifierReferences(
 	}
 	return references;
 }
+
+// A negative test only, not a JS parser: every dependency syntax we rewrite
+// contains one of these strings (or a Unicode escape in a require identifier).
+// False positives, including occurrences in comments, take the normal AST path.
+const POSSIBLE_EXTENSION_REFERENCE = /import|from|require|@jsxImportSource|\\u/;
 
 const JSX_IMPORT_SOURCE_PRAGMA = /@jsxImportSource\s+(\S+)/g;
 
@@ -770,21 +772,21 @@ function getExtensionSourceAnalysis(source: string, importerPath: string): Exten
 
 	const ast = parseExtensionSource(source, importerPath);
 	const sourceType = ast.program.sourceType;
+	const nodes = collectScopedAstNodes(
+		ast,
+		node => isSpecifierReferenceNode(node) || (sourceType === "script" && node.type === "MemberExpression"),
+	);
 	const analysis: ExtensionSourceAnalysis = {
 		sourceType,
-		references: collectExtensionSpecifierReferences(source, importerPath, ast),
+		references: collectExtensionSpecifierReferences(nodes),
 		jsxImportSources: collectJsxImportSourcePragmas(ast),
 		hasCommonJsSyntax:
 			sourceType === "script" &&
-			collectScopedAstNodes(ast, node => node.type === "CallExpression" || node.type === "MemberExpression").some(
-				({ node, scope }) => {
-					if (isGlobalRequireCall(node, scope)) return true;
-					if (node.type !== "MemberExpression") return false;
-					return (
-						isUnshadowedExportsTarget(node, scope) || isUnshadowedExportsTarget(asAstNode(node.object), scope)
-					);
-				},
-			),
+			nodes.some(({ node, scope }) => {
+				if (isGlobalRequireCall(node, scope)) return true;
+				if (node.type !== "MemberExpression") return false;
+				return isUnshadowedExportsTarget(node, scope) || isUnshadowedExportsTarget(asAstNode(node.object), scope);
+			}),
 	};
 	extensionSourceAnalysisCache.set(cacheKey, analysis);
 	writeExtensionSourceAnalysis(cacheKey, analysis);
@@ -1259,6 +1261,7 @@ async function rewriteLegacyExtensionSource(
 	resolvedImportMtimeTag: string | null = mtimeTag,
 	sources?: ExtensionGraphSources,
 ): Promise<string> {
+	if (sources?.isPlainLeafEntry(importerPath, source)) return source;
 	// Compiled mode completes the override map from the build-supplied module
 	// keys on first use; every rewrite path must see the full map.
 	await ensureLegacyPiOverridesReady();
@@ -1731,6 +1734,14 @@ class ExtensionGraphSources {
 	readonly #analyses = new Map<string, Promise<ExtensionSourceAnalysis>>();
 	readonly #relativeRequires = new Map<string, Promise<string | null>>();
 	readonly #relativeImports = new Map<string, string>();
+
+	constructor(readonly plainEntry?: string) {}
+
+	// Only the entry is necessarily compiled now. Helpers may be lazy, and
+	// tagged reloads must still walk and validate the full edited graph.
+	isPlainLeafEntry(modulePath: string, source: string): boolean {
+		return this.plainEntry === modulePath && !POSSIBLE_EXTENSION_REFERENCE.test(source);
+	}
 
 	resolveRelativeImport(specifier: string, dir: string): string {
 		const key = `${dir}\0${specifier}`;
@@ -2430,6 +2441,9 @@ async function collectExtensionModules(
 			continue;
 		}
 		modules.set(file, source);
+		// Tools often use only their injected API. Bun will compile this entry;
+		// there are no edges for the graph walker or rewriter to prepare.
+		if (sources.isPlainLeafEntry(file, source)) continue;
 		const analysis = await sources.analyze(file);
 		const sourceIsCommonJs = await isGraphOwnedCommonJsModule(
 			sources,
@@ -2807,8 +2821,10 @@ function installExtensionGraphHook(
  * Returns a clearable handle to drop cached sources that weren't consumed
  * during the initial load; `undefined` when no new modules were discovered.
  */
-async function ensureExtensionGraphHook(entryRealPath: string): Promise<{ clear(): void } | undefined> {
-	const sources = new ExtensionGraphSources();
+async function ensureExtensionGraphHook(entryRealPath: string, reload: boolean): Promise<{ clear(): void } | undefined> {
+	// The CommonJS bridge still needs its definitions even when there are no edges.
+	const plainEntry = reload || /\.(?:cjs|cts)$/i.test(entryRealPath) ? undefined : entryRealPath;
+	const sources = new ExtensionGraphSources(plainEntry);
 	const {
 		modules: currentModules,
 		commonJsPaths,
@@ -2886,6 +2902,10 @@ async function ensureExtensionGraphHook(entryRealPath: string): Promise<{ clear(
 	};
 }
 
+// Plain-path imports are shared by Bun. Share the loader work as well, keyed
+// by that same identity (never cache reload-tagged evaluations or failures).
+const plainModuleLoads = new Map<string, Promise<unknown>>();
+
 /**
  * Load a legacy Pi extension module from its real on-disk location.
  *
@@ -2906,10 +2926,23 @@ export async function loadLegacyPiModule(resolvedPath: string, options: { reload
 	// `bun link`/pnpm installs) so the rewrite filter matches the path Bun
 	// actually hands the hook.
 	const entryRealPath = await realpathOrSelf(path.resolve(resolvedPath));
+	if (options.reload !== false) return importLegacyPiModule(entryRealPath, true);
+	let load = plainModuleLoads.get(entryRealPath);
+	if (!load) {
+		load = importLegacyPiModule(entryRealPath, false).catch(error => {
+			plainModuleLoads.delete(entryRealPath);
+			throw error;
+		});
+		plainModuleLoads.set(entryRealPath, load);
+	}
+	return load;
+}
+
+async function importLegacyPiModule(entryRealPath: string, reload: boolean): Promise<unknown> {
 	// The entry is imported by its real path, so that is the one Bun must read.
 	if (!isBundledVirtualSpecifier(entryRealPath)) await assertBunCanImport(entryRealPath);
 	await ensureLegacyPiOverridesReady();
-	const pendingSources = await ensureExtensionGraphHook(entryRealPath);
+	const pendingSources = await ensureExtensionGraphHook(entryRealPath, reload);
 	try {
 		// Dynamic import is required: legacy extension entry paths are user/plugin supplied at runtime.
 		// Use the raw filesystem path so Bun keys the `?mtime` suffix as part of
@@ -2918,7 +2951,7 @@ export async function loadLegacyPiModule(resolvedPath: string, options: { reload
 		const entrySpecifier = isBundledVirtualSpecifier(entryRealPath)
 			? toImportSpecifier(entryRealPath)
 			: stripWindowsExtendedLengthPathPrefix(entryRealPath);
-		if (options.reload === false) return await import(entrySpecifier);
+		if (!reload) return await import(entrySpecifier);
 		return await import(`${entrySpecifier}?mtime=${nextLegacyPiLoadTag(entryRealPath)}`);
 	} finally {
 		// Drop whatever the initial import didn't consume: graph modules only

@@ -280,7 +280,7 @@ import {
 	resumeComputerTurnForOwner,
 	resumeComputerUseForOwner,
 	revokeComputerControlForOwner,
-} from "../tools/computer/supervisor";
+} from "../tools/computer/owner-state";
 import { isAutoQaEnabled } from "../tools/report-tool-issue";
 import {
 	buildResolveReminderMessage,
