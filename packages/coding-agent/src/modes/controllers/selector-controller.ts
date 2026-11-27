@@ -2216,7 +2216,6 @@ export class SelectorController {
 			(options?.followContinuation ? await findSessionContinuation(sessionPath) : undefined);
 		const target = await this.#relocateStranded(continuation?.session.path ?? sessionPath);
 		await this.ctx.prepareSessionSwitch();
-		this.ctx.resetObserverRegistry();
 		// AgentSession owns the transaction. It restores the complete source state
 		// if applying the target project's cwd fails, including in-memory sessions.
 		let modelFallbackWarning: string | undefined;
@@ -2246,6 +2245,9 @@ export class SelectorController {
 			if (!switched && memoryWarning) this.ctx.showWarning(memoryWarning);
 		}
 		if (!switched) return false;
+		// Only now does the session manager name the resumed file: the reset points the main
+		// session at it and rebuilds the subagent tray from it. A failed switch keeps both.
+		this.ctx.resetObserverRegistry();
 		this.ctx.clearTransientSessionUi();
 		const newCwd = this.ctx.sessionManager.getCwd();
 		const movedProject = normalizePathForComparison(newCwd) !== normalizePathForComparison(previousCwd);

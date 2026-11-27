@@ -128,6 +128,7 @@
 
 ### Fixed
 
+- `/resume` into a session without subagents no longer keeps showing the previous session's subagents above the composer
 - Fixed stealth injection registry to preserve native function source strings across frames
 - In Tern, `/copy` and `/annotate session` share the same block picker on desktop and mobile. Clicking a side preview accepts the full item and closes the picker ([#20791](https://github.com/can1357/oh-my-pi/pull/20791) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 - Resuming a session after its omp crashed or was killed now reminds about, and at session end reaps, the background processes that omp left running, while a second live omp on the same session still leaves them alone
