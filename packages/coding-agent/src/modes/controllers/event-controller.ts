@@ -54,6 +54,7 @@ import type { TranscriptBlock } from "../../ui/shell";
 import { toolEditMode } from "../../ui/tools/edit";
 import { PREVIEW_LIMITS, previewLine, TRUNCATE_LENGTHS } from "../../utils/render-utils";
 import { type RunFlowStatus, setRunStatus } from "../../utils/run-status";
+import { reportProgramResume } from "../../utils/program-resume";
 import {
 	cfgCompletionNotify,
 	cfgDisplayCacheMissMarker,
@@ -1407,6 +1408,7 @@ export class EventController {
 		this.#setTerminalProgress(true);
 		this.ctx.ensureWorkingRow();
 		setRunStatus({ state: "working" });
+		reportProgramResume();
 	}
 
 	async #handleMessageStart(event: Extract<AgentSessionEvent, { type: "message_start" }>): Promise<void> {
@@ -2511,6 +2513,7 @@ export class EventController {
 			if (!runActive) setRunStatus(this.#settledRunStatus(event));
 			await this.#finishAgentEnd(event);
 		}
+		reportProgramResume();
 		// This run may be extension-started while the main input loop remains
 		// asleep. Do not await session-idle from its own event.
 		if (this.ctx.shutdownRequested) this.ctx.requestShutdown();

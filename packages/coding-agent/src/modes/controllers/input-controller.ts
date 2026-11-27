@@ -58,6 +58,7 @@ import { resizeImage } from "../../utils/image-resize";
 import { type ImageAttachmentSource, tagImageAttachmentSource } from "../../utils/image-source";
 import { shortenPath, TRUNCATE_LENGTHS } from "../../utils/render-utils";
 import { resendProgramStatus } from "../../utils/run-status";
+import { resendProgramResume } from "../../utils/program-resume";
 import { truncateToWidth } from "../../utils/text-width";
 import { commandUsage, hintUsage } from "../../utils/usage-counter";
 import { buildVideoContactSheetPng, probeVideo, VideoError } from "../../utils/video";
@@ -1893,6 +1894,7 @@ export class InputController {
 			.then(
 				() => {
 					resendProgramStatus();
+					resendProgramResume();
 				},
 				(err: unknown) => {
 					const reason = err instanceof Error ? err.message : String(err);
