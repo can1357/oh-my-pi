@@ -112,6 +112,8 @@ fn load(name: &CStr) -> Result<PipeWire, String> {
 	Ok(pipewire)
 }
 
+/// `SPA_DATA_FLAG_READABLE`: the data plane may be read.
+const SPA_DATA_FLAG_READABLE: u32 = 1 << 0;
 pub(super) const SPA_DIRECTION_INPUT: u32 = 0;
 pub(super) const PW_STREAM_FLAG_AUTOCONNECT: u32 = 1 << 0;
 pub(super) const PW_STREAM_FLAG_MAP_BUFFERS: u32 = 1 << 2;
@@ -278,7 +280,7 @@ pub(super) struct SpaChunk {
 
 /// The first data plane of a dequeued buffer.
 pub(super) struct Plane<'a> {
-	/// The plane's mapped memory, absent when it was not mapped.
+	/// The plane's mapped memory, absent when it was not mapped readable.
 	pub(super) memory: Option<&'a [u8]>,
 	pub(super) chunk:  SpaChunk,
 }
@@ -300,8 +302,12 @@ pub(super) unsafe fn first_plane<'a>(buffer: *mut Buffer) -> Option<Plane<'a>> {
 	}
 	// SAFETY: a non-null chunk is valid while the buffer is dequeued.
 	let chunk = unsafe { *data.chunk };
-	let memory = (!data.data.is_null()).then(|| {
-		// SAFETY: a mapped plane (MAP_BUFFERS) spans `maxsize` readable bytes.
+	// MAP_BUFFERS maps a plane with read access only when the producer marks it
+	// READABLE; without the flag the mapping is PROT_NONE and reading it faults
+	// (xdg-desktop-portal-wlr 0.8.1 with PipeWire >= 1.6).
+	let readable = data.flags & SPA_DATA_FLAG_READABLE != 0;
+	let memory = (readable && !data.data.is_null()).then(|| {
+		// SAFETY: a READABLE mapped plane (MAP_BUFFERS) spans `maxsize` readable bytes.
 		unsafe { std::slice::from_raw_parts(data.data.cast::<u8>(), data.maxsize as usize) }
 	});
 	Some(Plane { memory, chunk })

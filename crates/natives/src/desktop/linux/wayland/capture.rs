@@ -152,7 +152,7 @@ fn rgba_from_buffer(format: VideoFormat, plane: &Plane<'_>) -> Result<RgbaImage,
 	let stride = stride as usize;
 	let source = plane
 		.memory
-		.ok_or_else(|| "PipeWire frame buffer is not memory-mapped".to_string())?;
+		.ok_or_else(|| "PipeWire frame buffer is not memory-mapped readable".to_string())?;
 	let end = offset
 		.checked_add(bytes)
 		.ok_or_else(|| "PipeWire frame size overflow".to_string())?

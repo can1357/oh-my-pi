@@ -18,6 +18,7 @@
 - Improved URL reading to preserve model tables, source-code indentation, linked content cards, meaningful button labels, and sign-in instructions while removing unrelated news, footer content, and empty whitespace-only paragraphs.
 - Fixed `Process.terminate` so descendants that start their own sessions are still terminated reliably.
 - Fixed the Linux GNU native addon so it no longer requires `libm.so.6` for the Perl `POSIX` `acosh` and `asinh` builtins.
+- Fixed Wayland screen capture crashing with a segmentation fault when the portal shares frame buffers without read access (xdg-desktop-portal-wlr 0.8.1 with PipeWire 1.6); capture now fails with an error instead ([#19647](https://github.com/can1357/oh-my-pi/issues/19647))
 
 ## [19.2.1] - 2026-11-25
 
