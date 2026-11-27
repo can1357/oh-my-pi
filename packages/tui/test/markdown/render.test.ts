@@ -205,7 +205,19 @@ describe("tables", () => {
 		expect(rows).toContain("│ cell text │        │       │");
 	});
 
-	it("falls back to the source when a column cannot get one cell", () => {
+	it("drops padding before showing raw Markdown in a narrow terminal", () => {
+		const source = "| A | B | C |\n| --- | ---: | --- |\n| 界 | 2 | **OK** |";
+		const rows = renderMarkdown(source, 10, { theme });
+		expect(plainRows(rows)).toEqual(["┌──┬──┬──┐", "│A │ B│C │", "├──┼──┼──┤", "│界│ 2│OK│", "└──┴──┴──┘"]);
+		expect(cellGrid(rows)[3]!.find(cell => cell.ch === "O")?.bold).toBe(true);
+	});
+
+	it("keeps a leading combining mark off a compact cell's border", () => {
+		const rows = plain("| A | B | C |\n| --- | --- | --- |\n| **\u0301** | e\u0301 | x |", 10);
+		expect(rows[3]).toBe("│◌\u0301 │e\u0301 │x │");
+	});
+
+	it("falls back to the source when even a compact grid cannot fit", () => {
 		expect(plain("| a | b | c |\n|---|---|---|\n| 1 | 2 | 3 |", 9)[0]).toBe("| a | b |");
 	});
 

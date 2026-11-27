@@ -1,8 +1,10 @@
 /**
  * GFM tables as box-drawn grids fitted to a width: columns take their natural
  * width when the table fits, else shrink toward their longest word (capped at
- * 30 cells) and wrap; below one cell per column the raw source is shown.
+ * 30 cells) and wrap. If the padded grid cannot fit, an unpadded grid is
+ * used when it has room for a wide terminal glyph in each column.
  */
+import { stripEscapes } from "../ansi";
 import { padTo, spaces, truncate, visibleWidth, wrap } from "../width";
 import type { Tokens } from "./lexer";
 
@@ -80,18 +82,18 @@ function aligned(text: string, width: number, align: Align): string {
 }
 
 /** Shrink columns to `available` cells: proportional to their longest word, then to what they can still grow. */
-function fitColumns(natural: readonly number[], words: readonly number[], available: number): number[] {
+function fitColumns(natural: readonly number[], words: readonly number[], available: number, floor: number): number[] {
 	const count = natural.length;
 	let min = [...words];
 	let minTotal = min.reduce((a, b) => a + b, 0);
 	if (minTotal > available) {
-		min = Array.from({ length: count }, () => 1);
-		const spare = available - count;
+		min = Array.from({ length: count }, () => floor);
+		const spare = available - floor * count;
 		if (spare > 0) {
-			const weight = words.reduce((total, w) => total + Math.max(0, w - 1), 0);
+			const weight = words.reduce((total, w) => total + Math.max(0, w - floor), 0);
 			let given = 0;
 			for (let i = 0; i < count; i++) {
-				const grow = weight > 0 ? Math.floor((Math.max(0, words[i]! - 1) / weight) * spare) : 0;
+				const grow = weight > 0 ? Math.floor((Math.max(0, words[i]! - floor) / weight) * spare) : 0;
 				min[i]! += grow;
 				given += grow;
 			}
@@ -127,14 +129,25 @@ function fitColumns(natural: readonly number[], words: readonly number[], availa
 export function renderTable(env: TableEnvironment, token: Tokens.Table, width: number, openCell = -1): string[] {
 	const count = token.header.length;
 	if (count === 0) return [];
-	const overhead = 3 * count + 1;
+	const compact = width < 4 * count + 1;
+	const columnFloor = compact ? 2 : 1;
+	const overhead = (compact ? count : 3 * count) + 1;
 	const available = width - overhead;
-	if (available < count) return wrap(token.raw.replace(/\n+$/, ""), width);
+	if (available < columnFloor * count) return wrap(token.raw.replace(/\n+$/, ""), width);
 
-	const headerTexts = token.header.map(cell => env.cellText(cell, true));
-	const bodyTexts = token.rows.map(row => row.map(cell => env.cellText(cell, false)));
-	const natural = headerTexts.map(text => Math.max(0, ...lineWidths(text)));
-	const words = headerTexts.map(text => Math.max(1, longestWord(text)));
+	const cellText = (cell: Tokens.TableCell, header: boolean): string => {
+		const text = env.cellText(cell, header);
+		if (!compact || !/\p{M}/u.test(text)) return text;
+		// A leading combining mark needs a base when the cell touches a border.
+		return text
+			.split("\n")
+			.map(line => (/^\p{M}/u.test(stripEscapes(line)) ? `◌${line}` : line))
+			.join("\n");
+	};
+	const headerTexts = token.header.map(cell => cellText(cell, true));
+	const bodyTexts = token.rows.map(row => row.map(cell => cellText(cell, false)));
+	const natural = headerTexts.map(text => Math.max(compact ? columnFloor : 0, ...lineWidths(text)));
+	const words = headerTexts.map(text => Math.max(columnFloor, longestWord(text)));
 	const lastRow = bodyTexts.length - 1;
 	const growing = lastRow > 0 ? openCell : -1;
 	for (const [index, row] of bodyTexts.entries()) {
@@ -146,12 +159,17 @@ export function renderTable(env: TableEnvironment, token: Tokens.Table, width: n
 	}
 	const naturalTotal = natural.reduce((a, b) => a + b, 0) + overhead;
 	const widths =
-		naturalTotal <= width ? natural.map((w, i) => Math.max(w, words[i]!)) : fitColumns(natural, words, available);
+		naturalTotal <= width
+			? natural.map((w, i) => Math.max(w, words[i]!))
+			: fitColumns(natural, words, available, columnFloor);
 
 	const { box } = env;
 	const h = box.horizontal;
+	const gap = compact ? "" : " ";
+	const ruleGap = compact ? "" : h;
+	const cellSeparator = `${gap}${box.vertical}${gap}`;
 	const rule = (left: string, join: string, right: string): string =>
-		`${left}${h}${widths.map(w => h.repeat(w)).join(`${h}${join}${h}`)}${h}${right}`;
+		`${left}${ruleGap}${widths.map(w => h.repeat(w)).join(`${ruleGap}${join}${ruleGap}`)}${ruleGap}${right}`;
 	const aligns: Align[] = token.header.map((cell, i) => cell.align ?? token.align[i] ?? null);
 	const out: string[] = [rule(box.topLeft, box.teeDown, box.topRight)];
 	const pushRow = (
@@ -171,7 +189,7 @@ export function renderTable(env: TableEnvironment, token: Tokens.Table, width: n
 				const text = aligned(lines[i]![line] ?? "", w, cells[i]?.align ?? aligns[i] ?? null);
 				return style ? style(text) : text;
 			});
-			out.push(`${box.vertical} ${parts.join(` ${box.vertical} `)} ${box.vertical}`);
+			out.push(`${box.vertical}${gap}${parts.join(cellSeparator)}${gap}${box.vertical}`);
 		}
 	};
 	pushRow(headerTexts, env.tableHeader, token.header);
