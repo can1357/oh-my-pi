@@ -19,6 +19,7 @@
 ### Changed
 
 - Embedded `ls` now separates columns with spaces regardless of `--tabsize`; without `LS_COLORS`, it colors by file type rather than filename extension.
+- Git cherry-picks, stash applies, and three-way patch applies now report a conflict when both sides edit adjacent lines, matching `git merge-file`.
 
 ### Fixed
 
