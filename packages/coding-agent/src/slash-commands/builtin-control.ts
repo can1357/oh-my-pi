@@ -87,7 +87,8 @@ async function runPauseScreen(ctx: InteractiveModeContext): Promise<void> {
 export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "autoprompt",
-		icon: "sparkle",
+		// "redo" - the command repeats the predicted follow-up; upstream's icon set has no "sparkle"
+		icon: "redo",
 		description: "Automatically submit predicted follow-ups within time, token, spend, and turn limits",
 		allowArgs: true,
 		subcommandOptional: true,
