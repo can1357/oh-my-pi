@@ -1346,6 +1346,62 @@ describe("AgentSession auto-compaction progress guard", () => {
 		);
 	});
 
+	it.each([
+		{ kind: "unsigned", thinkingSignature: undefined },
+		{ kind: "signed", thinkingSignature: "sig" },
+	])(
+		"retries a $kind thinking-only stop while speculative handoff is still running",
+		async ({ thinkingSignature }) => {
+			cfgCompactionMethodOrder.set(session.settings, ["handoff"]);
+			cfgCompactionEnabled.set(session.settings, true);
+			cfgCompactionAsyncEnabled.set(session.settings, true);
+			cfgCompactionThresholdTokens.set(session.settings, 150_000);
+			cfgCompactionKeepRecentTokens.set(session.settings, 1);
+			cfgContextPromotionEnabled.set(session.settings, false);
+			compactHookEnabled = false;
+			const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+			const handoffStarted = Promise.withResolvers<void>();
+			const handoffResult = Promise.withResolvers<string>();
+			vi.spyOn(compactionModule, "generateHandoffFromContext").mockImplementation(async () => {
+				handoffStarted.resolve();
+				return handoffResult.promise;
+			});
+
+			const speculativeTrigger = highUsageAssistant();
+			speculativeTrigger.usage.input = 143_000;
+			speculativeTrigger.usage.totalTokens = 144_000;
+			sessionManager.appendMessage(speculativeTrigger);
+			session.agent.emitExternalEvent({ type: "message_end", message: speculativeTrigger });
+			session.agent.emitExternalEvent({ type: "agent_end", messages: [speculativeTrigger] });
+			await handoffStarted.promise;
+			await session.waitForIdle();
+
+			const thinkingStop: AssistantMessage = {
+				...speculativeTrigger,
+				content: [{ type: "thinking", thinking: "unfinished reasoning", thinkingSignature }],
+				timestamp: speculativeTrigger.timestamp + 1,
+			};
+			try {
+				sessionManager.appendMessage(thinkingStop);
+				session.agent.replaceMessages(sessionManager.buildSessionContext().messages);
+				session.agent.emitExternalEvent({ type: "message_end", message: thinkingStop });
+				await scheduler.yield();
+				session.agent.emitExternalEvent({ type: "agent_end", messages: [thinkingStop] });
+				await session.waitForIdle();
+
+				expect(session.compactionSpeculation).toBe("running");
+				expect(continueSpy).toHaveBeenCalledTimes(1);
+				if (!thinkingSignature) {
+					expect(sessionManager.getBranch()).not.toContainEqual(
+						expect.objectContaining({ type: "message", message: thinkingStop }),
+					);
+				}
+			} finally {
+				handoffResult.resolve("## Goal\nContinue the original request");
+			}
+		},
+	);
+
 	it("resumes length recovery when overlapping speculation fails before agent_end", async () => {
 		cfgCompactionMethodOrder.set(session.settings, ["handoff"]);
 		cfgCompactionEnabled.set(session.settings, true);

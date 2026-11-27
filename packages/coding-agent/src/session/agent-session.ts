@@ -437,6 +437,7 @@ import {
 	type LaunchCompletionEntry,
 } from "./launch-completion";
 import {
+	assistantTurnDelivered,
 	type BashExecutionMessage,
 	buildReplanTitleContext,
 	buildTitleDriftTurns,
@@ -5256,7 +5257,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				await this.#settleServiceTier(assistantMsg);
 				this.#ttsr.onAssistantMessageEnd(assistantMsg);
 				const speculativeHandoff = this.#maintenance.speculationCompletion("handoff");
-				if (speculativeHandoff) {
+				// Empty and thinking-only stops still need recovery while the handoff runs.
+				if (speculativeHandoff && (assistantMsg.stopReason !== "stop" || assistantTurnDelivered(assistantMsg))) {
 					this.#maintenance.skipPostTurnMaintenanceAssistantTimestamp = assistantMsg.timestamp;
 					this.#skippedPostTurnSpeculationCompletion = speculativeHandoff;
 				}
