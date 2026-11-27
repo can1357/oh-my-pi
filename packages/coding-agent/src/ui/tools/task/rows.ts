@@ -762,7 +762,7 @@ function recentOutputText(recent: readonly string[]): string {
 	for (;;) {
 		const next = stripTrailingNotice(
 			stripGeneratedOutputNotice(text),
-			line => /^Wall time: \d+(?:\.\d+)? seconds$/u.test(line) || /^Command exited with code -?\d+$/u.test(line),
+			line => /^\[took \d+(?:\.\d+)?s\]$/u.test(line) || /^\[exit code -?\d+\]$/u.test(line),
 		);
 		if (next === text) return text;
 		text = next;

@@ -18,6 +18,7 @@ import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { InteractiveModeContext, PendingTool } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { isSettled } from "@oh-my-pi/pi-tui";
+import { createTestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "../../../src/ui/theme/service";
 import { blockText, transcriptText } from "../../helpers/transcript-text";
@@ -26,6 +27,7 @@ import type { SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-c
 import type { TaskToolDetails } from "@oh-my-pi/pi-coding-agent/task/task-details";
 import { type BashToolDetails, formatBackgroundNotice } from "@oh-my-pi/pi-coding-agent/tools/details/bash";
 import type { CoordinationDetails } from "@oh-my-pi/pi-coding-agent/tools/details/wait";
+import { createAssistantMessage } from "../../helpers/agent-session-setup";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
 function taskResult(asyncState: "running" | "completed" | "failed" | undefined, text: string) {
@@ -233,6 +235,45 @@ describe("EventController async update finalization", () => {
 		}
 	}
 
+	it("keeps later output in scrollback after replaying a running background task", async () => {
+		const { controller, ctx } = createFixture();
+		ctx.eventController = controller;
+		const helpers = new UiHelpers(ctx);
+		ctx.addMessageToChat = helpers.addMessageToChat.bind(helpers);
+		const running = taskResult("running", "Spawned background worker.");
+		const call: AssistantMessage = {
+			...createAssistantMessage(""),
+			timestamp: 1,
+			stopReason: "toolUse",
+			content: [{ type: "toolCall", id: "tc-task", name: "task", arguments: { tasks: [{ task: "work" }] } }],
+		};
+		const result: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "tc-task",
+			toolName: "task",
+			...running,
+			isError: false,
+			timestamp: 2,
+		};
+		ctx.viewSession.activeToolExecutionUpdates = () => [
+			{ type: "tool_execution_update", toolCallId: "tc-task", toolName: "task", args: {}, partialResult: running },
+		];
+		const reply = createAssistantMessage(
+			Array.from({ length: 30 }, (_, i) => `Output paragraph ${i + 1}.`).join("\n\n"),
+		);
+		helpers.renderSessionContext({ messages: [call, result, reply] } as SessionContext);
+		await Promise.resolve();
+
+		const term = createTestTerminal(() => ({}), { surface: ctx.shell.surface, columns: 100, rows: 12 });
+		try {
+			term.render();
+			expect(term.history().join("\n")).toContain("Output paragraph 1.");
+			expect(term.screen().join("\n")).toContain("Output paragraph 30.");
+		} finally {
+			term.dispose();
+		}
+	});
+
 	it("finalizes a backgrounded Bash block without tracking later job updates", async () => {
 		const { controller, pendingTools } = createFixture();
 		await controller.handleEvent({
@@ -320,7 +361,7 @@ describe("EventController async update finalization", () => {
 				result: bashResult(formatBackgroundNotice("bash-1", 300)),
 				isError: false,
 			});
-			await controller.handleEvent(jobFrame(bashResult("[Command cancelled]\nBenchmark 1", "cancelled")));
+			await controller.handleEvent(jobFrame(bashResult("[cancelled]\nBenchmark 1", "cancelled")));
 
 			expect(rendered(component)).toContain("Benchmark 1");
 			expect(component.call?.status()).toBe("cancelled");

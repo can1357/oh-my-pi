@@ -13,6 +13,7 @@ import { replaceTabs } from "@oh-my-pi/pi-tui/text/width";
 import type { ShellVizPresentation } from "@oh-my-pi/pi-wire";
 import type { OutputMeta } from "../../tools/output-meta-format";
 import { stripOutputNotice, stripTrailingNotice } from "../../tools/output-meta-format";
+import { formatExitCodeNotice, formatWallTimeNotice } from "../../tools/details/bash";
 import { resultText } from "./default";
 import type { ToolHead, ToolPresenter, ToolResult, ToolView, ToolViewState } from "./contract";
 import { registerToolPresenter } from "./registry";
@@ -241,15 +242,14 @@ function stripNotices(raw: string, details: BashDetails | undefined): { text: st
 	let text =
 		job?.state === "running"
 			? stripTrailingNotice(raw, line => {
-					const prefix = `Backgrounded as job ${job.jobId}`;
-					return line.startsWith(prefix) && (line[prefix.length] === ";" || line[prefix.length] === " ");
+					const prefix = `[backgrounded as ${job.jobId}`;
+					return line.startsWith(prefix) && (line[prefix.length] === "," || line[prefix.length] === " ");
 				})
 			: raw;
 	text = stripOutputNotice(text, details?.meta);
-	if (details?.exitCode !== undefined)
-		text = stripTrailingNotice(text, `Command exited with code ${details.exitCode}`);
+	if (details?.exitCode !== undefined) text = stripTrailingNotice(text, formatExitCodeNotice(details.exitCode));
 	if (details?.wallTimeMs !== undefined && details.wallTimeNoticeEmitted !== false)
-		text = stripTrailingNotice(text, `Wall time: ${(details.wallTimeMs / 1000).toFixed(2)} seconds`);
+		text = stripTrailingNotice(text, formatWallTimeNotice(details.wallTimeMs));
 	return stripRawOutputNotice(text);
 }
 

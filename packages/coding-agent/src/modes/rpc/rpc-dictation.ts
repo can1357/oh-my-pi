@@ -101,6 +101,7 @@ export class RpcDictationBridge {
 		const callbacks: SttCallbacks = {
 			manualSubmit: true,
 			showStatus: () => {},
+			clearStatus: () => {},
 			showWarning: message => {
 				if (!capture.ended) capture.error = message;
 			},

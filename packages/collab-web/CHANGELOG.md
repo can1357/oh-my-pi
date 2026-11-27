@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a `gitlab` tool renderer for shared sessions and HTML exports.
+
 ## [19.1.0] - 2026-11-21
 
 ### Added
