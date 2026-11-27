@@ -860,9 +860,9 @@ export interface ExtensionAsyncJobs {
 	 * Start `run` as a background job owned by this session's agent and return its id at once.
 	 * The job appears in `wait`, `proc://`, and the job list like a native background job,
 	 * cancelling it aborts `signal`, and the string `run` resolves to is delivered to the agent
-	 * as the job's result. A rejection fails the job with its message. A result or message above the
-	 * inline output cap (`tools.artifactSpillThreshold`, 50 KB by default) keeps its head and tail and links
-	 * the full text saved as a session artifact, as a `bash` result does. `label` and `options.intent` are
+	 * as the job's result. A rejection fails the job with its message. A result or message larger than
+	 * `tools.artifactSpillThreshold` (50 KB by default) keeps its head and tail and links the full text
+	 * saved as a session artifact, as a `bash` result does. `label` and `options.intent` are
 	 * each stripped of terminal escapes, collapsed to one line, and cut to 120 characters.
 	 * Throws when the session's running-job limit is reached.
 	 */
