@@ -310,6 +310,9 @@ describe("memories runtime", () => {
 		expect(ai.completeSimple).toHaveBeenCalledTimes(2);
 		const phase2Prompt = completeSpy.mock.calls[1]?.[1];
 		expect(phase2Prompt?.systemPrompt?.[0]).toContain("memory-stage-two consolidator");
+		// One-shot prompts: a cache write would only be billed, never read.
+		expect(completeSpy.mock.calls[0]?.[2]?.cacheRetention).toBe("none");
+		expect(completeSpy.mock.calls[1]?.[2]?.cacheRetention).toBe("none");
 	});
 
 	test("clamps stage1 and phase2 reasoning effort against the model's supported range", async () => {
