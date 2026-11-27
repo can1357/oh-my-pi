@@ -1399,14 +1399,14 @@ describe("ACP agent", () => {
 				speechSpeed: "speech.speed",
 			},
 			defaults: {
-				speechToTextModel: "local/parakeet-tdt-0.6b-v3",
+				speechToTextModel: "local/fluid-speech-pro",
 				textToSpeechModel: "local/phonon-31m",
 				voice: "harper",
 				speed: 1,
 			},
 			speechToText: {
 				setting: "modelRoles.dictation",
-				defaultValue: "local/parakeet-tdt-0.6b-v3",
+				defaultValue: "local/fluid-speech-pro",
 			},
 			textToSpeech: {
 				modelSetting: "modelRoles.speech",

@@ -84,8 +84,8 @@ A requested unavailable runtime raises `ToolError` with the bounded, sanitized p
 
 - Text is stdout/stderr (exactly what `print` and the trailing-expression echo wrote) plus image dimension notes.
 - Image-only success reports `(displayed N image(s); no text output)`; a cell with no visible output reports `(no output)`.
-- A nonzero backend exit appends `Command exited with code N`, marks the cell `error`, and sets `details.isError`.
-- Cancellation returns the captured output or `Command aborted`, with `details.isError=true`.
+- A nonzero backend exit appends `[exit code N]`, marks the cell `error`, and sets `details.isError`.
+- Cancellation returns the captured output or `[aborted]`, with `details.isError=true`.
 
 `EvalToolDetails`:
 
@@ -118,7 +118,7 @@ The renderer merges call and result inline, syntax-highlights from the declared 
 With `eval.autoBackground.enabled` (default `false`), a cell that outlives `eval.autoBackground.thresholdMs` (default 60000 ms) is converted into a managed async job instead of blocking the turn:
 
 - The tool foreground-waits for `resolveAutoBackgroundWaitMs(thresholdMs, clampedCellTimeoutMs)`: the threshold, clamped down to the cell's own clamped timeout minus a 1 s buffer so a deadline expiry resolves inline rather than backgrounding moments before it fires. Raising `timeout` therefore does not extend foreground execution beyond the threshold. A threshold of `0` backgrounds immediately.
-- On backgrounding, the tool returns the live output tail plus `Backgrounded as job <id> (killed once it has run <n>s in total; …)` — or `(no deadline)` under `timeout: 0` — and the no-polling instruction (`formatBackgroundNotice`), stating the cell's clamped timeout, with `details.async = { state: "running", jobId, type: "eval" }`. The deadline is the cell's runtime budget, counted from cell start (including the foreground wait), not wall-clock time left. Agent/completion handle waits, `judge()`, judgment-batch drains, package installation, delegated `tool.task()`/`tool.wait()`, and browser/computer preludes pause the watchdog; ordinary `tool.*` calls, including MCP tools that report progress, do not. The job's completion is delivered later like a backgrounded bash command.
+- On backgrounding, the tool returns the live output tail plus `[backgrounded as <id>, killed at <n>s total; …]` — `no deadline` under `timeout: 0` — and the no-polling instruction (`formatBackgroundNotice`), stating the cell's clamped timeout, with `details.async = { state: "running", jobId, type: "eval" }`. The deadline is the cell's runtime budget, counted from cell start (including the foreground wait), not wall-clock time left. Agent/completion handle waits, `judge()`, judgment-batch drains, package installation, delegated `tool.task()`/`tool.wait()`, and browser/computer preludes pause the watchdog; ordinary `tool.*` calls, including MCP tools that report progress, do not. The job's completion is delivered later like a backgrounded bash command.
 - A queued user/peer message (steer) arriving mid-wait backgrounds the cell immediately ("Backgrounded early to handle an incoming message; the cell keeps running.").
 - At the async-job manager's running-job capacity the tool falls through to ordinary foreground execution instead of failing.
 - A failed, cancelled, or timed-out cell is reported as a failed background job (an errored execution is re-entered into the job manager's failure path), never as a silent success.
@@ -139,7 +139,7 @@ With `eval.autoBackground.enabled` (default `false`), a cell that outlives `eval
 - Retained kernels are keyed by `python:${sessionId}`, normalized cwd, and interpreter. `python.kernelMode="per-call"` instead creates and shuts down a fresh kernel for each invocation.
 - The runner uses one persistent asyncio event loop, so top-level `await` works; `asyncio.run(...)` is invalid there.
 - The runner replaces `builtins.print` for stdout: printed images (omp image dicts, matplotlib figures, PIL images, `_repr_png_`/`_repr_jpeg_` objects) attach as images, and DataFrames/Series, Markdown objects, and large dicts/lists/tuples add views. A non-`None` trailing expression prints its `repr` the same way.
-- Interactive stdin is rejected with `Kernel requested stdin; interactive input is not supported.`
+- Interactive stdin is rejected with `[stdin unsupported]`.
 - Synchronous blocks use the default executor with copied ContextVars; Python bytecode still contends on the GIL.
 
 ## Prelude helpers
@@ -254,7 +254,7 @@ With `eval.tools.enabled` on (default off), a cell can turn a function into a to
 - Python uses a retained subprocess kernel speaking framed local IPC. JavaScript uses an isolated subprocess, with a Bun Worker fallback; if both fail to start, the call fails without executing code on the host thread.
 - Retained runtimes have no heartbeat or idle timer; they survive calls until reset, owner disposal (`EvalRunner.disposeKernels()` calls `disposeKernelSessionsByOwner` and `disposeVmContextsByOwner` keyed by `kernelOwnerId`, in `packages/coding-agent/src/session/eval-runner.ts`), or process exit.
 - Cancellation is destructive when needed: JS terminates its worker; managed kernels interrupt and may escalate to shutdown. A reset is likewise destructive to concurrent work sharing that backend session.
-- A retained runtime that dies between cells (crash, kill, out-of-memory, or a cancel/timeout that ended it) is replaced on the next call; the first cell to run on the replacement opens with `Kernel restarted: the previous Python kernel is dead; state is unavailable. …` (`JS worker` for JavaScript), once per replacement. A `reset` or owner disposal gives no notice.
+- A retained runtime that dies between cells (crash, kill, out-of-memory, or a cancel/timeout that ended it) is replaced on the next call; the first cell to run on the replacement opens with `[Python kernel restarted; earlier state gone]` (`JS worker` for JavaScript), once per replacement. A `reset` or owner disposal gives no notice.
 - Eval-driven `agent()` children stay registered as keep-alive agents; owner teardown cancels their jobs, releases completion handles/judgment batches, and closes the owner's work pools.
 
 ## Limits and errors

@@ -197,20 +197,35 @@ describe("CfgProtocolHandler", () => {
 		}
 	});
 
-	it("reports a partial record write as applied, since layers deep-merge", async () => {
+	it("writes a record as a patch naming only the entries it changes", async () => {
 		const settings = Settings.isolated();
-		cfgModelRoles.set(settings, { default: "anthropic/a" });
-		setCfgApprovalHost({ approve: async () => "once", applied: () => {}, persistentSettings: settings });
+		cfgModelRoles.set(settings, { default: "anthropic/a", smol: "anthropic/s" });
+		const asked: CfgChangeRequest[] = [];
+		setCfgApprovalHost({
+			approve: async request => (asked.push(request), "once"),
+			applied: () => {},
+			persistentSettings: settings,
+		});
 
-		const session = await write("cfg://modelRoles", '{"smol":"anthropic/b"}', settings);
-		expect(session.details?.cfg?.outcome).toBe("applied");
+		const session = await write("cfg://modelRoles", '{"plan":"anthropic/p"}', settings);
+		expect(asked[0]).toMatchObject({ previous: '{"plan":null}', value: '{"plan":"anthropic/p"}' });
 		expect(session.details?.cfg?.effective).toBeUndefined();
-		expect(textOf(session)).toContain("cfg://modelRoles/save");
+		expect(cfgModelRoles.get(settings)).toEqual({ default: "anthropic/a", smol: "anthropic/s", plan: "anthropic/p" });
 
-		const saved = await write("cfg://modelRoles/save", '{"smol":"anthropic/c"}', settings);
-		expect(saved.details?.cfg?.effective).toBeUndefined();
-		expect(textOf(saved)).not.toContain("Effective value is still");
-		expect(cfgModelRoles.get(settings)).toMatchObject({ smol: "anthropic/c" });
+		// The restore patch the result offers drops the session-only entry again.
+		await write("cfg://modelRoles", '{"plan":null}', settings);
+		expect(cfgModelRoles.get(settings)).toEqual({ default: "anthropic/a", smol: "anthropic/s" });
+
+		// A session override cannot remove an entry the config supplies, so the user is not asked.
+		await expect(write("cfg://modelRoles", '{"smol":null}', settings)).rejects.toThrow("cfg://modelRoles/save");
+		expect(asked).toHaveLength(2);
+
+		const saved = await write("cfg://modelRoles/save", '{"smol":null,"plan":"anthropic/c"}', settings);
+		expect(saved.details?.cfg?.previous).toBe('{"smol":"anthropic/s","plan":null}');
+		expect(cfgModelRoles.get(settings)).toEqual({ default: "anthropic/a", plan: "anthropic/c" });
+		// The global config kept the entry the patch did not name.
+		cfgModelRoles.clearOverride(settings);
+		expect(cfgModelRoles.get(settings)).toEqual({ default: "anthropic/a", plan: "anthropic/c" });
 	});
 
 	it("reports a saved value a project layer still overrides", async () => {
