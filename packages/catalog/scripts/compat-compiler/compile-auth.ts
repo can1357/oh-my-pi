@@ -425,6 +425,7 @@ function apiKeyLogin(node: KdlNodeView): CompiledApiKeyLogin {
 function callback(node: KdlNodeView): CompiledCallback {
 	validateProps(node, [
 		"port",
+		"port-env",
 		"path",
 		"hostname",
 		"redirect-uri",
@@ -444,6 +445,11 @@ function callback(node: KdlNodeView): CompiledCallback {
 		manualOnly: propBool(node, "manual-only") ?? false,
 		nativeScheme: propBool(node, "native-scheme") ?? false,
 	};
+	const portEnv = propString(node, "port-env");
+	if (portEnv !== undefined) {
+		if (!portEnv) malformed(node);
+		result.portEnv = portEnv;
+	}
 	const redirectUri = propString(node, "redirect-uri");
 	const redirectUriEnv = propString(node, "redirect-uri-env");
 	if (redirectUri !== undefined || redirectUriEnv !== undefined) {

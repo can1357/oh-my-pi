@@ -4,6 +4,7 @@
  * exchange, credential projection, userinfo enrichment and after-exchange hook.
  */
 import type { CompiledAuthProvider, CompiledCallback, CompiledOAuthCodeLogin } from "@oh-my-pi/pi-catalog/compat/types";
+import { $env } from "@oh-my-pi/pi-utils";
 import * as AIError from "../../error";
 import type { FetchImpl } from "../../types";
 import { validateApiKeyAgainstModelsEndpoint } from "../api-key-validation";
@@ -26,6 +27,20 @@ function isLoopbackHost(hostname: string): boolean {
 	return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
 }
 
+/** Rule port, or the `port-env` override when set (`0` binds a random free port). */
+function resolveCallbackPort(callback: CompiledCallback, provider: string): number {
+	const raw = callback.portEnv ? $env[callback.portEnv]?.trim() : undefined;
+	if (!raw) return callback.port;
+	const port = /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
+	if (!(port >= 0 && port <= 65535)) {
+		throw new AIError.OAuthError(`${callback.portEnv} must be a port number between 0 and 65535, got: ${raw}`, {
+			kind: "configuration",
+			provider,
+		});
+	}
+	return port;
+}
+
 /**
  * Callback-server options for a rule. A `redirect-uri-env` override is
  * advertised verbatim with random-port fallback disabled; HTTP loopback
@@ -37,7 +52,7 @@ export async function resolveCallbackOptions(
 	signal?: AbortSignal,
 ): Promise<OAuthCallbackFlowOptions> {
 	const base: OAuthCallbackFlowOptions = {
-		preferredPort: callback.port,
+		preferredPort: resolveCallbackPort(callback, provider),
 		callbackPath: callback.path,
 		callbackHostname: callback.hostname,
 		allowPortFallback: callback.portFallback,

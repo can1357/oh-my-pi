@@ -351,6 +351,12 @@ An invalid `KIRO_API_REGION` is an error rather than a silent fallback. `/login 
 | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `OMP_PROMPT_PERTURBATION` | Unset: models whose KDL rules set `prompt-perturbation #true` get the pooled lines rewritten with the wording chosen for this installation; others get the bundled wording. `1` perturbs every model; `0` none. |
 
+### Anthropic OAuth
+
+| Variable                           | Default / behavior                                                                                                          |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `PI_ANTHROPIC_OAUTH_CALLBACK_PORT` | Local callback port for Anthropic login. Default `54545`; `0` binds a random free port. Random-port fallback still applies. |
+
 ### GitLab Duo
 
 | Variable                         | Default / behavior                                                                                                                                                                                                                                                                                               |
