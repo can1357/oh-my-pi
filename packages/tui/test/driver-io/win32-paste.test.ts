@@ -20,6 +20,25 @@ function decode(chunks: string[], win32 = true): InputEvent[] {
 }
 
 describe("win32-input-mode bracketed paste", () => {
+	const ctrlJDown = "\x1b[74;36;10;1;8;1_";
+	const ctrlJUp = "\x1b[74;36;10;0;8;1_";
+	const ctrlJ = "\x1b[17;29;0;1;8;1_" + ctrlJDown + ctrlJUp + "\x1b[17;29;0;0;0;1_";
+	const relay = (text: string) => Array.from(text, char => `\x1b[0;0;${char.charCodeAt(0)};1;0;1_`).join("");
+
+	it("uses the newline character for alternate keyboard mappings", () => {
+		expect(decode([START + ctrlJ + ctrlJDown + ctrlJUp + END])).toEqual([{ type: "paste", paste: { text: "\n\n" } }]);
+		const mismatched = ctrlJDown + "\x1b[74;37;10;0;8;1_";
+		expect(decode([START + mismatched + END])).toEqual([{ type: "paste", paste: { text: mismatched } }]);
+	});
+
+	it("preserves LF in record-encoded framing across reads and keeps Ctrl+J outside the paste", () => {
+		const begin = relay(START + "a");
+		const end = relay("b" + END);
+		for (const chunks of [[begin + LF + ctrlJ + end], [begin, LF, ctrlJ, end]]) {
+			expect(decode([...chunks, ctrlJ])).toEqual([{ type: "paste", paste: { text: "a\n\nb" } }, ...decode([ctrlJ])]);
+		}
+	});
+
 	it("preserves pasted CR across split reads and emits a later physical Enter", () => {
 		const events = decode([
 			START + "первая" + ENTER.slice(0, 6),

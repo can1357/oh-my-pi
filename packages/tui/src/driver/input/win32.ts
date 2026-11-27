@@ -59,17 +59,47 @@ export function isWin32Record(seq: string): boolean {
 
 // ConPTY can report line breaks inside a bracketed paste as key record pairs.
 const CONPTY_PASTE_CR = "\x1b[13;28;13;1;0;1_\x1b[13;28;13;0;0;1_";
-const CONPTY_PASTE_LF = "\x1b[17;29;0;1;8;1_\x1b[13;28;10;1;8;1_\x1b[13;28;10;0;8;1_\x1b[17;29;0;0;0;1_";
+const CONPTY_PASTE_LF = /\x1b\[(\d+;\d+);10;1;(\d+);1_\x1b\[\1;10;0;\2;1_/g;
+const MODIFIER_DOWN = /^\x1b\[(16|17|18);(\d+);0;1;(\d+);1_$/;
+const PASTE_MODIFIER_RELEASE_ORDER = [
+	[17, LEFT_CTRL],
+	[18, LEFT_ALT],
+	[16, SHIFT],
+] as const;
 
+/** Restore line breaks in raw bracketed paste, leaving ordinary key records and literal escapes untouched. */
 export function decodeWin32Paste(content: string): string {
-	return content.replaceAll(CONPTY_PASTE_CR, "\r").replaceAll(CONPTY_PASTE_LF, "\n");
+	const text = content.replaceAll(CONPTY_PASTE_CR, "\r");
+	const parts: string[] = [];
+	let cursor = 0;
+	for (const match of text.matchAll(CONPTY_PASTE_LF)) {
+		let start = match.index;
+		let end = start + match[0].length;
+		let state = Number(match[2]);
+		// ConPTY presses Shift, Alt and Ctrl around the character, then releases them in reverse.
+		for (const [vk, flag] of PASTE_MODIFIER_RELEASE_ORDER) {
+			if (!(state & flag)) continue;
+			const before = text.lastIndexOf("\x1b[", start - 1);
+			if (before < cursor || before >= start) break;
+			const down = MODIFIER_DOWN.exec(text.slice(before, start));
+			if (!down || Number(down[1]) !== vk || Number(down[3]) !== state) break;
+			state &= ~flag;
+			const up = `\x1b[${vk};${down[2]};0;0;${state};1_`;
+			if (!text.startsWith(up, end)) break;
+			start = before;
+			end += up.length;
+		}
+		parts.push(text.slice(cursor, start), "\n");
+		cursor = end;
+	}
+	return parts.length ? parts.join("") + text.slice(cursor) : text;
 }
 
 export class Win32RecordDecoder {
 	#highSurrogate = "";
 
 	/** The bytes one record stands for (empty for releases, bare modifiers and half a surrogate pair). */
-	decode(seq: string): string {
+	decode(seq: string, inPaste?: () => boolean): string {
 		const match = RECORD.exec(seq);
 		if (!match) return seq;
 		const [vk, , uc, down, state, repeat] = match.slice(1).map(Number) as [
@@ -85,7 +115,7 @@ export class Win32RecordDecoder {
 			// Alt+Numpad composition arrives on the Alt release.
 			return vk === 18 && uc ? String.fromCharCode(uc) : "";
 		}
-		const one = this.#bytes(vk, uc, state);
+		const one = uc === 10 && vk !== 0 && vk !== VK_PACKET && inPaste?.() ? "\n" : this.#bytes(vk, uc, state);
 		return count === 1 || one === "" ? one : one.repeat(count);
 	}
 

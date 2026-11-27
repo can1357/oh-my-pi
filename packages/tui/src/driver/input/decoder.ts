@@ -37,6 +37,11 @@ export class InputDecoder {
 	/** A paste was decoded earlier in this read and no key followed it yet. */
 	#afterPaste = false;
 	#recordBytes = "";
+	readonly #inRelayedPaste = (): boolean => {
+		// The opening or closing bracket can be buffered in this very read.
+		this.#flushRecords();
+		return this.#relay.inPaste;
+	};
 
 	constructor(sink: DecoderSink, options: InputDecoderOptions = {}) {
 		this.#sink = sink;
@@ -130,7 +135,8 @@ export class InputDecoder {
 
 	#classify(seq: string, direct: boolean): void {
 		if (direct && this.win32 && isWin32Record(seq)) {
-			this.#recordBytes += this.#records.decode(seq);
+			const bytes = this.#records.decode(seq, this.#inRelayedPaste);
+			this.#recordBytes += bytes;
 			if (!this.#processing) this.#flushRecords();
 			return;
 		}
