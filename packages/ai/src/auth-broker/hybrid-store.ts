@@ -75,11 +75,6 @@ export class HybridAuthCredentialStore implements AuthCredentialStore {
 		this.#localProviders = this.#readLocalProviders();
 	}
 
-	/** Whether this provider's credential data is stored by the broker rather than this machine. */
-	routesToBroker(provider: string): boolean {
-		return !this.#localProviders.has(provider);
-	}
-
 	#readLocalProviders(): Set<string> {
 		return new Set([...DEVICE_BOUND_PROVIDERS, ...this.#local.listBrokerLocalProviders()]);
 	}

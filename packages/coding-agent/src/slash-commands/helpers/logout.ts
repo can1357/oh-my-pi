@@ -1,9 +1,10 @@
-import type { StoredCredentialSummary } from "@oh-my-pi/pi-ai";
 import { getOAuthCredentialProvider } from "@oh-my-pi/pi-ai/oauth";
+import { providerAccessOff } from "@oh-my-pi/pi-catalog/compat/auth";
 import { connectedProviderName } from "../../modes/view-model/chrome/format";
-import type { LogoutAccount } from "../../modes/view-model/overlays/logout-account-selector";
 import type { AgentSession } from "../../session/agent-session";
-import type { AuthStorage, OAuthAccountIdentity } from "../../session/auth-storage";
+import type { AuthStorage, OAuthAccountIdentity, StoredAuthCredential } from "../../session/auth-storage";
+
+import type { LogoutAccount } from "../../modes/view-model/overlays/logout-account-selector";
 
 interface LogoutAccountOptions {
 	activeIdentity?: OAuthAccountIdentity;
@@ -15,28 +16,31 @@ function nonEmpty(value: string | undefined): string | undefined {
 	return trimmed && trimmed.length > 0 ? trimmed : undefined;
 }
 
-function oauthLabel(row: StoredCredentialSummary): string {
-	if (row.type === "api_key") return `API key #${row.id}`;
+function oauthLabel(row: StoredAuthCredential): string {
+	const credential = row.credential;
+	if (credential.type !== "oauth") return `API key #${row.id}`;
 	const base =
-		nonEmpty(row.email) ??
-		nonEmpty(row.accountId) ??
-		nonEmpty(row.projectId) ??
-		nonEmpty(row.enterpriseUrl) ??
+		nonEmpty(credential.email) ??
+		nonEmpty(credential.accountId) ??
+		nonEmpty(credential.projectId) ??
+		nonEmpty(credential.enterpriseUrl) ??
 		`OAuth credential #${row.id}`;
 	// Two subscriptions (orgs) can share one email — the org is the only
 	// user-visible way to tell which row a logout will remove.
-	const org = nonEmpty(row.orgName) ?? nonEmpty(row.orgId);
+	const org = nonEmpty(credential.orgName) ?? nonEmpty(credential.orgId);
 	return org && org !== base ? `${base} (${org})` : base;
 }
 
-function oauthDetail(provider: string, row: StoredCredentialSummary, label: string): string {
-	if (row.type === "api_key") return `stored API key #${row.id}`;
+function oauthDetail(provider: string, row: StoredAuthCredential, label: string): string {
+	const credential = row.credential;
+	if (credential.type === "api_key") return `stored API key #${row.id}`;
 	const parts: string[] = [];
-	if (row.accessOff) parts.push(`${connectedProviderName(provider)} off`);
-	const email = nonEmpty(row.email);
-	const accountId = nonEmpty(row.accountId);
-	const projectId = nonEmpty(row.projectId);
-	const enterpriseUrl = nonEmpty(row.enterpriseUrl);
+	// Signed in, but the grant lacks the provider's `required-scope`.
+	if (providerAccessOff(provider, credential.scope)) parts.push(`${connectedProviderName(provider)} off`);
+	const email = nonEmpty(credential.email);
+	const accountId = nonEmpty(credential.accountId);
+	const projectId = nonEmpty(credential.projectId);
+	const enterpriseUrl = nonEmpty(credential.enterpriseUrl);
 	if (email && email !== label) parts.push(email);
 	if (accountId && accountId !== label) parts.push(`account ${accountId}`);
 	if (projectId && projectId !== label) parts.push(`project ${projectId}`);
@@ -46,10 +50,11 @@ function oauthDetail(provider: string, row: StoredCredentialSummary, label: stri
 }
 
 function oauthMatchesActiveIdentity(
-	credential: OAuthAccountIdentity,
+	row: StoredAuthCredential,
 	activeIdentity: OAuthAccountIdentity | undefined,
 ): boolean {
-	if (!activeIdentity) return false;
+	if (!activeIdentity || row.credential.type !== "oauth") return false;
+	const credential = row.credential;
 	// The org GATES the base identity rather than replacing it: mismatched org
 	// presence or different orgs never match — an org-scoped active session
 	// must not preselect the bare-email legacy row, and a bare-email active
@@ -80,14 +85,14 @@ function oauthMatchesActiveIdentity(
 
 export function toLogoutAccounts(
 	provider: string,
-	credentials: readonly StoredCredentialSummary[],
+	credentials: StoredAuthCredential[],
 	options: LogoutAccountOptions = {},
 ): LogoutAccount[] {
 	return credentials
 		.map(row => {
 			const label = oauthLabel(row);
 			const active =
-				row.type === "oauth"
+				row.credential.type === "oauth"
 					? oauthMatchesActiveIdentity(row, options.activeIdentity)
 					: options.activeApiKey === true;
 			return {
@@ -95,7 +100,7 @@ export function toLogoutAccounts(
 				provider,
 				label,
 				detail: oauthDetail(provider, row, label),
-				type: row.type,
+				type: row.credential.type,
 				active,
 			} satisfies LogoutAccount;
 		})
@@ -113,7 +118,7 @@ export async function listLogoutAccounts(
 ): Promise<LogoutAccount[]> {
 	const provider = getOAuthCredentialProvider(loginProvider);
 	await authStorage.credentials.reload();
-	return toLogoutAccounts(provider, authStorage.credentials.summaries(provider), {
+	return toLogoutAccounts(provider, authStorage.credentials.list(provider), {
 		activeIdentity: authStorage.oauth.identity(provider, sessionId),
 		activeApiKey: authStorage.keys.source(provider)?.kind === "api_key",
 	});

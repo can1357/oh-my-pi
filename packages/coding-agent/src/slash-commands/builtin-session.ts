@@ -177,7 +177,7 @@ async function handleSessionPinCommand(
 		return;
 	}
 	const account = matches[0];
-	if (!account || !(await session.pinCurrentProviderOAuthAccount(account.credentialId))) {
+	if (!account || !session.pinCurrentProviderOAuthAccount(account.credentialId)) {
 		await output(`${account?.label ?? selector} is no longer available to pin.`);
 		return;
 	}

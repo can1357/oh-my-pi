@@ -56,7 +56,6 @@ export type ArtifactManagerProtocol = {
 export type AgentStorageProtocol = {
 	getCache: RpcMethod<[key: string], string | null>;
 	setCache: RpcMethod<[key: string, value: string, expiresAtSec: number], void>;
-	/** Async-only: main may need to unlock the credential store before reading. */
 	listAuthCredentials: RpcMethod<[provider: string | undefined, includeDisabled: boolean], StoredAuthCredential[]>;
 	recordModelUsage: RpcMethod<[modelKey: string], void>;
 	getModelUsageOrder: RpcMethod<[], string[]>;
@@ -294,8 +293,8 @@ export class RemoteAgentStorage implements AgentStorageApi {
 		this.#remote.notify("setCache", key, value, expiresAtSec);
 	}
 
-	listAuthCredentials(provider?: string, includeDisabled = false): Promise<StoredAuthCredential[]> {
-		return this.#remote.call("listAuthCredentials", provider, includeDisabled);
+	listAuthCredentials(provider?: string, includeDisabled = false): StoredAuthCredential[] {
+		return this.#remote.callSync("listAuthCredentials", provider, includeDisabled);
 	}
 
 	recordModelUsage(modelKey: string): void {

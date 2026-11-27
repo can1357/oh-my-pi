@@ -1205,7 +1205,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#commandMetadataChangedListeners: CommandMetadataChangedListener[] = [];
 	#sessionChangeCallbacks = new Set<() => void>();
 	#observedSessionId: string | undefined;
-	#pendingCredentialPins: Promise<void> | undefined;
 
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	#pendingNextTurnMessages: CustomMessage[] = [];
@@ -2364,7 +2363,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				const name = `${model.provider}/${model.id}`;
 				try {
 					const prepared = await this.#modelRegistry.refreshSelectedModelMetadata(model);
-					if (this.#pendingCredentialPins) await this.#pendingCredentialPins;
 					if (await this.#modelRegistry.getApiKey(prepared, this.sessionId)) return prepared;
 					return `no credential for planning model ${name}`;
 				} catch (error) {
@@ -2581,7 +2579,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		});
 		this.agent.prepareQueuedMessages = this.#prepareQueuedUserMessages;
 		this.#detachUsageBeforeModelCall = this.agent.addBeforeModelCallHook(async signal => {
-			if (this.#pendingCredentialPins) await this.#pendingCredentialPins;
 			if (!cfgRetryUsageAwareFallback.get(this.settings)) return;
 			if (this.#usagePreflightReadyForNextModelCall) {
 				const checkedModel = this.#usagePreflightReadyModel;
@@ -7048,14 +7045,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// the account-scoped prompt cache. Skipped for fresh provider sessions —
 		// those explicitly want new routing identity.
 		if (!this.#freshProviderSessionId) {
-			const pending = seedCredentialPins(this.#modelRegistry.authStorage, this.sessionManager, sid);
-			if (pending) {
-				const previous = this.#pendingCredentialPins;
-				const settled = (previous ? Promise.all([previous, pending]) : pending).then(() => {
-					if (this.#pendingCredentialPins === settled) this.#pendingCredentialPins = undefined;
-				});
-				this.#pendingCredentialPins = settled;
-			}
+			seedCredentialPins(this.#modelRegistry.authStorage, this.sessionManager, sid);
 		}
 		// Keep every live advisor's provider identity in lockstep with the primary's
 		// across every session-boundary transition — including branch paths that
@@ -7063,11 +7053,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// conversation's session id/metadata (issue #6625). Guarded because this
 		// runs once during construction before the advisor controller exists.
 		if (this.#advisors) this.#advisors.refreshProviderIdentity();
-	}
-
-	/** Wait for transcript pins enqueued during synchronous session construction. */
-	waitForCredentialPins(): Promise<void> | undefined {
-		return this.#pendingCredentialPins;
 	}
 
 	#notifySessionChangeCallbacks(): void {
@@ -7782,9 +7767,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	async #runUsageAwarePreflight(signal?: AbortSignal): Promise<boolean> {
+		if (signal?.aborted) return false;
 		const generation = this.#promptGeneration;
-		if (this.#pendingCredentialPins) await this.#pendingCredentialPins;
-		if (signal?.aborted || this.#promptGeneration !== generation) return false;
 
 		const controller = new AbortController();
 		const onAbort = () => controller.abort(signal?.reason);
@@ -10086,7 +10070,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#promptSetupAbortController = setupAbort;
 		try {
 			options?.onPromptAdmitted?.();
-			if (this.#pendingCredentialPins) await this.#pendingCredentialPins;
 			await this.#recovery.maybeRestoreRetryFallbackPrimary();
 			// Auto-prewalk: return from the previous task's handoff before the usage preflight checks the model,
 			// then judge this task alongside the rest of setup; the decision is applied right before dispatch.
@@ -13051,7 +13034,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#freshProviderSessionId = undefined;
 			this.#clearInheritedProviderPromptCacheKey();
 			this.#syncAgentSessionId();
-			if (this.#pendingCredentialPins) await this.#pendingCredentialPins;
 			await this.#prewalk.resetForNewSession(this.#agentKind === "main" && cfgPrewalkEnabled.get(this.settings));
 			// Re-apply the configured selector so the new session does not inherit
 			// the previous session's auto-classified effort: auto stays auto but
@@ -13221,7 +13203,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#freshProviderSessionId = undefined;
 			this.#adoptInheritedProviderPromptCacheKey();
 			this.#syncAgentSessionId();
-			if (this.#pendingCredentialPins) await this.#pendingCredentialPins;
 			// The list is the same, but under a new session id: no list write tells the backend.
 			this.#mirrorTodoPhases();
 			this.#memory.rekeyForCurrentSessionId();
@@ -13504,7 +13485,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			let recorded = false;
 			try {
 				recorded = await this.#modelRegistry.authStorage.limits.markServiceTierUnavailable(message.provider, {
-					sessionId: this.agent.sessionId,
 					credentialId: message.credentialId,
 					serviceTier: "priority",
 					modelId: message.model,
@@ -14920,7 +14900,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				this.sessionManager.clearTaskSiblingCandidate();
 			}
 			this.#syncAgentSessionId(undefined, false);
-			if (this.#pendingCredentialPins) await this.#pendingCredentialPins;
 			this.#memory.rekeyForCurrentSessionId();
 
 			let sessionContext = this.buildDisplaySessionContext();
@@ -15108,7 +15087,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.sessionManager.restoreState(previousSessionState);
 			this.#freshProviderSessionId = previousFreshProviderSessionId;
 			this.#syncAgentSessionId(previousSessionState.sessionId, false);
-			if (this.#pendingCredentialPins) await this.#pendingCredentialPins;
 			this.#memory.rekeyForCurrentSessionId();
 			this.agent.setTools(previousTools);
 			this.#tools.restoreBaseSystemPrompt(previousBaseSystemPrompt, previousSystemPromptSources);
@@ -15350,7 +15328,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#freshProviderSessionId = undefined;
 			this.#clearInheritedProviderPromptCacheKey();
 			this.#syncAgentSessionId();
-			if (this.#pendingCredentialPins) await this.#pendingCredentialPins;
 			this.#memory.rekeyForCurrentSessionId();
 			await this.#memory.resetContextForNewTranscript();
 
@@ -15483,7 +15460,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#modelMentions.syncFromBranch();
 			this.#freshProviderSessionId = undefined;
 			this.#syncAgentSessionId();
-			if (this.#pendingCredentialPins) await this.#pendingCredentialPins;
 			this.#memory.rekeyForCurrentSessionId();
 			await this.#memory.resetContextForNewTranscript();
 
@@ -15673,7 +15649,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		let summaryDetails: unknown;
 		if (options.summarize && entriesToSummarize.length > 0 && !hookSummary) {
 			const model = this.model!;
-			if (this.#pendingCredentialPins) await this.#pendingCredentialPins;
 			const apiKey = await this.#modelRegistry.getApiKey(model, this.sessionId);
 			if (!apiKey) {
 				throw new Error(`No API key for ${model.provider}`);
@@ -16164,15 +16139,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * Pin a stored OAuth account to the current model provider for this session.
 	 * Returns false while streaming or when the credential is no longer available.
 	 */
-	async pinCurrentProviderOAuthAccount(credentialId: number): Promise<boolean> {
+	pinCurrentProviderOAuthAccount(credentialId: number): boolean {
 		const provider = this.model?.provider;
-		const sessionId = this.sessionId;
 		if (!provider || this.isStreaming) return false;
-		if (this.#pendingCredentialPins) {
-			await this.#pendingCredentialPins;
-			if (this.model?.provider !== provider || this.sessionId !== sessionId || this.isStreaming) return false;
-		}
-		return this.#modelRegistry.authStorage.sessions.pin(provider, sessionId, credentialId);
+		return this.#modelRegistry.authStorage.sessions.pin(provider, this.sessionId, credentialId);
 	}
 
 	/**
@@ -16310,7 +16280,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		identity: OAuthAccountIdentity | undefined,
 		coordinator: CodexAutoRedeemCoordinator,
 		activeBlockUnblockAtMs?: number,
-		permitsCredential?: (credentialId: number) => boolean,
 	): CodexResetPlan {
 		const cfg = cfgCodexResets.get(this.settings);
 		const model = this.model;
@@ -16321,7 +16290,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			modelId: model?.id ?? "",
 			settings: resetPlanSettings(resetWindowModes("openai-codex", this.settings), cfg),
 			identity,
-			permitsCredential,
+			permitsCredential: credentialId =>
+				this.#modelRegistry.authStorage.sessions.permits("openai-codex", this.sessionId, credentialId),
 			reports,
 			attemptedKeys: coordinator.attemptedKeys,
 			deferredUntilByKey: coordinator.deferredUntilByKey,
@@ -16340,7 +16310,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		statuses: readonly ResetCreditAccountStatus[],
 		coordinator: CodexAutoRedeemCoordinator,
 		activeBlockUnblockAtMs?: number,
-		permitsCredential?: (credentialId: number) => boolean,
 	): ClaudeResetPlan {
 		const cfg = cfgClaudeResets.get(this.settings);
 		const model = this.model;
@@ -16352,7 +16321,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			settings: resetPlanSettings(resetWindowModes("anthropic", this.settings), cfg),
 			reports,
 			statuses,
-			permitsCredential,
+			permitsCredential: credentialId =>
+				this.#modelRegistry.authStorage.sessions.permits("anthropic", this.sessionId, credentialId),
 			attemptedKeys: coordinator.attemptedKeys,
 			deferredUntilByKey: coordinator.deferredUntilByKey,
 			lastAttemptAtByAccount: coordinator.lastAttemptAtByAccount,
@@ -16384,13 +16354,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		for (const status of statuses) {
 			if (status.provider !== this.model?.provider) continue;
 			// A peer's reset of an account outside the session's pool cannot serve its retry.
-			if (
-				!(await this.#modelRegistry.authStorage.sessions.permits(
-					status.provider,
-					this.sessionId,
-					status.credentialId,
-				))
-			) {
+			if (!this.#modelRegistry.authStorage.sessions.permits(status.provider, this.sessionId, status.credentialId)) {
 				continue;
 			}
 			const lockKey = resetAccountLockKey(status);
@@ -16427,10 +16391,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const source = provider === "anthropic" ? "claude-auto-reset" : "codex-auto-reset";
 		// Consent, earlier actions, the fence and the live listing all wait after
 		// planning: a restore the session's account pool no longer allows is dropped.
-		// Checked immediately before the redeem call.
-		const outsidePool = async (action: CodexResetAction | ClaudeResetAction): Promise<boolean> =>
+		// Checked with no await before the redeem call.
+		const outsidePool = (action: CodexResetAction | ClaudeResetAction): boolean =>
 			action.reason === "blocked-account" &&
-			!(await authStorage.sessions.permits(provider, this.sessionId, action.target.credentialId));
+			!authStorage.sessions.permits(provider, this.sessionId, action.target.credentialId);
 		const restored: number[] = [];
 		let poolLimited = false;
 		for (const action of actions) {
@@ -16451,7 +16415,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				const lockKey = resetAccountLockKey(action.target);
 				if (!lockKey) {
 					// An account without an upstream identity cannot share a cross-process fence.
-					leftPool = await outsidePool(action);
+					leftPool = outsidePool(action);
 					if (!leftPool) outcome = await authStorage.resets.redeem(redeemOptions);
 				} else {
 					// The coordinator is process-local. Fence concurrent processes and
@@ -16473,10 +16437,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 								if (balance) return { ok: false, code: balance, provider } satisfies ResetCreditRedeemOutcome;
 							}
 							const { outcome: result, attemptedAt } = await markedRedeem(async () => {
-								// Check after the pending marker is written, just before redeem.
-								// A restore the pool no longer allows is never sent:
+								// Checked after the pending marker is written, with no await before
+								// the redeem. A restore the pool no longer allows is never sent:
 								// report a no-op so the fence clears its marker, and drop it below.
-								leftPool = await outsidePool(action);
+								leftPool = outsidePool(action);
 								if (leftPool) return { ok: false, code: "nothing_to_reset", provider };
 								return authStorage.resets.redeem(redeemOptions);
 							});
@@ -16589,18 +16553,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		let existing = coordinator.inFlightByAccount.get(accountKey);
 		while (existing) {
 			const shared = await existing;
-			if (shared.restored) {
-				try {
-					for (const id of shared.restoredCredentialIds ?? []) {
-						if (await authStorage.sessions.permits(provider, this.sessionId, id)) return shared;
-					}
-				} catch (error) {
-					logger.warn("auto-reset: shared account permission check failed", { provider, error: String(error) });
-					return { restored: false };
-				}
-			} else if (!shared.poolLimited) {
-				return shared;
-			}
+			const serves = shared.restored
+				? shared.restoredCredentialIds?.some(id => authStorage.sessions.permits(provider, this.sessionId, id))
+				: !shared.poolLimited;
+			if (serves) return shared;
 			existing = coordinator.inFlightByAccount.get(accountKey);
 		}
 
@@ -16613,44 +16569,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// Claude's live reset listing includes the same response's quota
 			// windows; a second broker usage poll adds no evidence and can 429.
 			const statuses = await this.listResetCredits(AbortSignal.timeout(10_000), provider);
-			const effectiveReports =
-				provider === "openai-codex"
-					? overlayLiveResetCredits(reports, statuses, { synthesizeActive: true, nowMs: Date.now() })
-					: reports;
-			const candidateIds = new Set<number>();
-			if (provider === "anthropic") {
-				for (const status of statuses) candidateIds.add(status.credentialId);
-			} else {
-				for (const report of effectiveReports ?? []) {
-					const id = report.metadata?.resetCreditCredentialId;
-					if (report.provider === provider && typeof id === "number" && Number.isInteger(id)) candidateIds.add(id);
-				}
-			}
-			const sessionId = this.sessionId;
-			const permittedIds = new Set<number>();
-			await Promise.all(
-				Array.from(candidateIds, async id => {
-					if (await authStorage.sessions.permits(provider, sessionId, id)) permittedIds.add(id);
-				}),
-			);
-			const permitsCredential = (id: number) => permittedIds.has(id);
 			const plan =
 				provider === "anthropic"
-					? this.#planClaudeResets(
-							"blocked",
-							reports,
-							statuses,
-							coordinator,
-							activeBlockUnblockAtMs,
-							permitsCredential,
-						)
+					? this.#planClaudeResets("blocked", reports, statuses, coordinator, activeBlockUnblockAtMs)
 					: this.#planCodexResets(
 							"blocked",
-							effectiveReports,
+							overlayLiveResetCredits(reports, statuses, { synthesizeActive: true, nowMs: Date.now() }),
 							identity,
 							coordinator,
 							activeBlockUnblockAtMs,
-							permitsCredential,
 						);
 			const poolLimited = plan.skipped.some(skip => skip.reason === "outside-account-pool");
 			if (plan.actions.length === 0) {

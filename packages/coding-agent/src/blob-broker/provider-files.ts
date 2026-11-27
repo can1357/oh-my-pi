@@ -1,6 +1,5 @@
 import type { AuthStorage, Context, ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
-import { findStoredOAuthIdentity } from "../session/auth-daemon-backend";
 import { contextHasImages, decorateContextProviderFiles } from "./context-images";
 import {
 	hashProviderFileContent,
@@ -12,12 +11,15 @@ import {
 	type ProviderFileHandle,
 	toProviderFileReference,
 } from "./provider-file-types";
-import { createAnthropicFileClient } from "./provider-files-anthropic";
+import { ANTHROPIC_FILES_OAUTH_SCOPE, createAnthropicFileClient } from "./provider-files-anthropic";
 import { createGeminiProviderFileClient } from "./provider-files-gemini";
 import { createOpenAIFileClient } from "./provider-files-openai";
 
 /** Resolve the current account credential for a model without retaining it. */
 export type ProviderFileCredentialResolver = (model: Model) => Promise<string | undefined>;
+
+/** OAuth scope a provider's Files API needs of a subscription grant. */
+const FILE_UPLOAD_SCOPES: Partial<Record<string, string>> = { anthropic: ANTHROPIC_FILES_OAUTH_SCOPE };
 
 /**
  * The model's request credential when it may upload provider files. A stored
@@ -34,9 +36,13 @@ export async function resolveProviderFileCredential(
 	sessionId?: string,
 ): Promise<string | undefined> {
 	const key = await registry.getApiKey(model, sessionId);
-	if (!key || model.provider !== "anthropic") return key;
-	const identity = await findStoredOAuthIdentity(registry.authStorage, model.provider, key);
-	return identity?.fileUploadAllowed === false ? undefined : key;
+	const scope = FILE_UPLOAD_SCOPES[model.provider];
+	if (!key || !scope) return key;
+	for (const { credential } of registry.authStorage.credentials.list(model.provider)) {
+		if (credential.type !== "oauth" || credential.access !== key) continue;
+		return credential.scope === undefined || credential.scope.split(" ").includes(scope) ? key : undefined;
+	}
+	return key;
 }
 
 /** Select a provider-native file client for a model and resolved credential. */

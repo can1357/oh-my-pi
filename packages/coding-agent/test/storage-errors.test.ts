@@ -136,7 +136,7 @@ test("concurrent agent and auth startup share one private recovered database", a
 		agent.recordModelUsage("openai/concurrent-recovery");
 		await auth.saveApiKey("concurrent-provider", "concurrent-secret");
 		expect(agent.getModelUsageOrder()).toEqual(["openai/concurrent-recovery"]);
-		expect(await agent.listAuthCredentials("concurrent-provider")).toMatchObject([
+		expect(agent.listAuthCredentials("concurrent-provider")).toMatchObject([
 			{ credential: { type: "api_key", key: "concurrent-secret" } },
 		]);
 		if (process.platform !== "win32") {

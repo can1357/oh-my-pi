@@ -42,9 +42,12 @@ import {
 	updateMCPServer,
 	validateServerName,
 } from "../../mcp/config-writer";
-import { mcpOAuthCredentialIdsForServerUrl, removeManagedMcpOAuthCredentials } from "../../mcp/oauth-credentials";
+import {
+	mcpOAuthCredentialIdsForServerUrl,
+	removeManagedMcpOAuthCredential,
+	removeManagedMcpOAuthCredentials,
+} from "../../mcp/oauth-credentials";
 import type { MCPAuthChallenge, MCPConfigFile, MCPServerConfig, MCPServerConnection } from "../../mcp/types";
-import { localAuthOwner } from "../../session/auth-daemon-backend";
 import { shortenPath } from "../../utils/render-utils";
 import { copyToClipboard } from "../../utils/clipboard";
 import { openPath } from "../../utils/open";
@@ -1370,21 +1373,23 @@ export class MCPCommandController {
 
 			const currentAuth = found.config.auth;
 			const authStorage = this.ctx.session.modelRegistry.authStorage;
-			// Clear the profile's URL-keyed binding as well as the explicit auth pointer.
-			const credentialIds: (string | undefined)[] =
-				found.config.type === "http" || found.config.type === "sse"
-					? mcpOAuthCredentialIdsForServerUrl(found.config.url)
-					: [];
-			if (currentAuth?.type === "oauth") credentialIds.unshift(currentAuth.credentialId);
-			let removedCredential = false;
-			if (credentialIds.length > 0) {
-				const owner = await localAuthOwner(authStorage);
-				removedCredential = await removeManagedMcpOAuthCredentials(owner, credentialIds);
-				if (removedCredential && owner !== authStorage) await authStorage.credentials.reload();
+			if (currentAuth?.type === "oauth") {
+				await removeManagedMcpOAuthCredential(authStorage, currentAuth.credentialId);
+			}
+			// Also drop this profile's url-keyed binding so the server is truly
+			// signed out even when the config carries no auth block. Runtime
+			// discovery expands `${...}` URL values before MCPManager looks up the
+			// deterministic credential row, so unauth must clear that same key.
+			let removedUrlKeyedCredential = false;
+			if ((found.config.type === "http" || found.config.type === "sse") && found.config.url) {
+				removedUrlKeyedCredential = await removeManagedMcpOAuthCredentials(
+					authStorage,
+					mcpOAuthCredentialIdsForServerUrl(found.config.url),
+				);
 			}
 
 			if (found.discovered && currentAuth?.type !== "oauth") {
-				if (!removedCredential) {
+				if (!removedUrlKeyedCredential) {
 					this.#showMessage(
 						["", currentTheme().fg("muted", `No stored OAuth auth to remove for "${name}".`), ""].join("\n"),
 					);

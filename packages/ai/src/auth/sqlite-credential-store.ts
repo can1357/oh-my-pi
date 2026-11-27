@@ -416,12 +416,6 @@ function extractOAuthTokenIdentifiers(token: string | undefined): string[] | und
  */
 export type CredentialEncryption = boolean | "auto";
 
-interface CredentialUnlockOptions {
-	encrypt?: CredentialEncryption;
-	/** Fail when sealed rows cannot be opened or the requested sealing cannot be enabled. */
-	requireUnlocked?: boolean;
-}
-
 /** How a {@link SqliteAuthCredentialStore} treats sealed credential rows. */
 export interface SqliteAuthCredentialStoreOptions {
 	/** Opens sealed rows; without it they read as unparsable and are skipped. */
@@ -612,7 +606,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	 */
 	static async open(
 		dbPath: string = getAgentDbPath(),
-		options: CredentialUnlockOptions = {},
+		options: { encrypt?: CredentialEncryption } = {},
 	): Promise<SqliteAuthCredentialStore> {
 		const dir = path.dirname(dbPath);
 		const dirExists = await fs
@@ -642,21 +636,9 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				},
 			},
 		);
-		try {
-			if (preservedPath) store.salvageQuarantinedCredentials(preservedPath);
-			await store.unlock(options);
-			return store;
-		} catch (error) {
-			try {
-				store.close();
-			} catch (closeError) {
-				logger.warn("Failed to close credential storage after unlock failure", {
-					dbPath,
-					error: String(closeError),
-				});
-			}
-			throw error;
-		}
+		if (preservedPath) store.salvageQuarantinedCredentials(preservedPath);
+		await store.unlock(options);
+		return store;
 	}
 
 	/**
@@ -666,13 +648,10 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	 * plaintext, and an empty store seals only when the vault answers without
 	 * prompting ({@link credentialVaultAvailable}; never on headless hosts).
 	 * Without sealing the vault is touched only to read sealed rows. A host
-	 * without a vault keeps writing plaintext unless `requireUnlocked` is set
-	 * and the store has sealed rows or needs to seal new writes.
+	 * without a vault keeps writing plaintext.
 	 */
-	async unlock(options: CredentialUnlockOptions = {}): Promise<void> {
-		using sealed = this.#db.prepare("SELECT 1 FROM auth_credentials WHERE salt IS NOT NULL LIMIT 1");
-		const sealedRows = sealed.get() !== null;
-		const strict = options.requireUnlocked === true;
+	async unlock(options: { encrypt?: CredentialEncryption } = {}): Promise<void> {
+		const sealedRows = this.#db.query("SELECT 1 FROM auth_credentials WHERE salt IS NOT NULL LIMIT 1").get() !== null;
 		let encrypt = options.encrypt === true;
 		if (options.encrypt === "auto") {
 			encrypt =
@@ -680,45 +659,20 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				(this.#db.query("SELECT 1 FROM auth_credentials LIMIT 1").get() === null &&
 					(await credentialVaultAvailable()));
 		}
-		let cipher = this.#cipher;
-		if (!cipher && (encrypt || sealedRows)) {
-			cipher = await loadCredentialCipher();
-			if (!cipher && encrypt && !(strict && sealedRows)) {
+		if (!this.#cipher && (encrypt || sealedRows)) {
+			this.#cipher = await loadCredentialCipher();
+			if (!this.#cipher && encrypt) {
 				// Concurrent first runs would each store a key and seal rows the other cannot
 				// open; the write lock lets the second find the first one's key.
 				this.#db.run("BEGIN IMMEDIATE");
 				try {
-					// Another opener may have sealed rows while we were waiting. In
-					// strict mode never create a replacement for an existing master key.
-					cipher = await loadCredentialCipher({ create: !strict || sealed.get() === null });
+					this.#cipher = await loadCredentialCipher({ create: true });
 				} finally {
 					this.#db.run("COMMIT");
 				}
 			}
 		}
-		if (strict) {
-			const hasSealedRows = sealedRows || sealed.get() !== null;
-			if (options.encrypt === "auto" && hasSealedRows) encrypt = true;
-			if (!cipher && (encrypt || hasSealedRows)) {
-				throw new Error("Credential master key unavailable; unlock the OS credential vault and try again");
-			}
-			if (cipher && hasSealedRows) {
-				using rows = this.#db.prepare<{ data: string; salt: string }, []>(
-					"SELECT data, salt FROM auth_credentials WHERE salt IS NOT NULL",
-				);
-				for (const row of rows.iterate()) {
-					try {
-						cipher.open(row);
-					} catch (cause) {
-						throw new Error("The OS credential vault master key cannot open existing sealed credentials", {
-							cause,
-						});
-					}
-				}
-			}
-		}
-		this.#cipher = cipher;
-		this.#encrypt = encrypt && cipher !== undefined;
+		this.#encrypt = encrypt && this.#cipher !== undefined;
 	}
 
 	/**

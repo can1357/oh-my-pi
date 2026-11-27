@@ -2,6 +2,8 @@ import { Database, type Statement } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
+	type AuthCredential,
+	type AuthCredentialStore,
 	parseServiceTier,
 	SqliteAuthCredentialStore,
 	type ServiceTier,
@@ -16,13 +18,9 @@ import {
 	isRecord,
 	logger,
 	openSqliteDatabase,
-	openSqliteDatabaseSync,
 	postmortem,
-	registerSqliteQuarantineRelease,
-	type SqliteFileIdentity,
-	sqliteFileIdentity,
 } from "@oh-my-pi/pi-utils";
-import type { RawSettings as Settings } from "../config/raw-settings";
+import type { RawSettings as Settings } from "../config/settings";
 
 /** Row shape for settings table queries */
 type SettingsRow = {
@@ -164,21 +162,6 @@ const USAGE_KINDS = ["command", "hint"] as const;
 /** Prepared statements for one `<kind>_usage` table. */
 type UsageStatements = { upsert: Statement; list: Statement };
 
-type StorageConnection = {
-	db: Database;
-	identity: SqliteFileIdentity;
-	statements: Statement[];
-	listSettings: Statement;
-	getCache: Statement;
-	upsertCache: Statement;
-	upsertModelUsage: Statement;
-	listModelUsage: Statement;
-	upsertModelPerf: Statement;
-	listModelPerf: Statement;
-	usage: Record<UsageKind, UsageStatements>;
-	unregisterQuarantineRelease: () => void;
-};
-
 /** Current agent.db schema version; bump when schema changes require migration. */
 export const SCHEMA_VERSION = 6;
 const SQLITE_NOW_EPOCH = "CAST(strftime('%s','now') AS INTEGER)";
@@ -200,7 +183,7 @@ export interface AgentStorageApi {
 	/** Set a cached value with expiry time (unix seconds). */
 	setCache(key: string, value: string, expiresAtSec: number): void;
 	/** Stored auth credentials, optionally filtered by provider. */
-	listAuthCredentials(provider?: string, includeDisabled?: boolean): Promise<StoredAuthCredential[]>;
+	listAuthCredentials(provider?: string, includeDisabled?: boolean): StoredAuthCredential[];
 	/** Record a model use ("provider/modelId"), bumping it in the MRU order. */
 	recordModelUsage(modelKey: string): void;
 	/** Model keys, most recently used first. */
@@ -214,18 +197,22 @@ export interface AgentStorageApi {
 }
 
 /**
- * SQLite storage for agent settings, usage, and cache. Explicit credential access
- * lazily opens a separate credential connection.
+ * Unified SQLite storage for agent settings, model usage, and auth credentials.
+ * Delegates auth credential operations to AuthCredentialStore from @oh-my-pi/pi-ai.
  * Uses singleton pattern per database path; access via AgentStorage.open().
  */
 export class AgentStorage implements AgentStorageApi {
-	readonly #dbPath: string;
-	#activeConnection?: StorageConnection;
-	#opening?: Promise<void>;
-	#authStore?: SqliteAuthCredentialStore;
-	#authIdentity: SqliteFileIdentity;
-	#unregisterAuthQuarantineRelease?: () => void;
-	#authOpening?: Promise<SqliteAuthCredentialStore>;
+	#db: Database;
+	#authStore: SqliteAuthCredentialStore;
+	/** Loads the OS-vault key when the store holds sealed credentials; `open()` waits for it. */
+	#unlocked: Promise<void>;
+
+	#listSettingsStmt: Statement;
+	#upsertModelUsageStmt: Statement;
+	#listModelUsageStmt: Statement;
+	#upsertModelPerfStmt: Statement;
+	#listModelPerfStmt: Statement;
+	#usageStmts: Record<UsageKind, UsageStatements>;
 	#modelUsageCache: string[] | null = null;
 	/** Only the real user db auto-imports stats.db history; custom paths (tests, embedding) opt in explicitly. */
 	#autoPerfBackfill: boolean;
@@ -235,49 +222,26 @@ export class AgentStorage implements AgentStorageApi {
 	#perfDrain = new AsyncDrain<ModelPerfInsert>(MODEL_PERF_FLUSH_DELAY_MS, { unref: true });
 	#closing = false;
 
-	private constructor(dbPath: string) {
-		this.#dbPath = dbPath;
+	private constructor(db: Database, dbPath: string) {
+		this.#db = db;
 		this.#autoPerfBackfill = dbPath === getAgentDbPath();
-	}
 
-	get #db(): Database {
-		return this.#connection.db;
-	}
+		this.#initializeSchema();
+		this.#hardenPermissions(dbPath);
 
-	get #connection(): StorageConnection {
-		if (this.#activeConnection) return this.#activeConnection;
-		if (this.#closing) throw new Error("AgentStorage is closed");
-		// A synchronous metadata caller can arrive while auth is reopening after
-		// quarantine. The original file is already detached in that case.
-		return (this.#activeConnection = openSqliteDatabaseSync(this.#dbPath, db => this.#prepareConnection(db)));
-	}
+		// Create AuthCredentialStore with our open database
+		this.#authStore = new SqliteAuthCredentialStore(this.#db);
+		this.#unlocked = this.#authStore.unlock();
 
-	#prepareConnection(db: Database): StorageConnection {
-		this.#initializeSchema(db);
-		this.#hardenPermissions(this.#dbPath);
-		const statements: Statement[] = [];
-		const prepare = (sql: string) => {
-			const stmt = db.prepare(sql);
-			statements.push(stmt);
-			return stmt;
-		};
-		try {
-			return {
-				db,
-				identity: sqliteFileIdentity(this.#dbPath),
-				statements,
-				listSettings: prepare("SELECT key, value FROM settings"),
-				getCache: prepare(`SELECT value FROM cache WHERE key = ? AND expires_at > ${SQLITE_NOW_EPOCH}`),
-				upsertCache: prepare(
-					"INSERT INTO cache (key, value, expires_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, expires_at = excluded.expires_at",
-				),
-				upsertModelUsage: prepare(
-					`INSERT INTO model_usage (model_key, last_used_at) VALUES (?, ${SQLITE_NOW_EPOCH}) ON CONFLICT(model_key) DO UPDATE SET last_used_at = ${SQLITE_NOW_EPOCH}`,
-				),
-				listModelUsage: prepare("SELECT model_key FROM model_usage ORDER BY last_used_at DESC"),
-				// Fold recency into old aggregates, halving them after MODEL_PERF_DECAY_AT samples.
-				upsertModelPerf: prepare(
-					`INSERT INTO model_perf (model_key, samples, output_tokens, gen_ms, ttft_samples, ttft_ms, updated_at)
+		this.#listSettingsStmt = this.#db.prepare("SELECT key, value FROM settings");
+		this.#upsertModelUsageStmt = this.#db.prepare(
+			`INSERT INTO model_usage (model_key, last_used_at) VALUES (?, ${SQLITE_NOW_EPOCH}) ON CONFLICT(model_key) DO UPDATE SET last_used_at = ${SQLITE_NOW_EPOCH}`,
+		);
+		this.#listModelUsageStmt = this.#db.prepare("SELECT model_key FROM model_usage ORDER BY last_used_at DESC");
+		// Recency-weighted upsert: past MODEL_PERF_DECAY_AT samples, every new
+		// sample first halves the aggregates so old measurements fade out.
+		this.#upsertModelPerfStmt = this.#db.prepare(
+			`INSERT INTO model_perf (model_key, samples, output_tokens, gen_ms, ttft_samples, ttft_ms, updated_at)
 VALUES (?1, 1, ?2, ?3, ?4, ?5, ${SQLITE_NOW_EPOCH})
 ON CONFLICT(model_key) DO UPDATE SET
 	samples = (CASE WHEN model_perf.samples >= ${MODEL_PERF_DECAY_AT} THEN model_perf.samples / 2 ELSE model_perf.samples END) + 1,
@@ -286,51 +250,37 @@ ON CONFLICT(model_key) DO UPDATE SET
 	ttft_samples = (CASE WHEN model_perf.samples >= ${MODEL_PERF_DECAY_AT} THEN model_perf.ttft_samples * 0.5 ELSE model_perf.ttft_samples END) + excluded.ttft_samples,
 	ttft_ms = (CASE WHEN model_perf.samples >= ${MODEL_PERF_DECAY_AT} THEN model_perf.ttft_ms * 0.5 ELSE model_perf.ttft_ms END) + excluded.ttft_ms,
 	updated_at = ${SQLITE_NOW_EPOCH}`,
-				),
-				// `model_key TEXT PRIMARY KEY` still admits NULL in a rowid table.
-				listModelPerf: prepare(
-					"SELECT model_key, samples, output_tokens, gen_ms, ttft_samples, ttft_ms FROM model_perf WHERE model_key IS NOT NULL",
-				),
-				usage: {
-					command: this.#prepareUsageStatements(prepare, "command"),
-					hint: this.#prepareUsageStatements(prepare, "hint"),
-				},
-				unregisterQuarantineRelease: registerSqliteQuarantineRelease(this.#dbPath, () =>
-					this.#closeConnection(false),
-				),
-			};
-		} catch (error) {
-			for (const stmt of statements) stmt.finalize();
-			throw error;
-		}
+		);
+		// `model_key TEXT PRIMARY KEY` admits NULL (SQLite rowid-table quirk); a NULL
+		// key would break every consumer that treats perf keys as selectors.
+		this.#listModelPerfStmt = this.#db.prepare(
+			"SELECT model_key, samples, output_tokens, gen_ms, ttft_samples, ttft_ms FROM model_perf WHERE model_key IS NOT NULL",
+		);
+		this.#usageStmts = {
+			command: this.#prepareUsageStatements("command"),
+			hint: this.#prepareUsageStatements("hint"),
+		};
 	}
 
-	#prepareUsageStatements(prepare: (sql: string) => Statement, kind: UsageKind): UsageStatements {
+	#prepareUsageStatements(kind: UsageKind): UsageStatements {
 		const table = `${kind}_usage`;
 		return {
-			upsert: prepare(
+			upsert: this.#db.prepare(
 				`INSERT INTO ${table} (name, count, last_used_at) VALUES (?, 1, ${SQLITE_NOW_EPOCH})
 ON CONFLICT(name) DO UPDATE SET count = ${table}.count + 1, last_used_at = ${SQLITE_NOW_EPOCH}`,
 			),
-			list: prepare(`SELECT name, count FROM ${table}`),
+			list: this.#db.prepare(`SELECT name, count FROM ${table}`),
 		};
 	}
 
 	/**
 	 * Creates tables if missing and migrates legacy settings.
-	 * SqliteAuthCredentialStore handles auth_credentials and shares the cache table.
+	 * AuthCredentialStore handles auth_credentials and cache tables.
 	 */
-	#initializeSchema(db: Database): void {
-		db.run(`
+	#initializeSchema(): void {
+		this.#db.run(`
 PRAGMA journal_mode=WAL;
 PRAGMA synchronous=NORMAL;
-
-CREATE TABLE IF NOT EXISTS cache (
-	key TEXT PRIMARY KEY,
-	value TEXT NOT NULL,
-	expires_at INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_cache_expires ON cache(expires_at);
 
 CREATE TABLE IF NOT EXISTS model_usage (
 	model_key TEXT PRIMARY KEY,
@@ -374,14 +324,14 @@ CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);
 
 		// One-off statements are scoped with `using`: an unfinalized statement keeps the SQLite
 		// connection (and agent.db) open after close() until GC collects it.
-		using settingsInfoStmt = db.prepare("PRAGMA table_info(settings)");
+		using settingsInfoStmt = this.#db.prepare("PRAGMA table_info(settings)");
 		const settingsInfo = settingsInfoStmt.all() as Array<{ name?: string }>;
 		const hasSettingsTable = settingsInfo.length > 0;
 		const hasKey = settingsInfo.some(column => column.name === "key");
 		const hasValue = settingsInfo.some(column => column.name === "value");
 
 		if (!hasSettingsTable) {
-			db.run(`
+			this.#db.run(`
 CREATE TABLE settings (
 	key TEXT PRIMARY KEY,
 	value TEXT NOT NULL,
@@ -391,7 +341,7 @@ CREATE TABLE settings (
 		} else if (!hasKey || !hasValue) {
 			// Migrate v1 schema: single JSON blob in `data` column → per-key rows
 			let legacySettings: Record<string, unknown> | null = null;
-			using legacyRowStmt = db.prepare("SELECT data FROM settings WHERE id = 1");
+			using legacyRowStmt = this.#db.prepare("SELECT data FROM settings WHERE id = 1");
 			const row = legacyRowStmt.get() as { data?: string } | undefined;
 			if (row?.data) {
 				try {
@@ -406,9 +356,9 @@ CREATE TABLE settings (
 				}
 			}
 
-			const migrate = db.transaction((settings: Record<string, unknown> | null) => {
-				db.run("DROP TABLE settings");
-				db.run(`
+			const migrate = this.#db.transaction((settings: Record<string, unknown> | null) => {
+				this.#db.run("DROP TABLE settings");
+				this.#db.run(`
 CREATE TABLE settings (
 	key TEXT PRIMARY KEY,
 	value TEXT NOT NULL,
@@ -416,7 +366,7 @@ CREATE TABLE settings (
 );
 `);
 				if (settings) {
-					using insert = db.prepare(
+					using insert = this.#db.prepare(
 						`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ${SQLITE_NOW_EPOCH})`,
 					);
 					for (const [key, value] of Object.entries(settings)) {
@@ -431,7 +381,7 @@ CREATE TABLE settings (
 			migrate(legacySettings);
 		}
 
-		using versionStmt = db.prepare("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1");
+		using versionStmt = this.#db.prepare("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1");
 		const versionRow = versionStmt.get() as { version?: number } | undefined;
 		const schemaVersion = typeof versionRow?.version === "number" ? versionRow.version : 0;
 		if (versionRow?.version !== undefined && versionRow.version !== SCHEMA_VERSION) {
@@ -441,59 +391,63 @@ CREATE TABLE settings (
 			});
 		}
 		if (schemaVersion < SCHEMA_VERSION) {
-			this.#migrateSchema(db, schemaVersion);
+			this.#migrateSchema(schemaVersion);
 			// Only an upgrade (or a fresh db) records the version; rewriting the same
 			// row on every open was a write transaction per process start.
-			using recordVersionStmt = db.prepare("INSERT OR REPLACE INTO schema_version(version) VALUES (?)");
+			using recordVersionStmt = this.#db.prepare("INSERT OR REPLACE INTO schema_version(version) VALUES (?)");
 			recordVersionStmt.run(SCHEMA_VERSION);
 		}
 	}
 
-	#migrateSchema(db: Database, fromVersion: number): void {
+	#migrateSchema(fromVersion: number): void {
+		if (fromVersion < 4) {
+			// v3 → v4: Add disabled column to auth_credentials (handled by AuthCredentialStore)
+			// Nothing to do here - AuthCredentialStore will handle this migration
+		}
 		if (fromVersion < 5) {
-			this.#migrateSchemaV4ToV5(db);
+			this.#migrateSchemaV4ToV5();
 		}
 		if (fromVersion < 6) {
 			// v5 → v6: TPS switched from the post-TTFT decode window to total
 			// request duration (hidden reasoning made decode-window rates bogus).
 			// Purge the old aggregates and re-arm the stats.db backfill so
 			// history is re-imported through the corrected fold.
-			db.run("DELETE FROM model_perf");
-			using clearBackfillStmt = db.prepare("DELETE FROM meta WHERE key = ?");
+			this.#db.run("DELETE FROM model_perf");
+			using clearBackfillStmt = this.#db.prepare("DELETE FROM meta WHERE key = ?");
 			clearBackfillStmt.run(MODEL_PERF_BACKFILL_KEY);
 		}
 	}
 
-	#migrateSchemaV4ToV5(db: Database): void {
-		const migrate = db.transaction(() => {
-			db.run("ALTER TABLE settings RENAME TO settings_legacy");
-			db.run(`
+	#migrateSchemaV4ToV5(): void {
+		const migrate = this.#db.transaction(() => {
+			this.#db.run("ALTER TABLE settings RENAME TO settings_legacy");
+			this.#db.run(`
 CREATE TABLE settings (
 	key TEXT PRIMARY KEY,
 	value TEXT NOT NULL,
 	updated_at INTEGER NOT NULL DEFAULT (${SQLITE_NOW_EPOCH})
 );
 `);
-			db.run(`
+			this.#db.run(`
 INSERT INTO settings (key, value, updated_at)
 SELECT key, value, updated_at
 FROM settings_legacy
 `);
-			db.run("DROP TABLE settings_legacy");
+			this.#db.run("DROP TABLE settings_legacy");
 
-			db.run("ALTER TABLE model_usage RENAME TO model_usage_legacy");
-			db.run(`
+			this.#db.run("ALTER TABLE model_usage RENAME TO model_usage_legacy");
+			this.#db.run(`
 CREATE TABLE model_usage (
 	model_key TEXT PRIMARY KEY,
 	last_used_at INTEGER NOT NULL DEFAULT (${SQLITE_NOW_EPOCH})
 );
 `);
-			db.run(`
+			this.#db.run(`
 INSERT INTO model_usage (model_key, last_used_at)
 SELECT model_key, last_used_at
 FROM model_usage_legacy
 `);
-			db.run("DROP TABLE model_usage_legacy");
+			this.#db.run("DROP TABLE model_usage_legacy");
 		});
 		migrate();
 	}
@@ -507,48 +461,23 @@ FROM model_usage_legacy
 	 * @returns AgentStorage instance for the given path
 	 */
 	static async open(dbPath: string = getAgentDbPath()): Promise<AgentStorage> {
-		let storage = instances.get(dbPath);
-		if (!storage) {
-			fs.mkdirSync(path.dirname(dbPath), { recursive: true, mode: 0o700 });
-			storage = new AgentStorage(dbPath);
-			instances.set(dbPath, storage);
-			cancelExitCleanup ??= postmortem.register("agent-storage", () => AgentStorage.close(), { exitOnly: true });
+		const existing = instances.get(dbPath);
+		if (existing) {
+			await existing.#unlocked;
+			return existing;
 		}
-		try {
-			await storage.#openMetadata();
-			if (storage.#closing) throw new Error("AgentStorage is closed");
-			return storage;
-		} catch (error) {
-			if (instances.get(dbPath) === storage) {
-				instances.delete(dbPath);
-				storage.#close();
-			}
-			throw error;
-		}
-	}
 
-	async #openMetadata(): Promise<void> {
-		if (this.#opening) return this.#opening;
-		const identity = sqliteFileIdentity(this.#dbPath);
-		if (identity !== undefined && identity === this.#activeConnection?.identity) return;
-		this.#closeConnection(false);
+		fs.mkdirSync(path.dirname(dbPath), { recursive: true, mode: 0o700 });
 		let preservedPath: string | undefined;
-		const opening = openSqliteDatabase(
-			this.#dbPath,
+		const opened = await openSqliteDatabase(
+			dbPath,
 			db => {
-				if (this.#closing) throw new Error("AgentStorage is closed");
-				if (preservedPath) {
-					// Keep ciphertext and salt intact, without opening the OS vault or sharing
-					// the metadata handle with a temporary store that will close it.
-					const salvage = openSqliteDatabaseSync(this.#dbPath, authDb => new SqliteAuthCredentialStore(authDb));
-					try {
-						salvage.salvageQuarantinedCredentials(preservedPath);
-					} finally {
-						salvage.close();
-					}
-				}
-				if (this.#activeConnection) db.close();
-				else this.#activeConnection = this.#prepareConnection(db);
+				const storage = new AgentStorage(db, dbPath);
+				// Publish synchronously: concurrent opens must reuse this handle before the helper yields.
+				// Exit-only cleanup keeps the connection valid for continuing sessions.
+				cancelExitCleanup ??= postmortem.register("agent-storage", () => AgentStorage.close(), { exitOnly: true });
+				instances.set(dbPath, storage);
+				return storage;
 			},
 			{
 				recoverCorruption: true,
@@ -557,23 +486,18 @@ FROM model_usage_legacy
 				},
 			},
 		);
-		this.#opening = opening;
-		try {
-			await opening;
-		} finally {
-			this.#opening = undefined;
+		// The quarantined store held the user's provider credentials; carry over what is readable.
+		if (preservedPath) {
+			opened.#authStore.salvageQuarantinedCredentials(preservedPath);
+			opened.#unlocked = opened.#authStore.unlock();
 		}
+		await opened.#unlocked;
+		return opened;
 	}
 
 	/** Flushes deferred writes, closes every process-wide database, and permits reopening them. */
 	static close(): void {
-		for (const storage of instances.values()) {
-			try {
-				storage.#close();
-			} catch (error) {
-				logger.warn("AgentStorage failed to close", { error: String(error) });
-			}
-		}
+		for (const storage of instances.values()) storage.#close();
 		instances.clear();
 		cancelExitCleanup?.();
 		cancelExitCleanup = undefined;
@@ -581,43 +505,29 @@ FROM model_usage_legacy
 
 	#close(): void {
 		this.#closing = true;
-		// Model-performance batches run synchronously once invoked. Flush before
-		// closing prepared statements, without starting a connection on shutdown.
-		if (this.#activeConnection) void this.#perfDrain.flush();
+		// Model-performance batches are synchronous once invoked, so this
+		// persists them before finalizing their statements during process exit.
+		void this.#perfDrain.flush();
+		// Best-effort: a database whose directory was removed (agent dir deleted underneath the
+		// process) cannot checkpoint, and that must not keep the remaining handles open.
 		try {
-			this.#closeConnection(true);
-		} finally {
-			this.#closeAuthStore();
+			checkpointWal(this.#db);
+		} catch (error) {
+			logger.debug("AgentStorage: WAL checkpoint on close failed", { error: String(error) });
 		}
-	}
-
-	#closeConnection(checkpoint: boolean): void {
-		const connection = this.#activeConnection;
-		if (!connection) return;
-		this.#activeConnection = undefined;
-		this.#modelUsageCache = null;
-		connection.unregisterQuarantineRelease();
-		if (checkpoint && sqliteFileIdentity(this.#dbPath) === connection.identity) {
-			try {
-				checkpointWal(connection.db);
-			} catch (error) {
-				logger.debug("AgentStorage: WAL checkpoint on close failed", { error: String(error) });
-			}
+		this.#listSettingsStmt.finalize();
+		this.#upsertModelUsageStmt.finalize();
+		this.#listModelUsageStmt.finalize();
+		this.#upsertModelPerfStmt.finalize();
+		this.#listModelPerfStmt.finalize();
+		for (const kind of USAGE_KINDS) {
+			const stmts = this.#usageStmts[kind];
+			stmts.upsert.finalize();
+			stmts.list.finalize();
 		}
-		try {
-			for (const stmt of connection.statements) stmt.finalize();
-		} finally {
-			connection.db.close();
-		}
-	}
-
-	#closeAuthStore(): void {
-		const store = this.#authStore;
-		this.#authStore = undefined;
-		this.#authIdentity = undefined;
-		this.#unregisterAuthQuarantineRelease?.();
-		this.#unregisterAuthQuarantineRelease = undefined;
-		store?.close();
+		// SqliteAuthCredentialStore.close() finalizes its own statements and
+		// closes the shared #db handle — must run after our statements finalize.
+		this.#authStore.close();
 	}
 
 	/**
@@ -627,7 +537,7 @@ FROM model_usage_legacy
 	 * @returns Settings object, or null if no settings are stored
 	 */
 	getSettings(): Settings | null {
-		const rows = (this.#connection.listSettings.all() as SettingsRow[]) ?? [];
+		const rows = (this.#listSettingsStmt.all() as SettingsRow[]) ?? [];
 		if (rows.length === 0) return null;
 		const settings: Record<string, unknown> = {};
 		for (const row of rows) {
@@ -658,7 +568,7 @@ FROM model_usage_legacy
 	 */
 	recordModelUsage(modelKey: string): void {
 		try {
-			this.#connection.upsertModelUsage.run(modelKey);
+			this.#upsertModelUsageStmt.run(modelKey);
 			this.#modelUsageCache = null;
 		} catch (error) {
 			logger.warn("AgentStorage failed to record model usage", { modelKey, error: String(error) });
@@ -675,7 +585,7 @@ FROM model_usage_legacy
 			return this.#modelUsageCache;
 		}
 		try {
-			const rows = this.#connection.listModelUsage.all() as ModelUsageRow[];
+			const rows = this.#listModelUsageStmt.all() as ModelUsageRow[];
 			this.#modelUsageCache = rows.map(row => row.model_key);
 			return this.#modelUsageCache;
 		} catch (error) {
@@ -690,7 +600,7 @@ FROM model_usage_legacy
 	 */
 	recordUsage(kind: UsageKind, name: string): void {
 		try {
-			this.#connection.usage[kind].upsert.run(name);
+			this.#usageStmts[kind].upsert.run(name);
 		} catch (error) {
 			logger.warn("AgentStorage failed to record usage", { kind, name, error: String(error) });
 		}
@@ -721,7 +631,7 @@ FROM model_usage_legacy
 	 */
 	listUsage(kind: UsageKind): Record<string, number> {
 		try {
-			const rows = this.#connection.usage[kind].list.all() as Array<{ name: string; count: number }>;
+			const rows = this.#usageStmts[kind].list.all() as Array<{ name: string; count: number }>;
 			const counts: Record<string, number> = {};
 			for (const row of rows) counts[row.name] = row.count;
 			return counts;
@@ -766,7 +676,7 @@ FROM model_usage_legacy
 	}
 
 	#foldModelPerf(row: ModelPerfInsert): void {
-		this.#connection.upsertModelPerf.run(row.modelKey, row.outputTokens, row.durationMs, row.ttftSamples, row.ttftMs);
+		this.#upsertModelPerfStmt.run(row.modelKey, row.outputTokens, row.durationMs, row.ttftSamples, row.ttftMs);
 	}
 
 	/**
@@ -782,7 +692,7 @@ FROM model_usage_legacy
 		this.#kickModelPerfBackfill();
 		const stats = new Map<string, ModelPerfStats>();
 		try {
-			for (const row of this.#connection.listModelPerf.all() as ModelPerfRow[]) {
+			for (const row of this.#listModelPerfStmt.all() as ModelPerfRow[]) {
 				if (row.gen_ms <= 0 || row.output_tokens <= 0) continue;
 				stats.set(row.model_key, {
 					samples: row.samples,
@@ -935,58 +845,22 @@ ON CONFLICT(model_key) DO UPDATE SET
 		}
 	}
 
-	async #getAuthStore(): Promise<SqliteAuthCredentialStore> {
-		if (this.#closing) throw new Error("AgentStorage is closed");
-		if (this.#authOpening) return this.#authOpening;
-		const identity = sqliteFileIdentity(this.#dbPath);
-		if (this.#authStore && identity !== undefined && identity === this.#authIdentity) return this.#authStore;
-		this.#closeAuthStore();
-		const opening = this.#openAuthStore();
-		this.#authOpening = opening;
-		try {
-			return await opening;
-		} finally {
-			this.#authOpening = undefined;
-		}
+	/**
+	 * Checks if any auth credentials exist in storage.
+	 * @returns True if at least one credential is stored
+	 */
+	hasAuthCredentials(): boolean {
+		return this.#authStore.listAuthCredentials().length > 0;
 	}
 
-	async #openAuthStore(): Promise<SqliteAuthCredentialStore> {
-		let preservedPath: string | undefined;
-		try {
-			const store = await openSqliteDatabase(
-				this.#dbPath,
-				async db => {
-					if (this.#closing) throw new Error("AgentStorage is closed");
-					// A BUSY retry may follow a failed unlock after construction.
-					this.#closeAuthStore();
-					const store = new SqliteAuthCredentialStore(db);
-					if (preservedPath) store.salvageQuarantinedCredentials(preservedPath);
-					this.#authStore = store;
-					this.#authIdentity = sqliteFileIdentity(this.#dbPath);
-					this.#unregisterAuthQuarantineRelease = registerSqliteQuarantineRelease(this.#dbPath, () =>
-						this.#closeAuthStore(),
-					);
-					await store.unlock();
-					return store;
-				},
-				{
-					recoverCorruption: true,
-					onCorruptionPreserved: backupPath => {
-						preservedPath = backupPath;
-					},
-				},
-			);
-			if (this.#closing) throw new Error("AgentStorage is closed");
-			if (!this.#activeConnection || this.#activeConnection.identity !== this.#authIdentity) {
-				await this.#openMetadata();
-			}
-			if (this.#closing) throw new Error("AgentStorage is closed");
-			if (this.#authStore !== store) throw new Error("AgentStorage credential connection was replaced");
-			return store;
-		} catch (error) {
-			this.#closeAuthStore();
-			throw error;
-		}
+	/**
+	 * Returns the underlying {@link AuthCredentialStore} so callers that need
+	 * the lower-level pi-ai abstraction (e.g. `findAnthropicAuth(store)`) can
+	 * reuse this storage's open database connection instead of opening their
+	 * own.
+	 */
+	get authStore(): AuthCredentialStore {
+		return this.#authStore;
 	}
 
 	/**
@@ -996,34 +870,69 @@ ON CONFLICT(model_key) DO UPDATE SET
 	 * @param includeDisabled - If true, includes disabled credentials
 	 * @returns Array of stored credentials with their database IDs
 	 */
-	async listAuthCredentials(provider?: string, includeDisabled = false): Promise<StoredAuthCredential[]> {
-		const store = await this.#getAuthStore();
-		if (this.#closing) throw new Error("AgentStorage is closed");
-		if (this.#authStore !== store) throw new Error("AgentStorage credential connection was replaced");
-		return includeDisabled ? store.listAllAuthCredentials(provider) : store.listAuthCredentials(provider);
+	listAuthCredentials(provider?: string, includeDisabled = false): StoredAuthCredential[] {
+		return includeDisabled
+			? this.#authStore.listAllAuthCredentials(provider)
+			: this.#authStore.listAuthCredentials(provider);
+	}
+
+	/**
+	 * Atomically replaces all credentials for a provider.
+	 * Useful for OAuth token refresh where old tokens should be discarded.
+	 * @param provider - Provider name (e.g., "anthropic", "openai")
+	 * @param credentials - New credentials to store
+	 * @returns Array of newly stored credentials with their database IDs
+	 */
+	replaceAuthCredentials(provider: string, credentials: AuthCredential[]): Promise<StoredAuthCredential[]> {
+		return this.#authStore.replaceAuthCredentials(provider, credentials);
+	}
+
+	/**
+	 * Updates an existing auth credential by ID.
+	 * @param id - Database row ID of the credential to update
+	 * @param credential - New credential data
+	 */
+	updateAuthCredential(id: number, credential: AuthCredential): void {
+		this.#authStore.updateAuthCredential(id, credential);
+	}
+
+	/**
+	 * Disables an auth credential by ID with a persisted cause.
+	 * @param id - Database row ID of the credential to disable
+	 * @param disabledCause - Human-readable cause stored with the disabled row
+	 */
+	deleteAuthCredential(id: number, disabledCause: string): Promise<boolean> {
+		return this.#authStore.deleteAuthCredential(id, disabledCause);
+	}
+
+	/**
+	 * Disables all auth credentials for a provider with a persisted cause.
+	 * @param provider - Provider name whose credentials should be disabled
+	 * @param disabledCause - Human-readable cause stored with the disabled rows
+	 */
+	deleteAuthCredentials(provider: string, disabledCause: string): Promise<void> {
+		return this.#authStore.deleteAuthCredentials(provider, disabledCause);
 	}
 
 	/**
 	 * Gets a cached value by key. Returns null if not found or expired.
 	 */
 	getCache(key: string): string | null {
-		try {
-			const row = this.#connection.getCache.get(key) as { value?: string } | null;
-			return row?.value ?? null;
-		} catch {
-			return null;
-		}
+		return this.#authStore.getCache(key);
 	}
 
 	/**
 	 * Sets a cached value with expiry time (unix seconds).
 	 */
 	setCache(key: string, value: string, expiresAtSec: number): void {
-		try {
-			this.#connection.upsertCache.run(key, value, expiresAtSec);
-		} catch {
-			// Ignore cache set failures.
-		}
+		this.#authStore.setCache(key, value, expiresAtSec);
+	}
+
+	/**
+	 * Deletes expired cache entries. Call periodically for cleanup.
+	 */
+	cleanExpiredCache(): void {
+		this.#authStore.cleanExpiredCache();
 	}
 
 	/**

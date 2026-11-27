@@ -83,7 +83,6 @@ import { isOfficialCodexApiUrl } from "@oh-my-pi/pi-catalog/wire/codex";
 import { getAgentDir, isBunTestRuntime, logger, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
 import { groupModelCandidates, resolveProviderModelReference } from "../config/model-resolver";
 import { generateCodexAttestation } from "../live/attestation";
-import { findStoredOAuthIdentity, prepareLocalAuthForProviders } from "../session/auth-daemon-backend";
 import type { AuthStorage } from "../session/auth-storage";
 import { redactUrlForLog } from "../utils/redact-url";
 import { END_SLICE, runSlicedWork } from "../utils/sliced-work";
@@ -144,6 +143,7 @@ import {
 	BUILT_IN_DISCOVERY_CACHE_TTL_MS,
 	BUILT_IN_DISCOVERY_NON_AUTHORITATIVE_RETRY_MS,
 	type BuiltInDiscoveryResult,
+	getOAuthCredentialsForProvider,
 	isAuthenticated,
 	isDiscoveryBearerApiKey,
 	kNoAuth,
@@ -1137,7 +1137,7 @@ export class ModelRegistry {
 					!this.#keylessProviders.has(providerId) &&
 					this.authStorage.keys.source(providerId) === undefined &&
 					!this.authStorage.keys.keyless(providerId) &&
-					!this.authStorage.credentials.hasOAuth(providerId)
+					getOAuthCredentialsForProvider(this.authStorage, providerId).length === 0
 				) {
 					return Promise.resolve<string | undefined>(undefined);
 				}
@@ -1802,7 +1802,7 @@ export class ModelRegistry {
 	/** A modifier runs only for a provider holding OAuth credentials; without one it cannot touch the catalog. */
 	#modelModifierCanApply(): boolean {
 		for (const providerName of this.#runtimeModelModifiers.keys()) {
-			if (this.authStorage.credentials.hasOAuth(providerName)) return true;
+			if (this.authStorage.credentials.getOAuth(providerName)) return true;
 		}
 		return false;
 	}
@@ -1827,9 +1827,9 @@ export class ModelRegistry {
 		if (this.#runtimeModelModifiers.size === 0) return models;
 		let projected = models;
 		for (const [providerName, modifyModels] of this.#runtimeModelModifiers) {
+			const credential = this.authStorage.credentials.getOAuth(providerName);
+			if (!credential) continue;
 			try {
-				const credential = this.authStorage.credentials.getOAuth(providerName);
-				if (!credential) continue;
 				// Clone mutable catalog data, retaining resolver functions as opaque
 				// capabilities. Hooks can then rename models without losing their
 				// request-time credentials or resolving them during catalog reads.
@@ -3450,7 +3450,8 @@ export class ModelRegistry {
 			if (cacheProviderId !== undefined) return peekedKey;
 			return (await this.#peekApiKeyForProvider(providerId, { includeExpired: true })) ?? peekedKey;
 		}
-		if (!this.authStorage.credentials.hasOAuth(providerId)) {
+		const oauthCredentials = getOAuthCredentialsForProvider(this.authStorage, providerId);
+		if (oauthCredentials.length === 0) {
 			return peekedKey;
 		}
 		// Authoritative providers prune bundled models only when their manager is
@@ -3494,7 +3495,7 @@ export class ModelRegistry {
 		const specialProviderDescriptors: Array<{
 			providerId: string;
 			resolveKey: (value: string | undefined) => string | undefined;
-			createOptions: (key: string) => ModelManagerOptions<Api> | Promise<ModelManagerOptions<Api>>;
+			createOptions: (key: string, raw: string | undefined) => ModelManagerOptions<Api>;
 		}> = [
 			{
 				providerId: "kiro",
@@ -3517,7 +3518,7 @@ export class ModelRegistry {
 			{
 				providerId: "openai-codex",
 				resolveKey: value => value,
-				createOptions: async accessToken => {
+				createOptions: accessToken => {
 					// A custom endpoint (models.yml `baseUrl`) receives only a configured,
 					// runtime, or command key. Official credentials (stored ChatGPT OAuth or
 					// the provider env token) keep discovering against chatgpt.com, as on a
@@ -3527,7 +3528,9 @@ export class ModelRegistry {
 					const configuredBaseUrl = this.#descriptorBaseUrl("openai-codex");
 					const officialCredential =
 						accessToken === getEnvApiKey("openai-codex") ||
-						(await findStoredOAuthIdentity(this.authStorage, "openai-codex", accessToken)) !== undefined;
+						getOAuthCredentialsForProvider(this.authStorage, "openai-codex").some(
+							credential => credential.access === accessToken,
+						);
 					if (officialCredential || isOfficialCodexApiUrl(configuredBaseUrl)) {
 						return openaiCodexModelManagerOptions({
 							baseUrl: officialCredential ? undefined : configuredBaseUrl,
@@ -3602,10 +3605,9 @@ export class ModelRegistry {
 			) {
 				// Residency belongs to the token selected for discovery, not another
 				// stored account that happens to appear first in the pool.
-				const identity =
-					apiKey === undefined
-						? undefined
-						: await findStoredOAuthIdentity(this.authStorage, descriptor.providerId, apiKey);
+				const identity = getOAuthCredentialsForProvider(this.authStorage, descriptor.providerId).find(
+					credential => credential.access === apiKey,
+				);
 				const discoveryConfig = {
 					apiKey: isDiscoveryBearerApiKey(apiKey) ? apiKey : undefined,
 					baseUrl: this.#descriptorBaseUrl(descriptor.providerId),
@@ -3634,7 +3636,7 @@ export class ModelRegistry {
 			if (!isAuthenticated(key)) {
 				continue;
 			}
-			options.push(this.#withRuntimeDiscovery(await descriptor.createOptions(key), key));
+			options.push(this.#withRuntimeDiscovery(descriptor.createOptions(key, specialKeys[i]), key));
 		}
 
 		// A pi-native provider's roster is its gateway's: the gateway lists what it
@@ -4883,18 +4885,6 @@ export class ModelRegistry {
 		}
 	}
 
-	/** Prepare local auth for extension providers before installing their callbacks. */
-	prepareProviderAuth(
-		registrations: readonly { name: string; config: ProviderConfigInput }[],
-	): Promise<void> | undefined {
-		if (this.#owner) return undefined;
-		const providers: string[] = [];
-		for (const { name, config } of registrations) {
-			if (config.oauth || config.usage) providers.push(name);
-		}
-		return providers.length > 0 ? prepareLocalAuthForProviders(this.authStorage, providers) : undefined;
-	}
-
 	/**
 	 * Register a provider dynamically (from extensions).
 	 *
@@ -5075,7 +5065,7 @@ export class ModelRegistry {
 			if (
 				config.oauth?.modifyModels &&
 				!this.#hasFullSnapshot &&
-				this.authStorage.credentials.hasOAuth(providerName)
+				this.authStorage.credentials.getOAuth(providerName)
 			) {
 				logger.time(`modelRegistry:materializeModifier:${providerName}`, () => this.#ensureFullSnapshot());
 			}

@@ -1,10 +1,11 @@
 import { describe, expect, it } from "bun:test";
+import * as path from "node:path";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { fetchReadUrl } from "@oh-my-pi/pi-coding-agent/tools/fetch";
-import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import { mockFetch } from "../helpers/fetch-mock";
 
 const ARTICLE_URL = "https://example.com/article";
@@ -12,21 +13,16 @@ const ARTICLE = `<html><body><article><h1>Fallback article</h1><p>${"This articl
 const JINA_URL = `https://r.jina.ai/${ARTICLE_URL}`;
 const FIRECRAWL_URL = "https://api.firecrawl.dev/v2/scrape";
 
-async function read(
-	settings: Settings,
-	transport: FetchImpl,
-	options?: { signal?: AbortSignal; modelRegistry?: ModelRegistry },
-) {
+async function read(settings: Settings, transport: FetchImpl, signal?: AbortSignal) {
 	const session: ToolSession = {
 		cwd: process.cwd(),
 		hasUI: false,
 		settings,
-		modelRegistry: options?.modelRegistry,
 		getSessionFile: () => null,
 		getSessionSpawns: () => null,
 		fetch: transport,
 	};
-	const result = await fetchReadUrl(session, { path: ARTICLE_URL }, options?.signal);
+	const result = await fetchReadUrl(session, { path: ARTICLE_URL }, signal);
 	return { method: result.details.method, content: result.content };
 }
 
@@ -93,7 +89,7 @@ describe("read URL: Jina stall does not starve local fallback (#1449)", () => {
 			return stall(init.signal);
 		});
 		const controller = new AbortController();
-		const pending = read(Settings.isolated(jinaSettings), transport, { signal: controller.signal });
+		const pending = read(Settings.isolated(jinaSettings), transport, controller.signal);
 
 		await Promise.race([started.promise, pending]);
 		controller.abort();
@@ -125,10 +121,10 @@ describe("read URL: Jina response validation", () => {
 	it("uses a stored Jina credential when the environment key is absent", async () => {
 		const originalApiKey = process.env.JINA_API_KEY;
 		delete process.env.JINA_API_KEY;
-		const auth = createInMemoryAuthStorage();
+		const tempDir = TempDir.createSync("@omp-jina-reader-auth-");
 		try {
-			await auth.credentials.set("jina", { type: "api_key", key: "stored-jina-key" });
-			const modelRegistry = new ModelRegistry(auth);
+			const storage = await AgentStorage.open(path.join(tempDir.path(), "agent.db"));
+			await storage.replaceAuthCredentials("jina", [{ type: "api_key", key: "stored-jina-key" }]);
 			let authorization: string | null | undefined;
 			const transport = withJina(init => {
 				authorization = new Headers(init?.headers).get("authorization");
@@ -136,12 +132,13 @@ describe("read URL: Jina response validation", () => {
 					`Markdown Content:\n# Authenticated article\n\n${"Substantive reader content. ".repeat(8)}`,
 				);
 			});
-			const result = await read(Settings.isolated(jinaSettings), transport, { modelRegistry });
+			const result = await read(Settings.isolated(jinaSettings, { storage }), transport);
 
 			expect(result.method).toBe("jina");
 			expect(authorization).toBe("Bearer stored-jina-key");
 		} finally {
-			auth.close();
+			AgentStorage.close();
+			await tempDir.remove().catch(() => {});
 			restoreKey("JINA_API_KEY", originalApiKey);
 		}
 	});

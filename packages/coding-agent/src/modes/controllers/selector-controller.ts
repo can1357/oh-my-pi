@@ -2391,10 +2391,7 @@ export class SelectorController {
 			// login that lands on an unintended account/subscription is visible
 			// immediately instead of silently replacing an existing registration.
 			const who = formatLoginIdentity(identity);
-			const destination = await credentialStoreLabel(
-				getOAuthCredentialProvider(providerId),
-				this.ctx.session.modelRegistry.authStorage,
-			);
+			const destination = await credentialStoreLabel(getOAuthCredentialProvider(providerId));
 			this.ctx.present(() =>
 				outcomeLinesView([
 					[
@@ -2434,7 +2431,7 @@ export class SelectorController {
 		const providerName = connectedProviderName(providerId);
 		try {
 			// Before the logout: removing a broker-unserved provider's last local login hands it back to the broker.
-			const source = await credentialStoreLabel(account.provider, this.ctx.session.modelRegistry.authStorage);
+			const source = await credentialStoreLabel(providerId);
 			const { removed, remainingSource, signOutError } = await logoutCredential(
 				this.ctx.session,
 				providerId,
@@ -2596,18 +2593,14 @@ export class SelectorController {
 			SessionAccountSelector({
 				provider: providerName,
 				accounts,
-				onSelect: async account => {
+				onSelect: account => {
 					done();
-					try {
-						if (!(await session.pinCurrentProviderOAuthAccount(account.credentialId))) {
-							this.ctx.showWarning(`${account.label} is no longer available to pin.`);
-							return;
-						}
-						this.ctx.showStatus(`Pinned ${account.label} to this session for ${providerName}.`);
-						this.ctx.statusLine.refresh();
-					} catch {
-						this.ctx.showError("Could not pin the provider account.");
+					if (!session.pinCurrentProviderOAuthAccount(account.credentialId)) {
+						this.ctx.showWarning(`${account.label} is no longer available to pin.`);
+						return;
 					}
+					this.ctx.showStatus(`Pinned ${account.label} to this session for ${providerName}.`);
+					this.ctx.statusLine.refresh();
 				},
 				onCancel: done,
 			}),

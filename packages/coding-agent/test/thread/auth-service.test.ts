@@ -168,16 +168,25 @@ describe("auth thread service", () => {
 		expect((await probe.generations()).length).toBe(seen);
 	});
 
-	it("updates worker auth availability when the main credential pool changes", async () => {
-		const providers = [PROVIDER, "unit-other"];
-		expect(await probe.sourceKinds(providers)).toEqual([undefined, undefined]);
+	it("answers worker auth availability from one cached batch until main's credentials change", async () => {
+		// Main lists stored providers once per batch.
+		const batches = vi.spyOn(storage.credentials, "all");
+		const keyless = vi.spyOn(storage.keys, "keyless");
+		// The first lookup brings every bundled provider along with the asked one.
+		expect(await probe.sourceKinds([PROVIDER, "anthropic", "openai"])).toHaveLength(3);
+		expect(batches).toHaveBeenCalledTimes(1);
+		const answered = new Set(keyless.mock.calls.map(([provider]) => provider));
+		for (const provider of [PROVIDER, "anthropic", "openai"]) expect(answered.has(provider)).toBe(true);
 
-		// The generation bump reaches the worker before the next probe (frames are ordered).
+		// A provider main did not list costs an answer of its own, not another batch.
+		expect(await probe.sourceKinds([PROVIDER, "unit-other"])).toEqual([undefined, undefined]);
+		expect(await probe.sourceKinds([PROVIDER, "unit-other", "anthropic"])).toHaveLength(3);
+		expect(batches).toHaveBeenCalledTimes(1);
+
+		// The generation bump reaches the worker before this probe call (frames are ordered).
 		await storeAccounts();
-		expect(await probe.sourceKinds(providers)).toEqual(["oauth", undefined]);
-
-		await storage.credentials.remove(PROVIDER);
-		expect(await probe.sourceKinds(providers)).toEqual([undefined, undefined]);
+		expect(await probe.sourceKinds([PROVIDER, "unit-other"])).toEqual(["oauth", undefined]);
+		expect(batches).toHaveBeenCalledTimes(2);
 	});
 
 	it("resolves a worker's OAuth identity from main once main stores an account after the worker saw none", async () => {
