@@ -248,6 +248,7 @@
 - Advisors now use their own `retry.fallbackChains.advisor` chain on their first fallback instead of inheriting the main session's active fallback chain ([#15101](https://github.com/can1357/oh-my-pi/issues/15101))
 - Fixed eval `agent()` spawning past an exhausted Goal Mode token budget that `budget()` reported as a hard ceiling ([#14946](https://github.com/can1357/oh-my-pi/issues/14946))
 - Fixed hashline edits reusing stale line numbers after a shifting edit being accepted one line high, duplicating a line, when the body echoed the line above the range ([#15035](https://github.com/can1357/oh-my-pi/issues/15035))
+- Defaulted the saved Codex/Claude reset prompt to "Not now" and split redeeming once from enabling auto-redeem, so a stray Enter no longer spends a reset or persists consent ([#13327](https://github.com/can1357/oh-my-pi/issues/13327))
 
 ### Removed
 

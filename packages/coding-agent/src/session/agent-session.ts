@@ -16229,15 +16229,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				: `Spend ${actions.length} saved ${providerLabel} rate-limit resets?\n${lines.join("\n")}`;
 		try {
 			const choice = await runner.getUIContext().select(question, [
-				{ label: "Yes", description: `Redeem now and set ${keyList} to yes.` },
-				{ label: "No", description: `Do not redeem, and set ${keyList} to no.` },
+				{ label: "Not now", description: "Do not redeem; ask again next time." },
+				{ label: "Redeem once", description: "Redeem now without changing settings." },
+				{ label: "Always redeem", description: `Redeem now and set ${keyList} to yes.` },
+				{ label: "Never redeem", description: `Do not redeem, and set ${keyList} to no.` },
 			]);
-			if (choice === "Yes" || choice === "No") {
+			if (choice === "Always redeem" || choice === "Never redeem") {
 				for (const key of keys) {
-					if (key.get(this.settings) === "unset") key.set(this.settings, choice === "Yes" ? "yes" : "no");
+					if (key.get(this.settings) === "unset")
+						key.set(this.settings, choice === "Always redeem" ? "yes" : "no");
 				}
-				if (choice === "Yes") return actions;
 			}
+			if (choice === "Redeem once" || choice === "Always redeem") return actions;
 		} catch (error) {
 			logger.warn(`${source} prompt failed`, { error: String(error) });
 		}
