@@ -98,6 +98,7 @@ export function registerExternalAgent(host: ExternalAgentHost, spec: ExternalAge
 			steer:
 				steer &&
 				(async text => {
+					// Its steer control is dropped on settle; this refuses a message already on its way then.
 					if (settled) throw new Error(`External agent ${id} has finished; register a new one to continue.`);
 					await steer(text, registry.get(id)?.status === "running" ? "steer" : "follow_up");
 				}),
@@ -151,6 +152,8 @@ export function registerExternalAgent(host: ExternalAgentHost, spec: ExternalAge
 		if (settled) return false;
 		settled = true;
 		unsubscribe();
+		// Before the status change, so its listeners already see an agent that takes no messages.
+		registry.closeExternal(id, ref);
 		registry.setStatus(id, status, ref);
 		if (frame) lifecycle(frame);
 		return true;

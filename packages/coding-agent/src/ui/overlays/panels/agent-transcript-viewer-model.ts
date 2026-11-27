@@ -246,7 +246,8 @@ export class AgentTranscriptViewerModel {
 
 	#metaSignature(): string {
 		const ref = this.ref();
-		return JSON.stringify([ref?.status, ref?.kind, ref?.parentId, ref?.sessionFile, this.progress()]);
+		// `sendable` flips when an external agent settles without a status change (idle, then complete()).
+		return JSON.stringify([ref?.status, ref?.kind, ref?.parentId, ref?.sessionFile, this.sendable, this.progress()]);
 	}
 
 	touch(): void {

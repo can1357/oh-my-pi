@@ -41,7 +41,7 @@ export interface ExternalTranscriptPage {
 /** What core calls on an external agent; the extension that registered it serves them. */
 export interface ExternalAgentControls {
 	readTranscript(fromByte: number, signal?: AbortSignal): Promise<ExternalTranscriptPage>;
-	/** Deliver a message: steered into its turn while it runs, a follow-up once idle. Absent when it takes none. */
+	/** Deliver a message: steered into its turn while it runs, a follow-up once idle. Absent when it takes none, or once it settled. */
 	steer?(text: string): Promise<void>;
 }
 

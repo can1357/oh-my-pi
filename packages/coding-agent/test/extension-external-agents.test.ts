@@ -17,6 +17,7 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import type { AsyncResultEntry } from "@oh-my-pi/pi-coding-agent/session/async-job-delivery";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { collectIrcPeerRoster } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
@@ -330,6 +331,36 @@ describe("ExtensionContext.agents.registerExternal", () => {
 			content: "one more thing",
 		});
 		expect(sent.isError).toBe(true);
+		expect(steered).toEqual([]);
+	});
+
+	it("drops a settled agent from broadcasts and peer rosters, and stops offering its chat", async () => {
+		const ctx = await extensionContext();
+		const steered: string[] = [];
+		const agent = ctx.agents!.registerExternal(remoteAgent({ steer: async text => void steered.push(text) }));
+		const viewer = new AgentTranscriptViewerModel({
+			agentId: agent.id,
+			transcript: agentTranscriptSource,
+			registry: AgentRegistry.global(),
+			terminalRows: () => 40,
+			expandKeys: [],
+			hubKeys: [],
+			onClose: () => {},
+			onHubClose: () => {},
+			pollMs: 60_000,
+		});
+		expect(viewer.sendable).toBe(true);
+		agent.complete({ status: "done", text: "ok" });
+
+		expect(viewer.sendable).toBe(false);
+		viewer.dispose();
+		expect(collectIrcPeerRoster(AgentRegistry.global(), "Main").peers.map(peer => peer.id)).not.toContain(agent.id);
+		const broadcast = await new WriteTool(toolSession()).execute("broadcast", {
+			path: "agent://all",
+			content: "status check",
+		});
+		expect(broadcast.isError).toBeFalsy();
+		expect(broadcast.content).toEqual([{ type: "text", text: "No live peers to broadcast to." }]);
 		expect(steered).toEqual([]);
 	});
 

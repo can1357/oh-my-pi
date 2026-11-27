@@ -183,11 +183,13 @@ export interface AgentRegistryApi {
 	detachSession(id: string, expected?: AgentRefExpectation): boolean;
 	/** Remove `id` when it still matches `expected`. */
 	unregister(id: string, expected?: AgentRefExpectation): boolean;
+	/** Stop external agent `id` taking messages (drop its `steer`) when it still matches `expected`; its transcript stays readable. */
+	closeExternal(id: string, expected?: AgentRefExpectation): boolean;
 	/** The current ref for `id`. */
 	get(id: string): AgentRef | undefined;
 	/** Every registered ref. */
 	list(): AgentRef[];
-	/** Every alive non-advisor agent except `id`. */
+	/** Every alive non-advisor agent except `id` that can take a message. */
 	listVisibleTo(id: string): AgentRef[];
 	/** Whether a ref's claimed running state is corroborated by its attached live session's open run. */
 	isRunning(ref: AgentRef): boolean;
@@ -464,6 +466,16 @@ export class AgentRegistry implements AgentRegistryApi {
 		return true;
 	}
 
+	closeExternal(id: string, expected?: AgentRefExpectation): boolean {
+		const ref = this.#refs.get(id);
+		if (!ref?.external || !this.#matchesExpected(ref, expected)) return false;
+		if (ref.external.steer) {
+			ref.external = { readTranscript: ref.external.readTranscript };
+			this.#emit({ type: "metadata_changed", ref });
+		}
+		return true;
+	}
+
 	get(id: string): AgentRef | undefined {
 		return this.#refs.get(id);
 	}
@@ -473,13 +485,18 @@ export class AgentRegistry implements AgentRegistryApi {
 	}
 
 	/**
-	 * Returns every alive agent (running | idle) except the caller. Advisor refs
-	 * are observability-only transcripts, never peers, so they are excluded.
-	 * Flat namespace: every other agent is visible.
+	 * Returns every alive agent (running | idle) except the caller that can take
+	 * a message. Advisor refs are observability-only transcripts, never peers, and
+	 * an external agent without `steer` (none given, or it settled) takes no
+	 * messages, so both are excluded. Flat namespace: every other agent is visible.
 	 */
 	listVisibleTo(id: string): AgentRef[] {
 		return this.list().filter(
-			ref => ref.id !== id && ref.kind !== "advisor" && (ref.status === "running" || ref.status === "idle"),
+			ref =>
+				ref.id !== id &&
+				ref.kind !== "advisor" &&
+				(ref.kind !== "external" || ref.external?.steer !== undefined) &&
+				(ref.status === "running" || ref.status === "idle"),
 		);
 	}
 

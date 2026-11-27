@@ -45,6 +45,7 @@ export type AgentRegistryProtocol = {
 	>;
 	detachSession: RpcMethod<[id: string, expected?: AgentRefExpectation], boolean>;
 	unregister: RpcMethod<[id: string, expected?: AgentRefExpectation], boolean>;
+	closeExternal: RpcMethod<[id: string, expected?: AgentRefExpectation], boolean>;
 	get: RpcMethod<[id: string], AgentRef | undefined>;
 	list: RpcMethod<[], AgentRef[]>;
 	listVisibleTo: RpcMethod<[id: string], AgentRef[]>;

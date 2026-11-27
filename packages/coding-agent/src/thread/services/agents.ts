@@ -262,6 +262,7 @@ function serveRegistry(bridge: MainSessionBridge): RpcServe<AgentRegistry, Agent
 			registry.attachSession(id, session, sessionFile, expected),
 		detachSession: (registry, id, expected) => registry.detachSession(id, expected),
 		unregister: (registry, id, expected) => registry.unregister(id, expected),
+		closeExternal: (registry, id, expected) => registry.closeExternal(id, expected),
 		get: (registry, id) => registry.get(id),
 		list: registry => registry.list(),
 		listVisibleTo: (registry, id) => registry.listVisibleTo(id),

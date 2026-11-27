@@ -160,6 +160,10 @@ export class RemoteAgentRegistry implements AgentRegistryApi {
 		return this.#remote.callSync("unregister", id, expected);
 	}
 
+	closeExternal(id: string, expected?: AgentRefExpectation): boolean {
+		return this.#remote.callSync("closeExternal", id, expected);
+	}
+
 	get(id: string): AgentRef | undefined {
 		return this.#remote.callSync("get", id);
 	}
