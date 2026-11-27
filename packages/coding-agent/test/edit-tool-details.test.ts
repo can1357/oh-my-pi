@@ -10,6 +10,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
+import * as fileWriteIo from "../src/tools/file-write-io";
 
 function makeSession(cwd: string, settings: Record<string, unknown> = {}): ToolSession {
 	return {
@@ -307,6 +308,54 @@ describe.skipIf(process.platform === "win32")("EditTool move permissions", () =>
 		expect(await Bun.file(source).exists()).toBe(false);
 		expect((await fs.stat(destination)).mode & 0o777).toBe(0o700);
 		expect(await $`${destination}`.quiet().text()).toBe("moved\n");
+	});
+
+	test("cancelling a claimed hashline move leaves a newer source save intact", async () => {
+		const source = path.join(tempDir, "run.sh");
+		const destination = path.join(tempDir, "renamed.sh");
+		const original = "#!/bin/sh\nprintf 'original\\n'\n";
+		await Bun.write(source, original);
+		await fs.chmod(source, 0o700);
+		await Bun.write(destination, "before\n");
+		await fs.chmod(destination, 0o644);
+		const changes = vi.fn();
+		const session = { ...makeSession(tempDir), recordFileChange: changes };
+		const read = await new ReadTool(session).execute("read-script", { path: "run.sh" });
+		const header = read.content.find(c => c.type === "text")?.text.split("\n")[0];
+		const controller = new AbortController();
+		const claimed = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const write = vi
+			.spyOn(fileWriteIo, "writeLocalFile")
+			.mockImplementationOnce(async (dst, bytes, _signal, target) => {
+				claimed.resolve();
+				await release.promise;
+				await Bun.write(target ?? dst, bytes);
+			});
+		const result = new EditTool(session, "hashline").execute(
+			"cancel-move",
+			{ input: `${header}\nMV renamed.sh` },
+			controller.signal,
+		);
+		try {
+			await Promise.race([
+				claimed.promise,
+				result.then(() => {
+					throw new Error("move returned before reaching the destination write");
+				}),
+			]);
+			controller.abort(new Error("cancelled move"));
+			await Bun.write(source, "newer user save\n");
+		} finally {
+			release.resolve();
+			await Promise.allSettled([result]);
+			write.mockRestore();
+		}
+		expect((await result).isError).toBe(true);
+		expect(await Bun.file(source).text()).toBe("newer user save\n");
+		expect(await Bun.file(destination).text()).toBe(original);
+		expect((await fs.stat(destination)).mode & 0o777).toBe(0o644);
+		expect(changes.mock.calls).toEqual([[{ path: destination, tool: "edit", before: "before\n", after: original }]]);
 	});
 
 	test("hashline MV keeps the setuid bit of the source", async () => {

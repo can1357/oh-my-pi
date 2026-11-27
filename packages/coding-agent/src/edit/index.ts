@@ -1233,10 +1233,18 @@ export class EditTool implements AgentTool<TInput> {
 			const destination = journaled ? await readSnapshot(request.moveTo) : undefined;
 			await mkdirAllowingFallback(path.dirname(request.moveTo));
 			await writeFileWithFallback(request.moveTo, request.content, undefined, signal);
-			if (mode !== undefined) await chmodMovedFile(request.moveTo, mode);
+			// The copy may have landed while abort was pending. Record it, but
+			// do not chmod it or remove the source after cancellation.
+			journal(request.moveTo, request.content, destination);
+			this.session.bumpFileMutationVersion?.(request.moveTo);
+			signal?.throwIfAborted();
+			if (mode !== undefined) {
+				await chmodMovedFile(request.moveTo, mode);
+				signal?.throwIfAborted();
+			}
 			await deleteFileWithFallback(request.path, Bun.file(request.path));
 			journal(request.path, null);
-			journal(request.moveTo, request.content, destination);
+			this.session.bumpFileMutationVersion?.(request.path);
 			if (this.session.enableLsp ?? true) {
 				await notifyWorkspaceWatchedFiles(
 					this.session.cwd,
@@ -1247,8 +1255,6 @@ export class EditTool implements AgentTool<TInput> {
 					signal,
 				);
 			}
-			this.session.bumpFileMutationVersion?.(request.path);
-			this.session.bumpFileMutationVersion?.(request.moveTo);
 			const diagnostics =
 				request.flushLsp && request.lspBatchId
 					? await flushLspWritethroughBatch(request.lspBatchId, this.session.cwd, signal)
