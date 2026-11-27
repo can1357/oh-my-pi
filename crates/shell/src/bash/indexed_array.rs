@@ -1,19 +1,20 @@
 //! Sparse indexed shell arrays shared across forked process images.
 //!
-//! The vector trie shares unchanged elements when an image is cloned. An
-//! append copies only the path to its new element; uncommon middle inserts
-//! and removals rebuild the sorted sequence.
+//! Cloning an image shares the element storage; the first write to a shared
+//! copy clones the vector (copy-on-write).
 
-use std::ops::{Index, IndexMut};
+use std::{
+	ops::{Index, IndexMut},
+	sync::Arc,
+};
 
 use bstr::BString;
-use rpds::VectorSync;
 use serde::{Deserialize, Serialize};
 
 /// Sorted, sparse indexed elements; cloning shares the existing elements.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct IndexedArray(VectorSync<(i64, BString)>);
+pub struct IndexedArray(Arc<Vec<(i64, BString)>>);
 
 impl IndexedArray {
 	/// Number of set elements.
@@ -66,7 +67,7 @@ impl IndexedArray {
 
 	/// Append an element greater than every current index.
 	pub fn push(&mut self, item: (i64, BString)) {
-		self.0.push_back_mut(item);
+		Arc::make_mut(&mut self.0).push(item);
 	}
 
 	/// Insert at a sorted position, appending when it is the end.
@@ -77,9 +78,7 @@ impl IndexedArray {
 		if position == self.len() {
 			self.push(item);
 		} else {
-			let mut values: Vec<_> = self.iter().cloned().collect();
-			values.insert(position, item);
-			*self = values.into();
+			Arc::make_mut(&mut self.0).insert(position, item);
 		}
 	}
 
@@ -89,11 +88,9 @@ impl IndexedArray {
 	/// `position` does not name an element.
 	pub fn remove(&mut self, position: usize) {
 		if position == self.len() - 1 {
-			self.0.drop_last_mut();
+			Arc::make_mut(&mut self.0).pop();
 		} else {
-			let mut values: Vec<_> = self.iter().cloned().collect();
-			values.remove(position);
-			*self = values.into();
+			Arc::make_mut(&mut self.0).remove(position);
 		}
 	}
 
@@ -105,19 +102,19 @@ impl IndexedArray {
 
 impl From<Vec<(i64, BString)>> for IndexedArray {
 	fn from(value: Vec<(i64, BString)>) -> Self {
-		Self(value.into_iter().collect())
+		Self(Arc::new(value))
 	}
 }
 
 impl FromIterator<(i64, BString)> for IndexedArray {
 	fn from_iter<I: IntoIterator<Item = (i64, BString)>>(iter: I) -> Self {
-		Self(iter.into_iter().collect())
+		Self(Arc::new(iter.into_iter().collect()))
 	}
 }
 
 impl Extend<(i64, BString)> for IndexedArray {
 	fn extend<I: IntoIterator<Item = (i64, BString)>>(&mut self, iter: I) {
-		self.0.extend(iter);
+		Arc::make_mut(&mut self.0).extend(iter);
 	}
 }
 
@@ -131,6 +128,6 @@ impl Index<usize> for IndexedArray {
 
 impl IndexMut<usize> for IndexedArray {
 	fn index_mut(&mut self, index: usize) -> &mut Self::Output {
-		&mut self.0[index]
+		&mut Arc::make_mut(&mut self.0)[index]
 	}
 }

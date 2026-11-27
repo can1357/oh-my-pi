@@ -40,8 +40,6 @@ parking_lot = "0.12.5"
 thiserror = "2.0.18"
 
 # ── Utility builtin dependencies ──────────────────────────────────────────────
-# 0.1.1 moved to unicode-width 0.2, the version the rest of the graph uses.
-ansi-width = "0.1.1"
 argmax = "0.4.0"
 # `ast-grep scan`: YAML rules on the ast-grep-core version omp-ast uses, and
 # their diagnostics in ast-grep's codespan layout.
