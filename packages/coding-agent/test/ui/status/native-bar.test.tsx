@@ -77,8 +77,8 @@ describe("structured native extension statuses", () => {
 	});
 
 	test("preserves native styling in the status preview while plain statuses stay plain", () => {
-		const spans = [{ t: "NORMAL", s: "strong accent" }];
-		const { root, dispose } = preview({ ...corpusStatusFacts(), hooks: ["tests passing", "NORMAL"], hookStyles: [undefined, { role: "extension.navigation", spans }] });
+		const spans = [{ t: "NORMAL", s: "strong accent" }, { t: " 1/3", s: "mono" }];
+		const { root, dispose } = preview({ ...corpusStatusFacts(), hooks: ["tests passing", "NORMAL 1/3"], hookStyles: [undefined, { role: "extension.navigation", spans }] });
 		try {
 			expect(root.children()[1]?.props()).toMatchObject({ role: "omp.status.hook", text: "tests passing" });
 			expect(root.children()[2]?.props()).toMatchObject({ role: "extension.navigation", spans });

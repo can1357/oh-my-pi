@@ -17,6 +17,7 @@ import { type Accessor, computed, For, type JSXNode, Show } from "@oh-my-pi/pi-t
 import { formatNumber } from "@oh-my-pi/pi-utils";
 import type { TspMeterMark, TspPropNode, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import type { StatusLineSegmentId } from "../../config/status-line-schema";
+import { sanitizeDisplaySingleLine } from "../../extensibility/inventory/display-text";
 import { sanitizeStatusText } from "../../modes/view-model/chrome/shared";
 import type { PromptCacheStatus } from "../../modes/view-model/status-line/host";
 import { promptCacheBrief } from "../../modes/view-model/status-line/prompt-cache";
@@ -176,7 +177,7 @@ export function composerFacts(props: {
 						key: `hook-${index}`,
 						role: style?.role ?? "omp.composer.fact",
 						priority: 0,
-						spans: dim(style?.spans?.map(span => ({ ...span, t: sanitizeStatusText(span.t) })) ?? [{ t: text }]),
+						spans: dim(style?.spans?.map(span => ({ ...span, t: sanitizeDisplaySingleLine(span.t) })) ?? [{ t: text }]),
 					});
 			});
 		}
@@ -378,7 +379,7 @@ export function StatusBarPreview(props: {
 						key={`hook-${index}`}
 						role={state.hookStyles?.[index]?.role ?? "omp.status.hook"}
 						text={state.hookStyles?.[index]?.spans ? undefined : sanitizeStatusText(status)}
-						spans={state.hookStyles?.[index]?.spans?.map(span => ({ ...span, t: sanitizeStatusText(span.t) }))}
+						spans={state.hookStyles?.[index]?.spans?.map(span => ({ ...span, t: sanitizeDisplaySingleLine(span.t) }))}
 						wrap="none"
 					/>
 				))}
