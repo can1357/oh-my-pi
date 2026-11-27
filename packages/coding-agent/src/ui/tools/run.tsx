@@ -15,6 +15,7 @@ import {
 	formatTruncationMetaNotice,
 	type MinimizedMeta,
 	type OutputMeta,
+	RAW_SELECTOR,
 	stripTrailingNotice,
 } from "../../tools/output-meta-format";
 import { shortenPath } from "../../utils/render-utils";
@@ -168,7 +169,7 @@ export function stripRawOutputNotice(text: string): { text: string; artifactId?:
 		if (!line.startsWith(RAW_OUTPUT_PREFIX) || !line.endsWith(RAW_OUTPUT_SUFFIX)) return false;
 		const url = line.slice(RAW_OUTPUT_PREFIX.length, line.length - RAW_OUTPUT_SUFFIX.length);
 		const id = parseSpillUrl(url);
-		if (id === undefined || spillUrl(id) !== url) return false;
+		if (id === undefined || `${spillUrl(id)}${RAW_SELECTOR}` !== url) return false;
 		artifactId = String(id);
 		return true;
 	});
