@@ -202,6 +202,57 @@ describe("time-sliced model refresh", () => {
 		expect(cachedNames(cacheDbPath)).toEqual(latest.map(model => model.name));
 	});
 
+	it("lands a refresh write when a later write of the same provider aborts before landing", async () => {
+		await using temp = await TempDir.create("@model-refresh-abort-later-");
+		const cacheDbPath = temp.join("models.db");
+		const earlier = refreshModels("earlier", 3);
+		const controller = new AbortController();
+
+		const pending = writeModelCacheAsync(PROVIDER, 1_000, earlier, true, "fp", cacheDbPath);
+		const aborted = writeModelCacheAsync(
+			PROVIDER,
+			2_000,
+			refreshModels("aborted", 3),
+			true,
+			"fp",
+			cacheDbPath,
+			[],
+			undefined,
+			controller.signal,
+		);
+		controller.abort();
+
+		expect(await aborted).toBe("aborted");
+		expect(await pending).toBe("written");
+		expect(cachedNames(cacheDbPath)).toEqual(earlier.map(model => model.name));
+	});
+
+	it("keeps a later landed write when a write after it aborts", async () => {
+		await using temp = await TempDir.create("@model-refresh-abort-after-landed-");
+		const cacheDbPath = temp.join("models.db");
+		const latest = refreshModels("latest", 3);
+		const controller = new AbortController();
+
+		const pending = writeModelCacheAsync(PROVIDER, 1_000, refreshModels("stale", 200), true, "fp", cacheDbPath);
+		expect(writeModelCache(PROVIDER, 2_000, latest, true, "fp", cacheDbPath)).toBe("written");
+		const aborted = writeModelCacheAsync(
+			PROVIDER,
+			3_000,
+			refreshModels("aborted", 3),
+			true,
+			"fp",
+			cacheDbPath,
+			[],
+			undefined,
+			controller.signal,
+		);
+		controller.abort();
+
+		expect(await aborted).toBe("aborted");
+		expect(await pending).toBe("superseded");
+		expect(cachedNames(cacheDbPath)).toEqual(latest.map(model => model.name));
+	});
+
 	it("waits out another connection's write lock without blocking the event loop", async () => {
 		await using temp = await TempDir.create("@model-refresh-lock-");
 		const cacheDbPath = temp.join("models.db");

@@ -1202,17 +1202,26 @@ function recordWriteOutcome(write: CacheRowWrite, outcome: ModelCacheWriteOutcom
 }
 
 /**
- * Latest write claimed per cache row (`readCacheKey`). A queued write whose
- * claim is no longer the latest lands as `superseded`, so the most recent
- * call wins, as it did when every write was synchronous.
+ * Claim of the newest landed write per cache row (`readCacheKey`), in call
+ * order. A write called before it resolves `superseded` instead of landing, so
+ * the most recent call wins, as it did when every write was synchronous. A
+ * later write that is aborted or fails never lands, so an earlier one still
+ * lands in its place.
  */
-const latestWriteClaims = new Map<string, number>();
+const landedWriteClaims = new Map<string, number>();
 let writeClaims = 0;
 
-function claimWrite(key: string): number {
-	const claim = ++writeClaims;
-	latestWriteClaims.set(key, claim);
-	return claim;
+function claimWrite(): number {
+	return ++writeClaims;
+}
+
+/** Whether a write called after `claim` has already landed for `key`. */
+function isSuperseded(key: string, claim: number, landedNow?: ReadonlyMap<string, number>): boolean {
+	return Math.max(landedWriteClaims.get(key) ?? 0, landedNow?.get(key) ?? 0) > claim;
+}
+
+function recordLandedClaim(key: string, claim: number, landed: Map<string, number> = landedWriteClaims): void {
+	if ((landed.get(key) ?? 0) < claim) landed.set(key, claim);
 }
 
 /**
@@ -1237,11 +1246,10 @@ export function writeModelCache<TApi extends Api>(
 	staticHeaderSources: readonly Model<TApi>[] = [],
 	restorableHeaderFallback?: Record<string, string>,
 ): ModelCacheWriteOutcome {
-	let claimed: { key: string; claim: number } | undefined;
 	try {
 		const { resolvedPath, shared } = resolveCacheDb(dbPath);
 		const key = readCacheKey(resolvedPath, providerId);
-		claimed = { key, claim: claimWrite(key) };
+		const claim = claimWrite();
 		readRowCache.delete(key);
 		const builder = new CacheRowBuilder(staticHeaderSources, restorableHeaderFallback);
 		for (const model of models) builder.add(model);
@@ -1249,14 +1257,12 @@ export function writeModelCache<TApi extends Api>(
 		const outcome = runModelCacheDb(resolvedPath, shared, db =>
 			storedRowUnchanged(db, write) ? "skipped" : db.transaction(() => applyCacheRowWrite(db, write)).immediate(),
 		);
+		recordLandedClaim(key, claim);
 		recordWriteOutcome(write, outcome);
 		return outcome;
 	} catch {
 		// Cache writes are best-effort; failures should not break model resolution.
 		return "failed";
-	} finally {
-		// Keep a later write's claim, if any.
-		if (claimed && latestWriteClaims.get(claimed.key) === claimed.claim) latestWriteClaims.delete(claimed.key);
 	}
 }
 
@@ -1267,8 +1273,9 @@ export function writeModelCache<TApi extends Api>(
  * through a shared writer whose short transactions batch other providers'
  * rows and wait out another process's write lock asynchronously. Resolves once
  * the row is stored (or found unchanged); until then readers see the previous
- * row whole. When the same provider is written again before this lands, the
- * later write wins and this one resolves `superseded`. Once `signal` aborts,
+ * row whole. When a write of the same provider called after this one lands
+ * first, it wins and this one resolves `superseded`; a later write that is
+ * aborted or fails leaves this one to land. Once `signal` aborts,
  * the row is never stored: a write still serializing resolves `aborted` when
  * serialization ends, and one queued behind another connection's write lock
  * resolves `aborted` at once.
@@ -1293,7 +1300,7 @@ export async function writeModelCacheAsync<TApi extends Api>(
 	}
 	const { resolvedPath, shared } = target;
 	const key = readCacheKey(resolvedPath, providerId);
-	const claim = claimWrite(key);
+	const claim = claimWrite();
 	// Keeps one connection to a non-default path for the comparison and the write.
 	using _connection = retainModelCacheConnection(dbPath);
 	try {
@@ -1301,8 +1308,9 @@ export async function writeModelCacheAsync<TApi extends Api>(
 		await forEachInSlices(models, model => builder.add(model));
 		if (signal?.aborted) return "aborted";
 		const write = builder.finish(providerId, updatedAt, authoritative, staticFingerprint);
-		if (latestWriteClaims.get(key) !== claim) return "superseded";
+		if (isSuperseded(key, claim)) return "superseded";
 		if (runModelCacheDb(resolvedPath, shared, db => storedRowUnchanged(db, write))) {
+			recordLandedClaim(key, claim);
 			recordWriteOutcome(write, "skipped");
 			return "skipped";
 		}
@@ -1311,9 +1319,6 @@ export async function writeModelCacheAsync<TApi extends Api>(
 		return await promise;
 	} catch {
 		return "failed";
-	} finally {
-		// Keep a later write's claim, if any.
-		if (latestWriteClaims.get(key) === claim) latestWriteClaims.delete(key);
 	}
 }
 
@@ -1355,6 +1360,7 @@ function settleQueuedWrite(job: QueuedCacheWrite, outcome: ModelCacheWriteOutcom
 	const index = writeQueue.indexOf(job);
 	if (index >= 0) writeQueue.splice(index, 1);
 	job.detachAbort?.();
+	if (outcome === "written" || outcome === "refreshed" || outcome === "skipped") recordLandedClaim(job.key, job.claim);
 	if (outcome === "written" || outcome === "refreshed") readRowCache.delete(job.key);
 	recordWriteOutcome(job.write, outcome);
 	job.settle(outcome);
@@ -1417,14 +1423,16 @@ async function drainCacheWrites(): Promise<void> {
 function landQueuedWrites(db: Database, resolvedPath: string): boolean {
 	if (!beginImmediateWithoutWaiting(db)) return false;
 	const landed: { job: QueuedCacheWrite; outcome: ModelCacheWriteOutcome }[] = [];
+	// Rows stored in this transaction, which a row called before them and queued after them loses to.
+	const landedNow = new Map<string, number>();
 	let failing: QueuedCacheWrite | undefined;
 	try {
 		for (const job of writeQueue) {
 			if (job.resolvedPath !== resolvedPath) continue;
 			failing = job;
-			const outcome =
-				latestWriteClaims.get(job.key) === job.claim ? applyCacheRowWrite(db, job.write) : "superseded";
+			const outcome = isSuperseded(job.key, job.claim, landedNow) ? "superseded" : applyCacheRowWrite(db, job.write);
 			failing = undefined;
+			if (outcome !== "superseded") recordLandedClaim(job.key, job.claim, landedNow);
 			landed.push({ job, outcome });
 			if (sliceSpent()) break;
 		}

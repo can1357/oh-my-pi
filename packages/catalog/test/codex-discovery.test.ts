@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -1437,6 +1437,20 @@ describe("Codex model discovery", () => {
 				const cacheProviderId = options.cacheProviderId ?? options.providerId;
 				writeModelCache(cacheProviderId, seededAt, [buildModel(cachedSol)], true, "seed", cacheDbPath);
 				const blocker = new Database(cacheDbPath);
+				const realRun = Database.prototype.run;
+				const writerBlocked = Promise.withResolvers<void>();
+				const runSpy = vi.spyOn(Database.prototype, "run").mockImplementation(function (
+					this: Database,
+					...args: Parameters<typeof realRun>
+				) {
+					try {
+						return realRun.apply(this, args);
+					} catch (error) {
+						// Only the shared writer takes the lock without waiting, and only for queued rows.
+						if (this !== blocker && args[0] === "BEGIN IMMEDIATE") writerBlocked.resolve();
+						throw error;
+					}
+				});
 				try {
 					blocker.run("BEGIN IMMEDIATE");
 					const controller = new AbortController();
@@ -1452,8 +1466,8 @@ describe("Codex model discovery", () => {
 							refreshError = error;
 						},
 					);
-					// Fetch, merge and serialization finish well within this; the row then waits on the lock.
-					await Bun.sleep(100);
+					// The refresh's row is queued once the writer finds the lock held.
+					await writerBlocked.promise;
 					expect(settled).toBe(false);
 
 					controller.abort(timeout);
@@ -1468,6 +1482,7 @@ describe("Codex model discovery", () => {
 					// The writer lands rows oldest first, so a row the aborted refresh left queued lands first.
 					expect(await writeModelCacheAsync("lock-flush", 1_000, [], true, "flush", cacheDbPath)).toBe("written");
 				} finally {
+					runSpy.mockRestore();
 					if (blocker.inTransaction) blocker.run("ROLLBACK");
 					blocker.close();
 				}
