@@ -5040,8 +5040,14 @@ use std::{
 
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::OsStringValueParser};
 
-use crate::host::{AsyncUtility, Host, matches_parser};
+use crate::{
+	host::{AsyncUtility, Host, matches_parser},
+	root_guard,
+};
 use matchers::{Follow, WalkEntry};
+
+/// `find`'s spelling of the [`root_guard`] escape hatches.
+const ROOT_FLAGS: root_guard::Flags = root_guard::Flags { allow: "-allow-root", depth: Some("-maxdepth") };
 
 pub struct Config {
 	same_file_system:  bool,
@@ -5055,8 +5061,8 @@ pub struct Config {
 	no_leaf_dirs:      bool,
 	follow:            Follow,
 	new_paths:         Option<Vec<String>>,
-	/// `-allow-root`: permits a starting point that is a filesystem root,
-	/// which [`run_find`] otherwise refuses.
+	/// `-allow-root`: permits walking a filesystem root deeper than
+	/// [`root_guard::SHALLOW_DEPTH`], which [`run_find`] otherwise refuses.
 	allow_root:        bool,
 	files0_argument:   Option<String>,
 	/// `-fprint`/`-fprintf`/`-fprint0`/`-fls` outputs, closed after the search.
@@ -5359,17 +5365,6 @@ async fn process_dir(
 	process_dir_walk_request(config, deps, host, matcher, quit, &resolved_root, operand).await
 }
 
-/// The filesystem root a resolved starting point names (`/`, `/usr/..`,
-/// `C:\`), if it names one. [`run_find`] refuses such walks without
-/// `-allow-root`; URL providers are never whole disks.
-fn filesystem_root(resolved: &Path) -> Option<PathBuf> {
-	if omp_vfs::is_virtual_path(resolved) {
-		return None;
-	}
-	let normalized = omp_vfs::normalize_lexically(resolved);
-	(normalized.has_root() && normalized.parent().is_none()).then_some(normalized)
-}
-
 async fn do_find(
 	args: &[&str],
 	deps: &dyn Dependencies,
@@ -5406,18 +5401,10 @@ async fn run_find(
 	}
 
 	if !config.allow_root
-		&& let Some(root) = paths.iter().find_map(|path| filesystem_root(&host.resolve(path)))
+		&& let Err(refusal) =
+			root_guard::check(paths.iter().map(|path| host.resolve(path)), Some(config.max_depth), ROOT_FLAGS)
 	{
-		let _ = writeln!(
-			host.stderr,
-			"find: refusing to search the filesystem root '{}'.\n\
-			 You most likely did not mean this. Never search a full disk: walking every file on the \
-			 machine can take hours to days.\n\
-			 Search the directory you actually need instead: the current directory (`find . ...`), \
-			 the project root, or a specific subdirectory.\n\
-			 Pass -allow-root only when a whole-disk search was explicitly requested.",
-			root.display()
-		);
+		let _ = writeln!(host.stderr, "find: {refusal}");
 		return 1;
 	}
 
@@ -5482,8 +5469,8 @@ Early alpha implementation. Currently the only expressions supported are
     processing them. Less efficient, but allows for deterministic output.
  -allow-root
     a non-standard extension that permits searching a filesystem root such
-    as /. Without it such searches are refused: a whole-disk walk can take
-    hours to days.
+    as / deeper than -maxdepth 2. Without it such searches are refused: a
+    whole-disk walk can take hours to days.
 "
 	);
 }
@@ -5904,20 +5891,23 @@ mod tests {
 	}
 
 	/// Failure mode: `find /` walked the whole disk for hours. A filesystem
-	/// root, however it is spelled, is refused unless `-allow-root` is passed.
+	/// root, however it is spelled, is refused unless the walk stays within
+	/// `-maxdepth 2` or `-allow-root` is passed.
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
-	async fn filesystem_root_is_refused_without_allow_root() {
+	async fn filesystem_root_is_refused_unless_shallow_or_allowed() {
 		let (_dir, root) = fixture();
-		// `-maxdepth 0` keeps a regression from walking the disk.
+		// `-quit` stops a regression at the first entry instead of walking the disk.
 		for (cwd, operand) in [(root.as_path(), "/"), (root.as_path(), "/usr/.."), (Path::new("/"), ".")] {
-			let (code, capture) = run_async_util::<Find>(&[operand, "-maxdepth", "0"], "", cwd).await;
+			let (code, capture) =
+				run_async_util::<Find>(&[operand, "-maxdepth", "3", "-print", "-quit"], "", cwd).await;
 			assert_eq!((code, capture.out().as_str()), (1, ""), "operand: {operand}");
 			assert!(capture.err().contains("-allow-root"), "stderr: {}", capture.err());
 		}
-		let (code, capture) =
-			run_async_util::<Find>(&["/", "-maxdepth", "0", "-allow-root"], "", &root).await;
-		assert_eq!((code, capture.out().as_str(), capture.err().as_str()), (0, "/\n", ""));
+		for args in [&["/", "-maxdepth", "2", "-print", "-quit"][..], &["/", "-allow-root", "-print", "-quit"]] {
+			let (code, capture) = run_async_util::<Find>(args, "", &root).await;
+			assert_eq!((code, capture.out().as_str(), capture.err().as_str()), (0, "/\n", ""), "{args:?}");
+		}
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
