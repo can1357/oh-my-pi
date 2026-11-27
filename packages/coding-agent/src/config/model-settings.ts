@@ -4,7 +4,7 @@
  */
 import { register, effect, operatorValue, type SettingValueOf } from "./registry";
 import type { AuthAccountPolicies } from "@oh-my-pi/pi-ai/auth-storage";
-import { setUnpausedProviders } from "@oh-my-pi/pi-ai/oauth";
+import { setUnpausedProviders } from "@oh-my-pi/pi-ai/oauth/pause-state";
 import { authProviders } from "@oh-my-pi/pi-catalog/compat/auth";
 import type { cfgDefaultThinkingLevel } from "../session/settings";
 

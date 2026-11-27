@@ -19,10 +19,12 @@
  * @example
  * configureProviderSlotBroker(new DaemonProviderSlots());
  */
-import type { ProviderSlotBroker } from "@oh-my-pi/pi-ai/stream";
-import { getConfigRootDir, isBunTestRuntime, isRecord, logger, toError } from "@oh-my-pi/pi-utils";
+import type { ProviderSlotBroker } from "@oh-my-pi/pi-ai/provider-slots";
+import { getConfigRootDir } from "@oh-my-pi/pi-utils/dirs";
+import { isBunTestRuntime } from "@oh-my-pi/pi-utils/env";
+import * as logger from "@oh-my-pi/pi-utils/logger";
+import { isRecord, toError } from "@oh-my-pi/pi-utils/type-guards";
 import { lineReader } from "../../irc/mesh-protocol";
-import { daemonClient, openTunnel } from "../client";
 import type { DaemonModule, ModuleTunnel, ModuleUnit } from "../module";
 import { type DaemonClient, type DaemonTunnel, GLOBAL_SCOPE, type UnitPolicy } from "../protocol";
 
@@ -199,7 +201,9 @@ interface SlotsLink {
 
 /** The test runner must never reach, or spawn, the user's daemon. */
 async function connectDaemon(): Promise<ProviderSlotsDaemon | undefined> {
-	return isBunTestRuntime() ? undefined : daemonClient();
+	if (isBunTestRuntime()) return undefined;
+	const { daemonClient } = await import("../client");
+	return daemonClient();
 }
 
 /**
@@ -296,6 +300,7 @@ export class DaemonProviderSlots implements ProviderSlotBroker {
 		const daemon = await this.#connect();
 		// A daemon of another build may not serve this module or this protocol.
 		if (daemon?.welcome.caps[PROVIDER_SLOTS_KIND] !== PROVIDER_SLOTS_VERSION) return undefined;
+		const { openTunnel } = await import("../client");
 		const { tunnel, lease } = await openTunnel(
 			daemon,
 			{ kind: PROVIDER_SLOTS_KIND, scope: GLOBAL_SCOPE, key: this.#key() },

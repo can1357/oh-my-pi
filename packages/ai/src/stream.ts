@@ -114,20 +114,15 @@ function healLeakedThinking(model: Model<Api>, inner: AssistantMessageEventStrea
 	return reachesOfficialEndpoint(model) ? inner : wrapLeakedThinkingStream(inner);
 }
 
-/**
- * Admits a request to a provider against the requests of other processes
- * that share its limit (`maxInFlightRequests`). pi-ai bounds each process on
- * its own; a host running several processes installs one with
- * {@link configureProviderSlotBroker} (coding-agent: through its daemon).
- */
-export interface ProviderSlotBroker {
-	/**
-	 * Resolve with the slot's release once fewer than `limit` requests to
-	 * `provider` run across processes. Rejects with the abort reason when
-	 * `signal` aborts first. The release never throws.
-	 */
-	acquire(provider: string, limit: number, signal?: AbortSignal): Promise<() => void>;
-}
+import {
+	configureProviderMaxInFlightRequests,
+	configureProviderSlotBroker,
+	getConfiguredProviderMaxInFlightRequests,
+	getProviderSlotBroker,
+	type ProviderSlotBroker,
+} from "./provider-slots";
+
+export { configureProviderMaxInFlightRequests, configureProviderSlotBroker, type ProviderSlotBroker };
 
 /** One provider's requests in this process: how many run, and who waits, in arrival order. */
 interface LocalSlots {
@@ -135,25 +130,14 @@ interface LocalSlots {
 	waiting: { limit: number; grant: () => void }[];
 }
 
-let configuredProviderMaxInFlightRequests: Record<string, number> = {};
-let providerSlotBroker: ProviderSlotBroker | undefined;
 let providerInFlightWaitObserver: ((provider: string) => void) | undefined;
 const localSlots = new Map<string, LocalSlots>();
-
-export function configureProviderMaxInFlightRequests(limits: Record<string, number> | undefined): void {
-	configuredProviderMaxInFlightRequests = limits ?? {};
-}
-
-/** Share in-flight limits across processes through `broker`; `undefined` keeps them per process. */
-export function configureProviderSlotBroker(broker: ProviderSlotBroker | undefined): void {
-	providerSlotBroker = broker;
-}
 
 function resolveProviderInFlightLimit(
 	provider: string,
 	options?: Pick<StreamOptions, "maxInFlightRequests">,
 ): number | undefined {
-	const limits = options?.maxInFlightRequests ?? configuredProviderMaxInFlightRequests;
+	const limits = options?.maxInFlightRequests ?? getConfiguredProviderMaxInFlightRequests();
 	const value = limits[provider];
 	if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return undefined;
 	return Math.max(1, Math.floor(value));
@@ -224,9 +208,10 @@ function grantLocalSlots(provider: string, slots: LocalSlots): void {
  */
 async function acquireProviderSlot(provider: string, limit: number, signal?: AbortSignal): Promise<() => void> {
 	const releaseLocal = await acquireLocalSlot(provider, limit, signal);
-	if (!providerSlotBroker) return releaseLocal;
+	const broker = getProviderSlotBroker();
+	if (!broker) return releaseLocal;
 	try {
-		const releaseShared = await providerSlotBroker.acquire(provider, limit, signal);
+		const releaseShared = await broker.acquire(provider, limit, signal);
 		return () => {
 			releaseShared();
 			releaseLocal();
