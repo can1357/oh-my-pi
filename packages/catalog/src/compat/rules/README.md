@@ -120,7 +120,6 @@ collapse {
     effort-family "cursor" "gpt-5.6-luna"
     routing-variant-suffix "-wm" "openai-codex" "openai-codex-device"
     variant-family "devin" "claude-opus-5" name="Claude Opus 5" { /* reviewed routing */ }
-    variant-family "google-antigravity" "gemini-{rev}-flash" name="Gemini {rev} Flash" revision=">=3.6" { /* per-revision template */ }
     provider-alias "devin" "opus" "claude-opus-5"
 }
 ```
@@ -225,7 +224,7 @@ One object axis carries a computed form: `long-context-cost` accepts either the 
 
 `thinking-effort-map` maps served efforts to wire values. An entry for an effort the ladder does not serve whose value is a served effort is an alias instead: clamping a request for that effort follows it rather than stepping down to the next lower tier (Refuseless sends `medium` to `high` on its `low|high|max` ladder). `reasoning-effort-map` entries never alias.
 
-`max-tokens-fallback` seeds `maxTokens` only when the row reports none, and `max-tokens-ceiling` lowers a larger reported `maxTokens` to the host's output cap (an unknown budget stays unknown unless a fallback seeded it); the ceiling also lowers discovered Antigravity per-SKU `maxOutputTokens` (`antigravityWireProfiles`, row and per-account), which the transport sends verbatim. Both apply in `buildModel` after `limits-patch`, so discovery mappers pass upstream output budgets through verbatim. See the Kimi rules in [`providers/fireworks.kdl`](providers/fireworks.kdl).
+`max-tokens-fallback` seeds `maxTokens` only when the row reports none, and `max-tokens-ceiling` lowers a larger reported `maxTokens` to the host's output cap (an unknown budget stays unknown unless a fallback seeded it). Both apply in `buildModel` after `limits-patch`, so discovery mappers pass upstream output budgets through verbatim. See the Kimi rules in [`providers/fireworks.kdl`](providers/fireworks.kdl).
 
 `inline-image-byte-budget` caps retained base64 image characters for a deployment's request body. It leaves room for tool schemas and text beneath the provider's body-size limit; the coding agent reads it through `resolveInlineImageByteBudget` before sending live history, and snapcompact gives its archive frames half of it (`frameDataBytesBudget`). The budget applies only while the request reaches the host the rules describe (the Anthropic API, first-party OpenAI, the Codex backend at its default URL, DeepSeek's API, or Factory Droid's own global or EU API host), which callers decide with pi-ai's `reachesBudgetedHost`: `compat.officialEndpoint` for the configured `baseUrl`, for first-party Anthropic models also the `ANTHROPIC_BASE_URL` or Foundry `FOUNDRY_BASE_URL` reroute applied at request time, and for Factory Droid models the `baseUrl` origin. A custom or rerouted endpoint imposes its own body limit.
 
@@ -333,7 +332,7 @@ behavior {
         exclude-substring "embedding"
     }
     model-operations provider="openai" { exact "o3"; prefix "gpt-"; operation "generate_image" }
-    append-only-context-providers "deepseek" "ollama" "google-antigravity" "google" "google-vertex"
+    append-only-context-providers "deepseek" "ollama" "google" "google-vertex"
     cursor-effort family-marker="gpt-" { tier "minimal" "low" "medium" "high" "xhigh" "max" }
     cursor-model-parameter model="composer-2.5" id="fast" value="false"
     quota-tiers provider="openai-codex" {
@@ -350,8 +349,8 @@ behavior {
     exclude-models provider="nanogpt" substring="embed" substring="tts"
     plan-requirement provider="openai-codex" { tier "pro" substring="-spark" }
     retry-reset-timezone provider="zhipu-coding-plan" base-url="https://open.bigmodel.cn/api/coding/paas/v4" offset="+08:00"
-    pricing-peer provider="google-antigravity" peers="google" "google-vertex" {
-        alias "gemini-3-pro" peer-id="gemini-3-pro-preview"
+    pricing-peer provider="xai-oauth" peers="xai" {
+        alias "grok-4.20-multi-agent-0309" peer-id="grok-4.20-multi-agent-beta-latest"
     }
     role-defaults "smol" {
         model "claude-haiku-5-5"
@@ -399,7 +398,7 @@ auth "anthropic" {
         after-exchange hook="anthropic-identity"
         paste-key prefix="sk-or-" validate-url="https://…"   // manual input starting with prefix is an API key
     }
-    refresh {                                   // or `refresh "none"` / `refresh hook="name"`
+    refresh {                                   // or `refresh "none"` / `refresh hook="name"` (optionally `{ window-ms … }`)
         token url="…" body="json" { headers { User-Agent "…" } }   // defaults to the login token request
         require "projectId"
         scopes "user:profile" "user:inference"   // sent space-joined as `scope`; a 400 `invalid_scope` retries once without it
@@ -411,6 +410,8 @@ auth "anthropic" {
     store-as "openai-codex"                      // persist under another provider id
     callback-port 54545                          // defaults to the oauth-code callback port
     paste-code #true                             // defaults to #true for oauth-code logins
+    device-bound #true                           // logins need a key only this machine holds: kept out of the auth broker
+    sign-out hook="name"                          // runs when a login is removed: forgets local secrets and revokes the grant upstream
     api-key-format "structured"                  // bearer (default) | structured (JSON credential as API key)
     expiry "jwt-or-never"                        // session-JWT expiry policy
     result "api-key"                             // OAuth login persists only credentials.access as a plain API key
@@ -422,6 +423,8 @@ auth "anthropic" {
     show-in-login-list #false
     disabled "Why it is paused, shown to users"  // turns the provider off: no login, no credential reaches it
     login-warning "Account risk to accept"       // a new login asks the user to type "yes" first
+    connected-name "Acme Pro plan"               // what linked-account surfaces call the provider; `name` stays the `/login` label
+    active-notice "Using your Acme Pro plan"     // transcript line when a session starts using one of the provider's models
 }
 ```
 
@@ -432,6 +435,8 @@ auth "anthropic" {
 `disabled "<reason>"` turns a provider off without removing its code or anyone's stored credentials: it leaves the built-in login roster, `login` and token refresh refuse it, usage probes skip it, and no key source (runtime, `models.yml`, stored, broker, env) resolves for it, so nothing calls the provider; a request names the reason. An extension that registers its own OAuth login under the paused id takes the id back, since that is the end user's choice, as does listing the id in the coding agent's `auth.unpausedProviders` setting (`setUnpausedProviders` in `@oh-my-pi/pi-ai/oauth`). Delete the line to turn it back on for everyone — stored logins come back as they were.
 
 `login-warning "<text>"` keeps a provider usable but makes every new login accept a risk first: the login list marks it "(at your own risk)", and `login` shows the text and starts the flow only after the user types `yes`; any other answer or a cancel stores nothing. Stored logins, token refresh and requests are not asked again. An extension that registers its own OAuth login under the id owns that prompt instead.
+
+`connected-name "<text>"` names the provider on every surface after an account is linked — login success lines, model picker provider scopes, logout and account rows, usage and status output — while `name` stays the pre-sign-in label in the `/login` list. Absent, those surfaces keep showing the provider id (title-cased where they already did). `active-notice "<text>"` adds one dim transcript line, `<text> · <model name>`, when the session switches to one of the provider's models or first runs a turn on one; it shows once per model per session.
 
 Login kinds:
 

@@ -1,10 +1,4 @@
-import {
-	CCA_UNSUPPORTED_SCHEMA_FIELDS,
-	COMBINATOR_KEYS,
-	NON_STRUCTURAL_SCHEMA_KEYS,
-	UNSUPPORTED_SCHEMA_FIELDS,
-} from "./fields";
-import { isValidJsonSchema } from "./meta-validator";
+import { COMBINATOR_KEYS, NON_STRUCTURAL_SCHEMA_KEYS, UNSUPPORTED_SCHEMA_FIELDS } from "./fields";
 import { isJsonObject, type JsonObject } from "./types";
 
 /**
@@ -18,7 +12,7 @@ import { isJsonObject, type JsonObject } from "./types";
  * down the contract; the runtime uses it to fail-open with diagnostic logs
  * rather than silently shipping a broken tool definition.
  */
-export type SchemaCompatibilityProvider = "openai-strict" | "google" | "cloud-code-assist-claude";
+export type SchemaCompatibilityProvider = "openai-strict" | "google";
 
 export interface SchemaCompatibilityViolation {
 	path: string;
@@ -44,7 +38,6 @@ export interface StrictSchemaEnforcementResult {
 // each rule is defined in exactly one place.
 const STRICT_FORBIDDEN_KEYS: Record<string, true> = { ...NON_STRUCTURAL_SCHEMA_KEYS, const: true, nullable: true };
 const GOOGLE_FORBIDDEN_KEYS: Record<string, true> = { ...UNSUPPORTED_SCHEMA_FIELDS, const: true };
-const CCA_FORBIDDEN_KEYS: Record<string, true> = { ...CCA_UNSUPPORTED_SCHEMA_FIELDS, const: true };
 
 // Keys whose values are JSON-Schema *containers* (arrays of values, scalars,
 // etc.) rather than nested schemas. The traversal must skip these — recursing
@@ -289,90 +282,6 @@ function validateGoogleNode(node: JsonObject, state: TraversalState): SchemaComp
 	return violations;
 }
 
-function validateCloudCodeAssistNode(node: JsonObject, state: TraversalState): SchemaCompatibilityViolation[] {
-	const violations: SchemaCompatibilityViolation[] = [];
-
-	for (const key in node) {
-		const value = node[key];
-		if (key in CCA_FORBIDDEN_KEYS) {
-			violations.push(
-				createViolation(
-					`${state.path}.${key}`,
-					"cca-forbidden-key",
-					`Cloud Code Assist schema contains unsupported key "${key}"`,
-					key,
-					value,
-				),
-			);
-		}
-	}
-
-	if (Array.isArray(node.type)) {
-		violations.push(
-			createViolation(
-				`${state.path}.type`,
-				"cca-type-array",
-				"Cloud Code Assist schema forbids array-valued type",
-				"type",
-				node.type,
-			),
-		);
-	}
-
-	if (node.type === "null") {
-		violations.push(
-			createViolation(
-				`${state.path}.type`,
-				"cca-null-type",
-				'Cloud Code Assist schema forbids type: "null"',
-				"type",
-				node.type,
-			),
-		);
-	}
-
-	if (Object.hasOwn(node, "nullable")) {
-		violations.push(
-			createViolation(
-				`${state.path}.nullable`,
-				"cca-nullable-key",
-				"Cloud Code Assist schema forbids nullable keyword",
-				"nullable",
-				node.nullable,
-			),
-		);
-	}
-
-	for (const key of COMBINATOR_KEYS) {
-		if (Array.isArray(node[key])) {
-			violations.push(
-				createViolation(
-					`${state.path}.${key}`,
-					"cca-combiner",
-					`Cloud Code Assist schema forbids ${key}`,
-					key,
-					node[key],
-				),
-			);
-		}
-	}
-
-	return violations;
-}
-
-function validateCloudCodeAssistSchema(schema: unknown): SchemaCompatibilityViolation[] {
-	if (isValidJsonSchema(schema)) {
-		return [];
-	}
-	return [
-		createViolation(
-			"root",
-			"cca-meta-schema-validation",
-			"Cloud Code Assist schema is not a structurally valid JSON Schema",
-		),
-	];
-}
-
 export function validateSchemaCompatibility(
 	schema: unknown,
 	provider: SchemaCompatibilityProvider,
@@ -390,13 +299,6 @@ export function validateSchemaCompatibility(
 			walkSchema(schema, { path: "root" }, (node, state) => {
 				violations.push(...validateGoogleNode(node, state));
 			});
-			break;
-		}
-		case "cloud-code-assist-claude": {
-			walkSchema(schema, { path: "root" }, (node, state) => {
-				violations.push(...validateCloudCodeAssistNode(node, state));
-			});
-			violations.push(...validateCloudCodeAssistSchema(schema));
 			break;
 		}
 	}

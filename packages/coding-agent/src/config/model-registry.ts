@@ -65,7 +65,6 @@ import {
 	getBundledProviders,
 } from "@oh-my-pi/pi-catalog/models";
 import {
-	googleAntigravityModelManagerOptions,
 	isCredentialScopedModelCacheProvider,
 	kiroModelManagerOptions,
 	MODELS_DEV_CATALOG_PROVIDER_IDS,
@@ -144,7 +143,6 @@ import {
 	BUILT_IN_DISCOVERY_CACHE_TTL_MS,
 	BUILT_IN_DISCOVERY_NON_AUTHORITATIVE_RETRY_MS,
 	type BuiltInDiscoveryResult,
-	extractGoogleOAuthToken,
 	getOAuthCredentialsForProvider,
 	isAuthenticated,
 	isDiscoveryBearerApiKey,
@@ -3500,29 +3498,6 @@ export class ModelRegistry {
 			resolveKey: (value: string | undefined) => string | undefined;
 			createOptions: (key: string, raw: string | undefined) => ModelManagerOptions<Api>;
 		}> = [
-			{
-				providerId: "google-antigravity",
-				resolveKey: extractGoogleOAuthToken,
-				createOptions: oauthToken =>
-					googleAntigravityModelManagerOptions({
-						resolveAccounts: async () => {
-							const accounts = await resolveOAuthDiscoveryAccounts(
-								this.authStorage,
-								"google-antigravity",
-								oauthToken,
-							);
-							return (
-								accounts?.map(account => ({
-									accessToken: account.accessToken,
-									accountKey: oauthAccountKey(account),
-									projectId: account.projectId,
-								})) ?? null
-							);
-						},
-						endpoint: this.#descriptorBaseUrl("google-antigravity"),
-						fetch: this.#fetch,
-					}),
-			},
 			{
 				providerId: "kiro",
 				resolveKey: value => value,

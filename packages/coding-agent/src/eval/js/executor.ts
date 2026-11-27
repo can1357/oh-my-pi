@@ -5,6 +5,8 @@ import {
 	OutputSink,
 } from "../../tools/streaming-output";
 import type { ToolSession } from "../../tools";
+import { formatTimeoutNotice } from "../../tools/details/bash";
+import { PAGE_ONLY_GLOBAL_RE } from "../../tools/browser/tab-protocol";
 import {
 	resolveOutputMaxColumns,
 	resolveOutputSinkArtifactMaxBytes,
@@ -90,20 +92,14 @@ function formatJsTimeoutAnnotation(timeoutMs: number | undefined): string {
 	// Timeout cancellation force-kills the worker (the only way to interrupt
 	// synchronous user code), which discards the persistent VM state. Say so,
 	// or the model will keep referencing variables that no longer exist.
-	const reset = "The JS worker was force-killed and its VM state was reset; variables from earlier cells are gone.";
-	if (timeoutMs === undefined) return `Command timed out. ${reset}`;
-	const secs = Math.max(1, Math.round(timeoutMs / 1000));
-	return `Command timed out after ${secs} seconds. ${reset}`;
+	return `${formatTimeoutNotice(timeoutMs)}; JS worker killed, state gone`;
 }
 
 function formatPackageInstallTimeoutAnnotation(installDeadlineReached: boolean): string {
 	const timing = installDeadlineReached
-		? `timed out after ${Math.round(JS_PACKAGE_INSTALL_TIMEOUT_MS / 1000)} seconds`
-		: "was cancelled by the caller's timeout";
-	return (
-		`JavaScript package installation ${timing}. ` +
-		"Any existing retained JS worker was not restarted; earlier variables, if any, remain available."
-	);
+		? `timed out after ${Math.round(JS_PACKAGE_INSTALL_TIMEOUT_MS / 1000)}s`
+		: "cut off by the cell timeout";
+	return `package install ${timing}; JS state kept`;
 }
 
 export async function executeJs(code: string, options: JsExecutorOptions): Promise<JsResult> {
@@ -151,9 +147,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 		// worker cannot see packages added after it looked there: restart it to resolve them.
 		const restartForInstall = packages.length > 0 && !options.reset && hasLiveVmContext(options.sessionId);
 		if (restartForInstall) {
-			outputSink.push(
-				"The retained JS worker was restarted so the new packages resolve; earlier JS globals were cleared.\n",
-			);
+			outputSink.push("[JS worker restarted for new packages; globals cleared]\n");
 		}
 		packageWorkComplete = true;
 		// Start the legacy compute timer only after host-side package work. The
@@ -227,9 +221,9 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 				const annotation = runtimeEntered
 					? formatJsTimeoutAnnotation(runtimeTimeoutMs ?? options.idleTimeoutMs)
 					: packageWorkComplete
-						? "Command timed out before JavaScript execution began. Any existing retained JS worker remains available."
+						? "timed out before JS ran; JS state kept"
 						: formatPackageInstallTimeoutAnnotation(packageTimeoutSignal?.aborted === true);
-				outputSink.push(annotation);
+				outputSink.push(`[${annotation}]`);
 			}
 			const summary = await outputSink.dump();
 			return {
@@ -255,7 +249,15 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 						header: Error.prototype.toString.call(error),
 					})
 				: String(error);
-		outputSink.push(message);
+		// The cell's own code reached for a page global (`document.querySelector(…)` written for the page). Checked by
+		// name: the worker's error arrives rebuilt as a plain Error carrying it.
+		const pageGlobal =
+			error instanceof Error && error.name === "ReferenceError" && PAGE_ONLY_GLOBAL_RE.test(error.message);
+		outputSink.push(
+			pageGlobal
+				? `${message}\nEval code runs in omp's Bun runtime, not in a page; run page code in a browser tab with tab.evaluate(() => …).`
+				: message,
+		);
 		const summary = await outputSink.dump();
 		return {
 			output: summary.output,

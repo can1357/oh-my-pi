@@ -902,6 +902,19 @@ export const cfgGithubEnabled = register({
 	},
 });
 
+export const cfgGitlabEnabled = register({
+	id: "gitlab.enabled",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tools",
+		group: "Available Tools",
+		label: "GitLab CLI",
+		description:
+			"Enable the gitlab tool (op-based dispatch for project, file, issue, merge request, discussion, search, checkout, push, and CI pipeline workflows)",
+	},
+});
+
 export const cfgGithubCacheEnabled = register({
 	id: "github.cache.enabled",
 	type: "boolean",
@@ -1119,6 +1132,58 @@ export const cfgAsyncWidgets = register({
 	},
 });
 
+/**
+ * `wait.idleTimeout`: how long a wait on the caller's own background jobs or services blocks with
+ * nothing new before it returns a still-running snapshot. `ladder` uses the wait tool's built-in
+ * windows, a duration one fixed window (milliseconds), `none` no window at all.
+ */
+export type WaitIdleTimeout = "ladder" | "none" | number;
+
+const WAIT_IDLE_DURATION = /^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/;
+const WAIT_IDLE_TIMEOUT_USAGE = "wait.idleTimeout takes ladder, none, or a duration such as 90s, 30m or 1h30m";
+
+/** `ladder`, `none`, or a positive duration such as `90s`, `30m`, `1h30m` (in milliseconds); `undefined` for anything else. */
+function parseWaitIdleTimeout(text: string): WaitIdleTimeout | undefined {
+	const value = text.trim().toLowerCase();
+	if (value === "ladder" || value === "none") return value;
+	const match = WAIT_IDLE_DURATION.exec(value);
+	if (!match) return undefined;
+	const [, hours = "0", minutes = "0", seconds = "0"] = match;
+	const ms = (Number(hours) * 3600 + Number(minutes) * 60 + Number(seconds)) * 1000;
+	return ms > 0 && Number.isSafeInteger(ms) ? ms : undefined;
+}
+
+export const cfgWaitIdleTimeout = register({
+	id: "wait.idleTimeout",
+	type: "string",
+	default: "ladder",
+	validate: raw => {
+		if (raw === undefined || raw === null) return;
+		if (typeof raw !== "string" || parseWaitIdleTimeout(raw) === undefined) {
+			throw new Error(`${WAIT_IDLE_TIMEOUT_USAGE}, got ${Bun.inspect(raw)}`);
+		}
+	},
+	ui: {
+		tab: "tools",
+		group: "Execution",
+		label: "Wait Idle Timeout",
+		description:
+			"How long `wait` blocks on the agent's own background jobs and services with nothing new before it returns a still-running snapshot. Ladder: 5s, then 4m for back-to-back waits. A duration: that one window every time. None: only a finished job or service, a message, steering, or an interrupt ends it. Waits for a reply keep the ladder",
+		options: [
+			{ value: "ladder", label: "Ladder", description: "Default; 5s, then 4m back-to-back" },
+			{ value: "1m", label: "1 minute" },
+			{ value: "5m", label: "5 minutes" },
+			{ value: "15m", label: "15 minutes" },
+			{ value: "30m", label: "30 minutes" },
+			{ value: "1h", label: "1 hour" },
+			{ value: "none", label: "None", description: "Block until a job or service finishes, or a message arrives" },
+		],
+	},
+});
+
+/** {@link cfgWaitIdleTimeout} parsed; `validate` rejects malformed values before they reach it. */
+export const waitIdleTimeout = cfgWaitIdleTimeout.map(value => parseWaitIdleTimeout(value) ?? "ladder");
+
 export const cfgToolsCommands = register({
 	id: "tools.commands",
 	type: "boolean",
@@ -1250,6 +1315,7 @@ export const cfgBuiltinToolGates = combine({
 	evalPy: cfgEvalPy,
 	find: cfgFindEnabled,
 	github: cfgGithubEnabled,
+	gitlab: cfgGitlabEnabled,
 	glob: cfgGlobEnabled,
 	grep: cfgGrepEnabled,
 	launch: cfgLaunchEnabled,

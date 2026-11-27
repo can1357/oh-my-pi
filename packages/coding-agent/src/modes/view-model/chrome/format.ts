@@ -1,9 +1,22 @@
-/** Title-case a provider id for display (`openai-codex` → `Openai Codex`). */
+import { providerConnectedName } from "@oh-my-pi/pi-catalog/compat/auth";
+
+/**
+ * What a surface about a linked account calls `provider`: its declared
+ * `connected-name` (`Acme Pro plan`), else `fallback` (the bare id).
+ */
+export function connectedProviderName(provider: string, fallback: string = provider): string {
+	return providerConnectedName(provider) ?? fallback;
+}
+
+/** A provider's display name: its connected name, else its id title-cased (`openai-codex` → `Openai Codex`). */
 export function formatProviderName(provider: string): string {
-	return provider
-		.split(/[-_]/g)
-		.map(part => (part ? part[0].toUpperCase() + part.slice(1) : ""))
-		.join(" ");
+	return connectedProviderName(
+		provider,
+		provider
+			.split(/[-_]/g)
+			.map(part => (part ? part[0].toUpperCase() + part.slice(1) : ""))
+			.join(" "),
+	);
 }
 
 /** Format a millisecond duration as a coarse-grained human label. */

@@ -431,17 +431,23 @@ const CLAUDE_ORGANIZATION_PLANS: Readonly<Record<string, string>> = {
 };
 
 /**
- * Subscription plan label for a `/profile` response: "Max 5x" / "Max 20x" from
- * the rate-limit tier (the $100 and $200 Max plans), else the organization
- * type ("Max", "Pro", "Team", "Enterprise"). Undefined when the profile names
- * no recognised plan.
+ * Subscription plan label for a `/profile` response: the organization type
+ * ("Max", "Pro", "Team", "Enterprise") followed by the rate-limit tier's
+ * multiplier when it has one ("Max 5x", "Max 20x", and "Team 5x" for a Team
+ * premium seat, which shares the Max tier). A multiplier with an unrecognised
+ * organization type reads as Max. Undefined when the profile names no
+ * recognised plan.
  */
 export function claudeProfilePlan(profile: unknown): string | undefined {
 	if (!isRecord(profile) || !isRecord(profile.organization)) return undefined;
 	const { rate_limit_tier: tier, organization_type: type } = profile.organization;
-	const maxMultiplier = typeof tier === "string" ? /max_(\d+x)/i.exec(tier)?.[1] : undefined;
-	if (maxMultiplier) return `Max ${maxMultiplier.toLowerCase()}`;
-	return typeof type === "string" ? CLAUDE_ORGANIZATION_PLANS[type.toLowerCase()] : undefined;
+	const multiplier = typeof tier === "string" ? /max_(\d+x)/i.exec(tier)?.[1]?.toLowerCase() : undefined;
+	const key = typeof type === "string" ? type.toLowerCase() : undefined;
+	const plan =
+		(key && Object.hasOwn(CLAUDE_ORGANIZATION_PLANS, key) ? CLAUDE_ORGANIZATION_PLANS[key] : undefined) ??
+		(multiplier ? "Max" : undefined);
+	if (!plan) return undefined;
+	return multiplier ? `${plan} ${multiplier}` : plan;
 }
 
 function extractProfileIdentity(profile: ClaudeProfile | null): { accountId?: string; email?: string } {
@@ -1112,8 +1118,7 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
 	// a healthy candidate rather than serve until 100%.
 	scopeLimitsForReserve: scopeClaudeLimitsForModel,
 	/**
-	 * Fable/Mythos usage-limit errors map to a per-family tier scope, mirroring
-	 * the per-counter precedent in packages/ai/src/usage/google-antigravity.ts:466-497.
+	 * Fable/Mythos usage-limit errors map to a per-family tier scope.
 	 * The two scopes address one metered counter, which is why healing judges
 	 * both by the same scoped weekly row.
 	 */

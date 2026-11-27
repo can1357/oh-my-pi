@@ -12,6 +12,7 @@ import { batch, computed, type JSXNode, signal, type UiNode, untrack } from "@oh
 import type { TspText } from "@oh-my-pi/pi-wire";
 import { getAgentDbPath } from "@oh-my-pi/pi-utils/dirs";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { connectedProviderName } from "../../../modes/view-model/chrome/format";
 import { LoginDialog, LoginDialogState } from "../../overlays/panels/login-dialog";
 import { OAuthSelector, type OAuthSelectorSheet } from "../../overlays/pickers/oauth-selector";
 import "../../styles/setup";
@@ -133,7 +134,7 @@ export const signInScene: SetupScene = {
 				batch(() => {
 					authRevision.set(untrack(authRevision) + 1);
 					signedIn.set(true);
-					outcome.set({ kind: "success", provider: name });
+					outcome.set({ kind: "success", provider: connectedProviderName(providerId, name) });
 				});
 			} catch (error) {
 				if (lifetime.signal.aborted || state.signal.aborted) return;

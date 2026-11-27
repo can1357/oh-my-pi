@@ -391,6 +391,34 @@ export const cfgTuiResizeScrollback = register({
 	},
 });
 
+export const cfgTuiScreen = register({
+	id: "tui.screen",
+	type: "enum",
+	values: ["inline", "fullscreen"] as const,
+	default: "inline",
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Screen",
+		get description() {
+			const shift = formatKeyHint("shift");
+			return `Where the session draws in a plain terminal (Tern draws its own): inline keeps the transcript in terminal scrollback; fullscreen uses the alternate screen with the composer pinned to the bottom and the transcript scrolled in omp (PgUp/PgDn, Ctrl+Home/Ctrl+End, mouse wheel), written to the terminal when omp exits. Fullscreen reports the mouse wheel, so native text selection becomes ${shift}+drag (Option+drag in iTerm2); /copy picks text without the mouse`;
+		},
+		options: [
+			{
+				value: "inline",
+				label: "Inline",
+				description: "Draw below the shell prompt; settled output goes into terminal scrollback",
+			},
+			{
+				value: "fullscreen",
+				label: "Fullscreen",
+				description: "Alternate screen, composer pinned to the bottom, transcript scrolled in omp",
+			},
+		],
+	},
+});
+
 export const cfgTerminalShowProgress = register({
 	id: "terminal.showProgress",
 	type: "boolean",
@@ -622,6 +650,19 @@ export const cfgTuiMaxFps = register({
 	},
 });
 
+export const cfgTuiShowLinkUrl = register({
+	id: "tui.showLinkUrl",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Link URLs",
+		description:
+			"Show the target URL in parentheses after named markdown links; off only hides it where terminal hyperlinks make the label clickable",
+	},
+});
+
 export const cfgTuiHyperlinks = register({
 	id: "tui.hyperlinks",
 	type: "enum",
@@ -763,17 +804,34 @@ export const cfgDisplaySmoothStreaming = register({
 	},
 });
 
-export const cfgDisplayHideToolActivity = register({
-	id: "display.hideToolActivity",
-	type: "boolean",
-	default: false,
+/** How the transcript shows model-initiated tool calls, in `app.tools.toggleVisibility` cycle order. */
+export const TOOL_ACTIVITY_MODES = ["detailed", "concise", "hidden"] as const;
+
+export const cfgDisplayToolActivity = register({
+	id: "display.toolActivity",
+	type: "enum",
+	values: TOOL_ACTIVITY_MODES,
+	default: "detailed",
 	ui: {
 		tab: "appearance",
 		group: "Display",
-		label: "Hide Tool Activity",
-		description: "Hide model-initiated tool calls and results from the transcript",
+		label: "Tool Activity",
+		description:
+			"How model-initiated tool calls show in the transcript (concise draws one status row per call; the tool-output toggle opens the full card)",
+		options: [
+			{ value: "detailed", label: "Detailed", description: "Full tool cards with arguments and output previews" },
+			{
+				value: "concise",
+				label: "Concise",
+				description: "One row per call: time, status, tool and intent; no arguments or output",
+			},
+			{ value: "hidden", label: "Hidden", description: "Hide tool calls and results from the transcript" },
+		],
 	},
 });
+
+/** {@link cfgDisplayToolActivity}'s value. */
+export type ToolActivityMode = (typeof TOOL_ACTIVITY_MODES)[number];
 
 export const cfgDisplayShowTokenUsage = register({
 	id: "display.showTokenUsage",
@@ -844,7 +902,7 @@ export const cfgDisplayAdvisorCollapsedLines = register({
 });
 /** Transcript display preferences the shell applies to its tool, message and image blocks. */
 export const cfgTranscriptDisplay = combine({
-	hideToolActivity: cfgDisplayHideToolActivity,
+	toolActivity: cfgDisplayToolActivity,
 	shellVisualization: cfgDisplayShellVisualization,
 	readToolResultPreview: cfgReadToolResultPreview,
 	showImages: cfgTerminalShowImages,

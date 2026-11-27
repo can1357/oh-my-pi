@@ -329,7 +329,7 @@ describe("AuthStorage account rotation", () => {
 		const googleRpc429 = (message: string, reason: string, retryDelay: string) =>
 			Object.assign(
 				new Error(
-					`Cloud Code Assist API error (429): ${JSON.stringify({
+					`Google API error (429): ${JSON.stringify({
 						error: {
 							code: 429,
 							message,
@@ -351,20 +351,16 @@ describe("AuthStorage account rotation", () => {
 			async key => {
 				attemptedKeys.push(key);
 				if (key === "drained") {
-					throw googleRpc429("Individual quota reached. Resets in 114h13m4s.", "QUOTA_EXHAUSTED", "411184.67s");
+					throw googleRpc429("Quota exceeded for this account.", "QUOTA_EXHAUSTED", "411184.67s");
 				}
 				if (attemptedKeys.length === 1) {
-					throw googleRpc429(
-						"You have exhausted your capacity on this model. Resets in 0s.",
-						"RATE_LIMIT_EXCEEDED",
-						"0.3s",
-					);
+					throw googleRpc429("Quota exceeded for this model.", "QUOTA_EXHAUSTED", "0.3s");
 				}
 				return "ok";
 			},
 		);
 
-		// healthy → capacity 429 (blocked 0.3 s); drained frees first and fails for
+		// healthy → quota 429 (blocked 0.3 s); drained frees first and fails for
 		// days; the request then waits for, and resends, the healthy bearer.
 		expect(result).toBe("ok");
 		expect(attemptedKeys).toEqual(["healthy", "drained", "healthy"]);

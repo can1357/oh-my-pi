@@ -245,6 +245,7 @@
 			"tool.ssh": "⇄",
 			"tool.lsp": "💡",
 			"tool.gh": "⎇",
+			"tool.gl": "⎇",
 			"tool.webSearch": "⌕",
 			"tool.exa": "🔭",
 			"tool.browser": "🌐",
@@ -527,6 +528,7 @@
 			"tool.ssh": "",
 			"tool.lsp": "",
 			"tool.gh": "",
+			"tool.gl": "",
 			"tool.webSearch": "",
 			"tool.exa": "",
 			"tool.browser": "",
@@ -809,6 +811,7 @@
 			"tool.ssh": "ssh",
 			"tool.lsp": "lsp",
 			"tool.gh": "gh",
+			"tool.gl": "gl",
 			"tool.webSearch": "web",
 			"tool.exa": "exa",
 			"tool.browser": "[w]",
@@ -846,6 +849,13 @@
 			"key.left": "Left",
 			"key.right": "Right"
 		}
+	},
+	"fallbacks": {
+		"status.success": "✓",
+		"status.done": "✓",
+		"status.warning": "▲",
+		"status.aborted": "■",
+		"checkbox.checked": "▣"
 	},
 	"spinners": {
 		"unicode": {

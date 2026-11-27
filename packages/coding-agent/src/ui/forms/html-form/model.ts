@@ -11,6 +11,7 @@
  */
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { batch, type KeyEvent, type Signal, signal, type TextEdit, untrack } from "@oh-my-pi/pi-tui";
+import { columnOf, layoutText, offsetAt, rowOf } from "@oh-my-pi/pi-tui/term/painters/editor";
 import { flattenLine } from "@oh-my-pi/pi-tui/text/sanitize";
 import { applyEdit, applyMaskedEdit } from "../../overlays/panels/common";
 import { getKeybindings } from "../../../config/keybindings/keybindings";
@@ -124,20 +125,6 @@ function compactNote(text: string, images: readonly ImageContent[]): { text: str
 	return { text: compacted.text, images: compacted.keep.map(index => images[index]!) };
 }
 
-/** The caret of a multi-line box one line up or down, keeping its column where the line reaches it. */
-function lineStep(line: LineState, delta: 1 | -1): LineState {
-	const { text, cursor } = line;
-	const start = text.slice(0, cursor).lastIndexOf("\n") + 1;
-	const column = cursor - start;
-	if (delta < 0) {
-		const above = text.slice(0, Math.max(0, start - 1)).lastIndexOf("\n") + 1;
-		return { text, cursor: Math.min(above + column, start - 1) };
-	}
-	const end = text.indexOf("\n", cursor);
-	const below = text.indexOf("\n", end + 1);
-	return { text, cursor: Math.min(end + 1 + column, below === -1 ? text.length : below) };
-}
-
 /** Whether `value` leaves its field unanswered, as {@link fieldError} counts emptiness. */
 function isBlank(value: HtmlFormValue | undefined): boolean {
 	return value === undefined || (Array.isArray(value) ? value.length === 0 : String(value).trim() === "");
@@ -176,6 +163,12 @@ export class HtmlFormModel {
 	 * the text above it).
 	 */
 	readonly scrollAnchor = signal<"top" | "bottom">("top");
+	/**
+	 * Cells a textarea's rows wrap at as the terminal card last drew them, so
+	 * Up/Down step through the rows on screen; undefined before that paint
+	 * (Up/Down then step hard lines).
+	 */
+	wrapWidth: number | undefined;
 	readonly focused: Signal<boolean>;
 	readonly #callbacks: HtmlFormCallbacks;
 	#done = false;
@@ -278,11 +271,16 @@ export class HtmlFormModel {
 		if (next) this.#editBox(box, next);
 	}
 
-	/** A key typed into `box`: Vim takes it first in Vim mode, else it edits the line (`accept` may refuse). */
-	#typeKey(box: TextBox, key: KeyEvent, accept?: (next: LineState) => boolean): void {
-		if (this.vim(box)?.handle(key)) return;
+	/**
+	 * A key typed into `box`: Vim takes it first in Vim mode, else it edits the line (`accept` may
+	 * refuse). False when the key is neither, so an app shortcut passes on.
+	 */
+	#typeKey(box: TextBox, key: KeyEvent, accept?: (next: LineState) => boolean): boolean {
+		if (this.vim(box)?.handle(key)) return true;
 		const next = editLine(this.#line(box), key);
-		if (next && (accept?.(next) ?? true)) this.#editBox(box, next);
+		if (!next) return false;
+		if (accept?.(next) ?? true) this.#editBox(box, next);
+		return true;
 	}
 
 	get fields(): readonly FormField[] {
@@ -644,6 +642,11 @@ export class HtmlFormModel {
 
 	// ─── Keys ───────────────────────────────────────────────────────────────
 
+	/**
+	 * A key while the form holds focus; true when the form took it. Keys it does not bind return
+	 * false so app-wide shortcuts (Alt+L display reset, Ctrl+T, Ctrl+R, …) reach the shell's global
+	 * handlers (#11213, #12217, #20771).
+	 */
 	key(key: KeyEvent): boolean {
 		const step = this.#vimRowStep(key);
 		const routed: KeyEvent = step ? { id: step, kind: key.kind, raw: key.raw } : key;
@@ -706,7 +709,8 @@ export class HtmlFormModel {
 			return true;
 		}
 		if (hidden) {
-			if (getKeybindings().matches(key, "tui.select.confirm")) this.hidden.set(false);
+			if (!getKeybindings().matches(key, "tui.select.confirm")) return false;
+			this.hidden.set(false);
 			return true;
 		}
 		const active = untrack(this.active);
@@ -748,7 +752,7 @@ export class HtmlFormModel {
 				this.jumpQuestion(-1);
 				return true;
 		}
-		return true;
+		return false;
 	}
 
 	#choiceKey(index: number, field: ChoiceField, key: KeyEvent): boolean {
@@ -765,8 +769,9 @@ export class HtmlFormModel {
 				// Back on Other after picking an option: Enter makes the kept text the answer again.
 				if (!field.multi && answer.other.text.trim() !== "") this.chooseOther(index);
 				this.#advance();
-			} else this.#typeKey({ kind: "other", field: index }, key);
-			return true;
+				return true;
+			}
+			return this.#typeKey({ kind: "other", field: index }, key);
 		}
 		switch (id) {
 			case "left":
@@ -783,7 +788,8 @@ export class HtmlFormModel {
 				this.#advance();
 				return true;
 		}
-		if (getKeybindings().matches(key, "app.ask.note")) this.startNote();
+		if (!getKeybindings().matches(key, "app.ask.note")) return false;
+		this.startNote();
 		return true;
 	}
 
@@ -820,13 +826,12 @@ export class HtmlFormModel {
 		}
 		// Type-ahead: the next option whose label starts with the letter.
 		const typed = key.text?.toLowerCase();
-		if (typed && typed.length === 1) {
-			const order = [...options.slice(at + 1), ...options.slice(0, at + 1)];
-			const match = order.find(i => spansText(field.options[i]!.label).toLowerCase().startsWith(typed));
-			if (match !== undefined) {
-				this.pick(index, match);
-				this.row.set(match);
-			}
+		if (!typed || typed.length !== 1) return false;
+		const order = [...options.slice(at + 1), ...options.slice(0, at + 1)];
+		const match = order.find(i => spansText(field.options[i]!.label).toLowerCase().startsWith(typed));
+		if (match !== undefined) {
+			this.pick(index, match);
+			this.row.set(match);
 		}
 		return true;
 	}
@@ -869,12 +874,11 @@ export class HtmlFormModel {
 				return true;
 		}
 		const typed = key.text?.toLowerCase();
+		if (!typed || typed.length !== 1) return false;
 		const field = this.field(active) as ChoiceField;
-		if (typed && typed.length === 1) {
-			const order = [...options.slice(at + 1), ...options.slice(0, at + 1)];
-			const match = order.find(i => spansText(field.options[i]!.label).toLowerCase().startsWith(typed));
-			if (match !== undefined) this.dropdown.set(match);
-		}
+		const order = [...options.slice(at + 1), ...options.slice(0, at + 1)];
+		const match = order.find(i => spansText(field.options[i]!.label).toLowerCase().startsWith(typed));
+		if (match !== undefined) this.dropdown.set(match);
 		return true;
 	}
 
@@ -882,10 +886,13 @@ export class HtmlFormModel {
 		const id = listKeyId(key);
 		const box: TextBox = { kind: "text", field: index };
 		if (id === "up" || id === "down") {
-			// A textarea's caret moves between its lines; from its first or last line the highlight moves on.
+			// A textarea's caret moves between its rows as drawn; from its first or last row the highlight moves on.
 			const { text, cursor } = this.#line(box);
-			const inside = (id === "up" ? text.slice(0, cursor) : text.slice(cursor)).includes("\n");
-			if (field.multiline && inside) this.#setLine(box, lineStep({ text, cursor }, id === "up" ? -1 : 1));
+			const rows = field.multiline ? layoutText(text, this.wrapWidth ?? Number.MAX_SAFE_INTEGER) : [];
+			const row = rowOf(rows, cursor);
+			const target = row + (id === "up" ? -1 : 1);
+			if (target >= 0 && target < rows.length)
+				this.#setLine(box, { text, cursor: offsetAt(text, rows, target, columnOf(text, rows[row]!, cursor)) });
 			else this.#move(id === "up" ? -1 : 1);
 			return true;
 		}
@@ -896,8 +903,8 @@ export class HtmlFormModel {
 				this.#editBox(box, { text: `${text.slice(0, cursor)}\n${text.slice(cursor)}`, cursor: cursor + 1 });
 			return true;
 		}
-		if (keybindings.matches(key, "tui.input.submit")) this.#advance();
-		else this.#typeKey(box, key);
+		if (!keybindings.matches(key, "tui.input.submit")) return this.#typeKey(box, key);
+		this.#advance();
 		return true;
 	}
 
@@ -910,8 +917,7 @@ export class HtmlFormModel {
 			this.keepNote();
 			return true;
 		}
-		this.#typeKey({ kind: "note" }, key);
-		return true;
+		return this.#typeKey({ kind: "note" }, key);
 	}
 
 	/** A paste into the focused editor (text field, Other answer, note). */

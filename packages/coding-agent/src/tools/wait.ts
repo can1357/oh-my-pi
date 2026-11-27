@@ -24,12 +24,14 @@ import type { IrcMessage } from "../irc/irc-types";
 import type { CoordinationDetails } from "./details/wait";
 import { throwIfAborted } from "./tool-errors";
 
-import { cfgLaunchEnabled } from "./settings";
+import { cfgLaunchEnabled, type WaitIdleTimeout, waitIdleTimeout } from "./settings";
 
 const waitSchema = type({});
 /**
  * Windows (ms) a blocking wait gives its first wake before it returns with
- * nothing new. The first idle wait hands the agent its turn back early while
+ * nothing new under `wait.idleTimeout: ladder` (the default; a job or service
+ * wait otherwise takes the configured window, or none, every time; a reply or
+ * parent wait always takes these). The first idle wait hands the agent its turn back early while
  * work warms up; a back-to-back idle wait means it has nothing else to do, so
  * it takes the top window, and keeps taking it while the waits stay
  * back-to-back. The top-level interactive session skips the floor on job
@@ -297,7 +299,10 @@ export function hasWaitTool(session: ToolSession): boolean {
  * holds on them in `AgentAwaits`, which their own waits and turn ends read.
  * With nothing new, a wait returns after a window from {@link WAIT_LADDER_MS}:
  * the first for a first idle wait (the top for the interactive session's job
- * waits), the top for each back-to-back one. A
+ * waits), the top for each back-to-back one. A job or service wait follows
+ * `wait.idleTimeout` instead when set: one fixed window, or (`none`) no window,
+ * blocking until a job or service finishes, a message arrives, or the call is
+ * interrupted. A
  * direct message arriving mid-wait ends any wait. Messages never ride in the wait's result: each one
  * reaches the caller as a user turn right after it (see `handOffMail`).
  * A progress note, or a broadcast leg from a peer, asks the caller nothing, so
@@ -311,7 +316,6 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 	readonly name = "wait";
 	readonly label = "Wait";
 	readonly summary = "Wait for the next result of a background job or service you started, or a reply you asked for";
-	readonly description: string;
 	readonly parameters = waitSchema;
 	readonly strict = true;
 	readonly interruptible = true;
@@ -326,15 +330,28 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 	readonly #endTurn: boolean;
 	/** A `/tan` fork runs one assignment: an idle wait keeps waiting while that assignment is blocked. */
 	readonly #tanFork: boolean;
+	#description = "";
+	/** The `wait.idleTimeout` value {@link #description} was rendered for. */
+	#descriptionFor: WaitIdleTimeout | undefined;
 
 	constructor(private readonly session: ToolSession) {
 		this.#endTurn = session.tuiTranscript === true;
 		this.#tanFork = session.tanFork === true;
-		this.description = prompt.render(waitDescription, {
-			endTurn: this.#endTurn,
-			subagent: (session.taskDepth ?? 0) > 0,
-			longest: formatDuration(WAIT_LADDER_MS[WAIT_TOP_RUNG]),
-		});
+	}
+
+	get description(): string {
+		const idleTimeout = waitIdleTimeout.get(this.session.settings);
+		if (idleTimeout !== this.#descriptionFor) {
+			this.#description = prompt.render(waitDescription, {
+				endTurn: this.#endTurn,
+				subagent: (this.session.taskDepth ?? 0) > 0,
+				ladder: idleTimeout === "ladder",
+				untilNews: idleTimeout === "none",
+				longest: formatDuration(typeof idleTimeout === "number" ? idleTimeout : WAIT_LADDER_MS[WAIT_TOP_RUNG]),
+			});
+			this.#descriptionFor = idleTimeout;
+		}
+		return this.#description;
 	}
 
 	async execute(
@@ -446,7 +463,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 	}
 
 	/**
-	 * Block until an owned job settles, an owned service finishes, a direct message arrives, the ladder window elapses, or the call aborts.
+	 * Block until an owned job settles, an owned service finishes, a direct message arrives, the idle window (see {@link #idleSpan}) elapses, or the call aborts.
 	 * With neither jobs nor a service, the block is a reply wait: it also ends once no agent asked can still reply.
 	 */
 	async #blockUntilWake(args: {
@@ -469,9 +486,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		const serviceAbort = new AbortController();
 		const serviceLeg = serviceRunning ? waitForOwnedServiceCompletion(this.session, serviceAbort.signal) : undefined;
 		const replyWait = messaging !== undefined && jobs.length === 0 && !serviceRunning;
-		const rung = streak || (this.#endTurn && jobs.length > 0) ? WAIT_TOP_RUNG : 0;
-		const topMs = replyWait ? agentWaitTopMs(this.session.getPromptCacheEntry?.()) : WAIT_LADDER_MS[WAIT_TOP_RUNG];
-		const span = { ms: rung === WAIT_TOP_RUNG ? topMs : WAIT_LADDER_MS[rung], topMs };
+		const span = this.#idleSpan(replyWait, streak, jobs.length);
 		const initialReplies = replyWait ? pendingReplies(messaging) : undefined;
 		const asked = initialReplies?.from ?? [];
 		// Only the parent can end this wait, and the caller asked it nothing.
@@ -524,7 +539,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 			message: replyWait,
 		});
 		const { promise: timeout, resolve: timedOut } = Promise.withResolvers<void>();
-		const timer = setTimeout(timedOut, span.ms);
+		const timer = span ? setTimeout(timedOut, span.ms) : undefined;
 		const abort = Promise.withResolvers<void>();
 		const onAbort = () => abort.resolve();
 		if (signal) {
@@ -555,7 +570,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 				...(busLeg ? [busLeg.then(() => "message" as const)] : []),
 				...(serviceLeg ? [serviceLeg.then(() => "service" as const)] : []),
 				...(replyWait ? [replyGone.promise.then(() => "unanswerable" as const)] : []),
-				timeout.then(() => "timeout" as const),
+				...(span ? [timeout.then(() => "timeout" as const)] : []),
 				abort.promise.then(() => "abort" as const),
 			];
 			wake = await Promise.race([...jobs.map(job => job.promise.then(() => "job" as const)), ...otherLegs]);
@@ -605,7 +620,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 					startedAtMs,
 					settledAtEntry,
 				});
-				if (wake === "timeout") {
+				if (wake === "timeout" && span) {
 					// The report is one text block (`buildJobResult`); the timeout line joins it.
 					const report = result.content.find(block => block.type === "text")?.text ?? "";
 					const blocking = this.#blockedOnIdleCaller(messaging, jobs, serviceRunning);
@@ -617,7 +632,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 				const { useless: _idle, ...woke } = result;
 				return woke;
 			}
-			if (wake === "timeout") {
+			if (wake === "timeout" && span) {
 				const blocking = this.#blockedOnIdleCaller(messaging, jobs, serviceRunning);
 				const text = replyWait
 					? elapsedReport(
@@ -650,6 +665,26 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		} finally {
 			manager?.unwatchJobs(watchedIds);
 		}
+	}
+
+	/**
+	 * The window a wait blocks with nothing new before it returns, and the top
+	 * window its elapsed report promises the next wait; `undefined` when only
+	 * news ends it. A job or service wait follows `wait.idleTimeout`; a reply or
+	 * parent wait always takes the ladder, since it also ends once no agent asked
+	 * can still answer.
+	 */
+	#idleSpan(
+		replyWait: boolean,
+		streak: IdleStreak | undefined,
+		jobCount: number,
+	): { ms: number; topMs: number } | undefined {
+		const idleTimeout = replyWait ? "ladder" : waitIdleTimeout.get(this.session.settings);
+		if (idleTimeout === "none") return undefined;
+		if (idleTimeout !== "ladder") return { ms: idleTimeout, topMs: idleTimeout };
+		const rung = streak || (this.#endTurn && jobCount > 0) ? WAIT_TOP_RUNG : 0;
+		const topMs = replyWait ? agentWaitTopMs(this.session.getPromptCacheEntry?.()) : WAIT_LADDER_MS[WAIT_TOP_RUNG];
+		return { ms: rung === WAIT_TOP_RUNG ? topMs : WAIT_LADDER_MS[rung], topMs };
 	}
 
 	/**
@@ -687,6 +722,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		if (!streak) return result;
 		const notice = prompt.render(this.#tanFork ? waitIdleForkTemplate : waitIdleTemplate, {
 			waited: formatDuration(waitedMs),
+			endTurn: this.#endTurn,
 		});
 		return { ...result, content: [...result.content, { type: "text", text: notice }] };
 	}

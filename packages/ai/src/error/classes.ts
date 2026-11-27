@@ -278,11 +278,6 @@ export class BedrockApiError extends ProviderHttpError {
 	override readonly name = "BedrockApiError";
 }
 
-/** Non-2xx response (or in-stream error chunk) from the Cloud Code Assist API. */
-export class GeminiCliApiError extends ProviderHttpError {
-	override readonly name = "GeminiCliApiError";
-}
-
 /** Non-2xx response (or in-stream error chunk) from the Google Generative Language / Vertex API. */
 export class GoogleApiError extends ProviderHttpError {
 	override readonly name = "GoogleApiError";

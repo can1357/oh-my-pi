@@ -68,6 +68,8 @@ autolearn:
    enabled: true
 ```
 
+A `learn` call (or `manage_skill`) may also create or update a managed skill under `~/.omp/agent/managed-skills`, stamped with the sessions and projects it was learned from. Review them with `/skills learned`; delete one with `/skills forget <name>`.
+
 With the local backend active, `learn` saves explicit durable lessons to the project's `learned.md`. Lessons are newest-first, deduplicated, secret-redacted, capped at 100 entries, and injected starting with the next session; a `learn` call does not mutate the active session's prompt-cache prefix. Each lesson's content is capped at 2,000 characters and optional context at 400 characters. Structured memory search, `recall`, `retain`, `reflect`, and `memory_edit` are not available for the local backend.
 
 ## How it works

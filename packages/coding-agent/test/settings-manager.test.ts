@@ -28,6 +28,7 @@ import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } f
 import {
 	cfgSymbolPreset,
 	cfgDisplayShowTokenUsage,
+	cfgDisplayToolActivity,
 	cfgAskTimeout,
 	cfgThemeDark,
 	cfgTerminalShowProgress,
@@ -1823,7 +1824,6 @@ describe("Settings", () => {
 		const MODEL_PRIO = roleDefaultModels();
 		const webExaCandidates = ["web/exa", ...MODEL_PRIO.web.filter(selector => selector !== "web/exa")];
 		const webOrderedHead = [
-			"google-antigravity/gemini-2.5-flash",
 			"google/gemini-2.5-flash",
 			"anthropic/claude-haiku-4-5",
 			"openai-codex/gpt-6-luna",
@@ -1839,7 +1839,6 @@ describe("Settings", () => {
 		const imageOrderedHead = [
 			"openai/gpt-image-2",
 			"openai-codex/gpt-image-2",
-			"google-antigravity/gemini-3-pro-image",
 			"xai/grok-imagine-image",
 			"openrouter/google/gemini-3-pro-image",
 			"google/gemini-3-pro-image",
@@ -1872,19 +1871,12 @@ describe("Settings", () => {
 			[
 				"image order",
 				"providers.imageOrder",
-				["openai", "openai-codex", "antigravity", "xai", "openrouter", "gemini", "deepinfra"],
+				["openai", "openai-codex", "xai", "openrouter", "gemini", "deepinfra"],
 				{ image: imageOrderedCandidates[0] },
 				{ image: imageOrderedCandidates.slice(1) },
 			],
 			["local speech provider", "providers.tts", "local", { speech: "local/phonon-31m" }, { speech: [] }],
 			["xAI speech provider", "providers.tts", "xai", { speech: "xai/grok-tts" }, { speech: [] }],
-			[
-				"DeepInfra speech provider",
-				"providers.tts",
-				"deepinfra",
-				{ speech: "deepinfra/hexgrad/Kokoro-82M" },
-				{ speech: [] },
-			],
 			[
 				"judgment provider",
 				"providers.judgmentProvider",
@@ -2002,10 +1994,7 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect([settings.getModelRole("web"), ...cfgRetryFallbackChains.get(settings).web.slice(0, 1)]).toEqual([
-				"google-antigravity/gemini-3.8-flash-high",
-				"google/gemini-3.8-flash-high",
-			]);
+			expect(settings.getModelRole("web")).toBe("google/gemini-3.8-flash-high");
 		});
 
 		it("drops legacy defaults without materializing kind roles", async () => {
@@ -2334,11 +2323,12 @@ describe("Settings", () => {
 			expect(cfgMnemopiScoping.get(settings)).toBe("global");
 		});
 
-		it("migrates legacy Kokoro voices and speech role to Phonon", async () => {
+		it("migrates retired local speech models: Kokoro to Phonon, Parakeet v3 to Fluid Speech Pro", async () => {
 			await writeSettings({
 				tts: { localVoice: "bm_george" },
 				speech: { voice: "af_bella" },
-				modelRoles: { speech: "local/kokoro" },
+				modelRoles: { speech: "local/kokoro", dictation: "local/parakeet-tdt-0.6b-v3" },
+				retry: { fallbackChains: { dictation: ["local/parakeet-tdt-0.6b-v3", "openai/gpt-transcribe"] } },
 			});
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
@@ -2346,6 +2336,11 @@ describe("Settings", () => {
 			expect(cfgTtsLocalVoice.get(settings)).toBe("edwin");
 			expect(cfgSpeechVoice.get(settings)).toBe("harper");
 			expect(settings.getModelRole("speech")).toBe("local/phonon-31m");
+			expect(settings.getModelRole("dictation")).toBe("local/fluid-speech-pro");
+			expect(cfgRetryFallbackChains.get(settings).dictation).toEqual([
+				"local/fluid-speech-pro",
+				"openai/gpt-transcribe",
+			]);
 		});
 
 		it("does not clobber an explicit mnemopi block when the legacy mnemosyne block is also present", async () => {
@@ -2420,6 +2415,31 @@ describe("Settings", () => {
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
 			expect(cfgFeaturesUnexpectedStopDetection.get(settings)).toBe("smart");
+		});
+
+		it.each([
+			[true, "hidden"],
+			[false, "detailed"],
+		] as const)("migrates legacy display.hideToolActivity=%p to display.toolActivity %p", async (hide, mode) => {
+			await writeSettings({ display: { hideToolActivity: hide } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(cfgDisplayToolActivity.get(settings)).toBe(mode);
+			// The legacy key leaves config.yml on the next save.
+			cfgDisplayShowTokenUsage.set(settings, true);
+			await settings.flush();
+			const display = (await readSettings()).display as Record<string, unknown>;
+			expect("hideToolActivity" in display).toBe(false);
+			expect(display.toolActivity).toBe(mode);
+		});
+
+		it("keeps an explicit display.toolActivity over a quoted-dotted legacy hideToolActivity", async () => {
+			await Bun.write(getConfigPath(), '"display.hideToolActivity": true\ndisplay:\n  toolActivity: concise\n');
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(cfgDisplayToolActivity.get(settings)).toBe("concise");
 		});
 
 		it("moves legacy lastChangelogVersion out of config.yml into the marker file", async () => {
@@ -2860,13 +2880,13 @@ describe("Settings", () => {
 	});
 
 	describe("extensionsSourceLevel", () => {
-		it("reports project when a foreign project provider (.claude/settings.json) supplies extensions", async () => {
-			const claudeSettings = path.join(projectDir, ".claude", "settings.json");
-			fs.mkdirSync(path.dirname(claudeSettings), { recursive: true });
-			fs.writeFileSync(claudeSettings, JSON.stringify({ extensions: ["../claude-ext"] }));
+		it("reports project when the project settings.json supplies extensions", async () => {
+			const projectSettings = path.join(getProjectAgentDir(projectDir), "settings.json");
+			fs.mkdirSync(path.dirname(projectSettings), { recursive: true });
+			fs.writeFileSync(projectSettings, JSON.stringify({ extensions: ["../project-ext"] }));
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			expect(cfgExtensions.get(settings)).toContain("../claude-ext");
+			expect(cfgExtensions.get(settings)).toContain("../project-ext");
 			expect(settings.extensionsSourceLevel()).toBe("project");
 		});
 
@@ -2880,31 +2900,31 @@ describe("Settings", () => {
 		});
 	});
 
-	describe("project .claude/settings.json parse warnings", () => {
+	describe("project settings.json parse warnings", () => {
 		it("logs capability warnings when project settings.json fails to parse", async () => {
-			const claudeSettings = path.join(projectDir, ".claude", "settings.json");
-			await Bun.write(claudeSettings, '{ "symbolPreset": "ascii", }');
+			const projectSettings = path.join(getProjectAgentDir(projectDir), "settings.json");
+			await Bun.write(projectSettings, '{ "symbolPreset": "ascii", }');
 
 			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir, inMemory: true });
 			expect(cfgSymbolPreset.get(settings)).toBe("unicode");
 			expect(warnSpy).toHaveBeenCalledWith(
-				expect.stringMatching(/Settings: \[Claude Code\] Failed to parse JSON in .*settings\.json/),
+				expect.stringMatching(/Settings: \[OMP\] Failed to parse .*settings\.json/),
 			);
 
 			warnSpy.mockRestore();
 		});
 
 		it("drops user-level warnings that #readProjectSettings does not merge", async () => {
-			const projectSettingsJson = path.join(projectDir, ".claude", "settings.json");
+			const projectSettingsJson = path.join(getProjectAgentDir(projectDir), "settings.json");
 			vi.spyOn(discovery, "loadCapability").mockResolvedValue({
 				items: [],
 				all: [],
 				warnings: [
-					`[Claude Code] Failed to parse JSON in ${path.join(tempDir.path(), "home", ".claude", "settings.json")}`,
-					"[Claude Code] Failed to load: boom",
-					`[Claude Code] Failed to parse JSON in ${projectSettingsJson}`,
+					`[OMP] Failed to parse ${path.join(tempDir.path(), "home", ".omp", "agent", "settings.json")}`,
+					"[OMP] Failed to load: boom",
+					`[OMP] Failed to parse ${projectSettingsJson}`,
 				],
 				providers: [],
 			});
@@ -2918,11 +2938,11 @@ describe("Settings", () => {
 
 		it("logs project warnings when the cwd is a filesystem root", async () => {
 			const root = path.parse(projectDir).root;
-			const rootSettingsJson = path.join(root, ".claude", "settings.json");
+			const rootSettingsJson = path.join(getProjectAgentDir(root), "settings.json");
 			vi.spyOn(discovery, "loadCapability").mockResolvedValue({
 				items: [],
 				all: [],
-				warnings: [`[Claude Code] Failed to parse JSON in ${rootSettingsJson}`],
+				warnings: [`[OMP] Failed to parse ${rootSettingsJson}`],
 				providers: [],
 			});
 			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
@@ -2932,30 +2952,30 @@ describe("Settings", () => {
 		});
 
 		it("logs a persistently malformed project file once across reloads", async () => {
-			const claudeSettings = path.join(projectDir, ".claude", "settings.json");
-			await Bun.write(claudeSettings, '{ "symbolPreset": "ascii", }');
+			const projectSettings = path.join(getProjectAgentDir(projectDir), "settings.json");
+			await Bun.write(projectSettings, '{ "symbolPreset": "ascii", }');
 
 			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			expect(warnSpy.mock.calls.filter(args => String(args[0]).includes("Failed to parse JSON"))).toHaveLength(1);
+			expect(warnSpy.mock.calls.filter(args => String(args[0]).includes("Failed to parse"))).toHaveLength(1);
 
 			await settings.reloadFromDisk();
-			expect(warnSpy.mock.calls.filter(args => String(args[0]).includes("Failed to parse JSON"))).toHaveLength(1);
+			expect(warnSpy.mock.calls.filter(args => String(args[0]).includes("Failed to parse"))).toHaveLength(1);
 		});
 
 		it("surfaces a project file that becomes malformed after startup", async () => {
-			const claudeSettings = path.join(projectDir, ".claude", "settings.json");
+			const projectSettings = path.join(getProjectAgentDir(projectDir), "settings.json");
 
 			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			expect(warnSpy.mock.calls.filter(args => String(args[0]).includes("Failed to parse JSON"))).toHaveLength(0);
+			expect(warnSpy.mock.calls.filter(args => String(args[0]).includes("Failed to parse"))).toHaveLength(0);
 
-			await Bun.write(claudeSettings, '{ "symbolPreset": "ascii", }');
+			await Bun.write(projectSettings, '{ "symbolPreset": "ascii", }');
 			await settings.reloadFromDisk();
 
 			expect(cfgSymbolPreset.get(settings)).toBe("unicode");
-			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(claudeSettings));
+			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(projectSettings));
 		});
 	});
 });
