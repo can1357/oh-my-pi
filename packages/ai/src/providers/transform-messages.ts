@@ -5,6 +5,7 @@ import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import type { CatalogPolicyInputs, ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { renderDemotedThinking } from "../dialect/demotion";
 import type {
+	AnthropicFallbackContent,
 	Api,
 	AssistantMessage,
 	DeveloperMessage,
@@ -586,6 +587,12 @@ export function dropsForeignReasoningPayload(
 }
 
 /**
+ * The target {@link dropsForeignThinking} judges another model's thinking for:
+ * a model, or the inner model an agent proxy encodes against.
+ */
+export type ForeignThinkingReader = CatalogPolicyInputs & { compat?: Model["compat"] };
+
+/**
  * Whether {@link transformMessages} drops a thinking block of `turn` on its
  * way to `model` because `model`'s input classifier refuses reasoning quoted
  * back to it. Claude is such a target. A model router also counts as one
@@ -595,11 +602,13 @@ export function dropsForeignReasoningPayload(
  *
  * Such a target keeps only its own thinking. Every other model's thinking
  * drops, signed or not, other Claude models included. The other model's
- * answer and tool calls stay.
+ * answer and tool calls stay. `turn.model` is the model that wrote the
+ * thinking: {@link thinkingDropsByAuthor} names it block by block for a turn
+ * that more than one model wrote.
  */
 export function dropsForeignThinking(
 	turn: Pick<AssistantMessage, "provider" | "api" | "model">,
-	model: CatalogPolicyInputs & { compat?: Model["compat"] },
+	model: ForeignThinkingReader,
 ): boolean {
 	if (
 		model.api !== "devin-agent" &&
@@ -611,6 +620,42 @@ export function dropsForeignThinking(
 	if (isSameModelTurn(turn, model)) return false;
 	const modelRouter = model.compat !== undefined && "modelRouter" in model.compat && model.compat.modelRouter === true;
 	return modelRouter || resolveCatalogPolicy(model).classifierCotExtraction === true;
+}
+
+/** Shared by every turn whose thinking all drops, so such a turn allocates no filter. */
+const dropsEveryBlock = (): boolean => true;
+
+/**
+ * Which thinking and redacted-thinking blocks of `turn` {@link transformMessages}
+ * drops on its way to `reader` because of the model that wrote them; undefined
+ * when it drops none for that reason.
+ *
+ * One model writes a turn, except a server-side fallback turn. Its response
+ * names one model for the whole turn: the served fallback model when the
+ * request opted in, the requested model when it did not (a gateway can opt in
+ * for it). Each `fallback` block hands the rest of the turn from `from.model`
+ * to `to.model`, so each segment is judged by {@link dropsForeignThinking} for
+ * the model that wrote it.
+ */
+export function thinkingDropsByAuthor(
+	turn: Pick<AssistantMessage, "provider" | "api" | "model" | "content">,
+	reader: ForeignThinkingReader,
+): ((index: number) => boolean) | undefined {
+	const content = turn.content;
+	const first = content.find((block): block is AnthropicFallbackContent => block.type === "fallback");
+	if (!first) return dropsForeignThinking(turn, reader) ? dropsEveryBlock : undefined;
+	let author = first.from.model;
+	let dropsAuthor: boolean | undefined;
+	const drops: boolean[] = [];
+	for (const block of content) {
+		if (block.type === "fallback") {
+			author = block.to.model;
+			dropsAuthor = undefined;
+		}
+		dropsAuthor ??= dropsForeignThinking({ provider: turn.provider, api: turn.api, model: author }, reader);
+		drops.push(dropsAuthor);
+	}
+	return index => drops[index] === true;
 }
 
 /**
@@ -1145,6 +1190,7 @@ export function transformMessages<TApi extends Api>(
 				isSigningAnthropicTarget &&
 				hasVisibleAnthropicThinking &&
 				!assistantMsg.content.some(anthropicVisibleThinkingSurvivesReplay);
+			const dropsThinking = thinkingDropsByAuthor(assistantMsg, model);
 
 			const transformedContent = assistantMsg.content.flatMap((block, blockIndex) => {
 				if (
@@ -1153,10 +1199,7 @@ export function transformMessages<TApi extends Api>(
 				) {
 					return [];
 				}
-				if (
-					(block.type === "thinking" || block.type === "redactedThinking") &&
-					dropsForeignThinking(assistantMsg, model)
-				) {
+				if ((block.type === "thinking" || block.type === "redactedThinking") && dropsThinking?.(blockIndex)) {
 					return [];
 				}
 				if (block.type === "thinking") {

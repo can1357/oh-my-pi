@@ -341,28 +341,61 @@ describe("anthropic fallback content-block replay policy", () => {
 		expect(params[0]?.content).toEqual([{ type: "text", text: "continued" }]);
 	});
 
-	it("drops both models' reasoning from a fallback turn another model served", () => {
-		// The turn is stored as the fallback model's (Opus 4.8). Claude receives
-		// no other model's thinking, so Fable gets neither model's reasoning from
-		// it: dropping every thinking block of the turn also keeps the latest
-		// turn's remaining blocks unmodified.
-		const history = [
-			priorFallbackAssistant([
+	// A response names one model for the whole turn: the served fallback model
+	// when the request opts in, the requested model when it does not (a gateway
+	// can opt in for it). Fable declined and Opus 4.8 wrote the rest of this
+	// turn, so each segment's reasoning belongs to the model that wrote it, and
+	// Claude receives no other model's reasoning.
+	const opusModel: Model<"anthropic-messages"> = buildModel({
+		id: "claude-opus-4-8",
+		name: "Claude Opus 4.8",
+		api: "anthropic-messages",
+		provider: "anthropic",
+		baseUrl: "https://api.anthropic.com",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+		contextWindow: 1_000_000,
+		maxTokens: 128_000,
+	});
+	const fallbackTurn = (model: string): Message[] => [
+		{
+			...priorFallbackAssistant([
 				{ type: "thinking", thinking: "primary plan", thinkingSignature: "sig-primary" },
 				{ type: "fallback", from: { model: "claude-fable-5" }, to: { model: "claude-opus-4-8" } },
 				{ type: "thinking", thinking: "fallback plan", thinkingSignature: "sig-fallback" },
 				{ type: "text", text: "continued" },
 			]),
-			{ role: "user", content: "next", timestamp: 0 } as const,
-		];
-		const optedIn = convertAnthropicMessages(history, fableModel, false, { serverSideFallbackEnabled: true });
-		expect(optedIn[0]?.content).toEqual([
-			{ type: "fallback", from: { model: "claude-fable-5" }, to: { model: "claude-opus-4-8" } },
-			{ type: "text", text: "continued" },
-		]);
-		const optedOut = convertAnthropicMessages(history, fableModel, false);
-		expect(optedOut[0]?.content).toEqual([{ type: "text", text: "continued" }]);
-	});
+			model,
+		},
+		{ role: "user", content: "next", timestamp: 0 },
+	];
+	const boundary = { type: "fallback", from: { model: "claude-fable-5" }, to: { model: "claude-opus-4-8" } } as const;
+	const fableReasoning = { type: "thinking", thinking: "primary plan", signature: "sig-primary" } as const;
+	const opusReasoning = { type: "thinking", thinking: "fallback plan", signature: "sig-fallback" } as const;
+	const continued = { type: "text", text: "continued" } as const;
+
+	it.each(["claude-opus-4-8", "claude-fable-5"])(
+		"sends the fallback model only its own reasoning from a turn named %s",
+		named => {
+			const history = fallbackTurn(named);
+			const optedIn = convertAnthropicMessages(history, opusModel, false, { serverSideFallbackEnabled: true });
+			expect(optedIn[0]?.content).toEqual([boundary, opusReasoning, continued]);
+			const optedOut = convertAnthropicMessages(history, opusModel, false);
+			expect(optedOut[0]?.content).toEqual([opusReasoning, continued]);
+		},
+	);
+
+	it.each(["claude-opus-4-8", "claude-fable-5"])(
+		"sends the declining model only its own reasoning from a turn named %s",
+		named => {
+			const history = fallbackTurn(named);
+			const optedIn = convertAnthropicMessages(history, fableModel, false, { serverSideFallbackEnabled: true });
+			expect(optedIn[0]?.content).toEqual([fableReasoning, boundary, continued]);
+			const optedOut = convertAnthropicMessages(history, fableModel, false);
+			expect(optedOut[0]?.content).toEqual([fableReasoning, continued]);
+		},
+	);
 });
 
 describe("anthropic assistant replay block ordering (tool_use partition)", () => {
@@ -677,7 +710,7 @@ describe("mid-turn fallback a gateway opted into", () => {
 		{ type: "message_stop" },
 	];
 
-	it("replays only the fallback model's reasoning on the next request", async () => {
+	it("replays none of the fallback model's reasoning to the model that declined", async () => {
 		const requests: Array<{ messages: MessageParam[] }> = [];
 		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation((params: unknown) => {
 			requests.push(params as { messages: MessageParam[] });
@@ -698,8 +731,9 @@ describe("mid-turn fallback a gateway opted into", () => {
 
 		const replayed = requests[1]?.messages.find(message => message.role === "assistant")?.content;
 		if (!Array.isArray(replayed)) throw new Error("expected the fallback turn on the wire");
-		expect(replayed.map(block => block.type)).toEqual(["thinking", "text", "tool_use"]);
-		expect(replayed[0]).toMatchObject({ thinking: "fallback plan", signature: "sig-fallback" });
+		// The stored turn names the requested Opus 5.5, but Opus 4.8 wrote its reasoning.
+		expect(replayed.map(block => block.type)).toEqual(["text", "tool_use"]);
+		expect(JSON.stringify(replayed)).not.toContain("sig-fallback");
 	});
 
 	// A turn recorded before boundaries were kept: both models' reasoning and no

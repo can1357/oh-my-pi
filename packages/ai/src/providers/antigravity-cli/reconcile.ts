@@ -135,16 +135,33 @@ export function replayPrompt(replay: readonly Message[], target: Model): Content
 }
 
 /**
- * Whether a native conversation built from `prefix` may hold thinking that `target` drops
- * (`dropsForeignThinking`): a native turn of another model, or a replayed turn whose thinking
- * the conversation's seed target kept. An undefined `seed` (a conversation forked from a
- * checkpoint) counts every replayed turn's thinking as kept.
+ * The transcript agy replayed into a native conversation: the messages at `[from, to)`, for
+ * `target`. A conversation created from a transcript replays all of it (`from` 0); one forked
+ * from a checkpoint replays only what follows the checkpoint.
  */
-export function holdsDroppedThinking(prefix: readonly Message[], seed: Model | undefined, target: Model): boolean {
-	return prefix.some(message => {
+export interface ConversationSeed {
+	target: Model;
+	from: number;
+	to: number;
+}
+
+/**
+ * Whether a native conversation built from `prefix` may hold thinking that `target` drops
+ * (`dropsForeignThinking`). A turn the conversation's `seed` replayed holds its thinking only
+ * where the seed's target kept it. Every other turn, which agy wrote in this conversation or
+ * which a forked checkpoint carried, holds its thinking natively. An undefined `seed` counts
+ * every turn's thinking as held.
+ */
+export function holdsDroppedThinking(
+	prefix: readonly Message[],
+	seed: ConversationSeed | undefined,
+	target: Model,
+): boolean {
+	return prefix.some((message, index) => {
 		if (message.role !== "assistant" || !message.content.some(part => part.type === "thinking")) return false;
 		if (!dropsForeignThinking(message, target)) return false;
-		return message.api === "antigravity-acp" || seed === undefined || !dropsForeignThinking(message, seed);
+		if (seed === undefined || index < seed.from || index >= seed.to) return true;
+		return !dropsForeignThinking(message, seed.target);
 	});
 }
 

@@ -38,6 +38,7 @@ import {
 import { agyCredentialEnv } from "./credentials";
 import { type McpCallHandler, McpBridge, type McpToolDefinition, type McpToolOutput } from "./mcp-bridge";
 import {
+	type ConversationSeed,
 	holdsDroppedThinking,
 	inputBlocks,
 	type Ledger,
@@ -148,10 +149,16 @@ interface Conversation {
 	defaultEffort?: string;
 	requestedEffort?: string;
 	/**
-	 * Target the conversation's transcript was replayed for when agy created it; undefined for a
-	 * conversation forked from a checkpoint. Decides which replayed thinking it may hold.
+	 * The transcript agy replayed into the conversation when it opened it: which messages, and
+	 * for which target. Decides which replayed thinking it may hold. Undefined for a conversation
+	 * this host did not open.
 	 */
-	seedTarget?: Model;
+	seed?: ConversationSeed;
+}
+
+/** The range of `messages` that `replay` covers, as the seed of the conversation it is replayed into. */
+function replayedRange(messages: readonly Message[], replay: readonly Message[], target: Model): ConversationSeed {
+	return { target, from: messages.length - replay.length, to: messages.length };
 }
 
 interface ActiveStep {
@@ -279,7 +286,7 @@ export class AgyHost implements ProviderSessionState {
 				(plan.kind === "resume" &&
 					holdsDroppedThinking(
 						context.messages.slice(0, this.#ledger?.count ?? 0),
-						this.#conversation?.seedTarget,
+						this.#conversation?.seed,
 						model,
 					)) ||
 				(plan.kind === "restore" &&
@@ -302,6 +309,8 @@ export class AgyHost implements ProviderSessionState {
 				await this.#startProcess(tools, toolsKey, cwd, step, options.credentialVersion);
 			}
 			let loadId: string | undefined;
+			// What the load replays into the conversation it opens, when that is a new fork.
+			let loadSeed: ConversationSeed | undefined;
 			if (plan.kind === "resume") {
 				const conversation = this.#conversation;
 				if (!conversation) throw new Error("Antigravity CLI conversation was lost");
@@ -316,11 +325,12 @@ export class AgyHost implements ProviderSessionState {
 				if (forkId) {
 					this.#ownedConversations.add(forkId);
 					loadId = forkId;
+					loadSeed = replayedRange(context.messages, plan.replay, model);
 				} else plan = { kind: "fresh", replay: [...context.messages] };
 			}
 			if (loadId) {
 				try {
-					await this.#setup(this.#loadConversation(loadId, system, systemKey, cwd));
+					await this.#setup(this.#loadConversation(loadId, system, systemKey, cwd, loadSeed));
 				} catch (error) {
 					if (step.controller.signal.aborted) throw error;
 					// A store can outlive an incompatible native CLI version. Do not reuse a partial load.
@@ -342,7 +352,7 @@ export class AgyHost implements ProviderSessionState {
 					loaded: true,
 					agyModels: modelValues(created.configOptions),
 					defaultEffort: thoughtLevel(created.configOptions),
-					seedTarget: model,
+					seed: replayedRange(context.messages, plan.replay, model),
 				};
 				this.#contextTokens = 0;
 			}
@@ -540,10 +550,17 @@ export class AgyHost implements ProviderSessionState {
 		}
 	}
 
-	async #loadConversation(id: string, system: string, systemKey: string, cwd: string): Promise<void> {
+	/** `replaySeed` is what this step replays into `id`; without one, `id` keeps the seed it already had. */
+	async #loadConversation(
+		id: string,
+		system: string,
+		systemKey: string,
+		cwd: string,
+		replaySeed?: ConversationSeed,
+	): Promise<void> {
 		conversationStorePath(this.#geminiDir, id);
 		const agy = this.#requireProcess();
-		const seedTarget = this.#conversation?.id === id ? this.#conversation.seedTarget : undefined;
+		const seed = replaySeed ?? (this.#conversation?.id === id ? this.#conversation.seed : undefined);
 		await this.#unloadConversation();
 		const loading = {};
 		this.#loading = loading;
@@ -563,7 +580,7 @@ export class AgyHost implements ProviderSessionState {
 				loaded: true,
 				agyModels: modelValues(loaded.configOptions),
 				defaultEffort: thoughtLevel(loaded.configOptions),
-				seedTarget,
+				seed,
 			};
 			this.#contextTokens = 0;
 		} finally {

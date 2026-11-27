@@ -98,6 +98,33 @@ describe("foreign thinking context estimate", () => {
 		expect(tokenizer.countMessage(own)).toBeGreaterThan(withoutThinking + 1000);
 	});
 
+	test("judges each part of a server-side fallback turn by the model that wrote it", () => {
+		// The response named the requested Fable for the whole turn; Opus wrote everything after the boundary.
+		const declined = { type: "thinking", thinking: THINKING, thinkingSignature: "sig-primary" } as const;
+		const handoff = {
+			type: "fallback",
+			from: { model: "claude-fable-5" },
+			to: { model: "claude-opus-4-8" },
+		} as const;
+		const served = { type: "thinking", thinking: THINKING, thinkingSignature: "sig-fallback" } as const;
+		const fallbackTurn: AssistantMessage = {
+			...turn("anthropic-messages", "anthropic", "claude-fable-5"),
+			content: [declined, handoff, served, answer, toolCall],
+		};
+		const fable = new Tokenizer(reader("anthropic-messages", "anthropic", "claude-fable-5"));
+		const opus = new Tokenizer(reader("anthropic-messages", "anthropic", "claude-opus-4-8"));
+
+		// Each model gets only its own reasoning: Fable's before the boundary, Opus's after it.
+		for (const [tokenizer, ownOnly] of [
+			[fable, [declined, handoff, answer, toolCall]],
+			[opus, [handoff, served, answer, toolCall]],
+		] as const) {
+			const count = tokenizer.countMessage(fallbackTurn);
+			expect(count).toBeGreaterThan(answerAndToolCount(tokenizer, fallbackTurn) + 1000);
+			expect(count).toBe(tokenizer.countMessage({ ...fallbackTurn, content: [...ownOnly] }));
+		}
+	});
+
 	test("does not count foreign thinking for Factory Droid's Claude inner route", () => {
 		const target = reader("factory-droid-agent", "factory-droid", "claude-sonnet-4-5-20250929");
 		const foreign = turn("openai-completions", "vertex", "google/gemini-3.1-pro-preview");

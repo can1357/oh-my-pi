@@ -10,9 +10,10 @@ import {
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import {
 	dropsForeignReasoningPayload,
-	dropsForeignThinking,
+	type ForeignThinkingReader,
 	isSameModelTurn,
 	shouldDropTruncatedThinkingOnlyAssistant,
+	thinkingDropsByAuthor,
 } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { replaysSignedReasoningText } from "@oh-my-pi/pi-ai/utils/reasoning-source";
 import { apiRouteFor } from "@oh-my-pi/pi-catalog/compat/behavior";
@@ -127,9 +128,6 @@ export function reasoningReplayKey(model: TokenizerModel | null | undefined): st
 	const reader = reasoningReplayReader(model);
 	return reader ? `${reader.api}\0${reader.provider}\0${reader.id}` : "";
 }
-
-/** The target {@link dropsForeignThinking} judges another model's thinking for. */
-type ForeignThinkingReader = Parameters<typeof dropsForeignThinking>[1];
 
 /**
  * The model a request's history is transformed for: the model itself, or the
@@ -329,7 +327,7 @@ export class Tokenizer {
 	readonly #frameBilling: snapcompact.FrameBilling;
 	readonly frameBillingKey: string;
 	readonly #reasoningReader: ModelIdentity | undefined;
-	/** The reader {@link dropsForeignThinking} judges another model's thinking for. */
+	/** The reader {@link thinkingDropsByAuthor} judges another model's thinking for. */
 	readonly #thinkingReader: ForeignThinkingReader | undefined;
 	readonly #foreignThinkingKey: string;
 	/** The counted model's identity, set even when filtering leaves no reasoning reader. */
@@ -578,7 +576,7 @@ export class Tokenizer {
 				const completionsReader = this.#dropsCompletionsThinking ? this.#reasoningReader : undefined;
 				const ownDroppedCompletionsTurn =
 					completionsReader !== undefined && isSameModelTurn(message, completionsReader);
-				const thinkingReader = this.#thinkingReader;
+				const dropsThinking = this.#thinkingReader && thinkingDropsByAuthor(message, this.#thinkingReader);
 				if (typeof replayedReasoning === "number") extra += replayedReasoning;
 				const signaturesPriced = this.thinkingReplayTokens === "signature";
 				// The replay's signature rule (`transformMessages`): an aborted or
@@ -622,7 +620,7 @@ export class Tokenizer {
 					if (block.type === "text") {
 						fragments.push(block.text);
 					} else if (block.type === "thinking") {
-						if (thinkingReader && dropsForeignThinking(message, thinkingReader)) continue;
+						if (dropsThinking?.(index)) continue;
 						if (ownThinkingFiltered) {
 							// The rebuilt item carries the thinking text verbatim; the
 							// signature stays off the wire either way.
@@ -672,7 +670,7 @@ export class Tokenizer {
 						fragments.push(block.name);
 						fragments.push(stringifyJson(block.arguments) ?? "null");
 					} else if (block.type === "redactedThinking") {
-						if (thinkingReader && dropsForeignThinking(message, thinkingReader)) continue;
+						if (dropsThinking?.(index)) continue;
 						// Encrypted reasoning blob the provider still bills for wherever it
 						// survives replay, as above; excluded from the compaction floor for
 						// the same reason.

@@ -66,6 +66,7 @@ import {
 } from "./connect-frame";
 import {
 	isResponsesFamilyApi,
+	isSameModelTurn,
 	normalizeToolCallId,
 	responsesCallComponent,
 	transformMessages,
@@ -272,6 +273,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			if (model.compat.modelRouter) {
 				assignment = await assignDevinModel(model, turn, chatBaseUrl, fetchImpl, options?.signal);
 				output.upstreamModel = assignment.modelUid;
+				turn.messages = keepAssignedModelThinking(turn.messages, model, assignment.modelUid);
 			}
 			// `/fast`: the effort's wire uid swaps for its fast-lane twin, billed at the lane's card.
 			const lane = assignment === undefined && options?.serviceTier === "priority" ? model.priorityLane : undefined;
@@ -668,6 +670,23 @@ function buildRouterPrompt(messages: Message[]): ChatMessagePrompt | undefined {
 		if (msg.role === "user" || msg.role === "developer") return buildUserPrompt(msg, "");
 	}
 	return undefined;
+}
+
+/**
+ * The router's history with only the assigned model's thinking. A router drops
+ * every other model's thinking (`dropsForeignThinking`), but its history is
+ * transformed before AssignModel picks a model, so its own earlier turns keep
+ * their thinking whichever model served them. The model that served a router
+ * turn is its `upstreamModel`; the other turns' answers and tool calls stay.
+ */
+function keepAssignedModelThinking(messages: Message[], router: Model<"devin-agent">, assigned: string): Message[] {
+	return messages.map(message => {
+		if (message.role !== "assistant" || message.upstreamModel === assigned || !isSameModelTurn(message, router)) {
+			return message;
+		}
+		const content = message.content.filter(block => block.type !== "thinking" && block.type !== "redactedThinking");
+		return content.length === message.content.length ? message : { ...message, content };
+	});
 }
 
 /**

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { gunzipSync } from "node:zlib";
 import { streamDevin } from "@oh-my-pi/pi-ai/providers/devin";
-import type { Context, Model } from "@oh-my-pi/pi-ai/types";
+import type { AssistantMessage, Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	type AssignModelRequest,
@@ -230,6 +230,36 @@ describe("streamDevin router assignment", () => {
 		expect(result.stopReason).toBe("error");
 		expect(recorded.chat).toBeUndefined();
 		expect(recorded.paths).not.toContain("/exa.api_server_pb.ApiServerService/GetChatMessage");
+	});
+
+	it("replays a router turn's thinking only to the model that served it", async () => {
+		const gemini = "MODEL_GOOGLE_GEMINI_3_0_FLASH_LOW";
+		const served: AssistantMessage = {
+			...(context.messages[1] as AssistantMessage),
+			content: [
+				{ type: "thinking", thinking: "GEMINI_THINKING", thinkingSignature: "gemini-signature" },
+				{ type: "text", text: "GEMINI_ANSWER" },
+			],
+			upstreamModel: gemini,
+		};
+		const replayed = async (assigned: string) => {
+			const { fetch: fetchImpl, recorded } = fakeDevin({
+				assignment: { assignmentJwt: "assign-jwt", modelUid: assigned },
+			});
+			const history: Context = { messages: [context.messages[0]!, served, context.messages[2]!] };
+			await streamDevin(devinModel({ modelRouter: true }), history, { apiKey: "token", fetch: fetchImpl }).result();
+			return recorded.chat?.chatMessagePrompts.find(prompt => prompt.source === ChatMessageSource.SYSTEM);
+		};
+
+		// The router served the earlier turn with Gemini and now assigns Claude.
+		const toClaude = await replayed("claude-sonnet-4-5");
+		expect(toClaude?.prompt).toBe("GEMINI_ANSWER");
+		expect(toClaude?.thinking).toBe("");
+		expect(toClaude?.signature).toBe("");
+		// The model that served it gets its thinking back.
+		const toGemini = await replayed(gemini);
+		expect(toGemini?.thinking).toBe("GEMINI_THINKING");
+		expect(toGemini?.signature).toBe("gemini-signature");
 	});
 
 	it("skips assignment for non-router models", async () => {
