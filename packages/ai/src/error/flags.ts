@@ -249,6 +249,12 @@ const EMPTY_RESPONSE_PATTERN = /\bthought-only response without final output\b/i
 const MALFORMED_RESPONSE_FINISH_PATTERN = /\bfinish reason:\s*MALFORMED_RESPONSE\b/i;
 const CONTENT_FILTER_PATTERN = /\b(?:incomplete:\s*)?content_filter\b/i;
 const ACCOUNT_POLICY_PATTERN = /\bcyber_policy\b|trusted access for cyber/i;
+/**
+ * Gemini's per-user quota endpoint refusing an account whose subscription does
+ * not cover it ("… requires an active Google AI … subscription"). Another
+ * signed-in account may qualify, so the credential is parked rather than invalidated.
+ */
+const PLAN_REQUIRED_PATTERN = /\brequires an active Google AI\b[^\n]{0,60}\bsubscription\b/i;
 export const ANTHROPIC_ACCOUNT_POLICY_PATTERN =
 	/\b(?:oauth_not_allowed_for_organization|permission_error)\b|\bOAuth authentication is currently not allowed for this organization\b/i;
 
@@ -695,7 +701,10 @@ function classifyText(
 		) {
 			kinds |= Flag.AccountPolicy | Flag.ContentBlocked;
 		}
-		if (isAnthropicAccountPolicyText(errorMessage, provider, statusClean)) {
+		if (
+			isAnthropicAccountPolicyText(errorMessage, provider, statusClean) ||
+			PLAN_REQUIRED_PATTERN.test(errorMessage)
+		) {
 			kinds |= Flag.AccountPolicy;
 		}
 		if (isAuthFailureText(errorMessage)) kinds |= Flag.AuthFailed;

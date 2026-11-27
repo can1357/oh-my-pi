@@ -1167,9 +1167,8 @@ export interface OAuthApi {
 	 */
 	login(provider: OAuthProviderId, ctrl: OAuthLoginController): Promise<OAuthLoginIdentity | undefined>;
 	/**
-	 * Remove one stored login. The provider's `sign-out` hook first forgets the
-	 * account's secrets kept outside the credential store and revokes the grant
-	 * at the provider. The login is removed even when the hook fails;
+	 * Remove one stored login. The provider's `sign-out` hook first revokes the
+	 * grant at the provider. The login is removed even when the hook fails;
 	 * {@link OAuthSignOutResult.signOutError} says why.
 	 */
 	signOut(provider: string, credentialId: number, options?: OAuthSignOutOptions): Promise<OAuthSignOutResult>;
