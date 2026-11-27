@@ -16,7 +16,7 @@
 ### Added
 
 - Added `CompactionSettings.summaryMaxTokens` to set the output budget for regular compaction summaries; history that fits alongside the actual previous summary and requested output is retained ([#18688](https://github.com/can1357/oh-my-pi/issues/18688))
-- Added `Agent.runAfterModelCall(callback)` to defer work such as closing provider sessions until no model call is in flight, and `AgentLoopConfig.onModelCallStateChange`, which reports when each model call starts and settles
+- Added `Agent.runAfterModelCall(callback)` to defer work such as closing provider sessions until no model call is in flight, and `AgentLoopConfig.onModelCallStateChange`, which reports when each model call starts and settles ([#20858](https://github.com/can1357/oh-my-pi/pull/20858) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 
 ### Changed
 
