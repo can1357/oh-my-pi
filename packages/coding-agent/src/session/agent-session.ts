@@ -7909,6 +7909,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
+	 * The tool session this session was built with. A subagent this session spawns takes its live
+	 * inputs from it (`subagentLiveInputs`), and so does the cold revive of such a subagent while this
+	 * session is its live parent.
+	 */
+	get evalToolSession(): ToolSession | undefined {
+		return this.#evalToolSession;
+	}
+
+	/**
 	 * Keeps a subagent transcript's latest `session_init` on the base prompt and work-pool yield items
 	 * its model calls are built from, appending a newer one when either changes: signed thinking is
 	 * bound to the system prompt and tools, so cold revival must replay them. A per-turn override is

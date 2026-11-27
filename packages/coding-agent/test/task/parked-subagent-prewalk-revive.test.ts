@@ -149,6 +149,12 @@ it.each([false, true])(
 				model => !routeOnly || model.provider !== row.provider || model.id !== row.id,
 			),
 		]);
+		const catalogAll = modelRegistry.getAll.bind(modelRegistry);
+		// A registry lists every model it can serve among all its models too; a revive resolves the handoff target there.
+		vi.spyOn(modelRegistry, "getAll").mockImplementation(() => [
+			...(routeOnly ? [row] : [planner, target]),
+			...catalogAll().filter(model => !routeOnly || model.provider !== row.provider || model.id !== row.id),
+		]);
 		if (routeOnly) {
 			vi.spyOn(globalThis, "fetch").mockRejectedValue(
 				new Error("Unexpected network request in routed prewalk fixture"),

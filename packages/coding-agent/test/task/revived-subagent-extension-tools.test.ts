@@ -155,7 +155,11 @@ async function spawnAndPark() {
 		},
 	});
 	const catalogAvailable = modelRegistry.getAvailable.bind(modelRegistry);
+	const catalogAll = modelRegistry.getAll.bind(modelRegistry);
 	vi.spyOn(modelRegistry, "getAvailable").mockImplementation(kind => [mock, ...catalogAvailable(kind)]);
+	// A registry lists every model it can serve among all its models too; a cold revive resolves the
+	// spawn's model there.
+	vi.spyOn(modelRegistry, "getAll").mockImplementation(() => [mock, ...catalogAll()]);
 	const settings = Settings.isolated({
 		// No TTL timer: the test parks explicitly through the same path the timer takes.
 		"task.agentIdleTtlMs": 0,

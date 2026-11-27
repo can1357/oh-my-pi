@@ -17,7 +17,7 @@ import {
 	getModelMatchPreferences,
 	resolveModelOverride,
 } from "../config/model-resolver";
-import { type OAuthAccountPools, validateAgentAccountPools } from "../config/account-pools";
+import type { OAuthAccountPools } from "../config/account-pools";
 import {
 	type CompactionThresholdPair,
 	validateAgentCompactionThresholdOverrides,
@@ -45,7 +45,14 @@ import { buildOutputValidator } from "../tools/output-schema-validator";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { type DiscoveryResult, discoverAgents, getAgent } from "./discovery";
 import { renderStepPrompts } from "./steps";
-import { type ExecutorOptions, runSubprocess, type SubagentToolResult, usesYield } from "./executor";
+import {
+	type ExecutorOptions,
+	liveAgentAccountPools,
+	runSubprocess,
+	type SubagentSpawnerLiveInputs,
+	type SubagentToolResult,
+	usesYield,
+} from "./executor";
 import {
 	applyEligibleNestedPatches,
 	type IsolationContext,
@@ -75,7 +82,6 @@ import { parseIsolationBackend } from "./worktree";
 
 import {
 	cfgIsolationBackend,
-	cfgTaskAgentAccountPools,
 	cfgTaskAgentCompactionThresholdOverrides,
 	cfgTaskAgentModelOverrides,
 	cfgTaskAgentServiceTierOverrides,
@@ -557,8 +563,7 @@ export async function resolveEffectiveSubagentPolicy(
 	const compactionThresholdOverride = Object.hasOwn(compactionThresholdOverrides, agentName)
 		? compactionThresholdOverrides[agentName]
 		: undefined;
-	const agentAccountPools = validateAgentAccountPools(cfgTaskAgentAccountPools.get(request.session.settings));
-	const oauthAccountPools = Object.hasOwn(agentAccountPools, agentName) ? agentAccountPools[agentName] : undefined;
+	const oauthAccountPools = liveAgentAccountPools(request.session.settings, agentName);
 	const perCallSelector: unknown = request.perCallModel;
 	const parentActiveModel = request.session.getActiveModel?.();
 	const userTaggedEffort =
@@ -721,12 +726,62 @@ async function refreshSkillsForAutoload(session: ToolSession, agent: AgentDefini
 	await session.refreshSkills();
 }
 
-function resolveAutoloadSkills(session: ToolSession, agent: AgentDefinition) {
-	const skills = [...(session.skills ?? [])];
-	const autoloadSkills = agent.autoloadSkills?.length
-		? agent.autoloadSkills.map(name => skills.find(skill => skill.name === name)).filter(skill => skill !== undefined)
-		: [];
-	return { skills, autoloadSkills };
+function resolveAutoloadSkills(skills: NonNullable<ExecutorOptions["skills"]>, agent: AgentDefinition) {
+	if (!agent.autoloadSkills?.length) return [];
+	return agent.autoloadSkills
+		.map(name => skills.find(skill => skill.name === name))
+		.filter(skill => skill !== undefined);
+}
+
+/**
+ * The live inputs of a subagent build, as `session` holds them: what a spawn of `session` passes, and
+ * what a cold revive of such a subagent takes while `session` is its live parent. The spawner applies its
+ * own policy over them (a restricted contract, MCP off).
+ */
+export function subagentLiveInputs(session: ToolSession): SubagentSpawnerLiveInputs {
+	return {
+		costGate: session.costGate,
+		getApiKey: session.getApiKey,
+		authStorage: session.authStorage,
+		modelRegistry: session.modelRegistry,
+		settings: session.settings,
+		asyncJobManager: session.asyncJobManager,
+		inheritedSessionAgents: session.getSessionAgents?.(),
+		// The provider offline mode holds a subagent's requests to.
+		parentActiveProvider: session.getActiveModel?.()?.provider,
+		mcpManager: session.mcpManager,
+		contextFiles: session.contextFiles,
+		noContextFiles: session.noContextFiles,
+		skills: [...(session.skills ?? [])],
+		workspaceTree: session.workspaceTree,
+		promptTemplates: session.promptTemplates,
+		rules: session.rules,
+		// The provider itself, never bound to `session`: the child's revive capture outlives its
+		// parking, so a bound copy would keep this parent's whole session graph alive for as long as
+		// the child can be revived.
+		extensionRoots: session.effectiveExtensionRoots,
+		preloadedExtensionPaths: session.extensionPaths,
+		preloadedPreparedExtensions: session.preparedExtensions,
+		preloadedCustomToolPaths: session.customToolPaths,
+		localProtocolOptions: sessionLocalProtocolOptions(session),
+		parentArtifactManager: session.getArtifactManager?.() ?? undefined,
+		parentHindsightSessionState: session.getHindsightSessionState?.(),
+		parentMnemopiSessionState: session.getMnemopiSessionState?.(),
+		parentTelemetry: session.getTelemetry?.(),
+	};
+}
+
+/**
+ * The policy fields a subagent build takes from `session`, its spawner: its credential source and workspace roots.
+ * A cold revive takes them from the live parent the same way.
+ */
+export function subagentSpawnerPolicy(
+	session: ToolSession,
+): Pick<ExecutorOptions, "additionalDirectories" | "credentialSourceSessionId"> {
+	return {
+		additionalDirectories: session.additionalDirectories,
+		credentialSourceSessionId: session.getCredentialSourceSessionId?.(),
+	};
 }
 
 function buildExecutorOptions(
@@ -736,16 +791,13 @@ function buildExecutorOptions(
 	id: string,
 ): ExecutorOptions {
 	const { session } = request;
-	const { skills, autoloadSkills } = resolveAutoloadSkills(session, policy.agent);
-	const localProtocolOptions = sessionLocalProtocolOptions(session);
+	const live = subagentLiveInputs(session);
 	const restrictToolNames = policy.planMode || session.restrictToolNames === true;
 	const enableMCP = !restrictToolNames && (session.enableMCP ?? true);
 	return {
+		...live,
 		cwd: session.cwd,
-		costGate: session.costGate,
-		additionalDirectories: session.additionalDirectories,
-		getApiKey: session.getApiKey,
-		credentialSourceSessionId: session.getCredentialSourceSessionId?.(),
+		...subagentSpawnerPolicy(session),
 		agent: policy.effectiveAgent,
 		...spawnPrompts(request, policy.structured),
 		assignment: request.assignment.trim(),
@@ -768,7 +820,6 @@ function buildExecutorOptions(
 		compactionThresholdOverride: policy.compactionThresholdOverride,
 		oauthAccountPools: policy.oauthAccountPools,
 		parentActiveModelPattern: policy.parentActiveModelPattern,
-		parentActiveProvider: session.getActiveModel?.()?.provider,
 		journalTaskLabel: journalCompletion(session.sessionManager, { purpose: "task-label" }),
 		perCallModelGrants: policy.perCallModelGrants,
 		thinkingLevel: policy.effectiveAgent.thinkingLevel,
@@ -795,38 +846,17 @@ function buildExecutorOptions(
 		subagentEventBus: session.subagentEventBus,
 		onProgress: request.onProgress,
 		onToolResult: request.onToolResult,
-		authStorage: session.authStorage,
-		modelRegistry: session.modelRegistry,
-		settings: session.settings,
-		asyncJobManager: session.asyncJobManager,
-		inheritedSessionAgents: session.getSessionAgents?.(),
-		mcpManager: enableMCP ? (session.mcpManager ?? MCPManager.instance()) : undefined,
+		mcpManager: enableMCP ? (live.mcpManager ?? MCPManager.instance()) : undefined,
 		mcpToolScope: session.mcpToolScope,
 		enableMCP,
 		customTools: request.customTools,
 		workPoolYieldItems: request.workPoolYieldItems,
-		contextFiles: session.contextFiles,
-		noContextFiles: session.noContextFiles,
-		skills,
-		autoloadSkills,
-		workspaceTree: session.workspaceTree,
-		promptTemplates: session.promptTemplates,
-		rules: session.rules,
+		autoloadSkills: resolveAutoloadSkills(live.skills ?? [], policy.agent),
 		// Root policy and module paths have separate jobs: the live policy drives
 		// recursive sub-discovery; preloaded paths only avoid re-scanning/reusing
 		// parent-bound extension instances while constructing the child.
-		// Forward the provider itself, never bound to `session`: the child's revive
-		// capture outlives its parking, so a bound copy would keep this parent's
-		// whole session graph alive for as long as the child can be revived.
-		extensionRoots: session.effectiveExtensionRoots,
-		preloadedExtensionPaths: restrictToolNames ? [] : session.extensionPaths,
-		preloadedPreparedExtensions: session.preparedExtensions,
-		preloadedCustomToolPaths: restrictToolNames ? [] : session.customToolPaths,
-		localProtocolOptions,
-		parentArtifactManager: session.getArtifactManager?.() ?? undefined,
-		parentHindsightSessionState: session.getHindsightSessionState?.(),
-		parentMnemopiSessionState: session.getMnemopiSessionState?.(),
-		parentTelemetry: session.getTelemetry?.(),
+		preloadedExtensionPaths: restrictToolNames ? [] : live.preloadedExtensionPaths,
+		preloadedCustomToolPaths: restrictToolNames ? [] : live.preloadedCustomToolPaths,
 		parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
 		parentSessionKey: session.getAgentSession?.()?.instanceKey,
 		parentPromptCacheKey: session.getPromptCacheKey?.(),

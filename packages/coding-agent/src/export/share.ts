@@ -105,8 +105,8 @@ export function buildShareSnapshot(sm: SessionManager, options?: ShareSessionOpt
  * typed end-to-end (no generic object traversal): inline image bytes are left
  * intact (size-trimmed later by {@link stripImagePayloads}) and opaque,
  * untyped payloads we cannot redact field-by-field (`compaction.preserveData`,
- * extension `details`/`data`, `mode_change.data`, structured output schemas)
- * are dropped so they cannot leak.
+ * extension `details`/`data`, `mode_change.data`, structured output schemas,
+ * subagent spawn specs) are dropped so they cannot leak.
  */
 function collectShareRegexSecretValues(o: SecretObfuscator, data: SessionData): SecretValueSet {
 	const values = new SecretValueSet();
@@ -338,6 +338,8 @@ function redactShareEntry(
 				outputSchema: undefined,
 				// Revival-only state; its item ids can carry user text.
 				workPoolYieldItems: undefined,
+				// Revival-only state; it repeats the task context, plan reference and agent prompt.
+				spawnSpec: undefined,
 			};
 		case "label":
 			return {

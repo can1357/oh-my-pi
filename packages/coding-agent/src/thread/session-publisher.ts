@@ -50,7 +50,6 @@ import type { AgentMessage, AgentTool, QueuedMessageGate } from "@oh-my-pi/pi-ag
 import type { Model } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Rule } from "../capability/rule";
-import type { OverlayLayers, Settings } from "../config/settings";
 import type { Skill } from "../extensibility/skills";
 import { deobfuscateAssistantContent } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
@@ -72,8 +71,8 @@ import {
 	type SessionMirrorState,
 	type SessionQueuedEntry,
 	type SessionRunState,
-	type SessionSettingsSource,
 	type SessionViewState,
+	sessionSettingsSource,
 	toWireData,
 } from "./session-mirror";
 
@@ -155,18 +154,6 @@ function sameItems(a: readonly unknown[] | null, b: readonly unknown[] | null): 
 	if (!a || !b || a.length !== b.length) return false;
 	for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
 	return true;
-}
-
-/** Main-side rebuild recipe of `settings` (see {@link SessionSettingsSource}). */
-function settingsSource(settings: Settings): SessionSettingsSource {
-	const layers: OverlayLayers[] = [];
-	let current: Settings | undefined = settings;
-	while (current && !isRpcProxy(current)) {
-		layers.push(current.overlayLayers());
-		current = current.overlayParent();
-	}
-	layers.reverse();
-	return { base: current ?? null, layers };
 }
 
 /** `entry` as the transcript shows it: model-authored text with secret placeholders restored. */
@@ -515,7 +502,7 @@ export class SessionPublisher {
 			queuedMessages: toWireData(session.getQueuedMessages()),
 			restorableQueue: toWireData({ steering: steering.map(queuedEntry), followUp: followUp.map(queuedEntry) }),
 			ephemeralMaxTokensPreservesRequest: session.ephemeralMaxTokensPreservesRequest(),
-			settings: settingsSource(session.settings),
+			settings: sessionSettingsSource(session.settings),
 		};
 	}
 }
@@ -620,6 +607,11 @@ export const SESSION_HOST_SERVE: RpcServe<SessionPublisher, SessionHostProtocol>
 		publisher.session.exportToHtml(outputPath, useUserThemes),
 	enableIdleMaintenance: (publisher, options) => publisher.session.enableIdleMaintenance(options),
 	refreshIdleMaintenance: publisher => publisher.session.refreshIdleMaintenance(),
+	subagentParentInputs: async (publisher, id, descriptors) => {
+		// On demand: the revive subsystem stays out of session construction's import graph.
+		const { serveSubagentParentInputs } = await import("../task/revive-parent-inputs");
+		return serveSubagentParentInputs(publisher.session, id, descriptors);
+	},
 };
 
 async function settle<T>(publisher: SessionPublisher, pending: Promise<T>): Promise<T> {
