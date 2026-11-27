@@ -1093,6 +1093,7 @@ export function isClinePassSurfaceGateMessage(errorMessage: string | undefined):
 
 const OPENCODE_FREE_TIER_GATE_PATTERN = /\bfree tier can only be used from within OpenCode\b/i;
 
+/**
  * OpenCode Zen serves its free models (`big-pickle`, `*-free`, the
  * `*-contributor-free` Muse Spark builds) only to the OpenCode app and answers
  * any other client with a 403 `FreeTierError` (#12306). The key is valid —
@@ -1103,7 +1104,6 @@ export function isOpenCodeFreeTierGateMessage(errorMessage: string | undefined):
 	return errorMessage !== undefined && OPENCODE_FREE_TIER_GATE_PATTERN.test(errorMessage);
 }
 
-/**
 const GITHUB_COPILOT_POLICY_DENIAL_PATTERN = /GitHub Copilot access denied \(HTTP 403\)/;
 
 /**
