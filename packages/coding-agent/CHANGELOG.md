@@ -18,6 +18,7 @@
 
 ### Added
 
+- Added `startup.scratchDir` and `/scratch` to choose the directory omp starts in when launched from your home directory, instead of the system temp directory ([#14150](https://github.com/can1357/oh-my-pi/pull/14150) by [@jaredlyon](https://github.com/jaredlyon))
 - Todo backends can define an optional `apply`: the selected backend is asked before the model's `todo` call commits, and returning `{ block: true, reason }` refuses the call with the list unchanged ([#20355](https://github.com/can1357/oh-my-pi/pull/20355) by [@Dangerboi](https://github.com/Dangerboi))
 - `models.yml` `compat.neutralizeDeepseekSpecialTokens` turns DeepSeek chat-template token breaking on or off per model (on by default for DeepSeek-class models on chat-completions) ([#20832](https://github.com/can1357/oh-my-pi/pull/20832) by [@dany-on-demand](https://github.com/dany-on-demand))
 - Added `--preset <name>` to start a session on a saved model preset (`/modelpreset save`), applying its roles and default thinking level for that run only ([#20306](https://github.com/can1357/oh-my-pi/pull/20306) by [@nick-maderight](https://github.com/nick-maderight))
