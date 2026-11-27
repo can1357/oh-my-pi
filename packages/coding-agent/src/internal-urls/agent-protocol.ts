@@ -31,6 +31,7 @@ import {
 	type ExternalAgentControls,
 	MAIN_AGENT_ID,
 } from "../registry/agent-registry";
+import { readExternalTranscriptMessages } from "../registry/external-agents";
 import { ensurePersistedRoster, sessionFileBelongsToRoot } from "../registry/persisted-agents";
 import { IrcBus } from "../irc/bus";
 import { executeSend, isIrcEnabled } from "../irc/messaging";
@@ -45,7 +46,7 @@ import type { ToolSession } from "../tools";
 import agentPromptDoc from "../prompts/internal-urls/agent.md" with { type: "text" };
 import agentProgressTemplate from "../prompts/tools/agent-url-progress.md" with { type: "text" };
 import agentSupersededTemplate from "../prompts/tools/agent-url-superseded.md" with { type: "text" };
-import { loadSessionMessagesReadOnly, parseSessionEntries } from "../session/session-loader";
+import { loadSessionMessagesReadOnly } from "../session/session-loader";
 import { artifactsDirsFromRegistry } from "./registry-helpers";
 import type {
 	InternalResource,
@@ -210,31 +211,6 @@ function lastAssistantText(messages: readonly AgentMessage[]): string | undefine
 		if (text) return text;
 	}
 	return undefined;
-}
-
-/** Most bytes `read agent://<id>` takes from an external agent's transcript, against a pager that never ends. */
-const MAX_EXTERNAL_TRANSCRIPT_BYTES = 64 * 1024 * 1024;
-
-/**
- * An external agent's transcript, paged from byte 0 until a page adds no complete line. A reset page
- * replaces what was read; a returned `error` fails the read like a thrown one.
- */
-async function readExternalTranscript(external: ExternalAgentControls): Promise<string> {
-	let text = "";
-	let cursor = 0;
-	let read = 0;
-	while (read < MAX_EXTERNAL_TRANSCRIPT_BYTES) {
-		const page = await external.readTranscript(cursor);
-		if (page.error) throw new Error(page.error);
-		const complete = page.text.slice(0, page.text.lastIndexOf("\n") + 1);
-		if (page.reset) text = "";
-		if (!complete) break;
-		const bytes = Buffer.byteLength(complete, "utf-8");
-		text += complete;
-		cursor = (page.reset ? 0 : cursor) + bytes;
-		read += bytes;
-	}
-	return text;
 }
 
 /**
@@ -661,9 +637,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			messages = await loadSessionMessagesReadOnly(ref.sessionFile);
 			source = "session file (read-only)";
 		} else if (ref.external) {
-			messages = parseSessionEntries(await readExternalTranscript(ref.external)).flatMap(entry =>
-				entry.type === "message" ? [entry.message] : [],
-			);
+			messages = await readExternalTranscriptMessages(ref.external);
 			source = "external transcript";
 		}
 		const sections = yieldSections(messages);

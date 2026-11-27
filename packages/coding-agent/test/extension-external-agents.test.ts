@@ -6,6 +6,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionContext, ExternalAgentSpec } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { AgentProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/agent-protocol";
+import { HistoryProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/history-protocol";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { agentTranscriptSource } from "@oh-my-pi/pi-coding-agent/modes/agent-hub-runtime";
 import { RpcSubagentRegistry, readRpcExternalTranscript } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-subagents";
@@ -103,6 +104,11 @@ describe("ExtensionContext.agents.registerExternal", () => {
 			readTranscript: async fromByte => ({ text: "", newSize: fromByte }),
 			...overrides,
 		};
+	}
+
+	/** One session JSONL line holding an assistant reply. */
+	function reply(id: string, text: string): string {
+		return `${JSON.stringify({ type: "message", id, parentId: null, timestamp: new Date(0).toISOString(), message: { role: "assistant", content: [{ type: "text", text }], timestamp: 0 } })}\n`;
 	}
 
 	function toolSession(): ToolSession {
@@ -230,8 +236,6 @@ describe("ExtensionContext.agents.registerExternal", () => {
 
 	it("reads its whole transcript for agent://<id>, page by page", async () => {
 		const ctx = await extensionContext();
-		const reply = (id: string, text: string): string =>
-			`${JSON.stringify({ type: "message", id, parentId: null, timestamp: new Date(0).toISOString(), message: { role: "assistant", content: [{ type: "text", text }], timestamp: 0 } })}\n`;
 		const transcript = reply("a", "first draft") + reply("b", "final answer");
 		// One line per page, like an extension that caps its page size.
 		const agent = ctx.agents!.registerExternal(
@@ -256,6 +260,22 @@ describe("ExtensionContext.agents.registerExternal", () => {
 		await expect(new AgentProtocolHandler().resolve(new URL(`agent://${agent.id}`) as never)).rejects.toThrow(
 			"job purged",
 		);
+	});
+
+	it("reads its transcript for history://<id>, also after complete()", async () => {
+		const ctx = await extensionContext();
+		const transcript = reply("a", "final answer");
+		const agent = ctx.agents!.registerExternal(
+			remoteAgent({
+				readTranscript: async fromByte => ({ text: transcript.slice(fromByte), newSize: transcript.length }),
+			}),
+		);
+		const history = async () =>
+			(await new HistoryProtocolHandler().resolve(new URL(`history://${agent.id}`) as never)).content;
+
+		expect(await history()).toContain("final answer");
+		agent.complete({ status: "done", text: "parser ported" });
+		expect(await history()).toContain("final answer");
 	});
 
 	it("blocks wait until complete() and delivers the result once", async () => {

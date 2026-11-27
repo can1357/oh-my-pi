@@ -8,9 +8,11 @@
  * lifecycle and progress go out as `task:subagent:*` frames, which the
  * subagent HUD and RPC subagent channels read.
  */
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJobManagerApi, formatAsyncJobLabel } from "../async/job-manager";
 import { sanitizeDisplayLine } from "../extensibility/inventory/display-text";
+import { parseSessionEntries } from "../session/session-loader";
 import { generateTaskName } from "../task/name-generator";
 import {
 	type SubagentLifecyclePayload,
@@ -18,7 +20,13 @@ import {
 	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
 	TASK_SUBAGENT_PROGRESS_CHANNEL,
 } from "../task/session-observer-registry";
-import type { AgentRegistryApi, AgentStatus, ExternalAgentExecution, ExternalTranscriptPage } from "./agent-registry";
+import type {
+	AgentRegistryApi,
+	AgentStatus,
+	ExternalAgentControls,
+	ExternalAgentExecution,
+	ExternalTranscriptPage,
+} from "./agent-registry";
 
 /** An agent an extension runs elsewhere, as `ctx.agents.registerExternal` takes it. */
 export interface ExternalAgentSpec {
@@ -226,4 +234,29 @@ export function registerExternalAgent(host: ExternalAgentHost, spec: ExternalAge
 			}
 		},
 	};
+}
+
+/** Most bytes one read of an external agent's whole transcript takes, against a pager that never ends. */
+const MAX_EXTERNAL_TRANSCRIPT_BYTES = 64 * 1024 * 1024;
+
+/**
+ * An external agent's whole transcript, as `read agent://<id>` and `history://<id>` show it: paged from byte 0 until
+ * a page adds no complete line. A reset page replaces what was read; a returned `error` fails the read like a thrown one.
+ */
+export async function readExternalTranscriptMessages(external: ExternalAgentControls): Promise<AgentMessage[]> {
+	let text = "";
+	let cursor = 0;
+	let read = 0;
+	while (read < MAX_EXTERNAL_TRANSCRIPT_BYTES) {
+		const page = await external.readTranscript(cursor);
+		if (page.error) throw new Error(page.error);
+		const complete = page.text.slice(0, page.text.lastIndexOf("\n") + 1);
+		if (page.reset) text = "";
+		if (!complete) break;
+		const bytes = Buffer.byteLength(complete, "utf-8");
+		text += complete;
+		cursor = (page.reset ? 0 : cursor) + bytes;
+		read += bytes;
+	}
+	return parseSessionEntries(text).flatMap(entry => (entry.type === "message" ? [entry.message] : []));
 }
