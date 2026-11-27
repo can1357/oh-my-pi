@@ -63,6 +63,7 @@ import {
 	type PaintImages,
 	paintNode,
 	type PointerHover,
+	releasePaintCache,
 } from "./paint";
 import { TranscriptSearch } from "./transcript-search";
 import { type TranscriptDocument, type TranscriptIndex, transcriptIndex } from "./transcript-document";
@@ -383,6 +384,12 @@ function lowerBound(values: readonly number[], value: number): number {
 	return lo;
 }
 
+/** Drop a covering block's caches together with the child blocks it composes. */
+function releasePaintTree(node: UiNode): void {
+	releasePaintCache(node);
+	for (const child of node.children()) releasePaintTree(child);
+}
+
 /** See the module docs. */
 export class TermBackend {
 	readonly #surface: Surface;
@@ -415,6 +422,8 @@ export class TermBackend {
 	readonly #emitted = new Map<UiNode, Emitted>();
 	/** Main nodes with rows of their own in terminal history: a separator alone does not count. */
 	readonly #withContent = new Set<UiNode>();
+	/** The height each covering dock node was last composed at (`undefined`: its natural height). */
+	readonly #dockFit = new WeakMap<UiNode, number | undefined>();
 	/** The next frame is the shutdown flush (see {@link flush}). */
 	#flushing = false;
 	/**
@@ -786,18 +795,23 @@ export class TermBackend {
 	}
 
 	/**
-	 * The dock's blocks at `width`. A dock taller than `height` would push its top rows off the
-	 * screen, so its covering blocks (a docked report, a waiting ask) paint again in the rows the
-	 * rest of the dock leaves them; a painter that reads `cx.height` fits itself there.
+	 * The dock's blocks at `width`. Covering blocks fit in the rows the rest of the dock leaves
+	 * when it outgrows `height`. A changed fit height repaints their subtree so the painter's
+	 * last run describes the block composed on screen, not another cached size.
 	 */
 	#paintDock(width: number, height: number): Block[] {
 		const nodes = this.#surface.dock();
 		const blocks = nodes.map(node => this.#paint(node, width));
 		let total = blocks.reduce((sum, block) => sum + block.rows.length, 0);
-		for (let i = 0; i < blocks.length && total > height; i++) {
+		for (let i = 0; i < blocks.length; i++) {
+			const node = nodes[i]!;
 			const block = blocks[i]!;
 			if (!block.covering) continue;
-			const fitted = this.#paint(nodes[i]!, width, Math.max(1, height - (total - block.rows.length)));
+			const chosen = total > height ? Math.max(1, height - (total - block.rows.length)) : undefined;
+			const changed = this.#dockFit.has(node) && this.#dockFit.get(node) !== chosen;
+			if (changed) releasePaintTree(node);
+			const fitted = chosen !== undefined || changed ? this.#paint(node, width, chosen) : block;
+			this.#dockFit.set(node, chosen);
 			total += fitted.rows.length - block.rows.length;
 			blocks[i] = fitted;
 		}

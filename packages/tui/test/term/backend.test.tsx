@@ -464,6 +464,40 @@ describe("TermBackend main surface", () => {
 		backend.stop();
 	});
 
+	it("a covering painter's last run is the block on screen after the dock budget changes back", () => {
+		const heights: (number | undefined)[] = [];
+		const cover = lines("c", 4);
+		defineRolePainter("rows", "test.cover", (_node, cx) => {
+			heights.push(cx.height);
+			const rows = cx.height === undefined ? cover : cover.slice(0, cx.height);
+			return { rows, covering: rows.length };
+		});
+		const driver = new FakeDriver();
+		const dock = signal(lines("d", 3));
+		const surface = createSurface(() => ({
+			dock: () => [<rows key="cover" role="test.cover" lines={cover} />, <rows key="dock" lines={dock} />],
+		}));
+		const backend = new TermBackend({ surface, driver, theme: () => PLAIN_THEME, separator: () => 0 });
+		backend.start();
+		try {
+			backend.renderNow();
+			expect(driver.viewport.slice(-driver.rows)).toEqual([...lines("c", 3), ...lines("d", 3)]);
+			expect(heights.at(-1)).toBe(3);
+
+			dock.set(lines("d", 1));
+			backend.renderNow();
+			expect(driver.viewport.slice(-(cover.length + 1))).toEqual([...cover, "d0"]);
+			expect(heights.at(-1)).toBeUndefined();
+
+			dock.set(lines("d", 3));
+			backend.renderNow();
+			expect(driver.viewport.slice(-driver.rows)).toEqual([...lines("c", 3), ...lines("d", 3)]);
+			expect(heights.at(-1)).toBe(3);
+		} finally {
+			backend.stop();
+		}
+	});
+
 	it("retires under a cover only what the screen without it cannot fit", () => {
 		const b = signal(lines("b", 2));
 		const { driver, backend, show, screen } = covered({

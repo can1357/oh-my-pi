@@ -124,6 +124,8 @@ interface Column {
 	readonly lines: string[];
 	/** First row of the open group. */
 	groupStart: number;
+	/** Row after the open group's last part. */
+	groupEnd: number;
 	focusStart: number;
 	focusEnd: number;
 	overlay?: { readonly at: number; readonly rows: string[] };
@@ -561,7 +563,7 @@ function buildColumn(
 	const theme = cx.theme;
 	const model = look.model;
 	const { intro, groups } = model.layout;
-	const column: Column = { lines: [], groupStart: 0, focusStart: 0, focusEnd: 0 };
+	const column: Column = { lines: [], groupStart: 0, groupEnd: 0, focusStart: 0, focusEnd: 0 };
 	const lines = column.lines;
 	const focused = typeof view.active === "number" ? model.field(view.active) : undefined;
 	/** A blank row under the rows before the next ones (none when `tight`). */
@@ -607,6 +609,7 @@ function buildColumn(
 		}
 		const before = lines.length;
 		emitParts(group.parts);
+		column.groupEnd = lines.length;
 		// The first group's head is the intro's too.
 		column.groupStart = group.index === 0 || before === 0 ? 0 : before + 1;
 	}
@@ -624,7 +627,7 @@ function buildColumn(
 			"…",
 		),
 	);
-	if (view.active === "submit") column.focusEnd = lines.length;
+	if (view.active === "submit") column.groupEnd = column.focusEnd = lines.length;
 	return column;
 }
 
@@ -702,6 +705,8 @@ function paintHtmlForm(node: UiNode, cx: PaintContext): Block {
 		column = buildColumn(cx, look, view, inner - 1, layouts);
 		body = Math.min(tallest(cx, look, inner - 1, view, layouts), limit);
 	}
+	// A warning must leave at least one row for the form itself.
+	skip.length = Math.min(skip.length, Math.max(0, body - 1));
 	// Up/Down in a textarea step through the rows drawn here.
 	model.wrapWidth = textareaWrap(overflow ? inner - 1 : inner);
 	const rows = body - skip.length;
@@ -718,8 +723,8 @@ function paintHtmlForm(node: UiNode, cx: PaintContext): Block {
 		});
 	}
 	const maxOffset = Math.max(0, lines.length - rows);
-	// The open group from its top when it fits with the highlight; else the highlighted row on top
-	// (a note under it: the note on the bottom), scrolled up toward the group's top by Up at its first row.
+	// Anchor the open group's top when it fits with the highlight; else the highlight on top
+	// (a note under it: the note on the bottom), then scroll toward either end of the group.
 	let offset =
 		column.focusEnd - column.groupStart <= rows
 			? column.groupStart
@@ -730,10 +735,12 @@ function paintHtmlForm(node: UiNode, cx: PaintContext): Block {
 	model.painted = {
 		active: view.active,
 		row: view.row,
-		maxScroll: Math.max(0, offset - column.groupStart),
-		reveal: offset + rows - column.focusEnd,
+		above: Math.max(0, offset - column.groupStart),
+		below: Math.max(0, Math.min(column.groupEnd, lines.length) - (offset + rows)),
+		upReveal: offset + rows - column.focusEnd,
+		downReveal: column.focusStart - offset,
 	};
-	offset -= Math.min(model.scrollBack(), model.painted.maxScroll);
+	offset -= Math.max(-model.painted.below, Math.min(model.scroll(), model.painted.above));
 	const content: string[] = [];
 	const scrolls = lines.length > rows;
 	const thumb = scrolls ? Math.max(1, Math.floor((rows * rows) / lines.length)) : 0;

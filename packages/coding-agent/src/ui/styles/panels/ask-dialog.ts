@@ -261,10 +261,13 @@ defineRolePainter("col", "omp.ask.card", (node: UiNode, cx): Block => {
 		return { rows: [truncate(`${label} ${theme.fg("muted", summary)}${more}${hint}`, cx.width, "…")] };
 	}
 	const terminalRows = model.options.terminalRows?.() ?? 40;
-	const skip = model.options.skipNotice?.();
+	const skip = (cx.height ?? Infinity) > PANEL_CHROME_ROWS + 1 ? model.options.skipNotice?.() : undefined;
 	// No taller than the rows the rest of the dock leaves (`cx.height`, set when the dock would outgrow the screen).
 	const total = Math.min(dialogHeight(theme, model, inner, terminalRows), cx.height ?? Infinity);
-	const bodyRows = Math.max(MIN_BODY_ROWS, total - PANEL_CHROME_ROWS - (skip ? 1 : 0));
+	const chrome = PANEL_CHROME_ROWS + (skip ? 1 : 0);
+	// shortcut: budgets under 3 rows still overflow to keep a body row and both borders.
+	const minimum = Math.max(1, Math.min(MIN_BODY_ROWS, (cx.height ?? Infinity) - chrome));
+	const bodyRows = Math.max(minimum, total - chrome);
 	let layout = column(theme, model, inner);
 	let overflow = layout.lines.length > bodyRows;
 	if (overflow) layout = column(theme, model, inner - 1);

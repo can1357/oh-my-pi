@@ -157,15 +157,17 @@ export class HtmlFormModel {
 	readonly dropdown = signal<number | undefined>(undefined);
 	readonly note = signal<NoteDraft | undefined>(undefined);
 	readonly hidden = signal(false);
-	/** Rows the card is asked to scroll up past the highlight: Up at the top of a group taller than the card scrolls through the text above it. */
-	readonly scrollBack = signal(0);
+	/** Rows the card is scrolled past where the highlight anchors it: positive up, negative down. */
+	readonly scroll = signal(0);
 	/**
-	 * The card as the terminal last drew it, for the field and row it drew: how far it can scroll up
-	 * (to the top of the open group), and how far up it can scroll with the highlight still on it.
-	 * Undefined before the first paint and in Tern, where Up never scrolls.
+	 * The card as the terminal last drew it, for the field and row it drew: rows of the open group
+	 * above and below the anchored card, and how far it can scroll with the highlight still on it.
+	 * Undefined before the first paint and in Tern, where arrow keys never scroll.
 	 */
-	painted: { active: Active; row: number; maxScroll: number; reveal: number } | undefined;
-	/** Set by a key that scrolled the card up or stopped at the top of the form: the scroll stays. */
+	painted:
+		| { active: Active; row: number; above: number; below: number; upReveal: number; downReveal: number }
+		| undefined;
+	/** Set by a key that scrolled the card or stopped at the top of the form: the scroll stays. */
 	#keepScroll = false;
 	/**
 	 * Cells a textarea's rows wrap at as the terminal card last drew them, so
@@ -520,11 +522,22 @@ export class HtmlFormModel {
 				// Up scrolls through the text above the group first; at the top of the form the scroll stays.
 				// Drawn for another field or row (keys ahead of the frame): scroll, which the painter clamps, rather than skip unseen text.
 				const here = this.#paintedHere();
-				const scroll = untrack(this.scrollBack);
-				const more = this.painted !== undefined && (!here || scroll < here.maxScroll);
-				if (more) this.scrollBack.set(scroll + 1);
+				const scroll = untrack(this.scroll);
+				const more = this.painted !== undefined && (!here || scroll < here.above);
+				if (more) this.scroll.set(scroll + 1);
 				this.#keepScroll = more || this.#fieldFrom(active, -1) === undefined;
 				if (this.#keepScroll) return;
+			}
+			if (delta > 0 && group?.fields.findLast(i => this.#reachable(i)) === active) {
+				// Down reads the text below the group's last control before leaving, including keys ahead of the frame.
+				const here = this.#paintedHere();
+				const scroll = untrack(this.scroll);
+				const more = this.painted !== undefined && (!here || scroll > -here.below);
+				if (more) {
+					this.scroll.set(scroll - 1);
+					this.#keepScroll = true;
+					return;
+				}
 			}
 		}
 		const target = this.#fieldFrom(active === "submit" ? this.fields.length : active, delta);
@@ -669,23 +682,27 @@ export class HtmlFormModel {
 		const routed: KeyEvent = step ? { id: step, kind: key.kind, raw: key.raw } : key;
 		// A key release neither scrolls nor drops the scroll.
 		if (key.kind === "release") return this.#key(routed);
-		const painted = this.#paintedHere();
-		const scroll = untrack(this.scrollBack);
-		// The scroll actually on screen (a resize may have shrunk what fits), against the most that keeps the highlight on it.
-		const scrolled = painted ? Math.min(scroll, painted.maxScroll) : scroll;
+		const here = this.#paintedHere();
+		const scroll = untrack(this.scroll);
+		// The scroll actually on screen: a resize may have shrunk what fits.
+		const shown = here ? Math.max(-here.below, Math.min(scroll, here.above)) : scroll;
 		const box = this.#activeBox();
 		const vim = box && this.vim(box);
-		const vimDown =
-			(key.text === "j" || key.text === "+") && vim && untrack(vim.mode) === "normal" && vim.pendingText() === "";
-		const down = listKeyId(routed) === "down" || vimDown === true;
-		// Down (Vim `j`/`+` in a text box too) scrolls back until the highlight shows, then moves it.
-		if (scrolled > Math.max(0, painted?.reveal ?? 0) && down) {
-			this.scrollBack.set(scrolled - 1);
+		const vimNormal = vim && untrack(vim.mode) === "normal" && vim.pendingText() === "";
+		const down = listKeyId(routed) === "down" || (vimNormal === true && (key.text === "j" || key.text === "+"));
+		const up = listKeyId(routed) === "up" || (vimNormal === true && (key.text === "k" || key.text === "-"));
+		// Scroll back until the highlight shows, then move it (including Vim's text-box keys).
+		if (down && shown > Math.max(0, here?.upReveal ?? 0)) {
+			this.scroll.set(shown - 1);
+			return true;
+		}
+		if (up && shown < -Math.max(0, here?.downReveal ?? 0)) {
+			this.scroll.set(shown + 1);
 			return true;
 		}
 		this.#keepScroll = false;
 		const handled = this.#key(routed);
-		if (!this.#keepScroll) this.scrollBack.set(0);
+		if (!this.#keepScroll) this.scroll.set(0);
 		return handled;
 	}
 
