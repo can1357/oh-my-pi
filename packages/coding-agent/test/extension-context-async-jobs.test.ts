@@ -125,6 +125,23 @@ describe("ExtensionContext.asyncJobs", () => {
 		expect(session!.getAsyncJobSnapshot()?.running).toEqual([]);
 	});
 
+	it("gives a job registered from an advisor-scoped context to the session's agent", async () => {
+		await extensionContext();
+		const advisorCtx = session!.extensionRunner!.createContext(undefined, undefined, {
+			kind: "sub",
+			id: "advisor",
+			name: "advisor",
+			depth: 0,
+			parentId: "Main",
+		});
+		const gate = Promise.withResolvers<string>();
+		const jobId = advisorCtx.asyncJobs!.register("advisor hook job", () => gate.promise);
+
+		expect(session!.getAsyncJobSnapshot()?.running.map(job => job.id)).toEqual([jobId]);
+		expect(session!.cancelAsyncJob(jobId)).toBe(true);
+		gate.resolve("unused");
+	});
+
 	it("aborts the job's signal when the agent cancels it", async () => {
 		const ctx = await extensionContext();
 		const aborted = Promise.withResolvers<void>();

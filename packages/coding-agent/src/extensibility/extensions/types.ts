@@ -840,7 +840,7 @@ export interface ExtensionAsyncJobRunContext {
 /** Background jobs an extension runs in this session's job manager; see {@link ExtensionContext.asyncJobs}. */
 export interface ExtensionAsyncJobs {
 	/**
-	 * Start `run` as a background job owned by the calling agent and return its id at once.
+	 * Start `run` as a background job owned by this session's agent and return its id at once.
 	 * The job appears in `wait`, `proc://`, and the job list like a native background job,
 	 * cancelling it aborts `signal`, and the string `run` resolves to is delivered to the agent
 	 * as the job's result. A rejection fails the job with its message. Throws when the session's

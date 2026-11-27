@@ -2062,15 +2062,15 @@ export class ExtensionRunner {
 			startLive: this.#startLiveFn,
 			asyncJobs: asyncJobManager
 				? {
-						// Owned by the calling agent like its native background jobs, so `wait`,
-						// cancellation, and result delivery scope to it.
+						// Owned by this runner's session agent, the only owner here with a delivery sink:
+						// an advisor-scoped `agent` would strand the job where nothing waits, delivers, or cancels.
 						register: (label, run, options) =>
 							asyncJobManager.register(
 								"extension",
 								label,
 								({ jobId, signal, reportProgress }) =>
 									run({ jobId, signal, reportProgress: text => reportProgress(text) }),
-								{ ownerId: agent.id, intent: options?.intent },
+								{ ownerId: this.agent.id, intent: options?.intent },
 							),
 					}
 				: undefined,
