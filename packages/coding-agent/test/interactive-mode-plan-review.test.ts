@@ -1368,15 +1368,20 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(open.isBlocked?.()).toBe(false);
 		expect(open.isCompactionBlocked?.()).toBe(true);
 
-		const refreshesBeforeClose = refresh.mock.calls.length;
+		// A keybinding dismissal resolves but, as pinned elsewhere, the sheet stays
+		// mounted until its owner replaces it: the blocker must stay active so long.
 		pressKey(mode.shell, "escape");
 		await expect(choice).resolves.toBeUndefined();
-		expect(mode.shell.overlays.open()).toBe(false);
-		// Closing re-syncs again (a fresh options object) and refreshes the session so
-		// the owed compaction re-arms after the review.
-		const closed = enable.mock.calls.at(-1)![0]!;
-		expect(closed).not.toBe(open);
-		expect(closed.isCompactionBlocked?.()).toBe(false);
+		await term.settle();
+		expect(mode.shell.overlays.open()).toBe(true);
+		expect(enable.mock.calls.at(-1)![0]!.isCompactionBlocked?.()).toBe(true);
+
+		// When the sheet does close (however it closes), the onClose wiring tears the
+		// review down and re-syncs idle maintenance so the owed compaction re-arms.
+		const refreshesBeforeClose = refresh.mock.calls.length;
+		mode.shell.overlays.closeAll();
+		await term.settle();
+		expect(enable.mock.calls.at(-1)![0]!.isCompactionBlocked?.()).toBe(false);
 		expect(refresh.mock.calls.length).toBeGreaterThan(refreshesBeforeClose);
 	});
 
@@ -1421,6 +1426,7 @@ describe("InteractiveMode plan review rendering", () => {
 
 		pressKey(mode.shell, "escape");
 		await expect(choice).resolves.toBeUndefined();
+		await term.settle();
 		// showPlanReview no longer hides on settle: the plan-approval caller fuses
 		// #hidePlanReview() with the replacement paint to avoid stale-buffer flicker.
 		expect(mode.shell.overlays.open()).toBe(true);

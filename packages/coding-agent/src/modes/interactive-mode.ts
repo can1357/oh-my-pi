@@ -5215,6 +5215,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#planReview = model;
 		this.#planReviewOverlayHandle = showSheet(this.shell, planReviewSheet(model), () => jsx(PlanReview, { model }), {
 			mouse: "any",
+			// Runs however the sheet closes (a keybinding dismissal too, not only the
+			// model's finish): tear the review state down and re-sync idle maintenance.
+			onClose: () => this.#hidePlanReview(),
 		});
 		// Re-evaluate idle maintenance so in-flight idle timers pause while the review is open.
 		this.syncIdleMaintenanceView();
