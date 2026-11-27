@@ -94,10 +94,9 @@ import type { AgentSessionEvent } from "./agent-session-events";
 import type { ContextUsageBreakdown } from "./agent-session-types";
 import type { CacheBridgeEstimate, CacheBridgeOutcome } from "./cache-warmer";
 import { findCompactMode } from "./compact-modes";
+import { type CompactionMethod, DEFAULT_COMPACTION_METHOD_ORDER } from "./compaction-method-ids";
 import {
-	type CompactionMethod,
 	canUseRemoteCompaction,
-	DEFAULT_COMPACTION_METHOD_ORDER,
 	resolveCompactionMethodOrder,
 	resolveMethodSettings,
 	resolveSpeculationMethod,
