@@ -12,6 +12,7 @@ import {
 	type PythonExecutionMessage,
 	type CustomMessage,
 	LIVE_DELEGATION_MESSAGE_TYPE,
+	LIVE_ENDED_MESSAGE_TYPE,
 	type HookMessage,
 	type FileMentionMessage,
 	isUserInvokedSkillPrompt,
@@ -65,6 +66,7 @@ import { copyPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import { readerIncludesThinking } from "@oh-my-pi/snapcompact";
+import liveEndedTemplate from "../live/prompts/live-ended.md" with { type: "text" };
 import voiceRequestTemplate from "../live/prompts/voice-request.md" with { type: "text" };
 import userInterjectionTemplate from "../prompts/steering/user-interjection.md" with { type: "text" };
 import { cleanTinyMessage, formatTitleConversationContext, type TitleConversationTurn } from "../tiny/message-preproc";
@@ -1125,6 +1127,8 @@ interface ConvertArrayMemo {
 	output: Message[];
 	tail: AgentMessage | undefined;
 	prefixOutputLen: number;
+	/** {@link VoiceScope} state before the tail, so growth resumes the scan at the old tail. */
+	prefixVoiceOpen: boolean;
 }
 
 let convertGeneration = 0;
@@ -1280,6 +1284,32 @@ function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
 
 const NO_LLM_MESSAGES: readonly Message[] = [];
 
+/** Spoken-request state carried through one history conversion by {@link convertMessageAt}. */
+interface VoiceScope {
+	/** A converted spoken request (`live-delegation`) no live-ended notice has closed yet. */
+	open: boolean;
+}
+
+/** A prompt the user wrote: typed, a `/skill:` invocation, or a collab peer's prompt; never agent-sent or synthetic. */
+function isUserWrittenPrompt(m: AgentMessage): boolean {
+	if (m.role === "user") return m.attribution !== "agent" && m.synthetic !== true;
+	return m.role === "custom" && !m.excludeFromContext && isUserTurnInitiator(m);
+}
+
+/** The notice that the live voice call is over, placed right before the user's prompt `next`. */
+function liveEndedNotice(next: AgentMessage): Message | undefined {
+	const notice = convertMessageToLlm({
+		role: "custom",
+		customType: LIVE_ENDED_MESSAGE_TYPE,
+		content: prompt.render(liveEndedTemplate),
+		display: false,
+		attribution: "agent",
+		timestamp: next.timestamp,
+	});
+	if (notice) copyPerCallContextMessage(notice, next);
+	return notice;
+}
+
 /**
  * Converts `messages[index]` with its neighbor-sensitive state.
  * {@link convertToLlm} and {@link convertMessagesForContextView} both go
@@ -1291,6 +1321,7 @@ function convertMessageAt(
 	messages: AgentMessage[],
 	index: number,
 	includeInterruptedThinking: boolean,
+	voice: VoiceScope,
 	convert: (m: AgentMessage, interruptedNext: boolean) => Message[],
 ): readonly Message[] {
 	const m = messages[index];
@@ -1302,6 +1333,24 @@ function convertMessageAt(
 	}
 	if (!includeInterruptedThinking && m.role === "custom" && m.customType === INTERRUPTED_THINKING_MESSAGE_TYPE) {
 		return NO_LLM_MESSAGES;
+	}
+	// Spoken requests put answers in voice style. The first prompt the user wrote after them hears that the
+	// call ended, derived from history alone: a stop mid-turn, a crash, or a transcript switch leaves the same
+	// history, sent turns render the same on every request, and only the user's own prompt closes the scope,
+	// so a later call's spoken request (with its own voice notice) never follows a stale one.
+	if (m.role === "custom" && !m.excludeFromContext) {
+		if (m.customType === LIVE_DELEGATION_MESSAGE_TYPE) {
+			voice.open = true;
+		} else if (m.customType === LIVE_ENDED_MESSAGE_TYPE) {
+			// A saved notice closes the scope; one with nothing to close would repeat it.
+			if (!voice.open) return NO_LLM_MESSAGES;
+			voice.open = false;
+		}
+	}
+	if (voice.open && isUserWrittenPrompt(m)) {
+		voice.open = false;
+		const notice = liveEndedNotice(m);
+		if (notice) return [notice, ...convert(m, false)];
 	}
 	return convert(m, false);
 }
@@ -1331,8 +1380,15 @@ export function convertMessagesForContextView(messages: AgentMessage[], model?: 
 	const modelMessages = wrapSteeringForModel(messages);
 	const includeInterruptedThinking = model !== undefined && readerIncludesThinking(model);
 	const result: ContextViewMessage[] = [];
+	const voice: VoiceScope = { open: false };
 	for (let sourceIndex = 0; sourceIndex < modelMessages.length; sourceIndex++) {
-		for (const message of convertMessageAt(modelMessages, sourceIndex, includeInterruptedThinking, convertOne)) {
+		for (const message of convertMessageAt(
+			modelMessages,
+			sourceIndex,
+			includeInterruptedThinking,
+			voice,
+			convertOne,
+		)) {
 			const replay = toProviderReplayMessage(message);
 			if (replay) result.push({ message: replay, sourceIndex, convertedIndex: result.length });
 		}
@@ -1402,6 +1458,7 @@ export function convertToLlm(messages: AgentMessage[], model?: Model): Message[]
 	// array while swapping earlier identities, forcing a full rebuild.
 	let out: Message[];
 	let start: number;
+	const voice: VoiceScope = { open: false };
 	if (
 		reusable &&
 		len > memo.length &&
@@ -1411,6 +1468,7 @@ export function convertToLlm(messages: AgentMessage[], model?: Model): Message[]
 	) {
 		out = memo.output.slice(0, memo.prefixOutputLen);
 		start = memo.length - 1;
+		voice.open = memo.prefixVoiceOpen;
 	} else {
 		out = [];
 		start = 0;
@@ -1419,9 +1477,13 @@ export function convertToLlm(messages: AgentMessage[], model?: Model): Message[]
 	// Output length contributed by messages[0 .. len-1), captured when the loop
 	// reaches the final index so the next growth can reuse this prefix.
 	let prefixOutputLen = 0;
+	let prefixVoiceOpen = false;
 	for (let i = start; i < len; i++) {
-		if (i === len - 1) prefixOutputLen = out.length;
-		const fragment = convertMessageAt(messages, i, includeInterruptedThinking, convertOneCached);
+		if (i === len - 1) {
+			prefixOutputLen = out.length;
+			prefixVoiceOpen = voice.open;
+		}
+		const fragment = convertMessageAt(messages, i, includeInterruptedThinking, voice, convertOneCached);
 		for (const msg of fragment) out.push(msg);
 	}
 	if (len === 0) prefixOutputLen = 0;
@@ -1435,6 +1497,7 @@ export function convertToLlm(messages: AgentMessage[], model?: Model): Message[]
 		output: out,
 		tail,
 		prefixOutputLen,
+		prefixVoiceOpen,
 	});
 	return out;
 }
