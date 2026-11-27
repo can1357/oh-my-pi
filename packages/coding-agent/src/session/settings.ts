@@ -38,7 +38,7 @@ import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMeta
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
 const EMPTY_STRING_ARRAYS_RECORD: Record<string, string[]> = {};
 const EMPTY_STRING_RECORD: Record<string, string> = {};
-const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["wait"];
+const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["wait", "vibe_wait"];
 
 /** Scope of the resume picker's current-folder list. */
 export const cfgSessionWorktreeScope = register({
