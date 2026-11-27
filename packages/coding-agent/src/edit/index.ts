@@ -295,21 +295,12 @@ function mutationKey(sourcePath: string, moveTo?: string): string {
 function aggregateDetails(
 	files: readonly EditFileOutcome[],
 	mode: EditMode,
-	cwd: string,
-	mutatedKeys: ReadonlySet<string>,
+	checkoutNotices: ReadonlyMap<string, string>,
 ): EditToolDetails | undefined {
 	if (files.length === 0) return undefined;
-	const checkoutNotice = createCheckoutNotice(cwd);
-	const perFileResults = files.map(file => {
-		const notice = mutatedKeys.has(mutationKey(file.path, file.moveTo))
-			? checkoutNotice?.({
-					path: file.path,
-					moveTo: file.moveTo,
-					followSymlinks: file.op !== "delete",
-				})
-			: undefined;
-		return toPerFileResult(file, mode, notice);
-	});
+	const perFileResults = files.map(file =>
+		toPerFileResult(file, mode, checkoutNotices.get(mutationKey(file.path, file.moveTo))),
+	);
 	if (perFileResults.length === 1) {
 		const [file] = perFileResults;
 		return {
@@ -766,7 +757,8 @@ export class EditTool implements AgentTool<TInput> {
 		const current = open;
 		const editSession = open.native;
 		const batch = getLspBatchRequest(context?.toolCall);
-		const mutatedKeys = new Set<string>();
+		const resolveCheckoutNotice = createCheckoutNotice(this.session.cwd);
+		const checkoutNotices = new Map<string, string>();
 		let outcome;
 		try {
 			outcome = await editSession.apply(
@@ -778,7 +770,14 @@ export class EditTool implements AgentTool<TInput> {
 						});
 					}
 					const response = await this.#write(request, current, signal);
-					mutatedKeys.add(mutationKey(request.path, request.moveTo));
+					const notice = resolveCheckoutNotice?.({
+						path: request.path,
+						moveTo: request.moveTo,
+						followSymlinks: request.op !== "delete",
+					});
+					if (notice !== undefined) {
+						checkoutNotices.set(mutationKey(request.path, request.moveTo), notice);
+					}
 					return response;
 				},
 			);
@@ -802,7 +801,7 @@ export class EditTool implements AgentTool<TInput> {
 			};
 		}
 
-		const details = aggregateDetails(outcome.files, this.mode, this.session.cwd, mutatedKeys);
+		const details = aggregateDetails(outcome.files, this.mode, checkoutNotices);
 		const result: AgentToolResult<EditToolDetails, TInput> = {
 			content: [{ type: "text", text: outcome.text }],
 			...(details ? { details } : {}),

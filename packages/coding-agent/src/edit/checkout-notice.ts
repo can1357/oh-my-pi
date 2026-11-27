@@ -2,7 +2,7 @@ import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { logger, normalizePathForComparison, resolveEquivalentPath } from "@oh-my-pi/pi-utils";
 
-export interface CheckoutNoticeTarget {
+interface CheckoutNoticeTarget {
 	/** Absolute source or edited file path. */
 	path: string;
 	/** Absolute destination path when the operation moves or renames the file. */
@@ -20,7 +20,7 @@ interface ResolvedWorktree {
 	branch: string;
 }
 
-export type CheckoutNoticeResolver = (target: CheckoutNoticeTarget) => string | undefined;
+type CheckoutNoticeResolver = (target: CheckoutNoticeTarget) => string | undefined;
 
 /**
  * Build a cached detector that reports when an edit mutates a sibling Git
@@ -34,14 +34,19 @@ export function createCheckoutNotice(cwd: string): CheckoutNoticeResolver | unde
 		const sessionCommonDir = normalizePathForComparison(session.commonDir);
 		const sessionGitDir = normalizePathForComparison(session.gitDir);
 		const byDirectory = new Map<string, ResolvedWorktree | null>();
-		let sessionBranch: string | undefined;
+		let sessionBranch: string | null | undefined;
 
 		const resolveSessionBranch = (): string | undefined => {
 			if (sessionBranch === undefined) {
-				const sessionHead = sessionRepo.headSync();
-				sessionBranch = sessionHead.branch ?? sessionHead.commit?.slice(0, 8);
+				try {
+					const sessionHead = sessionRepo.headSync();
+					sessionBranch = sessionHead.branch ?? sessionHead.commit?.slice(0, 8) ?? null;
+				} catch (error) {
+					logger.debug("Could not resolve session HEAD for edit", { error: String(error) });
+					sessionBranch = null;
+				}
 			}
-			return sessionBranch;
+			return sessionBranch ?? undefined;
 		};
 
 		const resolveSiblingWorktree = (filePath: string, followSymlinks: boolean): ResolvedWorktree | null => {

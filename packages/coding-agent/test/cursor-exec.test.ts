@@ -45,7 +45,7 @@ import { TodoTool } from "@oh-my-pi/pi-coding-agent/tools/todo";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import type { TruncationMeta } from "@oh-my-pi/pi-coding-agent/tools/output-meta-format";
 import type { TodoPhase } from "@oh-my-pi/pi-coding-agent/tools/details/todo";
-import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { initWorktreeFixture } from "./helpers/git-worktree";
 import { removeWithRetries, spillFileName, spillUrl, TempDir } from "@oh-my-pi/pi-utils";
 import { AdviseTool } from "../src/advisor/advise-tool";
 
@@ -2813,25 +2813,7 @@ describe("CursorExecHandlers passive tool context", () => {
 describe("CursorExecHandlers.write edit materialization worktree notice", () => {
 	it("attaches checkoutNotice on details and content when materializing an edit into a sibling worktree", async () => {
 		using temp = TempDir.createSync("@omp-cursor-worktree-");
-		const cwd = temp.join("main");
-		const gitDir = path.join(cwd, ".git");
-		await fs.mkdir(path.join(gitDir, "objects"), { recursive: true });
-		await fs.mkdir(path.join(gitDir, "refs", "heads"), { recursive: true });
-		await Bun.write(path.join(gitDir, "HEAD"), "ref: refs/heads/main\n");
-		await Bun.write(
-			path.join(gitDir, "config"),
-			"[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n\thooksPath = /dev/null\n[commit]\n\tgpgsign = false\n[user]\n\tname = Test\n\temail = test@example.com\n",
-		);
-		await Bun.write(path.join(cwd, "lesson.txt"), "before\n");
-		const repo = vcs.requireGit(cwd);
-		await repo.stageFiles(["lesson.txt"]);
-		const head = await repo.commitCreate("initial", {
-			author: { name: "Test", email: "test@example.com" },
-			noVerify: true,
-		});
-		const linked = temp.join("linked");
-		await repo.createBranch("preview", head, false);
-		await repo.worktreeAdd(linked, "preview", { detach: false, clone: false });
+		const { cwd, paths } = await initWorktreeFixture(temp, [{ name: "linked", branch: "preview" }]);
 
 		const writeTool = new WriteTool(createTestSession(cwd));
 		const handlers = new CursorExecHandlers({
@@ -2840,7 +2822,7 @@ describe("CursorExecHandlers.write edit materialization worktree notice", () => 
 			getToolContext: yoloToolContext,
 		});
 
-		const siblingTarget = path.join(linked, "lesson.txt");
+		const siblingTarget = path.join(paths.linked, "lesson.txt");
 		const crossResult = await handlers.write(
 			{
 				toolCallId: "cursor-cross",
@@ -2852,11 +2834,28 @@ describe("CursorExecHandlers.write edit materialization worktree notice", () => 
 			{ editMaterialization: true },
 		);
 		expect(crossResult.isError).toBe(false);
-		expect((crossResult.details as { checkoutNotice?: string } | undefined)?.checkoutNotice).toBe(
-			"Edited worktree: preview (session: main)",
-		);
+		expect(crossResult.details).toMatchObject({ checkoutNotice: "Edited worktree: preview (session: main)" });
 		const crossText = crossResult.content.map(c => (c.type === "text" ? c.text : "")).join("\n");
 		expect(crossText).toContain("Edited worktree: preview (session: main)");
+
+		// Wrapped path header that WriteTool unwraps into details.resolvedPath
+		const wrappedResult = await handlers.write(
+			{
+				toolCallId: "cursor-wrapped",
+				path: "[../linked/lesson.txt#ABCD]",
+				fileText: "wrapped\n",
+				returnFileContentAfterWrite: false,
+				fileBytes: new Uint8Array(),
+			},
+			{ editMaterialization: true },
+		);
+		expect(wrappedResult.isError).toBe(false);
+		expect(wrappedResult.details).toMatchObject({
+			path: siblingTarget,
+			checkoutNotice: "Edited worktree: preview (session: main)",
+		});
+		const wrappedText = wrappedResult.content.map(c => (c.type === "text" ? c.text : "")).join("\n");
+		expect(wrappedText).toContain("Edited worktree: preview (session: main)");
 
 		const localResult = await handlers.write(
 			{
@@ -2869,6 +2868,7 @@ describe("CursorExecHandlers.write edit materialization worktree notice", () => 
 			{ editMaterialization: true },
 		);
 		expect(localResult.isError).toBe(false);
-		expect((localResult.details as { checkoutNotice?: string } | undefined)?.checkoutNotice).toBeUndefined();
+		expect(localResult.details).toBeDefined();
+		expect(localResult.details).not.toHaveProperty("checkoutNotice");
 	});
 });

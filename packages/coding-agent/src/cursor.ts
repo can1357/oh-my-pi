@@ -394,26 +394,30 @@ async function materializeEdit(
 	const written = await executeTool(withoutEvents(options), "write", toolCallId, { path: pathArg, content });
 	const result: ToolResultMessage = { ...written, toolName: "edit" };
 	if (!written.isError) {
-		const checkoutNotice = createCheckoutNotice(cwd)?.({ path: absolutePath, followSymlinks: true });
 		const writeDetails =
 			typeof written.details === "object" && written.details !== null ? written.details : undefined;
+		const resolvedPath =
+			writeDetails && "resolvedPath" in writeDetails && typeof writeDetails.resolvedPath === "string"
+				? writeDetails.resolvedPath
+				: absolutePath;
+		const checkoutNotice = createCheckoutNotice(cwd)?.({ path: resolvedPath, followSymlinks: true });
 		if (before !== undefined) {
 			// `write` restores the file's CRLF and BOM, so compare both sides as `edit` does.
 			const { diff, firstChangedLine } = editDiffString(
 				normalizeToLF(stripBom(before).text),
 				normalizeToLF(stripBom(content).text),
-				absolutePath,
+				resolvedPath,
 			);
 			const details: EditToolDetails = {
 				...writeDetails,
 				diff,
 				firstChangedLine,
-				path: absolutePath,
+				path: resolvedPath,
 				...(checkoutNotice ? { checkoutNotice } : {}),
 			};
 			result.details = details;
 		} else if (checkoutNotice) {
-			const details: EditToolDetails = { ...writeDetails, diff: "", path: absolutePath, checkoutNotice };
+			const details: EditToolDetails = { ...writeDetails, diff: "", path: resolvedPath, checkoutNotice };
 			result.details = details;
 		}
 		if (checkoutNotice) {

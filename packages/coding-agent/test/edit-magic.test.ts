@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
-import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import type { Api, AssistantMessage, Message, Model, Tool, ToolCall } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
@@ -11,7 +10,7 @@ import { applyDescribedChange, parseMagicInput } from "@oh-my-pi/pi-coding-agent
 import { applyReplace, readBufferLines } from "@oh-my-pi/pi-coding-agent/edit/magic-tools";
 import { fileViews } from "@oh-my-pi/pi-coding-agent/edit/magic-view";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { initWorktreeFixture } from "./helpers/git-worktree";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 import { rejectionOf } from "./helpers/rejection";
@@ -620,27 +619,11 @@ describe("edit tool in magic mode", () => {
 
 	it("preserves checkoutNotice on perFileResults when a multi-file magic edit touches a sibling worktree", async () => {
 		using tempDir = TempDir.createSync("@omp-magic-worktree-");
-		const cwd = tempDir.join("main");
-		const gitDir = path.join(cwd, ".git");
-		await fsp.mkdir(path.join(gitDir, "objects"), { recursive: true });
-		await fsp.mkdir(path.join(gitDir, "refs", "heads"), { recursive: true });
-		await Bun.write(path.join(gitDir, "HEAD"), "ref: refs/heads/main\n");
-		await Bun.write(
-			path.join(gitDir, "config"),
-			"[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n\thooksPath = /dev/null\n[commit]\n\tgpgsign = false\n[user]\n\tname = Test\n\temail = test@example.com\n",
-		);
-		await Bun.write(path.join(cwd, "local.ts"), "export const value = 1;\n");
-		const repo = vcs.requireGit(cwd);
-		await repo.stageFiles(["local.ts"]);
-		const head = await repo.commitCreate("initial", {
-			author: { name: "Test", email: "test@example.com" },
-			noVerify: true,
+		const { cwd, paths } = await initWorktreeFixture(tempDir, [{ name: "linked", branch: "preview" }], {
+			files: { "local.ts": "export const value = 1;\n" },
 		});
-		const linked = tempDir.join("linked");
-		await repo.createBranch("preview", head, false);
-		await repo.worktreeAdd(linked, "preview", { detach: false, clone: false });
 
-		const siblingFile = path.join(linked, "local.ts");
+		const siblingFile = path.join(paths.linked, "local.ts");
 		const { tool } = magicTool(cwd, messages =>
 			messages.length === 1
 				? toolMsg([

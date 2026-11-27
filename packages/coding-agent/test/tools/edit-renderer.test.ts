@@ -1,8 +1,10 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { editDiffString } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { createCheckoutNotice } from "../../src/edit/checkout-notice";
+import { initWorktreeFixture } from "../helpers/git-worktree";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool, getEditStore } from "@oh-my-pi/pi-coding-agent/edit";
 import { visibleWidth } from "@oh-my-pi/pi-tui/text/width";
@@ -63,48 +65,6 @@ function resultRows(result: ToolCallResult, args: unknown, options: CardOptions 
 		renderContext: { ...(options.editMode ? { editMode: options.editMode } : {}), ...options.context },
 	});
 	return rows(call, options);
-}
-
-async function initWorktreeFixture(
-	temp: TempDir,
-	worktrees: readonly { name: string; branch: string }[],
-): Promise<{ cwd: string; paths: Record<string, string> }> {
-	const cwd = temp.join("main");
-	const gitDir = path.join(cwd, ".git");
-	await fs.mkdir(path.join(gitDir, "objects"), { recursive: true });
-	await fs.mkdir(path.join(gitDir, "refs", "heads"), { recursive: true });
-	await Bun.write(path.join(gitDir, "HEAD"), "ref: refs/heads/main\n");
-	await Bun.write(
-		path.join(gitDir, "config"),
-		[
-			"[core]",
-			"\trepositoryformatversion = 0",
-			"\tfilemode = true",
-			"\tbare = false",
-			"\thooksPath = /dev/null",
-			"[commit]",
-			"\tgpgsign = false",
-			"[user]",
-			"\tname = Test",
-			"\temail = test@example.com",
-			"",
-		].join("\n"),
-	);
-	await Bun.write(path.join(cwd, "lesson.txt"), "before\n");
-	const repo = vcs.requireGit(cwd);
-	await repo.stageFiles(["lesson.txt"]);
-	const head = await repo.commitCreate("initial", {
-		author: { name: "Test", email: "test@example.com" },
-		noVerify: true,
-	});
-	const paths: Record<string, string> = {};
-	for (const wt of worktrees) {
-		const wtPath = temp.join(wt.name);
-		await repo.createBranch(wt.branch, head, false);
-		await repo.worktreeAdd(wtPath, wt.branch, { detach: false, clone: false });
-		paths[wt.name] = wtPath;
-	}
-	return { cwd, paths };
 }
 
 function makeEditSession(cwd: string) {
@@ -226,6 +186,72 @@ describe("edit tool card", () => {
 		expect(res.details?.checkoutNotice).toBeUndefined();
 		const text = res.content.map(c => (c.type === "text" ? c.text : "")).join("\n");
 		expect(text).not.toContain("Edited worktree:");
+	});
+
+	it("preserves cross-worktree notice for a batched symlink MV even when a later REM deletes the referent", async () => {
+		using temp = TempDir.createSync("@omp-edit-batch-symlink-mv-");
+		const { cwd, paths } = await initWorktreeFixture(temp, [{ name: "linked", branch: "preview" }]);
+		const session = makeEditSession(cwd);
+		const tool = new EditTool(session, "hashline");
+
+		const src = path.join(cwd, "lesson.txt");
+		const siblingTarget = path.join(paths.linked, "lesson.txt");
+		const dstLink = path.join(cwd, "dest-link.txt");
+		await fs.symlink(siblingTarget, dstLink);
+
+		const store = getEditStore(session);
+		const srcTag = store.recordSnapshot(src, "before\n");
+		const targetTag = store.recordSnapshot(siblingTarget, "before\n");
+
+		const res = await tool.execute("batch-symlink-mv-rem", {
+			input: `[lesson.txt#${srcTag}]\nMV dest-link.txt\n[${siblingTarget}#${targetTag}]\nREM\n`,
+		});
+		expect(res.isError).toBeUndefined();
+		expect(res.details?.perFileResults).toHaveLength(2);
+		expect(res.details?.perFileResults?.[0]?.checkoutNotice).toBe(
+			"Edited worktree: moved to preview (session: main)",
+		);
+		expect(res.details?.perFileResults?.[1]?.checkoutNotice).toBe("Edited worktree: preview (session: main)");
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("does not fail a completed edit when session HEAD is unreadable during checkout attribution", async () => {
+		using temp = TempDir.createSync("@omp-edit-unreadable-head-");
+		const { cwd, paths } = await initWorktreeFixture(temp, [{ name: "linked", branch: "preview" }]);
+		const target = path.join(paths.linked, "lesson.txt");
+
+		// 1. Real GitRepo::headSync() failure when HEAD disappears after discovery.
+		const notice = createCheckoutNotice(cwd);
+		expect(notice).toBeDefined();
+		await fs.rm(path.join(cwd, ".git", "HEAD"));
+		expect(notice?.({ path: target })).toBeUndefined();
+
+		// Restore HEAD and verify EditTool.execute still succeeds if headSync() throws after write.
+		await Bun.write(path.join(cwd, ".git", "HEAD"), "ref: refs/heads/main\n");
+		const originalGit = vcs.git;
+		vi.spyOn(vcs, "git").mockImplementation(dir => {
+			const repo = originalGit(dir);
+			if (!repo || dir !== cwd) return repo;
+			return Object.assign(Object.create(Object.getPrototypeOf(repo)), repo, {
+				info: () => repo.info(),
+				headSync: () => {
+					throw new Error("HEAD unreadable");
+				},
+			});
+		});
+
+		const tool = makeEditTool(cwd, "replace");
+		const res = await tool.execute("unreadable-head", {
+			path: target,
+			old_string: "before",
+			new_string: "after",
+		});
+		expect(res.isError).toBeUndefined();
+		expect(res.details?.checkoutNotice).toBeUndefined();
+		expect(await Bun.file(target).text()).toBe("after\n");
 	});
 
 	it("shows the target path from partial JSON while edit args stream", () => {
