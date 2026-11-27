@@ -267,4 +267,68 @@ describe("AuthStorage api-key login upsert", () => {
 		expect(await authStorage.keys.get("opencode-go", "session-opencode-go-login")).toBe("new-opencode-key");
 		expect(await authStorage.keys.peek("opencode-go")).toBe("new-opencode-key");
 	});
+
+	it("lists Cloud.ru in /login, strips Bearer prefix, rejects auth errors, and stores the key", async () => {
+		if (!store || !authStorage) throw new Error("test setup failed");
+
+		const provider = getOAuthProviders().find(item => item.id === "cloud-ru");
+		expect(provider?.name).toBe("Cloud.ru");
+		expect(provider?.available).toBe(true);
+
+		const seen: { url: string; authorization: string | null }[] = [];
+		await authStorage.oauth.login("cloud-ru", {
+			onAuth: () => {},
+			onPrompt: async () => "  Bearer key-id.key-secret  ",
+			fetch: async (input, init) => {
+				seen.push({ url: String(input), authorization: new Headers(init?.headers).get("authorization") });
+				return Response.json({ id: "cmpl-1", choices: [{ message: { role: "assistant", content: "ok" } }] });
+			},
+		});
+
+		expect(seen).toEqual([
+			{
+				url: "https://foundation-models.api.cloud.ru/v1/chat/completions",
+				authorization: "Bearer key-id.key-secret",
+			},
+		]);
+		expect(store.listAuthCredentials("cloud-ru").map(entry => entry.credential)).toEqual([
+			{ type: "api_key", key: "key-id.key-secret", source: "login" },
+		]);
+		expect(await authStorage.keys.get("cloud-ru", "session-cloud-ru")).toBe("key-id.key-secret");
+
+		// Malformed keys return 400 with "invalid api key secret" on Cloud.ru and must fail login.
+		await expect(
+			authStorage.oauth.login("cloud-ru", {
+				onAuth: () => {},
+				onPrompt: async () => "bad-key",
+				fetch: async () =>
+					new Response(JSON.stringify({ code: "InvalidArgument", message: "invalid api key secret" }), {
+						status: 400,
+					}),
+			}),
+		).rejects.toThrow(/invalid api key secret/i);
+
+		// Unknown well-formed keys return 403 and must fail login.
+		await expect(
+			authStorage.oauth.login("cloud-ru", {
+				onAuth: () => {},
+				onPrompt: async () => "valid-shape.unknown-secret",
+				fetch: async () =>
+					new Response(JSON.stringify({ code: "AccessDenied", message: "api key not found: record not found" }), {
+						status: 403,
+					}),
+			}),
+		).rejects.toThrow(/api key not found/i);
+
+		// Transient upstream errors fall through because validation is optional.
+		await authStorage.oauth.login("cloud-ru", {
+			onAuth: () => {},
+			onPrompt: async () => "second-id.second-secret",
+			fetch: async () => new Response("Service Unavailable", { status: 503 }),
+		});
+		expect(store.listAuthCredentials("cloud-ru").map(entry => entry.credential)).toEqual([
+			{ type: "api_key", key: "key-id.key-secret", source: "login" },
+			{ type: "api_key", key: "second-id.second-secret", source: "login" },
+		]);
+	});
 });

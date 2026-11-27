@@ -9078,3 +9078,84 @@ export function arkaneCloudModelManagerOptions(config?: ModelManagerConfig): Mod
 		}),
 	};
 }
+
+// ---------------------------------------------------------------------------
+// Cloud.ru Foundation Models
+// ---------------------------------------------------------------------------
+
+export const CLOUD_RU_BASE_URL = "https://foundation-models.api.cloud.ru/v1";
+const CLOUD_RU_CHAT_ENDPOINT = "/v1/chat/completions";
+
+/** Cloud.ru Foundation Models discovery configuration. */
+export interface CloudRuModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+function hasCloudRuChatEndpoint(endpoints: unknown): boolean {
+	if (!Array.isArray(endpoints)) return true;
+	return endpoints.some(endpoint => isRecord(endpoint) && endpoint.path === CLOUD_RU_CHAT_ENDPOINT);
+}
+
+/**
+ * Map one Cloud.ru Foundation Models `/v1/models` row to an OpenAI-completions
+ * model spec. Non-LLM entries (`embedder`, `rerank`, `guard`, `audio-to-text`,
+ * `tts`, `image+text-to-text`) and entries that do not advertise
+ * `/v1/chat/completions` or text output are dropped.
+ *
+ * Cloud.ru quotes `metadata.prompt_tokens_cost` and `generated_tokens_cost` in
+ * Russian rubles (RUB) per million tokens without a currency field, so costs
+ * remain zero with `pricingStatus: "unknown"` rather than corrupting the
+ * USD-denominated cost model.
+ */
+function mapCloudRuModel(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+): ModelSpec<"openai-completions"> | null {
+	const metadata = isRecord(entry.metadata) ? entry.metadata : undefined;
+	if (typeof metadata?.type === "string" && metadata.type !== "llm") {
+		return null;
+	}
+	if (!hasCloudRuChatEndpoint(metadata?.endpoints)) {
+		return null;
+	}
+	const outputModalities = metadata?.output_modalities;
+	if (Array.isArray(outputModalities) && outputModalities.length > 0 && !outputModalities.includes("text")) {
+		return null;
+	}
+	return {
+		...defaults,
+		name: toModelName(metadata?.name, defaults.name),
+		reasoning: entry.reasoning === true,
+		input: toInputCapabilities(metadata?.input_modalities),
+		...(entry.function_calling === false ? { supportsTools: false } : {}),
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		pricingStatus: "unknown",
+		contextWindow: toPositiveNumber(entry.context_length ?? entry.max_model_len, defaults.contextWindow),
+		maxTokens: toPositiveNumber(entry.max_output_tokens ?? entry.max_completion_tokens, defaults.maxTokens),
+	};
+}
+
+/**
+ * Cloud.ru Foundation Models (`https://foundation-models.api.cloud.ru/v1`):
+ * OpenAI-compatible gateway serving Cloud.ru-hosted models (GigaChat, DeepSeek,
+ * Qwen, GLM, Kimi, MiniMax, gpt-oss) and external frontier models. `/v1/models`
+ * is public and carries each model's context window, input modalities, and
+ * tool/reasoning flags, so live discovery is authoritative once credentials are
+ * configured and runs unauthenticated during catalog generation.
+ */
+export function cloudRuModelManagerOptions(
+	config?: CloudRuModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	return createOpenAICompatibleModelManagerOptions({
+		api: "openai-completions",
+		providerId: "cloud-ru",
+		defaultBaseUrl: providerBaseUrl("cloud-ru") ?? CLOUD_RU_BASE_URL,
+		config: config?.baseUrl ? { ...config, baseUrl: config.baseUrl.trim().replace(/\/+$/, "") } : config,
+		dynamicModelsAuthoritative: true,
+		dynamicInputAuthoritative: true,
+		dynamicReasoningAuthoritative: true,
+		mapModel: mapCloudRuModel,
+	});
+}

@@ -20,6 +20,7 @@ export type KnownProvider =
 	| "charm-hyper"
 	| "chutes"
 	| "cline-pass"
+	| "cloud-ru"
 	| "cloudflare-ai-gateway"
 	| "cloudflare-workers-ai"
 	| "commandcode"
