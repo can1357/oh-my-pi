@@ -35,6 +35,7 @@
 - Included `tool_approvals` in `omp gc` stats database session purges ([#20294](https://github.com/can1357/oh-my-pi/pull/20294) by [@asuffield](https://github.com/asuffield))
 - Added `voice` and `speechFormats` to `models.yml` speech models; the `tts` tool switches between MP3 and WAV output to match the formats a model returns ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
 - Added `speech.cloud` (default off) to vocalize `speech.enabled` output through the cloud speech models configured in the `speech` role ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
+- `/annotate` syntax-highlights source files, selected code blocks, and diffs in ANSI terminals and Tern, while keeping added and removed lines visually distinct ([#20776](https://github.com/can1357/oh-my-pi/pull/20776) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 - Added `tui.showLinkUrl` to hide the URL displayed after named Markdown links when their labels are terminal hyperlinks.
 - Added model status-line options to show the provider, choose between model name, ID, or full identifier, and limit the displayed label length.
 - Added xAI speech-to-text support for dictation, including models such as `xai-oauth/grok-voice-transcribe-2.0`.

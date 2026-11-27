@@ -13,6 +13,7 @@
  */
 import type { Accessor, TextEdit } from "@oh-my-pi/pi-tui";
 import { signal } from "@oh-my-pi/pi-tui";
+import type { HighlightedLine } from "@oh-my-pi/pi-tui/text/highlight";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import type {
 	AnnotationOverlayDraft,
@@ -26,6 +27,7 @@ import type {
 	TextReviewSource,
 } from "../../../extensibility/custom-commands/bundled/annotate/annotation-types";
 import { type AnnotationFrame, annotationFrame, canShowRail } from "./annotation-review-frame";
+import { highlightReviewDiff, highlightReviewText } from "./annotation-review-syntax";
 import { selectKeyId } from "../../../config/keybindings/matchers";
 
 export const CONTINUE_CODE_REVIEW_ACTION = "Continue with LLM review";
@@ -121,6 +123,8 @@ export class AnnotationReviewModel {
 	viewportDriven = false;
 	viewportTowardEnd = false;
 	#textEdited = false;
+	#sourceSyntaxKey: readonly string[] | ReviewDiffFile | undefined;
+	#sourceSyntaxRows: readonly (HighlightedLine | undefined)[] | undefined;
 	#external = false;
 	#rev = 0;
 	/** Moves since the last draw: the view follows the cursor (or the cursor the view) once drawn. */
@@ -344,6 +348,20 @@ export class AnnotationReviewModel {
 
 	currentSourceRows(): ReviewSourceRow[] {
 		return this.currentFile()?.rows.filter(isSourceRow) ?? [];
+	}
+
+	/** Syntax spans for the current snapshot, independent of width, theme and note edits. */
+	sourceSyntax(): readonly (HighlightedLine | undefined)[] | undefined {
+		const source = this.textSource;
+		const file = this.currentFile();
+		const key = source ? this.textLines : file;
+		if (this.#sourceSyntaxKey !== key) {
+			this.#sourceSyntaxKey = key;
+			this.#sourceSyntaxRows = source
+				? highlightReviewText(source, this.textLines)
+				: file && highlightReviewDiff(file);
+		}
+		return this.#sourceSyntaxRows;
 	}
 
 	#rowCount(): number {

@@ -87,6 +87,9 @@ function sourceFromSelection(
 		kind,
 		label: selection.label,
 		text: selection.content,
+		...(selection.block?.language !== undefined && (kind === "code" || kind === "command")
+			? { language: selection.block.language }
+			: {}),
 		provenance: isLatestWholeAssistant ? { kind: "latest-assistant", entryId } : { kind: "session", entryId },
 		sessionId: ctx.sessionManager.getSessionId(),
 	};
