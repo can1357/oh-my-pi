@@ -11,7 +11,8 @@
  *
  * The wrapper merges the resolved CA bundle into Bun's `RequestInit.tls.ca`.
  * Bun's `tls.ca` REPLACES the default trust store when set, so the wrapper
- * always seeds {@link tls.rootCertificates} when the caller has not already
+ * always seeds `tls.getCACertificates("default")` (bundled, system when
+ * `NODE_USE_SYSTEM_CA=1`, and extra roots) when the caller has not already
  * curated their own CA list.
  */
 import * as fs from "node:fs";
@@ -116,18 +117,18 @@ export function __resetExtraCaCache(): void {
 
 /**
  * Merge `extraCa` into `init.tls.ca`. When the caller has not supplied a CA
- * list, the system root store is included alongside the extra bundle —
+ * list, the runtime default trust store is included alongside the extra bundle —
  * Bun's `tls.ca` replaces the default trust store, so omitting roots would
  * break every public host. When the caller already curated a list (e.g.
  * Anthropic Foundry's mTLS options, which already seed
- * `tls.rootCertificates`), only the extra CA is appended.
+ * `tls.getCACertificates("default")`), only the extra CA is appended.
  */
 export function withExtraCaInit(init: RequestInit | undefined, extraCa: string): RequestInit {
 	const existingTls = (init as BunTlsRequestInit | undefined)?.tls;
 	const existingCa = existingTls?.ca;
 	let mergedCa: string[];
 	if (existingCa === undefined) {
-		mergedCa = [...tls.rootCertificates, extraCa];
+		mergedCa = [...tls.getCACertificates("default"), extraCa];
 	} else if (Array.isArray(existingCa)) {
 		mergedCa = [...existingCa, extraCa];
 	} else {

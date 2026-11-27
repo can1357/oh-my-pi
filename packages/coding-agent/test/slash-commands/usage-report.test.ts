@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import type { UsageReport } from "@oh-my-pi/pi-ai";
 import { buildUsageReportText } from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/usage-report";
 
-describe("PR 3318 repro", () => {
+describe("buildUsageReportText", () => {
 	it("falls back to scoped account when metadata identities are empty strings", async () => {
 		const report: UsageReport = {
 			provider: "test-provider",
@@ -22,6 +22,7 @@ describe("PR 3318 repro", () => {
 				model: undefined,
 				fetchUsageReports: async () => [report],
 				getUsageReportingModelSelectors: () => ["test-provider/coding-plan-model"],
+				getSessionStats: () => ({}),
 			},
 		} as never);
 
@@ -46,7 +47,7 @@ describe("PR 3318 repro", () => {
 			resetCredits: { availableCount: 1 },
 		};
 		const text = await buildUsageReportText({
-			session: { model: undefined, fetchUsageReports: async () => [report] },
+			session: { model: undefined, fetchUsageReports: async () => [report], getSessionStats: () => ({}) },
 		} as never);
 		expect(text).toContain("user@example.test · plan: prolite forged: 1 saved rate-limit reset");
 		expect(text).toContain("user@example.test · plan: prolite forged: 20.00% used");

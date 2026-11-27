@@ -26,7 +26,6 @@ import {
 	$env,
 	formatDuration,
 	formatNumber,
-	getActiveProfile,
 	getProjectDir,
 	isEnoent,
 	logger,
@@ -37,7 +36,6 @@ import {
 } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 
-import { restartArgv } from "../cli/flag-tables";
 import type { CollabGuestLink } from "../collab/guest";
 import { CollabController } from "../collab/controller";
 import type { CollabHost } from "../collab/host";
@@ -46,6 +44,7 @@ import {
 	type ResolvedModelRoleValue,
 	resolveExactModelIdentity,
 } from "../config/model-resolver";
+import { notifyTerminal } from "@oh-my-pi/pi-tui/driver/session";
 import { isSettingsInitialized, Settings, settings } from "../config/settings";
 import type {
 	AutocompleteProviderFactory,
@@ -102,9 +101,8 @@ import planModeApprovedPrompt from "../prompts/system/plan-mode-approved.md" wit
 import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compact-instructions.md" with { type: "text" };
 import type { AgentHubRegistry } from "../registry/agent-hub-types";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
-import { isSessionTreeRef, registerPersistedSubagents } from "../registry/persisted-agents";
-import type { AgentCostSnapshot } from "./view-model/overlays/agent-hub-projection";
-import { sumSubagentTreeCost } from "./agent-hub-runtime";
+import { isSessionTreeRef } from "../registry/persisted-agents";
+import type { AgentTreeSpend } from "./view-model/overlays/agent-hub-projection";
 import {
 	type AgentSession,
 	type AgentSessionEvent,
@@ -113,6 +111,7 @@ import {
 	SHUTDOWN_CONSOLIDATE_BUDGET_MS,
 } from "../session/agent-session";
 import type { AgentSessionHandle, AgentViewSession } from "../session/agent-session-handle";
+import { type AiuTotals, sessionAiu } from "../session/aiu-billing";
 import type { TranscriptEntryLike } from "../session/transcript/transcript-entry";
 import type { BashExecutionMessage, PythonExecutionMessage } from "../session/transcript/messages";
 import type { CompactMode } from "../session/compact-modes";
@@ -140,7 +139,6 @@ import { buildStaticInlineHint } from "../slash-commands/builtin-completions";
 import { formatCoarseDuration } from "./view-model/chrome/format";
 import { type DictationTarget, MicCursor, type SttCallbacks, STTController, type SttState } from "../stt";
 import type { SpaceHoldHandler } from "../config/keybindings/space-hold";
-import { resolveRestartCmd } from "../subprocess/worker-client";
 
 import { parseConfiguredThinkingLevel } from "../thinking/levels";
 import { type ConfiguredThinkingLevel } from "../utils/render-utils";
@@ -187,6 +185,8 @@ import {
 	setProgramStatusSupported,
 	settleStartupRun,
 } from "../utils/run-status";
+import { buildResumeArgv, clearProgramResume, disposeProgramResume, initProgramResume } from "../utils/program-resume";
+import { getProgramResumeToken, OSC_7577_TOKEN_ENV } from "../utils/program-resume-token";
 import {
 	disposeTerminalTitleState,
 	initTerminalTitleState,
@@ -301,6 +301,7 @@ import {
 	cfgDisplayShowTurnTime,
 	cfgDisplaySubagentLivePreview,
 	cfgDisplayToolActivity,
+	cfgGitChildRepoDiscovery,
 	cfgGitEnabled,
 	cfgLoopConditionTimeoutMs,
 	cfgLoopMode,
@@ -337,6 +338,12 @@ import {
 	cfgTuiRenderEmbeds,
 	cfgTuiRenderSvg,
 	cfgTuiResizeScrollback,
+	cfgTuiScreen,
+	cfgTuiCopyOnSelect,
+	cfgTuiWheelLines,
+	cfgTuiScrollbar,
+	cfgTuiExitTranscript,
+	cfgTuiFullscreenMouse,
 	cfgTuiTextSizing,
 	cfgTuiTight,
 	cfgTuiTitleSpinner,
@@ -347,6 +354,7 @@ import {
 	cfgTuiVimShowCommand,
 	cfgTuiVimStartMode,
 	cfgTuiVimYankToClipboard,
+	cfgCompletionNotify,
 	type ToolActivityMode,
 } from "./settings";
 import { pickTableChart } from "../auto-graph/planner";
@@ -504,6 +512,12 @@ const cfgLiveUiSettings = combine({
 	"tui.textSizing": cfgTuiTextSizing,
 	"tui.tight": cfgTuiTight,
 	"tui.hyperlinks": cfgTuiHyperlinks,
+	"tui.screen": cfgTuiScreen,
+	"tui.copyOnSelect": cfgTuiCopyOnSelect,
+	"tui.wheelLines": cfgTuiWheelLines,
+	"tui.scrollbar": cfgTuiScrollbar,
+	"tui.exitTranscript": cfgTuiExitTranscript,
+	"tui.fullscreenMouse": cfgTuiFullscreenMouse,
 	"tui.titleState": cfgTuiTitleState,
 	"tui.titleSpinner": cfgTuiTitleSpinner,
 	motion: cfgMotionResolved,
@@ -517,6 +531,7 @@ const cfgLiveUiSettings = combine({
 	"statusLine.segmentOptions": cfgStatusLineSegmentOptions,
 	"statusLine.compactThinkingLevel": cfgStatusLineCompactThinkingLevel,
 	"statusLine.contextLine": cfgStatusLineContextLine,
+	"git.childRepoDiscovery": cfgGitChildRepoDiscovery,
 	"git.enabled": cfgGitEnabled,
 	"advisor.enabled": cfgAdvisorEnabled,
 	"advisor.maxNotesPerUpdate": cfgAdvisorMaxNotesPerUpdate,
@@ -1129,8 +1144,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** Command output held while a turn streams (also previewed in the `deferredCommand` slot). */
 	#pendingCommandOutput: { factory: () => JSXNode; options?: BlockOptions & { readonly live?: boolean } }[] = [];
 	#pendingCommandOutputSessionId: string | undefined;
-	/** Commands (not components) queued while streaming, for the deferral hint. */
+	/** Commands (not components) shown in the preview, for the deferral hint. */
 	#pendingCommandOutputCommands = 0;
+	/** Index of the first queued panel the preview shows; Esc hides the ones before it (they still mount at the settle). */
+	#pendingCommandOutputPreviewFrom = 0;
 	#pendingSlashCommands: SlashCommand[] = [];
 	/** Symbol preset the slash-command picker icons were resolved under. */
 	#slashIconPreset: string | undefined;
@@ -1251,9 +1268,18 @@ export class InteractiveMode implements InteractiveModeContext {
 		target: AgentViewSession | undefined;
 		ready: boolean;
 		isComposing: boolean;
+		/** A submitted plan awaits the user's answer: idle work must not summarize its exploration away. */
+		isReviewingPlan: boolean;
 		scheduledTurn: ((target: AgentViewSession) => boolean) | undefined;
 		presentRecap: ((recap: string) => void) | undefined;
-	} = { target: undefined, ready: false, isComposing: false, scheduledTurn: undefined, presentRecap: undefined };
+	} = {
+		target: undefined,
+		ready: false,
+		isComposing: false,
+		isReviewingPlan: false,
+		scheduledTurn: undefined,
+		presentRecap: undefined,
+	};
 
 	syncIdleMaintenanceView(target: AgentViewSession | null = this.viewSession): void {
 		const activity = this.#idleMaintenanceActivity;
@@ -1262,6 +1288,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			activity.target = undefined;
 			activity.ready = false;
 			activity.isComposing = false;
+			activity.isReviewingPlan = false;
 			activity.scheduledTurn = undefined;
 			activity.presentRecap = undefined;
 			previous?.refreshIdleMaintenance();
@@ -1270,8 +1297,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (!activity.scheduledTurn) return;
 		activity.target = target;
 		activity.isComposing = untrack(this.composer.text).trim() !== "";
+		activity.isReviewingPlan = this.#planReviewPick !== undefined;
 		target.enableIdleMaintenance({
-			isBlocked: () => !activity.ready || activity.target !== target || activity.isComposing,
+			isBlocked: () =>
+				!activity.ready || activity.target !== target || activity.isComposing || activity.isReviewingPlan,
 			scheduledTurn: () => activity.scheduledTurn?.(target) === true,
 			// Delivered only while unblocked, so `target` is the session on screen.
 			onRecap: recap => activity.presentRecap?.(recap),
@@ -1355,6 +1384,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#pendingCommandOutput = [];
 		this.#pendingCommandOutputSessionId = undefined;
 		this.#pendingCommandOutputCommands = 0;
+		this.#pendingCommandOutputPreviewFrom = 0;
 		this.#syncDeferredCommandPreview();
 		// A view switch leaves the main session, and the input queued for it, in place. A session reset
 		// hands a queued `/compact` and the input in the compaction queue back to the editor.
@@ -1402,8 +1432,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	#inspectableSubagentCount = 0;
 	#agentRegistryUnsubscribe?: () => void;
 	#agentRegistrySubscriptionTarget?: AgentHubRegistry;
-	#subagentSessionCosts = new WeakMap<object, AgentCostSnapshot>();
-	#subagentCostHydratedRoot?: string;
 	#mcpStatusOrder: string[] = [];
 	#mcpPendingServers = new Set<string>();
 	#mcpConnectedServers = new Set<string>();
@@ -1669,6 +1697,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.collabController = new CollabController(this);
 		this.session.setPromptDropped?.(prompt => this.restoreDroppedPrompt(prompt));
 		this.#observerRegistry = new SessionObserverRegistry();
+		this.session.attachSubagentObservers(this.#observerRegistry);
 		// The composer hint follows the ask above, running agents and the conversation's start.
 		this.#effect(() => this.composer.setPlaceholder(this.#composerHint()));
 		this.#effect(() => this.composer.setNativePlaceholder(this.#nativeComposerPlaceholder()));
@@ -1774,9 +1803,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		};
 	}
 
-	/** `tui.maxFps`, `tui.hyperlinks` and `tui.textSizing` into the running renderer. */
+	/** `tui.maxFps`, `tui.hyperlinks`, `tui.textSizing` and `tui.screen` into the running renderer. */
 	#syncFrameSettings(): void {
 		this.#frame.frameInterval.set(1000 / cfgTuiMaxFps.get(this.settings));
+		this.#frame.screen.set(cfgTuiScreen.get(this.settings));
+		this.#frame.copyOnSelect.set(cfgTuiCopyOnSelect.get(this.settings));
+		this.#frame.wheelLines.set(cfgTuiWheelLines.get(this.settings));
+		this.#frame.scrollbar.set(cfgTuiScrollbar.get(this.settings));
+		this.#frame.exitTranscript.set(cfgTuiExitTranscript.get(this.settings));
+		this.#frame.fullscreenMouse.set(cfgTuiFullscreenMouse.get(this.settings));
 		const hyperlinks = cfgTuiHyperlinks.get(this.settings);
 		this.#frame.hyperlinks.set(hyperlinks === "off" ? false : hyperlinks === "always" ? true : undefined);
 		this.#frame.textSizing.set(cfgTuiTextSizing.get(this.settings));
@@ -2166,6 +2201,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		initProgramStatus({ startupRun: options.startupRun });
 		setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
 		this.#probeProgramStatus();
+		initProgramResume({
+			sessionFile: () => (this.sessionManager.isSessionOnDisk() ? this.sessionManager.getSessionFile() : undefined),
+			cwd: () => this.sessionManager.getCwd(),
+		});
 		setTerminalSessionSource({
 			file: () => this.sessionManager.getSessionFile(),
 			cwd: () => this.sessionManager.getCwd(),
@@ -2644,7 +2683,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			return false;
 		}
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
-		this.statusLine.applyCwdChange();
+		this.statusLine.invalidateVcs();
 		return true;
 	}
 
@@ -3648,6 +3687,17 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#syncFrameSettings();
 			resetDisplay = true;
 		}
+		if (
+			any(
+				"tui.screen",
+				"tui.copyOnSelect",
+				"tui.wheelLines",
+				"tui.scrollbar",
+				"tui.exitTranscript",
+				"tui.fullscreenMouse",
+			)
+		)
+			this.#syncFrameSettings();
 		if (any("tui.titleState")) setTerminalTitleStateEnabled(cfgTuiTitleState.get(this.settings));
 		if (any("tui.titleSpinner")) setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
 		if (any("terminal.programStatus")) setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
@@ -3670,6 +3720,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		) {
 			this.statusLine.reloadSettings();
 		}
+		if (any("git.childRepoDiscovery")) this.statusLine.invalidateVcs();
 		if (any("statusLine.sessionAccent")) this.#handleSessionAccentInputsChanged();
 		// Advisor runtime start/stop has no session event; repaint its status segment.
 		if (any("advisor.enabled", "advisor.maxNotesPerUpdate", "tier.advisor")) this.statusLine.refresh();
@@ -3923,6 +3974,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * a collab guest's registry mirrors host transcripts outside this root).
 	 */
 	#subagentTreeCost = 0;
+	#subagentTreeAiu: AiuTotals | undefined;
 
 	syncRunningSubagentBadge(): boolean {
 		const registry = getRunningSubagentBadgeRegistry(this.collabGuest, AgentRegistry.global());
@@ -3944,39 +3996,23 @@ export class InteractiveMode implements InteractiveModeContext {
 		const inspectableChanged = inspectable !== this.#inspectableSubagentCount;
 		this.#inspectableSubagentCount = inspectable;
 		const agentsChanged = this.statusLine.setRunningSubagents(agentIds);
-		let treeCost = 0;
+		let tree: AgentTreeSpend | undefined;
 		if (!this.collabGuest) {
-			const rootSessionFile = this.sessionManager.getSessionFile() ?? undefined;
-			this.#hydratePersistedSubagentCosts(rootSessionFile);
-			treeCost = sumSubagentTreeCost({
-				refs: AgentRegistry.global().list(),
-				observers: this.#observerRegistry,
-				rootSessionFile,
-				sessionCosts: this.#subagentSessionCosts,
-			});
+			// Registers a resumed root's persisted subagents once per stay; the registry changes it makes re-sync this.
+			void this.session.hydratePersistedSubagents();
+			tree = this.session.getSubagentTreeSpend();
 		}
+		const treeCost = tree?.cost ?? 0;
+		const treeAiu = tree ? sessionAiu(tree.aiu) : undefined;
 		const costChanged = this.#subagentTreeCost !== treeCost;
+		const aiuChanged =
+			this.#subagentTreeAiu?.nano !== treeAiu?.nano || this.#subagentTreeAiu?.unknownCalls !== treeAiu?.unknownCalls;
 		this.#subagentTreeCost = treeCost;
-		if (costChanged) this.statusLine.setModes({ subagentTreeCost: treeCost });
-		const changed = agentsChanged || costChanged || inspectableChanged;
+		this.#subagentTreeAiu = treeAiu;
+		if (costChanged || aiuChanged) this.statusLine.setModes({ subagentTreeCost: treeCost, subagentTreeAiu: treeAiu });
+		const changed = agentsChanged || costChanged || aiuChanged || inspectableChanged;
 		if (changed) this.#syncHudPills();
 		return changed;
-	}
-
-	/**
-	 * Register a resumed session's persisted subagent transcripts (with usage
-	 * history) so the status line's tree cost matches the Agent Hub without it
-	 * being opened first. Once per on-disk root; registry changes re-sync the cost.
-	 */
-	#hydratePersistedSubagentCosts(rootSessionFile: string | undefined): void {
-		if (!rootSessionFile || this.#subagentCostHydratedRoot === rootSessionFile) return;
-		if (!this.sessionManager.isSessionOnDisk()) return;
-		this.#subagentCostHydratedRoot = rootSessionFile;
-		registerPersistedSubagents(AgentRegistry.global(), rootSessionFile, {
-			shouldContinue: () => this.sessionManager.getSessionFile() === rootSessionFile,
-		}).catch(error => {
-			logger.warn("Persisted subagent cost hydration failed", { rootSessionFile, error: String(error) });
-		});
 	}
 
 	/** Placeholder for the empty composer; see `COMPOSER_HINTS` for the registered hints. */
@@ -5124,6 +5160,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.#planReviewPick = undefined;
 			}
 			if (pending && this.#pendingPlanReview === pending) this.#pendingPlanReview = undefined;
+			this.syncIdleMaintenanceView();
 			resolve(choice);
 		};
 		this.#planReviewOwner = owner;
@@ -5164,6 +5201,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#planReviewOverlayHandle = showSheet(this.shell, planReviewSheet(model), () => jsx(PlanReview, { model }), {
 			mouse: "any",
 		});
+		this.syncIdleMaintenanceView();
+		if (cfgCompletionNotify.get(settings) !== "off") {
+			notifyTerminal({
+				title: this.sessionManager.getSessionName() || "omp",
+				body: "Plan ready for approval",
+				type: "completion",
+				actions: "focus",
+			});
+		}
 		return promise;
 	}
 
@@ -6975,7 +7021,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.session.isDisposed || this.#dialogLifetime.signal.aborted) return;
 		const worktreePlan = await this.#planOwnedWorktreeExit(signal);
 		try {
-			await this.#teardown();
+			await this.#teardown({ clearResume: true });
 		} catch (error) {
 			this.#handleTeardownError("close", error);
 			return;
@@ -7047,7 +7093,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	/**
 	 * Tear down like {@link shutdown}, then relaunch the CLI with the original
 	 * launch argv (session-source flags and positional prompts stripped, see
-	 * {@link restartArgv}), restoring this session (`--restore`) when it exists on
+	 * {@link buildResumeArgv}), restoring this session (`--restore`) when it exists on
 	 * disk: subagents the teardown cut off mid-turn go on in the new process.
 	 *
 	 * Refuses to close the session if its working directory has been removed.
@@ -7081,17 +7127,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 
 		const sessionFile = this.sessionManager.isSessionOnDisk() ? this.sessionManager.getSessionFile() : undefined;
-		// Pass the profile explicitly: native exec does not inherit Bun's process.env updates.
-		const activeProfile = getActiveProfile();
-		const cmd = [
-			...resolveRestartCmd(),
-			...restartArgv(
-				process.argv.slice(2),
-				sessionFile ? path.resolve(sessionFile) : undefined,
-				activeProfile ? { "--profile": true } : undefined,
-			),
-		];
-		if (activeProfile) cmd.push("--profile", activeProfile);
+		const cmd = buildResumeArgv(sessionFile);
+		const resumeToken = getProgramResumeToken();
 		await postmortem.cleanup();
 		await postmortem.drainStdout();
 		if (process.platform !== "win32") {
@@ -7101,6 +7138,8 @@ export class InteractiveMode implements InteractiveModeContext {
 					const value = process.env[key];
 					if (value !== undefined) env[key] = value;
 				}
+				// Restore the captured OSC 7577 token only for the replacement omp on this PTY.
+				if (resumeToken) env[OSC_7577_TOKEN_ENV] = resumeToken;
 				execReplace(cmd[0], cmd, env, []); // never returns on success
 			} catch (err) {
 				process.stderr.write(`${chalk.red(`Restart exec failed: ${err instanceof Error ? err.message : err}`)}\n`);
@@ -7111,6 +7150,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				stdin: "inherit",
 				stdout: "inherit",
 				stderr: "inherit",
+				...(resumeToken ? { env: { ...process.env, [OSC_7577_TOKEN_ENV]: resumeToken } } : {}),
 			});
 			await postmortem.quit(await child.exited);
 		} catch (err) {
@@ -7146,7 +7186,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	/** Shared `shutdown()`/`restart()` teardown: dispose the session and hand the terminal back. */
-	async #teardown(): Promise<void> {
+	async #teardown(options?: { clearResume?: boolean }): Promise<void> {
 		// An in-flight loop condition (or a deferred auto-submit timer) must not
 		// outlive session disposal: an unaborted `sleep 30`-style condition can
 		// resolve mid-teardown and drive `#passesLoopCondition` into invoking the
@@ -7199,6 +7239,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		// terminal back (which would leave the parent shell with a `π ⠋ …` tab).
 		disposeTerminalTitleState();
 		disposeProgramStatus();
+		if (options?.clearResume) clearProgramResume();
+		else disposeProgramResume();
 		popTerminalTitle();
 		this.stop();
 		// The driver drains in-flight key releases and restores the terminal before the shell gets it.
@@ -7415,6 +7457,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.#pendingCommandOutput.length > 0 && this.#pendingCommandOutputSessionId !== sessionId) {
 			this.#pendingCommandOutput = [];
 			this.#pendingCommandOutputCommands = 0;
+			this.#pendingCommandOutputPreviewFrom = 0;
 		}
 		this.#pendingCommandOutputSessionId = sessionId;
 		this.#pendingCommandOutput.push(options ? { factory, options } : { factory });
@@ -7426,9 +7469,21 @@ export class InteractiveMode implements InteractiveModeContext {
 	#syncDeferredCommandPreview(): void {
 		const deferred = this.hud.deferred;
 		batch(() => {
-			deferred.panels.set(this.#pendingCommandOutput.map(item => item.factory));
+			deferred.panels.set(
+				this.#pendingCommandOutput.slice(this.#pendingCommandOutputPreviewFrom).map(item => item.factory),
+			);
 			deferred.commands.set(this.#pendingCommandOutputCommands);
+			deferred.dismissKey.set(appInterruptKeys(this.keybindings)[0] ?? "escape");
 		});
+	}
+
+	/** Esc: hide the queued panels shown above the editor; they still enter the transcript at the settle. False when none is shown. */
+	dismissDeferredCommandOutput(): boolean {
+		if (this.#pendingCommandOutputPreviewFrom >= this.#pendingCommandOutput.length) return false;
+		this.#pendingCommandOutputPreviewFrom = this.#pendingCommandOutput.length;
+		this.#pendingCommandOutputCommands = 0;
+		this.#syncDeferredCommandPreview();
+		return true;
 	}
 
 	/** Mount every command panel queued for the current session while the agent was streaming. */
@@ -7439,6 +7494,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#pendingCommandOutput = [];
 		this.#pendingCommandOutputSessionId = undefined;
 		this.#pendingCommandOutputCommands = 0;
+		this.#pendingCommandOutputPreviewFrom = 0;
 		this.#syncDeferredCommandPreview();
 		if (pendingSessionId !== this.sessionManager.getSessionId()) return;
 		for (const item of pending) this.present(item.factory, item.options);
@@ -8209,8 +8265,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#selectorController.showSettingsSelector();
 	}
 
-	showUsageDashboard(reports: UsageReport[]): void {
-		this.#selectorController.showUsageDashboard(reports);
+	showUsageDashboard(reports: UsageReport[], sessionAiu?: AiuTotals): void {
+		this.#selectorController.showUsageDashboard(reports, sessionAiu);
 	}
 
 	showAdvisorConfigure(): void {

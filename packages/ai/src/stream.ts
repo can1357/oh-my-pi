@@ -17,6 +17,7 @@ import {
 	resolveWireModelId,
 	withoutUnverifiedThinking,
 } from "@oh-my-pi/pi-catalog/model-thinking";
+import { isKimiCodeEndpoint } from "@oh-my-pi/pi-catalog/compat/kimi-code";
 import { $env, logger } from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
 import {
@@ -46,7 +47,6 @@ import { type FactoryDroidOptions, streamFactoryDroid } from "./providers/factor
 import { streamGitLabDuo } from "./providers/gitlab-duo";
 import { type GitLabDuoWorkflowOptions, streamGitLabDuoWorkflow } from "./providers/gitlab-duo-workflow";
 import type { GoogleOptions } from "./providers/google";
-import { perturbContext } from "./prompts/perturbation";
 import { getVertexAccessToken } from "./providers/google-auth";
 import type { GoogleInteractionsOptions } from "./providers/google-interactions";
 import type { GoogleVertexOptions } from "./providers/google-vertex";
@@ -452,7 +452,6 @@ function streamDispatch<TApi extends Api>(
 	limited: boolean,
 ): AssistantMessageEventStream {
 	// A provider turned off in its auth rules is never called, even with a key passed in directly.
-	context = perturbContext(model, context);
 	assertProviderEnabled(model.provider);
 	const requestOptions = withSupportedSamplingParams(
 		model,
@@ -1118,8 +1117,9 @@ function streamSimpleDispatch<TApi extends Api>(
 		});
 	}
 
-	// Kimi Code - route to dedicated handler that wraps OpenAI or Anthropic API
-	if (model.provider === "kimi-code") {
+	// Kimi Code managed endpoint (`kimi-code-endpoint` axis) - route to the
+	// dedicated handler that wraps OpenAI or Anthropic API.
+	if (isKimiCodeEndpoint(model)) {
 		// streamKimi handles openai/anthropic format mapping internally, but the
 		// mandatory-reasoning clamp is a request-shaping concern owned here: K3's
 		// `supports_thinking_type: "only"` endpoint rejects disabled/omitted
@@ -1468,6 +1468,7 @@ function mapOptionsForApi<TApi extends Api>(
 		fetch: options?.fetch,
 		fallbacks: options?.fallbacks,
 		acceptEmptyResponse: options?.acceptEmptyResponse,
+		onDiscardedAttempt: options?.onDiscardedAttempt,
 		anthropicPrefixMismatchBehavior: options?.anthropicPrefixMismatchBehavior,
 		omitDemotedReasoning: options?.omitDemotedReasoning,
 		anthropicCompaction: options?.anthropicCompaction,

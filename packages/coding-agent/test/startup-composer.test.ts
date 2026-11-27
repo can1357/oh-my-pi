@@ -42,6 +42,7 @@ import {
 	cfgStartupShowSplash,
 	cfgTuiImeSafeCursor,
 	cfgTuiResizeScrollback,
+	cfgTuiScreen,
 	cfgTuiVimMode,
 } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
@@ -255,6 +256,7 @@ describe("startup prepaint frame", () => {
 			autocompleteMaxVisible: cfgAutocompleteMaxVisible.get(settings),
 			vim: cfgTuiVimMode.get(settings),
 			imeSafeCursor: cfgTuiImeSafeCursor.get(settings),
+			screen: cfgTuiScreen.get(settings),
 		};
 	});
 
@@ -671,6 +673,23 @@ describe("startup prepaint frame", () => {
 
 		term.type("still editable");
 		await term.waitFor(rows => rows.some(row => row.includes("still editable")));
+	});
+
+	it("starts a fullscreen session on the alternate screen without erasing the shell's scrollback", async () => {
+		const lease = await prepaint({ columns: 80, rows: 24, preferences: { screen: "fullscreen" } });
+		expect(term.engine.isMainScreen).toBe(false);
+		expect(term.memory.output.join("")).not.toContain("\x1b[3J");
+		await lease.frame.shell.stop();
+		expect(term.engine.isMainScreen).toBe(true);
+	});
+
+	it("switches a prepaint started from a stale cached screen mode to the resolved one", async () => {
+		term = createModeTerminal({ columns: 80, rows: 24 });
+		beginStartupComposer({ driver: term.memory.options, version: "test", cache: false, preferences: config });
+		await term.waitFor(rows => rows.length > 0);
+		expect(term.engine.isMainScreen).toBe(true);
+		applyStartupComposerPreferences({ ...config, screen: "fullscreen", theme: {} });
+		await term.waitFor(() => !term.engine.isMainScreen);
 	});
 
 	// Cold launch first clears native history while painting the prepaint welcome.

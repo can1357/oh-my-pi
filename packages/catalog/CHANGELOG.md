@@ -2,8 +2,13 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Moonshot no longer accepts `KIMI_API_KEY` as a fallback alias; the Open Platform provider uses `MOONSHOT_API_KEY` only, since a Moonshot key does not authenticate the Kimi Code endpoints and the shared alias made `KIMI_API_KEY` expose Moonshot models instead of Kimi Code (removes the legacy #2883 alias; [#20509](https://github.com/can1357/oh-my-pi/pull/20509) by [@digi4care](https://github.com/digi4care)). Migrate Moonshot Open Platform keys from `KIMI_API_KEY` to `MOONSHOT_API_KEY`.
+
 ### Added
 
+- Added `discoverGitHubCopilotAccount` (endpoint and `token_based_billing` mode from `copilot_internal/user`), `readCopilotTokenBilling`, `rememberCopilotTokenBilling`/`resolveCopilotTokenBilling` (billing mode learned per token for this process), and `ParsedGitHubCopilotApiKey.tokenBasedBilling` to `wire/github-copilot` ([#20807](https://github.com/can1357/oh-my-pi/pull/20807) by [@wapenshaw](https://github.com/wapenshaw))
 - Added ArkaneCloud provider: `/login arkanecloud` with `ARKANECLOUD_API_KEY`, models and prices discovered live per API key ([#20506](https://github.com/can1357/oh-my-pi/pull/20506) by [@Randyopo](https://github.com/Randyopo))
 - Added `xai-oauth/grok-voice-transcribe-2.0` (SuperGrok speech-to-text on `api.x.ai/v1/stt`, through the new `xai-stt` runner API) ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 - Added Refuseless (`refuseless`) with abliterated and standard open-weight models, live model discovery from `https://api.refuseless.com/v1/models`, and `/login refuseless` (`REFUSELESS_API_KEY`)
@@ -16,19 +21,31 @@
 - Added DeepInfra text-to-speech models `Qwen/Qwen3-TTS` and `sesame/csm-1b`.
 - Added the `connected-name` and `active-notice` auth nodes: what a provider is called once an account is signed in, and the transcript line shown when a session starts using one of its models
 - Added `window-ms` to hook-refreshed logins (`refresh hook="…" { window-ms … }`), so their access tokens can renew earlier than the 60-second default
-- Added the `device-bound` auth node (logins that depend on a key only this machine holds stay out of the auth broker) and the `sign-out hook="…"` node (forgets a removed login's secrets kept outside `agent.db` and revokes it upstream)
+- Added the `device-bound` auth node (logins that depend on a key only this machine holds stay out of the auth broker) and the `sign-out hook="…"` node (revokes a removed login upstream)
+- Added ArkaneCloud provider: `/login arkanecloud` with `ARKANECLOUD_API_KEY`, models and prices discovered live per API key ([#20506](https://github.com/can1357/oh-my-pi/pull/20506) by [@Randyopo](https://github.com/Randyopo))
+- Added `xai-oauth/grok-voice-transcribe-2.0` (SuperGrok speech-to-text on `api.x.ai/v1/stt`, through the new `xai-stt` runner API) ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+- Added Refuseless (`refuseless`) with abliterated and standard open-weight models, live model discovery from `https://api.refuseless.com/v1/models`, and `/login refuseless` (`REFUSELESS_API_KEY`)
+- Added the `kimi-code-global` provider for the global Kimi Code deployment (`https://auth.kimi.ai` / `https://api.kimi.ai/coding/v1`); `kimi-code` is now labeled "Kimi Code (China)" ([#15889](https://github.com/can1357/oh-my-pi/pull/15889) by [@z80dev](https://github.com/z80dev), [#20509](https://github.com/can1357/oh-my-pi/pull/20509) by [@digi4care](https://github.com/digi4care)). The global OAuth host honors `KIMI_GLOBAL_OAUTH_HOST` and `KIMI_GLOBAL_AUTH_HOST` overrides, falling back to the shared `KIMI_CODE_OAUTH_HOST` and `KIMI_OAUTH_HOST`; `KIMI_API_KEY` authenticates `kimi-code` at provider level and `KIMI_CODE_GLOBAL_API_KEY` authenticates `kimi-code-global`.
+- Added `/login google`, which stores a Google AI Studio Gemini API key for the `google` provider without setting `GEMINI_API_KEY` ([#3784](https://github.com/can1357/oh-my-pi/issues/3784))
+- Added the `reports-aiu` catalog axis: hosts whose replies carry a server-reported AI-credit charge, so a reply without one counts as unknown spend; GitHub Copilot sets it for Messages and Responses ([#20667](https://github.com/can1357/oh-my-pi/issues/20667), [#20806](https://github.com/can1357/oh-my-pi/pull/20806) by [@wapenshaw](https://github.com/wapenshaw))
+- Added Factory Droid's Gemini 4 Neon (`gemini-4-neon`), listed once the account's `gemini_4_neon` feature flag enables it, with low, medium, high and xhigh thinking levels (default high), a 1,048,576-token context, Google's list price and Factory's 1.2× input credit rate ([#19841](https://github.com/can1357/oh-my-pi/issues/19841))
+- Added Factory Droid's Gemini 4 Hydrogen (`gemini-4-hydrogen`), listed once the account's `gemini_4_hydrogen` feature flag enables it, with low, medium, high and xhigh thinking levels (default high), a 1,000,000-token context, Google's list price and Factory's 0.6× input credit rate ([#19173](https://github.com/can1357/oh-my-pi/issues/19173))
 
 ### Changed
 
 - Seeded models now remain available even when their provider applies model exclusions.
 - Replaced the local `parakeet-tdt-0.6b-v3` dictation seed with `fluid-speech-pro`, now the default dictation model, and added `parakeet-tdt-0.6b-v2` (English).
 - Devin models now expose their fast lane through `/fast` instead of listing separate `-fast` model entries.
+- `KIMI_API_KEY` moved from the `kimi-code` discovery block to provider level so runtime credential resolution and usage probing resolve it as the `kimi-code` env credential; discovery still inherits it via the provider-envVars fallback ([#12405](https://github.com/can1357/oh-my-pi/pull/12405) by [@evanmaranzano](https://github.com/evanmaranzano), API-key login design from [#960](https://github.com/can1357/oh-my-pi/pull/960) by [@tsubus](https://github.com/tsubus), [#20509](https://github.com/can1357/oh-my-pi/pull/20509) by [@digi4care](https://github.com/digi4care)).
 
 ### Fixed
 
 - Fixed QwenCloud Token Plan (`alibaba-token-plan`) DeepSeek V4.1 Flash models (`deepseek-v4.1-flash`, `deepseek-v4.1-flash-1017`) dropping attached images as text-only; they now accept image input ([#20773](https://github.com/can1357/oh-my-pi/issues/20773))
+- Fixed GitHub Copilot `-1m` long-context rows pricing cache reads at $0 when the tier's billing omits them, which understated dollar estimates; an omitted cache price now follows the base row, and the GPT long tiers whose rate card bills cache at 2x input scale it accordingly ([#20667](https://github.com/can1357/oh-my-pi/issues/20667), [#20803](https://github.com/can1357/oh-my-pi/pull/20803) by [@wapenshaw](https://github.com/wapenshaw))
 - Fixed Antigravity model display and pricing: models now appear as included with the Google AI plan, can serve as the cheapest configured vision fallback, and report zero cost in OTLP telemetry.
 - Fixed `google-vertex` Claude Fable 5.1+ requests failing their first attempt with 400 `thinking.adaptive.block_binding: Extra inputs are not permitted` ([#20765](https://github.com/can1357/oh-my-pi/issues/20765))
+- Fixed ClinePass subscription `deepseek-v4.1-flash-1017` offering no thinking levels; it now exposes `low`/`high`/`max` and sends the selected `reasoning_effort` ([#16414](https://github.com/can1357/oh-my-pi/issues/16414), [#16417](https://github.com/can1357/oh-my-pi/pull/16417) by [@jhste102lab](https://github.com/jhste102lab))
+- Fixed OpenRouter `typesafe/jev-router` being classified as a judge model, which aborted startup for custom providers registering the OpenRouter roster on the `openrouter` chat API ([#15244](https://github.com/can1357/oh-my-pi/issues/15244))
 
 ### Added
 

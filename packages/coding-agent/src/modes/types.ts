@@ -12,6 +12,7 @@ import type { KeyId } from "../config/keybindings/key-id";
 import type { KeybindingsManager } from "../config/keybindings/keybindings";
 import type { SpaceHoldHandler } from "../config/keybindings/space-hold";
 import type { Settings } from "../config/settings";
+import type { AiuTotals } from "../session/aiu-billing";
 import type {
 	AutocompleteProviderFactory,
 	ExtensionCustomFactory,
@@ -781,6 +782,8 @@ export interface InteractiveModeContext {
 	showSessionInfo(info: string, context?: ContextUsage): void;
 	/** Mount command output deferred by {@link presentCommandOutput}. */
 	flushPendingCommandOutput(): void;
+	/** Hide the deferred command output preview; the output still mounts at the settle. False when none is shown (Esc falls through). */
+	dismissDeferredCommandOutput(): boolean;
 	/**
 	 * Remove every transcript block (disposing their roots, so timers and subscriptions stop) and
 	 * forget the block maps. Used before a full rebuild.
@@ -1002,7 +1005,7 @@ export interface InteractiveModeContext {
 	// Selector handling
 	showSettingsSelector(): void;
 	/** Open the fullscreen `/usage` dashboard overlay for the given reports. */
-	showUsageDashboard(reports: UsageReport[]): void;
+	showUsageDashboard(reports: UsageReport[], sessionAiu?: AiuTotals): void;
 	showAdvisorConfigure(): void;
 	showHistorySearch(): void;
 	showExtensionsDashboard(): void;

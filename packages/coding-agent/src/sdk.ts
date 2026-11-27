@@ -253,7 +253,7 @@ import {
 import { describeUsageFallback } from "./session/retry-fallback-reason";
 import { kUsageLimitRequestProvider } from "./session/turn-recovery";
 import { getReadableCompactionEntry, getRestorableSessionModels } from "./session/session-context";
-import { completionRecord } from "./session/model-usage-journal";
+import { completionRecord, journalCompletion } from "./session/model-usage-journal";
 import { SessionManager } from "./session/session-manager";
 import { cfgOffline } from "./config/auxiliary-model-policy";
 import { SHAPE_RULE } from "./spotlight/shape";
@@ -435,6 +435,7 @@ import {
 import { cfgInterruptMode } from "./modes/settings";
 import { cfgFollowUpMode } from "./modes/settings";
 import { cfgSteeringMode } from "./modes/settings";
+import { cfgGitChildRepoDiscovery } from "./modes/settings";
 import {
 	cfgCommandsEnableClaudeProject,
 	cfgCommandsEnableOpencodeProject,
@@ -2152,6 +2153,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		: logger.time("discoverContextFiles", discoverContextFiles, cwd, agentDir).then(contextFileFilter);
 	contextFilesPromise.catch(() => {});
 	const resolveRepoContext = async (repoCwd: string) => {
+		if (!cfgGitChildRepoDiscovery.get(settings)) return null;
 		try {
 			return await resolveActiveRepoContext(repoCwd);
 		} catch (err) {
@@ -3974,7 +3976,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			() => (hasSession ? createSessionMemoryRuntimeContext(session, agentDir, cwd) : undefined),
 			settings,
 			localProtocolOptions,
-			() => (hasSession ? session.getAsyncJobSnapshot() : null),
+			{
+				getSnapshot: () => (hasSession ? session.getAsyncJobSnapshot() : null),
+				cancel: id => hasSession && session.cancelAsyncJob(id),
+			},
 			Object.freeze({
 				kind: isSubagentSession ? "sub" : "main",
 				id: resolvedAgentId,
@@ -5067,6 +5072,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				settingsBoundStreamFn(streamModel, context, {
 					...streamOptions,
 					thinkingCapabilityDbPath: modelRegistry.modelsDbPath,
+					// An attempt a replay-safe retry discarded was sent and may be billed: journal it as its
+					// own call so its tokens, cost and credits count, apart from the reply that replaced it.
+					onDiscardedAttempt:
+						streamOptions?.onDiscardedAttempt ??
+						((message, reason) =>
+							journalCompletion(sessionManager, { purpose: `stream-retry:${reason}`, usageOnly: true })?.(
+								message,
+							)),
 				}),
 			);
 		};

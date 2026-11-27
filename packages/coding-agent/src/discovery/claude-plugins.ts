@@ -58,6 +58,8 @@ interface ClaudePluginManifest {
 
 interface ResolvedPluginDir {
 	dirs: string[];
+	/** A manifest named a path, even if it resolved to the conventional directory or was rejected. */
+	declared: boolean;
 	warnings: string[];
 }
 
@@ -177,7 +179,7 @@ async function resolvePluginDir(root: ClaudePluginRoot, options: ResolvePluginDi
 	}
 
 	if (configured.length === 0) {
-		return { dirs: [fallbackDir], warnings: [] };
+		return { dirs: [fallbackDir], declared: false, warnings: [] };
 	}
 
 	const seen = new Set<string>();
@@ -200,12 +202,34 @@ async function resolvePluginDir(root: ClaudePluginRoot, options: ResolvePluginDi
 		dirs.push(resolved);
 	}
 
-	return { dirs, warnings };
+	return { dirs, declared: true, warnings };
 }
 
 // =============================================================================
 // Skills
 // =============================================================================
+
+async function pathExists(p: string): Promise<boolean> {
+	try {
+		await fs.stat(p);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function withPluginRoot(result: LoadResult<Skill>, pluginRoot: string): LoadResult<Skill> {
+	return {
+		items: result.items.map(item => ({
+			...item,
+			content: substitutePluginRoot(item.content, pluginRoot),
+			// Forward the install path so read-time body rendering
+			// (`skill://` reads, `/skill:` expansion) can substitute too.
+			_source: { ...item._source, pluginRoot },
+		})),
+		warnings: result.warnings,
+	};
+}
 
 async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 	const items: Skill[] = [];
@@ -215,12 +239,36 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 	const results = await Promise.all(
 		roots.map(async root => {
 			const marketplaceRootManifest = await readMarketplaceRootManifest(root);
-			const { dirs: skillsDirs, warnings: resolveWarnings } = await resolvePluginDir(root, {
+			const {
+				dirs: skillsDirs,
+				declared,
+				warnings: resolveWarnings,
+			} = await resolvePluginDir(root, {
 				manifestKeys: ["skills"],
 				fallback: "skills",
 				includeFallback: true,
 				marketplaceRootManifest,
 			});
+			// Claude Code >= 2.1.142 parity: a plugin with no `skills` manifest
+			// path and no `skills/` directory whose root holds a `SKILL.md` is
+			// itself a single skill.
+			const defaultSkillsDir = path.join(root.path, "skills");
+			const rootSkillPath = path.join(root.path, "SKILL.md");
+			if (!declared && !(await pathExists(defaultSkillsDir)) && (await pathExists(rootSkillPath))) {
+				const rootResult = await scanSkillsFromDir(ctx, {
+					dir: root.path,
+					providerId: PROVIDER_ID,
+					level: root.scope,
+					includeSelf: true,
+					origin: root.origin,
+					pluginName: root.plugin,
+				});
+				rootResult.items = rootResult.items.filter(item => item.path === rootSkillPath);
+				return {
+					scanResults: [withPluginRoot(rootResult, root.path)],
+					resolveWarnings,
+				};
+			}
 			const scanResults = await Promise.all(
 				skillsDirs.map(dir =>
 					scanSkillsFromDir(ctx, {
@@ -236,17 +284,7 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 			// Claude Code parity: `${CLAUDE_PLUGIN_ROOT}` / `${OMP_PLUGIN_ROOT}`
 			// resolve in skill Markdown bodies (#20165) — substitute the plugin
 			// install path when the content is loaded, not in bash.
-			const substitutedResults = scanResults.map(result => ({
-				items: result.items.map(item => ({
-					...item,
-					content: substitutePluginRoot(item.content, root.path),
-					// Forward the install path so read-time body rendering
-					// (`skill://` reads, `/skill:` expansion) can substitute too.
-					_source: { ...item._source, pluginRoot: root.path },
-				})),
-				warnings: result.warnings,
-			}));
-			return { scanResults: substitutedResults, resolveWarnings };
+			return { scanResults: scanResults.map(result => withPluginRoot(result, root.path)), resolveWarnings };
 		}),
 	);
 	for (const { scanResults, resolveWarnings } of results) {

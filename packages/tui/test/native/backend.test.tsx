@@ -637,7 +637,9 @@ describe("native reconciler", () => {
 	});
 
 	it("sends a canvas as rows painted at the surface width, repainting on resize", async () => {
-		const h = await mount(() => ({ main: <canvas paint={width => ["=".repeat(width)]} /> }), { cols: 6 });
+		const h = await mount(() => ({ main: <canvas paint={width => ["=".repeat(width)]} onMouse={() => true} /> }), {
+			cols: 6,
+		});
 		expect(h.tern.doc("s:t").tree("main/0")).toEqual({ id: "main/0", k: "rows", p: { cols: 6, lines: ["======"] } });
 		h.tern.event({ ev: "resize", cols: 3 });
 		h.settle();

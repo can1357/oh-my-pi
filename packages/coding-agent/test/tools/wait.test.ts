@@ -225,6 +225,25 @@ describe("wait", () => {
 		build.resolve("done");
 	});
 
+	test("the back-to-back reminder names a watcher job for outside conditions, then the mode's next step", async () => {
+		vi.useFakeTimers();
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const build = Promise.withResolvers<string>();
+		manager.register("bash", "build", async () => build.promise, { ownerId: "Main" });
+		// A CI run or deploy no job reports: the agent arranges its own wake-up instead of handing the timer to the user.
+		const interactive = new WaitTool(session(manager, "Main", false, { tuiTranscript: true }));
+		await elapse(interactive, 240_000);
+		const endTurn = notice(await elapse(interactive, 240_000));
+		expect(endTurn).toContain("watcher");
+		expect(endTurn).toContain("end your turn: its finish starts your next one");
+		const headless = new WaitTool(session(manager));
+		await elapse(headless, 5_000);
+		const waitAgain = notice(await elapse(headless, 240_000));
+		expect(waitAgain).toContain("watcher");
+		expect(waitAgain).toContain("call `wait`: its finish ends the wait");
+		build.resolve("done");
+	});
+
 	test("news or a minute away from wait restarts the ladder at the floor", async () => {
 		vi.useFakeTimers();
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });
@@ -459,7 +478,7 @@ describe("wait", () => {
 		test("the description follows a setting changed mid-session", () => {
 			const settings = Settings.isolated();
 			const tool = new WaitTool(session(undefined, "Main", false, { settings }));
-			expect(tool.description).toContain("it then blocks up to 4m, longer for a reply.");
+			expect(tool.description).toContain("it then blocks up to 4m, longer with a long-lived prompt cache.");
 			cfgWaitIdleTimeout.override(settings, "none");
 			expect(tool.description).toContain("returns only once one finishes or a message arrives");
 		});
@@ -1192,18 +1211,42 @@ describe("wait", () => {
 			expect(report(await elapse(tenMinutes, 540_000))).toContain("No reply within 9m");
 		});
 
-		test("a job wait keeps the 4m top window whatever the cache lifetime", async () => {
+		test("a back-to-back job wait stretches its top window to the cache lifetime, capped at 30m", async () => {
 			vi.useFakeTimers();
 			const manager = new AsyncJobManager({ onJobComplete: () => {} });
 			const build = Promise.withResolvers<string>();
 			manager.register("bash", "build", async () => build.promise, { ownerId: "Main" });
-			const tool = new WaitTool(
+			const hour = new WaitTool(
 				session(manager, "Main", false, {
 					getPromptCacheEntry: () => ({ touchedAt: Date.now(), tier: "long", ttlMs: 3_600_000 }),
 				}),
 			);
-			expect(report(await elapse(tool, 5_000))).toContain("it then blocks up to 4m.");
-			expect(report(await elapse(tool, 240_000))).toContain("No job finished within 4m");
+			expect(report(await elapse(hour, 5_000))).toContain("it then blocks up to 30m.");
+			expect(report(await elapse(hour, 1_800_000))).toContain("No job finished within 30m");
+
+			const tenMinutes = new WaitTool(
+				session(manager, "Main", false, {
+					getPromptCacheEntry: () => ({ touchedAt: Date.now(), tier: "long", ttlMs: 600_000 }),
+				}),
+			);
+			await elapse(tenMinutes, 5_000);
+			expect(report(await elapse(tenMinutes, 540_000))).toContain("No job finished within 9m");
+
+			const fiveMinutes = new WaitTool(
+				session(manager, "Main", false, {
+					getPromptCacheEntry: () => ({ touchedAt: Date.now(), tier: "short", ttlMs: 300_000 }),
+				}),
+			);
+			await elapse(fiveMinutes, 5_000);
+			expect(report(await elapse(fiveMinutes, 240_000))).toContain("No job finished within 4m");
+
+			const interactiveHour = new WaitTool(
+				session(manager, "Main", false, {
+					tuiTranscript: true,
+					getPromptCacheEntry: () => ({ touchedAt: Date.now(), tier: "long", ttlMs: 3_600_000 }),
+				}),
+			);
+			expect(report(await elapse(interactiveHour, 1_800_000))).toContain("No job finished within 30m");
 			build.resolve("done");
 		});
 

@@ -9,6 +9,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { StartupChangelogSelection } from "@oh-my-pi/pi-coding-agent/utils/changelog";
 import * as themeService from "@oh-my-pi/pi-coding-agent/ui/theme/service";
+import { CONSERVATIVE_EMOJI } from "@oh-my-pi/pi-tui/theme/contract";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { createTestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -32,7 +33,7 @@ const startupChangelog: StartupChangelogSelection = {
 	categoryCounts: { Fixed: 1 },
 };
 
-const DARK_TRUECOLOR = { truecolor: true, colors: 16_777_216, dark: true } as const;
+const DARK_TRUECOLOR = { truecolor: true, colors: 16_777_216, dark: true, emoji: CONSERVATIVE_EMOJI } as const;
 
 /** Opening SGR sequence `fg(color, ...)` emits under the active theme. */
 function fgPrefix(color: "accent" | "warning"): string {
