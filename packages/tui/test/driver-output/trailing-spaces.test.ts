@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { RESERVED_ROW } from "@oh-my-pi/pi-tui/driver/images/anchor";
 import { drawRow, normalizeRow, stripTrailingBlankSpaces } from "@oh-my-pi/pi-tui/driver/output/ansi";
 import { renderMarkdown } from "../../src/text/markdown";
 import { loadThemeSync } from "../../src/theme";
@@ -32,11 +33,28 @@ describe("stripTrailingBlankSpaces", () => {
 		);
 	});
 
-	it("strips default-background spaces after a background or hyperlink closes", () => {
+	it("strips default-background spaces after a background, underline, or hyperlink closes", () => {
 		expect(stripTrailingBlankSpaces("\x1b[48;2;30;30;30mhello\x1b[49m   ")).toBe("\x1b[48;2;30;30;30mhello\x1b[49m");
+		expect(stripTrailingBlankSpaces("\x1b[4:3mhello\x1b[4:0m   ")).toBe("\x1b[4:3mhello\x1b[4:0m");
+		// SGR 21 matches SgrState.apply (underline off).
+		expect(stripTrailingBlankSpaces("\x1b[4mhello\x1b[21m   ")).toBe("\x1b[4mhello\x1b[21m");
 		expect(stripTrailingBlankSpaces("\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\   ")).toBe(
 			"\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\",
 		);
+	});
+
+	it("handles 3-byte escapes, SOS/PM control strings, tmux DCS, and escape-only RESERVED_ROW", () => {
+		// 3-byte G0 charset designation (e.g. `tput sgr0` emits ESC ( B ESC [ m).
+		expect(stripTrailingBlankSpaces("\x1b[32mfoo   \x1b(B\x1b[m")).toBe("\x1b[32mfoo");
+		// SOS and PM payloads are control strings, not visible text.
+		expect(stripTrailingBlankSpaces("foo   \x1bXignored\x1b\\")).toBe("foo");
+		expect(stripTrailingBlankSpaces("foo   \x1b^ignored\x1b\\")).toBe("foo");
+		// Tmux passthrough DCS (doubled ESC inside payload) stays intact as graphics.
+		const tmux = "\x1bPtmux;\x1b\x1bPqdata\x1b\x1b\\\x1b\\";
+		expect(stripTrailingBlankSpaces(tmux)).toBe(tmux);
+		// Escape-only RESERVED_ROW (\x1b[0m) must remain distinct from "" so FrameWriter erases replaced image bands.
+		expect(stripTrailingBlankSpaces(RESERVED_ROW)).toBe(RESERVED_ROW);
+		expect(normalizeRow(RESERVED_ROW, 40)).toBe(RESERVED_ROW);
 	});
 });
 
@@ -65,15 +83,15 @@ describe("terminal output trailing spaces", () => {
 		expect(bytes).toContain("\x1b[K");
 		expect(bytes).not.toContain("Hello world          ");
 		expect(bytes).not.toContain("const answer = 42;          ");
-		expect(vt.screen().slice(0, 5)).toEqual([" Hello world", "", " ```ts", "const answer = 42;", " ```"]);
+		expect(vt.screen().slice(0, 5)).toEqual([" Hello world", "", "```ts", "const answer = 42;", "```"]);
 
 		// Updating a longer row to a shorter row emits EL0 (\x1b[K) and clears the remainder cleanly.
 		const updateMark = vt.writes.length;
-		vt.present({ viewport: [" Hi", "", " ```ts", "const x = 1;", " ```"], cursor: null });
+		vt.present({ viewport: [" Hi", "", "```ts", "const x = 1;", "```"], cursor: null });
 		const updateBytes = vt.since(updateMark);
 		expect(updateBytes).toContain("\r Hi\x1b[K");
 		expect(updateBytes).toContain("\rconst x = 1;\x1b[K");
-		expect(vt.screen().slice(0, 5)).toEqual([" Hi", "", " ```ts", "const x = 1;", " ```"]);
+		expect(vt.screen().slice(0, 5)).toEqual([" Hi", "", "```ts", "const x = 1;", "```"]);
 	});
 
 	it("preserves full-width background fills, box borders, and right-aligned text", () => {

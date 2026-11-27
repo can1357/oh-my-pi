@@ -73,10 +73,10 @@ export function frameRow(theme: Theme, width: number, row: string, border = "dim
 	return `${v} ${padTo(row, frameInner(width))} ${v}`;
 }
 
-/** A row filled with a background that survives the row's own resets (default-background rows omit trailing padding). */
+/** A row filled with a background that survives the row's own resets. */
 function fillRow(theme: Theme, key: string | undefined, row: string, width: number): string {
-	if (!key) return visibleWidth(row) > width ? truncate(row, width, "") : row;
 	const padded = padTo(row, width);
+	if (!key) return padded;
 	const fill = (theme as { bgFill?: (color: string, text: string) => string }).bgFill;
 	return fill ? fill.call(theme, key, padded) : theme.bg(key, padded);
 }
