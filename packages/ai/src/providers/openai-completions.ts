@@ -2601,28 +2601,6 @@ export function completionsDropsOwnThinking(
 	);
 }
 
-/**
- * Prefix every listed literal with a backslash.
- *
- * A chat template reserves some tokens for non-text positions (DeepSeek's
- * `<\｜deepseek_image\｜>` means "an image part goes here"), and its endpoint
- * rejects a request that carries the same bytes inside ordinary text. The
- * prefix changes the byte sequence the tokenizer matches without altering the
- * surrounding words, so a tool result that legitimately quoted a template
- * stays readable. Only literals the model's `compat.escapeTextTokens` names
- * are touched; every other model sends text byte-identical to the transcript.
- */
-function escapeReservedTextTokens(text: string, tokens: readonly string[] | undefined): string {
-	if (!tokens?.length) return text;
-	let escaped = text;
-	for (const token of tokens) {
-		// An empty literal would prefix every character gap in the message.
-		if (token.length === 0 || !escaped.includes(token)) continue;
-		escaped = escaped.replaceAll(token, `\\${token}`);
-	}
-	return escaped;
-}
-
 export function convertMessages(
 	model: Model<"openai-completions">,
 	context: Context,
@@ -3140,26 +3118,6 @@ export function convertMessages(
 					? "developer"
 					: "system"
 				: msg.role;
-	}
-
-	// One pass over the fresh wire bodies, so every role — system, developer,
-	// user, assistant replay, tool — is covered without threading the token
-	// list through each construction site. The objects are local to this call,
-	// so the rewrite is in place and allocation-free until a literal matches.
-	if (compat.escapeTextTokens?.length) {
-		const tokens = compat.escapeTextTokens;
-		for (const param of params as Array<{ content?: unknown }>) {
-			const content = param.content;
-			if (typeof content === "string") {
-				param.content = escapeReservedTextTokens(content, tokens);
-				continue;
-			}
-			if (!Array.isArray(content)) continue;
-			for (const part of content as Array<{ type?: unknown; text?: string }>) {
-				if (part?.type !== "text" || typeof part.text !== "string") continue;
-				part.text = escapeReservedTextTokens(part.text, tokens);
-			}
-		}
 	}
 
 	return params;

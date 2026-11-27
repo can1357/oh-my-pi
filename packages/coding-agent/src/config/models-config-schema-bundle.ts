@@ -76,9 +76,6 @@ export const getModelsConfigSchemaBundle = once(() => {
 	const OpenAICompatFields = {
 		"supportsStore?": "boolean",
 		"supportsDeveloperRole?": "boolean",
-		// Literals the chat template reserves for a non-text position; each is
-		// backslash-prefixed in outgoing text. Opt-in per model, empty by default.
-		"escapeTextTokens?": "string[]",
 		"supportsMultipleSystemMessages?": "boolean",
 		"supportsReasoningEffort?": "boolean",
 		"reasoningEffortMap?": ReasoningEffortMapSchema,
