@@ -1,4 +1,5 @@
 import { instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
+import { resolvedApiKeyBearer, seedApiKeyResolver } from "@oh-my-pi/pi-ai/auth-retry";
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { type Api, type AssistantMessage, completeSimple, type Model, type Usage } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
@@ -39,6 +40,22 @@ export interface ImageQuestionResult {
  * `images.questionRouting: active` allows only the active model.
  */
 export function resolveImageQuestionModel(session: ToolSession): ResolvedImageQuestionModel {
+	const activeModelPattern = session.getActiveModelString?.() ?? session.getModelString?.();
+	if (cfgImagesQuestionRouting.get(session.settings) === "active") {
+		const active = session.getActiveModel?.();
+		if (!active) {
+			throw new ToolError(
+				"Image questions are limited to the active model (images.questionRouting=active), and it could not be resolved.",
+			);
+		}
+		if (!sendsImageInputOnWire(active)) {
+			throw new ToolError(
+				`Active model ${active.provider}/${active.id} does not support image input, and images.questionRouting=active keeps image questions on the active model.`,
+			);
+		}
+		return { model: active, selectedPattern: activeModelPattern };
+	}
+
 	const modelRegistry = session.modelRegistry;
 	if (!modelRegistry) {
 		throw new ToolError("Model registry is unavailable for image questions.");
@@ -63,22 +80,6 @@ export function resolveImageQuestionModel(session: ToolSession): ResolvedImageQu
 		const expanded = expandRoleAlias(pattern, session.settings);
 		return resolveModelFromString(expanded, availableModels, matchPreferences);
 	};
-
-	const activeModelPattern = session.getActiveModelString?.() ?? session.getModelString?.();
-	if (cfgImagesQuestionRouting.get(session.settings) === "active") {
-		const active = resolvePattern(activeModelPattern);
-		if (!active) {
-			throw new ToolError(
-				"Image questions are limited to the active model (images.questionRouting=active), and it could not be resolved.",
-			);
-		}
-		if (!sendsImageInputOnWire(active)) {
-			throw new ToolError(
-				`Active model ${active.provider}/${active.id} does not support image input, and images.questionRouting=active keeps image questions on the active model.`,
-			);
-		}
-		return { model: active, selectedPattern: activeModelPattern };
-	}
 
 	let model: Model<Api> | undefined;
 	let selectedPattern: string | undefined;
@@ -129,18 +130,17 @@ export async function askImageQuestion(
 		);
 	}
 
-	const modelRegistry = session.modelRegistry;
-	if (!modelRegistry) {
+	const { model, selectedPattern } = resolved;
+	const useSessionKey = cfgImagesQuestionRouting.get(session.settings) === "active" && session.getApiKey;
+	if (!useSessionKey && !session.modelRegistry) {
 		throw new ToolError("Model registry is unavailable for image questions.");
 	}
-	const availableModels = modelRegistry.getAvailable();
-	if (availableModels.length === 0) {
-		throw new ToolError("No models available for image questions.");
-	}
-
-	const { model, selectedPattern } = resolved;
-	const apiKey = await modelRegistry.getApiKey(model);
-	if (!apiKey) {
+	const apiKey = useSessionKey
+		? await useSessionKey(model)
+		: session.modelRegistry?.resolver(model, session.getSessionId?.() ?? undefined);
+	const initialKey =
+		typeof apiKey === "function" ? await apiKey({ lastChance: false, error: undefined, signal }) : apiKey;
+	if (!resolvedApiKeyBearer(initialKey)) {
 		throw new ToolError(
 			`No API key available for ${model.provider}/${model.id}. Configure credentials for this provider or choose another vision-capable model.`,
 		);
@@ -159,13 +159,10 @@ export async function askImageQuestion(
 
 	const configuredThinking = concreteThinkingLevel(
 		extractExplicitThinkingSelector(selectedPattern, session.settings, {
-			isLiteralModelId: (provider, id) => {
-				if (provider !== undefined) {
-					return availableModels.some(candidate => candidate.provider === provider && candidate.id === id);
-				}
-				const lowerId = id.toLowerCase();
-				return availableModels.some(candidate => candidate.id.toLowerCase() === lowerId);
-			},
+			isLiteralModelId: (provider, id) =>
+				provider !== undefined
+					? model.provider === provider && model.id === id
+					: model.id.toLowerCase() === id.toLowerCase(),
 		}),
 	);
 	const reasoning = toReasoningEffort(resolveThinkingLevelForModel(model, configuredThinking));
@@ -190,7 +187,7 @@ export async function askImageQuestion(
 				],
 			},
 			{
-				apiKey: modelRegistry.resolver(model, session.getSessionId?.() ?? undefined),
+				apiKey: typeof apiKey === "function" ? seedApiKeyResolver(initialKey, apiKey) : apiKey,
 				signal: effectiveSignal,
 				reasoning,
 			},

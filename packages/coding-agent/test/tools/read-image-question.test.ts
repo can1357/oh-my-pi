@@ -363,7 +363,8 @@ describe("read image questions", () => {
 		expect(textOf(metadata)).not.toContain("?q=");
 	});
 
-	it("answers with the active model instead of the vision role under active-only routing", async () => {
+	it("answers with the exact active SDK endpoint instead of its catalog namesake or the vision role", async () => {
+		const privateModel = { ...visionModel, baseUrl: "https://private.example/v1" };
 		const otherProviderVision: Model<"openai-responses"> = { ...visionModel, provider: "other", id: "other-vision" };
 		const stub = createCompleteSimpleSuccessStub("Active answer");
 		const session = createSession(
@@ -371,14 +372,32 @@ describe("read image questions", () => {
 			otherProviderVision,
 			"test-key",
 			Settings.isolated({ "images.questionRouting": "active" }),
-			{ activeModel: visionModel, availableModels: [otherProviderVision, visionModel] },
+			{ activeModel: privateModel, availableModels: [otherProviderVision, visionModel] },
 		);
 
 		const result = await new ReadTool(session, stub.fn).execute("call", { path: `${imagePath}?q=What is visible?` });
 
 		expect(result.content).toEqual([{ type: "text", text: "Active answer" }]);
-		const selected = stub.calls[0]?.[0] as Model<"openai-responses"> | undefined;
-		expect(`${selected?.provider}/${selected?.id}`).toBe("openai/gpt-4o");
+		expect(stub.calls[0]?.[0]).toBe(privateModel);
+	});
+
+	it("answers with an SDK model and its credential without a model registry", async () => {
+		const session = createSession(
+			testDir,
+			visionModel,
+			undefined,
+			Settings.isolated({ "images.questionRouting": "active" }),
+		);
+		session.modelRegistry = undefined;
+		session.getApiKey = model => {
+			expect(model).toBe(visionModel);
+			return "sdk-key";
+		};
+		const stub = createCompleteSimpleSuccessStub("SDK answer");
+		const result = await new ReadTool(session, stub.fn).execute("call", { path: `${imagePath}?q=What is visible?` });
+		expect(result.content).toEqual([{ type: "text", text: "SDK answer" }]);
+		expect(stub.calls[0]?.[0]).toBe(visionModel);
+		expect(stub.calls[0]?.[2]).toMatchObject({ apiKey: "sdk-key" });
 	});
 
 	it("returns metadata and a question hint without pixels for text-only active models", async () => {
