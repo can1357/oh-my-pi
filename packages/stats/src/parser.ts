@@ -790,7 +790,7 @@ export async function parseSessionFile(
 		const answered = replies.visit(entry);
 		// The parent's copied calls bill to the parent, whichever transcript syncs first.
 		const inheritedCall = inherited.visit(entry);
-		spotlight.visit(entry);
+		spotlight.visit(entry, inheritedCall);
 		if (isServiceTierChange(entry)) {
 			currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
 			return;

@@ -973,6 +973,30 @@ describe("Spotlight ingest", () => {
 		expect(stats.sessions).toBe(1);
 	});
 
+	it("keeps a parent's requests when its reset fork is ingested first", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		shortenedRead(b);
+		const parentFile = await write("parent.jsonl", b);
+		// A `/tan` clone copies every entry and marks the copied prefix with the last one's id.
+		const lines = b.text().trimEnd().split("\n");
+		const lastId = (JSON.parse(lines.at(-1) ?? "{}") as { id?: string }).id;
+		const forked = lines.map(line => {
+			const entry = JSON.parse(line) as Record<string, unknown>;
+			return entry.type === "session"
+				? JSON.stringify({ ...entry, id: "fork", parentSession: parentFile, inheritedThroughEntryId: lastId })
+				: line;
+		});
+		const forkFile = path.join(getSessionsDir(), "--repo--", "parent-tan.jsonl");
+		await Bun.write(forkFile, `${forked.join("\n")}\n`);
+		await syncAllSessions({ workers: 1, files: [forkFile] });
+
+		const stats = await dashboard();
+		// The copied request belongs to the parent; claimed by the fork it would join neither file's message row.
+		expect(stats.sessionList.find(session => session.sessionFile === parentFile)?.requests).toBe(1);
+		expect(stats.gross.results).toBe(1);
+	});
+
 	it("backfills by re-parsing only transcripts modified since the experiment shipped", async () => {
 		const fresh = new SpotlightSessionBuilder(T0).header("/repo").marker();
 		fresh.user("go");
