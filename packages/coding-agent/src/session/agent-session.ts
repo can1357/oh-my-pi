@@ -14017,8 +14017,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const currentModel = this.model;
 		const isChanging = !routedModelsAreEqual(currentModel, model);
 		if (currentModel) {
-			// A response already streaming over these sessions gets to finish: retire them once it settles.
-			this.agent.runAfterModelCall(() => this.#closeProviderSessionsForModelSwitch(currentModel, model));
+			// Requests from here on open fresh provider sessions. A response still streaming over the
+			// retired ones keeps them until its run ends.
+			this.#closeProviderSessionsForModelSwitch(currentModel, model, this.agent.waitForIdle());
 			if (isChanging) {
 				this.#clearInheritedProviderPromptCacheKey();
 			}
@@ -14126,7 +14127,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 	}
 
-	#closeProviderSessionsForModelSwitch(currentModel: Model, nextModel: Model): void {
+	/**
+	 * Removes the provider sessions a switch from `currentModel` to `nextModel` invalidates, so later
+	 * requests open fresh ones, and closes them once `closeAfter` settles (at once without it).
+	 */
+	#closeProviderSessionsForModelSwitch(currentModel: Model, nextModel: Model, closeAfter?: Promise<void>): void {
 		const providerKeys = new Set<string>();
 		if (currentModel.api === "openai-codex-responses" || nextModel.api === "openai-codex-responses") {
 			providerKeys.add("openai-codex-responses");
@@ -14153,36 +14158,36 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 		}
 
+		const retired: Array<[string, ProviderSessionState]> = [];
 		for (const providerKey of providerKeys) {
 			const state = this.#providerSessionState.get(providerKey);
 			if (!state) continue;
-
-			try {
-				state.close();
-			} catch (error) {
-				logger.warn("Failed to close provider session state during model switch", {
-					providerKey,
-					error: String(error),
-				});
-			}
-
+			retired.push([providerKey, state]);
 			this.#providerSessionState.delete(providerKey);
 		}
 
 		if (completionsPrefixToEvict !== undefined) {
 			for (const [key, state] of this.#providerSessionState) {
 				if (!key.startsWith(completionsPrefixToEvict)) continue;
+				retired.push([key, state]);
+				this.#providerSessionState.delete(key);
+			}
+		}
+
+		const close = () => {
+			for (const [providerKey, state] of retired) {
 				try {
 					state.close();
 				} catch (error) {
 					logger.warn("Failed to close provider session state during model switch", {
-						providerKey: key,
+						providerKey,
 						error: String(error),
 					});
 				}
-				this.#providerSessionState.delete(key);
 			}
-		}
+		};
+		if (closeAfter) void closeAfter.then(close);
+		else close();
 	}
 
 	// =========================================================================

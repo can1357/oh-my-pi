@@ -595,9 +595,6 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 */
 	getModel?: () => Model;
 
-	/** Marks the model call from model selection through response settlement, before the next call can begin. */
-	onModelCallStateChange?: (active: boolean) => void;
-
 	/**
 	 * Dynamic reasoning-disable override, resolved per LLM call. When set,
 	 * its return value overrides the static `disableReasoning` from

@@ -322,20 +322,37 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		}
 	});
 
-	it("keeps provider session state until the streaming response settles when the model switches", async () => {
+	it("retires provider sessions at a model switch but closes them only after the streaming run ends", async () => {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-model-switch-stream-${Snowflake.next()}-`));
 		tempDirs.push(tempDir);
 		const { session } = await createSessionHarness(tempDir, SessionManager.inMemory());
 		sessions.push(session);
 
-		const closeSpy = vi.fn();
-		session.providerSessionState.set(`openai-responses:${openaiModel.provider}`, {
-			close: closeSpy,
-		} satisfies ProviderSessionState);
-		const stream = new AssistantMessageEventStream();
+		const stateKey = `openai-responses:${openaiModel.provider}`;
+		const retired = { close: vi.fn() } satisfies ProviderSessionState;
+		const opened = { close: vi.fn() } satisfies ProviderSessionState;
+		session.providerSessionState.set(stateKey, retired);
+		const reply = (model: Model): AssistantMessage => ({
+			role: "assistant",
+			content: [{ type: "text", text: `Reply from ${model.id}` }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: createUsage(),
+			stopReason: "stop",
+			timestamp: Date.now(),
+		});
+		const firstStream = new AssistantMessageEventStream();
 		const started = Promise.withResolvers<void>();
-		session.agent.streamFn = () => {
-			started.resolve();
+		const dispatches: Array<{ model: string; state: ProviderSessionState | undefined }> = [];
+		session.agent.streamFn = (model, _context, options) => {
+			dispatches.push({ model: model.id, state: options?.providerSessionState?.get(stateKey) });
+			if (dispatches.length === 1) {
+				started.resolve();
+				return firstStream;
+			}
+			const stream = new AssistantMessageEventStream();
+			stream.push({ type: "done", reason: "stop", message: reply(model) });
 			return stream;
 		};
 
@@ -343,23 +360,19 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		try {
 			await started.promise;
 			await session.setModel(alternateOpenaiModel);
-			expect(closeSpy).not.toHaveBeenCalled();
+			// A side request (`/btw`) on the new model opens its own session before the first response ends.
+			session.providerSessionState.set(stateKey, opened);
+			session.agent.followUp({ role: "user", content: "Follow-up request", timestamp: Date.now() });
+			expect(retired.close).not.toHaveBeenCalled();
 		} finally {
-			const reply: AssistantMessage = {
-				role: "assistant",
-				content: [{ type: "text", text: "First reply" }],
-				api: openaiModel.api,
-				provider: openaiModel.provider,
-				model: openaiModel.id,
-				usage: createUsage(),
-				stopReason: "stop",
-				timestamp: Date.now(),
-			};
-			stream.push({ type: "done", reason: "stop", message: reply });
+			firstStream.push({ type: "done", reason: "stop", message: reply(openaiModel) });
 			await run;
 		}
 
-		expect(closeSpy).toHaveBeenCalledTimes(1);
+		expect(dispatches.map(dispatch => dispatch.model)).toEqual([openaiModel.id, alternateOpenaiModel.id]);
+		expect(dispatches[1]?.state).toBe(opened);
+		expect(retired.close).toHaveBeenCalledTimes(1);
+		expect(opened.close).not.toHaveBeenCalled();
 	});
 
 	it("sanitizes stale assistant replay metadata during startup resume while preserving user payloads", async () => {

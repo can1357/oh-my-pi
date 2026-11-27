@@ -1512,7 +1512,6 @@ async function runLoopBody(
 						directiveResolvedForTurn = true;
 					}
 
-					config.onModelCallStateChange?.(true);
 					preparedProviderCall = await prepareProviderCall(currentContext, config, signal);
 					laps?.lap("prepareProviderMs");
 					if (signal?.aborted && (await endAbortedBeforeModel(turnMessages, turnOpen))) return;
@@ -1657,7 +1656,6 @@ async function runLoopBody(
 						continue;
 					}
 				} finally {
-					config.onModelCallStateChange?.(false);
 					const channel = preparedProviderCall.liveSteering;
 					if (channel) {
 						liveAccepted.push(...channel.accepted);
@@ -2006,8 +2004,6 @@ async function runLoopBody(
 
 		endAgentStream(stream, newMessages, telemetry, stepCounter.count);
 	} finally {
-		// Preparation can fail or stop at a gate before reaching the stream.
-		config.onModelCallStateChange?.(false);
 		discardAsides(pendingMessages, new Error("Aside message was not committed before the agent loop ended"));
 		if (!preserveSoftRequirementState) {
 			softRequirementState.id = undefined;
