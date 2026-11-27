@@ -1082,6 +1082,17 @@ describe("spotlight shaping of any tool", () => {
 		expect(trace?.savedTokens).toBe((trace?.plainTokens ?? 0) - (trace?.outTokens ?? 0));
 	});
 
+	it("gives a session without an active read the whole result, since it could not read a cut's hidden lines back", async () => {
+		const run = await experimentSession(ranked());
+		run.session.isToolActive = name => name !== "read";
+
+		const result = await agentCall(fakeTool("grep", OUTPUT), run, "g1", ARGS);
+
+		expect(resultText(result)).toBe(OUTPUT);
+		expect(spotlightDetails(result.details)).toBeUndefined();
+		expect(entries(run.manager, SPOTLIGHT_ENTRY.shape)).toEqual([]);
+	});
+
 	it("gives a held-out cut the wrapper's text and traces the would-be cut", async () => {
 		const run = await experimentSession(ranked(), {}, { holdout: 1 });
 

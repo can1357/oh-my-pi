@@ -8,7 +8,11 @@
  * `dock` form the mutable viewport, and `layer` nodes composite over it (or
  * take the alternate screen when fullscreen). A live tail taller than the
  * room is allocated: every unsettled block keeps a row, the newest take the
- * rest, a summary row stands for what does not fit. Replays (a lost display,
+ * rest, a summary row stands for what does not fit. In the `fullscreen`
+ * screen mode every frame is an alternate-screen frame instead: the dock is
+ * pinned to the bottom and `main` scrolls above it in an app-owned window
+ * (following its tail, or anchored to a block); nothing reaches history until
+ * the shutdown flush. Replays (a lost display,
  * a block inserted above history, a streaming head whose history rows no
  * longer match) rewrite the ledger under a fresh id; {@link TermBackend.flush}
  * writes everything into history at shutdown. The protocol, its invariants and
@@ -19,12 +23,19 @@
  * focused kind's widget (an editor turns them into `edit` events); clicks
  * resolve through the last frame's hit regions.
  */
-import type { FramePlan, InputEvent, MouseEvent, TerminalCapabilities, TerminalDriver } from "../driver/contract";
+import type {
+	FramePlan,
+	HistoryRowMark,
+	InputEvent,
+	MouseEvent,
+	TerminalCapabilities,
+	TerminalDriver,
+} from "../driver/contract";
 import { dropCutImages } from "../driver/images/anchor";
 import { DEFAULT_CELL } from "../driver/images/fit";
 import { bubbleEvent, bubbleKey, bubblePaste, keypathOf, pathTo } from "../dispatch";
 import type { KeyEvent } from "../events";
-import type { UiNode } from "../node";
+import type { ScrollRequest, UiNode } from "../node";
 import {
 	type Accessor,
 	batch,
@@ -54,6 +65,33 @@ import "./painters";
 
 /** Tick of a block drawing smooth motion (a shimmer sweep), ms. */
 const SMOOTH_TICK_MS = 1000 / 20;
+
+/** Rows one wheel tick scrolls the fullscreen transcript window. */
+const WHEEL_ROWS = 3;
+
+/**
+ * Where a session draws: `inline` on the normal screen (settled blocks retire into terminal
+ * history), or `fullscreen` on the alternate screen (`main` scrolls in an app-owned window above
+ * the pinned dock; history is written only by the shutdown flush).
+ */
+export type ScreenMode = "inline" | "fullscreen";
+
+/** The top of the fullscreen transcript window: a `main` node and a row of its entry (separator rows first). */
+interface ScrollAnchor {
+	readonly node: UiNode;
+	readonly row: number;
+}
+
+/** The fullscreen transcript window as the last frame drew it. */
+interface SessionWindow {
+	/** Its first row (the tail-following window's too, so scrolling starts from what is on screen). */
+	readonly top: ScrollAnchor | undefined;
+	/** Transcript rows on screen (the indicator row included). */
+	readonly rows: number;
+	readonly width: number;
+	/** The wheel scrolls it: no modal sheet owns the pointer. */
+	readonly wheel: boolean;
+}
 
 /** Options of a {@link TermBackend}. */
 export interface TermBackendOptions {
@@ -88,16 +126,17 @@ export interface TermBackendOptions {
 	 * the budget through `driver.images`.
 	 */
 	readonly images?: PaintImages;
+	/** Where the session draws (may change at runtime: frames follow it). Default `inline`. */
+	readonly screen?: Accessor<ScreenMode>;
 }
 
 /** A history batch offered to the driver until it acknowledges the id. */
 interface PendingBatch {
-	readonly id: number;
-	readonly rows: readonly string[];
+	readonly history: NonNullable<FramePlan["history"]>;
+	/** Marks offered with this batch; they are spent only when the driver acknowledges it. */
+	readonly marked?: ReadonlyMap<object, HistoryRowMark>;
 	/** Live main nodes the batch writes whole (committed on acknowledgement). */
 	readonly nodes: readonly UiNode[];
-	/** The batch replaces history: the committed ledger, then whatever retired with it. */
-	readonly replay: boolean;
 	/** A streaming node's stable head moved into history: its emitted rows after this batch. */
 	readonly head?: { readonly node: UiNode; readonly rows: readonly string[]; readonly count: number };
 	/** The last non-empty block whose rows this batch writes. */
@@ -316,6 +355,8 @@ export class TermBackend {
 	/** The `main` list the frontier was last checked against. */
 	#frontierChecked: readonly UiNode[] | undefined;
 	#pending: PendingBatch | undefined;
+	/** Written marks stay spent even if a resize or transcript edit replays their rows. */
+	readonly #marked = new WeakSet<object>();
 	/** The last non-empty main block with rows in history (what the first live block is separated from). */
 	#historyTail: UiNode | undefined;
 	/** Rows of live main nodes already moved into history (streaming heads), not repainted in the viewport. */
@@ -336,6 +377,10 @@ export class TermBackend {
 	#hitLayer: readonly UiNode[] | undefined;
 	/** The driver lost history: the next frame replays the committed ledger. */
 	#replay = false;
+	/** Fullscreen transcript window top; undefined while it follows the tail. */
+	#anchor: ScrollAnchor | undefined;
+	/** The fullscreen transcript window the last frame drew; undefined when none is on screen. */
+	#window: SessionWindow | undefined;
 	/** Indices of the unsettled `main` nodes, ascending (recomputed when `main` or a settle mark changes). */
 	readonly #unsettled: Accessor<readonly number[]>;
 	#unsubscribe: (() => void)[] = [];
@@ -445,6 +490,69 @@ export class TermBackend {
 		return pending !== undefined && (pending.head?.node === node || pending.nodes.includes(node));
 	}
 
+	/**
+	 * Scroll the fullscreen transcript window: by `by` (a page is the window less one row), or by a
+	 * row count (negative: up). Scrolling to the end follows the tail again. False when no window is
+	 * on screen (inline mode, a fullscreen layer up): the caller's key goes elsewhere.
+	 */
+	scroll(by: ScrollRequest["by"] | number): boolean {
+		const view = this.#window;
+		if (!this.#running || !view) return false;
+		const main = untrack(() => this.#surface.main());
+		const page = Math.max(1, view.rows - 1);
+		const delta =
+			typeof by === "number"
+				? by
+				: by === "page-up"
+					? -page
+					: by === "page-down"
+						? page
+						: by === "line-up"
+							? -1
+							: by === "line-down"
+								? 1
+								: 0;
+		if (by === "start") this.#anchor = main.length > 0 ? { node: main[0]!, row: 0 } : undefined;
+		else if (by === "end") this.#anchor = undefined;
+		else if (delta !== 0 && view.top && (delta < 0 || this.#anchor)) {
+			// From the position asked last (a frame may not have drawn it yet), else what is on screen.
+			const from = this.#anchor ?? view.top;
+			const size = untrack(() => this.#entrySizes(main, view.width));
+			let index = main.indexOf(from.node);
+			let row = from.row;
+			if (index < 0) return true;
+			if (delta < 0) {
+				for (let left = -delta; left > 0;) {
+					if (row >= left) {
+						row -= left;
+						break;
+					}
+					left -= row;
+					if (index === 0) {
+						row = 0;
+						break;
+					}
+					row = size(--index);
+				}
+				this.#anchor = { node: main[index]!, row };
+			} else {
+				for (let left = delta; left > 0 && index < main.length;) {
+					const rest = size(index) - row;
+					if (rest > left) {
+						row += left;
+						break;
+					}
+					left -= rest;
+					index++;
+					row = 0;
+				}
+				this.#anchor = index < main.length ? { node: main[index]!, row } : undefined;
+			}
+		}
+		this.requestRender();
+		return true;
+	}
+
 	/** Schedule a frame (coalesced, at most one per frame interval). */
 	requestRender(): void {
 		if (!this.#running || this.#frameRequested) return;
@@ -482,7 +590,9 @@ export class TermBackend {
 		// A frame whose history the driver did not write was not drawn inline either: the screen is as it was.
 		if (!plan.history || written === plan.history.id) this.#pin = this.#nextPin;
 		const pending = this.#pending;
-		if (pending && written === pending.id) {
+		if (pending && written === pending.history.id) {
+			const replay = pending.history.kind === "replay";
+			if (pending.marked) for (const key of pending.marked.keys()) this.#marked.add(key);
 			for (const node of pending.nodes) {
 				this.#committed.add(node);
 				this.#emitted.delete(node);
@@ -496,10 +606,10 @@ export class TermBackend {
 					verified: undefined,
 				});
 			}
-			if (pending.replay || pending.last) this.#historyTail = pending.last;
+			if (replay || pending.last) this.#historyTail = pending.last;
 			this.#pending = undefined;
 			this.#frontierChecked = undefined;
-			if (pending.replay) this.#replay = false;
+			if (replay) this.#replay = false;
 			// What became eligible while the batch waited retires in the next frame.
 			this.requestRender();
 		}
@@ -698,7 +808,9 @@ export class TermBackend {
 			for (const hit of block.hits ?? []) hits.push({ hit, top, left });
 		};
 		const fullscreenAt = layer.findLastIndex(isFullscreen);
+		const screen = this.#options.screen?.() ?? "inline";
 		if (fullscreenAt !== -1) {
+			this.#window = undefined;
 			const block = this.#paint(layer[fullscreenAt]!, width, height);
 			const rows = block.rows.slice(0, height);
 			while (rows.length < height) rows.push("");
@@ -711,6 +823,20 @@ export class TermBackend {
 			this.#nextPin = this.#pin;
 			return { viewport: [], cursor, fullscreen: rows };
 		}
+		if (screen === "fullscreen" && !flush) {
+			const modal = layer.some(
+				node => node.kind === "overlay" && (node.props() as { modal?: boolean }).modal === true,
+			);
+			const session = this.#composeSession(width, height, hits, !modal);
+			cursor = session.cursor;
+			for (const node of layer) place(session.rows, node);
+			this.#hits = hits;
+			// The normal screen stays as it was under the alternate one.
+			this.#nextPin = this.#pin;
+			return { viewport: [], cursor, fullscreen: session.rows };
+		}
+		this.#window = undefined;
+		if (!flush) this.#anchor = undefined;
 
 		const dock: Placed[] = [];
 		let dockRows = 0;
@@ -762,7 +888,7 @@ export class TermBackend {
 		let aboveLive = ledger
 			? ledgerLast
 			: pending
-				? (pending.last ?? (pending.replay ? undefined : this.#historyTail))
+				? (pending.last ?? (pending.history.kind === "replay" ? undefined : this.#historyTail))
 				: this.#historyTail;
 		if (pending) {
 			const retiring = new Set(pending.nodes);
@@ -838,11 +964,23 @@ export class TermBackend {
 		let live = 0;
 		let history: FramePlan["history"];
 		if (pending) {
-			history = { id: pending.id, rows: pending.rows, ...(pending.replay ? { kind: "replay" as const } : {}) };
+			history = pending.history;
 		} else if (boundary >= 0 || ledger) {
 			const retired: UiNode[] = [];
 			const rows: string[] = ledger ?? [];
 			let last = ledgerLast;
+			let marked: Map<object, HistoryRowMark> | undefined;
+			const appendRows = (block: Block, from: number, to: number): void => {
+				const mark = block.historyMark;
+				if (mark && mark.row >= from && mark.row < to && !this.#marked.has(mark.key) && !marked?.has(mark.key)) {
+					(marked ??= new Map()).set(mark.key, {
+						row: rows.length + mark.row - from,
+						before: mark.before,
+						after: mark.after,
+					});
+				}
+				for (let i = from; i < to; i++) rows.push(block.rows[i]!);
+			};
 			/** Move the rest of block `live` into history: it is committed with the batch. */
 			const retireWhole = (): void => {
 				const node = main[first + live]!;
@@ -853,7 +991,7 @@ export class TermBackend {
 					// The separator may depend on whether the block above retires (it just did, in this batch).
 					leads[live] = undefined;
 					for (let i = leadAt(live); i > 0; i--) rows.push("");
-					for (let i = skip; i < block.rows.length; i++) rows.push(block.rows[i]!);
+					appendRows(block, skip, block.rows.length);
 				}
 				if (block.rows.length > 0) last = node;
 				this.#retiring.add(node);
@@ -885,7 +1023,7 @@ export class TermBackend {
 					else if (take > 0 || lead > 0) {
 						for (let i = lead; i > 0; i--) rows.push("");
 						const stop = Math.min(skip + take, block.rows.length);
-						for (let i = skip; i < stop; i++) rows.push(block.rows[i]!);
+						appendRows(block, skip, stop);
 						head = { node, rows: block.rows, count: stop };
 						skips[live] = stop;
 						leads[live] = 0;
@@ -894,10 +1032,20 @@ export class TermBackend {
 				}
 			}
 			if (rows.length > 0 || ledger) {
-				const id = this.#nextHistoryId++;
-				const replay = ledger !== undefined;
-				this.#pending = { id, rows, nodes: retired, replay, ...(head ? { head } : {}), last, width };
-				history = { id, rows, ...(replay ? { kind: "replay" as const } : {}) };
+				history = {
+					id: this.#nextHistoryId++,
+					rows,
+					...(ledger ? { kind: "replay" } : {}),
+					...(marked ? { marks: [...marked.values()] } : {}),
+				};
+				this.#pending = {
+					history,
+					nodes: retired,
+					...(marked ? { marked } : {}),
+					...(head ? { head } : {}),
+					last,
+					width,
+				};
 			} else {
 				// Nothing to write: the blocks stay live (committed with the next batch that has rows).
 				leads[live] = undefined;
@@ -1005,6 +1153,135 @@ export class TermBackend {
 		return { ...(history ? { history } : {}), viewport, cursor };
 	}
 
+	/**
+	 * Rows each `main[i]` takes in the fullscreen transcript (its separator from the non-empty block
+	 * above, then its rows; none when it draws nothing), painted on demand at `width`.
+	 */
+	#entrySizes(main: readonly UiNode[], width: number): (i: number) => number {
+		const separator = this.#options.separator ?? (() => 1);
+		const rows: number[] = [];
+		const leads: number[] = [];
+		const rowsAt = (i: number): number => (rows[i] ??= this.#paint(main[i]!, width).rows.length);
+		return (i: number): number => {
+			if (rowsAt(i) === 0) return 0;
+			let lead = leads[i];
+			if (lead === undefined) {
+				lead = 0;
+				for (let j = i - 1; j >= 0; j--) {
+					if (rowsAt(j) > 0) {
+						lead = separator(main[j]!, main[i]!);
+						break;
+					}
+				}
+				leads[i] = lead;
+			}
+			return lead + rowsAt(i);
+		};
+	}
+
+	/**
+	 * The fullscreen session frame (before layers): the transcript window over the dock pinned to the
+	 * bottom row. The window follows the tail, or starts at {@link #anchor} (clamped to the
+	 * transcript; one that reaches the tail follows it again) with a row counting what is below it.
+	 */
+	#composeSession(
+		width: number,
+		height: number,
+		hits: { hit: Hit; top: number; left: number }[],
+		wheel: boolean,
+	): { rows: string[]; cursor: Cell | null } {
+		let cursor: Cell | null = null;
+		const dock: Placed[] = [];
+		let dockRows = 0;
+		for (const node of this.#surface.dock()) {
+			const block = this.#paint(node, width);
+			dock.push({ block, top: dockRows, left: 0 });
+			dockRows += block.rows.length;
+		}
+		const room = Math.max(0, height - dockRows);
+		const main = this.#surface.main();
+		const size = this.#entrySizes(main, width);
+
+		// The window's first entry and row in it, and the rows below the window (anchored only).
+		let index = 0;
+		let skip = 0;
+		let below = 0;
+		let anchor = this.#anchor;
+		let at = anchor ? main.indexOf(anchor.node) : -1;
+		if (anchor && at >= 0) {
+			skip = Math.max(0, Math.min(anchor.row, size(at) - 1));
+			let after = size(at) - skip;
+			for (let i = at + 1; i < main.length; i++) after += size(i);
+			// Everything from the anchor on fits: back to the tail.
+			if (after <= room || room === 0) at = -1;
+			else below = after - (room - 1);
+		}
+		if (at < 0) {
+			anchor = undefined;
+			let total = 0;
+			let i = main.length;
+			while (i > 0 && total < room) total += size(--i);
+			index = i;
+			skip = Math.max(0, total - room);
+		} else {
+			index = at;
+			anchor = { node: main[at]!, row: skip };
+		}
+		this.#anchor = anchor;
+
+		// The window: entry rows from the top down, the indicator taking its last row while anchored.
+		const content = below > 0 ? room - 1 : room;
+		const window: string[] = [];
+		for (let i = index; i < main.length && window.length < content; i++) {
+			const rows = size(i);
+			if (rows === 0) continue;
+			const node = main[i]!;
+			const block = this.#paint(node, width);
+			const lead = rows - block.rows.length;
+			// Window row of the block's first row (negative: cut above the window).
+			const top = window.length + lead - (i === index ? skip : 0);
+			for (let r = i === index ? skip : 0; r < rows && window.length < content; r++) {
+				window.push(r < lead ? "" : block.rows[r - lead]!);
+			}
+			if (block.cursor && this.#surface.focused()) {
+				const row = top + block.cursor.row;
+				if (row >= 0 && row < window.length) cursor = { row, col: block.cursor.col };
+			}
+			for (const hit of block.hits ?? []) {
+				if (top + hit.row >= 0 && top + hit.row + hit.height <= window.length) hits.push({ hit, top, left: 0 });
+			}
+		}
+		dropCutImages(window, 0);
+		if (below > 0) {
+			const theme = this.#options.theme();
+			window.push(truncate(theme.fg("dim", `↓ ${below} ${below === 1 ? "line" : "lines"} below`), width, ""));
+		}
+		while (window.length < room) window.push("");
+		this.#window = {
+			top: index < main.length ? { node: main[index]!, row: skip } : undefined,
+			rows: room,
+			width,
+			wheel,
+		};
+
+		const rows = window;
+		const dockTop = rows.length;
+		for (const placed of dock) {
+			rows.push(...placed.block.rows);
+			if (placed.block.cursor)
+				cursor = { row: dockTop + placed.top + placed.block.cursor.row, col: placed.block.cursor.col };
+			for (const hit of placed.block.hits ?? []) hits.push({ hit, top: dockTop + placed.top, left: 0 });
+		}
+		// A dock taller than the screen keeps its bottom rows (the editor).
+		const over = rows.length - height;
+		if (over > 0) {
+			rows.splice(0, over);
+			if (cursor) cursor = cursor.row >= over ? { row: cursor.row - over, col: cursor.col } : null;
+			for (const entry of hits) entry.top -= over;
+		}
+		return { rows, cursor };
+	}
+
 	#regions(): UiNode[] {
 		return [...this.#surface.layer(), ...this.#surface.dock(), ...this.#surface.main()];
 	}
@@ -1084,6 +1361,14 @@ export class TermBackend {
 				return;
 			}
 		}
+		// Nothing under the pointer took the wheel: it scrolls the fullscreen transcript.
+		if (
+			mouse.action === "press" &&
+			(mouse.button === "wheel-up" || mouse.button === "wheel-down") &&
+			this.#window?.wheel
+		) {
+			this.scroll(mouse.button === "wheel-up" ? -WHEEL_ROWS : WHEEL_ROWS);
+		}
 	}
 
 	/** Point the hover state at the topmost hit under the pointer (painters band it via `cx.hovered`). */
@@ -1114,6 +1399,16 @@ export class TermBackend {
 	/** The paint environment (for previews rendering through the same caches). */
 	get environment(): PaintEnvironment {
 		return this.#env;
+	}
+
+	/** Whether any `main` rows reached terminal history (committed blocks or a streaming head). */
+	get wroteHistory(): boolean {
+		return this.#committed.size > 0 || this.#emitted.size > 0;
+	}
+
+	/** Whether a fullscreen transcript window is on screen and follows the tail (false while scrolled back). */
+	get following(): boolean {
+		return this.#window !== undefined && this.#anchor === undefined;
 	}
 
 	/** Set reduced motion (clocked kinds draw their still frame). */

@@ -30,6 +30,7 @@ import { tinyTitleClient } from "../tiny/title-client";
 import { DEFAULT_TITLE_SPINNER_INTERVAL_MS, SPINNER_INTERVAL_STATIC } from "../config/spinner-interval";
 import { createRoot, effect, nativeRendering, untrack } from "@oh-my-pi/pi-tui";
 import { writeTerminalSequence } from "@oh-my-pi/pi-tui/driver/session";
+import { reportProgramResume } from "./program-resume";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { formatTitleUserMessage } from "../tiny/message-preproc";
 
@@ -773,14 +774,8 @@ export function nerdGlyphsActive(): boolean {
 	return currentTheme().symbols.preset === "nerd";
 }
 
-/** The OSC 1337 user variable Tern reads the session file from. */
+/** The OSC 1337 user variable Tern reads the session file from (for `/fork`, cloud, and session links). */
 const TERN_SESSION_FILE_VAR = "omp_session_file";
-/**
- * The OSC 1337 user variable telling Tern this omp understands `--restore`, set to
- * `1` before each session file report: Tern's daemon then relaunches it after a
- * crash with `--restore <file>` instead of `--resume <file>`.
- */
-const TERN_RESTORE_VAR = "omp_restore";
 
 /** The live session as Tern hears about it (read from the interactive session manager). */
 export interface TerminalSessionSource {
@@ -816,6 +811,8 @@ export function setTerminalSessionSource(source: TerminalSessionSource | undefin
  * directory as OSC 7 (`file://host/path`), as a shell reports it at each prompt.
  */
 export function reportTernSession(): void {
+	// OSC 7577 works in any supporting terminal (Tern, Rex, ...), gated by OSC7577_TOKEN.
+	reportProgramResume();
 	if (terminalTitleRuntime.disposed || $env.TERM_PROGRAM?.toLowerCase() !== "tern") return;
 	if (!process.stdout.isTTY || isTerminalHeadless()) return;
 	const file = sessionSource?.file();
@@ -823,7 +820,6 @@ export function reportTernSession(): void {
 	if (resolvedFile !== reportedSessionFile) {
 		reportedSessionFile = resolvedFile;
 		const value = resolvedFile ? `=${Buffer.from(resolvedFile).toString("base64")}` : "";
-		if (resolvedFile) writeTerminalSequence(`\x1b]1337;SetUserVar=${TERN_RESTORE_VAR}=MQ==\x07`);
 		writeTerminalSequence(`\x1b]1337;SetUserVar=${TERN_SESSION_FILE_VAR}${value}\x07`);
 	}
 	// Without a session the shell takes the directory back at its next prompt.

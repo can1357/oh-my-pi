@@ -865,3 +865,138 @@ describe("ProcessTerminalInput terminal quirks", () => {
 		expect(off.out()).not.toContain("\x1b_25a1;");
 	});
 });
+
+describe("ProcessTerminalInput emoji presentation", () => {
+	const PROBE = "\x1b7\x1b[?7l\x1b[8m\x1b[6n\u2714\uFE0F\x1b[6n\x1b[28m\x1b[?7h\x1b8\x1b[2X\x1b[c";
+	const KITTY = { KITTY_WINDOW_ID: "1" };
+
+	it("starts from the profile's answer", () => {
+		expect(setup({ env: KITTY }).input.capabilities.emoji).toEqual({ vs16Wide: true, bareFits: true });
+		expect(setup().input.capabilities.emoji).toEqual({ vs16Wide: false, bareFits: false });
+	});
+
+	it.each([1, 3] as const)("takes DEC 2027 status %i as wide U+FE0F forms, changing no mode", async status => {
+		const h = setup();
+		const started = h.input.start();
+		expect(h.out()).toContain("\x1b[?2027$p");
+		h.feed(`\x1b[?2027;${status}$y`);
+		h.settle();
+		await started;
+		expect(h.input.capabilities.emoji.vs16Wide).toBe(true);
+		expect(h.capabilities.at(-1)?.emoji.vs16Wide).toBe(true);
+		const out = h.out();
+		expect(out).not.toContain("\x1b[?2027h");
+		// Settled by the mode: no width probe.
+		expect(out).not.toContain(PROBE);
+		h.writes.length = 0;
+		h.input.stop();
+		expect(h.out()).not.toContain("\x1b[?2027l");
+	});
+
+	it("turns on a settable DEC 2027 for the session and off on stop", async () => {
+		const h = setup();
+		const started = h.input.start();
+		h.feed("\x1b[?2027;2$y");
+		expect(h.writes.at(-1)).toBe("\x1b[?2027h");
+		h.settle();
+		await started;
+		expect(h.input.capabilities.emoji.vs16Wide).toBe(true);
+		expect(h.out()).not.toContain(PROBE);
+		h.writes.length = 0;
+		h.input.stop();
+		expect(h.out()).toContain("\x1b[?2027l");
+		expect(h.input.capabilities.emoji.vs16Wide).toBe(false);
+	});
+
+	it("restores DEC 2027 on process exit", async () => {
+		const h = setup();
+		void h.input.start();
+		h.feed("\x1b[?2027;2$y");
+		h.writes.length = 0;
+		h.events.emit("exit");
+		expect(h.out()).toContain("\x1b[?2027l");
+	});
+
+	it("takes a permanently reset DEC 2027 over a wide profile", () => {
+		const h = setup({ env: KITTY });
+		void h.input.start();
+		h.feed("\x1b[?2027;4$y");
+		expect(h.input.capabilities.emoji).toEqual({ vs16Wide: false, bareFits: true });
+		expect(h.out()).not.toContain("\x1b[?2027h");
+	});
+
+	it("keeps a known profile's answer when DEC 2027 is unrecognized", async () => {
+		const h = setup({ env: KITTY });
+		const started = h.input.start();
+		h.feed("\x1b[?2027;0$y");
+		h.settle();
+		await started;
+		expect(h.input.capabilities.emoji.vs16Wide).toBe(true);
+		expect(h.out()).not.toContain(PROBE);
+	});
+
+	it("leaves emoji alone inside a multiplexer", async () => {
+		const h = setup({ env: { TMUX: "/tmp/t,1,0", TERM_PROGRAM: "tmux", WEZTERM_PANE: "0" } });
+		const started = h.input.start();
+		h.feed("\x1b[?2027;2$y");
+		h.settle();
+		await started;
+		const out = h.out();
+		expect(out).not.toContain("\x1b[?2027$p");
+		expect(out).not.toContain("\x1b[?2027h");
+		expect(out).not.toContain("UnicodeVersion");
+		expect(out).not.toContain(PROBE);
+		expect(h.input.capabilities.emoji.vs16Wide).toBe(false);
+	});
+
+	it("switches WezTerm to Unicode 14 under a label and pops back to it on stop", () => {
+		const h = setup({ env: { WEZTERM_PANE: "0" } });
+		void h.input.start();
+		expect(h.writes[0]).toContain("\x1b]1337;UnicodeVersion=push omp\x1b\\\x1b]1337;UnicodeVersion=14\x1b\\");
+		// Its default Unicode 9 advances U+FE0F one cell; the pushed 14 advances it two.
+		expect(h.input.capabilities.emoji.vs16Wide).toBe(true);
+		h.writes.length = 0;
+		h.input.stop();
+		expect(h.out()).toContain("\x1b]1337;UnicodeVersion=pop omp\x1b\\");
+		expect(setup({ env: KITTY }).out()).not.toContain("UnicodeVersion");
+	});
+
+	it.each([
+		[3, true],
+		[2, false],
+	] as const)("measures the U+FE0F advance of an unknown terminal (column after: %i)", async (after, wide) => {
+		const h = setup();
+		const started = h.input.start();
+		h.settle();
+		await started;
+		expect(h.writes.at(-1)).toBe(PROBE);
+		// The anchor query goes out while the probe's reports are still in flight.
+		const anchor = h.input.queryCursor();
+		h.feed(`\x1b[5;1R\x1b[5;${after}R`, DA1, "\x1b[7;4R");
+		expect(await anchor).toEqual({ row: 6, col: 3 });
+		expect(h.input.capabilities.emoji.vs16Wide).toBe(wide);
+		// The base profile already says narrow: only a wide answer notifies.
+		expect(h.capabilities.map(caps => caps.emoji.vs16Wide)).toEqual(wide ? [true] : []);
+		expect(h.received).toEqual([]);
+	});
+
+	it("ignores a width measured against the right edge", async () => {
+		const h = setup();
+		const started = h.input.start();
+		h.settle();
+		await started;
+		// Autowrap is off: a sample started one cell from the edge cannot advance past it.
+		h.feed("\x1b[5;99R\x1b[5;100R", DA1);
+		expect(h.input.capabilities.emoji.vs16Wide).toBe(false);
+		expect(h.capabilities).toEqual([]);
+	});
+
+	it("skips the width probe once startup is over", async () => {
+		const h = setup();
+		const started = h.input.start();
+		h.clock.advance(250);
+		await started;
+		h.settle();
+		expect(h.out()).not.toContain(PROBE);
+	});
+});

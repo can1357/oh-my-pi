@@ -19,8 +19,8 @@ export interface ProviderHooks {
 	/**
 	 * Streams every request to the provider's models. Receives what the
 	 * built-in adapter for the model's `api` would: the prepared model, and
-	 * options mapped for that api (`GoogleGeminiCliOptions` for
-	 * `google-gemini-cli`) carrying the provider's key.
+	 * options mapped for that api (`GoogleOptions` for
+	 * `google-generative-ai`) carrying the provider's key.
 	 */
 	stream?(model: Model<Api>, context: Context, options: StreamOptions): AssistantMessageEventStream;
 	/** Generates images with the provider's image models, after the provider-enabled check. */

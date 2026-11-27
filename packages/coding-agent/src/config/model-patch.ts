@@ -277,6 +277,8 @@ export interface ModelPatch {
 	compactionModel?: string;
 	remoteCompaction?: RemoteCompactionConfig<Api>;
 	premiumMultiplier?: number;
+	voice?: string;
+	speechFormats?: Model<Api>["speechFormats"];
 }
 
 /**
@@ -321,6 +323,8 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 		result.remoteCompaction = mergeRemoteCompactionConfig(base.remoteCompaction, patch.remoteCompaction);
 	}
 	if (patch.premiumMultiplier !== undefined) result.premiumMultiplier = patch.premiumMultiplier;
+	if (patch.voice !== undefined) result.voice = patch.voice;
+	if (patch.speechFormats !== undefined) result.speechFormats = patch.speechFormats;
 	if (patch.cost) {
 		const longContext = patch.cost.longContext ?? base.cost.longContext;
 		result.cost = {

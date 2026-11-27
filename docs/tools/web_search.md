@@ -149,9 +149,9 @@ Each provider search transport receives a hard timeout from `providers.webSearch
       - `num_search_results` controls upstream API breadth only in API-key mode. `limit` is preserved separately as `num_results` and slices returned `sources` after parsing in both auth modes.
       - Output may include `answer`, `sources`, `citations`, `usage`, `model`, `requestId`, `authMode`.
    - **Gemini** — `packages/coding-agent/src/web/search/providers/gemini.ts`
-      - Availability: OAuth credentials in `agent.db` for `google-antigravity`, or a Google Developer API key.
-      - Querying: SSE `streamGenerateContent` with Google Search grounding at the selected model's endpoint. Cloud Code Assist auth uses `withOAuthAccess`; developer API auth uses the model-registry resolver. HTTP retries use up to four attempts with exponential/server-provided delays capped at five minutes, bounded by the transport signal.
-      - Model: the selected `web` candidate (`google/…` or `google-antigravity/…` chat model).
+      - Availability: a Google Developer API key.
+      - Querying: SSE `streamGenerateContent` with Google Search grounding at the selected model's endpoint. Auth uses the model-registry resolver. HTTP retries use up to four attempts with exponential/server-provided delays capped at five minutes, bounded by the transport signal.
+      - Model: the selected `web` candidate (`google/…` chat model).
       - `max_tokens` and `temperature` pass through as `generationConfig.maxOutputTokens` / `generationConfig.temperature`.
       - `limit` and `num_search_results` are collapsed together before dispatch.
       - Output may include `answer`, `sources`, `citations`, `searchQueries`, `usage`, `model`.

@@ -210,12 +210,12 @@ describe("code fences", () => {
 		expect(plain("```ts\nlet x", 40)).toEqual(["```ts", "  let x", "```"]);
 	});
 
-	it("puts literal code rows at column zero through padding and containers", () => {
+	it("puts literal code rows and their fences at column zero through padding and containers", () => {
 		expect(plain("```sh\ncat <<'EOF'\nEOF\n```", 80, { paddingX: 1, codeIndent: 0 })).toEqual([
-			" ```sh",
+			"```sh",
 			"cat <<'EOF'",
 			"EOF",
-			" ```",
+			"```",
 		]);
 		const long = "x".repeat(24);
 		for (const source of [

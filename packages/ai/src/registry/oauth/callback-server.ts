@@ -12,6 +12,7 @@
  */
 import * as os from "node:os";
 import { logger } from "@oh-my-pi/pi-utils";
+import { timingSafeEqual } from "../../auth-gateway/http";
 import * as AIError from "../../error";
 import * as nativeSchemeCallback from "./native-scheme-callback";
 import type { NativeSchemeCallbackReceiver } from "./native-scheme-callback";
@@ -67,6 +68,13 @@ function serializeCallbackState(state: unknown): string {
 	return JSON.stringify(state).replaceAll("<", "\\u003c");
 }
 
+const STATE_ENCODER = new TextEncoder();
+
+/** Whether a callback's `state` is the flow's own nonce, compared in constant time. */
+function stateMatches(state: string, expectedState: string): boolean {
+	return timingSafeEqual(STATE_ENCODER.encode(state), STATE_ENCODER.encode(expectedState));
+}
+
 /**
  * Whether this host exposes an IPv6 loopback (`::1`) the companion listener can
  * bind. A kernel with IPv6 disabled (`ipv6.disable=1`) lists no internal IPv6
@@ -112,6 +120,8 @@ export interface OAuthCallbackFlowOptions {
 	manualInputOnly?: boolean;
 	/** Receive a custom-scheme redirect through the native OS handler when supported. */
 	nativeScheme?: boolean;
+	/** How long to wait for the browser callback, in ms; defaults to 5 minutes. */
+	timeoutMs?: number;
 }
 
 function parseNativeCallback(input: string, redirectUri: string, expectedState: string): CallbackResult {
@@ -133,7 +143,7 @@ function parseNativeCallback(input: string, redirectUri: string, expectedState: 
 		});
 	}
 	const state = callback.searchParams.get("state") ?? "";
-	if (expectedState && state !== expectedState) {
+	if (expectedState && !stateMatches(state, expectedState)) {
 		throw new AIError.OAuthError("State mismatch - possible CSRF attack", { kind: "device-auth" });
 	}
 	const error = callback.searchParams.get("error");
@@ -159,6 +169,7 @@ export abstract class OAuthCallbackFlow {
 	callbackHostname: string;
 	redirectUri?: string;
 	allowPortFallback: boolean;
+	timeoutMs: number;
 	#manualInputOnly: boolean;
 	#nativeScheme: boolean;
 	#callbackResolve?: (result: CallbackResult) => void;
@@ -183,6 +194,7 @@ export abstract class OAuthCallbackFlow {
 			this.callbackPath = callbackPath;
 			this.callbackHostname = DEFAULT_HOSTNAME;
 			this.allowPortFallback = true;
+			this.timeoutMs = DEFAULT_TIMEOUT;
 			this.#manualInputOnly = false;
 			this.#nativeScheme = false;
 			return;
@@ -193,6 +205,7 @@ export abstract class OAuthCallbackFlow {
 		this.callbackHostname = preferredPortOrOptions.callbackHostname ?? DEFAULT_HOSTNAME;
 		this.redirectUri = preferredPortOrOptions.redirectUri;
 		this.allowPortFallback = preferredPortOrOptions.allowPortFallback ?? true;
+		this.timeoutMs = preferredPortOrOptions.timeoutMs ?? DEFAULT_TIMEOUT;
 		this.#manualInputOnly = preferredPortOrOptions.manualInputOnly ?? false;
 		this.#nativeScheme = preferredPortOrOptions.nativeScheme ?? false;
 	}
@@ -563,14 +576,19 @@ export abstract class OAuthCallbackFlow {
 		const errorDescription = url.searchParams.get("error_description") || error;
 
 		type OkState = { ok: true; code: string; state: string };
-		type ErrorState = { ok?: false; error?: string };
+		type ErrorState = { ok?: false; error?: string; canceled?: true };
 		let resultState: OkState | ErrorState;
+		const genuine = !expectedState || stateMatches(state, expectedState);
+		// The user declined the provider's consent screen: a choice, not a failure.
+		const canceled = error === "access_denied" && genuine;
 
 		if (error) {
-			resultState = { ok: false, error: `Authorization failed: ${errorDescription}` };
+			resultState = canceled
+				? { ok: false, canceled: true, error: "Sign-in canceled. You can close this window." }
+				: { ok: false, error: `Authorization failed: ${errorDescription}` };
 		} else if (!code) {
 			resultState = { ok: false, error: "Missing authorization code" };
-		} else if (expectedState && state !== expectedState) {
+		} else if (!genuine) {
 			resultState = { ok: false, error: "State mismatch - possible CSRF attack" };
 		} else {
 			resultState = { ok: true, code, state };
@@ -581,23 +599,23 @@ export abstract class OAuthCallbackFlow {
 			queueMicrotask(() => {
 				resolve?.({ code: resultState.code, state: resultState.state });
 			});
-		} else if (error && (!expectedState || state === expectedState)) {
+		} else if (error && genuine) {
 			// The redirect carries our state nonce, so it came from the genuine
 			// authorization flow (e.g. the user denied the consent screen).
 			// Surface the denial now instead of leaving the login waiting for
 			// the 5-minute timeout. Errors WITHOUT the expected state stay
 			// ignored — any local process can forge those (#4106).
 			const reject = this.#callbackReject;
-			const message = resultState.error ?? `Authorization failed: ${errorDescription}`;
+			const message = `Authorization failed: ${errorDescription}`;
 			queueMicrotask(() => {
-				reject?.(new AIError.OAuthError(message, { kind: "device-auth" }));
+				reject?.(new AIError.OAuthError(message, { kind: "device-auth", code: error }));
 			});
 		}
 
 		return new Response(
 			(templateHtml as unknown as string).replaceAll("__OAUTH_STATE__", () => serializeCallbackState(resultState)),
 			{
-				status: resultState.ok ? 200 : 500,
+				status: resultState.ok || canceled ? 200 : 500,
 				headers: { "Content-Type": "text/html" },
 			},
 		);
@@ -607,7 +625,7 @@ export abstract class OAuthCallbackFlow {
 	 * Wait for OAuth callback or manual input (whichever comes first).
 	 */
 	#waitForCallback(expectedState: string, nativeCallback?: Promise<CallbackResult>): Promise<CallbackResult> {
-		const timeoutSignal = AbortSignal.timeout(DEFAULT_TIMEOUT);
+		const timeoutSignal = AbortSignal.timeout(this.timeoutMs);
 		const settledSignal = new AbortController();
 		const signals = this.ctrl.signal
 			? [this.ctrl.signal, timeoutSignal, settledSignal.signal]
@@ -640,8 +658,16 @@ export abstract class OAuthCallbackFlow {
 						callbackPromise,
 						requestManualInput(signal).then((input): CallbackResult | null => {
 							const parsed = parseCallbackInput(input);
+							// A pasted redirect with our state and an `error` (consent denied on a
+							// remote host) ends the login like the HTTP callback; others are ignored.
+							if (parsed.error && (!expectedState || stateMatches(parsed.state ?? "", expectedState))) {
+								throw new AIError.OAuthError(`Authorization failed: ${parsed.error}`, {
+									kind: "device-auth",
+									code: parsed.error,
+								});
+							}
 							if (!parsed.code) return null;
-							if (expectedState && parsed.state && parsed.state !== expectedState) return null;
+							if (expectedState && parsed.state && !stateMatches(parsed.state, expectedState)) return null;
 							return { code: parsed.code, state: parsed.state ?? "" };
 						}),
 					]);
@@ -660,28 +686,26 @@ export abstract class OAuthCallbackFlow {
 }
 
 /**
- * Parse a redirect URL or code string to extract code and state.
+ * Parse a redirect URL or code string to extract code, state, and the
+ * authorization server's `error` (a denied consent arrives without a code).
  */
-export function parseCallbackInput(input: string): { code?: string; state?: string } {
+export function parseCallbackInput(input: string): { code?: string; state?: string; error?: string } {
 	const value = input.trim();
 	if (!value) return {};
 
+	const fromParams = (params: URLSearchParams) => ({
+		code: params.get("code") ?? undefined,
+		state: params.get("state") ?? undefined,
+		error: params.get("error") ?? undefined,
+	});
 	try {
-		const url = new URL(value);
-		return {
-			code: url.searchParams.get("code") ?? undefined,
-			state: url.searchParams.get("state") ?? undefined,
-		};
+		return fromParams(new URL(value).searchParams);
 	} catch {
 		// Not a URL - check for query string format
 	}
 
-	if (value.includes("code=")) {
-		const params = new URLSearchParams(value.replace(/^[?#]/, ""));
-		return {
-			code: params.get("code") ?? undefined,
-			state: params.get("state") ?? undefined,
-		};
+	if (value.includes("code=") || value.includes("error=")) {
+		return fromParams(new URLSearchParams(value.replace(/^[?#]/, "")));
 	}
 
 	// Assume raw code, possibly with state after #

@@ -39,6 +39,21 @@ function makeOpenCodeGoQwen37Model(): Model<"anthropic-messages"> {
 	});
 }
 
+function makeOpenCodeZenClaudeModel(): Model<"anthropic-messages"> {
+	return buildModel({
+		id: "claude-haiku-4-5",
+		name: "Claude Haiku 4.5",
+		api: "anthropic-messages",
+		provider: "opencode-zen",
+		baseUrl: "https://opencode.ai/zen/v1",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: 8_192,
+	});
+}
+
 const testContext: Context = {
 	messages: [{ role: "user", content: "hello", timestamp: Date.now() }],
 };
@@ -93,6 +108,19 @@ describe("Anthropic Copilot auth config", () => {
 		expect(result.stopReason).toBe("error");
 		expect(requestedApiKeys[0]).toBe("opencode_test_key");
 		expect(requestedAuthorizations[0]).toBeNull();
+	});
+
+	it("authenticates OpenCode Zen Claude models with X-Api-Key, not bearer-only", () => {
+		const options = buildAnthropicClientOptions({
+			model: makeOpenCodeZenClaudeModel(),
+			apiKey: "sk-zen-test",
+			stream: true,
+		});
+
+		// The client adds `X-Api-Key` from `apiKey`; the bearer `Authorization`
+		// header must not be sent (Zen's Anthropic gateway rejects it).
+		expect(options.apiKey).toBe("sk-zen-test");
+		expect(options.defaultHeaders.Authorization).toBeUndefined();
 	});
 
 	it("unwraps structured Copilot credentials before setting Authorization", () => {
