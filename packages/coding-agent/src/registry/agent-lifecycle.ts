@@ -344,9 +344,9 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 		if (this.#adopted.has(id) || this.#parks.has(id) || this.#revivals.has(id)) return false;
 
 		const persistedFactory = ref.sessionFile ? this.#persistedReviverFactory : undefined;
-		if (persistedFactory) {
+		if (persistedFactory && !this.#refusedRevivals.has(ref)) {
 			try {
-				if (await persistedFactory(ref)) return false;
+				if (typeof (await persistedFactory(ref)) === "function") return false;
 			} catch (error) {
 				logger.warn("AgentLifecycleManager.reclaimDeadCorpse: persisted reviver probe failed", {
 					id,
@@ -575,7 +575,8 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 		}
 		// Only decides whether the kill can be undone; the cold-revive path builds
 		// its own reviver for the fresh generation.
-		const reviver = await factory(killed);
+		const refused = this.#refusedRevivals.get(killed);
+		const reviver = refused === undefined ? await factory(killed) : { refused };
 		if (this.#disposed) {
 			throw new Error(
 				`Agent "${id}" revival aborted: its lifecycle was disposed while its transcript was being checked.`,
@@ -584,6 +585,12 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 		if (!reviver) {
 			throw new Error(
 				`Agent "${id}" was killed and its transcript cannot be resumed (no session contract, isolated run, or its workspace is gone). Read history://${id} for what it did.`,
+			);
+		}
+		if (typeof reviver !== "function") {
+			this.#refusedRevivals.set(killed, reviver.refused);
+			throw new Error(
+				`Agent "${id}" was killed and cannot be resumed: ${reviver.refused}. Its transcript remains readable at history://${id}.`,
 			);
 		}
 		const reopened = this.#registry.reopen(id, killed);

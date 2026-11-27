@@ -228,6 +228,10 @@ describe("AgentLifecycleManager", () => {
 		expect(await lifecycle.reclaimDeadCorpse("Corpse-Sub", adopted)).toBe(false);
 
 		// The corpse is reclaimed, and its id becomes registerable again.
+		lifecycle.setPersistedSubagentReviverFactory(
+			async () => ({ refused: "it ran isolated" }),
+			() => TTL,
+		);
 		expect(await lifecycle.reclaimDeadCorpse("Corpse-Sub", corpse)).toBe(true);
 		expect(registry.get("Corpse-Sub")).toBeUndefined();
 		const respawn = registry.registerIfAvailable(
@@ -426,7 +430,7 @@ describe("AgentLifecycleManager", () => {
 	});
 
 	it("a permanently refused revive names the cause and is not retried on later wakes", async () => {
-		registry.register({
+		const ref = registry.register({
 			id: "7b-Sub",
 			displayName: "task",
 			kind: "sub",
@@ -447,6 +451,7 @@ describe("AgentLifecycleManager", () => {
 			'Agent "7b-Sub" is parked and cannot be resumed: it ran isolated. Its transcript remains readable at history://7b-Sub.',
 		);
 		await expect(lifecycle.ensureLive("7b-Sub")).rejects.toThrow(/cannot be resumed: it ran isolated/);
+		expect(await lifecycle.reclaimDeadCorpse(ref.id, ref)).toBe(true);
 		expect(factoryCalls).toBe(1);
 	});
 
@@ -1079,29 +1084,32 @@ describe("AgentLifecycleManager", () => {
 		expect(restoredRegistry.get(workerId)?.status).toBe("parked");
 	});
 
-	it("a killed transcript no reviver can rebuild stays killed", async () => {
-		using tempDir = TempDir.createSync("@omp-lifecycle-reopen-refused-");
-		const workerSessionFile = path.join(tempDir.path(), "Refused-Sub.jsonl");
-		await Bun.write(workerSessionFile, "");
-		const killed = registry.register({
-			id: "Refused-Sub",
-			displayName: "task",
-			kind: "sub",
-			session: makeSessionStub().session,
-			sessionFile: workerSessionFile,
-			status: "running",
-		});
-		expect(await lifecycle.release("Refused-Sub", killed, { tombstone: true })).toBe(true);
-		lifecycle.setPersistedSubagentReviverFactory(
-			async () => undefined,
-			() => 0,
-		);
+	it.each([undefined, { refused: "it ran isolated" }])(
+		"a killed transcript no reviver can rebuild stays killed (%j)",
+		async refusal => {
+			using tempDir = TempDir.createSync("@omp-lifecycle-reopen-refused-");
+			const workerSessionFile = path.join(tempDir.path(), "Refused-Sub.jsonl");
+			await Bun.write(workerSessionFile, "");
+			const killed = registry.register({
+				id: "Refused-Sub",
+				displayName: "task",
+				kind: "sub",
+				session: makeSessionStub().session,
+				sessionFile: workerSessionFile,
+				status: "running",
+			});
+			expect(await lifecycle.release("Refused-Sub", killed, { tombstone: true })).toBe(true);
+			lifecycle.setPersistedSubagentReviverFactory(
+				async () => refusal,
+				() => 0,
+			);
 
-		await expect(lifecycle.ensureLive("Refused-Sub")).rejects.toThrow(/cannot be resumed/);
-		expect(registry.get("Refused-Sub")).toBe(killed);
-		expect(killed.status).toBe("aborted");
-		expect(await Bun.file(`${workerSessionFile}.tombstone`).exists()).toBe(true);
-	});
+			await expect(lifecycle.ensureLive("Refused-Sub")).rejects.toThrow(/cannot be resumed/);
+			expect(registry.get("Refused-Sub")).toBe(killed);
+			expect(killed.status).toBe("aborted");
+			expect(await Bun.file(`${workerSessionFile}.tombstone`).exists()).toBe(true);
+		},
+	);
 
 	it("publishes an aborted status only after the session is detached", async () => {
 		const stub = makeSessionStub();
