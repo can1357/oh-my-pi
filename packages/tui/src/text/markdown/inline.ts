@@ -6,7 +6,7 @@ import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { latexToUnicode } from "../latex";
 import type { MathToken, Token, Tokens } from "./lexer";
 import { extensionLinkMarker } from "./links";
-import type { MarkdownStyles } from "./styles";
+import { type MarkdownStyles, unorderedListMarker } from "./styles";
 
 /** How plain text is drawn where inline content sits. */
 export interface InlineContext {
@@ -256,9 +256,7 @@ export function renderInline(env: InlineEnvironment, tokens: readonly Token[], c
 					if (!atLineStart(out)) lineBreak();
 					const list = lists.at(-1);
 					const depth = Math.max(0, lists.length - 1);
-					const marker = list?.ordered
-						? `${list.next++}. `
-						: `${styles.theme.symbols.symbol("md.bullet") || "•"} `;
+					const marker = list?.ordered ? `${list.next++}. ` : unorderedListMarker(styles.theme);
 					out += " ".repeat(depth * 2) + styles.bullet(marker);
 					pendingBreak = false;
 					afterMarker = true;

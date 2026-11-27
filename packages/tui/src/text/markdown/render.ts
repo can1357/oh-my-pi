@@ -32,7 +32,7 @@ import {
 import { EXTENSION_LINK_ID, extensionLinkTest } from "./links";
 import { mermaidRows } from "./mermaid";
 import { markdownLook } from "./look";
-import { type MarkdownStyles, markdownStyles, stylePrefix } from "./styles";
+import { type MarkdownStyles, markdownStyles, stylePrefix, unorderedListMarker } from "./styles";
 import { growingTableCell, repairOrphanClosingFence, speculativeStreamingSource } from "./stream";
 import { renderTable } from "./table";
 
@@ -177,8 +177,14 @@ function renderBlock(r: Renderer, token: Token, width: number, ctx: InlineContex
 			const inline = text.tokens ? renderInline(r.inline, text.tokens, ctx) : ctx.text(text.text);
 			return wrap(inline, width);
 		}
-		case "heading":
-			return wrap(renderHeading(r, token as Tokens.Heading, ctx), width);
+		case "heading": {
+			const heading = token as Tokens.Heading;
+			const indent = Math.min(Math.max(0, heading.depth - 2), Math.max(0, width - 2));
+			const text = renderHeading(r, heading, ctx);
+			if (indent === 0) return wrap(text, width);
+			const pad = spaces(indent);
+			return wrap(text, width - indent).map(row => pad + row);
+		}
 		case "code":
 			return renderCode(r, token as Tokens.Code, width);
 		case "blockquote":
@@ -246,8 +252,7 @@ function renderHeading(r: Renderer, token: Tokens.Heading, ctx: InlineContext): 
 	const color = (text: string): string => styles.heading(token.depth, text);
 	const inner = renderInline(r.inline, token.tokens, ctx);
 	if (token.depth === 1) return color(styles.bold(styles.underline(inner)));
-	if (token.depth === 2) return color(styles.bold(inner));
-	return color(styles.bold(`${"#".repeat(token.depth)} ${inner}`));
+	return color(styles.bold(inner));
 }
 
 /** Scale of a sized H1: rows tall, and cells per cell of its text. */
@@ -464,8 +469,8 @@ function renderDisplayMath(r: Renderer, latex: string, width: number, ctx: Inlin
 	return rows.flatMap(row => wrap(row, width));
 }
 
-function listMarker(token: Tokens.List, index: number): string {
-	if (!token.ordered) return "- ";
+function listMarker(r: Renderer, token: Tokens.List, index: number): string {
+	if (!token.ordered) return unorderedListMarker(r.options.theme);
 	const start = token.start === "" ? 1 : token.start;
 	return `${start + index}. `;
 }
@@ -473,7 +478,7 @@ function listMarker(token: Tokens.List, index: number): string {
 function renderList(r: Renderer, token: Tokens.List, width: number, ctx: InlineContext): Row[] {
 	const out: Row[] = [];
 	token.items.forEach((item, index) => {
-		out.push(...renderListItem(r, item, listMarker(token, index), width, ctx));
+		out.push(...renderListItem(r, item, listMarker(r, token, index), width, ctx));
 	});
 	return out;
 }
@@ -495,9 +500,10 @@ function renderListItem(r: Renderer, item: Tokens.ListItem, marker: string, widt
 		if (isBlank(child)) continue;
 		let rows: Row[];
 		if (child.type === "list") {
-			const nested = renderList(r, child as Tokens.List, Math.max(1, width - NESTED_LIST_INDENT), ctx);
-			const pad = spaces(NESTED_LIST_INDENT);
-			rows = prefixRows(nested, first ? lead + spaces(Math.max(0, NESTED_LIST_INDENT - markerWidth)) : pad, pad);
+			const nestedIndent = Math.min(width - 1, Math.max(NESTED_LIST_INDENT, first ? markerWidth : 0));
+			const nested = renderList(r, child as Tokens.List, width - nestedIndent, ctx);
+			const pad = spaces(nestedIndent);
+			rows = prefixRows(nested, first ? lead + spaces(nestedIndent - markerWidth) : pad, pad);
 		} else if (first && checkbox && (child.type === "text" || child.type === "paragraph")) {
 			const hang = markerWidth + checkbox.length;
 			rows = prefixRows(renderBlock(r, child, Math.max(1, width - hang), ctx), lead + checkbox, spaces(hang));

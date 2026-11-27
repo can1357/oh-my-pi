@@ -14,6 +14,11 @@ const GREEN = 2;
 /** Colorful heading hue per depth (H1, H2, H3 and deeper). */
 const HEADING_SLOTS = [MAGENTA, YELLOW, BLUE] as const;
 
+/** The unordered marker, including its gap before the item text. */
+export function unorderedListMarker(theme: Theme): string {
+	return `${theme.symbols.symbol("md.bullet") || "•"} `;
+}
+
 /** Styling functions per Markdown role. */
 export interface MarkdownStyles {
 	readonly theme: Theme;
