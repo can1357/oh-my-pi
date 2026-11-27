@@ -830,14 +830,18 @@ async fn timeout_spares_background_jobs_of_earlier_commands() {
 /// reader parks in `emit_chunk`, which does not watch the reader's cancel,
 /// and a cancelled run waits for its reader, so the run cannot end after the
 /// cancel. Its command ignores TERM and writes until the KILL, so the reader
-/// always has a second chunk to park on. A variable the old session set is
-/// gone in the new one; before the drop, a later run still sees it.
+/// always has a second chunk to park on. The session env gives every new
+/// session `x=new`, whatever the host exports; a later run sees the old
+/// session's `x=kept` before the drop, and the new session's `x=new` after it.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_dropped_run_gives_the_next_run_a_new_session() {
 	let _guard = shell_test_lock().lock().await;
-	let shell = Shell::new(None);
-	let echo = "echo \"${x-new}\"";
+	let shell = Shell::new(Some(ShellOptions {
+		session_env: Some(HashMap::from([("x".to_string(), "new".to_string())])),
+		..Default::default()
+	}));
+	let echo = "echo \"$x\"";
 	run_ok(&shell, "x=kept").await;
 	assert_eq!(
 		run_ok(&shell, echo).await,
