@@ -817,6 +817,8 @@ export async function parseSessionFile(
 			return;
 		}
 		if (isUserMessage(entry)) {
+			// A copied prompt is the parent's: owning its row would leave the parent's reply link nothing to fill.
+			if (inheritedCall) return;
 			const userMsg = extractUserStats(sessionPath, folder, entry);
 			if (userMsg) userStats.push(userMsg);
 			return;

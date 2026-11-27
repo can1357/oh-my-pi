@@ -340,9 +340,17 @@ describe("stats sync deduplicates forked-session entries", () => {
 		// Without the marker the fork's zeroed copy claims the request and the parent's $0.003 is lost.
 		expect(overall.totalCost).toBeCloseTo(0.006, 8);
 		// The copied tool call stays the parent's, so it still joins the parent's request row.
-		const owners = (await initDb())
+		const db = await initDb();
+		const owners = db
 			.query<{ session_file: string }, [string]>("SELECT session_file FROM tool_calls WHERE tool_call_id = ?")
 			.all("call01ab");
 		expect(owners.map(owner => owner.session_file)).toEqual([parentFile]);
+		// The copied prompt stays the parent's too, so the parent's reply link names its model.
+		const prompts = db
+			.query<{ session_file: string; model: string | null }, [string]>(
+				"SELECT session_file, model FROM user_messages WHERE entry_id = ?",
+			)
+			.all("user01ab");
+		expect(prompts).toEqual([{ session_file: parentFile, model: "gpt-5.4" }]);
 	});
 });
