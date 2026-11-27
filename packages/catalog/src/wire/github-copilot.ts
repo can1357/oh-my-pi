@@ -133,6 +133,27 @@ export function readCopilotTokenBilling(data: unknown): boolean | undefined {
 	return flags.includes(false) ? false : undefined;
 }
 
+/**
+ * Billing modes learned this process for bare GitHub tokens, keyed by a hash of
+ * the token (never the token itself). A raw `COPILOT_GITHUB_TOKEN` has no
+ * credential row to persist the mode on, so request-time billing reads it here.
+ */
+const learnedTokenBilling = new Map<string, boolean>();
+
+function tokenBillingKey(token: string): string {
+	return Bun.hash(token).toString(36);
+}
+
+/** Remember the billing mode `copilot_internal/user` reported for `token`, for this process. */
+export function rememberCopilotTokenBilling(token: string, tokenBasedBilling: boolean): void {
+	learnedTokenBilling.set(tokenBillingKey(token), tokenBasedBilling);
+}
+
+/** A request key's billing mode: the one it carries, else the one learned for its token, else unknown. */
+export function resolveCopilotTokenBilling(apiKey: ParsedGitHubCopilotApiKey): boolean | undefined {
+	return apiKey.tokenBasedBilling ?? learnedTokenBilling.get(tokenBillingKey(apiKey.accessToken));
+}
+
 const PUBLIC_GITHUB_HOSTS = new Set(["api.github.com", "github.com", "www.github.com"]);
 
 export function isPublicGitHubHost(host: string): boolean {
@@ -192,6 +213,7 @@ export async function discoverGitHubCopilotAccount(
 		const endpoint = isRecord(data.endpoints) ? data.endpoints.api : undefined;
 		const apiEndpoint = typeof endpoint === "string" ? normalizeGitHubCopilotApiEndpoint(endpoint) : undefined;
 		const tokenBasedBilling = readCopilotTokenBilling(data);
+		if (tokenBasedBilling !== undefined) rememberCopilotTokenBilling(token, tokenBasedBilling);
 		return {
 			...(apiEndpoint ? { apiEndpoint } : {}),
 			...(tokenBasedBilling === undefined ? {} : { tokenBasedBilling }),

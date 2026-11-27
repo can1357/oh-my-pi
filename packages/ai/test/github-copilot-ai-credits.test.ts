@@ -8,7 +8,7 @@ import type { AssistantMessage, Context, Model } from "@oh-my-pi/pi-ai/types";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { COPILOT_API_HEADERS } from "@oh-my-pi/pi-catalog/wire/github-copilot";
+import { COPILOT_API_HEADERS, rememberCopilotTokenBilling } from "@oh-my-pi/pi-catalog/wire/github-copilot";
 
 afterEach(() => {
 	vi.restoreAllMocks();
@@ -375,13 +375,26 @@ describe("premium-request estimate follows the account's billing mode", () => {
 	});
 
 	it("applies the same rule to Responses and Chat Completions requests", () => {
-		const estimate = (tokenBasedBilling: boolean) =>
+		for (const model of [makeResponsesModel("github-copilot"), makeCopilotCompletionsModel()]) {
+			const estimate = (tokenBasedBilling: boolean) =>
+				resolveOpenAIRequestSetup(model, {
+					apiKey: JSON.stringify({ token: "ghu_test", tokenBasedBilling }),
+					messages: context.messages,
+				}).copilotPremiumRequests;
+			expect(estimate(true)).toBeUndefined();
+			expect(estimate(false)).toBe(1);
+		}
+	});
+
+	it("drops the estimate for a bare token whose account was learned as token-billed", () => {
+		const estimate = () =>
 			resolveOpenAIRequestSetup(makeCopilotCompletionsModel(), {
-				apiKey: JSON.stringify({ token: "ghu_test", tokenBasedBilling }),
+				apiKey: "ghu_bare_env_token",
 				messages: context.messages,
 			}).copilotPremiumRequests;
-		expect(estimate(true)).toBeUndefined();
-		expect(estimate(false)).toBe(1);
+		expect(estimate()).toBe(1);
+		rememberCopilotTokenBilling("ghu_bare_env_token", true);
+		expect(estimate()).toBeUndefined();
 	});
 });
 
