@@ -11,8 +11,15 @@ describe("shouldInlineToolDescriptors", () => {
 	test("auto inlines for Gemini models", () => {
 		expect(shouldInlineToolDescriptors("auto", "gemini-3-pro")).toBe(true);
 		expect(shouldInlineToolDescriptors("auto", "gemini-3.1-flash")).toBe(true);
-		// Namespaced/aggregator ids fold onto the gemini lineage too.
-		expect(shouldInlineToolDescriptors("auto", "google-antigravity/gemini-3-pro")).toBe(true);
+	});
+
+	test("auto stays off for Antigravity models: schemas already travel in request.tools", () => {
+		// The Cloud Code Assist backend 429s large non-official system prompts, and
+		// both Antigravity transports send tool schemas in request.tools anyway.
+		expect(shouldInlineToolDescriptors("auto", "antigravity-cli/gemini-4-neon")).toBe(false);
+		expect(shouldInlineToolDescriptors("auto", "google-antigravity/gemini-3-pro")).toBe(false);
+		// Explicit on still wins for users who want the catalog back.
+		expect(shouldInlineToolDescriptors("on", "antigravity-cli/gemini-4-neon")).toBe(true);
 	});
 
 	test("auto stays off for non-Gemini models and missing model", () => {
