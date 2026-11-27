@@ -25,7 +25,7 @@ import { previewLine, shortenEmbeddedPaths, TRUNCATE_LENGTHS } from "../../utils
 import { replaceTabs } from "../../utils/text-width";
 import "../styles/dock";
 import { JobWidget } from "../tools/jobs/widget";
-import { kbdKeys } from "../keys/format";
+import { kbdKeys } from "@oh-my-pi/pi-tui/theme/keys";
 import { glanceSpans, MiniSpark, primarySpark } from "./pills";
 
 /** Fields every card face has. */

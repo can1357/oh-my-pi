@@ -30,7 +30,7 @@ import { formatDuration } from "@oh-my-pi/pi-utils";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import "../styles/dock";
 import type { WorkingTerm } from "../styles/dock/working";
-import { kbdKeys } from "../keys/format";
+import { kbdKeys } from "@oh-my-pi/pi-tui/theme/keys";
 import { formatTooltipKey } from "../keys/hints";
 
 /** A maintenance run in the working row's place: a retry waiting out its delay, or context compaction. */

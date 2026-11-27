@@ -7,7 +7,7 @@
  */
 import { batch, For, type JSXNode, type KeyEvent, signal, untrack } from "@oh-my-pi/pi-tui";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
-import { formatKey } from "../../keys/format";
+import { formatKey } from "@oh-my-pi/pi-tui/theme/keys";
 import type { SceneContext } from "../types";
 import { listKeyId } from "../../../config/keybindings/matchers";
 

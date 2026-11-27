@@ -5,7 +5,7 @@ import { paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
 import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
 import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import { getKeybindings, KeybindingsManager, setKeybindings } from "../../../../src/config/keybindings/keybindings";
-import { setKeyHintPlatform } from "../../../../src/ui/keys/format";
+import { setKeyHintPlatform } from "@oh-my-pi/pi-tui/theme/keys";
 import {
 	BranchSummaryBlock,
 	type CompactionSummary,

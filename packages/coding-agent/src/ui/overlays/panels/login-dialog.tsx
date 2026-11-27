@@ -22,7 +22,7 @@ import { editLine } from "../settings/line-edit";
 import { ActionButton, applyEdit, applyMaskedEdit } from "./common";
 import { matchesSelectCancel } from "../../../config/keybindings/matchers";
 import { getKeybindings } from "../../../config/keybindings/keybindings";
-import { keyHintPlatform } from "../../keys/format";
+import { keyHintPlatform } from "@oh-my-pi/pi-tui/theme/keys";
 import { actionKbd, actionKeyId, formatKeyHint, kbdOf } from "../../keys/hints";
 import { bindingGlyph, keyTitle } from "../../styles/panels/common";
 

@@ -7,8 +7,8 @@
  * Addon-free (only the preset tables), so CLI help text can format keys
  * without loading the native addon.
  */
-import { presetSymbols } from "@oh-my-pi/pi-tui/theme/symbols";
-import type { SymbolPreset } from "@oh-my-pi/pi-tui/theme/schema";
+import type { SymbolPreset } from "./schema";
+import { presetSymbols } from "./symbols";
 
 /** How keys read: the symbol preset and the platform whose modifier keycaps they name. */
 export interface KeyStyle {

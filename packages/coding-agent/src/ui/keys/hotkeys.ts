@@ -6,7 +6,7 @@
 import type { Keybinding } from "../../config/keybindings/app-keybindings";
 import { canonicalKeyId } from "../../config/keybindings/key-id";
 import type { KeybindingsManager } from "../../config/keybindings/keybindings";
-import { keyHintPlatform } from "./format";
+import { keyHintPlatform } from "@oh-my-pi/pi-tui/theme/keys";
 import { formatKeyHint, formatKeyHints } from "./hints";
 
 /** One piece of a shortcut cell: key alternatives (ids like `ctrl+r`; none: unbound), a typed token (`#<number>`), or prose. */

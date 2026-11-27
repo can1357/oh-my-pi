@@ -5,7 +5,7 @@ import {
 	setKeybindings,
 } from "@oh-my-pi/pi-coding-agent/config/keybindings/keybindings";
 import { keyText } from "@oh-my-pi/pi-coding-agent/extensibility/legacy-pi-coding-agent-shim";
-import { setKeyHintPlatform } from "@oh-my-pi/pi-coding-agent/ui/keys/format";
+import { setKeyHintPlatform } from "@oh-my-pi/pi-tui/theme/keys";
 
 describe("legacy keyText", () => {
 	let previous: KeybindingsManager;

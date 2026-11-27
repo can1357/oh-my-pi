@@ -546,7 +546,7 @@ function choiceEditor(
 		description: row.hint,
 		preview,
 		control: list.rows,
-		hint: `  ${caps("select.confirm")} to select · ${caps("select.cancel")} to go back`,
+		hint: `  ${caps(theme, "select.confirm")} to select · ${caps(theme, "select.cancel")} to go back`,
 	});
 	return {
 		rows: field.rows,
@@ -580,10 +580,10 @@ function multiEditor(
 		control.options.findIndex(candidate => candidate.value === option),
 	);
 	const list = selectList(theme, options, selected, width, MULTI_ROWS, hover);
-	const back = `${caps("select.cancel")} to go back`;
+	const back = `${caps(theme, "select.cancel")} to go back`;
 	const hint = ordered
-		? `  Click to toggle · drag selected items to reorder · ←/→ move · 1-9 place · ${back}`
-		: `  Click/${caps("select.confirm")}/␣ to toggle · ${back}`;
+		? `  Click to toggle · drag selected items to reorder · ${keyCaps(theme, ["left"])}/${keyCaps(theme, ["right"])} move · 1-9 place · ${back}`
+		: `  Click/${caps(theme, "select.confirm")}/${keyCaps(theme, ["space"])} to toggle · ${back}`;
 	const field = formField(theme, width, { label: row.label, description: row.hint, control: list.rows, hint });
 	return {
 		rows: field.rows,
@@ -606,30 +606,37 @@ function textEditor(
 		description: row.hint,
 		control: [inputLine(draft, cursor ?? draft.length, width)],
 		error,
-		hint: `  ${caps("select.confirm")} to save · ${caps("select.cancel")} to cancel · Clear field to unset`,
+		hint: `  ${caps(theme, "select.confirm")} to save · ${caps(theme, "select.cancel")} to cancel · Clear field to unset`,
 	});
 	return { rows: field.rows };
 }
 
 // ─── Footer ─────────────────────────────────────────────────────────────────
 
-/** The primary key of a widget action as keycaps (`⎋`), as the keymap binds it. */
-function caps(action: WidgetAction): string {
+/** The primary key of a widget action as `theme`'s keycaps (`⎋`, `Esc` in ascii), as the keymap binds it. */
+function caps(theme: Theme, action: WidgetAction): string {
 	const [key] = widgetKeys(action);
-	if (key === undefined) return "";
-	return keyCaps(key.endsWith("+") ? [...key.slice(0, -1).split("+").slice(0, -1), "+"] : key.split("+"));
+	return key === undefined ? "" : keyCaps(theme, [key]);
 }
 
-function footerHint(props: TspPrefsProps, term: PrefsTerm | undefined, runs: readonly PrefsRun[]): string {
+function footerHint(
+	theme: Theme,
+	props: TspPrefsProps,
+	term: PrefsTerm | undefined,
+	runs: readonly PrefsRun[],
+): string {
 	if (term?.hint !== undefined) return term.hint;
-	const confirm = caps("select.confirm");
-	const close = `${caps("select.cancel")} to close`;
-	if (isSearching(props)) return `${confirm} to change · ⇥ to jump tabs · ${caps("select.cancel")} to exit search`;
-	if (term?.body) return `⇥ to switch tabs · ${close}`;
+	const confirm = caps(theme, "select.confirm");
+	const cancel = caps(theme, "select.cancel");
+	const tab = keyCaps(theme, ["tab"]);
+	const switchTabs = `${keyCaps(theme, ["left"])}/${keyCaps(theme, ["right"])} to switch tabs`;
+	const close = `${cancel} to close`;
+	if (isSearching(props)) return `${confirm} to change · ${tab} to jump tabs · ${cancel} to exit search`;
+	if (term?.body) return `${tab} to switch tabs · ${close}`;
 	if (term?.sectionFocus)
-		return `${caps("select.up")}/${caps("select.down")} to jump sections · ⇥/${confirm} to settings · ←/→ to switch tabs · ${close}`;
-	const nav = runs.length >= 2 ? "⇥ to jump sections · ←/→ to switch tabs" : "⇥ to switch tabs";
-	return `${confirm}/␣ to change · ${nav} · Type to search · ${close}`;
+		return `${caps(theme, "select.up")}/${caps(theme, "select.down")} to jump sections · ${tab}/${confirm} to settings · ${switchTabs} · ${close}`;
+	const nav = runs.length >= 2 ? `${tab} to jump sections · ${switchTabs}` : `${tab} to switch tabs`;
+	return `${confirm}/${keyCaps(theme, ["space"])} to change · ${nav} · Type to search · ${close}`;
 }
 
 // ─── Page strip ─────────────────────────────────────────────────────────────
@@ -800,7 +807,7 @@ function paintWindow(node: UiNode, cx: PaintContext): Block {
 	for (let i = 0; i < contentRows; i++) rows.push(frameRow(theme, content[i] ?? "", width));
 	for (const line of previewRows) rows.push(frameRow(theme, line, width));
 	rows.push(frameRule(theme, width, theme.symbols.box.teeRight, theme.symbols.box.teeLeft));
-	rows.push(frameRow(theme, theme.fg("dim", footerHint(props, term, runs)), width));
+	rows.push(frameRow(theme, theme.fg("dim", footerHint(theme, props, term, runs)), width));
 	rows.push(frameRule(theme, width, theme.symbols.box.bottomLeft, theme.symbols.box.bottomRight));
 	return { rows, hits };
 }

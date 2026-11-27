@@ -105,7 +105,9 @@ describe("/security", () => {
 			await expect(tool.execute("disabled", request)).rejects.toThrow(/Security is disabled/);
 
 			cfgSecurityEnabled.override(settings, true);
-			await expect(tool.execute("enabled", request)).rejects.toThrow("Unknown security operation: missing-operation");
+			await expect(tool.execute("enabled", request)).rejects.toThrow(
+				"Unknown security operation: missing-operation",
+			);
 		} finally {
 			authStorage.close();
 		}

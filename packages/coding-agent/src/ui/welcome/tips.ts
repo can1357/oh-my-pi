@@ -8,7 +8,7 @@
  *   keys, formatted through the symbol preset.
  * - `[label](url)`: a link.
  */
-import { formatKey, formatKeys, formatKeyTwice, type KeyStyle } from "../keys/format";
+import { formatKey, formatKeys, formatKeyTwice, type KeyStyle } from "@oh-my-pi/pi-tui/theme/keys";
 import type { TspSpan, TspText } from "@oh-my-pi/pi-wire";
 import tipsText from "./tips.txt" with { type: "text" };
 

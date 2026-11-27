@@ -10,7 +10,7 @@ import { padTo, truncate, visibleWidth } from "@oh-my-pi/pi-tui/text/width";
 import type { TspKbdProps, TspSpan, TspText, TspTextProps } from "@oh-my-pi/pi-wire";
 import type { Keybinding } from "../../../config/keybindings/app-keybindings";
 import { canonicalKeyId } from "../../../config/keybindings/key-id";
-import { formatKeys, keyHintPlatform } from "../../keys/format";
+import { formatKeys, keyHintPlatform } from "@oh-my-pi/pi-tui/theme/keys";
 import { formatKeyHint, formatTooltipKey, keyLabel } from "../../keys/hints";
 import { getKeybindings } from "../../../config/keybindings/keybindings";
 
