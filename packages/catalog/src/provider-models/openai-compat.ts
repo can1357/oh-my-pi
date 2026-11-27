@@ -16,7 +16,7 @@ import { xaiResponsesReasoningEffortMap } from "../compat/openai";
 import { hasModelScopedEffortLadder, resolveCatalogAxes, resolveModelPolicy } from "../compat/resolve";
 import { compareRevision, parseRevision, revisionAtLeast } from "../compat/revision";
 import { providerBaseUrl, providerEntries, providerEntry, seedModels } from "../compat/providers";
-import { billingVariantPlain, classifyModel, discoveryVocabulary } from "../compat/taxonomy";
+import { AmbiguousIdentityError, billingVariantPlain, classifyModel, discoveryVocabulary } from "../compat/taxonomy";
 import {
 	DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS,
 	fetchOpenAICompatibleModels,
@@ -7027,16 +7027,20 @@ function createCopilotLongContextVariant(
 }
 
 /**
- * The `tier-cache-follows-input` axis of a synthesized long-context row; undefined when the rule tree
- * cannot resolve the row (an equal-rank overlap), which would otherwise throw out of the `/models`
- * mapper and reject every live row rather than this one.
+ * The `tier-cache-follows-input` axis of a synthesized long-context row; undefined when this build's
+ * rule tree cannot place the row (an equal-rank rule overlap or identity tie), which would otherwise
+ * throw out of the `/models` mapper and reject every live row rather than this one.
  */
 function copilotTierCacheFollowsInput(variant: ModelSpec<Api>): boolean | undefined {
 	try {
 		return resolveCatalogAxes(variant).tierCacheFollowsInput === true;
 	} catch (error) {
-		if (error instanceof AmbiguousOverlapError) return undefined;
-		throw error;
+		if (!(error instanceof AmbiguousOverlapError || error instanceof AmbiguousIdentityError)) throw error;
+		logger.warn("Copilot discovery skipped a long-context tier the rules cannot place", {
+			model: variant.id,
+			error: error.message,
+		});
+		return undefined;
 	}
 }
 

@@ -108,11 +108,16 @@ describe("Copilot tier cache pricing", () => {
 	});
 
 	it("keeps the other live rows when a long tier's rules cannot resolve", async () => {
-		// The rule tree has no reviewed rank for a reference-less Haiku 4.6, so its `-1m` row
-		// hits an equal-rank overlap; only that row may drop out.
+		// This build's rule tree cannot place either id: a reference-less Haiku 4.6's `-1m` row hits an
+		// equal-rank rule overlap, and `claude-haiku-fable-5.5` ties two family globs. Only they may drop out.
 		const data = [
 			entry(
 				"claude-haiku-4.6",
+				{ max_prompt_tokens: 200_000, input_price: 100, output_price: 500 },
+				{ max_prompt_tokens: 936_000, input_price: 200, output_price: 1000 },
+			),
+			entry(
+				"claude-haiku-fable-5.5",
 				{ max_prompt_tokens: 200_000, input_price: 100, output_price: 500 },
 				{ max_prompt_tokens: 936_000, input_price: 200, output_price: 1000 },
 			),
