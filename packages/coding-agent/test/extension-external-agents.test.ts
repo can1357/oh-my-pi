@@ -379,7 +379,12 @@ describe("ExtensionContext.agents.registerExternal", () => {
 			});
 			await asked.promise;
 			controller.abort();
-			await expect(reading).rejects.toThrow();
+			// Not `rejects`: on a read that never settles it keeps bun running past the test's timeout.
+			const failure = await reading.then(
+				() => undefined,
+				(error: unknown) => error,
+			);
+			expect(failure).toBeInstanceOf(Error);
 		}
 		expect(signals.map(signal => signal?.aborted)).toEqual([true, true]);
 	});
