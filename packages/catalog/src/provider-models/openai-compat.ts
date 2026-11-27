@@ -7016,6 +7016,9 @@ function createCopilotLongContextVariant(
 	// Long-context tier has its own token prices (Gemini/GPT bill ~2x above
 	// the default boundary); see copilotTierCost for the cache legs.
 	const scaleCache = copilotTierCacheFollowsInput(variant);
+	// The rule tree cannot build this row: synthesize none, so the base row
+	// promotes nowhere instead of naming a sibling discovery would then drop.
+	if (scaleCache === undefined) return undefined;
 	const longCost = copilotTierCost(longContext, base.cost, scaleCache);
 	if (longCost) {
 		variant.cost = longCost;
@@ -7024,15 +7027,15 @@ function createCopilotLongContextVariant(
 }
 
 /**
- * The `tier-cache-follows-input` axis of a synthesized long-context row. A row the rule tree cannot
- * resolve (an equal-rank overlap) scales nothing here; `buildModel` then skips that row alone instead
- * of the throw rejecting the whole `/models` response.
+ * The `tier-cache-follows-input` axis of a synthesized long-context row; undefined when the rule tree
+ * cannot resolve the row (an equal-rank overlap), which would otherwise throw out of the `/models`
+ * mapper and reject every live row rather than this one.
  */
-function copilotTierCacheFollowsInput(variant: ModelSpec<Api>): boolean {
+function copilotTierCacheFollowsInput(variant: ModelSpec<Api>): boolean | undefined {
 	try {
 		return resolveCatalogAxes(variant).tierCacheFollowsInput === true;
 	} catch (error) {
-		if (error instanceof AmbiguousOverlapError) return false;
+		if (error instanceof AmbiguousOverlapError) return undefined;
 		throw error;
 	}
 }

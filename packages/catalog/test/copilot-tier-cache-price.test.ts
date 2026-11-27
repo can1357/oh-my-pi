@@ -110,7 +110,7 @@ describe("Copilot tier cache pricing", () => {
 	it("keeps the other live rows when a long tier's rules cannot resolve", async () => {
 		// The rule tree has no reviewed rank for a reference-less Haiku 4.6, so its `-1m` row
 		// hits an equal-rank overlap; only that row may drop out.
-		const cost = await resolveCosts([
+		const data = [
 			entry(
 				"claude-haiku-4.6",
 				{ max_prompt_tokens: 200_000, input_price: 100, output_price: 500 },
@@ -121,10 +121,19 @@ describe("Copilot tier cache pricing", () => {
 				{ max_prompt_tokens: 272_000, input_price: 13, output_price: 50 },
 				{ max_prompt_tokens: 936_000, input_price: 26, output_price: 75 },
 			),
-		]);
+		];
+		const cost = await resolveCosts(data);
 		// Live prices, not the bundled fallback a rejected response would leave.
 		expect(cost("gpt-6-luna")?.input).toBe(0.13);
 		expect(cost("gpt-6-luna-1m")?.input).toBe(0.26);
 		expect(cost("claude-haiku-4.6-1m")).toBeUndefined();
+		// No sibling is synthesized, so the base row cannot promote into a row that never resolves.
+		const specs =
+			(await githubCopilotModelManagerOptions({
+				apiKey: "copilot-test-key",
+				fetch: async () => Response.json({ data }),
+			}).fetchDynamicModels?.()) ?? [];
+		expect(specs.map(spec => spec.id)).not.toContain("claude-haiku-4.6-1m");
+		expect(specs.find(spec => spec.id === "claude-haiku-4.6")?.contextPromotionTarget).toBeUndefined();
 	});
 });
