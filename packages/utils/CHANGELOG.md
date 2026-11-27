@@ -9,6 +9,7 @@
 ### Added
 
 - Added `getBunStubDir()` to expose the cache directory used for the `bun` executable stub in compiled applications.
+- Added `initializeSqliteSchema(db, apply)`, which runs an idempotent schema initializer and takes the write lock only when the schema needs a change ([#17968](https://github.com/can1357/oh-my-pi/pull/17968) by [@sjawhar](https://github.com/sjawhar))
 
 ### Fixed
 

@@ -19,6 +19,7 @@
 - Fixed cancelled inference requests being sent when cancellation occurs while the request body is being prepared.
 - Fixed reasoning-loop detection for unspaced writing systems such as Chinese, Japanese, and Thai, avoiding false aborts while still detecting genuine loops.
 - Corrected Claude usage reporting to label Team premium seats as “Team 5x” rather than “Max 5x”.
+- Fixed opening the credential store taking `agent.db`'s write lock on every start, which failed starts with `database is locked` while another process wrote `agent.db` ([#17968](https://github.com/can1357/oh-my-pi/pull/17968) by [@sjawhar](https://github.com/sjawhar))
 
 ## [19.2.1] - 2026-11-25
 

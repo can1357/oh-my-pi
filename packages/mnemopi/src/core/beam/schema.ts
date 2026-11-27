@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { initializeSqliteSchema } from "@oh-my-pi/pi-utils";
 
 type PragmaTableInfoRow = {
 	name: string;
@@ -21,7 +22,26 @@ function runAll(db: Database, statements: readonly string[]): void {
 	}
 }
 
+/**
+ * Installs trigger `name` from `sql` (`CREATE TRIGGER name ...`, without `IF NOT EXISTS`), replacing an
+ * older definition. SQLite stores that exact text, so a current trigger is only read: an unconditional
+ * `DROP TRIGGER` + `CREATE` would take the write lock on every open.
+ */
+function replaceTrigger(db: Database, name: string, sql: string): void {
+	const stored = db
+		.query<{ sql: string }, [string]>("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?")
+		.get(name);
+	if (stored?.sql === sql) return;
+	if (stored) db.run(`DROP TRIGGER ${name}`);
+	db.run(sql);
+}
+
+/** Creates and migrates a bank's BEAM tables; a current bank is only read (`initializeSqliteSchema`). */
 export function initBeam(db: Database): void {
+	initializeSqliteSchema(db, () => applyBeamSchema(db));
+}
+
+function applyBeamSchema(db: Database): void {
 	db.run(`
 		CREATE TABLE IF NOT EXISTS working_memory (
 			id TEXT PRIMARY KEY,
@@ -152,19 +172,25 @@ export function initBeam(db: Database): void {
 			INSERT INTO fts_episodes(fts_episodes, rowid, content) VALUES ('delete', old.rowid, old.content);
 			INSERT INTO fts_episodes(rowid, content) VALUES (new.rowid, new.content);
 		END`,
-		"DROP TRIGGER IF EXISTS wm_ai",
-		`CREATE TRIGGER IF NOT EXISTS wm_ai AFTER INSERT ON working_memory BEGIN
-			INSERT INTO fts_working(id, content) VALUES (new.id, COALESCE(new.embed_text, new.content));
-		END`,
 		`CREATE TRIGGER IF NOT EXISTS wm_ad AFTER DELETE ON working_memory BEGIN
 			DELETE FROM fts_working WHERE id = old.id;
 		END`,
-		"DROP TRIGGER IF EXISTS wm_au",
-		`CREATE TRIGGER IF NOT EXISTS wm_au AFTER UPDATE OF content, embed_text ON working_memory BEGIN
+	]);
+	replaceTrigger(
+		db,
+		"wm_ai",
+		`CREATE TRIGGER wm_ai AFTER INSERT ON working_memory BEGIN
+			INSERT INTO fts_working(id, content) VALUES (new.id, COALESCE(new.embed_text, new.content));
+		END`,
+	);
+	replaceTrigger(
+		db,
+		"wm_au",
+		`CREATE TRIGGER wm_au AFTER UPDATE OF content, embed_text ON working_memory BEGIN
 			DELETE FROM fts_working WHERE id = old.id;
 			INSERT INTO fts_working(id, content) VALUES (new.id, COALESCE(new.embed_text, new.content));
 		END`,
-	]);
+	);
 
 	db.run(`
 		CREATE TABLE IF NOT EXISTS memoria_facts (

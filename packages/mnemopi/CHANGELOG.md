@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed opening a memory bank taking its write lock on every open, which failed opens with `database is locked` while another process wrote the bank ([#17968](https://github.com/can1357/oh-my-pi/pull/17968) by [@sjawhar](https://github.com/sjawhar))
+
 ### Removed
 
 - Removed unused public configuration exports from @oh-my-pi/pi-mnemopi/config.

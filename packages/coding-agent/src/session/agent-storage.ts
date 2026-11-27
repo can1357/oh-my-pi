@@ -15,6 +15,7 @@ import {
 	getAgentDbPath,
 	getDbBusyTimeoutMs,
 	getStatsDbPath,
+	initializeSqliteSchema,
 	isRecord,
 	logger,
 	openSqliteDatabase,
@@ -271,14 +272,16 @@ ON CONFLICT(name) DO UPDATE SET count = ${table}.count + 1, last_used_at = ${SQL
 	}
 
 	/**
-	 * Creates tables if missing and migrates legacy settings.
-	 * AuthCredentialStore handles auth_credentials and cache tables.
+	 * Creates tables if missing and migrates legacy settings, writing nothing when the schema is
+	 * current (see `initializeSqliteSchema`). AuthCredentialStore handles auth_credentials and cache tables.
 	 */
 	#initializeSchema(): void {
-		this.#db.run(`
-PRAGMA journal_mode=WAL;
-PRAGMA synchronous=NORMAL;
+		this.#db.run("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
+		initializeSqliteSchema(this.#db, () => this.#applySchema());
+	}
 
+	#applySchema(): void {
+		this.#db.run(`
 CREATE TABLE IF NOT EXISTS model_usage (
 	model_key TEXT PRIMARY KEY,
 	last_used_at INTEGER NOT NULL DEFAULT (${SQLITE_NOW_EPOCH})
