@@ -97,7 +97,7 @@ function resolveFoundryTlsOptions(model: Model<"anthropic-messages">): FoundryTl
 	}
 
 	const options: FoundryTlsOptions = {};
-	if (ca) options.ca = [...tls.rootCertificates, ca];
+	if (ca) options.ca = [...tls.getCACertificates("default"), ca];
 	if (cert) options.cert = cert;
 	if (key) options.key = key;
 	const resolved = Object.keys(options).length > 0 ? options : undefined;

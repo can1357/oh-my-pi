@@ -94,10 +94,9 @@ import type { AgentSessionEvent } from "./agent-session-events";
 import type { ContextUsageBreakdown } from "./agent-session-types";
 import type { CacheBridgeEstimate, CacheBridgeOutcome } from "./cache-warmer";
 import { findCompactMode } from "./compact-modes";
+import { type CompactionMethod, DEFAULT_COMPACTION_METHOD_ORDER } from "./compaction-method-ids";
 import {
-	type CompactionMethod,
 	canUseRemoteCompaction,
-	DEFAULT_COMPACTION_METHOD_ORDER,
 	resolveCompactionMethodOrder,
 	resolveMethodSettings,
 	resolveSpeculationMethod,
@@ -150,11 +149,17 @@ export type CompactionCheckResult = Readonly<{
 	continuationScheduled: boolean;
 	automaticContinuationBlocked?: boolean;
 	historyRewritten?: boolean;
+	/** A `session_before_compact` hook returned `cancel`; nothing was committed. */
+	vetoedByHook?: boolean;
 }>;
 
 /** Shared no-op result for dispatcher paths that perform no maintenance. */
 export const COMPACTION_CHECK_NONE: CompactionCheckResult = {
 	continuationScheduled: false,
+};
+const COMPACTION_CHECK_VETOED: CompactionCheckResult = {
+	continuationScheduled: false,
+	vetoedByHook: true,
 };
 const COMPACTION_CHECK_CONTINUATION: CompactionCheckResult = {
 	continuationScheduled: true,
@@ -2251,7 +2256,7 @@ export class SessionMaintenance {
 					await this.#host.sessionManager.rewriteEntries();
 				}
 				this.#host.emitNotice("warning", warning, "compaction");
-				return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
+				return { ...COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION, historyRewritten: true };
 			}
 			if (willRetry) {
 				this.#host.scheduleAgentContinue({
@@ -2259,16 +2264,17 @@ export class SessionMaintenance {
 					delayMs: 100,
 					generation,
 				});
-				return COMPACTION_CHECK_CONTINUATION;
+				return { continuationScheduled: true, historyRewritten: true };
 			}
-			return this.#host.scheduleCompactionContinuation({
-				generation,
-				autoContinue: shouldAutoContinue,
-				terminalTextAnswer,
-				suppressContinuation,
-			})
-				? COMPACTION_CHECK_CONTINUATION
-				: COMPACTION_CHECK_NONE;
+			return {
+				continuationScheduled: this.#host.scheduleCompactionContinuation({
+					generation,
+					autoContinue: shouldAutoContinue,
+					terminalTextAnswer,
+					suppressContinuation,
+				}),
+				historyRewritten: true,
+			};
 		} catch (error) {
 			await this.#emitLifecycleEvent(
 				{
@@ -3370,7 +3376,15 @@ export class SessionMaintenance {
 
 		if (signal?.aborted) return;
 		this.#replaceActiveMessages(activeMessages);
-		logger.debug("Mid-run compaction ran between provider calls", {
+		const outcome = result.vetoedByHook
+			? "vetoed"
+			: result.automaticContinuationBlocked
+				? "dead_end"
+				: result.historyRewritten
+					? "committed"
+					: "unchanged";
+		logger.debug("Mid-run compaction attempted between provider calls", {
+			outcome,
 			contextTokens,
 			contextWindow,
 			methods: resolveCompactionMethodOrder(compactionSettings.methodOrder),
@@ -5998,6 +6012,11 @@ export class SessionMaintenance {
 				})) as SessionBeforeCompactResult | undefined;
 
 				if (hookResult?.cancel) {
+					logger.debug("Automatic compaction vetoed by session_before_compact hook", {
+						reason,
+						phase: options.phase,
+						triggerContextTokens: options.triggerContextTokens,
+					});
 					await this.#emitLifecycleEvent(
 						{
 							type: "auto_compaction_end",
@@ -6008,7 +6027,7 @@ export class SessionMaintenance {
 						},
 						options.detachPostCommit === true,
 					);
-					return COMPACTION_CHECK_NONE;
+					return COMPACTION_CHECK_VETOED;
 				}
 
 				if (hookResult?.compaction) {
@@ -6894,8 +6913,11 @@ export class SessionMaintenance {
 		if (deadEndWarning) {
 			this.#host.emitNotice("warning", deadEndWarning, "compaction");
 		}
-		if (continuationScheduled) return COMPACTION_CHECK_CONTINUATION;
-		return noProgressDeadEnd ? COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION : COMPACTION_CHECK_NONE;
+		return {
+			continuationScheduled,
+			...(noProgressDeadEnd && !continuationScheduled ? { automaticContinuationBlocked: true } : {}),
+			historyRewritten: true,
+		};
 	}
 
 	/**

@@ -342,3 +342,11 @@ commit's own ignore rules, after its tree and index have been written. Caches
 ignored by the target remain, even if the source did not ignore them. Nested
 repositories are preserved and symlinks are not followed. This target-ignore
 cleanup is skipped when keeping the source's uncommitted changes.
+
+Apart from those, every ignored file is carried, not only build caches: `.env` files,
+local credentials, signing configs such as `key.properties`, and editor or tool
+state arrive in the new worktree as independent copies. Those copies do not
+follow later changes in the source checkout, and a `post-checkout` hook that
+links a shared file will find a regular file already in place. There is no
+per-path exclude list; set `worktree.clone: false` to create worktrees with a
+plain checkout instead.

@@ -6218,6 +6218,7 @@ dependencies = [
  "libm",
  "log",
  "memchr",
+ "memmap2",
  "napi",
  "napi-build",
  "napi-derive",

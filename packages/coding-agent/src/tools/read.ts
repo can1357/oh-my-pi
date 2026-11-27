@@ -204,6 +204,7 @@ import { toolResult } from "./tool-result";
 
 import {
 	cfgFetchEnabled,
+	cfgImagesQuestionRouting,
 	cfgReadDefaultLimit,
 	cfgReadRenderMarkdown,
 	cfgReadSummarizeEnabled,
@@ -1750,9 +1751,14 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					: imageMetadata?.hasAlpha === false
 						? "- Alpha: no"
 						: "- Alpha: unknown",
-				"",
-				`To analyze the image, read \`${imageQuestionPath}?q=<question>\` — the question is answered by a vision model and returned as text.`,
 			];
+			// Under `images.questionRouting: active` a text-only active model cannot answer `?q=` either.
+			if (cfgImagesQuestionRouting.get(this.session.settings) !== "active") {
+				metadataLines.push(
+					"",
+					`To analyze the image, read \`${imageQuestionPath}?q=<question>\` — the question is answered by a vision model and returned as text.`,
+				);
+			}
 			return { content: [{ type: "text", text: metadataLines.join("\n") }], details: {}, sourcePath: absolutePath };
 		}
 		if (fileSize > MAX_IMAGE_SIZE) {

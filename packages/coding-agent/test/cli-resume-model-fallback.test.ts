@@ -133,7 +133,12 @@ describe("headless startup resume", () => {
 					if (rpc) {
 						// A fail-closed RPC startup exits before `ready`, so the reason is delivered as a stdout notice
 						// frame; the transcript itself must still never reach a provider or the stdout stream.
-						expect(out.split("\n").filter(Boolean).map(line => JSON.parse(line) as unknown)).toEqual([
+						expect(
+							out
+								.split("\n")
+								.filter(Boolean)
+								.map(line => JSON.parse(line) as unknown),
+						).toEqual([
 							{
 								type: "notice",
 								level: "error",

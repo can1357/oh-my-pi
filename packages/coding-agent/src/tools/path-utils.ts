@@ -114,6 +114,11 @@ function stripFileUrl(filePath: string): string {
 export { expandTilde };
 
 export function expandPath(filePath: string): string {
+	// Untyped callers (browser helpers fed from eval code) can pass any value; name the contract
+	// instead of failing on `filePath.startsWith is not a function`.
+	if (typeof filePath !== "string") {
+		throw new ToolError(`Expected a file path string; got ${filePath === null ? "null" : typeof filePath}.`);
+	}
 	// Some models intermittently prefix an otherwise-valid path with a stray
 	// `:` (e.g. `:/abs/path`, `:../rel`, or the Windows forms `:C:\repo\file`
 	// and `:.\src`). No real path starts with `:` and it never begins a

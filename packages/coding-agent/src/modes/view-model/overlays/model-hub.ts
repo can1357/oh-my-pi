@@ -1,4 +1,4 @@
-import type { KeysApi, Model } from "@oh-my-pi/pi-ai";
+import type { CredentialsApi, KeysApi, Model } from "@oh-my-pi/pi-ai";
 import { type ConfiguredThinkingLevel } from "../../../utils/render-utils";
 import type { ModelBrowserRegistry, ModelBrowserSource } from "./model-browser";
 
@@ -17,7 +17,7 @@ export interface ModelHubSource extends ModelBrowserSource {
 
 /** Catalog capabilities the /models hub needs. */
 export interface ModelHubRegistry extends ModelBrowserRegistry {
-	readonly authStorage: { readonly keys: Pick<KeysApi, "source"> };
+	readonly authStorage: { readonly keys: Pick<KeysApi, "source">; readonly credentials: Pick<CredentialsApi, "list"> };
 	getDiscoverableProviders(): string[];
 	getProviderDiscoveryState(provider: string):
 		| {
@@ -59,6 +59,8 @@ export interface ModelHubCallbacks {
 	onFallbackChainChange?: (role: string, chain: string[]) => void;
 	/** Locked provider activation: forward to the /login flow. */
 	onLoginRequest?: (providerId: string) => void;
+	/** Open a provider's `manage-url`, where the user turns its access on or off at the host. */
+	onManageAccess?: (url: string) => void;
 	/** Returns the rebuilt `--models` scope for the hub to list; `undefined` keeps the current one. */
 	onCatalogRefreshed?: (
 		providerId?: string,

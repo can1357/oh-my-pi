@@ -40,8 +40,8 @@ import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { extensionTheme } from "../../ui/extensions/render-output";
 import type { ComposerShape } from "../../ui/styles/composer/shapes";
-import { type AsyncJobManagerApi, formatAsyncJobLabel } from "../../async";
-import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/agent-session";
+import { formatAsyncJobLabel } from "../../async";
+import type { SendUserMessageOptions } from "../../session/agent-session";
 import { MAIN_AGENT_ID } from "../../registry/agent-registry";
 import type { SessionManager } from "../../session/session-manager";
 import type { ApprovalRecordSink } from "../../session/tool-approval-records";
@@ -77,6 +77,7 @@ import type {
 	Extension,
 	ExtensionActions,
 	ExtensionAgentIdentity,
+	ExtensionAsyncJobAccess,
 	ExtensionAnnotationsAPI,
 	ExtensionAnnotationsFactory,
 	ExtensionCommandContext,
@@ -650,8 +651,7 @@ export class ExtensionRunner {
 	#runEphemeralTurnFn?: ExtensionContextActions["runEphemeralTurn"];
 	#startLiveFn?: ExtensionContextActions["startLive"];
 	#ephemeralTurnBlocker = new AsyncLocalStorage<string | undefined>();
-	#getAsyncJobSnapshotFn: () => AsyncJobSnapshot | null = () => null;
-	#asyncJobManager: AsyncJobManagerApi | undefined;
+	#asyncJobs?: ExtensionAsyncJobAccess;
 	#newSessionHandler: NewSessionHandler = async () => ({ cancelled: false });
 	#branchHandler: BranchHandler = async () => ({ cancelled: false });
 	#navigateTreeHandler: NavigateTreeHandler = async () => ({ cancelled: false });
@@ -928,7 +928,8 @@ export class ExtensionRunner {
 		getMemory?: () => MemoryRuntimeContext | undefined,
 		private readonly settings?: Settings,
 		private readonly localProtocolOptions?: LocalProtocolOptions,
-		getAsyncJobSnapshot?: () => AsyncJobSnapshot | null,
+		/** The owning session's async jobs; absent outside a session. */
+		asyncJobs?: ExtensionAsyncJobAccess,
 		/** Identity of the agent this runner's session runs; defaults to the top-level agent. */
 		private readonly agent: ExtensionAgentIdentity = TOP_LEVEL_AGENT,
 		/** Builds `ctx.annotations`; supplied by the host that wires the bundled `/annotate` command. */
@@ -937,7 +938,7 @@ export class ExtensionRunner {
 		this.#uiContext = noOpUIContext;
 		this.#getMemoryFn = getMemory;
 		this.#createAnnotations = createAnnotations;
-		this.#getAsyncJobSnapshotFn = getAsyncJobSnapshot ?? (() => null);
+		this.#asyncJobs = asyncJobs;
 		this.runtime.getShortcutConflict = (shortcut, extensionPath) => this.getShortcutConflict(shortcut, extensionPath);
 	}
 
@@ -1196,11 +1197,6 @@ export class ExtensionRunner {
 	 */
 	setUserWaitTracker(track: UserWaitTracker): void {
 		this.#trackUserWait = track;
-	}
-
-	/** Backs `ctx.asyncJobs` with the session's job manager; `undefined` leaves it off the context. */
-	setAsyncJobManager(manager: AsyncJobManagerApi | undefined): void {
-		this.#asyncJobManager = manager;
 	}
 
 	/** Waits until the interactive transcript can show the tool call being approved. */
@@ -2009,13 +2005,14 @@ export class ExtensionRunner {
 			void this.runtime.sendUserMessage(text, options);
 		};
 		const getSessionModes = () => this.#sessionModes;
-		const asyncJobManager = this.#asyncJobManager;
+		const asyncJobManager = this.#asyncJobs?.manager;
 		return {
 			ui: delegation?.extensionPath ? this.#uiForPath(delegation.extensionPath) : this.#uiContext,
 			mode: this.#mode,
 			getContextUsage: () => this.#getContextUsageFn(),
 			compact: instructionsOrOptions => this.#compactFn(instructionsOrOptions),
-			getAsyncJobSnapshot: () => this.#getAsyncJobSnapshotFn(),
+			getAsyncJobSnapshot: () => this.#asyncJobs?.getSnapshot() ?? null,
+			cancelAsyncJob: id => this.#asyncJobs?.cancel(id) ?? false,
 			hasUI: this.hasUI(),
 			cwd: this.cwd,
 			sessionManager: this.sessionManager,

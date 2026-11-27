@@ -83,7 +83,8 @@ describe("AgentSession retry delay cap", () => {
 
 	beforeAll(async () => {
 		tempDir = TempDir.createSync("@pi-retry-cap-");
-		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+		// Fake Copilot keys must not reach github.com through the background billing probe.
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"), { copilotBillingProbe: false });
 		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 	});
 

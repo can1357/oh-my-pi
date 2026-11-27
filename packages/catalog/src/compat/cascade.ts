@@ -489,7 +489,7 @@ export function hasRuntimeProviderRules(): boolean {
 /**
  * Adds, replaces, or (with `undefined`) removes the runtime rule assigning
  * `directives` to every model of `provider`: what a KDL `provider "<id>" { … }`
- * block's axis lines would set, keyed by directive (`{ "prompt-perturbation": true }`).
+ * block's axis lines would set, keyed by directive (`{ "requires-native-tools": true }`).
  * The rule ranks as a provider-scoped rule in the runtime layer, so it
  * overrides bundled provider-wide assignments but not model-scoped ones.
  * Clears every memo derived from rule resolution.

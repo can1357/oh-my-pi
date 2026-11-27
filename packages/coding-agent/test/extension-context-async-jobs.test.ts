@@ -6,16 +6,20 @@ import { ASYNC_JOB_LABEL_MAX_CHARS } from "@oh-my-pi/pi-coding-agent/async";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
-import type { ExtensionContext, ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import type {
+	ExtensionAsyncJobAccess,
+	ExtensionContext,
+	ExtensionRuntime,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
-import type { AgentSession, AsyncJobSnapshot } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AsyncResultEntry } from "@oh-my-pi/pi-coding-agent/session/async-job-delivery";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { Snowflake } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
-function createRunner(getAsyncJobSnapshot?: () => AsyncJobSnapshot | null): ExtensionRunner {
+function createRunner(asyncJobs?: ExtensionAsyncJobAccess): ExtensionRunner {
 	const runtime = {
 		flagValues: new Map(),
 		pendingProviderRegistrations: [],
@@ -29,13 +33,29 @@ function createRunner(getAsyncJobSnapshot?: () => AsyncJobSnapshot | null): Exte
 		undefined,
 		undefined,
 		undefined,
-		getAsyncJobSnapshot,
+		asyncJobs,
 	);
 }
 
 describe("ExtensionRunner async job context", () => {
-	it("defaults to null outside a session", () => {
-		expect(createRunner().createContext().getAsyncJobSnapshot()).toBeNull();
+	it("defaults to null and no-op cancel outside a session", () => {
+		const ctx = createRunner().createContext();
+		expect(ctx.getAsyncJobSnapshot()).toBeNull();
+		expect(ctx.cancelAsyncJob("job-1")).toBe(false);
+	});
+
+	it("cancels through the owning session", () => {
+		const cancelled: string[] = [];
+		const ctx = createRunner({
+			getSnapshot: () => null,
+			cancel: id => {
+				cancelled.push(id);
+				return id === "job-1";
+			},
+		}).createContext();
+		expect(ctx.cancelAsyncJob("job-1")).toBe(true);
+		expect(ctx.cancelAsyncJob("job-2")).toBe(false);
+		expect(cancelled).toEqual(["job-1", "job-2"]);
 	});
 });
 
