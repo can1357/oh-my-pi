@@ -299,7 +299,13 @@ function assertNotShorterReadProjection(
 	writeContent: string = rawContent,
 ): void {
 	const rawPayloadLength = readProjectionPayloadLength(rawContent);
-	if (rawPayloadLength === undefined || currentContent === undefined) return;
+	if (rawPayloadLength === undefined) return;
+	if (currentContent === undefined) {
+		// No source to discard, but the new file would be a silently incomplete copy ending in the notice.
+		throw new ToolError(
+			`Refusing to create '${displayPath}' from an incomplete read projection: the content ends with an omp read truncation notice, so the new file would be missing the omitted content and contain the notice. Re-read the omitted ranges and write the complete file.`,
+		);
+	}
 	// A column-cap notice proves the page lossy at any length: a cut line ends in `…` in place of
 	// its tail, and a line one column past the cap renders exactly as long as its source. So does
 	// a truncation notice carrying the column clause, whose line-number prefixes pad the payload.

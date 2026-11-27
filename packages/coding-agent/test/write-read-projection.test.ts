@@ -292,7 +292,7 @@ describe("write tool read projection guard", () => {
 	});
 
 	it.skipIf(process.platform === "win32")(
-		"writes a bounded projection to a new ssh:// file and still guards existing ones",
+		"refuses a bounded projection for new and existing ssh:// files",
 		async () => {
 			vi.spyOn(capability, "loadCapability").mockResolvedValue({ items: [], all: [], warnings: [], providers: [] });
 			fakeSshTransport(() => tmpDir);
@@ -306,10 +306,13 @@ describe("write tool read projection guard", () => {
 			);
 			expect(projection).toContain("[Showing lines 1-20 of 60. Use :21- to continue]");
 
-			// No remote file yet: nothing to discard, so the write lands as it does for a new disk file.
+			// No remote file yet: the copy would be silently incomplete, so the write is refused.
 			const newPath = path.join(tmpDir, "new.txt");
-			await new WriteTool(session).execute("write-new", { path: `ssh://fixture${newPath}`, content: projection });
-			expect(await Bun.file(newPath).text()).toBe(projection);
+			const created = await rejectionOf(
+				new WriteTool(session).execute("write-new", { path: `ssh://fixture${newPath}`, content: projection }),
+			);
+			expect(created).toMatchObject({ message: expect.stringContaining("Refusing to create") });
+			expect(await Bun.file(newPath).exists()).toBe(false);
 
 			const longer = await rejectionOf(
 				new WriteTool(session).execute("write-existing", {
