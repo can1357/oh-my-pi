@@ -28,9 +28,10 @@ function quotaBody(tokenBasedBilling: boolean | undefined) {
 
 /** A GitHub API stub that counts `copilot_internal/user` calls; `internal` is its status. */
 function githubFetch(tokenBasedBilling: boolean | undefined, internal = 200) {
-	const calls = { internal: 0 };
+	const calls = { internal: 0, urls: [] as string[] };
 	const fetchImpl = Object.assign(
 		async (input: string | URL | Request) => {
+			calls.urls.push(String(input));
 			if (!String(input).endsWith("/copilot_internal/user")) return Response.json({ login: "octocat" });
 			calls.internal++;
 			return internal === 200
@@ -161,6 +162,27 @@ describe("GitHub Copilot billing mode on the stored login", () => {
 			expect(calls.internal).toBe(1);
 			expect(await requestBilling(storage)).toBeUndefined();
 			expect(calls.internal).toBe(1);
+		} finally {
+			storage.close();
+			store.close();
+		}
+	});
+
+	it("probes a GitHub Enterprise login on its own API host, never on public github.com", async () => {
+		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+		await store.saveOAuth("github-copilot", {
+			access: "ghu_enterprise",
+			refresh: "ghu_enterprise",
+			expires: Date.now() + YEAR_MS,
+			accountId: "octocat",
+			enterpriseUrl: "ghe.example.com",
+		});
+		const { fetchImpl, calls } = githubFetch(true);
+		const storage = storageFor(store, fetchImpl);
+		try {
+			await storage.credentials.reload();
+			await storage.keys.get("github-copilot", "billing-session");
+			expect(calls.urls).toEqual(["https://api.ghe.example.com/copilot_internal/user"]);
 		} finally {
 			storage.close();
 			store.close();

@@ -197,9 +197,11 @@ export async function discoverGitHubCopilotAccount(
 	token: string,
 	fetchImpl: FetchImpl,
 	signal?: AbortSignal,
+	/** The GitHub REST API host the token belongs to; GitHub Enterprise logins pass theirs. */
+	githubApiBaseUrl = "https://api.github.com",
 ): Promise<GitHubCopilotAccountInfo> {
 	try {
-		const response = await fetchImpl("https://api.github.com/copilot_internal/user", {
+		const response = await fetchImpl(`${githubApiBaseUrl}/copilot_internal/user`, {
 			headers: {
 				Accept: "application/json",
 				Authorization: `token ${token}`,

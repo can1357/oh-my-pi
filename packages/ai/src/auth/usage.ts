@@ -25,6 +25,7 @@ import type {
 	UsageProvider,
 	UsageReport,
 } from "../usage";
+import { githubApiBaseUrlFor } from "../usage/github-copilot";
 import { DEFAULT_USAGE_PROVIDERS } from "../usage/registry";
 import { raceSignal } from "./abort";
 import type { SessionAffinity } from "./affinity";
@@ -295,7 +296,8 @@ export class UsageService implements UsageApi {
 	 * `COPILOT_GITHUB_TOKEN`s otherwise keep the premium-request estimate until a
 	 * quota fetch happens to run, which a lone login in print/RPC/SDK runs never
 	 * triggers. A stored login's row keeps the result. Never fails: a failed probe
-	 * leaves the mode unknown.
+	 * leaves the mode unknown. GitHub Enterprise logins are probed on their own
+	 * API host (as the usage provider does), never on public github.com.
 	 */
 	learnCopilotBillingMode(provider: string, resolved: { apiKey: string; credentialId?: number }): Promise<void> {
 		if (provider !== "github-copilot") return Promise.resolve();
@@ -307,10 +309,22 @@ export class UsageService implements UsageApi {
 		const { credentialId } = resolved;
 		const probe = (async () => {
 			const signal = AbortSignal.timeout(this.requestTimeoutMs);
-			const { tokenBasedBilling } = await discoverGitHubCopilotAccount(apiKey.accessToken, this.fetch, signal);
+			const { tokenBasedBilling } = await discoverGitHubCopilotAccount(
+				apiKey.accessToken,
+				this.fetch,
+				signal,
+				githubApiBaseUrlFor(apiKey.enterpriseUrl),
+			);
 			if (tokenBasedBilling === undefined || credentialId === undefined) return;
 			const entry = this.#deps.pool.entries(provider).find(candidate => candidate.id === credentialId);
-			if (entry?.credential.type !== "oauth" || entry.credential.tokenBasedBilling !== undefined) return;
+			// The row may have been re-logged into another account while the probe ran.
+			if (
+				entry?.credential.type !== "oauth" ||
+				entry.credential.access !== apiKey.accessToken ||
+				entry.credential.tokenBasedBilling !== undefined
+			) {
+				return;
+			}
 			this.#deps.pool.replaceById(provider, credentialId, { ...entry.credential, tokenBasedBilling });
 		})().catch(error => this.logger.debug("Copilot billing mode probe failed", { error: String(error) }));
 		this.#billingModeProbes.set(probeKey, probe);

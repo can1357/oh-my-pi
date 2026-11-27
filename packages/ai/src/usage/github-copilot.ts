@@ -67,7 +67,12 @@ type BillingUsageResponse = {
 function resolveGitHubApiBaseUrl(params: UsageFetchParams): string {
 	const baseUrl = params.baseUrl?.replace(/\/$/, "");
 	if (baseUrl && !baseUrl.includes("githubcopilot.com")) return baseUrl;
-	const enterpriseUrl = params.credential.enterpriseUrl?.trim();
+	return githubApiBaseUrlFor(params.credential.enterpriseUrl);
+}
+
+/** The GitHub REST API host for a Copilot login: public GitHub, or its GitHub Enterprise host. */
+export function githubApiBaseUrlFor(enterpriseUrlRaw: string | undefined): string {
+	const enterpriseUrl = enterpriseUrlRaw?.trim();
 	if (!enterpriseUrl) return "https://api.github.com";
 	if (enterpriseUrl.startsWith("http://") || enterpriseUrl.startsWith("https://")) {
 		return enterpriseUrl.replace(/\/$/, "");
