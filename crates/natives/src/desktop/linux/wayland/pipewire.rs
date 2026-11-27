@@ -6,6 +6,7 @@
 
 use std::{
 	ffi::{CStr, c_char, c_int, c_void},
+	mem::MaybeUninit,
 	ptr,
 	sync::LazyLock,
 	time::Duration,
@@ -112,6 +113,8 @@ fn load(name: &CStr) -> Result<PipeWire, String> {
 	Ok(pipewire)
 }
 
+/// File-descriptor-backed shared memory (`enum spa_data_type`).
+const SPA_DATA_MEM_FD: u32 = 2;
 /// `SPA_DATA_FLAG_READABLE`: the data plane may be read.
 const SPA_DATA_FLAG_READABLE: u32 = 1 << 0;
 pub(super) const SPA_DIRECTION_INPUT: u32 = 0;
@@ -280,9 +283,49 @@ pub(super) struct SpaChunk {
 
 /// The first data plane of a dequeued buffer.
 pub(super) struct Plane<'a> {
-	/// The plane's mapped memory, absent when it was not mapped readable.
-	pub(super) memory: Option<&'a [u8]>,
-	pub(super) chunk:  SpaChunk,
+	data:             &'a SpaData,
+	pub(super) chunk: SpaChunk,
+}
+
+impl Plane<'_> {
+	/// Borrow the pixels while the buffer is dequeued. Geometry-only requests
+	/// never need to map them.
+	pub(super) fn with_memory<T>(&self, read: impl FnOnce(&[u8]) -> T) -> Option<T> {
+		let data = self.data;
+		let len = data.maxsize as usize;
+		if len == 0 || len > isize::MAX as usize {
+			return None;
+		}
+		if data.flags & SPA_DATA_FLAG_READABLE != 0 && !data.data.is_null() {
+			// SAFETY: MAP_BUFFERS provides `maxsize` readable bytes for this
+			// flagged plane, and the buffer stays dequeued throughout `read`.
+			return Some(read(unsafe { std::slice::from_raw_parts(data.data.cast::<u8>(), len) }));
+		}
+
+		// PipeWire 1.4 maps input MemFds readable even when the producer omits
+		// READABLE (e.g. portal-wlr); newer versions may map them PROT_NONE.
+		// Don't touch the ambiguous pointer. Map the plane from the fd instead.
+		if data.type_ != SPA_DATA_MEM_FD {
+			return None;
+		}
+		let fd = c_int::try_from(data.fd).ok()?;
+		let mut stat = MaybeUninit::uninit();
+		// SAFETY: fstat initializes `stat` on success without taking ownership of the fd.
+		let stat = unsafe {
+			if libc::fstat(fd, stat.as_mut_ptr()) != 0 {
+				return None;
+			}
+			stat.assume_init()
+		};
+		let offset = u64::from(data.mapoffset);
+		if offset + u64::from(data.maxsize) > u64::try_from(stat.st_size).ok()? {
+			return None; // mmap can succeed past EOF, then fault on access.
+		}
+		// SAFETY: the dequeued buffer's fd and contents stay live and stable
+		// until requeued. This read-only mapping covers only its in-file extent.
+		let map = unsafe { memmap2::MmapOptions::new().offset(offset).len(len).map(fd) }.ok()?;
+		Some(read(&map))
+	}
 }
 
 /// The first data plane of `buffer`, absent when it has none.
@@ -302,15 +345,7 @@ pub(super) unsafe fn first_plane<'a>(buffer: *mut Buffer) -> Option<Plane<'a>> {
 	}
 	// SAFETY: a non-null chunk is valid while the buffer is dequeued.
 	let chunk = unsafe { *data.chunk };
-	// MAP_BUFFERS maps a plane with read access only when the producer marks it
-	// READABLE; without the flag the mapping is PROT_NONE and reading it faults
-	// (xdg-desktop-portal-wlr 0.8.1 with PipeWire >= 1.6).
-	let readable = data.flags & SPA_DATA_FLAG_READABLE != 0;
-	let memory = (readable && !data.data.is_null()).then(|| {
-		// SAFETY: a READABLE mapped plane (MAP_BUFFERS) spans `maxsize` readable bytes.
-		unsafe { std::slice::from_raw_parts(data.data.cast::<u8>(), data.maxsize as usize) }
-	});
-	Some(Plane { memory, chunk })
+	Some(Plane { data, chunk })
 }
 
 /// `struct spa_pod`: the header every POD starts with.
@@ -464,6 +499,36 @@ pub(super) fn parse_video_format(pod: &[u8]) -> Option<VideoFormat> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn plane_reads_only_a_proven_mapping() {
+		use std::{io::Write, os::fd::AsRawFd};
+
+		let mut file = tempfile::tempfile().unwrap();
+		file.write_all(b"prefixframe").unwrap();
+		let chunk = SpaChunk { offset: 0, size: 5, stride: 5, flags: 0 };
+		// Distinct bytes make accidental reads from the stream pointer observable
+		// without having to crash the test process with an actual PROT_NONE page.
+		let mut data = SpaData {
+			type_:     SPA_DATA_MEM_FD,
+			flags:     0,
+			fd:        i64::from(file.as_raw_fd()),
+			mapoffset: 6,
+			maxsize:   5,
+			data:      b"other".as_ptr().cast_mut().cast(),
+			chunk:     &chunk,
+		};
+		let pixels = |data: &SpaData| Plane { data, chunk }.with_memory(<[u8]>::to_vec);
+		assert_eq!(pixels(&data).as_deref(), Some(&b"frame"[..]));
+		data.flags = SPA_DATA_FLAG_READABLE;
+		assert_eq!(pixels(&data).as_deref(), Some(&b"other"[..]));
+		data.flags = 0;
+		data.maxsize += 1;
+		assert_eq!(pixels(&data), None);
+		data.maxsize -= 1;
+		data.fd = -1;
+		assert_eq!(pixels(&data), None);
+	}
 
 	fn hex(text: &str) -> Vec<u8> {
 		(0..text.len())
