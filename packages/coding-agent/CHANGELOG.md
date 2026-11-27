@@ -61,6 +61,7 @@
 - Added `images.questionRouting: active`, which answers `read <image>?q=` only with the active model and fails instead of sending the image to another model or provider ([#20029](https://github.com/can1357/oh-my-pi/issues/20029))
 - Added `compaction.summaryMaxTokens` to raise the output budget of regular compaction summaries (default unchanged at 16384, clamped to the model's output limit), so dense sessions no longer fail compaction at the fixed cap ([#18688](https://github.com/can1357/oh-my-pi/issues/18688))
 - Added the `find.timeoutMs` setting (default 20 s, up to 10 minutes) for the `find` tool's wall-clock budget, so a slow or serial judge can finish a scoped search ([#18335](https://github.com/can1357/oh-my-pi/issues/18335))
+- Added `codexResets.expirySalvage` (default `true`): set it to `false` to auto-redeem saved Codex resets only when an exhausted window blocks the account, never spending expiring credits early and forfeiting remaining weekly quota ([#18308](https://github.com/can1357/oh-my-pi/issues/18308))
 
 ### Changed
 

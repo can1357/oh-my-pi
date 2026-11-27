@@ -1614,6 +1614,19 @@ export const cfgCodexResetsSalvageHorizonHours = register({
 	},
 });
 
+export const cfgCodexResetsExpirySalvage = register({
+	id: "codexResets.expirySalvage",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "providers",
+		group: "Services",
+		label: "Codex Reset Expiry Salvage",
+		description:
+			"Spend saved Codex resets that are about to expire, even when no chat window is exhausted (a full reset forfeits any remaining weekly headroom and restarts the window). Off: auto-redeem only restores an exhausted, blocked account, and expiring credits are left to lapse, including the 5-minute last chance.",
+	},
+});
+
 /** Codex saved-reset auto-redeem policy (`codexResets.*`). */
 export const cfgCodexResets = combine({
 	autoRedeem5h: cfgCodexResetsAutoRedeem5h,
@@ -1621,6 +1634,7 @@ export const cfgCodexResets = combine({
 	minBlockedMinutes: cfgCodexResetsMinBlockedMinutes,
 	keepCredits: cfgCodexResetsKeepCredits,
 	salvageHorizonHours: cfgCodexResetsSalvageHorizonHours,
+	expirySalvage: cfgCodexResetsExpirySalvage,
 });
 
 /** Whether automatic reset redemption asks first, spends, or remains disabled. */
