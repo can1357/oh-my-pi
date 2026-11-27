@@ -475,3 +475,94 @@ describe("ToolCallLoopGuard multi-call turns", () => {
 		expect(guard.recordTurn(turn(b()))).toBeNull();
 	});
 });
+
+describe("ToolCallLoopGuard unresolved tool calls (issue #10876)", () => {
+	let nextId = 0;
+
+	/** A turn of calls; `resolved: false` marks every call as naming no tool, answered `Tool <name> not found`. */
+	function turn(calls: Array<{ name: string; args: Record<string, unknown> }>, resolved: boolean) {
+		const toolCalls: ToolCall[] = calls.map(({ name, args }) => ({
+			type: "toolCall",
+			id: `tc_${nextId++}`,
+			name,
+			arguments: args,
+		}));
+		const message = {
+			role: "assistant",
+			content: toolCalls,
+			api: "openai-responses",
+			provider: "openai",
+			model: "test-model",
+			usage: zeroUsage,
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		} satisfies AssistantMessage;
+		const toolResults: ToolResultMessage[] = toolCalls.map(call => ({
+			role: "toolResult",
+			toolCallId: call.id,
+			toolName: call.name,
+			content: [{ type: "text", text: resolved ? "ok" : `Tool ${call.name} not found` }],
+			isError: !resolved,
+			timestamp: Date.now(),
+		}));
+		return { message, toolResults, unresolvedToolCallIds: resolved ? [] : toolCalls.map(call => call.id) };
+	}
+
+	test("trips on a streak of unresolved calls that vary in name and arguments", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 3, exemptTools: [] });
+		expect(guard.recordTurn(turn([{ name: "wri", args: { path: "a.txt" } }], false))).toBeNull();
+		expect(guard.recordTurn(turn([{ name: "wri", args: { path: "b.txt" } }], false))).toBeNull();
+		expect(guard.recordTurn(turn([{ name: "ed", args: { path: "c.txt" } }], false))).toEqual({
+			kind: "unresolved_tool_call",
+			toolName: "ed",
+			count: 3,
+			resultSummary: "Tool ed not found",
+			argumentsSummary: '{"path":"c.txt"}',
+		});
+		// Still stuck: keeps reporting past the threshold, like the identical-call bound.
+		expect(guard.recordTurn(turn([{ name: "ba", args: {} }], false))).toMatchObject({
+			kind: "unresolved_tool_call",
+			count: 4,
+		});
+	});
+
+	test("reports identical unresolved calls as unresolved, not as an argument repeat", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 2, exemptTools: [] });
+		expect(guard.recordTurn(turn([{ name: "wri", args: {} }], false))).toBeNull();
+		expect(guard.recordTurn(turn([{ name: "wri", args: {} }], false))).toMatchObject({
+			kind: "unresolved_tool_call",
+			toolName: "wri",
+			count: 2,
+		});
+	});
+
+	test("a resolved call breaks the streak, so a typo then a recovery never trips", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 2, exemptTools: [] });
+		expect(guard.recordTurn(turn([{ name: "wri", args: { path: "a.txt" } }], false))).toBeNull();
+		expect(guard.recordTurn(turn([{ name: "write", args: { path: "a.txt" } }], true))).toBeNull();
+		expect(guard.recordTurn(turn([{ name: "ed", args: { path: "a.txt" } }], false))).toBeNull();
+		expect(guard.recordTurn(turn([{ name: "edit", args: { path: "a.txt" } }], true))).toBeNull();
+	});
+
+	test("a turn mixing an unresolved call with a resolved one breaks the streak", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 2, exemptTools: [] });
+		expect(guard.recordTurn(turn([{ name: "wri", args: {} }], false))).toBeNull();
+		const mixed = turn([{ name: "read", args: { path: "a.ts" } }], true);
+		const miss = turn([{ name: "ed", args: {} }], false);
+		expect(
+			guard.recordTurn({
+				message: { ...mixed.message, content: [...mixed.message.content, ...miss.message.content] },
+				toolResults: [...mixed.toolResults, ...miss.toolResults],
+				unresolvedToolCallIds: miss.unresolvedToolCallIds,
+			}),
+		).toBeNull();
+		expect(guard.recordTurn(turn([{ name: "ba", args: {} }], false))).toBeNull();
+	});
+
+	test("varied resolved calls never trip", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 2, exemptTools: [] });
+		for (let index = 0; index < 6; index++) {
+			expect(guard.recordTurn(turn([{ name: index % 2 ? "read" : "bash", args: { n: index } }], true))).toBeNull();
+		}
+	});
+});

@@ -22,8 +22,6 @@ export type OAuthErrorKind =
 	| "device-auth"
 	/** Misconfiguration (bad redirect URI, missing projectId, callback bind, …). */
 	| "configuration"
-	/** Cloud project provisioning / onboarding (loadCodeAssist, onboardUser). */
-	| "provisioning"
 	/** Subscription/payment gate: plan required or purchase action needed. */
 	| "entitlement"
 	/** OIDC / endpoint discovery failed. */

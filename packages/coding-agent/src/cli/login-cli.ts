@@ -8,8 +8,10 @@
  */
 import * as readline from "node:readline";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai";
+import { LoginCancelledError } from "@oh-my-pi/pi-ai/error";
 import { APP_NAME, getProjectDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import { connectedProviderName } from "../modes/view-model/chrome/format";
 import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
 import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
@@ -50,12 +52,19 @@ export async function runLoginCommand(provider: string | undefined): Promise<voi
 		await modelRegistry.refreshProvider(info.storeCredentialsAs ?? info.id, "online");
 
 		const who = formatLoginIdentity(identity);
-		process.stdout.write(chalk.green(`\nLogged in to ${info.name}${who ? ` as ${who}` : ""}\n`));
+		process.stdout.write(
+			chalk.green(`\nLogged in to ${connectedProviderName(info.id, info.name)}${who ? ` as ${who}` : ""}\n`),
+		);
 		const destination = await credentialStoreLabel(info.storeCredentialsAs ?? info.id);
 		process.stdout.write(chalk.dim(`Credentials saved to ${destination}\n`));
 	} catch (error) {
-		process.stderr.write(chalk.red(`Login failed: ${error instanceof Error ? error.message : String(error)}\n`));
 		process.exitCode = 1;
+		if (error instanceof LoginCancelledError) {
+			// Declining the provider's consent screen is a choice, not a failure.
+			process.stderr.write(`${error.message}\n`);
+			return;
+		}
+		process.stderr.write(chalk.red(`Login failed: ${error instanceof Error ? error.message : String(error)}\n`));
 	} finally {
 		rl.close();
 		authStorage.close();

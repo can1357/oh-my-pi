@@ -295,12 +295,12 @@ import {
 	cfgDisplayAdvisorCollapsedLines,
 	cfgDisplayCacheMissMarker,
 	cfgDisplayCollapseCompacted,
-	cfgDisplayHideToolActivity,
 	cfgDisplayPinnedAgents,
 	cfgDisplayShellVisualization,
 	cfgDisplayShowTokenUsage,
 	cfgDisplayShowTurnTime,
 	cfgDisplaySubagentLivePreview,
+	cfgDisplayToolActivity,
 	cfgGitEnabled,
 	cfgLoopConditionTimeoutMs,
 	cfgLoopMode,
@@ -347,6 +347,7 @@ import {
 	cfgTuiVimShowCommand,
 	cfgTuiVimStartMode,
 	cfgTuiVimYankToClipboard,
+	type ToolActivityMode,
 } from "./settings";
 import { pickTableChart } from "../auto-graph/planner";
 import { hasNativeJudge } from "../judgment";
@@ -480,7 +481,7 @@ const cfgLiveUiSettings = combine({
 	"composer.predictionAlternatives": cfgComposerPredictionAlternatives,
 	"compaction.enabled": cfgCompactionEnabled,
 	"compaction.methodOrder": cfgCompactionMethodOrder,
-	"display.hideToolActivity": cfgDisplayHideToolActivity,
+	"display.toolActivity": cfgDisplayToolActivity,
 	"display.shellVisualization": cfgDisplayShellVisualization,
 	"terminal.showImages": cfgTerminalShowImages,
 	"terminal.programStatus": cfgTerminalProgramStatus,
@@ -690,7 +691,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** The view's display flags as signals the blocks read (the fields below write them). */
 	readonly #display: DisplayFlags = {
 		toolOutputExpanded: signal(false),
-		hideToolActivity: signal(false),
+		toolActivity: signal<ToolActivityMode>("detailed"),
 		hideThinking: signal(false),
 		proseOnlyThinking: signal(true),
 		expandThinkingBlocks: signal(false),
@@ -715,11 +716,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	set toolOutputExpanded(expanded: boolean) {
 		this.#display.toolOutputExpanded.set(expanded);
 	}
-	get hideToolActivity(): boolean {
-		return this.#display.hideToolActivity();
+	get toolActivity(): ToolActivityMode {
+		return this.#display.toolActivity();
 	}
-	set hideToolActivity(hidden: boolean) {
-		this.#display.hideToolActivity.set(hidden);
+	set toolActivity(mode: ToolActivityMode) {
+		this.#display.toolActivity.set(mode);
 	}
 	todoExpanded = false;
 	planModeEnabled = false;
@@ -1526,7 +1527,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.hud.status.onInterrupt = () => this.interruptFromPointer();
 		this.#messageEnv = {
 			expanded: () => this.#display.toolOutputExpanded(),
-			activityVisible: () => !this.#display.hideToolActivity(),
+			activityVisible: () => this.#display.toolActivity() !== "hidden",
 			advisorCollapsedLines: () => cfgDisplayAdvisorCollapsedLines.get(this.settings),
 			renderer: customType => this.viewSession.extensionRunner?.getMessageRenderer(customType),
 			onRenderError: (customType, error) =>
@@ -1600,8 +1601,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.hud.subagents.onToggle = () => this.#togglePinnedHudExpanded();
 		this.hud.queue.onEdit = () => this.handleDequeue();
 
-		this.#display.hideToolActivity.set(cfgDisplayHideToolActivity.get(settings));
-		this.#hideThinkingBlock = cfgHideThinkingBlock.get(settings);
+		this.#display.toolActivity.set(cfgDisplayToolActivity.get(settings));
 		this.#display.proseOnlyThinking.set(cfgProseOnlyThinking.get(settings));
 		this.#display.expandThinkingBlocks.set(cfgExpandThinkingBlocks.get(settings));
 		this.#syncTranscriptDisplaySettings();
@@ -1663,6 +1663,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#liveCommandController = new LiveCommandController(this);
 		this.#selectorController = new SelectorController(this);
 		this.#focusController = new SessionFocusController(this);
+		// Through the setter: the blocks read the synced signal, and its effective value needs the view session.
+		this.hideThinkingBlock = cfgHideThinkingBlock.get(settings);
 		this.#inputController = new InputController(this);
 		this.collabController = new CollabController(this);
 		this.session.setPromptDropped?.(prompt => this.restoreDroppedPrompt(prompt));
@@ -2260,12 +2262,15 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		// Initialize hooks with TUI-based UI context
 		await logger.time("InteractiveMode.init:hooks", () => this.initHooksAndCustomTools());
-		// A live `disabledExtensions` edit suspends or resumes extensions: drop (or restore) their link
-		// schemes and renderers from the transcript.
+		// A live `disabledExtensions` edit hides or restores widgets, link schemes and renderers.
 		const extensionRunner = this.session.extensionRunner;
 		if (extensionRunner) {
+			const syncWidgets = () =>
+				this.hud.widgets.setOwnerVisibility(owner => !extensionRunner.isExtensionSuspended(owner));
+			syncWidgets();
 			this.#eventBusUnsubscribers.push(
 				extensionRunner.onSuspensionChange(() => {
+					syncWidgets();
 					this.#applyExtensionLinks();
 					this.#redrawExtensionLinks();
 					this.#syncTranscriptPresenters();
@@ -3579,10 +3584,11 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		// Field comparisons skip effects the keybinding toggles already applied. The blocks read
 		// these flags reactively; rows already in scrollback change only with a replay.
-		const hideToolActivity = cfgDisplayHideToolActivity.get(this.settings);
-		if (any("display.hideToolActivity") && hideToolActivity !== this.hideToolActivity) {
-			this.hideToolActivity = hideToolActivity;
-			if (!hideToolActivity) this.toolOutputExpanded = false;
+		const toolActivity = cfgDisplayToolActivity.get(this.settings);
+		if (any("display.toolActivity") && toolActivity !== this.toolActivity) {
+			this.toolActivity = toolActivity;
+			// A new mode starts folded: Ctrl+O left on would draw every concise row as its full card.
+			this.toolOutputExpanded = false;
 			resetDisplay = true;
 		}
 		if (any("terminal.showImages", "display.shellVisualization")) this.#syncTranscriptDisplaySettings();
@@ -7599,6 +7605,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	showWarning(message: string, options?: { hideWithToolActivity?: boolean }): void {
 		this.#uiHelpers.showWarning(message, options);
+	}
+
+	showActiveModelNotice(): void {
+		this.#uiHelpers.showActiveModelNotice();
 	}
 
 	#handleLspStartupEvent(event: LspStartupEvent): void {

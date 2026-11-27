@@ -73,6 +73,7 @@ interface RegistryOverrides {
 	getDiscoverableProviders?: () => string[];
 	getProviderDiscoveryState?: (providerId: string) => unknown;
 	find?: (provider: string, id: string) => Model | undefined;
+	hasAuth?: (providerId: string) => boolean;
 }
 
 function makeRegistry(models: () => Model[], overrides: RegistryOverrides = {}): ModelRegistry {
@@ -95,7 +96,12 @@ function makeRegistry(models: () => Model[], overrides: RegistryOverrides = {}):
 				)),
 		getDiscoverableProviders: overrides.getDiscoverableProviders ?? (() => []),
 		getProviderDiscoveryState: overrides.getProviderDiscoveryState ?? (() => undefined),
-		authStorage: { keys: { source: () => undefined } },
+		authStorage: {
+			keys: {
+				source: (providerId: string) =>
+					overrides.hasAuth?.(providerId) ? { kind: "api_key", concrete: true } : undefined,
+			},
+		},
 	} as unknown as ModelRegistry;
 }
 
@@ -628,6 +634,194 @@ describe("ModelHub", () => {
 			} finally {
 				vi.useRealTimers();
 			}
+		});
+	});
+
+	describe("discoverable provider sidebar visibility", () => {
+		// Optional discoverable providers (implicit ollama, llama.cpp, lm-studio)
+		// stay hidden while discovery is "idle" or "unavailable"; explicitly
+		// configured or authed providers stay visible, and hidden ones are
+		// re-probed once per open so a freshly started server resurfaces its tab.
+		function discoveryState(provider: string, status: string, optional = true): unknown {
+			return { provider, status, optional, stale: false, models: [] };
+		}
+
+		/** Flush the constructor's freshness-check promise chain and any re-probes. */
+		async function settle(): Promise<void> {
+			for (let i = 0; i < 5; i++) {
+				await Bun.sleep(0);
+			}
+		}
+
+		test("hides an implicit local provider whose discovery never ran (idle)", async () => {
+			const { hub } = createHub({
+				models: [makeModel("prov-a", "model-a")],
+				registry: {
+					getDiscoverableProviders: () => ["lm-studio"],
+					getProviderDiscoveryState: id => discoveryState(id, "idle"),
+				},
+			});
+			await settle();
+			const rendered = normalize(hub.render(220));
+			expect(rendered).toContain("prov-a");
+			expect(rendered).not.toContain("lm-studio");
+		});
+
+		test("hides an implicit local provider whose endpoint is unreachable (unavailable)", async () => {
+			const { hub } = createHub({
+				models: [makeModel("prov-a", "model-a")],
+				registry: {
+					getDiscoverableProviders: () => ["lm-studio"],
+					getProviderDiscoveryState: id => discoveryState(id, "unavailable"),
+				},
+			});
+			await settle();
+			expect(normalize(hub.render(220))).not.toContain("lm-studio");
+		});
+
+		test("keeps a reachable local provider visible even when it serves zero models (empty)", async () => {
+			const { hub } = createHub({
+				models: [makeModel("prov-a", "model-a")],
+				registry: {
+					getDiscoverableProviders: () => ["lm-studio"],
+					getProviderDiscoveryState: id => discoveryState(id, "empty"),
+				},
+			});
+			await settle();
+			expect(normalize(hub.render(220))).toContain("lm-studio");
+		});
+
+		test("keeps an explicitly configured discovery provider visible when unreachable", async () => {
+			// models.yml discovery providers carry optional: false; hiding them
+			// would bury a misconfigured baseUrl instead of surfacing it.
+			const { hub } = createHub({
+				models: [makeModel("prov-a", "model-a")],
+				registry: {
+					getDiscoverableProviders: () => ["my-endpoint"],
+					getProviderDiscoveryState: id => discoveryState(id, "unavailable", false),
+				},
+			});
+			await settle();
+			expect(normalize(hub.render(220))).toContain("my-endpoint");
+		});
+
+		test("keeps a discoverable provider with stored auth visible", async () => {
+			const { hub } = createHub({
+				models: [makeModel("prov-a", "model-a")],
+				registry: {
+					getDiscoverableProviders: () => ["lm-studio"],
+					getProviderDiscoveryState: id => discoveryState(id, "unavailable"),
+					hasAuth: id => id === "lm-studio",
+				},
+			});
+			await settle();
+			expect(normalize(hub.render(220))).toContain("lm-studio");
+		});
+
+		test("keeps a discoverable provider visible when discovery state is unknown", async () => {
+			// Fail open: no recorded discovery state means the registry has not
+			// probed at all yet, so the tab stays until discovery says otherwise.
+			const { hub } = createHub({
+				models: [makeModel("prov-a", "model-a")],
+				registry: {
+					getDiscoverableProviders: () => ["lm-studio"],
+					getProviderDiscoveryState: () => undefined,
+				},
+			});
+			await settle();
+			expect(normalize(hub.render(220))).toContain("lm-studio");
+		});
+
+		test("a stale catalog refresh resurfaces a hidden local when its server appears", async () => {
+			let serving = false;
+			let checks = 0;
+			const { hub } = createHub({
+				models: () => {
+					if (serving) return [makeModel("prov-a", "model-a"), makeModel("lm-studio", "local-model")];
+					return [makeModel("prov-a", "model-a")];
+				},
+				registry: {
+					getDiscoverableProviders: () => ["lm-studio"],
+					getProviderDiscoveryState: id => discoveryState(id, serving ? "ok" : "unavailable"),
+					refreshIfStale: async () => {
+						checks++;
+						serving = true;
+						return true;
+					},
+				},
+			});
+			await settle();
+			expect(checks).toBe(1);
+			const rendered = normalize(hub.render(220));
+			expect(rendered).toContain("lm-studio");
+			expect(rendered).toContain("local-model");
+		});
+
+		test("does not refresh a hidden local that stays down more than once when the hub opens", async () => {
+			let checks = 0;
+			const { hub } = createHub({
+				models: [makeModel("prov-a", "model-a")],
+				registry: {
+					getDiscoverableProviders: () => ["lm-studio"],
+					getProviderDiscoveryState: id => discoveryState(id, "unavailable"),
+					refreshIfStale: async () => {
+						checks++;
+						return true;
+					},
+				},
+			});
+			await settle();
+			expect(checks).toBe(1);
+			expect(normalize(hub.render(220))).not.toContain("lm-studio");
+		});
+	});
+
+	describe("discovery status hints", () => {
+		async function openProviderTab(state: Record<string, unknown>): Promise<LayerTerminal> {
+			const { hub } = createHub({
+				models: [],
+				registry: {
+					getDiscoverableProviders: () => ["vllm"],
+					getProviderDiscoveryState: () => state,
+				},
+			});
+			await Bun.sleep(0);
+			// Scope-hop is the default arrow mode: one Down moves All models → the
+			// sole provider entry (separators are skipped).
+			hub.handleInput(DOWN);
+			await Bun.sleep(0);
+			return hub;
+		}
+
+		test("shows a provider-tab hint when discovery succeeds but returns zero models", async () => {
+			const hub = await openProviderTab({
+				provider: "vllm",
+				status: "empty",
+				optional: false,
+				stale: false,
+				fetchedAt: Date.now(),
+				models: [],
+			});
+
+			const rendered = normalize(hub.render(200));
+			expect(rendered).toContain("Discovery succeeded but returned 0 models");
+			expect(rendered).toContain("/models returns { data: [{ id }] }");
+		});
+
+		test("shows a provider-tab hint when the discovery endpoint returns 404", async () => {
+			const hub = await openProviderTab({
+				provider: "vllm",
+				status: "unavailable",
+				optional: false,
+				stale: false,
+				fetchedAt: Date.now(),
+				models: [],
+				error: "HTTP 404 from http://192.168.5.3:8085/v1/models",
+			});
+
+			const rendered = normalize(hub.render(200));
+			expect(rendered).toContain("http://192.168.5.3:8085/v1/models returned 404");
+			expect(rendered).toContain("baseUrl");
 		});
 	});
 

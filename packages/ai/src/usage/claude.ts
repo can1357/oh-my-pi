@@ -1118,8 +1118,7 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
 	// a healthy candidate rather than serve until 100%.
 	scopeLimitsForReserve: scopeClaudeLimitsForModel,
 	/**
-	 * Fable/Mythos usage-limit errors map to a per-family tier scope, mirroring
-	 * the per-counter precedent in packages/ai/src/usage/google-antigravity.ts:466-497.
+	 * Fable/Mythos usage-limit errors map to a per-family tier scope.
 	 * The two scopes address one metered counter, which is why healing judges
 	 * both by the same scoped weekly row.
 	 */

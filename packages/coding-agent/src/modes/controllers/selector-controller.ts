@@ -1,6 +1,7 @@
 import { type AgentMessage, type AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Api, ApiKey, AuthStorage, ImageContent, Model, UsageReport } from "@oh-my-pi/pi-ai";
+import { LoginCancelledError } from "@oh-my-pi/pi-ai/error";
 import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
 import * as path from "node:path";
 import { parseCloudflareCredential, serializeCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare";
@@ -68,6 +69,7 @@ import { SessionManager } from "../../session/session-manager";
 import { loadPinnedSessionIds, setSessionPinned } from "../../session/session-pins";
 import { FileSessionStorage } from "../../session/session-storage";
 import { listLogoutAccounts, logoutCredential } from "../../slash-commands/helpers/logout";
+import { connectedProviderName } from "../view-model/chrome/format";
 import type { LogoutAccount } from "../view-model/overlays/logout-account-selector";
 import { describeRedeemOutcome, toResetUsageAccounts } from "../../slash-commands/helpers/reset-usage";
 import { toSessionPinAccounts } from "../../slash-commands/helpers/session-pin";
@@ -2494,7 +2496,12 @@ export class SelectorController {
 			const destination = await credentialStoreLabel(getOAuthCredentialProvider(providerId));
 			this.ctx.present(() =>
 				outcomeLinesView([
-					["success", successText(`Successfully logged in to ${providerId}${who ? ` as ${who}` : ""}`)],
+					[
+						"success",
+						successText(
+							`Successfully logged in to ${connectedProviderName(providerId)}${who ? ` as ${who}` : ""}`,
+						),
+					],
 					["dim", `Credentials saved to ${destination}`],
 				]),
 			);
@@ -2505,6 +2512,11 @@ export class SelectorController {
 				// surfaced "Login cancelled".
 				return false;
 			}
+			if (error instanceof LoginCancelledError) {
+				// Declining the provider's consent screen is a choice, not a failure.
+				this.ctx.showStatus(error.message);
+				return false;
+			}
 			this.ctx.showError(`Login failed: ${error instanceof Error ? error.message : String(error)}`);
 			return false;
 		} finally {
@@ -2513,24 +2525,26 @@ export class SelectorController {
 	}
 
 	async #handleCredentialLogout(providerId: string, account: LogoutAccount): Promise<void> {
+		const providerName = connectedProviderName(providerId);
 		try {
 			// Before the logout: removing a broker-unserved provider's last local login hands it back to the broker.
 			const source = await credentialStoreLabel(providerId);
-			const { removed, remainingSource } = await logoutCredential(
+			const { removed, remainingSource, signOutError } = await logoutCredential(
 				this.ctx.session,
 				providerId,
 				account.credentialId,
 			);
 			if (!removed) {
-				this.ctx.showError(`Logout skipped: ${account.label} is no longer stored for ${providerId}.`);
+				this.ctx.showError(`Logout skipped: ${account.label} is no longer stored for ${providerName}.`);
 				return;
 			}
 
 			const lines: [string, string][] = [
-				["success", successText(`Successfully logged out ${account.label} from ${providerId}`)],
+				["success", successText(`Successfully logged out ${account.label} from ${providerName}`)],
 				["dim", `Credential removed from ${source}`],
 			];
-			if (remainingSource) lines.push(["warning", `${providerId} is still authenticated via ${remainingSource}`]);
+			if (signOutError) lines.push(["warning", signOutError]);
+			if (remainingSource) lines.push(["warning", `${providerName} is still authenticated via ${remainingSource}`]);
 			this.ctx.present(() => outcomeLinesView(lines));
 		} catch (error: unknown) {
 			this.ctx.showError(`Logout failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -2562,7 +2576,7 @@ export class SelectorController {
 
 		this.#showInEditorArea(done =>
 			LogoutAccountSelector({
-				provider: provider?.name ?? providerId,
+				provider: connectedProviderName(providerId, provider?.name ?? providerId),
 				accounts,
 				onSelect: account => {
 					done();
@@ -2660,7 +2674,7 @@ export class SelectorController {
 		}
 		const { getOAuthProviders } = await loadProviderAuthUi();
 		const provider = getOAuthProviders().find(candidate => candidate.id === accountList.provider);
-		const providerName = provider?.name ?? accountList.provider;
+		const providerName = connectedProviderName(accountList.provider, provider?.name ?? accountList.provider);
 		const accounts = toSessionPinAccounts(accountList.accounts);
 		if (accounts.length === 0) {
 			const source = session.modelRegistry.authStorage.keys.describe(accountList.provider, session.sessionId);

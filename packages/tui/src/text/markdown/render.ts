@@ -80,9 +80,10 @@ export interface MarkdownOptions {
 	 */
 	readonly stream?: boolean;
 	/**
-	 * Columns code fence bodies are indented by (default 2). 0 draws them
-	 * literally: at the row's column 0 whatever quote, list or padding holds
-	 * them, wrapped by cells, so copying the rows yields the code.
+	 * Columns code fence bodies are indented by (default 2). 0 draws them and
+	 * their ``` fence rows literally: at the row's column 0 whatever quote,
+	 * list or padding holds them, wrapped by cells, so copying the rows yields
+	 * the code and copying the whole block yields its markdown.
 	 */
 	readonly codeIndent?: number;
 }
@@ -342,9 +343,14 @@ function renderCode(r: Renderer, token: Tokens.Code, width: number): Row[] {
 	const code = token.text;
 	const lines =
 		lang !== undefined && supportsLanguage(lang) ? highlightCode(code, lang, options.theme) : code.split("\n");
-	const out: Row[] = wrap(styles.codeBorder(`\`\`\`${lang ?? ""}`), width);
-	const fence = r.fence?.token === token ? r.fence : undefined;
 	const indent = options.codeIndent ?? 2;
+	// A literal body takes its fence rows to column 0 with it, so the block stays aligned.
+	const border = (text: string): Row[] =>
+		indent > 0
+			? wrap(styles.codeBorder(text), width)
+			: wrap(styles.codeBorder(text), r.fullWidth).map(literal => ({ literal }));
+	const out: Row[] = border(`\`\`\`${lang ?? ""}`);
+	const fence = r.fence?.token === token ? r.fence : undefined;
 	for (let i = 0; i < lines.length; i++) {
 		// Every line another line follows is final; the last one can still grow or become the closing fence.
 		if (fence && i === lines.length - 1) fence.head = out.length;
@@ -353,7 +359,7 @@ function renderCode(r: Renderer, token: Tokens.Code, width: number): Row[] {
 		else if (line === "") out.push({ literal: "" });
 		else for (const literal of wrap(line, r.fullWidth)) out.push({ literal });
 	}
-	out.push(...wrap(styles.codeBorder("```"), width));
+	out.push(...border("```"));
 	return out;
 }
 

@@ -2907,7 +2907,7 @@ function buildCuratedClinePassModel(
 /**
  * Subscription models bill against plan quota, not per token — but the catalog still
  * carries the upstream list price so cost display reads as API-equivalent spend. Same
- * policy as the codex/antigravity generator fixups and the zai PAYG descriptor swap
+ * policy as the codex generator fixups and the zai PAYG descriptor swap
  * (issue #5598: an all-$0 roster surfaces every model as "free" in the picker, which
  * was treated as a bug there). The price comes from the bundled upstream reference,
  * so it works offline and survives roster refreshes (`preferDiscoveryCost` never lets

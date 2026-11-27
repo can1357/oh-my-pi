@@ -39,6 +39,7 @@ import { batch, type KeyEvent, signal } from "@oh-my-pi/pi-tui";
 import { errorMessage } from "@oh-my-pi/pi-utils";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { formatModelSelectorValue, parseModelString, splitUpstreamRouting } from "../../../config/model-selector";
+import { connectedProviderName } from "../../../modes/view-model/chrome/format";
 import {
 	buildSessionModelScope,
 	ModelSearchIndex,
@@ -1016,7 +1017,8 @@ export class ModelHubState {
 		const providerEntryOf = (providerId: string, isLocked: boolean): SidebarEntry => ({
 			id: `provider:${providerId}`,
 			kind: "provider",
-			label: providerId,
+			// A locked provider has no linked account yet, so only unlocked ones take the connected name.
+			label: isLocked ? providerId : connectedProviderName(providerId),
 			providerId,
 			locked: isLocked,
 			...(isLocked ? {} : { annotation: String(available.get(providerId) ?? 0) }),

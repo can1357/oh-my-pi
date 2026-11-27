@@ -1,8 +1,8 @@
 /**
  * Rules Capability
  *
- * Project-specific rules from Cursor (.mdc), Windsurf (.md), and Cline formats.
- * Translated to a canonical shape regardless of source format.
+ * Rules from `.omp/rules`, `.agent(s)/rules`, and plugin rule directories
+ * (Markdown with optional frontmatter), translated to a canonical shape.
  */
 import { logger } from "@oh-my-pi/pi-utils";
 import { LinearRegExp } from "@oh-my-pi/pi-utils/regex";

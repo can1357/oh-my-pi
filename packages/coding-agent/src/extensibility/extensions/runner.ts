@@ -90,6 +90,8 @@ import type {
 	ExtensionShortcut,
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
+	ExtensionWidgetContent,
+	ExtensionWidgetOptions,
 	InputEvent,
 	InputEventResult,
 	CacheWarmingAction,
@@ -330,12 +332,13 @@ function createHandlerUIContext(
  */
 function createHandlerContext(
 	ctx: ExtensionContext,
+	ui: ExtensionUIContext,
 	handlerSignal: AbortSignal,
 	timeoutBudget?: HandlerTimeoutBudget,
 ): ExtensionContext {
 	const scoped: ExtensionContext = Object.create(ctx);
 	Object.defineProperty(scoped, "ui", {
-		value: createHandlerUIContext(ctx.ui, handlerSignal, timeoutBudget),
+		value: createHandlerUIContext(ui, handlerSignal, timeoutBudget),
 		enumerable: true,
 		configurable: true,
 	});
@@ -612,8 +615,15 @@ export const UNAVAILABLE_ANNOTATIONS: ExtensionAnnotationsAPI = Object.freeze({
 	open: () => Promise.reject(new Error("ctx.annotations is not available in this host.")),
 });
 
+/** Host UI seam for attributing widgets without changing the extension's `setWidget` API. */
+export interface ExtensionHostUIContext extends ExtensionUIContext {
+	/** Set an editor widget attributed to a resolved extension entry path. */
+	setOwnedWidget?(owner: string, key: string, content: ExtensionWidgetContent, options?: ExtensionWidgetOptions): void;
+}
+
 export class ExtensionRunner {
-	#uiContext: ExtensionUIContext;
+	#uiContext: ExtensionHostUIContext;
+	#ownedUi = new Map<string, ExtensionUIContext>();
 	#mode: ExtensionMode = "print";
 	#toolApprovalPreviewWaiter?: (toolCallId: string) => Promise<void>;
 	/** Grant keys (see `sessionApprovalScope`) approved "for this session", each prefixed by the session it covers. */
@@ -973,7 +983,7 @@ export class ExtensionRunner {
 		actions: ExtensionActions,
 		contextActions: ExtensionContextActions,
 		commandContextActions?: ExtensionCommandContextActions,
-		uiContext?: ExtensionUIContext,
+		uiContext?: ExtensionHostUIContext,
 		mode: ExtensionMode = "print",
 	): void {
 		// Copy actions into the shared runtime (all extension APIs reference this)
@@ -1036,6 +1046,7 @@ export class ExtensionRunner {
 			uiContext && this.#trackUserWait
 				? trackUserWaits(uiContext, this.#trackUserWait)
 				: (uiContext ?? noOpUIContext);
+		this.#ownedUi.clear();
 		this.#mode = mode;
 		this.#initialized = true;
 
@@ -1195,6 +1206,26 @@ export class ExtensionRunner {
 		return this.#uiContext;
 	}
 
+	#uiForPath(extensionPath: string): ExtensionUIContext {
+		if (!this.#uiContext.setOwnedWidget) return this.#uiContext;
+		const owner = this.getLoadedExtensions().find(extension => extension.path === extensionPath);
+		return owner ? this.#uiForOwner(this.#uiContext, owner.resolvedPath) : this.#uiContext;
+	}
+
+	#uiForOwner(ui: ExtensionHostUIContext, owner: string): ExtensionUIContext {
+		if (!ui.setOwnedWidget) return ui;
+		const cache = ui === this.#uiContext ? this.#ownedUi : undefined;
+		const existing = cache?.get(owner);
+		if (existing) return existing;
+		const setWidget: ExtensionUIContext["setWidget"] = (key, content, options) =>
+			ui.setOwnedWidget?.(owner, key, content, options);
+		const bound: ExtensionUIContext = Object.create(ui, {
+			setWidget: { value: setWidget, writable: true, enumerable: true, configurable: true },
+		});
+		cache?.set(owner, bound);
+		return bound;
+	}
+
 	hasUI(): boolean {
 		return this.#uiContext !== noOpUIContext;
 	}
@@ -1209,10 +1240,8 @@ export class ExtensionRunner {
 	 * extension that only brokers writes never appears in the delete registry.
 	 *
 	 * One trampoline per extension per seam, not per handler: the list is walked
-	 * at mutation time so a handler this extension adds later still takes effect,
-	 * and `createContext()` takes no extension argument, so within one invocation
-	 * a single context is all any of this extension's handlers would have
-	 * received anyway.
+	 * at mutation time so a handler this extension adds later still takes effect.
+	 * All of an extension's handlers in the same invocation share one context.
 	 *
 	 * The context is built PER INVOCATION rather than captured here, matching
 	 * every other dispatch site. `createContext()` materializes `cwd` and
@@ -1235,6 +1264,7 @@ export class ExtensionRunner {
 				addFileWriteFallback(async req => {
 					if (this.#suspendedExtensions.has(ext)) return false;
 					const ctx = this.createContext();
+					ctx.ui = this.#uiForOwner(this.#uiContext, ext.resolvedPath);
 					for (const handler of ext.fileWriteFallbackHandlers) {
 						try {
 							if (await handler(req, ctx)) return true;
@@ -1254,6 +1284,7 @@ export class ExtensionRunner {
 				addFileDeleteFallback(async req => {
 					if (this.#suspendedExtensions.has(ext)) return false;
 					const ctx = this.createContext();
+					ctx.ui = this.#uiForOwner(this.#uiContext, ext.resolvedPath);
 					for (const handler of ext.fileDeleteFallbackHandlers) {
 						try {
 							if (await handler(req, ctx)) return true;
@@ -1865,7 +1896,8 @@ export class ExtensionRunner {
 		const event: LinkActivateEvent = { type: "link_activate", url, scheme };
 		const base = this.createContext();
 		const ctx: ExtensionContext =
-			ui && ui !== this.#uiContext ? Object.create(base, { ui: { value: ui }, hasUI: { value: true } }) : base;
+			ui && ui !== this.#uiContext ? Object.create(base, { hasUI: { value: true } }) : base;
+		ctx.ui = this.#uiForOwner(ui ?? this.#uiContext, owner.resolvedPath);
 		for (const handler of handlers) {
 			try {
 				await this.runScoped(() => handler(event, ctx));
@@ -1947,6 +1979,7 @@ export class ExtensionRunner {
 		model?: Model,
 		delegation?: {
 			toolName: string;
+			extensionPath?: string;
 			depth?: number;
 			context?: AgentToolContext;
 			signal?: AbortSignal;
@@ -1962,7 +1995,7 @@ export class ExtensionRunner {
 		};
 		const getSessionModes = () => this.#sessionModes;
 		return {
-			ui: this.#uiContext,
+			ui: delegation?.extensionPath ? this.#uiForPath(delegation.extensionPath) : this.#uiContext,
 			mode: this.#mode,
 			getContextUsage: () => this.#getContextUsageFn(),
 			compact: instructionsOrOptions => this.#compactFn(instructionsOrOptions),
@@ -2072,9 +2105,11 @@ export class ExtensionRunner {
 		for (const dispose of this.#fileFallbackDisposers.splice(0)) dispose();
 	}
 
-	createCommandContext(): ExtensionCommandContext {
+	/** Build the context for a command or shortcut, attributing widgets when it has an extension owner. */
+	createCommandContext(extensionPath?: string): ExtensionCommandContext {
 		return {
 			...this.createContext(),
+			ui: extensionPath ? this.#uiForPath(extensionPath) : this.#uiContext,
 			getContextUsage: () => this.#getContextUsageFn(),
 			waitForIdle: () => this.#waitForIdleFn(),
 			newSession: options => this.#newSessionHandler(options),
@@ -2125,6 +2160,7 @@ export class ExtensionRunner {
 						try {
 							const handlerContext = createHandlerContext(
 								ctx,
+								this.#uiForOwner(ctx.ui, ext.resolvedPath),
 								handlerSignal,
 								event.type === "tool_call" || SESSION_BEFORE_EVENTS[event.type] === true ? budget : undefined,
 							);

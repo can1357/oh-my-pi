@@ -106,6 +106,8 @@ export function buildCustomModelOverlay(
 		compactionModel: modelDef.compactionModel,
 		remoteCompaction: mergeRemoteCompactionConfig(providerRemoteCompaction, modelDef.remoteCompaction),
 		premiumMultiplier: modelDef.premiumMultiplier,
+		voice: modelDef.voice,
+		speechFormats: modelDef.speechFormats,
 		isOAuth: resolveCustomModelIsOAuth(api, providerAuth),
 	};
 }
@@ -150,6 +152,8 @@ export function finalizeCustomModel(resolvedModel: CustomModelOverlay, options: 
 		compactionModel: resolvedModel.compactionModel,
 		remoteCompaction: resolvedModel.remoteCompaction,
 		premiumMultiplier: resolvedModel.premiumMultiplier,
+		voice: resolvedModel.voice,
+		speechFormats: resolvedModel.speechFormats,
 		isOAuth: resolvedModel.isOAuth,
 	} as ModelSpec<Api>);
 	if (resolvedModel.cost) {

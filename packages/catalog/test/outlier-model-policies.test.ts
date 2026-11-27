@@ -34,7 +34,6 @@ describe("outlier catalog policies", () => {
 	test("hosted seeds retain the kinds required by their dedicated runners", () => {
 		const cases = [
 			["openai-codex", "gpt-image-2", "image"],
-			["google-antigravity", "gemini-3-pro-image", "image"],
 			["deepinfra", "black-forest-labs/FLUX-2-pro", "image"],
 			["deepinfra", "hexgrad/Kokoro-82M", "tts"],
 			["deepinfra", "Qwen/Qwen3-TTS", "tts"],
@@ -50,18 +49,9 @@ describe("outlier catalog policies", () => {
 		}
 	});
 
-	test("discovered Antigravity image SKUs build as image models while sibling Flash SKUs stay chat", () => {
-		// Antigravity discovery emits image SKUs as text-only rows without a kind.
-		const image = buildModel(chatSpec("google-antigravity", "google-gemini-cli", "gemini-3.1-flash-image"));
-		const chat = buildModel(chatSpec("google-antigravity", "google-gemini-cli", "gemini-3.1-flash-lite"));
-		expect(image.kind).toBe("image");
-		expect(chat.kind).toBeUndefined();
-	});
-
 	test("chat providers carry their grounding capability", () => {
 		const cases = [
 			["google", "google-generative-ai", "gemini"],
-			["google-antigravity", "google-gemini-cli", "gemini"],
 			["anthropic", "anthropic-messages", "anthropic"],
 			["openai-codex", "openai-codex-responses", "codex"],
 			["xai", "openai-responses", "xai"],

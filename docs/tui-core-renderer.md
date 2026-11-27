@@ -278,11 +278,13 @@ reply switches `TUI` to `native/backend.ts`: components
 are described (`describe()`, or `rows` fallback from `render()`), reconciled
 into document ops (`native/reconcile.ts`) and sent as frames, paced by the
 terminal's acknowledgements instead of the render cadence. A frame that echoes
-user input (a key, a paste, an `edit`, `undo` or `send` event) may run two
-frames past the credits, counting only frames unacknowledged for less than
-250 ms, so a controlled editor keeps echoing typing while Tern is slow to
-acknowledge a streaming transcript. The allowance is a rate, not a total: while
-Tern stays silent, typing sends at most `credits + 2` frames per 250 ms until
+user input (a key, a paste, or any UI event Tern reports for a node: a click, a
+toggle, an `edit`, …) may run two frames past the credits, counting only frames
+unacknowledged for less than 250 ms, so a controlled editor keeps echoing
+typing, and a clicked button's effect shows (a form it closes leaves the
+screen), while Tern is slow to acknowledge a streaming transcript. The
+allowance is a rate, not a total: while Tern stays silent, input sends at most
+`credits + 2` frames per 250 ms until
 the 5 s stall reset, and each echo carries every change held behind the
 credits. Other frames wait for an ack or that reset. None of this
 document's history, viewport, resize-replay or CPR machinery runs on that path;
