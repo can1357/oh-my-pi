@@ -9,6 +9,7 @@ import { Type } from "@oh-my-pi/omptype/typebox";
 import type { AgentMessage, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
+import { requestBodyText } from "@oh-my-pi/pi-ai/utils/request-body";
 import type { ImageContent, TextContent, TSchema } from "@oh-my-pi/pi-ai";
 import {
 	isPerCallContextMessage,
@@ -5475,7 +5476,7 @@ export default function (pi) {
 			const transformed = await runner.emitContext(messages);
 			let body: MessageCreateParams | undefined;
 			const fetchMock = (async (_input: string | URL | Request, init?: RequestInit) => {
-				body = JSON.parse(String(init?.body ?? "{}")) as MessageCreateParams;
+				body = JSON.parse(requestBodyText(init) ?? "{}") as MessageCreateParams;
 				return new Response(
 					JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "captured" } }),
 					{ status: 400, headers: { "Content-Type": "application/json" } },
@@ -5568,7 +5569,7 @@ export default function (pi) {
 			if (!model) throw new Error("Expected bundled Anthropic model to exist");
 			let body: MessageCreateParams | undefined;
 			const fetchMock = (async (_input: string | URL | Request, init?: RequestInit) => {
-				body = JSON.parse(String(init?.body ?? "{}")) as MessageCreateParams;
+				body = JSON.parse(requestBodyText(init) ?? "{}") as MessageCreateParams;
 				return new Response(
 					JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "captured" } }),
 					{ status: 400, headers: { "Content-Type": "application/json" } },

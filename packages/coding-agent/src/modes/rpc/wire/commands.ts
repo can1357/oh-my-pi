@@ -87,6 +87,11 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 		result: "CancellationResult",
 	},
 	{
+		name: "clear_context",
+		doc: "Clear the conversation in place, as the TUI's `/clear` does: the session id, title, model, settings and transcript file survive. Fails with `session_busy` while a response streams or a foreground bash/eval runs.",
+		result: { droppedCount: "number" },
+	},
+	{
 		name: "open_session",
 		doc: "Continue the newest non-empty session in a directory, or start a fresh one there. Give provider and modelId together to override the saved model; otherwise an unavailable saved model fails the request.",
 		params: { sessionDir: "string", "provider?": "string", "modelId?": "string" },

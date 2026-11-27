@@ -568,6 +568,38 @@ describe("listClaudePluginRoots", () => {
 		expect(cmd).toBeDefined();
 		expect(cmd?.content).toBe(`Read ${pluginPath}/shared/notes.md, then run ${pluginPath}/scripts/y.sh.\n`);
 	});
+
+	test.each([false, true])("plugin-root SKILL.md with absent skills/ (explicit path: %s)", async declared => {
+		const pluginPath = path.join(tempDir, "plugins", "db");
+		const pluginsDir = path.join(tempDir, ".omp", "plugins");
+		const registry = {
+			version: 2,
+			plugins: { "db@test-market": [{ scope: "user", installPath: pluginPath, version: "1.0.0" }] },
+		};
+		await Promise.all([
+			fs.mkdir(path.join(pluginPath, "reference", "nested"), { recursive: true }),
+			fs.mkdir(pluginsDir, { recursive: true }),
+		]);
+		await Promise.all([
+			fs.writeFile(path.join(pluginPath, "SKILL.md"), "---\nname: db\ndescription: Database router.\n---\nRoute.\n"),
+			fs.writeFile(
+				path.join(pluginPath, "reference", "nested", "SKILL.md"),
+				"---\nname: nested\ndescription: Not a skill.\n---\nNo.\n",
+			),
+			fs.writeFile(path.join(pluginsDir, "installed_plugins.json"), JSON.stringify(registry)),
+		]);
+
+		if (declared) {
+			await fs.mkdir(path.join(pluginPath, ".claude-plugin"));
+			await fs.writeFile(
+				path.join(pluginPath, ".claude-plugin", "plugin.json"),
+				JSON.stringify({ skills: "./skills" }),
+			);
+		}
+		const { skills } = await loadSkills({ cwd: tempDir });
+		const names = skills.filter(s => s.pluginRoot === pluginPath).map(s => s.name);
+		expect(names).toEqual(declared ? [] : ["db"]);
+	});
 });
 
 describe("claude-plugins flat .mcp.json shape", () => {

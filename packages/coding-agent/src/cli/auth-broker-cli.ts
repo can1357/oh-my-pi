@@ -28,7 +28,6 @@ import {
 	matchesReplacementCredential,
 	type OAuthCredential,
 	type OAuthProvider,
-	PROVIDER_REGISTRY,
 	SqliteAuthCredentialStore,
 } from "@oh-my-pi/pi-ai";
 import {
@@ -39,7 +38,8 @@ import {
 } from "@oh-my-pi/pi-ai/auth-broker";
 import { refreshOAuthToken } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
-import { providerDeviceBound } from "@oh-my-pi/pi-catalog/compat/auth";
+import { BROKER_CALLBACK_PORT_ENV, resolveCallbackPort } from "@oh-my-pi/pi-ai/registry/engine/oauth-code";
+import { authPolicyFor, providerDeviceBound } from "@oh-my-pi/pi-catalog/compat/auth";
 import { $which, APP_NAME, getAgentDbPath, getConfigRootDir, logger, postmortem, VERSION } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { setTransports as setLoggerTransports } from "@oh-my-pi/pi-utils/logger";
@@ -89,13 +89,6 @@ const ACTIONS: readonly AuthBrokerAction[] = [
 	"status",
 	"list",
 ];
-
-/** Callback ports baked from the per-provider OAuth flow modules. */
-const CALLBACK_PORTS: Record<string, number> = Object.fromEntries(
-	PROVIDER_REGISTRY.flatMap(provider =>
-		provider.callbackPort != null ? [[provider.id, provider.callbackPort] as [string, number]] : [],
-	),
-);
 
 function getTokenFilePath(): string {
 	return path.join(getConfigRootDir(), "auth-broker.token");
@@ -258,21 +251,33 @@ async function runLocalLogin(rl: readline.Interface, provider: string): Promise<
 	}
 }
 
-async function runRemoteLogin(provider: string, via: string, dryRun: boolean): Promise<void> {
-	const port = CALLBACK_PORTS[provider];
-	if (port === undefined) {
+/** SSH must forward the same concrete port the remote OAuth flow advertises to the browser. */
+export function remoteLoginSshArgs(provider: string, via: string): string[] {
+	const policy = authPolicyFor(provider);
+	const callback = policy?.login?.kind === "oauth-code" ? policy.login.callback : undefined;
+	const configurable = callback?.portEnv;
+	const port = callback && configurable ? resolveCallbackPort(callback, provider) : policy?.callbackPort;
+	if (configurable && port === 0) {
+		throw new Error(`${configurable}=0 cannot be forwarded over SSH; choose a fixed port or unset it.`);
+	}
+	if (!port) {
 		throw new Error(
 			`No known OAuth callback port for '${provider}'. Use device-code flow on the broker host directly.`,
 		);
 	}
-	const sshArgs = [
+	const env = configurable ? `env ${BROKER_CALLBACK_PORT_ENV}=${port} ` : "";
+	return [
 		"-L",
 		`${port}:127.0.0.1:${port}`,
 		"-o",
 		"ExitOnForwardFailure=yes",
 		via,
-		`${APP_NAME} auth-broker login ${provider}`,
+		`${env}${APP_NAME} auth-broker login ${provider}`,
 	];
+}
+
+async function runRemoteLogin(provider: string, via: string, dryRun: boolean): Promise<void> {
+	const sshArgs = remoteLoginSshArgs(provider, via);
 	if (dryRun) {
 		process.stdout.write(`ssh ${sshArgs.map(a => (a.includes(" ") ? `'${a}'` : a)).join(" ")}\n`);
 		return;

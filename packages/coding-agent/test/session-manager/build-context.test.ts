@@ -2,6 +2,7 @@ import { describe, expect, it, spyOn } from "bun:test";
 import { defaultConvertToLlm } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { convertToLlm, LIVE_DELEGATION_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { buildSessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import type {
 	BranchSummaryEntry,
@@ -402,6 +403,32 @@ describe("buildSessionContext", () => {
 				content: "Native summary",
 				signature: "sig_state",
 			});
+		});
+
+		it("replays the same voice-end notice when a native cut separates the delegation from the kept prompt", () => {
+			const entries: SessionEntry[] = [
+				{
+					type: "custom_message",
+					customType: LIVE_DELEGATION_MESSAGE_TYPE,
+					content: "Read the names.",
+					display: true,
+					attribution: "agent",
+					id: "voice",
+					parentId: null,
+					timestamp: "2025-01-01T00:00:00Z",
+				},
+				msg("kept", "voice", "user", "As a table now."),
+				msg("answer", "kept", "assistant", "Here is the table."),
+			];
+			const sent = convertToLlm(buildSessionContext(entries).messages);
+			expect(sent).toHaveLength(4); // delegation, end notice, prompt, answer
+			entries.push({
+				...compaction("cut", "answer", "Native summary", "kept"),
+				preserveData: {
+					anthropicCompaction: { provider: "anthropic", content: "Native summary", signature: "sig" },
+				},
+			});
+			expect(convertToLlm(buildSessionContext(entries).messages).slice(1)).toEqual(sent.slice(1));
 		});
 
 		it("replays new turns after an empty-tail snapshot with an earlier rewrite marker", () => {

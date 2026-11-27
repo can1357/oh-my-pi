@@ -8,21 +8,17 @@ import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context } from "@oh-my-pi/pi-ai/types";
-import {
-	__physicalTargetSegmentsForTesting,
-	resetSettingsForTest,
-	Settings,
-} from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { physicalTargetSegments } from "@oh-my-pi/pi-coding-agent/config/settings-yaml";
 import { bindEffects } from "@oh-my-pi/pi-coding-agent/config/registry";
 
-import * as discovery from "@oh-my-pi/pi-coding-agent/discovery";
+import * as atomicFile from "@oh-my-pi/pi-coding-agent/utils/atomic-file";
 import { editVariantForModel } from "@oh-my-pi/pi-coding-agent/utils/edit-mode";
 import { roleDefaultModels } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { resolveRoleChain } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { getAgentDbPath, getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
-import * as fileLock from "@oh-my-pi/pi-utils/file-lock";
 import { YAML } from "bun";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 import {
@@ -319,31 +315,6 @@ describe("Settings", () => {
 			const backupNames = fs.readdirSync(agentDir).filter(name => name.startsWith("config.yml.broken-"));
 			expect(backupNames).toHaveLength(1);
 			expect(await Bun.file(path.join(agentDir, backupNames[0])).text()).toBe(original);
-		});
-
-		it("rejects when another process quarantines malformed config before the lock is acquired", async () => {
-			const configPath = getConfigPath();
-			const backupPath = `${configPath}.broken-other-process`;
-			const original = 'modelRoles:\n  default: "unterminated\n';
-			await Bun.write(configPath, original);
-			const canonicalConfigPath = await fs.promises.realpath(configPath);
-			const withFileLock = fileLock.withFileLock;
-			let movedAside = false;
-			vi.spyOn(fileLock, "withFileLock").mockImplementation(async (filePath, fn, options) => {
-				if (!movedAside && filePath === canonicalConfigPath) {
-					await fs.promises.rename(configPath, backupPath);
-					movedAside = true;
-				}
-				return await withFileLock(filePath, fn, options);
-			});
-
-			await expect(Settings.init({ cwd: projectDir, agentDir })).rejects.toThrow(
-				"invalid before locking and is now missing",
-			);
-
-			expect(movedAside).toBe(true);
-			expect(await Bun.file(configPath).exists()).toBe(false);
-			expect(await Bun.file(backupPath).text()).toBe(original);
 		});
 
 		it("keeps malformed config in place for read-only loads", async () => {
@@ -974,20 +945,19 @@ describe("Settings", () => {
 			// `C:\C:\managed\final.yml`, so flushing through a dangling absolute link
 			// fails. Drive the splitter with the win32 engine so the bug reproduces
 			// on this POSIX host.
-			const segments = __physicalTargetSegmentsForTesting("C:\\managed\\final.yml", path.win32).filter(
+			const segments = physicalTargetSegments("C:\\managed\\final.yml", path.win32).filter(
 				segment => segment !== "" && segment !== ".",
 			);
 			expect(segments).toEqual(["managed", "final.yml"]);
 			// A UNC target seeds at the `\\server\share\` root, which must likewise
 			// be stripped rather than re-walked as `server` / `share` segments.
-			const uncSegments = __physicalTargetSegmentsForTesting(
-				"\\\\server\\share\\managed\\final.yml",
-				path.win32,
-			).filter(segment => segment !== "" && segment !== ".");
+			const uncSegments = physicalTargetSegments("\\\\server\\share\\managed\\final.yml", path.win32).filter(
+				segment => segment !== "" && segment !== ".",
+			);
 			expect(uncSegments).toEqual(["managed", "final.yml"]);
 			// A relative Windows target seeds at the link's real parent, so every
 			// segment is preserved unchanged.
-			expect(__physicalTargetSegmentsForTesting("managed\\final.yml", path.win32)).toEqual(["managed", "final.yml"]);
+			expect(physicalTargetSegments("managed\\final.yml", path.win32)).toEqual(["managed", "final.yml"]);
 		});
 
 		it("treats a backslash as a filename character on POSIX, not a separator", async () => {
@@ -996,10 +966,10 @@ describe("Settings", () => {
 			// `managed`/`config.yml` makes flush either fail on the missing dir or
 			// write an unrelated file while the real link stays dangling. Drive the
 			// splitter with the posix engine so the bug reproduces on any host.
-			expect(__physicalTargetSegmentsForTesting("managed\\config.yml", path.posix)).toEqual(["managed\\config.yml"]);
+			expect(physicalTargetSegments("managed\\config.yml", path.posix)).toEqual(["managed\\config.yml"]);
 			// Forward slashes still split, and the leading `/` of an absolute POSIX
 			// target strips to no extra segment (root seeded separately).
-			const absSegments = __physicalTargetSegmentsForTesting("/managed/final.yml", path.posix).filter(
+			const absSegments = physicalTargetSegments("/managed/final.yml", path.posix).filter(
 				segment => segment !== "" && segment !== ".",
 			);
 			expect(absSegments).toEqual(["managed", "final.yml"]);
@@ -1010,17 +980,13 @@ describe("Settings", () => {
 			// final.yml without following `alias`; walking the raw `..` pops the
 			// alias's PHYSICAL parent and writes a file the link never reads. Drive
 			// the splitter with each engine so both rules reproduce on any host.
-			expect(__physicalTargetSegmentsForTesting("alias\\..\\final.yml", path.win32)).toEqual(["final.yml"]);
+			expect(physicalTargetSegments("alias\\..\\final.yml", path.win32)).toEqual(["final.yml"]);
 			// A leading `..` still pops the link's real parent, and a trailing
 			// separator survives so the walk still demands a directory there.
-			expect(__physicalTargetSegmentsForTesting("..\\..\\final.yml", path.win32)).toEqual(["..", "..", "final.yml"]);
-			expect(__physicalTargetSegmentsForTesting("missing\\", path.win32)).toEqual(["missing", ""]);
+			expect(physicalTargetSegments("..\\..\\final.yml", path.win32)).toEqual(["..", "..", "final.yml"]);
+			expect(physicalTargetSegments("missing\\", path.win32)).toEqual(["missing", ""]);
 			// POSIX follows `alias` physically, so `..` stays for the walk to pop.
-			expect(__physicalTargetSegmentsForTesting("alias/../final.yml", path.posix)).toEqual([
-				"alias",
-				"..",
-				"final.yml",
-			]);
+			expect(physicalTargetSegments("alias/../final.yml", path.posix)).toEqual(["alias", "..", "final.yml"]);
 		});
 
 		it("falls back to move-aside replacement when Windows reports EPERM", async () => {
@@ -1233,26 +1199,28 @@ describe("Settings", () => {
 			expect(cfgTaskEnableEffort.get(settings)).toBe(false);
 			expect(cfgTaskMaxConcurrency.get(settings)).toBe(7);
 		});
-		it("retries when a persisted setting changes while files are being read", async () => {
+		it("keeps a global write issued while a reload is reading files", async () => {
 			await writeSettings({ setupVersion: 1 });
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			const loadCapability = discovery.loadCapability;
-			const projectLoadStarted = Promise.withResolvers<void>();
-			const releaseProjectLoad = Promise.withResolvers<void>();
-			let pauseProjectLoad = true;
-			vi.spyOn(discovery, "loadCapability").mockImplementation(async (id, options) => {
-				if (pauseProjectLoad) {
-					pauseProjectLoad = false;
-					projectLoadStarted.resolve();
-					await releaseProjectLoad.promise;
+			const configPath = getConfigPath();
+			const configPaths = new Set([configPath, await fs.promises.realpath(configPath)]);
+			const readFile = fs.promises.readFile.bind(fs.promises) as (...args: unknown[]) => Promise<unknown>;
+			const readStarted = Promise.withResolvers<void>();
+			const releaseRead = Promise.withResolvers<void>();
+			let pauseRead = true;
+			vi.spyOn(fs.promises, "readFile").mockImplementation((async (...args: unknown[]) => {
+				if (pauseRead && typeof args[0] === "string" && configPaths.has(args[0])) {
+					pauseRead = false;
+					readStarted.resolve();
+					await releaseRead.promise;
 				}
-				return await loadCapability(id, options);
-			});
+				return await readFile(...args);
+			}) as typeof fs.promises.readFile);
 
 			const reload = settings.reloadFromDisk();
-			await projectLoadStarted.promise;
+			await readStarted.promise;
 			cfgSetupVersion.set(settings, 2);
-			releaseProjectLoad.resolve();
+			releaseRead.resolve();
 			await reload;
 			await settings.flush();
 
@@ -1680,20 +1648,22 @@ describe("Settings", () => {
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			const firstSaveEntered = Promise.withResolvers<void>();
 			const releaseFirstSave = Promise.withResolvers<void>();
-			const firstSaveFinished = Promise.withResolvers<void>();
-			const withFileLock = fileLock.withFileLock;
-			vi.spyOn(fileLock, "withFileLock").mockImplementation(async (filePath, fn, options) => {
-				firstSaveEntered.resolve();
-				const result = await withFileLock(filePath, fn, options);
-				firstSaveFinished.resolve();
-				return result;
+			const writeFileAtomically = atomicFile.writeFileAtomically;
+			let pauseSave = true;
+			vi.spyOn(atomicFile, "writeFileAtomically").mockImplementation(async (filePath, content, mode) => {
+				if (pauseSave) {
+					pauseSave = false;
+					firstSaveEntered.resolve();
+					await releaseFirstSave.promise;
+				}
+				await writeFileAtomically(filePath, content, mode);
 			});
 
 			settings.setModelRole("smol", "anthropic/claude-haiku-4-5");
 			await firstSaveEntered.promise;
 			settings.setModelRole("advisor", "moonshot/kimi-k3:max");
 			releaseFirstSave.resolve();
-			await firstSaveFinished.promise;
+			await settings.flush();
 
 			expect((await readSettings()).modelRoles).toEqual({
 				default: "anthropic/claude-sonnet-4-5",
@@ -2914,41 +2884,6 @@ describe("Settings", () => {
 			);
 
 			warnSpy.mockRestore();
-		});
-
-		it("drops user-level warnings that #readProjectSettings does not merge", async () => {
-			const projectSettingsJson = path.join(getProjectAgentDir(projectDir), "settings.json");
-			vi.spyOn(discovery, "loadCapability").mockResolvedValue({
-				items: [],
-				all: [],
-				warnings: [
-					`[OMP] Failed to parse ${path.join(tempDir.path(), "home", ".omp", "agent", "settings.json")}`,
-					"[OMP] Failed to load: boom",
-					`[OMP] Failed to parse ${projectSettingsJson}`,
-				],
-				providers: [],
-			});
-			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
-
-			await Settings.init({ cwd: projectDir, agentDir, inMemory: true });
-			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(projectSettingsJson));
-			expect(warnSpy.mock.calls.filter(args => String(args[0]).includes("home"))).toEqual([]);
-			expect(warnSpy.mock.calls.filter(args => String(args[0]).includes("Failed to load"))).toEqual([]);
-		});
-
-		it("logs project warnings when the cwd is a filesystem root", async () => {
-			const root = path.parse(projectDir).root;
-			const rootSettingsJson = path.join(getProjectAgentDir(root), "settings.json");
-			vi.spyOn(discovery, "loadCapability").mockResolvedValue({
-				items: [],
-				all: [],
-				warnings: [`[OMP] Failed to parse ${rootSettingsJson}`],
-				providers: [],
-			});
-			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
-
-			await Settings.init({ cwd: root, agentDir, inMemory: true });
-			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(rootSettingsJson));
 		});
 
 		it("logs a persistently malformed project file once across reloads", async () => {

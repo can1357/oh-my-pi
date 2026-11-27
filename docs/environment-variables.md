@@ -344,12 +344,11 @@ An invalid `KIRO_API_REGION` is an error rather than a silent fallback. `/login 
 | `PI_OPENROUTER_RESPONSES`           | Responses API is enabled unless set to `0`; `0` selects the OpenAI Completions route                                                                                                                                                          |
 | `UMANS_WEBSEARCH_PROVIDER`          | Default Umans Anthropic web-search provider selection when not supplied explicitly                                                                                                                                                            |
 
+### Anthropic OAuth
 
-### Prompt perturbation
-
-| Variable                  | Default / behavior                                                                                                                                                                     |
-| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `OMP_PROMPT_PERTURBATION` | Unset: models whose KDL rules set `prompt-perturbation #true` get the pooled lines rewritten with the wording chosen for this installation; others get the bundled wording. `1` perturbs every model; `0` none. |
+| Variable                           | Default / behavior                                                                                                          |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `PI_ANTHROPIC_OAUTH_CALLBACK_PORT` | Anthropic callback port (default `54545`). Local login can fall back to a free port or request one with `0`. SSH broker login requires a fixed port and uses it on both ends of the tunnel. |
 
 ### GitLab Duo
 

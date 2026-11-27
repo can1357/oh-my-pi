@@ -3,7 +3,7 @@ import {
 	validateModelCompactionThresholds,
 } from "../config/compaction-threshold";
 import { combine, register, type SettingValueOf } from "../config/registry";
-import { COMPACTION_METHOD_CHOICES, DEFAULT_COMPACTION_METHOD_ORDER } from "./compaction-methods";
+import { COMPACTION_METHOD_CHOICES, DEFAULT_COMPACTION_METHOD_ORDER } from "./compaction-method-ids";
 import { SHAPE_VARIANT_NAMES } from "@oh-my-pi/snapcompact";
 
 const EMPTY_STRING_ARRAY: string[] = [];
@@ -163,7 +163,7 @@ export const cfgCompactionThresholdPercent = register({
 		label: "Compaction Threshold",
 		description: "Percent threshold for context maintenance; set to Default to use legacy reserve-based behavior",
 		options: [
-			{ value: "default", label: "Default", description: "Legacy reserve-based threshold" },
+			{ value: "default", label: "Default", description: "Window less its reserve, at most 690K tokens" },
 			{ value: "10", label: "10%", description: "Extremely early maintenance" },
 			{ value: "20", label: "20%", description: "Very early maintenance" },
 			{ value: "30", label: "30%", description: "Early maintenance" },
@@ -302,6 +302,14 @@ export const cfgCompactionReserveTokens = register({
 	default: undefined,
 });
 
+// No default: unset keeps the summary budget at min(0.8 × reserve, 16384),
+// the ceiling that keeps large-window summaries compressing (#7008).
+export const cfgCompactionSummaryMaxTokens = register({
+	id: "compaction.summaryMaxTokens",
+	type: "number",
+	default: undefined,
+});
+
 export const cfgCompactionKeepRecentTokens = register({
 	id: "compaction.keepRecentTokens",
 	type: "number",
@@ -412,6 +420,7 @@ export const cfgCompaction = combine({
 	thresholdPercent: cfgCompactionThresholdPercent,
 	thresholdTokens: cfgCompactionThresholdTokens,
 	reserveTokens: cfgCompactionReserveTokens,
+	summaryMaxTokens: cfgCompactionSummaryMaxTokens,
 	keepRecentTokens: cfgCompactionKeepRecentTokens,
 	midTurnEnabled: cfgCompactionMidTurnEnabled,
 	asyncEnabled: cfgCompactionAsyncEnabled,

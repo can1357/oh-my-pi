@@ -130,6 +130,35 @@ fs.writeFileSync(${JSON.stringify(bodyFile)}, new Uint8Array(await Bun.stdin.arr
 		}
 	});
 
+	it("kills a stalled FTP upload command once its timeout elapses", async () => {
+		const temp = fs.mkdtempSync(path.join(os.tmpdir(), "omp-ftp-stall-"));
+		try {
+			const executable = await compileFakeExecutable(
+				temp,
+				"stalled-curl",
+				"await new Promise(() => setInterval(() => {}, 1_000));\n",
+			);
+			const uploader = requiredUploader(
+				createSelfHostedUploader(
+					"ftp",
+					configured(
+						{
+							protocol: "ftp",
+							host: "upload.test",
+							publicBaseUrl: "https://cdn.test/assets/",
+							commandBinary: executable,
+							timeoutMs: 200,
+						},
+						{ username: "alice", password: "p@ss" },
+					),
+				),
+			);
+			await expect(uploader.upload(request)).rejects.toThrow("FTP upload command timed out after 200ms");
+		} finally {
+			fs.rmSync(temp, { recursive: true, force: true });
+		}
+	});
+
 	it("does not mis-map an encoded shared-folder path or write outside its configured subtree", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-shared-uploader-"));
 		try {

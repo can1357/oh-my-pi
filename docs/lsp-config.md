@@ -69,7 +69,7 @@ or (flat, without the `servers` wrapper):
 Top-level keys:
 
 - `servers` — map of server name to `ServerConfig` (optional wrapper; flat form is equivalent)
-- `idleTimeoutMs` — shut down idle language servers after this many milliseconds; omitted, zero, and negative values leave idle shutdown disabled
+- `idleTimeoutMs` — shut down idle language servers after this many milliseconds; defaults to `900000` (15 minutes) when omitted; zero or negative disables idle shutdown
 
 Do not mix wrapped and flat server entries: when `servers` is an object, sibling keys other than `idleTimeoutMs` are not treated as servers.
 

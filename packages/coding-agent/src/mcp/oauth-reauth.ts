@@ -819,7 +819,9 @@ export async function reauthorizeMcpServer(
 	const oauthResource =
 		oauth.resource ?? currentAuthResource ?? ("url" in runtimeBaseConfig ? runtimeBaseConfig.url : undefined);
 	const oauthResourceIsFallback = !oauth.resource && !currentAuthResource;
-	const baseScopes = oauth.scopes || runtimeBaseConfig.oauth?.scope || "";
+	// An explicit `oauth.scope` is the user's exact request; discovered scopes
+	// only fill in when none is configured.
+	const baseScopes = runtimeBaseConfig.oauth?.scope?.trim() || oauth.scopes || "";
 	// Step-up (RFC 6750 §3.1): protected-resource metadata names only the
 	// baseline, so keep what the grant holds and add what the challenge asks for.
 	const stepUpScopes = opts.authChallenge ? insufficientScopeOf(opts.authChallenge.wwwAuthenticate) : undefined;

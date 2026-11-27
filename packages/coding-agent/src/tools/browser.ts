@@ -5,7 +5,7 @@ import type { EvalPreludeContext, HostEvalPreludeDefinition } from "../eval/prel
 import type { ToolSession } from "../sdk";
 import { enforceInlineByteCap } from "./streaming-output";
 import { CmuxUnavailableError, resolveCmuxKind } from "./browser/cmux/rpc";
-import { type CdpTarget, describeCdpTargets, listCdpTargets, resolveSpawnArgs } from "./browser/attach";
+import { type CdpTarget, describeCdpTargets, listCdpTargets, normalizeAppArgs } from "./browser/attach";
 import {
 	acquireBrowser,
 	browserKey,
@@ -205,14 +205,12 @@ export function resolveBrowserKind(
 	}
 	if (app && !APP_KEYWORDS.includes(app)) {
 		const exe = resolveToCwd(app, session.cwd);
-		const args = resolveSpawnArgs(exe, params.argv, session.cwd);
-		if (params.insecure && !args.includes("--ignore-certificate-errors")) {
-			args.push("--ignore-certificate-errors");
-		}
-		if (!args.includes("--allow-file-access-from-files")) {
-			args.push("--allow-file-access-from-files");
-		}
-		return { kind: "spawned", path: exe, args };
+		const args = params.argv ?? [];
+		const required =
+			params.insecure && !args.includes("--ignore-certificate-errors")
+				? [...args, "--ignore-certificate-errors"]
+				: args;
+		return { kind: "spawned", path: exe, args: normalizeAppArgs(exe, required, session.cwd) };
 	}
 	const relayUrl = cfgBrowserRelayUrl.get(session.settings);
 	// Explicit app: "relay" wins over every setting; PI_BROWSER_RELAY stays the

@@ -165,6 +165,8 @@ export interface KeyCascadeDeps {
 	affinity: SessionAffinity;
 	/** LimitsApi.rotate, injected to avoid a cascade↔rotation import cycle. */
 	rotate: LimitsApi["rotate"];
+	/** Learns a resolved key's unknown account billing mode in the background (GitHub Copilot). */
+	learnBillingMode: (provider: string, resolved: ResolvedApiKey) => void;
 	sourceLabel?: string;
 }
 
@@ -371,7 +373,17 @@ export class KeyCascade implements KeysApi {
 		options?: AuthApiKeyOptions,
 	): Promise<ResolvedApiKey | undefined> {
 		assertProviderEnabled(provider);
-		return this.#resolve(provider, sessionId, options);
+		return this.#resolveForRequest(provider, sessionId, options);
+	}
+
+	async #resolveForRequest(
+		provider: string,
+		sessionId?: string,
+		options?: AuthApiKeyOptions,
+	): Promise<ResolvedApiKey | undefined> {
+		const resolved = await this.#resolve(provider, sessionId, options);
+		if (resolved) this.#deps.learnBillingMode(provider, resolved);
+		return resolved;
 	}
 
 	/**
@@ -393,7 +405,7 @@ export class KeyCascade implements KeysApi {
 	 */
 	async get(provider: string, sessionId?: string, options?: AuthApiKeyOptions): Promise<string | undefined> {
 		try {
-			return (await this.#resolve(provider, sessionId, options))?.apiKey;
+			return (await this.#resolveForRequest(provider, sessionId, options))?.apiKey;
 		} catch (error) {
 			if (!(error instanceof AIError.OAuthRefreshUnavailableError)) throw error;
 			logger.debug("API key probe skipped transient OAuth refresh failure", { provider, error: error.message });

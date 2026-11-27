@@ -8,6 +8,7 @@
 
 ### Added
 
+- Terminal canvas views can handle mouse clicks, motion, and wheel ticks with `onMouse` ([#20819](https://github.com/can1357/oh-my-pi/issues/20819)).
 - Added `MarkdownOptions.linkUrls` and `MarkdownLook.linkUrls` to hide the URL drawn after named links whose label is an OSC 8 hyperlink ([#13162](https://github.com/can1357/oh-my-pi/pull/13162) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
 - Added opt-in fullscreen terminal rendering: a scrollable transcript above a pinned dock, a draggable scrollbar, character/word/line selection and incremental search. The normal exit can append the transcript or keep the original screen ([#2040](https://github.com/can1357/oh-my-pi/issues/2040), building on [#2103](https://github.com/can1357/oh-my-pi/pull/2103) by [@shoucandanghehe](https://github.com/shoucandanghehe) and [#20766](https://github.com/can1357/oh-my-pi/pull/20766) by [@camjac251](https://github.com/camjac251))
 ### Added
@@ -37,6 +38,9 @@
 - Fixed SIXEL and iTerm2 images losing their bottom cell row in terminals that clear image cells on line erase, such as xterm.js ([#20752](https://github.com/can1357/oh-my-pi/issues/20752))
 - Fixed code blocks drawn with `codeIndent: 0` putting their ``` fence rows one column right of the code; fences now sit at column 0 with it, so copying the whole block yields its markdown ([#20752](https://github.com/can1357/oh-my-pi/issues/20752))
 - Stopped trusting an inherited `TERM_FEATURES` sync hint inside tmux/screen panes, which caused top-to-bottom redraw flashes while streaming in an inactive tmux 3.6 pane ([#20091](https://github.com/can1357/oh-my-pi/issues/20091))
+- Enabled kitty Unicode placeholder image rendering by default in Rex ([#19830](https://github.com/can1357/oh-my-pi/issues/19830))
+- Inline images inside tmux on terminals without Kitty Unicode placeholders (e.g. WezTerm) are no longer drawn at tmux's cursor; they use SIXEL when tmux renders it, else are skipped ([#19396](https://github.com/can1357/oh-my-pi/issues/19396))
+- Catppuccin, Rosé Pine, GitHub Dark and Celestial themes now draw composer and message text in their palette text color instead of the generic default ([#16374](https://github.com/can1357/oh-my-pi/issues/16374))
 
 ## [19.2.1] - 2026-11-25
 

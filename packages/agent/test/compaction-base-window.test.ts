@@ -12,11 +12,20 @@ const window = 1_000_000;
 
 describe("baseWindowTokens", () => {
 	it("rescales the reserve and percentage policies from the base", () => {
-		// 400K base minus max(15%, 16384) = 340K, instead of 850K on the real window.
+		// 400K base minus max(15%, 16384) = 340K, instead of the real window's default.
 		expect(resolveThresholdTokens(window, { ...base, baseWindowTokens: 400_000 })).toBe(340_000);
 		expect(resolveThresholdTokens(window, { ...base, thresholdPercent: 80, baseWindowTokens: 400_000 })).toBe(
 			320_000,
 		);
+	});
+
+	it("caps the bare default on wide windows, but not a configured trigger or base", () => {
+		// 1M less its 15% reserve would be 850K; the default stops at 690K.
+		expect(resolveThresholdTokens(window, base)).toBe(690_000);
+		expect(resolveThresholdTokens(window, { ...base, baseWindowTokens: window })).toBe(850_000);
+		expect(resolveThresholdTokens(window, { ...base, thresholdPercent: 90 })).toBe(900_000);
+		// A window whose reserve-based trigger sits below the ceiling keeps it.
+		expect(resolveThresholdTokens(800_000, base)).toBe(680_000);
 	});
 
 	it("leaves a fixed threshold clamped to the real window, not the base", () => {
