@@ -510,6 +510,16 @@ describe("openai-responses parseRequest", () => {
 		).toThrow("prompt_cache_options and prompt_cache_breakpoint are unsupported");
 	});
 
+	it("rejects structured-output text.format instead of serving it unconstrained (#20815)", () => {
+		const format = { type: "json_schema", name: "place", schema: { type: "object" } };
+		expect(() => parseRequest({ model: "m", input: "hi", text: { format } })).toThrow(
+			/text\.format \(structured output\) is unsupported/,
+		);
+		expect(
+			parseRequest({ model: "m", input: "hi", text: { format: { type: "text" }, verbosity: "low" } }).modelId,
+		).toBe("m");
+	});
+
 	it("accepts a bare string input and rejects a missing model", () => {
 		const parsed = parseRequest({ model: "m", input: "hi" });
 		expect(parsed.context.messages).toHaveLength(1);

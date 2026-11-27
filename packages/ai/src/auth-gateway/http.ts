@@ -7,7 +7,7 @@
 import { timingSafeEqual as nodeTimingSafeEqual } from "node:crypto";
 import * as os from "node:os";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { getInstallId } from "@oh-my-pi/pi-utils";
+import { getInstallId, isRecord } from "@oh-my-pi/pi-utils";
 import { extractClaudeMetadataSessionId } from "../providers/anthropic-identity";
 import type { Api, Model, ServiceTier } from "../types";
 import type { ClientUsageIdentity } from "../usage";
@@ -316,6 +316,16 @@ export function isOpenAIReasoningEffort(value: unknown): value is Effort {
 /** OpenAI-wire `service_tier` values the gateway forwards. */
 export function isOpenAIServiceTier(value: unknown): value is ServiceTier {
 	return value === "auto" || value === "default" || value === "flex" || value === "scale" || value === "priority";
+}
+
+/**
+ * Whether an OpenAI `response_format` (chat) or `text.format` (Responses)
+ * asks for constrained output — anything but absent/`null` or the default
+ * `{ type: "text" }`. The chat routes have no structured-output slot to
+ * forward it on, so they reject these instead of returning unconstrained text.
+ */
+export function isOpenAIStructuredOutputFormat(format: unknown): boolean {
+	return format != null && !(isRecord(format) && format.type === "text");
 }
 
 const CORS_HEADERS: Record<string, string> = {

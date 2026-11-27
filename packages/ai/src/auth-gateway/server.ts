@@ -268,8 +268,7 @@ function buildStreamOptions(parsed: ParsedFormatRequest, model: Model<Api>, sign
 		options.previousResponseId !== undefined ||
 		options.seed !== undefined ||
 		options.logitBias !== undefined ||
-		options.user !== undefined ||
-		options.responseFormat !== undefined
+		options.user !== undefined
 	) {
 		logger.debug("auth-gateway dropped unsupported typed options", {
 			api: model.api,
@@ -278,7 +277,6 @@ function buildStreamOptions(parsed: ParsedFormatRequest, model: Model<Api>, sign
 			seed: options.seed,
 			hasLogitBias: options.logitBias !== undefined,
 			user: options.user,
-			hasResponseFormat: options.responseFormat !== undefined,
 		});
 	}
 	return opts;

@@ -14,6 +14,7 @@ import { isRecord, logger, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import {
 	isOpenAIReasoningEffort,
 	isOpenAIServiceTier,
+	isOpenAIStructuredOutputFormat,
 	openAIErrorResponse,
 	resolvePromptCacheKey,
 } from "../auth-gateway/http";
@@ -365,6 +366,13 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	const data = openaiResponsesRequestSchema(body);
 	if (data instanceof type.errors) {
 		throw new AIError.ValidationError(`openai-responses: ${data.summary}`);
+	}
+	// `text.format` is structured output: no pi-ai option carries it, so serving
+	// the request would return unconstrained text as a 200 (#20815).
+	if (isRecord(data.text) && isOpenAIStructuredOutputFormat(data.text.format)) {
+		throw new AIError.ValidationError(
+			"openai-responses: text.format (structured output) is unsupported by this auth-gateway route; put the schema in the prompt or force a tool call instead",
+		);
 	}
 
 	const now = Date.now();

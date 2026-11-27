@@ -3,6 +3,7 @@ import { type } from "@oh-my-pi/omptype";
 import {
 	isOpenAIReasoningEffort,
 	isOpenAIServiceTier,
+	isOpenAIStructuredOutputFormat,
 	openAIErrorResponse,
 	resolvePromptCacheKey,
 } from "../auth-gateway/http";
@@ -94,6 +95,14 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 		throw new AIError.ValidationError(`openai-chat: ${parsed.summary}`);
 	}
 	const data = parsed;
+	// Structured output has no pi-ai option to land on. Accepting it would
+	// return unconstrained text as a 200; reject so clients fall back on
+	// purpose (#20815, same as `/v1/messages` in #18842).
+	if (isOpenAIStructuredOutputFormat(data.response_format)) {
+		throw new AIError.ValidationError(
+			"openai-chat: response_format (structured output) is unsupported by this auth-gateway route; put the schema in the prompt or force a tool call instead",
+		);
+	}
 
 	const now = Date.now();
 	const systemParts: string[] = [];
@@ -193,7 +202,6 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	if (data.seed !== undefined) options.seed = data.seed;
 	if (data.logit_bias !== undefined) options.logitBias = data.logit_bias;
 	if (data.user !== undefined) options.user = data.user;
-	if (data.response_format !== undefined) options.responseFormat = data.response_format;
 	if (data.parallel_tool_calls !== undefined) options.parallelToolCalls = data.parallel_tool_calls;
 	if (data.reasoning_effort === "none") {
 		options.forceReasoningOff = true;
