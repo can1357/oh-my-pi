@@ -87,6 +87,7 @@
 - The tool-call loop guard now also flags consecutive tool calls whose arguments drift only in numbers when the assistant's text repeats, and the loop-guard setting's description covers the wider detection. Progress-bearing arguments such as `grep`'s `skip` and file names inside shell commands stay distinct. Valid pagination and file sweeps are not interrupted ([#13426](https://github.com/can1357/oh-my-pi/pull/13426) by [@nick-maderight](https://github.com/nick-maderight))
 - Moonshot no longer accepts `KIMI_API_KEY` as a fallback alias for `MOONSHOT_API_KEY`: the alias silently authenticated Moonshot and exposed Moonshot models whenever a Kimi Code key was set. `KIMI_API_KEY` now belongs to the `kimi-code` / `kimi-code-global` providers; set `MOONSHOT_API_KEY` for Moonshot.
 - Moonshot no longer accepts `KIMI_API_KEY` as a fallback alias for `MOONSHOT_API_KEY`: the alias silently authenticated Moonshot and exposed Moonshot models whenever a Kimi Code key was set. `KIMI_API_KEY` now belongs to the `kimi-code` / `kimi-code-global` providers; set `MOONSHOT_API_KEY` for Moonshot ([#20509](https://github.com/can1357/oh-my-pi/pull/20509) by [@digi4care](https://github.com/digi4care)).
+- The eval `commit` draft summary now ends Review with a scoped recovery hint (`show(path)`, then `take(path, units)` for the units your edits or commands such as a formatter produced), and Unrecorded points to `take(path, units)` for part of a file ([#20556](https://github.com/can1357/oh-my-pi/issues/20556))
 
 ### Fixed
 

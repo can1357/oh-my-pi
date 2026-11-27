@@ -874,6 +874,7 @@ export class Draft {
 		}
 		const selected: string[] = [];
 		const review: string[] = [];
+		let firstReviewPath: string | undefined;
 		const otherAgents = new Map<string, number>();
 		/** Changed by nobody on record: nothing selected, nothing to review, no agent outside the scope. */
 		const unrecorded: FileChange[] = [];
@@ -881,13 +882,21 @@ export class Draft {
 			const counted = this.#describeFile(file);
 			if (counted.selected) selected.push(counted.selected);
 			review.push(...counted.review);
+			if (counted.review.length > 0) firstReviewPath ??= file.path;
 			for (const agent of counted.outOfScopeAgents) otherAgents.set(agent, (otherAgents.get(agent) ?? 0) + 1);
 			if (!counted.selected && counted.review.length === 0 && counted.outOfScopeAgents.size === 0) {
 				unrecorded.push(file);
 			}
 		}
 		lines.push(selected.length > 0 ? "Selected:" : "Selected: nothing", ...selected);
-		if (review.length > 0) lines.push("Review:", ...review);
+		if (firstReviewPath !== undefined) {
+			const target = JSON.stringify(firstReviewPath);
+			lines.push(
+				"Review:",
+				...review,
+				`  → show(${target}) lists unit ids; take(${target}, units) only the units your edits or commands (formatter, generator) produced.`,
+			);
+		}
 		if (otherAgents.size > 0) {
 			const parts = [...otherAgents].map(([agent, count]) => {
 				const running = this.agents.find(candidate => candidate.id === agent)?.running ? ", running" : "";
@@ -897,7 +906,7 @@ export class Draft {
 		}
 		if (unrecorded.length > 0) {
 			lines.push(
-				`Unrecorded: ${unrecorded.length} path(s) changed by other programs or by hand; take() the ones your commands produced.`,
+				`Unrecorded: ${unrecorded.length} path(s) changed by other programs or by hand; take(path) the ones your commands produced, or show(path) then take(path, units) for part of a file.`,
 			);
 			for (const file of unrecorded.slice(0, UNRECORDED_LIST_LIMIT)) {
 				const size = file.whole ? `whole ${wholeLabel(file)}` : `${formatCounts(file.counts)}${modeChange(file)}`;

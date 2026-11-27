@@ -742,6 +742,7 @@ describe("selective commit flow", () => {
 		expect(draft.summary()).toContain(
 			"? lib.rs  hunk 1: in-scope lines rewritten afterwards by an unrecorded change",
 		);
+		expect(draft.summary()).toContain('show("lib.rs") lists unit ids; take("lib.rs", units)');
 		expect(draft.show()).toContain("+    let x = 1;");
 
 		draft.take({ path: "lib.rs", units: ["1"] });
