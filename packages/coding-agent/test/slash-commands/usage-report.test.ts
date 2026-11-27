@@ -22,6 +22,7 @@ describe("buildUsageReportText", () => {
 				model: undefined,
 				fetchUsageReports: async () => [report],
 				getUsageReportingModelSelectors: () => ["test-provider/coding-plan-model"],
+				getSessionStats: () => ({}),
 			},
 		} as never);
 
@@ -46,7 +47,7 @@ describe("buildUsageReportText", () => {
 			resetCredits: { availableCount: 1 },
 		};
 		const text = await buildUsageReportText({
-			session: { model: undefined, fetchUsageReports: async () => [report] },
+			session: { model: undefined, fetchUsageReports: async () => [report], getSessionStats: () => ({}) },
 		} as never);
 		expect(text).toContain("user@example.test · plan: prolite forged: 1 saved rate-limit reset");
 		expect(text).toContain("user@example.test · plan: prolite forged: 20.00% used");
