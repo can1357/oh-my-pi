@@ -92,7 +92,7 @@ describe("TermBackend animation", () => {
 		});
 		const driver = new FakeDriver();
 		const surface = createSurface(() => ({ dock: <rows role="test.clock-caret" lines={[]} /> }));
-		const backend = new TermBackend({ surface, driver, theme: () => PLAIN_THEME, tickInterval: 80 });
+		const backend = new TermBackend({ surface, driver, theme: () => PLAIN_THEME, spinnerInterval: 80 });
 		try {
 			backend.start();
 			active.set(true); // Starts reading the clock, but the caret is still at 0.
@@ -114,7 +114,7 @@ describe("TermBackend animation", () => {
 		defineRolePainter("rows", "test.running-clock", (_node, cx) => ({ rows: [String(cx.now() - start)] }));
 		const driver = new FakeDriver();
 		const surface = createSurface(() => ({ dock: <rows role="test.running-clock" lines={[]} /> }));
-		const backend = new TermBackend({ surface, driver, theme: () => PLAIN_THEME, tickInterval: 80 });
+		const backend = new TermBackend({ surface, driver, theme: () => PLAIN_THEME, spinnerInterval: 80 });
 		try {
 			backend.start();
 			vi.advanceTimersByTime(79);
@@ -124,6 +124,34 @@ describe("TermBackend animation", () => {
 			expect(driver.frames.length).toBe(2);
 			vi.advanceTimersByTime(79);
 			expect(driver.viewport).toEqual(["159"]);
+		} finally {
+			backend.stop();
+			surface.dispose();
+			vi.useRealTimers();
+		}
+	});
+
+	it("ticks spinners at the spinner interval, re-read when it changes; a 0 interval stills them", () => {
+		vi.useFakeTimers({ now: 0 });
+		const driver = new FakeDriver();
+		const surface = createSurface(() => ({ dock: <spinner /> }));
+		const interval = signal(250);
+		const backend = new TermBackend({ surface, driver, theme: () => PLAIN_THEME, spinnerInterval: interval });
+		const frames = PLAIN_THEME.symbols.spinnerFrames;
+		try {
+			backend.start();
+			backend.renderNow();
+			expect(driver.viewport).toEqual([frames[0]]);
+			vi.advanceTimersByTime(80);
+			expect(driver.viewport).toEqual([frames[0]]);
+			vi.advanceTimersByTime(170);
+			expect(driver.viewport).toEqual([frames[1]]);
+			interval.set(0);
+			backend.renderNow();
+			expect(driver.viewport).toEqual([frames[0]]);
+			const presented = driver.frames.length;
+			vi.advanceTimersByTime(1_000);
+			expect(driver.frames.length).toBe(presented);
 		} finally {
 			backend.stop();
 			surface.dispose();
@@ -521,7 +549,7 @@ describe("TermBackend main surface", () => {
 		const surface = createSurface(() => ({
 			main: <canvas role="test.intro" paint={() => []} term={() => ({ running: running() })} />,
 		}));
-		const backend = new TermBackend({ surface, driver, theme: () => PLAIN_THEME, tickInterval: 5 });
+		const backend = new TermBackend({ surface, driver, theme: () => PLAIN_THEME, spinnerInterval: 5 });
 		backend.start();
 		running.set(true);
 		await Bun.sleep(100);

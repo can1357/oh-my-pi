@@ -1,7 +1,7 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
 import { describe, expect, test } from "bun:test";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
-import { isSettled, type Signal, signal, type UiNode } from "@oh-my-pi/pi-tui";
+import { isSettled, signal, type UiNode } from "@oh-my-pi/pi-tui";
 import { TerminalImages } from "@oh-my-pi/pi-tui/driver/images/store";
 import { driverImages } from "@oh-my-pi/pi-tui/term/backend";
 import { paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
@@ -92,7 +92,7 @@ const STARTS_EMPTY: Record<string, true> = {
 };
 
 screenSuite("assistant-message", (corpusCase, env) => {
-	(env.reduceMotion as Signal<boolean>).set(true);
+	env.setReduceMotion(true);
 	const inputs = corpusCase.inputs as AssistantInputs;
 	const content = withPng(inputs.content ?? []);
 	const extra: Partial<AssistantMessage> = {

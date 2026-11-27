@@ -1,7 +1,7 @@
 import { isReadableUrlPath, type ReadToolDetails } from "./details/read";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { type EditStore, notebookToEditableText } from "@oh-my-pi/pi-natives";
+import { notebookToEditableText } from "@oh-my-pi/pi-natives";
 import { type } from "@oh-my-pi/omptype";
 import type {
 	AgentTool,
@@ -84,12 +84,7 @@ import {
 import { executeReadUrl, fetchReadUrl, parseReadUrlTarget, type ReadUrlEntry } from "./fetch";
 import { approvalDirectoryKey } from "./approval-cache";
 import { approvalTargetKey, approvalTargetNamesFile, isApprovalPublicUrl } from "./approval-targets";
-import {
-	postProcessToolResult,
-	resolveArtifactSpillThreshold,
-	resolveInlineByteCapBudget,
-	resolveOutputMaxColumns,
-} from "./output-meta";
+import { resolveArtifactSpillThreshold, resolveInlineByteCapBudget, resolveOutputMaxColumns } from "./output-meta";
 import {
 	expandPath,
 	formatPathRelativeToCwd,
@@ -181,7 +176,6 @@ import { readBinary, resolveBinaryViewPath } from "./read-binary";
 import { readSqlite, resolveSqliteReadPath } from "./read-sqlite";
 import { parseJsonSelector, readJson, resolveJsonReadPath, splitJsonQueryTarget } from "./read-json";
 import {
-	getReadTextFileBridge,
 	isProseSummaryPath,
 	MAX_SUMMARY_BYTES,
 	MAX_SUMMARY_LINES,
@@ -193,7 +187,7 @@ import { isSqliteFile, parseSqlitePathCandidates } from "./sqlite-reader";
 import { formatBytes } from "@oh-my-pi/pi-utils";
 import { shortenPath } from "../utils/render-utils";
 import { ToolAbortError, throwIfAborted } from "./tool-errors";
-import { getToolConversationState, ToolConversationState } from "./tool-state";
+import { getToolConversationState } from "./tool-state";
 import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 

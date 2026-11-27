@@ -327,3 +327,6 @@ export const TODO_STRIKE_REVEAL_FRAMES = 12;
 
 /** Total frames in the completion strike animation. */
 export const TODO_STRIKE_TOTAL_FRAMES = TODO_STRIKE_HOLD_FRAMES + TODO_STRIKE_REVEAL_FRAMES;
+
+/** Milliseconds per completion strike frame. */
+export const TODO_STRIKE_FRAME_MS = 80;

@@ -21,7 +21,7 @@ import { type Block, defineRolePainter, EMPTY_BLOCK, type PaintContext } from "@
 import { styledText } from "@oh-my-pi/pi-tui/term/painters/layout";
 import { truncate, visibleWidth } from "@oh-my-pi/pi-tui/text/width";
 import { formatDuration } from "@oh-my-pi/pi-utils";
-import { SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-tui/term/painters/spinner";
+import { spinnerIndex } from "@oh-my-pi/pi-tui/term/painters/spinner";
 import { imageLabel, paintImage } from "@oh-my-pi/pi-tui/term/painters/image";
 import { terminalPaddingX } from "../terminal-padding";
 import { tint, tintRow } from "./default";
@@ -37,6 +37,7 @@ function withContext(
 		readonly width?: number;
 		readonly height?: number;
 		readonly reduceMotion?: boolean;
+		readonly spinnerInterval?: number;
 	},
 ): PaintContext {
 	const descriptors: PropertyDescriptorMap = {};
@@ -88,9 +89,9 @@ function compactGlyph(node: UiNode, props: ToolProps, cx: PaintContext, allocate
 	const spins = allocated
 		? props.term?.running === true
 		: (props.term?.spinning ?? (props.term?.running === true && lookFor(node).animated === true));
-	if (!spins || cx.reduceMotion) return theme.fg("dim", "•");
+	if (!spins || cx.spinnerInterval === 0) return theme.fg("dim", "•");
 	const frames = theme.symbols.spinnerFrames;
-	return theme.fg("muted", frames[Math.floor(cx.now() / SPINNER_INTERVAL_MS) % frames.length] ?? "•");
+	return theme.fg("muted", frames[spinnerIndex(cx, frames.length)] ?? "•");
 }
 
 function oneLine(text: string): string {
@@ -195,7 +196,7 @@ function paintLook(node: UiNode, cx: PaintContext): Block {
 function paintLookRows(node: UiNode, cx: PaintContext): Block {
 	const look = lookFor(node);
 	// A look that does not animate draws its still frame in the transcript (its spinner never ticks there).
-	const still = look.animated || look.clocked ? cx : withContext(cx, { reduceMotion: true });
+	const still = look.animated || look.clocked ? cx : withContext(cx, { reduceMotion: true, spinnerInterval: 0 });
 	if (look.boxed) {
 		const inner = look.paint(node, withContext(still, { width: Math.max(1, cx.width - 2) }));
 		if (inner.rows.length === 0) return EMPTY_BLOCK;

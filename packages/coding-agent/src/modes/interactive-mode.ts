@@ -1803,9 +1803,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		};
 	}
 
-	/** `tui.maxFps`, `tui.hyperlinks`, `tui.textSizing` and `tui.screen` into the running renderer. */
+	/** `tui.maxFps`, `tui.motion`, `tui.hyperlinks`, `tui.textSizing` and `tui.screen` into the running renderer. */
 	#syncFrameSettings(): void {
 		this.#frame.frameInterval.set(1000 / cfgTuiMaxFps.get(this.settings));
+		const motion = cfgMotionResolved.get(this.settings);
+		this.#frame.spinnerInterval.set(motion.spinnerInterval);
+		this.#frame.reduceMotion.set(!motion.effects);
 		this.#frame.screen.set(cfgTuiScreen.get(this.settings));
 		this.#frame.copyOnSelect.set(cfgTuiCopyOnSelect.get(this.settings));
 		this.#frame.wheelLines.set(cfgTuiWheelLines.get(this.settings));
@@ -3701,7 +3704,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (any("tui.titleState")) setTerminalTitleStateEnabled(cfgTuiTitleState.get(this.settings));
 		if (any("tui.titleSpinner")) setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
 		if (any("terminal.programStatus")) setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
-		if (any("motion")) setTerminalTitleSpinnerInterval(next.motion.titleSpinnerInterval);
+		if (any("motion")) {
+			setTerminalTitleSpinnerInterval(next.motion.titleSpinnerInterval);
+			this.#syncFrameSettings();
+		}
 
 		if (
 			any(
