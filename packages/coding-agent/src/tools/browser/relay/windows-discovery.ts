@@ -1,13 +1,12 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-import { untilAborted } from "@oh-my-pi/pi-utils";
+import type { ReadableStreamDefaultReader } from "node:stream/web";
+import { isFsError, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { throwIfAborted, ToolError } from "../../tool-errors";
 import type { RelayKind } from "./kind";
 import { NATIVE_HOST } from "./protocol";
 
 const UUID = "[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}";
 const WINDOWS_RECORD = new RegExp(`^([1-9][0-9]{0,4}) (${UUID})(?:\\r?\\n)?$`, "i");
-const runHelper = promisify(execFile);
+const PROBE_OUTPUT_LIMIT = 1024;
 
 // The registered Windows manifest locates custom installs without consulting WSL paths or config.
 const WINDOWS_RELAY_PROBE = String.raw`
@@ -87,23 +86,82 @@ const WINDOWS_PROBE_COMMAND = [
 	Buffer.from(WINDOWS_RELAY_PROBE, "utf16le").toString("base64"),
 ];
 
+async function readProbePipe(reader: ReadableStreamDefaultReader<Uint8Array>, output?: Uint8Array): Promise<number> {
+	let size = 0;
+	for (;;) {
+		const { done, value } = await reader.read();
+		if (done) return size;
+		if (size + value.byteLength > PROBE_OUTPUT_LIMIT) {
+			throw new ToolError("Windows relay probe exceeded the 1024-byte output limit", {
+				stream: output ? "stdout" : "stderr",
+			});
+		}
+		output?.set(value, size);
+		size += value.byteLength;
+	}
+}
+
 /** Find the newest Windows relay whose file record, listener and HTTP identity agree. */
 export async function discoverWindowsRelay(signal?: AbortSignal, command = WINDOWS_PROBE_COMMAND): Promise<RelayKind> {
 	throwIfAborted(signal);
 	const deadline = AbortSignal.timeout(4_000);
 	const probeSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
+	let phase = "spawn";
 	try {
-		const [file, ...args] = command;
-		// Interop can keep stdout open after termination; bound the wait as well as the child.
-		const { stdout } = await untilAborted(probeSignal, () =>
-			runHelper(file, args, { signal: probeSignal, killSignal: "SIGKILL", maxBuffer: 1024 }),
-		);
-		probeSignal.throwIfAborted();
-		const match = WINDOWS_RECORD.exec(stdout);
-		if (match && Number(match[1]) <= 65535) {
-			return { kind: "relay", cdpUrl: `http://127.0.0.1:${match[1]}`, windowsInstance: match[2] };
+		const proc = Bun.spawn(command, {
+			stdin: "ignore",
+			stdout: "pipe",
+			stderr: "pipe",
+			lazy: true,
+			signal: probeSignal,
+			killSignal: "SIGKILL",
+		});
+		phase = "read";
+		const stdout = proc.stdout.getReader();
+		const stderr = proc.stderr.getReader();
+		const output = new Uint8Array(PROBE_OUTPUT_LIMIT);
+		try {
+			// Interop can keep a pipe open after the helper exits, so bound the wait too.
+			const [size] = await untilAborted(probeSignal, () =>
+				Promise.all([
+					readProbePipe(stdout, output),
+					readProbePipe(stderr),
+					proc.exited.then(exitCode => {
+						if (exitCode !== 0) {
+							throw new ToolError("Windows relay probe exited unsuccessfully", {
+								exitCode,
+								signal: proc.signalCode,
+							});
+						}
+					}),
+				]),
+			);
+			probeSignal.throwIfAborted();
+			const match = WINDOWS_RECORD.exec(Buffer.from(output.buffer, 0, size).toString("utf8"));
+			if (match && Number(match[1]) <= 65535) {
+				return { kind: "relay", cdpUrl: `http://127.0.0.1:${match[1]}`, windowsInstance: match[2] };
+			}
+		} finally {
+			if (proc.exitCode === null && proc.signalCode === null && !probeSignal.aborted) proc.kill("SIGKILL");
+			for (const reader of [stdout, stderr]) {
+				void reader.cancel().catch(() => {});
+				reader.releaseLock();
+			}
 		}
-	} catch {}
+	} catch (error) {
+		throwIfAborted(signal);
+		if (deadline.aborted) {
+			throw new ToolError(
+				"Windows browser relay discovery timed out after 4 seconds. Try again or configure browser.relayUrl.",
+			);
+		}
+		// Raw spawn errors can include the encoded command, and pipe data is untrusted.
+		const code = isFsError(error) && /^[A-Z][A-Z0-9_]{0,31}$/.test(error.code) ? error.code : undefined;
+		logger.debug(
+			"browser relay: Windows discovery helper failed",
+			error instanceof ToolError ? { failure: error.message, ...error.context } : { phase, code },
+		);
+	}
 	throwIfAborted(signal);
 	throw new ToolError(
 		"No omp browser relay found on Windows. Open Chrome with the omp extension, make sure WSL interop is enabled, or configure browser.relayUrl.",

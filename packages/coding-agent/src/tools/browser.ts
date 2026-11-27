@@ -1,6 +1,6 @@
 import { type } from "@oh-my-pi/omptype";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import { getWebKitHostPath, isRecord, isWsl, logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { getWebKitHostPath, isRecord, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import type { EvalPreludeContext, HostEvalPreludeDefinition } from "../eval/preludes";
 import type { ToolSession } from "../sdk";
 import { enforceInlineByteCap } from "./streaming-output";
@@ -23,6 +23,7 @@ import { resolveInitScriptSources } from "./browser/open-options";
 import type { BrowserRelayGuidance } from "./browser/prelude-definition";
 import { isRelayOnly, type RelayKind, resolveRelayKind } from "./browser/relay/kind";
 import { relayExtensionNotice, resolveWslRelay } from "./browser/relay/probe";
+import { getWslNetworkingMode } from "./browser/relay/wsl-networking";
 import { describeTernTargets, listTernBlocks, type TernTarget, ternTargets } from "./browser/tern/blocks";
 import { resolveTernKind } from "./browser/tern/kind";
 import { isTernUnavailable } from "./browser/tern/wire";
@@ -686,7 +687,8 @@ async function installWebKitForOpen(
 }
 
 function automaticWslRelay(kind: BrowserKind, session: ToolSession): RelayKind | undefined {
-	if (kind.kind === "relay" && isWsl() && !configuredRelayUrl(session, process.env)?.trim()) return kind;
+	if (kind.kind !== "relay" || configuredRelayUrl(session, process.env)?.trim()) return;
+	return getWslNetworkingMode() === "mirrored" ? kind : undefined;
 }
 
 function matchingTab(name: string, kind: BrowserKind): TabSession | undefined {
@@ -752,7 +754,8 @@ async function openOnKind(
 		: `launching or connecting to the browser (${describeKind(kind)})`;
 	try {
 		if (wslRelay) {
-			kind = await resolveWslRelay(wslRelay, openSignal);
+			const bound = getTab(name)?.browser.kind;
+			kind = await resolveWslRelay(wslRelay, openSignal, bound?.kind === "relay" ? bound : undefined);
 			existing = matchingTab(name, kind);
 			stage = `launching or connecting to the browser (${describeKind(kind)})`;
 		}

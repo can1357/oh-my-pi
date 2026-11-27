@@ -1,8 +1,8 @@
 /** Per-user discovery for terminal clients; sidebar chats never publish an endpoint. */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { isWsl } from "@oh-my-pi/pi-utils";
 import { getBrowserRelayInstallRegistryFile } from "@oh-my-pi/pi-utils/dirs";
+import { getWslNetworkingMode } from "./wsl-networking";
 
 function discoveryDir(): string {
 	return path.join(path.dirname(getBrowserRelayInstallRegistryFile()), "endpoints");
@@ -46,7 +46,12 @@ export function discoverRelayEndpoints(): string[] {
 	let listeners: Map<number, string> | undefined;
 	try {
 		names = fs.readdirSync(dir);
-		if (names.length && isWsl()) listeners = wslLoopbackListeners();
+		if (names.length) {
+			const mode = getWslNetworkingMode();
+			if (mode !== undefined && !/^(?:wsl1|nat|bridged|none|virtioproxy|consomme)$/.test(mode)) {
+				listeners = wslLoopbackListeners();
+			}
+		}
 	} catch {
 		return [];
 	}

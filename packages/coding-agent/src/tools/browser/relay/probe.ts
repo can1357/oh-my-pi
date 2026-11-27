@@ -6,8 +6,9 @@
  * restart, while Chrome starts the next host. A 503 means a relay is up and its browser has not said hello yet,
  * which takes moments.
  */
+import { withTimeout } from "@oh-my-pi/pi-utils";
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
-import { throwIfAborted } from "../../tool-errors";
+import { ToolError, throwIfAborted } from "../../tool-errors";
 import { probeCdpResponse } from "../attach";
 import type { RelayKind } from "./kind";
 import { DISCARDED_TABS_PROTOCOL_VERSION, isOlderOmpVersion, RELAY_RESTART_PATH } from "./protocol";
@@ -21,6 +22,7 @@ const HELLO_WINDOW_MS = 10_000;
  */
 const RESTART_WINDOW_MS = 20_000;
 const PROBE_TIMEOUT_MS = 2_000;
+const WSL_RELAY_PROBE_TIMEOUT_MS = 500;
 const POLL_INTERVAL_MS = 150;
 
 /** Outcome of {@link waitForRelayExtension}. */
@@ -66,19 +68,35 @@ function reportedRelayInstance(info: object | null): string | undefined {
 	}
 }
 
+async function probeRelayIdentity(cdpUrl: string, signal?: AbortSignal): Promise<string | undefined> {
+	// The raw probe bounds its response but still awaits the TCP connect.
+	const reply = await withTimeout(
+		probeCdpResponse(`${cdpUrl}/json/version`, { timeoutMs: WSL_RELAY_PROBE_TIMEOUT_MS, signal }),
+		WSL_RELAY_PROBE_TIMEOUT_MS,
+		"Relay identity probe timed out",
+		signal,
+	).catch(() => null);
+	throwIfAborted(signal);
+	if (reply && (reply.status === 200 || reply.status === 503))
+		return reportedRelayInstance(parseVersionBody(reply.body));
+}
+
 /** A stale local record can outlive its relay even when the PID and port are both reused. */
-export async function resolveWslRelay(local: RelayKind, signal?: AbortSignal): Promise<RelayKind> {
-	if (local.cdpUrl) {
-		const reply = await probeCdpResponse(`${local.cdpUrl}/json/version`, { timeoutMs: 500, signal });
-		if (
-			reply &&
-			(reply.status === 200 || reply.status === 503) &&
-			reportedRelayInstance(parseVersionBody(reply.body))
-		) {
-			return local;
-		}
+export async function resolveWslRelay(local: RelayKind, signal?: AbortSignal, bound?: RelayKind): Promise<RelayKind> {
+	const windows = bound?.windowsInstance === undefined ? undefined : bound;
+	const instance = windows ? await probeRelayIdentity(windows.cdpUrl, signal) : undefined;
+	if (windows && instance === windows.windowsInstance) return windows;
+	if (local.cdpUrl && (local.cdpUrl === windows?.cdpUrl ? instance : await probeRelayIdentity(local.cdpUrl, signal)))
+		return local;
+
+	const discovered = await discoverWindowsRelay(signal);
+	if (windows && discovered.cdpUrl === windows.cdpUrl && discovered.windowsInstance === windows.windowsInstance) {
+		// Windows can still see its relay when WSL's loopback no longer reaches it.
+		throw new ToolError(
+			`The bound Windows omp browser relay at ${windows.cdpUrl} did not answer from WSL. Retry or close the tab before reopening it.`,
+		);
 	}
-	return discoverWindowsRelay(signal);
+	return discovered;
 }
 
 /** The id of the relay server answering at `cdpUrl`, ready or waiting; null when none answers. */
