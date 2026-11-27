@@ -2,12 +2,13 @@
  * Clickable copy buttons for fenced Markdown code blocks.
  *
  * When `codeCopy` is enabled on Markdown rendering, each fenced code block's
- * opening fence row includes a right-aligned `[Copy]` button (or `[Copied]`
- * after a click) wrapped in an OSC 8 marker under the reserved id
- * {@link CODE_COPY_ID} carrying the block's normalized content hash. Painters
- * strip the marker with {@link takeCodeCopyMarkers} and turn its cell range
- * into a mouse hit with `act = CODE_COPY_ACT_PREFIX + hash`, so left-clicking
- * bubbles an `action` event without leaking any OSC 8 escape to the terminal.
+ * opening fence row includes a right-aligned `[Copy]` button wrapped in an
+ * OSC 8 marker under the reserved id {@link CODE_COPY_ID} carrying the block's
+ * normalized content hash. Painters strip the marker with
+ * {@link takeCodeCopyMarkers}, turn its cell range into a mouse hit with
+ * `act = CODE_COPY_ACT_PREFIX + hash`, and swap the label to `[Copied]` via
+ * {@link replaceCodeCopyLabel} when that hash is active — keeping both the
+ * markdown block cache and completed frame cache free of click state.
  */
 import { tokens as ansiTokens } from "../ansi";
 import { visibleWidth } from "../width";
@@ -28,9 +29,15 @@ export function stripTrailingSpaces(text: string): string {
 	return text.replace(/[ \t]+(?=\r?$)/gm, "");
 }
 
-/** Deterministic content hash of a code block's normalized (trailing-space-free) code. */
+/**
+ * Deterministic content hash of a code block's normalized code.
+ * Tabs are expanded to three spaces to match the Markdown renderer's
+ * `normalizeSource` before hashing, and trailing horizontal whitespace is
+ * stripped per line.
+ */
 export function codeBlockHash(code: string): string {
-	return Bun.hash(stripTrailingSpaces(code)).toString(36);
+	const tabbed = code.includes("\t") ? code.replaceAll("\t", "   ") : code;
+	return Bun.hash(stripTrailingSpaces(tabbed)).toString(36);
 }
 
 /** `label` (already styled) inside the code-copy marker for `hash`. */
@@ -74,13 +81,56 @@ export function takeCodeCopyMarkers(row: string): { readonly row: string; readon
 	return { row: out, buttons };
 }
 
+/**
+ * Swap the button label at cell range `[start, end)` on `row` with
+ * `copiedLabel` (e.g. styled `[Copied]`), borrowing any extra width from plain
+ * spaces immediately before `start` so the row width stays unchanged.
+ */
+export function replaceCodeCopyLabel(
+	row: string,
+	start: number,
+	end: number,
+	copiedLabel: string,
+): { readonly row: string; readonly start: number; readonly end: number } {
+	const oldWidth = end - start;
+	const newWidth = visibleWidth(copiedLabel);
+	const extra = Math.max(0, newWidth - oldWidth);
+	if (start < extra) return { row, start, end };
+	const replaceStart = start - extra;
+	let col = 0;
+	let before = "";
+	let after = "";
+	let leadingSpaces = 0;
+	for (const token of ansiTokens(row)) {
+		if (token.escape) {
+			if (col <= replaceStart) before += token.text;
+			else if (col >= end) after += token.text;
+			continue;
+		}
+		for (const ch of token.text) {
+			const w = visibleWidth(ch);
+			const next = col + w;
+			if (next <= replaceStart) {
+				before += ch;
+			} else if (col >= end) {
+				after += ch;
+			} else if (col >= replaceStart && next <= start && ch === " ") {
+				leadingSpaces += w;
+			}
+			col = next;
+		}
+	}
+	if (leadingSpaces < extra) return { row, start, end };
+	return { row: `${before}${copiedLabel}${after}`, start: replaceStart, end: replaceStart + newWidth };
+}
+
 /** A fenced code block extracted from Markdown source. */
 export interface FencedCodeBlock {
 	/** Info string after the opening fence (language id), trimmed. */
 	readonly lang: string;
 	/** Code body with trailing horizontal whitespace stripped from every line. */
 	readonly code: string;
-	/** Deterministic hash matching {@link codeBlockHash}. */
+	/** Deterministic hash matching {@link codeBlockHash} on the renderer's tab-normalized source. */
 	readonly hash: string;
 }
 
@@ -89,37 +139,51 @@ export interface ExtractFencedCodeBlocksOptions {
 	readonly includeQuotes?: boolean;
 }
 
-/**
- * Fenced code blocks in `source` in document order (handles nested backtick
- * and tilde fences via the Markdown lexer, plus fences inside list items and
- * optionally blockquotes), with trailing spaces stripped from every line.
- */
-export function extractFencedCodeBlocks(
-	source: string,
-	options: ExtractFencedCodeBlocksOptions = {},
-): FencedCodeBlock[] {
-	const blocks: FencedCodeBlock[] = [];
+function collectFencedCodeTokens(source: string, includeQuotes: boolean): Tokens.Code[] {
+	const out: Tokens.Code[] = [];
 	const walk = (tokens: readonly Token[] | undefined): void => {
 		for (const token of tokens ?? []) {
 			if (token.type === "code") {
 				const codeToken = token as Tokens.Code;
-				if (codeToken.codeBlockStyle !== "indented") {
-					const code = stripTrailingSpaces(codeToken.text);
-					blocks.push({
-						lang: (codeToken.lang ?? "").trim(),
-						code,
-						hash: codeBlockHash(code),
-					});
-				}
+				if (codeToken.codeBlockStyle !== "indented") out.push(codeToken);
 			} else if (token.type === "list") {
 				walk((token as Tokens.List).items);
 			} else if (token.type === "list_item") {
 				walk((token as Tokens.ListItem).tokens);
-			} else if (options.includeQuotes && token.type === "blockquote") {
+			} else if (includeQuotes && token.type === "blockquote") {
 				walk((token as Tokens.Blockquote).tokens);
 			}
 		}
 	};
 	walk(lexMarkdown(source));
-	return blocks;
+	return out;
+}
+
+/**
+ * Fenced code blocks in `source` in document order (handles nested backtick
+ * and tilde fences via the Markdown lexer, plus fences inside list items and
+ * optionally blockquotes), with trailing spaces stripped from every line.
+ *
+ * Hashes are derived from the same 3-space tab-normalized source that the
+ * Markdown renderer feeds to the lexer, so blocks containing non-trailing tabs
+ * still match their rendered `[Copy]` button hash.
+ */
+export function extractFencedCodeBlocks(
+	source: string,
+	options: ExtractFencedCodeBlocksOptions = {},
+): FencedCodeBlock[] {
+	const includeQuotes = options.includeQuotes === true;
+	const rawTokens = collectFencedCodeTokens(source, includeQuotes);
+	const hashTokens = source.includes("\t")
+		? collectFencedCodeTokens(source.replaceAll("\t", "   "), includeQuotes)
+		: rawTokens;
+	return rawTokens.map((codeToken, index) => {
+		const code = stripTrailingSpaces(codeToken.text);
+		const hashSource = hashTokens[index]?.text ?? codeToken.text;
+		return {
+			lang: (codeToken.lang ?? "").trim(),
+			code,
+			hash: codeBlockHash(hashSource),
+		};
+	});
 }

@@ -1,7 +1,7 @@
 /**
  * Instance side of the agent mesh (see `mesh-protocol.ts`): joins the
- * project's daemon room, mirrors its roster, sends messages to agents of other
- * omp instances and hands theirs to the local {@link IrcBus}.
+ * daemon's global room, mirrors its roster, sends messages to agents of other
+ * omp instances (any project) and hands theirs to the local {@link IrcBus}.
  *
  * Bound to the interactive main session's settings by {@link bindAgentMesh};
  * without a daemon (or one lacking the `agents` module) the mesh stays empty
@@ -11,7 +11,7 @@ import type { IrcDeliveryReceipt } from "./irc-types";
 import { isRecord, logger, toError } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "../session/agent-session";
 import { canonicalProjectDir, daemonClient } from "../daemon/client";
-import { type DaemonClient, type DaemonTunnel, projectScope } from "../daemon/protocol";
+import { type DaemonClient, type DaemonTunnel, GLOBAL_SCOPE } from "../daemon/protocol";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { sessionFileBelongsToRoot } from "../registry/persisted-agents";
 import { IrcBus } from "./bus";
@@ -37,6 +37,8 @@ const REJOIN_DELAY_MS = 1_000;
 /** The mesh link of this process. */
 export class AgentMesh {
 	readonly #projectDir: string;
+	/** Canonical {@link #projectDir}, resolved on the first join. */
+	#project: string | undefined;
 	readonly #session: AgentSession;
 	readonly #unsubscribeSession: (() => void)[];
 	readonly #lifetime = new AbortController();
@@ -62,11 +64,19 @@ export class AgentMesh {
 		this.#rejoin();
 	}
 
-	/** Live instances in this project, this one excluded. */
-	peers(): MeshPeer[] {
-		return [...this.#peers.values()].filter(peer => peer.pid !== process.pid);
+	/** Canonical project directory this instance advertises; undefined until it first joins. */
+	get project(): string | undefined {
+		return this.#project;
 	}
 
+	/** Live instances in this project, or in every project with `allProjects`; this one excluded. */
+	peers(options?: { allProjects?: boolean }): MeshPeer[] {
+		return [...this.#peers.values()].filter(
+			peer => peer.pid !== process.pid && (options?.allProjects || peer.project === this.#project),
+		);
+	}
+
+	/** A live instance by pid, whatever its project. */
 	peer(pid: number): MeshPeer | undefined {
 		return pid === process.pid ? undefined : this.#peers.get(pid);
 	}
@@ -92,7 +102,7 @@ export class AgentMesh {
 			return Promise.resolve({
 				to: address,
 				outcome: "failed",
-				error: `No omp instance with pid ${to.pid} in this project.`,
+				error: `No live omp instance with pid ${to.pid}.`,
 			});
 		}
 		const id = crypto.randomUUID();
@@ -154,7 +164,7 @@ export class AgentMesh {
 
 	async #connect(): Promise<void> {
 		const signal = this.#lifetime.signal;
-		const scope = projectScope(await canonicalProjectDir(this.#projectDir));
+		this.#project ??= await canonicalProjectDir(this.#projectDir);
 		if (signal.aborted) return;
 		const client = await daemonClient();
 		if (signal.aborted || client.welcome.caps[AGENT_MESH_KIND] !== AGENT_MESH_VERSION) return;
@@ -172,7 +182,7 @@ export class AgentMesh {
 		}
 		const opened = await client.open({
 			kind: AGENT_MESH_KIND,
-			scope,
+			scope: GLOBAL_SCOPE,
 			key: AGENT_MESH_ROOM_KEY,
 			label: "agent mesh",
 		});
@@ -217,7 +227,8 @@ export class AgentMesh {
 	}
 
 	#publishState(): void {
-		if (!this.#tunnel) return;
+		const project = this.#project;
+		if (!this.#tunnel || project === undefined) return;
 		const registry = AgentRegistry.global();
 		const main = registry.get(MAIN_AGENT_ID);
 		const sessionFile = main?.sessionFile ?? null;
@@ -232,6 +243,7 @@ export class AgentMesh {
 		this.#emit({
 			t: "state",
 			state: {
+				project,
 				sessionFile,
 				status: main?.status ?? "unknown",
 				agents,

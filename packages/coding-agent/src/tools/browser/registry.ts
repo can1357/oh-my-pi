@@ -4,7 +4,14 @@ import type { Subprocess } from "bun";
 import type { Browser, CDPSession } from "puppeteer-core";
 import { ToolAbortError } from "../tool-errors";
 import { ToolError } from "../tool-errors";
-import { findFreeCdpPort, findReusableCdp, gracefulKillTreeOnce, resolveSpawnArgs, waitForCdp } from "./attach";
+import {
+	buildSpawnArgs,
+	findFreeCdpPort,
+	findReusableCdp,
+	gracefulKillTreeOnce,
+	normalizeAppArgs,
+	waitForCdp,
+} from "./attach";
 import { type CmuxKind, CmuxUnavailableError } from "./cmux/rpc";
 import { CmuxSocketClient } from "./cmux/socket-client";
 import {
@@ -141,7 +148,7 @@ export interface AcquireBrowserOptions {
 }
 
 export async function acquireBrowser(kind: BrowserKind, opts: AcquireBrowserOptions): Promise<BrowserHandle> {
-	if (kind.kind === "spawned") kind = { ...kind, args: resolveSpawnArgs(kind.path, kind.args, opts.cwd) };
+	if (kind.kind === "spawned") kind = { ...kind, args: normalizeAppArgs(kind.path, kind.args, opts.cwd) };
 	const key = browserKey(kind);
 	for (;;) {
 		const existing = browsers.get(key);
@@ -372,7 +379,8 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 		pid = reused.pid;
 	} else {
 		const port = await findFreeCdpPort();
-		const launchArgs = [...appArgs, `--remote-debugging-port=${port}`];
+		const launchArgs = buildSpawnArgs(exe, appArgs);
+		launchArgs.push(`--remote-debugging-port=${port}`);
 		const child = Bun.spawn([exe, ...launchArgs], {
 			cwd: opts.cwd,
 			stdout: "ignore",

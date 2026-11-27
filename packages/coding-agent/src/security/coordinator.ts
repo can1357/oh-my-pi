@@ -13,6 +13,7 @@ import securityCoordinatorPrompt from "../prompts/security/scan-coordinator.md" 
 import securityRequestPrompt from "../prompts/security/scan-request.md" with { type: "text" };
 import securityPublishDescription from "../prompts/tools/security-publish.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
+import type { AiuTotals } from "../session/aiu-billing";
 import type { AuthStorage } from "../session/auth-storage";
 import { SessionManager } from "../session/session-manager";
 import { createSecurityAuthResolver, selectSecurityAuth } from "./auth";
@@ -123,6 +124,7 @@ export interface SecurityScanSession {
 		};
 		cost: number;
 		premiumRequests: number;
+		aiu?: AiuTotals;
 	};
 	abort(options?: { reason?: string }): Promise<void>;
 	dispose(): Promise<void>;
@@ -664,6 +666,7 @@ export class SecurityCoordinator {
 									tokenUsage: { ...stats.tokens },
 									cost: stats.cost,
 									premiumRequests: stats.premiumRequests,
+									...(stats.aiu ? { aiuNano: stats.aiu.nano, aiuUnknownCalls: stats.aiu.unknownCalls } : {}),
 								}
 							: {}),
 					};

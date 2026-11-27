@@ -2,7 +2,7 @@
 import { expect, test } from "bun:test";
 import { signal } from "@oh-my-pi/pi-tui";
 import { staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
-import { clearCopiedCode, markCodeCopied, setCodeCopyEnabled, setLinkSchemes } from "@oh-my-pi/pi-tui/term/painters/md";
+import { clearCopiedCode, markCodeCopied, setLinkSchemes } from "@oh-my-pi/pi-tui/term/painters/md";
 import { renderBlock } from "@oh-my-pi/pi-tui/term/render";
 import { CODE_COPY_ACT_PREFIX, codeBlockHash, renderMarkdown } from "../../src/text/markdown";
 import { loadThemeSync } from "../../src/theme";
@@ -40,11 +40,10 @@ test("md draws registered link schemes as labels whose cells are hits carrying t
 	}
 });
 
-test("md draws clickable code-copy buttons with action hits and reactive [Copied] feedback", () => {
+test("md draws clickable code-copy buttons via props.codeCopy with reactive [Copied] feedback", () => {
 	const env = staticEnvironment(theme);
 	const code = "const x = 1;  ";
-	const tree = <md text={`\`\`\`ts\n${code}\n\`\`\``} />;
-	setCodeCopyEnabled(true);
+	const tree = <md text={`\`\`\`ts\n${code}\n\`\`\``} codeCopy />;
 	try {
 		const hash = codeBlockHash(code);
 		const block = renderBlock(tree as never, 40, { env });
@@ -62,6 +61,5 @@ test("md draws clickable code-copy buttons with action hits and reactive [Copied
 		]);
 	} finally {
 		clearCopiedCode();
-		setCodeCopyEnabled(false);
 	}
 });

@@ -16,7 +16,7 @@
  * a band-shaped composer closes while the status row above it draws (the
  * working row brings its own blank row). Natively the dock spaces itself.
  */
-import { type Accessor, For, type JSXNode, signal } from "@oh-my-pi/pi-tui";
+import { type Accessor, computed, For, type JSXNode, signal } from "@oh-my-pi/pi-tui";
 import "../styles/dock";
 import { ansiSpans } from "../transcript/messages/spans";
 
@@ -34,19 +34,43 @@ export const MAX_WIDGET_LINES = 10;
 
 interface WidgetEntry {
 	readonly key: string;
+	readonly owner?: string;
 	readonly content: WidgetContent;
 }
 
 /** The widgets on both sides of the editor; the extension UI controller feeds it. */
 export class HookWidgetsModel {
-	readonly above = signal<readonly WidgetEntry[]>([]);
-	readonly below = signal<readonly WidgetEntry[]>([]);
+	readonly #above = signal<readonly WidgetEntry[]>([]);
+	readonly #below = signal<readonly WidgetEntry[]>([]);
+	readonly #isOwnerVisible = signal<((owner: string) => boolean) | undefined>(undefined);
+	/** Visible widgets above the editor, in registration order. */
+	readonly above = computed(() => this.#visible(this.#above()));
+	/** Visible widgets below the editor, in registration order. */
+	readonly below = computed(() => this.#visible(this.#below()));
+
+	/** Refresh widget visibility after the extension runner changes its active set. */
+	setOwnerVisibility(isVisible: (owner: string) => boolean): void {
+		this.#isOwnerVisible.set(isVisible);
+	}
+
+	#visible(entries: readonly WidgetEntry[]): readonly WidgetEntry[] {
+		const isVisible = this.#isOwnerVisible();
+		if (!isVisible || !entries.some(({ owner }) => owner !== undefined && !isVisible(owner))) return entries;
+		return entries.filter(({ owner }) => owner === undefined || isVisible(owner));
+	}
 
 	/** Set widget `key` (replacing it wherever it was); `undefined` removes it. */
-	set(key: string, content: WidgetContent | undefined, placement: WidgetPlacement = "aboveEditor"): void {
+	set(
+		key: string,
+		content: WidgetContent | undefined,
+		placement: WidgetPlacement = "aboveEditor",
+		owner?: string,
+	): void {
+		// A retained context (e.g. in a timer) cannot change widgets while suspended.
+		if (owner !== undefined && this.#isOwnerVisible.peek()?.(owner) === false) return;
 		const without = (list: readonly WidgetEntry[]): readonly WidgetEntry[] => list.filter(entry => entry.key !== key);
-		const target = placement === "belowEditor" ? this.below : this.above;
-		const other = placement === "belowEditor" ? this.above : this.below;
+		const target = placement === "belowEditor" ? this.#below : this.#above;
+		const other = placement === "belowEditor" ? this.#above : this.#below;
 		other.set(without(other.peek()));
 		if (content === undefined) {
 			target.set(without(target.peek()));
@@ -54,14 +78,13 @@ export class HookWidgetsModel {
 		}
 		const list = target.peek();
 		const index = list.findIndex(entry => entry.key === key);
-		target.set(
-			index < 0 ? [...list, { key, content }] : list.map((entry, at) => (at === index ? { key, content } : entry)),
-		);
+		const entry = { key, content, owner };
+		target.set(index < 0 ? [...list, entry] : list.map((previous, at) => (at === index ? entry : previous)));
 	}
 
 	clear(): void {
-		this.above.set([]);
-		this.below.set([]);
+		this.#above.set([]);
+		this.#below.set([]);
 	}
 }
 

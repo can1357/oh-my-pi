@@ -3,6 +3,7 @@ import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { providerActiveNotice } from "@oh-my-pi/pi-catalog/compat/auth";
 import { jsx } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
 import { settings } from "../../config/settings";
@@ -37,7 +38,7 @@ import {
 import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
 import { parseSlashCommand } from "../../slash-commands/helpers/parse";
 import type { Shell, TranscriptBlock } from "../../ui/shell";
-import { NoticeLine, StatusNotice, StrippedToolCalls } from "../../ui/transcript/messages/notices";
+import { NoticeLine, StatusBlock, StatusNotice, StrippedToolCalls } from "../../ui/transcript/messages/notices";
 import { ToolActivity } from "../../ui/transcript/messages/panel";
 import { normalizeBlobExtension } from "../../utils/image-format";
 import { imageAttachmentSource } from "../../utils/image-source";
@@ -83,7 +84,7 @@ export type ReplayTarget = Pick<
 	| "statusLine"
 	| "updateEditorBorderColor"
 	| "settings"
-	| "hideToolActivity"
+	| "toolActivity"
 	| "transcriptBlocks"
 	| "present"
 	| "presentAssistant"
@@ -248,6 +249,8 @@ export class UiHelpers {
 	#lastStatus: { readonly block: TranscriptBlock; readonly message: string } | undefined;
 	/** Status, warning and error lines: a keyed status updates in place only with these below it. */
 	readonly #notices = new WeakSet<TranscriptBlock>();
+	/** Session and model the last active-model notice named; cleared while no declaring provider serves. */
+	#activeModelNoticeKey: string | undefined;
 
 	constructor(private ctx: InteractiveModeContext) {}
 
@@ -605,7 +608,7 @@ export class UiHelpers {
 					if (renderToolName === "read" && readArgsCollapseIntoGroup(content.arguments)) {
 						if (errorMessage) {
 							const group = ensureReadGroup();
-							group.updateArgs(content.arguments, content.id);
+							group.updateArgs(content.arguments, content.id, message.timestamp);
 							group.updateResult(
 								{ content: [{ type: "text", text: errorMessage }], isError: true },
 								false,
@@ -613,7 +616,7 @@ export class UiHelpers {
 							);
 						} else if (afterToolSegment) {
 							const group = ensureReadGroup();
-							group.updateArgs(content.arguments, content.id);
+							group.updateArgs(content.arguments, content.id, message.timestamp);
 							ctx.pendingTools.set(content.id, group);
 							readToolCallAssistants.set(content.id, assistant);
 							if (ctx.viewSession.isStreaming)
@@ -647,6 +650,7 @@ export class UiHelpers {
 						tool,
 						id: content.id,
 						cwd: ctx.viewSession.sessionManager.getCwd(),
+						timestamp: message.timestamp,
 					});
 					// Persisted args are final: settle a reply's text now. Cards keep their own args-complete timing.
 					if (!partialJson && pending.reply) pending.setArgsComplete(content.id);
@@ -668,7 +672,7 @@ export class UiHelpers {
 				const strippedToolCalls = (message as AgentMessage & StrippedToolCallsMarker).strippedToolCalls ?? 0;
 				if (strippedToolCalls > 0) {
 					ctx.present(() =>
-						jsx(StrippedToolCalls, { count: strippedToolCalls, visible: () => !ctx.hideToolActivity }),
+						jsx(StrippedToolCalls, { count: strippedToolCalls, visible: () => ctx.toolActivity !== "hidden" }),
 					);
 				}
 				const turnSummary = turnUsage.add(message, turnStartedAt);
@@ -720,7 +724,8 @@ export class UiHelpers {
 					if (!pending) {
 						const group = ensureReadGroup();
 						const args = readToolCallArgs.get(message.toolCallId);
-						if (args) group.updateArgs(args, message.toolCallId);
+						// The read joins the group with its result: dated by the result.
+						if (args) group.updateArgs(args, message.toolCallId, message.timestamp);
 						pending = group;
 					}
 					pending.updateResult(message, false, message.toolCallId);
@@ -1066,11 +1071,37 @@ export class UiHelpers {
 		this.#presentNotice(() => jsx(NoticeLine, { tone: "error", message: errorMessage }));
 	}
 
+	/**
+	 * The line a provider declares for its models (`active-notice`), such as "Using your Acme Pro
+	 * plan · Acme 2", once per model the viewed session switches to or first runs.
+	 */
+	showActiveModelNotice(): void {
+		const session = this.ctx.viewSession;
+		const model = session.model;
+		const notice = model ? providerActiveNotice(model.provider) : undefined;
+		const key =
+			model && notice ? `${session.sessionManager.getSessionId()}\n${model.provider}/${model.id}` : undefined;
+		if (key === this.#activeModelNoticeKey) return;
+		this.#activeModelNoticeKey = key;
+		if (!model || !notice) return;
+		const text = `${notice} · ${model.name}`;
+		this.#presentNotice(() =>
+			jsx(StatusBlock, {
+				rows: [
+					{
+						parts: [{ text, color: "dim" }],
+						native: { tone: "info", icon: `provider:${model.provider}`, message: [{ t: text, s: "dim" }] },
+					},
+				],
+			}),
+		);
+	}
+
 	showWarning(warningMessage: string, options?: { hideWithToolActivity?: boolean }): void {
 		const line = () => jsx(NoticeLine, { tone: "warning", message: warningMessage });
 		this.#presentNotice(
 			options?.hideWithToolActivity
-				? () => jsx(ToolActivity, { visible: () => !this.ctx.hideToolActivity, children: line() })
+				? () => jsx(ToolActivity, { visible: () => this.ctx.toolActivity !== "hidden", children: line() })
 				: line,
 		);
 	}

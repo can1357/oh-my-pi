@@ -5,6 +5,7 @@ import {
 	codeBlockHash,
 	extractFencedCodeBlocks,
 	renderMarkdownFrame,
+	replaceCodeCopyLabel,
 	stripTrailingSpaces,
 	takeCodeCopyMarkers,
 } from "../../src/text/markdown";
@@ -80,6 +81,17 @@ describe("extractFencedCodeBlocks", () => {
 		expect(withQuotes).toHaveLength(1);
 		expect(withQuotes[0]!.code).toBe("const quoted = 1;");
 	});
+
+	test("matches rendered marker hashes when code contains non-trailing tabs", () => {
+		const md = "```ts\n\tconst x = 1;\n\treturn x;\t\n```";
+		const frame = renderMarkdownFrame(md, 40, { theme, codeCopy: true });
+		const taken = takeCodeCopyMarkers(frame.rows[0]!);
+		const blocks = extractFencedCodeBlocks(md);
+
+		expect(taken.buttons).toHaveLength(1);
+		expect(blocks).toHaveLength(1);
+		expect(blocks[0]!.hash).toBe(taken.buttons[0]!.hash);
+	});
 });
 
 describe("markdown code-copy header button", () => {
@@ -95,23 +107,55 @@ describe("markdown code-copy header button", () => {
 		expect(taken.buttons).toEqual([{ hash: codeBlockHash(code), start: 34, end: 40 }]);
 	});
 
-	test("switches the button label to [Copied] when copiedCodeHash matches", () => {
+	test("replaceCodeCopyLabel swaps [Copy] to [Copied] by borrowing preceding pad spaces", () => {
 		const code = "const a = 1;";
 		const md = `\`\`\`ts\n${code}\n\`\`\``;
-		const hash = codeBlockHash(code);
-		const frame = renderMarkdownFrame(md, 40, { theme, codeCopy: true, copiedCodeHash: hash });
+		const frame = renderMarkdownFrame(md, 40, { theme, codeCopy: true });
 		const taken = takeCodeCopyMarkers(frame.rows[0]!);
+		const button = taken.buttons[0]!;
+		const swapped = replaceCodeCopyLabel(taken.row, button.start, button.end, theme.fg("success", "[Copied]"));
 
-		expect(stripEscapes(taken.row)).toBe(`\`\`\`ts${" ".repeat(27)}[Copied]`);
-		expect(taken.buttons).toEqual([{ hash, start: 32, end: 40 }]);
+		expect(stripEscapes(swapped.row)).toBe(`\`\`\`ts${" ".repeat(27)}[Copied]`);
+		expect(swapped.start).toBe(32);
+		expect(swapped.end).toBe(40);
 	});
 
-	test("omits the copy button when the width is too narrow or while a fence is still streaming open", () => {
+	test("omits the copy button when narrow or streaming open, keeps open fence out of stable head, and matches opener char/length", () => {
 		const md = "```typescript\nconst a = 1;\n```";
 		const narrow = renderMarkdownFrame(md, 16, { theme, codeCopy: true });
 		expect(takeCodeCopyMarkers(narrow.rows[0]!).buttons).toEqual([]);
 
-		const openStream = renderMarkdownFrame("```ts\nconst a = 1;", 40, { theme, codeCopy: true, stream: true });
+		// Multi-line open fence with codeCopy must not report its opener row as stable (since closing adds [Copy]).
+		const openStream = renderMarkdownFrame("```ts\nconst a = 1;\nconst b = 2;\nconst c = 3;", 40, {
+			theme,
+			codeCopy: true,
+			stream: true,
+		});
 		expect(takeCodeCopyMarkers(openStream.rows[0]!).buttons).toEqual([]);
+		expect(openStream.stable).toBe(0);
+
+		// Outer 4-backtick fence with a 3-backtick inner line is still open while streaming.
+		const nestedBacktickOpen = renderMarkdownFrame("````md\n```ts\nconst inner = 1;\n```", 40, {
+			theme,
+			codeCopy: true,
+			stream: true,
+		});
+		expect(takeCodeCopyMarkers(nestedBacktickOpen.rows[0]!).buttons).toEqual([]);
+
+		// Outer tilde fence with a 3-backtick inner line is still open while streaming.
+		const tildeOpen = renderMarkdownFrame("~~~md\n```", 40, {
+			theme,
+			codeCopy: true,
+			stream: true,
+		});
+		expect(takeCodeCopyMarkers(tildeOpen.rows[0]!).buttons).toEqual([]);
+
+		// Closing with matching fence char/length exposes [Copy].
+		const nestedClosed = renderMarkdownFrame("````md\n```ts\nconst inner = 1;\n```\n````", 40, {
+			theme,
+			codeCopy: true,
+			stream: true,
+		});
+		expect(takeCodeCopyMarkers(nestedClosed.rows[0]!).buttons).toHaveLength(1);
 	});
 });

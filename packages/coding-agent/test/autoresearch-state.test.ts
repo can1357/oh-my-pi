@@ -444,8 +444,8 @@ function createCommandHarness(
 	const api = {
 		appendEntry(): void {},
 		on(): void {},
-		registerCommand(name: string, options: Omit<RegisteredCommand, "name">): void {
-			command = { name, ...options };
+		registerCommand(name: string, options: Omit<RegisteredCommand, "name" | "extensionPath">): void {
+			command = { name, ...options, extensionPath: "autoresearch" };
 		},
 		registerShortcut(shortcut: string, options: ShortcutRegistration): void {
 			shortcuts.set(shortcut, options);

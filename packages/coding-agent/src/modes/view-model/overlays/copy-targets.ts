@@ -1,9 +1,7 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ToolCall } from "@oh-my-pi/pi-ai";
-import { extractFencedCodeBlocks, stripTrailingSpaces } from "@oh-my-pi/pi-tui/text/markdown/index";
+import { extractFencedCodeBlocks } from "@oh-my-pi/pi-tui/text/markdown/index";
 import { lexMarkdown } from "@oh-my-pi/pi-tui/text/markdown/lexer";
-
-export { stripTrailingSpaces };
 import type { Token, Tokens } from "@oh-my-pi/pi-utils/marked";
 
 /** A runnable command found in the transcript. */
@@ -101,7 +99,7 @@ type TokenWithChildren = Token & { tokens?: Token[]; items?: Token[] };
  * items too, never inside quotes), tokenized as the renderer does, with
  * trailing horizontal whitespace stripped from every line.
  */
-export function extractCodeBlocks(text: string): CodeBlock[] {
+function extractCodeBlocks(text: string): CodeBlock[] {
 	return extractFencedCodeBlocks(text).map(({ lang, code }) => ({ lang, code }));
 }
 
@@ -117,17 +115,6 @@ export function extractLastReplyCodeBlocks(messages: readonly AgentMessage[]): C
 		if (blocks.length > 0) return blocks;
 	}
 	return [];
-}
-
-/** All fenced code blocks across assistant messages in document order. */
-export function extractAllCodeBlocks(messages: readonly AgentMessage[]): CodeBlock[] {
-	const blocks: CodeBlock[] = [];
-	for (const msg of messages) {
-		const text = assistantText(msg);
-		if (!text) continue;
-		blocks.push(...extractCodeBlocks(text));
-	}
-	return blocks;
 }
 
 /** Walk the transcript backwards for the most recent fenced assistant code block. */

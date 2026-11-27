@@ -29,6 +29,7 @@ import {
 	type MarkdownLook,
 	markdownLook,
 	renderMarkdownFrame,
+	replaceCodeCopyLabel,
 	takeCodeCopyMarkers,
 	takeExtensionLinks,
 } from "@oh-my-pi/pi-tui/text/markdown/index";
@@ -112,14 +113,31 @@ interface MarkdownNode extends UiNode {
 		hyperlinks: boolean;
 		textStyle: string | undefined;
 		schemes: readonly string[] | undefined;
-		copiedHash: string | undefined;
+		codeCopy: boolean;
 		look: MarkdownLook;
 		frame: ReplyFrame;
 	};
 }
 
+function applyCopiedState(frame: ReplyFrame, theme: Theme): ReplyFrame {
+	if (!frame.hits?.some(hit => hit.act?.startsWith(CODE_COPY_ACT_PREFIX))) return frame;
+	const copiedHash = copiedCodeHash();
+	if (!copiedHash) return frame;
+	const targetAct = `${CODE_COPY_ACT_PREFIX}${copiedHash}`;
+	if (!frame.hits.some(hit => hit.act === targetAct)) return frame;
+	const rows = [...frame.rows];
+	const copiedLabel = theme.fg("success", "[Copied]");
+	const hits = frame.hits.map(hit => {
+		if (hit.act !== targetAct) return hit;
+		const swapped = replaceCodeCopyLabel(rows[hit.row]!, hit.col, hit.col + hit.width, copiedLabel);
+		rows[hit.row] = swapped.row;
+		return { ...hit, col: swapped.start, width: swapped.end - swapped.start };
+	});
+	return { rows, stable: frame.stable, hits };
+}
+
 function markdownRows(child: MarkdownNode, cx: PaintContext, thinking: boolean): ReplyFrame {
-	const props = propsOf<{ text: string; stream: boolean; tone: string }>(child);
+	const props = propsOf<{ text: string; stream: boolean; tone: string; codeCopy: boolean }>(child);
 	const term = termOf<ProseTerm>(child);
 	const source = term.source ?? props.text ?? "";
 	const { width, theme, hyperlinks } = cx;
@@ -128,12 +146,12 @@ function markdownRows(child: MarkdownNode, cx: PaintContext, thinking: boolean):
 		? "thinkingText em"
 		: (props.tone ?? (theme.has("assistantMessageText") ? "assistantMessageText" : undefined));
 	const schemes = thinking ? undefined : routedLinkSchemes();
-	const codeCopy = !thinking;
-	const copiedHash = codeCopy ? copiedCodeHash() : undefined;
+	const codeCopy = !thinking && props.codeCopy === true;
 	const look = markdownLook();
 	const links = thinking ? undefined : term.links;
 	// A host link resolver can change its targets in place.
 	const cacheable = !props.stream && !links?.size;
+	let frame: ReplyFrame | undefined;
 	if (cacheable) {
 		const last = child[kCompleted];
 		if (
@@ -145,60 +163,61 @@ function markdownRows(child: MarkdownNode, cx: PaintContext, thinking: boolean):
 			last.hyperlinks === hyperlinks &&
 			last.textStyle === textStyle &&
 			last.schemes === schemes &&
-			last.copiedHash === copiedHash &&
+			last.codeCopy === codeCopy &&
 			last.look === look
 		)
-			return last.frame;
+			frame = last.frame;
 	}
-	let frame: ReplyFrame = renderMarkdownFrame(source, width, {
-		theme,
-		paddingX,
-		codeIndent: thinking ? undefined : 0,
-		codeCopy,
-		copiedCodeHash: copiedHash,
-		textStyle,
-		stream: props.stream === true,
-		hyperlinks,
-		linkTarget: links?.size ? href => links.get(href) : undefined,
-		linkSchemes: schemes?.length ? schemes : undefined,
-	});
-	if (schemes?.length || codeCopy) {
-		const hits: Hit[] = [];
-		const rows = frame.rows.map((line, row) => {
-			let out = line;
-			if (schemes?.length) {
-				const taken = takeExtensionLinks(out);
-				for (const link of taken.links)
-					hits.push({
-						row,
-						col: link.start,
-						width: link.end - link.start,
-						height: 1,
-						node: child,
-						item: link.href,
-					});
-				out = taken.row;
-			}
-			if (codeCopy) {
-				const taken = takeCodeCopyMarkers(out);
-				for (const button of taken.buttons)
-					hits.push({
-						row,
-						col: button.start,
-						width: button.end - button.start,
-						height: 1,
-						node: child,
-						act: `${CODE_COPY_ACT_PREFIX}${button.hash}`,
-					});
-				out = taken.row;
-			}
-			return out;
+	if (!frame) {
+		frame = renderMarkdownFrame(source, width, {
+			theme,
+			paddingX,
+			codeIndent: thinking ? undefined : 0,
+			codeCopy,
+			textStyle,
+			stream: props.stream === true,
+			hyperlinks,
+			linkTarget: links?.size ? href => links.get(href) : undefined,
+			linkSchemes: schemes?.length ? schemes : undefined,
 		});
-		frame = { rows, stable: frame.stable, ...(hits.length > 0 ? { hits } : {}) };
+		if (schemes?.length || codeCopy) {
+			const hits: Hit[] = [];
+			const rows = frame.rows.map((line, row) => {
+				let out = line;
+				if (schemes?.length) {
+					const taken = takeExtensionLinks(out);
+					for (const link of taken.links)
+						hits.push({
+							row,
+							col: link.start,
+							width: link.end - link.start,
+							height: 1,
+							node: child,
+							item: link.href,
+						});
+					out = taken.row;
+				}
+				if (codeCopy) {
+					const taken = takeCodeCopyMarkers(out);
+					for (const button of taken.buttons)
+						hits.push({
+							row,
+							col: button.start,
+							width: button.end - button.start,
+							height: 1,
+							node: child,
+							act: `${CODE_COPY_ACT_PREFIX}${button.hash}`,
+						});
+					out = taken.row;
+				}
+				return out;
+			});
+			frame = { rows, stable: frame.stable, ...(hits.length > 0 ? { hits } : {}) };
+		}
+		if (cacheable)
+			child[kCompleted] = { source, width, theme, paddingX, hyperlinks, textStyle, schemes, codeCopy, look, frame };
 	}
-	if (cacheable)
-		child[kCompleted] = { source, width, theme, paddingX, hyperlinks, textStyle, schemes, copiedHash, look, frame };
-	return frame;
+	return codeCopy ? applyCopiedState(frame, theme) : frame;
 }
 
 function pulseRow(cx: PaintContext, dots: { tokens: number; rate: number }): string {

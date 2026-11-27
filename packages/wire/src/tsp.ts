@@ -314,6 +314,11 @@ export interface TspSpacerProps {
 export interface TspTextProps {
 	text?: string;
 	spans?: readonly TspSpan[];
+	/**
+	 * What a cost text bills, by plan: dollars paid and subscription use. A host short of room (a
+	 * phone) shows one total from these in place of the text.
+	 */
+	spend?: { readonly paid: number; readonly subscription: number };
 	wrap?: TspWrap;
 	truncate?: TspTruncate;
 	lines?: number;
@@ -325,6 +330,8 @@ export interface TspMarkdownProps {
 	stream?: boolean;
 	/** Literal runs drawn as these spans wherever they occur in prose (a sent prompt's chip tokens). */
 	marks?: readonly TspSpan[];
+	/** Expose clickable copy actions (`code-copy:<hash>`) on fenced code blocks. */
+	codeCopy?: boolean;
 }
 /** A comment drawn on a {@link TspDocProps} document, anchored to a quote of its source. */
 export interface TspDocComment {
@@ -863,19 +870,30 @@ export interface TspPickerProps {
 	noun?: string;
 	size?: "md" | "lg" | "screen";
 	/**
-	 * Where the sheet sits: absent, its size's place in the layer; `"composer"`, rising from the program's composer
-	 * (its `composerPart: "composer"` column), left edges aligned — a drop-up for a picker acting on the draft, such as
-	 * the model switcher. Placed as if absent while no composer is drawn, and on a phone.
+	 * False for a modeless inline palette (no backdrop dim, editor retains keyboard focus, hides when pane/window
+	 * blurs). Default: true.
 	 */
-	anchor?: "composer";
+	modal?: boolean;
 	/**
-	 * Where the search sits: the head (default), or `"list"`: no head row, the query leading the column heads' row
-	 * (count and esc gone), head actions atop a `rail`. Ignored on a phone.
+	 * Where the sheet sits: absent, its size's place in the layer; `"composer"`, rising from the program's composer
+	 * (its `composerPart: "composer"` column), left edges aligned; `{ caret }`, rising from the composer aligned near
+	 * that editor's caret clamped to the composer bounds. Placed as if absent while no composer is drawn, and on a phone.
 	 */
-	search?: "head" | "list";
+	anchor?: "composer" | { caret: string };
+	/**
+	 * Where the search sits: the head (default), `"list"` (inline in the list head), or `"none"` (no search box;
+	 * query lives in the composer). Ignored on a phone.
+	 */
+	search?: "head" | "list" | "none";
 	/** How tall rows run: regular (default), or `"snug"`: 30px rows and 26px group headers, the chrome tightened to match. Ignored on a phone. */
 	density?: "regular" | "snug";
-	layout?: "rows" | "cards" | "timeline" | "tree";
+	/**
+	 * How items are laid out. `"tiles"`: one left-to-right strip of `icon` + `label` tiles, the other
+	 * facts dim after the label; the first column's fact is the tile's short name, standing in for the
+	 * label when the strip is too narrow, and it leads a description line under the strip that shows
+	 * the lit (`selected`) or hovered tile's `detail`.
+	 */
+	layout?: "rows" | "cards" | "timeline" | "tree" | "tiles";
 	/** The program's search text (keys stay the program's); `null` hides the field. */
 	query?: string | null;
 	/** Caret as a UTF-16 offset into `query`; absent puts it at the end. */
@@ -883,7 +901,7 @@ export interface TspPickerProps {
 	placeholder?: string;
 	scopes?: readonly TspPickerScope[];
 	scope?: string;
-	/** How `scopes` draw: a labeled column (default), or `"rail"`: icons only, label and count as the tooltip, kept on narrow sheets. A `group` change draws a separator. */
+	/** How `scopes` draw: a labeled column (default) or `"rail"` (icons only). A `group` change draws a separator. */
 	scopeStyle?: "column" | "rail";
 	tabs?: readonly { id: string; label: TspText; count?: number }[];
 	tab?: string;

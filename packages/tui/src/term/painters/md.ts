@@ -12,25 +12,26 @@
  * rows never carry the label's marker, so the terminal gets no hyperlink it
  * would open itself.
  *
- * When code-block copy buttons are enabled ({@link setCodeCopyEnabled}), each
- * fenced code block header draws a clickable `[Copy]` button whose cells are a
- * mouse hit with `act = "code-copy:<hash>"`. Calling {@link markCodeCopied}
- * briefly flips that block's label to `[Copied]`.
+ * When `props.codeCopy` is true, each fenced code block header draws a
+ * clickable `[Copy]` button whose cells are a mouse hit with
+ * `act = "code-copy:<hash>"`. Calling {@link markCodeCopied} briefly flips
+ * that block's label to `[Copied]` without invalidating the Markdown block
+ * cache.
  */
 import type { TspMarkdownProps } from "@oh-my-pi/pi-wire";
 import { signal } from "../../reactive";
 import {
 	CODE_COPY_ACT_PREFIX,
 	renderMarkdownFrame,
+	replaceCodeCopyLabel,
 	takeCodeCopyMarkers,
 	takeExtensionLinks,
 } from "../../text/markdown";
 import { definePainter, EMPTY_BLOCK, type Hit } from "../paint";
 
 const linkSchemes = signal<readonly string[]>([]);
-const codeCopyEnabled = signal(false);
 const copiedCode = signal<string | undefined>(undefined);
-let copiedCodeTimer: ReturnType<typeof setTimeout> | undefined;
+let copiedCodeTimer: Timer | undefined;
 
 /** The link schemes the host routes (reactive): painters drawing Markdown of their own take them too. */
 export function routedLinkSchemes(): readonly string[] {
@@ -42,16 +43,6 @@ export function setLinkSchemes(schemes: Iterable<string>): void {
 	const next = [...new Set(schemes)].sort();
 	const current = linkSchemes();
 	if (next.length !== current.length || next.some((scheme, i) => scheme !== current[i])) linkSchemes.set(next);
-}
-
-/** Whether standalone `md` blocks draw clickable `[Copy]` buttons on fenced code blocks (reactive). */
-export function isCodeCopyEnabled(): boolean {
-	return codeCopyEnabled();
-}
-
-/** Toggle clickable `[Copy]` buttons on standalone `md` blocks. */
-export function setCodeCopyEnabled(enabled: boolean): void {
-	if (codeCopyEnabled.peek() !== enabled) codeCopyEnabled.set(enabled);
 }
 
 /** The content hash of the code block most recently copied (reactive), for brief `[Copied]` feedback. */
@@ -90,8 +81,7 @@ definePainter("md", (node, cx) => {
 	if (!text.trim()) return EMPTY_BLOCK;
 	const stream = props.stream === true;
 	const schemes = linkSchemes();
-	const codeCopy = codeCopyEnabled();
-	const copiedHash = codeCopy ? copiedCode() : undefined;
+	const codeCopy = props.codeCopy === true;
 	const frame = renderMarkdownFrame(text, cx.width, {
 		theme: cx.theme,
 		stream,
@@ -100,12 +90,13 @@ definePainter("md", (node, cx) => {
 		textSizing: cx.textSizing,
 		linkSchemes: schemes.length > 0 ? schemes : undefined,
 		codeCopy,
-		copiedCodeHash: copiedHash,
 	});
 	if (frame.rows.length === 0) return EMPTY_BLOCK;
 	let rows = frame.rows;
 	let hits: Hit[] | undefined;
 	if (schemes.length > 0 || codeCopy) {
+		let copiedHash: string | undefined;
+		let readCopied = false;
 		rows = frame.rows.map((line, row) => {
 			let out = line;
 			if (schemes.length > 0) {
@@ -124,17 +115,31 @@ definePainter("md", (node, cx) => {
 			}
 			if (codeCopy) {
 				const taken = takeCodeCopyMarkers(out);
-				for (const button of taken.buttons) {
-					(hits ??= []).push({
-						row,
-						col: button.start,
-						width: button.end - button.start,
-						height: 1,
-						node,
-						act: `${CODE_COPY_ACT_PREFIX}${button.hash}`,
-					});
-				}
 				out = taken.row;
+				if (taken.buttons.length > 0) {
+					if (!readCopied) {
+						copiedHash = copiedCode();
+						readCopied = true;
+					}
+					for (const button of taken.buttons) {
+						let start = button.start;
+						let end = button.end;
+						if (copiedHash === button.hash) {
+							const swapped = replaceCodeCopyLabel(out, start, end, cx.theme.fg("success", "[Copied]"));
+							out = swapped.row;
+							start = swapped.start;
+							end = swapped.end;
+						}
+						(hits ??= []).push({
+							row,
+							col: start,
+							width: end - start,
+							height: 1,
+							node,
+							act: `${CODE_COPY_ACT_PREFIX}${button.hash}`,
+						});
+					}
+				}
 			}
 			return out;
 		});

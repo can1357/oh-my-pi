@@ -560,6 +560,7 @@ export function AssistantMessageBlock(props: { model: AssistantMessageModel }): 
 			term={() => ({ thinkingDots: thinkingDots() })}
 			onAction={act => {
 				if (act.startsWith(CODE_COPY_ACT_PREFIX)) {
+					if (!model.onAction) return;
 					const hash = act.slice(CODE_COPY_ACT_PREFIX.length);
 					const sources: string[] = [];
 					for (const part of parts().values()) {
@@ -573,8 +574,8 @@ export function AssistantMessageBlock(props: { model: AssistantMessageModel }): 
 							candidate => candidate.hash === hash,
 						);
 						if (match) {
+							model.onAction("copy-code", match.code);
 							markCodeCopied(hash);
-							model.onAction?.("copy-code", match.code);
 							return;
 						}
 					}
@@ -612,6 +613,7 @@ export function AssistantMessageBlock(props: { model: AssistantMessageModel }): 
 						rate={() => read(model.thinkingRate) ?? 0}
 						tone={() => read(model.tone)}
 						thinkingRenderers={() => read(model.thinkingRenderers) ?? []}
+						codeCopy={Boolean(model.onAction)}
 					/>
 				)}
 			</For>
@@ -696,6 +698,7 @@ function ReplyPart(props: {
 	rate: () => number;
 	tone: () => TspTone | undefined;
 	thinkingRenderers: () => readonly AssistantThinkingRenderer[];
+	codeCopy: boolean;
 }): JSXNode {
 	const initial = untrack(props.part);
 	const kind = initial?.kind;
@@ -712,6 +715,7 @@ function ReplyPart(props: {
 				stream={() => (text()?.stream ? true : undefined)}
 				// Held before it was trimmed: a second hold would take the finished row for a partial one.
 				prepared={() => (text()?.stream ? true : undefined)}
+				codeCopy={props.codeCopy ? true : undefined}
 				tone={props.tone}
 				term={() => ({ source: text()?.source, links: text()?.links, deferFigures: text()?.deferFigures })}
 			/>

@@ -15,7 +15,7 @@ describe("contextFileCapability.key", () => {
 
 	test("user-level files share the same key regardless of depth", () => {
 		const a = makeContextFile({ path: "/home/user/.omp/agent/AGENTS.md", level: "user" });
-		const b = makeContextFile({ path: "/home/user/.claude/CLAUDE.md", level: "user" });
+		const b = makeContextFile({ path: "/home/user/.agents/AGENTS.md", level: "user" });
 		expect(key(a)).toBe("user");
 		expect(key(b)).toBe("user");
 		expect(key(a)).toBe(key(b));

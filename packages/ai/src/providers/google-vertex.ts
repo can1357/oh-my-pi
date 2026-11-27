@@ -73,12 +73,20 @@ export const streamGoogleVertex: StreamFunction<"google-vertex"> = (
 				const explicitLocation = options?.location;
 				const location = explicitLocation ?? resolveAmbientLocation() ?? "global";
 				const host = resolveVertexEndpointHost(location);
-				const path = `${API_VERSION}/publishers/google/models/${model.id}:streamGenerateContent?alt=sse`;
+				// With a known project, use the explicit project/location path: the
+				// project-less express URL resolves to the key's default region, which
+				// 404s for models published only on `locations/global`.
+				const project = resolveOptionalProject(options);
+				const modelPath = `publishers/google/models/${model.id}:streamGenerateContent?alt=sse`;
+				const pathFor = (loc: string) =>
+					project
+						? `${API_VERSION}/projects/${project}/locations/${loc}/${modelPath}`
+						: `${API_VERSION}/${modelPath}`;
 				const useGlobalFallback = !explicitLocation && host !== "aiplatform.googleapis.com";
 				return {
 					params,
-					url: `https://${host}/${path}`,
-					fallbackUrl: useGlobalFallback ? `https://aiplatform.googleapis.com/${path}` : undefined,
+					url: `https://${host}/${pathFor(location)}`,
+					fallbackUrl: useGlobalFallback ? `https://aiplatform.googleapis.com/${pathFor("global")}` : undefined,
 					headers: {
 						...baseHeaders,
 						"x-goog-api-key": apiKey,
@@ -110,8 +118,12 @@ function resolveApiKey(options?: GoogleVertexOptions): string | undefined {
 	return realKey || $env.GOOGLE_CLOUD_API_KEY;
 }
 
+function resolveOptionalProject(options?: GoogleVertexOptions): string | undefined {
+	return options?.project || $env.GOOGLE_CLOUD_PROJECT || $env.GCP_PROJECT || $env.GCLOUD_PROJECT || undefined;
+}
+
 function resolveProject(options?: GoogleVertexOptions): string {
-	const project = options?.project || $env.GOOGLE_CLOUD_PROJECT || $env.GCP_PROJECT || $env.GCLOUD_PROJECT;
+	const project = resolveOptionalProject(options);
 	if (!project) {
 		throw new AIError.ConfigurationError(
 			"Vertex AI requires a project ID. Set GOOGLE_CLOUD_PROJECT/GCP_PROJECT/GCLOUD_PROJECT or pass project in options.",

@@ -107,8 +107,8 @@ export class TranscriptReplica {
 			statusLine: mode.statusLine,
 			updateEditorBorderColor: () => mode.updateEditorBorderColor(),
 			settings: mode.settings,
-			get hideToolActivity() {
-				return mode.hideToolActivity;
+			get toolActivity() {
+				return mode.toolActivity;
 			},
 			transcriptBlocks: new WeakMap<AgentMessage, TranscriptBlock>(),
 			present: (factory, options) => {

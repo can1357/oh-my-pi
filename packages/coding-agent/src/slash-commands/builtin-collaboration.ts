@@ -633,7 +633,7 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 					clearSubmittedText(runtime);
 					return;
 				}
-				if (sub === "pick" || sub === "select" || sub === "list") {
+				if (sub === "pick") {
 					clearSubmittedText(runtime);
 					await runtime.ctx.showCodeBlockSelector();
 					return;

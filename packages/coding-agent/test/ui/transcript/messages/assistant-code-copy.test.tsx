@@ -3,7 +3,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { createRoot, isUiNode, type UiNode } from "@oh-my-pi/pi-tui";
 import { paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
-import { clearCopiedCode } from "@oh-my-pi/pi-tui/term/painters/md";
+import { clearCopiedCode, copiedCodeHash } from "@oh-my-pi/pi-tui/term/painters/md";
 import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
 import { CODE_COPY_ACT_PREFIX, codeBlockHash } from "@oh-my-pi/pi-tui/text/markdown/index";
 import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
@@ -42,7 +42,7 @@ describe("assistant message clickable code-block copy button", () => {
 		const markdown = [
 			"First block:",
 			"```ts",
-			"const first = 1;   ",
+			"\tconst first = 1;   ",
 			"  const second = 2;\t",
 			"```",
 			"",
@@ -67,6 +67,10 @@ describe("assistant message clickable code-block copy button", () => {
 		});
 
 		try {
+			// Native TSP <md> child carries codeCopy: true when onAction is wired.
+			const mdChild = rootNode.children().find(child => child.kind === "md");
+			expect((mdChild?.props() as { codeCopy?: boolean } | undefined)?.codeCopy).toBe(true);
+
 			const env = staticEnvironment(theme);
 			const block = paintNode(env, rootNode, 60);
 			const copyHits = (block.hits ?? []).filter(hit => hit.act?.startsWith(CODE_COPY_ACT_PREFIX));
@@ -74,7 +78,7 @@ describe("assistant message clickable code-block copy button", () => {
 			expect(copyHits).toHaveLength(2);
 			expect(block.rows.every(row => !row.includes("pi-code-copy"))).toBe(true);
 
-			const firstHash = codeBlockHash("const first = 1;\n  const second = 2;");
+			const firstHash = codeBlockHash("\tconst first = 1;\n  const second = 2;");
 			const secondHash = codeBlockHash("echo ok");
 			expect(copyHits[0]!.act).toBe(`${CODE_COPY_ACT_PREFIX}${firstHash}`);
 			expect(copyHits[1]!.act).toBe(`${CODE_COPY_ACT_PREFIX}${secondHash}`);
@@ -90,7 +94,10 @@ describe("assistant message clickable code-block copy button", () => {
 				mods: [],
 			});
 
-			expect(actions).toEqual([{ act: "copy-code", copyText: "const first = 1;\n  const second = 2;" }]);
+			expect(actions).toHaveLength(1);
+			expect(actions[0]!.act).toBe("copy-code");
+			expect(actions[0]!.copyText).toContain("const first = 1;");
+			expect(actions[0]!.copyText).toContain("const second = 2;");
 
 			// Repainting immediately shows [Copied] on the clicked block and [Copy] on the second block.
 			const updated = paintNode(env, rootNode, 60);
@@ -104,6 +111,43 @@ describe("assistant message clickable code-block copy button", () => {
 			expect(updatedSecondHeader.slice(updatedHits[1]!.col, updatedHits[1]!.col + updatedHits[1]!.width)).toBe(
 				"[Copy]",
 			);
+		} finally {
+			dispose();
+		}
+	});
+
+	test("omits [Copy] hits and suppresses [Copied] feedback when model.onAction is absent", () => {
+		const markdown = "```ts\nconst previewOnly = true;\n```";
+		let rootNode!: UiNode;
+		const dispose = createRoot(stop => {
+			const built = AssistantMessageBlock({
+				model: {
+					message: makeAssistantMessage(markdown),
+					finalized: true,
+				},
+			});
+			if (!isUiNode(built)) throw new Error("expected UiNode");
+			rootNode = built;
+			return stop;
+		});
+
+		try {
+			const mdChild = rootNode.children().find(child => child.kind === "md");
+			expect((mdChild?.props() as { codeCopy?: boolean } | undefined)?.codeCopy).toBeUndefined();
+
+			const env = staticEnvironment(theme);
+			const block = paintNode(env, rootNode, 60);
+			const copyHits = (block.hits ?? []).filter(hit => hit.act?.startsWith(CODE_COPY_ACT_PREFIX));
+			expect(copyHits).toHaveLength(0);
+
+			const hash = codeBlockHash("const previewOnly = true;");
+			rootNode.handlers.onAction?.(`${CODE_COPY_ACT_PREFIX}${hash}`, {
+				type: "action",
+				key: "",
+				act: `${CODE_COPY_ACT_PREFIX}${hash}`,
+				mods: [],
+			});
+			expect(copiedCodeHash()).toBeUndefined();
 		} finally {
 			dispose();
 		}

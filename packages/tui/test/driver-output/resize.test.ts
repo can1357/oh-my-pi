@@ -246,3 +246,59 @@ describe("resize", () => {
 		expect(vt.term.cursor.x).toBe(0);
 	});
 });
+
+describe("a session drawing only fullscreen frames", () => {
+	const SESSION = (rows: number): FramePlan => ({
+		viewport: [],
+		cursor: { row: rows - 1, col: 2 },
+		fullscreen: [...Array.from({ length: rows - 1 }, (_, i) => `t${i}`), "> "],
+	});
+
+	it("never clears the shell's scrollback: a rebuild resize repaints, and the exit frame lands below the shell", async () => {
+		const vt = new Vt({
+			columns: 30,
+			rows: 8,
+			shell: ["$ one", "$ omp"],
+			resizeScrollback: "rebuild",
+			canReplay: () => true,
+		});
+		vt.present(SESSION(8));
+		expect(vt.term.isMainScreen).toBe(false);
+		vt.resize(24, 8);
+		vt.present(SESSION(8));
+		await vt.settle();
+		expect(vt.invalidations).not.toContain("replay");
+		vt.present(SESSION(8));
+		expect(vt.screen()).toEqual([...Array.from({ length: 7 }, (_, i) => `t${i}`), ">"]);
+		// The shutdown flush: the transcript as history, the dock as the viewport.
+		vt.present({ history: { id: 1, rows: ["t0", "t1"] }, viewport: ["> "], cursor: { row: 0, col: 2 } });
+		vt.writer.stop();
+		expect(vt.writes.join("")).not.toContain(ED3);
+		expect(vt.term.isMainScreen).toBe(true);
+		expect(vt.transcript()).toEqual(["$ one", "$ omp", "t0", "t1", ">"]);
+	});
+
+	it("repaints the alternate screen whole on a display reset instead of clearing the normal screen", () => {
+		const vt = new Vt({ columns: 30, rows: 8, shell: ["$ omp"] });
+		vt.present(SESSION(8));
+		vt.writer.resetDisplay();
+		expect(vt.invalidations).toEqual(["repaint"]);
+		const mark = vt.writes.length;
+		vt.present(SESSION(8));
+		// Every row is written again (nothing diffed away).
+		expect(vt.since(mark).match(/t\d/g)?.length).toBe(7);
+		vt.present({ viewport: ["> "], cursor: { row: 0, col: 2 } });
+		expect(vt.writes.join("")).not.toContain(ED3);
+		expect(vt.transcript()).toEqual(["$ omp", ">"]);
+	});
+
+	it("still clears and replays once inline rows of ours are on the normal screen", () => {
+		const vt = new Vt({ columns: 30, rows: 8, canReplay: () => true });
+		vt.present({ history: { id: 1, rows: ["old"] }, viewport: ["> "], cursor: { row: 0, col: 2 } });
+		vt.present(SESSION(8));
+		vt.writer.resetDisplay();
+		expect(vt.invalidations).toEqual(["replay"]);
+		vt.present({ history: { id: 2, rows: ["old"], kind: "replay" }, viewport: ["> "], cursor: { row: 0, col: 2 } });
+		expect(vt.writes.join("")).toContain(ED3);
+	});
+});
