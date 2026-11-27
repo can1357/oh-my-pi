@@ -15,7 +15,7 @@ import { DAY_MS, HOUR_MS } from "./shared";
 
 const OPENCODE_GO_PROVIDER = "opencode-go";
 const DEFAULT_ENDPOINT = "https://opencode.ai/zen/go";
-const MODEL_ENDPOINT = "https://opencode.ai/inference/go";
+const FIRST_PARTY_HOST = "opencode.ai";
 const USAGE_PATH = "/v1/usage";
 
 /**
@@ -34,12 +34,14 @@ const OPENCODE_GO_WINDOWS = [
 ] as const;
 
 function normalizeBaseUrl(baseUrl?: string): string {
-	if (!baseUrl?.trim()) return DEFAULT_ENDPOINT;
-	// Preserve custom gateway prefixes while mapping first-party model URLs
-	// back to the separate Zen account endpoint.
-	const withoutTrailingSlash = baseUrl.trim().replace(/\/+$/, "");
-	const normalized = withoutTrailingSlash.replace(/\/v1$/i, "");
-	return normalized === MODEL_ENDPOINT ? DEFAULT_ENDPOINT : normalized || DEFAULT_ENDPOINT;
+	const trimmed = baseUrl?.trim().replace(/\/+$/, "");
+	if (!trimmed) return DEFAULT_ENDPOINT;
+	// Go models live under several first-party prefixes (`/inference/go`,
+	// `/inference/google/v1beta`, `/inference/systemone`, ...), but the account
+	// endpoint exists only at `/zen/go`. Any first-party URL maps there; custom
+	// gateways keep their own prefix.
+	if (URL.parse(trimmed)?.hostname === FIRST_PARTY_HOST) return DEFAULT_ENDPOINT;
+	return trimmed.replace(/\/v1$/i, "") || DEFAULT_ENDPOINT;
 }
 
 function resolveStatus(windowStatus: unknown, usedFraction: number): UsageStatus {
