@@ -73,7 +73,8 @@ export class TranscriptReplica {
 	readonly turns: readonly ReplicaTurn[];
 	readonly #transcript = new Transcript();
 
-	constructor(host: ReplicaHost, entries: readonly TranscriptEntryLike[]) {
+	/** `clipped`: the entries are a later part of the session, so the run they open in may have started above them. */
+	constructor(host: ReplicaHost, entries: readonly TranscriptEntryLike[], clipped: boolean) {
 		const mode = host.mode;
 		const transcript = this.#transcript;
 		const presenter = new TranscriptPresenter({
@@ -106,8 +107,8 @@ export class TranscriptReplica {
 			statusLine: mode.statusLine,
 			updateEditorBorderColor: () => mode.updateEditorBorderColor(),
 			settings: mode.settings,
-			get hideToolActivity() {
-				return mode.hideToolActivity;
+			get toolActivity() {
+				return mode.toolActivity;
 			},
 			transcriptBlocks: new WeakMap<AgentMessage, TranscriptBlock>(),
 			present: (factory, options) => {
@@ -130,7 +131,7 @@ export class TranscriptReplica {
 			const message = transcriptEntryMessage(entry);
 			if (message) replayed.push({ entry, message });
 		}
-		const steps = host.replaySteps(target, { messages: replayed.map(item => item.message) });
+		const steps = host.replaySteps(target, { messages: replayed.map(item => item.message), clipped });
 		const turns: MutableTurn[] = [];
 		const seen = new Set<TranscriptBlock>();
 		for (const { entry, message } of replayed) {

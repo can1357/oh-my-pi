@@ -26,8 +26,6 @@ export const cfgWorkspaceAdditionalDirectories = register({
 const BUILTIN_CONTEXT_FILE_NAMES: Record<string, true> = {
 	"agents.md": true,
 	"claude.md": true,
-	"gemini.md": true,
-	"copilot-instructions.md": true,
 };
 
 /** Why `entry` is not a valid `contextFiles.extra` name; undefined for a plain, non-built-in file name. */
@@ -44,7 +42,7 @@ function contextFileNameError(entry: unknown): string | undefined {
 	return undefined;
 }
 
-/** Extra instruction filenames discovered in addition to AGENTS.md / CLAUDE.md / GEMINI.md. */
+/** Extra instruction filenames discovered in addition to AGENTS.md / CLAUDE.md. */
 export const cfgContextFilesExtra = register({
 	id: "contextFiles.extra",
 	type: "array",
@@ -244,6 +242,31 @@ export const cfgCompactionHandoffSaveToDisk = register({
 	},
 });
 
+/**
+ * Wall-clock limit on one handoff generation. Off by default: a slow local
+ * model can legitimately take many minutes, and the output cap already ends a
+ * runaway stream. On expiry the handoff fails (not cancels), so automatic
+ * maintenance tries its next method and `/handoff` reports the timeout.
+ */
+export const cfgCompactionHandoffTimeoutSeconds = register({
+	id: "compaction.handoffTimeoutSeconds",
+	type: "number",
+	default: 0,
+	ui: {
+		tab: "context",
+		group: "Compaction",
+		label: "Handoff Timeout",
+		description:
+			"Seconds a handoff document may take to generate before it fails and automatic compaction tries the next method; 0 disables the limit",
+		options: [
+			{ value: "0", label: "Off", description: "No time limit" },
+			{ value: "300", label: "5 minutes" },
+			{ value: "600", label: "10 minutes" },
+			{ value: "1800", label: "30 minutes" },
+		],
+	},
+});
+
 export const cfgCompactionRemoteStreamingV2Enabled = register({
 	id: "compaction.remoteStreamingV2Enabled",
 	type: "boolean",
@@ -393,6 +416,7 @@ export const cfgCompaction = combine({
 	midTurnEnabled: cfgCompactionMidTurnEnabled,
 	asyncEnabled: cfgCompactionAsyncEnabled,
 	handoffSaveToDisk: cfgCompactionHandoffSaveToDisk,
+	handoffTimeoutSeconds: cfgCompactionHandoffTimeoutSeconds,
 	autoContinue: cfgCompactionAutoContinue,
 	remoteEndpoint: cfgCompactionRemoteEndpoint,
 	remoteStreamingV2Enabled: cfgCompactionRemoteStreamingV2Enabled,

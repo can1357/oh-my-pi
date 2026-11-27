@@ -9,14 +9,12 @@ This document describes how slash commands are discovered, deduplicated, surface
 - [`src/discovery/builtin.ts`](../packages/coding-agent/src/discovery/builtin.ts)
 - [`src/discovery/omp-plugins.ts`](../packages/coding-agent/src/discovery/omp-plugins.ts)
 - [`src/discovery/claude.ts`](../packages/coding-agent/src/discovery/claude.ts)
-- [`src/discovery/codex.ts`](../packages/coding-agent/src/discovery/codex.ts)
 - [`src/discovery/claude-plugins.ts`](../packages/coding-agent/src/discovery/claude-plugins.ts)
 - [`src/discovery/agents.ts`](../packages/coding-agent/src/discovery/agents.ts)
 - [`src/discovery/opencode.ts`](../packages/coding-agent/src/discovery/opencode.ts)
 - [`src/capability/index.ts`](../packages/coding-agent/src/capability/index.ts)
 - [`src/discovery/helpers.ts`](../packages/coding-agent/src/discovery/helpers.ts)
 - [`src/discovery/omp-extension-roots.ts`](../packages/coding-agent/src/discovery/omp-extension-roots.ts)
-- [`src/config/claude-paths.ts`](../packages/coding-agent/src/config/claude-paths.ts)
 - [`src/utils/command-args.ts`](../packages/coding-agent/src/utils/command-args.ts)
 - [`src/slash-commands/builtin-registry.ts`](../packages/coding-agent/src/slash-commands/builtin-registry.ts)
 - [`src/slash-commands/acp-builtins.ts`](../packages/coding-agent/src/slash-commands/acp-builtins.ts)
@@ -41,12 +39,11 @@ Current slash-command providers and priorities:
 3. `claude` — priority `80`
 4. `claude-plugins` — priority `70`
 5. `agents` (`.agent`/`.agents` standard dirs) — priority `70`
-6. `codex` — priority `70`
-7. `opencode` — priority `55`
+6. `opencode` — priority `55`
 
-Tie behavior: equal-priority providers keep registration order. Current import order registers `claude-plugins` before `agents` before `codex`, so plugin commands win over both on name collisions.
+Tie behavior: equal-priority providers keep registration order. Current import order registers `claude-plugins` before `agents`, so plugin commands win on name collisions.
 
-Foreign user-level sources are opt-in through `enabledProviders` (`claude`, `codex`, `opencode`, or `claude-plugins`; `*`/`all` enables all). Project sources are unaffected by this user opt-in. Claude/OpenCode also retain commands-only user toggles, described below. Setting `CLAUDE_CONFIG_DIR` opts in and relocates Claude's user source.
+Claude and OpenCode commands load only from the project; their home-directory commands are never read.
 
 ### Name-collision behavior
 
@@ -89,42 +86,21 @@ Scans `commands/*.md` in explicit extension-package directories, the effective `
 
 ## `claude` provider (`claude.ts`)
 
-The project side is controlled by `commands.enableClaudeProject` (default `true`). The user side loads when Claude is opted in, `CLAUDE_CONFIG_DIR` is set, or `commands.enableClaudeUser` is `true` (default `false`):
-
-- user: `<Claude config dir>/commands/**/*.md` (recursive; defaults to `~/.claude`)
-- project: `<cwd>/.claude/commands/**/*.md` (recursive)
+Controlled by `commands.enableClaudeProject` (default `true`). Loads `<cwd>/.claude/commands/**/*.md` (recursive).
 
 Commands in subdirectories additionally get a namespaced alias: `foo/bar.md` is registered under both `bar` and `foo:bar` (`addClaudeCommandNamespaceAliases`).
 
-The provider pushes user items before project items, so **user Claude commands beat project Claude commands** on same-name collisions inside this provider.
-
-## `codex` provider (`codex.ts`)
-
-Loads:
-
-- user: `~/.codex/commands/*.md` (only when `codex` user discovery is opted in)
-- project: `<cwd>/.codex/commands/*.md`
-
-Both sides are loaded then flattened in user-first order, so **user Codex commands beat project Codex commands** on collisions.
-
-Codex command content is parsed with frontmatter stripping (`parseFrontmatter`), and command name can be overridden by frontmatter `name`; otherwise filename is used.
-
 ## `opencode` provider (`opencode.ts`)
 
-The project side is controlled by `commands.enableOpencodeProject` (default `true`). The user side loads when OpenCode is opted in or `commands.enableOpencodeUser` is `true` (default `false`):
-
-- user: `~/.config/opencode/commands/*.md`
-- project: `<cwd>/.opencode/commands/*.md`
-
-Both sides are loaded then flattened in user-first order, so **user OpenCode commands beat project OpenCode commands** on collisions. OpenCode command content is parsed with frontmatter stripping, and command name can be overridden by frontmatter `name`; otherwise filename is used.
+Controlled by `commands.enableOpencodeProject` (default `true`). Loads `<cwd>/.opencode/commands/*.md`. OpenCode command content is parsed with frontmatter stripping, and command name can be overridden by frontmatter `name`; otherwise filename is used.
 
 ## `claude-plugins` provider (`claude-plugins.ts`)
 
-Loads roots via `listClaudePluginRoots(...)`, which reads the active Claude config directory's `plugins/installed_plugins.json`, the active OMP plugins directory's `installed_plugins.json` (profile/XDG-aware), and the nearest project `.omp/plugins/installed_plugins.json`. Claude-origin user roots require `claude` or `claude-plugins` user opt-in; OMP and explicit local roots do not. Disabled registry entries and Claude `enabledPlugins: false` entries are excluded.
+Loads roots via `listClaudePluginRoots(...)`, which reads the active OMP plugins directory's `installed_plugins.json` (profile/XDG-aware), and the nearest project `.omp/plugins/installed_plugins.json`. Disabled registry entries are excluded.
 
 For each root it normally scans `<pluginRoot>/commands/*.md`. Manifest `commands`/`slash-commands` entries can instead select directories or individual Markdown files; the first populated key wins. Command names are prefixed with the plugin name when one is present: `<plugin>:<command>`.
 
-Across the three registries, roots are merged by precedence rather than sorted: `--plugin-dir` injected roots come first, then project-scoped entries (which shadow user entries for the same plugin id), then user entries, with the OMP registry authoritative over Claude's for the same plugin id. Within each registry, per-plugin entry order from the JSON data is preserved; there is no additional sort step.
+Across these sources, roots are merged by precedence rather than sorted: `--plugin-dir` injected roots come first, then project-scoped entries (which shadow user entries for the same plugin id), then user entries. Within each registry, per-plugin entry order from the JSON data is preserved; there is no additional sort step.
 
 ## `agents` provider (`agents.ts`)
 
@@ -145,7 +121,7 @@ For each command:
 5. preserve `argumentHint` from discovery, or parse `argumentHint`/`argument-hint` frontmatter for autocomplete ghost text and ACP input hints
 6. set `side` when the frontmatter has the boolean `side: true` (a quoted `"true"` does not count)
 
-Codex/OpenCode providers strip frontmatter before this stage. Their discovered argument hints and `side` flags survive, but the runtime description currently falls back to the body rather than using the separately discovered description.
+The OpenCode provider strips frontmatter before this stage. Its discovered argument hints and `side` flags survive, but the runtime description currently falls back to the body rather than using the separately discovered description.
 
 Frontmatter parse severity is level-dependent:
 
@@ -563,7 +539,7 @@ The schema applies only to structured runs: `task.structured` on, or `structured
 4. Claude marketplace plugin agents
 5. the bundled `reviewer`
 
-Item 4 applies only with the `claude-plugins` provider enabled. User-scope roots from the foreign `~/.claude/plugins` tree also need the `claude` or `claude-plugins` user source. Claude-dialect plugin agents (foreign Claude roots and packages whose manifest declares the Claude format) drop their frontmatter `model`. OMP-native and Agent-Plugins-standard packages keep it. For a Claude-dialect `reviewer`, set `task.agentModelOverrides.reviewer` instead.
+Item 4 applies only with the `claude-plugins` provider enabled. Claude-dialect plugin agents (packages whose manifest declares the Claude format) drop their frontmatter `model`. OMP-native and Agent-Plugins-standard packages keep it. For a Claude-dialect `reviewer`, set `task.agentModelOverrides.reviewer` instead.
 
 The name comes from the frontmatter, not the file name. The replacement is the whole definition. Nothing merges with the bundled file, so restate `tools`, `spawns`, `model`, and `output` if the replacement needs them. To change only the model, set `task.agentModelOverrides.reviewer` instead. See [filesystem and plugin discovery](./task-agent-discovery.md#filesystem-and-plugin-discovery) and [merge and collision rules](./task-agent-discovery.md#merge-and-collision-rules).
 

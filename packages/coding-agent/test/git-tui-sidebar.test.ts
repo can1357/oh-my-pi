@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
 import type { KeyEvent } from "@oh-my-pi/pi-tui";
+import { CONSERVATIVE_EMOJI } from "@oh-my-pi/pi-tui/theme/contract";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { type SidebarAction } from "@oh-my-pi/pi-coding-agent/cli/git-tui/model/sidebar";
 import type { ChangedFile } from "@oh-my-pi/pi-coding-agent/cli/git-tui/model/state";
@@ -13,7 +14,11 @@ import { paintSidebar } from "../src/ui/styles/apps/git/sidebar";
 import { initTheme } from "../src/ui/theme/service";
 
 beforeAll(() => {
-	initTheme({ dark: "dark", light: "dark", capabilities: { truecolor: true, colors: 16_777_216, dark: true } });
+	initTheme({
+		dark: "dark",
+		light: "dark",
+		capabilities: { truecolor: true, colors: 16_777_216, dark: true, emoji: CONSERVATIVE_EMOJI },
+	});
 });
 
 /** A key press as the driver decodes `input` (`j`, ` `, `\r`, `G`). */

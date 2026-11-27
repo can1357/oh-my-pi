@@ -18,12 +18,7 @@ import { skillCapability } from "../capability/skill";
 import type { EffectiveExtensionRoots, SourceMeta } from "../capability/types";
 import type { Settings } from "../config/settings";
 import { cfgDisabledExtensions, cfgSkills, type SkillsSettings } from "./settings";
-import {
-	type Skill as CapabilitySkill,
-	isUserSourceEnabled,
-	loadCapability,
-	type SkillFrontmatter,
-} from "../discovery";
+import { type Skill as CapabilitySkill, loadCapability, type SkillFrontmatter } from "../discovery";
 import {
 	clearPluginRootsAndCaches,
 	compareSkillOrder,
@@ -109,7 +104,7 @@ export interface LoadSkillsResult {
  * Otherwise derived from the path so every other provider gets one without
  * plumbing: the directory owning `skills/` (a plugin or package root), else
  * the directory holding the skill (a custom skills root), else the provider.
- * Dotted homes (`~/.claude/skills`) are not meaningful names.
+ * Dotted homes (`.claude/skills`, `~/.agents/skills`) are not meaningful names.
  */
 function skillNamespace(skill: Pick<CapabilitySkill, "path" | "_source">): string {
 	let root = skill._source.pluginName;
@@ -332,8 +327,6 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 	const {
 		cwd = getProjectDir(),
 		enabled = true,
-		enableCodexUser = false,
-		enableClaudeUser = false,
 		enableClaudeProject = true,
 		enablePiUser = true,
 		enablePiProject = true,
@@ -357,21 +350,11 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		// — third-party CLI toggles must never silently hide them (cf. #2401). The
 		// master `enabled` flag above still gates them.
 		if (provider === MANAGED_SKILLS_PROVIDER_ID) return true;
-		if (provider === "codex" && level === "user") return enableCodexUser || isUserSourceEnabled("codex");
-		if (provider === "claude" && level === "user") return enableClaudeUser || isUserSourceEnabled("claude");
 		if (provider === "claude" && level === "project") return enableClaudeProject;
 		if (provider === "native" && level === "user") return enablePiUser;
 		if (provider === "native" && level === "project") return enablePiProject;
 		if (provider === "agents" && level === "user") return enableAgentsUser;
 		if (provider === "agents" && level === "project") return enableAgentsProject;
-		// User-scope claude-plugins skills carry the root's origin (#10743). omp's
-		// own installs (`omp` registry, `--plugin-dir`) are not the foreign
-		// ~/.claude/plugins tree, so the foreign opt-in gate applies only to
-		// claude-origin roots — parity with allowedRoots() in
-		// discovery/claude-plugins.ts. Without this, #10666's root-level fix is
-		// re-dropped here for every user-level claude-plugins skill.
-		if (provider === "claude-plugins" && source.origin !== undefined && source.origin !== "claude") return true;
-		if (level === "user") return isUserSourceEnabled(provider);
 		return true;
 	}
 

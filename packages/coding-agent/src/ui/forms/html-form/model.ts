@@ -271,11 +271,16 @@ export class HtmlFormModel {
 		if (next) this.#editBox(box, next);
 	}
 
-	/** A key typed into `box`: Vim takes it first in Vim mode, else it edits the line (`accept` may refuse). */
-	#typeKey(box: TextBox, key: KeyEvent, accept?: (next: LineState) => boolean): void {
-		if (this.vim(box)?.handle(key)) return;
+	/**
+	 * A key typed into `box`: Vim takes it first in Vim mode, else it edits the line (`accept` may
+	 * refuse). False when the key is neither, so an app shortcut passes on.
+	 */
+	#typeKey(box: TextBox, key: KeyEvent, accept?: (next: LineState) => boolean): boolean {
+		if (this.vim(box)?.handle(key)) return true;
 		const next = editLine(this.#line(box), key);
-		if (next && (accept?.(next) ?? true)) this.#editBox(box, next);
+		if (!next) return false;
+		if (accept?.(next) ?? true) this.#editBox(box, next);
+		return true;
 	}
 
 	get fields(): readonly FormField[] {
@@ -637,6 +642,11 @@ export class HtmlFormModel {
 
 	// ─── Keys ───────────────────────────────────────────────────────────────
 
+	/**
+	 * A key while the form holds focus; true when the form took it. Keys it does not bind return
+	 * false so app-wide shortcuts (Alt+L display reset, Ctrl+T, Ctrl+R, …) reach the shell's global
+	 * handlers (#11213, #12217, #20771).
+	 */
 	key(key: KeyEvent): boolean {
 		const step = this.#vimRowStep(key);
 		const routed: KeyEvent = step ? { id: step, kind: key.kind, raw: key.raw } : key;
@@ -699,7 +709,8 @@ export class HtmlFormModel {
 			return true;
 		}
 		if (hidden) {
-			if (getKeybindings().matches(key, "tui.select.confirm")) this.hidden.set(false);
+			if (!getKeybindings().matches(key, "tui.select.confirm")) return false;
+			this.hidden.set(false);
 			return true;
 		}
 		const active = untrack(this.active);
@@ -741,7 +752,7 @@ export class HtmlFormModel {
 				this.jumpQuestion(-1);
 				return true;
 		}
-		return true;
+		return false;
 	}
 
 	#choiceKey(index: number, field: ChoiceField, key: KeyEvent): boolean {
@@ -758,8 +769,9 @@ export class HtmlFormModel {
 				// Back on Other after picking an option: Enter makes the kept text the answer again.
 				if (!field.multi && answer.other.text.trim() !== "") this.chooseOther(index);
 				this.#advance();
-			} else this.#typeKey({ kind: "other", field: index }, key);
-			return true;
+				return true;
+			}
+			return this.#typeKey({ kind: "other", field: index }, key);
 		}
 		switch (id) {
 			case "left":
@@ -776,7 +788,8 @@ export class HtmlFormModel {
 				this.#advance();
 				return true;
 		}
-		if (getKeybindings().matches(key, "app.ask.note")) this.startNote();
+		if (!getKeybindings().matches(key, "app.ask.note")) return false;
+		this.startNote();
 		return true;
 	}
 
@@ -813,13 +826,12 @@ export class HtmlFormModel {
 		}
 		// Type-ahead: the next option whose label starts with the letter.
 		const typed = key.text?.toLowerCase();
-		if (typed && typed.length === 1) {
-			const order = [...options.slice(at + 1), ...options.slice(0, at + 1)];
-			const match = order.find(i => spansText(field.options[i]!.label).toLowerCase().startsWith(typed));
-			if (match !== undefined) {
-				this.pick(index, match);
-				this.row.set(match);
-			}
+		if (!typed || typed.length !== 1) return false;
+		const order = [...options.slice(at + 1), ...options.slice(0, at + 1)];
+		const match = order.find(i => spansText(field.options[i]!.label).toLowerCase().startsWith(typed));
+		if (match !== undefined) {
+			this.pick(index, match);
+			this.row.set(match);
 		}
 		return true;
 	}
@@ -862,12 +874,11 @@ export class HtmlFormModel {
 				return true;
 		}
 		const typed = key.text?.toLowerCase();
+		if (!typed || typed.length !== 1) return false;
 		const field = this.field(active) as ChoiceField;
-		if (typed && typed.length === 1) {
-			const order = [...options.slice(at + 1), ...options.slice(0, at + 1)];
-			const match = order.find(i => spansText(field.options[i]!.label).toLowerCase().startsWith(typed));
-			if (match !== undefined) this.dropdown.set(match);
-		}
+		const order = [...options.slice(at + 1), ...options.slice(0, at + 1)];
+		const match = order.find(i => spansText(field.options[i]!.label).toLowerCase().startsWith(typed));
+		if (match !== undefined) this.dropdown.set(match);
 		return true;
 	}
 
@@ -892,8 +903,8 @@ export class HtmlFormModel {
 				this.#editBox(box, { text: `${text.slice(0, cursor)}\n${text.slice(cursor)}`, cursor: cursor + 1 });
 			return true;
 		}
-		if (keybindings.matches(key, "tui.input.submit")) this.#advance();
-		else this.#typeKey(box, key);
+		if (!keybindings.matches(key, "tui.input.submit")) return this.#typeKey(box, key);
+		this.#advance();
 		return true;
 	}
 
@@ -906,8 +917,7 @@ export class HtmlFormModel {
 			this.keepNote();
 			return true;
 		}
-		this.#typeKey({ kind: "note" }, key);
-		return true;
+		return this.#typeKey({ kind: "note" }, key);
 	}
 
 	/** A paste into the focused editor (text field, Other answer, note). */

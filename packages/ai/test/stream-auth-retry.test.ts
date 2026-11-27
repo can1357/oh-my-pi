@@ -48,29 +48,6 @@ function usageLimitError(): Error & { status: number } {
 	});
 }
 
-const GOOGLE_CAPACITY_EXHAUSTED_MESSAGE = `Cloud Code Assist API error (429): ${JSON.stringify({
-	error: {
-		code: 429,
-		message: "You have exhausted your capacity on this model. Resets in 0s.",
-		status: "RESOURCE_EXHAUSTED",
-		details: [
-			{
-				"@type": "type.googleapis.com/google.rpc.ErrorInfo",
-				reason: "RATE_LIMIT_EXCEEDED",
-				domain: "cloudcode-pa.googleapis.com",
-				metadata: {
-					model: "gemini-3.7-flash-medium",
-					quotaResetDelay: "835.150299ms",
-				},
-			},
-			{
-				"@type": "type.googleapis.com/google.rpc.RetryInfo",
-				retryDelay: "0.835150299s",
-			},
-		],
-	},
-})}`;
-
 function model(): Model<Api> {
 	return {
 		id: "test-model",
@@ -239,7 +216,7 @@ describe("streamSimple resolver auth retry", () => {
 						? stream.fail(
 								new OAuthError("OAuth token expired before request", {
 									kind: "token-refresh",
-									provider: "google-antigravity",
+									provider: "openai-codex",
 								}),
 							)
 						: ok(stream),
@@ -271,11 +248,11 @@ describe("streamSimple resolver auth retry", () => {
 		const contexts: ApiKeyResolveContext[] = [];
 		const firstError = new OAuthError("First token expired before request", {
 			kind: "token-refresh",
-			provider: "google-antigravity",
+			provider: "openai-codex",
 		});
 		const secondError = new OAuthError("Refreshed token also expired before request", {
 			kind: "token-refresh",
-			provider: "google-antigravity",
+			provider: "openai-codex",
 		});
 		let providerCalls = 0;
 		registerCustomApi(
@@ -316,7 +293,7 @@ describe("streamSimple resolver auth retry", () => {
 		const contexts: ApiKeyResolveContext[] = [];
 		const configurationError = new OAuthError("OAuth provider is misconfigured", {
 			kind: "configuration",
-			provider: "google-antigravity",
+			provider: "openai-codex",
 		});
 		let providerCalls = 0;
 		registerCustomApi(
@@ -958,7 +935,7 @@ describe("streamSimple resolver auth retry", () => {
 
 	it("does not rotate or refresh on informative transient 429 bodies", async () => {
 		const transient429Bodies = [
-			"Cloud Code Assist API error (429): Too many requests",
+			"Google API error (429): Too many requests",
 			"Please retry in 5s",
 			"Service overloaded 529",
 		];
@@ -1008,51 +985,6 @@ describe("streamSimple resolver auth retry", () => {
 			expect(result.stopReason).toBe("error");
 			expect(result.errorMessage).toContain(body);
 		}
-	});
-
-	it("rotates on short Google account capacity exhaustion before content", async () => {
-		const keys: unknown[] = [];
-		const retryContexts: ApiKeyResolveContext[] = [];
-		registerCustomApi(
-			API,
-			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
-				pushKey(keys, options);
-				const stream = new AssistantMessageEventStream();
-				queueMicrotask(() => {
-					if (options?.apiKey === "next-key") {
-						ok(stream);
-						return;
-					}
-					stream.push({ type: "start", partial: assistant() });
-					stream.push({
-						type: "error",
-						reason: "error",
-						error: assistantError(GOOGLE_CAPACITY_EXHAUSTED_MESSAGE, 429),
-					});
-				});
-				return stream;
-			},
-			SOURCE_ID,
-		);
-
-		const stream = streamSimple(model(), context, {
-			apiKey: async ctx => {
-				if (ctx.error !== undefined) retryContexts.push(ctx);
-				return ctx.error === undefined ? "old-key" : ctx.lastChance ? "next-key" : "old-key";
-			},
-		});
-		for await (const _event of stream) {
-			// drain
-		}
-
-		expect((await stream.result()).content).toEqual([{ type: "text", text: "ok" }]);
-		expect(keys).toEqual(["old-key", "next-key"]);
-		expect(retryContexts.map(ctx => ({ lastChance: ctx.lastChance, hasError: ctx.error !== undefined }))).toEqual([
-			{ lastChance: true, hasError: true },
-		]);
-		const retryError = retryContexts[0]?.error;
-		if (!(retryError instanceof Error)) throw new Error("Expected credential retry error");
-		expect(retryError.message).toContain("exhausted your capacity");
 	});
 
 	it("surfaces the original error when the resolver declines every retry", async () => {

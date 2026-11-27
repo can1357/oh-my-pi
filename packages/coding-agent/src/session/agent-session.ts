@@ -381,6 +381,7 @@ import {
 	ASYNC_RESULT_MESSAGE_TYPE,
 	type AsyncResultEntry,
 	buildAsyncResultBatchMessage,
+	buildTanResultMessages,
 } from "./async-job-delivery";
 import { type AsyncNotifyEntry, type AsyncNotifySource, buildAsyncNotifyBatchMessage } from "./async-notify";
 import { type BashExecuteOptions, BashRunner, type BashRunnerHost } from "./bash-runner";
@@ -592,7 +593,6 @@ import {
 	cfgProviderAppendOnlyContext,
 	cfgProvidersCacheWarming,
 	cfgProvidersCacheRetention,
-	cfgProvidersAntigravityEndpoint,
 	cfgRetryModelFallback,
 	cfgRetryUsageAwareFallback,
 	cfgSampling,
@@ -4087,6 +4087,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * (spilling oversized output to an artifact), enqueue it as an async-result
 	 * follow-up, and settle only after the yield queue injects or discards it.
 	 * This keeps the job body recoverable through `proc://` while injection is pending.
+	 * A `/tan` job's completion takes {@link #deliverTanResult} instead.
 	 */
 	async #deliverAsyncJobResult(
 		manager: AsyncJobManagerApi,
@@ -4096,6 +4097,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	): Promise<void> {
 		if (this.#isDisposed) return;
 		if (manager.isDeliverySuppressed(jobId)) return;
+		const tanRequest = job?.request;
+		if (job && tanRequest !== undefined) {
+			await this.#deliverTanResult(jobId, job, tanRequest);
+			return;
+		}
 		// Snapshot the generation before the async format step: a `/new` during it
 		// bumps the epoch, so this delivery belongs to the replaced session and
 		// must not enqueue — the suppression marker alone is unreliable because
@@ -4113,6 +4119,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			durationMs,
 			epoch,
 		});
+	}
+
+	/**
+	 * A finished `/tan` never starts or extends a turn: the tangent was the user's
+	 * work, not this agent's. The user sees its breadcrumb now; the model gets a
+	 * hidden record linking the clone's output, appended now when idle, else with
+	 * the next prompt (see {@link buildTanResultMessages}).
+	 */
+	async #deliverTanResult(jobId: string, job: AsyncJob, request: string): Promise<void> {
+		const { breadcrumb, record } = buildTanResultMessages(jobId, job, request);
+		await this.sendCustomMessage(breadcrumb);
+		await this.sendCustomMessage(record, { deliverAs: "nextTurn" });
 	}
 
 	/**
@@ -10421,8 +10439,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (!command) return undefined;
 		onRouted?.();
 
-		// Get command context from extension runner (includes session control methods)
-		const ctx = this.#extensionRunner.createCommandContext();
+		const ctx = this.#extensionRunner.createCommandContext(command.extensionPath);
 
 		try {
 			await this.#extensionRunner.runScoped(() => command.handler(args, ctx));
@@ -16074,17 +16091,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const authStorage = this.#modelRegistry.authStorage;
 		if (!authStorage.usage.reports) return null;
 		const reports = await authStorage.usage.reports({
-			baseUrlResolver: provider => {
-				if (provider === "google-antigravity") {
-					const mode = cfgProvidersAntigravityEndpoint.get(this.settings);
-					if (mode === "sandbox") {
-						return "https://daily-cloudcode-pa.sandbox.googleapis.com";
-					} else if (mode === "production") {
-						return "https://daily-cloudcode-pa.googleapis.com";
-					}
-				}
-				return this.#modelRegistry.getProviderBaseUrl?.(provider);
-			},
+			baseUrlResolver: provider => this.#modelRegistry.getProviderBaseUrl?.(provider),
 			signal,
 		});
 		// Every fresh usage snapshot doubles as the salvage-sweep heartbeat: the

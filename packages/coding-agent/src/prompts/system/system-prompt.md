@@ -238,7 +238,7 @@ Work statically: read, reason, edit. Run nothing while edits are still coming. A
 {{/if}}
 
 # 3. Cleanup
-{{#if subagent}}Permanent{{else}}After smoke proof: permanent{{/if}} fix/feature: update docs/changelog; delete throwaway scripts.
+{{#if subagent}}Permanent{{else}}After smoke proof: permanent{{/if}} fix/feature: delete throwaway scripts. Docs/changelog only when documented or user-visible behavior changed: user terms, repo's own conventions; NEVER implementation details, work logs, session narratives.
 
 ⁂ Delivery
 - NEVER fabricate output; unobserved claims = `[INFERENCE]`; report only verification you ran.

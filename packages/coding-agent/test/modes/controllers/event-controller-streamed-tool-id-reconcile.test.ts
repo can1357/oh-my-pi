@@ -9,15 +9,23 @@
  * under the minted id finds no card and mounts a second one — a visible ghost
  * per empty-id call, plus a lost stream preview (held under the pre-mint id).
  */
-import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { Agent } from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessage, ToolCall } from "@oh-my-pi/pi-ai";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
+import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import type { InteractiveModeContext, PendingTool } from "@oh-my-pi/pi-coding-agent/modes/types";
-import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { isSettled } from "@oh-my-pi/pi-tui";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import type { TranscriptBlock } from "../../../src/ui/shell";
 import { initTheme } from "../../../src/ui/theme/service";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
+import { createModeTerminal } from "../../helpers/mode-terminal";
 import { blockText, transcriptText } from "../../helpers/transcript-text";
 
 beforeAll(() => {
@@ -418,5 +426,257 @@ describe("EventController reconciles streamed tool-call ids at message_end", () 
 		expect(rename).toHaveBeenCalledWith("call_1");
 		expect(ctx.pendingTools.get("call_1")).toBe(card);
 		controller.dispose();
+	});
+});
+
+describe("InteractiveMode re-keys a streamed tool card when its id changes mid-stream", () => {
+	const CMD = "which psql";
+	const READ_PATH = "src/index.ts";
+
+	let authStorage: AuthStorage;
+	let modelRegistry: ModelRegistry;
+	let mode: InteractiveMode;
+	let session: AgentSession;
+	let tempDir: TempDir;
+	let settingsDir: TempDir;
+
+	function bashToolCall(id: string): ToolCall {
+		return { type: "toolCall", id, name: "bash", arguments: { command: CMD } };
+	}
+
+	function toolUseMessage(content: AssistantMessage["content"]): AssistantMessage {
+		return { ...makeStreamingMessage(content), stopReason: "toolUse" };
+	}
+
+	/** Transcript blocks whose painted rows contain `text`. */
+	function blocksShowing(text: string): TranscriptBlock[] {
+		return mode.shell.transcript.blocks().filter(block => blockText(block).includes(text));
+	}
+
+	beforeAll(async () => {
+		resetSettingsForTest();
+		settingsDir = TempDir.createSync("@pi-streamed-tool-id-settings-");
+		await Settings.init({ inMemory: true, cwd: settingsDir.path() });
+		authStorage = await AuthStorage.create(":memory:");
+		modelRegistry = new ModelRegistry(authStorage);
+	});
+
+	beforeEach(() => {
+		tempDir = TempDir.createSync("@pi-streamed-tool-id-");
+		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected claude-sonnet-4-5 test model");
+
+		session = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+			sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
+			settings: Settings.isolated(),
+			modelRegistry,
+		});
+		// The session is constructed with no tools; bash is a built-in in real
+		// sessions, so provenance-gated rendering must treat it as one here.
+		vi.spyOn(session, "hasBuiltInTool").mockReturnValue(true);
+		mode = new InteractiveMode(
+			session,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			createModeTerminal().frame,
+		);
+		Object.defineProperty(session, "isStreaming", { configurable: true, get: () => true });
+	});
+
+	afterEach(async () => {
+		mode?.stop();
+		vi.restoreAllMocks();
+		await session?.dispose();
+		tempDir?.removeSync();
+	});
+
+	afterAll(() => {
+		authStorage.close();
+		settingsDir.removeSync();
+		resetSettingsForTest();
+	});
+
+	async function runToolCallToCompletion(id: string): Promise<void> {
+		const ec = mode.eventController;
+		await ec.handleEvent({
+			type: "tool_execution_start",
+			toolCallId: id,
+			toolName: "bash",
+			args: { command: CMD },
+		} as Extract<AgentSessionEvent, { type: "tool_execution_start" }>);
+		await ec.handleEvent({
+			type: "tool_execution_end",
+			toolCallId: id,
+			toolName: "bash",
+			result: { content: [{ type: "text", text: "(no output)" }] },
+			isError: true,
+		} as Extract<AgentSessionEvent, { type: "tool_execution_end" }>);
+		await ec.handleEvent({ type: "message_end", message: toolUseMessage([bashToolCall(id)]) } as Extract<
+			AgentSessionEvent,
+			{ type: "message_end" }
+		>);
+	}
+
+	it("re-keys a streamed tool card when its id is populated after the block appears", async () => {
+		const ec = mode.eventController;
+		await ec.handleEvent({ type: "agent_start" } as Extract<AgentSessionEvent, { type: "agent_start" }>);
+		await ec.handleEvent({ type: "message_start", message: toolUseMessage([]) } as Extract<
+			AgentSessionEvent,
+			{ type: "message_start" }
+		>);
+		// Provider (e.g. GitHub Copilot) streams the tool block before its id: the
+		// first delta carries an empty id, a later delta populates it.
+		await ec.handleEvent({
+			type: "message_update",
+			message: toolUseMessage([bashToolCall("")]),
+			assistantMessageEvent: {
+				type: "toolcall_start",
+				contentIndex: 0,
+				partial: toolUseMessage([bashToolCall("")]),
+			},
+		} as Extract<AgentSessionEvent, { type: "message_update" }>);
+		expect(blocksShowing(CMD)).toHaveLength(1);
+		await ec.handleEvent({
+			type: "message_update",
+			message: toolUseMessage([bashToolCall("call-real")]),
+			assistantMessageEvent: {
+				type: "toolcall_delta",
+				contentIndex: 0,
+				delta: "{}",
+				partial: toolUseMessage([bashToolCall("call-real")]),
+			},
+		} as Extract<AgentSessionEvent, { type: "message_update" }>);
+		// The populated id must reuse the existing card, not spawn a second one.
+		expect(blocksShowing(CMD)).toHaveLength(1);
+		await ec.handleEvent({
+			type: "message_end",
+			message: toolUseMessage([bashToolCall("call-real")]),
+		} as Extract<AgentSessionEvent, { type: "message_end" }>);
+		await runToolCallToCompletion("call-real");
+		expect(blocksShowing(CMD)).toHaveLength(1);
+		// The result routes into the surviving card (no orphaned pending preview).
+		expect(transcriptText(mode.shell)).toContain("(no output)");
+	});
+
+	it("re-keys a grouped read when its id is populated after the block appears", async () => {
+		const ec = mode.eventController;
+		const readAt = (id: string): ToolCall => ({
+			type: "toolCall",
+			id,
+			name: "read",
+			arguments: { path: READ_PATH, i: "Inspect entrypoint" },
+		});
+		await ec.handleEvent({ type: "agent_start" } as Extract<AgentSessionEvent, { type: "agent_start" }>);
+		await ec.handleEvent({ type: "message_start", message: toolUseMessage([]) } as Extract<
+			AgentSessionEvent,
+			{ type: "message_start" }
+		>);
+		await ec.handleEvent({
+			type: "message_update",
+			message: toolUseMessage([readAt("")]),
+			assistantMessageEvent: {
+				type: "toolcall_start",
+				contentIndex: 0,
+				partial: toolUseMessage([readAt("")]),
+			},
+		} as Extract<AgentSessionEvent, { type: "message_update" }>);
+		await ec.handleEvent({
+			type: "message_update",
+			message: toolUseMessage([readAt("read-real")]),
+			assistantMessageEvent: {
+				type: "toolcall_delta",
+				contentIndex: 0,
+				delta: "{}",
+				partial: toolUseMessage([readAt("read-real")]),
+			},
+		} as Extract<AgentSessionEvent, { type: "message_update" }>);
+
+		expect(mode.pendingTools.has("")).toBeFalse();
+		expect(mode.pendingTools.has("read-real")).toBeTrue();
+		expect(blocksShowing(READ_PATH)).toHaveLength(1);
+	});
+
+	it("re-keys a streamed tool card when its id grows across deltas (piped copilot id)", async () => {
+		const ec = mode.eventController;
+		await ec.handleEvent({ type: "agent_start" } as Extract<AgentSessionEvent, { type: "agent_start" }>);
+		await ec.handleEvent({ type: "message_start", message: toolUseMessage([]) } as Extract<
+			AgentSessionEvent,
+			{ type: "message_start" }
+		>);
+		await ec.handleEvent({
+			type: "message_update",
+			message: toolUseMessage([bashToolCall("call-x")]),
+			assistantMessageEvent: {
+				type: "toolcall_start",
+				contentIndex: 0,
+				partial: toolUseMessage([bashToolCall("call-x")]),
+			},
+		} as Extract<AgentSessionEvent, { type: "message_update" }>);
+		await ec.handleEvent({
+			type: "message_update",
+			message: toolUseMessage([bashToolCall("call-x|abc123==")]),
+			assistantMessageEvent: {
+				type: "toolcall_delta",
+				contentIndex: 0,
+				delta: "{}",
+				partial: toolUseMessage([bashToolCall("call-x|abc123==")]),
+			},
+		} as Extract<AgentSessionEvent, { type: "message_update" }>);
+		expect(blocksShowing(CMD)).toHaveLength(1);
+		await ec.handleEvent({
+			type: "message_end",
+			message: toolUseMessage([bashToolCall("call-x|abc123==")]),
+		} as Extract<AgentSessionEvent, { type: "message_end" }>);
+		await runToolCallToCompletion("call-x|abc123==");
+		expect(blocksShowing(CMD)).toHaveLength(1);
+	});
+
+	it("settles a held server-resolved completion after the tool-call id is re-keyed", async () => {
+		const ec = mode.eventController;
+		const todoAt = (id: string): ToolCall => ({ type: "toolCall", id, name: "todo", arguments: {} });
+		await ec.handleEvent({ type: "agent_start" } as Extract<AgentSessionEvent, { type: "agent_start" }>);
+		await ec.handleEvent({ type: "message_start", message: toolUseMessage([]) } as Extract<
+			AgentSessionEvent,
+			{ type: "message_start" }
+		>);
+		// The todo block streams before its id (placeholder empty id).
+		await ec.handleEvent({
+			type: "message_update",
+			message: toolUseMessage([todoAt("")]),
+			assistantMessageEvent: {
+				type: "toolcall_start",
+				contentIndex: 0,
+				partial: toolUseMessage([todoAt("")]),
+			},
+		} as Extract<AgentSessionEvent, { type: "message_update" }>);
+		// A server-resolved completion (Cursor todo) arrives under the REAL id
+		// before the id delta — no card is keyed by it yet, so it is held.
+		await ec.handleEvent({
+			type: "tool_execution_end",
+			toolCallId: "todo-real",
+			toolName: "todo",
+			result: { content: [{ type: "text", text: "todo done" }], details: { phases: [] } },
+			isError: false,
+		} as Extract<AgentSessionEvent, { type: "tool_execution_end" }>);
+		expect(mode.pendingTools.has("todo-real")).toBeFalse();
+
+		// A later delta fills the real id: the re-key must consume the held
+		// completion and settle the migrated card, not leave it pending.
+		await ec.handleEvent({
+			type: "message_update",
+			message: toolUseMessage([todoAt("todo-real")]),
+			assistantMessageEvent: {
+				type: "toolcall_delta",
+				contentIndex: 0,
+				delta: "{}",
+				partial: toolUseMessage([todoAt("todo-real")]),
+			},
+		} as Extract<AgentSessionEvent, { type: "message_update" }>);
+		expect(mode.pendingTools.has("todo-real")).toBeFalse();
+		expect(mode.pendingTools.has("")).toBeFalse();
 	});
 });

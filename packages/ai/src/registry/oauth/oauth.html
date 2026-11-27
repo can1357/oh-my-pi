@@ -163,12 +163,13 @@
 			.status-word {
 				display: none;
 			}
-			.container:not(.success):not(.error) .status-pending,
+			.container:not(.success):not(.error):not(.canceled) .status-pending,
 			.success .status-success,
-			.error .status-error {
+			.error .status-error,
+			.canceled .status-canceled {
 				display: inline;
 			}
-			.container:not(.success):not(.error) .status-dot {
+			.container:not(.success):not(.error):not(.canceled) .status-dot {
 				animation: pulse 1.4s ease-in-out infinite;
 			}
 			@keyframes pulse {
@@ -295,6 +296,7 @@
 				<span class="status-word status-pending">Waiting</span>
 				<span class="status-word status-success">Connected</span>
 				<span class="status-word status-error">Failed</span>
+				<span class="status-word status-canceled">Canceled</span>
 			</div>
 
 			<h1 id="title">Authentication</h1>
@@ -334,6 +336,10 @@
 					closeButton.remove();
 					message.innerHTML = "You have successfully logged in.<br>Please close this tab manually.";
 				}, 300);
+			} else if (serverState.canceled) {
+				app.classList.add("canceled");
+				title.textContent = "Sign-in canceled";
+				message.textContent = serverState.error;
 			} else {
 				app.classList.add("error");
 				title.textContent = "Authentication failed";

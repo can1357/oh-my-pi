@@ -39,6 +39,9 @@ class IssueInfo:
     author: str
     labels: tuple[str, ...]
     is_pull_request: bool
+    # GitHub's `state_reason`: `completed` / `not_planned` / `duplicate` when
+    # closed, `reopened` once anyone reopened it, "" otherwise.
+    state_reason: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -784,7 +787,7 @@ class GitHubClient:
         return tuple(_reaction_from_payload(item) for item in (data or []))
 
     async def close_issue(self, repo: str, number: int, *, reason: str = "completed") -> None:
-        """Close an issue with `state_reason` (`completed`/`not_planned`/`reopened`)."""
+        """Close an issue with `state_reason` (`completed`/`not_planned`/`duplicate`)."""
         await self.request(
             "PATCH",
             f"/repos/{repo}/issues/{number}",
@@ -863,6 +866,7 @@ def _issue_from_payload(repo: str, data: Mapping[str, Any]) -> IssueInfo:
         author=str(user.get("login") or ""),
         labels=labels,
         is_pull_request="pull_request" in data,
+        state_reason=str(data.get("state_reason") or ""),
     )
 
 

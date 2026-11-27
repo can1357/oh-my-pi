@@ -51,7 +51,6 @@ function formatBatches(api: Api): readonly (readonly ThinkingProbeFormat[])[] {
 			return [["anthropic-adaptive"], ["anthropic-budget"]];
 		case "google-generative-ai":
 		case "google-vertex":
-		case "google-gemini-cli":
 			return [["google-level"], ["google-budget"]];
 		default:
 			return [];
