@@ -486,9 +486,9 @@ function extensionChoiceValue(field: ChoiceField, value: unknown): HtmlFormValue
 
 /**
  * The data `form` submits for an extension's answer: its defaults with `data`'s fields applied.
- * `undefined` when `data` names no such field or a name several controls share (one value cannot be
- * checked against all of them), gives a value the field cannot take, or leaves the form invalid (a
- * required field empty, failed text validation).
+ * `undefined` when `data` names no such field or a name several controls share (no one answer can be
+ * meant for all of them), gives a value the field cannot take, or leaves the form invalid (a required
+ * field empty, failed text validation) — every control is checked against the value its name submits.
  */
 function extensionFormData(form: HtmlForm, data: Record<string, unknown>): HtmlFormData | undefined {
 	const submitted = defaultFormData(form);
@@ -510,10 +510,10 @@ function extensionFormData(form: HtmlForm, data: Record<string, unknown>): HtmlF
 		if (typeof value !== "string" && typeof value !== "number") return undefined;
 		submitted[name] = textValue(field, String(value));
 	}
-	// A shared name the extension left alone keeps the form's default, checked as before: by its last control.
-	for (const [name, fields] of named) {
-		const last = fields.at(-1);
-		if (last && fieldError(last, submitted[name]) !== undefined) return undefined;
+	// Each control against the value its name submits: a name several controls share carries one value,
+	// which has to satisfy every one of them (a later select's default cannot stand in for an empty email).
+	for (const field of form.fields) {
+		if (field.name && fieldError(field, submitted[field.name]) !== undefined) return undefined;
 	}
 	return submitted;
 }

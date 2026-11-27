@@ -1051,7 +1051,7 @@ describe("AskTool answered by an extension", () => {
 			expect(text(checked.result!)).toContain(JSON.stringify({ tags: ["a"], region: "eu", agree: "yes" }, null, 2));
 			expect((await answer({ agree: ["yes", "no"] })).accepted).toBe(false);
 		});
-		it("refuses an answer to a name several controls share", async () => {
+		it("refuses an answer to a name several controls share, or that leaves its shared default invalid", async () => {
 			const SHARED = `<form>
   <label>Contact <input type="email" name="contact" required></label>
   <label>Contact <select name="contact"><option value="phone">Phone</option></select></label>
@@ -1077,6 +1077,9 @@ describe("AskTool answered by an extension", () => {
 			const askId = ext.requested[0]?.askId ?? "missing";
 			// The select's option would skip the email field's validation.
 			expect(ext.pending.resolveAsk(askId, { data: { contact: "phone" } })).toBe(false);
+			// Left alone, the select's default `phone` is what the name submits: still not a valid email.
+			expect(ext.pending.resolveAsk(askId, { data: {} })).toBe(false);
+			expect(ext.pending.resolveAsk(askId, { data: { region: "us" } })).toBe(false);
 			expect(ext.pending.resolveAsk(askId, "cancel")).toBe(true);
 			await outcome.catch(() => undefined);
 		});
