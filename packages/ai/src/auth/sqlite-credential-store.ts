@@ -428,9 +428,17 @@ function extractOAuthTokenIdentifiers(token: string | undefined): string[] | und
 }
 /**
  * Whether a store seals new writes: `true` always (generating the master key on
- * first use), `false` never, `"auto"` per {@link SqliteAuthCredentialStore.unlock}.
+ * first use), `false` never and unseals rows sealed earlier, `"auto"` per
+ * {@link SqliteAuthCredentialStore.unlock}.
  */
 export type CredentialEncryption = boolean | "auto";
+
+/** A credential row's id with its sealed `data` column and salt. */
+interface SealedRow {
+	id: number;
+	data: string;
+	salt: string;
+}
 
 /** How a {@link SqliteAuthCredentialStore} treats sealed credential rows. */
 export interface SqliteAuthCredentialStoreOptions {
@@ -676,8 +684,9 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	 * holding sealed rows keeps sealing, one holding only plaintext rows stays
 	 * plaintext, and an empty store seals only when the vault answers without
 	 * prompting ({@link credentialVaultAvailable}; never on headless hosts).
-	 * Without sealing the vault is touched only to read sealed rows. A host
-	 * without a vault keeps writing plaintext.
+	 * Without sealing the vault is touched only to read sealed rows; `false`
+	 * rewrites those it opens in plaintext, so later opens never read the vault.
+	 * A host without a vault keeps writing plaintext.
 	 */
 	async unlock(options: { encrypt?: CredentialEncryption } = {}): Promise<void> {
 		const sealedRows = this.#db.query("SELECT 1 FROM auth_credentials WHERE salt IS NOT NULL LIMIT 1").get() !== null;
@@ -702,6 +711,27 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			}
 		}
 		this.#encrypt = encrypt && this.#cipher !== undefined;
+		if (options.encrypt === false && sealedRows && this.#cipher) this.#unseal(this.#cipher);
+	}
+
+	/** Rewrite every row `cipher` opens in plaintext; rows sealed under another key stay sealed. */
+	#unseal(cipher: CredentialCipher): void {
+		this.#db
+			.transaction(() => {
+				const rows = this.#db
+					.query<SealedRow, []>("SELECT id, data, salt FROM auth_credentials WHERE salt IS NOT NULL")
+					.all();
+				for (const row of rows) {
+					let data: string;
+					try {
+						data = cipher.open(row);
+					} catch {
+						continue;
+					}
+					this.#db.run("UPDATE auth_credentials SET data = ?, salt = NULL WHERE id = ?", [data, row.id]);
+				}
+			})
+			.immediate();
 	}
 
 	/**
