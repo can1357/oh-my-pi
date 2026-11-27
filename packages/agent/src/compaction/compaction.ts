@@ -913,9 +913,8 @@ function createSnapcompactArchiveMigrationMessage(archiveText: string): Message 
 const DEFAULT_SUMMARY_INPUT_WINDOW = 200_000;
 
 /**
- * Floor for one summarization window, so a tiny model still makes progress.
- * Scaled down (never below 1k) for models whose window cannot host the full
- * floor next to the carried summary and output reserves.
+ * Smallest conversation window worth retrying after a provider overflow.
+ * Scaled down (never below 1k) for small-context summarizers.
  */
 const MIN_SUMMARY_INPUT_TOKENS = 16_384;
 
@@ -926,19 +925,16 @@ function minSummaryInputTokens(model: Model): number {
 }
 
 /**
- * Usable conversation input for ONE summarization call: the summarizer's window
- * minus the summary it must emit, the previous summary it carries forward, and
- * prompt scaffolding. Providers tokenize differently from the local cl100k
- * estimate, so the window is discounted before the fixed reserves come off.
+ * Input available for the conversation and carried summary together, after
+ * reserving output and discounting the window for prompt scaffolding and
+ * differences between provider and local tokenizer counts.
  */
 function summaryInputBudgetTokens(model: Model, maxTokens: number): number {
 	const window = model.contextWindow && model.contextWindow > 0 ? model.contextWindow : DEFAULT_SUMMARY_INPUT_WINDOW;
 	// 0.8, not "window minus reserves": provider tokenizers disagree with the
 	// local cl100k estimate by a few percent, and being wrong here is a hard
 	// 400 on the one call that is supposed to rescue an oversized session.
-	// The carried-forward previous summary was generated under the same budget.
-	const previousSummaryTokens = Math.max(maxTokens, MAX_SUMMARY_TOKENS);
-	return Math.max(minSummaryInputTokens(model), Math.floor(window * 0.8) - maxTokens - previousSummaryTokens);
+	return Math.max(1, Math.floor(window * 0.8) - maxTokens);
 }
 
 /**
@@ -952,43 +948,6 @@ function clampConversationToBudget(text: string, budgetTokens: number, tokens: n
 	const keep = Math.max(1024, Math.floor((text.length * budgetTokens * 0.95) / tokens));
 	if (keep >= text.length) return text;
 	return `${text.slice(0, keep)}\n\n[... ${text.length - keep} more characters truncated]`;
-}
-
-/** One planned summarization call: its messages and the budget they were packed for. */
-interface SummaryWindow {
-	messages: Message[];
-	budgetTokens: number;
-	/** Serialization reused from the fit check, so the common path serializes once. */
-	text?: string;
-}
-
-/**
- * Partition a conversation into windows that each fit `budgetTokens`, splitting
- * on message boundaries. Only called when the whole conversation does not fit —
- * the common single-window path never pays this per-message sizing pass.
- */
-function planSummaryWindows(
-	messages: Message[],
-	tokenizer: Tokenizer,
-	dialect: Dialect | undefined,
-	dropThinking: boolean,
-	budgetTokens: number,
-): Message[][] {
-	const windows: Message[][] = [];
-	let current: Message[] = [];
-	let currentTokens = 0;
-	for (const message of messages) {
-		const tokens = tokenizer.countTokens(serializeConversationForSummary([message], dialect, dropThinking));
-		if (currentTokens > 0 && currentTokens + tokens > budgetTokens) {
-			windows.push(current);
-			current = [];
-			currentTokens = 0;
-		}
-		current.push(message);
-		currentTokens += tokens;
-	}
-	if (current.length > 0) windows.push(current);
-	return windows;
 }
 
 export async function generateSummary(
@@ -1009,34 +968,50 @@ export async function generateSummary(
 	const dialect = preferredDialect(model.id);
 	const dropThinking = resolveCatalogPolicy(model).classifierCotExtraction === true;
 	const tokenizer = new Tokenizer(model);
-	const wholeConversation = serializeConversationForSummary(llmMessages, dialect, dropThinking);
-	const budgetTokens = summaryInputBudgetTokens(model, maxTokens);
-	// A span that outgrew the summarizer's window is summarized as a fold: each
-	// window updates the summary carried out of the previous one, which is the
-	// same contract the update prompt already implements for iterative
-	// compaction. The alternative is a hard provider rejection on a prompt no
-	// retry can shrink — the state a cross-provider compaction boundary
-	// (see `prepareCompaction`) puts a long session into. One window is the
-	// common case and costs exactly the one call it always did.
-	const pending: SummaryWindow[] = tokenizer.checkTokenBudget(wholeConversation, budgetTokens).fits
-		? [{ messages: llmMessages, budgetTokens, text: wholeConversation }]
-		: planSummaryWindows(llmMessages, tokenizer, dialect, dropThinking, budgetTokens).map(messages => ({
-				messages,
-				budgetTokens,
-			}));
-
 	let carriedSummary = previousSummary;
-	while (pending.length > 0) {
-		const window = pending[0];
-		const text = window.text ?? serializeConversationForSummary(window.messages, dialect, dropThinking);
-		// A budget probe, not a raw count: a window whose bytes already fit needs
-		// neither an exact count nor the clamp, and the bust path hands back the
-		// exact count the proportional clamp needs as its denominator.
-		const budget = tokenizer.checkTokenBudget(text, window.budgetTokens);
+	let start = 0;
+	const catalogBudget = summaryInputBudgetTokens(model, maxTokens);
+	let inputBudget = catalogBudget;
+	let messageTokens: number[] | undefined;
+	function nextWindow(budgetTokens: number) {
+		// Most histories fit without a per-message sizing pass.
+		if (start === 0 && inputBudget === catalogBudget) {
+			const text = serializeConversationForSummary(llmMessages, dialect, dropThinking);
+			const budget = tokenizer.checkTokenBudget(text, budgetTokens);
+			if (budget.fits || llmMessages.length <= 1) return { text, budget, end: llmMessages.length };
+		}
+		messageTokens ??= [];
+		let tokens = 0;
+		let end = start;
+		while (end < llmMessages.length) {
+			const count = (messageTokens[end] ??= tokenizer.countTokens(
+				serializeConversationForSummary([llmMessages[end]], dialect, dropThinking),
+				"strict",
+			));
+			if (end > start && tokens + count > budgetTokens) break;
+			tokens += count;
+			end++;
+		}
+		// Separators can make the packed conversation larger than the sum of
+		// its parts. Split at a message boundary rather than discard its tail.
+		for (;;) {
+			const text = serializeConversationForSummary(llmMessages.slice(start, end), dialect, dropThinking);
+			const budget = tokenizer.checkTokenBudget(text, budgetTokens);
+			if (budget.fits || end <= start + 1) return { text, budget, end };
+			end--;
+		}
+	}
+	do {
+		// The previous call's actual output is input to this one. Pack only
+		// this window, not the remaining windows against a hypothetical cap.
+		const escapedSummary = carriedSummary && escapeSummaryBoundaryTags(carriedSummary);
+		const carriedTokens = escapedSummary ? tokenizer.countTokens(escapedSummary, "strict") : 0;
+		const budgetTokens = Math.max(1, inputBudget - carriedTokens);
+		const { text, budget, end } = nextWindow(budgetTokens);
 		try {
 			carriedSummary = await summarizeConversationWindow(
-				budget.fits ? text : clampConversationToBudget(text, window.budgetTokens, budget.tokens),
-				carriedSummary,
+				budget.fits ? text : clampConversationToBudget(text, budgetTokens, budget.tokens),
+				escapedSummary,
 				model,
 				maxTokens,
 				apiKey,
@@ -1056,32 +1031,25 @@ export async function generateSummary(
 			// fit path never counted this window, so pay for the exact size here —
 			// one tokenization is nothing against the provider round trip already lost.
 			const sentTokens = budget.exact ? budget.tokens : tokenizer.countTokens(text, "strict");
-			const halved = Math.floor(Math.min(window.budgetTokens, sentTokens) / 2);
+			const sent = Math.min(budgetTokens, sentTokens);
 			if (
 				!AIError.is(AIError.classify(error), AIError.Flag.ContextOverflow) ||
-				halved < minSummaryInputTokens(model)
+				sent <= minSummaryInputTokens(model)
 			) {
 				throw error;
 			}
-			pending.splice(
-				0,
-				1,
-				...planSummaryWindows(window.messages, tokenizer, dialect, dropThinking, halved).map(messages => ({
-					messages,
-					budgetTokens: halved,
-				})),
-			);
+			inputBudget = carriedTokens + Math.max(minSummaryInputTokens(model), Math.floor(sent / 2));
 			continue;
 		}
-		pending.shift();
-	}
+		start = end;
+	} while (start < llmMessages.length);
 	return carriedSummary ?? "";
 }
 
 /** One summarization call over a single conversation window. */
 async function summarizeConversationWindow(
 	conversationText: string,
-	previousSummary: string | undefined,
+	escapedPreviousSummary: string | undefined,
 	model: Model,
 	maxTokens: number,
 	apiKey: ApiKey,
@@ -1090,7 +1058,7 @@ async function summarizeConversationWindow(
 	options: SummaryOptions | undefined,
 ): Promise<string> {
 	// Use update prompt if we have a previous summary, otherwise initial prompt
-	let basePrompt = previousSummary ? UPDATE_SUMMARIZATION_PROMPT : SUMMARIZATION_PROMPT;
+	let basePrompt = escapedPreviousSummary ? UPDATE_SUMMARIZATION_PROMPT : SUMMARIZATION_PROMPT;
 	if (options?.promptOverride) {
 		basePrompt = options.promptOverride;
 	}
@@ -1100,8 +1068,8 @@ async function summarizeConversationWindow(
 
 	// Build the prompt with conversation wrapped in tags
 	let promptText = `<conversation>\n${conversationText}\n</conversation>\n\n`;
-	if (previousSummary) {
-		promptText += `<previous-summary>\n${escapeSummaryBoundaryTags(previousSummary)}\n</previous-summary>\n\n`;
+	if (escapedPreviousSummary) {
+		promptText += `<previous-summary>\n${escapedPreviousSummary}\n</previous-summary>\n\n`;
 	}
 	promptText += formatAdditionalContext(options?.extraContext);
 	promptText += basePrompt;
@@ -1881,7 +1849,7 @@ export async function compact(
 		promptOverride: options?.promptOverride,
 		extraContext: options?.extraContext,
 		remoteEndpoint: settings.remoteEnabled === false ? undefined : settings.remoteEndpoint,
-		summaryMaxTokens: settings.summaryMaxTokens,
+		summaryMaxTokens: options?.summaryMaxTokens ?? settings.summaryMaxTokens,
 		remoteSystemPrompt: options?.remoteSystemPrompt,
 		initiatorOverride: options?.initiatorOverride,
 		metadata: options?.metadata,

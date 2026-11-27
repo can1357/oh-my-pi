@@ -12,7 +12,7 @@
 
 ### Added
 
-- Added `CompactionSettings.summaryMaxTokens`, an opt-in output budget for regular compaction summaries that replaces the reserve-derived `MAX_SUMMARY_TOKENS` cap, bounded by the model's output limit ([#18688](https://github.com/can1357/oh-my-pi/issues/18688))
+- Added `CompactionSettings.summaryMaxTokens` to set the output budget for regular compaction summaries; history that fits alongside the actual previous summary and requested output is retained ([#18688](https://github.com/can1357/oh-my-pi/issues/18688))
 
 ## [19.2.1] - 2026-11-25
 
