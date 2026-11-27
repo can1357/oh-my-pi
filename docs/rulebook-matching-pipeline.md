@@ -18,10 +18,6 @@ It reflects the current implementation, including partial semantics and metadata
 - [`packages/coding-agent/src/discovery/omp-plugins.ts`](../packages/coding-agent/src/discovery/omp-plugins.ts)
 - [`packages/coding-agent/src/discovery/builtin-defaults.ts`](../packages/coding-agent/src/discovery/builtin-defaults.ts)
 - [`packages/coding-agent/src/discovery/agents.ts`](../packages/coding-agent/src/discovery/agents.ts)
-- [`packages/coding-agent/src/discovery/github.ts`](../packages/coding-agent/src/discovery/github.ts)
-- [`packages/coding-agent/src/discovery/cursor.ts`](../packages/coding-agent/src/discovery/cursor.ts)
-- [`packages/coding-agent/src/discovery/windsurf.ts`](../packages/coding-agent/src/discovery/windsurf.ts)
-- [`packages/coding-agent/src/discovery/cline.ts`](../packages/coding-agent/src/discovery/cline.ts)
 - [`packages/coding-agent/src/sdk.ts`](../packages/coding-agent/src/sdk.ts)
 - [`packages/coding-agent/src/system-prompt.ts`](../packages/coding-agent/src/system-prompt.ts)
 - [`packages/coding-agent/src/internal-urls/rule-protocol.ts`](../packages/coding-agent/src/internal-urls/rule-protocol.ts)
@@ -64,10 +60,6 @@ Consequence: precedence and deduplication are **name-based only**. Two different
 - `native` (priority `100`)
 - `omp-plugins` (priority `90`) — `rules/*.{md,mdc}` inside configured extension package roots, normalized via the shared `buildRuleFromMarkdown` path
 - `agents` (priority `70`)
-- `cursor` (priority `50`)
-- `windsurf` (priority `50`)
-- `cline` (priority `40`)
-- `github` (priority `30`)
 - `builtin-defaults` (priority `1`)
 
 ### Native provider (`builtin.ts`)
@@ -102,63 +94,6 @@ Loads from both `.agent` and `.agents` directories:
 
 Normalization uses the shared `buildRuleFromMarkdown` path: filename-derived name, stripped frontmatter body, and parsed `globs`, `alwaysApply`, `description`, `condition`/legacy `ttsr_trigger`, `astCondition`, `question`, `scope`, `agents`, `interruptMode`, and `repeatMode`.
 
-### Cursor provider (`cursor.ts`)
-
-Loads from:
-
-- user: `~/.cursor/rules/*.{mdc,md}`
-- project: `<cwd>/.cursor/rules/*.{mdc,md}`
-
-Normalization (`transformMDCRule`):
-
-- `description`: kept only if string
-- `alwaysApply`: normalized to a boolean — `true` only when frontmatter has `alwaysApply: true` (anything else becomes `false`)
-- `globs`: accepts array (string elements only) or single string
-- `condition`/legacy `ttsr_trigger`, `astCondition`, `question`, `scope`, `agents`, `interruptMode`, and `repeatMode` are parsed by shared rule helpers
-- `name` from filename without extension
-
-### Windsurf provider (`windsurf.ts`)
-
-Loads from:
-
-- user: `~/.codeium/windsurf/memories/global_rules.md` (fixed rule name `global_rules`)
-- project: `<cwd>/.windsurf/rules/*.md`
-
-Normalization:
-
-- `globs`: array-of-string or single string
-- `alwaysApply`, `description`, `condition`/legacy `ttsr_trigger`, `astCondition`, `question`, `scope`, `agents`, `interruptMode`, and `repeatMode` parsed by shared rule helpers
-- `name` is fixed to `global_rules` for the user global file and derived from filename for project rules
-
-### Cline provider (`cline.ts`)
-
-Searches upward from `cwd` for nearest `.clinerules`:
-
-- if directory: loads `*.md` inside it
-- if file: loads single file as rule named `clinerules`
-
-Normalization:
-
-- `globs`: array-of-string or single string
-- `alwaysApply`, `description`, `condition`/legacy `ttsr_trigger`, `astCondition`, `question`, `scope`, `agents`, `interruptMode`, and `repeatMode` parsed by shared rule helpers
-- `name` is fixed to `clinerules` for a `.clinerules` file and derived from filename for `.clinerules/*.md`
-
-### GitHub provider (`github.ts`)
-
-Loads `*.instructions.md` recursively from:
-
-- project: `<cwd>/.github/instructions/`
-- user: `<dir>/.github/instructions/` for every directory in the comma-separated `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`
-
-The filename without `.instructions.md` is the rule name. Shared Markdown parsing still recognizes normal OMP rule metadata, including TTSR fields. GitHub's `applyTo` is additionally normalized as follows:
-
-- a comma-separated string (or tolerated YAML array) becomes `globs`;
-- `*`, `**`, or `**/*` makes the rule always-apply and clears `globs`;
-- any other glob makes the rule non-always-apply; a missing `description` is generated from the globs;
-- missing `applyTo` produces a rulebook description plus a discovery warning.
-
-Because TTSR bucketing runs before always-apply/rulebook bucketing, a GitHub instruction carrying an accepted `condition`, `astCondition`, or `question` is still TTSR-only regardless of `applyTo`.
-
 ## 3. Frontmatter parsing behavior and ambiguity
 
 All providers use `parseFrontmatter` (`utils/frontmatter.ts`) with these semantics:
@@ -184,7 +119,6 @@ Fallback limitations:
 ### Precedence model
 
 - Providers are ordered by priority descending.
-- Equal priority keeps registration order (`cursor` before `windsurf` from `discovery/index.ts`).
 - Dedup is first-wins: first encountered rule name is kept; later same-name items are marked `_shadowed` in `all` and excluded from `items`.
 
 Effective rule provider order is currently:
@@ -192,11 +126,7 @@ Effective rule provider order is currently:
 1. `native` (100)
 2. `omp-plugins` (90)
 3. `agents` (70)
-4. `cursor` (50)
-5. `windsurf` (50)
-6. `cline` (40)
-7. `github` (30)
-8. `builtin-defaults` (1)
+4. `builtin-defaults` (1)
 
 ### Intra-provider ordering caveat
 
@@ -207,10 +137,6 @@ Notable source-order differences:
 - `native` appends project `.omp/rules`, user `~/.omp/agent/rules`, user `RULES.md`, then nearest project `RULES.md`.
 - `omp-plugins` appends `rules/` results per configured extension package root.
 - `agents` appends project-walk `.agent`/`.agents` rule dirs before user home dirs.
-- `cursor` appends user then project results.
-- `windsurf` appends user `global_rules` first, then project rules.
-- `cline` loads only the nearest `.clinerules` source.
-- `github` appends cwd project instructions first, followed by each `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` entry in environment-list order.
 - `builtin-defaults` uses the embedded rule source order.
 
 ## 5. Split into Rulebook, Always-Apply, and TTSR buckets
@@ -346,7 +272,7 @@ Session-scoped prompt rebuilds re-discover rules for the current cwd, re-bucket 
 
 ## 9. Known partial / non-enforced semantics
 
-1. The rule providers currently loaded for `rules` are `native`, `omp-plugins`, `agents`, `cursor`, `windsurf`, `cline`, `github`, and embedded `builtin-defaults`; provider files for other tools may parse other config formats but do not register rule loaders.
+1. The rule providers currently loaded for `rules` are `native`, `omp-plugins`, `agents`, and embedded `builtin-defaults`; provider files for other tools may parse other config formats but do not register rule loaders.
 2. `globs` metadata is surfaced to prompt/UI and is used as a global path gate for TTSR matching, but it is not used to automatically select rulebook rules for `rule://`.
 3. Rule selection for `rule://` includes rulebook, always-apply, and registered TTSR rules (so a triggered TTSR rule can be re-read), but not rules that registered no condition and carry neither a description nor `alwaysApply`.
 4. Discovery warnings (`loadCapability("rules").warnings`) are produced but `createAgentSession` does not currently surface/log them in this path.

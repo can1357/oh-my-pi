@@ -2861,13 +2861,13 @@ describe("Settings", () => {
 	});
 
 	describe("extensionsSourceLevel", () => {
-		it("reports project when a foreign project provider (.claude/settings.json) supplies extensions", async () => {
-			const claudeSettings = path.join(projectDir, ".claude", "settings.json");
-			fs.mkdirSync(path.dirname(claudeSettings), { recursive: true });
-			fs.writeFileSync(claudeSettings, JSON.stringify({ extensions: ["../claude-ext"] }));
+		it("reports project when the project settings.json supplies extensions", async () => {
+			const projectSettings = path.join(getProjectAgentDir(projectDir), "settings.json");
+			fs.mkdirSync(path.dirname(projectSettings), { recursive: true });
+			fs.writeFileSync(projectSettings, JSON.stringify({ extensions: ["../project-ext"] }));
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			expect(cfgExtensions.get(settings)).toContain("../claude-ext");
+			expect(cfgExtensions.get(settings)).toContain("../project-ext");
 			expect(settings.extensionsSourceLevel()).toBe("project");
 		});
 
@@ -2881,31 +2881,31 @@ describe("Settings", () => {
 		});
 	});
 
-	describe("project .claude/settings.json parse warnings", () => {
+	describe("project settings.json parse warnings", () => {
 		it("logs capability warnings when project settings.json fails to parse", async () => {
-			const claudeSettings = path.join(projectDir, ".claude", "settings.json");
-			await Bun.write(claudeSettings, '{ "symbolPreset": "ascii", }');
+			const projectSettings = path.join(getProjectAgentDir(projectDir), "settings.json");
+			await Bun.write(projectSettings, '{ "symbolPreset": "ascii", }');
 
 			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir, inMemory: true });
 			expect(cfgSymbolPreset.get(settings)).toBe("unicode");
 			expect(warnSpy).toHaveBeenCalledWith(
-				expect.stringMatching(/Settings: \[Claude Code\] Failed to parse JSON in .*settings\.json/),
+				expect.stringMatching(/Settings: \[OMP\] Failed to parse .*settings\.json/),
 			);
 
 			warnSpy.mockRestore();
 		});
 
 		it("drops user-level warnings that #readProjectSettings does not merge", async () => {
-			const projectSettingsJson = path.join(projectDir, ".claude", "settings.json");
+			const projectSettingsJson = path.join(getProjectAgentDir(projectDir), "settings.json");
 			vi.spyOn(discovery, "loadCapability").mockResolvedValue({
 				items: [],
 				all: [],
 				warnings: [
-					`[Claude Code] Failed to parse JSON in ${path.join(tempDir.path(), "home", ".claude", "settings.json")}`,
-					"[Claude Code] Failed to load: boom",
-					`[Claude Code] Failed to parse JSON in ${projectSettingsJson}`,
+					`[OMP] Failed to parse ${path.join(tempDir.path(), "home", ".omp", "agent", "settings.json")}`,
+					"[OMP] Failed to load: boom",
+					`[OMP] Failed to parse ${projectSettingsJson}`,
 				],
 				providers: [],
 			});
@@ -2919,11 +2919,11 @@ describe("Settings", () => {
 
 		it("logs project warnings when the cwd is a filesystem root", async () => {
 			const root = path.parse(projectDir).root;
-			const rootSettingsJson = path.join(root, ".claude", "settings.json");
+			const rootSettingsJson = path.join(getProjectAgentDir(root), "settings.json");
 			vi.spyOn(discovery, "loadCapability").mockResolvedValue({
 				items: [],
 				all: [],
-				warnings: [`[Claude Code] Failed to parse JSON in ${rootSettingsJson}`],
+				warnings: [`[OMP] Failed to parse ${rootSettingsJson}`],
 				providers: [],
 			});
 			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
@@ -2933,30 +2933,30 @@ describe("Settings", () => {
 		});
 
 		it("logs a persistently malformed project file once across reloads", async () => {
-			const claudeSettings = path.join(projectDir, ".claude", "settings.json");
-			await Bun.write(claudeSettings, '{ "symbolPreset": "ascii", }');
+			const projectSettings = path.join(getProjectAgentDir(projectDir), "settings.json");
+			await Bun.write(projectSettings, '{ "symbolPreset": "ascii", }');
 
 			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			expect(warnSpy.mock.calls.filter(args => String(args[0]).includes("Failed to parse JSON"))).toHaveLength(1);
+			expect(warnSpy.mock.calls.filter(args => String(args[0]).includes("Failed to parse"))).toHaveLength(1);
 
 			await settings.reloadFromDisk();
-			expect(warnSpy.mock.calls.filter(args => String(args[0]).includes("Failed to parse JSON"))).toHaveLength(1);
+			expect(warnSpy.mock.calls.filter(args => String(args[0]).includes("Failed to parse"))).toHaveLength(1);
 		});
 
 		it("surfaces a project file that becomes malformed after startup", async () => {
-			const claudeSettings = path.join(projectDir, ".claude", "settings.json");
+			const projectSettings = path.join(getProjectAgentDir(projectDir), "settings.json");
 
 			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			expect(warnSpy.mock.calls.filter(args => String(args[0]).includes("Failed to parse JSON"))).toHaveLength(0);
+			expect(warnSpy.mock.calls.filter(args => String(args[0]).includes("Failed to parse"))).toHaveLength(0);
 
-			await Bun.write(claudeSettings, '{ "symbolPreset": "ascii", }');
+			await Bun.write(projectSettings, '{ "symbolPreset": "ascii", }');
 			await settings.reloadFromDisk();
 
 			expect(cfgSymbolPreset.get(settings)).toBe("unicode");
-			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(claudeSettings));
+			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(projectSettings));
 		});
 	});
 });
