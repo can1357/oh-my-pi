@@ -314,6 +314,11 @@ export interface TspSpacerProps {
 export interface TspTextProps {
 	text?: string;
 	spans?: readonly TspSpan[];
+	/**
+	 * What a cost text bills, by plan: dollars paid and subscription use. A host short of room (a
+	 * phone) shows one total from these in place of the text.
+	 */
+	spend?: { readonly paid: number; readonly subscription: number };
 	wrap?: TspWrap;
 	truncate?: TspTruncate;
 	lines?: number;

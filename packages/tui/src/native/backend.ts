@@ -506,9 +506,11 @@ export class NativeBackend {
 				)
 					return;
 				if (this.#surfaceState === "open") {
+					logger.debug("TSP: terminal does not know the surface; reopening it", { sf: this.id });
 					this.#surfaceState = "reopening";
 					this.#reopen();
 				} else if (this.#surfaceState === "reopening") {
+					logger.warn("TSP: surface lost; frames stop until the terminal reports it gone", { sf: this.id });
 					this.#surfaceState = "lost";
 					this.#opened = false;
 					this.#clearFrames();

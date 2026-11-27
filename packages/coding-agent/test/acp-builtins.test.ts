@@ -286,6 +286,21 @@ describe("ACP builtin slash commands", () => {
 		expect(output).toEqual(["Fast mode is off."]);
 	});
 
+	it("reports that /reload-plugins leaves extension hooks and tools for a restart", async () => {
+		const { output, runtime } = createRuntime();
+		let reloads = 0;
+		runtime.reloadPlugins = async () => {
+			reloads++;
+		};
+
+		expect(await executeAcpBuiltinSlashCommand("/reload-plugins", runtime)).toEqual({ consumed: true });
+
+		expect(reloads).toBe(1);
+		expect(output).toEqual([
+			"Reloaded plugin skills and slash commands. Extension hooks and tools are unchanged; restart omp to apply their changes.",
+		]);
+	});
+
 	it("toggles extended context with explicit controls and reports state", async () => {
 		const { output, runtime } = createRuntime();
 

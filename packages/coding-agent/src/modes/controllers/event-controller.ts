@@ -54,6 +54,7 @@ import type { TranscriptBlock } from "../../ui/shell";
 import { toolEditMode } from "../../ui/tools/edit";
 import { PREVIEW_LIMITS, previewLine, TRUNCATE_LENGTHS } from "../../utils/render-utils";
 import { type RunFlowStatus, setRunStatus } from "../../utils/run-status";
+import { reportProgramResume } from "../../utils/program-resume";
 import {
 	cfgCompletionNotify,
 	cfgDisplayCacheMissMarker,
@@ -432,6 +433,7 @@ export class EventController {
 						settings: session.settings,
 						registry: session.modelRegistry,
 						getSessionProvider: () => session.model?.provider,
+						getSessionId: () => session.sessionId,
 					}
 				: null,
 		);
@@ -507,6 +509,7 @@ export class EventController {
 			model_changed: async () => {
 				vocalizer.enforceProviderPolicy();
 				this.ctx.statusLine.refresh();
+				this.ctx.showActiveModelNotice();
 			},
 			// Header rebuild is owned by InteractiveMode's own session
 			// subscription (mirrors model_changed); nothing to do here.
@@ -1360,6 +1363,8 @@ export class EventController {
 			this.#turnStartedAt = undefined;
 		}
 		this.#clearApprovalPreviewGates();
+		// A session that started on a plan model has had no switch to announce it.
+		this.ctx.showActiveModelNotice();
 		// A new turn cannot inherit a foreground tool execution. A dropped
 		// agent_end (for example after a renderer exception) otherwise leaves a
 		// live-only tool card without a persisted result; ordered transcript
@@ -1403,6 +1408,7 @@ export class EventController {
 		this.#setTerminalProgress(true);
 		this.ctx.ensureWorkingRow();
 		setRunStatus({ state: "working" });
+		reportProgramResume();
 	}
 
 	async #handleMessageStart(event: Extract<AgentSessionEvent, { type: "message_start" }>): Promise<void> {
@@ -2507,6 +2513,7 @@ export class EventController {
 			if (!runActive) setRunStatus(this.#settledRunStatus(event));
 			await this.#finishAgentEnd(event);
 		}
+		reportProgramResume();
 		// This run may be extension-started while the main input loop remains
 		// asleep. Do not await session-idle from its own event.
 		if (this.ctx.shutdownRequested) this.ctx.requestShutdown();
@@ -2878,7 +2885,7 @@ export class EventController {
 			ttsrBlock(
 				rules,
 				() => this.ctx.toolOutputExpanded,
-				() => !this.ctx.hideToolActivity,
+				() => this.ctx.toolActivity !== "hidden",
 			),
 		);
 		this.#lastTtsrNotification = { block, rules };
@@ -2886,7 +2893,7 @@ export class EventController {
 
 	async #handleTodoReminder(event: Extract<AgentSessionEvent, { type: "todo_reminder" }>): Promise<void> {
 		const { todos, attempt, maxAttempts } = event;
-		this.ctx.present(() => todoReminderBlock(todos, attempt, maxAttempts, () => !this.ctx.hideToolActivity));
+		this.ctx.present(() => todoReminderBlock(todos, attempt, maxAttempts, () => this.ctx.toolActivity !== "hidden"));
 	}
 	async #handleTodoAutoClear(_event: Extract<AgentSessionEvent, { type: "todo_auto_clear" }>): Promise<void> {
 		await this.ctx.reloadTodos();

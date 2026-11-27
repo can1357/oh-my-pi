@@ -14,7 +14,7 @@ import { resolveAnthropicApiVersion } from "../compat/anthropic";
 import { xaiResponsesReasoningEffortMap } from "../compat/openai";
 import { hasModelScopedEffortLadder, resolveModelPolicy } from "../compat/resolve";
 import { compareRevision, parseRevision, revisionAtLeast } from "../compat/revision";
-import { providerEntries, providerEntry, seedModels } from "../compat/providers";
+import { providerBaseUrl, providerEntries, providerEntry, seedModels } from "../compat/providers";
 import { billingVariantPlain, classifyModel, discoveryVocabulary } from "../compat/taxonomy";
 import {
 	DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS,
@@ -2907,7 +2907,7 @@ function buildCuratedClinePassModel(
 /**
  * Subscription models bill against plan quota, not per token — but the catalog still
  * carries the upstream list price so cost display reads as API-equivalent spend. Same
- * policy as the codex/antigravity generator fixups and the zai PAYG descriptor swap
+ * policy as the codex generator fixups and the zai PAYG descriptor swap
  * (issue #5598: an all-$0 roster surfaces every model as "free" in the picker, which
  * was treated as a bug there). The price comes from the bundled upstream reference,
  * so it works offline and survives roster refreshes (`preferDiscoveryCost` never lets
@@ -4332,29 +4332,36 @@ export const KIMI_CODE_DEFAULT_MAX_TOKENS = 32_000;
  * rule-owned (`runtime/behavior.kdl` model-limits), everything else ->
  * `fallback`.
  */
-export function kimiCodeMaxTokens(modelId: string, fallback?: number): number;
-export function kimiCodeMaxTokens(modelId: string, fallback: number | null): number | null;
+export function kimiCodeMaxTokens(provider: string, modelId: string, fallback?: number): number;
+export function kimiCodeMaxTokens(provider: string, modelId: string, fallback: number | null): number | null;
 export function kimiCodeMaxTokens(
+	provider: string,
 	modelId: string,
 	fallback: number | null = KIMI_CODE_DEFAULT_MAX_TOKENS,
 ): number | null {
-	return modelLimitsFor("kimi-code", modelId.trim().toLowerCase())?.maxTokens ?? fallback;
+	return modelLimitsFor(provider, modelId.trim().toLowerCase())?.maxTokens ?? fallback;
 }
 
 export function kimiCodeModelManagerOptions(
 	config?: KimiCodeModelManagerConfig,
+	provider: string = "kimi-code",
 ): ModelManagerOptions<"openai-completions"> {
 	const apiKey = config?.apiKey;
-	const baseUrl = config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("kimi-code")!;
+	// The managed `/coding/v1` base URL is rule-owned (`base-url` node in
+	// `providers/<id>.kdl`); both Kimi Code provider entries declare one.
+	const baseUrl = config?.baseUrl ?? providerBaseUrl(provider);
+	if (!baseUrl) {
+		throw new Error(`provider \`${provider}\` declares no managed base URL (\`base-url\` in providers/<id>.kdl)`);
+	}
 	return {
-		providerId: "kimi-code",
-		cacheProviderId: resolveModelCacheProviderId("kimi-code", { apiKey, baseUrl }),
+		providerId: provider,
+		cacheProviderId: resolveModelCacheProviderId(provider, { apiKey, baseUrl }),
 		dynamicModelsAuthoritative: true,
 		...(apiKey && {
 			fetchDynamicModels: () =>
 				fetchOpenAICompatibleModels({
 					api: "openai-completions",
-					provider: "kimi-code",
+					provider,
 					baseUrl,
 					apiKey,
 					headers: {
@@ -4374,10 +4381,10 @@ export function kimiCodeModelManagerOptions(
 							name: typeof entry.display_name === "string" ? entry.display_name : defaults.name,
 							reasoning,
 							// K2.5's misreported vision support is rule-owned
-							// (`providers/kimi-code.kdl` input-modalities).
+							// (`providers/kimi-code*.kdl` input-modalities).
 							input: entry.supports_image_in === true ? ["text", "image"] : ["text"],
 							contextWindow: typeof entry.context_length === "number" ? entry.context_length : 262144,
-							maxTokens: kimiCodeMaxTokens(id),
+							maxTokens: kimiCodeMaxTokens(provider, id, KIMI_CODE_DEFAULT_MAX_TOKENS),
 							thinking,
 							compat: {
 								thinkingFormat: thinking ? "kimi" : "zai",

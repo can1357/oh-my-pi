@@ -539,8 +539,8 @@ describe("model thinking derivation", () => {
 	it("maps minimal to LOW when a collapsed family aliases it onto the low wire id", () => {
 		const model = createModel({
 			id: "gemini-3.7-flash",
-			api: "google-gemini-cli",
-			provider: "google-antigravity",
+			api: "google-generative-ai",
+			provider: "google",
 			thinking: {
 				mode: "google-level",
 				efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],

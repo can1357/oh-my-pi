@@ -177,6 +177,26 @@ describe("buildSessionContext", () => {
 			// downgrades both produce such mismatched messages.
 			expect(ctx.models.default).toBe("openai/gpt-4");
 		});
+
+		it("keeps an explicit default when a temporary model change and its assistant reply follow", () => {
+			// A retry fallback or context promotion appends a role="temporary"
+			// model_change; the reply produced under it must not clobber the default.
+			const entries: SessionEntry[] = [
+				msg("1", null, "user", "hello"),
+				modelChange("2", "1", "openai", "gpt-4"),
+				{
+					type: "model_change",
+					id: "3",
+					parentId: "2",
+					timestamp: "2025-01-01T00:00:00Z",
+					model: "anthropic/claude-test",
+					role: "temporary",
+				},
+				msg("4", "3", "assistant", "hi"),
+			];
+			const ctx = buildSessionContext(entries);
+			expect(ctx.models.default).toBe("openai/gpt-4");
+		});
 	});
 
 	describe("with compaction", () => {

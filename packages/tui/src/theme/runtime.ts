@@ -10,6 +10,7 @@ import { errorMessage, logger } from "@oh-my-pi/pi-utils";
 import type { TerminalCapabilities } from "../driver/contract";
 import { type Accessor, signal } from "../reactive";
 import { type ColorDepth, depthOf } from "./color";
+import { CONSERVATIVE_EMOJI, type EmojiSupport } from "./contract";
 import DARK from "./data/dark.json" with { type: "json" };
 import { customThemePath, loadTheme, loadThemeSync } from "./loader";
 import type { SymbolPreset, ThemeJson } from "./schema";
@@ -24,6 +25,9 @@ export const currentTheme: Accessor<ResolvedTheme> = active;
 export function setCurrentTheme(theme: ResolvedTheme): void {
 	active.set(theme);
 }
+
+/** Terminal capabilities the theme follows: color support, the background's appearance, emoji drawing. */
+export type ThemeCapabilities = Pick<TerminalCapabilities, "truecolor" | "colors" | "dark" | "emoji">;
 
 /** Theme settings the controller reads. */
 export interface ThemeSettings {
@@ -71,6 +75,7 @@ export class ThemeController {
 	#colorBlindMode: boolean;
 	#depth: ColorDepth = "truecolor";
 	#appearance: "dark" | "light" = "dark";
+	#emoji: EmojiSupport = CONSERVATIVE_EMOJI;
 	#auto = true;
 	#name: string;
 	#request = 0;
@@ -109,7 +114,12 @@ export class ThemeController {
 	}
 
 	get options(): ThemeOptions {
-		return { depth: this.#depth, symbolPreset: this.#symbolPreset, colorBlindMode: this.#colorBlindMode };
+		return {
+			depth: this.#depth,
+			symbolPreset: this.#symbolPreset,
+			colorBlindMode: this.#colorBlindMode,
+			emoji: this.#emoji,
+		};
 	}
 
 	#autoName(): string {
@@ -117,7 +127,7 @@ export class ThemeController {
 	}
 
 	/** Load the starting theme synchronously (first paint); falls back to `dark` when it cannot load. */
-	initSync(capabilities?: Pick<TerminalCapabilities, "truecolor" | "colors" | "dark">): void {
+	initSync(capabilities?: ThemeCapabilities): void {
 		if (capabilities) this.#absorb(capabilities);
 		const name = this.#auto ? this.#autoName() : this.#name;
 		try {
@@ -130,19 +140,25 @@ export class ThemeController {
 
 	/**
 	 * Follow the terminal: depth from its color support, the auto slot from its
-	 * appearance. Reloads only when either changed.
+	 * appearance, emoji glyph forms from its emoji support. Reloads only when one changed.
 	 */
-	async applyCapabilities(capabilities: Pick<TerminalCapabilities, "truecolor" | "colors" | "dark">): Promise<void> {
+	async applyCapabilities(capabilities: ThemeCapabilities): Promise<void> {
 		if (!this.#absorb(capabilities)) return;
 		await this.#reload("terminal");
 	}
 
-	#absorb(capabilities: Pick<TerminalCapabilities, "truecolor" | "colors" | "dark">): boolean {
+	#absorb(capabilities: ThemeCapabilities): boolean {
 		const depth = depthOf(capabilities);
 		const appearance = capabilities.dark ? "dark" : "light";
-		const changed = depth !== this.#depth || (this.#auto && appearance !== this.#appearance);
+		const { emoji } = capabilities;
+		const changed =
+			depth !== this.#depth ||
+			(this.#auto && appearance !== this.#appearance) ||
+			emoji.vs16Wide !== this.#emoji.vs16Wide ||
+			emoji.bareFits !== this.#emoji.bareFits;
 		this.#depth = depth;
 		this.#appearance = appearance;
+		this.#emoji = emoji;
 		return changed;
 	}
 

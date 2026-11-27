@@ -187,7 +187,13 @@ export type AgentStreaming =
 	| { kind: "text" }
 	| { kind: "call"; tool: string; args?: string; argsKey?: string; intent?: string };
 
-/** Progress tracking for a single agent */
+/**
+ * Progress tracking for a single agent.
+ *
+ * The executor's run monitor replaces a field's value when it changes and never mutates it in
+ * place: it publishes a snapshot only when some field other than `durationMs` differs by identity
+ * from the last one it sent, so an in-place change would go unpublished until the next heartbeat.
+ */
 export interface AgentProgress {
 	index: number;
 	id: string;

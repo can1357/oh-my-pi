@@ -1708,6 +1708,9 @@ export class TurnRecovery {
 			this.#unexecutedToolCallsReplaySafe(message);
 		if (this.#hasReplayUnsafeOutput(message) && !replaySafeUnexecutedTools) return false;
 		if (AIError.is(id, AIError.Flag.AccountPolicy) || this.isClassifierRefusal(message)) return true;
+		// Admitted only so the retry handler can walk the fallback chain; it treats the
+		// flag as this model's spent budget and never replays the same model.
+		if (AIError.is(id, AIError.Flag.RetriesExhausted)) return true;
 		return AIError.retriable(id);
 	}
 
@@ -2856,11 +2859,15 @@ export class TurnRecovery {
 		const maxRetries = this.#isBoundedThinkingStreamClose(message)
 			? Math.min(retrySettings.maxRetries, 1)
 			: retrySettings.maxRetries;
-		const retryBudgetExhausted =
-			this.#retryAttempt > maxRetries || this.#genericAbortStreak > GENERIC_ABORT_MAX_RETRIES;
-
 		const errorMessage = message.errorMessage || "Unknown error";
 		const id = this.#classifyRetryMessage(message);
+		// The transport already spent this model's retry budget on the status:
+		// no same-model replay, but the fallback chain still gets its turn.
+		const transportRetriesExhausted = AIError.is(id, AIError.Flag.RetriesExhausted);
+		const retryBudgetExhausted =
+			transportRetriesExhausted ||
+			this.#retryAttempt > maxRetries ||
+			this.#genericAbortStreak > GENERIC_ABORT_MAX_RETRIES;
 		const requestProvider = (message as IssuedProviderAssistantMessage)[kUsageLimitRequestProvider];
 		const oldProviderLimitFor = (model: Model | undefined): boolean =>
 			requestProvider !== undefined &&
@@ -3297,7 +3304,11 @@ export class TurnRecovery {
 		} else if (retryBudgetExhausted) {
 			if (!switchedModel && !switchedCredential) {
 				const attempt = this.#retryAttempt - 1;
-				message.errorMessage = `Retry budget exhausted after ${attempt} ${attempt === 1 ? "retry" : "retries"}: ${terminalError}`;
+				// A transport-exhausted failure was never retried here; its own message already says what happened.
+				message.errorMessage =
+					transportRetriesExhausted && attempt === 0
+						? terminalError
+						: `Retry budget exhausted after ${attempt} ${attempt === 1 ? "retry" : "retries"}: ${terminalError}`;
 				await this.#closeRetrySaga(
 					{ success: false, attempt, finalError: terminalError },
 					{ terminalTurn: message, retryErrors: { status: "superseded" } },

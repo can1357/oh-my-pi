@@ -1481,7 +1481,14 @@ async function dispatchRun(
 						tabName: name,
 					});
 			execution.then(pending.resolve, pending.reject);
-			return await boundInProcessRun(promise, closeAc, name, opts.timeoutMs, opts.signal);
+			return await boundInProcessRun(promise, closeAc, name, opts.timeoutMs, opts.signal).catch((error: unknown) => {
+				// A worker's timed-out run says how to raise the budget; so does an in-process one.
+				if (error instanceof ToolError && error.message.startsWith("Browser code execution timed out after ")) {
+					const sentence = error.message.endsWith(".") ? error.message : `${error.message}.`;
+					throw new ToolError(`${sentence}${longerBudgetHint(opts.timeoutMs)}`);
+				}
+				throw error;
+			});
 		} finally {
 			// Completion is use too: a run outlasting the idle timeout must
 			// not look stale to the sweep right after it finishes.

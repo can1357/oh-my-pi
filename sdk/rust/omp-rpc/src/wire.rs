@@ -5835,6 +5835,8 @@ pub struct LogoutParams {
 pub struct LogoutResult {
 	#[serde(rename = "remainingSource", default, skip_serializing_if = "Option::is_none")]
 	pub remaining_source: Option<String>,
+	#[serde(rename = "signOutError", default, skip_serializing_if = "Option::is_none")]
+	pub sign_out_error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -7544,7 +7546,7 @@ impl Command for GetLogoutAccountsCommand {
 	}
 }
 
-/// Remove one stored credential; fails when it is no longer stored. `remainingSource` names auth that still applies.
+/// Remove one stored credential, revoking it at the provider when one supports it; fails when it is no longer stored. `remainingSource` names auth that still applies; `signOutError` says why the provider's sign-out failed (the credential is removed regardless).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LogoutCommand {
 	#[serde(rename = "providerId")]

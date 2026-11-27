@@ -516,7 +516,7 @@ describe("AuthStorage.health.check", () => {
 			expect(input.credential.type).toBe("oauth");
 			if (input.credential.type === "oauth") {
 				// Sentinel forwards verbatim so callers composing structured
-				// apiKeys (Copilot, Gemini CLI) don't have to special-case it.
+				// apiKeys (e.g. Copilot) don't have to special-case it.
 				expect(input.credential.refreshToken).toBe(REMOTE_REFRESH_SENTINEL);
 				expect(input.credential.accessToken).toBe("oat-13");
 			}

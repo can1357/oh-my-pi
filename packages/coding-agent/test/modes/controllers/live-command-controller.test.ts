@@ -267,6 +267,7 @@ describe("LiveSessionController with a caller-owned peer", () => {
 			modelRegistry: { authStorage: {} },
 			settings: Settings.isolated(),
 			sessionId: "s1",
+			sessionManager: { getSessionId: () => "s1" },
 			subscribe: () => () => {},
 			sendCustomMessage: async (message: { content: string }) => {
 				delegated.push(message.content);
@@ -329,6 +330,7 @@ describe("LiveSessionController with a caller-owned peer", () => {
 			modelRegistry: { authStorage: {} },
 			settings: Settings.isolated(),
 			sessionId: "s1",
+			sessionManager: { getSessionId: () => "s1" },
 			subscribe: (listener: (event: AgentSessionEvent) => void) => {
 				emit = listener;
 				return () => {};
