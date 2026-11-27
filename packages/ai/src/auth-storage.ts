@@ -28,7 +28,13 @@ import { logger } from "@oh-my-pi/pi-utils";
 import type { AuthAccountPolicyConfig } from "./auth-broker/discover";
 import { SessionAffinity, type SessionRestrictions } from "./auth/affinity";
 import { BlockStoreHealth, CredentialBlocks } from "./auth/blocks";
-import { KeyCascade, KeyOverrides } from "./auth/cascade";
+import {
+	KeyCascade,
+	KeyOverrides,
+	type StoredAuthPeekOptions,
+	type StoredAuthResolution,
+	type StoredAuthResolveOptions,
+} from "./auth/cascade";
 import { CredentialHealth } from "./auth/health";
 import { OAuthAccounts } from "./auth/oauth";
 import { AccountPolicies } from "./auth/policy";
@@ -59,6 +65,12 @@ import type { UsageLogger } from "./usage";
 import { defaultRankingStrategy, defaultUsageProvider } from "./usage/registry";
 
 export { OAUTH_ORG_POLICY_BLOCK_SCOPE } from "./auth/blocks";
+export type {
+	StoredAuthLocalSources,
+	StoredAuthPeekOptions,
+	StoredAuthResolution,
+	StoredAuthResolveOptions,
+} from "./auth/cascade";
 export {
 	isSameOAuthAccount,
 	isSqliteBusyError,
@@ -209,6 +221,57 @@ export class AuthStorage {
 		return this.#backend.replaceStore(store, options);
 	}
 
+	/** Compose the store-owner path, without a host config resolver or API-key usage probes. */
+	static forStoredAuth(
+		store: AuthCredentialStore,
+		options: Omit<AuthStorageOptions, "configValueResolver"> = {},
+	): AuthStorage {
+		return new AuthStorage(new LocalAuthStorageBackend(store, options, true));
+	}
+
+	/**
+	 * Resolve using the store-owner pool and the caller's nonsecret local fallback hints.
+	 * Transient OAuth refresh failures and session restrictions remain errors.
+	 */
+	async resolveStoredAuth(
+		provider: string,
+		sessionId?: string,
+		options?: StoredAuthResolveOptions,
+	): Promise<StoredAuthResolution> {
+		return this.#storedAuthOwner().keys.resolveStoredAuth(provider, sessionId, options);
+	}
+
+	/** Iterate provider IDs in the owner pool without projecting credential rows. */
+	storedAuthProviders(): IterableIterator<string> {
+		return this.#storedAuthOwner().credentials.providers();
+	}
+
+	/** Select authentication material without refreshing OAuth or resolving configuration references. */
+	async peekStoredAuth(provider: string, options?: StoredAuthPeekOptions): Promise<StoredAuthResolution> {
+		return this.#storedAuthOwner().keys.peekStoredAuth(provider, options);
+	}
+
+	/** Warm the store owner's OAuth ranking metadata without selecting an account. */
+	async prefetchStoredAuthUsage(
+		provider: string,
+		sessionId?: string,
+		options?: StoredAuthResolveOptions,
+	): Promise<void> {
+		return this.#storedAuthOwner().keys.prefetchStoredAuthUsage(provider, sessionId, options);
+	}
+
+	/** Stop the store owner and wait for its in-flight OAuth exchanges to save before closing. */
+	async closeAndDrain(): Promise<void> {
+		return this.#storedAuthOwner().closeAndDrain();
+	}
+
+	#storedAuthOwner(): LocalAuthStorageBackend {
+		if (!(this.#backend instanceof LocalAuthStorageBackend) || !this.#backend.ownsStoredAuth) {
+			throw new TypeError("Stored-auth operations require AuthStorage.forStoredAuth()");
+		}
+		return this.#backend;
+	}
+
 	/** Open the SQLite store at `dbPath` and wrap it (standalone use, e.g. the pi-ai CLI). */
 	static async create(dbPath: string, options: AuthStorageOptions = {}): Promise<AuthStorage> {
 		const store = await SqliteAuthCredentialStore.open(dbPath);
@@ -243,24 +306,27 @@ export class AuthStorage {
 
 /** The single-process backend: credential modules composed over one store. */
 class LocalAuthStorageBackend implements AuthStorageBackend {
+	readonly ownsStoredAuth: boolean;
 	readonly #options: AuthStorageOptions;
 	readonly #overrides: KeyOverrides;
 	readonly #policies: AccountPolicies;
 	readonly #restrictions: SessionRestrictions = new Map();
 	#modules: AuthStorageModules;
+	#closing?: Promise<void>;
 
-	constructor(store: AuthCredentialStore, options: AuthStorageOptions) {
+	constructor(store: AuthCredentialStore, options: AuthStorageOptions, ownsStoredAuth = false) {
+		this.ownsStoredAuth = ownsStoredAuth;
 		this.#options = options;
-		this.#overrides = new KeyOverrides(options.configValueResolver);
+		this.#overrides = new KeyOverrides(ownsStoredAuth ? async key => key : options.configValueResolver);
 		this.#policies = new AccountPolicies(options.accountPolicies ?? [], options.defaultReservePct);
 		this.#modules = this.#compose(store, options.sourceLabel);
 		if (options.onCredentialDisabled) this.#modules.pool.onDisabled(options.onCredentialDisabled);
 	}
 
-	get credentials(): CredentialsApi {
+	get credentials(): CredentialPool {
 		return this.#modules.pool;
 	}
-	get keys(): KeysApi {
+	get keys(): KeyCascade {
 		return this.#modules.keys;
 	}
 	get oauth(): OAuthApi {
@@ -347,6 +413,7 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
 			usageProviders,
 			fetch: options.usageFetch ?? fetch,
 			requestTimeoutMs: options.usageRequestTimeoutMs ?? DEFAULT_USAGE_REQUEST_TIMEOUT_MS,
+			storedOAuthOnly: this.ownsStoredAuth,
 			requestKey: provider => keys.peek(provider),
 			logger:
 				options.usageLogger ??
@@ -400,13 +467,35 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
 				strategies,
 			}),
 			limits,
-			resets: new ResetCredits({ store, pool, oauth, usage, usageCache, blocks }),
+			resets: new ResetCredits({ store, pool, oauth, usage, usageCache, blocks, affinity }),
 			blocks,
 		};
 	}
 
+	closeAndDrain(): Promise<void> {
+		if (this.#closing) return this.#closing;
+		const modules = this.#modules;
+		const closing = Promise.withResolvers<void>();
+		this.#closing = closing.promise;
+		modules.refresher.close(() => {
+			try {
+				modules.pool.close();
+				closing.resolve();
+			} catch (error) {
+				closing.reject(error);
+			}
+		});
+		return this.#closing;
+	}
+
 	close(): void {
-		retire(this.#modules);
+		if (this.ownsStoredAuth) {
+			void this.closeAndDrain().catch(error => {
+				logger.warn("Stored-auth owner close failed", { error: String(error) });
+			});
+		} else {
+			retire(this.#modules);
+		}
 	}
 }
 

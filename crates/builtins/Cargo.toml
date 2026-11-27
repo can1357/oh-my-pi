@@ -40,9 +40,6 @@ parking_lot = "0.12.5"
 thiserror = "2.0.18"
 
 # ── Utility builtin dependencies ──────────────────────────────────────────────
-# 0.1.1 moved to unicode-width 0.2, the version the rest of the graph uses.
-ansi-width = "0.1.1"
-argmax = "0.4.0"
 # `ast-grep scan`: YAML rules on the ast-grep-core version omp-ast uses, and
 # their diagnostics in ast-grep's codespan layout.
 ast-grep-config = { version = "0.39.9", optional = true }
@@ -115,7 +112,7 @@ toml = { workspace = true, optional = true }
 tokio-util = "0.7"
 xutf.workspace = true
 libc = "0.2.172"
-uutils_term_grid = "0.8"
+term_grid = { package = "uutils_term_grid", version = "0.8" }
 
 [dependencies.uucore]
 version = "0.8.0"

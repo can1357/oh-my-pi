@@ -872,6 +872,57 @@ function stripDeepseekSpecialTokens(text: string): string {
 	return normalized;
 }
 
+// Outbound counterpart: the DeepSeek encoder parses `<｜…｜>` in message text as special
+// tokens, and V4.1's rejects its image placeholder outright, so a tool result quoting the
+// chat template fails every later request. A zero-width space breaks each token without
+// changing the visible text. Covers the fullwidth-pipe `<｜…｜>` tokens and the bare
+// `｜DSML｜` tool-call token; ASCII spellings (`<|EOT|>`, `<think>`) are common in ordinary
+// text and stay untouched.
+const DEEPSEEK_RESERVED_TOKEN_START_REGEX = /<(?=｜[A-Za-z0-9_.｜▁]{1,64}｜>)/g;
+const DEEPSEEK_DSML_TOKEN = "｜DSML｜";
+const DEEPSEEK_DSML_TOKEN_NEUTRALIZED = "｜\u200bDSML｜";
+// Reasoning can replay under the configured field or a signature-derived one.
+const DEEPSEEK_REASONING_FIELDS: readonly OpenAICompletionsReasoningField[] = [
+	"reasoning_content",
+	"reasoning",
+	"reasoning_text",
+];
+
+function neutralizeDeepseekSpecialTokens(text: string): string {
+	if (!text.includes("｜")) return text;
+	return text
+		.replace(DEEPSEEK_RESERVED_TOKEN_START_REGEX, "<\u200b")
+		.replaceAll(DEEPSEEK_DSML_TOKEN, DEEPSEEK_DSML_TOKEN_NEUTRALIZED);
+}
+
+/** Neutralize DeepSeek special tokens in every text field of the wire messages, in place. */
+function neutralizeDeepseekSpecialTokensInParams(params: ChatCompletionMessageParam[]): void {
+	for (const param of params) {
+		if (typeof param.content === "string") {
+			param.content = neutralizeDeepseekSpecialTokens(param.content);
+		} else if (Array.isArray(param.content)) {
+			for (const part of param.content) {
+				if (part.type === "text") {
+					part.text = neutralizeDeepseekSpecialTokens(part.text);
+				} else if (part.type === "thinking") {
+					for (const inner of part.thinking) inner.text = neutralizeDeepseekSpecialTokens(inner.text);
+				}
+			}
+		}
+		if (param.role !== "assistant") continue;
+		const assistant: OpenAICompletionsAssistantMessageParam = param;
+		for (const field of DEEPSEEK_REASONING_FIELDS) {
+			const reasoning = assistant[field];
+			if (reasoning !== undefined) assistant[field] = neutralizeDeepseekSpecialTokens(reasoning);
+		}
+		for (const toolCall of assistant.tool_calls ?? []) {
+			if (toolCall.type === "function") {
+				toolCall.function.arguments = neutralizeDeepseekSpecialTokens(toolCall.function.arguments);
+			}
+		}
+	}
+}
+
 // Find a trailing partial `<｜...` (or `<|...`) that has not yet been closed by a
 // matching `｜>`/`|>`, so it can be held back until the next chunk arrives. A solo
 // trailing `<` is also held in case it is the start of a new token.
@@ -3118,6 +3169,10 @@ export function convertMessages(
 					? "developer"
 					: "system"
 				: msg.role;
+	}
+
+	if (compat.neutralizeDeepseekSpecialTokens) {
+		neutralizeDeepseekSpecialTokensInParams(params);
 	}
 
 	return params;

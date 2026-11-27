@@ -192,10 +192,9 @@ export default class Token extends Command {
 						activeProviders.add(p.id);
 					}
 				}
-				const all = authStorage.credentials.all();
-				for (const p in all) {
-					if (authStorage.keys.source(p) !== undefined) {
-						activeProviders.add(p);
+				for (const { provider: id } of authStorage.credentials.summaries()) {
+					if (!activeProviders.has(id) && authStorage.keys.source(id) !== undefined) {
+						activeProviders.add(id);
 					}
 				}
 

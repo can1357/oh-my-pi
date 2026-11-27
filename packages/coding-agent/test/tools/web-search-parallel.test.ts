@@ -2,7 +2,6 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, setSystemTime, v
 import { AuthStorage, type FetchImpl } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resolveConfigValue } from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
-import type { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { searchWithParallel } from "@oh-my-pi/pi-coding-agent/web/parallel";
 import { ParallelProvider, searchParallel } from "@oh-my-pi/pi-coding-agent/web/search/providers/parallel";
 import { USER_AGENT } from "@oh-my-pi/pi-utils";
@@ -18,23 +17,8 @@ afterAll(() => {
 });
 
 describe("Parallel web search", () => {
-	const fakeStorage = {
-		listAuthCredentials: () => [
-			{
-				id: 1,
-				credential: {
-					type: "oauth",
-					access: "test-access-token",
-					expires: Date.now() + 600_000,
-					accountId: "acct-test",
-				},
-			},
-		],
-		updateAuthCredential: () => undefined,
-		get authStore() {
-			return null as never;
-		},
-	} as unknown as AgentStorage;
+	const storedAuth = createInMemoryAuthStorage();
+	afterAll(() => storedAuth.close());
 	const fakeAuthStorage = {
 		keys: {
 			get: async () => process.env.PARALLEL_API_KEY ?? undefined,
@@ -86,7 +70,9 @@ describe("Parallel web search", () => {
 		};
 	}
 
-	it("sends the expected Parallel search request and parses results", async () => {
+	it("sends the expected Parallel search request with a stored credential and parses results", async () => {
+		delete process.env.PARALLEL_API_KEY;
+		await storedAuth.credentials.set("parallel", { type: "api_key", key: "test-access-token" });
 		const fetchMock = mockFetch({
 			search_id: "search-parallel-1",
 			results: [
@@ -101,7 +87,16 @@ describe("Parallel web search", () => {
 			usage: [{ name: "sku_search", count: 1 }],
 		});
 
-		const result = await searchWithParallel("parallel query", ["parallel query"], { fetch: fetchMock }, fakeStorage);
+		const fetchWithKeyCheck: FetchImpl = (url, init) => {
+			expect(init?.headers).toMatchObject({ "x-api-key": "test-access-token" });
+			return fetchMock(url, init);
+		};
+		const result = await searchWithParallel(
+			"parallel query",
+			["parallel query"],
+			{ fetch: fetchWithKeyCheck },
+			storedAuth.keys,
+		);
 		expect(capturedRequestBody).toEqual({
 			objective: "parallel query",
 			search_queries: ["parallel query"],
@@ -122,6 +117,21 @@ describe("Parallel web search", () => {
 			warnings: [],
 			usage: [{ name: "sku_search", count: 1 }],
 		});
+	});
+
+	it("surfaces a stored credential lookup failure without making a request", async () => {
+		delete process.env.PARALLEL_API_KEY;
+		const failingKeys = {
+			get: async () => {
+				throw new Error("sensitive storage details");
+			},
+		};
+		const fetchMock = vi.fn(mockFetch({}));
+
+		await expect(searchWithParallel("query", ["query"], { fetch: fetchMock }, failingKeys)).rejects.toThrow(
+			"Failed to read stored credentials for parallel.",
+		);
+		expect(fetchMock).not.toHaveBeenCalled();
 	});
 
 	it("maps Parallel search responses into SearchResponse", async () => {

@@ -4,6 +4,7 @@
 
 ### Breaking Changes
 
+- Snapcompact uses one installed font for the whole transcript. If no installed font covers it, automatic and default manual compaction try the next configured method, and inline content stays as text. The `silver16-bw` frame layout is now `cjk16-bw`.
 - Removed the `cwd` parameter from the `bash` tool; a leading `cd <path> && …` still selects the working directory
 - Removed the `cwd` argument of the eval `sh` helper; every `sh` command starts in the session cwd (use `cd <path> && …` inside the command)
 - The `providers.fetch` configuration values `native`, `trafilatura`, and `lynx` have been replaced by the single `local` value for the in-process reader engine.
@@ -17,6 +18,7 @@
 ### Added
 
 - Added `ctx.asyncJobs.register()` so extensions can run their own work as background jobs that show up in `wait` and the job list, can be cancelled, and deliver their results to the agent like native background jobs. ([#20785](https://github.com/can1357/oh-my-pi/pull/20785) by [@Xytronix](https://github.com/Xytronix))
+- `models.yml` `compat.neutralizeDeepseekSpecialTokens` turns DeepSeek chat-template token breaking on or off per model (on by default for DeepSeek-class models on chat-completions) ([#20832](https://github.com/can1357/oh-my-pi/pull/20832) by [@dany-on-demand](https://github.com/dany-on-demand))
 - Added `--preset <name>` to start a session on a saved model preset (`/modelpreset save`), applying its roles and default thinking level for that run only ([#20306](https://github.com/can1357/oh-my-pi/pull/20306) by [@nick-maderight](https://github.com/nick-maderight))
 - Credentials in `agent.db` can be encrypted with a master key kept in the OS credential vault (macOS Keychain, Windows Credential Manager, Secret Service): fresh installs encrypt when the vault answers without prompting (never on headless hosts), existing unencrypted stores stay as they are, and `auth.encrypt: true`/`false` (or `OMP_AUTH_ENCRYPT`) forces it on or off; `omp auth key` prints the master key and `omp auth key <key|->` installs one, re-encrypting stored credentials under it
 - Added OSC 7577 Program Resume Protocol reporting so supporting terminals (Tern, Rex, etc.) automatically restore open omp sessions with `--restore` and their launch flags after a crash or restart
@@ -74,6 +76,7 @@
 
 ### Changed
 
+- Sessions share built-in credential storage and refreshes through the local daemon. Environment keys and custom sign-in callbacks still run in the session.
 - Cross-instance agent messaging now spans projects: `agent://peers` still lists this folder's instances, `agent://peers?all` lists every project's, and `agent://<pid>` reads or messages an instance in any folder; `@p2p:` includes local agents and peers from every project, labeled with their folder when different, while plain `@` searches only this folder's peers
 - The `@` mention palette and mention chips draw their icons from the symbol preset: Nerd Font glyphs under `nerd`, plain ASCII under `ascii`, and a single-width unicode set otherwise (themes can override the `mention.*` symbols)
 - The `@` mention palette is colored: icons take their category's color, or the status of the row (running/idle/aborted agent, dirty file, open/merged/closed PR), and status badges take their tone
@@ -116,6 +119,7 @@
 
 ### Fixed
 
+- Extensions whose `.tsx`/`.jsx` files use `/** @jsxImportSource @oh-my-pi/pi-tui */` load in the compiled omp binary instead of failing with `Cannot find package '@oh-my-pi/pi-tui'` ([#20840](https://github.com/can1357/oh-my-pi/issues/20840))
 - Fixed web search with GitHub Copilot Claude models: it now uses the Copilot login's token and endpoint (Enterprise included) and sends the same Copilot and session headers as chat, so replies are no longer rejected or blocked ([#20678](https://github.com/can1357/oh-my-pi/issues/20678))
 - Session mentions whose title carries a card icon no longer show a second session icon in front of it
 - Git mention chips in the composer draw in the git color instead of plain text
@@ -278,6 +282,7 @@
 
 ### Removed
 
+- Removed the experimental `tools.speculativeExecution.enabled` and `tools.speculativeExecution.maxInFlight` settings (off by default); speculative `read` and eval shadow-cell execution are gone, while `task.speculativeLaunch` is unchanged
 - omp no longer reads Gemini CLI's `~/.gemini` and `.gemini/` config (MCP servers, `GEMINI.md`, system prompts, extensions, settings); the `gemini` discovery provider id is gone.
 - Removed unused `parse*Args`/`print*Help` exports from `@oh-my-pi/pi-coding-agent/cli/{config,grep,plugin,setup,shell,web-search,update}-cli`; the subcommands parse flags through `src/commands/*` ([#20526](https://github.com/can1357/oh-my-pi/pull/20526))
 - Fixed an empty toast with only a checkmark appearing in Tern each time dictation finished transcribing.

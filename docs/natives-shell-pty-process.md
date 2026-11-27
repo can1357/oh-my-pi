@@ -191,13 +191,14 @@ Concurrency guard:
 
 ### Spawn/attach/write/read/terminate patterns
 
-- PTY opened via `portable_pty::native_pty_system().openpty(...)`.
-- On Windows, `openpty()` is run on a helper thread with a 5s startup timeout; timeout rejects with `PTY creation timed out (5s). ConPTY may be unavailable on this system.`
+- PTY opened with `openpty` (Unix; the child leads its own session with the PTY as controlling terminal) or a ConPTY pseudoconsole (Windows; a sideloaded `conpty.dll` wins over the system's).
+- On Windows, the pseudoconsole is opened on a helper thread with a 5s startup timeout; timeout rejects with `PTY creation timed out (5s). ConPTY may be unavailable on this system.`
 - `start()` runs the command through the configured shell:
    - `cmd.exe`/`cmd` gets `/c`,
    - `powershell`/`pwsh` gets `-Command`,
    - other shells get `-lc`.
-- `startArgv()` passes each argument directly to `portable_pty::CommandBuilder`.
+- `startArgv()` passes each argument to the program unchanged (Windows quotes each for `CommandLineToArgvW`); the program is looked up on the child environment's `PATH` (plus `PATHEXT` on Windows).
+- A missing or non-directory `cwd` falls back to `HOME` (`USERPROFILE` on Windows).
 - PTY commands inherit the process environment after stripping Git repository-location overrides; explicit PTY `env` values can add them back.
 - Default size is `120x40`; dimensions are clamped (`cols 20..400`, `rows 5..200`) on start and resize.
 - `write(data: string)` sends the string's UTF-8 bytes to PTY stdin.

@@ -2,7 +2,7 @@
  * Snapcompact compaction: archive conversation history as dense bitmap images.
  *
  * Instead of asking an LLM to summarize discarded history, the serialized
- * conversation is rendered into PNG frames of pixel-font text that vision
+ * conversation is rendered into PNG frames using a single installed font that vision
  * models read back directly, like an archivist at a snapcompact frame
  * reader. Frames are `frameSize` wide; their height hugs the text rows
  * actually printed, with a 64px floor for vision processors that reject
@@ -15,14 +15,14 @@
  * which exposed that the prose-tuned dense cells erase the line numbers and
  * indentation that code/search output depends on:
  *
- * - **Anthropic** (`11on16-bw`): 8x13 glyphs on an 11px advance (extra
+ * - **Anthropic** (`11on16-bw`): 11px advance (extra
  *   letter-spacing), black ink. On the tool-result bench, tracking the
  *   readable cell beat plain `8on16-bw` (opus-4.8 f1 .806 vs .755) and far
  *   beat the prior dense `6x12-dim` (.351, which fell below the OCR ~16px/char
  *   floor and abstained). Opus 4.7+/Fable/Mythos ingest high-res natively
  *   (2576px edge, 4,784 visual-token cap), so those lines get 1932px frames:
  *   same bill, fewer frames. Older Claude lines downscale past 1568px.
- * - **Google** (`8on22-bw` @2048): 8x13 glyphs on a 22px pitch (extra line
+ * - **Google** (`8on22-bw` @2048): 22px pitch (extra line
  *   spacing), black ink. Leading lifted gemini-3.5-flash to f1 .934 vs .807
  *   for `8on16-bw` and .287 for the prior `doc-8on16-sent-dim`. Gemini 3.x
  *   bills a fixed `media_resolution` budget per image (default 1,120 tokens)
@@ -46,8 +46,8 @@
  * `image-max-edge`, e.g. Cursor) gets frames rendered at that edge instead,
  * so glyphs reach the model at the size they were drawn.
  *
- * The whole pass is local and deterministic — no LLM call, no API key, no
- * latency beyond rendering. Rasterization and PNG encoding happen in native
+ * Frame generation is local — no LLM call or API key. Glyph appearance
+ * depends on the installed font. Rasterization and PNG encoding happen in native
  * code (`renderSnapcompactPng` in `crates/natives/src/snapcompact.rs`).
  * Frames persist in the compaction entry's `preserveData` and are
  * re-attached to the compaction summary message on every context rebuild.
@@ -64,10 +64,11 @@ import {
 	imageTokens,
 	resolveImageMaxEdge,
 	resolveImageTokenization,
+	resolveSnapcompactVariant,
 } from "@oh-my-pi/pi-catalog/compat/image-tokenization";
 import { resolveImageCountBudget, resolveInlineImageByteBudget } from "@oh-my-pi/pi-catalog/compat/request-size";
 import { classifyModel, compareRevision, parseRevision } from "@oh-my-pi/pi-catalog/identity";
-import { renderSnapcompactPng, snapcompactSupportedChars } from "@oh-my-pi/pi-natives";
+import { renderSnapcompactPng, resolveSnapcompactFont } from "@oh-my-pi/pi-natives";
 import { formatGroupedPaths, isRecord, prompt, withLoopPhase } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import fileOperationsTemplate from "./prompts/file-operations.md" with { type: "text" };
@@ -77,18 +78,14 @@ import snapcompactSummaryPrompt from "./prompts/snapcompact-summary.md" with { t
 // Shapes
 // ============================================================================
 
-/** One eval-validated frame shape: font, cell, ink, repetition, and size. */
+/** One frame shape: cell geometry, ink, repetition, and size. */
 export interface Shape {
-	/** Bundled font in the native renderer. */
-	font: "5x8" | "8x8" | "6x12" | "8x13" | "silver";
-	/** Target cell advance in pixels; differing from the font's natural cell
-	 *  renders via Lanczos stretch (anti-aliased RGB frame). */
+	/** Target cell advance in pixels. */
 	cellWidth: number;
 	/** Target cell pitch in pixels. */
 	cellHeight: number;
-	/** `false` → glyphs drawn at natural size on the cell pitch (8on16);
-	 *  `true`/`undefined` → legacy auto Lanczos stretch when cell ≠ natural. */
-	stretch?: boolean;
+	/** CJK grids use one cell per glyph; narrower grids use two for wide glyphs. */
+	wideCells?: false;
 	/** Ink: `sent` cycles six hues at sentence boundaries; `bw` is black. */
 	variant: "sent" | "bw";
 	/** Print stopwords in dim ink (research `dim`/`sent-dim` variants). */
@@ -112,31 +109,17 @@ export interface Shape {
 /** Geometry half of a {@link Shape}: everything except provider billing. */
 export type ShapeGeometry = Omit<Shape, "frameTokenEstimate" | "frameTokensVerified" | "imageDetail">;
 
-/**
- * Frame variants exercised by the SQuAD evals in `research/` that the native
- * renderer reproduces faithfully, keyed by their research names. Font codes:
- * `8x8u` unscii square cell, `8x8r` unscii with every line printed twice
- * (redundancy coding), `6x6u` unscii Lanczos-squeezed to 6x6 (densest
- * readable cell), `5x8` the X.org legacy font on its 2576px frame, `6x12`
- * and `8x13` the X.org misc fonts, `8on16` 8x13 glyphs on an 8x16 cell pitch
- * (no stretch, extra leading), `8on22` the same glyphs on a 22px pitch (more
- * leading), `11on16` the same glyphs on an 11px advance (more tracking),
- * `silver16` the embedded Silver TrueType font on a 16px grid for CJK and
- * other non-Latin text, and `doc-` prefixed shapes a two-column word-wrapped
- * newspaper layout. Ink: `sent` cycles six hues at sentence boundaries, `bw`
- * is plain black, `-dim` suffix prints stopwords in gray.
- */
+/** Grid variants retain their historical names; all render with one installed face. */
 export const SHAPE_VARIANTS = {
-	"8x8r-bw": { font: "8x8", cellWidth: 8, cellHeight: 8, variant: "bw", lineRepeat: 2, frameSize: 1568 },
-	"8x8r-sent": { font: "8x8", cellWidth: 8, cellHeight: 8, variant: "sent", lineRepeat: 2, frameSize: 1568 },
-	"8x8u-bw": { font: "8x8", cellWidth: 8, cellHeight: 8, variant: "bw", lineRepeat: 1, frameSize: 1568 },
-	"8x8u-sent": { font: "8x8", cellWidth: 8, cellHeight: 8, variant: "sent", lineRepeat: 1, frameSize: 1568 },
-	"6x6u-bw": { font: "8x8", cellWidth: 6, cellHeight: 6, variant: "bw", lineRepeat: 1, frameSize: 1568 },
-	"6x6u-sent": { font: "8x8", cellWidth: 6, cellHeight: 6, variant: "sent", lineRepeat: 1, frameSize: 1568 },
-	"5x8-bw": { font: "5x8", cellWidth: 5, cellHeight: 8, variant: "bw", lineRepeat: 1, frameSize: 2576 },
-	"5x8-sent": { font: "5x8", cellWidth: 5, cellHeight: 8, variant: "sent", lineRepeat: 1, frameSize: 2576 },
+	"8x8r-bw": { cellWidth: 8, cellHeight: 8, variant: "bw", lineRepeat: 2, frameSize: 1568 },
+	"8x8r-sent": { cellWidth: 8, cellHeight: 8, variant: "sent", lineRepeat: 2, frameSize: 1568 },
+	"8x8u-bw": { cellWidth: 8, cellHeight: 8, variant: "bw", lineRepeat: 1, frameSize: 1568 },
+	"8x8u-sent": { cellWidth: 8, cellHeight: 8, variant: "sent", lineRepeat: 1, frameSize: 1568 },
+	"6x6u-bw": { cellWidth: 6, cellHeight: 6, variant: "bw", lineRepeat: 1, frameSize: 1568 },
+	"6x6u-sent": { cellWidth: 6, cellHeight: 6, variant: "sent", lineRepeat: 1, frameSize: 1568 },
+	"5x8-bw": { cellWidth: 5, cellHeight: 8, variant: "bw", lineRepeat: 1, frameSize: 2576 },
+	"5x8-sent": { cellWidth: 5, cellHeight: 8, variant: "sent", lineRepeat: 1, frameSize: 2576 },
 	"6x12-dim": {
-		font: "6x12",
 		cellWidth: 6,
 		cellHeight: 12,
 		variant: "bw",
@@ -144,67 +127,56 @@ export const SHAPE_VARIANTS = {
 		lineRepeat: 1,
 		frameSize: 1568,
 	},
-	"8x13-bw": { font: "8x13", cellWidth: 8, cellHeight: 13, variant: "bw", lineRepeat: 1, frameSize: 1568 },
+	"8x13-bw": { cellWidth: 8, cellHeight: 13, variant: "bw", lineRepeat: 1, frameSize: 1568 },
 	"8on16-bw": {
-		font: "8x13",
 		cellWidth: 8,
 		cellHeight: 16,
-		stretch: false,
 		variant: "bw",
 		lineRepeat: 1,
 		frameSize: 1568,
 	},
 	"8on22-bw": {
-		font: "8x13",
 		cellWidth: 8,
 		cellHeight: 22,
-		stretch: false,
 		variant: "bw",
 		lineRepeat: 1,
 		frameSize: 1568,
 	},
 	"11on16-bw": {
-		font: "8x13",
 		cellWidth: 11,
 		cellHeight: 16,
-		stretch: false,
 		variant: "bw",
 		lineRepeat: 1,
 		frameSize: 1568,
 	},
-	"silver16-bw": {
-		font: "silver",
+	"cjk16-bw": {
+		wideCells: false,
 		cellWidth: 16,
-		cellHeight: 16,
+		// Extra leading makes the row direction unambiguous to vision readers.
+		cellHeight: 22,
 		variant: "bw",
 		lineRepeat: 1,
 		frameSize: 1568,
 	},
 	"doc-8on16-bw": {
-		font: "8x13",
 		cellWidth: 8,
 		cellHeight: 16,
-		stretch: false,
 		variant: "bw",
 		columns: 2,
 		lineRepeat: 1,
 		frameSize: 1568,
 	},
 	"doc-8on16-sent": {
-		font: "8x13",
 		cellWidth: 8,
 		cellHeight: 16,
-		stretch: false,
 		variant: "sent",
 		columns: 2,
 		lineRepeat: 1,
 		frameSize: 1568,
 	},
 	"doc-8on16-sent-dim": {
-		font: "8x13",
 		cellWidth: 8,
 		cellHeight: 16,
-		stretch: false,
 		variant: "sent",
 		stopwordDim: true,
 		columns: 2,
@@ -318,7 +290,7 @@ export function plannedFrameTokens(shape: Shape): number {
 
 /** Eval-validated shapes, keyed by the provider family they won on. */
 export const SHAPES = {
-	/** `11on16-bw`: 8x13 glyphs on an 11px advance (extra tracking), black ink.
+	/** `11on16-bw`: 11px advance (extra tracking), black ink.
 	 *  Tool-result legibility bench (real search/read/find output, structure QA)
 	 *  on opus-4.8: f1 .806 vs .755 for plain `8on16-bw` and .351 for the prior
 	 *  `6x12-dim` default — letter-spacing the readable cell wins; the dense
@@ -339,10 +311,9 @@ export const SHAPES = {
 
 /** In-memory shapes may carry optional keys as `undefined`. */
 const ShapeSchema = type({
-	font: "'5x8' | '8x8' | '6x12' | '8x13' | 'silver'",
 	cellWidth: "number > 0",
 	cellHeight: "number > 0",
-	"stretch?": "boolean | undefined",
+	"wideCells?": "false | undefined",
 	variant: "'sent' | 'bw'",
 	"stopwordDim?": "boolean | undefined",
 	"columns?": "1 | 2 | undefined",
@@ -411,8 +382,10 @@ const MODEL_VARIANTS: readonly (readonly [RegExp, IdealShape])[] = [
 ];
 
 /** Eval-ideal format for a model id, or undefined when unmeasured. */
-export function idealShapeVariant(modelId: string): IdealShape | undefined {
-	const identity = classifyModel("", modelId, { lenient: true });
+export function idealShapeVariant(modelId: string, target?: ShapeTarget): IdealShape | undefined {
+	const identity = target?.identity ?? classifyModel(target?.provider ?? "", modelId, { lenient: true });
+	const pin = resolveSnapcompactVariant({ ...target, id: modelId, identity });
+	const variant = isShapeVariantName(pin) ? pin : undefined;
 	const revision = identity.revision === undefined ? undefined : parseRevision(identity.revision);
 	const opusFloor = parseRevision("4.7");
 	if (
@@ -429,9 +402,9 @@ export function idealShapeVariant(modelId: string): IdealShape | undefined {
 		// downscaled under Anthropic's 4,784 visual-token cap ((1932/28)² =
 		// 69² = 4,761 ≤ 4,784 28px patches), and staying below 2000px clears
 		// the stricter ≤2000px limit for requests with more than 20 images.
-		return HIGH_RES_ANTHROPIC_VARIANT;
+		return variant === undefined ? HIGH_RES_ANTHROPIC_VARIANT : { ...HIGH_RES_ANTHROPIC_VARIANT, variant };
 	}
-	return MODEL_VARIANTS.find(([pattern]) => pattern.test(modelId))?.[1];
+	return variant === undefined ? MODEL_VARIANTS.find(([pattern]) => pattern.test(modelId))?.[1] : { variant };
 }
 
 /** What will read the frames: the model id (shape and billing), the wire API
@@ -457,7 +430,7 @@ export interface ShapeTarget {
  */
 export function resolveShape(model?: ShapeTarget, variant?: ShapeVariantName | "auto"): Shape {
 	if (variant && variant !== "auto") return priceShape(fitHostImageEdge(SHAPE_VARIANTS[variant], model), model);
-	const ideal = configuredShape(model) ?? (model?.id ? idealShapeVariant(model.id) : undefined);
+	const ideal = configuredShape(model) ?? (model?.id ? idealShapeVariant(model.id, model) : undefined);
 	const base = SHAPE_VARIANTS[ideal?.variant ?? FAMILY_VARIANT[apiFamily(model?.api)]];
 	return priceShape(fitHostImageEdge(ideal?.frameSize ? { ...base, frameSize: ideal.frameSize } : base, model), model);
 }
@@ -497,37 +470,23 @@ function isCjkHeavyText(text: string): boolean {
 	return wideChars >= CJK_HEAVY_MIN_WIDE_CHARS && wideChars / graphicChars >= CJK_HEAVY_WIDE_RATIO;
 }
 
-/**
- * Pick the frame shape for `text`. Explicit variants remain forced. Auto first
- * resolves the model/provider default, then selects the Silver CJK grid when
- * the default font cannot safely render the text or wide CJK glyphs dominate
- * the transcript and Silver can render it safely.
- */
+/** Pick the reader's grid, using wider cells with extra leading for CJK-heavy text in auto mode. */
 export function resolveShapeForText(text: string, model?: ShapeTarget, variant?: ShapeVariantName | "auto"): Shape {
-	if (variant && variant !== "auto") return resolveShape(model, variant);
-	return resolveShapeAndScan(text, model, variant).shape;
+	const shape = resolveShape(model, variant);
+	if ((variant === undefined || variant === "auto") && !configuredShape(model) && isCjkHeavyText(text)) {
+		return resolveShape(model, "cjk16-bw");
+	}
+	return shape;
 }
 
-/** A shape picked for a text, with the text's {@link RenderabilityScan} under that shape. */
+/** A shape picked for a text, with its whole-transcript renderability verdict. */
 export interface ShapeScan extends RenderabilityScan {
 	shape: Shape;
 }
 
-/**
- * {@link resolveShapeForText} plus the {@link scanRenderability} verdict for the
- * picked shape. Auto resolution already scans `text` with the shape it picks, so
- * this reuses that pass instead of normalizing a long transcript twice.
- */
+/** Select grid geometry and check that a single installed font can cover the text. */
 export function resolveShapeAndScan(text: string, model?: ShapeTarget, variant?: ShapeVariantName | "auto"): ShapeScan {
-	const shape = resolveShape(model, variant);
-	const scan = scanRenderability(text, { shape });
-	if (variant && variant !== "auto") return { shape, ...scan };
-	const silver = resolveShape(model, "silver16-bw");
-	if (!scan.isSafe || (shape.font !== "silver" && isCjkHeavyText(text))) {
-		const silverScan = scanRenderability(text, { shape: silver });
-		if (silverScan.isSafe) return { shape: silver, ...silverScan };
-	}
-	return { shape, ...scan };
+	return { shape: resolveShapeForText(text, model, variant), ...scanRenderability(text) };
 }
 
 // ============================================================================
@@ -593,10 +552,9 @@ const AREA_PRICED_VARIANTS: readonly ShapeGeometry[] = [SHAPE_VARIANTS["8on22-bw
 export function maxFramesForDataBudget(shape: ShapeGeometry, budget: number): number {
 	const areaPriced = AREA_PRICED_VARIANTS.some(
 		variant =>
-			variant.font === shape.font &&
 			variant.cellWidth === shape.cellWidth &&
 			variant.cellHeight === shape.cellHeight &&
-			variant.stretch === shape.stretch &&
+			variant.wideCells === shape.wideCells &&
 			variant.variant === shape.variant &&
 			variant.stopwordDim === shape.stopwordDim &&
 			variant.columns === shape.columns &&
@@ -652,8 +610,9 @@ export interface Frame {
 	rows: number;
 	/** Characters actually printed onto this frame. */
 	chars: number;
-	/** Shape metadata (absent on legacy frames, which are 5x8 `sent`). */
-	font?: Shape["font"];
+	/** Font label on frames written by the old bundled-font renderer. */
+	font?: string;
+	/** Shape ink metadata (absent on legacy frames, which used `sent`). */
 	variant?: Shape["variant"];
 	lineRepeat?: number;
 	/** 2 on two-column doc frames; absent on row-major grid frames. */
@@ -1272,13 +1231,12 @@ const LINE_BREAK = /[\n\r\u2028\u2029]/;
 /** Leading/trailing spaces or newline glyphs add no information to a frame. */
 const EDGE_RUNS = /^[ \u2588]+|[ \u2588]+$/g;
 
-/** Glyph-less code points skipped outright instead of printing `?`: controls
- *  (bare ESC/BEL/NUL — full ANSI sequences are stripped beforehand),
- *  combining marks the fonts cannot compose, and lone surrogates. */
-const UNRENDERABLE = /[\p{Cc}\p{Mn}\p{Me}\p{Cs}]/u;
+/** Control characters that aren't used as layout markers are stripped. */
+const CONTROL_CHAR = /\p{Cc}/u;
+/** Scalars the fixed-cell renderer cannot represent as standalone glyphs. */
+const UNRENDERABLE = /[\p{Cc}\p{Mn}\p{Me}\p{Cs}\p{Noncharacter_Code_Point}]/u;
 
-/** Combining marks NFKD splits off accented letters; dropped so the base
- *  letter prints without the diacritic the bundled fonts cannot compose. */
+/** Marks removed when deriving an ASCII compatibility fold. */
 const COMBINING_MARKS = /\p{M}+/gu;
 
 /** Status-like pictographs that carry meaning in tool output; all other emoji
@@ -1310,28 +1268,7 @@ const EMOJI_FOLD: Record<string, string> = {
 
 const EMOJI_PICTOGRAPH = /\p{Extended_Pictographic}/u;
 
-export interface NormalizeOptions {
-	/** Shape whose font is tried before the embedded Silver fallback. */
-	shape?: Pick<Shape, "font">;
-	/** Native font name when a full shape is not available. */
-	font?: Shape["font"];
-}
-
-interface NormalizedText {
-	text: string;
-	totalGraphics: number;
-	fallbackCount: number;
-}
-
-/**
- * Aggressive single-code-point ASCII fold via Unicode NFKD: decompose the
- * compatibility form (fullwidth, super/subscripts, ligatures, circled and
- * math-styled alphanumerics, Roman numerals, vulgar fractions, …), strip the
- * combining marks, and keep the ASCII/Latin-1 skeleton — routing any residual
- * punctuation back through {@link CHAR_FOLD}. Returns `undefined` when the code
- * point has no decomposition or still leaves an undrawable glyph, so the
- * caller falls back to `?`.
- */
+/** The ASCII and Latin-1 range used by compatibility folds. */
 function isAsciiOrLatin1(cp: number): boolean {
 	return (cp >= 0x20 && cp < 0x7f) || (cp >= 0xa0 && cp <= 0xff);
 }
@@ -1353,17 +1290,6 @@ function foldToAscii(ch: string): string | undefined {
 	return out;
 }
 
-function renderableUnicodeChars(chars: readonly string[], font: Shape["font"] | undefined): ReadonlySet<string> {
-	if (chars.length === 0) return new Set();
-	const text = chars.join("");
-	const primaryFont = font ?? "5x8";
-	const supported = new Set(snapcompactSupportedChars(primaryFont, text));
-	if (primaryFont !== "silver") {
-		for (const ch of snapcompactSupportedChars("silver", text)) supported.add(ch);
-	}
-	return supported;
-}
-
 function normalizedInputChars(text: string): string[] {
 	const stripped = text.includes("\u001b") ? Bun.stripANSI(text) : text;
 	const collapsed = stripped
@@ -1371,114 +1297,58 @@ function normalizedInputChars(text: string): string[] {
 		// run containing genuine whitespace separates words.
 		.replace(COLLAPSIBLE, run => (LINE_BREAK.test(run) ? NEWLINE_GLYPH : /[^\p{Cf}]/u.test(run) ? " " : ""))
 		.replace(EDGE_RUNS, "");
-	return [...collapsed];
+	return [...collapsed.normalize("NFC")];
 }
 
-function candidateUnicodeChars(chars: readonly string[]): string[] {
-	const unique = new Set<string>();
-	for (const ch of chars) {
-		const cp = ch.codePointAt(0);
-		if (cp === undefined || isAsciiOrLatin1(cp) || ch === DIM_ON || ch === DIM_OFF || ch === NEWLINE_GLYPH) {
-			continue;
-		}
-		if (
-			CHAR_FOLD[ch] !== undefined ||
-			(cp >= 0x2500 && cp <= 0x257f) ||
-			EMOJI_FOLD[ch] !== undefined ||
-			EMOJI_PICTOGRAPH.test(ch) ||
-			foldToAscii(ch) !== undefined ||
-			UNRENDERABLE.test(ch)
-		) {
-			continue;
-		}
-		unique.add(ch);
-	}
-	return [...unique];
-}
-
-function normalizeWithStats(text: string, options?: NormalizeOptions): NormalizedText {
-	const chars = normalizedInputChars(text);
-	const font = options?.font ?? options?.shape?.font;
-	const supported = renderableUnicodeChars(candidateUnicodeChars(chars), font);
+/** Prepare text for framing without substituting missing glyphs. */
+export function normalize(text: string): string {
 	const out: string[] = [];
-	let totalGraphics = 0;
-	let fallbackCount = 0;
-
-	for (const ch of chars) {
+	for (const ch of normalizedInputChars(text)) {
 		const cp = ch.codePointAt(0);
 		if (cp === undefined) continue;
-		if (isAsciiOrLatin1(cp)) {
-			out.push(ch);
-			totalGraphics++;
-			continue;
-		}
-		if (ch === DIM_ON || ch === DIM_OFF || ch === NEWLINE_GLYPH) {
+		if (isAsciiOrLatin1(cp) || ch === DIM_ON || ch === DIM_OFF || ch === NEWLINE_GLYPH) {
 			out.push(ch);
 			continue;
 		}
-		const emoji = EMOJI_FOLD[ch];
-		if (emoji !== undefined) {
-			out.push(emoji);
-			totalGraphics++;
-			continue;
-		}
-		const fold = CHAR_FOLD[ch];
+		const fold = EMOJI_FOLD[ch] ?? CHAR_FOLD[ch];
 		if (fold !== undefined) {
 			out.push(fold);
-			totalGraphics++;
 			continue;
 		}
 		if (cp >= 0x2500 && cp <= 0x257f) {
 			out.push(cp === 0x2502 || cp === 0x2503 ? "|" : cp === 0x2500 || cp === 0x2501 ? "-" : "+");
-			totalGraphics++;
 			continue;
 		}
-		if (!EMOJI_PICTOGRAPH.test(ch) && supported.has(ch)) {
-			out.push(ch);
-			totalGraphics++;
-			continue;
-		}
-		const folded = foldToAscii(ch);
-		if (folded !== undefined) {
-			out.push(folded);
-			totalGraphics++;
-		} else if (EMOJI_PICTOGRAPH.test(ch)) {
-		} else if (!UNRENDERABLE.test(ch)) {
-			out.push("?");
-			totalGraphics++;
-			fallbackCount++;
-		}
+		const ascii = foldToAscii(ch);
+		if (ascii !== undefined) out.push(ascii);
+		else if (!EMOJI_PICTOGRAPH.test(ch) && !CONTROL_CHAR.test(ch)) out.push(ch);
 	}
-
-	return { text: out.join("").replace(/ +/g, " ").replace(EDGE_RUNS, ""), totalGraphics, fallbackCount };
+	return out.join("").replace(/ +/g, " ").replace(EDGE_RUNS, "");
 }
 
-/**
- * Prepare text for printing: strip ANSI escape sequences, collapse horizontal
- * whitespace runs, fold unsupported symbols (including box drawing to ASCII),
- * preserve Unicode glyphs that either the selected font or embedded Silver
- * fallback can render, and drop decorative emoji instead of printing `?`.
- */
-export function normalize(text: string, options?: NormalizeOptions): string {
-	return normalizeWithStats(text, options).text;
+/** The renderer lays out by code point, so uncomposed marks cannot be drawn on their base glyph. */
+function fontForText(normalized: string): number | null | undefined {
+	const chars = new Set<string>();
+	for (const ch of normalized) {
+		if (ch === " " || ch === "\n" || ch === DIM_ON || ch === DIM_OFF || ch === NEWLINE_GLYPH) continue;
+		if (UNRENDERABLE.test(ch)) return null;
+		chars.add(ch);
+	}
+	return resolveSnapcompactFont([...chars].join(""));
 }
 
-/** Verdict of {@link scanRenderability}. */
+/** Whether all printable text fits in one installed face. */
 export interface RenderabilityScan {
-	/** At most 5% of graphic characters hit the `?` fallback. */
 	isSafe: boolean;
-	/** Share of graphic characters the font cannot draw. */
+	/** 1 when the whole transcript must stay text, otherwise 0. */
 	unrenderableRatio: number;
 }
 
-/**
- * Scan text with the same font-aware path as {@link normalize}; unsafe means
- * more than 5% of graphic characters would hit the `?` fallback.
- */
-export function scanRenderability(text: string, options?: NormalizeOptions): RenderabilityScan {
-	const normalized = normalizeWithStats(text, options);
-	const unrenderableRatio = normalized.totalGraphics > 0 ? normalized.fallbackCount / normalized.totalGraphics : 0;
-	return { isSafe: unrenderableRatio <= 0.05, unrenderableRatio };
+/** Check whether the transcript can become PNGs without losing glyphs. */
+export function scanRenderability(text: string): RenderabilityScan {
+	const normalized = normalize(text);
+	const isSafe = normalized.length === 0 || fontForText(normalized) != null;
+	return { isSafe, unrenderableRatio: isSafe ? 0 : 1 };
 }
 
 // ============================================================================
@@ -1537,7 +1407,7 @@ export function dimStopwords(text: string): string {
 const DOC_GUTTER = 3;
 
 /** East Asian Wide / Fullwidth code points that occupy two grid cells when a
- *  narrow bitmap shape draws them through the Silver fallback. Mirrors
+ *  narrow grid draws them with a double advance. Mirrors
  *  `is_wide` in `crates/natives/src/snapcompact.rs`; the two MUST stay in
  *  sync or native layout and this capacity math disagree on cell counts. */
 function isWideCodePoint(cp: number): boolean {
@@ -1569,10 +1439,9 @@ function charCells(ch: string, wideCells: boolean): number {
 	return wideCells && cp !== undefined && isWideCodePoint(cp) ? 2 : 1;
 }
 
-/** Wide code points span two cells in every shape except the square-celled
- *  Silver shape, which sizes each cell for a full-width glyph already. */
-function usesWideCells(shape: Pick<Shape, "font">): boolean {
-	return shape.font !== "silver";
+/** Wide code points span two cells unless the grid already uses full-width CJK cells. */
+function usesWideCells(shape: Pick<Shape, "wideCells">): boolean {
+	return shape.wideCells !== false;
 }
 
 /** Total grid cells a string occupies (ignoring row wrapping/pads). */
@@ -1699,13 +1568,13 @@ export function geometry(shape: Shape, size: number = shape.frameSize): Geometry
 
 const NEWLINES = /\n/g;
 
-function nativeRenderOptions(shape: Shape, size: number) {
+function nativeRenderOptions(shape: Shape, size: number, fontId: number) {
 	return {
 		size,
-		font: shape.font,
+		fontId,
 		cellWidth: shape.cellWidth,
 		cellHeight: shape.cellHeight,
-		stretch: shape.stretch,
+		wideCells: shape.wideCells,
 		variant: shape.variant,
 		lineRepeat: shape.lineRepeat,
 		columns: shape.columns,
@@ -1738,10 +1607,16 @@ function renderedChars(text: string, shape: Shape, geo: Geometry): number {
 /** Render one snapcompact frame from already-normalized text. Doc shapes
  *  (`columns === 2`) expect one page of `\n`-joined pre-wrapped lines. */
 export async function render(text: string, shape: Shape, size: number = shape.frameSize): Promise<RenderedFrame> {
+	const fontId = fontForText(text);
+	if (fontId == null) throw new Error("No installed font covers the snapcompact text");
+	return renderWithFont(text, shape, size, fontId);
+}
+
+async function renderWithFont(text: string, shape: Shape, size: number, fontId: number): Promise<RenderedFrame> {
 	const geo = geometry(shape, size);
 	const { cols, rows } = geo;
 	const chars = renderedChars(text, shape, geo);
-	const data = await renderSnapcompactPng(text, nativeRenderOptions(shape, size));
+	const data = await renderSnapcompactPng(text, nativeRenderOptions(shape, size, fontId));
 	return { data, cols, rows, chars };
 }
 
@@ -1771,13 +1646,16 @@ export interface RenderManyOptions {
 
 /**
  * Render arbitrary text into snapcompact PNG frames as LLM image blocks
- * (first page first). Empty/whitespace-only input yields no frames.
+ * (first page first). Empty input or text no single installed face covers yields no frames.
  */
 export async function renderMany(text: string, options?: RenderManyOptions): Promise<ImageContent[]> {
 	const shape = options?.shape ?? resolveShapeForText(text, options?.model);
 	const frameSize = options?.frameSize ?? shape.frameSize;
 	const geo = geometry(shape, frameSize);
-	const normalized = normalize(text, { shape });
+	const normalized = normalize(text);
+	if (!normalized) return [];
+	const fontId = fontForText(normalized);
+	if (fontId == null) return [];
 	const cap = options?.maxFrames;
 	// Build the per-frame texts in order first (cheap, synchronous), then fan
 	// the native PNG renders out concurrently — render() is async/off-thread,
@@ -1796,7 +1674,7 @@ export async function renderMany(text: string, options?: RenderManyOptions): Pro
 			pageTexts.push(shape.stopwordDim ? dimStopwords(page) : page);
 		}
 	}
-	const rendered = await Promise.all(pageTexts.map(page => render(page, shape, frameSize)));
+	const rendered = await Promise.all(pageTexts.map(page => renderWithFont(page, shape, frameSize, fontId)));
 	return rendered.map(frame => ({
 		type: "image",
 		data: frame.data,
@@ -1811,7 +1689,8 @@ export async function renderMany(text: string, options?: RenderManyOptions): Pro
 export function frames(text: string, options?: Pick<RenderManyOptions, "shape" | "model" | "frameSize">): number {
 	const shape = options?.shape ?? resolveShapeForText(text, options?.model);
 	const geo = geometry(shape, options?.frameSize ?? shape.frameSize);
-	const normalized = normalize(text, { shape });
+	const normalized = normalize(text);
+	if (!normalized || fontForText(normalized) == null) return 0;
 	const wideCells = usesWideCells(shape);
 	if (shape.columns === 2) return Math.ceil(wrap(normalized, geo.cols, wideCells).length / (2 * geo.rows));
 	return paginateCells(normalized, geo.capacity, geo.cols, wideCells).length;
@@ -1888,17 +1767,53 @@ export function archiveSourceText(archive: Archive): string | undefined {
 	return text.length > 0 ? elideDataUrls(toPlainText(text), "archive") : undefined;
 }
 
-/** Build the text used to choose and preflight a font-aware snapcompact shape. */
+/** Build the same transcript used by compaction before choosing a font. */
 export function renderabilityProbeText(
 	serialized: string,
 	previousPreserveData?: Record<string, unknown>,
 	previousSummary?: string,
+	includeThinking?: boolean,
 ): string {
-	const previousArchive = getPreservedArchive(previousPreserveData);
-	const previousText = previousArchive ? (archiveSourceText(previousArchive) ?? "") : "";
-	if (previousText.length > 0) return `${previousText}${NEWLINE_GLYPH}${serialized}`;
-	if (previousSummary) return `${previousSummary}${NEWLINE_GLYPH}${serialized}`;
-	return serialized;
+	return archiveSource(
+		serialized,
+		getPreservedArchive(previousPreserveData),
+		previousSummary,
+		includeThinking === false,
+	).text;
+}
+
+function archiveSource(
+	serialized: string,
+	previousArchive: Archive | undefined,
+	previousSummary: string | undefined,
+	excludeThinking: boolean,
+): { text: string; includedPreviousSummary: boolean } {
+	const previousTextRaw =
+		excludeThinking && previousArchive
+			? sourceForReaderWithoutThinking(previousArchive)
+			: (previousArchive?.text ??
+				[previousArchive?.textHead, previousArchive?.textTail]
+					.filter((part): part is string => typeof part === "string" && part.length > 0)
+					.join(NEWLINE_GLYPH));
+	// Older archives may contain reasoned sections or sliced data URLs.
+	const healed = elideDataUrls(previousTextRaw, "archive");
+	const previousText = excludeThinking && healed ? textWithoutThinking(healed) : healed;
+	const recent = normalize(serialized);
+	if (previousText) {
+		return {
+			text: elideDataUrls(recent ? `${previousText}${NEWLINE_GLYPH}${recent}` : previousText),
+			includedPreviousSummary: false,
+		};
+	}
+	if (previousSummary) {
+		const lead = excludeThinking ? textWithoutThinking(previousSummary) : previousSummary;
+		const head = `${PREVIOUS_SUMMARY_HEAD} ${normalize(lead)}`;
+		return {
+			text: elideDataUrls(recent ? `${head} [Recent conversation] ${recent}` : head),
+			includedPreviousSummary: true,
+		};
+	}
+	return { text: elideDataUrls(recent), includedPreviousSummary: false };
 }
 
 /** A frame payload that can be priced before it is materialized. */
@@ -2120,10 +2035,10 @@ export function capFrameDataBytes(
 
 /** Denser companion of `high` for the foveated archive middle: same family and
  *  frame size (identical per-frame bill) but a tighter cell. Returns `high`
- *  unchanged for doc layouts, TrueType Unicode shapes, or when no denser
+ *  unchanged for doc layouts, CJK grids, or when no denser
  *  variant exists (foveation off). */
 function denseCompanion(high: Shape, api: Api | undefined): Shape {
-	if (high.columns === 2 || high.font === "silver") return high;
+	if (high.columns === 2 || high.wideCells === false) return high;
 	const low: Shape = {
 		...SHAPE_VARIANTS[FAMILY_VARIANT_LOW[apiFamily(api)]],
 		frameSize: high.frameSize,
@@ -2155,6 +2070,12 @@ function planFrames(pages: readonly string[], shape: Shape): PlanFrame[] {
 	return pages.map(text => ({ text, shape }));
 }
 
+/** Align UTF-16 budget cuts to a Unicode scalar boundary. */
+function scalarBoundary(text: string, offset: number): number {
+	const unit = text.charCodeAt(offset);
+	return unit >= 0xdc00 && unit <= 0xdfff ? offset - 1 : offset;
+}
+
 /**
  * Lay out the accumulated archive `text` (oldest→newest) with text at both
  * chronological edges and images in the middle. One HQ-capacity stays verbatim
@@ -2169,8 +2090,8 @@ function planArchive(text: string, high: Shape, low: Shape, maxFrames: number): 
 		return { frames: [], textHead: text, textTail: "", keptText: text, truncatedChars: 0 };
 	}
 	if (maxFrames < 1) {
-		const textHead = text.slice(0, edgeCap);
-		const textTail = text.slice(text.length - edgeCap);
+		const textHead = text.slice(0, scalarBoundary(text, edgeCap));
+		const textTail = text.slice(scalarBoundary(text, text.length - edgeCap));
 		return {
 			frames: [],
 			textHead,
@@ -2180,9 +2101,11 @@ function planArchive(text: string, high: Shape, low: Shape, maxFrames: number): 
 		};
 	}
 
-	const textHead = text.slice(0, edgeCap);
-	const textTail = text.slice(text.length - edgeCap);
-	const imageText = text.slice(edgeCap, text.length - edgeCap);
+	const headEnd = scalarBoundary(text, edgeCap);
+	const tailStart = scalarBoundary(text, text.length - edgeCap);
+	const textHead = text.slice(0, headEnd);
+	const textTail = text.slice(tailStart);
+	const imageText = text.slice(headEnd, tailStart);
 	if (imageText.length === 0) {
 		return { frames: [], textHead: text, textTail: "", keptText: text, truncatedChars: 0 };
 	}
@@ -2560,42 +2483,19 @@ export async function compact<TMessage = Message>(
 		const serialized = serializeConversation(llmMessages, options);
 		const previousArchive = getPreservedArchive(previousPreserveData);
 		const excludeThinking = options?.includeThinking === false;
-		const previousTextRaw =
-			excludeThinking && previousArchive
-				? sourceForReaderWithoutThinking(previousArchive)
-				: (previousArchive?.text ??
-					[previousArchive?.textHead, previousArchive?.textTail]
-						.filter((part): part is string => typeof part === "string" && part.length > 0)
-						.join(NEWLINE_GLYPH));
-		// Legacy archives may carry `¶think:` sections from before includeThinking
-		// existed, and any archive may carry an earlier summary's reasoning legend;
-		// scrub both when this compaction excludes thinking so the re-rendered
-		// archive stops replaying reasoning (issue #6093). They may also carry data
-		// URLs a pre-guard slice cut at any offset; heal those in archive context
-		// before the text is folded into the new source.
-		const previousTextHealed = elideDataUrls(previousTextRaw, "archive");
-		const previousText =
-			excludeThinking && previousTextHealed.length > 0
-				? textWithoutThinking(previousTextHealed)
-				: previousTextHealed;
-		const hasPreviousText = previousText.length > 0;
-		const includedPreviousSummary = !hasPreviousText && !!previousSummary;
-		const shapeProbeText = renderabilityProbeText(serialized, previousPreserveData, previousSummary);
-		const baseShape = options?.shape ?? resolveShapeForText(shapeProbeText, options?.model);
+		const { text: archiveText, includedPreviousSummary } = archiveSource(
+			serialized,
+			previousArchive,
+			previousSummary,
+			excludeThinking,
+		);
+		const baseShape = options?.shape ?? resolveShapeForText(archiveText, options?.model);
 		const frameSize = options?.frameSize ?? baseShape.frameSize;
 		const high = frameSize === baseShape.frameSize ? baseShape : { ...baseShape, frameSize };
 		const low = denseCompanion(high, options?.model?.api);
 		// The engine default caps archive growth; a caller-supplied maxFrames only
 		// lowers it further (an upper limit), never raising it past the default.
 		const maxFrames = Math.max(1, Math.min(options?.maxFrames ?? MAX_FRAMES_DEFAULT, MAX_FRAMES_DEFAULT));
-
-		let archiveText = normalize(serialized, { shape: high });
-
-		if (includedPreviousSummary && previousSummary) {
-			const lead = excludeThinking ? textWithoutThinking(previousSummary) : previousSummary;
-			const head = `${PREVIOUS_SUMMARY_HEAD} ${normalize(lead, { shape: high })}`;
-			archiveText = archiveText.length > 0 ? `${head} [Recent conversation] ${archiveText}` : head;
-		}
 
 		// An archive persisted without `text` (written before the text-first layout)
 		// holds its middle only as frames, which cannot be re-rendered: the new
@@ -2608,40 +2508,40 @@ export async function compact<TMessage = Message>(
 					(excludeThinking ? unscopedTailLength(previousArchive) : 0)
 				: 0);
 
-		// Re-compacting a snapcompacted history unfolds the prior archive's source
-		// text and treats it as one coherent transcript: the previous kept source
-		// ages in ahead of the new history, then the whole thing is re-rendered.
-		if (hasPreviousText) {
-			archiveText = archiveText.length > 0 ? `${previousText}${NEWLINE_GLYPH}${archiveText}` : previousText;
-		}
-		// Data URLs must never reach planArchive: its edge slices are structure-
-		// blind, and a split payload replays as broken image input on every later
-		// request. previousText is already strictly healed above; this source-mode
-		// pass covers intact URLs in fresh user/assistant text, which the
-		// serializer never truncates.
-		return { archiveText: elideDataUrls(archiveText), high, low, maxFrames, droppedChars, includedPreviousSummary };
+		return { archiveText, high, low, maxFrames, droppedChars, includedPreviousSummary };
 	});
 	await Bun.sleep(0);
 
 	const { high, includedPreviousSummary } = source;
 	const planned = withLoopPhase(COMPACT_LOOP_PHASE, () => {
-		const layout = planArchive(source.archiveText, high, source.low, source.maxFrames);
+		const { archiveText } = source;
+		const fontId = archiveText ? fontForText(archiveText) : null;
+		const newFrames: Promise<Frame>[] = [];
+		if (fontId == null) {
+			const layout: ArchiveLayout = {
+				frames: [],
+				textHead: archiveText,
+				textTail: "",
+				keptText: archiveText,
+				truncatedChars: 0,
+			};
+			return { layout, newFrames, dimOpen: false };
+		}
+		const layout = planArchive(archiveText, high, source.low, source.maxFrames);
 		// Re-render the planned frames, carrying any open dim span across every
 		// boundary: textHead → frames → textTail.
 		let dimOpen = layout.textHead.lastIndexOf(DIM_ON) > layout.textHead.lastIndexOf(DIM_OFF);
-		const newFrames: Promise<Frame>[] = [];
 		for (const planned of layout.frames) {
 			let pageText: string = dimOpen ? DIM_ON + planned.text : planned.text;
 			dimOpen = pageText.lastIndexOf(DIM_ON) > pageText.lastIndexOf(DIM_OFF);
 			if (planned.shape.stopwordDim) pageText = dimStopwords(pageText);
 			newFrames.push(
-				render(pageText, planned.shape).then(rendered => ({
+				renderWithFont(pageText, planned.shape, planned.shape.frameSize, fontId).then(rendered => ({
 					data: rendered.data,
 					mimeType: "image/png",
 					cols: rendered.cols,
 					rows: rendered.rows,
 					chars: rendered.chars,
-					font: planned.shape.font,
 					variant: planned.shape.variant,
 					lineRepeat: planned.shape.lineRepeat,
 					...(planned.shape.columns === 2 ? { columns: 2 } : {}),

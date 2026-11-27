@@ -113,6 +113,7 @@ import {
 	createAuthStorageSettingsSync,
 	describeAuthBrokerStartupError,
 	discoverSessionAuthStorage as discoverAuthStorage,
+	openManagedSessionAuthStorage,
 } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
 import { describePendingToolCalls } from "./session/exit-diagnostics";
@@ -2154,9 +2155,12 @@ export async function runRootCommand(
 			? Promise.resolve(deps.settings)
 			: logger.time("settings:init", Settings.init, { cwd, configFiles: parsedArgs.config });
 		settingsPromise.catch(() => {});
-		const authStoragePromise = logger.time("discoverAuthStorage", async () =>
-			(deps.discoverAuthStorage ?? discoverAuthStorage)(undefined, { settings: await settingsPromise }),
-		);
+		const authStoragePromise = logger.time("discoverAuthStorage", async () => {
+			const settings = await settingsPromise;
+			return deps.discoverAuthStorage
+				? deps.discoverAuthStorage(undefined, { settings })
+				: openManagedSessionAuthStorage(settings);
+		});
 		authStoragePromise.catch(() => {});
 		let authStorage: AuthStorage;
 		try {
@@ -2167,6 +2171,9 @@ export async function runRootCommand(
 			process.stderr.write(`${chalk.red(`Error: ${message}`)}\n`);
 			process.exit(1);
 		}
+
+		using authLifetime = new DisposableStack();
+		if (!deps.discoverAuthStorage) authLifetime.defer(() => authStorage.close());
 
 		const settingsInstance = await settingsPromise;
 		if (parsedArgs.approvalMode) {
@@ -2199,7 +2206,8 @@ export async function runRootCommand(
 			() => new ModelRegistry(authStorage, undefined, { settings: settingsInstance }),
 		);
 		// Process-lifetime: broker/account-policy/paused-provider edits reconfigure the shared credential store.
-		createAuthStorageSettingsSync(settingsInstance, authStorage, modelRegistry);
+		const authSettingsSync = createAuthStorageSettingsSync(settingsInstance, authStorage, modelRegistry);
+		authLifetime.defer(() => authSettingsSync.stop());
 		// Credential-scoped catalogs (e.g. GitHub Copilot) load from their cache
 		// rows only after credentials resolve. `--model` and `enabledModels` below
 		// resolve against the registry before `createAgentSession` hydrates it, so

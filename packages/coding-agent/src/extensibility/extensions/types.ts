@@ -2381,6 +2381,7 @@ export interface ExtensionAPI {
 	 * If only `baseUrl` is provided: overrides the URL for existing models.
 	 * If `streamSimple` is provided: registers a custom API stream handler.
 	 * If `stream`/`generateImage`/`webSearch`/`rules` are provided: takes over those parts of the provider.
+	 * Await live registrations before using a provider; custom auth may need to open its local store.
 	 *
 	 * @example
 	 * // Own an existing provider's wire requests and flip a KDL rule for its models
@@ -2415,15 +2416,16 @@ export interface ExtensionAPI {
 	 *   baseUrl: "https://proxy.example.com"
 	 * });
 	 */
-	registerProvider(name: string, config: ProviderConfig): void;
+	registerProvider(name: string, config: ProviderConfig): void | Promise<void>;
 
 	/**
 	 * Unregister a provider previously registered by an extension.
 	 *
 	 * Removes extension-provided models and restores overridden built-in models.
 	 * Has no effect when the provider is not registered.
+	 * Await live removal if a registration for the provider is still pending.
 	 */
-	unregisterProvider(name: string): void;
+	unregisterProvider(name: string): void | Promise<void>;
 
 	/** Shared event bus for extension communication. */
 	events: EventBus;
@@ -2612,10 +2614,10 @@ export interface ExtensionRuntimeState {
 	flagValues: Map<string, boolean | string>;
 	/** Provider registrations queued during extension loading, processed during session initialization */
 	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; sourceId: string }>;
-	/** Queue a provider registration until initialization, then apply it immediately. */
-	registerProvider(name: string, config: ProviderConfig, sourceId: string): void;
+	/** Queue a provider registration until initialization, then apply it using its auth owner. */
+	registerProvider(name: string, config: ProviderConfig, sourceId: string): void | Promise<void>;
 	/** Remove a queued or initialized provider registration. */
-	unregisterProvider(name: string, sourceId: string): void;
+	unregisterProvider(name: string, sourceId: string): void | Promise<void>;
 	/** What holds `shortcut` for the extension at `extensionPath`; answered by the runner once it exists. */
 	getShortcutConflict(shortcut: KeyId, extensionPath: string): ShortcutConflict | undefined;
 }

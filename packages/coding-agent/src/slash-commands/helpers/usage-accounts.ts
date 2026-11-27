@@ -29,25 +29,29 @@ export function usageAuthRejectedHint(account: UsageAccountIdentity): string | u
 
 /** Flatten every stored credential (OAuth and API key) into identity rows for unreported-account detection. */
 export function collectStoredAccounts(authStorage: AuthStorage): UsageAccountIdentity[] {
-	return authStorage.credentials.snapshot().credentials.map(({ provider, id, credential }) => {
+	const accounts: UsageAccountIdentity[] = [];
+	for (const row of authStorage.credentials.summaries()) {
+		if (row.disabled) continue;
+		const { provider, id, type } = row;
 		const usageAuthRejected = authStorage.usage.authRejection(provider, id);
-		return {
+		accounts.push({
 			provider,
-			type: credential.type,
-			...(credential.type === "oauth" && {
-				email: credential.email,
-				accountId: credential.accountId,
-				projectId: credential.projectId,
-				enterpriseUrl: credential.enterpriseUrl,
-				orgId: credential.orgId,
-				orgName: credential.orgName,
-				authorizedAt: credential.authorizedAt,
-				refreshExpires: credential.refreshExpires,
-				expires: credential.expires,
+			type,
+			...(row.type === "oauth" && {
+				email: row.email,
+				accountId: row.accountId,
+				projectId: row.projectId,
+				enterpriseUrl: row.enterpriseUrl,
+				orgId: row.orgId,
+				orgName: row.orgName,
+				authorizedAt: row.authorizedAt,
+				refreshExpires: row.refreshExpires,
+				expires: row.expires,
 			}),
 			...(usageAuthRejected !== undefined && { usageAuthRejected }),
-		};
-	});
+		});
+	}
+	return accounts;
 }
 
 /**

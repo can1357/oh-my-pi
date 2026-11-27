@@ -3,7 +3,8 @@ import type { Api, Model } from "@oh-my-pi/pi-ai/types";
 import { authProviders } from "@oh-my-pi/pi-catalog/compat/auth";
 import type { ModelResolutionSource } from "@oh-my-pi/pi-catalog/model-manager";
 import { MODELS_DEV_CATALOG_PROVIDER_IDS, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models";
-import type { AuthStorage, OAuthCredential } from "../session/auth-storage";
+import { findStoredOAuthIdentity } from "../session/auth-daemon-backend";
+import type { AuthStorage } from "../session/auth-storage";
 
 /**
  * Built-in providers whose discovery requires provider-specific credentials
@@ -90,15 +91,6 @@ export interface ProviderDiscoveryState {
 	error?: string;
 }
 
-export function getOAuthCredentialsForProvider(authStorage: AuthStorage, provider: string): OAuthCredential[] {
-	const providerEntry = authStorage.credentials.all()[provider];
-	if (!providerEntry) {
-		return [];
-	}
-	const entries = Array.isArray(providerEntry) ? providerEntry : [providerEntry];
-	return entries.filter((entry): entry is OAuthCredential => entry.type === "oauth");
-}
-
 /** One account resolved for discovery; `apiKey` is the key the provider's transport sends for it. */
 export type OAuthDiscoveryAccount = OAuthAccess & { apiKey: string };
 
@@ -131,15 +123,13 @@ export async function resolveOAuthDiscoveryAccounts(
 		accounts.push(access);
 	}
 	if (!accounts.some(account => account.accessToken === resolvedKey || account.apiKey === resolvedKey)) {
-		const matchingCredential = getOAuthCredentialsForProvider(authStorage, provider).find(
-			credential => credential.access === resolvedKey,
-		);
+		const identity = await findStoredOAuthIdentity(authStorage, provider, resolvedKey);
 		accounts.push({
 			accessToken: resolvedKey,
 			apiKey: resolvedKey,
-			accountId: matchingCredential?.accountId,
-			email: matchingCredential?.email,
-			projectId: matchingCredential?.projectId,
+			accountId: identity?.accountId,
+			email: identity?.email,
+			projectId: identity?.projectId,
 		});
 	}
 	return accounts;
