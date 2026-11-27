@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { rasterizeSvg } from "@oh-my-pi/pi-natives";
 import { type Accessor, computed, createRoot, type Signal, signal } from "@oh-my-pi/pi-tui";
 import type { TerminalCapabilities } from "@oh-my-pi/pi-tui/driver/contract";
-import { anchoredRows, RESERVED_ROW } from "@oh-my-pi/pi-tui/driver/images/anchor";
+import { anchoredRows, RESERVED_ROW, reservedRows } from "@oh-my-pi/pi-tui/driver/images/anchor";
 import { itermImage } from "@oh-my-pi/pi-tui/driver/images/iterm";
 import { kittyDelete, kittyDeleteAll, kittyTransmit, kittyVirtualPlace } from "@oh-my-pi/pi-tui/driver/images/kitty";
 import {
@@ -30,6 +30,7 @@ function capabilities(overrides: Partial<TerminalCapabilities> = {}): TerminalCa
 		multiplexer: null,
 		textSizing: false,
 		tsp: false,
+		pixelMouse: false,
 		...overrides,
 	};
 }
@@ -239,6 +240,18 @@ describe("TerminalImages: kitty", () => {
 });
 
 describe("TerminalImages: budget", () => {
+	it("measures offscreen images without evicting the picture on screen", () => {
+		const { images } = rig({}, { budget: 1 });
+		const request = { maxColumns: 3, fallback: "[image]" };
+		const visible = paint(images, image("visible"), request);
+		expect(frame(images, [visible]).rows[0]!.state).toBe("image");
+		expect(images.measure(image("offscreen"), request).rows).toEqual(reservedRows(3));
+		const next = frame(images, [visible]);
+		expect(next.rows[0]!.state).toBe("image");
+		expect(next.sequences).toBe("");
+		visible.dispose();
+	});
+
 	it("draws the newest `budget` images and shows older ones as fallback rows of the same height", () => {
 		const { images } = rig({}, { budget: 2 });
 		const request = (key: string): ImageRequest => ({ maxColumns: 12, maxRows: 3, fallback: `[Image: ${key}]` });

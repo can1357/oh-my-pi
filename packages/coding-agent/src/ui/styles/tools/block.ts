@@ -20,6 +20,8 @@ import { styledText } from "@oh-my-pi/pi-tui/term/painters/layout";
 import { truncate } from "@oh-my-pi/pi-tui/text/width";
 import { SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-tui/term/painters/spinner";
 import { imageLabel, paintImage } from "@oh-my-pi/pi-tui/term/painters/image";
+import type { TspSpan } from "@oh-my-pi/pi-wire";
+import { mapPrefixed, RowText, shiftText, sliceText } from "../rendered-text";
 import { terminalPaddingX } from "../terminal-padding";
 import { tint, tintRow } from "./default";
 import { imageLink, resultPictures } from "./file-common";
@@ -54,13 +56,13 @@ function withPictures(node: UiNode, cx: PaintContext, block: Block): Block {
 	const pictures = resultPictures(node, cx);
 	if (pictures.length === 0) return block;
 	const links = toolProps(node).term?.imageLinks;
-	const rows = [...block.rows];
+	const out = new RowText().block(block);
 	pictures.forEach((picture, i) => {
 		const text = links?.[i]?.text;
 		const label = text ? cx.theme.fg("toolOutput", text) : imageLabel(picture, cx);
-		rows.push("", ...paintImage(picture, cx, label).rows);
+		out.deco("").block(paintImage(picture, cx, label));
 	});
-	return { ...block, rows };
+	return { ...block, ...out.done() };
 }
 
 /** The compact summary text: bold label, muted ` · detail`, dim live seconds while running. */
@@ -102,13 +104,39 @@ function paintAllocated(node: UiNode, cx: PaintContext, rows: number): Block {
 	const props = toolProps(node);
 	const theme = cx.theme;
 	const text = compactText(props, cx);
-	if (rows === 1)
-		return {
-			rows: [truncate(`${compactGlyph(node, props, cx, true)} ${text}`, cx.width)],
-		};
-	return {
-		rows: [truncate(`${theme.fg("dim", "╭─")} ${text}`, cx.width), theme.fg("dim", "╰")],
-	};
+	if (rows === 1) {
+		const glyph = compactGlyph(node, props, cx, true);
+		return new RowText().prefixed(text, [truncate(`${glyph} ${text}`, cx.width)], `${Bun.stripANSI(glyph)} `).done();
+	}
+	return new RowText()
+		.prefixed(text, [truncate(`${theme.fg("dim", "╭─")} ${text}`, cx.width)], "╭─ ")
+		.deco(theme.fg("dim", "╰"))
+		.done();
+}
+
+/** A compact tool or read group: the glyph and the presenter's two-cell body indent do not copy. */
+export function compactPresenterBlock(
+	cx: PaintContext,
+	glyph: string,
+	label: string,
+	spans?: readonly TspSpan[],
+): Block {
+	const out = new RowText().prefixed(label, [truncate(`${glyph} ${label}`, cx.width)], `${Bun.stripANSI(glyph)} `);
+	if (spans?.length) {
+		const rows = paintPresenterRows(spans, cx);
+		out.block({
+			rows,
+			text: () => {
+				// presenterRows joins single-line bodies with newline spans; a truncated row still maps to its own line.
+				const lines = spans
+					.map(span => span.t)
+					.join("")
+					.split("\n");
+				return rows.map((row, i) => mapPrefixed(lines[i]!, [row], "  ")[0]);
+			},
+		});
+	}
+	return out.done();
 }
 
 /** An extension presenter's compact presentation: glyph and label (or the summary), then its rows. */
@@ -117,12 +145,9 @@ function paintCompact(node: UiNode, cx: PaintContext): Block {
 	const glyph = compactGlyph(node, props, cx);
 	const withLabel = props.term?.compact === "label";
 	const shown = withLabel ? styledText(cx.theme, props.target) : compactText(props, cx);
-	const rows = [truncate(`${glyph} ${shown}`, cx.width)];
-	if (withLabel) rows.push(...paintPresenterRows(bodySpans(node), cx));
+	const built = compactPresenterBlock(cx, glyph, shown, withLabel ? bodySpans(node) : undefined);
 	const limit = cx.height;
-	return {
-		rows: limit === undefined ? rows : rows.slice(0, Math.max(0, limit)),
-	};
+	return limit === undefined || built.rows.length <= limit ? built : sliceText(built, 0, Math.max(0, limit));
 }
 
 function paintToolBlock(node: UiNode, cx: PaintContext): Block {
@@ -134,7 +159,7 @@ function paintToolBlock(node: UiNode, cx: PaintContext): Block {
 	if (!(props.term?.margin ?? lookFor(node).margin) || block.rows.length === 0) return block;
 	return {
 		...block,
-		rows: ["", ...block.rows, ""],
+		...new RowText().deco("").block(block).deco("").done(),
 		...(block.hits ? { hits: block.hits.map(hit => ({ ...hit, row: hit.row + 1 })) } : {}),
 		...(block.cursor ? { cursor: { row: block.cursor.row + 1, col: block.cursor.col } } : {}),
 	};
@@ -177,8 +202,16 @@ function paintLookRows(node: UiNode, cx: PaintContext): Block {
 		const inner = look.paint(node, withContext(still, { width: Math.max(1, cx.width - 2) }));
 		if (inner.rows.length === 0) return EMPTY_BLOCK;
 		const key = tint(toolProps(node));
-		const rows = ["", ...inner.rows.map(row => ` ${row}`), ""].map(row => tintRow(cx.theme, key, row, cx.width));
-		return { rows };
+		const fill = (row: string): string => tintRow(cx.theme, key, row, cx.width);
+		return new RowText()
+			.deco(fill(""))
+			.block(
+				inner,
+				1,
+				inner.rows.map(row => fill(` ${row}`)),
+			)
+			.deco(fill(""))
+			.done();
 	}
 	const paddingX = look.inset ? terminalPaddingX() : 0;
 	if (paddingX > 0) {
@@ -187,6 +220,7 @@ function paintLookRows(node: UiNode, cx: PaintContext): Block {
 		return {
 			...inner,
 			rows: inner.rows.map(row => (row === "" ? row : pad + row)),
+			text: shiftText(inner, paddingX),
 			...(inner.hits ? { hits: inner.hits.map(hit => ({ ...hit, col: hit.col + paddingX })) } : {}),
 			...(inner.cursor ? { cursor: { row: inner.cursor.row, col: inner.cursor.col + paddingX } } : {}),
 		};

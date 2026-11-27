@@ -11,6 +11,7 @@ import type { Block, PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { replaceTabs, truncate, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { AutoresearchTerm } from "../../tools/autoresearch";
 import { defineToolLook, toolProps } from "./look";
+import { RowText } from "../rendered-text";
 
 /** Characters of a header argument shown. */
 const ARG_CHARS = 100;
@@ -60,8 +61,9 @@ function paintAutoresearch(node: UiNode, cx: PaintContext): Block {
 		rows.push(...wrap(text, cx.width));
 		return { rows };
 	}
-	for (const child of node.children()) rows.push(...cx.paint(child, cx.width).rows);
-	return { rows };
+	const out = new RowText().literal(...rows);
+	for (const child of node.children()) out.block(cx.paint(child, cx.width));
+	return out.done();
 }
 
 const look = { paint: paintAutoresearch, margin: true };

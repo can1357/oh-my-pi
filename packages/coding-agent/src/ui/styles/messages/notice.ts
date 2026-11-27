@@ -20,6 +20,7 @@ import { type Block, defineRolePainter, EMPTY_BLOCK, type PaintContext } from "@
 import { stack } from "@oh-my-pi/pi-tui/term/painters/layout";
 import { padTo, replaceTabs, wrap } from "@oh-my-pi/pi-tui/text/width";
 import { terminalPaddingX } from "../terminal-padding";
+import { RowText } from "../rendered-text";
 import type { NoticeBox, StatusRow } from "../../transcript/messages/notices";
 import { fillRow, paddedText, propsOf, termOf } from "./fill";
 
@@ -42,45 +43,57 @@ function paintNoticeRow(node: UiNode, cx: PaintContext): Block {
 	if (!term.line) return EMPTY_BLOCK;
 	const tone = propsOf<{ tone: string }>(node).tone ?? "warning";
 	const text = term.line.label ? `${term.line.label}: ${term.line.message}` : term.line.message;
-	return { rows: ["", ...paddedText(cx.theme.fg(tone, text), cx.width)] };
+	return new RowText()
+		.deco("")
+		.block(paddedText(cx.theme.fg(tone, text), cx.width).done())
+		.done();
 }
 
-/** Rows of one status row: parts joined by spaces under the row's indent. */
-export function statusRows(cx: PaintContext, row: Pick<StatusRow, "parts" | "indent">): string[] {
+/** Rows of one status row: parts joined by spaces under the row's indent, copying as one line. */
+export function statusRows(cx: PaintContext, row: Pick<StatusRow, "parts" | "indent">): RowText {
+	const out = new RowText();
 	const parts = row.parts.flatMap(part =>
 		part && part.text !== "" ? [part.color ? cx.theme.fg(part.color, part.text) : part.text] : [],
 	);
-	if (parts.length === 0) return [];
+	if (parts.length === 0) return out;
 	// The indent pads both sides.
 	const indent = " ".repeat(terminalPaddingX(row.indent));
-	return wrap(replaceTabs(parts.join(" ")), Math.max(1, cx.width - 2 * indent.length)).map(line => indent + line);
+	const source = replaceTabs(parts.join(" "));
+	const rows = wrap(source, Math.max(1, cx.width - 2 * indent.length));
+	return out.wrapped(
+		source,
+		rows,
+		indent.length,
+		rows.map(line => indent + line),
+	);
 }
 
 function paintStatusBlock(node: UiNode, cx: PaintContext): Block {
-	const rows = termOf<{ rows: readonly StatusRow[] }>(node).rows ?? [];
-	return { rows: rows.flatMap(row => statusRows(cx, row)) };
+	const out = new RowText();
+	for (const row of termOf<{ rows: readonly StatusRow[] }>(node).rows ?? []) out.block(statusRows(cx, row).done());
+	return out.done();
 }
 
 function paintStatusToast(node: UiNode, cx: PaintContext): Block {
 	const term = termOf<{ message: string; color: string }>(node);
 	const message = term.message ?? "";
-	return {
-		rows: ["", ...paddedText(term.color ? cx.theme.fg(term.color, message) : message, cx.width)],
-	};
+	return new RowText()
+		.deco("")
+		.block(paddedText(term.color ? cx.theme.fg(term.color, message) : message, cx.width).done())
+		.done();
 }
 
 function paintRecap(node: UiNode, cx: PaintContext): Block {
 	const recap = termOf<{ recap: string }>(node).recap ?? "";
-	return {
-		rows: ["", ...paddedText(cx.theme.style("dim em", `※ recap: ${recap}`), cx.width)],
-	};
+	return new RowText()
+		.deco("")
+		.block(paddedText(cx.theme.style("dim em", `※ recap: ${recap}`), cx.width).done())
+		.done();
 }
 
 function paintElided(node: UiNode, cx: PaintContext): Block {
 	const spans = propsOf<{ spans: readonly { t: string; s?: string }[] }>(node).spans ?? [];
-	return {
-		rows: paddedText(spans.map(span => cx.theme.style(span.s, span.t)).join(""), cx.width),
-	};
+	return paddedText(spans.map(span => cx.theme.style(span.s, span.t)).join(""), cx.width).done();
 }
 
 /** Turns off every text attribute but inverse, and the foreground. */
@@ -93,29 +106,37 @@ interface BoxTerm {
 	leadingSpace?: boolean;
 }
 
-/** The rows of a notice box at `width`. */
-export function noticeBoxRows(cx: PaintContext, term: Partial<BoxTerm>): string[] {
+/** The rows of a notice box at `width`: its fill is decoration, the header (past its glyph) and body copy. */
+export function noticeBoxRows(cx: PaintContext, term: Partial<BoxTerm>): RowText {
+	const out = new RowText();
 	const box = term.box;
-	if (!box) return [];
+	if (!box) return out;
 	const theme = cx.theme;
 	const inner = Math.max(1, cx.width - 2);
 	const glyph = box.icon ? theme.symbols.icon(box.icon) : "";
-	const lines = wrap(replaceTabs(glyph ? `${glyph} ${box.header}` : box.header), inner);
-	if (box.body && box.body.length > 0) {
-		lines.push("");
-		for (const text of box.body) lines.push(...wrap(replaceTabs(text), inner));
-	}
 	// Each line closes its attributes and color before the fill runs on to the edge.
-	const content = ["", ...lines, ""].map(line => padTo(` ${line}${line ? CLOSE : ""}`, cx.width));
 	const fill = term.background
 		? (row: string) => fillRow(theme, term.background!, row, cx.width)
 		: (row: string) => theme.style(`inverse ${term.severity ?? "warning"}`, row);
-	const rows = content.map(fill);
-	return term.leadingSpace === false ? rows : ["", ...rows];
+	const shown = (line: string): string => fill(padTo(` ${line}${line ? CLOSE : ""}`, cx.width));
+	if (term.leadingSpace !== false) out.deco("");
+	out.deco(shown(""));
+	const header = replaceTabs(box.header);
+	const headRows = wrap(replaceTabs(glyph ? `${glyph} ${box.header}` : box.header), inner);
+	out.prefixed(header, headRows, glyph ? `${Bun.stripANSI(glyph)} ` : "", "", 1, headRows.map(shown));
+	if (box.body && box.body.length > 0) {
+		out.deco(shown(""));
+		for (const text of box.body) {
+			const source = replaceTabs(text);
+			const rows = wrap(source, inner);
+			out.wrapped(source, rows, 1, rows.map(shown));
+		}
+	}
+	return out.deco(shown(""));
 }
 
 function paintNoticeBox(node: UiNode, cx: PaintContext): Block {
-	return { rows: noticeBoxRows(cx, termOf<BoxTerm>(node)) };
+	return noticeBoxRows(cx, termOf<BoxTerm>(node)).done();
 }
 
 defineRolePainter("row", "omp.notice", paintNoticeRow, { prefix: true });

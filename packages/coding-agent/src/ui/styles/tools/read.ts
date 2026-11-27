@@ -16,7 +16,7 @@ import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { ReadTerm } from "../../tools/read";
 import { codeCellRows, markdownCellRows } from "./code-cell";
 import { fileLink } from "./file-common";
-import { bracketed, frameInner, frameRows, outcomeBg, statusIcon, statusLine } from "./frame";
+import { bracketed, frameBlock, frameInner, outcomeBg, statusIcon, statusLine } from "./frame";
 import { defineToolLook, isExpanded, toolProps } from "./look";
 
 function paintRead(node: UiNode, cx: PaintContext): Block {
@@ -41,14 +41,12 @@ function paintRead(node: UiNode, cx: PaintContext): Block {
 		};
 	}
 	if (phase === "error") {
-		return {
-			rows: frameRows(theme, width, {
-				head: statusLine(theme, { glyph: statusIcon(cx, "error"), title: display ? `Read ${display}` : "Read" }),
-				sections: [{ lines: displayLines(term?.error ?? "").map(line => theme.fg("error", line)) }],
-				border: "error",
-				bg: outcomeBg("error"),
-			}),
-		};
+		return frameBlock(theme, width, {
+			head: statusLine(theme, { glyph: statusIcon(cx, "error"), title: display ? `Read ${display}` : "Read" }),
+			sections: [{ lines: displayLines(term?.error ?? "").map(line => theme.fg("error", line)) }],
+			border: "error",
+			bg: outcomeBg("error"),
+		});
 	}
 	const correction = term?.correctedFrom ? ` ${theme.fg("dim", `(corrected from ${term.correctedFrom})`)}` : "";
 	const warnings = (term?.warnings ?? []).map(warning =>
@@ -58,23 +56,21 @@ function paintRead(node: UiNode, cx: PaintContext): Block {
 	if (phase === "image") {
 		const details = term?.content ? displayLines(term.content).map(line => theme.fg("toolOutput", line)) : [];
 		const lines = [...details, ...warnings];
-		return {
-			rows: frameRows(theme, width, {
-				head: statusLine(theme, {
-					glyph: statusIcon(cx, term?.correctedFrom ? "warning" : "success"),
-					title: "Read",
-					description: `${display}${correction}`,
-				}),
-				sections: [
-					{
-						label: theme.fg("toolTitle", "Details"),
-						lines: lines.length > 0 ? lines : [theme.fg("dim", "(image)")],
-					},
-				],
-				border: "dim",
-				bg: outcomeBg("success"),
+		return frameBlock(theme, width, {
+			head: statusLine(theme, {
+				glyph: statusIcon(cx, term?.correctedFrom ? "warning" : "success"),
+				title: "Read",
+				description: `${display}${correction}`,
 			}),
-		};
+			sections: [
+				{
+					label: theme.fg("toolTitle", "Details"),
+					lines: lines.length > 0 ? lines : [theme.fg("dim", "(image)")],
+				},
+			],
+			border: "dim",
+			bg: outcomeBg("success"),
+		});
 	}
 	let title = display ? `Read ${display}${correction}` : "Read";
 	if (term?.summarySpans !== undefined)
@@ -84,31 +80,28 @@ function paintRead(node: UiNode, cx: PaintContext): Block {
 	const output = warnings.length > 0 ? warnings.join("\n") : undefined;
 	if (phase === "markdown") {
 		const md = node.children().find(child => child.kind === "md");
-		const rendered = md && (term?.content ?? "").trim() ? cx.paint(md, Math.max(20, frameInner(width))).rows : [];
-		return {
-			rows: markdownCellRows(
-				cx,
-				{ title, status: "complete", expanded, rendered, ...(output ? { output } : {}) },
-				width,
-			),
-		};
-	}
-	return {
-		rows: codeCellRows(
+		const rendered =
+			md && (term?.content ?? "").trim() ? cx.paint(md, Math.max(20, frameInner(width))) : { rows: [] };
+		return markdownCellRows(
 			cx,
-			{
-				code: term?.content ?? "",
-				...(term?.language ? { language: term.language } : {}),
-				title,
-				status: "complete",
-				...(output ? { output } : {}),
-				expanded,
-				...(term?.startLine !== undefined ? { codeStartLine: term.startLine } : {}),
-				...(term?.lineNumbers ? { codeLineNumbers: term.lineNumbers } : {}),
-			},
+			{ title, status: "complete", expanded, rendered, ...(output ? { output } : {}) },
 			width,
-		),
-	};
+		);
+	}
+	return codeCellRows(
+		cx,
+		{
+			code: term?.content ?? "",
+			...(term?.language ? { language: term.language } : {}),
+			title,
+			status: "complete",
+			...(output ? { output } : {}),
+			expanded,
+			...(term?.startLine !== undefined ? { codeStartLine: term.startLine } : {}),
+			...(term?.lineNumbers ? { codeLineNumbers: term.lineNumbers } : {}),
+		},
+		width,
+	);
 }
 
 defineToolLook("read", { paint: paintRead, margin: true });

@@ -94,7 +94,7 @@ describe("ProcessTerminalInput lifecycle", () => {
 		expect(out).not.toContain("\x1b[?1004h");
 		expect(out).toContain("\x1b[?u\x1b[c");
 		expect(out).toContain("\x1b]11;?\x07\x1b[c");
-		for (const mode of [2026, 2048, 2031, 2004, 1010, 1011]) expect(out).toContain(`\x1b[?${mode}$p`);
+		for (const mode of [2026, 2048, 2031, 2004, 1010, 1011, 1007, 1016]) expect(out).toContain(`\x1b[?${mode}$p`);
 		expect(out).toContain("\x1b[>0q");
 		expect(out).toContain("\x1b[16t");
 		// Image support comes from the terminal's identity (and the SIXEL geometry query), never a Kitty graphics probe.
@@ -127,7 +127,9 @@ describe("ProcessTerminalInput lifecycle", () => {
 		await started;
 		h.writes.length = 0;
 		await h.input.stop();
-		expect(h.out()).toContain("\x1b[?2004l\x1b[?5522l\x1b[?1006l\x1b[?1003l\x1b[?1000l\x1b[?1l\x1b>");
+		expect(h.out()).toContain(
+			"\x1b[?2004l\x1b[?5522l\x1b[?1016l\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1l\x1b>",
+		);
 		expect(h.stdin.isRaw).toBe(false);
 		expect(h.stdin.paused).toBe(true);
 		expect(h.stdin.count("data")).toBe(0);
@@ -527,7 +529,7 @@ describe("ProcessTerminalInput input, resize, title and mouse", () => {
 		h.input.setMouse("any");
 		expect(h.writes).toEqual(["\x1b[?1000h\x1b[?1006h", "\x1b[?1000l\x1b[?1003h\x1b[?1006h"]);
 		await h.input.stop();
-		expect(h.out()).toContain("\x1b[?1003l\x1b[?1006l");
+		expect(h.out()).toContain("\x1b[?1016l\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l");
 	});
 
 	it("wraps passthrough for the multiplexer it runs in", () => {
@@ -569,7 +571,9 @@ describe("ProcessTerminalInput terminal quirks", () => {
 		h.writes.length = 0;
 		await h.input.stop();
 		// Paste modes off (bracketed, and the enhanced one an app may have asked for), mouse reporting, then the keypad.
-		expect(h.out()).toContain("\x1b[?2004l\x1b[?5522l\x1b[?1006l\x1b[?1003l\x1b[?1000l\x1b[?1l\x1b>");
+		expect(h.out()).toContain(
+			"\x1b[?2004l\x1b[?5522l\x1b[?1016l\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1l\x1b>",
+		);
 	});
 
 	it("re-asserts bracketed paste before reads inside tmux, never mid-paste", async () => {

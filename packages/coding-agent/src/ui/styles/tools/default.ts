@@ -18,6 +18,7 @@ import { padTo, truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { argsSummaryCells, visibleArgKeys } from "../../tools/args";
 import { ansiLines } from "@oh-my-pi/pi-tui/term/painters/ansi";
+import { RowText } from "../rendered-text";
 import { resultPictures } from "./file-common";
 import { expandHint, isActive, moreLinesHint, statusGlyph } from "./frame";
 import { jsonTreeRows } from "./json-tree";
@@ -65,21 +66,31 @@ export interface DefaultCard {
 	readonly body: readonly UiNode[];
 }
 
-/** Body rows of the card at the content width. */
-function bodyRows(card: DefaultCard, theme: Theme, content: number): string[] {
-	const rows: string[] = [];
+/** One body line of a card and how it copies. */
+interface CardLine {
+	readonly row: string;
+	/** The logical text it shows (default: the line itself); `false`: decoration (hints, padding). */
+	readonly text?: string | false;
+	/** Plain chrome at the start of its first row (a tree branch), skipped when copying. */
+	readonly lead?: string;
+}
+
+/** Body lines of the card at the content width. */
+function bodyLines(card: DefaultCard, theme: Theme, content: number): CardLine[] {
+	const rows: CardLine[] = [];
 	const args = argsRecord(card.args);
 	if (!card.expanded && args && visibleArgKeys(args).length > 0) {
 		const branch = theme.symbols.symbol("tree.last");
 		const budget = Math.max(MIN_SUMMARY, content - visibleWidth(branch) - 2);
-		rows.push(` ${theme.fg("dim", branch)} ${theme.fg("dim", argsSummaryCells(args, budget))}`);
+		const summary = argsSummaryCells(args, budget);
+		rows.push({ row: ` ${theme.fg("dim", branch)} ${theme.fg("dim", summary)}`, text: summary, lead: ` ${branch} ` });
 	}
 	if (card.expanded && card.args !== undefined) {
-		rows.push("", theme.fg("dim", "Args"));
+		rows.push({ row: "", text: false }, { row: theme.fg("dim", "Args") });
 		const tree = jsonTreeRows(theme, card.args, undefined, ["i", "__partialJson"]);
-		for (const row of tree.rows) rows.push(...wrap(row, content));
-		if (tree.truncated) rows.push(theme.fg("dim", "…"));
-		rows.push("");
+		for (const row of tree.rows) rows.push({ row });
+		if (tree.truncated) rows.push({ row: theme.fg("dim", "…"), text: false });
+		rows.push({ row: "", text: false });
 	}
 	let output: string[] | undefined;
 	const flush = (): void => {
@@ -87,14 +98,15 @@ function bodyRows(card: DefaultCard, theme: Theme, content: number): string[] {
 		const lines = output.map(line => theme.fg("toolOutput", line));
 		output = undefined;
 		if (card.expanded) {
-			for (const line of lines) rows.push(...wrap(line, content));
+			for (const row of lines) rows.push({ row });
 			return;
 		}
 		const shown = lines.length > COLLAPSED_LINES ? lines.slice(0, COLLAPSED_LINES) : lines;
-		for (const line of shown) rows.push(truncate(line, content));
-		rows.push(
-			lines.length > COLLAPSED_LINES ? moreLinesHint(theme, lines.length - COLLAPSED_LINES) : expandHint(theme),
-		);
+		for (const line of shown) rows.push({ row: truncate(line, content), text: line });
+		rows.push({
+			row: lines.length > COLLAPSED_LINES ? moreLinesHint(theme, lines.length - COLLAPSED_LINES) : expandHint(theme),
+			text: false,
+		});
 	};
 	for (const child of card.body) {
 		const childProps = child.props() as {
@@ -118,46 +130,50 @@ function bodyRows(card: DefaultCard, theme: Theme, content: number): string[] {
 		flush();
 		if (child.kind === "text") {
 			const text = childProps.spans?.map(span => span.t).join("") ?? childProps.text ?? "";
-			rows.push(theme.fg("dim", text));
+			rows.push({ row: theme.fg("dim", text) });
 		}
 	}
 	flush();
 	return rows;
 }
 
-/** The rows of a generic card at `width`: padded by one cell and one row, tinted. */
-export function defaultCardRows(theme: Theme, card: DefaultCard, width: number): string[] {
+/**
+ * The rows of a generic card at `width`: padded by one cell and one row, tinted. Its padding and
+ * hints are decoration; the title, args and output copy as logical lines one cell in.
+ */
+export function defaultCardRows(theme: Theme, card: DefaultCard, width: number): RowText {
 	const content = Math.max(1, width - 2);
-	const head = `${card.glyph} ${theme.fg(card.titleColor ?? "accent", card.title)}`;
-	const lines = [head, ...bodyRows(card, theme, content)];
-	const rows = [tintRow(theme, card.tint, "", width)];
-	for (const line of lines) {
-		for (const row of line === "" ? [""] : wrap(line, content))
-			rows.push(tintRow(theme, card.tint, ` ${row}`, width));
+	const fill = (row: string): string => tintRow(theme, card.tint, row === "" ? "" : ` ${row}`, width);
+	const out = new RowText().deco(fill(""));
+	const title = theme.fg(card.titleColor ?? "accent", card.title);
+	const head = wrap(`${card.glyph} ${title}`, content);
+	out.prefixed(title, head, `${Bun.stripANSI(card.glyph)} `, "", 1, head.map(fill));
+	for (const line of bodyLines(card, theme, content)) {
+		const rows = line.row === "" ? [""] : wrap(line.row, content);
+		const shown = rows.map(fill);
+		if (line.text === false) out.deco(...shown);
+		else out.prefixed(line.text ?? line.row, rows, line.lead ?? "", "", 1, shown);
 	}
-	rows.push(tintRow(theme, card.tint, "", width));
-	return rows;
+	return out.deco(fill(""));
 }
 
 function paintDefault(node: UiNode, cx: PaintContext): Block {
 	const props = toolProps(node);
 	const children = node.children();
 	const drawnPictures = resultPictures(node, cx);
-	return {
-		rows: defaultCardRows(
-			cx.theme,
-			{
-				glyph: statusGlyph(node, cx),
-				title: styledText(cx.theme, props.title),
-				titleColor: props.tone === "info" ? "muted" : "accent",
-				tint: tint(props),
-				args: props.term?.args,
-				expanded: isExpanded(props),
-				body: drawnPictures.length > 0 ? children.filter(child => !drawnPictures.includes(child)) : children,
-			},
-			cx.width,
-		),
-	};
+	return defaultCardRows(
+		cx.theme,
+		{
+			glyph: statusGlyph(node, cx),
+			title: styledText(cx.theme, props.title),
+			titleColor: props.tone === "info" ? "muted" : "accent",
+			tint: tint(props),
+			args: props.term?.args,
+			expanded: isExpanded(props),
+			body: drawnPictures.length > 0 ? children.filter(child => !drawnPictures.includes(child)) : children,
+		},
+		cx.width,
+	).done();
 }
 
 defineToolLook("default", { paint: paintDefault, animated: true });

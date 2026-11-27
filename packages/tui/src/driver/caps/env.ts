@@ -158,6 +158,7 @@ export function capabilitiesFromEnv(env: Env, context: EnvCapabilityContext): Te
 		cell: null,
 		multiplexer,
 		tsp: false,
+		pixelMouse: false,
 	};
 }
 

@@ -1062,8 +1062,10 @@ export class UiHelpers {
 		this.ctx.composer.clearDraft({ recall: cfgComposerRecallClearedDrafts.get(this.ctx.settings) });
 	}
 
-	showError(errorMessage: string): void {
-		this.#presentNotice(() => jsx(NoticeLine, { tone: "error", message: errorMessage }));
+	/** `failsTurn` marks the current turn failed (its scrollbar mark); other errors leave turn outcomes alone. */
+	showError(errorMessage: string, options?: { failsTurn?: boolean }): void {
+		const block = this.#presentNotice(() => jsx(NoticeLine, { tone: "error", message: errorMessage }));
+		if (options?.failsTurn) this.ctx.registerTranscriptEntry(block, { kind: "failure" });
 	}
 
 	showWarning(warningMessage: string, options?: { hideWithToolActivity?: boolean }): void {

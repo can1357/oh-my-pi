@@ -12,7 +12,7 @@ import { type Block, EMPTY_BLOCK, type PaintContext } from "@oh-my-pi/pi-tui/ter
 import { wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import type { AskTerm, AskTermAnswer } from "../../tools/ask";
-import { capMoreLines, frameInner, frameRows, hangingWrap, outcomeBg, statusIcon, statusLine } from "./frame";
+import { capMoreLines, frameBlock, frameInner, hangingWrap, outcomeBg, statusIcon, statusLine } from "./frame";
 import { defineToolLook, isExpanded, toolProps } from "./look";
 
 /** Answer and note rows shown collapsed / expanded. */
@@ -57,14 +57,12 @@ function paintAsk(node: UiNode, cx: PaintContext): Block {
 	if (term.timedOut)
 		content.push(...hangingWrap(" ", " ", theme.fg("dim", "auto-selected after timeout — not a user choice"), inner));
 	const glyph = term.timedOut ? statusIcon(cx, "warning") : theme.fg("accent", theme.symbols.symbol("tool.ask"));
-	return {
-		rows: frameRows(theme, width, {
-			head: statusLine(theme, { glyph, title: "Ask" }),
-			sections: content.length > 0 ? [{ lines: content }] : [],
-			border: "borderMuted",
-			bg: outcomeBg(term.timedOut ? "warning" : "success"),
-		}),
-	};
+	return frameBlock(theme, width, {
+		head: statusLine(theme, { glyph, title: "Ask" }),
+		sections: content.length > 0 ? [{ lines: content }] : [],
+		border: "borderMuted",
+		bg: outcomeBg(term.timedOut ? "warning" : "success"),
+	});
 }
 
 defineToolLook("ask", { paint: paintAsk, margin: true });

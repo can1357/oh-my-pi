@@ -12,9 +12,7 @@ import { paddedText, termOf } from "../messages/fill";
 function paintWidgetLine(node: UiNode, cx: PaintContext): Block {
 	const { line, color } = termOf<{ line: string; color: string }>(node);
 	if (!line || line.trim() === "") return EMPTY_BLOCK;
-	return {
-		rows: paddedText(color ? cx.theme.fg(color, line) : line, cx.width),
-	};
+	return paddedText(color ? cx.theme.fg(color, line) : line, cx.width).done();
 }
 
 function paintEditorGap(node: UiNode): Block {

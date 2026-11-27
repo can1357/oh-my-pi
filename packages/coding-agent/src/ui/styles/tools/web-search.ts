@@ -15,7 +15,7 @@ import { pluralize } from "@oh-my-pi/pi-utils";
 import { PREVIEW_LIMITS } from "../../../utils/render-utils";
 import type { WebSearchTerm, WebSearchTermSource } from "../../tools/web-search";
 import { webLink } from "./file-common";
-import { expandHint, type FrameSection, frameInner, frameRows } from "./frame";
+import { expandHint, type FrameSection, frameBlock, frameInner } from "./frame";
 import { defineToolLook, toolProps } from "./look";
 
 /** Query characters a pending call shows. */
@@ -147,7 +147,7 @@ function paintWebSearch(node: UiNode, cx: PaintContext): Block {
 	}
 	const border = tone === "success" ? "dim" : tone;
 	const bg = tone === "error" ? "toolErrorBg" : tone === "warning" ? "toolPendingBg" : "toolSuccessBg";
-	return { rows: frameRows(theme, cx.width, { head, sections, border, bg }) };
+	return frameBlock(theme, cx.width, { head, sections, border, bg });
 }
 
 defineToolLook("web_search", { paint: paintWebSearch, margin: true });

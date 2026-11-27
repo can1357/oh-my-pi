@@ -19,6 +19,7 @@ const CAPABILITIES: TerminalCapabilities = {
 	multiplexer: null,
 	textSizing: false,
 	tsp: false,
+	pixelMouse: false,
 };
 
 /** An input half that records its lifecycle and lets the test fire resizes. */
@@ -90,6 +91,7 @@ class FakeInput implements TerminalInput {
 	}
 	setTitle(): void {}
 	setMouse(): void {}
+	setAlternateScroll(): void {}
 	refreshAppearance(): void {}
 	setProgress(active: boolean): void {
 		this.#port.write(active ? "<progress>" : "<no-progress>");

@@ -8,7 +8,7 @@ import type { UiNode } from "@oh-my-pi/pi-tui";
 import type { Block, PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { truncate, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { GoalTerm } from "../../tools/goal";
-import { type FrameSection, frameRows } from "./frame";
+import { type FrameSection, frameBlock } from "./frame";
 import { defineToolLook, toolProps } from "./look";
 
 /** Objective characters a pending call / a card shows. */
@@ -61,14 +61,12 @@ function paintGoal(node: UiNode, cx: PaintContext): Block {
 				lines: term.report.split("\n").map(line => theme.fg("muted", line)),
 			});
 	}
-	return {
-		rows: frameRows(theme, cx.width, {
-			head,
-			sections,
-			border: failed ? "error" : "borderMuted",
-			bg: failed ? "toolErrorBg" : "toolSuccessBg",
-		}),
-	};
+	return frameBlock(theme, cx.width, {
+		head,
+		sections,
+		border: failed ? "error" : "borderMuted",
+		bg: failed ? "toolErrorBg" : "toolSuccessBg",
+	});
 }
 
 defineToolLook("goal", { paint: paintGoal, margin: true });

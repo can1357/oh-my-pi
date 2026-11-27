@@ -24,6 +24,7 @@ import { feedModel } from "../../tools/agent-common";
 import { type EvalTerm, type EvalTermCell, formatMcpProgress, highlightLanguage, mcpProgress } from "../../tools/eval";
 import { styledModelBadge } from "./agent-common";
 import { resultPictures, withoutDrawnPlaceholders } from "./file-common";
+import { RowText } from "../rendered-text";
 import { codeCellRows } from "./code-cell";
 import { bracketed, frameInner, PREVIEW_WINDOW_ROWS } from "./frame";
 import { COLLAPSED_TREE, EXPANDED_TREE, jsonTreeRows } from "./json-tree";
@@ -429,11 +430,11 @@ function paintEval(node: UiNode, cx: PaintContext): Block {
 			return {
 				rows: wrap(theme.fg("toolTitle", `\x1b[1m${theme.fg("accent", ">>>")} …\x1b[22m`), width),
 			};
-		const rows: string[] = [];
+		const rows = new RowText();
 		cells.forEach((cell, i) => {
-			if (i > 0) rows.push("");
-			rows.push(
-				...codeCellRows(
+			if (i > 0) rows.deco("");
+			rows.block(
+				codeCellRows(
 					cx,
 					{
 						code: cell.code,
@@ -451,12 +452,12 @@ function paintEval(node: UiNode, cx: PaintContext): Block {
 				),
 			);
 		});
-		return { rows };
+		return rows.done();
 	}
 	const previewLines = Math.min(term.previewLines ?? 10, PREVIEW_WINDOW_ROWS);
 	const notes = callNotes(theme, term);
 	if (term.phase === "cells") {
-		const rows: string[] = [];
+		const rows = new RowText();
 		cells.forEach((cell, i) => {
 			const status = statusRows(theme, cell.events ?? [], expanded, cell.elided);
 			const output = cellOutputRows(theme, cell, expanded, previewLines, width);
@@ -467,8 +468,8 @@ function paintEval(node: UiNode, cx: PaintContext): Block {
 				if (lines.length > 0) lines.push(theme.fg("dim", "Status"));
 				lines.push(...status);
 			}
-			rows.push(
-				...codeCellRows(
+			rows.block(
+				codeCellRows(
 					cx,
 					{
 						code: cell.code,
@@ -487,10 +488,10 @@ function paintEval(node: UiNode, cx: PaintContext): Block {
 					width,
 				),
 			);
-			if (cell.agents && cell.agents.length > 0) rows.push(...agentRows(cx, cell.agents, width));
-			if (i < cells.length - 1) rows.push("");
+			if (cell.agents && cell.agents.length > 0) rows.literal(...agentRows(cx, cell.agents, width));
+			if (i < cells.length - 1) rows.deco("");
 		});
-		return { rows: [...rows, ...imagePlaceholderRows(node, cx), ...notes] };
+		return rows.literal(...imagePlaceholderRows(node, cx), ...notes).done();
 	}
 	const output = withoutDrawnPlaceholders(
 		term.output ?? "",
@@ -502,9 +503,8 @@ function paintEval(node: UiNode, cx: PaintContext): Block {
 	if (!output && status.length === 0) return { rows: notes.length > 0 ? wrap(notes.join("\n"), width) : [] };
 	if (!output || expanded) {
 		const styled = output ? output.split("\n").map(line => theme.fg("toolOutput", line)) : [];
-		return {
-			rows: wrap([...styled, ...statusBlock, ...notes].join("\n"), width),
-		};
+		const source = [...styled, ...statusBlock, ...notes].join("\n");
+		return new RowText().wrapped(source, wrap(source, width)).done();
 	}
 	const styled = output.split("\n").map(line => theme.fg("toolOutput", line));
 	const tail = visualTail(["", ...styled], previewLines, width);

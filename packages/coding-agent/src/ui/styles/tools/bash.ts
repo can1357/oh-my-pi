@@ -15,19 +15,21 @@ import { ansiLines } from "@oh-my-pi/pi-tui/term/painters/ansi";
 import { highlightCode } from "@oh-my-pi/pi-tui/text/highlight";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import type { ShellVizPresentation } from "@oh-my-pi/pi-wire";
+import { lazyText, type RenderedText } from "@oh-my-pi/pi-tui/term/text-layout";
+import { mapPrefixed, RowText } from "../rendered-text";
 import type { BashStat, BashTerm } from "../../tools/bash";
 import { resultPictures, withoutDrawnPlaceholders } from "./file-common";
 import {
 	bracketed,
 	capLines,
 	frameInner,
-	frameRows,
+	frameBlock,
 	PREVIEW_WINDOW_ROWS,
 	runningMs,
 	type StatusLine,
 	statusIcon,
 	statusLine,
-	tailRows,
+	tailBlock,
 } from "./frame";
 import { defineToolLook, isExpanded, toolProps } from "./look";
 import { shellVizRows } from "./shell-viz";
@@ -80,6 +82,8 @@ function paintBash(node: UiNode, cx: PaintContext): Block {
 	const input = findChild(node, "input");
 	const commandPrefix = term.prefix ?? "";
 	let lines: string[];
+	// The command's text past the `$ prefix` lead, when the rows are its lines one to one.
+	let commandText: (() => RenderedText) | undefined;
 	if (input?.kind === "shell") {
 		// The engine's reading of the command; its working directory and env lead on their own row.
 		const presentation = (input.props() as { presentation: ShellVizPresentation }).presentation;
@@ -91,9 +95,13 @@ function paintBash(node: UiNode, cx: PaintContext): Block {
 		const command = nodeText(input);
 		const body =
 			commandPrefix && command.startsWith(`${commandPrefix} `) ? command.slice(commandPrefix.length + 1) : command;
-		lines = commandLines(theme, body, commandPrefix);
+		const shown = commandLines(theme, body, commandPrefix);
+		lines = shown;
+		commandText = lazyText(() => mapPrefixed(body, shown, commandPrefix ? `$ ${commandPrefix} ` : "$ ", ""));
 	}
-	const inputRows = expanded ? lines : capLines(theme, lines, PREVIEW_WINDOW_ROWS);
+	const capped = !expanded && lines.length > PREVIEW_WINDOW_ROWS;
+	const inputRows = capped ? capLines(theme, lines, PREVIEW_WINDOW_ROWS) : lines;
+	const inputSection = { lines: inputRows, ...(capped || !commandText ? {} : { text: commandText }) };
 	const outcome = term.outcome;
 	const title = typeof props.title === "string" ? props.title : "";
 	let header: string | undefined;
@@ -115,30 +123,28 @@ function paintBash(node: UiNode, cx: PaintContext): Block {
 			elapsed === undefined || elapsed < 1000
 				? undefined
 				: theme.fg("dim", `elapsed ${clockText(Math.floor(elapsed / 1000) * 1000)}`);
-		return {
-			rows: frameRows(theme, width, {
-				head: header,
-				sections: [{ lines: inputRows }],
-				foot,
-				border: "accent",
-				bg: "toolPendingBg",
-			}),
-		};
+		return frameBlock(theme, width, {
+			head: header,
+			sections: [inputSection],
+			foot,
+			border: "accent",
+			bg: "toolPendingBg",
+		});
 	}
 
 	const run = node.children()[0];
-	const cards: string[] = [];
+	const cards = new RowText();
 	for (const child of run?.children() ?? []) {
 		if ((child.props() as { role?: string }).role !== "omp.tool.bash.command-tool") continue;
-		cards.push(...toolCommandRows(child, cx, frameInner(width), expanded));
+		cards.block(toolCommandRows(child, cx, frameInner(width), expanded));
 	}
 	// Images the block draws as pictures under the card leave their placeholders out of the output.
 	const printed = nodeText(findChild(node, "output"));
 	const output = withoutDrawnPlaceholders(printed, props.term?.imageLinks, resultPictures(node, cx).length);
 	const outputLines = output.trim().length > 0 ? ansiLines(output).map(line => theme.fg("toolOutput", line)) : [];
 	const limit = Math.min(term.previewLines ?? PREVIEW_WINDOW_ROWS, PREVIEW_WINDOW_ROWS);
-	const shown = expanded ? outputLines : tailRows(theme, outputLines, limit, frameInner(width));
-	if (term.warning) shown.push(theme.fg("warning", bracketed(theme, term.warning)));
+	const shown = tailBlock(theme, outputLines, expanded ? Number.POSITIVE_INFINITY : limit, frameInner(width), node.id);
+	if (term.warning) shown.literal(theme.fg("warning", bracketed(theme, term.warning)));
 	const stats = (term.stats ?? []).map(stat => statText(theme, stat));
 	if (term.liveClock) {
 		const seconds = Math.floor(runningMs(props, cx) / 1000);
@@ -147,20 +153,18 @@ function paintBash(node: UiNode, cx: PaintContext): Block {
 	}
 	const border =
 		outcome === "error" ? "error" : outcome === "warning" ? "warning" : outcome === "running" ? "accent" : "dim";
-	return {
-		rows: frameRows(theme, width, {
-			head: header,
-			sections: [
-				{ lines: inputRows },
-				...(cards.length > 0 ? [{ lines: cards }] : []),
-				...((term.sole || printed.trim().length > 0) && shown.length === 0
-					? []
-					: [{ label: theme.fg("toolTitle", "Output"), lines: shown }]),
-			],
-			foot: stats.length > 0 ? stats.join(theme.fg("dim", theme.symbols.symbol("sep.dot"))) : undefined,
-			border,
-		}),
-	};
+	return frameBlock(theme, width, {
+		head: header,
+		sections: [
+			inputSection,
+			...(cards.length > 0 ? [{ lines: cards.rows, text: cards.text() }] : []),
+			...((term.sole || printed.trim().length > 0) && shown.length === 0
+				? []
+				: [{ label: theme.fg("toolTitle", "Output"), lines: shown.rows, text: shown.text() }]),
+		],
+		foot: stats.length > 0 ? stats.join(theme.fg("dim", theme.symbols.symbol("sep.dot"))) : undefined,
+		border,
+	});
 }
 
 defineToolLook("bash", { paint: paintBash, margin: true });

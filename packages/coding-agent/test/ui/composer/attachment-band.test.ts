@@ -80,6 +80,7 @@ describe("attachment band pictures", () => {
 				multiplexer: null,
 				textSizing: false,
 				tsp: false,
+				pixelMouse: false,
 			});
 			const placeholders = signal(false);
 			const images = new TerminalImages({ capabilities: caps, placeholders });

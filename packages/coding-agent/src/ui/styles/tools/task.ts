@@ -27,7 +27,7 @@ import { shortenEmbeddedPaths } from "../../../utils/render-utils";
 import type { TaskTerm } from "../../tools/task";
 import { assignmentSource, contextSource, flatAgentLabel, noticeLines, runTally } from "../../tools/task/model";
 import { agentLines, callLines, type Line, nestedResultLines, type RowContext } from "../../tools/task/rows";
-import { type FrameSection, frameInner, frameRows, outcomeBg, statusLine } from "./frame";
+import { type FrameSection, frameBlock, frameInner, outcomeBg, statusLine } from "./frame";
 import { defineToolLook, isExpanded, toolProps } from "./look";
 
 /** Markdown sections render this many cells narrower than the card. */
@@ -135,11 +135,11 @@ function paintTask(node: UiNode, cx: PaintContext): Block {
 		if (owners.some(id => id !== undefined)) {
 			const rowTags: (string | undefined)[] = [];
 			const band = cx.hovered(node)?.item;
-			const painted = frameRows(theme, width, { head, sections, border, bg: outcomeBg(outcome), band }, rowTags);
-			return { rows: painted, hits: agentHits(node, rowTags, width) };
+			const painted = frameBlock(theme, width, { head, sections, border, bg: outcomeBg(outcome), band }, rowTags);
+			return { ...painted, hits: agentHits(node, rowTags, width) };
 		}
 	}
-	return { rows: frameRows(theme, width, { head, sections, border, bg: outcomeBg(outcome) }) };
+	return frameBlock(theme, width, { head, sections, border, bg: outcomeBg(outcome) });
 }
 
 /** One hit per run of rows a running agent draws, naming it (`item`) and focusing it on click. */
@@ -150,7 +150,16 @@ function agentHits(node: UiNode, rowTags: readonly (string | undefined)[], width
 		let end = row + 1;
 		while (end < rowTags.length && rowTags[end] === id) end++;
 		if (id !== undefined)
-			hits.push({ row, col: 0, width, height: end - row, node, item: id, act: `${SUBAGENT_FOCUS_ACT}${id}` });
+			hits.push({
+				row,
+				col: 0,
+				width,
+				height: end - row,
+				node,
+				item: id,
+				act: `${SUBAGENT_FOCUS_ACT}${id}`,
+				optionalTarget: "main",
+			});
 		row = end;
 	}
 	return hits;

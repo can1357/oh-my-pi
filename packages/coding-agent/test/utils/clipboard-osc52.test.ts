@@ -17,8 +17,11 @@ function osc52(text: string): string {
  */
 describe("copyToClipboard OSC 52 routing", () => {
 	let harness: ActiveTerminalHarness | undefined;
+	let termuxVersion: string | undefined;
 
 	beforeEach(() => {
+		termuxVersion = process.env.TERMUX_VERSION;
+		delete process.env.TERMUX_VERSION;
 		// Linux keeps macOS runs off the real pbcopy; the native write is stubbed.
 		Object.defineProperty(process, "platform", { value: "linux", configurable: true });
 		vi.spyOn(natives, "copyToClipboard").mockImplementation(() => {});
@@ -26,6 +29,7 @@ describe("copyToClipboard OSC 52 routing", () => {
 
 	afterEach(() => {
 		harness?.dispose();
+		if (termuxVersion !== undefined) process.env.TERMUX_VERSION = termuxVersion;
 		harness = undefined;
 		vi.restoreAllMocks();
 		if (platformDescriptor) Object.defineProperty(process, "platform", platformDescriptor);
@@ -38,6 +42,17 @@ describe("copyToClipboard OSC 52 routing", () => {
 
 		expect(harness.routed).toEqual([osc52("probe")]);
 		expect(harness.direct.join("")).not.toContain("\x1b]52;");
+	});
+
+	it("skips OSC 52 with redirected stdout even when a driver is active", async () => {
+		harness = await startActiveTerminal();
+		Object.defineProperty(process.stdout, "isTTY", { value: false, configurable: true });
+
+		await copyToClipboard("redirected payload");
+
+		expect(harness.routed).toEqual([]);
+		expect(harness.direct).toEqual([]);
+		expect(natives.copyToClipboard).toHaveBeenCalledWith("redirected payload");
 	});
 
 	it("writes OSC 52 straight to stdout once the terminal has stopped", async () => {

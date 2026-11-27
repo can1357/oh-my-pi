@@ -48,6 +48,22 @@ describe("history", () => {
 		expect(vt.screen()).toEqual(lines("v", 1, 6));
 	});
 
+	it("preserves a partial shell line and cursor through fullscreen, then starts an inline frame below it", () => {
+		const vt = new Vt({ rows: 3, shell: ["first", "second"] });
+		vt.writer.stop();
+		vt.term.write("partial");
+		const cursor = { row: vt.term.cursor.y, col: vt.term.cursor.x };
+		vt.writer.start(cursor);
+		vt.present({ viewport: [], fullscreen: ["reading"], cursor: null });
+		vt.writer.stop();
+		expect(vt.screen()).toEqual(["first", "second", "partial"]);
+		expect(vt.scrollback()).toEqual([]);
+		expect([vt.term.cursor.y, vt.term.cursor.x]).toEqual([cursor.row, cursor.col]);
+		vt.writer.start(cursor);
+		vt.present({ viewport: ["inline"], cursor: null });
+		expect(vt.transcript()).toEqual(["first", "second", "partial", "inline"]);
+	});
+
 	it("starts at an unknown cursor position and still anchors history exactly", () => {
 		const vt = new Vt({ rows: 5, blind: true, sync: false });
 		let id = 0;
@@ -134,6 +150,20 @@ describe("images", () => {
 		const again = vt.writes.length;
 		vt.present({ viewport: ["caption", "pic"], cursor: null });
 		expect(vt.since(again)).toBe("");
+	});
+
+	it("enters the alternate screen before transmitting an image for that screen", () => {
+		const transmit = "\x1b_Ga=t,i=7;AAAA\x1b\\";
+		const place = "\x1b_Ga=p,i=7\x1b\\";
+		const vt = new Vt({ images: { takeSequences: screen => (screen === "alternate" ? transmit : "") } });
+		vt.present({ viewport: ["inline"], cursor: null });
+		const mark = vt.writes.length;
+		vt.present({ viewport: [], fullscreen: [place], cursor: null });
+		const bytes = vt.since(mark);
+		const enter = bytes.indexOf("\x1b[?1049h");
+		expect(enter).toBeGreaterThanOrEqual(0);
+		expect(bytes.indexOf(transmit)).toBeGreaterThan(enter);
+		expect(bytes.indexOf(place)).toBeGreaterThan(bytes.indexOf(transmit));
 	});
 
 	it("rewrites rows carrying graphics in place instead of shifting them", () => {

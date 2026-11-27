@@ -3,11 +3,13 @@
  * `└ • key: value`; containers within `open` levels list their own entries
  * below on `├─`/`└─` branches, deeper ones fold to an inline preview
  * (`{id: "x", stars: 3}`) cut to the row. Scalars are colored like code.
+ * Text: each row as drawn, branches included; a cut row as far as it shows.
  */
 import type { TspJsonProps } from "@oh-my-pi/pi-wire";
 import type { Theme } from "../../theme/contract";
 import { replaceTabs, truncate } from "../../text/width";
 import { type Block, definePainter } from "../paint";
+import { lazyText, shownText } from "../text-layout";
 
 /** A scalar as JSON, colored by type. */
 export function jsonScalar(theme: Theme, value: unknown): string {
@@ -82,7 +84,16 @@ export function jsonRows(theme: Theme, value: unknown, width: number, open = 0):
 definePainter("json", (node, cx): Block => {
 	const props = node.props() as TspJsonProps;
 	if (cx.width <= 0) return { rows: [] };
+	const theme = cx.theme;
+	const value = props.value ?? null;
+	const open = props.open ?? 0;
+	const rows = jsonRows(theme, value, cx.width, open);
 	return {
-		rows: jsonRows(cx.theme, props.value ?? null, cx.width, props.open ?? 0),
+		rows,
+		text: lazyText(() => {
+			// The rows before they were cut to the width.
+			const whole = jsonRows(theme, value, Number.POSITIVE_INFINITY, open);
+			return rows.map((row, i) => shownText(whole[i] ?? row, row));
+		}),
 	};
 });

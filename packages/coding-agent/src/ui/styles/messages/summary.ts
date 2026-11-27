@@ -12,36 +12,57 @@ import { visibleWidth } from "@oh-my-pi/pi-tui/text/width";
 import type { SummaryTerm } from "../../transcript/messages/summaries";
 import { expandKeyLabel } from "../../keys/hints";
 import { fillRow, propsOf, termOf } from "./fill";
+import type { RenderedText } from "@oh-my-pi/pi-tui/term/text-layout";
+import { RowText, type TextRows } from "../rendered-text";
 
-function dividerRow(cx: PaintContext, term: Partial<SummaryTerm>): string {
+/** The divider row, and the label's text: what copies (the rules, glyphs and hint are chrome). */
+function dividerRow(cx: PaintContext, term: Partial<SummaryTerm>): TextRows {
 	const theme = cx.theme;
 	const glyph = term.glyph ? theme.symbols.icon(term.glyph) : "";
-	let label = glyph ? `${glyph} ${term.label ?? ""}` : (term.label ?? "");
+	const text = term.label ?? "";
+	let label = glyph ? `${glyph} ${text}` : text;
 	if (term.warning) label += ` ${theme.fg("warning", theme.symbols.icon("status.warning"))}`;
 	const hint = `${theme.symbols.symbol("sep.dot").trim()} ${expandKeyLabel(theme)}`;
 	const remaining = cx.width - visibleWidth(`${label} ${hint}`) - 2;
-	if (remaining < 4) return theme.fg("muted", label);
+	const lead = glyph ? visibleWidth(glyph) + 1 : 0;
+	const labelText = (column: number) => (): RenderedText => [
+		{ line: { text }, start: 0, end: text.length, column: column + lead },
+	];
+	if (remaining < 4) return { rows: [theme.fg("muted", label)], text: labelText(0) };
 	const left = Math.floor(remaining / 2);
 	const rule = theme.symbols.box.horizontal;
-	return `${theme.fg("dim", rule.repeat(left))} ${theme.fg("muted", label)} ${theme.fg("dim", hint)} ${theme.fg("dim", rule.repeat(remaining - left))}`;
+	return {
+		rows: [
+			`${theme.fg("dim", rule.repeat(left))} ${theme.fg("muted", label)} ${theme.fg("dim", hint)} ${theme.fg("dim", rule.repeat(remaining - left))}`,
+		],
+		text: labelText(left + 1),
+	};
 }
 
-/** `markdown` in a `customMessageBg` box with one row and one cell of padding. */
-export function detailBox(cx: PaintContext, markdown: string): string[] {
+/** `markdown` in a `customMessageBg` box with one row and one cell of padding (decoration); the Markdown copies one cell in. */
+export function detailBox(cx: PaintContext, markdown: string): RowText {
 	const theme = cx.theme;
-	const { rows } = renderMarkdownFrame(markdown, Math.max(1, cx.width - 2), {
+	const frame = renderMarkdownFrame(markdown, Math.max(1, cx.width - 2), {
 		theme,
 		textStyle: "customMessageText",
 		hyperlinks: cx.hyperlinks,
 	});
-	return ["", ...rows.map(row => ` ${row}`), ""].map(row => fillRow(theme, "customMessageBg", row, cx.width));
+	const fill = (row: string): string => fillRow(theme, "customMessageBg", row, cx.width);
+	return new RowText()
+		.deco(fill(""))
+		.block(
+			frame,
+			1,
+			frame.rows.map(row => fill(` ${row}`)),
+		)
+		.deco(fill(""));
 }
 
 function paintSummary(node: UiNode, cx: PaintContext): Block {
 	const term = termOf<SummaryTerm>(node);
-	const rows = ["", dividerRow(cx, term), ""];
-	if (propsOf<{ collapsed: boolean }>(node).collapsed === false) rows.push(...detailBox(cx, term.detail ?? ""));
-	return { rows };
+	const out = new RowText().deco("").block(dividerRow(cx, term)).deco("");
+	if (propsOf<{ collapsed: boolean }>(node).collapsed === false) out.block(detailBox(cx, term.detail ?? "").done());
+	return out.done();
 }
 
 for (const role of ["omp.compaction", "omp.handoff", "omp.branch"]) defineRolePainter("section", role, paintSummary);

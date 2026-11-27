@@ -340,13 +340,15 @@ export interface PendingTool {
 
 /**
  * What a transcript block shows, for controllers that walk `ctx.shell.transcript.blocks()`
- * (see {@link InteractiveModeContext.transcriptEntry}). Static blocks (notices, markers) have none.
+ * (see {@link InteractiveModeContext.transcriptEntry}). Static blocks (notices, markers) have none,
+ * except a `failure`: the notice of an error that failed the turn (the turn's scrollbar mark).
  */
 export type TranscriptEntry =
 	| { readonly kind: "assistant"; readonly view: AssistantView }
 	| { readonly kind: "tool"; readonly tool: PendingTool }
 	| { readonly kind: "exec"; readonly run: ExecRun }
-	| { readonly kind: "message"; readonly message: AgentMessage };
+	| { readonly kind: "message"; readonly message: AgentMessage }
+	| { readonly kind: "failure" };
 
 export interface InteractiveModeInitOptions {
 	suppressWelcomeIntro?: boolean;
@@ -774,6 +776,8 @@ export interface InteractiveModeContext {
 	): ExecRunPresentation;
 	/** What `block` shows (assistant reply, tool call, exec run, message), undefined for static blocks. */
 	transcriptEntry(block: TranscriptBlock): TranscriptEntry | undefined;
+	/** Record what a block the mode mounted itself shows (a `failure` notice), so `transcriptEntry` and the marks see it. */
+	registerTranscriptEntry(block: TranscriptBlock, entry: TranscriptEntry): void;
 	/** Show session information in a focused transient overlay; `context` adds a context-window meter natively. */
 	showSessionInfo(info: string, context?: ContextUsage): void;
 	/** Mount command output deferred by {@link presentCommandOutput}. */
@@ -786,7 +790,8 @@ export interface InteractiveModeContext {
 	showStatus(message: string, options?: ShowStatusOptions): void;
 	/** Show the ctrl+p role chip track above the editor, `activeIndex` filled. */
 	showModelCycleTrack(segments: readonly TrackSegment[], activeIndex: number): void;
-	showError(message: string): void;
+	/** Show an error notice; `failsTurn` marks the current turn failed (only retry exhaustion does). */
+	showError(message: string, options?: { failsTurn?: boolean }): void;
 	showPinnedError(message: string): void;
 	clearPinnedError(): void;
 	showWarning(message: string, options?: { hideWithToolActivity?: boolean }): void;

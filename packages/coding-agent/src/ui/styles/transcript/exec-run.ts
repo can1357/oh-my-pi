@@ -20,6 +20,7 @@ import { appInterruptKeys } from "../../../config/keybindings/matchers";
 import { terminalPaddingX } from "../terminal-padding";
 import { expandKeyLabel, keyLabel } from "../../keys/hints";
 import type { ExecRunTerm } from "../../transcript/exec-run";
+import { RowText, sliceText } from "../rendered-text";
 import { imageLink } from "../tools/file-common";
 import { toolProps } from "../tools/look";
 
@@ -48,38 +49,57 @@ function paintExecRun(node: UiNode, cx: PaintContext): Block {
 	const color = term.color;
 	const expanded = props.collapsed === false;
 	const running = props.status === "running";
-	const rows = [rule(theme, color, width)];
+	const out = new RowText().deco(rule(theme, color, width));
 	const source = props.command ?? "";
-	if (term.kind === "bash") rows.push(...padded(theme.fg(color, `\x1b[1m$ ${source}\x1b[22m`)));
+	if (term.kind === "bash")
+		out.prefixed(source, padded(theme.fg(color, `\x1b[1m$ ${source}\x1b[22m`)), `${pad}$ `, pad);
 	else {
 		const prompt = theme.fg(color, "\x1b[1m>>>\x1b[22m");
 		const indent = theme.fg(color, "    ");
 		const code = highlightCode(source, term.lang, theme);
-		rows.push(...padded(code.map((line, i) => (i === 0 ? `${prompt} ${line}` : `${indent}${line}`)).join("\n")));
+		const rows = padded(code.map((line, i) => (i === 0 ? `${prompt} ${line}` : `${indent}${line}`)).join("\n"));
+		out.prefixed(source, rows, `${pad}>>> `, pad);
 	}
 	const lines = term.lines.map(line => (term.styled ? line : theme.fg("muted", line)));
 	if (lines.length > 0) {
-		const wrapped = lines.flatMap(line => {
+		// Each output line copies whole; a collapsed run keeps the tail of its rows.
+		const output = new RowText();
+		for (const line of lines) {
 			const parts = wrap(line, inner);
-			return parts.length > 0 ? parts : [""];
-		});
-		const shown = expanded ? wrapped : wrapped.slice(-PREVIEW_ROWS);
-		rows.push("", ...shown.map(row => pad + row));
+			const rows = parts.length > 0 ? parts : [""];
+			output.wrapped(
+				line,
+				rows,
+				paddingX,
+				rows.map(row => pad + row),
+			);
+		}
+		const all = output.done();
+		out.deco("").block(expanded ? all : sliceText(all, Math.max(0, all.rows.length - PREVIEW_ROWS)));
 	}
 	const pictures = cx.images && term.images.length > 0 ? node.children().filter(child => child.kind === "image") : [];
 	term.images.forEach((image, index) => {
 		const label = theme.fg("muted", image);
 		const picture = pictures[index];
 		const drawn = picture && imageRows(picture, cx, label);
-		if (drawn && drawn.state !== "fallback") rows.push(...drawn.rows);
-		else rows.push(...padded(imageLink(cx, label, term.imageBlobs?.[index])));
+		if (drawn && drawn.state !== "fallback") out.deco(...drawn.rows);
+		else out.literal(...padded(imageLink(cx, label, term.imageBlobs?.[index])));
 	});
 	if (!running) {
 		const parts: string[] = [];
 		const hidden = expanded ? 0 : Math.max(0, term.lines.length - PREVIEW_ROWS);
 		if (hidden > 0) parts.push(theme.fg("dim", `… ${hidden} more lines (${expandKeyLabel(theme)} to expand)`));
 		for (const notice of term.notices) parts.push(theme.fg(notice.color, notice.text));
-		if (parts.length > 0) rows.push(...padded(`\n${parts.join("\n")}`));
+		if (parts.length > 0) {
+			const source = `\n${parts.join("\n")}`;
+			const rows = wrap(source, inner);
+			out.wrapped(
+				source,
+				rows,
+				paddingX,
+				rows.map(row => pad + row),
+			);
+		}
 	}
 	let label: string | undefined;
 	if (running) {
@@ -89,8 +109,7 @@ function paintExecRun(node: UiNode, cx: PaintContext): Block {
 		label = `${theme.fg(color, frame)} ${theme.fg("muted", `Running… (${interrupt} to cancel)`)}`;
 	} else if (props.status === "cancelled") label = theme.fg("warning", "cancelled");
 	else if (props.status === "error") label = theme.fg("error", `exit ${props.exit}`);
-	rows.push(rule(theme, color, width, label));
-	return { rows };
+	return out.deco(rule(theme, color, width, label)).done();
 }
 
 defineRolePainter("tool", "omp.bash", paintExecRun);

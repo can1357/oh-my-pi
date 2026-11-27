@@ -2,7 +2,16 @@
  * GFM tables as box-drawn grids fitted to a width: columns take their natural
  * width when the table fits, else shrink toward their longest word (capped at
  * 30 cells) and wrap; below one cell per column the raw source is shown.
+ * Text: a table row is one line, its cells joined by the column rule, each
+ * cell's text a run on every row it wraps to; the grid lines are decoration.
  */
+import {
+	clipRenderedText,
+	mapWrappedText,
+	type RenderedTextRow,
+	type RenderedTextSpan,
+	withSpans,
+} from "../../term/text-layout";
 import { padTo, spaces, truncate, visibleWidth, wrap } from "../width";
 import type { Tokens } from "./lexer";
 
@@ -123,13 +132,25 @@ function fitColumns(natural: readonly number[], words: readonly number[], availa
  * Rows of `token` at `width`. `openCell` is the cell of the last row still
  * being written while streaming: it does not size its column (rows above
  * keep their layout) and its row keeps the height its finished cells need.
+ * With `rowText`, each row's text is pushed onto it.
  */
-export function renderTable(env: TableEnvironment, token: Tokens.Table, width: number, openCell = -1): string[] {
+export function renderTable(
+	env: TableEnvironment,
+	token: Tokens.Table,
+	width: number,
+	openCell = -1,
+	rowText?: (RenderedTextRow | undefined)[],
+): string[] {
 	const count = token.header.length;
 	if (count === 0) return [];
 	const overhead = 3 * count + 1;
 	const available = width - overhead;
-	if (available < count) return wrap(token.raw.replace(/\n+$/, ""), width);
+	if (available < count) {
+		const raw = token.raw.replace(/\n+$/, "");
+		const rows = wrap(raw, width);
+		if (rowText) rowText.push(...mapWrappedText(raw, rows));
+		return rows;
+	}
 
 	const headerTexts = token.header.map(cell => env.cellText(cell, true));
 	const bodyTexts = token.rows.map(row => row.map(cell => env.cellText(cell, false)));
@@ -153,7 +174,9 @@ export function renderTable(env: TableEnvironment, token: Tokens.Table, width: n
 	const rule = (left: string, join: string, right: string): string =>
 		`${left}${h}${widths.map(w => h.repeat(w)).join(`${h}${join}${h}`)}${h}${right}`;
 	const aligns: Align[] = token.header.map((cell, i) => cell.align ?? token.align[i] ?? null);
+	const base = rowText?.length ?? 0;
 	const out: string[] = [rule(box.topLeft, box.teeDown, box.topRight)];
+	rowText?.push(undefined);
 	const pushRow = (
 		texts: readonly string[],
 		style: ((text: string) => string) | undefined,
@@ -166,26 +189,93 @@ export function renderTable(env: TableEnvironment, token: Tokens.Table, width: n
 			height = Math.max(1, ...lines.filter((_, i) => i !== open).map(l => l.length));
 			if (lines[open]!.length > height) lines[open] = heldLines(lines[open]!, height, widths[open]!);
 		}
+		const alignOf = (i: number): Align => cells[i]?.align ?? aligns[i] ?? null;
 		for (let line = 0; line < height; line++) {
 			const parts = widths.map((w, i) => {
-				const text = aligned(lines[i]![line] ?? "", w, cells[i]?.align ?? aligns[i] ?? null);
+				const text = aligned(lines[i]![line] ?? "", w, alignOf(i));
 				return style ? style(text) : text;
 			});
 			out.push(`${box.vertical} ${parts.join(` ${box.vertical} `)} ${box.vertical}`);
 		}
+		if (rowText) pushRowText(rowText, texts, lines, height, widths, alignOf, box.vertical);
 	};
 	pushRow(headerTexts, env.tableHeader, token.header);
 	const separator = rule(box.teeRight, box.cross, box.teeLeft);
 	out.push(separator);
+	rowText?.push(undefined);
 	token.rows.forEach((row, index) => {
 		pushRow(bodyTexts[index]!, undefined, row, index === lastRow ? growing : -1);
-		if (index < token.rows.length - 1) out.push(separator);
+		if (index < token.rows.length - 1) {
+			out.push(separator);
+			rowText?.push(undefined);
+		}
 	});
 	out.push(rule(box.bottomLeft, box.teeUp, box.bottomRight));
+	rowText?.push(undefined);
 	// Cell lines are cut to their column and padded to it, so with a narrow box every row is
 	// `overhead` plus the column widths wide; only a grid wider than `width` needs measuring.
 	let gridWidth = overhead;
 	for (const w of widths) gridWidth += w;
 	if (gridWidth <= width && narrowBox(box)) return out;
-	return out.map(row => (visibleWidth(row) > width ? padTo(row, width) : row));
+	return out.map((row, i) => {
+		if (visibleWidth(row) <= width) return row;
+		if (rowText) rowText[base + i] = clipRenderedText(rowText[base + i], width);
+		return padTo(row, width);
+	});
+}
+
+/**
+ * The text of a table row drawn `height` rows tall from cell `lines` (as
+ * `cellLines` cut them) of `texts` in columns `widths`: one line holding the
+ * cells joined by ` │ `, each visible piece of a cell a run at its column.
+ */
+function pushRowText(
+	text: (RenderedTextRow | undefined)[],
+	texts: readonly string[],
+	lines: readonly (readonly string[])[],
+	height: number,
+	widths: readonly number[],
+	alignOf: (i: number) => Align,
+	vertical: string,
+): void {
+	const sources = widths.map((_, i) => Bun.stripANSI(texts[i] ?? "").replaceAll("\n", " "));
+	const starts: number[] = [];
+	let joined = "";
+	for (let i = 0; i < sources.length; i++) {
+		if (i > 0) joined += ` ${vertical} `;
+		starts.push(joined.length);
+		joined += sources[i];
+	}
+	const line = { text: joined.trimEnd() };
+	const offsets = widths.map(() => 0);
+	for (let row = 0; row < height; row++) {
+		const spans: RenderedTextSpan[] = [];
+		let column = 2;
+		for (let i = 0; i < widths.length; i++) {
+			const drawn = lines[i]![row] ?? "";
+			const plain = Bun.stripANSI(drawn).trimEnd();
+			let content = plain.trimStart();
+			const gap = Math.max(0, widths[i]! - visibleWidth(drawn));
+			const align = alignOf(i);
+			const left = align === "right" ? gap : align === "center" ? Math.floor(gap / 2) : 0;
+			const lead = visibleWidth(plain.slice(0, plain.length - content.length));
+			let at = content ? sources[i]!.indexOf(content, offsets[i]) : -1;
+			// A piece cut to fit (or held while streaming) ends in an ellipsis the cell's text lacks.
+			if (at < 0 && content.endsWith("…")) {
+				content = content.slice(0, -1).trimEnd();
+				at = content ? sources[i]!.indexOf(content, offsets[i]) : -1;
+			}
+			if (at >= 0) {
+				offsets[i] = at + content.length;
+				const start = Math.min(starts[i]! + at, line.text.length);
+				spans.push({
+					start,
+					end: Math.min(starts[i]! + offsets[i]!, line.text.length),
+					column: column + left + lead,
+				});
+			}
+			column += widths[i]! + 3;
+		}
+		text.push(withSpans(line, spans));
+	}
 }

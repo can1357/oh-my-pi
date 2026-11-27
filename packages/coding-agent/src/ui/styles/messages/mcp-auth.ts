@@ -19,6 +19,7 @@ import { hyperlink } from "@oh-my-pi/pi-tui/text/osc";
 import { replaceTabs } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { termOf } from "./fill";
+import { RowText } from "../rendered-text";
 
 /** The narrowest URL chunk: below it the terminal is unusable, but every character still shows. */
 const MIN_WRAP_WIDTH = 16;
@@ -35,36 +36,39 @@ export interface McpAuthLinkTerm {
  * under one OSC 8 id: unlinked chunks let terminal URL auto-detection open
  * only the clicked row, a truncated authorize request (#20192).
  */
-function urlRows(theme: Theme, label: string, url: string, width: number, hyperlinks: boolean): string[] {
+function urlRows(theme: Theme, label: string, url: string, width: number, hyperlinks: boolean, out: RowText): void {
 	const sanitized = replaceTabs(url);
 	const effective = Math.max(MIN_WRAP_WIDTH, Math.trunc(width));
 	const id = Bun.hash(url).toString(36);
 	const link = (text: string) => (hyperlinks ? hyperlink(text, url, id) : text);
-	if (1 + label.length + 1 + sanitized.length <= effective)
-		return [` ${theme.fg("muted", `${label} ${link(sanitized)}`)}`];
-	const rows = [` ${theme.fg("muted", label)}`];
+	if (1 + label.length + 1 + sanitized.length <= effective) {
+		out.literal(` ${theme.fg("muted", `${label} ${link(sanitized)}`)}`);
+		return;
+	}
+	out.literal(` ${theme.fg("muted", label)}`);
+	// The chunks copy as the one URL they split.
+	const chunks: string[] = [];
 	for (let i = 0; i < sanitized.length; i += effective)
-		rows.push(theme.fg("muted", link(sanitized.slice(i, i + effective))));
-	return rows;
+		chunks.push(theme.fg("muted", link(sanitized.slice(i, i + effective))));
+	out.wrapped(sanitized, chunks);
 }
 
 /** The block's rows at `width` (see the module docs). */
-export function mcpAuthLinkRows(theme: Theme, term: McpAuthLinkTerm, width: number, hyperlinks: boolean): string[] {
+export function mcpAuthLinkRows(theme: Theme, term: McpAuthLinkTerm, width: number, hyperlinks: boolean): RowText {
 	const label = "Click here to authorize";
-	return [
+	const out = new RowText().literal(
 		` ${theme.fg("success", "Open authorization URL:")}`,
 		` ${theme.fg("accent", hyperlinks ? hyperlink(label, term.url) : label)}`,
-		...urlRows(theme, "Copy URL:", term.url, width, hyperlinks),
-		...(term.launchUrl
-			? urlRows(theme, "Local shortcut (this machine only):", term.launchUrl, width, hyperlinks)
-			: []),
-	];
+	);
+	urlRows(theme, "Copy URL:", term.url, width, hyperlinks, out);
+	if (term.launchUrl) urlRows(theme, "Local shortcut (this machine only):", term.launchUrl, width, hyperlinks, out);
+	return out;
 }
 
 function paintAuthLink(node: UiNode, cx: PaintContext): Block {
 	const term = termOf<McpAuthLinkTerm>(node);
 	if (!term.url) return { rows: [] };
-	return { rows: mcpAuthLinkRows(cx.theme, { url: term.url, launchUrl: term.launchUrl }, cx.width, cx.hyperlinks) };
+	return mcpAuthLinkRows(cx.theme, { url: term.url, launchUrl: term.launchUrl }, cx.width, cx.hyperlinks).done();
 }
 
 defineRolePainter("col", "omp.mcp.auth-link", paintAuthLink);

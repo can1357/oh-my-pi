@@ -16,11 +16,11 @@ import type { AgentProgress } from "@oh-my-pi/pi-coding-agent/task/task-details"
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { jsx, type KeyEvent, signal } from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { cfgTuiMouse } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { cfgTuiFullscreenMouse, cfgTuiMode, cfgTuiMouse } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { initTheme } from "../src/ui/theme/service";
 import { createModeTerminal, type ModeTerminal, transcriptText } from "./helpers/mode-terminal";
 
-describe("inline click-to-focus geometry", () => {
+describe("session click-to-focus geometry", () => {
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
 	let session: AgentSession;
@@ -288,6 +288,103 @@ describe("inline click-to-focus geometry", () => {
 		await mode.renderInitialMessages();
 		await term.waitFor(() => term.screen().some(row => row.includes(visible)));
 	}
+
+	/** An SGR click on actual painted cells, including a report already queued when tracking turned off. */
+	function clickLabel(label: string): void {
+		const screen = term.screen();
+		const y = screen.findIndex(row => row.includes(label));
+		expect(y).toBeGreaterThanOrEqual(0);
+		const x = screen[y]!.indexOf(label);
+		term.feed(`\x1b[<0;${x + 1};${y + 1}M\x1b[<0;${x + 1};${y + 1}m`);
+	}
+
+	it("gates task, HUD and link clicks independently of fullscreen pointer reporting", async () => {
+		// All three targets must remain visible on the normal screen as well as the alternate one.
+		term.resize(120, 48);
+		cfgTuiMode.override(mode.settings, "fullscreen");
+		cfgTuiFullscreenMouse.set(mode.settings, "wheel");
+		cfgTuiMouse.set(mode.settings, false);
+		cfgExtensionAssistantTextRenderers.set(mode.settings, true);
+		const { activated, firstActivation } = installDemoLinkExtension();
+		await mode.init({ suppressWelcomeIntro: true });
+		void mode.getUserInput();
+		const focus = vi.spyOn(mode, "focusAgentSession").mockResolvedValue();
+		await showReply("Open [link target](demo:target).", "link target");
+		await showLiveTask("CardTarget");
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "HudTarget",
+			index: 0,
+			agent: "task",
+			agentSource: "bundled",
+			description: "pinned task",
+			status: "started",
+			parentToolCallId: "hud-task",
+			detached: true,
+		});
+		await term.waitFor(screen => screen.some(row => row.includes("HudTarget")));
+		const clickTargets = () => {
+			clickLabel("CardTarget");
+			clickLabel("HudTarget");
+			clickLabel("link target");
+		};
+		for (const level of ["wheel", "select"] as const) {
+			cfgTuiFullscreenMouse.set(mode.settings, level);
+			await term.waitFor(() => term.frame.pointer() === level);
+			clickTargets();
+			await mode.shell.nextFrame();
+			expect(focus).not.toHaveBeenCalled();
+			expect(activated).toEqual([]);
+		}
+
+		cfgTuiFullscreenMouse.set(mode.settings, "wheel");
+		cfgTuiMouse.set(mode.settings, true);
+		await term.waitFor(() => term.frame.pointer() === "wheel" && term.frame.activateTargets());
+		clickTargets();
+		await firstActivation;
+		expect(focus.mock.calls).toEqual([["CardTarget"], ["HudTarget"]]);
+		expect(activated).toEqual(["demo:target"]);
+
+		cfgTuiMode.override(mode.settings, "inline");
+		cfgTuiMouse.set(mode.settings, false);
+		await term.waitFor(() => term.engine.isMainScreen && !term.frame.activateTargets());
+		clickTargets();
+		await mode.shell.nextFrame();
+		expect(focus).toHaveBeenCalledTimes(2);
+		expect(activated).toEqual(["demo:target"]);
+	});
+
+	it("keeps dock controls and dialog link hits enabled with session click targets off", async () => {
+		cfgTuiMode.override(mode.settings, "fullscreen");
+		cfgTuiFullscreenMouse.set(mode.settings, "wheel");
+		cfgTuiMouse.set(mode.settings, false);
+		cfgExtensionAssistantTextRenderers.set(mode.settings, true);
+		installDemoLinkExtension();
+		await mode.init({ suppressWelcomeIntro: true });
+		void mode.getUserInput();
+		const actions: string[] = [];
+		const dock = mode.shell.dock.slot("widgetsAbove");
+		dock.set(() => jsx("button", { text: "Dock control", onAction: (act: string) => actions.push(act) }));
+		await mode.shell.nextFrame();
+		clickLabel("Dock control");
+		expect(actions).toEqual(["click"]);
+
+		const link = () =>
+			jsx("md", { text: "[Dialog link](demo:dialog)", onSelect: (href: string) => actions.push(href) });
+		const dialog = mode.showEditorAreaDialog(link);
+		await mode.shell.nextFrame();
+		clickLabel("Dialog link");
+		expect(actions).toEqual(["click", "demo:dialog"]);
+		dialog.close();
+
+		const sheet = mode.shell.overlays.show(() => jsx("overlay", { modal: true, children: link() }), {
+			mouse: "click",
+		});
+		await mode.shell.nextFrame();
+		clickLabel("Dialog link");
+		expect(actions).toEqual(["click", "demo:dialog", "demo:dialog"]);
+		sheet.close();
+		dock.clear();
+	});
 
 	it("leaves a link change before the startup replay to that replay, drawing the transcript once", async () => {
 		cfgExtensionAssistantTextRenderers.set(mode.settings, true);

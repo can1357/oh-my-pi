@@ -44,6 +44,7 @@ export const KITTY: TerminalCapabilities = {
 	multiplexer: null,
 	textSizing: false,
 	tsp: false,
+	pixelMouse: false,
 };
 
 /** A block under test and how its model moves through the stages. */

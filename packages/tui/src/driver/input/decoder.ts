@@ -5,7 +5,7 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import type { InputEvent } from "../contract";
 import { decodeKey } from "./keys";
-import { decodeMouse } from "./mouse";
+import { decodeMouse, isSgrMouseReport, type SgrPixelGeometry } from "./mouse";
 import { parseReply, type TerminalReply } from "./replies";
 import { InputTokenizer, type TokenizerOptions, type TokenSink } from "./tokenizer";
 import { parseTspMessage } from "./tsp";
@@ -24,6 +24,8 @@ export interface InputDecoderOptions extends TokenizerOptions {
 export class InputDecoder {
 	/** A cursor position request is outstanding: `CSI r ; c R` is its answer, not Ctrl/Shift+F3. */
 	cprPending = false;
+	/** SGR-pixel reporting (DECSET 1016) is on: SGR mouse reports are in pixels of this geometry. */
+	pixelMouse: SgrPixelGeometry | null = null;
 
 	readonly #sink: DecoderSink;
 	readonly #main: InputTokenizer;
@@ -149,11 +151,13 @@ export class InputDecoder {
 			this.#sink.input({ type: "focus", focused: seq === "\x1b[I" });
 			return;
 		}
-		const mouse = decodeMouse(seq);
+		const mouse = decodeMouse(seq, this.pixelMouse);
 		if (mouse) {
 			this.#sink.input({ type: "mouse", mouse });
 			return;
 		}
+		// Kitty's pointer leave (and an out-of-window cell report): mouse framing, but no event.
+		if (isSgrMouseReport(seq)) return;
 		const reply = parseReply(seq, this.cprPending);
 		if (reply) {
 			this.#sink.reply(reply);

@@ -117,6 +117,7 @@ function paintSubagents(node: UiNode, cx: PaintContext): Block {
 			height: rows.length - top,
 			node,
 			act: `subagents.focus=${entry.id}`,
+			optionalTarget: "dock",
 		});
 	});
 	if (layout.toggle) {
@@ -128,6 +129,7 @@ function paintSubagents(node: UiNode, cx: PaintContext): Block {
 			height: 1,
 			node,
 			act: "subagents.toggle",
+			optionalTarget: "dock",
 		});
 		rows.push(`${pad}${truncate(` ${dim(label)}`, content, "")}`);
 	}

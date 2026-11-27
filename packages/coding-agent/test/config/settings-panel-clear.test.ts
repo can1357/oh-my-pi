@@ -11,6 +11,7 @@ import { SettingsWindow } from "../../src/ui/overlays/settings/settings";
 import { YAML } from "bun";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "../helpers/settings-test-state";
 
+import { cfgTuiMode } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { cfgTaskPerCallModelAllow } from "@oh-my-pi/pi-coding-agent/task/settings";
 import { cfgSearxngEndpoint } from "@oh-my-pi/pi-coding-agent/web/settings";
 import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
@@ -36,6 +37,29 @@ afterEach(() => {
 	state = undefined;
 	AgentStorage.close();
 	tempDir.removeSync();
+});
+
+it("shows and edits the saved TUI mode without mistaking a launch override for the environment", async () => {
+	const configPath = path.join(agentDir, "config.yml");
+	await Bun.write(configPath, "tui:\n  mode: inline\n");
+	Bun.env.PI_TUI_MODE = "inline";
+	const store = await Settings.init({ cwd: projectDir, agentDir });
+	cfgTuiMode.override(store, "fullscreen");
+	const panel = createSettingsHost();
+	expect(cfgTuiMode.get(store)).toBe("fullscreen");
+	expect(panel.get("tui.mode")).toBe("inline");
+	const description = panel.entries.find(entry => entry.path === "tui.mode")?.ui?.description;
+	expect(description).toContain("This session uses fullscreen.");
+	expect(description).not.toContain("$PI_TUI_MODE overrides");
+	await store.flush();
+	expect(YAML.parse(await Bun.file(configPath).text())).toMatchObject({ tui: { mode: "inline" } });
+	panel.set("tui.mode", "fullscreen");
+	await store.flush();
+	expect(YAML.parse(await Bun.file(configPath).text())).toMatchObject({ tui: { mode: "fullscreen" } });
+	panel.set("tui.mode", "inline");
+	await store.flush();
+	expect(cfgTuiMode.get(store)).toBe("fullscreen");
+	expect(panel.get("tui.mode")).toBe("inline");
 });
 
 it("clearing a settings-panel text field removes the key from config.yml so its env fallback applies again", async () => {

@@ -2,6 +2,7 @@
  * CLI argument parsing and help display
  */
 import * as path from "node:path";
+import type { TermPresentation } from "@oh-my-pi/pi-tui/term/backend";
 import { $env, APP_NAME } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import type { MotionMode } from "../config/motion-presets";
@@ -100,6 +101,8 @@ export interface Args {
 	noRules?: boolean;
 	noContextFiles?: boolean;
 	noTitle?: boolean;
+	/** `--tui-mode`: a launch-only override of the ANSI terminal presentation. */
+	tuiMode?: TermPresentation;
 	/** `--spinner-interval <ms>`: ephemeral `tui.spinnerInterval` override for every spinner (0 = static). */
 	spinnerInterval?: number;
 	/** `--max-fps <n>`: ephemeral `tui.maxFps` override — the ceiling on how often the TUI repaints. */
@@ -333,11 +336,12 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			// (`--system-prompt --profile foo` ⇒ the prompt is the literal "--profile"),
 			// except for the profile bootstrap's internal boundary sentinel.
 			if (
-				arg === "--goal" &&
+				(arg === "--goal" || arg === "--tui-mode") &&
 				(i + 1 >= args.length ||
 					args[i + 1] === PROFILE_BOOTSTRAP_BOUNDARY_ARG ||
 					(equalsValueIndex === -1 && args[i + 1].startsWith("-")))
 			) {
+				if (arg === "--tui-mode") throw new CliUsageError("--tui-mode requires a value: inline or fullscreen.");
 				result.invalidFlagValues.push("--goal requires an objective.");
 				// Like every string flag, a flag-looking token after `--goal` is its (rejected)
 				// value, never a flag of its own: `--goal --profile work` must not activate a profile.

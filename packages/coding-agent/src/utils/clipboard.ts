@@ -6,6 +6,7 @@ import {
 } from "@oh-my-pi/pi-natives/clipboard";
 import { isSsh } from "@oh-my-pi/pi-tui/driver/mux/detect";
 import { writeTerminalSequence } from "@oh-my-pi/pi-tui/driver/session";
+import type { SelectionClipboardResult } from "@oh-my-pi/pi-tui/term/backend";
 import { isWsl } from "@oh-my-pi/pi-utils";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { SUPPORTED_IMAGE_MIME_TYPES } from "@oh-my-pi/pi-utils/mime";
@@ -116,21 +117,28 @@ export async function readMacFileUrlsFromClipboard(): Promise<string[]> {
 
 let macClipboardWrite = Promise.resolve();
 
-/**
- * Copy text to the system clipboard.
- *
- * Emits OSC 52 first when running in a real terminal (works over SSH/mosh),
- * then attempts native clipboard copy as best-effort for local sessions.
- * On Termux, tries `termux-clipboard-set` before native.
- *
- * The OSC 52 goes through `writeTerminalSequence`, so it cannot tear a TUI
- * frame; from a worker thread it is skipped and only the native copy runs.
- *
- * @param text - UTF-8 text to place on the clipboard.
- */
+/** Enqueue OSC 52 on a TTY, then try the system clipboard (including a forwarded display). */
 export async function copyToClipboard(text: string): Promise<void> {
-	if (process.stdout.isTTY) writeTerminalSequence(`\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`);
+	if (process.stdout.isTTY) writeTerminalSequence(osc52(text));
+	await tryCopyToSystemClipboard(text);
+}
 
+function osc52(text: string): string {
+	return `\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`;
+}
+
+/**
+ * Copy a fullscreen transcript selection. Over SSH, a successful system write
+ * cannot prove delivery to the selecting terminal, even with a forwarded-looking
+ * DISPLAY. Use only OSC 52 there; writing its bytes is not an acknowledgement.
+ */
+export async function copyFullscreenSelection(text: string): Promise<SelectionClipboardResult> {
+	const terminalCopy = writeTerminalSequence(osc52(text), { awaitDelivery: true, ttyOnly: true });
+	if (isClipboardTerminalLocal() && (await tryCopyToSystemClipboard(text))) return "success";
+	return (await terminalCopy) ? "unconfirmed-terminal" : "failed";
+}
+
+async function tryCopyToSystemClipboard(text: string): Promise<boolean> {
 	// Keep pbcopy, document-header writes, and native fallbacks in invocation order.
 	let releaseWrite: (() => void) | undefined;
 	if (process.platform === "darwin") {
@@ -141,12 +149,11 @@ export async function copyToClipboard(text: string): Promise<void> {
 		await previousWrite;
 	}
 
-	// Also try native tools (best effort for local sessions)
 	try {
 		if (process.env.TERMUX_VERSION) {
 			try {
 				await spawnCapture(["termux-clipboard-set"], { input: text, timeoutMs: 5000 });
-				return;
+				return true;
 			} catch {
 				// Fall through to native
 			}
@@ -174,15 +181,16 @@ export async function copyToClipboard(text: string): Promise<void> {
 					timeoutMs: 5000,
 					env: { ...process.env, LANG: "en_US.UTF-8", LC_ALL: "en_US.UTF-8" },
 				});
-				return;
+				return true;
 			} catch {
 				// Fall through to native.
 			}
 		}
 
 		await nativeCopyToClipboard(text);
+		return true;
 	} catch {
-		// Ignore — clipboard copy is best-effort
+		return false;
 	} finally {
 		releaseWrite?.();
 	}

@@ -16,6 +16,7 @@ import { defineRoleWidget } from "@oh-my-pi/pi-tui/term/widgets";
 import { truncate } from "@oh-my-pi/pi-tui/text/width";
 import { gradientArt, LOGO } from "../../welcome/logo";
 import { centered, splashRows, starRow } from "./splash";
+import { fitHeight } from "../rendered-text";
 
 /** Terminal facts of the wizard root. */
 export type WizardTerm = { readonly rows: number };
@@ -137,9 +138,7 @@ defineRolePainter("col", "omp.setup", (node, cx): Block => {
 	const height = term?.rows ?? cx.height ?? 30;
 	const child = node.children()[0];
 	const block = child ? cx.paint(child, cx.width, height) : { rows: [] };
-	const rows = block.rows.slice(0, height);
-	while (rows.length < height) rows.push("");
-	return { rows, ...(block.hits ? { hits: block.hits } : {}) };
+	return { ...fitHeight(block, height), ...(block.hits ? { hits: block.hits } : {}) };
 });
 
 /** The wheel over a scene frame goes to the wizard (which scrolls the scene). */

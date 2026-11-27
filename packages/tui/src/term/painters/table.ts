@@ -2,12 +2,14 @@
  * `table`: a header row, a rule, then one row per record. Columns take their
  * natural width; when the row is too narrow the lowest-priority columns hide
  * first, then the widest shrink (cells cut per their `truncate`). Spare
- * cells go to `grow` columns.
+ * cells go to `grow` columns. Text: the header and records as drawn; the
+ * rule is not.
  */
 import type { TspTableColumn, TspTableProps } from "@oh-my-pi/pi-wire";
 import type { Theme } from "../../theme/contract";
 import { align, truncate, truncateMiddle, truncateStart, visibleWidth } from "../../text/width";
 import { type Block, definePainter, EMPTY_BLOCK } from "../paint";
+import { lazyText, literalRenderedText } from "../text-layout";
 import { styledText } from "./layout";
 
 const GAP = 2;
@@ -86,5 +88,5 @@ definePainter("table", (node, cx): Block => {
 	);
 	const rows = [line(c => heads.get(c.id)!), theme.fg("border", theme.symbols.box.horizontal.repeat(ruleWidth))];
 	for (const row of cells) rows.push(line(c => row.get(c.id)!));
-	return { rows };
+	return { rows, text: lazyText(() => rows.map((row, i) => (i === 1 ? undefined : literalRenderedText(row)))) };
 });

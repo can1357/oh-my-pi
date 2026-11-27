@@ -216,6 +216,22 @@ frame because output is backlogged, the writer holds that frame and writes it
 from the viewport top when the driver stops. `Host.suspend()` does
 not flush: the display is replayed when the program resumes.
 
+### 3.2 Fullscreen presentation
+
+`HostOptions.presentation` (`TermBackendOptions.presentation`) switches the terminal renderer between `inline` (everything above) and `fullscreen`. Tern ignores it: a native surface scrolls its own transcript.
+
+Fullscreen frames use the alternate screen and carry no history batch. On terminals wider than two columns, `main` reserves two columns for prompt marks and the scrollbar. The dock stays at the bottom; completion popups can cover the last transcript rows. Scrolling up anchors the window to a position in a transcript block. Output above it and repeated width changes reflow around that position. If the block disappears, a surviving neighbor takes its place. The indicator below the transcript reports new output and copy results. Full-size layers can still take over the screen, and smaller sheets draw over the transcript.
+
+On a cold transcript, `Host.scroller.state().metricsReady` is false while the renderer measures offscreen blocks in the background. Until it becomes true, `offset` and `totalRows` are estimates, not final scrollbar coordinates.
+
+Nothing in fullscreen touches the normal screen: `flush()` writes nothing, and `Host.replayHistory()` and the display reset after `Host.suspend()` are owed until the presentation turns inline again, when the owed reset runs before the first inline frame. Committed blocks stay committed across a switch, so returning to inline continues the ledger, and `retired()` keeps answering for it.
+
+`Host.scroller` gives the program the reading controls (`scrollBy`, `page`, `toTop`, `toBottom`, `seekMark`, `copyHighlight`, `dropHighlight`) and a reactive `state`; it is `undefined` natively and its methods return false while the presentation is inline. `marks` places one mark per `main` node on the marks lane, colored by kind (`running`, `success`, `warning`, `error`). Pointer reports over the transcript area go to the window before hit routing: the wheel (accelerated), scrollbar and mark clicks, and with `pointer: "select"` a text selection whose endpoints are anchored to block text (`term/selection.ts`). A selection copies the logical text painters describe through `Block.text` (`term/text-layout.ts`), soft-wrapped rows joined and decoration rows left out; rows without it copy as painted. `copyText` delivers the copy (on release with `copyOnRelease`, or through `copyHighlight`), and `activateTargets` lets a plain click on an action or item hit activate it instead of selecting. The backend never sets mouse tracking: the program does (`Host.setMouse`).
+
+`findText(query, direction)` searches logical transcript lines for a literal, case-insensitive match. A successful search scrolls to and highlights the match. `clearFind()` cancels an outstanding search and removes its highlight without moving the reading position.
+
+An image the window cuts would draw outside its rows: anchored sequences (SIXEL, iTerm2, kitty without ids) draw upward from the image's last row. The window passes each block slice through `windowImageRows` (`driver/images/clip.ts`): a cut SIXEL raster is cropped to the rows in view and anchored on the last of them, other anchored images keep reserved rows until wholly in view, and kitty direct placements, which carry a source band on every row, pass unchanged.
+
 ## 4. ANSI and width invariants
 
 `visibleWidth`, `truncateToWidth`, `sliceByColumn`, and `wrapTextWithAnsi` share

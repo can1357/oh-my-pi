@@ -292,6 +292,7 @@ describe("live completion surface", () => {
 		// Real enum option sets flow through unchanged.
 		expect(stdout).toContain(":value:(off minimal low medium high xhigh max auto)");
 		expect(stdout).toContain(":value:(always-ask always-ask-cached write yolo)");
+		expect(stdout).toMatch(/--tui-mode\[[^\]]+\]:value:\(inline fullscreen\)/);
 		// Real subcommands present; dynamic callbacks wired.
 		expect(stdout).toContain("_omp_cmd_commit");
 		expect(stdout).toContain("'completions:");

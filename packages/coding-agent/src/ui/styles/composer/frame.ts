@@ -11,7 +11,14 @@
  * keys are away at an ask above).
  */
 import type { UiNode } from "@oh-my-pi/pi-tui";
-import { type Block, type Cell, defineRolePainter, EMPTY_BLOCK, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
+import {
+	type Block,
+	type Cell,
+	defineRolePainter,
+	EMPTY_BLOCK,
+	type Hit,
+	type PaintContext,
+} from "@oh-my-pi/pi-tui/term/paint";
 import { visibleWidth } from "@oh-my-pi/pi-tui/text/width";
 import { fgSgr } from "@oh-my-pi/pi-tui/theme/color";
 import { type ComposerChromeContext, type ComposerStatus, caretOverflow, composerShape } from "./shapes";
@@ -101,6 +108,8 @@ function paintComposer(node: UiNode, cx: PaintContext): Block {
 	const top = shape.top?.(chrome);
 	if (top !== undefined) rows.push(top);
 	let cursor: Cell | undefined;
+	const hits: (Hit & { height: number })[] = [];
+	const left = side + gutterWidth;
 	const fieldRows = block.rows.length > 0 ? block.rows : [""];
 	const imeSafeCursorTail = term.imeSafeCursor === true && shape.sideBorders;
 	for (let i = 0; i < fieldRows.length; i++) {
@@ -117,11 +126,13 @@ function paintComposer(node: UiNode, cx: PaintContext): Block {
 			overflow: Math.max(0, width - contentWidth),
 		});
 		const textFirst = Array.isArray(rendered);
-		if (block.cursor?.row === i) {
-			cursor = {
-				row: rows.length + (textFirst ? 0 : rendered.textRow),
-				col: side + gutterWidth + block.cursor.col,
-			};
+		const row = rows.length + (textFirst ? 0 : rendered.textRow);
+		if (block.cursor?.row === i) cursor = { row, col: left + block.cursor.col };
+		if (field && i < block.rows.length && contentWidth > 0) {
+			// A custom shape can insert chrome between text rows; contiguous rows share one rectangle.
+			const last = hits.at(-1);
+			if (last && last.row + last.height === row) last.height++;
+			else hits.push({ node: field, row, fieldRowOffset: i, col: left, width: contentWidth, height: 1 });
 		}
 		rows.push(...(textFirst ? rendered : rendered.rows));
 	}
@@ -134,6 +145,7 @@ function paintComposer(node: UiNode, cx: PaintContext): Block {
 	rows.push(...covering);
 	return {
 		rows: term.faint ? rows.map(faint) : rows,
+		hits,
 		...(covering.length > 0 ? { covering: covering.length } : {}),
 		...(cursor ? { cursor } : {}),
 	};

@@ -47,7 +47,7 @@ export interface KeyboardScreenModes {
 	readonly leaveAltAfter: string;
 }
 
-/** Mouse reporting granularity (SGR encoding is always requested). */
+/** Mouse reporting granularity (SGR encoding is always requested; SGR-pixel too where `pixelMouse`). */
 export type MouseTracking = "off" | "click" | "drag" | "any";
 
 /** Hardware cursor shape (DECSCUSR); `default` is the one the user configured. */
@@ -66,6 +66,13 @@ export interface TerminalInput extends Pick<
 	/** Current alternate-screen keyboard bytes (they change once the keyboard probe settles). */
 	keyboardScreenModes(): KeyboardScreenModes;
 	setMouse(tracking: MouseTracking): void;
+	/**
+	 * Alternate scroll (DECSET 1007): on the alternate screen without mouse
+	 * reporting, the terminal turns wheel turns into arrow keys. `undefined`
+	 * puts the terminal's own state back (DECRQM, else the usual default: on),
+	 * as a stop does.
+	 */
+	setAlternateScroll(enabled: boolean | undefined): void;
 	/** Re-query the background color (OSC 11); the answer arrives through `onCapabilities`. */
 	refreshAppearance(): void;
 	/** Ask for the cursor position (CPR); null when the terminal does not answer in time. */

@@ -19,7 +19,7 @@ import {
 	parseIssuesLabel,
 } from "../../tools/grouped-output";
 import { countText } from "../../tools/search-common";
-import { frameInner, frameRows, outcomeBg } from "./frame";
+import { frameBlock, frameInner, outcomeBg } from "./frame";
 import {
 	errorDetail,
 	fileRowText,
@@ -48,29 +48,25 @@ function paintAstEdit(node: UiNode, cx: PaintContext): Block {
 	const width = cx.width;
 	if (term.phase === "call") return { rows: wrap(head(cx, term, "pending"), width) };
 	if (term.phase === "error")
-		return {
-			rows: frameRows(theme, width, {
-				head: head(cx, term, "error"),
-				sections: [{ lines: [errorDetail(theme, term.error ?? "")] }],
-				border: "error",
-				bg: outcomeBg("error"),
-			}),
-		};
+		return frameBlock(theme, width, {
+			head: head(cx, term, "error"),
+			sections: [{ lines: [errorDetail(theme, term.error ?? "")] }],
+			border: "error",
+			bg: outcomeBg("error"),
+		});
 	const searched = term.filesSearched ?? 0;
 	if ((term.replacements ?? 0) === 0) {
 		const meta = ["0 replacements"];
 		if (searched > 0) meta.push(`searched ${searched}`);
 		const issues = parseIssueRows(theme, term.parseErrors, term.parseErrorsTotal);
 		if (issues.length === 0) return { rows: wrap(head(cx, term, "warning", meta), width) };
-		return {
-			rows: frameRows(theme, width, {
-				head: head(cx, term, "warning"),
-				sections: [{ lines: issues }],
-				foot: theme.fg("dim", meta.join(theme.symbols.symbol("sep.dot"))),
-				border: "borderMuted",
-				bg: outcomeBg("warning"),
-			}),
-		};
+		return frameBlock(theme, width, {
+			head: head(cx, term, "warning"),
+			sections: [{ lines: issues }],
+			foot: theme.fg("dim", meta.join(theme.symbols.symbol("sep.dot"))),
+			border: "borderMuted",
+			bg: outcomeBg("warning"),
+		});
 	}
 	const dot = theme.fg("dim", theme.symbols.symbol("sep.dot"));
 	const facts = [
@@ -111,15 +107,13 @@ function paintAstEdit(node: UiNode, cx: PaintContext): Block {
 	const inner = frameInner(width);
 	const content = body.map(line => truncate(line, inner, ""));
 	while (content.length > 0 && content[0]!.trim() === "") content.shift();
-	return {
-		rows: frameRows(theme, width, {
-			head: head(cx, term, term.limitReached ? "warning" : "success"),
-			sections: content.length > 0 ? [{ lines: content }] : [],
-			foot: facts.join(dot),
-			border: "borderMuted",
-			bg: outcomeBg(term.partial ? "pending" : "success"),
-		}),
-	};
+	return frameBlock(theme, width, {
+		head: head(cx, term, term.limitReached ? "warning" : "success"),
+		sections: content.length > 0 ? [{ lines: content }] : [],
+		foot: facts.join(dot),
+		border: "borderMuted",
+		bg: outcomeBg(term.partial ? "pending" : "success"),
+	});
 }
 
 defineToolLook("ast_edit", { paint: paintAstEdit, margin: true });

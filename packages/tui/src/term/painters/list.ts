@@ -11,6 +11,7 @@ import type { UiNode } from "../../node";
 import type { Theme } from "../../theme/contract";
 import { padTo, truncate, visibleWidth } from "../../text/width";
 import { type Block, definePainter, EMPTY_BLOCK, type Hit } from "../paint";
+import { blockText, lazyText, offsetRenderedText, type RenderedTextRow } from "../text-layout";
 import { styledText } from "./layout";
 
 /** The one-row line of an item at `width`. */
@@ -57,12 +58,14 @@ definePainter("list", (node, cx): Block => {
 	const shown = limit !== undefined && items.length > limit ? items.slice(0, Math.max(0, limit - 1)) : items;
 	const rows: string[] = [];
 	const hits: Hit[] = [];
+	const blocks: Block[] = [];
 	const inner = Math.max(0, cx.width - 2);
 	for (const item of shown) {
 		const key = item.key();
 		const selected = selectable && key !== undefined && key === props.selected;
 		const marker = selectable ? (selected ? theme.style("accent", "❯") : " ") : theme.style("dim", "•");
 		const block = cx.paint(item, inner);
+		blocks.push(block);
 		const start = rows.length;
 		for (let r = 0; r < block.rows.length; r++) {
 			const row = block.rows[r]!;
@@ -80,5 +83,12 @@ definePainter("list", (node, cx): Block => {
 	}
 	const hidden = items.length - shown.length;
 	if (hidden > 0) rows.push(truncate(theme.style("muted", `${theme.symbols.ellipsis} ${hidden} more`), cx.width, ""));
-	return hits.length > 0 ? { rows, hits } : { rows };
+	// Markers and the `… N more` row are not text.
+	const text = lazyText(() => {
+		const out: (RenderedTextRow | undefined)[] = [];
+		for (const block of blocks) for (const row of blockText(block)) out.push(offsetRenderedText(row, 2));
+		if (hidden > 0) out.push(undefined);
+		return out;
+	});
+	return hits.length > 0 ? { rows, hits, text } : { rows, text };
 });

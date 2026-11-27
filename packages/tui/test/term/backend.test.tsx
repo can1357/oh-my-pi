@@ -23,6 +23,7 @@ const CAPABILITIES: TerminalCapabilities = {
 	multiplexer: null,
 	textSizing: false,
 	tsp: false,
+	pixelMouse: false,
 };
 
 /** Records frames; acknowledges every history batch; history is the concatenation of acknowledged batches. */

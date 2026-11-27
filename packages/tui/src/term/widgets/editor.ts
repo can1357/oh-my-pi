@@ -31,7 +31,16 @@
  */
 import type { KeyEvent, PasteEvent, TextEdit } from "../../events";
 import type { UiNode } from "../../node";
-import { caretCell, caretOf, type EditorProps, graphemes, lastLayout, offsetAt, rowOf } from "../painters/editor";
+import {
+	caretCell,
+	caretOf,
+	type EditorProps,
+	fieldWindowTop,
+	graphemes,
+	lastLayout,
+	offsetAt,
+	rowOf,
+} from "../painters/editor";
 import { type WidgetAction, widgetActionOf, widgetKeyMatches } from "../keymap";
 import { defineWidget, type Widget, type WidgetContext } from "../widgets";
 
@@ -465,9 +474,9 @@ export const fieldWidget: Widget = {
 		const field = openField(node, cx);
 		cx.emit({ type: "focus", key: cx.keypath });
 		const rows = lastLayout(node);
-		const top = field.props.maxLines !== undefined ? (cx.state("scroll", () => 0)() as number) : 0;
-		const row = Math.min(rows.length - 1, at.row + top);
-		moveTo(field, offsetAt(field.text, rows, row, at.col), null);
+		const limit = field.props.maxLines ?? Number.POSITIVE_INFINITY;
+		const top = rows.length > limit ? fieldWindowTop(node, rows.length, rowOf(rows, field.cursor), limit) : 0;
+		moveTo(field, offsetAt(field.text, rows, top + at.row, at.col), null);
 		settleField(field, "other");
 		return true;
 	},

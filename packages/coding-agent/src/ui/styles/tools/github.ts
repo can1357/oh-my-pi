@@ -13,7 +13,7 @@ import type { Block, PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { replaceTabs, truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import type { GithubState, GithubTerm, GithubTermFailedLog, GithubTermJob } from "../../tools/github";
-import { expandHint, type FrameSection, frameInner, frameRows, isActive, moreLinesHint, spinnerGlyph } from "./frame";
+import { expandHint, type FrameSection, frameBlock, frameInner, isActive, moreLinesHint, spinnerGlyph } from "./frame";
 import { defineToolLook, toolProps } from "./look";
 
 /** Subject characters a call shows. */
@@ -133,9 +133,7 @@ function paintGithub(node: UiNode, cx: PaintContext): Block {
 		const sections: FrameSection[] = [{ lines }];
 		if (term.failedLogs?.length)
 			sections.push({ label: "failed logs", lines: failedLogLines(theme, term.failedLogs, inner, expanded) });
-		return {
-			rows: frameRows(theme, cx.width, { head, sections, border }),
-		};
+		return frameBlock(theme, cx.width, { head, sections, border });
 	}
 	const lines = term.lines ?? [];
 	if (lines.length <= 1 && !term.subject) {
@@ -149,13 +147,11 @@ function paintGithub(node: UiNode, cx: PaintContext): Block {
 	const hidden = expanded ? 0 : Math.max(0, lines.length - COLLAPSED_LINES);
 	const body = lines.slice(0, lines.length - hidden).map(line => truncate(theme.fg(color, replaceTabs(line)), inner));
 	if (hidden > 0) body.push(moreLinesHint(theme, hidden));
-	return {
-		rows: frameRows(theme, cx.width, {
-			head,
-			sections: [{ lines: body.length > 0 ? body : [theme.fg("dim", term.empty ?? "")] }],
-			border,
-		}),
-	};
+	return frameBlock(theme, cx.width, {
+		head,
+		sections: [{ lines: body.length > 0 ? body : [theme.fg("dim", term.empty ?? "")] }],
+		border,
+	});
 }
 
 defineToolLook("github", { paint: paintGithub, margin: true });

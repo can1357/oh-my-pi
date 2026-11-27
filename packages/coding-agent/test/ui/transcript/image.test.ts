@@ -39,6 +39,7 @@ const caps: TerminalCapabilities = {
 	multiplexer: null,
 	textSizing: false,
 	tsp: false,
+	pixelMouse: false,
 };
 
 let cleanup: (() => void) | undefined;

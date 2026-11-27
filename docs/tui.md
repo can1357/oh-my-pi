@@ -79,7 +79,7 @@ them on Linux only; the Windows-specific cases run only on a local Windows host.
 
 ### Terminal backend: painters, roles, widgets
 
-- **Painters** (`packages/tui/src/term/paint.ts`, `term/painters/*`): `definePainter(kind, painter)` registers `paint(node, cx) → Block` (`rows`, optional cursor, hit rects, images). Blocks are cached per node by width and the signals they read.
+- **Painters** (`packages/tui/src/term/paint.ts`, `term/painters/*`): `definePainter(kind, painter)` registers `paint(node, cx) → Block` (`rows`, optional cursor, hit rects, images). Blocks are cached per node by width and the signals they read. A painter that draws text can also return `text`, a lazy description of the logical line behind each row (`term/text-layout.ts`: `mapWrappedText`, `offsetRenderedText`, `lazyText`); the fullscreen transcript's selection copies that text, so wrapped lines rejoin and chrome rows (borders, gutters, padding) stay out. Without it, rows copy as painted.
 - **Roles**: `defineRolePainter(kind, role, painter)` overrides a kind's look for nodes whose `role` prop matches; coding-agent uses this for screens that keep a specific look (`packages/coding-agent/src/ui/styles/**`).
 - **Widgets** (`term/widgets.ts`, `term/widgets/*`): `defineWidget(kind, widget)` / `defineRoleWidget` give focusable kinds their `key`, `paste` and `mouse` behaviour. A widget emits the same events a Tern terminal sends (an `editor` edit, a `picker` select/activate, a `button` action).
 

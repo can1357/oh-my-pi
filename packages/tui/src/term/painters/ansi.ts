@@ -8,12 +8,14 @@
  * kept per cell; other controls are dropped.
  *
  * Collapsed, `preview.lines` clamps the rows (the tail when `follow`), with a
- * dim count of the rows left out.
+ * dim count of the rows left out. Text: one line per output line (what a
+ * clamp keeps of it); the count row is not.
  */
 import type { TspAnsiProps } from "@oh-my-pi/pi-wire";
 import { escapeLength, SgrState, sgrParams } from "../../text/ansi";
 import { replaceTabs, visibleWidth, wrap } from "../../text/width";
 import { type Block, definePainter, EMPTY_BLOCK, type PaintContext } from "../paint";
+import { lazyText, mapWrappedText, type RenderedText, sliceRenderedText } from "../text-layout";
 
 interface ScreenCell {
 	readonly ch: string;
@@ -207,22 +209,39 @@ function serialize(cells: readonly ScreenCell[]): string {
 	return out;
 }
 
-/** Rows a collapsed `ansi` node shows, by its preview. */
-function clamp(rows: string[], props: TspAnsiProps, cx: PaintContext): string[] {
+/** What a collapsed `ansi` node shows of `rows` (`text` their text), by its preview. */
+function clamp(rows: string[], text: () => RenderedText, props: TspAnsiProps, cx: PaintContext): Block {
 	const preview = props.preview;
-	if (preview === undefined || preview === "auto" || rows.length <= preview.lines) return rows;
+	if (preview === undefined || preview === "auto" || rows.length <= preview.lines) return { rows, text };
 	const hidden = rows.length - preview.lines;
 	const note = cx.theme.fg("dim", `… ${hidden} more lines`);
-	return props.follow ? [note, ...rows.slice(-preview.lines)] : [...rows.slice(0, preview.lines), note];
+	if (props.follow) {
+		const kept = rows.slice(-preview.lines);
+		const from = rows.length - kept.length;
+		return {
+			rows: [note, ...kept],
+			text: lazyText(() => [undefined, ...sliceRenderedText(text(), from, rows.length)]),
+		};
+	}
+	return {
+		rows: [...rows.slice(0, preview.lines), note],
+		text: lazyText(() => [...sliceRenderedText(text(), 0, preview.lines), undefined]),
+	};
 }
 
 function paintAnsi(node: { props(): unknown }, cx: PaintContext): Block {
 	const props = node.props() as TspAnsiProps;
 	const text = props.text ?? "";
 	if (text === "") return EMPTY_BLOCK;
+	const lines = ansiLines(text.replace(/\n+$/, ""));
 	const rows: string[] = [];
-	for (const line of ansiLines(text.replace(/\n+$/, ""))) rows.push(...(line === "" ? [""] : wrap(line, cx.width)));
-	return { rows: clamp(rows, props, cx) };
+	for (const line of lines) rows.push(...(line === "" ? [""] : wrap(line, cx.width)));
+	return clamp(
+		rows,
+		lazyText(() => mapWrappedText(lines.join("\n"), rows)),
+		props,
+		cx,
+	);
 }
 
 definePainter("ansi", paintAnsi);

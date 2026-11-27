@@ -200,6 +200,15 @@ export class TerminalImages {
 	 */
 	rows(source: ImageSource, request: ImageRequest): ImageRows {
 		if (!getOwner()) throw new Error("pi-tui: TerminalImages.rows must run inside a painter (a reactive owner)");
+		return this.#rows(source, request, false);
+	}
+
+	/** Fit reserved rows for an offscreen measurement without acquiring, encoding, or transmitting the image. */
+	measure(source: ImageSource, request: ImageRequest): ImageRows {
+		return this.#rows(source, request, true);
+	}
+
+	#rows(source: ImageSource, request: ImageRequest, measureOnly: boolean): ImageRows {
 		const caps = this.#capabilities();
 		const label =
 			request.maxColumns === undefined ? request.fallback : truncate(request.fallback, request.maxColumns);
@@ -217,6 +226,10 @@ export class TerminalImages {
 		const placeholders = protocol === "kitty" && this.#placeholders() && kittyPlaceholdersFit(box.columns, box.rows);
 		// Placements and SIXEL/iTerm2 sequences address the screen: nothing else can share their rows.
 		if (request.cells && !placeholders) return { rows: [label], columns: visibleWidth(label), state: "fallback" };
+		if (measureOnly) {
+			const height = protocol === "kitty" && !placeholders ? Math.min(box.rows, SLOT_SPAN - 1) : box.rows;
+			return { rows: reservedRows(height), columns: box.columns, state: "pending" };
+		}
 		const entry = this.#acquire(source);
 		const fallback = (): ImageRows => ({
 			rows: [label, ...Array.from({ length: box.rows - 1 }, () => RESERVED_ROW)],

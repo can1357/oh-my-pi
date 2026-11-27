@@ -20,12 +20,14 @@ import {
 	type UiNode,
 } from "@oh-my-pi/pi-tui";
 import type { ResizeScrollback, TerminalDriverOptions } from "@oh-my-pi/pi-tui/driver/index";
+import type { FramePresentation, ScrollMark, TranscriptPointer } from "@oh-my-pi/pi-tui/term/backend";
 import { staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
 import { renderBlock } from "@oh-my-pi/pi-tui/term/render";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { setSymbolPreset } from "../../ui/theme/service";
 import type { Keybinding } from "../../config/keybindings/app-keybindings";
 import { getKeybindings } from "../../config/keybindings/keybindings";
+import { copyFullscreenSelection } from "../../utils/clipboard";
 import { Composer, ComposerChips } from "../../ui/composer";
 import {
 	DeferredCommand,
@@ -94,6 +96,10 @@ export interface AppFrameOptions {
 export interface AppFrameStartOptions {
 	/** The native surface's title (Tern). */
 	readonly title?: string;
+	/**
+	 * Clear the terminal's scrollback first (a fresh screen for the session). Inline only: a
+	 * fullscreen frame never touches the shell's scrollback.
+	 */
 	readonly clearHistory?: boolean;
 	/** `tui.resizeScrollback`. */
 	readonly resizeScrollback: ResizeScrollback;
@@ -123,6 +129,18 @@ export class AppFrame {
 	readonly hyperlinks: Signal<boolean | undefined> = signal(undefined);
 	/** `tui.textSizing`: sized headings where the terminal supports them. */
 	readonly textSizing: Signal<boolean> = signal(false);
+	/** The terminal layout, a reversible startup preview, or `null` to suppress ANSI paint. */
+	readonly presentation: Signal<FramePresentation> = signal<FramePresentation>("inline");
+	/** How the fullscreen transcript uses the mouse (`tui.fullscreenMouse`). */
+	readonly pointer: Signal<TranscriptPointer> = signal<TranscriptPointer>("select");
+	/** `tui.copyOnRelease`: a fullscreen transcript selection is copied when the mouse is released. */
+	readonly copyOnRelease: Signal<boolean> = signal(true);
+	/** `tui.mouse`: plain clicks on actionable transcript targets activate them instead of selecting. */
+	readonly activateTargets: Signal<boolean> = signal(false);
+	/** Where the fullscreen scrollbar's prompt marks come from: none until a session supplies them. */
+	readonly #marks: Signal<Accessor<readonly ScrollMark[]>> = signal<Accessor<readonly ScrollMark[]>>(NO_MARKS);
+	/** The fullscreen scrollbar's prompt marks (reactive). */
+	readonly marks: Accessor<readonly ScrollMark[]> = () => this.#marks()();
 	readonly #shape: Signal<string>;
 	readonly #quiet: Signal<boolean>;
 	/** Tip rolls, latched when the frame is built so the tip stays put for the session. */
@@ -176,7 +194,8 @@ export class AppFrame {
 
 	/**
 	 * Start rendering on the process terminal, focus resting on the composer; `clearHistory`
-	 * clears the terminal's scrollback first (a fresh screen for the session).
+	 * clears the terminal's scrollback first (a fresh screen for the session) unless the frame
+	 * presents fullscreen.
 	 */
 	async start(options: AppFrameStartOptions): Promise<void> {
 		// Before the host starts: keys typed while it probes the terminal are delivered to the focused node.
@@ -195,10 +214,22 @@ export class AppFrame {
 			hyperlinks: this.hyperlinks,
 			textSizing: this.textSizing,
 			...(this.#terminal?.clock ? { clock: this.#terminal.clock } : {}),
+			presentation: this.presentation,
+			clearHistory: options.clearHistory,
+			marks: this.marks,
+			pointer: this.pointer,
+			copyOnRelease: this.copyOnRelease,
+			copyText: copyFullscreenSelection,
+			copyShortcutLabel: () => actionKey("app.transcript.copyHighlight") || undefined,
+			activateTargets: this.activateTargets,
 		});
-		if (options.clearHistory) this.shell.host?.replayHistory();
 		// Tern draws omp's icons with its own Nerd Font: a native surface always uses those symbols.
 		if (this.shell.native()) await setSymbolPreset("nerd");
+	}
+
+	/** Draw `marks` on the fullscreen scrollbar (the interactive mode's, once its session exists). */
+	setMarks(marks: Accessor<readonly ScrollMark[]>): void {
+		this.#marks.set(marks);
 	}
 
 	/** The composer shape (`composer.shape`, or an extension's). */
@@ -474,6 +505,10 @@ export class AppFrame {
 		dock.slot("tray").set(() => <Tray model={hud.tray} />);
 	}
 }
+
+const NO_MARK_LIST: readonly ScrollMark[] = [];
+/** No scrollbar marks: the frame's until a session supplies its own. */
+const NO_MARKS: Accessor<readonly ScrollMark[]> = () => NO_MARK_LIST;
 
 /** `label`, then the key bound to `action` after two spaces (the hover title of a control). */
 function keyedTitle(label: string, action: Keybinding): string {

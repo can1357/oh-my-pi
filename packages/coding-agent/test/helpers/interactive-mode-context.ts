@@ -318,6 +318,9 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 		transcriptEntry: vi.fn((...args: Parameters<TranscriptPresenter["transcriptEntry"]>) =>
 			presenter().transcriptEntry(...args),
 		),
+		registerTranscriptEntry: vi.fn((...args: Parameters<TranscriptPresenter["register"]>) =>
+			presenter().register(...args),
+		),
 		presentMessage: vi.fn((...args: Parameters<TranscriptPresenter["presentMessage"]>) =>
 			presenter().presentMessage(...args),
 		),

@@ -17,6 +17,7 @@ import type { TermChip } from "../../transcript/messages/chips";
 import { fillRow, termOf } from "./fill";
 import { fileLink } from "../tools/file-common";
 import { bubbleMarkdown } from "./user";
+import { RowText } from "../rendered-text";
 
 interface SkillTerm {
 	label: string;
@@ -45,23 +46,41 @@ function paintSkill(node: UiNode, cx: PaintContext): Block {
 		1,
 	);
 	const header = term.lines ? `${pill}  ${theme.fg("muted", term.lines)}` : pill;
-	const content: string[] = [...wrap(header, inner)];
+	const content = new RowText().literal(...wrap(header, inner));
 	if (term.leading && term.draft)
-		content.push("", ...bubbleMarkdown(theme, term.draft, inner, { chips: term.chips, hyperlinks: cx.hyperlinks }));
-	if (term.expanded && term.prompt) {
-		content.push("", theme.fg("muted", "prompt"), "", ...bubbleMarkdown(theme, term.prompt, inner, {}));
-	}
+		content
+			.literal("")
+			.block(bubbleMarkdown(theme, term.draft, inner, { chips: term.chips, hyperlinks: cx.hyperlinks }));
+	if (term.expanded && term.prompt)
+		content
+			.literal("")
+			.literal(theme.fg("muted", "prompt"))
+			.literal("")
+			.block(bubbleMarkdown(theme, term.prompt, inner, {}));
 	const rail = theme.bg(BG, theme.fg("customMessageLabel", theme.symbols.symbol("skill.rail")));
-	const callout = ["", ...content, ""].map(row => rail + fillRow(theme, BG, row === "" ? "" : ` ${row}`, boxWidth));
-	if (term.leading) return { rows: callout };
-	const bubble = term.draft
-		? bubbleMarkdown(theme, term.draft, width, {
-				chips: term.chips,
-				padding: 1,
-				hyperlinks: cx.hyperlinks,
-			}).map(row => fillRow(theme, BG, row, width))
-		: [];
-	return { rows: term.expanded ? [...bubble, ...callout] : bubble };
+	const railRow = (row: string): string => rail + fillRow(theme, BG, row === "" ? "" : ` ${row}`, boxWidth);
+	const callout = new RowText()
+		.deco(railRow(""))
+		.block(content.done(), 2, content.rows.map(railRow))
+		.deco(railRow(""))
+		.done();
+	if (term.leading) return callout;
+	const out = new RowText();
+	if (term.draft) {
+		const bubble = bubbleMarkdown(theme, term.draft, width, {
+			chips: term.chips,
+			padding: 1,
+			hyperlinks: cx.hyperlinks,
+		});
+		// The fill adds escapes and padding only.
+		out.block(
+			bubble,
+			0,
+			bubble.rows.map(row => fillRow(theme, BG, row, width)),
+		);
+	}
+	if (term.expanded) out.block(callout);
+	return out.done();
 }
 
 defineRolePainter("card", "omp.skill", paintSkill);

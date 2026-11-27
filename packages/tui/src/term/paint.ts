@@ -16,6 +16,7 @@ import type { ImageRequest, ImageRows, ImageSource } from "../driver/images/stor
 import type { UiKind, UiNode } from "../node";
 import { type Accessor, computed, createRoot, signal } from "../reactive";
 import type { Theme } from "../theme/contract";
+import type { RenderedText } from "./text-layout";
 
 /** A cell position inside a block. */
 export interface Cell {
@@ -29,12 +30,16 @@ export interface Hit {
 	readonly col: number;
 	readonly width: number;
 	readonly height: number;
+	/** Row of the widget's visible content at the top of this rectangle (default 0; chrome can separate text rows). */
+	readonly fieldRowOffset?: number;
 	/** The node the event goes to. */
 	readonly node: UiNode;
 	/** The list item / tab / row key under the pointer, when the node has items. */
 	readonly item?: string;
 	/** The action a click runs (buttons). */
 	readonly act?: string;
+	/** The region where `activateTargets` gates this shortcut. The same content in a dialog keeps its hits. */
+	readonly optionalTarget?: "main" | "dock";
 }
 
 /** What a painter returns: rows (none wider than the width it got), plus cursor and hit regions. */
@@ -57,12 +62,16 @@ export interface Block {
 	 * children's.
 	 */
 	readonly covering?: number;
+	/** Logical text of each row (term/text-layout.ts), computed on demand; absent: rows copy literally. */
+	readonly text?: () => RenderedText;
 }
 
 /** Every observable part of the block counts, including pointer routing when no cell changed. */
 function sameBlock(a: Block, b: Block): boolean {
 	if (a === b) return true;
 	if (
+		// Annotations are lazy. Matching cells can still copy differently (a soft wrap vs. a newline).
+		a.text !== b.text ||
 		a.rows.length !== b.rows.length ||
 		a.stable !== b.stable ||
 		a.covering !== b.covering ||
@@ -83,7 +92,9 @@ function sameBlock(a: Block, b: Block): boolean {
 				(x.node !== y.node ||
 					x.item !== y.item ||
 					x.act !== y.act ||
+					x.optionalTarget !== y.optionalTarget ||
 					x.row !== y.row ||
+					x.fieldRowOffset !== y.fieldRowOffset ||
 					x.col !== y.col ||
 					x.width !== y.width ||
 					x.height !== y.height)
@@ -102,7 +113,7 @@ export interface PaintContext {
 	readonly height: number | undefined;
 	/** The active theme (reading it subscribes to theme changes). */
 	readonly theme: Theme;
-	/** Paint `node` at a size, cached; the child's reads are its own. */
+	/** Paint a child in this pass's scope (cached for normal terminal paints). */
 	paint(node: UiNode, width: number, height?: number): Block;
 	/**
 	 * Terminal clock in ms; reading it repaints this block on every animation tick. `smooth` asks for
@@ -138,6 +149,8 @@ export interface PaintContext {
  */
 export interface PaintImages {
 	rows(source: ImageSource, request: ImageRequest): ImageRows;
+	/** Offscreen geometry only, without acquiring or encoding the image. */
+	measure?(source: ImageSource, request: ImageRequest): ImageRows;
 	/** The terminal's cell size in pixels (what an image's natural size in cells is measured by). */
 	cell(): CellSize;
 }
@@ -226,7 +239,7 @@ export interface PaintEnvironment {
 const kCache = Symbol("pi-tui.term.paint-cache");
 
 interface PaintEntry {
-	readonly block: Accessor<Block>;
+	readonly read: Accessor<Block>;
 	readonly dispose: () => void;
 }
 
@@ -243,6 +256,32 @@ interface CachedNode {
 
 /** Most sizes cached per node before the oldest is dropped. */
 const MAX_SIZES_PER_NODE = 4;
+
+function paintBlock(node: UiNode, cx: PaintContext): Block {
+	if (node.props().hidden === true) return EMPTY_BLOCK;
+	const painter = painterFor(node);
+	if (!painter) throw new Error(`pi-tui: no terminal painter for <${node.kind}>`);
+	return painter(node, cx);
+}
+
+function createEntry(node: UiNode, cx: PaintContext): PaintEntry {
+	return createRoot(dispose => ({ read: computed(() => paintBlock(node, cx), { equals: sameBlock }), dispose }));
+}
+
+/** Recurse under the caller's computation: no node-lifetime caches or detached child owners. */
+function paintTree(env: PaintEnvironment, node: UiNode, width: number, height?: number): Block {
+	return paintBlock(node, createContext(env, width, height, paintTree));
+}
+
+/** One disposable transcript block. Its subtree's reads and image cleanups belong to this entry. */
+export function createOwnedPaint(node: UiNode, width: number, env: PaintEnvironment): PaintEntry {
+	return createEntry(node, createContext(env, width, undefined, paintTree));
+}
+
+/** A one-shot paint under the caller's watcher, using its geometry-only image and clock environment. */
+export function paintForMeasurement(node: UiNode, width: number, env: PaintEnvironment): Block {
+	return paintTree(env, node, width);
+}
 
 /**
  * Paint `node` at a size in `env`, through its per-size cache. Painting a
@@ -268,23 +307,10 @@ export function paintNode(env: PaintEnvironment, node: UiNode, width: number, he
 				cache.entries.delete(oldest);
 			}
 		}
-		const cx = createContext(env, width, height);
-		// Detached from whatever paint is running: the entry lives until the node retires or is evicted.
-		entry = createRoot(dispose => ({
-			block: computed(
-				() => {
-					if (node.props().hidden === true) return EMPTY_BLOCK;
-					const painter = painterFor(node);
-					if (!painter) throw new Error(`pi-tui: no terminal painter for <${node.kind}>`);
-					return painter(node, cx);
-				},
-				{ equals: sameBlock },
-			),
-			dispose,
-		}));
+		entry = createEntry(node, createContext(env, width, height, paintNode));
 		cache.entries.set(size, entry);
 	}
-	return entry.block();
+	return entry.read();
 }
 
 /** Drop every cached block of `node`. */
@@ -295,14 +321,19 @@ export function releasePaintCache(node: UiNode): void {
 	cache.entries.clear();
 }
 
-function createContext(env: PaintEnvironment, width: number, height: number | undefined): PaintContext {
+function createContext(
+	env: PaintEnvironment,
+	width: number,
+	height: number | undefined,
+	paint: typeof paintNode,
+): PaintContext {
 	return {
 		width,
 		height,
 		get theme() {
 			return env.theme();
 		},
-		paint: (child, childWidth, childHeight) => paintNode(env, child, childWidth, childHeight),
+		paint: (child, childWidth, childHeight) => paint(env, child, childWidth, childHeight),
 		now: smooth => env.clock(smooth),
 		focused: node => env.focus() === node,
 		hovered: node => {

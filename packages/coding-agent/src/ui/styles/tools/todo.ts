@@ -25,7 +25,7 @@ import {
 	TODO_STRIKE_TOTAL_FRAMES,
 } from "../../../tools/details/todo";
 import { nodePlain, stillMark } from "./agent-common";
-import { frameRows } from "./frame";
+import { frameBlock } from "./frame";
 import { defineToolLook, toolProps } from "./look";
 
 /** Open items a collapsed phase shows. */
@@ -165,7 +165,7 @@ function paintTodo(node: UiNode, cx: PaintContext): Block {
 	if (props.tone === "error" || props.status === "error") {
 		const message = children[0] ? nodePlain(children[0]) : "";
 		const [first = "", ...rest] = message.split("\n");
-		const rows = frameRows(theme, width, {
+		return frameBlock(theme, width, {
 			head: `${theme.fg("error", theme.symbols.symbol("status.error"))} ${theme.fg("accent", "Todo")}`,
 			// A multi-line message leaves the error color open over its first line's padding.
 			sections: [
@@ -181,7 +181,6 @@ function paintTodo(node: UiNode, cx: PaintContext): Block {
 			border: "error",
 			bg: "toolErrorBg",
 		});
-		return { rows };
 	}
 	const term = (props.term ?? {}) as TodoTerm;
 	if (term.ops)
@@ -202,13 +201,11 @@ function paintTodo(node: UiNode, cx: PaintContext): Block {
 	// The view opens natively; the terminal follows the transcript's expand state. Only a live block
 	// animates: a settled one's rows may go to scrollback, so its fresh completions draw struck.
 	const body = listRows(checklist, cx, props.term?.expanded === true, !isSettled(node), inner);
-	return {
-		rows: frameRows(theme, width, {
-			head,
-			sections: body.length > 0 ? [{ lines: body }] : [],
-			border: "borderMuted",
-		}),
-	};
+	return frameBlock(theme, width, {
+		head,
+		sections: body.length > 0 ? [{ lines: body }] : [],
+		border: "borderMuted",
+	});
 }
 
 defineToolLook("todo", { paint: paintTodo, margin: true, clocked: true });

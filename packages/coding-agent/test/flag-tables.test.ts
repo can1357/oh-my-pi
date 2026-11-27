@@ -178,6 +178,23 @@ describe("enum flag validation", () => {
 		]);
 	});
 
+	it("accepts both --tui-mode forms and keeps the prompt separate", () => {
+		expect(parseArgs(["--tui-mode=inline", "prompt"])).toMatchObject({ tuiMode: "inline", messages: ["prompt"] });
+		expect(parseArgs(["--tui-mode", "fullscreen", "prompt"])).toMatchObject({
+			tuiMode: "fullscreen",
+			messages: ["prompt"],
+		});
+		expect(parseArgs(["--tui-mode", "fullscreen", "--tui-mode=inline"]).tuiMode).toBe("inline");
+		expect(parseArgs(["--", "--tui-mode=inline"]).messages).toEqual(["--tui-mode=inline"]);
+	});
+
+	it("rejects missing, empty, flag-shaped, and unsupported --tui-mode values with a usage error", () => {
+		for (const args of [["--tui-mode"], ["--tui-mode="], ["--tui-mode", "--print"], ["--tui-mode=FullScreen"]]) {
+			expect(() => parseArgs(args)).toThrow(CliUsageError);
+			expect(() => parseArgs(args)).toThrow(/--tui-mode.*inline.*fullscreen/);
+		}
+	});
+
 	it("delivers a value to an extension flag that shadows a built-in enum flag", () => {
 		// Startup parses before extensions load; the extension-aware reparse must
 		// hand `--mode compact` to the extension, not report it as invalid.

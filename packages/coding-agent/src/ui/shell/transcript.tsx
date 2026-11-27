@@ -39,6 +39,7 @@ import {
 import { holdsImage } from "@oh-my-pi/pi-tui/driver/images/anchor";
 import { type Block, defineRolePainter, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
+import { shiftText } from "../styles/rendered-text";
 import { mountNode, type ViewEntry, ViewList } from "./views";
 
 /** A block in the transcript. */
@@ -446,12 +447,7 @@ function paintBlock(node: UiNode, cx: PaintContext): Block {
 	if (!child) return { rows: [] };
 	const bare =
 		(child.kind === "text" || child.kind === "md") && (child.props() as { role?: string }).role === undefined;
-	const painted = bare
-		? (() => {
-				const inner = cx.paint(child, Math.max(1, cx.width - 2), cx.height);
-				return { ...inner, rows: inner.rows.map(row => ` ${row}`) };
-			})()
-		: cx.paint(child, cx.width, cx.height);
+	const painted = bare ? cx.paint(child, Math.max(1, cx.width - 2), cx.height) : cx.paint(child, cx.width, cx.height);
 	const rows = painted.rows;
 	let start = 0;
 	let end = rows.length;
@@ -459,8 +455,10 @@ function paintBlock(node: UiNode, cx: PaintContext): Block {
 	while (end > start && blankRow(rows[end - 1]!)) end--;
 	if (start === 0 && end === rows.length && !bare) return painted;
 	const shift = bare ? 1 : 0;
+	const kept = start === 0 && end === rows.length ? rows : rows.slice(start, end);
 	return {
-		rows: rows.slice(start, end),
+		rows: bare ? kept.map(row => ` ${row}`) : kept,
+		text: shiftText(painted, shift, start, end),
 		...(painted.cursor ? { cursor: { row: painted.cursor.row - start, col: painted.cursor.col + shift } } : {}),
 		...(painted.hits
 			? { hits: painted.hits.map(hit => ({ ...hit, row: hit.row - start, col: hit.col + shift })) }

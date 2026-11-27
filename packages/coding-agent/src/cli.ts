@@ -48,6 +48,8 @@ import {
 } from "./cli/worker-selectors";
 import { DAEMON_WORKER_ARG } from "./daemon/protocol";
 import { MNEMOPI_EMBED_WORKER_ARG } from "./mnemopi/embed-protocol";
+import { isTuiMode } from "./modes/presentation-env";
+import type { PrepaintComposerOptions } from "./modes/startup-composer";
 import type * as JsProcessEntry from "./eval/js/process-entry";
 import type { WorkerInbound as JsWorkerInbound, WorkerOutbound as JsWorkerOutbound } from "./eval/js/worker-protocol";
 import { startParentWatchdog } from "./subprocess/parent-watchdog";
@@ -104,32 +106,25 @@ const PREPAINT_SAFE_FLAGS: Record<string, true> = {
 	"--no-title": true,
 	"--no-prewalk": true,
 	"--no-pty": true,
-	// `-e`/`--extension` only registers a local extension path; the extension
-	// loads later, so the speculative first frame stays valid (issue #20158).
-	// These take a value, so they are handled by `isPrepaintSafeArgv`.
 };
 
-/**
- * Flags in `PREPAINT_SAFE_FLAGS` whose single value follows as the next argv
- * token. `--extension=value` needs no special handling: it is one token that
- * matches the flag directly.
- */
-const PREPAINT_SAFE_VALUE_FLAGS: ReadonlySet<string> = new Set(["-e", "--extension"]);
-
-/** True when every token in `argv` still yields a valid speculative first frame. */
-export function isPrepaintSafeArgv(argv: readonly string[]): boolean {
+/** The early frame's launch options, or `undefined` when argv needs the regular command parser first. */
+export function prepaintOptionsForArgv(argv: readonly string[]): Pick<PrepaintComposerOptions, "tuiMode"> | undefined {
+	let tuiMode: PrepaintComposerOptions["tuiMode"];
 	for (let index = 0; index < argv.length; index++) {
 		const arg = argv[index]!;
-		if (PREPAINT_SAFE_VALUE_FLAGS.has(arg)) {
-			// The path value belongs to the flag; skip it. A missing value is
-			// a usage error the regular parse reports later.
+		if (arg === "--tui-mode" || arg.startsWith("--tui-mode=")) {
+			const value = arg === "--tui-mode" ? argv[++index] : arg.slice("--tui-mode=".length);
+			if (!isTuiMode(value)) return undefined;
+			tuiMode = value;
+		} else if (arg === "-e" || arg === "--extension") {
+			// Its path belongs to the extension, even when it looks like another flag (#20158).
 			index++;
-			continue;
+		} else if (!arg.startsWith("--extension=") && PREPAINT_SAFE_FLAGS[arg] !== true) {
+			return undefined;
 		}
-		if (PREPAINT_SAFE_VALUE_FLAGS.has(arg.split("=", 1)[0]!)) continue;
-		if (PREPAINT_SAFE_FLAGS[arg] !== true) return false;
 	}
-	return true;
+	return tuiMode ? { tuiMode } : {};
 }
 
 /** Complete the OS-visible process-name setup after speculative first paint. */
@@ -577,17 +572,16 @@ export async function runCli(argv: string[]): Promise<void> {
 	// `ensureSqliteLockShim`); this module stays free of pi-utils' env snapshot.
 	if (isProcessEntry && !helpOrVersion) installSqliteLockShim();
 	let stopStartupComposer: (() => void) | undefined;
-	if (
-		!process.env.PI_TIMING &&
-		process.stdin.isTTY === true &&
-		process.stdout.isTTY === true &&
-		isPrepaintSafeArgv(resolvedArgv)
-	) {
+	const prepaint =
+		!process.env.PI_TIMING && process.stdin.isTTY === true && process.stdout.isTTY === true
+			? prepaintOptionsForArgv(resolvedArgv)
+			: undefined;
+	if (prepaint) {
 		// Intentional exception to the static-import convention: this latency boundary
 		// keeps the TUI graph out of worker, subcommand, help, and version launches.
 		// Loading it statically would erase the measured cold-start improvement.
 		const { beginStartupComposer, stopPendingStartupComposer } = await import("./modes/startup-composer");
-		beginStartupComposer({ version: VERSION });
+		beginStartupComposer({ version: VERSION, ...prepaint });
 		stopStartupComposer = stopPendingStartupComposer;
 	}
 

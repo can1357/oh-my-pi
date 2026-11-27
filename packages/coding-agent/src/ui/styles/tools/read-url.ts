@@ -14,7 +14,7 @@ import { wrap } from "@oh-my-pi/pi-tui/text/width";
 import { formatFullOutputReference } from "../../../tools/output-meta-format";
 import type { ReadUrlTerm } from "../../tools/read-url";
 import { webLink } from "./file-common";
-import { expandHint, frameRows, outcomeBg, statusIcon, statusLine } from "./frame";
+import { expandHint, frameBlock, outcomeBg, statusIcon, statusLine } from "./frame";
 import { defineToolLook, isExpanded, toolProps } from "./look";
 
 function paintReadUrl(node: UiNode, cx: PaintContext): Block {
@@ -33,18 +33,16 @@ function paintReadUrl(node: UiNode, cx: PaintContext): Block {
 		return { rows: wrap(line, width) };
 	}
 	if (term.phase === "error") {
-		return {
-			rows: frameRows(theme, width, {
-				head: statusLine(theme, {
-					glyph: statusIcon(cx, "error"),
-					title: "Read",
-					...(description ? { description } : {}),
-				}),
-				sections: [{ lines: displayLines(term.error ?? "").map(line => theme.fg("error", line)) }],
-				border: "error",
-				bg: outcomeBg("error"),
+		return frameBlock(theme, width, {
+			head: statusLine(theme, {
+				glyph: statusIcon(cx, "error"),
+				title: "Read",
+				...(description ? { description } : {}),
 			}),
-		};
+			sections: [{ lines: displayLines(term.error ?? "").map(line => theme.fg("error", line)) }],
+			border: "error",
+			bg: outcomeBg("error"),
+		});
 	}
 	const truncated = term.truncated === true;
 	const muted = (text: string): string => theme.fg("muted", text);
@@ -69,20 +67,18 @@ function paintReadUrl(node: UiNode, cx: PaintContext): Block {
 	const preview = shown.length > 0 ? shown.map(line => theme.fg("dim", line)) : [theme.fg("dim", "(no content)")];
 	const remaining = Math.max(0, lines.length - Math.min(lines.length, limit));
 	if (remaining > 0) preview.push(muted(`… ${remaining} more lines${expanded ? "" : ` ${expandHint(theme)}`}`));
-	return {
-		rows: frameRows(theme, width, {
-			head: statusLine(theme, {
-				glyph: statusIcon(cx, truncated ? "warning" : "success"),
-				title: "Read",
-				...(description ? { description } : {}),
-			}),
-			sections: [
-				{ label: theme.fg("toolTitle", "Metadata"), lines: metadata },
-				{ label: theme.fg("toolTitle", "Content Preview"), lines: preview },
-			],
-			border: truncated ? "warning" : "dim",
+	return frameBlock(theme, width, {
+		head: statusLine(theme, {
+			glyph: statusIcon(cx, truncated ? "warning" : "success"),
+			title: "Read",
+			...(description ? { description } : {}),
 		}),
-	};
+		sections: [
+			{ label: theme.fg("toolTitle", "Metadata"), lines: metadata },
+			{ label: theme.fg("toolTitle", "Content Preview"), lines: preview },
+		],
+		border: truncated ? "warning" : "dim",
+	});
 }
 
 defineToolLook("read-url", { paint: paintReadUrl, margin: true });

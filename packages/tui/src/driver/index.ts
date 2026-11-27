@@ -59,6 +59,10 @@ export interface ProcessTerminalDriver extends TerminalDriver, Pick<TerminalInpu
 	 */
 	onReplay(listener: () => void): () => void;
 	setMouse(tracking: MouseTracking): void;
+	/** Alternate scroll (DECSET 1007) on or off; `undefined`, a stop or a crash restore puts the terminal's own state back. */
+	setAlternateScroll(enabled: boolean | undefined): void;
+	/** Write bytes that bypass frame diffing; true when they reached the output (the driver is running). */
+	writeRaw(data: string): boolean;
 	refreshAppearance(): void;
 	/** `sequence` wrapped so it reaches the outer terminal through a multiplexer. */
 	passthrough(sequence: string): string;
@@ -387,7 +391,9 @@ export function createTerminalDriver(
 		viewportRow: row => writer.viewportRow(row),
 		replaysOnResize: () => writer.replaysOnWidthChange(),
 		writeRaw: (data: string) => {
-			if (running) writer.writeRaw(data);
+			if (!running) return false;
+			writer.writeRaw(data);
+			return true;
 		},
 		onInput(listener) {
 			inputListeners.add(listener);
@@ -419,6 +425,7 @@ export function createTerminalDriver(
 		},
 		onHelloSettled: listener => terminal.onHelloSettled(listener),
 		setMouse: tracking => terminal.setMouse(tracking),
+		setAlternateScroll: enabled => terminal.setAlternateScroll(enabled),
 		refreshAppearance: () => terminal.refreshAppearance(),
 		passthrough: sequence => terminal.passthrough(sequence),
 		notify(message) {

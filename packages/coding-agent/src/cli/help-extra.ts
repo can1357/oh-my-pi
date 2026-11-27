@@ -89,6 +89,7 @@ export function getExtraHelpText(): string {
   PI_SMOL_MODEL              - Override smol/fast model (see --smol)
   PI_SLOW_MODEL              - Override slow/reasoning model (see --slow)
   PI_PLAN_MODEL              - Override planning model (see --plan)
+  PI_TUI_MODE                - Terminal presentation: inline or fullscreen (overridden by --tui-mode)
   PI_NO_PTY                  - Disable PTY-based interactive bash execution
   For complete environment variable reference, see:
   ${chalk.dim("docs/environment-variables.md")}

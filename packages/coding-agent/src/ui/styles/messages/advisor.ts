@@ -15,6 +15,7 @@ import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import type { AdvisorNote } from "../../../session/transcript/messages";
 import { COLLAPSED_ADVISOR_NOTES, noteSource } from "../../transcript/messages/advisor-message";
 import { termOf } from "./fill";
+import { RowText, sliceText } from "../rendered-text";
 
 /** Widest a note's text runs. */
 const NOTE_LINE_WIDTH = 110;
@@ -33,7 +34,8 @@ function wrapVarying(text: string, first: number, rest: number): string[] {
 	return [line, ...wrap(text.slice(at + line.length).trimStart(), rest)];
 }
 
-function noteRows(theme: Theme, note: AdvisorNote, width: number): string[] {
+/** A note's rows behind its rail (and, on the first, its badges): each paragraph copies whole. */
+function noteRows(theme: Theme, note: AdvisorNote, width: number, out: RowText): void {
 	const symbols = theme.symbols;
 	const color = severityColor(note.severity);
 	const badge = note.severity
@@ -48,17 +50,23 @@ function noteRows(theme: Theme, note: AdvisorNote, width: number): string[] {
 	const room = Math.min(NOTE_LINE_WIDTH, width);
 	const first = Math.max(10, room - quote - visibleWidth(badge) - visibleWidth(age) - visibleWidth(who));
 	const rest = Math.max(10, room - quote);
-	const lines: string[] = [];
+	const lead = `  ${railGlyph} `;
 	note.note
 		.split("\n")
 		.filter(paragraph => paragraph.trim())
-		.forEach((paragraph, index) =>
-			lines.push(...(index === 0 ? wrapVarying(paragraph, first, rest) : wrap(paragraph, rest))),
-		);
-	return lines.map(
-		(line, index) =>
-			`  ${rail} ${index === 0 ? `${badge}${age}${who}` : ""}${theme.fg("customMessageText", replaceTabs(line))}`,
-	);
+		.forEach((paragraph, index) => {
+			const lines = index === 0 ? wrapVarying(paragraph, first, rest) : wrap(paragraph, rest);
+			const badges = index === 0 ? `${badge}${age}${who}` : "";
+			const rows = lines.map(
+				(line, at) => `  ${rail} ${at === 0 ? badges : ""}${theme.fg("customMessageText", replaceTabs(line))}`,
+			);
+			out.prefixed(
+				replaceTabs(paragraph),
+				rows.map(row => truncate(row, width)),
+				`${lead}${Bun.stripANSI(badges)}`,
+				lead,
+			);
+		});
 }
 
 function paintAdvisor(node: UiNode, cx: PaintContext): Block {
@@ -70,19 +78,27 @@ function paintAdvisor(node: UiNode, cx: PaintContext): Block {
 	const meta = [`${notes.length} ${notes.length === 1 ? "note" : "notes"}`];
 	if (blockers > 0) meta.push(theme.fg("error", `${blockers} blocker${blockers === 1 ? "" : "s"}`));
 	const tag = theme.fg("customMessageLabel", `\x1b[1m${theme.symbols.symbol("status.info")} Advisor\x1b[22m`);
-	const rows = [truncate(`${tag} ${theme.fg("dim", meta.join(" · "))}`, inner)];
+	const head = truncate(`${tag} ${theme.fg("dim", meta.join(" · "))}`, inner);
 	const shown = term.expanded ? notes : notes.slice(0, COLLAPSED_ADVISOR_NOTES);
-	const body: string[] = [];
-	for (const note of shown) body.push(...noteRows(theme, note, inner));
+	const body = new RowText();
+	for (const note of shown) noteRows(theme, note, inner, body);
 	const hidden = notes.length - shown.length;
 	if (hidden > 0) {
 		const rail = theme.fg("dim", theme.symbols.symbol("advisor.rail"));
-		body.push(`  ${rail} ${theme.fg("dim", `… +${hidden} more ${hidden === 1 ? "note" : "notes"}`)}`);
+		body.deco(
+			truncate(`  ${rail} ${theme.fg("dim", `… +${hidden} more ${hidden === 1 ? "note" : "notes"}`)}`, inner),
+		);
 	}
 	const cap = term.expanded ? 0 : Math.max(0, Math.floor(term.collapsedLines ?? 0));
-	if (cap > 0) body.length = Math.min(body.length, cap);
-	rows.push(...body.map(line => truncate(line, inner)));
-	return { rows: rows.map(row => ` ${row}`) };
+	const kept = cap > 0 && body.length > cap ? sliceText(body.done(), 0, cap) : body.done();
+	const content = new RowText().literal(head).block(kept).done();
+	return new RowText()
+		.block(
+			content,
+			1,
+			content.rows.map(row => ` ${row}`),
+		)
+		.done();
 }
 
 defineRolePainter("card", "omp.advisor", paintAdvisor);

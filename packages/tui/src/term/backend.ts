@@ -14,16 +14,23 @@
  * writes everything into history at shutdown. The protocol, its invariants and
  * how they map here: docs/tui-core-renderer.md.
  *
+ * The fullscreen presentation (`TermBackendOptions.presentation`) keeps all of
+ * `main` on the alternate screen instead: it scrolls inside the program above
+ * the dock pinned to the bottom (term/fullscreen.ts), and terminal history is
+ * never written; display resets wait until the presentation turns inline.
+ *
  * Input becomes the same events a Tern terminal sends: keys first offer
  * themselves to `onKey` handlers from the focused node up, then to the
  * focused kind's widget (an editor turns them into `edit` events); clicks
- * resolve through the last frame's hit regions.
+ * resolve through the last frame's hit regions (the fullscreen transcript's
+ * wheel, scrollbar and selection come first).
  */
 import type { FramePlan, InputEvent, MouseEvent, TerminalCapabilities, TerminalDriver } from "../driver/contract";
 import { dropCutImages } from "../driver/images/anchor";
 import { DEFAULT_CELL } from "../driver/images/fit";
 import { bubbleEvent, bubbleKey, bubblePaste, keypathOf, pathTo } from "../dispatch";
 import type { KeyEvent } from "../events";
+import type { TranscriptScroller } from "../host";
 import type { UiNode } from "../node";
 import {
 	type Accessor,
@@ -43,17 +50,51 @@ import { padTo, truncate, visibleWidth } from "../text/width";
 import {
 	type Block,
 	type Cell,
-	type Hit,
+	createOwnedPaint,
 	type PaintEnvironment,
+	paintForMeasurement,
 	type PaintImages,
 	paintNode,
 	type PointerHover,
 } from "./paint";
+import { FullscreenTranscript, type PlacedHit } from "./fullscreen";
 import { type WidgetContext, widgetContext, widgetFor } from "./widgets";
 import "./painters";
 
 /** Tick of a block drawing smooth motion (a shimmer sweep), ms. */
 const SMOOTH_TICK_MS = 1000 / 20;
+
+/**
+ * How the terminal backend draws `main`: flowing into terminal history, or scrolled inside the
+ * program on the alternate screen.
+ */
+export type TermPresentation = "inline" | "fullscreen";
+
+/** A startup prediction uses the alternate buffer for either layout. `null` suppresses paint. */
+export type FramePresentation = TermPresentation | { readonly preview: TermPresentation } | null;
+
+function frameLayout(frame: FramePresentation): TermPresentation | null {
+	return typeof frame === "object" ? (frame?.preview ?? null) : frame;
+}
+
+/**
+ * A turn's outcome as its scrollbar mark shows it (`warning`: completed with tool failures;
+ * `error`: errored or aborted).
+ */
+export type ScrollMarkKind = "running" | "success" | "warning" | "error";
+/** A mark on the fullscreen transcript's marks lane, at a main node's first row. */
+export interface ScrollMark {
+	readonly node: UiNode;
+	readonly kind: ScrollMarkKind;
+}
+/**
+ * What the pointer does over the fullscreen transcript: `select` adds text selection to the
+ * wheel and the scrollbar, `wheel` keeps only those (drags are ignored), `native` is for a
+ * program that leaves the mouse to the terminal.
+ */
+export type TranscriptPointer = "select" | "wheel" | "native";
+/** How a clipboard write ended: `unconfirmed-terminal` went to the terminal (OSC 52), which never confirms. */
+export type SelectionClipboardResult = "success" | "unconfirmed-terminal" | "failed";
 
 /** Options of a {@link TermBackend}. */
 export interface TermBackendOptions {
@@ -85,9 +126,34 @@ export interface TermBackendOptions {
 	/**
 	 * Inline images painters draw (the process driver's `TerminalImages`).
 	 * Absent: `image` nodes show their text fallback. The frame loop settles
-	 * the budget through `driver.images`.
+	 * the budget through `driver.images`. Fullscreen history measures images
+	 * with `measure`, or measures the text fallback when it is unavailable.
 	 */
 	readonly images?: PaintImages;
+	/**
+	 * Draw `main` inline (default) or fullscreen: the transcript scrolls inside the program on
+	 * the alternate screen above the pinned dock, and terminal history is never written (see
+	 * term/fullscreen.ts). A preview paints that layout on the alternate screen. `null` holds
+	 * all frames; keyboard and paste input still reach the focused node.
+	 */
+	readonly presentation?: Accessor<FramePresentation>;
+	/** Clear the shell's history with the first authoritative frame if it is inline. */
+	readonly clearHistory?: boolean;
+	/** Marks on the fullscreen transcript's marks lane (main nodes, one per turn). */
+	readonly marks?: Accessor<readonly ScrollMark[]>;
+	/** What the pointer does over the fullscreen transcript. Default `select`. */
+	readonly pointer?: Accessor<TranscriptPointer>;
+	/** Copy a fullscreen selection when the drag ends. Default true. */
+	readonly copyOnRelease?: Accessor<boolean>;
+	/** Write selected transcript text to the clipboard; absent: copying is unavailable. */
+	readonly copyText?: (text: string) => Promise<SelectionClipboardResult>;
+	/** Display name of the copy key, named by copy-failure feedback (`Alt+C`). */
+	readonly copyShortcutLabel?: Accessor<string | undefined>;
+	/**
+	 * Route fullscreen transcript clicks to their target before starting a selection (default false).
+	 * An explicit false also disables the hits marked `optionalTarget` in their main or dock region.
+	 */
+	readonly activateTargets?: Accessor<boolean>;
 }
 
 /** A history batch offered to the driver until it acknowledges the id. */
@@ -148,13 +214,26 @@ interface Placed {
 	readonly left: number;
 }
 
+/** A layer node a frame drew over the rest: its cells, and whether it is modal (owning the pointer everywhere). */
+interface Sheet {
+	readonly top: number;
+	readonly left: number;
+	readonly width: number;
+	readonly height: number;
+	readonly modal: boolean;
+}
+
 /**
  * The paint seam over a driver's image store: its rows, measured in the
  * terminal's reported cell size (a default until the terminal reports one).
  */
-export function driverImages(images: Pick<PaintImages, "rows">, capabilities: () => TerminalCapabilities): PaintImages {
+export function driverImages(
+	images: Pick<PaintImages, "rows" | "measure">,
+	capabilities: () => TerminalCapabilities,
+): PaintImages {
 	return {
 		rows: (source, request) => images.rows(source, request),
+		...(images.measure ? { measure: images.measure.bind(images) } : {}),
 		cell: () => capabilities().cell ?? DEFAULT_CELL,
 	};
 }
@@ -331,7 +410,7 @@ export class TermBackend {
 	readonly #retiring = new Set<UiNode>();
 	#nextPin: Pin | undefined;
 	#nextHistoryId = 1;
-	#hits: { readonly hit: Hit; readonly top: number; readonly left: number }[] = [];
+	#hits: PlacedHit[] = [];
 	/** Layer stack these hits were painted for; queued reports cannot click through a newly opened modal. */
 	#hitLayer: readonly UiNode[] | undefined;
 	/** The driver lost history: the next frame replays the committed ledger. */
@@ -342,11 +421,21 @@ export class TermBackend {
 	/** Disposes the watcher of the last frame's reactive reads. */
 	#disposeWatch: (() => void) | undefined;
 	#running = false;
+	/** The fullscreen presentation's transcript: scroll state, selection, pointer gestures. */
+	readonly #transcript: FullscreenTranscript;
+	/** The presentation the last frame was composed for. */
+	#presentation: TermPresentation = "inline";
+	/** A display reset asked for while fullscreen: it runs once the presentation turns inline. */
+	#resetOwed = false;
+	#clearOnStart: boolean;
+	/** Sheets the last transcript frame drew over it (they keep their own pointer hits). */
+	#sheets: readonly Sheet[] = [];
 
 	constructor(options: TermBackendOptions) {
 		this.#surface = options.surface;
 		this.#driver = options.driver;
 		this.#options = options;
+		this.#clearOnStart = options.clearHistory === true;
 		this.#hyperlinks = signal(options.driver.capabilities.hyperlinks);
 		const terminalHyperlinks = this.#hyperlinks;
 		const hyperlinks: Accessor<boolean> = options.hyperlinks
@@ -363,19 +452,69 @@ export class TermBackend {
 		this.#textSizing = signal(options.driver.capabilities.textSizing);
 		const terminalTextSizing = this.#textSizing;
 		const allowTextSizing = options.textSizing;
-		this.#env = {
+		const clock = options.clock ?? this.#clock;
+		const images = options.images;
+		const shared = {
 			theme: options.theme,
-			clock: smooth => {
-				this.#scheduleTick(smooth === true);
-				return (options.clock ?? this.#clock)();
-			},
 			focus: options.surface.focused,
 			reduceMotion: this.#reduceMotion,
 			hover: this.#hover,
 			hyperlinks,
-			...(allowTextSizing ? { textSizing: () => allowTextSizing() && terminalTextSizing() } : {}),
-			...(options.images ? { images: options.images } : {}),
+			// Sized text (OSC 66) reaches into the rows below its own; the fullscreen window cuts and pads
+			// rows (a heading on its last row would draw over the dock), so text draws at normal size there.
+			...(allowTextSizing
+				? {
+						textSizing: () =>
+							allowTextSizing() &&
+							terminalTextSizing() &&
+							frameLayout(options.presentation?.() ?? "inline") !== "fullscreen",
+					}
+				: {}),
 		};
+		this.#env = {
+			...shared,
+			clock: smooth => {
+				this.#scheduleTick(smooth === true);
+				return clock();
+			},
+			...(images ? { images } : {}),
+		};
+		// An offscreen measurement snapshots the clock on first read, without subscribing or asking
+		// for ticks. Only the store's geometry method is safe here: rows() would retain image data.
+		let measuredAt: number | undefined;
+		const measureEnv: PaintEnvironment = {
+			...shared,
+			clock: () => (measuredAt ??= untrack(clock)),
+			...(images?.measure ? { images: { cell: () => images.cell(), rows: images.measure.bind(images) } } : {}),
+		};
+		this.#transcript = new FullscreenTranscript({
+			theme: options.theme,
+			paint: (node, width) => createOwnedPaint(node, width, this.#env),
+			measure: (node, width) => {
+				measuredAt = undefined;
+				return paintForMeasurement(node, width, measureEnv);
+			},
+			separator: options.separator ?? (() => 1),
+			...(options.marks ? { marks: options.marks } : {}),
+			...(options.pointer ? { pointer: options.pointer } : {}),
+			...(options.copyOnRelease ? { copyOnRelease: options.copyOnRelease } : {}),
+			...(options.copyText ? { copyText: options.copyText } : {}),
+			...(options.copyShortcutLabel ? { copyShortcutLabel: options.copyShortcutLabel } : {}),
+			...(options.activateTargets ? { activateTargets: options.activateTargets } : {}),
+			cellHeight: () => (this.#driver.capabilities.cell ?? DEFAULT_CELL).h,
+			active: () => this.#presentationNow() === "fullscreen",
+			requestRender: () => this.requestRender(),
+		});
+	}
+
+	/** Fullscreen transcript reading controls (see {@link TranscriptScroller}). */
+	get scroller(): TranscriptScroller {
+		return this.#transcript.scroller;
+	}
+
+	/** Current presentation, without subscribing the caller; an absent option is inline. */
+	#presentationNow(): FramePresentation {
+		return this.#options.presentation ? untrack(this.#options.presentation) : "inline";
 	}
 
 	/** Start rendering and routing input on a started driver (the host owns the driver's lifecycle). */
@@ -417,6 +556,7 @@ export class TermBackend {
 		for (const off of this.#unsubscribe.splice(0)) off();
 		this.#disposeWatch?.();
 		this.#disposeWatch = undefined;
+		this.#transcript.stop();
 	}
 
 	/**
@@ -424,10 +564,11 @@ export class TermBackend {
 	 * terminal history (every live `main` block as it is now, settled or not,
 	 * after the ledger a pending replay still owes) and keeps the dock as the
 	 * viewport. A driver that cannot write inline yet (mid-resize) writes it
-	 * when it stops. Call it last, right before {@link stop}.
+	 * when it stops. Call it last, right before {@link stop}. Fullscreen and a
+	 * startup whose presentation has not resolved write nothing.
 	 */
 	flush(): void {
-		if (!this.#running) return;
+		if (!this.#running || this.#presentationNow() !== "inline") return;
 		// An unwritten batch was never written: the flush batch takes its rows (a replay stays owed).
 		this.#pending = undefined;
 		this.#flushing = true;
@@ -443,6 +584,20 @@ export class TermBackend {
 		if (this.#committed.has(node) || this.#emitted.has(node) || this.#retiring.has(node)) return true;
 		const pending = this.#pending;
 		return pending !== undefined && (pending.head?.node === node || pending.nodes.includes(node));
+	}
+
+	/**
+	 * Clear terminal history and the screen, then replay the committed ledger (the driver's
+	 * `resetDisplay`). Outside inline presentation the shell's scrollback stays untouched:
+	 * the reset is owed until the presentation turns inline.
+	 */
+	resetDisplay(): void {
+		if (this.#presentationNow() !== "inline") {
+			this.#resetOwed = true;
+			return;
+		}
+		this.#resetOwed = false;
+		this.#driver.resetDisplay();
 	}
 
 	/** Schedule a frame (coalesced, at most one per frame interval). */
@@ -471,13 +626,29 @@ export class TermBackend {
 	}
 
 	#present(): void {
+		if (this.#clearOnStart) {
+			const mode = this.#presentationNow();
+			if (typeof mode === "string") {
+				this.#clearOnStart = false;
+				if (mode === "inline") this.#resetOwed = true;
+			}
+		}
+		// Inline again with a reset owed: it runs before this frame, which then carries the replay.
+		if (this.#resetOwed && this.#presentationNow() === "inline") {
+			this.#resetOwed = false;
+			this.#driver.resetDisplay();
+		}
 		this.#frameRequested = false;
 		clearTimeout(this.#frame);
 		this.#frame = undefined;
 		this.#lastFrame = performance.now();
-		let plan = this.#composeWatched();
-		// An image budget change after painting means the rows it painted are stale.
-		for (let pass = 0; pass < 3 && this.#driver.images?.settle(); pass++) plan = this.#composeWatched();
+		let plan: FramePlan | null;
+		for (let pass = 0; ; pass++) {
+			plan = this.#composeWatched();
+			if (plan === null) return;
+			// An image budget change after painting means the rows it painted are stale.
+			if (pass === 3 || !this.#driver.images?.settle()) break;
+		}
 		const written = this.#driver.present(plan);
 		// A frame whose history the driver did not write was not drawn inline either: the screen is as it was.
 		if (!plan.history || written === plan.history.id) this.#pin = this.#nextPin;
@@ -503,6 +674,7 @@ export class TermBackend {
 			// What became eligible while the batch waited retires in the next frame.
 			this.requestRender();
 		}
+		this.#transcript.publish();
 	}
 
 	/**
@@ -510,17 +682,17 @@ export class TermBackend {
 	 * blocks, options): the first change to any of them schedules the next
 	 * frame. Each frame replaces the previous frame's watcher.
 	 */
-	#composeWatched(): FramePlan {
+	#composeWatched(): FramePlan | null {
 		this.#disposeWatch?.();
-		let plan: FramePlan | undefined;
+		let plan: FramePlan | null | undefined;
 		createRoot(dispose => {
 			this.#disposeWatch = dispose;
 			effect(() => {
-				if (plan) untrack(() => this.requestRender());
+				if (plan !== undefined) untrack(() => this.requestRender());
 				else plan = this.#compose();
 			});
 		});
-		return plan!;
+		return plan ?? null;
 	}
 
 	#scheduleTick(smooth: boolean): void {
@@ -668,20 +840,32 @@ export class TermBackend {
 		return summary;
 	}
 
-	#compose(): FramePlan {
+	#compose(): FramePlan | null {
+		const mode = this.#options.presentation ? this.#options.presentation() : "inline";
+		const presentation = frameLayout(mode);
+		if (presentation === null) return null;
+		const preview = typeof mode === "object";
 		const width = Math.max(1, this.#driver.columns);
 		const height = Math.max(1, this.#driver.rows);
 		const flush = this.#flushing;
-		const hits: { hit: Hit; top: number; left: number }[] = [];
+		const hits: PlacedHit[] = [];
 		let cursor: Cell | null = null;
+		// The presentation may change at runtime: fullscreen starts at the tail; inline drops the selection.
+		if (presentation !== this.#presentation) {
+			this.#presentation = presentation;
+			if (presentation === "fullscreen") this.#transcript.enter();
+			else this.#transcript.leave();
+		}
 
 		// The shutdown flush writes the transcript inline: transient layers are no part of it.
 		const layer = flush ? [] : this.#surface.layer();
 		this.#hitLayer = layer;
+		const sheets: Sheet[] = [];
 		/** Draw a layer node over `rows` (centered, or at its `top`/`bottom` anchor). */
 		const place = (rows: string[], node: UiNode): void => {
 			// Modal sheets own the pointer everywhere, including their margins and non-interactive rows.
-			if (node.kind === "overlay" && (node.props() as { modal?: boolean }).modal) hits.length = 0;
+			const modal = node.kind === "overlay" && Boolean((node.props() as { modal?: boolean }).modal);
+			if (modal) hits.length = 0;
 			const overlayCols = node.kind === "overlay" ? overlayWidth(node, width) : width;
 			const block = this.#paint(node, overlayCols);
 			const anchor = layerAnchor(node);
@@ -695,15 +879,17 @@ export class TermBackend {
 			const left = Math.max(0, Math.floor((width - overlayCols) / 2));
 			composite(rows, block, top, left, width);
 			if (block.cursor) cursor = { row: top + block.cursor.row, col: left + block.cursor.col };
-			for (const hit of block.hits ?? []) hits.push({ hit, top, left });
+			for (const hit of block.hits ?? []) hits.push({ hit, region: "layer", top, left });
+			sheets.push({ top, left, width: overlayCols, height: block.rows.length, modal });
 		};
 		const fullscreenAt = layer.findLastIndex(isFullscreen);
 		if (fullscreenAt !== -1) {
+			this.#transcript.hide();
 			const block = this.#paint(layer[fullscreenAt]!, width, height);
 			const rows = block.rows.slice(0, height);
 			while (rows.length < height) rows.push("");
 			cursor = block.cursor ?? null;
-			for (const hit of block.hits ?? []) hits.push({ hit, top: 0, left: 0 });
+			for (const hit of block.hits ?? []) hits.push({ hit, region: "layer", top: 0, left: 0 });
 			// Sheets opened over a fullscreen layer (a help sheet over an app) draw on top of it.
 			for (const node of layer.slice(fullscreenAt + 1)) place(rows, node);
 			this.#hits = hits;
@@ -723,6 +909,40 @@ export class TermBackend {
 			covering += Math.min(block.covering ?? 0, block.rows.length);
 		}
 
+		if (presentation === "fullscreen") {
+			// The transcript scrolls in the rows above the dock pinned to the bottom (covering rows draw
+			// over its last ones); nothing goes to history, and the normal screen keeps its viewport.
+			const area = Math.max(0, height - dockRows + covering);
+			const transcript = this.#transcript.compose(
+				this.#surface.main(),
+				width,
+				area,
+				Math.max(0, Math.min(area, height - dockRows)),
+				this.#surface.focused() !== null,
+			);
+			const rows = transcript.rows.slice(0, height);
+			while (rows.length < height) rows.push("");
+			cursor = transcript.cursor;
+			hits.push(...transcript.hits);
+			const dockTop = height - dockRows;
+			for (const placed of dock) {
+				const top = dockTop + placed.top;
+				const block = placed.block;
+				for (let i = 0; i < block.rows.length; i++) if (top + i >= 0) rows[top + i] = block.rows[i]!;
+				if (block.cursor && top + block.cursor.row >= 0)
+					cursor = { row: top + block.cursor.row, col: block.cursor.col };
+				for (const hit of block.hits ?? []) hits.push({ hit, region: "dock", top, left: 0 });
+			}
+			for (const node of layer) place(rows, node);
+			// A modal sheet owns the pointer everywhere: the transcript's gestures end under it.
+			if (sheets.some(sheet => sheet.modal)) this.#transcript.disablePointer();
+			this.#hits = hits;
+			this.#sheets = sheets;
+			this.#nextPin = this.#pin;
+			return { viewport: [], cursor, fullscreen: rows };
+		}
+		this.#transcript.hide();
+
 		// The committed prefix of main stays in history; the rest is live.
 		const main = this.#surface.main();
 		let start = 0;
@@ -740,7 +960,7 @@ export class TermBackend {
 		// in the same frame; streaming heads start over (their stable rows go out again under pressure).
 		let ledger: string[] | undefined;
 		let ledgerLast: UiNode | undefined;
-		if (this.#replay && !this.#pending) {
+		if (!preview && this.#replay && !this.#pending) {
 			this.#emitted.clear();
 			this.#committed = new Set(main.slice(0, start));
 			ledger = [];
@@ -827,7 +1047,7 @@ export class TermBackend {
 		// exactly when `i <= boundary`: retirement asks nothing else of the blocks above it.
 		// The shutdown flush retires every live block, settled or not (frozen as it is now).
 		let boundary = flush ? count - 1 : -1;
-		for (let i = count - 1, rows = 0; !flush && i >= 0; i--) {
+		for (let i = count - 1, rows = 0; !preview && !flush && i >= 0; i--) {
 			rows += shownRows(i);
 			if (rows > capacity) {
 				boundary = i;
@@ -949,7 +1169,7 @@ export class TermBackend {
 			else dropCutImages(viewport, start);
 			if (block.cursor && block.cursor.row >= from && this.#surface.focused())
 				cursor = { row: top + block.cursor.row, col: block.cursor.col };
-			for (const hit of block.hits ?? []) if (hit.row >= from) hits.push({ hit, top, left: 0 });
+			for (const hit of block.hits ?? []) if (hit.row >= from) hits.push({ hit, region: "main", top, left: 0 });
 		}
 		const clipped = Math.max(0, viewport.length - capacity);
 		if (clipped > 0) {
@@ -978,7 +1198,8 @@ export class TermBackend {
 			// The rows from the viewport's top down: a shrunk viewport keeps its top (only a dock pads it down).
 			const held = !fresh && pin.bottom ? Math.min(height, pin.span - written) : 0;
 			const span = Math.max(viewport.length + dockRows, held);
-			this.#nextPin = { width, height, below: below + written, bottom, rows: viewport.length + dockRows, span };
+			if (!preview)
+				this.#nextPin = { width, height, below: below + written, bottom, rows: viewport.length + dockRows, span };
 			// The screen rows above the viewport: everything written so far, or (at the bottom) what it leaves.
 			const above = bottom ? Math.max(0, height - span) : below + written;
 			if (joinedEnd > 0) dropCutImages(viewport, 0, joinedEnd, above);
@@ -988,7 +1209,8 @@ export class TermBackend {
 			viewport.push(...placed.block.rows);
 			if (placed.block.cursor)
 				cursor = { row: dockTop + placed.top + placed.block.cursor.row, col: placed.block.cursor.col };
-			for (const hit of placed.block.hits ?? []) hits.push({ hit, top: dockTop + placed.top, left: 0 });
+			for (const hit of placed.block.hits ?? [])
+				hits.push({ hit, region: "dock", top: dockTop + placed.top, left: 0 });
 		}
 		// Covering dock rows hide the live rows they draw over (still live: they come back when it closes).
 		const hidden = covering > 0 ? Math.min(dockTop, viewport.length - height) : 0;
@@ -1002,6 +1224,8 @@ export class TermBackend {
 		if (layer.length > 0) for (; free > 0; free--) viewport.push("");
 		for (const node of layer) place(viewport, node);
 		this.#hits = hits;
+		// Keep an inline prediction's geometry without handing any of its rows to shell history.
+		if (preview) return { viewport: [], fullscreen: viewport, cursor };
 		return { ...(history ? { history } : {}), viewport, cursor };
 	}
 
@@ -1066,34 +1290,64 @@ export class TermBackend {
 			return;
 		}
 		this.#trackHover(viewportRow, mouse.col);
+		// The fullscreen transcript's wheel, lanes and selection come first; sheets over it keep their hits.
+		if (this.#presentation === "fullscreen") {
+			const sheet = this.#sheets.some(
+				sheet =>
+					viewportRow >= sheet.top &&
+					viewportRow < sheet.top + sheet.height &&
+					mouse.col >= sheet.left &&
+					mouse.col < sheet.left + sheet.width,
+			);
+			if (this.#transcript.mouse(mouse, viewportRow, sheet, () => this.#route(viewportRow, mouse))) return;
+		}
+		this.#route(viewportRow, mouse);
+	}
+
+	/** Widget coordinates at a frame cell, undefined outside the hit, null on a disabled shortcut that covers it. */
+	#hitCell(entry: PlacedHit, row: number, col: number): Cell | null | undefined {
+		const { hit, rows } = entry;
+		if (rows && (row < rows[0] || row >= rows[1])) return undefined;
+		const at = row - entry.top - hit.row;
+		const column = col - entry.left - hit.col;
+		if (at < 0 || column < 0 || at >= hit.height || column >= hit.width) return undefined;
+		if (hit.optionalTarget === entry.region && this.#options.activateTargets?.() === false) return null;
+		return { row: at + (hit.fieldRowOffset ?? 0), col: column };
+	}
+
+	/** Offer a pointer report to the last frame's hits, topmost first; true when one took it. */
+	#route(viewportRow: number, mouse: MouseEvent): boolean {
 		for (let i = this.#hits.length - 1; i >= 0; i--) {
-			const { hit, top, left } = this.#hits[i]!;
-			const row = viewportRow - top - hit.row;
-			const col = mouse.col - left - hit.col;
-			if (row < 0 || col < 0 || row >= hit.height || col >= hit.width) continue;
+			const entry = this.#hits[i]!;
+			const at = this.#hitCell(entry, viewportRow, mouse.col);
+			if (at === undefined) continue;
+			if (at === null) return false;
+			const hit = entry.hit;
 			const path = pathTo(this.#regions(), hit.node);
 			if (path.length === 0) continue;
 			const widget = widgetFor(hit.node);
-			if (widget?.mouse?.(hit.node, mouse, { row, col }, this.#widgetContext(path), hit)) return;
+			if (widget?.mouse?.(hit.node, mouse, at, this.#widgetContext(path), hit)) return true;
 			if (mouse.action === "press" && mouse.button === "left" && hit.act) {
 				bubbleEvent(path, { type: "action", key: keypathOf(path), act: hit.act, mods: mouse.mods });
-				return;
+				return true;
 			}
 			if (mouse.action === "press" && mouse.button === "left" && hit.item !== undefined) {
 				bubbleEvent(path, { type: "select", key: keypathOf(path), item: hit.item });
-				return;
+				return true;
 			}
 		}
+		return false;
 	}
 
 	/** Point the hover state at the topmost hit under the pointer (painters band it via `cx.hovered`). */
 	#trackHover(viewportRow: number, column: number): void {
 		let next: PointerHover | null = null;
 		for (let i = this.#hits.length - 1; i >= 0; i--) {
-			const { hit, top, left } = this.#hits[i]!;
-			const row = viewportRow - top - hit.row;
-			const col = column - left - hit.col;
-			if (row < 0 || col < 0 || row >= hit.height || col >= hit.width) continue;
+			const entry = this.#hits[i]!;
+			const at = this.#hitCell(entry, viewportRow, column);
+			if (at === undefined) continue;
+			if (at === null) break;
+			const hit = entry.hit;
 			next = {
 				node: hit.node,
 				...(hit.item === undefined ? {} : { item: hit.item }),

@@ -18,6 +18,7 @@ import { defaultCardRows, tint } from "./default";
 import { legacyPartRows } from "./legacy";
 import { statusGlyph, statusIcon, statusLine } from "./frame";
 import { defineToolLook, isExpanded, toolLook, toolProps } from "./look";
+import type { TextRows } from "../rendered-text";
 
 /** The `--help` row. */
 function helpRow(cx: PaintContext, term: ToolCommandTerm, width: number): string {
@@ -31,15 +32,14 @@ function helpRow(cx: PaintContext, term: ToolCommandTerm, width: number): string
 }
 
 /** A nested tool command card inside a shell run, at `width`. */
-export function toolCommandRows(node: UiNode, cx: PaintContext, width: number, expanded: boolean): string[] {
+export function toolCommandRows(node: UiNode, cx: PaintContext, width: number, expanded: boolean): TextRows {
 	const term = (node.props() as { term?: ToolCommandTerm & { tone?: string } }).term;
-	if (!term) return [];
-	if (term.mode === "help") return [helpRow(cx, term, width)];
-	if (term.mode === "legacy") return legacyPartRows(cx, term.parts ?? [], width);
+	if (!term) return { rows: [] };
+	if (term.mode === "help") return { rows: [helpRow(cx, term, width)] };
+	if (term.mode === "legacy") return legacyPartRows(cx, term.parts ?? [], width).done();
 	const inner = term.inner && term.inner !== "default" ? toolLook(term.inner) : undefined;
 	// The wrapped tool's look at the nested card's width (getters keep reading the paint environment).
-	if (inner)
-		return [...inner.paint(node, Object.create(cx, { width: { value: Math.max(1, width), enumerable: true } })).rows];
+	if (inner) return inner.paint(node, Object.create(cx, { width: { value: Math.max(1, width), enumerable: true } }));
 	const failed = term.exitCode !== 0;
 	return defaultCardRows(
 		cx.theme,
@@ -52,7 +52,7 @@ export function toolCommandRows(node: UiNode, cx: PaintContext, width: number, e
 			body: node.children().slice(1),
 		},
 		width,
-	);
+	).done();
 }
 
 function paintToolCommand(node: UiNode, cx: PaintContext): Block {
@@ -60,23 +60,21 @@ function paintToolCommand(node: UiNode, cx: PaintContext): Block {
 	const term = props.term as ToolCommandTerm | undefined;
 	if (!term) return { rows: [] };
 	if (term.mode === "help") return { rows: [helpRow(cx, term, cx.width)] };
-	if (term.mode === "legacy") return { rows: legacyPartRows(cx, term.parts ?? [], cx.width) };
+	if (term.mode === "legacy") return legacyPartRows(cx, term.parts ?? [], cx.width).done();
 	const inner = term.inner && term.inner !== "default" ? toolLook(term.inner) : undefined;
 	if (inner) return inner.paint(node, cx);
-	return {
-		rows: defaultCardRows(
-			cx.theme,
-			{
-				glyph: statusGlyph(node, cx),
-				title: styledText(cx.theme, props.title),
-				tint: tint(props),
-				args: term.args,
-				expanded: isExpanded(props),
-				body: node.children(),
-			},
-			cx.width,
-		),
-	};
+	return defaultCardRows(
+		cx.theme,
+		{
+			glyph: statusGlyph(node, cx),
+			title: styledText(cx.theme, props.title),
+			tint: tint(props),
+			args: term.args,
+			expanded: isExpanded(props),
+			body: node.children(),
+		},
+		cx.width,
+	).done();
 }
 
 defineToolLook("tool-command", { paint: paintToolCommand });

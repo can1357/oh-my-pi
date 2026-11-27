@@ -27,11 +27,22 @@ export interface KeybindingConflict {
  * binding claims one and the user left this action at its defaults, the
  * chord is dropped from it. Ctrl+Q backs up Ctrl+Enter for follow-up, which
  * Windows Terminal cannot deliver (#1903); Shift+Up backs up Alt+Up for
- * dequeue, which macOS Terminal.app consumes.
+ * dequeue, which macOS Terminal.app consumes. The fullscreen transcript's
+ * reading keys take chords the editor and other actions may be given.
  */
-const YIELDING_DEFAULTS: Partial<Record<Keybinding, KeyId>> = {
+const YIELDING_DEFAULTS: Partial<Record<Keybinding, KeyId | readonly KeyId[]>> = {
 	"app.message.followUp": "ctrl+q",
 	"app.message.dequeue": "shift+up",
+	"app.transcript.pageUp": "pageUp",
+	"app.transcript.pageDown": "pageDown",
+	"app.transcript.top": "alt+home",
+	"app.transcript.bottom": "alt+end",
+	"app.transcript.lineUp": "alt+k",
+	"app.transcript.lineDown": "alt+j",
+	"app.transcript.previousUser": "alt+pageUp",
+	"app.transcript.nextUser": "alt+pageDown",
+	"app.transcript.copyHighlight": "alt+c",
+	"app.transcript.find": "alt+/",
 };
 
 /** Chords lowercased (config chords are case-insensitive) and deduplicated, in configured order. */
@@ -141,14 +152,21 @@ export class KeybindingsManager {
 		for (const [key, keybindings] of claims) {
 			if (keybindings.length > 1) this.#conflicts.push({ key, keybindings });
 		}
+		// Event ids, so a claim spelled with other modifier order or case still takes the chord.
+		const claimed = new Set([...claims.keys()].map(canonicalKeyId));
 		for (const id in KEYBINDINGS) {
 			const action = id as Keybinding;
 			const userKeys = this.#userBindings[action];
 			const definition: KeybindingDefinition = KEYBINDINGS[action];
 			let keys = normalizeKeys(userKeys ?? definition.defaultKeys);
 			const yielding = YIELDING_DEFAULTS[action];
-			if (userKeys === undefined && yielding !== undefined && claims.has(yielding)) {
-				keys = keys.filter(key => key !== yielding);
+			if (userKeys === undefined && yielding !== undefined) {
+				const taken = new Set(
+					normalizeKeys(yielding)
+						.map(canonicalKeyId)
+						.filter(key => claimed.has(key)),
+				);
+				if (taken.size > 0) keys = keys.filter(key => !taken.has(canonicalKeyId(key)));
 			}
 			this.#keys.set(action, keys);
 			this.#ids.set(action, new Set(keys.map(canonicalKeyId)));

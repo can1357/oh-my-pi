@@ -11,6 +11,8 @@ declare const self: Worker;
 Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
 // Linux keeps macOS runs off the real pbcopy; the native write is stubbed.
 Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+// Over SSH native backends never run; the worker's env is its own copy.
+for (const key of ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"]) delete process.env[key];
 const stdout: string[] = [];
 spyOn(process.stdout, "write").mockImplementation(chunk => {
 	stdout.push(typeof chunk === "string" ? chunk : chunk.toString());

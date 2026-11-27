@@ -174,7 +174,10 @@ import {
 	cfgSymbolPreset,
 	cfgThemeDark,
 	cfgThemeLight,
+	cfgTuiCopyOnRelease,
+	cfgTuiFullscreenMouse,
 	cfgTuiImeSafeCursor,
+	cfgTuiMode,
 	cfgTuiResizeScrollback,
 	cfgTuiSpinnerInterval,
 	cfgTuiVimMode,
@@ -182,6 +185,7 @@ import {
 	cfgTuiMotion,
 	cfgUpdateAuto,
 	cfgUpdateChannel,
+	savedTuiMode,
 } from "./modes/settings";
 import {
 	cfgDefaultThinkingLevel,
@@ -2119,17 +2123,48 @@ export async function runRootCommand(
 		// Account routing must use the effective settings, including `--config` and
 		// `PI_CONFIG_FILES` overlays, rather than independently re-reading only the
 		// main config file during auth discovery.
-		const settingsPromise = deps.settings
-			? Promise.resolve(deps.settings)
-			: logger.time("settings:init", Settings.init, { cwd, configFiles: parsedArgs.config });
-		settingsPromise.catch(() => {});
-		const authStoragePromise = logger.time("discoverAuthStorage", async () =>
-			(deps.discoverAuthStorage ?? discoverAuthStorage)(undefined, { settings: await settingsPromise }),
-		);
-		authStoragePromise.catch(() => {});
+		const settingsInstance =
+			deps.settings ?? (await logger.time("settings:init", Settings.init, { cwd, configFiles: parsedArgs.config }));
+		if (isInteractive && parsedArgs.tuiMode) cfgTuiMode.override(settingsInstance, parsedArgs.tuiMode);
+
+		// Move the startup preview to its configured screen before auth and session discovery.
+		logger.time("initTheme:final", initTheme, {
+			watch: isInteractive,
+			// Keep the startup frame's appearance (the last launch's report) until the terminal answers.
+			appearance: getTerminalAppearance(),
+			symbolPreset: cfgSymbolPreset.get(settingsInstance),
+			colorBlindMode: cfgColorBlindMode.get(settingsInstance),
+			dark: cfgThemeDark.get(settingsInstance),
+			light: cfgThemeLight.get(settingsInstance),
+		});
+
+		applyStartupComposerPreferences({
+			quiet: cfgStartupQuiet.get(settingsInstance),
+			composerShape: cfgComposerShape.get(settingsInstance),
+			resizeScrollback: cfgTuiResizeScrollback.get(settingsInstance),
+			autocompleteMaxVisible: cfgAutocompleteMaxVisible.get(settingsInstance),
+			vim: cfgTuiVimMode.get(settingsInstance),
+			imeSafeCursor: cfgTuiImeSafeCursor.get(settingsInstance),
+			mode: savedTuiMode(settingsInstance),
+			presentation: cfgTuiMode.get(settingsInstance),
+			pointer: cfgTuiFullscreenMouse.get(settingsInstance),
+			copyOnRelease: cfgTuiCopyOnRelease.get(settingsInstance),
+			theme: {
+				symbolPreset: cfgSymbolPreset.get(settingsInstance),
+				colorBlindMode: cfgColorBlindMode.get(settingsInstance),
+				darkTheme: cfgThemeDark.get(settingsInstance),
+				lightTheme: cfgThemeLight.get(settingsInstance),
+			},
+		});
+
 		let authStorage: AuthStorage;
 		try {
-			authStorage = await authStoragePromise;
+			authStorage = await logger.time(
+				"discoverAuthStorage",
+				deps.discoverAuthStorage ?? discoverAuthStorage,
+				undefined,
+				{ settings: settingsInstance },
+			);
 		} catch (error) {
 			const message = await describeAuthBrokerStartupError(error);
 			if (message === null) throw error;
@@ -2137,7 +2172,6 @@ export async function runRootCommand(
 			process.exit(1);
 		}
 
-		const settingsInstance = await settingsPromise;
 		if (parsedArgs.approvalMode) {
 			// Runtime override (not persisted): every `tools.approvalMode` read downstream
 			// sees this value. The wrapper still honours --auto-approve / --yolo on top of it.
@@ -2174,7 +2208,7 @@ export async function runRootCommand(
 		// resolve against the registry before `createAgentSession` hydrates it, so
 		// without this a cached-only model is absent and its selector fuzzy-matches
 		// a bundled sibling (issue #14075). Local-only and never rejects; awaited
-		// right before the first catalog read so its I/O overlaps theme setup.
+		// right before the first catalog read so its I/O overlaps the remaining CLI setup.
 		const credentialScopedCacheHydration = logger.time("hydrateCredentialScopedModelCaches", () =>
 			modelRegistry.hydrateCredentialScopedModelCaches(),
 		);
@@ -2244,31 +2278,6 @@ export async function runRootCommand(
 		if (parsedArgs.motion !== undefined) {
 			cfgTuiMotion.override(settingsInstance, parsedArgs.motion);
 		}
-
-		logger.time("initTheme:final", initTheme, {
-			watch: isInteractive,
-			// Keep the startup frame's appearance (the last launch's report) until the terminal answers.
-			appearance: getTerminalAppearance(),
-			symbolPreset: cfgSymbolPreset.get(settingsInstance),
-			colorBlindMode: cfgColorBlindMode.get(settingsInstance),
-			dark: cfgThemeDark.get(settingsInstance),
-			light: cfgThemeLight.get(settingsInstance),
-		});
-
-		applyStartupComposerPreferences({
-			quiet: cfgStartupQuiet.get(settingsInstance),
-			composerShape: cfgComposerShape.get(settingsInstance),
-			resizeScrollback: cfgTuiResizeScrollback.get(settingsInstance),
-			autocompleteMaxVisible: cfgAutocompleteMaxVisible.get(settingsInstance),
-			vim: cfgTuiVimMode.get(settingsInstance),
-			imeSafeCursor: cfgTuiImeSafeCursor.get(settingsInstance),
-			theme: {
-				symbolPreset: cfgSymbolPreset.get(settingsInstance),
-				colorBlindMode: cfgColorBlindMode.get(settingsInstance),
-				darkTheme: cfgThemeDark.get(settingsInstance),
-				lightTheme: cfgThemeLight.get(settingsInstance),
-			},
-		});
 
 		await credentialScopedCacheHydration;
 		// ACP's settings-derived scope belongs to each session/new workspace.

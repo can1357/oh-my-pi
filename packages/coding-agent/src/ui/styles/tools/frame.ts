@@ -12,6 +12,8 @@ import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { expandKeyLabel } from "../../keys/hints";
 import { type ToolProps, toolProps } from "./look";
+import { lazyText, type RenderedText } from "@oh-my-pi/pi-tui/term/text-layout";
+import { RowText, sliceText, textOf } from "../rendered-text";
 
 /** The run of rule glyphs before a head, a section label or a footer. */
 const LEAD = 3;
@@ -29,6 +31,11 @@ export interface FrameSection {
 	readonly lines: readonly string[];
 	/** A tag per line (in step with `lines`): the rows it draws carry it (see {@link frameRows}). */
 	readonly tags?: readonly (string | undefined)[];
+	/**
+	 * The logical text of `lines` when they are rows already wrapped to the inner width (one row
+	 * each, in step with `lines`); absent, each line copies as its own logical line.
+	 */
+	readonly text?: () => RenderedText;
 }
 
 /** What a frame draws (all styled strings). */
@@ -83,29 +90,51 @@ function fillRow(theme: Theme, key: string | undefined, row: string, width: numb
 
 /** The rows of a rounded frame: lines wrap at the inner width. */
 export function frameRows(theme: Theme, width: number, spec: FrameSpec, rowTags?: (string | undefined)[]): string[] {
+	return frameBlock(theme, width, spec, rowTags).rows;
+}
+
+/**
+ * A rounded frame's rows and their logical text: edges and dividers are
+ * decoration; a line copies as one logical line (its wrapped rows joined)
+ * unless its section reports its own text.
+ */
+export function frameBlock(
+	theme: Theme,
+	width: number,
+	spec: FrameSpec,
+	rowTags?: (string | undefined)[],
+): { rows: string[]; text: () => RenderedText } {
 	const box = theme.symbols.box;
 	const border = spec.border ?? "dim";
 	const inner = frameInner(width);
-	const rows = [edgeRow(theme, width, box.topLeft, box.topRight, spec.head, border)];
+	const out = new RowText().deco(edgeRow(theme, width, box.topLeft, box.topRight, spec.head, border));
 	// Each row's section-line tag (filled into `rowTags` when given).
 	const tags: (string | undefined)[] = [undefined];
 	let tag: string | undefined;
-	const push = (row: string): void => {
-		rows.push(row);
+	const divider = (row: string): void => {
+		out.deco(row);
 		tags.push(tag);
 	};
-	const content = (line: string): void => {
+	/** One line's rows; `known` is its text when its section reports it (used while the line draws one row). */
+	const content = (line: string, known?: () => RenderedText): void => {
 		const wrapped = wrap(line.trimEnd(), Math.max(1, inner));
-		for (const part of wrapped.length > 0 ? wrapped : [""]) push(frameRow(theme, width, part, border));
+		const parts = wrapped.length > 0 ? wrapped : [""];
+		const shown = parts.map(part => frameRow(theme, width, part, border));
+		if (known && parts.length === 1) out.block({ rows: parts, text: known }, 2, shown);
+		else out.wrapped(line, parts, 2, shown);
+		for (let i = 0; i < shown.length; i++) tags.push(tag);
 	};
 	spec.sections.forEach((section, index) => {
 		tag = undefined;
-		if (section.label) push(edgeRow(theme, width, box.teeRight, box.teeLeft, section.label, border));
+		if (section.label) divider(edgeRow(theme, width, box.teeRight, box.teeLeft, section.label, border));
 		else if (section.separator && index > 0)
-			push(edgeRow(theme, width, box.teeRight, box.teeLeft, undefined, border));
+			divider(edgeRow(theme, width, box.teeRight, box.teeLeft, undefined, border));
+		const text = section.text;
 		section.lines.forEach((line, at) => {
 			tag = section.tags?.[at];
-			for (const part of line.split("\n")) content(part);
+			const parts = line.split("\n");
+			const known = text && parts.length === 1 ? () => [text()[at]] : undefined;
+			for (const part of parts) content(part, known);
 		});
 		tag = undefined;
 	});
@@ -113,18 +142,20 @@ export function frameRows(theme: Theme, width: number, spec: FrameSpec, rowTags?
 	const footFits =
 		foot === undefined ||
 		visibleWidth(` ${foot} `) <= width - visibleWidth(`${box.bottomLeft}${box.horizontal.repeat(LEAD)}`) - 1;
-	if (foot !== undefined && !footFits)
-		for (const wrapped of wrap(foot, Math.max(1, inner))) push(frameRow(theme, width, wrapped, border));
-	push(edgeRow(theme, width, box.bottomLeft, box.bottomRight, footFits ? foot : undefined, border));
+	if (foot !== undefined && !footFits) content(foot);
+	divider(edgeRow(theme, width, box.bottomLeft, box.bottomRight, footFits ? foot : undefined, border));
 	if (rowTags) rowTags.push(...tags);
-	return rows.map((row, index) =>
-		fillRow(
-			theme,
-			spec.band !== undefined && tags[index] === spec.band ? "selectedBg" : spec.bg,
-			truncate(row, width, ""),
-			width,
+	return {
+		rows: out.rows.map((row, index) =>
+			fillRow(
+				theme,
+				spec.band !== undefined && tags[index] === spec.band ? "selectedBg" : spec.bg,
+				truncate(row, width, ""),
+				width,
+			),
 		),
-	);
+		text: out.text(),
+	};
 }
 
 /** The bracketed hint to expand tool output, dim. */
@@ -138,16 +169,16 @@ export function moreLinesHint(theme: Theme, hidden: number): string {
 }
 
 /** A standalone failure with an error glyph and exactly one `Error:` prefix. */
-export function standaloneErrorRows(cx: PaintContext, message: string): string[] {
+export function standaloneError(cx: PaintContext, message: string): { rows: string[]; text: () => RenderedText } {
 	const theme = cx.theme;
 	const cleaned =
 		replaceTabs(sanitizeText(message))
 			.trim()
 			.replace(/^(?:Error:\s*)+/, "") || "Unknown error";
-	return wrap(
-		`${theme.fg("error", theme.symbols.symbol("status.error"))} ${theme.fg("error", `Error: ${cleaned}`)}`,
-		cx.width,
-	);
+	const glyph = theme.symbols.symbol("status.error");
+	const text = `Error: ${cleaned}`;
+	const rows = wrap(`${theme.fg("error", glyph)} ${theme.fg("error", text)}`, cx.width);
+	return new RowText().prefixed(text, rows, `${glyph} `, "").done();
 }
 
 /** The status spinner frame at the terminal clock; reduced motion draws the pending glyph. */
@@ -252,19 +283,33 @@ export function capLines(theme: Theme, lines: readonly string[], max: number): s
 
 /**
  * The tail of an output pane at `width`: lines wrapped, the last `limit`
- * rows kept below the hidden line count and the tool expansion hint.
+ * rows kept below the hidden line count and the tool expansion hint. Each
+ * line copies as one logical line; the marker is decoration.
  */
-export function tailRows(theme: Theme, lines: readonly string[], limit: number, width: number): string[] {
-	const rows: string[] = [];
+export function tailBlock(
+	theme: Theme,
+	lines: readonly string[],
+	limit: number,
+	width: number,
+	source: number,
+): RowText {
+	const all = new RowText();
+	let lastLineRows = 0;
 	for (const line of lines) {
 		const wrapped = wrap(line, Math.max(1, width));
-		rows.push(...(wrapped.length > 0 ? wrapped : [""]));
+		lastLineRows = Math.max(1, wrapped.length);
+		all.wrapped(line, wrapped.length > 0 ? wrapped : [""]);
 	}
-	if (rows.length <= limit) return rows;
-	const shown = limit <= 0 ? [] : rows.slice(rows.length - limit);
-	const hidden = rows.length - shown.length;
-	const marker = theme.fg("dim", `… (${hidden} earlier lines, showing ${shown.length} of ${rows.length})`);
-	return [`${marker} ${expandHint(theme)}`, ...shown];
+	const total = all.length;
+	if (total <= limit) return all;
+	const start = limit <= 0 ? total : total - limit;
+	const marker = theme.fg("dim", `… (${start} earlier lines, showing ${total - start} of ${total})`);
+	const shown = sliceText(all.done(), start);
+	const tail = { source, lines: lines.length, lastLineRows };
+	return new RowText().deco(`${marker} ${expandHint(theme)}`).block({
+		rows: shown.rows,
+		text: lazyText(() => textOf(shown).map(row => row && { ...row, tail })),
+	});
 }
 
 /** `⟦text⟧` with the theme's brackets. */
