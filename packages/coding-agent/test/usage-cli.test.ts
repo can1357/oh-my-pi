@@ -14,6 +14,7 @@ import { OAUTH_ORG_POLICY_BLOCK_SCOPE } from "@oh-my-pi/pi-ai/auth-storage";
 import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { __resetDirsFromEnvForTests, setAgentDir, TempDir, withFileLock } from "@oh-my-pi/pi-utils";
 import {
+	actionableDisables,
 	buildRedactionMap,
 	annotateUsagePolicy,
 	collectHistoryIdentityStrings,
@@ -33,6 +34,10 @@ import {
 	collectUnreportedAccounts,
 	type UsageAccountIdentity,
 } from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/usage-accounts";
+import { CONSERVATIVE_EMOJI } from "@oh-my-pi/pi-tui/theme/contract";
+import { builtinThemes } from "@oh-my-pi/pi-tui/theme/loader";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { createTheme, type ResolvedTheme } from "@oh-my-pi/pi-tui/theme/theme";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 const HOUR = 3_600_000;
@@ -259,22 +264,22 @@ describe("computeProviderWindowStats", () => {
 	});
 
 	it("does not meter routing copies of one shared upstream pool", () => {
-		// Antigravity reports one third-party pool once per model family; the shared group keeps
+		// A provider can report one third-party pool once per model family; the shared group keeps
 		// them one pool with the worst fraction binding, not one meter per copy.
-		const report = makeReport("google-antigravity", "shared@example.test", [
+		const report = makeReport("google", "shared@example.test", [
 			makeLimit({
-				id: "google-antigravity:anthropic:default:5h",
+				id: "google:anthropic:default:5h",
 				label: "Claude & GPT (shared)",
-				provider: "google-antigravity",
+				provider: "google",
 				usedFraction: 0.4,
 				durationMs: FIVE_HOURS,
 				windowId: "5h",
 				sharedGroup: "third-party:5h",
 			}),
 			makeLimit({
-				id: "google-antigravity:openai:default:5h",
+				id: "google:openai:default:5h",
 				label: "Claude & GPT (shared)",
-				provider: "google-antigravity",
+				provider: "google",
 				usedFraction: 0.7,
 				durationMs: FIVE_HOURS,
 				windowId: "5h",
@@ -496,22 +501,6 @@ describe("collectUnreportedAccounts", () => {
 		expect(collectUnreportedAccounts([aliceReport], [alice, bob, orgOnly])).toEqual([bob]);
 	});
 
-	it("does not let one Antigravity account's report cover a sibling on the same Google project", () => {
-		const project = "aicode-consumers";
-		const alice: UsageAccountIdentity = {
-			provider: "google-antigravity",
-			type: "oauth",
-			email: "alice@example.test",
-			projectId: project,
-		};
-		const bob: UsageAccountIdentity = { ...alice, email: "bob@example.test" };
-		const aliceReport = {
-			...makeReport("google-antigravity", alice.email!, []),
-			metadata: { email: alice.email, projectId: project },
-		};
-		expect(collectUnreportedAccounts([aliceReport], [alice, bob])).toEqual([bob]);
-	});
-
 	it("keeps an org-less account covered by its own org-less report when org-scoped siblings exist", () => {
 		// Live incident shape: legacy org-less rows (pre-org-capture logins)
 		// beside fresh org-scoped logins. Every account fetched successfully —
@@ -664,12 +653,12 @@ describe("usage JSON policy", () => {
 	});
 
 	it("keeps every row in the pool when only subpool rows are marked shared", () => {
-		// Antigravity marks its third-party subpool `shared` with a `sharedGroup`; its Gemini counter stays unmarked.
-		const report = makeReport("google-antigravity", "subpool@example.test", [
-			makeLimit({ id: "gemini", provider: "google-antigravity", usedFraction: 0.95 }),
+		// A third-party subpool is marked `shared` with a `sharedGroup`; the Gemini counter stays unmarked.
+		const report = makeReport("google", "subpool@example.test", [
+			makeLimit({ id: "gemini", provider: "google", usedFraction: 0.95 }),
 			makeLimit({
 				id: "third-party",
-				provider: "google-antigravity",
+				provider: "google",
 				usedFraction: 0.2,
 				sharedGroup: "third-party",
 			}),
@@ -677,7 +666,7 @@ describe("usage JSON policy", () => {
 		const options: UsagePolicyDiagnosticsOptions = {
 			globalReservePct: 10,
 			getAccountPolicy: (_provider, identity) => ({
-				provider: "google-antigravity",
+				provider: "google",
 				account: { email: identity.email },
 			}),
 		};
@@ -713,6 +702,15 @@ describe("usage JSON policy", () => {
 });
 
 describe("formatUsageBreakdown", () => {
+	// A terminal of unknown emoji support (CI): the one-cell `status.warning` slot draws its `▲` fallback.
+	let previousTheme: ResolvedTheme;
+	beforeEach(() => {
+		previousTheme = currentTheme();
+		setCurrentTheme(createTheme(builtinThemes().dark!, { emoji: CONSERVATIVE_EMOJI }));
+	});
+	afterEach(() => {
+		setCurrentTheme(previousTheme);
+	});
 	const reports = [
 		makeReport("anthropic", "dummy.primary@example.test", [
 			makeLimit({ id: "Claude 5 Hour", usedFraction: 0.84, durationMs: FIVE_HOURS, windowId: "5h" }),
@@ -955,20 +953,20 @@ describe("formatUsageBreakdown", () => {
 		expect(text).toContain("user@example.test · plan: team");
 	});
 
-	it("renders marked Antigravity shared quotas once per account", () => {
-		const antigravity = makeReport("google-antigravity", "user@example.test", [
+	it("renders marked shared quotas once per account", () => {
+		const report = makeReport("google", "user@example.test", [
 			makeLimit({
-				id: "google-antigravity:google:default:gemini-5h",
+				id: "google:google:default:gemini-5h",
 				label: "Gemini",
-				provider: "google-antigravity",
+				provider: "google",
 				usedFraction: 0.25,
 				durationMs: FIVE_HOURS,
 				windowId: "5h",
 			}),
 			makeLimit({
-				id: "google-antigravity:google:default:gemini-weekly",
+				id: "google:google:default:gemini-weekly",
 				label: "Gemini",
-				provider: "google-antigravity",
+				provider: "google",
 				usedFraction: 0.25,
 				durationMs: SEVEN_DAYS,
 				windowId: "weekly",
@@ -976,9 +974,9 @@ describe("formatUsageBreakdown", () => {
 			...(["5h", "weekly"] as const).flatMap((windowId, index) =>
 				(["anthropic", "openai"] as const).map(counter =>
 					makeLimit({
-						id: `google-antigravity:${counter}:default:3p-${windowId}`,
+						id: `google:${counter}:default:3p-${windowId}`,
 						label: "Claude & GPT (shared)",
-						provider: "google-antigravity",
+						provider: "google",
 						usedFraction: 0.25,
 						durationMs: index === 0 ? FIVE_HOURS : SEVEN_DAYS,
 						windowId,
@@ -988,7 +986,7 @@ describe("formatUsageBreakdown", () => {
 			),
 		]);
 
-		const text = stripVTControlCharacters(formatUsageBreakdown([antigravity], [], Date.now()));
+		const text = stripVTControlCharacters(formatUsageBreakdown([report], [], Date.now()));
 
 		expect(text.match(/Claude & GPT \(shared\)/g)).toHaveLength(2);
 		expect(text.match(/Gemini/g)).toHaveLength(2);
@@ -1102,13 +1100,13 @@ describe("formatUsageBreakdown", () => {
 
 	it("keeps one row per tier when a report repeats a meter per tier in the same window", () => {
 		const tierUsage = (tier: string, usedFraction: number) => ({
-			...makeLimit({ id: `antigravity:${tier}`, label: "Usage", provider: "google-antigravity", usedFraction }),
+			...makeLimit({ id: `google:${tier}`, label: "Usage", provider: "google", usedFraction }),
 			window: { id: "5h", label: "5 hours", durationMs: FIVE_HOURS },
-			scope: { provider: "google-antigravity", windowId: "5h", tier },
+			scope: { provider: "google", windowId: "5h", tier },
 		});
 		const providerReports = [
-			makeReport("google-antigravity", "both@example.test", [tierUsage("Pro", 0.1), tierUsage("Longer Tier", 0.2)]),
-			makeReport("google-antigravity", "one@example.test", [tierUsage("Longer Tier", 0.3)]),
+			makeReport("google", "both@example.test", [tierUsage("Pro", 0.1), tierUsage("Longer Tier", 0.2)]),
+			makeReport("google", "one@example.test", [tierUsage("Longer Tier", 0.3)]),
 		];
 
 		const text = stripVTControlCharacters(formatUsageBreakdown(providerReports, [], Date.now()));
@@ -1163,7 +1161,9 @@ describe("formatUsageBreakdown", () => {
 				cause: "oauth refresh failed: whatever",
 			},
 		];
-		const text = stripVTControlCharacters(formatUsageBreakdown(reports, accounts, now, undefined, disabled));
+		const text = stripVTControlCharacters(
+			formatUsageBreakdown(reports, accounts, now, undefined, actionableDisables(disabled, accounts)),
+		);
 		// Auto-disabled OAuth row: identity, age, shortened upstream cause, and the fix.
 		expect(text).toContain("✗ dead@example.test — disabled 4h ago: Refresh token expired (re-login to restore)");
 		// User-driven replacement and api_key tombstones are lifecycle noise, not lost capacity.
@@ -1195,9 +1195,34 @@ describe("formatUsageBreakdown", () => {
 				cause: "oauth refresh failed: Refresh token expired",
 			},
 		];
-		const text = stripVTControlCharacters(formatUsageBreakdown([], activeAccounts, now, undefined, disabled));
+		const text = stripVTControlCharacters(
+			formatUsageBreakdown([], activeAccounts, now, undefined, actionableDisables(disabled, activeAccounts)),
+		);
 		expect(text).not.toContain("active@example.test — disabled");
 		expect(text).toContain("✗ truly-dead@example.test — disabled");
+	});
+
+	it("suppresses an identity-less MCP OAuth tombstone once the server has an active login", () => {
+		const provider = "mcp_oauth:profile:default:https://mcp.cloudflare.com/mcp";
+		const disabled = [
+			{
+				id: 10,
+				provider,
+				type: "oauth" as const,
+				cause: 'oauth refresh failed: MCP OAuth refresh failed: 400 {"error":"invalid_grant","error_description":"Grant not found"}',
+			},
+		];
+		// The MCP provider has no usage endpoint, so its active row is not a
+		// reportable account; only the full stored set can restore the tombstone.
+		expect(actionableDisables(disabled, [{ provider, type: "oauth" }])).toEqual([]);
+		// An API key for the provider is not an OAuth re-login.
+		expect(actionableDisables(disabled, [{ provider, type: "api_key" }])).toEqual(disabled);
+		// An identified active account cannot vouch for an anonymous tombstone.
+		expect(actionableDisables(disabled, [{ provider, type: "oauth", email: "a@example.test" }])).toEqual(disabled);
+		// Outside managed MCP ids, identity-less logins coexist: a sibling Devin
+		// browser login is not a re-login of the failed one.
+		const devinDisabled = disabled.map(summary => ({ ...summary, provider: "devin" }));
+		expect(actionableDisables(devinDisabled, [{ provider: "devin", type: "oauth" }])).toEqual(devinDisabled);
 	});
 
 	it("renders a tombstone-only provider section even when no active credential remains", () => {
@@ -1234,9 +1259,9 @@ describe("formatUsageBreakdown", () => {
 		// 10d-old grant: no countdown noise.
 		expect(text).not.toContain("fresh@example.test — re-login");
 		// 27d-old grant: 3 days left.
-		expect(text).toContain("⚠ closing@example.test — re-login within 3d");
+		expect(text).toContain("▲ closing@example.test — re-login within 3d");
 		// Past the lifetime: hard warning.
-		expect(text).toContain("⚠ dead@example.test — grant is past Anthropic's ~30d lifetime; re-login now");
+		expect(text).toContain("▲ dead@example.test — grant is past Anthropic's ~30d lifetime; re-login now");
 	});
 
 	it("times the warning by the server-stated grant end over the ~30d estimate", () => {
@@ -1258,7 +1283,7 @@ describe("formatUsageBreakdown", () => {
 				now,
 			),
 		);
-		expect(text).toContain("⚠ stated@example.test — re-login within 2d (refresh token expires)");
+		expect(text).toContain("▲ stated@example.test — re-login within 2d (refresh token expires)");
 	});
 
 	it("times a long-lived Anthropic login by its token expiry, not the ~30d grant", () => {
@@ -1279,8 +1304,8 @@ describe("formatUsageBreakdown", () => {
 			),
 		);
 		// Past the grant lifetime, months of token left: no warning.
-		expect(text).not.toContain("⚠ year@example.test");
-		expect(text).toContain("⚠ ending@example.test — re-login within 3d (access token expires)");
+		expect(text).not.toContain("▲ year@example.test");
+		expect(text).toContain("▲ ending@example.test — re-login within 3d (access token expires)");
 	});
 
 	it("renders provider-level notes once per provider, not duplicated per account or limit", () => {
@@ -1307,38 +1332,6 @@ describe("formatUsageBreakdown", () => {
 		const noteIdx = text.indexOf(providerNote);
 		const firstLimitIdx = text.indexOf("5 Hour");
 		expect(noteIdx).toBeLessThan(firstLimitIdx);
-	});
-
-	it("renders Antigravity weekly windows in the usage breakdown", () => {
-		const now = Date.parse("2026-01-01T00:00:00.000Z");
-		const reports: UsageReport[] = [
-			{
-				provider: "google-antigravity",
-				fetchedAt: now,
-				metadata: { email: "ag@example.test", projectId: "proj-1" },
-				limits: [
-					{
-						id: "google-antigravity:google:default:weekly",
-						label: "Usage (Google)",
-						scope: { provider: "google-antigravity", projectId: "proj-1", windowId: "weekly" },
-						window: {
-							id: "weekly",
-							label: "Weekly",
-							durationMs: SEVEN_DAYS,
-							resetsAt: now + SEVEN_DAYS,
-						},
-						amount: { unit: "percent", usedFraction: 0.6, remainingFraction: 0.4 },
-						status: "ok",
-					},
-				],
-			},
-		];
-
-		const text = stripVTControlCharacters(formatUsageBreakdown(reports, [], now));
-		expect(text).toContain("Google Antigravity");
-		expect(text).toContain("Usage (Google) (Weekly)");
-		expect(text).toContain("60.0% used");
-		expect(text).toContain("0.40× quota left");
 	});
 
 	it("renders Cursor request quotas in the usage breakdown", () => {

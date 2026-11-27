@@ -15,7 +15,12 @@ and branches:
   (default 4), the issue auto-closes as `state_reason=completed`. A follow-up
   comment or external close cancels the schedule synchronously.
 - `enhancement` / `proposal` → one comment, no PR.
-- `invalid` / `duplicate` → one brief comment.
+- `invalid` → one brief comment.
+- `duplicate` → `gh_close_duplicate` posts `Duplicate of #N` (or `Fixed in
+  <sha>`) and closes the issue as `duplicate` / `completed`. The triage
+  kickoff lists the local issue index's closest text matches as candidates.
+  A maintainer reopen clears the verdict and re-triages from scratch; the bot
+  never re-closes a reopened issue.
 
 Follow-up issue comments and PR review comments resume the same omp session
 (`--continue` against the persisted JSONL transcript). On orchestrator

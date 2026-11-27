@@ -376,13 +376,13 @@ describe("retry fallback selector resolution", () => {
 	});
 
 	it("does not adopt a model-kind role's chain for a chat session on the same model", () => {
-		const model = getBundledModel("google-antigravity", "gemini-3.8-flash");
+		const model = getBundledModel("google", "gemini-3.8-flash");
 		const webModel = getBundledModel("web", "parallel");
 		if (!model || !webModel) throw new Error("Expected bundled Gemini and web-search test models");
-		const live = "google-antigravity/gemini-3.8-flash:medium";
+		const live = "google/gemini-3.8-flash:medium";
 		const models = [model, webModel];
 		const roleModels: Record<string, string> = {
-			web: "google-antigravity/gemini-3.8-flash:minimal",
+			web: "google/gemini-3.8-flash:minimal",
 			task: live,
 		};
 		const withWebChain = (chains: RetryFallbackResolutionContext["chains"]): RetryFallbackResolutionContext => ({

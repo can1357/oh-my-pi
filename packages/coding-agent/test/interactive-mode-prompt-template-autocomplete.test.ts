@@ -19,7 +19,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { AutocompleteProvider } from "@oh-my-pi/pi-coding-agent/autocomplete/autocomplete";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { logger, TempDir } from "@oh-my-pi/pi-utils";
 
 import { cfgStartupQuiet } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { initTheme } from "../src/ui/theme/service";
@@ -35,6 +35,29 @@ function makeTool(name: string): AgentTool {
 			return { content: [{ type: "text" as const, text: "ok" }] };
 		},
 	};
+}
+
+/**
+ * Wrap `current` the way a well-behaved pi extension does: contribute items for
+ * its own trigger prefix, delegate everything else to the wrapped provider.
+ */
+function makeWrappingFactory(tag: string): (current: AutocompleteProvider) => AutocompleteProvider {
+	return current => ({
+		async getSuggestions(lines, cursorLine, cursorCol) {
+			const line = lines[cursorLine] ?? "";
+			if (line.startsWith("##")) {
+				const base = await current.getSuggestions(lines, cursorLine, cursorCol);
+				return {
+					items: [...(base?.items ?? []), { value: tag, label: tag }],
+					prefix: base?.prefix ?? line.slice(0, cursorCol),
+				};
+			}
+			return current.getSuggestions(lines, cursorLine, cursorCol);
+		},
+		applyCompletion(lines, cursorLine, cursorCol, item, prefix) {
+			return current.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
+		},
+	});
 }
 
 describe("InteractiveMode prompt-template autocomplete (#2462)", () => {
@@ -257,5 +280,65 @@ describe("InteractiveMode prompt-template autocomplete (#2462)", () => {
 		// Builtin `/model` owns the `/models` alias. The colliding template is filtered
 		// out so autocomplete follows the interactive slash-command resolution path.
 		expect(matches.filter(name => name === "models")).toHaveLength(1);
+	});
+
+	describe("extension autocomplete providers", () => {
+		it("stacks extension factories on top of the built-in editor provider", async () => {
+			const created = createHarness([]);
+			const slot = captureAutocompleteProvider(created.mode);
+
+			// Registration before the first refresh (session_start fires before init's
+			// refreshSlashCommandState) must land once the base provider exists.
+			created.mode.addAutocompleteProvider(makeWrappingFactory("##fff-first"));
+			await created.mode.refreshSlashCommandState(tempDir.path());
+
+			const provider = slot.current;
+			expect(provider).toBeDefined();
+
+			// The extension's trigger prefix surfaces its items...
+			const extension = await provider!.getSuggestions(["##"], 0, 2);
+			expect(extension?.items.map(item => item.value)).toContain("##fff-first");
+
+			// ...while built-in slash completion still flows through the wrapper.
+			const slash = await provider!.getSuggestions(["/"], 0, 1);
+			expect(slash?.items.map(item => item.value)).toContain("model");
+
+			// Registration after the refresh re-applies immediately, preserving the chain.
+			created.mode.addAutocompleteProvider(makeWrappingFactory("##fff-second"));
+			const restacked = slot.current;
+			expect(restacked).toBeDefined();
+			expect(restacked).not.toBe(provider);
+
+			const chained = await restacked!.getSuggestions(["##"], 0, 2);
+			const values = chained?.items.map(item => item.value) ?? [];
+			expect(values).toContain("##fff-first");
+			expect(values).toContain("##fff-second");
+		});
+
+		it("skips broken factories without losing core autocomplete or healthy wrappers", async () => {
+			const created = createHarness([]);
+			const slot = captureAutocompleteProvider(created.mode);
+			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+			created.mode.addAutocompleteProvider(() => {
+				throw new Error("boom");
+			});
+			created.mode.addAutocompleteProvider(() => ({}) as AutocompleteProvider);
+			created.mode.addAutocompleteProvider(makeWrappingFactory("##healthy"));
+			await created.mode.refreshSlashCommandState(tempDir.path());
+
+			const provider = slot.current;
+			expect(provider).toBeDefined();
+
+			const slash = await provider!.getSuggestions(["/"], 0, 1);
+			expect(slash?.items.map(item => item.value)).toContain("model");
+
+			const extension = await provider!.getSuggestions(["##"], 0, 2);
+			expect(extension?.items.map(item => item.value)).toContain("##healthy");
+
+			expect(warnSpy.mock.calls.some(([message]) => String(message).includes("autocomplete provider factory"))).toBe(
+				true,
+			);
+		});
 	});
 });

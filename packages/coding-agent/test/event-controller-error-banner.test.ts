@@ -147,7 +147,7 @@ describe("EventController error banner", () => {
 			content: [{ type: "thinking", thinking: "Reasoning finished without final output." }],
 			stopReason: "error",
 			errorId: AIError.create(AIError.Flag.Transient, AIError.Flag.EmptyResponse),
-			errorMessage: "Cloud Code Assist API returned a thought-only response without final output",
+			errorMessage: "Gemini API returned a thought-only response without final output",
 		});
 		const { controller, showPinnedError, setErrorPinned } = createFixture(message);
 
@@ -170,7 +170,7 @@ describe("EventController error banner", () => {
 			content: [{ type: "thinking", thinking: "Reasoning finished without final output." }],
 			stopReason: "error",
 			errorId: AIError.create(AIError.Flag.Transient, AIError.Flag.EmptyResponse),
-			errorMessage: "Cloud Code Assist API returned a thought-only response without final output",
+			errorMessage: "Gemini API returned a thought-only response without final output",
 		});
 		const { controller, showPinnedError, clearPinnedError, showError } = createFixture(message);
 

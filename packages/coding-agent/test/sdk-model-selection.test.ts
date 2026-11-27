@@ -39,6 +39,7 @@ import { EPHEMERAL_MODEL_CHANGE_ROLE } from "@oh-my-pi/pi-coding-agent/session/s
 import { TurnRecovery, type TurnRecoveryHost } from "@oh-my-pi/pi-coding-agent/session/turn-recovery";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { YAML } from "bun";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 import {
@@ -46,6 +47,7 @@ import {
 	cfgCompactionModelThresholdsEnabled,
 } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { cfgRetryFallbackChains } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { cfgDisabledProviders, cfgEnabledModels } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 
 describe("createAgentSession deferred model pattern resolution", () => {
 	let tempDir: string;
@@ -2332,6 +2334,62 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			expect(session.model?.provider).toBe("devin");
 			expect(session.model?.id).toBe("swe-1-6");
 			expect(session.thinkingLevel).toBeUndefined();
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("keeps the default-model fallback inside path-scoped enabledModels", async () => {
+		const agentDir = path.join(tempDir, "agent");
+		const privatePath = path.join(tempDir, "private");
+		const cwd = path.join(privatePath, "sub");
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.mkdirSync(cwd, { recursive: true });
+		await Bun.write(
+			path.join(agentDir, "config.yml"),
+			YAML.stringify({
+				enabledModels: [{ path: privatePath, models: ["openai-codex"] }],
+				disabledProviders: [{ path: privatePath, providers: ["github-copilot"] }],
+				modelRoles: { default: "github-copilot/gpt-5.5" },
+			}),
+		);
+
+		const settings = await Settings.init({ cwd, agentDir });
+		// Sanity-check the path-scoped values resolved correctly for this cwd.
+		expect(cfgEnabledModels.get(settings)).toEqual(["openai-codex"]);
+		expect(cfgDisabledProviders.get(settings)).toEqual(["github-copilot"]);
+
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		// Only anthropic has credentials. Per `enabledModels` the path allows
+		// only openai-codex, so no anthropic model should be selected.
+		authStorage.keys.setRuntime("anthropic", "test-anthropic-key");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+
+		const { session, modelFallbackMessage } = await createAgentSession({
+			cwd,
+			agentDir,
+			authStorage,
+			modelRegistry,
+			settings,
+			sessionManager: SessionManager.inMemory(),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			workspaceTree: { rootPath: cwd, rendered: ".\n", truncated: false, totalLines: 1, agentsMdFiles: [] },
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+		});
+
+		try {
+			expect(session.model?.provider).not.toBe("anthropic");
+			expect(session.model?.provider).not.toBe("github-copilot");
+			// No openai-codex creds set → nothing in the allow-list is
+			// usable. Expect no model and a fallback message.
+			expect(session.model).toBeUndefined();
+			expect(modelFallbackMessage).toBeDefined();
 		} finally {
 			await session.dispose();
 		}

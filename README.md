@@ -99,6 +99,20 @@ mise use -g github:can1357/oh-my-pi
 
 macOS · Linux · Windows · bun ≥ 1.4.4
 
+### Uninstall
+
+```sh
+curl -fsSL https://omp.sh/install | sh -s -- --uninstall
+```
+
+```powershell
+& ([scriptblock]::Create((irm https://omp.sh/install.ps1))) -Uninstall
+```
+
+The uninstaller removes what the install scripts installed: the standalone binary (`~/.local/bin/omp`, or `$PI_INSTALL_DIR/omp`; on Windows `%LOCALAPPDATA%\omp\omp.exe` and the user `PATH` entry the installer added) or the bun global package. It also removes an npm global install of `@oh-my-pi/pi-coding-agent`. For a Homebrew install it prints `brew uninstall omp` for you to run.
+
+omp keeps its state in `~/.omp` (`$HOME/$PI_CONFIG_DIR` when that is set, plus `$XDG_*_HOME/omp` if you ran `omp config init-xdg`): sessions, settings, credentials, caches, and the git worktrees omp created. The uninstaller keeps that state unless you confirm its prompt, which only interactive runs show (PowerShell, or `sh install.sh --uninstall`); `curl … | sh` runs never prompt, so they never delete it on their own. Pass `--purge` (PowerShell: `-Purge`) to uninstall and delete the state without a prompt. Shell completion files and `PATH` lines you added yourself stay in place.
+
 ### Shell completions
 
 `omp` generates its own completion scripts for **bash**, **zsh**, and **fish** from the live command/flag metadata, so they never drift from the actual CLI. Subcommands, flags, and enum values complete statically; model names (`--model`, `--smol`, `--slow`, `--plan`) resolve against the bundled model catalog and `--resume` against your on-disk sessions.
@@ -226,9 +240,9 @@ The agent remembers your codebase between sessions. It writes facts mid-run with
 
 Run omp inside Zed and you get the same agent you drive from the terminal — reading the buffer you're actually looking at, writing through the editor's save path, spawning shells in the editor's terminal. Destructive tools pause for a permission prompt you can answer once and forget. No bridge, no plugin, no second brain to keep in sync.
 
-### 15 · Inherits what your other tools already wrote
+### 15 · Works with what your repo already has
 
-Every other agent ships an importer and expects you to convert. omp reads the eight formats already on disk in their native shape — Cursor MDC, Cline .clinerules, Codex AGENTS.md, Copilot applyTo, and the rest. No migration script, no YAML-to-TOML port, no "supported subset" footnotes. The config your team wrote last quarter still works tonight.
+omp reads the project files your team already committed in their native shape — `AGENTS.md`, `CLAUDE.md`, `.claude/` skills, commands and MCP servers, Codex `.codex/config.toml` and skills, OpenCode `opencode.json`, and `.agents/`. Your home directory stays yours: omp never reads another tool's `~/` config, and if you used to opt into it, a one-time prompt offers to copy or symlink it into `~/.omp/agent`.
 
 ### 16 · omp commit: atomic splits, validated messages
 
@@ -346,7 +360,7 @@ Auth tags below: `oauth` signs in with your provider account, `plan` routes thro
 
 Direct APIs and gateways. Mix providers per role.
 
-Anthropic `oauth` · OpenAI · OpenAI Codex `oauth` · Google Gemini · Google Vertex · Google Antigravity `oauth` · xAI · SuperGrok `oauth` · DeepSeek · Mistral · Groq · Cerebras · SambaNova · Fireworks · Together · Modular · Baseten · Chutes · DeepInfra · ArkaneCloud · Hugging Face · NVIDIA · Meta · Inception · Amazon Bedrock · Azure OpenAI · SiliconFlow · GMI Cloud · CoreWeave · Sakana AI · Command Code · Charm Hyper · StepFun · Helmcode · OpenRouter · TrustedRouter · Synthetic · Vercel AI Gateway · Cloudflare AI Gateway · Wafer Serverless · Scaleway · Otari · Refuseless
+Anthropic `oauth` · OpenAI · OpenAI Codex `oauth` · Google Gemini · Google Vertex · xAI · SuperGrok `oauth` · DeepSeek · Mistral · Groq · Cerebras · SambaNova · Fireworks · Together · Modular · Baseten · Chutes · DeepInfra · ArkaneCloud · Hugging Face · NVIDIA · Meta · Inception · Amazon Bedrock · Azure OpenAI · SiliconFlow · GMI Cloud · CoreWeave · Sakana AI · Command Code · Charm Hyper · StepFun · Helmcode · OpenRouter · TrustedRouter · Synthetic · Vercel AI Gateway · Cloudflare AI Gateway · Wafer Serverless · Scaleway · Otari · Refuseless
 
 ### Coding plans
 
@@ -388,7 +402,7 @@ modelRoles:
 
 ### Four knobs that make routing useful
 
-- **Custom providers** — Declare anything that speaks `openai-completions`, `openai-responses`, `openai-codex-responses`, `azure-openai-responses`, `anthropic-messages`, `bedrock-converse-stream`, `google-generative-ai`, `google-gemini-cli`, `google-vertex`, `typesafe`, `openrouter-decisions`, `openai-decisions`, or `workers-ai-systemone` (the judge APIs) in `~/.omp/agent/models.yml`.
+- **Custom providers** — Declare anything that speaks `openai-completions`, `openai-responses`, `openai-codex-responses`, `azure-openai-responses`, `anthropic-messages`, `bedrock-converse-stream`, `google-generative-ai`, `google-vertex`, `typesafe`, `openrouter-decisions`, `openai-decisions`, or `workers-ai-systemone` (the judge APIs) in `~/.omp/agent/models.yml`.
 - **Fallback chains** — Per-role or per-model chains under `retry.fallbackChains`. When the primary throws 429s or hits a quota wall, the next entry takes the rest of the turn — restored on cooldown.
 - **Path-scoped models** — Scope `enabledModels` and `disabledProviders` entries to a `path:` prefix to pin a different model set on one repo without touching the global config. Scoped entries cover the path and everything under it.
 - **Round-robin credentials** — Stack API keys per provider and the runtime rotates with session affinity and per-credential backoff. Useful when one key would burn its quota by lunch.
@@ -576,7 +590,7 @@ An extension is a TypeScript module. Same tool API, same slash-command registry,
 
 ### Discovery
 
-On first run omp inherits whatever is already on disk: rules, skills, and MCP servers from `.claude`, `.cursor`, `.windsurf`, `.gemini`, `.codex`, `.cline`, `.github/copilot`, and `.vscode`. No migration script.
+omp picks up project-level context, skills, commands, and MCP servers from `.claude`, `.codex`, `.opencode`/`opencode.json`, `.agents`, and standalone `AGENTS.md`/`CLAUDE.md`. Other tools' home-directory config is never read.
 
 ### Extensibility
 

@@ -924,7 +924,8 @@ class Database:
                 (pr_number, _utcnow(), key),
             )
 
-    def set_issue_classification(self, key: str, classification: str) -> None:
+    def set_issue_classification(self, key: str, classification: str | None) -> None:
+        """Record the triage primary type; `None` clears it so the next triage starts fresh."""
         with self._lock:
             self._conn.execute(
                 "UPDATE issues SET classification=?, updated_at=? WHERE key=?",
@@ -1422,8 +1423,10 @@ class Database:
         author: str | None = None,
         limit: int = 10,
     ) -> list[IssueIndexEntry]:
-        """Query the local index. Keywords go through FTS5 (bm25-ranked, AND
-        semantics); the remaining filters are exact. With no keywords, results
+        """Query the local index. Keywords go through FTS5 with OR semantics,
+        bm25-ranked with title hits weighted 3x, so rows matching more and
+        rarer terms come first and one absent synonym never empties the
+        result; the remaining filters are exact. With no keywords, results
         order by `updated_at` descending.
         """
         conds = ["i.repo = ?"]
@@ -1447,11 +1450,11 @@ class Database:
         with self._lock:
             if terms:
                 # Quote every term so reporter text can never inject FTS5 syntax.
-                match = " ".join('"' + t.replace('"', '""') + '"' for t in terms)
+                match = " OR ".join('"' + t.replace('"', '""') + '"' for t in terms)
                 sql = (
                     "SELECT i.* FROM issue_index_fts f JOIN issue_index i ON i.rowid = f.rowid "
                     f"WHERE issue_index_fts MATCH ? AND {' AND '.join(conds)} "
-                    "ORDER BY bm25(issue_index_fts) LIMIT ?"
+                    "ORDER BY bm25(issue_index_fts, 3.0, 1.0) LIMIT ?"
                 )
                 rows = self._conn.execute(sql, (match, *params, limit)).fetchall()
             else:
