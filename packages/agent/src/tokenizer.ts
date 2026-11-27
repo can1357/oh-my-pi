@@ -510,12 +510,15 @@ export class Tokenizer {
 	}
 
 	/** Sum of message counts, accounting for opaque replay invalidated by earlier calls. */
-	countMessages(messages: readonly AgentMessage[], options?: MessageCountOptions): number {
+	countMessages(messages: readonly AgentMessage[], options?: MessageCountOptions, stopAbove?: number): number {
 		let total = 0;
 		const opaqueReplayLimits = this.#opaqueReplayLimits;
 		const reader = this.#reasoningReader;
 		if (!opaqueReplayLimits || !reader) {
-			for (const message of messages) total += this.countMessage(message, options);
+			for (const message of messages) {
+				if (stopAbove !== undefined && total > stopAbove) break;
+				total += this.countMessage(message, options);
+			}
 			return total;
 		}
 
@@ -523,6 +526,7 @@ export class Tokenizer {
 		const floored = options?.excludeEncryptedReasoning === true;
 		const { allowedName, maxLength, views } = opaqueReplayLimits;
 		for (const message of messages) {
+			if (stopAbove !== undefined && total > stopAbove) break;
 			// Bit i marks dedup in view i; another view may still replay the summary.
 			let rewrittenViews = 0;
 			if (message.role === "assistant") {
