@@ -157,12 +157,15 @@ export class HtmlFormModel {
 	readonly dropdown = signal<number | undefined>(undefined);
 	readonly note = signal<NoteDraft | undefined>(undefined);
 	readonly hidden = signal(false);
-	/** Rows the card is scrolled up past the highlight: Up at the top of a group taller than the card scrolls through the text above it. */
+	/** Rows the card is asked to scroll up past the highlight: Up at the top of a group taller than the card scrolls through the text above it. */
 	readonly scrollBack = signal(0);
-	/** Rows of the open group above the card as the terminal last drew it; 0 before that paint and in Tern. */
-	hiddenAbove = 0;
-	/** Whether the highlighted row sits below the card as the terminal last drew it (scrolled up past it). */
-	highlightBelow = false;
+	/**
+	 * The card as the terminal last drew it: rows of the open group above it, rows it sits scrolled up
+	 * past the highlight, and whether the highlight is below it. Zeros before that paint and in Tern.
+	 */
+	painted = { above: 0, scrolled: 0, highlightBelow: false };
+	/** Set by a key that scrolled the card up or stopped at the top of the form: the scroll stays. */
+	#keepScroll = false;
 	/**
 	 * Cells a textarea's rows wrap at as the terminal card last drew them, so
 	 * Up/Down step through the rows on screen; undefined before that paint
@@ -512,9 +515,11 @@ export class HtmlFormModel {
 				}
 			}
 			const group = this.layout.groups.find(g => g.fields.includes(active));
-			if (delta < 0 && this.hiddenAbove > 0 && group?.fields.find(i => this.#reachable(i)) === active) {
-				this.scrollBack.set(untrack(this.scrollBack) + 1);
-				return;
+			if (delta < 0 && group?.fields.find(i => this.#reachable(i)) === active) {
+				// Up scrolls through the text above the group first; at the top of the form the scroll stays.
+				if (this.painted.above > 0) this.scrollBack.set(untrack(this.scrollBack) + 1);
+				this.#keepScroll = this.painted.above > 0 || this.#fieldFrom(active, -1) === undefined;
+				if (this.#keepScroll) return;
 			}
 		}
 		const target = this.#fieldFrom(active === "submit" ? this.fields.length : active, delta);
@@ -657,14 +662,20 @@ export class HtmlFormModel {
 	key(key: KeyEvent): boolean {
 		const step = this.#vimRowStep(key);
 		const routed: KeyEvent = step ? { id: step, kind: key.kind, raw: key.raw } : key;
-		const back = untrack(this.scrollBack);
-		// Down scrolls back until the highlight shows, then moves it; any key that does not scroll up drops the scroll.
-		if (back > 0 && this.highlightBelow && listKeyId(routed) === "down") {
-			this.scrollBack.set(back - 1);
+		// A key release neither scrolls nor drops the scroll.
+		if (key.kind === "release") return this.#key(routed);
+		const { scrolled, highlightBelow } = this.painted;
+		const box = this.#activeBox();
+		const mode = box && this.vim(box)?.mode;
+		const down = listKeyId(routed) === "down" || (key.id === "j" && mode !== undefined && untrack(mode) === "normal");
+		// Down (Vim `j` in a text box too) scrolls back until the highlight shows, then moves it.
+		if (scrolled > 0 && highlightBelow && down) {
+			this.scrollBack.set(Math.min(untrack(this.scrollBack), scrolled) - 1);
 			return true;
 		}
+		this.#keepScroll = false;
 		const handled = this.#key(routed);
-		if (untrack(this.scrollBack) === back) this.scrollBack.set(0);
+		if (!this.#keepScroll) this.scrollBack.set(0);
 		return handled;
 	}
 

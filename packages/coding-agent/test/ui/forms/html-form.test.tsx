@@ -275,14 +275,14 @@ test("Up at the top of a question taller than the card scrolls up through its te
 		rows: 16,
 	});
 	const shows = (text: string) => term.screen().some(row => row.includes(text));
-	/** Presses `key` until `text` shows (at most 60 times); the presses it took. */
+	/** Presses `key` until `text` shows (at most 60 times); the presses it took, or -1 when it never shows. */
 	const pressUntil = (key: string, text: string) => {
 		let presses = 0;
 		while (!shows(text) && presses < 60) {
 			term.press(key);
 			presses++;
 		}
-		return presses;
+		return shows(text) ? presses : -1;
 	};
 	try {
 		term.focus(term.surface.dock()[0]!);
@@ -291,6 +291,10 @@ test("Up at the top of a question taller than the card scrolls up through its te
 		// The first question's own text, then back down to its options: once the highlight shows, Down moves it.
 		expect(pressUntil("up", "First question")).toBeGreaterThan(1);
 		expect(model.active()).toBe(0);
+		// Neither a key release nor Up past the top of the form scrolls back down.
+		term.press("up", { kind: "release" });
+		term.press("up");
+		expect(shows("First question")).toBe(true);
 		pressUntil("down", "Alpha");
 		expect(model.row()).toBe(0);
 		term.press("down");
