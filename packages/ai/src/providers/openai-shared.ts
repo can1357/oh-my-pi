@@ -51,6 +51,7 @@ import {
 	type Message,
 	type MessageAttribution,
 	type Model,
+	type ProviderInputTransformation,
 	OPENAI_MAX_OUTPUT_TOKENS,
 	getPremiumServiceTierRequests,
 	parseServiceTier,
@@ -3472,6 +3473,29 @@ export function finalizeCustomToolCallInputDone(block: ResponsesToolCallBlock, i
 	block.arguments = { input };
 }
 
+/**
+ * Record `input_transformations` a terminal Responses event reports. From
+ * GPT-6.2 the API removes reasoning items that follow an edited or inserted
+ * prefix and reports each removal with reason `prefix_mismatch`.
+ */
+export function recordResponsesInputTransformations(output: AssistantMessage, value: unknown): void {
+	if (!Array.isArray(value)) return;
+	const transformations: ProviderInputTransformation[] = [];
+	for (const entry of value) {
+		if (!isRecord(entry) || typeof entry.type !== "string") continue;
+		transformations.push({ ...entry, type: entry.type });
+	}
+	if (transformations.length === 0) return;
+	output.inputTransformations = transformations;
+	const removed = transformations.filter(transformation => transformation.reason === "prefix_mismatch");
+	if (removed.length === 0) return;
+	logger.warn(`${output.provider}: API removed reasoning items after conversation prefix changed`, {
+		model: output.model,
+		count: removed.length,
+		transformations: removed,
+	});
+}
+
 type OpenAIResponsesTerminalStreamEvent =
 	| Extract<ResponseStreamEvent, { type: "response.completed" | "response.incomplete" }>
 	| { type: "response.done"; response?: Partial<OpenAIResponse> };
@@ -4148,6 +4172,7 @@ export async function processResponsesStream<TApi extends Api>(
 				// terminal event, a sibling of `response`.
 				applyCopilotUsageFrame(output.usage, terminalEvent);
 			}
+			recordResponsesInputTransformations(output, response?.input_transformations);
 			calculateCost(model, output.usage, output.timestamp);
 			applyProviderReportedCost(model, output.usage, response?.usage);
 			output.serviceTier = applyOpenAIResponsesServiceTierCost(
