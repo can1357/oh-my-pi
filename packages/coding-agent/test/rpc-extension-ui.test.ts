@@ -298,6 +298,11 @@ await runRpcMode(session);
 					`${JSON.stringify({ type: "extension_ui_response", id: formId, data: { trust: "yes" } })}\n`,
 				);
 				await child.stdin.flush();
+			} else if (frame.type === "available_commands_update" && !seen.includes("commands")) {
+				// The last step of startup. A held command answered before it would have been released early, ahead of
+				// the goal reconcile whose tool set it could otherwise change. Only the first one is recorded: a later
+				// command-metadata change emits another.
+				seen.push("commands");
 			} else if (frame.type === "extension_ui_request" && frame.method === "notify") {
 				seen.push(String(frame.message));
 			} else if (frame.type === "response" && (frame.id === "n" || frame.id === "s")) {
@@ -309,7 +314,7 @@ await runRpcMode(session);
 			}
 		}
 		await child.exited;
-		expect(seen, await stderr).toEqual(["ask", '{"trust":"yes"}', "n:true", "s:true"]);
+		expect(seen, await stderr).toEqual(["ask", '{"trust":"yes"}', "commands", "n:true", "s:true"]);
 		// The read queued behind the rename ran after it.
 		expect(sessionName).toBe("renamed");
 	}, 30_000);
@@ -320,7 +325,8 @@ await runRpcMode(session);
 		const stderr = new Response(child.stderr).text();
 		const seen: string[] = [];
 		let formId: unknown;
-		// stdin stays open: only the deferred shutdown can end the process.
+		// stdin stays open, and nothing is queued when startup ends: only the shutdown checked at the end of
+		// startup can end the process.
 		for await (const frame of readJsonl<unknown>(child.stdout)) {
 			if (!isRecord(frame)) continue;
 			if (frame.type === "extension_ui_request" && frame.method === "form") {
@@ -341,6 +347,40 @@ await runRpcMode(session);
 		const exitCode = await child.exited;
 		expect({ seen, exitCode, signal: child.signalCode }, await stderr).toEqual({
 			seen: ["s:true", '{"trust":"yes"}'],
+			exitCode: 0,
+			signal: null,
+		});
+	}, 30_000);
+
+	it("answers a command held for startup before a shutdown requested in session_start exits", async () => {
+		await using temp = await TempDir.create("@rpc-startup-dialog-shutdown-held-");
+		const child = await spawnStartupDialogRuntime(temp, { requestShutdown: true });
+		const stderr = new Response(child.stderr).text();
+		const seen: string[] = [];
+		let formId: unknown;
+		// stdin stays open: only the deferred shutdown can end the process, and it must not take the held
+		// command's response with it.
+		for await (const frame of readJsonl<unknown>(child.stdout)) {
+			if (!isRecord(frame)) continue;
+			if (frame.type === "extension_ui_request" && frame.method === "form") {
+				formId = frame.id;
+				child.stdin.write(`${JSON.stringify({ id: "s", type: "get_state" })}\n`);
+				child.stdin.write(`${JSON.stringify({ id: "ns", type: "new_session" })}\n`);
+				await child.stdin.flush();
+			} else if (frame.type === "response" && (frame.id === "s" || frame.id === "ns")) {
+				seen.push(`${frame.id}:${frame.success}`);
+				if (frame.id !== "s") continue;
+				child.stdin.write(
+					`${JSON.stringify({ type: "extension_ui_response", id: formId, data: { trust: "yes" } })}\n`,
+				);
+				await child.stdin.flush();
+			} else if (frame.type === "extension_ui_request" && frame.method === "notify") {
+				seen.push(String(frame.message));
+			}
+		}
+		const exitCode = await child.exited;
+		expect({ seen, exitCode, signal: child.signalCode }, await stderr).toEqual({
+			seen: ["s:true", '{"trust":"yes"}', "ns:true"],
 			exitCode: 0,
 			signal: null,
 		});

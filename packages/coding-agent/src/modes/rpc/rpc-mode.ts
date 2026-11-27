@@ -3213,10 +3213,11 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	await emitAvailableCommandsUpdate();
 
 	// Startup is over: release the commands held for it, in the order they reached `handleCommand`, and act on a
-	// shutdown an extension requested meanwhile.
+	// shutdown an extension requested meanwhile. The check waits for the serial queue, which the coordinator's own
+	// drain does not cover: a held command released here would otherwise lose its response to `disposeAndExit()`.
 	startupComplete = true;
 	startupSettled.resolve();
-	void shutdownCoordinator.checkShutdownRequested();
+	void inputDispatcher.drain().then(() => shutdownCoordinator.checkShutdownRequested());
 	await inputRead;
 
 	// stdin closed — RPC client is gone. Fail pending side-channel requests
