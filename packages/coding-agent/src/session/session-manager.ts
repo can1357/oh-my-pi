@@ -1105,6 +1105,7 @@ export class SessionManager {
 	#sessionName: string | undefined;
 	#titleSource: SessionTitleSource | undefined;
 	#titleRevision = 0;
+	#branchNavigationRevision = 0;
 	/** Bumped by in-place entry updates, which a {@link SessionBodyStamp} cannot otherwise see. */
 	#bodyRevision = 0;
 	#sessionFile: string | undefined;
@@ -4039,6 +4040,11 @@ export class SessionManager {
 		return pins;
 	}
 
+	/** Explicit branch selections, independent of ordinary journal appends. */
+	get branchNavigationRevision(): number {
+		return this.#branchNavigationRevision;
+	}
+
 	getLeafId(): string | null {
 		return this.#index.leafId();
 	}
@@ -4230,11 +4236,13 @@ export class SessionManager {
 	 */
 	branch(branchFromId: string): void {
 		if (!this.#index.has(branchFromId)) throw new Error(`Entry ${branchFromId} not found`);
+		this.#branchNavigationRevision++;
 		this.#setLeaf(branchFromId);
 	}
 
 	/** Reset the leaf to null so the next append creates a new root entry. */
 	resetLeaf(): void {
+		this.#branchNavigationRevision++;
 		this.#setLeaf(null);
 	}
 
@@ -4295,9 +4303,8 @@ export class SessionManager {
 
 	/** Like branch(), but also records a branch_summary of the abandoned path. */
 	branchWithSummary(branchFromId: string | null, summary: string, details?: unknown, fromExtension?: boolean): string {
-		if (branchFromId !== null && !this.#index.has(branchFromId)) throw new Error(`Entry ${branchFromId} not found`);
-
-		this.#setLeaf(branchFromId);
+		if (branchFromId === null) this.resetLeaf();
+		else this.branch(branchFromId);
 		const entry: BranchSummaryEntry = {
 			type: "branch_summary",
 			id: generateId(this.#index),

@@ -230,6 +230,26 @@ describe("experimental context notes", () => {
 		}
 	});
 
+	it("rejects a pending save when navigation selects an existing descendant", async () => {
+		const manager = SessionManager.inMemory();
+		const settings = Settings.isolated({ "compaction.experimentalContextManagement": true });
+		const tool = new ContextNotesTool(toolSession(settings, manager));
+		const root = manager.appendCustomEntry("root");
+		const child = manager.appendCustomEntry("child");
+		manager.branch(root);
+		const disk = Promise.withResolvers<void>();
+		const ensure = vi.spyOn(manager, "ensureOnDisk").mockReturnValue(disk.promise);
+		try {
+			const save = tool.execute("save", { text: "belongs to root" });
+			manager.branch(child);
+			disk.resolve();
+			await expect(save).rejects.toThrow("session branch changed");
+			expect(getContextNotes(manager.getBranch())).toBeUndefined();
+		} finally {
+			ensure.mockRestore();
+		}
+	});
+
 	it("does not append notes when experimental context management is disabled while preparing disk", async () => {
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated({ "compaction.experimentalContextManagement": true });
