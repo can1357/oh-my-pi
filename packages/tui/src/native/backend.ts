@@ -14,10 +14,10 @@
  * unanswered for {@link STALLED_ACK_MS}, the credits reset (one warning per stall).
  * Tern acknowledges a frame once it draws it and draws no hidden pane (a
  * background tab), so silence while the pane is hidden resets them without one.
- * A frame that echoes user input (a key, a paste, an `edit`, `undo` or `send`)
- * may overdraw them by {@link INPUT_OVERDRAFT}, and frames unanswered for
- * {@link INPUT_STALLED_ACK_MS} stop counting against it, so typing stays live
- * while the terminal is slow to acknowledge.
+ * A frame that echoes user input (a key, a paste, or a UI event such as a
+ * click, a toggle or an `edit`) may overdraw them by {@link INPUT_OVERDRAFT},
+ * and frames unanswered for {@link INPUT_STALLED_ACK_MS} stop counting against
+ * it, so typing and clicks stay live while the terminal is slow to acknowledge.
  *
  * Events: the terminal's UI events become {@link UiEvent}s delivered to the
  * node they name and bubbled to the nearest handler; keys and pastes the
@@ -547,8 +547,10 @@ export class NativeBackend {
 		}
 		const reconciler = this.#reconciler!;
 		const ui = toUiEvent(event, keypathOf(path), item => reconciler.itemKey(event.id, item));
-		// The field is controlled: it shows the change once a frame echoes it.
-		this.#route(event.ev === "edit" || event.ev === "undo" || event.ev === "send", () => {
+		// Every node event is the user's doing (a click, a toggle, an edit of a controlled field): it
+		// shows once a frame echoes it. Held behind stalled credits, the clicked control stays on
+		// screen and each further click names a node already let go of.
+		this.#route(true, () => {
 			// A native caret move/replacement ends a raw-key selection, even if
 			// the text and cursor happen to be unchanged (e.g. clicking its end).
 			const field = path.at(-1)!;

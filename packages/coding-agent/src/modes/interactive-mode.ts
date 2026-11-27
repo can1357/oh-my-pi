@@ -2260,12 +2260,15 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		// Initialize hooks with TUI-based UI context
 		await logger.time("InteractiveMode.init:hooks", () => this.initHooksAndCustomTools());
-		// A live `disabledExtensions` edit suspends or resumes extensions: drop (or restore) their link
-		// schemes and renderers from the transcript.
+		// A live `disabledExtensions` edit hides or restores widgets, link schemes and renderers.
 		const extensionRunner = this.session.extensionRunner;
 		if (extensionRunner) {
+			const syncWidgets = () =>
+				this.hud.widgets.setOwnerVisibility(owner => !extensionRunner.isExtensionSuspended(owner));
+			syncWidgets();
 			this.#eventBusUnsubscribers.push(
 				extensionRunner.onSuspensionChange(() => {
+					syncWidgets();
 					this.#applyExtensionLinks();
 					this.#redrawExtensionLinks();
 					this.#syncTranscriptPresenters();
