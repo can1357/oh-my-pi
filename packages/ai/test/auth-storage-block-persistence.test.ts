@@ -513,12 +513,12 @@ describe("AuthStorage credential block persistence", () => {
 		firstReopen.close();
 		expect(readCredentialBlockRows(dbPath)).toEqual(expectedRows);
 		expect(readLegacyCodexSharedBlock(dbPath, codexRow.id)?.blocked_until_ms).toBe(chatExpiryMs);
-		expect(readAuthSchemaVersion(dbPath)).toBe(8);
+		expect(readAuthSchemaVersion(dbPath)).toBe(9);
 
 		const secondReopen = await SqliteAuthCredentialStore.open(dbPath);
 		secondReopen.close();
 		expect(readCredentialBlockRows(dbPath)).toEqual(expectedRows);
-		expect(readAuthSchemaVersion(dbPath)).toBe(8);
+		expect(readAuthSchemaVersion(dbPath)).toBe(9);
 	});
 
 	it("mirrors a legacy Codex shared insert into meter rows while hiding shared from current APIs", async () => {
@@ -833,7 +833,7 @@ describe("AuthStorage credential block persistence", () => {
 			const expiresAtMs = Date.now() + 3_600_000;
 			expect(migratedStore.tryAcquireCredentialRefreshLease(1, "test-owner", expiresAtMs)).toBe(true);
 			expect(migratedStore.getCredentialRefreshLeaseExpiresAt(1)).toBe(expiresAtMs);
-			expect(readAuthSchemaVersion(dbPath)).toBe(8);
+			expect(readAuthSchemaVersion(dbPath)).toBe(9);
 		} finally {
 			migratedStore.close();
 		}
@@ -884,7 +884,7 @@ describe("AuthStorage credential block persistence", () => {
 			const rows = migratedStore.listAuthCredentials(PROVIDER);
 			expect(rows).toHaveLength(1);
 			expect(rows[0]!.credential).toMatchObject({ type: "oauth", access: "legacy-access" });
-			expect(readAuthSchemaVersion(dbPath)).toBe(8);
+			expect(readAuthSchemaVersion(dbPath)).toBe(9);
 			expect(tableExists(dbPath, "auth_credential_blocks")).toBe(true);
 		} finally {
 			migratedStore.close();

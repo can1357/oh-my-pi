@@ -91,9 +91,14 @@ export function createLiveCallModel(): LiveCallModel {
 	};
 }
 
-/** How loud the spectrum draws (0..1): silent while muted, a square-root boost of the held level otherwise. */
+/** How loud the spectrum draws (0..1): silent while muted, the held level's {@link voiceEnergy} otherwise. */
 export function callEnergy(phase: LivePhase, level: number): number {
-	return phase === "muted" ? 0 : Math.min(1, Math.sqrt(level * 5));
+	return phase === "muted" ? 0 : voiceEnergy(level);
+}
+
+/** A microphone RMS level as a voice wave's swing (0..1): a square-root boost, so speech fills the wave. */
+export function voiceEnergy(level: number): number {
+	return Math.min(1, Math.sqrt(level * 5));
 }
 
 /** The mic meter's value: the energy in 1/20 steps. */

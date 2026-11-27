@@ -12,10 +12,9 @@ import { e2eApiKey, resolveApiKey } from "./oauth";
 const oauthTokens = await Promise.all([
 	resolveApiKey("anthropic"),
 	resolveApiKey("github-copilot"),
-	resolveApiKey("google-antigravity"),
 	resolveApiKey("openai-codex"),
 ]);
-const [anthropicOAuthToken, githubCopilotToken, antigravityToken, openaiCodexToken] = oauthTokens;
+const [anthropicOAuthToken, githubCopilotToken, openaiCodexToken] = oauthTokens;
 
 /**
  * Test that tool results containing only images work correctly across all providers.
@@ -380,28 +379,6 @@ describe("Tool Results with Images", () => {
 			},
 			{ retry: 3, timeout: 30000 },
 		);
-	});
-
-	describe("Google Antigravity Provider", () => {
-		it.skipIf(!antigravityToken)(
-			"gemini-3.8-flash - should handle tool result with only image",
-			async () => {
-				const llm = getBundledModel("google-antigravity", "gemini-3.8-flash");
-				await handleToolWithImageResult(llm, { apiKey: antigravityToken });
-			},
-			{ retry: 3, timeout: 30000 },
-		);
-
-		it.skipIf(!antigravityToken)(
-			"gemini-3.8-flash - should handle tool result with text and image",
-			async () => {
-				const llm = getBundledModel("google-antigravity", "gemini-3.8-flash");
-				await handleToolWithTextAndImageResult(llm, { apiKey: antigravityToken });
-			},
-			{ retry: 3, timeout: 30000 },
-		);
-
-		// Note: gpt-oss-120b-medium does not support images, so not tested here
 	});
 
 	describe("OpenAI Codex Provider", () => {

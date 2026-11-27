@@ -20,7 +20,7 @@ import {
 	openSqliteDatabase,
 	postmortem,
 } from "@oh-my-pi/pi-utils";
-import type { RawSettings as Settings } from "../config/settings";
+import type { RawSettings as Settings } from "../config/raw-settings";
 
 /** Row shape for settings table queries */
 type SettingsRow = {
@@ -204,6 +204,8 @@ export interface AgentStorageApi {
 export class AgentStorage implements AgentStorageApi {
 	#db: Database;
 	#authStore: SqliteAuthCredentialStore;
+	/** Loads the OS-vault key when the store holds sealed credentials; `open()` waits for it. */
+	#unlocked: Promise<void>;
 
 	#listSettingsStmt: Statement;
 	#upsertModelUsageStmt: Statement;
@@ -229,6 +231,7 @@ export class AgentStorage implements AgentStorageApi {
 
 		// Create AuthCredentialStore with our open database
 		this.#authStore = new SqliteAuthCredentialStore(this.#db);
+		this.#unlocked = this.#authStore.unlock();
 
 		this.#listSettingsStmt = this.#db.prepare("SELECT key, value FROM settings");
 		this.#upsertModelUsageStmt = this.#db.prepare(
@@ -459,7 +462,10 @@ FROM model_usage_legacy
 	 */
 	static async open(dbPath: string = getAgentDbPath()): Promise<AgentStorage> {
 		const existing = instances.get(dbPath);
-		if (existing) return existing;
+		if (existing) {
+			await existing.#unlocked;
+			return existing;
+		}
 
 		fs.mkdirSync(path.dirname(dbPath), { recursive: true, mode: 0o700 });
 		let preservedPath: string | undefined;
@@ -481,7 +487,11 @@ FROM model_usage_legacy
 			},
 		);
 		// The quarantined store held the user's provider credentials; carry over what is readable.
-		if (preservedPath) opened.#authStore.salvageQuarantinedCredentials(preservedPath);
+		if (preservedPath) {
+			opened.#authStore.salvageQuarantinedCredentials(preservedPath);
+			opened.#unlocked = opened.#authStore.unlock();
+		}
+		await opened.#unlocked;
 		return opened;
 	}
 
@@ -861,41 +871,9 @@ ON CONFLICT(model_key) DO UPDATE SET
 	 * @returns Array of stored credentials with their database IDs
 	 */
 	listAuthCredentials(provider?: string, includeDisabled = false): StoredAuthCredential[] {
-		const credentials = this.#authStore.listAuthCredentials(provider);
-		if (!includeDisabled) return credentials;
-
-		using stmt = this.#db.prepare(
-			provider
-				? "SELECT id, provider, credential_type, data, disabled_cause FROM auth_credentials WHERE provider = ? ORDER BY id ASC"
-				: "SELECT id, provider, credential_type, data, disabled_cause FROM auth_credentials ORDER BY id ASC",
-		);
-		const rows = (provider ? stmt.all(provider) : stmt.all()) as Array<{
-			id: number;
-			provider: string;
-			credential_type: string;
-			data: string;
-			disabled_cause: string | null;
-		}>;
-
-		const results: StoredAuthCredential[] = [];
-		for (const row of rows) {
-			try {
-				const parsed = JSON.parse(row.data);
-				if (!parsed || typeof parsed !== "object") continue;
-
-				let credential: AuthCredential;
-				if (row.credential_type === "api_key" && typeof (parsed as { key?: unknown }).key === "string") {
-					credential = { type: "api_key", key: (parsed as { key: string }).key };
-				} else if (row.credential_type === "oauth") {
-					credential = { type: "oauth", ...(parsed as Record<string, unknown>) } as AuthCredential;
-				} else {
-					continue;
-				}
-
-				results.push({ id: row.id, provider: row.provider, credential, disabledCause: row.disabled_cause });
-			} catch {}
-		}
-		return results;
+		return includeDisabled
+			? this.#authStore.listAllAuthCredentials(provider)
+			: this.#authStore.listAuthCredentials(provider);
 	}
 
 	/**

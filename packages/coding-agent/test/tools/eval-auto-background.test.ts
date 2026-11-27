@@ -156,10 +156,10 @@ describe("EvalTool auto-background", () => {
 		expect(result.details?.async?.state).toBe("running");
 		expect(result.details?.async?.type).toBe("eval");
 		const text = result.content.map(c => (c.type === "text" ? c.text : "")).join("\n");
-		expect(text).toContain("Backgrounded as job");
+		expect(text).toContain("[backgrounded as ");
 		// No `timeout` given, backgrounded after its foreground wait: the deadline is eval's 30 s
 		// default counted over the cell's whole run, not time left.
-		expect(text).toContain("(killed once it has run 30s in total; `timeout: 0` disables the deadline)");
+		expect(text).toContain("killed at 30s total");
 		// The snapshot keeps the running cell (with its streamed tail) for the transcript.
 		expect(result.details?.cells?.[0]?.status).toBe("running");
 
@@ -212,7 +212,7 @@ describe("EvalTool auto-background", () => {
 		// running job and the cell finishes on its own.
 		expect(result.details?.async?.state).toBe("running");
 		const text = result.content.map(c => (c.type === "text" ? c.text : "")).join("\n");
-		expect(text).toContain("Backgrounded early to handle an incoming message");
+		expect(text).toContain("(incoming message)");
 		const jobId = result.details?.async?.jobId;
 		if (!jobId) {
 			throw new Error("expected a steer-backgrounded job id");

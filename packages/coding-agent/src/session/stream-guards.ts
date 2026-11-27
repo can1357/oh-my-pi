@@ -254,6 +254,7 @@ export class LoopGuards {
 			message: context.message,
 			toolResults: context.toolResults,
 			injectedContext: (context.additionalMessages?.length ?? 0) > 0,
+			unresolvedToolCallIds: context.unresolvedToolCallIds,
 		});
 		if (!detection) return false;
 		this.#injectToolCallLoopRedirect(messages, detection);
@@ -299,7 +300,11 @@ export class LoopGuards {
 	}
 
 	#injectToolCallLoopRedirect(messages: AgentMessage[], detection: RepeatedToolCallDetection): void {
-		logger.warn("cross-turn tool-call loop detected", { toolName: detection.toolName, count: detection.count });
+		logger.warn("cross-turn tool-call loop detected", {
+			kind: detection.kind,
+			toolName: detection.toolName,
+			count: detection.count,
+		});
 		injectTurnEndCorrective(
 			this.#host,
 			messages,

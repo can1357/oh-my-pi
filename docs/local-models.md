@@ -7,7 +7,7 @@ modelRoles:
    tiny: local/lfm2.5-230m
    memory: local/lfm2-1.2b
    speech: local/phonon-31m
-   dictation: local/parakeet-tdt-0.6b-v3
+   dictation: local/fluid-speech-pro
    # A local tiny model may also serve typed judgments:
    judge: local/lfm2-1.2b
 
@@ -30,7 +30,7 @@ The tiny-model CLI and source registry retain **title** and **memory** groupings
 
 - **Text/Whisper stack**: `@huggingface/transformers` (transformers.js) v4 running in a Bun
   worker, using the native `onnxruntime-node` backend by default. Phonon TTS runs
-  natively in `omp-natives` (no side install) inside an isolated worker; Parakeet uses `sherpa-onnx-node`.
+  natively in `omp-natives` (no side install) inside an isolated worker; Fluid Speech Pro, Parakeet, Nemotron, and the Silero voice activity detector use `sherpa-onnx-node`.
 - **Non-FHS distros (NixOS, and any host without `libstdc++.so.6` on the loader path)**: the
   on-demand `onnxruntime-node` / `sherpa-onnx-node` / `sharp` addons are prebuilt binaries that
   `dlopen` `libstdc++.so.6` and `libgcc_s.so.1`, and they carry their own `DT_RUNPATH`, so nothing in
@@ -223,12 +223,47 @@ Use these canonical catalog model ids:
 | `local/whisper-base`               | `onnx-community/whisper-base`                                                     | transformers.js q8  | ~60 MB   | Smallest multilingual Whisper option       |
 | `local/whisper-small`              | `onnx-community/whisper-small`                                                    | transformers.js q8  | ~190 MB  | Balanced multilingual Whisper option       |
 | `local/whisper-large-v3-turbo`     | `onnx-community/whisper-large-v3-turbo`                                           | transformers.js q4  | ~600 MB  | Whisper large-v3-turbo, 99 languages       |
-| `local/parakeet-tdt-0.6b-v3`       | `csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8`                           | sherpa-onnx int8    | ~680 MB  | Default; fast multilingual Parakeet TDT v3 |
+| `local/fluid-speech-pro`           | `FluidVoice-Labs/fluid-speech-pro-onnx`                                           | sherpa-onnx int8    | ~800 MB  | Default; 25 European languages             |
+| `local/parakeet-tdt-0.6b-v2`       | `csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8`                           | sherpa-onnx int8    | ~650 MB  | Most accurate English option               |
 | `local/nemotron-streaming-en-0.6b` | `csukuangfj2/sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25` | sherpa-onnx int8    | ~630 MB  | Native streaming; English only             |
 
-The transformers.js Whisper models read `providers.tinyModelDevice` / `PI_TINY_DEVICE` and `providers.tinyModelDtype` / `PI_TINY_DTYPE`; the default precision comes from each speech model's spec, not the text models' q4 default. Phonon runs on CPU through omp-natives and ignores these settings. MLX is a text-model backend, so selecting it leaves speech inference on CPU. Parakeet and Nemotron use their shipped sherpa-onnx int8 files on CPU. Keep `stt.language`, `stt.submitTrigger`, `tts.localVoice`, and the other speech/live settings for behavior; only model selection moved into roles.
+The transformers.js Whisper models read `providers.tinyModelDevice` / `PI_TINY_DEVICE` and `providers.tinyModelDtype` / `PI_TINY_DTYPE`; the default precision comes from each speech model's spec, not the text models' q4 default. Phonon runs on CPU through omp-natives and ignores these settings. MLX is a text-model backend, so selecting it leaves speech inference on CPU. Fluid Speech Pro, Parakeet, and Nemotron use their shipped sherpa-onnx int8 files on CPU. Keep `stt.language`, `stt.submitTrigger`, `tts.localVoice`, and the other speech/live settings for behavior; only model selection moved into roles.
 
-Choose Nemotron for live English dictation. It processes new audio in 160 ms chunks and updates the draft while recording, without repeatedly decoding the whole phrase. The chunk size is not a guarantee of word-display latency. The first recording waits for the recognizer to load; later recordings reuse it. Audio stays on your machine. The multilingual default remains Parakeet.
+Every model except Nemotron decodes whole utterances. During live dictation, Silero VAD (`istupakov/silero-vad-onnx`, ~2 MB, fetched with the model) splits the recording at pauses of 0.5 s or more. Each utterance is padded with 240 ms before and 120 ms after, decoded once, and committed; the utterance in progress is re-decoded for the live preview. The detector force-splits an utterance that runs past 20 s. Silero does not count singing as speech, so if it detects no speech in the whole recording, the recording is transcribed in one pass when you stop, in 20 s windows. Windows quieter than about −50 dBFS are skipped.
+
+Choose Nemotron for live English dictation. It processes new audio in 160 ms chunks and updates the draft while recording, without repeatedly decoding the whole phrase. The chunk size is not a guarantee of word-display latency. The first recording waits for the recognizer to load; later recordings reuse it. Audio stays on your machine. The multilingual default remains Fluid Speech Pro.
+
+Configured `local/parakeet-tdt-0.6b-v3` roles and fallback chains migrate to `local/fluid-speech-pro`, which is Parakeet TDT 0.6B v3 after further training.
+
+#### Dictation benchmark (2026-11-26)
+
+Test set: LibriSpeech dev-clean utterances concatenated into 24 clips of about 22 s, with 0.35–0.9 s pauses between utterances. Three conditions:
+
+- **clean:** the original audio.
+- **mic:** speech at about −36 dBFS with reverb and room noise at 18 dB SNR.
+- **music:** the mic condition plus a pop song underneath at 8 dB SNR.
+
+All runs used an M4 Max CPU with 4 threads and int8 weights. The first table decodes each clip whole:
+
+| Model | clean WER | mic WER | music WER | Speed (× real time) |
+| --- | --: | --: | --: | --: |
+| Parakeet TDT 0.6B v3 (former default) | 4.6% | 7.3% | 35.7% | 48× |
+| Fluid Speech Pro | 4.1% | 5.0% | 8.7% | 37× |
+| Parakeet TDT 0.6B v2 (English) | 3.2% | 3.8% | 9.7% | 49× |
+| Nemotron streaming EN 0.6B | 10.2% | 14.8% | 31.0% | 6× (fed in 100 ms chunks) |
+
+These scores count "Mr." as an error against the references' spelled-out "mister". That costs the models that print "Mr." a few tenths of a point.
+
+Live dictation decodes per utterance. On 6 clips, with "Mr." normalised to "mister", splitting with Silero VAD instead of the former loudness gate:
+
+| Model | Condition | Loudness gate | Silero VAD |
+| --- | --- | --: | --: |
+| Parakeet v3 | mic | 20.9% (48 pieces) | 6.9% (12 pieces) |
+| Parakeet v3 | music | 87.4% (65 pieces) | 30.1% (10 pieces) |
+| Fluid Speech Pro | mic | 17.7% | 4.6% |
+| Fluid Speech Pro | music | 79.3% | 7.1% |
+
+The loudness gate measured volume, not speech. A quiet microphone or music in the room broke utterances into sub-second pieces that decoded as stray words.
 
 In Tern, click the microphone beside Send, speak when **Recording · Stop** appears, then click Stop to finish the draft. This button never submits automatically. Keyboard dictation still follows `stt.submitTrigger`.
 

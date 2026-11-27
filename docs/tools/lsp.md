@@ -328,7 +328,7 @@ Uses the same location normalization and output shape as `definition`, but sends
    - Caches config per cwd in `configCache`; workspace `reload` invalidates the entry.
    - Caches LSP clients by spawn/initialization identity and cwd, with `pendingRequests`, `diagnostics`, `openFiles`, `serverCapabilities`, and project-load state. The transport may represent a shared mux link rather than an owned process.
    - Caches custom linter clients by `serverName:cwd`.
-   - Updates client `lastActivity`; optional idle-timeout cleanup is driven by workspace `idleTimeoutMs` or `setIdleTimeout()`.
+   - Updates client `lastActivity`; idle-timeout cleanup (default 15 min) is driven by workspace `idleTimeoutMs` or `setIdleTimeout()`.
    - Stamps each open document's `lastUsedAt` when an operation opens, syncs, saves, reconciles, or explicitly refreshes it. Before sending a `didOpen`, the client sends `didClose` for documents unused for 5 minutes, so the server can drop their projects; a queued close is written even if the opener is cancelled first, so a later use always reopens with a `didOpen` of the current text, and a close whose write is in flight when the opener is cancelled tears down a server that stopped reading stdin. A reopen resumes past the old version, and within the deferred-diagnostics window diagnostics waits treat an empty publish, or one versioned before the reopen, as provisional, since it may predate the close. Overlays ahead of disk and documents mid-operation stay open, and refreshing every open document after a watched-file change or `reload`, or syncing every open document before a query or diagnostics, does not count as a use.
 - Background work / cancellation
    - Every request has an abortable timeout signal.
@@ -346,7 +346,7 @@ Uses the same location normalization and output shape as `definition`, but sends
 - Failed initialization backoff: `3 * 60 * 1000ms` — `INIT_FAILURE_BACKOFF_MS`; a matching single-file or workspace `reload` clears this negative cache so retry is immediate.
 - Single-file diagnostics wait: `3_000ms` normally (`SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS` in `diagnostics.ts`); for project-aware servers the `lsp.requestTimeout` setting (default `10` seconds) or the call's `timeout`. Both are bounded by the tool timeout.
 - Late post-edit diagnostics (edit/write writethrough, delivered after the tool result): per-server wait `max(12_000ms, lsp.requestTimeout)` — `deferredDiagnosticsWaitMs()` in `diagnostics.ts`.
-- Batch/glob diagnostics wait per file: `400ms` — `BATCH_DIAGNOSTICS_WAIT_TIMEOUT_MS`.
+- Batch/glob diagnostics use the same per-file wait as single files; the tool timeout bounds the whole batch.
 - Glob diagnostic target cap: first `20` matches — `MAX_GLOB_DIAGNOSTIC_TARGETS`.
 - Workspace symbol cap: first `200` entries — `WORKSPACE_SYMBOL_LIMIT`.
 - Reference context cap: first `50` references include source context — `REFERENCE_CONTEXT_LIMIT`.

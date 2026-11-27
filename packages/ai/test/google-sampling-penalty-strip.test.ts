@@ -1,12 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-ai";
 import { streamGoogle } from "@oh-my-pi/pi-ai/providers/google";
-import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { AssistantMessageEvent, Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
-// Regression for #12784: the Gemini API (public, Vertex, and Cloud Code
-// Assist) has no `minP`/`repetitionPenalty` fields in `generationConfig`, so
+// Regression for #12784: the Gemini API (public and Vertex) has no
+// `minP`/`repetitionPenalty` fields in `generationConfig`, so
 // forwarding a global `repetitionPenalty` (or `minP`) produced
 // `400 Unknown name "repetitionPenalty" ... Cannot find field`. Supported
 // knobs (temperature/topP/topK/presencePenalty) must still be forwarded.
@@ -43,19 +42,6 @@ const geminiModel: Model<"google-generative-ai"> = buildModel({
 	maxTokens: 32_000,
 });
 
-const geminiCliModel: Model<"google-gemini-cli"> = buildModel({
-	id: "gemini-3-flash",
-	name: "Gemini 3 Flash (CLI)",
-	api: "google-gemini-cli",
-	provider: "google-gemini-cli",
-	baseUrl: "https://cloudcode-pa.googleapis.com",
-	reasoning: true,
-	input: ["text"],
-	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-	contextWindow: 1_000_000,
-	maxTokens: 65_536,
-});
-
 const sampling = { temperature: 1.0, topP: 0.95, topK: 40, minP: 0.05, presencePenalty: 0.1, repetitionPenalty: 1.05 };
 
 describe("Google transports drop Gemini-unsupported sampling fields (#12784)", () => {
@@ -72,25 +58,6 @@ describe("Google transports drop Gemini-unsupported sampling fields (#12784)", (
 		expect(gen.temperature).toBe(1.0);
 		expect(gen.topP).toBe(0.95);
 		expect(gen.topK).toBe(40);
-		expect(gen.presencePenalty).toBe(0.1);
-	});
-
-	it("Cloud Code Assist (gemini-cli/antigravity) omits minP/repetitionPenalty", async () => {
-		let body: { request?: { generationConfig?: Record<string, unknown> } } = {};
-		const fetch: FetchImpl = async (_url, init) => {
-			body = JSON.parse(String(init?.body ?? "{}"));
-			return sseStop();
-		};
-		await streamSimple(geminiCliModel, context, {
-			apiKey: JSON.stringify({ token: "t", projectId: "proj-123" }),
-			fetch,
-			...sampling,
-		}).result();
-		const gen = body.request?.generationConfig ?? {};
-		expect(gen.repetitionPenalty).toBeUndefined();
-		expect(gen.minP).toBeUndefined();
-		expect(gen.temperature).toBe(1.0);
-		expect(gen.topP).toBe(0.95);
 		expect(gen.presencePenalty).toBe(0.1);
 	});
 });

@@ -1,5 +1,5 @@
 /**
- * Shared utilities for Google Generative AI and Google Cloud Code Assist providers.
+ * Shared utilities for the Google Generative AI and Vertex AI providers.
  */
 
 import { scheduler } from "node:timers/promises";
@@ -30,7 +30,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import { armPreResponseTimeout, getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs } from "../utils/idle-iterator";
 import { notifyProviderResponse } from "../utils/provider-response";
-import { normalizeSchemaForCCA, normalizeSchemaForGoogle, toolWireSchema } from "../utils/schema";
+import { normalizeSchemaForGoogle, toolWireSchema } from "../utils/schema";
 import type {
 	Content,
 	FinishReason,
@@ -55,7 +55,7 @@ export type {
 } from "./google-types";
 export { normalizeSchemaForGoogle };
 
-type GoogleApiType = "google-generative-ai" | "google-gemini-cli" | "google-vertex";
+type GoogleApiType = "google-generative-ai" | "google-vertex";
 
 function convertGoogleImagePart(image: ImageContent): Part {
 	if (image.providerFile?.provider === "google" && image.providerFile.uri) {
@@ -76,7 +76,6 @@ export type GoogleThinkingLevel = "THINKING_LEVEL_UNSPECIFIED" | "MINIMAL" | "LO
 
 /**
  * Sampling/thinking options shared by `streamGoogle` and `streamGoogleVertex`.
- * `google-gemini-cli` uses a different transport and request shape — do not extend this for it.
  */
 export interface GoogleSharedStreamOptions extends StreamOptions {
 	/**
@@ -146,7 +145,8 @@ const base64SignaturePattern = /^[A-Za-z0-9+/]+={0,2}$/;
 export const SKIP_THOUGHT_SIGNATURE = "skip_thought_signature_validator";
 const SKIP_THOUGHT_SIGNATURE_BASE64 = Buffer.from(SKIP_THOUGHT_SIGNATURE).toString("base64");
 
-function isValidThoughtSignature(signature: string | undefined): boolean {
+/** Whether `signature` is well-formed base64, the only form Google accepts back (TYPE_BYTES). */
+export function isValidThoughtSignature(signature: string | undefined): boolean {
 	if (!signature) return false;
 	if (signature.length % 4 !== 0) return false;
 	return base64SignaturePattern.test(signature);
@@ -266,12 +266,11 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 			const parts: Part[] = [];
 			// Check if message is from same provider and model - only then keep thinking blocks
 			const isSameProviderAndModel = msg.provider === model.provider && msg.model === model.id;
-			const dropsUnsignedThinking = model.compat.dropUnsignedThinking;
 			let isFirstToolCall = true;
 
 			for (const block of msg.content) {
 				if (block.type === "text") {
-					// Skip empty text blocks - they can cause issues with some models (e.g. Claude via Antigravity)
+					// Skip empty text blocks - some models reject them
 					if (!block.text || block.text.trim() === "") continue;
 					const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.textSignature);
 					parts.push({
@@ -282,7 +281,6 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 					const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.thinkingSignature);
 					// Skip empty thinking unless it carries the signature of a signature-only thought part
 					if ((!block.thinking || block.thinking.trim() === "") && !thoughtSignature) continue;
-					if (dropsUnsignedThinking && !thoughtSignature) continue;
 					if (isSameProviderAndModel) {
 						// The model's own thinking replays in the thought slot even unsigned: Gemini
 						// signs the part after a thought summary, not the summary, and replayed as
@@ -301,9 +299,9 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 					emittedToolCallNames.set(block.id, block.name);
 					callOrder.call(block.id);
 					// Gemini 3 requires a thought signature on function calls it makes. The
-					// public API requires the bypass sentinel on every unsigned call. Cloud
-					// Code Assist and Vertex AI require it only when the first call itself is
-					// unsigned; signed-first parallel turns must leave unsigned secondary calls
+					// public API requires the bypass sentinel on every unsigned call. Vertex AI
+					// requires it only when the first call itself is unsigned; signed-first
+					// parallel turns must leave unsigned secondary calls
 					// bare. (#9638, #10602)
 					const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.thoughtSignature);
 					const requiresFallback =
@@ -346,8 +344,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 			const hasImages = imageContent.length > 0;
 
 			// Gemini 3+ models support multimodal function responses with images nested inside
-			// functionResponse.parts. Claude and other non-Gemini models behind Cloud Code Assist /
-			// Antigravity also accept this shape. Gemini < 3 still needs a separate user image turn.
+			// functionResponse.parts. Gemini < 3 still needs a separate user image turn.
 			const modelSupportsMultimodalFunctionResponse = model.compat.multimodalFunctionResponse;
 
 			// Use "output" key for success, "error" key for errors as per SDK documentation
@@ -373,7 +370,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 			};
 			callOrder.response(functionResponsePart, msg.toolCallId);
 
-			// Cloud Code Assist API requires all function responses to be in a single user turn.
+			// All function responses of one model turn must share a single user turn.
 			// Check if the last content is already a user turn with function responses and merge.
 			const lastContent = contents[contents.length - 1];
 			if (lastContent?.role === "user" && lastContent.parts?.some(p => p.functionResponse)) {
@@ -403,32 +400,17 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 /**
  * Convert tools to Gemini function declarations format.
  *
- * We prefer `parametersJsonSchema` (full JSON Schema: anyOf/oneOf/const/etc.).
- *
- * Claude models via Cloud Code Assist require the legacy `parameters` field; the API
- * translates it into Anthropic's `input_schema`. When using that path, we sanitize the
- * schema to remove Google-unsupported JSON Schema keywords.
+ * Declarations use `parametersJsonSchema` (full JSON Schema: anyOf/oneOf/const/etc.).
  */
-export function convertTools(
-	tools: Tool[],
-	model: Model<"google-generative-ai" | "google-gemini-cli" | "google-vertex">,
-): { functionDeclarations: Record<string, unknown>[] }[] | undefined {
+export function convertTools(tools: Tool[]): { functionDeclarations: Record<string, unknown>[] }[] | undefined {
 	if (tools.length === 0) return undefined;
-
-	/**
-	 * Claude models on Cloud Code Assist need the legacy `parameters` field;
-	 * the API translates it into Anthropic's `input_schema`.
-	 */
-	const useParameters = model.compat.ccaLegacyParametersSchema;
 
 	return [
 		{
 			functionDeclarations: tools.map(tool => ({
 				name: tool.name,
 				description: tool.description || "",
-				...(useParameters
-					? { parameters: normalizeSchemaForCCA(toolWireSchema(tool)) }
-					: { parametersJsonSchema: normalizeSchemaForGoogle(toolWireSchema(tool)) }),
+				parametersJsonSchema: normalizeSchemaForGoogle(toolWireSchema(tool)),
 			})),
 		},
 	];
@@ -502,8 +484,7 @@ export function mapStopReasonString(reason: string): StopReason {
 /**
  * Bounded retries for the well-known Gemini "empty response" failure: a benign
  * `finishReason: STOP` carrying only an empty/whitespace text part and no tool call.
- * Shared by the public/Vertex `streamGoogleGenAI` path and the Cloud Code Assist
- * (`google-gemini-cli`/`google-antigravity`) provider so both apply the same policy.
+ * Applied by the public/Vertex `streamGoogleGenAI` path.
  */
 export const MAX_EMPTY_STREAM_RETRIES = 2;
 export const EMPTY_STREAM_BASE_DELAY_MS = 500;
@@ -564,7 +545,7 @@ export interface ContinuedUsageMetadata extends UsageMetadata {
  * `promptTokenCount` includes `cachedContentTokenCount`, so input = prompt − cached,
  * matching the OpenAI convention where input + cacheRead = total prompt tokens.
  * Upstream sometimes omits `promptTokenCount` or reports a cache count above the
- * prompt (Antigravity), so the prompt falls back to `total − candidates − thoughts`
+ * prompt, so the prompt falls back to `total − candidates − thoughts`
  * and cached tokens are clamped to it: input is never negative.
  * Ref: https://ai.google.dev/api/generate-content#v1beta.GenerateContentResponse.UsageMetadata
  */
@@ -681,8 +662,7 @@ export function nextToolCallId(name: string): string {
 
 /**
  * Push the appropriate `text_end` / `thinking_end` event for the given block.
- * Shared between the SDK-backed stream consumer and the gemini-cli SSE consumer so
- * the end-of-block event shape stays in lockstep.
+ * Keeps the end-of-block event shape in one place.
  */
 export function pushBlockEndEvent(
 	block: TextContent | ThinkingContent,
@@ -727,11 +707,8 @@ export type GoogleThoughtText = "healed" | "verbatim";
  * `thoughtSignature` stays on the block it belongs to; the empty text part
  * Gemini sends after a reply's last chunk signs the open block.
  *
- * {@link push} folds whole parts. A route that rewrites visible text before it
- * lands (Gemini CLI's planning-leak buffer and markup healing) feeds the
- * rewritten text through {@link appendText}/{@link appendThinking} and
- * signature-only parts through {@link sign}, so block and signature placement
- * live only here.
+ * {@link push} folds whole parts, so block and signature placement live only
+ * here.
  */
 export class GoogleTextBlocks {
 	readonly #output: AssistantMessage;
@@ -764,24 +741,24 @@ export class GoogleTextBlocks {
 		if (text === undefined) return;
 		const isThinking = isThinkingPart(part);
 		if (text === "") {
-			if (thoughtSignature && !part.functionCall) this.sign(thoughtSignature, isThinking);
+			if (thoughtSignature && !part.functionCall) this.#signPart(thoughtSignature, isThinking);
 			return;
 		}
-		if (isThinking) this.appendThinking(text, thoughtSignature);
-		else this.appendText(text, thoughtSignature);
+		if (isThinking) this.#appendThinking(text, thoughtSignature);
+		else this.#appendText(text, thoughtSignature);
 	}
 
 	/**
 	 * Places a signature-only part's signature: an unmarked one signs the open block
 	 * (Gemini's trailing part after a reply), a thought part signs thinking of its own.
 	 */
-	sign(signature: string, isThought: boolean): void {
+	#signPart(signature: string, isThought: boolean): void {
 		const signed = isThought && this.#block?.type !== "thinking" ? this.#open(true) : this.#block;
 		if (signed) this.#sign(signed, signature);
 	}
 
 	/** Appends reply text to the open text block, opening one if needed. */
-	appendText(text: string, signature?: string): void {
+	#appendText(text: string, signature?: string): void {
 		const block = this.#block?.type === "text" ? this.#block : this.#open(false);
 		this.#sign(block, signature);
 		block.text += text;
@@ -789,7 +766,7 @@ export class GoogleTextBlocks {
 	}
 
 	/** Appends thought text to the open thinking block, opening one if needed. */
-	appendThinking(text: string, signature?: string): void {
+	#appendThinking(text: string, signature?: string): void {
 		const block = this.#block?.type === "thinking" ? this.#block : this.#open(true);
 		this.#sign(block, signature);
 		if (this.#thoughtText === "healed") this.#thinkingStripper ??= new ThinkingFenceStripper();
@@ -1020,10 +997,6 @@ export async function consumeGoogleStream<T extends GoogleApiType>(args: {
  * Build the `GenerateContentParameters` payload for the public Gemini API and Vertex AI.
  * Both surfaces accept the same `GenerateContentConfig` shape — every numeric/string knob,
  * tool-config, thinking-config, and system-instruction conversion is identical.
- *
- * `google-gemini-cli` is NOT routed through here: its `CloudCodeAssistRequest` body has a
- * distinct top-level shape (project/request/requestType) and a different thinking-config
- * placement on `generationConfig`.
  */
 export function buildGoogleGenerateContentParams<T extends "google-generative-ai" | "google-vertex">(
 	model: Model<T>,
@@ -1043,7 +1016,7 @@ export function buildGoogleGenerateContentParams<T extends "google-generative-ai
 	const config: GenerateContentConfig = {
 		...(Object.keys(generationConfig).length > 0 && generationConfig),
 		...(systemPrompts.length > 0 && { systemInstruction: { parts: systemPrompts.map(text => ({ text })) } }),
-		...(context.tools && context.tools.length > 0 && { tools: convertTools(context.tools, model) }),
+		...(context.tools && context.tools.length > 0 && { tools: convertTools(context.tools) }),
 	};
 
 	// Gemini API (google-generative-ai) reads the tier from the request body;
@@ -1410,7 +1383,6 @@ function paramsToWireBody(params: GenerateContentParameters): Record<string, unk
  * `google.rpc.ErrorInfo` reason to tell an account billing cap (terminal) from
  * a per-minute throttle (retryable), and reducing the body to `error.message`
  * hid both, so every billing 429 replayed as a transient rate limit (#13090).
- * The Cloud Code Assist path keeps the whole raw body for the same reason.
  */
 export function extractGoogleErrorMessage(errorText: string, status: number): string {
 	if (!errorText) return "Unknown error";
