@@ -370,6 +370,7 @@ import { goalContinuationActivity, goalFromModeData } from "../goals/state";
 import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "../plan-mode/settings";
 import { cfgStreamRedactPatterns } from "../stream/settings";
 import { cfgSttEnabled } from "../stt/settings";
+import { meterValue, voiceEnergy } from "../ui/apps/live-visualizer";
 import { combine, type SettingValueOf } from "../config/registry";
 import { cfgAdvisorEnabled, cfgAdvisorMaxNotesPerUpdate } from "../advisor/settings";
 import { cfgExtensionAssistantTextRenderers, cfgExtensionTranscriptPresenters } from "../extensibility/settings";
@@ -8052,10 +8053,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			showWarning: (msg: string) => this.showWarning(msg),
 			showStatus: (msg: string) => this.showStatus(msg),
 			clearStatus: () => this.#uiHelpers.clearStatus(),
+			onLevel: level => this.#frame.dictationLevel.set(meterValue(voiceEnergy(level))),
 			onStateChange: (state: SttState) => {
 				// Duck assistant speech while the user is talking (push-to-talk); restore after.
 				if (state === "recording") vocalizer.duck();
 				else vocalizer.unduck();
+				if (state !== "recording") this.#frame.dictationLevel.set(0);
 				if (this.#frame.dictation.peek() !== undefined) this.#frame.dictation.set(state);
 				if (state === "recording") {
 					this.#micCursor?.dispose();

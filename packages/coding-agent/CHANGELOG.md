@@ -23,6 +23,7 @@
 ### Changed
 
 - Redesigned the `/live` call panel in Tern: your voice as a moving wave in the call's color, the transcript as a caption, and the call's status beside Mute and End call.
+- Redesigned the composer's dictation control in Tern: while recording it shows a live wave of your voice and the time recorded beside a stop button.
 - Bash can now load approved `.envrc` files and opt-in `.env` files without requiring `direnv`, using the exact approved file contents.
 - URL reading now preserves cookies across redirects, follows meta refreshes, falls back to the headless browser when plain fetching is blocked, and uses the native reader for X, YouTube, docs.rs, Discourse, and Mastodon while raw reads bypass site-specific rendering.
 - Expanded `bash.gitGuard` protection in shared checkouts to cover more history-changing Git operations, including rebase, merge, pull, cherry-pick, revert, amend, and non-dry-run clean operations.

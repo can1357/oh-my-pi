@@ -12,7 +12,7 @@ import { type SttStreamHandle, sttClient } from "./asr-client";
 import { downloadSttModel, isSttModelCached } from "./downloader";
 import { resolveSttModelSpec, type SttModelKey } from "./models";
 import { evaluateSubmitTrigger } from "./submit-trigger";
-import { encodePcm16Wav, floatToPcm16 } from "./wav";
+import { encodePcm16Wav, floatToPcm16, rmsLevel } from "./wav";
 
 import { cfgSttLanguage, cfgSttSubmitTrigger } from "./settings";
 
@@ -25,6 +25,8 @@ export interface SttCallbacks {
 	/** Withdraw the progress status this capture showed ("Transcribing..."): its text landed. */
 	clearStatus(): void;
 	onStateChange(state: SttState): void;
+	/** The microphone's loudness (RMS, 0–1) for each captured chunk while recording. */
+	onLevel?(level: number): void;
 	/** Keep this capture as a draft, without interpreting submit commands. */
 	manualSubmit?: boolean;
 }
@@ -318,6 +320,7 @@ export class STTController {
 					options.showWarning(error.message);
 					return;
 				}
+				options.onLevel?.(rmsLevel(samples));
 				if (samples.length > 0) this.#cloudAudio.push(floatToPcm16(samples));
 			});
 		} catch (err) {
@@ -465,6 +468,7 @@ export class STTController {
 					options.showWarning(error.message);
 					return;
 				}
+				options.onLevel?.(rmsLevel(samples));
 				stream.pushAudio(samples);
 			});
 		} catch (err) {
