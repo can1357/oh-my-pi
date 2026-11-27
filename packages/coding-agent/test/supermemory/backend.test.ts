@@ -1005,6 +1005,36 @@ describe("supermemoryBackend", () => {
 		expect(docs.join("\n")).not.toContain("off-period");
 	});
 
+	it("a /skill: prompt starts its own window instead of extending the previous one", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "addDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
+		await start(session);
+		session.addTurn("one");
+		await session.endTurn();
+		// `/skill:foo`: the prompt is a custom message, not a user message.
+		session.emitStart();
+		session.sessionManager.getEntries().push({
+			type: "custom_message",
+			id: "skill-two",
+			parentId: null,
+			timestamp: new Date(0).toISOString(),
+			customType: SKILL_PROMPT_MESSAGE_TYPE,
+			content: "skill prompt two",
+			display: true,
+			attribution: "user",
+		} as never);
+		session.addAnswer("skill answer two");
+		await session.endTurn();
+		const docs = create.mock.calls.map(call => call[1]);
+		expect(docs).toHaveLength(2);
+		expect(docs[1]?.id).not.toBe(docs[0]?.id);
+		expect(docs[1]?.content).toContain("skill prompt two");
+		expect(docs[1]?.content).toContain("skill answer two");
+		expect(docs[0]?.content).not.toContain("skill answer two");
+	});
+
 	it("continuing a /skill: turn begun with memory off never extends an older window", async () => {
 		const create = vi
 			.spyOn(SupermemoryClient.prototype, "addDocument")

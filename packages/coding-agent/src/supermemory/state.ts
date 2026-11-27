@@ -44,6 +44,8 @@ const MAX_RETAIN_CHARS = 60_000;
 const DISPOSE_FLUSH_TIMEOUT_MS = 2_000;
 /** Custom transcript entry recording how far automatic retention got; see {@link SupermemorySessionState}. */
 const RETENTION_CURSOR_ENTRY_TYPE = "supermemory_retention";
+/** Windows count a user-invoked `/skill:` or collab prompt as a user turn, like a typed prompt. */
+const CUSTOM_TURNS = { customTurns: true } as const;
 /** Custom transcript entry recording a `/memory clear`, so a resume does not restore the cleared recall. */
 const RECALL_CLEAR_ENTRY_TYPE = "supermemory_recall_clear";
 
@@ -328,7 +330,7 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		this.#hasCursor = data !== undefined;
 		// Messages written outside retention's runs are not in this view (see {@link #retainable}), so a
 		// window open at a stop continues with the next run's turns.
-		const turns = countUserTurns(this.#retainable(path, start));
+		const turns = countUserTurns(this.#retainable(path, start), 0, CUSTOM_TURNS);
 		if (data?.scope === this.#scope()) {
 			// A cursor counted in a view that held more turns (an earlier build) must not stall retention.
 			this.lastRetainedTurn = Math.min(data.turn, turns);
@@ -802,13 +804,13 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 	#settledHistory(): SettledHistory {
 		const [path, start] = this.#retainedEntries();
 		const entries = this.#retainable(path, start);
-		const messages = extractMessages(entries);
+		const messages = extractMessages(entries, 0, CUSTOM_TURNS);
 		return {
 			messages,
 			openTail: messages.at(-1)?.role === "user" || lastTurnUnfinished(entries),
 			generation: this.#transcriptGeneration,
 			transcriptId: this.transcriptId,
-			userIds: userTurnEntryIds(entries),
+			userIds: userTurnEntryIds(entries, 0, CUSTOM_TURNS),
 			// The branch's leaf, even when off-period entries end it: a `/tree` move off it stales the job.
 			leaf: path.at(-1)?.id,
 		};

@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { parseEnv } from "node:util";
-import { getAgentDir, getConfigRootDir, getProjectDir, refreshDirsFromEnv } from "./dirs";
+import { getAgentDir, getConfigRootDir, getProjectDir, refreshDirsFromEnv, resolveEquivalentPath } from "./dirs";
 import { isBunTestRuntime } from "./test-runtime";
 
 export * from "./test-runtime";
@@ -308,7 +308,7 @@ for (const key of Object.keys(Bun.env)) {
  * inherits them. Read through {@link $otelEnv}; {@link withOmpOtelEnv} exposes
  * them to the OpenTelemetry SDK for the synchronous span of its construction.
  *
- * Keys are folded with {@link foldOtelEnvName}.
+ * Keys are folded with {@link foldEnvName}.
  */
 const ompOtelEnvFileValues = new Map<string, string>();
 
@@ -318,7 +318,7 @@ const ompOtelEnvFileValues = new Map<string, string>();
  * name; match and key them folded there, exactly on POSIX (names are
  * case-sensitive).
  */
-function foldOtelEnvName(name: string, platform: NodeJS.Platform): string {
+function foldEnvName(name: string, platform: NodeJS.Platform = process.platform): string {
 	return platform === "win32" ? name.toUpperCase() : name;
 }
 
@@ -338,7 +338,7 @@ export function claimOmpOtelEnvFileEntry(
 	value: string,
 	platform: NodeJS.Platform = process.platform,
 ): boolean {
-	const key = foldOtelEnvName(name, platform);
+	const key = foldEnvName(name, platform);
 	if (!key.startsWith("OTEL_")) return false;
 	if (!Bun.env[name] && !ompOtelEnvFileValues.get(key)) ompOtelEnvFileValues.set(key, value);
 	return true;
@@ -352,7 +352,7 @@ export function claimOmpOtelEnvFileEntry(
 export function $otelEnv(name: string): string | undefined {
 	const live = Bun.env[name];
 	if (live) return live;
-	return ompOtelEnvFileValues.get(foldOtelEnvName(name, process.platform)) ?? live;
+	return ompOtelEnvFileValues.get(foldEnvName(name)) ?? live;
 }
 
 /**
@@ -397,18 +397,12 @@ for (const file of [projectEnv, agentEnv, piEnv, homeEnv]) {
 // (absent, or a launcher value such as `""` that dotenv overwrote), else the user's own `.env` value
 // the project's shadowed. Captured now: those values stay in `Bun.env` after the project directory
 // changes or the files are edited, and a filter that re-reads the files misses them.
-const foldEnvName = (name: string) => (process.platform === "win32" ? name.toUpperCase() : name);
 const launchDotenvValues: ReadonlyMap<string, { planted: string; trusted: string | undefined }> = (() => {
 	const values = new Map<string, { planted: string; trusted: string | undefined }>();
-	const real = (dir: string) => {
-		try {
-			return fs.realpathSync(dir);
-		} catch {
-			return path.resolve(dir);
-		}
-	};
-	const home = real(os.homedir());
-	const launchDirs = [...new Set([launchProjectDir, process.cwd()].map(real))].filter(dir => dir !== home);
+	const home = resolveEquivalentPath(os.homedir());
+	const launchDirs = [...new Set([launchProjectDir, process.cwd()].map(dir => resolveEquivalentPath(dir)))].filter(
+		dir => dir !== home,
+	);
 	// Names each launch dir's dotenv files define. Without a launch snapshot, the filter decides by value,
 	// which `${VAR}` expansion against a later-merged `.env` or a mode file it does not read can defeat:
 	// every such name is refused, at the cost of a shell export the project's files also name.
@@ -436,7 +430,10 @@ const launchDotenvValues: ReadonlyMap<string, { planted: string; trusted: string
 	const dirsPlanted = launch.some(entry =>
 		Object.keys(Bun.env).some(key => dirAffecting.test(key) && plantedIn(entry, key)),
 	);
-	const userDirs = new Set([home, ...(dirsPlanted ? [] : [getConfigRootDir(), getAgentDir()].map(real))]);
+	const userDirs = new Set([
+		home,
+		...(dirsPlanted ? [] : [getConfigRootDir(), getAgentDir()].map(dir => resolveEquivalentPath(dir))),
+	]);
 	const userValue = (key: string) =>
 		(dirsPlanted ? homeEnv[key] : agentEnv[key] || piEnv[key] || homeEnv[key]) || undefined;
 	for (const entry of launch) {
