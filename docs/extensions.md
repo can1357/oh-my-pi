@@ -33,7 +33,7 @@ Extensions can combine all of the following in one module:
 - slash commands (`pi.registerCommand(...)`)
 - keyboard shortcuts and flags
 - custom message rendering
-- session/message injection APIs (`sendMessage`, `sendUserMessage`, `appendEntry`)
+- session/message injection APIs (`sendMessage`, `sendUserMessage`, `appendEntry`), including running text as typed input
 
 Import host values from the package root, `@oh-my-pi/pi-coding-agent`, and UI from `@oh-my-pi/pi-tui` (nodes, JSX, signals). Both resolve to the host's own copy inside the omp binary. Deeper coding-agent paths also resolve, but they name internal files: when a file moves, a static import of it stops the whole extension from loading. `@oh-my-pi/pi-tui` is gone; an extension importing it does not load (see [Migrating from pi-tui](#migrating-from-pi-tui)). Besides the extension types and the theme service (`getThemeByName`, `onThemeChange`, …), the root exports these helpers:
 
@@ -407,6 +407,47 @@ and starts a turn when idle. The message is recorded with `attribution: "user"` 
 `attribution: "agent"`; use `"agent"` for text the extension generated or relayed
 from another agent.
 
+`expand: true` instead runs the text as if the user had typed it, and `deliverAs`
+then means what it means for typed input: how a submitted message queues while
+the agent is streaming (default steer, like Enter), with an idle session starting
+a turn either way. In order:
+
+- extension `input` handlers run first, as for typed input (see "External input
+  interception"), with `source: "extension"`; one that consumes the text, or leaves no
+  text and no images, sends nothing, and text or images it substitutes are what the
+  steps below dispatch;
+- `/skill:<name>` is submitted as the skill prompt, attributed as `attribution` says
+  (default `"user"`);
+- anything else goes through the prompt flow: extension and custom commands run
+  locally; plain text, templates, file slash commands and slash text that names no
+  command (such as `/nosuch` or a path like `/var/log/app.log`) submit a user message,
+  as typing them does.
+
+Every form resolves with how the text was handled, so a bridge that forwards a
+person's text can tell a command from a submitted prompt:
+
+| `handled` | Meaning |
+| --- | --- |
+| `"prompt"` | Submitted as a user message; it carries the caller's `tag`. |
+| `"command"` | Handled locally and submitted nothing: a command ran, an `input` handler consumed the text, or no text was left. |
+| `"skill"` | `/skill:<name>` was submitted as the skill prompt message, carrying the `tag`. |
+
+A message the session drops before the agent sees it still rejects with
+`PromptDroppedError`, whichever form sent it; nothing was submitted or persisted, so
+the caller may send it again.
+
+`tag` (with or without `expand`) is recorded on the message the call submits (the
+user message, or the skill prompt message), so it appears on that message's
+`message_start`/`message_end` events and in the session file, and a bridge can match
+the message to the input it forwarded. Tagged input waiting in the queue is never
+handed back as editable text, since the editor and RPC clients carry only text and
+the tag would be lost: it still shows as a queue chip, but Alt+Up steps over it and
+RPC `remove_queued_message` does not match it, so it stays queued and is delivered
+with its tag. When the person interrupts (Esc, or RPC `abort_and_restore_queue`), the
+abort records it in the transcript without starting a turn, tag included. A tagged
+message the session drops before it is queued is not put in the editor either: its
+caller learns of the drop from the rejection and owns the retry.
+
 Payloads passed to `pi.sendMessage` are normalized before delivery
 (`normalizeCustomMessagePayload` in `packages/coding-agent/src/session/transcript/messages.ts`,
 re-exported by `session/messages.ts`): non-object payloads are coerced to string
@@ -685,6 +726,7 @@ prompt-template expansion, and queue insertion:
 | --------------------------------------------------------------------------- | --------------- |
 | Main-session Enter or Ctrl+Enter                                            | `"interactive"` |
 | `prompt`, `steer`, `follow_up`, or `abort_and_prompt` in RPC or RPC UI mode | `"rpc"`         |
+| An extension's `pi.sendUserMessage(text, { expand: true })`, in any mode    | `"extension"`   |
 
 Handlers run in extension/registration order. Returned `text` and `images`
 replacements feed subsequent handlers; omitted fields preserve the current value,
@@ -695,7 +737,9 @@ handler through `sendUserMessage` or `sendMessage` is not discarded.
 
 This is an ingress event, not a user-role message event. Queue delivery and replay
 do not emit it again. Programmatic `sendUserMessage`/`sendMessage` calls and
-synthetic continuations do not automatically emit `input`. Main-session Enter's
+synthetic continuations do not automatically emit `input`; `sendUserMessage` with
+`expand` does, so a handler that forwards input through it sees that call again with
+`source: "extension"`. Main-session Enter's
 `.`/`c` continuation shortcuts retain their synthetic path. Focused-subagent
 input retains its chat-only routing and does not invoke main-session input hooks.
 Print and ACP input are outside this interception contract.

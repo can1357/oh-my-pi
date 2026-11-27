@@ -26,7 +26,7 @@ import { getExtensionNameFromPath } from "../../discovery/helpers";
 import type { ExecOptions } from "../../exec/exec";
 import { execCommand } from "../../exec/exec";
 import { getCodingAgentApi } from "../host-api";
-import type { SendUserMessageOptions } from "../../session/agent-session";
+import type { SendUserMessageOptions, SendUserMessageResult } from "../../session/agent-session";
 import type { CustomMessagePayload } from "../../session/messages";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
 import { isFilesystemSourcePath } from "../../tools/path-utils";
@@ -146,7 +146,7 @@ export class ExtensionRuntime implements IExtensionRuntime {
 		throw new ExtensionRuntimeNotInitializedError();
 	}
 
-	sendUserMessage(): Promise<void> {
+	sendUserMessage(): Promise<SendUserMessageResult> {
 		throw new ExtensionRuntimeNotInitializedError();
 	}
 
@@ -411,7 +411,10 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		this.runtime.sendMessage(message, options);
 	}
 
-	sendUserMessage(content: string | (TextContent | ImageContent)[], options?: SendUserMessageOptions): Promise<void> {
+	sendUserMessage(
+		content: string | (TextContent | ImageContent)[],
+		options?: SendUserMessageOptions,
+	): Promise<SendUserMessageResult> {
 		return this.runtime.sendUserMessage(content, options);
 	}
 

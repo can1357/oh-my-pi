@@ -1343,6 +1343,8 @@ export interface UserMessage {
 	historyRewriteAt?: number;
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
+	/** Caller correlation id of the input this message came from (an extension's `sendUserMessage` `tag`). Never sent to providers. */
+	tag?: string;
 	/** Provider-specific opaque payload used to reconstruct transport-native history. */
 	providerPayload?: ProviderPayload;
 	timestamp: number; // Unix timestamp in milliseconds

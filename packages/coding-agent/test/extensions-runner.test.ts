@@ -136,7 +136,7 @@ describe("ExtensionRunner", () => {
 		);
 		const actions = {
 			sendMessage: () => {},
-			sendUserMessage: async () => {},
+			sendUserMessage: async () => ({ handled: "prompt" as const }),
 			appendEntry: () => {},
 			setLabel: () => {},
 			getActiveTools: () => [],
@@ -187,7 +187,7 @@ describe("ExtensionRunner", () => {
 		runner.initialize(
 			{
 				sendMessage: () => {},
-				sendUserMessage: async () => {},
+				sendUserMessage: async () => ({ handled: "prompt" }),
 				appendEntry: () => {},
 				setLabel: () => {},
 				getActiveTools: () => [],
@@ -1028,7 +1028,7 @@ describe("ExtensionRunner", () => {
 			runner.initialize(
 				{
 					sendMessage: () => {},
-					sendUserMessage: async () => {},
+					sendUserMessage: async () => ({ handled: "prompt" }),
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],
@@ -1243,7 +1243,7 @@ describe("ExtensionRunner", () => {
 			runner.initialize(
 				{
 					sendMessage: () => {},
-					sendUserMessage: async () => {},
+					sendUserMessage: async () => ({ handled: "prompt" }),
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],
@@ -1498,7 +1498,7 @@ describe("ExtensionRunner", () => {
 			runner.initialize(
 				{
 					sendMessage: () => {},
-					sendUserMessage: async () => {},
+					sendUserMessage: async () => ({ handled: "prompt" }),
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],
@@ -1897,7 +1897,7 @@ describe("ExtensionRunner", () => {
 			runner.initialize(
 				{
 					sendMessage: () => {},
-					sendUserMessage: async () => {},
+					sendUserMessage: async () => ({ handled: "prompt" }),
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],
@@ -2670,7 +2670,7 @@ describe("ExtensionRunner", () => {
 			runner.initialize(
 				{
 					sendMessage: () => {},
-					sendUserMessage: async () => {},
+					sendUserMessage: async () => ({ handled: "prompt" }),
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],
@@ -2745,7 +2745,7 @@ describe("ExtensionRunner", () => {
 			runner.initialize(
 				{
 					sendMessage: () => {},
-					sendUserMessage: async () => {},
+					sendUserMessage: async () => ({ handled: "prompt" }),
 					appendEntry: (_customType, data) => {
 						snapshots.push(data);
 					},
@@ -2816,7 +2816,7 @@ describe("ExtensionRunner", () => {
 			runner.initialize(
 				{
 					sendMessage: () => {},
-					sendUserMessage: async () => {},
+					sendUserMessage: async () => ({ handled: "prompt" }),
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],
@@ -2878,7 +2878,7 @@ describe("ExtensionRunner", () => {
 			runner.initialize(
 				{
 					sendMessage: () => {},
-					sendUserMessage: async () => {},
+					sendUserMessage: async () => ({ handled: "prompt" }),
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],
@@ -3733,7 +3733,7 @@ describe("ExtensionRunner", () => {
 			runner.initialize(
 				{
 					sendMessage: () => {},
-					sendUserMessage: () => {},
+					sendUserMessage: async () => ({ handled: "prompt" }),
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],
@@ -4846,7 +4846,7 @@ describe("ExtensionRunner", () => {
 			runner.initialize(
 				{
 					sendMessage: () => {},
-					sendUserMessage: async () => {},
+					sendUserMessage: async () => ({ handled: "prompt" }),
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],
@@ -4921,7 +4921,7 @@ describe("ExtensionRunner", () => {
 			runner.initialize(
 				{
 					sendMessage: () => {},
-					sendUserMessage: async () => {},
+					sendUserMessage: async () => ({ handled: "prompt" }),
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],
@@ -5011,7 +5011,7 @@ describe("ExtensionRunner", () => {
 			runner.initialize(
 				{
 					sendMessage: () => {},
-					sendUserMessage: async () => {},
+					sendUserMessage: async () => ({ handled: "prompt" }),
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],

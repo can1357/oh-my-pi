@@ -443,6 +443,8 @@ export interface CustomMessageEntry<T = unknown> extends SessionEntryBase {
 	attribution?: MessageAttribution;
 	/** Rendered and saved, never sent to the model (like `!!` bash rows). */
 	excludeFromContext?: boolean;
+	/** Caller correlation id of the input this message came from (an extension's `sendUserMessage` `tag`). */
+	tag?: string;
 }
 
 /** Session entry - has id/parentId for tree structure (returned by "read" methods in SessionManager) */

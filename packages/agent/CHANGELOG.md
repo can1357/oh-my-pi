@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `CustomMessage.tag`, a caller correlation id that stays with the message ([#18359](https://github.com/can1357/oh-my-pi/pull/18359) by [@sjawhar](https://github.com/sjawhar))
+
 ### Fixed
 
 - Reduced the size of authentication-gateway requests by preventing tool definitions from including internal host state.

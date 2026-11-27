@@ -59,6 +59,7 @@ import type { AgentSessionEvent } from "../session/agent-session-events";
 import type { AgentViewToolSchema } from "../session/agent-session-handle";
 import {
 	isHiddenUserCompanion,
+	isRestorableQueuedMessage,
 	isUserAuthoredQueuedMessage,
 	toRestoredQueuedMessage,
 } from "../session/queued-messages";
@@ -116,7 +117,10 @@ function publishedQueuedMessageId(message: AgentMessage): string | undefined {
 	return typeof id === "string" ? id : undefined;
 }
 
-/** `message` as a restorable queue entry, tagging it with an id on first publication. */
+/**
+ * `message` as a queue entry, tagging it with an id on first publication. Input an extension
+ * sent with a `tag` publishes as claimed: main never restores it to its composer.
+ */
 function queuedEntry(message: AgentMessage): SessionQueuedEntry {
 	let id = publishedQueuedMessageId(message);
 	if (id === undefined) {
@@ -126,7 +130,7 @@ function queuedEntry(message: AgentMessage): SessionQueuedEntry {
 	return {
 		id,
 		message: toRestoredQueuedMessage(message),
-		claimed: Reflect.get(message, kQueuedMessageClaimed) === true,
+		claimed: Reflect.get(message, kQueuedMessageClaimed) === true || !isRestorableQueuedMessage(message),
 	};
 }
 

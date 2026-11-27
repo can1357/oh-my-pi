@@ -503,6 +503,8 @@ export interface PromptOptions {
 	userInitiated?: boolean;
 	/** Explicit billing/initiator attribution. */
 	attribution?: MessageAttribution;
+	/** Caller correlation id recorded as `tag` on the user message this prompt submits (see {@link SendUserMessageOptions.tag}). */
+	tag?: string;
 	/** Skip pre-send compaction checks for this prompt. */
 	skipCompactionCheck?: boolean;
 	/** Delegator's open-endedness description (task tool `solutionSpace`); replaces the prompt as `auto` thinking classification input. */
@@ -552,6 +554,9 @@ export interface DroppedPrompt {
 	reason?: string;
 	/** {@link PromptOptions.followUps} that were never sent, in order. */
 	followUps?: string[];
+	/** The prompt's {@link PromptOptions.tag}. Tagged input belongs to its sender, which learns of the drop
+	 *  from its own call and owns the retry, so a host must not hand it back as editable text. */
+	tag?: string;
 }
 
 /** Options for AgentSession.followUp(). */
@@ -576,10 +581,33 @@ export interface SteerOptions {
 
 /** Options for AgentSession.sendUserMessage(). */
 export interface SendUserMessageOptions {
-	/** Queue behavior; omitted starts a turn when idle and steers while streaming. */
+	/** Queue behavior; omitted starts a turn when idle and steers while streaming.
+	 *  With {@link expand} this is instead the submitted prompt's streaming behavior, as for typed
+	 *  input: an idle session starts a turn whichever value is given. */
 	deliverAs?: "steer" | "followUp" | "aside";
 	/** Explicit billing/initiator attribution. */
 	attribution?: MessageAttribution;
+	/** Run the text as typed input rather than sending it verbatim: extension `input` handlers see
+	 *  it first (`source: "extension"`), then `/skill:<name>`, extension and custom commands, file
+	 *  slash commands and prompt templates are handled as they are for typed input, and anything
+	 *  left is submitted as a user message. */
+	expand?: boolean;
+	/** Caller correlation id recorded as `tag` on the message this call submits (the user message,
+	 *  or the skill prompt message), so a bridge can match that message to the input it forwarded. */
+	tag?: string;
+}
+
+/**
+ * How {@link AgentSession.sendUserMessage} handled its text. A message the session drops before
+ * the agent sees it rejects the call with `PromptDroppedError` instead.
+ * - `prompt`: submitted as a user message (plain text, a prompt template, a file slash command, or
+ *   slash text that names no command); the message carries the caller's `tag`.
+ * - `command`: handled locally and submitted nothing itself: an extension or custom command ran, an
+ *   extension `input` handler consumed the text, or no text was left to send.
+ * - `skill`: `/skill:<name>` was submitted as the user's skill prompt message, carrying the `tag`.
+ */
+export interface SendUserMessageResult {
+	handled: "prompt" | "command" | "skill";
 }
 
 /** Result from cycleModel(). */

@@ -46,7 +46,7 @@ async function loadRunner(
 	runner.initialize(
 		{
 			sendMessage: noop,
-			sendUserMessage: async () => {},
+			sendUserMessage: async () => ({ handled: "prompt" }),
 			appendEntry: noop,
 			setLabel: noop,
 			getActiveTools: () => [],

@@ -72,6 +72,29 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 	} = options;
 	const shutdown = onShutdown ?? (() => {});
 
+	/**
+	 * Report an extension send's turn ownership once its answer says whether it started an agent
+	 * turn. A send that starts none (idle steer superseded by a concurrent turn, plan-mode fold,
+	 * deferred ACP turn, a command expanded input ran) is a normal outcome, not a process error.
+	 * `trackAgentInvokingMessage` only attaches a handler while a prompt scope is active
+	 * (RpcExtensionUserMessageTracker); outside that window this rejection would otherwise be
+	 * unobserved and fatal the process, so it is marked handled up front.
+	 */
+	const claimTurnWhen = <T>(sendTask: Promise<T>, started: (answer: T) => boolean): void => {
+		const invokingTask = sendTask.then(answer => {
+			if (!started(answer)) throw new Error("send did not invoke the agent");
+		});
+		invokingTask.catch(() => {});
+		if (trackAgentInvokingMessage) {
+			trackAgentInvokingMessage(invokingTask);
+		} else {
+			invokingTask.then(
+				() => markAgentInvokingMessage?.(),
+				() => {},
+			);
+		}
+	};
+
 	runner.initialize(
 		// ExtensionActions
 		{
@@ -83,23 +106,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 					// (streaming queue, idle plan-mode fold, deferred ACP turn) — only a `true`
 					// result should mark this send as agent-invoking, so downstream trackers (RPC's
 					// hasAgentMessageTask) don't wait on agent events that will never arrive.
-					const invokingTask = sendTask.then(started => {
-						if (!started) throw new Error("send did not invoke the agent");
-					});
-					// A send that starts no turn (idle steer superseded by a concurrent turn,
-					// plan-mode fold, deferred ACP turn) is a normal outcome, not a process error.
-					// `trackAgentInvokingMessage` only attaches a handler while a prompt scope is
-					// active (RpcExtensionUserMessageTracker); outside that window this rejection
-					// would otherwise be unobserved and fatal the process. Mark it handled up front.
-					invokingTask.catch(() => {});
-					if (trackAgentInvokingMessage) {
-						trackAgentInvokingMessage(invokingTask);
-					} else {
-						invokingTask.then(
-							() => markAgentInvokingMessage?.(),
-							() => {},
-						);
-					}
+					claimTurnWhen(sendTask, started => started);
 				}
 				sendTask.catch(e => {
 					reportSendError("extension_send", toError(e));
@@ -108,11 +115,9 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 			sendUserMessage: (content, sendOptions) => {
 				const sendTask = session.sendUserMessage(content, sendOptions);
 				trackExtensionSend?.(sendTask);
-				if (trackAgentInvokingMessage) {
-					trackAgentInvokingMessage(sendTask);
-				} else {
-					markAgentInvokingMessage?.();
-				}
+				// Expanded input can be handled locally without submitting anything (a command ran,
+				// an `input` handler consumed the text); a drop rejects.
+				claimTurnWhen(sendTask, result => result.handled !== "command");
 				sendTask.catch(e => {
 					reportSendError("extension_send_user", toError(e));
 				});

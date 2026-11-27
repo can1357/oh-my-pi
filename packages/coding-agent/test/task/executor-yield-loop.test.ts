@@ -89,7 +89,7 @@ function createMockSession(
 			return true;
 		},
 		getLastAssistantMessage: () => messages[messages.length - 1] as never,
-		sendUserMessage: async () => {},
+		sendUserMessage: async () => ({ handled: "prompt" }),
 		get isRunActive() {
 			return asyncPending.value;
 		},

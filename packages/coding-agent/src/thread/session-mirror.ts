@@ -138,7 +138,8 @@ export interface SessionRestorableQueue {
 export interface SessionQueuedEntry {
 	readonly id: string;
 	readonly message: RestoredQueuedMessage;
-	/** Already claimed for delivery (its batch is being prepared); not restorable. */
+	/** Already claimed for delivery (its batch is being prepared), or input an extension sent with a
+	 *  `tag` (`isRestorableQueuedMessage`); not restorable. */
 	readonly claimed: boolean;
 }
 

@@ -428,7 +428,7 @@ describe("reportPromptResult", () => {
 			{
 				name: "sendUserMessage that succeeds",
 				send: actions => actions.sendUserMessage("start work"),
-				session: { sendUserMessage: async () => {} },
+				session: { sendUserMessage: async () => ({ handled: "prompt" }) },
 				startsTurn: true,
 			},
 			{

@@ -3886,6 +3886,7 @@ export class SessionManager {
 	 * @param attribution Who initiated this message for billing/attribution semantics
 	 * @param timestamp The message's own timestamp; defaults to now
 	 * @param excludeFromContext Render and save the message but never send it to the model
+	 * @param tag Caller correlation id of the input the message came from
 	 */
 	appendCustomMessageEntry<T = unknown>(
 		customType: string | undefined,
@@ -3895,6 +3896,7 @@ export class SessionManager {
 		attribution: MessageAttribution | undefined = "agent",
 		timestamp?: number,
 		excludeFromContext?: boolean,
+		tag?: string,
 	): string {
 		const normalized = normalizeCustomMessagePayload<T>({
 			customType,
@@ -3914,6 +3916,7 @@ export class SessionManager {
 			details: stripInternalDetailsFields(normalized.details),
 			attribution: normalized.attribution,
 			excludeFromContext: normalized.excludeFromContext,
+			...(tag !== undefined && { tag }),
 			...fresh,
 			// Prefer the initiating message's own timestamp: without it the entry
 			// records the emission time, which on rebuild excludes provider

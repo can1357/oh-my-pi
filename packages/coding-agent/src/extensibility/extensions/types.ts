@@ -101,7 +101,7 @@ import type * as PiCodingAgent from "../../index";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
 import type { LoopLimitConfig } from "../../modes/loop-limit";
 import type { MemoryRuntimeContext } from "../../memory-backend";
-import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/agent-session";
+import type { AsyncJobSnapshot, SendUserMessageOptions, SendUserMessageResult } from "../../session/agent-session";
 import type { EphemeralTurnOptions, EphemeralTurnResult } from "../../session/agent-session-types";
 import type { CompactMode } from "../../session/compact-modes";
 import type { CustomMessagePayload } from "../../session/messages";
@@ -1457,7 +1457,10 @@ export interface UserPythonEvent {
 // Input Events
 // ============================================================================
 
-/** Fired when the user submits input (interactive mode only). */
+/**
+ * Fired when input is submitted: typed into the interactive TUI (`interactive`), sent as an RPC
+ * prompt (`rpc`), or run by an extension through `sendUserMessage` with `expand` (`extension`).
+ */
 export interface InputEvent {
 	type: "input";
 	text: string;
@@ -2241,8 +2244,18 @@ export interface ExtensionAPI {
 	/** Send a user prompt: idle starts a turn; streaming queues as steer unless deliverAs is set.
 	 *  `deliverAs: "aside"` injects at the next step boundary without interrupting the in-flight tool
 	 *  batch while streaming, except that it ends a running interruptible `wait`; idle still starts a turn.
-	 *  Rejects with `PromptDroppedError` if the message was not admitted (e.g. abort or cost cap). */
-	sendUserMessage(content: string | (TextContent | ImageContent)[], options?: SendUserMessageOptions): Promise<void>;
+	 *  Rejects with `PromptDroppedError` if the message was not admitted (e.g. abort or cost cap).
+	 *
+	 *  `expand` instead runs the text as typed input: extension `input` handlers see it first (with
+	 *  `source: "extension"`), then `/skill:<name>`, extension and custom commands, file slash commands
+	 *  and prompt templates are handled as commands, and anything left is submitted as a user message;
+	 *  `deliverAs` is then the submitted prompt's streaming behavior, as for typed input. `tag` is
+	 *  recorded on the message the call submits, so a caller can match it on `message_start`/`message_end`.
+	 *  Resolves with how the text was handled; see {@link SendUserMessageResult}. */
+	sendUserMessage(
+		content: string | (TextContent | ImageContent)[],
+		options?: SendUserMessageOptions,
+	): Promise<SendUserMessageResult>;
 
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
 	appendEntry<T = unknown>(customType: string, data?: T): void;
@@ -2500,11 +2513,12 @@ export type SendMessageHandler = <T = unknown>(
 ) => void;
 
 /** `deliverAs: "aside"` injects at the next step boundary without interrupting the in-flight tool
- *  batch while streaming, except that it ends a running interruptible `wait`; idle still starts a turn. */
+ *  batch while streaming, except that it ends a running interruptible `wait`; idle still starts a turn.
+ *  See {@link ExtensionAPI.sendUserMessage} for `expand` and `tag`. */
 export type SendUserMessageHandler = (
 	content: string | (TextContent | ImageContent)[],
 	options?: SendUserMessageOptions,
-) => Promise<void>;
+) => Promise<SendUserMessageResult>;
 
 export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => void;
 

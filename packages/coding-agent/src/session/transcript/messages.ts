@@ -261,6 +261,8 @@ export interface CustomMessage<T = unknown> {
 	attribution?: MessageAttribution;
 	/** Rendered and saved, never sent to the model (like `!!` bash rows). */
 	excludeFromContext?: boolean;
+	/** Caller correlation id of the input this message came from (an extension's `sendUserMessage` `tag`). */
+	tag?: string;
 	timestamp: number;
 }
 

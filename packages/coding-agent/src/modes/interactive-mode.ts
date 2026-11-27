@@ -3436,7 +3436,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * usage preflight denial or the cost cap raced turn setup). The message was
 	 * never persisted, so the tree/branch selectors cannot offer it — remove the
 	 * optimistic transcript row and put the typed text back in the editor for editing.
-	 * A prompt with unsent follow-ups comes back as one `=>` list.
+	 * A prompt with unsent follow-ups comes back as one `=>` list. Input an extension sent with a
+	 * `tag` stays out of the editor: its sender learns of the drop from its own call and owns the
+	 * retry, as the queue never hands tagged input back either (see isRestorableQueuedMessage).
 	 */
 	restoreDroppedPrompt(prompt: DroppedPrompt): void {
 		this.clearOptimisticUserMessage();
@@ -3448,6 +3450,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.#btwController.reclaimDroppedPrompt(prompt)) return;
 		// The rebuild drops transient notices, including the one that refused this prompt.
 		if (prompt.reason) this.showError(prompt.reason);
+		if (prompt.tag !== undefined) return;
 		// The drop arrives asynchronously (after the abort settles); never clobber
 		// a draft the user has already started typing in the meantime.
 		if (!this.composer.text().trim()) {

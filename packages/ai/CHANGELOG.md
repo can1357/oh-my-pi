@@ -7,6 +7,7 @@
 - Added xAI speech-to-text support, including use through the authentication gateway.
 - Added the `priority` service tier for Devin models, using the fast lane and corresponding fast pricing.
 - Added an `upstreamModel` option for mock provider responses so tests and integrations can report the model that actually served a request.
+- Added `UserMessage.tag`, a caller correlation id that stays with the message and is never sent to providers ([#18359](https://github.com/can1357/oh-my-pi/pull/18359) by [@sjawhar](https://github.com/sjawhar))
 
 ### Changed
 

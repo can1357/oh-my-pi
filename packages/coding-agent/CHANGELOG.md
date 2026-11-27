@@ -6,6 +6,7 @@
 
 - The `providers.fetch` configuration values `native`, `trafilatura`, and `lynx` have been replaced by the single `local` value for the in-process reader engine.
 - Removed unused `parse*Args` and `print*Help` exports from the CLI configuration, grep, plugin, setup, shell, web-search, and update modules.
+- `pi.sendUserMessage` (and `ExtensionActions.sendUserMessage`) resolves with a `SendUserMessageResult`; a host that builds its own extension actions must return one ([#18359](https://github.com/can1357/oh-my-pi/pull/18359) by [@sjawhar](https://github.com/sjawhar))
 
 ### Added
 
@@ -19,6 +20,8 @@
 - Included `tool_approvals` in `omp gc` session statistics and purge handling.
 - Added `local/parakeet-tdt-0.6b-v2`, the most accurate local English dictation model.
 - Added Codex's 17 new live voices to `live.voice`: `aube`, `bubbie`, `haetsal`, `hanul`, `himari`, `leher`, `marin`, `miko`, `neer`, `porto`, `rindo`, `rio`, `rivage`, `selva`, `sonna`, `tinta`, and `viola`.
+- Extensions can run text as if the user typed it: `pi.sendUserMessage(text, { expand: true })` goes through `input` handlers, `/skill:<name>`, extension and custom commands, file slash commands and prompt templates, and resolves with whether a prompt, a command or a skill handled it ([#18359](https://github.com/can1357/oh-my-pi/pull/18359) by [@sjawhar](https://github.com/sjawhar))
+- `pi.sendUserMessage` takes a `tag` that is recorded on the message it submits and in the session file; queued tagged input is never handed back as editor text by Esc, Alt+Up or RPC `remove_queued_message`, so it is delivered or recorded with its tag ([#18359](https://github.com/can1357/oh-my-pi/pull/18359) by [@sjawhar](https://github.com/sjawhar))
 
 ### Changed
 
@@ -37,6 +40,7 @@
 
 ### Fixed
 
+- A message `pi.sendUserMessage` queues while the session is disposed now rejects with `PromptDroppedError` instead of resolving, and a queued skill prompt the session discards no longer reports as dispatched ([#18359](https://github.com/can1357/oh-my-pi/pull/18359) by [@sjawhar](https://github.com/sjawhar))
 - `edit` on `ssh://` files no longer contacts the host before the call is approved, and refuses to overwrite a file that changed on the host after the edit fetched it. Writable RPC host URIs get the same check as a read just before the write, so a change landing between that read and the write is not caught ([#16631](https://github.com/can1357/oh-my-pi/pull/16631) by [@lHyperionl](https://github.com/lHyperionl))
 - `edit` refuses `ssh://` symbolic links instead of replacing them with a regular file, and refuses creating, deleting or moving `ssh://` files before its preview ([#16631](https://github.com/can1357/oh-my-pi/pull/16631) by [@lHyperionl](https://github.com/lHyperionl))
 - `read` and `edit` give `ssh://host/~/x` and its absolute spelling one tag, and `read` shows `ssh://` notebooks as cells like local ones ([#16631](https://github.com/can1357/oh-my-pi/pull/16631) by [@lHyperionl](https://github.com/lHyperionl))

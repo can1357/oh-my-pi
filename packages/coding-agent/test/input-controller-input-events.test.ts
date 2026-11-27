@@ -30,6 +30,7 @@ async function createHarness(factory: ExtensionFactory) {
 	const generatedMessages: Array<string | (TextContent | ImageContent)[]> = [];
 	runtime.sendUserMessage = async (content?: string | (TextContent | ImageContent)[]) => {
 		if (content !== undefined) generatedMessages.push(content);
+		return { handled: "prompt" };
 	};
 	const sessionManager = SessionManager.inMemory(process.cwd());
 	const blobs = new Map<string, Buffer>();
