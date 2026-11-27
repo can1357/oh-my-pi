@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Renamed the OpenAI `promptCache.breakpoint` value `latest-stable-message` to `message-boundaries`; explicit mode now marks every boundary a later request repeats instead of a single block
+
 ### Added
 
 - Added encryption at rest to `SqliteAuthCredentialStore`: with `open(path, { encrypt: true })` (or `unlock({ encrypt: true })`) new credential rows are sealed with AES-256-GCM under a master key kept in the OS credential vault, each with its own salt; `encrypt: "auto"` keeps a store's current mode and encrypts a fresh one only when the vault answers without prompting; `openLocalAuthCredentialStore()` opens this machine's `agent.db` with `"auto"` unless `auth.encrypt`/`OMP_AUTH_ENCRYPT` forces it
@@ -37,7 +41,7 @@
 
 ### Changed
 
-- Explicit OpenAI prompt caching (`promptCache: { mode: "explicit" }`) now marks the leading instructions, every user message, and each run of tool outputs, so each request reads the prefix the previous one wrote; the `breakpoint` value `latest-stable-message` is renamed `message-boundaries`, and nested gateway markers are rejected ([#12880](https://github.com/can1357/oh-my-pi/pull/12880) by [@ZenAlexa](https://github.com/ZenAlexa)).
+- Explicit OpenAI prompt caching (`promptCache: { mode: "explicit" }`) now marks the leading instructions, every user message, and each run of tool outputs, so each request reads the prefix the previous one wrote, and nested gateway markers are rejected ([#12880](https://github.com/can1357/oh-my-pi/pull/12880) by [@ZenAlexa](https://github.com/ZenAlexa)).
 - Expanded xAI text-to-speech support with configurable playback speed, PCM output, and inputs up to 60,000 characters.
 - Devin sessions now automatically switch to another stored login when the active login has exhausted its weekly quota and has no on-demand balance.
 - The tool-call loop guard now also detects consecutive tool calls whose arguments drift only in numbers, such as `echo merge-live-3` after `echo merge-live-2`, when the assistant's text repeats. Progress-bearing arguments (`grep`'s `skip`, `offset`, cursor keys) and digits inside path-like tokens of command strings keep their values. Legitimate pagination and sweeps over distinct files are not interrupted ([#13426](https://github.com/can1357/oh-my-pi/pull/13426) by [@nick-maderight](https://github.com/nick-maderight))
