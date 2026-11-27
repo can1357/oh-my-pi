@@ -34,6 +34,7 @@
 
 ### Changed
 
+- Large provider catalogs use less disk space and load faster after their next refresh; existing offline snapshots remain usable.
 - Seeded models now remain available even when their provider applies model exclusions.
 - Replaced the local `parakeet-tdt-0.6b-v3` dictation seed with `fluid-speech-pro`, now the default dictation model, and added `parakeet-tdt-0.6b-v2` (English).
 - Devin models now expose their fast lane through `/fast` instead of listing separate `-fast` model entries.
