@@ -3,7 +3,11 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import { bubbleEvent } from "@oh-my-pi/pi-tui/dispatch";
 import type { TestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
 import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
-import type { ExtensionAskDialogQuestion, ExtensionUIContext } from "../../../src/extensibility/extensions";
+import type {
+	ExtensionAskDialogQuestion,
+	ExtensionOverlayHandle,
+	ExtensionUIContext,
+} from "../../../src/extensibility/extensions";
 import type { ExtensionRows } from "../../../src/extensibility/extensions/render-types";
 import { isSettingsInitialized, Settings } from "../../../src/config/settings";
 import { ExtensionUiController } from "../../../src/modes/controllers/extension-ui-controller";
@@ -469,10 +473,14 @@ describe("ExtensionUiController custom view", () => {
 		await flushMicrotasks();
 		expect(harness.ctx.shell.overlays.open()).toBe(true);
 		expect(onHandle).toHaveBeenCalledTimes(1);
-		const handle = onHandle.mock.calls[0]![0] as { closed: boolean; close(): void };
+		const handle = onHandle.mock.calls[0]![0] as ExtensionOverlayHandle;
 		expect(handle.closed).toBe(false);
+		expect(handle.isFocused()).toBe(true);
+		harness.ctx.shell.focus(harness.composer.field);
+		expect(handle.isFocused()).toBe(false);
 		handle.close();
 		expect(handle.closed).toBe(true);
+		expect(handle.isFocused()).toBe(false);
 		expect(harness.ctx.shell.overlays.open()).toBe(false);
 	});
 

@@ -1077,7 +1077,8 @@ to remove a widget; setting a key again replaces it in place.
 calls `done`: one root node (it takes focus, so handle keys with its `onKey`) or a
 rows object (keys and pastes arrive at its `handleInput` as raw input).
 `{ overlay: true }` draws it over the transcript, `fullscreen: true` on the
-alternate screen; `onHandle` receives `{ closed, close() }`. The factory's `ui`
+alternate screen; `onHandle` receives `{ closed, close(), isFocused() }`
+(`isFocused()` is true while keyboard focus is on the overlay or a node inside it). The factory's `ui`
 argument offers `requestRender()` (repaint rows objects), `size()` and
 `suspend(run)` (hand the terminal to an external editor while `run` settles).
 

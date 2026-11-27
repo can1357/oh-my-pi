@@ -57,7 +57,7 @@ import { type ApprovalChoice, ApprovalDialog } from "../../ui/overlays/panels/ap
 import { AskDialog, AskDialogModel } from "../../ui/overlays/panels/ask-dialog";
 import { HookEditor, type HookEditorHandle, HookInput } from "../../ui/overlays/panels/hook-dialogs";
 import { HookSelector } from "../../ui/overlays/pickers/hook-selector";
-import type { OverlayHandle, OverlayOptions } from "../../ui/shell";
+import { type OverlayHandle, type OverlayOptions, within } from "../../ui/shell";
 import { findNode } from "../../ui/styles/panels/common";
 import { registerComposerShape } from "../../ui/styles/composer/shapes";
 import { getAvailableThemesWithPaths, getThemeByName, setTheme } from "../../ui/theme/service";
@@ -1664,6 +1664,11 @@ export class ExtensionUiController {
 							return handle?.closed ?? true;
 						},
 						close: () => handle?.close(),
+						isFocused: () => {
+							if (!handle || handle.closed) return false;
+							const holder = this.ctx.shell.focused();
+							return holder !== null && (holder === handle.node || within(holder, handle.node));
+						},
 					});
 					return;
 				}

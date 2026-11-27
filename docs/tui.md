@@ -123,7 +123,7 @@ pi-tui's terminal widgets (`picker`, `prefs`, `menu`, `button`/`buttons`, `edito
 ## Focus, overlays, and cursor
 
 - The surface tracks one focused node; both backends draw the caret/focus ring there and route keys to it.
-- `ctx.ui.custom(factory)` without options shows the view in place of the composer; `{ overlay: true }` draws it over the transcript, `fullscreen: true` on the alternate screen. `onHandle` receives `{ closed, close() }`.
+- `ctx.ui.custom(factory)` without options shows the view in place of the composer; `{ overlay: true }` draws it over the transcript, `fullscreen: true` on the alternate screen. `onHandle` receives `{ closed, close(), isFocused() }`; `isFocused()` reports whether keyboard focus is on the overlay or a node inside it.
 - An `editor`/`input` node places the terminal cursor itself; rows objects have no cursor.
 
 ### Built-in full-screen surfaces
