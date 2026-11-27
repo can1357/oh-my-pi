@@ -1,37 +1,41 @@
 # napi (vendored)
 
 Vendored copy of [napi-rs](https://github.com/napi-rs/napi-rs)' `napi` crate
-3.14.2, the crates.io release. The workspace `Cargo.toml` routes the registry
+3.16.3, the crates.io release. The workspace `Cargo.toml` routes the registry
 dependency here through `[patch.crates-io]`. MIT licensed; see `LICENSE`.
 
 ## Local changes
 
-- `src/bindgen_runtime/module_register.rs`, `src/error.rs`: release a
-  superseded env's per-thread handles when a new env registers on the same OS
-  thread before the old one was torn down. The exact diff against the release
-  is `patches/0001-release-superseded-env-handles.patch`.
+- `src/bindgen_runtime/env_registration.rs`,
+  `src/bindgen_runtime/module_register.rs`: release a superseded env's
+  registration record when a new env registers on the same OS thread before
+  the old one was torn down. The exact diff against the release is
+  `patches/0001-release-superseded-env-handles.patch`.
 
-  napi-rs keeps three per-thread slots keyed by the registering env: the class
-  constructor references (`REGISTERED_CLASSES`, refcount 1), the custom-GC
-  threadsafe function (`CURRENT_CUSTOM_GC_HANDLE`), and the cached
-  `Reflect`/`Reflect.getOwnPropertyDescriptor` pair (`REFLECT_INTRINSICS`).
-  Each assumes one env per OS thread, so a re-registration overwrites the
-  previous entry on the premise that its env is already gone. `bun test
-  --isolate` (implied by `--parallel`) breaks that premise: every test file
-  gets a fresh global object and `napi_env` on the same worker thread, and the
-  previous env is never torn down (still so in Bun 1.4.3, which also skips the
-  teardown at the end of a run). The overwritten strong references then pin
-  every earlier file's realm, global object and entire module graph, for the
-  life of the worker. In `packages/coding-agent` that is ~15 MB of JS heap per
-  test file, so a `bun test --parallel=8` worker grows to ~6 GB.
+  napi-rs keeps one per-thread registration record per env
+  (`ENV_REGISTRATIONS`), holding strong references into that env: the class
+  constructors, the custom-GC threadsafe function and its sentinel, the cached
+  `Reflect`/`Reflect.getOwnPropertyDescriptor` holder, and the `AsyncTask`
+  promise functions. A record is only dropped by its env's cleanup hook, on the
+  premise that a host never retires a realm on a reused thread without tearing
+  its env down. `bun test --isolate` (implied by `--parallel`) breaks that
+  premise: every test file gets a fresh global object and `napi_env` on the
+  same worker thread, and the previous env is never torn down (still so in Bun
+  1.4.3, which also skips the teardown at the end of a run). The records' strong
+  references then pin every earlier file's realm, global object and entire
+  module graph, for the life of the worker. In `packages/coding-agent` that is
+  ~15 MB of JS heap per test file, so a `bun test --parallel=8` worker grows to
+  ~6 GB. Upstream documents this as the host's problem (`env_registration.rs`
+  module docs), so the patch is still needed.
 
-  The patch adds a per-thread `LIVE_ENV` slot that an env-cleanup hook clears
-  at teardown. A registration that still finds a different env there has
-  proof that env is alive, and `release_superseded_env` deletes its
-  constructor references, marks its custom-GC handle aborted and releases the
-  threadsafe function, and deletes its cached `Reflect` holder, all through
-  that still-valid env. Under Node an env on a thread is always torn down
-  (clearing the slot) before another registers, so the new path never runs.
+  The patch adds `release_superseded_envs`, called at the start of
+  `napi_register_module_v1`. A record of a different env that is still listed
+  proves that env is alive, so it is taken out of the list, the env is marked
+  torn down, and every reference it holds is deleted through that still-valid
+  env (the custom-GC sentinel's strong reference too, since its finalizer would
+  never run). Records of the registering env itself are kept. Under Node an env
+  on a thread is always torn down (removing its record) before another
+  registers, so the new path finds nothing there.
 - `src/bindgen_runtime/mod.rs`, `src/bindgen_runtime/js_values/arraybuffer.rs`:
   `set_external_release_hook` registers a callback that the external
   `Buffer`/typed-array GC finalizers run after freeing the Rust allocation.
@@ -47,7 +51,7 @@ dependency here through `[patch.crates-io]`. MIT licensed; see `LICENSE`.
   `Cargo.toml.orig`, `README.md` and VCS metadata are dropped; `BUILD.bazel`
   and `rustfmt.toml` are workspace wiring.
 
-Everything else is byte-identical to the 3.14.2 release.
+Everything else is byte-identical to the 3.16.3 release.
 
 ## Updating
 

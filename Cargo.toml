@@ -46,8 +46,9 @@ grep-searcher = { path = "crates/vendor/grep-searcher" }
 jaq-core = { path = "crates/vendor/jaq-core" }
 jaq-json = { path = "crates/vendor/jaq-json" }
 jaq-std = { path = "crates/vendor/jaq-std" }
-# napi 3.13.0 pins every `bun test --isolate` realm through per-thread handles
-# of never-torn-down envs; the vendored copy releases them (see its README.md).
+# napi (through 3.16.3) pins every `bun test --isolate` realm through the
+# per-thread records of never-torn-down envs; the vendored copy releases them
+# (see its README.md).
 napi = { path = "crates/vendor/napi" }
 # tree-sitter-go 0.25.0 (latest release) rejects Go 1.26 `new(expr)`; the
 # vendored copy carries the upstream grammar fix (see its README.md).
