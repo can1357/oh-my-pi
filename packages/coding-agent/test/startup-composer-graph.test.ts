@@ -66,11 +66,14 @@ describe("startup composer prepaint graph", () => {
 		expectGraphExcludes(await importedModules("src/cursor.ts"), [/coding-agent\/src\/(sdk|tools\/index)\.ts$/]);
 	});
 
-	it("keeps startup-composer prepaint decoupled from settings, model-registry, lsp, and mcp", async () => {
-		const modules = await importedModules("src/modes/startup-composer.ts");
+	it("keeps startup-composer and subagents dock decoupled from task/label and its runtime graph", async () => {
+		const startupModules = await importedModules("src/modes/startup-composer.ts");
+		expect(startupModules.some(module => module.endsWith("/src/modes/startup-composer.ts"))).toBe(true);
+		expectGraphExcludes(startupModules, [/coding-agent\/src\/task\/label\.ts$/]);
 
-		expect(modules.some(module => module.endsWith("/src/modes/startup-composer.ts"))).toBe(true);
-		expectGraphExcludes(modules, [
+		const subagentsModules = await importedModules("src/ui/dock/subagents.tsx");
+		expect(subagentsModules.some(module => module.endsWith("/src/ui/dock/subagents.tsx"))).toBe(true);
+		expectGraphExcludes(subagentsModules, [
 			/coding-agent\/src\/config\/settings\.ts$/,
 			/coding-agent\/src\/config\/model-registry\.ts$/,
 			/coding-agent\/src\/config\/model-resolver\.ts$/,
