@@ -221,7 +221,11 @@ impl Interp<'_> {
 		while !self.exit_hooks.is_empty() {
 			for hook in std::mem::take(&mut self.exit_hooks) { hook(self); }
 		}
-		self.flush_outputs();
+		// Output still buffered goes out now; with no reader left, SIGPIPE's
+		// default action ends the program, as it ends perl's own exit flush.
+		if self.flush_outputs() && let Err(Flow::Exit(status)) = self.raise_signal("PIPE", super::runtime::SIGPIPE) {
+			self.sv("main::?").replace(Value::Int(i64::from(status)));
+		}
 		for io in self.handles.iter().rev().filter_map(std::rc::Weak::upgrade) {
 			if let Ok(mut handle) = io.try_borrow_mut() && handle.is_open() { let _ = handle.close(); }
 		}

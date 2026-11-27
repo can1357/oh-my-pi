@@ -157,6 +157,23 @@ async fn run_case(case: &Case) -> Result<String, Box<dyn std::error::Error>> {
 	Ok(differences)
 }
 
+/// SIGPIPE's default action ends the program with status 141 and nothing
+/// more: a print loop into a pipe nobody reads stops (it used to spin
+/// forever), and so does output still buffered at exit. The corpus cannot
+/// hold these cases: its oracle dies of the signal itself.
+#[tokio::test]
+async fn sigpipe_default_action_ends_the_program() {
+	let cwd = tempfile::tempdir().unwrap();
+	for script in [
+		"pipe(R, W) or die; close R; select W; $| = 1; print 1 while 1;",
+		"pipe(R, W) or die; close R; print W 'buffered';",
+	] {
+		let (status, _, stderr) =
+			run_extra_bytes(&["perl", "-e", script], b"", cwd.path(), &[("OMP_PERL_FALLBACK", "0")]).await;
+		assert_eq!((status, String::from_utf8_lossy(&stderr)), (141, "".into()), "{script}");
+	}
+}
+
 #[tokio::test]
 async fn corpus() {
 	let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/perl/tests/corpus");

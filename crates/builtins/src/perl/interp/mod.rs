@@ -299,6 +299,9 @@ pub(in crate::perl) struct Interp<'h> {
 	compile_status: i32,
 	in_die: bool,
 	in_warn: bool,
+	/// A `SIGPIPE` handler runs: the signal is blocked, so its own failed
+	/// writes are plain errors ([`Interp::broken_pipe`]).
+	in_sigpipe: bool,
 	overloads: FxHashMap<Rc<str>, FxHashMap<Rc<str>, Value>>,
 	objects: indexmap::IndexMap<usize, Ref, rustc_hash::FxBuildHasher>,
 	destroying: FxHashSet<usize>,
