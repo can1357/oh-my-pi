@@ -111,7 +111,7 @@ impl Interp<'_> {
 
 	fn next_method(&mut self, invocant: Sv, class: &str, op: &str, mut args: Vec<Sv>, cx: Cx) -> PResult<Ret> {
 		let called_from = self.frames.iter().rev().find_map(|frame| {
-			let name = frame.info.sub.as_deref()?;
+			let name = frame.name();
 			let (package, sub) = name.rsplit_once("::")?;
 			(sub != "__ANON__").then(|| (Rc::<str>::from(package), Rc::<str>::from(sub)))
 		});

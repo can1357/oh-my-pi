@@ -7,6 +7,31 @@ const WHEN_CONTINUE: &str = "\0when continue";
 
 enum Loop<T> { Value(T), Next, Last, Redo }
 
+/// Program counter shared by ready statements and operations that can suspend.
+pub(super) struct Statements<'a> {
+	block: &'a Block,
+	cx: Cx,
+	ix: usize,
+	last: Option<usize>,
+	pub(super) result: Ret,
+}
+
+pub(super) enum Step { Done, Poll, Deferred }
+
+impl<'a> Statements<'a> {
+	pub(super) fn new(block: &'a Block, cx: Cx, ix: usize, result: Ret) -> Self {
+		let last = if cx == Cx::Void { None } else { block.stmts.iter().rposition(|stmt| !matches!(&stmt.kind,
+			StmtKind::Empty | StmtKind::Use(_) | StmtKind::Sub(_) | StmtKind::Phase(..) | StmtKind::Format
+			| StmtKind::Package(Package { block: None, .. }))) };
+		Self { block, cx, ix, last, result }
+	}
+	fn context(&self) -> Cx { if Some(self.ix) == self.last { self.cx } else { Cx::Void } }
+	fn advance(&mut self, ret: Ret) {
+		if Some(self.ix) == self.last { self.result = ret; }
+		self.ix += 1;
+	}
+}
+
 fn matches_label(target: &Option<Rc<str>>, label: Option<&str>) -> bool {
 	target.as_deref().is_none_or(|target| Some(target) == label)
 }
@@ -287,12 +312,7 @@ impl Interp<'_> {
 		unsafe { crate::deep::run(self.pop_scope()) };
 		self.package = package;
 		self.active_hints = hints;
-		if self.pending.is_none() && self.objects.is_empty() && self.tied_handles.is_empty() { return result; }
-		let cleanup = self.drain_destructors(false);
-		match (result, self.take_pending()) {
-			(Err(flow), _) | (Ok(_), Some(flow)) => Err(flow),
-			(Ok(value), None) => cleanup.map(|()| value),
-		}
+		self.finish_scope(result)
 	}
 
 	async fn scope_slots_async<T>(&mut self, f: impl AsyncFnOnce(&mut Self) -> PResult<T>) -> PResult<T> {
@@ -303,7 +323,15 @@ impl Interp<'_> {
 		self.pop_scope().await;
 		self.package = package;
 		self.active_hints = hints;
-		if self.pending.is_none() && self.objects.is_empty() && self.tied_handles.is_empty() { return result; }
+		self.finish_scope(result)
+	}
+
+	pub(super) fn scope_cleanup_needed(&self) -> bool {
+		self.pending.is_some() || !self.objects.is_empty() || !self.tied_handles.is_empty()
+	}
+
+	pub(super) fn finish_scope<T>(&mut self, result: PResult<T>) -> PResult<T> {
+		if !self.scope_cleanup_needed() { return result; }
 		let cleanup = self.drain_destructors(false);
 		match (result, self.take_pending()) {
 			(Err(flow), _) | (Ok(_), Some(flow)) => Err(flow),
@@ -316,34 +344,56 @@ impl Interp<'_> {
 		unsafe { crate::deep::run(self.run_statements_async(block, cx)) }
 	}
 
-	pub(super) async fn run_statements_async(&mut self, block: &Block, cx: Cx) -> PResult<Ret> {
-		self.run_statements_at(block, cx, 0, Ret::no_value(cx)).await
+	pub(super) fn run_statements_async<'a>(&'a mut self, block: &'a Block, cx: Cx) -> impl Future<Output = PResult<Ret>> + 'a {
+		self.run_statements_at(block, cx, 0, Ret::no_value(cx))
 	}
 
-	async fn run_statements_at(&mut self, block: &Block, cx: Cx, mut ix: usize, mut result: Ret) -> PResult<Ret> {
-		let statements = &block.stmts;
-		// In void context no statement's value is kept: skip locating the last executable one.
-		let last_executable = if cx == Cx::Void { None } else { statements.iter().rposition(|stmt| !matches!(&stmt.kind,
-			StmtKind::Empty | StmtKind::Use(_) | StmtKind::Sub(_) | StmtKind::Phase(..) | StmtKind::Format
-			| StmtKind::Package(Package { block: None, .. }))) };
-		while let Some(s) = statements.get(ix) {
-			self.statement_location(&s.location);
-			self.poll()?;
-			let scx = if Some(ix) == last_executable { cx } else { Cx::Void };
-			match self.run_statement(s, scx).await {
-				Err(Flow::Goto(GotoTarget::Label(label))) => {
-					let (position, value) = self.resume_label(block, label, cx).await?;
-					ix = position;
-					if let Some(v) = value { result = v; ix += 1; }
-					continue;
+	async fn run_statements_at(&mut self, block: &Block, cx: Cx, ix: usize, result: Ret) -> PResult<Ret> {
+		let mut cursor = Statements::new(block, cx, ix, result);
+		let step = self.run_ready(&mut cursor)?;
+		if matches!(step, Step::Done) { Ok(cursor.result) } else { self.resume_statements(cursor, step).await }
+	}
+
+	/// Advance only while the statement, including its checkpoint, cannot call
+	/// Perl. A miss identifies the next operation; completed statements never replay.
+	pub(super) fn run_ready(&mut self, cursor: &mut Statements<'_>) -> PResult<Step> {
+		if !self.quiet_statement() { return Ok(Step::Poll); }
+		self.run_quiet(cursor)
+	}
+
+	pub(super) fn run_quiet(&mut self, cursor: &mut Statements<'_>) -> PResult<Step> {
+		while let Some(stmt) = cursor.block.stmts.get(cursor.ix) {
+			self.statement_location(&stmt.location);
+			if self.is_cancelled() { return Err(Flow::Cancelled); }
+			let Some(ret) = self.ready_statement(stmt, cursor.context()) else { return Ok(Step::Deferred); };
+			cursor.advance(ret?);
+		}
+		Ok(Step::Done)
+	}
+
+	pub(super) async fn resume_statements(&mut self, mut cursor: Statements<'_>, mut step: Step) -> PResult<Ret> {
+		loop {
+			let result = match step {
+				Step::Done => return Ok(cursor.result),
+				Step::Deferred => self.deferred_statement(&cursor.block.stmts[cursor.ix], cursor.context()).await,
+				Step::Poll => {
+					let Some(stmt) = cursor.block.stmts.get(cursor.ix) else { return Ok(cursor.result); };
+					self.statement_location(&stmt.location);
+					self.poll()?;
+					self.run_statement(stmt, cursor.context()).await
 				}
-				Ok(value) if Some(ix) == last_executable => result = value,
-				Ok(_) => {}
+			};
+			match result {
+				Err(Flow::Goto(GotoTarget::Label(label))) => {
+					let (ix, value) = Box::pin(self.resume_label(cursor.block, label, cursor.cx)).await?;
+					cursor.ix = ix;
+					if let Some(v) = value { cursor.result = v; cursor.ix += 1; }
+				}
+				Ok(ret) => cursor.advance(ret),
 				Err(flow) => return Err(flow),
 			}
-			ix += 1;
+			step = self.run_ready(&mut cursor)?;
 		}
-		Ok(result)
 	}
 
 	async fn resume_label(&mut self, block: &Block, label: Rc<str>, cx: Cx) -> PResult<(usize, Option<Ret>)> {
@@ -471,16 +521,31 @@ impl Interp<'_> {
 	}
 
 	pub(super) async fn run_statement(&mut self, stmt: &Stmt, cx: Cx) -> PResult<Ret> {
+		if let Some(result) = self.ready_statement(stmt, cx) { result } else { self.deferred_statement(stmt, cx).await }
+	}
+
+	fn ready_statement(&mut self, stmt: &Stmt, cx: Cx) -> Option<PResult<Ret>> {
+		let StmtKind::Expr(e) = &stmt.kind else { return None; };
+		let result = match &e.kind {
+			ExprKind::Binary(Binary::Assign, lhs, rhs) => Ok(Ret::One(self.immediate_declaration(lhs, rhs, cx)?)),
+			ExprKind::Call(Call { target: CallTarget::Builtin(Builtin::Return, origin), args, .. })
+				if self.depth < 8188 && self.pending.is_none() && self.builtin_uses_core(Builtin::Return, *origin) => {
+				let &(context, false) = self.eval_contexts.last()? else { return None; };
+				let ret = match args { Some(e) => Ret::One(self.eval_immediate(e, context)?), None => Ret::no_value(context) };
+				Err(Flow::Return(ret))
+			}
+			_ => Ok(Ret::One(self.eval_immediate(e, cx)?)),
+		};
+		self.commit_declarations();
+		Some(result)
+	}
+
+	async fn deferred_statement(&mut self, stmt: &Stmt, cx: Cx) -> PResult<Ret> {
 		let at = self.depth;
 		let result = match &stmt.kind {
-			StmtKind::Expr(e) => match self.eval_immediate(e, cx) {
-				Some(v) => Ok(Ret::One(v)),
-				None => descend(at, Box::pin(self.eval_statement_expr(e, cx))).await,
-			},
+			StmtKind::Expr(e) => self.eval_deferred(e, cx, 2).await,
 			_ => descend(at, Box::pin(self.nested(async move |this| this.run_statement_inner(stmt, cx).await))).await,
 		};
-		// New my/state bindings enter scope after the statement, not after
-		// their assignment alone: `my $x = 1 and $x++` still sees the outer $x.
 		self.commit_declarations();
 		result
 	}
@@ -557,7 +622,8 @@ impl Interp<'_> {
 					_ => None,
 				});
 				let simple = match body.stmts.as_slice() {
-					[Stmt { kind: StmtKind::Expr(e), location, .. }] if continue_.is_none() && matches!(e.kind, ExprKind::Binary(..)) => Some((e, location)),
+					[Stmt { kind: StmtKind::Expr(e), location, .. }] if continue_.is_none()
+						&& matches!(&e.kind, ExprKind::Binary(_, a, b) if !matches!(a.kind, ExprKind::Call(_)) && !matches!(b.kind, ExprKind::Call(_))) => Some((e, location)),
 					_ => None,
 				};
 				if let (Some((_, name)), Some((e, loc)), ForeachItems::Range(range, _)) = (lexical, simple, &mut aliases) {

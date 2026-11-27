@@ -27,6 +27,14 @@ pub(super) struct Lexicals {
 	frame: usize,
 }
 
+fn bind_scalars(scope: &mut Scope, items: &[Expr], mut values: impl Iterator<Item = Value>) {
+	for item in items {
+		let id = (ungroup(item).cache.lexical.get() - 1) as usize;
+		let sv = scope.scalar(values.next().unwrap_or(Value::Undef));
+		scope.declarations.push((id, Slot::Scalar(sv)));
+	}
+}
+
 impl Lexicals {
 	#[inline]
 	fn operand(&self, sigil: Sigil, name: &str) -> Option<usize> {
@@ -553,7 +561,7 @@ impl Interp<'_> {
 	}
 
 	pub(super) fn pad_snapshot(&self) -> Pad {
-		self.scopes.iter().flat_map(|s| s.pad.iter().cloned()).collect()
+		self.scopes[self.scope_base..].iter().flat_map(|s| s.pad.iter().cloned()).collect()
 	}
 
 	pub(super) fn compile_overlay(&self) -> Pad {
@@ -624,45 +632,61 @@ impl Interp<'_> {
 		}).collect()
 	}
 
-	/// Switch to a sub's own scope stack, starting from its captured pad; returns the caller's stack for
-	/// `leave_pad`. Stacks and scopes are recycled across calls.
-	pub(super) fn enter_pad(&mut self, pad: &Pad) -> Vec<Scope> {
-		let stack = self.scope_stacks.pop().unwrap_or_default();
-		let outer = std::mem::replace(&mut self.scopes, stack);
+	/// A new register frame hides the caller's lexicals. Keep its scope records
+	/// on the same contiguous stack, with a boundary for dynamic name lookup.
+	pub(super) fn enter_pad(&mut self, pad: &Pad) -> usize {
+		let outer = std::mem::replace(&mut self.scope_base, self.scopes.len());
 		self.lexicals.frame += 1;
-		self.push_scope();
-		for (id, slot) in pad { self.put_resolved_pad(*id, slot.clone()); }
+		if !pad.is_empty() {
+			self.push_scope();
+			for (id, slot) in pad { self.put_resolved_pad(*id, slot.clone()); }
+		}
 		outer
 	}
 
-	/// Restore the caller's scope stack after `enter_pad`, discarding the sub's remaining scopes.
-	pub(super) fn leave_pad(&mut self, outer: Vec<Scope>) {
-		let mut inner = std::mem::replace(&mut self.scopes, outer);
-		if let Some(base) = inner.first() { self.lexicals.unwind(base.lexical_mark); }
+	/// Discard only this frame's remaining scope records and restore the caller's boundary.
+	pub(super) fn leave_pad(&mut self, outer: usize) {
+		let first = std::mem::replace(&mut self.scope_base, outer);
+		if let Some(base) = self.scopes.get(first) { self.lexicals.unwind(base.lexical_mark); }
 		self.lexicals.frame -= 1;
-		for mut scope in inner.drain(..) {
-			scope.pad.clear();
-			scope.declarations.clear();
+		for scope in &mut self.scopes[first..] {
+			scope.clear_bindings();
 			scope.undo.clear();
-			if self.scope_pool.len() < 64 { self.scope_pool.push(scope); }
 		}
-		if self.scope_stacks.len() < 64 { self.scope_stacks.push(inner); }
+		self.scopes.depth = first;
 	}
 
 	pub(super) fn push_scope(&mut self) {
-		let mut scope = self.scope_pool.pop().unwrap_or_default();
-		scope.lexical_mark = self.lexicals.undo.len();
-		self.scopes.push(scope);
+		let depth = self.scopes.depth;
+		if depth == self.scopes.slots.len() { self.scopes.slots.push(Scope::default()); }
+		self.scopes.slots[depth].lexical_mark = self.lexicals.undo.len();
+		self.scopes.depth += 1;
 	}
 
 	pub(super) async fn pop_scope(&mut self) {
-		let Some(mut scope) = self.scopes.pop() else { return };
+		if self.scopes.len() == self.scope_base { return; }
+		self.scopes.depth -= 1;
+		let index = self.scopes.depth;
+		let scope = &mut self.scopes.slots[index];
 		self.lexicals.unwind(scope.lexical_mark);
+		// Clear the ordinary scope in place; no Vec headers move. An undo or
+		// cleanup callback may enter this same depth, so detach its record first.
+		if scope.undo.is_empty() && self.objects.is_empty() && self.pending.is_none() && self.tied_handles.is_empty() {
+			scope.clear_bindings();
+			return;
+		}
+		let scope = std::mem::take(scope);
+		// An empty capture pad normally needs no scope record. Materialize it
+		// before cleanup can call Perl, so a restore/destructor cannot publish
+		// bindings into the suspended caller's last scope.
+		if self.scopes.len() == self.scope_base && self.lexicals.frame != 0 {
+			self.push_scope();
+		}
+		if !scope.undo.is_empty() { Box::pin(self.restore_scope(scope)).await; }
+	}
+
+	async fn restore_scope(&mut self, mut scope: Scope) {
 		while let Some(restore) = scope.undo.pop() { self.apply_restore(restore).await; }
-		scope.pad.clear();
-		scope.declarations.clear();
-		// Keep the emptied vectors for the next block (loop bodies enter a scope per iteration).
-		if self.scope_pool.len() < 64 { self.scope_pool.push(scope); }
 	}
 
 	/// Number of `local` restores pending in the innermost scope (a mark for `unwind_locals`).
@@ -822,7 +846,7 @@ impl Interp<'_> {
 			return self.register_position(id);
 		}
 		let sigil = slot_sigil(sigil);
-		self.scopes.iter().enumerate().rev().find_map(|(scope, s)| {
+		self.scopes.iter().enumerate().skip(self.scope_base).rev().find_map(|(scope, s)| {
 			s.pad.iter().rposition(|(id, _)| {
 				let (s, n) = self.lexicals.spelling(*id);
 				*s == sigil && n.as_ref() == name
@@ -1107,7 +1131,7 @@ impl Interp<'_> {
 		match name {
 			"^GLOBAL_PHASE" => Some(Value::str(self.phase)),
 			"^S" if self.compile_depth != 0 => Some(Value::Undef),
-			"^S" => Some(Value::Int(i64::from(self.frames.iter().any(|f| f.info.sub.as_deref() == Some("(eval)"))))),
+			"^S" => Some(Value::Int(i64::from(self.frames.iter().any(|f| f.name() == "(eval)")))),
 			"^LAST_FH" => Some(self.last_read().map_or(Value::Undef, |io| Value::Ref(Ref::Io(io)))),
 			"^OPEN" => self.active_hints.open_layers.as_ref().map(|(read, write)| {
 				let mut s = read.clone(); s.push_bytes(b"\0"); s.push(write); Value::Str(s)
@@ -2415,39 +2439,19 @@ impl Interp<'_> {
 			if let Some(scope) = self.scopes.last_mut() { scope.declarations.push((id, slot)); }
 			if let Some(sv) = target { self.write_sv(&sv, value)?; }
 		} else if let Some(scope) = self.scopes.last_mut() {
-			scope.declarations.push((id, Slot::Scalar(new_sv(value))));
+			let sv = scope.scalar(value);
+			scope.declarations.push((id, Slot::Scalar(sv)));
 		}
 		Ok(())
 	}
 
 	async fn assign_list(&mut self, lhs: &Expr, rhs: &Expr, capture: bool) -> PResult<(usize, Vec<Sv>)> {
-		// Common sub prologue: snapshot the single argument before declaring the scalar,
-		// exactly as list evaluation would, without either a value or a target vector.
-		if !capture && self.pending.is_none() && self.depth < 8192
-			&& let ExprKind::Variable(Sigil::Array, args) = &rhs.kind && args.as_ref() == "_"
-			&& let ExprKind::Declare(DeclKind::My, _, inner, attrs) = &ungroup(lhs).kind && attrs.is_empty()
-			&& self.pad_slot_at(rhs, Sigil::Array, args).is_none() && let Some((_, av, _)) = self.active_subs.last()
-			&& self.tied_array(av).is_none() {
-			let item = match &ungroup(inner).kind {
-				ExprKind::List(items) if items.len() == 1 => ungroup(&items[0]),
-				_ => ungroup(inner),
-			};
-			if matches!(&item.kind, ExprKind::Variable(Sigil::Scalar, _)) {
-				let arg = {
-					let elems = av.elems();
-					match elems.as_slice() {
-						[] => Some((0, Value::Undef)),
-						[sv] if !sv.has_read_magic() => Some((1, sv.get())),
-						_ => None,
-					}
-				};
-				if let Some((count, value)) = arg {
-					self.assign_my_scalar(item, value)?;
-					return Ok((count, Vec::new()));
-				}
-			}
-		}
 		let lhs = ungroup(lhs);
+		if !capture && self.pending.is_none() && self.depth < 8184
+			&& let ExprKind::Declare(DeclKind::My, None, target, attrs) = &lhs.kind && attrs.is_empty()
+			&& let Some(n) = self.fresh_array_declarations(target, rhs) {
+			return Ok((n, Vec::new()));
+		}
 		// Only split directly into an already-live destination. Resolving a missing LHS
 		// before evaluating the RHS could vivify a glob, changing observable evaluation order.
 		if let ExprKind::Variable(Sigil::Array, name) = &lhs.kind
@@ -2772,21 +2776,82 @@ impl Interp<'_> {
 	}
 
 	/// Alias leaves for which neither evaluation nor lvalue resolution can call Perl.
-	fn plain_alias(&mut self, e: &Expr) -> Option<Sv> {
+	pub(super) fn plain_alias(&mut self, e: &Expr) -> Option<Sv> {
 		if self.pending.is_some() || self.depth >= 8190 { return None; }
 		match &e.kind {
 			ExprKind::Variable(Sigil::Scalar, name) if plain_lower_name(name) => {
 				match self.pad_slot_at(e, Sigil::Scalar, name) { Some(Slot::Scalar(sv)) => Some(sv.clone()), _ => None }
+			}
+			ExprKind::Variable(Sigil::Scalar, name) if name.as_ref() == "_" => {
+				match self.pad_slot_at(e, Sigil::Scalar, name) {
+					Some(Slot::Scalar(sv)) => Some(sv.clone()),
+					None => self.topics.last().cloned(),
+					_ => None,
+				}
 			}
 			ExprKind::Int(n) if self.in_constant || self.active_hints.constant_overloads.is_empty() => Some(self.readonly_alias(Value::Int(*n))),
 			_ => None,
 		}
 	}
 
+	/// Only fresh, unobserved pad scalars can be initialized without STORE.
+	/// Check the whole destination before evaluating a possibly mutating RHS.
+	pub(super) fn immediate_declaration(&mut self, lhs: &Expr, rhs: &Expr, cx: Cx) -> Option<Value> {
+		let ExprKind::Declare(DeclKind::My, None, target, attrs) = &lhs.kind else { return None; };
+		if !attrs.is_empty() || self.pending.is_some() || self.depth >= 8184 || self.scopes.is_empty() { return None; }
+		if Self::list_target(target) {
+			if cx == Cx::List { return None; }
+			return self.fresh_array_declarations(target, rhs).map(|n| Value::Int(n as i64));
+		}
+		let id = self.fresh_scalar_id(target)?;
+		let value = self.eval_immediate(rhs, Cx::Scalar)?;
+		let scope = self.scopes.last_mut().unwrap();
+		let (sv, result) = if cx == Cx::Void { (scope.scalar(value), Value::Undef) } else { (scope.scalar(value.clone()), value) };
+		scope.declarations.push((id, Slot::Scalar(sv)));
+		Some(result)
+	}
+
+	fn fresh_array_declarations(&mut self, target: &Expr, rhs: &Expr) -> Option<usize> {
+		let ExprKind::Variable(Sigil::Array, name) = &rhs.kind else { return None; };
+		let items = match &ungroup(target).kind {
+			ExprKind::List(items) => items.as_slice(),
+			_ => std::slice::from_ref(ungroup(target)),
+		};
+		// Only new scalars: no STORE can run Perl or change a later source.
+		if !items.iter().all(|item| self.fresh_scalar_id(ungroup(item)).is_some()) { return None; }
+		let av = match self.pad_slot_at(rhs, Sigil::Array, name) {
+			Some(Slot::Array(av)) => av.clone(),
+			None if name.as_ref() == "_" => {
+				if let Some(arg) = &self.prefix_arg {
+					let count = usize::from(!matches!(arg, calls::PrefixArg::Empty));
+					let v = arg.value()?;
+					bind_scalars(self.scopes.last_mut()?, items, std::iter::once(v));
+					return Some(count);
+				}
+				self.active_subs.last()?.1.clone()
+			}
+			_ => return None,
+		};
+		if av.tie().is_some() { return None; }
+		let elems = av.elems();
+		if elems.iter().any(|sv| sv.has_read_magic()) { return None; }
+		bind_scalars(self.scopes.last_mut()?, items, elems.iter().map(|sv| sv.get()));
+		Some(elems.len())
+	}
+
+	fn fresh_scalar_id(&self, target: &Expr) -> Option<usize> {
+		let ExprKind::Variable(Sigil::Scalar, name) = &target.kind else { return None; };
+		let id = target.cache.lexical.get().checked_sub(1)? as usize;
+		(!self.lexicals.prepared.get(id).is_some_and(|p| p.iter().any(|(n, _)| Rc::ptr_eq(n, name)))).then_some(id)
+	}
+
 	/// Evaluate a list in aliasing context (foreach, map, grep and `@_`).
 	pub async fn eval_aliases_async(&mut self, e: &Expr) -> PResult<Vec<Sv>> {
 		let e = ungroup(e);
 		if let Some(sv) = self.plain_alias(e) { return Ok(vec![sv]); }
+		if let ExprKind::List(items) = &e.kind {
+			return self.at_location(&e.location, async |this| this.aliases_list(items).await).await;
+		}
 		let at = self.depth;
 		self.at_location(&e.location, async move |this| {  descend(at, Box::pin(this.aliases_inner(e))).await  }).await
 	}
@@ -2803,6 +2868,35 @@ impl Interp<'_> {
 		sv
 	}
 
+	async fn aliases_list(&mut self, items: &[Expr]) -> PResult<Vec<Sv>> {
+		let mut list = Vec::with_capacity(items.len());
+		let consumed = self.ready_aliases(items, &mut list);
+		if consumed != items.len() { self.deferred_aliases(&items[consumed..], &mut list).await?; }
+		Ok(list)
+	}
+
+	pub(super) fn ready_aliases(&mut self, items: &[Expr], list: &mut Vec<Sv>) -> usize {
+		for (i, item) in items.iter().enumerate() {
+			let e = ungroup(item);
+			if let Some(sv) = self.plain_alias(e) { list.push(sv); }
+			else if let Some(n) = self.plain_numeric_expr(e) { list.push(new_sv(n.into_value())); }
+			else { return i; }
+		}
+		items.len()
+	}
+
+	pub(super) async fn deferred_aliases(&mut self, mut remaining: &[Expr], list: &mut Vec<Sv>) -> PResult<()> {
+		while let Some((item, rest)) = remaining.split_first() {
+			let e = ungroup(item);
+			let at = self.depth;
+			list.extend(self.at_location(&e.location, async move |this|
+				descend(at, Box::pin(this.nested(async move |this| this.aliases_inner(e).await))).await).await?);
+			let consumed = self.ready_aliases(rest, list);
+			remaining = &rest[consumed..];
+		}
+		Ok(())
+	}
+
 	async fn aliases_inner(&mut self, e: &Expr) -> PResult<Vec<Sv>> {
 		match &e.kind {
 			ExprKind::Int(_) | ExprKind::UInt(_) | ExprKind::Float(_) | ExprKind::String(_) | ExprKind::Version(_)
@@ -2810,17 +2904,7 @@ impl Interp<'_> {
 				let value = self.eval_scalar_async(e).await?;
 				Ok(vec![self.readonly_alias(value)])
 			}
-			ExprKind::List(items) => {
-				let mut list: Vec<Sv> = Vec::with_capacity(items.len());
-				for item in items {
-					let e = ungroup(item);
-					if let Some(sv) = self.plain_alias(e) { list.push(sv); } else {
-						let cells: Vec<Sv> = self.at_location(&e.location, async move |this| this.nested(async move |this| Box::pin(this.aliases_inner(e)).await).await).await?;
-						list.extend(cells);
-					}
-				}
-				Ok(list)
-			}
+			ExprKind::List(items) => self.aliases_list(items).await,
 			ExprKind::Declare(kind, _, target, _) => {
 				let mut out = Vec::new();
 				for target in self.declare_targets(*kind, target, e as *const Expr as usize).await? {

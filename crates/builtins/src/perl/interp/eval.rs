@@ -10,21 +10,46 @@ const STACK_CHECK_EVERY: u32 = if cfg!(debug_assertions) { 1 } else { 4 };
 // Allow for a compound assignment above the bounded arithmetic subtree.
 const PURE_LIMIT: u32 = DEPTH_LIMIT - PURE_LEVELS as u32 - 1;
 
+pub(super) enum Operation<'a> {
+	Ready(PResult<Ret>),
+	Deferred(std::pin::Pin<Box<dyn Future<Output = PResult<Ret>> + 'a>>),
+}
+
+impl<'a> Operation<'a> {
+	#[inline(always)]
+	pub(super) fn start<F: Future<Output = PResult<Ret>> + 'a>(on_stack: bool, future: F) -> Self {
+		if !cfg!(debug_assertions) && on_stack {
+			// SAFETY: same linear interpreter futures as the root driver. A nested
+			// driver restores the enclosing driver's slot and finishes before returning.
+			// Pass a pin, not the potentially kilobyte-sized coroutine by value.
+			let root: std::pin::Pin<&mut dyn Future<Output = PResult<Ret>>> = std::pin::pin!(future);
+			Self::Ready(unsafe { crate::deep::run(root) })
+		} else {
+			Self::Deferred(Box::pin(future))
+		}
+	}
+}
+
 impl Interp<'_> {
 	#[inline]
 	pub(super) async fn depth_guard<T>(&mut self, f: impl AsyncFnOnce(&mut Self) -> PResult<T>) -> PResult<T> {
-		if self.depth >= DEPTH_LIMIT { return Err(self.die_msg("Deep recursion limit exceeded")); }
-		self.depth += 1;
+		self.enter_depth()?;
 		let result = f(self).await;
 		self.depth -= 1;
 		result
 	}
 
+	#[inline]
+	pub(super) fn enter_depth(&mut self) -> PResult<()> {
+		if self.depth >= DEPTH_LIMIT { return Err(self.die_msg("Deep recursion limit exceeded")); }
+		self.depth += 1;
+		Ok(())
+	}
+
 	/// Evaluate an expression in the context supplied by its parent.
 	pub async fn eval_async(&mut self, e: &Expr, cx: Cx) -> PResult<Ret> {
 		if let Some(value) = self.eval_immediate(e, cx) { return Ok(Ret::One(value)); }
-		let at = self.depth;
-		descend(at, Box::pin(self.eval_nonleaf(e, cx))).await
+		self.eval_deferred(e, cx, 1).await
 	}
 
 	/// Sync entry for native callbacks and coercion paths: drives the async
@@ -34,35 +59,88 @@ impl Interp<'_> {
 		unsafe { crate::deep::run(self.eval_async(e, cx)) }
 	}
 
-	async fn eval_nonleaf(&mut self, e: &Expr, cx: Cx) -> PResult<Ret> {
+	/// A statement and its expression share a poll: there is no Perl code between
+	/// their entries, but both levels count towards the language recursion limit.
+	pub(super) async fn eval_deferred(&mut self, e: &Expr, cx: Cx, levels: u32) -> PResult<Ret> {
+		let outer_depth = self.depth;
+		if levels == 2 && outer_depth >= DEPTH_LIMIT { return Err(self.die_msg("Deep recursion limit exceeded")); }
 		let saved = self.enter_location(&e.location);
-		let result = self.nested(async move |this| this.eval_node(e, cx).await).await;
-		self.leave_location(&e.location, saved);
-		result
-	}
-
-	/// An expression statement normally enters a statement frame immediately followed by an
-	/// expression frame. There is no Perl work between the two. In the gaps between stack
-	/// checks, reserve both levels together; at the boundary use the ordinary guarded entry.
-	pub(super) async fn eval_statement_expr(&mut self, e: &Expr, cx: Cx) -> PResult<Ret> {
-		let phase = self.depth % STACK_CHECK_EVERY;
-		if phase == 0 || self.depth >= PURE_LIMIT - 1 { return self.nested(async move |this| this.eval_async(e, cx).await).await; }
-		if phase + 1 == STACK_CHECK_EVERY {
-			return self.nested(async move |this| Box::pin(this.eval_nonleaf(e, cx)).await).await;
+		let mut node = e;
+		let mut levels = levels;
+		let mut checkpoint = false;
+		let mut cx = cx;
+		let mut pair = None;
+		let mut immediate_right = false;
+		let result = loop {
+			let at = self.depth;
+			if at > DEPTH_LIMIT - levels { break Err(self.die_msg("Deep recursion limit exceeded")); }
+			if let Some(flow) = self.take_pending() { break Err(flow); }
+			self.depth += levels;
+			checkpoint |= at.is_multiple_of(DESCEND_EVERY) || levels == 2 && (at + 1).is_multiple_of(DESCEND_EVERY);
+			// Groups and plain conditions have no work to do after the chosen operand.
+			// Walk these tails without returning through suspended poll frames.
+			let tail = match &node.kind {
+				ExprKind::Group(inner) | ExprKind::Unary(Unary::Plus, inner) => Some(&**inner),
+				ExprKind::Conditional(cond, yes, no) => self.plain_truth(cond).map(|v| if v { &**yes } else { &**no }),
+				_ => None,
+			};
+			// A ready left operand needs only one saved value, not a second
+			// coroutine/driver for the right operand. Limit fusion to one pair;
+			// deeper subtrees use the same general binary operator implementation.
+			if pair.is_none() && let ExprKind::Binary(Binary::Add | Binary::Sub | Binary::Mul | Binary::Div | Binary::Mod | Binary::Pow, lhs, rhs) = &node.kind
+				&& let Some(left) = self.eval_immediate(lhs, Cx::Scalar) {
+				pair = Some((node, left, self.depth, cx));
+				cx = Cx::Scalar;
+				if let Some(right) = self.eval_immediate(rhs, cx) {
+					immediate_right = true;
+					break Ok(Ret::One(right));
+				}
+				node = rhs;
+				self.statement_location(&node.location);
+				levels = 1;
+				continue;
+			}
+			if let Some(next) = tail {
+				if let Some(v) = self.eval_immediate(next, cx) { break Ok(Ret::One(v)); }
+				self.statement_location(&next.location);
+				node = next;
+				levels = 1;
+				continue;
+			}
+			let check = if checkpoint { 0 } else { at };
+			let result = match self.eval_operation(node, cx) {
+				Operation::Ready(result) => result,
+				Operation::Deferred(child) => descend(check, child).await,
+			};
+			break if let Some(flow) = self.take_pending() { Err(flow) } else { result };
+		};
+		let mut result = if immediate_right { result } else { self.finish_expression(result, cx) };
+		if let Some((parent, left, depth, parent_cx)) = pair {
+			let ExprKind::Binary(op, lhs, rhs) = &parent.kind else { unreachable!("saved arithmetic operand") };
+			self.depth = depth;
+			self.statement_location(&parent.location);
+			if let Ok(right) = result {
+				let right = right.scalar();
+				result = if let (Some(a), Some(b)) = (plain_num(&left), plain_num(&right)) {
+					match numeric_binary(*op, a, b, self.active_hints.integer) {
+						Ok(value) => Ok(Ret::One(value)),
+						Err(message) => descend(0, async { Err(self.die_msg(message)) }).await,
+					}
+				} else {
+					// After resuming an operand we are back on the parent's poll
+					// stack. Coercion, overload and DIE hooks need a fresh checkpoint.
+					descend(0, async { self.binary_pair_values(*op, lhs, left, rhs, right) }).await
+				};
+			}
+			result = if let Some(flow) = self.take_pending() { Err(flow) } else { self.finish_expression(result, parent_cx) };
 		}
-		let saved = self.enter_location(&e.location);
-		self.depth += 2;
-		let result = self.eval_node(e, cx).await;
-		self.depth -= 2;
+		self.depth = outer_depth;
 		self.leave_location(&e.location, saved);
 		result
 	}
 
 	#[inline]
-	async fn eval_node(&mut self, e: &Expr, cx: Cx) -> PResult<Ret> {
-		if let Some(flow) = self.take_pending() { return Err(flow); }
-		let mut result = self.eval_inner(e, cx).await;
-		if let Some(flow) = self.take_pending() { return Err(flow); }
+	fn finish_expression(&mut self, mut result: PResult<Ret>, cx: Cx) -> PResult<Ret> {
 		if let Ok(ret) = &mut result {
 			ret.apply_context(cx);
 			if matches!(ret, Ret::One(Value::Ref(Ref::Regexp(_)))) { self.track_ret(ret); }
@@ -71,15 +149,30 @@ impl Interp<'_> {
 	}
 
 	/// Execute bounded, callback-free operations without entering a recursive evaluator frame.
-	/// A miss must have no side effects: in particular, coercions that can warn or die go through eval_node.
+	/// A miss must have no side effects: coercions that can warn or die use the deferred evaluator.
 	#[inline]
 	pub(super) fn eval_immediate(&mut self, e: &Expr, cx: Cx) -> Option<Value> {
+		if let ExprKind::Conditional(cond, yes, no) = &e.kind {
+			if self.pending.is_some() || self.depth >= PURE_LIMIT - 2 { return None; }
+			let branch = if self.plain_truth(cond)? { yes } else { no };
+			// One branch only; nested conditions use the iterative deferred path.
+			return self.immediate_node(branch, cx).filter(|v| !matches!(v, Value::Ref(Ref::Regexp(_))));
+		}
+		self.immediate_node(e, cx)
+	}
+
+	#[inline]
+	fn immediate_node(&mut self, e: &Expr, cx: Cx) -> Option<Value> {
 		match &e.kind {
 			// These operations need an lvalue, a regex, or short-circuit evaluation:
 			// no bounded arithmetic/string probe can handle them.
 			ExprKind::Binary(Binary::Assign | Binary::Bind(_) | Binary::And | Binary::Or | Binary::DefinedOr
 				| Binary::AssignOp(Compound::Concat), _, _) => None,
 			ExprKind::Binary(..) => self.try_plain_binary(e, cx),
+			ExprKind::Select(base, Select::ArrayElement(false), key) if self.pending.is_none() && self.depth < PURE_LIMIT =>
+				self.plain_array_operand(base, key, Self::plain_element_value, |n| Some(n.into_value())),
+			ExprKind::Call(Call { target: CallTarget::Builtin(b @ (Builtin::Shift | Builtin::Pop), origin), args: None, .. }) =>
+				self.plain_remove_arg(*b, *origin),
 			ExprKind::Int(_) | ExprKind::UInt(_) | ExprKind::Float(_) | ExprKind::String(_) | ExprKind::Variable(Sigil::Scalar, _) => self.eval_leaf(e),
 			_ => None,
 		}
@@ -123,6 +216,62 @@ impl Interp<'_> {
 		}
 	}
 
+	/// Borrow an existing, untied named array's element for a callback-free read.
+	/// Misses (including holes, `our` aliases and overloaded indices) use normal selection.
+	#[inline]
+	fn plain_array_operand<T>(&self, base: &Expr, key: &Expr, read: impl FnOnce(&Sv) -> Option<T>, number: impl FnOnce(Num) -> Option<T>) -> Option<T> {
+		let ExprKind::Int(index) = &key.kind else { return None; };
+		if !self.in_constant && !self.active_hints.constant_overloads.is_empty() { return None; }
+		let ExprKind::Variable(_, name) = &base.kind else { return None; };
+		let av = match self.pad_slot_at(base, Sigil::Array, name) {
+			Some(Slot::Array(av)) => av,
+			None if matches!(name.as_ref(), "_" | "main::_") => {
+				if let Some(arg) = &self.prefix_arg {
+					if !matches!(*index, 0 | -1) { return None; }
+					return match arg {
+						calls::PrefixArg::Cell(sv) => read(sv),
+						calls::PrefixArg::Number(n) => number(*n),
+						calls::PrefixArg::Empty => None,
+					};
+				}
+				&self.active_subs.last()?.1
+			}
+			_ => return None,
+		};
+		if av.tie().is_some() { return None; }
+		let elems = av.elems();
+		let index = if *index < 0 { (elems.len() as i64).checked_add(*index)? } else { *index };
+		let sv = elems.get(usize::try_from(index).ok()?)?;
+		if Rc::ptr_eq(sv, &self.hole) { return None; }
+		read(sv)
+	}
+
+	fn plain_element_value(sv: &Sv) -> Option<Value> {
+		if sv.has_read_magic() { return None; }
+		let value = sv.get();
+		// The deferred evaluator enrolls regexp results in destructor tracking.
+		(!matches!(value, Value::Ref(Ref::Regexp(_)))).then_some(value)
+	}
+
+	fn plain_remove_arg(&mut self, b: Builtin, origin: BuiltinOrigin) -> Option<Value> {
+		if self.pending.is_some() || self.depth >= PURE_LIMIT || !self.builtin_uses_core(b, origin)
+			|| !self.active_hints.autodie.is_empty() { return None; }
+		if let Some(arg) = &mut self.prefix_arg {
+			let value = arg.value()?;
+			if matches!(value, Value::Ref(Ref::Regexp(_))) { return None; }
+			*arg = calls::PrefixArg::Empty;
+			return Some(value);
+		}
+		if !self.isa_globs.is_empty() { return None; }
+		let av = &self.active_subs.last()?.1;
+		if av.tie().is_some() || modules::readonly_array(self, av) { return None; }
+		let mut elems = av.elems_mut();
+		let Some(sv) = (if b == Builtin::Shift { elems.first() } else { elems.last() }) else { return Some(Value::Undef); };
+		let value = Self::plain_element_value(sv)?;
+		if b == Builtin::Shift { elems.remove(0); } else { elems.pop(); }
+		Some(value)
+	}
+
 	/// An explicit, callback-free scalar operand of print/split. Do not fetch a magical
 	/// operand while another operand or the output layer still has work to do.
 	pub(in crate::perl) fn plain_scalar_cell(&mut self, e: &Expr) -> Option<Sv> {
@@ -142,6 +291,8 @@ impl Interp<'_> {
 	fn plain_number_at(&self, e: &Expr, remaining: u8) -> Option<Num> {
 		match &e.kind {
 			ExprKind::Variable(Sigil::Scalar, name) => plain_num(&*self.numeric_cell(e, name)?.plain_value()?),
+			ExprKind::Select(base, Select::ArrayElement(false), key) =>
+				self.plain_array_operand(base, key, |sv| plain_num(&*sv.plain_value()?), Some),
 			ExprKind::Group(inner) | ExprKind::Unary(Unary::Plus, inner) if remaining != 0 =>
 				self.plain_number_at(inner, remaining - 1),
 			ExprKind::Binary(op @ (Binary::Add | Binary::Sub | Binary::Mul | Binary::Div | Binary::Mod | Binary::Pow), a, b) if remaining != 0 =>
@@ -196,33 +347,39 @@ impl Interp<'_> {
 			_ => return None,
 		};
 		// A compound assignment's shortcut for direct lexical lvalues does not apply to the global topic.
-		let ExprKind::Variable(Sigil::Scalar, name) = &left.kind else { return None; };
-		// The RHS is checked pure first, so the fallback below cannot leave a side effect on a miss.
 		let rhs = self.plain_number_at(right, PURE_LEVELS)?;
-		let global;
-		let cell: &Sv = match self.pad_slot_at(left, Sigil::Scalar, name) {
-			Some(Slot::Scalar(cell)) => cell,
-			// A package scalar already resolved by an earlier evaluation of this node.
-			_ => match self.cached_package_slot(left, Sigil::Scalar, name) {
-				Some(Slot::Scalar(cell)) => { global = cell; &global }
-				_ => return None,
+		let owned;
+		let cell: &Sv = match &left.kind {
+			ExprKind::Variable(Sigil::Scalar, name) => match self.pad_slot_at(left, Sigil::Scalar, name) {
+				Some(Slot::Scalar(cell)) => cell,
+				_ => match self.cached_package_slot(left, Sigil::Scalar, name) {
+					Some(Slot::Scalar(cell)) => { owned = cell; &owned }
+					_ => return None,
+				},
 			},
+			ExprKind::Select(base, Select::ArrayElement(false), key) => {
+				owned = self.plain_array_operand(base, key, |sv| Some(sv.clone()), |_| None)?;
+				&owned
+			}
+			_ => return None,
 		};
 		let old = plain_num(&*cell.plain_value()?)?;
 		if self.is_readonly_sv(cell) { return None; }
-		let rhs = self.plain_number_at(right, PURE_LEVELS)?;
 		let n = arithmetic(op, old, rhs, self.active_hints.integer).ok()?;
 		cell.set_number(n);
 		cell.set_pos(None);
 		Some(if cx == Cx::Void { Value::Undef } else { n.into_value() })
 	}
 
-	/// `depth_guard` for the hot recursive paths, checking for stack growth only every few levels (the check reads
-	/// a thread-local): a few nested optimized frames stay well within the 128 KiB red zone. Unoptimized frames
-	/// are far larger, so debug builds check at every level.
+	/// A native callback may enter another interpreter driver before the async
+	/// evaluator gets a chance to spill. Keep its headroom check at call boundaries.
+	#[inline]
+	pub(super) fn check_headroom(&self) {
+		if self.depth % STACK_CHECK_EVERY == 0 { crate::stack::guard(128 * 1024, || ()); }
+	}
 	#[inline]
 	pub(super) async fn nested<T>(&mut self, f: impl AsyncFnOnce(&mut Self) -> PResult<T>) -> PResult<T> {
-		if self.depth % STACK_CHECK_EVERY == 0 { crate::stack::guard(128 * 1024, || ()); }
+		self.check_headroom();
 		self.depth_guard(f).await
 	}
 
@@ -287,8 +444,7 @@ impl Interp<'_> {
 	/// Evaluate an expression, requesting a scalar result.
 	pub async fn eval_scalar_async(&mut self, e: &Expr) -> PResult<Value> {
 		if let Some(value) = self.eval_immediate(e, Cx::Scalar) { return Ok(value); }
-		let at = self.depth;
-		descend(at, Box::pin(self.eval_nonleaf(e, Cx::Scalar))).await.map(Ret::scalar)
+		self.eval_deferred(e, Cx::Scalar, 1).await.map(Ret::scalar)
 	}
 
 	/// Sync entry for native callbacks and coercion paths: drives the async
@@ -304,6 +460,31 @@ impl Interp<'_> {
 	pub fn eval_list(&mut self, e: &Expr) -> PResult<Vec<Value>> {
 		// SAFETY: interpreter recursion awaits one child directly to completion; it never selects, cancels, or polls those futures independently.
 		unsafe { crate::deep::run(self.eval_list_async(e)) }
+	}
+
+	/// Select the operation before allocating its recursion frame. In particular
+	/// a conditional or named call must not carry the string-eval compiler in its frame.
+	fn eval_operation<'a>(&'a mut self, e: &'a Expr, cx: Cx) -> Operation<'a> {
+		// Keep plentiful native headroom for the nested driver and synchronous
+		// callbacks. With less headroom (or unknown stack bounds) only the heap
+		// driver polls this expression. Debug frames always take the latter path.
+		let on_stack = !cfg!(debug_assertions) && crate::stack::remaining().is_some_and(|left| left > 768 * 1024);
+		match &e.kind {
+			ExprKind::Call(call @ Call { target: CallTarget::Named(name, amp), .. }) => self.named_operation(e, call, name, *amp, cx, on_stack),
+			ExprKind::Call(call @ Call { target: CallTarget::Code(code, amp), .. }) => Operation::start(on_stack, self.eval_code_call(call, code, *amp, cx)),
+			ExprKind::Call(call) => Operation::start(on_stack, self.eval_call(call, cx)),
+			ExprKind::Conditional(cond, yes, no) => Operation::start(on_stack, async move {
+				let branch = if self.eval_truth(cond).await? { yes } else { no };
+				self.eval_async(branch, cx).await
+			}),
+			ExprKind::Binary(Binary::Assign, a, b) => Operation::start(on_stack, self.assign(a, b, cx)),
+			ExprKind::Binary(Binary::AssignOp(op), a, b) => Operation::start(on_stack, async move { self.compound(*op, a, b, cx).await.map(Ret::One) }),
+			ExprKind::Binary(Binary::Bind(_) | Binary::And | Binary::Or | Binary::DefinedOr, ..) => Operation::start(on_stack, self.eval_inner(e, cx)),
+			ExprKind::Binary(op @ (Binary::SmartMatch | Binary::Range(_) | Binary::Repeat | Binary::Isa), a, b) =>
+				Operation::start(on_stack, self.binary_special(e as *const Expr as usize, *op, a, b, cx)),
+			ExprKind::Binary(op, a, b) => Operation::start(on_stack, self.binary_pair(*op, a, b)),
+			_ => Operation::start(on_stack, self.eval_inner(e, cx)),
+		}
 	}
 
 	async fn eval_inner(&mut self, e: &Expr, cx: Cx) -> PResult<Ret> {
@@ -356,17 +537,15 @@ impl Interp<'_> {
 				for item in earlier { self.eval_async(item, Cx::Void).await?; }
 				return self.eval_async(last, cx).await;
 			}
-			ExprKind::Group(inner) | ExprKind::Unary(Unary::Plus, inner) => return self.eval_async(inner, cx).await,
+			ExprKind::Group(_) | ExprKind::Unary(Unary::Plus, _) => unreachable!("tail operand traversed by eval_deferred"),
 			ExprKind::Declare(kind, class, target, attrs) => return self.read_declaration(*kind, class.as_ref(), target, attrs, e as *const Expr as usize, cx).await,
 			ExprKind::Unary(op, operand) => return self.unary(*op, operand, cx).await,
-			ExprKind::Binary(Binary::Assign, a, b) => return self.assign(a, b, cx).await,
-			ExprKind::Binary(Binary::AssignOp(op), a, b) => return self.compound(*op, a, b, cx).await.map(Ret::One),
 			ExprKind::Binary(Binary::Bind(neg), a, b) => return rx::bind_expr(self, a, b, *neg, cx),
 			ExprKind::Binary(op @ (Binary::And | Binary::Or | Binary::DefinedOr), a, b) => {
 				let value = self.eval_scalar_async(a).await?;
 				return if self.short_circuit(*op, &value)? { self.eval_async(b, cx).await } else { Ok(Ret::One(value)) };
 			}
-			ExprKind::Binary(op, a, b) => return self.binary(e as *const Expr as usize, *op, a, b, cx).await,
+			ExprKind::Binary(..) | ExprKind::Call(..) | ExprKind::Conditional(..) => unreachable!("dispatched by eval_operation"),
 			ExprKind::CompareChain(first, rest) => {
 				let mut left = self.eval_scalar_async(first).await?;
 				for (op, rhs) in rest {
@@ -377,11 +556,6 @@ impl Interp<'_> {
 				}
 				perl_bool(true)
 			}
-			ExprKind::Conditional(cond, yes, no) => {
-				let branch = if self.eval_truth(cond).await? { yes } else { no };
-				return self.eval_async(branch, cx).await;
-			}
-			ExprKind::Call(call) => return self.eval_call(e, call, cx).await,
 			ExprKind::Sub(sub) => {
 				let cv = self.make_sub(sub, None, self.capture_pad(sub.body.as_deref()));
 				// `sub : const {...}` runs once now and becomes a constant sub of that value (perlsub).
@@ -512,7 +686,7 @@ impl Interp<'_> {
 		Ok(Ret::One(result))
 	}
 
-	async fn binary(&mut self, site: usize, op: Binary, left: &Expr, right: &Expr, cx: Cx) -> PResult<Ret> {
+	async fn binary_special(&mut self, site: usize, op: Binary, left: &Expr, right: &Expr, cx: Cx) -> PResult<Ret> {
 		use Binary::*;
 		match op {
 			SmartMatch => {
@@ -557,9 +731,17 @@ impl Interp<'_> {
 			}
 			_ => {}
 		}
-		let mut a = self.eval_scalar_async(left).await?;
+		self.binary_pair(op, left, right).await
+	}
+
+	async fn binary_pair(&mut self, op: Binary, left: &Expr, right: &Expr) -> PResult<Ret> {
+		let a = self.eval_scalar_async(left).await?;
 		let b = self.eval_scalar_async(right).await?;
-		if op == Concat && let (Value::Str(x), Some(y)) = (&mut a, b.as_pstr()) {
+		self.binary_pair_values(op, left, a, right, b)
+	}
+
+	fn binary_pair_values(&mut self, op: Binary, left: &Expr, mut a: Value, right: &Expr, b: Value) -> PResult<Ret> {
+		if op == Binary::Concat && let (Value::Str(x), Some(y)) = (&mut a, b.as_pstr()) {
 			x.push(y);
 			return Ok(Ret::One(a));
 		}
@@ -583,6 +765,25 @@ impl Interp<'_> {
 		self.eval_truth(e).await
 	}
 
+	fn plain_truth(&self, e: &Expr) -> Option<bool> {
+		use Binary::*;
+		match &e.kind {
+			ExprKind::Variable(Sigil::Scalar, _) => {
+				let v = self.leaf_cell(e)?.plain_value()?;
+				(!matches!(&*v, Value::Ref(_))).then(|| v.truthy())
+			}
+			ExprKind::Binary(Add | Sub | Mul | Div | Mod | Pow, ..) if self.depth < PURE_LIMIT =>
+				Some(self.plain_number_at(e, PURE_LEVELS)?.into_value().truthy()),
+			ExprKind::Binary(op @ (Eq | Ne | Lt | Le | Gt | Ge), lhs, rhs) if self.depth < PURE_LIMIT => {
+				let a = self.plain_number_at(lhs, PURE_LEVELS - 1)?;
+				let b = self.plain_number_at(rhs, PURE_LEVELS - 1)?;
+				let order = if self.active_hints.integer { Some(a.wrapping_iv().cmp(&b.wrapping_iv())) } else { ops::num_cmp(a, b) };
+				Some(comparison_truth(*op, order))
+			}
+			_ => None,
+		}
+	}
+
 	pub(super) async fn eval_truth(&mut self, e: &Expr) -> PResult<bool> {
 		use Binary::*;
 		if self.pending.is_none() {
@@ -597,18 +798,10 @@ impl Interp<'_> {
 						result.map(|ret| ret.scalar().truthy())
 					}).await).await;
 				}
-				ExprKind::Variable(Sigil::Scalar, _) => {
-					if let Some(value) = self.leaf_cell(e).and_then(|sv| sv.plain_value())
-						&& !matches!(&*value, Value::Ref(_)) { return Ok(value.truthy()); }
-				}
-				ExprKind::Binary(op @ (Eq | Ne | Lt | Le | Gt | Ge), lhs, rhs) if self.depth < PURE_LIMIT => {
-					if let Some(a) = self.plain_number_at(lhs, PURE_LEVELS - 1)
-						&& let Some(b) = self.plain_number_at(rhs, PURE_LEVELS - 1) {
-						let order = if self.active_hints.integer { Some(a.wrapping_iv().cmp(&b.wrapping_iv())) } else { ops::num_cmp(a, b) };
-						return Ok(comparison_truth(*op, order));
-					}
-					// Already tried the same numeric operands that eval_immediate would inspect.
-					let v = Box::pin(self.eval_nonleaf(e, Cx::Scalar)).await?.scalar();
+				ExprKind::Variable(Sigil::Scalar, _) => if let Some(v) = self.plain_truth(e) { return Ok(v); },
+				ExprKind::Binary(Eq | Ne | Lt | Le | Gt | Ge, ..) if self.depth < PURE_LIMIT => {
+					if let Some(v) = self.plain_truth(e) { return Ok(v); }
+					let v = self.eval_deferred(e, Cx::Scalar, 1).await?.scalar();
 					return self.truthy(&v);
 				}
 				_ => {}
@@ -708,6 +901,16 @@ impl Interp<'_> {
 	/// Stores `old OP rhs` into `cell`; the result is returned when `keep` (else undef, saving a copy).
 	fn combine_compound(&mut self, op: Binary, cell: &Sv, old: Value, rhs: Value, keep: bool) -> PResult<Value> {
 		use Binary as B;
+		// The RHS may have called Perl or rebound/tied the target. Use the saved
+		// LHS value, but only a currently ordinary writable cell can take a raw store.
+		if matches!(op, B::Add | B::Sub | B::Mul | B::Div | B::Mod | B::Pow)
+			&& let (Some(a), Some(b)) = (plain_num(&old), plain_num(&rhs))
+			&& !cell.has_read_magic() && !cell.registered() && !self.is_readonly_sv(cell) {
+			let n = arithmetic(op, a, b, self.active_hints.integer).map_err(|m| self.die_msg(m))?;
+			cell.set_number(n);
+			cell.set_pos(None);
+			return Ok(if keep { n.into_value() } else { Value::Undef });
+		}
 		let value = if matches!(op, B::And | B::Or | B::DefinedOr) { rhs }
 		else if (matches!(old, Value::Ref(_)) || matches!(rhs, Value::Ref(_)))
 			&& let Some(value) = self.overload_binary(op_key(op), &old, &rhs, true)? { value }

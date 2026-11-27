@@ -1383,6 +1383,13 @@ impl indexmap::Equivalent<HKey> for HKeyRef<'_> {
 	fn equivalent(&self, key: &HKey) -> bool { !key.0.utf8 && self.0 == key.0.bytes.as_slice() }
 }
 
+/// A dead numeric temporary with no observable identity or side metadata.
+#[inline]
+pub(super) fn recyclable_number(sv: &Sv) -> bool {
+	Rc::strong_count(sv) == 1 && Rc::weak_count(sv) == 0 && sv.flags.get() == 0 && sv.metadata.get().is_none()
+		&& matches!(*sv.value.borrow(), Value::Int(_) | Value::UInt(_) | Value::Num(_))
+}
+
 /// Allocate an independent scalar cell with no blessing or match position.
 #[inline]
 pub(in crate::perl) fn new_sv(v: Value) -> Sv {

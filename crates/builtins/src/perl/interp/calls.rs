@@ -36,34 +36,69 @@ impl Drop for PerlBody {
 	}
 }
 
+/// A new @_ that has not had its array identity observed. No code can suspend
+/// with this representation installed; deferred work sees the exact remaining aliases.
+pub(super) enum PrefixArg { Empty, Number(Num), Cell(Sv) }
+
+impl PrefixArg {
+	pub(super) fn value(&self) -> Option<Value> {
+		match self {
+			Self::Empty => Some(Value::Undef),
+			Self::Number(n) => Some(n.into_value()),
+			Self::Cell(sv) if !sv.has_read_magic() => Some(sv.get()),
+			Self::Cell(_) => None,
+		}
+	}
+	fn into_array(self, pool: &mut Vec<Av>) -> Av {
+		let av = pool.pop().unwrap_or_else(|| new_av(Vec::new()));
+		{
+			let mut elems = av.elems_mut();
+			match self {
+				Self::Number(n) => if let Some(sv) = elems.first() { sv.set(n.into_value()); sv.set_pos(None); }
+					else { elems.push(new_sv(n.into_value())); },
+				Self::Cell(sv) => if let Some(cell) = elems.first_mut() { *cell = sv; } else { elems.push(sv); },
+				Self::Empty => elems.clear(),
+			}
+		}
+		av
+	}
+}
+
 enum InvokeArgs {
-	Number(Num), // one fresh, non-aliasing arithmetic result
+	Single(PrefixArg),
 	Explicit(Vec<Sv>),
+	Prepared(Av), // an explicit list assembled directly in the call's own array
 	Shared(Av, bool), // true when this is a tail call following an explicit argument list
 }
+/// A callback-free prefix of an explicit argument list has already captured
+/// its aliases. Continue at the first deferred item; never evaluate the prefix again.
+enum PendingArgs<'a> {
+	List { array: Av, location: &'a Location, remaining: &'a [Expr] },
+	Other,
+}
+
 impl InvokeArgs {
 	fn has_args(&self) -> bool { !matches!(self, Self::Shared(_, false)) }
 	fn into_array(self, pool: &mut Vec<Av>) -> Av {
 		match self {
-			Self::Number(n) => {
-				let array = pool.pop().unwrap_or_else(|| new_av(Vec::new()));
-				{
-					let mut elems = array.elems_mut();
-					if let Some(cell) = elems.first() { cell.set(n.into_value()); cell.set_pos(None); }
-					else { elems.push(new_sv(n.into_value())); }
-				}
-				array
-			}
+			Self::Single(arg) => arg.into_array(pool),
 			Self::Explicit(args) => {
 				let array = pool.pop().unwrap_or_else(|| new_av(Vec::new()));
-				array.replace_elems(args);
+				if args.is_empty() { array.elems_mut().clear(); } else { array.replace_elems(args); }
 				array
 			}
-			Self::Shared(array, _) => array,
+			Self::Prepared(array) | Self::Shared(array, _) => array,
 		}
 	}
 	fn into_vec(self) -> Vec<Sv> {
-		match self { Self::Number(n) => vec![new_sv(n.into_value())], Self::Explicit(args) => args, Self::Shared(array, _) => array.elems().clone() }
+		match self {
+			Self::Single(PrefixArg::Empty) => Vec::new(),
+			Self::Single(PrefixArg::Number(n)) => vec![new_sv(n.into_value())],
+			Self::Single(PrefixArg::Cell(sv)) => vec![sv],
+			Self::Explicit(args) => args,
+			Self::Prepared(array) => array.replace_elems(Vec::new()),
+			Self::Shared(array, _) => array.elems().clone(),
+		}
 	}
 }
 
@@ -215,7 +250,7 @@ impl Interp<'_> {
 
 	/// Call a Perl or native code value with aliased argument cells.
 	pub async fn call_sub_async(&mut self, cv: &Cv, args: Vec<Sv>, cx: Cx) -> PResult<Ret> {
-		self.call_sub_kind(cv, InvokeArgs::Explicit(args), cx, false).await
+		self.call_sub_kind(cv.clone(), InvokeArgs::Explicit(args), cx, false).await
 	}
 
 	/// Sync entry for native callbacks and coercion paths: drives the async
@@ -225,23 +260,19 @@ impl Interp<'_> {
 		unsafe { crate::deep::run(self.call_sub_async(cv, args, cx)) }
 	}
 
-	async fn call_sub_kind(&mut self, cv: &Cv, args: InvokeArgs, cx: Cx, as_lvalue: bool) -> PResult<Ret> {
-		let result = self.nested(async move |this| Box::pin(this.call_sub_loop(cv.clone(), args, cx, as_lvalue)).await).await;
-		if let Ok(ret) = &result { self.track_ret(ret); }
-		result
-	}
-
-	async fn call_sub_loop(&mut self, mut cv: Cv, mut args: InvokeArgs, cx: Cx, as_lvalue: bool) -> PResult<Ret> {
-		loop {
-			self.poll()?;
+	async fn call_sub_kind(&mut self, mut cv: Cv, mut args: InvokeArgs, cx: Cx, as_lvalue: bool) -> PResult<Ret> {
+		self.check_headroom();
+		self.enter_depth()?;
+		let result = loop {
+			if let Err(flow) = self.poll() { break Err(flow); }
 			let imp = cv.body.borrow().clone();
 			let explicit = args.has_args();
 			let out = match imp {
 				CodeImpl::Undefined => {
 					let name = cv.name.borrow().clone().unwrap_or_else(|| Rc::from("__ANON__"));
-					return self.call_undefined(&name, args, cx).await;
+					break Box::pin(self.call_undefined(&name, args, cx)).await;
 				}
-				CodeImpl::Constant(values) => return Ok(if cx == Cx::List { Ret::Many(values.to_vec()) }
+				CodeImpl::Constant(values) => break Ok(if cx == Cx::List { Ret::Many(values.to_vec()) }
 				else if values.len() > 1 { Ret::One(Value::Int(values.len() as i64)) }
 				else { Ret::One(values.first().cloned().unwrap_or(Value::Undef)) }),
 				CodeImpl::Native(callback) => {
@@ -252,57 +283,101 @@ impl Interp<'_> {
 					let result = callback(self, native_args, cx);
 					self.eval_contexts.pop();
 					self.active_subs.pop();
-					(result, av)
+					(result, Some(av))
 				}
 				CodeImpl::Perl(body) => {
-					if as_lvalue && !self.code_is_lvalue(&cv, body.lvalue) { return Err(self.die_msg("Can't modify non-lvalue subroutine call")); }
+					if as_lvalue && !self.code_is_lvalue(&cv, body.lvalue) { break Err(self.die_msg("Can't modify non-lvalue subroutine call")); }
 					let address = Rc::as_ptr(&cv) as usize;
-					let sub = cv.name.borrow().clone();
 					if self.enter_sub_depth(address) {
-						let msg = sub.as_deref().map_or_else(|| "Deep recursion on anonymous subroutine".to_owned(),
+						let msg = cv.name.borrow().as_deref().map_or_else(|| "Deep recursion on anonymous subroutine".to_owned(),
 							|name| format!("Deep recursion on subroutine \"{name}\""));
 						self.warn_category("recursion", msg);
 						if let Some(flow) = self.take_pending() {
 							self.leave_sub_depth(address);
-							return Err(flow);
+							break Err(flow);
 						}
 					}
-					let av = args.into_array(&mut self.arg_arrays);
+					let prefix = !as_lvalue && body.signature.is_none() && self.quiet_statement();
+					let mut array = match args {
+						InvokeArgs::Single(arg) if prefix => { self.prefix_arg = Some(arg); None }
+						args => Some(args.into_array(&mut self.arg_arrays)),
+					};
 					let outer = self.enter_pad(&body.pad);
-					let name = sub.unwrap_or_else(|| body.anon_name.get_or_init(|| Rc::from(format!("{}::__ANON__", body.package))).clone());
-					let frame = self.frame(Some(name), cx, explicit, None, false, Some(av.clone()));
-					let saved_loc = self.loc.clone();
-					let persistent = std::mem::replace(&mut self.persistent, body.persistent.clone());
-					self.active_subs.push((cv.clone(), av.clone(), cx));
-					self.frames.push(frame);
+					let mut origin = Some(CallerEnv {
+						location: self.loc.clone(),
+						package: std::mem::replace(&mut self.package, body.package.clone()),
+						hints: std::mem::replace(&mut self.active_hints, body.hints.clone()),
+					});
+					let outermost = self.active_subs.is_empty();
+					if let Some(av) = &array { self.active_subs.push((cv.clone(), av.clone(), cx)); }
 					self.eval_contexts.push((cx, as_lvalue));
-					let av_in = av.clone();
-					let result = self.scoped_async(async move |this| { 
-						this.package = body.package.clone();
-						this.active_hints = body.hints.clone();
-						if let Some(id) = body.lexical_register { this.put_resolved_pad(id, Slot::Code(cv.clone())); }
-						if let Some(signature) = &body.signature { this.bind_signature(signature, &av_in, &cv).await?; }
-						if as_lvalue { this.run_lvalue_body(&body.block, cx).await } else { this.run_statements_async(&body.block, cx).await }
-					 }).await;
+					self.push_scope();
+					if let Some(id) = body.lexical_register { self.put_resolved_pad(id, Slot::Code(cv.clone())); }
+
+					// Only callbacks can inspect caller records, touch match state or
+					// use the persistent pad. Build those parts at the first suspension,
+					// not for every invocation of a wholly ready subroutine.
+					let mut cursor = stmt::Statements::new(&body.block, cx, 0, Ret::no_value(cx));
+					let step = if prefix { self.run_quiet(&mut cursor) } else { Ok(stmt::Step::Poll) };
+					let singleton = self.prefix_arg.take();
+					let mut saved = None;
+					let result = match step {
+						Ok(stmt::Step::Done) => Ok(cursor.result),
+						Err(flow) => Err(flow),
+						Ok(step) => {
+							let av = array.get_or_insert_with(|| {
+								let av = singleton.expect("deferred singleton argument").into_array(&mut self.arg_arrays);
+								self.active_subs.push((cv.clone(), av.clone(), cx));
+								av
+							});
+							let name = cv.name.borrow().clone().unwrap_or_else(|| body.anon_name.get_or_init(|| Rc::from(format!("{}::__ANON__", body.package))).clone());
+							self.frames.push(CallFrame { kind: FrameKind::Sub { name, explicit, args: av.clone() },
+								env: origin.take().unwrap(), cx, outer: outermost });
+							saved = Some((self.last_match.clone(), std::mem::replace(&mut self.persistent, body.persistent.clone())));
+							let bound = if let Some(signature) = &body.signature { self.bind_signature(signature, av, &cv).await } else { Ok(()) };
+							match bound {
+								Err(flow) => Err(flow),
+								Ok(()) if as_lvalue => Box::pin(self.run_lvalue_body(&body.block, cx)).await,
+								Ok(()) => self.resume_statements(cursor, step).await,
+							}
+						}
+					};
+					self.pop_scope().await;
+					// A destructor runs under caller hints/package but still sees the
+					// callee's `caller` record. Only that case needs additional Rc owners.
+					let result = if self.scope_cleanup_needed() {
+						let env = origin.as_ref().unwrap_or_else(|| &self.frames.last().unwrap().env);
+						self.package = env.package.clone();
+						self.active_hints = env.hints.clone();
+						self.finish_scope(result)
+					} else { result };
+					let env = origin.unwrap_or_else(|| self.frames.pop().unwrap().env);
+					self.package = env.package;
+					self.active_hints = env.hints;
+					if let Some((last_match, persistent)) = saved {
+						self.last_match = last_match;
+						self.persistent = persistent;
+					}
 					self.eval_contexts.pop();
-					self.frames.pop();
-					self.active_subs.pop();
-					self.persistent = persistent;
+					if array.is_some() { self.active_subs.pop(); }
 					self.leave_pad(outer);
-					self.loc = saved_loc;
+					self.loc = env.location;
 					self.leave_sub_depth(address);
-					(result, av)
+					(result, array)
 				}
 			};
 			match out.0 {
 				Ok(v) | Err(Flow::Return(v)) => {
-					self.recycle_args(out.1);
-					return Ok(v.in_context(cx));
+					if let Some(av) = out.1 { self.recycle_args(av); }
+					break Ok(v.in_context(cx));
 				}
-				Err(Flow::Goto(GotoTarget::Sub(next))) => { cv = next; args = InvokeArgs::Shared(self.tail_args.take().unwrap_or(out.1), explicit); }
-				Err(flow) => return Err(flow),
+				Err(Flow::Goto(GotoTarget::Sub(next))) => { cv = next; args = InvokeArgs::Shared(self.tail_args.take().or(out.1).expect("goto from an active sub"), explicit); }
+				Err(flow) => break Err(flow),
 			}
-		}
+		};
+		self.depth -= 1;
+		if let Ok(ret) = &result { self.track_ret(ret); }
+		result
 	}
 
 	/// Most calls cannot possibly be the 100th activation of their CV. Maintain the
@@ -333,16 +408,14 @@ impl Interp<'_> {
 	fn recycle_args(&mut self, mut av: Av) {
 		// An escaped argument array, including a weak reference, a bless, tie or
 		// address-keyed registration, must keep exactly its old identity and contents.
-		if self.arg_arrays.len() >= 64 || Rc::get_mut(&mut av).is_none()
+		if Rc::get_mut(&mut av).is_none()
 			|| av.blessed.borrow().is_some() || av.tie().is_some() { return; }
 		{
 			let mut elems = av.elems_mut();
 			if elems.capacity() > 32 { return; }
 			// A single anonymous number can supply both the vector and the scalar of
 			// the next arithmetic argument. Never prolong the life of a referent.
-			if !matches!(elems.as_slice(), [sv] if Rc::strong_count(sv) == 1 && Rc::weak_count(sv) == 0
-				&& !sv.registered() && !sv.is_blessed()
-				&& sv.plain_value().is_some_and(|v| matches!(*v, Value::Int(_) | Value::UInt(_) | Value::Num(_)))) {
+			if !matches!(elems.as_slice(), [sv] if value::recyclable_number(sv)) {
 				elems.clear();
 			}
 		}
@@ -451,22 +524,19 @@ impl Interp<'_> {
 		Ok(())
 	}
 
-	fn frame(&self, sub: Option<Rc<str>>, cx: Cx, has_args: bool, eval_text: Option<PStr>, is_require: bool, args: Option<Av>) -> CallFrame {
-		let info = Frame { package: self.package(), file: self.loc.file.clone(), line: self.loc.line, sub, has_args,
-			wantarray: context_flag(cx), eval_text, is_require, args: None };
-		CallFrame { info, hints: self.active_hints.clone(), outer: self.active_subs.is_empty(), args }
+	fn eval_frame(&self, cx: Cx, source: Option<PStr>, require: bool) -> CallFrame {
+		CallFrame { kind: FrameKind::Eval { source, require },
+			env: CallerEnv { package: self.package(), location: self.loc.clone(), hints: self.active_hints.clone() },
+			cx, outer: self.active_subs.is_empty() }
 	}
 
 	/// Capture the requested caller frame (zero is the nearest Perl caller).
 	pub fn caller_frame(&self, level: usize) -> Option<Frame> {
-		let current = self.frames.iter().rev().nth(level)?;
-		let mut frame = current.info.clone();
-		frame.args = current.args.as_ref().map(|av| av.elems().iter().map(read_sv).collect());
-		Some(frame)
+		self.frames.iter().rev().nth(level).map(|frame| frame.snapshot(true))
 	}
 
 	/// Lexical hints in effect at the requested caller location.
-	pub fn caller_hints(&self, level: usize) -> Option<&Hints> { self.frames.iter().rev().nth(level).map(|frame| &*frame.hints) }
+	pub fn caller_hints(&self, level: usize) -> Option<&Hints> { self.frames.iter().rev().nth(level).map(|frame| &*frame.env.hints) }
 
 	/// Fully qualified name on the currently executing CV, including native calls.
 	pub fn current_sub_name(&self) -> Option<Rc<str>> { self.active_subs.last()?.0.name.borrow().clone() }
@@ -476,12 +546,59 @@ impl Interp<'_> {
 		let (pkg, func) = qualified.rsplit_once("::").unwrap_or(("main", name));
 		if func != "AUTOLOAD" && let Some(cv) = self.named_code(&format!("{pkg}::AUTOLOAD")) && !matches!(*cv.body.borrow(), CodeImpl::Undefined) {
 			self.sv(&format!("{pkg}::AUTOLOAD")).replace(Value::str(&qualified));
-			return self.call_sub_kind(&cv, args, cx, false).await;
+			return self.call_sub_kind(cv, args, cx, false).await;
 		}
 		Err(self.die_msg(format!("Undefined subroutine &{qualified} called")))
 	}
 
+	fn prepare_args<'a>(&mut self, call: &'a Call, inherit: bool, proto: Option<&PStr>) -> Result<InvokeArgs, PendingArgs<'a>> {
+		if call.slot.is_some() || proto.is_some() { return Err(PendingArgs::Other); }
+		let Some(args) = &call.args else {
+			return Ok(if inherit {
+				let av = self.active_subs.last().map(|(_, av, _)| av.clone()).unwrap_or_else(|| self.av("main::_"));
+				InvokeArgs::Shared(av, false)
+			} else { InvokeArgs::Single(PrefixArg::Empty) });
+		};
+		let mut arg = ungroup(args);
+		if let ExprKind::List(items) = &arg.kind {
+			if let [one] = items.as_slice() { arg = ungroup(one); }
+			else {
+				let array = self.arg_arrays.pop().unwrap_or_else(|| new_av(Vec::new()));
+				let mut elems = array.elems_mut();
+				elems.clear();
+				elems.reserve(items.len());
+				let consumed = self.ready_aliases(items, &mut elems);
+				drop(elems);
+				return if consumed == items.len() { Ok(InvokeArgs::Prepared(array)) }
+				else { Err(PendingArgs::List { array, location: &arg.location, remaining: &items[consumed..] }) };
+			}
+		}
+		if let Some(sv) = self.plain_alias(arg) { return Ok(InvokeArgs::Single(PrefixArg::Cell(sv))); }
+		self.plain_numeric_expr(arg).map(|n| InvokeArgs::Single(PrefixArg::Number(n))).ok_or(PendingArgs::Other)
+	}
+
 	async fn call_args(&mut self, call: &Call, inherit: bool, proto: Option<&PStr>) -> PResult<InvokeArgs> {
+		match self.prepare_args(call, inherit, proto) {
+			Ok(args) => Ok(args),
+			Err(pending) => self.deferred_args(pending, call, inherit, proto).await,
+		}
+	}
+
+	async fn deferred_args(&mut self, pending: PendingArgs<'_>, call: &Call, inherit: bool, proto: Option<&PStr>) -> PResult<InvokeArgs> {
+		if let PendingArgs::List { array, location, remaining } = pending {
+			// No RefCell borrow crosses an argument callback.
+			let mut cells = array.replace_elems(Vec::new());
+			self.at_location(location, async |this| this.deferred_aliases(remaining, &mut cells).await).await?;
+			array.replace_elems(cells);
+			return Ok(InvokeArgs::Prepared(array));
+		}
+		if call.slot.is_none() && proto.is_none() && let Some(args) = &call.args {
+			return self.eval_aliases_async(args).await.map(InvokeArgs::Explicit);
+		}
+		Box::pin(self.call_args_special(call, inherit, proto)).await
+	}
+
+	async fn call_args_special(&mut self, call: &Call, inherit: bool, proto: Option<&PStr>) -> PResult<InvokeArgs> {
 		let mut out = Vec::new();
 		if let Some(CallSlot::Block(b)) = &call.slot {
 			// Block-prototype calls use an anonymous code value. The front end supplies
@@ -497,14 +614,6 @@ impl Interp<'_> {
 			if proto.is_some_and(|p| p.bytes.starts_with(b"_")) { out.push(self.topic()); }
 			return Ok(InvokeArgs::Explicit(out));
 		};
-		if proto.is_none() && call.slot.is_none() {
-			let mut arg = ungroup(args);
-			if let ExprKind::List(items) = &arg.kind && let [one] = items.as_slice() { arg = ungroup(one); }
-			if matches!(arg.kind, ExprKind::Binary(Binary::Add | Binary::Sub | Binary::Mul | Binary::Div | Binary::Mod, ..))
-				&& let Some(n) = self.plain_numeric_expr(arg) {
-				return Ok(InvokeArgs::Number(n));
-			}
-		}
 		if let Some(proto) = proto {
 			let mut specs = proto.bytes.iter().copied().filter(|b| !b.is_ascii_whitespace() && *b != b';').peekable();
 			let items: &[Expr] = match &args.kind { ExprKind::List(v) => v, _ => std::slice::from_ref(args.as_ref()) };
@@ -587,28 +696,18 @@ impl Interp<'_> {
 		self.lookup_code(&self.qualify(name))
 	}
 
-	pub(super) async fn eval_call(&mut self, e: &Expr, call: &Call, cx: Cx) -> PResult<Ret> {
+	pub(super) async fn eval_call(&mut self, call: &Call, cx: Cx) -> PResult<Ret> {
 		match &call.target {
 			CallTarget::Builtin(b, origin) => {
 				if *origin != BuiltinOrigin::Core && let Some(cv) = self.global_override(*b) {
 					let args = self.call_args(call, false, call.prototype.as_ref()).await?;
-					return self.call_sub_kind(&cv, args, cx, false).await;
+					return self.call_sub_kind(cv, args, cx, false).await;
 				}
 				if *origin == BuiltinOrigin::Global { return Err(self.die_msg(format!("Undefined subroutine &CORE::GLOBAL::{} called", b.name()))); }
 				if let Some(result) = self.core_call(*b, call, cx).await { return result; }
 				func::call(self, *b, call, cx)
 			}
-			CallTarget::Named(name, amp) => {
-				let args = self.call_args(call, *amp, call.prototype.as_ref()).await?;
-				if let Some(cv) = self.named_code_at(e, name) { self.call_sub_kind(&cv, args, cx, false).await } else { self.call_undefined(name, args, cx).await }
-			}
-			CallTarget::Code(code, amp) => {
-				let value = self.eval_scalar_async(code).await?;
-				let value = self.overload_deref(Sigil::Code, value)?;
-				let Some(cv) = self.code_value(&value, true)? else { return Err(self.die_msg("Not a CODE reference")); };
-				let args = self.call_args(call, *amp, None).await?;
-				self.call_sub_kind(&cv, args, cx, false).await
-			}
+			CallTarget::Named(..) | CallTarget::Code(..) => unreachable!("dispatched by eval_operation"),
 			CallTarget::Method(object, method) => {
 				let invocant = match &ungroup(object).kind {
 					ExprKind::Bareword(class) => new_sv(Value::str(class.strip_suffix("::").unwrap_or(class))),
@@ -634,6 +733,28 @@ impl Interp<'_> {
 				}
 			}
 		}
+	}
+
+	pub(super) fn named_operation<'a>(&'a mut self, e: &'a Expr, call: &'a Call, name: &'a str, amp: bool, cx: Cx, on_stack: bool) -> eval::Operation<'a> {
+		match self.prepare_args(call, amp, call.prototype.as_ref()) {
+			Ok(args) => if let Some(cv) = self.named_code_at(e, name) { eval::Operation::start(on_stack, self.call_sub_kind(cv, args, cx, false)) }
+				else { eval::Operation::start(on_stack, self.call_undefined(name, args, cx)) },
+			Err(pending) => eval::Operation::start(on_stack, self.eval_named_call(e, call, name, amp, cx, pending)),
+		}
+	}
+
+	async fn eval_named_call(&mut self, e: &Expr, call: &Call, name: &str, amp: bool, cx: Cx, pending: PendingArgs<'_>) -> PResult<Ret> {
+		let args = self.deferred_args(pending, call, amp, call.prototype.as_ref()).await?;
+		if let Some(cv) = self.named_code_at(e, name) { self.call_sub_kind(cv, args, cx, false).await }
+		else { self.call_undefined(name, args, cx).await }
+	}
+
+	pub(super) async fn eval_code_call(&mut self, call: &Call, code: &Expr, amp: bool, cx: Cx) -> PResult<Ret> {
+		let value = self.eval_scalar_async(code).await?;
+		let value = self.overload_deref(Sigil::Code, value)?;
+		let Some(cv) = self.code_value(&value, true)? else { return Err(self.die_msg("Not a CODE reference")); };
+		let args = self.call_args(call, amp, None).await?;
+		self.call_sub_kind(cv, args, cx, false).await
 	}
 
 	pub(super) fn named_lvalue(&self, name: &str) -> bool {
@@ -662,14 +783,14 @@ impl Interp<'_> {
 				};
 				let mut args = self.call_args(call, false, None).await?.into_vec();
 				args.insert(0, new_sv(invocant));
-				let result = self.call_sub_kind(&cv, InvokeArgs::Explicit(args), Cx::Scalar, true).await?.scalar();
+				let result = self.call_sub_kind(cv, InvokeArgs::Explicit(args), Cx::Scalar, true).await?.scalar();
 				return Ok(match result { Value::Ref(Ref::Scalar(s)) => Some(s), _ => None });
 			}
 			_ => return Ok(None),
 		};
 		let Some(cv) = cv else { return Ok(None); };
 		let args = self.call_args(call, inherit, call.prototype.as_ref()).await?;
-		Ok(match self.call_sub_kind(&cv, args, Cx::Scalar, true).await?.scalar() { Value::Ref(Ref::Scalar(s)) => Some(s), _ => None })
+		Ok(match self.call_sub_kind(cv, args, Cx::Scalar, true).await?.scalar() { Value::Ref(Ref::Scalar(s)) => Some(s), _ => None })
 	}
 
 	/// Calls a named lvalue sub in list context: references to the scalars, arrays and hashes it returns (see `lvalue_result`).
@@ -677,7 +798,7 @@ impl Interp<'_> {
 		let CallTarget::Named(name, inherit) = &call.target else { return Ok(Vec::new()); };
 		let Some(cv) = self.named_code(name) else { return Ok(Vec::new()); };
 		let args = self.call_args(call, *inherit, call.prototype.as_ref()).await?;
-		Ok(self.call_sub_kind(&cv, args, Cx::List, true).await?.list())
+		Ok(self.call_sub_kind(cv, args, Cx::List, true).await?.list())
 	}
 
 	async fn core_call(&mut self, b: Builtin, call: &Call, cx: Cx) -> Option<PResult<Ret>> {
@@ -880,13 +1001,13 @@ impl Interp<'_> {
 	fn caller_builtin(&mut self, explicit: bool, level: i64, cx: Cx) -> PResult<Ret> {
 		let Some(level) = usize::try_from(level).ok() else { return Ok(Ret::no_value(cx)); };
 		let frame = if explicit && cx == Cx::List && self.package.as_ref() == "DB" { self.caller_frame(level) }
-			else { self.frames.iter().rev().nth(level).map(|f| f.info.clone()) };
+			else { self.frames.iter().rev().nth(level).map(|f| f.snapshot(false)) };
 		let Some(frame) = frame else { return Ok(Ret::no_value(cx)); };
 		if cx != Cx::List { return Ok(Ret::One(Value::str(&frame.package))); }
 		let mut out = vec![Value::str(&frame.package), Value::str(&frame.file), Value::Int(i64::from(frame.line))];
 		if explicit {
 			if self.package.as_ref() == "DB" && let Some(args) = frame.args { self.av("DB::args").replace_elems(aliases(args)); }
-			let hint_bits = self.frames.iter().rev().nth(level).map_or(0, |frame| frame.hints.bitmask(frame.outer));
+			let hint_bits = self.frames.iter().rev().nth(level).map_or(0, |frame| frame.env.hints.bitmask(frame.outer));
 			let hints = self.caller_hints(level);
 			let warnings = hints.and_then(|h| h.warnings.packed()).map_or(Value::Undef, Value::Str);
 			let entries = hints.map_or_else(Vec::new, Hints::lexical_entries);
@@ -971,7 +1092,7 @@ impl Interp<'_> {
 
 	/// Async eval frame: runs a recursive body via a boxed-future closure.
 	pub(super) async fn with_eval_async(&mut self, cx: Cx, source: Option<PStr>, require: bool, f: impl AsyncFnOnce(&mut Self) -> PResult<Ret>) -> PResult<Ret> {
-		self.frames.push(self.frame(Some(Rc::from("(eval)")), cx, false, source, require, None));
+		self.frames.push(self.eval_frame(cx, source, require));
 		self.eval_contexts.push((cx, false));
 		let error = self.sv("main::@");
 		error.replace(Value::bytes(b""));
@@ -1001,7 +1122,7 @@ impl Interp<'_> {
 
 	/// Sync entry for the compilation boundary (loading.rs): runs a non-recursive body directly.
 	pub(super) fn with_eval(&mut self, cx: Cx, source: Option<PStr>, require: bool, f: impl FnOnce(&mut Self) -> PResult<Ret>) -> PResult<Ret> {
-		self.frames.push(self.frame(Some(Rc::from("(eval)")), cx, false, source, require, None));
+		self.frames.push(self.eval_frame(cx, source, require));
 		self.eval_contexts.push((cx, false));
 		let error = self.sv("main::@");
 		error.replace(Value::bytes(b""));

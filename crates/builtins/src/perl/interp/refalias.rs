@@ -51,7 +51,7 @@ impl Interp<'_> {
 				let our = match &self.scopes[scope].pad[offset].1 { Slot::Our(name) => Some(name.clone()), _ => None };
 				(scope, offset, false, our)
 			})
-		} else { self.scopes.iter().enumerate().rev().find_map(|(scope_ix, scope)| {
+		} else { self.scopes.iter().enumerate().skip(self.scope_base).rev().find_map(|(scope_ix, scope)| {
 			[(true, &scope.declarations), (false, &scope.pad)].into_iter().find_map(|(is_pending, pad)| {
 				let cached = e.cache.lexical.get();
 				let (index, (_, slot)) = pad.iter().enumerate().rfind(|(_, (id, _))| {
