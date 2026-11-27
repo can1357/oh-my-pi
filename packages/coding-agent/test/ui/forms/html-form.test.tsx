@@ -445,6 +445,42 @@ test.each([
 	},
 );
 
+test.each([
+	["k", "j"],
+	["-", "+"],
+])("Vim %s scrolls a tall question's text and %s scrolls back before leaving its text box", (up, down) => {
+	const context = Array.from({ length: 12 }, (_, i) => `<p>${i === 0 ? "TOP " : ""}context ${i + 1}</p>`).join("");
+	const model = new HtmlFormModel(
+		parseHtmlForm(
+			`<form>${context}<label>First <input name="a"></label><label>Second <input name="b"></label></form>`,
+		),
+		{ onSubmit: () => {}, onCancel: () => {} },
+		{ vim: { startMode: () => "normal" } },
+	);
+	const term = createTestTerminal(() => ({ dock: <HtmlFormDialog model={model} terminalRows={() => 16} /> }), {
+		columns: 60,
+		rows: 16,
+	});
+	const shows = (text: string) =>
+		term
+			.screen()
+			.slice(-16)
+			.some(row => row.includes(text));
+	try {
+		term.focus(term.surface.dock()[0]!);
+		for (let presses = 0; presses < 60 && !shows("TOP"); presses++) term.type(up);
+		expect(shows("TOP")).toBe(true);
+		// One step back down scrolls; the first box keeps the keys until it is on screen again.
+		term.type(down);
+		expect(model.active()).toBe(0);
+		for (let presses = 0; presses < 60 && !shows("First"); presses++) term.type(down);
+		term.type(down);
+		expect(model.active()).toBe(1);
+	} finally {
+		term.dispose();
+	}
+});
+
 corpusSuite({
 	dir: "forms/html-form",
 	mount(caseName, corpusCase, env): Mounted {

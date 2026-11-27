@@ -674,9 +674,11 @@ export class HtmlFormModel {
 		// The scroll actually on screen (a resize may have shrunk what fits), against the most that keeps the highlight on it.
 		const scrolled = painted ? Math.min(scroll, painted.maxScroll) : scroll;
 		const box = this.#activeBox();
-		const mode = box && this.vim(box)?.mode;
-		const down = listKeyId(routed) === "down" || (key.id === "j" && mode !== undefined && untrack(mode) === "normal");
-		// Down (Vim `j` in a text box too) scrolls back until the highlight shows, then moves it.
+		const vim = box && this.vim(box);
+		const vimDown =
+			(key.text === "j" || key.text === "+") && vim && untrack(vim.mode) === "normal" && vim.pendingText() === "";
+		const down = listKeyId(routed) === "down" || vimDown === true;
+		// Down (Vim `j`/`+` in a text box too) scrolls back until the highlight shows, then moves it.
 		if (scrolled > Math.max(0, painted?.reveal ?? 0) && down) {
 			this.scrollBack.set(scrolled - 1);
 			return true;
