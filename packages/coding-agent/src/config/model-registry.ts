@@ -1188,7 +1188,9 @@ export class ModelRegistry {
 		if (this.#owner) {
 			const owner = this.#owner;
 			return launch
-				? logger.time("hydrateCredentialScopedModelCaches", () => owner.hydrateCredentialScopedModelCaches(providers))
+				? logger.time("hydrateCredentialScopedModelCaches", () =>
+						owner.hydrateCredentialScopedModelCaches(providers),
+					)
 				: owner.hydrateCredentialScopedModelCaches(providers);
 		}
 		const filter = providers && new Set(Array.from(providers, provider => provider.toLowerCase()));
@@ -3023,7 +3025,13 @@ export class ModelRegistry {
 			? undefined
 			: this.#prepareRuntimeDiscoveryLanding(configuredDiscoveryResults, builtInDiscovery, references);
 		if (!precedingLanding && !preparing) {
-			this.#landRuntimeDiscoveries(configuredDiscoveryResults, builtInDiscovery, providerFilter, references, startup);
+			this.#landRuntimeDiscoveries(
+				configuredDiscoveryResults,
+				builtInDiscovery,
+				providerFilter,
+				references,
+				startup,
+			);
 			return;
 		}
 		const { promise: landing, resolve: landed } = Promise.withResolvers<void>();
@@ -3035,7 +3043,13 @@ export class ModelRegistry {
 			} else {
 				await preparing;
 			}
-			this.#landRuntimeDiscoveries(configuredDiscoveryResults, builtInDiscovery, providerFilter, references, startup);
+			this.#landRuntimeDiscoveries(
+				configuredDiscoveryResults,
+				builtInDiscovery,
+				providerFilter,
+				references,
+				startup,
+			);
 		} finally {
 			if (this.#discoveryLandingTail === landing) this.#discoveryLandingTail = undefined;
 			landed();
@@ -4606,7 +4620,8 @@ export class ModelRegistry {
 		// scope that landed the named provider; let the full pass revalidate it.
 		if (this.#owner) return "conservative:mirror";
 		const changed = await this.#pollStartupCacheCredentials();
-		if (changed !== false) return changed ? "conservative:credentials-changed" : "conservative:credential-poll-failed";
+		if (changed !== false)
+			return changed ? "conservative:credentials-changed" : "conservative:credential-poll-failed";
 		if (this.#runtimeRegistrations.length) return `conservative:registration:${this.#runtimeRegistrations[0].name}`;
 		if (this.#hasFullSnapshot) return "conservative:full-snapshot";
 		const isAvailable = this.#createProviderAvailabilityCheck();
@@ -4629,7 +4644,8 @@ export class ModelRegistry {
 			) {
 				continue;
 			}
-			if (isAvailable(other) || this.#hasStartupDiscoveryAuth(other)) return `conservative:credential-scoped:${other}`;
+			if (isAvailable(other) || this.#hasStartupDiscoveryAuth(other))
+				return `conservative:credential-scoped:${other}`;
 			const descriptor = PROVIDER_DESCRIPTORS.find(candidate => candidate.providerId === other);
 			if (!descriptor) {
 				// Special managers require a key. Catalog-only managers may
@@ -4641,12 +4657,16 @@ export class ModelRegistry {
 			}
 			if (!this.#canUseDescriptorWithoutAuth(descriptor)) continue;
 			const table = reviewedCollapseTable(other);
-			if (table && (table.families.length > 0 || table.templates?.length)) return `conservative:reviewed-table:${other}`;
+			if (table && (table.families.length > 0 || table.templates?.length))
+				return `conservative:reviewed-table:${other}`;
 			const options = this.#createDescriptorModelManagerOptions(descriptor, undefined);
 			// Without a reviewed collapse table the offline roster contributes
 			// only input IDs and recorded wire IDs as aliases. Read persisted
 			// rows directly, not the manager's merge, policies, or landing.
-			const staticCollision = startupRoleRowCollision(options.staticModels ?? getBundledModelSlice(other), selectorIds);
+			const staticCollision = startupRoleRowCollision(
+				options.staticModels ?? getBundledModelSlice(other),
+				selectorIds,
+			);
 			if (staticCollision) return staticCollision;
 			const cache = readModelCache(
 				options.cacheProviderId ?? other,

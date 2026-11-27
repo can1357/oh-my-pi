@@ -2821,7 +2821,10 @@ function installExtensionGraphHook(
  * Returns a clearable handle to drop cached sources that weren't consumed
  * during the initial load; `undefined` when no new modules were discovered.
  */
-async function ensureExtensionGraphHook(entryRealPath: string, reload: boolean): Promise<{ clear(): void } | undefined> {
+async function ensureExtensionGraphHook(
+	entryRealPath: string,
+	reload: boolean,
+): Promise<{ clear(): void } | undefined> {
 	// The CommonJS bridge still needs its definitions even when there are no edges.
 	const plainEntry = reload || /\.(?:cjs|cts)$/i.test(entryRealPath) ? undefined : entryRealPath;
 	const sources = new ExtensionGraphSources(plainEntry);
