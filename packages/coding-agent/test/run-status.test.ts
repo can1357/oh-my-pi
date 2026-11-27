@@ -194,12 +194,12 @@ describe("run status OSC 7501 reporting", () => {
 		expect(writes).toEqual([report("state=working:app=omp"), report("state=idle:app=omp")]);
 	});
 
-	it("keeps prompt navigation before negotiation and suppresses redraws only after confirmation", () => {
-		// User-message bubbles paint their OSC 133 prompt zones while this reads true.
+	it("keeps prompt navigation before negotiation and suppresses prompt marks only after confirmation", () => {
+		// User messages can mark their scrollback rows while this reads true.
 		const marked = () => promptZonesEnabled();
 
 		// An unknown terminal may ignore OSC 7501; `agent_start` reports
-		// working before this bubble's first paint.
+		// working before the bubble reaches scrollback.
 		setRunStatus({ state: "working" });
 		expect(marked()).toBe(true);
 		setProgramStatusSupported(true);

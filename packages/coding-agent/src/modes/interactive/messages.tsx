@@ -294,6 +294,7 @@ function promptFace(
 					reaction,
 					actions: env.actions,
 					promptZones: env.promptZones,
+					promptZoneKey: message,
 					magicKeywords: env.magicKeywords,
 					onAction: act => env.onUserAction(act, text, message.timestamp),
 				}}
