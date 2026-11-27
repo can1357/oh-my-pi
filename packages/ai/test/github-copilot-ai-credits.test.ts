@@ -201,6 +201,41 @@ describe("Responses: copilot_usage on response.completed", () => {
 		expect(framed.usage.aiu?.nano).toBe(436_590_000);
 		expect(framed.usage.aiuMissing).toBeUndefined();
 	});
+
+	it("marks a reply that streamed text and then dropped before its terminal event", async () => {
+		// Responses reports tokens only on the terminal event, so the dropped reply carries none.
+		const result = await streamOpenAIResponses(makeResponsesModel("github-copilot"), context, {
+			apiKey: "ghu_test",
+			fetch: vi.fn(async () =>
+				sse([
+					{
+						type: "response.output_item.added",
+						output_index: 0,
+						item: { type: "message", id: "msg_1", role: "assistant", status: "in_progress", content: [] },
+					},
+					{
+						type: "response.content_part.added",
+						item_id: "msg_1",
+						output_index: 0,
+						content_index: 0,
+						part: { type: "output_text", text: "", annotations: [] },
+					},
+					{
+						type: "response.output_text.delta",
+						item_id: "msg_1",
+						output_index: 0,
+						content_index: 0,
+						delta: "partial answer",
+					},
+				]),
+			) as unknown as typeof fetch,
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.usage.totalTokens).toBe(0);
+		expect(result.content.length).toBeGreaterThan(0);
+		expect(result.usage.aiuMissing).toBe(true);
+	});
 });
 
 function sse(events: Array<Record<string, unknown>>): Response {

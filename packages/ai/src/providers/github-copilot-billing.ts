@@ -56,12 +56,19 @@ export function applyCopilotUsageFrame(usage: Usage, event: unknown): void {
 /**
  * Record a missing billing frame on a finished call: a `reports-aiu` model whose reply carried none gets
  * `usage.aiuMissing`, so consumers count it as unknown spend instead of inferring it (a transcript from
- * before the frame was read carries neither). A call that ended on an error or abort before any token
- * never reached the frame and stays unmarked.
+ * before the frame was read carries neither). A call that ended on an error or abort before any token or
+ * content never reached the frame and stays unmarked; Responses reports tokens only on its terminal event,
+ * so streamed content alone counts.
  */
 export function markMissingCopilotUsageFrame(model: Model<Api>, message: AssistantMessage): void {
 	const usage = message.usage;
 	if (usage.aiu || resolveCatalogPolicy(model).reportsAiu !== true) return;
-	if ((message.stopReason === "error" || message.stopReason === "aborted") && usage.totalTokens === 0) return;
+	if (
+		(message.stopReason === "error" || message.stopReason === "aborted") &&
+		usage.totalTokens === 0 &&
+		message.content.length === 0
+	) {
+		return;
+	}
 	usage.aiuMissing = true;
 }
