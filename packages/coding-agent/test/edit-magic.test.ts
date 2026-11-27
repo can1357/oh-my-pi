@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
+import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import type { Api, AssistantMessage, Message, Model, Tool, ToolCall } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
@@ -10,6 +11,7 @@ import { applyDescribedChange, parseMagicInput } from "@oh-my-pi/pi-coding-agent
 import { applyReplace, readBufferLines } from "@oh-my-pi/pi-coding-agent/edit/magic-tools";
 import { fileViews } from "@oh-my-pi/pi-coding-agent/edit/magic-view";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 import { rejectionOf } from "./helpers/rejection";
@@ -614,6 +616,48 @@ describe("edit tool in magic mode", () => {
 			input: "# sample.ts\n- Make total return sum + 1.",
 		});
 		expect(used).toEqual(["role-model", "role-model"]);
+	});
+
+	it("preserves checkoutNotice on perFileResults when a multi-file magic edit touches a sibling worktree", async () => {
+		using tempDir = TempDir.createSync("@omp-magic-worktree-");
+		const cwd = tempDir.join("main");
+		const gitDir = path.join(cwd, ".git");
+		await fsp.mkdir(path.join(gitDir, "objects"), { recursive: true });
+		await fsp.mkdir(path.join(gitDir, "refs", "heads"), { recursive: true });
+		await Bun.write(path.join(gitDir, "HEAD"), "ref: refs/heads/main\n");
+		await Bun.write(
+			path.join(gitDir, "config"),
+			"[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n\thooksPath = /dev/null\n[commit]\n\tgpgsign = false\n[user]\n\tname = Test\n\temail = test@example.com\n",
+		);
+		await Bun.write(path.join(cwd, "local.ts"), "export const value = 1;\n");
+		const repo = vcs.requireGit(cwd);
+		await repo.stageFiles(["local.ts"]);
+		const head = await repo.commitCreate("initial", {
+			author: { name: "Test", email: "test@example.com" },
+			noVerify: true,
+		});
+		const linked = tempDir.join("linked");
+		await repo.createBranch("preview", head, false);
+		await repo.worktreeAdd(linked, "preview", { detach: false, clone: false });
+
+		const siblingFile = path.join(linked, "local.ts");
+		const { tool } = magicTool(cwd, messages =>
+			messages.length === 1
+				? toolMsg([
+						{
+							name: "replace",
+							arguments: { old_string: "export const value = 1;", new_string: "export const value = 2;" },
+						},
+					])
+				: textMsg("DONE"),
+		);
+		const result = await tool.execute("magic-multi-worktree", {
+			input: `# local.ts\n- Change value to 2.\n# ${siblingFile}\n- Change value to 2.\n`,
+		});
+		expect(result.isError).toBeUndefined();
+		expect(result.details?.perFileResults).toHaveLength(2);
+		expect(result.details?.perFileResults?.[0]?.checkoutNotice).toBeUndefined();
+		expect(result.details?.perFileResults?.[1]?.checkoutNotice).toBe("Edited worktree: preview (session: main)");
 	});
 
 	it("applies each file of a batch on its own and reports the one that was refused", async () => {

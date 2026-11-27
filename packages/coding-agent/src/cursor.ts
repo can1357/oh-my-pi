@@ -38,6 +38,7 @@ import {
 import { editDiffString } from "@oh-my-pi/pi-natives";
 import { isEnoent, sanitizeText } from "@oh-my-pi/pi-utils";
 import { cursorMcpPrefersReplaceEdit, normalizeCursorReplaceArgs } from "./cursor-replace-args";
+import { createCheckoutNotice } from "./edit/checkout-notice";
 import { normalizeToLF, stripBom } from "./edit/normalize";
 import type { MCPResourceReadResult } from "./mcp/types";
 import {
@@ -382,7 +383,8 @@ async function materializeEdit(
 	pathArg: string,
 	content: string,
 ): Promise<ToolResultMessage> {
-	const absolutePath = resolveToCwd(pathArg, options.getCwd?.() ?? options.cwd);
+	const cwd = options.getCwd?.() ?? options.cwd;
+	const absolutePath = resolveToCwd(pathArg, cwd);
 	let before: string | undefined;
 	try {
 		before = await fs.promises.readFile(absolutePath, "utf8");
@@ -391,17 +393,32 @@ async function materializeEdit(
 	}
 	const written = await executeTool(withoutEvents(options), "write", toolCallId, { path: pathArg, content });
 	const result: ToolResultMessage = { ...written, toolName: "edit" };
-	if (!written.isError && before !== undefined) {
-		// `write` restores the file's CRLF and BOM, so compare both sides as `edit` does.
-		const { diff, firstChangedLine } = editDiffString(
-			normalizeToLF(stripBom(before).text),
-			normalizeToLF(stripBom(content).text),
-			absolutePath,
-		);
+	if (!written.isError) {
+		const checkoutNotice = createCheckoutNotice(cwd)?.({ path: absolutePath, followSymlinks: true });
 		const writeDetails =
 			typeof written.details === "object" && written.details !== null ? written.details : undefined;
-		const details: EditToolDetails = { ...writeDetails, diff, firstChangedLine, path: absolutePath };
-		result.details = details;
+		if (before !== undefined) {
+			// `write` restores the file's CRLF and BOM, so compare both sides as `edit` does.
+			const { diff, firstChangedLine } = editDiffString(
+				normalizeToLF(stripBom(before).text),
+				normalizeToLF(stripBom(content).text),
+				absolutePath,
+			);
+			const details: EditToolDetails = {
+				...writeDetails,
+				diff,
+				firstChangedLine,
+				path: absolutePath,
+				...(checkoutNotice ? { checkoutNotice } : {}),
+			};
+			result.details = details;
+		} else if (checkoutNotice) {
+			const details: EditToolDetails = { ...writeDetails, diff: "", path: absolutePath, checkoutNotice };
+			result.details = details;
+		}
+		if (checkoutNotice) {
+			result.content = [...result.content, { type: "text", text: checkoutNotice }];
+		}
 	}
 	options.emitEvent?.({
 		type: "tool_execution_end",
