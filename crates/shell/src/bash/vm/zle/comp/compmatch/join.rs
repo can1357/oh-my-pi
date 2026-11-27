@@ -4,6 +4,7 @@
 //! `join_psfx`, `join_mid`, `sub_join`).
 
 use bstr::BString;
+use xutf::{Utf8Decoder, Utf8Step};
 
 use super::{
 	CHR_INVALID, PP_LOWER, PP_UPPER, at, cline_setlens, cp_cline, free_cline, get_cline,
@@ -612,9 +613,8 @@ fn sub_match(c: &Comp, md: &mut Cmdata, s: &[u8], mut len: i32, sfx: bool) -> i3
 		if qm != 0 {
 			let mut p = 0isize;
 			while p < fulllen {
-				let mut buf = [0u8; 4];
-				let mut n = 0;
-				let mut cnt = super::Mb::Invalid;
+				let mut decoder = Utf8Decoder::new();
+				let mut cnt = Utf8Step::Reject;
 				let mut p2 = p;
 				while p2 < fulllen {
 					let cur = if at(s, p2) == META {
@@ -623,19 +623,13 @@ fn sub_match(c: &Comp, md: &mut Cmdata, s: &[u8], mut len: i32, sfx: bool) -> i3
 					} else {
 						at(s, p2)
 					};
-					if n == buf.len() {
-						cnt = super::Mb::Invalid;
-						break;
-					}
-					buf[n] = cur;
-					n += 1;
-					cnt = super::mbdecode(&buf[..n]);
-					if !matches!(cnt, super::Mb::Incomplete) {
+					cnt = decoder.push(cur);
+					if !matches!(cnt, Utf8Step::Pending) {
 						break;
 					}
 					p2 += 1;
 				}
-				if !matches!(cnt, super::Mb::Valid(_)) {
+				if !matches!(cnt, Utf8Step::Char(_)) {
 					break;
 				}
 				p2 += 1;
