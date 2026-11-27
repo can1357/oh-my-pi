@@ -171,6 +171,11 @@ const MODEL_USAGE_SINCE_MS = Date.parse("2026-08-31T00:00:00Z");
 // approval recording shipped are re-parsed once so older cursors stay put.
 const TOOL_APPROVALS_BACKFILL_KEY = "tool_approvals_v1";
 const TOOL_APPROVALS_SINCE_MS = Date.parse("2026-11-01T00:00:00Z");
+// A reset fork (`/tan`) now leaves the requests, prompts, tool calls, approvals and Spotlight rows of its
+// copied prefix to its parent; a clone an older build synced before its parent still owns them. One
+// reconciliation replay hands back the first three (see `applySessionParseResults`); it keeps Spotlight
+// and approval rows, so the files owning any are re-parsed from byte zero, which rebuilds them.
+const INHERITED_PREFIX_REPLAY_KEY = "inherited_prefix_replay_v1";
 function shouldResetBackfill(value: string | undefined): boolean {
 	return value !== BACKFILL_COMPLETE && value !== BACKFILL_PENDING;
 }
@@ -624,6 +629,7 @@ export async function initDb(): Promise<Database> {
 	reparseModifiedSince(db, SNAPCOMPACT_COMPACTIONS_BACKFILL_KEY, SNAPCOMPACT_COMPACTIONS_SINCE_MS);
 	reparseModifiedSince(db, MODEL_USAGE_PURPOSE_BACKFILL_KEY, MODEL_USAGE_SINCE_MS);
 	reparseModifiedSince(db, TOOL_APPROVALS_BACKFILL_KEY, TOOL_APPROVALS_SINCE_MS);
+	replayInheritedPrefixes(db);
 	ensureRollupSchema(db);
 	return db;
 }
@@ -876,6 +882,29 @@ function reparseModifiedSince(database: Database, key: string, sinceMs: number):
 	database.transaction(() => {
 		database.query("DELETE FROM file_offsets WHERE last_modified >= ?").run(sinceMs);
 		database.query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)").run(key, BACKFILL_COMPLETE);
+	})();
+}
+
+/**
+ * Hand each reset fork's copied prefix back to its parent once ({@link INHERITED_PREFIX_REPLAY_KEY}):
+ * the next sync replays every transcript, and files owning Spotlight or approval rows lose their cursors
+ * so it rebuilds those rows too. A database without cursors has stored nothing to repair.
+ */
+function replayInheritedPrefixes(database: Database): void {
+	const row = database
+		.query<{ value: string }, [string]>("SELECT value FROM meta WHERE key = ?")
+		.get(INHERITED_PREFIX_REPLAY_KEY);
+	if (row?.value === BACKFILL_COMPLETE) return;
+	database.transaction(() => {
+		if (database.query("SELECT 1 FROM file_offsets LIMIT 1").get()) {
+			database.run(
+				"DELETE FROM file_offsets WHERE session_file IN (SELECT session_file FROM spotlight_sessions UNION SELECT session_file FROM tool_approvals)",
+			);
+			database.run("INSERT OR REPLACE INTO meta (key, value) VALUES ('session_reconciliation', 'pending')");
+		}
+		database
+			.query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
+			.run(INHERITED_PREFIX_REPLAY_KEY, BACKFILL_COMPLETE);
 	})();
 }
 

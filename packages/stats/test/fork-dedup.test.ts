@@ -372,6 +372,83 @@ describe("stats sync deduplicates forked-session entries", () => {
 		expect(approvals.map(approval => approval.session_file)).toEqual([parentFile]);
 	});
 
+	it.each([
+		{ name: "its requests, prompts and tool calls", approval: false },
+		// Approval (and Spotlight) rows survive a reconciliation replay; the upgrade re-parses their files.
+		{ name: "its tool approvals too", approval: true },
+	])(
+		"hands a reset fork's copies that an older build gave the fork back to the parent on upgrade: $name",
+		async ({ approval }) => {
+			const ts = new Date("2026-06-24T10:00:00.000Z").toISOString();
+			const userEntry = buildUserEntry("user01ab", ts, "hello");
+			const plainEntry = buildAssistantEntry({ entryId: "asst01ab", parentId: "user01ab", timestamp: ts });
+			const toolCall = { type: "toolCall", id: "call01ab", name: "read", arguments: { path: "a.ts" } };
+			const assistantEntry = {
+				...plainEntry,
+				message: { ...plainEntry.message, content: [...plainEntry.message.content, toolCall] },
+			};
+			const approvalEntry = {
+				type: "custom",
+				id: "appr01ab",
+				parentId: "asst01ab",
+				timestamp: ts,
+				customType: "tool_approval_requested",
+				data: { toolCallId: "call01ab", toolName: "read", requestedAt: ts },
+			};
+			const parentEntries = approval ? [userEntry, assistantEntry, approvalEntry] : [userEntry, assistantEntry];
+			const parentFile = await writeSessionFile(
+				"--tmp--fork-dedup",
+				"01_parent.jsonl",
+				{ id: "parent00", cwd: "/tmp/project" },
+				parentEntries,
+			);
+			const copied = structuredClone(assistantEntry);
+			copied.message.usage.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+			const copies = approval ? [userEntry, copied, approvalEntry] : [userEntry, copied];
+			const lastCopy = copies[copies.length - 1].id;
+			const ownTs = new Date("2026-06-24T10:05:00.000Z").toISOString();
+			const forkFile = await writeSessionFile(
+				"--tmp--fork-dedup",
+				"02_fork.jsonl",
+				{ id: "fork0000", cwd: "/tmp/project", parentSession: parentFile, inheritedThroughEntryId: lastCopy },
+				[...copies, buildAssistantEntry({ entryId: "asst02cd", parentId: lastCopy, timestamp: ownTs })],
+			);
+			await syncAllSessions({ workers: 1, files: [parentFile, forkFile] });
+
+			// The state an older build left when the fork synced first: the fork owns the copied rows at its
+			// zeroed cost, both cursors are current, and the upgrade's one-shot has not run.
+			const db = await initDb();
+			db.query(
+				"UPDATE messages SET session_file = ?, cost_input = 0, cost_output = 0, cost_total = 0 WHERE entry_id = ?",
+			).run(forkFile, "asst01ab");
+			db.query("UPDATE user_messages SET session_file = ? WHERE entry_id = ?").run(forkFile, "user01ab");
+			db.query("UPDATE tool_calls SET session_file = ? WHERE tool_call_id = ?").run(forkFile, "call01ab");
+			db.query("UPDATE tool_approvals SET session_file = ? WHERE tool_call_id = ?").run(forkFile, "call01ab");
+			db.query("DELETE FROM meta WHERE key = ?").run("inherited_prefix_replay_v1");
+			expect(getOverallStats().totalCost).toBeCloseTo(0.003, 8);
+			closeDb();
+
+			await initDb();
+			await syncAllSessions({ workers: 1, files: [forkFile, parentFile] });
+
+			const requests = getRecentRequests(10);
+			expect(requests.find(request => request.entryId === "asst01ab")?.sessionFile).toBe(parentFile);
+			expect(requests.find(request => request.entryId === "asst02cd")?.sessionFile).toBe(forkFile);
+			expect(getOverallStats().totalCost).toBeCloseTo(0.006, 8);
+			const repaired = await initDb();
+			const owners = (sql: string, id: string) =>
+				repaired
+					.query<{ session_file: string }, [string]>(sql)
+					.all(id)
+					.map(row => row.session_file);
+			expect(owners("SELECT session_file FROM user_messages WHERE entry_id = ?", "user01ab")).toEqual([parentFile]);
+			expect(owners("SELECT session_file FROM tool_calls WHERE tool_call_id = ?", "call01ab")).toEqual([parentFile]);
+			expect(owners("SELECT session_file FROM tool_approvals WHERE tool_call_id = ?", "call01ab")).toEqual(
+				approval ? [parentFile] : [],
+			);
+		},
+	);
+
 	it("counts every call of a session whose header marks an entry its file does not hold", async () => {
 		const ts = new Date("2026-06-24T10:00:00.000Z").toISOString();
 		const laterTs = new Date("2026-06-24T10:05:00.000Z").toISOString();
