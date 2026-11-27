@@ -101,10 +101,19 @@ async function readProbePipe(reader: ReadableStreamDefaultReader<Uint8Array>, ou
 	}
 }
 
+export interface WindowsRelayDiscoveryOptions {
+	/** Helper argv; defaults to the PowerShell probe. */
+	command?: string[];
+	/** Fires when discovery has run too long; defaults to a 4 s timer. */
+	deadline?: AbortSignal;
+}
+
 /** Find the newest Windows relay whose file record, listener and HTTP identity agree. */
-export async function discoverWindowsRelay(signal?: AbortSignal, command = WINDOWS_PROBE_COMMAND): Promise<RelayKind> {
+export async function discoverWindowsRelay(
+	signal?: AbortSignal,
+	{ command = WINDOWS_PROBE_COMMAND, deadline = AbortSignal.timeout(4_000) }: WindowsRelayDiscoveryOptions = {},
+): Promise<RelayKind> {
 	throwIfAborted(signal);
-	const deadline = AbortSignal.timeout(4_000);
 	const probeSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
 	let phase = "spawn";
 	try {

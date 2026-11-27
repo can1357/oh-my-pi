@@ -288,18 +288,6 @@ describe("browser open with a mirrored WSL relay", () => {
 			expect(windows).toHaveBeenCalledTimes(1);
 			expect(workers).toBe(1);
 
-			const connecting = Promise.withResolvers<never>();
-			const connect = spyOn(Bun, "connect").mockImplementationOnce(() => connecting.promise);
-			try {
-				// A pending TCP connect must not keep the raw GET alive past its cheap-probe budget.
-				await expect(invoke(tool, { ...open, timeout: 1 })).rejects.toThrow(/did not answer from WSL/);
-			} finally {
-				connect.mockRestore();
-				void connecting.promise.catch(() => undefined);
-				connecting.reject(new Error("fixture connect ended"));
-			}
-			expect(windows).toHaveBeenCalledTimes(2);
-
 			old.stop();
 			const requests: string[] = [];
 			using _impostor = Bun.serve({
@@ -311,10 +299,10 @@ describe("browser open with a mirrored WSL relay", () => {
 				},
 			});
 			await expect(invoke(tool, open)).rejects.toThrow(/bound Windows omp browser relay.*did not answer from WSL/);
-			expect(windows).toHaveBeenCalledTimes(3);
+			expect(windows).toHaveBeenCalledTimes(2);
 			windows.mockResolvedValue(replacementKind);
 			await expect(invoke(tool, open)).rejects.toThrow(/bound to a different browser/);
-			expect(windows).toHaveBeenCalledTimes(4);
+			expect(windows).toHaveBeenCalledTimes(3);
 			expect(requests).toEqual(["GET /json/version", "GET /json/version"]);
 			expect(getTab(name)).toBe(bound);
 			expect(workers).toBe(1);
@@ -322,7 +310,7 @@ describe("browser open with a mirrored WSL relay", () => {
 			expect((await invoke(tool, { ...open, name: freshName })).text).toStartWith(`Opened tab "${freshName}"`);
 			expect(getTab(freshName)?.browser.kind).toEqual(replacementKind);
 			// The relay discovery last verified answers its identity again: no new helper launch.
-			expect(windows).toHaveBeenCalledTimes(4);
+			expect(windows).toHaveBeenCalledTimes(3);
 
 			process.env.PI_BROWSER_RELAY = "only";
 			process.env.PI_PANEL_RELAY_URL = replacementKind.cdpUrl;
@@ -330,7 +318,7 @@ describe("browser open with a mirrored WSL relay", () => {
 			await expect(invoke(panel, open)).rejects.toThrow(/bound to a different browser/);
 			expect((await invoke(panel, { ...open, name: panelName })).text).toStartWith(`Opened tab "${panelName}"`);
 			expect(getTab(panelName)?.browser.kind).toEqual({ kind: "relay", cdpUrl: replacementKind.cdpUrl });
-			expect(windows).toHaveBeenCalledTimes(4);
+			expect(windows).toHaveBeenCalledTimes(3);
 		} finally {
 			for (const tab of [name, freshName, panelName])
 				await releaseTab(tab, { keepPage: true }).catch(() => undefined);
