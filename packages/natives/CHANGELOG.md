@@ -18,7 +18,7 @@
 - Improved URL reading to preserve model tables, source-code indentation, linked content cards, meaningful button labels, and sign-in instructions while removing unrelated news, footer content, and empty whitespace-only paragraphs.
 - Fixed `Process.terminate` so descendants that start their own sessions are still terminated reliably.
 - Fixed the Linux GNU native addon so it no longer requires `libm.so.6` for the Perl `POSIX` `acosh` and `asinh` builtins.
-- Fixed the shell's `read -t` ignoring its timeout on input that never blocks (`read -t 0.5 x < /dev/zero`), and a cancelled command leaving such a read running.
+- Fixed the shell's `read -t` ignoring its timeout on input that never blocks (`read -t 0.5 x < /dev/zero`), and a cancelled command leaving such a read running ([#20795](https://github.com/can1357/oh-my-pi/pull/20795) by [@itskaism](https://github.com/itskaism))
 
 ## [19.2.1] - 2026-11-25
 
