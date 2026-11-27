@@ -40,12 +40,13 @@ import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { extensionTheme } from "../../ui/extensions/render-output";
 import type { ComposerShape } from "../../ui/styles/composer/shapes";
-import { formatAsyncJobLabel } from "../../async";
+import { capAsyncJobOutcome, formatAsyncJobLabel } from "../../async";
 import type { SendUserMessageOptions } from "../../session/agent-session";
 import { MAIN_AGENT_ID } from "../../registry/agent-registry";
 import type { SessionManager } from "../../session/session-manager";
 import type { ApprovalRecordSink } from "../../session/tool-approval-records";
 import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-write-fallback";
+import { resolveInlineByteCapBudget } from "../../tools/output-meta";
 import { truncateTail } from "../../tools/streaming-output";
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
 import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shared-events";
@@ -2097,9 +2098,18 @@ export class ExtensionRunner {
 							asyncJobManager.register(
 								"extension",
 								extensionJobText(label),
-								// Bounded like a background `bash` job's output preview: job views paint the whole text.
+								// Bounded like a background `bash` job: progress like its output preview (job views paint all of
+								// it), the result or failure like the output it hands the model.
 								({ jobId, signal, reportProgress }) =>
-									run({ jobId, signal, reportProgress: text => reportProgress(truncateTail(text).content) }),
+									capAsyncJobOutcome(
+										() =>
+											run({
+												jobId,
+												signal,
+												reportProgress: text => reportProgress(truncateTail(text).content),
+											}),
+										resolveInlineByteCapBudget(this.settings),
+									),
 								{
 									ownerId: this.agent.id,
 									intent: options?.intent ? extensionJobText(options.intent) : undefined,
