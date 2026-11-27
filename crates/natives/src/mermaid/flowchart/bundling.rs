@@ -391,4 +391,30 @@ mod tests {
 		assert!(graph.bundles.is_empty());
 		assert!(graph.edges.iter().all(|edge| edge.bundle.is_none()));
 	}
+
+	#[test]
+	fn skipped_top_row_fan_in_keeps_its_sources_fan_out() {
+		let mut graph = graph(LayoutDirection::TD);
+		let node = graph.nodes[0].clone();
+		graph.nodes = [(0, 0), (3, 4), (1, 6), (0, 8), (4, 8)]
+			.into_iter()
+			.enumerate()
+			.map(|(index, (x, y))| AsciiNode {
+				index,
+				grid_coord: Some(GridCoord::new(x, y)),
+				..node.clone()
+			})
+			.collect();
+		let edge = graph.edges[0].clone();
+		// Both back edges end on the top row; node 1 also fans out downward.
+		graph.edges = [(1, 0), (2, 0), (1, 3), (1, 4)]
+			.into_iter()
+			.map(|(from, to)| AsciiEdge { from, to, ..edge.clone() })
+			.collect();
+		analyze_edge_bundles(&mut graph);
+		assert_eq!(graph.bundles.len(), 1);
+		assert_eq!(graph.bundles[0].kind, BundleKind::FanOut);
+		assert_eq!(graph.bundles[0].edges, vec![2, 3]);
+		assert!(graph.edges[..2].iter().all(|edge| edge.bundle.is_none()));
+	}
 }
