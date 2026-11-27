@@ -311,16 +311,6 @@ crate.annotation(
     },
     crate = "ring",
 )
-# psm (via wasmtime) assembles windows-aarch64 from its GAS source
-# off a Windows host, but preprocesses that source only for GNU-style
-# compilers; under clang-cl its GLOBL/FUNCTION macros stay unexpanded. Hand it
-# @msvc_cc_arm64's GNU-driver clang (see the ring note). Absent elsewhere.
-crate.annotation(
-    build_script_env = {
-        "CC_aarch64_pc_windows_msvc": "$${pwd}/external/+msvc_cc_repository+msvc_cc_arm64/bin/clang",
-    },
-    crate = "psm",
-)
 # --- end msvc cross toolchain ---------------------------------------------------
 
 # --- darwin cross toolchain (owned by bazel/toolchains/darwin) -----------------
