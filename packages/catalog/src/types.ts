@@ -505,7 +505,10 @@ export interface OpenAICompat {
 	/**
 	 * Request header carrying the conversation session id, independent of prompt
 	 * caching. One vocabulary for the `session-header` axis across the OpenAI
-	 * and Anthropic compat records. Default: unset.
+	 * and Anthropic compat records, but not one behavior: on OpenAI-compatible
+	 * rows the declared header replaces the generic `x-session-id`; on Anthropic
+	 * rows it is sent in addition to it (see `ResolvedAnthropicCompat`).
+	 * Default: unset.
 	 */
 	sessionHeader?: "x-litellm-session-id" | "x-client-session-id";
 	/** Whether chat-completions payloads should include provider-specific prompt-cache markers. */
@@ -1310,7 +1313,9 @@ export type ResolvedAnthropicCompat = Required<
 	/**
 	 * Request header carrying the conversation session id. Rule-owned: GitHub
 	 * Copilot's `/v1/messages` returns blocked replies without usage when it is
-	 * missing. Undefined sends none.
+	 * missing. Additive: unlike OpenAI-compatible rows, where it replaces the
+	 * generic `x-session-id`, the request builder still sends `x-session-id` and
+	 * the Claude Code session header alongside it. Undefined sends none.
 	 */
 	sessionHeader?: OpenAICompat["sessionHeader"];
 	/**
