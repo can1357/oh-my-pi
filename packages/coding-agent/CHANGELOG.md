@@ -64,6 +64,7 @@
 - Added `codexResets.expirySalvage` (default `true`): set it to `false` to auto-redeem saved Codex resets only when an exhausted window blocks the account, never spending expiring credits early and forfeiting remaining weekly quota ([#18308](https://github.com/can1357/oh-my-pi/issues/18308))
 - Added `ctx.cancelAsyncJob(id)` to the extension context, so an extension can cancel the session's own background jobs (such as `task` workers) like `/jobs kill` ([#18033](https://github.com/can1357/oh-my-pi/issues/18033))
 - Added the `git.childRepoDiscovery` setting: set it to `false` to stop a session started outside a repository from scanning its direct child directories and adopting a single child checkout for the status line, git/PR lookup, and prompt context ([#18232](https://github.com/can1357/oh-my-pi/issues/18232))
+- `omp models --json` now reports each model's compat overrides under `compat` (`extraBody` values redacted) ([#17092](https://github.com/can1357/oh-my-pi/issues/17092))
 
 ### Changed
 
@@ -220,6 +221,7 @@
 - With both eval runtimes enabled, the eval tool helper list now names the JS spelling `judgeBatch` alongside Python's `judge_batch` ([#17273](https://github.com/can1357/oh-my-pi/issues/17273))
 - Fixed the working row keeping the previous turn's tool intent (e.g. a lone `todo init`) while the next model request is pending; it now falls back to the default label at each turn start ([#17347](https://github.com/can1357/oh-my-pi/issues/17347))
 - Fixed `todo` init/append with an unknown field such as `tasks` failing as "Missing list for init operation"; the error now names the unknown field and the expected shape, and the tool description includes parameter examples ([#17052](https://github.com/can1357/oh-my-pi/issues/17052))
+- Fixed `omp config get`/`list` ignoring `--config` overlays, whether passed before or after `config` ([#17092](https://github.com/can1357/oh-my-pi/issues/17092))
 
 ### Removed
 

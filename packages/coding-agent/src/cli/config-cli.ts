@@ -30,6 +30,8 @@ export interface ConfigCommandArgs {
 		json?: boolean;
 		/** `list` shows only the keys this layer sets, with the values as written. */
 		scope?: ConfigScope;
+		/** Extra `config.yml` overlays layered for `get`/`list`; `set`/`reset` always write global config. */
+		config?: string[];
 	};
 }
 // =============================================================================
@@ -119,7 +121,8 @@ export async function runConfigCommand(cmd: ConfigCommandArgs): Promise<void> {
 		console.error(chalk.red("--scope applies to `config list` only"));
 		process.exit(1);
 	}
-	await Settings.init();
+	const readsEffective = cmd.action === "get" || cmd.action === "list";
+	await Settings.init(readsEffective ? { configFiles: cmd.flags.config } : undefined);
 
 	switch (cmd.action) {
 		case "list":

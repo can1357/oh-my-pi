@@ -85,6 +85,8 @@ interface ModelJson {
 	input: ("text" | "image")[];
 	cost: Model<Api>["cost"];
 	pricingStatus: ModelPricingStatus;
+	/** Sparse compat overrides in force (catalog + models.yml/config), `extraBody` values redacted; null when none. */
+	compat: Record<string, unknown> | null;
 }
 
 interface ModelsJson {
@@ -129,7 +131,19 @@ function toModelJson(model: Model<Api>): ModelJson {
 		input: model.input,
 		cost: { ...model.cost, input, output, cacheRead, cacheWrite },
 		pricingStatus: getModelPricingStatus(model),
+		compat: compatOverridesJson(model.compatConfig),
 	};
+}
+
+/** `extraBody` may carry credentials, so only its keys are reported. */
+function compatOverridesJson(config: object | undefined): Record<string, unknown> | null {
+	if (!config) return null;
+	const out: Record<string, unknown> = { ...config };
+	const extraBody = out.extraBody;
+	if (extraBody && typeof extraBody === "object") {
+		out.extraBody = Object.fromEntries(Object.keys(extraBody).map(key => [key, "[redacted]"]));
+	}
+	return Object.keys(out).length > 0 ? out : null;
 }
 
 type ColumnAlign = "left" | "right";
