@@ -37,6 +37,7 @@
 
 ### Fixed
 
+- On Windows, closing the terminal that first started the shared omp daemon no longer kills the daemon and the services of other sessions, as long as the terminal's job object allows breakaway ([#20722](https://github.com/can1357/oh-my-pi/issues/20722))
 - `edit` on `ssh://` files no longer contacts the host before the call is approved, and refuses to overwrite a file that changed on the host after the edit fetched it. Writable RPC host URIs get the same check as a read just before the write, so a change landing between that read and the write is not caught ([#16631](https://github.com/can1357/oh-my-pi/pull/16631) by [@lHyperionl](https://github.com/lHyperionl))
 - `edit` refuses `ssh://` symbolic links instead of replacing them with a regular file, and refuses creating, deleting or moving `ssh://` files before its preview ([#16631](https://github.com/can1357/oh-my-pi/pull/16631) by [@lHyperionl](https://github.com/lHyperionl))
 - `read` and `edit` give `ssh://host/~/x` and its absolute spelling one tag, and `read` shows `ssh://` notebooks as cells like local ones ([#16631](https://github.com/can1357/oh-my-pi/pull/16631) by [@lHyperionl](https://github.com/lHyperionl))
