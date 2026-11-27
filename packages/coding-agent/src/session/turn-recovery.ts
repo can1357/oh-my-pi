@@ -2156,7 +2156,17 @@ export class TurnRecovery {
 				selectedAccount.state !== "healthy" &&
 				health.accounts.some(account => account.state === "healthy")
 			) {
-				this.#host.modelRegistry.authStorage.sessions.release(currentModel.provider, this.#host.sessionId());
+				try {
+					await this.#host.modelRegistry.authStorage.sessions.release(
+						currentModel.provider,
+						this.#host.sessionId(),
+					);
+				} catch (error) {
+					logger.debug("Usage-aware credential release failed open", {
+						provider: currentModel.provider,
+						error: String(error),
+					});
+				}
 			}
 			return false;
 		}
@@ -2283,7 +2293,7 @@ export class TurnRecovery {
 							selected.state !== "healthy" &&
 							candidateHealth.accounts.some(account => account.state === "healthy")
 						) {
-							this.#host.modelRegistry.authStorage.sessions.release(
+							await this.#host.modelRegistry.authStorage.sessions.release(
 								candidateModel.provider,
 								this.#host.sessionId(),
 							);
@@ -3082,7 +3092,12 @@ export class TurnRecovery {
 			const accountPolicyKey = `${currentModel.provider}/${currentModel.id}`;
 			const rotationsRemaining =
 				this.#accountPolicyRotationsRemaining.get(accountPolicyKey) ??
-				Math.max(0, this.#host.modelRegistry.authStorage.credentials.list(currentModel.provider).length - 1);
+				Math.max(
+					0,
+					this.#host.modelRegistry.authStorage.credentials
+						.summaries(currentModel.provider)
+						.filter(row => !row.disabled).length - 1,
+				);
 			this.#accountPolicyRotationsRemaining.set(accountPolicyKey, Math.max(0, rotationsRemaining - 1));
 			// `rotate` may sleep out a sibling's short block; register its signal
 			// as the retry controller so `abortRetry()` cancels that wait exactly

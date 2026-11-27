@@ -419,7 +419,12 @@ async function generateTitleOnlineWithModels(
 					.accounts(model.provider, credentialSourceSessionId)
 					.find(account => account.active);
 				if (foregroundCredential) {
-					registry.authStorage.sessions.pin(model.provider, sessionId, foregroundCredential.credentialId);
+					const applied = await registry.authStorage.sessions.pin(
+						model.provider,
+						sessionId,
+						foregroundCredential.credentialId,
+					);
+					if (!applied) logger.debug("title-generator: source credential could not be pinned", modelContext);
 				}
 			}
 			const apiKey = await registry.getApiKey(model, sessionId);

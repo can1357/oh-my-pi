@@ -5,7 +5,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import { type FetchImpl, getEnvApiKey, type ImageContent, type TextContent } from "@oh-my-pi/pi-ai";
+import { type FetchImpl, getEnvApiKey, type ImageContent, type KeysApi, type TextContent } from "@oh-my-pi/pi-ai";
 import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
 import { resolveXaiBaseUrl, XAI_DEFAULT_BASE_URL } from "@oh-my-pi/pi-ai/providers/xai-base-url";
 import { notebookToEditableText, type ReaderRemoteBackend } from "@oh-my-pi/pi-natives";
@@ -21,13 +21,11 @@ import {
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import type { ToolSession } from "../sdk";
-import type { AgentStorageApi } from "../session/agent-storage";
 import { DEFAULT_MAX_BYTES, truncateHead, truncateHeadBytes } from "./streaming-output";
 import { webpExclusionForModel } from "../utils/image-input";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize";
 import { CONVERTIBLE_EXTENSIONS } from "../utils/markit";
-import { configuredFirecrawlBaseUrl, findFirecrawlApiKey } from "../web/firecrawl";
-import { findParallelApiKey } from "../web/parallel";
+import { configuredFirecrawlBaseUrl } from "../web/firecrawl";
 import { type ReadOutput, readUrl } from "../web/read";
 import { decodeBody } from "../web/response-body";
 import type { RenderResult } from "../web/scrapers/types";
@@ -230,24 +228,27 @@ function shouldSkipBodyDownload(contentType: string): boolean {
 	return mime.startsWith("audio/") || mime.startsWith("video/");
 }
 
-function remoteReaderOptions(
+async function remoteReaderOptions(
 	settings: Settings,
-	storage: AgentStorageApi | null,
-): {
+	keys: KeysApi | undefined,
+	signal: AbortSignal | undefined,
+): Promise<{
 	remote: ReaderRemoteBackend[];
 	preferRemote: boolean;
-} {
+}> {
 	const provider = cfgProvidersFetch.get(settings);
 	const remote: ReaderRemoteBackend[] = [];
-	const parallelKey = findParallelApiKey(storage);
+	const [parallelKey, firecrawlKey, jinaKey] = await Promise.all([
+		findCredential(keys, "parallel", signal),
+		findCredential(keys, "firecrawl", signal),
+		findCredential(keys, "jina", signal),
+	]);
 	if (parallelKey) remote.push({ kind: "parallel", apiKey: parallelKey });
-	const firecrawlKey = findFirecrawlApiKey(storage);
 	if (firecrawlKey) {
 		remote.push({ kind: "firecrawl", apiKey: firecrawlKey, baseUrl: configuredFirecrawlBaseUrl() });
 	}
-	const jinaKey = findCredential(storage, getEnvApiKey("jina"), "jina")?.trim() || undefined;
 	if (jinaKey || cfgProvidersWebKeyless.get(settings)) {
-		remote.push({ kind: "jina", apiKey: jinaKey });
+		remote.push({ kind: "jina", apiKey: jinaKey?.trim() });
 	}
 	const preferredIndex = remote.findIndex(({ kind }) => kind === provider);
 	if (preferredIndex > 0) remote.unshift(...remote.splice(preferredIndex, 1));
@@ -564,7 +565,6 @@ async function renderUrl(
 	raw: boolean,
 	settings: Settings,
 	signal: AbortSignal | undefined,
-	storage: AgentStorageApi | null,
 	modelRegistry: ModelRegistry | undefined,
 	fetchOverride?: FetchImpl,
 	excludeWebP?: true,
@@ -598,7 +598,7 @@ async function renderUrl(
 		apiUserAgent: USER_AGENT,
 		nowMs: Date.now(),
 		...(!raw && (await siteReaderOptions(url, settings, modelRegistry, signal))),
-		...(!raw && remoteReaderOptions(settings, storage)),
+		...(!raw && (await remoteReaderOptions(settings, modelRegistry?.authStorage.keys, signal))),
 		timeoutMs: timeout * 1000,
 		signal,
 		fetch: fetchOverride,
@@ -834,7 +834,6 @@ export async function fetchReadUrl(
 		throw new ToolAbortError();
 	}
 
-	const storage = session.settings.getStorage();
 	const render = (target: string) =>
 		renderUrl(
 			target,
@@ -842,7 +841,6 @@ export async function fetchReadUrl(
 			raw,
 			session.settings,
 			signal,
-			storage,
 			session.modelRegistry,
 			session.fetch,
 			webpExclusionForModel(session.getActiveModel?.()),

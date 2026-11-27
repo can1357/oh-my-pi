@@ -111,6 +111,7 @@ const serveArtifactManager: RpcServe<ArtifactManager, ArtifactManagerProtocol> =
 const serveAgentStorage: RpcServe<AgentStorage, AgentStorageProtocol> = {
 	getCache: (storage, key) => storage.getCache(key),
 	setCache: (storage, key, value, expiresAtSec) => storage.setCache(key, value, expiresAtSec),
+	// Async RPC resolves the storage promise before encoding the rows.
 	listAuthCredentials: (storage, provider, includeDisabled) => storage.listAuthCredentials(provider, includeDisabled),
 	recordModelUsage: (storage, modelKey) => storage.recordModelUsage(modelKey),
 	getModelUsageOrder: storage => storage.getModelUsageOrder(),

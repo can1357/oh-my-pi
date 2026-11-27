@@ -918,24 +918,27 @@ export class CredentialSelector {
 			const [preferred] = candidates.splice(sessionPreferredCandidate, 1);
 			candidates.unshift(preferred);
 		}
-		// Step (b) of the auth-retry policy: when `forceRefresh` is set, re-mint
-		// the session-preferred credential (or the first candidate when no
-		// session preference exists yet) even if its cached token still looks
-		// valid — a peer/broker may have rotated it out from under us.
-		const forceRefreshIndex = options?.forceRefresh
-			? (sessionPreferredIndex ?? candidates[0]?.selection.index)
-			: undefined;
+		// Force recovery for an owner-issued handle only on its original row.
+		// Local retries instead target the session preference or first candidate.
+		const forceRefreshId = options?.forceRefresh ? options.forceRefreshCredentialId : undefined;
+		const forceRefreshIndex =
+			options?.forceRefresh && forceRefreshId === undefined
+				? (sessionPreferredIndex ?? candidates[0]?.selection.index)
+				: undefined;
 		// Candidate IDs were captured before ranking. Their synchronous rebinds
 		// share one provider re-list; resyncs after refresh await re-read the store.
 		let preflightRows: StoredAuthCredential[] | undefined;
 		await Promise.all(
 			candidates.map(async candidate => {
-				const force = forceRefreshIndex !== undefined && candidate.selection.index === forceRefreshIndex;
 				const initialCredentialId = credentialIds[candidate.selection.index];
 				if (initialCredentialId === undefined) {
 					preflightFailures.add(candidate);
 					return;
 				}
+				const force =
+					forceRefreshId !== undefined
+						? initialCredentialId === forceRefreshId
+						: candidate.selection.index === forceRefreshIndex;
 				const beforeSync = candidate.selection.credential;
 				preflightRows ??= this.#reloadProviderRows(provider);
 				if (!this.#rebindOAuthSelection(preflightRows, candidate.selection, initialCredentialId)) {

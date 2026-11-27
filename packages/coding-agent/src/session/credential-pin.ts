@@ -17,6 +17,7 @@
  * stick or re-rank.
  */
 
+import { logger } from "@oh-my-pi/pi-utils";
 import type { AuthStorage } from "./auth-storage";
 import type { SessionManager } from "./session-manager";
 
@@ -83,7 +84,12 @@ export function recordCredentialPin(
  * Seeds with the session's effective last-use time so stale resumes still fall
  * through to usage ranking.
  */
-export function seedCredentialPins(authStorage: AuthStorage, sessionManager: SessionManager, sessionId: string): void {
+export function seedCredentialPins(
+	authStorage: AuthStorage,
+	sessionManager: SessionManager,
+	sessionId: string,
+): void | Promise<void> {
+	const pending: Promise<void>[] = [];
 	for (const [provider, pin] of sessionManager.getCredentialPins()) {
 		const accounts = authStorage.oauth.accounts(provider, sessionId);
 		if (accounts.length === 0) continue;
@@ -91,8 +97,21 @@ export function seedCredentialPins(authStorage: AuthStorage, sessionManager: Ses
 		if (!match) continue;
 		const active = accounts.find(account => account.active);
 		if (active && (active !== match || (active.lastUsedAtMs ?? 0) >= pin.lastUsedAt)) continue;
-		authStorage.sessions.pin(provider, sessionId, match.credentialId, {
-			restoredAtMs: pin.lastUsedAt,
-		});
+		const onResult = (applied: boolean) => {
+			if (!applied) logger.debug("Session credential pin was not restored", { provider });
+		};
+		const onError = (error: unknown) => {
+			logger.warn("Session credential pin restore failed", { provider, error: String(error) });
+		};
+		try {
+			const result = authStorage.sessions.pin(provider, sessionId, match.credentialId, {
+				restoredAtMs: pin.lastUsedAt,
+			});
+			if (typeof result === "boolean") onResult(result);
+			else pending.push(result.then(onResult, onError));
+		} catch (error) {
+			onError(error);
+		}
 	}
+	if (pending.length > 0) return Promise.all(pending).then(() => {});
 }

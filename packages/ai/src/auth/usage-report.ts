@@ -1,4 +1,5 @@
 import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
+import type { Provider } from "../types";
 import { resolveUsedFraction } from "../usage";
 import type {
 	CredentialRankingContext,
@@ -7,6 +8,32 @@ import type {
 	UsageLogger,
 	UsageReport,
 } from "../usage";
+
+/** Models whose usage reports cover a quantitative model, tier, or shared limit. */
+export function usageReportingModelIds(
+	provider: Provider,
+	modelIds: readonly string[],
+	reports: readonly UsageReport[],
+	strategy?: CredentialRankingStrategy,
+): string[] {
+	const providerReports = reports.filter(report => report.provider === provider);
+	if (providerReports.length === 0) return [];
+	const seen = new Set<string>();
+	const reporting: string[] = [];
+	for (const modelId of modelIds) {
+		if (seen.has(modelId)) continue;
+		seen.add(modelId);
+		const context: CredentialRankingContext = { modelId };
+		const hasUsage = providerReports.some(report => {
+			const limits = strategy
+				? scopedUsageLimits(strategy, report, context)
+				: report.limits.filter(limit => limit.scope.shared === true || limit.scope.modelId === modelId);
+			return limits.some(limit => isUsageLimitExhausted(limit) || resolveUsedFraction(limit) !== undefined);
+		});
+		if (hasUsage) reporting.push(modelId);
+	}
+	return reporting;
+}
 
 /** Read a string identity field from report metadata. */
 export function usageReportMetadataValue(report: UsageReport, key: string): string | undefined {
