@@ -16,7 +16,10 @@
 - Added DeepInfra text-to-speech models `Qwen/Qwen3-TTS` and `sesame/csm-1b`.
 - Added the `connected-name` and `active-notice` auth nodes: what a provider is called once an account is signed in, and the transcript line shown when a session starts using one of its models
 - Added `window-ms` to hook-refreshed logins (`refresh hook="…" { window-ms … }`), so their access tokens can renew earlier than the 60-second default
-- Added the `device-bound` auth node (logins that depend on a key only this machine holds stay out of the auth broker) and the `sign-out hook="…"` node (forgets a removed login's secrets kept outside `agent.db` and revokes it upstream)
+- Added the `device-bound` auth node (logins that depend on a key only this machine holds stay out of the auth broker) and the `sign-out hook="…"` node (revokes a removed login upstream)
+- Added ArkaneCloud provider: `/login arkanecloud` with `ARKANECLOUD_API_KEY`, models and prices discovered live per API key ([#20506](https://github.com/can1357/oh-my-pi/pull/20506) by [@Randyopo](https://github.com/Randyopo))
+- Added `xai-oauth/grok-voice-transcribe-2.0` (SuperGrok speech-to-text on `api.x.ai/v1/stt`, through the new `xai-stt` runner API) ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+- Added Refuseless (`refuseless`) with abliterated and standard open-weight models, live model discovery from `https://api.refuseless.com/v1/models`, and `/login refuseless` (`REFUSELESS_API_KEY`)
 
 ### Changed
 

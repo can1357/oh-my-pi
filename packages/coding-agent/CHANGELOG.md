@@ -8,6 +8,7 @@
 - Removed the `cwd` argument of the eval `sh` helper; every `sh` command starts in the session cwd (use `cd <path> && …` inside the command)
 - The `providers.fetch` configuration values `native`, `trafilatura`, and `lynx` have been replaced by the single `local` value for the in-process reader engine.
 - Removed unused `parse*Args` and `print*Help` exports from the CLI configuration, grep, plugin, setup, shell, web-search, and update modules.
+- The `logout` RPC command (and its SDK bindings) no longer takes a `disconnect` parameter; it always revokes the credential at the provider when one supports it.
 - omp no longer reads other agents' user-level config (`~/.claude`, `~/.claude.json`, Claude Code plugins, `~/.codex`, `~/.config/opencode`, `~/.cursor`, `~/.codeium/windsurf`, `~/.copilot`); the `enabledProviders` setting, the `skills.enableClaudeUser`, `skills.enableCodexUser`, `commands.enableClaudeUser` and `commands.enableOpencodeUser` settings, and the dashboard's per-provider user toggle are gone. If you had opted in, the first launch offers to symlink or copy what you were inheriting into `~/.omp/agent`
 - Dropped discovery of GitHub Copilot (`.github/copilot-instructions.md`, `.github/instructions`, `.github/prompts`, `.github/skills`), Cursor (`.cursor/rules`, `.cursorrules`, `.cursor/mcp.json`), Windsurf (`.windsurf/`), VS Code (`.vscode/mcp.json`) and Cline (`.clinerules`) config
 - Project-level Claude Code, Codex and OpenCode config is limited to MCP servers, skills, commands and `.claude/CLAUDE.md`; `.claude/{tools,extensions,hooks,settings.json,SYSTEM.md}`, Codex commands, prompts, hooks, tools and settings, and OpenCode plugins and settings no longer load
@@ -39,7 +40,9 @@
 - Included `tool_approvals` in `omp gc` session statistics and purge handling.
 - Added `local/parakeet-tdt-0.6b-v2`, the most accurate local English dictation model.
 - Added Codex's 17 new live voices to `live.voice`: `aube`, `bubbie`, `haetsal`, `hanul`, `himari`, `leher`, `marin`, `miko`, `neer`, `porto`, `rindo`, `rio`, `rivage`, `selva`, `sonna`, `tinta`, and `viola`.
-- The `logout` RPC response carries `signOutError` when the provider could not confirm revoking the login; the login is removed regardless
+- Added `statusLine.segmentOptions.model.showProvider` to prefix the status-line model with its provider (`anthropic/Opus 4.8`) and `statusLine.segmentOptions.model.display` (`name`, `id` or `full`) to show the exact model id, with `statusLine.segmentOptions.model.maxLength` to cap the label ([#20559](https://github.com/can1357/oh-my-pi/pull/20559) by [@Xytronix](https://github.com/Xytronix))
+- Dictation now works with xAI speech-to-text models such as `xai-oauth/grok-voice-transcribe-2.0` ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+- `/fast` now switches Devin models onto their fast lanes, replacing the separate Devin Fast model entries; set `tier.devin: priority` to start every session in fast mode
 - Esc hides the command output (`/mcp` and other slash commands) previewed above the editor while the agent streams, without interrupting the turn; the output still enters the transcript when the agent pauses ([#17954](https://github.com/can1357/oh-my-pi/issues/17954))
 - Added an uninstaller to the install scripts: `curl -fsSL https://omp.sh/install | sh -s -- --uninstall` (PowerShell: `-Uninstall`) removes the installed binary or bun/npm global package and keeps `~/.omp` unless you confirm the prompt or pass `--purge` (`-Purge`) ([#3351](https://github.com/can1357/oh-my-pi/issues/3351))
 - Added `tui.screen: fullscreen`, an opt-in screen mode that draws the session on the alternate screen with the composer, status line and HUD pinned to the bottom while the transcript scrolls inside omp (PageUp/PageDown, Ctrl+Home/Ctrl+End via the new `app.transcript.*` keybindings, and the mouse wheel), following new output unless scrolled back, and writes the whole transcript to the normal screen on exit without erasing the shell's scrollback; `inline` stays the default ([#2040](https://github.com/can1357/oh-my-pi/issues/2040), building on [#2103](https://github.com/can1357/oh-my-pi/pull/2103) by [@shoucandanghehe](https://github.com/shoucandanghehe))
@@ -51,6 +54,7 @@
 - The `grep`, `glob`, `ast_grep` and `ast_edit` tools refuse a search scope that resolves to a filesystem root (`/usr/..`, `../../..`, `C:\`) and explain why; a bare `/` still means the workspace
 - `/tan` agents now treat the conversation they fork from as reference only and stop after finishing your request, instead of picking up or deferring to the main agent's in-progress work
 - The main agent no longer sees `/tan` dispatch notices or gets woken when a tangent finishes; with your next message it gets a short record linking the tangent's output
+- Subagents may now run quick checks on their own files; only full builds and whole test suites wait for the parent agent.
 - Redesigned the `/live` call panel in Tern: your voice as a moving wave in the call's color, the transcript as a caption, and the call's status beside Mute and End call.
 - Redesigned the composer's dictation control in Tern: while recording it shows a live wave of your voice and the time recorded beside a stop button.
 - In Tern, only a click on a `/btw` note's question line points the composer at the note; clicking its answer to read or select it no longer does.
@@ -92,6 +96,8 @@
 - Turning an extension off in `/extensions` hides its editor widgets; turning it back on restores them ([#20725](https://github.com/can1357/oh-my-pi/issues/20725)).
 - On Windows, closing the terminal that first started the shared omp daemon no longer kills the daemon and the services of other sessions, as long as the terminal's job object allows breakaway ([#20722](https://github.com/can1357/oh-my-pi/issues/20722))
 - Fixed async compaction paying for a second summary during ordinary growth through a wide pre-threshold band ([#20739](https://github.com/can1357/oh-my-pi/issues/20739)).
+- Turn recovery no longer re-sends a request whose provider already used up its own 503/504 retries; it moves to the next `retry.fallbackChains` model at once or ends the turn with the provider's message
+- Declining a provider's consent screen during `/login` or `omp login` now reports the sign-in as canceled, in the terminal and on the browser page, instead of as a failed login
 - `edit` on `ssh://` files no longer contacts the host before the call is approved, and refuses to overwrite a file that changed on the host after the edit fetched it. Writable RPC host URIs get the same check as a read just before the write, so a change landing between that read and the write is not caught ([#16631](https://github.com/can1357/oh-my-pi/pull/16631) by [@lHyperionl](https://github.com/lHyperionl))
 - `edit` refuses `ssh://` symbolic links instead of replacing them with a regular file, and refuses creating, deleting or moving `ssh://` files before its preview ([#16631](https://github.com/can1357/oh-my-pi/pull/16631) by [@lHyperionl](https://github.com/lHyperionl))
 - `read` and `edit` give `ssh://host/~/x` and its absolute spelling one tag, and `read` shows `ssh://` notebooks as cells like local ones ([#16631](https://github.com/can1357/oh-my-pi/pull/16631) by [@lHyperionl](https://github.com/lHyperionl))
@@ -142,7 +148,6 @@
 - Custom composer shapes can add blank rows above the input and keep the caret on the text row ([#20532](https://github.com/can1357/oh-my-pi/issues/20532)).
 - Fixed ACP and RPC `/mcp` commands to respect project-server precedence, enable/disable overrides, and the session working directory. ([#20499](https://github.com/can1357/oh-my-pi/pull/20499) by [@eggpeat](https://github.com/eggpeat))
 - Fixed `bash.patterns` approval false positives on benign flags (`go test -race`, `rg -e`, `jq -c`, quoted commit messages with `-e`/`-c`, ANSI-C `$'...'` strings) by parsing commands with omp's native Bash/Zsh parser and a command-aware argument guard ([#20686](https://github.com/can1357/oh-my-pi/pull/20686) by [@asuffield](https://github.com/asuffield))
-- Declining a provider's consent screen during `/login` or `omp login` now reports the sign-in as canceled, in the terminal and on the browser page, instead of as a failed login
 - Fixed headless browser automation on Windows sometimes showing a blank white Chrome window by launching its hidden native window off-screen ([#5397](https://github.com/can1357/oh-my-pi/issues/5397), [#5524](https://github.com/can1357/oh-my-pi/pull/5524) by [@dragonbaba](https://github.com/dragonbaba))
 - Fixed agents writing implementation details and session notes into README and other docs after every fix: the system prompt now asks for docs/changelog updates only when documented or user-visible behavior changes, in user terms and following the repository's own conventions ([#16155](https://github.com/can1357/oh-my-pi/issues/16155))
 - `/reload-plugins` now reports only what it reloaded (skills, slash commands, task agents and MCP servers in the TUI; skills and slash commands over ACP/RPC) and says extension hooks and tools need an omp restart, instead of claiming it reloaded them ([#7260](https://github.com/can1357/oh-my-pi/issues/7260))
@@ -152,6 +157,7 @@
 
 ### Removed
 
+- omp no longer reads Gemini CLI's `~/.gemini` and `.gemini/` config (MCP servers, `GEMINI.md`, system prompts, extensions, settings); the `gemini` discovery provider id is gone.
 - Removed unused `parse*Args`/`print*Help` exports from `@oh-my-pi/pi-coding-agent/cli/{config,grep,plugin,setup,shell,web-search,update}-cli`; the subcommands parse flags through `src/commands/*` ([#20526](https://github.com/can1357/oh-my-pi/pull/20526))
 - Fixed an empty toast with only a checkmark appearing in Tern each time dictation finished transcribing.
 - Fixed `bash` running its command approval analysis in yolo mode without `bash.patterns` rules, which failed every command when the native addon was out of date.
@@ -167,8 +173,6 @@
 - Fixed Gemini planning behavior so long tool-free reasoning is not repeatedly interrupted.
 - Fixed ACP and RPC `/mcp` commands to honor project-server precedence, enable/disable overrides, and the session working directory.
 - Fixed unsupported `ANTHROPIC_SEARCH_BASE_URL` from appearing in `omp --help`, and improved the error shown when `bun` is unavailable in compiled JavaScript evaluation.
-- Removed the paused Google Antigravity provider (`google-antigravity`) and the Gemini CLI (Cloud Code Assist) transport (`google-gemini-cli` api); Gemini remains available through a Gemini API key and Vertex AI
-- omp no longer reads Gemini CLI's `~/.gemini` and `.gemini/` config (MCP servers, `GEMINI.md`, system prompts, extensions, settings); the `gemini` discovery provider id is gone.
 
 ## [19.2.1] - 2026-11-25
 

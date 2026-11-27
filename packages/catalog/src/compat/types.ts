@@ -630,15 +630,12 @@ export interface CompiledAuthProvider {
 	callbackPort?: number;
 	pasteCode?: boolean;
 	/**
-	 * Logins are bound to a key only this machine holds (such as a proof-of-possession key in
-	 * the OS vault), so they stay in the local `agent.db`: the auth broker
-	 * neither stores nor refreshes them.
+	 * Logins are bound to a key that must stay on this machine (such as a DPoP
+	 * key), so they stay in the local `agent.db`: the auth broker neither stores
+	 * nor refreshes them.
 	 */
 	deviceBound?: boolean;
-	/**
-	 * Runs when a login is removed: `hook` forgets the account's secrets kept
-	 * outside the credential store and revokes the grant at the provider.
-	 */
+	/** Runs when a login is removed: `hook` revokes the grant at the provider. */
 	signOut?: { hook: string };
 	apiKeyFormat: "bearer" | "structured";
 	expiry?: "jwt-or-never";

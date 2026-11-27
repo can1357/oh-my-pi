@@ -6,30 +6,6 @@ A **provider** is the account or backend namespace, such as `anthropic`, `openai
 
 This page covers how providers become available, how credentials are resolved, the provider/environment-variable map, local engines, disabling providers, and custom providers. For native Kiro authentication, model discovery, and streaming, see [Kiro](./kiro.md). For endpoint-specific request, reasoning, tool, stream, usage, and retry constraints, see [Provider endpoint constraints](./provider-endpoint-constraints.md). For model selection and the full `models.yml` schema, see [Model and Provider Configuration](./models.md). For config-file locations and merge precedence, see [Settings](./settings.md). For credential storage and login flows in depth, see [Secrets and credentials](./secrets.md). For the complete environment-variable reference, see [Environment variables](./environment-variables.md). For local engine setup, see [Local models](./local-models.md). For context-file discovery providers, see [Context files](./context-files.md).
 
-## Factory Droid
-
-The `factory-droid` provider uses Factory's Droid subscription gateway directly. No `droid` binary, daemon, or SDK subprocess is needed for login or inference.
-
-1. Run `omp login factory-droid` or `/login factory-droid` in an interactive session.
-2. Open the printed `auth.factory.ai/device` link in your browser, enter the displayed device code, and approve the login.
-3. Select a model, for example `factory-droid/kimi-k3`, and send a prompt. The stored WorkOS session refreshes automatically. `omp auth-broker login factory-droid` supports broker-backed credentials.
-
-Use subscription OAuth for this provider. It does not discover credentials from an installed Droid CLI or read `FACTORY_API_KEY`; Factory's separate API-key products are not part of this integration.
-
-The roster ships as KDL (`packages/catalog/src/compat/rules/providers/factory-droid.kdl`, with each model's wire and billing pool in `rules/runtime/behavior.kdl`), maintained by hand against the Droid CLI version pinned by `FACTORY_DROID_CLIENT_VERSION` (`packages/catalog/src/wire/factory-droid.ts`). It contains concrete CLI models, not the Factory Auto Model router or app-only Flex variants. Account feature flags, hard-deprecation gates, organization policy (including explicit opt-in requirements), and serving region narrow it live; new model IDs require a catalog update. Until discovery has succeeded online, feature-gated and consent-gated models stay hidden. Offline or failed discovery can retain a cached snapshot, which is not a guarantee of current entitlement.
-
-The roster includes Factory's `generate_image` models (`gpt-image-2.6-sunburst`, `gpt-image-2.6-flare`, `gpt-image-2.5-sunburst`, `gpt-image-2.5-flare`, `gemini-3-pro-image-preview`), which close the `image` role's defaults so a Factory login alone can generate images. They appear only after discovery reads the organization's managed settings: `imageGenerationEnabled: false` hides all of them, and `imageGenerationAllowedModelIds` narrows them (an empty list hides all). Image calls bill to the Standard Credits pool.
-
-Organization identity and residency travel with the credential serving each request, including account rotation, and each account/residency scope has its own model cache. Residency chooses the API host; the independent inference region (`global`, `us`, or `eu`) constrains upstream eligibility.
-
-Claude requests on Anthropic's own upstream offer Factory's server-side refusal fallback (Opus 5 for Fable and Opus 5.5) only when discovery found the fallback model in the account's roster. A request served by another organization's credential than discovery saw offers none; a Factory model OMP did not discover (one defined in `models.yml`) offers every fallback its rules name, as before discovery tracked them.
-
-`/usage` and `omp usage` report Standard Credits and Droid Core quota windows when the account uses token-rate-limit billing. Accounts whose billing response explicitly disables that mode remain visible with a note that no quota windows are exposed; OMP does not invent a remaining balance. The model browser shows each model's credit rate in force now, including Factory's dated credit promotions, and the model details name the next scheduled rate and its date; dollar figures are upstream list-price references, not Factory billing, and include no promotions. Models without a dollar reference display their credit rate rather than `free`. Extra balance alone does not establish that overage billing is enabled.
-
-If account rotation would narrow the selected model's context window, OMP stops before sending that retry rather than guessing whether the existing conversation fits. Refresh discovery with `omp models refresh factory-droid` and select the region-appropriate model before retrying.
-
-Factory's native context limits hold even when extended context is disabled. Factory GPT and Gemini routes omit output-token caps, so bounded ephemeral turns reject a `maxTokens` request instead of silently running uncapped.
-
 ## How `omp` decides a provider is available
 
 The model registry composes these sources:

@@ -411,7 +411,7 @@ auth "anthropic" {
     callback-port 54545                          // defaults to the oauth-code callback port
     paste-code #true                             // defaults to #true for oauth-code logins
     device-bound #true                           // logins need a key only this machine holds: kept out of the auth broker
-    sign-out hook="name"                          // runs when a login is removed: forgets local secrets and revokes the grant upstream
+    sign-out hook="name"                          // runs when a login is removed: revokes the grant upstream
     api-key-format "structured"                  // bearer (default) | structured (JSON credential as API key)
     expiry "jwt-or-never"                        // session-JWT expiry policy
     result "api-key"                             // OAuth login persists only credentials.access as a plain API key
