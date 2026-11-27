@@ -71,6 +71,41 @@ function contentAttempt(): AssistantMessageEventStream {
 	] as unknown as AssistantMessageEvent[]);
 }
 
+function copilotAttempt(hasContent: boolean, aiu?: Usage["aiu"]): AssistantMessageEventStream {
+	const message = assistant(hasContent ? ["hello"] : []);
+	message.provider = "github-copilot";
+	if (aiu !== undefined) message.usage.aiu = aiu;
+	const events: unknown[] = [{ type: "start", partial: message }];
+	if (hasContent) {
+		events.push(
+			{ type: "text_start", contentIndex: 0, partial: message },
+			{ type: "text_delta", contentIndex: 0, delta: "hello", partial: message },
+			{ type: "text_end", contentIndex: 0, content: "hello", partial: message },
+		);
+	}
+	events.push({ type: "done", reason: "stop", message });
+	return streamFromEvents(events as unknown as AssistantMessageEvent[]);
+}
+
+async function retryCopilotAiu(
+	discardedAiu: Usage["aiu"],
+	deliveredAiu: Usage["aiu"],
+): Promise<{ message: AssistantMessage; attempts: number }> {
+	let attempts = 0;
+	const stream = withReplaySafeStreamRetry(
+		{},
+		CTX,
+		{ providerRetryWait: async () => {} },
+		() => {
+			const attempt = ++attempts;
+			return copilotAttempt(attempt > 1, attempt === 1 ? discardedAiu : deliveredAiu);
+		},
+		{ retryEmptyCompletion: true },
+	);
+	await drain(stream);
+	return { message: await stream.result(), attempts };
+}
+
 async function drain(stream: AssistantMessageEventStream): Promise<AssistantMessageEvent[]> {
 	const events: AssistantMessageEvent[] = [];
 	for await (const event of stream) events.push(event);
@@ -125,6 +160,80 @@ describe("withReplaySafeStreamRetry", () => {
 		expect(waits).toEqual([500]);
 		expect(events.filter(e => e.type === "start")).toHaveLength(1);
 		expect(result.content).toEqual([{ type: "text", text: "hello" }]);
+	});
+
+	it("keeps the credits billed for a discarded empty attempt on the delivered message", async () => {
+		let attempts = 0;
+		const billedEmpty = (nano: number): AssistantMessageEventStream => {
+			const message = assistant();
+			message.usage.aiu = { nano };
+			return streamFromEvents([
+				{ type: "start", partial: message },
+				{ type: "done", reason: "stop", message },
+			] as unknown as AssistantMessageEvent[]);
+		};
+		const billedContent = (nano: number): AssistantMessageEventStream => {
+			const message = assistant(["hello"]);
+			message.usage.aiu = { nano };
+			return streamFromEvents([
+				{ type: "start", partial: message },
+				{ type: "text_start", contentIndex: 0, partial: message },
+				{ type: "text_delta", contentIndex: 0, delta: "hello", partial: message },
+				{ type: "text_end", contentIndex: 0, content: "hello", partial: message },
+				{ type: "done", reason: "stop", message },
+			] as unknown as AssistantMessageEvent[]);
+		};
+		const stream = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{ providerRetryWait: async () => {} },
+			() => {
+				attempts++;
+				return attempts === 1 ? billedEmpty(400) : billedContent(600);
+			},
+			{ retryEmptyCompletion: true },
+		);
+
+		await drain(stream);
+		const result = await stream.result();
+
+		expect(attempts).toBe(2);
+		expect(result.usage.aiu).toEqual({ nano: 1000 });
+	});
+
+	it("keeps an unknown delivered Copilot turn unknown after a billed discarded attempt", async () => {
+		const { message, attempts } = await retryCopilotAiu({ nano: 400 }, undefined);
+
+		expect(attempts).toBe(2);
+		expect(message.usage.aiu).toBeUndefined();
+	});
+
+	it("does not turn a reported zero discarded frame into an unknown delivered turn's exact zero", async () => {
+		const { message, attempts } = await retryCopilotAiu({ nano: 0 }, undefined);
+
+		expect(attempts).toBe(2);
+		expect(message.usage.aiu).toBeUndefined();
+	});
+
+	it("merges discarded and delivered per-token-type charges", async () => {
+		const { message } = await retryCopilotAiu(
+			{ nano: 400, nanoByType: { input: 100, output: 300 } },
+			{ nano: 600, nanoByType: { cacheRead: 200, output: 400 } },
+		);
+
+		expect(message.usage.aiu).toEqual({
+			nano: 1000,
+			nanoByType: { input: 100, cacheRead: 200, output: 700 },
+		});
+	});
+
+	it("retains a reported zero and its token-type split across retries", async () => {
+		const { message } = await retryCopilotAiu(
+			{ nano: 0, nanoByType: { input: 0 } },
+			{ nano: 600, nanoByType: { output: 600 } },
+		);
+
+		expect(message.usage.aiu).toEqual({ nano: 600, nanoByType: { input: 0, output: 600 } });
 	});
 
 	it("delivers the empty result after exhausting the retry cap", async () => {
@@ -275,6 +384,41 @@ describe("withReplaySafeStreamRetry", () => {
 		expect(attempts).toBe(1);
 		expect(events.at(-1)?.type).toBe("done");
 		expect(result.content).toEqual([]);
+	});
+
+	it("counts each billed attempt once when aborted during a later backoff", async () => {
+		const controller = new AbortController();
+		let attempts = 0;
+		let waits = 0;
+		const stream = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{
+				signal: controller.signal,
+				providerRetryWait: async () => {
+					// The first backoff completes; the second is cut short by the abort.
+					if (++waits < 2) return;
+					controller.abort();
+					throw new Error("aborted");
+				},
+			},
+			() => {
+				const message = assistant();
+				message.usage.aiu = { nano: ++attempts === 1 ? 300 : 400 };
+				return streamFromEvents([
+					{ type: "start", partial: message },
+					{ type: "done", reason: "stop", message },
+				] as unknown as AssistantMessageEvent[]);
+			},
+			{ retryEmptyCompletion: true },
+		);
+
+		await drain(stream);
+		const result = await stream.result();
+
+		expect(attempts).toBe(2);
+		// 300 from the discarded first attempt plus 400 on the delivered one, not 1100.
+		expect(result.usage.aiu).toEqual({ nano: 700 });
 	});
 
 	it("discards buffered pre-content markers from a retried empty attempt", async () => {

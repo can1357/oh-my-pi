@@ -14,7 +14,7 @@
  * classifier and are separately bounded by the caller's policy.
  */
 import * as AIError from "../error";
-import type { AssistantMessage, AssistantMessageEvent, Context } from "../types";
+import type { AssistantMessage, AssistantMessageEvent, Context, Usage } from "../types";
 import { AssistantMessageEventStream } from "./event-stream";
 import { waitForRetry } from "./retry-wait";
 
@@ -92,6 +92,20 @@ class FinalizedProviderStreamError extends Error {
 	}
 }
 
+type Aiu = NonNullable<Usage["aiu"]>;
+
+/** Sum two AI-credit meters; the per-type split is kept when either side carries one. */
+function sumAiu(a: Aiu, b: Aiu): Aiu {
+	const nano = a.nano + b.nano;
+	if (!a.nanoByType && !b.nanoByType) return { nano };
+	const nanoByType = { ...a.nanoByType };
+	for (const key of ["input", "cacheRead", "cacheWrite", "output"] as const) {
+		const share = b.nanoByType?.[key];
+		if (share !== undefined) nanoByType[key] = (nanoByType[key] ?? 0) + share;
+	}
+	return { nano, nanoByType };
+}
+
 /**
  * Re-issues a fresh provider request only while the current attempt remains
  * replay-safe. Buffered pre-output events from discarded attempts never reach
@@ -109,6 +123,15 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 	void (async () => {
 		let emptyRetries = 0;
 		let providerErrorRetries = 0;
+		// Reported charges of discarded attempts, carried onto the delivered attempt when it has a frame too.
+		let discardedAiu: Aiu | undefined;
+		const carryDiscardedCharge = (message: AssistantMessage | undefined): void => {
+			// A discarded charge cannot make a frame-less result exact; its aiu stays absent for the lower-bound marker.
+			if (!discardedAiu || !message?.usage?.aiu) return;
+			message.usage.aiu = sumAiu(message.usage.aiu, discardedAiu);
+		};
+		const terminalMessage = (event: AssistantMessageEvent | undefined): AssistantMessage | undefined =>
+			event?.type === "done" ? event.message : event?.type === "error" ? event.error : undefined;
 		while (true) {
 			const buffered: AssistantMessageEvent[] = [];
 			let committed = options?.acceptEmptyResponse === true;
@@ -185,21 +208,32 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				} catch (waitError) {
 					flush();
 					if (signal?.aborted) {
-						if (terminal) outer.push(terminal);
+						// The attempt is delivered after all, so its own charge is already on it; only earlier
+						// attempts' charges are carried over.
+						if (terminal) {
+							carryDiscardedCharge(terminalMessage(terminal));
+							outer.push(terminal);
+						}
 					} else {
 						outer.fail(waitError);
 					}
 					return;
 				}
+				// Only now is the attempt discarded: its charge moves to the next one.
+				const attemptAiu = terminalMessage(terminal)?.usage?.aiu;
+				if (attemptAiu) discardedAiu = discardedAiu ? sumAiu(discardedAiu, attemptAiu) : attemptAiu;
 				continue;
 			}
 
 			flush();
 			if (terminal) {
+				carryDiscardedCharge(terminalMessage(terminal));
 				outer.push(terminal);
 			} else if (!outer.done) {
 				try {
-					outer.end(await inner.result());
+					const message = await inner.result();
+					carryDiscardedCharge(message);
+					outer.end(message);
 				} catch (error) {
 					outer.fail(error);
 				}
