@@ -1,10 +1,12 @@
 //! Snapcompact frame rendering.
 //!
 //! Resolve one installed outline face for the entire transcript, then render
-//! pre-normalized text on a fixed grid using only that face. Text normalization,
-//! pagination, and provider-specific shapes live in `packages/snapcompact`.
+//! pre-normalized text on a fixed grid using only that face. Text
+//! normalization, pagination, and provider-specific shapes live in
+//! `packages/snapcompact`.
 
 use std::{
+	borrow::Cow,
 	collections::{HashMap, hash_map::Entry},
 	iter::Peekable,
 	str::Chars,
@@ -66,7 +68,10 @@ impl SystemFace {
 			.get_or_init(|| {
 				system_font_db().with_face_data(self.id, |data, index| {
 					let face = Face::parse(data, index).ok()?;
-					face.raw_face().table(Tag::from_bytes(b"cmap")).map(Box::from)
+					face
+						.raw_face()
+						.table(Tag::from_bytes(b"cmap"))
+						.map(Box::from)
 				})?
 			})
 			.as_deref()
@@ -75,14 +80,16 @@ impl SystemFace {
 			return false;
 		};
 		if !chars.iter().all(|&ch| {
-			table.subtables.into_iter().any(|subtable| {
-				subtable.is_unicode() && subtable.glyph_index(ch as u32).is_some()
-			})
+			table
+				.subtables
+				.into_iter()
+				.any(|subtable| subtable.is_unicode() && subtable.glyph_index(ch as u32).is_some())
 		}) {
 			return false;
 		}
 
-		self.outlines
+		self
+			.outlines
 			.get_or_init(|| {
 				system_font_db().with_face_data(self.id, |data, collection_index| {
 					Font::from_bytes(data, FontSettings {
@@ -104,7 +111,10 @@ struct SystemFonts {
 }
 
 static SYSTEM_FONTS: LazyLock<SystemFonts> = LazyLock::new(|| {
-	let mut faces: Vec<_> = system_font_db().faces().filter(|face| !is_last_resort(face)).collect();
+	let mut faces: Vec<_> = system_font_db()
+		.faces()
+		.filter(|face| !is_last_resort(face))
+		.collect();
 	faces.sort_by_key(|&face| face_rank(face, true));
 	let mut latin_order: Vec<_> = (0..faces.len()).collect();
 	latin_order.sort_by_key(|&index| face_rank(faces[index], false));
@@ -112,8 +122,8 @@ static SYSTEM_FONTS: LazyLock<SystemFonts> = LazyLock::new(|| {
 		faces: faces
 			.into_iter()
 			.map(|face| SystemFace {
-				id: face.id,
-				cmap: OnceLock::new(),
+				id:       face.id,
+				cmap:     OnceLock::new(),
 				outlines: OnceLock::new(),
 			})
 			.collect(),
@@ -126,7 +136,9 @@ fn is_last_resort(face: &FaceInfo) -> bool {
 	let is_placeholder = |name: &str| {
 		let name = name.trim_start_matches('.');
 		["LastResort", "Last Resort"].iter().any(|prefix| {
-			name.get(..prefix.len()).is_some_and(|start| start.eq_ignore_ascii_case(prefix))
+			name
+				.get(..prefix.len())
+				.is_some_and(|start| start.eq_ignore_ascii_case(prefix))
 		})
 	};
 	is_placeholder(&face.post_script_name)
@@ -159,7 +171,10 @@ fn face_rank(face: &FaceInfo, cjk: bool) -> (usize, bool, u16, bool, &str, &str)
 	let rank = preferred
 		.iter()
 		.position(|prefix| {
-			face.families.iter().any(|(family, _)| family.starts_with(prefix))
+			face
+				.families
+				.iter()
+				.any(|(family, _)| family.starts_with(prefix))
 		})
 		.unwrap_or(preferred.len() + usize::from(!cjk && !face.monospaced));
 	(
@@ -211,9 +226,10 @@ struct Grid {
 	cell_h: usize,
 }
 
-/// East Asian Wide / Fullwidth code points take two cells by default. The same ranges
-/// are mirrored in `packages/snapcompact/src/snapcompact.ts` so the TypeScript
-/// capacity/pagination math and this layout never disagree on cell counts.
+/// East Asian Wide / Fullwidth code points take two cells by default. The same
+/// ranges are mirrored in `packages/snapcompact/src/snapcompact.ts` so the
+/// TypeScript capacity/pagination math and this layout never disagree on cell
+/// counts.
 const fn is_wide(cp: u32) -> bool {
 	matches!(cp,
 		0x1100..=0x115F
@@ -397,50 +413,57 @@ impl Iterator for Layout<'_> {
 	}
 }
 
-fn fill_repeat_bands_rgb(pixels: &mut [u8], width: usize, grid: &Grid) {
+// Three nonzero coverage steps preserve antialiasing while fitting a plain
+// black-on-white frame into a 2-bit palette. Repeated rows get a separate ramp
+// blended onto the highlight instead of onto white.
+const COVERAGE_STEPS: u8 = 3;
+const RAMP_SIZE: u8 = PALETTE.len() as u8 * COVERAGE_STEPS;
+const FRAME_COLORS: usize = 2 + 2 * RAMP_SIZE as usize;
+
+const fn ramp_start(ink: u8, highlighted: bool) -> u8 {
+	2 + ink * COVERAGE_STEPS + if highlighted { RAMP_SIZE } else { 0 }
+}
+
+const fn frame_palette() -> [[u8; 3]; FRAME_COLORS] {
+	let mut colors = [[0; 3]; FRAME_COLORS];
+	colors[0] = PALETTE[0];
+	colors[1] = PALETTE[BG_REPEAT as usize];
+	let mut index = 2;
+	while index < colors.len() {
+		let ramp = (index - 2) % RAMP_SIZE as usize;
+		let ink = PALETTE[ramp / COVERAGE_STEPS as usize];
+		let bg = colors[(index - 2) / RAMP_SIZE as usize];
+		let alpha = (ramp % COVERAGE_STEPS as usize + 1) as u16;
+		let steps = COVERAGE_STEPS as u16;
+		let mut channel = 0;
+		while channel < 3 {
+			colors[index][channel] =
+				((bg[channel] as u16 * (steps - alpha) + ink[channel] as u16 * alpha + steps / 2)
+					/ steps) as u8;
+			channel += 1;
+		}
+		index += 1;
+	}
+	colors
+}
+
+const FRAME_PALETTE: [[u8; 3]; FRAME_COLORS] = frame_palette();
+const SOLID_BLACK: u8 = ramp_start(INK_BLACK, false) + COVERAGE_STEPS - 1;
+
+fn fill_repeat_bands(pixels: &mut [u8], width: usize, grid: &Grid) {
 	if grid.repeat <= 1 {
 		return;
 	}
-	let band = PALETTE[BG_REPEAT as usize];
-	let rows = pixels.len() / (width * 3 * grid.repeat * grid.cell_h);
-	for row in 0..rows {
-		for copy in 1..grid.repeat {
-			let band_top = (row * grid.repeat + copy) * grid.cell_h;
-			for y in band_top..band_top + grid.cell_h {
-				for px in pixels[y * width * 3..(y + 1) * width * 3]
-					.as_chunks_mut::<3>()
-					.0
-				{
-					px.copy_from_slice(&band);
-				}
-			}
-		}
+	let pitch = width * grid.cell_h;
+	for rows in pixels.chunks_exact_mut(pitch * grid.repeat) {
+		rows[pitch..].fill(1);
 	}
 }
 
-fn fill_cell_rgb(
-	pixels: &mut [u8],
-	width: usize,
-	height: usize,
-	grid: &Grid,
-	x_origin: usize,
-	row: usize,
-	ink: u8,
-) {
-	let x0 = x_origin.min(width);
-	let x1 = (x_origin + grid.cell_w).min(width);
-	if x0 >= x1 {
-		return;
-	}
-	let color = PALETTE[ink as usize];
-	for copy in 0..grid.repeat {
-		let top = (row * grid.repeat + copy) * grid.cell_h;
-		for y in top..(top + grid.cell_h).min(height) {
-			let row = &mut pixels[y * width * 3..(y + 1) * width * 3];
-			for x in x0..x1 {
-				row[x * 3..x * 3 + 3].copy_from_slice(&color);
-			}
-		}
+fn fill_block(pixels: &mut [u8], width: usize, grid: &Grid, col: usize, row: usize) {
+	let pitch = width * grid.cell_h * grid.repeat;
+	for scanline in pixels[row * pitch..(row + 1) * pitch].chunks_exact_mut(width) {
+		scanline[col..col + grid.cell_w].fill(SOLID_BLACK);
 	}
 }
 
@@ -466,7 +489,8 @@ fn rasterize_glyph(
 	line_height: f32,
 ) -> RasterizedGlyph {
 	// Use the same scale for a cell class, shrinking only glyphs that would
-	// overrun the box. Otherwise narrow letters would grow taller than wide ones.
+	// overrun the box. Otherwise narrow letters would grow taller than wide
+	// ones.
 	let width = width_per_em
 		.max(glyph.unit.advance_width)
 		.max(glyph.unit.bounds.width);
@@ -487,33 +511,42 @@ fn blit_ttf_glyph(
 	glyph: &RasterizedGlyph,
 	(left, top): (usize, usize),
 	(cell_w, cell_h): (usize, usize),
-	ink: u8,
+	ramp: u8,
 ) {
-	let draw_w = glyph.metrics.width.min(cell_w).min(width.saturating_sub(left));
-	let draw_h = glyph.metrics.height.min(cell_h).min((pixels.len() / (width * 3)).saturating_sub(top));
+	let draw_w = glyph
+		.metrics
+		.width
+		.min(cell_w)
+		.min(width.saturating_sub(left));
+	let draw_h = glyph
+		.metrics
+		.height
+		.min(cell_h)
+		.min((pixels.len() / width).saturating_sub(top));
 	if draw_w == 0 {
 		return;
 	}
-	let color = PALETTE[ink as usize].map(u16::from);
-	for (y, row) in glyph.bitmap.chunks_exact(glyph.metrics.width).take(draw_h).enumerate() {
-		let offset = ((top + y) * width + left) * 3;
-		let dst = pixels[offset..offset + draw_w * 3].as_chunks_mut::<3>().0;
-		for (&alpha, rgb) in row[..draw_w].iter().zip(dst) {
-			if alpha == 0 {
-				continue;
-			}
-			let alpha = u16::from(alpha);
-			let inv = 255 - alpha;
-			for c in 0..3 {
-				let bg = u16::from(rgb[c]);
-				rgb[c] = ((bg * inv + color[c] * alpha + 127) / 255) as u8;
+	for (y, row) in glyph
+		.bitmap
+		.chunks_exact(glyph.metrics.width)
+		.take(draw_h)
+		.enumerate()
+	{
+		let offset = (top + y) * width + left;
+		for (&alpha, pixel) in row[..draw_w]
+			.iter()
+			.zip(&mut pixels[offset..offset + draw_w])
+		{
+			let step = (u16::from(alpha) + 42) / 85;
+			if step != 0 {
+				*pixel = ramp + step as u8 - 1;
 			}
 		}
 	}
 }
 
-/// Alpha-blend outlines from the resolved face, never from a fallback face.
-fn render_rgb(
+/// Draw quantized outline coverage from the resolved face into palette slots.
+fn render_indexed(
 	layout: Layout<'_>,
 	width: usize,
 	height: usize,
@@ -522,30 +555,35 @@ fn render_rgb(
 	mut glyphs: HashMap<char, Glyph>,
 ) -> Vec<u8> {
 	let grid = layout.grid;
-	let mut pixels = vec![255u8; width * height * 3];
+	let mut pixels = vec![0; width * height];
 	if layout.is_empty() {
 		return pixels;
 	}
-	fill_repeat_bands_rgb(&mut pixels[..content_height * width * 3], width, grid);
+	fill_repeat_bands(&mut pixels[..content_height * width], width, grid);
 	let (ascent, line_height) = font
 		.horizontal_line_metrics(1.0)
 		.map_or((0.8, 1.0), |line| (line.ascent, (line.ascent - line.descent).max(1.0)));
 	let narrow_width = font.metrics('M', 1.0).advance_width.max(0.6);
 	for cell in layout {
 		if cell.ch as u32 == FULL_BLOCK {
-			fill_cell_rgb(&mut pixels, width, height, grid, cell.x, cell.row, INK_BLACK);
+			fill_block(&mut pixels, width, grid, cell.x, cell.row);
 			continue;
 		}
 		if !needs_glyph(cell.ch) {
 			continue;
 		}
 		let cell_w = cell.units * grid.cell_w;
-		let glyph = glyphs.get_mut(&cell.ch).expect("frame glyphs are validated before drawing");
+		let glyph = glyphs
+			.get_mut(&cell.ch)
+			.expect("frame glyphs are validated before drawing");
 		if glyph.rasterized.is_none() {
-			let width = if is_wide(cell.ch as u32) { 1.0 } else { narrow_width };
-			glyph.rasterized = Some(rasterize_glyph(
-				font, glyph, cell_w, grid.cell_h, width, ascent, line_height,
-			));
+			let width = if is_wide(cell.ch as u32) {
+				1.0
+			} else {
+				narrow_width
+			};
+			glyph.rasterized =
+				Some(rasterize_glyph(font, glyph, cell_w, grid.cell_h, width, ascent, line_height));
 		}
 		let glyph = glyph.rasterized.as_ref().expect("glyph was rasterized");
 		let metrics = &glyph.metrics;
@@ -562,7 +600,7 @@ fn render_rgb(
 				glyph,
 				(cell.x + x, cell_top + y),
 				(cell_w - x, grid.cell_h - y),
-				cell.ink,
+				ramp_start(cell.ink, copy > 0),
 			);
 		}
 	}
@@ -572,23 +610,68 @@ fn render_rgb(
 /// Character cells between the two doc columns (eval `exp14` layout).
 const GUTTER: usize = 3;
 
-/// Encode the antialiased RGB frame as a PNG.
-fn encode_rgb_png(
-	pixels: &[u8],
-	width: usize,
-	height: usize,
-	compression: png::Compression,
-) -> Result<Vec<u8>> {
+/// Drop unused colors and pack palette indices into the smallest PNG depth.
+fn encode_indexed_png(mut pixels: Vec<u8>, width: usize, height: usize) -> Result<Vec<u8>> {
+	let mut used = [false; FRAME_COLORS];
+	for &index in &pixels {
+		used[index as usize] = true;
+	}
+	let mut remap = [0; FRAME_COLORS];
+	let mut palette = Vec::<[u8; 3]>::new();
+	for (index, rgb) in FRAME_PALETTE
+		.into_iter()
+		.enumerate()
+		.filter(|(i, _)| used[*i])
+	{
+		let slot = palette
+			.iter()
+			.position(|color| color == &rgb)
+			.unwrap_or_else(|| {
+				palette.push(rgb);
+				palette.len() - 1
+			});
+		remap[index] = slot as u8;
+	}
+	let (depth, bits) = match palette.len() {
+		0..=2 => (png::BitDepth::One, 1),
+		3..=4 => (png::BitDepth::Two, 2),
+		5..=16 => (png::BitDepth::Four, 4),
+		_ => (png::BitDepth::Eight, 8),
+	};
+	if bits == 8 {
+		for px in &mut pixels {
+			*px = remap[*px as usize];
+		}
+	} else {
+		let group = 8 / bits;
+		let row_bytes = width.div_ceil(group);
+		for y in 0..height {
+			let row = y * width;
+			for (x, start) in (0..width).step_by(group).enumerate() {
+				let mut packed = 0;
+				for (i, &px) in pixels[row + start..row + (start + group).min(width)]
+					.iter()
+					.enumerate()
+				{
+					packed |= remap[px as usize] << (8 - (i + 1) * bits);
+				}
+				pixels[y * row_bytes + x] = packed;
+			}
+		}
+		pixels.truncate(height * row_bytes);
+	}
 	let mut out = Vec::new();
 	let mut encoder = png::Encoder::new(&mut out, width as u32, height as u32);
-	encoder.set_color(png::ColorType::Rgb);
-	encoder.set_depth(png::BitDepth::Eight);
-	encoder.set_compression(compression);
+	encoder.set_color(png::ColorType::Indexed);
+	encoder.set_depth(depth);
+	encoder.set_palette(Cow::Borrowed(palette.as_flattened()));
+	encoder.set_compression(png::Compression::High);
+	encoder.set_filter(png::Filter::NoFilter);
 	let mut writer = encoder
 		.write_header()
 		.map_err(|err| Error::from_reason(format!("Failed to write PNG header: {err}")))?;
 	writer
-		.write_image_data(pixels)
+		.write_image_data(&pixels)
 		.map_err(|err| Error::from_reason(format!("Failed to write PNG data: {err}")))?;
 	writer
 		.finish()
@@ -603,7 +686,8 @@ fn encode_rgb_png(
 /// Shape options for one snapcompact frame.
 #[napi(object)]
 pub struct SnapcompactRenderOptions {
-	/// Frame width in pixels; also bounds grid rows before the 64px height floor.
+	/// Frame width in pixels; also bounds grid rows before the 64px height
+	/// floor.
 	pub size:        u32,
 	/// Process-local face returned by `resolveSnapcompactFont`.
 	pub font_id:     u32,
@@ -612,9 +696,11 @@ pub struct SnapcompactRenderOptions {
 	pub cell_height: u32,
 	/// Use two cells for East Asian wide glyphs (default true).
 	pub wide_cells:  Option<bool>,
-	/// Ink variant: `"sent"` (default, six-hue sentence cycling) or `"bw"` (black).
+	/// Ink variant: `"sent"` (default, six-hue sentence cycling) or `"bw"`
+	/// (black).
 	pub variant:     Option<String>,
-	/// Copies of each line; copies after the first have a highlight band (default 1).
+	/// Copies of each line; copies after the first have a highlight band
+	/// (default 1).
 	pub line_repeat: Option<u32>,
 	/// `1` (default) row-major grid, `2` two columns of pre-wrapped lines.
 	pub columns:     Option<u32>,
@@ -627,7 +713,7 @@ pub fn resolve_snapcompact_font(chars: JsString) -> Result<Option<u32>> {
 	Ok(resolve_font(&js::utf8(chars)?))
 }
 
-/// Render pre-normalized text on a worker and return its RGB PNG as base64.
+/// Render pre-normalized text on a worker and return its indexed PNG as base64.
 /// Height hugs used rows with a 64px floor. Overlong input clips to the grid.
 #[napi]
 pub fn render_snapcompact_png(
@@ -683,7 +769,9 @@ fn render_snapcompact_png_sync(
 		.faces
 		.get(options.font_id as usize)
 		.and_then(|face| face.outlines.get()?.as_ref())
-		.ok_or_else(|| Error::from_reason(format!("Unknown snapcompact font ID {}", options.font_id)))?;
+		.ok_or_else(|| {
+			Error::from_reason(format!("Unknown snapcompact font ID {}", options.font_id))
+		})?;
 	let mut glyphs = HashMap::new();
 	for ch in text.chars().filter(|&ch| needs_glyph(ch)) {
 		if let Entry::Vacant(entry) = glyphs.entry(ch) {
@@ -697,9 +785,9 @@ fn render_snapcompact_png_sync(
 	let layout = Layout::new(&text, &grid, doc, wide_cells, black_ink);
 	let content_height = layout.clone().used_rows() * grid.repeat * grid.cell_h;
 	let height = content_height.max(64);
-	let pixels = render_rgb(layout, size, height, content_height, font, glyphs);
+	let pixels = render_indexed(layout, size, height, content_height, font, glyphs);
 	Ok(STANDARD
-		.encode(encode_rgb_png(&pixels, size, height, png::Compression::High)?)
+		.encode(encode_indexed_png(pixels, size, height)?)
 		.into())
 }
 
@@ -723,7 +811,9 @@ mod tests {
 	fn render(text: &str, options: SnapcompactRenderOptions) -> image::RgbImage {
 		let encoded = render_snapcompact_png_sync(text.into(), options).expect("render frame");
 		let png = STANDARD.decode(&*encoded).expect("base64 PNG");
-		image::load_from_memory(&png).expect("decode PNG").into_rgb8()
+		image::load_from_memory(&png)
+			.expect("decode PNG")
+			.into_rgb8()
 	}
 
 	#[test]
@@ -734,15 +824,27 @@ mod tests {
 				.map(|cell| (cell.ch, cell.x, cell.row, cell.units))
 				.collect::<Vec<_>>()
 		};
-		assert_eq!(positions(true), [('a', 0, 0, 1), ('b', 8, 0, 1), ('漢', 0, 1, 2), ('c', 16, 1, 1)]);
-		assert_eq!(positions(false), [('a', 0, 0, 1), ('b', 8, 0, 1), ('漢', 16, 0, 1), ('c', 0, 1, 1)]);
+		assert_eq!(positions(true), [
+			('a', 0, 0, 1),
+			('b', 8, 0, 1),
+			('漢', 0, 1, 2),
+			('c', 16, 1, 1)
+		]);
+		assert_eq!(positions(false), [
+			('a', 0, 0, 1),
+			('b', 8, 0, 1),
+			('漢', 16, 0, 1),
+			('c', 0, 1, 1)
+		]);
 	}
 
 	#[test]
 	fn doc_layout_clips_columns_and_keeps_ink_markers_zero_width() {
 		let grid = Grid { cols: 11, rows: 2, repeat: 1, cell_w: 8, cell_h: 16 };
 		let layout = Layout::new("a.\n\u{e}b\u{f}█漢\nc", &grid, true, true, false);
-		let cells: Vec<_> = layout.map(|cell| (cell.ch, cell.x, cell.row, cell.ink)).collect();
+		let cells: Vec<_> = layout
+			.map(|cell| (cell.ch, cell.x, cell.row, cell.ink))
+			.collect();
 		assert_eq!(cells, [
 			('a', 0, 0, 1),
 			('.', 8, 0, 1),

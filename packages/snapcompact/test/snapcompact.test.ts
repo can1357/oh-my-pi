@@ -182,45 +182,41 @@ describe("isUrlSchemePath", () => {
 	});
 });
 
-/** Decode an 8-bit RGB PNG into packed RGB pixels for visual assertions. */
+/** Decode the renderer's packed palette indices to RGB for visual assertions. */
 function decodePng(png: Buffer) {
 	expect(png.subarray(0, 8)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
 	const width = png.readUInt32BE(16);
 	const height = png.readUInt32BE(20);
-	expect(png[24]).toBe(8);
-	expect(png[25]).toBe(2);
+	const depth = png[24];
+	expect(png[25]).toBe(3);
 	const parts: Uint8Array[] = [];
+	const palette: number[] = [];
 	for (let offset = 8; offset < png.length;) {
 		const length = png.readUInt32BE(offset);
-		if (png.toString("ascii", offset + 4, offset + 8) === "IDAT")
-			parts.push(png.subarray(offset + 8, offset + 8 + length));
+		const type = png.toString("ascii", offset + 4, offset + 8);
+		const start = offset + 8;
+		if (type === "IDAT") parts.push(png.subarray(start, start + length));
+		if (type === "PLTE") {
+			for (let i = start; i < start + length; i += 3) palette.push(png.readUIntBE(i, 3));
+		}
 		offset += 12 + length;
 	}
 	const raw = Bun.inflateSync(Buffer.concat(parts).subarray(2, -4));
-	const stride = width * 3 + 1;
+	const perByte = 8 / depth;
+	const stride = Math.ceil(width / perByte) + 1;
+	const mask = (1 << depth) - 1;
 	expect(raw.length).toBe(height * stride);
 	const pixels = new Uint32Array(width * height);
 	for (let y = 0; y < height; y++) {
 		const row = y * stride;
-		const filter = raw[row];
-		for (let x = 1; x < stride; x++) {
-			const offset = row + x;
-			const left = x > 3 ? raw[offset - 3] : 0;
-			const up = y > 0 ? raw[offset - stride] : 0;
-			const corner = x > 3 && y > 0 ? raw[offset - stride - 3] : 0;
-			const dl = Math.abs(up - corner);
-			const du = Math.abs(left - corner);
-			const dc = Math.abs(left + up - 2 * corner);
-			const paeth = dl <= du && dl <= dc ? left : du <= dc ? up : corner;
-			raw[offset] +=
-				filter === 1 ? left : filter === 2 ? up : filter === 3 ? (left + up) >> 1 : filter === 4 ? paeth : 0;
-		}
+		expect(raw[row]).toBe(0);
 		for (let x = 0; x < width; x++) {
-			const offset = row + 1 + x * 3;
-			pixels[y * width + x] = (raw[offset] << 16) | (raw[offset + 1] << 8) | raw[offset + 2];
+			const byte = raw[row + 1 + Math.floor(x / perByte)];
+			const shift = 8 - ((x % perByte) + 1) * depth;
+			pixels[y * width + x] = palette[(byte >> shift) & mask];
 		}
 	}
-	return { width, height, pixels };
+	return { width, height, depth, pixels };
 }
 
 const WHITE = 0xffffff;
@@ -622,7 +618,7 @@ describe("shape resolution", () => {
 });
 
 describe("render", () => {
-	it("produces an RGB PNG of the declared geometry with sentence-cycled ink (legacy 5x8)", async () => {
+	it("produces an indexed PNG of the declared geometry with sentence-cycled ink (legacy 5x8)", async () => {
 		const geometry = snapcompact.geometry(snapcompact.SHAPES.legacy, TEST_FRAME_SIZE);
 		expect(geometry).toEqual({ cols: 64, rows: 40, capacity: 2560 });
 
@@ -655,6 +651,17 @@ describe("render", () => {
 		expect(longer.height).toBe(88);
 		expect(short.pixels.subarray(0, 22 * short.width)).toEqual(longer.pixels.subarray(0, 22 * short.width));
 		expect(short.pixels.subarray(22 * short.width).every(pixel => pixel === WHITE)).toBe(true);
+	});
+
+	it("packs antialiased black ink at two bits even when scanlines need padding", async () => {
+		const shape = snapcompact.resolveShape(undefined, "8on16-bw");
+		const frame = await snapcompact.render("█Hello! █Again.", shape, 65);
+		const png = decodePng(Buffer.from(frame.data, "base64"));
+		expect(png.depth).toBe(2);
+		expect(png.pixels[15 * 65 + 7]).toBe(0);
+		expect(png.pixels[31 * 65 + 7]).toBe(0);
+		expect(png.pixels[15 * 65 + 64]).toBe(WHITE);
+		expect(png.pixels.some(rgb => rgb !== 0 && rgb !== WHITE)).toBe(true);
 	});
 
 	it("leaves the repeated-row highlight out of padding", async () => {

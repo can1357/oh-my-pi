@@ -4123,7 +4123,7 @@ export interface RenderHtmlOptions {
 export declare function renderMermaidAscii(text: string, options?: MermaidRenderOptions | undefined | null): string
 
 /**
- * Render pre-normalized text on a worker and return its RGB PNG as base64.
+ * Render pre-normalized text on a worker and return its indexed PNG as base64.
  * Height hugs used rows with a 64px floor. Overlong input clips to the grid.
  */
 export declare function renderSnapcompactPng(text: string, options: SnapcompactRenderOptions): Promise<string>
@@ -4826,7 +4826,10 @@ export declare function sliceWithWidth(line: string, startCol: number, length: n
 
 /** Shape options for one snapcompact frame. */
 export interface SnapcompactRenderOptions {
-  /** Frame width in pixels; also bounds grid rows before the 64px height floor. */
+  /**
+   * Frame width in pixels; also bounds grid rows before the 64px height
+   * floor.
+   */
   size: number
   /** Process-local face returned by `resolveSnapcompactFont`. */
   fontId: number
@@ -4835,9 +4838,15 @@ export interface SnapcompactRenderOptions {
   cellHeight: number
   /** Use two cells for East Asian wide glyphs (default true). */
   wideCells?: boolean
-  /** Ink variant: `"sent"` (default, six-hue sentence cycling) or `"bw"` (black). */
+  /**
+   * Ink variant: `"sent"` (default, six-hue sentence cycling) or `"bw"`
+   * (black).
+   */
   variant?: string
-  /** Copies of each line; copies after the first have a highlight band (default 1). */
+  /**
+   * Copies of each line; copies after the first have a highlight band
+   * (default 1).
+   */
   lineRepeat?: number
   /** `1` (default) row-major grid, `2` two columns of pre-wrapped lines. */
   columns?: number
