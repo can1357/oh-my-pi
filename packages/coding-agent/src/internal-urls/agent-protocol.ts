@@ -198,6 +198,31 @@ function lastAssistantText(messages: readonly AgentMessage[]): string | undefine
 	return undefined;
 }
 
+/** Most bytes `read agent://<id>` takes from an external agent's transcript, against a pager that never ends. */
+const MAX_EXTERNAL_TRANSCRIPT_BYTES = 64 * 1024 * 1024;
+
+/**
+ * An external agent's transcript, paged from byte 0 until a page adds no complete line. A reset page
+ * replaces what was read; a returned `error` fails the read like a thrown one.
+ */
+async function readExternalTranscript(external: ExternalAgentControls): Promise<string> {
+	let text = "";
+	let cursor = 0;
+	let read = 0;
+	while (read < MAX_EXTERNAL_TRANSCRIPT_BYTES) {
+		const page = await external.readTranscript(cursor);
+		if (page.error) throw new Error(page.error);
+		const complete = page.text.slice(0, page.text.lastIndexOf("\n") + 1);
+		if (page.reset) text = "";
+		if (!complete) break;
+		const bytes = Buffer.byteLength(complete, "utf-8");
+		text += complete;
+		cursor = (page.reset ? 0 : cursor) + bytes;
+		read += bytes;
+	}
+	return text;
+}
+
 /**
  * The registered agent a message to `named` means: the id itself when
  * registered (or `all`), the sender's parent for `parent`, else the one agent
@@ -616,13 +641,10 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			messages = await loadSessionMessagesReadOnly(ref.sessionFile);
 			source = "session file (read-only)";
 		} else if (ref.external) {
-			const page = await ref.external.readTranscript(0);
-			if (!page.error) {
-				messages = parseSessionEntries(page.text).flatMap(entry =>
-					entry.type === "message" ? [entry.message] : [],
-				);
-				source = "external transcript";
-			}
+			messages = parseSessionEntries(await readExternalTranscript(ref.external)).flatMap(entry =>
+				entry.type === "message" ? [entry.message] : [],
+			);
+			source = "external transcript";
 		}
 		const sections = yieldSections(messages);
 		const lastText = lastAssistantText(messages);

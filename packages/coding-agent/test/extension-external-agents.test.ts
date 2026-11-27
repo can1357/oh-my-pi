@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionContext, ExternalAgentSpec } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import { AgentProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/agent-protocol";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { agentTranscriptSource } from "@oh-my-pi/pi-coding-agent/modes/agent-hub-runtime";
 import { RpcSubagentRegistry, readRpcExternalTranscript } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-subagents";
@@ -224,6 +225,36 @@ describe("ExtensionContext.agents.registerExternal", () => {
 		await until(() => reads.length === 3, "read after the reset");
 		expect(reads).toEqual([0, Buffer.byteLength(first), Buffer.byteLength(rebuilt)]);
 		viewer.dispose();
+	});
+
+	it("reads its whole transcript for agent://<id>, page by page", async () => {
+		const ctx = await extensionContext();
+		const reply = (id: string, text: string): string =>
+			`${JSON.stringify({ type: "message", id, parentId: null, timestamp: new Date(0).toISOString(), message: { role: "assistant", content: [{ type: "text", text }], timestamp: 0 } })}\n`;
+		const transcript = reply("a", "first draft") + reply("b", "final answer");
+		// One line per page, like an extension that caps its page size.
+		const agent = ctx.agents!.registerExternal(
+			remoteAgent({
+				readTranscript: async fromByte => {
+					const end = transcript.indexOf("\n", fromByte) + 1 || fromByte;
+					return { text: transcript.slice(fromByte, end), newSize: end };
+				},
+			}),
+		);
+
+		const progress = await new AgentProtocolHandler().resolve(new URL(`agent://${agent.id}`) as never);
+		expect(progress.content).toContain("final answer");
+	});
+
+	it("fails a read of agent://<id> on a transcript error its extension returns", async () => {
+		const ctx = await extensionContext();
+		const agent = ctx.agents!.registerExternal(
+			remoteAgent({ readTranscript: async () => ({ text: "", newSize: 0, error: "job purged" }) }),
+		);
+
+		await expect(new AgentProtocolHandler().resolve(new URL(`agent://${agent.id}`) as never)).rejects.toThrow(
+			"job purged",
+		);
 	});
 
 	it("blocks wait until complete() and delivers the result once", async () => {
