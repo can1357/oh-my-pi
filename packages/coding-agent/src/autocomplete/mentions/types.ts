@@ -3,7 +3,7 @@
  *
  * Every category source implements {@link MentionSource}, returning ranked items
  * alongside a normalized {@link MatchTier} so the Intent Arbiter keeps Files on
- * top while letting explicit namespaces (`@model:`, `@agent:`, `@session:`, …)
+ * top while letting explicit namespaces (`@m:`, `@p2p:`, `@ses:`, …)
  * and unambiguous strong matches shine cleanly.
  */
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
@@ -41,8 +41,8 @@ export const MATCH_TIER = {
 
 export type MatchTier = (typeof MATCH_TIER)[keyof typeof MATCH_TIER];
 
-/** Sub-category filter implied by an explicit namespace prefix (`@pr:`, `@branch:`, `@peer:`, …). */
-export type MentionSubKind = "pr" | "issue" | "branch" | "commit" | "tag" | "diff" | "peer";
+/** Git or forge result filter. */
+export type MentionSubKind = "pr" | "issue" | "branch" | "commit" | "tag" | "diff";
 
 /** Parsed state of the mention token currently under the composer caret. */
 export interface MentionQuery {
@@ -54,9 +54,9 @@ export interface MentionQuery {
 	readonly query: string;
 	/** Raw body immediately after the trigger character(s), before namespace stripping. */
 	readonly rawBody: string;
-	/** Unambiguous syntactic lock (`^`, `#123`, `@model:`, `@./`, `@#42`, …). */
+	/** Unambiguous syntactic lock (`^`, `#123`, `@m:`, `@./`, `@#42`, …). */
 	readonly syntaxLock?: MentionCategoryId;
-	/** Explicit sub-kind filter (`@pr:`, `@branch:`, `@peer:`, `pr #123`, …). */
+	/** Explicit sub-kind filter (`@pr:`, `@iss:`, `@git:branch:`, `pr #123`, …). */
 	readonly subKind?: MentionSubKind;
 	/** Whether the `@` token opened with a double quote (`@"…`). */
 	readonly quoted?: boolean;
@@ -90,7 +90,7 @@ export interface MentionItem extends AutocompleteItem {
 	readonly appendSpace?: boolean;
 	/** Directory entry that keeps completion open after acceptance. */
 	readonly isDirectory?: boolean;
-	/** Namespace jump row (`@model:`, `@agent:`, `@session:`, …) that chains straight into that scope. */
+	/** Category jump row that chains straight into that scope. */
 	readonly isNamespaceShortcut?: boolean;
 	/** Native Tern picker row representation. */
 	readonly pickerItem: TspPickerItem;

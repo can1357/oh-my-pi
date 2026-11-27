@@ -77,33 +77,26 @@ describe("parseMentionQuery", () => {
 	});
 
 	it("handles explicit namespaces, line ranges, hex SHAs, and provider-vs-directory slash disambiguation", () => {
-		expect(parseMentionQuery("@peer:auth")).toMatchObject({
-			syntaxLock: "agents",
-			subKind: "peer",
-			query: "auth",
+		const agents = parseMentionQuery("@p2p:auth");
+		expect(agents).toMatchObject({ syntaxLock: "agents", query: "auth" });
+		expect(agents?.subKind).toBeUndefined();
+		expect(parseMentionQuery("@m:opus:high")).toMatchObject({
+			syntaxLock: "models",
+			query: "opus",
+			modelEffortSuffix: "high",
 		});
-		expect(parseMentionQuery("@branch:feat/x")).toMatchObject({
+		expect(parseMentionQuery("@ses:auth")).toMatchObject({ syntaxLock: "sessions", query: "auth" });
+		expect(parseMentionQuery("@git:main")).toMatchObject({ syntaxLock: "vcs", query: "main" });
+		expect(parseMentionQuery("@git:branch:feat/x")).toMatchObject({
 			syntaxLock: "vcs",
 			subKind: "branch",
 			query: "feat/x",
 		});
-		expect(parseMentionQuery("@session:auth")).toMatchObject({
-			syntaxLock: "sessions",
-			query: "auth",
-		});
-		expect(parseMentionQuery("@chat:debug")).toMatchObject({
-			syntaxLock: "sessions",
-			query: "debug",
-		});
-		expect(parseMentionQuery("@diff:")).toMatchObject({ syntaxLock: "vcs", subKind: "diff", query: "" });
+		expect(parseMentionQuery("@git:diff:")).toMatchObject({ syntaxLock: "vcs", subKind: "diff", query: "" });
 		expect(parseMentionQuery("@mcp:notes")).toMatchObject({ syntaxLock: "mcp", query: "notes" });
 		expect(parseMentionQuery("@ssh:prod")).toMatchObject({ syntaxLock: "ssh", query: "prod" });
-		// One-letter canonical tokens: `s` is SSH, sessions moved to `h`, and PRs/issues split.
-		expect(parseMentionQuery("@s:prod")).toMatchObject({ syntaxLock: "ssh", query: "prod" });
-		expect(parseMentionQuery("@h:auth")).toMatchObject({ syntaxLock: "sessions", query: "auth" });
-		expect(parseMentionQuery("@r:notes")).toMatchObject({ syntaxLock: "mcp", query: "notes" });
-		expect(parseMentionQuery("@p:12")).toMatchObject({ syntaxLock: "forge", subKind: "pr", query: "12" });
-		expect(parseMentionQuery("@i:")).toMatchObject({ syntaxLock: "forge", subKind: "issue", query: "" });
+		expect(parseMentionQuery("@pr:12")).toMatchObject({ syntaxLock: "forge", subKind: "pr", query: "12" });
+		expect(parseMentionQuery("@iss:")).toMatchObject({ syntaxLock: "forge", subKind: "issue", query: "" });
 		expect(parseMentionQuery("@#99")).toMatchObject({
 			syntaxLock: "forge",
 			query: "99",
@@ -127,6 +120,11 @@ describe("parseMentionQuery", () => {
 		expect(parseMentionQuery("@feat/auth", hints)?.syntaxLock).toBeUndefined();
 	});
 
+	it("locks to files by path syntax, not by the removed files token", () => {
+		expect(parseMentionQuery("@f:")?.syntaxLock).toBeUndefined();
+		expect(parseMentionQuery("@./x")).toMatchObject({ syntaxLock: "files", query: "./x" });
+	});
+
 	it("ignores embedded email addresses and plain prose", () => {
 		expect(parseMentionQuery("user@example.com")).toBeNull();
 		expect(parseMentionQuery("just typing prose")).toBeNull();
@@ -141,9 +139,11 @@ describe("arbitrateMentions (Intent Arbiter & Anti-Noise Budgeting)", () => {
 		{ id: "sessions", label: "Sessions" },
 		{ id: "vcs", label: "Git" },
 		{ id: "forge", label: "GitHub" },
+		{ id: "mcp", label: "MCP" },
+		{ id: "ssh", label: "SSH" },
 	];
 
-	it("lists only the available @category: shortcuts on bare @", () => {
+	it("lists the eight category shortcuts, never a files shortcut, on bare @", () => {
 		const query: MentionQuery = { trigger: "@", prefix: "@", query: "", rawBody: "" };
 		const results: MentionSourceResult[] = [
 			{
@@ -186,7 +186,9 @@ describe("arbitrateMentions (Intent Arbiter & Anti-Noise Budgeting)", () => {
 		];
 
 		const out = arbitrateMentions(query, results, metas);
-		expect(out.items.map(i => i.insertText)).toEqual(["@f:", "@m:", "@a:", "@h:"]);
+		const tokens = ["@m:", "@p2p:", "@ses:", "@git:", "@pr:", "@iss:", "@mcp:", "@ssh:"];
+		expect(out.items.map(i => i.insertText)).toEqual(tokens);
+		expect(out.palette.pickerItems.map(i => i.facts?.meta)).toEqual(tokens);
 		expect(out.items.every(i => i.isNamespaceShortcut === true && i.appendSpace === false)).toBe(true);
 	});
 
@@ -244,83 +246,77 @@ describe("arbitrateMentions (Intent Arbiter & Anti-Noise Budgeting)", () => {
 });
 
 describe("AgentsMentionSource (local & foreign mesh subagents)", () => {
-	it("surfaces both local subagents and foreign mesh peers synchronously with local running ranked first", () => {
-		const localRefs: AgentRef[] = [
-			{
-				id: "Scout",
-				generation: 1,
-				displayName: "Scout",
-				kind: "sub",
-				status: "running",
-				session: null,
-				sessionFile: null,
-				createdAt: 100,
-				lastActivity: 500,
-				activity: "scanning surface/kinds",
-			},
-			{
-				id: "HiddenAdvisor",
-				generation: 2,
-				displayName: "Advisor",
-				kind: "advisor",
-				status: "idle",
-				session: null,
-				sessionFile: null,
-				createdAt: 100,
-				lastActivity: 400,
-			},
-		];
-		const peers: MeshPeer[] = [
-			{
-				pid: 4812,
-				project: "/work/app",
-				title: "COMMIT: Very long session title that would truncate away subagent names",
-				sessionFile: null,
-				status: "idle",
-				agents: [
-					{ id: "WorkerA", status: "running", sessionFile: "/tmp/worker-a.jsonl" },
-					{ id: "ParkedOld", status: "parked", sessionFile: "/tmp/parked.jsonl" },
-				],
-			},
-			{ pid: 7001, project: "/work/stencil", title: "MENT", sessionFile: null, status: "idle", agents: [] },
-		];
-		const mesh: MentionMesh = {
+	const localRefs: AgentRef[] = [
+		{
+			id: "Scout",
+			generation: 1,
+			displayName: "Scout",
+			kind: "sub",
+			status: "running",
+			session: null,
+			sessionFile: null,
+			createdAt: 100,
+			lastActivity: 500,
+			activity: "scanning surface/kinds",
+		},
+		{
+			id: "HiddenAdvisor",
+			generation: 2,
+			displayName: "Advisor",
+			kind: "advisor",
+			status: "idle",
+			session: null,
+			sessionFile: null,
+			createdAt: 100,
+			lastActivity: 400,
+		},
+	];
+	const peers: MeshPeer[] = [
+		{
+			pid: 4812,
 			project: "/work/app",
-			peers: options => (options?.allProjects ? peers : peers.filter(peer => peer.project === "/work/app")),
-		};
+			title: "COMMIT: Very long session title that would truncate away subagent names",
+			sessionFile: null,
+			status: "idle",
+			agents: [
+				{ id: "WorkerA", status: "running", sessionFile: "/tmp/worker-a.jsonl" },
+				{ id: "ParkedOld", status: "parked", sessionFile: "/tmp/parked.jsonl" },
+			],
+		},
+		{ pid: 7001, project: "/work/stencil", title: "MENT", sessionFile: null, status: "running", agents: [] },
+	];
+	const mesh: MentionMesh = {
+		project: "/work/app",
+		peers: options => (options?.allProjects ? peers : peers.filter(peer => peer.project === "/work/app")),
+	};
 
-		const source = new AgentsMentionSource({
-			registry: () => ({ list: () => localRefs }),
-			mesh: () => mesh,
-		});
+	const source = new AgentsMentionSource({
+		registry: () => ({ list: () => localRefs }),
+		mesh: () => mesh,
+	});
 
+	it("surfaces local subagents and same-folder mesh peers synchronously for plain @", () => {
 		// Unlocked `@` omits parked agents and other projects, and leads foreign subagents with their own `sub.id` (no clones).
 		const all = source.querySync({ trigger: "@", prefix: "@", query: "", rawBody: "" });
 		expect(all.available).toBe(true);
 		expect(all.items.map(i => i.insertText)).toEqual(["agent://Scout", "agent://4812/WorkerA", "agent://4812"]);
 		expect(all.items[1]!.label).toBe("WorkerA");
 		expect(all.items[1]!.pickerItem.badges?.some(b => b.text === "peer")).toBe(true);
+	});
 
-		// `@a:` reaches other projects' instances, tagged with their folder.
-		const locked = source.querySync(parseMentionQuery("@a:")!);
-		const other = locked.items.find(i => i.insertText === "agent://7001");
-		expect(other?.pickerItem.facts?.right).toBe("stencil · pid 7001");
-
-		// Explicit `@peer:` includes parked peers too; this project's rank before other projects'.
-		const peersOnly = source.querySync({
-			trigger: "@",
-			prefix: "@peer:",
-			query: "",
-			rawBody: "peer:",
-			syntaxLock: "agents",
-			subKind: "peer",
-		});
-		expect(peersOnly.items.map(i => i.insertText)).toEqual([
+	it("includes other projects in @p2p: and ranks same-folder peers first", () => {
+		const locked = source.querySync(parseMentionQuery("@p2p:")!);
+		expect(locked.items.map(i => i.insertText)).toEqual([
+			"agent://Scout",
 			"agent://4812/WorkerA",
 			"agent://4812",
-			"agent://7001",
 			"agent://4812/ParkedOld",
+			"agent://7001",
+			"agent://all",
 		]);
+		expect(locked.items.find(i => i.insertText === "agent://7001")?.pickerItem.facts?.right).toBe(
+			"stencil · pid 7001",
+		);
 	});
 });
 
@@ -515,11 +511,12 @@ describe("UnifiedMentionEngine async streaming & composer integration", () => {
 				.slice(2)
 				.join("\n");
 			expect(popupRows).not.toContain("index.ts");
-			expect(popupRows).toMatch(/Files.*Models/);
-			expect(popupRows).toContain("@f:  Tag a file or directory");
+			expect(popupRows).not.toContain("Files");
+			expect(popupRows).toContain("Models");
+			expect(popupRows).toContain("@m:  Tag a model");
 			expect(popupRows).not.toContain("──");
 
-			// Tab lights the next category in place; typing then enters it.
+			// Tab selects the category in place; typing then enters it.
 			composer.handleDraftKey({ id: "tab", kind: "press", raw: "\t" });
 			expect(composer.text()).toBe("@");
 			expect(plainRows(paintNode(env, composer.node, 80).rows).join("\n")).toContain("@m:  Tag a model");

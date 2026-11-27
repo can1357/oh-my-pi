@@ -115,7 +115,7 @@ function buildSessionItem(entry: SessionSummary, tier: MatchTier): MentionItem {
 	};
 }
 
-/** Past conversations mention source (`@session:`, `@chat:`, `@conv:`). */
+/** Past conversations mention source (`@ses:`). */
 export class SessionsMentionSource implements MentionSource {
 	readonly id = "sessions" as const;
 	readonly label = "Sessions";

@@ -5,7 +5,7 @@
  * 100% synchronous Tier 0. Deduplicates strictly by target URL, leads foreign
  * subagent rows with their own `sub.id` (never truncating clones of a long
  * peer session title), and hides parked/aborted agents in unlocked `@` queries.
- * Unlocked `@` lists peers of this project only; `@a:`/`@peer:` add every
+ * Unlocked `@` lists peers of this project only; `@p2p:` adds every
  * other project's, tagged with their folder name.
  */
 import * as path from "node:path";
@@ -232,7 +232,6 @@ export class AgentsMentionSource implements MentionSource {
 
 	querySync(q: MentionQuery): MentionSourceResult {
 		const explicit = q.syntaxLock === "agents";
-		const onlyPeers = q.subKind === "peer";
 		const localRefs = (this.#host.registry?.() ?? AgentRegistry.global())
 			.list()
 			.filter(ref => ref.kind !== "advisor" && ref.id !== MAIN_AGENT_ID && (explicit || isLiveStatus(ref.status)));
@@ -242,7 +241,7 @@ export class AgentsMentionSource implements MentionSource {
 			? peers
 			: peers.filter(peer => isLiveStatus(peer.status) || peer.agents.some(sub => isLiveStatus(sub.status)));
 
-		const hasAny = (!onlyPeers && localRefs.length > 0) || livePeers.length > 0;
+		const hasAny = localRefs.length > 0 || livePeers.length > 0;
 		if (!hasAny) {
 			return { category: "agents", items: [], bestTier: MATCH_TIER.None, total: 0, available: false };
 		}
@@ -258,21 +257,19 @@ export class AgentsMentionSource implements MentionSource {
 			rows.push(row);
 		};
 
-		if (!onlyPeers) {
-			for (const ref of localRefs) {
-				const primary = ref.displayName && ref.displayName !== ref.id ? `${ref.id} ${ref.displayName}` : ref.id;
-				const secondary = [ref.activity ?? "", ref.history?.agent ?? "", ref.status].filter(Boolean).join(" ");
-				const matched = scoreMatch(trimmed, fuzzyQuery, primary, secondary, explicit);
-				if (!matched) continue;
-				pushUnique({
-					url: `agent://${ref.id}`,
-					item: buildLocalAgentItem(ref, matched.tier),
-					distance: 0,
-					statusRank: statusOrder(ref.status),
-					recency: ref.lastActivity,
-					score: matched.score,
-				});
-			}
+		for (const ref of localRefs) {
+			const primary = ref.displayName && ref.displayName !== ref.id ? `${ref.id} ${ref.displayName}` : ref.id;
+			const secondary = [ref.activity ?? "", ref.history?.agent ?? "", ref.status].filter(Boolean).join(" ");
+			const matched = scoreMatch(trimmed, fuzzyQuery, primary, secondary, explicit);
+			if (!matched) continue;
+			pushUnique({
+				url: `agent://${ref.id}`,
+				item: buildLocalAgentItem(ref, matched.tier),
+				distance: 0,
+				statusRank: statusOrder(ref.status),
+				recency: ref.lastActivity,
+				score: matched.score,
+			});
 		}
 
 		for (const peer of livePeers) {
@@ -311,7 +308,7 @@ export class AgentsMentionSource implements MentionSource {
 		}
 
 		// Broadcast `agent://all` only when explicitly scoped to Agents or when typing `all`.
-		if (!onlyPeers && (explicit || trimmed.toLowerCase() === "all")) {
+		if (explicit || trimmed.toLowerCase() === "all") {
 			const allHit = scoreMatch(trimmed, fuzzyQuery, "all", "broadcast every agent", explicit);
 			if (allHit) {
 				const icon = currentTheme().symbols.symbol("mention.agent");
@@ -345,8 +342,8 @@ export class AgentsMentionSource implements MentionSource {
 		rows.sort(
 			(a, b) =>
 				a.item.tier - b.item.tier ||
-				a.statusRank - b.statusRank ||
 				a.distance - b.distance ||
+				a.statusRank - b.statusRank ||
 				a.score - b.score ||
 				b.recency - a.recency,
 		);

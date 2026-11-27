@@ -14,61 +14,33 @@ interface NamespaceRule {
 	readonly subKind?: MentionSubKind;
 }
 
-/**
- * Explicit `@<ns>:<query>` prefixes that hard-lock a single category. The
- * one-letter keys are the canonical tokens the palette inserts (`@m:`, `@h:`,
- * `@s:`, …); the long names stay as aliases.
- */
-const NAMESPACE_PREFIXES: Readonly<Record<string, NamespaceRule>> = {
+/** Explicit category prefixes in palette order. */
+export const MENTION_NAMESPACES = {
 	m: { category: "models" },
-	model: { category: "models" },
-	models: { category: "models" },
-	f: { category: "files" },
-	file: { category: "files" },
-	files: { category: "files" },
-	a: { category: "agents" },
-	agent: { category: "agents" },
-	agents: { category: "agents" },
-	peer: { category: "agents", subKind: "peer" },
-	peers: { category: "agents", subKind: "peer" },
-	h: { category: "sessions" },
-	history: { category: "sessions" },
-	session: { category: "sessions" },
-	sessions: { category: "sessions" },
-	chat: { category: "sessions" },
-	chats: { category: "sessions" },
-	conv: { category: "sessions" },
-	conversation: { category: "sessions" },
-	conversations: { category: "sessions" },
-	g: { category: "vcs" },
+	p2p: { category: "agents" },
+	ses: { category: "sessions" },
 	git: { category: "vcs" },
-	vcs: { category: "vcs" },
-	branch: { category: "vcs", subKind: "branch" },
-	br: { category: "vcs", subKind: "branch" },
-	commit: { category: "vcs", subKind: "commit" },
-	sha: { category: "vcs", subKind: "commit" },
-	tag: { category: "vcs", subKind: "tag" },
-	tags: { category: "vcs", subKind: "tag" },
-	diff: { category: "vcs", subKind: "diff" },
-	changes: { category: "vcs", subKind: "diff" },
-	r: { category: "mcp" },
-	mcp: { category: "mcp" },
-	resource: { category: "mcp" },
-	resources: { category: "mcp" },
-	s: { category: "ssh" },
-	ssh: { category: "ssh" },
-	host: { category: "ssh" },
-	hosts: { category: "ssh" },
-	gh: { category: "forge" },
-	github: { category: "forge" },
-	p: { category: "forge", subKind: "pr" },
 	pr: { category: "forge", subKind: "pr" },
-	prs: { category: "forge", subKind: "pr" },
-	pull: { category: "forge", subKind: "pr" },
-	i: { category: "forge", subKind: "issue" },
-	issue: { category: "forge", subKind: "issue" },
-	issues: { category: "forge", subKind: "issue" },
-};
+	iss: { category: "forge", subKind: "issue" },
+	mcp: { category: "mcp" },
+	ssh: { category: "ssh" },
+} as const satisfies Readonly<Record<string, NamespaceRule>>;
+
+export type MentionNamespace = keyof typeof MENTION_NAMESPACES;
+
+function isMentionNamespace(key: string): key is MentionNamespace {
+	return Object.hasOwn(MENTION_NAMESPACES, key);
+}
+
+function vcsSubKind(key: string): MentionSubKind | undefined {
+	switch (key) {
+		case "branch":
+		case "commit":
+		case "tag":
+		case "diff":
+			return key;
+	}
+}
 
 /** Optional synchronous hints for disambiguating `head/tail` slash tokens. */
 export interface MentionParseOptions {
@@ -152,13 +124,21 @@ export function parseMentionQuery(textBeforeCursor: string, options?: MentionPar
 		};
 	}
 
-	// Explicit namespace prefix (`@m:`, `@a:`, `@f:`, `@g:`, `@h:`, `@p:`, `@i:`, `@r:`, `@s:`, `@branch:`, …).
+	// Explicit category tokens take precedence over provider and path inference.
 	const firstColon = rawBody.indexOf(":");
 	if (firstColon > 0) {
 		const nsKey = rawBody.slice(0, firstColon).toLowerCase();
-		const rule = NAMESPACE_PREFIXES[nsKey];
-		if (rule) {
-			const rest = rawBody.slice(firstColon + 1);
+		if (isMentionNamespace(nsKey)) {
+			const rule: NamespaceRule = MENTION_NAMESPACES[nsKey];
+			let rest = rawBody.slice(firstColon + 1);
+			let subKind = rule.subKind;
+			if (rule.category === "vcs") {
+				const colon = rest.indexOf(":");
+				if (colon > 0) {
+					subKind = vcsSubKind(rest.slice(0, colon).toLowerCase());
+					if (subKind) rest = rest.slice(colon + 1);
+				}
+			}
 			const modelSplit = rule.category === "models" ? splitModelEffortSuffix(rest) : undefined;
 			return {
 				trigger: "@",
@@ -166,7 +146,7 @@ export function parseMentionQuery(textBeforeCursor: string, options?: MentionPar
 				rawBody,
 				query: modelSplit?.effortSuffix !== undefined ? modelSplit.base : rest,
 				syntaxLock: rule.category,
-				...(rule.subKind ? { subKind: rule.subKind } : {}),
+				...(subKind ? { subKind } : {}),
 				...(modelSplit?.effortSuffix !== undefined ? { modelEffortSuffix: modelSplit.effortSuffix } : {}),
 			};
 		}

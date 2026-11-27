@@ -73,10 +73,10 @@
 
 ### Changed
 
-- Cross-instance agent messaging now spans projects: `agent://peers` still lists this folder's instances, `agent://peers?all` lists every project's, and `agent://<pid>` reads or messages an instance in any folder; `@a:`/`@peer:` mentions offer other projects' instances too, tagged with their folder, while bare `@` stays per-folder
+- Cross-instance agent messaging now spans projects: `agent://peers` still lists this folder's instances, `agent://peers?all` lists every project's, and `agent://<pid>` reads or messages an instance in any folder; `@p2p:` includes local agents and peers from every project, labeled with their folder when different, while plain `@` searches only this folder's peers
 - The `@` mention palette and mention chips draw their icons from the symbol preset: Nerd Font glyphs under `nerd`, plain ASCII under `ascii`, and a single-width unicode set otherwise (themes can override the `mention.*` symbols)
 - The `@` mention palette is colored: icons take their category's color, or the status of the row (running/idle/aborted agent, dirty file, open/merged/closed PR), and status badges take their tone
-- Mention categories now use one-letter tokens: `@f:` files, `@m:` models, `@a:` agents, `@h:` sessions, `@g:` git, `@p:` PRs, `@i:` issues, `@r:` MCP resources, `@s:` SSH hosts; the long names still work, but `@s:` now means SSH instead of sessions
+- Mention categories use `@m:` for models, `@p2p:` for agents and peers, `@ses:` for sessions, `@git:` for Git, `@pr:` for pull requests, `@iss:` for issues, `@mcp:` for MCP resources, and `@ssh:` for SSH hosts. Use `@` followed by a path to mention files; Git results can be narrowed with `@git:branch:`, `@git:commit:`, `@git:tag:`, or `@git:diff:`
 - A bare `@` shows the categories as a strip of icons: Tab/Shift+Tab or ←/→ light one and show its token and description below, and Enter or typing enters it (`@m:` plus what you typed)
 - The mention palette no longer shows category scope pills or pins a category with Shift+Tab; mixed results head each category with its icon and match count instead
 - Role mentions now insert only the model without an explicit thinking level

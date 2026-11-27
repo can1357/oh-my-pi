@@ -2,9 +2,7 @@
  * Cross-source Intent Arbiter for the unified mention palette.
  *
  * Design principles:
- * - **Categories on bare `@`**: an empty `@` lists only the namespace jump rows
- *   (`@f:`, `@m:`, `@a:`, `@h:`, `@g:`, `@p:`, `@i:`, `@r:`, `@s:`), so nothing gets
- *   buried and there is zero 800-model / 30-agent spam.
+ * - **Categories on bare `@`**: an empty `@` lists only namespace jump rows.
  * - **Files first**: a general `@<query>` leads with workspace files.
  * - **Smart auto-switching**: once another category clearly wins (e.g. `@opus`
  *   has strong model matches and no strong file match, or `@m:`/`^`/`#123`
@@ -12,6 +10,7 @@
  */
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import type { TspPickerColumn, TspPickerGroup, TspPickerItem } from "@oh-my-pi/pi-wire";
+import { MENTION_NAMESPACES, type MentionNamespace } from "./parse";
 import {
 	MATCH_TIER,
 	MENTION_CATEGORY_ORDER,
@@ -21,7 +20,6 @@ import {
 	type MentionQuery,
 	type MentionSourceMeta,
 	type MentionSourceResult,
-	type MentionSubKind,
 } from "./types";
 
 const LOCKED_SCOPE_CAP = 20;
@@ -30,109 +28,64 @@ const FILES_WITH_OTHERS_CAP = 6;
 const SECONDARY_CATEGORY_CAP = 2;
 const TOTAL_MIXED_CAP = 10;
 
-/** One `@<x>:` jump row: a short token that locks its category, named by the long form. */
+/** Display metadata for an `@<namespace>:` jump row. */
 interface NamespaceShortcutDef {
-	readonly category: MentionCategoryId;
-	/** Inserted and shown token (`@m:`); the parser maps it to {@link category}. */
-	readonly token: string;
-	/** Display name (`Models`). */
 	readonly name: string;
 	readonly detail: string;
-	/** Tern icon name. */
 	readonly icon: string;
-	/** Theme symbol key of the terminal glyph. */
 	readonly symbol: string;
-	/** Typed prefixes (`@mod`) that surface the row; 2+ characters. */
-	readonly aliases: readonly string[];
-	/** Sub-kind the token narrows to; such a row shows no category-wide count. */
-	readonly subKind?: MentionSubKind;
 }
 
-const NAMESPACE_SHORTCUTS: readonly NamespaceShortcutDef[] = [
-	{
-		category: "files",
-		token: "@f:",
-		name: "Files",
-		detail: "Tag a file or directory",
-		icon: "file",
-		symbol: "mention.file",
-		aliases: ["file", "files"],
-	},
-	{
-		category: "models",
-		token: "@m:",
+const NAMESPACE_SHORTCUTS: Readonly<Record<MentionNamespace, NamespaceShortcutDef>> = {
+	m: {
 		name: "Models",
 		detail: "Tag a model + thinking effort (or ^)",
 		icon: "cpu",
 		symbol: "mention.model",
-		aliases: ["model", "models"],
 	},
-	{
-		category: "agents",
-		token: "@a:",
+	p2p: {
 		name: "Agents",
-		detail: "Tag a local or peer subagent",
+		detail: "Tag a local agent or a peer from any project",
 		icon: "users",
 		symbol: "mention.agent",
-		aliases: ["agent", "agents", "peer", "peers"],
 	},
-	{
-		category: "sessions",
-		token: "@h:",
+	ses: {
 		name: "Sessions",
 		detail: "Tag a past conversation",
 		icon: "message",
 		symbol: "mention.session",
-		aliases: ["session", "sessions", "history", "chat", "conv", "conversation"],
 	},
-	{
-		category: "vcs",
-		token: "@g:",
+	git: {
 		name: "Git",
 		detail: "Tag a diff, branch, commit, or tag",
 		icon: "git-branch",
 		symbol: "mention.git",
-		aliases: ["git", "branch", "commit", "tag", "diff", "changes", "vcs"],
 	},
-	{
-		category: "forge",
-		token: "@p:",
+	pr: {
 		name: "PRs",
 		detail: "Tag a GitHub pull request (or #123)",
 		icon: "pr",
 		symbol: "mention.pr",
-		aliases: ["pr", "prs", "pull", "github", "gh"],
-		subKind: "pr",
 	},
-	{
-		category: "forge",
-		token: "@i:",
+	iss: {
 		name: "Issues",
 		detail: "Tag a GitHub issue",
 		icon: "info",
 		symbol: "mention.issue",
-		aliases: ["issue", "issues"],
-		subKind: "issue",
 	},
-	{
-		category: "mcp",
-		token: "@r:",
+	mcp: {
 		name: "MCP",
 		detail: "Tag an MCP resource",
 		icon: "mcp",
 		symbol: "mention.mcp",
-		aliases: ["mcp", "resource", "resources"],
 	},
-	{
-		category: "ssh",
-		token: "@s:",
+	ssh: {
 		name: "SSH",
 		detail: "Tag an SSH host",
 		icon: "host",
 		symbol: "mention.ssh",
-		aliases: ["ssh", "host", "hosts"],
 	},
-];
+};
 
 /** Universal right-aligned fact columns shared by all mention categories in Tern. */
 export const MENTION_PICKER_COLUMNS: readonly TspPickerColumn[] = [
@@ -154,15 +107,19 @@ function categoryOrderIndex(id: MentionCategoryId): number {
  * A category jump row: the display name as label, the description as detail,
  * the token as the `meta` fact and the category count as `right`.
  */
-function makeNamespaceShortcutItem(def: NamespaceShortcutDef, count: number): MentionItem {
-	const facts: Record<string, string> = { meta: def.token };
-	const shown = def.subKind ? undefined : shownCount(count);
+function makeNamespaceShortcutItem(namespace: MentionNamespace, count: number): MentionItem {
+	const def = NAMESPACE_SHORTCUTS[namespace];
+	const rule = MENTION_NAMESPACES[namespace];
+	const subKind = "subKind" in rule ? rule.subKind : undefined;
+	const token = `@${namespace}:`;
+	const facts: Record<string, string> = { meta: token };
+	const shown = subKind ? undefined : shownCount(count);
 	if (shown !== undefined) facts.right = String(shown);
 	return {
-		category: def.category,
+		category: rule.category,
 		tier: MATCH_TIER.Medium,
-		value: def.token,
-		insertText: def.token,
+		value: token,
+		insertText: token,
 		appendSpace: false,
 		isNamespaceShortcut: true,
 		label: def.name,
@@ -171,7 +128,7 @@ function makeNamespaceShortcutItem(def: NamespaceShortcutDef, count: number): Me
 		icon: currentTheme().symbols.symbol(def.symbol),
 		iconName: def.icon,
 		pickerItem: {
-			id: `ns:${def.subKind ?? def.category}`,
+			id: `ns:${subKind ?? rule.category}`,
 			label: def.name,
 			detail: def.detail,
 			icon: def.icon,
@@ -223,9 +180,11 @@ export function arbitrateMentions(
 	} else if (query.query.trim() === "") {
 		// Bare `@`: the category jump rows alone; the composer Tab-cycles them.
 		const shortcuts: MentionItem[] = [];
-		for (const def of NAMESPACE_SHORTCUTS) {
-			const res = byId.get(def.category);
-			if (res?.available) shortcuts.push(makeNamespaceShortcutItem(def, res.total));
+		for (const key in MENTION_NAMESPACES) {
+			const namespace = key as MentionNamespace;
+			const category = MENTION_NAMESPACES[namespace].category;
+			if (metaById.has(category))
+				shortcuts.push(makeNamespaceShortcutItem(namespace, byId.get(category)?.total ?? 0));
 		}
 		if (shortcuts.length > 0) {
 			selectedSections.push({ groupId: "categories", label: "Categories", items: shortcuts });
@@ -259,16 +218,13 @@ export function arbitrateMentions(
 				return a.bestTier - b.bestTier || categoryOrderIndex(a.category) - categoryOrderIndex(b.category);
 			});
 
-		// Matching `@category:` namespace shortcuts (e.g. `@mod` → `@model:`, `@ses` → `@session:`).
+		// Match canonical namespace prefixes (e.g. `@se` → `@ses:`).
 		const matchingShortcuts: MentionItem[] = [];
-		if (lower.length >= 2 && !lower.includes("/") && !lower.includes(":")) {
-			for (const def of NAMESPACE_SHORTCUTS) {
-				const res = byId.get(def.category);
-				if (!res?.available) continue;
-				if (def.aliases.some(alias => alias.startsWith(lower))) {
-					matchingShortcuts.push(makeNamespaceShortcutItem(def, res.total));
-				}
-			}
+		for (const key in MENTION_NAMESPACES) {
+			if (!key.startsWith(lower)) continue;
+			const namespace = key as MentionNamespace;
+			const res = byId.get(MENTION_NAMESPACES[namespace].category);
+			if (res) matchingShortcuts.push(makeNamespaceShortcutItem(namespace, res.total));
 		}
 
 		// Case 1: Model `:effort` suffix typed or Files has no strong match while one non-file category clearly wins.
