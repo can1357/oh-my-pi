@@ -48,6 +48,7 @@ import {
 	readComposedCatalog,
 	readComposedCatalogDescriptor,
 	readModelCache,
+	readModelCaches,
 	retainModelCacheConnection,
 	staticCatalogSources,
 	writeComposedCatalog,
@@ -2370,10 +2371,12 @@ export class ModelRegistry {
 			if (startup.policyInputs !== undefined && startup.policyInputs !== policy) this.#startupCatalog = undefined;
 			else startup.policyInputs = policy;
 		}
-		for (const providerId of providerIds) {
-			const cacheProviderId = this.#resolveStartupModelCacheProviderId(providerId);
-			const cache = readModelCache<Api>(cacheProviderId, STANDARD_MODEL_CACHE_TTL_MS, Date.now, this.#cacheDbPath);
-			const hasKey = this.#startupDiscoveryHasKey(providerId, cache !== null, disabledProviders);
+		const namespaces = providerIds.map(id => this.#resolveStartupModelCacheProviderId(id));
+		const caches = readModelCaches<Api>(namespaces, STANDARD_MODEL_CACHE_TTL_MS, Date.now, this.#cacheDbPath);
+		for (const [index, providerId] of providerIds.entries()) {
+			const cacheProviderId = namespaces[index];
+			const cache = caches.get(cacheProviderId);
+			const hasKey = this.#startupDiscoveryHasKey(providerId, cache !== undefined, disabledProviders);
 			if (startup) {
 				for (const model of cache?.models ?? []) {
 					if (model.cost.timeBased?.effectiveRates?.length) {
@@ -2582,9 +2585,10 @@ export class ModelRegistry {
 	#loadCachedDiscoverableModels(): Model<Api>[] {
 		const cachedModels: Model<Api>[] = [];
 		using _cacheConnection = retainModelCacheConnection(this.#cacheDbPath);
-		for (const providerConfig of this.#discoverableProviders) {
-			const cacheProviderId = this.#configuredDiscoveryCacheProviderId(providerConfig);
-			const cache = readModelCache<Api>(cacheProviderId, STANDARD_MODEL_CACHE_TTL_MS, Date.now, this.#cacheDbPath);
+		const namespaces = this.#discoverableProviders.map(config => this.#configuredDiscoveryCacheProviderId(config));
+		const caches = readModelCaches<Api>(namespaces, STANDARD_MODEL_CACHE_TTL_MS, Date.now, this.#cacheDbPath);
+		for (const [index, providerConfig] of this.#discoverableProviders.entries()) {
+			const cache = caches.get(namespaces[index]);
 			if (!cache) {
 				this.#providerDiscoveryStates.set(providerConfig.provider, {
 					provider: providerConfig.provider,

@@ -60,6 +60,26 @@ export async function compileCompatRules(rulesDir: string): Promise<CompiledComp
 	};
 }
 
+/** Serialize the rules and index the two whole-tree queries made by model-cache readers. */
+export function serializeCompatRules(rules: CompiledCompatRules) {
+	const dates = new Set<number>();
+	const json = JSON.stringify(rules, (key, value: unknown) => {
+		if (key === "effectiveFrom" && typeof value === "string") {
+			const instant = Date.parse(value);
+			if (Number.isFinite(instant)) dates.add(instant);
+		}
+		return value;
+	});
+	return {
+		json,
+		index: {
+			version: rules.version,
+			hash: Bun.hash(json).toString(36),
+			priceChanges: [...dates].sort((a, b) => a - b),
+		},
+	};
+}
+
 /**
  * Source of the committed `src/compat/auth-ids.ts`: literal id unions derived
  * from the compiled auth stratum so `@oh-my-pi/pi-ai` keeps typed provider

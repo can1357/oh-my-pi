@@ -8,7 +8,7 @@ import {
 	getTerminalSessionsDir,
 	getWorktreesDir,
 	hashPath,
-	relativePathWithinRoot,
+	relativePathWithinNormalizedRoot,
 	resolveEquivalentPath,
 } from "@oh-my-pi/pi-utils/dirs";
 import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
@@ -493,8 +493,38 @@ function writeIfChangedSync(file: string, content: string): void {
  */
 function isFoundByManagedScan(file: string): boolean {
 	if (!file.endsWith(".jsonl")) return false;
-	const relative = relativePathWithinRoot(getSessionsDir(), file);
-	return relative !== null && !relative.split(path.sep).some(segment => segment.startsWith("."));
+	const root = getSessionsDir();
+	try {
+		const present = fs.lstatSync(file, { throwIfNoEntry: false });
+		if (!present) {
+			// A lazy transcript in an ordinary root/bucket needs no realpath: aliases
+			// at or above root are shared by the scan. A dangling leaf link is not absent.
+			const bucket = path.dirname(file);
+			if (path.dirname(bucket) === root && !fs.lstatSync(bucket, { throwIfNoEntry: false })?.isSymbolicLink()) {
+				return !path.basename(bucket).startsWith(".") && !path.basename(file).startsWith(".");
+			}
+		}
+
+		const realRoot = fs.realpathSync(root);
+		let existing = file;
+		if (!present) {
+			// Keep markers for missing custom paths. For a candidate under the physical
+			// root, check its nearest existing ancestor so a bucket link cannot escape.
+			if (relativePathWithinNormalizedRoot(realRoot, file) === null) return false;
+			do {
+				if (path.basename(existing).startsWith(".")) return false;
+				const parent = path.dirname(existing);
+				if (parent === existing) return false;
+				existing = parent;
+			} while (!fs.lstatSync(existing, { throwIfNoEntry: false }));
+		}
+		const relative = relativePathWithinNormalizedRoot(realRoot, fs.realpathSync(existing));
+		if (relative === null || relative.startsWith(".") || relative.includes(`${path.sep}.`)) return false;
+		return !present || relative.endsWith(".jsonl");
+	} catch {
+		// Inaccessible entries or dangling links are not provably covered by the scan.
+		return false;
+	}
 }
 
 /**

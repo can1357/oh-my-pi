@@ -246,6 +246,55 @@ describe("custom session-file registry", () => {
 		}
 	});
 
+	test.skipIf(process.platform === "win32")("classifies linked and missing transcript paths", () => {
+		const agentDir = fs.realpathSync(makeTempDir("omp-agent-"));
+		const cwd = makeTempDir("omp-cwd-");
+		const originalAgentDir = getAgentDir();
+		setAgentDir(agentDir);
+		try {
+			const root = getSessionsDir();
+			const bucket = path.join(root, "visible");
+			const sibling = `${root}-other`;
+			fs.mkdirSync(bucket, { recursive: true });
+			fs.mkdirSync(sibling);
+			const escape = path.join(root, "escape");
+			const alias = path.join(cwd, "alias");
+			fs.symlinkSync(sibling, escape);
+			fs.symlinkSync(bucket, alias);
+			fs.writeFileSync(path.join(bucket, "existing.jsonl"), "");
+			const dangling = path.join(bucket, "dangling.jsonl");
+			fs.symlinkSync(path.join(cwd, "missing"), dangling);
+			const linkedFile = path.join(bucket, "linked.jsonl");
+			const outsideFile = path.join(sibling, "external.jsonl");
+			fs.writeFileSync(outsideFile, "");
+			fs.symlinkSync(outsideFile, linkedFile);
+			const linkedText = path.join(bucket, "linked-text.jsonl");
+			fs.writeFileSync(path.join(bucket, "work.txt"), "");
+			fs.symlinkSync(path.join(bucket, "work.txt"), linkedText);
+
+			for (const [file, needsMarker] of [
+				[path.join(bucket, "new.jsonl"), false],
+				[path.join(bucket, "missing", "nested", "new.jsonl"), false],
+				[path.join(bucket, ".missing", "new.jsonl"), true],
+				[path.join(sibling, "new.jsonl"), true],
+				[path.join(escape, "new.jsonl"), true],
+				[path.join(escape, "missing", "nested", "new.jsonl"), true],
+				[path.join(alias, "existing.jsonl"), false],
+				[path.join(alias, "missing", "new.jsonl"), true],
+				[path.join(alias, ".missing", "new.jsonl"), true],
+				[dangling, true],
+				[linkedFile, true],
+				[linkedText, true],
+			] as const) {
+				writeTerminalBreadcrumb(cwd, file, true);
+				const marker = path.join(getCustomSessionFilesDir(), hashPath(file));
+				expect(fs.existsSync(marker)).toBe(needsMarker);
+			}
+		} finally {
+			setAgentDir(originalAgentDir);
+		}
+	});
+
 	test("leaves identical breadcrumb and marker files unwritten when the same session is recorded again", () => {
 		const agentDir = makeTempDir("omp-agent-");
 		const cwd = makeTempDir("omp-cwd-");

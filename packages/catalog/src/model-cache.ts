@@ -15,7 +15,7 @@ import {
 	VERSION,
 } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
-import RULES from "./compat/rules.json" with { type: "json" };
+import ruleIndex from "./compat/rules-index.json" with { type: "json" };
 import type { Api, Model } from "./types";
 
 // Rows persist fully materialized Models so compatible warm-cache reads do not
@@ -45,17 +45,13 @@ const HEADER_RESTORE_VERSION = 1;
 /**
  * Explicit compatibility gate for materialized rows. Bump whenever buildModel
  * semantics change without an app-version change. The compiled-rules content
- * hash catches every KDL policy edit even when the package version is unchanged;
- * computed lazily on first cache access and memoized, so processes that never
- * touch the model cache skip the stringify entirely.
+ * hash catches every KDL policy edit even when the package version is unchanged.
  */
 const MODEL_MATERIALIZATION_VERSION = 2;
 let cachedMaterializationPolicy: string | undefined;
 function materializationPolicy(): string {
 	if (cachedMaterializationPolicy === undefined) {
-		cachedMaterializationPolicy =
-			`app-${VERSION}:builder-${MODEL_MATERIALIZATION_VERSION}:rules-${RULES.version}-` +
-			Bun.hash(JSON.stringify(RULES)).toString(36);
+		cachedMaterializationPolicy = `app-${VERSION}:builder-${MODEL_MATERIALIZATION_VERSION}:rules-${ruleIndex.version}-${ruleIndex.hash}`;
 	}
 	return cachedMaterializationPolicy;
 }
@@ -134,15 +130,15 @@ const CACHE_ROW_FRESHNESS_COLUMNS = `
 		f.authoritative AS freshness_authoritative`;
 // Keep SQLite's overflow pages and the multi-MB JS string off the read path
 // when only freshness or header provenance changed. NULL never matches a hash.
-const SELECT_CACHE_ROW = `
-	SELECT m.provider_id, m.version, m.materialization_policy, m.updated_at, m.authoritative,
+const CACHE_ROW_COLUMNS = `m.provider_id, m.version, m.materialization_policy, m.updated_at, m.authoritative,
 		m.static_fingerprint, m.models_hash, m.header_omitted_model_ids, m.unrestorable_header_model_ids,
-		m.header_restore_version, ${CACHE_ROW_FRESHNESS_COLUMNS},
+		m.header_restore_version, ${CACHE_ROW_FRESHNESS_COLUMNS}`;
+const CACHE_ROW_FROM = `FROM model_cache m LEFT JOIN model_cache_freshness f
+		ON f.provider_id = m.provider_id AND f.materialization_policy = m.materialization_policy`;
+const SELECT_CACHE_ROW = `SELECT ${CACHE_ROW_COLUMNS},
 		CASE WHEN m.models_hash = ? THEN NULL ELSE m.models END AS models
-	FROM model_cache m LEFT JOIN model_cache_freshness f
-		ON f.provider_id = m.provider_id AND f.materialization_policy = m.materialization_policy
-	WHERE m.provider_id = ? AND m.materialization_policy = ? AND m.version = ${CACHE_SCHEMA_VERSION}
-`;
+	${CACHE_ROW_FROM}
+	WHERE m.provider_id = ? AND m.materialization_policy = ? AND m.version = ${CACHE_SCHEMA_VERSION}`;
 
 /** Cumulative model-cache write counters for this process. */
 export interface ModelCacheWriteStats {
@@ -282,8 +278,8 @@ interface PinnedDb {
 const pinnedDbs = new Map<string, PinnedDb>();
 
 interface ReadRowCacheEntry {
-	/** `PRAGMA data_version` of the shared connection when validated; null for per-call connections. */
-	dataVersion: number | null;
+	/** Identifies one data version of one shared or retained connection; null for per-call connections. */
+	generation: ReadGeneration | null;
 	/**
 	 * Scalar columns (plus `models_hash`) of the row the entry was parsed from;
 	 * null when the row was absent or rejected. Never the multi-MB payload itself.
@@ -292,8 +288,8 @@ interface ReadRowCacheEntry {
 	entry: CacheEntry<Api> | null;
 }
 
-const readRowCache = new Map<string, ReadRowCacheEntry>();
 const READ_ROW_CACHE_MAX = 64;
+const readRowCache = new LRUCache<string, ReadRowCacheEntry>({ max: READ_ROW_CACHE_MAX });
 
 /**
  * Parsed `models` payloads by `models_hash`, shared across database files: a
@@ -308,10 +304,19 @@ function readCacheKey(resolvedPath: string, providerId: string): string {
 	return `${resolvedPath} ${providerId}`;
 }
 
-function dbDataVersion(db: Database): number | null {
+interface ReadGeneration {
+	readonly version: number;
+}
+const kReadGeneration = Symbol("modelCache.readGeneration");
+
+/** SQLite data_version is comparable only on the same connection, not even across reopens of the same file. */
+function dbReadGeneration(db: Database & { [kReadGeneration]?: ReadGeneration }): ReadGeneration | null {
 	try {
-		const row = db.query<{ data_version: number }, []>("PRAGMA data_version").get();
-		return typeof row?.data_version === "number" ? row.data_version : null;
+		const version = db.query<{ data_version: number }, []>("PRAGMA data_version").get()?.data_version;
+		if (typeof version !== "number") return null;
+		const last = db[kReadGeneration];
+		if (last?.version === version) return last;
+		return (db[kReadGeneration] = { version });
 	} catch {
 		return null;
 	}
@@ -783,9 +788,13 @@ function parseMaterializedModels<TApi extends Api>(serialized: string): Model<TA
 	}
 }
 
-/** {@link parseMaterializedModels}, memoized by the row's `models_hash` (rows without one always parse). */
+function payloadHash(models: string): string {
+	return `${models.length.toString(36)}:${Bun.hash(models).toString(36)}`;
+}
+
+/** Legacy and externally edited rows have no trusted on-disk hash: hash the actual bytes on every read. */
 function parsePayload<TApi extends Api>(serialized: string, hash: string): Model<TApi>[] | null {
-	if (hash === "") return parseMaterializedModels<TApi>(serialized);
+	if (hash === "") hash = payloadHash(serialized);
 	const cached = parsedPayloads.get(hash);
 	if (cached !== undefined) return cached as Model<TApi>[];
 	const models = parseMaterializedModels<TApi>(serialized);
@@ -815,43 +824,118 @@ export function readModelCache<TApi extends Api>(
 		// can leave every size:mtime pair identical, so file metadata alone
 		// cannot invalidate. PRAGMA data_version increments on each committed
 		// write transaction visible to a new reader. It is only comparable
-		// across calls on the same connection, so it gates the no-query fast
-		// path for the shared handle only.
+		// across calls on the same connection: per-call handles always query.
 		const { resolvedPath, shared } = resolveCacheDb(dbPath);
 		const key = readCacheKey(resolvedPath, providerId);
 		return runModelCacheDb(resolvedPath, shared, db => {
-			const dataVersion = shared ? dbDataVersion(db) : null;
+			const generation = shared || pinnedDbs.has(resolvedPath) ? dbReadGeneration(db) : null;
 			const cached = readRowCache.get(key);
-			if (dataVersion !== null && cached?.dataVersion === dataVersion) {
+			if (generation !== null && cached?.generation === generation) {
 				// Freshness is time-relative: recompute per call from the
 				// cached row's updatedAt so a long-lived process goes stale.
 				return withFreshness(cached.entry as CacheEntry<TApi> | null, ttlMs, now);
 			}
 			// Any commit (to any provider) bumps data_version. Revalidate the
 			// scalars and fetch the payload only on a hash miss, in one snapshot.
-			const previous = cached?.entry as CacheEntry<TApi> | null | undefined;
-			const row = queryRow(db, providerId, cached?.meta?.models_hash || null);
-			const entry =
-				row?.models === null && previous && cached?.meta && cacheRowsEqual(cached.meta, row)
-					? withFreshness(withRowState(previous, row), ttlMs, now)
-					: parseCacheRow(db, providerId, row, ttlMs, now, previous?.models);
-			if (row) row.models = null; // Never pin the serialized payload in the memo.
-			if (readRowCache.size >= READ_ROW_CACHE_MAX) readRowCache.clear();
-			readRowCache.set(key, { dataVersion, meta: entry ? row : null, entry: entry as CacheEntry<Api> | null });
-			return entry;
+			const row = db
+				.query<CacheRow, [string | null, string, string]>(SELECT_CACHE_ROW)
+				.get(cached?.meta?.models_hash || null, providerId, materializationPolicy());
+			return rememberRow<TApi>(db, key, providerId, cached, row, generation, ttlMs, now);
 		});
 	} catch {
 		return null;
 	}
 }
 
-/** This build's row for `providerId`; rows of other materialization policies are invisible. */
-function queryRow(db: Database, providerId: string, knownHash: string | null): CacheRow | null {
-	const stmt = db.query<CacheRow, [string | null, string, string]>(SELECT_CACHE_ROW);
+function rememberRow<TApi extends Api>(
+	db: Database,
+	key: string,
+	providerId: string,
+	cached: ReadRowCacheEntry | undefined,
+	row: CacheRow | null,
+	generation: ReadGeneration | null,
+	ttlMs: number,
+	now: () => number,
+): CacheEntry<TApi> | null {
+	const previous = cached?.entry as CacheEntry<TApi> | null | undefined;
+	const entry =
+		row?.models === null && previous && cached?.meta && cacheRowsEqual(cached.meta, row)
+			? withFreshness(withRowState(previous, row), ttlMs, now)
+			: parseCacheRow(db, providerId, row, ttlMs, now, previous?.models);
+	if (row) row.models = null; // Never pin the serialized payload in the memo.
+	readRowCache.set(key, { generation, meta: entry ? row : null, entry: entry as CacheEntry<Api> | null });
+	return entry;
+}
+
+/**
+ * Read a group of startup namespaces together: one change check, and one indexed
+ * join for all rows that need revalidation, including misses. Only changed
+ * payloads cross the SQLite boundary, just as in the single-provider reader.
+ */
+export function readModelCaches<TApi extends Api>(
+	providerIds: readonly string[],
+	ttlMs: number,
+	now: () => number,
+	dbPath?: string,
+): Map<string, CacheEntry<TApi>> {
+	const entries = new Map<string, CacheEntry<TApi>>();
+	if (providerIds.length === 0) return entries;
+	if (providerIds.length === 1) {
+		const entry = readModelCache<TApi>(providerIds[0], ttlMs, now, dbPath);
+		if (entry) entries.set(providerIds[0], entry);
+		return entries;
+	}
 	try {
-		return stmt.get(knownHash, providerId, materializationPolicy());
-	} finally {
-		stmt.finalize();
+		const { resolvedPath, shared } = resolveCacheDb(dbPath);
+		return runModelCacheDb(resolvedPath, shared, db => {
+			entries.clear(); // A corruption recovery may retry this callback on a replacement database.
+			const generation = shared || pinnedDbs.has(resolvedPath) ? dbReadGeneration(db) : null;
+			const pending = new Map<string, { key: string; cached: ReadRowCacheEntry | undefined }>();
+			const bindings: (string | null)[] = [];
+			for (const id of providerIds) {
+				const key = readCacheKey(resolvedPath, id);
+				const cached = readRowCache.get(key);
+				if (generation !== null && cached?.generation === generation) {
+					const entry = withFreshness(cached.entry as CacheEntry<TApi> | null, ttlMs, now);
+					if (entry) entries.set(id, entry);
+				} else if (!pending.has(id)) {
+					pending.set(id, { key, cached });
+					bindings.push(id, cached?.meta?.models_hash || null);
+				}
+			}
+			if (pending.size === 0) return entries;
+			// Stream instead of collecting all payload strings for a large catalog.
+			const values = "(?,?),".repeat(pending.size).slice(0, -1);
+			const stmt = db.prepare<CacheRow, (string | null)[]>(`
+				WITH wanted(id, hash) AS (VALUES ${values})
+				SELECT ${CACHE_ROW_COLUMNS}, CASE WHEN m.models_hash = wanted.hash THEN NULL ELSE m.models END AS models
+				${CACHE_ROW_FROM} JOIN wanted ON m.provider_id = wanted.id
+				WHERE m.materialization_policy = ? AND m.version = ${CACHE_SCHEMA_VERSION}`);
+			try {
+				bindings.push(materializationPolicy());
+				for (const row of stmt.iterate(...bindings)) {
+					const { key, cached } = pending.get(row.provider_id)!;
+					const entry = rememberRow<TApi>(db, key, row.provider_id, cached, row, generation, ttlMs, now);
+					if (entry) entries.set(row.provider_id, entry);
+					pending.delete(row.provider_id);
+				}
+			} finally {
+				stmt.finalize();
+			}
+			for (const { key } of pending.values()) {
+				readRowCache.set(key, { generation, meta: null, entry: null });
+			}
+			return entries;
+		});
+	} catch {
+		// One unreadable row (or a group exceeding SQLite's binding limit) must
+		// not hide healthy providers. The single reader isolates per-row failures.
+		entries.clear();
+		for (const id of providerIds) {
+			const entry = readModelCache<TApi>(id, ttlMs, now, dbPath);
+			if (entry) entries.set(id, entry);
+		}
+		return entries;
 	}
 }
 
@@ -1089,7 +1173,7 @@ class CacheRowBuilder<TApi extends Api> {
 			unrestorableHeaderModelIds: JSON.stringify(this.#unrestorableHeaderModelIds),
 			models,
 			// Length prefix: a collision would also need an equal payload size.
-			modelsHash: `${models.length.toString(36)}:${Bun.hash(models).toString(36)}`,
+			modelsHash: payloadHash(models),
 		};
 	}
 }

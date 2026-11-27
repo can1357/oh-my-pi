@@ -185,12 +185,16 @@ function parseForcedLevel(value: string | undefined): ColorLevel | undefined {
 
 /** Detect an ANSI color level from terminal environment and TTY state. */
 export function detectColorLevel(environment: NodeJS.ProcessEnv, isTTY: boolean): ColorLevel {
-	const forced = parseForcedLevel(environment.FORCE_COLOR);
-	if (forced !== undefined) return forced;
-	if ("NO_COLOR" in environment || environment.TERM === "dumb") return 0;
-	if (!isTTY) return 0;
-	if (environment.COLORTERM === "truecolor" || environment.COLORTERM === "24bit") return 3;
-	if (environment.TERM?.endsWith("-256color")) return 2;
+	return parseForcedLevel(environment.FORCE_COLOR) ?? (isTTY ? ttyColorLevel(environment) : 0);
+}
+
+function ttyColorLevel(environment: NodeJS.ProcessEnv): ColorLevel {
+	if ("NO_COLOR" in environment) return 0;
+	const term = environment.TERM;
+	if (term === "dumb") return 0;
+	const colorTerm = environment.COLORTERM;
+	if (colorTerm === "truecolor" || colorTerm === "24bit") return 3;
+	if (term?.endsWith("-256color")) return 2;
 	if (environment.CI) {
 		if (environment.GITHUB_ACTIONS || environment.GITEA_ACTIONS) return 3;
 		if (
@@ -204,10 +208,11 @@ export function detectColorLevel(environment: NodeJS.ProcessEnv, isTTY: boolean)
 		}
 		return 0;
 	}
-	if (environment.TERM_PROGRAM === "iTerm.app") {
+	const program = environment.TERM_PROGRAM;
+	if (program === "iTerm.app") {
 		return Number.parseInt(environment.TERM_PROGRAM_VERSION ?? "0", 10) >= 3 ? 3 : 2;
 	}
-	if (environment.TERM_PROGRAM === "Apple_Terminal") return 2;
+	if (program === "Apple_Terminal") return 2;
 	return 1;
 }
 
@@ -216,11 +221,17 @@ function colorSupport(level: ColorLevel): ColorSupport | false {
 	return { level, hasBasic: true, has256: level >= 2, has16m: level >= 3 };
 }
 
+// Both streams share the terminal environment, but either may be redirected.
+const forcedLevel = parseForcedLevel(process.env.FORCE_COLOR);
+const stdoutTTY = forcedLevel === undefined && process.stdout.isTTY;
+const stderrTTY = forcedLevel === undefined && process.stderr.isTTY;
+const ttyLevel = stdoutTTY || stderrTTY ? ttyColorLevel(process.env) : 0;
+
 /** Color support detected for standard output. */
-export const supportsColor = colorSupport(detectColorLevel(process.env, Boolean(process.stdout.isTTY)));
+export const supportsColor = colorSupport(forcedLevel ?? (stdoutTTY ? ttyLevel : 0));
 
 /** Color support detected for standard error. */
-export const supportsColorStderr = colorSupport(detectColorLevel(process.env, Boolean(process.stderr.isTTY)));
+export const supportsColorStderr = colorSupport(forcedLevel ?? (stderrTTY ? ttyLevel : 0));
 
 function ansi256(r: number, g: number, b: number): number {
 	if (r === g && g === b) {
@@ -349,7 +360,6 @@ function ChalkImplementation(this: unknown, options: ChalkOptions = {}): ChalkIn
 /** Construct an independently configured chalk formatter. */
 export const Chalk = ChalkImplementation as unknown as ChalkConstructor;
 
-const defaultLevel = supportsColor === false ? 0 : supportsColor.level;
-const chalk = new Chalk({ level: defaultLevel });
+const chalk = new Chalk();
 
 export default chalk;

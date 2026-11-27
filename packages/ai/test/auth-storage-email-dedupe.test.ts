@@ -153,6 +153,20 @@ describe("AuthStorage openai-codex email dedupe", () => {
 		expect(remaining.credential.accountId).toBe("account-b");
 	});
 
+	it("uses the preferred explicit identity before conflicting JWT claims", async () => {
+		if (!store || !db) throw new Error("test setup failed");
+		const credential = {
+			...createJwtOnlyCredential({ suffix: "first", accountId: "jwt-account", email: "jwt@example.com" }),
+			accountId: " explicit-account ",
+			email: " EXPLICIT@example.com ",
+			orgId: " org-1 ",
+		};
+		await store.upsertAuthCredential("openai-codex", credential);
+		await store.upsertAuthCredential("fixture-account-first", credential);
+		expect(readStoredIdentityRows(db, "openai-codex")[0]?.identity_key).toBe("email:explicit@example.com|org:org-1");
+		expect(readStoredIdentityRows(db, "fixture-account-first")[0]?.identity_key).toBe("account:explicit-account");
+	});
+
 	it("updates in-place when a codex credential with matching email replaces another account", async () => {
 		if (!store || !db) throw new Error("test setup failed");
 

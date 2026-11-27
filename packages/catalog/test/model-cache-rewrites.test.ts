@@ -4,7 +4,13 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { getModelCacheWriteStats, readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+import {
+	getModelCacheWriteStats,
+	readModelCache,
+	readModelCaches,
+	retainModelCacheConnection,
+	writeModelCache,
+} from "@oh-my-pi/pi-catalog/model-cache";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { type GeneratedProvider, getBundledModels, getBundledProviders } from "@oh-my-pi/pi-catalog/models";
 import { modelsDevCatalogFallback } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
@@ -141,6 +147,56 @@ describe("model cache write churn", () => {
 		} finally {
 			db.close();
 		}
+	});
+
+	it("batch reads isolate corrupt rows, observe repairs and refresh side rows, and age preloaded entries", () => {
+		using _connection = retainModelCacheConnection(dbPath);
+		const ids = ["absent", "good", "bad", "good"];
+		const load = (now: number) => readModelCaches(ids, 100, () => now, dbPath);
+		for (const id of ["good", "bad"]) writeModelCache(id, 1_000, [model("initial", id)], true, "fp", dbPath);
+		const first = load(1_000);
+		expect(first.size).toBe(2);
+		expect(first.get("good")?.fresh).toBe(true);
+
+		const db = new Database(dbPath);
+		try {
+			db.run("UPDATE model_cache SET header_omitted_model_ids = 'invalid' WHERE provider_id = 'bad'");
+			db.run("UPDATE model_cache SET models_hash = '' WHERE provider_id = 'good'");
+			const stale = load(2_000);
+			expect([...stale.keys()]).toEqual(["good"]);
+			// The legacy writer left no hash. Its actual bytes still identify the parsed models.
+			expect(stale.get("good")?.models).toBe(first.get("good")?.models);
+			expect(stale.get("good")?.payloadIdentity).toBeUndefined();
+			expect(stale.get("good")?.fresh).toBe(false);
+			expect(payloadRow(dbPath, "bad")).toBeNull();
+			db.run("UPDATE model_cache SET models = '[]' WHERE provider_id = 'good'");
+			expect(load(2_000).get("good")?.models).toEqual([]);
+		} finally {
+			db.close();
+		}
+
+		writeModelCache("bad", 2_000, [model("recovered", "bad")], true, "fp", dbPath);
+		writeModelCache("bad", 3_000, [model("recovered", "bad")], false, "fp", dbPath);
+		writeModelCache("absent", 3_000, [model("new", "absent")], true, "fp", dbPath);
+		const recovered = load(3_000);
+		expect(recovered.get("absent")?.models[0].id).toBe("new");
+		expect(recovered.get("bad")).toMatchObject({ updatedAt: 3_000, authoritative: false, fresh: true });
+		expect(recovered.get("bad")?.models[0].id).toBe("recovered");
+	});
+
+	it("does not reuse a retained connection's change counter after reopening the same path", () => {
+		const ids = ["rewrite-test", "absent"];
+		{
+			using _connection = retainModelCacheConnection(dbPath);
+			writeModelCache("rewrite-test", 1_000, [model("original")], true, "fp", dbPath);
+			expect(readModelCaches(ids, 100, () => 1_000, dbPath).get("rewrite-test")?.fresh).toBe(true);
+			expect(readModelCaches(ids, 100, () => 2_000, dbPath).get("rewrite-test")?.fresh).toBe(false);
+		}
+		const db = new Database(dbPath);
+		db.run("UPDATE model_cache SET models = '[]' WHERE provider_id = 'rewrite-test'");
+		db.close();
+		using _reopened = retainModelCacheConnection(dbPath);
+		expect(readModelCaches(ids, 100, () => 1_000, dbPath).get("rewrite-test")?.models).toEqual([]);
 	});
 
 	it("ignores a side row left behind by a payload another writer replaced", () => {

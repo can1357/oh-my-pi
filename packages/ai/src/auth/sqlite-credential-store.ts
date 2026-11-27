@@ -204,9 +204,9 @@ function toStoredAuthCredential(row: AuthRow, credential: AuthCredential): Store
 	return { id: row.id, provider: row.provider, credential, disabledCause: row.disabled_cause };
 }
 
-function resolveProviderCredentialIdentityKey(provider: string, identifiers: string[]): string | null {
+function resolveProviderCredentialIdentityKey(orgScoped: boolean, identifiers: string[]): string | null {
 	const emailIdentifier = identifiers.find(identifier => identifier.startsWith("email:"));
-	if (authPolicyFor(provider)?.orgScopedIdentity === true) {
+	if (orgScoped) {
 		// One account email can hold several organizations/workspaces (e.g. a
 		// Team seat plus a personal plan), each with its own org-scoped token
 		// and limit pools. Scope identity by org so both subscriptions can be
@@ -240,7 +240,20 @@ function resolveProviderCredentialIdentityKey(provider: string, identifiers: str
  */
 export function resolveCredentialIdentityKey(provider: string, credential: AuthCredential): string | null {
 	if (credential.type === "api_key") return null;
-	return resolveProviderCredentialIdentityKey(provider, extractOAuthCredentialIdentifiers(credential));
+	// Explicit fields precede token claims of the same kind. When the policy's
+	// preferred field is present no JWT claim can change the resulting key.
+	const orgScoped = authPolicyFor(provider)?.orgScopedIdentity === true;
+	if (orgScoped) {
+		const email = normalizeStoredEmail(credential.email);
+		if (email) {
+			const org = normalizeStoredAccountId(credential.orgId);
+			return org ? `email:${email}|org:${org}` : `email:${email}`;
+		}
+	} else {
+		const account = normalizeStoredAccountId(credential.accountId);
+		if (account) return `account:${account}`;
+	}
+	return resolveProviderCredentialIdentityKey(orgScoped, extractOAuthCredentialIdentifiers(credential));
 }
 
 function resolveRowCredentialIdentityKey(provider: string, row: AuthRow): string | null {
@@ -282,7 +295,10 @@ export function matchesReplacementCredential(
 		return false;
 	}
 	const incomingIdentifiers = extractOAuthCredentialIdentifiers(incoming);
-	const incomingIdentityKey = resolveProviderCredentialIdentityKey(provider, incomingIdentifiers);
+	const incomingIdentityKey = resolveProviderCredentialIdentityKey(
+		authPolicyFor(provider)?.orgScopedIdentity === true,
+		incomingIdentifiers,
+	);
 	if (incomingIdentityKey === null) return false;
 	if (incomingIdentityKey === existingIdentityKey) return true;
 	if (existingIdentityKey === null) return false;
@@ -1562,7 +1578,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 
 	#backfillCredentialIdentityKeys(): void {
 		const selectRowsStmt = this.#db.prepare(
-			"SELECT id, provider, credential_type, data, salt, disabled_cause, identity_key FROM auth_credentials WHERE identity_key IS NULL ORDER BY id ASC",
+			"SELECT id, provider, credential_type, data, salt, disabled_cause, identity_key FROM auth_credentials WHERE credential_type = 'oauth' AND identity_key IS NULL ORDER BY id ASC",
 		);
 		let rows: AuthRow[];
 		try {
@@ -2374,6 +2390,35 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		return rows.map(row => row.provider);
 	}
 
+	/**
+	 * Read persisted broker-local routes and their active rows in one snapshot. The
+	 * left join keeps routes with no usable credential: they still hide broker rows.
+	 */
+	readBrokerLocalSnapshot(deviceBoundProviders: readonly string[]): {
+		providers: Set<string>;
+		credentials: StoredAuthCredential[];
+	} {
+		const providers = new Set(deviceBoundProviders);
+		const credentials: StoredAuthCredential[] = [];
+		for (const provider of deviceBoundProviders) {
+			for (const row of this.listAuthCredentials(provider)) credentials.push(row);
+		}
+		const rows = this.#db
+			.query<AuthRow | { provider: string; id: null }, []>(`
+				SELECT p.provider, c.id, c.credential_type, c.data, c.salt, c.disabled_cause, c.identity_key
+				FROM auth_broker_local_providers p LEFT JOIN auth_credentials c ON c.provider = p.provider AND c.disabled_cause IS NULL
+				ORDER BY p.provider, c.id
+			`)
+			.all();
+		for (const row of rows) {
+			providers.add(row.provider);
+			if (row.id === null || deviceBoundProviders.includes(row.provider)) continue;
+			const credential = deserializeCredential(this.#reveal(row));
+			if (credential) credentials.push(toStoredAuthCredential(row, credential));
+		}
+		return { providers, credentials };
+	}
+
 	/** Record `provider` in {@link listBrokerLocalProviders}; a no-op when already listed. */
 	markBrokerLocalProvider(provider: string): void {
 		this.#db
@@ -2393,9 +2438,9 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	 * writes leave it unchanged and already notify AuthStorage directly.
 	 */
 	pollExternalChanges(): boolean {
-		this.#acknowledgeLocalAuthChanges();
 		const dataVersion = this.#readDataVersion();
 		if (dataVersion === this.#dataVersion) return false;
+		this.#acknowledgeLocalAuthChanges();
 		this.#dataVersion = dataVersion;
 		const authRevision = this.#readAuthRevision();
 		if (authRevision === this.#authRevision) return false;
