@@ -175,6 +175,7 @@ import type {
 	SessionBeforeSwitchResult,
 	SessionBeforeTreeResult,
 	SessionStopEventResult,
+	TodoBackendChange,
 	ToolInfo,
 	TreePreparation,
 } from "../extensibility/extensions";
@@ -293,7 +294,7 @@ import { toolCommandDispatches } from "../tools/tool-commands";
 import { PROPOSE_COMMAND_NAME, REJECT_COMMAND_NAME } from "../tools/details/resolve";
 import { supportsExternalThinking } from "../tools/think";
 import { USER_TODO_EDIT_CUSTOM_TYPE } from "../tools/todo";
-import type { TodoPhase } from "../tools/details/todo";
+import type { TodoApplyOutcome, TodoPhase } from "../tools/details/todo";
 import { ToolError } from "../tools/tool-errors";
 import { currentThreadId, isMainThread } from "../thread/identity";
 import { registerLocalSession } from "../thread/session-directory";
@@ -4954,7 +4955,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
-	 * Drops queued `todo-error-reminder`s superseded by a successful `todo` call.
+	 * Drops queued `todo-error-reminder`s superseded by a successful `todo` call, or by one whose
+	 * valid payload a todo backend kept from committing.
 	 * Exact retries clear every matching failure. Otherwise the call is treated
 	 * as a corrected retry of the oldest outstanding failure with the same op
 	 * (placeholder task text, missing items, ...); failures of other ops stay queued.
@@ -5335,11 +5337,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				if (toolName === "todo" && !isError && details && this.#todo.onTodoResultDetails(details, toolCallId)) {
 					this.#scheduleTitleRefresh("replan");
 				}
-				if (toolName === "todo" && !isError && details?.op !== "view") {
+				if (toolName === "todo" && (!isError || details?.uncommitted !== undefined) && details?.op !== "view") {
 					const retry = this.#todoCallArguments(toolCallId);
 					if (retry) this.#dropSupersededTodoReminders(retry, details && stringProperty(details, "op"));
 				}
-				if (toolName === "todo" && isError) {
+				// A call the todo backend kept from committing had a valid payload: retrying it unchanged is the model's call.
+				if (toolName === "todo" && isError && details?.uncommitted === undefined) {
 					const errorText = content.find(part => part.type === "text")?.text;
 					const attemptedArgs = this.#todoCallArguments(toolCallId);
 					// The tool result already contains the full snapshot. Only carry the
@@ -12202,6 +12205,28 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#mirrorTodoPhases(): void {
 		const backend = this.#todoBackend();
 		if (backend !== undefined) this.#extensionRunner?.syncTodoBackend(backend, this.#todo.phases);
+	}
+
+	/** Put a `todo` call's change to the selected todo backend; see {@link ExtensionRunner.applyTodoBackend}. */
+	applyTodoChange(
+		change: TodoBackendChange,
+		commit: () => void,
+		signal?: AbortSignal,
+	): TodoApplyOutcome | Promise<TodoApplyOutcome> {
+		const backend = this.#todoBackend();
+		if (backend === undefined || !this.#extensionRunner) {
+			commit();
+			return { kind: "committed" };
+		}
+		return this.#extensionRunner.applyTodoBackend({
+			backend,
+			change,
+			current: () => this.#todo.phases,
+			commit,
+			closing: () => this.#isDisposed,
+			selected: () => this.#todoBackend(),
+			signal,
+		});
 	}
 
 	/** Active item labels accepted by this pooled turn's incremental yield tool. */
