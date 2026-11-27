@@ -1115,6 +1115,17 @@ impl Write for MuxWriter {
 	}
 }
 
+/// The connection's last output (internal monotonic milliseconds, 0 = never).
+/// Output through the linked writer counts even if it was built with its own
+/// counters. The idle check below and the read's postponement of it both read
+/// the connection's last output through this, so they cannot disagree on what
+/// it is.
+fn last_out(counters: &IoCounters, writer: Option<&MuxWriter>) -> u64 {
+	writer
+		.map_or(0, |w| w.shared.counters.last_out.load(Ordering::Relaxed))
+		.max(counters.last_out.load(Ordering::Relaxed))
+}
+
 /// Upstream `check_timeout`: optional keepalive, then the idle check (the
 /// receiver never times out by itself).
 fn check_timeout(
@@ -1136,13 +1147,7 @@ fn check_timeout(
 	if role == Some(Role::Receiver) {
 		return Ok(());
 	}
-	// Output through the linked writer counts even if it was built with its
-	// own counters.
-	let last_out = writer
-		.map(|w| w.shared.counters.last_out.load(Ordering::Relaxed))
-		.unwrap_or(0)
-		.max(counters.last_out.load(Ordering::Relaxed));
-	let chk = counters.last_in.load(Ordering::Relaxed).max(last_out);
+	let chk = counters.last_in.load(Ordering::Relaxed).max(last_out(counters, writer));
 	let idle = idle_secs(now, chk);
 	if idle >= timing.timeout { Err(timeout_error(role, idle)) } else { Ok(()) }
 }
@@ -1819,15 +1824,19 @@ impl MuxReader {
 		Ok(more)
 	}
 
+	/// The writer the idle check takes, and so the one the postponement counts.
+	/// A hooked reader (the receiving side's receiver) gives it none: upstream's
+	/// receiver writes its keepalives to the generator's pipe, and the generator
+	/// sees socket activity through the shared counters.
+	fn timeout_writer(&self) -> Option<&MuxWriter> {
+		if self.refill_hook.is_some() { None } else { self.writer.as_ref() }
+	}
+
 	/// How long ago the connection's last output was written (`None`: never),
-	/// counting the linked writer's, as the idle check does.
+	/// read as the idle check reads it.
 	fn since_output(&self) -> Option<Duration> {
-		let last_out = self
-			.writer
-			.as_ref()
-			.map_or(0, |w| w.shared.counters.last_out.load(Ordering::Relaxed))
-			.max(self.shared.counters.last_out.load(Ordering::Relaxed));
-		(last_out != 0).then(|| Duration::from_millis(clock_ms().saturating_sub(last_out)))
+		let last = last_out(&self.shared.counters, self.timeout_writer());
+		(last != 0).then(|| Duration::from_millis(clock_ms().saturating_sub(last)))
 	}
 
 	fn read_data(&mut self, buf: &mut [u8], mut idle: Option<IdleWork<'_>>) -> io::Result<usize> {
@@ -1950,10 +1959,11 @@ impl MuxReader {
 				// Upstream's poll counts its select timeout again after each write,
 				// so a check comes a whole select after the last output, the
 				// keepalive the previous check queued included. Here the output
-				// thread writes that keepalive only after the check returned:
-				// counted from the check, the next one came less than a lull after
-				// a late write and sent no keepalive, so the peer heard nothing for
-				// two lulls, and the check after it could time the sender out.
+				// thread writes that keepalive, and stamps it, only after
+				// check_timeout has returned, so a check that comes due less than
+				// a select after the last output waits out the rest of it.
+				// Postponing cannot hide a timeout: it happens only while less
+				// than select of silence has passed, and select <= timeout.
 				if now >= due
 					&& let Some(left) = self.since_output().and_then(|since| select.checked_sub(since))
 					&& !left.is_zero()
@@ -1964,12 +1974,7 @@ impl MuxReader {
 				if now >= due {
 					let role = st.role;
 					drop(st);
-					// A hooked reader (the receiving side's receiver) keeps its
-					// keepalives off the socket: upstream's receiver writes them
-					// to the generator's pipe, and the generator sees socket
-					// activity through the shared counters.
-					let writer = if self.refill_hook.is_some() { None } else { self.writer.as_ref() };
-					check_timeout(&sh.counters, Some(timing), role, writer, 0, false)?;
+					check_timeout(&sh.counters, Some(timing), role, self.timeout_writer(), 0, false)?;
 					st = sh.lock();
 					next_check = Some(Instant::now() + select);
 					continue;
@@ -2974,8 +2979,30 @@ mod tests {
 		assert!(out.len() >= 8 && out.chunks(4).all(|c| c == [0, 0, 0, 7]), "{out:?}");
 		let write_ends = lock(&write_ends).clone();
 		let lull = timeout / 2;
+		// Two keepalives are what the cancelling thread waits for; say so when
+		// the sink took fewer writes than that, rather than indexing past the end.
+		assert!(write_ends.len() >= 2, "the sink took {} writes: {write_ends:?}", write_ends.len());
 		let gap = write_ends[1] - write_ends[0];
 		assert!(gap < lull + lull / 2, "the second keepalive ended {gap:?} after the first");
+	}
+
+	/// The postponement and the idle check read one last output, so they cannot
+	/// postpone against a clock they do not then judge by. On a real connection
+	/// a reader and its linked writer share one `IoCounters` (`make_streams`),
+	/// so only a writer with counters of its own tells the two readings apart:
+	/// the check takes no writer from a hooked reader (the receiving side's
+	/// receiver, whose keepalives stay off the connection), and neither does
+	/// this.
+	#[test]
+	fn the_postponement_reads_the_output_the_idle_check_reads() {
+		let counters = IoCounters::default();
+		let (mut r, _tx, _cancel) = blocking_reader(Some(Duration::from_secs(10)));
+		let sink = Sink::default();
+		r.link_writer(MuxWriter::new(Box::new(sink.clone()), counters.clone(), WriteConfig::default()));
+		counters.last_out.store(clock_ms(), Ordering::Relaxed);
+		assert!(r.since_output().is_some(), "the check counts the linked writer's output");
+		r.set_refill_hook(Some(Box::new(|_| {})));
+		assert_eq!(r.since_output(), None, "the check takes no writer from a hooked reader");
 	}
 
 	#[test]
