@@ -15,6 +15,7 @@ import {
 	markSessionBackfillsComplete,
 	type ParsedSession,
 	prepareSessionSync,
+	replayInheritedPrefixes,
 } from "./db";
 import {
 	getSessionEntry,
@@ -301,6 +302,7 @@ async function syncAllSessionsLocked(
 	opts?: SyncOptions,
 ): Promise<{ processed: number; files: number; reconcile: boolean }> {
 	await initDb();
+	await replayInheritedPrefixes();
 	const replay = prepareSessionSync();
 
 	const files = opts?.files ?? (await orderForIngest(await listAllSessionFiles()));

@@ -715,6 +715,42 @@ function inheritedPrefixEnd(bytes: Uint8Array): string | undefined {
 	return markerFound ? marker : undefined;
 }
 
+/** A transcript's header identity, and whether it is a reset fork ({@link readResetFork}). */
+export interface ResetForkHeader {
+	id?: string;
+	parentSession?: string;
+	resetFork: boolean;
+}
+
+/**
+ * Read `sessionPath`'s header identity and whether the file can hold a reset fork's inherited prefix
+ * ({@link inheritedPrefixEnd}): a header marker, or a legacy `/tan` boundary in a file whose header names a
+ * parent. Only such a fork reads past its header line. Null for a missing file or one without a header.
+ */
+export async function readResetFork(sessionPath: string): Promise<ResetForkHeader | null> {
+	try {
+		let header: SessionEntry | null = null;
+		for await (const line of readLines(Bun.file(sessionPath).stream())) {
+			header = parseJsonLine(line, 0, line.length);
+			break;
+		}
+		if (header?.type !== "session") return null;
+		const id = "id" in header && typeof header.id === "string" ? header.id : undefined;
+		const parentSession =
+			"parentSession" in header && typeof header.parentSession === "string" ? header.parentSession : undefined;
+		let resetFork = "inheritedThroughEntryId" in header && typeof header.inheritedThroughEntryId === "string";
+		if (!resetFork && parentSession !== undefined) {
+			const bytes = await Bun.file(sessionPath).bytes();
+			resetFork =
+				Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).indexOf(TAN_FORK_BOUNDARY_BYTES) >= 0;
+		}
+		return { id, parentSession, resetFork };
+	} catch (err) {
+		if (isEnoent(err)) return null;
+		throw err;
+	}
+}
+
 /**
  * Tracks a reset fork's inherited prefix ({@link inheritedPrefixEnd}): the model calls the fork copied
  * from its parent. They are the parent's calls, so they become no request rows here. Fork copies keep

@@ -1005,6 +1005,31 @@ describe("Spotlight ingest", () => {
 		expect(stats.gross.results).toBe(1);
 	});
 
+	it("hands a parent's Spotlight rows that an older build gave its reset fork back on upgrade", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		shortenedRead(b);
+		const parentFile = await write("parent.jsonl", b);
+		const forkFile = await writeResetFork(b, parentFile);
+		await syncAllSessions({ workers: 1, files: [parentFile, forkFile] });
+		// The state an older build left when the fork synced first: the fork owns the copied request and its
+		// Spotlight row, both cursors are current, and the upgrade's one-shot has not run.
+		const db = await initDb();
+		db.query("UPDATE messages SET session_file = ? WHERE session_file = ?").run(forkFile, parentFile);
+		db.query("UPDATE spotlight_requests SET session_file = ? WHERE session_file = ?").run(forkFile, parentFile);
+		db.query("DELETE FROM meta WHERE key = ?").run("inherited_prefix_replay_v1");
+		closeDb();
+
+		await initDb();
+		await syncAllSessions({ workers: 1, files: [forkFile, parentFile] });
+
+		const owners = (await initDb())
+			.query<{ session_file: string }, []>("SELECT session_file FROM spotlight_requests")
+			.all();
+		expect(owners.map(owner => owner.session_file)).toEqual([parentFile]);
+		expect((await dashboard()).sessionList.find(session => session.sessionFile === parentFile)?.requests).toBe(1);
+	});
+
 	it("leaves an inherited open read's needs to the parent when the fork re-reads the file first", async () => {
 		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
 		b.user("go");
