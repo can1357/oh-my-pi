@@ -467,6 +467,53 @@ for (const { adapter, url } of BACKENDS) {
 				}).toEqual({ closed: "closed", failures: [], copies: 1, holdsTheJournal: true });
 			}, 120_000);
 
+			// A title set during the rewrite changes the body's title slot and header, so the landed rewrite publishes the
+			// whole transcript again instead of appending the waiting entry. When the seal supersedes that second write before
+			// it reaches the store, only the first body, which lacks the entry, has landed: close() must still write it.
+			it("stores the entry when the session is sealed before the rewrite's second full write lands", async () => {
+				await using s = await openHeldSession(adapter, url ?? "");
+				const secondWriteStarted = Promise.withResolvers<void>();
+				const sealed = Promise.withResolvers<void>();
+				let fullWrites = 0;
+				const writeTextAtomic = s.storage.writeTextAtomic.bind(s.storage);
+				s.storage.writeTextAtomic = async (requested, content, options) => {
+					if (requested === s.sessionFile && ++fullWrites === 2) {
+						secondWriteStarted.resolve();
+						await sealed.promise;
+					}
+					return writeTextAtomic(requested, content, options);
+				};
+				const rewrite = s.startHeldRewrite();
+				await s.client.replaceStarted.promise;
+				s.manager.appendMessage({ role: "user", content: WAITING_ENTRY, timestamp: Date.now() });
+				const renamed = s.manager.setSessionName("renamed during the rewrite", "user");
+				s.client.allowReplace.resolve();
+				const sealedAtSecondWrite = await Promise.race([
+					secondWriteStarted.promise.then(() => true),
+					rewrite.then(
+						() => false,
+						() => false,
+					),
+				]);
+				s.manager.seal();
+				sealed.resolve();
+				await rewrite.catch(() => undefined);
+				await renamed.catch(() => undefined);
+				const closed = await s.manager.close().then(
+					() => "closed",
+					(err: unknown) => String(err),
+				);
+
+				const body = await s.stored();
+				expect({
+					closed,
+					failures: s.failures,
+					sealedAtSecondWrite,
+					copies: copies(body, WAITING_ENTRY),
+					holdsTheJournal: holdsTheJournal(body, s.manager),
+				}).toEqual({ closed: "closed", failures: [], sealedAtSecondWrite: true, copies: 1, holdsTheJournal: true });
+			}, 120_000);
+
 			// The append that carries the waiting entries can fail before it reaches the store, as preparing an entry does
 			// for a blob it cannot write. The failure is reported, and the rewrite publishes the whole transcript again
 			// instead of leaving the entries out of a file it marks current.
@@ -500,6 +547,39 @@ for (const { adapter, url } of BACKENDS) {
 					copies: copies(body, WAITING_ENTRY),
 					holdsTheJournal: holdsTheJournal(body, s.manager),
 				}).toEqual({ failures: [failure], copies: 1, holdsTheJournal: true });
+			}, 120_000);
+
+			// The same second full write holds the title's own entry. The title's append, queued behind the rewrite, must not
+			// write that entry again: a duplicate ID in the stored transcript.
+			it("stores a title set during the rewrite once when the rewrite writes the whole transcript again", async () => {
+				await using s = await openHeldSession(adapter, url ?? "");
+				const rewrite = s.startHeldRewrite();
+				await s.client.replaceStarted.promise;
+				s.manager.appendMessage({ role: "user", content: WAITING_ENTRY, timestamp: Date.now() });
+				const renamed = s.manager.setSessionName("renamed during the rewrite", "user");
+				const landedAt = s.client.statements.length;
+				s.client.allowReplace.resolve();
+				await rewrite.catch(() => undefined);
+				const named = await renamed.then(String, (err: unknown) => String(err));
+				await s.manager.flush().catch(() => undefined);
+
+				const titleChange = s.manager.getEntries().find(entry => entry.type === "title_change");
+				if (!titleChange) throw new Error("Expected the title's entry in the journal");
+				const body = await s.stored();
+				expect({
+					named,
+					failures: s.failures,
+					fullWritesAfterLanding: s.client.statements.slice(landedAt).filter(query => s.fullWrite.test(query))
+						.length,
+					copies: [WAITING_ENTRY, `"id":"${titleChange.id}"`].map(text => copies(body, text)),
+					holdsTheJournal: holdsTheJournal(body, s.manager),
+				}).toEqual({
+					named: "true",
+					failures: [],
+					fullWritesAfterLanding: 1,
+					copies: [1, 1],
+					holdsTheJournal: true,
+				});
 			}, 120_000);
 		},
 	);

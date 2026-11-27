@@ -1120,11 +1120,25 @@ export class SessionManager {
 	/** Set by synchronous appends that land while an atomic replacement is active. */
 	#atomicRewriteDirty = false;
 	/**
+	 * The newest entry that waited for a fenced rewrite on a store that defers
+	 * its publishes (see `#appendToCurrentSessionFile`) and that no landed body
+	 * or append holds yet. Unlike `#atomicRewriteDirty`, which each pass of the
+	 * rewrite loop clears before it serializes, it stays set until a body or
+	 * append that holds the entry lands.
+	 */
+	#unsavedWaitingEntry: SessionEntry | undefined;
+	/**
 	 * Set when {@link seal} superseded a fenced rewrite that entries waited on
 	 * (see `#appendToCurrentSessionFile`): {@link close} publishes the whole
 	 * transcript with them.
 	 */
 	#sealSupersededWaitingEntries = false;
+	/**
+	 * The last body a fenced rewrite landed: the session file, how many entries
+	 * it held, and the last of them. A title change whose append waited behind
+	 * that rewrite skips the append when the body already holds its entry.
+	 */
+	#landedRewrite: { sessionFile: string; entryCount: number; lastEntry: SessionEntry | undefined } | undefined;
 	/**
 	 * Active {@link moveTo} relocation. Concurrent completed appends write a
 	 * full body to the live path: source while it still exists, destination
@@ -1927,6 +1941,9 @@ export class SessionManager {
 	async #runFencedAtomicRewrite(epoch: number): Promise<boolean> {
 		if (this.#released) return false;
 		this.#atomicRewriteFenceEpoch = epoch;
+		// The first body holds every entry recorded before it, those that waited
+		// on an earlier rewrite included.
+		this.#unsavedWaitingEntry = undefined;
 		let recoveries = 0;
 		try {
 			do {
@@ -1936,6 +1953,9 @@ export class SessionManager {
 				const sessionFile = this.#sessionFile;
 				if (!sessionFile) return false;
 				if (this.#diskEpoch !== epoch) return false;
+				// An entry that waited until here is in this body; one that waits from
+				// here on is not, and replaces the one read here.
+				const waitingInBody: SessionEntry | undefined = this.#unsavedWaitingEntry;
 				const body = this.#serializeBody();
 				const options = {
 					expectedSize: this.#expectedDiskSize,
@@ -1972,8 +1992,11 @@ export class SessionManager {
 					return false;
 				}
 				this.#recordFullRewrite(body.bytes);
+				this.#landedRewrite = { sessionFile, entryCount: body.stamp.entryCount, lastEntry: body.stamp.lastEntry };
+				if (this.#unsavedWaitingEntry === waitingInBody) this.#unsavedWaitingEntry = undefined;
 				if (this.#atomicRewriteDirty && this.#appendEntriesRecordedSince(sessionFile, body.stamp)) {
 					this.#atomicRewriteDirty = false;
+					this.#unsavedWaitingEntry = undefined;
 				}
 			} while (this.#atomicRewriteDirty);
 			return true;
@@ -1985,7 +2008,7 @@ export class SessionManager {
 			// this stale rewrite was still awaiting storage. Clearing it here
 			// unconditionally would strand appends during the newer publish.
 			if (this.#atomicRewriteFenceEpoch === epoch) this.#atomicRewriteFenceEpoch = null;
-			if (this.#released && this.#atomicRewriteDirty && this.#storage.defersSyncPublish) {
+			if (this.#released && this.#unsavedWaitingEntry && this.#storage.defersSyncPublish) {
 				this.#sealSupersededWaitingEntries = true;
 			}
 		}
@@ -2103,7 +2126,10 @@ export class SessionManager {
 		}
 		if (this.#atomicRewriteFenceEpoch !== null && this.#atomicRewriteFenceEpoch === this.#diskEpoch) {
 			this.#atomicRewriteDirty = true;
-			if (this.#storage.defersSyncPublish) return;
+			if (this.#storage.defersSyncPublish) {
+				this.#unsavedWaitingEntry = entry;
+				return;
+			}
 			this.#rewriteSynchronously();
 			return;
 		}
@@ -2161,6 +2187,22 @@ export class SessionManager {
 		}
 	}
 
+	/**
+	 * Whether the last body a fenced rewrite landed on `sessionFile` holds
+	 * `entry`. `false` when the journal's entry at that body's end is no longer
+	 * the body's last entry (a replaced or pruned history), so the caller
+	 * writes the entry.
+	 */
+	#landedRewriteHolds(sessionFile: string, entry: SessionEntry): boolean {
+		const landed = this.#landedRewrite;
+		if (!landed || landed.sessionFile !== sessionFile) return false;
+		const entries = this.#entries;
+		if (landed.entryCount === 0 || entries[landed.entryCount - 1] !== landed.lastEntry) return false;
+		// From the end: the entry is recent, and most entries the body holds lie before it.
+		const at = entries.lastIndexOf(entry);
+		return at !== -1 && at < landed.entryCount;
+	}
+
 	async #persistTitleChangeEntry(entry: TitleChangeEntry, update: SessionTitleUpdate): Promise<void> {
 		if (!this.#persist || !this.#sessionFile) return;
 		if (this.#diskFailure) {
@@ -2204,8 +2246,13 @@ export class SessionManager {
 				const sessionFile = this.#sessionFile;
 				if (!sessionFile) return;
 				try {
-					await this.#appendWriter().append(line);
-					this.#recordDurableAppend(line);
+					// A fenced rewrite ahead of this task can already have published
+					// the entry: its loop writes the whole transcript again when the
+					// title changed while its body published.
+					if (!this.#landedRewriteHolds(sessionFile, entry)) {
+						await this.#appendWriter().append(line);
+						this.#recordDurableAppend(line);
+					}
 					await this.#storage.updateSessionTitle(sessionFile, update);
 					if (this.#diskEpoch === epoch) this.#fileIsCurrent = true;
 				} catch {
@@ -3095,6 +3142,13 @@ export class SessionManager {
 	 * Synchronously makes the current append-only session durable. Avoid rewriting
 	 * an already-current file: large restored sessions can contain GiB of compacted
 	 * history, and Ctrl+C must not rebuild the whole JSONL string just to flush.
+	 *
+	 * On a store that defers its publishes (`defersSyncPublish`) nothing is
+	 * durable when this returns: its writer has no `flushSync`, and a rewrite only
+	 * queues. There it reports the failures known so far. Queued appends, and
+	 * entries that wait for a fenced rewrite to land (`#appendToCurrentSessionFile`),
+	 * reach the store while the process runs on; {@link flush} and {@link close}
+	 * wait for them.
 	 */
 	flushSync(): void {
 		if (!this.#persist || !this.#sessionFile) return;
@@ -3260,6 +3314,8 @@ export class SessionManager {
 		this.seal();
 		this.#entries = [];
 		this.#index.clear();
+		this.#unsavedWaitingEntry = undefined;
+		this.#landedRewrite = undefined;
 		this.#closeWriterEventually();
 		this.#entriesReleased = true;
 	}
