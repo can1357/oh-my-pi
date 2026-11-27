@@ -12,7 +12,7 @@ import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 /**
  * Behavior contract for the @-import expander used by every AGENTS.md /
- * CLAUDE.md / GEMINI.md loader. Each test names one externally-observable
+ * CLAUDE.md loader. Each test names one externally-observable
  * promise — relative-resolution, code-block opacity, cycle/depth caps, etc.
  */
 describe("expandAtImports", () => {

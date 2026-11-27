@@ -75,9 +75,9 @@ describe("Frameless Bidi client payloads", () => {
 	test("builds the exact live call session JSON", () => {
 		const payload = buildLiveSessionPayload("Be concise.", "marin");
 
-		expect(LIVE_MODEL).toBe("gpt-live-1-codex");
+		expect(LIVE_MODEL).toBe("gpt-live-1.1-codex");
 		expect(JSON.stringify(payload)).toBe(
-			'{"model":"gpt-live-1-codex","instructions":"Be concise.","audio":{"output":{"voice":"marin"}},"delegation":{"type":"client"}}',
+			'{"model":"gpt-live-1.1-codex","instructions":"Be concise.","audio":{"output":{"voice":"marin"}},"delegation":{"type":"client"}}',
 		);
 	});
 

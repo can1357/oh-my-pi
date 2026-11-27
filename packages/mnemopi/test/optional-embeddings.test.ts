@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it } from "bun:test";
 import {
 	available,
@@ -20,6 +21,7 @@ const ENV_KEYS = [
 	"BUN_ENV",
 	"MNEMOPI_NO_EMBEDDINGS",
 	"MNEMOPI_EMBEDDING_MODEL",
+	"MNEMOPI_EMBEDDING_BATCH_SIZE",
 	"MNEMOPI_EMBEDDING_API_URL",
 	"MNEMOPI_EMBEDDING_API_KEY",
 	"OPENROUTER_BASE_URL",
@@ -246,6 +248,42 @@ describe("optional embeddings", () => {
 		}
 	});
 
+	it("finishes large local embedding batches without exceeding a worker request cap", async () => {
+		await withEnv(
+			{
+				NODE_ENV: undefined,
+				BUN_ENV: undefined,
+				MNEMOPI_NO_EMBEDDINGS: undefined,
+				MNEMOPI_EMBEDDING_MODEL: "intfloat/multilingual-e5-large",
+				MNEMOPI_EMBEDDING_API_URL: undefined,
+				MNEMOPI_EMBEDDING_BATCH_SIZE: undefined,
+				OPENROUTER_BASE_URL: undefined,
+			},
+			async () => {
+				const sizes: number[] = [];
+				setLocalModelInitializerForTests(async () => ({
+					async *embed(texts) {
+						sizes.push(texts.length);
+						if (texts.length > 8) throw new Error("mnemopi embed worker request timed out");
+						yield texts.map(text => [Number(text), 1]);
+					},
+				}));
+				const texts = Array.from({ length: 128 }, (_, i) => String(i));
+				const matrix = await embed(texts);
+				expect(matrix?.map(row => row[0])).toEqual(texts.map(Number));
+				expect(sizes).toEqual(Array(16).fill(8));
+
+				sizes.length = 0;
+				const override = await withMnemopiRuntimeOptions(
+					{ embeddings: { model: "intfloat/multilingual-e5-large", batchSize: 3 } },
+					() => embed(texts.slice(0, 8)),
+				);
+				expect(override?.map(row => row[0])).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+				expect(sizes).toEqual([3, 3, 2]);
+			},
+		);
+	});
+
 	it("retries local model initialization after a transient failure", async () => {
 		await withEnv(LOCAL_EMBEDDING_ENV, async () => {
 			let initCalls = 0;
@@ -320,5 +358,52 @@ describe("optional embeddings", () => {
 			expect(second).toEqual([new Float32Array([0, 1, 4])]);
 			expect(inits).toEqual([FAST_MULTILINGUAL_E5_LARGE]);
 		});
+	});
+
+	it("scopes embedQuery() cache per provider so two Mnemopi runtimes do not cross-contaminate", async () => {
+		// `embedQuery()` caches query vectors; a second `Mnemopi` in the same process with a
+		// different provider must not read back the first runtime's vector. Each Mnemopi here
+		// exposes a distinct projection for the same query token; recall MUST score with that
+		// runtime's own projection, never the sibling's cached one.
+		const alphaProvider = {
+			async *embed(texts: readonly string[]) {
+				yield texts.map(() => [1, 0]);
+			},
+		};
+		const betaProvider = {
+			async *embed(texts: readonly string[]) {
+				yield texts.map(() => [0, 1]);
+			},
+		};
+
+		const alpha = new Mnemopi({
+			db: new Database(":memory:"),
+			embeddings: { provider: alphaProvider },
+		});
+		const beta = new Mnemopi({
+			db: new Database(":memory:"),
+			embeddings: { provider: betaProvider },
+		});
+
+		try {
+			alpha.remember("shared query text", { source: "test" });
+			beta.remember("shared query text", { source: "test" });
+			await alpha.flushExtractions();
+			await beta.flushExtractions();
+
+			// Recall on alpha first to seed the cache, then beta: an unscoped cache would
+			// hand beta alpha's `[1, 0]` vector.
+			const alphaResults = await alpha.recall("shared query text", 1);
+			const betaResults = await beta.recall("shared query text", 1);
+
+			// Each runtime scores against its own projection: alpha hits [1,0]·[1,0] = 1,
+			// beta hits [0,1]·[0,1] = 1. Without scoped keys, beta's dense_score
+			// collapses to [1,0]·[0,1] = 0.
+			expect(alphaResults[0]?.dense_score ?? 0).toBeCloseTo(1, 5);
+			expect(betaResults[0]?.dense_score ?? 0).toBeCloseTo(1, 5);
+		} finally {
+			alpha.close();
+			beta.close();
+		}
 	});
 });

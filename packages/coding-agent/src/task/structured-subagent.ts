@@ -24,7 +24,7 @@ import {
 } from "../config/compaction-threshold";
 import { type ServiceTierInheritSettingValue, validateAgentServiceTierOverrides } from "../config/service-tier";
 import type { Settings } from "../config/settings";
-import { isProviderEnabled, isUserSourceEnabled } from "../capability";
+import { isProviderEnabled } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import { sessionLocalProtocolOptions } from "../internal-urls/context";
@@ -468,12 +468,7 @@ const inflightDiscovery = new Map<string, { fn: typeof discoverAgents; promise: 
 
 function discoverAgentsShared(cwd: string, extensionRoots?: EffectiveExtensionRoots): Promise<DiscoveryResult> {
 	const fn = discoverAgents;
-	const policy = [
-		isProviderEnabled("omp-plugins"),
-		isProviderEnabled("claude-plugins"),
-		isUserSourceEnabled("claude-plugins"),
-		isUserSourceEnabled("claude"),
-	].join(",");
+	const policy = [isProviderEnabled("omp-plugins"), isProviderEnabled("claude-plugins")].join(",");
 	const key = `${path.resolve(cwd)}\0${policy}\0${JSON.stringify(extensionRoots ?? null)}`;
 	const existing = inflightDiscovery.get(key);
 	if (existing && existing.fn === fn) return existing.promise;
@@ -658,6 +653,9 @@ async function applySpawnHook(
 			modelRole: policy.modelRole,
 			patterns: policy.modelOverride ?? [],
 			spawnKey,
+			...(request.parentToolCallId !== undefined
+				? { parentToolCallId: request.parentToolCallId, itemIndex: request.index ?? 0 }
+				: {}),
 		},
 		request.signal,
 	);
@@ -771,6 +769,10 @@ function buildExecutorOptions(
 		parentActiveProvider: session.getActiveModel?.()?.provider,
 		journalTaskLabel: journalCompletion(session.sessionManager, { purpose: "task-label" }),
 		perCallModelGrants: policy.perCallModelGrants,
+		callerSelectedModel:
+			request.perCallModel !== undefined &&
+			policy.modelOverride?.length === 1 &&
+			policy.modelOverride[0] === request.perCallModel.trim(),
 		thinkingLevel: policy.effectiveAgent.thinkingLevel,
 		effort: policy.effort,
 		solutionSpace: request.solutionSpace?.trim() || undefined,

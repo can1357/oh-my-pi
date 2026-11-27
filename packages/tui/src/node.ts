@@ -13,6 +13,7 @@
  */
 import { TSP_TEXT_KINDS, type TspCommonProps, type TspKind, type TspProps } from "@oh-my-pi/pi-wire";
 import { resolveChildren } from "./children";
+import type { MouseEvent } from "./driver/contract";
 import type { KeyEvent, PasteEvent, UiEvent } from "./events";
 import { type Accessor, computed, getOwner, onCleanup, read, signal, structural } from "./reactive";
 
@@ -27,6 +28,8 @@ export type UiKind = TspKind | "canvas";
 export interface CanvasProps extends TspCommonProps {
 	/** Rows at `width`; no row may exceed it. */
 	paint: (width: number) => readonly string[];
+	/** Terminal pointer input over the painted rows, in zero-based canvas cells. True consumes it. */
+	onMouse?: (event: MouseEvent) => boolean;
 }
 
 /** Props of a node of kind `K`. */
@@ -293,7 +296,7 @@ export function derivedNode<K extends UiKind>(
 }
 
 /** Canvas props whose function value is the prop itself, not an accessor. */
-const CANVAS_FN_PROPS: Readonly<Record<string, true>> = { paint: true };
+const CANVAS_FN_PROPS: Readonly<Record<string, true>> = { paint: true, onMouse: true };
 
 /** Whether `value` is a {@link UiNode}. */
 export function isUiNode(value: unknown): value is UiNode {

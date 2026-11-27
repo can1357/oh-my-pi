@@ -6,7 +6,7 @@ import type { Provider } from "../types";
 import type { CredentialRankingContext, CredentialRankingStrategy, PlanGate, UsageReport } from "../usage";
 import { isWithinUsageReserve } from "../usage";
 import type { RankingStrategyResolver } from "../usage/registry";
-import type { SessionAffinity } from "./affinity";
+import type { SessionAffinity, SessionCredential } from "./affinity";
 import { raceSignal } from "./abort";
 import {
 	credentialBlockScopesForRequest,
@@ -96,6 +96,8 @@ export type TryOAuthOptions = {
 	allowFallback?: boolean;
 	/** Receives a non-definitive refresh failure that left this credential unusable; the caller filters for retryable ones. */
 	onTransientRefreshFailure?: (error: unknown) => void;
+	/** The session's sticky when selection began; see {@link SessionAffinity.recordSelection}. */
+	sessionBasis?: SessionCredential;
 };
 
 /** Services consulted by CredentialSelector for policy, usage, blocks, refresh, and session affinity. */
@@ -1131,6 +1133,7 @@ export class CredentialSelector {
 					blockScope,
 					blockScopes,
 					onTransientRefreshFailure: recordTransientRefreshFailure,
+					sessionBasis: sessionCredential,
 				});
 				if (!resolved) continue;
 				// A dead grant makes `tryOAuth` re-resolve onto a sibling, whose own
@@ -1352,7 +1355,13 @@ export class CredentialSelector {
 			}
 			this.#deps.pool.noteBearer(provider, result.apiKey, credentialId);
 			if (options?.recordAffinity !== false) {
-				this.#deps.affinity.record(provider, sessionId, "oauth", selection.index);
+				this.#deps.affinity.recordSelection(
+					provider,
+					sessionId,
+					"oauth",
+					selection.index,
+					usageOptions.sessionBasis,
+				);
 			}
 			return { apiKey: result.apiKey, credential: updated, credentialId };
 		} catch (error) {

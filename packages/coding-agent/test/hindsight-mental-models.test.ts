@@ -200,6 +200,35 @@ describe("ensureMentalModels", () => {
 /* -------------------------------------------------------------------------- */
 
 describe("renderMentalModelsBlock", () => {
+	it("renders every body intact when the complete block fits", () => {
+		const long = "L".repeat(9000);
+		const block = renderMentalModelsBlock(
+			[
+				{ id: "a", bank_id: "b", name: "A", content: "short" },
+				{ id: "b", bank_id: "b", name: "B", content: long },
+			],
+			16_000,
+		);
+		expect(block).toContain(long);
+		expect(block).not.toContain("[mental-model snapshot truncated at render budget]");
+	});
+
+	it("gives unused shares of short models to longer ones", () => {
+		const block = renderMentalModelsBlock(
+			[
+				{ id: "a", bank_id: "b", name: "A", content: "a".repeat(1000) },
+				{ id: "b", bank_id: "b", name: "B", content: "b".repeat(20_000) },
+				{ id: "c", bank_id: "b", name: "C", content: "c".repeat(1000) },
+			],
+			10_000,
+		);
+		expect(block.length).toBeLessThanOrEqual(10_000);
+		expect(block.length).toBeGreaterThan(9_800);
+		expect(block).toContain("a".repeat(1000));
+		expect(block).toContain("c".repeat(1000));
+		expect(block).toContain("[mental-model snapshot truncated at render budget]");
+	});
+
 	it("wraps content in <mental_models> under per-model headings", () => {
 		const block = renderMentalModelsBlock(
 			[{ id: "u", bank_id: "b", name: "User Preferences", content: "prefers tabs" }],

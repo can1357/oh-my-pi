@@ -1032,9 +1032,9 @@ describe("AgentSession advisor context maintenance", () => {
 		advisor.setModel(opus46);
 		vi.spyOn(modelRegistry, "getApiKey").mockResolvedValue("test-key");
 		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([opus46]);
-		// Opus 4-6 has a 1M-token window against a reserve-based threshold, and
-		// only the newest usage report anchors the estimate — so the anchors
-		// themselves must each clear ~850k, where the shared helper's 371k
+		// Opus 4-6 has a 1M-token window whose default threshold stops at 690k,
+		// and only the newest usage report anchors the estimate — so the anchors
+		// themselves must each clear 690k, where the shared helper's 371k
 		// suffices for the fallback harness's 400k windows.
 		const hugeAnchor = (timestamp: number): AssistantMessage => {
 			const anchor = usageAnchor(advisorMock, timestamp);

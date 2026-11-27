@@ -8,6 +8,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import {
+	$env,
 	$envExact,
 	getAgentDbPath,
 	getAgentDir,
@@ -17,6 +18,7 @@ import {
 	isRetryableStatus,
 	logger,
 	MAIN_CONFIG_FILENAMES,
+	parseFlag,
 } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import {
@@ -27,6 +29,7 @@ import {
 	DEFAULT_USAGE_RESERVE_PCT,
 	SqliteAuthCredentialStore,
 } from "../auth-storage";
+import type { CredentialEncryption } from "../auth/sqlite-credential-store";
 import * as AIError from "../error";
 import { AuthBrokerClient, AuthBrokerError, type FetchSnapshotResult } from "./client";
 import { HybridAuthCredentialStore } from "./hybrid-store";
@@ -109,6 +112,7 @@ interface ConfigSnapshot {
 	token?: string;
 	accountPolicies?: unknown;
 	usageReservePct?: unknown;
+	encrypt?: unknown;
 }
 
 /**
@@ -258,6 +262,7 @@ async function readConfigYaml(agentDir: string): Promise<ConfigSnapshot> {
 			token: readDottedString(record, "auth.broker.token"),
 			accountPolicies: readDottedValue(record, "auth.accountPolicies"),
 			usageReservePct: readDottedValue(record, "retry.usageReservePct"),
+			encrypt: readDottedValue(record, "auth.encrypt"),
 		};
 	}
 	return {};
@@ -593,7 +598,7 @@ export async function openAuthCredentialStore(
 		// broker round trip. A token revoked since the cache was written surfaces
 		// through that background path exactly like a mid-session revocation.
 		// Opened before the broker store, whose constructor starts background sync that a failed open would leak.
-		const local = await SqliteAuthCredentialStore.open(getAgentDbPath(options.agentDir ?? getAgentDir()));
+		const local = await openLocalAuthCredentialStore(options.agentDir);
 		const broker = new RemoteAuthCredentialStore({
 			client,
 			initialSnapshot,
@@ -606,9 +611,29 @@ export async function openAuthCredentialStore(
 		};
 	}
 
-	const dbPath = getAgentDbPath(options.agentDir ?? getAgentDir());
-	const store = await SqliteAuthCredentialStore.open(dbPath);
-	return { store, sourceLabel: options.sourceLabel ?? `local ${dbPath}` };
+	const store = await openLocalAuthCredentialStore(options.agentDir);
+	return { store, sourceLabel: options.sourceLabel ?? `local ${getAgentDbPath(options.agentDir ?? getAgentDir())}` };
+}
+
+/**
+ * This machine's credential store, `<agentDir>/agent.db`. `OMP_AUTH_ENCRYPT`, else
+ * `auth.encrypt` in `<agentDir>/config.yml`, forces sealing new secrets under the
+ * OS-vault master key on or off; unset, the store keeps its current mode (see
+ * {@link SqliteAuthCredentialStore.unlock}). In broker mode only the logins kept
+ * on this machine land here; the broker encrypts its own store.
+ */
+export async function openLocalAuthCredentialStore(
+	agentDir: string = getAgentDir(),
+): Promise<SqliteAuthCredentialStore> {
+	const env = $env.OMP_AUTH_ENCRYPT;
+	let encrypt: CredentialEncryption = "auto";
+	if (env) {
+		encrypt = parseFlag(env);
+	} else {
+		const configured = (await readConfigYaml(agentDir)).encrypt;
+		if (typeof configured === "boolean") encrypt = configured;
+	}
+	return SqliteAuthCredentialStore.open(getAgentDbPath(agentDir), { encrypt });
 }
 
 /**

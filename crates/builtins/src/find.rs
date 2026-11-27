@@ -4883,6 +4883,10 @@ pub mod matchers {
 					config.sorted_output = true;
 					Some(TrueMatcher.into_box())
 				},
+				"-allow-root" => {
+					config.allow_root = true;
+					Some(TrueMatcher.into_box())
+				},
 				"-maxdepth" => {
 					if i >= args.len() - 1 {
 						return Err(From::from(format!("missing argument to {}", args[i])));
@@ -5036,8 +5040,14 @@ use std::{
 
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::OsStringValueParser};
 
-use crate::host::{AsyncUtility, Host, matches_parser};
+use crate::{
+	host::{AsyncUtility, Host, matches_parser},
+	root_guard,
+};
 use matchers::{Follow, WalkEntry};
+
+/// `find`'s spelling of the [`root_guard`] escape hatches.
+const ROOT_FLAGS: root_guard::Flags = root_guard::Flags { allow: "-allow-root", depth: Some("-maxdepth") };
 
 pub struct Config {
 	same_file_system:  bool,
@@ -5051,6 +5061,9 @@ pub struct Config {
 	no_leaf_dirs:      bool,
 	follow:            Follow,
 	new_paths:         Option<Vec<String>>,
+	/// `-allow-root`: permits walking a filesystem root deeper than
+	/// [`root_guard::SHALLOW_DEPTH`], which [`run_find`] otherwise refuses.
+	allow_root:        bool,
 	files0_argument:   Option<String>,
 	/// `-fprint`/`-fprintf`/`-fprint0`/`-fls` outputs, closed after the search.
 	output_files:      Vec<(String, omp_vfs::File)>,
@@ -5074,6 +5087,7 @@ impl Default for Config {
 			follow:            Follow::Never,
 			new_paths:         None, // This option exclusively for -files0-from argument.
 			files0_argument:   None, //This option also is used for file0-from
+			allow_root:        false,
 			output_files:      Vec::new(),
 		}
 	}
@@ -5386,6 +5400,14 @@ async fn run_find(
 		return 0;
 	}
 
+	if !config.allow_root
+		&& let Err(refusal) =
+			root_guard::check(paths.iter().map(|path| host.resolve(path)), Some(config.max_depth), ROOT_FLAGS)
+	{
+		let _ = writeln!(host.stderr, "find: {refusal}");
+		return 1;
+	}
+
 	let mut ret = 0;
 	let mut quit = false;
 	for path in paths {
@@ -5445,6 +5467,10 @@ Early alpha implementation. Currently the only expressions supported are
  -sorted
     a non-standard extension that sorts directory contents by name before
     processing them. Less efficient, but allows for deterministic output.
+ -allow-root
+    a non-standard extension that permits searching a filesystem root such
+    as / deeper than -maxdepth 2. Without it such searches are refused: a
+    whole-disk walk can take hours to days.
 "
 	);
 }
@@ -5862,6 +5888,26 @@ mod tests {
 				.await;
 		assert_eq!(code, 0, "stderr: {err}");
 		assert_eq!(out, "1 sub/d.txt\n");
+	}
+
+	/// Failure mode: `find /` walked the whole disk for hours. A filesystem
+	/// root, however it is spelled, is refused unless the walk stays within
+	/// `-maxdepth 2` or `-allow-root` is passed.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn filesystem_root_is_refused_unless_shallow_or_allowed() {
+		let (_dir, root) = fixture();
+		// `-quit` stops a regression at the first entry instead of walking the disk.
+		for (cwd, operand) in [(root.as_path(), "/"), (root.as_path(), "/usr/.."), (Path::new("/"), ".")] {
+			let (code, capture) =
+				run_async_util::<Find>(&[operand, "-maxdepth", "3", "-print", "-quit"], "", cwd).await;
+			assert_eq!((code, capture.out().as_str()), (1, ""), "operand: {operand}");
+			assert!(capture.err().contains("-allow-root"), "stderr: {}", capture.err());
+		}
+		for args in [&["/", "-maxdepth", "2", "-print", "-quit"][..], &["/", "-allow-root", "-print", "-quit"]] {
+			let (code, capture) = run_async_util::<Find>(args, "", &root).await;
+			assert_eq!((code, capture.out().as_str(), capture.err().as_str()), (0, "/\n", ""), "{args:?}");
+		}
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
