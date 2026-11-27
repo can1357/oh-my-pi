@@ -299,8 +299,8 @@ SOFTWARE.
 Unicode Character Database (https://www.unicode.org/ucd/), Unicode data license
 --------------------------------------------------------------------------------
 Covers: the Unicode 13.0 tables generated into perl's case mapping, property,
-and line-break data (`src/perl/func/data/unicode_data.rs`, `src/perl/rx/ucd_data.rs`,
-`src/perl/rx/linebreak_data.rs`).
+line-break and character-name data (`src/perl/func/data/unicode_data.rs`,
+`src/perl/rx/ucd_data.rs`, `src/perl/rx/linebreak_data.rs`, `src/perl/charnames.zst`).
 
 UNICODE, INC. LICENSE AGREEMENT - DATA FILES AND SOFTWARE
 See Terms of Use for definitions of Unicode Inc.'s

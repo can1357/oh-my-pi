@@ -712,8 +712,8 @@ fn char_name(src: &[u8], open: usize) -> Result<(Vec<u32>, usize), String> {
 		}).collect::<Option<Vec<_>>>().ok_or_else(|| "Invalid hexadecimal number in \\N{U+...}".to_string())?;
 		return Ok((cps, end + 1));
 	}
-	if let Some(ch) = std::str::from_utf8(raw).ok().and_then(unicode_names2::character) {
-		return Ok((vec![u32::from(ch)], end + 1));
+	if let Some(cp) = std::str::from_utf8(raw).ok().and_then(crate::perl::charnames::character) {
+		return Ok((vec![cp], end + 1));
 	}
 	Err(format!("Unknown charname '{}'", String::from_utf8_lossy(raw)))
 }
