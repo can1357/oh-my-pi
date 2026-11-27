@@ -41,6 +41,7 @@
 
 ### Changed
 
+- Updated task prompt to forbid full builds or test suites mid‑flight and allow quick scoped checks
 - The shell's `find`, `grep -r`, `rg`, `fd` and `ast-grep` refuse to search a filesystem root such as `/` and explain why; `find`, `rg` and `fd` still allow a shallow look (max depth 2), and `-allow-root` (`find`) or `--allow-root` searches the whole disk on purpose
 - The `grep`, `glob`, `ast_grep` and `ast_edit` tools refuse a search scope that resolves to a filesystem root (`/usr/..`, `../../..`, `C:\`) and explain why; a bare `/` still means the workspace
 - `/tan` agents now treat the conversation they fork from as reference only and stop after finishing your request, instead of picking up or deferring to the main agent's in-progress work
