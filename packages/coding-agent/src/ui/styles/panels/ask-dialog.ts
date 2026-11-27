@@ -262,7 +262,8 @@ defineRolePainter("col", "omp.ask.card", (node: UiNode, cx): Block => {
 	}
 	const terminalRows = model.options.terminalRows?.() ?? 40;
 	const skip = model.options.skipNotice?.();
-	const total = dialogHeight(theme, model, inner, terminalRows);
+	// No taller than the rows the rest of the dock leaves (`cx.height`, set when the dock would outgrow the screen).
+	const total = Math.min(dialogHeight(theme, model, inner, terminalRows), cx.height ?? Infinity);
 	const bodyRows = Math.max(MIN_BODY_ROWS, total - PANEL_CHROME_ROWS - (skip ? 1 : 0));
 	let layout = column(theme, model, inner);
 	let overflow = layout.lines.length > bodyRows;

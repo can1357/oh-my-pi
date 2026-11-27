@@ -785,6 +785,25 @@ export class TermBackend {
 		return paintNode(this.#env, node, width, height);
 	}
 
+	/**
+	 * The dock's blocks at `width`. A dock taller than `height` would push its top rows off the
+	 * screen, so its covering blocks (a docked report, a waiting ask) paint again in the rows the
+	 * rest of the dock leaves them; a painter that reads `cx.height` fits itself there.
+	 */
+	#paintDock(width: number, height: number): Block[] {
+		const nodes = this.#surface.dock();
+		const blocks = nodes.map(node => this.#paint(node, width));
+		let total = blocks.reduce((sum, block) => sum + block.rows.length, 0);
+		for (let i = 0; i < blocks.length && total > height; i++) {
+			const block = blocks[i]!;
+			if (!block.covering) continue;
+			const fitted = this.#paint(nodes[i]!, width, Math.max(1, height - (total - block.rows.length)));
+			total += fitted.rows.length - block.rows.length;
+			blocks[i] = fitted;
+		}
+		return blocks;
+	}
+
 	/** History must be written again: the next frame prepares a replay (a batch not yet written is dropped). */
 	#requestReplay(): void {
 		this.#replay = true;
@@ -985,8 +1004,7 @@ export class TermBackend {
 		let dockRows = 0;
 		/** Dock rows drawn over the transcript (a completion popup): they take no room from `main`. */
 		let covering = 0;
-		for (const node of this.#surface.dock()) {
-			const block = this.#paint(node, width);
+		for (const block of this.#paintDock(width, height)) {
 			dock.push({ block, top: dockRows, left: 0 });
 			dockRows += block.rows.length;
 			covering += Math.min(block.covering ?? 0, block.rows.length);
@@ -1391,8 +1409,7 @@ export class TermBackend {
 		const search = this.#search;
 		const dock: Placed[] = [];
 		let dockRows = search ? 1 : 0;
-		for (const node of search ? [] : this.#surface.dock()) {
-			const block = this.#paint(node, screenWidth);
+		for (const block of search ? [] : this.#paintDock(screenWidth, height)) {
 			// Inline dock painters include breathing room between the ledger and controls.
 			// On the fixed screen give leading, purely decorative blank rows back to the transcript.
 			let skip = 0;

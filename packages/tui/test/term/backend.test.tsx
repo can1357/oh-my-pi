@@ -388,9 +388,11 @@ describe("TermBackend main surface", () => {
 	 * A transcript (`a` settled, `b` live) over a dock of an optional cover (a docked report, a
 	 * waiting ask: every row of it draws over the transcript) and a one-row composer.
 	 */
-	function covered(options: { rows?: number; main?: () => unknown } = {}) {
-		defineRolePainter("rows", "test.cover", node => {
-			const rows = (node.props() as { lines: readonly string[] }).lines;
+	function covered(options: { rows?: number; main?: () => unknown; fit?: boolean } = {}) {
+		defineRolePainter("rows", "test.cover", (node, cx) => {
+			const all = (node.props() as { lines: readonly string[] }).lines;
+			// A fitting cover keeps its top rows when the dock gives it a height.
+			const rows = options.fit && cx.height !== undefined ? all.slice(0, cx.height) : all;
 			return { rows, covering: rows.length };
 		});
 		const driver = new FakeDriver();
@@ -451,6 +453,14 @@ describe("TermBackend main surface", () => {
 		show(undefined);
 		expect(driver.history).toEqual([]);
 		expect(screen()).toEqual([...lines("a", 3), "b0", "b1", ">"]);
+		backend.stop();
+	});
+
+	it("paints a cover the dock would push off the screen in the rows the rest of the dock leaves it", () => {
+		const { backend, show, screen } = covered({ fit: true });
+		show(lines("c", 8));
+		// Six rows less the composer's one: the cover's top five rows, none of them pushed off the screen.
+		expect(screen()).toEqual([...lines("c", 5), ">"]);
 		backend.stop();
 	});
 

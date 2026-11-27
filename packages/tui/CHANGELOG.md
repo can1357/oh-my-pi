@@ -27,6 +27,7 @@
 ### Fixed
 
 - Moving through a question's options in Tern with the arrow keys no longer scrolls the chat back to the question each time
+- A dock taller than the screen now paints its covering blocks (a docked report, a waiting ask) again in the rows the rest of the dock leaves them, so a painter that reads `cx.height` fits on screen instead of having its top rows pushed off it ([#20788](https://github.com/can1357/oh-my-pi/pull/20788) by [@jaredlyon](https://github.com/jaredlyon))
 - Improved performance when editing large documents and updating or closing views with many reactive values.
 - Fixed pane resizing in Herdr to avoid repeated redraw loops.
 - Fixed SIXEL and iTerm2 images overflowing rows, scrolling the terminal unexpectedly, or rendering incorrectly when they extend beyond the visible screen.

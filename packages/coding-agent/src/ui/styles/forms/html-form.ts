@@ -688,7 +688,12 @@ function paintHtmlForm(node: UiNode, cx: PaintContext): Block {
 	const skip = look.skipNotice
 		? wrap(theme.fg("warning", `${theme.symbols.symbol("status.warning")} ${flattenLine(look.skipNotice)}`), inner)
 		: [];
-	const limit = Math.max(1, Math.floor(look.terminalRows * HEIGHT_RATIO) - CHROME_ROWS);
+	// At most HEIGHT_RATIO of the terminal, and no taller than the rows the rest of the dock leaves (`cx.height`, set
+	// when the dock would outgrow the screen): rows past the screen's top could never be scrolled to.
+	const limit = Math.max(
+		1,
+		Math.min(Math.floor(look.terminalRows * HEIGHT_RATIO), cx.height ?? Infinity) - CHROME_ROWS,
+	);
 	const layouts: TextareaLayouts = new Map();
 	let column = buildColumn(cx, look, view, inner, layouts);
 	let body = Math.min(tallest(cx, look, inner, view, layouts), limit);

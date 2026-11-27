@@ -14,6 +14,7 @@ import { CORPUS_NOW } from "@oh-my-pi/pi-tui/testing/corpus";
 import { createTestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
 import { parseHtmlForm } from "../../../src/tools/html-form/parse";
 import { formMedia, HtmlFormDialog, HtmlFormModel } from "../../../src/ui/forms/html-form";
+import "../../../src/ui/styles/dock/covering";
 import "../../../src/ui/styles/panels/ask-dialog";
 import { figureWorkSettled } from "../../../src/ui/transcript/figures";
 import { corpusSuite, type Driver, type Mounted, settle } from "../setup/harness";
@@ -350,6 +351,45 @@ test("keys that arrive before the next frame scroll and move the ask form as if 
 		burst("down", "down");
 		expect(model.active()).toBe(1);
 		expect(model.row()).toBe(1);
+	} finally {
+		term.dispose();
+	}
+});
+
+test("a long question above other dock rows scrolls to its title on the screen, not above it", () => {
+	const context = Array.from({ length: 20 }, (_, i) => `<p>context ${i + 1}</p>`).join("");
+	const model = new HtmlFormModel(
+		parseHtmlForm(`<form><fieldset><legend>Confirm the release</legend>${context}
+			<label><input type="radio" name="a" value="approve" checked> Approve</label>
+			<label><input type="radio" name="a" value="reject"> Reject</label>
+		</fieldset></form>`),
+		{ onSubmit: () => {}, onCancel: () => {} },
+	);
+	const widgets = Array.from({ length: 10 }, (_, i) => <text key={`w${i}`} spans={[{ t: `widget ${i + 1}` }]} />);
+	const term = createTestTerminal(
+		() => ({
+			dock: [
+				<col key="ask" role="omp.dock.covering">
+					<HtmlFormDialog model={model} terminalRows={() => 24} />
+				</col>,
+				<col key="widgets">{widgets}</col>,
+			],
+		}),
+		{ columns: 60, rows: 24 },
+	);
+	// What a 24-row terminal shows: the frame's last 24 rows (a taller frame scrolls its top away).
+	const shows = (text: string) =>
+		term
+			.screen()
+			.slice(-24)
+			.some(row => row.includes(text));
+	try {
+		term.focus(term.surface.dock()[0]!.children()[0]!);
+		for (let presses = 0; presses < 60 && !shows("Confirm the release"); presses++) term.press("up");
+		expect(shows("Confirm the release")).toBe(true);
+		expect(shows("widget 10")).toBe(true);
+		for (let presses = 0; presses < 60 && !shows("Approve"); presses++) term.press("down");
+		expect(model.row()).toBe(0);
 	} finally {
 		term.dispose();
 	}
