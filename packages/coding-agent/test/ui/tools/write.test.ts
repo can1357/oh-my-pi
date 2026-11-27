@@ -45,5 +45,42 @@ test("IRC writes paint the preset's direction arrow, receipt badge and error sep
 	);
 	const rows = plainToolRows(call, env);
 	expect(rows).toContain(" IRC  Reviewer failed");
-	expect(rows).toContain("└─ Reviewer ⟨failed⟩ – not running");
+	expect(rows).toContain("  └─ Reviewer ⟨failed⟩ – not running");
+});
+
+test("default-preset broadcasts run the quote rail into the receipt branches", () => {
+	const env = staticEnvironment(loadThemeSync("dark"));
+	const call = new ToolCall({
+		id: "irc-all",
+		name: "write",
+		presenter: writePresenter,
+		args: { path: "agent://all", content: "Toolchain bug\nKeep proofs admitted" },
+	});
+	call.setExecutionStarted();
+	const receipts = Array.from({ length: 9 }, (_, index) => ({ to: `Fixer${index}`, outcome: "injected" }));
+	call.updateResult({ content: [], details: { message: { to: "all", receipts } } }, false);
+	const rows = plainToolRows(call, env);
+	const row = (text: string): string => rows.find(line => line.includes(text)) ?? "";
+
+	const spine = row("Fixer0").indexOf("├─");
+	expect(spine).not.toBe(-1);
+	expect(row("Toolchain bug")[spine]).toBe("│");
+	expect(row("Keep proofs admitted")[spine]).toBe("│");
+	expect(row("1 more recipients").indexOf("└─")).toBe(spine);
+});
+
+test("default-preset messages without receipt branches keep the quote border", () => {
+	const env = staticEnvironment(loadThemeSync("dark"));
+	const call = new ToolCall({
+		id: "irc-one",
+		name: "write",
+		presenter: writePresenter,
+		args: { path: "agent://Reviewer", content: "Take a look" },
+	});
+	call.setExecutionStarted();
+	call.updateResult(
+		{ content: [], details: { message: { to: "Reviewer", receipts: [{ to: "Reviewer", outcome: "injected" }] } } },
+		false,
+	);
+	expect(plainToolRows(call, env)).toContain("  ▏ Take a look");
 });

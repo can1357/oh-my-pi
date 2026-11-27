@@ -1046,6 +1046,120 @@ def test_search_commits_message_and_patch_modes(db: Database, tmp_path: Path) ->
     assert none.startswith("No commits")
 
 
+def _close_duplicate_github(**live: Any) -> tuple[httpx.MockTransport, list[tuple[str, str, Any]]]:
+    """GitHub double for gh_close_duplicate: #42 is the inbound issue in state `live`, #7 exists."""
+    calls: list[tuple[str, str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content) if request.content else None
+        path = request.url.path
+        calls.append((request.method, path, body))
+        if request.method == "GET" and path.endswith("/issues/42"):
+            issue = {"number": 42, "title": "boom", "body": "b", "user": {"login": "alice"}, "labels": []}
+            return httpx.Response(200, json={**issue, **live})
+        if request.method == "GET" and path.endswith("/issues/7"):
+            issue = {"number": 7, "title": "orig", "body": "", "state": "open", "user": {"login": "bob"}, "labels": []}
+            return httpx.Response(200, json=issue)
+        if request.method == "GET":
+            return httpx.Response(404, json={"message": "Not Found"})
+        if path.endswith("/comments"):
+            return httpx.Response(
+                201, json={"id": 99, "user": {"login": "bot"}, "body": body["body"], "created_at": "t"}
+            )
+        if path.endswith("/labels"):
+            return httpx.Response(200, json=[{"name": n} for n in body["labels"]])
+        return httpx.Response(200, json={})
+
+    return httpx.MockTransport(handler), calls
+
+
+def test_gh_close_duplicate_links_original_then_closes_as_duplicate(db: Database, tmp_path: Path) -> None:
+    transport, calls = _close_duplicate_github(state="open", labels=[{"name": "duplicate"}])
+    bindings, loop, t = _bindings(db, tmp_path, transport)
+    db.set_issue_classification(bindings.issue_key, "duplicate")
+    try:
+        tool = next(x for x in build(bindings) if x.name == "gh_close_duplicate")
+        tool.execute({"duplicate_of": 7, "fixed_in": "", "body": "Same Ctrl+C crash; #7 tracks it."}, _ctx())
+    finally:
+        _stop_loop(loop, t)
+
+    mutations = [(m, p, b) for m, p, b in calls if m != "GET"]
+    assert [m for m, _, _ in mutations] == ["POST", "PATCH"]  # label already present: no re-label
+    comment = mutations[0][2]["body"]
+    assert comment.splitlines()[0] == "Duplicate of #7"  # GitHub's duplicate-marking syntax leads
+    assert "Same Ctrl+C crash; #7 tracks it." in comment
+    assert mutations[1] == ("PATCH", "/repos/octo/widget/issues/42", {"state": "closed", "state_reason": "duplicate"})
+
+
+def test_gh_close_duplicate_fixed_in_commit_closes_completed(db: Database, tmp_path: Path) -> None:
+    transport, calls = _close_duplicate_github(state="open")
+    bindings, loop, t = _bindings(db, tmp_path, transport)
+    _git_repo_with_commits(bindings)
+    sha = subprocess.run(
+        ["git", "-C", str(bindings.workspace.repo_dir), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    db.set_issue_classification(bindings.issue_key, "bug")
+    try:
+        tool = next(x for x in build(bindings) if x.name == "gh_close_duplicate")
+        tool.execute({"fixed_in": sha[:8], "body": "Fixed on main; ships in the next release."}, _ctx())
+    finally:
+        _stop_loop(loop, t)
+
+    mutations = [(m, p, b) for m, p, b in calls if m != "GET"]
+    assert mutations[0][2]["body"].splitlines()[0] == f"Fixed in {sha[:12]}"
+    assert mutations[1] == ("POST", "/repos/octo/widget/issues/42/labels", {"labels": ["duplicate"]})
+    assert mutations[2][2] == {"state": "closed", "state_reason": "completed"}
+    row = db.get_issue(bindings.issue_key)
+    assert row is not None and row.classification == "duplicate"
+
+
+@pytest.mark.parametrize(
+    ("classification", "live", "args"),
+    [
+        pytest.param(None, {"state": "open"}, {"duplicate_of": 7}, id="before-classify"),
+        pytest.param(
+            "duplicate", {"state": "open", "state_reason": "reopened"}, {"duplicate_of": 7}, id="human-reopened"
+        ),
+        pytest.param("duplicate", {"state": "open"}, {"duplicate_of": 8}, id="unknown-original"),
+        pytest.param("duplicate", {"state": "open"}, {"duplicate_of": 42}, id="self-reference"),
+        pytest.param("duplicate", {"state": "open"}, {"fixed_in": "deadbeef"}, id="commit-not-on-default"),
+    ],
+)
+def test_gh_close_duplicate_refusals_leave_issue_untouched(
+    db: Database, tmp_path: Path, classification: str | None, live: dict[str, Any], args: dict[str, Any]
+) -> None:
+    transport, calls = _close_duplicate_github(**live)
+    bindings, loop, t = _bindings(db, tmp_path, transport)
+    if classification is not None:
+        db.set_issue_classification(bindings.issue_key, classification)
+    try:
+        tool = next(x for x in build(bindings) if x.name == "gh_close_duplicate")
+        with pytest.raises(RpcCommandError):
+            tool.execute({**args, "body": "same problem"}, _ctx())
+    finally:
+        _stop_loop(loop, t)
+    assert [c for c in calls if c[0] != "GET"] == []
+
+
+def test_fetch_issue_thread_reads_other_issue_by_number(db: Database, tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/issues/7/comments"):
+            return httpx.Response(200, json=[])
+        if request.url.path.endswith("/issues/7"):
+            issue = {"number": 7, "title": "orig", "body": "ctrl c kills subagents", "user": {"login": "bob"}}
+            return httpx.Response(200, json={**issue, "state": "closed", "state_reason": "completed", "labels": []})
+        return httpx.Response(404, json={"message": "Not Found"})
+
+    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(handler))
+    try:
+        tool = next(x for x in build(bindings) if x.name == "fetch_issue_thread")
+        result = tool.execute({"number": 7}, _ctx())
+    finally:
+        _stop_loop(loop, t)
+    assert result.splitlines()[0] == "# octo/widget#7 (issue, closed, completed)"
+    assert "ctrl c kills subagents" in result
+
+
 def test_classify_issue_rejects_bug_without_priority(db: Database, tmp_path: Path) -> None:
     bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(lambda r: httpx.Response(500)))
     try:

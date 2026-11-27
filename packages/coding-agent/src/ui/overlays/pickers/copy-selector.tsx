@@ -22,6 +22,7 @@ import { commandFromToolCall } from "../../../modes/view-model/overlays/copy-tar
 import { isReplyWrite, toolResultReplies } from "../../../session/transcript/reply-write";
 import {
 	isUserRequestEntry,
+	recentTranscriptEntries,
 	type TranscriptEntryLike,
 	textContent,
 	transcriptEntryMessage,
@@ -52,8 +53,6 @@ export interface CopySelectorProps {
 	readonly terminalRows?: Accessor<number>;
 }
 
-/** Entries replayed at open; older history loads on demand. */
-const TAIL_ENTRIES = 600;
 /** Lines of a block the preview holds; longer blocks copy through the program. */
 const PREVIEW_BLOCK_LINES = 400;
 /** Lines of a block the terminal shows while descended. */
@@ -75,14 +74,6 @@ interface MarkdownToken {
 	codeBlockStyle?: string;
 	tokens?: MarkdownToken[];
 	items?: MarkdownToken[];
-}
-
-/** The tail of a long branch, starting at a user turn. */
-function recentEntries(entries: readonly TranscriptEntryLike[]): readonly TranscriptEntryLike[] {
-	if (entries.length <= TAIL_ENTRIES) return entries;
-	for (let index = entries.length - TAIL_ENTRIES; index > 0; index--)
-		if (isUserRequestEntry(entries[index]!)) return entries.slice(index);
-	return entries;
 }
 
 function targetsOf(entries: readonly TranscriptEntryLike[]): Target[] {
@@ -436,8 +427,9 @@ export function turnPreview(target: Target, content: string): JSXNode {
 
 export function CopySelector(props: CopySelectorProps): JSXNode {
 	const all = props.entries;
-	const truncated = signal(recentEntries(all).length < all.length);
-	const targets = computed(() => targetsOf(truncated() ? recentEntries(all) : all));
+	const tail = recentTranscriptEntries(all);
+	const truncated = signal(tail.length < all.length);
+	const targets = computed(() => targetsOf(truncated() ? tail : all));
 	const selected = signal(Math.max(0, targets().length - 1));
 	/** The focused block while descended into the turn's blocks. */
 	const blockAt = signal<number | undefined>(undefined);

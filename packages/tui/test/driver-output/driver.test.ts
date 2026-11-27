@@ -19,6 +19,7 @@ const CAPABILITIES: TerminalCapabilities = {
 	multiplexer: null,
 	textSizing: false,
 	tsp: false,
+	emoji: { vs16Wide: false, bareFits: false },
 };
 
 /** An input half that records its lifecycle and lets the test fire resizes. */

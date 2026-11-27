@@ -82,7 +82,7 @@ export function ownsPage(payload: WorkerInitPayload): boolean {
 }
 
 /** Globals every page has and omp's Bun runtime lacks: run code that cannot find one was written for the page. */
-const PAGE_ONLY_GLOBAL_RE =
+export const PAGE_ONLY_GLOBAL_RE =
 	/^(document|window|location|history|localStorage|sessionStorage|customElements|getComputedStyle|CSS|HTML\w*Element|Element|Node) is not defined$/;
 
 /**

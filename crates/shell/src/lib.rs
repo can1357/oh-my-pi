@@ -49,6 +49,7 @@ pub mod vfs;
 #[cfg(test)]
 mod suites;
 
+pub mod approval;
 pub mod cancel;
 mod child_session;
 mod cmd_dialect;
@@ -63,6 +64,10 @@ pub mod taps;
 #[cfg(windows)]
 pub mod windows;
 
+pub use approval::{
+	ApprovalAndClause, ApprovalDialect, ApprovalSimpleCommand, BashApprovalAnalysis,
+	analyze_approval,
+};
 pub use child_session::{ChildSessionAction, child_session_action};
 pub use commands::{
 	SessionCommandFuture, SessionCommandHandler, SessionCommandRequest, SessionCommandResult,

@@ -1,5 +1,5 @@
 export * from "./color";
-export type * from "./contract";
+export * from "./contract";
 export * from "./loader";
 export * from "./plain";
 export * from "./runtime";

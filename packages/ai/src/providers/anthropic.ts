@@ -4,6 +4,7 @@ import {
 	isOfficialAnthropicApiUrl,
 	resolveAnthropicApiVersion,
 } from "@oh-my-pi/pi-catalog/compat/anthropic";
+import { isKimiCodeEndpoint } from "@oh-my-pi/pi-catalog/compat/kimi-code";
 import { hostMatchesUrl, isVertexRawPredictUrl, modelMatchesHost } from "@oh-my-pi/pi-catalog/hosts";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { mapEffortToAnthropicAdaptiveEffort } from "@oh-my-pi/pi-catalog/model-thinking";
@@ -5401,8 +5402,9 @@ function buildParams(
 	const metadataUserId = resolveAnthropicMetadataUserId(
 		rebindAnthropicMetadataUserId(
 			readAnthropicMetadataString(options?.metadata, "user_id") ??
-				// Deliberately share the normalized affinity identity across Kimi's two transports.
-				(model.provider === "kimi-code" ? getOpenAIPromptCacheKey(options) : undefined),
+				// Deliberately share the normalized affinity identity across Kimi's two
+				// transports (`kimi-code-endpoint` axis).
+				(isKimiCodeEndpoint(model) ? getOpenAIPromptCacheKey(options) : undefined),
 			isOAuthToken ? servingAccountId : undefined,
 		),
 		isOAuthToken,

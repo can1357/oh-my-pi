@@ -6,7 +6,8 @@
  * included. `omp auth import <file>` merges such a file into the local store:
  * an imported OAuth login replaces the stored login of the same provider
  * account, an imported API key replaces the provider's stored API key, and
- * everything else is kept.
+ * everything else is kept. `omp auth key` prints the master key that encrypts
+ * `agent.db`; `omp auth key <key|->` installs one and re-encrypts under it.
  */
 import {
 	type AuthCredential,
@@ -18,6 +19,8 @@ import {
 	resolveCredentialIdentityKey,
 	SqliteAuthCredentialStore,
 } from "@oh-my-pi/pi-ai";
+import { openLocalAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-broker";
+import { readCredentialMasterKey } from "@oh-my-pi/pi-ai/auth/credential-cipher";
 import { getAgentDbPath, isEnoent, isRecord } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Args, CliUsageError, Command } from "@oh-my-pi/pi-utils/cli";
@@ -164,17 +167,56 @@ export async function importAuthCredentials(
 	return { imported: data.credentials.length, providers: [...byProvider.keys()] };
 }
 
+/**
+ * `omp auth key`: print the credential master key from the OS vault, or, given
+ * a key (or `-` to read it from stdin), make it this machine's key and re-seal
+ * every encrypted credential in agent.db under it.
+ */
+async function runKey(value: string | undefined): Promise<void> {
+	try {
+		if (value === undefined) {
+			const key = await readCredentialMasterKey();
+			if (key === null) {
+				process.stderr.write(`${chalk.red("error: this machine's credential vault holds no master key.")}\n`);
+				process.exitCode = 1;
+				return;
+			}
+			process.stderr.write(
+				`${chalk.yellow("warning: this key decrypts every encrypted credential in agent.db.")}\n`,
+			);
+			process.stdout.write(`${key}\n`);
+			return;
+		}
+		const text = (value === "-" ? await Bun.stdin.text() : value).trim();
+		const key = Buffer.from(text, "base64");
+		if (key.length !== 32 || key.toString("base64") !== text) {
+			throw new Error("a master key is 32 bytes, base64-encoded, as `omp auth key` prints it");
+		}
+		const store = await SqliteAuthCredentialStore.open(getAgentDbPath());
+		try {
+			const resealed = await store.rekey(key);
+			process.stderr.write(`Stored the master key; re-encrypted ${resealed} credential(s).\n`);
+		} finally {
+			store.close();
+		}
+	} catch (error) {
+		process.stderr.write(`${chalk.red(`error: ${error instanceof Error ? error.message : String(error)}`)}\n`);
+		process.exitCode = 1;
+	}
+}
+
 export default class Auth extends Command {
 	static description = commandHelp.description;
 
 	static args = {
 		action: Args.string({
-			description: "export or import",
+			description: "export, import, or key",
 			required: true,
-			options: ["export", "import"],
+			options: ["export", "import", "key"],
 		}),
 		file: Args.string({
-			description: "File written by `omp auth export`, or - for stdin (import)",
+			description:
+				"File written by `omp auth export`, or - for stdin (import); a new master key, or - for stdin (key)",
 			required: false,
 		}),
 	};
@@ -183,6 +225,8 @@ export default class Auth extends Command {
 		"# Write every stored credential to a file (keep it secret)\n  omp auth export > credentials.json",
 		"# Merge them into this machine's credential store\n  omp auth import credentials.json",
 		"# Copy credentials to another machine over SSH\n  omp auth export | ssh host omp auth import -",
+		"# Print the master key that encrypts this machine's agent.db (keep it secret)\n  omp auth key",
+		"# Give another machine the same master key, re-encrypting its stored credentials\n  omp auth key | ssh host omp auth key -",
 	];
 
 	async run(): Promise<void> {
@@ -196,6 +240,14 @@ export default class Auth extends Command {
 		}
 		if (action === "import" && argv.length > 2) {
 			throw new CliUsageError(`Unexpected argument "${argv[2]}". Usage: omp auth import <file|->`);
+		}
+		if (action === "key" && argv.length > 2) {
+			throw new CliUsageError(`Unexpected argument "${argv[2]}". Usage: omp auth key [<key>|-]`);
+		}
+		// The master key protects this machine's agent.db, broker or not.
+		if (action === "key") {
+			await runKey(args.file);
+			return;
 		}
 
 		const broker = await resolveAuthBrokerConfig();
@@ -245,7 +297,7 @@ export default class Auth extends Command {
 			process.exitCode = 1;
 			return;
 		}
-		const store = await SqliteAuthCredentialStore.open(getAgentDbPath());
+		const store = await openLocalAuthCredentialStore();
 		try {
 			const summary = await importAuthCredentials(store, data);
 			process.stderr.write(

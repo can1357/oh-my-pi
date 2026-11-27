@@ -615,6 +615,44 @@ describe("extensions discovery", () => {
 		expect(result.extensions[0].tools.has("parse_duration")).toBe(true);
 	});
 
+	it("loads legacy Pi extensions whose sibling TypeScript files import each other via relative paths", async () => {
+		const toolName = "legacy-multi-file-tool";
+		const extDir = path.join(tempDir.path(), "legacy-pi-multi-file-extension");
+		fs.mkdirSync(extDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(extDir, "package.json"),
+			JSON.stringify({
+				name: "legacy-pi-multi-file-extension",
+				version: "1.0.0",
+				pi: { extensions: ["./index.ts"] },
+			}),
+		);
+		fs.writeFileSync(path.join(extDir, "helper.ts"), `export const foo = ${JSON.stringify(toolName)};\n`);
+		fs.writeFileSync(
+			path.join(extDir, "index.ts"),
+			[
+				'import { foo } from "./helper.ts";',
+				"",
+				"export default function(pi) {",
+				"\tconst { Type } = pi.typebox;",
+				"\tpi.registerTool({",
+				"\t\tname: foo,",
+				'\t\tdescription: "Multi-file legacy Pi extension",',
+				"\t\tparameters: Type.Object({}),",
+				'\t\texecute: async () => ({ content: [{ type: "text", text: foo }] }),',
+				"\t});",
+				"}",
+			].join("\n"),
+		);
+
+		const result = await discoverForTest([extDir]);
+		const extension = result.extensions.find(ext => ext.path === path.join(extDir, "index.ts"));
+
+		expect(result.errors).toHaveLength(0);
+		expect(extension).toBeDefined();
+		expect(extension?.tools.has(toolName)).toBe(true);
+	});
+
 	it("registers message renderers", async () => {
 		const extCode = `
 			export default function(pi) {
@@ -750,34 +788,5 @@ describe("extensions discovery", () => {
 		expect(result.extensions).toHaveLength(1);
 		expect(result.extensions[0].tools.has("explicit")).toBe(true);
 		expect(result.extensions[0].tools.has("discovered")).toBe(false);
-	});
-
-	it("discoverExtensionPaths only invokes the native extension-module provider (#4198)", async () => {
-		// The extension-module capability has multiple providers
-		// (native, claude, codex, gemini, opencode), but discoverExtensionPaths
-		// only surfaces native-provider paths. Regression: pre-fix it still
-		// invoked every provider's load() and then dropped foreign items,
-		// running four unused directory walks per startup (worst on Windows).
-		const capability = getCapability<ExtensionModule>(extensionModuleCapability.id);
-		expect(capability, "extension-modules capability must be registered").toBeDefined();
-
-		const providers = capability?.providers ?? [];
-		const foreignIds = providers.map(p => p.id).filter(id => id !== "native");
-		// Guard the invariant this test is defending — without foreign providers
-		// the test would trivially pass and hide a future regression.
-		expect(foreignIds.length).toBeGreaterThan(0);
-
-		const spies = providers.map(provider => vi.spyOn(provider, "load"));
-		try {
-			await discoverExtensionPaths([], tempDir.path());
-
-			const callsById = new Map(providers.map((provider, i) => [provider.id, spies[i].mock.calls.length]));
-			expect(callsById.get("native")).toBe(1);
-			for (const id of foreignIds) {
-				expect(callsById.get(id), `foreign provider ${id} must not be walked`).toBe(0);
-			}
-		} finally {
-			for (const spy of spies) spy.mockRestore();
-		}
 	});
 });

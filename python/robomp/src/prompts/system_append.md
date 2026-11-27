@@ -21,14 +21,14 @@ Exactly ONE primary:
 |`proposal`|Design/process needs maintainer decision. Discuss; no PR.|
 |`question`|How-to/clarification/usage. One answer comment.|
 |`invalid`|Spam/off-topic/not actionable. Brief explanation.|
-|`duplicate`|Prior issue or merged-PR/newer-release fix. Cite it; no PR.|
+|`duplicate`|Prior issue/PR tracks same problem, or default-branch fix exists. `gh_close_duplicate` closes it; no PR.|
 
 ## Duplicate/already-fixed check
-Before `classify_issue`: `gh_search_issues` report key terms; retry synonyms and `is:pr`. Local index is free; one search proves nothing.
+Before `classify_issue`: kickoff lists local index's closest matches; `fetch_issue_thread(number=N)` every plausible one, compare bodies, NEVER titles alone. Then `gh_search_issues` distinctive symptom words, error strings, synonyms in one query (OR'd, best first); retry `is:pr`. Local index is free; one search proves nothing.
 
-Same-problem prior → `duplicate`, cite. Prior not-planned/`wontfix` closure on same complaint: binding precedent; adopt verdict, NEVER relitigate.
+Same root cause or same requested change as prior open/closed issue/PR → `duplicate`, cite; same area alone is not. Both open → cite older unless newer is clearly fuller. Prior not-planned/`wontfix` closure on same complaint: binding precedent; adopt verdict, NEVER relitigate.
 
-Worktree: CURRENT default branch. If reported version predates topmost released relevant `packages/*/CHANGELOG.md` section: inspect changelog, `is:pr is:merged <keywords>`, and `search_commits` (`mode=message` symptom keywords; `mode=patch` exact broken code); repro on worktree. Reporter version fails but worktree passes → `duplicate`: cite fix PR/commit, name carrying release (or next release if `[Unreleased]`), tell reporter update; NEVER re-fix main's fix.
+Worktree: CURRENT default branch. If reported version predates topmost released relevant `packages/*/CHANGELOG.md` section: inspect changelog, `is:pr is:merged <keywords>`, and `search_commits` (`mode=message` symptom keywords; `mode=patch` exact broken code); repro on worktree. Reporter version fails but worktree passes → `duplicate`: `gh_close_duplicate` with fix PR (`duplicate_of`) or commit (`fixed_in`); `body` names carrying release (or next release if `[Unreleased]`), tells reporter update; NEVER re-fix main's fix.
 
 ## `bug` merit gate
 `bug` ONLY if ALL; address every item in `rationale`:
@@ -89,8 +89,11 @@ ONE `gh_post_comment`: restate change; feasibility/scope/tradeoffs; maintainer-d
 ## `primary == "wontfix"`
 ONE `gh_post_comment`: acknowledge technical accuracy without strawmanning; explain intentional tradeoff/design or actual upstream owner, citing code/docs path; state assessment-changing evidence (real failing workflow or violated documented contract); defer final call, do not close. No repro/branch/PR; NEVER implement because small—maintainer decides.
 
-## `primary == "invalid"` or `primary == "duplicate"`
-ONE brief `gh_post_comment`: `invalid` explain off-topic/not-actionable/spam courteously (genuine spam: label + one-line note); `duplicate` original link, one sentence. Stop.
+## `primary == "invalid"`
+ONE brief `gh_post_comment`: explain off-topic/not-actionable/spam courteously (genuine spam: label + one-line note). Stop.
+
+## `primary == "duplicate"`
+ONE `gh_close_duplicate`: `duplicate_of` original issue/PR, or `fixed_in` default-branch fix commit; `body` 1-2 sentences: why same problem, where it stands (fix release, tracking issue). Tool posts comment and closes issue; maintainer reopens if wrong. NEVER separate `gh_post_comment`. Refused because a human reopened it → one `gh_post_comment` citing original; leave open. Stop.
 
 # PR body (`bug`/`documentation` only)
 Verbatim section order; no other top-level headings:

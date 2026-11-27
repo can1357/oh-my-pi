@@ -9,7 +9,6 @@ import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { preloadPluginRoots } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { rejectionOf, trackUnhandled } from "../helpers/rejection";
-import { restoreEnvValue } from "../helpers/settings-test-state";
 import { createLspWritethrough, LspTool } from "@oh-my-pi/pi-coding-agent/lsp";
 import * as lspClient from "@oh-my-pi/pi-coding-agent/lsp/client";
 import * as lspConfig from "@oh-my-pi/pi-coding-agent/lsp/config";
@@ -53,7 +52,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { clampTimeout } from "@oh-my-pi/pi-coding-agent/tools/tool-timeouts";
 import * as piUtils from "@oh-my-pi/pi-utils";
-import { sanitizeText, TempDir } from "@oh-my-pi/pi-utils";
+import { getPluginsDir, sanitizeText, TempDir } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
 import DEFAULTS from "../../src/lsp/defaults.json" with { type: "json" };
 import { ToolCall } from "../../src/ui/transcript/tool-block";
@@ -3430,24 +3429,14 @@ describe("lsp regressions", () => {
 		expect(detectLanguageId(emacsPath)).toBe("emacs-lisp");
 	});
 
-	it("loads config-only marketplace LSP servers from Claude plugin cache", async () => {
-		const originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
-		delete process.env.CLAUDE_CONFIG_DIR;
-		delete Bun.env.CLAUDE_CONFIG_DIR;
+	it("loads config-only marketplace LSP servers from a Claude-format plugin", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-marketplace-config-");
 		const home = path.join(tempDir.path(), "home");
 		const cwd = path.join(tempDir.path(), "repo");
-		const pluginRoot = path.join(
-			home,
-			".claude",
-			"plugins",
-			"cache",
-			"claude-plugins-official",
-			"csharp-lsp",
-			"1.0.0",
-		);
+		const pluginsDir = getPluginsDir(home);
+		const pluginRoot = path.join(pluginsDir, "cache", "claude-plugins-official", "csharp-lsp", "1.0.0");
 		const marketplaceRoot = path.dirname(path.dirname(pluginRoot));
-		const registryPath = path.join(home, ".claude", "plugins", "installed_plugins.json");
+		const registryPath = path.join(pluginsDir, "installed_plugins.json");
 
 		await fs.promises.mkdir(pluginRoot, { recursive: true });
 		await fs.promises.mkdir(cwd, { recursive: true });
@@ -3517,7 +3506,6 @@ describe("lsp regressions", () => {
 			try {
 				await preloadPluginRoots(path.join(tempDir.path(), "empty-home"), cwd);
 			} finally {
-				restoreEnvValue("CLAUDE_CONFIG_DIR", originalClaudeConfigDir);
 				tempDir.removeSync();
 			}
 		}

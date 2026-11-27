@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings/keybindings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
-import { cfgDisplayHideToolActivity } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { cfgDisplayToolActivity } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 
 describe("InputController tool output expansion", () => {
@@ -10,7 +10,7 @@ describe("InputController tool output expansion", () => {
 		const showStatus = vi.fn();
 		const ctx = {
 			toolOutputExpanded: false,
-			hideToolActivity: false,
+			toolActivity: "detailed",
 			showStatus,
 		} as unknown as InteractiveModeContext;
 
@@ -23,7 +23,7 @@ describe("InputController tool output expansion", () => {
 	it("does not expand hidden tool activity and explains why", () => {
 		const showStatus = vi.fn();
 		const ctx = {
-			hideToolActivity: true,
+			toolActivity: "hidden",
 			toolOutputExpanded: false,
 			keybindings: KeybindingsManager.inMemory(),
 			showStatus,
@@ -36,13 +36,13 @@ describe("InputController tool output expansion", () => {
 	});
 });
 
-describe("InputController tool activity visibility", () => {
-	it("persists the toggle, rebuilds scrollback, and reveals tools collapsed", () => {
+describe("InputController tool activity cycle", () => {
+	it("cycles detailed, concise and hidden, persisting each, rebuilding scrollback and folding tools", () => {
 		const settings = Settings.isolated();
 		const replayHistory = vi.fn();
 		const showStatus = vi.fn();
 		const ctx = {
-			hideToolActivity: false,
+			toolActivity: "detailed",
 			toolOutputExpanded: true,
 			settings,
 			shell: { host: { replayHistory } },
@@ -50,19 +50,15 @@ describe("InputController tool activity visibility", () => {
 		} as unknown as InteractiveModeContext;
 		const controller = new InputController(ctx);
 
-		controller.toggleToolActivityVisibility();
+		for (const [index, mode] of (["concise", "hidden", "detailed"] as const).entries()) {
+			ctx.toolOutputExpanded = true;
+			controller.cycleToolActivity();
 
-		expect(ctx.hideToolActivity).toBe(true);
-		expect(cfgDisplayHideToolActivity.get(settings)).toBe(true);
-		expect(replayHistory).toHaveBeenCalledTimes(1);
-		expect(showStatus).toHaveBeenLastCalledWith("Tool activity: hidden");
-
-		controller.toggleToolActivityVisibility();
-
-		expect(ctx.hideToolActivity).toBe(false);
-		expect(ctx.toolOutputExpanded).toBe(false);
-		expect(cfgDisplayHideToolActivity.get(settings)).toBe(false);
-		expect(replayHistory).toHaveBeenCalledTimes(2);
-		expect(showStatus).toHaveBeenLastCalledWith("Tool activity: visible");
+			expect(ctx.toolActivity).toBe(mode);
+			expect(cfgDisplayToolActivity.get(settings)).toBe(mode);
+			expect(ctx.toolOutputExpanded).toBe(false);
+			expect(replayHistory).toHaveBeenCalledTimes(index + 1);
+			expect(showStatus).toHaveBeenLastCalledWith(`Tool activity: ${mode}`);
+		}
 	});
 });

@@ -93,7 +93,6 @@ function mapFactoryDroidFinishReason(reason: string): {
 const GOOGLE_APIS: Record<string, true> = {
 	"google-generative-ai": true,
 	"google-vertex": true,
-	"google-gemini-cli": true,
 };
 
 /** Whether Factory serves `model` on this Gemini generate wire rather than through an inner Anthropic or OpenAI model. */

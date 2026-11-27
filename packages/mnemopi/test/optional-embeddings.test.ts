@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it } from "bun:test";
 import {
 	available,
@@ -320,5 +321,52 @@ describe("optional embeddings", () => {
 			expect(second).toEqual([new Float32Array([0, 1, 4])]);
 			expect(inits).toEqual([FAST_MULTILINGUAL_E5_LARGE]);
 		});
+	});
+
+	it("scopes embedQuery() cache per provider so two Mnemopi runtimes do not cross-contaminate", async () => {
+		// `embedQuery()` caches query vectors; a second `Mnemopi` in the same process with a
+		// different provider must not read back the first runtime's vector. Each Mnemopi here
+		// exposes a distinct projection for the same query token; recall MUST score with that
+		// runtime's own projection, never the sibling's cached one.
+		const alphaProvider = {
+			async *embed(texts: readonly string[]) {
+				yield texts.map(() => [1, 0]);
+			},
+		};
+		const betaProvider = {
+			async *embed(texts: readonly string[]) {
+				yield texts.map(() => [0, 1]);
+			},
+		};
+
+		const alpha = new Mnemopi({
+			db: new Database(":memory:"),
+			embeddings: { provider: alphaProvider },
+		});
+		const beta = new Mnemopi({
+			db: new Database(":memory:"),
+			embeddings: { provider: betaProvider },
+		});
+
+		try {
+			alpha.remember("shared query text", { source: "test" });
+			beta.remember("shared query text", { source: "test" });
+			await alpha.flushExtractions();
+			await beta.flushExtractions();
+
+			// Recall on alpha first to seed the cache, then beta: an unscoped cache would
+			// hand beta alpha's `[1, 0]` vector.
+			const alphaResults = await alpha.recall("shared query text", 1);
+			const betaResults = await beta.recall("shared query text", 1);
+
+			// Each runtime scores against its own projection: alpha hits [1,0]·[1,0] = 1,
+			// beta hits [0,1]·[0,1] = 1. Without scoped keys, beta's dense_score
+			// collapses to [1,0]·[0,1] = 0.
+			expect(alphaResults[0]?.dense_score ?? 0).toBeCloseTo(1, 5);
+			expect(betaResults[0]?.dense_score ?? 0).toBeCloseTo(1, 5);
+		} finally {
+			alpha.close();
+			beta.close();
+		}
 	});
 });
