@@ -36,7 +36,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import type { TuiSlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
-import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
+import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking/levels";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
@@ -634,7 +634,7 @@ describe("AgentSession prewalk", () => {
 			settings: created.settings,
 			collabGuest: false,
 			showStatus: vi.fn(),
-			editor: { setText: vi.fn() },
+			composer: { setText: vi.fn() },
 			refreshSlashCommandState: vi.fn(),
 		} as unknown as InteractiveModeContext;
 		expect(await executeBuiltinSlashCommand("/prewalk off", { ctx })).toBe(true);
@@ -1589,7 +1589,7 @@ describe("AgentSession prewalk", () => {
 			settings,
 			collabGuest: false,
 			showStatus,
-			editor: { setText: vi.fn() },
+			composer: { setText: vi.fn() },
 			refreshSlashCommandState: vi.fn(),
 		} as unknown as InteractiveModeContext;
 		const runtime = { ctx } satisfies TuiSlashCommandRuntime;
@@ -1692,7 +1692,7 @@ describe("AgentSession prewalk", () => {
 			settings,
 			collabGuest: false,
 			showStatus,
-			editor: { setText: vi.fn() },
+			composer: { setText: vi.fn() },
 			refreshSlashCommandState: vi.fn(),
 		} as unknown as InteractiveModeContext;
 		const runtime = { ctx } satisfies TuiSlashCommandRuntime;
@@ -1757,7 +1757,7 @@ describe("AgentSession prewalk", () => {
 			settings,
 			collabGuest: false,
 			showStatus,
-			editor: { setText: vi.fn() },
+			composer: { setText: vi.fn() },
 			refreshSlashCommandState: vi.fn(),
 		} as unknown as InteractiveModeContext;
 		return { session: created, settings, showStatus, runtime: { ctx } satisfies TuiSlashCommandRuntime };
@@ -1816,6 +1816,24 @@ describe("AgentSession prewalk", () => {
 		expect(session.getPrewalkState()?.target.id).toBe(target.id);
 		expect(showStatus.mock.calls.length).toBe(calls + 1);
 		expect(showStatus).toHaveBeenLastCalledWith(expect.stringContaining("Usage: /prewalk"));
+	});
+
+	it("/prewalk accepts ^ model references for into and from", async () => {
+		const primary = modelOrThrow("claude-sonnet-4-5");
+		const target = modelOrThrow("claude-sonnet-4-6");
+		const { session, showStatus, runtime } = createSelectorFixture(primary, { default: primary, smol: primary });
+		const from = `^${primary.provider}/${primary.id}:medium`;
+		const into = `^${target.provider}/${target.id}:high`;
+
+		expect(await executeBuiltinSlashCommand(`/prewalk ${into}`, runtime)).toBe(true);
+		expect(showStatus).toHaveBeenLastCalledWith(expect.stringContaining("Prewalk on"));
+		expect(session.getPrewalkState()?.target.id).toBe(target.id);
+		expect(session.getPrewalkState()?.thinkingLevel).toBe(Effort.High);
+
+		expect(await executeBuiltinSlashCommand(`/prewalk restart ${from} ${into}`, runtime)).toBe(true);
+		expect(showStatus).toHaveBeenLastCalledWith(expect.stringContaining("Prewalk restarted"));
+		expect(session.model?.id).toBe(primary.id);
+		expect(session.getPrewalkState()?.target.id).toBe(target.id);
 	});
 
 	it("requires a fresh todo before a later explicit prewalk can hand off", async () => {

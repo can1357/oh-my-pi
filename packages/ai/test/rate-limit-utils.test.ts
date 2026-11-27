@@ -957,7 +957,7 @@ describe("isUsageLimitOutcome", () => {
 		expect(isUsageLimitOutcome(429, message)).toBe(true);
 	});
 
-	it("rotates on Anthropic 402 in-flight credit exhaustion instead of surfacing the retry hint", () => {
+	it("rotates on OpenRouter 402 in-flight credit exhaustion instead of surfacing the retry hint", () => {
 		const message =
 			"402 This request would exceed your available credits given your current in-flight requests. Retry after in-flight requests settle, or add credits. retry-after-ms=120000";
 		expect(parseRateLimitReason(message)).toBe("QUOTA_EXHAUSTED");
@@ -981,6 +981,23 @@ describe("isUsageLimitOutcome", () => {
 		expect(isUsageLimitOutcome(undefined, devinTrailer)).toBe(true);
 		expect(isUsageLimit(devinTrailer)).toBe(true);
 		expect(isUsageLimitOutcome(403, "Forbidden")).toBe(false);
+	});
+
+	it("rotates on Devin's statusless daily and weekly allowance refusals", () => {
+		const weekly =
+			"Devin stream error failed_precondition: Your weekly usage quota has been exhausted. Visit https://app.devin.ai/settings/usage to purchase on-demand usage or turn on auto-reload.";
+		// The daily form without the "quota will reset" suffix older matchers relied on.
+		const daily = "Devin stream error failed_precondition: Your daily usage quota has been exhausted.";
+		for (const message of [weekly, daily]) {
+			expect(isUsageLimitOutcome(undefined, message)).toBe(true);
+			expect(isUsageLimit(message)).toBe(true);
+		}
+	});
+
+	it("does not rotate on a per-minute throttle worded like Devin's allowance refusal", () => {
+		const perMinute = "Usage quota has been exhausted for this per minute window. Please retry in 30 seconds.";
+		expect(isUsageLimitOutcome(429, perMinute)).toBe(false);
+		expect(isUsageLimit(perMinute)).toBe(false);
 	});
 
 	// A statusless per-minute reset-window transient ("Rate limit will reset in

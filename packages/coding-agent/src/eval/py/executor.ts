@@ -2,8 +2,9 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 import { getProjectDir, isRecord, logger, Snowflake } from "@oh-my-pi/pi-utils";
-import type { ArtifactAllocator, OutputArtifactError } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import type { ArtifactAllocator, OutputArtifactError } from "../../tools/streaming-output";
 import type { ToolSession } from "../../tools";
+import { formatTimeoutNotice } from "../../tools/details/bash";
 import {
 	abortReasonError,
 	buildManagedKernelEnv,
@@ -25,7 +26,6 @@ import type { EvalDisplayOutput, EvalToolDescriptor, EvalToolInvokeResult } from
 import {
 	createKernelSessionRegistry,
 	formatSessionKernelTimeoutAnnotation,
-	formatSessionTimeoutAnnotation,
 	type KernelSession,
 	type KernelSessionRegistryContext,
 	normalizeKernelSessionCwd,
@@ -252,7 +252,7 @@ function requireRemainingTimeoutMs(deadlineMs?: number): number | undefined {
 // Result formatting
 // ---------------------------------------------------------------------------
 
-const formatTimeoutAnnotation = formatSessionTimeoutAnnotation;
+const formatTimeoutAnnotation = formatTimeoutNotice;
 
 const formatKernelTimeoutAnnotation = formatSessionKernelTimeoutAnnotation;
 
@@ -659,7 +659,7 @@ export async function executePython(code: string, options?: PythonExecutorOption
 		const request = { signal: executionOptions.signal, deadlineMs };
 		if (isCancellationError(err, PythonExecutionCancelledError, request)) {
 			const timedOut = isTimedOutCancellation(err, PythonExecutionCancelledError, request.signal, deadlineMs);
-			return createCancelledKernelResult(timedOut ? formatTimeoutAnnotation(executionOptions.timeoutMs) : "");
+			return createCancelledKernelResult(timedOut ? `[${formatTimeoutAnnotation(executionOptions.timeoutMs)}]` : "");
 		}
 		throw err;
 	}

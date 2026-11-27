@@ -1,4 +1,4 @@
-import type { GrepToolDetails } from "@oh-my-pi/pi-tui/tools/grep";
+import type { GrepToolDetails } from "./details/grep";
 import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
@@ -32,12 +32,7 @@ import { sessionResolveContext } from "../internal-urls/context";
 import { InternalUrlRouter } from "../internal-urls/router";
 import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
 import grepDescription from "../prompts/tools/grep.md" with { type: "text" };
-import {
-	DEFAULT_MAX_BYTES,
-	DEFAULT_MAX_COLUMN,
-	type TruncationResult,
-	truncateHead,
-} from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_COLUMN, type TruncationResult, truncateHead } from "./streaming-output";
 import { sessionDelegationBias } from "../task/prompt-policy";
 import { isScoutSpawnable } from "../task/spawn-policy";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
@@ -46,9 +41,9 @@ import { resolveToolTier } from "./approval";
 import { materializeReadUrlToFile, parseReadUrlTarget } from "./fetch";
 import { createFileRecorder, formatResultPath, resultSnapshotPath } from "./file-recorder";
 import { fileToolApproval } from "./guard-rules";
-import { type FileMatchSection, formatFileMatches } from "@oh-my-pi/pi-tui/tools/grouped-file-output";
-import { formatMatchLine } from "@oh-my-pi/pi-tui/tools/match-line-format";
-import { isFindEnabled } from "./jfind";
+import { type FileMatchSection, formatFileMatches } from "./grouped-file-output";
+import { formatMatchLine } from "./match-line-format";
+import { findHintVisible } from "./jfind";
 import {
 	expandDelimitedPathEntries,
 	formatPathRelativeToCwd,
@@ -73,12 +68,12 @@ import {
 	approvalRootCandidates,
 	searchApprovalCacheTargets,
 } from "./search-approval-targets";
-import { type LineRange, parseLineRanges, selectorLineRanges } from "@oh-my-pi/pi-tui/tools/line-ranges";
-import { isReadableUrlPath, splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
-import { toPathList } from "@oh-my-pi/pi-tui/render/render-utils";
+import { type LineRange, parseLineRanges, selectorLineRanges } from "./line-ranges";
+import { isReadableUrlPath, splitPathAndSel } from "./details/read";
+import { toPathList } from "../utils/render-utils";
 import { isRawSelector } from "./read-selector";
-import { formatCodeFrameLine } from "@oh-my-pi/pi-tui/render/render-utils";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { formatCodeFrameLine } from "../utils/render-utils";
+import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 
 import { cfgGrepContextAfter, cfgGrepContextBefore, cfgToolsGuardRules } from "./settings";
@@ -627,7 +622,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 		const displayMode = resolveFileDisplayMode(this.session);
 		const isHlMode = displayMode.hashLines;
 		const isLineNumberMode = !displayMode.hashLines && displayMode.lineNumbers;
-		const hasFind = this.session.isToolActive?.("find") ?? isFindEnabled(this.session);
+		const hasFind = findHintVisible(this.session);
 		const eagerDelegation = sessionDelegationBias(this.session) === "eager";
 		const scoutAvailable = isScoutSpawnable(
 			cfgTaskDisabledAgents.get(this.session.settings),

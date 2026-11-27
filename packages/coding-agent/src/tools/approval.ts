@@ -6,11 +6,17 @@
  * - compare a tool capability tier against the active approval mode,
  * - format the generic approval prompt body.
  */
-import { isRecord, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
-import { replaceTabs } from "@oh-my-pi/pi-tui";
-import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { isRecord, prompt, relativePathWithinNormalizedRoot, sanitizeText } from "@oh-my-pi/pi-utils";
+import { replaceTabs } from "../utils/text-width";
+import { shortenPath } from "../utils/render-utils";
 import approvalFolderTemplate from "../prompts/tools/approval-folder.md" with { type: "text" };
-import type { AgentTool, AgentToolContext, ToolApprovalDecision, ToolTier } from "@oh-my-pi/pi-agent-core";
+import type {
+	AgentTool,
+	AgentToolContext,
+	ToolApprovalDecision,
+	ToolApprovalQuery,
+	ToolTier,
+} from "@oh-my-pi/pi-agent-core";
 import * as path from "node:path";
 import type { Settings } from "../config/settings";
 import type {
@@ -109,6 +115,34 @@ export function resolveApprovalFromContext(context?: ApprovalContextSource | nul
 		approvalMode: isApprovalMode(configured) ? configured : "yolo",
 		userPolicies: asPolicyMap(cfgToolsApproval.get(settings)),
 	};
+}
+
+/**
+ * Whether a tool-level `allow` decision can change the outcome from `prompt` to `allow`
+ * for `toolName` at `tier` under the configured approval mode and user policies.
+ */
+export function canToolAllowAvoidPrompt(
+	toolName: string,
+	tier: ToolTier,
+	context?: ApprovalContextSource | null,
+): boolean {
+	const { approvalMode, userPolicies } = resolveApprovalFromContext(context);
+	const unmatched = resolvePolicy(
+		{ name: toolName, approval: () => ({ tier }) },
+		undefined,
+		approvalMode,
+		userPolicies,
+		undefined,
+	);
+	if (unmatched.policy !== "prompt") return false;
+	const matched = resolvePolicy(
+		{ name: toolName, approval: () => ({ tier, policy: "allow" }) },
+		undefined,
+		approvalMode,
+		userPolicies,
+		undefined,
+	);
+	return matched.policy === "allow";
 }
 
 export interface ResolvedApproval {
@@ -290,6 +324,9 @@ function normalizeDecision(value: unknown): Omit<ResolvedApproval, "policy"> & {
 	return { tier: "exec", override: false };
 }
 
+const PROMPTING_QUERY: ToolApprovalQuery = { prompts: true };
+const NON_PROMPTING_QUERY: ToolApprovalQuery = { prompts: false };
+
 /**
  * Run a tool's approval declaration. `resolution`, when given, is the mode and user policies the
  * call is being resolved under; a function-valued approval called with a context receives it there
@@ -298,13 +335,14 @@ function normalizeDecision(value: unknown): Omit<ResolvedApproval, "policy"> & {
 function getToolDecision(
 	tool: ApprovalSubject,
 	args: unknown,
+	query: ToolApprovalQuery,
 	context?: AgentToolContext,
 	resolution?: ResolvedExecuteTimeApproval,
 ): Omit<ResolvedApproval, "policy"> & { policy?: ApprovalPolicy } {
 	const approval = tool.approval;
 	if (typeof approval !== "function") return normalizeDecision(approval);
 	return normalizeDecision(
-		approval(args, context && resolution ? { ...context, approvalResolution: resolution } : context),
+		approval(args, context && resolution ? { ...context, approvalResolution: resolution } : context, query),
 	);
 }
 
@@ -316,7 +354,7 @@ function getToolDecision(
  * argument-dependent tier instead of falling back to `exec`.
  */
 export function resolveToolTier(tool: ApprovalSubject, args: unknown, context?: AgentToolContext): ToolTier {
-	return getToolDecision(tool, args, context).tier;
+	return getToolDecision(tool, args, NON_PROMPTING_QUERY, context).tier;
 }
 
 function modeApprovesTier(mode: ApprovalMode, tier: ToolTier): boolean {
@@ -394,7 +432,11 @@ function resolvePolicy(
 	grants: ApprovalGrantStore | undefined,
 	context?: AgentToolContext,
 ): ResolvedApproval {
-	const decision = getToolDecision(tool, args, context, { approvalMode: mode, userPolicies: userConfig });
+	// Yolo honours only a decision's explicit `policy`; every other mode may prompt on it.
+	const decision = getToolDecision(tool, args, mode === "yolo" ? NON_PROMPTING_QUERY : PROMPTING_QUERY, context, {
+		approvalMode: mode,
+		userPolicies: userConfig,
+	});
 	const userPolicy = Object.hasOwn(userConfig, tool.name) ? normalizePolicy(userConfig[tool.name]) : undefined;
 
 	// Legacy-name fallback for renamed tools (e.g. MCP mints that gained digits).
@@ -500,10 +542,7 @@ function resolvePolicy(
 
 /** Whether `candidate` is `root` or lies below it; both are cache keys, so equally normalized. */
 function isWithinFolder(root: string, candidate: string): boolean {
-	const relative = path.relative(root, candidate);
-	if (relative === "") return true;
-	// `..name` is a child, not an escape: only a `..` segment leaves the root.
-	return !path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`);
+	return relativePathWithinNormalizedRoot(root, candidate) !== null;
 }
 
 /**

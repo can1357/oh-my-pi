@@ -9,17 +9,25 @@
  * 3. Billed-but-unstreamed tokens are additive: a fixed per-message overhead
  *    learned from small tool calls never amplifies a later fast visible burst,
  *    and hidden pre-delta reasoning is charged against its silent span.
+ *    Hidden reasoning learned from thinking turns is credited only while a
+ *    message is thinking, never to a fully streamed write.
  * 4. Too few tokens is no reading, not a spurious one; reset blanks it.
  */
 import { describe, expect, it } from "bun:test";
-import { TokenRateMeter } from "../../src/utils/token-rate";
+import { type TokenRateDelta, TokenRateMeter } from "../../src/utils/token-rate";
 
 const words = (text: string) => text.split(/\s+/).filter(Boolean).length;
 
-/** Stream `perDelta` words every 100ms from `from` to `to`. */
-function stream(meter: TokenRateMeter, from: number, to: number, perDelta: number) {
+/** Stream `perDelta` words of `kind` every 100ms from `from` to `to`. */
+function stream(
+	meter: TokenRateMeter,
+	from: number,
+	to: number,
+	perDelta: number,
+	kind: TokenRateDelta = "text_delta",
+) {
 	const delta = `${"w ".repeat(perDelta)}`;
-	for (let t = from; t < to; t += 100) meter.push(delta, t);
+	for (let t = from; t < to; t += 100) meter.push(delta, kind, t);
 }
 
 /** `count` messages of 600 tokens over 10s at 60 tok/s, 5s tool gaps, billed as counted. Returns the clock. */
@@ -41,7 +49,7 @@ describe("TokenRateMeter", () => {
 		expect(meter.rate(0)).toBeNull();
 		meter.begin(0);
 		// A provider's first buffered chunk: 300 tokens in one delta is not a rate yet.
-		meter.push("w ".repeat(300), 500);
+		meter.push("w ".repeat(300), "text_delta", 500);
 		expect(meter.rate(600)).toBeNull();
 		stream(meter, 600, 10_000, 6);
 		expect(meter.rate(10_000)).toBeGreaterThan(80);
@@ -75,7 +83,7 @@ describe("TokenRateMeter", () => {
 		const meter = new TokenRateMeter(words);
 		// 20s of silence, then a 2-token tool call; the provider bills 1500.
 		meter.begin(0);
-		meter.push("x y", 20_000);
+		meter.push("x y", "toolcall_delta", 20_000);
 		meter.end(1500, 20_100);
 		expect(meter.rate(20_100)).toBeCloseTo(1500 / 20.1, 0);
 	});
@@ -86,7 +94,7 @@ describe("TokenRateMeter", () => {
 		let clock = 0;
 		for (let i = 0; i < 10; i++) {
 			meter.begin(clock);
-			meter.push("w ".repeat(25), clock + 1500);
+			meter.push("w ".repeat(25), "toolcall_delta", clock + 1500);
 			clock += 2000;
 			meter.end(80, clock);
 			clock += 3000;
@@ -97,13 +105,57 @@ describe("TokenRateMeter", () => {
 		meter.begin(clock);
 		let peak = 0;
 		for (let t = 0; t < 20_000; t += 100) {
-			meter.push("w ".repeat(10), clock + t);
+			meter.push("w ".repeat(10), "toolcall_delta", clock + t);
 			peak = Math.max(peak, meter.rate(clock + t) ?? 0);
 		}
 		expect(peak).toBeLessThan(115);
 		meter.end(2055, clock + 20_000);
 		expect(meter.rate(clock + 20_000)).toBeGreaterThan(80);
 		expect(meter.rate(clock + 20_000)).toBeLessThan(105);
+	});
+
+	describe("after summarized-thinking turns", () => {
+		/**
+		 * Three turns of 60s thinking streaming 20 tok/s of summary while the
+		 * provider bills 140 tok/s, each closed by a 2s, 100-token tool call.
+		 * Returns the clock.
+		 */
+		function thinkingTurns(meter: TokenRateMeter): number {
+			let clock = 0;
+			for (let i = 0; i < 3; i++) {
+				meter.begin(clock);
+				stream(meter, clock, clock + 60_000, 2, "thinking_delta");
+				stream(meter, clock + 60_000, clock + 62_000, 5, "toolcall_delta");
+				clock += 62_000;
+				meter.end(60 * 140 + 100, clock);
+				clock += 3_000;
+			}
+			return clock;
+		}
+
+		it("credits the learned hidden rate while the next message thinks", () => {
+			const meter = new TokenRateMeter(words);
+			const clock = thinkingTurns(meter);
+			meter.begin(clock);
+			stream(meter, clock, clock + 30_000, 2, "thinking_delta");
+			// Visible summary alone is 20 tok/s; the provider is generating ~140.
+			expect(meter.rate(clock + 30_000)).toBeGreaterThan(110);
+		});
+
+		it("reads a fully streamed write at its own rate", () => {
+			const meter = new TokenRateMeter(words);
+			const clock = thinkingTurns(meter);
+			// A 5-minute write streaming 140 tok/s of tool-call args, nothing hidden.
+			meter.begin(clock);
+			let peak = 0;
+			for (let t = 0; t < 300_000; t += 100) {
+				meter.push("w ".repeat(14), "toolcall_delta", clock + t);
+				if (t >= 30_000) peak = Math.max(peak, meter.rate(clock + t) ?? 0);
+			}
+			expect(peak).toBeLessThan(150);
+			meter.end(42_000, clock + 300_000);
+			expect(meter.rate(clock + 300_000)).toBeCloseTo(140, -1);
+		});
 	});
 
 	it("blanks on reset", () => {

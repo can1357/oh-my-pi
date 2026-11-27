@@ -91,10 +91,10 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { ToolApprovalDecision, ToolCallContext, ToolTier } from "@oh-my-pi/pi-agent-core";
 import { getAuthBrokerTokenFilePath } from "@oh-my-pi/pi-ai/auth-broker/discover";
 import { getAgentDbPath, getAuthBrokerSnapshotCachePath, getConfigRootDir } from "@oh-my-pi/pi-utils";
-import { isReadableUrlPath, splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
 import { InternalUrlRouter } from "../internal-urls/router";
 import { toolApprovalScopeToken } from "./approval-scope";
 import { resolveToCwd } from "./path-utils";
+import { isReadableUrlPath, splitPathAndSel } from "./details/read";
 import { parseSqlitePathCandidates } from "./sqlite-reader";
 import {
 	append,

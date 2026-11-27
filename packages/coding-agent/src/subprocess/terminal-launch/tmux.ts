@@ -1,4 +1,4 @@
-import { hasTerminalMultiplexerSession } from "@oh-my-pi/pi-tui/terminal-multiplexer";
+import { hasMultiplexerSession } from "@oh-my-pi/pi-tui/driver/mux/detect";
 import { quotePosixArgv } from "../../utils/shell-quote";
 import { launchError, oneLineId, runStep } from "./shared";
 import type { SupportedMultiplexerCapabilities, TerminalLaunchBackend, TerminalLaunchProvider } from "./types";
@@ -33,7 +33,7 @@ const launchTmux: TerminalLaunchBackend<"tmux", typeof capabilities> = async (
 	request,
 	{ environment: env, runCli },
 ) => {
-	const inTmux = hasTerminalMultiplexerSession("tmux", env);
+	const inTmux = hasMultiplexerSession("tmux", env);
 	if (!inTmux && !request.target) {
 		throw launchError(request, "capability", "tmux launch requires an active TMUX session or an explicit target.");
 	}

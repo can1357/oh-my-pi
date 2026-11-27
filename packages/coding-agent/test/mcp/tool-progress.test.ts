@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as os from "node:os";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -12,8 +12,13 @@ import type {
 } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { visibleWidth } from "@oh-my-pi/pi-tui";
-import type { MCPProgress, MCPToolDetails } from "@oh-my-pi/pi-tui/tools/mcp";
+import { visibleWidth } from "@oh-my-pi/pi-tui/text/width";
+import type { MCPToolDetails } from "@oh-my-pi/pi-coding-agent/tools/details/mcp";
+import type { MCPProgress } from "@oh-my-pi/pi-coding-agent/tools/mcp-progress";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 const definition = { name: "progress_tool", inputSchema: { type: "object" as const } };
 const result: MCPToolCallResult = {

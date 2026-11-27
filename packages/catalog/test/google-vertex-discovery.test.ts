@@ -6,7 +6,6 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
-import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import {
 	googleModelManagerOptions,
 	googleVertexModelManagerOptions,
@@ -141,15 +140,14 @@ describe("google-vertex model catalog", () => {
 	it("invalidates cached Gemini 3.7/3.8 Flash effort metadata on upgrade (#10543)", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-google-flash37-cache-"));
 		try {
-			for (const [providerId, options] of [
-				["google", googleModelManagerOptions()],
-				["google-vertex", googleVertexModelManagerOptions()],
+			for (const [providerId, api, options] of [
+				["google", "google-generative-ai", googleModelManagerOptions()],
+				["google-vertex", "google-vertex", googleVertexModelManagerOptions()],
 			] as const) {
-				const bundledModels = getBundledModels(providerId);
 				const currentIds = ["gemini-3.7-flash", "gemini-3.8-flash"];
-				const stale = currentIds.map(id => {
-					const current = bundledModels.find(model => model.id === id);
-					if (!current?.thinking) throw new Error(`${providerId} ${id} is missing thinking metadata`);
+				const currentModels = currentIds.map(id => buildModel(geminiSpec(providerId, api, id)));
+				const stale = currentModels.map(current => {
+					if (!current.thinking) throw new Error(`${providerId} ${current.id} is missing thinking metadata`);
 					return {
 						...current,
 						thinking: {
@@ -162,7 +160,7 @@ describe("google-vertex model catalog", () => {
 				writeModelCache(providerId, Date.now(), stale, true, "merge-v3:pre-10543", cacheDbPath);
 
 				const result = await resolveProviderModels(
-					{ ...options, staticModels: bundledModels, cacheDbPath },
+					{ ...options, staticModels: currentModels, cacheDbPath },
 					"offline",
 				);
 				for (const id of currentIds) {

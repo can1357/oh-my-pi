@@ -7,6 +7,7 @@ import { createGunzip, createGzip } from "node:zlib";
 import { withStatsSyncLock } from "@oh-my-pi/omp-stats/aggregator";
 import { isCompressScratchPath } from "@oh-my-pi/omp-stats/parser";
 import {
+	errorMessage,
 	formatBytes,
 	getAgentDir,
 	getBlobsDir,
@@ -21,6 +22,7 @@ import {
 	hashPath,
 	isPidAlive,
 	normalizePathForComparison,
+	pathExists,
 	readLines,
 	type FileLockHandle,
 } from "@oh-my-pi/pi-utils";
@@ -393,24 +395,10 @@ function getArchivedSessionsDir(agentDir: string): string {
 	return path.join(path.dirname(getSessionsDir(agentDir)), "archive", "sessions");
 }
 
-function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
-}
-
 function codeOf(error: unknown): string | undefined {
 	return typeof error === "object" && error !== null && "code" in error
 		? String((error as { code?: unknown }).code)
 		: undefined;
-}
-
-async function pathExists(target: string): Promise<boolean> {
-	try {
-		await fs.stat(target);
-		return true;
-	} catch (error) {
-		if (codeOf(error) === "ENOENT") return false;
-		throw error;
-	}
 }
 
 async function statIfPresent(target: string) {
@@ -1186,14 +1174,15 @@ async function cleanupHistoryRowsForArchivedSessions(
 	}
 }
 
-const STATS_SESSION_TABLES = ["messages", "user_messages", "tool_calls", "file_offsets"] as const;
-const STATS_ENTRY_TABLES = ["messages", "user_messages", "tool_calls"] as const;
+const STATS_SESSION_TABLES = ["messages", "user_messages", "tool_calls", "tool_approvals", "file_offsets"] as const;
+const STATS_ENTRY_TABLES = ["messages", "user_messages", "tool_calls", "tool_approvals"] as const;
 type StatsEntryTable = (typeof STATS_ENTRY_TABLES)[number];
 
 const STATS_IDENTITY_COLUMNS: Record<StatsEntryTable, readonly string[]> = {
 	messages: ["entry_id", "timestamp"],
 	user_messages: ["entry_id", "timestamp"],
 	tool_calls: ["entry_id", "timestamp", "tool_call_id"],
+	tool_approvals: ["tool_call_id"],
 };
 
 interface StatsSession {
@@ -1238,6 +1227,7 @@ function createStatsIdentities(): Record<StatsEntryTable, StatsEntryIdentity[]> 
 		messages: [],
 		user_messages: [],
 		tool_calls: [],
+		tool_approvals: [],
 	};
 }
 
@@ -1478,10 +1468,26 @@ function addSessionStatsIdentity(line: string, identities: Record<StatsEntryTabl
 	if (line.length === 0) return;
 	try {
 		const record: unknown = JSON.parse(line);
+		if (!record || typeof record !== "object" || !("type" in record)) return;
+		if (record.type === "custom") {
+			if (
+				!("customType" in record) ||
+				(record.customType !== "tool_approval_requested" && record.customType !== "tool_approval_resolved") ||
+				!("data" in record) ||
+				!record.data ||
+				typeof record.data !== "object" ||
+				!("toolCallId" in record.data) ||
+				typeof record.data.toolCallId !== "string"
+			) {
+				return;
+			}
+			const toolCallId = record.data.toolCallId.trim();
+			if (toolCallId.length > 0) {
+				identities.tool_approvals.push({ entryId: "", timestamp: 0, toolCallId });
+			}
+			return;
+		}
 		if (
-			!record ||
-			typeof record !== "object" ||
-			!("type" in record) ||
 			record.type !== "message" ||
 			!("id" in record) ||
 			typeof record.id !== "string" ||
@@ -1612,13 +1618,17 @@ function reconcileStatsRowsForSessions(dbPath: string, plans: StatsCleanupPlan[]
 		`),
 		);
 		const transferStatements = entryTables.map(table => {
-			const toolCallMatch =
-				table === "tool_calls" ? `retained.tool_call_id = ${table}.tool_call_id` : "retained.tool_call_id = ''";
-			const identityMatch = `
+			const identityMatch =
+				table === "tool_approvals"
+					? `
+				retained.table_name = 'tool_approvals'
+				AND retained.tool_call_id = tool_approvals.tool_call_id
+			`
+					: `
 				retained.table_name = '${table}'
 				AND retained.entry_id = ${table}.entry_id
 				AND retained.timestamp = ${table}.timestamp
-				AND ${toolCallMatch}
+				AND ${table === "tool_calls" ? `retained.tool_call_id = ${table}.tool_call_id` : "retained.tool_call_id = ''"}
 			`;
 			return statements.use(
 				db.prepare(`

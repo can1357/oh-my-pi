@@ -15,17 +15,21 @@
  * - `cfg://<setting>`         session-only runtime override
  * - `cfg://<setting>/save`    persisted to the global config.yml
  *
+ * A record setting's content is a patch: a JSON object naming only the entries it
+ * changes, `null` removing one; the record's other entries stay as they are.
+ *
  * Credential values are always redacted.
  */
 import { isRecord, prompt } from "@oh-my-pi/pi-utils";
-import { fuzzyFilter } from "@oh-my-pi/pi-tui/fuzzy";
-import { type CfgWriteDetails, type CfgWriteOutcome } from "@oh-my-pi/pi-tui/tools/cfg-render";
-import { CFG_SAVE_SEGMENT, CFG_URL_PREFIX, parseCfgUrl } from "@oh-my-pi/pi-tui/tools/cfg-url";
+import { fuzzyFilter } from "../utils/fuzzy";
+import { type CfgWriteDetails, type CfgWriteOutcome } from "../tools/details/cfg-render";
+import { CFG_SAVE_SEGMENT, CFG_URL_PREFIX, parseCfgUrl } from "./cfg-url";
 import { type AnySetting, all } from "../config/registry";
 import type { SettingProvenance, Settings } from "../config/settings";
 import cfgPromptDoc from "../prompts/internal-urls/cfg.md" with { type: "text" };
 import cfgEnvShadowedTemplate from "../prompts/tools/cfg-env-shadowed.md" with { type: "text" };
 import cfgApprovalTimeoutTemplate from "../prompts/tools/cfg-approval-timeout.md" with { type: "text" };
+import cfgEntryConfiguredTemplate from "../prompts/tools/cfg-entry-configured.md" with { type: "text" };
 import cfgWriteResultTemplate from "../prompts/tools/cfg-write-result.md" with { type: "text" };
 import type { ToolSession } from "../tools";
 import type {
@@ -155,6 +159,38 @@ function formatValue(setting: AnySetting, value: unknown): string {
 }
 
 /**
+ * Patch written to a record setting: entries to set, `null` for entries to remove.
+ *
+ * @throws Error when `content` is not a JSON object.
+ */
+function parseRecordPatch(content: string): Record<string, unknown> {
+	let patch: unknown;
+	try {
+		patch = JSON.parse(content);
+	} catch {
+		patch = undefined;
+	}
+	if (!isRecord(patch)) throw new Error(`Invalid record JSON: ${content}`);
+	return patch;
+}
+
+/** Own entry `key` of `record`; undefined when absent or `record` is not a record. */
+function entryOf(record: unknown, key: string): unknown {
+	return isRecord(record) && Object.hasOwn(record, key) ? record[key] : undefined;
+}
+
+/** `record` with `patch` applied: entries replaced in place or appended, `null` entries removed. */
+function applyPatch(record: unknown, patch: Record<string, unknown>): Record<string, unknown> {
+	const entries = new Map(isRecord(record) ? Object.entries(record) : []);
+	for (const key in patch) {
+		const entry = patch[key];
+		if (entry === null) entries.delete(key);
+		else entries.set(key, entry);
+	}
+	return Object.fromEntries(entries);
+}
+
+/**
  * Canonicalize URL segments against the schema, case-insensitively.
  * `leaf` is set when the path names a setting; `members` lists every setting beneath it.
  *
@@ -239,7 +275,7 @@ function renderLeaf(settings: Settings, setting: AnySetting): string {
 /**
  * Layer that keeps a written `value` from taking effect on `settings`, or undefined when it applies.
  * Decided by which layer owns the setting; `effective` only clears a false alarm where that layer
- * already agrees (settings layers deep-merge, so a record write shows up as a subset of the effective record).
+ * already agrees (for a record, `value` is the patch: each entry it names, `null` as absent).
  */
 function shadowingLayer(
 	setting: AnySetting,
@@ -255,9 +291,16 @@ function shadowingLayer(
 		return Bun.deepEquals(effective, value) ? undefined : owner;
 	}
 	for (const key in value) {
-		if (!Bun.deepEquals(effective[key], value[key])) return owner;
+		if (!Bun.deepEquals(entryOf(effective, key) ?? null, value[key])) return owner;
 	}
 	return undefined;
+}
+
+/** Value `persistent`'s global config gives `setting`, which a `/save` replaces. */
+function globalValue(setting: AnySetting, persistent: Settings): unknown {
+	let value: unknown = persistent.getGlobalSettings();
+	for (const segment of setting.segments) value = isRecord(value) ? value[segment] : undefined;
+	return value;
 }
 
 /**
@@ -273,8 +316,7 @@ function saveShadowingLayer(
 ): SettingProvenance | undefined {
 	const owner = setting.provenance(persistent);
 	const effective = setting.get(persistent);
-	let global: unknown = persistent.getGlobalSettings();
-	for (const segment of setting.segments) global = isRecord(global) ? global[segment] : undefined;
+	const global = globalValue(setting, persistent);
 	if (above.includes(owner) && keepsGlobalListEntries(setting, owner, effective, global ?? setting.default)) {
 		return undefined;
 	}
@@ -282,9 +324,9 @@ function saveShadowingLayer(
 		return shadowingLayer(setting, persistent, value, above);
 	}
 	for (const key in value) {
-		const current = effective[key];
+		const current = entryOf(effective, key);
 		if (current === undefined || Bun.deepEquals(current, value[key])) continue;
-		if (isRecord(global) && Bun.deepEquals(global[key], current)) continue;
+		if (Bun.deepEquals(entryOf(global, key), current)) continue;
 		return owner;
 	}
 	return undefined;
@@ -387,26 +429,40 @@ export class CfgProtocolHandler implements ProtocolHandler {
 			throw new Error(`${path || CFG_URL_PREFIX} is a namespace; write a single setting, e.g. ${example}.`);
 		}
 		const save = target?.save ?? false;
-		const value = leaf.parse(content);
 		const previous = leaf.get(settings);
+		// A record write is a patch naming only the entries it changes; `value` is the whole resulting record.
+		const patch = leaf.type === "record" ? parseRecordPatch(content) : undefined;
+		const value = patch ? applyPatch(previous, patch) : leaf.parse(content);
+		// Refuse before prompting: an approved change that fails validation would only fail afterwards.
+		leaf.assertWritable(value);
+		// Shadowing is judged on what the write names: a patch leaves the record's other entries alone.
+		const written = patch ?? value;
+		// A patched record shows only the entries the patch names, absent ones as `null`: the patch restoring them.
+		const shown = (current: unknown) =>
+			formatValue(
+				leaf,
+				patch ? Object.fromEntries(Object.keys(patch).map(key => [key, entryOf(current, key) ?? null])) : current,
+			);
 		const request: CfgChangeRequest = {
 			path: leaf.id,
-			previous: formatValue(leaf, previous),
-			value: formatValue(leaf, value),
+			previous: shown(previous),
+			value: formatValue(leaf, written),
 			save,
 		};
 		const settingUrl = `${CFG_URL_PREFIX}${leaf.id.replaceAll(".", "/")}`;
+		const saveUrl = `${settingUrl}/${CFG_SAVE_SEGMENT}`;
 		const finish = (
 			outcome: CfgWriteOutcome,
 			shadow?: { layer: SettingProvenance; scope: Settings },
 		): InternalWriteResult => {
-			const effective = shadow ? formatValue(leaf, leaf.get(shadow.scope)) : undefined;
+			const effective = shadow ? shown(leaf.get(shadow.scope)) : undefined;
 			const details: CfgWriteDetails = { ...request, outcome, ...(effective !== undefined ? { effective } : {}) };
 			const text = prompt
 				.render(cfgWriteResultTemplate, {
 					...request,
 					url: settingUrl,
-					saveUrl: `${settingUrl}/${CFG_SAVE_SEGMENT}`,
+					saveUrl,
+					patch: patch !== undefined,
 					declined: outcome === "declined",
 					unchanged: outcome === "unchanged",
 					saved: outcome === "applied" && save,
@@ -421,16 +477,24 @@ export class CfgProtocolHandler implements ProtocolHandler {
 		if (!save && Bun.deepEquals(previous, value)) return finish("unchanged");
 		// Refuse before prompting: approving a session change a non-fallback env var overrides is a no-op.
 		// A fallback env var yields to the override the write adds, so it does not shadow.
-		if (!save && !leaf.envFallback && shadowingLayer(leaf, settings, value, ABOVE_SESSION)) {
+		if (!save && !leaf.envFallback && shadowingLayer(leaf, settings, written, ABOVE_SESSION)) {
 			throw new Error(
 				prompt
 					.render(cfgEnvShadowedTemplate, {
 						path: leaf.id,
-						effective: formatValue(leaf, previous),
+						effective: shown(previous),
 						env: leaf.envName,
 					})
 					.trim(),
 			);
+		}
+		// A session override deep-merges over the configured record, so it cannot remove entries configured there.
+		if (patch && !save) {
+			const configured = settings.underlyingValue(leaf);
+			const kept = Object.keys(patch).filter(key => patch[key] === null && entryOf(configured, key) !== undefined);
+			if (kept.length > 0) {
+				throw new Error(prompt.render(cfgEntryConfiguredTemplate, { path: leaf.id, keys: kept, saveUrl }).trim());
+			}
 		}
 		const host = approvalHost;
 		if (!host) {
@@ -440,12 +504,12 @@ export class CfgProtocolHandler implements ProtocolHandler {
 		}
 		if (save) {
 			// Saving may still be meant for other projects, so ask anyway, but name the layer that wins here.
-			// A session sharing the persistent instance drops its own override on save, so it does not shadow.
+			// A session sharing the persistent instance drops or patches its own override on save, so it does not shadow.
 			const persistent = host.persistentSettings;
 			const above = ABOVE_GLOBAL.filter(
 				layer => !(layer === "env" && leaf.envFallback) && !(layer === "runtime" && settings === persistent),
 			);
-			const layer = saveShadowingLayer(leaf, persistent, value, above);
+			const layer = saveShadowingLayer(leaf, persistent, written, above);
 			if (layer) {
 				request.shadowedBy =
 					layer === "env" && leaf.envName ? `environment variable ${leaf.envName}` : PROVENANCE_LABELS[layer];
@@ -466,23 +530,27 @@ export class CfgProtocolHandler implements ProtocolHandler {
 			leaf.override(settings, value);
 			host.applied({ path: leaf.id, value: leaf.get(settings), settings, save });
 			// A non-fallback env var outranks runtime overrides; report it instead of claiming the change.
-			const layer = shadowingLayer(leaf, settings, value, ABOVE_SESSION);
+			const layer = shadowingLayer(leaf, settings, written, ABOVE_SESSION);
 			return finish("applied", layer ? { layer, scope: settings } : undefined);
 		}
 		const persistent = host.persistentSettings;
-		leaf.set(persistent, value);
+		// A patch keeps the global record's other entries.
+		leaf.set(persistent, patch ? applyPatch(globalValue(leaf, persistent), patch) : value);
 		await persistent.flush();
-		// A session sharing the persistent instance drops its override so the saved value
-		// takes effect; a separate instance never reloads from disk, so mirror it.
-		if (settings === persistent) {
+		// A session sharing the persistent instance drops its override so the saved value takes effect,
+		// unless a patch keeps that override's other entries; a separate instance never reloads from disk,
+		// so mirror it.
+		if (settings === persistent && !(patch && settings.hasRuntimeOverride(leaf))) {
 			leaf.clearOverride(settings);
 		} else {
-			leaf.override(settings, value);
-			host.applied({ path: leaf.id, value: leaf.get(persistent), settings: persistent, save });
+			leaf.override(settings, patch ? applyPatch(leaf.get(settings), patch) : value);
+			if (settings !== persistent) {
+				host.applied({ path: leaf.id, value: leaf.get(persistent), settings: persistent, save });
+			}
 		}
 		host.applied({ path: leaf.id, value: leaf.get(settings), settings, save });
 		// Judged on the persistent instance: a separate session carries the mirrored override above.
-		const layer = shadowingLayer(leaf, persistent, value, ABOVE_GLOBAL);
+		const layer = shadowingLayer(leaf, persistent, written, ABOVE_GLOBAL);
 		return finish("applied", layer ? { layer, scope: persistent } : undefined);
 	}
 

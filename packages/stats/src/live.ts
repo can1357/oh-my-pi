@@ -12,7 +12,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { getSessionsDir, logger } from "@oh-my-pi/pi-utils";
+import { getSessionsDir, hasFsCode, isEacces, logger } from "@oh-my-pi/pi-utils";
 import { syncAllSessions } from "./aggregator";
 import { getDataVersion, initDb } from "./db";
 import { isCompressScratchPath } from "./parser";
@@ -21,7 +21,9 @@ import type { LiveStatus, LiveSyncStatus } from "./shared-types";
 
 /** Wait this long after the last transcript write before syncing it. */
 const WATCH_DEBOUNCE_MS = 800;
-/** Full resync cadence, catching anything the watcher missed (or everything, without one). */
+/** Sync pending writes at most this long after the first, even while agents keep writing (the debounce never settles). */
+const WATCH_MAX_WAIT_MS = 5000;
+/** Spacing from the end of one full resync to the start of the next, catching anything the watcher missed. */
 const FULL_SYNC_INTERVAL_MS = 5 * 60 * 1000;
 /** Minimum spacing of `version` bumps; each bump makes open pages refetch. */
 const VERSION_THROTTLE_MS = 1000;
@@ -53,6 +55,7 @@ export class StatsLive {
 	#watcher: fs.FSWatcher | null = null;
 	#fullSyncTimer: NodeJS.Timeout | null = null;
 	#debounceTimer: NodeJS.Timeout | null = null;
+	#maxWaitTimer: NodeJS.Timeout | null = null;
 	#versionTimer: NodeJS.Timeout | null = null;
 	#progressTimer: NodeJS.Timeout | null = null;
 	#retryTimer: NodeJS.Timeout | null = null;
@@ -79,8 +82,7 @@ export class StatsLive {
 		if (this.#started) return;
 		this.#started = true;
 		this.#watch();
-		this.#fullSyncTimer = setInterval(() => this.requestSync(), FULL_SYNC_INTERVAL_MS);
-		this.#fullSyncTimer.unref?.();
+		// Each full sync schedules the next when it ends (see #runSync).
 		this.requestSync();
 	}
 
@@ -88,11 +90,18 @@ export class StatsLive {
 		this.#started = false;
 		this.#watcher?.close();
 		this.#watcher = null;
-		clearInterval(this.#fullSyncTimer ?? undefined);
-		for (const timer of [this.#debounceTimer, this.#versionTimer, this.#progressTimer, this.#retryTimer]) {
+		for (const timer of [
+			this.#fullSyncTimer,
+			this.#debounceTimer,
+			this.#maxWaitTimer,
+			this.#versionTimer,
+			this.#progressTimer,
+			this.#retryTimer,
+		]) {
 			clearTimeout(timer ?? undefined);
 		}
-		this.#fullSyncTimer = this.#debounceTimer = this.#versionTimer = this.#progressTimer = this.#retryTimer = null;
+		this.#fullSyncTimer = this.#debounceTimer = this.#maxWaitTimer = null;
+		this.#versionTimer = this.#progressTimer = this.#retryTimer = null;
 		this.#queued = null;
 	}
 
@@ -127,6 +136,9 @@ export class StatsLive {
 		// Targeted syncs of a file or two stay quiet; only full syncs show progress.
 		const visible = files === undefined;
 		if (visible) {
+			// Any full sync (periodic or requested) resets the schedule; the next is armed when this one ends.
+			clearTimeout(this.#fullSyncTimer ?? undefined);
+			this.#fullSyncTimer = null;
 			this.#sync = { ...this.#sync, phase: "syncing", current: 0, total: 0, processed: 0, error: null };
 			this.#emit();
 		}
@@ -172,11 +184,26 @@ export class StatsLive {
 				}, SYNC_RETRY_MS);
 			}
 		}
-		// Another process may have ingested too; its commits move SQLite's data_version.
-		if (this.#externalWrites()) this.#changed();
-		// A full sync held its last bump back: show its data now rather than at the end of the throttle.
-		if (visible && this.#versionTimer) this.#advanceVersion();
-		this.#emit();
+		try {
+			// Another process may have ingested too; its commits move SQLite's data_version.
+			if (this.#externalWrites()) this.#changed();
+			// A full sync held its last bump back: show its data now rather than at the end of the throttle.
+			if (visible && this.#versionTimer) this.#advanceVersion();
+			this.#emit();
+		} finally {
+			// Spaced from the end, so a full sync slower than the interval never runs back to back with the next.
+			// Armed even if the reporting above throws: the schedule is a chain, and a lost link ends it.
+			if (visible && this.#started) this.#scheduleFullSync();
+		}
+	}
+
+	#scheduleFullSync(): void {
+		clearTimeout(this.#fullSyncTimer ?? undefined);
+		this.#fullSyncTimer = setTimeout(() => {
+			this.#fullSyncTimer = null;
+			this.requestSync();
+		}, FULL_SYNC_INTERVAL_MS);
+		this.#fullSyncTimer.unref?.();
 	}
 
 	/** Whether another connection committed since the last check (always true on the first). */
@@ -242,19 +269,28 @@ export class StatsLive {
 	#watch(): void {
 		const root = getSessionsDir();
 		const pending = new Set<string>();
+		const flush = () => {
+			clearTimeout(this.#debounceTimer ?? undefined);
+			clearTimeout(this.#maxWaitTimer ?? undefined);
+			this.#debounceTimer = this.#maxWaitTimer = null;
+			const files = [...pending];
+			pending.clear();
+			this.requestSync(files);
+		};
 		try {
 			this.#watcher = fs.watch(root, { recursive: true }, (_event, filename) => {
 				if (!filename?.endsWith(".jsonl") || isCompressScratchPath(filename)) return;
 				pending.add(path.join(root, filename));
 				clearTimeout(this.#debounceTimer ?? undefined);
-				this.#debounceTimer = setTimeout(() => {
-					this.#debounceTimer = null;
-					const files = [...pending];
-					pending.clear();
-					this.requestSync(files);
-				}, WATCH_DEBOUNCE_MS);
+				this.#debounceTimer = setTimeout(flush, WATCH_DEBOUNCE_MS);
+				this.#maxWaitTimer ??= setTimeout(flush, WATCH_MAX_WAIT_MS);
 			});
 			this.#watcher.on("error", error => {
+				// An unreadable subtree (e.g. a root-only directory) fails only its own watch; the rest keeps reporting.
+				if (isEacces(error) || hasFsCode(error, "EPERM")) {
+					logger.debug("Stats session watcher skipped an unreadable directory", { error: String(error) });
+					return;
+				}
 				logger.warn("Stats session watcher failed; relying on periodic sync", { error: String(error) });
 				this.#watcher?.close();
 				this.#watcher = null;

@@ -26,10 +26,10 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
-import * as scrapers from "@oh-my-pi/pi-coding-agent/web/scrapers/types";
-import { reasonShows, type SpotlightReason, spotlightDetails } from "@oh-my-pi/pi-tui/chat/spotlight";
-import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { reasonShows, type SpotlightReason, spotlightDetails } from "@oh-my-pi/pi-coding-agent/tools/details/spotlight";
+import { formatOutputNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta-format";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { mockFetch } from "../helpers/fetch-mock";
 
 const tmpDirs: string[] = [];
 
@@ -528,13 +528,11 @@ describe("spotlight raw reads and path lists", () => {
 		const body = Array.from({ length: 200 }, (_, i) => `row ${i}: the ledger reconciles against shard ${i % 4}`).join(
 			"\n",
 		);
-		vi.spyOn(scrapers, "loadPage").mockImplementation(async (requestedUrl: string) => ({
-			ok: true,
-			status: 200,
-			finalUrl: requestedUrl,
-			contentType: "text/plain",
-			content: body,
-		}));
+		shaped.session.fetch = mockFetch(input =>
+			input === "https://example.test/data.txt"
+				? new Response(body, { headers: { "content-type": "text/plain" } })
+				: new Response(null, { status: 404 }),
+		);
 
 		const result = await new ReadTool(shaped.session).execute("r1", { path: "https://example.test/data.txt:raw" });
 
@@ -719,7 +717,7 @@ describe("spotlight column-capped output", () => {
 		const artifactId = await manager.saveArtifact(FULL);
 		if (artifactId === undefined) throw new Error("the in-memory session keeps artifacts");
 		// The sink puts its timeout notice above the preview; the artifact holds only what the command printed.
-		const preview = `[Command timed out after 1 seconds]\n${FULL.slice(0, 768)}…`;
+		const preview = `[timed out after 1s]\n${FULL.slice(0, 768)}…`;
 		const timedOut: bashExecutor.BashResult = {
 			...bashOutput(preview),
 			exitCode: undefined,
@@ -736,7 +734,7 @@ describe("spotlight column-capped output", () => {
 
 		expect(result.details?.spotlight?.inChars).toBe(FULL.length);
 		expect(result.isError).toBe(true);
-		expect(resultText(result).match(/\[Command timed out after 1 seconds\]/g)).toHaveLength(1);
+		expect(resultText(result).match(/\[timed out after 1s\]/g)).toHaveLength(1);
 	});
 });
 

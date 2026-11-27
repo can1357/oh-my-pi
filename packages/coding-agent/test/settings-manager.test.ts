@@ -6,7 +6,7 @@ import * as path from "node:path";
 import { Effort } from "@oh-my-pi/pi-ai";
 import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
-import { __providerInFlightForTesting, streamSimple } from "@oh-my-pi/pi-ai/stream";
+import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context } from "@oh-my-pi/pi-ai/types";
 import {
 	__physicalTargetSegmentsForTesting,
@@ -148,7 +148,6 @@ describe("Settings", () => {
 	afterEach(async () => {
 		vi.restoreAllMocks();
 		clearCustomApis();
-		__providerInFlightForTesting.setRoot(undefined);
 		AgentStorage.close();
 		restoreSettingsTestState(settingsState);
 		settingsState = undefined;
@@ -2335,11 +2334,12 @@ describe("Settings", () => {
 			expect(cfgMnemopiScoping.get(settings)).toBe("global");
 		});
 
-		it("migrates legacy Kokoro voices and speech role to Phonon", async () => {
+		it("migrates retired local speech models: Kokoro to Phonon, Parakeet v3 to Fluid Speech Pro", async () => {
 			await writeSettings({
 				tts: { localVoice: "bm_george" },
 				speech: { voice: "af_bella" },
-				modelRoles: { speech: "local/kokoro" },
+				modelRoles: { speech: "local/kokoro", dictation: "local/parakeet-tdt-0.6b-v3" },
+				retry: { fallbackChains: { dictation: ["local/parakeet-tdt-0.6b-v3", "openai/gpt-transcribe"] } },
 			});
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
@@ -2347,6 +2347,11 @@ describe("Settings", () => {
 			expect(cfgTtsLocalVoice.get(settings)).toBe("edwin");
 			expect(cfgSpeechVoice.get(settings)).toBe("harper");
 			expect(settings.getModelRole("speech")).toBe("local/phonon-31m");
+			expect(settings.getModelRole("dictation")).toBe("local/fluid-speech-pro");
+			expect(cfgRetryFallbackChains.get(settings).dictation).toEqual([
+				"local/fluid-speech-pro",
+				"openai/gpt-transcribe",
+			]);
 		});
 
 		it("does not clobber an explicit mnemopi block when the legacy mnemosyne block is also present", async () => {
@@ -2790,7 +2795,6 @@ describe("Settings", () => {
 			it("applies the effective merged value as the process-wide limit", async () => {
 				const settings = Settings.isolated({ "providers.maxInFlightRequests": { openai: 1 } });
 				bindEffects(settings);
-				__providerInFlightForTesting.setRoot(tempDir.join("provider-inflight"));
 				registerMockApi();
 				const firstStarted = Promise.withResolvers<void>();
 				const releaseFirst = Promise.withResolvers<void>();

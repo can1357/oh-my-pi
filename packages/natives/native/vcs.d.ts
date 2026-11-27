@@ -113,9 +113,3 @@ export declare function validateHunkSelections(
 	rawDiff: string,
 	selections: VcsHunkSelection[],
 ): VcsHunkSelectionError[];
-
-/** Stat-poll interval for {@link watch}. */
-export declare const HEAD_WATCH_INTERVAL_MS: number;
-
-/** Watch a repository for head changes; returns a disposer. */
-export declare function watch(repo: VcsRepo, onChange: () => void, intervalMs?: number): () => void;
