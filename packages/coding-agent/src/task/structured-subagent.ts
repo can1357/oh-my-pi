@@ -653,6 +653,9 @@ async function applySpawnHook(
 			modelRole: policy.modelRole,
 			patterns: policy.modelOverride ?? [],
 			spawnKey,
+			...(request.parentToolCallId !== undefined
+				? { parentToolCallId: request.parentToolCallId, itemIndex: request.index ?? 0 }
+				: {}),
 		},
 		request.signal,
 	);
@@ -766,6 +769,10 @@ function buildExecutorOptions(
 		parentActiveProvider: session.getActiveModel?.()?.provider,
 		journalTaskLabel: journalCompletion(session.sessionManager, { purpose: "task-label" }),
 		perCallModelGrants: policy.perCallModelGrants,
+		callerSelectedModel:
+			request.perCallModel !== undefined &&
+			policy.modelOverride?.length === 1 &&
+			policy.modelOverride[0] === request.perCallModel.trim(),
 		thinkingLevel: policy.effectiveAgent.thinkingLevel,
 		effort: policy.effort,
 		solutionSpace: request.solutionSpace?.trim() || undefined,

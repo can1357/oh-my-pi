@@ -20,7 +20,7 @@ import {
 	openSqliteDatabase,
 	postmortem,
 } from "@oh-my-pi/pi-utils";
-import type { RawSettings as Settings } from "../config/settings";
+import type { RawSettings as Settings } from "../config/raw-settings";
 
 /** Row shape for settings table queries */
 type SettingsRow = {

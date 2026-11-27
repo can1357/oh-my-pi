@@ -1,6 +1,7 @@
 import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { OAuthAccountIdentity } from "../../session/auth-storage";
+import { type AiuTotals, formatAiuCredits } from "../../session/aiu-billing";
 import { collapseSharedUsageReports, summarizeUsageResetCredits } from "../../session/usage-display";
 import type { SlashCommandRuntime } from "../types";
 import { formatCodexUsageReportLabel, reportMatchesActiveAccount } from "./active-oauth-account";
@@ -165,6 +166,7 @@ function renderUsageReports(
  * session-manager tallies.
  */
 export async function buildUsageReportText(runtime: SlashCommandRuntime): Promise<string> {
+	const sessionAiuLines = formatSessionAiuLines(runtime.session.getSessionStats().aiu);
 	const provider = runtime.session as SlashCommandRuntime["session"] & {
 		fetchUsageReports?: () => Promise<UsageReport[] | null>;
 		getUsageReportingModelSelectors?: (reports: readonly UsageReport[]) => string[];
@@ -177,12 +179,13 @@ export async function buildUsageReportText(runtime: SlashCommandRuntime): Promis
 				? runtime.session.modelRegistry.authStorage.oauth.identity(currentProvider, runtime.session.sessionId)
 				: undefined;
 			const usageModelSelectors = provider.getUsageReportingModelSelectors?.(reports) ?? [];
-			return renderUsageReports(
+			const report = renderUsageReports(
 				reports,
 				Date.now(),
 				providerId => (providerId === currentProvider ? activeAccount : undefined),
 				usageModelSelectors,
 			);
+			return sessionAiuLines.length > 0 ? `${report}\n\nSession spend\n${sessionAiuLines.join("\n")}` : report;
 		}
 	}
 
@@ -197,6 +200,16 @@ export async function buildUsageReportText(runtime: SlashCommandRuntime): Promis
 		`Total tokens: ${stats.totalTokens}`,
 		...(orchestrationTokens > 0 ? [`Orchestration tokens: ${orchestrationTokens}`] : []),
 		`Premium requests: ${stats.premiumRequests}`,
+		...sessionAiuLines,
 		`Cost: $${stats.cost.toFixed(6)}`,
 	].join("\n");
+}
+
+/** The session's AI credits (own calls plus subagent tree), when any call reported or missed a charge. */
+function formatSessionAiuLines(aiu: AiuTotals | undefined): string[] {
+	if (!aiu) return [];
+	return [
+		`AI credits (reported): ${formatAiuCredits(aiu, 4)}`,
+		...(aiu.unknownCalls > 0 ? [`Calls without billing frame: ${aiu.unknownCalls.toLocaleString()}`] : []),
+	];
 }

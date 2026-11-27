@@ -1,4 +1,6 @@
 import { getOAuthCredentialProvider } from "@oh-my-pi/pi-ai/oauth";
+import { providerAccessOff } from "@oh-my-pi/pi-catalog/compat/auth";
+import { connectedProviderName } from "../../modes/view-model/chrome/format";
 import type { AgentSession } from "../../session/agent-session";
 import type { AuthStorage, OAuthAccountIdentity, StoredAuthCredential } from "../../session/auth-storage";
 
@@ -29,10 +31,12 @@ function oauthLabel(row: StoredAuthCredential): string {
 	return org && org !== base ? `${base} (${org})` : base;
 }
 
-function oauthDetail(row: StoredAuthCredential, label: string): string {
+function oauthDetail(provider: string, row: StoredAuthCredential, label: string): string {
 	const credential = row.credential;
 	if (credential.type === "api_key") return `stored API key #${row.id}`;
 	const parts: string[] = [];
+	// Signed in, but the grant lacks the provider's `required-scope`.
+	if (providerAccessOff(provider, credential.scope)) parts.push(`${connectedProviderName(provider)} off`);
 	const email = nonEmpty(credential.email);
 	const accountId = nonEmpty(credential.accountId);
 	const projectId = nonEmpty(credential.projectId);
@@ -95,7 +99,7 @@ export function toLogoutAccounts(
 				credentialId: row.id,
 				provider,
 				label,
-				detail: oauthDetail(row, label),
+				detail: oauthDetail(provider, row, label),
 				type: row.credential.type,
 				active,
 			} satisfies LogoutAccount;

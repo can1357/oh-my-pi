@@ -124,8 +124,10 @@ import {
 	getOpenAIStrictToolsScope,
 	isCompiledGrammarTooLargeStrictError,
 	isStrictToolsDisabledForScope,
+	markOpenAIPromptCacheBoundaries,
 	type OpenAICompatPolicy,
 	type OpenAICompletionsParams,
+	type OpenAIPromptCacheBoundary,
 	type OpenAIPromptCacheOptions,
 	type OpenAIRequestSetup,
 	type OpenAIStrictToolsState,
@@ -137,6 +139,7 @@ import {
 	resolveOpenAIRequestSetup,
 	shouldDropAutoToolChoiceForReasoning,
 	shouldRetryWithoutStrictTools,
+	withOpenAIPromptCacheBreakpoint,
 } from "./openai-shared";
 import { completionsSendsOwnThinking, transformMessages } from "./transform-messages";
 import {
@@ -2177,50 +2180,42 @@ function isChatCompletionsPromptCacheableContentBlock(
 	return block.type === "text" || block.type === "image_url" || block.type === "input_audio" || block.type === "file";
 }
 
-function markLatestStableChatCompletionsCacheBreakpoint(messages: ChatCompletionMessageParam[]): boolean {
-	const markMessage = (message: ChatCompletionMessageParam): boolean => {
-		if (
-			message.role !== "user" &&
-			message.role !== "developer" &&
-			message.role !== "system" &&
-			message.role !== "assistant" &&
-			message.role !== "tool"
-		)
-			return false;
-		if (typeof message.content === "string") {
-			if (message.content.length === 0) return false;
-			Object.assign(message, {
-				content: [{ type: "text", text: message.content, prompt_cache_breakpoint: { mode: "explicit" } }],
-			});
-			return true;
-		}
-		if (!Array.isArray(message.content)) return false;
-		for (let j = message.content.length - 1; j >= 0; j--) {
-			const block = message.content[j];
-			if (!isChatCompletionsPromptCacheableContentBlock(block)) continue;
-			Object.assign(block, { prompt_cache_breakpoint: { mode: "explicit" } });
-			return true;
-		}
-		return false;
-	};
+function chatCompletionsPromptCacheBoundary(
+	message: ChatCompletionMessageParam,
+): OpenAIPromptCacheBoundary | undefined {
+	if (message.role === "system" || message.role === "developer") return "instructions";
+	if (message.role === "user") return "user";
+	return message.role === "tool" ? "output" : undefined;
+}
 
-	let latestInputMessage = -1;
-	for (let i = messages.length - 1; i >= 0; i--) {
-		const message = messages[i];
-		if (message.role === "user" || message.role === "developer") {
-			latestInputMessage = i;
-			break;
-		}
-	}
-	for (let i = messages.length - 1; i > latestInputMessage; i--) {
-		if (markMessage(messages[i]!)) return true;
-	}
-	if (latestInputMessage <= 0) return false;
+function markedChatCompletionsText(text: string): ChatCompletionContentPartText[] | undefined {
+	return text ? [{ type: "text", text, prompt_cache_breakpoint: { mode: "explicit" } }] : undefined;
+}
 
-	for (let i = latestInputMessage - 1; i >= 0; i--) {
-		if (markMessage(messages[i]!)) return true;
+/** A copy of `message` with its last cacheable block marked; undefined when nothing in it can carry a breakpoint. */
+function withChatCompletionsMessageBreakpoint(
+	message: ChatCompletionMessageParam,
+): ChatCompletionMessageParam | undefined {
+	switch (message.role) {
+		case "user": {
+			const content =
+				typeof message.content === "string"
+					? markedChatCompletionsText(message.content)
+					: withOpenAIPromptCacheBreakpoint(message.content, isChatCompletionsPromptCacheableContentBlock);
+			return content && { ...message, content };
+		}
+		case "system":
+		case "developer":
+		case "tool": {
+			const content =
+				typeof message.content === "string"
+					? markedChatCompletionsText(message.content)
+					: withOpenAIPromptCacheBreakpoint(message.content, isChatCompletionsPromptCacheableContentBlock);
+			return content && { ...message, content };
+		}
+		default:
+			return undefined;
 	}
-	return false;
 }
 
 function applyOpenAIChatCompletionsPromptCachePolicy(
@@ -2256,7 +2251,11 @@ function applyOpenAIChatCompletionsPromptCachePolicy(
 		ttl: promptCache.ttl ?? model.compat.promptCacheBreakpointTtl,
 	};
 	if (promptCache.mode === "explicit" && promptCache.breakpoint !== "none")
-		markLatestStableChatCompletionsCacheBreakpoint(params.messages);
+		markOpenAIPromptCacheBoundaries(
+			params.messages,
+			chatCompletionsPromptCacheBoundary,
+			withChatCompletionsMessageBreakpoint,
+		);
 }
 
 function buildParams(

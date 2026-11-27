@@ -76,6 +76,8 @@ export class SessionFocusController {
 	#attachGeneration = 0;
 	/** Monotonic focus-request id: a request that resolves after a newer one drops instead of clobbering the view. */
 	#focusRequestSeq = 0;
+	/** Agent last reported through `agent_view_changed`; undefined for the main session. */
+	#shownAgentId: string | undefined;
 
 	constructor(
 		private ctx: InteractiveModeContext,
@@ -275,6 +277,7 @@ export class SessionFocusController {
 			if (generation !== this.#attachGeneration) return;
 			this.ctx.updatePendingMessagesDisplay();
 			this.ctx.updateEditorBorderColor();
+			this.#reportViewChange(target);
 		} catch (error) {
 			if (generation === this.#attachGeneration) {
 				this.#focusedAgentId = undefined;
@@ -293,6 +296,20 @@ export class SessionFocusController {
 			}
 			throw error;
 		}
+	}
+
+	/** Tell the main session's extensions which agent the view now shows, once per actual change. */
+	#reportViewChange(target: AgentViewSession): void {
+		const agentId = this.#focusedAgentId;
+		const previousAgentId = this.#shownAgentId;
+		if (agentId === previousAgentId) return;
+		this.#shownAgentId = agentId;
+		void this.ctx.session.extensionRunner?.emit({
+			type: "agent_view_changed",
+			agentId,
+			previousAgentId,
+			sessionId: target.sessionManager.getSessionId(),
+		});
 	}
 
 	/**

@@ -432,6 +432,14 @@ describe("collectUnreportedAccounts", () => {
 		]);
 	});
 
+	it("keeps a rejected API key visible beside a sibling's usage report", () => {
+		const key: UsageAccountIdentity = { provider: "opencode-go", type: "api_key" };
+		const rejected = { ...key, usageAuthRejected: 401 };
+		const report = makeReport(key.provider, "sibling", []);
+		expect(collectUnreportedAccounts([report], [key, rejected])).toEqual([rejected]);
+		expect(formatUsageBreakdown([report], [key, rejected], report.fetchedAt)).toContain("usage auth rejected (401)");
+	});
+
 	it("does not claim unattributable credentials are missing when reports carry no identity", () => {
 		const anonymous = [{ ...makeReport("anthropic", "seen@example.test", []), metadata: {} }];
 		const unreported = collectUnreportedAccounts(anonymous, accounts);
@@ -1580,6 +1588,15 @@ describe("formatUsageBreakdown", () => {
 			expect(text).toContain(lost ? "spend it:  /usage reset" : "or now:  /usage reset");
 		},
 	);
+
+	it("does not forecast a Codex expiry redemption when salvage is disabled", () => {
+		const now = Date.parse("2026-01-01T00:00:00Z");
+		const report = codexResetReport({ nowMs: now, accountId: "ws-team", weeklyUsed: 0.8, expiresInMs: [6 * HOUR] });
+		const options = resetExpiryOptions({ "codexResets.expirySalvage": false, "codexResets.autoRedeemWeekly": "yes" });
+		const text = stripVTControlCharacters(formatUsageBreakdown([report], [], now, undefined, [], undefined, options));
+		expect(text).toContain("not spent automatically  (codexResets.expirySalvage: false)\n");
+		expect(text).toContain("spend it:  /usage reset");
+	});
 
 	it("decides each provider's expiring reset by its own setting", () => {
 		const now = Date.parse("2026-01-01T00:00:00.000Z");

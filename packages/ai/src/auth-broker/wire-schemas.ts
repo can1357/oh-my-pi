@@ -59,6 +59,7 @@ import type {
 /** Real OAuth credential (broker-side) — refresh token is the actual upstream value. */
 export const oauthCredentialSchema: FluentType<OAuthCredential> = type({
 	"apiEndpoint?": "string",
+	"tokenBasedBilling?": "boolean",
 	type: "'oauth'",
 	refresh: type("string").narrow(
 		(value, ctx) =>
@@ -90,6 +91,7 @@ export const oauthCredentialSchema: FluentType<OAuthCredential> = type({
 /** OAuth credential as it appears in broker snapshots — refresh replaced with sentinel. */
 export const remoteOauthCredentialSchema: FluentType<RemoteOAuthCredential> = type({
 	"apiEndpoint?": "string",
+	"tokenBasedBilling?": "boolean",
 	type: "'oauth'",
 	refresh: type.enumerated(REMOTE_REFRESH_SENTINEL),
 	access: type("string").atLeastLength(1),

@@ -504,6 +504,32 @@ describe("Gemini Interactions errors", () => {
 		expect(AIError.isModelEntitlementDenial(error, "gemini-host", "gemini-4-neon")).toBe(true);
 	});
 
+	it("reads a per-day QuotaFailure of zero as a model refusal even when the text reads as a rate limit", async () => {
+		const body = JSON.stringify({
+			error: {
+				code: 429,
+				message: "Resource has been exhausted.",
+				status: "RESOURCE_EXHAUSTED",
+				details: [
+					{
+						"@type": "type.googleapis.com/google.rpc.QuotaFailure",
+						violations: [{ quotaId: "GenerateRequestsPerDayPerUser", quotaValue: "0" }],
+					},
+				],
+			},
+		});
+		const { fetch, captured } = scripted([
+			() => new Response(body, { status: 429, headers: { "content-type": "application/json" } }),
+		]);
+		const neon = hostModel("gemini-4-neon");
+
+		const message = await streamGoogleInteractions(neon, userTurn, { apiKey: "k", fetch, ...noWait }).result();
+		const error = new AIError.ProviderHttpError(message.errorMessage ?? "", 429);
+
+		expect(captured.bodies).toHaveLength(1);
+		expect(AIError.isModelEntitlementDenial(error, "gemini-host", "gemini-4-neon")).toBe(true);
+	});
+
 	it("keeps a per-minute 429 transient and retries it in the transport", async () => {
 		const { fetch, captured } = scripted([
 			() => jsonError(429, "Too many requests, please slow down.", "too_many_requests", { "retry-after": "0" }),
@@ -527,6 +553,19 @@ describe("Gemini Interactions errors", () => {
 					details: [{ "@type": "type.googleapis.com/google.rpc.ErrorInfo", reason: "SERVICE_DISABLED" }],
 				},
 			}),
+		],
+		[
+			"SERVICE_DISABLED in an array body",
+			JSON.stringify([
+				{
+					error: {
+						code: 403,
+						message: "Permission denied.",
+						status: "PERMISSION_DENIED",
+						details: [{ "@type": "type.googleapis.com/google.rpc.ErrorInfo", reason: "SERVICE_DISABLED" }],
+					},
+				},
+			]),
 		],
 		[
 			"an unauthorized OAuth client",

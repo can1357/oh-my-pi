@@ -26,15 +26,18 @@ def _make_browser():
         return value
 
     def _arguments(args, kwargs):
-        values = list(args)
-        while values and values[-1] is None:
-            values.pop()
-        values = [_encode_arg(value) for value in values]
         options = {
             key: _encode_arg(value)
             for key, value in kwargs.items()
             if value is not None
         }
+        values = list(args)
+        # Trailing `None`s are dropped as omitted arguments, but not when keyword options follow:
+        # `ariaSnapshot(None, interactive=True)` must keep the options in the second slot.
+        if not options:
+            while values and values[-1] is None:
+                values.pop()
+        values = [_encode_arg(value) for value in values]
         if options:
             values.append(options)
         return values

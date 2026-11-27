@@ -12,6 +12,7 @@ import {
 	extractRetryHint,
 	fetchWithRetry,
 	formatDuration,
+	isRecord,
 	parseStreamingJson,
 	readSseJson,
 	USER_AGENT,
@@ -138,6 +139,8 @@ interface InteractionError {
 	code?: string | number;
 	/** `google.rpc.ErrorInfo.reason` from a gateway error's `details` (e.g. `SERVICE_DISABLED`). */
 	reason?: string;
+	/** Allowance of the per-day `google.rpc.QuotaFailure` violation; `0` means the plan does not serve the model. */
+	perDayLimit?: number;
 }
 
 interface InteractionEvent {
@@ -336,31 +339,39 @@ export function parseInteractionsErrorBody(bodyText: string): InteractionError |
 	}
 	for (const candidate of candidates) {
 		const trimmed = candidate.trim();
-		if (!trimmed.startsWith("{")) continue;
+		if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) continue;
+		let parsed: unknown;
 		try {
-			const parsed: unknown = JSON.parse(trimmed);
-			if (parsed && typeof parsed === "object" && "error" in parsed) {
-				const error = parsed.error;
-				if (error && typeof error === "object") {
-					const message = "message" in error && typeof error.message === "string" ? error.message : undefined;
-					const code =
-						"code" in error && (typeof error.code === "string" || typeof error.code === "number")
-							? error.code
-							: undefined;
-					// Pre-handler gateway errors are google.rpc.Status: ErrorInfo sits in `details`.
-					let reason: string | undefined;
-					if ("details" in error && Array.isArray(error.details)) {
-						for (const item of error.details) {
-							if (item && typeof item === "object" && "reason" in item && typeof item.reason === "string") {
-								reason = item.reason;
-								break;
-							}
-						}
-					}
-					return { message, code, reason };
-				}
-			}
-		} catch {}
+			parsed = JSON.parse(trimmed);
+		} catch {
+			continue;
+		}
+		// 401s and gateway 403s arrive as a one-element array of google.rpc.Status.
+		const status = Array.isArray(parsed) ? parsed[0] : parsed;
+		if (!isRecord(status) || !isRecord(status.error)) continue;
+		const { error } = status;
+		const message = typeof error.message === "string" ? error.message : undefined;
+		const code = typeof error.code === "string" || typeof error.code === "number" ? error.code : undefined;
+		const details = Array.isArray(error.details) ? error.details.filter(isRecord) : [];
+		const typed = (suffix: string) => details.find(item => String(item["@type"]).endsWith(suffix));
+		const info = typed("google.rpc.ErrorInfo") ?? details.find(item => typeof item.reason === "string");
+		const reason = typeof info?.reason === "string" ? info.reason : undefined;
+		const violations = typed("google.rpc.QuotaFailure")?.violations;
+		const perDay = Array.isArray(violations)
+			? violations.find(v => isRecord(v) && typeof v.quotaId === "string" && v.quotaId.includes("PerDay"))
+			: undefined;
+		// `quotaValue` is an int64, which JSON carries as a string.
+		const quotaValue = isRecord(perDay) ? perDay.quotaValue : undefined;
+		const perDayLimit =
+			typeof quotaValue === "number" || (typeof quotaValue === "string" && quotaValue.trim() !== "")
+				? Number(quotaValue)
+				: undefined;
+		return {
+			message,
+			code,
+			reason,
+			...(perDayLimit !== undefined && Number.isFinite(perDayLimit) ? { perDayLimit } : {}),
+		};
 	}
 	return undefined;
 }
@@ -381,8 +392,9 @@ function describeHttpError(
 ): string {
 	const detail = error?.message?.trim() || bodyText.trim() || "Unknown error";
 	const code = error?.code !== undefined && error.code !== status ? ` ${error.code}` : "";
-	if (status === 429 && AIError.isDailyQuotaCapText(detail)) {
+	if (status === 429 && (error?.perDayLimit !== undefined || AIError.isDailyQuotaCapText(detail))) {
 		if (
+			error?.perDayLimit === 0 ||
 			ZERO_DAILY_ALLOWANCE_PATTERN.test(detail) ||
 			(UPGRADE_TIER_PATTERN.test(detail) && !RETRY_IN_PATTERN.test(detail) && !headers.has("retry-after"))
 		) {
@@ -399,9 +411,9 @@ function describeHttpError(
 	if (status === 403 && (error?.reason === "SERVICE_DISABLED" || CLIENT_NOT_AUTHORIZED_PATTERN.test(detail))) {
 		return `Google has turned off Gemini access for this sign-in right now; signing in again will not help. Try again later or ${GEMINI_API_KEY_HINT}.`;
 	}
-	// Copy stays classifiable: AIError.isInvalidatedOAuthTokenError disables the credential like a dead grant.
+	// The sign-in stays stored: a grant without the scope (declined, or turned off at Google) is off, not dead.
 	if (isScopeInsufficient(status, error, detail)) {
-		return "Your Google sign-in is missing a permission omp needs; sign in again.";
+		return "Gemini access is off for this Google sign-in (declined at sign-in or turned off at https://myaccount.google.com/permissions). Sign in again to turn it on.";
 	}
 	if (status === 400 && UNSUPPORTED_LOCATION_PATTERN.test(detail)) {
 		return `Gemini API access is not available in your region (${detail})`;
@@ -715,7 +727,8 @@ const streamGoogleInteractionsOnce = (
 						defaultDelayMs: TRANSIENT_RETRY_DELAYS_MS,
 						maxDelayMs: options.maxRetryDelayMs,
 						// A daily cap or zero allowance is final until the reset: never replay it.
-						shouldRetryResponse: (_response, bodyText) => !AIError.isUsageLimit(bodyText),
+						shouldRetryResponse: (_response, bodyText) =>
+							!AIError.isUsageLimit(bodyText) && parseInteractionsErrorBody(bodyText)?.perDayLimit === undefined,
 						fetch: options.fetch,
 						timeout: false,
 					});

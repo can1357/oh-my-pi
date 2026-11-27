@@ -617,6 +617,17 @@ describe("TodoTool lenient init shapes", () => {
 		if (summary?.type !== "text") throw new Error("Expected text summary");
 		expect(summary.text).toContain("Missing list for init operation");
 	});
+
+	it("names an unknown field like tasks and the expected init shape", async () => {
+		const tool = new TodoTool(createSession());
+		const result = await tool.execute("call-1", { op: "init", tasks: ["a", "b"] } as never);
+
+		expect(result.isError).toBe(true);
+		const summary = result.content.find(part => part.type === "text");
+		if (summary?.type !== "text") throw new Error("Expected text summary");
+		expect(summary.text).toContain('unknown field "tasks"');
+		expect(summary.text).toContain('list: [{"phase"');
+	});
 });
 describe("TodoTool lenient op recovery", () => {
 	// Regression: models occasionally drop `op` while sending an otherwise

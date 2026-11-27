@@ -248,6 +248,64 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(registry.find("gateway", "dynamic-model")).toBeDefined();
 	});
 
+	test("openai-models-list prices chat and embedding rows in their advertised units", async () => {
+		writeRawModelsJson({
+			relay: {
+				baseUrl: "http://127.0.0.1:9993",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "openai-models-list" },
+			},
+		});
+		const fetchMock: FetchImpl = async input => {
+			if (String(input) === "http://127.0.0.1:9993/v1/models") {
+				return Response.json({
+					data: [
+						{
+							id: "relay-priced",
+							pricing: { prompt: "0.000003", completion: "0.000015", input_cache_read: "0.0000003" },
+						},
+						{
+							id: "relay-per-million",
+							pricing: { unit: "per_million_tokens", prompt: "2", completion: "10", input_cache_read: "0.5" },
+						},
+						{
+							id: "relay-embedding",
+							output_modalities: ["embeddings"],
+							pricing: { prompt: "0.00000025" },
+						},
+						{ id: "relay-unpriced" },
+					],
+				});
+			}
+			return new Response("", { status: 404 });
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refreshDiscoverableProviders(["relay"], "online");
+
+		const priced = registry.find("relay", "relay-priced")?.cost;
+		expect(priced?.input).toBeCloseTo(3);
+		expect(priced?.output).toBeCloseTo(15);
+		expect(priced?.cacheRead).toBeCloseTo(0.3);
+		expect(priced?.cacheWrite).toBe(0);
+		expect(registry.find("relay", "relay-per-million")?.cost).toEqual({
+			input: 2,
+			output: 10,
+			cacheRead: 0.5,
+			cacheWrite: 0,
+		});
+		expect(registry.find("relay", "relay-embedding")).toMatchObject({
+			api: "openai-embeddings",
+			cost: { input: 0.25, output: 0, cacheRead: 0, cacheWrite: 0 },
+		});
+		expect(registry.find("relay", "relay-unpriced")?.cost).toEqual({
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+		});
+	});
+
 	test("does not coalesce or apply discovery across provider config changes", async () => {
 		writeRawModelsJson({
 			gateway: {
@@ -2774,6 +2832,30 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(long?.maxTokens).toBe(32_768);
 		expect(registry.getProviderDiscoveryState("vllm-fast")?.status).toBe("ok");
 		expect(registry.getProviderDiscoveryState("vllm-long")?.status).toBe("ok");
+	});
+
+	test.each([true, false])("preserves the proxy offline roster (advertisedReasoning=%s)", advertisedReasoning => {
+		const provider = "cached-proxy";
+		const baseUrl = "https://proxy.example/v1";
+		writeRawModelsJson({
+			[provider]: {
+				baseUrl,
+				auth: "none",
+				api: "openai-completions",
+				discovery: { type: "proxy", advertisedReasoning },
+			},
+		});
+		const bundled = getBundledModels("openai")[0];
+		writeModelCache(
+			`${provider}:proxy-v2-${advertisedReasoning ? "" : "advertised-off-"}context-v6`,
+			Date.now(),
+			[{ ...bundled, provider, baseUrl, id: "offline-only" }],
+			true,
+			"",
+			cacheDbPath,
+		);
+		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+		expect(registry.find(provider, "offline-only")?.baseUrl).toBe(baseUrl);
 	});
 
 	test("configured openai-models-list discovery ignores rows cached under the bare provider namespace", async () => {

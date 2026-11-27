@@ -256,6 +256,7 @@ describe("images from the environment", () => {
 		["vscode", { TERM: "screen-256color" }, direct, null],
 		["ghostty", { TMUX: "s" }, direct, "kitty"],
 		["ghostty", { TMUX: "s" }, { ...direct, tmuxPassthrough: false }, null],
+		["wezterm", { TMUX: "s" }, direct, null],
 		["iterm2", { ZELLIJ: "0" }, direct, "iterm"],
 		["iterm2", { TMUX: "s" }, direct, "iterm"],
 		["base", { PI_FORCE_IMAGE_PROTOCOL: "sixel" }, direct, "sixel"],
