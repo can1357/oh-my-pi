@@ -67,7 +67,6 @@ import type {
 	ServiceTier,
 	StoredAuthCredential,
 	StoredCredentialBlock,
-	StoredCredentialSummary,
 	UsageHistoryEntry,
 	UsageHistoryQuery,
 	UsageLimitMarkResult,
@@ -166,7 +165,6 @@ export type AuthStorageProtocol = {
 	"credentials.get": RpcMethod<[provider: string], AuthCredential | undefined>;
 	"credentials.all": RpcMethod<[], AuthStorageData>;
 	"credentials.list": RpcMethod<[provider?: string], StoredAuthCredential[]>;
-	"credentials.summaries": RpcMethod<[provider?: string], StoredCredentialSummary[]>;
 	"credentials.has": RpcMethod<[provider: string], boolean>;
 	"credentials.hasOAuth": RpcMethod<[provider: string], boolean>;
 	"credentials.hasSubscription": RpcMethod<[provider: string], boolean>;
@@ -233,8 +231,6 @@ export type AuthStorageProtocol = {
 		[provider: string, sessionId: string, credentialId: number, options?: { restoredAtMs?: number }],
 		boolean
 	>;
-	/** Stored providers the worker's `sessions.inherit` filter must cover. */
-	"sessions.inheritProviders": RpcMethod<[], string[]>;
 	"sessions.inherit": RpcMethod<
 		[sourceSessionId: string, targetSessionId: string, include: InheritTable | undefined],
 		number
@@ -244,7 +240,6 @@ export type AuthStorageProtocol = {
 	"sessions.unrestrict": RpcMethod<[provider: string, sessionId: string, lease: number], void>;
 	"sessions.permits": RpcMethod<[provider: string, sessionId: string, credentialId: number], boolean>;
 	"sessions.release": RpcMethod<[provider: string, sessionId: string], boolean>;
-	"sessions.clear": RpcMethod<[provider: string, sessionId: string], void>;
 
 	"usage.reports": RpcMethod<[options?: WireUsageReportsOptions], UsageReport[] | null>;
 	"usage.ingestHeaders": RpcMethod<
@@ -286,10 +281,7 @@ export type AuthStorageProtocol = {
 		[provider: string, options: MarkServiceTierUnavailableOptions],
 		boolean
 	>;
-	"limits.rearmServiceTier": RpcMethod<
-		[provider: string, serviceTier: ServiceTier, modelId: string, sessionId?: string],
-		void
-	>;
+	"limits.rearmServiceTier": RpcMethod<[provider: string, serviceTier: ServiceTier, modelId: string], void>;
 	"limits.invalidateMatching": RpcMethod<
 		[provider: string, apiKey: string, options?: InvalidateCredentialMatchingOptions],
 		boolean
@@ -430,7 +422,7 @@ export type ModelRegistryProtocol = {
 	>;
 	refreshDiscoverableProviders: RpcMethod<[providerIds: string[], strategy: ModelRefreshStrategy], void>;
 	refreshRuntimeProviders: RpcMethod<[strategy: ModelRefreshStrategy], void>;
-	hydrateCredentialScopedModelCaches: RpcMethod<[], void>;
+	hydrateCredentialScopedModelCaches: RpcMethod<[providers?: readonly string[]], void>;
 	reapplyModelPolicies: RpcMethod<[], void>;
 	refreshInBackground: RpcMethod<[strategy: ModelRefreshStrategy], void>;
 	/** Sync. */

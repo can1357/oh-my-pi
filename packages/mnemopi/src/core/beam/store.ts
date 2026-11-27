@@ -232,6 +232,15 @@ function purgeWorkingMemoryArtifacts(db: BeamMemoryState["db"], ids: readonly st
  * marker with an old event timestamp (issue #4819). Rows flagged `IMPORTED`
  * are treated as durable and never trimmed, and trimmed rows cascade all linked
  * artifacts via `purgeWorkingMemoryArtifacts`.
+ *
+ * Rows are addressed by rowid, not `id`: `id TEXT PRIMARY KEY` admits NULL (a
+ * database rebuilt by SQLite's `.recover` can hold such rows), and one NULL id in
+ * the keep set makes `id NOT IN (...)` unknown for every row outside it, so the
+ * size half selects none of them. A rowid is never NULL. It is read and bound as
+ * decimal text because it can exceed 2^53. Only string ids reach
+ * `purgeWorkingMemoryArtifacts`. The `wm_ad` trigger removes a search entry by
+ * id, which cannot match a NULL id, so for each trimmed row with no id the trim
+ * removes one `fts_working` entry with no id and the same text.
  */
 function trimWorkingMemory(beam: BeamMemoryState): void {
 	const limit = beam.config.workingMemoryLimit;
@@ -240,30 +249,45 @@ function trimWorkingMemory(beam: BeamMemoryState): void {
 	const cutoff = toUtcIso(new Date(Date.now() - ttlHours * 3_600_000));
 	transaction(beam.db, () => {
 		using selectStatement = beam.db.prepare(`
-			SELECT id FROM working_memory
+			SELECT CAST(rowid AS TEXT) AS row_key, id,
+				CASE WHEN id IS NULL THEN COALESCE(embed_text, content) END AS unkeyed_text
+			FROM working_memory
 			WHERE session_id = ?
 			  AND consolidated_at IS NULL
 			  AND trust_tier IS NOT 'IMPORTED'
 			  AND (
 				timestamp < ? OR
-				id NOT IN (
-					SELECT id FROM working_memory
+				rowid NOT IN (
+					SELECT rowid FROM working_memory
 					WHERE session_id = ? AND consolidated_at IS NULL AND trust_tier IS NOT 'IMPORTED'
 					ORDER BY timestamp DESC
 					LIMIT ?
 				)
 			  )
 		`);
-		const ids = (selectStatement.all(beam.sessionId, cutoff, beam.sessionId, limit) as { id: string }[]).map(
-			row => row.id,
-		);
-		if (ids.length === 0) return;
-		const placeholders = ids.map(() => "?").join(", ");
-		beam.db.run(`DELETE FROM working_memory WHERE id IN (${placeholders}) AND session_id = ?`, [
-			...ids,
+		const trimmed = selectStatement.all(beam.sessionId, cutoff, beam.sessionId, limit) as {
+			row_key: string;
+			id: unknown;
+			unkeyed_text: string | Uint8Array | null;
+		}[];
+		if (trimmed.length === 0) return;
+		const rowKeys = trimmed.map(row => row.row_key);
+		const placeholders = rowKeys.map(() => "?").join(", ");
+		beam.db.run(`DELETE FROM working_memory WHERE rowid IN (${placeholders}) AND session_id = ?`, [
+			...rowKeys,
 			beam.sessionId,
 		]);
-		purgeWorkingMemoryArtifacts(beam.db, ids);
+		const unkeyed = trimmed.filter(row => row.id === null);
+		if (unkeyed.length > 0) {
+			using searchStatement = beam.db.prepare(
+				"DELETE FROM fts_working WHERE rowid = (SELECT rowid FROM fts_working WHERE id IS NULL AND content = ? LIMIT 1)",
+			);
+			for (const row of unkeyed) searchStatement.run(row.unkeyed_text);
+		}
+		purgeWorkingMemoryArtifacts(
+			beam.db,
+			trimmed.map(row => row.id).filter(id => typeof id === "string"),
+		);
 	});
 }
 

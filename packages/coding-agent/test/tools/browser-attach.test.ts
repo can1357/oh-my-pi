@@ -895,6 +895,25 @@ describe("pickElectronTarget", () => {
 				expect((await invoke(pageSize)).details).toMatchObject({
 					value: { width: 400, height: 800, deviceScaleFactor: 2 },
 				});
+				// A viewport larger than the user's window is still just emulation on this tab.
+				const emulated = await invoke({
+					action: "run",
+					name,
+					code: `const client = await page.createCDPSession();
+try {
+	const { windowId, bounds } = await client.send("Browser.getWindowForTarget");
+	const width = bounds.width + 200;
+	await tab.emulate({ viewport: { width, height: 800, scale: 2 } });
+	const after = await client.send("Browser.getWindowBounds", { windowId });
+	return {
+		viewportApplied: (await tab.evaluate(() => innerWidth)) === width,
+		windowUnchanged: after.bounds.width === bounds.width && after.bounds.height === bounds.height,
+	};
+} finally {
+	await client.detach();
+}`,
+				});
+				expect(emulated.details).toMatchObject({ value: { viewportApplied: true, windowUnchanged: true } });
 			} finally {
 				await invoke({ action: "close", name }).catch(() => {});
 				await gracefulKillTreeOnce(child.pid);

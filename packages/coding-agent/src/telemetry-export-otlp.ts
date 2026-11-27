@@ -7,9 +7,9 @@
  *
  * Only the `http/protobuf` transport is supported — an
  * `OTEL_EXPORTER_OTLP*_PROTOCOL` of `grpc` or `http/json` declines rather than
- * misrouting protobuf payloads. The exporter line is pinned to the 0.218/2.7
- * family validated under Bun; the 1.x OTLP line deadlocks when its
- * `req.on("close")` handler fires after a successful export.
+ * misrouting protobuf payloads. The exporter line is pinned to the 0.301/3.1
+ * family validated under Bun by the real-export tests; the 1.x OTLP line
+ * deadlocks when its `req.on("close")` handler fires after a successful export.
  */
 import type {
 	AgentRunCoverage,
@@ -24,14 +24,16 @@ import type {
 import { $otelEnv, logger, postmortem, untilAborted, withOmpOtelEnv } from "@oh-my-pi/pi-utils";
 import {
 	type Attributes,
-	type AttributeValue,
 	type Counter,
 	context,
 	type Histogram,
+	logs,
+	type Logger as OtelLogger,
 	type Meter,
 	metrics,
+	SeverityNumber,
+	trace,
 } from "@opentelemetry/api";
-import { type LogAttributes, logs, type Logger as OtelLogger, SeverityNumber } from "@opentelemetry/api-logs";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import { OTLPLogExporter } from "@opentelemetry/exporter-logs-otlp-proto";
 import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-proto";
@@ -39,8 +41,7 @@ import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";
 import { detectResources, envDetector, resourceFromAttributes } from "@opentelemetry/resources";
 import { BatchLogRecordProcessor, LoggerProvider } from "@opentelemetry/sdk-logs";
 import { MeterProvider, PeriodicExportingMetricReader } from "@opentelemetry/sdk-metrics";
-import { BatchSpanProcessor } from "@opentelemetry/sdk-trace-base";
-import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
+import { BatchSpanProcessor, TracerProvider } from "@opentelemetry/sdk-trace";
 import type { TelemetryModelPricingResolver, TelemetrySignalConfig } from "./telemetry-export";
 
 /**
@@ -72,7 +73,7 @@ const LOG_LEVEL_WEIGHT: Record<logger.LogLevel, number> = {
 
 const TOOL_STATUSES = ["ok", "error", "skipped", "blocked", "timeout", "aborted"] satisfies readonly ToolStatus[];
 
-let traceProvider: NodeTracerProvider | undefined;
+let traceProvider: TracerProvider | undefined;
 let logProvider: LoggerProvider | undefined;
 let meterProvider: MeterProvider | undefined;
 let metricRecorder: AgentMetricRecorder | undefined;
@@ -152,7 +153,7 @@ export function createTelemetryExportConfig(
  * Register global trace/log/meter providers for the enabled signals.
  *
  * The OpenTelemetry SDK reads its `OTEL_*` configuration (exporter endpoint,
- * headers, timeouts, resource attributes, sampler, batch limits) from
+ * headers, timeouts, compression, resource attributes) from
  * `process.env` at construction. OMP keeps the values from its own `.env` files
  * out of the process environment, so everything that constructs SDK objects runs
  * in one synchronous {@link withOmpOtelEnv} window. Nothing here awaits, and the
@@ -171,11 +172,12 @@ export async function registerProviders(signalConfig: TelemetrySignalConfig): Pr
 
 		if (signalConfig.trace) {
 			const exporter = new OTLPTraceExporter();
-			traceProvider = new NodeTracerProvider({
+			traceProvider = new TracerProvider({
 				resource,
-				spanProcessors: [new BatchSpanProcessor(exporter)],
+				spanProcessors: [new BatchSpanProcessor({ exporter })],
 			});
-			traceProvider.register({ contextManager: new AsyncLocalStorageContextManager().enable() });
+			trace.setGlobalTracerProvider(traceProvider);
+			context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
 		}
 
 		if (signalConfig.metric) {
@@ -403,7 +405,7 @@ function emitTelemetryWarningLog(warning: AgentTelemetryWarning): void {
 function emitOtelLog(
 	level: logger.LogLevel,
 	body: string,
-	attributes: LogAttributes,
+	attributes: Attributes,
 	eventName: string,
 	timestamp = new Date(),
 ): void {
@@ -440,8 +442,8 @@ function parseOtelLogLevel(raw: string | undefined): OtelLogLevel {
 	}
 }
 
-function logAttributesFromContext(input: Record<string, unknown> | undefined): LogAttributes {
-	const out: LogAttributes = { "process.pid": process.pid };
+function logAttributesFromContext(input: Record<string, unknown> | undefined): Attributes {
+	const out: Attributes = { "process.pid": process.pid };
 	if (!input) return out;
 	for (const key in input) {
 		const attr = logAttributeValue(input[key]);
@@ -450,7 +452,7 @@ function logAttributesFromContext(input: Record<string, unknown> | undefined): L
 	return out;
 }
 
-function logAttributeValue(value: unknown): AttributeValue | undefined {
+function logAttributeValue(value: unknown): string | number | boolean | undefined {
 	if (value === undefined || value === null) return undefined;
 	if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
 	if (value instanceof Error) {

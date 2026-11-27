@@ -1,30 +1,57 @@
-import { getEnvApiKey, type Api, type KeysApi, type Model } from "@oh-my-pi/pi-ai";
+import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { mapOpenAIReasoningEffort } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { type ConfiguredThinkingLevel } from "../../../utils/render-utils";
 import { concreteThinkingLevel, toReasoningEffort } from "../../../thinking/levels";
 import { readBoundedBody } from "@oh-my-pi/pi-utils/bounded-json";
+import { debug } from "@oh-my-pi/pi-utils/logger";
+import type { AgentStorageApi } from "../../../session/agent-storage";
 import { DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS, SearchProviderError } from "../../../web/search/types";
 import { SEARCH_PROVIDER_LABELS, type SearchProviderId, type SearchSource } from "../types";
 import { decodeBody } from "../../response-body";
 import { formatQuery, type QuerySyntax, type StructuredQuery } from "../query";
 import { dateToAgeSeconds } from "../utils";
 
-/** Web readers prefer the caller's environment key, then ask the session's credential owner. */
+/**
+ * Search for an API credential by checking an env-derived key first,
+ * then falling back to agent.db stored credentials for the given providers.
+ *
+ * The caller MUST supply an open {@link AgentStorage} handle so the helper
+ * never reaches out to global filesystem state; both the unified web_search
+ * chain and one-shot CLI calls open storage exactly once and thread it
+ * through every provider.
+ *
+ * @param storage - Open agent storage handle
+ * @param envKey - Pre-resolved environment variable value (or null)
+ * @param storageProviders - Provider names to look up in AgentStorage
+ */
 export async function findCredential(
-	keys: Pick<KeysApi, "get"> | undefined,
-	provider: string,
-	signal?: AbortSignal,
+	storage: AgentStorageApi | null | undefined,
+	envKey: string | null | undefined,
+	...storageProviders: string[]
 ): Promise<string | null> {
-	const envKey = getEnvApiKey(provider);
 	if (envKey) return envKey;
+	if (!storage) return null;
+
 	try {
-		const key = await keys?.get(provider, undefined, { signal });
-		return key?.trim() ? key : null;
+		for (const provider of storageProviders) {
+			const records = await storage.listAuthCredentials(provider);
+			for (const record of records) {
+				const credential = record.credential;
+				if (credential.type === "api_key" && credential.key.trim().length > 0) {
+					return credential.key;
+				}
+				if (credential.type === "oauth" && credential.access.trim().length > 0) {
+					return credential.access;
+				}
+			}
+		}
 	} catch {
-		signal?.throwIfAborted();
-		throw new Error(`Failed to read stored credentials for ${provider}.`);
+		debug("Could not read stored credentials for web provider", { providers: storageProviders });
+		return null;
 	}
+
+	return null;
 }
 
 /**

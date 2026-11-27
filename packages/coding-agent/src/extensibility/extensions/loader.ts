@@ -396,6 +396,9 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		if (typeof definition.replace !== "function") {
 			throw new TypeError(`Todo backend "${id}" must have a replace function`);
 		}
+		if (definition.apply !== undefined && typeof definition.apply !== "function") {
+			throw new TypeError(`Todo backend "${id}" apply must be a function`);
+		}
 		(this.extension.todoBackends ??= new Map()).set(id, definition);
 	}
 
@@ -470,13 +473,13 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		return this.runtime.setSessionName(name);
 	}
 
-	registerProvider(name: string, config: ProviderConfig): void | Promise<void> {
+	registerProvider(name: string, config: ProviderConfig): void {
 		this.extension.registersProviders = true;
-		return this.runtime.registerProvider(name, config, this.extension.path);
+		this.runtime.registerProvider(name, config, this.extension.path);
 	}
 
-	unregisterProvider(name: string): void | Promise<void> {
-		return this.runtime.unregisterProvider(name, this.extension.path);
+	unregisterProvider(name: string): void {
+		this.runtime.unregisterProvider(name, this.extension.path);
 	}
 }
 

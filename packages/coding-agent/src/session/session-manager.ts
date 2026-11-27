@@ -39,7 +39,7 @@ import { hasAnnotationDraftsSync } from "../extensibility/custom-commands/bundle
 import { resolveLocalRoot } from "../internal-urls/local-root";
 import { ArtifactManager, type ArtifactManagerApi } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore, lazyImageDataSync } from "./blob-store";
-import type { CompactionMethod } from "./compaction-method-ids";
+import type { CompactionMethod } from "./compaction-methods";
 import {
 	type BashExecutionMessage,
 	type CustomMessage,

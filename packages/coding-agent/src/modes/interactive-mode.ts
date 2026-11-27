@@ -268,6 +268,7 @@ import type {
 	WorkingKind,
 	CompactionQueuedMessage,
 	ComposerOwner,
+	CwdChangeOptions,
 	InteractiveModeContext,
 	InteractiveModeInitOptions,
 	InteractiveSelectorDialogOptions,
@@ -1771,10 +1772,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			if (this.focusedAgentId !== undefined) return;
 			if (untrack(() => this.viewSession.messages.length) === 0) freshContext = facts.context;
 			if (!freshContext) return;
-			// A fresh session runs at the configured tier, not this one's `/fast` toggle.
+			// A fresh session runs at the configured tier, not this one's selected tier.
 			const model = untrack(() => this.session.model);
-			const fastMode = model !== undefined && this.session.isFastModeConfiguredFor(model);
-			cache.writeStatus(project, predictStatus(facts, settings, { context: freshContext, fastMode }));
+			const fastTier = model && this.session.configuredFastTier(model);
+			cache.writeStatus(project, predictStatus(facts, settings, { context: freshContext, fastTier }));
 		});
 	}
 
@@ -1785,9 +1786,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		});
 	}
 
-	/** Start the shell (unless a prepaint already did) on the process terminal. */
+	/** Start the shell on the process terminal (a prepaint may already have). */
 	async #startShell(clearHistory: boolean): Promise<void> {
-		this.#syncFrameSettings();
 		await this.#frame.start({
 			clearHistory,
 			resizeScrollback: cfgTuiResizeScrollback.get(this.settings),
@@ -1803,9 +1803,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		};
 	}
 
-	/** `tui.maxFps`, `tui.hyperlinks`, `tui.textSizing` and `tui.screen` into the running renderer. */
+	/** `tui.maxFps`, `tui.motion`, `tui.hyperlinks`, `tui.textSizing` and `tui.screen` into the running renderer. */
 	#syncFrameSettings(): void {
 		this.#frame.frameInterval.set(1000 / cfgTuiMaxFps.get(this.settings));
+		const motion = cfgMotionResolved.get(this.settings);
+		this.#frame.spinnerInterval.set(motion.spinnerInterval);
+		this.#frame.reduceMotion.set(!motion.effects);
 		this.#frame.screen.set(cfgTuiScreen.get(this.settings));
 		this.#frame.copyOnSelect.set(cfgTuiCopyOnSelect.get(this.settings));
 		this.#frame.wheelLines.set(cfgTuiWheelLines.get(this.settings));
@@ -1827,6 +1830,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		};
 		const host = this.shell.host;
 		if (!host) return;
+		host.driver.images.setBudget(cfgTuiMaxInlineImages.get(this.settings));
 		const updateFigureCell = (): void => {
 			const caps = host.driver.capabilities;
 			const next = caps.images ? (caps.cell ?? DEFAULT_FIGURE_CELL) : undefined;
@@ -2182,7 +2186,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Load initial todos
 		await logger.time("InteractiveMode.init:todos", () => this.#loadTodoList());
 
-		// A prepaint frame may already own the terminal.
+		// A prepaint frame may already own the terminal: settings reach its renderer either way.
+		this.#syncFrameSettings();
 		if (!this.#ownsStartedUi) {
 			await this.#startShell(options.clearInitialTerminalHistory === true);
 			this.#ownsStartedUi = true;
@@ -2638,8 +2643,14 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * active session's working directory changed (`/move` relocation or resuming
 	 * a session from another project). The SessionManager's cwd MUST already
 	 * reflect `newCwd` before this is called.
+	 *
+	 * `options.restore` marks a return to the directory a failed move left;
+	 * the internal rollback below is one too. A return never fails over memory.
+	 * The memory warning for the directory this call leaves the session in goes
+	 * to `options.onWarning`; at most one rescope per call completes, so the
+	 * callback runs at most once.
 	 */
-	async applyCwdChange(newCwd: string): Promise<boolean> {
+	async applyCwdChange(newCwd: string, options: CwdChangeOptions): Promise<boolean> {
 		const previousCwd = getProjectDir();
 		try {
 			setProjectDir(newCwd);
@@ -2653,8 +2664,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		// fails, undo the chdir so `false` reliably means "nothing committed";
 		// callers roll back their own session/manager state on false.
 		const scopedSettings = isSettingsInitialized() ? settings : undefined;
+		const rescope = async (cwd: string, restore: boolean): Promise<void> => {
+			const warning = await rescopeSessionToCwd(this.session, scopedSettings, cwd, { restore });
+			if (warning) options.onWarning(warning);
+		};
 		try {
-			await rescopeSessionToCwd(this.session, scopedSettings, newCwd);
+			await rescope(newCwd, options.restore === true);
 		} catch (error) {
 			// Undo the whole transition: the process cwd, Settings scope, and
 			// cwd-derived state (memory, plugin roots, agents, extensions, custom
@@ -2663,12 +2678,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.sessionManager.setCwdWithoutRelocation(previousCwd);
 			try {
 				setProjectDir(previousCwd);
-				await rescopeSessionToCwd(this.session, scopedSettings, previousCwd);
+				await rescope(previousCwd, true);
 			} catch (restoreError) {
 				const actual = this.sessionManager.getCwd();
 				try {
 					setProjectDir(actual);
-					await rescopeSessionToCwd(this.session, scopedSettings, actual);
+					await rescope(actual, true);
 				} catch {}
 				this.showError(
 					`Failed to switch to ${newCwd} (${error instanceof Error ? error.message : String(error)}), and restoring the previous workspace failed: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`,
@@ -3598,6 +3613,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (any("showHardwareCursor"))
 			this.composer.setCaret(cfgShowHardwareCursor.get(this.settings) ? "terminal" : "drawn");
 		if (any("tui.imeSafeCursor")) this.#frame.setImeSafeCursor(cfgTuiImeSafeCursor.get(this.settings));
+		if (any("tui.resizeScrollback")) this.#frame.setResizeScrollback(cfgTuiResizeScrollback.get(this.settings));
 		if (any("autocompleteMaxVisible"))
 			this.composer.setAutocompleteMaxVisible(cfgAutocompleteMaxVisible.get(this.settings));
 		if (any("composer.shape")) this.syncComposerShape();
@@ -3636,6 +3652,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			rebuildChat = true;
 		}
 		if (any("terminal.showImages")) resetDisplay = true;
+		// Images in scrollback were committed under the old budget; the replay redraws them under the new one.
+		if (any("tui.maxInlineImages")) {
+			this.shell.host?.driver.images.setBudget(next["tui.maxInlineImages"]);
+			resetDisplay = true;
+		}
 		const hideThinkingBlock = cfgHideThinkingBlock.get(this.settings);
 		if (any("hideThinkingBlock") && hideThinkingBlock !== this.hideThinkingBlock) {
 			this.hideThinkingBlock = hideThinkingBlock;
@@ -3701,7 +3722,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (any("tui.titleState")) setTerminalTitleStateEnabled(cfgTuiTitleState.get(this.settings));
 		if (any("tui.titleSpinner")) setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
 		if (any("terminal.programStatus")) setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
-		if (any("motion")) setTerminalTitleSpinnerInterval(next.motion.titleSpinnerInterval);
+		if (any("motion")) {
+			setTerminalTitleSpinnerInterval(next.motion.titleSpinnerInterval);
+			this.#syncFrameSettings();
+		}
 
 		if (
 			any(

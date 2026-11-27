@@ -412,6 +412,7 @@ describe("per-call model advertisement", () => {
 			clearMemoryPromotionSnapshot: () => {},
 			captureMemoryPromotionSnapshot: () => {},
 			emitNotice: () => {},
+			mcpStartupMount: () => false,
 			notifyCommandMetadataChanged: () => {},
 			localProtocolOptions: () => ({}),
 			evalPreludes: () => [],

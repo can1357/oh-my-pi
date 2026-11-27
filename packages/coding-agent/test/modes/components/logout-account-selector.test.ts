@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from "bun:test";
-import type { StoredCredentialSummary } from "@oh-my-pi/pi-ai";
+import type { StoredAuthCredential } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { toLogoutAccounts } from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/logout";
 import { LogoutAccountSelector } from "../../../src/ui/overlays/pickers/logout-account-selector";
 import { mountOverlay } from "../../helpers/overlay-terminal";
@@ -10,26 +10,32 @@ afterAll(() => setCurrentTheme(restoreTheme));
 
 describe("logout account selector", () => {
 	it("starts on the active stored account and selects that credential", () => {
-		const rows: StoredCredentialSummary[] = [
+		const rows: StoredAuthCredential[] = [
 			{
 				id: 11,
 				provider: "anthropic",
-				disabled: false,
-				type: "oauth",
-				accessOff: false,
-				fileUploadAllowed: true,
-				email: "a@example.com",
-				accountId: "acct-a",
+				disabledCause: null,
+				credential: {
+					type: "oauth",
+					access: "access-a",
+					refresh: "refresh-a",
+					expires: Date.now() + 60_000,
+					email: "a@example.com",
+					accountId: "acct-a",
+				},
 			},
 			{
 				id: 12,
 				provider: "anthropic",
-				disabled: false,
-				type: "oauth",
-				accessOff: false,
-				fileUploadAllowed: true,
-				email: "b@example.com",
-				accountId: "acct-b",
+				disabledCause: null,
+				credential: {
+					type: "oauth",
+					access: "access-b",
+					refresh: "refresh-b",
+					expires: Date.now() + 60_000,
+					email: "b@example.com",
+					accountId: "acct-b",
+				},
 			},
 		];
 		const accounts = toLogoutAccounts("anthropic", rows, { activeIdentity: { accountId: "acct-b" } });

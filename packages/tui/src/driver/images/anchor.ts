@@ -40,6 +40,17 @@ export function anchoredRows(sequence: string, rows: number): string[] {
 	return out;
 }
 
+/**
+ * Rows an anchored image's draw row moves up over (its reserved rows, see
+ * {@link anchoredRows}), however the rows were decorated (tinted, indented);
+ * 0 for any other row. Row trimmers keep those rows with it, or drop them all.
+ */
+export function anchoredRise(row: string): number {
+	if (!hasGraphics(row)) return 0;
+	const up = ANCHOR.exec(row);
+	return up ? Number(up[1]) : 0;
+}
+
 /** `rows` reserved rows (an image whose pixels are not ready yet). */
 export function reservedRows(rows: number): string[] {
 	return Array.from({ length: Math.max(1, rows) }, () => RESERVED_ROW);

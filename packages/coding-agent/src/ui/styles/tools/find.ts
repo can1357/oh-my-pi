@@ -97,6 +97,7 @@ function paintFind(node: UiNode, cx: PaintContext): Block {
 		target,
 		meta,
 	});
+	const heading = rows.length;
 	const failures = (term.failures ?? []).map(failure => truncate(theme.fg("warning", failure), cx.width, ""));
 	if (term.empty !== undefined) {
 		rows.push(...wrap(`${searchGlyph(theme, "warning")} ${theme.fg("muted", term.empty)}`, cx.width));
@@ -108,7 +109,7 @@ function paintFind(node: UiNode, cx: PaintContext): Block {
 					"",
 				),
 			);
-		return { rows: [...rows, ...failures] };
+		return { rows: [...rows, ...failures], heading };
 	}
 	const items = node
 		.children()
@@ -120,7 +121,7 @@ function paintFind(node: UiNode, cx: PaintContext): Block {
 		if (term.keywords) rows.push(truncate(theme.fg("dim", term.keywords), cx.width, ""));
 		rows.push(...failures);
 	}
-	return { rows };
+	return { rows, heading };
 }
 
 defineToolLook("find", { paint: paintFind, margin: true, inset: true, animated: true });

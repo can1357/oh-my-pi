@@ -56,7 +56,6 @@ export type ArtifactManagerProtocol = {
 export type AgentStorageProtocol = {
 	getCache: RpcMethod<[key: string], string | null>;
 	setCache: RpcMethod<[key: string, value: string, expiresAtSec: number], void>;
-	/** Async-only: main may need to unlock the credential store before reading. */
 	listAuthCredentials: RpcMethod<[provider: string | undefined, includeDisabled: boolean], StoredAuthCredential[]>;
 	recordModelUsage: RpcMethod<[modelKey: string], void>;
 	getModelUsageOrder: RpcMethod<[], string[]>;

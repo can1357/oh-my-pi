@@ -2,7 +2,9 @@ import { discoverRelayEndpoints } from "../../src/tools/browser/relay/discovery"
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createBrowserPrelude, resolveBrowserKind, resolveRelayKind } from "@oh-my-pi/pi-coding-agent/tools/browser";
-import type { BrowserKindTag } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
+import { acquireBrowser, type BrowserKindTag, releaseBrowser } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
+import type { RelayKind } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/kind";
+import { DISCARDED_TABS_PROTOCOL_VERSION } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/protocol";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 
 describe("resolveRelayKind", () => {
@@ -48,6 +50,71 @@ describe("resolveRelayKind", () => {
 			kind: "relay",
 			cdpUrl: discoverRelayEndpoints()[0] ?? "",
 		});
+	});
+});
+
+describe("Windows relay acquisition", () => {
+	it("verifies identity before CDP and uses the fixed socket without attempting a restart", async () => {
+		const windowsInstance = crypto.randomUUID();
+		const protocol = String(DISCARDED_TABS_PROTOCOL_VERSION);
+		const ready = {
+			ompRelayVersion: "1.0.0",
+			ompRelayInstance: windowsInstance,
+			ompRelayDiscardedTabsProtocol: protocol,
+			ompExtensionDiscardedTabsProtocol: protocol,
+			ompRelayCdpClients: 0,
+		};
+		let version: Record<string, unknown> = {};
+		const requests: string[] = [];
+		using server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch(request, server) {
+				const path = new URL(request.url).pathname;
+				requests.push(`${request.method} ${path}`);
+				if (path === "/json/version") {
+					return Response.json({ ...version, webSocketDebuggerUrl: `ws://${server.url.host}/advertised` });
+				}
+				if (path === "/cdp" && server.upgrade(request)) return;
+				return new Response(null, { status: 404 });
+			},
+			websocket: {
+				message(ws, message) {
+					const { id, method } = JSON.parse(String(message)) as { id: number; method: string };
+					ws.send(
+						JSON.stringify({
+							id,
+							result: method === "Target.getBrowserContexts" ? { browserContextIds: [] } : {},
+						}),
+					);
+				},
+			},
+		});
+		const kind: RelayKind = { kind: "relay", cdpUrl: server.url.origin, windowsInstance };
+		const opts = { cwd: process.cwd(), signal: AbortSignal.timeout(3_000) };
+		for (const unverified of [
+			{ Browser: "Chrome/151" },
+			{ ...ready, ompRelayVersion: "" },
+			{ ...ready, ompRelayInstance: crypto.randomUUID() },
+		]) {
+			version = unverified;
+			await expect(acquireBrowser(kind, opts)).rejects.toThrow(/verified Windows relay did not answer/);
+		}
+		version = { ...ready, ompRelayDiscardedTabsProtocol: "" };
+		await expect(acquireBrowser(kind, opts)).rejects.toThrow(/Windows relay or Chrome extension is incompatible/);
+		expect(requests.splice(0)).toEqual(Array(4).fill("GET /json/version"));
+
+		version = ready;
+		const handle = await acquireBrowser(kind, opts);
+		try {
+			expect("wsEndpoint" in handle && handle.wsEndpoint).toBe(`ws://${server.url.host}/cdp`);
+			await expect(acquireBrowser({ ...kind, windowsInstance: crypto.randomUUID() }, opts)).rejects.toThrow(
+				/verified Windows relay did not answer/,
+			);
+			expect(requests).toEqual(["GET /json/version", "GET /cdp", "GET /json/version"]);
+		} finally {
+			await releaseBrowser(handle, { kill: false });
+		}
 	});
 });
 

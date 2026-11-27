@@ -94,9 +94,10 @@ import type { AgentSessionEvent } from "./agent-session-events";
 import type { ContextUsageBreakdown } from "./agent-session-types";
 import type { CacheBridgeEstimate, CacheBridgeOutcome } from "./cache-warmer";
 import { findCompactMode } from "./compact-modes";
-import { type CompactionMethod, DEFAULT_COMPACTION_METHOD_ORDER } from "./compaction-method-ids";
 import {
+	type CompactionMethod,
 	canUseRemoteCompaction,
+	DEFAULT_COMPACTION_METHOD_ORDER,
 	resolveCompactionMethodOrder,
 	resolveMethodSettings,
 	resolveSpeculationMethod,
@@ -5173,11 +5174,11 @@ export class SessionMaintenance {
 			firstKeptEntryId: result.firstKeptEntryId,
 			preserveData: result.preserveData,
 		});
-		// A text-only rebuild is safe only if the full source fits the recovery target.
+		// A text-only rebuild is safe only if the full source fits the recovery target; an unknown window cannot show that.
 		const ctxWindow = model.contextWindow;
 		if (
 			rebuilt.frames.length === 0 &&
-			tokensAfter > COMPACTION_RECOVERY_BAND * resolveThresholdTokens(ctxWindow, settings)
+			(!ctxWindow || tokensAfter > COMPACTION_RECOVERY_BAND * resolveThresholdTokens(ctxWindow, settings))
 		)
 			return undefined;
 
