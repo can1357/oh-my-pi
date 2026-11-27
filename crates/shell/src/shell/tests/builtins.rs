@@ -722,6 +722,51 @@ async fn uutils_head_streams_stdin_and_reads_files() {
 	let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// Redirected (seekable) stdin: awk stopping early leaves the shared offset
+/// after its last record; otherwise its read-ahead swallows what `cat` reads.
+#[tokio::test(flavor = "multi_thread")]
+async fn awk_exit_leaves_seekable_stdin_offset() {
+	let tmp = std::env::temp_dir().join(format!("pi-awk-seek-{}", std::process::id()));
+	let _ = std::fs::remove_dir_all(&tmp);
+	std::fs::create_dir_all(&tmp).expect("temp dir");
+	std::fs::write(tmp.join("data.txt"), "l1\nl2\nl3\nl4\nl5\n").expect("write data");
+	let tmp_str = tmp.to_str().expect("utf8 temp path");
+
+	let config = ShellConfig {
+		session_env:   None,
+		snapshot_path: None,
+		minimizer:     None,
+		filesystem:    Fs::native(),
+		seed:          None,
+	};
+	let mut session = create_session(&config).await.expect("create_session");
+	let params = TestStdio::null();
+	session
+		.run_test(format!("cd {}", quote_arg(tmp_str)), &params)
+		.await
+		.expect("set cwd");
+
+	for (script, expected) in [
+		(
+			"{ awk 'NR==1{print; exit}'; echo '|'; cat; } < data.txt > out.txt",
+			"l1\n|\nl2\nl3\nl4\nl5\n",
+		),
+		(
+			"{ awk 'BEGIN{getline; print; exit}'; echo '|'; cat; } < data.txt > out.txt",
+			"l1\n|\nl2\nl3\nl4\nl5\n",
+		),
+	] {
+		let s = session
+			.run_test(script, &params)
+			.await
+			.expect("run seekable");
+		assert_eq!(exit_code(&s), 0, "{script}");
+		assert_eq!(std::fs::read_to_string(tmp.join("out.txt")).unwrap(), expected, "{script}");
+	}
+
+	let _ = std::fs::remove_dir_all(&tmp);
+}
+
 /// `head --help` / invalid flag must be handled in-process (rendered to the
 /// command streams, returned as an exit code) — head has its own `run`
 /// entry point bypassing uutils' process-exiting parser, and literalized
