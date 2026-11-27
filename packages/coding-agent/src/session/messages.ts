@@ -795,6 +795,9 @@ function wrapSteeringUserMessage(message: SteeringUserMessage): UserMessage {
 			: {
 					role: "user",
 					content: message.content,
+					...(isRecord(message.details) && message.details.duringLiveCall === true
+						? { duringLiveCall: true as const }
+						: {}),
 					attribution: "user",
 					timestamp: message.timestamp,
 				};
@@ -1296,6 +1299,28 @@ function isUserWrittenPrompt(m: AgentMessage): boolean {
 	return m.role === "custom" && !m.excludeFromContext && isUserTurnInitiator(m);
 }
 
+/** Stamp new written input at admission, not during conversion: replay cannot consult a live controller. */
+export function markDuringLiveCall(m: AgentMessage): void {
+	if (!isUserWrittenPrompt(m)) return;
+	if (m.role === "user") m.duringLiveCall = true;
+	else if (m.role === "custom") m.details = { ...(isRecord(m.details) ? m.details : {}), duringLiveCall: true };
+}
+
+/** Change to the spoken-answer scope; `undefined` leaves the preceding scope intact. */
+export function liveVoiceScopeChange(m: AgentMessage): boolean | undefined {
+	if (m.role === "compactionSummary") return m.liveVoiceOpen;
+	if (m.role === "custom" && !m.excludeFromContext) {
+		if (m.customType === LIVE_DELEGATION_MESSAGE_TYPE) return true;
+		if (m.customType === LIVE_ENDED_MESSAGE_TYPE) return false;
+	}
+	if (!isUserWrittenPrompt(m)) return undefined;
+	const inCall =
+		m.role === "user"
+			? m.duringLiveCall
+			: m.role === "custom" && isRecord(m.details) && m.details.duringLiveCall === true;
+	return inCall ? undefined : false;
+}
+
 /** The notice that the live voice call is over, placed right before the user's prompt `next`. */
 function liveEndedNotice(next: AgentMessage): Message | undefined {
 	const notice = convertMessageToLlm({
@@ -1334,23 +1359,17 @@ function convertMessageAt(
 	if (!includeInterruptedThinking && m.role === "custom" && m.customType === INTERRUPTED_THINKING_MESSAGE_TYPE) {
 		return NO_LLM_MESSAGES;
 	}
-	// Spoken requests put answers in voice style. The first prompt the user wrote after them hears that the
-	// call ended, derived from history alone: a stop mid-turn, a crash, or a transcript switch leaves the same
-	// history, sent turns render the same on every request, and only the user's own prompt closes the scope,
-	// so a later call's spoken request (with its own voice notice) never follows a stale one.
-	if (m.role === "custom" && !m.excludeFromContext) {
-		if (m.customType === LIVE_DELEGATION_MESSAGE_TYPE) {
-			voice.open = true;
-		} else if (m.customType === LIVE_ENDED_MESSAGE_TYPE) {
-			// A saved notice closes the scope; one with nothing to close would repeat it.
-			if (!voice.open) return NO_LLM_MESSAGES;
-			voice.open = false;
+	const change = liveVoiceScopeChange(m);
+	if (change !== undefined) {
+		const wasOpen = voice.open;
+		voice.open = change;
+		if (m.role === "custom" && m.customType === LIVE_ENDED_MESSAGE_TYPE) {
+			// A saved notice with no open scope would repeat one already sent.
+			if (!wasOpen) return NO_LLM_MESSAGES;
+		} else if (wasOpen && !change) {
+			const notice = liveEndedNotice(m);
+			if (notice) return [notice, ...convert(m, false)];
 		}
-	}
-	if (voice.open && isUserWrittenPrompt(m)) {
-		voice.open = false;
-		const notice = liveEndedNotice(m);
-		if (notice) return [notice, ...convert(m, false)];
 	}
 	return convert(m, false);
 }

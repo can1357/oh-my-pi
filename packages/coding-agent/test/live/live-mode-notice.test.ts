@@ -11,6 +11,7 @@ import {
 	convertToLlm,
 	LIVE_DELEGATION_MESSAGE_TYPE,
 	LIVE_ENDED_MESSAGE_TYPE,
+	markDuringLiveCall,
 	wrapSteeringForModel,
 } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { prompt } from "@oh-my-pi/pi-utils";
@@ -212,6 +213,30 @@ describe("live call end as the coding agent sees it", () => {
 			expect.stringContaining("use a table"),
 			"assistant: | name |",
 			"user: and their ages?",
+		]);
+	});
+
+	test("an in-call steer keeps the answer spoken, even when the steer is replayed after disconnect", async () => {
+		const fake = fakeSession();
+		const call = await startCall(fake.session);
+		call.say("list the names");
+		await fake.admitAll();
+		const transcript = fake.transcript("a");
+		const steer = typed("only the first two", { steering: true });
+		expect(fake.session.activeVoiceCall).toBeDefined();
+		markDuringLiveCall(steer);
+		transcript.push(steer, answer("Ann and Bo."));
+		expect(convertToLlm(wrapSteeringForModel(transcript)).map(label)).not.toContain("ended");
+		await call.controller.stop();
+		expect(fake.session.activeVoiceCall).toBeUndefined();
+		transcript.push(typed("now as a table"));
+		const replay = JSON.parse(JSON.stringify(transcript)) as AgentMessage[];
+		expect(convertToLlm(wrapSteeringForModel(replay)).map(label)).toEqual([
+			"voice: list the names",
+			expect.stringContaining("only the first two"),
+			"assistant: Ann and Bo.",
+			"ended",
+			"user: now as a table",
 		]);
 	});
 

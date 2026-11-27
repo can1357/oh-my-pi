@@ -102,6 +102,7 @@ export class LiveSessionController {
 	/** The custom server set by `live.endpoint`, resolved at start; unset uses Codex. */
 	#endpoint: LiveEndpoint | undefined;
 	readonly #transportAbort = new AbortController();
+	readonly #callId = Symbol("live voice call");
 	#recorder: AudioCapture | undefined;
 	#unsubscribeSession: (() => void) | undefined;
 	#sendChain: Promise<void> = Promise.resolve();
@@ -260,6 +261,7 @@ export class LiveSessionController {
 
 	async #stop(): Promise<void> {
 		this.#stopped = true;
+		if (this.#session.activeVoiceCall === this.#callId) this.#session.activeVoiceCall = undefined;
 		if (
 			this.#phase === "connecting" ||
 			(cfgOffline.get(this.#session.settings) && this.#session.model?.provider !== "openai-codex")
@@ -352,6 +354,7 @@ export class LiveSessionController {
 		}
 		request = request.trim();
 		if (!request) return;
+		this.#session.activeVoiceCall = this.#callId;
 		this.#activeDelegationId = event.item.id;
 		this.#refreshAudioPhase();
 		// No end-of-call message follows: the model sees the call's end before the next typed prompt,

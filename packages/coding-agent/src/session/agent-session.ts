@@ -459,6 +459,7 @@ import {
 	isUserInterruptAbort,
 	isUserInvokedSkillPrompt,
 	logProviderTurnError,
+	markDuringLiveCall,
 	normalizeCustomMessagePayload,
 	operatorTitleText,
 	type PythonExecutionMessage,
@@ -1096,6 +1097,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** False for a subagent, whose gate belongs to its session tree's root. */
 	readonly #ownsCostGate: boolean;
 	#costCapRefusal: CostCapRefusal | undefined;
+	/** Identity of the connected voice call that delegated work here, cleared synchronously on disconnect. */
+	activeVoiceCall?: symbol;
 	/** Entries of tools mounted as bash commands; empty when none are mounted. */
 	getToolCommandEntries: () => Array<{ name: string; summary: string }>;
 	readonly yieldQueue: YieldQueue;
@@ -9541,6 +9544,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				}
 			: { role: "user" as const, content: userContent, attribution: promptAttribution, timestamp: submittedAt };
 
+		if (this.activeVoiceCall) markDuringLiveCall(message);
+
 		const preludeMessages: AgentMessage[] = [];
 		if (eagerTodoPrelude) {
 			if (eagerTodoPrelude.toolChoice) {
@@ -9747,6 +9752,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			attribution: message.attribution ?? "agent",
 			timestamp: Date.now(),
 		};
+		if (this.activeVoiceCall) markDuringLiveCall(customMessage);
 		const hasSkillImages =
 			isUserInvokedSkillPrompt(customMessage) &&
 			Array.isArray(customMessage.content) &&
@@ -10840,6 +10846,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (await this.#sessionGenerationChanged(sessionGeneration)) return false;
 			const records: AgentMessage[] = [...prependMessages, ...attachmentSourceNotices];
 			const userMessage: AgentMessage = { role: "user", content, attribution, timestamp: timestamp ?? Date.now() };
+			if (this.activeVoiceCall) markDuringLiveCall(userMessage);
 			this.#queuedMessageRawText.set(userMessage, rawText);
 			records.push(userMessage);
 			this.#irc.queueAside(records);
@@ -10889,6 +10896,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			mode === "followUp"
 				? { role: "user", content, attribution, timestamp }
 				: { role: "user", content, steering: true, attribution, timestamp };
+		if (this.activeVoiceCall) markDuringLiveCall(userMessage);
 		this.#queuedMessageRawText.set(userMessage, rawText);
 		const group = [...companions, userMessage];
 		if (mode === "followUp") {
@@ -11390,6 +11398,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			attribution: message.attribution ?? "agent",
 			timestamp: Date.now(),
 		};
+		if (this.activeVoiceCall) markDuringLiveCall(appMessage);
 		const preprocessed = options?.preprocessed;
 		const prependMessages = options?.prependMessages ?? [];
 		const onPromptAdmitted = options?.onPromptAdmitted;
@@ -11540,6 +11549,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			excludeFromContext: normalizedPayload.excludeFromContext,
 			timestamp: Date.now(),
 		};
+		if (this.activeVoiceCall) markDuringLiveCall(appMessage);
 		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
 		if (normalizedAppMessage.excludeFromContext) {
 			// The model never sees this row, so it must not start or extend a turn: a steer or aside would

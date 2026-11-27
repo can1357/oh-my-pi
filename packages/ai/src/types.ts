@@ -1350,6 +1350,8 @@ export interface UserMessage {
 	synthetic?: boolean;
 	/** True when injected mid-turn as a steer; consumed by the agent's pre-LLM transform to wrap it for emphasis. Never rendered. */
 	steering?: boolean;
+	/** The user wrote this input during a live voice call; it does not return the answer to the screen. */
+	duringLiveCall?: true;
 	/** True when the provider delivered this steer into the response it was streaming (`response.steer`). Display-only; never sent. */
 	liveSteered?: boolean;
 	/** Timestamp of a client-side history rewrite represented by this message. */
