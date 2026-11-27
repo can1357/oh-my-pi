@@ -1211,7 +1211,8 @@ async function findUnlistedSessionContinuation(
 		const files =
 			scope === "local" ? storage.listFilesSync(localDir, `*_${prefix}*.jsonl`) : await findSessionFiles(prefix);
 		for (const file of files) {
-			if (!parseSessionFileName(file)?.id.startsWith(prefix)) continue;
+			const id = parseSessionFileName(file)?.id;
+			if (!(options.exactId === true ? id === prefix : id?.startsWith(prefix))) continue;
 			const continuation = await findSessionContinuation(file, storage, { matchedByFileName: true });
 			if (continuation) return continuation;
 		}
@@ -1738,10 +1739,22 @@ function sessionMatchesResumeArg(session: SessionInfo, sessionArg: string): bool
 	return fileSessionId.startsWith(normalizedArg);
 }
 
+/**
+ * The session a resume key selects in one scope's listing: with `exactId`, the one whose
+ * id is the key; else the first whose id or file name starts with it.
+ */
+function findResumeMatch(sessions: SessionInfo[], sessionArg: string, exactId: boolean): SessionInfo | undefined {
+	if (!exactId) return sessions.find(session => sessionMatchesResumeArg(session, sessionArg));
+	const normalizedArg = sessionArg.toLowerCase();
+	return sessions.find(session => session.id.toLowerCase() === normalizedArg);
+}
+
 /** Controls cross-directory fallback for resumable session lookup. */
 export interface ResolveResumableSessionOptions {
 	/** Search default global session buckets after the active/custom session directory misses. */
 	allowGlobalFallback?: boolean;
+	/** Match only a session whose id is the key, never one whose id or file name starts with it. */
+	exactId?: boolean;
 }
 
 function isSessionStorage(value: SessionStorage | ResolveResumableSessionOptions): value is SessionStorage {
@@ -1759,7 +1772,7 @@ export async function resolveResumableSession(
 	const resolvedOptions = isSessionStorage(storageOrOptions) ? options : storageOrOptions;
 	const localSessionDir = sessionDir ?? computeDefaultSessionDir(cwd, storage);
 	const localSessions = await listSessions(localSessionDir, storage);
-	const localMatch = localSessions.find(session => sessionMatchesResumeArg(session, sessionArg));
+	const localMatch = findResumeMatch(localSessions, sessionArg, resolvedOptions.exactId === true);
 	if (localMatch) {
 		return { session: localMatch, scope: "local" };
 	}
@@ -1769,7 +1782,7 @@ export async function resolveResumableSession(
 	}
 
 	const globalSessions = await listAllSessions(storage);
-	const globalMatch = globalSessions.find(session => sessionMatchesResumeArg(session, sessionArg));
+	const globalMatch = findResumeMatch(globalSessions, sessionArg, resolvedOptions.exactId === true);
 	if (!globalMatch) {
 		return undefined;
 	}

@@ -71,6 +71,9 @@ export const launchHelp = {
 		"from-claude": Flags.boolean({ description: "Import a Claude Code session into OMP" }),
 		"from-codex": Flags.boolean({ description: "Import a Codex session into OMP" }),
 		"session-dir": Flags.string({ description: "Directory for session storage and lookup" }),
+		"session-id": Flags.string({
+			description: "Resume the session with this id (a UUID), or start a new session under it",
+		}),
 		"no-session": Flags.boolean({ description: "Don't save session (ephemeral)" }),
 		models: Flags.string({
 			description: `Comma-separated model patterns for ${formatKey("ctrl+p", { preset: "ascii", platform: keyHintPlatform() })} cycling`,

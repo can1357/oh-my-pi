@@ -1005,6 +1005,17 @@ export class ForkSourceNotFoundError extends Error {
 }
 
 /**
+ * What {@link SessionManager.createWithSessionId} did with a launcher-chosen id. Only `created`
+ * wrote anything.
+ * - `held`: a stored session already holds the id.
+ * - `owned-elsewhere`: another live omp process owns the id.
+ */
+export type SessionIdCreation =
+	| { status: "created"; manager: SessionManager }
+	| { status: "held" }
+	| { status: "owned-elsewhere" };
+
+/**
  * Stores and navigates an append-only conversation journal.
  *
  * A session is a JSONL file: one header line followed by entries. Entries form a
@@ -2170,7 +2181,7 @@ export class SessionManager {
 			this.#sessionDir = path.resolve(options.sessionDir);
 			this.#storage.ensureDirSync(this.#sessionDir);
 		}
-		this.#sessionId = mintSessionId();
+		this.#sessionId = options?.sessionId ?? mintSessionId();
 		this.#taskSiblingCandidate = undefined;
 		this.#sessionName = undefined;
 		this.#titleSource = undefined;
@@ -4359,12 +4370,58 @@ export class SessionManager {
 	 * Create a new session.
 	 * @param cwd Working directory (stored in the session header)
 	 * @param sessionDir Optional session directory; defaults to the cwd-derived dir.
+	 * @param options New-session options; `sessionId` names the session instead of a minted id, and
+	 *   `suppressBreadcrumb` keeps the terminal's last-session record untouched.
 	 */
-	static create(cwd: string, sessionDir?: string, storage: SessionStorage = new FileSessionStorage()): SessionManager {
+	static create(
+		cwd: string,
+		sessionDir?: string,
+		storage: SessionStorage = new FileSessionStorage(),
+		options?: NewSessionOptions & { suppressBreadcrumb?: boolean },
+	): SessionManager {
 		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
 		const manager = new SessionManager(cwd, dir, true, storage);
-		manager.#resetToNewSession();
+		manager.#suppressBreadcrumb = options?.suppressBreadcrumb === true;
+		manager.#resetToNewSession(options);
 		return manager;
+	}
+
+	/**
+	 * Create a new session under a launcher-chosen id, reserved for this process. The session claims
+	 * the id's ownership lease first, then asks `isHeld` whether a stored session already holds it,
+	 * and only then writes its header and records itself as the terminal's last session. So a second
+	 * launch under the id, in another live process, finds it taken, and a later one finds it stored.
+	 * Writes nothing when another live process owns the id or `isHeld` answers `true`.
+	 */
+	static async createWithSessionId(
+		cwd: string,
+		sessionDir: string | undefined,
+		sessionId: string,
+		isHeld: () => Promise<boolean>,
+	): Promise<SessionIdCreation> {
+		const manager = SessionManager.create(cwd, sessionDir, undefined, { sessionId, suppressBreadcrumb: true });
+		if (manager.#sessionOwnedElsewhere()) {
+			await manager.close();
+			return { status: "owned-elsewhere" };
+		}
+		if (await isHeld()) {
+			await manager.close();
+			return { status: "held" };
+		}
+		manager.#suppressBreadcrumb = false;
+		await manager.ensureOnDisk();
+		return { status: "created", manager };
+	}
+
+	/**
+	 * Claim this process's ownership of the stored session `sessionId` at `sessionPath` before
+	 * opening it, as {@link renameSessionTitle} does, so a caller can refuse a session another
+	 * live omp process owns before opening it changes anything. Returns the release callback, or
+	 * `null` while another live process owns the session. A manager that opens the session takes
+	 * its own claim at its first write or {@link isOwnedElsewhere}; release this one after that.
+	 */
+	static claimStoredSession(sessionPath: string, sessionId: string): (() => void) | null {
+		return new FileSessionStorage().claimSession(sessionId, sessionPath);
 	}
 
 	/**

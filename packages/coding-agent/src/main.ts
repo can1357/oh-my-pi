@@ -36,6 +36,7 @@ import {
 	validateGoalStartup,
 	validateRestoreLaunch,
 	validateRestorePrompt,
+	validateSessionIdLaunch,
 	validateToolNames,
 } from "./cli/args";
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
@@ -123,11 +124,13 @@ import {
 	findSessionContinuation,
 	type PickerListing,
 	readSessionInfo,
+	type ResumeTarget,
 	resolveResumeTarget,
 	resolveResumableSession,
 	type SessionContinuation,
 	type SessionInfo,
 } from "./session/session-listing";
+import { CANONICAL_SESSION_ID_RE } from "./session/session-id-format";
 import { ForkSourceNotFoundError, SessionManager, SessionMoveRefusedError } from "./session/session-manager";
 import { forkIfMovedAway } from "./session/session-transfer";
 import { shouldShowStartupSplash } from "./startup-splash";
@@ -1349,8 +1352,6 @@ export function watchScopedModelSettings(
 	session.addDisposer(stop);
 }
 
-const SESSION_ID_ARG_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 export function normalizeContinueSessionArgs(parsed: Args, rawArgs?: readonly string[]): void {
 	if (!parsed.continue || parsed.resume || parsed.fork) return;
 
@@ -1361,7 +1362,7 @@ export function normalizeContinueSessionArgs(parsed: Args, rawArgs?: readonly st
 		const continueIndex = rawArgs.findIndex(arg => arg === "--continue" || arg === "-c");
 		message = rawArgs[continueIndex + 1]?.trim();
 	}
-	if (!message || !SESSION_ID_ARG_RE.test(message)) return;
+	if (!message || !CANONICAL_SESSION_ID_RE.test(message.toLowerCase())) return;
 
 	const messageIndex = parsed.messages.indexOf(message);
 	if (messageIndex === -1) return;
@@ -1371,6 +1372,92 @@ export function normalizeContinueSessionArgs(parsed: Args, rawArgs?: readonly st
 }
 const SESSION_NOT_FOUND_HINT =
 	"Run `omp --resume` without an argument to pick from recent sessions, or `omp` to start a new one.";
+
+/**
+ * Open the session a resume key resolved to, as `--resume <key>` does: report a newer copy of its
+ * conversation, offer to move a session whose recorded directory is gone, and fork a copy whose
+ * conversation moved to another machine. `undefined` when the user declines the move.
+ */
+async function openResumeTarget(
+	sessionArg: string,
+	target: ResumeTarget,
+	cwd: string,
+	sessionDir: string | undefined,
+	askToMoveSession: SessionPrompt,
+	onSessionContinuation: ((continuation: SessionContinuation) => void) | undefined,
+): Promise<SessionManager | undefined> {
+	const { session, continuation } = target;
+	if (continuation) onSessionContinuation?.(continuation);
+	const moveResult = await moveMissingCwdSessionIfNeeded(sessionArg, session, cwd, sessionDir, askToMoveSession);
+	if (moveResult.status === "moved") {
+		return await forkIfMovedAway(moveResult.manager, sessionDir);
+	}
+	if (moveResult.status === "declined") {
+		return undefined;
+	}
+	return await forkIfMovedAway(await SessionManager.open(session.path, sessionDir), sessionDir);
+}
+
+function sessionOpenElsewhereError(sessionId: string): SessionResolutionError {
+	return new SessionResolutionError(
+		`Session "${sessionId}" is open in another running omp process. Stop that process, then run this command again to resume it.`,
+	);
+}
+
+/**
+ * `--session-id <id>`: resume the stored session that holds exactly this id, as `--resume <id>`
+ * opens it, else start a new session under the id. Refused while another live omp process owns
+ * the session: this process would then write its turns to a new sibling session under another
+ * id, and the id the launcher recorded would no longer name the conversation.
+ */
+async function openOrCreateSessionById(
+	sessionId: string,
+	cwd: string,
+	sessionDir: string | undefined,
+	askToMoveSession: SessionPrompt,
+	onSessionContinuation: ((continuation: SessionContinuation) => void) | undefined,
+): Promise<SessionManager | undefined> {
+	// The scopes and storage `--resume <id>` searches, matched by the exact id rather than a prefix.
+	const findHolder = () => resolveResumeTarget(sessionId, cwd, sessionDir, { exactId: true });
+	let target = await findHolder();
+	if (!target) {
+		const creation = await SessionManager.createWithSessionId(
+			cwd,
+			sessionDir,
+			sessionId,
+			async () => (await findHolder()) !== undefined,
+		);
+		if (creation.status === "created") return creation.manager;
+		if (creation.status === "owned-elsewhere") throw sessionOpenElsewhereError(sessionId);
+		// Another launch stored the session between the lookup and the claim: resume it.
+		target = await findHolder();
+		if (!target) {
+			throw new SessionResolutionError(`Session "${sessionId}" not found.`, SESSION_NOT_FOUND_HINT);
+		}
+	}
+	// Claimed before it is opened: opening records it as the terminal's last session, and a session
+	// another live omp process owns is refused with nothing written.
+	const claim = SessionManager.claimStoredSession(target.session.path, target.session.id);
+	if (!claim) throw sessionOpenElsewhereError(sessionId);
+	try {
+		const manager = await openResumeTarget(
+			sessionId,
+			target,
+			cwd,
+			sessionDir,
+			askToMoveSession,
+			onSessionContinuation,
+		);
+		// The manager takes its own claim before this one is released, so the session stays this process's.
+		if (manager?.isOwnedElsewhere()) {
+			await manager.close();
+			throw sessionOpenElsewhereError(sessionId);
+		}
+		return manager;
+	} finally {
+		claim();
+	}
+}
 
 function validateSessionPersistenceArgs(parsed: Pick<Args, "continue" | "noSession" | "resume">): void {
 	if (!parsed.noSession) return;
@@ -1382,7 +1469,7 @@ function validateSessionPersistenceArgs(parsed: Pick<Args, "continue" | "noSessi
 	}
 }
 /**
- * Resolves CLI session flags into an existing, forked, in-memory, or cancelled session manager.
+ * Resolves CLI session flags into an existing, forked, in-memory, new, or cancelled session manager.
  *
  * `nativeFlagOwnership: "preliminary"` is reserved for the startup parse,
  * before extensions establish whether a built-in-named flag belongs to them.
@@ -1399,6 +1486,15 @@ export async function createSessionManager(
 		onSessionContinuation?: (continuation: SessionContinuation) => void;
 	} = {},
 ): Promise<SessionManager | undefined> {
+	if (parsed.sessionId !== undefined) {
+		return await openOrCreateSessionById(
+			parsed.sessionId,
+			cwd,
+			parsed.sessionDir,
+			askToMoveSession,
+			options.onSessionContinuation,
+		);
+	}
 	if (parsed.fork) {
 		if (parsed.noSession) {
 			throw new SessionResolutionError("--fork requires session persistence");
@@ -1470,22 +1566,14 @@ export async function createSessionManager(
 		if (!target) {
 			throw new SessionResolutionError(`Session "${sessionArg}" not found.`, SESSION_NOT_FOUND_HINT);
 		}
-		const { session, continuation } = target;
-		if (continuation) options.onSessionContinuation?.(continuation);
-		const moveResult = await moveMissingCwdSessionIfNeeded(
+		return await openResumeTarget(
 			sessionArg,
-			session,
+			target,
 			cwd,
 			parsed.sessionDir,
 			askToMoveSession,
+			options.onSessionContinuation,
 		);
-		if (moveResult.status === "moved") {
-			return await forkIfMovedAway(moveResult.manager, parsed.sessionDir);
-		}
-		if (moveResult.status === "declined") {
-			return undefined;
-		}
-		return await forkIfMovedAway(await SessionManager.open(session.path, parsed.sessionDir), parsed.sessionDir);
 	}
 	if (parsed.continue) {
 		const manager = await forkIfMovedAway(
@@ -2092,6 +2180,7 @@ export async function runRootCommand(
 		// Before session resolution: resume, fork, and import act on these same
 		// startup-parse flags, so rejecting later would leave forked or imported
 		// transcripts (or an opened picker) behind a usage error.
+		validateSessionIdLaunch(parsedArgs);
 		validateGoalLaunch(parsedArgs, isInteractive);
 		validateRestoreLaunch(parsedArgs, isInteractive);
 		// Without piped text the prompt must come from argv, which only the

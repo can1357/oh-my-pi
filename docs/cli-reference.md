@@ -89,13 +89,15 @@ Argument handling:
 | `--fork <session>`                      | Fork a saved session (by ID prefix or path) into a new session. See [session operations](./session-operations-export-share-fork-resume.md).                                                                                                                                                                   |
 | `--from-claude`                         | Import a Claude Code session into OMP.                                                                                                                                                                                                                                                                        |
 | `--from-codex`                          | Import a Codex session into OMP.                                                                                                                                                                                                                                                                              |
+| `--session-id <uuid>`                   | Resume the session that holds this ID (a UUID, any case), or start a new session under it, for a launcher that records the ID before the session starts. Refused, before any model call, while another running omp process has that session open.                                                             |
 | `--export <session>`                    | Export a session file to HTML and exit.                                                                                                                                                                                                                                                                       |
 | `--no-title`                            | Disable title auto-generation (equivalent to the `PI_NO_TITLE` [environment variable](./environment-variables.md)).                                                                                                                                                                                           |
 
 `--continue`, `--resume`, `--restore`, `--fork`, and foreign-session imports require
 persistence and cannot use `--no-session`. `--from-claude` and `--from-codex`
 are mutually exclusive and cannot be combined with `--continue`, `--resume`,
-or `--fork`.
+or `--fork`. `--session-id` selects its session itself, so it cannot be combined
+with any of these, nor with `--no-session`, `--mode acp` or `--goal`.
 
 #### Model selection
 

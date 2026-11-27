@@ -470,6 +470,48 @@ fails with `Session "<path>" not found.`; an existing empty file or malformed
 non-empty headers fail closed without modifying the file, unless the file was
 replaced under a session that went on in a sibling (see above).
 
+## CLI `--session-id`
+
+`--session-id <uuid>` resumes the session that holds that id, or starts a new
+session whose header and file name carry it instead of a generated id. A
+launcher records the id before the first launch and runs the same command for
+every later one. The value must be a UUID (`8-4-4-4-12` hex digits); omp
+lowercases it, as it mints ids, so `--session-id "$(uuidgen)"` works where
+`uuidgen` prints uppercase. Any other value, or the flag with no value, is a
+usage error raised while the arguments are parsed, so no other session flag
+acts first.
+
+`createSessionManager()` first looks for a stored session that holds the id, the
+way `--resume <id>` would find it (`resolveResumeTarget` with `exactId`: the same
+scopes and storage, matched by the exact id rather than a prefix, the
+unlisted-file probe included). It opens that one as `--resume <id>` does,
+continuations and the moved-directory prompt included. A session that was packed
+and moved to another machine (`omp session pack`) forks to a copy under a new id
+when it opens, as with `--resume <id>`, so on this machine the id no longer names
+the conversation that goes on.
+
+When no stored session holds the id, `SessionManager.createWithSessionId()`
+creates the session object without touching the terminal's last-session record,
+claims the id's ownership lease for this process, and asks again whether a stored
+session holds the id. If one does now, the launch resumes it. Otherwise the
+session's header is written at once, rather than with its first entry, so a later
+launch under the same id finds it, and only then is the terminal's record updated.
+
+Either way the session must be this process's. While another live omp process
+owns it (holds its ownership lease), a resume would write this process's turns to
+a new sibling session under another id (see `"open-elsewhere"` in
+[session storage](./session.md)), so the launch is refused instead, before any
+model call, with exit status 1 and
+`Session "<id>" is open in another running omp process. Stop that process, then run this command again to resume it.`
+A refused launch writes nothing: no session file, no change to the other
+process's file, and no change to the terminal's record that `--continue` reads.
+
+`--session-id` selects its session itself, so it is refused beside every other
+session selector: `--resume`/`-r`/`--session`, `--restore`, `--continue`/`-c`,
+`--fork`, `--no-session`, `--from-claude` and `--from-codex`. It is also refused in
+ACP mode (`--mode acp`, `omp acp`), which starts a session for each client request,
+and beside `--goal`, which needs a fresh session while the id can name a stored one.
+
 ## CLI `--restore`
 
 `--restore [value]` selects and opens its session exactly as `--resume [value]`
@@ -531,11 +573,11 @@ This is startup-only behavior; there is no interactive `/continue` slash command
 Interactive `/restart` performs normal teardown, flushes postmortem cleanup and
 stdout, then relaunches the CLI. `restartArgv()` preserves launch configuration
 flags but strips original prompts/`@file` positionals and one-shot session
-selectors (`--session`, `--resume`, `--restore`, `--continue`, `--fork`, and
-foreign imports). It adds `--restore <session-file>` only when the session
-actually exists on disk, so the subagents the teardown cut off mid-turn go on in
-the new process (see [CLI `--restore`](#cli---restore)); an in-memory or
-never-materialized session restarts fresh.
+selectors (`--session`, `--resume`, `--restore`, `--continue`, `--fork`,
+`--session-id`, and foreign imports). It adds `--restore <session-file>` only
+when the session actually exists on disk, so the subagents the teardown cut off
+mid-turn go on in the new process (see [CLI `--restore`](#cli---restore)); an
+in-memory or never-materialized session restarts fresh.
 
 POSIX uses process-image replacement when available. Windows or a failed exec
 falls back to spawning the replacement with inherited terminal streams.
