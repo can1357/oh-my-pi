@@ -486,7 +486,8 @@ for (const { adapter, url } of BACKENDS) {
 				const rewrite = s.startHeldRewrite();
 				await s.client.replaceStarted.promise;
 				s.manager.appendMessage({ role: "user", content: WAITING_ENTRY, timestamp: Date.now() });
-				const renamed = s.manager.setSessionName("renamed during the rewrite", "user");
+				// Handled here: a rejection left unhandled until the awaits below would fail whichever test runs then.
+				const renamed = s.manager.setSessionName("renamed during the rewrite", "user").catch(() => false);
 				s.client.allowReplace.resolve();
 				const sealedAtSecondWrite = await Promise.race([
 					secondWriteStarted.promise.then(() => true),
@@ -498,7 +499,7 @@ for (const { adapter, url } of BACKENDS) {
 				s.manager.seal();
 				sealed.resolve();
 				await rewrite.catch(() => undefined);
-				await renamed.catch(() => undefined);
+				await renamed;
 				const closed = await s.manager.close().then(
 					() => "closed",
 					(err: unknown) => String(err),
@@ -556,11 +557,13 @@ for (const { adapter, url } of BACKENDS) {
 				const rewrite = s.startHeldRewrite();
 				await s.client.replaceStarted.promise;
 				s.manager.appendMessage({ role: "user", content: WAITING_ENTRY, timestamp: Date.now() });
-				const renamed = s.manager.setSessionName("renamed during the rewrite", "user");
+				const renamed = s.manager
+					.setSessionName("renamed during the rewrite", "user")
+					.then(String, (err: unknown) => String(err));
 				const landedAt = s.client.statements.length;
 				s.client.allowReplace.resolve();
 				await rewrite.catch(() => undefined);
-				const named = await renamed.then(String, (err: unknown) => String(err));
+				const named = await renamed;
 				await s.manager.flush().catch(() => undefined);
 
 				const titleChange = s.manager.getEntries().find(entry => entry.type === "title_change");
