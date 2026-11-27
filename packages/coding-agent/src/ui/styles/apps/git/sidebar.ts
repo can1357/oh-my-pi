@@ -11,6 +11,7 @@ import { defineRolePainter } from "@oh-my-pi/pi-tui/term/paint";
 import { padTo, spaces, truncate, visibleWidth } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { hslToHex } from "@oh-my-pi/pi-utils/color";
+import { segmentGraphemes } from "@oh-my-pi/pi-utils/graphemes";
 import type { ChangedFile } from "../../../../cli/git-tui/model/state";
 import { type SidebarLayout, type SidebarModel, type SidebarRow, SUMMARY_LIMIT } from "../../../apps/git/sidebar-model";
 import type { LineState } from "../../../overlays/settings/line-edit";
@@ -41,7 +42,7 @@ const nerd = (theme: Theme): boolean => theme.symbols.preset === "nerd";
 
 /** A one-line field: the text with an inverse caret cell, scrolled to keep the caret in `width`. */
 export function fieldLine(theme: Theme, line: LineState, width: number): string {
-	const graphemes = [...new Intl.Segmenter().segment(line.text)].map(part => ({
+	const graphemes = [...segmentGraphemes(line.text)].map(part => ({
 		text: part.segment,
 		start: part.index,
 		width: visibleWidth(part.segment),

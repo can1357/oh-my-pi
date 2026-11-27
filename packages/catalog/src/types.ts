@@ -277,6 +277,29 @@ export interface Usage {
 		/** Final committed ACU cost, when reported. */
 		acuCost?: number;
 	};
+	/**
+	 * GitHub Copilot server-reported AI-credit meter (`copilot_usage` frame).
+	 * Absent when the server sent no billing frame (see {@link aiuMissing}); never zero for a missing frame.
+	 * Kept apart from `cost` (a local dollar estimate) and `premiumRequests` (request
+	 * billing). 1 AIU = 1 AI credit = $0.01.
+	 */
+	aiu?: {
+		/** Server-reported `total_nano_aiu` (1 AIU = 1e9 nano-AIU). Authoritative per-request charge. */
+		nano: number;
+		/** Per-token-type share of `nano`, derived from the frame's `token_details`; only the types the server listed. */
+		nanoByType?: {
+			input?: number;
+			cacheRead?: number;
+			cacheWrite?: number;
+			output?: number;
+		};
+	};
+	/**
+	 * Set when the model declares a billing frame (`reports-aiu`) and the call finished without one: its
+	 * charge is unknown, not zero. Absent on calls that report no credits, on calls that failed before any
+	 * token, and on transcripts recorded before the frame was read.
+	 */
+	aiuMissing?: boolean;
 	cost: {
 		input: number;
 		output: number;
@@ -589,6 +612,12 @@ export interface OpenAICompat {
 	reasoningDeltasMayBeCumulative?: boolean;
 	/** Strip leaked DeepSeek chat-template special tokens from visible content deltas. Default: auto-detected. */
 	stripDeepseekSpecialTokens?: boolean;
+	/**
+	 * Break DeepSeek chat-template special tokens (`<｜…｜>`, `｜DSML｜`) quoted in outgoing
+	 * message text, so the encoder neither rejects them (V4.1's image-placeholder
+	 * guard) nor parses them as token IDs. Rule-owned: the DeepSeek class.
+	 */
+	neutralizeDeepseekSpecialTokens?: boolean;
 	/** Drop assistant thinking blocks from replayed chat-completions history. Default: false. */
 	stripThinkingHistory?: boolean;
 	/** Heal leaked chat-template/tool-call/thinking markup from visible content deltas. Default: auto-detected. */

@@ -106,8 +106,6 @@ export class NativeSurfaces {
 	#screen: { readonly backend: NativeBackend; readonly role: string | undefined } | undefined;
 	#connection: TspConnection | undefined;
 	#unwatch: (() => void) | undefined;
-	/** The inline surface's hold; a page surface takes the same hold while it is up. */
-	#held = false;
 
 	constructor(options: NativeSurfacesOptions) {
 		this.#options = options;
@@ -164,23 +162,6 @@ export class NativeSurfaces {
 			effect(() => this.#sync(this.#page()));
 			return dispose;
 		});
-	}
-
-	/**
-	 * Hold every open surface: nothing is sent until the hold is released (see
-	 * {@link NativeBackend.setOutputHold}). A page surface takes the same hold.
-	 */
-	setOutputHold(hold: boolean): boolean {
-		if (this.#held === hold) return false;
-		this.#held = hold;
-		this.#inline.setOutputHold(hold);
-		this.#screen?.backend.setOutputHold(hold);
-		return true;
-	}
-
-	/** Whether {@link setOutputHold} is holding the output. */
-	getOutputHold(): boolean {
-		return this.#held;
 	}
 
 	/** Close every surface; `keep` leaves the inline surface's `main` in scrollback (and adoptable). */

@@ -48,6 +48,12 @@ const MATCHER_RANK: Record<CompiledMatcher["kind"], number> = {
 	glob: 0,
 };
 
+// Visit stronger candidates first; stable sorting preserves declaration order
+// for the ambiguity diagnostic when distinct classes share the winning rank.
+const classMatchers = rules.taxonomy.classes
+	.flatMap(cls => cls.matchers.map(matcher => ({ cls, matcher, priority: MATCHER_RANK[matcher.kind] })))
+	.sort((a, b) => b.priority - a.priority || b.matcher.token.length - a.matcher.token.length);
+
 function bareOf(id: string): string {
 	const slash = id.lastIndexOf("/");
 	return slash === -1 ? id : id.slice(slash + 1);
@@ -67,6 +73,8 @@ function matcherMatches(matcher: CompiledMatcher, lower: string, bare: string): 
 		case "bounded":
 			return boundedMatch(bare, matcher.token);
 		case "namespace": {
+			// Most ids don't mention this namespace. Split only plausible matches.
+			if (!lower.includes(matcher.token)) return false;
 			const parts = matcher.bounded ? lower.split(/[/.:]/) : lower.split("/");
 			for (const part of parts) {
 				if (!part) continue;
@@ -162,25 +170,24 @@ interface ClassRanks {
 function classifyRanks(model: string, lenient: boolean): ClassRanks {
 	const lower = model.trim().toLowerCase();
 	const bare = bareOf(lower);
-	let winner: { rank: readonly [number, number]; cls: CompiledClass } | undefined;
-	let tied: readonly [string, string] | undefined;
-	for (const cls of rules.taxonomy.classes) {
-		for (const matcher of cls.matchers) {
-			if (!matcherMatches(matcher, lower, bare)) continue;
-			const rank = [MATCHER_RANK[matcher.kind], matcher.token.length] as const;
-			if (winner && winner.rank[0] === rank[0] && winner.rank[1] === rank[1] && winner.cls.id !== cls.id) {
-				tied = [winner.cls.id, cls.id];
-			} else if (!winner || winner.rank[0] < rank[0] || (winner.rank[0] === rank[0] && winner.rank[1] < rank[1])) {
-				winner = { rank, cls };
-				tied = undefined;
-			}
+	let winner: (typeof classMatchers)[number] | undefined;
+	let tiedClass: string | undefined;
+	for (const candidate of classMatchers) {
+		if (
+			winner &&
+			(candidate.priority !== winner.priority || candidate.matcher.token.length !== winner.matcher.token.length)
+		) {
+			break;
 		}
-	}
-	if (tied) {
-		if (lenient) return { class: "unknown" };
-		throw new AmbiguousIdentityError(lower, tied[0], tied[1], "class");
+		if (!matcherMatches(candidate.matcher, lower, bare)) continue;
+		if (!winner) winner = candidate;
+		else if (winner.cls.id !== candidate.cls.id) tiedClass = candidate.cls.id;
 	}
 	if (!winner) return { class: "unknown" };
+	if (tiedClass !== undefined) {
+		if (lenient) return { class: "unknown" };
+		throw new AmbiguousIdentityError(lower, winner.cls.id, tiedClass, "class");
+	}
 	const ranks: ClassRanks = { class: winner.cls.id };
 	const family = classifyFamily(winner.cls, bare, lower, lenient);
 	if (family !== undefined) ranks.family = family;

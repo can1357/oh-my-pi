@@ -97,7 +97,7 @@ function fileHead(cx: PaintContext, props: ToolProps, term: WriteTerm): string {
 	const failed = props.tone === "error" || props.status === "error";
 	let glyph = "";
 	if (failed) glyph = theme.fg("error", theme.symbols.symbol("status.error"));
-	else if (term.call) glyph = cx.reduceMotion || !term.spinning ? "" : spinnerGlyph(cx);
+	else if (term.call) glyph = cx.spinnerInterval === 0 || !term.spinning ? "" : spinnerGlyph(cx);
 	else if (isActive(props)) glyph = spinnerGlyph(cx);
 	else glyph = theme.fg("accent", theme.symbols.symbol("tool.write"));
 	const rawPath = term.path ?? "";

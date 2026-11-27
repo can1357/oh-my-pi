@@ -26,4 +26,11 @@ provider "cline-pass" {
 	class "anthropic" {
 		cache-control-format "anthropic"
 	}
+	// residue: the paid DeepSeek V4.1 Flash 1017 roster row carries no ladder;
+	// it serves DeepSeek's low/high/max encoder tiers as `reasoning_effort`.
+	models "deepseek-v4.1-flash-1017" {
+		trust-explicit-thinking-only #false
+		thinking-efforts "low" "high" "max"
+		supports-reasoning-effort #true
+	}
 }

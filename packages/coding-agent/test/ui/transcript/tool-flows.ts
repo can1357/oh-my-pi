@@ -9,9 +9,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, setSystemTime } from "bun:test";
 import { capturing, type StageResult, stageTest } from "../deviations";
-import { createRoot, isUiNode, type Signal, type UiNode } from "@oh-my-pi/pi-tui";
-import { paintNode, type StaticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
-import { SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-tui/term/painters/spinner";
+import { createRoot, isUiNode, type UiNode } from "@oh-my-pi/pi-tui";
+import { DEFAULT_SPINNER_INTERVAL_MS, paintNode, type StaticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
 import { firstCellDiff } from "@oh-my-pi/pi-tui/testing/cells";
 import {
 	CORPUS_DIR,
@@ -199,9 +198,9 @@ function step(driver: Driver, label: string, flow: FlowInputs): void {
 /** Paint clock showing `frame` at (or just after) `now`. */
 function paintClock(env: StaticEnvironment, now: number, frame: number): number {
 	const frames = env.theme().symbols.spinnerFrames.length;
-	const at = Math.floor(now / SPINNER_INTERVAL_MS) % frames;
+	const at = Math.floor(now / DEFAULT_SPINNER_INTERVAL_MS) % frames;
 	const ahead = (((frame - at) % frames) + frames) % frames;
-	return (Math.floor(now / SPINNER_INTERVAL_MS) + ahead) * SPINNER_INTERVAL_MS;
+	return (Math.floor(now / DEFAULT_SPINNER_INTERVAL_MS) + ahead) * DEFAULT_SPINNER_INTERVAL_MS;
 }
 
 /** Outcome of one stage: null fields matched. */
@@ -241,7 +240,7 @@ export function checkFlowCase(corpusCase: CorpusCase, hooks?: FlowHooks): FlowSt
 				step(driver, stage.label, flow);
 				setSystemTime(new Date(driver.appNow));
 				env.setNow(paintClock(env, driver.appNow, driver.frame));
-				(env.reduceMotion as Signal<boolean>).set(false);
+				env.setReduceMotion(false);
 				const described = describeTree(tree, env);
 				const native = firstDiff(stageNative(corpusCase, index), described);
 				const rows: Record<string, string | null> = {};

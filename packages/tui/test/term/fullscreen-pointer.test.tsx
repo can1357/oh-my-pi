@@ -207,6 +207,16 @@ describe("fullscreen transcript pointer", () => {
 		expect(wheel.lines(1, 420, 0)).toBe(1);
 	});
 
+	it("ramps OS-accelerated wheel input during a sustained gesture and restarts after a pause or reversal", () => {
+		const wheel = new TranscriptWheel(false);
+		const sustained = Array.from({ length: 20 }, (_, i) => wheel.lines(-1, i * 16, 0));
+		expect(sustained.slice(0, 4)).toEqual([1, 1, 1, 1]);
+		expect(sustained[6]).toBe(2);
+		expect(sustained.at(-1)).toBe(6);
+		expect(wheel.lines(-1, 400, 0)).toBe(1);
+		expect(wheel.lines(1, 410, 0)).toBe(1);
+	});
+
 	it("copies the visible OSC 66 payload rather than the terminal sequence or its hyperlink target", () => {
 		mount(["A\x1b]66;s=2;Hi\x1b\\Z", ""]);
 		mouse("press", 0, 2);

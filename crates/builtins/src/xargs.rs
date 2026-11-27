@@ -12,7 +12,10 @@ use std::{
 
 use clap::{Arg, ArgAction, ArgMatches};
 
-use crate::host::{CommandStatus, Host, RunningCommand, ShellCommand, Utility, matches_parser};
+use crate::{
+	exec_line,
+	host::{CommandStatus, Host, RunningCommand, ShellCommand, Utility, matches_parser},
+};
 
 mod options {
 	pub const COMMAND: &str = "COMMAND";
@@ -133,20 +136,6 @@ impl Clone for LimiterCollection {
 	}
 }
 
-#[cfg(windows)]
-fn count_osstr_chars_for_exec(s: &OsStr) -> usize {
-	use std::os::windows::ffi::OsStrExt;
-	// Include +1 for either the null terminator or trailing space.
-	s.encode_wide().count() + 1
-}
-
-#[cfg(unix)]
-fn count_osstr_chars_for_exec(s: &OsStr) -> usize {
-	use std::os::unix::ffi::OsStrExt;
-	// Include +1 for the null terminator.
-	s.as_bytes().len() + 1
-}
-
 #[derive(Clone)]
 struct MaxCharsCommandSizeLimiter {
 	current_size: usize,
@@ -159,32 +148,11 @@ impl MaxCharsCommandSizeLimiter {
 		Self { current_size: 0, max_chars, per_arg_overhead: 0 }
 	}
 
-	#[cfg(windows)]
-	fn new_system(_env: &HashMap<OsString, OsString>) -> MaxCharsCommandSizeLimiter {
-		// Taken from the CreateProcess docs.
-		const MAX_CMDLINE: usize = 32767;
-		MaxCharsCommandSizeLimiter::new(MAX_CMDLINE)
-	}
-
-	#[cfg(unix)]
 	fn new_system(env: &HashMap<OsString, OsString>) -> Self {
-		// POSIX requires that we leave 2048 bytes of space so that the child processes
-		// can have room to set their own environment variables.
-		const ARG_HEADROOM: usize = 2048;
-		let arg_max = unsafe { libc::sysconf(libc::_SC_ARG_MAX) } as usize;
-		let pointer_size = std::mem::size_of::<*const libc::c_char>();
-
-		let env_size: usize = env
-			.iter()
-			// The two string terminators account for '=' and '\0'; envp has one pointer.
-			.map(|(var, value)| {
-				count_osstr_chars_for_exec(var) + count_osstr_chars_for_exec(value) + pointer_size
-			})
-			.sum();
-
-		let mut limiter = Self::new(arg_max.saturating_sub(ARG_HEADROOM).saturating_sub(env_size).max(1));
-		// ARG_MAX covers argv pointers as well as strings. Keep -s string-only.
-		limiter.per_arg_overhead = pointer_size;
+		let mut limiter = Self::new(exec_line::system_room(env));
+		// The room covers argv pointers as well as strings; `-s` counts
+		// strings only.
+		limiter.per_arg_overhead = exec_line::ARG_OVERHEAD;
 		limiter
 	}
 }
@@ -195,7 +163,7 @@ impl CommandSizeLimiter for MaxCharsCommandSizeLimiter {
 		arg: Argument,
 		cursor: LimiterCursor<'_>,
 	) -> Result<Argument, ExhaustedCommandSpace> {
-		let chars = count_osstr_chars_for_exec(&arg.arg) + self.per_arg_overhead;
+		let chars = exec_line::string_size(&arg.arg) + self.per_arg_overhead;
 		if self.current_size + chars <= self.max_chars {
 			let arg = cursor.try_next(arg)?;
 			self.current_size += chars;

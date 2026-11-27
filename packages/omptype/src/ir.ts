@@ -599,16 +599,7 @@ function parseLiteralUnion(src: string): IR | undefined {
 		while (index < src.length && isWhitespaceAt(src, index)) index++;
 		if (index === src.length) {
 			const ir: IR = members.length === 1 ? members[0] : { k: "union", members };
-			let simple = true;
-			for (let member = 1; simple && member < members.length; member++) {
-				for (let previous = 0; previous < member; previous++) {
-					if (members[previous].k === "lit" && members[previous].v === members[member].v) {
-						simple = false;
-						break;
-					}
-				}
-			}
-			ir[kSimple] = simple;
+			ir[kSimple] = members.length === 1 || isSimpleUnion(members);
 			ir[kSimpleOwner] = ir;
 			return ir;
 		}
@@ -1533,6 +1524,45 @@ export function isSimpleIR(ir: IR): boolean {
 	return simple;
 }
 
+const nonUnit = Symbol("non-primitive-unit");
+
+function primitiveUnit(ir: IR): unknown {
+	if (ir.k === "null") return null;
+	if (ir.k === "undefined") return undefined;
+	if (ir.k === "lit" && (ir.v === null || (typeof ir.v !== "object" && typeof ir.v !== "function"))) return ir.v;
+	return nonUnit;
+}
+
+/** Distinct primitive units cannot prune each other. Also recognize nullable
+ * primitive domains, without allocating a set for the common binary unions. */
+function isSimpleUnion(members: IR[]): boolean {
+	if (members.length < 2) return false;
+	if (members.length === 2) {
+		const a = primitiveUnit(members[0]);
+		const b = primitiveUnit(members[1]);
+		if (a !== nonUnit && b !== nonUnit) return a !== b && !(typeof a === "boolean" && typeof b === "boolean");
+		const other =
+			a === null || a === undefined ? members[1] : b === null || b === undefined ? members[0] : undefined;
+		return (
+			other?.k === "string" ||
+			other?.k === "number" ||
+			other?.k === "boolean" ||
+			other?.k === "bigint" ||
+			other?.k === "symbol"
+		);
+	}
+	const first = primitiveUnit(members[0]);
+	if (first === nonUnit) return false;
+	const values = new Set<unknown>();
+	values.add(first);
+	for (let i = 1; i < members.length; i++) {
+		const value = primitiveUnit(members[i]);
+		if (value === nonUnit || values.has(value)) return false;
+		values.add(value);
+	}
+	return true;
+}
+
 function scanSimpleIR(ir: IR): boolean {
 	switch (ir.k) {
 		case "intersection":
@@ -1543,27 +1573,7 @@ function scanSimpleIR(ir: IR): boolean {
 		case "refine":
 			return scanSimpleIR(ir.base);
 		case "union":
-			if (ir.members.length < 2) return false;
-			if (
-				ir.members.length === 2 &&
-				ir.members.every(member => member.k === "lit" && typeof member.v === "boolean")
-			) {
-				return false;
-			}
-			for (let index = 0; index < ir.members.length; index++) {
-				const member = ir.members[index];
-				if (
-					member.k !== "lit" ||
-					(member.v !== null && (typeof member.v === "object" || typeof member.v === "function"))
-				) {
-					return false;
-				}
-				for (let previous = 0; previous < index; previous++) {
-					const candidate = ir.members[previous];
-					if (candidate.k === "lit" && candidate.v === member.v) return false;
-				}
-			}
-			return true;
+			return isSimpleUnion(ir.members);
 		case "array":
 			return scanSimpleIR(ir.el);
 		case "tuple":

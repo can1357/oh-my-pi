@@ -1110,7 +1110,7 @@ struct Layout {
 
 /// `file_mbswidth`.
 fn width(name: &[u8]) -> usize {
-	ansi_width::ansi_width(&String::from_utf8_lossy(name))
+	xutf::width_ansi_str(&String::from_utf8_lossy(name))
 }
 
 impl Scan<'_> {

@@ -45,7 +45,7 @@ Plain provider credential names come from `env` entries in `packages/catalog/src
 | `ANTHROPIC_FOUNDRY_API_KEY`           | Anthropic via Azure Foundry / enterprise gateway   | `CLAUDE_CODE_USE_FOUNDRY` enabled                              | Takes precedence over `ANTHROPIC_OAUTH_TOKEN` and `ANTHROPIC_API_KEY` when Foundry mode is enabled                                           |
 | `OPENAI_API_KEY`                      | OpenAI auth                                        | Using OpenAI-family providers without explicit apiKey argument | Used by OpenAI Completions/Responses providers                                                                                               |
 | `OPENAI_CODEX_OAUTH_TOKEN`            | OpenAI Codex auth                                  | Using `openai-codex` provider                                  | Environment-supplied Codex OAuth token                                                                                                       |
-| `GEMINI_API_KEY`                      | Google Gemini auth                                 | Using `google` provider models                                 | Primary key for Gemini provider mapping                                                                                                      |
+| `GEMINI_API_KEY`                      | Google Gemini auth                                 | Using `google` provider models                                 | Primary key for Gemini provider mapping; also configured via the interactive API-key login (`/login google`)                                 |
 | `GROQ_API_KEY`                        | Groq auth                                          | Using Groq models                                              |                                                                                                                                              |
 | `CEREBRAS_API_KEY`                    | Cerebras auth                                      | Using Cerebras models                                          |                                                                                                                                              |
 | `FIREWORKS_API_KEY`                   | Fireworks auth                                     | Using Fireworks models                                         |                                                                                                                                              |
@@ -344,12 +344,11 @@ An invalid `KIRO_API_REGION` is an error rather than a silent fallback. `/login 
 | `PI_OPENROUTER_RESPONSES`           | Responses API is enabled unless set to `0`; `0` selects the OpenAI Completions route                                                                                                                                                          |
 | `UMANS_WEBSEARCH_PROVIDER`          | Default Umans Anthropic web-search provider selection when not supplied explicitly                                                                                                                                                            |
 
+### Anthropic OAuth
 
-### Prompt perturbation
-
-| Variable                  | Default / behavior                                                                                                                                                                     |
-| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `OMP_PROMPT_PERTURBATION` | Unset: models whose KDL rules set `prompt-perturbation #true` get the pooled lines rewritten with the wording chosen for this installation; others get the bundled wording. `1` perturbs every model; `0` none. |
+| Variable                           | Default / behavior                                                                                                          |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `PI_ANTHROPIC_OAUTH_CALLBACK_PORT` | Anthropic callback port (default `54545`). Local login can fall back to a free port or request one with `0`. SSH broker login requires a fixed port and uses it on both ends of the tunnel. |
 
 ### GitLab Duo
 

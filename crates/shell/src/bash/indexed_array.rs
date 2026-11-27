@@ -1,19 +1,23 @@
 //! Sparse indexed shell arrays shared across forked process images.
 //!
-//! The vector trie shares unchanged elements when an image is cloned. An
-//! append copies only the path to its new element; uncommon middle inserts
-//! and removals rebuild the sorted sequence.
+//! The persistent vector shares unchanged elements when an image is cloned. An
+//! append or in-place write copies only the path to its element; uncommon
+//! middle inserts and removals rebuild the sequence after the edit position.
 
-use std::ops::{Index, IndexMut};
+use std::{
+	ops::{Index, IndexMut},
+	sync::Arc,
+};
 
 use bstr::BString;
-use rpds::VectorSync;
 use serde::{Deserialize, Serialize};
+
+use super::pvec::{self, Vector};
 
 /// Sorted, sparse indexed elements; cloning shares the existing elements.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct IndexedArray(VectorSync<(i64, BString)>);
+pub struct IndexedArray(Vector<(i64, BString)>);
 
 impl IndexedArray {
 	/// Number of set elements.
@@ -22,7 +26,7 @@ impl IndexedArray {
 	}
 
 	/// Whether there are no set elements.
-	pub fn is_empty(&self) -> bool {
+	pub const fn is_empty(&self) -> bool {
 		self.0.is_empty()
 	}
 
@@ -42,7 +46,7 @@ impl IndexedArray {
 	}
 
 	/// Elements in ascending index order.
-	pub fn iter(&self) -> impl DoubleEndedIterator<Item = &(i64, BString)> + ExactSizeIterator {
+	pub fn iter(&self) -> pvec::Iter<'_, (i64, BString)> {
 		self.0.iter()
 	}
 
@@ -66,7 +70,7 @@ impl IndexedArray {
 
 	/// Append an element greater than every current index.
 	pub fn push(&mut self, item: (i64, BString)) {
-		self.0.push_back_mut(item);
+		self.0.push(item);
 	}
 
 	/// Insert at a sorted position, appending when it is the end.
@@ -74,12 +78,11 @@ impl IndexedArray {
 	/// # Panics
 	/// `position` exceeds the number of elements.
 	pub fn insert(&mut self, position: usize, item: (i64, BString)) {
-		if position == self.len() {
-			self.push(item);
-		} else {
-			let mut values: Vec<_> = self.iter().cloned().collect();
-			values.insert(position, item);
-			*self = values.into();
+		assert!(position <= self.len(), "insert position out of bounds");
+		let rest = self.split_off(position);
+		self.0.push(item);
+		for item in rest {
+			self.0.push_arc(item);
 		}
 	}
 
@@ -88,24 +91,31 @@ impl IndexedArray {
 	/// # Panics
 	/// `position` does not name an element.
 	pub fn remove(&mut self, position: usize) {
-		if position == self.len() - 1 {
-			self.0.drop_last_mut();
-		} else {
-			let mut values: Vec<_> = self.iter().cloned().collect();
-			values.remove(position);
-			*self = values.into();
+		assert!(position < self.len(), "remove position out of bounds");
+		let rest = self.split_off(position);
+		for item in rest.into_iter().skip(1) {
+			self.0.push_arc(item);
 		}
+	}
+
+	/// Detach the elements from `position` on, still shared with their copies.
+	fn split_off(&mut self, position: usize) -> Vec<Arc<(i64, BString)>> {
+		let rest: Vec<_> = (position..self.len())
+			.filter_map(|at| self.0.get_arc(at).cloned())
+			.collect();
+		self.0.truncate(position);
+		rest
 	}
 
 	/// Remove every element.
 	pub fn clear(&mut self) {
-		*self = Self::default();
+		self.0.clear();
 	}
 }
 
 impl From<Vec<(i64, BString)>> for IndexedArray {
 	fn from(value: Vec<(i64, BString)>) -> Self {
-		Self(value.into_iter().collect())
+		Self(value.into())
 	}
 }
 
@@ -132,5 +142,14 @@ impl Index<usize> for IndexedArray {
 impl IndexMut<usize> for IndexedArray {
 	fn index_mut(&mut self, index: usize) -> &mut Self::Output {
 		&mut self.0[index]
+	}
+}
+
+impl<'a> IntoIterator for &'a IndexedArray {
+	type IntoIter = pvec::Iter<'a, (i64, BString)>;
+	type Item = &'a (i64, BString);
+
+	fn into_iter(self) -> Self::IntoIter {
+		self.iter()
 	}
 }

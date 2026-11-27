@@ -1,3 +1,4 @@
+import { segmentGraphemes } from "../graphemes";
 import {
 	BufferLine,
 	type BufferState,
@@ -7,8 +8,6 @@ import {
 	DEFAULT_CELL_ATTRIBUTES,
 	sharedBlankCell,
 } from "./buffer";
-
-const segmenter = new Intl.Segmenter();
 
 /** Construction options supported by the headless virtual terminal. */
 export interface TerminalOptions {
@@ -254,7 +253,7 @@ export class Terminal {
 			while (clusterEnd < end && !(text.charCodeAt(clusterEnd) < 0x80 && text.charCodeAt(clusterEnd - 1) < 0x80)) {
 				clusterEnd++;
 			}
-			for (const part of segmenter.segment(text.slice(index, clusterEnd))) this.#print(part.segment);
+			for (const part of segmentGraphemes(text.slice(index, clusterEnd))) this.#print(part.segment);
 			index = clusterEnd;
 		}
 	}

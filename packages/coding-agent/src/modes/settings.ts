@@ -55,6 +55,20 @@ export const cfgGitEnabled = register({
 	},
 });
 
+/** Whether a cwd outside any repository adopts its single direct-child checkout as the active repo. */
+export const cfgGitChildRepoDiscovery = register({
+	id: "git.childRepoDiscovery",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "interaction",
+		group: "Git",
+		label: "Discover Child Repository",
+		description:
+			"Outside a repository, scan direct child directories and adopt a single child checkout for the status line, git/PR lookup, and prompt context.",
+	},
+});
+
 // ────────────────────────────────────────────────────────────────────────
 // Appearance
 // ────────────────────────────────────────────────────────────────────────
@@ -646,16 +660,21 @@ export const cfgTuiTitleState = register({
 export const cfgTuiTitleSpinner = register({
 	id: "tui.titleSpinner",
 	type: "enum",
-	values: ["braille", "pulse", "dots", "line"] as const,
-	default: "braille",
+	values: ["braille", "centered", "pulse", "dots", "line"] as const,
+	default: "centered",
 	ui: {
 		tab: "appearance",
 		group: "Display",
 		label: "Terminal Title Spinner",
 		description:
-			"Glyph set for the working-state spinner in the terminal title — braille sweep, filling moon, single-dot cycle, or ASCII-safe line",
+			"Glyph set for the working-state spinner in the terminal title — centered braille sweep, classic braille sweep, filling moon, single-dot cycle, or ASCII-safe line",
 		options: [
-			{ value: "braille", label: "Braille", description: "Classic ⠋⠙⠹ sweep (default)" },
+			{
+				value: "centered",
+				label: "Centered",
+				description: "Three-dot ⠙⠸⢰⣠ snake around the full cell, centered on the title (default)",
+			},
+			{ value: "braille", label: "Braille", description: "Classic ⠋⠙⠹ sweep, sitting high beside the title" },
 			{ value: "pulse", label: "Pulse", description: "Moon filling ○◑● then emptying" },
 			{ value: "dots", label: "Dots", description: "Single braille dots cycling" },
 			{ value: "line", label: "Line", description: "ASCII - \\ | / for fonts without braille coverage" },
@@ -1572,7 +1591,7 @@ export const cfgCompletionNotify = register({
 		tab: "interaction",
 		group: "Notifications",
 		label: "Completion Notification",
-		description: "Notify when the agent finishes a turn",
+		description: "Notify when the agent finishes a turn or a plan is ready for approval",
 	},
 });
 

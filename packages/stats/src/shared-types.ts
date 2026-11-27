@@ -38,6 +38,8 @@ export interface AggregatedStats {
 	unpricedRequests: number;
 	/** Total premium requests */
 	totalPremiumRequests: number;
+	/** Server-reported Copilot AI credits in nano-AIU; null when no request in the range reported any. */
+	totalAiuNano: number | null;
 	/** Average duration in ms */
 	avgDuration: number | null;
 	/** Average TTFT in ms */
@@ -901,6 +903,8 @@ export interface ProviderAggregate {
 	/** Requests excluded because no public-equivalent subscription price exists. */
 	unpricedRequests: number;
 	totalPremiumRequests: number;
+	/** Server-reported Copilot AI credits in nano-AIU; null when no request in the range reported any. */
+	totalAiuNano: number | null;
 	avgTokensPerSecond: number | null;
 }
 

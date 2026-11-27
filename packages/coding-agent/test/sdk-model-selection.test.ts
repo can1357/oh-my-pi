@@ -1822,7 +1822,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 				authStorage,
 				modelRegistry,
 				sessionManager,
-				settings: Settings.isolated(),
+				settings: Settings.isolated({ modelRoles: { default: `${savedModel.provider}/${savedModel.id}:high` } }),
 				disableExtensionDiscovery: true,
 				skills: [],
 				contextFiles: [],
@@ -1839,6 +1839,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			try {
 				expect(session.model?.provider).toBe(savedModel.provider);
 				expect(session.model?.id).toBe(savedModel.id);
+				expect(session.configuredThinkingLevel()).toBe(Effort.High);
 				expect(getApiKeySpy).not.toHaveBeenCalled();
 			} finally {
 				await session.dispose();
@@ -1847,6 +1848,60 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			getApiKeySpy.mockRestore();
 		}
 	});
+
+	test.each(["resume", "provider default", "raw default selector"] as const)(
+		"hydrates a cached-only model for %s",
+		async selection => {
+			const authStorage = createInMemoryAuthStorage();
+			authStoragesToClose.push(authStorage);
+			const provider = "opencode-go";
+			const apiKey = "cached-startup-key";
+			const id = selection === "raw default selector" ? "retired-vendor/cache-only-default" : "cache-only-model";
+			const cachedModel = buildModel({
+				id,
+				name: "Cached Startup Model",
+				api: "openai-responses",
+				provider,
+				baseUrl: "https://opencode.ai/zen/go/v1",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128_000,
+				maxTokens: 16_384,
+			});
+			authStorage.keys.setRuntime(provider, apiKey);
+			writeModelCache(
+				resolveModelCacheProviderId(provider, { apiKey }),
+				Date.now(),
+				[cachedModel],
+				true,
+				"",
+				path.join(tempDir, "models.db"),
+			);
+			const selector = selection === "raw default selector" ? id : `${provider}/${id}`;
+			const settings = Settings.isolated(selection === "resume" ? {} : { modelRoles: { default: selector } });
+			const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"), { settings });
+			expect(modelRegistry.find(provider, id)).toBeUndefined();
+			const sessionManager = SessionManager.inMemory();
+			if (selection === "resume") sessionManager.appendModelChange(selector);
+
+			const { session, modelFallbackMessage } = await createAgentSession({
+				...buildSessionOptions(""),
+				authStorage,
+				modelRegistry,
+				settings,
+				sessionManager,
+				extensions: [],
+			});
+			try {
+				expect(session.model?.provider).toBe(provider);
+				expect(session.model?.id).toBe(id);
+				expect(modelFallbackMessage).toBeUndefined();
+			} finally {
+				await session.dispose();
+			}
+		},
+	);
 
 	function buildResumeOptions() {
 		const authStorage = createInMemoryAuthStorage();

@@ -32,6 +32,7 @@ export interface Usage {
 	cacheWrite: number;
 	totalTokens: number;
 	premiumRequests?: number;
+	aiu?: { nano: number };
 	cost: {
 		input: number;
 		output: number;

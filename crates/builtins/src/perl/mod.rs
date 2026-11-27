@@ -46,6 +46,7 @@ impl Utility for Perl {
 }
 
 mod ast;
+mod charnames;
 mod cli;
 mod code;
 mod func;

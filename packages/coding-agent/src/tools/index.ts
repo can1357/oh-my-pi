@@ -16,6 +16,7 @@ import type {
 	BeforeSubagentSpawnEvent,
 	BeforeSubagentSpawnEventResult,
 	PreparedExtension,
+	TodoBackendChange,
 } from "../extensibility/extensions/types";
 import type { Skill, SkillRediscoveryHost } from "../extensibility/skills";
 import type { GoalModeState, GoalRuntime } from "../goals";
@@ -113,7 +114,7 @@ import { cfgMemoryBackend } from "../memory-backend/settings";
 import { cfgTaskMaxRecursionDepth } from "../task/settings";
 import type { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
 import type { StructuredSubagentSchemaMode } from "../task/task-details";
-import type { TodoPhase } from "./details/todo";
+import type { TodoApplyOutcome, TodoPhase } from "./details/todo";
 
 export * from "../edit";
 export * from "../goals";
@@ -310,13 +311,14 @@ export interface ToolSession {
 	/** Imported extension factories safe to rebind in child sessions. */
 	preparedExtensions?: PreparedExtension[];
 	/**
-	 * Session-local extension roots for post-startup sub-discovery: explicit SDK
-	 * roots, discovery mode, and configured `extensions:`. A provider (not a
-	 * stored value) so it is materialized live per discovery call — a runtime
-	 * override or settings reload is reflected, never a construction-time
-	 * snapshot. Keeps the task surface byte-identical to the scoped load.
-	 * A standalone function, never a `this`-bound method: subagents forward it
-	 * as is, and a parked subagent keeps it for revival after its parent is gone.
+	 * Session-local extension roots for task-tool construction and post-startup
+	 * sub-discovery: explicit SDK roots, discovery mode, and configured
+	 * `extensions:`. A provider (not a stored value) so it is materialized live
+	 * per discovery call — a runtime override or settings reload is reflected,
+	 * never a construction-time snapshot. Keeps the task surface byte-identical
+	 * to the scoped load. A standalone function, never a `this`-bound method:
+	 * subagents forward it as is, and a parked subagent keeps it for revival
+	 * after its parent is gone.
 	 */
 	effectiveExtensionRoots?: () => EffectiveExtensionRoots;
 	/**
@@ -378,7 +380,12 @@ export interface ToolSession {
 	 * cost ledger (`appendModelUsage`) without changing advisor-local IDs.
 	 */
 	sessionManager?: Pick<SessionManager, "appendCustomEntry" | "ensureOnDisk" | "flush" | "getBranch" | "getEntries"> &
-		Partial<Pick<SessionManager, "getSessionId" | "getLeafId" | "appendModelUsage" | "getArtifactsDir">>;
+		Partial<
+			Pick<
+				SessionManager,
+				"getSessionId" | "getLeafId" | "appendModelUsage" | "getArtifactsDir" | "branchNavigationRevision"
+			>
+		>;
 	/**
 	 * Session-owned raw SSE capture, shared with the `/debug` report. Optional:
 	 * helper and standalone contexts without one simply forgo `/debug` capture.
@@ -518,6 +525,12 @@ export interface ToolSession {
 	 * use this so branch rehydration agrees with the in-memory list.
 	 */
 	commitTodoPhases?: (phases: TodoPhase[]) => void;
+	/** Put a `todo` call's change to the selected backend, committing it when the backend accepts or when no backend decides. */
+	applyTodoChange?: (
+		change: TodoBackendChange,
+		commit: () => void,
+		signal?: AbortSignal,
+	) => TodoApplyOutcome | Promise<TodoApplyOutcome>;
 	/** Active workpool items whose incremental yields complete the current turn. */
 	getWorkPoolYieldItems?: () => readonly WorkPoolYieldItem[];
 	/** The `i` intent the model wrote on a tool call of the current turn, by call ID. */

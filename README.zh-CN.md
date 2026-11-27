@@ -482,7 +482,7 @@ Exa 也可以通过 `/login exa` 存储 API 密钥；显式选择无密钥模式
 | keys          | Kitty 键盘协议，带 xterm 回退 · PHF 完美哈希查找                      | phf                                       |   1,740 |
 | ast           | ast-grep 模式匹配与结构化重写                                         | ast-grep-core                             |   1,510 |
 | diff          | 为工具和预览提供结构化文件 diff                                       | 自研                                      |   1,030 |
-| pty           | 为 sudo · ssh 交互式提示分配原生 PTY                                  | portable-pty                              |     630 |
+| pty           | 为 sudo · ssh 交互式提示分配原生 PTY                                  | in-tree                                   |     630 |
 | crash_handler | 原生崩溃捕获与上报                                                    | 自研                                      |     610 |
 | highlight     | 语法高亮 · 11 种语义类别 · 30+ 个别名                                 | syntect                                   |     550 |
 | appearance    | Mode 2031 + 通过 CoreFoundation FFI 实现 macOS 原生深色/浅色检测      | core-foundation                           |     450 |

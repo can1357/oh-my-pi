@@ -64,14 +64,10 @@ export function isRevokedOAuthBearerError(error: unknown): boolean {
 	return status === 403 && message !== undefined && REVOKED_OAUTH_BEARER_PATTERN.test(message);
 }
 
-/**
- * The bearer is unusable until the user signs in again: an upstream
- * "invalidated oauth token", or a transport's copy for a grant missing a scope
- * the request needs ("sign-in is missing a permission omp needs").
- */
-const INVALIDATED_OAUTH_TOKEN_PATTERN = /\binvalidated oauth token\b|\bsign-in is missing a permission omp needs\b/i;
+/** The bearer is unusable until the user signs in again: an upstream "invalidated oauth token". */
+const INVALIDATED_OAUTH_TOKEN_PATTERN = /\binvalidated oauth token\b/i;
 
-/** Whether an upstream response explicitly says the supplied OAuth bearer was invalidated or lacks a required scope. */
+/** Whether an upstream response explicitly says the supplied OAuth bearer was invalidated. */
 export function isInvalidatedOAuthTokenError(error: unknown): boolean {
 	if (typeof error === "object" && error !== null && "errorMessage" in error) {
 		const errorMessage =

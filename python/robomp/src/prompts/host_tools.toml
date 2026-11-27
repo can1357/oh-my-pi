@@ -49,6 +49,7 @@ description = "Push the workspace branch to origin. Pre-publish gate (when the r
 
 [gh_push_branch.parameters]
 branch = "Optional branch override; defaults to the workspace branch."
+base = "Optional base branch the pre-push gates diff against (default: repo default). Pass the same `base` you will give `gh_open_pr`."
 skip_checks = "Bypass `bun run fix` + `bun check`. Use ONLY after verifying (e.g. `git diff origin/<default>..HEAD` against the failing paths) the failure exists on `main` and is NOT caused by your diff. Dirty-tree gate still runs — commit everything first."
 
 [release_ci_status]
