@@ -16,6 +16,7 @@ import { describe, expect, it } from "bun:test";
 import { createSurface, type JSXNode, settle, signal, startHost, type UiNode } from "@oh-my-pi/pi-tui";
 import { type MemoryTerminal, memoryTerminal } from "@oh-my-pi/pi-tui/testing/memory-terminal";
 import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
+import { KittyTerminal } from "kitty-vt-wasm";
 
 async function openHarness(columns = 40, rows = 10, resizeScrollback: "preserve" | "rebuild" = "preserve") {
 	const main = signal<JSXNode[]>([<rows key="live" lines={["live one"]} />]);
@@ -114,6 +115,34 @@ describe("Host.setOutputHold", () => {
 		} finally {
 			await host.stop();
 			surface.dispose();
+		}
+	});
+
+	it("takes the notice down on release, over a frame row and below the frame", async () => {
+		for (const length of [12, 2]) {
+			const main = signal<JSXNode[]>([<rows key="live" lines={Array.from({ length }, (_, i) => `row-${i}`)} />]);
+			const surface = createSurface(() => ({ main: () => main() }));
+			const term = memoryTerminal({ columns: 40, rows: 6 });
+			const host = await startHost({
+				surface,
+				theme: () => loadThemeSync("dark"),
+				native: false,
+				driver: term.options,
+			});
+			try {
+				await Bun.sleep(80);
+				host.setOutputHold(true, "HOLD NOTICE");
+				host.setOutputHold(false);
+				await Bun.sleep(80);
+				const vt = KittyTerminal.createSync({ columns: 40, rows: 6, scrollback: 100 });
+				vt.write(output(term));
+				const screen = Array.from({ length: 6 }, (_, y) => vt.line(y).trimEnd());
+				expect(screen.join("\n")).not.toContain("HOLD NOTICE");
+				expect(screen).toContain(`row-${length - 1}`);
+			} finally {
+				await host.stop();
+				surface.dispose();
+			}
 		}
 	});
 

@@ -274,6 +274,8 @@ export class FrameWriter {
 	#pushedCursor: number | undefined;
 	/** Output stopped by {@link setOutputHold}: no frame, resize write or anchor probe goes out. */
 	#held = false;
+	/** The hold notice is on the last screen row, outside the frame diff, until the release takes it down. */
+	#holdNotice = false;
 
 	constructor(options: FrameWriterOptions) {
 		this.#options = options;
@@ -427,8 +429,12 @@ export class FrameWriter {
 			if (this.#alt && !this.#fullscreen) this.#send(this.#leaveAlt());
 		} else if (this.#started && tx) {
 			// The terminal reflowed while held: recover the anchor, repaint in place, never replay.
+			// That repaint also covers the notice row.
+			this.#holdNotice = false;
 			tx.inPlace = true;
 			this.#settle();
+		} else if (this.#holdNotice) {
+			this.#clearHoldNotice();
 		}
 		if (hold && notice !== undefined && !this.#alt) this.#drawHoldNotice(notice);
 	}
@@ -1045,6 +1051,23 @@ export class FrameWriter {
 			`${sync ? SYNC_BEGIN : ""}\x1b7${position(this.#rows - 1, 0)}${SGR_RESET}${ERASE_LINE}` +
 			`\x1b[2m${label}${SGR_RESET}\x1b8${sync ? SYNC_END : ""}`;
 		this.#send(out);
+		this.#holdNotice = true;
+	}
+
+	/**
+	 * Take the hold notice down. The frame diff never saw it, so a frame row
+	 * under it is marked unknown (the next frame redraws it); a row below the
+	 * frame is erased directly.
+	 */
+	#clearHoldNotice(): void {
+		this.#holdNotice = false;
+		if (!this.#started || this.#alt) return;
+		const row = this.#rows - 1 - this.#topLo;
+		if (this.#topKnown() && row >= 0 && row < this.#shown.length) {
+			this.#shown[row] = UNKNOWN_ROW;
+			return;
+		}
+		this.#send(`\x1b7${position(this.#rows - 1, 0)}${SGR_RESET}${ERASE_LINE}\x1b8`);
 	}
 
 	/**
