@@ -12,6 +12,7 @@ import type { KeyId } from "../config/keybindings/key-id";
 import type { KeybindingsManager } from "../config/keybindings/keybindings";
 import type { SpaceHoldHandler } from "../config/keybindings/space-hold";
 import type { Settings } from "../config/settings";
+import type { AiuTotals } from "../session/aiu-billing";
 import type {
 	AutocompleteProviderFactory,
 	ExtensionCustomFactory,
@@ -376,6 +377,17 @@ export interface ResumeSessionOptions {
 	 * `sessionPath` is that copy, and the notice names the file it came from.
 	 */
 	continuation?: SessionContinuation;
+}
+
+/** How {@link InteractiveModeContext.applyCwdChange} re-scopes the session and reports memory. */
+export interface CwdChangeOptions {
+	/** The session returns to a directory after a failed move; see `CwdRescopeOptions.restore`. */
+	restore?: boolean;
+	/**
+	 * Receives the memory warning for the directory the call leaves the session in, at most once per call.
+	 * A caller that applies a cwd again during a rollback shows only the last call's warning.
+	 */
+	onWarning: (warning: string) => void;
 }
 
 export interface RenderSessionContextOptions {
@@ -999,12 +1011,12 @@ export interface InteractiveModeContext {
 	refreshSlashCommandState(cwd?: string): Promise<void>;
 	/** Reload session skills and derived `/skill:<name>` commands. */
 	refreshSkillState(): Promise<void>;
-	applyCwdChange(newCwd: string): Promise<boolean>;
+	applyCwdChange(newCwd: string, options: CwdChangeOptions): Promise<boolean>;
 
 	// Selector handling
 	showSettingsSelector(): void;
 	/** Open the fullscreen `/usage` dashboard overlay for the given reports. */
-	showUsageDashboard(reports: UsageReport[]): void;
+	showUsageDashboard(reports: UsageReport[], sessionAiu?: AiuTotals): void;
 	showAdvisorConfigure(): void;
 	showHistorySearch(): void;
 	showExtensionsDashboard(): void;

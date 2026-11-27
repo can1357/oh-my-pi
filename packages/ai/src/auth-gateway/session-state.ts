@@ -204,7 +204,7 @@ function conversationKeys(request: AuthGatewaySessionStateRequest): string[] {
  * fields are serialized on their own, so two histories hash alike exactly when
  * their role + content serialize alike.
  */
-function hashMessage(message: Message, seed: number | bigint): number | bigint {
+function hashMessage(message: Message, seed: bigint): bigint {
 	let hash = Bun.hash(message.role, seed);
 	const { content } = message;
 	if (typeof content === "string") return Bun.hash(content, hash);

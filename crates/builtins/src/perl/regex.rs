@@ -3357,7 +3357,7 @@ pub(super) fn char_by_name(name: &[u8]) -> Option<u32> {
 	};
 	if alias.is_some() { return alias; }
 	if name.bytes().any(|b| b.is_ascii_lowercase()) { return None; }
-	unicode_names2::character(name).map(u32::from)
+	super::charnames::character(name)
 }
 
 fn diagnostic(src: &PStr, reason: &str, at: Option<usize>) -> String {

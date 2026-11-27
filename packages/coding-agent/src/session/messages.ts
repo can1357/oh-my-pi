@@ -12,6 +12,7 @@ import {
 	type PythonExecutionMessage,
 	type CustomMessage,
 	LIVE_DELEGATION_MESSAGE_TYPE,
+	LIVE_ENDED_MESSAGE_TYPE,
 	type HookMessage,
 	type FileMentionMessage,
 	isUserInvokedSkillPrompt,
@@ -65,6 +66,7 @@ import { copyPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import { readerIncludesThinking } from "@oh-my-pi/snapcompact";
+import liveEndedTemplate from "../live/prompts/live-ended.md" with { type: "text" };
 import voiceRequestTemplate from "../live/prompts/voice-request.md" with { type: "text" };
 import userInterjectionTemplate from "../prompts/steering/user-interjection.md" with { type: "text" };
 import { cleanTinyMessage, formatTitleConversationContext, type TitleConversationTurn } from "../tiny/message-preproc";
@@ -794,6 +796,9 @@ function wrapSteeringUserMessage(message: SteeringUserMessage): UserMessage {
 			: {
 					role: "user",
 					content: message.content,
+					...(isRecord(message.details) && message.details.duringLiveCall === true
+						? { duringLiveCall: true as const }
+						: {}),
 					attribution: "user",
 					timestamp: message.timestamp,
 				};
@@ -1126,6 +1131,8 @@ interface ConvertArrayMemo {
 	output: Message[];
 	tail: AgentMessage | undefined;
 	prefixOutputLen: number;
+	/** {@link VoiceScope} state before the tail, so growth resumes the scan at the old tail. */
+	prefixVoiceOpen: boolean;
 }
 
 let convertGeneration = 0;
@@ -1281,6 +1288,54 @@ function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
 
 const NO_LLM_MESSAGES: readonly Message[] = [];
 
+/** Spoken-request state carried through one history conversion by {@link convertMessageAt}. */
+interface VoiceScope {
+	/** A converted spoken request (`live-delegation`) no live-ended notice has closed yet. */
+	open: boolean;
+}
+
+/** A prompt the user wrote: typed, a `/skill:` invocation, or a collab peer's prompt; never agent-sent or synthetic. */
+function isUserWrittenPrompt(m: AgentMessage): boolean {
+	if (m.role === "user") return m.attribution !== "agent" && m.synthetic !== true;
+	return m.role === "custom" && !m.excludeFromContext && isUserTurnInitiator(m);
+}
+
+/** Stamp new written input at admission, not during conversion: replay cannot consult a live controller. */
+export function markDuringLiveCall(m: AgentMessage): void {
+	if (!isUserWrittenPrompt(m)) return;
+	if (m.role === "user") m.duringLiveCall = true;
+	else if (m.role === "custom") m.details = { ...(isRecord(m.details) ? m.details : {}), duringLiveCall: true };
+}
+
+/** Change to the spoken-answer scope; `undefined` leaves the preceding scope intact. */
+export function liveVoiceScopeChange(m: AgentMessage): boolean | undefined {
+	if (m.role === "compactionSummary") return m.liveVoiceOpen;
+	if (m.role === "custom" && !m.excludeFromContext) {
+		if (m.customType === LIVE_DELEGATION_MESSAGE_TYPE) return true;
+		if (m.customType === LIVE_ENDED_MESSAGE_TYPE) return false;
+	}
+	if (!isUserWrittenPrompt(m)) return undefined;
+	const inCall =
+		m.role === "user"
+			? m.duringLiveCall
+			: m.role === "custom" && isRecord(m.details) && m.details.duringLiveCall === true;
+	return inCall ? undefined : false;
+}
+
+/** The notice that the live voice call is over, placed right before the user's prompt `next`. */
+function liveEndedNotice(next: AgentMessage): Message | undefined {
+	const notice = convertMessageToLlm({
+		role: "custom",
+		customType: LIVE_ENDED_MESSAGE_TYPE,
+		content: prompt.render(liveEndedTemplate),
+		display: false,
+		attribution: "agent",
+		timestamp: next.timestamp,
+	});
+	if (notice) copyPerCallContextMessage(notice, next);
+	return notice;
+}
+
 /**
  * Converts `messages[index]` with its neighbor-sensitive state.
  * {@link convertToLlm} and {@link convertMessagesForContextView} both go
@@ -1292,6 +1347,7 @@ function convertMessageAt(
 	messages: AgentMessage[],
 	index: number,
 	includeInterruptedThinking: boolean,
+	voice: VoiceScope,
 	convert: (m: AgentMessage, interruptedNext: boolean) => Message[],
 ): readonly Message[] {
 	const m = messages[index];
@@ -1303,6 +1359,18 @@ function convertMessageAt(
 	}
 	if (!includeInterruptedThinking && m.role === "custom" && m.customType === INTERRUPTED_THINKING_MESSAGE_TYPE) {
 		return NO_LLM_MESSAGES;
+	}
+	const change = liveVoiceScopeChange(m);
+	if (change !== undefined) {
+		const wasOpen = voice.open;
+		voice.open = change;
+		if (m.role === "custom" && m.customType === LIVE_ENDED_MESSAGE_TYPE) {
+			// A saved notice with no open scope would repeat one already sent.
+			if (!wasOpen) return NO_LLM_MESSAGES;
+		} else if (wasOpen && !change) {
+			const notice = liveEndedNotice(m);
+			if (notice) return [notice, ...convert(m, false)];
+		}
 	}
 	return convert(m, false);
 }
@@ -1332,8 +1400,15 @@ export function convertMessagesForContextView(messages: AgentMessage[], model?: 
 	const modelMessages = wrapSteeringForModel(messages);
 	const includeInterruptedThinking = model !== undefined && readerIncludesThinking(model);
 	const result: ContextViewMessage[] = [];
+	const voice: VoiceScope = { open: false };
 	for (let sourceIndex = 0; sourceIndex < modelMessages.length; sourceIndex++) {
-		for (const message of convertMessageAt(modelMessages, sourceIndex, includeInterruptedThinking, convertOne)) {
+		for (const message of convertMessageAt(
+			modelMessages,
+			sourceIndex,
+			includeInterruptedThinking,
+			voice,
+			convertOne,
+		)) {
 			const replay = toProviderReplayMessage(message);
 			if (replay) result.push({ message: replay, sourceIndex, convertedIndex: result.length });
 		}
@@ -1403,6 +1478,7 @@ export function convertToLlm(messages: AgentMessage[], model?: Model): Message[]
 	// array while swapping earlier identities, forcing a full rebuild.
 	let out: Message[];
 	let start: number;
+	const voice: VoiceScope = { open: false };
 	if (
 		reusable &&
 		len > memo.length &&
@@ -1412,6 +1488,7 @@ export function convertToLlm(messages: AgentMessage[], model?: Model): Message[]
 	) {
 		out = memo.output.slice(0, memo.prefixOutputLen);
 		start = memo.length - 1;
+		voice.open = memo.prefixVoiceOpen;
 	} else {
 		out = [];
 		start = 0;
@@ -1420,9 +1497,13 @@ export function convertToLlm(messages: AgentMessage[], model?: Model): Message[]
 	// Output length contributed by messages[0 .. len-1), captured when the loop
 	// reaches the final index so the next growth can reuse this prefix.
 	let prefixOutputLen = 0;
+	let prefixVoiceOpen = false;
 	for (let i = start; i < len; i++) {
-		if (i === len - 1) prefixOutputLen = out.length;
-		const fragment = convertMessageAt(messages, i, includeInterruptedThinking, convertOneCached);
+		if (i === len - 1) {
+			prefixOutputLen = out.length;
+			prefixVoiceOpen = voice.open;
+		}
+		const fragment = convertMessageAt(messages, i, includeInterruptedThinking, voice, convertOneCached);
 		for (const msg of fragment) out.push(msg);
 	}
 	if (len === 0) prefixOutputLen = 0;
@@ -1436,6 +1517,7 @@ export function convertToLlm(messages: AgentMessage[], model?: Model): Message[]
 		output: out,
 		tail,
 		prefixOutputLen,
+		prefixVoiceOpen,
 	});
 	return out;
 }

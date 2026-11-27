@@ -220,6 +220,8 @@ One object axis carries a computed form: `long-context-cost` accepts either the 
 
 `context-window-authoritative #true` preserves a host's supplied context window through runtime model selection instead of applying inferred expansion or reference-price-tier caps. Explicit user context overrides still apply afterward. It applies to rows materialized through `buildModel` (discovery and regenerated bundles). See [`providers/factory-droid.kdl`](providers/factory-droid.kdl).
 
+`tier-cache-follows-input #true` marks a host's long-context tier as billing cache reads and writes at the same multiple of its source row as input. GitHub Copilot discovery scales the cache legs `billing.token_prices` omits on a synthesized `-1m` row by that input ratio; a reported `cache_price` wins, and unmarked tiers carry the source row's cache legs unscaled. See [`providers/github-copilot.kdl`](providers/github-copilot.kdl).
+
 `long-context-window-uncapped #true` keeps a model's `long-context-cost` tier from capping its runtime context window while extended context is off: the coding agent normally lowers the window to the tier's input threshold so compaction fires before a request crosses into premium pricing. Use it where the tier is an API-equivalent estimate on a subscription host (`xai-oauth`) or where the model is served at its full window regardless (GPT-5.4, except on GitHub Copilot). `buildModel` materializes it as `Model.longContextWindowUncapped`; explicit user context overrides still apply.
 
 `thinking-effort-map` maps served efforts to wire values. An entry for an effort the ladder does not serve whose value is a served effort is an alias instead: clamping a request for that effort follows it rather than stepping down to the next lower tier (Refuseless sends `medium` to `high` on its `low|high|max` ladder). `reasoning-effort-map` entries never alias.
@@ -427,6 +429,9 @@ auth "anthropic" {
     login-warning "Account risk to accept"       // a new login asks the user to type "yes" first
     connected-name "Acme Pro plan"               // what linked-account surfaces call the provider; `name` stays the `/login` label
     active-notice "Using your Acme Pro plan"     // transcript line when a session starts using one of the provider's models
+    login-notice "Requests follow Acme's terms"  // shown once after each successful sign-in
+    manage-url "https://acme.example/apps"       // the host page where the user turns this app's access on or off
+    required-scope "acme.inference"              // a login without this scope stays signed in with the provider off
 }
 ```
 
@@ -439,6 +444,8 @@ auth "anthropic" {
 `login-warning "<text>"` keeps a provider usable but makes every new login accept a risk first: the login list marks it "(at your own risk)", and `login` shows the text and starts the flow only after the user types `yes`; any other answer or a cancel stores nothing. Stored logins, token refresh and requests are not asked again. An extension that registers its own OAuth login under the id owns that prompt instead.
 
 `connected-name "<text>"` names the provider on every surface after an account is linked — login success lines, model picker provider scopes, logout and account rows, usage and status output — while `name` stays the pre-sign-in label in the `/login` list. Absent, those surfaces keep showing the provider id (title-cased where they already did). `active-notice "<text>"` adds one dim transcript line, `<text> · <model name>`, when the session switches to one of the provider's models or first runs a turn on one; it shows once per model per session.
+
+`login-notice "<text>"` adds a dim line under the login success line. `manage-url "<url>"` is the host's page where the user turns the app's access on or off: login and logout output link it, and the model picker's provider pane opens it (F6). `required-scope "<scope>"` names the OAuth scope a login must hold to serve requests; a login whose granted `scope` lacks it is kept, and login output, logout rows and the model picker show the provider as off instead of signing the user out.
 
 Login kinds:
 

@@ -1,13 +1,17 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import { cdpTargets, findFreeCdpPort } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
+import * as discovery from "@oh-my-pi/pi-coding-agent/tools/browser/relay/discovery";
 import {
 	DISCARDED_TABS_PROTOCOL_VERSION,
 	type TabSnapshot,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/protocol";
 import { type RelayServer, startRelayServer } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/server";
-import { releaseTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
+import * as windowsDiscovery from "@oh-my-pi/pi-coding-agent/tools/browser/relay/windows-discovery";
+import * as networking from "@oh-my-pi/pi-coding-agent/tools/browser/relay/wsl-networking";
+import type { WorkerInbound, WorkerOutbound } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-protocol";
+import { getTab, releaseTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { type FakeAnswer, type FakeDaemon, startFakeDaemon } from "./tern-fake-daemon";
@@ -20,7 +24,13 @@ const BLOCKS = [
 	{ block: 7, url: "https://docs.example/c", title: "Docs C", owner: null, shown: true, driven: false },
 ];
 
-const ENV_KEYS = ["TERN_PANE_SOCKET", "TERN_PANE", "PI_BROWSER_TERN", "PI_BROWSER_RELAY"] as const;
+const ENV_KEYS = [
+	"TERN_PANE_SOCKET",
+	"TERN_PANE",
+	"PI_BROWSER_TERN",
+	"PI_BROWSER_RELAY",
+	"PI_PANEL_RELAY_URL",
+] as const;
 let savedEnv: Map<string, string | undefined>;
 
 let daemon: FakeDaemon | undefined;
@@ -226,7 +236,147 @@ async function connectExtension(port: number, tabs: TabSnapshot[]): Promise<WebS
 	return await opened.promise;
 }
 
+async function windowsKind(port: number) {
+	const cdpUrl = `http://127.0.0.1:${port}`;
+	const info = await (await fetch(`${cdpUrl}/json/version`, { proxy: "" })).json();
+	if (!isRecord(info) || typeof info.ompRelayInstance !== "string") throw new Error("No relay instance");
+	return { kind: "relay" as const, cdpUrl, windowsInstance: info.ompRelayInstance };
+}
+
+describe("browser open with a mirrored WSL relay", () => {
+	it("reuses the verified name but refuses a different relay, even on the same port", async () => {
+		process.env.PI_BROWSER_RELAY = "1";
+		const realWorker = globalThis.Worker;
+		let workers = 0;
+		const old = startRelayServer({ port: 0 });
+		const replacement = startRelayServer({ port: 0 });
+		const name = "windows-bound";
+		const freshName = "windows-fresh";
+		const panelName = "windows-panel";
+		try {
+			spyOn(networking, "getWslNetworkingMode").mockReturnValue("mirrored");
+			spyOn(discovery, "discoverRelayEndpoints").mockReturnValue([]);
+			const windows = spyOn(windowsDiscovery, "discoverWindowsRelay");
+			// Use the real prelude, browser registry, relay and tab supervisor; only emulate the page worker.
+			globalThis.Worker = class extends EventTarget {
+				postMessage(message: WorkerInbound) {
+					const send = (data: WorkerOutbound) => this.dispatchEvent(new MessageEvent("message", { data }));
+					if (message.type === "init") {
+						send({ type: "setup" });
+						send({
+							type: "ready",
+							info: { targetId: String(++workers), url: "about:blank", viewport: { width: 800, height: 600 } },
+						});
+					} else if (message.type === "close") {
+						queueMicrotask(() => send({ type: "closed" }));
+					}
+				}
+				terminate() {}
+			} as unknown as typeof Worker;
+			await connectExtension(old.port, []);
+			await connectExtension(replacement.port, []);
+			const oldKind = await windowsKind(old.port);
+			const replacementKind = await windowsKind(replacement.port);
+			windows.mockResolvedValue(oldKind);
+			const tool = session();
+			const open = { action: "open", name, timeout: 3 };
+			expect((await invoke(tool, open)).text).toStartWith(`Opened tab "${name}"`);
+			const bound = getTab(name);
+			expect(bound?.browser.kind).toEqual(oldKind);
+			expect((await invoke(tool, open)).text).toStartWith(`Reused tab "${name}"`);
+			expect(getTab(name)).toBe(bound);
+			expect(windows).toHaveBeenCalledTimes(1);
+			expect(workers).toBe(1);
+
+			old.stop();
+			const requests: string[] = [];
+			using _impostor = Bun.serve({
+				hostname: "127.0.0.1",
+				port: old.port,
+				fetch(request) {
+					requests.push(`${request.method} ${new URL(request.url).pathname}`);
+					return Response.json({ ompRelayVersion: "1.0.0", ompRelayInstance: replacementKind.windowsInstance });
+				},
+			});
+			await expect(invoke(tool, open)).rejects.toThrow(/bound Windows omp browser relay.*did not answer from WSL/);
+			expect(windows).toHaveBeenCalledTimes(2);
+			windows.mockResolvedValue(replacementKind);
+			await expect(invoke(tool, open)).rejects.toThrow(/bound to a different browser/);
+			expect(windows).toHaveBeenCalledTimes(3);
+			expect(requests).toEqual(["GET /json/version", "GET /json/version"]);
+			expect(getTab(name)).toBe(bound);
+			expect(workers).toBe(1);
+
+			expect((await invoke(tool, { ...open, name: freshName })).text).toStartWith(`Opened tab "${freshName}"`);
+			expect(getTab(freshName)?.browser.kind).toEqual(replacementKind);
+			// The relay discovery last verified answers its identity again: no new helper launch.
+			expect(windows).toHaveBeenCalledTimes(3);
+
+			process.env.PI_BROWSER_RELAY = "only";
+			process.env.PI_PANEL_RELAY_URL = replacementKind.cdpUrl;
+			const panel = session({ "browser.relayUrl": "///" });
+			await expect(invoke(panel, open)).rejects.toThrow(/bound to a different browser/);
+			expect((await invoke(panel, { ...open, name: panelName })).text).toStartWith(`Opened tab "${panelName}"`);
+			expect(getTab(panelName)?.browser.kind).toEqual({ kind: "relay", cdpUrl: replacementKind.cdpUrl });
+			expect(windows).toHaveBeenCalledTimes(3);
+		} finally {
+			for (const tab of [name, freshName, panelName])
+				await releaseTab(tab, { keepPage: true }).catch(() => undefined);
+			old.stop();
+			replacement.stop();
+			globalThis.Worker = realWorker;
+			mock.restore();
+		}
+	});
+});
+
 describe("browser targets with the relay", () => {
+	it("rediscovers a rotated Windows relay instead of listing the old browser", async () => {
+		process.env.PI_BROWSER_RELAY = "1";
+		const mode = spyOn(networking, "getWslNetworkingMode").mockReturnValue("mirrored");
+		const local = spyOn(discovery, "discoverRelayEndpoints").mockReturnValue([]);
+		const windows = spyOn(windowsDiscovery, "discoverWindowsRelay");
+		const methods: string[] = [];
+		using reused = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch(request) {
+				methods.push(request.method);
+				return Response.json({ Browser: "Chrome/151" });
+			},
+		});
+		const hosts: RelayServer[] = [];
+		try {
+			local.mockReturnValueOnce([reused.url.origin]);
+			const tool = session();
+			for (const title of ["First", "Second"]) {
+				const host = startRelayServer({ port: 0 });
+				hosts.push(host); // Keep the first port allocated so the replacement cannot reuse it.
+				const url = `https://example.com/${title}`;
+				const peer = await connectExtension(host.port, [snapshot(1, { url, title })]);
+				try {
+					windows.mockResolvedValue(await windowsKind(host.port));
+					const { value } = await invoke(tool, { action: "targets", app: "relay" });
+					expect(value).toEqual([{ target: url, title, url, shown: false }]);
+				} finally {
+					peer.close();
+				}
+			}
+			expect(methods).toEqual(["GET"]);
+			await expect(invoke(session({ "browser.relayUrl": "///" }), { action: "open", app: "relay" })).rejects.toThrow(
+				/configure browser\.relayUrl/,
+			);
+			mode.mockReturnValue("nat");
+			await expect(invoke(tool, { action: "targets", app: "relay" })).rejects.toThrow(/No local omp browser relay/);
+			expect(windows).toHaveBeenCalledTimes(2);
+		} finally {
+			for (const host of hosts) host.stop();
+			windows.mockRestore();
+			local.mockRestore();
+			mode.mockRestore();
+		}
+	});
+
 	it("lists the user's Chrome pages, skipping discarded ones", async () => {
 		for (const key of ENV_KEYS) delete process.env[key];
 		const port = await findFreeCdpPort();

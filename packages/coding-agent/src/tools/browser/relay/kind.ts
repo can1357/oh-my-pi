@@ -13,6 +13,7 @@ import { parseFlag } from "@oh-my-pi/pi-utils";
 export interface RelayKind {
 	kind: "relay";
 	cdpUrl: string;
+	windowsInstance?: string;
 }
 
 /** Whether `cdpUrl` names this machine; a browser behind any other endpoint may be on another OS. */

@@ -827,6 +827,11 @@ export interface Response {
 	 */
 	usage?: ResponseUsage;
 	/**
+	 * Input rewrites the API applied, e.g. reasoning items removed with reason
+	 * `prefix_mismatch` after earlier content changed (GPT-6.2+).
+	 */
+	input_transformations?: unknown[];
+	/**
 	 * @deprecated This field is being replaced by `safety_identifier` and
 	 * `prompt_cache_key`. Use `prompt_cache_key` instead to maintain caching
 	 * optimizations. A stable identifier for your end-users. Used to boost cache hit

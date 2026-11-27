@@ -20,21 +20,67 @@ pub(crate) enum Backrefs {
 
 /// A pattern the BRE dialect cannot express.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(
+	not(any(feature = "util.grep", feature = "util.sed")),
+	allow(dead_code, reason = "only grep's ERE validation raises some variants")
+)]
 pub(crate) enum BreError {
 	/// A repetition operator with nothing to repeat, where the tools error
 	/// rather than treating the character as a literal.
 	RepetitionOperandMissing,
-	InvalidBracketComponent,
+	/// A `[` with no closing `]`, or a `[:`, `[.` or `[=` with no closing partner.
+	UnmatchedBracket,
+	/// A `[` or `[^` that ends an ERE, which glibc rejects as malformed outright.
+	BracketAtEnd,
+	/// A `[:name:]` naming no POSIX class.
+	InvalidClassName,
+	/// A `[.x.]` or `[=x=]` that is not a single character.
+	InvalidCollation,
 	InvalidCharacterRange,
+	/// An ERE `(` that is never closed.
+	UnmatchedParen,
+	/// An ERE interval `{}` or `{n,m}` with `n > m`.
+	InvalidInterval,
+	/// An ERE interval bound above glibc's `RE_DUP_MAX` (32767).
+	IntervalTooBig,
+	/// An ERE ending in an unescaped `\`.
+	TrailingBackslash,
+	/// An ERE back-reference to a group that is not closed before it.
+	InvalidBackReference,
 }
 
 impl BreError {
-	/// The message GNU and BSD grep both use for this condition.
+	/// The BSD wording `sed` and `nl` print; conditions only grep's ERE
+	/// validation raises have no BSD form and use glibc's.
+	#[cfg_attr(
+		not(any(feature = "util.sed", feature = "util.nl")),
+		allow(dead_code, reason = "only sed and nl print the BSD wording")
+	)]
 	pub(crate) fn message(self) -> &'static str {
 		match self {
 			Self::RepetitionOperandMissing => "repetition-operator operand invalid",
-			Self::InvalidBracketComponent => "invalid character class, equivalence class, or collating element",
+			Self::UnmatchedBracket | Self::InvalidClassName | Self::InvalidCollation => {
+				"invalid character class, equivalence class, or collating element"
+			},
 			Self::InvalidCharacterRange => "invalid character range",
+			_ => self.gnu_message(),
+		}
+	}
+
+	/// glibc's `regerror` text for this condition, which GNU grep prints.
+	pub(crate) fn gnu_message(self) -> &'static str {
+		match self {
+			Self::RepetitionOperandMissing => "Invalid preceding regular expression",
+			Self::UnmatchedBracket => "Unmatched [, [^, [:, [., or [=",
+			Self::BracketAtEnd => "Invalid regular expression",
+			Self::InvalidClassName => "Invalid character class name",
+			Self::InvalidCollation => "Invalid collation character",
+			Self::InvalidCharacterRange => "Invalid range end",
+			Self::UnmatchedParen => r"Unmatched ( or \(",
+			Self::InvalidInterval => r"Invalid content of \{\}",
+			Self::IntervalTooBig => "Regular expression too big",
+			Self::TrailingBackslash => "Trailing backslash",
+			Self::InvalidBackReference => "Invalid back reference",
 		}
 	}
 }
@@ -281,7 +327,7 @@ fn push_bracket_expression(result: &mut String, chars: &mut Peekable<Chars<'_>>)
 			result.push('[');
 			result.push(marker);
 			loop {
-				let next = probe.next().ok_or(BreError::InvalidBracketComponent)?;
+				let next = probe.next().ok_or(BreError::UnmatchedBracket)?;
 				if next == marker && probe.next_if_eq(&']').is_some() {
 					break;
 				}
@@ -295,7 +341,7 @@ fn push_bracket_expression(result: &mut String, chars: &mut Peekable<Chars<'_>>)
 					"alnum" | "alpha" | "blank" | "cntrl" | "digit" | "graph" | "lower"
 						| "print" | "punct" | "space" | "upper" | "xdigit"
 				) {
-					return Err(BreError::InvalidBracketComponent);
+					return Err(BreError::InvalidClassName);
 				}
 				result.push_str(":]");
 				false
@@ -304,9 +350,9 @@ fn push_bracket_expression(result: &mut String, chars: &mut Peekable<Chars<'_>>)
 				// its own collating symbol/equivalence class. Do not hand
 				// locale-specific multi-character elements to Rust as sets.
 				let mut body = result[body_start + 2..].chars();
-				let symbol = body.next().ok_or(BreError::InvalidBracketComponent)?;
+				let symbol = body.next().ok_or(BreError::InvalidCollation)?;
 				if body.next().is_some() {
-					return Err(BreError::InvalidBracketComponent);
+					return Err(BreError::InvalidCollation);
 				}
 				result.truncate(body_start);
 				push_class_literal(result, symbol);
@@ -337,79 +383,149 @@ fn push_class_literal(result: &mut String, c: char) {
 	result.push(c);
 }
 
-/// Translate bracket expressions in an ERE. Grep additionally treats a
-/// non-interval `{` as literal and rejects repetition without an operand.
+/// Translate bracket expressions in an ERE. Grep additionally reads a
+/// non-interval `{` and an unopened `)` as literals, and rejects repetition
+/// without an operand and the other patterns glibc refuses.
 #[cfg(any(feature = "util.grep", feature = "util.sed"))]
 pub(crate) fn ere_to_rust(pattern: &str, grep: bool) -> Result<Cow<'_, str>, BreError> {
-	let rewrite = pattern.contains('[') || (grep && pattern.contains('{'));
-	if !grep && !rewrite {
+	if !grep && !pattern.contains('[') {
 		return Ok(Cow::Borrowed(pattern));
 	}
 
-	let mut result = if rewrite { String::with_capacity(pattern.len()) } else { String::new() };
+	let mut result = String::with_capacity(pattern.len());
 	let mut chars = pattern.chars().peekable();
 	let mut has_atom = false;
+	// Grep only: numbers of the groups still open, the count opened so far,
+	// and a bit per closed group `\1`-`\9` may name.
+	let mut open_groups = Vec::new();
+	let mut groups = 0u32;
+	let mut closed_groups = 0u16;
 	while let Some(c) = chars.next() {
 		match c {
 			'\\' => {
-				if rewrite {
-					result.push(c);
-				}
-				if let Some(next) = chars.next() && rewrite {
-					result.push(next);
+				result.push(c);
+				match chars.next() {
+					Some(next) => {
+						if grep
+							&& let Some(group @ 1..=9) = next.to_digit(10)
+							&& closed_groups & (1 << group) == 0
+						{
+							return Err(BreError::InvalidBackReference);
+						}
+						result.push(next);
+					},
+					None if grep => return Err(BreError::TrailingBackslash),
+					None => {},
 				}
 				has_atom = true;
 				continue;
 			},
 			'[' => {
 				push_bracket_expression(&mut result, &mut chars)?;
+				// An unterminated bracket leaves only its `[` behind.
+				if grep && result.ends_with('[') {
+					let mut rest = chars.clone();
+					rest.next_if_eq(&'^');
+					return Err(if rest.peek().is_none() {
+						BreError::BracketAtEnd
+					} else {
+						BreError::UnmatchedBracket
+					});
+				}
 				has_atom = true;
 				continue;
+			},
+			'(' if grep => {
+				groups += 1;
+				open_groups.push(groups);
+				has_atom = false;
+			},
+			')' if grep => {
+				match open_groups.pop() {
+					Some(group) if group <= 9 => closed_groups |= 1 << group,
+					Some(_) => {},
+					// GNU grep reads a `)` that closes no group as a literal.
+					None => result.push('\\'),
+				}
+				has_atom = true;
 			},
 			'(' | '|' | '^' | '$' => has_atom = false,
 			'*' | '+' | '?' if grep && !has_atom => {
 				return Err(BreError::RepetitionOperandMissing);
 			},
-			'{' if grep => {
-				if opens_interval(chars.clone()) {
-					if !has_atom {
-						return Err(BreError::RepetitionOperandMissing);
-					}
-				} else {
-					// Keep an attempted but malformed interval for the engine
-					// to reject, rather than turning a typo into a match.
-					if !chars.peek().is_some_and(char::is_ascii_digit) {
-						result.push('\\');
-					}
+			'{' if grep => match classify_brace(chars.clone()) {
+				Brace::Interval | Brace::Invalid(BreError::IntervalTooBig) if !has_atom => {
+					return Err(BreError::RepetitionOperandMissing);
+				},
+				// The engine needs the lower bound glibc leaves implicit.
+				Brace::Interval if chars.peek() == Some(&',') => {
+					result.push_str("{0");
+					continue;
+				},
+				Brace::Interval => {},
+				Brace::Invalid(error) if has_atom => return Err(error),
+				// glibc reads a brace with nothing to repeat as a literal.
+				Brace::Literal | Brace::Invalid(_) => {
+					result.push('\\');
 					has_atom = true;
-				}
+				},
 			},
 			_ => has_atom = true,
 		}
-		if rewrite {
-			result.push(c);
-		}
+		result.push(c);
+	}
+	if !open_groups.is_empty() {
+		return Err(BreError::UnmatchedParen);
 	}
 
-	Ok(if rewrite && result != pattern { Cow::Owned(result) } else { Cow::Borrowed(pattern) })
+	Ok(if result == pattern { Cow::Borrowed(pattern) } else { Cow::Owned(result) })
 }
 
-/// Does the text just past a `{` complete a valid interval (`n}`, `n,}` or `n,m}`)?
+/// How GNU grep reads an ERE `{`.
 #[cfg(any(feature = "util.grep", feature = "util.sed"))]
-fn opens_interval(mut chars: Peekable<Chars<'_>>) -> bool {
-	if !chars.next().is_some_and(|c| c.is_ascii_digit()) {
-		return false;
-	}
-	while chars.peek().is_some_and(char::is_ascii_digit) {
-		chars.next();
-	}
-	if chars.peek() == Some(&',') {
-		chars.next();
-		while chars.peek().is_some_and(char::is_ascii_digit) {
+enum Brace {
+	/// `{n}`, `{n,}`, `{,m}`, `{n,m}` or `{,}`: a repetition.
+	Interval,
+	/// Never closed, or not numeric: an ordinary character.
+	Literal,
+	/// Closed but malformed: `{}`, `n > m`, or a bound above 32767.
+	Invalid(BreError),
+}
+
+/// Classifies the text just past a `{` the way glibc's `parse_dup_op` does,
+/// bounds clamped just above `RE_DUP_MAX` as glibc clamps them.
+#[cfg(any(feature = "util.grep", feature = "util.sed"))]
+fn classify_brace(mut chars: Peekable<Chars<'_>>) -> Brace {
+	const DUP_MAX: u32 = 0x7fff;
+	let number = |chars: &mut Peekable<Chars<'_>>| {
+		let mut value = None;
+		while let Some(digit) = chars.peek().and_then(|c| c.to_digit(10)) {
 			chars.next();
+			value = Some((value.unwrap_or(0) * 10 + digit).min(DUP_MAX + 1));
 		}
+		value
+	};
+	let min = number(&mut chars);
+	let max = match chars.next() {
+		Some('}') if min.is_some() => min,
+		Some('}') => return Brace::Invalid(BreError::InvalidInterval),
+		Some(',') => {
+			let max = number(&mut chars);
+			if chars.next() != Some('}') {
+				return Brace::Literal;
+			}
+			max
+		},
+		_ => return Brace::Literal,
+	};
+	let min = min.unwrap_or(0);
+	if max.is_some_and(|max| min > max) {
+		Brace::Invalid(BreError::InvalidInterval)
+	} else if max.unwrap_or(min) > DUP_MAX {
+		Brace::Invalid(BreError::IntervalTooBig)
+	} else {
+		Brace::Interval
 	}
-	chars.next() == Some('}')
 }
 
 #[cfg(test)]
@@ -635,7 +751,6 @@ mod tests {
 			"a|b+",
 			"$",
 			r"\\",
-			r"a\",      // trailing backslash: not our error to report
 			// A `{` that opens no interval is a LITERAL, not an operator.
 			// Measured: `grep -E '^{'` and `grep -E '{a}'` match nothing and
 			// report no error, while `grep -E '{1}'` IS invalid. Rejecting
@@ -643,7 +758,6 @@ mod tests {
 			"^{",
 			"{",
 			"{a}",
-			"{,5}",
 			"^{}",
 			"{1a}",
 		] {
@@ -654,7 +768,7 @@ mod tests {
 	#[cfg(feature = "util.grep")]
 	#[test]
 	fn ere_rejects_only_intervals_that_really_open() {
-		for pattern in ["{1}", "^{2}", "{3,}", "{4,5}", "(|{6})"] {
+		for pattern in ["{1}", "^{2}", "{3,}", "{4,5}", "(|{6})", "{,5}"] {
 			assert_eq!(ere_to_rust(pattern, true), Err(BreError::RepetitionOperandMissing), "{pattern}");
 		}
 	}

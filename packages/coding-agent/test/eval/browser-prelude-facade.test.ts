@@ -631,6 +631,35 @@ describe("browser facade in real Eval runtimes", () => {
 		).toBe('py.fill("#password", <hidden>)');
 	});
 
+	it("keeps an explicit None before Python keyword options in its argument slot (issue #16618)", async () => {
+		const calls: unknown[] = [];
+		let definitions: readonly EvalPreludeDefinition[] = [];
+		const session = makeSession(() => definitions);
+		definitions = [recorderDefinition(session, calls)];
+		const result = await executePython(
+			[
+				'tab = await browser.open(name="py-none")',
+				"await tab.ariaSnapshot(None, interactive=True)",
+				'await tab.extract(None, selector="main")',
+				"await tab.ariaSnapshot(None)",
+			].join("\n"),
+			{
+				cwd: process.cwd(),
+				sessionId: `browser-facade-py-none-${crypto.randomUUID()}`,
+				toolSession: session,
+				kernelMode: "per-call",
+			},
+		);
+
+		expect(result.exitCode).toBe(0);
+		const chains = calls.flatMap(call => (field(call, "action") === "call" ? [field(call, "chain")] : []));
+		expect(chains).toEqual([
+			[{ method: "ariaSnapshot", args: [null, { interactive: true }] }],
+			[{ method: "extract", args: [null, { selector: "main" }] }],
+			[{ method: "ariaSnapshot", args: [] }],
+		]);
+	});
+
 	it("forwards Python open timeout and persist side by side (issue #8246 review)", async () => {
 		const calls: unknown[] = [];
 		let definitions: readonly EvalPreludeDefinition[] = [];
@@ -722,6 +751,9 @@ describe("browser facade Chromium helper E2E", () => {
 					),
 				).toBe("Go");
 				expect(await runInContext('__e2eTab.waitFor("text/Go")', context)).toBe(true);
+				// Python `ariaSnapshot(None, interactive=True)` arrives as a null selector plus options (issue #16618).
+				const snapshot = await runInContext("__e2eTab.ariaSnapshot(null, { interactive: true })", context);
+				expect(snapshot).toContain('button "Go"');
 			} finally {
 				await prelude
 					.invoke({ action: "close", name }, { session, toolCallId: `browser-e2e-cleanup-${crypto.randomUUID()}` })

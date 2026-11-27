@@ -124,8 +124,10 @@ import {
 	getOpenAIStrictToolsScope,
 	isCompiledGrammarTooLargeStrictError,
 	isStrictToolsDisabledForScope,
+	markOpenAIPromptCacheBoundaries,
 	type OpenAICompatPolicy,
 	type OpenAICompletionsParams,
+	type OpenAIPromptCacheBoundary,
 	type OpenAIPromptCacheOptions,
 	type OpenAIRequestSetup,
 	type OpenAIStrictToolsState,
@@ -137,6 +139,7 @@ import {
 	resolveOpenAIRequestSetup,
 	shouldDropAutoToolChoiceForReasoning,
 	shouldRetryWithoutStrictTools,
+	withOpenAIPromptCacheBreakpoint,
 } from "./openai-shared";
 import { completionsSendsOwnThinking, transformMessages } from "./transform-messages";
 import {
@@ -867,6 +870,57 @@ function stripDeepseekSpecialTokens(text: string): string {
 	if (DEEPSEEK_SPECIAL_TOKEN_AT_START_REGEX.test(text)) normalized = normalized.replace(/^\s+/u, "");
 	if (DEEPSEEK_SPECIAL_TOKEN_AT_END_REGEX.test(text)) normalized = normalized.replace(/\s+$/u, "");
 	return normalized;
+}
+
+// Outbound counterpart: the DeepSeek encoder parses `<｜…｜>` in message text as special
+// tokens, and V4.1's rejects its image placeholder outright, so a tool result quoting the
+// chat template fails every later request. A zero-width space breaks each token without
+// changing the visible text. Covers the fullwidth-pipe `<｜…｜>` tokens and the bare
+// `｜DSML｜` tool-call token; ASCII spellings (`<|EOT|>`, `<think>`) are common in ordinary
+// text and stay untouched.
+const DEEPSEEK_RESERVED_TOKEN_START_REGEX = /<(?=｜[A-Za-z0-9_.｜▁]{1,64}｜>)/g;
+const DEEPSEEK_DSML_TOKEN = "｜DSML｜";
+const DEEPSEEK_DSML_TOKEN_NEUTRALIZED = "｜\u200bDSML｜";
+// Reasoning can replay under the configured field or a signature-derived one.
+const DEEPSEEK_REASONING_FIELDS: readonly OpenAICompletionsReasoningField[] = [
+	"reasoning_content",
+	"reasoning",
+	"reasoning_text",
+];
+
+function neutralizeDeepseekSpecialTokens(text: string): string {
+	if (!text.includes("｜")) return text;
+	return text
+		.replace(DEEPSEEK_RESERVED_TOKEN_START_REGEX, "<\u200b")
+		.replaceAll(DEEPSEEK_DSML_TOKEN, DEEPSEEK_DSML_TOKEN_NEUTRALIZED);
+}
+
+/** Neutralize DeepSeek special tokens in every text field of the wire messages, in place. */
+function neutralizeDeepseekSpecialTokensInParams(params: ChatCompletionMessageParam[]): void {
+	for (const param of params) {
+		if (typeof param.content === "string") {
+			param.content = neutralizeDeepseekSpecialTokens(param.content);
+		} else if (Array.isArray(param.content)) {
+			for (const part of param.content) {
+				if (part.type === "text") {
+					part.text = neutralizeDeepseekSpecialTokens(part.text);
+				} else if (part.type === "thinking") {
+					for (const inner of part.thinking) inner.text = neutralizeDeepseekSpecialTokens(inner.text);
+				}
+			}
+		}
+		if (param.role !== "assistant") continue;
+		const assistant: OpenAICompletionsAssistantMessageParam = param;
+		for (const field of DEEPSEEK_REASONING_FIELDS) {
+			const reasoning = assistant[field];
+			if (reasoning !== undefined) assistant[field] = neutralizeDeepseekSpecialTokens(reasoning);
+		}
+		for (const toolCall of assistant.tool_calls ?? []) {
+			if (toolCall.type === "function") {
+				toolCall.function.arguments = neutralizeDeepseekSpecialTokens(toolCall.function.arguments);
+			}
+		}
+	}
 }
 
 // Find a trailing partial `<｜...` (or `<|...`) that has not yet been closed by a
@@ -2177,50 +2231,42 @@ function isChatCompletionsPromptCacheableContentBlock(
 	return block.type === "text" || block.type === "image_url" || block.type === "input_audio" || block.type === "file";
 }
 
-function markLatestStableChatCompletionsCacheBreakpoint(messages: ChatCompletionMessageParam[]): boolean {
-	const markMessage = (message: ChatCompletionMessageParam): boolean => {
-		if (
-			message.role !== "user" &&
-			message.role !== "developer" &&
-			message.role !== "system" &&
-			message.role !== "assistant" &&
-			message.role !== "tool"
-		)
-			return false;
-		if (typeof message.content === "string") {
-			if (message.content.length === 0) return false;
-			Object.assign(message, {
-				content: [{ type: "text", text: message.content, prompt_cache_breakpoint: { mode: "explicit" } }],
-			});
-			return true;
-		}
-		if (!Array.isArray(message.content)) return false;
-		for (let j = message.content.length - 1; j >= 0; j--) {
-			const block = message.content[j];
-			if (!isChatCompletionsPromptCacheableContentBlock(block)) continue;
-			Object.assign(block, { prompt_cache_breakpoint: { mode: "explicit" } });
-			return true;
-		}
-		return false;
-	};
+function chatCompletionsPromptCacheBoundary(
+	message: ChatCompletionMessageParam,
+): OpenAIPromptCacheBoundary | undefined {
+	if (message.role === "system" || message.role === "developer") return "instructions";
+	if (message.role === "user") return "user";
+	return message.role === "tool" ? "output" : undefined;
+}
 
-	let latestInputMessage = -1;
-	for (let i = messages.length - 1; i >= 0; i--) {
-		const message = messages[i];
-		if (message.role === "user" || message.role === "developer") {
-			latestInputMessage = i;
-			break;
-		}
-	}
-	for (let i = messages.length - 1; i > latestInputMessage; i--) {
-		if (markMessage(messages[i]!)) return true;
-	}
-	if (latestInputMessage <= 0) return false;
+function markedChatCompletionsText(text: string): ChatCompletionContentPartText[] | undefined {
+	return text ? [{ type: "text", text, prompt_cache_breakpoint: { mode: "explicit" } }] : undefined;
+}
 
-	for (let i = latestInputMessage - 1; i >= 0; i--) {
-		if (markMessage(messages[i]!)) return true;
+/** A copy of `message` with its last cacheable block marked; undefined when nothing in it can carry a breakpoint. */
+function withChatCompletionsMessageBreakpoint(
+	message: ChatCompletionMessageParam,
+): ChatCompletionMessageParam | undefined {
+	switch (message.role) {
+		case "user": {
+			const content =
+				typeof message.content === "string"
+					? markedChatCompletionsText(message.content)
+					: withOpenAIPromptCacheBreakpoint(message.content, isChatCompletionsPromptCacheableContentBlock);
+			return content && { ...message, content };
+		}
+		case "system":
+		case "developer":
+		case "tool": {
+			const content =
+				typeof message.content === "string"
+					? markedChatCompletionsText(message.content)
+					: withOpenAIPromptCacheBreakpoint(message.content, isChatCompletionsPromptCacheableContentBlock);
+			return content && { ...message, content };
+		}
+		default:
+			return undefined;
 	}
-	return false;
 }
 
 function applyOpenAIChatCompletionsPromptCachePolicy(
@@ -2256,7 +2302,11 @@ function applyOpenAIChatCompletionsPromptCachePolicy(
 		ttl: promptCache.ttl ?? model.compat.promptCacheBreakpointTtl,
 	};
 	if (promptCache.mode === "explicit" && promptCache.breakpoint !== "none")
-		markLatestStableChatCompletionsCacheBreakpoint(params.messages);
+		markOpenAIPromptCacheBoundaries(
+			params.messages,
+			chatCompletionsPromptCacheBoundary,
+			withChatCompletionsMessageBreakpoint,
+		);
 }
 
 function buildParams(
@@ -3119,6 +3169,10 @@ export function convertMessages(
 					? "developer"
 					: "system"
 				: msg.role;
+	}
+
+	if (compat.neutralizeDeepseekSpecialTokens) {
+		neutralizeDeepseekSpecialTokensInParams(params);
 	}
 
 	return params;

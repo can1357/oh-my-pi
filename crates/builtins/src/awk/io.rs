@@ -6,6 +6,7 @@ use std::{
 };
 
 use super::regex::AwkRegex;
+use crate::openfile::OpenFile;
 
 /// How `RS` separates records.
 #[derive(Clone)]
@@ -47,11 +48,32 @@ pub(super) struct RecordReader {
 	/// How far past `start` the current separator search already looked.
 	scanned: usize,
 	eof:     bool,
+	/// Seekable shared stdin to rewind over unconsumed read-ahead on drop (POSIX).
+	rewind:  Option<OpenFile>,
+}
+
+impl Drop for RecordReader {
+	fn drop(&mut self) {
+		let excess = self.buf.len() - self.start;
+		if let Some(file) = &self.rewind
+			&& excess > 0
+		{
+			let _ = file.seek(io::SeekFrom::Current(-(excess as i64)));
+		}
+	}
 }
 
 impl RecordReader {
 	pub fn new(src: Box<dyn Read>) -> Self {
-		Self { src, buf: Vec::new(), start: 0, scanned: 0, eof: false }
+		Self { src, buf: Vec::new(), start: 0, scanned: 0, eof: false, rewind: None }
+	}
+
+	/// A reader over shared stdin that leaves its offset after the last consumed record.
+	pub fn rewinding(src: Box<dyn Read>, file: OpenFile) -> Self {
+		let seekable = file.seek(io::SeekFrom::Current(0)).is_ok();
+		let mut reader = Self::new(src);
+		reader.rewind = seekable.then_some(file);
+		reader
 	}
 
 	/// Reads more input; `false` at end of input.

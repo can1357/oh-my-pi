@@ -41,6 +41,7 @@ import { registerBlob } from "@oh-my-pi/pi-tui/native/blobs";
 import { truncate } from "@oh-my-pi/pi-tui/text/width";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { type AgentActivityStatus, toolCallSummary } from "../../modes/view-model/overlays/agent-activity";
+import { readImageHeaderDimensions } from "../../utils/image-resize";
 import { readMediaPath } from "../../session/transcript/tool-execution";
 import { type ShellInspectorSource, shellVizEventAction } from "../apps/shell-visualizer/model";
 import { sanitizeDisplaySingleLine } from "../../extensibility/inventory/display-text";
@@ -517,18 +518,14 @@ function withImagesAsText(result: ToolCallResult): ToolCallResult {
 /** `[Image: [image/png] 1x1]`. */
 export function imagePlaceholder(block: { readonly data?: string; readonly mimeType?: string }): string {
 	const mime = block.mimeType ?? "image";
-	const size = block.data ? imageSize(block.data) : undefined;
+	const size = block.data ? imageSize(Buffer.from(block.data, "base64")) : undefined;
 	return `[Image: [${mime}]${size ? ` ${size.w}x${size.h}` : ""}]`;
 }
 
-/** Pixel size of a base64 PNG/GIF/JPEG, when its header says. */
-export function imageSize(base64: string): { w: number; h: number } | undefined {
-	const bytes = Buffer.from(base64.slice(0, 64), "base64");
-	if (bytes.length >= 24 && bytes[0] === 0x89 && bytes[1] === 0x50)
-		return { w: bytes.readUInt32BE(16), h: bytes.readUInt32BE(20) };
-	if (bytes.length >= 10 && bytes[0] === 0x47 && bytes[1] === 0x49)
-		return { w: bytes.readUInt16LE(6), h: bytes.readUInt16LE(8) };
-	return undefined;
+/** Pixel size of decoded PNG/JPEG/GIF/WebP bytes, when the header says. */
+export function imageSize(bytes: Uint8Array): { w: number; h: number } | undefined {
+	const size = readImageHeaderDimensions(bytes);
+	return size ? { w: size.width, h: size.height } : undefined;
 }
 
 /** Call view then result view: the result's head facts win; bodies stack. */
@@ -749,12 +746,13 @@ export function toolNodeProps(input: ToolNodeInput): ToolNodeProps {
 /** A result's images as `image` nodes (shown under the body while images are on). */
 function imageNodes(result: ToolCallResult | undefined): JSXNode {
 	return resultImages(result).map((image, index) => {
-		const size = imageSize(image.data);
+		const bytes = Buffer.from(image.data, "base64");
+		const size = imageSize(bytes);
 		return (
 			<image
 				key={`img${index}`}
 				term={inlineImageTerm({ role: RESULT_IMAGE_ROLE })}
-				blob={registerBlob(Buffer.from(image.data, "base64"), image.mimeType ?? "image/png")}
+				blob={registerBlob(bytes, image.mimeType ?? "image/png")}
 				alt={image.mimeType}
 				w={size?.w}
 				h={size?.h}

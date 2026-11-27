@@ -56,6 +56,7 @@ import { padTo, sliceColumns, truncate, visibleWidth } from "../text/width";
 import {
 	type Block,
 	type Cell,
+	DEFAULT_SPINNER_INTERVAL_MS,
 	type Hit,
 	type PaintEnvironment,
 	type PaintImages,
@@ -132,8 +133,15 @@ export interface TermBackendOptions {
 	 * clock, advanced on every animation tick.
 	 */
 	readonly clock?: Accessor<number>;
-	/** Animation tick for terminal-clocked kinds, ms. Default 80. */
-	readonly tickInterval?: number;
+	/**
+	 * Milliseconds per spinner frame (may change at runtime); 0 draws spinners still. The animation
+	 * tick of terminal-clocked kinds runs at this interval when it is faster than
+	 * {@link DEFAULT_SPINNER_INTERVAL_MS}, else at the default, so a slow or still spinner never slows
+	 * other clock readers (pulses, strikes, progress slides). Default {@link DEFAULT_SPINNER_INTERVAL_MS}.
+	 */
+	readonly spinnerInterval?: Reactive<number>;
+	/** Decorative motion off (blink, fade, pulse, sweeps): such kinds draw their still frame. Default false. */
+	readonly reduceMotion?: Accessor<boolean>;
 	/**
 	 * Inline images painters draw (the process driver's `TerminalImages`).
 	 * Absent: `image` nodes show their text fallback. The frame loop settles
@@ -227,8 +235,10 @@ export function driverImages(images: Pick<PaintImages, "rows">, capabilities: ()
 const FULLSCREEN_KINDS: ReadonlySet<string> = new Set(["picker", "prefs"]);
 
 function isFullscreen(node: UiNode): boolean {
+	const props = node.props();
+	if (node.kind === "picker") return !("modal" in props && props.modal === false);
 	if (FULLSCREEN_KINDS.has(node.kind)) return true;
-	return node.kind === "overlay" && (node.props() as { size?: string }).size === "full";
+	return node.kind === "overlay" && "size" in props && props.size === "full";
 }
 
 /**
@@ -376,7 +386,6 @@ export class TermBackend {
 	// A content frame can absorb a tick in the same millisecond as the last sample. Clock readers
 	// still have to run to renew their request for ticks, even if the wall time hasn't changed.
 	readonly #clock: Signal<number> = signal(Date.now(), { equals: false });
-	readonly #reduceMotion: Signal<boolean> = signal(false);
 	/** The hit under the pointer, from the last mouse report. */
 	readonly #hover: Signal<PointerHover | null> = signal<PointerHover | null>(null);
 	readonly #hyperlinks: Signal<boolean>;
@@ -430,8 +439,6 @@ export class TermBackend {
 	/** Disposes the watcher of the last frame's reactive reads. */
 	#disposeWatch: (() => void) | undefined;
 	#running = false;
-	/** Output held: no frame is composed, written or acknowledged until released. */
-	#held = false;
 
 	constructor(options: TermBackendOptions) {
 		this.#surface = options.surface;
@@ -460,7 +467,8 @@ export class TermBackend {
 				return (options.clock ?? this.#clock)();
 			},
 			focus: options.surface.focused,
-			reduceMotion: this.#reduceMotion,
+			reduceMotion: options.reduceMotion ?? (() => false),
+			spinnerInterval: () => read(options.spinnerInterval ?? DEFAULT_SPINNER_INTERVAL_MS),
 			hover: this.#hover,
 			hyperlinks,
 			...(allowTextSizing ? { textSizing: () => allowTextSizing() && terminalTextSizing() } : {}),
@@ -500,7 +508,6 @@ export class TermBackend {
 		this.#running = false;
 		this.#leavePointerWindow();
 		this.#closeSearch();
-		this.#held = false;
 		clearTimeout(this.#frame);
 		clearTimeout(this.#tick);
 		this.#frame = undefined;
@@ -520,8 +527,6 @@ export class TermBackend {
 	 */
 	flush(): void {
 		if (!this.#running) return;
-		// A flush must reach the terminal even from a held screen.
-		this.setOutputHold(false);
 		if (this.#options.screen?.() === "fullscreen" && this.#options.exitTranscript?.() === false) return;
 		// An unwritten batch was never written: the flush batch takes its rows (a replay stays owed).
 		this.#pending = undefined;
@@ -538,37 +543,6 @@ export class TermBackend {
 		if (this.#committed.has(node) || this.#emitted.has(node) || this.#retiring.has(node)) return true;
 		const pending = this.#pending;
 		return pending !== undefined && (pending.head?.node === node || pending.nodes.includes(node));
-	}
-
-	/**
-	 * Hold the screen still: no frame is composed, written or acknowledged until
-	 * the hold is released, so a streaming turn stops scrolling the terminal
-	 * while the user reads native scrollback. Nothing is lost — the model keeps
-	 * moving and the release repaints from it in one frame. `notice` paints a
-	 * one-line hint on the last screen row without scrolling it.
-	 *
-	 * @returns Whether the hold state changed.
-	 */
-	setOutputHold(hold: boolean, notice?: string): boolean {
-		if (!this.#running || this.#held === hold) return false;
-		this.#held = hold;
-		if (hold) {
-			// Everything queued now is exactly what the hold exists to stop.
-			clearTimeout(this.#frame);
-			this.#frame = undefined;
-			this.#frameRequested = false;
-			this.#driver.setOutputHold?.(true, notice);
-		} else {
-			// Settles (and re-anchors) a resize that arrived while held, then repaints.
-			this.#driver.setOutputHold?.(false);
-			this.renderNow();
-		}
-		return true;
-	}
-
-	/** Whether {@link setOutputHold} is holding the output. */
-	getOutputHold(): boolean {
-		return this.#held;
 	}
 
 	/**
@@ -689,7 +663,7 @@ export class TermBackend {
 
 	/** Schedule a frame (coalesced, at most one per frame interval). */
 	requestRender(): void {
-		if (!this.#running || this.#held || this.#frameRequested) return;
+		if (!this.#running || this.#frameRequested) return;
 		this.#frameRequested = true;
 		if (this.#inTick) return;
 		const interval = untrack(() => read(this.#options.frameInterval ?? 16));
@@ -699,7 +673,7 @@ export class TermBackend {
 
 	/** Paint and present a frame now. */
 	renderNow(): void {
-		if (!this.#running || this.#held) return;
+		if (!this.#running) return;
 		if (this.#tick !== undefined) {
 			// This frame carries the animation too. Drop the old watcher before updating the clock:
 			// only the *new* visible blocks should repaint and ask for the next tick.
@@ -769,7 +743,9 @@ export class TermBackend {
 
 	#scheduleTick(smooth: boolean): void {
 		if (!this.#running || this.#options.clock) return;
-		const delay = smooth ? SMOOTH_TICK_MS : (this.#options.tickInterval ?? 80);
+		const delay = smooth
+			? SMOOTH_TICK_MS
+			: Math.min(untrack(this.#env.spinnerInterval) || DEFAULT_SPINNER_INTERVAL_MS, DEFAULT_SPINNER_INTERVAL_MS);
 		if (this.#tick !== undefined) {
 			if (this.#tickDelay <= delay) return;
 			clearTimeout(this.#tick);
@@ -1649,10 +1625,5 @@ export class TermBackend {
 	/** Whether a fullscreen transcript window is on screen and follows the tail (false while scrolled back). */
 	get following(): boolean {
 		return this.#window !== undefined && this.#anchor === undefined;
-	}
-
-	/** Set reduced motion (clocked kinds draw their still frame). */
-	setReduceMotion(reduce: boolean): void {
-		this.#reduceMotion.set(reduce);
 	}
 }

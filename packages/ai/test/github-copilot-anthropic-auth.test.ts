@@ -264,6 +264,42 @@ describe("Anthropic Copilot auth config", () => {
 		expect(requestedInitiators[0]).toBe("agent");
 	});
 
+	it("sends the conversation id as X-Client-Session-Id on Copilot message requests", async () => {
+		const requestedSessionIds: Array<string | null> = [];
+		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+			requestedSessionIds.push(getRequestHeader(input, init, "X-Client-Session-Id"));
+			return new Response(JSON.stringify({ error: { type: "authentication_error", message: "Unauthorized" } }), {
+				status: 401,
+				headers: { "Content-Type": "application/json" },
+			});
+		});
+
+		const result = await streamAnthropic(makeCopilotClaudeModel(), testContext, {
+			apiKey: "ghu_test_copilot_token",
+			fetch: fetchMock as unknown as typeof fetch,
+			sessionId: "session-123",
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(requestedSessionIds[0]).toBe("session-123");
+	});
+
+	it("keeps a caller-supplied X-Client-Session-Id on Copilot requests", () => {
+		const result = buildAnthropicClientOptions({
+			model: makeCopilotClaudeModel(),
+			apiKey: "ghu_test",
+			extraBetas: [],
+			stream: true,
+			dynamicHeaders: {},
+			headers: { "x-client-session-id": "caller-session" },
+			sessionId: "session-123",
+		});
+
+		const keys = Object.keys(result.defaultHeaders).filter(key => key.toLowerCase() === "x-client-session-id");
+		expect(keys).toHaveLength(1);
+		expect(result.defaultHeaders[keys[0]]).toBe("caller-session");
+	});
+
 	it("keeps the CLI identity on Enterprise message requests", async () => {
 		const requestedUrls: string[] = [];
 		const requestedIntegrationIds: Array<string | null> = [];

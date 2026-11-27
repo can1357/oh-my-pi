@@ -1,3 +1,4 @@
+import { providerAccessOff } from "@oh-my-pi/pi-catalog/compat/auth";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { getProviderDefinition, PASTE_CODE_LOGIN_PROVIDERS } from "../registry";
@@ -123,8 +124,10 @@ export class OAuthAccounts implements OAuthApi {
 		// Any legacy api_key rows from older versions will be cleaned up so they do not
 		// shadow the new OAuth row, while preserving other active OAuth credentials.
 		await this.#deps.pool.upsertOAuth(def.storeCredentialsAs ?? provider, newCredential);
+		const storedAs = def.storeCredentialsAs ?? provider;
 		return {
 			type: "oauth",
+			...(providerAccessOff(storedAs, newCredential.scope) ? { accessOff: true } : {}),
 			email: newCredential.email,
 			accountId: newCredential.accountId,
 			orgId: newCredential.orgId,

@@ -1236,7 +1236,8 @@ impl<'a> Interp<'a> {
 
 	fn stdin_reader(&self) -> R<RecordReader> {
 		let stdin = self.host.stdin.try_clone().map_err(|err| Stop::Error(format!("stdin: {}", strip_errno(&err))))?;
-		Ok(RecordReader::new(Box::new(stdin)))
+		let file = stdin.file().try_clone().map_err(|err| Stop::Error(format!("stdin: {}", strip_errno(&err))))?;
+		Ok(RecordReader::rewinding(Box::new(stdin), file))
 	}
 
 	/// Opens the next input from `ARGV`, applying `var=value` operands on

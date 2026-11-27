@@ -162,8 +162,8 @@ describe("BashTool execution results", () => {
 		});
 		const [id, file, tag] = (result.content.find(c => c.type === "text")?.text ?? "").split("|");
 		expect(id).toBe("session-fg");
-		// The leftover-process membership tag (exec/session-processes.ts).
-		expect(tag).toBe("session-fg");
+		// The leftover-process membership tag (exec/session-processes.ts), scoped to this process.
+		expect(tag).toBe(`session-fg@${process.pid}`);
 		// Empty, not the stale path: the session is not persisted.
 		expect(file).toBe("");
 	});
