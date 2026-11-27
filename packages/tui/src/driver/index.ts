@@ -390,6 +390,7 @@ export function createTerminalDriver(
 			writer.hold(frame);
 			return undefined;
 		},
+		setOutputHold: (hold: boolean, notice?: string) => writer.setOutputHold(hold, notice),
 		viewportRow: row => writer.viewportRow(row),
 		replaysOnResize: () => writer.replaysOnWidthChange(),
 		writeRaw: (data: string) => {

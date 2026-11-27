@@ -108,6 +108,7 @@ export class Shell {
 	#unwatchResize: (() => void) | undefined;
 	#unwatchHost: (() => void) | undefined;
 	#unwatchMouse: (() => void) | undefined;
+	#unwatchHold: (() => void) | undefined;
 	readonly #inlineMouse = signal<MouseTracking>("off");
 	readonly #interceptors: InputInterceptor[] = [];
 	readonly #globalKeys: ((key: KeyEvent) => boolean)[] = [];
@@ -231,6 +232,14 @@ export class Shell {
 		});
 		this.#size.set({ columns: host.driver.columns, rows: host.driver.rows });
 		this.#unwatchResize = host.driver.onResize((columns, rows) => this.#size.set({ columns, rows }));
+		// An overlay the user did not cause (an approval, a plan review, a picker) must
+		// never land behind a held screen: it would be invisible while the agent waits.
+		this.#unwatchHold = createRoot(dispose => {
+			effect(() => {
+				if (this.overlays.open()) host.setOutputHold(false);
+			});
+			return dispose;
+		});
 		this.transcript.attach(host);
 	}
 
@@ -255,10 +264,25 @@ export class Shell {
 		return rows;
 	}
 
+	/**
+	 * Hold the screen still (see {@link Host.setOutputHold}); false when the
+	 * renderer cannot hold or the state did not change.
+	 */
+	setOutputHold(hold: boolean, notice?: string): boolean {
+		return this.#host?.setOutputHold(hold, notice) ?? false;
+	}
+
+	/** Whether the output is held (see {@link Shell.setOutputHold}). */
+	getOutputHold(): boolean {
+		return this.#host?.getOutputHold() ?? false;
+	}
+
 	/** Stop rendering and restore the terminal; the surface stays mounted. */
 	async stop(): Promise<void> {
 		const host = this.#host;
 		this.#host = undefined;
+		this.#unwatchHold?.();
+		this.#unwatchHold = undefined;
 		this.#unwatchResize?.();
 		this.#unwatchResize = undefined;
 		this.#unwatchHost?.();

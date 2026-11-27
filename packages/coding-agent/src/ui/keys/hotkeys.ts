@@ -87,6 +87,7 @@ export function hotkeyGroups(keybindings: KeybindingsManager): HotkeyGroup[] {
 				...exitRows,
 				{ keys: [act("app.suspend")], action: "Suspend to background" },
 				{ keys: [act("app.display.reset")], action: "Reset terminal display" },
+				{ keys: [act("app.display.hold")], action: "Hold output while you read back; any key resumes" },
 				{
 					keys: [act("app.transcript.pageUp"), { text: " / " }, act("app.transcript.pageDown")],
 					action: "Scroll the transcript a page (fullscreen screen)",

@@ -430,6 +430,8 @@ export class TermBackend {
 	/** Disposes the watcher of the last frame's reactive reads. */
 	#disposeWatch: (() => void) | undefined;
 	#running = false;
+	/** Output held: no frame is composed, written or acknowledged until released. */
+	#held = false;
 
 	constructor(options: TermBackendOptions) {
 		this.#surface = options.surface;
@@ -498,6 +500,7 @@ export class TermBackend {
 		this.#running = false;
 		this.#leavePointerWindow();
 		this.#closeSearch();
+		this.#held = false;
 		clearTimeout(this.#frame);
 		clearTimeout(this.#tick);
 		this.#frame = undefined;
@@ -517,6 +520,8 @@ export class TermBackend {
 	 */
 	flush(): void {
 		if (!this.#running) return;
+		// A flush must reach the terminal even from a held screen.
+		this.setOutputHold(false);
 		if (this.#options.screen?.() === "fullscreen" && this.#options.exitTranscript?.() === false) return;
 		// An unwritten batch was never written: the flush batch takes its rows (a replay stays owed).
 		this.#pending = undefined;
@@ -533,6 +538,37 @@ export class TermBackend {
 		if (this.#committed.has(node) || this.#emitted.has(node) || this.#retiring.has(node)) return true;
 		const pending = this.#pending;
 		return pending !== undefined && (pending.head?.node === node || pending.nodes.includes(node));
+	}
+
+	/**
+	 * Hold the screen still: no frame is composed, written or acknowledged until
+	 * the hold is released, so a streaming turn stops scrolling the terminal
+	 * while the user reads native scrollback. Nothing is lost — the model keeps
+	 * moving and the release repaints from it in one frame. `notice` paints a
+	 * one-line hint on the last screen row without scrolling it.
+	 *
+	 * @returns Whether the hold state changed.
+	 */
+	setOutputHold(hold: boolean, notice?: string): boolean {
+		if (!this.#running || this.#held === hold) return false;
+		this.#held = hold;
+		if (hold) {
+			// Everything queued now is exactly what the hold exists to stop.
+			clearTimeout(this.#frame);
+			this.#frame = undefined;
+			this.#frameRequested = false;
+			this.#driver.setOutputHold?.(true, notice);
+		} else {
+			// Settles (and re-anchors) a resize that arrived while held, then repaints.
+			this.#driver.setOutputHold?.(false);
+			this.renderNow();
+		}
+		return true;
+	}
+
+	/** Whether {@link setOutputHold} is holding the output. */
+	getOutputHold(): boolean {
+		return this.#held;
 	}
 
 	/**
@@ -653,7 +689,7 @@ export class TermBackend {
 
 	/** Schedule a frame (coalesced, at most one per frame interval). */
 	requestRender(): void {
-		if (!this.#running || this.#frameRequested) return;
+		if (!this.#running || this.#held || this.#frameRequested) return;
 		this.#frameRequested = true;
 		if (this.#inTick) return;
 		const interval = untrack(() => read(this.#options.frameInterval ?? 16));
@@ -663,7 +699,7 @@ export class TermBackend {
 
 	/** Paint and present a frame now. */
 	renderNow(): void {
-		if (!this.#running) return;
+		if (!this.#running || this.#held) return;
 		if (this.#tick !== undefined) {
 			// This frame carries the animation too. Drop the old watcher before updating the clock:
 			// only the *new* visible blocks should repaint and ask for the next tick.

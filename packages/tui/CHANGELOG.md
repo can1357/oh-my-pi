@@ -8,6 +8,7 @@
 
 ### Added
 
+- Added `Host.setOutputHold()` / `getOutputHold()` (and the same pair on the terminal and native backends): an explicit output hold that composes, writes and acknowledges no frame until release, then repaints from the newest state in one frame. A resize during the hold settles as an in-place repaint, so releasing never rebuilds history or clears scrollback ([#19751](https://github.com/can1357/oh-my-pi/pull/19751) by [@LangYa466](https://github.com/LangYa466)).
 - Added `MarkdownOptions.linkUrls` and `MarkdownLook.linkUrls` to hide the URL drawn after named links whose label is an OSC 8 hyperlink ([#13162](https://github.com/can1357/oh-my-pi/pull/13162) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
 - Added opt-in fullscreen terminal rendering: a scrollable transcript above a pinned dock, a draggable scrollbar, character/word/line selection and incremental search. The normal exit can append the transcript or keep the original screen ([#2040](https://github.com/can1357/oh-my-pi/issues/2040), building on [#2103](https://github.com/can1357/oh-my-pi/pull/2103) by [@shoucandanghehe](https://github.com/shoucandanghehe) and [#20766](https://github.com/can1357/oh-my-pi/pull/20766) by [@camjac251](https://github.com/camjac251))
 ### Added

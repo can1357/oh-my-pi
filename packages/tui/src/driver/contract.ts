@@ -106,6 +106,12 @@ export interface TerminalDriver {
 	stop(): Promise<void>;
 	/** Show a frame; returns the history id it wrote, if any (the acknowledgement). */
 	present(frame: FramePlan): number | undefined;
+	/**
+	 * Hold every write: frames, resize transactions and the probes they start.
+	 * The release repaints in place at the geometry the terminal settled on.
+	 * `notice` paints one hint row on the last screen row without scrolling.
+	 */
+	setOutputHold?(hold: boolean, notice?: string): void;
 	/** Screen row mapped into the displayed viewport; null outside it or when its anchor is unknown. Omitted by screen-origin drivers. */
 	viewportRow?(screenRow: number): number | null;
 	/** Write raw bytes (protocol messages, images); bypasses frame diffing. */

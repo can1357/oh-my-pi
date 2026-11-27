@@ -47,11 +47,14 @@ import {
 	position,
 	reflowHeight,
 	right,
+	SGR_RESET,
 	SYNC_BEGIN,
 	SYNC_END,
 	up,
 } from "./ansi";
 import { planShift } from "./shift";
+import { singleLine, stripControl } from "../../text/sanitize";
+import { truncate } from "../../text/width";
 
 /** Where frames go: the terminal's output stream. */
 export interface OutputSink {
@@ -185,7 +188,8 @@ interface Transaction {
 	readonly rows: number;
 	shrank: boolean;
 	grew: boolean;
-	readonly inPlace: boolean;
+	/** Repaint in place; the release of a hold flips it so a held resize never replays history. */
+	inPlace: boolean;
 	/** Frames wait for the settle (in place, or no borrow). */
 	readonly quiet: boolean;
 	/** The viewport reached the bottom row before the resize. */
@@ -268,6 +272,8 @@ export class FrameWriter {
 	#pushed: string[] = [];
 	/** Where the cursor report after that shrink must find the cursor for `#pushed` to hold; undefined once checked. */
 	#pushedCursor: number | undefined;
+	/** Output stopped by {@link setOutputHold}: no frame, resize write or anchor probe goes out. */
+	#held = false;
 
 	constructor(options: FrameWriterOptions) {
 		this.#options = options;
@@ -349,6 +355,11 @@ export class FrameWriter {
 	 */
 	present(frame: FramePlan): number | undefined {
 		if (!this.#started) return undefined;
+		if (this.#held) {
+			// Held: nothing is written, but the frame stays for stop() to flush.
+			if (!frame.fullscreen) this.#deferred = frame;
+			return undefined;
+		}
 		if (frame.fullscreen) {
 			this.#deferred = undefined;
 			if (!this.#anchoring) this.#paintAlternate(frame.fullscreen, frame.cursor, "", true);
@@ -386,6 +397,40 @@ export class FrameWriter {
 	 */
 	hold(frame: FramePlan): void {
 		if (this.#started) this.#deferred = frame.fullscreen ? undefined : frame;
+	}
+
+	/** Whether {@link setOutputHold} is holding the output. */
+	get outputHeld(): boolean {
+		return this.#held;
+	}
+
+	/**
+	 * Stop writing anything: frames, a resize borrow and its settle, and the
+	 * anchor probes it would start. The last frame is kept for {@link stop}, and
+	 * the frame source repaints on release, so nothing is lost — a user reading
+	 * native scrollback just stops losing their place to a streaming turn.
+	 *
+	 * A release settles a resize that arrived while held as an in-place repaint:
+	 * the terminal already reflowed the screen, and replaying history there is
+	 * the jump a hold exists to prevent. `notice` paints one hint row on the
+	 * last screen row without scrolling it.
+	 */
+	setOutputHold(hold: boolean, notice?: string): void {
+		if (this.#held === hold) return;
+		this.#held = hold;
+		const tx = this.#resize;
+		if (hold) {
+			// Everything queued now is exactly what the hold exists to stop.
+			tx?.cancel?.();
+			if (tx) tx.cancel = undefined;
+			// A borrowed alternate screen would hide the transcript for the whole hold.
+			if (this.#alt && !this.#fullscreen) this.#send(this.#leaveAlt());
+		} else if (this.#started && tx) {
+			// The terminal reflowed while held: recover the anchor, repaint in place, never replay.
+			tx.inPlace = true;
+			this.#settle();
+		}
+		if (hold && notice !== undefined && !this.#alt) this.#drawHoldNotice(notice);
 	}
 
 	/** Whether a settled width change replays history (the policy rebuilds or appends it, not in place). */
@@ -460,12 +505,15 @@ export class FrameWriter {
 		if (rows < before.rows) tx.shrank = true;
 		if (rows > before.rows) tx.grew = true;
 		if (!this.#pendingClear) this.#stale = true;
-		if (tx.inPlace && !this.#alt && !this.#options.multiplexer()) {
+		if (!this.#held && tx.inPlace && !this.#alt && !this.#options.multiplexer()) {
 			const erase = this.#preErase();
 			if (erase) this.#send(erase);
 		}
 		tx.cancel?.();
-		tx.cancel = (this.#options.schedule ?? schedule)(() => this.#settle(), this.#options.settleMs ?? 100);
+		// Held: the release settles this transaction in place (see setOutputHold).
+		tx.cancel = this.#held
+			? undefined
+			: (this.#options.schedule ?? schedule)(() => this.#settle(), this.#options.settleMs ?? 100);
 	}
 
 	/**
@@ -507,6 +555,8 @@ export class FrameWriter {
 	 */
 	stop(emergency = false): void {
 		if (!this.#started) return;
+		// The handoff must reach the terminal even from a held screen.
+		this.#held = false;
 		this.#epoch++;
 		this.#started = false;
 		this.#anchoring = false;
@@ -982,6 +1032,20 @@ export class FrameWriter {
 	}
 
 	// ── output ────────────────────────────────────────────────────────────
+
+	/**
+	 * A one-line hint on the last screen row for a held screen: cursor
+	 * save/restore and no line terminator, so the hint never pushes a row into
+	 * scrollback. Sanitized because the text is a public parameter.
+	 */
+	#drawHoldNotice(notice: string): void {
+		const label = truncate(singleLine(stripControl(notice)), this.#columns);
+		const sync = this.#options.synchronizedOutput();
+		const out =
+			`${sync ? SYNC_BEGIN : ""}\x1b7${position(this.#rows - 1, 0)}${SGR_RESET}${ERASE_LINE}` +
+			`\x1b[2m${label}${SGR_RESET}\x1b8${sync ? SYNC_END : ""}`;
+		this.#send(out);
+	}
 
 	/**
 	 * One frame write: `lead` (a screen switch and erase), images, rows with

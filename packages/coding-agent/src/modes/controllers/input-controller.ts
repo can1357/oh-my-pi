@@ -401,6 +401,9 @@ export class InputController {
 			this.ctx.interceptInput(event => this.#handleLinkHintInput(event)),
 			// Input arriving while an image paste lands waits for it, ahead of every other hook.
 			this.ctx.interceptInput(this.#holdInput),
+			// The output hold, ahead of every other hook: a key that resumes is handled
+			// before the repaint showing it is scheduled.
+			this.ctx.interceptInput(event => this.#handleOutputHoldInput(event)),
 			composer.addActionHandler(act => this.#onComposerAction(act)),
 			createRoot(dispose => {
 				effect(() => {
@@ -675,6 +678,39 @@ export class InputController {
 			this.toggleToolOutputExpansion();
 			return true;
 		}
+		return false;
+	}
+
+	/**
+	 * `app.display.hold`, and the release-on-keystroke rule. This interceptor runs
+	 * before the focus path, so a hold is gone before the repaint that shows the
+	 * key. A hold must never trap the user behind a prompt they cannot see, so
+	 * releasing always wins, overlay or not.
+	 */
+	#handleOutputHoldInput(event: InputEvent): boolean {
+		const shell = this.ctx.shell;
+		const getOutputHold = shell.getOutputHold?.bind(shell);
+		if (!getOutputHold) return false;
+		if (event.type === "key") {
+			if (event.key.kind === "release") return false;
+			if (this.ctx.keybindings.matches(event.key, "app.display.hold")) {
+				if (getOutputHold()) {
+					shell.setOutputHold(false);
+					return true;
+				}
+				if (shell.overlays.open()) return false;
+				const key = actionKey("app.display.hold", this.ctx.keybindings);
+				// The bottom-row notice is the whole message: a status row presented
+				// now could not paint until the release anyway.
+				return shell.setOutputHold(true, `⏸ Output held · ${key} or any key resumes`);
+			}
+			// Only a real keystroke resumes. Mouse moves, focus changes and terminal
+			// replies are separate event types, so they pass without dropping the hold.
+			if (getOutputHold()) shell.setOutputHold(false);
+			return false;
+		}
+		// A paste is the user acting too: it resumes like a keystroke.
+		if (event.type === "paste" && getOutputHold()) shell.setOutputHold(false);
 		return false;
 	}
 
