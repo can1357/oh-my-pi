@@ -176,6 +176,24 @@ function syntheticToolResultTailStart(messages: readonly AgentMessage[]): number
 	return index;
 }
 
+/**
+ * Index of the assistant turn ending at `tail` (a context index), looking back
+ * over the synthetic results the loop paired with its unrun tool calls. A real
+ * result means a call ran, so a mixed tail never resolves to the turn.
+ */
+function failedTurnStart(messages: readonly AgentMessage[], tail: number): number {
+	let index = tail;
+	while (index > 0 && isSyntheticToolResultMessage(messages[index])) index--;
+	const assistant = messages[index];
+	if (index === tail || assistant?.role !== "assistant") return index;
+	const callIds = new Set(assistant.content.flatMap(block => (block.type === "toolCall" ? [block.id] : [])));
+	for (let i = index + 1; i <= tail; i++) {
+		const result = messages[i];
+		if (result.role !== "toolResult" || !callIds.has(result.toolCallId)) return tail;
+	}
+	return index;
+}
+
 function retryableAssistantTurnEnd(messages: readonly AgentMessage[]): number | undefined {
 	const turnEnd = syntheticToolResultTailStart(messages);
 	const message = messages[turnEnd - 1];
@@ -1373,9 +1391,12 @@ export class TurnRecovery {
 		// Rows kept out of context may trail the failed turn; they stay, the turn goes.
 		const index = lastContextIndex(messages);
 		const lastMessage = messages[index];
-		const lastAssistant: AssistantMessage | undefined = lastMessage?.role === "assistant" ? lastMessage : undefined;
+		// Synthetic results for its unrun tool calls trail the turn; drop them with it.
+		const start = failedTurnStart(messages, index);
+		const candidate = messages[start];
+		const lastAssistant: AssistantMessage | undefined = candidate?.role === "assistant" ? candidate : undefined;
 		if (lastAssistant !== undefined && this.#isSameAssistantMessage(lastAssistant, assistantMessage)) {
-			this.#host.agent.replaceMessages(messages.toSpliced(index, 1));
+			this.#host.agent.replaceMessages(messages.toSpliced(start, index - start + 1));
 			return;
 		}
 		// A miss means the failed turn is still in active context (or was never
@@ -3493,7 +3514,8 @@ export class TurnRecovery {
 	/**
 	 * Positional backstop for {@link removeAssistantMessageFromActiveContext}:
 	 * when the identity check missed, the failed assistant turn is still the
-	 * active tail and the scheduled continue() would reject it. An
+	 * active tail (ahead of any synthetic results for its unrun tool calls) and
+	 * the scheduled continue() would reject or replay it. An
 	 * error/aborted-stopped assistant tail is never legal continuation input
 	 * and no recovery path wants it replayed on the wire, so drop it by
 	 * position; any healthy tail is left untouched.
@@ -3501,14 +3523,15 @@ export class TurnRecovery {
 	#stripFailedAssistantTail(): void {
 		const messages = this.#host.agent.state.messages;
 		const index = lastContextIndex(messages);
-		const tail = messages[index];
+		const start = failedTurnStart(messages, index);
+		const tail = messages[start];
 		if (tail?.role !== "assistant") return;
 		if (tail.stopReason !== "error" && tail.stopReason !== "aborted") return;
 		logger.debug("agent active context failed assistant tail stripped positionally", {
 			stopReason: tail.stopReason,
 			timestamp: tail.timestamp,
 		});
-		this.#host.agent.replaceMessages(messages.toSpliced(index, 1));
+		this.#host.agent.replaceMessages(messages.toSpliced(start, index - start + 1));
 	}
 
 	/**

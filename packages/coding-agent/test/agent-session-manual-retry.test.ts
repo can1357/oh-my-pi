@@ -160,6 +160,47 @@ describe("AgentSession manual retry", () => {
 		expect(mock.calls).toHaveLength(action === "retry" ? 3 : 2);
 	});
 
+	it("prunes a refused turn together with the synthetic results of its unrun tool calls", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [{ type: "toolCall", id: "refused-call", name: "read", arguments: { path: "a.txt" } }],
+					stopReason: "error",
+					stopDetails: { type: "refusal", category: "cyber", explanation: "Declined." },
+					errorMessage: "Refusal (cyber): Declined.",
+				},
+				{ content: ["next answer"], stopReason: "stop" },
+			],
+		});
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({
+				"compaction.enabled": false,
+				"retry.enabled": false,
+				"retry.modelFallback": false,
+			}),
+			modelRegistry,
+		});
+
+		await session.prompt("refused prompt");
+		await session.waitForIdle();
+		expect(session.getLastAssistantMessage()?.stopReason).toBe("error");
+		expect(session.agent.state.messages.map(message => message.role)).toEqual(["user"]);
+
+		await session.prompt("next prompt");
+		await session.waitForIdle();
+		expect(mock.calls[1].context.messages.map(message => message.role)).toEqual(["user", "user"]);
+	});
+
 	it("returns false when the trailing assistant turn succeeded", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) {
