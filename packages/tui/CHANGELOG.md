@@ -12,6 +12,8 @@
 ### Added
 
 - `TextEdit.paste` marks an edit that types a bracketed paste ([#20681](https://github.com/can1357/oh-my-pi/issues/20681))
+- `Host.requestFrame()` schedules a terminal frame even when nothing on screen changed ([#20704](https://github.com/can1357/oh-my-pi/pull/20704) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- Added `tool.gl` symbol across unicode, nerd, and ascii presets for the GitLab tool ([#20396](https://github.com/can1357/oh-my-pi/pull/20396) by [@asuffield](https://github.com/asuffield))
 
 ### Fixed
 

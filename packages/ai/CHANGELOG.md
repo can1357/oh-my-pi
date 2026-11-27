@@ -9,6 +9,10 @@
 - Added the `priority` service tier on Devin models: it sends the model's fast lane and bills the fast price
 - Added `JUDGMENT_PROTOCOLS` and `judgmentProtocol` (each judgment API's label, request path and root help, taken from its wire definition), `JUDGMENT_API_PATHS` (derived from them), `catalogJudgmentApis` and `nativeJudgeRootDefault` (default endpoint roots from the model, the catalog seed or the provider's chat root), `validateNativeJudgeEndpointRoot` and `validateNativeJudgeProviderId` to `judgment/native`, for tools that declare native judge models, `timeoutMs` to `NativeJudgeConnection` so `createNativeJudge` callers can set the per-attempt timeout, and `detail` (the error body's message) to `JudgmentApiError`, whose `code` now falls back to the body's top-level `type` as Bifrost sends it ([#19055](https://github.com/can1357/oh-my-pi/pull/19055) by [@Xytronix](https://github.com/Xytronix))
 
+### Fixed
+
+- Fixed auth-gateway (`pi-native`) requests sending options the gateway discards, such as `providerOptions`, `cwd`, and fallback-credit replay bodies
+
 ### Changed
 
 - `xai-tts` now sends `speed`, accepts `pcm` output, and allows xAI's current 60,000-character input (was 15,000) ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))

@@ -54,6 +54,7 @@ const STATS_SESSION_TABLES = [
 	"messages",
 	"user_messages",
 	"tool_calls",
+	"tool_approvals",
 	"file_offsets",
 	"session_rollup",
 	"session_dirty",

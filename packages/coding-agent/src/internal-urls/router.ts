@@ -40,6 +40,7 @@ import type {
 	InternalWriteResult,
 	LocateOptions,
 	ProtocolHandler,
+	RemoteEditHooks,
 	ResolveContext,
 	SchemeHost,
 	SchemeSpec,
@@ -48,6 +49,13 @@ import type {
 } from "./types";
 import { VaultProtocolHandler } from "./vault-protocol";
 import { splitInternalUrlSel } from "../tools/details/read";
+
+/** A URL whose scheme lets `edit` update it in place through a local mirror (`spec.write.edits`). */
+export interface RemoteEditTarget {
+	url: InternalUrl;
+	scheme: string;
+	hooks: RemoteEditHooks;
+}
 
 /**
  * Routed read/search target.
@@ -154,6 +162,16 @@ export class InternalUrlRouter {
 			}
 			if (!handler.locate) throw new Error(`${scheme}:// spec.write.via "file" requires a locate() hook`);
 			if (spec.immutable) throw new Error(`${scheme}:// spec.write.via "file" contradicts spec.immutable`);
+		}
+		if (spec.write?.edits !== undefined) {
+			if (via !== "handler" || spec.write.payload !== "text" || spec.backing !== "remote") {
+				throw new Error(
+					`${scheme}:// spec.write.edits requires backing "remote" with a handler-written text payload`,
+				);
+			}
+			if (!handler.edit) throw new Error(`${scheme}:// spec.write.edits requires edit() hooks`);
+		} else if (handler.edit) {
+			throw new Error(`${scheme}:// handler has edit() hooks but spec.write.edits is absent`);
 		}
 		if (spec.write?.scope === "sandbox" && (!spec.linkable || !handler.locateSync)) {
 			throw new Error(`${scheme}:// spec.write.scope "sandbox" requires spec.linkable and a locateSync() hook`);
@@ -385,6 +403,13 @@ export class InternalUrlRouter {
 	writeTarget(input: string): { url: InternalUrl; spec: SchemeSpec } | undefined {
 		const registered = this.#registered(input);
 		return registered && { url: parseInternalUrl(registered.url), spec: registered.handler.spec };
+	}
+
+	/** Parsed URL, scheme, and mirror-edit hooks of a registered `input` whose scheme declares `spec.write.edits`. */
+	remoteEdit(input: string): RemoteEditTarget | undefined {
+		const registered = this.#registered(input);
+		const hooks = registered?.handler.spec.write?.edits ? registered.handler.edit : undefined;
+		return hooks && registered && { url: parseInternalUrl(registered.url), scheme: registered.scheme, hooks };
 	}
 
 	/**
