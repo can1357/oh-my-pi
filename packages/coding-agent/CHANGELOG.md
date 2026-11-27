@@ -90,6 +90,7 @@
 ### Removed
 
 - Removed unused `parse*Args`/`print*Help` exports from `@oh-my-pi/pi-coding-agent/cli/{config,grep,plugin,setup,shell,web-search,update}-cli`; the subcommands parse flags through `src/commands/*` ([#20526](https://github.com/can1357/oh-my-pi/pull/20526))
+- Fixed an empty toast with only a checkmark appearing in Tern each time dictation finished transcribing.
 - Fixed `bash` running its command approval analysis in yolo mode without `bash.patterns` rules, which failed every command when the native addon was out of date.
 - Fixed garbled live dictation (stray words like "Yeah. Oh. Hey.") with quiet microphones or background music: recordings are now split at pauses by the Silero voice activity detector instead of a loudness threshold that chopped speech into sub-second pieces. A recording with no detected speech, such as a song, is transcribed in one pass when recording stops.
 - Fixed terminal completion, focus, scrolling, and keyboard handling across prompts, ask forms, plugin and agent views, debugger and plan review screens, session management, and external editors.

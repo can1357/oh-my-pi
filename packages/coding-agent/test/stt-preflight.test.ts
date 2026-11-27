@@ -99,6 +99,7 @@ describe("STTController preflight", () => {
 		return {
 			showWarning: vi.fn(),
 			showStatus: vi.fn(),
+			clearStatus: vi.fn(),
 			onStateChange: vi.fn(),
 		};
 	}

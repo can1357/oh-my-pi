@@ -22,6 +22,8 @@ export type SttState = "idle" | "recording" | "transcribing";
 export interface SttCallbacks {
 	showWarning(msg: string): void;
 	showStatus(msg: string): void;
+	/** Withdraw the progress status this capture showed ("Transcribing..."): its text landed. */
+	clearStatus(): void;
 	onStateChange(state: SttState): void;
 	/** Keep this capture as a draft, without interpreting submit commands. */
 	manualSubmit?: boolean;
@@ -536,7 +538,10 @@ export class STTController {
 		} else {
 			this.#streamEditor?.clearVolatileText();
 		}
-		if (!failed) options.showStatus(this.#streamCommitted ? "" : "No speech detected.");
+		if (!failed) {
+			if (this.#streamCommitted) options.clearStatus();
+			else options.showStatus("No speech detected.");
+		}
 
 		if (!options.manualSubmit && this.#streamCommitted && !failed && this.#streamEditor) {
 			const trigger = cfgSttSubmitTrigger.get(this.#settings);
