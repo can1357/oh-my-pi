@@ -1,4 +1,4 @@
-import { $env } from "@oh-my-pi/pi-utils";
+import { $env, isRecord } from "@oh-my-pi/pi-utils";
 import type { ResponseInput, ResponseInputItem } from "./providers/openai-responses-wire";
 import { isMalformedToolCallName, redactSensitiveCredentials } from "./providers/transform-messages";
 export { normalizeToolCallId } from "./providers/transform-messages";
@@ -111,8 +111,8 @@ export function stripOpenAIResponsesOutputOnlyStatusesForReplay<TItem extends { 
 	return sanitized ?? items;
 }
 
-function holdsCreatedBy(value: unknown): boolean {
-	return typeof value === "object" && value !== null && Object.hasOwn(value, "created_by");
+function holdsCreatedBy(value: unknown): value is Record<string, unknown> & { created_by: unknown } {
+	return isRecord(value) && Object.hasOwn(value, "created_by");
 }
 
 /**
@@ -123,10 +123,16 @@ function holdsCreatedBy(value: unknown): boolean {
  * or copy while keeping/dropping id.
  */
 export function stripOpenAIResponsesInternalMetadataForReplay<
-	TItem extends { id?: unknown; internal_chat_message_metadata_passthrough?: unknown },
+	TItem extends {
+		id?: unknown;
+		type?: unknown;
+		output?: unknown;
+		created_by?: unknown;
+		internal_chat_message_metadata_passthrough?: unknown;
+	},
 >(item: TItem, mode: "preserve" | "copy" | "drop-id" = "preserve"): TItem {
-	const record = item as Record<string, unknown>;
-	const shellOutput = record.type === "shell_call_output" && Array.isArray(record.output) ? record.output : undefined;
+	const shellOutput: readonly unknown[] | undefined =
+		item.type === "shell_call_output" && Array.isArray(item.output) ? item.output : undefined;
 	const entriesHoldCreatedBy = shellOutput?.some(holdsCreatedBy) === true;
 	if (
 		mode === "preserve" &&
@@ -136,18 +142,21 @@ export function stripOpenAIResponsesInternalMetadataForReplay<
 	) {
 		return item;
 	}
-	const sanitized = { ...record };
+	const sanitized =
+		shellOutput && entriesHoldCreatedBy
+			? {
+					...item,
+					output: shellOutput.map(entry => {
+						if (!holdsCreatedBy(entry)) return entry;
+						const { created_by: _createdBy, ...withoutCreatedBy } = entry;
+						return withoutCreatedBy;
+					}),
+				}
+			: { ...item };
 	delete sanitized.internal_chat_message_metadata_passthrough;
 	delete sanitized.created_by;
-	if (shellOutput && entriesHoldCreatedBy) {
-		sanitized.output = shellOutput.map(entry => {
-			if (!holdsCreatedBy(entry)) return entry;
-			const { created_by: _createdBy, ...withoutCreatedBy } = entry as Record<string, unknown>;
-			return withoutCreatedBy;
-		});
-	}
 	if (mode === "drop-id") delete sanitized.id;
-	return sanitized as TItem;
+	return sanitized;
 }
 
 /**
