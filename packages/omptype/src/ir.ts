@@ -1541,8 +1541,7 @@ function isSimpleUnion(members: IR[]): boolean {
 		const a = primitiveUnit(members[0]);
 		const b = primitiveUnit(members[1]);
 		if (a !== nonUnit && b !== nonUnit) return a !== b && !(typeof a === "boolean" && typeof b === "boolean");
-		const other =
-			a === null || a === undefined ? members[1] : b === null || b === undefined ? members[0] : undefined;
+		const other = a === null || a === undefined ? members[1] : b === null || b === undefined ? members[0] : undefined;
 		return (
 			other?.k === "string" ||
 			other?.k === "number" ||

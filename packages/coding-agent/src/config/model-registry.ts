@@ -1162,7 +1162,9 @@ export class ModelRegistry {
 		if (this.#owner) {
 			const owner = this.#owner;
 			return launch
-				? logger.time("hydrateCredentialScopedModelCaches", () => owner.hydrateCredentialScopedModelCaches(providers))
+				? logger.time("hydrateCredentialScopedModelCaches", () =>
+						owner.hydrateCredentialScopedModelCaches(providers),
+					)
 				: owner.hydrateCredentialScopedModelCaches(providers);
 		}
 		const filter = providers && new Set(Array.from(providers, provider => provider.toLowerCase()));
@@ -2995,7 +2997,13 @@ export class ModelRegistry {
 			? undefined
 			: this.#prepareRuntimeDiscoveryLanding(configuredDiscoveryResults, builtInDiscovery, references);
 		if (!precedingLanding && !preparing) {
-			this.#landRuntimeDiscoveries(configuredDiscoveryResults, builtInDiscovery, providerFilter, references, startup);
+			this.#landRuntimeDiscoveries(
+				configuredDiscoveryResults,
+				builtInDiscovery,
+				providerFilter,
+				references,
+				startup,
+			);
 			return;
 		}
 		const { promise: landing, resolve: landed } = Promise.withResolvers<void>();
@@ -3007,7 +3015,13 @@ export class ModelRegistry {
 			} else {
 				await preparing;
 			}
-			this.#landRuntimeDiscoveries(configuredDiscoveryResults, builtInDiscovery, providerFilter, references, startup);
+			this.#landRuntimeDiscoveries(
+				configuredDiscoveryResults,
+				builtInDiscovery,
+				providerFilter,
+				references,
+				startup,
+			);
 		} finally {
 			if (this.#discoveryLandingTail === landing) this.#discoveryLandingTail = undefined;
 			landed();

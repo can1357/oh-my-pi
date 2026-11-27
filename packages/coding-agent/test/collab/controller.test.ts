@@ -450,13 +450,14 @@ describe("interactive collaboration startup", () => {
 		remoteHosts.push(remote);
 		await remote.start(RELAY_URL);
 		const render = InteractiveMode.prototype.renderInitialMessages;
-		spyOn(InteractiveMode.prototype, "renderInitialMessages").mockImplementation(
-			async function (this: InteractiveMode, options) {
-				if (this.sessionManager.getHeader()?.parentSession === remote.sessionId)
-					throw new Error("dedicated replica rendering failed");
-				await render.call(this, options);
-			},
-		);
+		spyOn(InteractiveMode.prototype, "renderInitialMessages").mockImplementation(async function (
+			this: InteractiveMode,
+			options,
+		) {
+			if (this.sessionManager.getHeader()?.parentSession === remote.sessionId)
+				throw new Error("dedicated replica rendering failed");
+			await render.call(this, options);
+		});
 		beginStartupComposer({
 			driver: memoryTerminal({ columns: 80, rows: 24 }).options,
 			version: "test",
@@ -697,12 +698,14 @@ describe("interactive collaboration startup", () => {
 		const guest = new CollabGuestLink(local);
 		let transport: CollabSocket | undefined;
 		const send = CollabSocket.prototype.send;
-		const capture = spyOn(CollabSocket.prototype, "send").mockImplementation(
-			function (this: CollabSocket, frame, targetPeer) {
-				if (typeof frame !== "string" && frame.t === "hello") transport = this;
-				return send.call(this, frame, targetPeer);
-			},
-		);
+		const capture = spyOn(CollabSocket.prototype, "send").mockImplementation(function (
+			this: CollabSocket,
+			frame,
+			targetPeer,
+		) {
+			if (typeof frame !== "string" && frame.t === "hello") transport = this;
+			return send.call(this, frame, targetPeer);
+		});
 		await guest.join(remote.link);
 		capture.mockRestore();
 		const rendering = Promise.withResolvers<void>();
@@ -793,24 +796,24 @@ describe("interactive collaboration startup", () => {
 				version: "test",
 				cache: false,
 			});
-			spyOn(InteractiveMode.prototype, "initHooksAndCustomTools").mockImplementation(
-				async function (this: InteractiveMode) {
-					mode = this;
-					earlyHost = this.collabHost;
-					// Ordinary init still installs the host before invoking startup hooks.
-					expect(earlyHost).toBeDefined();
-					await this.collabController.idle();
-					expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([{ access: "view" }]);
-					if (failurePoint === "cleanup rejection" && earlyHost) {
-						const stop = earlyHost.stop.bind(earlyHost);
-						spyOn(earlyHost, "stop").mockImplementation(async reason => {
-							await stop(reason);
-							throw cleanupFailure;
-						});
-					}
-					if (failurePoint !== "replay") throw startupFailure;
-				},
-			);
+			spyOn(InteractiveMode.prototype, "initHooksAndCustomTools").mockImplementation(async function (
+				this: InteractiveMode,
+			) {
+				mode = this;
+				earlyHost = this.collabHost;
+				// Ordinary init still installs the host before invoking startup hooks.
+				expect(earlyHost).toBeDefined();
+				await this.collabController.idle();
+				expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([{ access: "view" }]);
+				if (failurePoint === "cleanup rejection" && earlyHost) {
+					const stop = earlyHost.stop.bind(earlyHost);
+					spyOn(earlyHost, "stop").mockImplementation(async reason => {
+						await stop(reason);
+						throw cleanupFailure;
+					});
+				}
+				if (failurePoint !== "replay") throw startupFailure;
+			});
 			if (failurePoint === "replay") {
 				spyOn(InteractiveMode.prototype, "renderInitialMessages").mockRejectedValue(startupFailure);
 			}

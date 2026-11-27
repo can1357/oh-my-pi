@@ -92,14 +92,15 @@ describe("outer startup collaboration gate", () => {
 		const startupFailure = new Error("initial replay failed");
 		const finished = new Error("finished observing startup");
 		const renderInitialMessages = InteractiveMode.prototype.renderInitialMessages;
-		vi.spyOn(InteractiveMode.prototype, "renderInitialMessages").mockImplementation(
-			async function (this: InteractiveMode, options) {
-				await renderInitialMessages.call(this, options);
-				enteredReplay.resolve(this);
-				await releaseReplay.promise;
-				if (result === "fails") throw startupFailure;
-			},
-		);
+		vi.spyOn(InteractiveMode.prototype, "renderInitialMessages").mockImplementation(async function (
+			this: InteractiveMode,
+			options,
+		) {
+			await renderInitialMessages.call(this, options);
+			enteredReplay.resolve(this);
+			await releaseReplay.promise;
+			if (result === "fails") throw startupFailure;
+		});
 		vi.spyOn(InteractiveMode.prototype, "getUserInput").mockRejectedValue(finished);
 		type GuestOutcome = "refused" | "prompt" | "abort" | "agent";
 		let outcome = Promise.withResolvers<GuestOutcome>();

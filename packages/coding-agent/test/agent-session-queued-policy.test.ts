@@ -734,16 +734,17 @@ describe("queued user delivery policy", () => {
 		);
 		const normalizeImages = SessionProviderBoundary.prototype.normalizeImagesForModel;
 		let changed = false;
-		vi.spyOn(SessionProviderBoundary.prototype, "normalizeImagesForModel").mockImplementation(
-			async function (this: SessionProviderBoundary, images) {
-				const normalized = await normalizeImages.call(this, images);
-				if (!changed) {
-					changed = true;
-					await session.setActiveToolsByName(["new_tool"]);
-				}
-				return normalized;
-			},
-		);
+		vi.spyOn(SessionProviderBoundary.prototype, "normalizeImagesForModel").mockImplementation(async function (
+			this: SessionProviderBoundary,
+			images,
+		) {
+			const normalized = await normalizeImages.call(this, images);
+			if (!changed) {
+				changed = true;
+				await session.setActiveToolsByName(["new_tool"]);
+			}
+			return normalized;
+		});
 		await session.steer("image policy");
 		await session.waitForIdle();
 		expect(requests).toHaveLength(1);

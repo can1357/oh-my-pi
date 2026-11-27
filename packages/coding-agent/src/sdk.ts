@@ -2100,7 +2100,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			? [options.modelPattern.trim()]
 			: [];
 	const hasExplicitModel = options.model !== undefined || deferredModelPatterns.length > 0;
-	const hydrateStartupModelCaches = options.hydrateStartupModelCaches ?? modelRegistry.createStartupModelCacheHydrator();
+	const hydrateStartupModelCaches =
+		options.hydrateStartupModelCaches ?? modelRegistry.createStartupModelCacheHydrator();
 	const startStartupModelCacheHydration = (providers?: ReadonlySet<string>) => {
 		const hydration = hydrateStartupModelCaches(providers);
 		// A worker's owner call may reject before we reach the first reader.
@@ -2395,7 +2396,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			await hydrateFullStartupModelCaches();
 		} else {
 			if (startupProvider) providers.delete(startupProvider);
-			await Promise.all([startupProviderHydration, providers.size > 0 ? hydrateStartupModelCaches(providers) : undefined]);
+			await Promise.all([
+				startupProviderHydration,
+				providers.size > 0 ? hydrateStartupModelCaches(providers) : undefined,
+			]);
 		}
 	}
 
