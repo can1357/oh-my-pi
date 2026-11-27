@@ -517,15 +517,22 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 					...(reason ? { reason } : {}),
 				});
 				if (!hasApprovalHandlers) return;
-				await this.runner.emit({
-					type: "tool_approval_resolved",
-					sessionId,
-					approvalId,
-					toolName: this.tool.name,
-					toolCallId,
-					approved,
-					...(reason ? { reason } : {}),
-					by,
+				// Handlers are awaited, but an aborted call does not wait on them: they finish in the background
+				// while the call takes its abort path.
+				await untilAborted(
+					signal,
+					this.runner.emit({
+						type: "tool_approval_resolved",
+						sessionId,
+						approvalId,
+						toolName: this.tool.name,
+						toolCallId,
+						approved,
+						...(reason ? { reason } : {}),
+						by,
+					}),
+				).catch(error => {
+					if (!signal?.aborted) throw error;
 				});
 			};
 

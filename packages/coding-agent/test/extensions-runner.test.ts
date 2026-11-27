@@ -3543,6 +3543,8 @@ describe("ExtensionRunner", () => {
 				abortResult?: boolean;
 				/** A second `tool_approval_requested` handler awaits this, ignoring every signal. */
 				laterHold?: Promise<void>;
+				/** The `tool_approval_resolved` handler awaits this, ignoring every signal. */
+				resolvedHold?: Promise<void>;
 			};
 			const globalState = globalThis as typeof globalThis & { __extApproval?: Seen };
 			/** The approval id a call's request carried (an unknown id when it was never requested). */
@@ -3574,9 +3576,10 @@ describe("ExtensionRunner", () => {
 							const seen = globalThis.__extApproval;
 							if (seen.laterHold) await seen.laterHold;
 						});
-						pi.on("tool_approval_resolved", event => {
+						pi.on("tool_approval_resolved", async event => {
 							globalThis.__extApproval.resolved.push({ approved: event.approved, by: event.by, reason: event.reason });
 							globalThis.__extApproval.onResolved?.();
+							if (globalThis.__extApproval.resolvedHold) await globalThis.__extApproval.resolvedHold;
 						});
 					}`,
 				);
@@ -3847,6 +3850,16 @@ describe("ExtensionRunner", () => {
 				expect(executed).not.toHaveBeenCalled();
 				expect(seen.resolved[0]).toMatchObject({ approved: false, by: "user" });
 				release.resolve();
+			});
+
+			it("aborting while a tool_approval_resolved handler awaits does not wait for it", async () => {
+				const turn = new AbortController();
+				const { seen, executed, run } = await setup({ select: async () => "Approve" });
+				seen.resolvedHold = Promise.withResolvers<void>().promise;
+				seen.onResolved = () => turn.abort();
+				await expect(run("call-resolved-held", { signal: turn.signal })).rejects.toThrow(/Aborted/);
+				expect(seen.resolved).toEqual([{ approved: true, by: "user", reason: undefined }]);
+				expect(executed).not.toHaveBeenCalled();
 			});
 
 			it("a handler deleting event.signal does not keep a later handler from releasing on abort", async () => {

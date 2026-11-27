@@ -1089,6 +1089,28 @@ describe("AskTool answered by an extension", () => {
 		expect(text(await second)).toContain('"store": "sqlite"');
 	});
 
+	it("cancelling while an ask_resolved handler awaits does not wait for it", async () => {
+		const ext = channel();
+		const turn = new AbortController();
+		const reported: AskResolvedEvent[] = [];
+		// An `ask_resolved` handler stuck on remote work that ignores every signal.
+		ext.extensionAsk.resolved = async event => {
+			reported.push(event);
+			turn.abort();
+			await Promise.withResolvers<void>().promise;
+		};
+		const formDialog = vi.fn<FormDialog>(async () => ({ data: { store: "sqlite", ttl: 7 } }));
+		const outcome = new AskTool(createSession()).execute(
+			"call-resolved-held",
+			{ html: DB_FORM },
+			turn.signal,
+			undefined,
+			withChannel(createContext({ formDialog }), ext.extensionAsk),
+		);
+		await expect(outcome).rejects.toThrow("Ask input was cancelled");
+		expect(reported).toHaveLength(1);
+	});
+
 	it("a pending listing carries the form's live signal", async () => {
 		const ext = channel();
 		const opened = Promise.withResolvers<void>();

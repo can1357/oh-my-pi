@@ -742,7 +742,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		} finally {
 			pending?.close();
 			const settled = answered;
-			await context.extensionAsk?.resolved({
+			const reported = context.extensionAsk?.resolved({
 				type: "ask_resolved",
 				sessionId,
 				askId,
@@ -751,6 +751,13 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 				answered: settled !== undefined && !settled.timedOut,
 				by,
 			});
+			// Handlers are awaited, but an abort or interrupting message does not wait on them: they finish
+			// in the background while the ask takes its abort path below.
+			if (reported) {
+				await untilAborted(dialogSignal, reported).catch(error => {
+					if (!dialogSignal.aborted) throw error;
+				});
+			}
 		}
 		// `ask_resolved` handlers are awaited: an abort or interrupting message during them wins over the answer.
 		if (dialogSignal.aborted) throw abortError();
