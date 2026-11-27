@@ -33,6 +33,12 @@ export interface DestinationProcessContext {
 	readonly cwd: string;
 }
 
+/**
+ * Wall-clock budget for one destination upload child process: the command
+ * uploader's kill timer, and curl's `--max-time` for FTP/FTPS uploads.
+ */
+export const UPLOAD_TIMEOUT_MS = 60_000;
+
 /** `context`, or this process's environment and safe project cwd. */
 export function destinationSpawnContext(context: DestinationProcessContext | undefined): DestinationProcessContext {
 	if (context) return context;
