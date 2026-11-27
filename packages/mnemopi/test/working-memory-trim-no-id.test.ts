@@ -107,7 +107,10 @@ describe("working-memory trim with a row that has no id", () => {
 
 	it("removes a row with no id that falls outside the newest N", () => {
 		const state = makeState(2);
-		for (const id of ["wm-1", "wm-2", "wm-3"]) addMemory(state, id, hoursAgo(1));
+		// Distinct timestamps: the trim's `ORDER BY timestamp DESC` has no tie-breaker.
+		addMemory(state, "wm-1", hoursAgo(3));
+		addMemory(state, "wm-2", hoursAgo(2));
+		addMemory(state, "wm-3", hoursAgo(1));
 		addRecoveredRow(state, RECOVERED_ROWID);
 		const kept = remember(state, "the write that runs the trim");
 		// A row with no timestamp sorts outside the newest N, so the trim takes it with the oldest.
