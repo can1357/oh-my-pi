@@ -15,6 +15,7 @@
 
 ### Fixed
 
+- `Process.terminate` cancelled by its abort signal before or during its grace period still sends its hard wave, at once, so a process that ignores SIGTERM no longer outlives the cancelled call; the call then rejects with the abort without waiting for the exits. A cancelled call therefore ends the grace period at the abort: a child still handling the SIGTERM then dies of the SIGKILL instead of exiting on its own ([#20762](https://github.com/can1357/oh-my-pi/pull/20762) by [@sjawhar](https://github.com/sjawhar))
 - Improved URL reading to preserve model tables, source-code indentation, linked content cards, meaningful button labels, and sign-in instructions while removing unrelated news, footer content, and empty whitespace-only paragraphs.
 - Fixed `Process.terminate` so descendants that start their own sessions are still terminated reliably.
 - Fixed the Linux GNU native addon so it no longer requires `libm.so.6` for the Perl `POSIX` `acosh` and `asinh` builtins.
