@@ -181,6 +181,22 @@ export async function stageAgyCredentials(apiKey: string, geminiDir: string): Pr
 		await withFileLock(geminiDir, async () => {
 			await fs.chmod(geminiDir, 0o700);
 			await fs.chmod(path.dirname(file), 0o700);
+			const existingRaw = await fs.readFile(file, "utf8").catch(() => undefined);
+			if (existingRaw !== undefined) {
+				const existing = record(json(existingRaw));
+				const existingToken = record(existing?.token);
+				const existingExpires =
+					typeof existingToken?.expiry === "string" ? Date.parse(existingToken.expiry) : Number.NaN;
+				if (
+					existing?.auth_method === "consumer" &&
+					nonempty(existingToken?.access_token) &&
+					Number.isFinite(existingExpires) &&
+					existingExpires > credentials.expires &&
+					existing.id_token_email === credentials.email
+				) {
+					return;
+				}
+			}
 			await fs.writeFile(
 				temporary,
 				JSON.stringify({ token, auth_method: "consumer", id_token_email: credentials.email }),

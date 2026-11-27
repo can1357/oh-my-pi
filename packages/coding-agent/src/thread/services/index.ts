@@ -5,6 +5,7 @@
  */
 import type { ThreadService } from "../services";
 import { agentsThreadService } from "./agents";
+import { antigravityCliThreadService } from "./antigravity-cli";
 import { asyncJobsThreadService } from "./async-jobs";
 import { authService } from "./auth";
 import { executorThreadService } from "./executor";
@@ -27,6 +28,7 @@ export const THREAD_SERVICES: readonly ThreadService[] = [
 	authService,
 	agentsThreadService,
 	lspThreadService,
+	antigravityCliThreadService,
 	telemetryThreadService,
 	memoryThreadService,
 	integrationsThreadService,

@@ -102,6 +102,10 @@
 			"types": "./src/providers/openai-codex/*.ts",
 			"import": "./src/providers/openai-codex/*.ts"
 		},
+		"./providers/antigravity-cli/*": {
+			"types": "./src/providers/antigravity-cli/*.ts",
+			"import": "./src/providers/antigravity-cli/*.ts"
+		},
 		"./usage/*": {
 			"types": "./src/usage/*.ts",
 			"import": "./src/usage/*.ts"
