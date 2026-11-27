@@ -288,11 +288,13 @@ test("Up at the top of a question taller than the card scrolls up through its te
 		term.focus(term.surface.dock()[0]!);
 		expect(shows("Alpha")).toBe(true);
 		expect(shows("First question")).toBe(false);
-		// The first question's own text, then back down to its options.
+		// The first question's own text, then back down to its options: once the highlight shows, Down moves it.
 		expect(pressUntil("up", "First question")).toBeGreaterThan(1);
 		expect(model.active()).toBe(0);
 		pressUntil("down", "Alpha");
-		expect(shows("Alpha")).toBe(true);
+		expect(model.row()).toBe(0);
+		term.press("down");
+		expect(model.row()).toBe(1);
 
 		term.press("pageDown");
 		expect(model.active()).toBe(1);

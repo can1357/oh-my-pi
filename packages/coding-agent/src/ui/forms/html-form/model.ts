@@ -161,6 +161,8 @@ export class HtmlFormModel {
 	readonly scrollBack = signal(0);
 	/** Rows of the open group above the card as the terminal last drew it; 0 before that paint and in Tern. */
 	hiddenAbove = 0;
+	/** Whether the highlighted row sits below the card as the terminal last drew it (scrolled up past it). */
+	highlightBelow = false;
 	/**
 	 * Cells a textarea's rows wrap at as the terminal card last drew them, so
 	 * Up/Down step through the rows on screen; undefined before that paint
@@ -656,8 +658,8 @@ export class HtmlFormModel {
 		const step = this.#vimRowStep(key);
 		const routed: KeyEvent = step ? { id: step, kind: key.kind, raw: key.raw } : key;
 		const back = untrack(this.scrollBack);
-		// Down scrolls back toward the highlight before moving it; any key that does not scroll up drops the scroll.
-		if (back > 0 && listKeyId(routed) === "down") {
+		// Down scrolls back until the highlight shows, then moves it; any key that does not scroll up drops the scroll.
+		if (back > 0 && this.highlightBelow && listKeyId(routed) === "down") {
 			this.scrollBack.set(back - 1);
 			return true;
 		}
