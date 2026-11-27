@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- LSP requests now report server exits, including TypeScript analysis child exits reported by the wrapper, instead of timing out or returning empty results. `lsp reload` restarts TypeScript analysis ([#19238](https://github.com/can1357/oh-my-pi/issues/19238)) ([#20459](https://github.com/can1357/oh-my-pi/pull/20459) by [@J4ck1e2000](https://github.com/J4ck1e2000)).
 ### Breaking Changes
 
 - Removed the `cwd` parameter from the `bash` tool; a leading `cd <path> && …` still selects the working directory
