@@ -307,6 +307,8 @@ describe("Messages: copilot_usage on message_delta", () => {
 		expect(result.usage.aiu?.nano).toBe(436_590_000);
 		expect(result.usage.output).toBe(103);
 		expect(result.usage.cacheRead).toBe(27_694);
+		// The reported charge replaces the per-request estimate on a token-billed account.
+		expect(result.usage.premiumRequests).toBeUndefined();
 	});
 
 	it("leaves aiu absent when the reply carries no billing frame", async () => {
@@ -322,6 +324,8 @@ describe("Messages: copilot_usage on message_delta", () => {
 		expect(result.usage.aiu).toBeUndefined();
 		// Recorded as a missed frame, unlike a transcript from before the frame was read.
 		expect(result.usage.aiuMissing).toBe(true);
+		// A request-billed plan sends no frame and keeps its premium-request estimate.
+		expect(result.usage.premiumRequests).toBe(1);
 	});
 
 	it("does not mark a request that failed before any token", async () => {
