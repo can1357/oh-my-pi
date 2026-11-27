@@ -165,7 +165,9 @@ function pickerActions(hub: ModelHubState): TspPickerAction[] {
 		].filter((action): action is TspPickerAction => action !== undefined);
 	}
 	const route = hub.canEditNativeRoute() ? pickerAction("nativeRoute", "Native route", "ctrl+r") : undefined;
-	const create = hub.canCreateNativeJudge() ? pickerAction("nativeJudgeCreate", "Add native judge", "ctrl+n") : undefined;
+	const create = hub.canCreateNativeJudge()
+		? pickerAction("nativeJudgeCreate", "Add native judge", "ctrl+n")
+		: undefined;
 	if (strip) {
 		const apply =
 			strip.kind === "name"
@@ -625,11 +627,7 @@ function hubProps(hub: ModelHubState): TspPickerProps {
 		scopes: pickerScopes(hub),
 		scope: entry.id,
 		actions: pickerActions(hub),
-		strip: hub.nativeRouteForm
-			? nativeRouteStrip(hub, hub.nativeRouteForm)
-			: strip
-				? pickerStrip(hub, strip)
-				: null,
+		strip: hub.nativeRouteForm ? nativeRouteStrip(hub, hub.nativeRouteForm) : strip ? pickerStrip(hub, strip) : null,
 		focus: strip || hub.nativeRouteForm ? "strip" : hub.focus === "scope" ? "scopes" : "list",
 	};
 	if (rolesView) {

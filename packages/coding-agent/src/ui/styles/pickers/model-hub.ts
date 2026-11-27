@@ -340,14 +340,20 @@ function nativeRouteRows(
 		const view = nativeRouteFieldView(step);
 		lines.push(` ${caretField(theme, "> ", view.text, view.cursor, Math.max(4, width - 2))}`);
 		const preview = hub.nativeRoutePreview();
-		if (step.error) for (const row of wrap(theme.style("error", step.error), Math.max(1, width - 3))) lines.push(`   ${row}`);
+		if (step.error)
+			for (const row of wrap(theme.style("error", step.error), Math.max(1, width - 3))) lines.push(`   ${row}`);
 		else if (preview) lines.push(cut(theme.style("dim", `   ${preview}`)));
 	}
 	return { lines, choiceStart };
 }
 
 /** The body row's choice index under body row `content` of a hub painted `width` wide (the open form's). */
-export function nativeRouteChoiceAt(theme: Theme, hub: ModelHubState, width: number, content: number): number | undefined {
+export function nativeRouteChoiceAt(
+	theme: Theme,
+	hub: ModelHubState,
+	width: number,
+	content: number,
+): number | undefined {
 	const form = hub.nativeRouteForm;
 	if (!form?.step.choices) return undefined;
 	const { choiceStart } = nativeRouteRows(theme, hub, form, hubGeometry(width, hub.entries).body);

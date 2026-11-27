@@ -351,7 +351,10 @@ function choiceStep(
 		label,
 		description,
 		choices,
-		index: Math.max(0, choices.findIndex(choice => choice.value === value)),
+		index: Math.max(
+			0,
+			choices.findIndex(choice => choice.value === value),
+		),
 		field: { text: "", cursor: 0 },
 		secret: false,
 		empty: "reject",
@@ -1882,10 +1885,15 @@ export class ModelHubState {
 			case "baseUrl": {
 				const provider = form.draft.provider ?? "";
 				const root = api ? nativeJudgeRootDefault(api, provider, this.registry.getAll("all")) : undefined;
-				form.step = textStep("baseUrl", "Native API base URL", api ? nativeRootDescription(api, provider, root) : "", {
-					initial: form.draft.baseUrl ?? root?.baseUrl,
-					preview: true,
-				});
+				form.step = textStep(
+					"baseUrl",
+					"Native API base URL",
+					api ? nativeRootDescription(api, provider, root) : "",
+					{
+						initial: form.draft.baseUrl ?? root?.baseUrl,
+						preview: true,
+					},
+				);
 				return;
 			}
 			case "token": {
@@ -1908,13 +1916,21 @@ export class ModelHubState {
 					description +=
 						" Workers AI also needs the Cloudflare account ID, asked next unless the credential carries it.";
 				}
-				form.step = textStep("token", "Provider API key (optional)", description, { secret: true, empty: "submit" });
+				form.step = textStep("token", "Provider API key (optional)", description, {
+					secret: true,
+					empty: "submit",
+				});
 				return;
 			}
 			case "accountId":
-				form.step = textStep("accountId", "Cloudflare account ID", "Stored with the key as one Cloudflare credential.", {
-					secret: true,
-				});
+				form.step = textStep(
+					"accountId",
+					"Cloudflare account ID",
+					"Stored with the key as one Cloudflare credential.",
+					{
+						secret: true,
+					},
+				);
 				return;
 		}
 	}
@@ -1989,7 +2005,11 @@ export class ModelHubState {
 				return;
 			case "token":
 				form.token = value.trim() || undefined;
-				if (form.token && form.api === "workers-ai-systemone" && !parseCloudflareCredential(form.token)?.accountId) {
+				if (
+					form.token &&
+					form.api === "workers-ai-systemone" &&
+					!parseCloudflareCredential(form.token)?.accountId
+				) {
 					this.#openNativeJudgeCreateStep(form, "accountId");
 					return;
 				}
