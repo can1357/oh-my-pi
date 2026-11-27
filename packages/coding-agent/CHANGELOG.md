@@ -39,6 +39,7 @@
 - Added Codex's 17 new live voices to `live.voice`: `aube`, `bubbie`, `haetsal`, `hanul`, `himari`, `leher`, `marin`, `miko`, `neer`, `porto`, `rindo`, `rio`, `rivage`, `selva`, `sonna`, `tinta`, and `viola`.
 - The `logout` RPC response carries `signOutError` when the provider could not confirm revoking the login; the login is removed regardless
 - Esc hides the command output (`/mcp` and other slash commands) previewed above the editor while the agent streams, without interrupting the turn; the output still enters the transcript when the agent pauses ([#17954](https://github.com/can1357/oh-my-pi/issues/17954))
+- Added an uninstaller to the install scripts: `curl -fsSL https://omp.sh/install | sh -s -- --uninstall` (PowerShell: `-Uninstall`) removes the installed binary or bun/npm global package and keeps `~/.omp` unless you confirm the prompt or pass `--purge` (`-Purge`) ([#3351](https://github.com/can1357/oh-my-pi/issues/3351))
 
 ### Changed
 
