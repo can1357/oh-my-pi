@@ -258,6 +258,21 @@ export class UsageService implements UsageApi {
 		});
 	}
 
+	/**
+	 * Copy a report's account billing mode (`metadata.tokenBasedBilling`) onto
+	 * the stored OAuth row, so request keys built from it carry the mode. Writes
+	 * only when the mode changes.
+	 */
+	#recordBillingMode(provider: Provider, credential: UsageCredential, report: UsageReport): void {
+		const tokenBasedBilling = report.metadata?.tokenBasedBilling;
+		if (typeof tokenBasedBilling !== "boolean" || credential.type !== "oauth") return;
+		const credentialId = this.#deps.pool.findIdForUsageCredential(provider, credential);
+		if (credentialId === undefined) return;
+		const entry = this.#deps.pool.entries(provider).find(candidate => candidate.id === credentialId);
+		if (entry?.credential.type !== "oauth" || entry.credential.tokenBasedBilling === tokenBasedBilling) return;
+		this.#deps.pool.replaceById(provider, credentialId, { ...entry.credential, tokenBasedBilling });
+	}
+
 	/** Probe a provider endpoint, refreshing near-expiry OAuth tokens when possible. */
 	async #fetchUsageUncached(request: UsageRequestDescriptor, timeoutMs?: number): Promise<UsageReport | null> {
 		const providerImpl = this.providerFor(request.provider);
@@ -357,6 +372,7 @@ export class UsageService implements UsageApi {
 					};
 				}
 			}
+			if (report) this.#recordBillingMode(request.provider, params.credential, report);
 			return report;
 		} catch (error) {
 			if (error instanceof AIError.ProviderHttpError && (error.status === 401 || error.status === 403)) {

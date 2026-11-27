@@ -314,6 +314,7 @@ export function resolveOpenAIRequestSetup(
 			enterpriseUrl: copilotApiKey.enterpriseUrl,
 			integrationId: resolveCopilotRequestIdentity(options.extraHeaders),
 			cachedIntegrationId: copilotCached,
+			tokenBasedBilling: copilotApiKey.tokenBasedBilling,
 		});
 		Object.assign(headers, copilot.headers);
 		copilotPremiumRequests = copilot.premiumRequests;

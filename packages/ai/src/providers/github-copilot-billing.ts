@@ -46,17 +46,11 @@ export function parseCopilotUsageFrame(frame: unknown): CopilotAiu | undefined {
 /**
  * Record the billing frame carried by a terminal SSE event on `usage`. Leaves
  * `usage.aiu` untouched when the event has no valid `copilot_usage` field.
- *
- * A reported charge replaces the local premium-request estimate: the account
- * bills per token, so the multiplier count no longer describes what was paid.
- * A reply without a frame (a request-billed plan) keeps its estimate.
  */
 export function applyCopilotUsageFrame(usage: Usage, event: unknown): void {
 	if (!isRecord(event)) return;
 	const aiu = parseCopilotUsageFrame(event.copilot_usage);
-	if (!aiu) return;
-	usage.aiu = aiu;
-	delete usage.premiumRequests;
+	if (aiu) usage.aiu = aiu;
 }
 
 /**

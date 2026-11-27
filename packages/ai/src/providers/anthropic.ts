@@ -2010,6 +2010,7 @@ const streamAnthropicOnce = (
 						initiatorOverride: options?.initiatorOverride,
 						enterpriseUrl: copilotApiKey.enterpriseUrl,
 						cachedIntegrationId: copilotCached,
+						tokenBasedBilling: copilotApiKey.tokenBasedBilling,
 					})
 				: undefined;
 			if (copilotDynamicHeaders?.premiumRequests !== undefined) {

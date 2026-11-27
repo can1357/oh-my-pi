@@ -5,7 +5,7 @@
  */
 
 import { toBoolean, toNumber } from "@oh-my-pi/pi-catalog/utils";
-import { COPILOT_GITHUB_HEADERS } from "@oh-my-pi/pi-catalog/wire/github-copilot";
+import { COPILOT_GITHUB_HEADERS, readCopilotTokenBilling } from "@oh-my-pi/pi-catalog/wire/github-copilot";
 import * as AIError from "../error";
 import type {
 	UsageAmount,
@@ -269,7 +269,7 @@ function normalizeQuotaSnapshots(
 				"premium",
 				{ requests: "Premium Requests", credits: "AI Credits" },
 				premium,
-				premium.token_based_billing || data.token_based_billing === true,
+				readCopilotTokenBilling(data) === true,
 				data.copilot_plan,
 				window,
 				accountId,
@@ -392,6 +392,15 @@ function rethrowAuthRejection(failures: unknown[]): void {
 	if (failures.length > 0 && rejected) throw failures.at(-1);
 }
 
+/**
+ * The account's billing mode as report metadata (`tokenBasedBilling`); the
+ * auth layer copies it onto the stored credential for request-time use.
+ */
+function billingMetadata(usage: CopilotUsageResponse): { tokenBasedBilling?: boolean } {
+	const tokenBasedBilling = readCopilotTokenBilling(usage);
+	return tokenBasedBilling === undefined ? {} : { tokenBasedBilling };
+}
+
 export const githubCopilotUsageProvider: UsageProvider = {
 	id: "github-copilot",
 	supports: ({ provider, credential }) => {
@@ -462,6 +471,7 @@ export const githubCopilotUsageProvider: UsageProvider = {
 							accountId: username,
 							plan: usage.copilot_plan,
 							quotaResetDate: usage.quota_reset_date,
+							...billingMetadata(usage),
 						},
 						raw: usage,
 					};
@@ -501,6 +511,7 @@ export const githubCopilotUsageProvider: UsageProvider = {
 						email: params.credential.email,
 						plan: usage.copilot_plan,
 						quotaResetDate: usage.quota_reset_date,
+						...billingMetadata(usage),
 					},
 					raw: usage,
 				};
