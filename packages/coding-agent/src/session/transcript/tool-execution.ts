@@ -19,13 +19,12 @@ export function isSettledJobFrame(details: unknown): boolean {
 }
 
 /** Tools whose returned call hands its card to the background job it started (see {@link parksAsBackground}). */
-const JOB_CARD_TOOLS: Record<string, "always" | "native"> = { task: "always", bash: "native", eval: "native" };
+const JOB_CARD_TOOLS: Record<string, "always" | "native"> = { task: "always", bash: "always", eval: "native" };
 
 /**
- * Whether a call that returned with `details.async.state === "running"` stays parked so its job's
- * later frames keep filling the card until a `completed`/`failed` frame settles it. Detached `task`
- * spawns always do; backgrounded `bash`/`eval` jobs only on a `native` (Tern) surface, where the
- * terminal transcript keeps them frozen instead. Shared by the live event path and the rebuild.
+ * Whether a call that returned with `details.async.state === "running"` keeps its card subscribed
+ * to job frames. Detached `task` spawns and backgrounded `bash` jobs do on both surfaces; `eval`
+ * only does on Tern. On a plain terminal, Bash stops updating once its card enters scrollback.
  */
 export function parksAsBackground(toolName: string, details: unknown, native: boolean): boolean {
 	const mode = JOB_CARD_TOOLS[toolName];

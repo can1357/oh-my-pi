@@ -172,12 +172,15 @@ interface PendingBatch {
 	readonly marked?: ReadonlyMap<object, HistoryRowMark>;
 	/** Live main nodes the batch writes whole (committed on acknowledgement). */
 	readonly nodes: readonly UiNode[];
+	/** Paint snapshots of the whole nodes at the start of the batch, indexed like `nodes`. */
+	readonly painted: readonly (Block | undefined)[];
 	/** A streaming node's stable head moved into history: its emitted rows after this batch. */
 	readonly head?: { readonly node: UiNode; readonly rows: readonly string[]; readonly count: number };
 	/** The last non-empty block whose rows this batch writes. */
 	readonly last: UiNode | undefined;
 	/** Columns the rows were painted at: a batch still unwritten at another width is prepared again. */
 	readonly width: number;
+	readonly capacity: number;
 }
 
 /**
@@ -539,9 +542,12 @@ export class TermBackend {
 		}
 	}
 
-	/** Whether `node` has rows in terminal history (retired whole, or a streaming head), or a batch writing them. */
-	retired(node: UiNode): boolean {
-		if (this.#committed.has(node) || this.#emitted.has(node) || this.#retiring.has(node)) return true;
+	/** Whether `node` is retired. `"content"` counts only acknowledged writes and excludes a separator-only head. */
+	retired(node: UiNode, part?: "content"): boolean {
+		if (this.#committed.has(node)) return true;
+		const emitted = this.#emitted.get(node);
+		if (part === "content") return emitted !== undefined && emitted.count > 0;
+		if (emitted || this.#retiring.has(node)) return true;
 		const pending = this.#pending;
 		return pending !== undefined && (pending.head?.node === node || pending.nodes.includes(node));
 	}
@@ -987,10 +993,24 @@ export class TermBackend {
 		// Whether a resize replays history at its new width (else blocks leave history whole: see below).
 		const rowWise = this.#driver.replaysOnResize?.() ?? true;
 		this.#checkEmitted(main, start, width, rowWise);
-		// A batch never written is prepared again when it no longer fits: another width, or blocks that
-		// moved under it (a replay it was stays owed).
+		const capacity = flush ? 0 : Math.max(0, height - dockRows + covering);
+		// An unwritten batch can still change: the geometry or order moved, or a block repainted
+		// before the driver could write it (e.g. a background card received more output).
 		const offered = this.#pending;
-		if (offered && (offered.width !== width || !heads(offered, main, start))) this.#pending = undefined;
+		if (offered) {
+			const head = offered.head;
+			if (
+				offered.width !== width ||
+				offered.capacity !== capacity ||
+				!heads(offered, main, start) ||
+				offered.nodes.some((node, i) => this.#paint(node, width).rows !== offered.painted[i]!.rows)
+			) {
+				this.#pending = undefined;
+			} else if (head) {
+				const rows = this.#paint(head.node, width).rows;
+				if (rows.length < head.rows.length || !startsWith(rows, head.rows, head.count)) this.#pending = undefined;
+			}
+		}
 		// A lost display gets the committed ledger back under a fresh id, followed by whatever retires
 		// in the same frame; streaming heads start over (their stable rows go out again under pressure).
 		let ledger: string[] | undefined;
@@ -1010,7 +1030,6 @@ export class TermBackend {
 		}
 		const pending = this.#pending;
 		const pendingHead = pending?.head;
-		const capacity = flush ? 0 : Math.max(0, height - dockRows + covering);
 		// Live main nodes are `main[first + i]`, `i < count`. A batch still being written to history
 		// is not live; the blocks it writes are what the first live block is separated from.
 		let first = start;
@@ -1020,9 +1039,9 @@ export class TermBackend {
 				? (pending.last ?? (pending.history.kind === "replay" ? undefined : this.#historyTail))
 				: this.#historyTail;
 		if (pending) {
-			const retiring = new Set(pending.nodes);
-			for (; first < main.length && retiring.has(main[first]!); first++) {
-				if (this.#paint(main[first]!, width).rows.length > 0) aboveLive = main[first];
+			for (let i = 0; i < pending.nodes.length; i++) {
+				if (pending.painted[i]!.rows.length > 0) aboveLive = main[first];
+				first++;
 			}
 		}
 		const count = main.length - first;
@@ -1133,7 +1152,7 @@ export class TermBackend {
 			// block's rows are final, a streaming one offers its stable head. The rest stays live (a
 			// settled block still repaints them: a tool card collapses below the rows already in history).
 			// A driver that keeps history at its old width on a resize (`preserve`, in-place) gets whole
-			// blocks and whole stable heads instead, which map exactly to the new width.
+			// blocks and whole stable heads when content overflows, which map exactly to the new width.
 			let head: PendingBatch["head"];
 			if (!flush && live < count && live <= boundary) {
 				const node = main[first + live]!;
@@ -1147,7 +1166,8 @@ export class TermBackend {
 					// Only the pressure: the separator written with the first rows relieves it too (it may
 					// alone; the block's rows then stay live).
 					const lead = leadAt(live);
-					const take = rowWise ? Math.min(stable - skip, Math.max(0, liveRows - capacity - lead)) : stable - skip;
+					const overflow = Math.max(0, liveRows - capacity - lead);
+					const take = overflow === 0 ? 0 : rowWise ? Math.min(stable - skip, overflow) : stable - skip;
 					if (settled && skip + take >= block.rows.length) retireWhole();
 					else if (take > 0 || lead > 0) {
 						for (let i = lead; i > 0; i--) rows.push("");
@@ -1170,10 +1190,12 @@ export class TermBackend {
 				this.#pending = {
 					history,
 					nodes: retired,
+					painted: blocks,
 					...(marked ? { marked } : {}),
 					...(head ? { head } : {}),
 					last,
 					width,
+					capacity,
 				};
 			} else {
 				// Nothing to write: the blocks stay live (committed with the next batch that has rows).

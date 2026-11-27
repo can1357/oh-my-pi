@@ -351,6 +351,50 @@ describe("in-place transcript rebuild", () => {
 			expect(blocks().filter(drawsAfter)).toHaveLength(1);
 		});
 
+		it("keeps a backgrounded Bash card above later committed replies after a mid-turn rebuild", async () => {
+			const call = assistantWithBash("run benchmark");
+			const result: ToolResultMessage = {
+				role: "toolResult",
+				toolCallId: "call-1",
+				toolName: "bash",
+				content: [{ type: "text", text: "Benchmark backgrounded" }],
+				details: { async: { state: "running", jobId: "bash-1", type: "bash" } },
+				isError: false,
+				timestamp: call.timestamp + 1,
+			};
+			session.sessionManager.appendMessage(call);
+			session.sessionManager.appendMessage(result);
+			session.sessionManager.appendMessage({
+				...call,
+				content: [{ type: "text", text: "Later committed reply" }],
+				stopReason: "stop",
+				timestamp: call.timestamp + 2,
+			});
+
+			const update = (
+				text: string,
+				state: "running" | "completed",
+			): Extract<AgentSessionEvent, { type: "tool_execution_update" }> => ({
+				type: "tool_execution_update",
+				toolCallId: "call-1",
+				toolName: "bash",
+				args: {},
+				partialResult: {
+					content: [{ type: "text", text }],
+					details: { async: { state, jobId: "bash-1", type: "bash" } },
+				},
+			});
+			vi.spyOn(session, "activeToolExecutionUpdates").mockReturnValue([update("First benchmark sample", "running")]);
+			mode.rebuildChatFromMessages();
+
+			Object.defineProperty(session, "isStreaming", { configurable: true, get: () => true });
+			mode.rebuildChatFromMessages();
+			expect(transcriptText(mode.shell)).toMatch(/First benchmark sample[\s\S]*Later committed reply/);
+
+			await mode.eventController.handleEvent(update("Final benchmark sample", "completed"));
+			expect(transcriptText(mode.shell)).toMatch(/Final benchmark sample[\s\S]*Later committed reply/);
+		});
+
 		it("uses the rendered view session when preserving a focused subagent stream", () => {
 			const { streamingComponent, pendingTool } = makeStreamingFixture(false);
 			Object.defineProperty(mode, "viewSession", {

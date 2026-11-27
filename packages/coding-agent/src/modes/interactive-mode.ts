@@ -4096,16 +4096,16 @@ export class InteractiveMode implements InteractiveModeContext {
 			collapseCompactedHistory: cfgDisplayCollapseCompacted.get(settings),
 		});
 		const preservedLiveToolCallIds = new Set<string>();
-		// A preserved call whose result already landed in the replayed transcript is drawn by the
-		// replay itself (#6516); keeping its live block too would draw the call twice. A background
-		// job's `running` result keeps its live block (later frames still fill it), and a read group
-		// another pending read still shares stays as one block.
+		// Replay persisted results instead of moving their cards below newer replies. Keep
+		// live handles for other running jobs and read groups that still share a pending call.
+		// Plain-terminal Bash can be rebuilt at its original position from the latest job frame.
+		const native = this.shell.native();
 		for (const message of context.messages) {
 			if (message.role !== "toolResult") continue;
 			const resolved = livePendingTools.get(message.toolCallId);
 			if (!resolved) continue;
 			const details = message.details as { async?: { state?: string } } | undefined;
-			if (details?.async?.state === "running") {
+			if (details?.async?.state === "running" && (native || message.toolName !== "bash")) {
 				preservedLiveToolCallIds.add(message.toolCallId);
 				continue;
 			}

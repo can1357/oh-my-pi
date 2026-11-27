@@ -127,10 +127,10 @@ export interface Host {
 	onChange(listener: () => void): () => void;
 	readonly driver: ProcessTerminalDriver;
 	/**
-	 * Whether `node` has rows in terminal history a plain terminal cannot
-	 * repaint (always false natively, where nothing retires).
+	 * Whether `node` has rows in terminal history or an upcoming write (always false natively).
+	 * `"content"` counts only acknowledged retirement, not a separator-only write.
 	 */
-	retired(node: UiNode): boolean;
+	retired(node: UiNode, part?: "content"): boolean;
 	/** Redraw terminal history from the current main region (its retired rows changed or went away). */
 	replayHistory(): void;
 	/**
@@ -459,7 +459,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
 		return {
 			native: false,
 			hour12: undefined,
-			retired: node => backend.retired(node),
+			retired: (node, part) => backend.retired(node, part),
 			replayHistory: () => driver.resetDisplay(),
 			redescribe: () => {},
 			dispatch: event => backend.dispatch(event),
@@ -513,7 +513,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			return renderer.hour12;
 		},
 		driver,
-		retired: node => renderer.retired(node),
+		retired: (node, part) => renderer.retired(node, part),
 		replayHistory: () => renderer.replayHistory(),
 		redescribe: node => renderer.redescribe(node),
 		dispatch: event => renderer.dispatch(event),

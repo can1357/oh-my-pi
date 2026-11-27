@@ -744,22 +744,18 @@ export class UiHelpers {
 					const isBackground =
 						parksAsBackground(message.toolName, message.details, native) &&
 						(frame !== undefined || runningAsyncJobs.some(job => job.id === jobId));
-					const settled = isBackground && isSettledJobFrame(frame?.details);
-					// A background job call's persisted result is only its "still running"
-					// snapshot; the job's latest frame supersedes it. Until that frame
-					// settles, keep the card partial, parked, and in `pendingTools` so
-					// later live progress frames land on it (#10447).
+					const settled = isBackground && frame !== undefined && isSettledJobFrame(frame.details);
+					const partial = isBackground && (message.toolName !== "bash" || native);
+					// The persisted result is the job's first snapshot; restore its latest frame
+					// and keep routing updates if the job is still running.
 					if (settled) {
 						settleWithJobFrame(pending, frame, message.toolCallId);
-					} else if (frame && isBackground) {
-						pending.updateResult(frame, true, message.toolCallId);
 					} else {
-						pending.updateResult(message, isBackground, message.toolCallId);
+						pending.updateResult(isBackground && frame ? frame : message, partial, message.toolCallId);
 					}
 					if (isBackground && !settled) {
 						pending.parkAsBackground();
-						// The call has returned; only the job is still running.
-						transcript.settle(pending.block);
+						if (partial) transcript.settle(pending.block);
 						backgroundCallIds.add(message.toolCallId);
 					} else {
 						ctx.pendingTools.delete(message.toolCallId);

@@ -313,6 +313,58 @@ describe("exactly-once in-order ledger (ECH, Lemma 4.6, Corollary 4.14)", () => 
 		expect(driver.history.filter(row => row.length > 12)).toEqual([]);
 		backend.stop();
 	});
+
+	it("keeps content live when only its separator overflows under preserve mode", () => {
+		const driver = new FakeDriver();
+		driver.replays = false;
+		const { surface, backend } = mount(
+			driver,
+			() => [<rows lines={["Earlier"]} />, <rows lines={lines("card", 6)} />],
+			{ separator: 1 },
+		);
+		try {
+			const [earlier, card] = surface.main();
+			settle(earlier!);
+			settle(card!);
+			backend.renderNow();
+			expect(driver.history).toEqual(["Earlier", ""]);
+			expect(driver.viewport).toEqual(lines("card", 6));
+			expect(backend.retired(card!, "content")).toBe(false);
+
+			driver.resize(20, 5);
+			backend.renderNow();
+			expect(driver.history).toEqual(["Earlier", "", ...lines("card", 6)]);
+			expect(backend.retired(card!, "content")).toBe(true);
+		} finally {
+			backend.stop();
+			surface.dispose();
+		}
+	});
+
+	it.each([5, 7])("writes the latest card output when a batch with %i later rows was deferred", laterRows => {
+		const output = signal("sample");
+		const { driver, backend, surface } = setup(() => [
+			<rows lines={() => lines(output(), 3)} />,
+			<rows lines={lines("later", laterRows)} />,
+		]);
+		try {
+			const card = surface.main()[0]!;
+			driver.ack = false;
+			settle(card);
+			backend.renderNow();
+			expect(driver.history).toEqual([]);
+			expect(backend.retired(card, "content")).toBe(false);
+
+			output.set("final");
+			driver.ack = true;
+			backend.renderNow();
+			expect(driver.transcript).toEqual([...lines("final", 3), ...lines("later", laterRows).slice(-6)]);
+			expect(backend.retired(card, "content")).toBe(true);
+		} finally {
+			backend.stop();
+			surface.dispose();
+		}
+	});
 });
 
 describe("append-only contract of the stable head (§2.4, Lemma 4.6(i))", () => {

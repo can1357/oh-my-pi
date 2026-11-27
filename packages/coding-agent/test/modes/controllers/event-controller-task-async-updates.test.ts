@@ -274,27 +274,98 @@ describe("EventController async update finalization", () => {
 		}
 	});
 
-	it("finalizes a backgrounded Bash block without tracking later job updates", async () => {
-		const { controller, pendingTools } = createFixture();
-		await controller.handleEvent({
-			type: "tool_execution_start",
-			toolCallId: "tc-bash",
-			toolName: "bash",
-			args: { command: "sleep 30" },
-		});
-		const component = pendingTools.get("tc-bash")!;
-		sealed.push(component);
+	const jobFrame = (partialResult: BashFrame) => ({
+		type: "tool_execution_update" as const,
+		toolCallId: "tc-bash",
+		toolName: "bash",
+		args: {},
+		partialResult,
+	});
 
-		await controller.handleEvent({
-			type: "tool_execution_end",
+	it("updates backgrounded Bash until a card row, not just its separator, enters scrollback", async () => {
+		const { controller, ctx } = createFixture();
+		const columns = 100;
+		ctx.presentAssistant(createAssistantMessage("Earlier assistant reply.")).finalized.set(true);
+		const transcript = ctx.shell.transcript;
+		const term = createTestTerminal(() => ({ main: transcript.nodes }), { columns, rows: 40 });
+		transcript.attach({
+			retired: (node, part) => term.backend.retired(node, part),
+			replayHistory: () => {},
+			redescribe: () => {},
+		});
+		try {
+			const earlierRows = term.rows().length;
+			await controller.handleEvent({
+				type: "tool_execution_start",
+				toolCallId: "tc-bash",
+				toolName: "bash",
+				args: { command: "run benchmark" },
+			});
+			await controller.handleEvent({
+				type: "tool_execution_end",
+				toolCallId: "tc-bash",
+				toolName: "bash",
+				result: bashResult(formatBackgroundNotice("bash-1", 300)),
+				isError: false,
+			});
+			await controller.handleEvent(jobFrame(bashResult("First sample")));
+			term.render();
+			expect(term.screen().join("\n")).toContain("First sample");
+			expect(term.history()).toEqual([]);
+
+			const cardRows = term.rows().length - earlierRows - 1;
+			term.resize(columns, cardRows);
+			expect(term.history()).toHaveLength(earlierRows + 1);
+			expect(term.history().at(-1)).toBe("");
+			await controller.handleEvent(jobFrame(bashResult("Second sample")));
+			term.render();
+			expect(term.screen().join("\n")).toContain("Second sample");
+
+			const firstCardRow = term.rows()[0];
+			term.resize(columns, cardRows - 1);
+			expect(term.history().at(-1)).toBe(firstCardRow);
+			expect(term.screen().join("\n")).toContain("Second sample");
+			await controller.handleEvent(jobFrame(bashResult("Off-screen completion", "completed", 0)));
+			term.render();
+			expect(term.screen().join("\n")).toContain("Second sample");
+			expect(term.screen().join("\n")).not.toContain("Off-screen completion");
+			expect(term.history()).toHaveLength(earlierRows + 2);
+		} finally {
+			transcript.attach(undefined);
+			term.dispose();
+		}
+	});
+
+	it("shows backgrounded Bash completion in place after rebuilding the visible transcript", async () => {
+		const { controller, ctx } = createFixture();
+		ctx.eventController = controller;
+		const helpers = new UiHelpers(ctx);
+		ctx.addMessageToChat = helpers.addMessageToChat.bind(helpers);
+		const call: AssistantMessage = {
+			...createAssistantMessage(""),
+			stopReason: "toolUse",
+			content: [{ type: "toolCall", id: "tc-bash", name: "bash", arguments: { command: "run benchmark" } }],
+		};
+		const result: ToolResultMessage = {
+			role: "toolResult",
 			toolCallId: "tc-bash",
 			toolName: "bash",
-			result: bashResult(formatBackgroundNotice("bash-1", 300)),
+			...bashResult(formatBackgroundNotice("bash-1", 300)),
 			isError: false,
-		});
-
-		expect(pendingTools.has("tc-bash")).toBe(false);
-		expect(isSettled(component.block.node)).toBe(true);
+			timestamp: call.timestamp + 1,
+		};
+		ctx.viewSession.activeToolExecutionUpdates = () => [jobFrame(bashResult("Sample before rebuild"))];
+		helpers.renderSessionContext({ messages: [call, result] } as SessionContext);
+		const term = createTestTerminal(() => ({ main: ctx.shell.transcript.nodes }), { columns: 100, rows: 40 });
+		try {
+			expect(term.screen().join("\n")).toContain("Sample before rebuild");
+			await controller.handleEvent(jobFrame(bashResult("Final sample", "completed", 0)));
+			term.render();
+			expect(term.screen().join("\n")).toContain("Final sample");
+			expect(term.screen().join("\n")).not.toContain("Sample before rebuild");
+		} finally {
+			term.dispose();
+		}
 	});
 
 	describe("native rendering", () => {
@@ -316,14 +387,6 @@ describe("EventController async update finalization", () => {
 			sealed.push(component);
 			return component;
 		}
-
-		const jobFrame = (partialResult: BashFrame) => ({
-			type: "tool_execution_update" as const,
-			toolCallId: "tc-bash",
-			toolName: "bash",
-			args: {},
-			partialResult,
-		});
 
 		const rendered = (component: PendingTool) => blockText(component.block);
 

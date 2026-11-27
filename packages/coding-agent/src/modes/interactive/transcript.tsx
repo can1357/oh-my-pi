@@ -3,7 +3,8 @@
  * The live transcript blocks the interactive mode presents: assistant
  * replies, tool calls (cards, read groups, reply writes) and user `!`/`$`
  * runs, each wired to the view's reactive display flags and to the extension
- * transcript presenters, plus a registry of what each block shows.
+ * transcript presenters, plus a registry of what each block shows. A plain
+ * terminal Bash card updates until its first content row retires.
  *
  * Settle rules: a reply settles when its view is finalized; a card on its
  * final result (a parked background card keeps taking frames: natively they
