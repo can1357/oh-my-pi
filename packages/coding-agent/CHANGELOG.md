@@ -243,6 +243,7 @@
 - The `worktree.clone` setting and worktree docs now state that clone-first worktrees copy every gitignored file, including `.env` files and other local secrets, not only build caches ([#15476](https://github.com/can1357/oh-my-pi/issues/15476))
 - `omp commit` no longer saves its agent session, so it no longer clutters `omp --resume` and `/resume` ([#15247](https://github.com/can1357/oh-my-pi/issues/15247))
 - `omp usage` and `/usage` now show "usage auth rejected (401); re-login to restore usage" instead of "no usage data" when a provider rejects the usage fetch as unauthorized, e.g. an expired Muse Code account token ([#15551](https://github.com/can1357/oh-my-pi/issues/15551))
+- Corrected the extension authoring guide: native project extensions load only from `<cwd>/.omp/extensions/`, not ancestor directories ([#15067](https://github.com/can1357/oh-my-pi/issues/15067))
 
 ### Removed
 
