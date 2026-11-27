@@ -468,7 +468,7 @@ export class EventController {
 			agent_start: e => this.#handleAgentStart(e),
 			agent_pause: e => this.#handleAgentPause(e),
 			agent_end: e => this.#handleAgentEnd(e),
-			turn_start: async () => {},
+			turn_start: async () => this.#handleTurnStart(),
 			turn_end: async e => this.#handleTurnEnd(e),
 			message_start: e => this.#handleMessageStart(e),
 			message_update: e => this.#handleMessageUpdate(e),
@@ -1721,6 +1721,17 @@ export class EventController {
 		} else if (delta.type === "thinking_delta" && mode === "all") {
 			vocalizer.pushDelta(delta.delta);
 		}
+	}
+
+	/**
+	 * A new turn means a fresh model request: drop the previous turn's tool
+	 * intent (e.g. a lone `todo init`) so the row stops naming finished work
+	 * while the provider is still thinking.
+	 */
+	#handleTurnStart(): void {
+		if (this.#lastIntent === undefined || this.#showingAsyncWait) return;
+		this.#lastIntent = undefined;
+		this.ctx.setWorkingMessage();
 	}
 
 	/**

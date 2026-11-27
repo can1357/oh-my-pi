@@ -218,6 +218,7 @@
 - Fixed `omp completions` output repeating its first 8192 bytes when stdout is a pipe ([#17625](https://github.com/can1357/oh-my-pi/issues/17625))
 - `omp plugin install` now rejects `--local`, and `--scope project` for npm or local-path packages, before installing anything instead of silently writing to the user plugin registry ([#18112](https://github.com/can1357/oh-my-pi/issues/18112))
 - With both eval runtimes enabled, the eval tool helper list now names the JS spelling `judgeBatch` alongside Python's `judge_batch` ([#17273](https://github.com/can1357/oh-my-pi/issues/17273))
+- Fixed the working row keeping the previous turn's tool intent (e.g. a lone `todo init`) while the next model request is pending; it now falls back to the default label at each turn start ([#17347](https://github.com/can1357/oh-my-pi/issues/17347))
 
 ### Removed
 
