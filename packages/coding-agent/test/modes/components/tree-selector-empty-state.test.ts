@@ -44,7 +44,7 @@ function userMessageTree(): SessionTreeNode[] {
 	return [{ entry, children: [] }];
 }
 
-describe("issue #1909: tree-selector empty-state messaging", () => {
+describe("tree-selector empty-state messaging", () => {
 	it("explains that the filter — not missing data — is hiding entries on a fresh session", () => {
 		const text = renderTreeSelector({ roots: freshSessionTree(), currentLeafId: "e2" }, { rows: 60 });
 
