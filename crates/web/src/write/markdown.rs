@@ -1116,10 +1116,17 @@ impl<'a> Writer<'a> {
 	/// A language-labelled ARIA table with one code cell per row represents
 	/// source lines rather than a data table. Keep each row, including blanks.
 	fn source_table(&mut self, el: &'a Element) -> bool {
-		if !el.attr("role").is_some_and(|role| role.trim().eq_ignore_ascii_case("table")) {
+		if !el
+			.attr("role")
+			.is_some_and(|role| role.trim().eq_ignore_ascii_case("table"))
+		{
 			return false;
 		}
-		let Some(lang) = el.attr("data-markdown-slug").map(str::trim).filter(|lang| is_lang(lang)) else {
+		let Some(lang) = el
+			.attr("data-markdown-slug")
+			.map(str::trim)
+			.filter(|lang| is_lang(lang))
+		else {
 			return false;
 		};
 		let mut code = String::new();
@@ -1151,7 +1158,7 @@ impl<'a> Writer<'a> {
 			let role = row.attr("role").map(str::trim);
 			if !role.is_some_and(|role| role.eq_ignore_ascii_case("row")) {
 				if row.name() == "div"
-					&& (role.is_none() || role.is_some_and(|role| role.eq_ignore_ascii_case("rowgroup")))
+					&& role.is_none_or(|role| role.eq_ignore_ascii_case("rowgroup"))
 					&& self.source_rows(row.children.clone(), code, rows)
 				{
 					continue;
@@ -1162,11 +1169,12 @@ impl<'a> Writer<'a> {
 			for node in self.siblings(row.children.clone()) {
 				if let Node::Tag(tag) = node
 					&& tag.name() == "code"
-					&& tag.attr("role").is_some_and(|role| role.trim().eq_ignore_ascii_case("cell"))
+					&& tag
+						.attr("role")
+						.is_some_and(|role| role.trim().eq_ignore_ascii_case("cell"))
+					&& cell.replace(tag).is_some()
 				{
-					if cell.replace(tag).is_some() {
-						return false;
-					}
+					return false;
 				}
 			}
 			let Some(cell) = cell else {
@@ -1179,7 +1187,9 @@ impl<'a> Writer<'a> {
 					let node = &self.nodes[index];
 					if let Node::Tag(tag) = node {
 						if tag.name() == "code"
-							&& tag.attr("role").is_some_and(|role| role.trim().eq_ignore_ascii_case("cell"))
+							&& tag
+								.attr("role")
+								.is_some_and(|role| role.trim().eq_ignore_ascii_case("cell"))
 							&& self.dropped.get(index).copied().unwrap_or(false)
 						{
 							dropped_cell = true;
@@ -2998,61 +3008,78 @@ mod tests {
 	#[test]
 	fn language_labelled_source_rows_preserve_code_layout() {
 		assert_eq!(
-			md("<div role=\"table\" data-markdown-slug=\"js\">\
-			    <div role=\"row\"><div role=\"cell\">1</div><code role=\"cell\"><span>if (x) {</span>\n</code></div>\
-			    <div><div role=\"row\"><div role=\"cell\">2</div><code role=\"cell\">  run();\n</code></div>\
-			    <div role=\"rowgroup\"><div role=\"row\"><div role=\"cell\">3</div><code role=\"cell\">\n</code></div></div></div>\
-			    <div role=\"row\"><div role=\"cell\">4</div><code role=\"cell\">}\n</code></div>\
-			    </div>"),
+			md("<div role=\"table\" data-markdown-slug=\"js\"><div role=\"row\"><div \
+			    role=\"cell\">1</div><code role=\"cell\"><span>if (x) \
+			    {</span>\n</code></div><div><div role=\"row\"><div role=\"cell\">2</div><code \
+			    role=\"cell\">  run();\n</code></div><div role=\"rowgroup\"><div role=\"row\"><div \
+			    role=\"cell\">3</div><code role=\"cell\">\n</code></div></div></div><div \
+			    role=\"row\"><div role=\"cell\">4</div><code role=\"cell\">}\n</code></div></div>"),
 			"```js\nif (x) {\n  run();\n\n}\n```\n",
 		);
 		assert_eq!(
-			md("<div role=\"table\" data-markdown-slug=\"js\"><div role=\"row\"><div role=\"cell\">ordinary data</div></div></div>"),
+			md("<div role=\"table\" data-markdown-slug=\"js\"><div role=\"row\"><div \
+			    role=\"cell\">ordinary data</div></div></div>"),
 			"ordinary data\n",
 		);
 	}
 
 	#[test]
 	fn source_table_keeps_other_rows_when_a_code_cell_is_dropped() {
-		let html = "<div role=\"table\" data-markdown-slug=\"js\">\
-		    <div role=\"row\"><code role=\"cell\">first\n</code></div>\
-		    <div role=\"row\"><code role=\"cell\">excluded\n</code></div>\
-		    <div role=\"row\"><code role=\"cell\">last\n</code></div></div>";
+		let html = "<div role=\"table\" data-markdown-slug=\"js\"><div role=\"row\"><code \
+		            role=\"cell\">first\n</code></div><div role=\"row\"><code \
+		            role=\"cell\">excluded\n</code></div><div role=\"row\"><code \
+		            role=\"cell\">last\n</code></div></div>";
 		let nodes = parse(html).unwrap();
 		let mut selection = Selection {
-			root: 0..nodes.len(),
-			dropped: vec![false; nodes.len()],
+			root:             0..nodes.len(),
+			dropped:          vec![false; nodes.len()],
 			recoverable_only: false,
 		};
-		let excluded = nodes.iter().enumerate().find_map(|(index, node)| match node {
-			Node::Tag(tag) if tag.name() == "code"
-				&& nodes[tag.children.clone()].iter().any(|node| matches!(node, Node::Text(text) if text.contains("excluded"))) => Some(index),
-			_ => None,
-		}).unwrap();
+		let excluded = nodes
+			.iter()
+			.enumerate()
+			.find_map(|(index, node)| match node {
+				Node::Tag(tag)
+					if tag.name() == "code"
+						&& nodes[tag.children.clone()]
+							.iter()
+							.any(|node| matches!(node, Node::Text(text) if text.contains("excluded"))) =>
+				{
+					Some(index)
+				},
+				_ => None,
+			})
+			.unwrap();
 		selection.dropped[excluded] = true;
 		assert_eq!(write(&nodes, &selection, None, true), "```js\nfirst\nlast\n```\n");
 	}
 
 	#[test]
 	fn source_rows_survive_reader_selection() {
-		let html = "<html><body><div id=\"scrolling\"><div id=\"content\" class=\"content source-listing not-diff\">\
-		    <div id=\"file\" class=\"file\" role=\"table\" data-markdown-slug=\"js\">\
-		    <div role=\"row\" id=\"line-1\" class=\"source-line-with-number\">\
-		    <div role=\"cell\"><div role=\"button\" aria-expanded=\"false\" class=\"cov-strip cov-uncovered\" aria-label=\"uncovered\"></div></div>\
-		    <div role=\"cell\"><div class=\"blame-strip c2\" data-blame=\"abc\" role=\"button\"></div></div>\
-		    <div role=\"cell\" class=\"line-number\" data-line-number=\"1\"></div>\
-		    <code role=\"cell\" class=\"source-line\"><span class=\"syn_comment\">/* Header */</span>\n</code></div>\
-		    <div class=\"nesting-container nesting-depth-0\" data-nesting-sym=\"1-0\">\
-		    <div role=\"row\" id=\"line-2\" class=\"source-line-with-number nesting-sticky-line\">\
-		    <div role=\"cell\" class=\"line-number\" data-line-number=\"2\"></div>\
-		    <code role=\"cell\" class=\"source-line\">  <span class=\"syn_reserved\">return</span> value;\n</code></div>\
-		    <div role=\"row\" id=\"line-3\" class=\"source-line-with-number\">\
-		    <div role=\"cell\" class=\"line-number\" data-line-number=\"3\"></div>\
-		    <code role=\"cell\" class=\"source-line\">\n</code></div></div>\
-		    </div></div></div></body></html>";
+		let html = "<html><body><div id=\"scrolling\"><div id=\"content\" class=\"content \
+		            source-listing not-diff\"><div id=\"file\" class=\"file\" role=\"table\" \
+		            data-markdown-slug=\"js\"><div role=\"row\" id=\"line-1\" \
+		            class=\"source-line-with-number\"><div role=\"cell\"><div role=\"button\" \
+		            aria-expanded=\"false\" class=\"cov-strip cov-uncovered\" \
+		            aria-label=\"uncovered\"></div></div><div role=\"cell\"><div \
+		            class=\"blame-strip c2\" data-blame=\"abc\" role=\"button\"></div></div><div \
+		            role=\"cell\" class=\"line-number\" data-line-number=\"1\"></div><code \
+		            role=\"cell\" class=\"source-line\"><span class=\"syn_comment\">/* Header \
+		            */</span>\n</code></div><div class=\"nesting-container nesting-depth-0\" \
+		            data-nesting-sym=\"1-0\"><div role=\"row\" id=\"line-2\" \
+		            class=\"source-line-with-number nesting-sticky-line\"><div role=\"cell\" \
+		            class=\"line-number\" data-line-number=\"2\"></div><code role=\"cell\" \
+		            class=\"source-line\">  <span class=\"syn_reserved\">return</span> \
+		            value;\n</code></div><div role=\"row\" id=\"line-3\" \
+		            class=\"source-line-with-number\"><div role=\"cell\" class=\"line-number\" \
+		            data-line-number=\"3\"></div><code role=\"cell\" \
+		            class=\"source-line\">\n</code></div></div></div></div></div></body></html>";
 		let nodes = parse(html).unwrap();
 		let selection = crate::select::reader(&nodes, crate::Hidden::Drop);
-		assert_eq!(write(&nodes, &selection, None, true), "```js\n/* Header */\n  return value;\n\n```\n");
+		assert_eq!(
+			write(&nodes, &selection, None, true),
+			"```js\n/* Header */\n  return value;\n\n```\n"
+		);
 	}
 
 	#[test]

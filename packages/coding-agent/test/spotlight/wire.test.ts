@@ -717,7 +717,7 @@ describe("spotlight column-capped output", () => {
 		const artifactId = await manager.saveArtifact(FULL);
 		if (artifactId === undefined) throw new Error("the in-memory session keeps artifacts");
 		// The sink puts its timeout notice above the preview; the artifact holds only what the command printed.
-		const preview = `[Command timed out after 1 seconds]\n${FULL.slice(0, 768)}…`;
+		const preview = `[timed out after 1s]\n${FULL.slice(0, 768)}…`;
 		const timedOut: bashExecutor.BashResult = {
 			...bashOutput(preview),
 			exitCode: undefined,
@@ -734,7 +734,7 @@ describe("spotlight column-capped output", () => {
 
 		expect(result.details?.spotlight?.inChars).toBe(FULL.length);
 		expect(result.isError).toBe(true);
-		expect(resultText(result).match(/\[Command timed out after 1 seconds\]/g)).toHaveLength(1);
+		expect(resultText(result).match(/\[timed out after 1s\]/g)).toHaveLength(1);
 	});
 });
 

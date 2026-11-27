@@ -33,7 +33,7 @@ export function isOfficialCodexApiUrl(baseUrl: string | undefined): boolean {
  * omitted from `/models` at 0.155.1 and listed at 0.159.0. An older pin
  * silently hides newer SKUs from discovery.
  */
-export const CODEX_CLIENT_VERSION = "0.169.0";
+export const CODEX_CLIENT_VERSION = "0.172.0";
 
 export const OPENAI_HEADERS = {
 	BETA: "OpenAI-Beta",
