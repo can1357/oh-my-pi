@@ -68,7 +68,7 @@ zstd.workspace = true
 xxhash-rust.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-ashpd = { version = "=0.13.13", default-features = false, features = ["tokio"] }
+ashpd = { version = "=0.13.13", default-features = false, features = ["remote_desktop", "screencast", "tokio"] }
 atspi = { version = "=0.30.0", default-features = false, features = ["proxies", "tokio", "wrappers", "zbus"] }
 memmap2 = "0.9.12"
 reis = { version = "=0.7.1", features = ["tokio"] }
