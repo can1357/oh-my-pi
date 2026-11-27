@@ -145,6 +145,8 @@ export interface CommandCtor extends CommandMetadata {
 	new (argv: string[], config: CliConfig): Command;
 	strict?: boolean;
 	aliases?: string[];
+	/** Command-specific help detection for value-aware parsing; receives argv after the command name. */
+	isHelpRequest?: (argv: readonly string[]) => boolean;
 }
 
 /** Configuration passed to every command instance and help renderers. */
@@ -462,20 +464,6 @@ export async function run(opts: RunOptions): Promise<void> {
 		return;
 	}
 
-	// Per-command help: load only the requested command. Loading the full
-	// command table here would make `omp <cmd> --help` hang or crash whenever
-	// any *unrelated* command module misbehaves at import time.
-	if (commandArgv.includes("--help") || commandArgv.includes("-h")) {
-		const entry = findEntry(opts.commands, commandId);
-		if (entry) {
-			const Cmd = await loadEntry(entry);
-			renderCommandHelp(bin, entry.name, Cmd);
-		} else {
-			process.stderr.write(`Unknown command: ${commandId}\n`);
-		}
-		return;
-	}
-
 	// Find command by name or alias
 	const entry = findEntry(opts.commands, commandId);
 
@@ -485,7 +473,21 @@ export async function run(opts: RunOptions): Promise<void> {
 		return;
 	}
 
+	// Load only the requested command. A command may supply value-aware help
+	// detection when a help-looking token is actually another flag's value.
 	const Cmd = await loadEntry(entry);
+	const helpRequested = Cmd.isHelpRequest
+		? Cmd.isHelpRequest(commandArgv)
+		: (() => {
+				const separatorIndex = commandArgv.indexOf("--");
+				const helpScanArgv = separatorIndex === -1 ? commandArgv : commandArgv.slice(0, separatorIndex);
+				return helpScanArgv.includes("--help") || helpScanArgv.includes("-h");
+			})();
+	if (helpRequested) {
+		renderCommandHelp(bin, entry.name, Cmd);
+		return;
+	}
+
 	const config: CliConfig = { bin, version, commands: new Map([[entry.name, Cmd]]) };
 	const instance = new Cmd(commandArgv, config);
 	try {

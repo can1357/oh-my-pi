@@ -112,6 +112,8 @@ export interface Args {
 	approvalMode?: ApprovalMode;
 	messages: string[];
 	fileArgs: string[];
+	/** Positional tokens in their original argv order, including `@`-prefixed files. */
+	positionalTokens?: string[];
 	/** Extension-registered flags this parse recognized — name to value. */
 	unknownFlags: Map<string, boolean | string>;
 	/**
@@ -259,6 +261,7 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 	const result: Args = {
 		messages: [],
 		fileArgs: [],
+		positionalTokens: [],
 		unknownFlags: new Map(),
 		unrecognizedFlags: [],
 		invalidFlagValues: [],
@@ -272,6 +275,7 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 	for (let i = 0; i < args.length; i++) {
 		let arg = args[i];
 		if (sawSeparator) {
+			result.positionalTokens!.push(arg);
 			result.messages.push(arg);
 			continue;
 		}
@@ -430,10 +434,12 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			} else if (filePath.startsWith("'") && filePath.endsWith("'") && filePath.length > 1) {
 				filePath = filePath.slice(1, -1);
 			}
+			result.positionalTokens!.push(arg);
 			result.fileArgs.push(filePath);
 		} else if (!arg.startsWith("-") || arg === "-") {
 			// Plain positional or lone `-` (stdin marker) — pass through as a
 			// message rather than flagging it.
+			result.positionalTokens!.push(arg);
 			result.messages.push(arg);
 		} else if (arg === "--") {
 			// POSIX positional separator: drop the token and switch the loop

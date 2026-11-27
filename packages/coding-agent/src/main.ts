@@ -1973,7 +1973,7 @@ interface RunRootCommandDependencies {
 	settings?: Settings;
 	forceSetupWizard?: boolean;
 	/** Prebuilt or extension-aware first prompt for a subcommand-owned single-shot run. */
-	initialPrompt?: string | ((parsed: Args) => string);
+	initialPrompt?: string | ((parsed: Args, settings: Settings) => string);
 	/** Do not inherit autoResume for a subcommand-owned single-shot run. */
 	freshSession?: boolean;
 }
@@ -2753,7 +2753,7 @@ export async function runRootCommand(
 				);
 			}
 			const extensionAwareInitialPrompt =
-				typeof deps.initialPrompt === "function" ? deps.initialPrompt(initialArgs) : undefined;
+				typeof deps.initialPrompt === "function" ? deps.initialPrompt(initialArgs, settingsInstance) : undefined;
 			if (extensionAwareInitialPrompt !== undefined) {
 				initialArgs.messages = [];
 				initialArgs.fileArgs = [];

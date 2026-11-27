@@ -11,7 +11,14 @@
 import { describe, expect, test } from "bun:test";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { resolveCliArgv } from "@oh-my-pi/pi-coding-agent/cli-commands";
-import { parseReviewLaunch, reviewFocus, validateReviewLaunch } from "@oh-my-pi/pi-coding-agent/commands/review";
+import Review, {
+	parseReviewLaunch,
+	reviewFocus,
+	validateReviewLaunch,
+	validateReviewSettings,
+} from "@oh-my-pi/pi-coding-agent/commands/review";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgTaskBatch, cfgTaskDisabledAgents, cfgTaskMaxRecursionDepth } from "@oh-my-pi/pi-coding-agent/task/settings";
 
 describe("resolveCliArgv routes subcommands hidden behind leading global flags", () => {
 	test("`--approval-mode=yolo acp` dispatches the acp subcommand with the flag preserved", () => {
@@ -156,6 +163,30 @@ describe("resolveCliArgv routes subcommands hidden behind leading global flags",
 		expect(reviewFocus(parsed)).toBe("@src/auth.ts");
 	});
 
+	test("preserves interleaved message and @-file focus order", () => {
+		const review = parseReviewLaunch(["--base", "main", "compare", "@old.ts", "against", "@new.ts"]);
+		const parsed = parseArgs(review.launchArgv);
+
+		expect(parsed.positionalTokens).toEqual(["compare", "@old.ts", "against", "@new.ts"]);
+		expect(reviewFocus(parsed)).toBe("compare @old.ts against @new.ts");
+	});
+
+	test("rejects required launch flags without a non-empty value", () => {
+		for (const flag of ["--cwd", "--config", "--model", "--max-time", "--tools", "-e"]) {
+			expect(() => parseReviewLaunch(["--base", "main", flag])).toThrow(`${flag} requires a non-empty value.`);
+		}
+		expect(() => parseReviewLaunch(["--base", "main", "--cwd="])).toThrow("--cwd requires a non-empty value.");
+		expect(() => parseReviewLaunch(["--base", "main", "--config="])).toThrow("--config requires a non-empty value.");
+		expect(() => parseReviewLaunch(["--base", "main", "--plan"])).not.toThrow();
+	});
+
+	test("recognizes help only when it is not a string flag's value", () => {
+		expect(Review.isHelpRequest(["--base", "main", "--help"])).toBe(true);
+		expect(Review.isHelpRequest(["--base", "main", "--system-prompt", "--help"])).toBe(false);
+		expect(Review.isHelpRequest(["--base", "main", "--system-prompt", "-h"])).toBe(false);
+		expect(Review.isHelpRequest(["--base", "main", "--", "--help"])).toBe(false);
+	});
+
 	test("rejects launch selectors that restore or import a session", () => {
 		for (const argv of [
 			["--continue"],
@@ -187,6 +218,31 @@ describe("resolveCliArgv routes subcommands hidden behind leading global flags",
 		expect(() => validateReviewLaunch(parseArgs(["--tools", "read"]))).toThrow("omp review requires the task tool");
 		expect(() => validateReviewLaunch(parseArgs(["--no-tools", "--tools", "task"]))).toThrow(
 			"omp review requires the task tool",
+		);
+	});
+
+	test("rejects review runs whose effective settings disable task spawning", () => {
+		const settings = Settings.isolated();
+		cfgTaskMaxRecursionDepth.set(settings, 0);
+		expect(() => validateReviewSettings(settings)).toThrow(
+			"omp review requires task spawning; set task.maxRecursionDepth to a non-zero value.",
+		);
+
+		cfgTaskMaxRecursionDepth.set(settings, 1);
+		expect(() => validateReviewSettings(settings)).not.toThrow();
+	});
+
+	test("rejects review runs whose effective settings disable reviewer tasks", () => {
+		const settings = Settings.isolated();
+		cfgTaskBatch.set(settings, false);
+		expect(() => validateReviewSettings(settings)).toThrow(
+			"omp review requires batch task spawning; enable task.batch.",
+		);
+
+		cfgTaskBatch.set(settings, true);
+		cfgTaskDisabledAgents.set(settings, ["reviewer"]);
+		expect(() => validateReviewSettings(settings)).toThrow(
+			'omp review requires the reviewer agent; remove "reviewer" from task.disabledAgents.',
 		);
 	});
 

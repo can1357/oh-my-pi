@@ -81,3 +81,7 @@ _Full diff too large ({{len files}} files). Showing first ~{{linesPerFile}} line
 
 {{additionalInstructions}}
 {{/if}}
+
+### Final Response
+
+After every reviewer task finishes, your final response MUST contain the complete consolidated review, including all findings, file and line references, severity, verdicts, reviewed scope, and any reviewer errors. Do not replace the findings with a status-only or process-only summary.

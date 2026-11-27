@@ -3,19 +3,22 @@
  */
 
 import * as path from "node:path";
-import { errorMessage } from "@oh-my-pi/pi-utils";
+import { $env, errorMessage } from "@oh-my-pi/pi-utils";
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { runRootCommand } from "../main";
 import { type Args as ParsedArgs, parseArgs, reportCliUsageError } from "../cli/args";
 import { reviewHelp as commandHelp } from "../cli/command-help";
-import { flagConsumesValue } from "../cli/flag-tables";
+import { EXTENSION_SHADOWABLE_STRING_FLAGS, flagConsumesValue, STRING_VALUE_FLAGS } from "../cli/flag-tables";
 import { CliUsageError } from "../cli/usage-error";
+import type { Settings } from "../config/settings";
 import { buildReviewPrompt } from "../extensibility/custom-commands/bundled/review/prompt";
 import {
 	getReviewTargetIssue,
 	resolveBaseBranchTarget,
 	type ResolvedReviewTarget,
 } from "../extensibility/custom-commands/bundled/review/target";
+import { cfgTaskBatch, cfgTaskDisabledAgents, cfgTaskMaxRecursionDepth } from "../task/settings";
+import { canSpawnAtDepth } from "../task/types";
 
 export interface ReviewLaunch {
 	base: string;
@@ -35,6 +38,11 @@ const REVIEW_RESTORE_FLAGS: ReadonlySet<string> = new Set([
 	"--from-codex",
 ]);
 const REVIEW_UNSUPPORTED_FLAGS: ReadonlySet<string> = new Set(["--export", "--goal", "--no-ui"]);
+const REVIEW_VALUE_FLAGS: ReadonlySet<string> = new Set([
+	...[...STRING_VALUE_FLAGS].filter(flag => !EXTENSION_SHADOWABLE_STRING_FLAGS.has(flag)),
+	"--profile",
+	"--alias",
+]);
 
 function rejectReviewOnlyFlag(arg: string): void {
 	if (!arg.startsWith("-")) return;
@@ -48,9 +56,20 @@ function rejectReviewOnlyFlag(arg: string): void {
 	}
 }
 
+function requireReviewFlagValue(arg: string, next: string | undefined): void {
+	const equals = arg.indexOf("=");
+	const name = equals === -1 ? arg : arg.slice(0, equals);
+	if (!REVIEW_VALUE_FLAGS.has(name)) return;
+	const value = equals === -1 ? next : arg.slice(equals + 1);
+	if (value === undefined || value.trim().length === 0) {
+		throw new CliUsageError(`${name} requires a non-empty value.`);
+	}
+}
+
 /** Focus text is positional; an @-prefixed token must not silently disappear. */
 export function reviewFocus(args: ParsedArgs): string | undefined {
-	const focus = [...args.messages, ...args.fileArgs.map(file => `@${file}`)].join(" ").trim();
+	const tokens = args.positionalTokens ?? [...args.messages, ...args.fileArgs.map(file => `@${file}`)];
+	const focus = tokens.join(" ").trim();
 	return focus || undefined;
 }
 
@@ -107,6 +126,7 @@ export function parseReviewLaunch(argv: readonly string[]): ReviewLaunch {
 			// launch-only flags that this command never supports before the
 			// command can accidentally continue with a default model turn.
 			rejectReviewOnlyFlag(arg);
+			requireReviewFlagValue(arg, argv[index + 1]);
 			launch.push(arg);
 			// Keep a forwarded flag's value attached so focus text like "--head"
 			// is only interpreted as a review option when it is in option position.
@@ -159,8 +179,44 @@ export function validateReviewLaunch(args: ParsedArgs): void {
 	}
 }
 
+export function validateReviewSettings(settings: Settings): void {
+	if (!canSpawnAtDepth(cfgTaskMaxRecursionDepth.get(settings), 0)) {
+		throw new CliUsageError("omp review requires task spawning; set task.maxRecursionDepth to a non-zero value.");
+	}
+	if (!cfgTaskBatch.get(settings)) {
+		throw new CliUsageError("omp review requires batch task spawning; enable task.batch.");
+	}
+	if (cfgTaskDisabledAgents.get(settings).includes("reviewer")) {
+		throw new CliUsageError('omp review requires the reviewer agent; remove "reviewer" from task.disabledAgents.');
+	}
+	if ($env.PI_BLOCKED_AGENT === "reviewer") {
+		throw new CliUsageError("omp review cannot spawn reviewer while PI_BLOCKED_AGENT blocks that agent.");
+	}
+}
+
 export default class Review extends Command {
 	static description = commandHelp.description;
+
+	static isHelpRequest(argv: readonly string[]): boolean {
+		for (let index = 0; index < argv.length; index += 1) {
+			const arg = argv[index]!;
+			if (arg === "--") return false;
+			if (arg === "--help" || arg === "-h") return true;
+			if (!arg.startsWith("-") || arg === "-") continue;
+			const equals = arg.indexOf("=");
+			if (equals !== -1) continue;
+			const name = arg;
+			if (
+				name === "--base" ||
+				name === "--head" ||
+				REVIEW_VALUE_FLAGS.has(name) ||
+				flagConsumesValue(name, argv[index + 1])
+			) {
+				index += 1;
+			}
+		}
+		return false;
+	}
 
 	static args = {
 		focus: Args.string({
@@ -221,7 +277,10 @@ export default class Review extends Command {
 
 		try {
 			await runRootCommand(launchArgs, reviewLaunch.launchArgv, {
-				initialPrompt: parsed => buildReviewPrompt(target, reviewFocus(parsed)),
+				initialPrompt: (parsed, settings) => {
+					validateReviewSettings(settings);
+					return buildReviewPrompt(target, reviewFocus(parsed));
+				},
 				freshSession: true,
 			});
 		} catch (error) {

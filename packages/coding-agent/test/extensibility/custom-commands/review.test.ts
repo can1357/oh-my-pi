@@ -1086,6 +1086,7 @@ describe("ReviewCommand", () => {
 
 		const prompt = buildReviewPrompt(target);
 
+		expect(prompt).toContain("your final response MUST contain the complete consolidated review");
 		expect(prompt).toContain("git diff 111111111111..222222222222 -- <assigned paths>");
 		expect(prompt).toContain("git show 222222222222:<path>");
 		expect(prompt).toContain("for deleted paths use `git show 111111111111:<path>`");
