@@ -246,6 +246,115 @@ mod tests {
 
 	use super::*;
 
+	/// Render `source` and check that every edge label in it shows whole.
+	fn assert_edge_labels_intact(source: &str) -> String {
+		let options = RenderOptions { color_mode: Some(ColorMode::None), ..RenderOptions::default() };
+		let art = render(source, &options).unwrap();
+		for label in source.split('|').skip(1).step_by(2) {
+			assert!(art.contains(label), "{label} overwritten\n{art}");
+		}
+		art
+	}
+
+	#[test]
+	fn labels_on_merged_routes_stay_apart() {
+		assert_edge_labels_intact(
+			"flowchart LR\nB -->|labelBH| H\nG --> I\nC --> G\nG -->|labelGH| H",
+		);
+	}
+
+	#[test]
+	fn labels_keep_off_subgraph_titles() {
+		let art = assert_edge_labels_intact(
+			"flowchart TD\nsubgraph Clients\nUI\nend\nsubgraph Services\nAPI\nend\nAPI -->|reply| \
+			 UI\nUI --> API",
+		);
+		assert!(art.contains("Clients") && art.contains("Services"), "{art}");
+	}
+
+	/// Its own arrowhead, another edge's, or a tee.
+	#[test]
+	fn labels_keep_off_arrowheads_and_tees() {
+		let options = RenderOptions { color_mode: Some(ColorMode::None), ..RenderOptions::default() };
+		let art =
+			render("flowchart LR\nN5 -->|q01| N6\nN5 -->|q03| N6\nN1 -->|q04| N3", &options).unwrap();
+		let heads = art.chars().filter(|c| "►◄▲▼".contains(*c)).count();
+		assert_eq!(heads, 3, "an arrowhead is hidden\n{art}");
+		let art = render("flowchart TD\nN3 -->|q04| N5\nN3 --> N4\nN1 --> N5", &options).unwrap();
+		assert!(art.contains("q04") && art.contains('┤'), "{art}");
+	}
+
+	/// A label holding a space with a combining mark takes the one cell it is
+	/// measured in, not two, so it leaves the arrowhead after it.
+	#[test]
+	fn labels_with_combining_marks_keep_their_width() {
+		let options = RenderOptions { color_mode: Some(ColorMode::None), ..RenderOptions::default() };
+		let art = render("flowchart LR\nN0 -->|a04 \u{301}b| N1", &options).unwrap();
+		assert!(art.contains("a04 \u{301}b") && art.contains('►'), "{art}");
+	}
+
+	/// A cell holding a space with a combining mark is label text, so a later
+	/// label drawn over it does not replace it.
+	#[test]
+	fn labels_with_combining_marks_keep_their_cells() {
+		let options = RenderOptions { color_mode: Some(ColorMode::None), ..RenderOptions::default() };
+		let art =
+			render("flowchart LR\nA --> B\nC -->|a \u{301}b| D\nB -->|xxx| D", &options).unwrap();
+		assert!(art.contains("a \u{301}b"), "{art}");
+	}
+
+	#[test]
+	fn moved_labels_leave_stuck_labels_intact() {
+		assert_edge_labels_intact(
+			"flowchart LR\nN0 -->|q00| N1\nN0 -->|q01 some longer text| N2\nN2 -->|q02| N3\nN1 --> \
+			 N2\nN1 -->|q06 some longer text| N3",
+		);
+	}
+
+	/// A cell of line stays between a moved label and the next, so they read
+	/// apart.
+	#[test]
+	fn moved_labels_keep_a_gap_to_other_labels() {
+		let options = RenderOptions { color_mode: Some(ColorMode::None), ..RenderOptions::default() };
+		let art = render(
+			"flowchart LR\nB --> E\nA --> B\nC -->|q1 some longer text| D\nB -->|q2| D",
+			&options,
+		)
+		.unwrap();
+		assert!(art.contains("q1 some longer text─q2"), "{art}");
+	}
+
+	/// The earlier edge's label shows, as before labels could move.
+	#[test]
+	fn stuck_labels_overlap_in_edge_order() {
+		let options = RenderOptions { color_mode: Some(ColorMode::None), ..RenderOptions::default() };
+		let art =
+			render("flowchart LR\nN0 --> N2\nN4 -->|q3| N1\nN2 -->|q4long| N1", &options).unwrap();
+		assert!(art.contains("q3"), "q3 overwritten\n{art}");
+	}
+
+	#[test]
+	fn moved_labels_keep_route_crossings_visible() {
+		let options = RenderOptions { color_mode: Some(ColorMode::None), ..RenderOptions::default() };
+		let source = "flowchart LR\nC --> A\nB --> C\nC --> A\nA --> B\nC -->|q5| A";
+		let art = render(source, &options).unwrap();
+		assert!(art.contains("q5") && art.contains('┼'), "{art}");
+	}
+
+	/// A label on a run another route shares, in the same or another line
+	/// style, stays at its default spot: the run reads as one line.
+	#[test]
+	fn labels_stay_on_runs_routes_share() {
+		let options = RenderOptions { color_mode: Some(ColorMode::None), ..RenderOptions::default() };
+		for (arrow, bend) in [("-->", "├───┐"), ("-.->", "└───┐")] {
+			let source = format!("flowchart TD\nC --> A\nB --> A\nB {arrow}|q| C");
+			let art = render(&source, &options).unwrap();
+			let lines: Vec<&str> = art.lines().collect();
+			let q = lines.iter().position(|line| line.trim() == "q").unwrap();
+			assert_eq!(lines[q + 1].trim(), bend, "{art}");
+		}
+	}
+
 	const EDGE_GLYPHS: &str = "─│┌┐└┘├┤┬┴┼▲▼◄►┄┆";
 
 	/// Rendered art as display cells; a wide glyph's second cell is `'\0'`.
