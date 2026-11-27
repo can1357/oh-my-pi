@@ -378,9 +378,6 @@
 - Cache warming no longer sends a refresh after sleep or another timer delay leaves less than ten seconds before cache expiry ([#20366](https://github.com/can1357/oh-my-pi/issues/20366)).
 - Removed the paused Google Antigravity provider (`google-antigravity`) and the Gemini CLI (Cloud Code Assist) transport (`google-gemini-cli` api); Gemini remains available through a Gemini API key and Vertex AI
 - omp no longer reads Gemini CLI's `~/.gemini` and `.gemini/` config (MCP servers, `GEMINI.md`, system prompts, extensions, settings); the `gemini` discovery provider id is gone.
-### Fixed
-
-- Fixed `edit` on a bare file name answering "Use the write tool" when the tag matches a file read outside the workspace; the error now names that file's full path so the retry needs no re-read ([#16087](https://github.com/can1357/oh-my-pi/pull/16087) by [@nick-maderight](https://github.com/nick-maderight))
 
 ## [19.2.1] - 2026-11-25
 
