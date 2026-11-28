@@ -111,7 +111,10 @@ function createMockRequest(events: MockAnthropicEvent[]): MockAnthropicRequest {
 		},
 	};
 }
-function createRawSseRequest(frames: string[]): { asResponse(): Promise<Response> } {
+function createRawSseRequest(
+	frames: string[],
+	headers: Record<string, string> = {},
+): { asResponse(): Promise<Response> } {
 	const body = new TextEncoder().encode(frames.join(""));
 	return {
 		async asResponse() {
@@ -120,6 +123,7 @@ function createRawSseRequest(frames: string[]): { asResponse(): Promise<Response
 				headers: {
 					"content-type": "text/event-stream",
 					"request-id": "req_raw_mock",
+					...headers,
 				},
 			});
 		},
@@ -1887,6 +1891,96 @@ describe("anthropic stream envelope handling", () => {
 		expect(AIError.isStreamEnvelopeTruncationText(result.errorMessage ?? "")).toBe(false);
 		expect(AIError.retriable(AIError.classifyMessage(result))).toBe(true);
 		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "Here is the first half" }]);
+	});
+
+	it("resends an in-band rate limit that follows a content block showing nothing", async () => {
+		// Any content block start, an ignored one included, marks the first token,
+		// which ends the resend of an HTTP refusal. An ignored block shows the caller
+		// nothing, so a rate limit after it is as safe to resend as one before any
+		// block; without the resend the caller gets an empty failed turn.
+		const message = "Number of request tokens has exceeded your per-minute rate limit";
+		let created = 0;
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(() => {
+			created += 1;
+			if (created > 1) return createRawSseRequest(createTextSuccessSseFrames("recovered")) as never;
+			return createRawSseRequest([
+				sseFrame("message_start", createTextSuccessEvents("unused")[0]),
+				sseFrame("content_block_start", {
+					type: "content_block_start",
+					index: 0,
+					content_block: { type: "future_server_block", id: "srv_1", name: "web_search" },
+				}),
+				sseFrame("error", { type: "error", error: { type: "rate_limit_error", message } }),
+			]) as never;
+		});
+
+		const stream = streamAnthropic(model, context, {
+			apiKey: "sk-ant-test",
+			providerRetryWait: async () => {},
+		});
+		const events: AssistantMessageEvent[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+		const result = await stream.result();
+
+		expect(created).toBe(2);
+		expect(countEvents(events, "error")).toBe(0);
+		expect(countEvents(events, "done")).toBe(1);
+		expect(result.stopReason).toBe("stop");
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "recovered" }]);
+	});
+
+	it("reads the retry headers of the 200 response that streamed a rate limit", async () => {
+		// An in-band rate limit arrives in a 200 response whose headers carry the
+		// server's wait (`retry-after-ms`) and retry verdict (`x-should-retry`), as an
+		// HTTP 429's do. Dropped, the resend fires before the window clears, and a
+		// refusal the server marked final is sent again ten times.
+		const message = "Number of request tokens has exceeded your per-minute rate limit";
+		const rateLimitFrame = sseFrame("error", { type: "error", error: { type: "rate_limit_error", message } });
+
+		// The stated wait paces the resend.
+		let created = 0;
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(() => {
+			created += 1;
+			return (
+				created === 1
+					? createRawSseRequest([rateLimitFrame], { "retry-after-ms": "4321" })
+					: createRawSseRequest(createTextSuccessSseFrames("recovered"))
+			) as never;
+		});
+		const waits: number[] = [];
+		const paced = await streamAnthropic(model, context, {
+			apiKey: "sk-ant-test",
+			providerRetryWait: async delayMs => {
+				waits.push(delayMs);
+			},
+		}).result();
+
+		expect(paced.stopReason).toBe("stop");
+		expect(created).toBe(2);
+		expect(waits).toEqual([4321]);
+		vi.restoreAllMocks();
+
+		// `x-should-retry: false` surfaces the 429 at once, carrying the stated wait
+		// for the caller's own retry.
+		created = 0;
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(() => {
+			created += 1;
+			return createRawSseRequest([rateLimitFrame], {
+				"retry-after-ms": "4321",
+				"x-should-retry": "false",
+			}) as never;
+		});
+		const refused = await streamAnthropic(model, context, {
+			apiKey: "sk-ant-test",
+			providerRetryWait: async () => {},
+		}).result();
+
+		expect(created).toBe(1);
+		expect(refused.stopReason).toBe("error");
+		expect(refused.errorStatus).toBe(429);
+		expect(refused.errorMessage).toBe(`Anthropic stream error (rate_limit_error): ${message} retry-after-ms=4321`);
 	});
 
 	it("retries a stream cut before any stop_reason when no content streamed", async () => {

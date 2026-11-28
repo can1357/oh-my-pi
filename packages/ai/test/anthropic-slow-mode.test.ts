@@ -64,6 +64,15 @@ function errorResponse(status: number, type: string, headers: Record<string, str
 	});
 }
 
+/** A 200 stream whose only frame is an in-band `error` refusal of `type`. */
+function streamedErrorResponse(type: string, headers: Record<string, string>): Response {
+	const frame = { type: "error", error: { type, message: `${type} test` } };
+	return new Response(`event: error\ndata: ${JSON.stringify(frame)}\n\n`, {
+		status: 200,
+		headers: { "content-type": "text/event-stream", ...headers },
+	});
+}
+
 type RecordingHooks = AnthropicSlowModeHooks & {
 	observed: AnthropicSlowModeSignal[];
 	failures: AnthropicSlowModeFailure[];
@@ -236,6 +245,41 @@ describe("Anthropic provider slow mode", () => {
 			waitedMs: 0,
 		});
 		expect(hooks.observed.map(signal => signal.status)).toEqual(["active"]);
+	});
+
+	it("waits the hook-chosen delay on a slot_busy rate limit streamed inside a 200 response", async () => {
+		// The slow-lane headers ride on the 200 response, and only the failure hook
+		// acts on `slot_busy`: without them on the streamed 429 the request falls
+		// back to generic backoff instead of the server-paced capacity wait.
+		const waits: number[] = [];
+		const scripted = scriptedFetch([
+			() =>
+				streamedErrorResponse("rate_limit_error", {
+					"anthropic-ratelimit-unified-slow-status": "slot_busy",
+					"anthropic-ratelimit-unified-slow-retry-after": "20",
+				}),
+			() => successResponse({ "anthropic-ratelimit-unified-slow-status": "active" }),
+		]);
+		const hooks = recordingHooks(
+			() => true,
+			failure => (failure.signal?.status === "slot_busy" ? { delayMs: 12_345, capacityWait: true } : undefined),
+		);
+		const result = await streamAnthropic(MODEL, CONTEXT, {
+			apiKey: "sk-ant-oat-test",
+			fetch: scripted.fetch,
+			anthropicSlowMode: hooks,
+			providerRetryWait: async delayMs => {
+				waits.push(delayMs);
+			},
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(waits).toEqual([12_345]);
+		expect(hooks.failures).toHaveLength(1);
+		expect(hooks.failures[0]).toMatchObject({
+			httpStatus: 429,
+			signal: { status: "slot_busy", retryAfterMs: 20_000 },
+		});
 	});
 
 	it("resends immediately with the slow header when the hook accepts a session-limit offer", async () => {

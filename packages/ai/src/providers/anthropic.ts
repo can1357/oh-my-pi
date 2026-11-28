@@ -1002,6 +1002,16 @@ const ANTHROPIC_STREAM_ERROR_STATUS: Readonly<Record<string, number>> = {
 };
 
 /**
+ * A `rate_limit_error` frame inside an open message: the same 429 refusal as a
+ * {@link AIError.ProviderHttpError}, with its own class only so the provider
+ * loop can resend it under the gate it had as a stream truncation. A content
+ * block that shows nothing (an ignored or fallback block) already counts as the
+ * first token, but leaves nothing to replay: only replay-unsafe content before
+ * the frame stops the resend.
+ */
+class AnthropicStreamRateLimitError extends AIError.ProviderHttpError {}
+
+/**
  * In-stream `error` SSE frames carry an Anthropic error envelope:
  * `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`.
  * Surface the structured type, code and message instead of the raw JSON blob;
@@ -1009,7 +1019,9 @@ const ANTHROPIC_STREAM_ERROR_STATUS: Readonly<Record<string, number>> = {
  * the message so `isProviderRetryableError`'s classification keys off the
  * structured type rather than incidental JSON substrings. A type in
  * {@link ANTHROPIC_STREAM_ERROR_STATUS} becomes a {@link AIError.ProviderHttpError}
- * with that status and the type as its code, as the HTTP response would.
+ * with that status, the type as its code and the response's `headers`, as the
+ * HTTP response would: their retry hints, `x-should-retry` and slow-mode
+ * headers reach the retry and slow-mode handling that read the error.
  *
  * `midMessage` marks a frame that lands inside an open message envelope — after
  * `message_start`, before the terminal frame (`message_stop`, or a
@@ -1026,7 +1038,8 @@ const ANTHROPIC_STREAM_ERROR_STATUS: Readonly<Record<string, number>> = {
  *
  * Only frame types the provider loop already retries take the truncation path,
  * and `rate_limit_error` does not: a rate limit is the provider refusing the
- * request, not a cut wire, so it stays the 429 inside an open message too.
+ * request, not a cut wire, so it stays the 429 inside an open message too
+ * ({@link AnthropicStreamRateLimitError}).
  * A deterministic rejection (`invalid_request_error`, `authentication_error`,
  * `billing_error`, `permission_error`, an account cap) is a decision the
  * provider made about the request, not a cut wire: rewriting it as a truncation
@@ -1037,7 +1050,7 @@ const ANTHROPIC_STREAM_ERROR_STATUS: Readonly<Record<string, number>> = {
  * existed — the retry decision moves nowhere, only the shape of a retryable
  * failure changes.
  */
-function createAnthropicSseStreamError(data: string, midMessage: boolean): Error {
+function createAnthropicSseStreamError(data: string, midMessage: boolean, headers: Headers): Error {
 	let parsed: { error?: { type?: unknown; code?: unknown; message?: unknown } } | undefined;
 	try {
 		parsed = JSON.parse(data) as { error?: { type?: unknown; code?: unknown; message?: unknown } };
@@ -1056,10 +1069,13 @@ function createAnthropicSseStreamError(data: string, midMessage: boolean): Error
 		errorType !== undefined && Object.hasOwn(ANTHROPIC_STREAM_ERROR_STATUS, errorType)
 			? ANTHROPIC_STREAM_ERROR_STATUS[errorType]
 			: undefined;
+	const options = { code: errorType, headers };
 	const rejection =
 		httpStatus === undefined
 			? new AIError.ProviderResponseError(text, { provider: "anthropic", kind: "output" })
-			: new AIError.ProviderHttpError(text, httpStatus, { code: errorType });
+			: midMessage && httpStatus === 429
+				? new AnthropicStreamRateLimitError(text, httpStatus, options)
+				: new AIError.ProviderHttpError(text, httpStatus, options);
 	if (!midMessage || httpStatus === 429 || !AIError.isProviderRetryableError(rejection)) {
 		return rejection;
 	}
@@ -1096,7 +1112,11 @@ async function* iterateAnthropicEvents(
 		// complete: classify it as the truncation family so the failure is
 		// retryable/continuable instead of a completed-turn provider rejection.
 		if (sse.event === "error") {
-			throw createAnthropicSseStreamError(sse.data, sawMessageStart && !sawMessageEnd && !sawTerminalDelta);
+			throw createAnthropicSseStreamError(
+				sse.data,
+				sawMessageStart && !sawMessageEnd && !sawTerminalDelta,
+				response.headers,
+			);
 		}
 
 		if (sse.event === "ping") {
@@ -2600,7 +2620,8 @@ const streamAnthropicOnce = (
 			stream.push({ type: "start", partial: output });
 			// Retry loop for transient errors from the stream.
 			// Provider-level transport/rate-limit failures: only before any streamed content starts.
-			// Malformed envelopes/JSON: only before replay-unsafe text/tool events are visible on this stream.
+			// Malformed envelopes/JSON, and a rate-limit frame inside the message: only before
+			// replay-unsafe text/tool events are visible on this stream.
 			let providerRetryAttempt = 0;
 			const firstEventTimeoutAbortError = new AIError.StreamTimeoutError(
 				"Anthropic stream timed out while waiting for the first event",
@@ -3858,7 +3879,7 @@ const streamAnthropicOnce = (
 					const canRetryTransientEnvelopeFailure = isTransientEnvelopeFailure && !streamedReplayUnsafeContent;
 					const canRetryProviderFailure =
 						!isLocalIdleTimeout &&
-						firstTokenTime === undefined &&
+						(firstTokenTime === undefined || streamFailure instanceof AnthropicStreamRateLimitError) &&
 						!streamedReplayUnsafeContent &&
 						AIError.isProviderRetryableError(streamFailure);
 					if (
