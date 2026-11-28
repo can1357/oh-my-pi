@@ -5,6 +5,7 @@ import type { SttTransport, SttWorkerInbound, SttWorkerOutbound } from "../src/s
 import { startSttWorker } from "../src/stt/asr-worker";
 import type { DetectedSpeech, SpeechDetector } from "../src/stt/endpointer";
 import * as registry from "../src/stt/models";
+import * as device from "../src/tiny/device";
 import * as runtime from "../src/stt/sherpa-runtime";
 
 // A stateful native-API double: each positive sample introduces a token, -1
@@ -409,5 +410,35 @@ describe("online stream terminal boundaries", () => {
 		await nextTurn();
 		expect(h.events).toEqual([]);
 		expect(OnlineRecognizer.instances[0]!.streams).toHaveLength(0);
+	});
+});
+
+describe("accelerated device fallback", () => {
+	it("tells the client which device the model fell back to and why", async () => {
+		// The worker keeps loaded models warm; only this test loads whisper-base.
+		const whisperKey: registry.SttModelKey = "whisper-base";
+		mock.restore();
+		spyOn(fs, "mkdir").mockResolvedValue(undefined);
+		spyOn(fs, "stat").mockResolvedValue(presentFile);
+		spyOn(runtime, "loadSherpaRuntime").mockResolvedValue(nativeRuntime);
+		spyOn(device, "tinyModelDeviceLoadOrder").mockReturnValue(["cuda", "cpu"]);
+		const transformers = {
+			pipeline: async (_task: string, _repo: string, options: { device: string }) => {
+				if (options.device === "cuda") throw new Error("CUDA out of memory\nstack");
+				return async () => ({ text: "" });
+			},
+		};
+		spyOn(MemoizedRuntime.prototype, "load").mockResolvedValue(transformers);
+		const h = harness();
+		h.send({ type: "stream_start", id: "gpu", modelKey: whisperKey });
+		expect(await h.waitFor("device_fallback", "gpu")).toEqual({
+			type: "device_fallback",
+			id: "gpu",
+			modelKey: whisperKey,
+			device: "cuda",
+			fallbackDevice: "cpu",
+			error: "CUDA out of memory\nstack",
+		});
+		h.send({ type: "stream_cancel", id: "gpu" });
 	});
 });

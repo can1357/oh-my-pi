@@ -20,11 +20,13 @@ interface SessionStub {
 	setQueue: (queue: { steering?: string[]; followUp?: string[] }) => void;
 }
 
-function makeSessionStub(opts: { isStreaming?: boolean } = {}): SessionStub {
+function makeSessionStub(opts: { isStreaming?: boolean; sessionId?: string } = {}): SessionStub {
 	let listener: ((event: AgentSessionEvent) => Promise<void> | void) | undefined;
 	let unsubscribeCalls = 0;
 	let queue: { steering: string[]; followUp: string[] } = { steering: [], followUp: [] };
 	const stub = {
+		sessionId: "provider-session",
+		sessionManager: { getSessionId: () => opts.sessionId ?? "session" },
 		isStreaming: opts.isStreaming ?? false,
 		runStartedAt: undefined as number | undefined,
 		agent: { state: { streamMessage: null } },
@@ -70,6 +72,10 @@ interface Harness {
 	reloadTodoSessions: AgentSession[];
 	/** The steering queue the pending bar showed, per `updatePendingMessagesDisplay()` call. */
 	pendingDisplays: string[][];
+	/** Events the main session's extension runner received. */
+	extensionEvents: unknown[];
+	/** Call `listener` on the next event the main session's extension runner receives. */
+	onExtensionEvent: (listener: () => void) => void;
 	counts: {
 		clearTransientSessionUi: () => number;
 		resetTranscriptAnchors: () => number;
@@ -79,7 +85,18 @@ interface Harness {
 }
 
 function makeHarness(options: { renderInitialMessages?: () => void | Promise<void> } = {}): Harness {
-	const main = makeSessionStub();
+	const main = makeSessionStub({ sessionId: "main-session" });
+	const extensionEvents: unknown[] = [];
+	let extensionListener: (() => void) | undefined;
+	Object.assign(main.session, {
+		extensionRunner: {
+			emit: async (event: unknown) => {
+				extensionEvents.push(event);
+				extensionListener?.();
+				extensionListener = undefined;
+			},
+		},
+	});
 	const handledEvents: unknown[] = [];
 	const setSessionCalls: Array<[AgentSession, string | undefined]> = [];
 	const reloadTodoSessions: AgentSession[] = [];
@@ -152,6 +169,10 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 		setSessionCalls,
 		reloadTodoSessions,
 		pendingDisplays,
+		extensionEvents,
+		onExtensionEvent: listener => {
+			extensionListener = listener;
+		},
 		counts: {
 			clearTransientSessionUi: () => clearTransientSessionUi,
 			resetTranscriptAnchors: () => resetTranscriptAnchors,
@@ -369,6 +390,47 @@ describe("SessionFocusController", () => {
 			[worker.session, "Worker"],
 			[h.main.session, undefined],
 		]);
+	});
+
+	it("reports each attached view change to the main session's extensions (#16546)", async () => {
+		const h = makeHarness();
+		const parent = makeSessionStub({ sessionId: "parent-session" });
+		const worker = makeSessionStub({ sessionId: "worker-session" });
+		registerSub(h.registry, "Parent", parent.session, MAIN_AGENT_ID);
+		registerSub(h.registry, "Worker", worker.session, "Parent");
+
+		await h.controller.focusAgent("Worker");
+		await h.controller.focusAgent("Worker");
+		await h.controller.focusParent();
+		await h.controller.unfocus();
+		await h.controller.unfocus();
+		await h.controller.focusAgent("Worker");
+		// The reactive return is fire-and-forget: wait for the report it ends with.
+		const returned = Promise.withResolvers<void>();
+		h.onExtensionEvent(returned.resolve);
+		h.registry.setStatus("Worker", "parked");
+		await returned.promise;
+
+		expect(h.extensionEvents).toEqual([
+			{ type: "agent_view_changed", agentId: "Worker", previousAgentId: undefined, sessionId: "worker-session" },
+			{ type: "agent_view_changed", agentId: "Parent", previousAgentId: "Worker", sessionId: "parent-session" },
+			{ type: "agent_view_changed", agentId: undefined, previousAgentId: "Parent", sessionId: "main-session" },
+			{ type: "agent_view_changed", agentId: "Worker", previousAgentId: undefined, sessionId: "worker-session" },
+			{ type: "agent_view_changed", agentId: undefined, previousAgentId: "Worker", sessionId: "main-session" },
+		]);
+	});
+
+	it("does not report a focus whose attachment fails (#16546)", async () => {
+		const h = makeHarness({
+			renderInitialMessages: () => {
+				if (h.controller.focusedAgentId) throw new Error("replay failed");
+			},
+		});
+		const worker = makeSessionStub();
+		registerSub(h.registry, "Worker", worker.session, MAIN_AGENT_ID);
+
+		await expect(h.controller.focusAgent("Worker")).rejects.toThrow("replay failed");
+		expect(h.extensionEvents).toEqual([]);
 	});
 
 	it("drops a slower focus that resolves after a newer request", async () => {

@@ -21,6 +21,7 @@ import type { Database, Statement } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ResizeScrollback } from "@oh-my-pi/pi-tui/driver/index";
+import type { ScreenMode } from "@oh-my-pi/pi-tui/term/backend";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { getComposerCacheDbPath } from "@oh-my-pi/pi-utils/dirs";
 import { isBunTestRuntime } from "@oh-my-pi/pi-utils/env";
@@ -55,6 +56,8 @@ export interface StartupPreferences {
 	readonly autocompleteMaxVisible: number;
 	readonly vim: boolean;
 	readonly imeSafeCursor: boolean;
+	/** `tui.screen`: the first frame draws inline or on the alternate screen. */
+	readonly screen: ScreenMode;
 }
 
 /** What the cache knows for a project. */
@@ -82,6 +85,8 @@ const RESIZE_SCROLLBACK: Record<string, ResizeScrollback> = {
 
 const SYMBOL_PRESETS: Record<string, true> = { unicode: true, nerd: true, ascii: true };
 
+const SCREEN_MODES: Record<string, ScreenMode> = { inline: "inline", fullscreen: "fullscreen" };
+
 function parseJson(value: string | undefined): unknown {
 	if (value === undefined) return undefined;
 	try {
@@ -95,7 +100,8 @@ function parseUi(
 	value: unknown,
 ): { readonly preferences: StartupPreferences; readonly theme: ComposerThemePreferences } | undefined {
 	if (!isRecord(value) || !isRecord(value.preferences) || !isRecord(value.theme)) return undefined;
-	const { quiet, composerShape, resizeScrollback, autocompleteMaxVisible, vim, imeSafeCursor } = value.preferences;
+	const { quiet, composerShape, resizeScrollback, autocompleteMaxVisible, vim, imeSafeCursor, screen } =
+		value.preferences;
 	const scrollback = typeof resizeScrollback === "string" ? RESIZE_SCROLLBACK[resizeScrollback] : undefined;
 	if (
 		typeof quiet !== "boolean" ||
@@ -124,6 +130,8 @@ function parseUi(
 			autocompleteMaxVisible,
 			vim,
 			imeSafeCursor: imeSafeCursor === true,
+			// Caches written before the setting existed start inline.
+			screen: (typeof screen === "string" ? SCREEN_MODES[screen] : undefined) ?? "inline",
 		},
 		theme: { symbolPreset, colorBlindMode, darkTheme, lightTheme } as ComposerThemePreferences,
 	};

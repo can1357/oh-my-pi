@@ -40,18 +40,19 @@ import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { extensionTheme } from "../../ui/extensions/render-output";
 import type { ComposerShape } from "../../ui/styles/composer/shapes";
-import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/agent-session";
+import type { SendUserMessageOptions } from "../../session/agent-session";
 import { MAIN_AGENT_ID } from "../../registry/agent-registry";
 import type { SessionManager } from "../../session/session-manager";
 import type { ApprovalRecordSink } from "../../session/tool-approval-records";
 import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-write-fallback";
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
 import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shared-events";
+import { aggregateExtensionFlags } from "./flags";
 import { ManagedTimers } from "./managed-timers";
 import { createExtensionModelQuery } from "./model-api";
 import { trackUserWaits, type UserWaitTracker } from "./user-wait";
 import { sanitizeDisplayLine } from "../inventory/display-text";
-import type { TodoPhase } from "../../tools/details/todo";
+import type { TodoApplyOutcome, TodoPhase } from "../../tools/details/todo";
 import { extensionLinkClicksAvailable } from "./link-clicks";
 import {
 	notifyTranscriptPresentersChanged,
@@ -76,6 +77,7 @@ import type {
 	Extension,
 	ExtensionActions,
 	ExtensionAgentIdentity,
+	ExtensionAsyncJobAccess,
 	ExtensionAnnotationsAPI,
 	ExtensionAnnotationsFactory,
 	ExtensionCommandContext,
@@ -90,6 +92,8 @@ import type {
 	ExtensionShortcut,
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
+	ExtensionWidgetContent,
+	ExtensionWidgetOptions,
 	InputEvent,
 	InputEventResult,
 	CacheWarmingAction,
@@ -111,6 +115,7 @@ import type {
 	SessionStopEvent,
 	SessionStopEventResult,
 	ShortcutConflict,
+	TodoBackendChange,
 	TodoBackendDefinition,
 	ToolCallEvent,
 	ToolCallEventResult,
@@ -330,12 +335,13 @@ function createHandlerUIContext(
  */
 function createHandlerContext(
 	ctx: ExtensionContext,
+	ui: ExtensionUIContext,
 	handlerSignal: AbortSignal,
 	timeoutBudget?: HandlerTimeoutBudget,
 ): ExtensionContext {
 	const scoped: ExtensionContext = Object.create(ctx);
 	Object.defineProperty(scoped, "ui", {
-		value: createHandlerUIContext(ctx.ui, handlerSignal, timeoutBudget),
+		value: createHandlerUIContext(ui, handlerSignal, timeoutBudget),
 		enumerable: true,
 		configurable: true,
 	});
@@ -598,6 +604,23 @@ interface TodoBackendList {
 	phases: TodoPhase[];
 }
 
+/** Longest a backend gets to answer `apply`; the extension handler timeout caps it further. */
+const TODO_APPLY_TIMEOUT_MS = 10_000;
+
+const NOTHING_SAVED_SUFFIX = "; nothing was saved.";
+const TODO_APPLY_EVENT = "todo_backend_apply";
+
+interface TodoApplyRequest {
+	backend: string;
+	change: TodoBackendChange;
+	current(): TodoPhase[];
+	commit(): void;
+	closing(): boolean;
+	/** The selected todo backend id, or undefined for native. */
+	selected(): string | undefined;
+	signal?: AbortSignal;
+}
+
 /** Identity reported by a session that is not a subagent and received no explicit identity. */
 export const TOP_LEVEL_AGENT: ExtensionAgentIdentity = Object.freeze({
 	kind: "main",
@@ -612,8 +635,15 @@ export const UNAVAILABLE_ANNOTATIONS: ExtensionAnnotationsAPI = Object.freeze({
 	open: () => Promise.reject(new Error("ctx.annotations is not available in this host.")),
 });
 
+/** Host UI seam for attributing widgets without changing the extension's `setWidget` API. */
+export interface ExtensionHostUIContext extends ExtensionUIContext {
+	/** Set an editor widget attributed to a resolved extension entry path. */
+	setOwnedWidget?(owner: string, key: string, content: ExtensionWidgetContent, options?: ExtensionWidgetOptions): void;
+}
+
 export class ExtensionRunner {
-	#uiContext: ExtensionUIContext;
+	#uiContext: ExtensionHostUIContext;
+	#ownedUi = new Map<string, ExtensionUIContext>();
 	#mode: ExtensionMode = "print";
 	#toolApprovalPreviewWaiter?: (toolCallId: string) => Promise<void>;
 	/** Grant keys (see `sessionApprovalScope`) approved "for this session", each prefixed by the session it covers. */
@@ -631,7 +661,7 @@ export class ExtensionRunner {
 	#runEphemeralTurnFn?: ExtensionContextActions["runEphemeralTurn"];
 	#startLiveFn?: ExtensionContextActions["startLive"];
 	#ephemeralTurnBlocker = new AsyncLocalStorage<string | undefined>();
-	#getAsyncJobSnapshotFn: () => AsyncJobSnapshot | null = () => null;
+	#asyncJobs?: ExtensionAsyncJobAccess;
 	#newSessionHandler: NewSessionHandler = async () => ({ cancelled: false });
 	#branchHandler: BranchHandler = async () => ({ cancelled: false });
 	#navigateTreeHandler: NavigateTreeHandler = async () => ({ cancelled: false });
@@ -687,6 +717,13 @@ export class ExtensionRunner {
 	#todoClosed = false;
 	/** Aborted when {@link closeTodoBackend} stops waiting: a call still running is given up, and its handler timer with it. */
 	#todoGivenUp = new AbortController();
+	/**
+	 * Holders asked by `apply`, by definition, until their next list goes out: it is sent even when it
+	 * equals the last one they took, since the answer may have written something else.
+	 */
+	#todoUnsynced = new WeakMap<TodoBackendDefinition, Set<Extension>>();
+	/** The `resync` of each asked call not run yet: still deciding, or failed and waiting for its apply to settle. */
+	#todoResyncs = new Set<() => void>();
 	/** The selected `todo.backend` id last reported as unregistered; cleared once a selected id resolves. */
 	#reportedTodoBackend: string | undefined;
 	/** Selected todo backend ids whose shadowed registrations were already reported. */
@@ -908,7 +945,8 @@ export class ExtensionRunner {
 		getMemory?: () => MemoryRuntimeContext | undefined,
 		private readonly settings?: Settings,
 		private readonly localProtocolOptions?: LocalProtocolOptions,
-		getAsyncJobSnapshot?: () => AsyncJobSnapshot | null,
+		/** The owning session's async jobs; absent outside a session. */
+		asyncJobs?: ExtensionAsyncJobAccess,
 		/** Identity of the agent this runner's session runs; defaults to the top-level agent. */
 		private readonly agent: ExtensionAgentIdentity = TOP_LEVEL_AGENT,
 		/** Builds `ctx.annotations`; supplied by the host that wires the bundled `/annotate` command. */
@@ -917,7 +955,7 @@ export class ExtensionRunner {
 		this.#uiContext = noOpUIContext;
 		this.#getMemoryFn = getMemory;
 		this.#createAnnotations = createAnnotations;
-		this.#getAsyncJobSnapshotFn = getAsyncJobSnapshot ?? (() => null);
+		this.#asyncJobs = asyncJobs;
 		this.runtime.getShortcutConflict = (shortcut, extensionPath) => this.getShortcutConflict(shortcut, extensionPath);
 	}
 
@@ -973,7 +1011,7 @@ export class ExtensionRunner {
 		actions: ExtensionActions,
 		contextActions: ExtensionContextActions,
 		commandContextActions?: ExtensionCommandContextActions,
-		uiContext?: ExtensionUIContext,
+		uiContext?: ExtensionHostUIContext,
 		mode: ExtensionMode = "print",
 	): void {
 		// Copy actions into the shared runtime (all extension APIs reference this)
@@ -1036,6 +1074,7 @@ export class ExtensionRunner {
 			uiContext && this.#trackUserWait
 				? trackUserWaits(uiContext, this.#trackUserWait)
 				: (uiContext ?? noOpUIContext);
+		this.#ownedUi.clear();
 		this.#mode = mode;
 		this.#initialized = true;
 
@@ -1195,6 +1234,26 @@ export class ExtensionRunner {
 		return this.#uiContext;
 	}
 
+	#uiForPath(extensionPath: string): ExtensionUIContext {
+		if (!this.#uiContext.setOwnedWidget) return this.#uiContext;
+		const owner = this.getLoadedExtensions().find(extension => extension.path === extensionPath);
+		return owner ? this.#uiForOwner(this.#uiContext, owner.resolvedPath) : this.#uiContext;
+	}
+
+	#uiForOwner(ui: ExtensionHostUIContext, owner: string): ExtensionUIContext {
+		if (!ui.setOwnedWidget) return ui;
+		const cache = ui === this.#uiContext ? this.#ownedUi : undefined;
+		const existing = cache?.get(owner);
+		if (existing) return existing;
+		const setWidget: ExtensionUIContext["setWidget"] = (key, content, options) =>
+			ui.setOwnedWidget?.(owner, key, content, options);
+		const bound: ExtensionUIContext = Object.create(ui, {
+			setWidget: { value: setWidget, writable: true, enumerable: true, configurable: true },
+		});
+		cache?.set(owner, bound);
+		return bound;
+	}
+
 	hasUI(): boolean {
 		return this.#uiContext !== noOpUIContext;
 	}
@@ -1209,10 +1268,8 @@ export class ExtensionRunner {
 	 * extension that only brokers writes never appears in the delete registry.
 	 *
 	 * One trampoline per extension per seam, not per handler: the list is walked
-	 * at mutation time so a handler this extension adds later still takes effect,
-	 * and `createContext()` takes no extension argument, so within one invocation
-	 * a single context is all any of this extension's handlers would have
-	 * received anyway.
+	 * at mutation time so a handler this extension adds later still takes effect.
+	 * All of an extension's handlers in the same invocation share one context.
 	 *
 	 * The context is built PER INVOCATION rather than captured here, matching
 	 * every other dispatch site. `createContext()` materializes `cwd` and
@@ -1235,6 +1292,7 @@ export class ExtensionRunner {
 				addFileWriteFallback(async req => {
 					if (this.#suspendedExtensions.has(ext)) return false;
 					const ctx = this.createContext();
+					ctx.ui = this.#uiForOwner(this.#uiContext, ext.resolvedPath);
 					for (const handler of ext.fileWriteFallbackHandlers) {
 						try {
 							if (await handler(req, ctx)) return true;
@@ -1254,6 +1312,7 @@ export class ExtensionRunner {
 				addFileDeleteFallback(async req => {
 					if (this.#suspendedExtensions.has(ext)) return false;
 					const ctx = this.createContext();
+					ctx.ui = this.#uiForOwner(this.#uiContext, ext.resolvedPath);
 					for (const handler of ext.fileDeleteFallbackHandlers) {
 						try {
 							if (await handler(req, ctx)) return true;
@@ -1481,18 +1540,10 @@ export class ExtensionRunner {
 
 	/**
 	 * Aggregate the registered CLI flags across a set of extensions (last write
-	 * wins on name collision). Static so callers that need the flag set before a
-	 * runner exists — e.g. the CLI resolving `@file`/flag args before session
-	 * creation — share this exact logic instead of duplicating it.
+	 * wins on name collision).
 	 */
 	static aggregateFlags(extensions: readonly Extension[]): Map<string, ExtensionFlag> {
-		const allFlags = new Map<string, ExtensionFlag>();
-		for (const ext of extensions) {
-			for (const [name, flag] of ext.flags) {
-				allFlags.set(name, flag);
-			}
-		}
-		return allFlags;
+		return aggregateExtensionFlags(extensions);
 	}
 
 	getFlags(): Map<string, ExtensionFlag> {
@@ -1770,10 +1821,137 @@ export class ExtensionRunner {
 	 * host's process alive long after the session is gone.
 	 */
 	async closeTodoBackend(): Promise<void> {
+		// Calls still deciding, or waiting for a late apply, resync now, before the closed flag drops them: a
+		// late write after this can still land, but the shutdown budget allows no longer wait.
+		const resyncs = [...this.#todoResyncs];
+		this.#todoResyncs.clear();
+		for (const resync of resyncs) resync();
 		this.#todoClosed = true;
 		await this.todoBackendSettled();
 		this.#todoPending = undefined;
 		this.#todoGivenUp.abort();
+	}
+
+	/**
+	 * Ask the backend `todo.backend` selects to accept a `todo` call's change. `request.commit`
+	 * runs in the same synchronous step as the checks of the answer. `apply` is not queued behind
+	 * `replace`. `closing` is read here and again at commit: the dispose wrappers await before
+	 * `closeTodoBackend`.
+	 */
+	applyTodoBackend(request: TodoApplyRequest): TodoApplyOutcome | Promise<TodoApplyOutcome> {
+		const owner = this.#sessionStartEvent ? this.getTodoBackends().get(request.backend) : undefined;
+		if (!owner?.definition.apply) {
+			request.commit();
+			return { kind: "committed" };
+		}
+		// A backend that decides still decides while closing, so the call fails; nothing is resent here.
+		if (this.#todoClosed || request.closing())
+			return {
+				kind: "stale",
+				message: `The session is closing; todo backend "${sanitizeDisplayLine(request.backend)}" was not asked${NOTHING_SAVED_SUFFIX}`,
+			};
+		return this.#askTodoBackend(owner.extension, owner.definition, request);
+	}
+
+	async #askTodoBackend(
+		extension: Extension,
+		definition: TodoBackendDefinition,
+		{ backend, change, current, commit, closing, selected, signal }: TodoApplyRequest,
+	): Promise<TodoApplyOutcome> {
+		const sessionId = this.sessionManager.getSessionId();
+		const timeoutMs = Math.min(TODO_APPLY_TIMEOUT_MS, extensionHandlerTimeoutMs);
+		const answered = Promise.withResolvers<void>();
+		// Whatever `apply` wrote is undone by the next list its holder takes, even one equal to the last: at
+		// once if it is still selected, else when it is selected again.
+		const resync = () => {
+			const holders = this.#todoUnsynced.get(definition) ?? new Set<Extension>();
+			this.#todoUnsynced.set(definition, holders.add(extension));
+			const now = selected();
+			if (now !== undefined) this.syncTodoBackend(now, current());
+		};
+		let asked = false;
+		const verdict = await this.#runHandlerWithTimeout<
+			{ type: typeof TODO_APPLY_EVENT; change: TodoBackendChange },
+			| { kind: "accepted" }
+			| { kind: "refused"; message: string }
+			| { kind: "failed"; message: string }
+			| { kind: "timeout" }
+		>(
+			async (event, ctx) => {
+				asked = true;
+				this.#todoResyncs.add(resync);
+				// A throw is an extension error, not a refusal (`onFailure` below makes its message text); a non-text reason is dropped.
+				try {
+					const answer = await definition.apply?.(event.change, ctx);
+					if (!answer?.block) return { kind: "accepted" };
+					return { kind: "refused", message: typeof answer.reason === "string" ? answer.reason : "" };
+				} finally {
+					answered.resolve();
+				}
+			},
+			{ type: TODO_APPLY_EVENT, change: structuredClone(change) },
+			this.createContext(),
+			extension,
+			timeoutMs,
+			(kind, failure) => (kind === "timeout" ? { kind: "timeout" } : { kind: "failed", message: String(failure) }),
+			signal ? AbortSignal.any([signal, this.#todoGivenUp.signal]) : this.#todoGivenUp.signal,
+		);
+		// Why the change can no longer commit, checked in the same synchronous step as the commit.
+		const owner = this.getTodoBackends().get(backend);
+		const staleCause = signal?.aborted
+			? "The call was aborted"
+			: this.#todoClosed || closing()
+				? "The session closed"
+				: this.sessionManager.getSessionId() !== sessionId
+					? "The session changed"
+					: selected() !== backend || owner?.extension !== extension || owner.definition !== definition
+						? "The todo backend changed"
+						: !Bun.deepEquals(current(), change.previous)
+							? "The todo list changed"
+							: undefined;
+		if (verdict?.kind === "accepted" && staleCause === undefined) {
+			this.#todoResyncs.delete(resync);
+			commit();
+			resync();
+			return { kind: "committed" };
+		}
+		const id = sanitizeDisplayLine(backend);
+		let result: { kind: "refused" | "stale"; message: string };
+		switch (verdict?.kind) {
+			case "refused":
+				result = {
+					kind: "refused",
+					message: `Todo backend "${id}" did not accept this change: ${sanitizeDisplayLine(verdict.message) || "no reason given"}`,
+				};
+				break;
+			case "timeout":
+				result = {
+					kind: "stale",
+					message: `Todo backend "${id}" did not answer within ${timeoutMs} ms${NOTHING_SAVED_SUFFIX}`,
+				};
+				break;
+			case "failed":
+				result = {
+					kind: "stale",
+					message: `Todo backend "${id}" failed: ${sanitizeDisplayLine(verdict.message) || "no reason given"}${NOTHING_SAVED_SUFFIX}`,
+				};
+				break;
+			default:
+				// No verdict only after an abort of the call or of the session's wait, both named above.
+				result = {
+					kind: "stale",
+					message: `${staleCause ?? "The call was aborted"} while todo backend "${id}" decided${NOTHING_SAVED_SUFFIX}`,
+				};
+		}
+		// A failed call resyncs once its apply settles, so a late write lands first, and outside the call queue, so
+		// a later commit is not held behind it. One that never answers resyncs when the session closes.
+		if (asked)
+			void answered.promise
+				.then(() => {
+					if (this.#todoResyncs.delete(resync)) resync();
+				})
+				.catch((error: unknown) => logger.warn("Todo backend call failed", { error: String(error) }));
+		return result;
 	}
 
 	#queueTodoBackendCall(): void {
@@ -1805,10 +1983,12 @@ export class ExtensionRunner {
 		const { extension, definition } = owner;
 		this.#reportShadowedTodoBackends(pending.backend, extension);
 		const sent = this.#todoSent;
+		const unsynced = this.#todoUnsynced.get(definition)?.delete(extension) === true;
 		if (
-			sent === "none"
+			!unsynced &&
+			(sent === "none"
 				? pending.phases.length === 0
-				: sent?.extension === extension && sent.definition === definition && Bun.deepEquals(sent.list, pending)
+				: sent?.extension === extension && sent.definition === definition && Bun.deepEquals(sent.list, pending))
 		)
 			return;
 		this.#todoSent = undefined;
@@ -1865,7 +2045,8 @@ export class ExtensionRunner {
 		const event: LinkActivateEvent = { type: "link_activate", url, scheme };
 		const base = this.createContext();
 		const ctx: ExtensionContext =
-			ui && ui !== this.#uiContext ? Object.create(base, { ui: { value: ui }, hasUI: { value: true } }) : base;
+			ui && ui !== this.#uiContext ? Object.create(base, { hasUI: { value: true } }) : base;
+		ctx.ui = this.#uiForOwner(ui ?? this.#uiContext, owner.resolvedPath);
 		for (const handler of handlers) {
 			try {
 				await this.runScoped(() => handler(event, ctx));
@@ -1947,6 +2128,7 @@ export class ExtensionRunner {
 		model?: Model,
 		delegation?: {
 			toolName: string;
+			extensionPath?: string;
 			depth?: number;
 			context?: AgentToolContext;
 			signal?: AbortSignal;
@@ -1962,11 +2144,12 @@ export class ExtensionRunner {
 		};
 		const getSessionModes = () => this.#sessionModes;
 		return {
-			ui: this.#uiContext,
+			ui: delegation?.extensionPath ? this.#uiForPath(delegation.extensionPath) : this.#uiContext,
 			mode: this.#mode,
 			getContextUsage: () => this.#getContextUsageFn(),
 			compact: instructionsOrOptions => this.#compactFn(instructionsOrOptions),
-			getAsyncJobSnapshot: () => this.#getAsyncJobSnapshotFn(),
+			getAsyncJobSnapshot: () => this.#asyncJobs?.getSnapshot() ?? null,
+			cancelAsyncJob: id => this.#asyncJobs?.cancel(id) ?? false,
 			hasUI: this.hasUI(),
 			cwd: this.cwd,
 			sessionManager: this.sessionManager,
@@ -2072,9 +2255,11 @@ export class ExtensionRunner {
 		for (const dispose of this.#fileFallbackDisposers.splice(0)) dispose();
 	}
 
-	createCommandContext(): ExtensionCommandContext {
+	/** Build the context for a command or shortcut, attributing widgets when it has an extension owner. */
+	createCommandContext(extensionPath?: string): ExtensionCommandContext {
 		return {
 			...this.createContext(),
+			ui: extensionPath ? this.#uiForPath(extensionPath) : this.#uiContext,
 			getContextUsage: () => this.#getContextUsageFn(),
 			waitForIdle: () => this.#waitForIdleFn(),
 			newSession: options => this.#newSessionHandler(options),
@@ -2125,8 +2310,13 @@ export class ExtensionRunner {
 						try {
 							const handlerContext = createHandlerContext(
 								ctx,
+								this.#uiForOwner(ctx.ui, ext.resolvedPath),
 								handlerSignal,
-								event.type === "tool_call" || SESSION_BEFORE_EVENTS[event.type] === true ? budget : undefined,
+								event.type === "tool_call" ||
+									event.type === TODO_APPLY_EVENT ||
+									SESSION_BEFORE_EVENTS[event.type] === true
+									? budget
+									: undefined,
 							);
 							result = await this.#toolRegistrationScope.run(registrationScope, () =>
 								handler(event, handlerContext),

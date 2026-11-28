@@ -1,5 +1,6 @@
 const locale = "en-US";
-const languages = [locale, "en"];
+// Native `navigator.languages` is frozen, sealed and identity-stable across reads.
+const languages = Object.freeze([locale, "en"]);
 
 const sameLanguages = (value) => {
   if (!value || value.length !== languages.length) return false;

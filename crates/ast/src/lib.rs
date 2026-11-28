@@ -1,7 +1,3 @@
-// Share semver with host dependencies when wasm grammars are enabled.
-#[cfg(feature = "wasm")]
-use semver as _;
-
 pub mod block;
 pub mod debug;
 pub mod language;

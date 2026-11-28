@@ -661,14 +661,118 @@ function scanPrefixState(
 	bytes: Uint8Array,
 	spotlight: SpotlightCollector,
 	replies: ReplyTracker,
+	inherited: InheritedPrefix,
 ): ServiceTierByFamily | undefined {
 	let currentServiceTier: ServiceTierByFamily | undefined;
 	visitSessionEntriesLenient(bytes, entry => {
 		replies.visit(entry);
+		const inheritedEntry = inherited.visit(entry);
 		if (isServiceTierChange(entry)) currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
-		else spotlight.visit(entry);
+		else spotlight.visit(entry, inheritedEntry);
 	});
 	return currentServiceTier;
+}
+
+/** `TAN_FORK_BOUNDARY_CUSTOM_TYPE` of coding-agent's session entries: a `/tan` clone's end-of-copy marker. */
+const TAN_FORK_BOUNDARY = "tan-fork-boundary";
+const TAN_FORK_BOUNDARY_BYTES = new TextEncoder().encode(TAN_FORK_BOUNDARY);
+const INHERITED_THROUGH_BYTES = new TextEncoder().encode("inheritedThroughEntryId");
+
+/**
+ * The last entry of a reset fork's inherited prefix: the header's `SessionHeader.inheritedThroughEntryId`,
+ * else, for a `/tan` clone written before that marker, the entry before its last `tan-fork-boundary` (the
+ * clone appends the boundary right after the entries it copied). The last boundary counts whatever session
+ * id it carries: a file derived from such a clone (an ordinary fork or copy) keeps the clone's boundary and
+ * id under a new header, and everything before it is still an ancestor's copied prefix.
+ *
+ * Undefined for any other transcript, and for a header marker naming an entry the file does not hold: the
+ * prefix then fails open, as coding-agent's `inheritedMarkerWithin` does, instead of suppressing every row
+ * of the session. Session files are written atomically, so a full read holds the marked entry if it exists.
+ */
+function inheritedPrefixEnd(bytes: Uint8Array): string | undefined {
+	const text = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	if (text.indexOf(INHERITED_THROUGH_BYTES) < 0 && text.indexOf(TAN_FORK_BOUNDARY_BYTES) < 0) return undefined;
+	let marker: string | undefined;
+	let markerFound = false;
+	let previous: string | undefined;
+	let legacy: string | undefined;
+	visitSessionEntriesLenient(bytes, entry => {
+		if (entry.type === "session") {
+			const through = "inheritedThroughEntryId" in entry ? entry.inheritedThroughEntryId : undefined;
+			if (typeof through === "string") marker = through;
+			return;
+		}
+		if (entry.type === "custom" && "customType" in entry && entry.customType === TAN_FORK_BOUNDARY) {
+			legacy = previous;
+			return;
+		}
+		if ("id" in entry && typeof entry.id === "string") {
+			previous = entry.id;
+			if (entry.id === marker) markerFound = true;
+		}
+	});
+	if (marker === undefined) return legacy;
+	return markerFound ? marker : undefined;
+}
+
+/** A transcript's header identity, and whether it is a reset fork ({@link readResetFork}). */
+export interface ResetForkHeader {
+	id?: string;
+	parentSession?: string;
+	resetFork: boolean;
+}
+
+/**
+ * Read `sessionPath`'s header identity and whether the file can hold a reset fork's inherited prefix
+ * ({@link inheritedPrefixEnd}): a header marker, or a legacy `/tan` boundary in a file whose header names a
+ * parent. Only a file whose header names a parent, and has no marker, reads past its header line. Null for a
+ * file without a header or one that cannot be read: the upgrade scan skips what it cannot re-parse anyway.
+ */
+export async function readResetFork(sessionPath: string): Promise<ResetForkHeader | null> {
+	try {
+		let header: SessionEntry | null = null;
+		for await (const line of readLines(Bun.file(sessionPath).stream())) {
+			header = parseJsonLine(line, 0, line.length);
+			// `SessionManager` writes a fixed-width title slot ahead of the header line.
+			if (header?.type !== "title") break;
+		}
+		if (header?.type !== "session") return null;
+		const id = "id" in header && typeof header.id === "string" ? header.id : undefined;
+		const parentSession =
+			"parentSession" in header && typeof header.parentSession === "string" ? header.parentSession : undefined;
+		let resetFork = "inheritedThroughEntryId" in header && typeof header.inheritedThroughEntryId === "string";
+		if (!resetFork && parentSession !== undefined) {
+			const bytes = await Bun.file(sessionPath).bytes();
+			resetFork =
+				Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).indexOf(TAN_FORK_BOUNDARY_BYTES) >= 0;
+		}
+		return { id, parentSession, resetFork };
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Tracks a reset fork's inherited prefix ({@link inheritedPrefixEnd}): the model calls the fork copied
+ * from its parent. They are the parent's calls, so they become no request rows here. Fork copies keep
+ * their entry ids, so the parent's own rows win regardless of which file syncs first. A tail read never
+ * has one: the fork writes its whole prefix when it creates the file, so the full read before it passed
+ * the prefix's end.
+ */
+class InheritedPrefix {
+	#through: string | undefined;
+
+	/** `through`: the {@link inheritedPrefixEnd} of the transcript, read from its first byte. */
+	constructor(through?: string) {
+		this.#through = through;
+	}
+
+	/** Whether `entry` lies at or before the end of the inherited prefix. */
+	visit(entry: SessionEntry): boolean {
+		if (this.#through === undefined || entry.type === "session") return false;
+		if ("id" in entry && entry.id === this.#through) this.#through = undefined;
+		return true;
+	}
 }
 export interface SessionParserState {
 	version: 1;
@@ -679,6 +783,8 @@ export interface SessionParserState {
 	mtimeMs: number;
 	checkpoint: string;
 	serviceTier: ServiceTierByFamily | null;
+	/** This cursor was unreadable during reconciliation; retry from byte zero even if the file is unchanged. */
+	replayPending?: true;
 	/** Absent in cursors persisted before the Spotlight tables; such a tail parse starts from an empty state. */
 	spotlight?: SpotlightParserState;
 	/** Absent in cursors persisted before replies were tracked; such a cursor is rebuilt from the transcript prefix. */
@@ -750,11 +856,14 @@ export async function parseSessionFile(
 	const callsById = new Map<string, ToolCallStats>();
 	let spotlight = new SpotlightCollector(sessionPath, folder, emptySpotlightState());
 	let replies = new ReplyTracker();
+	let inherited = new InheritedPrefix();
 
 	// Reduce each entry immediately so full replays do not retain tool-output/message bodies.
 	const visit = (entry: SessionEntry): void => {
 		const answered = replies.visit(entry);
-		spotlight.visit(entry);
+		// The parent's copied calls bill to the parent, whichever transcript syncs first.
+		const inheritedCall = inherited.visit(entry);
+		spotlight.visit(entry, inheritedCall);
 		if (isServiceTierChange(entry)) {
 			currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
 			return;
@@ -766,6 +875,8 @@ export async function parseSessionFile(
 		}
 		const approval = extractToolApproval(sessionPath, folder, entry);
 		if (approval) {
+			// Approvals of copied calls are the parent's, like the calls they gate.
+			if (inheritedCall) return;
 			const existing = approvalsById.get(approval.toolCallId);
 			if (existing) {
 				if (approval.parentToolCallId !== undefined) existing.parentToolCallId = approval.parentToolCallId;
@@ -781,6 +892,8 @@ export async function parseSessionFile(
 			return;
 		}
 		if (isUserMessage(entry)) {
+			// A copied prompt is the parent's: owning its row would leave the parent's reply link nothing to fill.
+			if (inheritedCall) return;
 			const userMsg = extractUserStats(sessionPath, folder, entry);
 			if (userMsg) userStats.push(userMsg);
 			return;
@@ -797,13 +910,17 @@ export async function parseSessionFile(
 			return;
 		}
 		if (isModelUsage(entry)) {
-			const modelUsageStats = extractModelUsageStats(sessionPath, folder, entry, agentType);
+			const modelUsageStats = inheritedCall ? null : extractModelUsageStats(sessionPath, folder, entry, agentType);
 			if (modelUsageStats) stats.push(modelUsageStats);
 			return;
 		}
 		if (isAssistantMessage(entry)) {
-			const msgStats = extractStats(sessionPath, folder, entry, currentServiceTier, agentType);
+			const msgStats = inheritedCall
+				? null
+				: extractStats(sessionPath, folder, entry, currentServiceTier, agentType);
 			if (msgStats) stats.push(msgStats);
+			// The copied calls are the parent's too, joined to its request rows by entry id.
+			if (inheritedCall) return;
 			for (const call of extractToolCalls(sessionPath, folder, entry, agentType)) {
 				toolCalls.push(call);
 				if (!callsById.has(call.toolCallId)) callsById.set(call.toolCallId, call);
@@ -850,7 +967,8 @@ export async function parseSessionFile(
 				replies = new ReplyTracker(state?.pendingReplies);
 			} else {
 				const prefix = new SpotlightCollector(sessionPath, folder, emptySpotlightState(), false);
-				currentServiceTier = scanPrefixState(bytes.subarray(0, start), prefix, replies);
+				inherited = new InheritedPrefix(inheritedPrefixEnd(bytes));
+				currentServiceTier = scanPrefixState(bytes.subarray(0, start), prefix, replies, inherited);
 				spotlight = new SpotlightCollector(sessionPath, folder, prefix.state);
 			}
 			read = visitSessionEntriesLenient(bytes.subarray(start - readStart), visit);

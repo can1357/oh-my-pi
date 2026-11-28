@@ -3,7 +3,7 @@
  * The account picker `/logout` opens once the provider is chosen.
  *
  * A row click highlights an account; activating it (Enter, a second click,
- * `Sign out`) logs it out.
+ * `Sign out`) logs it out, revoking it at the provider when one supports it.
  */
 import { type JSXNode, signal } from "@oh-my-pi/pi-tui";
 import type { TspPickerAction, TspSpan } from "@oh-my-pi/pi-wire";
@@ -18,11 +18,6 @@ export interface LogoutAccountSelectorProps {
 	onSelect(account: LogoutAccount): void;
 	onCancel(): void;
 }
-
-const actions = (): TspPickerAction[] => [
-	pickerAction("confirm", "Sign out", confirmKbd(), { primary: true, danger: true }),
-	closeAction(),
-];
 
 /** The terminal row of an account: label, `(active)`, then its detail. */
 function accountRow(account: LogoutAccount): TspSpan[] {
@@ -39,6 +34,10 @@ export function LogoutAccountSelector(props: LogoutAccountSelectorProps): JSXNod
 	const selected = signal<string | null>(
 		active ? String(active.credentialId) : accounts[0] ? String(accounts[0].credentialId) : null,
 	);
+	const actions = (): TspPickerAction[] => [
+		pickerAction("confirm", "Sign out", confirmKbd(), { primary: true, danger: true }),
+		closeAction(),
+	];
 	const confirm = (): void => {
 		const account = byId.get(selected() ?? "");
 		if (account) props.onSelect(account);

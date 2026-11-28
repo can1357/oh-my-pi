@@ -32,7 +32,6 @@ impl Utility for Perl {
 	const RUNS_COMMANDS: bool = true;
 	const USAGE_ERROR: u8 = 29;
 	const DEFERS_TO_PATH: bool = false;
-
 	fn rewrite_argv(mut argv: Vec<OsString>) -> Result<Vec<OsString>, String> {
 		if argv.len() > 1 {
 			argv.insert(1, OsString::from("--"));
@@ -46,6 +45,7 @@ impl Utility for Perl {
 }
 
 mod ast;
+mod charnames;
 mod cli;
 mod code;
 mod func;

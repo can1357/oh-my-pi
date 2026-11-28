@@ -39,6 +39,7 @@ import {
 import {
 	cfgClaudeResets,
 	cfgCodexResets,
+	cfgCodexResetsExpirySalvage,
 	type ResetAutoRedeemMode,
 	type ResetWindow,
 	resetWindowModes,
@@ -166,7 +167,7 @@ export interface ResetSpendVerdict {
 	kind: "auto" | "ask" | "off";
 	/** The setting key or keys that decide it. */
 	setting: string;
-	mode: ResetAutoRedeemMode;
+	mode: ResetAutoRedeemMode | false;
 	eligibleNow: boolean;
 }
 
@@ -176,10 +177,13 @@ export function resetSpendVerdict(
 	settings: Settings,
 	nowMs: number,
 ): ResetSpendVerdict {
-	const mode = resetWindowMode(resetWindowModes(warning.provider, settings), warning.window);
-	const kind = mode === "no" ? "off" : mode === "unset" ? "ask" : "auto";
+	const salvageDisabled = warning.provider === "openai-codex" && !cfgCodexResetsExpirySalvage.get(settings);
+	const mode = salvageDisabled ? false : resetWindowMode(resetWindowModes(warning.provider, settings), warning.window);
+	const kind = mode === false || mode === "no" ? "off" : mode === "unset" ? "ask" : "auto";
 	const windows: readonly ResetWindow[] = warning.window ? [warning.window] : ["5h", "weekly"];
-	const setting = windows.map(window => resetWindowSettings[warning.provider][window]?.id).join(" + ");
+	const setting = salvageDisabled
+		? cfgCodexResetsExpirySalvage.id
+		: windows.map(window => resetWindowSettings[warning.provider][window]?.id).join(" + ");
 	const plan = planAsLastChance(report, warning, settings, nowMs);
 	// A stale report says nothing about eligibility: the sweep plans only after a fresh fetch.
 	const eligibleNow =
@@ -224,7 +228,10 @@ function planAsLastChance(
 			trigger: "sweep",
 			provider: "",
 			modelId: "",
-			settings: resetPlanSettings({ "5h": "yes", weekly: "yes" }, cfgCodexResets.get(settings)),
+			settings: {
+				...resetPlanSettings({ "5h": "yes", weekly: "yes" }, cfgCodexResets.get(settings)),
+				expirySalvage: true,
+			},
 			identity: undefined,
 			reports: [{ ...lastChance, metadata: { ...report.metadata, resetCreditCredentialId: credentialId } }],
 			...episodes,

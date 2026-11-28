@@ -16,6 +16,13 @@ import type { DestinationProcessContext, DestinationRuntimeConfig } from "./uplo
 /** Daemon unit kind and `call` module name. */
 export const BLOB_BROKER_KIND = "blob";
 
+/** Protocol version for control calls, open parameters, and render tunnel messages. */
+export const BLOB_MODULE_VERSION = 1;
+/** Stage one base64 slice before publishing an upload too large for the control line. */
+export const BLOB_APPEND_METHOD = "append";
+/** Maximum base64 slice; a multiple of four so slices decode independently. */
+export const BLOB_CALL_CHUNK_CHARS = 4 * 1024 * 1024;
+
 /** Tunnel channel on which the daemon asks the registering session to render lazy blobs. */
 export const BLOB_RENDER_CHANNEL = "render";
 

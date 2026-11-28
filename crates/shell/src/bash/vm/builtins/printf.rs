@@ -804,20 +804,11 @@ fn pad(out: &mut Vec<u8>, s: &[u8], width: usize, left: bool) {
 
 /// The first UTF-8 character of `s` (a single byte when invalid).
 fn first_char(s: &[u8]) -> &[u8] {
-	let Some(&b) = s.first() else {
+	if s.is_empty() {
 		return s;
-	};
-	let n = match b {
-		0xc2..=0xdf => 2,
-		0xe0..=0xef => 3,
-		0xf0..=0xf4 => 4,
-		_ => 1,
-	};
-	if n > 1 && s.len() >= n && std::str::from_utf8(&s[..n]).is_ok() {
-		&s[..n]
-	} else {
-		&s[..1]
 	}
+	let len = locale::char_len(locale::Charset::Utf8, s, false).unwrap_or(1);
+	&s[..len]
 }
 
 /// `%(fmt)T` after the `(`: the time format and the bytes used through

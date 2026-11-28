@@ -316,7 +316,7 @@ fn remove(interp: &mut Interp<'_>, change: &mut Change, path: &Path, name: &PStr
 					let file_name = entry.file_name();
 					let next = PStr::from_bytes(file_name.as_encoded_bytes());
 					// One native frame per directory level: grow the stack for deep trees.
-					stacker::maybe_grow(128 * 1024, 2 * 1024 * 1024, || remove(interp, change, &entry.path(), &next, false))?;
+					crate::stack::guard(128 * 1024, || remove(interp, change, &entry.path(), &next, false))?;
 				},
 				Err(err) => change.error(interp, name, "cannot read directory", err, false)?,
 			}
@@ -518,7 +518,7 @@ impl Find {
 		}
 		for (child, full, meta) in dirs {
 			// One native frame per directory level: grow the stack for deep trees.
-			stacker::maybe_grow(128 * 1024, 2 * 1024 * 1024, || self.visit(interp, &child, &full, Some((path, name)), Some(meta)))?;
+			crate::stack::guard(128 * 1024, || self.visit(interp, &child, &full, Some((path, name)), Some(meta)))?;
 		}
 		if !self.follows() && let Some(postprocess) = &self.postprocess {
 			if !self.no_chdir { interp.set_cwd(path.to_path_buf()); }
@@ -540,7 +540,7 @@ impl Find {
 				Err(err) => { self.warn(interp, &full, "Can't stat", err); return Ok(()); },
 			}
 		}
-		stacker::maybe_grow(128 * 1024, 2 * 1024 * 1024, || self.visit(interp, &child, &full, Some((path, name)), lstat))
+		crate::stack::guard(128 * 1024, || self.visit(interp, &child, &full, Some((path, name)), lstat))
 	}
 
 	fn metadata(&self, interp: &mut Interp<'_>, path: &Path, name: &PStr, parent: Option<(&Path, &PStr)>) -> PResult<Option<Found>> {

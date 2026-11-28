@@ -12,6 +12,7 @@ import { TerminalImages } from "@oh-my-pi/pi-tui/driver/images/store";
 import { driverImages } from "@oh-my-pi/pi-tui/term/backend";
 import { paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
 import { describeTree } from "@oh-my-pi/pi-tui/testing/corpus";
+import { CONSERVATIVE_EMOJI } from "@oh-my-pi/pi-tui/theme/contract";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { bindEffects } from "../../../src/config/registry";
 import { Settings } from "../../../src/config/settings";
@@ -23,6 +24,7 @@ import { readPresenter } from "../../../src/ui/tools/read";
 import { ExecRun, ExecRunBlock } from "../../../src/ui/transcript/exec-run";
 import { followInlineImageLimits, ImageNode } from "../../../src/ui/transcript/messages/image";
 import { ToolBlock, ToolCall } from "../../../src/ui/transcript/tool-block";
+import { withLargeMetadata } from "../../helpers/jpeg-metadata";
 
 const RED_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
 const caps: TerminalCapabilities = {
@@ -39,6 +41,7 @@ const caps: TerminalCapabilities = {
 	multiplexer: null,
 	textSizing: false,
 	tsp: false,
+	emoji: CONSERVATIVE_EMOJI,
 };
 
 let cleanup: (() => void) | undefined;
@@ -137,6 +140,37 @@ test("a read picture draws once beneath the details card and only while images a
 			const hidden = rows().join("\n");
 			expect(hidden).toContain("Picture detail");
 			expect(hidden).not.toContain("File=inline=1;");
+		} finally {
+			dispose();
+		}
+	});
+});
+
+test.each([
+	["jpeg", "jpeg"],
+	["webp", "webp"],
+	["jpeg with its SOF behind large metadata", "jpeg-metadata"],
+] as const)("a %s tool result draws inline instead of its placeholder", async (_label, format) => {
+	const source = new Bun.Image(Buffer.from(RED_PNG, "base64")).resize(1200, 600);
+	const data =
+		format === "webp"
+			? await source.webp().toBase64()
+			: format === "jpeg"
+				? await source.jpeg().toBase64()
+				: withLargeMetadata(Buffer.from(await source.jpeg().bytes())).toString("base64");
+	const mimeType = format === "webp" ? "image/webp" : "image/jpeg";
+	const settings = sizingSettings(() => 50);
+	cfgTuiMaxInlineImageColumns.override(settings, 40);
+	cfgTuiMaxInlineImageRows.override(settings, 10);
+	createRoot(dispose => {
+		try {
+			const call = new ToolCall({ id: "shot", name: "eval", args: {} });
+			call.updateResult({ content: [{ type: "image", data, mimeType }] }, false);
+			const node = ToolBlock({ call });
+			if (!isUiNode(node)) throw new Error("expected a tool node");
+			const drawn = paintRows(node)().join("\n");
+			expect(drawn).toContain("File=inline=1;width=40;height=10:");
+			expect(drawn).not.toContain("[Image:");
 		} finally {
 			dispose();
 		}

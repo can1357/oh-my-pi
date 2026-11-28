@@ -88,10 +88,10 @@ import { type Effort, SERVICE_TIER_UNAVAILABLE_FEATURE, serviceTierFamily, strea
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { clearAnthropicFastModeFallback } from "@oh-my-pi/pi-ai/providers/anthropic-state";
 import { prewarmModelConnection } from "@oh-my-pi/pi-ai/providers/connection-prewarm";
-import { isPromptPerturbationEnabled, perturbPromptText } from "@oh-my-pi/pi-ai/prompts/perturbation";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-state";
 import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { presentNarrationAsAnswer } from "@oh-my-pi/pi-ai/utils/narration";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { supportsOutputTokenLimit } from "@oh-my-pi/pi-catalog/compat/output-limits";
@@ -153,7 +153,7 @@ import {
 	withUpstreamPinOf,
 } from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
-import { isServiceTierForFamily, serviceTierSettingToTier } from "../config/service-tier";
+import { type FastServiceTier, isServiceTierForFamily, serviceTierSettingToTier } from "../config/service-tier";
 import { combine, type SettingsScope } from "../config/registry";
 import { type Settings, withActiveSettings } from "../config/settings";
 import { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
@@ -177,6 +177,7 @@ import type {
 	SessionBeforeSwitchResult,
 	SessionBeforeTreeResult,
 	SessionStopEventResult,
+	TodoBackendChange,
 	ToolInfo,
 	TreePreparation,
 } from "../extensibility/extensions";
@@ -281,7 +282,7 @@ import {
 	resumeComputerTurnForOwner,
 	resumeComputerUseForOwner,
 	revokeComputerControlForOwner,
-} from "../tools/computer/supervisor";
+} from "../tools/computer/owner-state";
 import { isAutoQaEnabled } from "../tools/report-tool-issue";
 import {
 	buildResolveReminderMessage,
@@ -295,7 +296,7 @@ import { toolCommandDispatches } from "../tools/tool-commands";
 import { PROPOSE_COMMAND_NAME, REJECT_COMMAND_NAME } from "../tools/details/resolve";
 import { supportsExternalThinking } from "../tools/think";
 import { USER_TODO_EDIT_CUSTOM_TYPE } from "../tools/todo";
-import type { TodoPhase } from "../tools/details/todo";
+import type { TodoApplyOutcome, TodoPhase } from "../tools/details/todo";
 import { ToolError } from "../tools/tool-errors";
 import { currentThreadId, isMainThread } from "../thread/identity";
 import { registerLocalSession } from "../thread/session-directory";
@@ -379,6 +380,7 @@ import {
 	ASYNC_RESULT_MESSAGE_TYPE,
 	type AsyncResultEntry,
 	buildAsyncResultBatchMessage,
+	buildTanResultMessages,
 } from "./async-job-delivery";
 import { type AsyncNotifyEntry, type AsyncNotifySource, buildAsyncNotifyBatchMessage } from "./async-notify";
 import { type BashExecuteOptions, BashRunner, type BashRunnerHost } from "./bash-runner";
@@ -440,6 +442,7 @@ import {
 	type LaunchCompletionEntry,
 } from "./launch-completion";
 import {
+	assistantTurnDelivered,
 	type BashExecutionMessage,
 	buildReplanTitleContext,
 	buildTitleDriftTurns,
@@ -461,6 +464,7 @@ import {
 	isUserInterruptAbort,
 	isUserInvokedSkillPrompt,
 	logProviderTurnError,
+	markDuringLiveCall,
 	normalizeCustomMessagePayload,
 	operatorTitleText,
 	type PythonExecutionMessage,
@@ -546,6 +550,11 @@ import { SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
+import { type AiuTotals, sessionAiu } from "./aiu-billing";
+import { sumSubagentTreeCost } from "../modes/agent-hub-runtime";
+import type { AgentCostSnapshot, AgentTreeSpend } from "../modes/view-model/overlays/agent-hub-projection";
+import { registerPersistedSubagents } from "../registry/persisted-agents";
+import type { SessionObserverRegistry } from "../task/session-observer-registry";
 import { promptDigestOfEntry, SessionTools, type SessionToolsHost } from "./session-tools";
 import { resolveWebsocketPreference } from "./settings-stream-fn";
 import type { ShakeMode, ShakeResult } from "./shake-types";
@@ -591,7 +600,6 @@ import {
 	cfgProviderAppendOnlyContext,
 	cfgProvidersCacheWarming,
 	cfgProvidersCacheRetention,
-	cfgProvidersAntigravityEndpoint,
 	cfgRetryModelFallback,
 	cfgRetryUsageAwareFallback,
 	cfgSampling,
@@ -1094,6 +1102,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** False for a subagent, whose gate belongs to its session tree's root. */
 	readonly #ownsCostGate: boolean;
 	#costCapRefusal: CostCapRefusal | undefined;
+	/** Identity of the connected voice call that delegated work here, cleared synchronously on disconnect. */
+	activeVoiceCall?: symbol;
 	/** Entries of tools mounted as bash commands; empty when none are mounted. */
 	getToolCommandEntries: () => Array<{ name: string; summary: string }>;
 	readonly yieldQueue: YieldQueue;
@@ -1230,6 +1240,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	readonly #advisors: SessionAdvisors;
 	/** Resolves once the resume-time advisor spend backfill settles. */
 	#advisorCostRestore: Promise<void> = Promise.resolve();
+	/** Per-subagent spend reads the tree roll-up reuses between calls; see {@link getSubagentTreeSpend}. */
+	readonly #subagentSpend = new WeakMap<object, AgentCostSnapshot>();
+	/** The current root's persisted-subagent registration; see {@link hydratePersistedSubagents}. */
+	#subagentHydration: { root: string; promise: Promise<void> } | undefined;
+	/** Live subagent observers of the host; see {@link attachSubagentObservers}. */
+	#subagentObservers: SessionObserverRegistry | undefined;
 	#goalTurnCounter = 0;
 	#planReferenceSent = false;
 	#planReferencePath = "local://PLAN.md";
@@ -1440,7 +1456,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * bounded, so its system prompt already carries the MCP routes and instructions;
 	 * otherwise the prompt changes on the next turn and the provider prompt cache misses.
 	 */
-	#pendingMCPDiscovery: Promise<void> | undefined;
+	#pendingMCPDiscovery: Promise<void> | (() => Promise<void>) | undefined;
+	/** Whether a tool name belongs to an MCP server still in its startup connect (its mount is no change). */
+	#mcpStartupMount: ((toolName: string) => boolean) | undefined;
 	/**
 	 * Startup-deferred extensions (see `startup-deferral.ts`): the loader binding
 	 * them into this session, then its in-flight run once started. Submissions and
@@ -1555,6 +1573,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#yieldTerminationPending = false;
 	#synchronouslyTerminatedYieldToolCallIds = new Set<string>();
 	#providerSessionState = new Map<string, ProviderSessionState>();
+	/** Sessions a model switch took out of `#providerSessionState` and has not closed yet, with their keys. */
+	#retiredProviderSessions = new Map<ProviderSessionState, string>();
 	readonly #cacheWarmer: CacheWarmer | undefined;
 	/** Transcript the warmer was last armed for: its confirmed entry describes no other transcript. */
 	#promptCacheArmSessionId: string | undefined;
@@ -2587,7 +2607,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			sessionManager: this.sessionManager,
 			modelRegistry: this.#modelRegistry,
 			model: () => this.model,
-			sessionId: () => this.sessionId,
 		};
 		this.#stats = new SessionStatsTracker(statsHost);
 		const memoryHost: SessionMemoryHost = {
@@ -2828,6 +2847,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			clientBridge: () => this.#clientBridge,
 			agentKind: () => this.#agentKind,
 			isDisposed: () => this.#isDisposed,
+			mcpStartupMount: toolName => this.#mcpStartupMount?.(toolName) === true,
 			isStreaming: () => this.isStreaming,
 			steeringArrivalSignal: () => this.#steeringArrivalSignal(),
 			steeringArrivalSeq: () => this.#steeringArrivalSeq(),
@@ -4084,6 +4104,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * (spilling oversized output to an artifact), enqueue it as an async-result
 	 * follow-up, and settle only after the yield queue injects or discards it.
 	 * This keeps the job body recoverable through `proc://` while injection is pending.
+	 * A `/tan` job's completion takes {@link #deliverTanResult} instead.
 	 */
 	async #deliverAsyncJobResult(
 		manager: AsyncJobManagerApi,
@@ -4093,6 +4114,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	): Promise<void> {
 		if (this.#isDisposed) return;
 		if (manager.isDeliverySuppressed(jobId)) return;
+		const tanRequest = job?.request;
+		if (job && tanRequest !== undefined) {
+			await this.#deliverTanResult(jobId, job, tanRequest);
+			return;
+		}
 		// Snapshot the generation before the async format step: a `/new` during it
 		// bumps the epoch, so this delivery belongs to the replaced session and
 		// must not enqueue — the suppression marker alone is unreliable because
@@ -4110,6 +4136,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			durationMs,
 			epoch,
 		});
+	}
+
+	/**
+	 * A finished `/tan` never starts or extends a turn: the tangent was the user's
+	 * work, not this agent's. The user sees its breadcrumb now; the model gets a
+	 * hidden record linking the clone's output, appended now when idle, else with
+	 * the next prompt (see {@link buildTanResultMessages}).
+	 */
+	async #deliverTanResult(jobId: string, job: AsyncJob, request: string): Promise<void> {
+		const { breadcrumb, record } = buildTanResultMessages(jobId, job, request);
+		await this.sendCustomMessage(breadcrumb);
+		await this.sendCustomMessage(record, { deliverAs: "nextTurn" });
 	}
 
 	/**
@@ -4922,7 +4960,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
-	 * Drops queued `todo-error-reminder`s superseded by a successful `todo` call.
+	 * Drops queued `todo-error-reminder`s superseded by a successful `todo` call, or by one whose
+	 * valid payload a todo backend kept from committing.
 	 * Exact retries clear every matching failure. Otherwise the call is treated
 	 * as a corrected retry of the oldest outstanding failure with the same op
 	 * (placeholder task text, missing items, ...); failures of other ops stay queued.
@@ -5259,7 +5298,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				await this.#settleServiceTier(assistantMsg);
 				this.#ttsr.onAssistantMessageEnd(assistantMsg);
 				const speculativeHandoff = this.#maintenance.speculationCompletion("handoff");
-				if (speculativeHandoff) {
+				// Empty and thinking-only stops still need recovery while the handoff runs.
+				// Preserve the existing settle path for completed server-tool output.
+				if (
+					speculativeHandoff &&
+					(assistantMsg.stopReason !== "stop" ||
+						assistantTurnDelivered(presentNarrationAsAnswer(assistantMsg)) ||
+						assistantMsg.content.some(content => content.type === "anthropicServerTool"))
+				) {
 					this.#maintenance.skipPostTurnMaintenanceAssistantTimestamp = assistantMsg.timestamp;
 					this.#skippedPostTurnSpeculationCompletion = speculativeHandoff;
 				}
@@ -5296,11 +5342,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				if (toolName === "todo" && !isError && details && this.#todo.onTodoResultDetails(details, toolCallId)) {
 					this.#scheduleTitleRefresh("replan");
 				}
-				if (toolName === "todo" && !isError && details?.op !== "view") {
+				if (toolName === "todo" && (!isError || details?.uncommitted !== undefined) && details?.op !== "view") {
 					const retry = this.#todoCallArguments(toolCallId);
 					if (retry) this.#dropSupersededTodoReminders(retry, details && stringProperty(details, "op"));
 				}
-				if (toolName === "todo" && isError) {
+				// A call the todo backend kept from committing had a valid payload: retrying it unchanged is the model's call.
+				if (toolName === "todo" && isError && details?.uncommitted === undefined) {
 					const errorText = content.find(part => part.type === "text")?.text;
 					const attemptedArgs = this.#todoCallArguments(toolCallId);
 					// The tool result already contains the full snapshot. Only carry the
@@ -7487,6 +7534,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	#closeAllProviderSessions(reason: string): void {
+		this.#closeRetiredProviderSessions();
 		for (const [providerKey, state] of this.#providerSessionState) {
 			try {
 				state.close();
@@ -8245,13 +8293,30 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#setMcpServerInstructionsSource?.(source);
 	}
 
-	/** Makes turns wait, bounded, for in-flight MCP discovery before building their system prompt. */
-	setPendingMCPDiscovery(discovery: Promise<void>): void {
+	/** Makes turns start or join MCP discovery, with a bounded wait before building their system prompt. */
+	setPendingMCPDiscovery(discovery: Promise<void> | (() => Promise<void>)): void {
+		if (typeof discovery === "function") this.#pendingMCPDiscovery = discovery;
+		else this.#trackMCPDiscovery(discovery);
+	}
+
+	/** Start deferred MCP discovery, or join the current connection pass. */
+	startPendingMCPDiscovery(): Promise<void> | undefined {
+		const pending = this.#pendingMCPDiscovery;
+		return typeof pending === "function" ? this.#trackMCPDiscovery(Promise.resolve().then(pending)) : pending;
+	}
+
+	#trackMCPDiscovery(discovery: Promise<void>): Promise<void> {
 		const settled = () => {
 			if (this.#pendingMCPDiscovery === pending) this.#pendingMCPDiscovery = undefined;
 		};
 		const pending = discovery.then(settled, settled);
 		this.#pendingMCPDiscovery = pending;
+		return pending;
+	}
+
+	/** Names the tools of MCP servers still in their startup connect: their mounts are not announced as changes. */
+	setMCPStartupMounts(isStartupMount: (toolName: string) => boolean): void {
+		this.#mcpStartupMount = isStartupMount;
 	}
 
 	/** Bind startup-deferred extensions on the first {@link loadDeferredExtensions} call. */
@@ -9516,6 +9581,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				}
 			: { role: "user" as const, content: userContent, attribution: promptAttribution, timestamp: submittedAt };
 
+		if (this.activeVoiceCall) markDuringLiveCall(message);
+
 		const preludeMessages: AgentMessage[] = [];
 		if (eagerTodoPrelude) {
 			if (eagerTodoPrelude.toolChoice) {
@@ -9722,6 +9789,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			attribution: message.attribution ?? "agent",
 			timestamp: Date.now(),
 		};
+		if (this.activeVoiceCall) markDuringLiveCall(customMessage);
 		const hasSkillImages =
 			isUserInvokedSkillPrompt(customMessage) &&
 			Array.isArray(customMessage.content) &&
@@ -9912,7 +9980,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const laps = new Laps();
 		if (this.hasPendingDeferredExtensions) await this.loadDeferredExtensions();
 		laps.lap("extensionsMs");
-		const pendingMCPDiscovery = this.#pendingMCPDiscovery;
+		const pendingMCPDiscovery = this.startPendingMCPDiscovery();
 		if (pendingMCPDiscovery) {
 			const timedOut = new Error("MCP discovery still pending");
 			// Abort ends the wait at once.
@@ -10341,8 +10409,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (!command) return undefined;
 		onRouted?.();
 
-		// Get command context from extension runner (includes session control methods)
-		const ctx = this.#extensionRunner.createCommandContext();
+		const ctx = this.#extensionRunner.createCommandContext(command.extensionPath);
 
 		try {
 			await this.#extensionRunner.runScoped(() => command.handler(args, ctx));
@@ -10394,6 +10461,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			openPlanReview: async () => false,
 			getContextUsage: () => this.getContextUsage(),
 			getAsyncJobSnapshot: () => this.getAsyncJobSnapshot(),
+			cancelAsyncJob: id => this.cancelAsyncJob(id),
 			waitForIdle: () => this.waitForIdle(),
 			newSession: async options => {
 				const success = await this.newSession({ parentSession: options?.parentSession });
@@ -10815,6 +10883,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (await this.#sessionGenerationChanged(sessionGeneration)) return false;
 			const records: AgentMessage[] = [...prependMessages, ...attachmentSourceNotices];
 			const userMessage: AgentMessage = { role: "user", content, attribution, timestamp: timestamp ?? Date.now() };
+			if (this.activeVoiceCall) markDuringLiveCall(userMessage);
 			this.#queuedMessageRawText.set(userMessage, rawText);
 			records.push(userMessage);
 			this.#irc.queueAside(records);
@@ -10864,6 +10933,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			mode === "followUp"
 				? { role: "user", content, attribution, timestamp }
 				: { role: "user", content, steering: true, attribution, timestamp };
+		if (this.activeVoiceCall) markDuringLiveCall(userMessage);
 		this.#queuedMessageRawText.set(userMessage, rawText);
 		const group = [...companions, userMessage];
 		if (mode === "followUp") {
@@ -11365,6 +11435,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			attribution: message.attribution ?? "agent",
 			timestamp: Date.now(),
 		};
+		if (this.activeVoiceCall) markDuringLiveCall(appMessage);
 		const preprocessed = options?.preprocessed;
 		const prependMessages = options?.prependMessages ?? [];
 		const onPromptAdmitted = options?.onPromptAdmitted;
@@ -11515,6 +11586,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			excludeFromContext: normalizedPayload.excludeFromContext,
 			timestamp: Date.now(),
 		};
+		if (this.activeVoiceCall) markDuringLiveCall(appMessage);
 		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
 		if (normalizedAppMessage.excludeFromContext) {
 			// The model never sees this row, so it must not start or extend a turn: a steer or aside would
@@ -12151,6 +12223,28 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#mirrorTodoPhases(): void {
 		const backend = this.#todoBackend();
 		if (backend !== undefined) this.#extensionRunner?.syncTodoBackend(backend, this.#todo.phases);
+	}
+
+	/** Put a `todo` call's change to the selected todo backend; see {@link ExtensionRunner.applyTodoBackend}. */
+	applyTodoChange(
+		change: TodoBackendChange,
+		commit: () => void,
+		signal?: AbortSignal,
+	): TodoApplyOutcome | Promise<TodoApplyOutcome> {
+		const backend = this.#todoBackend();
+		if (backend === undefined || !this.#extensionRunner) {
+			commit();
+			return { kind: "committed" };
+		}
+		return this.#extensionRunner.applyTodoBackend({
+			backend,
+			change,
+			current: () => this.#todo.phases,
+			commit,
+			closing: () => this.#isDisposed,
+			selected: () => this.#todoBackend(),
+			signal,
+		});
 	}
 
 	/** Active item labels accepted by this pooled turn's incremental yield tool. */
@@ -12984,6 +13078,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					...options,
 					additionalDirectories: cfgWorkspaceAdditionalDirectories.get(this.settings),
 				});
+				this.ttsrManager?.resetSession();
 				this.#bash.markSessionTransition(bashTransition);
 				// The new session owns the transcript from here, so the previous
 				// conversation's advisor spend is retired with it. Clearing at the commit
@@ -13339,19 +13434,19 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#models.getAvailableEffortSelectors();
 	}
 
-	/** Reports whether `/fast` is enabled for the active model family. */
+	/** Reports whether the active model family has selected Fast or Ultrafast. */
 	isFastModeEnabled(): boolean {
 		return this.#models.isFastModeEnabled();
 	}
 
-	/** Reports whether priority service is realized by the active model. */
+	/** Reports whether Fast or Ultrafast service is realized by the active model. */
 	isFastModeActive(): boolean {
 		return this.#models.isFastModeActive();
 	}
 
-	/** Reports whether a fresh session on `model` realizes a fast tier from configured `tier.*` settings. */
-	isFastModeConfiguredFor(model: Model): boolean {
-		return this.#models.isFastModeConfiguredFor(model);
+	/** Returns the fast tier a fresh session on `model` realizes from configured `tier.*` settings. */
+	configuredFastTier(model: Model): FastServiceTier | undefined {
+		return this.#models.configuredFastTier(model);
 	}
 
 	/** Effective wire service tier for a request to `model` under the live per-family tiers. */
@@ -13489,7 +13584,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 	}
 
-	/** Reports whether `/fast ultra` (the OpenAI `ultrafast` tier) is selected for the active model. */
+	/** Reports whether the OpenAI `ultrafast` tier is selected for the active model. */
 	isUltrafastModeEnabled(): boolean {
 		return this.#models.isUltrafastModeEnabled();
 	}
@@ -13940,7 +14035,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const currentModel = this.model;
 		const isChanging = !routedModelsAreEqual(currentModel, model);
 		if (currentModel) {
-			this.#closeProviderSessionsForModelSwitch(currentModel, model);
+			// Requests from here on open fresh provider sessions. A response still streaming over the
+			// retired ones keeps them until its run ends — the whole run, tool turns included, so an
+			// idle Codex WebSocket stays connected that long.
+			this.#closeProviderSessionsForModelSwitch(currentModel, model, this.agent.waitForIdle());
 			if (isChanging) {
 				this.#clearInheritedProviderPromptCacheKey();
 			}
@@ -14048,7 +14146,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 	}
 
-	#closeProviderSessionsForModelSwitch(currentModel: Model, nextModel: Model): void {
+	/**
+	 * Moves the provider sessions a switch from `currentModel` to `nextModel` invalidates out of
+	 * `#providerSessionState`, so later requests open fresh ones, and closes those sessions once
+	 * `closeAfter` settles (at once without it). Sessions an earlier switch retired keep their own
+	 * deadline; `#closeAllProviderSessions` closes whatever is still retired.
+	 */
+	#closeProviderSessionsForModelSwitch(currentModel: Model, nextModel: Model, closeAfter?: Promise<void>): void {
 		const providerKeys = new Set<string>();
 		if (currentModel.api === "openai-codex-responses" || nextModel.api === "openai-codex-responses") {
 			providerKeys.add("openai-codex-responses");
@@ -14075,10 +14179,37 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 		}
 
+		const retired: ProviderSessionState[] = [];
 		for (const providerKey of providerKeys) {
 			const state = this.#providerSessionState.get(providerKey);
 			if (!state) continue;
+			retired.push(state);
+			this.#retiredProviderSessions.set(state, providerKey);
+			this.#providerSessionState.delete(providerKey);
+		}
 
+		if (completionsPrefixToEvict !== undefined) {
+			for (const [key, state] of this.#providerSessionState) {
+				if (!key.startsWith(completionsPrefixToEvict)) continue;
+				retired.push(state);
+				this.#retiredProviderSessions.set(state, key);
+				this.#providerSessionState.delete(key);
+			}
+		}
+
+		if (retired.length === 0) return;
+		if (closeAfter) void closeAfter.then(() => this.#closeRetiredProviderSessions(retired));
+		else this.#closeRetiredProviderSessions(retired);
+	}
+
+	/** Closes `states` (every retired session by default) that are still open, once each. */
+	#closeRetiredProviderSessions(
+		states: Iterable<ProviderSessionState> = [...this.#retiredProviderSessions.keys()],
+	): void {
+		for (const state of states) {
+			const providerKey = this.#retiredProviderSessions.get(state);
+			if (providerKey === undefined) continue;
+			this.#retiredProviderSessions.delete(state);
 			try {
 				state.close();
 			} catch (error) {
@@ -14086,23 +14217,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					providerKey,
 					error: String(error),
 				});
-			}
-
-			this.#providerSessionState.delete(providerKey);
-		}
-
-		if (completionsPrefixToEvict !== undefined) {
-			for (const [key, state] of this.#providerSessionState) {
-				if (!key.startsWith(completionsPrefixToEvict)) continue;
-				try {
-					state.close();
-				} catch (error) {
-					logger.warn("Failed to close provider session state during model switch", {
-						providerKey: key,
-						error: String(error),
-					});
-				}
-				this.#providerSessionState.delete(key);
 			}
 		}
 	}
@@ -14133,7 +14247,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/** Whether the last turn ended aborted/failed on a tool call, so {@link retry} would re-attempt it. */
 	get hasAbortedToolCallTail(): boolean {
-		return this.#recovery.hasAbortedToolCallTail;
+		return this.#recovery.hasAbortedToolCallTail(this.#prunedTerminalFailure);
 	}
 
 	/** Retry the last failed assistant turn when the session is idle. */
@@ -15957,7 +16071,65 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * Get session statistics.
 	 */
 	getSessionStats(): SessionStats {
-		return this.#stats.getSessionStats();
+		const stats = this.#stats.getSessionStats();
+		const aiu = this.getSessionAiu();
+		return aiu ? { ...stats, aiu } : stats;
+	}
+
+	/**
+	 * The session's server-reported AI credits: its own recorded calls (assistant messages and
+	 * `model_usage`, from the usage index) plus its subagent tree's (see {@link getSubagentTreeSpend}).
+	 * Advisors bill apart, as their dollars do. Undefined until a call reported a charge or missed its frame.
+	 */
+	getSessionAiu(): AiuTotals | undefined {
+		const usage = this.sessionManager.getUsageStatistics();
+		return sessionAiu({ nano: usage.aiuNano, unknownCalls: usage.aiuUnknownCalls }, this.getSubagentTreeSpend().aiu);
+	}
+
+	/**
+	 * Spend (dollars and AI credits) of this session's subagent tree, descendants included and its own
+	 * advisors excluded: the one sum the status line, `/session`, ACP and RPC report. Reads the registry
+	 * only; a host that needs subagents persisted by an earlier process awaits
+	 * {@link hydratePersistedSubagents} first. File-less subagents count while the observers attached by
+	 * {@link attachSubagentObservers} track them.
+	 */
+	getSubagentTreeSpend(): AgentTreeSpend {
+		return sumSubagentTreeCost({
+			refs: AgentRegistry.global().list(),
+			observers: this.#subagentObservers,
+			rootSessionFile: this.sessionFile,
+			sessionCosts: this.#subagentSpend,
+		});
+	}
+
+	/** Count the file-less subagents `observers` tracks live (a `--no-session` root's) in the tree spend. */
+	attachSubagentObservers(observers: SessionObserverRegistry): void {
+		this.#subagentObservers = observers;
+	}
+
+	/**
+	 * Register the subagent and advisor transcripts persisted under this session's file (with their usage
+	 * history) as parked registry refs, so a resumed tree's spend counts before anything opens the Agent
+	 * Hub. Scans once per stay on a root: switching away and back scans again (another root's scan may have
+	 * re-targeted shared ids), and a scan cut short by the switch is not kept as done. Never rejects.
+	 */
+	hydratePersistedSubagents(): Promise<void> {
+		const root = this.sessionFile;
+		if (!root || !this.sessionManager.isSessionOnDisk()) return Promise.resolve();
+		if (this.#subagentHydration?.root === root) return this.#subagentHydration.promise;
+		const promise: Promise<void> = registerPersistedSubagents(AgentRegistry.global(), root, {
+			shouldContinue: () => this.sessionFile === root,
+		})
+			.catch(error => {
+				logger.warn("Persisted subagent cost hydration failed", { rootSessionFile: root, error: String(error) });
+			})
+			.then(() => {
+				if (this.sessionFile !== root && this.#subagentHydration?.promise === promise) {
+					this.#subagentHydration = undefined;
+				}
+			});
+		this.#subagentHydration = { root, promise };
+		return promise;
 	}
 
 	#goalUsage(): GoalTokenUsage {
@@ -15994,17 +16166,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const authStorage = this.#modelRegistry.authStorage;
 		if (!authStorage.usage.reports) return null;
 		const reports = await authStorage.usage.reports({
-			baseUrlResolver: provider => {
-				if (provider === "google-antigravity") {
-					const mode = cfgProvidersAntigravityEndpoint.get(this.settings);
-					if (mode === "sandbox") {
-						return "https://daily-cloudcode-pa.sandbox.googleapis.com";
-					} else if (mode === "production") {
-						return "https://daily-cloudcode-pa.googleapis.com";
-					}
-				}
-				return this.#modelRegistry.getProviderBaseUrl?.(provider);
-			},
+			baseUrlResolver: provider => this.#modelRegistry.getProviderBaseUrl?.(provider),
 			signal,
 		});
 		// Every fresh usage snapshot doubles as the salvage-sweep heartbeat: the
@@ -16155,15 +16317,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				: `Spend ${actions.length} saved ${providerLabel} rate-limit resets?\n${lines.join("\n")}`;
 		try {
 			const choice = await runner.getUIContext().select(question, [
-				{ label: "Yes", description: `Redeem now and set ${keyList} to yes.` },
-				{ label: "No", description: `Do not redeem, and set ${keyList} to no.` },
+				{ label: "Not now", description: "Do not redeem; ask again next time." },
+				{ label: "Redeem once", description: "Redeem now without changing settings." },
+				{ label: "Always redeem", description: `Redeem now and set ${keyList} to yes.` },
+				{ label: "Never redeem", description: `Do not redeem, and set ${keyList} to no.` },
 			]);
-			if (choice === "Yes" || choice === "No") {
+			if (choice === "Always redeem" || choice === "Never redeem") {
 				for (const key of keys) {
-					if (key.get(this.settings) === "unset") key.set(this.settings, choice === "Yes" ? "yes" : "no");
+					if (key.get(this.settings) === "unset")
+						key.set(this.settings, choice === "Always redeem" ? "yes" : "no");
 				}
-				if (choice === "Yes") return actions;
 			}
+			if (choice === "Redeem once" || choice === "Always redeem") return actions;
 		} catch (error) {
 			logger.warn(`${source} prompt failed`, { error: String(error) });
 		}
@@ -16843,16 +17008,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	async #formatLlmRequestJson(messages: AgentMessage[]): Promise<string> {
 		const llmMessages = await this.convertMessagesToLlm(messages);
 		const model = this.agent.state.model;
-		// Mirror `streamDispatch`: show the prose the model receives, not the bundled wording.
-		const perturb = model && isPromptPerturbationEnabled(model) ? perturbPromptText : (text: string) => text;
 		const payload = {
 			model: model ?? null,
 			thinkingLevel: this.thinkingLevel ?? null,
 			serviceTier: this.#models.serviceTierEntry(),
-			systemPrompt: this.agent.state.systemPrompt.map(perturb),
+			systemPrompt: this.agent.state.systemPrompt,
 			tools: this.agent.state.tools.map(tool => ({
 				name: tool.name,
-				description: perturb(tool.description),
+				description: tool.description,
 				parameters: toolWireSchema(tool),
 				...(tool.strict !== undefined ? { strict: tool.strict } : {}),
 				...(tool.customWireName ? { customWireName: tool.customWireName } : {}),

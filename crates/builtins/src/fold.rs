@@ -193,16 +193,10 @@ fn scan(bytes: &[u8], utf8: bool) -> Mcel {
 	if !utf8 {
 		return Mcel { ch: None, len: 1 };
 	}
-	let len = match lead {
-		0xC2..=0xDF => 2,
-		0xE0..=0xEF => 3,
-		0xF0..=0xF4 => 4,
-		_ => return Mcel { ch: None, len: 1 },
-	};
-	match bytes.get(..len).and_then(|seq| std::str::from_utf8(seq).ok()) {
-		Some(text) => Mcel { ch: text.chars().next(), len },
-		None => Mcel { ch: None, len: 1 },
-	}
+	let ch = xutf::valid_prefix(&bytes[..bytes.len().min(char::MAX_LEN_UTF8)])
+		.chars()
+		.next();
+	Mcel { ch, len: ch.map_or(1, char::len_utf8) }
 }
 
 /// GNU `c32issep` on glibc (`c32isblank`): blanks that are not no-break.

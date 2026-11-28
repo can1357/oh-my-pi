@@ -76,6 +76,8 @@ export function formatTaskResultSummary(
 			agentName: result.agent,
 			id: result.id,
 			status,
+			model: result.resolvedModel,
+			fallback: result.resolvedModelIsFallback === true,
 			duration: formatDuration(options.totalDurationMs),
 			abortReason: result.aborted ? escapeHarnessTags(result.abortReason ?? "") || undefined : undefined,
 			error: error === undefined ? undefined : escapeHarnessTags(error),

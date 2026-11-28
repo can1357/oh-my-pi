@@ -117,7 +117,15 @@ describe("multiprocess file logging", () => {
 			`omp.${localDate(30)}.log.2.gz`,
 			".0123456789abcdef0123456789abcdef01234567-audit.json",
 		];
-		const retained = [`omp.${localDate(1)}.log`, `omp.${localDate(1)}.log.gz`, ".fedcba9876543210-audit.json"];
+		const retained = [
+			`omp.${localDate(1)}.log`,
+			`omp.${localDate(1)}.log.gz`,
+			".fedcba9876543210-audit.json",
+			`omp.${localDate(0)}.${process.pid}.log`,
+			`omp.${localDate(0)}.${process.pid}.log.1`,
+			`omp.${localDate(30)}.${process.pid}.log`,
+			`.omp.${process.pid}-audit.json`,
+		];
 		for (const name of [...expired, ...retained]) await Bun.write(path.join(logsDir, name), name);
 		const thirtyDaysAgoSec = (Date.now() - 30 * 24 * 60 * 60 * 1000) / 1000;
 		await fs.utimes(path.join(logsDir, expired[4]!), thirtyDaysAgoSec, thirtyDaysAgoSec);

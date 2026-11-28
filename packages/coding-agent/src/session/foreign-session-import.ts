@@ -1,13 +1,18 @@
 import { directoryExists } from "@oh-my-pi/pi-utils";
-import { ClaudeSessionStore } from "./claude-session-store";
-import { CodexSessionStore } from "./codex-session-store";
+import type * as ClaudeStore from "./claude-session-store";
+import type * as CodexStore from "./codex-session-store";
 import type { ForeignSessionInfo, ForeignSessionSource, ForeignSessionStore } from "./foreign-session-store";
 import type { SessionInfo } from "./session-listing";
 import type { SessionManager } from "./session-manager";
 
 /** Construct the importer for a supported foreign session source. */
 export function createForeignSessionStore(source: ForeignSessionSource): ForeignSessionStore {
-	return source === "claude" ? new ClaudeSessionStore() : new CodexSessionStore();
+	if (source === "claude") {
+		const { ClaudeSessionStore } = require("./claude-session-store") as typeof ClaudeStore;
+		return new ClaudeSessionStore();
+	}
+	const { CodexSessionStore } = require("./codex-session-store") as typeof CodexStore;
+	return new CodexSessionStore();
 }
 
 /** Display name for a supported foreign session source. */

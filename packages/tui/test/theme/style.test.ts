@@ -1,8 +1,28 @@
 import { describe, expect, it } from "bun:test";
-import { builtinThemes, createTheme, type ThemeJson } from "@oh-my-pi/pi-tui/theme/index";
+import {
+	builtinThemes,
+	createTheme,
+	type EmojiSupport,
+	presetSymbols,
+	type ThemeJson,
+	ThemeSymbols,
+} from "@oh-my-pi/pi-tui/theme/index";
 
 const dark = createTheme(builtinThemes().dark!);
 const light = createTheme(builtinThemes().light!);
+/** One-cell slots: aligned columns where an emoji-capable glyph must stay a one-cell text glyph. */
+const ONE_CELL_SLOTS = ["status.success", "status.warning", "status.aborted", "status.done", "checkbox.checked"];
+/** Key groups drawn as icons. */
+const ICON_GROUP = /^(?:status|icon|cmd|tab|tool|lang|chip)\./;
+/** A text-default emoji-capable char (Extended_Pictographic without Emoji_Presentation). */
+const TEXT_EMOJI = /(?=\p{Extended_Pictographic})\P{Emoji_Presentation}/u;
+const TEXT_EMOJI_ALL = new RegExp(`(${TEXT_EMOJI.source})`, "gu");
+const EMOJI_COMBOS: readonly EmojiSupport[] = [
+	{ vs16Wide: false, bareFits: false },
+	{ vs16Wide: false, bareFits: true },
+	{ vs16Wide: true, bareFits: false },
+	{ vs16Wide: true, bareFits: true },
+];
 
 describe("fg / bg", () => {
 	it("keeps the outer color after a nested color ends", () => {
@@ -134,7 +154,7 @@ describe("symbols", () => {
 
 	it("resolves icons by key, icon name and slash-command name", () => {
 		const { symbols } = dark;
-		expect(symbols.icon("status.success")).toBe("✔");
+		expect(symbols.icon("status.success")).toBe("✓");
 		expect(symbols.icon("warning")).toBe("⚠");
 		expect(symbols.icon("jobs")).toBe(symbols.symbol("icon.job"));
 		expect(symbols.icon("gear")).toBe(symbols.symbol("cmd.gear"));
@@ -142,6 +162,60 @@ describe("symbols", () => {
 		expect(symbols.langIcon("ts")).toBe(symbols.symbol("lang.typescript"));
 		expect(symbols.langIcon("weird")).toBe("⌘");
 		expect(symbols.symbol("status.done")).toBe(symbols.symbol("status.success"));
+	});
+
+	it("picks the form of a slot and an icon from the terminal's emoji support", () => {
+		const forms = EMOJI_COMBOS.map(emoji => {
+			const symbols = new ThemeSymbols({ preset: "unicode", emoji });
+			return { emoji, warning: symbols.symbol("status.warning"), irc: symbols.symbol("tool.irc") };
+		});
+		expect(forms).toEqual([
+			{ emoji: EMOJI_COMBOS[0]!, warning: "▲", irc: "✉" },
+			{ emoji: EMOJI_COMBOS[1]!, warning: "⚠", irc: "✉" },
+			{ emoji: EMOJI_COMBOS[2]!, warning: "▲", irc: "✉\uFE0F" },
+			{ emoji: EMOJI_COMBOS[3]!, warning: "⚠", irc: "✉\uFE0F" },
+		]);
+	});
+
+	it("gives emoji-capable icons U+FE0F only where the terminal advances it two cells", () => {
+		// Stored bare; U+FE0F makes terminal and stringWidth agree on 2 cells where the terminal honors it.
+		const table = presetSymbols("unicode");
+		const icons = Object.keys(table).filter(
+			key => ICON_GROUP.test(key) && !ONE_CELL_SLOTS.includes(key) && TEXT_EMOJI.test(table[key]!),
+		);
+		expect(icons.length).toBeGreaterThan(0);
+		const wide = new ThemeSymbols({ preset: "unicode", emoji: { vs16Wide: true, bareFits: true } });
+		const narrow = new ThemeSymbols({ preset: "unicode", emoji: { vs16Wide: false, bareFits: true } });
+		const mismatched = icons.filter(
+			key =>
+				table[key]!.includes("\uFE0F") ||
+				wide.symbol(key) !== table[key]!.replace(TEXT_EMOJI_ALL, "$1\uFE0F") ||
+				narrow.symbol(key) !== table[key],
+		);
+		expect(mismatched).toEqual([]);
+	});
+
+	it("draws one-cell slots as one-cell text glyphs that take the theme color when bare glyphs spill", () => {
+		// Emoji ignore fg color and spill past their cell; slots sit in aligned columns.
+		const table = presetSymbols("unicode");
+		const conservative = new ThemeSymbols({ preset: "unicode" });
+		const slots = ONE_CELL_SLOTS.filter(key => TEXT_EMOJI.test(table[key]!)).map(key => ({
+			key,
+			width: Bun.stringWidth(conservative.symbol(key)),
+			pictographic: /\p{Extended_Pictographic}/u.test(conservative.symbol(key)),
+		}));
+		expect(slots.length).toBe(ONE_CELL_SLOTS.length);
+		expect(slots).toEqual(slots.map(({ key }) => ({ key, width: 1, pictographic: false })));
+	});
+
+	it("draws a theme's override in a one-cell slot as written, not as the slot's fallback", () => {
+		const symbols = new ThemeSymbols({
+			preset: "unicode",
+			overrides: { "status.warning": "☢" },
+			emoji: { vs16Wide: false, bareFits: false },
+		});
+		expect(symbols.symbol("status.warning")).toBe("☢");
+		expect(symbols.symbol("status.aborted")).toBe("■");
 	});
 
 	it("switches glyphs and spinners with the preset", () => {

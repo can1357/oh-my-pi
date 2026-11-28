@@ -258,8 +258,8 @@ function extensions(): Extension[] {
 
 function providers(): ExtensionProvider[] {
 	return [
-		{ id: "native", displayName: "OMP", enabled: true, userSourceEnabled: true, foreignUserSource: false },
-		{ id: "claude", displayName: "Claude Code", enabled: false, userSourceEnabled: false, foreignUserSource: true },
+		{ id: "native", displayName: "OMP", enabled: true },
+		{ id: "claude", displayName: "Claude Code", enabled: false },
 	];
 }
 
@@ -402,11 +402,6 @@ function runtime(all: () => Extension[]): ExtensionDashboardRuntime {
 			const provider = provs.find(entry => entry.id === id)!;
 			provider.enabled = !provider.enabled;
 			return provider.enabled;
-		},
-		toggleUserSource: id => {
-			const provider = provs.find(entry => entry.id === id)!;
-			provider.userSourceEnabled = !provider.userSourceEnabled;
-			return provider.userSourceEnabled;
 		},
 		persistMcpToggle: async () => {},
 		applyMcpToggle: async () => {},

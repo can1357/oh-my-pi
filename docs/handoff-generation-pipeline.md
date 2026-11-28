@@ -54,7 +54,7 @@ Does not cover:
 - Deobfuscates the returned handoff text.
 - For auto-triggered generations with `compaction.handoffSaveToDisk`, writes a timestamped `handoff-*.md` artifact under the session's artifacts directory.
 
-`generateHandoffFromContext(...)` lives in `packages/agent/src/compaction/compaction.ts` next to summarization. It issues an OTEL-instrumented `completeSimple`-equivalent oneshot against the caller-built `Context`, overriding the supplied stream options with clamped compaction reasoning and `toolChoice: "none"`.
+`generateHandoffFromContext(...)` lives in `packages/agent/src/compaction/compaction.ts` next to summarization. It issues an OTEL-instrumented `completeSimple`-equivalent oneshot against the caller-built `Context`, overriding the supplied stream options with clamped compaction reasoning, `toolChoice: "none"`, and `maxTokens: MAX_SUMMARY_TOKENS` (the summary output cap, so a server without its own limit cannot stream forever).
 
 Before the oneshot, the prepared context (handoff instruction, system prompt, and tool schemas included) is counted locally against the model's context window (`countContextOverrun` in `packages/agent/src/output-budget.ts`). A request that leaves no room for the transport's minimum fitted output fails without network I/O. The count carries no tokenizer margin, so a near-full request is still sent.
 
@@ -85,7 +85,7 @@ Capture is direct from the oneshot response; no agent-loop events or latest-assi
 
 ### 3) Cancellation and validation
 
-`abortCompaction()` or a caller's abort signal cancels generation or a prepared result waiting for its commit boundary. Cancellation raises `CompactionCancelledError` with the signal reason as `cause`; a provider failure without cancellation is reported as a failure. Missing content or a missing `## Goal` section rejects a manual compaction. Automatic maintenance can try the next configured method instead.
+`abortCompaction()` or a caller's abort signal cancels generation or a prepared result waiting for its commit boundary. Cancellation raises `CompactionCancelledError` with the signal reason as `cause`; a provider failure without cancellation is reported as a failure. A positive `compaction.handoffTimeoutSeconds` (default `0`, off) aborts generation at that deadline as a failure (`Handoff timed out after Ns`), never a cancel, and discards any partial text. Missing content or a missing `## Goal` section rejects a manual compaction. Automatic maintenance can try the next configured method instead.
 
 ### 4) Commit as a compaction entry
 
@@ -109,7 +109,7 @@ Manual `/handoff` works regardless of the context-maintenance method order. To u
 
 Async compaction (`compaction.asyncEnabled`) may also generate the handoff document speculatively in the pre-threshold band and commit it instantly when the threshold is crossed; see `docs/compaction.md`.
 
-If auto generation returns no document, maintenance advances to the next configured method. `compaction.handoffSaveToDisk` defaults to `false`; when enabled, only auto-triggered handoffs write the extra markdown artifact.
+If auto generation returns no document, fails, or times out, maintenance advances to the next configured method. `compaction.handoffSaveToDisk` defaults to `false`; when enabled, only auto-triggered handoffs write the extra markdown artifact.
 
 ## Interactive behavior
 

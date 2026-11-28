@@ -561,7 +561,7 @@ describe("Claude saved-reset trigger integration", () => {
 			// The pool is replaced while the planned restore waits for consent.
 			consent: async () => {
 				replaced = authStorage.sessions.restrict("anthropic", session.sessionId, []);
-				return "Yes";
+				return "Always redeem";
 			},
 		});
 		const pool = await poolToSessionAccount(session, 3 * 24 * HOUR);
@@ -994,7 +994,7 @@ describe("Claude saved-reset trigger integration", () => {
 				select: {
 					value: async (question: string) => {
 						questions.push(question);
-						return "No";
+						return "Never redeem";
 					},
 				},
 			}),

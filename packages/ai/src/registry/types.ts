@@ -3,9 +3,9 @@
  * gateways, search/tool credentials, and login-only flows — is described by
  * one {@link ProviderDefinition}, built by `./build.ts` from the compiled
  * `rules/auth/<id>.kdl` policy in `@oh-my-pi/pi-catalog` plus optional
- * TypeScript transport hooks. The legacy scattered structures (the
- * `OAuthProvider` union, `serviceProviderMap`, `builtInOAuthProviders`, the
- * refresh/login switches, and the CLI callback maps) are all *derived* from
+ * TypeScript transport hooks. The legacy scattered structures
+ * (`serviceProviderMap`, `builtInOAuthProviders`, the refresh/login
+ * switches, and the CLI callback maps) are all *derived* from
  * the registry of these definitions. Adding a provider is one new
  * `auth/<id>.kdl`. Model-catalog metadata (default model, model-manager
  * factory, catalog discovery) lives in `@oh-my-pi/pi-catalog`'s descriptor
@@ -14,6 +14,7 @@
 
 import type { Api, FetchImpl, Model, SimpleStreamOptions, StreamOptions } from "../types";
 import type { OAuthRefreshReason } from "../auth/types";
+import type { SignOutHook } from "./hooks/types";
 import type { OAuthController, OAuthCredentials } from "./oauth/types";
 
 /**
@@ -51,7 +52,7 @@ export type ProviderModelDiscoveryPreparer = (config: ProviderModelDiscoveryConf
  *
  * - `envKeys` present ⇒ env-var fallback in `getEnvApiKey`, overriding the
  *   catalog table's `envVars` for that provider.
- * - `login` present ⇒ member of `OAuthProvider`, shown in the `/login` list
+ * - `login` present ⇒ shown in the `/login` list
  *   (unless `showInLoginList === false`) and dispatchable via `AuthStorage.oauth.login`.
  * - `callbackPort` present ⇒ entry in the auth-broker `CALLBACK_PORTS` map.
  * - `pasteCodeFlow` ⇒ member of `PASTE_CODE_LOGIN_PROVIDERS`.
@@ -93,6 +94,8 @@ export interface ProviderDefinition {
 		reason?: OAuthRefreshReason,
 	) => Promise<OAuthCredentials>;
 	readonly getApiKey?: (credentials: OAuthCredentials) => string;
+	/** Forget a removed login's secrets kept outside `agent.db` and revoke it upstream (`sign-out hook=`). */
+	readonly signOut?: SignOutHook;
 	/** Store OAuth credentials under a different provider id (e.g. `openai-codex-device` ⇒ `openai-codex`). */
 	readonly storeCredentialsAs?: string;
 	// --- coding-agent login UX ---

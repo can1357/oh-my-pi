@@ -75,7 +75,7 @@ Argument handling:
 | `--allow-home`        | Allow starting in `~` without auto-switching to a temp dir.                                  |
 | `--profile <name>`    | Use an isolated profile for auth, sessions, settings, and caches.                            |
 | `--alias <name>`      | Create a shell shortcut for a named profile and exit; requires `--profile` or `OMP_PROFILE`. |
-| `--config <file>`     | Load an extra `config.yml`-style overlay for this run (repeatable).                          |
+| `--config <file>`     | Load an extra `config.yml`-style overlay for this run (repeatable). An overlay that sets a setting the early composer draws (`tui.screen`, theme, symbols, composer shape, …) skips that frame; see `--prepaint`. |
 | `--session-dir <dir>` | Directory for session storage and lookup.                                                    |
 | `--no-session`        | Don't save the session (ephemeral).                                                          |
 
@@ -105,6 +105,7 @@ or `--fork`.
 | `--smol <id>`                | Smol/fast model for lightweight tasks (or `PI_SMOL_MODEL`).                                                                |
 | `--slow <id>`                | Slow/reasoning model for thorough analysis (or `PI_SLOW_MODEL`).                                                           |
 | `--plan <id>`                | Plan model for architectural planning (or `PI_PLAN_MODEL`).                                                                |
+| `--preset <name>`            | Start on a saved model preset: its role models and default thinking level apply for that run only, and `--model`, `--smol`, `--slow` and `--plan` still win for the roles they name. |
 | `--models <a,b,c>`           | Comma-separated model patterns for `Ctrl+P` cycling.                                                                       |
 | `--provider <name>`          | Provider to use (legacy; prefer `--model`).                                                                                |
 | `--api-key <key>`            | API key (defaults to env vars).                                                                                            |
@@ -153,6 +154,7 @@ See [providers](./providers.md) and [models](./models.md) for model resolution.
 | `--motion <mode>`          | Animation preset: `full` (default), `reduced` (250 ms spinners, no shimmer or blink/fade) or `none` (static spinners and title). Streaming text is unaffected; see `--max-fps`. Overrides `tui.motion` and `PI_MOTION` for this run.                  |
 | `--spinner-interval <ms>`  | Milliseconds between spinner frames, terminal title included (default `80`, terminal title `250`; `0` = static). Overrides `tui.spinnerInterval` and `PI_SPINNER_INTERVAL` for this run.                                                                                  |
 | `--max-fps <n>`            | Repaint ceiling in frames per second (default `30`; `1`–`120`), streaming text included; keystroke echo keeps 30 fps. Overrides `tui.maxFps` and `PI_MAX_FPS` for this run.                                                                          |
+| `--prepaint <mode>`        | Draw the composer before startup finishes, so typing lands at once: `on` (default) skips it when another flag or a `--config`/`PI_CONFIG_FILES` overlay would change that frame, `off` never draws it early, `force` always does.                     |
 | `--warn-cost <usd>`        | Warn once when the session's spend, subagents included, reaches this many USD. Overrides `session.warnCost`.                                                                                         |
 | `--max-cost <usd>`         | Stop sending model requests once the session's spend reaches this many USD; a request already in flight can carry spend past it. Overrides `session.maxCost`.                                        |
 
@@ -341,3 +343,11 @@ commit's own ignore rules, after its tree and index have been written. Caches
 ignored by the target remain, even if the source did not ignore them. Nested
 repositories are preserved and symlinks are not followed. This target-ignore
 cleanup is skipped when keeping the source's uncommitted changes.
+
+Apart from those, every ignored file is carried, not only build caches: `.env` files,
+local credentials, signing configs such as `key.properties`, and editor or tool
+state arrive in the new worktree as independent copies. Those copies do not
+follow later changes in the source checkout, and a `post-checkout` hook that
+links a shared file will find a regular file already in place. There is no
+per-path exclude list; set `worktree.clone: false` to create worktrees with a
+plain checkout instead.

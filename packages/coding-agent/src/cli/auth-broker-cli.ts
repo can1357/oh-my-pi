@@ -27,13 +27,18 @@ import {
 	listProvidersWithEnvKey,
 	matchesReplacementCredential,
 	type OAuthCredential,
-	type OAuthProvider,
-	PROVIDER_REGISTRY,
 	SqliteAuthCredentialStore,
 } from "@oh-my-pi/pi-ai";
-import { AuthBrokerClient, DEFAULT_AUTH_BROKER_BIND, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
+import {
+	AuthBrokerClient,
+	DEFAULT_AUTH_BROKER_BIND,
+	openLocalAuthCredentialStore,
+	startAuthBroker,
+} from "@oh-my-pi/pi-ai/auth-broker";
 import { refreshOAuthToken } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
+import { BROKER_CALLBACK_PORT_ENV, resolveCallbackPort } from "@oh-my-pi/pi-ai/registry/engine/oauth-code";
+import { authPolicyFor, providerDeviceBound } from "@oh-my-pi/pi-catalog/compat/auth";
 import { $which, APP_NAME, getAgentDbPath, getConfigRootDir, logger, postmortem, VERSION } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { setTransports as setLoggerTransports } from "@oh-my-pi/pi-utils/logger";
@@ -84,13 +89,6 @@ const ACTIONS: readonly AuthBrokerAction[] = [
 	"list",
 ];
 
-/** Callback ports baked from the per-provider OAuth flow modules. */
-const CALLBACK_PORTS: Record<string, number> = Object.fromEntries(
-	PROVIDER_REGISTRY.flatMap(provider =>
-		provider.callbackPort != null ? [[provider.id, provider.callbackPort] as [string, number]] : [],
-	),
-);
-
 function getTokenFilePath(): string {
 	return path.join(getConfigRootDir(), "auth-broker.token");
 }
@@ -128,7 +126,7 @@ export function refreshBrokerOAuthCredential(
 	}
 	// Non-MCP rows: same per-provider path AuthStorage would take by default
 	// (the serve process registers no custom OAuth providers).
-	return refreshOAuthToken(provider as OAuthProvider, credential, signal);
+	return refreshOAuthToken(provider, credential, signal);
 }
 
 /** The `omp auth-broker serve` vault: tokens refresh in this process through {@link refreshBrokerOAuthCredential}. */
@@ -151,9 +149,8 @@ async function runServe(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 
 	const bind = flags.bind ?? DEFAULT_AUTH_BROKER_BIND;
 	const token = await ensureToken();
-	const dbPath = getAgentDbPath();
 	applyUnpausedProviders(await resolveEffectiveSettings());
-	const store = await SqliteAuthCredentialStore.open(dbPath);
+	const store = await openLocalAuthCredentialStore();
 	const storage = createBrokerAuthStorage(store);
 	await storage.credentials.reload();
 	const handle = startAuthBroker({
@@ -242,7 +239,7 @@ async function runLogin(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 async function runLocalLogin(rl: readline.Interface, provider: string): Promise<void> {
 	// Drive the per-provider OAuth dance in-process. Persists into the same
 	// SQLite store the broker uses.
-	const store = await SqliteAuthCredentialStore.open(getAgentDbPath());
+	const store = await openLocalAuthCredentialStore();
 	const storage = new AuthStorage(store);
 	await storage.credentials.reload();
 	try {
@@ -253,21 +250,33 @@ async function runLocalLogin(rl: readline.Interface, provider: string): Promise<
 	}
 }
 
-async function runRemoteLogin(provider: string, via: string, dryRun: boolean): Promise<void> {
-	const port = CALLBACK_PORTS[provider];
-	if (port === undefined) {
+/** SSH must forward the same concrete port the remote OAuth flow advertises to the browser. */
+export function remoteLoginSshArgs(provider: string, via: string): string[] {
+	const policy = authPolicyFor(provider);
+	const callback = policy?.login?.kind === "oauth-code" ? policy.login.callback : undefined;
+	const configurable = callback?.portEnv;
+	const port = callback && configurable ? resolveCallbackPort(callback, provider) : policy?.callbackPort;
+	if (configurable && port === 0) {
+		throw new Error(`${configurable}=0 cannot be forwarded over SSH; choose a fixed port or unset it.`);
+	}
+	if (!port) {
 		throw new Error(
 			`No known OAuth callback port for '${provider}'. Use device-code flow on the broker host directly.`,
 		);
 	}
-	const sshArgs = [
+	const env = configurable ? `env ${BROKER_CALLBACK_PORT_ENV}=${port} ` : "";
+	return [
 		"-L",
 		`${port}:127.0.0.1:${port}`,
 		"-o",
 		"ExitOnForwardFailure=yes",
 		via,
-		`${APP_NAME} auth-broker login ${provider}`,
+		`${env}${APP_NAME} auth-broker login ${provider}`,
 	];
+}
+
+async function runRemoteLogin(provider: string, via: string, dryRun: boolean): Promise<void> {
+	const sshArgs = remoteLoginSshArgs(provider, via);
 	if (dryRun) {
 		process.stdout.write(`ssh ${sshArgs.map(a => (a.includes(" ") ? `'${a}'` : a)).join(" ")}\n`);
 		return;
@@ -335,7 +344,6 @@ async function runList(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 const CLIPROXY_TYPE_TO_PROVIDER: Record<string, string> = {
 	claude: "anthropic",
 	codex: "openai-codex",
-	antigravity: "google-antigravity",
 };
 
 interface CliProxyCredentialJson {
@@ -534,7 +542,7 @@ async function runImport(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 		return;
 	}
 
-	const store = await SqliteAuthCredentialStore.open(getAgentDbPath());
+	const store = await openLocalAuthCredentialStore();
 	try {
 		for (const entry of entries) {
 			await store.upsertAuthCredential(entry.provider, entry.credential);
@@ -631,6 +639,15 @@ async function runMigrate(flags: AuthBrokerCommandArgs["flags"]): Promise<void> 
 				continue;
 			}
 			const identity = credentialIdentity(row.provider, row.credential);
+			if (providerDeviceBound(row.provider)) {
+				skipped.push({
+					source: "local-sqlite",
+					provider: row.provider,
+					identity,
+					reason: "login is bound to this machine's key and never leaves it",
+				});
+				continue;
+			}
 			if (row.credential.type === "oauth" && flags.includeOauth !== true) {
 				skipped.push({
 					source: "local-sqlite",

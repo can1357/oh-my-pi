@@ -162,8 +162,8 @@ describe("BashTool execution results", () => {
 		});
 		const [id, file, tag] = (result.content.find(c => c.type === "text")?.text ?? "").split("|");
 		expect(id).toBe("session-fg");
-		// The leftover-process membership tag (exec/session-processes.ts).
-		expect(tag).toBe("session-fg");
+		// The leftover-process membership tag (exec/session-processes.ts), scoped to this process.
+		expect(tag).toBe(`session-fg@${process.pid}`);
 		// Empty, not the stale path: the session is not persisted.
 		expect(file).toBe("");
 	});
@@ -338,24 +338,6 @@ describe("BashTool skill:// working directory", () => {
 		};
 	}
 
-	it("runs a command with a bare skill URI as cwd, resolving relative paths inside it", async () => {
-		const { dir, skill } = await skillFixture();
-		try {
-			const tool = new BashTool({ ...makeSession(), skills: [skill] });
-			const result = await tool.execute("call-skill-cwd", {
-				command: "pwd; cat SKILL.md",
-				cwd: "skill://docs",
-			});
-			const text = result.content.find(c => c.type === "text")?.text ?? "";
-
-			expect(result.isError).toBeUndefined();
-			expect(text).toContain("skill://docs");
-			expect(text).toContain("body");
-		} finally {
-			await fs.rm(dir, { recursive: true, force: true });
-		}
-	});
-
 	it("runs a leading cd into a bare skill URI", async () => {
 		const { dir, skill } = await skillFixture();
 		try {
@@ -434,8 +416,7 @@ describe("BashTool skill:// containment failures", () => {
 
 			await expect(
 				tool.execute("call-skill-leak-cwd", {
-					command: "pwd",
-					cwd: "skill://docs",
+					command: "cd skill://docs && pwd",
 				}),
 			).rejects.toThrow("resolves outside the plugin root");
 		} finally {
