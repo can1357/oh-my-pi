@@ -128,6 +128,7 @@
 - `omp plugin disable` and the Settings → Plugins enable toggle now note that running sessions keep the plugin until they restart ([#9722](https://github.com/can1357/oh-my-pi/issues/9722))
 - Status line keeps the auto indicator on an auto-resolved thinking effort (e.g. `⟳ high`) so it is distinguishable from a pinned level ([#5951](https://github.com/can1357/oh-my-pi/issues/5951))
 - A configured MCP `oauth.scope` now overrides scopes advertised by the server on initial authorization and `/mcp reauth`, so you can request a narrower (or different) scope set than discovery reports ([#7841](https://github.com/can1357/oh-my-pi/issues/7841))
+- The `eval` tool description now always points the model to `judge_batch` (`judgeBatch` in JS) for about 20+ homogeneous items sharing one yes/no, bucket or score question, with the rubric fixed before reading the data; it reads only the items the judge flags, is unsure about or fails on, instead of scanning them all by hand ([#19052](https://github.com/can1357/oh-my-pi/pull/19052) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
 
