@@ -235,6 +235,38 @@ export function resetActiveSkillsForTests(): void {
 	activeSkills = [];
 }
 
+/** The skill list of every subagent spawned from a session with no skills: one frozen list no holder can change. */
+const NO_SKILLS: readonly Skill[] = Object.freeze([]);
+
+/**
+ * The frozen copy of each parent's skill list that {@link spawnedSubagentSkills} made last, by the parent's list, until
+ * a spawn finds the list empty. The map does not keep the parent's list alive. A child or its reviver can still hold
+ * the copy.
+ */
+const spawnedSkillCopies = new WeakMap<readonly Skill[], readonly Skill[]>();
+
+/**
+ * The skills of a subagent spawned from a session with `skills`: a frozen shallow copy of the list, or
+ * {@link NO_SKILLS} when there are none. A kept-alive subagent keeps the list for as long as it can be revived, so
+ * subagents spawned on one thread from the same list share one copy while the list holds the same skills in the same
+ * order; once the caller changes the list in place, the next spawn gets a fresh copy. A subagent on a worker thread
+ * still receives its own copy: the worker link clones its spawn options.
+ */
+export function spawnedSubagentSkills(skills: readonly Skill[] | undefined): readonly Skill[] {
+	if (skills === undefined) return NO_SKILLS;
+	if (skills.length === 0) {
+		// When a spawn sees an empty list, drop the cache's reference. Earlier children or their revivers can still
+		// hold the old copy.
+		spawnedSkillCopies.delete(skills);
+		return NO_SKILLS;
+	}
+	const cached = spawnedSkillCopies.get(skills);
+	if (cached?.length === skills.length && cached.every((skill, index) => skill === skills[index])) return cached;
+	const copy = Object.freeze([...skills]);
+	spawnedSkillCopies.set(skills, copy);
+	return copy;
+}
+
 /**
  * Whether `name` is already claimed by an active authored (non-managed) skill.
  *

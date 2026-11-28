@@ -593,7 +593,7 @@ export interface ExecutorOptions {
 	subagentEventBus?: EventBus;
 	contextFiles?: ContextFileEntry[];
 	noContextFiles?: boolean;
-	skills?: Skill[];
+	skills?: readonly Skill[];
 	promptTemplates?: PromptTemplate[];
 	workspaceTree?: WorkspaceTree;
 	/** Parent-discovered rules, forwarded to skip rule discovery in the subagent. */

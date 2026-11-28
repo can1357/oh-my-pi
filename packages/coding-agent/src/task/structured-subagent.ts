@@ -27,6 +27,7 @@ import type { Settings } from "../config/settings";
 import { isProviderEnabled } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { CustomTool } from "../extensibility/custom-tools/types";
+import { spawnedSubagentSkills } from "../extensibility/skills";
 import { sessionLocalProtocolOptions } from "../internal-urls/context";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
 import { MCPManager } from "../mcp/manager";
@@ -720,7 +721,7 @@ async function refreshSkillsForAutoload(session: ToolSession, agent: AgentDefini
 }
 
 function resolveAutoloadSkills(session: ToolSession, agent: AgentDefinition) {
-	const skills = [...(session.skills ?? [])];
+	const skills = spawnedSubagentSkills(session.skills);
 	const autoloadSkills = agent.autoloadSkills?.length
 		? agent.autoloadSkills.map(name => skills.find(skill => skill.name === name)).filter(skill => skill !== undefined)
 		: [];
