@@ -10,7 +10,12 @@ import {
 	transformMessages,
 	withCredentialRedaction,
 } from "@oh-my-pi/pi-ai/providers/transform-messages";
-import type { Message, Model } from "@oh-my-pi/pi-ai/types";
+import {
+	inputBlocks,
+	lateToolResultPrompt,
+	transcriptDigest,
+} from "@oh-my-pi/pi-ai/providers/antigravity-cli/reconcile";
+import type { Message, Model, ToolResultMessage, UserMessage } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
 function makeModel(): Model<"openai-completions"> {
@@ -64,5 +69,29 @@ describe("transformMessages malformed-content normalization", () => {
 		expect(out).toHaveLength(2);
 		expect((out[0] as { content: string }).content).toBe("hello");
 		expect((out[1] as { content: Array<{ text: string }> }).content[0].text).toBe("hi");
+	});
+});
+
+describe("antigravity-acp malformed message content (#20910)", () => {
+	it("degrades undefined user content in inputBlocks and transcriptDigest", () => {
+		const message = { role: "user", content: undefined, timestamp: 0 } as unknown as UserMessage;
+		expect(inputBlocks(message)).toEqual([{ type: "text", text: MALFORMED_MESSAGE_CONTENT_PLACEHOLDER }]);
+		expect(() => transcriptDigest([message])).not.toThrow();
+	});
+
+	it("degrades undefined tool-result content in lateToolResultPrompt", () => {
+		const result = {
+			role: "toolResult",
+			toolCallId: "call-1",
+			toolName: "read",
+			isError: false,
+			content: undefined,
+			timestamp: 0,
+		} as unknown as ToolResultMessage;
+		expect(() => lateToolResultPrompt(result)).not.toThrow();
+		const blocks = lateToolResultPrompt(result);
+		expect(blocks.some(block => block.type === "text" && block.text === MALFORMED_MESSAGE_CONTENT_PLACEHOLDER)).toBe(
+			true,
+		);
 	});
 });

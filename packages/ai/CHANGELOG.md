@@ -28,6 +28,7 @@
 
 ### Fixed
 
+- `transformMessages` now normalizes malformed user/developer `content` (neither a string nor a block array) before credential redaction, so a missing `content` after compaction no longer crashes the turn; the antigravity-acp path is guarded the same way ([#20910](https://github.com/can1357/oh-my-pi/issues/20910), [#20914](https://github.com/can1357/oh-my-pi/pull/20914) by [@koeria](https://github.com/koeria)).
 - Fixed startup failing with `no such column: salt` when `agent.db` records auth schema v9 but its credentials table has no `salt` column
 - An OpenAI Responses request retried after an empty completion keeps the provider session it started with, so a session the host retired mid-request (a model switch) is not recreated for the next model ([#20858](https://github.com/can1357/oh-my-pi/pull/20858) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Fixed DeepSeek sessions failing every request with `400 … image special token` after a tool result quoted DeepSeek's chat template: `<｜…｜>` and `｜DSML｜` tokens in outgoing message text are now broken with a zero-width space ([#20832](https://github.com/can1357/oh-my-pi/pull/20832) by [@dany-on-demand](https://github.com/dany-on-demand))
@@ -253,9 +254,6 @@
 - Improved reliability of managed Antigravity CLI downloads on slow connections and provided more useful progress and timeout errors.
 - Fixed Antigravity CLI host tools with mixed-type union schemas being published incorrectly, allowing subagents to submit results.
 - Fixed Codex assistant messages in the `partial_answer` phase losing their phase when stored and replayed.
-### Fixed
-
-- `transformMessages` now normalizes malformed user/developer `content` (neither a string nor a block array) before credential redaction, so a missing `content` after compaction no longer crashes the turn; the antigravity-acp path is guarded the same way ([#20910](https://github.com/can1357/oh-my-pi/issues/20910), [#20914](https://github.com/can1357/oh-my-pi/pull/20914) by [@koeria](https://github.com/koeria)).
 
 ## [18.22.0] - 2026-11-16
 

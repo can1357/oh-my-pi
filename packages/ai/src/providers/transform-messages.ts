@@ -886,7 +886,7 @@ function redactSensitiveCredentialsInMessages(messages: Message[]): Message[] {
 			// Rewritten thinking or arguments invalidate the turn's `reasoning_details`
 			// envelope, which still holds the original text and call signatures.
 			let replayStateChanged = false;
-			const content = assistantMsg.content.map((block): AssistantMessage["content"][number] => {
+			const content = raw.map((block): AssistantMessage["content"][number] => {
 				if (block.type === "text") {
 					const redacted = redactSensitiveCredentials(block.text);
 					if (redacted !== block.text) {
