@@ -815,6 +815,18 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			? buildUserShellCommand(shell, args, preflight.command)
 			: preflight.command;
 
+	// A single-line result of a run that invoked a session tool command (e.g. an
+	// MCP tool returning unformatted JSON) is the whole answer: it stays uncapped.
+	let toolCommandRan = false;
+	const toolCommands = options?.commands;
+	const commands: ShellCommands | undefined = toolCommands && {
+		names: toolCommands.names,
+		handler: request => {
+			toolCommandRan = true;
+			return toolCommands.handler(request);
+		},
+	};
+
 	// Create output sink for truncation and artifact handling
 	const graphics = new TerminalGraphicsDecoder();
 	const onChunk = usePty ? undefined : options?.onChunk;
@@ -831,6 +843,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		headBytes: resolveOutputSinkHeadBytes(settings),
 		artifactMaxBytes: resolveOutputSinkArtifactMaxBytes(settings),
 		maxColumns: resolveOutputMaxColumns(settings),
+		exemptSingleLine: commands ? () => toolCommandRan : undefined,
 		chunkThrottleMs: onChunk || onPreview ? (options?.chunkThrottleMs ?? 50) : 0,
 	});
 
@@ -1012,7 +1025,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				signal: runAbortController.signal,
 				filesystem: options?.filesystem,
 				speech: options?.speech,
-				commands: options?.commands,
+				commands,
 				streams: options?.streams,
 				trace: runTrace,
 			},

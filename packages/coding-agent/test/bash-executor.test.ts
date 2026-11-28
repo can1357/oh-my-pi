@@ -1347,6 +1347,40 @@ exit 64
 		expect(result.output).toContain("a");
 	});
 
+	describe("single-line output and the column cap", () => {
+		// One line of unformatted JSON, wider than the default 768-byte column cap.
+		const json = JSON.stringify({ items: Array.from({ length: 60 }, (_, id) => ({ id, name: `item-${id}` })) });
+		const toolCommands = (): piNatives.ShellCommands => ({
+			names: ["mcp_fake"],
+			handler: async () => ({ stdout: `${json}\n`, stderr: "", exitCode: 0 }),
+		});
+
+		it("keeps a session tool command's one-line output whole", async () => {
+			expect(Buffer.byteLength(json)).toBeGreaterThan(768);
+			const result = await executeBash("mcp_fake", { cwd: tempDir, timeout: 5000, commands: toolCommands() });
+
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toBe(`${json}\n`);
+			expect(result.output).not.toContain("…");
+		});
+
+		it("caps a plain command's one-line output", async () => {
+			const result = await executeBash(`printf '%s\\n' ${shellQuote(json)}`, { cwd: tempDir, timeout: 5000 });
+
+			expect(result.output).toBe(`${json.slice(0, 765)}…\n`);
+		});
+
+		it("caps one-line output when session tool commands are mounted but not invoked", async () => {
+			const result = await executeBash(`printf '%s\\n' ${shellQuote(json)}`, {
+				cwd: tempDir,
+				timeout: 5000,
+				commands: toolCommands(),
+			});
+
+			expect(result.output).toBe(`${json.slice(0, 765)}…\n`);
+		});
+	});
+
 	it("handles large output without freeze or OOM", async () => {
 		if (process.platform === "win32") return;
 

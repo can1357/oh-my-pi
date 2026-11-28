@@ -253,7 +253,7 @@ The bash executor builds the sink with `headBytes` and `maxColumns` from setting
 
 - keeps the inline body within `spillThreshold` (`DEFAULT_MAX_BYTES`, 50 KiB by default), using UTF-8-safe boundaries,
 - when `headBytes > 0` (`tools.artifactHeadBytes`, default 20 KiB) it reserves a **head** window within that same budget and uses the remainder for a rolling **tail**; head retention is capped at half the total budget, and `dump()` splices in a middle-elision marker when necessary,
-- per-line column cap: when `maxColumns > 0` (`tools.outputMaxColumns`, default 768 bytes) over-wide lines are ellipsis-truncated at write time and the rest of the line is dropped,
+- per-line column cap: when `maxColumns > 0` (`tools.outputMaxColumns`, default 768 bytes) over-wide lines are ellipsis-truncated at write time and the rest of the line is dropped. When the run mounts session tool commands, the executor passes `exemptSingleLine`: the first line is held uncapped until a byte follows its newline, then cut like any other line; output that stays a single line (one trailing newline allowed) is kept whole, bounded only by the byte budget, if a tool command ran (e.g. an MCP tool returning unformatted JSON), and cut at `dump()` otherwise,
 - tracks total bytes/lines seen,
 - mirrors the sanitized, uncapped text stream to the artifact file when output overflows, a column cap dropped bytes, or the file is already active; the artifact file is capped at `tools.artifactMaxBytes` (default 16 MB: the first 3 MB plus a rolling tail, joined by an `[ARTIFACT TRUNCATED: …]` notice; `0` = unbounded),
 - marks `truncated` on tail overflow, middle elision, column-cap drops, or file spill.

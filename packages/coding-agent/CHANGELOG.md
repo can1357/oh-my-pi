@@ -18,6 +18,7 @@
 
 ### Added
 
+- Added `OutputSinkOptions.exemptSingleLine` so a consumer can keep output that is a single line whole under `maxColumns`, bounded by the byte budget ([#20053](https://github.com/can1357/oh-my-pi/pull/20053) by [@apoc](https://github.com/apoc))
 - Added `--prepaint=on|off|force` to control the composer drawn before startup finishes: `off` waits for the full interface, `force` draws it even for flags that would change it
 - Todo backends can define an optional `apply`: the selected backend is asked before the model's `todo` call commits, and returning `{ block: true, reason }` refuses the call with the list unchanged ([#20355](https://github.com/can1357/oh-my-pi/pull/20355) by [@Dangerboi](https://github.com/Dangerboi))
 - `models.yml` `compat.neutralizeDeepseekSpecialTokens` turns DeepSeek chat-template token breaking on or off per model (on by default for DeepSeek-class models on chat-completions) ([#20832](https://github.com/can1357/oh-my-pi/pull/20832) by [@dany-on-demand](https://github.com/dany-on-demand))
@@ -131,6 +132,8 @@
 
 ### Fixed
 
+- Fixed MCP servers that return unformatted single-line JSON having their tool results cut to `tools.outputMaxColumns`; a bash run that invokes a tool command now keeps one-line output whole within the output byte budget ([#20053](https://github.com/can1357/oh-my-pi/pull/20053) by [@apoc](https://github.com/apoc))
+- Fixed `OutputSink` reordering output when a multibyte character left spare head-window room and later output filled it ([#20053](https://github.com/can1357/oh-my-pi/pull/20053) by [@apoc](https://github.com/apoc))
 - `/resume` into a session without subagents no longer keeps showing the previous session's subagents above the composer
 - Fixed stealth injection registry to preserve native function source strings across frames
 - In Tern, `/copy` and `/annotate session` share the same block picker on desktop and mobile. Clicking a side preview accepts the full item and closes the picker ([#20791](https://github.com/can1357/oh-my-pi/pull/20791) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
