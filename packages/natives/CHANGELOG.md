@@ -25,6 +25,7 @@
 
 - Reduced Snapcompact frame sizes with indexed PNGs while retaining antialiased text.
 - Improved URL reading to preserve model tables, source-code indentation, linked content cards, meaningful button labels, and sign-in instructions while removing unrelated news, footer content, and empty whitespace-only paragraphs.
+- Fixed Mermaid edge labels in flowcharts and state diagrams hiding other labels, corners, route crossings, arrowheads, subgraph frames and subgraph titles: a label whose default spot is taken now moves along its edge to the nearest clear spot when one exists ([#20924](https://github.com/can1357/oh-my-pi/pull/20924) by [@loishi](https://github.com/loishi))
 - Fixed `Process.terminate` so descendants that start their own sessions are still terminated reliably.
 - Fixed the Linux GNU native addon so it no longer requires `libm.so.6` for the Perl `POSIX` `acosh` and `asinh` builtins.
 - Fixed Wayland capture crashing on unreadable portal frame buffers while preserving capture from readable shared-memory frames on older PipeWire versions ([#19647](https://github.com/can1357/oh-my-pi/issues/19647))

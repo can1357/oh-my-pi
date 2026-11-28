@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::{
 	AsciiEdge, AsciiGraph, BundleKind, Dir, EdgeBundle, EdgeStyle, GridCoord, NodeId, NodeShape,
@@ -10,7 +10,7 @@ use super::{
 use crate::mermaid::{
 	ansi::CharRole,
 	canvas::{Canvas, Cell, CellSurface, DrawingCoord, Layer, RoleCanvas, to_cells},
-	text::{LABEL_SPACE, display_width, split_lines},
+	text::{LABEL_SPACE, display_width, grapheme_width, split_lines},
 };
 
 /// Draw a node in the dimensions allocated to its grid cell.
@@ -321,17 +321,16 @@ pub fn draw_line(
 	drawn
 }
 
-/// Draw an edge into six independently composited layers.
-pub fn draw_arrow(graph: &AsciiGraph, edge: &AsciiEdge) -> [Layer; 6] {
+/// Draw an edge into five independently composited layers; its label is
+/// drawn later, once every route is known.
+fn draw_arrow(graph: &AsciiGraph, edge: &AsciiEdge, drawing_path: &[DrawingCoord]) -> [Layer; 5] {
 	if edge.path.is_empty() {
 		return std::array::from_fn(|_| Layer::over(&graph.canvas));
 	}
-	let drawing_path = edge_drawing_path(graph, edge);
-	let label_canvas = draw_arrow_label(graph, edge, &drawing_path);
 	let (path_canvas, lines_drawn, line_dirs) =
-		draw_path(graph, &edge.path, &drawing_path, edge.style);
+		draw_path(graph, &edge.path, drawing_path, edge.style);
 	let source_shape = graph.nodes.get(edge.from).map_or_default(|node| node.shape);
-	let box_start_canvas = draw_box_start(graph, &edge.path, &drawing_path, source_shape);
+	let box_start_canvas = draw_box_start(graph, &edge.path, drawing_path, source_shape);
 	let arrow_end_canvas = if edge.has_arrow_end {
 		match (lines_drawn.last(), line_dirs.last()) {
 			(Some(line), Some(&dir)) => draw_arrow_head(graph, line, dir),
@@ -359,15 +358,8 @@ pub fn draw_arrow(graph: &AsciiGraph, edge: &AsciiEdge) -> [Layer; 6] {
 	} else {
 		Layer::over(&graph.canvas)
 	};
-	let corners_canvas = draw_corners(graph, &edge.path, &drawing_path);
-	[
-		path_canvas,
-		box_start_canvas,
-		arrow_end_canvas,
-		arrow_start_canvas,
-		corners_canvas,
-		label_canvas,
-	]
+	let corners_canvas = draw_corners(graph, &edge.path, drawing_path);
+	[path_canvas, box_start_canvas, arrow_end_canvas, arrow_start_canvas, corners_canvas]
 }
 
 const fn reverse_direction(dir: Dir) -> Dir {
@@ -392,12 +384,15 @@ const fn reverse_direction(dir: Dir) -> Dir {
 fn edge_drawing_path(graph: &AsciiGraph, edge: &AsciiEdge) -> Vec<DrawingCoord> {
 	let mut coords = line_to_drawing(graph, &edge.path);
 	let n = edge.path.len();
+	if n < 3 || edge.from == edge.to {
+		return coords;
+	}
 	let twins = graph
 		.edges
 		.iter()
 		.filter(|other| edge.joins_same_pair(other))
 		.count();
-	if n < 3 || edge.from == edge.to || twins < 2 {
+	if twins < 2 {
 		return coords;
 	}
 	let mut others = graph
@@ -615,10 +610,14 @@ fn draw_corners(graph: &AsciiGraph, path: &[GridCoord], drawing_path: &[DrawingC
 	canvas
 }
 
-fn draw_arrow_label(graph: &AsciiGraph, edge: &AsciiEdge, drawing_path: &[DrawingCoord]) -> Layer {
-	let mut canvas = Layer::over(&graph.canvas);
-	if edge.text.is_empty() {
-		return canvas;
+/// The label of `edge`, or `None` when it has none.
+fn edge_label(
+	graph: &AsciiGraph,
+	edge: &AsciiEdge,
+	drawing_path: &[DrawingCoord],
+) -> Option<EdgeLabel> {
+	if edge.text.is_empty() || edge.path.is_empty() {
+		return None;
 	}
 	let line = if let [a, b] = edge.label_line.as_slice() {
 		edge
@@ -637,13 +636,8 @@ fn draw_arrow_label(graph: &AsciiGraph, edge: &AsciiEdge, drawing_path: &[Drawin
 		(Some(start), Some(end)) if edge.path.len() >= 2 && end.y > start.y => Some(false),
 		_ => None,
 	};
-	draw_text_on_line(&mut canvas, &line, &edge.text, upward);
-	canvas
-}
-
-fn draw_text_on_line(canvas: &mut Layer, line: &[DrawingCoord], label: &str, upward: Option<bool>) {
 	let (Some(first), Some(second)) = (line.first(), line.get(1)) else {
-		return;
+		return None;
 	};
 	let min_x = first.x.min(second.x);
 	let max_x = first.x.max(second.x);
@@ -655,12 +649,97 @@ fn draw_text_on_line(canvas: &mut Layer, line: &[DrawingCoord], label: &str, upw
 		let offset = 1.max((max_y - min_y).div_euclid(4));
 		middle_y += if upward { offset } else { -offset };
 	}
-	let lines: Vec<&str> = split_lines(label).collect();
-	let start_y = middle_y - (lines.len() as i32 - 1).div_euclid(2);
-	for (i, line) in lines.iter().enumerate() {
-		let x = middle_x - (display_width(line) as i32).div_euclid(2);
-		let protected = line.replace(' ', &LABEL_SPACE.to_string());
-		canvas.draw_text(DrawingCoord::new(x, start_y + i as i32), &protected, false);
+	let lines: Vec<(String, i32)> = split_lines(&edge.text)
+		.map(|line| {
+			// Protect only lone spaces: replacing the space of a space plus
+			// combining mark would split that grapheme into two cells.
+			let mut text = String::with_capacity(line.len());
+			let mut width = 0;
+			for grapheme in xutf::graphemes_str(line) {
+				if grapheme == " " {
+					text.push(LABEL_SPACE);
+				} else {
+					text.push_str(grapheme);
+				}
+				width += grapheme_width(grapheme) as i32;
+			}
+			(text, width)
+		})
+		.collect();
+	let vertical = min_x == max_x;
+	let centers = if vertical {
+		min_y + 1..max_y
+	} else if min_y == max_y {
+		// Along a horizontal line, even the widest row stays between its ends.
+		let width = lines.iter().map(|&(_, width)| width).max().unwrap_or(0);
+		let left = width.div_euclid(2);
+		min_x + 1 + left..max_x + 1 - (width - left).max(1)
+	} else {
+		// A diagonal line, left when routing fails, is drawn bent, so its
+		// label stays home.
+		0..0
+	};
+	Some(EdgeLabel {
+		lines,
+		home: (middle_x, middle_y),
+		vertical,
+		centers,
+		line: [(min_x, min_y), (max_x, max_y)],
+	})
+}
+
+/// An edge label's lines with their widths in cells, its default center, the
+/// other centers along its line (rows if `vertical`, else columns), and the
+/// top-left and bottom-right corners of that line.
+struct EdgeLabel {
+	lines:    Vec<(String, i32)>,
+	home:     (i32, i32),
+	vertical: bool,
+	centers:  std::ops::Range<i32>,
+	line:     [(i32, i32); 2],
+}
+
+impl EdgeLabel {
+	/// Left column, row and width of each label line centered on `(x, y)`.
+	fn spans(&self, (x, y): (i32, i32)) -> impl Iterator<Item = (i32, i32, i32)> + '_ {
+		let rows = self.lines.len() as i32;
+		self.lines.iter().enumerate().map(move |(i, &(_, width))| {
+			(x - width.div_euclid(2), y - (rows - 1).div_euclid(2) + i as i32, width)
+		})
+	}
+
+	fn cells(&self, spot: (i32, i32)) -> impl Iterator<Item = (i32, i32)> + '_ {
+		self
+			.spans(spot)
+			.flat_map(|(left, row, width)| (left..left + width).map(move |column| (column, row)))
+	}
+
+	fn on_line(&self, (x, y): (i32, i32)) -> bool {
+		let [(min_x, min_y), (max_x, max_y)] = self.line;
+		(min_x..=max_x).contains(&x) && (min_y..=max_y).contains(&y)
+	}
+
+	/// Home, then the other centers nearest first, the lower one first on ties.
+	fn candidates(&self) -> impl Iterator<Item = (i32, i32)> + '_ {
+		let (home_x, home_y) = self.home;
+		let center = if self.vertical { home_y } else { home_x };
+		let reach = if self.centers.is_empty() {
+			0
+		} else {
+			(center - self.centers.start).max(self.centers.end - 1 - center)
+		};
+		std::iter::once(self.home).chain(
+			(1..=reach)
+				.flat_map(move |distance| [center - distance, center + distance])
+				.filter(|c| self.centers.contains(c))
+				.map(move |c| {
+					if self.vertical {
+						(home_x, c)
+					} else {
+						(c, home_y)
+					}
+				}),
+		)
 	}
 }
 
@@ -698,7 +777,7 @@ fn draw_bundled_edge_segment(
 	graph: &AsciiGraph,
 	edge: &AsciiEdge,
 	bundle: &EdgeBundle,
-) -> [Layer; 6] {
+) -> [Layer; 5] {
 	if edge.path_to_junction.is_empty() {
 		return std::array::from_fn(|_| Layer::over(&graph.canvas));
 	}
@@ -760,7 +839,6 @@ fn draw_bundled_edge_segment(
 		Layer::over(&graph.canvas),
 		Layer::over(&graph.canvas),
 		corners_canvas,
-		Layer::over(&graph.canvas),
 	]
 }
 
@@ -950,15 +1028,29 @@ pub fn draw_subgraph_box(graph: &AsciiGraph, sg: SubgraphId) -> Canvas {
 
 /// Draw a subgraph label and return its placement offset.
 pub fn draw_subgraph_label(graph: &AsciiGraph, sg: SubgraphId) -> (Canvas, DrawingCoord) {
-	let Some(sg) = graph.subgraphs.get(sg) else {
+	let Some(bounds) = graph.subgraphs.get(sg) else {
 		return (Canvas::new(1, 1), DrawingCoord::new(0, 0));
 	};
-	let width = sg.max_x - sg.min_x;
-	let height = sg.max_y - sg.min_y;
+	let width = bounds.max_x - bounds.min_x;
+	let height = bounds.max_y - bounds.min_y;
 	if width <= 0 || height <= 0 {
 		return (Canvas::new(1, 1), DrawingCoord::new(0, 0));
 	}
 	let mut canvas = Canvas::new(width + 1, height + 1);
+	for (x, y, cell) in subgraph_title_cells(graph, sg) {
+		canvas.set(x, y, cell);
+	}
+	(canvas, DrawingCoord::new(bounds.min_x, bounds.min_y))
+}
+
+/// The cells of a subgraph's title, relative to its bounding-box origin.
+fn subgraph_title_cells(graph: &AsciiGraph, sg: SubgraphId) -> Vec<(i32, i32, Cell)> {
+	let mut title = Vec::new();
+	let Some(sg) = graph.subgraphs.get(sg) else {
+		return title;
+	};
+	let width = sg.max_x - sg.min_x;
+	let height = sg.max_y - sg.min_y;
 	for (i, line) in split_lines(&sg.name).enumerate() {
 		let y = 1 + i as i32;
 		let x = (width.div_euclid(2) - (display_width(line) as i32).div_euclid(2)).max(1);
@@ -972,13 +1064,13 @@ pub fn draw_subgraph_label(graph: &AsciiGraph, sg: SubgraphId) -> (Canvas, Drawi
 			if cx + i32::from(wide) >= width || y >= height {
 				continue;
 			}
-			canvas.set(cx, y, cell.clone());
+			title.push((cx, y, cell.clone()));
 			if wide {
-				canvas.set(cx + 1, y, Cell::WIDE_PAD);
+				title.push((cx + 1, y, Cell::WIDE_PAD));
 			}
 		}
 	}
-	(canvas, DrawingCoord::new(sg.min_x, sg.min_y))
+	title
 }
 
 fn subgraph_depth(graph: &AsciiGraph, mut sg: SubgraphId) -> usize {
@@ -1086,6 +1178,123 @@ fn fill_roles_for_node_box(roles: &mut RoleCanvas, canvas: &Canvas, offset: Draw
 	}
 }
 
+/// Draw the edge labels once every route is known, moving each along its line
+/// off nodes, labels, subgraph titles and route marks, and off other routes
+/// when it can.
+fn draw_labels(
+	graph: &AsciiGraph,
+	labels: Vec<EdgeLabel>,
+	lines: &[Layer],
+	marks: [&[Layer]; 5],
+) -> Vec<Layer> {
+	if labels.is_empty() {
+		return Vec::new();
+	}
+	let mut marks: HashSet<(i32, i32)> = marks
+		.into_iter()
+		.flatten()
+		.flat_map(|layer| layer.cells().map(|(x, y, _)| (x, y)))
+		.collect();
+	for (sg, bounds) in graph.subgraphs.iter().enumerate() {
+		if !bounds.nodes.is_empty() {
+			marks.extend(
+				subgraph_title_cells(graph, sg)
+					.into_iter()
+					.map(|(x, y, _)| (bounds.min_x + x, bounds.min_y + y)),
+			);
+		}
+	}
+	// Avoid hiding routes: cells where a horizontal and a vertical route meet,
+	// and other routes off the label's own line. Routes running along its line
+	// read as one line in any style, so a label may cover them.
+	let horizontal = |cell: &Cell| {
+		[EdgeStyle::Solid, EdgeStyle::Dotted, EdgeStyle::Thick]
+			.into_iter()
+			.any(|style| *cell == line_chars(style, graph.config.use_ascii).0)
+	};
+	let mut drawn = HashMap::new();
+	let mut crossings = HashSet::new();
+	for layer in lines {
+		for (x, y, cell) in layer.cells() {
+			let across = horizontal(cell);
+			if drawn
+				.insert((x, y), across)
+				.is_some_and(|other| other != across)
+			{
+				crossings.insert((x, y));
+			}
+		}
+	}
+	// Cells past the right or bottom edge are free: drawing text grows the
+	// canvas.
+	let free = |x: i32, y: i32| {
+		x >= 0
+			&& y >= 0
+			&& graph.canvas.get(x, y).is_none_or(Cell::is_space)
+			&& !marks.contains(&(x, y))
+	};
+	let mut occupied = HashMap::new();
+	for cell in labels.iter().flat_map(|label| label.cells(label.home)) {
+		*occupied.entry(cell).or_insert(0) += 1;
+	}
+	// In edge order, so where two labels that cannot move overlap, the earlier
+	// one shows.
+	labels
+		.iter()
+		.map(|label| {
+			// `occupied` counts drawn labels and homes not drawn yet; releasing
+			// only this label's home keeps it off labels that cannot move.
+			for cell in label.cells(label.home) {
+				if let Some(count) = occupied.get_mut(&cell) {
+					*count -= 1;
+					if *count == 0 {
+						occupied.remove(&cell);
+					}
+				}
+			}
+			// The nearest free spot with no other label beside each row; failing
+			// that, the nearest that covers a route stroke off its own line but
+			// no crossing, then the nearest that covers a crossing.
+			let mut on_route = None;
+			let mut on_crossing = None;
+			let spot = label
+				.candidates()
+				.find(|&spot| {
+					let clear = label.spans(spot).all(|(left, row, width)| {
+						(left..left + width).all(|x| free(x, row))
+							&& (left - 1..=left + width).all(|x| !occupied.contains_key(&(x, row)))
+					});
+					if !clear {
+						return false;
+					}
+					if label.cells(spot).any(|cell| crossings.contains(&cell)) {
+						on_crossing.get_or_insert(spot);
+						return false;
+					}
+					if label
+						.cells(spot)
+						.any(|cell| drawn.contains_key(&cell) && !label.on_line(cell))
+					{
+						on_route.get_or_insert(spot);
+						return false;
+					}
+					true
+				})
+				.or(on_route)
+				.or(on_crossing)
+				.unwrap_or(label.home);
+			let mut canvas = Layer::over(&graph.canvas);
+			for ((text, _), (left, row, width)) in label.lines.iter().zip(label.spans(spot)) {
+				canvas.draw_text(DrawingCoord::new(left, row), text, false);
+				for column in left..left + width {
+					*occupied.entry((column, row)).or_insert(0) += 1;
+				}
+			}
+			canvas
+		})
+		.collect()
+}
+
 /// Composite subgraphs, nodes, edges, labels, and role metadata into the graph
 /// canvases.
 pub fn draw_graph(graph: &mut AsciiGraph) {
@@ -1117,8 +1326,8 @@ pub fn draw_graph(graph: &mut AsciiGraph) {
 	let mut arrow_ends = Vec::new();
 	let mut arrow_starts = Vec::new();
 	let mut box_starts = Vec::new();
-	let mut labels = Vec::new();
 	let mut junctions = Vec::new();
+	let mut labels = Vec::new();
 	let mut processed_bundles = HashSet::new();
 
 	for edge in &graph.edges {
@@ -1126,12 +1335,10 @@ pub fn draw_graph(graph: &mut AsciiGraph) {
 			let Some(bundle) = graph.bundles.get(bundle_id) else {
 				continue;
 			};
-			let [path, box_start, _, _, edge_corners, label] =
-				draw_bundled_edge_segment(graph, edge, bundle);
+			let [path, box_start, _, _, edge_corners] = draw_bundled_edge_segment(graph, edge, bundle);
 			lines.push(path);
 			corners.push(edge_corners);
 			box_starts.push(box_start);
-			labels.push(label);
 			if processed_bundles.insert(bundle_id) {
 				let (shared_path, shared_corners) = draw_bundle_shared_path(graph, bundle);
 				lines.push(shared_path);
@@ -1149,16 +1356,25 @@ pub fn draw_graph(graph: &mut AsciiGraph) {
 				arrow_ends.push(draw_bundle_arrowhead(graph, &edge.path_to_junction, edge.to));
 			}
 		} else {
-			let [path, box_start, arrow_end, arrow_start, edge_corners, label] =
-				draw_arrow(graph, edge);
+			let drawing_path = edge_drawing_path(graph, edge);
+			let [path, box_start, arrow_end, arrow_start, edge_corners] =
+				draw_arrow(graph, edge, &drawing_path);
+			labels.extend(edge_label(graph, edge, &drawing_path));
 			lines.push(path);
 			corners.push(edge_corners);
 			arrow_ends.push(arrow_end);
 			arrow_starts.push(arrow_start);
 			box_starts.push(box_start);
-			labels.push(label);
 		}
 	}
+
+	let labels = draw_labels(graph, labels, &lines, [
+		&corners,
+		&junctions,
+		&arrow_ends,
+		&box_starts,
+		&arrow_starts,
+	]);
 
 	// Edge layers composite by kind, each kind over every edge in order.
 	for (layers, role) in [

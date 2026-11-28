@@ -114,12 +114,17 @@ impl Cell {
 	}
 
 	/// Whether the cell holds label content for first-label-wins collision
-	/// handling: letters/digits in any script, the continuation cell of a
-	/// wide glyph, or any 2-column glyph (only labels produce wide glyphs).
+	/// handling: letters/digits in any script, a label space (alone or with
+	/// combining marks), the continuation cell of a wide glyph, or any
+	/// 2-column glyph (only labels produce wide glyphs).
 	pub fn is_label(&self) -> bool {
 		match self.as_char() {
 			Some(c) => c == LABEL_SPACE || c == WIDE_PAD || c.is_alphanumeric() || char_width(c) == 2,
-			None => self.display_width() == 2 || self.as_str().chars().any(char::is_alphanumeric),
+			None => {
+				self.display_width() == 2
+					|| self.as_str().starts_with(' ')
+					|| self.as_str().chars().any(char::is_alphanumeric)
+			},
 		}
 	}
 }
