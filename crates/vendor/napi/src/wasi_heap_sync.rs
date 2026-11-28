@@ -6,8 +6,8 @@
 //! `memory.fill`, `memory.copy` and atomics (on hosts without V8's wasm trap handler, every load
 //! and store) against that old size. `memory.grow(0)` on the stale thread reloads it. The
 //! mechanism, and the state this module shares with napi-async-runtime, are described in
-//! `napi_sys::wasi_heap_sync`; the evidence and the rejected alternatives are in rolldown's
-//! `internal-docs/wasi-shared-memory-grow/design.md`, where this code comes from.
+//! `napi_sys::wasi_heap_sync`; the evidence and the rejected alternatives are in
+//! `cli/docs/wasi-heap-sync-design.md` ("Evidence", "Rejected alternatives").
 //!
 //! # The fix: refresh under the allocator lock
 //!
@@ -49,10 +49,10 @@
 //! dlmalloc's lock: a large zeroed allocation or realloc copy holds every other thread's
 //! allocator calls. Kept on purpose: moving the fill and copy out of the lock did not help on
 //! rolldown's measured loads, and dlmalloc has no in-place-only realloc entry, so a realloc
-//! outside the lock would cost a second lock round trip and lose in-place growth (rolldown's
-//! design.md, principle 1). The lock spins like dlmalloc's, so it is safe on a browser main
-//! thread, where `memory.atomic.wait` traps and where emnapi frees memory from a
-//! `FinalizationRegistry` callback.
+//! outside the lock would cost a second lock round trip and lose in-place growth
+//! (`cli/docs/wasi-heap-sync-design.md`, "Design principles", principle 1). The lock spins like
+//! dlmalloc's, so it is safe on a browser main thread, where `memory.atomic.wait` traps and
+//! where emnapi frees memory from a `FinalizationRegistry` callback.
 //!
 //! Not re-entrant, and it does not need to be: inside dlmalloc's object the public names are thin
 //! wrappers over static functions, and the object's only calls out are `sbrk` and

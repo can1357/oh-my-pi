@@ -153,6 +153,12 @@ fn procargs2_env(buffer: &[u8]) -> impl Iterator<Item = &[u8]> {
 		.take_while(|var| !var.is_empty())
 }
 
+/// The value of the first `name=value` among `vars`; `None` when none sets `name`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn env_var_value<'a>(mut vars: impl Iterator<Item = &'a [u8]>, name: &[u8]) -> Option<&'a [u8]> {
+	vars.find_map(|var| var.strip_prefix(name)?.strip_prefix(b"="))
+}
+
 /// argc and the NUL-separated strings from argv on in a `KERN_PROCARGS2`
 /// buffer; `None` without a header or with a negative argc.
 #[cfg(any(target_os = "macos", test))]
@@ -246,12 +252,12 @@ pub mod sys {
 		)
 	}
 
-	/// Whether the environment `pid` was exec'd with (`/proc/<pid>/environ`)
-	/// holds exactly `entry` (`NAME=value`); `false` when unreadable (another
+	/// The value of `name` in the environment `pid` was exec'd with
+	/// (`/proc/<pid>/environ`); `None` when unset or unreadable (another
 	/// user's process, a kernel thread, a zombie).
-	pub fn has_env_entry(pid: i32, entry: &[u8]) -> bool {
-		fs::read(format!("/proc/{pid}/environ"))
-			.is_ok_and(|environ| environ.split(|byte| *byte == 0).any(|var| var == entry))
+	pub fn env_value(pid: i32, name: &[u8]) -> Option<Vec<u8>> {
+		let environ = fs::read(format!("/proc/{pid}/environ")).ok()?;
+		super::env_var_value(environ.split(|byte| *byte == 0), name).map(<[u8]>::to_vec)
 	}
 
 	/// Whether `pid` ignores `SIGHUP` (the `SigIgn` mask of
@@ -817,13 +823,14 @@ pub mod sys {
 		procargs2(pid).map_or_else(Vec::new, |buffer| super::parse_procargs2(&buffer))
 	}
 
-	/// Whether the environment `pid` was exec'd with (from `KERN_PROCARGS2`)
-	/// holds exactly `entry` (`NAME=value`); `false` when unreadable (another
-	/// user's process, a zombie). The kernel withholds the environment of
-	/// Apple platform binaries (`/bin/sh`, `/bin/sleep`, …) even from the
-	/// same user, so those never match.
-	pub fn has_env_entry(pid: i32, entry: &[u8]) -> bool {
-		procargs2(pid).is_some_and(|buffer| super::procargs2_env(&buffer).any(|var| var == entry))
+	/// The value of `name` in the environment `pid` was exec'd with (from
+	/// `KERN_PROCARGS2`); `None` when unset or unreadable (another user's
+	/// process, a zombie). The kernel withholds the environment of Apple
+	/// platform binaries (`/bin/sh`, `/bin/sleep`, …) even from the same user,
+	/// so those never have one.
+	pub fn env_value(pid: i32, name: &[u8]) -> Option<Vec<u8>> {
+		let buffer = procargs2(pid)?;
+		super::env_var_value(super::procargs2_env(&buffer), name).map(<[u8]>::to_vec)
 	}
 
 	/// `pid`'s `KERN_PROCARGS2` buffer: argc, exec path, argv, environment.
@@ -2309,9 +2316,8 @@ mod tests {
 		let default = spawn(libc::SIG_DFL, Stdio::piped());
 		let (ignoring_pid, default_pid) = (ignoring.0.id() as i32, default.0.id() as i32);
 
-		assert!(sys::has_env_entry(ignoring_pid, b"OMP_PROC_SYS_TEST=tagged"));
-		assert!(!sys::has_env_entry(ignoring_pid, b"OMP_PROC_SYS_TEST=other"));
-		assert!(!sys::has_env_entry(ignoring_pid, b"OMP_PROC_SYS_TEST"), "a name alone is no entry");
+		assert_eq!(sys::env_value(ignoring_pid, b"OMP_PROC_SYS_TEST").as_deref(), Some(&b"tagged"[..]));
+		assert_eq!(sys::env_value(ignoring_pid, b"OMP_PROC_SYS_TES"), None, "a name prefix is no name");
 		assert_eq!(sys::ignores_hangup(ignoring_pid), Some(true));
 		assert_eq!(sys::ignores_hangup(default_pid), Some(false));
 		assert_eq!(
@@ -2321,7 +2327,7 @@ mod tests {
 		assert_eq!(sys::output_file(default_pid, 1), None, "a pipe is no output file");
 		drop(ignoring);
 		drop(default);
-		assert!(!sys::has_env_entry(ignoring_pid, b"OMP_PROC_SYS_TEST=tagged"), "reaped");
+		assert_eq!(sys::env_value(ignoring_pid, b"OMP_PROC_SYS_TEST"), None, "reaped");
 	}
 
 	/// Set in [`sleeper`]'s environment when a test spawns it.

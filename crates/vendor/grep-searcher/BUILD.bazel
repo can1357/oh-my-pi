@@ -21,7 +21,7 @@ rust_library(
         "noclippy",
         "norustfmt",
     ],
-    version = "0.1.17",
+    version = "0.1.18",
     deps = all_crate_deps(normal = True),
 )
 

@@ -93,11 +93,9 @@ impl BigInt {
   /// return true in the last element of tuple if the value is lossless
   /// or the value is truncated
   pub fn get_u64(&self) -> (bool, u64, bool) {
-    (
-      self.sign_bit,
-      self.words[0],
-      !self.sign_bit && self.words.len() == 1,
-    )
+    let lo = self.words.first().copied().unwrap_or(0);
+    let upper_zero = self.words.iter().skip(1).all(|&w| w == 0);
+    (self.sign_bit, lo, !self.sign_bit && upper_zero)
   }
 
   /// (value, lossless)
@@ -105,13 +103,17 @@ impl BigInt {
   /// return true if the value is lossless
   /// or the value is truncated
   pub fn get_i64(&self) -> (i64, bool) {
-    if self.sign_bit && self.words[0] == i64::MIN.unsigned_abs() {
-      return (i64::MIN, self.words.len() == 1);
+    let lo = self.words.first().copied().unwrap_or(0);
+    let upper_zero = self.words.iter().skip(1).all(|&w| w == 0);
+    if self.sign_bit && lo == i64::MIN.unsigned_abs() {
+      return (i64::MIN, upper_zero);
     }
-    (
-      self.words[0] as i64 * if self.sign_bit { -1 } else { 1 },
-      self.words.len() == 1 && self.words[0] as i64 >= 0,
-    )
+    let val = if self.sign_bit {
+      (lo as i64).wrapping_neg()
+    } else {
+      lo as i64
+    };
+    (val, upper_zero && (lo as i64) >= 0)
   }
 
   /// (value, lossless)
@@ -119,22 +121,19 @@ impl BigInt {
   /// return true if the value is lossless
   /// or the value is truncated
   pub fn get_i128(&self) -> (i128, bool) {
-    let len = self.words.len();
-    if len == 1 {
-      (
-        self.words[0] as i128 * if self.sign_bit { -1 } else { 1 },
-        true,
-      )
-    } else {
-      let val = self.words[0] as u128 + ((self.words[1] as u128) << 64);
-      if self.sign_bit && val == i128::MIN.unsigned_abs() {
-        return (i128::MIN, len > 2);
-      }
-      (
-        val as i128 * if self.sign_bit { -1 } else { 1 },
-        len == 2 && self.words[1] as i64 >= 0,
-      )
+    let lo = self.words.first().copied().unwrap_or(0);
+    let hi = self.words.get(1).copied().unwrap_or(0);
+    let val = (lo as u128) | ((hi as u128) << 64);
+    let upper_zero = self.words.iter().skip(2).all(|&w| w == 0);
+    if self.sign_bit && val == i128::MIN.unsigned_abs() {
+      return (i128::MIN, upper_zero);
     }
+    let signed_val = if self.sign_bit {
+      (val as i128).wrapping_neg()
+    } else {
+      val as i128
+    };
+    (signed_val, upper_zero && (hi as i64) >= 0)
   }
 
   /// (signed, value, lossless)
@@ -142,13 +141,11 @@ impl BigInt {
   /// return true if the value is lossless
   /// or the value is truncated
   pub fn get_u128(&self) -> (bool, u128, bool) {
-    let len = self.words.len();
-    if len == 1 {
-      (self.sign_bit, self.words[0] as u128, true)
-    } else {
-      let val = self.words[0] as u128 + ((self.words[1] as u128) << 64);
-      (self.sign_bit, val, len == 2)
-    }
+    let lo = self.words.first().copied().unwrap_or(0);
+    let hi = self.words.get(1).copied().unwrap_or(0);
+    let val = (lo as u128) | ((hi as u128) << 64);
+    let upper_zero = self.words.iter().skip(2).all(|&w| w == 0);
+    (self.sign_bit, val, upper_zero)
   }
 }
 
@@ -357,4 +354,46 @@ fn test_bigint_comparison() {
 
   assert_eq!(BigInt::from(i128::MAX), BigInt::from(i128::MAX));
   assert_ne!(BigInt::from(i64::MAX), BigInt::from(i128::MAX));
+}
+
+#[test]
+fn test_bigint_lossless_conversions() {
+  assert_eq!(BigInt::from(i64::MIN).get_i64(), (i64::MIN, true));
+  assert_eq!(BigInt::from(i64::MAX).get_i64(), (i64::MAX, true));
+  assert_eq!(BigInt::from(i64::MIN).get_i128(), (i64::MIN as i128, true));
+
+  // Negative 1-word value below i64::MIN must report lossy for i64 and lossless for i128
+  let below_i64_min = BigInt {
+    sign_bit: true,
+    words: vec![i64::MIN.unsigned_abs() + 1],
+  };
+  assert!(!below_i64_min.get_i64().1);
+  assert_eq!(below_i64_min.get_i128(), (i64::MIN as i128 - 1, true));
+
+  // Exact i128::MIN must be lossless; >128-bit with the same low 128 bits must be lossy
+  assert_eq!(BigInt::from(i128::MIN).get_i128(), (i128::MIN, true));
+  let truncated_i128_min = BigInt {
+    sign_bit: true,
+    words: vec![0, i64::MIN.unsigned_abs(), 1],
+  };
+  assert_eq!(truncated_i128_min.get_i128(), (i128::MIN, false));
+
+  assert_eq!(BigInt::from(i128::MAX).get_i128(), (i128::MAX, true));
+  let above_i128_max = BigInt {
+    sign_bit: false,
+    words: vec![0, i64::MIN.unsigned_abs()],
+  };
+  assert!(!above_i128_max.get_i128().1);
+
+  assert_eq!(BigInt::from(u64::MAX).get_u64(), (false, u64::MAX, true));
+  assert_eq!(BigInt::from(u128::MAX).get_u128(), (false, u128::MAX, true));
+  let above_u128_max = BigInt {
+    sign_bit: false,
+    words: vec![0, 0, 1],
+  };
+  assert_eq!(above_u128_max.get_u128(), (false, 0, false));
+
+  // Trailing zero words (as produced by From<i128> / From<u128>) remain lossless
+  assert_eq!(BigInt::from(1_i128).get_i64(), (1, true));
+  assert_eq!(BigInt::from(1_u128).get_u64(), (false, 1, true));
 }

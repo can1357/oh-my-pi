@@ -5,6 +5,7 @@
 use std::{borrow::Cow, sync::Arc};
 
 use bstr::BString;
+use xutf::DecodeError;
 
 use super::{
 	super::{
@@ -22,7 +23,7 @@ use super::{
 };
 use crate::bash::{
 	pattern::zsh::{PatFlags, Pattern, haswilds, remnulargs, tokenize},
-	syntax::zsh::tok::{QUEST, STAR, at, metafy, unmetafy, untokenize},
+	syntax::zsh::tok::{QUEST, STAR, at, metafy, metafy_into, unmetafy, untokenize},
 	vm::{
 		expand::{Expander, X},
 		zsh::{subst::singsub, zpattern},
@@ -943,42 +944,29 @@ const fn mode_type(mode: u32) -> u8 {
 /// `$'\ooo'`; `None` when all are fine.
 fn quote_invalid(str: &[u8]) -> Option<Vec<u8>> {
 	let raw = unmetafy(str);
-	if std::str::from_utf8(&raw).is_ok() {
+	let valid = xutf::valid_prefix(&raw);
+	let mut bytes = &raw[valid.len()..];
+	if bytes.is_empty() {
 		return None;
 	}
 	let mut out = Vec::with_capacity(raw.len() * 2);
-	let esc = |out: &mut Vec<u8>, b: u8| {
-		out.extend_from_slice(b"$'\\");
-		out.extend_from_slice(&[b'0' + ((b >> 6) & 7), b'0' + ((b >> 3) & 7), b'0' + (b & 7), b'\'']);
-	};
-	let mut fs = 0;
-	while fs < raw.len() {
-		match std::str::from_utf8(&raw[fs..(fs + 4).min(raw.len())]) {
-			Ok(s) => {
-				let n = s.chars().next().map_or(1, char::len_utf8);
-				out.extend_from_slice(&metafy(&raw[fs..fs + n]));
-				fs += n;
+	metafy_into(valid.as_bytes(), &mut out);
+	while !bytes.is_empty() {
+		let (valid, bad, rest) = match xutf::decode(bytes) {
+			Ok(text) => (text, &[][..], &[][..]),
+			Err(DecodeError::Invalid { valid_prefix, invalid_sequence, remaining_input }) => {
+				(valid_prefix, invalid_sequence, remaining_input)
 			},
-			Err(e) if e.valid_up_to() > 0 => {
-				let n = std::str::from_utf8(&raw[fs..fs + e.valid_up_to()])
-					.ok()
-					.and_then(|s| s.chars().next())
-					.map_or(1, char::len_utf8);
-				out.extend_from_slice(&metafy(&raw[fs..fs + n]));
-				fs += n;
+			Err(DecodeError::Incomplete { valid_prefix, .. }) => {
+				(valid_prefix, &bytes[valid_prefix.len()..], &[][..])
 			},
-			Err(e) if e.error_len().is_none() && fs + 4 > raw.len() => {
-				// Incomplete at the end: all of it.
-				for &b in &raw[fs..] {
-					esc(&mut out, b);
-				}
-				fs = raw.len();
-			},
-			Err(_) => {
-				esc(&mut out, raw[fs]);
-				fs += 1;
-			},
+		};
+		metafy_into(valid.as_bytes(), &mut out);
+		for &b in bad {
+			out.extend_from_slice(b"$'\\");
+			out.extend_from_slice(&[b'0' + ((b >> 6) & 7), b'0' + ((b >> 3) & 7), b'0' + (b & 7), b'\'']);
 		}
+		bytes = rest;
 	}
 	Some(out)
 }

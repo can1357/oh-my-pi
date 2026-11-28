@@ -7,7 +7,9 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import {
+	BLOB_APPEND_METHOD,
 	BLOB_BROKER_KIND,
+	BLOB_CALL_CHUNK_CHARS,
 	BLOB_RENDER_CHANNEL,
 	type BlobBrokerWorkerConfig,
 	type BlobRenderRequest,
@@ -16,7 +18,6 @@ import {
 	type EnsureBlobResponse,
 } from "@oh-my-pi/pi-coding-agent/blob-broker/protocol";
 import { canonicalProjectDir, daemonClient, isolateDaemonForSmokeTest } from "@oh-my-pi/pi-coding-agent/daemon/client";
-import { BLOB_APPEND_METHOD, BLOB_CALL_CHUNK_CHARS } from "@oh-my-pi/pi-coding-agent/daemon/modules/blob";
 import { type DaemonClient, type DaemonTunnel, projectScope } from "@oh-my-pi/pi-coding-agent/daemon/protocol";
 import { TempDir } from "@oh-my-pi/pi-utils";
 

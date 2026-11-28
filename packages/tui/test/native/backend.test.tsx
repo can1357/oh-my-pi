@@ -674,6 +674,37 @@ describe("native reconciler", () => {
 		expect(h.ops()).toEqual([["scroll", "main/1", "page-down"]]);
 	});
 
+	it("reveals a rebuilt node again only when its request moves", async () => {
+		const rev = signal(0);
+		const open = signal(false);
+		const n = signal(1);
+		const h = await mount(() => ({
+			main: () => {
+				rev();
+				return open() ? (
+					<col key="q" reveal={{ at: "start", n: n() }}>
+						<text text={`open ${rev()}`} />
+					</col>
+				) : (
+					<col key="q">
+						<text text="folded" />
+					</col>
+				);
+			},
+		}));
+		// The folded node opening (its record taken over) is a request it never had.
+		open.set(true);
+		h.settle();
+		expect(h.ops().filter(op => op[0] === "reveal")).toEqual([["reveal", "main/q", "start"]]);
+		// Rebuilt with the same request (a key moving the highlight): no reveal.
+		rev.set(1);
+		h.settle();
+		expect(h.ops().filter(op => op[0] === "reveal")).toEqual([]);
+		n.set(2);
+		h.settle();
+		expect(h.ops().filter(op => op[0] === "reveal")).toEqual([["reveal", "main/q", "start"]]);
+	});
+
 	it("scrolls on the first request an existing node gets, never on the one it was added with", async () => {
 		const scroll = signal<ScrollRequest | undefined>(undefined);
 		const shown = signal(false);

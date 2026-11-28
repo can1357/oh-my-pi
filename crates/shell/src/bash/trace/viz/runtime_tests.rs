@@ -1154,7 +1154,14 @@ async fn running_command_keeps_the_script_it_runs_active() {
 		let probe = async {
 			loop {
 				let p = present(&trace, &Options::default());
-				if p["running"] == true {
+				// `running` flips before `sh -c` spawns; until then its script
+				// shows as a raw two-line document instead of the expanded rows.
+				let expanded = rows(&p)
+					.iter()
+					.filter(|(_, row)| row["depth"].as_u64() > Some(0))
+					.count()
+					>= 3;
+				if p["running"] == true && expanded {
 					let raw = present(&trace, &Options { view: View::Raw, ..Options::default() });
 					std::fs::write(&gate, []).unwrap();
 					return (p, raw);

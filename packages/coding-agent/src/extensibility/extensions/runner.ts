@@ -50,6 +50,7 @@ import { resolveArtifactSpillThreshold } from "../../tools/output-meta";
 import { type InlineByteCapOptions, truncateTail } from "../../tools/streaming-output";
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
 import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shared-events";
+import { aggregateExtensionFlags } from "./flags";
 import { ManagedTimers } from "./managed-timers";
 import { createExtensionModelQuery } from "./model-api";
 import { trackUserWaits, type UserWaitTracker } from "./user-wait";
@@ -1562,18 +1563,10 @@ export class ExtensionRunner {
 
 	/**
 	 * Aggregate the registered CLI flags across a set of extensions (last write
-	 * wins on name collision). Static so callers that need the flag set before a
-	 * runner exists — e.g. the CLI resolving `@file`/flag args before session
-	 * creation — share this exact logic instead of duplicating it.
+	 * wins on name collision).
 	 */
 	static aggregateFlags(extensions: readonly Extension[]): Map<string, ExtensionFlag> {
-		const allFlags = new Map<string, ExtensionFlag>();
-		for (const ext of extensions) {
-			for (const [name, flag] of ext.flags) {
-				allFlags.set(name, flag);
-			}
-		}
-		return allFlags;
+		return aggregateExtensionFlags(extensions);
 	}
 
 	getFlags(): Map<string, ExtensionFlag> {

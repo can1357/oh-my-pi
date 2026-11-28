@@ -53,25 +53,21 @@ pub mod compile;
 pub mod data;
 mod exn;
 mod filter;
-mod fold;
 mod funs;
-mod into_iter;
 pub mod load;
 pub mod native;
 pub mod ops;
 pub mod path;
-mod rc_lazy_list;
+pub mod pull;
 mod rc_list;
-mod stack;
 pub mod val;
 
 pub use data::DataT;
 pub use exn::{Error, Exn};
-pub use filter::{Ctx, Cv, Native, PathsPtr, RunPtr, UpdatePtr, Vars};
+pub use filter::{Ctx, Cv, Native, PathsPtr, RunNodePtr, RunPtr, UpdatePtr, Vars};
 pub use val::{unwrap_valr, ValR, ValT, ValX, ValXs};
 
-use rc_list::List as RcList;
-use stack::Stack;
+pub use rc_list::List as RcList;
 
 /// Argument of a definition, such as `$v` or `f` in `def foo($v; f): ...`.
 ///
@@ -152,6 +148,5 @@ where
     for<'a> D::V<'a>: ValT,
 {
     let run = funs::run().into_vec().into_iter().map(native::run);
-    let paths = funs::paths().into_vec().into_iter().map(native::paths);
-    run.chain(paths)
+    run.chain(funs::resumable())
 }

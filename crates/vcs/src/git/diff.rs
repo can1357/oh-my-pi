@@ -9,6 +9,7 @@ use std::{
 use gix::{
 	bstr::{BStr, BString, ByteSlice},
 	diff::blob::platform::prepare_diff::Operation,
+	error::ResultExt as _,
 };
 
 use super::{
@@ -401,8 +402,8 @@ fn index_changes(
 			index,
 			pathspec.as_mut(),
 			gix::status::tree_index::TrackRenames::AsConfigured,
-			|change, _, _| -> Result<_> {
-				out.push(index_change(repo, change.into_owned())?);
+			|change, _, _| -> gix::Result<_> {
+				out.push(index_change(repo, change.into_owned()).or_error()?);
 				Ok(std::ops::ControlFlow::Continue(()))
 			},
 		)
@@ -1477,7 +1478,8 @@ const BASE85: &[u8; 85] =
 	b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~";
 
 fn zlib_compress(data: &[u8]) -> Result<Vec<u8>> {
-	let mut writer = gix::features::zlib::stream::deflate::Write::new(Vec::new());
+	let mut writer =
+		gix::zlib::stream::deflate::Write::new(Vec::new(), gix::zlib::Compression::BEST_SPEED);
 	writer
 		.write_all(data)
 		.and_then(|()| writer.flush())

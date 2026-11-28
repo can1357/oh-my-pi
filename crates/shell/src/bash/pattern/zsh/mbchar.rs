@@ -10,6 +10,8 @@
 //! Ported from zsh 5.9 (MIT-style licence, Copyright (c) 1992-1997 Paul
 //! Falstad and the zsh development group).
 
+use xutf::DecodeError;
+
 use crate::bash::syntax::zsh::tok::{META, head, is_tok, span, tok_char};
 
 /// How a multibyte character decoded (zsh `ZMB_VALID` and friends).
@@ -34,14 +36,10 @@ pub(super) const fn invalid(b: u8) -> u32 {
 /// there is none (`mbrtowc`).
 #[inline]
 fn decode(s: &[u8]) -> Result<(u32, usize), Zmb> {
-	let take = head(s, 4);
-	let valid = match core::str::from_utf8(take) {
-		Ok(v) => v,
-		Err(e) if e.valid_up_to() > 0 => {
-			core::str::from_utf8(head(take, e.valid_up_to())).unwrap_or_default()
-		},
-		Err(e) if e.error_len().is_none() => return Err(Zmb::Incomplete),
-		Err(_) => return Err(Zmb::Invalid),
+	let valid = match xutf::decode(head(s, char::MAX_LEN_UTF8)) {
+		Ok(text) | Err(DecodeError::Incomplete { valid_prefix: text, .. }) => text,
+		Err(DecodeError::Invalid { valid_prefix: "", .. }) => return Err(Zmb::Invalid),
+		Err(DecodeError::Invalid { valid_prefix, .. }) => valid_prefix,
 	};
 	valid
 		.chars()

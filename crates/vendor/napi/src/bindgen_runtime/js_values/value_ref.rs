@@ -8,7 +8,10 @@ use std::sync::{Arc, Weak};
 use nohash_hasher::NoHashHasher;
 
 use crate::{
-  bindgen_runtime::{FromNapiValue, MaybeTypeTag, PersistedPerInstanceHashMap, ToNapiValue},
+  bindgen_runtime::{
+    check_class_identity, ClassId, FromNapiValue, MaybeTypeTag, PersistedPerInstanceHashMap,
+    ToNapiValue,
+  },
   check_status, Env, Error, Result, Status,
 };
 
@@ -18,11 +21,33 @@ pub(crate) type RefInformation = (
   /* finalize_callback */ *const Cell<*mut dyn FnOnce()>,
 );
 
+/// A `REFERENCE_MAP` entry.
+#[derive(Clone, Copy)]
+pub(crate) struct RefEntry {
+  pub(crate) info: RefInformation,
+  /// The class wrapped at this address, see `class_identity.rs`.
+  #[cfg_attr(all(feature = "napi8", not(target_family = "wasm")), allow(dead_code))]
+  pub(crate) class_id: ClassId,
+}
+
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub(crate) fn add_ref(env: crate::sys::napi_env, t: *mut c_void, value: RefInformation) {
+pub(crate) fn add_ref(
+  env: crate::sys::napi_env,
+  t: *mut c_void,
+  value: RefInformation,
+  class_id: ClassId,
+) {
   REFERENCE_MAP.with(|cell| {
     cell.borrow_mut(|map| {
-      if let Some((_, previous_ref, previous_rc)) = map.insert(t, value) {
+      let entry = RefEntry {
+        info: value,
+        class_id,
+      };
+      if let Some(RefEntry {
+        info: (_, previous_ref, previous_rc),
+        ..
+      }) = map.insert(t, entry)
+      {
         unsafe { Arc::from_raw(previous_rc) };
         unsafe { crate::sys::napi_delete_reference(env, previous_ref) };
       }
@@ -32,7 +57,7 @@ pub(crate) fn add_ref(env: crate::sys::napi_env, t: *mut c_void, value: RefInfor
 
 thread_local! {
   pub(crate) static REFERENCE_MAP: LazyCell<
-    PersistedPerInstanceHashMap<*mut c_void, RefInformation, BuildHasherDefault<NoHashHasher<usize>>>,
+    PersistedPerInstanceHashMap<*mut c_void, RefEntry, BuildHasherDefault<NoHashHasher<usize>>>,
   > = LazyCell::new(Default::default);
 }
 
@@ -81,13 +106,20 @@ impl<T: 'static> Reference<T> {
   #[doc(hidden)]
   #[allow(clippy::not_unsafe_ptr_arg_deref)]
   pub fn add_ref(env: crate::sys::napi_env, t: *mut c_void, value: RefInformation) {
-    add_ref(env, t, value);
+    // Callers outside the runtime may not pass the wrapped class as `T`, so no
+    // class is recorded and the class check accepts the entry as before.
+    add_ref(env, t, value, Default::default());
   }
 
   #[doc(hidden)]
   pub unsafe fn from_value_ptr(t: *mut c_void, env: crate::sys::napi_env) -> Result<Self> {
-    if let Some((wrapped_value, napi_ref, finalize_callbacks_ptr)) =
-      REFERENCE_MAP.with(|cell| cell.borrow_mut(|map| map.get(&t).cloned()))
+    // Reject a pointer wrapped for another class on builds without type tags
+    // (#3608). No-op on napi8 native.
+    check_class_identity::<T>(t, std::any::type_name::<T>)?;
+    if let Some(RefEntry {
+      info: (wrapped_value, napi_ref, finalize_callbacks_ptr),
+      ..
+    }) = REFERENCE_MAP.with(|cell| cell.borrow_mut(|map| map.get(&t).copied()))
     {
       let mut ref_count = 0;
       check_status!(
@@ -138,8 +170,8 @@ impl<T: 'static + MaybeTypeTag> FromNapiValue for Reference<T> {
 
     // Reject a wrong-class / prototype-spoofed object before adopting it as a
     // `Reference<T>`. Compiled only on napi8 NATIVE targets (the `T: MaybeTypeTag`
-    // bound provides `T::type_tag()` only there; elsewhere this is the pre-tag
-    // path).
+    // bound provides `T::type_tag()` only there). Elsewhere `from_value_ptr`
+    // checks the class recorded at wrap time instead (see `class_identity.rs`).
     #[cfg(all(feature = "napi8", not(target_family = "wasm")))]
     unsafe {
       crate::bindgen_runtime::validate_type_tag(

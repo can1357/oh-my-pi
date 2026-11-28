@@ -2,7 +2,6 @@ import { type AgentMessage, type AgentToolResult, ThinkingLevel } from "@oh-my-p
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import type { ImageContent, Model, UsageReport } from "@oh-my-pi/pi-ai";
 import { LoginCancelledError } from "@oh-my-pi/pi-ai/error";
-import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
 import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { type JSXNode, type KeyEvent, signal, type UiNode, untrack } from "@oh-my-pi/pi-tui";
@@ -2217,7 +2216,6 @@ export class SelectorController {
 			(options?.followContinuation ? await findSessionContinuation(sessionPath) : undefined);
 		const target = await this.#relocateStranded(continuation?.session.path ?? sessionPath);
 		await this.ctx.prepareSessionSwitch();
-		this.ctx.resetObserverRegistry();
 		// AgentSession owns the transaction. It restores the complete source state
 		// if applying the target project's cwd fails, including in-memory sessions.
 		let modelFallbackWarning: string | undefined;
@@ -2247,6 +2245,9 @@ export class SelectorController {
 			if (!switched && memoryWarning) this.ctx.showWarning(memoryWarning);
 		}
 		if (!switched) return false;
+		// Only now does the session manager name the resumed file: the reset points the main
+		// session at it and rebuilds the subagent tray from it. A failed switch keeps both.
+		this.ctx.resetObserverRegistry();
 		this.ctx.clearTransientSessionUi();
 		const newCwd = this.ctx.sessionManager.getCwd();
 		const movedProject = normalizePathForComparison(newCwd) !== normalizePathForComparison(previousCwd);
@@ -2367,7 +2368,7 @@ export class SelectorController {
 		);
 		const handle = this.ctx.showEditorAreaDialog(() => LoginDialog({ state: dialog }));
 		try {
-			const identity = await this.ctx.session.modelRegistry.authStorage.oauth.login(providerId as OAuthProvider, {
+			const identity = await this.ctx.session.modelRegistry.authStorage.oauth.login(providerId, {
 				signal: dialog.signal,
 				onBrowserSession: captureBrowserSession,
 				onAuth: (info: { url: string; launchUrl?: string; instructions?: string }) => {

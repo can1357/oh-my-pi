@@ -4,6 +4,7 @@
  * the `tui.editor.*` bindings.
  */
 import type { KeyEvent } from "@oh-my-pi/pi-tui";
+import { segmentGraphemes } from "@oh-my-pi/pi-utils/graphemes";
 import type { Keybinding } from "../../../config/keybindings/app-keybindings";
 import { getKeybindings } from "../../../config/keybindings/keybindings";
 
@@ -13,11 +14,9 @@ export interface LineState {
 	readonly cursor: number;
 }
 
-const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
-
 function graphemeBefore(text: string, at: number): number {
 	let previous = 0;
-	for (const { index } of segmenter.segment(text)) {
+	for (const { index } of segmentGraphemes(text)) {
 		if (index >= at) break;
 		previous = index;
 	}
@@ -25,7 +24,7 @@ function graphemeBefore(text: string, at: number): number {
 }
 
 function graphemeAfter(text: string, at: number): number {
-	for (const { index, segment } of segmenter.segment(text)) if (index >= at) return index + segment.length;
+	for (const { index, segment } of segmentGraphemes(text)) if (index >= at) return index + segment.length;
 	return text.length;
 }
 

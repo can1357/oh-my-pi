@@ -2,8 +2,11 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { cfgBinjaInstall } from "@oh-my-pi/pi-coding-agent/binja/install";
+import { cfgBinjaInstallDir } from "@oh-my-pi/pi-coding-agent/binja/settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { cfgDisasmBackend } from "@oh-my-pi/pi-coding-agent/disasm/active";
+import { cfgDisassembler } from "@oh-my-pi/pi-coding-agent/disasm/settings";
 import { formatDatabaseHandle, parseDatabaseHandle } from "@oh-my-pi/pi-coding-agent/disasm/protocol";
 import { ghidraHostSupported } from "@oh-my-pi/pi-coding-agent/ghidra/platform";
 import { isExecutableHeader, parseFatSlices, selectSlice, splitSliceRef } from "@oh-my-pi/pi-coding-agent/disasm/store";
@@ -141,6 +144,30 @@ describe("disassembler backend selection", () => {
 	it("prefers an idalib install", () => {
 		const settings = Settings.isolated({ "ida.installDir": withIdalib });
 		expect(cfgDisasmBackend.get(settings)).toBe("ida");
+	});
+
+	it("does not probe Binary Ninja in auto, but observes its install when explicitly selected", async () => {
+		const settings = Settings.isolated({ "ida.installDir": withIdalib, "binja.installDir": withoutBinja });
+		const changes: unknown[] = [];
+		const stop = cfgDisasmBackend.listen(settings, backend => {
+			changes.push(backend);
+		});
+		try {
+			expect(cfgDisasmBackend.get(settings)).toBe("ida");
+			expect(settings.valueCache[cfgBinjaInstall.slot]).toBeUndefined();
+			cfgBinjaInstallDir.override(settings, withBinja);
+			await Promise.resolve();
+			expect(settings.valueCache[cfgBinjaInstall.slot]).toBeUndefined();
+			expect(changes).toEqual([]);
+
+			cfgDisassembler.override(settings, "binja");
+			await Promise.resolve();
+			cfgBinjaInstallDir.override(settings, withoutBinja);
+			await Promise.resolve();
+			expect(changes).toEqual(["binja", undefined]);
+		} finally {
+			stop();
+		}
 	});
 
 	it("disables every backend even with an idalib install", () => {

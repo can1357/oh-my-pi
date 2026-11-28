@@ -153,18 +153,19 @@ describe("startup model fallback notice after first-run setup", () => {
 			return showWarning.call(this, message, ...rest);
 		});
 		const renderInitialMessages = InteractiveMode.prototype.renderInitialMessages;
-		spyOn(InteractiveMode.prototype, "renderInitialMessages").mockImplementation(
-			async function (this: InteractiveMode, options) {
-				// Stubbed setup step: runs before the startup notices are shown.
-				if (setupModelId) {
-					const model = scopedModel(setupModelId).model;
-					// Sign-in stores a credential for the provider before the model it selects.
-					this.session.modelRegistry.authStorage.keys.setRuntime(model.provider, "setup-test-key");
-					await this.session.setModel(model, "default", { persist: false });
-				}
-				await renderInitialMessages.call(this, options);
-			},
-		);
+		spyOn(InteractiveMode.prototype, "renderInitialMessages").mockImplementation(async function (
+			this: InteractiveMode,
+			options,
+		) {
+			// Stubbed setup step: runs before the startup notices are shown.
+			if (setupModelId) {
+				const model = scopedModel(setupModelId).model;
+				// Sign-in stores a credential for the provider before the model it selects.
+				this.session.modelRegistry.authStorage.keys.setRuntime(model.provider, "setup-test-key");
+				await this.session.setModel(model, "default", { persist: false });
+			}
+			await renderInitialMessages.call(this, options);
+		});
 		spyOn(InteractiveMode.prototype, "getUserInput").mockImplementation(async function (this: InteractiveMode) {
 			mode = this;
 			throw interrupted;
