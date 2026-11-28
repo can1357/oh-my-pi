@@ -225,6 +225,12 @@ interface Pin {
 	readonly span: number;
 }
 
+/** Screen rows above an inline viewport at this size (0 without a pin that reaches it). */
+function screenAbove(pin: Pin | undefined, width: number, height: number): number {
+	if (!pin || pin.width !== width || pin.height !== height) return 0;
+	return pin.bottom ? Math.max(0, height - pin.span) : pin.below;
+}
+
 interface Placed {
 	readonly block: Block;
 	/** Viewport row of the block's first row. */
@@ -1201,14 +1207,7 @@ export class TermBackend {
 			// they reach that far down — past the top row its cursor-up clamps there and the image
 			// lands over rows that are not its own. A pin of another size leaves nothing to reach.
 			if (carriedEnd > 0) {
-				const pin = this.#pin;
-				const above =
-					!pin || pin.width !== width || pin.height !== height
-						? 0
-						: pin.bottom
-							? Math.max(0, height - pin.span)
-							: pin.below;
-				dropCutImages(rows, 0, carriedEnd, above);
+				dropCutImages(rows, 0, carriedEnd, screenAbove(this.#pin, width, height));
 			}
 			if (rows.length > 0 || ledger) {
 				history = {
@@ -1310,9 +1309,7 @@ export class TermBackend {
 			const held = !fresh && pin.bottom ? Math.min(height, pin.span - written) : 0;
 			const span = Math.max(viewport.length + dockRows, held);
 			this.#nextPin = { width, height, below: below + written, bottom, rows: viewport.length + dockRows, span };
-			// The screen rows above the viewport: everything written so far, or (at the bottom) what it leaves.
-			const above = bottom ? Math.max(0, height - span) : below + written;
-			if (joinedEnd > 0) dropCutImages(viewport, 0, joinedEnd, above);
+			if (joinedEnd > 0) dropCutImages(viewport, 0, joinedEnd, screenAbove(this.#nextPin, width, height));
 		} else if (joinedEnd > 0) dropCutImages(viewport, 0, joinedEnd);
 		const dockTop = viewport.length;
 		for (const placed of dock) {
