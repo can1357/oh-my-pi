@@ -68,6 +68,8 @@ export interface ResetExpiryWarning {
 	usedFraction: number;
 	/** Window whose consent governs spending the warned reset; absent when either chat window could. */
 	window: ResetWindow | undefined;
+	/** Id of the warned reset, so a spend command can name exactly it. */
+	creditId?: string;
 }
 
 /**
@@ -134,6 +136,7 @@ export function classifyResetExpiry(report: UsageReport, nowMs: number): ResetEx
 		usableNow: spendableNow(provider, report.resetCredits, warned.credit),
 		...fullest,
 		window,
+		creditId: "id" in warned.credit && typeof warned.credit.id === "string" ? warned.credit.id : undefined,
 	};
 }
 

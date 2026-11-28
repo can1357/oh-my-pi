@@ -67,7 +67,7 @@ import { FileSessionStorage } from "../../session/session-storage";
 import { listLogoutAccounts, logoutCredential } from "../../slash-commands/helpers/logout";
 import { connectedProviderName } from "../view-model/chrome/format";
 import type { LogoutAccount } from "../view-model/overlays/logout-account-selector";
-import { describeRedeemOutcome, toResetUsageAccounts } from "../../slash-commands/helpers/reset-usage";
+import { describeRedeemOutcome, toResetSelectorAccounts } from "../../slash-commands/helpers/reset-usage";
 import { toSessionPinAccounts } from "../../slash-commands/helpers/session-pin";
 import {
 	accountIdentityLabel,
@@ -2639,7 +2639,7 @@ export class SelectorController {
 			);
 			return;
 		}
-		const accounts = toResetUsageAccounts(statuses);
+		const accounts = toResetSelectorAccounts(statuses);
 		if (accounts.length === 0) {
 			this.ctx.showStatus("No provider accounts found. Use /login to add one.");
 			return;

@@ -15,7 +15,8 @@ export default class Usage extends Command {
 			options: ["invalidate", "clients", "accounts", "reset"],
 		}),
 		target: Args.string({
-			description: "Saved reset to spend with `reset`: <provider>/<credential id> as `omp usage reset` lists it",
+			description:
+				"Saved reset to spend with `reset`: <provider>/<credential id>[:<credit id>] as `omp usage reset` lists it",
 			required: false,
 		}),
 	};
@@ -51,8 +52,9 @@ export default class Usage extends Command {
 		"# Usage-limit trend over the last 30 days\n  omp usage --history --days 30",
 		"# Per-client token burn (which machine/app spent what) over the last 30 days\n  omp usage clients --days 30",
 		"# OAuth identity keys for task.agentAccountPools (no tokens)\n  omp usage accounts",
-		"# Saved Codex and Claude rate-limit resets per account, with each account's credential id\n  omp usage reset",
+		"# Saved Codex and Claude rate-limit resets per account: credential ids, each reset's id, and what each Claude reset clears\n  omp usage reset",
 		"# Spend one saved reset on a listed account\n  omp usage reset codex/3",
+		"# Spend exactly the named reset (required when an account holds resets that clear different limits)\n  omp usage reset anthropic/5:launch-2610-fable",
 		"# Invalidate cached usage reports for all providers\n  omp usage invalidate",
 		"# Invalidate cached usage reports for a specific provider\n  omp usage invalidate --provider anthropic",
 	];

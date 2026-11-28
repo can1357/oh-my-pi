@@ -425,6 +425,126 @@ describe("planClaudeResetRedemptions: window consent", () => {
 	});
 });
 
+describe("planClaudeResetRedemptions: a wider reset than the block needs", () => {
+	const fullClears = ["anthropic:5h", "anthropic:7d", "anthropic:7d:fable"];
+	const fableBlock = { weeklyUsed: 0.5, fableUsed: 1 };
+	const fableGrant: UsageResetCredit = {
+		id: "launch-2610-fable",
+		program: "cedar_ember",
+		title: "New model launch: one Fable reset",
+		remainingCount: 1,
+		usable: false,
+		requiresLimit: true,
+		clears: ["anthropic:5h", "anthropic:7d:fable"],
+		blocking: [],
+		usedFractions: {},
+		status: "unavailable",
+		expiresAt: new Date(NOW + 20 * 24 * HOUR).toISOString(),
+	};
+
+	it("holds a full reset on a Fable-only block and names the Fable grant offered after it", () => {
+		const live = status({
+			availableCount: 2,
+			credit: {
+				id: "full-reset-2611",
+				title: "One full limit reset (November 2026)",
+				clears: fullClears,
+				blocking: ["anthropic:7d:fable"],
+				usedFractions: { "anthropic:7d:fable": 1 },
+				expiresAt: new Date(NOW + 20 * 24 * HOUR).toISOString(),
+			},
+		});
+		live.credits.push(fableGrant);
+		const plan = planClaudeResetRedemptions(
+			input({ modelId: "claude-fable-5", reports: [report(fableBlock)], statuses: [live] }),
+		);
+		expect(plan.actions).toEqual([]);
+		expect(plan.skipped).toContainEqual({
+			accountKey: "anthropic|org-a|11",
+			rule: "blocked-account",
+			reason: "broader-than-blocked",
+		});
+		expect(plan.held).toMatchObject([
+			{
+				target: { credentialId: 11, creditId: "full-reset-2611" },
+				credit: { id: "full-reset-2611" },
+				blockedWindows: ["anthropic:7d:fable"],
+				beyond: ["anthropic:7d"],
+				narrower: { id: "launch-2610-fable" },
+			},
+		]);
+	});
+
+	it("restores another account's Fable grant rather than the active account's full reset", () => {
+		const active = status({
+			credit: {
+				id: "full-reset-2611",
+				clears: fullClears,
+				blocking: ["anthropic:7d:fable"],
+				usedFractions: { "anthropic:7d:fable": 1 },
+				expiresAt: new Date(NOW + 20 * 24 * HOUR).toISOString(),
+			},
+		});
+		const other = status({
+			credentialId: 22,
+			orgId: "org-b",
+			active: false,
+			credit: { ...fableGrant, usable: true, status: "available", blocking: ["anthropic:7d:fable"] },
+		});
+		const plan = planClaudeResetRedemptions(
+			input({
+				modelId: "claude-fable-5",
+				reports: [report(fableBlock), report({ ...fableBlock, orgId: "org-b" })],
+				statuses: [active, other],
+			}),
+		);
+		expect(plan.actions).toMatchObject([
+			{ reason: "blocked-account", target: { credentialId: 22, creditId: "launch-2610-fable" } },
+		]);
+		expect(plan.held).toEqual([]);
+	});
+
+	it("spends a reset that also clears the weekly window on a 5h-only block when no narrower grant is banked", () => {
+		const plan = planClaudeResetRedemptions(
+			input({
+				reports: [report({ fiveHourUsed: 1, weeklyUsed: 0.5 })],
+				statuses: [
+					status({
+						credit: {
+							blocking: ["anthropic:5h"],
+							usedFractions: { "anthropic:5h": 1 },
+							expiresAt: new Date(NOW + 20 * 24 * HOUR).toISOString(),
+						},
+					}),
+				],
+			}),
+		);
+		expect(plan.actions).toMatchObject([
+			{ reason: "blocked-account", window: "5h", blockedWindows: ["anthropic:5h"] },
+		]);
+		expect(plan.held).toEqual([]);
+	});
+
+	it("holds a reset that also clears the weekly window on a 5h-only block when a 5h-only grant is banked", () => {
+		const live = status({
+			availableCount: 2,
+			credit: {
+				blocking: ["anthropic:5h"],
+				usedFractions: { "anthropic:5h": 1 },
+				expiresAt: new Date(NOW + 20 * 24 * HOUR).toISOString(),
+			},
+		});
+		live.credits.push({ ...fableGrant, id: "five-hour-2611", clears: ["anthropic:5h"] });
+		const plan = planClaudeResetRedemptions(
+			input({ reports: [report({ fiveHourUsed: 1, weeklyUsed: 0.5 })], statuses: [live] }),
+		);
+		expect(plan.actions).toEqual([]);
+		expect(plan.held).toMatchObject([
+			{ blockedWindows: ["anthropic:5h"], beyond: ["anthropic:7d"], narrower: { id: "five-hour-2611" } },
+		]);
+	});
+});
+
 describe("planClaudeResetRedemptions: expiry salvage", () => {
 	it("salvages at the inclusive five-minute boundary despite zero horizon, reserve, and zero usage", () => {
 		const urgentInput = input({

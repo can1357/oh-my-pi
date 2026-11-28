@@ -20,6 +20,7 @@
 - Added the `onDiscardedAttempt` stream option: it receives each attempt a replay-safe retry throws away (an empty completion, a transient provider error), which the provider may still have billed; attempts with no tokens and no charge are skipped ([#20667](https://github.com/can1357/oh-my-pi/issues/20667), [#20806](https://github.com/can1357/oh-my-pi/pull/20806) by [@wapenshaw](https://github.com/wapenshaw))
 - Factory Droid Gemini requests send the `xhigh` thinking level for models whose ladder offers it (Gemini 4 Neon) instead of capping at `HIGH` ([#19841](https://github.com/can1357/oh-my-pi/issues/19841))
 - Added `PI_ANTHROPIC_OAUTH_CALLBACK_PORT` to override the Anthropic login callback port (default `54545`, `0` for a random free port) ([#14135](https://github.com/can1357/oh-my-pi/issues/14135))
+- Added `groupResetCreditsByClears`, which groups an account's spendable saved-reset credits by the limits they clear ([#19894](https://github.com/can1357/oh-my-pi/pull/19894) by [@Xytronix](https://github.com/Xytronix))
 
 ### Removed
 
@@ -70,6 +71,7 @@
 - Devin sessions now switch to another stored login when the current one's weekly quota is spent and it has no on-demand balance, instead of failing every request on it ([#20524](https://github.com/can1357/oh-my-pi/pull/20524) by [@will-bogusz](https://github.com/will-bogusz))
 - The thinking-loop guard no longer aborts healthy reasoning written in Chinese, Japanese, Thai, or other unspaced scripts when the same English tool or metric names recur, and now also catches loops in that text ([#20096](https://github.com/can1357/oh-my-pi/issues/20096))
 - Pi-native stream requests now use a configured `Authorization` header regardless of its casing and fall back to the API key when the header is empty or absent ([#20472](https://github.com/can1357/oh-my-pi/pull/20472) by [@enieuwy](https://github.com/enieuwy))
+- `resets.redeem` no longer spends the Claude grant offered next when the target names no credit and the account holds grants that clear different limits; it returns `credit_choice_required` and spends nothing ([#19894](https://github.com/can1357/oh-my-pi/pull/19894) by [@Xytronix](https://github.com/Xytronix))
 
 ## [19.2.1] - 2026-11-25
 

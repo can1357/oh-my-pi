@@ -1,11 +1,14 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
 /**
  * The account picker for `/usage reset`: provider accounts with their saved
- * rate-limit resets. A reset is a scarce, irreversible credit, so spending
- * takes two activations: the first turns the selected row into a confirm
- * strip (what the reset covers reads in the subtitle), the second spends it.
- * Moving to another account, ⎋, or the strip's `cancel` drops the pending
- * confirmation; ⎋ with nothing pending (or `close`) cancels the picker.
+ * rate-limit resets, and the selected account's credits under the list. A
+ * reset is a scarce, irreversible credit, so spending takes two activations:
+ * the first turns the selected row into a confirm strip (what the reset covers
+ * reads in the subtitle), the second spends it. An account whose resets clear
+ * different limits gets one row per reset instead, and only the reset the
+ * provider offers next can be confirmed. Moving to another account, ⎋, or the
+ * strip's `cancel` drops the pending confirmation; ⎋ with nothing pending (or
+ * `close`) cancels the picker.
  */
 import { batch, type JSXNode, type KeyEvent, signal } from "@oh-my-pi/pi-tui";
 import { formatDuration, sanitizeText } from "@oh-my-pi/pi-utils";
@@ -38,12 +41,17 @@ const oneLine = (value: string): string => sanitizeText(value.replace(/[\r\n\t]+
 
 /** The account's picker id: provider, credential and credit. */
 export function resetAccountKey(account: ResetUsageAccount): string {
-	return `${account.provider}:${account.target.credentialId}:${account.target.creditId ?? ""}`;
+	return `${account.provider}:${account.target.credentialId}:${account.credit?.id ?? account.target.creditId ?? ""}`;
 }
 
-/** Reset count, usability, expiry and unavailability of an account row, or its error. */
+/** Reset count, usability, expiry and unavailability of an account row, or its error; a reset row's own line. */
 function countLabel(account: ResetUsageAccount, now: number): string {
 	if (account.error) return oneLine(account.error);
+	if (account.creditLine) {
+		const reason =
+			account.redeemableCount <= 0 && account.unavailableReason ? ` · ${oneLine(account.unavailableReason)}` : "";
+		return `${oneLine(account.creditLine)}${reason}`;
+	}
 	let label = `${account.availableCount} saved reset${account.availableCount === 1 ? "" : "s"}`;
 	if (account.redeemableCount !== account.availableCount) label += ` · ${account.redeemableCount} usable now`;
 	const expiry = account.expiresAt ? Date.parse(account.expiresAt) : Number.NaN;
@@ -60,6 +68,7 @@ function pickerItem(account: ResetUsageAccount, now: number): TspPickerItem {
 	if (reason) detail.push({ t: ` · ${oneLine(reason)}`, s: account.error ? "error" : "warning" });
 	let resets: TspSpan;
 	if (account.error) resets = { t: "unavailable", s: "error" };
+	else if (account.creditLine) resets = { t: oneLine(account.creditLine), s: redeemable ? "success" : "dim" };
 	else if (!redeemable) resets = { t: `${account.availableCount} saved`, s: "dim" };
 	else if (account.redeemableCount === account.availableCount)
 		resets = { t: `${account.redeemableCount} usable`, s: "success" };
@@ -78,6 +87,8 @@ function pickerItem(account: ResetUsageAccount, now: number): TspPickerItem {
 		mark: { text: account.providerLabel, seed: account.provider },
 		facts,
 		...(reason ? { disabled: oneLine(reason) } : {}),
+		// Each credit's id, title and coverage on hover.
+		...(account.creditLines?.length ? { title: account.creditLines.map(oneLine).join("\n") } : {}),
 	};
 }
 
@@ -97,7 +108,10 @@ function terminalRow(account: ResetUsageAccount, now: number): TspSpan[] {
 
 /** What a reset of `account` spends and covers, without key instructions. */
 function confirmationNotes(account: ResetUsageAccount): { subject: string; notes: string[] } {
-	const subject = account.credit?.title ? `“${account.credit.title}”` : "1 saved reset";
+	const credit = account.credit;
+	const id = credit?.id ? oneLine(credit.id) : undefined;
+	const title = credit?.title ? `“${credit.title}”` : undefined;
+	const subject = title && id ? `${title} (${id})` : (title ?? (id ? `saved reset ${id}` : "1 saved reset"));
 	const notes: string[] = [];
 	if (account.credit?.program === "juniper_tide") {
 		notes.push("This resets Claude's 5h session limit only; weekly limits stay unchanged.");
@@ -139,11 +153,17 @@ export function ResetUsageSelector(props: ResetUsageSelectorProps): JSXNode {
 			return;
 		}
 		if (account.redeemableCount <= 0) {
-			status.set(
-				account.unavailableReason
-					? `That account's saved resets are unavailable: ${account.unavailableReason}`
-					: "That account has no saved resets usable right now.",
-			);
+			if (account.creditLine) {
+				status.set(
+					`That reset can't be spent now${account.unavailableReason ? `: ${account.unavailableReason}` : "."}`,
+				);
+			} else {
+				status.set(
+					account.unavailableReason
+						? `That account's saved resets are unavailable: ${account.unavailableReason}`
+						: "That account has no saved resets usable right now.",
+				);
+			}
 			return;
 		}
 		const key = resetAccountKey(account);
@@ -222,6 +242,10 @@ export function ResetUsageSelector(props: ResetUsageSelectorProps): JSXNode {
 			].join(" ");
 			hint = [{ t: oneLine(message), s: "warning" }];
 		}
+		// The selected account's credits, one per line: id, title, what each clears.
+		const notes: TspSpan[][] = (byKey.get(selected() ?? "")?.creditLines ?? []).map(line => [
+			{ t: oneLine(line), s: "dim" },
+		]);
 		const message = status();
 		return {
 			title: "Spend a saved rate-limit reset",
@@ -229,7 +253,11 @@ export function ResetUsageSelector(props: ResetUsageSelectorProps): JSXNode {
 			empty: [{ t: "No provider accounts with saved resets", s: "muted" }],
 			hint,
 			hintWrap: true,
-			notes: message ? ["", [{ t: oneLine(message), s: "warning" }]] : undefined,
+			notes: message
+				? [...notes, "", [{ t: oneLine(message), s: "warning" }]]
+				: notes.length > 0
+					? notes
+					: undefined,
 		};
 	};
 

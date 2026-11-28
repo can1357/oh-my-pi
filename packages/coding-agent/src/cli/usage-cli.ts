@@ -875,8 +875,10 @@ function formatResetExpiryBanner(
 		const stored = options
 			.accounts(warning.provider)
 			.filter(account => reportMatchesStatus(report, { ...account, provider: warning.provider }));
+		// Claude accounts can bank resets that clear different limits; name the warned one.
+		const credit = warning.provider === "anthropic" && warning.creditId ? `:${warning.creditId}` : "";
 		const command =
-			stored.length === 1 ? `/usage reset ${warning.provider}/${stored[0]!.credentialId}` : "/usage reset";
+			stored.length === 1 ? `/usage reset ${warning.provider}/${stored[0]!.credentialId}${credit}` : "/usage reset";
 		lines.push(
 			`    ${verdicts[index]!.kind === "off" ? "spend it" : "or now"}:  ${chalk.cyan(command)} ${chalk.dim("in omp")}`,
 		);
@@ -1540,6 +1542,7 @@ async function runUsageResetCommand(
 			label: maskText(account.label),
 			error: maskOptionalText(account.error),
 			unavailableReason: maskOptionalText(account.unavailableReason),
+			credits: account.credits?.map(credit => ({ ...credit, title: maskOptionalText(credit.title) })),
 		};
 	});
 
@@ -1587,7 +1590,10 @@ async function runUsageResetCommand(
 			return;
 		}
 		const lines = ["Saved rate-limit resets:", ...accounts.map(formatResetUsageAccountLine)];
-		lines.push("", `Spend one with \`${RESET_COMMAND} <provider>/<credential id>\`.`);
+		lines.push(
+			"",
+			`Spend one with \`${RESET_COMMAND} <provider>/<credential id>\`, or name the reset with \`${RESET_COMMAND} <provider>/<credential id>:<credit id>\`.`,
+		);
 		process.stdout.write(`${lines.join("\n")}\n`);
 		return;
 	}

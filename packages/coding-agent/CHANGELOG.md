@@ -128,6 +128,7 @@
 - `omp plugin disable` and the Settings → Plugins enable toggle now note that running sessions keep the plugin until they restart ([#9722](https://github.com/can1357/oh-my-pi/issues/9722))
 - Status line keeps the auto indicator on an auto-resolved thinking effort (e.g. `⟳ high`) so it is distinguishable from a pinned level ([#5951](https://github.com/can1357/oh-my-pi/issues/5951))
 - A configured MCP `oauth.scope` now overrides scopes advertised by the server on initial authorization and `/mcp reauth`, so you can request a narrower (or different) scope set than discovery reports ([#7841](https://github.com/can1357/oh-my-pi/issues/7841))
+- `omp usage reset` and `/usage reset` list each saved reset's id and title, and for Claude the limits it clears; the `/usage reset` picker shows the selected account's resets too ([#19894](https://github.com/can1357/oh-my-pi/pull/19894) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
 
@@ -340,6 +341,10 @@
 - A long session no longer keeps every finished background job, with its full output, in memory after the job's result reaches the agent ([#20836](https://github.com/can1357/oh-my-pi/pull/20836) by [@sjawhar](https://github.com/sjawhar))
 - Skipped prompt-cache writes for one-off memory extraction and consolidation in the local memory backend ([#20783](https://github.com/can1357/oh-my-pi/pull/20783) by [@farnoy](https://github.com/farnoy))
 - Starting or resuming a session no longer prints a `Tool commands: added mcp__…` line listing every MCP tool; MCP tools mounted later are still shown ([#20643](https://github.com/can1357/oh-my-pi/pull/20643) by [@Petyok](https://github.com/Petyok)).
+- `omp usage reset` and `/usage reset` take `<provider>/<credential id>:<credit id>` to spend exactly that saved reset, and refuse a target without one when the account holds resets that clear different limits (a full Claude reset next to a Fable-only one), or a named Claude grant that isn't the one Claude offers next ([#19894](https://github.com/can1357/oh-my-pi/pull/19894) by [@Xytronix](https://github.com/Xytronix))
+- Automatic Claude restores no longer spend a reset that clears more than the block needs while the account banks one, offered later, that clears only that (a full reset ahead of a Fable-only one on a Fable-only block); the session shows the command to spend it instead, and a blocked account whose reset clears only what blocks it is restored first ([#19894](https://github.com/can1357/oh-my-pi/pull/19894) by [@Xytronix](https://github.com/Xytronix))
+- The expiry banner's spend command for a Claude account names the expiring reset ([#19894](https://github.com/can1357/oh-my-pi/pull/19894) by [@Xytronix](https://github.com/Xytronix))
+- The `/usage reset` picker shows each reset of an account whose resets clear different limits as its own row and spends only the one offered next ([#19894](https://github.com/can1357/oh-my-pi/pull/19894) by [@Xytronix](https://github.com/Xytronix))
 
 ### Removed
 
