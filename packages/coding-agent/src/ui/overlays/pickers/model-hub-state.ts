@@ -850,15 +850,24 @@ export class ModelHubState {
 		}
 	}
 
-	/** The scope's rows; while assigning a role (or a role's fallback) only models the role accepts. */
+	/**
+	 * The scope's rows; while assigning a role (or a role's fallback) only models the role accepts.
+	 * Model-keyed chains (`provider/model-id`, `provider/*`) and brand-new chain keys have no role
+	 * predicate; they protect chat turns, so the default role's `accepts` filters them instead.
+	 */
 	#setCandidateItems(items: ReadonlyArray<ModelBrowserItem>): void {
 		const assigning = this.#assigning;
 		const role =
 			assigning?.kind === "role" || (assigning?.kind === "fallback" && !assigning.role.includes("/"))
 				? assigning.role
 				: undefined;
+		const chatFallback = assigning?.kind === "fallback" || assigning?.kind === "fallbackKey";
 		this.#candidateItems =
-			role !== undefined ? items.filter(item => this.source.getRoleInfo(role).accepts(item.model)) : [...items];
+			role !== undefined
+				? items.filter(item => this.source.getRoleInfo(role).accepts(item.model))
+				: chatFallback
+					? items.filter(item => this.source.getRoleInfo("default").accepts(item.model))
+					: [...items];
 		this.#applyModelKind();
 	}
 
@@ -1167,12 +1176,17 @@ export class ModelHubState {
 				});
 			}
 		}
-		chips.push(
-			{ label: `fallbacks:${item.model.id}`, action: "fallbackModel" },
-			{ label: `fallbacks:${item.model.provider}/*`, action: "fallbackProvider" },
-		);
-		// `retry-fallback` appends to the default chain: chat-capable models only.
-		if (this.source.getRoleInfo("default").accepts(item.model)) chips.push({ label: "fallback", action: "fallback" });
+		// Fallback chains protect chat turns, so `fallbacks:*` chains (keyed by a
+		// model or its whole provider) and `retry-fallback` are only offered for
+		// models the default chat role accepts — a non-chat model must never
+		// become a chat fallback or a chain key. Regression: #20897.
+		if (this.source.getRoleInfo("default").accepts(item.model)) {
+			chips.push(
+				{ label: `fallbacks:${item.model.id}`, action: "fallbackModel" },
+				{ label: `fallbacks:${item.model.provider}/*`, action: "fallbackProvider" },
+			);
+			chips.push({ label: "fallback", action: "fallback" });
+		}
 		this.#strip = { kind: "role", item, chips, index: 0, returnToRoles: false };
 	}
 
