@@ -1268,7 +1268,7 @@ export const cfgToolsCommandInline = register({
 export const cfgToolsCommandNotices = register({
 	id: "tools.commandNotices",
 	type: "boolean",
-	default: true,
+	default: false,
 	ui: {
 		tab: "tools",
 		group: "Discovery & MCP",

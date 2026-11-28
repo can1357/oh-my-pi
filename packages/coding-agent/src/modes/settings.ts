@@ -1448,6 +1448,19 @@ export const cfgStartupQuiet = register({
 	},
 });
 
+export const cfgStartupModelScopeNotice = register({
+	id: "startup.modelScopeNotice",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "interaction",
+		group: "Startup & Updates",
+		label: "Model Scope Notice",
+		description:
+			"On startup, list the models Ctrl+P cycles through when --models or enabledModels scopes them. Quiet Startup still suppresses it.",
+	},
+});
+
 export const cfgStartupShowSplash = register({
 	id: "startup.showSplash",
 	type: "boolean",

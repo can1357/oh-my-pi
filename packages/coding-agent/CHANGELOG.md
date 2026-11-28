@@ -80,6 +80,8 @@
 ### Changed
 
 - Clarified in `/settings` and the settings reference that `statusLine.separator` applies to built-in `box` and `band` composer layouts (and `top-border`/`top-band` attachments) and is ignored by other layouts ([#20890](https://github.com/can1357/oh-my-pi/pull/20890) by [@5UM-4N](https://github.com/5UM-4N)).
+- MCP/extension tool mount notices (`Tool commands: added …`) are now off by default; set `tools.commandNotices: true` to show them
+- The startup `Model scope: … (Ctrl+P to cycle)` notice is now off by default; set `startup.modelScopeNotice: true` to show it
 - The model picker pins only the `default`, `smol`, `slow` and `plan` role models to the top; models holding background roles (`tiny`, `memory`, `commit`, `vision`, …) sort by recent use
 - Launches with `--config` draw the composer before startup finishes unless an overlay sets a setting that frame shows (`tui.screen`, theme, symbols, composer shape, vim mode, quiet startup); `PI_CONFIG_FILES` overlays that set one now skip it too
 - OTLP export runs on OpenTelemetry JS SDK 3; `OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG`, `OTEL_BSP_*` and the span limit variables are no longer read (the documented `OTEL_*` variables work as before)

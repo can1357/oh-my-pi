@@ -174,6 +174,7 @@ import {
 	cfgSetupVersion,
 	cfgStartupChangelogMode,
 	cfgStartupCheckUpdate,
+	cfgStartupModelScopeNotice,
 	cfgStartupQuiet,
 	cfgStartupSetupWizard,
 	cfgStartupShowSplash,
@@ -442,9 +443,9 @@ function postSetupModelFallback(
 
 export function buildModelScopeNotification(
 	scopedModelsForDisplay: readonly Pick<ScopedModel, "model" | "thinkingLevel" | "explicitThinkingLevel">[],
-	startupQuiet: boolean,
+	suppressed: boolean,
 ): InteractiveModeNotify | null {
-	if (startupQuiet || scopedModelsForDisplay.length === 0) {
+	if (suppressed || scopedModelsForDisplay.length === 0) {
 		return null;
 	}
 	const modelList = scopedModelsForDisplay
@@ -3138,7 +3139,7 @@ export async function runRootCommand(
 
 				const modelScopeNotification = buildModelScopeNotification(
 					scopedModels,
-					cfgStartupQuiet.get(settingsInstance),
+					cfgStartupQuiet.get(settingsInstance) || !cfgStartupModelScopeNotice.get(settingsInstance),
 				);
 				if (modelScopeNotification) {
 					// Routed through the TUI (not stdout): the startup capture owns the

@@ -1718,6 +1718,7 @@ Unavailable; invocations fail:
 			toolCommands: createTestToolCommandState(),
 			responses: [{ content: ["ok"] }],
 		});
+		cfgToolsCommandNotices.set(session.settings, true);
 		cfgToolsCommandDocs.set(session.settings, "builtins");
 		cfgToolsCommandInline.set(session.settings, ["mcp__nucleus_*"]);
 		const notices: string[] = [];

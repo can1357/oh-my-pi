@@ -63,7 +63,7 @@ function setSessionModel(session: TestSessionContext["session"], model: Model | 
 }
 
 describe("buildModelScopeNotification", () => {
-	it("does not emit startup model scope chrome while startup.quiet is enabled", () => {
+	it("does not emit startup model scope chrome while suppressed", () => {
 		expect(buildModelScopeNotification([scopedModel("claude-sonnet-4-5")], true)).toBeNull();
 	});
 });
