@@ -55,7 +55,8 @@ async fn diff_header_like_rows_are_hunk_content() {
 }
 
 /// A unified-diff file header opening the body right before an `@@` row is
-/// recognized and dropped, so a `git diff`-shaped update still applies.
+/// recognized and dropped, also after blank rows, so a `git diff`-shaped update
+/// still applies.
 #[tokio::test]
 async fn leading_unified_file_header_is_dropped() {
 	const HUNK: &str = "@@ -1,3 +1,3 @@\n a\n-b\n+B\n c";
@@ -65,6 +66,9 @@ async fn leading_unified_file_header_is_dropped() {
 		 a/fixture.txt\n+++ b/fixture.txt\n",
 		"--- a/fixture.txt\n",
 		"+++ b/fixture.txt\n",
+		"\n--- a/fixture.txt\n+++ b/fixture.txt\n",
+		"diff --git a/fixture.txt b/fixture.txt\n\nindex 1234567..89abcde 100644\n\n--- \
+		 a/fixture.txt\n+++ b/fixture.txt\n",
 	] {
 		let workspace = common::Workspace::new(EditMode::ApplyPatch);
 		workspace.write("fixture.txt", "a\nb\nc\n");

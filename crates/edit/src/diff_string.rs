@@ -844,13 +844,15 @@ const fn is_signed_row(line: &str) -> bool {
 }
 
 /// Range of a unified-diff file header (`--- a`, `+++ b`, either or both)
-/// opening an `apply_patch` body after any unsigned metadata rows. Only a
-/// header directly followed by a unified range header (`@@ -l,s +l,s @@`)
+/// opening an `apply_patch` body after any unsigned metadata or blank rows.
+/// Only a header right before a unified range header (`@@ -l,s +l,s @@`)
 /// counts: Codex hunk headers never take that form, so before a bare or
 /// context `@@` the rows are a header-less first hunk's content.
 fn leading_file_header(lines: &[&str]) -> Option<std::ops::Range<usize>> {
 	let start = lines.iter().position(|line| {
-		is_signed_row(line) || !matches_trimmed_prefix(line.trim(), &DIFF_METADATA_PREFIXES)
+		let trimmed = line.trim();
+		is_signed_row(line)
+			|| !(trimmed.is_empty() || matches_trimmed_prefix(trimmed, &DIFF_METADATA_PREFIXES))
 	})?;
 	let mut end = start;
 	if lines.get(end).is_some_and(|line| line.starts_with("--- ")) {
