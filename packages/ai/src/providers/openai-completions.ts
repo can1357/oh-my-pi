@@ -48,7 +48,13 @@ import type {
 } from "../types";
 import { normalizeSystemPrompts, normalizeToolCallId, resolveCacheRetention } from "../utils";
 import { createAbortSourceTracker } from "../utils/abort";
-import { isDemotedThinking, kStreamingLastParseLen } from "../utils/block-symbols";
+import {
+	clearStreamingPartialJson,
+	isDemotedThinking,
+	kStreamingLastParseLen,
+	type StreamingPartialJsonCarrier,
+	setStreamingPartialJson,
+} from "../utils/block-symbols";
 import {
 	hasVisibleAssistantContent,
 	transportExhaustedMessages,
@@ -1240,11 +1246,12 @@ const streamOpenAICompletionsOnce = (
 			// though tool calls are also surfaced structurally. Strip the leaked markers
 			// so users don't see raw `<｜...｜>` tokens.
 			const stripDeepseekChatTemplateTokens = policy.stream.stripSpecialTokens === "deepseek";
-			type ToolCallStreamBlock = ToolCall & {
-				partialArgs?: string | Record<string, unknown>;
-				streamIndex?: number;
-				[kStreamingLastParseLen]?: number;
-			};
+			type ToolCallStreamBlock = ToolCall &
+				StreamingPartialJsonCarrier & {
+					partialArgs?: string | Record<string, unknown>;
+					streamIndex?: number;
+					[kStreamingLastParseLen]?: number;
+				};
 			type OpenAIStreamBlock = TextContent | ThinkingContent | ToolCallStreamBlock;
 			const pendingToolCallBlocks: ToolCallStreamBlock[] = [];
 			const toolCallBlockByIndex = new Map<number, ToolCallStreamBlock>();
@@ -1295,6 +1302,7 @@ const streamOpenAICompletionsOnce = (
 				block.arguments =
 					typeof block.partialArgs === "string" ? parseToolCallArguments(block.partialArgs) : block.partialArgs;
 				delete block.partialArgs;
+				clearStreamingPartialJson(block);
 				if (block.streamIndex !== undefined) {
 					if (toolCallBlockByIndex.get(block.streamIndex) === block) {
 						toolCallBlockByIndex.delete(block.streamIndex);
@@ -1873,6 +1881,7 @@ const streamOpenAICompletionsOnce = (
 									delta = rawArgs;
 									const prev = typeof block.partialArgs === "string" ? block.partialArgs : "";
 									block.partialArgs = prev + rawArgs;
+									setStreamingPartialJson(block, block.partialArgs);
 									const throttled = parseStreamingJsonThrottled(
 										block.partialArgs,
 										block[kStreamingLastParseLen] ?? 0,

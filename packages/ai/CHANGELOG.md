@@ -27,6 +27,7 @@
 - Removed the `SPEECH_FORMATS` value export; import it from `@oh-my-pi/pi-catalog/types`. The `SpeechFormat` type is still exported ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
+- Fixed tool-call arguments on OpenAI-compatible chat completions hosts staying hidden until the call finished, so tool cards fill in as they stream and speculative subagent launch can start early ([#17551](https://github.com/can1357/oh-my-pi/issues/17551), [#19960](https://github.com/can1357/oh-my-pi/pull/19960) by [@JamieJ5926](https://github.com/JamieJ5926))
 
 - Fixed startup failing with `no such column: salt` when `agent.db` records auth schema v9 but its credentials table has no `salt` column
 - An OpenAI Responses request retried after an empty completion keeps the provider session it started with, so a session the host retired mid-request (a model switch) is not recreated for the next model ([#20858](https://github.com/can1357/oh-my-pi/pull/20858) by [@JustasMasiulis](https://github.com/JustasMasiulis))
