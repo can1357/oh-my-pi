@@ -1063,6 +1063,36 @@ describe("standard OpenAI Responses WebSocket opt-in", () => {
 		expect(fixture.httpRequests).toHaveLength(2);
 	});
 
+	it("does not recreate a provider session the host retired while retrying an empty completion", async () => {
+		let http = 0;
+		const fixture = endpoint(undefined, {
+			httpResponse: () => {
+				if (++http > 1) return sse(textEvents("HTTP RETRIED", "retried"));
+				// The host retires the session mid-request (a model switch); the retry must not re-create it.
+				fixture.providerSessionState.clear();
+				return sse([
+					{
+						type: "response.completed",
+						response: {
+							id: "empty_http",
+							status: "completed",
+							output: [],
+							usage: { input_tokens: 0, output_tokens: 0 },
+						},
+					},
+				]);
+			},
+		});
+		const result = await streamOpenAIResponses(fixture.model, fixture.context, {
+			...fixture.options,
+			preferWebsockets: false,
+			providerRetryWait: async () => {},
+		}).result();
+		expect(result.content).toMatchObject([{ type: "text", text: "HTTP RETRIED" }]);
+		expect(fixture.httpRequests).toHaveLength(2);
+		expect(fixture.providerSessionState.size).toBe(0);
+	});
+
 	it("does not share sticky SSE between independent calls without a logical sessionId", async () => {
 		const fixture = endpoint((socket, _body, index) => {
 			if (index === 1) socket.close(1011, "drop");

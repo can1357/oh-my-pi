@@ -12,13 +12,13 @@ import * as pluginHelpers from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { clearOmpExtensionCliRoots } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
 import { runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
+import { beginStartupComposer } from "@oh-my-pi/pi-coding-agent/modes/startup-composer";
 import {
 	applyStartupComposerPreferences,
-	beginStartupComposer,
 	type ComposerLease,
 	stopPendingStartupComposer,
 	takeStartupComposerLease,
-} from "@oh-my-pi/pi-coding-agent/modes/startup-composer";
+} from "@oh-my-pi/pi-coding-agent/modes/startup-frame";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { memoryTerminal } from "@oh-my-pi/pi-tui/testing/memory-terminal";
@@ -57,6 +57,43 @@ afterEach(() => {
 	setInteractiveHost(savedInteractiveHost);
 });
 
+describe("guarded prepaint shutdown", () => {
+	it.each([
+		{ key: "Ctrl+C", input: "\x03", code: 130 },
+		{ key: "Ctrl+D", input: "\x04", code: 0 },
+	])("restores the terminal and exits on $key while an extension is loading", async ({ input, code }) => {
+		const child = Bun.spawn(
+			[
+				process.execPath,
+				"-e",
+				`import * as fs from "node:fs";
+				import { withHostGuard, ExtensionExitError } from "@oh-my-pi/pi-coding-agent/extensibility/utils";
+				import { beginStartupComposer } from "@oh-my-pi/pi-coding-agent/modes/startup-composer";
+				import { takeStartupComposerLease } from "@oh-my-pi/pi-coding-agent/modes/startup-frame";
+				import { memoryTerminal } from "@oh-my-pi/pi-tui/testing/memory-terminal";
+				const term = memoryTerminal({ columns: 80, rows: 24 });
+				beginStartupComposer({ driver: term.options, cache: false });
+				await takeStartupComposerLease().ready;
+				if (!term.options.stdin.isRaw) throw new Error("prepaint did not claim the terminal");
+				process.on("exit", () => fs.writeSync(1, JSON.stringify({ raw: term.options.stdin.isRaw })));
+				await withHostGuard(async () => {
+					try { process.exit(99); } catch (error) { if (!(error instanceof ExtensionExitError)) throw error; }
+					term.feed(${JSON.stringify(input)});
+				});
+				throw new Error("startup interrupt did not exit");`,
+			],
+			{ stdin: "ignore", stdout: "pipe", stderr: "pipe" },
+		);
+		const [status, stdout, stderr] = await Promise.all([
+			child.exited,
+			new Response(child.stdout).text(),
+			new Response(child.stderr).text(),
+		]);
+		expect(status, stderr).toBe(code);
+		expect(JSON.parse(stdout)).toEqual({ raw: false });
+	});
+});
+
 describe("outer startup collaboration gate", () => {
 	it.each(["completes", "fails"] as const)("keeps guest mutations gated until outer startup %s", async result => {
 		const originalProject = getProjectDir();
@@ -92,14 +129,15 @@ describe("outer startup collaboration gate", () => {
 		const startupFailure = new Error("initial replay failed");
 		const finished = new Error("finished observing startup");
 		const renderInitialMessages = InteractiveMode.prototype.renderInitialMessages;
-		vi.spyOn(InteractiveMode.prototype, "renderInitialMessages").mockImplementation(
-			async function (this: InteractiveMode, options) {
-				await renderInitialMessages.call(this, options);
-				enteredReplay.resolve(this);
-				await releaseReplay.promise;
-				if (result === "fails") throw startupFailure;
-			},
-		);
+		vi.spyOn(InteractiveMode.prototype, "renderInitialMessages").mockImplementation(async function (
+			this: InteractiveMode,
+			options,
+		) {
+			await renderInitialMessages.call(this, options);
+			enteredReplay.resolve(this);
+			await releaseReplay.promise;
+			if (result === "fails") throw startupFailure;
+		});
 		vi.spyOn(InteractiveMode.prototype, "getUserInput").mockRejectedValue(finished);
 		type GuestOutcome = "refused" | "prompt" | "abort" | "agent";
 		let outcome = Promise.withResolvers<GuestOutcome>();
@@ -443,6 +481,21 @@ describe("startup prepaint frame", () => {
 		}
 	});
 
+	it("applies tui.motion to an adopted prepaint frame's renderer", async () => {
+		const lease = await prepaint();
+		const testSession = await createTestSession({ inMemory: true, settingsOverrides: { "tui.motion": "none" } });
+		const mode = adopt(lease, testSession.session);
+		try {
+			await mode.init({ suppressWelcomeIntro: true });
+			expect(lease.frame.spinnerInterval.peek()).toBe(0);
+			expect(lease.frame.reduceMotion.peek()).toBe(true);
+		} finally {
+			mode.stop();
+			await mode.shell.stop();
+			await testSession.cleanup();
+		}
+	});
+
 	it("accepts input while the initial CLI prompt's first turn is still running", async () => {
 		const lease = await prepaint();
 		const testSession = await createTestSession({ inMemory: true });
@@ -610,7 +663,6 @@ describe("startup prepaint frame", () => {
 					thinkingLevel: "high",
 					usingSubscription: false,
 					autoCompact: true,
-					fastMode: false,
 					context: { tokens: 6_000, window: 200_000, percent: 3 },
 				},
 			},
@@ -641,7 +693,6 @@ describe("startup prepaint frame", () => {
 					model: { id: "prophet-9", name: "Prophet 9", thinking: true, contextWindow: 200_000 },
 					usingSubscription: false,
 					autoCompact: true,
-					fastMode: false,
 					context: { tokens: 6_000, window: 200_000, percent: 3 },
 				},
 			},

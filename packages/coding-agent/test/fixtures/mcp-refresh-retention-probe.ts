@@ -62,6 +62,7 @@ const host: SessionToolsHost = {
 	clearMemoryPromotionSnapshot: () => {},
 	captureMemoryPromotionSnapshot: () => {},
 	emitNotice: () => {},
+	mcpStartupMount: () => false,
 	notifyCommandMetadataChanged: () => {},
 	localProtocolOptions: () => ({}),
 	evalPreludes: () => [],

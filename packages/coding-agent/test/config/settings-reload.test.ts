@@ -3,8 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
-import * as atomicFile from "@oh-my-pi/pi-coding-agent/utils/atomic-file";
-import { getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
+import { acquireFileLock, getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "../helpers/settings-test-state";
 
@@ -39,24 +38,6 @@ describe("Settings layer refresh", () => {
 	});
 
 	const configPath = () => path.join(agentDir, "config.yml");
-	/** Holds the store's next config.yml write open until `release`; `reached` settles once the save is at that write. */
-	const pauseNextSave = () => {
-		const original = atomicFile.writeFileAtomically;
-		const reached = Promise.withResolvers<void>();
-		const gate = Promise.withResolvers<void>();
-		let paused = false;
-		const spy = spyOn(atomicFile, "writeFileAtomically").mockImplementation(
-			async (...args: Parameters<typeof original>) => {
-				if (!paused) {
-					paused = true;
-					reached.resolve();
-					await gate.promise;
-				}
-				return original(...args);
-			},
-		);
-		return { reached: reached.promise, release: () => gate.resolve(), restore: () => spy.mockRestore() };
-	};
 	const writeConfig = (settings: Record<string, unknown>) => Bun.write(configPath(), YAML.stringify(settings));
 
 	function writeProjectSettings(project: string, settings: Record<string, unknown>): void {
@@ -105,7 +86,7 @@ describe("Settings layer refresh", () => {
 		});
 	});
 
-	it("keeps global writes made while a save is in flight live and persists them next", async () => {
+	it("keeps global writes made while a save waits on the lock live and persists them next", async () => {
 		await writeConfig({ compaction: { enabled: false } });
 		const settings = await Settings.init({ cwd: startProject, agentDir });
 		const seen: [string, unknown][] = [];
@@ -113,20 +94,14 @@ describe("Settings layer refresh", () => {
 			seen.push([setting.id, setting.get(settings)]);
 		});
 
-		// The save snapshots its pending write, then stalls writing config.yml.
-		const save = pauseNextSave();
-		try {
-			cfgTemperature.set(settings, 0.5);
-			const saving = settings.flush();
-			await save.reached;
-			cfgCompactionEnabled.unset(settings);
-			cfgProvidersMaxInFlightRequests.set(settings, { openai: 3 });
-			save.release();
-			await saving;
-		} finally {
-			save.release();
-			save.restore();
-		}
+		// Another writer holds config.yml's lock: the save snapshots its pending write, then waits.
+		const lock = await acquireFileLock(configPath());
+		cfgTemperature.set(settings, 0.5);
+		const saving = settings.flush();
+		cfgCompactionEnabled.unset(settings);
+		cfgProvidersMaxInFlightRequests.set(settings, { openai: 3 });
+		lock.release();
+		await saving;
 
 		expect(cfgCompactionEnabled.get(settings)).toBe(true);
 		expect(cfgProvidersMaxInFlightRequests.get(settings)).toEqual({ openai: 3 });
@@ -142,23 +117,17 @@ describe("Settings layer refresh", () => {
 		});
 	});
 
-	it("persists a setting written again while its save is in flight without a stale-edit warning", async () => {
+	it("persists a setting written again while its save waits on the lock without a stale-edit warning", async () => {
 		await writeConfig({ temperature: 0.1 });
 		const settings = await Settings.init({ cwd: startProject, agentDir });
 		const warn = spyOn(logger, "warn");
 		try {
-			const save = pauseNextSave();
-			try {
-				cfgTemperature.set(settings, 0.5);
-				const saving = settings.flush();
-				await save.reached;
-				cfgTemperature.set(settings, 0.7);
-				save.release();
-				await saving;
-			} finally {
-				save.release();
-				save.restore();
-			}
+			const lock = await acquireFileLock(configPath());
+			cfgTemperature.set(settings, 0.5);
+			const saving = settings.flush();
+			cfgTemperature.set(settings, 0.7);
+			lock.release();
+			await saving;
 			expect(cfgTemperature.get(settings)).toBe(0.7);
 
 			await settings.flush();

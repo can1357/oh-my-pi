@@ -4,8 +4,10 @@ use std::{
 };
 
 use ashpd::desktop::{
-	PersistMode, Session,
-	remote_desktop::{DeviceType, RemoteDesktop},
+	CreateSessionOptions, PersistMode, Session,
+	remote_desktop::{
+		ConnectToEISOptions, DeviceType, RemoteDesktop, SelectDevicesOptions, StartOptions,
+	},
 };
 use futures::StreamExt;
 use reis::{
@@ -52,7 +54,7 @@ struct EiDevice {
 	layout:  Option<KeyboardLayout>,
 }
 
-type RemoteDesktopSession = Session<'static, RemoteDesktop<'static>>;
+type RemoteDesktopSession = Session<RemoteDesktop>;
 
 struct PortalSession {
 	runtime: &'static tokio::runtime::Runtime,
@@ -181,16 +183,18 @@ impl Libei {
 			let portal = cancellable(RemoteDesktop::new()).await?.map_err(|err| {
 				DesktopError::permission_denied(format!("RemoteDesktop portal unavailable: {err}"))
 			})?;
-			let session = cancellable(portal.create_session()).await?.map_err(|err| {
-				DesktopError::permission_denied(format!("RemoteDesktop CreateSession: {err}"))
-			})?;
+			let session = cancellable(portal.create_session(CreateSessionOptions::default()))
+				.await?
+				.map_err(|err| {
+					DesktopError::permission_denied(format!("RemoteDesktop CreateSession: {err}"))
+				})?;
 			let fd = cancellable(async {
 				portal
 					.select_devices(
 						&session,
-						DeviceType::Keyboard | DeviceType::Pointer,
-						None,
-						PersistMode::DoNot,
+						SelectDevicesOptions::default()
+							.set_devices(DeviceType::Keyboard | DeviceType::Pointer)
+							.set_persist_mode(PersistMode::DoNot),
 					)
 					.await
 					.map_err(|err| {
@@ -198,22 +202,23 @@ impl Libei {
 					})?;
 				// Only `Start` waits on the user; the steps around it are not
 				// the dialog and keep `main`'s cancel-only bound.
-				let response = until_deadline(portal.start(&session, None), DIALOG_UNANSWERED)
-					.await?
-					.map_err(|err| {
-						DesktopError::permission_denied(format!("RemoteDesktop Start: {err}"))
-					})?
-					.response()
-					.map_err(|err| {
-						DesktopError::permission_denied(format!("RemoteDesktop permission: {err}"))
-					})?;
+				let response = until_deadline(
+					portal.start(&session, None, StartOptions::default()),
+					DIALOG_UNANSWERED,
+				)
+				.await?
+				.map_err(|err| DesktopError::permission_denied(format!("RemoteDesktop Start: {err}")))?
+				.response()
+				.map_err(|err| {
+					DesktopError::permission_denied(format!("RemoteDesktop permission: {err}"))
+				})?;
 				let devices = response.devices();
 				let targets = DiscoveryTargets {
 					pointer:  devices.contains(DeviceType::Pointer),
 					keyboard: devices.contains(DeviceType::Keyboard),
 				};
 				portal
-					.connect_to_eis(&session)
+					.connect_to_eis(&session, ConnectToEISOptions::default())
 					.await
 					.map(|fd| (fd, targets))
 					.map_err(|err| {

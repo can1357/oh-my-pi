@@ -28,6 +28,7 @@ use crate::{
 			RERR_UNSUPPORTED, RsyncError,
 		},
 		log::{Debug, LogCode, Logger, Role, syserr_text},
+		md4,
 		paths,
 		transport::{ConnCtl, Connection, child_argv_line, secluded_stream, truncate},
 	},
@@ -76,8 +77,8 @@ impl AuthDigest {
 			Self::Sha256 => hash::<sha2::Sha256>(&[], password, challenge),
 			Self::Sha1 => hash::<sha1::Sha1>(&[], password, challenge),
 			Self::Md5 => hash::<md5::Md5>(&[], password, challenge),
-			Self::Md4 => hash::<md4::Md4>(&[], password, challenge),
-			Self::Md4Old => hash::<md4::Md4>(&[0; 4], password, challenge),
+			Self::Md4 => md4::md4(&[&[], password, challenge]).to_vec(),
+			Self::Md4Old => md4::md4(&[&[0; 4], password, challenge]).to_vec(),
 		};
 		base64::engine::general_purpose::STANDARD_NO_PAD.encode(sum)
 	}

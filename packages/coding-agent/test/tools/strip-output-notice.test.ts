@@ -104,8 +104,9 @@ describe("stripOutputNotice", () => {
 		expect(stripOutputNotice(streaming, truncation)).toBe(streaming);
 	});
 
-	it("strips result-limit notices without metadata, with or without retry advice", () => {
+	it("strips result-limit notices without metadata, with or without retry advice or a clamp", () => {
 		const atCap: OutputMeta = { limits: { resultLimit: { reached: 200 } } };
+		const clamped: OutputMeta = { limits: { resultLimit: { reached: 200, requested: 400 } } };
 		const combined: OutputMeta = {
 			limits: {
 				resultLimit: { reached: 100, suggestion: 200 },
@@ -113,6 +114,7 @@ describe("stripOutputNotice", () => {
 			},
 		};
 		expect(stripGeneratedOutputNotice(`body${formatOutputNotice(atCap)}`)).toBe("body");
+		expect(stripGeneratedOutputNotice(`body${formatOutputNotice(clamped)}`)).toBe("body");
 		expect(stripGeneratedOutputNotice(`body${formatOutputNotice(combined)}`)).toBe("body");
 	});
 

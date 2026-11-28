@@ -33,7 +33,7 @@ import {
 
 const HANDOFF_SECRET = "HANDOFF_SECRET_TOKEN_12345";
 const HANDOFF_ARTIFACTS = new Bun.Glob("**/handoff-*.md");
-const UNRENDERABLE_SNAPCOMPACT_TEXT = "\uE000\uE001\uE002\uE003\uE004\uE005\uE006\uE007\uE008\uE009";
+const UNRENDERABLE_SNAPCOMPACT_TEXT = "\u{10FFFF}".repeat(10);
 
 describe("AgentSession handoff", () => {
 	// Immutable across the whole file: the model registry's synchronous bundled-model
@@ -542,7 +542,7 @@ describe("AgentSession handoff", () => {
 			(event): event is Extract<AgentSessionEvent, { type: "notice" }> =>
 				event.type === "notice" &&
 				event.source === "compaction" &&
-				event.message.startsWith("snapcompact disabled: unsupported characters for selected snapcompact font"),
+				event.message.startsWith("snapcompact disabled: no installed font covers the whole transcript"),
 		);
 		expect(downgradeNotice?.message).toContain("trying the next preferred compaction method.");
 	});

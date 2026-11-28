@@ -169,17 +169,18 @@ describe("BTW session boundaries", () => {
 		const done = Promise.withResolvers<void>();
 		if (action === "picker delete") {
 			const remove = FileSessionStorage.prototype.deleteSessionWithArtifacts;
-			vi.spyOn(FileSessionStorage.prototype, "deleteSessionWithArtifacts").mockImplementation(
-				async function (this: FileSessionStorage, file) {
-					try {
-						await remove.call(this, file);
-						done.resolve();
-					} catch (error) {
-						done.reject(error);
-						throw error;
-					}
-				},
-			);
+			vi.spyOn(FileSessionStorage.prototype, "deleteSessionWithArtifacts").mockImplementation(async function (
+				this: FileSessionStorage,
+				file,
+			) {
+				try {
+					await remove.call(this, file);
+					done.resolve();
+				} catch (error) {
+					done.reject(error);
+					throw error;
+				}
+			});
 			term.press("delete");
 		} else {
 			const resume = SelectorController.prototype.handleResumeSession;
@@ -207,13 +208,14 @@ describe("BTW session boundaries", () => {
 			const entered = Promise.withResolvers<void>();
 			const release = Promise.withResolvers<void>();
 			const upsert = BtwHistoryStore.prototype.upsert;
-			vi.spyOn(BtwHistoryStore.prototype, "upsert").mockImplementationOnce(
-				async function (this: BtwHistoryStore, record) {
-					entered.resolve();
-					await release.promise;
-					await upsert.call(this, record);
-				},
-			);
+			vi.spyOn(BtwHistoryStore.prototype, "upsert").mockImplementationOnce(async function (
+				this: BtwHistoryStore,
+				record,
+			) {
+				entered.resolve();
+				await release.promise;
+				await upsert.call(this, record);
+			});
 			try {
 				const { finished } = await startTransition(action);
 				await entered.promise;
@@ -275,12 +277,13 @@ describe("BTW session boundaries", () => {
 		await picker(target);
 		const removed = Promise.withResolvers<void>();
 		const remove = FileSessionStorage.prototype.deleteSessionWithArtifacts;
-		vi.spyOn(FileSessionStorage.prototype, "deleteSessionWithArtifacts").mockImplementation(
-			async function (this: FileSessionStorage, file) {
-				await remove.call(this, file);
-				removed.resolve();
-			},
-		);
+		vi.spyOn(FileSessionStorage.prototype, "deleteSessionWithArtifacts").mockImplementation(async function (
+			this: FileSessionStorage,
+			file,
+		) {
+			await remove.call(this, file);
+			removed.resolve();
+		});
 		term.press("delete");
 		term.press("enter");
 		await removed.promise;

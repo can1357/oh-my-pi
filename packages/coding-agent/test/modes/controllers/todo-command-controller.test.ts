@@ -64,6 +64,28 @@ describe("TodoCommandController", () => {
 		expect(ctx.showError).not.toHaveBeenCalled();
 	});
 
+	it("imports multiline tasks from an unchanged export", async () => {
+		tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-todo-round-trip-"));
+		const phases: TodoPhase[] = [
+			{
+				name: "Work",
+				tasks: [
+					{ content: "Run tests\nCheck logs", status: "in_progress" },
+					{ content: "Record results  \n\n# Output\n  - [x] Example\n\\- Literal backslash", status: "pending" },
+				],
+			},
+			{ name: "Cleanup", tasks: [{ content: "Remove test files", status: "pending" }] },
+		];
+		const ctx = createContext(tempRoot, phases);
+		const controller = new TodoCommandController(ctx);
+
+		await controller.handleTodoCommand("export");
+		await controller.handleTodoCommand("import");
+
+		expect(ctx.showError).not.toHaveBeenCalled();
+		expect(ctx.session.commitTodoPhases).toHaveBeenCalledWith(phases);
+	});
+
 	it("imports the default TODO.md under the active session cwd", async () => {
 		tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-todo-import-"));
 		const target = path.join(tempRoot, "TODO.md");
@@ -102,7 +124,7 @@ describe("TodoCommandController", () => {
 	it("reports import parse errors without committing", async () => {
 		tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-todo-import-invalid-"));
 		const target = path.join(tempRoot, "TODO.md");
-		await fs.writeFile(target, "# Imported\nnot a todo\n", "utf8");
+		await fs.writeFile(target, "# Imported\n- [ ] Valid task\nnot a todo\n", "utf8");
 		const ctx = createContext(tempRoot, []);
 		const controller = new TodoCommandController(ctx);
 

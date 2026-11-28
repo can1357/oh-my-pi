@@ -15,7 +15,7 @@ use omp_vfs::File;
 use thiserror::Error;
 use uucore::{display::Quotable, line_ending::LineEnding};
 
-use crate::host::{Host, Utility, matches_parser};
+use crate::host::{Host, Utility, matches_parser, strip_errno};
 
 const BUF_SIZE: usize = 65536;
 
@@ -983,7 +983,7 @@ use take::{copy_all_but_n_bytes, copy_all_but_n_lines, take_lines};
 #[derive(Error, Debug)]
 enum HeadError {
 	/// Wrapper around `io::Error`
-	#[error("error reading {}: {}", name.quote(), err)]
+	#[error("error reading {}: {}", .name.quote(), strip_errno(.err))]
 	Io { name: PathBuf, err: io::Error },
 
 	#[error("{0}")]
@@ -1147,7 +1147,7 @@ impl HeadOptions {
 
 #[inline]
 fn wrap_in_stdout_error(err: io::Error) -> io::Error {
-	io::Error::new(err.kind(), format!("error writing 'standard output': {err}"))
+	io::Error::new(err.kind(), format!("error writing 'standard output': {}", strip_errno(&err)))
 }
 
 
@@ -1404,21 +1404,36 @@ impl Utility for Head {
 				if print_headers {
 					print_header(&mut out, b"standard input", &mut first);
 				}
-				let mut input = io::BufReader::with_capacity(BUF_SIZE, &mut host.stdin);
-				match options.mode {
-					Mode::FirstBytes(n) => read_n_bytes(&mut input, &mut out, n),
-					Mode::AllButLastBytes(n) => {
-						read_but_last_n_bytes(&mut input, &mut out, n)
-					},
-					Mode::FirstLines(n) => {
-						read_n_lines(&mut input, &mut out, n, options.line_ending.into())
-					},
-					Mode::AllButLastLines(n) => read_but_last_n_lines(
-						&mut input,
-						&mut out,
-						n,
-						options.line_ending.into(),
-					),
+				// POSIX leaves a seekable stdin's offset just past the bytes
+				// used, so `{ head -n1; cat; } < file` hands `cat` the rest.
+				// The read buffer takes more; seek back over the excess.
+				let start = if options.presume_input_pipe {
+					None
+				} else {
+					host.stdin.file().seek(SeekFrom::Current(0)).ok()
+				};
+				let copied = {
+					let mut input = io::BufReader::with_capacity(BUF_SIZE, &mut host.stdin);
+					match options.mode {
+						Mode::FirstBytes(n) => read_n_bytes(&mut input, &mut out, n),
+						Mode::AllButLastBytes(n) => {
+							read_but_last_n_bytes(&mut input, &mut out, n)
+						},
+						Mode::FirstLines(n) => {
+							read_n_lines(&mut input, &mut out, n, options.line_ending.into())
+						},
+						Mode::AllButLastLines(n) => read_but_last_n_lines(
+							&mut input,
+							&mut out,
+							n,
+							options.line_ending.into(),
+						),
+					}
+				};
+				match start {
+					Some(start) => copied
+						.and_then(|n| host.stdin.file().seek(SeekFrom::Start(start + n)).map(|_| n)),
+					None => copied,
 				}
 			} else {
 				let resolved = host.resolve(file);
@@ -1434,7 +1449,7 @@ impl Utility for Head {
 				let mut input = match host.fs().open(&resolved) {
 					Ok(input) => input,
 					Err(err) => {
-						host.error(format!("cannot open {} for reading: {err}", file.quote()), 1);
+						host.error(format!("cannot open {} for reading: {}", file.quote(), strip_errno(&err)), 1);
 						continue;
 					},
 				};
@@ -1567,7 +1582,7 @@ mod tests {
 		let (code, capture) = run_util::<Head>(&["-n", "1", "missing", "f1", "f2"], "", dir.path());
 		assert_eq!(code, 1);
 		assert_eq!(capture.out(), "==> f1 <==\na\n\n==> f2 <==\nb\n");
-		assert!(capture.err().contains("cannot open 'missing' for reading"));
+		assert_eq!(capture.err(), "head: cannot open 'missing' for reading: No such file or directory\n");
 	}
 
 	// Failure mode: the `==> dir <==` header was suppressed before the

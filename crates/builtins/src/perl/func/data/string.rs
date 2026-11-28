@@ -701,7 +701,7 @@ fn lvalue_guard<T>(interp: &mut Interp<'_>, f: impl FnOnce(&mut Interp<'_>) -> P
 	// A graph of aliases can be arbitrarily deep even when evaluating a tiny AST.
 	if interp.data.lvalue_depth >= 1024 { return Err(interp.die_msg("Deep recursion in string lvalue")); }
 	interp.data.lvalue_depth += 1;
-	let result = stacker::maybe_grow(128 * 1024, 2 * 1024 * 1024, || f(interp));
+	let result = crate::stack::guard(128 * 1024, || f(interp));
 	interp.data.lvalue_depth -= 1;
 	result
 }

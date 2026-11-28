@@ -7,13 +7,13 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { UnitSnapshot } from "@oh-my-pi/pi-coding-agent/daemon/daemon-types";
 import { executeBash, heldShellProcesses } from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
-import { BASH_SESSION_ENV } from "@oh-my-pi/pi-coding-agent/exec/session-processes";
+import { BASH_SESSION_ENV, bashSessionTag } from "@oh-my-pi/pi-coding-agent/exec/session-processes";
 import { cfgBashReapBackground } from "@oh-my-pi/pi-coding-agent/exec/settings";
 import * as services from "@oh-my-pi/pi-coding-agent/launch/services";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { listProcessesWithEnv, processInfo } from "@oh-my-pi/pi-natives";
+import { listProcessesWithEnvPrefix, processInfo } from "@oh-my-pi/pi-natives";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
@@ -80,7 +80,7 @@ describe.skipIf(process.platform === "win32")("AgentSession leftover background 
 		const result = await executeBash(script, {
 			cwd: tempDir.path(),
 			sessionKey: sessionId,
-			env: { [BASH_SESSION_ENV]: sessionId },
+			env: { [BASH_SESSION_ENV]: bashSessionTag(sessionId) },
 			timeout: 10_000,
 		});
 		expect(result.exitCode).toBe(0);
@@ -90,7 +90,9 @@ describe.skipIf(process.platform === "win32")("AgentSession leftover background 
 	function sessionProcesses() {
 		const sessionId = sessionManager.getSessionId();
 		const held = heldShellProcesses(sessionId).map(proc => proc.pid);
-		return [...listProcessesWithEnv(BASH_SESSION_ENV, sessionId), ...processInfo(held)];
+		const tag = bashSessionTag(sessionId);
+		const tagged = listProcessesWithEnvPrefix(BASH_SESSION_ENV, tag).filter(proc => proc.envValue === tag);
+		return [...tagged, ...processInfo(held)];
 	}
 
 	async function pidOf(match: (command: string) => boolean, what: string): Promise<number> {

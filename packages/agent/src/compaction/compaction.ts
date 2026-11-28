@@ -24,7 +24,6 @@ import {
 	type Usage,
 	withAuth,
 } from "@oh-my-pi/pi-ai";
-import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createOpenAICodexCompactionRequestContext } from "@oh-my-pi/pi-ai/providers/openai-codex-compaction";
 import type { OpenAICodexCompactionBody } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
@@ -2489,22 +2488,33 @@ export async function compact(
 		const inputTokens = getCompactionV2PreserveData(preserveData)?.usedTokens ?? 0;
 		summary = formatRemoteCompactionSummary(inputTokens);
 	} else if (isSplitTurn && turnPrefixMessages.length > 0) {
-		// Generate both summaries in parallel
-		const [historyResult, turnPrefixResult] = await Promise.all([
+		// Generate both summaries in parallel. The first failure aborts the other
+		// request with that failure as the reason, and compaction throws it only
+		// after both requests have stopped, so no summary request outlives the
+		// compaction that started it. The caller's signal, with its own reason,
+		// still reaches both requests.
+		const splitAbort = new AbortController();
+		const summarySignal = signal ? AbortSignal.any([signal, splitAbort.signal]) : splitAbort.signal;
+		const requests = [
 			messagesToSummarize.length > 0 || previousSummaryForCompaction
 				? generateSummary(
 						messagesToSummarize,
 						model,
 						reserveTokens,
 						apiKey,
-						signal,
+						summarySignal,
 						customInstructions,
 						previousSummaryForCompaction,
 						summaryOptions,
 					)
 				: Promise.resolve("No prior history."),
-			generateTurnPrefixSummary(turnPrefixMessages, model, reserveTokens, apiKey, signal, summaryOptions),
-		]);
+			generateTurnPrefixSummary(turnPrefixMessages, model, reserveTokens, apiKey, summarySignal, summaryOptions),
+		] as const;
+		const [historyResult, turnPrefixResult] = await Promise.all(requests).catch(async (error: unknown) => {
+			splitAbort.abort(error);
+			await Promise.allSettled(requests);
+			throw error;
+		});
 		// Merge into single summary
 		summary = `${historyResult}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixResult}`;
 	} else if (messagesToSummarize.length > 0) {

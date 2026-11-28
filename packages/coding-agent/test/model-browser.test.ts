@@ -885,7 +885,7 @@ describe("Factory Droid dated credit rates over time", () => {
 
 describe("serviceTierFor", () => {
 	test("labels the live session tier rather than the configured setting", async () => {
-		// The setting asks for ultrafast, but `/fast ultra` and `/slow` act on the
+		// The setting asks for ultrafast, but `/ultrafast` and `/slow` act on the
 		// session's per-family map; the browser must follow the session.
 		const settings = Settings.isolated({ "tier.openai": "ultrafast" });
 		const astra = makeModel("openai", "gpt-6-astra");

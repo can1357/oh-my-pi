@@ -13,6 +13,7 @@ import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { type Accessor, type JSXNode, onCleanup, type Signal, signal, type TextEdit, untrack } from "@oh-my-pi/pi-tui";
 import type { EditorTerm } from "@oh-my-pi/pi-tui/term/painters/editor";
 import { replaceTabs } from "@oh-my-pi/pi-tui/text/width";
+import { isSingleGrapheme } from "@oh-my-pi/pi-utils/graphemes";
 import type { HookEditorOptions } from "../../../modes/view-model/overlays/hook-editor";
 import {
 	compactImageMarkers,
@@ -212,7 +213,6 @@ function vimTerm(vim: VimEditor): EditorTerm {
 
 /** Editor rows when the caller sets no height. */
 const DEFAULT_MAX_LINES = 18;
-const graphemes = new Intl.Segmenter();
 
 /** `edit` with a deletion that reaches into an attached image's marker widened to the whole marker. */
 function widenOverMarkers(edit: TextEdit, text: string, images: number): TextEdit {
@@ -271,7 +271,7 @@ export function HookEditor(props: HookEditorProps & { readonly ref?: (handle: Ho
 			field.from === field.to &&
 			field.cursor === field.from + field.text.length &&
 			/^\S/u.test(field.text) &&
-			(field.text.length === 1 || graphemes.segment(field.text).containing(0)?.segment === field.text);
+			isSingleGrapheme(field.text);
 		if (next.text !== before.text && !(word && field.from === wordEnd)) history.push(before);
 		wordEnd = word ? next.cursor : -1;
 		line.set(next);
