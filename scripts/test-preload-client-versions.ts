@@ -1,0 +1,9 @@
+/**
+ * `bun test` preload (see the package `bunfig.toml` files): pins every spoofed
+ * client version that is otherwise resolved from a third-party registry at run
+ * time, so no suite reaches the network and headers stay deterministic. Tests
+ * of the lookups themselves unset the variable locally and restore it after.
+ */
+import { DEFAULT_CLAUDE_CODE_VERSION } from "@oh-my-pi/pi-ai/providers/claude-code-fingerprint";
+
+process.env.PI_AI_CLAUDE_CODE_VERSION ||= DEFAULT_CLAUDE_CODE_VERSION;
