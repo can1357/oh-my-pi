@@ -12,7 +12,7 @@ import { githubCopilotUsageProvider } from "./github-copilot";
 import { kimiGlobalUsageProvider, kimiRankingStrategy, kimiUsageProvider } from "./kimi";
 import { kiroRankingStrategy, kiroUsageProvider } from "./kiro";
 import { museCodeUsageProvider } from "./muse-code";
-import { minimaxCodeUsageProvider } from "./minimax-code";
+import { minimaxCodeCnUsageProvider, minimaxCodeUsageProvider } from "./minimax-code";
 import { ollamaCloudUsageProvider, ollamaUsageProvider } from "./ollama";
 import { codexRankingStrategy, openaiCodexUsageProvider } from "./openai-codex";
 import { opencodeGoRankingStrategy, opencodeGoUsageProvider } from "./opencode-go";
@@ -32,6 +32,7 @@ export const DEFAULT_USAGE_PROVIDERS: readonly UsageProvider[] = [
 	kimiUsageProvider,
 	kimiGlobalUsageProvider,
 	minimaxCodeUsageProvider,
+	minimaxCodeCnUsageProvider,
 	museCodeUsageProvider,
 	ollamaUsageProvider,
 	factoryDroidUsageProvider,
