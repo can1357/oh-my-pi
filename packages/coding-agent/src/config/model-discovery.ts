@@ -1076,6 +1076,17 @@ type AdvertisedReasoning =
 			requiresEffort?: boolean;
 	  };
 
+/** Wire fields of a `/v1/models` row that carry advertised reasoning metadata. */
+interface AdvertisedReasoningRow {
+	metadata?: unknown;
+	pricing?: unknown;
+	supported_reasoning_levels?: unknown;
+	default_reasoning_level?: unknown;
+	reasoning?: unknown;
+	reasoning_effort_map?: unknown;
+	reasoning_required?: unknown;
+}
+
 /**
  * Read server-advertised reasoning support from an OpenAI-compatible
  * `/v1/models` row. codex-lb nests the Codex registry fields under `metadata`
@@ -1092,15 +1103,7 @@ type AdvertisedReasoning =
  * charge). A stray ladder beside `reasoning: false` is ignored.
  */
 function extractAdvertisedReasoning(
-	item: {
-		metadata?: unknown;
-		pricing?: unknown;
-		supported_reasoning_levels?: unknown;
-		default_reasoning_level?: unknown;
-		reasoning?: unknown;
-		reasoning_effort_map?: unknown;
-		reasoning_required?: unknown;
-	},
+	item: AdvertisedReasoningRow,
 	ladder: readonly Effort[] = ADVERTISED_REASONING_EFFORTS,
 ): AdvertisedReasoning | undefined {
 	const metadata = isRecord(item.metadata) ? item.metadata : undefined;
@@ -1254,7 +1257,7 @@ function withoutReasoning(spec: ModelSpec<Api>, isAnthropic: boolean): ModelSpec
  */
 function advertisedImageThinking(
 	providerConfig: DiscoveryProviderConfig,
-	item: Parameters<typeof extractAdvertisedReasoning>[0],
+	item: AdvertisedReasoningRow,
 ): { reasoning: boolean; thinking?: ThinkingConfig } {
 	const advertised = advertisedReasoningEnabled(providerConfig)
 		? extractAdvertisedReasoning(item, ADVERTISED_IMAGE_REASONING_EFFORTS)
