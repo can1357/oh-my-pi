@@ -281,6 +281,39 @@ describe.skipIf(process.platform === "win32")("AgentSession leftover background 
 		expect([alive(sub), alive(subChild)]).toEqual([true, true]);
 	});
 
+	it("leaves a tagged leaf under an untagged intermediate of a service alone", async () => {
+		const toolSession = { cwd: tempDir.path(), getSessionId: () => sessionManager.getSessionId() } as ToolSession;
+		const session = createSession({ toolSession });
+		vi.spyOn(session.agent, "continue").mockResolvedValue();
+		const dir = tempDir.path();
+		const bun = `'${process.execPath}'`;
+		// service (tagged) -> untagged wrapper (its env stripped, as macOS hides Apple-signed
+		// binaries) -> tagged leaf the env scan sees but the tagged chain misses.
+		await Bun.write(
+			path.join(dir, "service-tree.ts"),
+			"const env: Record<string, string | undefined> = { ...process.env };\n" +
+				"const sid = env.OMP_BASH_SESSION;\n" +
+				"delete env.OMP_BASH_SESSION;\n" +
+				`Bun.spawn(["sh", "-c", \`OMP_BASH_SESSION='\${sid}' ${bun} \${import.meta.dir}/sleeper.ts svc-leaf >/dev/null 2>&1\`], { env, stdio: ["ignore", "ignore", "ignore"] });\n` +
+				"await Bun.sleep(300_000);\n",
+		);
+		await Bun.write(path.join(dir, "sleeper.ts"), "await Bun.sleep(300_000);\n");
+		await runTagged(`${bun} service-tree.ts >/dev/null 2>&1 &`);
+		const service = await pidOf(command => command.endsWith("service-tree.ts"), "the service tree root");
+		const leaf = await pidOf(command => command.endsWith("sleeper.ts svc-leaf"), "the wrapped leaf");
+		// The untagged wrapper between them, for cleanup.
+		spawned.push(processInfo([leaf])[0]?.ppid ?? 0);
+		expect(processInfo([leaf])[0]?.ppid).not.toBe(service);
+		vi.spyOn(services, "listServices").mockResolvedValue([{ pids: [service] } as UnitSnapshot]);
+
+		textOnlyStop(session);
+		await session.waitForIdle();
+		expect(reminders()).toEqual([]);
+
+		await session.dispose();
+		expect(alive(leaf)).toBe(true);
+	});
+
 	it("does not remind subagents", async () => {
 		const session = createSession({ agentKind: "sub" });
 		vi.spyOn(session.agent, "continue").mockResolvedValue();
