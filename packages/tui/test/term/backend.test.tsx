@@ -385,8 +385,8 @@ describe("TermBackend main surface", () => {
 	});
 
 	/**
-	 * A transcript (`a` settled, `b` live) over a dock of an optional cover (a docked report, a
-	 * waiting ask: every row of it draws over the transcript) and a one-row composer.
+	 * A transcript (`a` settled, `b` live) over a dock of an optional cover (a docked report: every
+	 * row of it draws over the transcript) and a one-row composer.
 	 */
 	function covered(options: { rows?: number; main?: () => unknown } = {}) {
 		defineRolePainter("rows", "test.cover", node => {
