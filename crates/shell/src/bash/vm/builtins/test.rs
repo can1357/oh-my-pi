@@ -271,7 +271,7 @@ fn binary(ctx: &mut Ctx<'_, '_>, op: &[u8], l: &[u8], r: &[u8], cond: bool) -> T
 			}
 		},
 		b"-ef" => match (stat(ctx, l, true)?, stat(ctx, r, true)?) {
-			(Some(a), Some(b)) => a.dev == b.dev && a.ino == b.ino,
+			(Some(a), Some(b)) => a.same_file(&b),
 			_ => false,
 		},
 		_ => return Err(syntax(format!("{}: binary operator expected", op.as_bstr()))),

@@ -32,8 +32,9 @@ use super::{
 };
 use crate::bash::{
 	event::{EventData, WaitKey},
+	fs::{Stat, StatKind},
 	host::EnvView,
-	ids::ModeId,
+	ids::{Dialect, ModeId},
 	invocation::{self, Input, ShellArgs},
 	store::{Attrs, Key, KeyBuf, MiscKey, OptId, Record, StateStore, StoreError, Table, TrapKey},
 };
@@ -161,7 +162,10 @@ pub fn start(
 			}
 		},
 	};
-	let new = New { args: &args, env, pairs: &pairs, dollar0: &dollar0, origin };
+	// Bash rewrites an inherited `$PWD` only in the POSIX mode it starts in,
+	// not in the one `sh` turns on after its startup files.
+	let posix = args.mode.dialect() != Dialect::Zsh && args.posix_at_start(&pairs);
+	let new = New { args: &args, env, pairs: &pairs, dollar0: &dollar0, origin, posix };
 	launch(k, vp, cx, &new, &src, stdin)
 }
 
@@ -191,7 +195,8 @@ pub fn start_script(
 	};
 	let pairs = env_pairs(env);
 	let dollar0 = args.dollar0_in(&pairs);
-	let new = New { args: &args, env, pairs: &pairs, dollar0: &dollar0, origin: "" };
+	// Bash starts it over with POSIX mode off when it reads `$PWD`.
+	let new = New { args: &args, env, pairs: &pairs, dollar0: &dollar0, origin: "", posix: false };
 	launch(k, vp, cx, &new, text, false)
 }
 
@@ -211,6 +216,9 @@ struct New<'a> {
 	dollar0: &'a [u8],
 	/// `$-`'s `c` or `s` (`MiscKey::RunOrigin`), empty for a script.
 	origin:  &'static str,
+	/// Whether the shell starts in POSIX mode (`--posix`, `-o posix`,
+	/// `POSIXLY_CORRECT`) when it reads the inherited `$PWD` ([`new_pwd`]).
+	posix:   bool,
 }
 
 /// Start the new shell `new` describes, reading `src` (standard input when
@@ -228,7 +236,18 @@ fn launch(
 	src: &[u8],
 	stdin: bool,
 ) -> Option<Flow> {
-	let New { args, env, pairs, dollar0, origin } = *new;
+	let New { args, env, pairs, dollar0, origin, posix } = *new;
+	// The environment the new shell starts from, with the `$PWD` it binds:
+	// bash binds it before it expands `BASH_ENV` or `ENV`.
+	let rebound;
+	let pairs = match new_pwd(k, cx, vp, pairs, posix) {
+		Ok(None) => pairs,
+		Ok(Some(pwd)) => {
+			rebound = with_pwd(pairs, pwd);
+			&rebound[..]
+		},
+		Err(key) => return Some(Flow::Block(key)),
+	};
 	// The startup files (`BASH_ENV` for a non-interactive bash): the first
 	// readable candidate of each.
 	let home = env
@@ -320,6 +339,103 @@ fn launch(
 	Some(Flow::Block(WaitKey::Proc(vpid)))
 }
 
+/// The `$PWD` a new shell binds, as bash 5.2.37 binds it; `None` keeps the
+/// inherited one as it is. An inherited absolute `$PWD` that names the working
+/// directory (the same file, however it is spelled: `D/`, a symlink to `D`)
+/// stays. A shell that starts in POSIX mode (`posix`) binds its lexical form
+/// instead (`.` and `..` resolved textually, a leading `//` kept), or the
+/// working directory where that form, or a prefix before one of its `..`, is
+/// no directory. Any other `$PWD` gives way to the working directory, unless
+/// the working directory cannot be stat'ed (it was removed): then any
+/// inherited `$PWD` stays as it is.
+fn new_pwd(
+	k: &Kernel,
+	cx: &mut Cx<'_>,
+	vp: &mut Vproc,
+	env: &[(BString, BString)],
+	posix: bool,
+) -> Result<Option<BString>, WaitKey> {
+	let cwd = vp.cwd.clone();
+	let Some((_, pwd)) = env.iter().find(|(name, _)| name.as_slice() == b"PWD") else {
+		return Ok(Some(cwd));
+	};
+	if *pwd != cwd {
+		// bash keeps any inherited `$PWD` where it cannot read the working
+		// directory (it was removed).
+		if stat(k, cx, vp, &cwd)?.is_none() {
+			return Ok(None);
+		}
+		if probe::absolute(&cwd, pwd) != *pwd || !same_file(k, cx, vp, pwd, &cwd)? {
+			return Ok(Some(cwd));
+		}
+	}
+	if !posix {
+		return Ok(None);
+	}
+	let is_dir = |stat: Option<Stat>| stat.is_some_and(|stat| stat.kind == StatKind::Dir);
+	let mut at = 0;
+	for part in pwd.split(|&c| c == b'/') {
+		if part == b".." && !is_dir(stat(k, cx, vp, &builtins::dir::logical(b"/", &pwd[..at]))?) {
+			return Ok(Some(cwd));
+		}
+		at += part.len() + 1;
+	}
+	let mut lexical = builtins::dir::logical(b"/", pwd);
+	if pwd.starts_with(b"//") && pwd.get(2) != Some(&b'/') {
+		lexical.insert(0, b'/');
+	}
+	if !is_dir(stat(k, cx, vp, &lexical)?) {
+		return Ok(Some(cwd));
+	}
+	Ok(Some(lexical))
+}
+
+/// `env` (sorted by name, as an [`EnvView`] is) with `PWD` bound to `pwd`.
+fn with_pwd(env: &[(BString, BString)], pwd: BString) -> Vec<(BString, BString)> {
+	let mut env = env.to_vec();
+	match env.binary_search_by(|(name, _)| name.as_slice().cmp(b"PWD")) {
+		Ok(at) => env[at].1 = pwd,
+		Err(at) => env.insert(at, (BString::from("PWD"), pwd)),
+	}
+	env
+}
+
+/// `stat` of `path`, following links.
+fn stat(k: &Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, path: &[u8]) -> Result<Option<Stat>, WaitKey> {
+	let probe = Probe::Stat { path: BString::from(path), follow: true };
+	Ok(match command_probe(k, cx, vp, &probe)? {
+		ProbeResult::Stat(stat) => stat,
+		_ => None,
+	})
+}
+
+/// Whether `a` and `b` name the same file: the same device and inode
+/// ([`Stat::same_file`]), or the same canonical path where the filesystem
+/// gives no inode (`ino` 0, as for every file of the OS filesystem on
+/// Windows).
+fn same_file(
+	k: &Kernel,
+	cx: &mut Cx<'_>,
+	vp: &mut Vproc,
+	a: &[u8],
+	b: &[u8],
+) -> Result<bool, WaitKey> {
+	let (Some(stat_a), Some(stat_b)) = (stat(k, cx, vp, a)?, stat(k, cx, vp, b)?) else {
+		return Ok(false);
+	};
+	if stat_a.ino != 0 && stat_b.ino != 0 {
+		return Ok(stat_a.same_file(&stat_b));
+	}
+	let mut real = |path: &[u8]| {
+		let probe = Probe::RealPath { path: BString::from(path) };
+		command_probe(k, cx, vp, &probe).map(|answer| match answer {
+			ProbeResult::Path(real) => real,
+			_ => None,
+		})
+	};
+	Ok(matches!((real(a)?, real(b)?), (Some(real_a), Some(real_b)) if real_a == real_b))
+}
+
 /// A child of `vp` holding a new shell's state (see the module docs).
 fn fresh_shell(
 	k: &mut Kernel,
@@ -408,9 +524,6 @@ fn fresh_shell(
 	}
 	if !foreign.is_empty() {
 		image.put(Key::Misc(MiscKey::ForeignEnv), Record::Words(foreign));
-	}
-	if image.var(b"PWD").is_none() {
-		image.set_var(b"PWD", Some(Var::scalar(vp.cwd.clone(), Attrs::EXPORT)));
 	}
 	let zsh = args.mode.dialect() == crate::bash::ids::Dialect::Zsh;
 	let shlvl = env

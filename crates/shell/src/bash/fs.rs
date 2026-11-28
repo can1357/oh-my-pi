@@ -497,6 +497,15 @@ pub struct Stat {
 	pub blksize:  u64,
 }
 
+impl Stat {
+	/// Whether `self` and `other` are the same file: the same device and inode
+	/// (`test -ef`). Where the filesystem gives no inode (`ino` 0, as for every
+	/// file of the OS filesystem on Windows), any two files compare the same.
+	pub const fn same_file(&self, other: &Self) -> bool {
+		self.dev == other.dev && self.ino == other.ino
+	}
+}
+
 /// One directory entry.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DirEntry {

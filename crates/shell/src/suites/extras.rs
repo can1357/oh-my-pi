@@ -328,6 +328,68 @@ async fn find_exec_runs_commands() {
 	assert_eq!(out(&mut s, "find . -name x -exec cat {} +").await, "hello\n");
 }
 
+/// A shell a utility starts in another directory (`find -execdir`) has that
+/// directory as `$PWD`: like bash, it does not keep an inherited `$PWD` that
+/// names another one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_command_run_in_another_directory_gets_it_as_pwd() {
+	let dir = tempfile::tempdir().unwrap();
+	let root = std::fs::canonicalize(dir.path()).unwrap();
+	std::fs::create_dir_all(root.join("sub/inner")).unwrap();
+	let mut s = session_in(&root, &[]);
+	let sub = root.join("sub").display().to_string();
+	let command = "find sub -mindepth 1 -name inner -execdir sh -c 'echo \"$PWD\"; pwd' {} \\;";
+	assert_eq!(out(&mut s, command).await, format!("{sub}\n{sub}\n"));
+}
+
+/// A new shell keeps an inherited absolute `$PWD` that names its working
+/// directory, however it is spelled (`D/`, a symlink to `D`), as bash 5.2.37
+/// does, and the inherited `$PWD` where the working directory is gone; any
+/// other `$PWD` gives way to the working directory, before `BASH_ENV` is
+/// expanded. Only a bash or `sh` started in POSIX mode (`--posix`,
+/// `-o posix`, `POSIXLY_CORRECT`) writes the kept `$PWD` in its lexical form
+/// (a leading `//` kept), or the working directory where that form is no
+/// directory; not `sh` itself, an imported `SHELLOPTS`, nor a script with no
+/// `#!`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_inherited_pwd_stays_only_where_it_names_the_working_directory() {
+	use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+	let dir = tempfile::tempdir().unwrap();
+	let root = std::fs::canonicalize(dir.path()).unwrap();
+	for path in ["d/real", "s/r/sub", "s/r/q", "dd/x"] {
+		std::fs::create_dir_all(root.join(path)).unwrap();
+	}
+	symlink("real", root.join("d/link")).unwrap();
+	symlink("r/sub", root.join("s/l")).unwrap();
+	std::fs::write(root.join("d/nosb"), "echo \"$PWD\"\n").unwrap();
+	std::fs::write(root.join("d/rc"), "echo rc-in-d\n").unwrap();
+	std::fs::write(root.join("s/rc"), "echo rc-in-s\n").unwrap();
+	std::fs::set_permissions(root.join("d/nosb"), std::fs::Permissions::from_mode(0o755)).unwrap();
+	let d = root.join("d").display().to_string();
+	let top = root.join("s").display().to_string();
+	let gone = root.join("dd/x").display().to_string();
+	let both = "'echo \"$PWD\"; pwd'";
+	let one = "'echo \"$PWD\"'";
+	let mut s = session_in(&root, &[]);
+	for (command, expected) in [
+		(format!("cd {d} && PWD={d}/ bash -c {both}"), format!("{d}/\n{d}\n")),
+		(format!("cd {d} && PWD={d}/ sh -c {both}"), format!("{d}/\n{d}\n")),
+		(format!("cd {d} && PWD={d}/ bash --posix -c {both}"), format!("{d}\n{d}\n")),
+		(format!("cd {d} && sh -c 'PWD={d}/ ./nosb'"), format!("{d}/\n")),
+		(format!("cd {d} && env SHELLOPTS=posix PWD={d}/ bash -c {one}"), format!("{d}/\n")),
+		(format!("cd {d}/real && PWD={d}/link bash -c {one}"), format!("{d}/link\n")),
+		(format!("cd {d} && PWD=/ bash -c {both}"), format!("{d}\n{d}\n")),
+		(format!("cd {d} && PWD={top} BASH_ENV='$PWD/rc' bash -c {one}"), format!("rc-in-d\n{d}\n")),
+		(format!("cd / && PWD=// bash --posix -c {one}"), "//\n".to_owned()),
+		(format!("cd {d} && PWD=/{d} bash --posix -c {one}"), format!("/{d}\n")),
+		(format!("cd {top}/r/q && PWD={top}/l/../q bash --posix -c {one}"), format!("{top}/r/q\n")),
+		(format!("cd {gone} && rmdir ../x && PWD=/ bash -c {one}"), "/\n".to_owned()),
+	] {
+		assert_eq!(out(&mut s, &command).await, expected, "{command}");
+	}
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fd_exec_runs_commands() {
 	let dir = tempfile::tempdir().unwrap();

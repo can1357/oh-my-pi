@@ -475,7 +475,7 @@ fn primary(
 			let Some(b) = getstat(ctx, r, true)? else {
 				return Ok(Res::St(1));
 			};
-			st(a.dev == b.dev && a.ino == b.ino)
+			st(a.same_file(&b))
 		},
 		C::Unary(c) => {
 			let kind = |s: Option<Stat>, k: StatKind| s.is_some_and(|s| s.kind == k);

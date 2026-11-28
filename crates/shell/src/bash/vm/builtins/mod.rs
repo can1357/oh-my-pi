@@ -11,7 +11,7 @@
 //! its output joins the builtin's replay log, and the re-run replays it.
 
 mod caller;
-mod dir;
+pub(super) mod dir;
 pub mod dirstack;
 mod doc_table;
 pub mod flow;
