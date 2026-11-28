@@ -428,7 +428,11 @@ export interface SpotlightRecoveryTotals {
 	tokens: number;
 	/** Requests that issued nothing but recovery calls. */
 	turns: number;
-	/** Provider cost of those requests. */
+	/**
+	 * What those requests added to the bill: their provider cost with the cache writes the next request reads back priced
+	 * at their own cache-read rate, since that request would have written that context had they not run. Writes nothing
+	 * reads back keep their full price, and a request that read no cache bills no read rate, so it keeps its whole cost.
+	 */
 	turnsUsd: number;
 	/**
 	 * The recovery tokens carried through later requests, priced like {@link SpotlightCompounding.savedUsd}
@@ -578,7 +582,7 @@ export interface SpotlightCutEconomics {
 	savedUsd: number;
 	/** Recovered tokens carried through later requests, priced like the savings. */
 	recoveryUsd: number;
-	/** Provider cost of the extra turns. */
+	/** What the extra turns added to the bill, priced like {@link SpotlightRecoveryTotals.turnsUsd}. */
 	turnUsd: number;
 	/** savedUsd − recoveryUsd − turnUsd − this cell's Spotlight bill. */
 	netUsd: number;

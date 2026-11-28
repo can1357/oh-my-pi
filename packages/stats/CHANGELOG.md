@@ -13,6 +13,7 @@
 - Fixed `omp stats` dropping a session's cost when a `/tan` clone of it was synced first: the clone's copied requests, prompts, tool calls, approvals and Spotlight rows now count toward the original session, and stats databases that already credited them to the clone are repaired on the next sync ([#20805](https://github.com/can1357/oh-my-pi/pull/20805) by [@wapenshaw](https://github.com/wapenshaw))
 - Fixed forked requests disappearing from stats when a transcript was temporarily unreadable during reconciliation.
 - Fixed usage history failing entirely when one session file cannot be read (e.g. blocked by antivirus); unreadable transcripts are now skipped and logged ([#18566](https://github.com/can1357/oh-my-pi/issues/18566))
+- Fixed the Spotlight page charging a fetch-back turn the cache-write premium on context the next request reads back and would have written anyway ([#19898](https://github.com/can1357/oh-my-pi/pull/19898) by [@Xytronix](https://github.com/Xytronix))
 
 ## [19.1.1] - 2026-11-23
 

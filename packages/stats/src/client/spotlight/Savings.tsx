@@ -168,7 +168,7 @@ export function WhereSavingsWent({ stats, stale }: Omit<SavingsProps, "range">) 
 					value: -clawback.turnsUsd,
 					color: "var(--spot-turns)",
 					note: share(clawback.turnsUsd),
-					title: "Provider cost of requests that issued nothing but recovery calls",
+					title: "Requests that issued nothing but recovery calls, with the cache writes the next request reads back priced at their cache-read rate",
 				},
 				{
 					key: "spotlight",
@@ -228,7 +228,7 @@ export function WhereSavingsWent({ stats, stale }: Omit<SavingsProps, "range">) 
 			stale={stale}
 			footer={
 				unit === "usd"
-					? "Recoveries are priced as carried context; extra turns are requests that only recovered; Spotlight cost is its own scoring bill. What comes back anyway is the cuts' recovery $ in proportion to the tokens held-out results fetch regardless, plus the recovery $ of results shaping left whole."
+					? "Recoveries are priced as carried context; extra turns are requests that only recovered, with the cache writes the next request reads back priced at their cache-read rate (whole cost if they read no cache); Spotlight cost is its own scoring bill. What comes back anyway is the cuts' recovery $ in proportion to the tokens held-out results fetch regardless, plus the recovery $ of results shaping left whole."
 					: `Recovered tokens are the full results of the recovery calls (estimated as chars ÷ 4 where no exact count exists). What comes back anyway is, per tool, the tokens a held-out result gets fetched back times the cuts, apart for results plain capped and shown whole, plus the recovered tokens of results shaping left whole; while a side with cuts has under ${formatInteger(adjusted.minHoldouts)} held-out results, all the tool's cuts take its pooled rate.`
 			}
 		>

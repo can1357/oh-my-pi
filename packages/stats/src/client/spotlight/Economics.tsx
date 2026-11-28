@@ -91,7 +91,7 @@ export function Economics({ stats, stale }: EconomicsProps) {
 				)
 			}
 			stale={stale}
-			footer="Shortened results only; held-out ones save nothing. Every fetch-back counts against the cut here, the share held-out results show comes back anyway included, so this is the cautious view. An extra turn is a request whose every tool call fetched back output these cuts hid. Dollars price saved and fetched-back tokens as carried context, like Compounding."
+			footer="Shortened results only; held-out ones save nothing. Every fetch-back counts against the cut here, the share held-out results show comes back anyway included, so this is the cautious view. An extra turn is a request whose every tool call fetched back output these cuts hid, with the cache writes the next request reads back priced at its cache-read rate (whole cost if it read no cache). Dollars price saved and fetched-back tokens as carried context, like Compounding."
 		>
 			{tools.length === 0 ? (
 				<div className="empty">No shortened results in this range.</div>
