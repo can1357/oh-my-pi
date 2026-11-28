@@ -7,10 +7,10 @@ import {
 	type ProviderFileClient,
 	type ProviderFileHandle,
 } from "@oh-my-pi/pi-coding-agent/blob-broker/provider-file-types";
+import { resolveProviderFileCredential } from "@oh-my-pi/pi-coding-agent/blob-broker/provider-file-credential";
 import {
 	type ProviderFileClientFactory,
 	ProviderFileManager,
-	resolveProviderFileCredential,
 } from "@oh-my-pi/pi-coding-agent/blob-broker/provider-files";
 import { createAnthropicFileClient } from "@oh-my-pi/pi-coding-agent/blob-broker/provider-files-anthropic";
 import { createGeminiProviderFileClient } from "@oh-my-pi/pi-coding-agent/blob-broker/provider-files-gemini";

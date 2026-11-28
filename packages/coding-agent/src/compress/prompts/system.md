@@ -54,7 +54,7 @@ Articles; copulas; expletive there/it; complementizer `that`; relative pronouns;
 - Conditionals and causality: if, unless, because, since.
 - True hedges — deleting "approximately" or "usually" asserts certainty the source did not have.
 - Exact strings: identifiers, API names, flags, paths, regexes, format literals, error text.
-- Template syntax, verbatim and in place: `{{var}}`, `{{#if x}}`, `{{/if}}`, `{{{raw}}}`, `${...}`, `%s`. These are substituted by code — renaming, reordering, or dropping one breaks the caller. Every placeholder present in the source MUST appear in the output.
+- Template syntax, verbatim and in place: `{{var}}`, `{{#if x}}`, `{{/if}}`, `{{{raw}}}`, `${…}`, `%s`. These are substituted by code — renaming, reordering, or dropping one breaks the caller. Every placeholder present in the source MUST appear in the output.
 - YAML frontmatter between `---` fences: keys, values, and quoting unchanged. It is parsed, not read.
 - XML-ish structural tags the harness matches on (`<critical>`, `<instruction>`, `<example>`): keep the tags, compress only the prose inside them.
 - Fenced code blocks and their language tags. Compress the prose around a block, never the code inside it.
@@ -68,7 +68,7 @@ Articles; copulas; expletive there/it; complementizer `that`; relative pronouns;
 - External deixis — `A`, `B`, "the claim above". Name the thing.
 - Scratchpad residue — `Hmm`, `Actually`, `Wait`, abandoned clauses, goals revised mid-line.
 - Layered corrections or dead branches. A cold reader cannot tell which pass won; a model may execute the abandoned one.
-- Nested colons, and `...` or `?` used as operators. They mean nothing to a cold reader.
+- Nested colons, and `…` or `?` used as operators. They mean nothing to a cold reader.
 - Prose that mixes instruction with data. Keep instructions in a marked channel: heading, tag, or MUST line.
 
 <critical>

@@ -386,7 +386,9 @@ async fn wait_for_watchable_exits(
 		if process.status() == proc_snapshot::ProcessStatus::Exited {
 			continue;
 		}
-		match AsyncFd::with_interest(fd, Interest::READABLE) {
+		// SAFETY: the `OwnedFd` keeps its descriptor open and unchanged for the
+		// `AsyncFd`'s lifetime.
+		match unsafe { AsyncFd::register_with_interest(fd, Interest::READABLE) } {
 			Ok(fd) => watched.push((process, fd)),
 			Err(_) => polled.push(process),
 		}

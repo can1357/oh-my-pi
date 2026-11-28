@@ -49,6 +49,17 @@ pub fn unwrap_valr<T, V>(v: ValX<T, V>) -> ValR<T, V> {
 /// Range of options, used for iteration operations.
 pub type Range<V> = core::ops::Range<Option<V>>;
 
+/// A suspended update to the immediate children of a value.
+/// Every child returned by `next` must receive one `put` before advancing.
+pub trait ValueUpdate<V> {
+    /// Move out the next child to evaluate.
+    fn next(&mut self) -> Option<V>;
+    /// Store the replacement, or remove the child for `None`.
+    fn put(&mut self, value: Option<V>) -> ValR<(), V>;
+    /// Finish after the last child.
+    fn finish(self: alloc::boxed::Box<Self>) -> V;
+}
+
 /// Values that can be processed by jaq.
 ///
 /// Implement this trait if you want jaq to process your own type of values.
@@ -103,45 +114,16 @@ pub trait ValT:
     /// This is used by `.[s:e]`, `.[s:]`, and `.[:e]`.
     fn range(self, range: Range<&Self>) -> ValR<Self>;
 
-    /// Map a function over the children of the value.
-    ///
-    /// This is used by
-    /// - `.[]  |= f` (`opt` = [`Opt::Essential`]) and
-    /// - `.[]? |= f` (`opt` = [`Opt::Optional`]).
-    ///
-    /// If the children of the value are undefined, then:
-    ///
-    /// - If `opt` is [`Opt::Essential`], return an error.
-    /// - If `opt` is [`Opt::Optional`] , return the input value.
-    fn map_values<'a, I: Iterator<Item = ValX<'a, Self>>>(
-        self,
-        opt: Opt,
-        f: impl Fn(Self) -> I,
-    ) -> ValX<'a, Self>;
+    /// Prepare to update each child in iteration order.
+    /// If selection is invalid, optional updates have no children and finish
+    /// unchanged, while essential updates return a selection error.
+    fn update_values(self, opt: Opt) -> ValR<alloc::boxed::Box<dyn ValueUpdate<Self>>, Self>;
 
-    /// Map a function over the child of the value at the given index.
-    ///
-    /// This is used by `.[k] |= f`.
-    ///
-    /// See [`Self::map_values`] for the behaviour of `opt`.
-    fn map_index<'a, I: Iterator<Item = ValX<'a, Self>>>(
-        self,
-        index: &Self,
-        opt: Opt,
-        f: impl Fn(Self) -> I,
-    ) -> ValX<'a, Self>;
+    /// Prepare to update one indexed child.
+    fn update_index(self, index: &Self, opt: Opt) -> ValR<alloc::boxed::Box<dyn ValueUpdate<Self>>, Self>;
 
-    /// Map a function over the slice of the value with the given range.
-    ///
-    /// This is used by `.[s:e] |= f`, `.[s:] |= f`, and `.[:e] |= f`.
-    ///
-    /// See [`Self::map_values`] for the behaviour of `opt`.
-    fn map_range<'a, I: Iterator<Item = ValX<'a, Self>>>(
-        self,
-        range: Range<&Self>,
-        opt: Opt,
-        f: impl Fn(Self) -> I,
-    ) -> ValX<'a, Self>;
+    /// Prepare to update a slice.
+    fn update_range(self, range: Range<&Self>, opt: Opt) -> ValR<alloc::boxed::Box<dyn ValueUpdate<Self>>, Self>;
 
     /// Return a boolean representation of the value.
     ///

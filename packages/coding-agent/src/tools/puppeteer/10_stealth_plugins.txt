@@ -199,12 +199,25 @@ for (const pluginData of pluginsData) {
 	});
 }
 
-const patchNavigator = (name, value) =>
-	Object_defineProperty(Object_getPrototypeOf(navigator), name, {
-		get() {
-			return value;
+const patchNavigator = (name, value) => {
+	// A named getter with native flags, registered in the mask: an anonymous enumerable-false
+	// accessor is visible through getOwnPropertyDescriptor(s)/__lookupGetter__ even when the
+	// single-descriptor path is masked.
+	const getter = Object_getOwnPropertyDescriptor(
+		{
+			get [name]() {
+				return value;
+			},
 		},
+		name,
+	).get;
+	if (typeof patchToString === "function") patchToString(getter, "get " + name);
+	Object_defineProperty(Object_getPrototypeOf(navigator), name, {
+		get: getter,
+		enumerable: true,
+		configurable: true,
 	});
+};
 
 if (!("plugins" in navigator) || navigator.plugins.length === 0) {
 	patchNavigator("plugins", plugins);

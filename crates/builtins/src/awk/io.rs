@@ -6,11 +6,12 @@ use std::{
 };
 
 use super::regex::AwkRegex;
+use crate::openfile::OpenFile;
 
 /// How `RS` separates records.
 #[derive(Clone)]
 pub(super) enum RecordSep {
-	/// `RS="\n"`: lines, with a `\r` before the newline dropped (as GoAWK).
+	/// `RS="\n"`: lines separated by LF, with CR preserved as data.
 	Newline,
 	/// A single-byte `RS`.
 	Byte(u8),
@@ -47,11 +48,32 @@ pub(super) struct RecordReader {
 	/// How far past `start` the current separator search already looked.
 	scanned: usize,
 	eof:     bool,
+	/// Seekable shared stdin to rewind over unconsumed read-ahead on drop (POSIX).
+	rewind:  Option<OpenFile>,
+}
+
+impl Drop for RecordReader {
+	fn drop(&mut self) {
+		let excess = self.buf.len() - self.start;
+		if let Some(file) = &self.rewind
+			&& excess > 0
+		{
+			let _ = file.seek(io::SeekFrom::Current(-(excess as i64)));
+		}
+	}
 }
 
 impl RecordReader {
 	pub fn new(src: Box<dyn Read>) -> Self {
-		Self { src, buf: Vec::new(), start: 0, scanned: 0, eof: false }
+		Self { src, buf: Vec::new(), start: 0, scanned: 0, eof: false, rewind: None }
+	}
+
+	/// A reader over shared stdin that leaves its offset after the last consumed record.
+	pub fn rewinding(src: Box<dyn Read>, file: OpenFile) -> Self {
+		let seekable = file.seek(io::SeekFrom::Current(0)).is_ok();
+		let mut reader = Self::new(src);
+		reader.rewind = seekable.then_some(file);
+		reader
 	}
 
 	/// Reads more input; `false` at end of input.
@@ -101,24 +123,17 @@ impl RecordReader {
 					if let Some(found) = memchr::memchr(byte, &data[self.scanned.min(data.len())..]) {
 						let len = self.scanned + found;
 						self.take(out, len, 1);
-						if byte == b'\n' && out.last() == Some(&b'\r') {
-							out.pop();
-						}
 						return Ok(true);
 					}
 					self.scanned = data.len();
 					if !self.fill()? {
-						let got = self.take_rest(out, false);
-						if byte == b'\n' && out.last() == Some(&b'\r') {
-							out.pop();
-						}
-						return Ok(got);
+						return Ok(self.take_rest(out, false));
 					}
 				}
 			},
 			RecordSep::Paragraph => {
 				loop {
-					while self.start < self.buf.len() && matches!(self.buf[self.start], b'\n' | b'\r') {
+					while self.buf.get(self.start) == Some(&b'\n') {
 						self.start += 1;
 					}
 					if self.start < self.buf.len() || !self.fill()? {
@@ -129,33 +144,22 @@ impl RecordReader {
 				loop {
 					let data = &self.buf[self.start..];
 					let mut found = None;
-					let mut i = self.scanned.saturating_sub(2);
+					let mut i = self.scanned.saturating_sub(1);
 					while let Some(nl) = memchr::memchr(b'\n', &data[i..]) {
 						let at = i + nl;
 						if data.get(at + 1) == Some(&b'\n') {
-							found = Some((at, 2));
-							break;
-						}
-						if data.get(at + 1) == Some(&b'\r') && data.get(at + 2) == Some(&b'\n') {
-							found = Some((at, 3));
+							found = Some(at);
 							break;
 						}
 						i = at + 1;
 					}
-					if let Some((at, skip)) = found {
-						self.take(out, at, skip);
-						if out.last() == Some(&b'\r') {
-							out.pop();
-						}
+					if let Some(at) = found {
+						self.take(out, at, 2);
 						return Ok(true);
 					}
 					self.scanned = data.len();
 					if !self.fill()? {
-						let got = self.take_rest(out, true);
-						if out.last() == Some(&b'\r') {
-							out.pop();
-						}
-						return Ok(got);
+						return Ok(self.take_rest(out, true));
 					}
 				}
 			},
@@ -220,7 +224,7 @@ mod tests {
 
 	#[test]
 	fn splits_lines_and_bytes() {
-		assert_eq!(records("a\r\nb\nc", "\n"), ["a", "b", "c"]);
+		assert_eq!(records("a\r\nb\nc\r", "\n"), ["a\r", "b", "c\r"]);
 		assert_eq!(records("a;b;", ";"), ["a", "b"]);
 		assert_eq!(records("", "\n"), Vec::<String>::new());
 	}

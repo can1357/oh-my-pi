@@ -1,9 +1,9 @@
+/// A persistent, shareable list of keys or filter bindings.
 #[derive(Debug, PartialEq, Eq)]
-pub struct List<T>(alloc::rc::Rc<Node<T>>);
+pub struct List<T>(Option<alloc::rc::Rc<Node<T>>>);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Node<T> {
-    Nil,
     Cons(T, List<T>),
     /// a path that the value it belongs to is not at, see [`List::invalid`]
     Invalid,
@@ -21,35 +21,55 @@ impl<T> Default for List<T> {
     }
 }
 
+impl<T> Drop for List<T> {
+    fn drop(&mut self) {
+        let mut head = self.0.take();
+        while let Some(rc) = head {
+            match alloc::rc::Rc::try_unwrap(rc) {
+                Ok(Node::Cons(_, mut tail)) => head = tail.0.take(),
+                _ => break,
+            }
+        }
+    }
+}
+
 impl<T: Clone> List<T> {
-    pub fn pop(self) -> Option<(T, Self)> {
-        match alloc::rc::Rc::try_unwrap(self.0).unwrap_or_else(|rc| (*rc).clone()) {
-            Node::Nil | Node::Invalid => None,
+    /// Remove the most recently added element, if this list is uniquely owned.
+    pub fn pop(mut self) -> Option<(T, Self)> {
+        match alloc::rc::Rc::try_unwrap(self.0.take()?).unwrap_or_else(|rc| (*rc).clone()) {
+            Node::Invalid => None,
             Node::Cons(head, tail) => Some((head, tail)),
         }
     }
 }
 
 impl<T> List<T> {
+    pub(crate) fn pop_unique(mut self) -> Option<(T, Self)> {
+        match alloc::rc::Rc::try_unwrap(self.0.take()?).ok()? {
+            Node::Cons(head, tail) => Some((head, tail)),
+            Node::Invalid => None,
+        }
+    }
+
     /// Return an empty list.
     pub fn new() -> Self {
-        Self(Node::Nil.into())
+        Self(None)
     }
 
     /// Return a list that marks a value as not being at any path,
     /// such as the output of `1` in `path(1)`.
     pub fn invalid() -> Self {
-        Self(Node::Invalid.into())
+        Self(Some(Node::Invalid.into()))
     }
 
     /// Whether the list is [`Self::invalid`].
     pub fn is_invalid(&self) -> bool {
-        matches!(&*self.0, Node::Invalid)
+        matches!(self.0.as_deref(), Some(Node::Invalid))
     }
 
     /// Append a new element to the list.
     pub fn cons(self, x: T) -> Self {
-        Self(Node::Cons(x, self).into())
+        Self(Some(Node::Cons(x, self).into()))
     }
 
     /// Repeatedly add elements to the list.
@@ -59,8 +79,8 @@ impl<T> List<T> {
 
     /// Return the element most recently added to the list.
     pub fn head(&self) -> Option<&T> {
-        match &*self.0 {
-            Node::Nil | Node::Invalid => None,
+        match self.0.as_deref()? {
+            Node::Invalid => None,
             Node::Cons(x, _) => Some(x),
         }
     }
@@ -76,27 +96,29 @@ impl<T> List<T> {
     pub fn skip(&self, n: usize) -> &Self {
         let mut cur = self;
         for _ in 0..n {
-            match &*cur.0 {
-                Node::Cons(_, xs) => cur = xs,
-                Node::Nil | Node::Invalid => break,
+            match cur.0.as_deref() {
+                Some(Node::Cons(_, xs)) => cur = xs,
+                _ => break,
             }
         }
         cur
     }
 
+    /// Iterate from the most recently added key or binding.
     pub fn iter(&self) -> Iter<'_, T> {
         Iter(self)
     }
 }
 
+/// Borrowed iterator over a persistent list.
 pub struct Iter<'a, T>(&'a List<T>);
 
 impl<'a, T> Iterator for Iter<'a, T> {
     type Item = &'a T;
     fn next(&mut self) -> Option<Self::Item> {
-        let (x, xs) = match &*self.0 .0 {
+        let (x, xs) = match self.0.0.as_deref()? {
             Node::Cons(x, xs) => (x, xs),
-            Node::Nil | Node::Invalid => return None,
+            Node::Invalid => return None,
         };
         self.0 = xs;
         Some(x)

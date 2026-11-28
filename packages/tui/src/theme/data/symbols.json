@@ -749,7 +749,7 @@
 			"cmd.handoff": "",
 			"cmd.history": "",
 			"cmd.question": "",
-			"cmd.rocket": "",
+			"cmd.rocket": ">>>",
 			"cmd.stethoscope": "",
 			"cmd.redo": "",
 			"cmd.bug": "",

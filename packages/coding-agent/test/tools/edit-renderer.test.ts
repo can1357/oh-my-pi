@@ -1,8 +1,13 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { $ } from "bun";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import { editDiffString } from "@oh-my-pi/pi-natives";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { createCheckoutNotice } from "../../src/edit/checkout-notice";
+import { initWorktreeFixture } from "../helpers/git-worktree";
+import { SYMLINKS_USABLE } from "../helpers/symlink-support";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
+import { EditTool, getEditStore } from "@oh-my-pi/pi-coding-agent/edit";
 import { visibleWidth } from "@oh-my-pi/pi-tui/text/width";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { editToolPresenter } from "../../src/ui/tools/edit";
@@ -63,44 +68,197 @@ function resultRows(result: ToolCallResult, args: unknown, options: CardOptions 
 	return rows(call, options);
 }
 
+function makeEditSession(cwd: string) {
+	return {
+		cwd,
+		hasUI: false,
+		enableLsp: false,
+		getSessionFile: () => null,
+		getSessionSpawns: () => "*",
+		getArtifactsDir: () => null,
+		settings: Settings.isolated({ "edit.enforceSeenLines": false }),
+	};
+}
+
+function makeEditTool(cwd: string, mode: "replace" | "hashline" = "replace"): EditTool {
+	return new EditTool(makeEditSession(cwd), mode);
+}
+
 describe("edit tool card", () => {
 	it("names the edited Git worktree when it differs from the session checkout", async () => {
 		using temp = TempDir.createSync("@omp-edit-checkout-");
-		const cwd = temp.join("main");
-		const linked = temp.join("linked");
-		await $`git init -qb main ${cwd}`.quiet();
-		await Bun.write(temp.join("main", "lesson.txt"), "before\n");
-		await $`git add lesson.txt`.cwd(cwd).quiet();
-		await $`git -c user.name=Test -c user.email=test@example.com -c core.hooksPath=/dev/null commit -qm initial`
-			.cwd(cwd)
-			.quiet();
-		await $`git -c core.hooksPath=/dev/null worktree add -qb preview ${linked}`.cwd(cwd).quiet();
-
-		const tool = new EditTool(
-			{
-				cwd,
-				hasUI: false,
-				enableLsp: false,
-				getSessionFile: () => null,
-				getSessionSpawns: () => "*",
-				getArtifactsDir: () => null,
-				settings: Settings.isolated({ "edit.enforceSeenLines": false }),
-			},
-			"replace",
-		);
-		const target = temp.join("linked", "lesson.txt");
+		const { cwd, paths } = await initWorktreeFixture(temp, [{ name: "linked", branch: "preview" }]);
+		const tool = makeEditTool(cwd, "replace");
+		const target = path.join(paths.linked, "lesson.txt");
 		const args = { path: target, old_string: "before", new_string: "after" };
 		const result = await tool.execute("cross-worktree", args);
 		const rendered = plain(resultRows(result, args, { editMode: "replace" })).join("\n");
 		expect(rendered).toContain("Edited worktree: preview (session: main)");
 		expect(await Bun.file(target).text()).toBe("after\n");
-		expect(await Bun.file(temp.join("main", "lesson.txt")).text()).toBe("before\n");
+		expect(await Bun.file(path.join(cwd, "lesson.txt")).text()).toBe("before\n");
 
 		const local = { ...args, path: "lesson.txt" };
 		const localResult = await tool.execute("session-checkout", local);
 		const localRendered = plain(resultRows(localResult, local, { editMode: "replace" })).join("\n");
 		expect(localRendered).not.toContain("Edited worktree:");
-		expect(await Bun.file(temp.join("main", "lesson.txt")).text()).toBe("after\n");
+		expect(await Bun.file(path.join(cwd, "lesson.txt")).text()).toBe("after\n");
+	});
+
+	it.skipIf(!SYMLINKS_USABLE)(
+		"detects cross-worktree edits through symlinked session cwd and file symlinks, but not symlink deletes",
+		async () => {
+			using temp = TempDir.createSync("@omp-edit-symlink-");
+			const { cwd, paths } = await initWorktreeFixture(temp, [{ name: "linked", branch: "preview" }]);
+			const aliasCwd = temp.join("alias");
+			await fs.symlink(cwd, aliasCwd);
+
+			// 1. Symlinked session cwd editing a sibling worktree
+			const aliasTool = makeEditTool(aliasCwd, "replace");
+			const target = path.join(paths.linked, "lesson.txt");
+			const res1 = await aliasTool.execute("alias-edit", {
+				path: target,
+				old_string: "before",
+				new_string: "via-alias",
+			});
+			expect(res1.details?.checkoutNotice).toBe("Edited worktree: preview (session: main)");
+
+			// 2. Write through a file symlink in session checkout pointing into sibling worktree
+			const linkPath = path.join(cwd, "link.txt");
+			await fs.symlink(target, linkPath);
+			const tool = makeEditTool(cwd, "replace");
+			const res2 = await tool.execute("symlink-write", {
+				path: "link.txt",
+				old_string: "via-alias",
+				new_string: "via-link",
+			});
+			expect(res2.details?.checkoutNotice).toBe("Edited worktree: preview (session: main)");
+			expect(await Bun.file(target).text()).toBe("via-link\n");
+
+			// 3. Deleting the symlink acts on the session checkout entry, not the sibling worktree
+			const hashlineSession = makeEditSession(cwd);
+			const hashlineTool = new EditTool(hashlineSession, "hashline");
+			const linkTag = getEditStore(hashlineSession).recordSnapshot(linkPath, "via-link\n");
+			const delRes = await hashlineTool.execute("symlink-delete", { input: `[link.txt#${linkTag}]\nREM\n` });
+			expect(delRes.isError).toBeUndefined();
+			expect(delRes.details?.checkoutNotice).toBeUndefined();
+			expect(await fs.lstat(linkPath).catch(() => null)).toBeNull();
+			expect(await Bun.file(target).exists()).toBe(true);
+		},
+	);
+
+	it("attributes both source and destination checkouts on cross-worktree moves", async () => {
+		using temp = TempDir.createSync("@omp-edit-move-");
+		const { cwd, paths } = await initWorktreeFixture(temp, [
+			{ name: "preview", branch: "preview" },
+			{ name: "release", branch: "release" },
+		]);
+		const session = makeEditSession(cwd);
+		const tool = new EditTool(session, "hashline");
+
+		// 1. Sibling B -> Sibling C
+		const srcB = path.join(paths.preview, "lesson.txt");
+		const dstC = path.join(paths.release, "moved-from-preview.txt");
+		const tagB = getEditStore(session).recordSnapshot(srcB, "before\n");
+		const resBC = await tool.execute("move-b-to-c", { input: `[${srcB}#${tagB}]\nMV ${dstC}\n` });
+		expect(resBC.isError).toBeUndefined();
+		expect(resBC.details?.checkoutNotice).toBe("Edited worktree: moved preview → release (session: main)");
+
+		// 2. Sibling C -> Session A
+		const dstA = path.join(cwd, "returned.txt");
+		const tagC = getEditStore(session).recordSnapshot(dstC, "before\n");
+		const resCA = await tool.execute("move-c-to-a", { input: `[${dstC}#${tagC}]\nMV ${dstA}\n` });
+		expect(resCA.isError).toBeUndefined();
+		expect(resCA.details?.checkoutNotice).toBe("Edited worktree: moved from release (session: main)");
+
+		// 3. Session A -> Sibling B
+		const tagA = getEditStore(session).recordSnapshot(dstA, "before\n");
+		const resAB = await tool.execute("move-a-to-b", { input: `[${dstA}#${tagA}]\nMV ${srcB}\n` });
+		expect(resAB.isError).toBeUndefined();
+		expect(resAB.details?.checkoutNotice).toBe("Edited worktree: moved to preview (session: main)");
+	});
+
+	it("does not report a worktree edit on a hashline no-op", async () => {
+		using temp = TempDir.createSync("@omp-edit-noop-");
+		const { cwd, paths } = await initWorktreeFixture(temp, [{ name: "linked", branch: "preview" }]);
+		const session = makeEditSession(cwd);
+		const tool = new EditTool(session, "hashline");
+		const target = path.join(paths.linked, "lesson.txt");
+		const tag = getEditStore(session).recordSnapshot(target, "before\n");
+		// Replacing line 1 with identical content succeeds as FileOp::Noop without writing.
+		const res = await tool.execute("noop-edit", { input: `[${target}#${tag}]\nPUT 1.=1:\n+before\n` });
+		expect(res.isError).toBeUndefined();
+		expect(res.details?.checkoutNotice).toBeUndefined();
+		const text = res.content.map(c => (c.type === "text" ? c.text : "")).join("\n");
+		expect(text).not.toContain("Edited worktree:");
+	});
+
+	it.skipIf(!SYMLINKS_USABLE)(
+		"preserves cross-worktree notice for a batched symlink MV even when a later REM deletes the referent",
+		async () => {
+			using temp = TempDir.createSync("@omp-edit-batch-symlink-mv-");
+			const { cwd, paths } = await initWorktreeFixture(temp, [{ name: "linked", branch: "preview" }]);
+			const session = makeEditSession(cwd);
+			const tool = new EditTool(session, "hashline");
+
+			const src = path.join(cwd, "lesson.txt");
+			const siblingTarget = path.join(paths.linked, "lesson.txt");
+			const dstLink = path.join(cwd, "dest-link.txt");
+			await fs.symlink(siblingTarget, dstLink);
+
+			const store = getEditStore(session);
+			const srcTag = store.recordSnapshot(src, "before\n");
+			const targetTag = store.recordSnapshot(siblingTarget, "before\n");
+
+			const res = await tool.execute("batch-symlink-mv-rem", {
+				input: `[lesson.txt#${srcTag}]\nMV dest-link.txt\n[${siblingTarget}#${targetTag}]\nREM\n`,
+			});
+			expect(res.isError).toBeUndefined();
+			expect(res.details?.perFileResults).toHaveLength(2);
+			expect(res.details?.perFileResults?.[0]?.checkoutNotice).toBe(
+				"Edited worktree: moved to preview (session: main)",
+			);
+			expect(res.details?.perFileResults?.[1]?.checkoutNotice).toBe("Edited worktree: preview (session: main)");
+		},
+	);
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("does not fail a completed edit when session HEAD is unreadable during checkout attribution", async () => {
+		using temp = TempDir.createSync("@omp-edit-unreadable-head-");
+		const { cwd, paths } = await initWorktreeFixture(temp, [{ name: "linked", branch: "preview" }]);
+		const target = path.join(paths.linked, "lesson.txt");
+
+		// 1. Real GitRepo::headSync() failure when HEAD disappears after discovery.
+		const notice = createCheckoutNotice(cwd);
+		expect(notice).toBeDefined();
+		await fs.rm(path.join(cwd, ".git", "HEAD"));
+		expect(notice?.({ path: target })).toBeUndefined();
+
+		// Restore HEAD and verify EditTool.execute still succeeds if headSync() throws after write.
+		await Bun.write(path.join(cwd, ".git", "HEAD"), "ref: refs/heads/main\n");
+		const originalGit = vcs.git;
+		vi.spyOn(vcs, "git").mockImplementation(dir => {
+			const repo = originalGit(dir);
+			if (!repo || dir !== cwd) return repo;
+			return Object.assign(Object.create(Object.getPrototypeOf(repo)), repo, {
+				info: () => repo.info(),
+				headSync: () => {
+					throw new Error("HEAD unreadable");
+				},
+			});
+		});
+
+		const tool = makeEditTool(cwd, "replace");
+		const res = await tool.execute("unreadable-head", {
+			path: target,
+			old_string: "before",
+			new_string: "after",
+		});
+		expect(res.isError).toBeUndefined();
+		expect(res.details?.checkoutNotice).toBeUndefined();
+		expect(await Bun.file(target).text()).toBe("after\n");
 	});
 
 	it("shows the target path from partial JSON while edit args stream", () => {

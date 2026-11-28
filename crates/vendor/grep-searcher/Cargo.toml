@@ -11,10 +11,11 @@
 
 [package]
 edition = "2024"
+rust-version = "1.96"
 name = "grep-searcher"
-version = "0.1.17"
-authors = ["Andrew Gallant <jamslam@gmail.com>"]
+version = "0.1.18"
 publish = false
+authors = ["Andrew Gallant <jamslam@gmail.com>"]
 build = false
 autolib = false
 autobins = false
@@ -36,11 +37,11 @@ keywords = [
 license = "Unlicense OR MIT"
 repository = "https://github.com/BurntSushi/ripgrep/tree/master/crates/searcher"
 
-[lints]
-
 [features]
 avx-accel = []
 simd-accel = []
+
+[lints]
 
 [lib]
 name = "grep_searcher"
@@ -62,7 +63,7 @@ version = "0.8.33"
 version = "0.1.7"
 
 [dependencies.grep-matcher]
-version = "0.1.8"
+version = "0.1.10"
 
 [dependencies.log]
 version = "0.4.20"
@@ -75,7 +76,7 @@ version = "0.9.0"
 package = "memmap2"
 
 [dev-dependencies.grep-regex]
-version = "0.1.14"
+version = "0.1.15"
 
 [dev-dependencies.regex]
 version = "1.9.5"

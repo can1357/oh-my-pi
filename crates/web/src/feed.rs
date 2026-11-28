@@ -51,7 +51,7 @@ const fn field(entry: &mut Entry, name: Field) -> &mut Option<String> {
 }
 
 fn clean(text: &str) -> String {
-	let decoded = html_escape::decode_html_entities(text);
+	let decoded = crate::entities::decode_html_entities(text);
 	TAG.replace_all(&decoded, "").trim().to_owned()
 }
 

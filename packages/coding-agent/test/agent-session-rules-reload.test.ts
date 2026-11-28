@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { Api, Model, ModelSpec } from "@oh-my-pi/pi-ai";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -193,6 +194,56 @@ describe("AgentSession session-local rule snapshot reload on session reset", () 
 			authStorage.close();
 		}
 	});
+});
+
+it("re-arms once-mode TTSR rules for a new session but not when clearing the same session", async () => {
+	using tempDir = TempDir.createSync("@pi-ttsr-new-session-");
+	await Bun.write(
+		tempDir.join(".omp", "rules", "new-session-probe.md"),
+		"---\ndescription: New session probe\ncondition: zzprobe\nscope: tool:read\ninterruptMode: never\n---\nReview the probe.\n",
+	);
+	await Bun.write(tempDir.join("zzprobe.txt"), "Probe file");
+	const { session, authStorage } = await createReloadSession(tempDir);
+	try {
+		session.agent.streamFn = createMockModel({
+			handler: ({ messages }) => ({
+				content:
+					messages.at(-1)?.role === "user"
+						? [{ type: "toolCall", name: "read", arguments: { path: "zzprobe.txt" } }]
+						: ["Done"],
+			}),
+		}).stream;
+		const triggered: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "ttsr_triggered" && event.rules.some(rule => rule.name === "new-session-probe")) {
+				triggered.push(session.sessionManager.getSessionId());
+			}
+		});
+		const runProbe = async () => {
+			await session.prompt("Read the probe file");
+			await session.waitForIdle();
+			const result = session.messages.findLast(message => message.role === "toolResult");
+			expect(result?.content.some(block => block.type === "text" && block.text.includes("Probe file"))).toBe(true);
+		};
+
+		const firstId = session.sessionManager.getSessionId();
+		await runProbe();
+		expect(triggered).toEqual([firstId]);
+
+		expect(await session.resetSessionContext()).toBeDefined();
+		expect(session.sessionManager.getSessionId()).toBe(firstId);
+		await runProbe();
+		expect(triggered).toEqual([firstId]);
+
+		expect(await session.newSession()).toBe(true);
+		const newId = session.sessionManager.getSessionId();
+		expect(newId).not.toBe(firstId);
+		await runProbe();
+		expect(triggered).toEqual([firstId, newId]);
+	} finally {
+		await session.dispose();
+		authStorage.close();
+	}
 });
 
 describe("AgentSession configured extension-package rules on rebuild", () => {

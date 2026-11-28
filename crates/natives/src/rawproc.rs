@@ -441,8 +441,13 @@ impl FdIo {
 		// SAFETY: the caller hands over ownership of `raw`.
 		let owned = unsafe { OwnedFd::from_raw_fd(raw) };
 		set_nonblocking(raw)?;
-		napi::bindgen_prelude::within_runtime_if_available(|| tokio::io::unix::AsyncFd::new(owned))
-			.map(Self)
+		napi::bindgen_prelude::within_runtime_if_available(|| {
+			// SAFETY: the `OwnedFd` keeps its descriptor open and unchanged for
+			// the `AsyncFd`'s lifetime.
+			unsafe { tokio::io::unix::AsyncFd::register(owned) }
+		})
+		.map(Self)
+		.map_err(io::Error::from)
 	}
 
 	async fn read(&self, buf: &mut [u8]) -> io::Result<usize> {

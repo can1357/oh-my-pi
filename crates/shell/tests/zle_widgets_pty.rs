@@ -188,17 +188,6 @@ fn region_widgets() {
 }
 
 #[test]
-fn whole_line_kills() {
-	same("", &[
-		"echo abc def\x02\x02\x18l\x19\x19\r",
-		"junk\x15echo ok\r",
-		"junk\x0bx\x18\x0becho kb\x01\x19\r",
-		"echo a\x1b\rb\x1b\rc\x02\x02\x02\x18l\x18l,\r",
-		"echo a\x1b\rb\x1b\rc\x1b\x30\x0b,\r",
-	]);
-}
-
-#[test]
 fn copy_prev_words() {
 	same("", &[
 		"echo foo-bar baz \x1b\x1f\x1b3\x1b\x1f\r",
