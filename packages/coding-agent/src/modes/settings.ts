@@ -202,7 +202,8 @@ export const cfgStatusLineSeparator = register({
 		tab: "appearance",
 		group: "Status Line",
 		label: "Status Line Separator",
-		description: "Style of separators between segments (built-in box and band layouts, or top-border/top-band attachments)",
+		description:
+			"Style of separators between segments (built-in box and band layouts, or top-border/top-band attachments)",
 		options: [
 			{ value: "powerline", label: "Powerline", description: "Solid arrows (Nerd Font)" },
 			{ value: "powerline-thin", label: "Thin chevron", description: "Thin arrows (Nerd Font)" },

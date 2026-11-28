@@ -643,11 +643,16 @@ function buildColumn(
 	return column;
 }
 
+/**
+ * A raw CR is stripped by the terminal writer and a tab jumps to the next stop; a space keeps
+ * each one's caret cell and UTF-16 offset.
+ */
+const NOTE_CONTROL = /[\r\t]/g;
+
 /** Prepare a caret-relative excerpt once per paint, without changing the draft or its offsets. */
 function noteDisplayLine({ text, cursor }: LineState): NoteDisplayLine {
-	// A raw CR is stripped by the terminal writer; a space keeps its caret cell and UTF-16 offset.
 	if (text.length <= NOTE_LAYOUT_LIMIT)
-		return { text: text.replaceAll("\r", " "), cursor, omittedBefore: false, omittedAfter: false };
+		return { text: text.replace(NOTE_CONTROL, " "), cursor, omittedBefore: false, omittedAfter: false };
 
 	// Keep the excerpt fixed as the caret moves within a page.
 	const stride = NOTE_LAYOUT_LIMIT / 2;
@@ -664,7 +669,7 @@ function noteDisplayLine({ text, cursor }: LineState): NoteDisplayLine {
 	if (from >= to || at < from || (omittedAfter && at >= to))
 		return { text: "…", cursor: 0, omittedBefore, omittedAfter };
 
-	return { text: sample.slice(from, to).replaceAll("\r", " "), cursor: at - from, omittedBefore, omittedAfter };
+	return { text: sample.slice(from, to).replace(NOTE_CONTROL, " "), cursor: at - from, omittedBefore, omittedAfter };
 }
 
 function currentView(model: HtmlFormModel): View {

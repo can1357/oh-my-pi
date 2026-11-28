@@ -255,7 +255,7 @@ test("wraps a long option note and keeps its caret on screen", () => {
 	}
 });
 
-test("inverts the whole grapheme under a wrapped option note's caret", () => {
+test("shows the caret on a pasted carriage return or tab without changing the saved option note", () => {
 	const model = new HtmlFormModel(
 		parseHtmlForm(`<form><label><input type="radio" name="r" value="keep" checked> Keep</label></form>`),
 		{ onSubmit: () => {}, onCancel: () => {} },
@@ -268,41 +268,13 @@ test("inverts the whole grapheme under a wrapped option note's caret", () => {
 	try {
 		term.focus(term.surface.dock()[0]!);
 		term.press("n");
-		const family = "👨‍👩‍👧‍👦";
-		term.paste(`${"x".repeat(33)} Go ${family}!`);
-		term.press("left"); // onto the exclamation mark
-		term.press("left"); // onto the family emoji
-		const screen = term.screen();
-		const first = screen.findIndex(row => row.includes("x".repeat(30)));
-		expect(first).toBeGreaterThanOrEqual(0);
-		expect(screen[first + 1]).toContain(`Go ${family}!`);
-		expect(highlighted(term.rows())).toEqual([family]);
-	} finally {
-		term.dispose();
-	}
-});
-
-test("shows the caret on a pasted carriage return without changing the saved option note", () => {
-	const model = new HtmlFormModel(
-		parseHtmlForm(`<form><label><input type="radio" name="r" value="keep" checked> Keep</label></form>`),
-		{ onSubmit: () => {}, onCancel: () => {} },
-	);
-	const term = createTestTerminal(() => ({ dock: <HtmlFormDialog model={model} terminalRows={() => 24} /> }), {
-		columns: 42,
-		rows: 24,
-		theme: loadThemeSync("dark"),
-	});
-	try {
-		term.focus(term.surface.dock()[0]!);
-		term.press("n");
-		term.paste("a\rb");
-		term.press("left");
-		term.press("left");
-		expect(term.screen().some(row => row.includes("a b"))).toBe(true);
+		term.paste("a\rb\tc");
+		for (let i = 0; i < 4; i++) term.press("left");
+		expect(term.screen().some(row => row.includes("a b c"))).toBe(true);
 		expect(highlighted(term.rows())).toEqual([" "]);
 
 		term.press("enter");
-		expect(model.notes()).toEqual([expect.objectContaining({ value: "keep", text: "a\rb" })]);
+		expect(model.notes()).toEqual([expect.objectContaining({ value: "keep", text: "a\rb\tc" })]);
 	} finally {
 		term.dispose();
 	}

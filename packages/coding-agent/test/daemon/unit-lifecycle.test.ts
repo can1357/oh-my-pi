@@ -234,7 +234,9 @@ describe.skipIf(process.platform === "win32")("daemon unit lifecycle", () => {
 						{
 							application: process.execPath,
 							args: ["-e", 'import { createConnection } from "node:net"; createConnection("./hold.sock");'],
+							env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
 							cwd: root,
+							pty: false,
 						},
 						{ policy: DETACHED_LEASES },
 					)

@@ -38,7 +38,6 @@ import { KITTY_PLACEHOLDER } from "../driver/images/kitty";
 import { clipViewportImages, maskOverlayImages } from "../driver/images/viewport";
 import { bubbleEvent, bubbleKey, bubblePaste, keypathOf, pathTo } from "../dispatch";
 import type { KeyEvent } from "../events";
-import type { ReplayOptions } from "../host";
 import type { ScrollRequest, UiNode } from "../node";
 import {
 	type Accessor,
@@ -108,6 +107,12 @@ interface SessionWindow {
 	readonly width: number;
 	/** The wheel scrolls it: no modal sheet owns the pointer. */
 	readonly wheel: boolean;
+}
+
+/** Options for replaying terminal scrollback from the current transcript. */
+export interface ReplayOptions {
+	/** Keep an inline dock that has already reached the bottom at the same terminal size. */
+	readonly preserveDock?: boolean;
 }
 
 /** Options of a {@link TermBackend}. */

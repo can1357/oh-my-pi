@@ -27,7 +27,6 @@ import {
 	onCleanup,
 	type Owner,
 	provide,
-	type ReplayOptions,
 	runWithOwner,
 	type Signal,
 	settle,
@@ -38,6 +37,7 @@ import {
 	useContext,
 } from "@oh-my-pi/pi-tui";
 import { holdsImage } from "@oh-my-pi/pi-tui/driver/images/anchor";
+import type { ReplayOptions } from "@oh-my-pi/pi-tui/term/backend";
 import { type Block, defineRolePainter, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
 import { mountNode, type ViewEntry, ViewList } from "./views";

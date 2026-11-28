@@ -28,6 +28,7 @@ import type { UiNode } from "./node";
 import type { Surface } from "./surface";
 import {
 	driverImages,
+	type ReplayOptions,
 	type SelectionMotion,
 	TermBackend,
 	type TermBackendOptions,
@@ -109,12 +110,6 @@ export interface PresentedFrame {
 	readonly cursor: { readonly row: number; readonly col: number } | null;
 	readonly columns: number;
 	readonly rows: number;
-}
-
-/** Options for replaying terminal scrollback from the current transcript. */
-export interface ReplayOptions {
-	/** Keep an inline dock that has already reached the bottom at the same terminal size. */
-	readonly preserveDock?: boolean;
 }
 
 export interface Host {
