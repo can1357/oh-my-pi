@@ -1144,6 +1144,8 @@ export function applySessionParseResults(sessions: ParsedSession[]): {
 					const messageById = new Map(messages.map(row => [row.entry_id, row.timestamp]));
 					const userById = new Map(users.map(row => [row.entry_id, row]));
 					const toolById = new Map(tools.map(row => [row.tool_call_id, row]));
+					// A retraction clears a stored link, so it and each later link of its prompt apply as well.
+					const retracted = new Set<string>();
 					const absentMessages = new Set(messageById.keys());
 					const absentUsers = new Set(userById.keys());
 					const absentTools = new Set(toolById.keys());
@@ -1169,9 +1171,14 @@ export function applySessionParseResults(sessions: ParsedSession[]): {
 						userStats,
 						toolCalls,
 						// A reused ID needs fresh linkage after its old identity is removed.
-						userLinks: result.userLinks.filter(
-							row => absentUsers.has(row.entryId) || userById.get(row.entryId)?.model == null,
-						),
+						userLinks: result.userLinks.filter(row => {
+							if (row.model === null) retracted.add(row.entryId);
+							return (
+								retracted.has(row.entryId) ||
+								absentUsers.has(row.entryId) ||
+								userById.get(row.entryId)?.model == null
+							);
+						}),
 						toolResults: result.toolResults.filter(
 							row => absentTools.has(row.toolCallId) || toolById.get(row.toolCallId)?.result_chars == null,
 						),
@@ -1885,24 +1892,34 @@ export function insertUserMessageStats(stats: Iterable<UserMessageStats>): numbe
 /**
  * Backfill the responding `model`/`provider` on user-message rows that were
  * persisted before their assistant reply was parsed by an incremental tail
- * read. Each row is updated at most once because the `model IS NULL` guard
- * short-circuits subsequent passes.
+ * read. A link fills only a row whose `model` is NULL, so a re-parse never
+ * overwrites a stored reply. A link with a null `model` retracts the stored
+ * reply instead, clearing the row; links apply in order, so the retry's link
+ * that follows fills it again.
  *
  * Returns the number of rows actually updated.
  */
 export function updateUserMessageLinks(links: Iterable<UserMessageLink>): number {
 	if (!db) return 0;
 
-	const stmt = db.query(`
+	const link = db.query(`
 		UPDATE user_messages
 		   SET model = ?, provider = ?
 		 WHERE session_file = ? AND entry_id = ? AND model IS NULL
 	`);
+	const retract = db.query(`
+		UPDATE user_messages
+		   SET model = NULL, provider = NULL
+		 WHERE session_file = ? AND entry_id = ? AND model IS NOT NULL
+	`);
 
 	let updated = 0;
 	atomically(db, () => {
-		for (const link of links) {
-			const result = stmt.run(link.model, link.provider, link.sessionFile, link.entryId);
+		for (const row of links) {
+			const result =
+				row.model === null
+					? retract.run(row.sessionFile, row.entryId)
+					: link.run(row.model, row.provider, row.sessionFile, row.entryId);
 			if (result.changes > 0) updated++;
 		}
 	});

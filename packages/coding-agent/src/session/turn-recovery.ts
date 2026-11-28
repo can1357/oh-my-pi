@@ -1426,9 +1426,8 @@ export class TurnRecovery {
 	}
 
 	/**
-	 * Drop the failed turn from active context and the persisted branch, then
-	 * durably persist the reparented leaf so the empty stop cannot resurface on
-	 * reload or after a mid-retry process kill.
+	 * Drop the failed turn from active context and record the new active branch
+	 * so the empty stop cannot resurface on reload after a mid-retry process kill.
 	 */
 	async #dropAssistantTurnDurably(assistantMessage: AssistantMessage): Promise<void> {
 		const droppedEntryId = await this.#dropPersistedAssistantTurn(assistantMessage);

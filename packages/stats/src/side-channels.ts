@@ -1,9 +1,9 @@
 /**
  * Classification of the model calls stored in `messages`, for attributing usage.
  *
- * - A **turn** is an assistant message (stored with a NULL purpose), or the
- *   billed usage of a discarded assistant turn, which the session journals as
- *   a `model_usage` entry with purpose `discarded-turn`.
+ * - A **turn** is an assistant message (stored with a NULL purpose), or
+ *   discarded-turn usage that an older journal stored as a `model_usage`
+ *   entry with purpose `discarded-turn`.
  * - A **side channel** is every other `model_usage` entry: a model call that
  *   is not part of the conversation (title generation, job captions, judge
  *   queries, …). Its category groups the purposes of one use case.
