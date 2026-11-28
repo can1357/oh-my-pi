@@ -1106,6 +1106,16 @@ describe("AskTool answered by an extension", () => {
 			expect(form.accepts({ plan: "pro" })).toBe(true);
 			expect(text(await form.result)).toContain(JSON.stringify({ plan: "pro" }, null, 2));
 		});
+		it("accepts a required radio group's option whose value is empty", async () => {
+			const form = await openForm(`<form>
+  <fieldset><legend>Tier</legend>
+    <label><input type="radio" name="tier" value="" required> None</label>
+    <label><input type="radio" name="tier" value="gold"> Gold</label>
+  </fieldset>
+</form>`);
+			expect(form.accepts({ tier: "" })).toBe(true);
+			expect(text(await form.result)).toContain(JSON.stringify({ tier: "" }, null, 2));
+		});
 		it("refuses an answer to a name several controls share, or that leaves its shared default invalid", async () => {
 			const form = await openForm(`<form>
   <label>Contact <input type="email" name="contact" required></label>

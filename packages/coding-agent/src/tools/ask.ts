@@ -539,8 +539,9 @@ function extensionFormData(form: HtmlForm, data: Record<string, unknown>): HtmlF
 function extensionFieldAccepts(field: FormField, value: HtmlFormValue | undefined): boolean {
 	if (fieldError(field, value) !== undefined) return false;
 	if (field.kind !== "choice" || value === undefined) return true;
-	// A required select's `<option value="">` placeholder is no answer.
-	if (field.required && (value === "" || (Array.isArray(value) && value.every(item => item === "")))) return false;
+	// A required single `<select>`'s `<option value="">` placeholder is no answer (as in HTML). Radio and
+	// checkbox groups may offer a real option with an empty value, so their selection stands.
+	if (field.required && field.select && !field.multi && value === "") return false;
 	return extensionChoiceValue(field, value) !== undefined;
 }
 
