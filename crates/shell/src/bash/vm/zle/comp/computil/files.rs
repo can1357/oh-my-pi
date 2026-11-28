@@ -73,11 +73,6 @@ fn ztat(ctx: &Ctx<'_, '_>, nam: &[u8], ls: bool) -> Result<Option<Stat>, Need> {
 	stat(ctx, &p, !ls)
 }
 
-/// Same file (`st_dev` and `st_ino`).
-const fn same(a: &Stat, b: &Stat) -> bool {
-	a.dev == b.dev && a.ino == b.ino
-}
-
 /// Tokenize and compile the metafied pattern `p`.
 fn compile(
 	ctx: &mut Ctx<'_, '_>,
@@ -562,7 +557,7 @@ fn cfp_add_sdirs(
 				} else {
 					unmetafy(m)
 				};
-				hit = stat(ctx, &mraw, true)?.is_some_and(|b| same(&a, &b));
+				hit = stat(ctx, &mraw, true)?.is_some_and(|b| a.same_file(&b));
 			}
 			if !hit {
 				continue;
@@ -650,7 +645,7 @@ fn cf_ignore(
 			continue;
 		}
 		if let Some(e) = &est
-			&& same(&nst, e)
+			&& nst.same_file(e)
 		{
 			ign.push(unmetafy(&comp::quotestring(&n, qt::BACKSLASH, env.qopts)).into());
 			continue;
@@ -660,14 +655,14 @@ fn cf_ignore(
 			let mut found = false;
 			while let Some(e) = c.rfind_byte(b'/').filter(|&e| e > pl) {
 				c.truncate(e);
-				if ztat(ctx, &c, false)?.is_some_and(|st| same(&st, &nst)) {
+				if ztat(ctx, &c, false)?.is_some_and(|st| st.same_file(&nst)) {
 					found = true;
 					break;
 				}
 			}
 			let more = !found
 				&& match c.rfind_byte(b'/').filter(|&e| e > pl) {
-					Some(_) => ztat(ctx, &c, true)?.is_some_and(|st| same(&st, &nst)),
+					Some(_) => ztat(ctx, &c, true)?.is_some_and(|st| st.same_file(&nst)),
 					None => false,
 				};
 			if found || more {

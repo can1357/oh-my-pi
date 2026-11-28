@@ -178,3 +178,14 @@ fn a_script_without_shebang_starts_from_the_command_environment() {
 		 found\n/work/plain: line 2: nosuch: command not found\n"
 	);
 }
+
+/// On a filesystem that gives no file an inode (`MemFs`; on Windows every
+/// file has inode 0), a new shell still keeps an inherited `$PWD` only where
+/// it names the working directory, as bash 5.2.37 does: `/tmp/` in `/tmp`
+/// stays, `/` gives way.
+#[test]
+fn an_inherited_pwd_without_inodes_stays_only_for_the_working_directory() {
+	let (out, ..) =
+		run("cd /tmp && PWD=/ bash -c 'echo \"$PWD\"' && PWD=/tmp/ bash -c 'echo \"$PWD\"'");
+	assert_eq!(out, "/tmp\n/tmp/\n");
+}

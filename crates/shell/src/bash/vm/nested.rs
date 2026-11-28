@@ -237,6 +237,17 @@ fn launch(
 	stdin: bool,
 ) -> Option<Flow> {
 	let New { args, env, pairs, dollar0, origin, posix } = *new;
+	// The environment the new shell starts from, with the `$PWD` it binds:
+	// bash binds it before it expands `BASH_ENV` or `ENV`.
+	let rebound;
+	let pairs = match new_pwd(k, cx, vp, pairs, posix) {
+		Ok(None) => pairs,
+		Ok(Some(pwd)) => {
+			rebound = with_pwd(pairs, pwd);
+			&rebound[..]
+		},
+		Err(key) => return Some(Flow::Block(key)),
+	};
 	// The startup files (`BASH_ENV` for a non-interactive bash): the first
 	// readable candidate of each.
 	let home = env
@@ -277,11 +288,7 @@ fn launch(
 			notes.push(b'\n');
 		},
 	}
-	let pwd = match new_pwd(k, cx, vp, pairs, posix) {
-		Ok(pwd) => pwd,
-		Err(key) => return Some(Flow::Block(key)),
-	};
-	let mut child = match fresh_shell(k, cx, vp, args, pairs, dollar0, origin, pwd) {
+	let mut child = match fresh_shell(k, cx, vp, args, pairs, dollar0, origin) {
 		Ok(child) => child,
 		Err(err) => {
 			k.fail(err);
@@ -334,12 +341,13 @@ fn launch(
 
 /// The `$PWD` a new shell binds, as bash 5.2.37 binds it; `None` keeps the
 /// inherited one as it is. An inherited absolute `$PWD` that names the working
-/// directory (the same device and inode, however it is spelled: `D/`, a
-/// symlink to `D`) stays. A shell that starts in POSIX mode (`posix`) binds its
-/// lexical form instead (`.` and `..` resolved textually, a leading `//`
-/// kept), or the working directory where that form, or a prefix before one of
-/// its `..`, is no directory. Any other `$PWD` gives way to the working
-/// directory.
+/// directory (the same file, however it is spelled: `D/`, a symlink to `D`)
+/// stays. A shell that starts in POSIX mode (`posix`) binds its lexical form
+/// instead (`.` and `..` resolved textually, a leading `//` kept), or the
+/// working directory where that form, or a prefix before one of its `..`, is
+/// no directory. Any other `$PWD` gives way to the working directory, unless
+/// the working directory cannot be stat'ed (it was removed): then any
+/// inherited `$PWD` stays as it is.
 fn new_pwd(
 	k: &Kernel,
 	cx: &mut Cx<'_>,
@@ -351,11 +359,15 @@ fn new_pwd(
 	let Some((_, pwd)) = env.iter().find(|(name, _)| name.as_slice() == b"PWD") else {
 		return Ok(Some(cwd));
 	};
-	if *pwd != cwd
-		&& (probe::absolute(&cwd, pwd) != *pwd
-			|| !same_file(stat(k, cx, vp, pwd)?, stat(k, cx, vp, &cwd)?))
-	{
-		return Ok(Some(cwd));
+	if *pwd != cwd {
+		// bash keeps any inherited `$PWD` where it cannot read the working
+		// directory (it was removed).
+		if stat(k, cx, vp, &cwd)?.is_none() {
+			return Ok(None);
+		}
+		if probe::absolute(&cwd, pwd) != *pwd || !same_file(k, cx, vp, pwd, &cwd)? {
+			return Ok(Some(cwd));
+		}
 	}
 	if !posix {
 		return Ok(None);
@@ -378,6 +390,16 @@ fn new_pwd(
 	Ok(Some(lexical))
 }
 
+/// `env` (sorted by name, as an [`EnvView`] is) with `PWD` bound to `pwd`.
+fn with_pwd(env: &[(BString, BString)], pwd: BString) -> Vec<(BString, BString)> {
+	let mut env = env.to_vec();
+	match env.binary_search_by(|(name, _)| name.as_slice().cmp(b"PWD")) {
+		Ok(at) => env[at].1 = pwd,
+		Err(at) => env.insert(at, (BString::from("PWD"), pwd)),
+	}
+	env
+}
+
 /// `stat` of `path`, following links.
 fn stat(k: &Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, path: &[u8]) -> Result<Option<Stat>, WaitKey> {
 	let probe = Probe::Stat { path: BString::from(path), follow: true };
@@ -387,13 +409,34 @@ fn stat(k: &Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, path: &[u8]) -> Result<Opti
 	})
 }
 
-/// Whether `a` and `b` are the same file (device and inode).
-fn same_file(a: Option<Stat>, b: Option<Stat>) -> bool {
-	matches!((a, b), (Some(a), Some(b)) if (a.dev, a.ino) == (b.dev, b.ino))
+/// Whether `a` and `b` name the same file: the same device and inode
+/// ([`Stat::same_file`]), or the same canonical path where the filesystem
+/// gives no inode (`ino` 0, as for every file of the OS filesystem on
+/// Windows).
+fn same_file(
+	k: &Kernel,
+	cx: &mut Cx<'_>,
+	vp: &mut Vproc,
+	a: &[u8],
+	b: &[u8],
+) -> Result<bool, WaitKey> {
+	let (Some(stat_a), Some(stat_b)) = (stat(k, cx, vp, a)?, stat(k, cx, vp, b)?) else {
+		return Ok(false);
+	};
+	if stat_a.ino != 0 && stat_b.ino != 0 {
+		return Ok(stat_a.same_file(&stat_b));
+	}
+	let mut real = |path: &[u8]| {
+		let probe = Probe::RealPath { path: BString::from(path) };
+		command_probe(k, cx, vp, &probe).map(|answer| match answer {
+			ProbeResult::Path(real) => real,
+			_ => None,
+		})
+	};
+	Ok(matches!((real(a)?, real(b)?), (Some(real_a), Some(real_b)) if real_a == real_b))
 }
 
-/// A child of `vp` holding a new shell's state (see the module docs), its
-/// `$PWD` `pwd` ([`new_pwd`]) or the inherited one where that is `None`.
+/// A child of `vp` holding a new shell's state (see the module docs).
 fn fresh_shell(
 	k: &mut Kernel,
 	cx: &mut Cx<'_>,
@@ -402,7 +445,6 @@ fn fresh_shell(
 	env: &[(BString, BString)],
 	dollar0: &[u8],
 	origin: &str,
-	pwd: Option<BString>,
 ) -> Result<Vproc, StoreError> {
 	let vpid = k.vpid(cx.store);
 	let (mut image, _) = state::fork_image(&k.root, cx.store, vp)?;
@@ -482,9 +524,6 @@ fn fresh_shell(
 	}
 	if !foreign.is_empty() {
 		image.put(Key::Misc(MiscKey::ForeignEnv), Record::Words(foreign));
-	}
-	if let Some(pwd) = pwd {
-		image.set_var(b"PWD", Some(Var::scalar(pwd, Attrs::EXPORT)));
 	}
 	let zsh = args.mode.dialect() == crate::bash::ids::Dialect::Zsh;
 	let shlvl = env

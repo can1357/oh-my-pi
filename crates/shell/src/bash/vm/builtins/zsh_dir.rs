@@ -600,9 +600,7 @@ fn new_pwd(ctx: &mut Ctx<'_, '_>, cd: &mut Cd, dir: usize, quiet: bool) -> R {
 		match stat(ctx, &new, true)? {
 			None => new = realpath(ctx, &actual)?.unwrap_or(actual),
 			Some(s1) => {
-				if cd.chasing
-					&& stat(ctx, &actual, true)?.is_some_and(|s2| (s1.dev, s1.ino) != (s2.dev, s2.ino))
-				{
+				if cd.chasing && stat(ctx, &actual, true)?.is_some_and(|s2| !s1.same_file(&s2)) {
 					new = realpath(ctx, &actual)?.unwrap_or(actual);
 				}
 			},
