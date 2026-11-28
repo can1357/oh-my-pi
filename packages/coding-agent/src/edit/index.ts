@@ -1,4 +1,3 @@
-import { realpathSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -26,7 +25,6 @@ import {
 	type EditWriteRequest,
 	type EditWriteResponse,
 } from "@oh-my-pi/pi-natives";
-import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
 import { type FileSnapshot, readSnapshot } from "../commit/selective/journal";
 import {
@@ -66,6 +64,7 @@ import { type EditMode } from "../tools/details/edit";
 import { resolveEditMode, resolveEditToolMode } from "../utils/edit-mode";
 import { attemptEditAutoRepair, type EditAutoRepairOutcome } from "./auto-repair";
 import { type AppliedEditSnapshot, createEditBlackboxRecorder } from "./blackbox";
+import { createCheckoutNotice } from "./checkout-notice";
 import hashlineCompactPrompt from "./hashline-compact.md" with { type: "text" };
 import { MAGIC_EDIT_GRAMMAR, magicEditPaths, runMagicEdit } from "./magic";
 import magicEditDescription from "../prompts/tools/magic-edit.md" with { type: "text" };
@@ -289,58 +288,19 @@ function toPerFileResult(file: EditFileOutcome, mode: EditMode, checkoutNotice?:
 	};
 }
 
-function createCheckoutNotice(cwd: string): ((target: string) => string | undefined) | undefined {
-	try {
-		const sessionRepo = vcs.git(cwd);
-		if (!sessionRepo) return undefined;
-		const session = sessionRepo.info();
-		// Git may record a linked worktree's gitdir through a resolved symlink (macOS `/var` → `/private/var`).
-		const sessionCommonDir = realpathSync(session.commonDir);
-		const sessionGitDir = realpathSync(session.gitDir);
-		const byDirectory = new Map<string, string | undefined>();
-		let sessionBranch: string | undefined;
-		return target => {
-			if (!path.isAbsolute(target)) return undefined;
-			const dir = path.dirname(target);
-			if (byDirectory.has(dir)) return byDirectory.get(dir);
-			let note: string | undefined;
-			try {
-				const targetRepo = vcs.git(dir);
-				const checkout = targetRepo?.info();
-				if (
-					targetRepo &&
-					checkout &&
-					realpathSync(checkout.commonDir) === sessionCommonDir &&
-					realpathSync(checkout.gitDir) !== sessionGitDir
-				) {
-					if (sessionBranch === undefined) {
-						const sessionHead = sessionRepo.headSync();
-						sessionBranch = sessionHead.branch ?? sessionHead.commit?.slice(0, 8);
-					}
-					const targetHead = targetRepo.headSync();
-					const targetBranch = targetHead.branch ?? targetHead.commit?.slice(0, 8);
-					if (sessionBranch && targetBranch) note = `Edited worktree: ${targetBranch} (session: ${sessionBranch})`;
-				}
-			} catch (error) {
-				logger.debug("Could not resolve edited worktree", { error: String(error) });
-			}
-			byDirectory.set(dir, note);
-			return note;
-		};
-	} catch (error) {
-		logger.debug("Could not resolve session checkout for edit", { error: String(error) });
-		return undefined;
-	}
+function mutationKey(sourcePath: string, moveTo?: string): string {
+	return `${sourcePath}\0${moveTo ?? ""}`;
 }
 
-function aggregateDetails(files: readonly EditFileOutcome[], mode: EditMode, cwd: string): EditToolDetails | undefined {
+function aggregateDetails(
+	files: readonly EditFileOutcome[],
+	mode: EditMode,
+	checkoutNotices: ReadonlyMap<string, string>,
+): EditToolDetails | undefined {
 	if (files.length === 0) return undefined;
-	const checkoutNotice = createCheckoutNotice(cwd);
-	const perFileResults = files.map(file => {
-		const notice =
-			checkoutNotice?.(file.moveTo ?? file.path) ?? (file.moveTo ? checkoutNotice?.(file.path) : undefined);
-		return toPerFileResult(file, mode, notice);
-	});
+	const perFileResults = files.map(file =>
+		toPerFileResult(file, mode, checkoutNotices.get(mutationKey(file.path, file.moveTo))),
+	);
 	if (perFileResults.length === 1) {
 		const [file] = perFileResults;
 		return {
@@ -797,6 +757,8 @@ export class EditTool implements AgentTool<TInput> {
 		const current = open;
 		const editSession = open.native;
 		const batch = getLspBatchRequest(context?.toolCall);
+		const resolveCheckoutNotice = createCheckoutNotice(this.session.cwd);
+		const checkoutNotices = new Map<string, string>();
 		let outcome;
 		try {
 			outcome = await editSession.apply(
@@ -807,7 +769,16 @@ export class EditTool implements AgentTool<TInput> {
 							path: request.path,
 						});
 					}
-					return this.#write(request, current, signal);
+					const response = await this.#write(request, current, signal);
+					const notice = resolveCheckoutNotice?.({
+						path: request.path,
+						moveTo: request.moveTo,
+						followSymlinks: request.op !== "delete",
+					});
+					if (notice !== undefined) {
+						checkoutNotices.set(mutationKey(request.path, request.moveTo), notice);
+					}
+					return response;
 				},
 			);
 			if (outcome.isError && batch?.flush) {
@@ -830,7 +801,7 @@ export class EditTool implements AgentTool<TInput> {
 			};
 		}
 
-		const details = aggregateDetails(outcome.files, this.mode, this.session.cwd);
+		const details = aggregateDetails(outcome.files, this.mode, checkoutNotices);
 		const result: AgentToolResult<EditToolDetails, TInput> = {
 			content: [{ type: "text", text: outcome.text }],
 			...(details ? { details } : {}),
@@ -839,7 +810,12 @@ export class EditTool implements AgentTool<TInput> {
 		const notes: string[] = [];
 		if (details?.checkoutNotice) notes.push(details.checkoutNotice);
 		for (const file of details?.perFileResults ?? []) {
-			if (file.checkoutNotice) notes.push(`${file.checkoutNotice} — ${path.relative(this.session.cwd, file.path)}`);
+			if (file.checkoutNotice) {
+				const label = file.sourcePath
+					? `${path.relative(this.session.cwd, file.sourcePath)} → ${path.relative(this.session.cwd, file.path)}`
+					: path.relative(this.session.cwd, file.path);
+				notes.push(`${file.checkoutNotice} — ${label}`);
+			}
 		}
 		for (const file of outcome.files) {
 			if (!file.parseRegressed || file.oldText === undefined || file.newText === undefined) continue;

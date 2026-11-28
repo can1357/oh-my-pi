@@ -18,7 +18,7 @@ import * as path from "node:path";
 import { errorMessage, getAgentDir, getMCPConfigPath, isEnoent, isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
 import { JSONC } from "bun";
 import { resolveClaudePaths } from "../config/claude-paths";
-import type { RawSettings } from "../config/raw-settings";
+import type { RawSettings } from "../config/settings";
 import { addMCPServer, readMCPConfigFile } from "../mcp/config-writer";
 import type { MCPServerConfig } from "../mcp/types";
 import { shortenPath } from "../utils/render-utils";

@@ -17,6 +17,7 @@
 use std::sync::Arc;
 
 use bstr::BString;
+use xutf::{Utf8Decoder, Utf8Step};
 
 use super::{
 	State,
@@ -249,10 +250,9 @@ pub fn metachar(s: &[u8], i: usize, multibyte: bool) -> (usize, Option<u32>) {
 	if first <= 0x7f {
 		return (1, Some(u32::from(first)));
 	}
-	let mut buf = [0u8; 4];
-	let mut n = 0;
+	let mut decoder = Utf8Decoder::new();
 	let mut p = i;
-	while p < s.len() && n < buf.len() {
+	while p < s.len() {
 		let c = if s[p] == META {
 			p += 1;
 			at(s, p) ^ 32
@@ -262,12 +262,10 @@ pub fn metachar(s: &[u8], i: usize, multibyte: bool) -> (usize, Option<u32>) {
 			s[p]
 		};
 		p += 1;
-		buf[n] = c;
-		n += 1;
-		match std::str::from_utf8(&buf[..n]) {
-			Ok(st) => return (p - i, st.chars().next().map(u32::from)),
-			Err(e) if e.error_len().is_none() => {},
-			Err(_) => break,
+		match decoder.push(c) {
+			Utf8Step::Char(ch) => return (p - i, Some(u32::from(ch))),
+			Utf8Step::Pending => {},
+			Utf8Step::Reject => break,
 		}
 	}
 	(1 + usize::from(first == META), None)

@@ -1253,12 +1253,12 @@ describe("AgentSession auto-compaction queue resume", () => {
 		// Observe entry into admission, then yield an event-loop turn without guessing a wall-clock duration.
 		const admissionEntered = Promise.withResolvers<void>();
 		const waitForCleanup = SessionMaintenance.prototype.waitForMaintenanceCleanup;
-		vi.spyOn(SessionMaintenance.prototype, "waitForMaintenanceCleanup").mockImplementation(
-			function (this: SessionMaintenance) {
-				admissionEntered.resolve();
-				return waitForCleanup.call(this);
-			},
-		);
+		vi.spyOn(SessionMaintenance.prototype, "waitForMaintenanceCleanup").mockImplementation(function (
+			this: SessionMaintenance,
+		) {
+			admissionEntered.resolve();
+			return waitForCleanup.call(this);
+		});
 		const prompted = session.prompt("after idle compaction", {
 			onPromptAdmitted: () => order.push("prompt admitted"),
 			images: [

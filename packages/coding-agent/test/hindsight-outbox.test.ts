@@ -132,6 +132,18 @@ async function age(file: string, ms: number): Promise<void> {
 	await fs.utimes(file, then, then);
 }
 
+/** Lists every directory by name, ascending or descending, in place of the filesystem's own order. */
+function listByName(direction: "ascending" | "descending"): void {
+	const realReaddir = fs.readdir;
+	vi.spyOn(fs, "readdir").mockImplementation((async (...args: Parameters<typeof fs.readdir>) => {
+		const listed = await realReaddir(...args);
+		// The outbox reads event names from plain listings; a `withFileTypes` one lists destinations.
+		if (args.length > 1) return listed;
+		const byName = (listed as unknown as string[]).toSorted();
+		return direction === "ascending" ? byName : byName.reverse();
+	}) as typeof fs.readdir);
+}
+
 function eventWithContent(pending: OutboxEvent[], content: string): OutboxEvent {
 	const event = pending.find(candidate => candidate.content === content);
 	if (!event) throw new Error(`Expected an outbox event containing ${content}`);
@@ -210,6 +222,93 @@ describe("Hindsight retain outbox", () => {
 		expect(requests).toHaveLength(3);
 		const tags = Object.fromEntries(requests.flat().map(item => [item.content, item.tags]));
 		expect(tags).toEqual({ project: ["project:alpha"], global: undefined, "other project": ["project:beta"] });
+	});
+
+	// Events written within one tick of a filesystem's clock share an mtime, and a directory lists them in an
+	// order of its own (ext4 by a name hash seeded per filesystem). The mtimes are tied and the listing is fixed
+	// by name both ways, so a delivery order that rests on either fails one of the two on every filesystem.
+	it.each(["ascending", "descending"] as const)(
+		"delivers events in the order they were queued when their mtimes tie and the directory lists them by name %s",
+		async direction => {
+			const first = fixture();
+			const second = fixture({}, "session-b");
+			await first.tool.execute("first-call", {
+				items: [{ content: "one" }, { content: "two" }, { content: "three" }],
+			});
+			await second.tool.execute("second-call", { items: [{ content: "four" }, { content: "five" }] });
+			await first.tool.execute("third-call", { items: [{ content: "six" }] });
+			const tick = new Date();
+			for (const file of await eventFiles()) await fs.utimes(file, tick, tick);
+			listByName(direction);
+
+			await first.state.flushRetainQueue();
+			expect(requests).toHaveLength(1);
+			expect(accepted.map(item => item.content)).toEqual(["one", "two", "three", "four", "five", "six"]);
+		},
+	);
+
+	it("delivers an older release's events, which carry no sequence, before newer ones and by mtime", async () => {
+		const { tool, state } = fixture();
+		await tool.execute("older-release", { items: [{ content: "older first" }, { content: "older second" }] });
+		// Rewrite both as an older release published them: no sequence, and a second apart.
+		const now = Date.now();
+		for (const file of await eventFiles()) {
+			const older = (await Bun.file(file).json()) as OutboxEvent;
+			delete older.sequence;
+			await Bun.write(file, JSON.stringify(older));
+			const at = new Date(now - (older.content === "older first" ? 2_000 : 1_000));
+			await fs.utimes(file, at, at);
+		}
+		await tool.execute("this-release", { items: [{ content: "newer" }] });
+		// The sequenced event gets the oldest mtime, so only its sequence can put it after the older release's.
+		for (const file of await eventFiles()) {
+			if (((await Bun.file(file).json()) as OutboxEvent).content !== "newer") continue;
+			const at = new Date(now - 3_000);
+			await fs.utimes(file, at, at);
+		}
+		listByName("descending");
+
+		await state.flushRetainQueue();
+		expect(accepted.map(item => item.content)).toEqual(["older first", "older second", "newer"]);
+		expect(await events()).toEqual([]);
+	});
+
+	it("queues nothing when a pending event cannot be read to place the call after it", async () => {
+		const { tool, state } = fixture();
+		await tool.execute("earlier", { items: [{ content: "earlier" }] });
+		const [earlier] = await eventFiles();
+		const realReadFile = fs.readFile;
+		const failing = vi.spyOn(fs, "readFile").mockImplementation((async (...args: Parameters<typeof fs.readFile>) => {
+			if (String(args[0]) === earlier) throw Object.assign(new Error("simulated read failure"), { code: "EIO" });
+			return realReadFile(...args);
+		}) as typeof fs.readFile);
+
+		await expect(tool.execute("later", { items: [{ content: "later" }] })).rejects.toThrow(/NOT queued/);
+		expect(await eventFiles()).toEqual([earlier]);
+		failing.mockRestore();
+		await tool.execute("later", { items: [{ content: "later" }] });
+		await state.flushRetainQueue();
+		expect(accepted.map(item => item.content)).toEqual(["earlier", "later"]);
+	});
+
+	it("queues nothing when the call's sequence would pass the largest safe integer", async () => {
+		const { tool, state } = fixture();
+		await tool.execute("near-the-end", { items: [{ content: "last but one" }] });
+		const [file] = await eventFiles();
+		const event = (await Bun.file(file).json()) as OutboxEvent;
+		await Bun.write(file, JSON.stringify({ ...event, sequence: Number.MAX_SAFE_INTEGER - 1 }));
+
+		await expect(tool.execute("crosses", { items: [{ content: "one" }, { content: "two" }] })).rejects.toThrow(
+			/NOT queued/,
+		);
+		expect(await eventFiles()).toEqual([file]);
+		await tool.execute("fits", { items: [{ content: "last" }] });
+		// The pending event now holds the largest safe integer, so not even one more item fits.
+		await expect(tool.execute("past-the-end", { items: [{ content: "one more" }] })).rejects.toThrow(/NOT queued/);
+		expect(await eventFiles()).toHaveLength(2);
+		await state.flushRetainQueue();
+		expect(accepted.map(item => item.content)).toEqual(["last but one", "last"]);
+		expect(await events()).toEqual([]);
 	});
 
 	it("rejects a call that would overflow the outbox without writing any of it", async () => {

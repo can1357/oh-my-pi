@@ -56,8 +56,7 @@ try {
 		// Each write is a separate JS string: lone surrogates cannot pair across writes.
 		const expected = fragments.map(fragment => Buffer.from(fragment).toString()).join("");
 		expect(output.slice(0, expected.length)).toBe(expected);
-		// PtySession's teardown sends "\n" + VEOF to the PTY (portable-pty's writer
-		// drop); Linux echoes it back as "\r\n" after the child's output.
+		// Nothing but line-discipline whitespace follows the child's output.
 		expect(output.slice(expected.length).trim()).toBe("");
 	},
 	15_000,

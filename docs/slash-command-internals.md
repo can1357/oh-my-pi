@@ -472,6 +472,8 @@ answers or relax these branch guards.
 | `/annotate path/to/file`        | Text read from a file                                                        |
 | `/annotate "text"`              | Literal text                                                                 |
 
+`/copy` and `/annotate session` use the same picker. Highlight a message and choose **Blocks** in Tern (or press Right) to browse its blocks. Choose **Copy** or **Select** (or press Enter) to accept the highlighted message or block. When Tern has room for a side preview, you can also click a preview section to accept its full text and close the picker.
+
 The whole remainder after `/annotate` is one source specification (`CustomCommand.execute` receives it verbatim as `rawArgs`):
 
 - A remainder wrapped in matching `"` or `'` is literal text; only the outer pair is stripped and the interior is kept byte-for-byte.
@@ -479,6 +481,8 @@ The whole remainder after `/annotate` is one source specification (`CustomComman
 - Anything else is one file path, spaces included, resolved with `resolveReadPath` against the live session cwd. Missing or non-regular paths notify and never fall back to literal text.
 
 Argument completion offers the modes, a `./` file-path starter, and a quote starter. `CustomCommand.getArgumentCompletions(prefix, cwd)` receives the live session cwd, so file suggestions follow `/move` and `/wt`.
+
+The annotation pane syntax-highlights supported file types, selected code blocks with a known language, and diff contents in ANSI terminals and Tern. In ANSI, added and removed code keeps a distinct background tint even when syntax colors are active. Line notes still refer to the original source line or old/new diff line, including when the display wraps.
 
 **Code review.** The menu lists up to three GitHub PRs or GitLab MRs referenced in the conversation, then the local diff kinds. `/annotate code-review` takes the same arguments as `/review`; a ref or `#N`/`!N` skips the menu. The diff is resolved once in the review checkout and frozen (`ResolvedReviewTarget`); the overlay and the reviewer prompt read the same snapshot, filtered by the same exclusion rules as `/review` (`src/extensibility/custom-commands/bundled/review/diff.ts`). The overlay offers **Continue with LLM review** (submits the `/review` prompt with the notes as operator focus) and **Paste annotations into prompt**. Both include the optional `[focus]` text. Nothing is posted to GitHub or GitLab.
 

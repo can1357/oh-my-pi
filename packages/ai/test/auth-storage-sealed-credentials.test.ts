@@ -132,4 +132,24 @@ describe("sealed credential rows", () => {
 
 		expect(rawRows().map(row => row.salt === null)).toEqual([false, true]);
 	});
+
+	it("forcing encryption off unseals what the key opens, so later opens need no vault", async () => {
+		const sealing = open({ cipher, encrypt: true });
+		await sealing.upsertAuthCredential(PROVIDER, login);
+		sealing.close();
+		const foreign = open({ cipher: new CredentialCipher(new Uint8Array(32).fill(9)), encrypt: true });
+		await foreign.upsertAuthCredential("perplexity", { type: "api_key", key: "pplx-foreign" });
+		foreign.close();
+
+		const optedOut = open({ cipher });
+		await optedOut.unlock({ encrypt: false });
+		optedOut.close();
+		const [unsealed, stillSealed] = rawRows();
+		expect(unsealed!.salt).toBeNull();
+		expect(stillSealed!.salt).not.toBeNull();
+
+		const vaultless = open();
+		expect(vaultless.listAuthCredentials(PROVIDER).map(row => row.credential)).toEqual([login]);
+		vaultless.close();
+	});
 });

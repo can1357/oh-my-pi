@@ -108,6 +108,21 @@ function imageCount(context: Context): number {
 }
 
 describe("SnapcompactInlineTransformer", () => {
+	it("keeps the system prompt and tool output as text when no face covers them", async () => {
+		const text = `${LARGE} \u{10FFFF}`;
+		const options = withTestShape({ renderSystemPrompt: "all", renderToolResults: true });
+		const context = { systemPrompt: [text], messages: [userMessage("go"), toolResult("call_1", text)] };
+		const model = makeModel();
+		const render = spyOn(snapcompact, "renderMany");
+		try {
+			expect(await new SnapcompactInlineTransformer(options).transform(context, model)).toBe(context);
+			expect(estimateInlineSavings({ options, model, ...context }).savedTokens).toBe(0);
+			expect(render).not.toHaveBeenCalled();
+		} finally {
+			render.mockRestore();
+		}
+	});
+
 	it("is a no-op for text-only models", async () => {
 		const transformer = new SnapcompactInlineTransformer(
 			withTestShape({ renderSystemPrompt: "all", renderToolResults: true }),
@@ -368,10 +383,10 @@ describe("SnapcompactInlineTransformer", () => {
 
 	it("applies option changes on the next request, re-rendering cached frames when the shape changes", async () => {
 		const options = withTestShape({ renderSystemPrompt: "none", renderToolResults: false });
-		const renderedFonts: string[] = [];
+		const renderedCellWidths: number[] = [];
 		const transformer = new SnapcompactInlineTransformer(options, undefined, {
 			async framesFor(text, shape) {
-				renderedFonts.push(shape.font);
+				renderedCellWidths.push(shape.cellWidth);
 				return Array.from({ length: snapcompact.frames(text, { shape }) }, () => ({
 					type: "image" as const,
 					data: "ZnJhbWU=",
@@ -382,20 +397,20 @@ describe("SnapcompactInlineTransformer", () => {
 		const context = makeContext();
 
 		expect(await transformer.transform(context, makeModel())).toBe(context);
-		expect(renderedFonts).toEqual([]);
+		expect(renderedCellWidths).toEqual([]);
 
 		// Both large results (call_1, call_3) render once each.
 		options.renderToolResults = true;
 		expect(imageCount(await transformer.transform(context, makeModel()))).toBeGreaterThan(0);
-		expect(renderedFonts).toEqual(["6x12", "6x12"]);
+		expect(renderedCellWidths).toEqual([6, 6]);
 
 		// Same shape → served from the frame cache.
 		await transformer.transform(context, makeModel());
-		expect(renderedFonts).toEqual(["6x12", "6x12"]);
+		expect(renderedCellWidths).toEqual([6, 6]);
 
 		options.shape = "8x13-bw";
 		expect(imageCount(await transformer.transform(context, makeModel()))).toBeGreaterThan(0);
-		expect(renderedFonts).toEqual(["6x12", "6x12", "8x13", "8x13"]);
+		expect(renderedCellWidths).toEqual([6, 6, 8, 8]);
 	});
 
 	it("reports per-tool-result savings to the sink for each imaged result only", async () => {

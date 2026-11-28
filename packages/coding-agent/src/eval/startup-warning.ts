@@ -1,7 +1,7 @@
 import { sanitizeDisplayWarnings } from "../utils/render-utils";
 import type { Args } from "../cli/args";
 import type { Settings } from "../config/settings";
-import { checkPythonKernelAvailability } from "./py/kernel";
+import type * as PythonKernel from "./py/kernel";
 import { cfgEvalJs, cfgEvalPy, cfgPythonInterpreter } from "./settings";
 
 const PYTHON_FIX_HINT = "Install Python 3.8+ or set python.interpreter, then verify with `omp setup python --check`.";
@@ -22,6 +22,7 @@ export async function resolvePythonEvalWarning({
 }): Promise<string | undefined> {
 	if (!cfgEvalPy.get(settings)) return undefined;
 	const interpreter = cfgPythonInterpreter.get(settings)?.trim() || undefined;
+	const { checkPythonKernelAvailability } = require("./py/kernel") as typeof PythonKernel;
 	const availability = await checkPythonKernelAvailability(cwd, interpreter, { signal });
 	if (availability.ok || signal?.aborted) return undefined;
 	// The reason embeds interpreter paths and spawn errors: shorten home, strip controls, bound length.

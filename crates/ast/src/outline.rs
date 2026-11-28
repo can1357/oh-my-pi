@@ -233,7 +233,7 @@ fn last_named_child(node: Node<'_>) -> Option<Node<'_>> {
 	node
 		.named_child_count()
 		.checked_sub(1)
-		.and_then(|index| node.named_child(index))
+		.and_then(|index| node.named_child(index as u32))
 }
 
 fn is_import_kind(kind: &str) -> bool {

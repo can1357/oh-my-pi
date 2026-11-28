@@ -91,27 +91,31 @@ pub(crate) fn update_reference(
 /// `expected` is the commit the update started from. `actual` is the value that
 /// broke the swap; a reference that disappeared leaves it `None`, the same way
 /// an unborn HEAD is reported.
-fn head_moved_at_commit(
-	expected: Option<gix::hash::ObjectId>,
-	err: &gix::reference::edit::Error,
-) -> Option<Error> {
-	let gix::reference::edit::Error::FileTransactionPrepare(prepare) = err else {
+fn head_moved_at_commit(expected: Option<gix::hash::ObjectId>, err: &gix::Error) -> Option<Error> {
+	use gix::refs::file::transaction::prepare::{MustNotExist, ReferenceOutOfDate};
+	let actual = if let Some(ReferenceOutOfDate { actual, .. }) = err.downcast_any_ref() {
+		match actual {
+			gix::refs::Target::Object(id) => Some(id.to_hex().to_string()),
+			gix::refs::Target::Symbolic(_) => None,
+		}
+	} else if let Some(MustNotExist { actual: gix::refs::Target::Object(id), .. }) =
+		err.downcast_any_ref()
+	{
+		Some(id.to_hex().to_string())
+	} else if is_missing_reference(err) {
+		None
+	} else {
 		return None;
 	};
-	let actual = match prepare {
-		gix::refs::file::transaction::prepare::Error::ReferenceOutOfDate {
-			actual: gix::refs::Target::Object(id),
-			..
-		}
-		| gix::refs::file::transaction::prepare::Error::MustNotExist {
-			actual: gix::refs::Target::Object(id),
-			..
-		} => Some(id.to_hex().to_string()),
-		gix::refs::file::transaction::prepare::Error::ReferenceOutOfDate { .. }
-		| gix::refs::file::transaction::prepare::Error::MustExist { .. } => None,
-		_ => return None,
-	};
 	Some(Error::HeadMoved { expected: commit_head_label(expected), actual })
+}
+
+/// A must-exist precondition failed: gix reports it as a not-found message,
+/// unlike filesystem not-found errors, which carry an I/O error.
+fn is_missing_reference(err: &gix::Error) -> bool {
+	err.classify().any(|classification| {
+		classification.class() == gix::error::Class::NotFound && classification.io_kind().is_none()
+	})
 }
 
 fn commit_head_label(head: Option<gix::ObjectId>) -> String {
@@ -265,7 +269,6 @@ impl GitRepo {
 		let sign = repo
 			.config_snapshot()
 			.try_boolean("commit.gpgSign")
-			.transpose()
 			.map_err(|err| Error::backend("git commit read commit.gpgSign", err))?
 			.unwrap_or(false);
 		let index_path = options.index_path.as_deref();
@@ -1324,12 +1327,7 @@ fn hook_configured(repository: &GitRepo, name: &str) -> Result<bool> {
 		.sections_by_name("hook")
 		.into_iter()
 		.flatten()
-		.any(|section| {
-			section
-				.values("event")
-				.iter()
-				.any(|event| event.as_ref() == name)
-		}))
+		.any(|section| section.values("event").iter().any(|event| event == name)))
 }
 
 /// Write a signed commit object through `git commit-tree -S`, which runs the
@@ -2343,7 +2341,7 @@ fn prune_nonrelocatable_clone_dirs(
 			} else if is_dotenv(&entry.file_name()) {
 				let path = entry.path();
 				let relative = path.strip_prefix(root).expect("cloned entry is under root");
-				let tracked = gix::path::try_into_bstr(relative).is_ok_and(|key| {
+				let tracked = gix::path::into_bstr(relative).is_ok_and(|key| {
 					index
 						.entry_by_path(&gix::path::to_unix_separators_on_windows(key))
 						.is_some()
@@ -2790,7 +2788,7 @@ mod tests {
 		let head = git(temp.path(), &["rev-parse", "HEAD"]);
 		let id = repo
 			.commit_create("alt", &CommitOptions {
-				index_path: Some(alt.clone()),
+				index_path: Some(alt),
 				expected_head: Some(head),
 				..Default::default()
 			})

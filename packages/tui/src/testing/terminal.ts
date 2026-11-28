@@ -13,6 +13,7 @@
  * term.dispose();
  * ```
  */
+import { segmentGraphemes } from "@oh-my-pi/pi-utils/graphemes";
 import type { FramePlan, InputEvent, MouseEvent, TerminalCapabilities, TerminalDriver } from "../driver/contract";
 import type { KeyEvent } from "../events";
 import type { UiNode } from "../node";
@@ -40,6 +41,8 @@ export interface TestTerminalOptions {
 	readonly copyOnSelect?: TermBackendOptions["copyOnSelect"];
 	readonly wheelLines?: TermBackendOptions["wheelLines"];
 	readonly scrollbar?: TermBackendOptions["scrollbar"];
+	readonly spinnerInterval?: TermBackendOptions["spinnerInterval"];
+	readonly reduceMotion?: TermBackendOptions["reduceMotion"];
 	/** Drive this surface (an app shell's) instead of one built from the template. */
 	readonly surface?: Surface;
 }
@@ -183,6 +186,8 @@ export function createTestTerminal(template: () => SurfaceTemplate, options: Tes
 		...(options.copyOnSelect ? { copyOnSelect: options.copyOnSelect } : {}),
 		...(options.wheelLines ? { wheelLines: options.wheelLines } : {}),
 		...(options.scrollbar ? { scrollbar: options.scrollbar } : {}),
+		...(options.spinnerInterval === undefined ? {} : { spinnerInterval: options.spinnerInterval }),
+		...(options.reduceMotion ? { reduceMotion: options.reduceMotion } : {}),
 	});
 	backend.start();
 	const input = (event: InputEvent): void => {
@@ -205,7 +210,7 @@ export function createTestTerminal(template: () => SurfaceTemplate, options: Tes
 			});
 		},
 		type(text) {
-			for (const { segment } of new Intl.Segmenter().segment(text)) {
+			for (const { segment } of segmentGraphemes(text)) {
 				const id =
 					segment === " "
 						? "space"

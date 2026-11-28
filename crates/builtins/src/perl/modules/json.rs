@@ -650,11 +650,12 @@ impl Parser<'_> {
 				0..=0x1f if !self.opts.has(Flag::Loose) => return Err(self.err(i, "invalid character encountered while parsing JSON string")),
 				0..=0x7f => { self.at += 1; text.bytes.push(b); }
 				_ if self.opts.has(Flag::Utf8) || self.data.utf8 => {
-					let width = match b { 0xc2..=0xdf => 2, 0xe0..=0xef => 3, 0xf0..=0xf4 => 4, _ => 0 };
-					let bytes = self.tail().get(..width).filter(|_| width != 0).filter(|b| std::str::from_utf8(b).is_ok());
-					let Some(bytes) = bytes else { return Err(self.err(i, "malformed UTF-8 character in JSON string")); };
+					let tail = self.tail();
+					let valid = xutf::valid_prefix(&tail[..tail.len().min(char::MAX_LEN_UTF8)]);
+					let Some(ch) = valid.chars().next() else { return Err(self.err(i, "malformed UTF-8 character in JSON string")); };
+					let width = ch.len_utf8();
 					text.upgrade();
-					text.bytes.extend_from_slice(bytes);
+					text.bytes.extend_from_slice(&valid.as_bytes()[..width]);
 					self.at += width;
 				}
 				_ => { self.at += 1; text.upgrade(); text.push_char(u32::from(b)); }

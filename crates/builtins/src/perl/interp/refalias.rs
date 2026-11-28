@@ -21,25 +21,25 @@ impl Interp<'_> {
 		Ok(())
 	}
 
-	pub(super) fn ref_target(&mut self, e: &Expr) -> PResult<RefTarget> {
+	pub(super) async fn ref_target(&mut self, e: &Expr) -> PResult<RefTarget> {
 		let e = ungroup(e);
 		if let ExprKind::Declare(kind, _, variable, _) = &e.kind {
-			self.declare_targets(*kind, variable, e as *const Expr as usize)?;
+			self.declare_targets(*kind, variable, e as *const Expr as usize).await?;
 			if let ExprKind::Variable(sigil, name) = &ungroup(variable).kind {
 				return self.ref_variable(ungroup(variable), *sigil, name, *kind != DeclKind::Local);
 			}
-			return self.ref_target(variable);
+			return Box::pin(self.ref_target(variable)).await;
 		}
 		if let ExprKind::Variable(sigil, name) = &e.kind { return self.ref_variable(e, *sigil, name, false); }
 		if let ExprKind::Call(Call { target: CallTarget::Named(name, true), args: None, .. }) = &e.kind {
 			return self.ref_variable(e, Sigil::Code, name, false);
 		}
 		if let ExprKind::Conditional(cond, yes, no) = &e.kind {
-			let value = self.eval_scalar(cond)?;
+			let value = self.eval_scalar_async(cond).await?;
 			let branch = if self.truthy(&value)? { yes } else { no };
-			return self.ref_target(branch);
+			return Box::pin(self.ref_target(branch)).await;
 		}
-		self.ref_element_target(e)
+		Box::pin(self.ref_element_target(e)).await
 	}
 
 	fn ref_variable(&mut self, e: &Expr, sigil: Sigil, name: &str, pending: bool) -> PResult<RefTarget> {
@@ -51,7 +51,7 @@ impl Interp<'_> {
 				let our = match &self.scopes[scope].pad[offset].1 { Slot::Our(name) => Some(name.clone()), _ => None };
 				(scope, offset, false, our)
 			})
-		} else { self.scopes.iter().enumerate().rev().find_map(|(scope_ix, scope)| {
+		} else { self.scopes.iter().enumerate().skip(self.scope_base).rev().find_map(|(scope_ix, scope)| {
 			[(true, &scope.declarations), (false, &scope.pad)].into_iter().find_map(|(is_pending, pad)| {
 				let cached = e.cache.lexical.get();
 				let (index, (_, slot)) = pad.iter().enumerate().rfind(|(_, (id, _))| {
@@ -75,9 +75,9 @@ impl Interp<'_> {
 		Ok(RefTarget { place: RefPlace::Glob(self.glob(name), sigil), sigil })
 	}
 
-	pub(super) fn pending_ref_target(&mut self, e: &Expr) -> PResult<RefTarget> {
+	pub(super) async fn pending_ref_target(&mut self, e: &Expr) -> PResult<RefTarget> {
 		if let ExprKind::Variable(sigil, name) = &ungroup(e).kind { self.ref_variable(ungroup(e), *sigil, name, true) }
-		else { self.ref_target(e) }
+		else { Box::pin(self.ref_target(e)).await }
 	}
 
 	pub(super) fn element_ref_target(place: RefPlace) -> RefTarget { RefTarget { place, sigil: Sigil::Scalar } }

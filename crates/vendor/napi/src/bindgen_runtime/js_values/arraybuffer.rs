@@ -5,9 +5,7 @@ use std::ops::Deref;
 use std::ptr::{self, NonNull};
 
 #[cfg(all(feature = "napi4", not(feature = "noop")))]
-use crate::bindgen_prelude::{
-  current_custom_gc_handle, current_thread_owns_custom_gc, CustomGcHandle,
-};
+use crate::bindgen_prelude::{custom_gc_handle_for_env, CustomGcHandle};
 use crate::{
   bindgen_prelude::{
     FromNapiValue, JsObjectValue, JsValue, This, ToNapiValue, TypeName, ValidateNapiValue,
@@ -87,13 +85,51 @@ impl From<TypedArrayType> for sys::napi_typedarray_type {
 
 #[cfg(target_family = "wasm")]
 extern "C" {
-  fn emnapi_sync_memory(
+  // Also used by the compat `JsArrayBufferValue` in js_values/arraybuffer.rs.
+  pub(crate) fn emnapi_sync_memory(
     env: crate::sys::napi_env,
     js_to_wasm: bool,
-    arraybuffer_or_view: crate::sys::napi_value,
+    arraybuffer_or_view: *mut crate::sys::napi_value,
     byte_offset: usize,
     length: usize,
   ) -> crate::sys::napi_status;
+}
+
+#[cfg(target_family = "wasm")]
+fn sync_copied_arraybuffer(
+  env: sys::napi_env,
+  arraybuffer: &mut sys::napi_value,
+  byte_length: usize,
+) -> Result<()> {
+  check_status!(
+    unsafe { emnapi_sync_memory(env, false, arraybuffer, 0, byte_length) },
+    "Failed to sync ArrayBuffer memory"
+  )
+}
+
+/// Create an engine-owned `ArrayBuffer` that holds a copy of `bytes`, and
+/// return it with its data pointer.
+fn create_arraybuffer_copy(
+  env: sys::napi_env,
+  bytes: &[u8],
+) -> Result<(sys::napi_value, *mut c_void)> {
+  let len = bytes.len();
+  let mut arraybuffer_value = ptr::null_mut();
+  let mut underlying_data = ptr::null_mut();
+  check_status!(
+    unsafe { sys::napi_create_arraybuffer(env, len, &mut underlying_data, &mut arraybuffer_value) },
+    "Failed to create ArrayBuffer"
+  )?;
+  // Skip empty input: the data pointer is null then, and emnapi throws
+  // "Unknown ArrayBuffer address" when asked to sync an empty buffer.
+  if len > 0 {
+    unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), underlying_data.cast(), len) };
+    // Under emnapi the data pointer is a separate wasm-side copy of the new JS
+    // buffer, so the bytes written there must be pushed to JS.
+    #[cfg(target_family = "wasm")]
+    sync_copied_arraybuffer(env, &mut arraybuffer_value, len)?;
+  }
+  Ok((arraybuffer_value, underlying_data))
 }
 
 #[derive(Clone, Copy)]
@@ -306,15 +342,7 @@ impl<'env> ArrayBuffer<'env> {
   pub fn copy_from<D: AsRef<[u8]>>(env: &Env, data: D) -> Result<Self> {
     let data = data.as_ref();
     let len = data.len();
-    let mut arraybuffer_value = ptr::null_mut();
-    let mut underlying_data = ptr::null_mut();
-
-    check_status!(
-      unsafe {
-        sys::napi_create_arraybuffer(env.0, len, &mut underlying_data, &mut arraybuffer_value)
-      },
-      "Failed to create ArrayBuffer"
-    )?;
+    let (arraybuffer_value, underlying_data) = create_arraybuffer_copy(env.0, data)?;
 
     Ok(Self {
       value: Value {
@@ -366,6 +394,12 @@ impl<'env> ArrayBuffer<'env> {
 pub struct TypedArray<'env> {
   pub(crate) value: Value,
   pub typed_array_type: TypedArrayType,
+  /// The bytes of the view: they start at the view's first byte
+  /// (`byte_offset` is already applied) and span its `byteLength` when the
+  /// runtime reports a known element type. An unknown or unreported type
+  /// keeps 1 byte per element, so the slice holds only the first `length`
+  /// bytes. A Float16Array spans its `byteLength` only on a runtime that
+  /// reports its type (11).
   pub arraybuffer: ArrayBuffer<'env>,
   pub byte_offset: usize,
 }
@@ -431,6 +465,29 @@ impl FromNapiValue for TypedArray<'_> {
       },
       "Failed to get typedarray info"
     )?;
+    // `length` is the ELEMENT count (Node `array->Length()`, emnapi
+    // `viewLength`), but `arraybuffer` is a byte slice of the view, so scale
+    // it by the element size. Match the raw value, not `TypedArrayType`: the
+    // runtime reports BigInt64Array/BigUint64Array (9/10) without the `napi6`
+    // feature too, and Float16Array (11) maps to `TypedArrayType::Unknown`.
+    // An unknown kind keeps 1 byte per element: every element is at least
+    // 1 byte wide, so the slice never reaches past the view. A runtime that
+    // does not report Float16Array leaves the kind at its starting value 0
+    // (Int8), so there a Float16Array also keeps 1 byte per element.
+    let element_size: usize = match typed_array_type {
+      sys::TypedarrayType::int16_array | sys::TypedarrayType::uint16_array | 11 => 2,
+      sys::TypedarrayType::int32_array
+      | sys::TypedarrayType::uint32_array
+      | sys::TypedarrayType::float32_array => 4,
+      sys::TypedarrayType::float64_array | 9 | 10 => 8,
+      _ => 1,
+    };
+    let byte_length = length.checked_mul(element_size).ok_or_else(|| {
+      Error::new(
+        Status::InvalidArg,
+        "TypedArray byte length overflows usize".to_owned(),
+      )
+    })?;
     Ok(Self {
       value: Value {
         env,
@@ -444,7 +501,7 @@ impl FromNapiValue for TypedArray<'_> {
         data: if data.is_null() {
           &[]
         } else {
-          unsafe { std::slice::from_raw_parts(data as *const u8, length) }
+          unsafe { std::slice::from_raw_parts(data as *const u8, byte_length) }
         },
       },
     })
@@ -495,41 +552,24 @@ macro_rules! impl_typed_array {
           #[cfg(all(feature = "napi4", not(feature = "noop")))]
           {
             if let Some(handle) = self.custom_gc_handle.as_ref() {
-              handle.with_read_aborted(|aborted| {
-                if aborted {
-                  // owner env gone, V8 already invalidated the ref -> no-op (safe leak).
-                  // Reached on BOTH the off-thread AND the same-thread (cached-value-at-thread-exit) paths.
-                  return;
-                }
-                if current_thread_owns_custom_gc(handle) {
-                  // same isolate's JS thread, owner alive -> direct unref+delete on the OWNER env.
-                  // DELIBERATE copy of the trailing direct block below; the copy is `aborted`-gated, the
-                  // trailing block is the non-napi4 / None-handle fallback. Do NOT "dedupe" either away.
-                  let mut ref_count = 0;
-                  crate::check_status_or_throw!(
-                    env,
-                    unsafe { sys::napi_reference_unref(env, ref_, &mut ref_count) },
-                    "Failed to unref ArrayBuffer reference in drop"
-                  );
-                  debug_assert!(
-                    ref_count == 0,
-                    "ArrayBuffer reference count in ArrayBuffer::drop is not zero"
-                  );
-                  crate::check_status_or_throw!(
-                    env,
-                    unsafe { sys::napi_delete_reference(env, ref_) },
-                    "Failed to delete ArrayBuffer reference in drop"
-                  );
-                } else {
-                  // off-thread OR a different isolate's JS thread (fixes F5) -> route to ITS tsfn
-                  let status =
-                    unsafe { sys::napi_call_threadsafe_function(handle.get_raw(), ref_.cast(), 1) };
-                  assert!(
-                    status == sys::Status::napi_ok || status == sys::Status::napi_closing,
-                    "Call custom GC in ArrayBuffer::drop failed {}",
-                    Status::from(status)
-                  );
-                }
+              // On the env's JS thread while the env runs: delete now. Anywhere else, the handle
+              // keeps the reference for the JS thread to delete.
+              CustomGcHandle::release_ref(handle, ref_, || {
+                let mut ref_count = 0;
+                crate::check_status_or_throw!(
+                  env,
+                  unsafe { sys::napi_reference_unref(env, ref_, &mut ref_count) },
+                  "Failed to unref ArrayBuffer reference in drop"
+                );
+                debug_assert!(
+                  ref_count == 0,
+                  "ArrayBuffer reference count in ArrayBuffer::drop is not zero"
+                );
+                crate::check_status_or_throw!(
+                  env,
+                  unsafe { sys::napi_delete_reference(env, ref_) },
+                  "Failed to delete ArrayBuffer reference in drop"
+                );
               });
               return;
             }
@@ -568,16 +608,18 @@ macro_rules! impl_typed_array {
     }
 
     impl $name {
+      /// Copy the elements written through `as_mut()` back to the JS view. Under emnapi
+      /// the data of a TypedArray received from JS is a wasm-side copy of its buffer.
       #[cfg(target_family = "wasm")]
       pub fn sync(&mut self, env: &crate::Env) {
         if let Some((reference, _)) = self.raw {
           let mut value = ptr::null_mut();
-          let mut array_buffer = ptr::null_mut();
           crate::check_status_or_throw!(
             env.raw(),
             unsafe { crate::sys::napi_get_reference_value(env.raw(), reference, &mut value) },
             "Failed to get reference value from TypedArray while syncing"
           );
+          let mut view_length = 0;
           crate::check_status_or_throw!(
             env.raw(),
             unsafe {
@@ -585,23 +627,36 @@ macro_rules! impl_typed_array {
                 env.raw(),
                 value,
                 &mut ($typed_array_type as i32) as *mut i32,
-                &mut self.length as *mut usize,
+                &mut view_length,
                 ptr::null_mut(),
-                &mut array_buffer,
+                ptr::null_mut(),
                 &mut self.byte_offset as *mut usize,
               )
             },
-            "Failed to get ArrayBuffer under the TypedArray while syncing"
+            "Failed to get TypedArray info while syncing"
           );
+          // Never sync more than the `capacity` elements that `from_napi_value` saw. For a
+          // length-tracking view that JS has grown since, emnapi would copy unrelated wasm heap
+          // bytes into JS. This cannot help when emnapi had already copied the buffer before it
+          // grew: emnapi reuses that smaller copy, which is an emnapi bug. After
+          // `ToNapiValue for &mut Self` hands the data to JS, `capacity` is 0, so this is a no-op.
+          self.length = view_length.min(self.capacity);
+          // Nothing to copy, and emnapi throws "Unknown ArrayBuffer address" for an empty
+          // buffer before it checks the length.
+          if self.length == 0 {
+            return;
+          }
+          // Pass the view itself with offset 0: emnapi applies the view's byteOffset on
+          // both sides. The length is in bytes.
           crate::check_status_or_throw!(
             env.raw(),
             unsafe {
               emnapi_sync_memory(
                 env.raw(),
                 false,
-                array_buffer,
-                self.byte_offset,
-                self.length,
+                &mut value,
+                0,
+                self.length * mem::size_of::<$rust_type>(),
               )
             },
             "Failed to sync memory"
@@ -739,21 +794,21 @@ macro_rules! impl_typed_array {
           unsafe { sys::napi_create_reference(env, napi_val, 1, &mut ref_) },
           "Failed to create reference from TypedArray"
         )?;
-        check_status!(
-          unsafe {
-            sys::napi_get_typedarray_info(
-              env,
-              napi_val,
-              &mut typed_array_type,
-              &mut length,
-              &mut data,
-              &mut array_buffer,
-              &mut byte_offset,
-            )
-          },
-          "Get TypedArray info failed"
-        )?;
-        if typed_array_type != $typed_array_type as i32 {
+        let status = unsafe {
+          sys::napi_get_typedarray_info(
+            env,
+            napi_val,
+            &mut typed_array_type,
+            &mut length,
+            &mut data,
+            &mut array_buffer,
+            &mut byte_offset,
+          )
+        };
+        if status != sys::Status::napi_ok || typed_array_type != $typed_array_type as i32 {
+          // Nothing owns `ref_` yet: delete it, or the value is never collected.
+          unsafe { sys::napi_delete_reference(env, ref_) };
+          check_status!(status, "Get TypedArray info failed")?;
           return Err(Error::new(
             Status::InvalidArg,
             format!(
@@ -770,7 +825,7 @@ macro_rules! impl_typed_array {
           byte_offset,
           raw: Some((ref_, env)),
           #[cfg(all(feature = "napi4", not(feature = "noop")))]
-          custom_gc_handle: current_custom_gc_handle(),
+          custom_gc_handle: custom_gc_handle_for_env(env),
           finalizer_notify: ptr::null_mut::<fn(*mut $rust_type, usize)>(),
         })
       }
@@ -959,7 +1014,7 @@ macro_rules! impl_typed_array {
         val.raw = Some((ref_, env));
         #[cfg(all(feature = "napi4", not(feature = "noop")))]
         {
-          val.custom_gc_handle = current_custom_gc_handle();
+          val.custom_gc_handle = custom_gc_handle_for_env(env);
         }
         if let Some(copied_val) = copied_val {
           val.finalizer_notify = ptr::null_mut::<fn(*mut $rust_type, usize)>();
@@ -1193,20 +1248,11 @@ macro_rules! impl_from_slice {
       pub fn copy_from<D: AsRef<[$rust_type]>>(env: &Env, data: D) -> Result<Self> {
         let data = data.as_ref();
         let len = data.len();
-        let mut arraybuffer_value = ptr::null_mut();
-        let mut underlying_data = ptr::null_mut();
-
-        check_status!(
-          unsafe {
-            sys::napi_create_arraybuffer(
-              env.0,
-              len,
-              &mut underlying_data,
-              &mut arraybuffer_value,
-            )
-          },
-          "Failed to create ArrayBuffer"
-        )?;
+        // The elements are plain numbers, so the slice can be read as its bytes.
+        let bytes = unsafe {
+          std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), mem::size_of_val(data))
+        };
+        let (arraybuffer_value, underlying_data) = create_arraybuffer_copy(env.0, bytes)?;
 
         let mut napi_val = ptr::null_mut();
         check_status!(
@@ -1909,15 +1955,7 @@ impl<'env> Uint8ClampedSlice<'env> {
   pub fn copy_from<D: AsRef<[u8]>>(env: &Env, data: D) -> Result<Self> {
     let data = data.as_ref();
     let len = data.len();
-    let mut arraybuffer_value = ptr::null_mut();
-    let mut underlying_data = ptr::null_mut();
-
-    check_status!(
-      unsafe {
-        sys::napi_create_arraybuffer(env.0, len, &mut underlying_data, &mut arraybuffer_value)
-      },
-      "Failed to create ArrayBuffer"
-    )?;
+    let (arraybuffer_value, underlying_data) = create_arraybuffer_copy(env.0, data)?;
 
     let mut napi_val = ptr::null_mut();
     check_status!(
