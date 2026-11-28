@@ -75,6 +75,7 @@
 - Added the `agent_view_changed` extension event, fired when the TUI focuses a subagent or returns to the main session, so extensions can re-scope their status to the agent on screen ([#16546](https://github.com/can1357/oh-my-pi/issues/16546))
 - Added `model` and `fallback` attributes to `task` result envelopes so the parent sees which model served each subagent ([#16017](https://github.com/can1357/oh-my-pi/issues/16017))
 - Added a terminal notification when a plan is ready for approval, controlled by `completion.notify` ([#7724](https://github.com/can1357/oh-my-pi/issues/7724))
+- The SDK exports `applyEntryPatches`, which applies a session's `entry_patch` records to the entries the raw session loaders return; RPC `get_entries`, `get_tree` and `get_subagent_messages` return entries with those fields already applied
 
 ### Changed
 
@@ -123,6 +124,7 @@
 - `omp plugin disable` and the Settings → Plugins enable toggle now note that running sessions keep the plugin until they restart ([#9722](https://github.com/can1357/oh-my-pi/issues/9722))
 - Status line keeps the auto indicator on an auto-resolved thinking effort (e.g. `⟳ high`) so it is distinguishable from a pinned level ([#5951](https://github.com/can1357/oh-my-pi/issues/5951))
 - A configured MCP `oauth.scope` now overrides scopes advertised by the server on initial authorization and `/mcp reauth`, so you can request a narrower (or different) scope set than discovery reports ([#7841](https://github.com/can1357/oh-my-pi/issues/7841))
+- Recovered retries, compaction stamps and elide passes append a small record instead of rewriting the whole session file, so they stay fast on long sessions; when an entry they change has a line of 4 MiB or more, the file is still rewritten, so a collab guest can fetch that entry. The session picker's preview can still show a prompt's original text when the record lies between the file's head and tail windows
 
 ### Fixed
 
@@ -316,6 +318,8 @@
 - A long session no longer keeps every finished background job, with its full output, in memory after the job's result reaches the agent ([#20836](https://github.com/can1357/oh-my-pi/pull/20836) by [@sjawhar](https://github.com/sjawhar))
 - Skipped prompt-cache writes for one-off memory extraction and consolidation in the local memory backend ([#20783](https://github.com/can1357/oh-my-pi/pull/20783) by [@farnoy](https://github.com/farnoy))
 - Starting or resuming a session no longer prints a `Tool commands: added mcp__…` line listing every MCP tool; MCP tools mounted later are still shown ([#20643](https://github.com/can1357/oh-my-pi/pull/20643) by [@Petyok](https://github.com/Petyok)).
+- Agent Activity no longer drops the first response it reads after a sync that showed no row for the agent (a prompt read before its answer, or a response whose text an `entry_patch` record removed)
+- A collab guest keeps the host's whole model context when the host's entries link to an entry guests never receive, at join, after a compaction and after an `entry_patch` record
 
 ### Removed
 

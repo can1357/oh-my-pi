@@ -13,6 +13,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs/promises";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
+import { type EntryPatchRecord, isEntryPatchRecord } from "@oh-my-pi/pi-utils/entry-patches";
 import type {
 	BusChannel,
 	CollabUiRequest,
@@ -25,6 +26,7 @@ import type { InteractiveModeContext } from "../modes/types";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "../session/agent-session";
+import { withoutEntryPatches } from "../session/entry-patches";
 import { toWireEvent } from "../session/loop-end-wire";
 import { stripImagesFromMessage, USER_INTERRUPT_LABEL } from "../session/messages";
 import type { SessionEntry as StoredSessionEntry } from "../session/session-entries";
@@ -48,6 +50,7 @@ import {
 	formatCollabWebLink,
 	generateRoomId,
 	parseCollabLink,
+	TRANSCRIPT_READ_CAP,
 } from "./protocol";
 import {
 	type CollabAccess,
@@ -136,8 +139,6 @@ function progressKey(data: unknown): string | undefined {
 	return `bus-progress:${data.progress.id}`;
 }
 const CONNECT_TIMEOUT_MS = 15_000;
-/** Max bytes served per fetch-transcript reply (guest re-requests from `newSize`). */
-export const TRANSCRIPT_READ_CAP = 4 * 1024 * 1024;
 const TRANSCRIPT_ENTRY_TOO_LARGE_ERROR = `transcript entry exceeds transcript fetch cap (${TRANSCRIPT_READ_CAP} bytes)`;
 /**
  * Soft byte cap per `snapshot-chunk` frame. The first MB of a snapshot takes
@@ -585,6 +586,8 @@ export class CollabHost {
 					this.#send({ t: "event", event: oversizedEntryNotice(entry.type) });
 				}
 				this.#socket?.send(encodeEntryFrame(bounded.json));
+			} else if (isEntryPatchRecord(entry) && this.#broadcastAllowed()) {
+				this.#broadcastEntryPatchRecord(entry);
 			}
 			// Model/thinking/title changes land as entries while idle; refresh
 			// guest state promptly (debounce + JSON diff dedupe).
@@ -820,6 +823,24 @@ export class CollabHost {
 		if (event.type === "notice") socket?.broadcastAdvisory(frame);
 		else if (event.type === "message_update") socket?.sendLatest(`message_update:${this.#messageSeq}`, frame);
 		else socket?.send(frame);
+	}
+
+	/**
+	 * Send an `entry_patch` record live, so each guest sets its fields on the
+	 * entries it holds. The welcome snapshot never carries a record: its
+	 * entries already hold their fields. A record goes whole or not at all,
+	 * since a shrunk one would set a truncated value; one past the frame
+	 * ceiling goes as a record that sets nothing, which keeps the guests'
+	 * parent chain, with a notice. The guests get the fields at their next
+	 * resync.
+	 */
+	#broadcastEntryPatchRecord(record: StoredSessionEntry & EntryPatchRecord): void {
+		let json = JSON.stringify(record);
+		if (Buffer.byteLength(json, "utf-8") > MAX_REPLICATED_PAYLOAD_BYTES) {
+			this.#send({ t: "event", event: oversizedEntryNotice(record.customType) });
+			json = JSON.stringify(withoutEntryPatches(record));
+		}
+		this.#socket?.send(encodeEntryFrame(json));
 	}
 
 	#handleFrame(frame: CollabFrame, fromPeer: number): void {

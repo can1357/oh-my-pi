@@ -17,6 +17,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { getBundledAgentsMap } from "../task/agents";
 import { BUILTIN_TOOL_NAMES, isMCPToolName } from "../tools/builtin-names";
 import { lexShellCommand } from "../tools/shell-tokenize";
+import { ENTRY_PATCH_CUSTOM_TYPE, NO_PATCHES } from "./entry-patches";
 import type { SessionEntry, SessionHeader } from "./session-entries";
 import { collectSubSessions, type SubSession } from "./sub-sessions";
 
@@ -39,7 +40,8 @@ export const ANONYMIZED_REVIEW_NOTE =
  * - `tool`/`name`/`customType`: code-chosen identifiers kept; MCP (user-configured) names tokenized.
  * - `content`: string or content blocks. `struct`: nested omp structure.
  * - `args`/`details`/`data`: tool-call args, tool-result details, custom-entry data — walked only
- *   for built-in tools / omp's own entries, otherwise opaque.
+ *   for built-in tools / omp's own entries, otherwise opaque; `entry_patch`
+ *   records export an empty payload.
  * - `runtime`: the build stamp; version and commit kept, branch/diff/label tokenized.
  * - `judgment`: a journaled judge query; probabilities and counts kept, the state hash,
  *   question ids, and choice labels tokenized.
@@ -1547,10 +1549,17 @@ export class SessionAnonymizer {
 					? this.#struct(value, true)
 					: this.#opaque(value);
 			case "data":
-				// omp's execution log mirrors the tool call; every other custom entry is extension state.
-				return parent.type === "custom" && parent.customType === "tool_execution_start" && isObject(value)
-					? this.#executionLog(value)
-					: this.#opaque(value);
+				if (parent.type !== "custom") return this.#opaque(value);
+				switch (parent.customType) {
+					// The entries already hold these records' effects; an empty payload reopens as a no-op record.
+					case ENTRY_PATCH_CUSTOM_TYPE:
+						return NO_PATCHES;
+					// omp's execution log mirrors the tool call; every other custom entry is extension state.
+					case "tool_execution_start":
+						return isObject(value) ? this.#executionLog(value) : this.#opaque(value);
+					default:
+						return this.#opaque(value);
+				}
 			case "runtime":
 				return isObject(value) ? this.#runtimeStamp(value) : this.#opaque(value);
 			case "judgment":
@@ -1820,6 +1829,10 @@ export class SessionAnonymizer {
 /** A session transcript to anonymize: its header, entries, and file (for subagent discovery). */
 export interface AnonymizeSessionInput {
 	header: SessionHeader | null;
+	/**
+	 * Entries carrying the effects of their `entry_patch` records inline, as live entries do or as
+	 * `applyEntryPatches` leaves loaded ones: the export writes those records with empty payloads.
+	 */
 	entries: readonly SessionEntry[];
 	sessionFile?: string;
 	/** Malformed records the caller skipped while loading the main transcript. */

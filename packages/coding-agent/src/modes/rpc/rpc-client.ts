@@ -998,7 +998,10 @@ export class RpcClient {
 	}
 
 	/**
-	 * Read persisted transcript entries for a tracked subagent session.
+	 * Read persisted transcript entries for a tracked subagent session. The
+	 * reply's `entries` are raw: they carry the fields the window's own
+	 * `entry_patch` records set, and list those records too, so a client that
+	 * holds entries of earlier windows applies them there (`applyEntryPatches`).
 	 */
 	async getSubagentMessages(selector: {
 		subagentId?: string;
@@ -1083,6 +1086,12 @@ export class RpcClient {
 	 * Pi-compatible append-history read. Delegates to the canonical
 	 * `SessionManager` on the server: no `since` returns all entries in append
 	 * order, `since` returns entries strictly after the matching durable entry.
+	 * The entries are the manager's live entries, which already carry the
+	 * patched fields; the session's `entry_patch` records are listed among them
+	 * (a record loaded at resume, fork or adoption with its payload emptied). A
+	 * client that keeps entries applies only the records a later `since` read
+	 * returns to them (`applyEntryPatches`), never the records of the read that
+	 * returned the entries.
 	 */
 	async getEntries(since?: string): Promise<{ entries: SessionEntry[]; leafId: string | null }> {
 		const response = await this.#send({ type: "get_entries", since });
@@ -1090,7 +1099,8 @@ export class RpcClient {
 	}
 
 	/**
-	 * Pi-compatible raw session tree plus the current leaf id.
+	 * Pi-compatible raw session tree plus the current leaf id. Its nodes carry
+	 * the patched fields and include the session's `entry_patch` records.
 	 */
 	async getTree(): Promise<{ tree: SessionTreeNode[]; leafId: string | null }> {
 		const response = await this.#send({ type: "get_tree" });

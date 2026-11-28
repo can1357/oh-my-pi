@@ -21,6 +21,7 @@ import {
 	isEnotdir,
 	isEnotempty,
 	isFsError,
+	isRecord,
 	logger,
 	pathIsWithin,
 	spillIdOfFileName,
@@ -28,6 +29,8 @@ import {
 	toError,
 	withLoopPhase,
 } from "@oh-my-pi/pi-utils";
+import { isEntryPatchData } from "@oh-my-pi/pi-utils/entry-patches";
+import { TRANSCRIPT_READ_CAP } from "../collab/protocol";
 import { isTaskToolDetails, type StructuredSubagentSchemaMode } from "../task/task-details";
 import type { ConfiguredThinkingLevel } from "../utils/render-utils";
 import { isUserRequestEntry } from "./transcript/transcript-entry";
@@ -40,6 +43,16 @@ import { resolveLocalRoot } from "../internal-urls/local-root";
 import { ArtifactManager, type ArtifactManagerApi } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore, lazyImageDataSync } from "./blob-store";
 import type { CompactionMethod } from "./compaction-methods";
+import {
+	applyEntryPatches,
+	clearEntryPatchPayloads,
+	ENTRY_PATCH_CUSTOM_TYPE,
+	type EntryPatch,
+	entryAcceptsPatch,
+	setPatchedFields,
+	toEntryPatchData,
+	withoutEntryPatches,
+} from "./entry-patches";
 import {
 	type BashExecutionMessage,
 	type CustomMessage,
@@ -958,6 +971,7 @@ interface SessionManagerStateSnapshot {
 	taskSiblingCandidate: string | undefined;
 	header: SessionHeader;
 	entries: SessionEntry[];
+	oversizedLines: ReadonlySet<string>;
 }
 
 interface DiskQueueOptions {
@@ -978,8 +992,9 @@ interface AtomicEntryBatch {
 /**
  * The state a full-file body was serialized from, cheap to compare against
  * the live state. Entries change only by append, array replacement, or an
- * in-place update announced through `rewriteEntries()` (which bumps the
- * revision); the title slot and header are small and compared by value.
+ * in-place update announced through `rewriteEntries()` or `patchEntries()`
+ * (which bump the revision); the title slot and header are small and compared
+ * by value.
  */
 interface SessionBodyStamp {
 	entries: readonly SessionEntry[];
@@ -992,13 +1007,70 @@ interface SessionBodyStamp {
 
 /**
  * One full-file serialization: title slot, header, and entry lines in file
- * order plus their total UTF-8 byte length. Kept as lines so the file backend
- * streams them instead of materializing one string the size of the session.
+ * order plus their total UTF-8 byte length, and the ids of the entries whose
+ * line holds {@link TRANSCRIPT_READ_CAP} bytes or more. Kept as lines so the
+ * file backend streams them instead of materializing one string the size of
+ * the session.
  */
 interface SessionFileBody {
 	lines: string[];
 	bytes: number;
+	oversizedLines: Set<string>;
 	stamp: SessionBodyStamp;
+}
+
+/**
+ * Whether a stored `line`, its newline included, holds {@link TRANSCRIPT_READ_CAP}
+ * bytes or more without it. A UTF-16 unit takes at most 3 UTF-8 bytes, so a
+ * shorter line is not measured.
+ */
+function isOversizedLine(line: string): boolean {
+	return line.length * 3 > TRANSCRIPT_READ_CAP && Buffer.byteLength(line, "utf8") > TRANSCRIPT_READ_CAP;
+}
+
+/**
+ * Whether the JSON of `value` may hold `bytes` bytes or more. Over-estimates:
+ * a string's UTF-16 unit counts 6 bytes (`\uXXXX`), any other scalar 25; stops
+ * once the estimate reaches `bytes`.
+ */
+function jsonMayReach(value: unknown, bytes: number): boolean {
+	let estimate = 0;
+	const pending: unknown[] = [value];
+	while (pending.length > 0) {
+		const next = pending.pop();
+		if (typeof next === "string") {
+			estimate += 2 + 6 * next.length;
+		} else if (Array.isArray(next)) {
+			estimate += 2 + next.length;
+			for (const item of next) pending.push(item);
+		} else if (isRecord(next)) {
+			estimate += 2;
+			for (const key in next) {
+				estimate += 4 + 6 * key.length;
+				pending.push(next[key]);
+			}
+		} else {
+			estimate += 25;
+		}
+		if (estimate >= bytes) return true;
+	}
+	return false;
+}
+
+/**
+ * Ids of `entries` whose line holds {@link TRANSCRIPT_READ_CAP} bytes or more.
+ * Each entry is as read from its file, before a migration, record or blob
+ * changes it, so its JSON is its line when `JSON.stringify` wrote it; only an
+ * entry whose JSON may reach that size is serialized to measure it.
+ */
+function oversizedLineIdsOf(entries: readonly FileEntry[]): Set<string> {
+	const ids = new Set<string>();
+	for (const entry of entries) {
+		if (entry.type === "session" || !jsonMayReach(entry, TRANSCRIPT_READ_CAP)) continue;
+		const json = stringifyJson(entry);
+		if (json !== undefined && Buffer.byteLength(json, "utf8") >= TRANSCRIPT_READ_CAP) ids.add(entry.id);
+	}
+	return ids;
 }
 
 /** Whether `text` is exactly the concatenation of `lines`, compared without building it. */
@@ -1124,6 +1196,13 @@ export class SessionManager {
 	#loadedMalformedRecords = 0;
 	/** Byte length this manager last loaded or durably wrote; `null` means the path was absent. */
 	#expectedDiskSize: number | null = null;
+	/**
+	 * Ids of the entries whose line, as this manager last loaded or wrote it,
+	 * holds {@link TRANSCRIPT_READ_CAP} bytes or more, newline aside: a collab
+	 * guest cannot fetch such a line, so {@link patchEntries} rewrites the file
+	 * rather than leave it whole under a record.
+	 */
+	#oversizedLines = new Set<string>();
 	/**
 	 * Generation of the latest deferred publish queued on a `defersSyncPublish`
 	 * backend. A deferred-rewrite confirmation older than the latest queued
@@ -1379,22 +1458,29 @@ export class SessionManager {
 	 * Keep the entries another writer added to `#sessionFile`, whose bytes now
 	 * measure `diskSize`. They join this session's tree as a side branch (their
 	 * parents are entries both writers loaded), the active leaf stays this
-	 * session's, and the retried rewrite republishes them with the rest.
+	 * session's, and the retried rewrite republishes them with the rest. An
+	 * `entry_patch` record among them sets its fields on the entries this
+	 * session holds, which the rewrite then writes inline.
 	 */
 	#adoptForeignEntries(foreign: readonly SessionEntry[], diskSize: number): void {
 		const leaf = this.#index.leafId();
-		let adopted = 0;
+		const kept: SessionEntry[] = [];
 		for (const entry of foreign) {
 			// A recovery that raced this one may already have kept it.
 			if (this.#index.has(entry.id)) continue;
 			this.#entries.push(entry);
 			this.#index.insert(entry);
-			adopted++;
+			kept.push(entry);
 		}
 		this.#index.setLeaf(leaf);
 		this.#expectedDiskSize = diskSize;
-		if (adopted > 0)
-			logger.warn("Kept session entries another writer added", { sessionFile: this.#sessionFile, adopted });
+		if (applyEntryPatches(kept, this.#index)) this.#bodyRevision++;
+		clearEntryPatchPayloads(kept);
+		if (kept.length > 0)
+			logger.warn("Kept session entries another writer added", {
+				sessionFile: this.#sessionFile,
+				adopted: kept.length,
+			});
 	}
 
 	/**
@@ -1717,7 +1803,7 @@ export class SessionManager {
 				throw this.#latchIndeterminate(operationError, recoveryErrors);
 			}
 		}
-		this.#recordFullRewrite(body.bytes);
+		this.#recordFullRewrite(body.bytes, body.oversizedLines);
 	}
 
 	#appendWriter(): SessionStorageWriter {
@@ -1732,6 +1818,7 @@ export class SessionManager {
 		return this.#writer;
 	}
 
+	/** The stored line of `entry`. */
 	#lineFor(entry: FileEntry): string {
 		return `${stringifyJson(prepareEntryForPersistence(entry, this.#blobs)) ?? "null"}\n`;
 	}
@@ -1739,8 +1826,9 @@ export class SessionManager {
 		this.#expectedDiskSize = (this.#expectedDiskSize ?? 0) + Buffer.byteLength(line, "utf8");
 	}
 
-	#recordFullRewrite(bytes: number): void {
+	#recordFullRewrite(bytes: number, oversizedLines: Set<string>): void {
 		this.#expectedDiskSize = bytes;
+		this.#oversizedLines = oversizedLines;
 	}
 
 	/**
@@ -1798,11 +1886,14 @@ export class SessionManager {
 		const headerLine = this.#lineFor(this.#header);
 		const entries = this.#entries;
 		const lines = [titleLine, headerLine];
+		const oversizedLines = new Set<string>();
 		let bytes = Buffer.byteLength(titleLine, "utf8") + Buffer.byteLength(headerLine, "utf8");
 		withLoopPhase("session.rewrite", () => {
 			for (const entry of entries) {
-				const line = this.#lineFor(entry);
-				bytes += Buffer.byteLength(line, "utf8");
+				const line = this.#lineFor(withoutEntryPatches(entry));
+				const lineBytes = Buffer.byteLength(line, "utf8");
+				bytes += lineBytes;
+				if (lineBytes > TRANSCRIPT_READ_CAP) oversizedLines.add(entry.id);
 				lines.push(line);
 			}
 		});
@@ -1813,7 +1904,7 @@ export class SessionManager {
 			revision: this.#bodyRevision,
 			prefix: titleLine + headerLine,
 		};
-		return { lines, bytes, stamp };
+		return { lines, bytes, oversizedLines, stamp };
 	}
 
 	#historyContainsAssistantMessage(): boolean {
@@ -1888,12 +1979,12 @@ export class SessionManager {
 				// The success handler below is the single place the replacement
 				// becomes durable state.
 				const generation = ++this.#deferredPublishGen;
-				const { bytes, stamp } = body;
+				const { bytes, oversizedLines, stamp } = body;
 				this.#confirmDeferredPublish(targetPath, () => {
 					// A newer deferred publish owns the durability record now;
 					// this body is no longer on the backend, so record nothing.
 					if (generation !== this.#deferredPublishGen) return;
-					this.#recordFullRewrite(bytes);
+					this.#recordFullRewrite(bytes, oversizedLines);
 					const entries = this.#entries;
 					const bodyIsCurrent =
 						stamp.entries === entries &&
@@ -1922,7 +2013,7 @@ export class SessionManager {
 				});
 				return;
 			}
-			this.#recordFullRewrite(body.bytes);
+			this.#recordFullRewrite(body.bytes, body.oversizedLines);
 			// Only mark the manager current when writing the active session path.
 			// Mid-move writes update the live relocation path; `#sessionFile` is
 			// still the pre-repoint source until moveTo repoints it.
@@ -2010,7 +2101,7 @@ export class SessionManager {
 					}
 					try {
 						if (textMatchesLines(await this.#storage.readText(sessionFile), body.lines)) {
-							this.#recordFullRewrite(body.bytes);
+							this.#recordFullRewrite(body.bytes, body.oversizedLines);
 						}
 					} catch {
 						// Preserve the publish error when durable state cannot be read back.
@@ -2020,14 +2111,14 @@ export class SessionManager {
 				if (this.#diskEpoch !== epoch) {
 					try {
 						if (textMatchesLines(await this.#storage.readText(sessionFile), body.lines)) {
-							this.#recordFullRewrite(body.bytes);
+							this.#recordFullRewrite(body.bytes, body.oversizedLines);
 						}
 					} catch {
 						// A superseding rewrite owns the durability record when its body cannot be read back.
 					}
 					return false;
 				}
-				this.#recordFullRewrite(body.bytes);
+				this.#recordFullRewrite(body.bytes, body.oversizedLines);
 			} while (this.#atomicRewriteDirty);
 			return true;
 		} finally {
@@ -2124,6 +2215,7 @@ export class SessionManager {
 		try {
 			const writer = this.#appendWriter();
 			const line = this.#lineFor(entry);
+			if (isOversizedLine(line)) this.#oversizedLines.add(entry.id);
 			if (writer.appendSync && !this.#storage.defersSyncPublish) {
 				writer.appendSync(line);
 				this.#recordDurableAppend(line);
@@ -2224,6 +2316,7 @@ export class SessionManager {
 		this.#diskTail = Promise.resolve();
 		this.#clearDiskError();
 		this.#expectedDiskSize = null;
+		this.#oversizedLines = new Set();
 		this.#reconcileSessionDirForFallback();
 		if (options?.sessionDir && this.#persist) {
 			this.#sessionDir = path.resolve(options.sessionDir);
@@ -2463,6 +2556,7 @@ export class SessionManager {
 			// a rollback observe the move it is undoing.
 			header: structuredClone(this.#header),
 			entries: [...this.#entries],
+			oversizedLines: new Set(this.#oversizedLines),
 		};
 	}
 
@@ -2480,6 +2574,7 @@ export class SessionManager {
 		if (!persist) {
 			clone.#sessionFile = undefined;
 			clone.#expectedDiskSize = null;
+			clone.#oversizedLines = new Set();
 			clone.#fileIsCurrent = false;
 			clone.#rewriteRequired = false;
 			clone.#forceFileCreation = false;
@@ -2496,6 +2591,7 @@ export class SessionManager {
 		this.#sessionDir = snapshot.sessionDir;
 		this.#sessionFile = snapshot.sessionFile;
 		this.#expectedDiskSize = snapshot.expectedDiskSize;
+		this.#oversizedLines = new Set(snapshot.oversizedLines);
 		this.#fileIsCurrent = snapshot.onDisk;
 		this.#rewriteRequired = snapshot.needsRewrite;
 		this.#forceFileCreation = snapshot.onDisk;
@@ -2607,7 +2703,13 @@ export class SessionManager {
 			return;
 		}
 
+		// Measured on the entries as read: no line of a file under the cap reaches it.
+		const oversizedLines =
+			sourceSize !== null && sourceSize >= TRANSCRIPT_READ_CAP ? oversizedLineIdsOf(fileEntries) : new Set<string>();
 		const migrated = migrateToCurrentVersion(fileEntries);
+		// Patch records apply after migration, so each patch finds its target in the current shape.
+		applyEntryPatches(fileEntries);
+		clearEntryPatchPayloads(fileEntries);
 		await resolveBlobRefsInEntries(fileEntries, this.#blobs);
 		// loadEntriesFromFile guarantees entries[0] is a valid session header.
 		const header = fileEntries[0] as SessionHeader;
@@ -2637,6 +2739,7 @@ export class SessionManager {
 
 		this.#applyEntries(header, fileEntries.slice(1) as SessionEntry[]);
 		this.#expectedDiskSize = sourceSize;
+		this.#oversizedLines = oversizedLines;
 		this.#additionalDirectories = header.additionalDirectories ?? [];
 		this.#titleUpdatedAt = titleSlot?.updatedAt ?? header.timestamp;
 		this.#hasTitleSlot = titleSlot !== undefined;
@@ -3545,7 +3648,7 @@ export class SessionManager {
 		return this.#titleSource;
 	}
 
-	/** Bumped when entries are rewritten in place (`rewriteEntries`, replay sanitizing); appends do not bump it. */
+	/** Bumped when entries change in place (`rewriteEntries`, `patchEntries`, replay sanitizing); appends do not bump it. */
 	get bodyRevision(): number {
 		return this.#bodyRevision;
 	}
@@ -3929,8 +4032,59 @@ export class SessionManager {
 	}
 
 	/**
+	 * Set fields on entries this session holds and persist them as one appended
+	 * `entry_patch` record, whose size follows the patched fields rather than
+	 * the transcript; whole-file readers replay it on load (`entry-patches.ts`).
+	 * Bumps the body revision, as {@link rewriteEntries} does, so observers of
+	 * in-place updates (the thread publisher) republish the entries. The record
+	 * holds its own copy of each value, and an entry keeps a value it already
+	 * holds (an elide pass passes a message's own `content`), so no entry
+	 * shares an object with the record.
+	 *
+	 * When a target's line, as this manager last loaded or wrote it, holds
+	 * {@link TRANSCRIPT_READ_CAP} bytes or more (a collab guest cannot fetch
+	 * it), the fields are set and the file is rewritten, as
+	 * {@link rewriteEntries} does, instead: a record would leave that line whole.
+	 *
+	 * Rejects before changing anything when a patch names an entry this
+	 * session lacks or a field that entry's kind does not have, or when the
+	 * record as its line holds it fails the check every reader applies (a
+	 * count that is not a finite number writes as `null`): a reader skips such
+	 * a record whole, its valid patches with it. A failed write does not
+	 * reject: like every append, it reaches the persistence-error observers,
+	 * the fields stay set, and the next successful write lands them. Resolves
+	 * once pending writes, the record's or the rewrite's included, have settled.
+	 */
+	async patchEntries(patches: readonly EntryPatch[]): Promise<void> {
+		if (patches.length === 0) return;
+		const changes = patches.map(patch => {
+			const target = this.#index.get(patch.entryId);
+			if (!target || !entryAcceptsPatch(target, patch)) {
+				throw new Error(`Entry patch does not fit session entry ${patch.entryId}`);
+			}
+			return { target, patch };
+		});
+		const data = toEntryPatchData(patches);
+		if (!isEntryPatchData(JSON.parse(stringifyJson(data) ?? "null"))) {
+			throw new Error("Entry patch holds a value its session line cannot hold");
+		}
+		for (const { target, patch } of changes) setPatchedFields(target, patch);
+		const rewrite = patches.some(patch => this.#oversizedLines.has(patch.entryId));
+		if (!rewrite) {
+			this.#bodyRevision++;
+			this.appendCustomEntry(ENTRY_PATCH_CUSTOM_TYPE, data);
+		}
+		try {
+			await (rewrite ? this.rewriteEntries() : this.flush());
+		} catch (error) {
+			this.#noteDiskFailure(error);
+		}
+	}
+
+	/**
 	 * Rewrite the session file after in-place entry updates (e.g. pruning old tool
-	 * outputs). Use sparingly.
+	 * outputs). Use sparingly: a field update that {@link patchEntries} can
+	 * describe is one appended record instead of a rewrite of the whole file.
 	 */
 	async rewriteEntries(): Promise<void> {
 		this.#bodyRevision++;
@@ -4506,6 +4660,8 @@ export class SessionManager {
 			throw err;
 		}
 		migrateToCurrentVersion(sourceEntries);
+		applyEntryPatches(sourceEntries);
+		clearEntryPatchPayloads(sourceEntries);
 		await resolveBlobRefsInEntries(sourceEntries, manager.#blobs);
 
 		const sourceHeader = sourceEntries.find(entry => entry.type === "session") as SessionHeader | undefined;

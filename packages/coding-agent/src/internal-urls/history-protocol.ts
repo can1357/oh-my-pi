@@ -34,6 +34,7 @@ import {
 	type TranscriptDetails,
 	type TranscriptViewOptions,
 } from "../session/transcript-view";
+import { isEntryPatchRecord } from "../session/entry-patches";
 import {
 	bashExecutionToText,
 	pythonExecutionToText,
@@ -376,9 +377,11 @@ function renderRawEntry(lines: string[], entry: SessionEntry, includeThinking: b
  * Render every persisted entry on the caller's live branch without the
  * compaction filters that shape model context. Each block begins with the
  * durable session-entry id, making references unambiguous across compactions
- * and branch rewinds. `includeThinking: false` leaves assistant reasoning out,
- * for a reader whose classifier refuses its own reasoning quoted back as text
- * (`classifier-cot-extraction`, Claude's `reasoning_extraction`).
+ * and branch rewinds. An `entry_patch` record is left out: the live entries
+ * carry the fields it sets. `includeThinking: false` leaves assistant
+ * reasoning out, for a reader whose classifier refuses its own reasoning
+ * quoted back as text (`classifier-cot-extraction`, Claude's
+ * `reasoning_extraction`).
  */
 export function formatCurrentBranchFullHistory(
 	entries: readonly SessionEntry[],
@@ -391,6 +394,7 @@ export function formatCurrentBranchFullHistory(
 		"",
 	];
 	for (const entry of entries) {
+		if (isEntryPatchRecord(entry)) continue;
 		renderRawEntry(lines, entry, options.includeThinking);
 		lines.push("");
 	}

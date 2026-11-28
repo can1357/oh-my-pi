@@ -28,8 +28,9 @@ import type { AgentHubRemote, AgentHubRemoteTranscript } from "../modes/view-mod
 import type { InteractiveModeContext } from "../modes/types";
 import { AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "../session/agent-session";
+import { applyEntryPatches, isEntryPatchRecord } from "../session/entry-patches";
 import { fromWireEvent } from "../session/loop-end-wire";
-import type { SessionEntry } from "../session/session-entries";
+import { type SessionEntry, sessionEntryLeafId } from "../session/session-entries";
 import { mintSessionId, SessionManager } from "../session/session-manager";
 import { FileSessionStorage } from "../session/session-storage";
 import { shouldDisableReasoning, toReasoningEffort } from "../thinking/levels";
@@ -524,6 +525,15 @@ export class CollabGuestLink {
 			parentSession: pending.header.id,
 			providerPromptCacheKey: SessionManager.getInheritedProviderPromptCacheKey(pending.header),
 		};
+		// An entry whose parent the snapshot lacks goes on from the leaf the entries
+		// before it leave, as a live entry goes on from the replica's leaf (#applyFrame).
+		const held = new Set<string>();
+		for (const entry of pending.entries) held.add(entry.id);
+		let leafId: string | null = null;
+		for (const entry of pending.entries) {
+			if (entry.parentId !== null && !held.has(entry.parentId)) entry.parentId = leafId;
+			leafId = sessionEntryLeafId(entry);
+		}
 		const lines = [header, ...pending.entries].map(entry => JSON.stringify(entry)).join("\n");
 		const storage = new FileSessionStorage();
 		this.#replicaLease ??= storage.claimSession(this.#replicaId, replicaPath) ?? undefined;
@@ -642,13 +652,36 @@ export class CollabGuestLink {
 	#applyFrame(frame: CollabFrame): void {
 		switch (frame.t) {
 			case "entry": {
+				const entry = frame.entry;
+				const sessionManager = this.#ctx.sessionManager;
+				// The host sends each entry with the parent its own session gives
+				// it, and that parent can be an entry no host sends: the
+				// `tool_execution_start` record before each tool result, model
+				// usage, a mode change. The replica's model context is built by
+				// walking parent links (after a record, a compaction, a resync), so
+				// a link to an entry the replica lacks would end the walk there and
+				// drop all the history above it. The entries between the replica's
+				// leaf and this one on the host's path are ones guests never get,
+				// so it goes on from the leaf. The entry is the guest's own copy,
+				// parsed from the frame.
+				if (entry.parentId !== null && !sessionManager.getEntry(entry.parentId)) {
+					entry.parentId = sessionManager.getLeafId();
+				}
 				// Entries are never rendered directly — rendering is events-only
 				// (prevents double-render). They keep the replica file, the agent's
 				// message array (/dump, context estimates), and todos current.
-				this.#ctx.sessionManager.ingestReplicatedEntry(frame.entry);
-				if (frame.entry.type === "message") {
-					this.#ctx.session.agent.replaceMessages([...this.#ctx.session.messages, frame.entry.message]);
-				} else if (frame.entry.type === "compaction" || frame.entry.type === "branch_summary") {
+				sessionManager.ingestReplicatedEntry(entry);
+				if (isEntryPatchRecord(entry)) {
+					// An `entry_patch` record sets fields on entries the replica
+					// holds, as the host's patchEntries did (an elided `content`, a
+					// tool result's `prunedAt`), so the messages built from them
+					// change too. The record is a `custom` entry: never shown.
+					if (applyEntryPatches([entry], { get: id => sessionManager.getEntry(id) })) {
+						this.#ctx.session.agent.replaceMessages(this.#ctx.session.buildDisplaySessionContext().messages);
+					}
+				} else if (entry.type === "message") {
+					this.#ctx.session.agent.replaceMessages([...this.#ctx.session.messages, entry.message]);
+				} else if (entry.type === "compaction" || entry.type === "branch_summary") {
 					// Compaction/branch entries rewrite the host's model context: the
 					// pre-boundary transcript collapses behind a summary. Appending
 					// the entry alone leaves the replica holding the stale full

@@ -49,6 +49,7 @@ import { resolveRoleSelection } from "../src/config/model-resolver";
 import { roleCandidatePool } from "../src/config/model-roles";
 import { createAgentSession } from "../src/sdk";
 import type { AgentSession } from "../src/session/agent-session";
+import { applyEntryPatches } from "../src/session/entry-patches";
 import { loadEntriesFromFile } from "../src/session/session-loader";
 import { SessionManager } from "../src/session/session-manager";
 import { preprocessTinyMessage } from "../src/tiny/message-preproc";
@@ -248,6 +249,8 @@ async function indexSessionFiles(sessionsDir: string): Promise<Map<string, strin
  */
 async function readSampleEntry(sessionId: string, file: string): Promise<SampleEntry | undefined> {
 	const entries = await loadEntriesFromFile(file);
+	// The first prompt as a resume shows it: an elide pass's placeholder in place of what it shortened.
+	applyEntryPatches(entries);
 	const header = entries[0];
 	if (header?.type !== "session" || header.parentSession) return undefined;
 	const recorded: SampleEntry["recorded"] = { title: header.title, titleSource: header.titleSource };

@@ -350,6 +350,21 @@ describe("history:// protocol", () => {
 		expect(content).toContain("[provider fallback: claude-primary to claude-backup]");
 	});
 
+	// The live branch's entries carry the fields an `entry_patch` record set on them, so the record, payload and
+	// all, would only repeat them as raw JSON in the history the agent reads back.
+	it("renders a current branch holding an entry_patch record as the branch without it", () => {
+		const branch = currentBranchFixture();
+		const record = {
+			type: "custom",
+			customType: "entry_patch",
+			id: "elide-record",
+			parentId: "latest-entry",
+			timestamp: new Date().toISOString(),
+			data: { patches: [{ entryId: "latest-entry", message: { content: "latest raw request survives" } }] },
+		} as unknown as SessionEntry;
+		expect(formatCurrentBranchFullHistory([...branch, record])).toBe(formatCurrentBranchFullHistory(branch));
+	});
+
 	it("leaves own reasoning out of current-branch full history for a reasoning-refusing reader (#19740)", async () => {
 		const entries = [
 			{

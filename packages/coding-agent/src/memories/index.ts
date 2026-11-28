@@ -16,11 +16,20 @@ import {
 	getAgentDbPath,
 	getMemoriesDir,
 	isEnoent,
+	isRecord,
 	logger,
 	parseJsonlLenient,
 	peekFile,
 	prompt,
+	readFileRange,
 } from "@oh-my-pi/pi-utils";
+import {
+	applyEntryPatches,
+	type EntryPatchRecord,
+	entryPatchMarkerAt,
+	entryPatchRecordsIn,
+	isEntryPatchRecord,
+} from "@oh-my-pi/pi-utils/entry-patches";
 
 import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
@@ -773,13 +782,20 @@ function shouldPersistResponseItemForMemories(message: AgentMessage): boolean {
 	return false;
 }
 
-function extractPersistableMessages(payload: string): AgentMessage[] {
+/**
+ * The persistable messages of `payload`, complete lines of a rollout, each
+ * carrying the fields `records` (the rollout's `entry_patch` records, in file
+ * order) set on it, as a rollout written with those fields inline holds them.
+ */
+function extractPersistableMessages(payload: string, records: readonly EntryPatchRecord[]): AgentMessage[] {
 	const rows = parseJsonlLenient(payload);
 	if (!Array.isArray(rows)) return [];
+	const entries: Record<string, unknown>[] = [];
+	// The records are applied from `records`, which holds every one in file order.
+	for (const row of rows) if (isRecord(row) && !isEntryPatchRecord(row)) entries.push(row);
+	if (records.length > 0) applyEntryPatches<object>([...entries, ...records]);
 	const messages: AgentMessage[] = [];
-	for (const row of rows) {
-		if (!row || typeof row !== "object") continue;
-		const entry = row as Record<string, unknown>;
+	for (const entry of entries) {
 		if (entry.type !== "message") continue;
 		const maybeMessage = entry.message;
 		if (!maybeMessage || typeof maybeMessage !== "object") continue;
@@ -812,30 +828,73 @@ const MEMORY_CACHE_RETENTION: CacheRetention = "none";
 /** Byte window used when streaming rollout head/tail for stage-1 input. */
 const STAGE1_ROLLOUT_WINDOW_BYTES = 1024 * 1024;
 
-/** Persistable messages from the start of the rollout, in file order, read window by window. */
-async function* persistableMessagesFromFront(file: Bun.BunFile, size: number): AsyncGenerator<AgentMessage> {
-	const decoder = new TextDecoder();
+/**
+ * A rollout read through one open file handle: every window of every pass
+ * reads the body the handle opened, the first `size` bytes of it, even when a
+ * rewrite renames another body over the path between two reads.
+ */
+interface RolloutBytes {
+	size: number;
+	read(start: number, end: number): Promise<Uint8Array>;
+}
+
+/**
+ * The complete lines of `rollout`, in file order, a window of at most
+ * {@link STAGE1_ROLLOUT_WINDOW_BYTES} at a time; a record spanning windows is
+ * carried until its newline, and a last line without one ends the rollout.
+ */
+async function* rolloutLineWindows(rollout: RolloutBytes): AsyncGenerator<Uint8Array> {
 	let carry: Uint8Array | undefined;
 	let offset = 0;
-	while (offset < size) {
-		const end = Math.min(size, offset + STAGE1_ROLLOUT_WINDOW_BYTES);
-		const window = await file.slice(offset, end).bytes();
+	while (offset < rollout.size) {
+		const end = Math.min(rollout.size, offset + STAGE1_ROLLOUT_WINDOW_BYTES);
+		const window = await rollout.read(offset, end);
 		offset = end;
 		const bytes = carry ? Buffer.concat([carry, window]) : window;
-		const cut = offset >= size ? bytes.length : bytes.lastIndexOf(0x0a) + 1;
+		const cut = offset >= rollout.size ? bytes.length : bytes.lastIndexOf(0x0a) + 1;
 		carry = cut < bytes.length ? bytes.subarray(cut) : undefined;
-		if (cut > 0) yield* extractPersistableMessages(decoder.decode(bytes.subarray(0, cut)));
+		if (cut > 0) yield bytes.subarray(0, cut);
 	}
 }
 
-/** Persistable messages from the end of the rollout, in reverse file order, read window by window. */
-async function* persistableMessagesFromBack(file: Bun.BunFile, size: number): AsyncGenerator<AgentMessage> {
+/**
+ * The `entry_patch` records of `rollout`, in file order. A record sets fields
+ * on messages before it, so the messages are read after every record is
+ * known. Only windows and lines that hold the record's custom type are
+ * decoded and parsed: the scan reads the rollout but parses none of its
+ * messages.
+ */
+async function rolloutPatchRecords(rollout: RolloutBytes): Promise<EntryPatchRecord[]> {
+	const decoder = new TextDecoder();
+	const records: EntryPatchRecord[] = [];
+	for await (const lines of rolloutLineWindows(rollout)) {
+		if (entryPatchMarkerAt(lines) !== -1) records.push(...entryPatchRecordsIn(decoder.decode(lines)));
+	}
+	return records;
+}
+
+/** Persistable messages from the start of the rollout, in file order, with `records` applied. */
+async function* persistableMessagesFromFront(
+	rollout: RolloutBytes,
+	records: readonly EntryPatchRecord[],
+): AsyncGenerator<AgentMessage> {
+	const decoder = new TextDecoder();
+	for await (const lines of rolloutLineWindows(rollout)) {
+		yield* extractPersistableMessages(decoder.decode(lines), records);
+	}
+}
+
+/** Persistable messages from the end of the rollout, in reverse file order, read window by window, with `records` applied. */
+async function* persistableMessagesFromBack(
+	rollout: RolloutBytes,
+	records: readonly EntryPatchRecord[],
+): AsyncGenerator<AgentMessage> {
 	const decoder = new TextDecoder();
 	let carry: Uint8Array | undefined;
-	let end = size;
+	let end = rollout.size;
 	while (end > 0) {
 		const start = Math.max(0, end - STAGE1_ROLLOUT_WINDOW_BYTES);
-		const window = await file.slice(start, end).bytes();
+		const window = await rollout.read(start, end);
 		end = start;
 		const bytes = carry ? Buffer.concat([window, carry]) : window;
 		// Bytes before the first newline belong to a line that starts in an earlier window.
@@ -845,7 +904,7 @@ async function* persistableMessagesFromBack(file: Bun.BunFile, size: number): As
 			continue;
 		}
 		carry = cut > 0 ? bytes.subarray(0, cut) : undefined;
-		const messages = extractPersistableMessages(decoder.decode(bytes.subarray(cut)));
+		const messages = extractPersistableMessages(decoder.decode(bytes.subarray(cut)), records);
 		for (let i = messages.length - 1; i >= 0; i--) yield messages[i];
 	}
 }
@@ -853,46 +912,57 @@ async function* persistableMessagesFromBack(file: Bun.BunFile, size: number): As
 /**
  * Build the stage-1 `response_items_json` payload for a rollout file.
  *
- * Equivalent to `truncateByApproxTokens(JSON.stringify(persistableMessages), tokenLimit)`, but
- * streams the rollout in byte windows and serializes messages from the front and back only until
- * the head/tail budgets fill. Peak memory is bounded by the window size plus the largest single
- * JSONL record (a record spanning windows is carried until its newline), not by rollout size.
+ * Equivalent to `truncateByApproxTokens(JSON.stringify(persistableMessages), tokenLimit)` over the
+ * rollout's messages with its `entry_patch` records applied, but streams the rollout in byte
+ * windows. A first pass finds the records (a record sets fields on messages before it, and an elide
+ * pass's placeholder must reach the model in place of what it replaced); the messages are then
+ * serialized from the front and back only until the head/tail budgets fill. Every pass reads
+ * through one open handle, so all of them read the one body it opened: a rewrite that renames a
+ * new body over the path meanwhile is read by the next extraction. Peak memory is bounded by the
+ * window size, the largest single JSONL record (a record spanning windows is carried until its
+ * newline) and the records, not by rollout size.
  */
 export async function buildStage1RolloutItems(rolloutPath: string, tokenLimit: number): Promise<string> {
-	const file = Bun.file(rolloutPath);
-	// stat() throws for a missing rollout, matching the previous Bun.file().text() failure.
-	const { size } = await file.stat();
-	if (tokenLimit <= 0) return "";
-	const maxChars = tokenLimit * 4;
-	const headChars = Math.floor(maxChars * 0.6);
-	const tailChars = maxChars - headChars;
+	// open() throws for a missing rollout, matching the previous Bun.file().text() failure.
+	const handle = await fs.open(rolloutPath, "r");
+	try {
+		const { size } = await handle.stat();
+		if (tokenLimit <= 0) return "";
+		const rollout: RolloutBytes = { size, read: (start, end) => readFileRange(handle, start, end) };
+		const records = await rolloutPatchRecords(rollout);
+		const maxChars = tokenLimit * 4;
+		const headChars = Math.floor(maxChars * 0.6);
+		const tailChars = maxChars - headChars;
 
-	let head = "[";
-	let truncated = false;
-	for await (const message of persistableMessagesFromFront(file, size)) {
-		head += head.length === 1 ? JSON.stringify(message) : `,${JSON.stringify(message)}`;
-		if (head.length > maxChars) {
-			truncated = true;
-			break;
+		let head = "[";
+		let truncated = false;
+		for await (const message of persistableMessagesFromFront(rollout, records)) {
+			head += head.length === 1 ? JSON.stringify(message) : `,${JSON.stringify(message)}`;
+			if (head.length > maxChars) {
+				truncated = true;
+				break;
+			}
 		}
-	}
-	if (!truncated) {
-		const full = `${head}]`;
-		if (full.length <= maxChars) return full;
-	}
+		if (!truncated) {
+			const full = `${head}]`;
+			if (full.length <= maxChars) return full;
+		}
 
-	let tail = "]";
-	let exhausted = true;
-	for await (const message of persistableMessagesFromBack(file, size)) {
-		tail = `,${JSON.stringify(message)}${tail}`;
-		if (tail.length >= tailChars) {
-			exhausted = false;
-			break;
+		let tail = "]";
+		let exhausted = true;
+		for await (const message of persistableMessagesFromBack(rollout, records)) {
+			tail = `,${JSON.stringify(message)}${tail}`;
+			if (tail.length >= tailChars) {
+				exhausted = false;
+				break;
+			}
 		}
+		// Every message consumed: the leading separator is really the array opener.
+		if (exhausted) tail = `[${tail.slice(1)}`;
+		return `${head.slice(0, headChars)}\n\n...[truncated]...\n\n${tail.slice(-tailChars)}`;
+	} finally {
+		await handle.close();
 	}
-	// Every message consumed: the leading separator is really the array opener.
-	if (exhausted) tail = `[${tail.slice(1)}`;
-	return `${head.slice(0, headChars)}\n\n...[truncated]...\n\n${tail.slice(-tailChars)}`;
 }
 
 async function runStage1Job(options: {

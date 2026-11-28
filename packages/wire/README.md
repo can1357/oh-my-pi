@@ -13,7 +13,7 @@ import { COLLAB_PROTO, DEFAULT_RELAY_URL, ENVELOPE_HEADER_LENGTH } from "@oh-my-
 
 Key groups:
 
-- message and transcript entry shapes rendered by collab guests,
+- message and transcript entry shapes rendered by collab guests, and `EntryPatchEntry`, the `entry_patch` record a host sends in an `entry` frame to set fields on entries its guests already hold (guests apply it and never show it),
 - live agent event and task-subagent bus payload shapes,
 - `GuestFrame`, `HostFrame`, and `WireFrame` unions for AES-GCM sealed payloads,
 - relay control TEXT messages,

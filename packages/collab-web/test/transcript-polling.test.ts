@@ -6,8 +6,10 @@
  * from the same cursor forever.
  */
 import { describe, expect, it, vi } from "bun:test";
-import type { HostFrame, SessionEntry } from "@oh-my-pi/pi-wire";
+import { EntryPatchReplay } from "@oh-my-pi/pi-utils/entry-patches";
+import type { EntryPatchEntry, HostFrame, SessionEntry } from "@oh-my-pi/pi-wire";
 import { GuestClient } from "../src/lib/client";
+import { repaintPatchedRows, type TranscriptLine } from "../src/lib/entry-patch-rows";
 import { encodeBase64Url } from "../src/lib/link";
 import { decideTranscriptPoll } from "../src/lib/transcript-poll";
 
@@ -25,6 +27,21 @@ function messageEntry(id: string, content: string, timestamp: number): SessionEn
 		timestamp: "2026-06-12T00:00:01Z",
 		message: { role: "user", content, timestamp },
 	};
+}
+
+function contentRecord(id: string, entryId: string, content: string): EntryPatchEntry {
+	return {
+		type: "custom",
+		customType: "entry_patch",
+		id,
+		parentId: entryId,
+		timestamp: "2026-06-12T00:00:02Z",
+		data: { patches: [{ entryId, message: { content } }] },
+	};
+}
+
+function userContent(entry: SessionEntry | undefined): unknown {
+	return entry?.type === "message" ? entry.message.content : undefined;
 }
 
 describe("GuestClient.fetchTranscript", () => {
@@ -83,13 +100,14 @@ describe("GuestClient.fetchTranscript", () => {
 
 describe("decideTranscriptPoll", () => {
 	it("retries on transient failure (null) without touching the cursor", () => {
-		expect(decideTranscriptPoll(null, "")).toEqual({ action: "retry" });
+		expect(decideTranscriptPoll(null, "", new EntryPatchReplay<TranscriptLine>())).toEqual({ action: "retry" });
 	});
 
 	it("stops on a terminal frame error and carries the message to render", () => {
 		const decision = decideTranscriptPoll(
 			{ kind: "error", message: "transcript entry exceeds transcript fetch cap (4194304 bytes)" },
 			"partial-line",
+			new EntryPatchReplay<TranscriptLine>(),
 		);
 		expect(decision).toEqual({
 			action: "stop",
@@ -101,12 +119,17 @@ describe("decideTranscriptPoll", () => {
 		const entry = messageEntry("m1", "hi", 1);
 		const rows = `{"type":"session","id":"s1"}\n${JSON.stringify(entry)}\n`;
 		const text = `${rows}{"type":"mes`;
-		const decision = decideTranscriptPoll({ kind: "rows", text, newSize: text.length }, "");
+		const decision = decideTranscriptPoll(
+			{ kind: "rows", text, newSize: text.length },
+			"",
+			new EntryPatchReplay<TranscriptLine>(),
+		);
 		expect(decision).toEqual({
 			action: "advance",
 			newSize: text.length,
 			carry: '{"type":"mes',
 			fresh: [entry],
+			changed: [],
 		});
 	});
 
@@ -117,12 +140,62 @@ describe("decideTranscriptPoll", () => {
 		const decision = decideTranscriptPoll(
 			{ kind: "rows", text: line.slice(splitAt), newSize: 100 },
 			line.slice(0, splitAt),
+			new EntryPatchReplay<TranscriptLine>(),
 		);
 		expect(decision).toEqual({
 			action: "advance",
 			newSize: 100,
 			carry: "",
 			fresh: [entry],
+			changed: [],
 		});
+	});
+
+	// A subagent transcript is read in replies of at most 4 MiB: an elide pass's
+	// record in a later reply must reach the entry an earlier reply showed.
+	it("applies a record in a later reply to an entry of an earlier one, and never lists the record", () => {
+		const patches = new EntryPatchReplay<TranscriptLine>();
+		const first = `${JSON.stringify(messageEntry("m1", "heavy tool output", 1))}\n`;
+		const firstDecision = decideTranscriptPoll({ kind: "rows", text: first, newSize: first.length }, "", patches);
+		if (firstDecision.action !== "advance") throw new Error("expected the first reply to advance");
+		expect(firstDecision.fresh.map(userContent)).toEqual(["heavy tool output"]);
+
+		// Control: the same field written inline in the entry's own line.
+		const control = messageEntry("m2", "[elided]", 2);
+		const second = `${JSON.stringify(contentRecord("p1", "m1", "[elided]"))}\n${JSON.stringify(control)}\n`;
+		const decision = decideTranscriptPoll(
+			{ kind: "rows", text: second, newSize: first.length + second.length },
+			"",
+			patches,
+		);
+		if (decision.action !== "advance") throw new Error("expected the second reply to advance");
+		// The record is not a row; the entry it changed comes back to be shown again.
+		expect(decision.fresh).toEqual([control]);
+		expect(decision.changed.map(entry => entry.id)).toEqual(["m1"]);
+
+		const rows = [...repaintPatchedRows(firstDecision.fresh, decision.changed), ...decision.fresh];
+		expect(rows.map(entry => entry.id)).toEqual(["m1", "m2"]);
+		expect(rows.map(userContent)).toEqual(["[elided]", "[elided]"]);
+		// A new object, so the transcript's memoized row paints it again.
+		expect(rows[0]).not.toBe(firstDecision.fresh[0]);
+	});
+
+	// A reply that ends between a record and the entry it names (a host read
+	// out of order, a carried line) must still show the entry patched.
+	it("holds a record read before its target and applies it when the target arrives", () => {
+		const patches = new EntryPatchReplay<TranscriptLine>();
+		const first = `${JSON.stringify(contentRecord("p1", "m1", "[elided]"))}\n`;
+		const firstDecision = decideTranscriptPoll({ kind: "rows", text: first, newSize: first.length }, "", patches);
+		expect(firstDecision).toEqual({ action: "advance", newSize: first.length, carry: "", fresh: [], changed: [] });
+
+		const second = `${JSON.stringify(messageEntry("m1", "heavy tool output", 1))}\n`;
+		const decision = decideTranscriptPoll(
+			{ kind: "rows", text: second, newSize: first.length + second.length },
+			"",
+			patches,
+		);
+		if (decision.action !== "advance") throw new Error("expected the second reply to advance");
+		expect(decision.fresh.map(userContent)).toEqual(["[elided]"]);
+		expect(decision.changed).toEqual([]);
 	});
 });

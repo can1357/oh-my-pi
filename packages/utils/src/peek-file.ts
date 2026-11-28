@@ -66,6 +66,27 @@ export async function peekFile<T>(filePath: string, maxBytes: number, op: (heade
 }
 
 /**
+ * Bytes `start` to `end` of the file `handle` holds open, fewer when the file
+ * ends first. Each read is positioned, so the handle's own position stays
+ * where it was, and every read sees the body the handle opened even when
+ * another file is renamed over its path between them.
+ */
+export async function readFileRange(
+	handle: fs.promises.FileHandle,
+	start: number,
+	end: number,
+): Promise<Uint8Array<ArrayBuffer>> {
+	const bytes = new Uint8Array(end - start);
+	let read = 0;
+	while (read < bytes.length) {
+		const { bytesRead } = await handle.read(bytes, read, bytes.length - read, start + read);
+		if (bytesRead === 0) break;
+		read += bytesRead;
+	}
+	return bytes.subarray(0, read);
+}
+
+/**
  * Read up to the last `maxBytes` of `filePath` and pass that slice to `op`.
  *
  * The tail mirror of {@link peekFile}: the read is positioned at `size - len` so

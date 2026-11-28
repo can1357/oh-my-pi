@@ -454,7 +454,7 @@ export class SessionStatsTracker {
 	 * assistant snapshot keeps reloads accurate, and the next successful
 	 * assistant response naturally replaces it with a fresh provider anchor.
 	 */
-	recordAnchoredHistoryRewrite(tokensRemoved: number): void {
+	recordAnchoredHistoryRewrite(tokensRemoved: number): SessionMessageEntry | undefined {
 		if (!Number.isFinite(tokensRemoved) || tokensRemoved <= 0) return;
 
 		const branchEntries = this.#host.sessionManager.getBranchView();
@@ -475,7 +475,7 @@ export class SessionStatsTracker {
 			const snapshot = assistant.contextSnapshot;
 			snapshot.historyRewriteTokensRemoved = (snapshot.historyRewriteTokensRemoved ?? 0) + Math.floor(tokensRemoved);
 			this.#contextUsageRevision++;
-			return;
+			return entry;
 		}
 	}
 

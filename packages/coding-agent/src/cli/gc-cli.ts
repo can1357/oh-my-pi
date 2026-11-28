@@ -26,6 +26,7 @@ import {
 	readLines,
 	type FileLockHandle,
 } from "@oh-my-pi/pi-utils";
+import { entryPatchesOf, isEntryPatchRecord, patchFitsMessageRole } from "@oh-my-pi/pi-utils/entry-patches";
 import { Settings } from "../config/settings";
 import type { Setting } from "../config/registry";
 
@@ -1046,13 +1047,15 @@ async function scanArchivedSession(
 ): Promise<SessionLineageHeader | undefined> {
 	const decoder = new TextDecoder();
 	const reader = new SessionLineageHeaderReader();
+	const statsReader = identities && new SessionStatsIdentityReader(identities);
 	// Drain even after the header: a late gzip error must invalidate the archive.
 	await scanSessionLinesIfPresent(file, line => {
-		if (reader.done && !identities) return;
+		if (reader.done && !statsReader) return;
 		const text = decoder.decode(line);
 		reader.read(text);
-		if (identities) addSessionStatsIdentity(text, identities);
+		statsReader?.read(text);
 	});
+	statsReader?.finish();
 	return reader.header;
 }
 
@@ -1464,75 +1467,119 @@ function buildStatsCleanupPlans(
 	};
 }
 
-function addSessionStatsIdentity(line: string, identities: Record<StatsEntryTable, StatsEntryIdentity[]>): void {
-	if (line.length === 0) return;
-	try {
-		const record: unknown = JSON.parse(line);
-		if (!record || typeof record !== "object" || !("type" in record)) return;
-		if (record.type === "custom") {
+/** The tool call identities of `content`, an assistant message's, as the stats ingest keys its rows. */
+function toolCallIdentities(entryId: string, timestamp: number, content: readonly unknown[]): StatsEntryIdentity[] {
+	const calls: StatsEntryIdentity[] = [];
+	for (const block of content) {
+		if (
+			block &&
+			typeof block === "object" &&
+			"type" in block &&
+			block.type === "toolCall" &&
+			"id" in block &&
+			typeof block.id === "string"
+		) {
+			calls.push({ entryId, timestamp, toolCallId: block.id });
+		}
+	}
+	return calls;
+}
+
+/**
+ * The stats identities of one transcript, read line by line into
+ * `identities`. An assistant message's tool calls are held until
+ * {@link finish}, so an `entry_patch` record that sets its `content` later in
+ * the file decides them, as the stats ingest reads them.
+ */
+class SessionStatsIdentityReader {
+	readonly #identities: Record<StatsEntryTable, StatsEntryIdentity[]>;
+	/** Each assistant message's timestamp and tool call identities, by entry id. */
+	readonly #assistants = new Map<string, { timestamp: number; calls: StatsEntryIdentity[] }>();
+
+	constructor(identities: Record<StatsEntryTable, StatsEntryIdentity[]>) {
+		this.#identities = identities;
+	}
+
+	read(line: string): void {
+		if (line.length === 0) return;
+		const identities = this.#identities;
+		try {
+			const record: unknown = JSON.parse(line);
+			if (!record || typeof record !== "object" || !("type" in record)) return;
+			if (record.type === "custom") {
+				if (isEntryPatchRecord(record)) {
+					for (const patch of entryPatchesOf(record) ?? []) {
+						const content = patch.message?.content;
+						const assistant = this.#assistants.get(patch.entryId);
+						if (!assistant || !Array.isArray(content) || !patchFitsMessageRole(patch, "assistant")) continue;
+						assistant.calls = toolCallIdentities(patch.entryId, assistant.timestamp, content);
+					}
+					return;
+				}
+				if (
+					!("customType" in record) ||
+					(record.customType !== "tool_approval_requested" && record.customType !== "tool_approval_resolved") ||
+					!("data" in record) ||
+					!record.data ||
+					typeof record.data !== "object" ||
+					!("toolCallId" in record.data) ||
+					typeof record.data.toolCallId !== "string"
+				) {
+					return;
+				}
+				const toolCallId = record.data.toolCallId.trim();
+				if (toolCallId.length > 0) {
+					identities.tool_approvals.push({ entryId: "", timestamp: 0, toolCallId });
+				}
+				return;
+			}
 			if (
-				!("customType" in record) ||
-				(record.customType !== "tool_approval_requested" && record.customType !== "tool_approval_resolved") ||
-				!("data" in record) ||
-				!record.data ||
-				typeof record.data !== "object" ||
-				!("toolCallId" in record.data) ||
-				typeof record.data.toolCallId !== "string"
+				record.type !== "message" ||
+				!("id" in record) ||
+				typeof record.id !== "string" ||
+				record.id.length === 0 ||
+				!("message" in record) ||
+				!record.message ||
+				typeof record.message !== "object"
 			) {
 				return;
 			}
-			const toolCallId = record.data.toolCallId.trim();
-			if (toolCallId.length > 0) {
-				identities.tool_approvals.push({ entryId: "", timestamp: 0, toolCallId });
+			const message = record.message;
+			if (!("role" in message)) return;
+			const parsedEntryTimestamp =
+				"timestamp" in record && typeof record.timestamp === "string" ? Date.parse(record.timestamp) : Number.NaN;
+			if (message.role === "user") {
+				identities.user_messages.push({
+					entryId: record.id,
+					timestamp: Number.isFinite(parsedEntryTimestamp) ? parsedEntryTimestamp : 0,
+					toolCallId: "",
+				});
+				return;
 			}
-			return;
+			if (message.role !== "assistant") return;
+			const timestamp =
+				"timestamp" in message && typeof message.timestamp === "number" && Number.isFinite(message.timestamp)
+					? message.timestamp
+					: Number.isFinite(parsedEntryTimestamp)
+						? parsedEntryTimestamp
+						: 0;
+			identities.messages.push({ entryId: record.id, timestamp, toolCallId: "" });
+			const calls =
+				"content" in message && Array.isArray(message.content)
+					? toolCallIdentities(record.id, timestamp, message.content)
+					: [];
+			const held = this.#assistants.get(record.id);
+			if (held) held.calls.push(...calls);
+			else this.#assistants.set(record.id, { timestamp, calls });
+		} catch {
+			// Stats parsing is also lenient: a malformed line cannot own a retained row.
 		}
-		if (
-			record.type !== "message" ||
-			!("id" in record) ||
-			typeof record.id !== "string" ||
-			record.id.length === 0 ||
-			!("message" in record) ||
-			!record.message ||
-			typeof record.message !== "object"
-		) {
-			return;
-		}
-		const message = record.message;
-		if (!("role" in message)) return;
-		const parsedEntryTimestamp =
-			"timestamp" in record && typeof record.timestamp === "string" ? Date.parse(record.timestamp) : Number.NaN;
-		if (message.role === "user") {
-			identities.user_messages.push({
-				entryId: record.id,
-				timestamp: Number.isFinite(parsedEntryTimestamp) ? parsedEntryTimestamp : 0,
-				toolCallId: "",
-			});
-			return;
-		}
-		if (message.role !== "assistant") return;
-		const timestamp =
-			"timestamp" in message && typeof message.timestamp === "number" && Number.isFinite(message.timestamp)
-				? message.timestamp
-				: Number.isFinite(parsedEntryTimestamp)
-					? parsedEntryTimestamp
-					: 0;
-		identities.messages.push({ entryId: record.id, timestamp, toolCallId: "" });
-		if (!("content" in message) || !Array.isArray(message.content)) return;
-		for (const block of message.content) {
-			if (
-				block &&
-				typeof block === "object" &&
-				"type" in block &&
-				block.type === "toolCall" &&
-				"id" in block &&
-				typeof block.id === "string"
-			) {
-				identities.tool_calls.push({ entryId: record.id, timestamp, toolCallId: block.id });
-			}
-		}
-	} catch {
-		// Stats parsing is also lenient: a malformed line cannot own a retained row.
+	}
+
+	/** Add the held tool call identities to the identities read. */
+	finish(): void {
+		for (const { calls } of this.#assistants.values()) this.#identities.tool_calls.push(...calls);
+		this.#assistants.clear();
 	}
 }
 
@@ -1540,10 +1587,12 @@ async function collectSessionStatsIdentities(
 	sessionPath: string,
 ): Promise<Record<StatsEntryTable, StatsEntryIdentity[]>> {
 	const identities = createStatsIdentities();
+	const reader = new SessionStatsIdentityReader(identities);
 	const decoder = new TextDecoder();
 	for await (const line of readLines(Bun.file(sessionPath).stream())) {
-		addSessionStatsIdentity(decoder.decode(line), identities);
+		reader.read(decoder.decode(line));
 	}
+	reader.finish();
 	return identities;
 }
 

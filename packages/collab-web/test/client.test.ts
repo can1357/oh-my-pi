@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "bun:test";
 import type {
 	AgentSnapshot,
 	AssistantMessage,
+	EntryPatchEntry,
 	GuestFrame,
 	HostFrame,
 	SessionEntry,
@@ -50,6 +51,21 @@ function assistantMessage(text: string): AssistantMessage {
 
 function messageEntry(id: string, message: WireMessage): SessionEntry {
 	return { type: "message", id, parentId: null, timestamp: "2026-06-12T00:00:01Z", message };
+}
+
+function contentRecord(id: string, entryId: string, content: string): EntryPatchEntry {
+	return {
+		type: "custom",
+		customType: "entry_patch",
+		id,
+		parentId: entryId,
+		timestamp: "2026-06-12T00:00:03Z",
+		data: { patches: [{ entryId, message: { content } }] },
+	};
+}
+
+function userContent(entry: SessionEntry | undefined): unknown {
+	return entry?.type === "message" ? entry.message.content : undefined;
 }
 
 function welcomeFrame(entryCount = 0, readOnly?: boolean): HostFrame {
@@ -629,6 +645,45 @@ describe("GuestClient frame apply", () => {
 		const after = client.getSnapshot();
 		expect(after.entries).not.toBe(before.entries);
 		expect(after.entries).toHaveLength(before.entries.length + 1);
+	});
+
+	// The host sends an elide pass's record live: without it the guest keeps
+	// showing the heavy output until it rejoins.
+	it("applies an entry_patch record in an entry frame to the entry it names, and never shows the record", () => {
+		const client = liveClient([messageEntry("e1", { role: "user", content: "heavy tool output", timestamp: 1 })]);
+		// Control: the same field written inline in a live entry.
+		client.applyFrameForTest({
+			t: "entry",
+			entry: messageEntry("e2", { role: "user", content: "[elided]", timestamp: 2 }),
+		});
+		const before = client.getSnapshot().entries;
+
+		client.applyFrameForTest({ t: "entry", entry: contentRecord("p1", "e1", "[elided]") });
+
+		const entries = client.getSnapshot().entries;
+		expect(entries.map(entry => entry.id)).toEqual(["e1", "e2"]);
+		expect(entries.map(userContent)).toEqual(["[elided]", "[elided]"]);
+		// A new object, so the transcript's memoized row paints it again.
+		expect(entries[0]).not.toBe(before[0]);
+		expect(entries[1]).toBe(before[1]);
+	});
+
+	// A record the host sends while the welcome snapshot still loads names an
+	// entry of that snapshot.
+	it("applies a record that arrives during a snapshot to the snapshot's entries", () => {
+		const client = new GuestClient(LINK, "tester");
+		client.applyFrameForTest(welcomeFrame(2));
+		client.applyFrameForTest(
+			snapshotChunk([messageEntry("e1", { role: "user", content: "heavy tool output", timestamp: 1 })], false),
+		);
+		client.applyFrameForTest({ t: "entry", entry: contentRecord("p1", "e1", "[elided]") });
+		client.applyFrameForTest(
+			snapshotChunk([messageEntry("e2", { role: "user", content: "[elided]", timestamp: 2 })]),
+		);
+
+		const entries = client.getSnapshot().entries;
+		expect(entries.map(entry => entry.id)).toEqual(["e1", "e2"]);
+		expect(entries.map(userContent)).toEqual(["[elided]", "[elided]"]);
 	});
 });
 

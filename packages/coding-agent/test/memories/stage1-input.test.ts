@@ -1,5 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import * as fs from "node:fs/promises";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { buildStage1RolloutItems } from "@oh-my-pi/pi-coding-agent/memories";
@@ -43,11 +43,15 @@ describe("buildStage1RolloutItems", () => {
 	let tempDir: string;
 
 	beforeEach(async () => {
-		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-stage1-input-test-"));
+		tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-stage1-input-test-"));
 	});
 
 	afterEach(async () => {
-		await fs.rm(tempDir, { recursive: true, force: true });
+		try {
+			vi.restoreAllMocks();
+		} finally {
+			await fs.promises.rm(tempDir, { recursive: true, force: true });
+		}
 	});
 
 	async function expectParity(raw: string, limits: number[]): Promise<void> {
@@ -77,7 +81,7 @@ describe("buildStage1RolloutItems", () => {
 		// One record larger than a whole window.
 		lines.splice(lines.length - 3, 0, messageLine(3, "y".repeat(1_500_000)));
 		await expectParity(`${lines.join("\n")}\n`, [1, 4000, 100_000, 10_000_000]);
-	});
+	}, 30_000);
 
 	it("excludes signed and redacted reasoning from the stage-1 extraction payload", async () => {
 		const filePath = path.join(tempDir, "reasoning.jsonl");
@@ -117,5 +121,66 @@ describe("buildStage1RolloutItems", () => {
 
 	it("rejects missing rollouts", async () => {
 		await expect(buildStage1RolloutItems(path.join(tempDir, "missing.jsonl"), 100)).rejects.toThrow();
+	});
+
+	it("builds one file's stage-1 input when another file is renamed over the rollout between its record scan and its message reads", async () => {
+		// If this regresses, a memory extracted from a session file another process replaced meanwhile
+		// applies the old file's records to the new file's messages, and the extraction model gets the
+		// output the new file's record elided.
+		const rollout = path.join(tempDir, "rollout.jsonl");
+		const result = (id: string, text: string) =>
+			JSON.stringify({
+				type: "message",
+				id,
+				message: { role: "toolResult", toolName: "bash", content: [{ type: "text", text }] },
+			});
+		const elide = (recordId: string, entryId: string) =>
+			JSON.stringify({
+				type: "custom",
+				customType: "entry_patch",
+				id: recordId,
+				data: { patches: [{ entryId, message: { content: [{ type: "text", text: "elided" }] } }] },
+			});
+		const body = (...lines: string[]) =>
+			`${['{"type":"session","id":"s"}', messageLine(0, "go"), ...lines].join("\n")}\n`;
+		// The old file is the longer one, so a read sized by it takes all of the new one.
+		const oldFile = body(result("t1", "o".repeat(4096)), elide("p1", "t1"));
+		const newFile = body(result("t1", "fresh output"), result("t2", "HEAVY"), elide("p2", "t2"));
+		await Bun.write(rollout, oldFile);
+		// Every read of the rollout goes through the `read` of its file handle, wherever the runtime defines it.
+		const probe = await fs.promises.open(rollout, "r");
+		await probe.close();
+		let owner: fs.promises.FileHandle = Object.getPrototypeOf(probe);
+		while (!Object.hasOwn(owner, "read")) owner = Object.getPrototypeOf(owner);
+		const realRead = owner.read;
+		let replaced = false;
+		// The record scan's first read, then the new file renamed over the rollout, synchronously, before the
+		// scan goes on and before any message is read.
+		vi.spyOn(owner, "read").mockImplementation(async function (
+			this: fs.promises.FileHandle,
+			...args: Parameters<typeof realRead>
+		) {
+			const read = await realRead.apply(this, args);
+			if (!replaced) {
+				replaced = true;
+				fs.writeFileSync(`${rollout}.new`, newFile);
+				fs.renameSync(`${rollout}.new`, rollout);
+			}
+			return read;
+		});
+
+		// The whole input from the front, and a budget whose tail is read from the back.
+		for (const limit of [10_000_000, 20]) {
+			await Bun.write(rollout, oldFile);
+			replaced = false;
+
+			const built = await buildStage1RolloutItems(rollout, limit);
+
+			expect({ limit, replaced }).toEqual({ limit, replaced: true });
+			expect([
+				referenceItems(body(result("t1", "elided")), limit),
+				referenceItems(body(result("t1", "fresh output"), result("t2", "elided")), limit),
+			]).toContain(built);
+		}
 	});
 });

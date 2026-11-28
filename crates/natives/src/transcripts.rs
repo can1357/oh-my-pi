@@ -8,10 +8,13 @@
 //!
 //! A line is classified from its head before any parse: entries other than
 //! `session` and `message`, and message roles a scan does not need, are never
-//! decoded. Each file is one blocking job on Tokio's pool; the export settles
-//! a Promise and never holds the JS thread. Capped scans read files newest
-//! first in batches and stop once the next batch is older than every hit they
-//! keep.
+//! decoded, except an `entry_patch` record: a first pass over the file reads
+//! the `content` such records set on messages, a second the lines that name
+//! those messages, and the last message with each id carries it when it is
+//! decoded, as every reader of a session file shows it. Each file is one
+//! blocking job on Tokio's pool; the export settles a Promise and never holds
+//! the JS thread. Capped scans read files newest first in batches and stop
+//! once the next batch is older than every hit they keep.
 
 use std::{
 	borrow::Cow, collections::HashMap, fmt, fs, marker::PhantomData, num::NonZero, sync::Arc,
@@ -43,6 +46,10 @@ const SNIPPET_CHARS: usize = 100;
 const CUT_MARK: &str = "\n…\n";
 /// Leading bytes of a message line searched for its role before a full parse.
 const ROLE_PROBE_BYTES: usize = 1024;
+/// `customType` of an `entry_patch` record, as its line holds it.
+const ENTRY_PATCH_MARKER: &[u8] = b"\"entry_patch\"";
+/// Key of an entry's id, as its line holds it.
+const ID_KEY: &[u8] = b"\"id\":";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // N-API surface
@@ -520,9 +527,9 @@ pub fn transcript_messages(
 				|| wants(TranscriptRecordKind::Call),
 			results:   wants(TranscriptRecordKind::Result),
 		};
-		let buf = fs::read(&path).map_err(|err| Error::from_reason(format!("{path}: {err}")))?;
+		let mut buf = fs::read(&path).map_err(|err| Error::from_reason(format!("{path}: {err}")))?;
 		ct.heartbeat()?;
-		let transcript = read_transcript(&buf, roles);
+		let transcript = read_transcript(&mut buf, roles);
 		let mut kept: Vec<TranscriptRecord> = transcript
 			.records
 			.iter()
@@ -640,10 +647,10 @@ fn read_file<H>(
 	roles: Roles,
 	per_file: &impl for<'a> Fn(u32, Vec<Record<'a>>) -> Vec<H>,
 ) -> (Option<TranscriptHeader>, Vec<H>) {
-	let Ok(buf) = fs::read(path) else {
+	let Ok(mut buf) = fs::read(path) else {
 		return (None, Vec::new());
 	};
-	let transcript = read_transcript(&buf, roles);
+	let transcript = read_transcript(&mut buf, roles);
 	let file = clamp_u32(index as u64);
 	let header = transcript.header.map(|(id, cwd)| TranscriptHeader {
 		file,
@@ -842,6 +849,7 @@ struct PairedCalls<'a> {
 enum LineKind {
 	Session,
 	Message,
+	Custom,
 }
 
 /// Entry type at the head of a line, spaced JSON (`{"type": "message"`)
@@ -854,6 +862,8 @@ fn line_kind(line: &[u8]) -> Option<LineKind> {
 		Some(LineKind::Message)
 	} else if rest.starts_with(b"\"session\"") {
 		Some(LineKind::Session)
+	} else if rest.starts_with(b"\"custom\"") {
+		Some(LineKind::Custom)
 	} else {
 		None
 	}
@@ -871,10 +881,19 @@ fn probe_role(line: &[u8]) -> Option<&str> {
 }
 
 /// The header and the records of `roles` among `buf`'s complete lines; an
-/// unparseable line, such as a half-written last one, is skipped.
-fn read_transcript(buf: &[u8], roles: Roles) -> Transcript<'_> {
+/// unparseable line, such as a half-written last one, is skipped. Each
+/// message carries the `content` the `entry_patch` records of `buf` set on it
+/// ([`entry_patches`]), when it is the last entry with its id
+/// ([`last_targets`]). A line holding a lone surrogate escape reads as
+/// `JSON.parse` reads it, with U+FFFD for the surrogate
+/// ([`replace_lone_surrogates`]).
+fn read_transcript(buf: &mut [u8], roles: Roles) -> Transcript<'_> {
+	replace_lone_surrogates(buf);
+	let buf: &[u8] = buf;
+	let mut patches = entry_patches(buf);
+	let targets = last_targets(buf, &patches);
 	let mut transcript = Transcript::default();
-	for line in buf.split(|&byte| byte == b'\n') {
+	for (number, line) in buf.split(|&byte| byte == b'\n').enumerate() {
 		match line_kind(line) {
 			Some(LineKind::Message) => {
 				if probe_role(line).is_some_and(|role| !roles.wants(role)) {
@@ -883,9 +902,10 @@ fn read_transcript(buf: &[u8], roles: Roles) -> Transcript<'_> {
 				let Ok(text) = std::str::from_utf8(line) else {
 					continue;
 				};
-				let Ok(entry) = serde_json::from_str::<Line<'_>>(text) else {
+				let Ok(mut entry) = serde_json::from_str::<Line<'_>>(text) else {
 					continue;
 				};
+				apply_content_patches(&mut entry, number, &mut patches, &targets);
 				push_message(entry, roles, &mut transcript.records);
 			},
 			Some(LineKind::Session) if transcript.header.is_none() => {
@@ -902,6 +922,320 @@ fn read_transcript(buf: &[u8], roles: Roles) -> Transcript<'_> {
 		}
 	}
 	transcript
+}
+
+/// Rewrites in place, as `\ufffd`, each `\u` escape in `buf` of a UTF-16
+/// surrogate without its other half, which `JSON.parse` reads and `serde_json`
+/// rejects with the whole line. Tool output can end in half a pair, which
+/// `JSON.stringify` writes as such an escape.
+fn replace_lone_surrogates(buf: &mut [u8]) {
+	let mut at = 0;
+	while let Some(found) = memchr::memmem::find(&buf[at..], b"\\u") {
+		let escape = at + found;
+		at = escape + 2;
+		// After an odd run of backslashes, the `\u` is text: `\\u` is a
+		// backslash and a `u`.
+		let run = buf[..escape]
+			.iter()
+			.rev()
+			.take_while(|&&byte| byte == b'\\')
+			.count();
+		if run % 2 == 1 {
+			continue;
+		}
+		let Some(unit) = escaped_unit(buf, escape) else {
+			continue;
+		};
+		let low = |half: u16| (0xdc00..0xe000).contains(&half);
+		if (0xd800..0xdc00).contains(&unit) && escaped_unit(buf, escape + 6).is_some_and(low) {
+			at = escape + 12;
+		} else if (0xd800..0xe000).contains(&unit) {
+			buf[escape + 2..escape + 6].copy_from_slice(b"fffd");
+			at = escape + 6;
+		}
+	}
+}
+
+/// The UTF-16 code unit of the `\uXXXX` escape at `at` in `buf`, if one is
+/// there.
+fn escaped_unit(buf: &[u8], at: usize) -> Option<u16> {
+	let escape = buf.get(at..at + 6)?.strip_prefix(b"\\u")?;
+	let hex = std::str::from_utf8(escape).ok()?;
+	u16::from_str_radix(hex, 16).ok()
+}
+
+/// The `content` an `entry_patch` record sets on a message, and what else its
+/// patch sets, which decides the roles it fits.
+struct ContentPatch<'a> {
+	content:   Content<'a>,
+	/// The patch also sets a field only an assistant message has
+	/// (`retryRecovery`, `contextSnapshot`, `elidedOutputTokens`).
+	assistant: bool,
+	/// The patch also sets `prunedAt`, which only a tool result has.
+	result:    bool,
+}
+
+impl ContentPatch<'_> {
+	/// Whether the patch fits a message of `role`, as `entryAcceptsPatch` of
+	/// `@oh-my-pi/pi-utils/entry-patches` decides: string content only for a
+	/// user or developer message, blocks for those and assistant and tool-result
+	/// messages.
+	fn fits(&self, role: &str) -> bool {
+		if (self.assistant && role != "assistant") || (self.result && role != "toolResult") {
+			return false;
+		}
+		match self.content {
+			Content::Text(_) => matches!(role, "user" | "developer"),
+			_ => matches!(role, "user" | "developer" | "assistant" | "toolResult"),
+		}
+	}
+}
+
+/// The patches of `buf`'s `entry_patch` records that set a message's
+/// `content`, by the id of the entry each names, each id's in file order. A
+/// record the TypeScript readers skip as malformed ([`is_entry_patch_data`])
+/// is skipped whole, and a patch that also sets a field of another entry kind
+/// fits no message.
+fn entry_patches(buf: &[u8]) -> HashMap<Cow<'_, str>, Vec<ContentPatch<'_>>> {
+	let mut patches: HashMap<Cow<'_, str>, Vec<ContentPatch<'_>>> = HashMap::new();
+	if memchr::memmem::find(buf, ENTRY_PATCH_MARKER).is_none() {
+		return patches;
+	}
+	for line in buf.split(|&byte| byte == b'\n') {
+		if !matches!(line_kind(line), Some(LineKind::Custom))
+			|| memchr::memmem::find(line, ENTRY_PATCH_MARKER).is_none()
+		{
+			continue;
+		}
+		let Ok(text) = std::str::from_utf8(line) else {
+			continue;
+		};
+		let Ok(value) = serde_json::from_str::<Value>(text) else {
+			continue;
+		};
+		if value.get("customType").and_then(Value::as_str) != Some("entry_patch")
+			|| !value.get("data").is_some_and(is_entry_patch_data)
+		{
+			continue;
+		}
+		let Ok(record) = serde_json::from_str::<PatchLine<'_>>(text) else {
+			continue;
+		};
+		for patch in record.data.patches {
+			let (Str(Some(entry_id)), Some(message)) = (patch.entry_id, patch.message) else {
+				continue;
+			};
+			if matches!(message.content, Content::Absent)
+				|| patch.entry.is_some_and(|fields| fields.any())
+			{
+				continue;
+			}
+			let assistant = message.retry_recovery.is_some()
+				|| message.context_snapshot.is_some()
+				|| message.elided_output_tokens.is_some();
+			let result = message.pruned_at.is_some();
+			patches.entry(entry_id).or_default().push(ContentPatch {
+				content: message.content,
+				assistant,
+				result,
+			});
+		}
+	}
+	patches
+}
+
+/// Whether `data` is the `data` of a well-formed `entry_patch` record, as
+/// `isEntryPatchData` of `@oh-my-pi/pi-utils/entry-patches` decides, so this
+/// reader applies the records the TypeScript readers apply and no other.
+fn is_entry_patch_data(data: &Value) -> bool {
+	let Some(patches) = data.get("patches").and_then(Value::as_array) else {
+		return false;
+	};
+	patches.iter().all(|patch| {
+		let Some(patch) = patch.as_object() else {
+			return false;
+		};
+		patch.get("entryId").is_some_and(Value::is_string)
+			&& patch.get("entry").is_none_or(|fields| {
+				fields.as_object().is_some_and(|fields| {
+					fields.get("warning").is_none_or(Value::is_string)
+						&& fields.get("tokensAfter").is_none_or(Value::is_number)
+						&& fields.get("preserveData").is_none_or(Value::is_object)
+						&& fields.get("content").is_none_or(is_content)
+				})
+			})
+			&& patch.get("message").is_none_or(|fields| {
+				fields.as_object().is_some_and(|fields| {
+					fields.get("retryRecovery").is_none_or(Value::is_object)
+						&& fields
+							.get("contextSnapshot")
+							.is_none_or(is_context_snapshot)
+						&& fields
+							.get("elidedOutputTokens")
+							.is_none_or(Value::is_number)
+						&& fields.get("prunedAt").is_none_or(Value::is_number)
+						&& fields.get("content").is_none_or(is_content)
+				})
+			})
+	})
+}
+
+/// Whether `value` is message content a record may set: a string, or blocks
+/// each of which [`is_content_block`] accepts.
+fn is_content(value: &Value) -> bool {
+	match value {
+		Value::String(_) => true,
+		Value::Array(blocks) => blocks.iter().all(is_content_block),
+		_ => false,
+	}
+}
+
+/// Whether `block` is a content block with a string `type` and, for each
+/// known type, the payload the model-context builder and the providers read
+/// from it, as `@oh-my-pi/pi-utils/entry-patches` decides; a block of another
+/// type passes on its `type` alone.
+fn is_content_block(block: &Value) -> bool {
+	let Some(block) = block.as_object() else {
+		return false;
+	};
+	let string = |key: &str| block.get(key).is_some_and(Value::is_string);
+	let object = |key: &str| block.get(key).is_some_and(Value::is_object);
+	// A provider fallback's `from` or `to`: an object naming its model.
+	let model = |key: &str| block.get(key).is_some_and(|it| it["model"].is_string());
+	match block.get("type").and_then(Value::as_str) {
+		Some("text") => string("text"),
+		Some("thinking") => {
+			string("thinking") && block.get("thinkingSignature").is_none_or(Value::is_string)
+		},
+		Some("redactedThinking") => string("data"),
+		Some("image") => string("data") && string("mimeType"),
+		Some("toolCall") => string("id") && string("name") && object("arguments"),
+		Some("fallback") => model("from") && model("to"),
+		Some("anthropicServerTool") => object("block"),
+		Some(_) => true,
+		None => false,
+	}
+}
+
+/// Whether `value` is an assistant's `contextSnapshot`, as
+/// `@oh-my-pi/pi-utils/entry-patches` decides: its prompt and non-message
+/// token counts numbers, and each optional count absent or a number.
+fn is_context_snapshot(value: &Value) -> bool {
+	let Some(snapshot) = value.as_object() else {
+		return false;
+	};
+	let count = |key: &str| snapshot.get(key).is_some_and(Value::is_number);
+	let optional = |key: &str| snapshot.get(key).is_none_or(Value::is_number);
+	count("promptTokens")
+		&& count("nonMessageTokens")
+		&& optional("toolSchemaTokens")
+		&& optional("historyRewriteTokensRemoved")
+		&& optional("compactionEpoch")
+		&& optional("lastMessageTimestamp")
+}
+
+/// The line number of the last entry among `buf`'s lines with each id
+/// `patches` names, as `applyEntryPatches` of `@oh-my-pi/pi-utils/entry-patches`
+/// finds a record's target: every entry but the session header has its id,
+/// and of entries that share one, the last in the file is the target. Only
+/// the lines that can hold such an entry are parsed ([`may_name_target`]).
+fn last_targets<'a>(
+	buf: &'a [u8],
+	patches: &HashMap<Cow<'_, str>, Vec<ContentPatch<'_>>>,
+) -> HashMap<Cow<'a, str>, usize> {
+	let mut last = HashMap::new();
+	if patches.is_empty() {
+		return last;
+	}
+	for (number, line) in buf.split(|&byte| byte == b'\n').enumerate() {
+		let Some(key) = memchr::memmem::find(line, ID_KEY) else {
+			continue;
+		};
+		if !may_name_target(line, key, patches) {
+			continue;
+		}
+		let Ok(text) = std::str::from_utf8(line) else {
+			continue;
+		};
+		let Ok(TargetLine { kind: Str(kind), id: Str(Some(id)) }) = serde_json::from_str(text) else {
+			continue;
+		};
+		if kind.as_deref() != Some("session") && patches.contains_key(&*id) {
+			last.insert(id, number);
+		}
+	}
+	last
+}
+
+/// Whether `line`, whose first [`ID_KEY`] is at `key`, can be an entry with an
+/// id `patches` names. Not when that key is the line's own, nothing before it
+/// opening a nested value, and its value is a plain string `patches` lacks;
+/// any other line is parsed to tell. A message's line names its id before its
+/// message, so no message but a target is parsed here.
+fn may_name_target(
+	line: &[u8],
+	key: usize,
+	patches: &HashMap<Cow<'_, str>, Vec<ContentPatch<'_>>>,
+) -> bool {
+	let Some(head) = line[..key].strip_prefix(b"{") else {
+		return true;
+	};
+	if head.iter().any(|&byte| byte == b'{' || byte == b'[') {
+		return true;
+	}
+	let Some(value) = line[key + ID_KEY.len()..]
+		.trim_ascii_start()
+		.strip_prefix(b"\"")
+	else {
+		return true;
+	};
+	let Some(close) = memchr::memchr(b'"', value) else {
+		return true;
+	};
+	let id = &value[..close];
+	if id.contains(&b'\\') {
+		return true;
+	}
+	match std::str::from_utf8(id) {
+		Ok(id) => patches.contains_key(id),
+		Err(_) => true,
+	}
+}
+
+/// Sets on `line`'s message, the line numbered `number`, the `content` of the
+/// last patch for its entry that fits its role, when it is the last entry
+/// with its id ([`last_targets`]); records apply in file order, so the newest
+/// value wins.
+fn apply_content_patches<'a>(
+	line: &mut Line<'a>,
+	number: usize,
+	patches: &mut HashMap<Cow<'a, str>, Vec<ContentPatch<'a>>>,
+	targets: &HashMap<Cow<'_, str>, usize>,
+) {
+	if patches.is_empty() {
+		return;
+	}
+	let (Str(Some(id)), Some(message)) = (&line.id, &mut line.message) else {
+		return;
+	};
+	let Some(role) = message.role.0.as_deref() else {
+		return;
+	};
+	if matches!(message.content, Content::Absent) {
+		return;
+	}
+	// Of entries that share an id, records set fields on the last only. An id
+	// whose line the target scan missed (its key written another way) patches
+	// the first message with it.
+	if targets.get(&**id).is_some_and(|&last| last != number) {
+		return;
+	}
+	let Some(held) = patches.remove(&**id) else {
+		return;
+	};
+	if let Some(patch) = held.into_iter().rev().find(|patch| patch.fits(role)) {
+		message.content = patch.content;
+	}
 }
 
 fn push_message<'a>(line: Line<'a>, roles: Roles, out: &mut Vec<Record<'a>>) {
@@ -1225,6 +1559,78 @@ struct Line<'a> {
 	message:   Option<Message<'a>>,
 }
 
+/// The fields of any line that make its entry a patch target: its type and
+/// id ([`last_targets`]).
+#[derive(Deserialize)]
+struct TargetLine<'a> {
+	#[serde(default, borrow, rename = "type")]
+	kind: Str<'a>,
+	#[serde(default, borrow)]
+	id:   Str<'a>,
+}
+
+/// The fields of an `entry_patch` record line scans read, once
+/// [`is_entry_patch_data`] accepted its `data`.
+#[derive(Deserialize)]
+struct PatchLine<'a> {
+	#[serde(borrow)]
+	data: PatchData<'a>,
+}
+
+#[derive(Deserialize)]
+struct PatchData<'a> {
+	#[serde(borrow)]
+	patches: Vec<Patch<'a>>,
+}
+
+/// One patch of a record: the entry it names and the fields it sets.
+#[derive(Deserialize)]
+struct Patch<'a> {
+	#[serde(default, borrow, rename = "entryId")]
+	entry_id: Str<'a>,
+	#[serde(default)]
+	entry:    Option<EntryFields>,
+	#[serde(default, borrow)]
+	message:  Option<MessageFields<'a>>,
+}
+
+/// Entry fields a patch sets; any of them fits no message.
+#[derive(Deserialize)]
+struct EntryFields {
+	#[serde(default)]
+	warning:       Option<IgnoredAny>,
+	#[serde(default, rename = "tokensAfter")]
+	tokens_after:  Option<IgnoredAny>,
+	#[serde(default, rename = "preserveData")]
+	preserve_data: Option<IgnoredAny>,
+	#[serde(default)]
+	content:       Option<IgnoredAny>,
+}
+
+impl EntryFields {
+	const fn any(&self) -> bool {
+		self.warning.is_some()
+			|| self.tokens_after.is_some()
+			|| self.preserve_data.is_some()
+			|| self.content.is_some()
+	}
+}
+
+/// Message fields a patch sets.
+#[derive(Deserialize)]
+struct MessageFields<'a> {
+	#[serde(default, rename = "retryRecovery")]
+	retry_recovery:       Option<IgnoredAny>,
+	#[serde(default, rename = "contextSnapshot")]
+	context_snapshot:     Option<IgnoredAny>,
+	#[serde(default, rename = "elidedOutputTokens")]
+	elided_output_tokens: Option<IgnoredAny>,
+	#[serde(default, rename = "prunedAt")]
+	pruned_at:            Option<IgnoredAny>,
+	#[serde(default, borrow)]
+	content:              Content<'a>,
+}
+
 #[derive(Deserialize)]
 struct Runtime<'a> {
 	#[serde(default, borrow)]
@@ -1389,5 +1795,225 @@ impl<'de: 'a, 'a> Deserialize<'de> for Str<'a> {
 		}
 
 		deserializer.deserialize_any(StrVisitor(PhantomData))
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use serde_json::json;
+
+	use super::*;
+
+	fn jsonl(lines: &[Value]) -> Vec<u8> {
+		let mut buf = Vec::new();
+		for line in lines {
+			buf.extend_from_slice(line.to_string().as_bytes());
+			buf.push(b'\n');
+		}
+		buf
+	}
+
+	/// Kind, text and call arguments of each record a scan reads from `lines`.
+	fn records(lines: &[Value]) -> Vec<(&'static str, Option<String>, Option<String>)> {
+		records_in(jsonl(lines))
+	}
+
+	/// [`records`] of a transcript's bytes.
+	fn records_in(mut buf: Vec<u8>) -> Vec<(&'static str, Option<String>, Option<String>)> {
+		read_transcript(&mut buf, Roles::ALL)
+			.records
+			.iter()
+			.map(record_output)
+			.map(|record| {
+				let kind = match record.kind {
+					TranscriptRecordKind::User => "user",
+					TranscriptRecordKind::Assistant => "assistant",
+					TranscriptRecordKind::Thinking => "thinking",
+					TranscriptRecordKind::Call => "call",
+					TranscriptRecordKind::Result => "result",
+				};
+				(kind, record.text, record.args)
+			})
+			.collect()
+	}
+
+	fn message(id: &str, message: Value) -> Value {
+		json!({ "type": "message", "id": id, "parentId": null, "timestamp": "2026-01-01T00:00:00.000Z", "message": message })
+	}
+
+	fn record(id: &str, patches: Value) -> Value {
+		json!({
+			"type": "custom",
+			"customType": "entry_patch",
+			"id": id,
+			"parentId": null,
+			"timestamp": "2026-01-01T00:00:01.000Z",
+			"data": { "patches": patches },
+		})
+	}
+
+	/// A prompt, a reply with one tool call, and the call's result.
+	fn conversation(prompt: &str, reply: &str, output: &str) -> Vec<Value> {
+		vec![
+			json!({ "type": "session", "id": "s1", "cwd": "/repo" }),
+			message("u1", json!({ "role": "user", "content": prompt })),
+			message(
+				"a1",
+				json!({
+					"role": "assistant",
+					"content": [
+						{ "type": "text", "text": reply },
+						{ "type": "toolCall", "id": "c1", "name": "bash", "arguments": { "command": "ls" } },
+					],
+				}),
+			),
+			message(
+				"t1",
+				json!({
+					"role": "toolResult",
+					"toolCallId": "c1",
+					"toolName": "bash",
+					"content": [{ "type": "text", "text": output }],
+					"isError": false,
+				}),
+			),
+		]
+	}
+
+	// `archive.messages`, `.grep` and `.calls` read a session as a resume shows
+	// it: the placeholders an elide pass recorded, not the heavy text it
+	// replaced, and of two records that set one message, the later in the file.
+	#[test]
+	fn messages_carry_the_content_entry_patch_records_set() {
+		let mut patched = conversation("heavy prompt", "heavy reply", "heavy output");
+		patched.push(record(
+			"p1",
+			json!([{ "entryId": "t1", "message": { "content": [{ "type": "text", "text": "older placeholder" }] } }]),
+		));
+		patched.push(record(
+			"p2",
+			json!([
+				{ "entryId": "u1", "message": { "content": "elided prompt" } },
+				{
+					"entryId": "a1",
+					"message": {
+						"content": [
+							{ "type": "text", "text": "elided reply" },
+							{ "type": "toolCall", "id": "c1", "name": "bash", "arguments": { "command": "ls" } },
+						],
+						"elidedOutputTokens": 40,
+					},
+				},
+				{ "entryId": "t1", "message": { "content": [{ "type": "text", "text": "elided output" }], "prunedAt": 5 } },
+			]),
+		));
+		let expected = vec![
+			("user", Some("elided prompt".to_owned()), None),
+			("assistant", Some("elided reply".to_owned()), None),
+			("call", None, Some(r#"{"command":"ls"}"#.to_owned())),
+			("result", Some("elided output".to_owned()), None),
+		];
+		assert_eq!(records(&patched), expected);
+		// Control: the same fields written inline, as a full rewrite leaves them.
+		assert_eq!(
+			records(&conversation("elided prompt", "elided reply", "elided output")),
+			expected
+		);
+	}
+
+	// A record the TypeScript readers skip leaves the message as first written
+	// here too: a text block without its text, a thinking block without its
+	// thinking and a context snapshot without its token counts (malformed), a
+	// string where a tool result holds blocks, and a tool result's field on a
+	// user message (both misfits).
+	#[test]
+	fn messages_keep_their_content_past_records_the_readers_skip() {
+		let mut patched = conversation("prompt", "reply", "output");
+		patched.push(record(
+			"p1",
+			json!([{ "entryId": "a1", "message": { "content": [{ "type": "text" }] } }]),
+		));
+		patched
+			.push(record("p2", json!([{ "entryId": "t1", "message": { "content": "a string" } }])));
+		patched.push(record(
+			"p3",
+			json!([{ "entryId": "u1", "message": { "content": "elided", "prunedAt": 5 } }]),
+		));
+		patched.push(record(
+			"p4",
+			json!([{ "entryId": "a1", "message": { "content": [{ "type": "thinking" }] } }]),
+		));
+		patched.push(record(
+			"p5",
+			json!([{
+				"entryId": "a1",
+				"message": {
+					"content": [{ "type": "text", "text": "elided" }],
+					"contextSnapshot": { "promptTokens": 1000 },
+				},
+			}]),
+		));
+		assert_eq!(records(&patched), records(&conversation("prompt", "reply", "output")));
+	}
+
+	/// `lines` as a transcript, with each `LONE` in its strings written as the
+	/// escape of half a surrogate pair, as `JSON.stringify` writes a string
+	/// cut inside a pair.
+	fn with_lone_surrogates(lines: &[Value]) -> Vec<u8> {
+		String::from_utf8_lossy(&jsonl(lines))
+			.replace("LONE", r"\ud83d")
+			.into_bytes()
+	}
+
+	// Tool output cut inside a surrogate pair holds half of it, which
+	// `JSON.parse` reads and serde_json rejects with the whole line. A record
+	// holding one applies, as the TypeScript readers apply it, with U+FFFD for
+	// the half pair; a `\\u` in the text (a backslash, then a `u`) reads as
+	// written.
+	#[test]
+	fn records_holding_a_lone_surrogate_escape_apply() {
+		let prompt = r"C:\ud83d";
+		let mut patched = conversation(prompt, "reply", "heavy output");
+		patched.push(record(
+			"p1",
+			json!([{ "entryId": "t1", "message": { "content": [{ "type": "text", "text": "elided LONE" }] } }]),
+		));
+		assert_eq!(
+			records_in(with_lone_surrogates(&patched)),
+			records(&conversation(prompt, "reply", "elided \u{fffd}"))
+		);
+	}
+
+	// A message whose own line holds half a surrogate pair is read, as
+	// `JSON.parse` reads it, and carries the content a record set on it.
+	#[test]
+	fn messages_holding_a_lone_surrogate_escape_carry_their_patched_content() {
+		let mut patched = conversation("prompt", "reply", "heavy output LONE");
+		patched.push(record(
+			"p1",
+			json!([{ "entryId": "t1", "message": { "content": [{ "type": "text", "text": "elided output" }] } }]),
+		));
+		assert_eq!(
+			records_in(with_lone_surrogates(&patched)),
+			records(&conversation("prompt", "reply", "elided output"))
+		);
+	}
+
+	// The duplicate-id fixture every reader of a session file reads (the
+	// TypeScript whole-file and windowed readers, the stats parser, the Python
+	// sync): a record sets its fields on the last entry with the id it names,
+	// even when an earlier entry with that id comes before the record.
+	#[test]
+	fn a_record_sets_the_content_of_the_last_message_with_its_id() {
+		let fixture: Value =
+			serde_json::from_str(include_str!("../fixtures/entry-patch-duplicate-id.json")).unwrap();
+		let lines = fixture["lines"].as_array().unwrap();
+		let reads: Vec<(&str, Option<String>, Option<String>)> = fixture["reads"]
+			.as_array()
+			.unwrap()
+			.iter()
+			.map(|text| ("user", Some(text.as_str().unwrap().to_owned()), None))
+			.collect();
+		assert_eq!(records(lines), reads);
 	}
 }

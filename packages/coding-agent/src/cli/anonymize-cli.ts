@@ -5,6 +5,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getProjectDir, isEnoent, pathIsWithin } from "@oh-my-pi/pi-utils";
+import { applyEntryPatches } from "../session/entry-patches";
 import { ANONYMIZED_REVIEW_NOTE, anonymizeSessionTranscripts } from "../session/session-anonymizer";
 import type { SessionEntry, SessionHeader } from "../session/session-entries";
 import { loadSessionFile } from "../session/session-loader";
@@ -31,6 +32,8 @@ export async function runAnonymizeCommand(args: AnonymizeCommandArgs): Promise<v
 	const sourceReal = await fs.realpath(sourcePath);
 	if (!(await fs.stat(sourceReal)).isFile()) throw new CliUsageError(`${sourcePath} is not a session file`);
 	const { entries: records, malformedRecords } = await loadSessionFile(sourceReal);
+	// The export writes patch records empty, so their effects go inline first.
+	applyEntryPatches(records);
 	// The loader returns [] for a file without a valid session header.
 	const header = records.find((record): record is SessionHeader => record.type === "session");
 	if (!header) throw new CliUsageError(`${sourcePath} is not a valid session file`);

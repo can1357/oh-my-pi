@@ -5,18 +5,21 @@
  * the same {@link PanelSnapshot} collab-web's `GuestClient` builds from collab frames, so the panel renders either
  * source with one transcript. Committed transcript rows come from the session itself (`get_entries`, fetched
  * incrementally after every finished message), which also lets a panel that attaches late show the full history;
- * the streaming assistant message, running tools and liveness come from the event stream.
+ * an `entry_patch` record a later read returns sets its fields on the rows earlier reads brought. The streaming
+ * assistant message, running tools and liveness come from the event stream.
  *
  * High-rate events (`message_update`, `tool_execution_update`) are published at most once per animation frame;
  * everything else publishes synchronously.
  */
 import type { ActiveTool, ConnectionPhase, Notice } from "@oh-my-pi/collab-web/src/lib/client";
+import { repaintPatchedRows, type TranscriptLine } from "@oh-my-pi/collab-web/src/lib/entry-patch-rows";
 import type {
 	AgentSnapshot,
 	AssistantMessage,
 	CollabUiRequest,
 	CollabUiRequestDraft,
 	CollabUiResponseValue,
+	EntryPatchEntry,
 	ImageContent,
 	SessionEntry,
 	SessionHeader,
@@ -56,6 +59,7 @@ import type {
 	ToolExecutionStartEvent,
 	ToolExecutionUpdateEvent,
 } from "../../../../coding-agent/src/modes/rpc/wire/rpc-wire.generated";
+import { EntryPatchReplay, isEntryPatchRecord } from "@oh-my-pi/pi-utils/entry-patches";
 import { errorMessage } from "@oh-my-pi/pi-utils/type-guards";
 import type { RpcSessionInfo } from "../../messages";
 import type { PanelModel, PanelSession, PanelSnapshot, PanelThinking, PanelWorker, QueuedDraft } from "../session";
@@ -193,6 +197,11 @@ function isWireEntry(value: unknown): value is SessionEntry {
 	);
 }
 
+/** Whether `value` is an `entry_patch` record: it sets fields on rows the panel holds and is never a row itself. */
+function isPatchRecord(value: unknown): value is EntryPatchEntry {
+	return typeof value === "object" && value !== null && isEntryPatchRecord(value);
+}
+
 function entryId(value: unknown): string | undefined {
 	if (typeof value !== "object" || value === null) return undefined;
 	const id: unknown = Reflect.get(value, "id");
@@ -227,6 +236,8 @@ export class RpcPanelSession implements PanelSession {
 	#entries: readonly SessionEntry[] = [];
 	/** Id of the last raw session entry fetched (any type); the `get_entries` cursor. */
 	#cursor: string | undefined;
+	/** The rows of {@link #entries} by id, and the `entry_patch` records later reads returned for them. */
+	readonly #patches = new EntryPatchReplay<TranscriptLine>();
 	#entriesBusy = false;
 	#entriesDirty = false;
 	#stateBusy = false;
@@ -486,8 +497,21 @@ export class RpcPanelSession implements PanelSession {
 		const lastId = entryId(raw.at(-1));
 		if (lastId !== undefined) this.#cursor = lastId;
 		const fresh = raw.filter(isWireEntry);
-		if (!replace && fresh.length === 0) return;
-		this.#entries = replace ? fresh : [...this.#entries, ...fresh];
+		// This read's entries carry the fields of its records already. A record sets them on the rows of earlier
+		// reads only (`docs/rpc.md`), and its patch for an entry of this read is dropped: replayed there, it could
+		// undo a later rewrite of that entry.
+		let changed: readonly TranscriptLine[] = [];
+		if (replace) this.#patches.clear();
+		else {
+			const records = raw.filter(isPatchRecord);
+			if (records.length > 0) changed = this.#patches.add(records);
+			for (const entry of fresh) this.#patches.forget(entry.id);
+		}
+		this.#patches.add(fresh);
+		if (!replace && fresh.length === 0 && changed.length === 0) return;
+		// A row a record changed goes back on screen as a new object, since the transcript memoizes rows by identity.
+		const kept = changed.length > 0 ? repaintPatchedRows(this.#entries, changed) : this.#entries;
+		this.#entries = replace ? fresh : [...kept, ...fresh];
 		// The committed row supersedes the finished stream ghost.
 		if (
 			this.#streamDone &&

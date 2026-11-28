@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The side panel shows a tool output an elide pass shortened as its placeholder while the session stays open, instead of the original text
+
 ## [19.2.0] - 2026-11-25
 
 ### Fixed

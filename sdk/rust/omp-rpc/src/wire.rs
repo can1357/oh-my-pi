@@ -6706,7 +6706,7 @@ impl Command for GetAvailableCommandsCommand {
 	}
 }
 
-/// Read the append-history; with `since`, only entries strictly after that durable entry id.
+/// Read the append-history; with `since`, only entries strictly after that durable entry id. Entries carry the patched fields and list the `entry_patch` records; a caller that keeps entries applies only records from a later `since` read to them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct GetEntriesCommand {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
@@ -6723,7 +6723,7 @@ impl Command for GetEntriesCommand {
 	}
 }
 
-/// Read the raw session tree.
+/// Read the raw session tree; its nodes carry the patched fields and include the `entry_patch` records.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct GetTreeCommand {}
 
@@ -6832,7 +6832,7 @@ impl Command for GetSubagentsCommand {
 	}
 }
 
-/// Read a subagent transcript by id or registered session file (`subagentId` wins).
+/// Read a subagent transcript by id or registered session file (`subagentId` wins). Entries carry the fields the window's `entry_patch` records set and list those records; a caller applies them to entries it kept from earlier windows.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct GetSubagentMessagesCommand {
 	#[serde(rename = "subagentId", default, skip_serializing_if = "Option::is_none")]

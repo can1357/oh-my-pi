@@ -403,6 +403,25 @@ type PendingRetryError = {
 	note: string;
 };
 
+/**
+ * The id of the assistant entry of `branch` that `entryId` names, else the
+ * id of the newest one whose message has `persistenceKey`.
+ */
+function branchAssistantEntry(
+	branch: readonly SessionEntry[],
+	entryId: string,
+	persistenceKey: string,
+): string | undefined {
+	let byKey: string | undefined;
+	for (let index = branch.length - 1; index >= 0; index--) {
+		const entry = branch[index]!;
+		if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+		if (entry.id === entryId) return entry.id;
+		if (byKey === undefined && sessionMessagePersistenceKey(entry.message) === persistenceKey) byKey = entry.id;
+	}
+	return byKey;
+}
+
 /** How a retry saga's pending error entries are annotated when it closes. */
 type RetryErrorCompletion = { status: "recovered"; supersedingMessage: AssistantMessage } | { status: "superseded" };
 
@@ -1109,25 +1128,14 @@ export class TurnRecovery {
 		});
 	}
 
+	/** Annotates a closing saga's pending errors with `retryRecovery`, in one appended `entry_patch` record. */
 	async #markPendingRetryErrors(completion: RetryErrorCompletion): Promise<RetryErrorUpdate[]> {
 		if (this.#pendingRetryErrors.length === 0) return [];
 		const branch = this.#host.sessionManager.getBranchView();
-		const branchById = new Map<string, SessionEntry>();
-		for (const entry of branch) {
-			branchById.set(entry.id, entry);
-		}
 		const retryErrors: RetryErrorUpdate[] = [];
 		for (const pending of this.#pendingRetryErrors) {
-			let entry = branchById.get(pending.entryId);
-			if (entry?.type !== "message" || entry.message.role !== "assistant") {
-				entry = branch.findLast(
-					candidate =>
-						candidate.type === "message" &&
-						candidate.message.role === "assistant" &&
-						sessionMessagePersistenceKey(candidate.message) === pending.persistenceKey,
-				);
-			}
-			if (entry?.type !== "message" || entry.message.role !== "assistant") continue;
+			const entryId = branchAssistantEntry(branch, pending.entryId, pending.persistenceKey);
+			if (entryId === undefined) continue;
 			let retryRecovery: AssistantRetryRecovery;
 			if (completion.status === "recovered") {
 				retryRecovery = {
@@ -1155,16 +1163,17 @@ export class TurnRecovery {
 					note: pending.note,
 				};
 			}
-			entry.message.retryRecovery = retryRecovery;
 			retryErrors.push({
-				entryId: entry.id,
+				entryId,
 				persistenceKey: pending.persistenceKey,
 				note: retryRecovery.note,
 				retryRecovery,
 			});
 		}
 		if (retryErrors.length > 0) {
-			await this.#host.sessionManager.rewriteEntries();
+			await this.#host.sessionManager.patchEntries(
+				retryErrors.map(({ entryId, retryRecovery }) => ({ entryId, message: { retryRecovery } })),
+			);
 		}
 		return retryErrors;
 	}

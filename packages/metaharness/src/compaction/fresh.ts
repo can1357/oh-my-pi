@@ -20,6 +20,7 @@
  *   // write build.sessionJsonl + build.files, then `omp --resume <new file>`
  */
 import { prompt } from "@oh-my-pi/pi-utils";
+import { applyEntryPatches } from "@oh-my-pi/pi-utils/entry-patches";
 import pointerPrompt from "./prompts/fresh-pointer.md" with { type: "text" };
 
 /** Where the archive lives inside the task container (outside `/workspace`, so it is never packed). */
@@ -133,6 +134,8 @@ export class FreshStart {
 			.split("\n")
 			.filter(line => line.length > 0)
 			.map(line => JSON.parse(line) as SessionEntry);
+		// The conversation as the session holds it: an elide pass's placeholders in place of what they shortened.
+		applyEntryPatches(entries);
 		const modelChange = entries.find(entry => entry.type === "model_change");
 		const thinking = entries.find(entry => entry.type === "thinking_level_change");
 		const task = entries.find(entry => entry.type === "message" && entry.message?.role === "user");

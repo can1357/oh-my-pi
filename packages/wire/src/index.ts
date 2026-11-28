@@ -166,6 +166,19 @@ export type SessionEntry =
 	| ModelChangeEntry
 	| ThinkingLevelChangeEntry;
 
+/**
+ * An `entry_patch` record (`@oh-my-pi/pi-utils/entry-patches`): a `custom`
+ * entry that sets fields on entries already sent, such as the `content` an
+ * elide pass shortened. A host sends it in an `entry` frame, never in a
+ * snapshot, whose entries already carry their records. A guest applies it to
+ * the entries it holds and never shows it.
+ */
+export interface EntryPatchEntry extends EntryBase {
+	type: "custom";
+	customType: "entry_patch";
+	data: unknown;
+}
+
 /** customType of collab guest prompts injected on the host. */
 export const COLLAB_PROMPT_MESSAGE_TYPE = "collab-prompt";
 
@@ -387,7 +400,8 @@ export type HostFrame =
 	 * carries `final: true`; guests finalize the replica on that frame.
 	 */
 	| { t: "snapshot-chunk"; entries: SessionEntry[]; final: boolean }
-	| { t: "entry"; entry: SessionEntry }
+	/** One live entry, or a record that sets fields on entries the guest holds. */
+	| { t: "entry"; entry: SessionEntry | EntryPatchEntry }
 	| { t: "event"; event: AgentEvent }
 	| { t: "state"; state: SessionState }
 	/** Mirrored EventBus traffic (task subagent lifecycle/progress channels only). */

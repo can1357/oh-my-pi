@@ -171,6 +171,13 @@ const MODEL_USAGE_SINCE_MS = Date.parse("2026-08-31T00:00:00Z");
 // approval recording shipped are re-parsed once so older cursors stay put.
 const TOOL_APPROVALS_BACKFILL_KEY = "tool_approvals_v1";
 const TOOL_APPROVALS_SINCE_MS = Date.parse("2026-11-01T00:00:00Z");
+// Rows derived from an entry before an `entry_patch` record set its fields (a
+// build whose parser did not apply records, or a tail read that stored the
+// entry's rows, then met the record) are derived again once, from entries
+// carrying those fields. Only files modified since the code that writes the
+// records was committed can hold one, so older cursors stay put.
+const ENTRY_PATCH_BACKFILL_KEY = "entry_patch_v1";
+const ENTRY_PATCH_SINCE_MS = Date.parse("2026-11-15T13:34:58Z");
 // A reset fork (`/tan`) now leaves the requests, prompts, tool calls, approvals and Spotlight rows of its
 // copied prefix to its parent; a clone an older build synced before its parent still owns them. Re-parsing
 // the reset forks and their parents from byte zero once hands them back (see `replayInheritedPrefixes`).
@@ -635,6 +642,7 @@ export async function initDb(): Promise<Database> {
 	reparseModifiedSince(db, SNAPCOMPACT_COMPACTIONS_BACKFILL_KEY, SNAPCOMPACT_COMPACTIONS_SINCE_MS);
 	reparseModifiedSince(db, MODEL_USAGE_PURPOSE_BACKFILL_KEY, MODEL_USAGE_SINCE_MS);
 	reparseModifiedSince(db, TOOL_APPROVALS_BACKFILL_KEY, TOOL_APPROVALS_SINCE_MS);
+	reparseModifiedSince(db, ENTRY_PATCH_BACKFILL_KEY, ENTRY_PATCH_SINCE_MS);
 	ensureRollupSchema(db);
 	return db;
 }
@@ -879,7 +887,9 @@ function backfillNoCacheInputCosts(database: Database): void {
  * parser-filled rows. Keys: {@link SPOTLIGHT_BACKFILL_KEY} (the Spotlight
  * tables are new), {@link SPOTLIGHT_TOGGLE_BACKFILL_KEY} (the experiment became
  * a toggle), {@link SNAPCOMPACT_COMPACTIONS_BACKFILL_KEY} (the table is new),
- * {@link MODEL_USAGE_PURPOSE_BACKFILL_KEY} (`messages.purpose` is new).
+ * {@link MODEL_USAGE_PURPOSE_BACKFILL_KEY} (`messages.purpose` is new),
+ * {@link TOOL_APPROVALS_BACKFILL_KEY} (the table is new) and
+ * {@link ENTRY_PATCH_BACKFILL_KEY} (entries carry their records' fields).
  */
 function reparseModifiedSince(database: Database, key: string, sinceMs: number): void {
 	const row = database.query<{ value: string }, [string]>("SELECT value FROM meta WHERE key = ?").get(key);

@@ -105,6 +105,12 @@ export type CollabFrame =
 	/** `resync`: the host no longer counts this guest as joined; the guest should send `hello` again. */
 	| { t: "error"; message: string; resync?: true };
 
+/**
+ * Max bytes of one `transcript` reply; the guest asks again from `newSize`. A reply short of the file's end
+ * stops after its last line break, so a transcript line of this many bytes or more is never served.
+ */
+export const TRANSCRIPT_READ_CAP = 4 * 1024 * 1024;
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Pre-serialized frames: the host bounds replicated payloads by serializing
 // them, so the frames that carry them are assembled from that JSON instead of

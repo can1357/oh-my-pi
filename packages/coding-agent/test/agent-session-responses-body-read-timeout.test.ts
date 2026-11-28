@@ -14,7 +14,12 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import {
+	FileSessionStorage,
+	type SessionStorage,
+	type SessionStorageWriter,
+} from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 
 const NATIVE_REPLAY_BULK = "NATIVE_REPLAY_BULK_SENTINEL ".repeat(1000);
 const BODY_READ_TIMEOUT = "Timed out reading request body. Try again, or use a smaller request size.";
@@ -108,6 +113,7 @@ type SessionHarnessOptions = {
 	messages?: AgentMessage[];
 	respond?: ResponseFactory;
 	tools?: HarnessTool[];
+	storage?: SessionStorage;
 };
 
 type SessionHarness = {
@@ -119,6 +125,40 @@ type SessionHarness = {
 	session: AgentSession;
 	cleanup: () => Promise<void>;
 };
+
+/** File storage whose next appended line containing `failNextAppendContaining` throws, as a full disk refuses a write. */
+class FailingAppendFileSessionStorage extends FileSessionStorage {
+	failNextAppendContaining: string | undefined;
+
+	override openWriter(
+		filePath: string,
+		options?: { flags?: "a" | "w"; onError?: (err: Error) => void },
+	): SessionStorageWriter {
+		const writer = super.openWriter(filePath, options);
+		const admit = (line: string): void => {
+			const marker = this.failNextAppendContaining;
+			if (marker === undefined || !line.includes(marker)) return;
+			this.failNextAppendContaining = undefined;
+			throw new Error("injected append failure");
+		};
+		return {
+			append: line => {
+				admit(line);
+				return writer.append(line);
+			},
+			appendSync: line => {
+				admit(line);
+				if (!writer.appendSync) throw new Error("file writer lost appendSync");
+				writer.appendSync(line);
+			},
+			flush: () => writer.flush(),
+			flushSync: () => writer.flushSync?.(),
+			isOpen: () => writer.isOpen(),
+			close: () => writer.close(),
+			getError: () => writer.getError(),
+		};
+	}
+}
 
 function timeoutResponse(): Response {
 	return Response.json({ error: { code: "user_request_timeout", message: BODY_READ_TIMEOUT } }, { status: 408 });
@@ -183,7 +223,7 @@ async function createSessionHarness(options: SessionHarnessOptions = {}): Promis
 	const tempDir = TempDir.createSync("@pi-responses-body-read-");
 	const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
 	authStorage.keys.setRuntime("openai", "local-test-key");
-	const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+	const sessionManager = SessionManager.create(tempDir.path(), tempDir.path(), options.storage);
 	const activeModel = model(server.url.toString().replace(/\/$/, ""));
 	const messages = options.messages ?? defaultMessages();
 	for (const message of messages) sessionManager.appendMessage(message as never);
@@ -655,26 +695,40 @@ describe("AgentSession Responses request-body timeout recovery", () => {
 		}
 	});
 
-	it("rolls back the in-memory rewrite when durable history write fails", async () => {
-		const harness = await createSessionHarness();
-		const rewriteEntries = vi
-			.spyOn(harness.sessionManager, "rewriteEntries")
-			.mockRejectedValueOnce(new Error("injected rewrite failure"));
+	it("keeps the elision live and lands it in the session file after its record fails to write", async () => {
+		const storage = new FailingAppendFileSessionStorage();
+		const harness = await createSessionHarness({ storage });
+		storage.failNextAppendContaining = "entry_patch";
+		const persistenceErrors: string[] = [];
+		const unsubscribe = harness.sessionManager.onPersistenceError(error => persistenceErrors.push(error.message));
 		try {
 			await runPrompt(harness);
-			expect(harness.requests).toHaveLength(1);
-			expect(
-				harness.sessionManager
-					.getBranch()
-					.some(
-						entry =>
-							entry.type === "message" &&
-							messageContainsText(entry.message as AgentMessage, "historical tool result"),
-					),
-			).toBe(true);
-			assertTerminalErrorState(harness);
+			// The failed write reaches the persistence-error surface; the elision
+			// stays applied, so the retried request carries the placeholder.
+			expect(persistenceErrors).toEqual(["injected append failure"]);
+			expect(harness.requests).toHaveLength(2);
+			const artifactId = /local:\/\/(\d+)\.log/.exec(harness.requests[1]!)?.[1];
+			expect(artifactId).toBeDefined();
+			const recoveryLink = `local://${artifactId}.log`;
+			expect(harness.requests[1]).not.toContain("historical tool result");
+
+			// A later successful save lands the elision in the file.
+			await harness.sessionManager.flush();
+			const reloaded = await SessionManager.open(harness.sessionManager.getSessionFile()!, harness.tempDir.path());
+			try {
+				const branchHas = (needle: string): boolean =>
+					reloaded
+						.getBranch()
+						.some(
+							entry => entry.type === "message" && messageContainsText(entry.message as AgentMessage, needle),
+						);
+				expect(branchHas(recoveryLink)).toBe(true);
+				expect(branchHas("historical tool result")).toBe(false);
+			} finally {
+				await reloaded.close();
+			}
 		} finally {
-			rewriteEntries.mockRestore();
+			unsubscribe();
 			await harness.cleanup();
 		}
 	});
@@ -706,24 +760,25 @@ describe("AgentSession Responses request-body timeout recovery", () => {
 	});
 
 	it("keeps the committed rewrite authoritative after abort during the durable write", async () => {
-		const rewriteStarted = Promise.withResolvers<void>();
-		const releaseRewrite = Promise.withResolvers<void>();
+		const recordStarted = Promise.withResolvers<void>();
+		const releaseRecord = Promise.withResolvers<void>();
 		const harness = await createSessionHarness();
-		const originalRewrite = harness.sessionManager.rewriteEntries.bind(harness.sessionManager);
+		const originalPatch = harness.sessionManager.patchEntries.bind(harness.sessionManager);
 		let blocked = true;
-		const rewriteEntries = vi.spyOn(harness.sessionManager, "rewriteEntries").mockImplementation(async () => {
+		const patchEntries = vi.spyOn(harness.sessionManager, "patchEntries").mockImplementation(async patches => {
 			if (blocked) {
 				blocked = false;
-				rewriteStarted.resolve();
-				await releaseRewrite.promise;
+				recordStarted.resolve();
+				await releaseRecord.promise;
 			}
-			await originalRewrite();
+			await originalPatch(patches);
 		});
 		try {
 			const firstPrompt = harness.session.prompt("continue");
-			await rewriteStarted.promise;
+			// Below the test's timeout, so a write that never starts fails here and names itself.
+			await withTimeout(recordStarted.promise, 10_000, "the elision's record write never started");
 			const abort = harness.session.abort({ reason: "negative-test-abort-during-rewrite" });
-			releaseRewrite.resolve();
+			releaseRecord.resolve();
 			await abort;
 			await firstPrompt;
 			await harness.session.waitForIdle();
@@ -760,8 +815,10 @@ describe("AgentSession Responses request-body timeout recovery", () => {
 				content: [{ type: "text", text: "Recovered" }],
 			});
 		} finally {
-			rewriteEntries.mockRestore();
+			// A failure before the release above must not leave the write blocked through teardown.
+			releaseRecord.resolve();
+			patchEntries.mockRestore();
 			await harness.cleanup();
 		}
-	});
+	}, 30_000);
 });

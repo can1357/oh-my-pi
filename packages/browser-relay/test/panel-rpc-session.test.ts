@@ -233,6 +233,49 @@ describe("rpc panel session", () => {
 		expect(worker.last("get_entries").since).toBe("e2");
 	});
 
+	// The panel keeps the entries of earlier reads: an elide pass's record that a later read returns must reach
+	// them, or the panel shows the text the pass removed for the life of the view. That read's own entries already
+	// carry its records, which may predate a later rewrite of the entry (docs/rpc.md).
+	it("sets the fields a later read's record names on the entries of earlier reads, and not on that read's", async () => {
+		const { worker, session } = await attached();
+		worker.line({ type: "message_end", messageId: "msg-1", message: assistant("current reply") });
+		expect(worker.last("get_entries").since).toBe("e2");
+		const reply: SessionEntry = {
+			type: "message",
+			id: "e3",
+			parentId: "e2",
+			timestamp: "2026-11-20T10:00:05Z",
+			message: assistant("current reply"),
+		};
+		const record = (id: string, entryId: string, content: unknown) => ({
+			type: "custom",
+			customType: "entry_patch",
+			id,
+			parentId: "e3",
+			timestamp: "2026-11-20T10:00:06Z",
+			data: { patches: [{ entryId, message: { content } }] },
+		});
+		worker.respond("get_entries", {
+			entries: [
+				reply,
+				record("p1", "e1", "[elided prompt]"),
+				record("p2", "e3", [{ type: "text", text: "older reply" }]),
+			],
+			leafId: "p2",
+		});
+		await until(session, snapshot => snapshot.entries.length === 2);
+		expect(session.getSnapshot().entries).toEqual([
+			{
+				type: "message",
+				id: "e1",
+				parentId: null,
+				timestamp: "2026-11-20T10:00:00Z",
+				message: { role: "user", content: "[elided prompt]", timestamp: 1 },
+			},
+			reply,
+		]);
+	});
+
 	it("forwards prompts with images, answers dialogs and acknowledges stop", async () => {
 		const { worker, session } = await attached();
 		const image = { type: "image" as const, data: "iVBORw0K", mimeType: "image/png" };

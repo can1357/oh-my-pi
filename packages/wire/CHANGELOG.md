@@ -6,6 +6,10 @@
 
 - Added the TSP `meter` style `wave`: bars that swing with the value, animated by the host, for a live voice or audio level.
 
+### Changed
+
+- The `entry` host frame's type admits `EntryPatchEntry`, the `entry_patch` record a host now sends live; guests apply it to the entries they hold and never show it
+
 ## [19.2.1] - 2026-11-25
 
 ### Added

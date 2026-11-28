@@ -13,6 +13,7 @@
  * pending state with it, so the published end state is unchanged.
  */
 
+import { EntryPatchReplay } from "@oh-my-pi/pi-utils/entry-patches";
 import type {
 	AgentSnapshot,
 	AssistantMessage,
@@ -28,6 +29,7 @@ import type {
 } from "@oh-my-pi/pi-wire";
 import { takeAutoRejoin } from "@oh-my-pi/pi-wire";
 import { importRoomKey } from "./codec";
+import { isShownEntry, repaintPatchedRows, type TranscriptLine } from "./entry-patch-rows";
 import { COLLAB_PROTO, encodeBase64Url, parseCollabLink } from "./link";
 import { CollabSocket } from "./socket";
 
@@ -137,9 +139,12 @@ export class GuestClient {
 	#entries: SessionEntry[] = [];
 	/**
 	 * Snapshot in flight since `welcome`: chunk entries, plus live `entry`
-	 * frames that arrived meanwhile (published after the snapshot, at the tail).
+	 * frames that arrived meanwhile (published after the snapshot, at the tail;
+	 * their `entry_patch` records apply to the snapshot's entries).
 	 */
-	#pendingSnapshot: { entries: SessionEntry[]; live: SessionEntry[]; total: number } | null = null;
+	#pendingSnapshot: { entries: SessionEntry[]; live: TranscriptLine[]; total: number } | null = null;
+	/** The `entry_patch` records of the transcript on screen, applied to its entries. */
+	readonly #patches = new EntryPatchReplay<TranscriptLine>();
 	#state: SessionState | null = null;
 	#agents: readonly AgentSnapshot[] = [];
 	#progress: ReadonlyMap<string, SubagentProgressPayload> = new Map();
@@ -408,6 +413,7 @@ export class GuestClient {
 				if (frame.entryCount === 0) {
 					this.#entries = [];
 					this.#publishedEntries = [];
+					this.#patches.clear();
 					this.#pendingSnapshot = null;
 				} else {
 					this.#pendingSnapshot = { entries: [], live: [], total: frame.entryCount };
@@ -448,28 +454,43 @@ export class GuestClient {
 					this.#armSnapshotProgressTimer();
 					break;
 				}
+				// The host serialized the snapshot before any live entry that
+				// arrived meanwhile, so the records among those apply to it.
+				this.#patches.clear();
+				this.#patches.add(pending.entries);
+				this.#patches.add(pending.live);
 				this.#entries = pending.entries;
-				this.#entries.push(...pending.live);
+				for (const line of pending.live) if (isShownEntry(line)) this.#entries.push(line);
 				this.#publishedEntries = [...this.#entries];
 				this.#pendingSnapshot = null;
 				this.#clearSnapshotProgressTimer();
 				this.#phase = "live";
 				break;
 			}
-			case "entry":
+			case "entry": {
+				const entry = frame.entry;
 				// The committed row supersedes the finished stream ghost, even when
 				// the row is buffered behind an in-flight snapshot.
-				if (this.#streamDone && frame.entry.type === "message" && frame.entry.message.role === "assistant") {
+				if (this.#streamDone && entry.type === "message" && entry.message.role === "assistant") {
 					this.#stream = null;
 					this.#streamDone = false;
 				}
 				if (this.#pendingSnapshot !== null) {
-					this.#pendingSnapshot.live.push(frame.entry);
+					this.#pendingSnapshot.live.push(entry);
 					break;
 				}
-				this.#entries.push(frame.entry);
+				const changed = this.#patches.add([entry]);
+				if (isShownEntry(entry)) {
+					this.#entries.push(entry);
+				} else {
+					// An `entry_patch` record sets fields on entries already on
+					// screen and is never a row itself.
+					if (changed.length === 0) break;
+					this.#entries = repaintPatchedRows(this.#entries, changed);
+				}
 				this.#publishedEntries = [...this.#entries];
 				break;
+			}
 			case "event":
 				this.#applyEvent(frame.event);
 				break;

@@ -12,8 +12,8 @@
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, type Mock, spyOn } from "bun:test";
 import * as os from "node:os";
-import { Agent } from "@oh-my-pi/pi-agent-core";
-import type { Model } from "@oh-my-pi/pi-ai";
+import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessage, Model, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { CollabGuestLink } from "@oh-my-pi/pi-coding-agent/collab/guest";
 import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
@@ -22,6 +22,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { TOOL_EXECUTION_START_CUSTOM_TYPE } from "@oh-my-pi/pi-coding-agent/session/exit-diagnostics";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { tryAcquireSessionLease } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { refreshDirsFromEnv, TempDir } from "@oh-my-pi/pi-utils";
@@ -162,18 +163,34 @@ beforeAll(() => {
 	model = bundled;
 });
 
-afterAll(async () => {
-	uninstallInMemoryRelay();
-	authStorage.close();
-	homedirSpy?.mockRestore();
-	refreshDirsFromEnv();
-	await homeDir?.remove().catch(() => {});
-});
+/** Run every step in order, each even when one before it throws; then throw the failures together. */
+async function runEach(steps: readonly (() => unknown)[]): Promise<void> {
+	const failures: unknown[] = [];
+	for (const step of steps) {
+		try {
+			await step();
+		} catch (error) {
+			failures.push(error);
+		}
+	}
+	if (failures.length > 0) throw new AggregateError(failures, "collab test cleanup failed");
+}
 
+afterAll(async () => {
+	await runEach([
+		() => uninstallInMemoryRelay(),
+		() => authStorage?.close(),
+		() => homedirSpy?.mockRestore(),
+		() => refreshDirsFromEnv(),
+		() => homeDir?.remove(),
+	]);
+}, 30_000);
+
+/** Stops a host and disposes a guest harness after each test, newest first. */
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {
-	for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
-});
+	await runEach(cleanups.splice(0).reverse());
+}, 30_000);
 
 describe("collab host compaction → guest sync (#9781)", () => {
 	it("collapses the guest's model context behind the summary after the host compacts", async () => {
@@ -183,8 +200,8 @@ describe("collab host compaction → guest sync (#9781)", () => {
 		const keptId = hostManager.appendMessage({ role: "user", content: "keep", timestamp: Date.now() });
 
 		const host = new CollabHost(makeHostContext(hostManager));
-		await host.start("ws://localhost:8788");
 		cleanups.push(() => host.stop("test done"));
+		await host.start("ws://localhost:8788");
 
 		const harness = makeGuestHarness(model, modelRegistry);
 		cleanups.push(harness.dispose);
@@ -215,7 +232,7 @@ describe("collab host compaction → guest sync (#9781)", () => {
 		const withFollowup = harness.session.messages;
 		expect(withFollowup[0]?.role).toBe("compactionSummary");
 		expect(withFollowup.at(-1)).toMatchObject({ role: "user", content: "after" });
-	});
+	}, 30_000);
 });
 
 describe("collab guest replica identity", () => {
@@ -225,8 +242,8 @@ describe("collab guest replica identity", () => {
 		hostManager.appendMessage(createAssistantMessage("reply"));
 		const keptId = hostManager.appendMessage({ role: "user", content: "keep", timestamp: Date.now() });
 		const host = new CollabHost(makeHostContext(hostManager));
-		await host.start("ws://localhost:8788");
 		cleanups.push(() => host.stop("test done"));
+		await host.start("ws://localhost:8788");
 		const harness = makeGuestHarness(model, modelRegistry);
 		cleanups.push(harness.dispose);
 
@@ -253,5 +270,156 @@ describe("collab guest replica identity", () => {
 		await settleFrames(() => harness.session.messages[0]?.role === "compactionSummary");
 		expect(harness.session.sessionManager.getSessionId()).toBe(replicaId);
 		expect(leaseFree()).toBe(false);
-	});
+	}, 30_000);
+});
+
+describe("collab host entry_patch records → guest", () => {
+	/** The text of each message the guest's model context holds, or its role. */
+	const contents = (session: AgentSession) =>
+		session.messages.map(m => ("content" in m && typeof m.content === "string" ? m.content : m.role));
+
+	// An elide pass on the host appends a record that sets an entry's content: a
+	// joined guest must set it on its replica, or its context and `/dump` keep
+	// the heavy content until it rejoins. The record is written by hand, as a
+	// file holds it, so the case fails for the live path on a tree without it.
+	it("sends a record in a live entry frame, and the guest applies it to the entry it holds", async () => {
+		const hostManager = SessionManager.inMemory();
+		const firstId = hostManager.appendMessage({ role: "user", content: "heavy first", timestamp: Date.now() });
+		hostManager.appendMessage(createAssistantMessage("reply"));
+		const host = new CollabHost(makeHostContext(hostManager));
+		cleanups.push(() => host.stop("test done"));
+		await host.start("ws://localhost:8788");
+		const harness = makeGuestHarness(model, modelRegistry);
+		cleanups.push(harness.dispose);
+		await harness.guest.join(host.link);
+		await settleFrames(() => harness.session.messages.length === 2);
+
+		const recordId = hostManager.appendCustomEntry("entry_patch", {
+			patches: [{ entryId: firstId, message: { content: "[elided]" } }],
+		});
+		// A live entry after the record: once it lands, the record (sent before it) has too.
+		hostManager.appendMessage({ role: "user", content: "after", timestamp: Date.now() });
+		await settleFrames(() => harness.session.messages.length === 3);
+
+		expect({
+			messages: contents(harness.session),
+			replicaHoldsRecord: harness.session.sessionManager.getEntry(recordId)?.type,
+		}).toEqual({ messages: ["[elided]", "assistant", "after"], replicaHoldsRecord: "custom" });
+	}, 30_000);
+
+	// A record past the frame ceiling cannot be shrunk without setting a
+	// truncated value: it goes as a record that sets nothing, which keeps the
+	// guest's parent chain, and the guest keeps the entry as it was.
+	it("sends a record too large for one frame as one that sets nothing", async () => {
+		const hostManager = SessionManager.inMemory();
+		const firstId = hostManager.appendMessage({ role: "user", content: "first", timestamp: Date.now() });
+		const host = new CollabHost(makeHostContext(hostManager));
+		cleanups.push(() => host.stop("test done"));
+		await host.start("ws://localhost:8788");
+		const harness = makeGuestHarness(model, modelRegistry);
+		cleanups.push(harness.dispose);
+		await harness.guest.join(host.link);
+		await settleFrames(() => harness.session.messages.length === 1);
+
+		const recordId = hostManager.appendCustomEntry("entry_patch", {
+			patches: [{ entryId: firstId, message: { content: "x".repeat(1_100_000) } }],
+		});
+		hostManager.appendMessage({ role: "user", content: "after", timestamp: Date.now() });
+		await settleFrames(() => harness.session.messages.length === 2);
+
+		const replicated = harness.session.sessionManager.getEntry(recordId);
+		expect({
+			messages: contents(harness.session),
+			record: replicated?.type === "custom" ? replicated.data : undefined,
+		}).toEqual({ messages: ["first", "after"], record: { patches: [] } });
+	}, 30_000);
+
+	/**
+	 * One tool turn as `AgentSession` writes it: the user's request, the call, the
+	 * `tool_execution_start` record (which the host never sends), the result, the
+	 * reply. Returns the tool result's id.
+	 */
+	function appendToolTurn(manager: SessionManager): string {
+		manager.appendMessage({ role: "user", content: "read a.txt", timestamp: 1 });
+		const call: AssistantMessage = {
+			...createAssistantMessage(""),
+			content: [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "a.txt" } }],
+			stopReason: "toolUse",
+		};
+		manager.appendMessage(call);
+		manager.appendCustomEntry(TOOL_EXECUTION_START_CUSTOM_TYPE, {
+			toolCallId: "call-1",
+			toolName: "read",
+			startedAt: new Date(0).toISOString(),
+		});
+		const result: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call-1",
+			toolName: "read",
+			content: [{ type: "text", text: "heavy tool output" }],
+			isError: false,
+			timestamp: 3,
+		};
+		const toolId = manager.appendMessage(result);
+		manager.appendMessage(createAssistantMessage("done"));
+		return toolId;
+	}
+
+	/** What a model context holds of each message: its role and its content. */
+	const contextView = (messages: readonly AgentMessage[]) =>
+		messages.map(message => ({ role: message.role, ...("content" in message && { content: message.content }) }));
+
+	/** Wait for the guest to hold `lastId`, then check its model context is the host's. */
+	async function expectHostContext(harness: GuestHarness, hostManager: SessionManager, lastId: string): Promise<void> {
+		await settleFrames(() => harness.session.sessionManager.getEntry(lastId) !== undefined);
+		const hostContext = contextView(hostManager.buildSessionContext().messages);
+		expect(hostContext.map(message => message.role)).toEqual([
+			"user",
+			"user",
+			"assistant",
+			"toolResult",
+			"assistant",
+			"user",
+		]);
+		expect(contextView(harness.session.messages)).toEqual(hostContext);
+		expect(contextView(harness.session.buildDisplaySessionContext().messages)).toEqual(hostContext);
+	}
+
+	// The host sends each entry with the parent its session gives it, and a tool
+	// result's parent is the `tool_execution_start` record the host never sends.
+	// A record makes the guest build its context by walking the replica's parent
+	// links: a link to an entry the replica lacks would end the walk there and
+	// drop the history above it.
+	it("keeps the whole context when a record follows a tool result whose parent the host never sends", async () => {
+		const hostManager = SessionManager.inMemory();
+		hostManager.appendMessage({ role: "user", content: "seed", timestamp: 0 });
+		const host = new CollabHost(makeHostContext(hostManager));
+		cleanups.push(() => host.stop("test done"));
+		await host.start("ws://localhost:8788");
+		const harness = makeGuestHarness(model, modelRegistry);
+		cleanups.push(harness.dispose);
+		await harness.guest.join(host.link);
+		await settleFrames(() => harness.session.messages.length === 1);
+
+		const toolId = appendToolTurn(hostManager);
+		await hostManager.patchEntries([{ entryId: toolId, message: { content: [{ type: "text", text: "[elided]" }] } }]);
+		const lastId = hostManager.appendMessage({ role: "user", content: "after", timestamp: 9 });
+		await expectHostContext(harness, hostManager, lastId);
+	}, 30_000);
+
+	// The welcome snapshot holds the entries the host sends, each with the parent
+	// its session gives it: the replica the guest resumes walks the same links.
+	it("gives a joining guest the whole context of a session whose tool result's parent the host never sends", async () => {
+		const hostManager = SessionManager.inMemory();
+		hostManager.appendMessage({ role: "user", content: "seed", timestamp: 0 });
+		appendToolTurn(hostManager);
+		const lastId = hostManager.appendMessage({ role: "user", content: "after", timestamp: 9 });
+		const host = new CollabHost(makeHostContext(hostManager));
+		cleanups.push(() => host.stop("test done"));
+		await host.start("ws://localhost:8788");
+		const harness = makeGuestHarness(model, modelRegistry);
+		cleanups.push(harness.dispose);
+		await harness.guest.join(host.link);
+		await expectHostContext(harness, hostManager, lastId);
+	}, 30_000);
 });

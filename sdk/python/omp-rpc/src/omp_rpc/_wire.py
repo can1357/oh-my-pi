@@ -3651,14 +3651,14 @@ class WireClient:
         return required(expect_object(self._command("get_available_commands", params), "get_available_commands"), "commands", array(parse_available_slash_command), "get_available_commands")
 
     def get_entries(self, since: str | None = None) -> SessionEntries:
-        """Read the append-history; with `since`, only entries strictly after that durable entry id."""
+        """Read the append-history; with `since`, only entries strictly after that durable entry id. Entries carry the patched fields and list the `entry_patch` records; a caller that keeps entries applies only records from a later `since` read to them."""
         params: dict[str, object] = {}
         if since is not None:
             params["since"] = since
         return parse_session_entries(self._command("get_entries", params), "get_entries")
 
     def get_tree(self) -> SessionTree:
-        """Read the raw session tree."""
+        """Read the raw session tree; its nodes carry the patched fields and include the `entry_patch` records."""
         params: dict[str, object] = {}
         return parse_session_tree(self._command("get_tree", params), "get_tree")
 
@@ -3680,7 +3680,7 @@ class WireClient:
         return required(expect_object(self._command("get_subagents", params), "get_subagents"), "subagents", array(parse_subagent_snapshot), "get_subagents")
 
     def get_subagent_messages(self, *, subagent_id: str | None = None, session_file: str | None = None, from_byte: int | None = None) -> SubagentMessages:
-        """Read a subagent transcript by id or registered session file (`subagentId` wins)."""
+        """Read a subagent transcript by id or registered session file (`subagentId` wins). Entries carry the fields the window's `entry_patch` records set and list those records; a caller applies them to entries it kept from earlier windows."""
         params: dict[str, object] = {}
         if subagent_id is not None:
             params["subagentId"] = subagent_id

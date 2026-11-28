@@ -24,7 +24,13 @@
  *   compaction's stored summary is a placeholder for its encrypted history).
  *
  * A rewrite keeps every line without replay data byte for byte (the title slot
- * included) and the transcript's timestamps.
+ * included) and the transcript's timestamps. The latest replay turn is found
+ * with the transcript's `entry_patch` records applied, as a resume applies
+ * them (a retry saga's `retryRecovery` decides which attempt survives), and a
+ * record that sets the `content` of a message outside that turn loses its
+ * replay data as the message's own line does: a resume sets that content over
+ * the stripped line. A record every reader skips stays as written, so the
+ * strip never turns it into one they apply.
  */
 import type { BigIntStats } from "node:fs";
 import * as fsSync from "node:fs";
@@ -36,6 +42,8 @@ import type { ProviderPayload } from "@oh-my-pi/pi-ai";
 import { isReplayTurnBoundary, isSurvivingAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { isReasoningSourceSignature, parseReasoningDetailsSignature } from "@oh-my-pi/pi-ai/utils/reasoning-source";
 import { isRecord, readLines, tryParseJson } from "@oh-my-pi/pi-utils";
+import { isEntryPatchData, isEntryPatchRecord } from "@oh-my-pi/pi-utils/entry-patches";
+import { applyEntryPatches } from "../session/entry-patches";
 import { convertMessagesForContextView } from "../session/messages";
 import { buildSessionContext } from "../session/session-context";
 import type { FileEntry, RawFileEntry, SessionEntry } from "../session/session-entries";
@@ -60,6 +68,8 @@ export interface StripPlan {
 	stat: BigIntStats;
 	/** Line indices whose replay data is removed. */
 	strip: ReadonlySet<number>;
+	/** Ids of the messages of the latest replay turn: a record's patch of one keeps its replay data. */
+	protectedIds: ReadonlySet<string>;
 	/** Records that lose replay data. */
 	records: number;
 	/** JSONL bytes removed; uncompressed for an archived `.jsonl.gz`. */
@@ -124,29 +134,49 @@ function stripBlock(block: Record<string, unknown>): boolean {
 	}
 }
 
-/**
- * Remove provider replay data from one parsed session record, in place.
- * Returns whether anything was removed; records other than messages are never touched.
- */
-function stripRecord(record: unknown): boolean {
-	if (!isRecord(record) || record.type !== "message" || !isRecord(record.message)) return false;
-	const message = record.message;
+/** Remove replay data from `holder.content`, a message's content or a patch of it, in place; whether any was removed. */
+function stripContent(holder: Record<string, unknown>): boolean {
+	if (!Array.isArray(holder.content)) return false;
 	let changed = false;
-	if (message.role === "assistant") {
-		if (isContentCache(message.providerPayload)) changed = drop(message, ["providerPayload"]);
-		changed = drop(message, ["requestControls", "inputTransformations"]) || changed;
-	}
-	if (!Array.isArray(message.content)) return changed;
 	// Redacted thinking is nothing but the encrypted reasoning.
-	const content = message.content.filter(block => !isRecord(block) || block.type !== "redactedThinking");
-	if (content.length !== message.content.length) {
-		message.content = content;
+	const content = holder.content.filter(block => !isRecord(block) || block.type !== "redactedThinking");
+	if (content.length !== holder.content.length) {
+		holder.content = content;
 		changed = true;
 	}
 	for (const block of content) {
 		if (isRecord(block)) changed = stripBlock(block) || changed;
 	}
 	return changed;
+}
+
+/**
+ * Remove provider replay data from one parsed session record, in place: a
+ * message, or an `entry_patch` record's patches of the content of messages
+ * outside `protectedIds`. Returns whether anything was removed; other records
+ * are never touched, nor is an `entry_patch` record whose `data` the readers
+ * skip whole (`isEntryPatchData`).
+ */
+function stripRecord(record: unknown, protectedIds: ReadonlySet<string>): boolean {
+	if (!isRecord(record)) return false;
+	if (isEntryPatchRecord(record)) {
+		const data = record.data;
+		if (!isEntryPatchData(data)) return false;
+		let changed = false;
+		for (const patch of data.patches) {
+			if (protectedIds.has(patch.entryId) || !isRecord(patch.message)) continue;
+			changed = stripContent(patch.message) || changed;
+		}
+		return changed;
+	}
+	if (record.type !== "message" || !isRecord(record.message)) return false;
+	const message = record.message;
+	let changed = false;
+	if (message.role === "assistant") {
+		if (isContentCache(message.providerPayload)) changed = drop(message, ["providerPayload"]);
+		changed = drop(message, ["requestControls", "inputTransformations"]) || changed;
+	}
+	return stripContent(message) || changed;
 }
 
 function parseRecord(text: string): unknown {
@@ -244,21 +274,28 @@ export async function planStrip(file: string, idleBeforeMs: number): Promise<Str
 		const entry = parseFileEntry(text, index);
 		if (!entry) continue;
 		fileEntries.push(entry);
-		if (entry.type === "message" && REPLAY_KEY_RE.test(text)) {
+		if ((entry.type === "message" || isEntryPatchRecord(entry)) && REPLAY_KEY_RE.test(text)) {
 			const record = parseRecord(text);
 			if (isRecord(record)) candidates.push({ index, byteLength: bytes.length, record });
 		}
 	}
 	if (candidates.length === 0) return undefined;
 	migrateToCurrentVersion(fileEntries);
+	// The turn a resume replays, with the fields the records set (a recovered attempt's marker).
+	applyEntryPatches(fileEntries);
 	const entries = fileEntries.filter((entry): entry is SessionEntry => entry.type !== "session");
 	const keep = protectedTurnLines(entries);
 	if (!keep) return undefined;
+	const protectedIds = new Set<string>();
+	for (const entry of entries) {
+		const lineIndex = entry.type === "message" ? (entry.message as TaggedMessage)[LINE_INDEX] : undefined;
+		if (lineIndex !== undefined && keep.has(lineIndex)) protectedIds.add(entry.id);
+	}
 
 	const strip = new Set<number>();
-	const plan: StripPlan = { file, stat, strip, records: 0, bytes: 0 };
+	const plan: StripPlan = { file, stat, strip, protectedIds, records: 0, bytes: 0 };
 	for (const { index: lineIndex, byteLength, record } of candidates) {
-		if (keep.has(lineIndex) || !stripRecord(record)) continue;
+		if (keep.has(lineIndex) || !stripRecord(record, protectedIds)) continue;
 		strip.add(lineIndex);
 		plan.records += 1;
 		plan.bytes += byteLength - Buffer.byteLength(JSON.stringify(record));
@@ -274,7 +311,7 @@ async function* strippedChunks(plan: StripPlan): AsyncGenerator<Buffer> {
 	for await (const { bytes, text } of transcriptLines(plan.file)) {
 		index += 1;
 		const record = plan.strip.has(index) ? parseRecord(text) : undefined;
-		const line = stripRecord(record) ? Buffer.from(JSON.stringify(record)) : bytes;
+		const line = stripRecord(record, plan.protectedIds) ? Buffer.from(JSON.stringify(record)) : bytes;
 		parts.push(line, NEWLINE);
 		size += line.length + 1;
 		if (size < WRITE_CHUNK_BYTES) continue;
