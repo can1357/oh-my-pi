@@ -109,6 +109,16 @@ const STRAITLY_ROWS: Record<string, unknown>[] = [
 		pricing: { prompt: "0.000001", completion: "0.000003" },
 	},
 	{
+		id: "empty-efforts-thinking",
+		name: "Empty Efforts Thinking Variant",
+		context_length: 200_000,
+		architecture: { input_modalities: ["text"], output_modalities: ["text"] },
+		top_provider: { context_length: 200_000, max_completion_tokens: 16_384 },
+		supported_parameters: ["max_tokens", "reasoning", "reasoning_effort", "tool_choice", "tools"],
+		reasoning: { mandatory: false, default_enabled: true, supported_efforts: [] },
+		pricing: { prompt: "0.000001", completion: "0.000003" },
+	},
+	{
 		id: "mandatory-reasoner",
 		name: "Mandatory Reasoner",
 		context_length: 262_144,
@@ -238,6 +248,11 @@ describe("Straitly provider", () => {
 		expect(optionalFallbackThinking?.reasoning).toBe(true);
 		expect(optionalFallbackThinking?.thinking?.requiresEffort).toBe(false);
 		expect(optionalFallbackThinking?.compat?.reasoningDisableMode).toBe("cline-enabled-false");
+
+		const emptyEfforts = models.find(model => model.id === "empty-efforts-thinking");
+		expect(emptyEfforts?.reasoning).toBe(true);
+		expect(emptyEfforts?.thinking).toBeUndefined();
+		expect(emptyEfforts?.compat?.trustExplicitThinkingOnly).toBe(true);
 
 		const mandatory = models.find(model => model.id === "mandatory-reasoner");
 		expect(mandatory?.reasoning).toBe(true);

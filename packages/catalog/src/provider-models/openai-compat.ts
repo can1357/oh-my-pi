@@ -9140,6 +9140,9 @@ function mapStraitlyModel(
 		reasoningMeta !== undefined ||
 		catalogMeta?.reasoning === true;
 	const thinking = mapStraitlyThinking(entry, defaults);
+	// An explicit empty/unknown `supported_efforts` list means "no dial": keep
+	// identity or KDL fallback from regrowing a guessed effort ladder.
+	const explicitNoDial = Array.isArray(reasoningMeta?.supported_efforts) && thinking === undefined;
 	const supportsTools = params !== undefined ? params.includes("tools") : undefined;
 	const supportsToolChoice = params !== undefined ? params.includes("tool_choice") : true;
 	// `supportsSamplingParams` and `supportsPenaltyAndStopParams` are coarse gates
@@ -9165,6 +9168,7 @@ function mapStraitlyModel(
 		...(!supportsSamplingParams && { supportsSamplingParams: false }),
 		...(!supportsPenaltyAndStopParams && { supportsPenaltyAndStopParams: false }),
 		...(reasoning && params !== undefined && !advertisesReasoningEffort && { supportsReasoningEffort: false }),
+		...(explicitNoDial && { trustExplicitThinkingOnly: true }),
 		...(reasoningMeta?.mandatory === true && { reasoningDisableMode: "lowest-effort" }),
 		...(reasoningMeta?.default_enabled === false && {
 			whenThinking: { extraBody: { reasoning: { enabled: true } } },
