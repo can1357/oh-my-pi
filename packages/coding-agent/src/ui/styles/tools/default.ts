@@ -125,39 +125,37 @@ function bodyRows(card: DefaultCard, theme: Theme, content: number): string[] {
 	return rows;
 }
 
-/** The rows of a generic card at `width`: padded by one cell and one row, tinted. */
-export function defaultCardRows(theme: Theme, card: DefaultCard, width: number): string[] {
+/** A generic card at `width`: padded by one cell and one row, tinted; its heading is the pad and the (wrapped) title. */
+export function defaultCard(theme: Theme, card: DefaultCard, width: number): Block {
 	const content = Math.max(1, width - 2);
-	const head = `${card.glyph} ${theme.fg(card.titleColor ?? "accent", card.title)}`;
-	const lines = [head, ...bodyRows(card, theme, content)];
-	const rows = [tintRow(theme, card.tint, "", width)];
-	for (const line of lines) {
-		for (const row of line === "" ? [""] : wrap(line, content))
-			rows.push(tintRow(theme, card.tint, ` ${row}`, width));
+	const row = (text: string): string => tintRow(theme, card.tint, ` ${text}`, width);
+	const pad = tintRow(theme, card.tint, "", width);
+	const title = wrap(`${card.glyph} ${theme.fg(card.titleColor ?? "accent", card.title)}`, content).map(row);
+	const rows = [pad, ...title];
+	for (const line of bodyRows(card, theme, content)) {
+		for (const part of line === "" ? [""] : wrap(line, content)) rows.push(row(part));
 	}
-	rows.push(tintRow(theme, card.tint, "", width));
-	return rows;
+	rows.push(pad);
+	return { rows, heading: 1 + title.length };
 }
 
 function paintDefault(node: UiNode, cx: PaintContext): Block {
 	const props = toolProps(node);
 	const children = node.children();
 	const drawnPictures = resultPictures(node, cx);
-	return {
-		rows: defaultCardRows(
-			cx.theme,
-			{
-				glyph: statusGlyph(node, cx),
-				title: styledText(cx.theme, props.title),
-				titleColor: props.tone === "info" ? "muted" : "accent",
-				tint: tint(props),
-				args: props.term?.args,
-				expanded: isExpanded(props),
-				body: drawnPictures.length > 0 ? children.filter(child => !drawnPictures.includes(child)) : children,
-			},
-			cx.width,
-		),
-	};
+	return defaultCard(
+		cx.theme,
+		{
+			glyph: statusGlyph(node, cx),
+			title: styledText(cx.theme, props.title),
+			titleColor: props.tone === "info" ? "muted" : "accent",
+			tint: tint(props),
+			args: props.term?.args,
+			expanded: isExpanded(props),
+			body: drawnPictures.length > 0 ? children.filter(child => !drawnPictures.includes(child)) : children,
+		},
+		cx.width,
+	);
 }
 
 defineToolLook("default", { paint: paintDefault, animated: true });

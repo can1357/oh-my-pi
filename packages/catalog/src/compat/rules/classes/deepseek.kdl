@@ -70,6 +70,11 @@ class "deepseek" {
 			requires-reasoning-content-for-tool-calls #true
 		}
 	}
+	// The DeepSeek encoder parses `<｜…｜>` in message text as special tokens, and
+	// V4.1's rejects its image placeholder outright ("Message content contains
+	// image special token"); a tool result quoting the chat template would
+	// otherwise fail every later request. Source: https://github.com/jundot/omlx/issues/4010
+	neutralize-deepseek-special-tokens #true
 	strip-image-input #true
 	models token="ocr" {
 		strip-image-input #false

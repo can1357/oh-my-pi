@@ -7,8 +7,8 @@ A built-in provider is described in two halves:
   variables, catalog-discovery policy, seed models, and provider compat rules.
   Runtime discovery factories live in
   `src/provider-models/descriptors.ts`'s `MODEL_MANAGER_FACTORIES` table.
-  `KnownProvider`, `PROVIDER_DESCRIPTORS`, and `DEFAULT_MODEL_PER_PROVIDER`
-  derive from the compiled catalog entries and that factory table.
+  `PROVIDER_DESCRIPTORS` and `DEFAULT_MODEL_PER_PROVIDER` derive from the
+  compiled catalog entries and that factory table.
 - **Auth half** (`packages/catalog` + `packages/ai`): an
   `auth "<id>"` entry in `packages/catalog/src/compat/rules/auth/<id>.kdl`.
   `packages/ai/src/registry/build.ts` interprets the compiled policy into a
@@ -54,8 +54,8 @@ factory only if the provider supports model listing.
    constructed by the coding-agent runtime instead.
 5. **Regenerate compiled rules and the bundled catalog.** From the repo root,
    run `bun run gen:compat`, then `bun run gen:models` with the discovery
-   credentials needed by the provider. `gen:compat` writes `rules.json`,
-   `auth-ids.ts`, and `provider-ids.ts` under `packages/catalog/src/compat/`.
+   credentials needed by the provider. `gen:compat` writes
+   `packages/catalog/src/compat/rules.json`.
    For a provider-only catalog update, use `bun run gen:models --provider <id>`
    to regenerate that provider while preserving every other provider's committed
    snapshot. Cross-provider reference data remains available to the generator.

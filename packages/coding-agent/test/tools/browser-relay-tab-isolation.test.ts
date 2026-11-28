@@ -312,7 +312,7 @@ async function writeStandInVault(contentScript: string): Promise<string> {
 			manifest_version: 3,
 			name: "Stand-in vault",
 			version: "1.0",
-			content_scripts: [{ matches: ["http://127.0.0.1/*"], js: ["content.js"] }],
+			content_scripts: [{ matches: ["http://127.0.0.1/*"], js: ["content.js"], run_at: "document_start" }],
 			web_accessible_resources: [
 				{
 					resources: ["menu.html", "notification.html"],
@@ -721,9 +721,9 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 			`document.addEventListener("submit", () => {
 	const card = document.createElement("vault-notification");
 	const frame = document.createElement("iframe");
+	frame.src = chrome.runtime.getURL("notification.html");
 	card.attachShadow({ mode: "closed" }).append(frame);
 	document.documentElement.append(card);
-	frame.src = chrome.runtime.getURL("notification.html");
 }, true);`,
 		);
 		const fixture = await launchRelayFixture(undefined, [vaultDir]);
@@ -752,27 +752,54 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 		document.body.append(frame);
 	}
 });`);
-			// The card starts loading as the click submits, so Chrome may drop omp during this call.
 			const submitted = await runInTab(name, {
 				code: "await tab.click('#go');",
 				timeoutMs: 10_000,
 				session,
 			}).then(shown, (error: unknown) => String(error));
-			const after = await runInTab(name, title);
-			expect(after.returnValue).toBe("Signed in");
-			const told = await untilNamed(name, vaultId, submitted, shown(after));
+			const firstRead = await runInTab(name, title).then(
+				result => {
+					expect(result.returnValue).toBe("Signed in");
+					return shown(result);
+				},
+				(error: unknown) => {
+					if (!(error instanceof Error) || !error.message.includes("omp could not reattach to the tab"))
+						throw error;
+					return error.message;
+				},
+			);
+			// A blocked decoy can finish on Chrome's internal error document, which still refuses debugging.
+			// Check the submitted document from the fixture before navigating away, not by retrying a refused read.
+			await page.waitForFrame(
+				() => {
+					const frames = page.mainFrame().childFrames();
+					return (
+						frames.length === 4 &&
+						frames.every(
+							frame => frame.url() === "about:srcdoc" || frame.url() === "chrome-error://chromewebdata/",
+						)
+					);
+				},
+				{ timeout: 10_000 },
+			);
+			expect(await page.title()).toBe("Signed in");
+			expect(page.frames().filter(frame => frame.url().startsWith("chrome-extension://"))).toEqual([]);
+			await page.goto(`${fixture.origin}/second`);
+			const nextPage = await runInTab(name, title);
+			expect(nextPage.returnValue).toBe("Second");
+			const notices = await untilNamed(name, vaultId, submitted, firstRead, shown(nextPage));
+			const transcript = notices.join("\n");
 			// The card's page, once, by the title the vault gave it.
-			expect(occurrences(told.join("\n"), vaultId)).toBe(1);
-			expect(told.join("\n")).toContain(`"notification.html"`);
-			expect(told.join("\n")).toContain(`"Vault: save login"`);
-			expect(told.at(-1)).not.toContain(vaultId);
+			expect(occurrences(transcript, vaultId)).toBe(1);
+			expect(transcript).toContain(`"notification.html"`);
+			expect(transcript).toContain(`"Vault: save login"`);
+			expect(notices.at(-1)).not.toContain(vaultId);
 			// The page's frames to an extension that is not installed, or to a page the vault does not expose, are emptied
 			// but never reported: they could not have shown that extension's page. A `/../` in a planted `src` still
 			// loads the vault's page; only the URL that loaded is reported.
-			expect(told.join("\n")).not.toContain("decoy.html");
-			expect(told.join("\n")).not.toContain("private.html");
-			expect(told.join("\n")).not.toContain("Page text");
-			expect(page.frames().filter(frame => frame.url().startsWith("chrome-extension://"))).toEqual([]);
+			expect(transcript).not.toContain("decoy.html");
+			expect(transcript).not.toContain("private.html");
+			expect(transcript).not.toContain("Page text");
 		} finally {
 			await releaseTab(name).catch(() => undefined);
 			await releaseBrowser(relay, { kill: false });

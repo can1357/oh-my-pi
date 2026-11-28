@@ -186,6 +186,7 @@ export class SessionStatusLine implements StatusLineModel {
 	#onPullRequest: ((pr: { number: number; url: string } | undefined) => void) | undefined;
 	#lastPr: { number: number; url: string } | undefined;
 	#disposed = false;
+	readonly #live: Signal<boolean>;
 
 	readonly settings: Accessor<StatusLineSettings> = computed(() => ({ ...this.#saved(), ...this.#preview() }));
 
@@ -210,7 +211,7 @@ export class SessionStatusLine implements StatusLineModel {
 		this.#toolRevision();
 		const session = this.#session;
 		const model = session.state.model ?? session.model;
-		this.#syncUsage(model?.provider, model?.id);
+		if (this.#live()) this.#syncUsage(model?.provider, model?.id);
 		return session.getAnthropicSlowModeLabel();
 	});
 	readonly #speculation = computed(() => {
@@ -265,10 +266,16 @@ export class SessionStatusLine implements StatusLineModel {
 		};
 	});
 
-	constructor(session: AgentViewSession) {
+	constructor(session: AgentViewSession, options?: { deferStartupReads?: boolean }) {
 		this.#session = session;
+		this.#live = signal(!options?.deferStartupReads);
 		this.#saved = signal(statusLineHost.getSettings());
 		this.#attach(session);
+	}
+
+	/** Start reading context, checkout and account usage once startup can spare the event loop. */
+	finishStartup(): void {
+		this.#live.set(true);
 	}
 
 	/** Called with the first PR the active branch resolves to (terminal title). */
@@ -568,11 +575,12 @@ export class SessionStatusLine implements StatusLineModel {
 		this.#streamRevision();
 		const session = this.#session;
 		const model = session.state.model ?? session.model;
-		const usage = session.getContextUsage();
+		const live = this.#live();
+		const usage = live ? session.getContextUsage() : undefined;
 		let contextWindow = usage?.contextWindow ?? model?.contextWindow ?? 0;
 		let tokens = usage?.tokens ?? 0;
 		let percent: number | null =
-			usage?.percent === null || contextWindow === 0 ? null : (tokens / contextWindow) * 100;
+			!live || usage?.percent === null || contextWindow === 0 ? null : (tokens / contextWindow) * 100;
 		const collab = this.#collab();
 		const override = collab?.stateOverride?.contextUsage;
 		if (override) {
@@ -613,6 +621,12 @@ export class SessionStatusLine implements StatusLineModel {
 		const turnStartedAt = this.#meter().since;
 		const activeMs = this.activeMs(now);
 		this.#syncPricingTimer(segments.includes("cost") ? model?.cost : undefined, now);
+		const fastTier =
+			model && session.isFastModeActive()
+				? session.effectiveServiceTier(model) === "ultrafast"
+					? "ultrafast"
+					: "priority"
+				: undefined;
 
 		return {
 			...(model
@@ -631,7 +645,7 @@ export class SessionStatusLine implements StatusLineModel {
 			...(session.isAutoThinking && session.autoResolvedThinkingLevel()
 				? { autoResolvedLevel: session.autoResolvedThinkingLevel() }
 				: {}),
-			...(session.isFastModeActive() ? { fastMode: true } : {}),
+			...(fastTier ? { fastTier } : {}),
 			...(advisorStatuses.length > 0
 				? {
 						advisor: {
@@ -723,7 +737,7 @@ export class SessionStatusLine implements StatusLineModel {
 	/** Git facts for the bar when a git segment shows; starts a refresh when the cached ones are stale. */
 	#vcsFacts(segments: readonly string[]): Pick<StatusFacts, "git" | "worktree" | "activeRepoRoot"> {
 		// Tern reads and shows the checkout itself: nothing to read here.
-		if (this.#checkoutHomed) return {};
+		if (!this.#live() || this.#checkoutHomed) return {};
 		const wantsGit = segments.includes("git") || segments.includes("pr");
 		const wantsPath = segments.includes("path");
 		if (!statusLineHost.gitEnabled() || (!wantsGit && !wantsPath)) return {};

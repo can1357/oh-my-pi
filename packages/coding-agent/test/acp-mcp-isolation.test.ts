@@ -264,6 +264,7 @@ describe("createAcpSessionFactory scope rebuild after discovery", () => {
 		const registry = {
 			getAvailable: () => available,
 			getDiscoverableProviders: () => [],
+			createStartupModelCacheHydrator: () => async () => {},
 			refresh: async () => {},
 			awaitBackgroundRefresh: () => discovery.promise,
 			reapplyModelPolicies: () => {},

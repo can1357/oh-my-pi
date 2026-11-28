@@ -561,8 +561,7 @@ function emitSkip(
 		markAddress();
 		if (back) c.i32(lanes - 2).op(OP.sub);
 		c.i32(1).simd(0x0f);
-		if (narrow)
-			c.simd(0x0b).op(0, 0); // v128.store
+		if (narrow) c.simd(0x0b).op(0, 0); // v128.store
 		else c.simd(0x5b).op(0, 0, 0); // v128.store64_lane
 	}
 	c.get(P)

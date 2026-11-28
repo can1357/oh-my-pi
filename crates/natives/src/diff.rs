@@ -17,6 +17,7 @@ use std::{fs::File, io::Read, path::PathBuf, sync::Arc};
 use napi::{JsString, bindgen_prelude::*};
 use napi_derive::napi;
 use parking_lot::Mutex;
+use xutf::{DecodeError, Incomplete, REPLACEMENT_CHARACTER};
 
 use crate::{js, task};
 
@@ -185,7 +186,8 @@ fn diff_runs(runs: Vec<omp_diff::Run>) -> Vec<DiffRun> {
 struct StreamSide {
 	text:         Vec<u16>,
 	line_ends:    Vec<usize>,
-	pending_utf8: Vec<u8>,
+	/// A UTF-8 character the last chunk cut off, for the next to complete.
+	held_utf8:    Option<Incomplete>,
 	started:      bool,
 	reading:      bool,
 	done:         bool,
@@ -219,7 +221,7 @@ impl StreamSide {
 
 	fn append_bytes(&mut self, chunk: &[u8]) -> Result<()> {
 		self.ensure_pushable()?;
-		self.append_utf8(chunk, false);
+		self.append_utf8(chunk);
 		Ok(())
 	}
 
@@ -234,39 +236,34 @@ impl StreamSide {
 		Ok(())
 	}
 
-	fn append_utf8(&mut self, bytes: &[u8], final_chunk: bool) {
+	/// Decodes `bytes` onto the text, malformed sequences as U+FFFD, holding a
+	/// character they cut off for the next chunk.
+	fn append_utf8(&mut self, mut bytes: &[u8]) {
 		self.binary |= bytes.contains(&0);
-		self.pending_utf8.extend_from_slice(bytes);
-		let mut decoded = Vec::with_capacity(self.pending_utf8.len());
-		let mut offset = 0usize;
-		while offset < self.pending_utf8.len() {
-			match std::str::from_utf8(&self.pending_utf8[offset..]) {
-				Ok(text) => {
-					decoded.extend(text.encode_utf16());
-					offset = self.pending_utf8.len();
-				},
-				Err(error) => {
-					let valid_end = offset + error.valid_up_to();
-					// SAFETY: `valid_up_to` is the UTF-8 parser's verified prefix.
-					let valid =
-						unsafe { std::str::from_utf8_unchecked(&self.pending_utf8[offset..valid_end]) };
-					decoded.extend(valid.encode_utf16());
-					offset = valid_end;
-					if let Some(invalid_len) = error.error_len() {
-						decoded.push(char::REPLACEMENT_CHARACTER as u16);
-						offset += invalid_len;
-					} else {
-						break;
-					}
-				},
-			}
+		let mut decoded = Vec::with_capacity(bytes.len() + 1);
+		if let Some(mut held) = self.held_utf8.take() {
+			let Some((completed, rest)) = held.try_complete(bytes) else {
+				self.held_utf8 = Some(held);
+				return;
+			};
+			decoded.extend(completed.unwrap_or(REPLACEMENT_CHARACTER).encode_utf16());
+			bytes = rest;
 		}
-		if final_chunk && offset < self.pending_utf8.len() {
+		loop {
+			let (valid, rest) = match xutf::decode(bytes) {
+				Ok(text) => (text, None),
+				Err(DecodeError::Invalid { valid_prefix, remaining_input, .. }) => {
+					(valid_prefix, Some(remaining_input))
+				},
+				Err(DecodeError::Incomplete { valid_prefix, incomplete_suffix }) => {
+					self.held_utf8 = Some(incomplete_suffix);
+					(valid_prefix, None)
+				},
+			};
+			decoded.extend(valid.encode_utf16());
+			let Some(rest) = rest else { break };
 			decoded.push(char::REPLACEMENT_CHARACTER as u16);
-			offset = self.pending_utf8.len();
-		}
-		if offset > 0 {
-			self.pending_utf8.drain(..offset);
+			bytes = rest;
 		}
 		self.append_units(&decoded);
 	}
@@ -275,8 +272,9 @@ impl StreamSide {
 		if self.done {
 			return;
 		}
-		if !self.pending_utf8.is_empty() {
-			self.append_utf8(&[], true);
+		if self.held_utf8.take().is_some() {
+			// The stream ends in the middle of a character.
+			self.append_units(&[char::REPLACEMENT_CHARACTER as u16]);
 		}
 		if !self.text.is_empty() && self.text.last() != Some(&LF) {
 			self.line_ends.push(self.text.len());
@@ -523,7 +521,7 @@ fn read_file_into_stream(
 			break;
 		}
 		let mut locked = state.lock();
-		locked.side_mut(side).append_utf8(&buffer[..read], false);
+		locked.side_mut(side).append_utf8(&buffer[..read]);
 		locked.update_stable_common();
 		if locked.side(side).binary {
 			break;
@@ -653,9 +651,9 @@ mod tests {
 	fn stream_utf8_decoder_preserves_code_points_split_across_chunks() {
 		let mut side = StreamSide::default();
 		let bytes = "a🚀b\n".as_bytes();
-		side.append_utf8(&bytes[..3], false);
-		side.append_utf8(&bytes[3..5], false);
-		side.append_utf8(&bytes[5..], false);
+		side.append_utf8(&bytes[..3]);
+		side.append_utf8(&bytes[3..5]);
+		side.append_utf8(&bytes[5..]);
 		side.finish();
 		assert_eq!(String::from_utf16(&side.text).unwrap(), "a🚀b\n");
 		assert_eq!(side.line_ends.len(), 1);

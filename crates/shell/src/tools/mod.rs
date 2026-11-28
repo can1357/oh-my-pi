@@ -172,8 +172,16 @@ impl ToolConfig {
 			Some(NOHUP) => self.nohup.then_some(NOHUP),
 			Some(GIT) => self.git.any().then_some(GIT),
 			Some(tool) => Some(tool),
-			None => self.extras.runs_commands(name).then_some(EXTRA),
+			None => self.extra(name),
 		}
+	}
+
+	/// The tool `name` resolves to when it is an offered extra that runs
+	/// command lines (`env`, `xargs`, `find`, `awk`, `perl`, …), not one of
+	/// pi's other tools: what a process shell offers
+	/// ([`crate::process::NativeHost::offer_extras`]).
+	pub fn extra(&self, name: &BStr) -> Option<ToolRef> {
+		self.extras.runs_commands(name).then_some(EXTRA)
 	}
 
 	/// The extra `name` resolves to when it is an offered extra that runs

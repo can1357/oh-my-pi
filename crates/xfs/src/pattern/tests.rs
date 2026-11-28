@@ -192,7 +192,7 @@ fn max_depth() {
 		("{a,b/c}", Some(2)),
 		("**/*.go", None),
 		("src/**", None),
-		("a/[!x]", None),
+		("a/[!x]", Some(2)),
 		("**", None),
 	];
 	for (pattern, want) in cases {

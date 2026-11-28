@@ -11,6 +11,7 @@ describe("identifier", () => {
 
 	it("unresolvable", () => {
 		expect(() => type("HUH")).toThrow();
+		expect(() => type("constructor[]")).toThrow('unknown keyword "constructor"');
 	});
 });
 

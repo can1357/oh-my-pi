@@ -38,7 +38,7 @@ close()
 selectors: CSS, or Puppeteer aria/… text/… xpath/… pierce/… label/… placeholder/… testid/… alt/… title/… role/<role>[name="…"] (append " exact" inside the role name filter for exact matching)
 ```
 
-  - `console({level?, since?, limit?, clear?})` and `errors({since?, limit?, clear?})` return `{entries, nextSeq, dropped}`, not a list: read its `entries` field (`r.entries` in JavaScript, `r["entries"]` in Python), and pass `nextSeq` as `since` to read only later entries.
+  - `console({level?, since?, limit?, clear?})` and `errors({since?, limit?, clear?})` return `{entries, nextSeq, dropped}`, not a list: read its `entries` field (`r.entries` in JavaScript, `r["entries"]` in Python), and pass `nextSeq` as `since` to read only later entries. Local and dev pages (`localhost`, private IPs, `file:`, `data:`) record console messages and uncaught exceptions from load; public sites record them only after the tab's first `console()` or `errors()` call, so the page cannot detect automation, and results then carry `captureStartedAt` (Unix ms): nothing earlier was recorded.
 
 - `targets` resolves the browser like `open` (pass the same `app`, e.g. `"relay"`) and lists pages `target` can adopt:
   - a Tern window's browser blocks (`tab`: the omp tab holding one), or
@@ -81,7 +81,6 @@ selectors: CSS, or Puppeteer aria/… text/… xpath/… pierce/… label/… pl
 - `allowed_domains`: exact hosts and `*.example.com` patterns (bare domain included); other navigation, subresource, fetch, and WebSocket requests abort.
 
 Browser choice:
-
 - No `app` → the first that applies:
   1. the user's Chrome through the relay (`browser.relay` setting; `PI_BROWSER_RELAY=1`/`=0` overrides it)
   2. `browser.cdpUrl`
@@ -103,7 +102,6 @@ Browser choice:
 - `file:` pages can always read other local files. `insecure` applies per tab.
 
 WebKit (open result: `omp's headless WebKit browser`, or `omp's WebKit browser (in a window)` when shown):
-
 - Off screen unless shown (there the user can click and type too); the page always sees a visible, focused window and no automation flag.
 - `target` names nothing there. Engine cannot start → Chromium.
 - `app: "chromium"`: managed Chromium for this open.
@@ -121,7 +119,6 @@ WebKit (open result: `omp's headless WebKit browser`, or `omp's WebKit browser (
   - whatever `evaluate` code leaves behind
 
 Relay (`app: "relay"`: the user's Chrome through the omp relay):
-
 - No `target`: a new name opens omp's own background tab, leaving the user's tab alone (an outdated relay extension selects it instead).
   - `url` navigates that tab.
 - `target` borrows an existing tab by URL/title substring. Reopening an open name keeps its tab.
@@ -130,7 +127,6 @@ Relay (`app: "relay"`: the user's Chrome through the omp relay):
 {{{x11Guidance}}}
 
 Tern:
-
 - Inside a Tern pane a tab opens as a browser picture-in-picture (PiP; native WKWebView, not Chromium) over your own pane,
   a passive corner card while the user looks at another Tern tab; it never takes focus or input.
 - When the open result says it is not on screen (the user hid PiPs), tell the user where it is.
@@ -144,7 +140,6 @@ Tern:
 - No Tern window can host a PiP → omp's own browser.
 
 Tern and WebKit tab limits:
-
 - Input is trusted native mouse/keyboard events at element centres; `evaluate` runs in the page world.
 - Frames inside CSS-scaled/rotated elements cannot be driven.
 - `console`, `requests`, HAR:
@@ -162,7 +157,6 @@ Tern and WebKit tab limits:
 - Raw `page`/`browser` in `tab.run` are a Puppeteer-like subset: goto, evaluate, content, $, $$, locator, waits, screenshot, keyboard, mouse, cookies; no event listeners (`page.on`): read `tab.requests()` or wait with `tab.waitForResponse`.
 
 Lifetime:
-
 - Closing releases the managed tab and closes pages omp opened, never borrowed pages or adopted Tern blocks.
 - `browser.close({ all: true })` releases the tabs you opened, not other agents'.
 - `kill: true` terminates only applications spawned by this process, never reused browser processes.

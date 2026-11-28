@@ -268,6 +268,7 @@ import type {
 	WorkingKind,
 	CompactionQueuedMessage,
 	ComposerOwner,
+	CwdChangeOptions,
 	InteractiveModeContext,
 	InteractiveModeInitOptions,
 	InteractiveSelectorDialogOptions,
@@ -414,6 +415,7 @@ import { appInterruptKeys } from "../config/keybindings/matchers";
 import { setExtensionLinkClicksProvider } from "../extensibility/extensions/link-clicks";
 import { getAssistantMessageLinkTargets } from "../session/transcript/link-targets";
 import { onTranscriptPresentersChanged } from "../session/transcript/transcript-presentation";
+import { followsViewportOnly } from "../session/transcript/tool-execution";
 import type { TurnAct } from "../session/transcript/transcript-actions";
 import type { Composer } from "../ui/composer";
 import type { DialogVim } from "../ui/composer/vim-editor";
@@ -540,6 +542,8 @@ const cfgLiveUiSettings = combine({
 type LiveUiSettings = SettingValueOf<typeof cfgLiveUiSettings>;
 
 const STILL_CLOSING_DELAY_MS = 3_000;
+const STARTUP_BACKGROUND_QUIET_MS = 150;
+const STARTUP_BACKGROUND_MAX_DELAY_MS = 1_000;
 const JUDGMENT_BATCH_PROGRESS_RETAIN_MS = 1_000;
 /** A transcript action naming an agent to view (a live task card's agent row). */
 const SUBAGENT_FOCUS_ACT = "subagents.focus=";
@@ -1260,6 +1264,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * then deny instead of prompting onto a torn-down UI. Refreshed by `init`.
 	 */
 	#dialogLifetime = new AbortController();
+	#cancelStartupBackground: (() => void) | undefined;
 	readonly #inputController: InputController;
 	readonly #selectorController: SelectorController;
 	readonly #focusController: SessionFocusController;
@@ -1516,7 +1521,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		);
 		setExtensionLinkClicksProvider(() => this.#extensionLinkClicksAvailable());
 
-		this.statusLine = new SessionStatusLine(session);
+		this.statusLine = new SessionStatusLine(session, { deferStartupReads: true });
 		this.statusLine.onPullRequest = pr => setTerminalTitlePullRequest(pr?.number);
 		this.statusLine.onResetExpiryNotice = notice => this.showWarning(notice);
 		this.statusLine.setAutoCompactEnabled(session.autoCompactionEnabled);
@@ -1724,7 +1729,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Both read the viewed session through the focus controller: after every controller exists.
 		// A started frame (the startup frame's predicted bar) redraws the bar's slots at once.
 		this.#attachStatusLine();
-		this.#predictStatusForNextLaunch();
 		// The composer's dictation control shows while speech-to-text is on.
 		const syncDictation = (enabled: boolean): void =>
 			this.#frame.dictation.set(enabled ? (this.#sttController?.state ?? "idle") : undefined);
@@ -1771,10 +1775,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			if (this.focusedAgentId !== undefined) return;
 			if (untrack(() => this.viewSession.messages.length) === 0) freshContext = facts.context;
 			if (!freshContext) return;
-			// A fresh session runs at the configured tier, not this one's `/fast` toggle.
+			// A fresh session runs at the configured tier, not this one's selected tier.
 			const model = untrack(() => this.session.model);
-			const fastMode = model !== undefined && this.session.isFastModeConfiguredFor(model);
-			cache.writeStatus(project, predictStatus(facts, settings, { context: freshContext, fastMode }));
+			const fastTier = model && this.session.configuredFastTier(model);
+			cache.writeStatus(project, predictStatus(facts, settings, { context: freshContext, fastTier }));
 		});
 	}
 
@@ -1785,9 +1789,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		});
 	}
 
-	/** Start the shell (unless a prepaint already did) on the process terminal. */
+	/** Start the shell on the process terminal (a prepaint may already have). */
 	async #startShell(clearHistory: boolean): Promise<void> {
-		this.#syncFrameSettings();
 		await this.#frame.start({
 			clearHistory,
 			resizeScrollback: cfgTuiResizeScrollback.get(this.settings),
@@ -1803,9 +1806,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		};
 	}
 
-	/** `tui.maxFps`, `tui.hyperlinks`, `tui.textSizing` and `tui.screen` into the running renderer. */
+	/** `tui.maxFps`, `tui.motion`, `tui.hyperlinks`, `tui.textSizing` and `tui.screen` into the running renderer. */
 	#syncFrameSettings(): void {
 		this.#frame.frameInterval.set(1000 / cfgTuiMaxFps.get(this.settings));
+		const motion = cfgMotionResolved.get(this.settings);
+		this.#frame.spinnerInterval.set(motion.spinnerInterval);
+		this.#frame.reduceMotion.set(!motion.effects);
 		this.#frame.screen.set(cfgTuiScreen.get(this.settings));
 		this.#frame.copyOnSelect.set(cfgTuiCopyOnSelect.get(this.settings));
 		this.#frame.wheelLines.set(cfgTuiWheelLines.get(this.settings));
@@ -1827,6 +1833,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		};
 		const host = this.shell.host;
 		if (!host) return;
+		host.driver.images.setBudget(cfgTuiMaxInlineImages.get(this.settings));
 		const updateFigureCell = (): void => {
 			const caps = host.driver.capabilities;
 			const next = caps.images ? (caps.cell ?? DEFAULT_FIGURE_CELL) : undefined;
@@ -2182,7 +2189,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Load initial todos
 		await logger.time("InteractiveMode.init:todos", () => this.#loadTodoList());
 
-		// A prepaint frame may already own the terminal.
+		// A prepaint frame may already own the terminal: settings reach its renderer either way.
+		this.#syncFrameSettings();
 		if (!this.#ownsStartedUi) {
 			await this.#startShell(options.clearInitialTerminalHistory === true);
 			this.#ownsStartedUi = true;
@@ -2272,25 +2280,6 @@ export class InteractiveMode implements InteractiveModeContext {
 				}),
 			);
 		}
-
-		// Prewarm the local tiny-title worker off the submit hot path: spawn it
-		// now, idle and unref'd, so the first submit reuses a live subprocess
-		// instead of paying spawn latency ahead of the first frame (issue #6462).
-		// No-ops for the online default and for already-named sessions that will
-		// not be titled. Deferred via setImmediate so it runs AFTER the render
-		// callback requestRender(true) queued above (immediates are FIFO) — the
-		// spawn syscall never lands in the same loop turn ahead of the first paint.
-		setImmediate(() => {
-			// Resumed sessions paint their restored transcript (code blocks, diffs)
-			// right after init; warm the native syntax set (~60ms, ~24 MiB) off-thread
-			// so that paint does not build it on the JS thread. Fresh sessions skip it
-			// and pay the cost lazily on the first highlight, if any.
-			// Open the model API connection while the user reads the first frame.
-			this.session.prewarmModelConnection();
-			if (!$env.PI_NO_TITLE && !this.sessionManager.getSessionName()) {
-				this.#inputController.prewarmTinyTitleModel();
-			}
-		});
 
 		// Host the session before extension hooks run: a dialog raised from a
 		// `session_start` hook is then retained for the first writer that joins.
@@ -2457,10 +2446,46 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#idleMaintenanceActivity.ready = true;
 		if (!options.suppressWelcomeIntro) this.playWelcomeIntro();
 		this.syncIdleMaintenanceView();
-		// The first alt+p then opens as fast as a reopen.
-		this.#selectorController
-			.warmModelPicker(this.#dialogLifetime.signal)
-			.catch(error => logger.warn("Model picker prewarm failed", { error: String(error) }));
+		this.#scheduleStartupBackground(options.startupBackgroundWork);
+	}
+
+	#scheduleStartupBackground(work: (() => void) | undefined): void {
+		this.#cancelStartupBackground?.();
+		let lastInput = performance.now();
+		const deadline = lastInput + STARTUP_BACKGROUND_MAX_DELAY_MS;
+		const releaseInput = this.interceptInput(event => {
+			if (event.type === "paste" || (event.type === "key" && event.key.kind !== "release")) {
+				lastInput = performance.now();
+			}
+			return false;
+		});
+		let timer: NodeJS.Timeout;
+		const cancel = () => {
+			clearTimeout(timer);
+			releaseInput();
+			this.#cancelStartupBackground = undefined;
+		};
+		const run = (): void => {
+			// Give pending input and its redraw priority, without starving discovery while typing.
+			const remaining = Math.min(lastInput + STARTUP_BACKGROUND_QUIET_MS, deadline) - performance.now();
+			if (remaining > 1) {
+				timer = setTimeout(run, remaining).unref();
+				return;
+			}
+			cancel();
+			if (this.session.isDisposed) return;
+			this.statusLine.finishStartup();
+			this.#predictStatusForNextLaunch();
+			work?.();
+			this.composer.warmAutocomplete();
+			this.session.prewarmModelConnection();
+			if (!$env.PI_NO_TITLE && !this.sessionManager.getSessionName()) this.#inputController.prewarmTinyTitleModel();
+			this.#selectorController
+				.warmModelPicker(this.#dialogLifetime.signal)
+				.catch(error => logger.warn("Model picker prewarm failed", { error: String(error) }));
+		};
+		this.#cancelStartupBackground = cancel;
+		timer = setTimeout(run, STARTUP_BACKGROUND_QUIET_MS).unref();
 	}
 
 	/**
@@ -2638,8 +2663,14 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * active session's working directory changed (`/move` relocation or resuming
 	 * a session from another project). The SessionManager's cwd MUST already
 	 * reflect `newCwd` before this is called.
+	 *
+	 * `options.restore` marks a return to the directory a failed move left;
+	 * the internal rollback below is one too. A return never fails over memory.
+	 * The memory warning for the directory this call leaves the session in goes
+	 * to `options.onWarning`; at most one rescope per call completes, so the
+	 * callback runs at most once.
 	 */
-	async applyCwdChange(newCwd: string): Promise<boolean> {
+	async applyCwdChange(newCwd: string, options: CwdChangeOptions): Promise<boolean> {
 		const previousCwd = getProjectDir();
 		try {
 			setProjectDir(newCwd);
@@ -2653,8 +2684,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		// fails, undo the chdir so `false` reliably means "nothing committed";
 		// callers roll back their own session/manager state on false.
 		const scopedSettings = isSettingsInitialized() ? settings : undefined;
+		const rescope = async (cwd: string, restore: boolean): Promise<void> => {
+			const warning = await rescopeSessionToCwd(this.session, scopedSettings, cwd, { restore });
+			if (warning) options.onWarning(warning);
+		};
 		try {
-			await rescopeSessionToCwd(this.session, scopedSettings, newCwd);
+			await rescope(newCwd, options.restore === true);
 		} catch (error) {
 			// Undo the whole transition: the process cwd, Settings scope, and
 			// cwd-derived state (memory, plugin roots, agents, extensions, custom
@@ -2663,12 +2698,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.sessionManager.setCwdWithoutRelocation(previousCwd);
 			try {
 				setProjectDir(previousCwd);
-				await rescopeSessionToCwd(this.session, scopedSettings, previousCwd);
+				await rescope(previousCwd, true);
 			} catch (restoreError) {
 				const actual = this.sessionManager.getCwd();
 				try {
 					setProjectDir(actual);
-					await rescopeSessionToCwd(this.session, scopedSettings, actual);
+					await rescope(actual, true);
 				} catch {}
 				this.showError(
 					`Failed to switch to ${newCwd} (${error instanceof Error ? error.message : String(error)}), and restoring the previous workspace failed: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`,
@@ -3598,6 +3633,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (any("showHardwareCursor"))
 			this.composer.setCaret(cfgShowHardwareCursor.get(this.settings) ? "terminal" : "drawn");
 		if (any("tui.imeSafeCursor")) this.#frame.setImeSafeCursor(cfgTuiImeSafeCursor.get(this.settings));
+		if (any("tui.resizeScrollback")) this.#frame.setResizeScrollback(cfgTuiResizeScrollback.get(this.settings));
 		if (any("autocompleteMaxVisible"))
 			this.composer.setAutocompleteMaxVisible(cfgAutocompleteMaxVisible.get(this.settings));
 		if (any("composer.shape")) this.syncComposerShape();
@@ -3636,6 +3672,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			rebuildChat = true;
 		}
 		if (any("terminal.showImages")) resetDisplay = true;
+		// Images in scrollback were committed under the old budget; the replay redraws them under the new one.
+		if (any("tui.maxInlineImages")) {
+			this.shell.host?.driver.images.setBudget(next["tui.maxInlineImages"]);
+			resetDisplay = true;
+		}
 		const hideThinkingBlock = cfgHideThinkingBlock.get(this.settings);
 		if (any("hideThinkingBlock") && hideThinkingBlock !== this.hideThinkingBlock) {
 			this.hideThinkingBlock = hideThinkingBlock;
@@ -3701,7 +3742,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (any("tui.titleState")) setTerminalTitleStateEnabled(cfgTuiTitleState.get(this.settings));
 		if (any("tui.titleSpinner")) setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
 		if (any("terminal.programStatus")) setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
-		if (any("motion")) setTerminalTitleSpinnerInterval(next.motion.titleSpinnerInterval);
+		if (any("motion")) {
+			setTerminalTitleSpinnerInterval(next.motion.titleSpinnerInterval);
+			this.#syncFrameSettings();
+		}
 
 		if (
 			any(
@@ -4074,14 +4118,16 @@ export class InteractiveMode implements InteractiveModeContext {
 		const preservedLiveToolCallIds = new Set<string>();
 		// A preserved call whose result already landed in the replayed transcript is drawn by the
 		// replay itself (#6516); keeping its live block too would draw the call twice. A background
-		// job's `running` result keeps its live block (later frames still fill it), and a read group
-		// another pending read still shares stays as one block.
+		// job's `running` result keeps its live block (later frames still fill it), unless the card
+		// follows the viewport only: the replay redraws it in place from the job's latest frame, so
+		// it stays above later replies. A read group another pending read still shares stays as one block.
+		const native = this.shell.native();
 		for (const message of context.messages) {
 			if (message.role !== "toolResult") continue;
 			const resolved = livePendingTools.get(message.toolCallId);
 			if (!resolved) continue;
 			const details = message.details as { async?: { state?: string } } | undefined;
-			if (details?.async?.state === "running") {
+			if (details?.async?.state === "running" && !followsViewportOnly(message.toolName, native)) {
 				preservedLiveToolCallIds.add(message.toolCallId);
 				continue;
 			}
@@ -6904,6 +6950,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	stop(): void {
+		this.#cancelStartupBackground?.();
 		this.#frame.releaseStartupKeys();
 		this.#closeAttempt?.abort();
 		this.syncIdleMaintenanceView(null);

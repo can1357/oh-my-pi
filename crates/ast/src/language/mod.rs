@@ -8,7 +8,7 @@ pub mod grammar;
 mod parsers;
 pub mod wasm_grammars;
 
-use std::{borrow::Cow, collections::HashMap, fmt, path::Path, sync::LazyLock};
+use std::{borrow::Cow, fmt, path::Path, sync::LazyLock};
 
 use ast_grep_core::{
 	AstGrep, Doc, Language, Node,
@@ -276,17 +276,15 @@ impl LanguageExt for Html {
 	fn extract_injections<L: LanguageExt>(
 		&self,
 		root: Node<StrDoc<L>>,
-	) -> HashMap<String, Vec<TSRange>> {
+	) -> Vec<(String, Vec<TSRange>)> {
 		let lang = root.lang();
-		let mut map = HashMap::new();
+		let mut injections = Vec::new();
 		let matcher = KindMatcher::new("script_element", lang.clone());
 		for script in root.find_all(matcher) {
 			let injected = find_html_lang(&script).unwrap_or_else(|| "js".into());
 			let content = script.children().find(|c| c.kind() == "raw_text");
 			if let Some(content) = content {
-				map.entry(injected)
-					.or_insert_with(Vec::new)
-					.push(node_to_range(&content));
+				injections.push((injected, vec![node_to_range(&content)]));
 			}
 		}
 		let matcher = KindMatcher::new("style_element", lang.clone());
@@ -294,12 +292,10 @@ impl LanguageExt for Html {
 			let injected = find_html_lang(&style).unwrap_or_else(|| "css".into());
 			let content = style.children().find(|c| c.kind() == "raw_text");
 			if let Some(content) = content {
-				map.entry(injected)
-					.or_insert_with(Vec::new)
-					.push(node_to_range(&content));
+				injections.push((injected, vec![node_to_range(&content)]));
 			}
 		}
-		map
+		injections
 	}
 }
 
@@ -641,10 +637,10 @@ impl LanguageExt for SupportLang {
 	fn extract_injections<L: LanguageExt>(
 		&self,
 		root: Node<StrDoc<L>>,
-	) -> HashMap<String, Vec<TSRange>> {
+	) -> Vec<(String, Vec<TSRange>)> {
 		match self {
 			Self::Html => Html.extract_injections(root),
-			_ => HashMap::new(),
+			_ => Vec::new(),
 		}
 	}
 }
