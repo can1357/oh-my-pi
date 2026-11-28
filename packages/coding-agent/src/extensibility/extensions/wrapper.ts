@@ -28,6 +28,8 @@ import { getApprovalGrants } from "../../tools/approval-cache";
 import { withToolApprovalScope } from "../../tools/approval-scope";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { withFileMutationSession } from "../../tools/file-write-fallback";
+import { checkToolInterception } from "../../tools/tool-interceptor";
+import { cfgToolInterceptorEnabled, cfgToolInterceptorRules } from "../../tools/settings";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { recordToolApprovalRequested, recordToolApprovalResolved } from "../../session/tool-approval-records";
 import { applyToolProxy } from "../tool-proxy";
@@ -388,6 +390,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			cancelPreflight();
 			throw denyError(resolved, this.tool.name);
 		}
+		const xdevBypass = context?.xdevPolicyKey !== undefined && effectiveParams === params;
 		const pendingSafetyChecks = computerSafetyChecks(context);
 		// ACP approval satisfies prompts only for the input the client approved: it compares
 		// against a deep snapshot because handlers can mutate the original argument object in
@@ -414,6 +417,36 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			required: pendingSafetyChecks.length > 0 || (resolved.policy === "prompt" && !acpBypass && !sessionApproved),
 			reason: resolved.reason,
 		};
+		const interceptorEnabled = approvalSettings ? cfgToolInterceptorEnabled.get(approvalSettings) : false;
+		if (interceptorEnabled && approvalSettings && !xdevBypass) {
+			const aliases = [resolved.policyKey, this.tool.customWireName].filter(
+				(alias): alias is string => typeof alias === "string" && alias.length > 0 && alias !== this.tool.name,
+			);
+			const interception = await untilAborted(signal, () =>
+				checkToolInterception(this.tool.name, resolvedArgs, {
+					availableTools: context?.toolNames,
+					toolAliases: aliases,
+					policy: approvalCheck.required ? "prompt" : "allow",
+					rules: cfgToolInterceptorRules.get(approvalSettings),
+					judge: () => this.runner.getJudge("tool-interceptor", approvalSettings),
+					signal,
+				}),
+			);
+			if (interception.block) {
+				cancelPreflight();
+				throw denyError(
+					{
+						policy: "deny",
+						tier: resolved.tier,
+						override: true,
+						source: "tool",
+						reason: interception.message,
+						...(resolved.policyKey ? { policyKey: resolved.policyKey } : {}),
+					},
+					this.tool.name,
+				);
+			}
+		}
 
 		if (approvalCheck.required) {
 			const scheduledCall = context?.toolCall?.toolCalls[context.toolCall.index];

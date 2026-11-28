@@ -99,7 +99,7 @@ Resolution per tool call:
 
 Policy strings are trimmed and case-normalized. Invalid user values are ignored.
 
-Approval is resolved again after extension `tool_call` handlers revise the input, against the arguments that will actually execute. A deny blocks execution before a prompt; a call that still requires a prompt fails rather than silently allowing it when no interactive UI is available.
+Approval is resolved again after extension `tool_call` handlers revise the input, against the arguments that will actually execute. When `toolInterceptor.enabled` is `true`, `toolInterceptor.rules` also run before the interactive approval prompt (after `resolveApproval` on the effective arguments) so intercepted calls are refused with guidance without prompting the user. A deny blocks execution before a prompt; a call that still requires a prompt fails rather than silently allowing it when no interactive UI is available.
 
 ## Safety overrides
 

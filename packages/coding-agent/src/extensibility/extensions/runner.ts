@@ -15,6 +15,7 @@ import type {
 	AssistantMessage,
 	CredentialDisabledEvent,
 	ImageContent,
+	Judge,
 	Model,
 	ProviderResponseMetadata,
 	TextContent,
@@ -156,6 +157,7 @@ export interface ToolCallPreflight {
 		context?: AgentToolContext,
 	) => Promise<AgentToolResult | undefined> | AgentToolResult | undefined;
 	cancel?: (toolCallId: string) => void;
+	judge?: (purpose: string, settings?: Settings) => Judge | undefined;
 }
 
 export const EXTENSION_HANDLER_TIMEOUT_MS = 30_000;
@@ -1005,6 +1007,14 @@ export class ExtensionRunner {
 	 */
 	get sessionSettings(): Settings | undefined {
 		return this.settings;
+	}
+
+	/**
+	 * Resolve a {@link Judge} for session-owned preflight checks (`toolInterceptor`),
+	 * billed to this session's usage ledger and backed by the shared judgment cache.
+	 */
+	getJudge(purpose = "tool-interceptor", settingsOverride?: Settings): Judge | undefined {
+		return this.#toolCallPreflight?.judge?.(purpose, settingsOverride);
 	}
 
 	initialize(
