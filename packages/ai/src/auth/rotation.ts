@@ -1,3 +1,4 @@
+import { logger } from "@oh-my-pi/pi-utils";
 import { scheduler } from "node:timers/promises";
 import * as AIError from "../error";
 import { isUsageLimitOutcome } from "../error/rate-limit";
@@ -13,6 +14,7 @@ import {
 	credentialBlockScopesForRequest,
 	modelAccountPolicyBlockScope,
 	OAUTH_ORG_POLICY_BLOCK_SCOPE,
+	OAUTH_REFRESH_FAILURE_BLOCK_SCOPE,
 	providerTypeKey,
 	serviceTierBlockScope,
 } from "./blocks";
@@ -60,6 +62,16 @@ export type CredentialBlockRouting = {
 	rankingContext: CredentialRankingContext;
 	blockScope: string | undefined;
 	siblingBlockScopes: readonly string[];
+};
+
+/** Why rotation counted one sibling credential as available or not. */
+type SiblingVerdict = {
+	credentialId: number;
+	state: "free" | "blocked" | "model-policy" | "org-policy" | "outside-session-pool";
+	/** Merged deadline across the scopes selection reads. */
+	blockedUntilMs?: number;
+	/** Exact scopes holding a live block (`""` is the unscoped quota block). */
+	blockScopes?: string[];
 };
 
 /** Dependencies for rate-limit marking and credential rotation. */
@@ -192,24 +204,41 @@ export class RateLimits implements LimitsApi {
 					blockedUntil)
 				: blockedUntil;
 
-		const remainingCredentials = this.#deps.pool
-			.credentials(provider)
-			.map((credential, index) => ({ credential, index }))
-			.filter(
-				(entry): entry is { credential: AuthCredential; index: number } =>
-					entry.credential.type === credentialType &&
-					entry.index !== targetIndex &&
-					this.#deps.affinity.allows(provider, sessionId, entry.credential),
-			);
+		const allSiblings = this.#deps.pool
+			.entries(provider)
+			.map((entry, index) => ({ credential: entry.credential, index, id: entry.id }))
+			.filter(entry => entry.credential.type === credentialType && entry.index !== targetIndex);
+		const remainingCredentials = allSiblings.filter(entry =>
+			this.#deps.affinity.allows(provider, sessionId, entry.credential),
+		);
 
 		let availability = this.#siblingAvailability(provider, routing, remainingCredentials);
 		// Selection re-checks live usage for a blocked account whose block a
 		// healthy report may lift; rotation must judge siblings the same way, or
 		// a stale block reports "no sibling" while the next resolve would happily
 		// serve that account.
+		let probedHealable = false;
 		if (!availability.free && (await this.#probeHealableSiblings(provider, routing, remainingCredentials, probe))) {
+			probedHealable = true;
 			availability = this.#siblingAvailability(provider, routing, remainingCredentials);
 		}
+		logger.debug("Credential blocked for rotation", {
+			provider,
+			sessionId,
+			credentialId: targetId,
+			blockScope: routing.blockScope,
+			blockedUntilMs: mergedBlockedUntil,
+			providerTimed,
+			siblingAvailable: availability.free,
+			retryAtMs: availability.retryAtMs,
+			probedHealable,
+			siblings: [
+				...availability.siblings,
+				...allSiblings
+					.filter(sibling => !remainingCredentials.includes(sibling))
+					.map((sibling): SiblingVerdict => ({ credentialId: sibling.id, state: "outside-session-pool" })),
+			],
+		});
 		return availability.free
 			? { switched: true, blockedUntilMs: mergedBlockedUntil, priorBlockedUntilMs, priorBlockedUntilTimed }
 			: {
@@ -238,15 +267,27 @@ export class RateLimits implements LimitsApi {
 	/**
 	 * Whether any sibling is unblocked under the scopes selection reads; else the
 	 * earliest unblock. A sibling refused by model or organization policy adds
-	 * no unblock time a caller could usefully wait for.
+	 * no unblock time a caller could usefully wait for. `siblings` is each
+	 * sibling's verdict: the live block scopes and deadline that made it
+	 * unavailable.
 	 */
 	#siblingAvailability(
 		provider: string,
 		routing: CredentialBlockRouting,
-		siblings: readonly { credential: AuthCredential; index: number }[],
-	): { free: boolean; retryAtMs?: number } {
+		siblings: readonly { credential: AuthCredential; index: number; id: number }[],
+	): { free: boolean; retryAtMs?: number; siblings: SiblingVerdict[] } {
 		const modelPolicyScope = modelAccountPolicyBlockScope(routing.rankingContext.modelId);
+		const scopes = [
+			"",
+			AUTH_BLOCK_SCOPE,
+			OAUTH_REFRESH_FAILURE_BLOCK_SCOPE,
+			ACCOUNT_POLICY_BLOCK_SCOPE,
+			OAUTH_ORG_POLICY_BLOCK_SCOPE,
+			...routing.siblingBlockScopes,
+		];
+		let free = false;
 		let retryAtMs: number | undefined;
+		const verdicts: SiblingVerdict[] = [];
 		for (const sibling of siblings) {
 			// Sibling availability must use the same scope set selection reads, or
 			// this reports a sibling as free that selection will then refuse.
@@ -256,22 +297,41 @@ export class RateLimits implements LimitsApi {
 				sibling.index,
 				routing.siblingBlockScopes,
 			);
-			if (siblingBlockedUntil === undefined) return { free: true };
-			if (
-				this.#deps.blocks.isScopeBlocked(
-					provider,
-					routing.providerKey,
-					sibling.index,
-					OAUTH_ORG_POLICY_BLOCK_SCOPE,
-				) ||
-				(modelPolicyScope !== undefined &&
-					this.#deps.blocks.isScopeBlocked(provider, routing.providerKey, sibling.index, modelPolicyScope))
-			) {
+			if (siblingBlockedUntil === undefined) {
+				free = true;
+				verdicts.push({ credentialId: sibling.id, state: "free" });
 				continue;
 			}
+			const blockScopes = [...new Set(scopes)].filter(scope =>
+				this.#deps.blocks.isScopeBlocked(provider, routing.providerKey, sibling.index, scope),
+			);
+			const orgPolicyBlocked = this.#deps.blocks.isScopeBlocked(
+				provider,
+				routing.providerKey,
+				sibling.index,
+				OAUTH_ORG_POLICY_BLOCK_SCOPE,
+			);
+			const modelPolicyBlocked =
+				modelPolicyScope !== undefined &&
+				this.#deps.blocks.isScopeBlocked(provider, routing.providerKey, sibling.index, modelPolicyScope);
+			if (orgPolicyBlocked || modelPolicyBlocked) {
+				verdicts.push({
+					credentialId: sibling.id,
+					state: orgPolicyBlocked ? "org-policy" : "model-policy",
+					blockedUntilMs: siblingBlockedUntil,
+					blockScopes,
+				});
+				continue;
+			}
+			verdicts.push({
+				credentialId: sibling.id,
+				state: "blocked",
+				blockedUntilMs: siblingBlockedUntil,
+				blockScopes,
+			});
 			if (retryAtMs === undefined || siblingBlockedUntil < retryAtMs) retryAtMs = siblingBlockedUntil;
 		}
-		return { free: false, retryAtMs };
+		return free ? { free, siblings: verdicts } : { free, retryAtMs, siblings: verdicts };
 	}
 
 	/**
@@ -323,9 +383,20 @@ export class RateLimits implements LimitsApi {
 			apiKey: options?.apiKey,
 			allowStaleOAuthBearer: true,
 		});
-		if (!sessionCredential) return { switched: false };
+		if (!sessionCredential) {
+			logger.debug("Usage limit not marked: no credential target", {
+				provider,
+				sessionId,
+				credentialId: options?.credentialId,
+				hasApiKey: options?.apiKey !== undefined,
+			});
+			return { switched: false };
+		}
 		const target = this.#deps.pool.entries(provider)[sessionCredential.index];
-		if (!target || target.credential.type !== sessionCredential.type) return { switched: false };
+		if (!target || target.credential.type !== sessionCredential.type) {
+			logger.debug("Usage limit not marked: credential target changed", { provider, sessionId });
+			return { switched: false };
+		}
 		const credentialType = sessionCredential.type;
 		const targetCredentialId = target.id;
 

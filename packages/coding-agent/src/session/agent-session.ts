@@ -16219,7 +16219,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	pinCurrentProviderOAuthAccount(credentialId: number): boolean {
 		const provider = this.model?.provider;
 		if (!provider || this.isStreaming) return false;
-		return this.#modelRegistry.authStorage.sessions.pin(provider, this.sessionId, credentialId);
+		const pinned = this.#modelRegistry.authStorage.sessions.pin(provider, this.sessionId, credentialId);
+		logger.debug("Session OAuth account pin requested", {
+			sessionId: this.sessionId,
+			provider,
+			credentialId,
+			pinned,
+		});
+		return pinned;
 	}
 
 	/**
@@ -16672,6 +16679,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				return { restored: false, retryAfterMs, poolLimited };
 			}
 			const executed = await this.#redeemConsentedResets(provider, plan.actions, coordinator);
+			logger.debug("auto-reset: blocked pass", {
+				provider,
+				actions: plan.actions.map(action => ({
+					reason: action.reason,
+					credentialId: action.target.credentialId,
+					window: action.window,
+					blockedWindows: action.blockedWindows,
+				})),
+				restoredCredentialIds: executed.restoredCredentialIds,
+			});
 			return {
 				restored: executed.restoredCredentialIds.length > 0,
 				restoredCredentialIds: executed.restoredCredentialIds,

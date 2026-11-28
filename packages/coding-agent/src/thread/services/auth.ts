@@ -43,6 +43,7 @@ import {
 	AnthropicSlowModeLanes,
 	anthropicSlowModeLanes,
 } from "../../session/anthropic-slow-mode";
+import type { ThreadId } from "../identity";
 import type { MainThreadLink, WorkerThreadLink } from "../protocol";
 import { type RemoteObject, type RpcServe, registerRpcError, rpcSync } from "../rpc";
 import type { ThreadService, WorkerPeer } from "../services";
@@ -188,7 +189,10 @@ function authAvailability(storage: AuthStorage, providers: readonly string[]): A
 	return table;
 }
 /** Main-side implementation of {@link AuthStorageProtocol} for one worker. */
-function serveAuthStorage(state: PeerAuthState): RpcServe<AuthStorage, AuthStorageProtocol> {
+function serveAuthStorage(state: PeerAuthState, threadId: ThreadId): RpcServe<AuthStorage, AuthStorageProtocol> {
+	// Session-affinity and quota calls decide which account a worker-homed subagent uses.
+	const trace = (method: string, fields: Record<string, unknown>): void =>
+		logger.debug("Worker auth bridge call", { threadId, method, ...fields });
 	return {
 		"credentials.generation": storage => storage.credentials.generation,
 		"credentials.onGeneration": (storage, listener) =>
@@ -244,14 +248,18 @@ function serveAuthStorage(state: PeerAuthState): RpcServe<AuthStorage, AuthStora
 		"oauth.refresh": (storage, id, signal, options) => storage.oauth.refresh(id, signal, options),
 		"oauth.signOut": (storage, provider, id, options) => storage.oauth.signOut(provider, id, options),
 
-		"sessions.pin": (storage, provider, sessionId, credentialId, options) =>
-			storage.sessions.pin(provider, sessionId, credentialId, options),
-		"sessions.inherit": (storage, source, target, table) =>
-			storage.sessions.inherit(
+		"sessions.pin": (storage, provider, sessionId, credentialId, options) => {
+			trace("sessions.pin", { provider, sessionId, credentialId, restored: options?.restoredAtMs !== undefined });
+			return storage.sessions.pin(provider, sessionId, credentialId, options);
+		},
+		"sessions.inherit": (storage, source, target, table) => {
+			trace("sessions.inherit", { sourceSessionId: source, targetSessionId: target, filtered: table !== undefined });
+			return storage.sessions.inherit(
 				source,
 				target,
 				table ? (provider, explicit) => table[provider]?.[explicit ? 1 : 0] ?? false : undefined,
-			),
+			);
+		},
 		"sessions.restrict": (storage, provider, sessionId, identityKeys) =>
 			state.hold({
 				storage,
@@ -303,9 +311,14 @@ function serveAuthStorage(state: PeerAuthState): RpcServe<AuthStorage, AuthStora
 			return storage.health.check({ ...rest, baseUrlResolver: tableResolver(baseUrls) });
 		},
 
-		"limits.markReached": (storage, provider, sessionId, options) =>
-			storage.limits.markReached(provider, sessionId, options),
-		"limits.rotate": (storage, provider, sessionId, options) => storage.limits.rotate(provider, sessionId, options),
+		"limits.markReached": (storage, provider, sessionId, options) => {
+			trace("limits.markReached", { provider, sessionId, credentialId: options?.credentialId });
+			return storage.limits.markReached(provider, sessionId, options);
+		},
+		"limits.rotate": (storage, provider, sessionId, options) => {
+			trace("limits.rotate", { provider, sessionId, credentialId: options?.credentialId });
+			return storage.limits.rotate(provider, sessionId, options);
+		},
 		"limits.markServiceTierUnavailable": (storage, provider, options) =>
 			storage.limits.markServiceTierUnavailable(provider, options),
 		"limits.rearmServiceTier": (storage, provider, serviceTier, modelId) =>
@@ -467,7 +480,7 @@ export const authService: ThreadService = {
 		link.exportClass<AuthStorage, AuthStorageProtocol>(
 			AUTH_STORAGE_KIND,
 			(value): value is AuthStorage => value instanceof AuthStorage,
-			serveAuthStorage(peerState(link)),
+			serveAuthStorage(peerState(link), peer.threadId),
 		);
 		link.exportClass<ModelRegistry, ModelRegistryProtocol>(
 			MODEL_REGISTRY_KIND,

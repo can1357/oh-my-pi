@@ -2167,11 +2167,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// account wins) and cold-miss the child's whole prefix. An explicit parent pin is
 		// the user's choice and still reaches the child.
 		const ownPins = sessionManager.getCredentialPins();
-		modelRegistry.authStorage.sessions.inherit(
+		const inherited = modelRegistry.authStorage.sessions.inherit(
 			options.credentialSourceSessionId,
 			providerSessionId,
 			(provider, explicit) => explicit || !ownPins.has(provider),
 		);
+		// Providers skipped as "excluded" in the affinity log are these transcript pins.
+		logger.debug("Subagent session inherited parent credential affinity", {
+			agentId: options.agentId ?? options.parentTaskPrefix,
+			sourceSessionId: options.credentialSourceSessionId,
+			targetSessionId: providerSessionId,
+			inherited,
+			ownTranscriptPins: [...ownPins.keys()],
+			accountPools: options.oauthAccountPools ? Object.keys(options.oauthAccountPools) : undefined,
+		});
 	}
 	// From here on the session resolves every key through its pools; see
 	// SessionAccountPoolScope. A startup failure leaves no session to lift them.

@@ -429,22 +429,32 @@ export class SessionAffinity implements SessionsApi {
 		include?: (provider: string, explicit: boolean) => boolean,
 	): number {
 		if (!sourceSessionId || !targetSessionId || sourceSessionId === targetSessionId) return 0;
-		let inherited = 0;
+		const inherited: { provider: string; credentialId: number | undefined; explicit: boolean }[] = [];
+		const skipped: { provider: string; reason: "not-permitted" | "excluded" }[] = [];
 		for (const provider of this.#pool.providers()) {
 			const credential = this.get(provider, sourceSessionId);
-			if (!credential || !this.#permits(provider, targetSessionId, credential.index)) continue;
-			if (include && !include(provider, credential.explicit === true)) continue;
-			this.record(
-				provider,
-				targetSessionId,
-				credential.type,
-				credential.index,
-				credential.lastUsedAtMs,
-				credential.explicit === true,
-			);
-			inherited += 1;
+			if (!credential) continue;
+			if (!this.#permits(provider, targetSessionId, credential.index)) {
+				skipped.push({ provider, reason: "not-permitted" });
+				continue;
+			}
+			const explicit = credential.explicit === true;
+			if (include && !include(provider, explicit)) {
+				skipped.push({ provider, reason: "excluded" });
+				continue;
+			}
+			this.record(provider, targetSessionId, credential.type, credential.index, credential.lastUsedAtMs, explicit);
+			inherited.push({ provider, credentialId: credential.credentialId, explicit });
 		}
-		return inherited;
+		if (inherited.length > 0 || skipped.length > 0) {
+			logger.debug("Session credential affinity inherited", {
+				sourceSessionId,
+				targetSessionId,
+				inherited,
+				skipped,
+			});
+		}
+		return inherited.length;
 	}
 
 	/**

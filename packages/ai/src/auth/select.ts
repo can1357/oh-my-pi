@@ -926,6 +926,9 @@ export class CredentialSelector {
 			: undefined;
 		// Candidate IDs were captured before ranking. Their synchronous rebinds
 		// share one provider re-list; resyncs after refresh await re-read the store.
+		// Preflight may rebind `selection.index`; the trace names each candidate by
+		// the id it started with.
+		const candidateCredentialIds = new Map<OAuthCandidate, number>();
 		let preflightRows: StoredAuthCredential[] | undefined;
 		await Promise.all(
 			candidates.map(async candidate => {
@@ -935,6 +938,7 @@ export class CredentialSelector {
 					preflightFailures.add(candidate);
 					return;
 				}
+				candidateCredentialIds.set(candidate, initialCredentialId);
 				const beforeSync = candidate.selection.credential;
 				preflightRows ??= this.#reloadProviderRows(provider);
 				if (!this.#rebindOAuthSelection(preflightRows, candidate.selection, initialCredentialId)) {
@@ -1102,6 +1106,42 @@ export class CredentialSelector {
 		const lastResortCandidates = explicitPin
 			? [explicitPin, ...candidates.filter(candidate => candidate !== explicitPin)]
 			: candidates;
+		// Selection telemetry: enough to reconstruct which account a session used and why.
+		// Only a multi-account pool has a choice to explain.
+		const traceSelection = stored.length > 1;
+		const describeSelection = (
+			candidate: OAuthCandidate | undefined,
+			resolvedCredentialId: number | undefined,
+			allowBlocked: boolean,
+		) => {
+			const resolvedSticky =
+				resolvedCredentialId !== undefined && resolvedCredentialId === sessionCredential?.credentialId;
+			return {
+				provider,
+				sessionId,
+				modelId: options?.modelId,
+				credentialId: resolvedCredentialId,
+				// Differs from `credentialId` when the candidate was disabled and re-resolved.
+				candidateCredentialId: candidate === undefined ? undefined : candidateCredentialIds.get(candidate),
+				source:
+					candidate === undefined
+						? undefined
+						: allowBlocked
+							? "last-resort-blocked"
+							: resolvedSticky
+								? sessionPinIsExplicit
+									? "explicit-pin"
+									: "sticky"
+								: shouldRank
+									? "usage-ranking"
+									: "pool-order",
+				stickyCredentialId: sessionCredential?.credentialId,
+				stickyExplicit: sessionPinIsExplicit,
+				stickyWarm: sessionPreferredIndex === undefined ? undefined : sessionPreferredIsWarm,
+				stickyAvailable: sessionPreferredIndex === undefined ? undefined : sessionPreferredIsAvailable,
+				restricted: this.#deps.affinity.isRestricted(provider, sessionId),
+			};
+		};
 
 		let checkPoolExhaustion = this.#deps.affinity.isRestricted(provider, sessionId);
 		for (const pass of passes) {
@@ -1135,6 +1175,12 @@ export class CredentialSelector {
 					sessionBasis: sessionCredential,
 				});
 				if (!resolved) continue;
+				if (traceSelection) {
+					logger.debug(
+						"OAuth credential resolved",
+						describeSelection(candidate, resolved.credentialId, pass.allowBlocked),
+					);
+				}
 				// A dead grant makes `tryOAuth` re-resolve onto a sibling, whose own
 				// verdict that inner pass already attached.
 				const servedByCandidate =
@@ -1146,6 +1192,19 @@ export class CredentialSelector {
 			}
 		}
 
+		if (traceSelection) {
+			// The full-pool scan runs only when no account could serve, never on the request path.
+			logger.debug("OAuth credential unresolved", {
+				...describeSelection(undefined, undefined, false),
+				blockedCredentialIds: credentials
+					.filter(entry => this.#deps.blocks.isBlocked(provider, providerKey, entry.index, blockScopes))
+					.map(entry => credentialIds[entry.index]),
+				preflightFailedCredentialIds: [...preflightFailures].map(candidate =>
+					candidateCredentialIds.get(candidate),
+				),
+				transientRefreshFailure: transientRefreshFailure !== undefined,
+			});
+		}
 		if (transientRefreshFailure !== undefined) {
 			throw new AIError.OAuthRefreshUnavailableError(provider, transientRefreshFailure);
 		}
