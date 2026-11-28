@@ -57,6 +57,7 @@ provider "github-copilot" {
 	// Replaces the provider check that disabled reasoning params on chat completions.
 	on-api "openai-completions" {
 		supports-reasoning-params #false
+		reasoning-opaque-replay #true
 	}
 	// Copilot caps GPT-5.4 below the lineage's 1M window (model-limits in
 	// runtime/behavior.kdl), so the class-wide window patch and uncapped

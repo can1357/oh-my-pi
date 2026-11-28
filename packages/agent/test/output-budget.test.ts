@@ -274,4 +274,62 @@ describe("countContextOverrun", () => {
 		const context: Context = { messages: [userOf(1_200_000, 1), reported(10_000, 2)] };
 		expect(countContextOverrun(context, deepseek, tokenizer)).toBe(1_200_000);
 	});
+
+	test("excludes a dedup-invalidated opaque summary from the overrun floor", () => {
+		const copilotGemini = buildModel({
+			id: "gemini-4-neon",
+			name: "Gemini 4 Neon",
+			api: "openai-completions",
+			provider: "github-copilot",
+			baseUrl: "https://api.githubcopilot.com",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 16_384,
+			compat: { replayReasoningContent: false },
+		});
+		const copilotTokenizer = new Tokenizer(copilotGemini);
+		const summary = "Check the repository layout carefully. ".repeat(400);
+		const toolCall = { type: "toolCall" as const, id: "call_dup", name: "read", arguments: { path: "a.ts" } };
+		const makeTurn = (opaque: string, timestamp: number): AssistantMessage => ({
+			role: "assistant",
+			api: copilotGemini.api,
+			provider: copilotGemini.provider,
+			model: copilotGemini.id,
+			content: [
+				{
+					type: "thinking",
+					thinking: summary,
+					thinkingSignature: JSON.stringify({ field: "reasoning_text", reasoningOpaque: opaque }),
+				},
+				toolCall,
+			],
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp,
+		});
+		const first = makeTurn("first-state", 1);
+		const second = makeTurn("second-state", 2);
+		const context: Context = { messages: [first, second] };
+		const historyAwareTokens = copilotTokenizer.countMessages(context.messages, { excludeEncryptedReasoning: true });
+		const isolatedSumTokens =
+			copilotTokenizer.countMessage(first, { excludeEncryptedReasoning: true }) +
+			copilotTokenizer.countMessage(second, { excludeEncryptedReasoning: true });
+		expect(historyAwareTokens).toBeLessThan(isolatedSumTokens);
+
+		// A budget strictly between the history-aware floor and the isolated sum must fit.
+		const fitsModel = { ...copilotGemini, contextWindow: historyAwareTokens + minimumRequest };
+		expect(countContextOverrun(context, fitsModel, copilotTokenizer)).toBeUndefined();
+		expect(
+			countContextOverrun(context, { ...fitsModel, contextWindow: fitsModel.contextWindow - 1 }, copilotTokenizer),
+		).toBe(historyAwareTokens);
+	});
 });

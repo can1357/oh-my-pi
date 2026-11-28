@@ -180,6 +180,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		"chat-template-thinking-false",
 	]),
 	"reasoning-effort-map": wire("reasoningEffortMap", OAI, "object"),
+	"reasoning-opaque-replay": wire("reasoningOpaqueReplay", ["openai"]),
 	"replay-reasoning-content": wire("replayReasoningContent", ["openai"]),
 	"synthetic-reasoning-content-fallback": wire("syntheticReasoningContentFallback", ["openai"]),
 	"requires-assistant-after-tool-result": wire("requiresAssistantAfterToolResult", ["openai"]),

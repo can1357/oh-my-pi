@@ -175,10 +175,8 @@ export function countContextOverrun(context: Context, model: Model, tokenizer: T
 	if (!contextWindow || contextWindow <= 0) return undefined;
 	const budget = contextWindow - OUTPUT_FIT_HEADWAY_TOKENS - MIN_FITTED_OUTPUT_TOKENS;
 	let tokens = countFramingTokens(context, tokenizer);
-	for (const message of context.messages) {
-		if (tokens > budget) break;
-		// Encrypted reasoning bytes overstate what the provider bills; a floor leaves them out.
-		tokens += tokenizer.countMessage(message, { excludeEncryptedReasoning: true });
-	}
+	if (tokens > budget) return tokens;
+	// Encrypted reasoning bytes overstate what the provider bills; a floor leaves them out.
+	tokens += tokenizer.countMessages(context.messages, { excludeEncryptedReasoning: true }, budget - tokens);
 	return tokens > budget ? tokens : undefined;
 }

@@ -141,7 +141,7 @@ import {
 	shouldRetryWithoutStrictTools,
 	withOpenAIPromptCacheBreakpoint,
 } from "./openai-shared";
-import { completionsSendsOwnThinking, transformMessages } from "./transform-messages";
+import { completionsSendsOwnThinking, isSameModelTurn, transformMessages } from "./transform-messages";
 import {
 	isOpenAICompletionsVisionSupported,
 	joinTextWithImagePlaceholder,
@@ -150,7 +150,7 @@ import {
 
 export { applyOpenRouterRoutingVariant } from "./openai-shared";
 
-const OPENAI_TOOL_CALL_ID_MAX_LENGTH = 40;
+export const OPENAI_TOOL_CALL_ID_MAX_LENGTH = 40;
 
 type OpenAICompletionsReasoningField = NonNullable<ResolvedOpenAICompat["reasoningContentField"]>;
 
@@ -409,7 +409,7 @@ function getLiteLLMThinkingBlocksDelta(delta: object): unknown[] | undefined {
 /**
  * Whether a thinking block's signature is a raw LiteLLM (Anthropic) one, not a
  * reasoning field name, the Mistral content-parts marker, or a
- * `reasoning_details` envelope.
+ * chat-completions reasoning replay envelope.
  */
 export function isLiteLLMThinkingSignature(signature: string | undefined): signature is string {
 	return !!signature && !isReasoningSourceSignature(signature) && !parseReasoningDetailsSignature(signature);
@@ -440,6 +440,7 @@ function encodeLiteLLMThinkingBlocks(content: AssistantMessage["content"]): Lite
 type OpenAICompletionsAssistantMessageParam = ChatCompletionAssistantMessageParam &
 	Partial<Record<OpenAICompletionsReasoningField | GeminiMessageThoughtSignatureField, string>> & {
 		reasoning_details?: unknown[];
+		reasoning_opaque?: string;
 		thinking_blocks?: LiteLLMThinkingBlock[];
 	};
 
@@ -757,6 +758,7 @@ export function isOpenAICompletionsProgressChunk(chunk: unknown): boolean {
 				reasoning?: unknown;
 				reasoning_content?: unknown;
 				reasoning_text?: unknown;
+				reasoning_opaque?: unknown;
 				reasoning_details?: unknown;
 				refusal?: unknown;
 			};
@@ -775,6 +777,7 @@ export function isOpenAICompletionsProgressChunk(chunk: unknown): boolean {
 	if (typeof delta.reasoning === "string" && delta.reasoning.length > 0) return true;
 	if (typeof delta.reasoning_content === "string" && delta.reasoning_content.length > 0) return true;
 	if (typeof delta.reasoning_text === "string" && delta.reasoning_text.length > 0) return true;
+	if (typeof delta.reasoning_opaque === "string" && delta.reasoning_opaque.length > 0) return true;
 	if (Array.isArray(delta.reasoning_details) && delta.reasoning_details.length > 0) return true;
 	if (typeof delta.refusal === "string" && delta.refusal.length > 0) return true;
 	return false;
@@ -1080,6 +1083,7 @@ const streamOpenAICompletionsOnce = (
 			const attemptedReasoningEffortFallbacks = new Set<string>();
 			let activeReasoningEffortFallbackKey: string | undefined;
 			let activeRequestParams: OpenAICompletionsParams | undefined;
+			let reasoningOpaqueReplay = false;
 			const providerSessionState = getOpenAICompletionsProviderSessionState(
 				model,
 				baseUrl,
@@ -1095,6 +1099,7 @@ const streamOpenAICompletionsOnce = (
 				const effectiveToolStrictModeOverride = disableStrictTools ? "none" : toolStrictModeOverride;
 				const builtParams = buildParams(model, context, options, effectiveToolStrictModeOverride);
 				appliedStrictTools = builtParams.strictToolsApplied;
+				reasoningOpaqueReplay = builtParams.reasoningOpaqueReplay;
 				let params = builtParams.params;
 				// Tool-triggered suppression is a hard wire constraint; cached
 				// enabled-effort negotiation must not overwrite its `none`.
@@ -1260,6 +1265,7 @@ const streamOpenAICompletionsOnce = (
 			};
 			let currentBlock: OpenAIStreamBlock | undefined;
 			let messageThoughtSignature: GeminiMessageThoughtSignature | undefined;
+			let reasoningOpaque: string | undefined;
 			// Content blocks are append-only for the lifetime of the stream, so each
 			// block's index is stable once pushed. Map block → index to keep the
 			// per-delta contentIndex lookup O(1): a linear `indexOf` per delta turns a
@@ -1657,9 +1663,19 @@ const streamOpenAICompletionsOnce = (
 					// Some endpoints return reasoning in reasoning_content (llama.cpp),
 					// or reasoning (other openai compatible endpoints). Use the first
 					// non-empty reasoning field to avoid duplication when a chunk carries
-					// multiple aliases for the same reasoning text.
-					const reasoningFields = ["reasoning_content", "reasoning", "reasoning_text"];
+					// multiple aliases for the same reasoning text. When opaque replay is
+					// enabled, prefer `reasoning_text` so a mirrored alias does not erase
+					// the replay summary source marker.
+					const reasoningFields = reasoningOpaqueReplay
+						? ["reasoning_text", "reasoning_content", "reasoning"]
+						: ["reasoning_content", "reasoning", "reasoning_text"];
 					const deltaRecord = choice.delta as Record<string, unknown>;
+					if (reasoningOpaqueReplay) {
+						const opaque = deltaRecord.reasoning_opaque;
+						// Interleaved reasoning can send a new state at each tool call, with
+						// or without its text. Empty values never clear the latest state.
+						if (typeof opaque === "string" && opaque.length > 0) reasoningOpaque = opaque;
+					}
 					let foundReasoningField: string | undefined;
 					let foundReasoningDelta = "";
 					for (const field of reasoningFields) {
@@ -1993,23 +2009,33 @@ const streamOpenAICompletionsOnce = (
 				);
 			}
 
-			// Keep the received `reasoning_details` on the first thinking block whose
-			// signature only names its text's source field, so replay sends them back
-			// verbatim. With no such block, an empty thinking block holds them only when
-			// the turn has other content (text or tool calls, already pushed by now): an
-			// encrypted-only turn stays empty so the empty-stop retry still runs.
-			if (receivedReasoningDetails.length > 0) {
+			// Store message-level reasoning replay data on the first thinking block
+			// carrying only a source marker. Use an empty thinking block if needed,
+			// but leave a turn with no other content eligible for empty-stop retry
+			// and never persist turn-scoped opaque state from errored/aborted turns.
+			const failedTurn =
+				output.stopReason === "error" ||
+				output.stopReason === "aborted" ||
+				abortTracker.getLocalAbortReason() !== undefined ||
+				abortTracker.wasCallerAbort();
+			const persistReasoningOpaque = failedTurn ? undefined : reasoningOpaque;
+			if (receivedReasoningDetails.length > 0 || persistReasoningOpaque !== undefined) {
 				const holder = output.content.find(
 					(block): block is ThinkingContent =>
 						block.type === "thinking" &&
 						(block.thinkingSignature === undefined || isReasoningField(block.thinkingSignature)),
 				);
-				const stored: ReasoningDetailsSignature = { reasoningDetails: receivedReasoningDetails };
+				const stored: ReasoningDetailsSignature = { reasoningOpaque: persistReasoningOpaque };
+				if (receivedReasoningDetails.length > 0) stored.reasoningDetails = receivedReasoningDetails;
 				const holderField = holder?.thinkingSignature;
 				const field = isReasoningField(holderField) ? holderField : mirroredReasoningField;
 				if (field) stored.field = field;
 				if (holder) holder.thinkingSignature = JSON.stringify(stored);
-				else if (output.content.length > 0) openThinkingBlock(JSON.stringify(stored));
+				else if (
+					receivedReasoningDetails.length > 0 ? output.content.length > 0 : hasVisibleAssistantContent(output)
+				) {
+					openThinkingBlock(JSON.stringify(stored));
+				}
 			}
 
 			if (currentBlock?.type === "toolCall") {
@@ -2319,6 +2345,7 @@ function buildParams(
 	toolStrictMode: AppliedToolStrictMode;
 	strictToolsApplied: boolean;
 	reasoningEffortFallbackAllowed: boolean;
+	reasoningOpaqueReplay: boolean;
 } {
 	const initialPolicy = resolveOpenAICompatForRequest(model, options, Boolean(context.tools?.length));
 	const initialCompat = initialPolicy.compat as ResolvedOpenAICompat;
@@ -2518,6 +2545,7 @@ function buildParams(
 		toolStrictMode,
 		strictToolsApplied,
 		reasoningEffortFallbackAllowed: finalPolicy.reasoning.disableReason !== "tools",
+		reasoningOpaqueReplay: compat.reasoningOpaqueReplay,
 	};
 }
 
@@ -2652,6 +2680,70 @@ export function completionsDropsOwnThinking(
 	);
 }
 
+/**
+ * Replay the latest opaque state with the whole turn's summary, but only
+ * to the exact model that issued it and never from errored/aborted turns.
+ */
+export function getReasoningOpaqueReplay(
+	turn: AssistantMessage,
+	model: Pick<Model, "api" | "provider" | "id"> | undefined,
+	enabled: boolean,
+): { opaque: string; text: string } | undefined {
+	if (
+		!enabled ||
+		!model ||
+		turn.stopReason === "error" ||
+		turn.stopReason === "aborted" ||
+		!isSameModelTurn(turn, model)
+	) {
+		return undefined;
+	}
+	let opaque: string | undefined;
+	let text = "";
+	for (const block of turn.content) {
+		if (block.type !== "thinking") continue;
+		const signature = block.thinkingSignature;
+		const stored = parseReasoningDetailsSignature(signature);
+		if (stored?.reasoningOpaque) opaque = stored.reasoningOpaque;
+		if (signature === "reasoning_text" || stored?.field === "reasoning_text") text += block.thinking;
+	}
+	return opaque === undefined ? undefined : { opaque, text };
+}
+
+interface CompletionsToolCallIdCompat {
+	requiresMistralToolIds?: boolean;
+	usesOpenAIToolCallIdLimit?: boolean;
+}
+
+/** Normalize before dedup for foreign turns, or at encode time for the target's own turns. */
+export function normalizeCompletionsToolCallId(
+	id: string,
+	compat: CompletionsToolCallIdCompat | undefined,
+	isSameModelSource: boolean,
+): string {
+	if (compat?.requiresMistralToolIds) return normalizeMistralToolId(id, true);
+	// A pipe is a literal part of a same-model Chat Completions correlation ID.
+	const pipe = isSameModelSource ? -1 : id.indexOf("|");
+	if (pipe !== -1) return normalizeToolCallId(id.slice(0, pipe), OPENAI_TOOL_CALL_ID_MAX_LENGTH);
+	return compat?.usesOpenAIToolCallIdLimit && id.length > OPENAI_TOOL_CALL_ID_MAX_LENGTH
+		? id.slice(0, OPENAI_TOOL_CALL_ID_MAX_LENGTH)
+		: id;
+}
+
+/** Whether encoding an opaque replay turn changes any of its provider-issued IDs. */
+export function completionsRewritesToolCallId(
+	turn: AssistantMessage,
+	compat: CompletionsToolCallIdCompat | undefined,
+): boolean {
+	for (const block of turn.content) {
+		if (block.type !== "toolCall") continue;
+		if (typeof block.id !== "string") return true;
+		const normalized = normalizeCompletionsToolCallId(block.id, compat, true);
+		if (normalized !== block.id || normalized.trim().length === 0) return true;
+	}
+	return false;
+}
+
 export function convertMessages(
 	model: Model<"openai-completions">,
 	context: Context,
@@ -2665,30 +2757,10 @@ export function convertMessages(
 			? OPENAI_TOOL_CALL_ID_MAX_LENGTH
 			: undefined;
 	const duplicateToolCallIdSuffixPrefix = compat.requiresMistralToolIds ? "dup" : undefined;
-	const normalizeCompletionsToolCallId = (id: string, source?: AssistantMessage): string => {
-		if (compat.requiresMistralToolIds) return normalizeMistralToolId(id, true);
-
-		const isSameModelSource =
-			source !== undefined &&
-			source.provider === model.provider &&
-			source.api === model.api &&
-			source.model === model.id;
-		// Cross-model replay converts OpenAI Responses composite IDs from
-		// `{call_id}|{item_id}` to the Chat Completions `call_id`. Same-model
-		// Chat Completions IDs are provider-issued opaque correlation tokens.
-		if (!isSameModelSource && id.includes("|")) {
-			const [callId] = id.split("|");
-			return normalizeToolCallId(callId, OPENAI_TOOL_CALL_ID_MAX_LENGTH);
-		}
-
-		if (compat.usesOpenAIToolCallIdLimit)
-			return id.length > OPENAI_TOOL_CALL_ID_MAX_LENGTH ? id.slice(0, OPENAI_TOOL_CALL_ID_MAX_LENGTH) : id;
-		return id;
-	};
 	const transformedMessages = transformMessages(
 		context.messages,
 		model,
-		(id, _target, source) => normalizeCompletionsToolCallId(id, source),
+		(id, _target, source) => normalizeCompletionsToolCallId(id, compat, isSameModelTurn(source, model)),
 		maxNormalizedToolCallIdLength,
 		duplicateToolCallIdSuffixPrefix,
 		compat,
@@ -2721,7 +2793,11 @@ export function convertMessages(
 	};
 
 	const ensureToolCallId = (rawId: string, seed: string, source?: AssistantMessage): string => {
-		const normalized = normalizeCompletionsToolCallId(rawId, source);
+		const normalized = normalizeCompletionsToolCallId(
+			rawId,
+			compat,
+			source !== undefined && isSameModelTurn(source, model),
+		);
 		if (normalized.trim().length > 0) return normalized;
 		return generateFallbackToolCallId(seed);
 	};
@@ -3011,6 +3087,7 @@ export function convertMessages(
 				assistantMsg[reasoningField] = ".";
 				hasReasoningField = true;
 			}
+			let toolCallIdRewritten = false;
 			if (toolCalls.length > 0) {
 				assistantMsg.tool_calls = toolCalls.map((tc, toolCallIndex) => {
 					const toolCallId = ensureToolCallId(tc.id, `${i}:${toolCallIndex}:${tc.name}`, msg);
@@ -3023,6 +3100,7 @@ export function convertMessages(
 							arguments: serializeToolArguments(tc.arguments),
 						},
 					};
+					if (replayedToolCall.id !== tc.id) toolCallIdRewritten = true;
 					const stored = normalizeStoredGeminiSignature(parseStoredThoughtSignature(tc.thoughtSignature));
 					const extraContent = getGeminiThoughtSignatureExtraContent(stored?.perCall);
 					if (extraContent) replayedToolCall.extra_content = extraContent;
@@ -3041,11 +3119,24 @@ export function convertMessages(
 			// (a pass rewrote the turn's thinking or arguments, or the turn predates
 			// it), the encrypted entries kept on unchanged tool calls still replay.
 			// A request that drops the model's own thinking also drops its unsigned text.
-			const receivedReasoningDetails = msg.content.flatMap(block =>
-				block.type === "thinking"
-					? (parseReasoningDetailsSignature(block.thinkingSignature)?.reasoningDetails ?? [])
-					: [],
+			const receivedReasoningDetails: Record<string, unknown>[] = [];
+			// Opaque state belongs to the provider-issued call IDs, not their wire replacements.
+			const opaqueReplay = getReasoningOpaqueReplay(
+				msg,
+				model,
+				compat.reasoningOpaqueReplay && !toolCallIdRewritten,
 			);
+			for (const block of thinkingBlocks) {
+				const stored = parseReasoningDetailsSignature(block.thinkingSignature);
+				if (stored?.reasoningDetails) {
+					for (const detail of stored.reasoningDetails) receivedReasoningDetails.push(detail);
+				}
+			}
+			if (opaqueReplay) {
+				assistantMsg.reasoning_opaque = opaqueReplay.opaque;
+				if (opaqueReplay.text.length > 0) assistantMsg.reasoning_text = opaqueReplay.text;
+				hasReasoningField = true;
+			}
 			const reasoningDetails =
 				receivedReasoningDetails.length > 0
 					? receivedReasoningDetails

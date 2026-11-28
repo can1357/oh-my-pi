@@ -20,6 +20,7 @@ import type {
 	Tool,
 	ToolResultMessage,
 } from "@oh-my-pi/pi-ai/types";
+import { parseReasoningDetailsSignature } from "@oh-my-pi/pi-ai/utils/reasoning-source";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
@@ -36,6 +37,17 @@ const gpt4oMiniSpec: ModelSpec<"openai-completions"> = (() => {
 	} = getBundledModel("openai", "gpt-4o-mini") as Model<"openai-completions">;
 	return { ...rest, compat: compatConfig };
 })();
+
+const copilotGeminiSpec: ModelSpec<"openai-completions"> = {
+	...gpt4oMiniSpec,
+	id: "gemini-4-neon",
+	name: "Gemini 4 Neon",
+	api: "openai-completions",
+	provider: "github-copilot",
+	baseUrl: "https://api.githubcopilot.com",
+	reasoning: true,
+	compat: undefined,
+};
 
 function createAbortedSignal(): AbortSignal {
 	const controller = new AbortController();
@@ -193,6 +205,7 @@ describe("openai-completions compatibility", () => {
 			maxTokensField: "max_completion_tokens",
 			requiresToolResultName: false,
 			requiresAssistantAfterToolResult: false,
+			foldUserAfterToolResult: false,
 			requiresThinkingAsText: false,
 			requiresMistralToolIds: false,
 			thinkingFormat: "openai",
@@ -214,6 +227,7 @@ describe("openai-completions compatibility", () => {
 			supportsStrictMode: true,
 			toolStrictMode: "none",
 			supportsReasoningParams: true,
+			reasoningOpaqueReplay: false,
 			supportsSamplingParams: true,
 			supportsPenaltyAndStopParams: true,
 			alwaysSendMaxTokens: false,
@@ -233,7 +247,6 @@ describe("openai-completions compatibility", () => {
 			rejectRootObjectUnion: false,
 			retryWithoutStrictOnGrammarError: false,
 			supportsPromptCacheKey: false,
-			foldUserAfterToolResult: false,
 			splitToolCalls: false,
 		} satisfies ResolvedOpenAICompat;
 		const assistantMessage: AssistantMessage = {
@@ -1240,6 +1253,288 @@ describe("openai-completions compatibility", () => {
 		const assistantObject = toObject(assistant);
 		expect(assistantObject?.reasoning_text).toBe("inspect tool output");
 		expect(assistantObject?.reasoning_content).toBeUndefined();
+	});
+
+	it.each([
+		{ name: "interleaved reasoning", first: "Check ", second: "the file.", replayText: "Check the file." },
+		{ name: "opaque-only reasoning", first: undefined, second: undefined, replayText: undefined },
+	])("persists and replays Copilot $name only to the issuing model", async ({ first, second, replayText }) => {
+		const model = buildModel(copilotGeminiSpec);
+		const deltas = [
+			{ reasoning_text: first },
+			{ reasoning_opaque: "earlier-state" },
+			{
+				tool_calls: [{ index: 0, id: "call_first", type: "function", function: { name: "read", arguments: "{}" } }],
+			},
+			{ reasoning_text: second },
+			{ reasoning_opaque: "latest-state" },
+			{
+				tool_calls: [
+					{ index: 1, id: "call_second", type: "function", function: { name: "read", arguments: "{}" } },
+				],
+			},
+			{ reasoning_opaque: "" },
+		];
+		const fetchMock = createMockFetch([
+			...deltas.map(delta => ({ choices: [{ index: 0, delta }] })),
+			{ choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] },
+			"[DONE]",
+		]);
+		const context = baseContext();
+		const result = await streamOpenAICompletions(model, context, { apiKey: "test-key", fetch: fetchMock }).result();
+		expect(result.stopReason).toBe("toolUse");
+		const stored = result.content.find(block => block.type === "thinking")?.thinkingSignature;
+		expect(JSON.parse(stored ?? "null")).toMatchObject({ reasoningOpaque: "latest-state" });
+		const history: Context = {
+			messages: [
+				...context.messages,
+				result,
+				...["call_first", "call_second"].map((toolCallId): ToolResultMessage => ({
+					role: "toolResult",
+					toolCallId,
+					toolName: "read",
+					content: [{ type: "text", text: "File contents" }],
+					isError: false,
+					timestamp: Date.now(),
+				})),
+			],
+		};
+		const replay = async (target: Model<"openai-completions">) =>
+			getPayloadMessages(await captureOpenAICompletionsPayload(target, history)).find(
+				message => message.role === "assistant",
+			);
+		const expectedReplay: Record<string, unknown> = {
+			role: "assistant",
+			content: "",
+			tool_calls: [
+				{ id: "call_first", type: "function", function: { name: "read", arguments: "{}" } },
+				{ id: "call_second", type: "function", function: { name: "read", arguments: "{}" } },
+			],
+			reasoning_opaque: "latest-state",
+		};
+		if (replayText !== undefined) expectedReplay.reasoning_text = replayText;
+		expect(await replay(model)).toEqual(expectedReplay);
+		for (const target of [
+			buildModel({ ...copilotGeminiSpec, id: "gemini-4-hydrogen" }),
+			buildModel({ ...copilotGeminiSpec, provider: "openai", baseUrl: "https://api.openai.com/v1" }),
+		]) {
+			const foreign = await replay(target);
+			expect(foreign?.tool_calls).toHaveLength(2);
+			expect(foreign?.reasoning_opaque).toBeUndefined();
+			expect(foreign?.reasoning_text).toBeUndefined();
+		}
+	});
+
+	it.each([{ base: true }, { base: false }])("uses thinking compat for opaque replay ($base)", async ({ base }) => {
+		const model = buildModel({
+			...copilotGeminiSpec,
+			compat: { reasoningOpaqueReplay: base, whenThinking: { reasoningOpaqueReplay: !base } },
+		});
+		const fetchMock = (opaque: string) =>
+			createMockFetch([
+				{
+					choices: [
+						{ index: 0, delta: { content: "Answer", reasoning_text: "Summary", reasoning_opaque: opaque } },
+					],
+				},
+				{ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] },
+				"[DONE]",
+			]);
+		const context = baseContext();
+		const prior = await streamOpenAICompletions(model, context, {
+			apiKey: "test-key",
+			reasoning: base ? undefined : "medium",
+			fetch: fetchMock("prior-state"),
+		}).result();
+		let assistant: Record<string, unknown> | undefined;
+		const next = await streamOpenAICompletions(
+			model,
+			{ messages: [...context.messages, prior] },
+			{
+				apiKey: "test-key",
+				reasoning: "medium",
+				fetch: fetchMock("next-state"),
+				onPayload: payload => {
+					assistant = getPayloadMessages(payload).find(message => message.role === "assistant");
+				},
+			},
+		).result();
+		expect(assistant?.content).toBe("Answer");
+		expect(assistant?.reasoning_opaque).toBe(base ? undefined : "prior-state");
+		const signature = next.content.find(block => block.type === "thinking")?.thinkingSignature;
+		if (base) {
+			expect(signature).toBe("reasoning_text");
+		} else {
+			expect(JSON.parse(signature ?? "null")).toEqual({ reasoningOpaque: "next-state", field: "reasoning_text" });
+		}
+	});
+
+	it("preserves reasoning_text summary when an opaque-replay delta also mirrors reasoning_content", async () => {
+		const model = buildModel(copilotGeminiSpec);
+		const fetchMock = createMockFetch([
+			{
+				choices: [
+					{
+						index: 0,
+						delta: {
+							reasoning_content: "Mirrored summary",
+							reasoning_text: "Mirrored summary",
+							reasoning_opaque: "mirrored-state",
+							content: "Answer",
+						},
+					},
+				],
+			},
+			{ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] },
+			"[DONE]",
+		]);
+		const context = baseContext();
+		const result = await streamOpenAICompletions(model, context, { apiKey: "test-key", fetch: fetchMock }).result();
+		const thinking = result.content.find(block => block.type === "thinking");
+		expect(thinking?.thinking).toBe("Mirrored summary");
+		expect(JSON.parse(thinking?.thinkingSignature ?? "null")).toEqual({
+			field: "reasoning_text",
+			reasoningOpaque: "mirrored-state",
+		});
+
+		const assistant = getPayloadMessages(
+			await captureOpenAICompletionsPayload(model, { messages: [...context.messages, result] }),
+		).find(message => message.role === "assistant");
+		expect(assistant).toEqual({
+			role: "assistant",
+			content: "Answer",
+			reasoning_opaque: "mirrored-state",
+			reasoning_text: "Mirrored summary",
+		});
+	});
+
+	it("drops opaque replay state from errored turns on both capture and replay", async () => {
+		const model = buildModel(copilotGeminiSpec);
+		const fetchMock = createMockFetch([
+			{
+				choices: [
+					{
+						index: 0,
+						delta: {
+							reasoning_text: "Partial summary",
+							reasoning_opaque: "error-state",
+						},
+					},
+				],
+			},
+			{
+				choices: [{ index: 0, delta: { content: "Partial answer" }, finish_reason: "error" }],
+			},
+			"[DONE]",
+		]);
+		const context = baseContext();
+		const errored = await streamOpenAICompletions(model, context, { apiKey: "test-key", fetch: fetchMock }).result();
+		expect(errored.stopReason).toBe("error");
+		const thinking = errored.content.find(block => block.type === "thinking");
+		expect(thinking?.thinkingSignature).toBe("reasoning_text");
+
+		// Even if an earlier thinking block already carries an opaque envelope on a persisted error turn,
+		// replay must not send it back to Copilot.
+		const persistedError: AssistantMessage = {
+			...errored,
+			content: [
+				{
+					type: "thinking",
+					thinking: "Partial summary",
+					thinkingSignature: JSON.stringify({ field: "reasoning_text", reasoningOpaque: "error-state" }),
+				},
+				{ type: "text", text: "Partial answer" },
+			],
+		};
+		const replayed = getPayloadMessages(
+			await captureOpenAICompletionsPayload(model, { messages: [...context.messages, persistedError] }),
+		).find(message => message.role === "assistant");
+		expect(replayed?.reasoning_opaque).toBeUndefined();
+		expect(replayed?.reasoning_text).toBeUndefined();
+	});
+
+	it.each([
+		{ label: "opaque", provider: "github-copilot", envelope: { reasoningOpaque: "stale-state" } },
+		{
+			label: "details",
+			provider: "openrouter",
+			envelope: { reasoningDetails: [{ type: "reasoning.encrypted", data: "stale-state" }] },
+		},
+	])("drops turn-scoped reasoning $label with a malformed call", async ({ provider, envelope }) => {
+		const model = buildModel({
+			...copilotGeminiSpec,
+			provider,
+			baseUrl: provider === "openrouter" ? "https://openrouter.ai/api/v1" : copilotGeminiSpec.baseUrl,
+		});
+		const assistant: AssistantMessage = {
+			role: "assistant",
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			timestamp: Date.now(),
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			content: [
+				{
+					type: "thinking",
+					thinking: "Check the file.",
+					thinkingSignature: JSON.stringify({ ...envelope, field: "reasoning_text" }),
+				},
+				{ type: "toolCall", id: "call_bad", name: "", arguments: {} },
+				{ type: "toolCall", id: "call_good", name: "read", arguments: {} },
+			],
+		};
+		const history: Context = {
+			messages: [
+				...baseContext().messages,
+				assistant,
+				...["call_bad", "call_good"].map((toolCallId): ToolResultMessage => ({
+					role: "toolResult",
+					toolCallId,
+					toolName: toolCallId === "call_good" ? "read" : "",
+					content: [{ type: "text", text: toolCallId }],
+					isError: toolCallId === "call_bad",
+					timestamp: Date.now(),
+				})),
+			],
+		};
+		const messages = getPayloadMessages(await captureOpenAICompletionsPayload(model, history));
+		const replay = messages.find(message => message.role === "assistant");
+		expect(replay?.tool_calls).toEqual([
+			{ type: "function", id: "call_good", function: { name: "read", arguments: "{}" } },
+		]);
+		expect(messages.filter(message => message.role === "tool").map(message => message.tool_call_id)).toEqual([
+			"call_good",
+		]);
+		expect(replay?.reasoning_opaque).toBeUndefined();
+		expect(replay?.reasoning_details).toBeUndefined();
+		if (provider === "github-copilot") expect(replay?.reasoning_text).toBeUndefined();
+	});
+
+	it.each([
+		{ name: "no text", text: undefined },
+		{ name: "a newline", text: "\n" },
+	])("does not turn a Copilot empty stop with $name into a replayable turn", async ({ text }) => {
+		const model = buildModel(copilotGeminiSpec);
+		const fetchMock = createMockFetch([
+			{ choices: [{ index: 0, delta: { content: text, reasoning_opaque: "opaque-state" } }] },
+			{ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] },
+			"[DONE]",
+		]);
+		const result = await streamOpenAICompletions(model, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+			acceptEmptyResponse: true,
+		}).result();
+		expect(result.stopReason).toBe("stop");
+		expect(result.content).toEqual(text === undefined ? [] : [{ type: "text", text }]);
 	});
 
 	it("maps MiMo unsupported reasoning efforts to opencode-go accepted wire values", async () => {
@@ -3505,23 +3800,27 @@ describe("custom API OpenAI-completions compatibility", () => {
 		} as ModelSpec<Api>);
 	}
 
-	function createFetch(capture: (body: Record<string, unknown>) => void): FetchImpl {
+	function createFetch(
+		capture?: (body: Record<string, unknown>) => void,
+		delta?: Record<string, unknown>,
+		finishReason = "stop",
+	): FetchImpl {
 		async function mockFetch(_input: string | URL | Request, init?: RequestInit): Promise<Response> {
-			if (typeof init?.body === "string") capture(JSON.parse(init.body) as Record<string, unknown>);
+			if (typeof init?.body === "string") capture?.(JSON.parse(init.body) as Record<string, unknown>);
 			const payload = [
 				`data: ${JSON.stringify({
 					id: "chatcmpl-custom",
 					object: "chat.completion.chunk",
 					created: 0,
 					model: "hy4-preview",
-					choices: [{ index: 0, delta: { role: "assistant", content: "ok" } }],
+					choices: [{ index: 0, delta: { role: "assistant", content: "ok", ...delta } }],
 				})}`,
 				`data: ${JSON.stringify({
 					id: "chatcmpl-custom",
 					object: "chat.completion.chunk",
 					created: 0,
 					model: "hy4-preview",
-					choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+					choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
 				})}`,
 				"data: [DONE]",
 			].join("\n\n");
@@ -3533,6 +3832,16 @@ describe("custom API OpenAI-completions compatibility", () => {
 		return Object.assign(mockFetch, { preconnect: fetch.preconnect });
 	}
 
+	function registerOpenAIWrapper(): void {
+		registerCustomApi(CUSTOM_OPENAI_API, (custom, messages, options) =>
+			streamOpenAICompletions(
+				custom as Model<"openai-completions">,
+				messages,
+				(options ?? {}) as OpenAICompletionsOptions,
+			),
+		);
+	}
+
 	afterEach(() => {
 		clearCustomApis();
 	});
@@ -3542,13 +3851,7 @@ describe("custom API OpenAI-completions compatibility", () => {
 			maxTokensField: "max_tokens",
 			supportsSamplingParams: false,
 		});
-		registerCustomApi(CUSTOM_OPENAI_API, (custom, messages, options) =>
-			streamOpenAICompletions(
-				custom as Model<"openai-completions">,
-				messages,
-				(options ?? {}) as OpenAICompletionsOptions,
-			),
-		);
+		registerOpenAIWrapper();
 
 		let request: Record<string, unknown> | undefined;
 		const result = await streamSimple(
@@ -3569,6 +3872,99 @@ describe("custom API OpenAI-completions compatibility", () => {
 		expect(request?.max_tokens).toBe(321);
 		expect(request?.max_completion_tokens).toBeUndefined();
 		expect(request?.temperature).toBeUndefined();
+	});
+
+	it("captures and replays opaque reasoning through an opted-in wrapper", async () => {
+		const model = customModel(CUSTOM_OPENAI_API, { reasoningOpaqueReplay: true });
+		registerOpenAIWrapper();
+		const initial: Context = { messages: [{ role: "user", content: "hello", timestamp: Date.now() }] };
+		const reasoning = { reasoning_opaque: "opaque-state", reasoning_text: "Check the input." };
+		const first = await streamSimple(model, initial, {
+			apiKey: "test-key",
+			fetch: createFetch(undefined, reasoning),
+		}).result();
+
+		expect(first.stopReason).toBe("stop");
+		expect(first.api).toBe(CUSTOM_OPENAI_API);
+		const thinking = first.content.find(block => block.type === "thinking");
+		expect(parseReasoningDetailsSignature(thinking?.thinkingSignature)).toMatchObject({
+			field: "reasoning_text",
+			reasoningOpaque: reasoning.reasoning_opaque,
+		});
+
+		let request: Record<string, unknown> | undefined;
+		const next = await streamSimple(
+			model,
+			{ messages: [...initial.messages, first, { role: "user", content: "continue", timestamp: Date.now() }] },
+			{
+				apiKey: "test-key",
+				fetch: createFetch(body => {
+					request = body;
+				}),
+			},
+		).result();
+
+		expect(next.stopReason).toBe("stop");
+		expect(request?.messages).toEqual(
+			expect.arrayContaining([expect.objectContaining({ role: "assistant", ...reasoning })]),
+		);
+	});
+
+	it("does not replay opaque reasoning when a wrapper truncates a tool call ID", async () => {
+		const model = customModel(CUSTOM_OPENAI_API, {
+			reasoningOpaqueReplay: true,
+			usesOpenAIToolCallIdLimit: true,
+		});
+		registerOpenAIWrapper();
+		const initial: Context = { messages: [{ role: "user", content: "hello", timestamp: Date.now() }] };
+		const id = `call_${"a".repeat(48)}`;
+		const first = await streamSimple(model, initial, {
+			apiKey: "test-key",
+			fetch: createFetch(
+				undefined,
+				{
+					reasoning_opaque: "opaque-state",
+					reasoning_text: "Read the file.",
+					tool_calls: [{ index: 0, id, type: "function", function: { name: "read", arguments: "{}" } }],
+				},
+				"tool_calls",
+			),
+		}).result();
+		expect(first.stopReason).toBe("toolUse");
+		expect(first.content).toContainEqual(expect.objectContaining({ type: "toolCall", id }));
+		const thinking = first.content.find(block => block.type === "thinking");
+		expect(parseReasoningDetailsSignature(thinking?.thinkingSignature)?.reasoningOpaque).toBe("opaque-state");
+
+		let request: Record<string, unknown> | undefined;
+		const next = await streamSimple(
+			model,
+			{
+				messages: [
+					...initial.messages,
+					first,
+					{
+						role: "toolResult",
+						toolCallId: id,
+						toolName: "read",
+						content: [{ type: "text", text: "file contents" }],
+						isError: false,
+						timestamp: Date.now(),
+					},
+				],
+			},
+			{
+				apiKey: "test-key",
+				fetch: createFetch(body => {
+					request = body;
+				}),
+			},
+		).result();
+
+		expect(next.stopReason).toBe("stop");
+		const messages = request?.messages as Array<Record<string, unknown>> | undefined;
+		const replayed = messages?.find(message => message.role === "assistant");
+		expect(replayed).toMatchObject({ tool_calls: [{ id: id.slice(0, 40) }] });
+		expect(replayed).not.toHaveProperty("reasoning_opaque");
 	});
 
 	it("keeps compatibility undefined for a registered unrelated custom API", () => {

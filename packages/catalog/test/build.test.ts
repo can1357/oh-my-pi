@@ -838,12 +838,30 @@ describe("openai-completions wire-quirk compat detection", () => {
 		).toBe(false);
 	});
 
+	it("enables opaque reasoning replay only on Copilot chat completions", () => {
+		const copilot = { provider: "github-copilot", id: "gemini-4-neon", baseUrl: "https://api.githubcopilot.com" };
+		expect(resolveModelPolicy(completionsSpec(copilot)).compat.reasoningOpaqueReplay).toBe(true);
+		expect(resolveModelPolicy(openrouterSpec({ id: "google/gemini-4-neon" })).compat.reasoningOpaqueReplay).toBe(
+			false,
+		);
+		expect("reasoningOpaqueReplay" in resolveModelPolicy(responsesSpec(copilot)).compat).toBe(false);
+	});
+
 	it("folds user text into the preceding tool result for Gemini 4 models only", () => {
 		// Gemini 4 ends requests closing on user text after a function response with
 		// an empty MALFORMED_RESPONSE; Gemini 3.x does not.
 		expect(resolveModelPolicy(openrouterSpec({ id: "google/gemini-4-neon" })).compat.foldUserAfterToolResult).toBe(
 			true,
 		);
+		expect(
+			resolveModelPolicy(
+				completionsSpec({
+					provider: "github-copilot",
+					id: "gemini-4-neon",
+					baseUrl: "https://api.githubcopilot.com",
+				}),
+			).compat.foldUserAfterToolResult,
+		).toBe(true);
 		expect(
 			resolveModelPolicy(
 				responsesSpec({ provider: "custom", id: "gemini-4-neon", baseUrl: "https://proxy.example/v1" }),
