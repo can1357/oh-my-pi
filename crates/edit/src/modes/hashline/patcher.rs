@@ -771,9 +771,14 @@ fn format_block_resolution(resolution: &BlockResolution) -> String {
 	format!("{op} → resolved {span} ({lines} line{}){suffix}", if lines == 1 { "" } else { "s" })
 }
 
-/// Rebind a missing disk path to the unique local snapshot with its tag and
-/// name when the replacement is inside the session's sandbox. Otherwise,
-/// report the other path without rebinding.
+/// When the authored path does not exist but exactly one file this session
+/// read has the same name and tag, rebind the section onto it when the header
+/// is a filesystem path and the match lies in the session's sandbox
+/// ([`crate::path_policy::PathPolicy::allow_tag_path_recovery`]). A working-
+/// tree file of that name may be another checkout's copy. Recovery declines
+/// for URL-shaped headers and for matches outside the sandbox, and the
+/// rejection then names that path. `Ok(None)` keeps the authored section and
+/// target.
 pub(crate) fn recover_target(
 	section: &PatchSection,
 	initial: &Resolved,

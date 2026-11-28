@@ -353,6 +353,7 @@
 - Starting or resuming a session no longer prints a `Tool commands: added mcp__…` line listing every MCP tool; MCP tools mounted later are still shown ([#20643](https://github.com/can1357/oh-my-pi/pull/20643) by [@Petyok](https://github.com/Petyok)).
 - Ask form option notes wrap as you type in the terminal, with a visible caret on pasted carriage returns and title arrows when a very long draft is only partly shown ([#20880](https://github.com/can1357/oh-my-pi/pull/20880) by [@brianzilla](https://github.com/brianzilla)).
 - Model discovery reads the reasoning effort ladder, default level and mandatory flag from `/v1/models` rows that publish them as a `reasoning: { supported_efforts, default_effort, mandatory }` object (the OpenRouter shape), not only from flat `supported_reasoning_levels` ([#20879](https://github.com/can1357/oh-my-pi/pull/20879) by [@Xytronix](https://github.com/Xytronix))
+- Fixed `edit` on a bare file name answering "Use the write tool" when the tag matches a file read outside the workspace; the error now names that file's full path so the retry needs no re-read ([#16087](https://github.com/can1357/oh-my-pi/pull/16087) by [@nick-maderight](https://github.com/nick-maderight))
 
 ### Removed
 
