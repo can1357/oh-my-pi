@@ -31,6 +31,7 @@ import type { AgentViewSession } from "../../session/agent-session-handle";
 import { type AiuTotals, sessionAiu } from "../../session/aiu-billing";
 import { latestJobWidget } from "../../tools/details/job-widget";
 import { BRAND_FADE_MS, type StatusFacts, type StatusLineSettings } from "../../ui/status/facts";
+import { effectiveStatusSettings } from "../../ui/status/segments";
 import type { CollabStatus, StatusLineModel } from "../types";
 import { statusLineHost } from "../status-line-host";
 import type { LoopConditionConfig, LoopLimitRuntime } from "../view-model/status-line/loop";
@@ -190,6 +191,11 @@ export class SessionStatusLine implements StatusLineModel {
 
 	readonly settings: Accessor<StatusLineSettings> = computed(() => ({ ...this.#saved(), ...this.#preview() }));
 
+	readonly #segments = computed(() => {
+		const { leftSegments, rightSegments } = effectiveStatusSettings(this.settings());
+		return [...leftSegments, ...rightSegments];
+	});
+
 	readonly #sessionFacts = computed(() => this.#buildSessionFacts());
 	readonly #context = computed((previous: StatusFacts["context"] | undefined) => this.#readContext(previous));
 	readonly #jobs = computed((previous: Pick<StatusFacts, "jobs" | "jobGlance"> | undefined) => {
@@ -250,7 +256,6 @@ export class SessionStatusLine implements StatusLineModel {
 		const sessionFacts = this.#sessionFacts();
 		const context = this.#context();
 		const boundaries = this.#boundaries();
-		const settings = this.settings();
 		const slowModeLabel = this.#accountLabel();
 		return {
 			...sessionFacts,
@@ -260,7 +265,7 @@ export class SessionStatusLine implements StatusLineModel {
 			...(slowModeLabel ? { slowModeLabel } : {}),
 			speculation: this.#speculation(),
 			tokensPerSecond: this.#rate(),
-			...(settings.leftSegments?.includes("cache") || settings.rightSegments?.includes("cache")
+			...(this.#segments().includes("cache")
 				? { promptCache: this.#session.getPromptCacheStatus?.(sessionFacts.now, context.tokens) }
 				: {}),
 		};
@@ -271,6 +276,7 @@ export class SessionStatusLine implements StatusLineModel {
 		this.#live = signal(!options?.deferStartupReads);
 		this.#saved = signal(statusLineHost.getSettings());
 		this.#attach(session);
+		this.#syncClock();
 	}
 
 	/** Start reading context, checkout and account usage once startup can spare the event loop. */
@@ -554,8 +560,7 @@ export class SessionStatusLine implements StatusLineModel {
 
 	/** Tick the wall clock once a second while a segment shows time or a turn's active window is open. */
 	#syncClock(): void {
-		const settings = this.settings();
-		const segments = [...(settings.leftSegments ?? []), ...(settings.rightSegments ?? [])];
+		const segments = this.#segments();
 		const needs =
 			segments.includes("time") ||
 			(segments.includes("time_spent") && this.#meter().since !== undefined) ||
@@ -597,10 +602,9 @@ export class SessionStatusLine implements StatusLineModel {
 		this.#revision();
 		const now = this.#clock();
 		const session = this.#session;
-		const settings = this.settings();
 		const modes = this.#modes();
 		const model = session.state.model ?? session.model;
-		const segments = [...(settings.leftSegments ?? []), ...(settings.rightSegments ?? [])];
+		const segments = this.#segments();
 		const stats = session.sessionManager.getUsageStatistics();
 		const collab = this.#collab();
 		const autoCompact = this.#autoCompact();

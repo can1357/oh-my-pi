@@ -4,13 +4,16 @@
  * tree cost, modes, extension statuses), and that git is only probed while
  * git integration is on and a git-backed segment is visible.
  */
-import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
+import * as os from "node:os";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { cfgGitEnabled } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { cfgGitEnabled, cfgStatusLinePreset } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import type { PromptCacheStatus } from "@oh-my-pi/pi-coding-agent/modes/view-model/status-line/host";
 import { STATUS_LINE_PRESETS } from "@oh-my-pi/pi-coding-agent/modes/view-model/status-line/presets";
 import type { StatusLineSettings } from "@oh-my-pi/pi-coding-agent/modes/view-model/status-line/types";
 import { effectiveStatusSettings } from "@oh-my-pi/pi-coding-agent/ui/status/segments";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { disposeStatusLines, flushStatus, lineText, statusLine, statusSession } from "./helpers/session-status-line";
 
 beforeAll(async () => {
@@ -24,7 +27,9 @@ afterAll(() => {
 
 afterEach(() => {
 	disposeStatusLines();
+	vi.useRealTimers();
 	cfgGitEnabled.clearOverride(Settings.instance);
+	cfgStatusLinePreset.clearOverride(Settings.instance);
 });
 
 function makeLine(settings: Partial<StatusLineSettings>) {
@@ -46,6 +51,39 @@ function makeLine(settings: Partial<StatusLineSettings>) {
 }
 
 describe("effective status-line settings", () => {
+	it("shows prompt-cache expiry and the hostname when only the built-in preset is configured", () => {
+		const touchedAt = 1_000_000_000;
+		const ttlMs = 300_000;
+		vi.useFakeTimers({ now: touchedAt + ttlMs - 1_000 });
+		cfgGitEnabled.override(Settings.instance, false);
+		cfgStatusLinePreset.override(Settings.instance, "nerd");
+		const line = statusLine(
+			statusSession({
+				getPromptCacheStatus: (now: number): PromptCacheStatus => ({
+					state: now < touchedAt + ttlMs ? "warm" : "cold",
+					inferred: false,
+					tier: "short",
+					touchedAt,
+					ttlMs,
+					cachedTokens: 1_000,
+					nextTokens: 1_000,
+				}),
+			}),
+		);
+		const warm = lineText(line, 200);
+		const { symbols } = currentTheme();
+		expect(warm).toContain(symbols.symbol("icon.cacheWarm"));
+		expect(warm).toContain(os.hostname().split(".")[0]!);
+
+		vi.advanceTimersByTime(1_000);
+		expect(lineText(line, 200)).toContain(symbols.symbol("icon.cacheCold"));
+
+		line.previewSettings({ preset: "full", leftSegments: [], rightSegments: [] });
+		expect(lineText(line, 200)).toContain(symbols.symbol("icon.cacheCold"));
+		line.previewSettings({ preset: "custom", leftSegments: [], rightSegments: [] });
+		expect(lineText(line, 200)).not.toContain(symbols.symbol("icon.cacheCold"));
+	});
+
 	it("preserves preset option siblings while user segment options win", () => {
 		const effective = effectiveStatusSettings({
 			preset: "default",

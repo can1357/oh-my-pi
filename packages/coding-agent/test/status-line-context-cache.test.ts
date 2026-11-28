@@ -119,7 +119,7 @@ describe("status line context usage", () => {
 					getContextUsage: () => ({ tokens, contextWindow: window, percent: 0 }),
 					getPromptCacheStatus: (_now: number, nextTokens: number) => ({ nextTokens }),
 				}),
-				{ leftSegments: ["cache"], rightSegments: [] },
+				{ preset: "custom", leftSegments: ["cache"], rightSegments: [] },
 			);
 			line.facts();
 			readName.mockClear();
