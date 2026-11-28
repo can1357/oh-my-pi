@@ -265,6 +265,15 @@ export interface SessionStorage {
 	 * `writeTextSync` publish is still on the wire.
 	 */
 	drain(): Promise<void>;
+	/**
+	 * Wait until this storage may queue more transcript appends. Returns `undefined` at once, with nothing to
+	 * await, while the appends it has queued and not yet settled are at or under the point where its turns start
+	 * to wait (not a bound on what it queues), or once `signal` has fired; otherwise a promise that resolves once
+	 * enough of them settle or `signal` fires. An agent session waits before each model request and before
+	 * appending tool results that reach `afterToolCall`. This slows turns when the backend falls behind. Storage
+	 * that never makes turns wait omits this method.
+	 */
+	waitForAppendAdmission?(signal?: AbortSignal): Promise<void> | undefined;
 }
 
 // FinalizationRegistry to clean up leaked file descriptors
@@ -678,8 +687,101 @@ export function probeSessionLeases(sessionIds: readonly string[]): SessionLeaseR
 	return report;
 }
 
-/** Approximate size (UTF-16 units synchronously, bytes through a sink) buffered per staging-file write when streaming a body. */
-const LINE_STREAM_CHUNK = 1 << 20;
+/** Target size of a chunk used to stream a transcript body. */
+export const LINE_STREAM_CHUNK = 1 << 20;
+
+function isHighSurrogate(unit: number): boolean {
+	return unit >= 0xd800 && unit <= 0xdbff;
+}
+
+/** Slice UTF-16 input without breaking pairs, including pairs split across input fragments. */
+function* utf16Slices(lines: Iterable<string>): Generator<string> {
+	let trailing = "";
+	for (const line of lines) {
+		if (line.length === 0) continue;
+		let start = 0;
+		if (trailing) {
+			const first = line.charCodeAt(0);
+			if (first >= 0xdc00 && first <= 0xdfff) {
+				yield trailing + line[0];
+				start = 1;
+			} else {
+				yield trailing;
+			}
+		}
+		const end = isHighSurrogate(line.charCodeAt(line.length - 1)) ? line.length - 1 : line.length;
+		trailing = end < line.length ? line[end] : "";
+		while (start < end) {
+			let stop = Math.min(start + LINE_STREAM_CHUNK, end);
+			if (stop < end && isHighSurrogate(line.charCodeAt(stop - 1))) stop--;
+			yield line.slice(start, stop);
+			start = stop;
+		}
+	}
+	if (trailing) yield trailing;
+}
+
+/**
+ * Encode the concatenated UTF-8 bytes of `lines` in chunks of at most {@link LINE_STREAM_CHUNK}.
+ * With `reuse`, each chunk is a view of one buffer that the next iteration may overwrite.
+ */
+export function* encodeLineChunks(lines: Iterable<string>, reuse = false): Generator<Uint8Array> {
+	const encoder = new TextEncoder();
+	let buffer = Buffer.allocUnsafe(LINE_STREAM_CHUNK);
+	let used = 0;
+	for (const slice of utf16Slices(lines)) {
+		for (let read = 0; read < slice.length;) {
+			const encoded = encoder.encodeInto(slice.slice(read), buffer.subarray(used));
+			read += encoded.read;
+			used += encoded.written;
+			if (used === buffer.length || read < slice.length) {
+				yield buffer.subarray(0, used);
+				if (!reuse) buffer = Buffer.allocUnsafe(LINE_STREAM_CHUNK);
+				used = 0;
+			}
+		}
+	}
+	if (used > 0) yield buffer.subarray(0, used);
+}
+
+/**
+ * Write `lines` at `fd`'s position in bounded UTF-8 chunks.
+ * Returns the number of bytes written.
+ */
+export function writeLinesToDescriptorSync(fd: number, lines: readonly string[]): number {
+	let bytes = 0;
+	for (const chunk of encodeLineChunks(lines, true)) {
+		fs.writeFileSync(fd, chunk);
+		bytes += chunk.byteLength;
+	}
+	return bytes;
+}
+
+/**
+ * {@link writeLinesToDescriptorSync} through asynchronous writes, from offset 0
+ * of a new file, so the event loop runs while each chunk is written.
+ */
+export async function writeLinesToDescriptor(fd: number, lines: readonly string[]): Promise<number> {
+	let bytes = 0;
+	for (const chunk of encodeLineChunks(lines, true)) {
+		for (let offset = 0; offset < chunk.byteLength;) {
+			const written = await writeAt(fd, chunk.subarray(offset), bytes + offset);
+			if (written === 0) throw new Error(`A write to descriptor ${fd} stored no bytes at byte ${bytes + offset}`);
+			offset += written;
+		}
+		bytes += chunk.byteLength;
+	}
+	return bytes;
+}
+
+function writeAt(fd: number, buffer: Uint8Array, position: number): Promise<number> {
+	const { promise, resolve, reject } = Promise.withResolvers<number>();
+	fs.write(fd, buffer, 0, buffer.byteLength, position, (err, written) => {
+		if (err) reject(err);
+		else resolve(written);
+	});
+	return promise;
+}
 
 /**
  * Write `lines` to a new file at `target` in bounded chunks, never holding their full concatenation.
@@ -689,14 +791,7 @@ function writeLinesToFileSync(target: string, lines: readonly string[]): void {
 	withLoopPhase("session.rewrite", () => {
 		const fd = fs.openSync(target, "w");
 		try {
-			let chunk = "";
-			for (const line of lines) {
-				chunk += line;
-				if (chunk.length < LINE_STREAM_CHUNK) continue;
-				fs.writeFileSync(fd, chunk);
-				chunk = "";
-			}
-			if (chunk.length > 0) fs.writeFileSync(fd, chunk);
+			writeLinesToDescriptorSync(fd, lines);
 		} finally {
 			fs.closeSync(fd);
 		}

@@ -678,12 +678,20 @@ export function getUpdateStateDir(): string {
 }
 
 /**
- * Return a per-user directory (`<tmpdir>/<prefix>-<uid>`) under the OS temp dir
+ * Return account `uid`'s directory `<tmpdir>/<prefix>-<uid>` under the OS temp
+ * dir: accounts share `/tmp`, and a directory another account made first
+ * would refuse this one's files.
+ */
+export function getPrivateTempDir(prefix: string, uid: number | string): string {
+	return path.join(os.tmpdir(), `${prefix}-${uid}`);
+}
+
+/**
+ * Return a per-user directory ({@link getPrivateTempDir}) under the OS temp dir
  * so `bun test` state never collides across accounts sharing `/tmp`.
  */
 export function getTestTempDir(prefix: string): string {
-	const uid = typeof process.getuid === "function" ? process.getuid() : os.userInfo().username;
-	return path.join(os.tmpdir(), `${prefix}-${uid}`);
+	return getPrivateTempDir(prefix, typeof process.getuid === "function" ? process.getuid() : os.userInfo().username);
 }
 
 /**

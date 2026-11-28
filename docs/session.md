@@ -19,6 +19,7 @@ Does not cover `/tree` UI rendering behavior beyond semantics that affect sessio
 
 - [`src/session/session-manager.ts`](../packages/coding-agent/src/session/session-manager.ts) — orchestration: tree/leaf, appends, persistence, blobs, lifecycle factories
 - [`src/session/session-entries.ts`](../packages/coding-agent/src/session/session-entries.ts) — entry/header types, `SessionEntry` union, `CURRENT_SESSION_VERSION`
+- [`src/session/session-body.ts`](../packages/coding-agent/src/session/session-body.ts) — the bodies of indexed storage's full writes: spool file, in-memory copy, or streamed from the lines
 - [`src/session/session-migrations.ts`](../packages/coding-agent/src/session/session-migrations.ts) — version migrations
 - [`src/session/session-loader.ts`](../packages/coding-agent/src/session/session-loader.ts) — file load + blob-ref resolution
 - [`src/session/session-context.ts`](../packages/coding-agent/src/session/session-context.ts) — `buildSessionContext`
@@ -632,7 +633,11 @@ Algorithm:
 
 ### Write pipeline
 
-Ordinary completed appends update memory and local file storage synchronously once the lazy file-creation gate has been crossed. There is no `fsync`, so successful local writes protect against software crashes, not power loss. Indexed Redis/SQL backends update their local view immediately but publish remotely in an ordered async queue; `flush()`/backend drain is required to confirm those writes. Title changes and atomic batches have their own awaited persistence paths. Streaming partial text is not persisted until the completed message is appended.
+Ordinary completed appends update memory and local file storage synchronously after the session file exists. There is no `fsync`, so successful local writes protect against software crashes, not power loss. Indexed Redis and SQL storage update their local view immediately. They publish remotely in an ordered queue, so `flush()` or backend drain must finish to confirm those writes.
+
+If an indexed store has more than 64 MiB of unsettled appends, `waitForAppendAdmission` pauses the turns of the sessions on that store; another store's backlog never pauses them. The wait runs before each model request and before the agent appends tool results that reach `afterToolCall`. It ends when enough appends settle or the turn is aborted. Under the threshold the method returns `undefined`, so a turn has nothing to await. Appends made meanwhile still queue, and a writer's `append` resolves once its own line is stored, so 64 MiB is not a bound on the queue. A wait that lasts 10 s logs one warning (`Session append admission still waiting`) with the bytes queued.
+
+Title changes and atomic batches have their own awaited persistence paths. Streaming partial text is not persisted until the completed message is appended.
 
 - A new ordinary session remains memory-only until it contains an assistant message or a caller invokes `ensureOnDisk()`.
 - Before that gate, entries remain in memory; crossing it writes the full title slot, header, and accumulated entries.
@@ -678,7 +683,17 @@ These projections leave the live entries unchanged. On load, ordinary persisted 
 
 ## Storage Abstractions
 
-`SessionStorage` owns filesystem-like operations used by `SessionManager`: synchronous directory/existence/write/stat/list operations; async read, sliced read, write, guarded atomic write, rename, unlink, artifact-aware deletion, title update, writer creation, and backend drain. Optional capabilities include synchronous reads, confirmed remote writes, assistant-turn scans, file locking, session ownership claims, and conditional artifact-aware deletion.
+`SessionStorage` owns filesystem-like operations used by `SessionManager`: synchronous directory/existence/write/stat/list operations; async read, sliced read, write, guarded atomic write, rename, unlink, artifact-aware deletion, title update, writer creation, and backend drain. Optional capabilities include synchronous reads, streamed full writes (`writeLinesSync`, `writeLinesAtomic`), confirmed remote writes, assistant-turn scans, file locking, session ownership claims, and conditional artifact-aware deletion.
+
+An `IndexedSessionStorage` backend (`SessionStorageBackend`, for an SDK's own store) implements `init`, `loadIndex`, `readFull`, `readSlices`, `writeFull`, `append`, `updateSessionTitle`, `truncate`, `remove`, and `move`. It can also implement:
+
+- `readChunks(path, fromByte)` yields the stored bytes in chunks. For a missing path, iteration rejects with `ENOENT`. Without `readChunks`, line scans and full-write read-back read the whole body as a string.
+- `writeFullStream(path, chunks, byteLength, mtimeMs, title, expectedSize)` takes a UTF-8 stream and applies the same size check as `writeFull`. The backend must consume the stream to its normal end before it commits. A stream that fails or yields a different byte count must leave the previous body intact. Without `writeFullStream`, the backend receives one string through `writeFull`.
+- `appendBatch(path, lines, mtimeMs)` stores the queued lines in order as one atomic write. Throw `SessionAppendBatchRolledBackError` only when the backend knows it stored none of the lines. Indexed storage retries those lines one at a time. If the commit outcome is unknown, propagate another error. Indexed storage never retries a batch reported with another error. Without `appendBatch`, indexed storage uses one `append` per line.
+
+For a backend with `writeFullStream`, `writeLinesSync` and `writeLinesAtomic` first read the lines into a private spool file under the OS temp directory (`omp-spool-<uid>`), or, where the platform has no account id, into compressed blocks in memory; `writeLinesAtomic` prepares that body through asynchronous writes and compression, from a copy of the caller's array taken when it is called, so the caller may change its array meanwhile. If the spool fails, indexed storage measures the lines (`writeLinesAtomic` lets the event loop run between chunks) and streams them through `writeFullStream`: `writeLinesAtomic` from its copy, `writeLinesSync` from the caller's array. A backend without `writeFullStream` receives the joined lines through `writeFull`, with no spool.
+
+On indexed storage, the asynchronous writes of a path (`writeText`, `writeTextAtomic`, `writeLinesAtomic`, a title update, a rename, an unlink, `deleteSessionWithArtifacts`) take their places in one order per path when they are called, before their first await; a rename takes the places of both its paths at once, and `deleteSessionWithArtifacts` takes the places of the session path and of the artifact paths in the index when it is called (an artifact path created after that call is not ordered against the delete). Each write goes to the backend only after every write called before it on any of its paths has settled. A write that fails, also one whose body cannot be prepared, fails only its own caller and lets no later write past those called before it. An atomic write prepares its body while the writes ahead of it settle. A synchronous write (`writeTextSync`, `writeLinesSync`, a writer's append) still queues at once. `drain` also waits for the asynchronous writes that have not queued anything yet.
 
 Implementations and adapters:
 

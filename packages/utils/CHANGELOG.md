@@ -10,6 +10,7 @@
 ### Added
 
 - Added `getBunStubDir()` to expose the cache directory used for the `bun` executable stub in compiled applications.
+- Added `getPrivateTempDir(prefix, uid)` for an account's own directory (`<tmpdir>/<prefix>-<uid>`) under the OS temp dir; `getTestTempDir()` builds on it ([#20735](https://github.com/can1357/oh-my-pi/pull/20735) by [@sjawhar](https://github.com/sjawhar)).
 
 ### Fixed
 
