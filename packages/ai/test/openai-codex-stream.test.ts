@@ -490,6 +490,40 @@ describe("openai-codex streaming", () => {
 		}
 	});
 
+	it("falls back to SSE after one rejected upgrade while a response observer inspects it", async () => {
+		let upgrades = 0;
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch(request) {
+				if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
+					upgrades += 1;
+					return new Response("Forbidden", { status: 403 });
+				}
+				return new Response(createCompletedCodexSse("Hello"), {
+					headers: { "content-type": "text/event-stream", "x-request-id": "req_sse" },
+				});
+			},
+		});
+		const onResponse = vi.fn(async () => {});
+		try {
+			const model = createCodexTestModel(server.url.href);
+			const result = await streamOpenAICodexResponses(model, createCodexTestContext(), {
+				apiKey: createCodexTestToken(),
+				sessionId: "ws-rejected-observer",
+				providerSessionState: new Map(),
+				onResponse,
+			}).result();
+
+			expect(result.stopReason).toBe("stop");
+			expect(upgrades).toBe(1);
+			expect(onResponse).toHaveBeenCalledTimes(1);
+			expect(onResponse).toHaveBeenCalledWith(expect.objectContaining({ status: 200, requestId: "req_sse" }), model);
+		} finally {
+			await server.stop(true);
+		}
+	});
+
 	it.each(["arguments.done", "output_item.done", "terminal"])(
 		"refuses truncated final JSON via %s",
 		async finalizer => {
