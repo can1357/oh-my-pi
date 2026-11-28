@@ -1,0 +1,118 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  ansible-content:
+    name: Run Ansible Content Actions
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Ansible content tests
+        uses: ansible/ansible-content-actions@v1.1.0
+        with:
+          path: "."                    # Root path to Ansible collection
+          # base_ref: "main"           # Optional: Base branch for PRs
+          # repo: ${{ github.repository }}  # Optional: Repository URL
+          # environment: "production"  # Optional: Deployment environment
+          # ah_publish: false          # Optional: Publish to Automation Hub
+          # galaxy_publish: false      # Optional: Publish to Ansible Galaxy
+          # collection_pre_install: "" # Optional: Comma-separated additional collections
+        # Uncomment below to enable publishing
+        # env:
+        #   ANSIBLE_GALAXY_API_KEY: ${{ secrets.GALAXY_API_KEY }}
+        #   AUTOMATION_HUB_TOKEN: ${{ secrets.AUTOMATION_HUB_TOKEN }}
+
+  deno-tools:
+    name: Deno Lint & Test Suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Deno
+        uses: denoland/setup-deno@61fe2df320078202e33d7d5ad347e7dcfa0e8f31  # v1.1.2
+        with:
+          deno-version: "v1.x"
+
+      # Optional formatting check
+      # - name: Verify formatting
+      #   run: deno fmt --check
+
+      - name: Run linter
+        run: deno lint
+
+      - name: Execute tests
+        run: deno test -A
+
+  cache-setup:
+    name: Restore and Save Cache
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Manage cache
+        uses: actions/cache@v5.1.0
+        with:
+          path: # specify files/directories to cache
+          key: # unique cache key
+          # restore-keys: # optional fallback patterns
+
+  setup-java:
+    name: Java Setup
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure Java
+        uses: actions/setup-java@v6.2.0
+        with:
+          # java-version: "17"
+          # distribution: "temurin"
+          # Additional optional configurations can be uncommented and adjusted here
+
+  download-artifact:
+    name: Download Build Artifact
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v8.0.2
+        with:
+          # name: artifact_name
+          # path: output_directory
+          # Optional filters: artifact-ids, pattern, merge-multiple, etc.
+
+  setup-go:
+    name: Go Environment Setup
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure Go
+        uses: actions/setup-go@v7.0.0
+        with:
+          # go-version: "1.20"
+          # cache: true
+          # cache-dependency-path: go.mod
+
+  codefresh-run:
+    name: Codefresh Pipeline Runner
+    runs-on: ubuntu-latest
+    steps:
+      - name: Execute Codefresh pipeline
+        uses: codefresh-io/codefresh-pipeline-runner@v8
+        with:
+          # args: "pipelineName --param value"
+
