@@ -49,6 +49,7 @@ import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../s
 import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shared-events";
 import { aggregateExtensionFlags } from "./flags";
 import { ManagedTimers } from "./managed-timers";
+import { PendingInteractions } from "./pending-interactions";
 import { createExtensionModelQuery } from "./model-api";
 import { trackUserWaits, type UserWaitTracker } from "./user-wait";
 import { sanitizeDisplayLine } from "../inventory/display-text";
@@ -226,6 +227,8 @@ const SESSION_BEFORE_EVENTS: Record<string, true> = {
  * the handlers so nothing runs alongside a handler that ignores the abort.
  */
 const RELEASING_SIGNAL_EVENTS: Record<string, true> = {
+	tool_approval_requested: true,
+	ask_requested: true,
 	session_stop: true,
 	session_before_shutdown: true,
 };
@@ -648,6 +651,8 @@ export class ExtensionRunner {
 	#toolApprovalPreviewWaiter?: (toolCallId: string) => Promise<void>;
 	/** Grant keys (see `sessionApprovalScope`) approved "for this session", each prefixed by the session it covers. */
 	#sessionApprovals = new Set<string>();
+	/** Tool approvals and `ask` forms open right now, which extensions may answer. */
+	readonly pendingInteractions = new PendingInteractions();
 	#trackUserWait?: UserWaitTracker;
 	#errorListeners: Set<ExtensionErrorListener> = new Set();
 	#getModel: () => Model | undefined = () => undefined;
@@ -2167,6 +2172,10 @@ export class ExtensionRunner {
 			resolvePlanReview: (reviewId, choice, input) => this.#resolvePlanReviewFn(reviewId, choice, input),
 			getPendingPlanReview: () => this.#getPendingPlanReviewFn(),
 			openPlanReview: () => this.#openPlanReviewFn(),
+			resolveToolApproval: (approvalId, answer) => this.pendingInteractions.resolveApproval(approvalId, answer),
+			getPendingToolApprovals: () => this.pendingInteractions.pendingApprovals(),
+			resolveAsk: (askId, answer) => this.pendingInteractions.resolveAsk(askId, answer),
+			getPendingAsks: () => this.pendingInteractions.pendingAsks(),
 			// Live: a context saved before or across a host rebind sees the current controls.
 			get sessionModes() {
 				return getSessionModes();
@@ -2295,7 +2304,7 @@ export class ExtensionRunner {
 			RELEASING_SIGNAL_EVENTS[event.type] && "signal" in event && event.signal instanceof AbortSignal
 				? event.signal
 				: undefined;
-		const signals = [outerSignal, ownSignal].filter((s): s is AbortSignal => s !== undefined);
+		const signals = [...new Set([outerSignal, ownSignal])].filter((s): s is AbortSignal => s !== undefined);
 		const signal = signals.length === 0 ? undefined : signals.length === 1 ? signals[0] : AbortSignal.any(signals);
 		if (signal?.aborted) return undefined;
 		const registrationScope: ToolRegistrationScope = { pending: new Set(), closed: false };
@@ -2430,7 +2439,17 @@ export class ExtensionRunner {
 				ctx ??= this.createContext();
 
 				for (const handler of handlers) {
-					const handlerResult = await this.#runHandlerWithTimeout(handler, event, ctx, ext, timeoutMs);
+					// `signal` was read before any handler ran: one that deletes or replaces `event.signal`
+					// cannot stop later handlers from releasing on the original.
+					const handlerResult = await this.#runHandlerWithTimeout(
+						handler,
+						event,
+						ctx,
+						ext,
+						timeoutMs,
+						undefined,
+						signal,
+					);
 
 					if (this.#isSessionBeforeEvent(event) && handlerResult) {
 						result = handlerResult as SessionBeforeEventResult;

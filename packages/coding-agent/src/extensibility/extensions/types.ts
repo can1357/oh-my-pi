@@ -898,6 +898,29 @@ export interface ExtensionContext {
 	 */
 	getPendingPlanReview(): PlanReviewRequestedEvent | undefined;
 	/**
+	 * Answer a pending tool approval (see `tool_approval_requested`) as if the user picked `answer` in
+	 * its dialog; the host's dialog closes and the user is told an extension answered. `session` and
+	 * grant answers apply exactly as from the dialog (session approval, `always-ask-cached` grants).
+	 * First answer wins: false when the call is not pending (unknown, already answered, aborted, or not
+	 * `answerable`) or the prompt does not offer `answer` (no `session` label, or a grant scope it does not list).
+	 * An answer given while the call's turn is being aborted is discarded and the call fails closed.
+	 */
+	resolveToolApproval(approvalId: string, answer: ExtensionApprovalAnswer): boolean;
+	/**
+	 * Tool approvals still awaiting an answer, oldest first, as `tool_approval_requested` reported them,
+	 * including the live `signal`: an extension that connects mid-prompt can still cancel its remote work.
+	 */
+	getPendingToolApprovals(): ToolApprovalRequestedEvent[];
+	/**
+	 * Answer a pending `ask` form (see `ask_requested`) as if the user submitted `answer`; the host's
+	 * dialog closes. False when the form is not pending, or `answer.data` names an unknown field, gives a
+	 * value a field rejects (disabled or unknown option without Other, failed validation), or leaves a
+	 * required field empty.
+	 */
+	resolveAsk(askId: string, answer: ExtensionAskAnswer): boolean;
+	/** `ask` forms still awaiting an answer, oldest first, as `ask_requested` reported them, live `signal` included. */
+	getPendingAsks(): AskRequestedEvent[];
+	/**
 	 * Open the interactive plan review on the newest plan file, like `/plan-review`, while the
 	 * session is idle. True once a review is awaiting an answer (an already-open review is kept,
 	 * not replaced), without waiting for a choice. False, without aborting anything or showing
@@ -1489,23 +1512,119 @@ export interface InputEvent {
 // Tool Events
 // ============================================================================
 
+/**
+ * A tool call is waiting for approval. `prompt` is the approval dialog's own text and choices, so an
+ * extension can relay it elsewhere (another device, a chat) and answer with `ctx.resolveToolApproval(event.approvalId, answer)`.
+ * The prompt stays open until the first answer: the host's dialog or an extension, whichever comes first.
+ * `tool_approval_resolved` and the host dialog wait until every handler of this event returns, so
+ * handlers should hand long work (a remote round-trip) off rather than await it; a resolve made inside
+ * a handler answers the call before any dialog opens. Only `answerable` calls take an extension's answer.
+ */
 export interface ToolApprovalRequestedEvent {
 	type: "tool_approval_requested";
 	sessionId: string;
+	/**
+	 * Unique to this approval within the runner; pass it to `ctx.resolveToolApproval`. Unlike `toolCallId`
+	 * (the provider's), it never repeats across concurrent agent loops sharing the runner.
+	 */
+	approvalId: string;
 	toolCallId: string;
 	toolName: string;
 	reason?: string;
 	approvalMode: ApprovalMode;
+	/** The rendered prompt: `session` and `grants` list the answers besides `once`/`deny` that this call accepts. */
+	prompt: ExtensionApprovalPrompt;
+	/** True when the call carries provider safety checks (listed at the end of `prompt.full`). */
+	safetyChecks: boolean;
+	/**
+	 * Aborts when the call is aborted (Esc, a session switch). The call then stops waiting on handlers and the
+	 * approval closes: hand it to remote work so it stops too. Absent when the call has no abort signal.
+	 */
+	signal?: AbortSignal;
+	/**
+	 * Whether `ctx.resolveToolApproval` can answer this call. False when only the host can: a host without a
+	 * UI (the call fails closed), provider safety checks, or a prompt raised by `tools.restrictedFolders`.
+	 */
+	answerable: boolean;
 }
 
 export interface ToolApprovalResolvedEvent {
 	type: "tool_approval_resolved";
 	sessionId: string;
+	/** The `approvalId` of the `tool_approval_requested` event this resolves. */
+	approvalId: string;
 	toolCallId: string;
 	toolName: string;
 	approved: boolean;
 	reason?: string;
+	/** `extension` when `ctx.resolveToolApproval` gave the answer; `user` for the host's dialog, an abort or a headless refusal. */
+	by: "user" | "extension";
 }
+
+/** One named control of an `ask` form, as `ask_requested` reports it. */
+export interface AskFieldSummary {
+	name: string;
+	/**
+	 * `choice`: radio/checkbox group or select (answer with an option `value`, an array of them when `multi`;
+	 * a lone checkbox, reported with `multi: false`, also takes `[]` to leave it unchecked); `text`: free text.
+	 */
+	kind: "choice" | "text";
+	/** The question shown for this control, plain text. */
+	question: string;
+	required: boolean;
+	/** Choice fields: whether several options may be checked. */
+	multi?: boolean;
+	/** Choice fields: whether a free-text answer outside `options` is accepted. */
+	other?: boolean;
+	/** Choice fields: the options in order; disabled options cannot be answered. */
+	options?: { value: string; label: string; disabled: boolean }[];
+	/** Text fields: the `<input type>`, or `textarea`. */
+	type?: string;
+	/** Text fields: the prefilled value. */
+	value?: string;
+}
+
+/**
+ * The `ask` tool opened a form for the user (every mode with a UI). The form is one question set:
+ * `ctx.resolveAsk(askId, answer)` answers all of it at once, whether the host shows it as an HTML form
+ * or field by field (select / input / editor dialogs). Same first-answer-wins and handler timing
+ * as {@link ToolApprovalRequestedEvent}.
+ */
+export interface AskRequestedEvent {
+	type: "ask_requested";
+	sessionId: string;
+	/** Unique to this form; pass it to `ctx.resolveAsk`. Provider tool call ids can repeat across concurrent loops. */
+	askId: string;
+	toolCallId: string;
+	/** The form's HTML as the model wrote it. */
+	html: string;
+	fields: AskFieldSummary[];
+	/**
+	 * Aborts when the call is aborted or a user message interrupts the form. The call then stops waiting on
+	 * handlers and the form closes: hand it to remote work so it stops too.
+	 */
+	signal?: AbortSignal;
+}
+
+/** The `ask` form closed. `answered` is false for a cancel, timeout, abort or interrupting message. */
+export interface AskResolvedEvent {
+	type: "ask_resolved";
+	sessionId: string;
+	askId: string;
+	toolCallId: string;
+	answered: boolean;
+	by: "user" | "extension";
+}
+
+/**
+ * An answer to an `ask` form: values by control `name` (a string, a number for numeric inputs, or an
+ * array for multi-choice fields; a choice value outside its options is the "Other" text), or `cancel`.
+ * Unanswered fields keep their defaults.
+ */
+export type ExtensionAskAnswer = { data: ExtensionAskData } | "cancel";
+
+/** Values of an `ask` form by control `name`, as an extension answers them. */
+export type ExtensionAskData = Record<string, string | number | string[]>;
 
 /** Stable ids for the interactive plan review's choices; labels may change (keep's label carries a token count). */
 export type PlanReviewChoice = "execute" | "compact" | "keep" | "refine" | "save";
@@ -1805,6 +1924,8 @@ export type ExtensionEvent =
 	| ToolApprovalResolvedEvent
 	| PlanReviewRequestedEvent
 	| PlanReviewResolvedEvent
+	| AskRequestedEvent
+	| AskResolvedEvent
 	| ModeChangedEvent
 	| AgentViewChangedEvent;
 
@@ -2087,6 +2208,8 @@ export interface ExtensionAPI {
 	on(event: "tool_approval_resolved", handler: ExtensionHandler<ToolApprovalResolvedEvent>): void;
 	on(event: "plan_review_requested", handler: ExtensionHandler<PlanReviewRequestedEvent>): void;
 	on(event: "plan_review_resolved", handler: ExtensionHandler<PlanReviewResolvedEvent>): void;
+	on(event: "ask_requested", handler: ExtensionHandler<AskRequestedEvent>): void;
+	on(event: "ask_resolved", handler: ExtensionHandler<AskResolvedEvent>): void;
 	on(event: "mode_changed", handler: ExtensionHandler<ModeChangedEvent>): void;
 	on(event: "agent_view_changed", handler: ExtensionHandler<AgentViewChangedEvent>): void;
 	on(event: "tool_call", handler: ExtensionHandler<ToolCallEvent, ToolCallEventResult>): void;

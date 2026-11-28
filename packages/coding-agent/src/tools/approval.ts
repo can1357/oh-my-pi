@@ -877,15 +877,69 @@ function approvalGrantChoices(
 }
 
 /**
- * Ask the user to approve a call: the host's approval dialog when it has one (it gets the full
- * prompt and a compact one with the details summarized to a row, so the composer beneath it
- * keeps its room), else a select with the full prompt (RPC, ACP, extension hosts). `appendix`
- * lines follow the prompt on both. With a `sessionSubject`, both also offer to approve that
- * subject for the rest of the session; with `grants`, both offer the `always-ask-cached` grants
- * the call can record, and the prompt lists the folder a directory grant would cover. `signal`
- * (the call's abort signal) closes the prompt, so aborting the turn never waits on a prompt
- * nobody can see or answer. Anything but an explicit approval is `deny`.
+ * The approval prompt for a call, in both renderings: `full` for a dialog or select, and `compact`
+ * with the details summarized to a row, so the composer beneath a dialog keeps its room. `appendix`
+ * lines follow the prompt on both. With a `sessionSubject` it offers to approve that subject for the
+ * rest of the session; with `grants`, the `always-ask-cached` grants the call can record, and the
+ * prompt lists the folder a directory grant would cover.
  */
+export async function buildApprovalPrompt(
+	tool: ApprovalSubject,
+	args: unknown,
+	options: { reason?: string; appendix?: readonly string[]; sessionSubject?: string; grants?: boolean } = {},
+): Promise<ExtensionApprovalPrompt> {
+	const { reason, appendix = [], sessionSubject } = options;
+	const header = approvalHeader(tool, reason);
+	const details = approvalDetails(tool, args);
+	const session = sessionSubject === undefined ? undefined : `Approve ${sessionSubject} for this session`;
+	const folder = options.grants ? approvalFolderCandidate(tool, args) : undefined;
+	const grants = options.grants ? approvalGrantChoices(tool, args, folder) : [];
+	// A directory answer names what it covers: the folder's own entries, listed in the prompt.
+	const listing = folder ? await approvalFolderListing(folder.key, APPROVAL_FOLDER_FULL_LISTING) : undefined;
+	const folderBlock = approvalFolderPromptBlock(folder?.label, listing, APPROVAL_FOLDER_FULL_LISTING);
+	const full = [...header, ...details, ...(folderBlock ? [folderBlock] : []), ...appendix].join("\n");
+	const summary = approvalSummary(details);
+	const compactBlock = approvalFolderPromptBlock(folder?.label, listing, APPROVAL_FOLDER_COMPACT_LISTING);
+	const compact = [
+		...header,
+		...(summary ? [summary] : []),
+		...(compactBlock ? [compactBlock] : []),
+		...appendix,
+	].join("\n");
+	return { full, compact, ...(session ? { session } : {}), ...(grants.length > 0 ? { grants } : {}) };
+}
+
+/**
+ * Show `prompt` to the user: the host's approval dialog when it has one, else a select with the full
+ * prompt (RPC, ACP, extension hosts). `signal` closes the prompt. Anything but an explicit approval
+ * the prompt offers is `deny`.
+ */
+export async function presentApproval(
+	ui: Pick<ExtensionUIContext, "select" | "approve">,
+	prompt: ExtensionApprovalPrompt,
+	signal?: AbortSignal,
+): Promise<ExtensionApprovalAnswer> {
+	const dialogOptions = signal ? { signal } : undefined;
+	if (ui.approve) return acceptedApprovalAnswer(prompt, await ui.approve(prompt, dialogOptions)) ?? "deny";
+	return approvalAnswerForChoice(prompt, await ui.select(prompt.full, approvalChoiceLabels(prompt), dialogOptions));
+}
+
+/**
+ * `answer` as `prompt` accepts it, or `undefined` when the prompt does not offer it: `session` needs the
+ * prompt's session label and a grant one of its grant scopes. Shared by the dialog and extension answers.
+ */
+export function acceptedApprovalAnswer(
+	prompt: Pick<ExtensionApprovalPrompt, "session" | "grants">,
+	answer: unknown,
+): ExtensionApprovalAnswer | undefined {
+	if (answer === "once" || answer === "deny") return answer;
+	if (answer === "session") return prompt.session ? answer : undefined;
+	if (typeof answer !== "object" || answer === null || !("grant" in answer)) return undefined;
+	const grant = prompt.grants?.find(candidate => candidate.scope === answer.grant);
+	return grant ? { grant: grant.scope, always: "always" in answer && answer.always === true } : undefined;
+}
+
+/** Ask the user to approve a call: {@link buildApprovalPrompt} shown by {@link presentApproval}. */
 export async function requestApproval(
 	ui: Pick<ExtensionUIContext, "select" | "approve">,
 	tool: ApprovalSubject,
@@ -898,43 +952,7 @@ export async function requestApproval(
 		signal?: AbortSignal;
 	} = {},
 ): Promise<ExtensionApprovalAnswer> {
-	const { reason, appendix = [], sessionSubject, signal } = options;
-	const header = approvalHeader(tool, reason);
-	const details = approvalDetails(tool, args);
-	const session = sessionSubject === undefined ? undefined : `Approve ${sessionSubject} for this session`;
-	const folder = options.grants ? approvalFolderCandidate(tool, args) : undefined;
-	const grants = options.grants ? approvalGrantChoices(tool, args, folder) : [];
-	// A directory answer names what it covers: the folder's own entries, listed in the prompt.
-	const listing = folder ? await approvalFolderListing(folder.key, APPROVAL_FOLDER_FULL_LISTING) : undefined;
-	const folderBlock = approvalFolderPromptBlock(folder?.label, listing, APPROVAL_FOLDER_FULL_LISTING);
-	const full = [...header, ...details, ...(folderBlock ? [folderBlock] : []), ...appendix].join("\n");
-	const dialogOptions = signal ? { signal } : undefined;
-	if (ui.approve) {
-		const summary = approvalSummary(details);
-		const compactBlock = approvalFolderPromptBlock(folder?.label, listing, APPROVAL_FOLDER_COMPACT_LISTING);
-		const compact = [
-			...header,
-			...(summary ? [summary] : []),
-			...(compactBlock ? [compactBlock] : []),
-			...appendix,
-		].join("\n");
-		const answer = await ui.approve(
-			{
-				full,
-				compact,
-				...(session ? { session } : {}),
-				...(grants.length > 0 ? { grants } : {}),
-			},
-			dialogOptions,
-		);
-		if (answer === "once" || (answer === "session" && session)) return answer;
-		if (typeof answer === "object" && answer !== null && grants.some(grant => grant.scope === answer.grant)) {
-			return { grant: answer.grant, always: answer.always === true };
-		}
-		return "deny";
-	}
-	const choices = { ...(session ? { session } : {}), ...(grants.length > 0 ? { grants } : {}) };
-	return approvalAnswerForChoice(choices, await ui.select(full, approvalChoiceLabels(choices), dialogOptions));
+	return presentApproval(ui, await buildApprovalPrompt(tool, args, options), options.signal);
 }
 
 /** The approve-this-call-only label: "Approve", or "Approve Once" beside grants that remember more. */

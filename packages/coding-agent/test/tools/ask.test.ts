@@ -8,10 +8,15 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type {
+	AskRequestedEvent,
+	AskResolvedEvent,
+	ExtensionAskAnswer,
+	ExtensionAskData,
 	ExtensionFormDialogResult,
 	ExtensionUIDialogOptions,
 	ExtensionUISelectItem,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { PendingInteractions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/pending-interactions";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { AskTool, recoverAskHtml } from "@oh-my-pi/pi-coding-agent/tools/ask";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
@@ -844,5 +849,431 @@ describe("AskTool option note images", () => {
 
 			expect(result.content.slice(1)).toEqual([image]);
 		});
+	});
+});
+
+describe("AskTool answered by an extension", () => {
+	type Channel = NonNullable<AgentToolContext["extensionAsk"]>;
+	const channel = (answerOnOpen?: ExtensionAskAnswer) => {
+		const pending = new PendingInteractions();
+		const requested: AskRequestedEvent[] = [];
+		const resolved: AskResolvedEvent[] = [];
+		const extensionAsk: Channel = {
+			async open(event, accept, signal) {
+				// As the runner's channel does: the dialog's signal closes the pending form.
+				const prompt = pending.openAsk(event, accept, signal);
+				requested.push(event);
+				if (answerOnOpen !== undefined) pending.resolveAsk(event.askId, answerOnOpen);
+				return prompt;
+			},
+			async resolved(event) {
+				resolved.push(event);
+			},
+		};
+		return { pending, requested, resolved, extensionAsk };
+	};
+	const withChannel = (context: AgentToolContext, extensionAsk: Channel, notify = vi.fn()): AgentToolContext => {
+		context.extensionAsk = extensionAsk;
+		(context.ui as { notify?: unknown }).notify = notify;
+		return context;
+	};
+
+	it("reports the form's fields and closes the open dialog when the extension answers first", async () => {
+		const ext = channel();
+		const opened = Promise.withResolvers<AbortSignal | undefined>();
+		const select = vi.fn<Select>(async (_title, _options, dialogOptions) => {
+			opened.resolve(dialogOptions?.signal);
+			await new Promise<void>(resolve => dialogOptions?.signal?.addEventListener("abort", () => resolve()));
+			return undefined;
+		});
+		const notify = vi.fn();
+		const outcome = new AskTool(createSession()).execute(
+			"call-ext-ask",
+			{ html: DB_FORM },
+			undefined,
+			undefined,
+			withChannel(createContext({ select }), ext.extensionAsk, notify),
+		);
+		const signal = await opened.promise;
+
+		expect(ext.requested[0]?.fields).toEqual([
+			{
+				name: "store",
+				kind: "choice",
+				question: "Session store",
+				required: false,
+				multi: false,
+				other: true,
+				options: [
+					{ value: "sqlite", label: "SQLite", disabled: false },
+					{ value: "redis", label: "Redis", disabled: false },
+				],
+			},
+			{ name: "ttl", kind: "text", question: "Lifetime (days)", required: false, type: "number", value: "30" },
+		]);
+		// Data the form cannot take is refused and leaves the form open.
+		expect(ext.pending.resolveAsk(ext.requested[0]?.askId ?? "missing", { data: { missing: "x" } })).toBe(false);
+		expect(ext.pending.resolveAsk(ext.requested[0]?.askId ?? "missing", { data: { ttl: "soon" } })).toBe(false);
+		expect(ext.pending.resolveAsk(ext.requested[0]?.askId ?? "missing", { data: { store: "redis" } })).toBe(true);
+		const result = await outcome;
+
+		expect(signal?.aborted).toBe(true);
+		expect(notify).toHaveBeenCalledWith("Question answered by extension", "info");
+		// Fields the extension left out keep their defaults.
+		expect(text(result)).toBe(`User answers:\n${JSON.stringify({ store: "redis", ttl: 30 }, null, 2)}`);
+		expect(ext.resolved).toEqual([
+			{
+				type: "ask_resolved",
+				sessionId: "",
+				askId: ext.requested[0]!.askId,
+				toolCallId: "call-ext-ask",
+				answered: true,
+				by: "extension",
+			},
+		]);
+		expect(ext.pending.resolveAsk(ext.requested[0]?.askId ?? "missing", { data: {} })).toBe(false);
+	});
+
+	it("an answer given while handling the request skips the dialog", async () => {
+		const ext = channel({ data: { store: "mongo", ttl: 7 } });
+		const result = await new AskTool(createSession()).execute(
+			"call-ext-early",
+			{ html: DB_FORM },
+			undefined,
+			undefined,
+			withChannel(createContext({}), ext.extensionAsk),
+		);
+		// "mongo" is not an option: it is the field's Other answer.
+		expect(text(result)).toBe(`User answers:\n${JSON.stringify({ store: "mongo", ttl: 7 }, null, 2)}`);
+		expect(ext.resolved[0]).toMatchObject({ answered: true, by: "extension" });
+	});
+
+	it("an extension's cancel cancels like the user's", async () => {
+		const ext = channel("cancel");
+		const abort = vi.fn();
+		await expect(
+			new AskTool(createSession()).execute(
+				"call-ext-cancel",
+				{ html: DB_FORM },
+				undefined,
+				undefined,
+				withChannel(createContext({ abort }), ext.extensionAsk),
+			),
+		).rejects.toBeInstanceOf(ToolAbortError);
+		expect(abort).toHaveBeenCalled();
+		expect(ext.resolved[0]).toMatchObject({ answered: false, by: "extension" });
+	});
+
+	it("an answer given while the call is aborted takes the abort path", async () => {
+		const turn = new AbortController();
+		const pending = new PendingInteractions();
+		const resolved: AskResolvedEvent[] = [];
+		const extensionAsk: Channel = {
+			async open(event, accept) {
+				const prompt = pending.openAsk(event, accept);
+				pending.resolveAsk(event.askId, { data: { store: "redis" } });
+				turn.abort();
+				return prompt;
+			},
+			async resolved(event) {
+				resolved.push(event);
+			},
+		};
+		await expect(
+			new AskTool(createSession()).execute(
+				"call-ext-aborted",
+				{ html: DB_FORM },
+				turn.signal,
+				undefined,
+				withChannel(createContext({}), extensionAsk),
+			),
+		).rejects.toThrow("Ask input was cancelled");
+		expect(resolved[0]).toMatchObject({ answered: false, by: "user" });
+	});
+
+	describe("choice answers", () => {
+		const CHOICES = `<form>
+  <fieldset><legend>Tags</legend>
+    <label><input type="checkbox" name="tags" value="a" checked> A</label>
+    <label><input type="checkbox" name="tags" value="b"> B</label>
+    <label><input type="checkbox" name="tags" value="c" disabled> C</label>
+  </fieldset>
+  <label>Region <select name="region"><option value="eu">EU</option><option value="us">US</option></select></label>
+  <label><input type="checkbox" name="agree" value="yes" checked> Agree</label>
+</form>`;
+		const answer = async (data: ExtensionAskData) => {
+			const ext = channel();
+			const opened = Promise.withResolvers<void>();
+			const select = vi.fn<Select>(async (_title, _options, dialogOptions) => {
+				opened.resolve();
+				await new Promise<void>(resolve => dialogOptions?.signal?.addEventListener("abort", () => resolve()));
+				return undefined;
+			});
+			const outcome = new AskTool(createSession()).execute(
+				"call-choices",
+				{ html: CHOICES },
+				undefined,
+				undefined,
+				withChannel(createContext({ select }), ext.extensionAsk),
+			);
+			await opened.promise;
+			const accepted = ext.pending.resolveAsk(ext.requested[0]?.askId ?? "missing", { data });
+			if (!accepted) ext.pending.resolveAsk(ext.requested[0]?.askId ?? "missing", "cancel");
+			const result = await outcome.catch(() => undefined);
+			return { accepted, result };
+		};
+
+		it("rejects a disabled option", async () => {
+			expect((await answer({ tags: ["c"] })).accepted).toBe(false);
+		});
+		it("rejects more than one Other value in a multi field", async () => {
+			expect((await answer({ tags: ["a", "x", "y"] })).accepted).toBe(false);
+		});
+		it("rejects an Other value when the field offers none", async () => {
+			expect((await answer({ region: "asia" })).accepted).toBe(false);
+		});
+		it("accepts one Other value beside options, and an empty array clears the group", async () => {
+			const other = await answer({ tags: ["b", "x"] });
+			expect(other.accepted).toBe(true);
+			expect(text(other.result!)).toContain(
+				JSON.stringify({ tags: ["b", "x"], region: "eu", agree: "yes" }, null, 2),
+			);
+			const cleared = await answer({ tags: [] });
+			expect(cleared.accepted).toBe(true);
+			expect(text(cleared.result!)).toContain(JSON.stringify({ region: "eu", agree: "yes" }, null, 2));
+		});
+		it("an empty array unchecks a preselected lone checkbox, and [value] keeps it checked", async () => {
+			const unchecked = await answer({ agree: [] });
+			expect(unchecked.accepted).toBe(true);
+			expect(text(unchecked.result!)).toContain(JSON.stringify({ tags: ["a"], region: "eu" }, null, 2));
+			const checked = await answer({ agree: ["yes"] });
+			expect(checked.accepted).toBe(true);
+			expect(text(checked.result!)).toContain(JSON.stringify({ tags: ["a"], region: "eu", agree: "yes" }, null, 2));
+			expect((await answer({ agree: ["yes", "no"] })).accepted).toBe(false);
+		});
+		/** Opens `html` in a form dialog that waits, and returns whether each extension answer is accepted. */
+		const openForm = async (html: string) => {
+			const ext = channel();
+			const opened = Promise.withResolvers<void>();
+			const formDialog = vi.fn<FormDialog>(async (_html, options) => {
+				opened.resolve();
+				const closed = Promise.withResolvers<void>();
+				options?.signal?.addEventListener("abort", () => closed.resolve());
+				await closed.promise;
+				return undefined;
+			});
+			const outcome = new AskTool(createSession()).execute(
+				"call-form",
+				{ html },
+				undefined,
+				undefined,
+				withChannel(createContext({ formDialog }), ext.extensionAsk),
+			);
+			await opened.promise;
+			const askId = ext.requested[0]?.askId ?? "missing";
+			return {
+				accepts: (data: ExtensionAskData) => ext.pending.resolveAsk(askId, { data }),
+				result: outcome,
+				close: async () => {
+					ext.pending.resolveAsk(askId, "cancel");
+					await outcome.catch(() => undefined);
+				},
+			};
+		};
+		it("unchecking a checkbox leaves its hidden fallback, as the dialog would", async () => {
+			const html = `<form>
+  <input type="hidden" name="agree" value="no">
+  <label><input type="checkbox" name="agree" value="yes" checked> Agree</label>
+</form>`;
+			const unchecked = await openForm(html);
+			expect(unchecked.accepts({ agree: [] })).toBe(true);
+			expect(text(await unchecked.result)).toContain(JSON.stringify({ agree: "no" }, null, 2));
+			// Left unchecked, the fallback is what the name submits, not an option the checkbox lacks.
+			const untouched = await openForm(html.replace(" checked>", ">"));
+			expect(untouched.accepts({})).toBe(true);
+			expect(text(await untouched.result)).toContain(JSON.stringify({ agree: "no" }, null, 2));
+		});
+		it("accepts choosing the option a hidden fallback also holds", async () => {
+			const form = await openForm(`<form>
+  <input type="hidden" name="plan" value="pro">
+  <fieldset><legend>Plan</legend>
+    <label><input type="radio" name="plan" value="free" required> Free</label>
+    <label><input type="radio" name="plan" value="pro"> Pro</label>
+  </fieldset>
+</form>`);
+			// Left alone, the required group answers nothing even though the fallback holds `pro`.
+			expect(form.accepts({})).toBe(false);
+			expect(form.accepts({ plan: "pro" })).toBe(true);
+			expect(text(await form.result)).toContain(JSON.stringify({ plan: "pro" }, null, 2));
+		});
+		it("accepts a required radio group's option whose value is empty", async () => {
+			const form = await openForm(`<form>
+  <fieldset><legend>Tier</legend>
+    <label><input type="radio" name="tier" value="" required> None</label>
+    <label><input type="radio" name="tier" value="gold"> Gold</label>
+  </fieldset>
+</form>`);
+			expect(form.accepts({ tier: "" })).toBe(true);
+			expect(text(await form.result)).toContain(JSON.stringify({ tier: "" }, null, 2));
+		});
+		it("refuses an answer to a name several controls share, or that leaves its shared default invalid", async () => {
+			const form = await openForm(`<form>
+  <label>Contact <input type="email" name="contact" required></label>
+  <label>Contact <select name="contact"><option value="phone">Phone</option></select></label>
+  <label>Region <select name="region"><option value="eu">EU</option><option value="us">US</option></select></label>
+</form>`);
+			// The select's option would skip the email field's validation.
+			expect(form.accepts({ contact: "phone" })).toBe(false);
+			// Left alone, the select's default `phone` is what the name submits: still not a valid email.
+			expect(form.accepts({})).toBe(false);
+			expect(form.accepts({ region: "us" })).toBe(false);
+			await form.close();
+		});
+		it("refuses a shared choice default that an earlier choice does not offer", async () => {
+			// A select offers no Other answer, so the later select's `enterprise` is not one of its values.
+			const form = await openForm(`<form>
+  <label>Plan <select name="plan"><option value="free">Free</option><option value="pro">Pro</option></select></label>
+  <label>Plan <select name="plan"><option value="enterprise">Enterprise</option></select></label>
+  <label>Region <select name="region"><option value="eu">EU</option><option value="us">US</option></select></label>
+</form>`);
+			expect(form.accepts({})).toBe(false);
+			expect(form.accepts({ region: "us" })).toBe(false);
+			await form.close();
+		});
+		it("refuses a required select's empty placeholder", async () => {
+			const form = await openForm(`<form>
+  <label>Region <select name="region" required><option value="">Choose…</option><option value="eu">EU</option></select></label>
+</form>`);
+			expect(form.accepts({ region: "" })).toBe(false);
+			expect(form.accepts({})).toBe(false);
+			expect(form.accepts({ region: "eu" })).toBe(true);
+			await form.close();
+		});
+	});
+
+	it("a call aborted while its answer is being reported takes the abort path", async () => {
+		const ext = channel({ data: { store: "redis" } });
+		const turn = new AbortController();
+		const reported = ext.extensionAsk.resolved;
+		ext.extensionAsk.resolved = async event => {
+			await reported(event);
+			turn.abort();
+		};
+		await expect(
+			new AskTool(createSession()).execute(
+				"call-ext-reported",
+				{ html: DB_FORM },
+				turn.signal,
+				undefined,
+				withChannel(createContext({}), ext.extensionAsk),
+			),
+		).rejects.toThrow("Ask input was cancelled");
+	});
+
+	it("two pending forms with the same tool call id are answered separately", async () => {
+		const ext = channel();
+		let opened = 0;
+		const bothOpen = Promise.withResolvers<void>();
+		const select = vi.fn<Select>(async (_title, _options, dialogOptions) => {
+			if (++opened === 2) bothOpen.resolve();
+			await new Promise<void>(resolve => dialogOptions?.signal?.addEventListener("abort", () => resolve()));
+			return undefined;
+		});
+		const ask = () =>
+			new AskTool(createSession()).execute(
+				"call-dup",
+				{ html: DB_FORM },
+				undefined,
+				undefined,
+				withChannel(createContext({ select }), ext.extensionAsk),
+			);
+		const first = ask();
+		const second = ask();
+		await bothOpen.promise;
+		const [a, b] = ext.requested;
+		expect(a!.askId).not.toBe(b!.askId);
+		expect(ext.pending.resolveAsk(a!.askId, { data: { store: "redis" } })).toBe(true);
+		expect(ext.pending.pendingAsks().map(form => form.askId)).toEqual([b!.askId]);
+		expect(ext.pending.resolveAsk(b!.askId, { data: { store: "sqlite" } })).toBe(true);
+		expect(text(await first)).toContain('"store": "redis"');
+		expect(text(await second)).toContain('"store": "sqlite"');
+	});
+
+	it("cancelling while an ask_resolved handler awaits does not wait for it", async () => {
+		const ext = channel();
+		const turn = new AbortController();
+		const reported: AskResolvedEvent[] = [];
+		// An `ask_resolved` handler stuck on remote work that ignores every signal.
+		ext.extensionAsk.resolved = async event => {
+			reported.push(event);
+			turn.abort();
+			await Promise.withResolvers<void>().promise;
+		};
+		const formDialog = vi.fn<FormDialog>(async () => ({ data: { store: "sqlite", ttl: 7 } }));
+		const outcome = new AskTool(createSession()).execute(
+			"call-resolved-held",
+			{ html: DB_FORM },
+			turn.signal,
+			undefined,
+			withChannel(createContext({ formDialog }), ext.extensionAsk),
+		);
+		await expect(outcome).rejects.toThrow("Ask input was cancelled");
+		expect(reported).toHaveLength(1);
+	});
+
+	it("a pending listing carries the form's live signal", async () => {
+		const ext = channel();
+		const opened = Promise.withResolvers<void>();
+		const select = vi.fn<Select>(async (_title, _options, dialogOptions) => {
+			opened.resolve();
+			const closed = Promise.withResolvers<void>();
+			dialogOptions?.signal?.addEventListener("abort", () => closed.resolve());
+			await closed.promise;
+			return undefined;
+		});
+		const turn = new AbortController();
+		const outcome = new AskTool(createSession()).execute(
+			"call-listed",
+			{ html: DB_FORM },
+			turn.signal,
+			undefined,
+			withChannel(createContext({ select }), ext.extensionAsk),
+		);
+		await opened.promise;
+		// An extension that connects mid-form only has the listing to cancel its remote work.
+		const [listed] = ext.pending.pendingAsks();
+		expect(listed?.signal?.aborted).toBe(false);
+		turn.abort();
+		await outcome.catch(() => undefined);
+		expect(listed?.signal?.aborted).toBe(true);
+		expect(ext.pending.pendingAsks()).toEqual([]);
+	});
+
+	it("a timeout is reported as unanswered even when the form's values are valid", async () => {
+		const ext = channel();
+		const formDialog = vi.fn<FormDialog>(async () => ({ data: { store: "sqlite", ttl: 30 }, timedOut: true }));
+		await new AskTool(createSession()).execute(
+			"call-timeout",
+			{ html: DB_FORM },
+			undefined,
+			undefined,
+			withChannel(createContext({ formDialog }), ext.extensionAsk),
+		);
+		expect(ext.resolved[0]).toMatchObject({ answered: false, by: "user" });
+	});
+
+	it("once the user answers, the extension can no longer", async () => {
+		const ext = channel();
+		const formDialog = vi.fn<FormDialog>(async () => ({ data: { store: "sqlite", ttl: 1 } }));
+		await new AskTool(createSession()).execute(
+			"call-user-ask",
+			{ html: DB_FORM },
+			undefined,
+			undefined,
+			withChannel(createContext({ formDialog }), ext.extensionAsk),
+		);
+		expect(ext.resolved[0]).toMatchObject({ answered: true, by: "user" });
+		expect(ext.pending.resolveAsk(ext.requested[0]?.askId ?? "missing", { data: {} })).toBe(false);
+		expect(ext.pending.pendingAsks()).toEqual([]);
 	});
 });

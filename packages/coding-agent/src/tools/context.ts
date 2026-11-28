@@ -1,5 +1,6 @@
 import type { AgentToolContext, ToolCallContext } from "@oh-my-pi/pi-agent-core";
 import type { CustomToolContext } from "../extensibility/custom-tools/types";
+import type { ExtensionAskChannel } from "../extensibility/extensions/pending-interactions";
 import type { ExtensionUIContext } from "../extensibility/extensions/types";
 import { trackUserWaits, type UserWaitTracker } from "../extensibility/extensions/user-wait";
 import type { CalledToolShaper } from "../spotlight";
@@ -28,6 +29,8 @@ declare module "@oh-my-pi/pi-agent-core" {
 		 *  then neither spills the result to an artifact nor appends display notices (truncation
 		 *  stays structured in `details.meta`), and `read` returns `:raw` selections whole. */
 		programmatic?: boolean;
+		/** Set by the extension tool wrapper: lets the `ask` tool's form be answered by an extension. */
+		extensionAsk?: ExtensionAskChannel;
 		/** Enclosing eval invocation for a host-dispatched session tool. */
 		parentToolCallId?: string;
 		/** Set while the session runs the Spotlight experiment: the tool wrapper passes the final result of each of

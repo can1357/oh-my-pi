@@ -43,6 +43,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { createEvalCustomTools, describeEvalTools } from "@oh-my-pi/pi-coding-agent/task/eval-tools";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { AskTool } from "@oh-my-pi/pi-coding-agent/tools/ask";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import { getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
@@ -3119,11 +3120,11 @@ export default function (pi) {
 				{ type: "ui_select" },
 				{ type: "tool_approval_resolved", approved: true },
 			]);
-			// No abort signal reached the call, so the prompt gets no dialog options.
+			// Even without a turn signal the prompt gets one: an extension's answer closes it.
 			expect(select).toHaveBeenCalledWith(
 				expect.stringContaining("Allow tool: dangerous_tool"),
 				["Approve", "Approve dangerous_tool for this session", "Deny"],
-				undefined,
+				{ signal: expect.any(AbortSignal) },
 			);
 			delete globalState.__approvalEvents;
 		});
@@ -3160,7 +3161,9 @@ export default function (pi) {
 			const critical = { ...approvalTool, approval: () => ({ tier: "exec" as const, override: true }) };
 			select.mockImplementationOnce(async () => "Approve");
 			await run(critical, "call-critical");
-			expect(select).toHaveBeenLastCalledWith(expect.any(String), ["Approve", "Deny"], undefined);
+			expect(select).toHaveBeenLastCalledWith(expect.any(String), ["Approve", "Deny"], {
+				signal: expect.any(AbortSignal),
+			});
 			// A new session starts without the grant.
 			await sessionManager.newSession();
 			await run(approvalTool, "call-new-session");
@@ -3542,6 +3545,496 @@ export default function (pi) {
 				},
 			]);
 			delete globalState.__partialContextApprovalEvents;
+		});
+
+		describe("ask handlers awaiting remote work", () => {
+			type AskSeen = {
+				ctx?: { resolveAsk(id: string, answer: unknown): boolean };
+				askId?: string;
+				entered: () => void;
+				hold: Promise<void>;
+			};
+			const askState = globalThis as typeof globalThis & { __extAsk?: AskSeen };
+			afterEach(() => {
+				delete askState.__extAsk;
+			});
+			const FORM = `<form><label><input type="radio" name="pick" value="a"> A</label><label><input type="radio" name="pick" value="b"> B</label></form>`;
+
+			const runAsk = async (abortWith: "call" | "steering") => {
+				const release = Promise.withResolvers<void>();
+				const entered = Promise.withResolvers<void>();
+				askState.__extAsk = { entered: entered.resolve, hold: release.promise };
+				fs.writeFileSync(
+					path.join(extensionsDir, "ext-ask.ts"),
+					`export default function(pi) {
+						pi.on("ask_requested", async (event, ctx) => {
+							const seen = globalThis.__extAsk;
+							seen.ctx = ctx;
+							seen.askId = event.askId;
+							seen.entered();
+							await seen.hold;
+						});
+					}`,
+				);
+				const result = await loadTestExtensions();
+				const runner = new ExtensionRunner(
+					result.extensions,
+					result.runtime,
+					tempDir.path(),
+					sessionManager,
+					modelRegistry,
+				);
+				initializeRunner(runner, async () => undefined);
+				const session = {
+					cwd: tempDir.path(),
+					hasUI: true,
+					canPromptUser: true,
+					getSessionFile: () => null,
+					getSessionSpawns: () => "*",
+					settings: Settings.isolated({ "ask.notify": "off" }),
+				} as unknown as ToolSession;
+				const select = vi.fn(async () => undefined);
+				const turn = new AbortController();
+				const steering = new AbortController();
+				const wrapper = new ExtensionToolWrapper(new AskTool(session) as unknown as AgentTool, runner);
+				const execution = (wrapper as ExtensionToolWrapper<any>).execute(
+					"call-ask-held",
+					{ html: FORM },
+					turn.signal,
+					undefined,
+					{
+						sessionManager,
+						modelRegistry,
+						model: undefined,
+						isIdle: () => true,
+						hasQueuedMessages: () => false,
+						abort: () => {},
+						settings: Settings.isolated({ "tools.approvalMode": "yolo" }),
+						hasUI: true,
+						ui: { select, input: select, editor: select, notify: () => {} },
+						toolCall: { steeringSignal: steering.signal },
+					} as never,
+				);
+				await entered.promise;
+				if (abortWith === "call") turn.abort();
+				else steering.abort("user");
+				const outcome = await execution.then(
+					value => ({ value }),
+					error => ({ error }),
+				);
+				const late = askState.__extAsk!.ctx!.resolveAsk(askState.__extAsk!.askId!, { data: { pick: "a" } });
+				release.resolve();
+				return { outcome, late, select };
+			};
+
+			it("aborting the call ends the ask without waiting on the handler", async () => {
+				const { outcome, late, select } = await runAsk("call");
+				expect("error" in outcome ? String(outcome.error) : "no error").toContain("Ask input was cancelled");
+				expect(late).toBe(false);
+				expect(select).not.toHaveBeenCalled();
+			});
+
+			it("a message interrupting the ask ends it without waiting on the handler", async () => {
+				const { outcome, late, select } = await runAsk("steering");
+				expect("error" in outcome ? String(outcome.error) : "no error").toContain("Ask interrupted by message");
+				expect(late).toBe(false);
+				expect(select).not.toHaveBeenCalled();
+			});
+		});
+
+		describe("answered by an extension", () => {
+			type Seen = {
+				requested: Array<{
+					approvalId: string;
+					toolCallId: string;
+					prompt: { session?: string };
+					safetyChecks: boolean;
+					answerable: boolean;
+				}>;
+				resolved: Array<{ approved: boolean; by: string; reason?: string }>;
+				ctx?: {
+					resolveToolApproval(id: string, answer: unknown): boolean;
+					getPendingToolApprovals(): Array<{ toolCallId: string }>;
+				};
+				/** Answer given inside the requested handler, if any. */
+				inHandler?: unknown;
+				inHandlerResult?: boolean;
+				/** Runs at the end of the requested handler. */
+				afterHandler?: () => void;
+				/** The requested handler awaits this before returning, like a remote round-trip. */
+				hold?: Promise<void>;
+				/** Runs in the resolved handler. */
+				onResolved?: () => void;
+				/** Runs first in the requested handler, with the event it received. */
+				mutate?: (event: { prompt: { full: string; session?: string; grants?: unknown[] }; signal?: AbortSignal }) => void;
+				/** When set, the handler answers the moment the call's signal aborts, and stores the result. */
+				answerOnAbort?: boolean;
+				abortResult?: boolean;
+				/** A second `tool_approval_requested` handler awaits this, ignoring every signal. */
+				laterHold?: Promise<void>;
+				/** The `tool_approval_resolved` handler awaits this, ignoring every signal. */
+				resolvedHold?: Promise<void>;
+			};
+			const globalState = globalThis as typeof globalThis & { __extApproval?: Seen };
+			/** The approval id a call's request carried (an unknown id when it was never requested). */
+			const approvalIdOf = (seen: Seen, toolCallId: string): string =>
+				seen.requested.find(request => request.toolCallId === toolCallId)?.approvalId ?? `missing:${toolCallId}`;
+			afterEach(() => {
+				delete globalState.__extApproval;
+			});
+
+			const setup = async (options: { ui?: boolean; select?: Parameters<typeof initializeRunner>[1] } = {}) => {
+				const seen: Seen = { requested: [], resolved: [] };
+				globalState.__extApproval = seen;
+				fs.writeFileSync(
+					path.join(extensionsDir, "ext-approval.ts"),
+					`export default function(pi) {
+						pi.on("tool_approval_requested", async (event, ctx) => {
+							const seen = globalThis.__extApproval;
+							seen.mutate?.(event);
+							seen.requested.push(event);
+							seen.ctx = ctx;
+							if (seen.inHandler !== undefined) seen.inHandlerResult = ctx.resolveToolApproval(event.approvalId, seen.inHandler);
+							if (seen.answerOnAbort) event.signal?.addEventListener("abort", () => {
+								seen.abortResult = ctx.resolveToolApproval(event.approvalId, "once");
+							});
+							seen.afterHandler?.();
+							if (seen.hold) await seen.hold;
+						});
+						pi.on("tool_approval_requested", async () => {
+							const seen = globalThis.__extApproval;
+							if (seen.laterHold) await seen.laterHold;
+						});
+						pi.on("tool_approval_resolved", async event => {
+							globalThis.__extApproval.resolved.push({ approved: event.approved, by: event.by, reason: event.reason });
+							globalThis.__extApproval.onResolved?.();
+							if (globalThis.__extApproval.resolvedHold) await globalThis.__extApproval.resolvedHold;
+						});
+					}`,
+				);
+				const result = await loadTestExtensions();
+				const runner = new ExtensionRunner(
+					result.extensions,
+					result.runtime,
+					tempDir.path(),
+					sessionManager,
+					modelRegistry,
+				);
+				if (options.ui !== false) initializeRunner(runner, options.select ?? (async () => "Approve"));
+				const executed = vi.fn(async () => ({ content: [{ type: "text" as const, text: "ok" }] }));
+				const restricted = path.join(tempDir.path(), "restricted");
+				const wrapper = new ExtensionToolWrapper(
+					{ ...approvalTool, execute: executed, approvalRestrictionPaths: () => [path.join(restricted, "file")] },
+					runner,
+				);
+				const run = (
+					id: string,
+					extra: { signal?: AbortSignal; toolCall?: unknown; restrictedFolder?: boolean } = {},
+				) =>
+					(wrapper as ExtensionToolWrapper<any>).execute(id, {}, extra.signal, undefined, {
+						sessionManager,
+						modelRegistry,
+						model: undefined,
+						isIdle: () => true,
+						hasQueuedMessages: () => false,
+						abort: () => {},
+						settings: Settings.isolated(
+							extra.restrictedFolder
+								? { "tools.approvalMode": "yolo", "tools.restrictedFolders": [restricted] }
+								: { "tools.approvalMode": "always-ask" },
+						),
+						...(extra.toolCall ? { toolCall: extra.toolCall } : {}),
+					} as never);
+				return { seen, runner, executed, run };
+			};
+
+			it("reports the rendered prompt and closes the open dialog when the extension answers first", async () => {
+				let dialogSignal: AbortSignal | undefined;
+				const opened = Promise.withResolvers<void>();
+				const select = vi.fn(
+					async (_title: string, _options: string[], dialogOptions?: ExtensionUIDialogOptions) => {
+						dialogSignal = dialogOptions?.signal;
+						opened.resolve();
+						await new Promise<void>(resolve => dialogSignal?.addEventListener("abort", () => resolve()));
+						return undefined;
+					},
+				);
+				const { seen, executed, run } = await setup({ select });
+				const execution = run("call-ext-first");
+				await opened.promise;
+
+				expect(seen.requested[0]).toMatchObject({
+					toolCallId: "call-ext-first",
+					safetyChecks: false,
+					prompt: { session: "Approve dangerous_tool for this session" },
+				});
+				expect(seen.ctx!.getPendingToolApprovals().map(pending => pending.toolCallId)).toEqual(["call-ext-first"]);
+				// A grant scope this prompt does not offer is refused and leaves the call pending.
+				expect(
+					seen.ctx!.resolveToolApproval(approvalIdOf(seen, "call-ext-first"), { grant: "folder", always: false }),
+				).toBe(false);
+				expect(seen.ctx!.resolveToolApproval(approvalIdOf(seen, "call-ext-first"), "once")).toBe(true);
+				await execution;
+
+				expect(dialogSignal?.aborted).toBe(true);
+				expect(executed).toHaveBeenCalledTimes(1);
+				expect(seen.resolved).toEqual([{ approved: true, by: "extension", reason: undefined }]);
+				// First answer wins: the call is no longer pending.
+				expect(seen.ctx!.resolveToolApproval(approvalIdOf(seen, "call-ext-first"), "deny")).toBe(false);
+				expect(seen.ctx!.getPendingToolApprovals()).toEqual([]);
+			});
+
+			it("an extension's deny fails the call as denied by the extension", async () => {
+				const { seen, executed, run } = await setup();
+				seen.inHandler = "deny";
+				await expect(run("call-ext-deny")).rejects.toThrow("Tool call denied by extension: dangerous_tool");
+				expect(seen.inHandlerResult).toBe(true);
+				expect(executed).not.toHaveBeenCalled();
+				expect(seen.resolved).toEqual([{ approved: false, by: "extension", reason: "denied by extension" }]);
+			});
+
+			it("a session answer from the extension approves later calls of the tool without asking", async () => {
+				const select = vi.fn(async () => "Deny");
+				const { seen, executed, run } = await setup({ select });
+				seen.inHandler = "session";
+				await run("call-ext-session-1");
+				seen.inHandler = undefined;
+				await run("call-ext-session-2");
+				expect(select).not.toHaveBeenCalled();
+				expect(seen.requested).toHaveLength(1);
+				expect(executed).toHaveBeenCalledTimes(2);
+			});
+
+			it("once the user answers, the extension can no longer", async () => {
+				const { seen, run } = await setup({ select: async () => "Approve" });
+				await run("call-user-first");
+				expect(seen.resolved).toEqual([{ approved: true, by: "user", reason: undefined }]);
+				expect(seen.ctx!.resolveToolApproval(approvalIdOf(seen, "call-user-first"), "deny")).toBe(false);
+			});
+
+			it("without a UI the call fails closed even when a handler tries to answer", async () => {
+				const headless = await setup({ ui: false });
+				headless.seen.inHandler = "once";
+				await expect(headless.run("call-headless")).rejects.toThrow("no interactive UI available");
+				expect(headless.seen.requested[0]?.answerable).toBe(false);
+				expect(headless.seen.inHandlerResult).toBe(false);
+				expect(headless.executed).not.toHaveBeenCalled();
+				expect(headless.seen.resolved).toEqual([
+					{ approved: false, by: "user", reason: "no interactive UI available" },
+				]);
+			});
+
+			it("calls with provider safety checks are answered only at the host", async () => {
+				let pendingDuringDialog: unknown;
+				let resolvedDuringDialog: boolean | undefined;
+				const select = vi.fn(async () => {
+					pendingDuringDialog = globalState.__extApproval!.ctx!.getPendingToolApprovals();
+					resolvedDuringDialog = globalState.__extApproval!.ctx!.resolveToolApproval(
+						approvalIdOf(globalState.__extApproval!, "call-safety"),
+						"once",
+					);
+					return "Deny";
+				});
+				const { seen, executed, run } = await setup({ select });
+				seen.inHandler = "once";
+				const toolCall = {
+					batchId: "safety-batch",
+					index: 0,
+					total: 1,
+					toolCalls: [],
+					providerMetadata: {
+						type: "computer",
+						providerItemId: "computer-call",
+						actions: [],
+						pendingSafetyChecks: [{ id: "safety-check", message: "Check the page" }],
+					},
+				};
+				await expect(run("call-safety", { toolCall })).rejects.toThrow("Tool call denied by user");
+				expect(seen.requested[0]).toMatchObject({ safetyChecks: true, answerable: false });
+				expect(seen.inHandlerResult).toBe(false);
+				expect(pendingDuringDialog).toEqual([]);
+				expect(resolvedDuringDialog).toBe(false);
+				expect(select).toHaveBeenCalledTimes(1);
+				expect(executed).not.toHaveBeenCalled();
+			});
+
+			it("calls a restricted folder raised are answered only at the host", async () => {
+				const select = vi.fn(async () => "Approve");
+				const { seen, executed, run } = await setup({ select });
+				seen.inHandler = "deny";
+				await run("call-restricted", { restrictedFolder: true });
+				expect(seen.requested[0]?.answerable).toBe(false);
+				expect(seen.inHandlerResult).toBe(false);
+				expect(select).toHaveBeenCalledTimes(1);
+				expect(executed).toHaveBeenCalledTimes(1);
+				expect(seen.resolved).toEqual([{ approved: true, by: "user", reason: undefined }]);
+			});
+
+			it("an answer given while handling the request is shown to the user", async () => {
+				const select = vi.fn(async () => "Deny");
+				const { seen, runner, executed, run } = await setup({ select });
+				const notify = vi.spyOn(runner.getUIContext(), "notify");
+				seen.inHandler = "once";
+				await run("call-in-handler");
+				expect(select).not.toHaveBeenCalled();
+				expect(executed).toHaveBeenCalledTimes(1);
+				expect(notify).toHaveBeenCalledWith("Approval for dangerous_tool answered by extension", "info");
+			});
+
+			it("a handler changing the event's prompt changes neither the dialog nor the answers it accepts", async () => {
+				const select = vi.fn(async (_title: string, options: string[]) => options[1]);
+				const { seen, executed, run } = await setup({ select });
+				seen.mutate = event => {
+					event.prompt.full = "redacted";
+					delete event.prompt.session;
+				};
+				await run("call-mutated-dialog");
+				expect(select).toHaveBeenCalledWith(
+					expect.stringContaining("Allow tool: dangerous_tool"),
+					["Approve", "Approve dangerous_tool for this session", "Deny"],
+					expect.anything(),
+				);
+				expect(executed).toHaveBeenCalledTimes(1);
+
+				// The session answer is still the host's to accept, however the event was edited.
+				const second = await setup({ select: async () => "Deny" });
+				second.seen.mutate = event => {
+					delete event.prompt.session;
+				};
+				second.seen.inHandler = "session";
+				await second.run("call-mutated-answer");
+				expect(second.seen.inHandlerResult).toBe(true);
+				expect(second.executed).toHaveBeenCalledTimes(1);
+			});
+
+			it("two pending calls with the same tool call id are answered separately", async () => {
+				const opened: Array<() => void> = [];
+				const bothOpen = Promise.withResolvers<void>();
+				const select = vi.fn(
+					async (_title: string, _options: string[], dialogOptions?: ExtensionUIDialogOptions) => {
+						opened.push(() => {});
+						if (opened.length === 2) bothOpen.resolve();
+						await new Promise<void>(resolve => dialogOptions?.signal?.addEventListener("abort", () => resolve()));
+						return undefined;
+					},
+				);
+				const { seen, executed, run } = await setup({ select });
+				// Concurrent loops (advisors) sharing a runner can reuse a provider tool call id.
+				const first = run("call-dup");
+				const second = run("call-dup");
+				await bothOpen.promise;
+				const [a, b] = seen.requested as unknown as Array<{ approvalId: string }>;
+				expect(a!.approvalId).not.toBe(b!.approvalId);
+				expect(seen.ctx!.getPendingToolApprovals()).toHaveLength(2);
+				expect(seen.ctx!.resolveToolApproval(a!.approvalId, "deny")).toBe(true);
+				await expect(first).rejects.toThrow("denied by extension");
+				expect(seen.ctx!.getPendingToolApprovals()).toHaveLength(1);
+				expect(seen.ctx!.resolveToolApproval(b!.approvalId, "once")).toBe(true);
+				await second;
+				expect(executed).toHaveBeenCalledTimes(1);
+			});
+
+			it("a call aborted while its approval is being reported does not run", async () => {
+				const { seen, executed, run } = await setup();
+				const turn = new AbortController();
+				seen.inHandler = "once";
+				seen.onResolved = () => turn.abort();
+				await expect(run("call-aborted-after", { signal: turn.signal })).rejects.toThrow(/Aborted/);
+				expect(seen.resolved).toEqual([{ approved: true, by: "extension", reason: undefined }]);
+				expect(executed).not.toHaveBeenCalled();
+			});
+
+			it("a call aborted while its prompt is built requests nothing", async () => {
+				const { seen, executed, run } = await setup();
+				const turn = new AbortController();
+				turn.abort();
+				await expect(run("call-aborted-early", { signal: turn.signal })).rejects.toThrow(/Aborted/);
+				expect(seen.requested).toEqual([]);
+				expect(seen.resolved).toEqual([]);
+				expect(
+					sessionManager
+						.getEntries()
+						.filter(entry => entry.type === "custom" && entry.customType === "tool_approval_requested"),
+				).toEqual([]);
+				expect(executed).not.toHaveBeenCalled();
+			});
+
+			it("aborting the call stops waiting on a handler and closes the approval", async () => {
+				const { seen, executed, run } = await setup();
+				const release = Promise.withResolvers<void>();
+				const entered = Promise.withResolvers<void>();
+				seen.hold = release.promise;
+				seen.answerOnAbort = true;
+				seen.afterHandler = () => entered.resolve();
+				const turn = new AbortController();
+				const execution = run("call-held", { signal: turn.signal });
+				await entered.promise;
+				turn.abort();
+				// Ends without the handler returning.
+				await expect(execution).rejects.toThrow(/Aborted/);
+				// Closed the moment the call aborted, before the handler (or anyone) could answer it.
+				expect(seen.abortResult).toBe(false);
+				expect(seen.ctx!.resolveToolApproval(approvalIdOf(seen, "call-held"), "once")).toBe(false);
+				expect(seen.ctx!.getPendingToolApprovals()).toEqual([]);
+				expect(executed).not.toHaveBeenCalled();
+				expect(seen.resolved[0]).toMatchObject({ approved: false, by: "user" });
+				release.resolve();
+			});
+
+			it("aborting while a tool_approval_resolved handler awaits does not wait for it", async () => {
+				const turn = new AbortController();
+				const { seen, executed, run } = await setup({ select: async () => "Approve" });
+				seen.resolvedHold = Promise.withResolvers<void>().promise;
+				seen.onResolved = () => turn.abort();
+				await expect(run("call-resolved-held", { signal: turn.signal })).rejects.toThrow(/Aborted/);
+				expect(seen.resolved).toEqual([{ approved: true, by: "user", reason: undefined }]);
+				expect(executed).not.toHaveBeenCalled();
+			});
+
+			it("a handler deleting event.signal does not keep a later handler from releasing on abort", async () => {
+				const { seen, executed, run } = await setup();
+				const entered = Promise.withResolvers<void>();
+				seen.mutate = event => {
+					delete event.signal;
+				};
+				seen.afterHandler = () => entered.resolve();
+				seen.laterHold = Promise.withResolvers<void>().promise;
+				const turn = new AbortController();
+				const execution = run("call-stripped", { signal: turn.signal });
+				await entered.promise;
+				turn.abort();
+				// Ends although the later handler never returns and no longer sees a signal on the event.
+				await expect(execution).rejects.toThrow(/Aborted/);
+				expect(executed).not.toHaveBeenCalled();
+			});
+
+			it("a pending listing carries the call's live abort signal", async () => {
+				const turn = new AbortController();
+				let listed: Array<{ signal?: AbortSignal }> = [];
+				const select = vi.fn(async () => {
+					// An extension that connects during the dialog only has the listing to cancel its remote work.
+					listed = globalState.__extApproval!.ctx!.getPendingToolApprovals() as Array<{ signal?: AbortSignal }>;
+					expect(listed[0]?.signal?.aborted).toBe(false);
+					turn.abort();
+					return "Deny";
+				});
+				const { executed, run } = await setup({ select });
+				await expect(run("call-listed", { signal: turn.signal })).rejects.toThrow();
+				expect(listed).toHaveLength(1);
+				expect(listed[0]?.signal?.aborted).toBe(true);
+				expect(executed).not.toHaveBeenCalled();
+			});
+
+			it("an answer given while the turn is aborted does not run the call", async () => {
+				const { seen, executed, run } = await setup();
+				const turn = new AbortController();
+				seen.inHandler = "once";
+				seen.afterHandler = () => turn.abort();
+				await expect(run("call-aborted", { signal: turn.signal })).rejects.toThrow(/Aborted/);
+				expect(seen.inHandlerResult).toBe(true);
+				expect(executed).not.toHaveBeenCalled();
+				expect(seen.resolved[0]).toMatchObject({ approved: false, by: "user" });
+			});
 		});
 	});
 
