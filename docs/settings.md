@@ -534,6 +534,22 @@ The 3-second default leaves `find`'s 20-second budget room to reach a second and
 
 Independently of the deadline, a judge candidate whose route rejects the account (`401`, `402`, `403`), does not serve the model (`404`), or is a gateway answering `502` with error type or code `upstream_credentials_exhausted` (every upstream key for the model failed) is skipped for 5 minutes by every judge using the same model registry. That gateway `502` is sent once rather than retried; other `5xx` answers stay transient and are retried.
 
+### Stuck-turn guard
+
+| Key                               | Type    | Default | Notes |
+| --------------------------------- | ------- | ------- | ----- |
+| `model.stuckTurnGuard.enabled`    | boolean | `false` | After each tool-call turn, ask the `judge` role what the latest turns are doing compared with what the session already established. |
+| `model.stuckTurnGuard.threshold`  | number  | `0.8`   | P(`re_investigating`) + P(`retrying`), above 0 and up to 1, at or above which a turn counts as stuck. |
+| `model.stuckTurnGuard.strikes`    | number  | `3`     | Positive integer count of consecutive stuck turns that earns one nudge. |
+
+When enabled, each tool-call turn end asks one judge choice question over a cut of the session built by code, with no model call: the goal is the user's last three requests (500 characters each), and the history holds user messages, harness messages, the assistant's replies without reasoning, and each tool call's input (up to 1,000 characters) with a note in place of its output (status, size, a test or lint tally when the command is a check, and the first 300 characters). The cut is fitted to about 24k tokens by wearing down the oldest entries first; the first message and the newest six entries are never collapsed or left out.
+
+The judge picks one of `advancing`, `re_investigating`, `retrying`, `off_plan`, `finished`, or `unclear`. A turn is a strike when P(`re_investigating`) + P(`retrying`) reaches the threshold; a judge that returns only a choice counts it as certain. Any other verdict breaks the streak. When the streak reaches the strike count, one hidden nudge goes into the next request telling the model to act on what it already found, and the count starts over. Strikes never carry over from one prompt to the next, and a turn that ends the run is not judged. A turn the tool-call loop guard already corrected resets the streak, so that corrective gets a full streak of turns before a stuck nudge can follow it. The guard does not run while plan mode is on, since plan mode is read-only until the plan is approved.
+
+The ask runs while the rest of the turn-end work (prewalk, advisors) runs and is settled before mid-run compaction, waiting at most 5 seconds. A judge that is unavailable, times out, or answers malformed has no effect except breaking the streak. Each verdict is logged at debug level (`stuck-turn guard verdict`, with the choice, stuck probability, and strike count), each nudge at warning level, and the nudge is journaled as a `stuck-turn-nudge` custom entry whose details record the verdict that earned it. Judge usage is billed to the session under the `stuck-turn` purpose.
+
+The design is a port of [nace-ai/intern](https://github.com/nace-ai/intern)'s run supervision (Apache-2.0); replayed over 82 stored sessions, 16 of its 19 nudges fell on turns a blind judge called stuck.
+
 ### Advisor
 
 Advisors review primary turns on a configurable cadence and can inject advice. Enable them with `advisor.enabled`, `/advisor on`, or `--advisor`. For the default single advisor, `modelRoles.advisor` selects its model; when unset, resolution uses a configured `slow` role or the built-in slow-model priorities. An unavailable explicit advisor assignment does not silently select another model.

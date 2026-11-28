@@ -65,6 +65,38 @@ export interface StreamGuardsHost {
 	discardAssistantTurn(message: AssistantMessage): void;
 }
 
+/** Session surfaces a turn-end corrective is written to. */
+export interface TurnEndCorrectiveSink {
+	agent: Pick<Agent, "state" | "appendMessage">;
+	sessionManager: Pick<SessionManager, "appendCustomMessageEntry">;
+}
+
+/**
+ * Adds a hidden, agent-attributed corrective to a turn's live context from an
+ * `onTurnEnd` hook, so the next request of the same run carries it, and
+ * journals it. Shared by the turn-end guards (tool-call loop, stuck turns).
+ */
+export function injectTurnEndCorrective(
+	sink: TurnEndCorrectiveSink,
+	messages: AgentMessage[],
+	customType: string,
+	content: string,
+	details: unknown,
+): void {
+	const corrective: CustomMessage = {
+		role: "custom",
+		customType,
+		content,
+		display: false,
+		details,
+		attribution: "agent",
+		timestamp: Date.now(),
+	};
+	messages.push(corrective);
+	if (sink.agent.state.messages !== messages) sink.agent.appendMessage(corrective);
+	sink.sessionManager.appendCustomMessageEntry(customType, content, false, details, "agent");
+}
+
 /** Guards streamed edit calls against invalid final previews. */
 export class StreamingEditGuard {
 	readonly #host: StreamGuardsHost;
@@ -215,16 +247,18 @@ export class LoopGuards {
 		this.#host = host;
 	}
 
-	/** Records a completed turn and injects a redirect when calls repeat. */
-	recordTurn(messages: AgentMessage[], context: AgentTurnEndContext | undefined): void {
-		if (context?.message.role !== "assistant") return;
+	/** Records a completed turn and injects a redirect when calls repeat; `true` when it injected one. */
+	recordTurn(messages: AgentMessage[], context: AgentTurnEndContext | undefined): boolean {
+		if (context?.message.role !== "assistant") return false;
 		const detection = this.#activeToolCallLoopGuard()?.recordTurn({
 			message: context.message,
 			toolResults: context.toolResults,
 			injectedContext: (context.additionalMessages?.length ?? 0) > 0,
 			unresolvedToolCallIds: context.unresolvedToolCallIds,
 		});
-		if (detection) this.#injectToolCallLoopRedirect(messages, detection);
+		if (!detection) return false;
+		this.#injectToolCallLoopRedirect(messages, detection);
+		return true;
 	}
 
 	/** Feeds a streamed assistant event to the Gemini header-runaway detector. */
@@ -271,25 +305,12 @@ export class LoopGuards {
 			toolName: detection.toolName,
 			count: detection.count,
 		});
-		const content = renderToolCallLoopRedirect(detection);
-		const details = toolCallLoopRedirectDetails(detection);
-		const redirectMessage: CustomMessage = {
-			role: "custom",
-			customType: TOOL_CALL_LOOP_REDIRECT_TYPE,
-			content,
-			display: false,
-			details,
-			attribution: "agent",
-			timestamp: Date.now(),
-		};
-		messages.push(redirectMessage);
-		if (this.#host.agent.state.messages !== messages) this.#host.agent.appendMessage(redirectMessage);
-		this.#host.sessionManager.appendCustomMessageEntry(
+		injectTurnEndCorrective(
+			this.#host,
+			messages,
 			TOOL_CALL_LOOP_REDIRECT_TYPE,
-			content,
-			false,
-			details,
-			"agent",
+			renderToolCallLoopRedirect(detection),
+			toolCallLoopRedirectDetails(detection),
 		);
 	}
 

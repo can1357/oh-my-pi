@@ -408,6 +408,55 @@ export const cfgModelToolCallLoopGuardExemptTools = register({
 	},
 });
 
+export const cfgModelStuckTurnGuardEnabled = register({
+	id: "model.stuckTurnGuard.enabled",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "model",
+		group: "Thinking",
+		label: "Stuck-Turn Guard",
+		description:
+			"After each tool-call turn, ask the judge role whether the latest turns re-investigate or retry what the session already established, and nudge the model to act on its findings after consecutive stuck turns",
+	},
+});
+
+export const cfgModelStuckTurnGuardThreshold = register({
+	id: "model.stuckTurnGuard.threshold",
+	type: "number",
+	default: 0.8,
+	validate: raw => {
+		if (typeof raw !== "number" || !(raw > 0 && raw <= 1)) {
+			throw new Error("model.stuckTurnGuard.threshold must be a number above 0, up to 1");
+		}
+	},
+	ui: {
+		tab: "model",
+		group: "Thinking",
+		label: "Stuck-Turn Threshold",
+		description:
+			"P(re-investigating) + P(retrying), from 0 to 1, at or above which the judge's verdict counts a turn as stuck",
+	},
+});
+
+export const cfgModelStuckTurnGuardStrikes = register({
+	id: "model.stuckTurnGuard.strikes",
+	type: "number",
+	default: 3,
+	validate: raw => {
+		if (typeof raw !== "number" || !Number.isSafeInteger(raw) || raw < 1) {
+			throw new Error("model.stuckTurnGuard.strikes must be a positive integer");
+		}
+	},
+	ui: {
+		tab: "model",
+		group: "Thinking",
+		label: "Stuck-Turn Strikes",
+		description:
+			"Consecutive stuck turns required before the nudge is injected; the count starts over after each nudge",
+	},
+});
+
 export const cfgInlineToolDescriptors = register({
 	id: "inlineToolDescriptors",
 	type: "enum",
