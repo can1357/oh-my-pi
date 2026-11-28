@@ -5,6 +5,7 @@ import { type Api, type FetchImpl, type Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { factoryDroidRegistry } from "@oh-my-pi/pi-catalog/compat/factory-droid";
 import { buildFactoryDroidModel } from "@oh-my-pi/pi-catalog/discovery";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -393,6 +394,66 @@ describe("imageGenTool catalog routing", () => {
 
 		expect(requestUrl).toBe("https://google.example/v1/models/gemini-selected-image:generateContent");
 		expect(result.details?.model).toBe("gemini-selected-image");
+	});
+
+	describe("thinking effort", () => {
+		const effortModel = (): Model<Api> =>
+			buildModel({
+				id: "gemini-3.1-flash-image",
+				name: "Gemini 3.1 Flash Image",
+				api: "google-generative-ai",
+				provider: "google",
+				baseUrl: "https://google.example/v1beta",
+				kind: "image",
+				reasoning: true,
+				thinking: { mode: "google-level", efforts: [Effort.Minimal, Effort.High], defaultLevel: Effort.Minimal },
+				input: ["text", "image"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 65_536,
+				maxTokens: 32_768,
+			});
+
+		/** Runs the tool with `role` as the image role and returns the request's `thinkingConfig`. */
+		async function thinkingConfig(params: { subject: string; model?: string }, role: string) {
+			const configs: unknown[] = [];
+			const ctx = createContext({
+				models: [effortModel()],
+				settings: Settings.isolated({ modelRoles: { image: role } }),
+				fetch: async (_input, init) => {
+					configs.push(JSON.parse(String(init?.body)).generationConfig.thinkingConfig);
+					return new Response(
+						JSON.stringify({
+							candidates: [{ content: { parts: [{ inlineData: { data: PNG_DATA, mimeType: "image/png" } }] } }],
+						}),
+						{ status: 200 },
+					);
+				},
+			});
+			collectPaths(await imageGenTool.execute("effort", params, undefined, ctx));
+			expect(configs).toHaveLength(1);
+			return configs[0];
+		}
+
+		it("sends the thinking level of the role entry, and none without one", async () => {
+			const model = "google/gemini-3.1-flash-image";
+			expect(await thinkingConfig({ subject: "a banana" }, `${model}:high`)).toEqual({ thinkingLevel: "HIGH" });
+			expect(await thinkingConfig({ subject: "a banana" }, model)).toBeUndefined();
+		});
+
+		it("sends the thinking level of a request model override", async () => {
+			expect(
+				await thinkingConfig(
+					{ subject: "a banana", model: "google/gemini-3.1-flash-image:minimal" },
+					"google/gemini-3.1-flash-image:high",
+				),
+			).toEqual({ thinkingLevel: "MINIMAL" });
+		});
+
+		it("clamps a level off the model's ladder like chat", async () => {
+			expect(await thinkingConfig({ subject: "a banana" }, "google/gemini-3.1-flash-image:xhigh")).toEqual({
+				thinkingLevel: "HIGH",
+			});
+		});
 	});
 
 	it("generates through a Factory Droid image model chosen for the image role", async () => {

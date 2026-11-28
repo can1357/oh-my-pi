@@ -75,6 +75,7 @@
 - Added the `agent_view_changed` extension event, fired when the TUI focuses a subagent or returns to the main session, so extensions can re-scope their status to the agent on screen ([#16546](https://github.com/can1357/oh-my-pi/issues/16546))
 - Added `model` and `fallback` attributes to `task` result envelopes so the parent sees which model served each subagent ([#16017](https://github.com/can1357/oh-my-pi/issues/16017))
 - Added a terminal notification when a plan is ready for approval, controlled by `completion.notify` ([#7724](https://github.com/can1357/oh-my-pi/issues/7724))
+- `generate_image` sends the thinking level set on the image model selector (`modelRoles.image`, fallback chain entries, or the tool's `model` argument, e.g. `google/gemini-3.1-flash-image:high`), clamped to the model's ladder like chat. OpenAI-compatible discovery keeps the advertised reasoning ladder of image-generation rows, including `minimal`, which chat rows still drop
 
 ### Changed
 

@@ -4030,6 +4030,50 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(rosterFor("image")).toEqual(["image-generator"]);
 	});
 
+	test("openai-models-list image rows keep their advertised ladder, including minimal", async () => {
+		writeRawModelsJson({
+			"openai-test": {
+				baseUrl: "http://127.0.0.1:9996",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "openai-models-list" },
+			},
+		});
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:9996/v1/models") {
+				return Response.json({
+					data: [
+						{
+							id: "banana-render",
+							architecture: { output_modalities: ["image"] },
+							supported_reasoning_levels: ["minimal", "medium", "high"],
+							default_reasoning_level: "minimal",
+						},
+						{ id: "plain-render", architecture: { output_modalities: ["image"] } },
+						{ id: "chat-think", supported_reasoning_levels: ["minimal", "low", "high"] },
+					],
+				});
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+		const banana = registry.find("openai-test", "banana-render");
+		expect(banana?.api).toBe("openai-images");
+		expect(banana?.reasoning).toBe(true);
+		expect(banana?.thinking).toMatchObject({
+			mode: "effort",
+			efforts: [Effort.Minimal, Effort.Medium, Effort.High],
+			defaultLevel: Effort.Minimal,
+		});
+		const plain = registry.find("openai-test", "plain-render");
+		expect(plain?.reasoning).toBe(false);
+		expect(plain?.thinking).toBeUndefined();
+		// Chat rows still drop `minimal`, which the GPT-6 generation rejects.
+		expect(registry.find("openai-test", "chat-think")?.thinking?.efforts).toEqual([Effort.Low, Effort.High]);
+	});
+
 	test("openai-models-list routes gateway speech and transcription rows by their declared modalities", async () => {
 		writeRawModelsJson({
 			"gateway-test": {

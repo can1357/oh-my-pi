@@ -1,3 +1,4 @@
+import { getSupportedEfforts, mapEffortToGoogleThinkingLevel } from "@oh-my-pi/pi-catalog/model-thinking";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
 import { withAuth } from "../auth-retry";
 import * as AIError from "../error";
@@ -62,6 +63,13 @@ export async function generateGoogleImage(
 		request.aspectRatio || request.imageSize
 			? { aspectRatio: request.aspectRatio, imageSize: request.imageSize }
 			: undefined;
+	// Gemini 3.x image models take chat's `thinkingLevel`; an effort off the model's ladder is omitted.
+	const thinkingLevel =
+		request.reasoning !== undefined &&
+		model.thinking?.mode === "google-level" &&
+		getSupportedEfforts(model).includes(request.reasoning)
+			? mapEffortToGoogleThinkingLevel(request.reasoning, model)
+			: undefined;
 	const fetchImpl = options.fetch ?? fetch;
 	const body = {
 		contents: geminiImageContents(request),
@@ -69,6 +77,7 @@ export async function generateGoogleImage(
 			responseModalities: ["IMAGE"],
 			...(imageConfig ? { imageConfig } : {}),
 			...(request.count ? { candidateCount: request.count } : {}),
+			...(thinkingLevel ? { thinkingConfig: { thinkingLevel } } : {}),
 		},
 	};
 	const response = await withAuth(

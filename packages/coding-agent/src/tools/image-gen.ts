@@ -23,6 +23,7 @@ import type { CustomTool } from "../extensibility/custom-tools/types";
 import imageGenDescription from "../prompts/tools/image-gen.md" with { type: "text" };
 import { journalCompletion } from "../session/model-usage-journal";
 import { resolveConfiguredModelTarget } from "../session/role-models";
+import { concreteThinkingLevel, resolveThinkingLevelForModel, toReasoningEffort } from "../thinking/levels";
 import { saveImagesToTemp } from "../utils/image-temp";
 import { resolveReadPath, specialFileKind } from "./path-utils";
 
@@ -145,12 +146,19 @@ function resolveHostedImageCarrier(
 	return carrier;
 }
 
+/** An image model to try, with the thinking level its role entry or `:level` suffix configured. */
+type ImageCandidate = Pick<RoleChainCandidate, "model" | "thinkingLevel">;
+
 /**
  * Default image candidates: explicit role entries first, then the session's
  * own provider (its `imageModel` swap, then the session model itself when it
  * carries the hosted image tool), then the remaining built-in chain.
  */
-function defaultImageCandidates(chain: RoleChainCandidate[], sessionModel: Model | undefined, pool: Model[]): Model[] {
+function defaultImageCandidates(
+	chain: RoleChainCandidate[],
+	sessionModel: Model | undefined,
+	pool: Model[],
+): ImageCandidate[] {
 	const sessionCandidates = sessionModel
 		? [
 				resolveConfiguredModelTarget(sessionModel.imageModel, sessionModel, pool),
@@ -158,13 +166,12 @@ function defaultImageCandidates(chain: RoleChainCandidate[], sessionModel: Model
 			]
 		: [];
 	const ordered = [
-		...chain.filter(candidate => candidate.explicit).map(candidate => candidate.model),
-		...sessionCandidates,
-		...chain.filter(candidate => !candidate.explicit).map(candidate => candidate.model),
+		...chain.filter(candidate => candidate.explicit),
+		...sessionCandidates.flatMap(model => (model ? [{ model }] : [])),
+		...chain.filter(candidate => !candidate.explicit),
 	];
 	const seen = new Set<string>();
-	return ordered.filter((model): model is Model => {
-		if (!model) return false;
+	return ordered.filter(({ model }) => {
 		const key = `${model.provider}/${model.id}`;
 		if (seen.has(key)) return false;
 		seen.add(key);
@@ -250,12 +257,12 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 			const requestSignal = ptree.combineSignals(signal, IMAGE_TIMEOUT);
 			const effectiveSettings = ctx.settings ?? settings;
 			const pool = roleCandidatePool("image", effectiveSettings, ctx.modelRegistry);
-			let candidates: Model[];
+			let candidates: ImageCandidate[];
 			if (params.model) {
-				const selected = resolveModelRoleValue(params.model, pool, { settings: effectiveSettings }).model;
-				if (!selected)
+				const selected = resolveModelRoleValue(params.model, pool, { settings: effectiveSettings });
+				if (!selected.model)
 					throw new Error(`Image model selector did not match an available image model: ${params.model}`);
-				candidates = [selected];
+				candidates = [{ model: selected.model, thinkingLevel: selected.thinkingLevel }];
 			} else {
 				candidates = defaultImageCandidates(resolveRoleChain("image", effectiveSettings, pool), ctx.model, pool);
 			}
@@ -265,7 +272,7 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 			const offline = cfgOffline.get(effectiveSettings);
 			const activeProvider = ctx.model?.provider;
 			let inputImages: ImageGenerationRequest["inputImages"];
-			for (const model of candidates) {
+			for (const { model, thinkingLevel } of candidates) {
 				if (offline && (!activeProvider || model.provider !== activeProvider)) {
 					skipped.push(`${model.provider}/${model.id} (offline provider restriction)`);
 					continue;
@@ -318,6 +325,7 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 					aspectRatio: params.aspect_ratio,
 					imageSize: params.image_size,
 					count: 1,
+					reasoning: toReasoningEffort(resolveThinkingLevelForModel(model, concreteThinkingLevel(thinkingLevel))),
 				};
 				const resolvedModel = {
 					...model,
@@ -366,7 +374,7 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 				}
 			}
 
-			const attempted = candidates.map(model => `${model.provider}/${model.id}`).join(", ");
+			const attempted = candidates.map(({ model }) => `${model.provider}/${model.id}`).join(", ");
 			// 压平空白并截断每条 provider 错误；去掉句末句号，避免与统一补的标点叠成 `..`。
 			const reasons =
 				failures.length > 0

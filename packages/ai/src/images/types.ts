@@ -1,3 +1,4 @@
+import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { Api, FetchImpl, Model, Usage } from "@oh-my-pi/pi-catalog/types";
 import type { ApiKey } from "../auth-retry";
 
@@ -12,6 +13,8 @@ export interface ImageGenerationRequest {
 	aspectRatio?: string;
 	imageSize?: string;
 	count?: number;
+	/** Thinking effort for image models with a reasoning ladder; models without one ignore it. */
+	reasoning?: Effort;
 }
 
 export interface GeneratedImage {

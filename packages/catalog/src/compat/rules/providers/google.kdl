@@ -41,6 +41,15 @@ provider "google" {
 	models "gemini-3.1-flash-lite-image" {
 		kind "image"
 	}
+	// Gemini 3.1 Flash Image SKUs take `thinkingConfig.thinkingLevel` with only
+	// `minimal` (the default) and `high`, but the upstream listing marks them
+	// non-reasoning; repair it so the ladder is selectable.
+	// https://ai.google.dev/gemini-api/docs/image-generation#thinking-process
+	models "gemini-3.1-flash-image" "gemini-3.1-flash-lite-image" {
+		thinking-upgrade-neutral #true
+		thinking-efforts "minimal" "high"
+		thinking-default-level "minimal"
+	}
 	models "gemini-decision-1" {
 		kind "judge"
 	}

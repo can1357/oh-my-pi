@@ -2506,3 +2506,28 @@ describe("Gemini 4 long decodes", () => {
 		}
 	});
 });
+
+describe("Gemini 3.1 Flash Image thinking ladder", () => {
+	// https://ai.google.dev/gemini-api/docs/image-generation#thinking-process
+	it("repairs the non-reasoning listing to Google's minimal/high ladder", () => {
+		for (const id of ["gemini-3.1-flash-image", "gemini-3.1-flash-lite-image"]) {
+			const model = buildModel({
+				id,
+				name: id,
+				api: "google-generative-ai",
+				provider: "google",
+				baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+				kind: "image",
+				reasoning: false,
+				input: ["text", "image"],
+				contextWindow: 65_536,
+				maxTokens: 32_768,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			});
+			const ladder = { mode: "google-level", efforts: [Effort.Minimal, Effort.High], defaultLevel: Effort.Minimal };
+			expect(model.reasoning).toBe(true);
+			expect(model.thinking).toMatchObject(ladder);
+			expect(bundled.getBundledModel("google", id).thinking).toMatchObject(ladder);
+		}
+	});
+});
