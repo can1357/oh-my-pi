@@ -582,8 +582,8 @@ function multiEditor(
 	const list = selectList(theme, options, selected, width, MULTI_ROWS, hover);
 	const back = `${caps(theme, "select.cancel")} to go back`;
 	const hint = ordered
-		? `  Click to toggle · drag selected items to reorder · ${keyCaps(theme, ["left"])}/${keyCaps(theme, ["right"])} move · 1-9 place · ${back}`
-		: `  Click/${caps(theme, "select.confirm")}/${keyCaps(theme, ["space"])} to toggle · ${back}`;
+		? `  Click to toggle · drag selected items to reorder · ${keyCaps(["left", "right"], theme)} move · 1-9 place · ${back}`
+		: `  Click/${caps(theme, "select.confirm")}/${keyCaps(["space"], theme)} to toggle · ${back}`;
 	const field = formField(theme, width, { label: row.label, description: row.hint, control: list.rows, hint });
 	return {
 		rows: field.rows,
@@ -616,7 +616,7 @@ function textEditor(
 /** The primary key of a widget action as `theme`'s keycaps (`⎋`, `Esc` in ascii), as the keymap binds it. */
 function caps(theme: Theme, action: WidgetAction): string {
 	const [key] = widgetKeys(action);
-	return key === undefined ? "" : keyCaps(theme, [key]);
+	return key === undefined ? "" : keyCaps([key], theme);
 }
 
 function footerHint(
@@ -628,15 +628,15 @@ function footerHint(
 	if (term?.hint !== undefined) return term.hint;
 	const confirm = caps(theme, "select.confirm");
 	const cancel = caps(theme, "select.cancel");
-	const tab = keyCaps(theme, ["tab"]);
-	const switchTabs = `${keyCaps(theme, ["left"])}/${keyCaps(theme, ["right"])} to switch tabs`;
+	const tab = keyCaps(["tab"], theme);
+	const switchTabs = `${keyCaps(["left", "right"], theme)} to switch tabs`;
 	const close = `${cancel} to close`;
 	if (isSearching(props)) return `${confirm} to change · ${tab} to jump tabs · ${cancel} to exit search`;
 	if (term?.body) return `${tab} to switch tabs · ${close}`;
 	if (term?.sectionFocus)
 		return `${caps(theme, "select.up")}/${caps(theme, "select.down")} to jump sections · ${tab}/${confirm} to settings · ${switchTabs} · ${close}`;
 	const nav = runs.length >= 2 ? `${tab} to jump sections · ${switchTabs}` : `${tab} to switch tabs`;
-	return `${confirm}/${keyCaps(theme, ["space"])} to change · ${nav} · Type to search · ${close}`;
+	return `${confirm}/${keyCaps(["space"], theme)} to change · ${nav} · Type to search · ${close}`;
 }
 
 // ─── Page strip ─────────────────────────────────────────────────────────────

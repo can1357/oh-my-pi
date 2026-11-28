@@ -1,8 +1,8 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
 import { expect, test } from "bun:test";
+import { actionHint, keyCaps } from "@oh-my-pi/pi-tui/term/painters/picker";
 import { createRoot, isUiNode } from "../../src";
 import { paintNode, staticEnvironment } from "../../src/term/paint";
-import "../../src/term/painters/picker";
 import { loadThemeSync } from "../../src/theme/loader";
 
 test("picker footer preserves alternative keys and keeps modifier chords together", () => {
@@ -28,4 +28,9 @@ test("picker footer preserves alternative keys and keeps modifier chords togethe
 	} finally {
 		dispose();
 	}
+});
+
+test("custom picker looks can omit the theme and still get compact Unicode keycaps", () => {
+	expect(keyCaps(["ctrl", "p"])).toBe("⌃P");
+	expect(actionHint([{ id: "choose", label: "Choose", keys: ["left", "right"] }])).toBe("←→ choose");
 });

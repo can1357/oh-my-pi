@@ -324,17 +324,42 @@ export function queryRow(theme: Theme, query: string, width: number, placeholder
 
 // ─── Hints ──────────────────────────────────────────────────────────────────
 
-/** Draw action keycaps in the active preset, preserving chords and alternative keys. */
-export function keyCaps(theme: Theme, keys: readonly string[]): string {
-	return formatKeyCaps(keys, { preset: theme.symbols.preset, platform: keyHintPlatform() });
+// Published picker looks without a theme use the original compact Unicode keycaps on every platform.
+const KEY_CAPS: Readonly<Record<string, string>> = {
+	enter: "⏎",
+	return: "⏎",
+	esc: "⎋",
+	escape: "⎋",
+	tab: "⇥",
+	backspace: "⌫",
+	delete: "⌦",
+	space: "␣",
+	up: "↑",
+	down: "↓",
+	left: "←",
+	right: "→",
+	ctrl: "⌃",
+	alt: "⌥",
+	shift: "⇧",
+	super: "⌘",
+	pageup: "PgUp",
+	pagedown: "PgDn",
+	home: "Home",
+	end: "End",
+};
+
+/** Draw keycaps in `theme`'s preset, or as compact Unicode keycaps if no theme is supplied. */
+export function keyCaps(keys: readonly string[], theme?: Theme): string {
+	if (theme) return formatKeyCaps(keys, { preset: theme.symbols.preset, platform: keyHintPlatform() });
+	return keys.map(key => KEY_CAPS[key.toLowerCase()] ?? (key.length === 1 ? key.toUpperCase() : key)).join("");
 }
 
 /** The hint row of `actions`: `⏎ select · ⎋ close` (actions without keys are skipped). */
-export function actionHint(theme: Theme, actions: readonly TspPickerAction[] | undefined): string {
+export function actionHint(actions: readonly TspPickerAction[] | undefined, theme?: Theme): string {
 	const parts: string[] = [];
 	for (const action of actions ?? []) {
 		if (!action.keys || action.keys.length === 0 || action.disabled) continue;
-		parts.push(`${keyCaps(theme, action.keys)} ${action.label.toLowerCase()}`);
+		parts.push(`${keyCaps(action.keys, theme)} ${action.label.toLowerCase()}`);
 	}
 	return parts.join(" · ");
 }
@@ -400,7 +425,7 @@ export function paintPickerFooter(node: UiNode, theme: Theme, width: number): st
 	const props = node.props() as TspPickerProps;
 	const term = pickerTerm(node);
 	const rows: string[] = [];
-	const hint = term.hint === undefined ? actionHint(theme, props.actions) : term.hint;
+	const hint = term.hint === undefined ? actionHint(props.actions, theme) : term.hint;
 	if (hint !== null && plainText(hint).length > 0) {
 		// A plain hint is muted; spans carry their own styles (a warning in its place).
 		const text = typeof hint === "string" ? theme.style("muted", hint) : styledText(theme, hint);
