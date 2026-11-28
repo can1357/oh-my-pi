@@ -888,7 +888,7 @@ fn compile_sequence(
 	let mut tail: Option<Rc<RefCell<Command>>> = None;
 
 	loop {
-		line.eat_spaces();
+		line.eat_ascii_spaces();
 
 		// According to POSIX: "If the first two characters in the script are
 		// "#n", the default output shall be suppressed".
@@ -921,7 +921,7 @@ fn compile_sequence(
 
 		let mut cmd = Rc::new(RefCell::new(Command::at_position(lines, line)));
 		let n_addr = compile_address_range(lines, line, &mut cmd, context)?;
-		line.eat_spaces();
+		line.eat_blanks();
 		let mut cmd_spec = get_verified_cmd_spec(lines, line, n_addr, context.posix)?;
 		// Compile the command according to its specification.
 		let mut cmd_mut = cmd.borrow_mut();
@@ -966,7 +966,7 @@ fn compile_address_range(
 
 	let mut is_line0 = false;
 
-	line.eat_spaces();
+	line.eat_blanks();
 	if !line.eol() && is_address_char(line.current()) {
 		let addr1 = compile_address(lines, line, context)?;
 		is_line0 = matches!(addr1, Address::Line(0));
@@ -974,18 +974,18 @@ fn compile_address_range(
 		n_addr += 1;
 	}
 
-	line.eat_spaces();
+	line.eat_blanks();
 	// ~ steps are a GNU extension; under --posix a `~` is an unknown command.
 	if n_addr == 1 && !line.eol() && (line.current() == ',' || (line.current() == '~' && !context.posix))
 	{
 		let is_step_match = line.current() == '~'; // E.g. 0~2: Pick even-numbered lines
 		line.advance();
-		line.eat_spaces();
+		line.eat_blanks();
 		// E.g. /foo/,~10: Start at foo, include all lines until multiple of 10 is reached.
 		let is_step_end = !is_step_match && !context.posix && !line.eol() && line.current() == '~';
 		if is_step_end {
 			line.advance();
-			line.eat_spaces();
+			line.eat_blanks();
 		}
 
 		if is_step_match || is_step_end {
@@ -1081,7 +1081,7 @@ fn compile_address(
 			// GNU's `I` and `M` address flags, in any order and spacing; --posix has neither.
 			let mut multiline = false;
 			loop {
-				line.eat_spaces();
+				line.eat_blanks();
 				if context.posix || line.eol() {
 					break;
 				}
@@ -1149,8 +1149,9 @@ fn parse_number(
 }
 
 /// Parse the end of a command, failing with an error on extra characters.
+/// As in GNU sed, only blanks may come before the end: `p\v#c` is junk.
 fn parse_command_ending(lines: &ScriptLineProvider, line: &mut ScriptCharProvider) -> SedResult<()> {
-	line.eat_spaces();
+	line.eat_blanks();
 	// Leave a closing brace for compile_sequence to validate and close the group,
 	// and a comment for it to skip. GNU sed recognizes both at a command boundary
 	// even under --posix.
@@ -1452,7 +1453,7 @@ pub fn compile_subst_flags(
 	subst.write_file = None;
 
 	loop {
-		line.eat_spaces();
+		line.eat_blanks();
 		if line.eol() {
 			break;
 		}
@@ -1538,6 +1539,15 @@ pub fn compile_subst_flags(
 
 			';' | '\n' | '}' | '#' => break,
 
+			// As in GNU sed, a CR right before the newline ends the flags (a CRLF
+			// script); followed by anything else, or by no newline, it is junk.
+			'\r' => {
+				line.advance();
+				if !(line.eol() && lines.line_terminated()) {
+					return compilation_error(lines, line, ERR_UNKNOWN_OPTION_TO_S);
+				}
+			},
+
 			_ => {
 				return compilation_error(lines, line, ERR_UNKNOWN_OPTION_TO_S);
 			},
@@ -1577,7 +1587,7 @@ fn compile_negation_command(
 		return compilation_error(lines, line, "multiple `!'s");
 	}
 	line.advance();
-	line.eat_spaces();
+	line.eat_blanks();
 	cmd.non_select = true;
 	Ok(CommandHandling::GetNext)
 }
@@ -1690,17 +1700,17 @@ fn compile_label_command(
 	cmd: &mut Command,
 	_context: &mut ProcessingContext,
 ) -> SedResult<CommandHandling> {
-	/// Return true if `c` is in the POSIX portable filename character set.
-	fn is_portable_filename_char(c: char) -> bool {
-		c.is_ascii_alphanumeric()  // A–Z, a–z, 0–9
-        || matches!(c, '.' | '_' | '-')
+	/// Return true if `c` ends a label. As in GNU sed, a label holds any other
+	/// character: `:a+b` names `a+b`, `:a\vb` names `a\vb`, and `:a#c` names `a`.
+	fn ends_label(c: char) -> bool {
+		matches!(c, ' ' | '\t' | ';' | '}' | '#')
 	}
 
 	line.advance(); // Skip the command character
-	line.eat_spaces(); // Skip any leading whitespace
+	line.eat_blanks(); // Skip any leading blanks
 
 	let mut label = String::new();
-	while !line.eol() && is_portable_filename_char(line.current()) {
+	while !line.eol() && !ends_label(line.current()) {
 		label.push(line.current());
 		line.advance();
 	}
@@ -1714,7 +1724,8 @@ fn compile_label_command(
 		cmd.data = CommandData::Label(Some(label));
 	}
 
-	parse_command_ending(lines, line)?;
+	// GNU sed reads the next command right after the label (`tx p`), so
+	// compile_sequence takes what ends it.
 	Ok(CommandHandling::Continue)
 }
 
@@ -1734,7 +1745,7 @@ fn compile_number_command(
 	_context: &mut ProcessingContext,
 ) -> SedResult<CommandHandling> {
 	line.advance(); // Skip the command character
-	line.eat_spaces(); // Skip any leading whitespace
+	line.eat_blanks(); // Skip any leading blanks
 
 	match parse_number(lines, line, false)? {
 		Some(n) => {
@@ -8768,6 +8779,23 @@ impl ScriptCharProvider {
 		}
 	}
 
+	/// Advances the position past any blanks: spaces and tabs, the only
+	/// characters GNU sed skips inside a command (`p #c`, `s/a/b/ g`, `b
+	/// label`).
+	pub fn eat_blanks(&mut self) {
+		while self.pos < self.line.len() && matches!(self.line[self.pos], ' ' | '\t') {
+			self.pos += 1;
+		}
+	}
+
+	/// Advances past ASCII whitespace, which GNU sed skips between commands;
+	/// it reads any other character, such as a no-break space, as a command.
+	pub fn eat_ascii_spaces(&mut self) {
+		while self.pos < self.line.len() && matches!(self.line[self.pos], ' ' | '\t' | '\x0b' | '\x0c' | '\r') {
+			self.pos += 1;
+		}
+	}
+
 	/// Return current position
 	pub fn get_pos(&self) -> usize {
 		self.pos
@@ -8956,6 +8984,11 @@ impl ScriptLineProvider {
 	/// Returns the GNU-style origin of the current script line.
 	pub fn origin(&self) -> &ScriptOrigin {
 		&self.origin
+	}
+
+	/// Returns whether the current line ended with a newline.
+	pub fn line_terminated(&self) -> bool {
+		self.line_terminated
 	}
 
 	/// Returns GNU's `char` count at `line`: expression bytes read, counting the
@@ -10134,6 +10167,51 @@ mod tests {
 
 		let (code, capture) = crate::host::run_util::<Sed>(&["b foo"], "x\n", "/");
 		assert_eq!((code, capture.err().as_str()), (4, "sed: can't find label for jump to `foo'\n"));
+	}
+
+	#[test]
+	fn labels_and_blanks_answer_as_gnu() {
+		// GNU sed 4.9 ends a label at a blank (space or tab), `;`, `}` or `#`,
+		// keeps any other character in it, and reads the next command after it.
+		// Only a blank may come before the `#` of a comment after a command, an
+		// `s` flag or a number: a vertical tab there is junk. A CR right before
+		// the newline still ends an `s` command's flags (a CRLF script).
+		for (args, stdin, expected) in [
+			(&["-n", "-e", ":a+b", "-e", "s/a/X/;ta+b;p"][..], "a\nb\n", "X\nb\n"),
+			(&["-n", "bL\x0bR; :L\x0bR; p"], "a\n", "a\n"),
+			(&["-n", "tx p;:x"], "a\n", "a\n"),
+			(&["-n", "p\t#c"], "a\n", "a\n"),
+			(&["s/a/X/g\r\np"], "a\nb\n", "X\nX\nb\nb\n"),
+		] {
+			let (code, capture) = crate::host::run_util::<Sed>(args, stdin, "/");
+			assert_eq!((code, capture.out().as_str()), (0, expected), "{args:?}: {}", capture.err());
+		}
+		for (script, expected) in [
+			("p\x0b#c", "char 2: extra characters after command"),
+			("s/a/X/p\x0b#c", "char 8: unknown option to `s'"),
+			("l\x0b1", "char 2: extra characters after command"),
+			// Only a blank may come between an address and its command.
+			("1\x0bp", "char 2: unknown command: `\x0b'"),
+			// A CR that no newline follows is junk after the flags.
+			("s/a/X/\r", "char 7: unknown option to `s'"),
+			("s/a/X/\r;p", "char 8: unknown option to `s'"),
+			// The unclosed group is reported before the jump to a missing label.
+			("{b missing", "char 0: unmatched `{'"),
+		] {
+			let (code, capture) = crate::host::run_util::<Sed>(&["-n", script], "a\n", "/");
+			assert_eq!(
+				(code, capture.out().as_str(), capture.err()),
+				(1, "", format!("sed: -e expression #1, {expected}\n")),
+				"{script:?}"
+			);
+		}
+		// Between commands GNU skips only ASCII whitespace, and after an address,
+		// after `!` and before the flags of an address only a blank, so a no-break
+		// space or a vertical tab there is an unknown command, also after a label.
+		for script in ["ba \u{a0}p;:a", "ba 1\x0bp;:a", "ba !\x0bp;:a", "ba /x/\x0bIp;:a"] {
+			let (code, capture) = crate::host::run_util::<Sed>(&[script], "a\n", "/");
+			assert_eq!((code, capture.out().as_str()), (1, ""), "{script:?}: {}", capture.err());
+		}
 	}
 
 	#[test]
