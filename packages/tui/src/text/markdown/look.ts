@@ -1,28 +1,35 @@
 /**
  * The host's Markdown look: what `renderMarkdownFrame` draws with where a
- * caller leaves `colorful`, `mermaid` or `linkUrls` unset, so every Markdown
+ * caller leaves `colorful`, `mermaid`, `linkUrls` or `codeFrame` unset, so every Markdown
  * surface follows the host's settings. Reactive: a painter that renders
  * Markdown repaints when it changes.
  */
 import { signal } from "../../reactive";
 
-/** Palette hues for headings, emphasis and inline code; mermaid fences as diagrams. */
+/** Palette hues for headings, emphasis and inline code; mermaid fences as diagrams; code fences as dashed hairlines. */
 export interface MarkdownLook {
 	readonly colorful: boolean;
 	readonly mermaid: boolean;
 	readonly linkUrls: boolean;
+	/** Draw code blocks (fenced and indented) as dashed hairlines instead of literal ``` rows (default off). */
+	readonly codeFrame?: boolean;
 }
 
-const look = signal<MarkdownLook>({ colorful: true, mermaid: true, linkUrls: true });
+const look = signal<MarkdownLook>({ colorful: true, mermaid: true, linkUrls: true, codeFrame: false });
 
 /** The host's Markdown look (reactive); a new object on every change. */
 export function markdownLook(): MarkdownLook {
 	return look();
 }
 
-/** Set the host's Markdown look (`tui.colorfulMarkdown`, `tui.renderMermaid`, `tui.showLinkUrl`). */
+/** Set the host's Markdown look (`tui.colorfulMarkdown`, `tui.renderMermaid`, `tui.showLinkUrl`, `tui.codeFrame`). */
 export function setMarkdownLook(next: MarkdownLook): void {
 	const current = look();
-	if (current.colorful !== next.colorful || current.mermaid !== next.mermaid || current.linkUrls !== next.linkUrls)
+	if (
+		current.colorful !== next.colorful ||
+		current.mermaid !== next.mermaid ||
+		current.linkUrls !== next.linkUrls ||
+		(current.codeFrame ?? false) !== (next.codeFrame ?? false)
+	)
 		look.set(next);
 }

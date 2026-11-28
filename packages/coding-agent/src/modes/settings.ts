@@ -566,6 +566,19 @@ export const cfgTuiRenderMermaid = register({
 	},
 });
 
+export const cfgTuiCodeFrame = register({
+	id: "tui.codeFrame",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Frame Code Blocks",
+		description:
+			"Draw code blocks between a dashed hairline carrying the language and a bare one, instead of literal ``` rows (indented blocks included). The frame adds no characters to the code rows, so a selection copies the same text as without it. Plain terminal only; the native view ignores it. Off by default.",
+	},
+});
+
 export const cfgTuiRenderSvg = register({
 	id: "tui.renderSvg",
 	type: "boolean",

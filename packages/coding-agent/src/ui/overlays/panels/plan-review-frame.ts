@@ -83,7 +83,7 @@ export function sectionRows(raw: string, width: number, theme: Theme): string[] 
 	holder[kRendered] ??= new Map();
 	const cache = holder[kRendered];
 	const look = markdownLook();
-	const key = `${width}\u0000${look.colorful}\u0000${look.mermaid}\u0000${raw}`;
+	const key = `${width}\u0000${look.colorful}\u0000${look.mermaid}\u0000${look.codeFrame ?? false}\u0000${raw}`;
 	let rows = cache.get(key);
 	if (!rows) {
 		rows = renderMarkdown(raw, width, { theme, paddingX: 1 });
