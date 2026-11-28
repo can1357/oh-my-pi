@@ -917,6 +917,7 @@ function isCodexSparkRequest(context?: CredentialRankingContext): boolean {
 	return context?.modelId !== undefined && quotaTierFor("openai-codex", context.modelId) === "spark";
 }
 
+/** Map Codex quota reports to credential ranking and request-scoped backoff. */
 export const codexRankingStrategy: CredentialRankingStrategy = {
 	planGate(context) {
 		const requirement = resolveOpenAICodexPlanRequirement(context.modelId);
@@ -973,7 +974,13 @@ export const codexRankingStrategy: CredentialRankingStrategy = {
 			const windowId = key === "secondary" ? "7d" : "1h";
 			return limits.find(l => l.scope.windowId?.toLowerCase() === windowId);
 		};
-		return { primary: findLimit("primary"), secondary: findLimit("secondary") };
+		const primary = findLimit("primary");
+		// Codex can report the weekly meter in its primary slot. The 7d
+		// fallback above ranks it as secondary, not as a short window.
+		return {
+			primary: primary?.scope.windowId?.toLowerCase() === "7d" ? undefined : primary,
+			secondary: findLimit("secondary"),
+		};
 	},
 	windowDefaults: { primaryMs: 60 * 60 * 1000, secondaryMs: 7 * 24 * 60 * 60 * 1000 },
 	hasPriorityBoost(primary, primaryUncapped = false, context) {
