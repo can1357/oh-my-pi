@@ -4,6 +4,7 @@
  * hands it to the screens through an accessor. The screens never read
  * sessions or settings themselves.
  */
+import type { FastServiceTier } from "../../config/service-tier";
 import type { StatusLineSettings } from "../../modes/view-model/status-line/types";
 import type { JobWidgetView } from "../../tools/details/job-widget";
 import type { LoopConditionConfig, LoopLimitRuntime } from "../../modes/view-model/status-line/loop";
@@ -89,7 +90,8 @@ export interface StatusFacts {
 	readonly autoThinking?: boolean;
 	/** The level auto thinking resolved for the turn, once classified. */
 	readonly autoResolvedLevel?: string;
-	readonly fastMode?: boolean;
+	/** The fast tier the active model can serve at, if any. */
+	readonly fastTier?: FastServiceTier;
 	/** Anthropic usage-limit stage label (wrap-up allowance, low priority). */
 	readonly slowModeLabel?: string;
 	readonly advisor?: StatusAdvisor;

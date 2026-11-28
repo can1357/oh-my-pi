@@ -72,14 +72,18 @@ const RULE_CASES: &[(&str, &str, bool, Match)] = &[
 	("foo?", "foo12", false, Match::None),
 	("[a-c]*", "b-file", false, Match::Ignore),
 	("[a-c]*", "d-file", false, Match::None),
-	("a[/]b", "a/b", false, Match::Ignore),
+	("a[/]b", "a/b", false, Match::None),
 	("{x,}y", "xy", false, Match::Ignore),
 	("{x,}y", "y", false, Match::None),
 	("\\", "x", false, Match::None),
 	("**/a/**/*.rs", "a/x.rs", false, Match::Ignore),
 	("**/a/**/*.rs", "q/a/b/c.rs", false, Match::Ignore),
 	("**/a/**/*.rs", "a.rs", false, Match::None),
-	("!", "anything", false, Match::Whitelist),
+	("!", "anything", false, Match::None),
+	("*.tmp\n!", "a/x.tmp", false, Match::Ignore),
+	("foo\\   ", "foo ", false, Match::Ignore),
+	("foo\\   ", "foo  ", false, Match::None),
+	("foo  ", "foo", false, Match::Ignore),
 	("/*.txt", "a.txt", false, Match::Ignore),
 	("/*.txt", "d/a.txt", false, Match::None),
 	("é*", "éa", false, Match::Ignore),
@@ -152,12 +156,12 @@ fn rules_match_ignore_crate() {
 
 #[test]
 fn parse_framing() {
-	// BOM stripped from the first line, CRLF endings, and parsing stops at
-	// the first line that is not UTF-8.
+	// BOM stripped from the first line, CRLF endings, and a line that is not
+	// UTF-8 skipped without dropping the lines after it.
 	let rules = Rules::parse(b"\xEF\xBB\xBF*.log\r\n!keep.log\r\n\xff\n*.txt\n");
 	assert_eq!(rules.matched(b"x.log", false), Match::Ignore);
 	assert_eq!(rules.matched(b"keep.log", false), Match::Whitelist);
-	assert_eq!(rules.matched(b"x.txt", false), Match::None);
+	assert_eq!(rules.matched(b"x.txt", false), Match::Ignore);
 	assert!(Rules::parse(b"# only a comment\n\n   \n").is_empty());
 }
 
@@ -191,6 +195,8 @@ fn parse_excludes_file_matches_ignore_crate_regex() {
 		("  ExcludesFile=\"/x/y\"  \n", Some("/x/y")),
 		("excludesfile\n= spaced\n", Some("spaced")),
 		("excludesfile = first\nexcludesfile = second\n", Some("first")),
+		("excludesfile = C:/PROGRA~1/ignore\n", Some("C:/PROGRA~1/ignore")),
+		("excludesfile = ~user/x\n", Some("~user/x")),
 		("excludesfile = \"a b\"\n", None),
 		("excludesfiles = x\n", None),
 		("[core]\n\teditor = vim\n", None),

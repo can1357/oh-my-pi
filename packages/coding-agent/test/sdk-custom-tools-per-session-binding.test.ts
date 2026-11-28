@@ -18,6 +18,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type CustomToolAPI, loadCustomTools } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { createNoOpUIContext } from "../src/extensibility/utils";
 
 describe("loadCustomTools per-session binding (#2190 review fix)", () => {
 	let tmp: string;
@@ -47,14 +48,17 @@ describe("loadCustomTools per-session binding (#2190 review fix)", () => {
 		await removeWithRetries(tmp);
 	});
 
-	it("binds each load to its own cwd and pending-action callback", async () => {
+	it("binds each load to its own cwd, exec, UI and pending-action callback", async () => {
 		const parentLog: string[] = [];
 		const subagentLog: string[] = [];
 
-		const parentResult = await loadCustomTools([{ path: toolPath }], "/tmp/parent-cwd", [], action =>
+		const parentCwd = path.join(tmp, "parent");
+		const subagentCwd = path.join(tmp, "child");
+		await Promise.all([fs.mkdir(parentCwd), fs.mkdir(subagentCwd)]);
+		const parentResult = await loadCustomTools([{ path: toolPath }], parentCwd, [], action =>
 			parentLog.push(`parent:${action.label}`),
 		);
-		const subagentResult = await loadCustomTools([{ path: toolPath }], "/tmp/subagent-cwd", [], action =>
+		const subagentResult = await loadCustomTools([{ path: toolPath }], subagentCwd, [], action =>
 			subagentLog.push(`subagent:${action.label}`),
 		);
 
@@ -67,10 +71,27 @@ describe("loadCustomTools per-session binding (#2190 review fix)", () => {
 		expect(subagentResult.errors).toEqual([]);
 		expect(parentResult.tools).toHaveLength(1);
 		expect(subagentResult.tools).toHaveLength(1);
-		expect(parentApi.cwd).toBe("/tmp/parent-cwd");
-		expect(subagentApi.cwd).toBe("/tmp/subagent-cwd");
+		expect(parentApi.cwd).toBe(parentCwd);
+		expect(subagentApi.cwd).toBe(subagentCwd);
 		expect(subagentApi).not.toBe(parentApi);
 		expect(subagentResult.tools[0]?.tool).not.toBe(parentResult.tools[0]?.tool);
+
+		const parentUI = parentApi.ui;
+		const childUI = createNoOpUIContext();
+		childUI.getEditorText = () => "child";
+		subagentResult.setUIContext(childUI, true);
+		expect(subagentApi.hasUI).toBe(true);
+		expect(subagentApi.ui.getEditorText()).toBe("child");
+		expect(parentApi.ui).toBe(parentUI);
+		expect(parentApi.hasUI).toBe(false);
+
+		const command = ["-e", 'console.log(require("node:path").basename(process.cwd()))'];
+		const [parentExec, childExec] = await Promise.all([
+			parentApi.exec(process.execPath, command),
+			subagentApi.exec(process.execPath, command),
+		]);
+		expect(parentExec.stdout.trim()).toBe("parent");
+		expect(childExec.stdout.trim()).toBe("child");
 
 		// Cast: the test fixture exposes the runtime API verbatim.
 		parentApi.pushPendingAction({

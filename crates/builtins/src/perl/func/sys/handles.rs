@@ -292,7 +292,11 @@ pub(super) fn call(interp: &mut Interp<'_>, b: Builtin, call: &Call, cx: Cx) -> 
 		if let Some(ret) = interp.call_tied_handle(&handle, method, aliases(vals.iter().cloned()), context) { return ret; }
 	}
 	Ok(match b {
-		B::Close => { let closed = close(interp, &handle); result(interp, closed, super::bool_ret) },
+		B::Close => {
+			let closed = close(interp, &handle);
+			if let Err(err) = &closed { interp.broken_pipe(err)?; }
+			result(interp, closed, super::bool_ret)
+		},
 		B::Fileno => {
 			let fd = handle.borrow().fileno();
 			match fd {
@@ -627,6 +631,7 @@ fn transfer(interp: &mut Interp<'_>, b: Builtin, es: &[Expr], handle: Option<Io>
 		if !(0..=n).contains(&at) { return Err(interp.die_msg("Offset outside string")); }
 		let Some(h) = handle else { return Ok(fail(interp, libc::EBADF)); };
 		let r = h.borrow_mut().syswrite(&s.bytes[at as usize..at.saturating_add(len).min(n) as usize]);
+		if let Err(err) = &r { interp.broken_pipe(err)?; }
 		return transfer_result(interp, r, |n| n as i64);
 	}
 	let sv = interp.eval_lvalue(buf)?;

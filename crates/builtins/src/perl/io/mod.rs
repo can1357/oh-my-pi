@@ -869,6 +869,12 @@ impl Handle {
 		self.resource.with_mut(|device| device.set_len(len))
 	}
 
+	/// Drop buffered writes undelivered, as a vanished process loses its
+	/// PerlIO buffers.
+	pub fn discard_output(&mut self) {
+		self.output.with_mut(Vec::clear);
+	}
+
 	/// Close the handle. For a pipe, close its end before waiting for the command
 	/// and return `Some` of the command's encoded Perl `$?`.
 	pub fn close(&mut self) -> io::Result<Option<i32>> {

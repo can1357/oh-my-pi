@@ -39,23 +39,23 @@ function session(settings: Record<string, unknown> = {}): ToolSession {
 }
 
 describe("resolveBrowserKind with omp's WebKit host", () => {
-	it("defaults to the WebKit host found through the env override or the path setting", () => {
+	it("defaults to the WebKit host found through the env override or the path setting", async () => {
 		const webkit: WebKitKind = { kind: "webkit", path: executable };
-		expect(resolveBrowserKind({ action: "open" }, session(), { PI_BROWSER_WEBKIT_PATH: engineDir })).toEqual(webkit);
+		expect(await resolveBrowserKind({ action: "open" }, session(), { PI_BROWSER_WEBKIT_PATH: engineDir })).toEqual(webkit);
 		// The setting may name the executable itself.
-		expect(resolveBrowserKind({ action: "open" }, session({ "browser.webkitPath": executable }), {})).toEqual(webkit);
+		expect(await resolveBrowserKind({ action: "open" }, session({ "browser.webkitPath": executable }), {})).toEqual(webkit);
 		// The env override is not a fallback chain: one that holds no host hides the setting.
 		expect(
-			resolveBrowserKind({ action: "open" }, session({ "browser.webkitPath": engineDir }), {
+			(await resolveBrowserKind({ action: "open" }, session({ "browser.webkitPath": engineDir }), {
 				PI_BROWSER_WEBKIT_PATH: emptyDir,
-			}).kind,
+			})).kind,
 		).toBe("headless");
 	});
 
-	it("keeps a subagent on omp's WebKit host even when the parent's relay and panes are enabled", () => {
+	it("keeps a subagent on omp's WebKit host even when the parent's relay and panes are enabled", async () => {
 		const child = { ...session({ "browser.relay": true }), taskDepth: 1 };
 		expect(
-			resolveBrowserKind({ action: "open" }, child, {
+			await resolveBrowserKind({ action: "open" }, child, {
 				PI_BROWSER_WEBKIT_PATH: engineDir,
 				PI_BROWSER_RELAY: "1",
 				PI_BROWSER_TERN: "1",
@@ -68,28 +68,28 @@ describe("resolveBrowserKind with omp's WebKit host", () => {
 	});
 
 	it("opens Chromium when no host executable resolves", async () => {
-		expect(resolveBrowserKind({ action: "open" }, session(), { PI_BROWSER_WEBKIT_PATH: emptyDir }).kind).toBe(
+		expect((await resolveBrowserKind({ action: "open" }, session(), { PI_BROWSER_WEBKIT_PATH: emptyDir })).kind).toBe(
 			"headless",
 		);
 		const plainFile = path.join(root, "not-executable");
 		await Bun.write(plainFile, "");
 		await fs.chmod(plainFile, 0o644);
-		expect(resolveBrowserKind({ action: "open" }, session(), { PI_BROWSER_WEBKIT_PATH: plainFile }).kind).toBe(
+		expect((await resolveBrowserKind({ action: "open" }, session(), { PI_BROWSER_WEBKIT_PATH: plainFile })).kind).toBe(
 			"headless",
 		);
 	});
 
-	it("follows the browser.webkit setting, with PI_BROWSER_WEBKIT overriding it either way", () => {
+	it("follows the browser.webkit setting, with PI_BROWSER_WEBKIT overriding it either way", async () => {
 		const env = { PI_BROWSER_WEBKIT_PATH: engineDir };
-		expect(resolveBrowserKind({ action: "open" }, session({ "browser.webkit": false }), env).kind).toBe("headless");
-		expect(resolveBrowserKind({ action: "open" }, session(), { ...env, PI_BROWSER_WEBKIT: "0" }).kind).toBe(
+		expect((await resolveBrowserKind({ action: "open" }, session({ "browser.webkit": false }), env)).kind).toBe("headless");
+		expect((await resolveBrowserKind({ action: "open" }, session(), { ...env, PI_BROWSER_WEBKIT: "0" })).kind).toBe(
 			"headless",
 		);
 		expect(
-			resolveBrowserKind({ action: "open" }, session({ "browser.webkit": false }), {
+			(await resolveBrowserKind({ action: "open" }, session({ "browser.webkit": false }), {
 				...env,
 				PI_BROWSER_WEBKIT: "1",
-			}).kind,
+			})).kind,
 		).toBe("webkit");
 	});
 
@@ -107,57 +107,57 @@ describe("resolveBrowserKind with omp's WebKit host", () => {
 		await fs.symlink(host, link);
 		const env = { PI_BROWSER_WEBKIT_PATH: link };
 		const webkit: WebKitKind = { kind: "webkit", path: host, viewer };
-		expect(resolveBrowserKind({ action: "open", headed: true }, session(), env)).toEqual(webkit);
-		expect(resolveBrowserKind({ action: "open" }, session({ "browser.headless": false }), env)).toEqual(webkit);
-		expect(resolveBrowserKind({ action: "open", headed: true, app: "webkit" }, session(), env)).toEqual(webkit);
+		expect(await resolveBrowserKind({ action: "open", headed: true }, session(), env)).toEqual(webkit);
+		expect(await resolveBrowserKind({ action: "open" }, session({ "browser.headless": false }), env)).toEqual(webkit);
+		expect(await resolveBrowserKind({ action: "open", headed: true, app: "webkit" }, session(), env)).toEqual(webkit);
 	});
 
-	it("leaves a visible window to Chromium on an engine without a viewer", () => {
+	it("leaves a visible window to Chromium on an engine without a viewer", async () => {
 		const env = { PI_BROWSER_WEBKIT_PATH: engineDir };
-		expect(resolveBrowserKind({ action: "open", headed: true }, session(), env)).toMatchObject({
+		expect(await resolveBrowserKind({ action: "open", headed: true }, session(), env)).toMatchObject({
 			kind: "headless",
 			headless: false,
 		});
-		expect(resolveBrowserKind({ action: "open" }, session({ "browser.headless": false }), env)).toMatchObject({
+		expect(await resolveBrowserKind({ action: "open" }, session({ "browser.headless": false }), env)).toMatchObject({
 			kind: "headless",
 			headless: false,
 		});
 		// `headed: false` asks for a hidden browser whatever the setting says: WebKit can be that.
 		expect(
-			resolveBrowserKind({ action: "open", headed: false }, session({ "browser.headless": false }), env).kind,
+			(await resolveBrowserKind({ action: "open", headed: false }, session({ "browser.headless": false }), env)).kind,
 		).toBe("webkit");
 	});
 
-	it('lets one open opt out with app: "chromium" and require the host with app: "webkit"', () => {
+	it('lets one open opt out with app: "chromium" and require the host with app: "webkit"', async () => {
 		const env = { PI_BROWSER_WEBKIT_PATH: engineDir };
 		const pane = { TERN_PANE_SOCKET: "/tmp/tern.sock", TERN_PANE: "42" };
-		expect(resolveBrowserKind({ action: "open", app: "chromium" }, session(), env).kind).toBe("headless");
+		expect((await resolveBrowserKind({ action: "open", app: "chromium" }, session(), env)).kind).toBe("headless");
 		// Naming Chromium picks it outright, whatever Tern would have taken.
-		expect(resolveBrowserKind({ action: "open", app: "chromium" }, session(), { ...env, ...pane }).kind).toBe(
+		expect((await resolveBrowserKind({ action: "open", app: "chromium" }, session(), { ...env, ...pane })).kind).toBe(
 			"headless",
 		);
 
 		// Required: it wins over the setting that turns the backend off, over Tern, cmux and a configured CDP URL.
 		const required = { action: "open", app: "webkit" } as const;
-		expect(resolveBrowserKind(required, session({ "browser.webkit": false }), env).kind).toBe("webkit");
-		expect(resolveBrowserKind(required, session({ "browser.headless": false }), env).kind).toBe("webkit");
+		expect((await resolveBrowserKind(required, session({ "browser.webkit": false }), env)).kind).toBe("webkit");
+		expect((await resolveBrowserKind(required, session({ "browser.headless": false }), env)).kind).toBe("webkit");
 		expect(
-			resolveBrowserKind(required, session({ "browser.cdpUrl": "http://127.0.0.1:9333" }), {
+			(await resolveBrowserKind(required, session({ "browser.cdpUrl": "http://127.0.0.1:9333" }), {
 				...env,
 				...pane,
 				CMUX_SOCKET_PATH: "/tmp/cmux.sock",
-			}).kind,
+			})).kind,
 		).toBe("webkit");
 
 		// Required and unavailable is an error, never a quiet Chromium.
-		expect(() => resolveBrowserKind(required, session(), { PI_BROWSER_WEBKIT_PATH: emptyDir })).toThrow(
+		await expect(resolveBrowserKind(required, session(), { PI_BROWSER_WEBKIT_PATH: emptyDir })).rejects.toThrow(
 			/app: "webkit" requires omp's WebKit engine/,
 		);
-		expect(() => resolveBrowserKind(required, session(), { ...env, PI_BROWSER_WEBKIT: "0" })).toThrow(
+		await expect(resolveBrowserKind(required, session(), { ...env, PI_BROWSER_WEBKIT: "0" })).rejects.toThrow(
 			/app: "webkit" requires omp's WebKit engine/,
 		);
 		// Nothing an open asks for sends a required open elsewhere: a window it cannot show fails when it is shown.
-		expect(resolveBrowserKind({ ...required, headed: true }, session(), env).kind).toBe("webkit");
+		expect((await resolveBrowserKind({ ...required, headed: true }, session(), env)).kind).toBe("webkit");
 	});
 
 	it("looks for the platform's executable name in an engine directory and takes a file path as given", async () => {
@@ -181,22 +181,22 @@ describe("resolveBrowserKind with omp's WebKit host", () => {
 		});
 	});
 
-	it("stays behind explicit app options, the relay, a CDP URL, Tern and cmux", () => {
+	it("stays behind explicit app options, the relay, a CDP URL, Tern and cmux", async () => {
 		const env = { PI_BROWSER_WEBKIT_PATH: engineDir };
 		const pane = { TERN_PANE_SOCKET: "/tmp/tern.sock", TERN_PANE: "42" };
-		expect(resolveBrowserKind({ action: "open", app: "http://127.0.0.1:9222" }, session(), env).kind).toBe(
+		expect((await resolveBrowserKind({ action: "open", app: "http://127.0.0.1:9222" }, session(), env)).kind).toBe(
 			"connected",
 		);
-		expect(resolveBrowserKind({ action: "open", app: "/usr/bin/chromium" }, session(), env).kind).toBe("spawned");
-		expect(resolveBrowserKind({ action: "open" }, session({ "browser.relay": true }), env).kind).toBe("relay");
+		expect((await resolveBrowserKind({ action: "open", app: "/usr/bin/chromium" }, session(), env)).kind).toBe("spawned");
+		expect((await resolveBrowserKind({ action: "open" }, session({ "browser.relay": true }), env)).kind).toBe("relay");
 		expect(
-			resolveBrowserKind({ action: "open" }, session({ "browser.cdpUrl": "http://127.0.0.1:9333" }), env).kind,
+			(await resolveBrowserKind({ action: "open" }, session({ "browser.cdpUrl": "http://127.0.0.1:9333" }), env)).kind,
 		).toBe("connected");
-		expect(resolveBrowserKind({ action: "open" }, session(), { ...env, ...pane }).kind).toBe("tern");
+		expect((await resolveBrowserKind({ action: "open" }, session(), { ...env, ...pane })).kind).toBe("tern");
 		expect(
-			resolveBrowserKind({ action: "open" }, session(), { ...env, CMUX_SOCKET_PATH: "/tmp/cmux.sock" }).kind,
+			(await resolveBrowserKind({ action: "open" }, session(), { ...env, CMUX_SOCKET_PATH: "/tmp/cmux.sock" })).kind,
 		).toBe("cmux");
 		// Opting out of Tern lands on omp's own browser, which is now WebKit.
-		expect(resolveBrowserKind({ action: "open", app: "own" }, session(), { ...env, ...pane }).kind).toBe("webkit");
+		expect((await resolveBrowserKind({ action: "open", app: "own" }, session(), { ...env, ...pane })).kind).toBe("webkit");
 	});
 });

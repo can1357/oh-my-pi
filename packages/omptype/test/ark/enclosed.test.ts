@@ -121,8 +121,17 @@ it("escaped enclosing", () => {
 it("escaped backslash", () => {
 	const T = type("'\\\\'");
 	const Expected = type.unit("\\");
+	expect(T.allows("\\")).toBe(true);
+	expect(T.allows("\\\\")).toBe(false);
 	const _infer: Eq<typeof T.t, typeof Expected.t> = true;
 	expect(_infer).toBe(true);
+});
+
+it("unescapes each member of a quoted union", () => {
+	const T = type("'one\\\\two' | 'three'");
+	expect(T.allows("one\\two")).toBe(true);
+	expect(T.allows("one\\\\two")).toBe(false);
+	expect(T.allows("three")).toBe(true);
 });
 
 it("string literal stress", () => {

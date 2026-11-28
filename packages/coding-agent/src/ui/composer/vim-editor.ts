@@ -7,6 +7,7 @@
  */
 import { type Accessor, batch, type KeyEvent, type Signal, signal } from "@oh-my-pi/pi-tui";
 import { columnOf, type EditorRow, offsetAt, rowOf } from "@oh-my-pi/pi-tui/term/painters/editor";
+import { segmentGraphemes } from "@oh-my-pi/pi-utils/graphemes";
 import {
 	countGraphemes,
 	diffInsertSession,
@@ -25,8 +26,6 @@ import {
 	VimState,
 	visualRange,
 } from "./vim";
-
-const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
 /** A field's text and caret (UTF-16 offset). */
 export interface VimSnapshot {
@@ -319,7 +318,7 @@ export class VimEditor {
 				return true;
 			}
 			if (key.text && !/^(?:ctrl|alt|super)\+/.test(key.id)) {
-				for (const seg of segmenter.segment(key.text)) this.#overwriteGrapheme(seg.segment);
+				for (const seg of segmentGraphemes(key.text)) this.#overwriteGrapheme(seg.segment);
 				return true;
 			}
 		}
@@ -338,7 +337,7 @@ export class VimEditor {
 			if (vim.pending) this.#run("escape");
 			return false;
 		}
-		for (const seg of segmenter.segment(text)) {
+		for (const seg of segmentGraphemes(text)) {
 			if (this.#modeNow() === "replace") {
 				this.#overwriteGrapheme(seg.segment);
 				continue;
@@ -804,7 +803,7 @@ export class VimEditor {
 		lines[from.line] = line.slice(0, from.col) + text + line.slice(to.col);
 		this.#state.cursorLine = from.line;
 		let last = from.col;
-		for (const seg of segmenter.segment(text)) last = from.col + seg.index;
+		for (const seg of segmentGraphemes(text)) last = from.col + seg.index;
 		this.#setCursorCol(last);
 		this.#afterEdit();
 	}
@@ -1003,7 +1002,7 @@ export class VimEditor {
 			if (mode === "upper") return text.toUpperCase();
 			if (mode === "lower") return text.toLowerCase();
 			let out = "";
-			for (const { segment } of segmenter.segment(text)) {
+			for (const { segment } of segmentGraphemes(text)) {
 				const upper = segment.toUpperCase();
 				out += segment === upper ? segment.toLowerCase() : upper;
 			}
@@ -1042,7 +1041,7 @@ export class VimEditor {
 	/** Overwrite from the cursor as Replace mode would, line breaks opening new lines. */
 	#overwriteText(text: string): void {
 		this.#recordUndo();
-		for (const seg of segmenter.segment(text)) {
+		for (const seg of segmentGraphemes(text)) {
 			const lines = this.#state.lines;
 			const line = lines[this.#state.cursorLine] ?? "";
 			const col = this.#state.cursorCol;

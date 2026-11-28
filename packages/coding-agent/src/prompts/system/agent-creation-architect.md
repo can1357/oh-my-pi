@@ -15,7 +15,6 @@ On user-described agent task:
    - NEVER use generic terms like "helper" or "assistant".
 
 Output MUST be a valid JSON object with exactly these fields:
-
 ```json
 {
   "identifier": "A unique, descriptive identifier using lowercase letters, numbers, and hyphens (e.g., 'test-runner', 'api-docs-writer', 'code-formatter')",

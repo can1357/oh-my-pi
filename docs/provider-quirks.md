@@ -2033,7 +2033,7 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/veni
 ### Auth & usage
 
 - **API Key Login & Validation**: Declared in `packages/catalog/src/compat/rules/auth/venice.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`) to direct users to `https://venice.ai/settings/api` for API keys (`vapi_...` placeholder prefix) and validate credentials via a lightweight `chat-completions` request using validation model `qwen3-4b`. Registered in `packages/ai/src/registry/registry.ts`.
-- **Usage Accounting**: Uses standard OpenAI Chat Completions usage accounting (`calculateOpenAIUsageAccounting` in `packages/ai/src/providers/openai-shared.ts`) without custom quota or usage endpoints.
+- **Usage Accounting**: Inference usage uses standard OpenAI Chat Completions accounting (`calculateOpenAIUsageAccounting` in `packages/ai/src/providers/openai-shared.ts`). `omp usage` reads USD and DIEM balances, positive bundled credits, and the DIEM epoch reset from `GET /api_keys/rate_limits`. A regular inference key is sufficient. Venice's inference access flag determines the status, not any one balance.
 
 ### Catalog model handling
 

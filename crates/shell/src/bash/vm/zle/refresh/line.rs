@@ -2,6 +2,8 @@
 //! `tc_rightcurs`, `tc_downcurs`, `tcmultout`, `singmoveto`) and the
 //! single-line display (zsh `singlerefresh`).
 
+use xutf::{Utf8Decoder, Utf8Step};
+
 use super::{
 	Cap, Elem, Line, N_SPECIAL_HIGHLIGHTS, R, TXT_ATTR_ON_MASK, TXT_MULTIWORD_MASK, WEOF, ZR_CR,
 	ZR_NL, ZR_SP, ZR_ZR, Zattr, at, ctrl_char, is_basechar, is_combining, iswcntrl, off_from_on,
@@ -19,8 +21,7 @@ fn mb_metacharlenconv(s: &[u8], i: usize) -> (usize, Option<char>) {
 	if first <= 0x7f {
 		return (1, Some(char::from(first)));
 	}
-	let mut buf = [0u8; 4];
-	let mut n = 0;
+	let mut decoder = Utf8Decoder::new();
 	let mut p = i;
 	while p < s.len() {
 		let c = if s[p] == META {
@@ -33,15 +34,10 @@ fn mb_metacharlenconv(s: &[u8], i: usize) -> (usize, Option<char>) {
 			s[p]
 		};
 		p += 1;
-		if n == buf.len() {
-			break;
-		}
-		buf[n] = c;
-		n += 1;
-		match std::str::from_utf8(&buf[..n]) {
-			Ok(st) => return (p - i, st.chars().next()),
-			Err(e) if e.error_len().is_none() => {},
-			Err(_) => break,
+		match decoder.push(c) {
+			Utf8Step::Char(ch) => return (p - i, Some(ch)),
+			Utf8Step::Pending => {},
+			Utf8Step::Reject => break,
 		}
 	}
 	if p > i {

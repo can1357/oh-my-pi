@@ -58,7 +58,7 @@ import { Transcript } from "./transcript";
 /** Configuration of {@link Shell.start}. */
 export interface ShellStartOptions extends Pick<
 	HostOptions,
-	"screen" | "copyOnSelect" | "wheelLines" | "scrollbar" | "exitTranscript"
+	"screen" | "copyOnSelect" | "wheelLines" | "scrollbar" | "exitTranscript" | "spinnerInterval" | "reduceMotion"
 > {
 	readonly theme: Accessor<Theme>;
 	readonly title?: string;
@@ -194,6 +194,8 @@ export class Shell {
 			...(options.hyperlinks ? { hyperlinks: options.hyperlinks } : {}),
 			...(options.textSizing ? { textSizing: options.textSizing } : {}),
 			...(options.clock ? { clock: options.clock } : {}),
+			...(options.spinnerInterval !== undefined ? { spinnerInterval: options.spinnerInterval } : {}),
+			...(options.reduceMotion ? { reduceMotion: options.reduceMotion } : {}),
 			...(options.screen ? { screen: options.screen } : {}),
 			copySelection: text =>
 				void copyToClipboard(text, { terminalOnly: !isClipboardTerminalLocal(), passthrough: true }),

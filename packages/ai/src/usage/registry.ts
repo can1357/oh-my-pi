@@ -19,6 +19,7 @@ import { codexRankingStrategy, openaiCodexUsageProvider } from "./openai-codex";
 import { opencodeGoRankingStrategy, opencodeGoUsageProvider } from "./opencode-go";
 import { syntheticUsageProvider } from "./synthetic";
 import { umansUsageProvider } from "./umans";
+import { veniceUsageProvider } from "./venice";
 import { xaiOauthRankingStrategy, xaiOauthUsageProvider } from "./xai-oauth";
 import { zaiRankingStrategy, zaiUsageProvider } from "./zai";
 
@@ -44,6 +45,7 @@ export const DEFAULT_USAGE_PROVIDERS: readonly UsageProvider[] = [
 	githubCopilotUsageProvider,
 	cursorUsageProvider,
 	syntheticUsageProvider,
+	veniceUsageProvider,
 	xaiOauthUsageProvider,
 	devinUsageProvider,
 	charmHyperUsageProvider,
