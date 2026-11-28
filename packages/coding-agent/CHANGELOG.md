@@ -76,6 +76,7 @@
 - Added the `agent_view_changed` extension event, fired when the TUI focuses a subagent or returns to the main session, so extensions can re-scope their status to the agent on screen ([#16546](https://github.com/can1357/oh-my-pi/issues/16546))
 - Added `model` and `fallback` attributes to `task` result envelopes so the parent sees which model served each subagent ([#16017](https://github.com/can1357/oh-my-pi/issues/16017))
 - Added a terminal notification when a plan is ready for approval, controlled by `completion.notify` ([#7724](https://github.com/can1357/oh-my-pi/issues/7724))
+- Extensions can now observe the built-in composer's state (the collapsed draft, caret, focus, completion popup, inline hint and attachment chips), insert text at the caret, and add prose word-completion sources whose ghost text replaces the native spelling's while active (`ctx.ui.composer.observe`, `insertText`, `addWordCompletionProvider`).
 
 ### Changed
 
@@ -340,6 +341,7 @@
 - A long session no longer keeps every finished background job, with its full output, in memory after the job's result reaches the agent ([#20836](https://github.com/can1357/oh-my-pi/pull/20836) by [@sjawhar](https://github.com/sjawhar))
 - Skipped prompt-cache writes for one-off memory extraction and consolidation in the local memory backend ([#20783](https://github.com/can1357/oh-my-pi/pull/20783) by [@farnoy](https://github.com/farnoy))
 - Starting or resuming a session no longer prints a `Tool commands: added mcp__…` line listing every MCP tool; MCP tools mounted later are still shown ([#20643](https://github.com/can1357/oh-my-pi/pull/20643) by [@Petyok](https://github.com/Petyok)).
+- Composer extension key handlers now run before app shortcuts, so a draft rewrite can consume Escape to restore the original before Escape interrupts the agent.
 
 ### Removed
 
