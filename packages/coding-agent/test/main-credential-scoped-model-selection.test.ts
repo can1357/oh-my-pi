@@ -4,7 +4,7 @@
  * cached model absent from the bundled catalog fuzzy-matched its nearest
  * bundled sibling and the session silently ran a different model.
  */
-import { afterEach, beforeEach, expect, it } from "bun:test";
+import { afterEach, beforeEach, expect, it, spyOn } from "bun:test";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -76,6 +76,12 @@ it("--model resolves a cached-only Copilot model exactly instead of its bundled 
 
 	const authStorage = await AuthStorage.create(":memory:");
 	authStorage.keys.setRuntime("github-copilot", apiKey);
+	authStorage.keys.setRuntime("openrouter", "unavailable-key");
+	const peek = authStorage.keys.peek.bind(authStorage.keys);
+	const peekSpy = spyOn(authStorage.keys, "peek").mockImplementation(async (provider, options) => {
+		if (provider === "openrouter") throw new Error("Unrelated credential lookup failed");
+		return peek(provider, options);
+	});
 	const rawArgs = ["--model", `github-copilot/${servedId}`, "--print", "hello"];
 	const parsed = parseArgs(rawArgs);
 	parsed.noExtensions = true;
@@ -98,6 +104,7 @@ it("--model resolves a cached-only Copilot model exactly instead of its bundled 
 	} catch (error) {
 		if (!(error instanceof Error) || error.message !== "stop after session options") throw error;
 	} finally {
+		peekSpy.mockRestore();
 		authStorage.close();
 	}
 

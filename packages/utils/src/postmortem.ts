@@ -114,24 +114,25 @@ function nativeHardExit(fn: HardExitFn | undefined): HardExitFn | undefined {
  * `process.exit` re-reads `process.reallyExit` at call time, so exiting through
  * one primitive while its sibling still holds the throwing stub re-enters the
  * guard and loops the rejection storm (#11789). After restoring, `reallyExit`
- * (the low-level primitive) is preferred; `process.exit` and finally `SIGKILL`
- * are fallbacks so a poisoned or absent chain can never leave the process alive.
+ * is preferred unless the host requests `emitExitEvent` to run synchronous exit
+ * hooks (including terminal restoration). The other primitive and finally
+ * `SIGKILL` are fallbacks if the preferred one cannot terminate the process.
  *
  * Buffered log records are written first: `reallyExit` skips the `exit` event
  * the logger otherwise flushes on, which would drop the last batch on every
  * signal and fatal exit.
  */
-export function exitProcess(code: number): never {
+export function exitProcess(code: number, options?: { emitExitEvent: boolean }): never {
 	logger.flush();
 	const reallyExit = nativeHardExit(typeof process.reallyExit === "function" ? process.reallyExit : undefined);
 	const exit = nativeHardExit(process.exit as HardExitFn);
 	if (reallyExit) process.reallyExit = reallyExit as typeof process.reallyExit;
 	if (exit) process.exit = exit as typeof process.exit;
 	try {
-		reallyExit?.call(process, code);
+		(options?.emitExitEvent ? exit : reallyExit)?.call(process, code);
 	} catch {}
 	try {
-		exit?.call(process, code);
+		(options?.emitExitEvent ? reallyExit : exit)?.call(process, code);
 	} catch {}
 	try {
 		process.kill(process.pid, "SIGKILL");

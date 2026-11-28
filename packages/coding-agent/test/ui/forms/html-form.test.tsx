@@ -158,6 +158,103 @@ test("wraps a long textarea line and keeps the caret row visible in a short term
 	}
 });
 
+test.each(["radio", "checkbox"])("keeps a long %s Other answer visible and editable at both ends", type => {
+	const onSubmit = vi.fn();
+	const model = new HtmlFormModel(
+		parseHtmlForm(`<form>
+			<label><input type="${type}" name="route" value="road" checked> Road</label>
+			<label><input type="${type}" name="route" value="river"> River</label>
+		</form>`),
+		{ onSubmit, onCancel: () => {} },
+	);
+	const term = createTestTerminal(() => ({ dock: <HtmlFormDialog model={model} /> }), {
+		columns: 42,
+		rows: 16,
+		theme: loadThemeSync("dark"),
+	});
+	try {
+		term.focus(term.surface.dock()[0]!);
+		term.press("down");
+		term.press("down");
+		const answer = "Use the marked trail past the river and meet at sunrise";
+		term.paste(answer + "界");
+		expect(term.screen().join("\n")).toMatch(/Other: ‹.*at sunrise界/);
+		term.press("left");
+		expect(highlighted(term.rows())).toContain("界");
+		term.resize(16, 16);
+		expect(highlighted(term.rows().filter(row => row.includes("Other:")))).toEqual([" "]);
+		term.resize(42, 16);
+		term.press("delete");
+		term.type("!");
+		term.press("home");
+		expect(term.screen().join("\n")).toMatch(/Other: Use the marked trail.*›/);
+		term.type("Please ");
+		term.press("enter");
+		const edited = `Please ${answer}!`;
+		expect(onSubmit).toHaveBeenCalledWith({ route: type === "checkbox" ? ["road", edited] : edited }, []);
+	} finally {
+		term.dispose();
+	}
+});
+
+test("keeps a long ordinary input visible and editable at both ends", () => {
+	const onSubmit = vi.fn();
+	const model = new HtmlFormModel(parseHtmlForm(`<form><label>Route <input name="route"></label></form>`), {
+		onSubmit,
+		onCancel: () => {},
+	});
+	const term = createTestTerminal(() => ({ dock: <HtmlFormDialog model={model} /> }), { columns: 42, rows: 16 });
+	try {
+		term.focus(term.surface.dock()[0]!);
+		const answer = "Use the marked trail past the river and meet at sunrise";
+		term.paste(answer);
+		expect(term.screen().join("\n")).toMatch(/│ ‹.*at sunrise/);
+		term.type("!");
+		term.press("home");
+		expect(term.screen().join("\n")).toMatch(/│ Use the marked trail.*›/);
+		term.type("Please ");
+		term.press("enter");
+		expect(onSubmit).toHaveBeenCalledWith({ route: `Please ${answer}!` }, []);
+	} finally {
+		term.dispose();
+	}
+});
+
+test("places the masked password caret after one bullet for an emoji", () => {
+	const onSubmit = vi.fn();
+	const model = new HtmlFormModel(
+		parseHtmlForm(`<form><label>Code <input type="password" name="code"></label></form>`),
+		{
+			onSubmit,
+			onCancel: () => {},
+		},
+	);
+	const term = createTestTerminal(() => ({ dock: <HtmlFormDialog model={model} /> }), {
+		columns: 32,
+		rows: 16,
+		theme: loadThemeSync("dark"),
+	});
+	try {
+		term.focus(term.surface.dock()[0]!);
+		term.paste("😀ab");
+		term.press("home");
+		term.press("right");
+		const spans = styledSpans(term.rows().find(row => row.includes("•")) ?? "");
+		const caret = spans.findIndex(span => span.s?.split(" ").includes("mark"));
+		expect(spans[caret]?.t).toBe("•");
+		const before = spans
+			.slice(0, caret)
+			.map(span => span.t)
+			.join("");
+		expect(before).toMatch(/│ •$/);
+		term.type("x");
+		term.press("enter");
+		expect(onSubmit).toHaveBeenCalledWith({ code: "😀xab" }, []);
+	} finally {
+		term.dispose();
+	}
+});
+
 corpusSuite({
 	dir: "forms/html-form",
 	mount(caseName, corpusCase, env): Mounted {

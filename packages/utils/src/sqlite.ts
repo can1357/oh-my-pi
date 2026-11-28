@@ -52,10 +52,26 @@ export type SqliteFileIdentity = string | null | undefined;
  * so the opener that quarantines the store closes its peers' dead handles too.
  */
 const pendingCorruptHandles = new Map<string, Set<Database>>();
+const quarantineReleases = new Map<string, Set<() => void>>();
 
 function corruptHandleKey(dbPath: string): string {
 	const resolved = path.resolve(dbPath);
 	return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+/** Release a cached connection after its corrupt files have been copied and before they are removed. */
+export function registerSqliteQuarantineRelease(dbPath: string, release: () => void): () => void {
+	const key = corruptHandleKey(dbPath);
+	let releases = quarantineReleases.get(key);
+	if (!releases) {
+		releases = new Set();
+		quarantineReleases.set(key, releases);
+	}
+	releases.add(release);
+	return () => {
+		releases.delete(release);
+		if (releases.size === 0) quarantineReleases.delete(key);
+	};
 }
 
 function registerCorruptHandle(dbPath: string, db: Database | undefined): void {
@@ -235,6 +251,8 @@ function quarantineCorruptSqliteStore(dbPath: string, db: Database | undefined):
 			throw error;
 		}
 	}
+	const releases = quarantineReleases.get(corruptHandleKey(dbPath));
+	if (releases) for (const release of releases) release();
 	db?.close();
 	// Only Windows refuses to unlink a file another handle still holds. Elsewhere
 	// each peer must keep its own handle until it closes it after adopting the
@@ -337,6 +355,35 @@ export async function openSqliteDatabase<T>(
 		return await openWithBusyRetries(dbPath, initialize, {});
 	} catch (error) {
 		throw annotateSqliteError(error instanceof SqliteAttemptFailure ? error.original : error, dbPath);
+	}
+}
+
+/**
+ * Initialize a feature on an already-open connection with bounded BUSY retries.
+ * Unlike opening a store, this never quarantines a live database: another
+ * owner may still be using it. Returns undefined if the file was replaced;
+ * the caller must obtain a fresh connection.
+ */
+export async function initializeSqliteConnection<T>(
+	dbPath: string,
+	connection: { db: Database; identity: SqliteFileIdentity },
+	initialize: (db: Database) => T | Promise<T>,
+): Promise<T | undefined> {
+	const { db, identity } = connection;
+	for (let attempt = 0; ; attempt++) {
+		const current = sqliteFileIdentity(dbPath);
+		if (identity !== undefined && current !== undefined && identity !== current) return;
+		try {
+			const result = await initialize(db);
+			const after = sqliteFileIdentity(dbPath);
+			if (identity !== undefined && after !== undefined && identity !== after) return;
+			return result;
+		} catch (error) {
+			if (!isSqliteBusyError(error) || attempt + 1 >= BUSY_MAX_ATTEMPTS) {
+				throw annotateSqliteError(error, dbPath);
+			}
+			await Bun.sleep(BUSY_BASE_DELAY_MS * 2 ** attempt);
+		}
 	}
 }
 

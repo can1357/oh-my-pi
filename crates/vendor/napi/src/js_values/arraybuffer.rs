@@ -64,6 +64,11 @@ pub struct JsArrayBufferValue {
   pub value: JsArrayBuffer,
   pub(crate) len: usize,
   pub(crate) data: *mut c_void,
+  /// Set only by `Env::create_arraybuffer`. Under emnapi `data` is then a
+  /// wasm-side copy of the new `ArrayBuffer`, so `into_raw` and `into_unknown`
+  /// copy the bytes to JS.
+  #[cfg(target_family = "wasm")]
+  pub(crate) sync_to_js: bool,
 }
 
 #[deprecated(
@@ -154,6 +159,8 @@ impl JsArrayBuffer {
       data,
       value: self,
       len,
+      #[cfg(target_family = "wasm")]
+      sync_to_js: false,
     })
   }
 
@@ -206,15 +213,45 @@ impl JsArrayBuffer {
 
 impl JsArrayBufferValue {
   pub fn new(value: JsArrayBuffer, data: *mut c_void, len: usize) -> Self {
-    JsArrayBufferValue { value, len, data }
+    JsArrayBufferValue {
+      value,
+      len,
+      data,
+      #[cfg(target_family = "wasm")]
+      sync_to_js: false,
+    }
   }
 
   pub fn into_raw(self) -> JsArrayBuffer {
+    #[cfg(target_family = "wasm")]
+    self.copy_to_js();
     self.value
   }
 
   pub fn into_unknown<'env>(self) -> Unknown<'env> {
+    #[cfg(target_family = "wasm")]
+    self.copy_to_js();
     unsafe { Unknown::from_raw_unchecked(self.value.0.env, self.value.0.value) }
+  }
+
+  #[cfg(target_family = "wasm")]
+  fn copy_to_js(&self) {
+    if !self.sync_to_js || self.len == 0 || self.data.is_null() {
+      return;
+    }
+    let env = self.value.0.env;
+    let mut value = self.value.0.value;
+    // Ask for the length only: with a data pointer, emnapi would first copy the
+    // JS bytes over the Rust writes. A detached buffer reports 0 and is skipped,
+    // because emnapi throws for it.
+    let mut byte_length = 0;
+    let status =
+      unsafe { sys::napi_get_arraybuffer_info(env, value, ptr::null_mut(), &mut byte_length) };
+    if status != sys::Status::napi_ok || byte_length < self.len {
+      return;
+    }
+    // There is no `Result` to report a failure; the JS bytes then stay as they were.
+    unsafe { crate::bindgen_runtime::emnapi_sync_memory(env, false, &mut value, 0, self.len) };
   }
 }
 

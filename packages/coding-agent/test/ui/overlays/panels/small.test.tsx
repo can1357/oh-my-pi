@@ -171,7 +171,7 @@ panelSuite({
 			),
 			steps: {
 				settle,
-				variant: () => value.set("silver16-bw"),
+				variant: () => value.set("cjk16-bw"),
 				"settle 2": settle,
 				bogus: () => value.set("bogus"),
 				"variant 5x8": () => value.set("5x8-bw"),

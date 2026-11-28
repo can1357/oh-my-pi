@@ -2,7 +2,7 @@
 
 Contributor map for Rust workspace members under `crates/`. They are implementation details behind `@oh-my-pi/pi-natives` and its embedded shell; package consumers use JavaScript entrypoints, not these crate APIs.
 
-The root `Cargo.toml` lists every crate under `crates/` explicitly in `workspace.members` — add new crates there. Its `[patch.crates-io]` selects vendored `cfg_aliases`, `grep-searcher`, `napi`, and `tree-sitter-go`.
+The root `Cargo.toml` lists every crate under `crates/` explicitly in `workspace.members` — add new crates there. Its `[patch.crates-io]` selects vendored `grep-searcher`, `jaq-core`, `jaq-json`, `jaq-std`, `napi`, and `tree-sitter-go`.
 
 ## First-party crates
 
@@ -25,7 +25,7 @@ The root `Cargo.toml` lists every crate under `crates/` explicitly in `workspace
 
 | Group                       | Paths                                                                                                                                                                         | Purpose                                                                                                                                                                                 |
 | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Build/runtime compatibility | [`crates/vendor/cfg_aliases`](../crates/vendor/cfg_aliases), [`crates/vendor/grep-searcher`](../crates/vendor/grep-searcher), [`crates/vendor/napi`](../crates/vendor/napi), [`crates/vendor/tree-sitter-go`](../crates/vendor/tree-sitter-go) | Workspace patches fix macro compatibility, add a chunk-fed search (`Searcher::search_push`), fix N-API environment teardown, and fix Go grammar support respectively.                                                                             |
+| Build/runtime compatibility | [`crates/vendor/grep-searcher`](../crates/vendor/grep-searcher), [`crates/vendor/napi`](../crates/vendor/napi), [`crates/vendor/tree-sitter-go`](../crates/vendor/tree-sitter-go) | Workspace patches add a chunk-fed search (`Searcher::search_push`), fix N-API environment teardown, and fix Go grammar support respectively.                                                                             |
 
 `omp_builtins::extras::extras()` (defined in `src/extras.rs`) is the authoritative list of in-process extras; `omp-shell` (`src/extras.rs`) resolves a command name through the engine's builtins, pi's tools, then these extras, honoring the `PI_DISABLE_*` gates in the session environment `omp-shell` configures. A directory being a workspace member does not by itself mean that `omp-natives` exposes it as a JavaScript API.
 

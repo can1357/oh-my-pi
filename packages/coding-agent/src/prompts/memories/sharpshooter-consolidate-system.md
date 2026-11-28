@@ -5,7 +5,6 @@ Call the `replace_memory_files` tool exactly once with the COMPLETE final conten
 ## Admission law — memory is earned by friction, not by decision-existence
 
 Admit a decision into the files only if its lineage shows at least one of:
-
 1. **Regression** — behavior that was settled broke or drifted at any point (a single observed regression qualifies).
 2. **Subtlety** — the rule is non-obvious from the code alone: invisible invariants, cross-component expectations, "A is distinct from B" distinctions, look-and-feel intent code does not self-describe.
 3. **Repetition** — two or more corrective touches across sessions, or an explicit reversal whose rejected alternative remains a live temptation.
@@ -19,7 +18,6 @@ Every bullet must be able to change a fresh agent's behavior. "Provide configura
 ## Single-home rule
 
 Each decision lives in exactly one file:
-
 - `architecture.md` — structural/runtime decisions: component boundaries, chosen abstractions, protocol/storage direction, explicit "X over Y" with reason.
 - `product.md` — behavior, UX, defaults, scope, naming/terminology, workflow decisions of the product.
 - `style.md` — visual/aesthetic language, presentation and typography conventions, prose/voice rules.

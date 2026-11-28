@@ -41,6 +41,7 @@ interface FakeAcpBuiltinSession {
 	setFastMode(enabled: boolean): boolean;
 	isFastModeEnabled(): boolean;
 	isUltrafastModeEnabled(): boolean;
+	getEvalPreludes(): [];
 	setForcedToolChoice(toolName: string): void;
 	fetchUsageReports?: () => Promise<unknown>;
 	getSessionStats: () => Pick<SessionStats, "aiu">;
@@ -125,6 +126,9 @@ function createRuntime() {
 		},
 		isUltrafastModeEnabled() {
 			return false;
+		},
+		getEvalPreludes() {
+			return [];
 		},
 		setForcedToolChoice(toolName: string) {
 			this.forcedToolChoice = toolName;
@@ -281,13 +285,14 @@ function createRuntime() {
 }
 
 describe("ACP builtin slash commands", () => {
-	it("consumes fast status without returning prompt text", async () => {
+	it("includes mode status alongside session identity in /session info", async () => {
 		const { output, runtime } = createRuntime();
 
-		const result = await executeAcpBuiltinSlashCommand("/fast status", runtime);
+		await executeAcpBuiltinSlashCommand("/session info", runtime);
 
-		expect(result).toEqual({ consumed: true });
-		expect(output).toEqual(["Fast mode is off."]);
+		expect(output[0]).toContain("Session: fake-session-id");
+		expect(output[0]).toContain("Fast tier: off");
+		expect(output[0]).toContain("Computer use: disabled");
 	});
 
 	it("reports that /reload-plugins leaves extension hooks and tools for a restart", async () => {

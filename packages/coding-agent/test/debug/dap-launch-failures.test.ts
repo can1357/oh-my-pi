@@ -14,6 +14,7 @@ import type {
 } from "@oh-my-pi/pi-coding-agent/dap/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { DebugTool } from "@oh-my-pi/pi-coding-agent/tools/debug";
+import { cfgDebugEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import { removeWithRetries, withTimeout } from "@oh-my-pi/pi-utils";
 
 const TEST_ADAPTER: DapResolvedAdapter = {
@@ -737,7 +738,7 @@ await Bun.sleep(60_000);
 });
 
 describe("DebugTool launch validation", () => {
-	it("rejects directory programs when the selected adapter cannot debug a directory", async () => {
+	it("rejects directory programs on first execution after enabling debug", async () => {
 		const launchSpy = spyOn(dapModule, "selectLaunchAdapter").mockReturnValue({
 			kind: "adapter",
 			adapter: TEST_ADAPTER,
@@ -746,18 +747,24 @@ describe("DebugTool launch validation", () => {
 			const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-debug-program-"));
 			try {
 				await fs.mkdir(path.join(cwd, "python"));
+				const settings = Settings.isolated({ "debug.enabled": false });
 				const session: ToolSession = {
 					cwd,
 					hasUI: false,
 					getSessionFile: () => null,
 					getSessionSpawns: () => "*",
-					settings: Settings.isolated({ "debug.enabled": true }),
+					settings,
 				};
-				const tool = new DebugTool(session);
+				expect(DebugTool.createIf(session)).toBeNull();
+				cfgDebugEnabled.override(settings, true);
+				const tool = DebugTool.createIf(session);
+				if (!tool) throw new Error("debug tool not available after enabling it");
 
 				await expect(tool.execute("call", { action: "launch", program: "python" })).rejects.toThrow(
 					/launch program resolves to a directory.*python/,
 				);
+				cfgDebugEnabled.override(settings, false);
+				expect(DebugTool.createIf(session)).toBeNull();
 			} finally {
 				await removeWithRetries(cwd);
 			}

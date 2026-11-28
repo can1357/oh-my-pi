@@ -11,10 +11,12 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+async-trait.workspace = true
 bytes.workspace = true
 flume.workspace = true
 opus.workspace = true
 parking_lot.workspace = true
+rtc.workspace = true
 tokio.workspace = true
 webrtc.workspace = true
 

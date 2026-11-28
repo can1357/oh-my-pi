@@ -6,7 +6,7 @@
  */
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import type { PaintContext } from "@oh-my-pi/pi-tui/term/paint";
-import { SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-tui/term/painters/spinner";
+import { spinnerIndex } from "@oh-my-pi/pi-tui/term/painters/spinner";
 import { padTo, replaceTabs, truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
@@ -150,12 +150,13 @@ export function standaloneErrorRows(cx: PaintContext, message: string): string[]
 	);
 }
 
-/** The status spinner frame at the terminal clock; reduced motion draws the pending glyph. */
+/** The status spinner frame at the terminal clock; still spinners draw the pending glyph. */
 export function spinnerGlyph(cx: PaintContext): string {
 	const theme = cx.theme;
 	const frames = theme.symbols.spinnerFrames;
-	if (cx.reduceMotion || frames.length === 0) return theme.fg("muted", theme.symbols.symbol("status.pending"));
-	return frames[Math.floor(cx.now() / SPINNER_INTERVAL_MS) % frames.length]!;
+	if (cx.spinnerInterval === 0 || frames.length === 0)
+		return theme.fg("muted", theme.symbols.symbol("status.pending"));
+	return frames[spinnerIndex(cx, frames.length)]!;
 }
 
 /** Whether the tool is still working (its head animates). */
@@ -233,8 +234,8 @@ export function statusIcon(
 		case "aborted":
 			return symbol("status.aborted", "error");
 		case "running":
-			// Reduced motion stills the spinner to the running glyph.
-			return cx.reduceMotion ? symbol("status.running", "accent") : spinnerGlyph(cx);
+			// A still spinner draws the running glyph.
+			return cx.spinnerInterval === 0 ? symbol("status.running", "accent") : spinnerGlyph(cx);
 	}
 }
 

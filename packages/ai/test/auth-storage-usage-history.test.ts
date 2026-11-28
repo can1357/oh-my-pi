@@ -253,6 +253,36 @@ describe("OpenCode Go usage via the upstream endpoint", () => {
 		]);
 	});
 
+	it("queries the Zen account endpoint for any first-party model base URL", async () => {
+		// Go models sit under several first-party prefixes; only /zen/go serves
+		// /v1/usage, the rest 404 and usage silently disappears.
+		const urls: string[] = [];
+		const usage = { status: "ok", percent: 1, resetsAt: "2026-08-12T15:09:04.847Z" };
+		const fetchStub = (async (input: string | URL | Request) => {
+			urls.push(String(input));
+			return Response.json({ usage: { rolling: usage, weekly: usage, monthly: usage } });
+		}) as unknown as typeof fetch;
+		const fetchUsage = (baseUrl: string) =>
+			opencodeGoUsage.opencodeGoUsageProvider.fetchUsage(
+				{ provider: "opencode-go", credential: { type: "api_key", apiKey: "k" }, baseUrl },
+				{ fetch: fetchStub },
+			);
+		for (const baseUrl of [
+			"https://opencode.ai/inference/go/v1",
+			"https://opencode.ai/inference/google/v1beta",
+			"https://opencode.ai/inference/systemone",
+		]) {
+			expect(await fetchUsage(baseUrl)).not.toBeNull();
+		}
+		await fetchUsage("https://gateway.example/opencode/v1");
+		expect(urls).toEqual([
+			"https://opencode.ai/zen/go/v1/usage",
+			"https://opencode.ai/zen/go/v1/usage",
+			"https://opencode.ai/zen/go/v1/usage",
+			"https://gateway.example/opencode/v1/usage",
+		]);
+	});
+
 	it("resolves reference-stored API keys before the Authorization header", async () => {
 		// Keys stored as references (env var name, "!command") must reach the
 		// endpoint as the resolved secret, not the reference string (#8337 review).

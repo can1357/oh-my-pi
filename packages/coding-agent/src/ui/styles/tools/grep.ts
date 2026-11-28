@@ -94,13 +94,14 @@ function paintGrep(node: UiNode, cx: PaintContext): Block {
 		meta,
 	};
 	const rows = searchHeadRows(cx, head);
+	const heading = rows.length;
 	if (term.error !== undefined) {
 		rows.push(...hangingWrap("  ", "  ", theme.fg("error", term.error), cx.width));
-		return { rows };
+		return { rows, heading };
 	}
 	const notes = term.notes ?? [];
 	const noteRows = notes.flatMap(note => wrap(theme.fg("warning", note), cx.width));
-	if (term.output === undefined) return { rows: [...rows, ...noteRows] };
+	if (term.output === undefined) return { rows: [...rows, ...noteRows], heading };
 	if (!term.detailed) {
 		const lines = term.output.split("\n").filter(line => line.trim() !== "");
 		const items: TreeItem[] = lines.map(line => [theme.fg("muted", replaceTabs(line))]);
@@ -108,7 +109,7 @@ function paintGrep(node: UiNode, cx: PaintContext): Block {
 			!expanded && items.length > COLLAPSED_ROWS
 				? [...items.slice(0, COLLAPSED_ROWS - 1), moreItem(theme, items.length - (COLLAPSED_ROWS - 1), "items")]
 				: items;
-		return { rows: [...rows, ...treeRows(theme, shown, cx.width)] };
+		return { rows: [...rows, ...treeRows(theme, shown, cx.width)], heading };
 	}
 	const groups = parseGrepOutput(term.output);
 	const marked = groups.some(group => group.lines.some(line => line.match));
@@ -127,7 +128,7 @@ function paintGrep(node: UiNode, cx: PaintContext): Block {
 	}
 	if (shownMatches < total)
 		items.push(moreItem(theme, total - shownMatches, total - shownMatches === 1 ? "match" : "matches"));
-	return { rows: [...rows, ...treeRows(theme, items, cx.width), ...noteRows] };
+	return { rows: [...rows, ...treeRows(theme, items, cx.width), ...noteRows], heading };
 }
 
 defineToolLook("grep", { paint: paintGrep, margin: true, inset: true });

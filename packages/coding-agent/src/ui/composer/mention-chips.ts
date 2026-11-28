@@ -12,7 +12,9 @@
  * and skills (`/skill:<name>`) keep their dedicated atomizers.
  */
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
-import { MENTION_STYLES, type MentionCategoryId, sessionMentionHead } from "../../autocomplete/mentions";
+import { sessionMentionHead } from "../../autocomplete/mentions/sources/sessions";
+import { MENTION_STYLES } from "../../autocomplete/mentions/style";
+import type { MentionCategoryId } from "../../autocomplete/mentions/types";
 import { isLocalExecutionDraft } from "../../extensibility/skill-tokens";
 import { agentMesh } from "../../irc/mesh";
 import { AgentRegistry } from "../../registry/agent-registry";

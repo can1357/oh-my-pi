@@ -37,9 +37,12 @@ export function isRemainingOnlyAbsoluteAmount(limit: UsageLimit): boolean {
 	);
 }
 
+const compactAmount = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 });
+const fractionalAmount = new Intl.NumberFormat("en-US", { maximumSignificantDigits: 2 });
+
 function formatQuantity(value: number, unit: UsageLimit["amount"]["unit"], suffix: string): string {
 	if (unit === "usd") return `$${value.toFixed(2)} ${suffix}`;
-	const formatted = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 }).format(value);
+	const formatted = (Math.abs(value) < 1 ? fractionalAmount : compactAmount).format(value);
 	return `${formatted} ${unit} ${suffix}`;
 }
 
