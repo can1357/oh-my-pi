@@ -454,6 +454,13 @@ export class TurnRecovery {
 		targetSelector: string;
 		handle: AnthropicFallbackCreditHandle;
 	};
+	/**
+	 * When a classifier refusal's credit switch lets `cooldown-expiry` restore the
+	 * primary. A refusal is not a route failure. The refusing model stays a
+	 * fallback target for every other session sharing the registry; only this
+	 * session waits out the revert window.
+	 */
+	#refusalFallbackRevertAtMs: number | undefined;
 	#usageReserveApproval: { model: string; sessionId: string } | undefined;
 	#pendingRetryErrors: PendingRetryError[] = [];
 	#usageLimitOutcomes = new WeakMap<AssistantMessage, Promise<UsageLimitOutcome>>();
@@ -2022,6 +2029,7 @@ export class TurnRecovery {
 	clearActiveRetryFallback(): void {
 		this.#activeRetryFallback = undefined;
 		this.#fallbackRoutedFor = undefined;
+		this.#refusalFallbackRevertAtMs = undefined;
 	}
 
 	/** Checks whether a fallback selector remains in cooldown. */
@@ -2029,14 +2037,19 @@ export class TurnRecovery {
 		return this.#host.modelRegistry.isSelectorSuppressed(selector.raw);
 	}
 
+	/** The cooldown window a failing selector sits out before it is tried again. */
+	#retryFallbackCooldownMs(retryAfterMs: number | undefined, errorMessage: string): number {
+		if (retryAfterMs && retryAfterMs > 0) return retryAfterMs;
+		const reason = parseRateLimitReason(errorMessage);
+		return reason === "UNKNOWN" ? 5 * 60 * 1000 : calculateRateLimitBackoffMs(reason);
+	}
+
 	/** Records the cooldown that should suppress a failing selector. */
 	noteRetryFallbackCooldown(currentSelector: string, retryAfterMs: number | undefined, errorMessage: string): void {
-		let cooldownMs = retryAfterMs;
-		if (!cooldownMs || cooldownMs <= 0) {
-			const reason = parseRateLimitReason(errorMessage);
-			cooldownMs = reason === "UNKNOWN" ? 5 * 60 * 1000 : calculateRateLimitBackoffMs(reason);
-		}
-		this.#host.modelRegistry.suppressSelector(currentSelector, Date.now() + cooldownMs);
+		this.#host.modelRegistry.suppressSelector(
+			currentSelector,
+			Date.now() + this.#retryFallbackCooldownMs(retryAfterMs, errorMessage),
+		);
 	}
 
 	/**
@@ -2441,11 +2454,16 @@ export class TurnRecovery {
 		failedMessage: AssistantMessage,
 		options?: {
 			excludeProvider?: string;
-			pinFallback?: boolean;
 			preserveFailedTurn?: boolean;
 			wrapAround?: boolean;
 			/** This hop is a classifier-refusal walk, which visits each model at most once per turn. */
 			refusalWalk?: boolean;
+			/**
+			 * A classifier-refusal consult: only a candidate the refusal's fallback
+			 * credit can redeem may take the hop. The refusal's content judgment
+			 * replays identically on any other route, so a paid switch is never made.
+			 */
+			refusalCreditOnly?: boolean;
 			/** The retry policy retries the failed model if this hop does not switch. */
 			sameModelRetryAvailable?: boolean;
 		},
@@ -2534,6 +2552,9 @@ export class TurnRecovery {
 				const creditLive =
 					creditHandle !== undefined && creditTargets.length > 0 && Date.now() < creditHandle.expiresAt;
 				const refusalKeepsCredit = options?.refusalWalk === true && creditLive;
+				// A refusal consult only ever takes a credit redemption hop; every other
+				// candidate would re-send the refused content at full price.
+				if (options?.refusalCreditOnly === true && !canRedeemFallbackCredit) continue;
 				if (
 					(signerRetryRemains || refusalKeepsCredit) &&
 					!canRedeemFallbackCredit &&
@@ -2571,6 +2592,16 @@ export class TurnRecovery {
 				const previousEditMode = this.#host.resolveActiveEditMode();
 				const previousSystemPrompt = [...this.#host.agent.state.systemPrompt];
 				const previousTools = [...this.#host.agent.state.tools];
+				const modelBeforeSwap = this.#host.model();
+				const thinkingLevelBeforeSwap = this.#host.configuredThinkingLevel();
+				// The mutable fallback record survives the hop, and `applyRetryFallbackCandidate`
+				// overwrites `lastAppliedFallbackThinkingLevel` and `pinned` on the shared
+				// object. Snapshot a clone for the undo below. Restoring the mutated
+				// original leaves the attempted target's level recorded, and the primary
+				// restore later mistakes the fallback's level for a user override.
+				const activeFallbackBeforeSwap =
+					this.#activeRetryFallback === undefined ? undefined : { ...this.#activeRetryFallback };
+				const fallbackRoutedBeforeSwap = this.#fallbackRoutedFor;
 				const applied = await this.applyRetryFallbackCandidate(role, selector, currentSelector, {
 					...options,
 					cause: failedTurnFallbackCause(failedMessage),
@@ -2584,9 +2615,46 @@ export class TurnRecovery {
 					Bun.deepEquals(systemPrompt, previousSystemPrompt) &&
 					tools.length === previousTools.length &&
 					tools.every((tool, index) => tool === previousTools[index]);
+				if (applied && options?.refusalCreditOnly === true && !requestSurfaceUnchanged) {
+					// A credit consult's only purpose is the zero-cost redemption, and
+					// redemption replays this request's frozen surface. A swap that
+					// rebuilt it cannot arm the credit. Undo the switch instead of
+					// sending the refused content to the fallback at full price.
+					this.#activeRetryFallback = activeFallbackBeforeSwap;
+					this.#fallbackRoutedFor = fallbackRoutedBeforeSwap;
+					if (modelBeforeSwap && this.#host.model() !== modelBeforeSwap) {
+						const candidateEditMode = this.#host.resolveActiveEditMode();
+						await this.#host.setModelWithProviderSessionReset(modelBeforeSwap);
+						this.#host.sessionManager.appendModelChange(
+							formatModelStringWithRouting(modelBeforeSwap),
+							EPHEMERAL_MODEL_CHANGE_ROLE,
+							// Returning to a model that is itself a fallback: keep the entry
+							// fallback-attributed, or `buildSessionContext` drops the pre-fallback
+							// thinking snapshot and the fallback's effort survives resume.
+							activeFallbackBeforeSwap === undefined
+								? undefined
+								: {
+										fallback: {
+											from: activeFallbackBeforeSwap.originalSelector,
+											...failedTurnFallbackCause(failedMessage),
+										},
+									},
+						);
+						this.#host.setThinkingLevel(thinkingLevelBeforeSwap);
+						await this.#host.syncAfterModelChange(candidateEditMode, { retryFallback: true });
+					}
+					// `syncAfterModelChange` keeps the cached prompt unless a key
+					// changed, and the swap may have rebuilt the surface without
+					// touching any key. Restore the pre-swap surface directly, or
+					// the refusal settles on the primary with the fallback's
+					// prompt and tools still active.
+					this.#host.agent.setSystemPrompt(previousSystemPrompt);
+					this.#host.agent.setTools(previousTools);
+					continue;
+				}
 				if (
 					applied &&
-					options?.pinFallback === true &&
+					options?.refusalCreditOnly === true &&
 					creditHandle !== undefined &&
 					canRedeemFallbackCredit &&
 					requestSurfaceUnchanged
@@ -2629,6 +2697,11 @@ export class TurnRecovery {
 		// failure — switching to the base model would just re-trigger it.
 		if (this.isClassifierRefusal(message)) return false;
 		const id = this.#classifyRetryMessage(message);
+		// A provider content-filter stop is the same judgment — the base model
+		// re-filters identical content. Account-policy denials carry the
+		// ContentBlocked bit too but stay eligible: another provider's account
+		// can serve the request.
+		if (AIError.is(id, AIError.Flag.ContentBlocked) && !AIError.is(id, AIError.Flag.AccountPolicy)) return false;
 		if (AIError.isContextOverflow(message, model.contextWindow ?? 0)) return false;
 		if (AIError.is(id, AIError.Flag.UsageLimit)) return false;
 		if (AIError.is(id, AIError.Flag.AuthFailed)) return false;
@@ -2648,8 +2721,8 @@ export class TurnRecovery {
 	 * model switch cannot fix or must not replay: cancellations (abort-flavored
 	 * errors are not model faults), context overflow the live context actually
 	 * exhibits (compaction's job), classifier refusals (chain consult is handled
-	 * on the retryable path with `pinFallback`), and turns that already emitted
-	 * replay-unsafe output.
+	 * on the retryable path with `refusalCreditOnly`), and turns that already
+	 * emitted replay-unsafe output.
 	 */
 	isHardErrorFallbackEligible(message: AssistantMessage): boolean {
 		if (message.stopReason !== "error") return false;
@@ -2667,6 +2740,11 @@ export class TurnRecovery {
 		if (!retrySettings.enabled || !retrySettings.modelFallback) return false;
 		if (this.isClassifierRefusal(message)) return false;
 		const id = this.#classifyRetryMessage(message);
+		// A provider content-filter stop is the model's judgment of the request,
+		// not a route failure — the next entry re-filters identical content.
+		// Account-policy denials carry the ContentBlocked bit too but stay
+		// eligible: another provider's account can still serve the request.
+		if (AIError.is(id, AIError.Flag.ContentBlocked) && !AIError.is(id, AIError.Flag.AccountPolicy)) return false;
 		if (AIError.is(id, AIError.Flag.Abort) || AIError.is(id, AIError.Flag.UserInterrupt)) return false;
 		if (!retryFallbackAdmits(retrySettings.fallbackOn, AIError.is(id, AIError.Flag.UsageLimit))) return false;
 		// Text-ambiguous overflows waive the veto; usage-backed do not — see AIError.isTextAmbiguousContextOverflow (#9235).
@@ -2748,6 +2826,14 @@ export class TurnRecovery {
 		if (!this.#activeRetryFallback) return false;
 		if (this.#activeRetryFallback.pinned) return false;
 		if (this.#getRetryFallbackRevertPolicy() !== "cooldown-expiry") return false;
+
+		// A refusal-driven switch arms no shared-registry suppression. This
+		// session-local deadline holds the session on the credit target for the
+		// same window a route failure would.
+		if (this.#refusalFallbackRevertAtMs !== undefined) {
+			if (Date.now() < this.#refusalFallbackRevertAtMs) return false;
+			this.#refusalFallbackRevertAtMs = undefined;
+		}
 
 		const {
 			originalSelector: originalSelectorRaw,
@@ -2891,6 +2977,7 @@ export class TurnRecovery {
 			transportRetriesExhausted ||
 			this.#retryAttempt > maxRetries ||
 			this.#genericAbortStreak > GENERIC_ABORT_MAX_RETRIES;
+
 		const requestProvider = (message as IssuedProviderAssistantMessage)[kUsageLimitRequestProvider];
 		const oldProviderLimitFor = (model: Model | undefined): boolean =>
 			requestProvider !== undefined &&
@@ -3237,17 +3324,18 @@ export class TurnRecovery {
 			currentSelector
 		) {
 			// The retry budget bounds same-model retries against a failing provider. A
-			// classifier refusal is not that: retrying the same model reproduces a refusal
-			// of the request itself (the mid-stream kind is resampled above), and
-			// the next model in the chain is one request away and often answers. Stopping
-			// the walk at the budget ends the turn with models left untried.
+			// classifier refusal is not that — but neither is another route: the refusal
+			// is a judgment about this request's content, so a paid hop re-sends the
+			// same content and re-triggers it (or the next provider's filter, at full
+			// price — a 12-hour unattended run once walked its whole chain on one
+			// refusal this way). The chain is consulted only to redeem a live
+			// Anthropic fallback credit, the one sanctioned, zero-cost retry; every
+			// other refusal ends the turn and hands the refusal back to the agent,
+			// which can change what it asks for.
 			//
-			// The budget was also what terminated the walk: `retryFallbackChainKeys`
-			// consults the current model's own chain as well as the pinned one, so chains
-			// that name each other alternate rather than loop in place, and every hop used
-			// to spend an attempt. The walk is bounded here instead — a refusal visits any
-			// one model at most once per turn, so A -> B -> A terminates whatever the
-			// chains say.
+			// The consult stays budget-exempt and bounded: it happens even when the
+			// retry budget is spent (a refusal is not a same-model retry), and the
+			// walk-set below visits any one model at most once per turn.
 			const refusalWalkKey = this.#refusalWalkKey(currentSelector);
 			const refusalWalkRepeats = classifierRefusal && this.#refusalWalkTried.has(refusalWalkKey);
 			if (
@@ -3274,7 +3362,7 @@ export class TurnRecovery {
 				}
 				switchedModel = await this.#tryRetryModelFallback(currentSelector, message, {
 					excludeProvider: longUsageLimitFallback ? currentModel.provider : undefined,
-					pinFallback: classifierRefusal,
+					refusalCreditOnly: classifierRefusal,
 					refusalWalk: classifierRefusal,
 					preserveFailedTurn,
 					wrapAround: longUsageLimitFallback,
@@ -3301,6 +3389,13 @@ export class TurnRecovery {
 								: delayMs,
 						),
 				});
+				if (classifierRefusal && switchedModel) {
+					// A refusal-driven switch is not a route failure. The primary is
+					// not suppressed on the shared registry; only this session waits
+					// out the window before `cooldown-expiry` restores it.
+					this.#refusalFallbackRevertAtMs =
+						Date.now() + this.#retryFallbackCooldownMs(parsedRetryAfterMs, errorMessage);
+				}
 			}
 			// Auto fallback from a Fireworks Fast variant to its base model. Independent
 			// of the role-fallback setting: it's intrinsic to the Fast contract (speed
@@ -3327,11 +3422,16 @@ export class TurnRecovery {
 		} else if (retryBudgetExhausted) {
 			if (!switchedModel && !switchedCredential) {
 				const attempt = this.#retryAttempt - 1;
-				// A transport-exhausted failure was never retried here; its own message already says what happened.
-				message.errorMessage =
-					transportRetriesExhausted && attempt === 0
-						? terminalError
-						: `Retry budget exhausted after ${attempt} ${attempt === 1 ? "retry" : "retries"}: ${terminalError}`;
+				// A refusal is the model's judgment of the request itself, and a
+				// transport-exhausted failure was never retried here. Both keep the
+				// provider's own text as the terminal error so the agent can act
+				// on what was refused or what the transport already reported.
+				if (!classifierRefusal) {
+					message.errorMessage =
+						transportRetriesExhausted && attempt === 0
+							? terminalError
+							: `Retry budget exhausted after ${attempt} ${attempt === 1 ? "retry" : "retries"}: ${terminalError}`;
+				}
 				await this.#closeRetrySaga(
 					{ success: false, attempt, finalError: terminalError },
 					{ terminalTurn: message, retryErrors: { status: "superseded" } },

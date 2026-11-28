@@ -233,6 +233,51 @@ describe("error-id classification", () => {
 		expect(AIError.retriable(id)).toBe(false);
 	});
 
+	it("classifies Bedrock content_filtered stop messages as content blocks", () => {
+		const assistant = message({
+			errorMessage: "Response filtered by Amazon Bedrock content filters (stop reason: content_filtered).",
+		});
+		const id = AIError.classifyMessage(assistant);
+		expect(AIError.is(id, AIError.Flag.ContentBlocked)).toBe(true);
+		expect(AIError.retriable(id)).toBe(false);
+	});
+
+	it("classifies the snake-case content_filtering policy block as a content block", () => {
+		const assistant = message({
+			errorMessage: "Output blocked by content_filtering policy",
+		});
+		const id = AIError.classifyMessage(assistant);
+		expect(AIError.is(id, AIError.Flag.ContentBlocked)).toBe(true);
+		expect(AIError.retriable(id)).toBe(false);
+	});
+
+	it("classifies Anthropic content filtering policy blocks as content blocks", () => {
+		const assistant = message({
+			errorMessage: "Output blocked by content filtering policy",
+		});
+		const id = AIError.classifyMessage(assistant);
+		expect(AIError.is(id, AIError.Flag.ContentBlocked)).toBe(true);
+		expect(AIError.retriable(id)).toBe(false);
+	});
+
+	it("keeps a transient filter-service outage retryable", () => {
+		const id = AIError.classifyMessage(
+			message({ errorMessage: "500 content filtering service temporarily unavailable" }),
+		);
+		expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
+		expect(AIError.is(id, AIError.Flag.ContentBlocked)).toBe(false);
+		expect(AIError.retriable(id)).toBe(true);
+	});
+
+	it("keeps a transient filter-service outage retryable in the snake-case spelling", () => {
+		const id = AIError.classifyMessage(
+			message({ errorMessage: "500 content_filtering service temporarily unavailable" }),
+		);
+		expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);
+		expect(AIError.is(id, AIError.Flag.ContentBlocked)).toBe(false);
+		expect(AIError.retriable(id)).toBe(true);
+	});
+
 	it("classifies Codex cyber approval denials as account-scoped policy blocks", () => {
 		const assistant = message({
 			api: "openai-codex-responses",

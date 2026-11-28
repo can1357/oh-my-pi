@@ -247,7 +247,16 @@ const EMPTY_RESPONSE_PATTERN = /\bthought-only response without final output\b/i
 /** Gemini's MALFORMED_RESPONSE finish is a backend fault: the same request can succeed. Kept narrow so
  *  other "malformed response" errors (e.g. an image API's) stay terminal. */
 const MALFORMED_RESPONSE_FINISH_PATTERN = /\bfinish reason:\s*MALFORMED_RESPONSE\b/i;
-const CONTENT_FILTER_PATTERN = /\b(?:incomplete:\s*)?content_filter\b/i;
+// The spaced-prose alternatives must state the response was blocked or
+// filtered. A bare "content filtering" match would flag a transient outage of
+// the filter service ("content filtering service temporarily unavailable") as
+// a policy block. `retriable` gives ContentBlocked precedence over Transient,
+// and the outage would then stop being retried. The same holds for the
+// snake-case outage spelling. `content_filtering` needs blocked/filtered
+// context too, and only `content_filter` and `content_filtered` stop codes are
+// accepted bare.
+const CONTENT_FILTER_PATTERN =
+	/\b(?:incomplete:\s*)?content_filter(?:ed)?\b|\b(?:blocked|filtered)[^\n.]{0,80}\bcontent filters?\b|\bblocked by content filtering\b|\bblocked by content_filtering\b/i;
 const ACCOUNT_POLICY_PATTERN = /\bcyber_policy\b|trusted access for cyber/i;
 /**
  * Gemini's per-user quota endpoint refusing an account whose subscription does
