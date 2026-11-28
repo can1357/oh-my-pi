@@ -24,6 +24,7 @@ import type {
 	GhApiUser,
 	GhLabel,
 	GhSearchCodeResult,
+	GhSearchCodeTextMatch,
 	GhSearchCommitResult,
 	GhSearchRepoResult,
 	GhSearchResult,
@@ -208,7 +209,11 @@ export function apiCodeToSearchResult(item: GhApiSearchCodeItem): GhSearchCodeRe
 		path: item.path,
 		repository: { nameWithOwner: item.repository?.full_name },
 		sha: item.sha,
-		textMatches: item.text_matches?.map(match => ({ fragment: match.fragment, property: match.property })),
+		textMatches: item.text_matches?.map(match => ({
+			fragment: match.fragment,
+			property: match.property,
+			matches: match.matches,
+		})),
 		url: item.html_url,
 	};
 }
@@ -284,9 +289,12 @@ export async function resolveSearchRepoScope(
  * GitHub's search qualifiers take a bare `owner/repo`, so an enterprise host
  * has to travel as a separate `--hostname` instead of inside the query.
  */
-function searchScope(repo: string | undefined): { qualifier?: string; host?: string } {
+function searchScope(repo: string | undefined, query?: string): { qualifier?: string; host?: string } {
 	if (!repo) return {};
 	const ref = parseRepoRef(repo);
+	if (query && REPO_SCOPE_QUALIFIER_PATTERN.test(query)) {
+		return { host: ref.host };
+	}
 	return { qualifier: `repo:${ref.slug}`, host: ref.host };
 }
 
@@ -321,6 +329,25 @@ export function formatSearchResults(
 	return lines.join("\n").trim();
 }
 
+function extractCodeMatchLine(match: GhSearchCodeTextMatch | undefined): string | undefined {
+	const fragment = match?.fragment;
+	if (!fragment) return undefined;
+	const start = match.matches?.[0]?.indices?.[0];
+	if (typeof start === "number" && start >= 0 && start <= fragment.length) {
+		const lineStart = start === 0 ? 0 : fragment.lastIndexOf("\n", start - 1) + 1;
+		const rawEnd = fragment.indexOf("\n", start);
+		const lineEnd = rawEnd === -1 ? fragment.length : rawEnd;
+		const matchedLine = normalizeText(fragment.slice(lineStart, lineEnd));
+		if (matchedLine) return matchedLine;
+	}
+	return normalizeText(fragment)
+		.split("\n")
+		.find(line => line.trim().length > 0);
+}
+
+const SEARCH_CODE_OR_PATTERN = /(?:^|\s)OR(?:\s|$)/;
+const SEARCH_CODE_SINGLE_QUOTE_PATTERN = /(?:^|\s)'[^']+'(?:\s|$)/;
+
 export function formatSearchCodeResults(query: string, repo: string | undefined, items: GhSearchCodeResult[]): string {
 	const lines: string[] = [`# GitHub code search`, "", `Query: ${query}`];
 	pushLine(lines, "Repository", repo);
@@ -329,6 +356,11 @@ export function formatSearchCodeResults(query: string, repo: string | undefined,
 	if (items.length === 0) {
 		lines.push("");
 		lines.push("No code matches found.");
+		if (SEARCH_CODE_OR_PATTERN.test(query) || SEARCH_CODE_SINGLE_QUOTE_PATTERN.test(query)) {
+			lines.push(
+				"Note: GitHub REST /search/code treats OR as a literal word (run separate queries) and requires double quotes for phrases.",
+			);
+		}
 		return lines.join("\n").trim();
 	}
 
@@ -338,9 +370,9 @@ export function formatSearchCodeResults(query: string, repo: string | undefined,
 		pushLine(lines, "  Repo", item.repository?.nameWithOwner);
 		pushLine(lines, "  Commit", formatShortSha(item.sha));
 		pushLine(lines, "  URL", item.url);
-		const fragment = item.textMatches?.find(match => match.fragment)?.fragment;
-		if (fragment) {
-			pushLine(lines, "  Match", normalizeText(fragment).split("\n", 1)[0]);
+		const matchLine = extractCodeMatchLine(item.textMatches?.find(match => match.fragment));
+		if (matchLine) {
+			pushLine(lines, "  Match", matchLine);
 		}
 	}
 
@@ -423,7 +455,7 @@ export async function executeSearchIssues(
 	const dateQualifier = buildSearchDateQualifier(dateField, params.since, params.until);
 	const displayQuery = composeSearchQuery([params.query, dateQualifier]);
 	const repo = await resolveSearchRepoScope(session.cwd, normalizeOptionalString(params.repo), displayQuery, signal);
-	const scope = searchScope(repo);
+	const scope = searchScope(repo, displayQuery);
 	const apiQuery = composeSearchQuery([displayQuery, scope.qualifier, "is:issue"]);
 	const args = buildGhApiSearchArgs("issues", apiQuery, limit, { host: scope.host });
 
@@ -444,7 +476,7 @@ export async function executeSearchPrs(
 	const dateQualifier = buildSearchDateQualifier(dateField, params.since, params.until);
 	const displayQuery = composeSearchQuery([params.query, dateQualifier]);
 	const repo = await resolveSearchRepoScope(session.cwd, normalizeOptionalString(params.repo), displayQuery, signal);
-	const scope = searchScope(repo);
+	const scope = searchScope(repo, displayQuery);
 	const apiQuery = composeSearchQuery([displayQuery, scope.qualifier, "is:pr"]);
 	const args = buildGhApiSearchArgs("issues", apiQuery, limit, { host: scope.host });
 
@@ -468,7 +500,7 @@ export async function executeSearchCode(
 	}
 	const limit = resolveSearchLimit(params.limit);
 	const repo = await resolveSearchRepoScope(session.cwd, normalizeOptionalString(params.repo), query, signal);
-	const scope = searchScope(repo);
+	const scope = searchScope(repo, query);
 	const apiQuery = composeSearchQuery([query, scope.qualifier]);
 	const args = buildGhApiSearchArgs("code", apiQuery, limit, {
 		host: scope.host,
@@ -492,7 +524,7 @@ export async function executeSearchCommits(
 	const dateQualifier = buildSearchDateQualifier(dateField, params.since, params.until);
 	const displayQuery = composeSearchQuery([params.query, dateQualifier]);
 	const repo = await resolveSearchRepoScope(session.cwd, normalizeOptionalString(params.repo), displayQuery, signal);
-	const scope = searchScope(repo);
+	const scope = searchScope(repo, displayQuery);
 	const apiQuery = composeSearchQuery([displayQuery, scope.qualifier]);
 	const args = buildGhApiSearchArgs("commits", apiQuery, limit, { host: scope.host });
 
