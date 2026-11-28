@@ -323,15 +323,14 @@ pub fn draw_line(
 
 /// Draw an edge into five independently composited layers; its label is
 /// drawn later, once every route is known.
-pub fn draw_arrow(graph: &AsciiGraph, edge: &AsciiEdge) -> [Layer; 5] {
+fn draw_arrow(graph: &AsciiGraph, edge: &AsciiEdge, drawing_path: &[DrawingCoord]) -> [Layer; 5] {
 	if edge.path.is_empty() {
 		return std::array::from_fn(|_| Layer::over(&graph.canvas));
 	}
-	let drawing_path = edge_drawing_path(graph, edge);
 	let (path_canvas, lines_drawn, line_dirs) =
-		draw_path(graph, &edge.path, &drawing_path, edge.style);
+		draw_path(graph, &edge.path, drawing_path, edge.style);
 	let source_shape = graph.nodes.get(edge.from).map_or_default(|node| node.shape);
-	let box_start_canvas = draw_box_start(graph, &edge.path, &drawing_path, source_shape);
+	let box_start_canvas = draw_box_start(graph, &edge.path, drawing_path, source_shape);
 	let arrow_end_canvas = if edge.has_arrow_end {
 		match (lines_drawn.last(), line_dirs.last()) {
 			(Some(line), Some(&dir)) => draw_arrow_head(graph, line, dir),
@@ -359,7 +358,7 @@ pub fn draw_arrow(graph: &AsciiGraph, edge: &AsciiEdge) -> [Layer; 5] {
 	} else {
 		Layer::over(&graph.canvas)
 	};
-	let corners_canvas = draw_corners(graph, &edge.path, &drawing_path);
+	let corners_canvas = draw_corners(graph, &edge.path, drawing_path);
 	[path_canvas, box_start_canvas, arrow_end_canvas, arrow_start_canvas, corners_canvas]
 }
 
@@ -385,12 +384,15 @@ const fn reverse_direction(dir: Dir) -> Dir {
 fn edge_drawing_path(graph: &AsciiGraph, edge: &AsciiEdge) -> Vec<DrawingCoord> {
 	let mut coords = line_to_drawing(graph, &edge.path);
 	let n = edge.path.len();
+	if n < 3 || edge.from == edge.to {
+		return coords;
+	}
 	let twins = graph
 		.edges
 		.iter()
 		.filter(|other| edge.joins_same_pair(other))
 		.count();
-	if n < 3 || edge.from == edge.to || twins < 2 {
+	if twins < 2 {
 		return coords;
 	}
 	let mut others = graph
@@ -609,11 +611,14 @@ fn draw_corners(graph: &AsciiGraph, path: &[GridCoord], drawing_path: &[DrawingC
 }
 
 /// The label of `edge`, or `None` when it has none.
-fn edge_label(graph: &AsciiGraph, edge: &AsciiEdge) -> Option<EdgeLabel> {
+fn edge_label(
+	graph: &AsciiGraph,
+	edge: &AsciiEdge,
+	drawing_path: &[DrawingCoord],
+) -> Option<EdgeLabel> {
 	if edge.text.is_empty() || edge.path.is_empty() {
 		return None;
 	}
-	let drawing_path = edge_drawing_path(graph, edge);
 	let line = if let [a, b] = edge.label_line.as_slice() {
 		edge
 			.path
@@ -674,16 +679,24 @@ fn edge_label(graph: &AsciiGraph, edge: &AsciiEdge) -> Option<EdgeLabel> {
 		// label stays home.
 		0..0
 	};
-	Some(EdgeLabel { lines, home: (middle_x, middle_y), vertical, centers })
+	Some(EdgeLabel {
+		lines,
+		home: (middle_x, middle_y),
+		vertical,
+		centers,
+		line: [(min_x, min_y), (max_x, max_y)],
+	})
 }
 
-/// An edge label's lines with their widths in cells, its default center, and
-/// the other centers along its line (rows if `vertical`, else columns).
+/// An edge label's lines with their widths in cells, its default center, the
+/// other centers along its line (rows if `vertical`, else columns), and the
+/// top-left and bottom-right corners of that line.
 struct EdgeLabel {
 	lines:    Vec<(String, i32)>,
 	home:     (i32, i32),
 	vertical: bool,
 	centers:  std::ops::Range<i32>,
+	line:     [(i32, i32); 2],
 }
 
 impl EdgeLabel {
@@ -699,6 +712,11 @@ impl EdgeLabel {
 		self
 			.spans(spot)
 			.flat_map(|(left, row, width)| (left..left + width).map(move |column| (column, row)))
+	}
+
+	fn on_line(&self, (x, y): (i32, i32)) -> bool {
+		let [(min_x, min_y), (max_x, max_y)] = self.line;
+		(min_x..=max_x).contains(&x) && (min_y..=max_y).contains(&y)
 	}
 
 	/// Home, then the other centers nearest first, the lower one first on ties.
@@ -1161,15 +1179,14 @@ fn fill_roles_for_node_box(roles: &mut RoleCanvas, canvas: &Canvas, offset: Draw
 }
 
 /// Draw the edge labels once every route is known, moving each along its line
-/// off nodes, labels, subgraph titles and route marks, and off crossings when
-/// it can.
-fn draw_labels(graph: &AsciiGraph, lines: &[Layer], marks: [&[Layer]; 5]) -> Vec<Layer> {
-	let labels: Vec<EdgeLabel> = graph
-		.edges
-		.iter()
-		.filter(|edge| edge.bundle.is_none())
-		.filter_map(|edge| edge_label(graph, edge))
-		.collect();
+/// off nodes, labels, subgraph titles and route marks, and off other routes
+/// when it can.
+fn draw_labels(
+	graph: &AsciiGraph,
+	labels: Vec<EdgeLabel>,
+	lines: &[Layer],
+	marks: [&[Layer]; 5],
+) -> Vec<Layer> {
 	if labels.is_empty() {
 		return Vec::new();
 	}
@@ -1187,8 +1204,9 @@ fn draw_labels(graph: &AsciiGraph, lines: &[Layer], marks: [&[Layer]; 5]) -> Vec
 			);
 		}
 	}
-	// Avoid cells where a horizontal and a vertical route meet; routes running
-	// along each other read as one line in any style, so a label may cover them.
+	// Avoid hiding routes: cells where a horizontal and a vertical route meet,
+	// and other routes off the label's own line. Routes running along its line
+	// read as one line in any style, so a label may cover them.
 	let horizontal = |cell: &Cell| {
 		[EdgeStyle::Solid, EdgeStyle::Dotted, EdgeStyle::Thick]
 			.into_iter()
@@ -1234,8 +1252,10 @@ fn draw_labels(graph: &AsciiGraph, lines: &[Layer], marks: [&[Layer]; 5]) -> Vec
 					}
 				}
 			}
-			// The nearest free spot with a free cell beside each row; one on a
-			// crossing only as a fallback.
+			// The nearest free spot with no other label beside each row; failing
+			// that, the nearest that covers a route stroke off its own line but
+			// no crossing, then the nearest that covers a crossing.
+			let mut on_route = None;
 			let mut on_crossing = None;
 			let spot = label
 				.candidates()
@@ -1244,12 +1264,23 @@ fn draw_labels(graph: &AsciiGraph, lines: &[Layer], marks: [&[Layer]; 5]) -> Vec
 						(left..left + width).all(|x| free(x, row))
 							&& (left - 1..=left + width).all(|x| !occupied.contains_key(&(x, row)))
 					});
-					if clear && label.cells(spot).any(|cell| crossings.contains(&cell)) {
+					if !clear {
+						return false;
+					}
+					if label.cells(spot).any(|cell| crossings.contains(&cell)) {
 						on_crossing.get_or_insert(spot);
 						return false;
 					}
-					clear
+					if label
+						.cells(spot)
+						.any(|cell| drawn.contains_key(&cell) && !label.on_line(cell))
+					{
+						on_route.get_or_insert(spot);
+						return false;
+					}
+					true
 				})
+				.or(on_route)
 				.or(on_crossing)
 				.unwrap_or(label.home);
 			let mut canvas = Layer::over(&graph.canvas);
@@ -1296,6 +1327,7 @@ pub fn draw_graph(graph: &mut AsciiGraph) {
 	let mut arrow_starts = Vec::new();
 	let mut box_starts = Vec::new();
 	let mut junctions = Vec::new();
+	let mut labels = Vec::new();
 	let mut processed_bundles = HashSet::new();
 
 	for edge in &graph.edges {
@@ -1324,7 +1356,10 @@ pub fn draw_graph(graph: &mut AsciiGraph) {
 				arrow_ends.push(draw_bundle_arrowhead(graph, &edge.path_to_junction, edge.to));
 			}
 		} else {
-			let [path, box_start, arrow_end, arrow_start, edge_corners] = draw_arrow(graph, edge);
+			let drawing_path = edge_drawing_path(graph, edge);
+			let [path, box_start, arrow_end, arrow_start, edge_corners] =
+				draw_arrow(graph, edge, &drawing_path);
+			labels.extend(edge_label(graph, edge, &drawing_path));
 			lines.push(path);
 			corners.push(edge_corners);
 			arrow_ends.push(arrow_end);
@@ -1333,8 +1368,13 @@ pub fn draw_graph(graph: &mut AsciiGraph) {
 		}
 	}
 
-	let labels =
-		draw_labels(graph, &lines, [&corners, &junctions, &arrow_ends, &box_starts, &arrow_starts]);
+	let labels = draw_labels(graph, labels, &lines, [
+		&corners,
+		&junctions,
+		&arrow_ends,
+		&box_starts,
+		&arrow_starts,
+	]);
 
 	// Edge layers composite by kind, each kind over every edge in order.
 	for (layers, role) in [

@@ -355,6 +355,39 @@ mod tests {
 		}
 	}
 
+	/// A label keeps off another route's straight stroke beside its own line,
+	/// whether that line runs across or down.
+	#[test]
+	fn labels_keep_other_routes_visible() {
+		let options = RenderOptions { color_mode: Some(ColorMode::None), ..RenderOptions::default() };
+		let art = render("flowchart LR\nD --> D\nD -->|q1<br/>below| B", &options).unwrap();
+		assert!(art.contains("q1") && art.contains("below│"), "{art}");
+		let art =
+			render("flowchart TD\nA -->|hello| B\nB --> A\nB --> A\nB --> A", &options).unwrap();
+		let lines: Vec<&str> = art.lines().collect();
+		let head = lines.iter().position(|line| line.contains('▲')).unwrap();
+		let column = lines[head].chars().position(|c| c == '▲').unwrap();
+		assert!(art.contains("hello"), "{art}");
+		assert_eq!(lines[head + 1].chars().nth(column), Some('│'), "{art}");
+	}
+
+	/// Covering a straight stroke beats covering a crossing.
+	#[test]
+	fn labels_cover_strokes_before_crossings() {
+		let options = RenderOptions { color_mode: Some(ColorMode::None), ..RenderOptions::default() };
+		let art = render(
+			"flowchart TD\nC --> A\nC --> B\nA --> B\nA -->|q<br/>abcdef| C\nB --> A",
+			&options,
+		)
+		.unwrap();
+		assert!(art.contains("abcdef"), "{art}");
+		assert!(
+			art.lines()
+				.any(|line| line.contains('q') && line.contains('┼')),
+			"{art}"
+		);
+	}
+
 	const EDGE_GLYPHS: &str = "─│┌┐└┘├┤┬┴┼▲▼◄►┄┆";
 
 	/// Rendered art as display cells; a wide glyph's second cell is `'\0'`.
