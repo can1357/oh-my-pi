@@ -1989,11 +1989,9 @@ async fn execute_search<M: Matcher + Clone + Send + Sync + 'static>(
 				DirectoryAction::Skip => {},
 				DirectoryAction::Read => {
 					had_error = true;
-					let _ = writeln!(
-						host.stderr,
-						"grep: {}: Is a directory",
-						operand.display()
-					);
+					if !opts.no_messages {
+						let _ = writeln!(host.stderr, "grep: {}: Is a directory", operand.display());
+					}
 				},
 			},
 			Ok(metadata) => {
@@ -2616,6 +2614,23 @@ mod tests {
 		assert_eq!(code, 2);
 		assert_eq!(err, "");
 		assert_eq!(std::fs::read(&path).unwrap(), b"needle\n");
+	}
+
+	/// GNU grep 3.11's `-s` silences "Is a directory" as it silences any input
+	/// it cannot read; the status stays 2. Without `-s` the message stays.
+	/// Failure mode: `grep -s` prints `grep: DIR: Is a directory`, or `grep`
+	/// without `-s` drops it.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn no_messages_silences_a_directory_operand() {
+		let tree = tempfile::tempdir().unwrap();
+		std::fs::write(tree.path().join("f1"), "zz\n").unwrap();
+		let (code, capture) = run_async_util::<Grep>(&["-s", "zz", ".", "f1"], "", tree.path()).await;
+		assert_eq!((code, capture.out().as_str(), capture.err().as_str()), (2, "f1:zz\n", ""));
+		let (code, capture) = run_async_util::<Grep>(&["zz", ".", "f1"], "", tree.path()).await;
+		assert_eq!(
+			(code, capture.out().as_str(), capture.err().as_str()),
+			(2, "f1:zz\n", "grep: .: Is a directory\n")
+		);
 	}
 
 	/// Contract: a recursive search refuses the output file it walks into.
