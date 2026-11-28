@@ -99,14 +99,17 @@ pub fn install() {
 
 		std::alloc::set_alloc_error_hook(|layout| {
 			// Print the canonical line before doing anything allocation-prone.
-			// If this is genuine process-wide OOM, report formatting/path work may
-			// recursively enter this hook; the secondary entry writes the same
-			// stack-only fallback and aborts immediately.
+			// Capture raw IPs onto the stack up front so a secondary allocation
+			// failure inside `Backtrace::force_capture` or `String` formatting can
+			// still emit module+RVA frames to stderr before aborting.
 			write_alloc_failure_line(std::io::stderr(), layout.size());
+			let mut raw_ips = [0usize; MAX_RAW_FRAMES];
+			let raw_len = capture_raw_frames(&mut raw_ips);
 			if ALLOC_HOOK_ACTIVE.swap(true, Ordering::AcqRel) {
+				write_raw_frames_io(std::io::stderr(), &raw_ips[..raw_len]);
 				process::abort();
 			}
-			let report = format_alloc_report(layout);
+			let report = format_alloc_report_with_frames(layout, &raw_ips[..raw_len]);
 			persist(&report, CrashKind::Alloc, true);
 			process::abort();
 		});
@@ -162,7 +165,11 @@ impl CrashKind {
 	}
 }
 
+const MAX_RAW_FRAMES: usize = 64;
+
 fn format_panic_report(info: &std::panic::PanicHookInfo<'_>) -> String {
+	let mut raw_ips = [0usize; MAX_RAW_FRAMES];
+	let raw_len = capture_raw_frames(&mut raw_ips);
 	let bt = Backtrace::force_capture();
 	let location = info.location().map_or_else(
 		|| String::from("<unknown>"),
@@ -171,20 +178,29 @@ fn format_panic_report(info: &std::panic::PanicHookInfo<'_>) -> String {
 	let mut out = report_header(CrashKind::Panic);
 	let _ = writeln!(out, "location: {location}");
 	let _ = writeln!(out, "message:  {}", panic_payload(info.payload()));
+	append_raw_frames_str(&mut out, &raw_ips[..raw_len]);
 	let _ = writeln!(out, "backtrace:\n{bt}");
 	out
 }
 
+#[cfg(test)]
 fn format_alloc_report(layout: Layout) -> String {
+	let mut raw_ips = [0usize; MAX_RAW_FRAMES];
+	let raw_len = capture_raw_frames(&mut raw_ips);
+	format_alloc_report_with_frames(layout, &raw_ips[..raw_len])
+}
+
+fn format_alloc_report_with_frames(layout: Layout, raw_ips: &[usize]) -> String {
 	// Capturing a backtrace allocates. If the global allocator is in a state
 	// where small allocations keep failing this will recurse into the hook —
 	// `Backtrace::force_capture` swallows the secondary failure internally and
-	// returns an empty backtrace, which is still strictly more useful than the
-	// nothing the default handler prints.
+	// returns an empty backtrace, while `raw_ips` was already captured onto the
+	// stack with zero heap allocations.
 	let bt = Backtrace::force_capture();
 	let mut out = report_header(CrashKind::Alloc);
 	let _ = writeln!(out, "size:      {} bytes", layout.size());
 	let _ = writeln!(out, "alignment: {} bytes", layout.align());
+	append_raw_frames_str(&mut out, raw_ips);
 	let _ = writeln!(out, "backtrace:\n{bt}");
 	out
 }
@@ -192,12 +208,281 @@ fn format_alloc_report(layout: Layout) -> String {
 fn report_header(kind: CrashKind) -> String {
 	let thread_name = thread::current().name().unwrap_or("<unnamed>").to_owned();
 	let now_ms = unix_millis();
-	format!(
+	let mut out = format!(
 		"omp-natives {kind} crash\npid:       {pid}\nthread:    {thread_name}\ntimestamp: {now_ms} \
 		 (unix ms)\n",
 		kind = kind.as_str(),
 		pid = process::id(),
-	)
+	);
+	if let Some(m) = resolve_module((install as *const ()).addr()) {
+		let _ = writeln!(out, "module:    {} (base {:#x})", m.name(), m.base);
+	}
+	out
+}
+
+/// Stack-allocated module identity (`name` + load `base`) so resolution works
+/// inside the OOM hook without touching the heap.
+struct ResolvedModule {
+	name_buf: [u8; 256],
+	name_len: usize,
+	base:     usize,
+}
+
+impl ResolvedModule {
+	fn from_bytes(bytes: &[u8], base: usize) -> Self {
+		let mut name_buf = [0u8; 256];
+		let mut len = 0;
+		for &b in bytes.iter().take(name_buf.len()) {
+			name_buf[len] = if b.is_ascii_graphic() || b == b' ' {
+				b
+			} else {
+				b'?'
+			};
+			len += 1;
+		}
+		if len == 0 {
+			let fallback = b"<unknown>";
+			name_buf[..fallback.len()].copy_from_slice(fallback);
+			len = fallback.len();
+		}
+		Self { name_buf, name_len: len, base }
+	}
+
+	#[cfg(windows)]
+	fn from_utf16_lossy(units: &[u16], base: usize) -> Self {
+		let mut raw = [0u8; 256];
+		let mut len = 0;
+		for &u in units.iter().take(raw.len()) {
+			raw[len] = u8::try_from(u)
+				.ok()
+				.filter(|b| b.is_ascii_graphic() || *b == b' ')
+				.unwrap_or(b'?');
+			len += 1;
+		}
+		Self::from_bytes(&raw[..len], base)
+	}
+
+	fn name(&self) -> &str {
+		// Guaranteed ASCII by `from_bytes`.
+		std::str::from_utf8(&self.name_buf[..self.name_len]).unwrap_or("<unknown>")
+	}
+}
+
+#[cfg(unix)]
+fn basename_bytes(path: &[u8]) -> &[u8] {
+	path
+		.iter()
+		.rposition(|&b| b == b'/')
+		.map_or(path, |idx| &path[idx + 1..])
+}
+
+#[cfg(unix)]
+fn resolve_module(addr: usize) -> Option<ResolvedModule> {
+	if addr == 0 {
+		return None;
+	}
+	// SAFETY: `Dl_info` is a plain C struct of pointers safe to zero-initialize.
+	let mut info: libc::Dl_info = unsafe { std::mem::zeroed() };
+	// SAFETY: `dladdr` inspects dynamic-linker tables for `addr` and writes only
+	// to `info`.
+	let ok = unsafe {
+		libc::dladdr(std::ptr::with_exposed_provenance::<std::ffi::c_void>(addr), &raw mut info)
+	};
+	if ok == 0 || info.dli_fbase.is_null() {
+		return None;
+	}
+	let base = info.dli_fbase.addr();
+	if addr < base {
+		return None;
+	}
+	let bytes = if info.dli_fname.is_null() {
+		b"<unknown>".as_slice()
+	} else {
+		// SAFETY: `dladdr` sets `dli_fname` to a valid NUL-terminated C string
+		// when non-null.
+		let raw = unsafe { std::ffi::CStr::from_ptr(info.dli_fname) }.to_bytes();
+		basename_bytes(raw)
+	};
+	Some(ResolvedModule::from_bytes(bytes, base))
+}
+
+#[cfg(windows)]
+fn resolve_module(addr: usize) -> Option<ResolvedModule> {
+	const GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT: u32 = 0x0000_0002;
+	const GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS: u32 = 0x0000_0004;
+	#[link(name = "kernel32")]
+	unsafe extern "system" {
+		fn GetModuleHandleExW(
+			dw_flags: u32,
+			lp_module_name: *const u16,
+			ph_module: *mut *mut std::ffi::c_void,
+		) -> i32;
+		fn GetModuleFileNameW(
+			h_module: *mut std::ffi::c_void,
+			lp_filename: *mut u16,
+			n_size: u32,
+		) -> u32;
+	}
+	if addr == 0 {
+		return None;
+	}
+	let mut module: *mut std::ffi::c_void = std::ptr::null_mut();
+	// SAFETY: `FROM_ADDRESS | UNCHANGED_REFCOUNT` queries the PEB loader table
+	// for the module containing `addr` without altering reference counts.
+	let ok = unsafe {
+		GetModuleHandleExW(
+			GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+			std::ptr::with_exposed_provenance::<u16>(addr),
+			&raw mut module,
+		)
+	};
+	if ok == 0 || module.is_null() {
+		return None;
+	}
+	let base = module.addr();
+	if addr < base {
+		return None;
+	}
+	let mut wide = [0u16; 512];
+	// SAFETY: `wide` is a valid writable stack buffer of `wide.len()` UTF-16
+	// code units.
+	let len = unsafe { GetModuleFileNameW(module, wide.as_mut_ptr(), wide.len() as u32) } as usize;
+	let slice = &wide[..len.min(wide.len())];
+	let start = slice
+		.iter()
+		.rposition(|&c| c == u16::from(b'\\') || c == u16::from(b'/'))
+		.map_or(0, |idx| idx + 1);
+	Some(ResolvedModule::from_utf16_lossy(&slice[start..], base))
+}
+
+#[cfg(unix)]
+fn capture_raw_frames(buf: &mut [usize; MAX_RAW_FRAMES]) -> usize {
+	#[repr(C)]
+	enum UnwindReasonCode {
+		NoReason   = 0,
+		EndOfStack = 5,
+	}
+	unsafe extern "C" {
+		fn _Unwind_Backtrace(
+			trace: extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void) -> UnwindReasonCode,
+			trace_argument: *mut std::ffi::c_void,
+		) -> UnwindReasonCode;
+		fn _Unwind_GetIP(ctx: *mut std::ffi::c_void) -> usize;
+	}
+	struct WalkState<'a> {
+		buf:  &'a mut [usize; MAX_RAW_FRAMES],
+		len:  usize,
+		skip: usize,
+	}
+	extern "C" fn step(ctx: *mut std::ffi::c_void, arg: *mut std::ffi::c_void) -> UnwindReasonCode {
+		// SAFETY: `arg` points to `WalkState` on `capture_raw_frames`'s stack
+		// frame.
+		let state = unsafe { &mut *arg.cast::<WalkState<'_>>() };
+		// SAFETY: `ctx` is the active frame context supplied by
+		// `_Unwind_Backtrace`.
+		let ip = unsafe { _Unwind_GetIP(ctx) };
+		if state.skip > 0 {
+			state.skip -= 1;
+			return UnwindReasonCode::NoReason;
+		}
+		if ip != 0 {
+			if state.len >= MAX_RAW_FRAMES {
+				return UnwindReasonCode::EndOfStack;
+			}
+			state.buf[state.len] = ip;
+			state.len += 1;
+		}
+		UnwindReasonCode::NoReason
+	}
+	let mut state = WalkState { buf, len: 0, skip: 1 };
+	// SAFETY: `step` does not unwind and only mutates `state` for the duration
+	// of the call.
+	unsafe {
+		let _ = _Unwind_Backtrace(step, (&raw mut state).cast::<std::ffi::c_void>());
+	}
+	state.len
+}
+
+#[cfg(windows)]
+fn capture_raw_frames(buf: &mut [usize; MAX_RAW_FRAMES]) -> usize {
+	#[link(name = "kernel32")]
+	unsafe extern "system" {
+		fn RtlCaptureStackBackTrace(
+			frames_to_skip: u32,
+			frames_to_capture: u32,
+			back_trace: *mut *mut std::ffi::c_void,
+			back_trace_hash: *mut u32,
+		) -> u16;
+	}
+	// SAFETY: `usize` and `*mut c_void` have identical size and alignment, and
+	// `buf` has `MAX_RAW_FRAMES` elements.
+	let count = unsafe {
+		RtlCaptureStackBackTrace(
+			1,
+			MAX_RAW_FRAMES as u32,
+			buf.as_mut_ptr().cast::<*mut std::ffi::c_void>(),
+			std::ptr::null_mut(),
+		)
+	} as usize;
+	count.min(MAX_RAW_FRAMES)
+}
+
+fn append_raw_frames_str(out: &mut String, ips: &[usize]) {
+	let _ = writeln!(out, "raw_frames:");
+	for (idx, &ip) in ips.iter().enumerate() {
+		if let Some(m) = resolve_module(ip) {
+			let rva = ip - m.base;
+			let _ = writeln!(out, "  {idx:2}: {ip:#x} ({}+{rva:#x})", m.name());
+		} else {
+			let _ = writeln!(out, "  {idx:2}: {ip:#x}");
+		}
+	}
+}
+
+fn format_hex_usize(buf: &mut [u8; 18], mut value: usize) -> &[u8] {
+	const HEX: &[u8; 16] = b"0123456789abcdef";
+	let mut pos = buf.len();
+	if value == 0 {
+		pos -= 1;
+		buf[pos] = b'0';
+	} else {
+		while value > 0 {
+			pos -= 1;
+			buf[pos] = HEX[value & 0xf];
+			value >>= 4;
+		}
+	}
+	pos -= 1;
+	buf[pos] = b'x';
+	pos -= 1;
+	buf[pos] = b'0';
+	&buf[pos..]
+}
+
+fn write_raw_frames_io(mut out: impl std::io::Write, ips: &[usize]) {
+	let _ = out.write_all(b"raw_frames:\n");
+	let mut hex_ip = [0u8; 18];
+	let mut hex_rva = [0u8; 18];
+	for (idx, &ip) in ips.iter().enumerate() {
+		let _ = out.write_all(b"  ");
+		let mut dec = NumBuffer::new();
+		let idx_bytes = idx.format_into(&mut dec);
+		if idx_bytes.len() < 2 {
+			let _ = out.write_all(b" ");
+		}
+		let _ = out.write_all(idx_bytes.as_bytes());
+		let _ = out.write_all(b": ");
+		let _ = out.write_all(format_hex_usize(&mut hex_ip, ip));
+		if let Some(m) = resolve_module(ip) {
+			let rva = ip - m.base;
+			let _ = out.write_all(b" (");
+			let _ = out.write_all(m.name().as_bytes());
+			let _ = out.write_all(b"+");
+			let _ = out.write_all(format_hex_usize(&mut hex_rva, rva));
+			let _ = out.write_all(b")");
+		}
+		let _ = out.write_all(b"\n");
+	}
 }
 fn write_alloc_failure_line(mut out: impl std::io::Write, size: usize) {
 	let _ = out.write_all(b"memory allocation of ");
@@ -419,18 +704,41 @@ mod tests {
 	}
 
 	#[test]
-	fn alloc_report_contains_size_alignment_and_backtrace() {
+	fn alloc_report_contains_size_alignment_module_rvas_and_backtrace() {
 		let layout = Layout::from_size_align(7714, 8).unwrap();
 		let report = format_alloc_report(layout);
 		assert!(report.contains("omp-natives alloc crash"), "report missing header: {report}");
+		assert!(report.contains("module:    "), "report missing module base header: {report}");
+		assert!(report.contains("(base 0x"), "report missing module hex base: {report}");
 		assert!(report.contains("size:      7714 bytes"), "report missing size: {report}");
 		assert!(report.contains("alignment: 8 bytes"), "report missing alignment: {report}");
+		assert!(report.contains("raw_frames:\n"), "report missing raw_frames section: {report}");
+		let m = resolve_module((install as *const ()).addr()).expect("current module resolves");
+		assert!(
+			report.contains(&format!("({}+0x", m.name())),
+			"raw_frames missing module+RVA entry for {}: {report}",
+			m.name()
+		);
 		assert!(report.contains("backtrace:"), "report missing backtrace section: {report}");
 		assert!(
 			report.contains(&format!("pid:       {}", process::id())),
 			"report missing pid: {report}"
 		);
 		assert!(report.contains("thread:"), "report missing thread: {report}");
+	}
+
+	#[test]
+	fn stack_only_raw_frame_writer_matches_string_rva_format() {
+		let ip = (install as *const ()).addr();
+		let m = resolve_module(ip).expect("current module resolves");
+		let rva = ip - m.base;
+		let mut buf = Vec::new();
+		write_raw_frames_io(&mut buf, &[ip, 0]);
+		let text = String::from_utf8(buf).unwrap();
+		let mut expected = String::new();
+		append_raw_frames_str(&mut expected, &[ip, 0]);
+		assert_eq!(text, expected);
+		assert!(text.contains(&format!("({}+{rva:#x})", m.name())), "unexpected output: {text}");
 	}
 
 	#[test]
