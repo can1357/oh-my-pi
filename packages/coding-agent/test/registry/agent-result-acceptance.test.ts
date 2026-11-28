@@ -96,6 +96,40 @@ describe("AgentRegistry final-result acceptance", () => {
 		expect(registry.staleAcceptedRuns()).toEqual([]);
 	});
 
+	it("terminalizes an accepted run paused on background work once its run ends", () => {
+		// The follow-up / wake-turn path: the result is accepted while the session's run is still
+		// open (paused on an owned job), so acceptance must not settle the ref; the run's own end,
+		// mirrored through syncSessionStatus, is what leaves `running`.
+		let runStartedAt: number | undefined = 1;
+		const listeners = new Set<(state: "running" | "idle") => void>();
+		const session = {
+			get runStartedAt(): number | undefined {
+				return runStartedAt;
+			},
+			subscribeRunState(listener: (state: "running" | "idle") => void) {
+				listeners.add(listener);
+				return () => listeners.delete(listener);
+			},
+		} as unknown as AgentSession;
+		const ref = registerRunning("PolicyCommand", session);
+		const unsubscribe = registry.syncSessionStatus(ref.id, session);
+
+		expect(registry.markResultAccepted(ref.id, session, ref.createdAt)).toBe(true);
+		expect(registry.get(ref.id)?.status).toBe("running");
+		expect(registry.staleAcceptedRuns()).toEqual([]);
+
+		// The background job settles without waking a turn: the session closes its run.
+		runStartedAt = undefined;
+		for (const listener of listeners) listener("idle");
+
+		const settled = registry.get(ref.id);
+		expect(settled?.status).toBe("idle");
+		expect(settled?.lifecycle?.acceptedAt).toBeNumber();
+		expect(settled?.lifecycle?.terminalAt).toBeNumber();
+		expect(registry.staleAcceptedRuns()).toEqual([]);
+		unsubscribe();
+	});
+
 	it("ignores acceptance from a session the ref no longer owns", () => {
 		const ref = registerRunning("PolicyCommand", sessionStub(false));
 
