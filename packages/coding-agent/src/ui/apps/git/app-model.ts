@@ -18,7 +18,7 @@ import { buildLineSelectionPatch, type HunkBlock, type WhitespaceMode } from "..
 import type { GitTuiHost } from "../../../cli/git-tui/model/git-tui";
 import type { SidebarAction } from "../../../cli/git-tui/model/sidebar";
 import type { ChangedFile, FileContents, GitTuiModel } from "../../../cli/git-tui/model/state";
-import { formatKey } from "../../keys/format";
+import { formatKey } from "@oh-my-pi/pi-tui/theme/keys";
 import { DiffPaneModel, type HunkAction, type ViewMode } from "./diff-pane-model";
 import { buildDiffDocument } from "./document";
 import { SidebarModel } from "./sidebar-model";

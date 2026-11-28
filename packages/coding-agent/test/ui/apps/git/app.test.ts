@@ -10,7 +10,7 @@ import type {
 } from "../../../../src/cli/git-tui/model/state";
 import { GitApp, GitAppModel } from "../../../../src/ui/apps/git";
 import { presentGitApp } from "../../../../src/cli/git-tui";
-import { setKeyHintPlatform } from "../../../../src/ui/keys/format";
+import { setKeyHintPlatform } from "@oh-my-pi/pi-tui/theme/keys";
 import { ensureTheme } from "../../../../src/ui/theme/service";
 import { createModeTerminal, type ModeTerminal } from "../../../helpers/mode-terminal";
 import { nativeShell } from "../../../helpers/native-shell";

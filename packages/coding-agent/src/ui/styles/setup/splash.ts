@@ -9,7 +9,7 @@ import { type Block, defineRolePainter, type PaintContext } from "@oh-my-pi/pi-t
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { truncate, visibleWidth } from "@oh-my-pi/pi-tui/text/width";
 import { gradientArt, LOGO, LOGO_WIDTH } from "../../welcome/logo";
-import { formatKey } from "../../keys/format";
+import { formatKey } from "@oh-my-pi/pi-tui/theme/keys";
 
 /** Terminal facts of the splash: the clock time the animation counts from. */
 export type SplashTerm = { readonly start: number };

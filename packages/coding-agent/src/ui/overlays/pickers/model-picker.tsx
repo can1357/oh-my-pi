@@ -14,7 +14,6 @@
  */
 import type { Model } from "@oh-my-pi/pi-ai";
 import { batch, computed, effect, type JSXNode, type KeyEvent, signal } from "@oh-my-pi/pi-tui";
-import { keyCaps } from "@oh-my-pi/pi-tui/term/painters/picker";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import type { TspPickerLevel, TspPickerScope } from "@oh-my-pi/pi-wire";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
@@ -44,7 +43,8 @@ import type { ModelPickerLookTerm } from "../../styles/pickers/model-picker";
 import { END_SLICE, runSlicedWork, type SlicedWork } from "../../../utils/sliced-work";
 import { ModelBrowserState } from "./model-browser-state";
 import { pickerAction } from "./select-sheet";
-import { actionKbd, cancelKbd, confirmKbd } from "../../keys/hints";
+import { formatKeyHint } from "../../keys/hints";
+import { bindingGlyph, keyGlyph, selectNavGlyphs } from "../../styles/panels/common";
 
 /** Catalog access the switcher needs: the browser's reads plus a refresh when stale. */
 export interface ModelPickerRegistry extends ModelBrowserRegistry {
@@ -168,7 +168,7 @@ export function ModelPicker(props: ModelPickerProps): JSXNode {
 	const { source, registry, callbacks } = props;
 	const options = props.options ?? {};
 	const quickRoleKey = `@`;
-	const cycleKey = keyCaps(["ctrl", "p"]);
+	const cycleKey = formatKeyHint("ctrl+p");
 	const taskKey = callbacks.onPickTask ? options.taskModeKeys?.[0] : undefined;
 	const taskKeys = new Set<string>(callbacks.onPickTask ? (options.taskModeKeys ?? []) : []);
 	const currentQuickRole = options.currentQuickRole ? `${quickRoleKey}${options.currentQuickRole}` : undefined;
@@ -434,10 +434,10 @@ export function ModelPicker(props: ModelPickerProps): JSXNode {
 	});
 
 	const footer = (): string => {
-		const close = `${keyCaps(cancelKbd())} close`;
-		const nav = `${keyCaps(actionKbd("tui.select.up", "up"))}/${keyCaps(actionKbd("tui.select.down", "down"))}`;
-		const confirm = keyCaps(confirmKbd());
-		const provider = `${keyCaps(["tab"])} provider`;
+		const close = `${bindingGlyph("tui.select.cancel", "escape")} close`;
+		const nav = selectNavGlyphs();
+		const confirm = bindingGlyph("tui.select.confirm", "enter");
+		const provider = `${keyGlyph("tab")} provider`;
 		let hint: string;
 		switch (mode()) {
 			case "role":
@@ -447,12 +447,12 @@ export function ModelPicker(props: ModelPickerProps): JSXNode {
 				hint = `${nav} models · ${confirm} use for Task subagents · ${provider} · type to search · ${close}`;
 				break;
 			default: {
-				const steps = options.thinkingLevelFor ? " · ←/→ thinking" : "";
+				const steps = options.thinkingLevelFor ? ` · ${keyGlyph("left")}/${keyGlyph("right")} thinking` : "";
 				hint = `${nav} models · ${confirm} use for this session · ${provider}${steps} · type to search · @ quick roles · ${close}`;
 			}
 		}
 		if (taskKey !== undefined && !roleMode())
-			hint += ` · ${keyCaps(taskKey.split("+"))} ${taskMode() ? "session model" : "task model"}`;
+			hint += ` · ${keyGlyph(taskKey)} ${taskMode() ? "session model" : "task model"}`;
 		return hint;
 	};
 

@@ -10,7 +10,14 @@ import type { Keybinding } from "../../config/keybindings/app-keybindings";
 import { getKeybindings, type KeybindingsManager } from "../../config/keybindings/keybindings";
 import { canonicalKeyId } from "../../config/keybindings/key-id";
 import { appInterruptKeys } from "../../config/keybindings/matchers";
-import { formatKey, formatKeys, formatKeyTwice, type KeyStyle, kbdKeys, keyHintPlatform } from "./format";
+import {
+	formatKey,
+	formatKeys,
+	formatKeyTwice,
+	type KeyStyle,
+	kbdKeys,
+	keyHintPlatform,
+} from "@oh-my-pi/pi-tui/theme/keys";
 
 /** The active theme's symbol preset on the key-hint platform. */
 export function activeKeyStyle(): KeyStyle {

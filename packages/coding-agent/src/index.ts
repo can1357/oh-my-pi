@@ -17,7 +17,7 @@ export {
 } from "./config/keybindings/config-file";
 export { canonicalKeyId, type KeyId } from "./config/keybindings/key-id";
 export * from "./config/keybindings/keybindings";
-export { keyHintPlatform, setKeyHintPlatform } from "./ui/keys/format";
+export { keyHintPlatform, setKeyHintPlatform } from "@oh-my-pi/pi-tui/theme/keys";
 export { formatDoubleTap, formatKeyHint, formatKeyHints, formatTooltipKey } from "./ui/keys/hints";
 export type { ResolvedRoleModel } from "./modes/view-model/overlays/model-picker";
 export type { ContextUsage } from "./modes/view-model/status-line/types";

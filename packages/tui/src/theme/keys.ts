@@ -7,8 +7,8 @@
  * Addon-free (only the preset tables), so CLI help text can format keys
  * without loading the native addon.
  */
-import { presetSymbols } from "@oh-my-pi/pi-tui/theme/symbols";
-import type { SymbolPreset } from "@oh-my-pi/pi-tui/theme/schema";
+import type { SymbolPreset } from "./schema";
+import { presetSymbols } from "./symbols";
 
 /** How keys read: the symbol preset and the platform whose modifier keycaps they name. */
 export interface KeyStyle {
@@ -54,6 +54,10 @@ export function keyHintPlatform(): NodeJS.Platform {
 	return platformOverride ?? process.platform;
 }
 
+function isModifier(key: string): boolean {
+	return MODIFIERS.some(modifier => modifier === key);
+}
+
 function modifierSymbol(modifier: string, mac: boolean): string {
 	return modifier === "shift" ? "key.shift" : `key.${modifier}${mac ? "Mac" : ""}`;
 }
@@ -86,7 +90,7 @@ export function formatKey(key: string, style: KeyStyle): string {
 		out += LETTERS.test(label) ? `${label}+` : label + (symbols["key.joiner"] ?? "");
 	}
 	const lower = base.toLowerCase();
-	if ((MODIFIERS as readonly string[]).includes(lower)) out += symbols[modifierSymbol(lower, mac)] ?? lower;
+	if (isModifier(lower)) out += symbols[modifierSymbol(lower, mac)] ?? lower;
 	else if (NAMED_KEYS[lower]) out += symbols[NAMED_KEYS[lower]] ?? lower;
 	else if (WORD_KEYS[lower]) out += WORD_KEYS[lower];
 	else if (base.length === 1) out += parts.length === 0 ? base : base.toUpperCase();
@@ -97,6 +101,24 @@ export function formatKey(key: string, style: KeyStyle): string {
 /** Alternative keys slash-separated (`["f5", "alt+r"]` → `F5/⌥R`). */
 export function formatKeys(keys: string | readonly string[], style: KeyStyle): string {
 	return typeof keys === "string" ? formatKey(keys, style) : keys.map(key => formatKey(key, style)).join("/");
+}
+
+/** Picker action keycaps: attach bare modifiers to the next key and separate alternatives with `/`. */
+export function formatKeyCaps(keys: readonly string[], style: KeyStyle): string {
+	let chord = "";
+	let label = "";
+	for (let i = 0; i < keys.length; i++) {
+		const key = keys[i]!;
+		chord += key;
+		if (i + 1 < keys.length && isModifier(key.toLowerCase())) {
+			chord += "+";
+			continue;
+		}
+		if (label) label += "/";
+		label += formatKey(chord, style);
+		chord = "";
+	}
+	return label;
 }
 
 /** A double tap of `key`: `←←` with glyphs, `Left Left` with words. */

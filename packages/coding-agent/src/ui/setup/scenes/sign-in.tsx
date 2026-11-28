@@ -20,7 +20,7 @@ import type { SignInLine, SignInTerm } from "../../styles/setup/sign-in";
 import type { SetupScene } from "../types";
 import { keyLabel } from "./choice";
 import { actionKeyId } from "../../keys/hints";
-import { formatKey } from "../../keys/format";
+import { formatKey } from "@oh-my-pi/pi-tui/theme/keys";
 
 const SCENE_TITLE = "Sign in to your providers";
 const SHEET_ROLE = "omp.setup.sheet";

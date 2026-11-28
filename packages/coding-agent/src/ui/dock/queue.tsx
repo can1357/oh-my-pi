@@ -15,7 +15,7 @@
 import { type JSXNode, signal } from "@oh-my-pi/pi-tui";
 import { replaceTabs } from "@oh-my-pi/pi-tui/text/width";
 import "../styles/dock";
-import { kbdKeys } from "../keys/format";
+import { kbdKeys } from "@oh-my-pi/pi-tui/theme/keys";
 import { formatTooltipKey } from "../keys/hints";
 
 /** Queued messages under one heading. */
