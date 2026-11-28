@@ -129,6 +129,10 @@
 - Status line keeps the auto indicator on an auto-resolved thinking effort (e.g. `⟳ high`) so it is distinguishable from a pinned level ([#5951](https://github.com/can1357/oh-my-pi/issues/5951))
 - A configured MCP `oauth.scope` now overrides scopes advertised by the server on initial authorization and `/mcp reauth`, so you can request a narrower (or different) scope set than discovery reports ([#7841](https://github.com/can1357/oh-my-pi/issues/7841))
 
+### Changed
+
+- On macOS, an automatic retry now waits for the machine to fully wake when it would run during a Power Nap or maintenance dark wake with the lid closed, instead of sending a request that stalls and re-writes the prompt cache; `power.sleepPrevention = "system"` keeps retrying as before ([#19543](https://github.com/can1357/oh-my-pi/issues/19543))
+
 ### Fixed
 
 - `/resume` into a session without subagents no longer keeps showing the previous session's subagents above the composer

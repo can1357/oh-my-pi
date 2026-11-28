@@ -367,6 +367,7 @@ import type {
 	UsageFallbackConfirmer,
 } from "./agent-session-types";
 import { writeArtifact } from "./artifacts";
+import { waitForFullWake } from "./dark-wake";
 import { type PowerAssertionHandle, startPowerAssertion } from "./power-assertion-backend";
 import { renderAttachmentSourceNotice } from "./attachment-source-notice";
 import { formatArtifactErrorNotice, type OutputMeta, stripOutputNotice } from "../tools/output-meta-format";
@@ -1609,6 +1610,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#powerAssertion = startPowerAssertion(options);
 	}
 
+	/**
+	 * "system" sleep prevention keeps a lid-closed Mac in dark wake on purpose, with the
+	 * network up, so only hold retries when nothing of ours keeps the machine awake.
+	 */
+	async #waitForFullWake(signal: AbortSignal): Promise<void> {
+		if (isBunTestRuntime()) return;
+		if (this.#powerAssertion && cfgPowerSleepPrevention.get(this.settings) === "system") return;
+		await waitForFullWake(signal);
+	}
+
 	#releasePowerAssertion(): void {
 		const assertion = this.#powerAssertion;
 		this.#powerAssertion = undefined;
@@ -2544,6 +2555,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			isStreaming: () => this.isStreaming,
 			isCompacting: () => this.isCompacting,
 			abortInProgress: () => this.#abortInProgress,
+			waitForFullWake: signal => this.#waitForFullWake(signal),
 			streamingEditAbortTriggered: () => this.#streamingEditGuard.abortTriggered,
 			promptGeneration: () => this.#promptGeneration,
 			promptSequence: () => this.#promptSequence,

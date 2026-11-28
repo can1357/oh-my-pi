@@ -98,6 +98,7 @@ function createHost(
 		isStreaming: () => false,
 		isCompacting: () => false,
 		abortInProgress: () => false,
+		waitForFullWake: async () => {},
 		streamingEditAbortTriggered: () => false,
 		promptGeneration: () => 0,
 		promptSequence: () => 0,
