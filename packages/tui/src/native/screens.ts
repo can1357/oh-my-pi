@@ -20,6 +20,7 @@
  * the root of the key and event paths of what it holds, so handlers on it
  * keep working.
  */
+import { logger } from "@oh-my-pi/pi-utils";
 import type { TspFrame } from "@oh-my-pi/pi-wire";
 import type { InputEvent } from "../driver/contract";
 import type { KeyEvent } from "../events";
@@ -216,10 +217,16 @@ export class NativeSurfaces {
 			}
 		}
 		if (!page) {
+			if (open) logger.debug("TSP: page closed; the inline surface takes input again", { sf: this.#inline.id });
 			this.#inline.requestFrame();
 			return;
 		}
 		if (this.#screen) return;
+		// A page the terminal never shows leaves the session frozen: say when one takes over.
+		logger.debug("TSP: page covers the inline surface; it takes no input until the page closes", {
+			sf: this.#inline.id,
+			role,
+		});
 		const backend = new NativeBackend({
 			...this.#shared(),
 			surface: this.#pageSurface,

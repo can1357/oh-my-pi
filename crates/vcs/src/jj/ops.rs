@@ -9,9 +9,9 @@ use std::{
 	sync::Arc,
 };
 
-use futures::TryStreamExt as _;
+use futures::{StreamExt as _, TryStreamExt as _};
 use jj_lib::{
-	backend::CommitId,
+	backend::{CommitId, MergedTreeValue},
 	commit::Commit,
 	config::{ConfigSource, StackedConfig},
 	conflicts::{ConflictMarkerStyle, ConflictMaterializeOptions, materialize_tree_value},
@@ -23,14 +23,14 @@ use jj_lib::{
 	},
 	gitignore::GitIgnoreFile,
 	matchers::{EverythingMatcher, NothingMatcher},
-	merge::{Diff, MergedTreeValue},
+	merge::Diff,
 	merged_tree::MergedTree,
 	object_id::{HexPrefix, ObjectId as _, PrefixResolution},
 	repo::{ReadonlyRepo, Repo},
 	repo_path::{RepoPath, RepoPathBuf},
 	settings::UserSettings,
 	working_copy::{SnapshotOptions, WorkingCopyFreshness},
-	workspace::Workspace,
+	workspace::{DefaultWorkspaceLoaderFactory, Workspace, WorkspaceLoaderFactory as _},
 };
 
 use super::JjWorkspace;
@@ -76,7 +76,7 @@ impl JjWorkspace {
 
 				let mut candidates = BTreeSet::new();
 				for (_, target) in repo.view().local_bookmarks() {
-					for id in target.added_ids() {
+					for id in target.adds().flatten() {
 						if repo
 							.index()
 							.is_ancestor(id, &wc_id)
@@ -103,6 +103,7 @@ impl JjWorkspace {
 
 				let prefix_len = repo
 					.shortest_unique_change_id_prefix_len(wc_commit.change_id())
+					.await
 					.map_err(|err| Error::backend("jj log", err))?
 					.max(8);
 				let change_id = wc_commit.change_id().reverse_hex();
@@ -133,7 +134,7 @@ impl JjWorkspace {
 				else {
 					return Ok(StatusSummary::default());
 				};
-				let changes = collect_changes(&before, &after, &copies, &[], "jj status")?;
+				let changes = collect_changes(&before, &after, &copies, &[], "jj status").await?;
 				let mut summary = StatusSummary::default();
 				for change in changes {
 					if change.before.is_absent() {
@@ -158,7 +159,8 @@ impl JjWorkspace {
 				else {
 					return Ok(String::new());
 				};
-				let changes = collect_changes(&before, &after, &copies, &pathspecs, "jj status")?;
+				let changes =
+					collect_changes(&before, &after, &copies, &pathspecs, "jj status").await?;
 				Ok(render_status_porcelain(&changes, nul_terminated))
 			})
 		})
@@ -174,7 +176,7 @@ impl JjWorkspace {
 				else {
 					return Ok(String::new());
 				};
-				let changes = collect_changes(&before, &after, &copies, &files, "jj diff")?;
+				let changes = collect_changes(&before, &after, &copies, &files, "jj diff").await?;
 				render_git_diff(repo.as_ref(), &before, &after, changes).await
 			})
 		})
@@ -190,7 +192,8 @@ impl JjWorkspace {
 				else {
 					return Ok(Vec::new());
 				};
-				Ok(collect_changes(&before, &after, &copies, &files, "jj diff")?
+				Ok(collect_changes(&before, &after, &copies, &files, "jj diff")
+					.await?
 					.into_iter()
 					.map(|change| change.after_path.as_internal_file_string().to_owned())
 					.collect())
@@ -208,7 +211,7 @@ impl JjWorkspace {
 				else {
 					return Ok(Vec::new());
 				};
-				let changes = collect_changes(&before, &after, &copies, &files, "jj diff")?;
+				let changes = collect_changes(&before, &after, &copies, &files, "jj diff").await?;
 				render_numstat(repo.as_ref(), &before, &after, changes).await
 			})
 		})
@@ -236,6 +239,7 @@ impl JjWorkspace {
 				for commit in commits {
 					let prefix_len = repo
 						.shortest_unique_change_id_prefix_len(commit.change_id())
+						.await
 						.map_err(|err| Error::backend("jj log", err))?
 						.max(8);
 					let change_id = commit.change_id().reverse_hex();
@@ -252,7 +256,8 @@ impl JjWorkspace {
 		let rev = rev.to_owned();
 		self.with_current_repo("jj show", move |workspace, repo| {
 			Box::pin(async move {
-				let commit_id = resolve_commit_id(workspace, repo.as_ref(), &rev)?
+				let commit_id = resolve_commit_id(workspace, repo.as_ref(), &rev)
+					.await?
 					.ok_or_else(|| Error::ObjectNotFound { spec: rev.clone() })?;
 				let commit = repo
 					.store()
@@ -261,11 +266,7 @@ impl JjWorkspace {
 					.map_err(|err| Error::backend("jj show", err))?;
 				let root_id = repo.store().root_commit_id();
 				let author = commit.author();
-				let date = author
-					.timestamp
-					.to_datetime()
-					.map_err(|err| Error::backend("jj show", err))?
-					.to_rfc3339();
+				let date = rfc3339(author.timestamp).map_err(|err| Error::backend("jj show", err))?;
 				let raw_message = commit.description();
 				let message = raw_message
 					.strip_suffix('\n')
@@ -308,7 +309,8 @@ impl JjWorkspace {
 					.get_commit_async(wc_id)
 					.await
 					.map_err(|err| Error::backend("jj files", err))?;
-				Ok(tree_entries(&commit.tree(), "jj files")?
+				Ok(tree_entries(&commit.tree(), "jj files")
+					.await?
 					.into_keys()
 					.map(|path| path.as_internal_file_string().to_owned())
 					.collect())
@@ -336,9 +338,10 @@ impl JjWorkspace {
 		let settings = user_settings().map_err(|err| Error::backend(context, err))?;
 		let store_factories = default_backend_factories();
 		let working_copy_factories = default_working_copy_factories();
-		let mut workspace =
-			Workspace::load(&settings, &self.root, &store_factories, &working_copy_factories)
-				.map_err(|err| Error::backend(context, err))?;
+		let mut workspace = DefaultWorkspaceLoaderFactory
+			.create(&self.root)
+			.and_then(|loader| loader.load(&settings, &store_factories, &working_copy_factories))
+			.map_err(|err| Error::backend(context, err))?;
 		let runtime = tokio::runtime::Builder::new_current_thread()
 			.enable_all()
 			.build()
@@ -346,7 +349,7 @@ impl JjWorkspace {
 		runtime.block_on(async move {
 			let mut repo = workspace
 				.repo_loader()
-				.load_at_head()
+				.load_at_head(None)
 				.await
 				.map_err(|err| Error::backend(context, err))?;
 			if snapshot {
@@ -415,7 +418,11 @@ fn commit_subject(commit: &Commit) -> String {
 		.to_owned()
 }
 
-fn resolve_commit_id(
+#[allow(
+	clippy::future_not_send,
+	reason = "driven on a per-call current-thread runtime; `&dyn Repo` is !Send"
+)]
+async fn resolve_commit_id(
 	workspace: &Workspace,
 	repo: &dyn Repo,
 	rev: &str,
@@ -429,6 +436,7 @@ fn resolve_commit_id(
 	if let Some(prefix) = HexPrefix::try_from_reverse_hex(rev) {
 		let resolution = repo
 			.resolve_change_id_prefix(&prefix)
+			.await
 			.map_err(|err| Error::backend("jj show", err))?;
 		if let PrefixResolution::SingleMatch(targets) = resolution {
 			let mut visible = targets.visible_with_offsets().map(|(_, id)| id.clone());
@@ -442,6 +450,7 @@ fn resolve_commit_id(
 		let resolution = repo
 			.index()
 			.resolve_commit_id_prefix(&prefix)
+			.await
 			.map_err(|err| Error::backend("jj show", err))?;
 		if let PrefixResolution::SingleMatch(id) = resolution {
 			return Ok(Some(id));
@@ -459,7 +468,7 @@ fn user_settings() -> std::result::Result<UserSettings, jj_lib::config::ConfigGe
 			let _ = config.load_file(ConfigSource::User, &path);
 		}
 	}
-	UserSettings::from_config(config)
+	UserSettings::from_config_and_home_dir(config, std::env::home_dir())
 }
 
 fn user_config_paths() -> Vec<PathBuf> {
@@ -605,7 +614,7 @@ async fn working_copy_trees(
 		.await
 		.map_err(|err| Error::backend(context, err))?;
 	let parent_tree = commit
-		.parent_tree(repo)
+		.parent_tree(repo.index())
 		.await
 		.map_err(|err| Error::backend(context, err))?;
 	// Renames and copies come from the backend (the git backend runs gix
@@ -626,29 +635,39 @@ async fn working_copy_trees(
 	Ok(Some((parent_tree, commit.tree(), copies)))
 }
 
-fn tree_entries(
+async fn tree_entries(
 	tree: &MergedTree,
 	context: &'static str,
 ) -> Result<BTreeMap<RepoPathBuf, MergedTreeValue>> {
 	tree
 		.entries()
-		.map(|(path, value)| {
-			value
-				.map(|value| (path, value))
-				.map_err(|err| Error::backend(context, err))
-		})
-		.collect()
+		.map(|(path, value)| value.map(|value| (path, value)))
+		.try_collect()
+		.await
+		.map_err(|err| Error::backend(context, err))
 }
 
-fn collect_changes(
+/// RFC 3339 with whole seconds, or milliseconds when non-zero.
+fn rfc3339(
+	timestamp: jj_lib::backend::Timestamp,
+) -> std::result::Result<String, jj_lib::backend::TimestampOutOfRange> {
+	let format = if timestamp.timestamp.0.rem_euclid(1000) == 0 {
+		"%Y-%m-%dT%H:%M:%S%:z"
+	} else {
+		"%Y-%m-%dT%H:%M:%S%.3f%:z"
+	};
+	Ok(timestamp.to_zoned()?.strftime(format).to_string())
+}
+
+async fn collect_changes(
 	before_tree: &MergedTree,
 	after_tree: &MergedTree,
 	copies: &CopyRecords,
 	files: &[String],
 	context: &'static str,
 ) -> Result<Vec<TreeChange>> {
-	let before = tree_entries(before_tree, context)?;
-	let after = tree_entries(after_tree, context)?;
+	let before = tree_entries(before_tree, context).await?;
+	let after = tree_entries(after_tree, context).await?;
 	let mut changes = Vec::new();
 	let mut removed: BTreeSet<RepoPathBuf> = before
 		.keys()
@@ -998,7 +1017,12 @@ mod tests {
 			.build()
 			.unwrap();
 		runtime
-			.block_on(Workspace::init_internal_git(&settings, root, gix::hash::Kind::Sha1))
+			.block_on(Workspace::init_internal_git(
+				&settings,
+				root,
+				jj_lib::ref_name::WorkspaceName::DEFAULT,
+				gix::hash::Kind::Sha1,
+			))
 			.unwrap();
 	}
 

@@ -366,7 +366,10 @@ impl Decode {
             decoder: encoding.map(|e| e.new_decoder_with_bom_removal()),
             detect: config.bom_sniffing,
             with_bom: !config.bom_sniffing,
-            peek: Some(Peek { bytes: [0; 3], len: 0 }),
+            // Raw byte searches need not wait for three bytes before seeing
+            // even a complete line from a live stream.
+            peek: (config.bom_sniffing || encoding.is_some())
+                .then_some(Peek { bytes: [0; 3], len: 0 }),
             head: vec![],
             body: vec![],
         }

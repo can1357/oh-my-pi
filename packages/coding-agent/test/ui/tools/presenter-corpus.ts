@@ -14,14 +14,14 @@ import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { JSXNode, UiNode } from "@oh-my-pi/pi-tui";
-import { createRoot, isUiNode, jsx, resolveChildren, type Signal } from "@oh-my-pi/pi-tui";
+import { createRoot, isUiNode, jsx, resolveChildren } from "@oh-my-pi/pi-tui";
 import {
+	DEFAULT_SPINNER_INTERVAL_MS,
 	defineRolePainter,
 	type PaintEnvironment,
 	paintNode,
 	type StaticEnvironment,
 } from "@oh-my-pi/pi-tui/term/paint";
-import { SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-tui/term/painters/spinner";
 import { firstCellDiff } from "@oh-my-pi/pi-tui/testing/cells";
 import {
 	CORPUS_DIR,
@@ -64,18 +64,21 @@ export interface ToolStage {
 
 /**
  * Set `env` to a stage: the clock moved to the stage's time and then on to
- * the old spinner frame (`SPINNER_INTERVAL_MS` per frame), reduced motion
- * once the old spinner stopped (painters draw their still frame).
+ * the old spinner frame (`DEFAULT_SPINNER_INTERVAL_MS` per frame), still
+ * spinners and reduced motion once the old spinner stopped (painters draw
+ * their still frame).
  */
 export function applyStage(env: StaticEnvironment, stage: ToolStage): void {
 	const frames = env.theme().symbols.spinnerFrames.length;
 	let now = stage.now;
 	if (stage.spinnerFrame !== undefined && frames > 0) {
-		const at = Math.floor(now / SPINNER_INTERVAL_MS) % frames;
-		now += ((((stage.spinnerFrame - at) % frames) + frames) % frames) * SPINNER_INTERVAL_MS;
+		const at = Math.floor(now / DEFAULT_SPINNER_INTERVAL_MS) % frames;
+		now += ((((stage.spinnerFrame - at) % frames) + frames) % frames) * DEFAULT_SPINNER_INTERVAL_MS;
 	}
 	env.setNow(now);
-	(env.reduceMotion as Signal<boolean>).set(stage.spinnerFrame === undefined);
+	const still = stage.spinnerFrame === undefined;
+	env.setReduceMotion(still);
+	env.setSpinnerInterval(still ? 0 : DEFAULT_SPINNER_INTERVAL_MS);
 }
 
 /** The display state of every stage of a case, replaying the harness steps by label. */

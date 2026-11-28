@@ -16,7 +16,7 @@ class "kimi" {
 		}
 	}
 	// Replaces Moonshot-native K3 and K2.7 Code stream-idle branches.
-	on "kimi-code" "moonshot" {
+	on "kimi-code" "kimi-code-global" "moonshot" {
 		family "k3" {
 			stream-idle-timeout-ms 300000
 		}
@@ -44,7 +44,7 @@ class "kimi" {
 			max "max"
 		}
 	}
-	on "alibaba-coding-plan" "cursor" "kimi-code" "moonshot" "ollama-cloud" "openrouter" {
+	on "alibaba-coding-plan" "cursor" "kimi-code" "kimi-code-global" "moonshot" "ollama-cloud" "openrouter" {
 		family "k2.5" {
 			thinking-efforts "minimal" "low" "medium" "high"
 		}
@@ -110,7 +110,7 @@ class "kimi" {
 	models "*kimi*k2*" {
 		stream-markup-healing-pattern "kimi"
 	}
-	on "kimi-code" "moonshot" {
+	on "kimi-code" "kimi-code-global" "moonshot" {
 		family "k3" {
 			native-kimi-k3-reasoning #true
 			clamp-output-to-model-max #true

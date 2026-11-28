@@ -928,3 +928,15 @@ await Promise.withResolvers().promise;`;
 		expect(await Bun.file(download.path).text()).toBe("export payload");
 	});
 });
+
+describe("buildHeadlessLaunchArgs window placement", () => {
+	const OFFSCREEN = "--window-position=-10000,-10000";
+	const vp = { width: 800, height: 600 };
+
+	it("moves only the Windows headless window off-screen", () => {
+		expect(buildHeadlessLaunchArgs(vp, { headless: true, platform: "win32" })).toContain(OFFSCREEN);
+		expect(buildHeadlessLaunchArgs(vp, { headless: false, platform: "win32" })).not.toContain(OFFSCREEN);
+		expect(buildHeadlessLaunchArgs(vp, { headless: true, platform: "linux" })).not.toContain(OFFSCREEN);
+		expect(buildHeadlessLaunchArgs(vp, { headless: true, platform: "darwin" })).not.toContain(OFFSCREEN);
+	});
+});

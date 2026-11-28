@@ -15,6 +15,12 @@ use rustc_hash::FxBuildHasher;
 
 pub(in crate::perl) use super::code::{CodeBody, Cv};
 
+/// Counts non-continuation bytes in a Perl UTF-8 span without validating it.
+pub(in crate::perl) fn count_utf8_starts(bytes: &[u8]) -> usize {
+	const CONTINUATIONS: xutf::UnitSet = xutf::UnitSet::from_ranges(&[0x80..=0xbf]);
+	bytes.len() - CONTINUATIONS.count::<xutf::Utf8>(bytes)
+}
+
 /// A string with Perl's separate byte/UTF-8 representation flag.
 #[derive(Clone, Default, Debug)]
 pub(in crate::perl) struct PStr {
@@ -1375,6 +1381,13 @@ impl Hash for HKeyRef<'_> {
 
 impl indexmap::Equivalent<HKey> for HKeyRef<'_> {
 	fn equivalent(&self, key: &HKey) -> bool { !key.0.utf8 && self.0 == key.0.bytes.as_slice() }
+}
+
+/// A dead numeric temporary with no observable identity or side metadata.
+#[inline]
+pub(super) fn recyclable_number(sv: &Sv) -> bool {
+	Rc::strong_count(sv) == 1 && Rc::weak_count(sv) == 0 && sv.flags.get() == 0 && sv.metadata.get().is_none()
+		&& matches!(*sv.value.borrow(), Value::Int(_) | Value::UInt(_) | Value::Num(_))
 }
 
 /// Allocate an independent scalar cell with no blessing or match position.

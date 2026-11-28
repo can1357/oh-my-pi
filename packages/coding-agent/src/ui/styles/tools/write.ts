@@ -97,7 +97,7 @@ function fileHead(cx: PaintContext, props: ToolProps, term: WriteTerm): string {
 	const failed = props.tone === "error" || props.status === "error";
 	let glyph = "";
 	if (failed) glyph = theme.fg("error", theme.symbols.symbol("status.error"));
-	else if (term.call) glyph = cx.reduceMotion || !term.spinning ? "" : spinnerGlyph(cx);
+	else if (term.call) glyph = cx.spinnerInterval === 0 || !term.spinning ? "" : spinnerGlyph(cx);
 	else if (isActive(props)) glyph = spinnerGlyph(cx);
 	else glyph = theme.fg("accent", theme.symbols.symbol("tool.write"));
 	const rawPath = term.path ?? "";
@@ -331,7 +331,7 @@ function paintCard(node: UiNode, cx: PaintContext): Block {
 			rows.push(...quoteRows(theme, nodePlain(child), spine, expanded, message ? cx.width : undefined));
 		else if (childProps.role === "omp.tool.error") rows.push(errorDetail(theme, nodePlain(child)));
 		else if (nodeStyle(child) === "muted" && childProps.spans?.length === 1)
-			rows.push(theme.fg("muted", nodePlain(child)));
+			rows.push(`  ${theme.fg("muted", nodePlain(child))}`);
 		else rows.push(`  ${looseSpans(theme, childProps.spans ?? [])}`);
 	}
 	return { rows: rows.map(row => truncate(row, cx.width)) };

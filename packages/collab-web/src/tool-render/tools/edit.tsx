@@ -64,6 +64,7 @@ interface DiagnosticsEntry {
 /** One file's outcome — top-level `details` and `perFileResults[i]` share this shape. */
 interface FileEntry {
 	path: string | null;
+	checkoutNotice: string | null;
 	diff: string | null;
 	firstChangedLine: number | null;
 	op: string | null;
@@ -81,6 +82,7 @@ function fileEntry(d: Record<string, unknown>): FileEntry {
 	}
 	return {
 		path: str(d.path),
+		checkoutNotice: str(d.checkoutNotice),
 		diff: str(d.diff),
 		firstChangedLine: num(d.firstChangedLine),
 		op: str(d.op),
@@ -177,6 +179,7 @@ function FileSection({ entry, fallbackPath }: { entry: FileEntry; fallbackPath?:
 					</span>
 				</div>
 			)}
+			{entry.checkoutNotice !== null && <Note>{entry.checkoutNotice}</Note>}
 			{entry.isError
 				? entry.errorText !== null && <Output text={entry.errorText} error maxLines={10} />
 				: entry.diff !== null && entry.diff.length > 0 && <DiffBlock diff={entry.diff} maxLines={40} />}
@@ -204,7 +207,7 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 	} else if (details) {
 		const top = fileEntry(details);
 		outcome =
-			top.diff !== null || top.diagnostics !== null || top.move !== null ? (
+			top.diff !== null || top.diagnostics !== null || top.move !== null || top.checkoutNotice !== null ? (
 				<FileSection entry={top} fallbackPath={fallbackPath} />
 			) : (
 				<ResultText result={result} maxLines={8} />

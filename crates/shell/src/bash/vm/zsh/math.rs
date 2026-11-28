@@ -36,6 +36,7 @@ use std::{borrow::Cow, fmt, fmt::Write as _, sync::Arc};
 use bstr::{BString, ByteSlice};
 use hashbrown::HashMap;
 use parking_lot::Mutex;
+use xutf::{Utf8Decoder, Utf8Step};
 
 use crate::bash::syntax::zsh::{
 	tok,
@@ -1095,10 +1096,9 @@ fn mb_metacharlenconv(s: &[u8], i: usize, multibyte: bool) -> (usize, Option<u32
 	if tok::is_tok(c) {
 		return (1, None);
 	}
-	let mut buf = [0u8; 4];
-	let mut len = 0;
+	let mut decoder = Utf8Decoder::new();
 	let mut pos = i;
-	while at(s, pos) != 0 && len < 4 {
+	while at(s, pos) != 0 {
 		let inchar = if at(s, pos) == tok::META {
 			pos += 1;
 			at(s, pos) ^ 32
@@ -1108,12 +1108,10 @@ fn mb_metacharlenconv(s: &[u8], i: usize, multibyte: bool) -> (usize, Option<u32
 			at(s, pos)
 		};
 		pos += 1;
-		buf[len] = inchar;
-		len += 1;
-		match std::str::from_utf8(head(&buf, len)) {
-			Ok(decoded) => return (pos - i, decoded.chars().next().map(u32::from)),
-			Err(err) if err.error_len().is_none() => {},
-			Err(_) => break,
+		match decoder.push(inchar) {
+			Utf8Step::Char(ch) => return (pos - i, Some(u32::from(ch))),
+			Utf8Step::Pending => {},
+			Utf8Step::Reject => break,
 		}
 	}
 	if pos > i {

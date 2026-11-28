@@ -206,10 +206,14 @@ mod platform {
 
 		/// Resolves once the process exits: its pidfd becomes readable then.
 		pub async fn exited(&self) -> std::io::Result<()> {
-			let pidfd = tokio::io::unix::AsyncFd::with_interest(
-				self.pidfd.try_clone()?,
-				tokio::io::Interest::READABLE,
-			)?;
+			// SAFETY: the cloned `OwnedFd` keeps its descriptor open and
+			// unchanged for the `AsyncFd`'s lifetime.
+			let pidfd = unsafe {
+				tokio::io::unix::AsyncFd::register_with_interest(
+					self.pidfd.try_clone()?,
+					tokio::io::Interest::READABLE,
+				)
+			}?;
 			let _ready = pidfd.readable().await?;
 			Ok(())
 		}
@@ -445,7 +449,11 @@ mod platform {
 			if self.status() != ProcessStatus::Running {
 				return Ok(());
 			}
-			let kq = tokio::io::unix::AsyncFd::with_interest(kq, tokio::io::Interest::READABLE)?;
+			// SAFETY: the `OwnedFd` keeps the kqueue open and unchanged for the
+			// `AsyncFd`'s lifetime.
+			let kq = unsafe {
+				tokio::io::unix::AsyncFd::register_with_interest(kq, tokio::io::Interest::READABLE)
+			}?;
 			let _ready = kq.readable().await?;
 			Ok(())
 		}

@@ -149,6 +149,20 @@ function instance(ctor: new (...args: never[]) => object, name: string): IR {
 }
 
 const keywordFactories: Record<string, () => IR> = {
+	number: () => ({ k: "number" }),
+	"number.integer": () => ({ k: "number", int: true }),
+	boolean: () => ({ k: "boolean" }),
+	bigint: () => ({ k: "bigint" }),
+	symbol: () => ({ k: "symbol" }),
+	never: () => ({ k: "never" }),
+	null: () => ({ k: "null" }),
+	undefined: () => ({ k: "undefined" }),
+	unknown: () => ({ k: "unknown" }),
+	any: () => ({ k: "unknown" }),
+	object: () => ({ k: "anyobject" }),
+	Date: () => ({ k: "instance", ctor: Date, expected: "a Date" }),
+	true: () => ({ k: "lit", v: true }),
+	false: () => ({ k: "lit", v: false }),
 	string: () => ({ k: "string" }),
 	Key: () => ({ k: "union", members: [{ k: "string" }, { k: "symbol" }] }),
 	"unknown.any": () => ({ k: "unknown" }),
@@ -341,7 +355,7 @@ const keywordFactories: Record<string, () => IR> = {
 
 /** Lower a built-in keyword into fresh validation IR. */
 export function keywordIR(name: string): IR | undefined {
-	return keywordFactories[name]?.();
+	return Object.hasOwn(keywordFactories, name) ? keywordFactories[name]() : undefined;
 }
 
 /** Lower a regular expression into a string refinement. */

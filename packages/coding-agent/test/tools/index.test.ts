@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { createTools, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { createTools, resolveBuiltinToolPlan, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { toolCommandNames } from "@oh-my-pi/pi-coding-agent/exec/tool-command-host";
 
 Bun.env.PI_PYTHON_SKIP_CHECK = "1";
@@ -80,6 +80,66 @@ describe("createTools", () => {
 		expect(names.filter(name => name === "grep")).toHaveLength(1);
 		expect(names).toContain("glob");
 		expect(names).not.toContain("search");
+	});
+
+	it.each([true, false])("settles auto-find before publishing tools or hints (enabled=%s)", async enabled => {
+		const started = Promise.withResolvers<void>();
+		const decision = Promise.withResolvers<boolean>();
+		const resolveAutoFind = vi.fn(() => {
+			started.resolve();
+			return decision.promise;
+		});
+		const published: string[][] = [];
+		const session = createTestSession({
+			restrictToolNames: true,
+			settings: createSettingsWithOverrides({ "find.enabled": "auto" }),
+			setActiveToolNames: names => {
+				published.push([...names]);
+			},
+			isToolActive: name => published.at(-1)?.includes(name) ?? false,
+		});
+		const pending = createTools(session, ["glob", "grep", "Find"], { resolveAutoFind });
+		try {
+			const first = await Promise.race([started.promise.then(() => "judge"), pending.then(() => "roster")]);
+			expect(first).toBe("judge");
+			expect(published).toEqual([]);
+		} finally {
+			decision.resolve(enabled);
+		}
+
+		const tools = await pending;
+		const names = enabled ? ["glob", "grep", "find"] : ["glob", "grep"];
+		expect(published).toEqual([names]);
+		expect(tools.map(tool => tool.name)).toEqual(names);
+		expect(tools[0].description.includes("`find`")).toBe(enabled);
+		expect(tools[1].description.includes("`find`")).toBe(enabled);
+		expect(resolveAutoFind).toHaveBeenCalledTimes(1);
+
+		// A live re-plan checks the current judge instead of keeping the startup decision.
+		const livePlan = await resolveBuiltinToolPlan(session, ["Find"]);
+		expect(livePlan.names).toEqual([]);
+		expect(livePlan.isAllowed("find")).toBe(false);
+	});
+
+	it.each([
+		{ mode: "on", toolNames: ["glob", "find"], expectedNames: ["glob", "find"] },
+		{ mode: "off", toolNames: ["glob", "find"], expectedNames: ["glob"] },
+		{ mode: "auto", toolNames: ["glob"], expectedNames: ["glob"] },
+		{ mode: "auto", toolNames: undefined, expectedNames: [] },
+	])("does not probe auto-find for $mode with a restricted request of $toolNames", async ({
+		mode,
+		toolNames,
+		expectedNames,
+	}) => {
+		const session = createTestSession({
+			restrictToolNames: true,
+			settings: createSettingsWithOverrides({ "find.enabled": mode }),
+		});
+		const resolveAutoFind = vi.fn(async () => false);
+		const tools = await createTools(session, toolNames && [...toolNames], { resolveAutoFind });
+
+		expect(tools.map(tool => tool.name)).toEqual([...expectedNames]);
+		expect(resolveAutoFind).not.toHaveBeenCalled();
 	});
 
 	it("still exposes eval when only the js backend is allowed", async () => {

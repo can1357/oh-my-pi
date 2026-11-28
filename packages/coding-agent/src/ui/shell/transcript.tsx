@@ -43,6 +43,8 @@ import { mountNode, type ViewEntry, ViewList } from "./views";
 
 /** A block in the transcript. */
 export interface TranscriptBlock extends ViewEntry {
+	/** A real user prompt for transcript navigation, not a synthetic message. */
+	readonly prompt?: true;
 	/** Whether the block currently draws as compact rows (reactive). */
 	readonly compact: Accessor<boolean>;
 	/** The block draws its own blank row below it: no separator follows it. */
@@ -58,6 +60,7 @@ export interface TranscriptBlock extends ViewEntry {
 
 /** Options of {@link Transcript.append}. */
 export interface BlockOptions {
+	readonly prompt?: boolean;
 	/** Pack against compact neighbours (may change over time). */
 	readonly compact?: Accessor<boolean>;
 	/**
@@ -81,6 +84,8 @@ export interface BlockOptions {
 export interface TranscriptHost {
 	/** Whether `node` has rows in terminal scrollback. */
 	retired(node: UiNode): boolean;
+	/** Whether the terminal acknowledged rows of `node`'s own content in scrollback, not only its separator. */
+	contentInHistory(node: UiNode): boolean;
 	/** Rebuild terminal scrollback from the current main region. */
 	replayHistory(): void;
 	/** Describe again the settled block holding `node` (Tern dropped its description). */
@@ -264,6 +269,11 @@ export class Transcript {
 		return this.#host?.retired(block.node) ?? false;
 	}
 
+	/** Whether the terminal acknowledged rows of `block`'s own content in scrollback, not only its separator. */
+	contentInHistory(block: TranscriptBlock): boolean {
+		return this.#host?.contentInHistory(block.node) ?? false;
+	}
+
 	/** Remove `block`; scrollback is rebuilt when it had rows there. */
 	remove(block: TranscriptBlock): void {
 		const retired = this.retired(block);
@@ -400,6 +410,7 @@ export class Transcript {
 			compact: options?.compact ?? NOT_COMPACT,
 			spacedBelow: options?.spacedBelow === true,
 			head: options?.head === true,
+			...(options?.prompt ? { prompt: true } : {}),
 			native: () => {
 				const nodes = native();
 				for (const node of nodes) this.#fallback(node);

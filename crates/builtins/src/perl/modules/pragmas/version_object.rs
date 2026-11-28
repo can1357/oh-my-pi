@@ -4,6 +4,7 @@ use std::{cmp::Ordering, rc::Rc};
 
 use super::super::{alias, arg, boolean, define, text};
 use crate::perl::{
+	charnames,
 	interp::{Cx, Interp, PResult, Ret},
 	value::{HKey, PStr, Ref, Sv, Value, new_av, new_sv},
 };
@@ -289,10 +290,10 @@ fn lookup(i: &mut Interp<'_>, name: &str) -> Option<u32> {
 	if let Some((script, short)) = name.split_once(':') {
 		let case = if short.starts_with(char::is_uppercase) { "CAPITAL" } else { "SMALL" };
 		let expanded = format!("{} {case} LETTER {}", script.to_ascii_uppercase(), short.to_ascii_uppercase());
-		return unicode_names2::character(&expanded).map(u32::from);
+		return charnames::character(&expanded);
 	}
 	if name.bytes().any(|b| b.is_ascii_lowercase()) { return None; }
-	unicode_names2::character(name).map(u32::from)
+	charnames::character(name)
 }
 fn vianame(i: &mut Interp<'_>, a: Vec<Sv>, _: Cx) -> PResult<Ret> {
 	let name = text(&a, 0);
@@ -313,6 +314,6 @@ fn viacode(i: &mut Interp<'_>, a: Vec<Sv>, _: Cx) -> PResult<Ret> {
 		10 => Some("LINE FEED"), 11 => Some("LINE TABULATION"), 12 => Some("FORM FEED"), 13 => Some("CARRIAGE RETURN"),
 		27 => Some("ESCAPE"), 127 => Some("DELETE"), _ => None,
 	};
-	let name = name.map(str::to_owned).or_else(|| char::from_u32(cp).and_then(unicode_names2::name).map(|n| n.to_string()));
+	let name = name.map(str::to_owned).or_else(|| charnames::name(cp));
 	Ok(Ret::One(name.map_or(Value::Undef, |s| Value::str(&s))))
 }

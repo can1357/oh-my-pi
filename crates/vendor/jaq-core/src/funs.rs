@@ -1,24 +1,15 @@
-use crate::box_iter::BoxIter;
-use crate::native::{bome, v, Filter, RunPathsPtr};
-use crate::{Bind, DataT, Error, Exn, RunPtr, ValT, ValX};
+use crate::native::{bome, v, Filter, Fun};
+use crate::filter::{first_then,n_item,n_map,n_once,paths_node,run_node,valid_path,INode,Item,Payload};
+use crate::pull::{Action, Input, Node};
+use crate::{Bind, Cv, DataT, Error, Exn, Native, RcList, RunPtr, ValT, ValX};
 use alloc::{boxed::Box, vec::Vec};
 
 pub fn run<D: DataT>() -> Box<[Filter<RunPtr<D>>]>
 where
     for<'a> D::V<'a>: ValT,
 {
-    let f = || [Bind::Fun(())].into();
     Box::new([
         ("error", v(0), (|cv| bome(Err(Error::new(cv.1))))),
-        ("path", f(), |mut cv| {
-            let (f, fc) = cv.0.pop_fun();
-            let cvp = (fc, (cv.1, Default::default()));
-            Box::new(f.paths(cvp).map(|vp| {
-                let (_v, path) = vp?;
-                let path: Vec<_> = path.iter().cloned().collect();
-                Ok(path.into_iter().rev().collect())
-            }))
-        }),
         ("range", v(3), |mut cv| {
             let by = cv.0.pop_var();
             let to = cv.0.pop_var();
@@ -53,113 +44,93 @@ fn range<V: ValT>(mut from: ValX<V>, to: V, by: V) -> impl Iterator<Item = ValX<
     })
 }
 
-fn once_or_empty<'a, T: 'a, E: 'a>(r: Result<Option<T>, E>) -> BoxIter<'a, Result<T, E>> {
-    Box::new(r.transpose().into_iter())
+type PathCv<'a,D> = Cv<'a,D,(<D as DataT>::V<'a>,RcList<<D as DataT>::V<'a>>)>;
+
+fn path<'a,D:DataT>(mut cv: Cv<'a,D>) -> INode<'a,D> {
+    let (f, ctx) = cv.0.pop_fun();
+    n_map(paths_node(f, (ctx, (cv.1, RcList::new()))), |x| x.and_then(valid_path::<D>).map(|(_,path)| {
+        let keys: Vec<_> = path.iter().cloned().collect();
+        Payload::Val(keys.into_iter().rev().collect())
+    }))
 }
 
-macro_rules! first {
-    ( $run:ident ) => {
-        |mut cv| {
-            let (f, fc) = cv.0.pop_fun();
-            Box::new(f.$run((fc, cv.1)).next().into_iter())
-        }
-    };
-}
-macro_rules! last {
-    ( $run:ident ) => {
-        |mut cv| {
-            let (f, fc) = cv.0.pop_fun();
-            once_or_empty(f.$run((fc, cv.1)).try_fold(None, |_, x| x.map(Some)))
-        }
-    };
-}
+#[derive(Copy,Clone)]
+enum Kind { First, Last, Limit, Skip }
 
-macro_rules! while_gtz {
-    ( $n:expr, $gtz:expr, $lez:expr ) => {{
-        let mut n = Some($n);
-        Box::new(core::iter::from_fn(move || {
-            while let Some(i) = n.take().filter(|i| *i > 0.into()) {
-                match i - 1.into() {
-                    Ok(i) => n = Some(i),
-                    Err(e) => return Some(Err(e.into())),
-                }
-                $gtz
-            }
-            $lez
-        }))
-    }};
-}
-
-/// jq defines `limit` and `skip` as
-///
-/// ~~~ text
-/// def limit($n; expr):
-///   if $n > 0 then label $out | foreach expr as $item ($n; . - 1; $item, if . <= 0 then break $out else empty end)
-///   elif $n == 0 then empty
-///   else error("limit doesn't support negative count") end;
-/// def skip($n; expr):
-///   if $n > 0 then foreach expr as $item ($n; . - 1; if . < 0 then $item else empty end)
-///   elif $n == 0 then expr
-///   else error("skip doesn't support negative count") end;
-/// ~~~
-///
-/// They are native here so that `path(limit(...))` works:
-/// variables never have a path in jaq, whereas they may in jq.
-macro_rules! limit {
-    ( $run:ident ) => {
-        |mut cv| {
-            let ((f, fc), n) = (cv.0.pop_fun(), cv.0.pop_var());
+fn apply<'a,D:DataT,T:'a>(mut cv: Cv<'a,D,T>, eval: fn(crate::compile::TermId,Cv<'a,D,T>)->INode<'a,D>, kind: Kind, paths: bool) -> INode<'a,D> {
+    let (f, ctx) = cv.0.pop_fun();
+    let count = match kind {
+        Kind::Limit | Kind::Skip => {
+            let n = cv.0.pop_var();
             if n == 0.into() {
-                return Box::new(core::iter::empty());
-            } else if !(n > 0.into()) {
-                let e = Error::str("limit doesn't support negative count");
-                return Box::new(core::iter::once(Err(e.into())));
+                return if matches!(kind,Kind::Limit) { Box::new(crate::pull::Empty) } else { validated(eval(f,(ctx,cv.1)),paths) };
             }
-            let mut iter = f.$run((fc, cv.1));
-            while_gtz!(n, return iter.next(), None)
-        }
+            if !(n > 0.into()) {
+                let msg = if matches!(kind,Kind::Limit) { "limit doesn't support negative count" } else { "skip doesn't support negative count" };
+                return n_once(Err(Error::str(msg).into()));
+            }
+            Some(n)
+        },
+        _ => None,
     };
+    let child = validated(eval(f,(ctx,cv.1)),paths);
+    if matches!(kind,Kind::First) {
+        return first_then(child, |x| x.map_or_else(|| Box::new(crate::pull::Empty) as INode<'a,D>, n_item));
+    }
+    Box::new(Take { child: Some(child), kind, count, last: None, done: false })
 }
-macro_rules! skip {
-    ( $run:ident ) => {
-        |mut cv| {
-            let ((f, fc), n) = (cv.0.pop_fun(), cv.0.pop_var());
-            if n == 0.into() {
-                return f.$run((fc, cv.1));
-            } else if !(n > 0.into()) {
-                let e = Error::str("skip doesn't support negative count");
-                return Box::new(core::iter::once(Err(e.into())));
-            }
-            let mut iter = f.$run((fc, cv.1));
-            // as jq's countdown, skip while `n - 1` is not negative
-            let mut n = Some(n);
-            Box::new(core::iter::from_fn(move || {
-                while let Some(i) = n.take() {
-                    match i - 1.into() {
-                        Ok(i) if i < 0.into() => break,
-                        Ok(i) => n = Some(i),
-                        Err(e) => return Some(Err(e.into())),
-                    }
-                    if let Some(e) = iter.next()?.err() {
-                        return Some(Err(e));
+
+fn validated<'a,D:DataT>(node: INode<'a,D>, paths: bool) -> INode<'a,D> {
+    if !paths { return node }
+    n_map(node, |x| x.and_then(valid_path::<D>).map(|(v,p)| Payload::ValPath(v,p)))
+}
+
+struct Take<'a,D:DataT> {
+    child: Option<INode<'a,D>>,
+    kind: Kind,
+    count: Option<D::V<'a>>,
+    last: Option<Item<'a,D>>,
+    done: bool,
+}
+
+impl<'a,D:DataT> Node<'a,Item<'a,D>> for Take<'a,D> {
+    fn resume(&mut self, input: Input<Item<'a,D>>) -> Action<'a,Item<'a,D>> {
+        if self.done { return Action::Done }
+        match input {
+            Input::Start => {
+                if let Some(n) = self.count.take() {
+                    if matches!(self.kind,Kind::Limit) && !(n > 0.into()) { self.done = true; return Action::Done }
+                    match n - 1.into() {
+                        Ok(n) if matches!(self.kind,Kind::Skip) && n < 0.into() => {},
+                        Ok(n) => self.count = Some(n),
+                        Err(e) => { self.done = true; return Action::Yield(Err(e.into())) },
                     }
                 }
-                iter.next()
-            }))
+                self.child.take().map_or(Action::Continue,Action::Descend)
+            },
+            Input::End => { self.done = true; self.last.take().map_or(Action::Done, Action::Yield) },
+            Input::Item(x) => match self.kind {
+                Kind::Last if x.is_ok() => { self.last = Some(x); Action::Continue },
+                Kind::Last => { self.done = true; Action::Yield(x) },
+                Kind::Skip if self.count.is_some() && x.is_ok() => self.resume(Input::Start),
+                _ => Action::Yield(x),
+            },
         }
-    };
+    }
 }
 
-pub fn paths<D: DataT>() -> Box<[Filter<RunPathsPtr<D>>]>
-where
-    for<'a> D::V<'a>: ValT,
-{
+pub(crate) fn resumable<D:DataT>() -> impl Iterator<Item=Fun<D>> {
+    macro_rules! both {
+        ($kind:ident) => { Native::resumable(|cv: Cv<'_,D>| apply(cv,run_node,Kind::$kind,false))
+            .with_paths(|cv: PathCv<'_,D>| apply(cv,paths_node,Kind::$kind,true)) };
+    }
     let f = || [Bind::Fun(())].into();
-    let vf = || [Bind::Var(()), Bind::Fun(())].into();
-    Box::new([
-        ("first", f(), (first!(run), first!(paths))),
-        ("last", f(), (last!(run), last!(paths))),
-        ("limit", vf(), (limit!(run), limit!(paths))),
-        ("skip", vf(), (skip!(run), skip!(paths))),
-    ])
+    let vf = || [Bind::Var(()),Bind::Fun(())].into();
+    [
+        ("path",f(),Native::resumable(path::<D>)),
+        ("first",f(),both!(First)),
+        ("last",f(),both!(Last)),
+        ("limit",vf(),both!(Limit)),
+        ("skip",vf(),both!(Skip)),
+    ].into_iter()
 }

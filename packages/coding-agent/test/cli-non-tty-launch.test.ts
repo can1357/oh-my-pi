@@ -40,6 +40,8 @@ async function launchWithoutTerminal(
 		NO_COLOR: "1",
 		// CI can run on EC2 even when no credential variables are inherited.
 		AWS_EC2_METADATA_DISABLED: "true",
+		// Test runtime: keeps the child off the OS keychain.
+		PI_TEST_RUNTIME: "1",
 	};
 	const discoveryArgs = extensionDiscovery ? [] : ["--no-extensions"];
 	const proc = Bun.spawn([process.execPath, cliEntry, "--no-session", ...discoveryArgs, ...MODEL_ARGS, ...args], {
@@ -137,13 +139,16 @@ describe("launch without a terminal on stdin", () => {
 		expect(run.stderr).toContain("EXT_FLAG=reviewer");
 	}, 30_000);
 
-	it("still runs a real prompt after an extension flag value in print mode", async () => {
+	it("reuses one extension binding and treats a file-looking flag value as data in print mode", async () => {
 		using tempDir = TempDir.createSync("@omp-non-tty-ext-prompt-");
 		const extensionPath = await writeFlagExtension(tempDir, "spawn-peer");
-		const run = await launchWithoutTerminal(tempDir, ["-e", extensionPath, "--spawn-peer", "reviewer", "say ok"]);
+		const run = await launchWithoutTerminal(tempDir, ["-e", extensionPath, "--spawn-peer", "@missing.md", "say ok"]);
 
 		expect(run.stderr).not.toContain(TTY_ERROR);
 		expect(run.stderr).toContain(NO_API_KEY);
+		// Each factory binding reports independently. A second SDK binding would
+		// either lose the parsed value or add another report at process exit.
+		expect(run.stderr.match(/^EXT_FLAG=.*$/gm)).toEqual(["EXT_FLAG=@missing.md"]);
 		expect(run.exitCode, run.stderr).toBe(1);
 	}, 30_000);
 

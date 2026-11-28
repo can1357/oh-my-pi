@@ -364,8 +364,8 @@ export class RemoteModelRegistryOwner implements ModelRegistryOwner {
 		return this.#remote.call("refreshRuntimeProviders", strategy);
 	}
 
-	hydrateCredentialScopedModelCaches(): Promise<void> {
-		return this.#remote.call("hydrateCredentialScopedModelCaches");
+	hydrateCredentialScopedModelCaches(providers?: ReadonlySet<string>): Promise<void> {
+		return this.#remote.call("hydrateCredentialScopedModelCaches", providers && [...providers]);
 	}
 
 	reapplyModelPolicies(): Promise<void> {

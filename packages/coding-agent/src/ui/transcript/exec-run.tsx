@@ -327,20 +327,21 @@ export function ExecRunBlock(props: { readonly run: ExecRun }): JSXNode {
 							}
 						/>
 					</RunBox>,
-					images().list.map((image, index) =>
-						images().show ? (
+					images().list.map((image, index) => {
+						if (!images().show) return <text spans={[{ t: imagePlaceholder(image), s: "muted" }]} />;
+						const bytes = Buffer.from(image.data, "base64");
+						const size = imageSize(bytes);
+						return (
 							<image
 								key={`img${index}`}
 								term={inlineImageTerm()}
-								blob={registerBlob(Buffer.from(image.data, "base64"), image.mimeType)}
+								blob={registerBlob(bytes, image.mimeType)}
 								alt={image.mimeType}
-								w={imageSize(image.data)?.w}
-								h={imageSize(image.data)?.h}
+								w={size?.w}
+								h={size?.h}
 							/>
-						) : (
-							<text spans={[{ t: imagePlaceholder(image), s: "muted" }]} />
-						),
-					),
+						);
+					}),
 				];
 			}}
 		</tool>

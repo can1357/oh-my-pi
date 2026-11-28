@@ -1,9 +1,11 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
 import { expect, test } from "bun:test";
+import type { TspPickerProps } from "@oh-my-pi/pi-wire";
 import type { UiEvent } from "@oh-my-pi/pi-tui";
 import { fullscreenMenuView } from "../../../../src/modes/controllers/selector-views";
 import { nativeShell } from "../../../helpers/native-shell";
 import type { TranscriptEntryLike } from "../../../../src/session/transcript/transcript-entry";
+import type { CopyPickSource } from "../../../../src/modes/view-model/overlays/copy-selector";
 import { CopySelector } from "../../../../src/ui/overlays/pickers/copy-selector";
 import { type Driver, pickerSuite } from "./harness";
 
@@ -88,7 +90,7 @@ function ev(
 	};
 }
 
-test("the primary Copy action picks the outlined turn; its preview action picks just the block", async () => {
+test("the Copy picker accepts the whole turn or copies the raw text of the clicked preview", async () => {
 	await using ui = await nativeShell();
 	const picked: string[] = [];
 	const text = "more\n```py\nprint(1)\n```";
@@ -103,8 +105,73 @@ test("the primary Copy action picks the outlined turn; its preview action picks 
 		),
 	);
 	ui.send({ ev: "action", sf: ui.sf, id: ui.node("picker").id, act: "pick" });
-	ui.send({ ev: "action", sf: ui.sf, id: ui.node("section", "b0").id, act: "copy" });
+	const preview = ui.node("section", "b0");
+	// Tern handles the reserved `copy` action locally, bypassing the shared handoff.
+	expect(preview.p.actions).toMatchObject({ click: "pick" });
+	ui.send({ ev: "action", sf: ui.sf, id: preview.id, act: "pick" });
 	expect(picked).toEqual([text, "print(1)"]);
+});
+
+test("the native transcript picker previews the selected code block and hands off its language separately", async () => {
+	await using ui = await nativeShell();
+	const second = "second\nsecond line";
+	const text = `\`\`\`ts\nfirst\n\`\`\`\n\n\`\`\`py\n${second}\n\`\`\``;
+	const picked: { content: string; source: CopyPickSource }[] = [];
+	ui.shell.overlays.show(() =>
+		fullscreenMenuView(
+			"annotate",
+			<CopySelector
+				entries={[
+					entry("turn", null, { role: "user", content: text, timestamp: 1 }),
+					entry("other", "turn", assistant([{ type: "text", text: "other turn" }])),
+				]}
+				onPick={(content, _label, source) => picked.push({ content, source })}
+				onCancel={noop}
+			/>,
+		),
+	);
+	const picker = (): TspPickerProps => ui.node("picker").p as TspPickerProps;
+	const turn = picker().items![0]!;
+	ui.send({ ev: "activate", sf: ui.sf, id: ui.node("picker").id, item: turn.id });
+	expect(ui.node("picker").p.selected).toBe(turn.id);
+	expect(picked).toEqual([]);
+
+	const blocks = picker().actions!.find(action => action.label === "Blocks")!;
+	ui.send({ ev: "action", sf: ui.sf, id: ui.node("picker").id, act: blocks.id });
+	const secondRow = picker().items![1]!;
+	ui.send({ ev: "select", sf: ui.sf, id: ui.node("picker").id, item: secondRow.id });
+	const preview = ui.node("section");
+	expect(preview.p.role).toBe("omp.picker.block.focused");
+	const code = ui.children(preview).find(child => child.k === "code")!;
+	expect(code.p.text).toBe(second);
+	expect(code.p.lang).toBe("py");
+
+	ui.send({ ev: "activate", sf: ui.sf, id: ui.node("picker").id, item: secondRow.id });
+	expect(picked.map(({ content }) => content)).toEqual([second]);
+	expect(picked[0]?.source.block?.language).toBe("py");
+
+	// Tern binds bar actions by keycap: Esc must back out of the blocks, not close the picker.
+	const back = picker().actions!.find(action => action.id === "back")!;
+	expect(back.keys).toContain("esc");
+	ui.send({ ev: "action", sf: ui.sf, id: ui.node("picker").id, act: back.id });
+	expect(picker().items!.map(item => item.id)).toEqual(["turn", "other"]);
+});
+
+test("activating a turn without blocks accepts it at once", async () => {
+	await using ui = await nativeShell();
+	const picked: string[] = [];
+	ui.shell.overlays.show(() =>
+		fullscreenMenuView(
+			"annotate",
+			<CopySelector
+				entries={[entry("plain", null, { role: "user", content: "plain prose", timestamp: 1 })]}
+				onPick={content => picked.push(content)}
+				onCancel={noop}
+			/>,
+		),
+	);
+	ui.send({ ev: "activate", sf: ui.sf, id: ui.node("picker").id, item: "plain" });
+	expect(picked).toEqual(["plain prose"]);
 });
 
 pickerSuite({

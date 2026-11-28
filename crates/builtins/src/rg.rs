@@ -24,7 +24,7 @@ use std::{
 use clap::{ArgAction, Parser, ValueEnum};
 use grep_cli::DecompressionMatcher;
 use grep_matcher::{Captures, LineTerminator, Matcher};
-use grep_pcre2::{RegexMatcher as PcreMatcher, RegexMatcherBuilder as PcreMatcherBuilder};
+use omp_xfs::grep::pcre::{RegexMatcher as PcreMatcher, RegexMatcherBuilder as PcreMatcherBuilder};
 use grep_printer::{JSONBuilder, Stats};
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{
@@ -41,6 +41,7 @@ use crate::grep::{
 	describe_search_error, exit_status, for_each_nonempty_match,
 };
 use crate::host::{AsyncUtility, Host, StdoutFile, StreamWriter, forward_slash_display};
+use crate::root_guard;
 use crate::stdio;
 
 use ignore::{
@@ -55,6 +56,9 @@ use omp_xfs::{
 	ignore::{Match as RuleMatch, Rules},
 	walk,
 };
+
+/// `rg`'s spelling of the [`root_guard`] escape hatches.
+const ROOT_FLAGS: root_guard::Flags = root_guard::Flags { allow: "--allow-root", depth: Some("--max-depth") };
 
 #[derive(Parser, Debug)]
 #[command(
@@ -284,6 +288,10 @@ pub(crate) struct Rg {
 	/// Limit directory traversal depth.
 	#[arg(short = 'd', long = "max-depth", alias = "maxdepth", value_name = "NUM")]
 	max_depth: Option<usize>,
+
+	/// Permit searching a filesystem root such as / deeper than --max-depth 2.
+	#[arg(long = "allow-root")]
+	allow_root: bool,
 
 	/// Ignore files larger than this size.
 	#[arg(long = "max-filesize", value_name = "NUM")]
@@ -2290,6 +2298,13 @@ impl AsyncUtility for Rg {
 		paths,
 		!cli.files && !pattern_stdin_consumed && host.stdin_is_search_input(),
 	);
+	if !cli.allow_root
+		&& let Err(refusal) =
+			root_guard::check(operands.paths.iter().map(|path| host.resolve(path)), cli.max_depth, ROOT_FLAGS)
+	{
+		let _ = writeln!(host.stderr, "rg: {refusal}");
+		return 2;
+	}
 	opts.line_number = effective_line_number(&cli);
 	if cli.files {
 		let outcome = list_files(host, &cli, &operands, &opts.record, &mut out).await;
@@ -2323,6 +2338,15 @@ mod tests {
 	async fn run(args: &[&str], stdin: &str) -> (i32, String, String) {
 		let (code, capture) = run_async_util::<Rg>(args, stdin, "/").await;
 		(code, capture.out(), capture.err())
+	}
+
+	/// Failure mode: `rg x /` walked the whole disk for hours.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn refuses_to_search_the_filesystem_root() {
+		let (code, out, err) = run(&["--max-depth", "3", "needle", "/"], "").await;
+		assert_eq!((code, out.as_str()), (2, ""));
+		assert!(err.starts_with("rg: refusing") && err.contains("--allow-root"), "stderr: {err}");
 	}
 
 	fn anchored_glob_tree() -> tempfile::TempDir {

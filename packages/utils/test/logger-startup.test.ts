@@ -1,6 +1,7 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as logger from "@oh-my-pi/pi-utils/logger";
+import { moduleLoadBuffer } from "@oh-my-pi/pi-utils/timing-buffer";
 
 /** Run `fn` with PI_DEBUG_STARTUP set, capturing `[startup]` stderr markers. */
 function withMarkerCapture<T>(fn: () => T): { result: T; markers: string[] } {
@@ -66,6 +67,87 @@ describe("PI_DEBUG_STARTUP streaming markers", () => {
 			if (prev !== undefined) process.env.PI_DEBUG_STARTUP = prev;
 		}
 		expect(writes.filter(w => w.startsWith("[startup]"))).toEqual([]);
+	});
+});
+
+describe("startup wall-clock accounting", () => {
+	it("clips detached work at its parent's end and counts overlapping and unfinished work once at the snapshot", async () => {
+		let now = 10;
+		const clock = spyOn(performance, "now").mockImplementation(() => now);
+		const reports: string[] = [];
+		const sink = spyOn(console, "error").mockImplementation(text => reports.push(String(text)));
+		const gate = Promise.withResolvers<void>();
+		let tail: Promise<void> | undefined;
+		logger.startTiming();
+		try {
+			now = 15;
+			logger.time("parent", () => {
+				now = 17;
+				tail = logger.time("detached", () => gate.promise);
+				now = 25;
+			});
+			now = 30;
+			logger.time("next", () => {
+				now = 40;
+			});
+			now = 50;
+			logger.printTimings();
+			const report = reports[0];
+			expect(report).toContain("parent: 10.0ms (2.0ms outside child spans)");
+			expect(report).toContain("detached: 33.0ms [open at snapshot]");
+			expect(report).toContain("next: 10.0ms @30.0ms");
+			expect(report).toContain("App timing window: 40.0ms (35.0ms in spans; 5.0ms unmarked)");
+			expect(report).toContain("Total: 50.0ms");
+		} finally {
+			gate.resolve();
+			await tail;
+			logger.endTiming();
+			sink.mockRestore();
+			clock.mockRestore();
+		}
+	});
+
+	it("keeps module observations out of app accounting and excludes gaps between reads and evaluations", async () => {
+		let now = 50;
+		const clock = spyOn(performance, "now").mockImplementation(() => now);
+		const reports: string[] = [];
+		const sink = spyOn(console, "error").mockImplementation(text => reports.push(String(text)));
+		const gate = Promise.withResolvers<void>();
+		logger.startTiming();
+		try {
+			now = 60;
+			const first = logger.time("first", () => gate.promise);
+			now = 65;
+			logger.time("second", () => {
+				now = 70;
+			});
+			now = 75;
+			gate.resolve();
+			await first;
+			now = 80;
+			logger.time("last", () => {
+				now = 85;
+			});
+			moduleLoadBuffer().push(
+				{ path: "a.ts", readStart: 2, readEnd: 3, bodyStart: 20, bodyEnd: 25 },
+				{ path: "b.ts", readStart: 60, readEnd: 62, bodyStart: 82, bodyEnd: 86 },
+				{ path: "c.ts", readStart: 62, readEnd: 63, bodyStart: 83, bodyEnd: 85 },
+			);
+			now = 100;
+			logger.printTimings();
+			const report = reports[0];
+			expect(report).toContain("first: 15.0ms [overlaps sibling]");
+			expect(report).toContain("second: 5.0ms [overlaps sibling]");
+			expect(report).toContain("last: 5.0ms @80.0ms");
+			expect(report).toContain("App timing window: 50.0ms (20.0ms in spans; 30.0ms unmarked)");
+			expect(report).toContain("Source reads: 4.0ms covered; evaluation including top-level await: 9.0ms covered");
+			expect(report).toContain("Total: 100.0ms");
+		} finally {
+			gate.resolve();
+			logger.endTiming();
+			sink.mockRestore();
+			clock.mockRestore();
+		}
 	});
 });
 

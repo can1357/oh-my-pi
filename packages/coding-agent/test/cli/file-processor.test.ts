@@ -53,3 +53,62 @@ describe.skipIf(!hasFfmpeg)("processFileArguments video attachments", () => {
 		expect(processed.text).toContain("Preview grid: 6 frames (3x2)");
 	});
 });
+
+function createPdfWithText(text: string): string {
+	const chunks: string[] = [];
+	let position = 0;
+	const offsets = [0];
+	const add = (chunk: string) => {
+		chunks.push(chunk);
+		position += Buffer.byteLength(chunk);
+	};
+
+	add("%PDF-1.4\n");
+	offsets.push(position);
+	add("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+	offsets.push(position);
+	add("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+	offsets.push(position);
+	add(
+		"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\nendobj\n",
+	);
+	offsets.push(position);
+	add("4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n");
+
+	const stream = `BT /F1 24 Tf 72 720 Td (${text}) Tj ET`;
+	offsets.push(position);
+	add(`5 0 obj\n<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream\nendobj\n`);
+
+	const xrefPosition = position;
+	add("xref\n0 6\n0000000000 65535 f \n");
+	for (let i = 1; i <= 5; i++) {
+		add(`${String(offsets[i]).padStart(10, "0")} 00000 n \n`);
+	}
+	add(`trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xrefPosition}\n%%EOF\n`);
+
+	return chunks.join("");
+}
+
+describe("processFileArguments PDF attachments", () => {
+	let testDir: string;
+
+	beforeEach(async () => {
+		testDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-pdf-file-args-"));
+	});
+
+	afterEach(async () => {
+		await removeWithRetries(testDir);
+	});
+
+	it("converts PDF file arguments before adding them to the prompt", async () => {
+		const pdfPath = path.join(testDir, "document.pdf");
+		await fs.writeFile(pdfPath, createPdfWithText("Hello PDF attachment"));
+
+		const result = await processFileArguments([pdfPath], { autoResizeImages: false });
+
+		expect(result.images).toEqual([]);
+		expect(result.text).toContain("Hello PDF attachment");
+		expect(result.text).not.toContain("%PDF-1.4");
+		expect(result.text).not.toContain("stream");
+	});
+});

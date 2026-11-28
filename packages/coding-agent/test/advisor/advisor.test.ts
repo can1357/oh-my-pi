@@ -1801,7 +1801,7 @@ describe("advisor", () => {
 			expect(firstReview).not.toContain("_thinking:_");
 
 			// Switch advisor model identity and verify includeReasoning: false stays enforced
-			currentModelIdentity = "google-antigravity/gemini-4-argon";
+			currentModelIdentity = "google/gemini-3-pro";
 			messages.push({
 				role: "assistant",
 				content: [

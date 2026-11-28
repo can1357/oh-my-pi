@@ -9,11 +9,8 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getProjectDir, TempDir } from "@oh-my-pi/pi-utils";
 import * as startupCache from "../src/modes/interactive/startup-cache";
-import {
-	beginStartupComposer,
-	stopPendingStartupComposer,
-	takeStartupComposerLease,
-} from "../src/modes/startup-composer";
+import { beginStartupComposer } from "../src/modes/startup-composer";
+import { stopPendingStartupComposer, takeStartupComposerLease } from "../src/modes/startup-frame";
 import { getCurrentThemeName, initTheme } from "../src/ui/theme/service";
 import { StartupCache } from "../src/modes/interactive/startup-cache";
 import { predictedStatusLine, type StatusPrediction } from "../src/modes/interactive/status-prediction";
@@ -27,7 +24,7 @@ const prediction: StatusPrediction = {
 		thinkingLevel: "high",
 		usingSubscription: true,
 		autoCompact: true,
-		fastMode: false,
+		fastTier: "ultrafast",
 		context: { tokens: 6_000, window: 200_000, percent: 3 },
 	},
 };
@@ -62,6 +59,25 @@ describe("startup cache status prediction", () => {
 		store.writeStatus("/work/beta", beta);
 		expect(store.read("/work/alpha").status?.facts.thinkingLevel).toBe("high");
 		expect(store.read("/work/gamma").status?.facts.thinkingLevel).toBe("low");
+	});
+
+	it("remembers the screen mode for the next first frame; older entries start inline", () => {
+		const store = open();
+		const preferences: startupCache.StartupPreferences = {
+			quiet: false,
+			composerShape: "box",
+			resizeScrollback: "rebuild",
+			autocompleteMaxVisible: 5,
+			vim: false,
+			imeSafeCursor: false,
+			screen: "fullscreen",
+		};
+		store.write("/work/alpha", preferences, {});
+		expect(store.read("/work/alpha").preferences?.screen).toBe("fullscreen");
+		// An entry written before the setting existed carries no screen field.
+		const { screen: _screen, ...older } = preferences;
+		store.write("/work/gamma", JSON.parse(JSON.stringify(older)), {});
+		expect(store.read("/work/gamma").preferences?.screen).toBe("inline");
 	});
 
 	it("ignores a stored prediction that names segments the bar does not have", () => {

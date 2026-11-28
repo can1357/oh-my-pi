@@ -123,6 +123,53 @@ describe("Anthropic abandoned/aborted tool-use replay", () => {
 		expect(blocks.some(b => b.type === "tool_use")).toBe(true);
 	});
 
+	it("drops unsigned thinking from the latest abandoned tool-use turn instead of demoting it to text (#19740)", () => {
+		// Interleaved thinking cut off by max_tokens after a tool call: the final block never got
+		// its signature. The latest-turn byte-for-byte rule binds signed blocks only; the unsigned
+		// one must not reach the wire as text, where it reads as the model's own reasoning quoted
+		// back and trips the reasoning_extraction classifier.
+		const user: UserMessage = { role: "user", content: "go", timestamp: 1 };
+		const truncated: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: "first, list them", thinkingSignature: "sig_done" },
+				{ type: "toolCall", id: "toolu_1", name: "list", arguments: {} },
+				{ type: "thinking", thinking: "now decide which to open" },
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: model.id,
+			usage: emptyUsage,
+			stopReason: "length",
+			timestamp: 2,
+		};
+		const toolResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "toolu_1",
+			toolName: "list",
+			content: [{ type: "text", text: "a, b" }],
+			isError: false,
+			timestamp: 3,
+		};
+		const blocks = assistantBlocks([user, truncated, toolResult]);
+		expectNoUnsignedThinking(blocks);
+		expect(blocks.some(b => b.type === "thinking" && b.signature === "sig_done")).toBe(true);
+		expect(JSON.stringify(blocks)).not.toContain("now decide which to open");
+		expect(blocks.some(b => b.type === "tool_use")).toBe(true);
+
+		// Fully unsigned (signatures cleared by a history rewrite): nothing replays as text either.
+		const unsigned: AssistantMessage = {
+			...truncated,
+			content: truncated.content.map(block =>
+				block.type === "thinking" ? { ...block, thinkingSignature: undefined } : block,
+			),
+		};
+		const unsignedBlocks = assistantBlocks([user, unsigned, toolResult]);
+		expect(unsignedBlocks.some(b => b.type === "thinking")).toBe(false);
+		expect(JSON.stringify(unsignedBlocks)).not.toContain("first, list them");
+		expect(JSON.stringify(unsignedBlocks)).not.toContain("now decide which to open");
+	});
+
 	it("drops historical end_turn(stop) tool-use thinking so the continuation stays wire-valid", () => {
 		const blocks = assistantBlocks(buildHistoryWithLaterAssistant("stop", "sig_valid"));
 		expectNoUnsignedThinking(blocks);
