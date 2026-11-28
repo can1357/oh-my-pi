@@ -58,6 +58,7 @@ import type {
 } from "./agent-session-types";
 import {
 	assistantTurnProducedOutput,
+	dropAssistantReplayPayloadForProvider,
 	isEmptyAssistantStop,
 	isEmptyErrorTurn,
 	isUserAuthoredMessage,
@@ -133,6 +134,19 @@ const HTTP2_STREAM_RESET_ERROR_RE =
 // eligible for preserved-turn continuation on resolved tool turns.
 const PREMATURE_STREAM_CLOSE_ERROR_RE =
 	/(?:stream closed before a (?:finish_reason|terminal response event)|Codex stream ended before terminal completion event|Cursor stream ended before turnEnded)/i;
+// Bedrock Mantle's OpenAI-Responses gateway can invalidate a previously
+// issued `reasoning.encrypted_content` block out from under a live,
+// unchanged model. The request 400s with "encrypted reasoning was created
+// for a different account or model" even though the harness never switched
+// model or credential. The generic classifier sees a terminal 400, and
+// `isStaleResponsesText` does not recognize it (no "Item with id"/"previous
+// response" wording). Retry admission is explicit at isRetryableError
+// instead. Never reuse Flag.StaleResponsesItem for it. That flag gates out
+// the model-fallback branch in #applyRetryPolicy, which is the recovery
+// path that actually works. A fallback candidate's model/api never matches
+// the poisoned message. buildResponsesInput's replay guard already skips
+// it. Only a same-model retry needs the payload stripped.
+const ACCOUNT_BOUND_REASONING_REPLAY_ERROR_RE = /encrypted reasoning was created for a different account or model/i;
 
 /**
  * Bare abort sentinels with no provider reason: our own `"Request was aborted"`
@@ -1732,6 +1746,10 @@ export class TurnRecovery {
 		// Admitted only so the retry handler can walk the fallback chain; it treats the
 		// flag as this model's spent budget and never replays the same model.
 		if (AIError.is(id, AIError.Flag.RetriesExhausted)) return true;
+		// The account-bound reasoning 400 classifies as a terminal 400. The
+		// generic classifier refuses it. Admit it here or the no-fallback
+		// production path never reaches the payload strip in #applyRetryPolicy.
+		if (ACCOUNT_BOUND_REASONING_REPLAY_ERROR_RE.test(message.errorMessage ?? "")) return true;
 		return AIError.retriable(id);
 	}
 
@@ -2910,6 +2928,10 @@ export class TurnRecovery {
 		const sourceRateLimited =
 			retrySettings.rateLimitWalksChain &&
 			(message.errorStatus === 429 || rateLimitReason === "RATE_LIMIT_EXCEEDED");
+		// See ACCOUNT_BOUND_REASONING_REPLAY_ERROR_RE above. This exact 400
+		// retries with the payload stripped, and never reuses
+		// Flag.StaleResponsesItem, which gates out the model-fallback branch.
+		const accountBoundReasoningReplayError = ACCOUNT_BOUND_REASONING_REPLAY_ERROR_RE.test(errorMessage);
 		const staleOpenAIResponsesReplayError = AIError.is(id, AIError.Flag.StaleResponsesItem);
 		const accountPolicyDenial = AIError.is(id, AIError.Flag.AccountPolicy);
 		let recordedUsageLimitOutcome = await this.#usageLimitOutcomes.get(message);
@@ -3473,6 +3495,21 @@ export class TurnRecovery {
 		// continue() accepts — and never once a newer prompt owns the session.
 		if (!preserveFailedTurn && this.#host.promptGeneration() === generation) {
 			this.#stripFailedAssistantTail();
+		}
+
+		// Drop the poisoned native replay payload so a same-model retry (no
+		// fallback configured, exhausted, or ineligible) reconstructs plain
+		// history instead of resending the identical encrypted_content that
+		// just 400'd. See dropAssistantReplayPayloadForProvider's own doc for
+		// why this must not gate on switchedModel/switchedCredential.
+		if (accountBoundReasoningReplayError && currentModel) {
+			const strippedMessages = dropAssistantReplayPayloadForProvider(
+				this.#host.agent.state.messages,
+				currentModel.provider,
+			);
+			if (strippedMessages !== this.#host.agent.state.messages) {
+				this.#host.agent.replaceMessages(strippedMessages);
+			}
 		}
 
 		// Retry via continue() outside the agent_end event callback chain. A

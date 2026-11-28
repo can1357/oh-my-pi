@@ -1638,6 +1638,10 @@
 - DeepSeek-style `*** End` and `*** End Patch` markers are no longer written into files or truncate later edits
 - Composer prediction ghost text no longer vanishes when advisor messages arrive
 
+### Fixed
+
+- An automatic retry on the same model no longer resends account-bound OpenAI-Responses reasoning the provider has invalidated. When a gateway 400s mid-session with "encrypted reasoning was created for a different account or model", the retry now drops the native `reasoning.encrypted_content` replay payload and rebuilds plain history instead of looping the identical request until the retry budget runs out ([#12612](https://github.com/can1357/oh-my-pi/pull/12612) by [@nick-maderight](https://github.com/nick-maderight))
+
 ## [18.16.0] - 2026-11-02
 
 ### Added
