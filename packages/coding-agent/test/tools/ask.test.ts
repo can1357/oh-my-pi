@@ -455,6 +455,20 @@ describe("AskTool form dialog", () => {
 });
 
 describe("AskTool without a form surface", () => {
+	it("asks and returns the only field when its wrapping label names it with for", async () => {
+		const input = vi.fn<Input>(async () => "Ship it");
+		const result = await new AskTool(createSession()).execute(
+			"call-wrapped-label",
+			{ html: `<form><label for="probe">Anything to add? <input id="probe" name="probe"></label></form>` },
+			undefined,
+			undefined,
+			createContext({ input }),
+		);
+
+		expect(input.mock.calls.map(([title]) => title)).toEqual(["Anything to add?"]);
+		expect(result.details?.answers).toEqual([{ name: "probe", question: "Anything to add?", answer: "Ship it" }]);
+	});
+
 	it("asks each named field in order and builds the form data", async () => {
 		const selects: { title: string; options: (string | undefined)[]; initialIndex?: number }[] = [];
 		const select: Select = async (title, options, dialogOptions) => {

@@ -350,10 +350,10 @@ class FormBuilder {
 	}
 
 	#label(label: Element, style: FormSpanStyle | undefined): void {
-		const target = label.getAttribute("for");
-		if (target && this.#labelFor.get(target) === label) return;
 		const controls = label.querySelectorAll(CONTROL_SELECTOR);
 		if (controls.length === 0) {
+			const target = label.getAttribute("for");
+			if (target && this.#labelFor.get(target) === label) return;
 			this.#children(label, style);
 			return;
 		}
