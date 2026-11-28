@@ -138,4 +138,4 @@ export function latestJobWidget<T extends JobWidgetEntry>(entries: readonly T[])
 }
 
 /** What kind of job a tile shows: a subagent (`task`) goes by its name, any other job by what it runs. */
-export type JobTileType = "bash" | "task" | "eval";
+export type JobTileType = "bash" | "task" | "eval" | "extension";
