@@ -1076,9 +1076,9 @@ type AdvertisedReasoning =
  * other gateways may advertise the same fields top-level, along with
  * `reasoning_effort_map` (where an unserved request lands) and
  * `reasoning_required`. OpenRouter-style rows carry the ladder as an object,
- * `reasoning: { supported_efforts, default_effort }`; the flat fields win when
- * a row sends both. Returns undefined when the row says nothing usable about
- * reasoning.
+ * `reasoning: { supported_efforts, default_effort }`. A row sending both shapes
+ * keeps the flat ladder, and each default applies only to the ladder of its own
+ * shape. Returns undefined when the row says nothing usable about reasoning.
  *
  * An explicit non-reasoning declaration is reported as `{ kind: "none" }`
  * rather than `undefined`: the caller must be able to tell "this endpoint says
@@ -1101,15 +1101,16 @@ function extractAdvertisedReasoning(item: {
 	// would keep the reference dial alive.
 	const reasoning = metadata?.reasoning ?? item.reasoning;
 	if (reasoning === false) return { kind: "none" };
-	const reasoningObject = isRecord(reasoning) ? reasoning : undefined;
-	const raw =
-		metadata?.supported_reasoning_levels ?? item.supported_reasoning_levels ?? reasoningObject?.supported_efforts;
+	const flatLevels = metadata?.supported_reasoning_levels ?? item.supported_reasoning_levels;
+	const reasoningObject = flatLevels == null && isRecord(reasoning) ? reasoning : undefined;
+	const raw = reasoningObject ? reasoningObject.supported_efforts : flatLevels;
 	const efforts = extractReasoningLevels(raw);
 	if (efforts === undefined) {
 		return reasoning === true ? { kind: "native" } : undefined;
 	}
-	const rawDefault =
-		metadata?.default_reasoning_level ?? item.default_reasoning_level ?? reasoningObject?.default_effort;
+	const rawDefault = reasoningObject
+		? reasoningObject.default_effort
+		: (metadata?.default_reasoning_level ?? item.default_reasoning_level);
 	const defaultLevel = advertisedReasoningEffort(rawDefault);
 	const effortMap = extractReasoningEffortMap(metadata?.reasoning_effort_map ?? item.reasoning_effort_map);
 	const requiresEffort = metadata?.reasoning_required ?? item.reasoning_required;

@@ -3780,7 +3780,7 @@ describe("ModelRegistry runtime discovery", () => {
 					data: [
 						{
 							id: "acme-object",
-							reasoning: { supported_efforts: ["max", "low", "high"], default_effort: "high" },
+							reasoning: { supported_efforts: ["max", "none", "low", "high"], default_effort: "high" },
 						},
 						{
 							id: "acme-object-nested",
@@ -3794,11 +3794,8 @@ describe("ModelRegistry runtime discovery", () => {
 						{
 							id: "acme-flat-and-object",
 							supported_reasoning_levels: ["low", "high"],
-							default_reasoning_level: "high",
-							reasoning: { supported_efforts: ["medium"], default_effort: "medium" },
+							reasoning: { supported_efforts: ["medium", "high"], default_effort: "high" },
 						},
-						{ id: "acme-native", reasoning: true },
-						{ id: "acme-plain", reasoning: false },
 					],
 				});
 			}
@@ -3816,29 +3813,45 @@ describe("ModelRegistry runtime discovery", () => {
 		const find = (id: string) => models.find(model => model.id === id);
 		const object = find("acme-object");
 		expect(object?.reasoning).toBe(true);
+		// `none` is the wire off-switch, not an effort tier.
 		expect(object?.thinking).toMatchObject({
 			mode: "effort",
 			efforts: [Effort.Low, Effort.High, Effort.Max],
 			defaultLevel: Effort.High,
 		});
-		expect((object?.compat as OpenAICompat | undefined)?.supportsReasoningEffort).toBe(true);
+		const compat = object?.compat;
+		expect(compat && "supportsReasoningEffort" in compat ? compat.supportsReasoningEffort : undefined).toBe(true);
 		expect(find("acme-object-nested")?.thinking).toMatchObject({
 			mode: "effort",
 			efforts: [Effort.Low, Effort.Medium],
 			defaultLevel: Effort.Medium,
 		});
-		// The flat dialect keeps winning when a row sends both shapes.
+		// A row sending both shapes keeps the flat ladder and never borrows the
+		// object's `default_effort`, so the lowest tier stays the fallback default.
 		expect(find("acme-flat-and-object")?.thinking).toMatchObject({
 			efforts: [Effort.Low, Effort.High],
-			defaultLevel: Effort.High,
+			defaultLevel: Effort.Low,
 		});
-		// Booleans are not ladders: `true` stays native, `false` still denies reasoning.
-		const native = find("acme-native");
-		expect(native?.reasoning).toBe(true);
-		expect(native?.thinking?.unverified).not.toBe(true);
-		const plain = find("acme-plain");
-		expect(plain?.reasoning).toBe(false);
-		expect(plain?.thinking).toBeUndefined();
+		if (!object || object.api !== "openai-completions") {
+			throw new Error("expected the discovered model to use OpenAI Completions");
+		}
+		let requestPayload: Record<string, unknown> | undefined;
+		const chatFetch: FetchImpl = async (_input, init) => {
+			requestPayload = JSON.parse(typeof init?.body === "string" ? init.body : "{}") as Record<string, unknown>;
+			const events = [
+				{ id: "chatcmpl-object-fixture", choices: [{ index: 0, delta: { role: "assistant", content: "OK" } }] },
+				{ id: "chatcmpl-object-fixture", choices: [{ index: 0, finish_reason: "stop", delta: {} }] },
+			];
+			const body = `${events.map(event => `data: ${JSON.stringify(event)}`).join("\n\n")}\n\ndata: [DONE]\n\n`;
+			return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+		};
+		// A thinking-off request sends the `none` the object listed instead of the lowest tier.
+		await streamOpenAICompletions(
+			object as Model<"openai-completions">,
+			{ messages: [{ role: "user", content: "Reply with exactly OK.", timestamp: Date.now() }] },
+			{ apiKey: "TEST_KEY", fetch: chatFetch, disableReasoning: true },
+		).result();
+		expect(requestPayload?.reasoning_effort).toBe("none");
 	});
 
 	test("openai-models-list discovery carries advertised effort aliases and mandatory reasoning", async () => {
