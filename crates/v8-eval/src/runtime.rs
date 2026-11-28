@@ -19,6 +19,10 @@ static V8_INIT: Once = Once::new();
 
 pub fn init_v8_platform() {
 	V8_INIT.call_once(|| {
+		v8::V8::set_flags_from_string(
+			"--nominor_gc_task --single_threaded_gc --noconcurrent_recompilation \
+			 --nolazy_compile_dispatcher --noparallel_reclaim_unmodified_wrappers",
+		);
 		let platform = v8::new_default_platform(1, false).make_shared();
 		v8::V8::initialize_platform(platform);
 		v8::V8::initialize();
@@ -257,7 +261,6 @@ impl V8SandboxRuntime {
 			exceeded: Arc::clone(&heap_limit_exceeded),
 		}));
 		isolate.add_near_heap_limit_callback(on_near_heap_limit, near_heap_ptr.cast());
-
 		isolate.set_slot(BridgeState {
 			active_run_id: None,
 			next_call_seq: 0,
@@ -723,7 +726,7 @@ fn cb_display(
 	args: v8::FunctionCallbackArguments,
 	_rv: v8::ReturnValue,
 ) {
-	let output = match v8_to_json(scope, args.get(0)) {
+	let output = match v8_to_raw_json(scope, args.get(0)) {
 		Ok(val) => val,
 		Err(msg) => {
 			throw_type_error(scope, &msg);
@@ -787,9 +790,9 @@ fn cb_call_tool(
 	let name = args.get(0).to_rust_string_lossy(scope);
 	let arg_val = args.get(1);
 	let tool_args = if arg_val.is_undefined() || arg_val.is_null() {
-		serde_json::Value::Object(serde_json::Map::new())
+		serde_json::value::RawValue::from_string("{}".to_string()).expect("empty json object")
 	} else {
-		match v8_to_json(scope, arg_val) {
+		match v8_to_raw_json(scope, arg_val) {
 			Ok(val) => val,
 			Err(msg) => {
 				throw_type_error(scope, &msg);
@@ -872,12 +875,13 @@ fn throw_type_error(scope: &v8::PinScope<'_, '_>, message: &str) {
 	}
 }
 
-fn v8_to_json(
+fn v8_to_raw_json(
 	scope: &mut v8::PinScope<'_, '_>,
 	value: v8::Local<'_, v8::Value>,
-) -> Result<serde_json::Value, String> {
+) -> Result<Box<serde_json::value::RawValue>, String> {
 	if value.is_undefined() {
-		return Ok(serde_json::Value::Null);
+		return serde_json::value::RawValue::from_string("null".to_string())
+			.map_err(|err| err.to_string());
 	}
 	let tc = std::pin::pin!(v8::TryCatch::new(scope));
 	let tc = tc.init();
@@ -889,7 +893,8 @@ fn v8_to_json(
 		return Err(reason);
 	};
 	let raw = json_str.to_rust_string_lossy(&tc);
-	serde_json::from_str(&raw).map_err(|err| format!("Failed to parse serialized JSON: {err}"))
+	serde_json::value::RawValue::from_string(raw)
+		.map_err(|err| format!("Failed to parse serialized JSON: {err}"))
 }
 
 fn json_to_v8<'s>(
@@ -904,6 +909,14 @@ fn json_to_v8<'s>(
 		return Err("Failed to allocate JSON string".to_string());
 	};
 	v8::json::parse(scope, json_str).ok_or_else(|| "Failed to parse JSON into V8 value".to_string())
+}
+
+fn v8_to_json(
+	scope: &mut v8::PinScope<'_, '_>,
+	value: v8::Local<'_, v8::Value>,
+) -> Result<serde_json::Value, String> {
+	let raw = v8_to_raw_json(scope, value)?;
+	serde_json::from_str(raw.get()).map_err(|err| format!("Failed to parse serialized JSON: {err}"))
 }
 
 fn v8_error_from_payload<'s>(

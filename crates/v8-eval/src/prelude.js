@@ -702,4 +702,7 @@
 	globalThis.__omp_emit_final_expr__ = value => {
 		if (value !== undefined) consoleBridge.log(value);
 	};
+	// Warm up V8 PRNG and stack-trace symbolization before OS sandbox drops FS access.
+	void Math.random();
+	void new Error().stack;
 })();

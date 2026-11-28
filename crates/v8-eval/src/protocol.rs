@@ -37,7 +37,7 @@ pub enum V8Inbound {
 pub enum BridgeOp {
 	Tool {
 		name: String,
-		args: serde_json::Value,
+		args: Box<serde_json::value::RawValue>,
 	},
 	Read {
 		path:    String,
@@ -63,7 +63,7 @@ pub enum V8Outbound {
 	Display {
 		#[serde(rename = "runId")]
 		run_id: String,
-		output: serde_json::Value,
+		output: Box<serde_json::value::RawValue>,
 	},
 	BridgeCall {
 		id:     String,
