@@ -491,6 +491,8 @@ fn install_prelude(scope: &mut v8::PinScope<'_, '_>) -> Result<(), String> {
 	bind_fn(scope, global, "__v8_url_read", cb_url_read)?;
 	bind_fn(scope, global, "__v8_url_write", cb_url_write)?;
 	bind_fn(scope, global, "__v8_set_final_expr", cb_set_final_expr)?;
+	bind_fn(scope, global, "__v8_utf8_encode", cb_utf8_encode)?;
+	bind_fn(scope, global, "__v8_utf8_decode", cb_utf8_decode)?;
 
 	let tc = std::pin::pin!(v8::TryCatch::new(scope));
 	let tc = tc.init();
@@ -522,6 +524,59 @@ fn bind_fn(
 		.ok_or_else(|| format!("Failed to create function {name}"))?;
 	global.set(scope, key.into(), func.into());
 	Ok(())
+}
+
+fn cb_utf8_encode(
+	scope: &mut v8::PinScope<'_, '_>,
+	args: v8::FunctionCallbackArguments,
+	mut rv: v8::ReturnValue,
+) {
+	let text = args.get(0).to_rust_string_lossy(scope);
+	let bytes = text.as_bytes();
+	let ab = v8::ArrayBuffer::new(scope, bytes.len());
+	let bs = ab.get_backing_store();
+	for (slot, &b) in bs.iter().zip(bytes) {
+		slot.set(b);
+	}
+	let Some(arr) = v8::Uint8Array::new(scope, ab, 0, bytes.len()) else {
+		throw_type_error(scope, "Failed to allocate Uint8Array");
+		return;
+	};
+	rv.set(arr.into());
+}
+
+fn cb_utf8_decode(
+	scope: &mut v8::PinScope<'_, '_>,
+	args: v8::FunctionCallbackArguments,
+	mut rv: v8::ReturnValue,
+) {
+	let Ok(view) = v8::Local::<v8::ArrayBufferView>::try_from(args.get(0)) else {
+		throw_type_error(scope, "TextDecoder.decode() expects an ArrayBuffer or ArrayBufferView");
+		return;
+	};
+	let fatal = args.get(1).boolean_value(scope);
+	let ignore_bom = args.get(2).boolean_value(scope);
+	let mut buf = vec![0u8; view.byte_length()];
+	view.copy_contents(&mut buf);
+	let slice = if !ignore_bom && buf.starts_with(&[0xef, 0xbb, 0xbf]) {
+		&buf[3..]
+	} else {
+		&buf[..]
+	};
+	let decoded = if fatal {
+		let Ok(s) = std::str::from_utf8(slice) else {
+			throw_type_error(scope, "The encoded data was not valid.");
+			return;
+		};
+		std::borrow::Cow::Borrowed(s)
+	} else {
+		String::from_utf8_lossy(slice)
+	};
+	let Some(out) = v8::String::new(scope, &decoded) else {
+		throw_type_error(scope, "Failed to allocate decoded string");
+		return;
+	};
+	rv.set(out.into());
 }
 
 fn cb_text(

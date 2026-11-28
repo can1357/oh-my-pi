@@ -7,20 +7,26 @@
 	const rawUrlRead = globalThis.__v8_url_read;
 	const rawUrlWrite = globalThis.__v8_url_write;
 	const rawSetFinalExpr = globalThis.__v8_set_final_expr;
+	const rawUtf8Encode = globalThis.__v8_utf8_encode;
+	const rawUtf8Decode = globalThis.__v8_utf8_decode;
 
-	delete globalThis.__v8_text;
-	delete globalThis.__v8_display;
-	delete globalThis.__v8_call_tool;
-	delete globalThis.__v8_url_read;
-	delete globalThis.__v8_url_write;
-	delete globalThis.__v8_set_final_expr;
-
-	delete globalThis.WebAssembly;
+	for (const key of [
+		"__v8_text",
+		"__v8_display",
+		"__v8_call_tool",
+		"__v8_url_read",
+		"__v8_url_write",
+		"__v8_set_final_expr",
+		"__v8_utf8_encode",
+		"__v8_utf8_decode",
+		"WebAssembly",
+	]) {
+		delete globalThis[key];
+	}
 
 	const ReflectConstruct = Reflect.construct;
 	const ObjectDefineProperty = Object.defineProperty;
 	const guardBufferConstructor = (OrigCtor, label) => {
-		if (typeof OrigCtor !== "function") return OrigCtor;
 		const Guarded = new Proxy(OrigCtor, {
 			construct(target, args, newTarget) {
 				if (args.length > 1 && args[1] !== undefined) {
@@ -44,118 +50,53 @@
 		return Guarded;
 	};
 
-	if (typeof globalThis.ArrayBuffer === "function") {
-		const OrigArrayBuffer = globalThis.ArrayBuffer;
-		if (OrigArrayBuffer.prototype && "resize" in OrigArrayBuffer.prototype) {
-			delete OrigArrayBuffer.prototype.resize;
-		}
-		globalThis.ArrayBuffer = guardBufferConstructor(OrigArrayBuffer, "ArrayBuffer");
-	}
-	if (typeof globalThis.SharedArrayBuffer === "function") {
-		const OrigSharedArrayBuffer = globalThis.SharedArrayBuffer;
-		if (OrigSharedArrayBuffer.prototype && "grow" in OrigSharedArrayBuffer.prototype) {
-			delete OrigSharedArrayBuffer.prototype.grow;
-		}
-		globalThis.SharedArrayBuffer = guardBufferConstructor(OrigSharedArrayBuffer, "SharedArrayBuffer");
+	for (const [name, method] of [
+		["ArrayBuffer", "resize"],
+		["SharedArrayBuffer", "grow"],
+	]) {
+		const Orig = globalThis[name];
+		if (typeof Orig !== "function") continue;
+		if (Orig.prototype && method in Orig.prototype) delete Orig.prototype[method];
+		globalThis[name] = guardBufferConstructor(Orig, name);
 	}
 
 	const isNil = value => value === undefined || value === null;
 	const isPlainObject = value => value !== null && typeof value === "object" && !Array.isArray(value);
 
-	const positionalOptions = (name, args, keys, example) => {
-		for (let index = keys.length; index < args.length; index++) {
-			if (!isNil(args[index])) {
-				throw new TypeError(
-					`${name}() accepts at most ${keys.length} positional optional args; got ${args.length}. Pass ${name}(..., ${example}) for named options.`,
-				);
-			}
-		}
-		const options = {};
-		for (let index = 0; index < keys.length && index < args.length; index++) {
-			const value = args[index];
-			if (!isNil(value)) options[keys[index]] = value;
-		}
-		return options;
+	const toUint8Array = data => {
+		if (data instanceof Uint8Array) return data;
+		if (data instanceof ArrayBuffer) return new Uint8Array(data);
+		if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+		return null;
 	};
 
-	const optionsArg = (name, value, rest, keys, example) => {
-		if (isNil(value)) return positionalOptions(name, [value, ...rest], keys, example);
+	const parseReadOptions = (value, rest) => {
 		if (isPlainObject(value)) {
 			if (rest.some(arg => !isNil(arg))) {
 				throw new TypeError(
-					`${name}() takes either a single trailing options object like ${example} or positional optional args; do not mix both forms.`,
+					"read() takes either a single trailing options object like { offset, limit } or positional optional args; do not mix both forms.",
 				);
 			}
 			return value;
 		}
-		if (typeof value === "object") {
+		if (!isNil(value) && typeof value === "object") {
 			const kind = Array.isArray(value) ? "an array" : (value.constructor?.name ?? "object");
 			throw new TypeError(
-				`${name}() options must be a plain object like ${example}, null/undefined, or positional optional args, not ${kind}.`,
+				`read() options must be a plain object like { offset, limit }, null/undefined, or positional optional args, not ${kind}.`,
 			);
 		}
-		return positionalOptions(name, [value, ...rest], keys, example);
-	};
-
-	const BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-	const BASE64_LOOKUP = new Int16Array(128).fill(-1);
-	for (let i = 0; i < BASE64_ALPHABET.length; i++) {
-		BASE64_LOOKUP[BASE64_ALPHABET.charCodeAt(i)] = i;
-	}
-
-	const encodeBase64Bytes = bytes => {
-		let out = "";
-		for (let i = 0; i < bytes.length; i += 3) {
-			const b0 = bytes[i];
-			const has1 = i + 1 < bytes.length;
-			const has2 = i + 2 < bytes.length;
-			const b1 = has1 ? bytes[i + 1] : 0;
-			const b2 = has2 ? bytes[i + 2] : 0;
-			const n = (b0 << 16) | (b1 << 8) | b2;
-			out += BASE64_ALPHABET[(n >> 18) & 63];
-			out += BASE64_ALPHABET[(n >> 12) & 63];
-			out += has1 ? BASE64_ALPHABET[(n >> 6) & 63] : "=";
-			out += has2 ? BASE64_ALPHABET[n & 63] : "=";
-		}
-		return out;
-	};
-
-	const decodeBase64Bytes = input => {
-		const cleaned = String(input).replace(/[\t\n\f\r ]+/g, "");
-		if (cleaned.length % 4 === 1) {
-			const err = new Error("The string to be decoded is not correctly encoded.");
-			err.name = "InvalidCharacterError";
-			throw err;
-		}
-		const padLen = cleaned.endsWith("==") ? 2 : cleaned.endsWith("=") ? 1 : 0;
-		const bodyLen = cleaned.length - padLen;
-		const out = new Uint8Array(Math.floor((cleaned.length * 3) / 4) - padLen);
-		let outIdx = 0;
-		for (let i = 0; i < cleaned.length; i += 4) {
-			const c0 = cleaned.charCodeAt(i);
-			const c1 = cleaned.charCodeAt(i + 1);
-			const v0 = c0 < 128 ? BASE64_LOOKUP[c0] : -1;
-			const v1 = c1 < 128 ? BASE64_LOOKUP[c1] : -1;
-			if (v0 < 0 || v1 < 0) {
-				const err = new Error("The string to be decoded is not correctly encoded.");
-				err.name = "InvalidCharacterError";
-				throw err;
+		const args = [value, ...rest];
+		for (let i = 2; i < args.length; i++) {
+			if (!isNil(args[i])) {
+				throw new TypeError(
+					`read() accepts at most 2 positional optional args; got ${args.length}. Pass read(..., { offset, limit }) for named options.`,
+				);
 			}
-			const c2 = i + 2 < bodyLen ? cleaned.charCodeAt(i + 2) : -1;
-			const c3 = i + 3 < bodyLen ? cleaned.charCodeAt(i + 3) : -1;
-			const v2 = c2 === -1 ? 0 : c2 < 128 ? BASE64_LOOKUP[c2] : -1;
-			const v3 = c3 === -1 ? 0 : c3 < 128 ? BASE64_LOOKUP[c3] : -1;
-			if (v2 < 0 || v3 < 0) {
-				const err = new Error("The string to be decoded is not correctly encoded.");
-				err.name = "InvalidCharacterError";
-				throw err;
-			}
-			const n = (v0 << 18) | (v1 << 12) | (v2 << 6) | v3;
-			out[outIdx++] = (n >> 16) & 0xff;
-			if (c2 !== -1) out[outIdx++] = (n >> 8) & 0xff;
-			if (c3 !== -1) out[outIdx++] = n & 0xff;
 		}
-		return out;
+		const options = {};
+		if (!isNil(args[0])) options.offset = args[0];
+		if (!isNil(args[1])) options.limit = args[1];
+		return options;
 	};
 
 	const btoa = data => {
@@ -168,14 +109,21 @@
 			}
 			bytes[i] = code;
 		}
-		return encodeBase64Bytes(bytes);
+		return bytes.toBase64();
 	};
 
 	const atob = encoded => {
-		const bytes = decodeBase64Bytes(encoded);
+		let bytes;
+		try {
+			bytes = Uint8Array.fromBase64(String(encoded), { lastChunkHandling: "loose" });
+		} catch {
+			const err = new Error("The string to be decoded is not correctly encoded.");
+			err.name = "InvalidCharacterError";
+			throw err;
+		}
 		let out = "";
-		for (let i = 0; i < bytes.length; i++) {
-			out += String.fromCharCode(bytes[i]);
+		for (let i = 0; i < bytes.length; i += 8192) {
+			out += String.fromCharCode(...bytes.subarray(i, i + 8192));
 		}
 		return out;
 	};
@@ -186,37 +134,7 @@
 		}
 
 		encode(input = "") {
-			const str = String(input);
-			const out = [];
-			for (let i = 0; i < str.length; i++) {
-				let cp = str.charCodeAt(i);
-				if (cp >= 0xd800 && cp <= 0xdbff && i + 1 < str.length) {
-					const low = str.charCodeAt(i + 1);
-					if (low >= 0xdc00 && low <= 0xdfff) {
-						cp = 0x10000 + ((cp - 0xd800) << 10) + (low - 0xdc00);
-						i++;
-					} else {
-						cp = 0xfffd;
-					}
-				} else if (cp >= 0xd800 && cp <= 0xdfff) {
-					cp = 0xfffd;
-				}
-				if (cp <= 0x7f) {
-					out.push(cp);
-				} else if (cp <= 0x7ff) {
-					out.push(0xc0 | (cp >> 6), 0x80 | (cp & 0x3f));
-				} else if (cp <= 0xffff) {
-					out.push(0xe0 | (cp >> 12), 0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f));
-				} else {
-					out.push(
-						0xf0 | (cp >> 18),
-						0x80 | ((cp >> 12) & 0x3f),
-						0x80 | ((cp >> 6) & 0x3f),
-						0x80 | (cp & 0x3f),
-					);
-				}
-			}
-			return new Uint8Array(out);
+			return rawUtf8Encode(String(input));
 		}
 
 		encodeInto(source, destination) {
@@ -224,42 +142,19 @@
 				throw new TypeError("TextEncoder.encodeInto() destination must be a Uint8Array");
 			}
 			const str = String(source);
+			const full = rawUtf8Encode(str);
+			if (full.length <= destination.length) {
+				destination.set(full);
+				return { read: str.length, written: full.length };
+			}
 			let read = 0;
 			let written = 0;
-			for (let i = 0; i < str.length; i++) {
-				const code = str.charCodeAt(i);
-				let cp = code;
-				let units = 1;
-				if (code >= 0xd800 && code <= 0xdbff && i + 1 < str.length) {
-					const low = str.charCodeAt(i + 1);
-					if (low >= 0xdc00 && low <= 0xdfff) {
-						cp = 0x10000 + ((code - 0xd800) << 10) + (low - 0xdc00);
-						units = 2;
-					} else {
-						cp = 0xfffd;
-					}
-				} else if (code >= 0xd800 && code <= 0xdfff) {
-					cp = 0xfffd;
-				}
-				const need = cp <= 0x7f ? 1 : cp <= 0x7ff ? 2 : cp <= 0xffff ? 3 : 4;
-				if (written + need > destination.length) break;
-				if (need === 1) {
-					destination[written++] = cp;
-				} else if (need === 2) {
-					destination[written++] = 0xc0 | (cp >> 6);
-					destination[written++] = 0x80 | (cp & 0x3f);
-				} else if (need === 3) {
-					destination[written++] = 0xe0 | (cp >> 12);
-					destination[written++] = 0x80 | ((cp >> 6) & 0x3f);
-					destination[written++] = 0x80 | (cp & 0x3f);
-				} else {
-					destination[written++] = 0xf0 | (cp >> 18);
-					destination[written++] = 0x80 | ((cp >> 12) & 0x3f);
-					destination[written++] = 0x80 | ((cp >> 6) & 0x3f);
-					destination[written++] = 0x80 | (cp & 0x3f);
-				}
-				read += units;
-				if (units === 2) i++;
+			for (const ch of str) {
+				const bytes = rawUtf8Encode(ch);
+				if (written + bytes.length > destination.length) break;
+				destination.set(bytes, written);
+				written += bytes.length;
+				read += ch.length;
 			}
 			return { read, written };
 		}
@@ -278,80 +173,9 @@
 
 		decode(input) {
 			if (input === undefined) return "";
-			let bytes;
-			if (input instanceof ArrayBuffer) {
-				bytes = new Uint8Array(input);
-			} else if (ArrayBuffer.isView(input)) {
-				bytes = new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
-			} else {
-				throw new TypeError("TextDecoder.decode() expects an ArrayBuffer or ArrayBufferView");
-			}
-			let i = 0;
-			if (!this.ignoreBOM && bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
-				i = 3;
-			}
-			let out = "";
-			const fail = () => {
-				if (this.fatal) throw new TypeError("The encoded data was not valid.");
-				out += "\ufffd";
-			};
-			while (i < bytes.length) {
-				const b0 = bytes[i++];
-				if (b0 <= 0x7f) {
-					out += String.fromCharCode(b0);
-				} else if (b0 >= 0xc2 && b0 <= 0xdf) {
-					if (i >= bytes.length || (bytes[i] & 0xc0) !== 0x80) {
-						fail();
-						continue;
-					}
-					const b1 = bytes[i++];
-					out += String.fromCharCode(((b0 & 0x1f) << 6) | (b1 & 0x3f));
-				} else if (b0 >= 0xe0 && b0 <= 0xef) {
-					if (i + 1 >= bytes.length) {
-						fail();
-						i = bytes.length;
-						continue;
-					}
-					const b1 = bytes[i];
-					const b2 = bytes[i + 1];
-					const valid =
-						(b1 & 0xc0) === 0x80 &&
-						(b2 & 0xc0) === 0x80 &&
-						!(b0 === 0xe0 && b1 < 0xa0) &&
-						!(b0 === 0xed && b1 >= 0xa0);
-					if (!valid) {
-						fail();
-						continue;
-					}
-					i += 2;
-					out += String.fromCharCode(((b0 & 0x0f) << 12) | ((b1 & 0x3f) << 6) | (b2 & 0x3f));
-				} else if (b0 >= 0xf0 && b0 <= 0xf4) {
-					if (i + 2 >= bytes.length) {
-						fail();
-						i = bytes.length;
-						continue;
-					}
-					const b1 = bytes[i];
-					const b2 = bytes[i + 1];
-					const b3 = bytes[i + 2];
-					const valid =
-						(b1 & 0xc0) === 0x80 &&
-						(b2 & 0xc0) === 0x80 &&
-						(b3 & 0xc0) === 0x80 &&
-						!(b0 === 0xf0 && b1 < 0x90) &&
-						!(b0 === 0xf4 && b1 > 0x8f);
-					if (!valid) {
-						fail();
-						continue;
-					}
-					i += 3;
-					const cp = ((b0 & 0x07) << 18) | ((b1 & 0x3f) << 12) | ((b2 & 0x3f) << 6) | (b3 & 0x3f);
-					out += String.fromCodePoint(cp);
-				} else {
-					fail();
-				}
-			}
-			return out;
+			const bytes = toUint8Array(input);
+			if (!bytes) throw new TypeError("TextDecoder.decode() expects an ArrayBuffer or ArrayBufferView");
+			return rawUtf8Decode(bytes, this.fatal, this.ignoreBOM);
 		}
 	}
 
@@ -363,16 +187,22 @@
 	const coerceImageBase64 = data => {
 		if (typeof data === "string") {
 			const trimmed = data.trim();
-			if (trimmed.length === 0 || trimmed.length % 4 !== 0 || !BASE64_STRICT_RE.test(trimmed)) return null;
-			return trimmed;
+			return trimmed.length > 0 && trimmed.length % 4 === 0 && BASE64_STRICT_RE.test(trimmed) ? trimmed : null;
 		}
-		if (data instanceof Uint8Array) return encodeBase64Bytes(data);
-		if (data instanceof ArrayBuffer) return encodeBase64Bytes(new Uint8Array(data));
-		if (ArrayBuffer.isView(data)) return encodeBase64Bytes(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+		const bytes = toUint8Array(data);
+		if (bytes) return bytes.toBase64();
 		if (Array.isArray(data) && data.every(n => typeof n === "number" && Number.isInteger(n) && n >= 0 && n <= 255)) {
-			return encodeBase64Bytes(Uint8Array.from(data));
+			return Uint8Array.from(data).toBase64();
 		}
 		return null;
+	};
+
+	const formatBlock = (open, close, items, depth) => {
+		const single = `${open} ${items.join(", ")} ${close}`;
+		if (single.length <= 120 && !single.includes("\n")) return single;
+		const indent = "  ".repeat(depth + 1);
+		const closeIndent = "  ".repeat(depth);
+		return `${open}\n${items.map(item => `${indent}${item}`).join(",\n")}\n${closeIndent}${close}`;
 	};
 
 	const inspectValue = (value, depth = 0, seen = new WeakSet()) => {
@@ -390,19 +220,12 @@
 		if (seen.has(value)) return "[Circular]";
 		seen.add(value);
 		try {
-			if (depth >= 6) {
-				if (Array.isArray(value)) return `[Array(${value.length})]`;
-				return `[Object]`;
-			}
+			if (depth >= 6) return Array.isArray(value) ? `[Array(${value.length})]` : "[Object]";
 			if (Array.isArray(value)) {
 				if (value.length === 0) return "[]";
 				const items = value.slice(0, 100).map(item => inspectValue(item, depth + 1, seen));
 				if (value.length > 100) items.push(`... ${value.length - 100} more items`);
-				const single = `[ ${items.join(", ")} ]`;
-				if (single.length <= 120 && !single.includes("\n")) return single;
-				const indent = "  ".repeat(depth + 1);
-				const closeIndent = "  ".repeat(depth);
-				return `[\n${items.map(item => `${indent}${item}`).join(",\n")}\n${closeIndent}]`;
+				return formatBlock("[", "]", items, depth);
 			}
 			if (value instanceof Map) {
 				const entries = [];
@@ -425,18 +248,14 @@
 				const preview = Array.from(value.subarray ? value.subarray(0, 32) : []).join(", ");
 				return `${name}(${value.length ?? value.byteLength}) [ ${preview}${value.length > 32 ? ", ..." : ""} ]`;
 			}
-			if (value instanceof ArrayBuffer) {
-				return `ArrayBuffer { byteLength: ${value.byteLength} }`;
-			}
+			if (value instanceof ArrayBuffer) return `ArrayBuffer { byteLength: ${value.byteLength} }`;
 			const keys = Object.keys(value);
 			if (keys.length === 0) return "{}";
-			const entries = keys.slice(0, 100).map(k => `${/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(k) ? k : JSON.stringify(k)}: ${inspectValue(value[k], depth + 1, seen)}`);
+			const entries = keys
+				.slice(0, 100)
+				.map(k => `${/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(k) ? k : JSON.stringify(k)}: ${inspectValue(value[k], depth + 1, seen)}`);
 			if (keys.length > 100) entries.push(`... ${keys.length - 100} more keys`);
-			const single = `{ ${entries.join(", ")} }`;
-			if (single.length <= 120 && !single.includes("\n")) return single;
-			const indent = "  ".repeat(depth + 1);
-			const closeIndent = "  ".repeat(depth);
-			return `{\n${entries.map(entry => `${indent}${entry}`).join(",\n")}\n${closeIndent}}`;
+			return formatBlock("{", "}", entries, depth);
 		} finally {
 			seen.delete(value);
 		}
@@ -532,46 +351,20 @@
 				? ["Values"]
 				: [...colSet];
 		const heads = ["(index)", ...cols];
-		const rows = entries.map(([idx, row]) => {
-			if (hasPrimitives && colSet.size === 0) {
-				return [idx, inspectValue(row, 1)];
-			}
-			return [
-				idx,
-				...cols.map(col => {
-					if (row !== null && typeof row === "object" && Object.hasOwn(row, col)) {
-						return inspectValue(row[col], 1);
-					}
-					return "";
-				}),
-			];
-		});
+		const rows = entries.map(([idx, row]) =>
+			hasPrimitives && colSet.size === 0
+				? [idx, inspectValue(row, 1)]
+				: [idx, ...cols.map(col => (row !== null && typeof row === "object" && Object.hasOwn(row, col) ? inspectValue(row[col], 1) : ""))],
+		);
 		const widths = heads.map((h, i) => Math.max(h.length, ...rows.map(r => r[i].length)));
 		const border = (l, m, r) => `${l}${widths.map(w => "─".repeat(w + 2)).join(m)}${r}`;
 		const renderRow = cells => `│ ${cells.map((c, i) => c.padEnd(widths[i])).join(" │ ")} │`;
-		const lines = [
-			border("┌", "┬", "┐"),
-			renderRow(heads),
-			border("├", "┼", "┤"),
-			...rows.map(renderRow),
-			border("└", "┴", "┘"),
-		];
-		const buffer = `${lines.join("\n")}\n`;
+		const buffer = `${[border("┌", "┬", "┐"), renderRow(heads), border("├", "┼", "┤"), ...rows.map(renderRow), border("└", "┴", "┘")].join("\n")}\n`;
 		rawText(buffer);
 		const viewCols = heads.map((head, i) => {
 			const column = { head: head === "(index)" ? "" : head };
-			let saw = false;
-			let numeric = true;
-			for (const row of rows) {
-				const cell = row[i];
-				if (cell === "") continue;
-				saw = true;
-				if (!NUMERIC_CELL_RE.test(cell)) {
-					numeric = false;
-					break;
-				}
-			}
-			if (saw && numeric) column.numeric = true;
+			const nonEmpty = rows.map(r => r[i]).filter(Boolean);
+			if (nonEmpty.length > 0 && nonEmpty.every(cell => NUMERIC_CELL_RE.test(cell))) column.numeric = true;
 			return column;
 		});
 		rawDisplay({ type: "view", text: buffer, view: { kind: "table", columns: viewCols, rows } });
@@ -579,62 +372,50 @@
 
 	const consoleTimers = new Map();
 	const consoleCounts = new Map();
+	const logLine = (...args) => logConsoleArgs("log", args);
+	const logGroup = (...args) => {
+		if (args.length > 0) logConsoleArgs("log", args);
+	};
+	const reportTimer = (label, remove, extra) => {
+		const key = String(label ?? "default");
+		const start = consoleTimers.get(key);
+		if (start === undefined) {
+			logConsoleArgs("warn", [`Timer '${key}' does not exist`]);
+			return;
+		}
+		if (remove) consoleTimers.delete(key);
+		logConsoleArgs("log", [`${key}: ${Date.now() - start}ms`, ...extra]);
+	};
+
 	const consoleBridge = {
-		log: (...args) => logConsoleArgs("log", args),
-		info: (...args) => logConsoleArgs("info", args),
+		log: logLine,
+		info: logLine,
+		debug: logLine,
+		dirxml: logLine,
 		warn: (...args) => logConsoleArgs("warn", args),
 		error: (...args) => logConsoleArgs("error", args),
-		debug: (...args) => logConsoleArgs("debug", args),
-		table: (data, columns) => formatTable(data, columns),
+		table: formatTable,
 		dir: value => logConsoleArgs("log", [value]),
-		dirxml: (...args) => logConsoleArgs("log", args),
 		trace: (...args) => {
 			const stack = (new Error().stack ?? "").split("\n").slice(2).join("\n");
 			logConsoleArgs("log", [args.length > 0 ? `Trace: ${args.map(a => inspectValue(a, 0)).join(" ")}` : "Trace", `\n${stack}`]);
 		},
 		assert: (condition, ...args) => {
-			if (condition) return;
-			if (args.length > 0) logConsoleArgs("error", ["Assertion failed:", ...args]);
-			else logConsoleArgs("error", ["Assertion failed"]);
+			if (!condition) logConsoleArgs("error", args.length > 0 ? ["Assertion failed:", ...args] : ["Assertion failed"]);
 		},
-		group: (...args) => {
-			if (args.length > 0) logConsoleArgs("log", args);
-		},
-		groupCollapsed: (...args) => {
-			if (args.length > 0) logConsoleArgs("log", args);
-		},
+		group: logGroup,
+		groupCollapsed: logGroup,
 		groupEnd: () => {},
-		time: label => {
-			consoleTimers.set(String(label ?? "default"), Date.now());
-		},
-		timeLog: (label, ...args) => {
-			const key = String(label ?? "default");
-			const start = consoleTimers.get(key);
-			if (start === undefined) {
-				logConsoleArgs("warn", [`Timer '${key}' does not exist`]);
-				return;
-			}
-			logConsoleArgs("log", [`${key}: ${Date.now() - start}ms`, ...args]);
-		},
-		timeEnd: label => {
-			const key = String(label ?? "default");
-			const start = consoleTimers.get(key);
-			if (start === undefined) {
-				logConsoleArgs("warn", [`Timer '${key}' does not exist`]);
-				return;
-			}
-			consoleTimers.delete(key);
-			logConsoleArgs("log", [`${key}: ${Date.now() - start}ms`]);
-		},
+		time: label => consoleTimers.set(String(label ?? "default"), Date.now()),
+		timeLog: (label, ...args) => reportTimer(label, false, args),
+		timeEnd: label => reportTimer(label, true, []),
 		count: label => {
 			const key = String(label ?? "default");
 			const next = (consoleCounts.get(key) ?? 0) + 1;
 			consoleCounts.set(key, next);
 			logConsoleArgs("log", [`${key}: ${next}`]);
 		},
-		countReset: label => {
-			consoleCounts.delete(String(label ?? "default"));
-		},
+		countReset: label => consoleCounts.delete(String(label ?? "default")),
 	};
 
 	const log = message => rawDisplay({ type: "status", event: { op: "log", message: String(message) } });
@@ -658,22 +439,12 @@
 		return text;
 	}
 
-	const read = async (path, opts, ...rest) => {
-		const options = optionsArg("read", opts, rest, ["offset", "limit"], "{ offset, limit }");
-		return await rawUrlRead(String(path), options);
-	};
+	const read = async (path, opts, ...rest) => await rawUrlRead(String(path), parseReadOptions(opts, rest));
 
 	const write = async (path, data) => {
-		if (typeof data === "string") {
-			return await rawUrlWrite(String(path), data, "utf8");
-		}
-		if (data instanceof ArrayBuffer) {
-			return await rawUrlWrite(String(path), encodeBase64Bytes(new Uint8Array(data)), "base64");
-		}
-		if (ArrayBuffer.isView(data)) {
-			const bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-			return await rawUrlWrite(String(path), encodeBase64Bytes(bytes), "base64");
-		}
+		if (typeof data === "string") return await rawUrlWrite(String(path), data, "utf8");
+		const bytes = toUint8Array(data);
+		if (bytes) return await rawUrlWrite(String(path), bytes.toBase64(), "base64");
 		throw new TypeError("write() expects string, ArrayBuffer, or ArrayBufferView data");
 	};
 
@@ -684,24 +455,27 @@
 		},
 	});
 
-	globalThis.console = consoleBridge;
-	globalThis.print = consoleBridge.log;
-	globalThis.log = log;
-	globalThis.phase = phase;
-	globalThis.env = env;
-	globalThis.read = read;
-	globalThis.write = write;
-	globalThis.tool = tool;
-	globalThis.btoa = btoa;
-	globalThis.atob = atob;
-	globalThis.TextEncoder = TextEncoder;
-	globalThis.TextDecoder = TextDecoder;
-	globalThis.__omp_set_final_expr__ = value => {
-		rawSetFinalExpr(value);
-	};
-	globalThis.__omp_emit_final_expr__ = value => {
-		if (value !== undefined) consoleBridge.log(value);
-	};
+	Object.assign(globalThis, {
+		console: consoleBridge,
+		print: logLine,
+		log,
+		phase,
+		env,
+		read,
+		write,
+		tool,
+		btoa,
+		atob,
+		TextEncoder,
+		TextDecoder,
+		__omp_set_final_expr__: value => {
+			rawSetFinalExpr(value);
+		},
+		__omp_emit_final_expr__: value => {
+			if (value !== undefined) logLine(value);
+		},
+	});
+
 	// Warm up V8 PRNG and stack-trace symbolization before OS sandbox drops FS access.
 	void Math.random();
 	void new Error().stack;
