@@ -29,6 +29,8 @@
 ### Fixed
 
 - Fixed startup failing with `no such column: salt` when `agent.db` records auth schema v9 but its credentials table has no `salt` column
+- Fixed unresolved `blob:sha256:` image references reaching OpenAI Responses, Chat Completions, and Cursor as poisoned data URLs; `convertResponsesInputImage` now prefers a valid `url` over stale blob `data` ([#20903](https://github.com/can1357/oh-my-pi/issues/20903), [#20906](https://github.com/can1357/oh-my-pi/pull/20906))
+
 - An OpenAI Responses request retried after an empty completion keeps the provider session it started with, so a session the host retired mid-request (a model switch) is not recreated for the next model ([#20858](https://github.com/can1357/oh-my-pi/pull/20858) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Fixed DeepSeek sessions failing every request with `400 … image special token` after a tool result quoted DeepSeek's chat template: `<｜…｜>` and `｜DSML｜` tokens in outgoing message text are now broken with a zero-width space ([#20832](https://github.com/can1357/oh-my-pi/pull/20832) by [@dany-on-demand](https://github.com/dany-on-demand))
 - Usage checks no longer send a private gateway’s configured credential to a built-in provider’s public quota service.

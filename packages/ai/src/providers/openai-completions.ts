@@ -13,7 +13,7 @@ import {
 	parseStreamingJsonThrottled,
 	type ServerSentEvent,
 } from "@oh-my-pi/pi-utils";
-import { isUnresolvedBlobImage, UNRESOLVED_BLOB_IMAGE_PLACEHOLDER } from "../utils/blob-ref";
+import { isUnresolvedBlobRef, UNRESOLVED_BLOB_IMAGE_PLACEHOLDER } from "../utils/blob-ref";
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
@@ -2786,7 +2786,7 @@ export function convertMessages(
 							text,
 						} satisfies ChatCompletionContentPartText);
 					} else if (supportsImages) {
-						if (isUnresolvedBlobImage(item.data) && !item.url) {
+						if (isUnresolvedBlobRef(item.data) && !item.url) {
 							content.push({ type: "text", text: UNRESOLVED_BLOB_IMAGE_PLACEHOLDER });
 						} else {
 							content.push({
@@ -3129,7 +3129,7 @@ export function convertMessages(
 				if (hasImages && supportsImages) {
 					for (const block of toolMsg.content) {
 						if (block.type === "image") {
-							if (isUnresolvedBlobImage(block.data) && !block.url) {
+							if (isUnresolvedBlobRef(block.data) && !block.url) {
 								imageBlocks.push({ type: "text", text: UNRESOLVED_BLOB_IMAGE_PLACEHOLDER });
 							} else {
 								imageBlocks.push({

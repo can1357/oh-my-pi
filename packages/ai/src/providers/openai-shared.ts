@@ -142,7 +142,7 @@ import {
 	setHeaderIfAbsent,
 } from "./inference-headers";
 import { isMalformedToolCallName, isValidToolCallId, transformMessages } from "./transform-messages";
-import { isUnresolvedBlobImage, UNRESOLVED_BLOB_IMAGE_PLACEHOLDER } from "../utils/blob-ref";
+import { isUnresolvedBlobRef, UNRESOLVED_BLOB_IMAGE_PLACEHOLDER } from "../utils/blob-ref";
 import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER, partitionVisionContent } from "./vision-guard";
 
 export interface OpenAIModelIdentity {
@@ -1979,16 +1979,21 @@ function convertResponsesInputImage(image: ImageContent, supportsImageDetailOrig
 	if (image.providerFile?.provider === "openai" && image.providerFile.id) {
 		return { type: "input_image", detail, file_id: image.providerFile.id };
 	}
+	// A valid `url` wins, matching the other wire paths: stale blob `data`
+	// must not displace an image the provider can fetch.
+	if (image.url) {
+		return { type: "input_image", detail, image_url: image.url };
+	}
 	// An unresolved `blob:sha256:` reference (bare or data-URL-wrapped) must
 	// never become a data URL: providers reject it with HTTP 400 and the ref
 	// persists in history, failing every later turn. Degrade to a placeholder.
-	if (isUnresolvedBlobImage(image.data)) {
+	if (isUnresolvedBlobRef(image.data)) {
 		return { type: "input_text", text: UNRESOLVED_BLOB_IMAGE_PLACEHOLDER };
 	}
 	return {
 		type: "input_image",
 		detail,
-		image_url: image.url ?? `data:${image.mimeType};base64,${image.data}`,
+		image_url: `data:${image.mimeType};base64,${image.data}`,
 	};
 }
 

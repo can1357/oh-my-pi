@@ -180,3 +180,41 @@ describe("image url parts", () => {
 		expect(images[1].image_url?.url).toBe(`data:image/png;base64,${PNG_B64}`);
 	});
 });
+
+const BLOB_REF = `blob:sha256:${"a".repeat(64)}`;
+
+describe("unresolved blob image refs", () => {
+	it("responses input degrades unresolved blob data without a url to a placeholder", () => {
+		const converted = convertResponsesInputContent(
+			[
+				{ type: "text", text: "look" },
+				{ type: "image", data: BLOB_REF, mimeType: "image/png" },
+			],
+			true,
+			true,
+		);
+
+		expect(converted).toEqual([
+			{ type: "input_text", text: "look" },
+			{ type: "input_text", text: "[image omitted: unresolved blob reference]" },
+		]);
+	});
+
+	it("responses input prefers a fetchable url over unresolved blob data", () => {
+		const converted = convertResponsesInputContent(
+			[
+				{ type: "text", text: "look" },
+				{ type: "image", data: BLOB_REF, mimeType: "image/png", url: BLOB_URL },
+			],
+			true,
+			true,
+		);
+
+		expect(converted?.find(part => part.type === "input_image")).toEqual({
+			type: "input_image",
+			detail: "auto",
+			image_url: BLOB_URL,
+		});
+		expect(JSON.stringify(converted)).not.toContain(BLOB_REF);
+	});
+});

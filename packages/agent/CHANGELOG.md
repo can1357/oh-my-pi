@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Fixed remote compaction replaying unresolved `blob:sha256:` `image_url`s from native history and wrapping blob-ref `data` into a data URL even when a fetchable `url` was present ([#20903](https://github.com/can1357/oh-my-pi/issues/20903), [#20906](https://github.com/can1357/oh-my-pi/pull/20906))
+
 - Fixed turn-end hooks being unable to tell which tool calls named no tool: `AgentTurnEndContext.unresolvedToolCallIds` now lists them ([#10876](https://github.com/can1357/oh-my-pi/issues/10876))
 - Fixed `generateHandoffFromContext` sending no output limit, so a server without its own limit could stream a handoff forever; the request is now capped at `MAX_SUMMARY_TOKENS` and ends as an incomplete-output failure ([#18031](https://github.com/can1357/oh-my-pi/issues/18031))
 - Reduced the size of authentication-gateway requests by preventing tool definitions from including internal host state.

@@ -301,6 +301,20 @@ describe("dropUnreadableContextImages", () => {
 		expect(await dropUnreadableContextImages(context, OPENAI_RESPONSES_MODEL)).toBe(context);
 	});
 
+	test("degrades a bare blob:sha256 image_url in a native replay payload", async () => {
+		const ref = `blob:sha256:${"a".repeat(64)}`;
+		const original = userMessage([{ type: "text", text: "what is in this screenshot?" }], nativeImagePayload(ref));
+		const context: Context = { messages: [original] };
+
+		const guarded = await dropUnreadableContextImages(context, OPENAI_RESPONSES_MODEL);
+
+		expect(guarded).not.toBe(context);
+		const parts = nativeContentParts(guarded.messages[0]!);
+		expect(parts[0]).toEqual({ type: "input_text", text: "what is in this screenshot?" });
+		expect(nativeTextOf(parts[1])).toContain("unresolved blob reference");
+		expect(JSON.stringify(parts)).not.toContain(ref);
+	});
+
 	/**
 	 * A computer screenshot rides on `providerMetadata` and is replayed verbatim
 	 * into `computer_call_output.output`, bypassing generic content entirely.
@@ -327,6 +341,28 @@ describe("dropUnreadableContextImages", () => {
 		expect(guardedResult.providerMetadata).toBeUndefined();
 		// The text the fallback note is built from survives untouched.
 		expect(guardedResult.content).toBe(result.content);
+	});
+
+	test("clears computer metadata whose screenshot is a bare blob:sha256 ref", async () => {
+		const ref = `blob:sha256:${"a".repeat(64)}`;
+		const result: ToolResultMessage = {
+			...toolResult([{ type: "text", text: "clicked at 100,200" }]),
+			toolName: "computer",
+			providerMetadata: {
+				type: "computer",
+				screenshot: { type: "computer_screenshot", image_url: ref },
+				acknowledgedSafetyChecks: [],
+			},
+		};
+		const context: Context = { messages: [result] };
+
+		const guarded = await dropUnreadableContextImages(context, OPENAI_RESPONSES_MODEL);
+
+		const guardedResult = guarded.messages[0];
+		if (guardedResult?.role !== "toolResult") throw new Error("expected a tool result");
+		expect(guardedResult.providerMetadata).toBeUndefined();
+		expect(guardedResult.content).toBe(result.content);
+		expect(JSON.stringify(guarded)).not.toContain(ref);
 	});
 
 	test("keeps a decodable computer screenshot byte-identical", async () => {

@@ -422,6 +422,52 @@ describe("buildOpenAiNativeHistory multimodal tool results", () => {
 		]);
 		expect(items.some(item => item.type === "message" && item.role === "user")).toBe(false);
 	});
+
+	test("degrades a bare blob:sha256 image_url in replayed raw history", () => {
+		const ref = `blob:sha256:${"a".repeat(64)}`;
+		const user: UserMessage = {
+			role: "user",
+			content: [{ type: "text", text: "what is in this screenshot?" }],
+			timestamp: Date.now(),
+			providerPayload: {
+				type: "openaiResponsesHistory",
+				provider: "openai-codex",
+				dt: true,
+				items: [
+					{
+						type: "message",
+						role: "user",
+						content: [
+							{ type: "input_text", text: "what is in this screenshot?" },
+							{ type: "input_image", detail: "auto", image_url: ref },
+						],
+					},
+				],
+			},
+		};
+		const model = makeOpenAiModel({ provider: "openai-codex", input: ["text", "image"] });
+
+		const items = buildOpenAiNativeHistory([user], model);
+
+		expect(JSON.stringify(items)).toContain("[image omitted: unresolved blob reference]");
+		expect(JSON.stringify(items)).not.toContain(ref);
+	});
+
+	test("uses a content-block url instead of wrapping unresolved blob data as a data URL", () => {
+		const ref = `blob:sha256:${"a".repeat(64)}`;
+		const user: UserMessage = {
+			role: "user",
+			content: [{ type: "image", data: ref, mimeType: "image/png", url: "https://cdn.example/shot.png" }],
+			timestamp: Date.now(),
+		};
+		const model = makeOpenAiModel({ provider: "openai-codex", input: ["text", "image"] });
+
+		const items = buildOpenAiNativeHistory([user], model);
+
+		expect(JSON.stringify(items)).toContain("https://cdn.example/shot.png");
+		expect(JSON.stringify(items)).not.toContain(`data:image/png;base64,${ref}`);
+		expect(JSON.stringify(items)).not.toContain(ref);
+	});
 });
 
 describe("buildOpenAiNativeHistory interleaved assistant message (#8789)", () => {

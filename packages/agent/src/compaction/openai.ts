@@ -16,7 +16,7 @@
  */
 
 import { attach, create, Flag, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
-import { isUnresolvedBlobImage, UNRESOLVED_BLOB_IMAGE_PLACEHOLDER } from "@oh-my-pi/pi-ai/utils/blob-ref";
+import { isUnresolvedBlobRef, UNRESOLVED_BLOB_IMAGE_PLACEHOLDER } from "@oh-my-pi/pi-ai/utils/blob-ref";
 import { getCodexAttestationHeader } from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
 import { createOpenAICodexCompactionRequestContext } from "@oh-my-pi/pi-ai/providers/openai-codex-compaction";
 import {
@@ -566,6 +566,42 @@ function computerHistoryNote(item: Record<string, unknown>): Record<string, unkn
 	};
 }
 
+function degradeUnresolvedBlobImagePart(part: Record<string, unknown>): Record<string, unknown> | undefined {
+	if (part.type !== "input_image") return undefined;
+	if (typeof part.image_url === "string" && isUnresolvedBlobRef(part.image_url)) {
+		return { type: "input_text", text: UNRESOLVED_BLOB_IMAGE_PLACEHOLDER };
+	}
+	return undefined;
+}
+
+function degradeUnresolvedBlobHistoryItem(item: Record<string, unknown>): Record<string, unknown> | undefined {
+	const asPart = degradeUnresolvedBlobImagePart(item);
+	if (asPart) return asPart;
+	if (!Array.isArray(item.content)) return undefined;
+	let content: unknown[] | undefined;
+	for (let i = 0; i < item.content.length; i++) {
+		const part = item.content[i];
+		if (!part || typeof part !== "object") continue;
+		const rewritten = degradeUnresolvedBlobImagePart(part as Record<string, unknown>);
+		if (!rewritten) continue;
+		content ??= [...item.content];
+		content[i] = rewritten;
+	}
+	return content ? { ...item, content } : undefined;
+}
+
+/** Rewrite bare `blob:sha256:` `image_url`s in replayed native history so they never reach the provider. */
+function degradeUnresolvedBlobHistoryItems(items: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+	let copied: Array<Record<string, unknown>> | undefined;
+	for (let i = 0; i < items.length; i++) {
+		const rewritten = degradeUnresolvedBlobHistoryItem(items[i]!);
+		if (!rewritten) continue;
+		copied ??= [...items];
+		copied[i] = rewritten;
+	}
+	return copied ?? items;
+}
+
 function adaptComputerHistoryForCompaction(
 	items: Array<Record<string, unknown>>,
 	supportsComputerUse: boolean,
@@ -639,7 +675,7 @@ export function buildOpenAiNativeHistory(
 					}
 				}
 				const historyItems = adaptComputerHistoryForCompaction(
-					dropMalformedOpenAIResponsesToolCalls(rawHistoryItems),
+					degradeUnresolvedBlobHistoryItems(dropMalformedOpenAIResponsesToolCalls(rawHistoryItems)),
 					model.supportsComputerUse === true,
 				);
 				input.push(...historyItems);
@@ -663,7 +699,7 @@ export function buildOpenAiNativeHistory(
 					if (block.type === "image") {
 						// Unresolved `blob:sha256:` refs must not become poisoned data
 						// URLs (HTTP 400 on every later turn); degrade to a placeholder.
-						if (isUnresolvedBlobImage(block.data) && !block.url) {
+						if (isUnresolvedBlobRef(block.data) && !block.url) {
 							contentBlocks.push({
 								type: "input_text",
 								text: UNRESOLVED_BLOB_IMAGE_PLACEHOLDER,
@@ -673,7 +709,7 @@ export function buildOpenAiNativeHistory(
 						contentBlocks.push({
 							type: "input_image",
 							detail: "auto",
-							image_url: `data:${block.mimeType};base64,${block.data}`,
+							image_url: block.url ?? `data:${block.mimeType};base64,${block.data}`,
 						});
 					}
 				}
@@ -702,7 +738,7 @@ export function buildOpenAiNativeHistory(
 					}
 				}
 				const historyItems = adaptComputerHistoryForCompaction(
-					dropMalformedOpenAIResponsesToolCalls(providerPayload.items),
+					degradeUnresolvedBlobHistoryItems(dropMalformedOpenAIResponsesToolCalls(providerPayload.items)),
 					model.supportsComputerUse === true,
 				);
 				if (providerPayload.dt) {

@@ -2,13 +2,16 @@ import { blobExtensionForImageMimeType, normalizeBlobExtension } from "../utils/
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
+import {
+	BLOB_HASH_RE,
+	BLOB_PREFIX,
+	isBlobRef,
+	parseBlobRef as parseCanonicalBlobRef,
+} from "@oh-my-pi/pi-ai/utils/blob-ref";
 import { isEexist, isEnoent, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type { LazyFrameData } from "@oh-my-pi/snapcompact";
 
-const BLOB_PREFIX = "blob:sha256:";
-
-/** Canonical blob hash shape: exactly 64 lowercase hex chars (a SHA-256 digest). */
-export const BLOB_HASH_RE = /^[a-f0-9]{64}$/;
+export { BLOB_HASH_RE, isBlobRef };
 
 /**
  * A reused blob older than this gets its mtime refreshed (metadata only, never
@@ -290,11 +293,6 @@ export class BlobStore {
 	}
 }
 
-/** Check if a data string is a blob reference. */
-export function isBlobRef(data: string): boolean {
-	return data.startsWith(BLOB_PREFIX);
-}
-
 /**
  * Extract the SHA-256 hash from a blob reference string.
  *
@@ -303,12 +301,13 @@ export function isBlobRef(data: string): boolean {
  * single choke point that keeps every resolution path confined to the blob dir:
  * `get`/`getSync` feed this value into `path.join(this.dir, hash)`, so an
  * unvalidated `../` suffix would otherwise escape the store and read arbitrary files.
+ * The prefix and hash grammar come from `@oh-my-pi/pi-ai/utils/blob-ref`.
  */
 export function parseBlobRef(data: string): string | null {
-	if (!data.startsWith(BLOB_PREFIX)) return null;
-	const hash = data.slice(BLOB_PREFIX.length);
-	if (!BLOB_HASH_RE.test(hash)) {
-		logger.warn("Rejected malformed blob reference", { suffix: hash });
+	if (!isBlobRef(data)) return null;
+	const hash = parseCanonicalBlobRef(data);
+	if (!hash) {
+		logger.warn("Rejected malformed blob reference", { suffix: data.slice(BLOB_PREFIX.length) });
 		return null;
 	}
 	return hash;
