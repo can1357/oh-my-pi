@@ -376,7 +376,11 @@ function parseManifest(bytes: Uint8Array, archive: string): SessionArchiveManife
  */
 async function readSessionArchive(archive: string): Promise<SessionArchiveContents> {
 	await requireFile(archive, "Archive");
-	const { readArchiveEntries, ArchiveError, formatArchivePathForError }: typeof Archive = require("@oh-my-pi/pi-utils/ar");
+	const {
+		readArchiveEntries,
+		ArchiveError,
+		formatArchivePathForError,
+	}: typeof Archive = require("@oh-my-pi/pi-utils/ar");
 	let members: Map<string, Uint8Array>;
 	try {
 		members = await readArchiveEntries(

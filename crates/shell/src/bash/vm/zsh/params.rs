@@ -645,7 +645,7 @@ fn dense(items: &IndexedArray) -> (Vec<BString>, bool) {
 		return (items.iter().map(|e| e.1.clone()).collect(), false);
 	}
 	let mut out = vec![BString::default(); len];
-	for (k, v) in items.iter() {
+	for (k, v) in items {
 		if let Ok(i) = usize::try_from(*k)
 			&& i < len
 		{

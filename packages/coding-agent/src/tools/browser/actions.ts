@@ -53,12 +53,7 @@ import { ToolError } from "../tool-errors";
 import { toolResult } from "../tool-result";
 import { clampTimeout } from "../tool-timeouts";
 
-import {
-	cfgBrowserHeadless,
-	cfgBrowserIdleCloseSec,
-	cfgBrowserWebKit,
-	cfgBrowserWebKitPath,
-} from "./settings";
+import { cfgBrowserHeadless, cfgBrowserIdleCloseSec, cfgBrowserWebKit, cfgBrowserWebKitPath } from "./settings";
 import { cfgToolsMaxTimeout } from "../settings";
 
 import { chromiumKind, configuredRelayUrl, ownBrowserKind, resolveBrowserKind, selectBrowserKind } from "./select-kind";

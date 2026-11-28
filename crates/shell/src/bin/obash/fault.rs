@@ -580,7 +580,7 @@ impl Injector {
 				Step::Done { run: done, status } if done == run => break status,
 				Step::Done { run, status } => callouts.on_done(&shell, run, status),
 				Step::Call { id, call } => {
-					callouts.on_call(&mut shell, &mut host, &mut store, id, call)
+					callouts.on_call(&mut shell, &mut host, &mut store, id, call);
 				},
 				Step::Blocked | Step::Paused => {
 					wait_runnable(&mut self.parker, &shell, root, &callouts);

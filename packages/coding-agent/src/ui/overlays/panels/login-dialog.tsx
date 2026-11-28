@@ -375,14 +375,7 @@ export function LoginDialog(props: { readonly state: LoginDialogState }): JSXNod
 				else if (act === "submit" && untrack(() => state.activeField())) state.submit();
 			}}
 		>
-			<overlay
-				key="sheet"
-				role="omp.overlay.login"
-				head={state.sheetTitle}
-				anchor="center"
-				size="md"
-				modal
-			>
+			<overlay key="sheet" role="omp.overlay.login" head={state.sheetTitle} anchor="center" size="md" modal>
 				<col gap="lg">
 					<col key="body" role="omp.login.body" gap="md">
 						{() => {

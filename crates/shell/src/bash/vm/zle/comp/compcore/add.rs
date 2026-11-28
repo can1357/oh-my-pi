@@ -964,7 +964,12 @@ fn quote_invalid(str: &[u8]) -> Option<Vec<u8>> {
 		metafy_into(valid.as_bytes(), &mut out);
 		for &b in bad {
 			out.extend_from_slice(b"$'\\");
-			out.extend_from_slice(&[b'0' + ((b >> 6) & 7), b'0' + ((b >> 3) & 7), b'0' + (b & 7), b'\'']);
+			out.extend_from_slice(&[
+				b'0' + ((b >> 6) & 7),
+				b'0' + ((b >> 3) & 7),
+				b'0' + (b & 7),
+				b'\'',
+			]);
 		}
 		bytes = rest;
 	}

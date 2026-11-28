@@ -18,6 +18,7 @@ use objc2_core_foundation::{
 use objc2_core_graphics::{
 	CGEvent, CGEventField, CGEventSource, CGEventSourceStateID, CGEventType,
 };
+use objc2_foundation::NSProcessInfo;
 use parking_lot::Mutex;
 
 use super::{
@@ -132,7 +133,8 @@ struct ForegroundSpi {
 	/// Differs from the front process while a panel of another process, such
 	/// as Spotlight or a launcher, has the keyboard.
 	get_key_focus: Option<SLPSGetKeyFocusProcessFn>,
-	post_record:   SLPSPostEventRecordToFn,
+	/// `None` below macOS 15 ([`records_encodable`]).
+	post_record:   Option<SLPSPostEventRecordToFn>,
 	psn:           PsnLookup,
 	conditional:   Option<ConditionalFront>,
 }
@@ -233,10 +235,25 @@ fn resolve_foreground() -> Option<ForegroundSpi> {
 		set_front: symbol(c"_SLPSSetFrontProcessWithOptions")?,
 		get_front: symbol(c"_SLPSGetFrontProcess")?,
 		get_key_focus: symbol(c"SLPSGetKeyFocusProcess"),
-		post_record: symbol(c"SLPSPostEventRecordTo")?,
+		post_record: if records_encodable() {
+			Some(symbol(c"SLPSPostEventRecordTo")?)
+		} else {
+			None
+		},
 		psn,
 		conditional: resolve_conditional_front(),
 	})
+}
+
+/// Whether `SLPSPostEventRecordTo` can take the hand-built make-key record
+/// ([`make_key_record`]). Below macOS 15 it archives the record with
+/// `NSKeyedArchiver`, which reads part of it as an object pointer and
+/// crashes the process (issue #20951).
+fn records_encodable() -> bool {
+	NSProcessInfo::processInfo()
+		.operatingSystemVersion()
+		.majorVersion
+		>= 15
 }
 
 fn resolve_conditional_front() -> Option<ConditionalFront> {
@@ -3021,14 +3038,19 @@ fn make_window_key_unless_user_acted(
 }
 
 /// The paired make-key records (`0x01`, then `0x02`) that make `wid` the
-/// native key window of its process once that process is in front.
+/// native key window of its process once that process is in front. Where the
+/// records cannot be posted ([`records_encodable`]), nothing is sent and the
+/// front request alone decides the key window.
 fn post_make_key_records(
 	spi: &ForegroundSpi,
 	target: ProcessSerialNumber,
 	wid: u32,
 ) -> CoreResult<()> {
+	let Some(post) = spi.post_record else {
+		return Ok(());
+	};
 	for kind in [0x01, 0x02] {
-		if !post_record(spi.post_record, target, &make_key_record(wid, kind)) {
+		if !post_record(post, target, &make_key_record(wid, kind)) {
 			return Err(DesktopError::input_failed(format!(
 				"window {wid} rejected its make-key record"
 			)));
