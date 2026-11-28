@@ -582,18 +582,40 @@ enum Candidate {
 	Denied,
 }
 
-/// What `path` names as a command; `None` for nothing (or a directory).
+/// What `path` names as a command, as `execve` would take it: `None` for
+/// nothing, or for a script whose `#!` interpreter is missing (`ENOENT`);
+/// [`Candidate::Denied`] for a directory, a file without an execute bit, or a
+/// script whose interpreter cannot be executed (`EACCES`). A relative
+/// interpreter, one the kernel takes as cut short (the kernel refuses it with
+/// `ENOEXEC`, and `execvp` runs it with `/bin/sh`), and any other failure are
+/// left to the run.
 #[cfg(unix)]
 fn executable(path: PathBuf) -> Option<Candidate> {
-	use std::os::unix::fs::PermissionsExt as _;
-	let meta = std::fs::metadata(&path)
-		.ok()
-		.filter(std::fs::Metadata::is_file)?;
-	Some(if meta.permissions().mode() & 0o111 != 0 {
-		Candidate::Runs(path)
-	} else {
-		Candidate::Denied
-	})
+	use std::os::unix::{ffi::OsStrExt as _, fs::PermissionsExt as _};
+
+	use crate::sys::shebang;
+	let runs = |meta: &std::fs::Metadata| meta.is_file() && meta.permissions().mode() & 0o111 != 0;
+	if !runs(&std::fs::metadata(&path).ok()?) {
+		return Some(Candidate::Denied);
+	}
+	let mut head = [0; shebang::HEAD_LEN];
+	let Ok(len) = shebang::read_head(&path, &mut head) else {
+		return Some(Candidate::Runs(path));
+	};
+	let head = &head[..len];
+	let Some(line) = shebang::parse(head).filter(|_| !shebang::interpreter_cut(head)) else {
+		return Some(Candidate::Runs(path));
+	};
+	let interpreter = std::path::Path::new(OsStr::from_bytes(line.interpreter));
+	if !interpreter.is_absolute() {
+		return Some(Candidate::Runs(path));
+	}
+	match std::fs::metadata(interpreter) {
+		Ok(meta) if runs(&meta) => Some(Candidate::Runs(path)),
+		Ok(_) => Some(Candidate::Denied),
+		Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+		Err(_) => Some(Candidate::Runs(path)),
+	}
 }
 
 /// What `path` names as a command: the file itself, else the file with `.exe`
@@ -628,6 +650,58 @@ mod tests {
 		assert!(!is_name("1x"));
 		assert!(!is_name("a-b"));
 		assert!(!is_name(""));
+	}
+
+	/// The lookup refuses a command as `execve` refuses it, before it runs: a
+	/// directory or a file without an execute bit cannot be executed, and a
+	/// script cannot run when its `#!` interpreter is missing or cannot be
+	/// executed itself.
+	#[cfg(unix)]
+	#[test]
+	fn a_command_lookup_fails_as_execve_fails() {
+		use std::{io::ErrorKind, os::unix::fs::PermissionsExt as _};
+
+		let dir = tempfile::tempdir().unwrap();
+		let root = dir.path();
+		std::fs::create_dir(root.join("d")).unwrap();
+		std::fs::write(root.join("noexec"), "#!/bin/sh\necho hi\n").unwrap();
+		for (name, text) in [
+			("runs", "#!/bin/sh\necho hi\n".to_owned()),
+			("badint", "#!/nonexistent/sh\n".to_owned()),
+			("badint2", format!("#!{}\n", root.join("noexec").display())),
+			("dirint", format!("#!{}\n", root.join("d").display())),
+			// An interpreter path longer than the head the kernel reads: the
+			// kernel takes the path as cut short and refuses the file with
+			// `ENOEXEC`, and `execvp` runs it with `/bin/sh`.
+			("long", format!("#!/{}\necho ran \"$@\"\n", "0".repeat(300))),
+		] {
+			let path = root.join(name);
+			std::fs::write(&path, text).unwrap();
+			std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+		}
+		let lookup = Lookup {
+			path:   Some(root.display().to_string()),
+			cwd:    root.to_path_buf(),
+			config: ToolConfig::default(),
+		};
+		for (name, expected) in [
+			("./runs", Ok(())),
+			("./d", Err(ErrorKind::PermissionDenied)),
+			("./noexec", Err(ErrorKind::PermissionDenied)),
+			("./badint", Err(ErrorKind::NotFound)),
+			("./badint2", Err(ErrorKind::PermissionDenied)),
+			("./dirint", Err(ErrorKind::PermissionDenied)),
+			("./long", Ok(())),
+			// Searched on `PATH` as `execvp` searches it.
+			("d", Err(ErrorKind::PermissionDenied)),
+			("badint", Err(ErrorKind::NotFound)),
+		] {
+			let outcome = lookup
+				.program(&ShellCommand::new(vec![name.into()]))
+				.map(drop)
+				.map_err(|error| error.kind());
+			assert_eq!(outcome, expected, "{name}");
+		}
 	}
 
 	#[cfg(not(unix))]

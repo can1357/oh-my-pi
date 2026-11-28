@@ -80,6 +80,25 @@ pub fn parse(head: &[u8]) -> Option<Shebang<'_>> {
 	})
 }
 
+/// Whether the Linux kernel takes the `#!` interpreter of a file starting
+/// with `head` as cut short.
+///
+/// The kernel reads the `#!` line from the first [`HEAD_LEN`] bytes of the
+/// file only (execve(2)). The interpreter is cut short when the file has at
+/// least [`HEAD_LEN`] bytes, with no newline in the first [`HEAD_LEN`], and no
+/// blank or NUL from the interpreter's first byte to the last of them.
+/// `execve` then refuses the file, and `execvp` runs it with `/bin/sh`: on
+/// Linux 6.12 such a file ran under `/bin/sh`.
+pub fn interpreter_cut(head: &[u8]) -> bool {
+	let Some(line) = head.get(2..HEAD_LEN).filter(|_| head.starts_with(b"#!")) else {
+		return false;
+	};
+	let Some(start) = line.iter().position(|&c| c != b' ' && c != b'\t') else {
+		return false;
+	};
+	!line.contains(&b'\n') && !line[start..].iter().any(|&c| matches!(c, b' ' | b'\t' | 0))
+}
+
 /// Last path component (either separator, so Windows paths work too).
 fn basename(path: &[u8]) -> &[u8] {
 	path.rfind_byteset(b"/\\").map_or(path, |i| &path[i + 1..])
@@ -169,7 +188,9 @@ pub fn has_shebang(path: &Path) -> bool {
 	read_head(path, &mut head).is_ok_and(|n| n == 2 && head == *b"#!")
 }
 
-fn read_head(path: &Path, buf: &mut [u8]) -> io::Result<usize> {
+/// Read the first bytes of the file at `path` into `buf`, as many as fit or
+/// the file has; their count.
+pub fn read_head(path: &Path, buf: &mut [u8]) -> io::Result<usize> {
 	let mut f = fs::File::open(path)?;
 	let mut n = 0;
 	while n < buf.len() {
