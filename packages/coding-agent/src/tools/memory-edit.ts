@@ -19,6 +19,8 @@ export type MemoryEditParams = typeof memoryEditSchema.infer;
 export class MemoryEditTool implements AgentTool<typeof memoryEditSchema> {
 	readonly name = "memory_edit";
 	readonly approval = "read" as const;
+	/** Read tier is authorization only; this tool must not run as a soft-requirement detour. */
+	readonly softRequirementDetour = false;
 	readonly label = "Memory Edit";
 	get description(): string {
 		return prompt.render(memoryEditDescription);

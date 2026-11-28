@@ -1645,6 +1645,7 @@ const CAPTURE_DROPPED_KEYS = [
 	"concurrency",
 	"speculation",
 	"interruptible",
+	"softRequirementDetour",
 	"handlesToolInterrupt",
 	"matcherDigest",
 	"matcherPaths",

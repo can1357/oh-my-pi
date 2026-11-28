@@ -213,6 +213,9 @@
 - Fixed native compaction token estimates counting opaque encrypted-state bytes as conversation text ([#16904](https://github.com/can1357/oh-my-pi/pull/16904) by [@eggpeat](https://github.com/eggpeat))
 - Fixed split-turn compaction leaving `session.compacting` context out of the turn-prefix summary ([#16707](https://github.com/can1357/oh-my-pi/pull/16707) by [@integrITsolutions](https://github.com/integrITsolutions))
 - Fixed compaction failing as a whole, and discarding the completed summary, when the optional short summary fails or returns no answer; the compaction now completes without a short summary, and cancellation still cancels it ([#16942](https://github.com/can1357/oh-my-pi/pull/16942) by [@Mouriya-Emma](https://github.com/Mouriya-Emma))
+### Fixed
+
+- Fixed a pending soft tool requirement skipping every other tool call, including harmless reads the model needs to satisfy it: read-tier calls (and the `todo` view operation) now run as a detour without escalating the required tool, while writes and shell execution are still skipped; a tool can opt out with `softRequirementDetour: false` ([#16663](https://github.com/can1357/oh-my-pi/pull/16663) by [@Komzpa](https://github.com/Komzpa))
 
 ## [18.12.4] - 2026-10-20
 
