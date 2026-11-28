@@ -202,9 +202,121 @@ pub enum Address {
 #[derive(Debug)]
 /// A single part of an RE replacement
 pub enum ReplacementPart {
-	Literal(String), // Normal text
-	WholeMatch,      // &
-	Group(u32),      // \1 to \9
+	Literal(String),      // Normal text
+	WholeMatch,           // &
+	Group(u32),           // \1 to \9
+	Case(CaseConversion), // \U, \L, \E, \u, \l (GNU extension)
+}
+
+/// A case conversion of the text that follows it in a replacement
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaseConversion {
+	Upper,     // \U: upper case, until \L or \E
+	Lower,     // \L: lower case, until \U or \E
+	End,       // \E: no conversion
+	UpperNext, // \u: upper case the next character
+	LowerNext, // \l: lower case the next character
+}
+
+#[derive(Clone, Copy)]
+enum Case {
+	Upper,
+	Lower,
+}
+
+impl Case {
+	/// Map `ch` as GNU sed's `towupper` and `towlower` do in a UTF-8
+	/// locale: by Unicode's simple mapping, one character to one. Where the
+	/// full mapping is several characters (`ß`, `ﬁ`), the simple one is the
+	/// character itself, apart from the Greek small letters with
+	/// ypogegrammeni, whose upper case is the letter with prosgegrammeni,
+	/// and `İ`, whose lower case is `i`.
+	fn map(self, ch: char) -> char {
+		match self {
+			Self::Upper => {
+				let mut upper = ch.to_uppercase();
+				match (upper.next(), upper.next()) {
+					(Some(one), None) => one,
+					_ => match ch {
+						'\u{1f80}'..='\u{1f87}'
+						| '\u{1f90}'..='\u{1f97}'
+						| '\u{1fa0}'..='\u{1fa7}' => char::from_u32(ch as u32 + 8).unwrap_or(ch),
+						'\u{1fb3}' => '\u{1fbc}',
+						'\u{1fc3}' => '\u{1fcc}',
+						'\u{1ff3}' => '\u{1ffc}',
+						_ => ch,
+					},
+				}
+			},
+			Self::Lower => {
+				let mut lower = ch.to_lowercase();
+				match (lower.next(), lower.next()) {
+					(Some(one), None) => one,
+					_ if ch == '\u{130}' => 'i',
+					_ => ch,
+				}
+			},
+		}
+	}
+}
+
+/// The case conversions in force while a replacement is appended.
+#[derive(Default)]
+struct CaseState {
+	/// `\U` or `\L`, until `\E`
+	run:     Option<Case>,
+	/// `\u` or `\l`, for the next character appended
+	next:    Option<Case>,
+	/// `next` has passed over an empty group, which it does once
+	carried: bool,
+}
+
+impl CaseState {
+	fn set(&mut self, conversion: CaseConversion) {
+		match conversion {
+			CaseConversion::Upper => (self.run, self.next) = (Some(Case::Upper), None),
+			CaseConversion::Lower => (self.run, self.next) = (Some(Case::Lower), None),
+			CaseConversion::End => (self.run, self.next) = (None, None),
+			CaseConversion::UpperNext => (self.next, self.carried) = (Some(Case::Upper), false),
+			CaseConversion::LowerNext => (self.next, self.carried) = (Some(Case::Lower), false),
+		}
+	}
+
+	/// Append one piece of the replacement, converted as GNU sed does: a
+	/// byte that is no character is copied, and drops a `\u` or `\l` not
+	/// yet used, while `\U` and `\L` go on past it; a NUL ends the
+	/// conversion of the piece, whose rest is copied as it is.
+	fn append(&mut self, text: &[u8], result: &mut Vec<u8>) {
+		if text.is_empty() {
+			// An empty group passes a `\u` or `\l` on to what follows it.
+			if self.next.is_some() {
+				if self.carried {
+					self.next = None;
+				}
+				self.carried = !self.carried;
+			}
+			return;
+		}
+		let mut next = self.next.take();
+		let mut copied = 0;
+		'chunks: for chunk in text.utf8_chunks() {
+			for ch in chunk.valid().chars() {
+				// Past a `\u` or `\l` alone, the rest is copied as it is.
+				let Some(case) = next.take().or(self.run) else {
+					break 'chunks;
+				};
+				if ch == '\0' {
+					break 'chunks;
+				}
+				result.extend_from_slice(case.map(ch).encode_utf8(&mut [0; 4]).as_bytes());
+				copied += ch.len_utf8();
+			}
+			next = None;
+			result.extend_from_slice(chunk.invalid());
+			copied += chunk.invalid().len();
+		}
+		result.extend_from_slice(&text[copied..]);
+	}
 }
 
 // The maximum value allowed in regex quantifier
@@ -249,26 +361,28 @@ impl ReplacementTemplate {
 	/// Append the replacement for a match, using original bytes from its captures;
 	/// a group the regex lacks expands to nothing, as in GNU.
 	pub fn apply_captures(&self, caps: &Captures, result: &mut Vec<u8>) {
+		let mut case = CaseState::default();
 		for part in &self.parts {
 			match part {
-				ReplacementPart::Literal(s) => result.extend_from_slice(s.as_bytes()),
-				ReplacementPart::WholeMatch => result.extend_from_slice(caps.get(0).unwrap().as_bytes()),
+				ReplacementPart::Literal(s) => case.append(s.as_bytes(), result),
+				ReplacementPart::WholeMatch => case.append(caps.get(0).unwrap().as_bytes(), result),
 				ReplacementPart::Group(n) => {
-					if let Some(m) = caps.get(*n as usize) {
-						result.extend_from_slice(m.as_bytes());
-					}
+					case.append(caps.get(*n as usize).map_or(&[][..], |m| m.as_bytes()), result);
 				},
+				ReplacementPart::Case(conversion) => case.set(*conversion),
 			}
 		}
 	}
 
 	/// Apply the template to the given RE single match.
 	pub fn apply_match(&self, m: &Match, result: &mut Vec<u8>) {
+		let mut case = CaseState::default();
 		for part in &self.parts {
 			match part {
-				ReplacementPart::Literal(s) => result.extend_from_slice(s.as_bytes()),
-				ReplacementPart::WholeMatch => result.extend_from_slice(m.as_bytes()),
+				ReplacementPart::Literal(s) => case.append(s.as_bytes(), result),
+				ReplacementPart::WholeMatch => case.append(m.as_bytes(), result),
 				ReplacementPart::Group(_) => panic!("unexpected Regex group replacement"),
+				ReplacementPart::Case(conversion) => case.set(*conversion),
 			}
 		}
 	}
@@ -637,8 +751,8 @@ use crate::openfile::OpenFile;
 use crate::host::ShellPaths;
 use crate::sed::{
 	command::{
-		Address, Command, CommandData, LineSource, ProcessingContext, RegexMode, ReplacementPart,
-		ReplacementTemplate, Substitution, Transliteration,
+		Address, CaseConversion, Command, CommandData, LineSource, ProcessingContext, RegexMode,
+		ReplacementPart, ReplacementTemplate, Substitution, Transliteration,
 	},
 	delimited_parser::{ERR_UNTERMINATED_Y, parse_char_escape, parse_regex, parse_transliteration},
 	error_handling::{
@@ -1255,10 +1369,12 @@ fn exclude_newline_from_negated_classes(pattern: &str) -> String {
 	result
 }
 
-/// Compile a regular expression replacement string.
+/// Compile a regular expression replacement string. Outside `posix` mode
+/// `\U`, `\L`, `\E`, `\u` and `\l` convert case, as in GNU sed.
 pub fn compile_replacement(
 	lines: &mut ScriptLineProvider,
 	line: &mut ScriptCharProvider,
+	posix: bool,
 ) -> SedResult<ReplacementTemplate> {
 	let mut parts = Vec::new();
 	let mut literal = String::new();
@@ -1305,9 +1421,12 @@ pub fn compile_replacement(
 						line.advance();
 					},
 
-					// Literal \ and &
+					// Literal \ and &. As in GNU sed, the escape ends a piece
+					// of the replacement, where a case conversion that a NUL
+					// ended starts again.
 					'\\' | '&' => {
 						literal.push(line.current());
+						parts.push(ReplacementPart::Literal(std::mem::take(&mut literal)));
 						line.advance();
 					},
 
@@ -1317,13 +1436,41 @@ pub fn compile_replacement(
 						line.advance();
 					},
 
+					// Case conversion
+					c @ ('U' | 'L' | 'E' | 'u' | 'l') if !posix => {
+						if !literal.is_empty() {
+							parts.push(ReplacementPart::Literal(std::mem::take(&mut literal)));
+						}
+						parts.push(ReplacementPart::Case(match c {
+							'U' => CaseConversion::Upper,
+							'L' => CaseConversion::Lower,
+							'E' => CaseConversion::End,
+							'u' => CaseConversion::UpperNext,
+							_ => CaseConversion::LowerNext,
+						}));
+						line.advance();
+					},
+
 					// other escape sequences
 					_ => {
+						let numeric = matches!(line.current(), 'd' | 'o' | 'x');
+						let control = line.current() == 'c';
 						if let Some(decoded) = parse_char_escape(line) {
 							literal.push(decoded);
+							// GNU reads `\c\\` as one escape, the control character
+							// of `\`, so what follows it is plain text.
+							if control && decoded == '\x1c' && !line.eol() && line.current() == '\\' {
+								line.advance();
+							}
+							// GNU reads a numeric escape that gives `&` or `\` as
+							// `\&` or `\\`, which end a piece.
+							if numeric && matches!(decoded, '&' | '\\') {
+								parts.push(ReplacementPart::Literal(std::mem::take(&mut literal)));
+							}
 						} else {
 							literal.push('\\');
 							literal.push(line.current());
+							parts.push(ReplacementPart::Literal(std::mem::take(&mut literal)));
 							line.advance();
 						}
 					},
@@ -1369,7 +1516,7 @@ fn compile_subst_command(
 	let parsed = parse_regex(lines, line, regex_mode, ERR_UNTERMINATED_S)?;
 	let mut subst = Box::new(Substitution::default());
 
-	subst.replacement = compile_replacement(lines, line)?;
+	subst.replacement = compile_replacement(lines, line, context.posix)?;
 	compile_subst_flags(lines, line, &mut subst, context.posix, context.sandbox, &context.paths)?;
 
 	if parsed.pattern.is_empty() && (subst.ignore_case || subst.multiline) {
@@ -2584,7 +2731,7 @@ mod tests {
 	#[test]
 	fn test_compile_replacement_literal() {
 		let (mut lines, mut chars) = make_providers("/hello/");
-		let template = compile_replacement(&mut lines, &mut chars).unwrap();
+		let template = compile_replacement(&mut lines, &mut chars, false).unwrap();
 
 		assert_eq!(template.parts.len(), 1);
 		assert!(matches!(&template.parts[0], ReplacementPart::Literal(s) if s == "hello"));
@@ -2593,7 +2740,7 @@ mod tests {
 	#[test]
 	fn test_compile_replacement_escaped_delimiter() {
 		let (mut lines, mut chars) = make_providers(r"/hell\/o/");
-		let template = compile_replacement(&mut lines, &mut chars).unwrap();
+		let template = compile_replacement(&mut lines, &mut chars, false).unwrap();
 
 		assert_eq!(template.parts.len(), 1);
 		assert!(matches!(&template.parts[0], ReplacementPart::Literal(s) if s == "hell/o"));
@@ -2602,7 +2749,7 @@ mod tests {
 	#[test]
 	fn test_compile_replacement_backrefs_and_literal() {
 		let (mut lines, mut chars) = make_providers("/prefix \\1 and \\2/");
-		let template = compile_replacement(&mut lines, &mut chars).unwrap();
+		let template = compile_replacement(&mut lines, &mut chars, false).unwrap();
 
 		assert_eq!(template.parts.len(), 4);
 		assert!(matches!(&template.parts[0], ReplacementPart::Literal(s) if s == "prefix "));
@@ -2614,7 +2761,7 @@ mod tests {
 	#[test]
 	fn test_compile_replacement_whole_match() {
 		let (mut lines, mut chars) = make_providers("/The match was: &/");
-		let template = compile_replacement(&mut lines, &mut chars).unwrap();
+		let template = compile_replacement(&mut lines, &mut chars, false).unwrap();
 
 		assert_eq!(template.parts.len(), 2);
 		assert!(matches!(&template.parts[0], ReplacementPart::Literal(s) if s == "The match was: "));
@@ -2624,7 +2771,7 @@ mod tests {
 	#[test]
 	fn test_compile_replacement_whole_match_synonym() {
 		let (mut lines, mut chars) = make_providers(r"/The match was: \0/");
-		let template = compile_replacement(&mut lines, &mut chars).unwrap();
+		let template = compile_replacement(&mut lines, &mut chars, false).unwrap();
 
 		assert_eq!(template.parts.len(), 2);
 		assert!(matches!(&template.parts[0], ReplacementPart::Literal(s) if s == "The match was: "));
@@ -2633,19 +2780,19 @@ mod tests {
 
 	#[test]
 	fn test_compile_replacement_ampersand() {
+		// As in GNU sed, the escaped `&` ends a piece of the replacement.
 		let (mut lines, mut chars) = make_providers("/Simon \\& Garfunkel/");
-		let template = compile_replacement(&mut lines, &mut chars).unwrap();
+		let template = compile_replacement(&mut lines, &mut chars, false).unwrap();
 
-		assert_eq!(template.parts.len(), 1);
-		assert!(
-			matches!(&template.parts[0], ReplacementPart::Literal(s) if s == "Simon & Garfunkel")
-		);
+		assert_eq!(template.parts.len(), 2);
+		assert!(matches!(&template.parts[0], ReplacementPart::Literal(s) if s == "Simon &"));
+		assert!(matches!(&template.parts[1], ReplacementPart::Literal(s) if s == " Garfunkel"));
 	}
 
 	#[test]
 	fn test_compile_replacement_escape_sequences() {
 		let (mut lines, mut chars) = make_providers("/line\\nnewline\\tend/");
-		let template = compile_replacement(&mut lines, &mut chars).unwrap();
+		let template = compile_replacement(&mut lines, &mut chars, false).unwrap();
 
 		assert_eq!(template.parts.len(), 1);
 		assert!(matches!(
@@ -2664,7 +2811,7 @@ mod tests {
 		let first_line = provider.next_line().unwrap().unwrap();
 		let mut chars = ScriptCharProvider::new(&first_line);
 
-		let template = compile_replacement(&mut provider, &mut chars).unwrap();
+		let template = compile_replacement(&mut provider, &mut chars, false).unwrap();
 		assert_eq!(template.parts.len(), 1);
 		assert!(matches!(
 			 &template.parts[0],
@@ -10415,5 +10562,57 @@ mod tests {
 		// A regex reused from another `s` expands its missing groups to nothing.
 		let (code, capture) = crate::host::run_util::<Sed>(&[r"s/a/b/;s//\1/"], "aa\n", "/");
 		assert_eq!((code, capture.out().as_str()), (0, "b\n"), "{}", capture.err());
+	}
+
+	#[test]
+	fn case_conversion_maps_one_character_to_one() {
+		// GNU sed 4.9's `\U`, `\L`, `\u` and `\l` map each character to one,
+		// by Unicode's simple case mappings, as `towupper` and `towlower` do
+		// in a UTF-8 locale: `ß` has no one-character upper case and stays.
+		for (script, input, expected) in [
+			(r"s/a./\U&/", "abc\n", "ABc\n"),
+			(r"s/.*/\U&/", "straße\n", "STRAßE\n"),
+			(r"s/.*/\u&/", "ß\n", "ß\n"),
+			(r"s/.*/\L&/", "STRASSE\n", "strasse\n"),
+			(r"s/.*/\L&/", "\u{130}\n", "i\n"),
+			(r"s/.*/\l&/", "\u{130}X\n", "iX\n"),
+			(r"s/.*/\U&/", "\u{1fb3}\n", "\u{1fbc}\n"),
+			(r"s/.*/\u&/", "\u{1fb3}x\n", "\u{1fbc}x\n"),
+			// `\u` and `\l` change the next character alone, past one empty
+			// group; `\U` and `\L` run on until `\E`.
+			(r"s/.*/\L\u&/", "hello world\n", "Hello world\n"),
+			(r"s/a/\Ufoo\lBAR/", "ab\n", "FOObARb\n"),
+			(r"s/a/\Ufoo\Ebar/", "ab\n", "FOObarb\n"),
+			(r"s/\(\)\(H\)/\l\1\2/", "HELLO\n", "hELLO\n"),
+			(r"s/\(\)\(\)\(a\)/\u\1\2\3/", "ab\n", "ab\n"),
+			// An escaped delimiter is the delimiter, and --posix has no case
+			// conversion. `\c\\` is one escape, the control character of `\`,
+			// so the `U` after it is plain text.
+			(r"sUaU\UU", "aU\n", "UU\n"),
+			(r"s/a/\c\\Ux/", "a\n", "\u{1c}Ux\n"),
+		] {
+			let (code, capture) = crate::host::run_util::<Sed>(&[script], input, "/");
+			let out = capture.out();
+			assert_eq!((code, out.as_str()), (0, expected), "{script}: {}", capture.err());
+		}
+		let (code, capture) = crate::host::run_util::<Sed>(&["--posix", r"s/a/\Ux/"], "ab\n", "/");
+		assert_eq!((code, capture.out().as_str()), (0, "Uxb\n"), "{}", capture.err());
+		// A NUL ends the conversion of its piece of the replacement, which
+		// ends at the next escape: `\&` and `\\` start another, converted, and
+		// so does a numeric escape that gives `&` or `\`, which GNU reads as
+		// `\&` or `\\`. Any other character it gives is plain text.
+		for (script, expected) in [
+			(r"s/a/\Ua\x00bc\&de/", &b"A\0bc&DE\n"[..]),
+			(r"s/a/\Ua\x00bc\\de/", &b"A\0bc\\DE\n"[..]),
+			(r"s/a/\Ua\x00bc\x26de/", &b"A\0bc&DE\n"[..]),
+			(r"s/a/\Ua\x00bc\x5cde/", &b"A\0bc\\DE\n"[..]),
+			(r"s/a/\Ua\x00bc\d038de/", &b"A\0bc&DE\n"[..]),
+			(r"s/a/\Ua\x00bc\o134de/", &b"A\0bc\\DE\n"[..]),
+			(r"s/a/\Ua\x00bc\x41de/", &b"A\0bcAde\n"[..]),
+		] {
+			let (code, capture) = crate::host::run_util::<Sed>(&[script], "a\n", "/");
+			let stdout = capture.stdout();
+			assert_eq!((code, stdout.as_slice()), (0, expected), "{script}: {}", capture.err());
+		}
 	}
 }
