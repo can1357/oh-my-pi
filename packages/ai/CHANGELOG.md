@@ -46,6 +46,7 @@
 - Fixed `google-vertex` API-key mode ignoring `GOOGLE_CLOUD_PROJECT`: with a project configured, requests now use the `projects/{project}/locations/{location}` path so models published only on `locations/global` no longer 404 in the key's default region ([#18827](https://github.com/can1357/oh-my-pi/issues/18827))
 - Fixed OAuth login failing on Android/Termux when interface enumeration (`getifaddrs`) is denied; the callback server now falls back to IPv4 loopback ([#16127](https://github.com/can1357/oh-my-pi/issues/16127))
 - Fixed Anthropic rate limits sent inside a streaming response carrying no HTTP status: they now report 429 like a rate limit returned as an HTTP response, also after text has streamed, where they were treated as a dropped connection. An overload sent before the response starts now reports 529 ([#20835](https://github.com/can1357/oh-my-pi/pull/20835) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the SQLite auth credential store leaving its database handle open on Windows after `close()`, which blocked temporary-directory cleanup with `EBUSY`; closing the store now finalizes outstanding statements ([#14828](https://github.com/can1357/oh-my-pi/pull/14828) by [@jchanghong023](https://github.com/jchanghong023)).
 
 ### Changed
 
