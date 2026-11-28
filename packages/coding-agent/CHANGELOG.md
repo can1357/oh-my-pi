@@ -369,6 +369,7 @@
 - Selective commits now leave HEAD and staging unchanged if the shared index stays locked. Retry once the lock is released ([#20252](https://github.com/can1357/oh-my-pi/issues/20252)).
 - Cache warming no longer sends a refresh after sleep or another timer delay leaves less than ten seconds before cache expiry ([#20366](https://github.com/can1357/oh-my-pi/issues/20366)).
 
+- Fixed the write tool erasing an existing non-empty file when content was empty; it now refuses with an error that names the file, its size, and the shell-valid command to empty it on purpose, and leaves the file unchanged ([#20129](https://github.com/can1357/oh-my-pi/pull/20129) by [@nick-maderight](https://github.com/nick-maderight))
 ## [19.2.1] - 2026-11-25
 
 ### Breaking Changes

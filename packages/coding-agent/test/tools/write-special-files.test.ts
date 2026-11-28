@@ -117,3 +117,51 @@ describe.skipIf(process.platform === "win32")("write on non-regular files", () =
 		).rejects.toHaveProperty("message", expect.stringContaining("it is a character device"));
 	});
 });
+
+describe("write with empty content", () => {
+	let testDir: string;
+
+	beforeEach(() => {
+		testDir = path.join(os.tmpdir(), `write-empty-${Snowflake.next()}`);
+		fs.mkdirSync(testDir, { recursive: true });
+	});
+
+	afterEach(async () => {
+		await removeWithRetries(testDir);
+	});
+
+	it("refuses to erase a non-empty file and leaves its bytes alone", async () => {
+		const target = path.join(testDir, "worklog.md");
+		const original = "# Worklog\n\nShip the empty-write guard.\n";
+		fs.writeFileSync(target, original);
+
+		const outcome = await new WriteTool(createSession(testDir))
+			.execute("empty-overwrite", { path: target, content: "" })
+			.then(
+				() => "RESOLVED" as const,
+				(error: unknown) => error,
+			);
+
+		expect(outcome).toBeInstanceOf(ToolError);
+		expect(outcome).toHaveProperty("message", expect.stringContaining("Refusing to overwrite"));
+		expect(outcome).toHaveProperty("message", expect.stringContaining(target));
+		// The erase command follows the configured shell. `truncate` covers POSIX shells and
+		// Git Bash, and `type nul >` covers the cmd.exe fallback.
+		const eraseCommands = [`truncate -s 0 '${target}'`, `type nul > "${target}"`].map(command =>
+			command.replace(/[.*+?^${}()|[\]\\`]/g, "\\$&"),
+		);
+		expect(outcome).toHaveProperty(
+			"message",
+			expect.stringMatching(new RegExp("`(?:" + eraseCommands.join("|") + ")`")),
+		);
+		expect(fs.readFileSync(target, "utf8")).toBe(original);
+	});
+
+	it("creates an empty file when the path does not exist", async () => {
+		const target = path.join(testDir, "new.md");
+
+		await new WriteTool(createSession(testDir)).execute("empty-create", { path: target, content: "" });
+
+		expect(fs.statSync(target).size).toBe(0);
+	});
+});

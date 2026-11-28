@@ -127,11 +127,13 @@ describe("write tool keeps the replaced file's line endings and BOM", () => {
 		expect(await fs.readFile(pngPath, "latin1")).toBe("not an image\nanymore\n");
 	});
 
-	it("does not leave a lone BOM when emptying a BOM file", async () => {
+	it("refuses to empty a BOM file and keeps its BOM", async () => {
 		const filePath = path.join(tmpDir, "empty.txt");
 		await fs.writeFile(filePath, "\uFEFFold\r\n");
-		await new WriteTool(createSession(tmpDir)).execute("call-1", { path: filePath, content: "" });
-		expect((await fs.readFile(filePath)).length).toBe(0);
+		await expect(
+			new WriteTool(createSession(tmpDir)).execute("call-1", { path: filePath, content: "" }),
+		).rejects.toThrow(/Refusing to overwrite/);
+		expect(await fs.readFile(filePath, "utf8")).toBe("\uFEFFold\r\n");
 	});
 
 	it("finds the first line break past the binary sniff window", async () => {
