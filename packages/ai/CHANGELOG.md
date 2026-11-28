@@ -44,6 +44,7 @@
 - Fixed `google-vertex` API-key mode ignoring `GOOGLE_CLOUD_PROJECT`: with a project configured, requests now use the `projects/{project}/locations/{location}` path so models published only on `locations/global` no longer 404 in the key's default region ([#18827](https://github.com/can1357/oh-my-pi/issues/18827))
 - Fixed OAuth login failing on Android/Termux when interface enumeration (`getifaddrs`) is denied; the callback server now falls back to IPv4 loopback ([#16127](https://github.com/can1357/oh-my-pi/issues/16127))
 - Fixed Anthropic rate limits sent inside a streaming response carrying no HTTP status: they now report 429 like a rate limit returned as an HTTP response, also after text has streamed, where they were treated as a dropped connection. An overload sent before the response starts now reports 529 ([#20835](https://github.com/can1357/oh-my-pi/pull/20835) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the SQLite auth credential store leaving its database handle open on Windows after `close()`, which blocked temporary-directory cleanup with `EBUSY`; closing the store now finalizes outstanding statements ([#14828](https://github.com/can1357/oh-my-pi/pull/14828) by [@jchanghong023](https://github.com/jchanghong023)).
 
 ### Changed
 
@@ -219,7 +220,6 @@
 - Fixed Anthropic requests that replay a signed server-compaction block still asking for a message thread, which the API refuses (`thread_unsupported_request`), so every such request first paid a rejected round trip before resending without the thread ([#19473](https://github.com/can1357/oh-my-pi/pull/19473) by [@alphastorm](https://github.com/alphastorm))
 - Anthropic requests whose connection drops before any response now say how long after the request started it dropped and whether the request body was still uploading or had all been written to the socket, with its size, instead of a bare "Connection error." ([#18624](https://github.com/can1357/oh-my-pi/pull/18624) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed Anthropic requests dropping the reasoning of earlier non-Claude turns signed in under another credential, or kept through a compaction; it is now replayed like other models' reasoning ([#7241](https://github.com/can1357/oh-my-pi/issues/7241)) ([#17610](https://github.com/can1357/oh-my-pi/pull/17610) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed the SQLite auth credential store leaving its database handle open on Windows after `close()`, which blocked temporary-directory cleanup with `EBUSY`; closing the store now finalizes outstanding statements ([#14828](https://github.com/can1357/oh-my-pi/pull/14828) by [@jchanghong023](https://github.com/jchanghong023)).
 
 ## [18.22.1] - 2026-11-17
 
