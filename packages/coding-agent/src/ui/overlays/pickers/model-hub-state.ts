@@ -28,6 +28,7 @@ import { providerAccessOff, providerManageUrl, providerRequiredScope } from "@oh
 import { connectedProviderName } from "../../../modes/view-model/chrome/format";
 import {
 	buildSessionModelScope,
+	CHAT_MODEL_ROLE_IDS,
 	ModelSearchIndex,
 	type ModelBrowserItem,
 	type ModelRoleLookup,
@@ -850,16 +851,32 @@ export class ModelHubState {
 		}
 	}
 
-	/** The scope's rows; while assigning a role (or a role's fallback) only models the role accepts. */
+	/**
+	 * The scope's rows; while assigning a role (or a role's fallback) only models the role accepts.
+	 * Model-keyed chains (`provider/model-id`, `provider/*`) and brand-new chain keys have no single
+	 * role predicate. They are consumed by chat-section roles (including `tiny`/`memory`, whose
+	 * `accepts` is `acceptsTinyOrChat`), so a model is eligible when any chat-section role accepts
+	 * it — not only `default`. Kind-section models (image, judge, …) stay out. Regression: #20897.
+	 */
 	#setCandidateItems(items: ReadonlyArray<ModelBrowserItem>): void {
 		const assigning = this.#assigning;
 		const role =
 			assigning?.kind === "role" || (assigning?.kind === "fallback" && !assigning.role.includes("/"))
 				? assigning.role
 				: undefined;
+		const chatFallback = assigning?.kind === "fallback" || assigning?.kind === "fallbackKey";
 		this.#candidateItems =
-			role !== undefined ? items.filter(item => this.source.getRoleInfo(role).accepts(item.model)) : [...items];
+			role !== undefined
+				? items.filter(item => this.source.getRoleInfo(role).accepts(item.model))
+				: chatFallback
+					? items.filter(item => this.#acceptedByChatSectionRole(item.model))
+					: [...items];
 		this.#applyModelKind();
+	}
+
+	/** True when any chat-section role accepts `model` (chat or tiny kinds today). */
+	#acceptedByChatSectionRole(model: Model): boolean {
+		return CHAT_MODEL_ROLE_IDS.some(role => this.source.getRoleInfo(role).accepts(model));
 	}
 
 	#applyModelKind(): void {
@@ -1167,12 +1184,18 @@ export class ModelHubState {
 				});
 			}
 		}
-		chips.push(
-			{ label: `fallbacks:${item.model.id}`, action: "fallbackModel" },
-			{ label: `fallbacks:${item.model.provider}/*`, action: "fallbackProvider" },
-		);
-		// `retry-fallback` appends to the default chain: chat-capable models only.
-		if (this.source.getRoleInfo("default").accepts(item.model)) chips.push({ label: "fallback", action: "fallback" });
+		// Fallback chains are consumed by chat-section roles, so `fallbacks:*`
+		// (keyed by a model or its whole provider) and `retry-fallback` are only
+		// offered when any chat-section role accepts the model. A kind-section
+		// model (image, judge, …) must never become a chat-section fallback or a
+		// chain key. Regression: #20897.
+		if (this.#acceptedByChatSectionRole(item.model)) {
+			chips.push(
+				{ label: `fallbacks:${item.model.id}`, action: "fallbackModel" },
+				{ label: `fallbacks:${item.model.provider}/*`, action: "fallbackProvider" },
+				{ label: "fallback", action: "fallback" },
+			);
+		}
 		this.#strip = { kind: "role", item, chips, index: 0, returnToRoles: false };
 	}
 
