@@ -67,6 +67,7 @@ import type {
 	TrayModel,
 	WorkingSpec,
 } from "../ui/dock";
+import type { ErrorBannerAction } from "../ui/overlays/panels/error-banner";
 import type { HookSelectorProps } from "../ui/overlays/pickers/hook-selector";
 import type {
 	BlockOptions,
@@ -806,7 +807,7 @@ export interface InteractiveModeContext {
 	/** Show the ctrl+p role chip track above the editor, `activeIndex` filled. */
 	showModelCycleTrack(segments: readonly TrackSegment[], activeIndex: number): void;
 	showError(message: string): void;
-	showPinnedError(message: string): void;
+	showPinnedError(message: string, actions?: readonly ErrorBannerAction[]): void;
 	clearPinnedError(): void;
 	showWarning(message: string, options?: { hideWithToolActivity?: boolean }): void;
 	/** The provider's `active-notice` line when the viewed session moves onto a new model of that provider. */

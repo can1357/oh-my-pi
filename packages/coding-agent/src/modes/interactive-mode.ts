@@ -422,7 +422,7 @@ import type { DialogVim } from "../ui/composer/vim-editor";
 import { enabledMagicKeywords } from "../ui/composer/magic-keywords";
 import { deferredMaxRows, subagentEntries, TODO_COMPACT_ROWS, type WorkingSpec } from "../ui/dock";
 import { CodexResetFireworks, FIREWORKS_SHEET } from "../ui/overlays/panels/codex-reset-fireworks";
-import { ErrorBanner } from "../ui/overlays/panels/error-banner";
+import { ErrorBanner, type ErrorBannerAction } from "../ui/overlays/panels/error-banner";
 import { PlanReview, planReviewSheet } from "../ui/overlays/panels/plan-review";
 import { SpotlightSheet, spotlightOverlay } from "../ui/overlays/panels/spotlight-sheet";
 import { renderAssistantText } from "../ui/transcript/messages/assistant-message";
@@ -7695,11 +7695,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#uiHelpers.showError(message);
 	}
 
-	showPinnedError(message: string): void {
+	showPinnedError(message: string, actions?: readonly ErrorBannerAction[]): void {
 		this.#hidePlanReview();
 		this.shell.dock
 			.slot("errorBanner")
-			.set(() => jsx(ErrorBanner, { message, onDismiss: () => this.clearPinnedError() }));
+			.set(() => jsx(ErrorBanner, { message, actions, onDismiss: () => this.clearPinnedError() }));
 	}
 
 	clearPinnedError(): void {
