@@ -31,6 +31,7 @@
 - Fixed `Shell.abort()` sometimes doing nothing to a `Shell.run` that was queued behind another run on the same shell, leaving the command and its child processes running ([#17105](https://github.com/can1357/oh-my-pi/issues/17105))
 - Fixed the bash tool's built-in `rsync --timeout=N` skipping a keepalive while its sender waited on a quiet peer on a busy machine, which could end a healthy transfer with `rsync: [sender] io timeout after N seconds -- exiting` (code 30) ([#20763](https://github.com/can1357/oh-my-pi/pull/20763) by [@sjawhar](https://github.com/sjawhar))
 - Fixed Mermaid flowcharts drawing edges into a top-rank node, such as two back edges into it, as a straight line through other nodes' boxes and labels with no arrowhead; those edges now route around the nodes ([#20781](https://github.com/can1357/oh-my-pi/pull/20781) by [@loishi](https://github.com/loishi))
+- Fixed the bash tool's built-in `grep` matching only ASCII letters with `[[:alpha:]]`, `[[:alnum:]]`, `[[:upper:]]` and `[[:lower:]]` in a UTF-8 locale, where GNU grep matches every letter ([#20900](https://github.com/can1357/oh-my-pi/pull/20900) by [@sjawhar](https://github.com/sjawhar))
 
 ## [19.2.1] - 2026-11-25
 
