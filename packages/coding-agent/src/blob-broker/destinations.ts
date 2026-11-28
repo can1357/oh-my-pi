@@ -844,6 +844,18 @@ export const BUILTIN_BLOB_DESTINATIONS = {
 /** Identifier of any built-in blob destination, derived from registry keys. */
 export type BlobDestinationId = keyof typeof BUILTIN_BLOB_DESTINATIONS;
 
+/** Destinations that make the local blob server reachable instead of uploading its bytes. */
+export type ExposureKind = Extract<
+	(typeof BUILTIN_BLOB_DESTINATIONS)[BlobDestinationId],
+	{ family: "tunnel" | "local-serving" }
+>["id"];
+
+/** Test the serving mode without loading the local server or its upload clients. */
+export function isServeKind(kind: BlobDestinationId): kind is ExposureKind {
+	const family = BUILTIN_BLOB_DESTINATIONS[kind]?.family;
+	return family === "tunnel" || family === "local-serving";
+}
+
 /** Exhaustive mapping of ShareX `ImageDestination` members to registry entries. */
 export const SHAREX_IMAGE_DESTINATIONS = {
 	Imgur: "imgur",

@@ -651,6 +651,28 @@ describe("structured subagent primitive", () => {
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 
+	it("identifies the dispatching task tool call and item on before_subagent_spawn", async () => {
+		mockDiscovery();
+		const blockedSession = session();
+		const events: BeforeSubagentSpawnEvent[] = [];
+		blockedSession.emitBeforeSubagentSpawn = async event => {
+			events.push(event);
+			return { block: true, reason: "observed" };
+		};
+		for (const index of [undefined, 2]) {
+			await runStructuredSubagent(
+				request({ session: blockedSession, parentToolCallId: "call_task", index, identity: { label: "Cheap" } }),
+			).catch(() => undefined);
+		}
+
+		expect(
+			events.map(({ spawnKey, parentToolCallId, itemIndex }) => ({ spawnKey, parentToolCallId, itemIndex })),
+		).toEqual([
+			{ spawnKey: "Cheap", parentToolCallId: "call_task", itemIndex: 0 },
+			{ spawnKey: "Cheap", parentToolCallId: "call_task", itemIndex: 2 },
+		]);
+	});
+
 	it("rejects dispatch before leasing artifacts when an extension blocks the spawn", async () => {
 		mockDiscovery();
 		const blockedSession = session();

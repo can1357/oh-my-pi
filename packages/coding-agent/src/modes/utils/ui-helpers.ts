@@ -22,6 +22,7 @@ import { groupedReadUsageCallIds, readArgsCollapseIntoGroup } from "../../sessio
 import { replyDisplayMessage, toolResultReplies } from "../../session/transcript/reply-write";
 import { ServedModelTracker } from "../../session/transcript/served-model-marker";
 import {
+	followsViewportOnly,
 	isSettledJobFrame,
 	parksAsBackground,
 	readMediaPath,
@@ -741,20 +742,23 @@ export class UiHelpers {
 					const frame = activeToolExecutionUpdates.find(
 						event => event.toolCallId === message.toolCallId,
 					)?.partialResult;
+					// A viewport-only card that froze in scrollback is redrawn from the job's latest frame too:
+					// the rebuild replays history, so no row of the old card remains to match.
 					const isBackground =
 						parksAsBackground(message.toolName, message.details, native) &&
 						(frame !== undefined || runningAsyncJobs.some(job => job.id === jobId));
 					const settled = isBackground && isSettledJobFrame(frame?.details);
+					const partial = isBackground && !followsViewportOnly(message.toolName, native);
 					// A background job call's persisted result is only its "still running"
 					// snapshot; the job's latest frame supersedes it. Until that frame
-					// settles, keep the card partial, parked, and in `pendingTools` so
-					// later live progress frames land on it (#10447).
+					// settles, keep the card parked and in `pendingTools` so later live
+					// progress frames land on it (#10447).
 					if (settled) {
 						settleWithJobFrame(pending, frame, message.toolCallId);
 					} else if (frame && isBackground) {
-						pending.updateResult(frame, true, message.toolCallId);
+						pending.updateResult(frame, partial, message.toolCallId);
 					} else {
-						pending.updateResult(message, isBackground, message.toolCallId);
+						pending.updateResult(message, partial, message.toolCallId);
 					}
 					if (isBackground && !settled) {
 						pending.parkAsBackground();

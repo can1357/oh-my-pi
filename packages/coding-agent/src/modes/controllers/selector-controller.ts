@@ -2,7 +2,6 @@ import { type AgentMessage, type AgentToolResult, ThinkingLevel } from "@oh-my-p
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import type { ImageContent, Model, UsageReport } from "@oh-my-pi/pi-ai";
 import { LoginCancelledError } from "@oh-my-pi/pi-ai/error";
-import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
 import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { type JSXNode, type KeyEvent, signal, type UiNode, untrack } from "@oh-my-pi/pi-tui";
@@ -14,7 +13,7 @@ import { loadWatchdogConfigFile, resolveAdvisorConfigEditPath, saveWatchdogConfi
 import { reset as resetCapabilities } from "../../capability";
 import type { AdvisorConfigScope } from "../../advisor/advisor-config-types";
 import { showGitOverlay } from "../../cli/git-tui";
-import { formatLoginIdentity } from "../../cli/oauth-terminal";
+import { formatLoginIdentity, loginFollowUps } from "../../cli/oauth-terminal";
 import {
 	acquireModelRoleMutation,
 	applyModelPreset,
@@ -46,6 +45,7 @@ import type {
 	SubmittedUserInput,
 } from "../../modes/types";
 import type { SessionOAuthAccountList } from "../../session/agent-session-types";
+import type { AiuTotals } from "../../session/aiu-billing";
 import type { ResetCreditAccountStatus, ResetCreditRedeemOutcome } from "../../session/auth-storage";
 import { credentialStoreLabel } from "../../session/auth-broker-config";
 import {
@@ -72,6 +72,7 @@ import { toSessionPinAccounts } from "../../slash-commands/helpers/session-pin";
 import {
 	accountIdentityLabel,
 	collectStoredAccounts,
+	usageAuthRejectedHint,
 	collectUnreportedAccounts,
 	selectReportableAccounts,
 } from "../../slash-commands/helpers/usage-accounts";
@@ -482,24 +483,28 @@ export class SelectorController {
 	 * idiom): compact subscriptions grid + daily activity heatmap, with the
 	 * classic full report one keypress away. Takes no transcript space.
 	 */
-	showUsageDashboard(reports: UsageReport[]): void {
+	showUsageDashboard(reports: UsageReport[], sessionAiu?: AiuTotals): void {
 		// Checked here, not before the fetch: a repeat `/usage` whose fetch lands
 		// while the first dashboard is open focuses it instead of stacking a copy.
 		const kind = "usage-dashboard";
 		if (this.#focusOpenMenu(kind)) return;
 		const authStorage = this.ctx.session.modelRegistry.authStorage;
-		const accounts = selectReportableAccounts(
-			collectStoredAccounts(authStorage),
-			provider => authStorage.usage.providerFor(provider) !== undefined,
-		);
-		if (reports.length === 0 && accounts.length === 0) {
+		const dashboardData = (reports: UsageReport[]) => {
+			const accounts = selectReportableAccounts(
+				collectStoredAccounts(authStorage),
+				provider => authStorage.usage.providerFor(provider) !== undefined,
+			);
+			const unavailableAccounts = collectUnreportedAccounts(reports, accounts).map(account => ({
+				provider: account.provider,
+				label: [accountIdentityLabel(account), usageAuthRejectedHint(account)].filter(Boolean).join(" — "),
+			}));
+			return { reports, unavailableAccounts };
+		};
+		const data = dashboardData(reports);
+		if (reports.length === 0 && data.unavailableAccounts.length === 0 && sessionAiu === undefined) {
 			this.ctx.showWarning("No usage data available.");
 			return;
 		}
-		const unavailableAccounts = collectUnreportedAccounts(reports, accounts).map(account => ({
-			provider: account.provider,
-			label: accountIdentityLabel(account),
-		}));
 		const currentProvider = this.ctx.session.model?.provider;
 		const activeAccount = currentProvider
 			? this.ctx.session.modelRegistry.authStorage.oauth.identity(currentProvider, this.ctx.session.sessionId)
@@ -508,9 +513,9 @@ export class SelectorController {
 		const menu = this.#claimMenu(kind);
 		const size = this.ctx.shell.size;
 		const dashboard = new UsageDashboardModel({
-			reports,
-			unavailableAccounts,
-			renderDetail: (width, current) =>
+			...data,
+			sessionAiu,
+			renderDetail: (width, { reports: current, unavailableAccounts }) =>
 				renderUsageReports(
 					current,
 					currentTheme(),
@@ -531,7 +536,10 @@ export class SelectorController {
 					throw error;
 				}
 			},
-			refresh: () => this.ctx.session.fetchUsageReports(),
+			refresh: async () => {
+				const refreshed = await this.ctx.session.fetchUsageReports();
+				return refreshed && dashboardData(refreshed);
+			},
 			terminalRows: () => size().rows,
 			onClose: () => this.#closeMenu(menu),
 		});
@@ -1224,6 +1232,7 @@ export class SelectorController {
 				done();
 				void this.#loginThenReopenModelHub(providerId);
 			},
+			onManageAccess: url => openPath(url),
 			onCatalogRefreshed: async () => {
 				await this.ctx.session.refreshScopedModels();
 				return this.ctx.session.scopedModels;
@@ -2207,23 +2216,38 @@ export class SelectorController {
 			(options?.followContinuation ? await findSessionContinuation(sessionPath) : undefined);
 		const target = await this.#relocateStranded(continuation?.session.path ?? sessionPath);
 		await this.ctx.prepareSessionSwitch();
-		this.ctx.resetObserverRegistry();
 		// AgentSession owns the transaction. It restores the complete source state
 		// if applying the target project's cwd fails, including in-memory sessions.
 		let modelFallbackWarning: string | undefined;
-		if (
-			(await this.ctx.session.switchSession(target.sessionPath, {
+		// The warning of the last cwd application, which names where the session ends up. Shown after the
+		// re-render below, which would clear it; a switch that does not commit renders nothing more, so a
+		// rollback's warning shows at once.
+		let memoryWarning: string | undefined;
+		let switched = false;
+		try {
+			switched = await this.ctx.session.switchSession(target.sessionPath, {
 				onCwdChange: async (newCwd, sourceCwd) => {
+					memoryWarning = undefined;
 					if (normalizePathForComparison(newCwd) === normalizePathForComparison(sourceCwd)) return true;
-					return this.ctx.applyCwdChange(newCwd);
+					return this.ctx.applyCwdChange(newCwd, {
+						// The switch calls back with the directory this resume started in only to roll back to it.
+						restore: normalizePathForComparison(newCwd) === normalizePathForComparison(previousCwd),
+						onWarning: warning => {
+							memoryWarning = warning;
+						},
+					});
 				},
 				onModelFallback: warning => {
 					modelFallbackWarning = warning;
 				},
-			})) === false
-		) {
-			return false;
+			});
+		} finally {
+			if (!switched && memoryWarning) this.ctx.showWarning(memoryWarning);
 		}
+		if (!switched) return false;
+		// Only now does the session manager name the resumed file: the reset points the main
+		// session at it and rebuilds the subagent tray from it. A failed switch keeps both.
+		this.ctx.resetObserverRegistry();
 		this.ctx.clearTransientSessionUi();
 		const newCwd = this.ctx.sessionManager.getCwd();
 		const movedProject = normalizePathForComparison(newCwd) !== normalizePathForComparison(previousCwd);
@@ -2250,6 +2274,7 @@ export class SelectorController {
 		}
 		if (continuation) this.ctx.showWarning(formatSessionContinuationNotice(continuation));
 		if (modelFallbackWarning) this.ctx.showWarning(modelFallbackWarning);
+		if (memoryWarning) this.ctx.showWarning(memoryWarning);
 		return true;
 	}
 
@@ -2343,7 +2368,7 @@ export class SelectorController {
 		);
 		const handle = this.ctx.showEditorAreaDialog(() => LoginDialog({ state: dialog }));
 		try {
-			const identity = await this.ctx.session.modelRegistry.authStorage.oauth.login(providerId as OAuthProvider, {
+			const identity = await this.ctx.session.modelRegistry.authStorage.oauth.login(providerId, {
 				signal: dialog.signal,
 				onBrowserSession: captureBrowserSession,
 				onAuth: (info: { url: string; launchUrl?: string; instructions?: string }) => {
@@ -2390,6 +2415,11 @@ export class SelectorController {
 							`Successfully logged in to ${connectedProviderName(providerId)}${who ? ` as ${who}` : ""}`,
 						),
 					],
+					...(identity
+						? loginFollowUps(providerId, identity, `/login ${providerId}`).map(
+								({ tone, text }) => [tone, text] as const,
+							)
+						: []),
 					["dim", `Credentials saved to ${destination}`],
 				]),
 			);

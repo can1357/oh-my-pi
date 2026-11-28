@@ -56,17 +56,7 @@ impl<'env> JsExternal<'env> {
   ///
   /// If the underlying value is not `T`, it will return `InvalidArg` error.
   pub fn create_ref<T: 'static>(&self) -> Result<ExternalRef<T>> {
-    let mut ref_ = ptr::null_mut();
-    let external = self.get_static_value()?;
-    check_status!(
-      unsafe { sys::napi_create_reference(self.0.env, self.0.value, 1, &mut ref_) },
-      "Failed to create reference on external value"
-    )?;
-    Ok(ExternalRef {
-      obj: external,
-      raw: ref_,
-      env: self.0.env,
-    })
+    unsafe { ExternalRef::from_napi_value(self.0.env, self.0.value) }
   }
 
   #[inline]

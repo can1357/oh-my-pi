@@ -277,7 +277,7 @@ fn start_time_ms(_pid: i32) -> Option<f64> {
 	None
 }
 
-/// A live process whose environment carries a given `NAME=value` entry.
+/// A live process, as an environment scan or a pid lookup found it.
 #[napi(object)]
 pub struct TaggedProcess {
 	pub pid:            i32,
@@ -289,6 +289,9 @@ pub struct TaggedProcess {
 	/// SIGHUP is ignored (nohup)
 	pub ignores_hangup: bool,
 	pub stopped:        bool,
+	/// The scanned variable's value ([`list_processes_with_env_prefix`]);
+	/// unset for a pid lookup.
+	pub env_value:      Option<String>,
 }
 
 /// Regular files a process's stdout/stderr point at.
@@ -307,8 +310,8 @@ pub struct KillProcessFamilyOptions {
 	pub spare_hangup_ignoring: Option<bool>,
 }
 
-/// Live processes (never the caller) whose environment contains exactly
-/// `name=value`.
+/// Live processes (never the caller) whose environment sets `name` to a
+/// value starting with `prefix`, each with that value.
 ///
 /// Reads the environment each process was exec'd with: only
 /// the caller's user's processes are readable, others are skipped. macOS
@@ -316,8 +319,8 @@ pub struct KillProcessFamilyOptions {
 /// `/bin/sleep`, …) even from the same user, so those never match there.
 /// Empty on platforms without a readable process environment (Windows).
 #[napi]
-pub fn list_processes_with_env(name: String, value: String) -> Result<Vec<TaggedProcess>> {
-	scan::with_env(&name, &value).map_err(|err| napi::Error::from_reason(err.to_string()))
+pub fn list_processes_with_env_prefix(name: String, prefix: String) -> Result<Vec<TaggedProcess>> {
+	scan::with_env_prefix(&name, &prefix).map_err(|err| napi::Error::from_reason(err.to_string()))
 }
 
 /// The record of each of `pids` that is alive (zombies and unknown pids
@@ -368,31 +371,39 @@ mod scan {
 
 	use super::TaggedProcess;
 
-	pub fn with_env(name: &str, value: &str) -> io::Result<Vec<TaggedProcess>> {
-		let entry = format!("{name}={value}");
+	pub fn with_env_prefix(name: &str, prefix: &str) -> io::Result<Vec<TaggedProcess>> {
 		let me = std::process::id() as i32;
-		live(|p| p.pid != me && proc_sys::has_env_entry(p.pid, entry.as_bytes()))
+		live(|p| {
+			if p.pid == me {
+				return None;
+			}
+			let value = proc_sys::env_value(p.pid, name.as_bytes())?;
+			let value = String::from_utf8(value).ok()?;
+			value.starts_with(prefix).then_some(Some(value))
+		})
 	}
 
 	pub fn info(pids: &[i32]) -> io::Result<Vec<TaggedProcess>> {
-		live(|p| pids.contains(&p.pid))
+		live(|p| pids.contains(&p.pid).then_some(None))
 	}
 
 	/// The records of the live (not zombie) processes `select` picks, from
-	/// one process-table scan.
-	fn live(select: impl Fn(&ProcInfo) -> bool) -> io::Result<Vec<TaggedProcess>> {
+	/// one process-table scan; `select` also gives the record's `env_value`.
+	fn live(select: impl Fn(&ProcInfo) -> Option<Option<String>>) -> io::Result<Vec<TaggedProcess>> {
 		let epoch_ms = super::start_to_epoch_ms()
 			.ok_or_else(|| io::Error::other("the kernel boot time is unavailable"))?;
 		Ok(proc::list()?
 			.into_iter()
-			.filter(|p| p.state != ProcState::Zombie && select(p))
-			.map(|p| TaggedProcess {
-				pid:            p.pid,
-				ppid:           p.ppid,
-				started_at:     epoch_ms(p.start),
-				command:        command_line(&p),
+			.filter(|p| p.state != ProcState::Zombie)
+			.filter_map(|p| select(&p).map(|env_value| (p, env_value)))
+			.map(|(p, env_value)| TaggedProcess {
+				pid: p.pid,
+				ppid: p.ppid,
+				started_at: epoch_ms(p.start),
+				command: command_line(&p),
 				ignores_hangup: proc_sys::ignores_hangup(p.pid).unwrap_or(false),
-				stopped:        p.state == ProcState::Stopped,
+				stopped: p.state == ProcState::Stopped,
+				env_value,
 			})
 			.collect())
 	}
@@ -471,7 +482,7 @@ mod scan {
 	use super::{TaggedProcess, core_process};
 
 	#[allow(clippy::unnecessary_wraps, reason = "matches the Unix scan, which can fail")]
-	pub const fn with_env(_name: &str, _value: &str) -> io::Result<Vec<TaggedProcess>> {
+	pub const fn with_env_prefix(_name: &str, _prefix: &str) -> io::Result<Vec<TaggedProcess>> {
 		Ok(Vec::new())
 	}
 
@@ -506,7 +517,7 @@ mod tests {
 	use omp_shell::sys::proc::{self, ProcState};
 
 	use super::{
-		KillProcessFamilyOptions, TaggedProcess, kill_process_family, list_processes_with_env,
+		KillProcessFamilyOptions, TaggedProcess, kill_process_family, list_processes_with_env_prefix,
 		process_info, process_output_files,
 	};
 
@@ -600,7 +611,11 @@ mod tests {
 		}
 
 		fn list(&self) -> Vec<TaggedProcess> {
-			list_processes_with_env(TAG.to_owned(), self.value.clone()).expect("scan")
+			list_processes_with_env_prefix(TAG.to_owned(), self.value.clone())
+				.expect("scan")
+				.into_iter()
+				.filter(|p| p.env_value.as_deref() == Some(self.value.as_str()))
+				.collect()
 		}
 
 		/// The tagged processes once the sleepers of every one of `roles` run.
@@ -623,7 +638,12 @@ mod tests {
 
 	impl Drop for Tagged {
 		fn drop(&mut self) {
-			for p in list_processes_with_env(TAG.to_owned(), self.value.clone()).unwrap_or_default() {
+			let scan =
+				list_processes_with_env_prefix(TAG.to_owned(), self.value.clone()).unwrap_or_default();
+			for p in scan
+				.iter()
+				.filter(|p| p.env_value.as_deref() == Some(self.value.as_str()))
+			{
 				// SAFETY: plain syscall; the pids carry this test's tag.
 				unsafe { libc::kill(p.pid, libc::SIGKILL) };
 			}
@@ -684,7 +704,12 @@ mod tests {
 			plain.started_at
 		);
 		assert!(
-			list_processes_with_env(TAG.to_owned(), "absent".to_owned())
+			found
+				.iter()
+				.all(|p| p.env_value.as_deref() == Some(tagged.value.as_str()))
+		);
+		assert!(
+			list_processes_with_env_prefix(TAG.to_owned(), "absent".to_owned())
 				.unwrap()
 				.is_empty()
 		);

@@ -216,6 +216,10 @@ export interface SecurityScanMetrics {
 	};
 	cost?: number;
 	premiumRequests?: number;
+	/** Server-reported AI credits of the scan session and its subagents, in nano-AIU (1e9 = 1 credit). */
+	aiuNano?: number;
+	/** Scan calls whose billing frame never arrived; positive makes `aiuNano` a lower bound. */
+	aiuUnknownCalls?: number;
 }
 
 export interface SecurityScan {

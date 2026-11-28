@@ -429,12 +429,17 @@ fn child_end(
 }
 
 /// A pipe between the child and engine object `end`; the child's end.
-fn pipe_end(end: End, child_reads: bool, pumps: &mut Vec<Pump>) -> io::Result<fs::File> {
+fn pipe_end(mut end: End, child_reads: bool, pumps: &mut Vec<Pump>) -> io::Result<fs::File> {
 	let (ours, theirs) = os::pipe(child_reads)?;
-	pumps.push(if child_reads {
-		Pump::In(end, ours)
-	} else {
-		Pump::Out(ours, end)
-	});
+	if child_reads {
+		pumps.push(Pump::In(end, ours));
+	} else if end.direction().1 {
+		pumps.push(Pump::Out(ours, end));
+	}
+	// Otherwise the engine side already refuses bytes (its reader is gone):
+	// dropping our read end gives the child `SIGPIPE` on its first write, as
+	// the real pipe would. A pump would take a short write into the OS pipe
+	// and let the child exit 0 before its relay failed, so `yes | xargs
+	// /bin/echo | head` never ended.
 	Ok(theirs)
 }

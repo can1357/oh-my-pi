@@ -25,6 +25,7 @@ mod tests;
 use std::sync::Arc;
 
 use bstr::BString;
+use xutf::{Utf8Decoder, Utf8Step};
 
 pub use self::{
 	join::join_clines,
@@ -130,21 +131,6 @@ fn cstr(s: &[u8]) -> Vec<u8> {
 	v
 }
 
-/// One `mbrtowc` step on the bytes of one character so far.
-enum Mb {
-	Valid(u32),
-	Incomplete,
-	Invalid,
-}
-
-fn mbdecode(b: &[u8]) -> Mb {
-	match core::str::from_utf8(b) {
-		Ok(s) => Mb::Valid(s.chars().next().map_or(0, |c| c as u32)),
-		Err(e) if e.error_len().is_none() && e.valid_up_to() == 0 && b.len() < 4 => Mb::Incomplete,
-		Err(_) => Mb::Invalid,
-	}
-}
-
 /// zsh `mb_metacharlenconv_r` with a fresh state: the metafied length
 /// of the character at the start of `s` and the character
 /// ([`CHR_INVALID`] when the bytes are none).
@@ -153,8 +139,7 @@ pub(crate) fn mb_metacharlenconv(s: &[u8]) -> (usize, u32) {
 	if b0 <= 0x7f {
 		return (1, u32::from(b0));
 	}
-	let mut buf = [0u8; 4];
-	let mut n = 0;
+	let mut decoder = Utf8Decoder::new();
 	let mut p = 0isize;
 	while at(s, p) != 0 {
 		let inchar = if at(s, p) == tok::META {
@@ -166,15 +151,10 @@ pub(crate) fn mb_metacharlenconv(s: &[u8]) -> (usize, u32) {
 			at(s, p)
 		};
 		p += 1;
-		if n == buf.len() {
-			break;
-		}
-		buf[n] = inchar;
-		n += 1;
-		match mbdecode(&buf[..n]) {
-			Mb::Valid(c) => return (p as usize, c),
-			Mb::Incomplete => {},
-			Mb::Invalid => break,
+		match decoder.push(inchar) {
+			Utf8Step::Char(ch) => return (p as usize, u32::from(ch)),
+			Utf8Step::Pending => {},
+			Utf8Step::Reject => break,
 		}
 	}
 	(

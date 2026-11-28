@@ -153,6 +153,20 @@ describe("AuthStorage openai-codex email dedupe", () => {
 		expect(remaining.credential.accountId).toBe("account-b");
 	});
 
+	it("uses the preferred explicit identity before conflicting JWT claims", async () => {
+		if (!store || !db) throw new Error("test setup failed");
+		const credential = {
+			...createJwtOnlyCredential({ suffix: "first", accountId: "jwt-account", email: "jwt@example.com" }),
+			accountId: " explicit-account ",
+			email: " EXPLICIT@example.com ",
+			orgId: " org-1 ",
+		};
+		await store.upsertAuthCredential("openai-codex", credential);
+		await store.upsertAuthCredential("fixture-account-first", credential);
+		expect(readStoredIdentityRows(db, "openai-codex")[0]?.identity_key).toBe("email:explicit@example.com|org:org-1");
+		expect(readStoredIdentityRows(db, "fixture-account-first")[0]?.identity_key).toBe("account:explicit-account");
+	});
+
 	it("updates in-place when a codex credential with matching email replaces another account", async () => {
 		if (!store || !db) throw new Error("test setup failed");
 
@@ -463,7 +477,7 @@ describe("AuthStorage openai-codex email dedupe", () => {
 
 		const migratedStore = new SqliteAuthCredentialStore(legacyDb);
 		try {
-			expect(readAuthSchemaVersion(legacyDb)).toBe(8);
+			expect(readAuthSchemaVersion(legacyDb)).toBe(9);
 			const readKeys = (provider: string): string[] => {
 				// Rows were inserted by this test above; the cast names their shape.
 				const rows = legacyDb
@@ -504,7 +518,7 @@ describe("AuthStorage openai-codex email dedupe", () => {
 		const freshDb = new Database(":memory:");
 		const freshStore = new SqliteAuthCredentialStore(freshDb);
 		try {
-			expect(readAuthSchemaVersion(freshDb)).toBe(8);
+			expect(readAuthSchemaVersion(freshDb)).toBe(9);
 			expect(readTableSql(freshDb, "auth_credentials")).not.toContain("unixepoch(");
 			expect(readTableSql(freshDb, "auth_credentials")).toContain("strftime('%s','now')");
 		} finally {
@@ -519,12 +533,13 @@ describe("AuthStorage openai-codex email dedupe", () => {
 				id INTEGER PRIMARY KEY CHECK (id = 1),
 				version INTEGER NOT NULL
 			);
-			INSERT INTO auth_schema_version(id, version) VALUES (1, 9);
+			INSERT INTO auth_schema_version(id, version) VALUES (1, 10);
 			CREATE TABLE auth_credentials (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
 				provider TEXT NOT NULL,
 				credential_type TEXT NOT NULL,
 				data TEXT NOT NULL,
+				salt TEXT DEFAULT NULL,
 				disabled_cause TEXT DEFAULT NULL,
 				identity_key TEXT DEFAULT NULL,
 				created_at INTEGER NOT NULL DEFAULT (unixepoch()),
@@ -534,7 +549,41 @@ describe("AuthStorage openai-codex email dedupe", () => {
 
 		const reopenedStore = new SqliteAuthCredentialStore(futureDb);
 		try {
-			expect(readAuthSchemaVersion(futureDb)).toBe(9);
+			expect(readAuthSchemaVersion(futureDb)).toBe(10);
+		} finally {
+			reopenedStore.close();
+		}
+	});
+
+	it("opens a store that records v9 but lacks the salt column", async () => {
+		const stampedDb = new Database(":memory:");
+		stampedDb.run(`
+			CREATE TABLE auth_schema_version (
+				id INTEGER PRIMARY KEY CHECK (id = 1),
+				version INTEGER NOT NULL
+			);
+			INSERT INTO auth_schema_version(id, version) VALUES (1, 9);
+			CREATE TABLE auth_credentials (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				provider TEXT NOT NULL,
+				credential_type TEXT NOT NULL,
+				data TEXT NOT NULL,
+				disabled_cause TEXT DEFAULT NULL,
+				identity_key TEXT DEFAULT NULL,
+				created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+				updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+			);
+		`);
+		stampedDb
+			.query("INSERT INTO auth_credentials (provider, credential_type, data) VALUES (?, ?, ?)")
+			.run("openai", "api_key", JSON.stringify({ key: "sk-stamped-v9" }));
+
+		const reopenedStore = new SqliteAuthCredentialStore(stampedDb);
+		try {
+			// The stored row stays readable, and writes (which bind `salt`) succeed.
+			expect(reopenedStore.getApiKey("openai")).toBe("sk-stamped-v9");
+			await reopenedStore.saveApiKey("openai", "sk-after-repair");
+			expect(reopenedStore.getApiKey("openai")).toBe("sk-after-repair");
 		} finally {
 			reopenedStore.close();
 		}
@@ -560,7 +609,7 @@ describe("AuthStorage openai-codex email dedupe", () => {
 				const reopened = await SqliteAuthCredentialStore.open(reopenDbPath);
 				try {
 					expect(reopened.listAuthCredentials("openai")).toHaveLength(1);
-					expect(readAuthSchemaVersion(observer)).toBe(8);
+					expect(readAuthSchemaVersion(observer)).toBe(9);
 				} finally {
 					reopened.close();
 				}
@@ -613,7 +662,7 @@ describe("AuthStorage openai-codex email dedupe", () => {
 
 		const migratedStore = new SqliteAuthCredentialStore(legacyDb);
 		try {
-			expect(readAuthSchemaVersion(legacyDb)).toBe(8);
+			expect(readAuthSchemaVersion(legacyDb)).toBe(9);
 			expect(readTableSql(legacyDb, "auth_credentials")).not.toContain("unixepoch(");
 			expect(readTableSql(legacyDb, "auth_credentials")).toContain("strftime('%s','now')");
 			expect(readStoredIdentityRows(legacyDb, "openai-codex")).toEqual([

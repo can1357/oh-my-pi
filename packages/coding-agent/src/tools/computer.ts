@@ -18,12 +18,8 @@ import {
 	screenStateNotice,
 	secureInputNotice,
 } from "./computer/protocol";
-import {
-	type ComputerController,
-	ComputerSupervisor,
-	computerTurnInFlight,
-	registerComputerController,
-} from "./computer/supervisor";
+import { type ComputerController, ComputerSupervisor } from "./computer/supervisor";
+import { computerTurnInFlight, registerComputerController } from "./computer/owner-state";
 import type { ToolSession } from "./index";
 import { renderFunctionRun, renderStatusCallChain } from "./run-code";
 import { throwIfAborted } from "./tool-errors";

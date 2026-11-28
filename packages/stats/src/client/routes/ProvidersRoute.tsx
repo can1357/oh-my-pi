@@ -4,6 +4,7 @@ import { getProviderDashboardStats, getProviderWindowStats } from "../api";
 import { Chart, type ChartSeries, Legend, ShareBar, TimeChart, useHiddenSeries } from "../charts";
 import { buildColorLookup, OTHER_COLOR, SERIES_COLORS } from "../data/colors";
 import {
+	formatAiCredits,
 	formatCompact,
 	formatCost,
 	formatErrorRate,
@@ -413,6 +414,16 @@ function ProviderTotalsTable({
 					<span className={p.totalPremiumRequests > 0 ? "num" : "num dim"}>
 						{formatInteger(Math.round(p.totalPremiumRequests * 100) / 100)}
 					</span>
+				),
+			},
+			{
+				key: "aiu",
+				header: "AI credits",
+				title: "Server-reported GitHub Copilot AI credits; a dash when no request reported any",
+				align: "right",
+				sort: p => p.totalAiuNano ?? -1,
+				render: p => (
+					<span className={p.totalAiuNano === null ? "num dim" : "num"}>{formatAiCredits(p.totalAiuNano)}</span>
 				),
 			},
 		];

@@ -247,8 +247,8 @@ Each provider search transport receives a hard timeout from `providers.webSearch
       - `limit` / `num_search_results`: `params.numSearchResults ?? params.limit`, clamped to `1..50`, default `10`.
       - Output: `sources` (snippet is the model-oriented `summary`, falling back to `snippet`), `authMode: "api_key"`. Billed per successful non-empty request.
    - **Kimi** — `packages/coding-agent/src/web/search/providers/kimi.ts`
-      - Availability: `MOONSHOT_SEARCH_API_KEY`, `KIMI_SEARCH_API_KEY`, or an `agent.db` credential for `kimi-code`. `MOONSHOT_API_KEY` and stored `moonshot` credentials are intentionally rejected because the Open Platform key does not authenticate the Kimi Code search service.
-      - Querying: POST to `MOONSHOT_SEARCH_BASE_URL` / `KIMI_SEARCH_BASE_URL` / default `https://api.kimi.com/coding/v1/search` with `text_query`, `limit`, `enable_page_crawling`, `timeout_seconds: 30`.
+      - Availability: `MOONSHOT_SEARCH_API_KEY`, `KIMI_SEARCH_API_KEY`, or an `agent.db` credential for `kimi-code` / `kimi-code-global`. `MOONSHOT_API_KEY` and stored `moonshot` credentials are intentionally rejected because the Open Platform key does not authenticate the Kimi Code search service.
+      - Querying: POST to `MOONSHOT_SEARCH_BASE_URL` / `KIMI_SEARCH_BASE_URL` / the credential's regional default (`https://api.kimi.com/coding/v1/search` for env keys and `kimi-code`, `https://api.kimi.ai/coding/v1/search` for `kimi-code-global`) with `text_query`, `limit`, `enable_page_crawling`, `timeout_seconds: 30`.
       - `limit` / `num_search_results`: `params.numSearchResults ?? params.limit`, clamped to `1..20`, default `10`.
       - Output: `sources`, `requestId`.
    - **Parallel** — `packages/coding-agent/src/web/search/providers/parallel.ts`, `packages/coding-agent/src/web/parallel.ts`

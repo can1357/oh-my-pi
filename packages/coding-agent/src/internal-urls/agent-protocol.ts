@@ -30,7 +30,7 @@ import { ensurePersistedRoster, sessionFileBelongsToRoot } from "../registry/per
 import { IrcBus } from "../irc/bus";
 import { executeSend, isIrcEnabled } from "../irc/messaging";
 import { agentMesh } from "../irc/mesh";
-import { formatPeerAddress, type PeerAddress } from "../irc/mesh-protocol";
+import { formatPeerAddress, type MeshPeer, type PeerAddress } from "../irc/mesh-protocol";
 import type { AgentKindModelChange, AgentModelChange, AgentSessionHandle } from "../session/agent-session-handle";
 import { discoverAgents, getAgent } from "../task/discovery";
 import { cfgTaskAgentModelOverrides, cfgTaskCrossInstance, cfgTaskDisabledAgents } from "../task/settings";
@@ -72,6 +72,20 @@ function pidTarget(url: InternalUrl): PidTarget | undefined {
 	if (id && /[/\\\0]/.test(id)) throw new Error("Invalid agent ID in PID-qualified URL.");
 	const pid = Number(host);
 	return { address: { pid, ...(id ? { id } : {}) }, segments, local: pid === process.pid };
+}
+
+/** One roster line per instance: `- agent://<pid> (<status>): <title>`. */
+function peerLines(peers: MeshPeer[]): string {
+	return peers.map(peer => `- agent://${peer.pid} (${peer.status})${peer.title ? `: ${peer.title}` : ""}`).join("\n");
+}
+
+/** {@link peerLines} under one heading per project, `own` first. */
+function peersByProject(peers: MeshPeer[], own: string | undefined): string {
+	const groups = [...Map.groupBy(peers, peer => peer.project)];
+	groups.sort(([a], [b]) => Number(b === own) - Number(a === own) || a.localeCompare(b));
+	return groups
+		.map(([project, group]) => `## ${project}${project === own ? " (this project)" : ""}\n${peerLines(group)}`)
+		.join("\n\n");
 }
 
 function crossInstanceEnabled(context?: ResolveContext): boolean {
@@ -428,13 +442,19 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		});
 	}
 
-	/** Roster of the other omp instances in this project. */
+	/** Roster of the other omp instances: this project's, or every project's with `?all`. */
 	#resolvePeers(url: InternalUrl): InternalResource {
-		const peers = agentMesh()?.peers() ?? [];
-		const content =
-			peers.length === 0
-				? "No other omp instances in this project.\n"
-				: `${peers.map(peer => `- agent://${peer.pid} (${peer.status})${peer.title ? `: ${peer.title}` : ""}`).join("\n")}\n\nRead agent://<pid>/<id> for a subagent's output; write agent://<pid> to message its main agent.\n`;
+		const mesh = agentMesh();
+		const all = url.searchParams.has("all");
+		const peers = mesh?.peers({ allProjects: all }) ?? [];
+		const allHint = "agent://peers?all lists every project's.";
+		let content: string;
+		if (peers.length === 0) {
+			content = all ? "No other omp instances.\n" : `No other omp instances in this project; ${allHint}\n`;
+		} else {
+			const list = all ? peersByProject(peers, mesh?.project) : peerLines(peers);
+			content = `${list}\n\nRead agent://<pid>/<id> for a subagent's output; write agent://<pid> to message its main agent.${all ? "" : ` ${allHint}`}\n`;
+		}
 		return {
 			url: url.href,
 			content,
@@ -449,7 +469,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 	async #resolvePeer(url: InternalUrl, target: PidTarget): Promise<InternalResource> {
 		const { pid, id } = target.address;
 		const peer = agentMesh()?.peer(pid);
-		if (!peer) throw new Error(`No omp instance with pid ${pid} in this project. List them with agent://peers`);
+		if (!peer) throw new Error(`No live omp instance with pid ${pid}. List them with agent://peers?all`);
 		const sessionFile = peer.sessionFile;
 		if (!sessionFile) throw new Error(`Instance ${pid} has no session file; its agents cannot be read.`);
 		if (!id) {

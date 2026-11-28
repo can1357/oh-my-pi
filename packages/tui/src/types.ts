@@ -73,6 +73,6 @@ export declare namespace JSX {
 	type IntrinsicElements = { [K in TspKind]: KindAttributes<TspProps<K>> } & {
 		overlay: KindAttributes<TspProps<"overlay">> & OverlayAttributes;
 		md: KindAttributes<TspProps<"md">> & MdAttributes;
-		canvas: Omit<KindAttributes<CanvasProps>, "paint"> & { paint: CanvasProps["paint"] };
+		canvas: Omit<KindAttributes<CanvasProps>, "paint" | "onMouse"> & Pick<CanvasProps, "paint" | "onMouse">;
 	};
 }
