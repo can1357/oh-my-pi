@@ -4,7 +4,9 @@
  * grace, `hold: "persist"`, `survive: "detached"` lease units across a daemon
  * crash, per-scope caps, idle daemon exit, and the unit env.
  */
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import * as fs from "node:fs/promises";
+import { Process } from "@oh-my-pi/pi-natives";
 import { DAEMON_IDLE_EXIT_GRACE_ENV, DAEMON_RESUME_LEASE_GRACE_ENV } from "../../src/daemon/protocol";
 import { type DaemonConn, pidAlive, rejection, shProc, TestDaemon, until } from "../fixtures/daemon-proc-harness";
 
@@ -208,6 +210,50 @@ describe.skipIf(process.platform === "win32")("daemon unit lifecycle", () => {
 			expect(exit.unit.exitReason).toBe("idle");
 			expect(exit.unit.exitedAt! - restartedAt).toBeGreaterThanOrEqual(LEASE_GRACE_MS);
 			await until(() => (pidAlive(opened.unit.pids[0]) ? undefined : true), "idle-stopped process to exit");
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it.skipIf(process.platform !== "linux")(
+		"disposes a detached unit whose PID was not recorded before the daemon crashed",
+		async () => {
+			const { daemon: d, conn, root } = await startDaemon();
+			const connected = Promise.withResolvers<void>();
+			const barrier = Bun.listen({
+				unix: `${root}/hold.sock`,
+				socket: {
+					open: () => connected.resolve(),
+					data() {},
+				},
+			});
+			try {
+				const lookup = spyOn(Process, "fromPid").mockReturnValueOnce(null);
+				const opened = await conn
+					.openProc(
+						"untracked",
+						{
+							application: process.execPath,
+							args: ["-e", 'import { createConnection } from "node:net"; createConnection("./hold.sock");'],
+							cwd: root,
+						},
+						{ policy: DETACHED_LEASES },
+					)
+					.finally(() => lookup.mockRestore());
+				const pid = opened.unit.pids[0];
+				const stdout = `/proc/${pid}/fd/1`;
+				await connected.promise;
+				await d.kill();
+				const log = await fs.readlink(stdout);
+				expect(log.startsWith(`${root}/daemon/units/`)).toBe(true);
+
+				await d.dispose();
+				daemon = undefined;
+				expect(pidAlive(pid)).toBe(false);
+				await expect(fs.readlink(stdout)).rejects.toMatchObject({ code: "ENOENT" });
+				await expect(fs.stat(root)).rejects.toMatchObject({ code: "ENOENT" });
+			} finally {
+				barrier.stop(true);
+			}
 		},
 		TEST_TIMEOUT_MS,
 	);
