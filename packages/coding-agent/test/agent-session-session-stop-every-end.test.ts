@@ -12,12 +12,15 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type { AgentEndEvent } from "@oh-my-pi/pi-coding-agent/extensibility/shared-events";
+import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import {
 	AgentSession,
 	type AgentSessionEvent,
 	type StopContinuation,
 	type StopRoute,
 } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { AgentSessionHandle } from "@oh-my-pi/pi-coding-agent/session/agent-session-handle";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionMaintenance } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -46,6 +49,8 @@ interface Options {
 	tools?: AgentTool[];
 	kind?: "main" | "sub";
 	jobs?: AsyncJobManager;
+	registry?: AgentRegistry;
+	onStop?: () => void;
 }
 interface Case {
 	name: string;
@@ -151,6 +156,7 @@ async function setup(responses: MockHandler[], answer: Answer, options: Options 
 				events.push(stop(text));
 				if (target === undefined || text !== target) return;
 				target = undefined;
+				options.onStop?.();
 				if (answer === "continue") return { continue: true, additionalContext: HIDDEN };
 				if (answer === "block") return { decision: "block", reason: HIDDEN };
 			});
@@ -188,7 +194,8 @@ async function setup(responses: MockHandler[], answer: Answer, options: Options 
 		extensionRunner: new ExtensionRunner(extensions, runtime, cwd, sessionManager, modelRegistry),
 		toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
 		agentKind: options.kind,
-		agentId: options.jobs ? "Main" : undefined,
+		agentId: options.jobs || options.registry ? "Main" : undefined,
+		agentRegistry: options.registry,
 		asyncJobManager: options.jobs,
 	});
 	session.subscribe(event => {
@@ -694,6 +701,49 @@ register({
 	continuation: "allowed",
 	drive: answer => runningSpeculation("anthropic-messages", answer),
 });
+it("trailing tool call with a scheduled compaction continuation settles as continuing", async () => {
+	const f = await setup(
+		[
+			reply(SEED),
+			{
+				...reply(TARGET),
+				stopReason: "error",
+				errorMessage: "context_length_exceeded: Your input exceeds the context window of this model.",
+				content: [TARGET, toolCall],
+			},
+			reply(FOLLOW_UP),
+		],
+		"observe",
+		{
+			family: "anthropic-messages",
+			settings: { "compaction.methodOrder": ["soft"], "compaction.asyncEnabled": false },
+		},
+	);
+	await prompt(f, "Earlier context to summarize. ".repeat(400));
+	f.events.length = 0;
+	f.sessionEvents.length = 0;
+	const compact = holdSoftCompaction();
+	const turn = prompt(f);
+	try {
+		await reached(compact.started.promise, "the overflow compaction request");
+	} finally {
+		compact.finish.resolve();
+		await turn;
+	}
+
+	expect(f.sessionEvents.find(event => event.type === "auto_compaction_start")).toMatchObject({ reason: "overflow" });
+	const failedReply = f.sessionEvents.find(
+		event =>
+			event.type === "message_end" && event.message.role === "assistant" && event.message.stopReason === "error",
+	);
+	expect(failedReply).toMatchObject({ message: { content: expect.arrayContaining([toolCall]) } });
+	expect(f.events).toEqual([
+		expect.objectContaining({ kind: "end", willContinue: true, awaitingAsyncWork: false }),
+		stop(FOLLOW_UP),
+		end(FOLLOW_UP),
+	]);
+	expect(f.mock.calls).toHaveLength(3);
+});
 register({
 	name: "provider abort with tool call refuses continuation but notifies",
 	continuation: "refused",
@@ -737,6 +787,50 @@ for (const suppressDelivery of [false, true]) {
 			expect(requestContains(f, 1, "Background result")).toBe(true);
 			expect(requestContains(f, 1, HIDDEN)).toBe(false);
 		}
+	});
+}
+
+for (const route of ["normal", "compaction-blocked"] as const) {
+	it(`a waiter arriving during the ${route} stop pass does not restart the run`, async () => {
+		const registry = new AgentRegistry();
+		vi.spyOn(IrcBus, "global").mockReturnValue(new IrcBus(registry));
+		const jobs = route === "compaction-blocked" ? new AsyncJobManager({}) : undefined;
+		if (jobs) cleanups.push(() => jobs.dispose().then(() => undefined));
+		const f = await setup([reply(TARGET), reply(FOLLOW_UP)], "observe", {
+			registry,
+			jobs,
+			onStop() {
+				const childSession = { runStartedAt: Date.now() } as unknown as AgentSessionHandle;
+				registry.register({
+					id: "Child",
+					displayName: "Child",
+					kind: "sub",
+					parentId: "Main",
+					session: childSession,
+				});
+				cleanups.push(registry.awaits.hold("Child", ["Main"], { interruptible: true, message: true }));
+			},
+		});
+		const waiting = jobs ? [end(TARGET, true, true)] : [];
+		const held = jobs ? holdOwnedJob(jobs, true) : undefined;
+		if (held) {
+			vi.spyOn(SessionMaintenance.prototype, "checkCompaction").mockResolvedValueOnce({
+				continuationScheduled: false,
+				automaticContinuationBlocked: true,
+			});
+		}
+		await prompt(f);
+		if (held) {
+			expect(f.events).toEqual(waiting);
+			held.result.resolve("Background result");
+			await held.job.promise;
+			await idle(f);
+		}
+
+		expect(f.session.isRunActive).toBe(false);
+		expect(passCount(f)).toBe(1);
+		expect(f.events).toEqual([...waiting, stop(TARGET), end(TARGET)]);
+		expect(f.mock.calls).toHaveLength(1);
 	});
 }
 

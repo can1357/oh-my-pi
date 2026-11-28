@@ -864,6 +864,8 @@ interface LoopEnd {
 	readonly superseded: boolean;
 	/** A pass still owed if this loop is not resumed. */
 	deferredStop: DeferredStop | undefined;
+	/** The stop pass ran and did not schedule a continuation. */
+	stopPassTerminal: boolean;
 	/** A delivery can start the next loop while the deferred pass is still running. */
 	stopTask?: Promise<void>;
 }
@@ -6411,6 +6413,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			paused: false,
 			superseded,
 			deferredStop: options?.deferredStop,
+			stopPassTerminal: !options?.continuing && this.#sessionStopPasses.has(event),
 		};
 		this.#loopEnd = end;
 		if (options?.continuing) this.#pauseLoop(end);
@@ -6500,10 +6503,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			paused: false,
 			superseded: false,
 			deferredStop: undefined,
+			stopPassTerminal: false,
 		};
-		// An agent may start blocking on this one after its loop stopped (a paused run): the
-		// stall guard's notice turn then continues the run, as at the loop's end.
-		if (this.#lastTurnSettledCleanly() && this.#continueForStalledWaiters()) {
+		// A waiter can arrive after a loop pauses. Give it a notice unless the stop pass has
+		// already settled this loop without a continuation.
+		if (!this.#loopEnd.stopPassTerminal && this.#lastTurnSettledCleanly() && this.#continueForStalledWaiters()) {
 			// A stop-time notice, not outside work, resumes the run.
 			if (!this.#loopEnd.paused) this.#loopEnd = { ...this.#loopEnd, yielded: false };
 			this.#pauseLoop(this.#loopEnd);
@@ -6531,7 +6535,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					}),
 				)
 				.then(willContinue => {
-					if (!willContinue || this.#loopEnd !== end) return;
+					if (this.#loopEnd !== end) return;
+					if (!willContinue) {
+						end.stopPassTerminal = this.#sessionStopPasses.has(end.event);
+						return;
+					}
 					if (!end.paused) this.#loopEnd = { ...end, yielded: false };
 					this.#pauseLoop(this.#loopEnd);
 				})
