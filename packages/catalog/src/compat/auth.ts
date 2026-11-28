@@ -44,6 +44,31 @@ export function providerActiveNotice(provider: string): string | undefined {
 	return byId[provider]?.activeNotice;
 }
 
+/** The notice shown once after a successful `provider` sign-in (`login-notice "<text>"`), if declared. */
+export function providerLoginNotice(provider: string): string | undefined {
+	return byId[provider]?.loginNotice;
+}
+
+/** Where the user turns `provider`'s access on or off at the host (`manage-url "<url>"`), if declared. */
+export function providerManageUrl(provider: string): string | undefined {
+	return byId[provider]?.manageUrl;
+}
+
+/** The OAuth scope `provider` logins must hold to serve requests (`required-scope "<scope>"`), if declared. */
+export function providerRequiredScope(provider: string): string | undefined {
+	return byId[provider]?.requiredScope;
+}
+
+/**
+ * Whether a `provider` login granted `scope` leaves the provider off: it
+ * declares a `required-scope` the grant lacks. An unknown grant (`scope`
+ * undefined) is not off.
+ */
+export function providerAccessOff(provider: string, scope: string | undefined): boolean {
+	const required = providerRequiredScope(provider);
+	return required !== undefined && scope !== undefined && !scope.split(" ").includes(required);
+}
+
 /** Every hook name referenced anywhere in the auth stratum, for registry completeness checks. */
 export function authHookNames(): Record<string, string[]> {
 	const names: Record<string, string[]> = {};

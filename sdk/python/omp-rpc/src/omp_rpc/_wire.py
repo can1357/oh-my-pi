@@ -280,6 +280,9 @@ class Usage(TypedDict):
     cttl: NotRequired[JsonObject]
     server: NotRequired[JsonObject]
     credits: NotRequired[JsonObject]
+    aiu: NotRequired[JsonObject]
+    aiuMissing: NotRequired[bool]
+    """The model reports AI credits and this call's billing frame never arrived."""
 
 
 ParentIrc = TypedDict("ParentIrc", {"from": "str", "body": "str"})
@@ -896,6 +899,14 @@ class SessionCredits:
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
+class SessionAiu:
+    nano: float
+    """Reported charge in nano-AIU (1e9 = 1 AI credit)."""
+    unknown_calls: int
+    """Calls whose billing frame never arrived; positive makes `nano` a lower bound."""
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
 class SessionStats:
     session_id: str
     user_messages: int
@@ -908,6 +919,8 @@ class SessionStats:
     cost: float
     session_file: str | None = None
     credits: SessionCredits | None = None
+    aiu: SessionAiu | None = None
+    """Server-reported AI credits of the session and its subagent tree."""
     routed_models: dict[str, float] | None = None
     edit_rejections: dict[str, float] | None = None
     """Failed edits by the engine's `errorKind`."""
@@ -1772,6 +1785,11 @@ class AbortAndDeliverQueueResult:
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
+class ClearContextResult:
+    dropped_count: float
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
 class LiveConnectResult:
     voice: str
     sdp_answer: str
@@ -2374,6 +2392,14 @@ def parse_session_credits(value: object, path: str = "SessionCredits") -> Sessio
     )
 
 
+def parse_session_aiu(value: object, path: str = "SessionAiu") -> SessionAiu:
+    payload = expect_object(value, path)
+    return SessionAiu(
+        nano=required(payload, "nano", decode_float, path),
+        unknown_calls=required(payload, "unknownCalls", decode_int, path),
+    )
+
+
 def parse_session_stats(value: object, path: str = "SessionStats") -> SessionStats:
     payload = expect_object(value, path)
     return SessionStats(
@@ -2388,6 +2414,7 @@ def parse_session_stats(value: object, path: str = "SessionStats") -> SessionSta
         cost=required(payload, "cost", decode_float, path),
         session_file=optional(payload, "sessionFile", decode_str, path),
         credits=optional(payload, "credits", parse_session_credits, path),
+        aiu=optional(payload, "aiu", parse_session_aiu, path),
         routed_models=optional(payload, "routedModels", record(decode_float), path),
         edit_rejections=optional(payload, "editRejections", record(decode_float), path),
         context_usage=optional(payload, "contextUsage", parse_context_usage, path),
@@ -3353,6 +3380,13 @@ def parse_abort_and_deliver_queue_result(value: object, path: str = "AbortAndDel
     )
 
 
+def parse_clear_context_result(value: object, path: str = "ClearContextResult") -> ClearContextResult:
+    payload = expect_object(value, path)
+    return ClearContextResult(
+        dropped_count=required(payload, "droppedCount", decode_float, path),
+    )
+
+
 def parse_live_connect_result(value: object, path: str = "LiveConnectResult") -> LiveConnectResult:
     payload = expect_object(value, path)
     return LiveConnectResult(
@@ -3562,6 +3596,11 @@ class WireClient:
         if parent_session is not None:
             params["parentSession"] = parent_session
         return parse_cancellation_result(self._command("new_session", params), "new_session")
+
+    def clear_context(self) -> ClearContextResult:
+        """Clear the conversation in place, as the TUI's `/clear` does: the session id, title, model, settings and transcript file survive. Fails with `session_busy` while a response streams or a foreground bash/eval runs."""
+        params: dict[str, object] = {}
+        return parse_clear_context_result(self._command("clear_context", params), "clear_context")
 
     def open_session(self, session_dir: str | Path, *, provider: str | None = None, model_id: str | None = None) -> OpenSessionResult:
         """Continue the newest non-empty session in a directory, or start a fresh one there. Give provider and modelId together to override the saved model; otherwise an unavailable saved model fails the request."""
@@ -4250,6 +4289,7 @@ __all__ = [
     "CacheWarmingStartEvent",
     "CancelUiRequest",
     "CancellationResult",
+    "ClearContextResult",
     "CommandOutputEvent",
     "CompactionResult",
     "CompactionSummaryMessage",
@@ -4343,6 +4383,7 @@ __all__ = [
     "RpcNotification",
     "SelectOptionDetail",
     "SelectUiRequest",
+    "SessionAiu",
     "SessionCredits",
     "SessionEntries",
     "SessionInfoUpdateEvent",
@@ -4450,6 +4491,7 @@ __all__ = [
     "parse_cache_warming_start_event",
     "parse_cancel_ui_request",
     "parse_cancellation_result",
+    "parse_clear_context_result",
     "parse_command_output_event",
     "parse_compaction_result",
     "parse_compaction_summary_message",
@@ -4529,6 +4571,7 @@ __all__ = [
     "parse_rpc_frame_error_event",
     "parse_select_option_detail",
     "parse_select_ui_request",
+    "parse_session_aiu",
     "parse_session_credits",
     "parse_session_entries",
     "parse_session_info_update_event",

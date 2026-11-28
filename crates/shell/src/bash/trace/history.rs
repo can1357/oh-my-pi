@@ -5,6 +5,7 @@ use std::collections::{HashMap, VecDeque};
 
 use bstr::BString;
 use serde::{Deserialize, Serialize};
+use xutf::{DecodeError, Incomplete, REPLACEMENT_CHARACTER};
 
 use super::{ARG_ITEMS, cut};
 use crate::bash::{
@@ -30,25 +31,17 @@ impl OutputOrigin {
 	}
 }
 
-/// At most one incomplete UTF-8 scalar per final visible stream.
-#[derive(Debug, Default)]
+/// At most one incomplete UTF-8 scalar per final visible stream, with the
+/// origin of each of its bytes.
+#[derive(Debug)]
 struct PendingText {
-	bytes:   [u8; 4],
+	scalar:  Incomplete,
 	origins: [OutputOrigin; 4],
-	len:     usize,
 }
 
-impl PendingText {
-	const fn push(&mut self, byte: u8, origin: OutputOrigin) {
-		self.bytes[self.len] = byte;
-		self.origins[self.len] = origin;
-		self.len += 1;
-	}
-
-	fn consume(&mut self, count: usize) {
-		self.bytes.copy_within(count..self.len, 0);
-		self.origins.copy_within(count..self.len, 0);
-		self.len -= count;
+impl Default for PendingText {
+	fn default() -> Self {
+		Self { scalar: Incomplete::empty(), origins: [OutputOrigin::default(); 4] }
 	}
 }
 
@@ -366,66 +359,46 @@ impl Journal {
 			t_ns,
 		};
 		let mut pending = self.pending_text.remove(&fd).unwrap_or_default();
-		loop {
-			if pending.len != 0 {
-				match std::str::from_utf8(&pending.bytes[..pending.len]) {
-					Ok(_) => {
-						self.output_pending(
-							seq,
-							t_ns,
-							fd,
-							&pending,
-							pending.len,
-							&pending.bytes[..pending.len],
-						);
-						pending.len = 0;
-					},
-					Err(error) if error.valid_up_to() != 0 => {
-						let count = error.valid_up_to();
-						self.output_pending(seq, t_ns, fd, &pending, count, &pending.bytes[..count]);
-						pending.consume(count);
-					},
-					Err(error) => {
-						if let Some(count) = error.error_len() {
-							self.output_pending(seq, t_ns, fd, &pending, count, "\u{fffd}".as_bytes());
-							pending.consume(count);
-						} else if let Some((&byte, rest)) = bytes.split_first() {
-							pending.push(byte, origin);
-							bytes = rest;
-						} else {
-							break;
-						}
-					},
-				}
-				continue;
-			}
-			if bytes.is_empty() {
-				break;
-			}
-			match std::str::from_utf8(bytes) {
-				Ok(_) => {
-					self.output_text(seq, t_ns, origin, fd, bytes, Vec::new());
-					break;
+		if !pending.scalar.is_empty() {
+			let held = usize::from(pending.scalar.buffer_len);
+			match pending.scalar.try_complete(bytes) {
+				None => {
+					// Every byte joined the scalar, still incomplete.
+					pending.origins[held..held + bytes.len()].fill(origin);
+					bytes = &[];
 				},
-				Err(error) if error.valid_up_to() != 0 => {
-					let count = error.valid_up_to();
-					self.output_text(seq, t_ns, origin, fd, &bytes[..count], Vec::new());
-					bytes = &bytes[count..];
-				},
-				Err(error) => {
-					if let Some(count) = error.error_len() {
-						self.output_text(seq, t_ns, origin, fd, "\u{fffd}".as_bytes(), Vec::new());
-						bytes = &bytes[count..];
-					} else {
-						for &byte in bytes {
-							pending.push(byte, origin);
-						}
-						bytes = &[];
-					}
+				Some((completed, rest)) => {
+					let (scalar, text) = match completed {
+						Ok(text) => (text.as_bytes(), text),
+						Err(malformed) => (malformed, REPLACEMENT_CHARACTER),
+					};
+					pending.origins[held..scalar.len()].fill(origin);
+					let origins = &pending.origins[..scalar.len()];
+					self.output_pending(seq, t_ns, fd, scalar, origins, text.as_bytes());
+					bytes = rest;
 				},
 			}
 		}
-		if pending.len != 0 {
+		loop {
+			let (valid, rest) = match xutf::decode(bytes) {
+				Ok(text) => (text, None),
+				Err(DecodeError::Invalid { valid_prefix, remaining_input, .. }) => {
+					(valid_prefix, Some(remaining_input))
+				},
+				Err(DecodeError::Incomplete { valid_prefix, incomplete_suffix }) => {
+					pending.origins[..usize::from(incomplete_suffix.buffer_len)].fill(origin);
+					pending.scalar = incomplete_suffix;
+					(valid_prefix, None)
+				},
+			};
+			if !valid.is_empty() {
+				self.output_text(seq, t_ns, origin, fd, valid.as_bytes(), Vec::new());
+			}
+			let Some(rest) = rest else { break };
+			self.output_text(seq, t_ns, origin, fd, REPLACEMENT_CHARACTER.as_bytes(), Vec::new());
+			bytes = rest;
+		}
+		if !pending.scalar.is_empty() {
 			if self.pending_text.len() == HISTORY_EVENTS
 				&& let Some(old) = self.pending_text.keys().next().copied()
 			{
@@ -441,10 +414,12 @@ impl Journal {
 		let Some(pending) = self.pending_text.remove(&fd) else {
 			return false;
 		};
-		if pending.len == 0 {
+		let held = usize::from(pending.scalar.buffer_len);
+		if held == 0 {
 			return false;
 		}
-		self.output_pending(seq, t_ns, fd, &pending, pending.len, "\u{fffd}".as_bytes());
+		let (scalar, origins) = (&pending.scalar.buffer[..held], &pending.origins[..held]);
+		self.output_pending(seq, t_ns, fd, scalar, origins, REPLACEMENT_CHARACTER.as_bytes());
 		true
 	}
 
@@ -453,20 +428,17 @@ impl Journal {
 		seq: u64,
 		t_ns: u64,
 		fd: i32,
-		pending: &PendingText,
-		count: usize,
+		scalar: &[u8],
+		origins: &[OutputOrigin],
 		text: &[u8],
 	) {
-		let first = pending.origins[0];
-		if pending.origins[..count]
-			.iter()
-			.all(|origin| first.same_producer(*origin))
-		{
+		let first = origins[0];
+		if origins.iter().all(|origin| first.same_producer(*origin)) {
 			self.output_text(seq, t_ns, first, fd, text, Vec::new());
 			return;
 		}
 		let mut contributors: Vec<OutputContributor> = Vec::new();
-		for (&byte, &origin) in pending.bytes[..count].iter().zip(&pending.origins[..count]) {
+		for (&byte, &origin) in scalar.iter().zip(origins) {
 			if let Some(last) = contributors.last_mut()
 				&& last.command == origin.command
 				&& last.u == origin.u

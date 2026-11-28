@@ -54,7 +54,8 @@ export function optionalSelectorArgs<O extends object>(
 	opts: O | undefined,
 ): { selector: unknown; opts: O | undefined } {
 	if (opts === undefined && isPlainOptions(selector)) return { selector: undefined, opts: selector as O };
-	return { selector, opts };
+	// A null selector (Python `ariaSnapshot(None, interactive=True)`) is an omitted one.
+	return { selector: selector ?? undefined, opts };
 }
 
 /** The delta keys `scroll({…})`/`wheel({…})` reads; an object with none of them names no scroll. */

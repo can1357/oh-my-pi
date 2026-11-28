@@ -9,6 +9,7 @@ import type { MouseEvent } from "@oh-my-pi/pi-tui/driver/contract";
 import { stripControl } from "@oh-my-pi/pi-tui/text/sanitize";
 import { replaceTabs, truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { segmentGraphemes } from "@oh-my-pi/pi-utils/graphemes";
 import { formatKeyHint, formatKeyHints } from "../../keys/hints";
 import { ViewerFrameModel } from "../viewer-frame";
 import { LOG_CHUNK, LogEntries, logCopyPayload } from "./entries";
@@ -158,10 +159,7 @@ export class LogViewerModel {
 	/** The filter after a key, or undefined when the key does not edit it. */
 	#editFilter(id: string, text: string | undefined): string | undefined {
 		if (id === "backspace")
-			return [...new Intl.Segmenter().segment(this.#filter)]
-				.slice(0, -1)
-				.map(s => s.segment)
-				.join("");
+			return this.#filter.slice(0, segmentGraphemes(this.#filter).containing(this.#filter.length - 1)?.index ?? 0);
 		if (id === "ctrl+u") return "";
 		if (id === "ctrl+w") return this.#filter.replace(/\S*\s*$/, "");
 		if (text !== undefined && text.length > 0 && !/[\x00-\x1f\x7f]/.test(text)) return this.#filter + text;

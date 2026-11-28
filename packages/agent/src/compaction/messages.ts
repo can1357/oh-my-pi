@@ -51,6 +51,8 @@ export interface BranchSummaryMessage {
 
 export interface CompactionSummaryMessage {
 	role: "compactionSummary";
+	/** Runtime replay state: a spoken delegation was still open at the retained-history boundary. */
+	liveVoiceOpen?: true;
 	summary: string;
 	shortSummary?: string;
 	tokensBefore: number;

@@ -3039,7 +3039,8 @@ export class TernTab implements InProcessRunTab {
 	}
 
 	/** Readable text/markdown of the page. */
-	async extract(format: ReadableFormat = "markdown", opts?: ReadableExtractOptions): Promise<string> {
+	async extract(formatArg?: ReadableFormat | null, opts?: ReadableExtractOptions): Promise<string> {
+		const format = formatArg ?? "markdown";
 		return await this.#quickRead("tab.extract()", async () => {
 			const html = await this.pageContent();
 			const readable = await extractReadableFromHtml(html, this.#url, format, opts);

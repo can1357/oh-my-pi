@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import * as path from "node:path";
-import { compileCompatRules, renderAuthIds } from "../scripts/compat-compiler";
+import { compileCompatRules } from "../scripts/compat-compiler";
 import { compileAuth } from "../scripts/compat-compiler/compile-auth";
 import { compileBehavior } from "../scripts/compat-compiler/compile-behavior";
 import { compileCascade } from "../scripts/compat-compiler/compile-cascade";
@@ -8,8 +8,6 @@ import { compileProviders } from "../scripts/compat-compiler/compile-providers";
 import { compileTaxonomy } from "../scripts/compat-compiler/compile-taxonomy";
 import { cursorModelParameters } from "../src/compat/behavior";
 import committed from "../src/compat/rules.json";
-
-const AUTH_IDS_PATH = path.join(import.meta.dir, "../src/compat/auth-ids.ts");
 
 const RULES_DIR = path.join(import.meta.dir, "../src/compat/rules");
 
@@ -344,8 +342,6 @@ describe("auth grammar", () => {
 			order("b"),
 		]);
 		expect(compiled.providers.map(p => p.id)).toEqual(["b", "a"]);
-		expect(renderAuthIds(compiled)).toContain('export type LoginProviderId = "b";');
-		expect(renderAuthIds(compiled)).toContain('export type AuthProviderId = "a" | "b";');
 	});
 
 	test("provider-owned authentication APIs compile into auth policy", () => {
@@ -501,6 +497,29 @@ describe("provider catalog grammar", () => {
 		expect(() => compileProviders(src(provider("p", ['\tenv "P_KEY"'])))).toThrow(
 			/providers\/p\.kdl:1.*has catalog nodes but no default-model/,
 		);
+	});
+
+	test("provider base-url compiles with an optional environment override", () => {
+		const compiled = compileProviders([
+			{
+				file: "providers/p.kdl",
+				text: provider("p", [
+					'\tdefault-model "m"',
+					'\tbase-url "https://api.example/v1" {\n\t\tenv "P_BASE_URL"\n\t}',
+				]),
+			},
+			{
+				file: "providers/q.kdl",
+				text: provider("q", ['\tdefault-model "m"', '\tbase-url "https://other.example/v1"']),
+			},
+		]);
+
+		expect(compiled.p).toMatchObject({
+			baseUrl: "https://api.example/v1",
+			baseUrlEnv: "P_BASE_URL",
+		});
+		expect(compiled.q).toMatchObject({ baseUrl: "https://other.example/v1" });
+		expect(compiled.q.baseUrlEnv).toBeUndefined();
 	});
 
 	test("runner seeds and per-kind APIs compile without entering the cascade", () => {
@@ -659,6 +678,7 @@ describe("committed rules.json", () => {
 	test("matches a fresh compile of rules/ (run `bun run gen:compat` after editing KDL)", async () => {
 		const fresh = await compileCompatRules(RULES_DIR);
 		expect(fresh).toEqual(committed);
-		expect(await Bun.file(AUTH_IDS_PATH).text()).toBe(renderAuthIds(fresh.auth));
+		const { hash, priceChanges: _dates, ...policy } = fresh;
+		expect(hash).toBe(Bun.hash(JSON.stringify(policy)).toString(36));
 	});
 });

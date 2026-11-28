@@ -37,19 +37,19 @@ const waitSchema = type({});
  * back-to-back. The top-level interactive session skips the floor on job
  * waits: an early return there can only end its turn, one more request
  * than blocking until the result. Every idle return re-reads the whole prompt, and each one is a
- * request. A job or service wait keeps this top window, inside the shortest
- * (5-minute) prompt-cache lifetime, since each return also reports the job's
- * progress. A reply or parent wait reports nothing until the answer, so its
- * top window stretches to the session's known cache lifetime (see
- * {@link agentWaitTopMs}): the return still hits a live cache, with fewer
- * requests per hour of waiting.
+ * request. Without a known prompt-cache lifetime, the top window stays inside
+ * the shortest (5-minute) prompt-cache lifetime; when the session tracks a
+ * longer cache lifetime (see {@link waitTopMs}), both job/service waits and
+ * reply/parent waits stretch to `ttlMs - margin` (capped at 30m) so idle
+ * returns still hit a warm cache with far fewer requests per hour of waiting
+ * (live job progress still streams to the UI via `onUpdate` every 500ms).
  */
 const WAIT_LADDER_MS = [5_000, 240_000] as const;
 const WAIT_TOP_RUNG = WAIT_LADDER_MS.length - 1;
-/** How long before its cache entry expires a reply wait's top window returns. */
-const AGENT_WAIT_CACHE_MARGIN_MS = 60_000;
-/** Longest top window of a reply wait, whatever the cache lifetime. */
-const AGENT_WAIT_TOP_MAX_MS = 30 * 60_000;
+/** How long before its cache entry expires a wait's top window returns. */
+const WAIT_CACHE_MARGIN_MS = 60_000;
+/** Longest top window of a wait, whatever the cache lifetime. */
+const WAIT_TOP_MAX_MS = 30 * 60_000;
 /** A gap this long since the last idle wait returned means the agent worked in between: the ladder restarts at the floor. */
 const WAIT_LADDER_RESET_MS = 60_000;
 /** After one watched job settles, keep collecting briefly so near-simultaneous completions share one wait result. */
@@ -62,14 +62,14 @@ const RECENTLY_EVICTED_MS = 10 * 60_000;
 const RECENTLY_EVICTED_SHOWN = 3;
 
 /**
- * Top window of a reply or parent wait: the cache lifetime of the caller's
- * latest request less a margin, between the job top window and
- * {@link AGENT_WAIT_TOP_MAX_MS}; the job top window without a known entry.
+ * Top window of a blocking wait: the cache lifetime of the caller's latest
+ * request less a margin, between the default 4m top window and
+ * {@link WAIT_TOP_MAX_MS}; the default 4m top window without a known entry.
  */
-function agentWaitTopMs(entry: PromptCacheEntry | undefined): number {
+function waitTopMs(entry: PromptCacheEntry | undefined): number {
 	const floor = WAIT_LADDER_MS[WAIT_TOP_RUNG];
 	if (!entry) return floor;
-	return Math.min(Math.max(entry.ttlMs - AGENT_WAIT_CACHE_MARGIN_MS, floor), AGENT_WAIT_TOP_MAX_MS);
+	return Math.min(Math.max(entry.ttlMs - WAIT_CACHE_MARGIN_MS, floor), WAIT_TOP_MAX_MS);
 }
 
 /** Back-to-back waits that each elapsed with nothing new. */
@@ -683,7 +683,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		if (idleTimeout === "none") return undefined;
 		if (idleTimeout !== "ladder") return { ms: idleTimeout, topMs: idleTimeout };
 		const rung = streak || (this.#endTurn && jobCount > 0) ? WAIT_TOP_RUNG : 0;
-		const topMs = replyWait ? agentWaitTopMs(this.session.getPromptCacheEntry?.()) : WAIT_LADDER_MS[WAIT_TOP_RUNG];
+		const topMs = waitTopMs(this.session.getPromptCacheEntry?.());
 		return { ms: rung === WAIT_TOP_RUNG ? topMs : WAIT_LADDER_MS[rung], topMs };
 	}
 
@@ -722,6 +722,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		if (!streak) return result;
 		const notice = prompt.render(this.#tanFork ? waitIdleForkTemplate : waitIdleTemplate, {
 			waited: formatDuration(waitedMs),
+			endTurn: this.#endTurn,
 		});
 		return { ...result, content: [...result.content, { type: "text", text: notice }] };
 	}

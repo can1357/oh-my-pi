@@ -7,6 +7,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createRoot, type KeyEvent } from "@oh-my-pi/pi-tui";
 import { createTestTerminal, type TestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
+import { CONSERVATIVE_EMOJI } from "@oh-my-pi/pi-tui/theme/contract";
 import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { Settings } from "../../../src/config/settings";
 import { MacOSSpellingProvider, type SpellingBackend } from "../../../src/modes/view-model/prompt/macos-spelling";
@@ -21,7 +22,7 @@ const restoreTheme = currentTheme();
 
 beforeAll(() => {
 	// The glow assertions read truecolor SGR: pin the depth instead of following the runner's env.
-	initTheme({ capabilities: { truecolor: true, colors: 16_777_216, dark: true } });
+	initTheme({ capabilities: { truecolor: true, colors: 16_777_216, dark: true, emoji: CONSERVATIVE_EMOJI } });
 });
 
 afterAll(() => {

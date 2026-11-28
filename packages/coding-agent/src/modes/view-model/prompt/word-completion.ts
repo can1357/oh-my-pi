@@ -1,4 +1,4 @@
-import { type Accessor, signal } from "@oh-my-pi/pi-tui";
+import { type Accessor, signal } from "@oh-my-pi/pi-tui/reactive";
 import { logger } from "@oh-my-pi/pi-utils";
 import { maskNonProse } from "./markdown-prose";
 import { isProseWord, lineContext, ProseSource } from "./prose-gate";

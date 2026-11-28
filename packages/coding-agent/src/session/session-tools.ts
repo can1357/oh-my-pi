@@ -94,7 +94,7 @@ import {
 	cfgToolsCommandNotices,
 } from "../tools/settings";
 import type { LocalProtocolOptions } from "../internal-urls";
-import { SPECIAL_TOOL_NAMES, specialToolApplies } from "../tools";
+import { SPECIAL_TOOL_NAMES, specialToolApplies } from "../tools/special-tools";
 
 /**
  * Registered tools a mode may activate mid-session that `active` leaves out, for {@link Agent.setStandbyTools}:
@@ -118,6 +118,8 @@ export interface SessionToolsHost {
 	clientBridge(): ClientBridge | undefined;
 	agentKind(): "main" | "sub";
 	isDisposed(): boolean;
+	/** Whether `toolName` belongs to an MCP server still in its startup connect (its mount is no mid-session change). */
+	mcpStartupMount(toolName: string): boolean;
 	isStreaming(): boolean;
 	/**
 	 * Aborts once per user steering-message arrival; the ACP permission gate
@@ -1921,9 +1923,13 @@ export class SessionTools {
 			removedNames,
 		);
 		if (cfgStartupQuiet.get(this.#host.settings) || !cfgToolsCommandNotices.get(this.#host.settings)) return;
+		// The startup connect reports its servers itself ("MCP finished …"): their first mounts are no change to announce.
+		const shownAdded = addedNames.filter(name => !this.#host.mcpStartupMount(name));
+		const shownRemoved = removedNames.filter(name => !this.#host.mcpStartupMount(name));
+		if (shownAdded.length === 0 && shownRemoved.length === 0) return;
 		const parts: string[] = [];
-		if (addedNames.length > 0) parts.push(`added ${addedNames.join(", ")}`);
-		if (removedNames.length > 0) parts.push(`removed ${removedNames.join(", ")}`);
+		if (shownAdded.length > 0) parts.push(`added ${shownAdded.join(", ")}`);
+		if (shownRemoved.length > 0) parts.push(`removed ${shownRemoved.join(", ")}`);
 		this.#host.emitNotice("info", `Tool commands: ${parts.join("; ")}`, "toolCommands");
 	}
 
@@ -2018,7 +2024,7 @@ export class SessionTools {
 	/**
 	 * Builds the hidden notice reconciling the eval preludes the model knows with
 	 * the live set. Delivered with the next user prompt instead of rebuilding the
-	 * system prompt, so a mid-session toggle (`/computer on`) keeps the provider
+	 * system prompt, so toggling `/computer` mid-session keeps the provider
 	 * cache prefix intact.
 	 *
 	 * Known preludes are the committed base snapshot, then every prelude notice

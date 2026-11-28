@@ -7,8 +7,8 @@ A built-in provider is described in two halves:
   variables, catalog-discovery policy, seed models, and provider compat rules.
   Runtime discovery factories live in
   `src/provider-models/descriptors.ts`'s `MODEL_MANAGER_FACTORIES` table.
-  `KnownProvider`, `PROVIDER_DESCRIPTORS`, and `DEFAULT_MODEL_PER_PROVIDER`
-  derive from the compiled catalog entries and that factory table.
+  `PROVIDER_DESCRIPTORS` and `DEFAULT_MODEL_PER_PROVIDER` derive from the
+  compiled catalog entries and that factory table.
 - **Auth half** (`packages/catalog` + `packages/ai`): an
   `auth "<id>"` entry in `packages/catalog/src/compat/rules/auth/<id>.kdl`.
   `packages/ai/src/registry/build.ts` interprets the compiled policy into a
@@ -54,8 +54,8 @@ factory only if the provider supports model listing.
    constructed by the coding-agent runtime instead.
 5. **Regenerate compiled rules and the bundled catalog.** From the repo root,
    run `bun run gen:compat`, then `bun run gen:models` with the discovery
-   credentials needed by the provider. `gen:compat` writes `rules.json`,
-   `auth-ids.ts`, and `provider-ids.ts` under `packages/catalog/src/compat/`.
+   credentials needed by the provider. `gen:compat` writes
+   `packages/catalog/src/compat/rules.json`.
    For a provider-only catalog update, use `bun run gen:models --provider <id>`
    to regenerate that provider while preserving every other provider's committed
    snapshot. Cross-provider reference data remains available to the generator.
@@ -128,7 +128,7 @@ authorization-code flow, and `github-copilot.kdl` for a custom flow.
 | `store-as "id"`                                           | Stores credentials under another provider ID.                                                                      |
 | `callback-port N`, `paste-code #true`                     | Coding-agent/broker callback metadata; OAuth-code flows derive these from their callback policy unless overridden. |
 | `device-bound #true`                                      | Logins depend on a key only this machine holds; they stay in the local `agent.db` and never reach the auth broker. |
-| `sign-out hook="…"`                                       | Runs when a login is removed: deletes secrets kept outside `agent.db` and revokes the grant upstream.                     |
+| `sign-out hook="…"`                                       | Runs when a login is removed: revokes the grant upstream.                                                                 |
 | `oauth-token-env "VAR" …`                                 | Dedicated OAuth environment tokens; borrowed API-key aliases do not make this provider automatically available.    |
 | `org-scoped-identity #true`                               | Distinguishes stored accounts by organization as well as identity.                                                 |
 | `api-key-format "structured"`                             | Declares a transport-specific credential encoding rather than a plain bearer.                                      |

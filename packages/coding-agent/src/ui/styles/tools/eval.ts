@@ -11,7 +11,7 @@
  */
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import type { Block, PaintContext } from "@oh-my-pi/pi-tui/term/paint";
-import { SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-tui/term/painters/spinner";
+import { spinnerIndex } from "@oh-my-pi/pi-tui/term/painters/spinner";
 import { renderMarkdown } from "@oh-my-pi/pi-tui/text/markdown/index";
 import { replaceTabs, truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
@@ -297,9 +297,9 @@ function cellOutputRows(
 /** The spinner (or the still running glyph) in the accent color. */
 function runningGlyph(cx: PaintContext): string {
 	const theme = cx.theme;
-	if (cx.reduceMotion) return theme.fg("accent", theme.symbols.symbol("status.running"));
+	if (cx.spinnerInterval === 0) return theme.fg("accent", theme.symbols.symbol("status.running"));
 	const frames = theme.symbols.spinnerFrames;
-	return theme.fg("accent", frames[Math.floor(cx.now() / SPINNER_INTERVAL_MS) % frames.length]!);
+	return theme.fg("accent", frames[spinnerIndex(cx, frames.length)]!);
 }
 
 /** `agent()` progress rows under a cell. */
@@ -442,7 +442,7 @@ function paintEval(node: UiNode, cx: PaintContext): Block {
 						index: i,
 						total: cells.length,
 						...(cell.title !== undefined ? { title: cell.title } : {}),
-						status: cx.reduceMotion ? "pending" : "running",
+						status: cx.spinnerInterval === 0 ? "pending" : "running",
 						codeTail: true,
 						codeMaxLines: PREVIEW_WINDOW_ROWS,
 						expanded,

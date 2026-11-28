@@ -209,6 +209,42 @@ fn missing_input_file_is_reported_and_skipped() {
 }
 
 #[test]
+fn newline_records_keep_carriage_returns() {
+	// Default printing must not silently convert CRLF to LF.
+	assert_eq!(run("1", "a\r\nb\r\n"), "a\r\nb\r\n");
+	assert_eq!(run("{ print length }", "a\r\nb\r"), "2\n2\n");
+}
+
+#[test]
+fn paragraph_records_keep_carriage_returns() {
+	// A CR-only line is not a blank line and must not split the paragraph.
+	assert_eq!(
+		run(r#"BEGIN { RS = "" } { printf "[%s]", $0 }"#, "\r\na\r\n\r\nb\r\n\nc\r\n"),
+		"[\r\na\r\n\r\nb\r][c\r]",
+	);
+}
+
+#[test]
+fn explicit_separators_keep_carriage_returns() {
+	// Only the matched separator bytes should be removed.
+	assert_eq!(run(r#"BEGIN { RS = ";" } 1"#, "a\r;b\r;"), "a\r\nb\r\n");
+	assert_eq!(run(r#"BEGIN { RS = "[0-9]+" } 1"#, "a\r12b\r345c\r"), "a\r\nb\r\nc\r\n");
+}
+
+#[test]
+fn getline_keeps_carriage_returns() {
+	// Both getline sources must return CR as part of the record.
+	let input = "a\r\nb\r";
+	let expected = "a\r\nb\r\n";
+	assert_eq!(run("BEGIN { while ((getline x) > 0) print x }", input), expected);
+	let dir = tempfile::tempdir().unwrap();
+	std::fs::write(dir.path().join("input.txt"), input).unwrap();
+	let prog = r#"BEGIN { while ((getline x < "input.txt") > 0) print x }"#;
+	let (code, out, err) = awk_in(dir.path(), &[prog], "");
+	assert_eq!((code, out.as_str(), err.as_str()), (0, expected, ""));
+}
+
+#[test]
 fn program_files() {
 	let dir = tempfile::tempdir().unwrap();
 	std::fs::write(dir.path().join("prog.awk"), "{ print NR \": \" $0 }\n").unwrap();
@@ -297,6 +333,72 @@ fn nextfile_moves_to_the_next_file() {
 	std::fs::write(dir.path().join("b"), "3\n4\n").unwrap();
 	let (_, out, _) = awk_in(dir.path(), &["{ print; nextfile }", "a", "b"], "");
 	assert_eq!(out, "1\n3\n");
+}
+
+/// Non-tail user recursion (the addend is used only after the recursive call
+/// returns) must survive 20,000 levels on a small, ordinary stack, and hold
+/// the right value once it unwinds. Before the heap queue this ran on a
+/// dedicated 512 MiB thread; the test pins a 512 KiB stack to prove the
+/// recursion now lives on the heap.
+#[test]
+fn deep_non_tail_user_recursion_runs_on_a_small_stack() {
+	// sum(1..20000) == 20000 * 20001 / 2.
+	let prog = "function down(n) { return n <= 0 ? 0 : down(n - 1) + n } BEGIN { print down(20000) }";
+	let out = std::thread::Builder::new()
+		.stack_size(512 * 1024)
+		.spawn(move || run(prog, ""))
+		.expect("spawn the deeply recursing awk thread")
+		.join()
+		.expect("awk must not overflow the stack");
+	assert_eq!(out, "200010000\n");
+}
+
+/// A builtin resumes through the tree walker every fourth activation. The
+/// native poll budget must count these reentries, not total AWK call depth.
+#[test]
+fn mixed_function_continuations_run_on_a_small_stack() {
+	let prog = "function a(n) { return n ? b(n) : 0 }
+	            function b(n) { return c(n) }
+	            function c(n) { return d(n) }
+	            function d(n) { return int(a(n-1)) + 1 }
+	            BEGIN { print a(2000) }";
+	let out = std::thread::Builder::new().stack_size(512 * 1024).spawn(move || run(prog, "")).unwrap().join().unwrap();
+	assert_eq!(out, "2000\n");
+}
+
+#[test]
+fn nonlocal_exit_discards_partially_evaluated_arguments() {
+	let prog = r#"function skip(a) { a["seen"]++; if (NR == 1) next; return a["seen"] }
+	              function add(x,y) { return x+y }
+	              function outer(a,t) { t=3; return add(t++,skip(a))+t }
+	              { print outer(xs) }"#;
+	assert_eq!(run(prog, "first\nsecond\n"), "9\n");
+}
+
+/// A long *acyclic* call chain — `f0` calls `f1` … calls `fN` — has no
+/// recursion, yet its frames must still be kept off the native stack; an
+/// acyclicity test alone cannot justify inlining. 4,000 nested calls on a
+/// 512 KiB stack prove the native stack stays
+/// bounded whatever the chain's shape.
+#[test]
+fn long_acyclic_user_chain_runs_on_a_small_stack() {
+	let count = 4000;
+	let mut prog = String::new();
+	for i in 0..count {
+		if i + 1 == count {
+			prog.push_str(&format!("function f{i}() {{ return 1 }} "));
+		} else {
+			prog.push_str(&format!("function f{i}() {{ return f{}() }} ", i + 1));
+		}
+	}
+	prog.push_str("BEGIN { print f0() }");
+	let out = std::thread::Builder::new()
+		.stack_size(512 * 1024)
+		.spawn(move || run(&prog, ""))
+		.expect("spawn the long-chain awk thread")
+		.join()
+		.expect("awk must not overflow the stack");
+	assert_eq!(out, "1\n");
 }
 
 /// Command tests go through the test command runner, which runs command

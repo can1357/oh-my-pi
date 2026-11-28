@@ -52,6 +52,7 @@ pub mod ir;
 mod mem;
 mod mem_store;
 mod packed_names;
+mod pvec;
 pub mod signal;
 pub mod snapshot;
 pub mod socket;

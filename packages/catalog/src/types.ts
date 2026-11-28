@@ -5,7 +5,6 @@ import type { DatedCostCard } from "./pricing";
 // Re-exported from @oh-my-pi/pi-utils so the whole workspace shares one
 // `fetch`-compatible signature (tls-fetch's wrappers produce/accept it).
 export type { FetchImpl } from "@oh-my-pi/pi-utils";
-export type { KnownProvider } from "./provider-models/descriptors";
 
 export type KnownApi =
 	| "openai-completions"
@@ -212,8 +211,7 @@ export interface ThinkingConfig {
 	unverified?: boolean;
 }
 
-// `Provider` is any provider-id string; `KnownProvider` (re-exported above) enumerates
-// the built-in model providers from the catalog descriptor table.
+/** Provider id; built-in ids are data in the compiled KDL rules, not a type-level union. */
 export type Provider = string;
 
 /** Token budgets for each thinking level (token-based providers only) */
@@ -277,6 +275,29 @@ export interface Usage {
 		/** Final committed ACU cost, when reported. */
 		acuCost?: number;
 	};
+	/**
+	 * GitHub Copilot server-reported AI-credit meter (`copilot_usage` frame).
+	 * Absent when the server sent no billing frame (see {@link aiuMissing}); never zero for a missing frame.
+	 * Kept apart from `cost` (a local dollar estimate) and `premiumRequests` (request
+	 * billing). 1 AIU = 1 AI credit = $0.01.
+	 */
+	aiu?: {
+		/** Server-reported `total_nano_aiu` (1 AIU = 1e9 nano-AIU). Authoritative per-request charge. */
+		nano: number;
+		/** Per-token-type share of `nano`, derived from the frame's `token_details`; only the types the server listed. */
+		nanoByType?: {
+			input?: number;
+			cacheRead?: number;
+			cacheWrite?: number;
+			output?: number;
+		};
+	};
+	/**
+	 * Set when the model declares a billing frame (`reports-aiu`) and the call finished without one: its
+	 * charge is unknown, not zero. Absent on calls that report no credits, on calls that failed before any
+	 * token, and on transcripts recorded before the frame was read.
+	 */
+	aiuMissing?: boolean;
 	cost: {
 		input: number;
 		output: number;
@@ -591,6 +612,12 @@ export interface OpenAICompat {
 	reasoningDeltasMayBeCumulative?: boolean;
 	/** Strip leaked DeepSeek chat-template special tokens from visible content deltas. Default: auto-detected. */
 	stripDeepseekSpecialTokens?: boolean;
+	/**
+	 * Break DeepSeek chat-template special tokens (`<｜…｜>`, `｜DSML｜`) quoted in outgoing
+	 * message text, so the encoder neither rejects them (V4.1's image-placeholder
+	 * guard) nor parses them as token IDs. Rule-owned: the DeepSeek class.
+	 */
+	neutralizeDeepseekSpecialTokens?: boolean;
 	/** Drop assistant thinking blocks from replayed chat-completions history. Default: false. */
 	stripThinkingHistory?: boolean;
 	/** Heal leaked chat-template/tool-call/thinking markup from visible content deltas. Default: auto-detected. */
@@ -848,6 +875,12 @@ export interface AnthropicCompat {
 	betweenToolsEffort?: "low" | "medium" | "high";
 	/** The model is a fast-mode SKU: send `speed: "fast"` with the fast-mode beta. Default: false. */
 	fastMode?: boolean;
+	/**
+	 * Host header that also carries the conversation session id. Sent alongside
+	 * `x-session-id` and `X-Claude-Code-Session-Id`, never instead of them; a
+	 * caller-set value wins. Default: unset.
+	 */
+	additiveSessionHeader?: "x-client-session-id";
 }
 
 /**
@@ -1213,6 +1246,13 @@ export interface ResolvedOpenAIResponsesCompat extends ResolvedOpenAISharedCompa
 	 */
 	toolNamePrefix?: string;
 	/**
+	 * `reasoning.summary` level sent when reasoning is engaged and the caller did
+	 * not choose one. Rule-owned: host/model pairs whose `"auto"` summaries come
+	 * back sparse; see the KDL rules for current assignments. Unset keeps
+	 * `"auto"`. Ignored while `supportsReasoningSummary` is false.
+	 */
+	reasoningSummaryDefault?: "auto" | "detailed" | "concise";
+	/**
 	 * Whether the host binds native history items (`encrypted_content`, item
 	 * ids) to the connection that issued them, so a new process must rebuild
 	 * prior turns from message content until its first successful response.
@@ -1257,6 +1297,7 @@ export type ResolvedAnthropicCompat = Required<
 		| "betweenToolsEffort"
 		| "stripThinkingHistory"
 		| "fastMode"
+		| "additiveSessionHeader"
 		| "maxImageDimension"
 		| "maxImagePayloadBytes"
 	>
@@ -1273,6 +1314,8 @@ export type ResolvedAnthropicCompat = Required<
 	stripThinkingHistory?: AnthropicCompat["stripThinkingHistory"];
 	/** Fast-mode SKU; undefined behaves as false. */
 	fastMode?: AnthropicCompat["fastMode"];
+	/** Additive host session header; undefined sends none. */
+	additiveSessionHeader?: AnthropicCompat["additiveSessionHeader"];
 	/**
 	 * Largest width or height a single image block may carry. Undefined defers
 	 * to the canonical Anthropic API limit applied by the request builder.

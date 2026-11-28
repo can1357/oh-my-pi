@@ -18,7 +18,7 @@ describe("RPC queued-message editing", () => {
 	let directory: string;
 
 	/** Selects the fixture's first model call (QUEUED_RPC_SCRIPT). */
-	type FirstCallScript = "hold" | "until-steer" | "internal-steer" | "live-steer";
+	type FirstCallScript = "hold" | "until-steer" | "internal-steer" | "live-steer" | "paused-job";
 	function createClient(script?: FirstCallScript): RpcClient {
 		return new RpcClient({
 			command: [process.execPath, path.join(import.meta.dir, "fixtures", "queued-message-rpc-agent.ts")],
@@ -90,6 +90,29 @@ describe("RPC queued-message editing", () => {
 			[{ type: "text", text: "resume" }],
 			[{ type: "text", text: "keep this" }],
 		]);
+	}, 30_000);
+
+	test("a busy clear leaves earlier queued input intact", async () => {
+		await startStreamingTurn();
+		const [, error] = await Promise.all([client.followUp("keep this"), rejectionOf(client.clearContext())]);
+		expect(error).toMatchObject({ command: "clear_context", code: "session_busy" });
+		expect((await client.getState()).queuedMessages.followUp).toEqual(["keep this"]);
+	}, 30_000);
+
+	test("clear publishes settlement when a background job was holding a paused run open", async () => {
+		client = createClient("paused-job");
+		await client.start();
+		await client.promptAndWait("finish this turn");
+		expect((await client.getState()).isSettled).toBe(false);
+		const settled = Promise.withResolvers<void>();
+		const unsubscribe = client.onSessionSettled(settled.resolve);
+		try {
+			await client.clearContext();
+			await withTimeout(settled.promise, 10_000, "clear did not settle the paused run");
+			expect((await client.getState()).isSettled).toBe(true);
+		} finally {
+			unsubscribe();
+		}
 	}, 30_000);
 
 	test("returns the removed message's images so the client can restore its draft", async () => {

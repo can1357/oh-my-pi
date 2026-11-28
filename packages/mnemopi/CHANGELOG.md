@@ -6,6 +6,11 @@
 
 - Removed unused public configuration exports from @oh-my-pi/pi-mnemopi/config.
 
+### Fixed
+
+- Fixed local embedding rebuilds repeatedly timing out on large memory backlogs by splitting local requests into smaller batches ([#18559](https://github.com/can1357/oh-my-pi/issues/18559))
+- Fixed working memory growing past its configured limit and keeping expired memories in some recovered memory databases ([#20808](https://github.com/can1357/oh-my-pi/pull/20808) by [@sjawhar](https://github.com/sjawhar))
+
 ## [19.1.0] - 2026-11-21
 
 ### Fixed

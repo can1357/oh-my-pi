@@ -445,7 +445,8 @@ interface TabApi {
 	screenshot(opts?: ScreenshotOptions): Promise<string | ScreenshotChangeResult>;
 	diffScreenshot(baselinePath: string, opts?: DiffScreenshotOptions): Promise<DiffScreenshotResult>;
 	pdf(opts?: PdfOptions): Promise<string>;
-	extract(format?: ReadableFormat, opts?: ReadableExtractOptions): Promise<string>;
+	/** `format` null (Python `extract(None, selector=…)`) means the default, like an omitted one. */
+	extract(format?: ReadableFormat | null, opts?: ReadableExtractOptions): Promise<string>;
 	click(
 		selector: string,
 		opts?: { button?: "left" | "right" | "middle" | "back" | "forward"; count?: number },
@@ -2335,6 +2336,7 @@ export class WorkerCore {
 			if (payload.mode === "attach" && payload.page.kind === "create" && payload.page.reload) {
 				// A failed load leaves the new page where it got to; the supervisor reports that from the ready URL.
 				const { url, timeoutMs } = payload.page.reload;
+				await this.#consoleCapture.prepareNavigation(url);
 				await this.#page.goto(url, { waitUntil: "load", timeout: timeoutMs }).catch(() => undefined);
 			}
 			const hiddenFrames = this.#hiddenFrames.splice(0);
@@ -3147,6 +3149,7 @@ export class WorkerCore {
 			goto: (url, opts) =>
 				input(`tab.goto(${JSON.stringify(url)})`, INF, async sig => {
 					this.#clearElementCache();
+					await this.#consoleCapture.prepareNavigation(url);
 					try {
 						// Default to "load" because dev servers with HMR/WS never reach networkidle.
 						// budgetBound (not the full cell) so a hung navigation fails named and
@@ -3202,8 +3205,9 @@ export class WorkerCore {
 			},
 			screenshot: opts =>
 				read(describeScreenshot(opts), quickOpMs, sig => this.#captureScreenshot(shots, sig, opts)),
-			extract: (format = "markdown", opts) =>
-				read(`tab.extract(${JSON.stringify(format)})`, quickOpMs, async sig => {
+			extract: (formatArg, opts) => {
+				const format = formatArg ?? "markdown";
+				return read(`tab.extract(${JSON.stringify(format)})`, quickOpMs, async sig => {
 					const html = (await untilAborted(sig, () => page.content())) as string;
 					const result = await extractReadableFromHtml(html, page.url(), format, opts);
 					if (!result) {
@@ -3218,7 +3222,8 @@ export class WorkerCore {
 						);
 					}
 					return content;
-				}),
+				});
+			},
 			click: (selector, opts) =>
 				act(
 					`tab.click(${JSON.stringify(selector)})`,

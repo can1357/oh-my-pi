@@ -38,6 +38,7 @@ import {
 import { installSqliteLockShim } from "@oh-my-pi/pi-natives/sqlite-locks";
 import { isNativeShell, runNativeShell } from "./cli/native-shell";
 import { extractProfileFlags } from "./cli/profile-bootstrap";
+import { scanPrepaintArgv } from "./cli/prepaint";
 import {
 	AUTO_UPDATE_WORKER_ARG,
 	COMPUTER_WORKER_ARG,
@@ -48,9 +49,15 @@ import {
 } from "./cli/worker-selectors";
 import { DAEMON_WORKER_ARG } from "./daemon/protocol";
 import { MNEMOPI_EMBED_WORKER_ARG } from "./mnemopi/embed-protocol";
+import { stopPendingStartupComposer } from "./modes/startup-frame";
 import type * as JsProcessEntry from "./eval/js/process-entry";
 import type { WorkerInbound as JsWorkerInbound, WorkerOutbound as JsWorkerOutbound } from "./eval/js/worker-protocol";
 import { startParentWatchdog } from "./subprocess/parent-watchdog";
+import { captureProgramResumeToken } from "./utils/program-resume-token";
+
+// Capture OSC7577_TOKEN into memory and remove it from process.env before any
+// subprocess, worker, or tool can inherit it.
+captureProgramResumeToken();
 
 if (Bun.semver.order(Bun.version, MIN_BUN_VERSION) < 0) {
 	process.stderr.write(
@@ -86,49 +93,19 @@ function getWorkerParentPort(): MessagePort | null {
 }
 
 /**
- * Launch flags that only switch off discovery or persistence. An argv made of
- * these still enters interactive mode, so the speculative first frame is
- * valid; anything else (subcommands, `-p`, model/session selectors) skips it.
+ * Start the speculative first frame when `--prepaint` and the launch allow it: `force` always, `off`
+ * never, and the default `on` for prepaint-safe flags whose config overlays leave the cached frame
+ * valid. Returns whether it started.
  */
-const PREPAINT_SAFE_FLAGS: Record<string, true> = {
-	"--no-session": true,
-	"--no-extensions": true,
-	"--no-skills": true,
-	"--no-rules": true,
-	"--no-context-files": true,
-	"--no-tools": true,
-	"--no-judge": true,
-	"--no-spotlight": true,
-	"--offline": true,
-	"--no-lsp": true,
-	"--no-title": true,
-	"--no-prewalk": true,
-	"--no-pty": true,
-	// `-e`/`--extension` only registers a local extension path; the extension
-	// loads later, so the speculative first frame stays valid (issue #20158).
-	// These take a value, so they are handled by `isPrepaintSafeArgv`.
-};
-
-/**
- * Flags in `PREPAINT_SAFE_FLAGS` whose single value follows as the next argv
- * token. `--extension=value` needs no special handling: it is one token that
- * matches the flag directly.
- */
-const PREPAINT_SAFE_VALUE_FLAGS: ReadonlySet<string> = new Set(["-e", "--extension"]);
-
-/** True when every token in `argv` still yields a valid speculative first frame. */
-export function isPrepaintSafeArgv(argv: readonly string[]): boolean {
-	for (let index = 0; index < argv.length; index++) {
-		const arg = argv[index]!;
-		if (PREPAINT_SAFE_VALUE_FLAGS.has(arg)) {
-			// The path value belongs to the flag; skip it. A missing value is
-			// a usage error the regular parse reports later.
-			index++;
-			continue;
-		}
-		if (PREPAINT_SAFE_VALUE_FLAGS.has(arg.split("=", 1)[0]!)) continue;
-		if (PREPAINT_SAFE_FLAGS[arg] !== true) return false;
-	}
+async function beginPrepaint(argv: readonly string[]): Promise<boolean> {
+	const { mode, safe, overlays } = scanPrepaintArgv(argv);
+	if (mode === "off" || (mode === "on" && !safe)) return false;
+	// Intentional exception to the static-import convention: this latency boundary
+	// keeps the TUI graph out of worker, subcommand, help, and version launches.
+	// Loading it statically would erase the measured cold-start improvement.
+	const composer = await import("./modes/startup-composer");
+	if (mode === "on" && !(await composer.overlaysKeepPrepaint(overlays))) return false;
+	composer.beginStartupComposer({ version: VERSION });
 	return true;
 }
 
@@ -581,13 +558,8 @@ export async function runCli(argv: string[]): Promise<void> {
 		!process.env.PI_TIMING &&
 		process.stdin.isTTY === true &&
 		process.stdout.isTTY === true &&
-		isPrepaintSafeArgv(resolvedArgv)
+		(await beginPrepaint(resolvedArgv))
 	) {
-		// Intentional exception to the static-import convention: this latency boundary
-		// keeps the TUI graph out of worker, subcommand, help, and version launches.
-		// Loading it statically would erase the measured cold-start improvement.
-		const { beginStartupComposer, stopPendingStartupComposer } = await import("./modes/startup-composer");
-		beginStartupComposer({ version: VERSION });
 		stopStartupComposer = stopPendingStartupComposer;
 	}
 

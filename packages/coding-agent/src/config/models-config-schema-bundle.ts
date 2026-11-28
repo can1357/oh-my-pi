@@ -104,6 +104,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"toolStrictMode?": '"all_strict" | "none"',
 		"streamIdleTimeoutMs?": "number >= 0",
 		"streamMarkupHealingPattern?": '"kimi" | "dsml" | "qwen" | "thinking"',
+		"supportsPromptCacheBreakpoints?": "boolean",
 		"supportsLongPromptCacheRetention?": "boolean",
 		"supportsReasoningParams?": "boolean",
 		"supportsReasoningSummary?": "boolean",
@@ -114,6 +115,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"supportsConfigurationUpdate?": "boolean",
 		"supportsSteering?": "boolean",
 		"stripImageInput?": "boolean",
+		"neutralizeDeepseekSpecialTokens?": "boolean",
 		// anthropic-messages compat flags (same `compat` slot, per-api interpretation)
 		"supportsContextManagement?": "boolean",
 		"supportsEagerToolInputStreaming?": "boolean",

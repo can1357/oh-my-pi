@@ -1,7 +1,9 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { flattenLine, normalizeLineEndings, shortenHomeIn } from "@oh-my-pi/pi-tui/text/sanitize";
+import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { previewLine, TRUNCATE_LENGTHS } from "../../utils/render-utils";
+import { replaceTabs } from "../../utils/text-width";
 import { resolveAbortLabel, shouldRenderAbortReason } from "./messages";
-import { replaceTabs, truncateToWidth } from "../../utils/text-width";
-import { TRUNCATE_LENGTHS } from "../../utils/render-utils";
 import { canonicalizeMessage } from "./thinking-display";
 
 type AssistantAgentMessage = Extract<AgentMessage, { role: "assistant" }>;
@@ -96,12 +98,7 @@ export function normalizeToolArgs(args: unknown): Record<string, unknown> {
 export type AssistantErrorPresentation =
 	| { kind: "none" }
 	| { kind: "full"; text: string; isError: true }
-	| { kind: "compact-recovered"; text: string; isError: false };
-
-function sanitizeRecoveredRetryNote(note: string): string {
-	const normalized = replaceTabs(note).replace(/\s+/g, " ").trim();
-	return truncateToWidth(normalized || "retried", TRUNCATE_LENGTHS.CONTENT);
-}
+	| { kind: "compact-recovered"; text: string; outcome: string; detail: string; isError: false };
 
 /**
  * Resolve the turn-ending assistant error presentation, if any.
@@ -115,9 +112,26 @@ export function resolveAssistantErrorPresentation(
 ): AssistantErrorPresentation {
 	if (message.retryRecovery?.status === "superseded") return { kind: "none" };
 	if (message.retryRecovery?.status === "recovered") {
+		const { note, recovery, supersededBy } = message.retryRecovery;
+		const model = recovery === "model" ? supersededBy : undefined;
+		const savedNote = flattenLine(sanitizeText(note));
+		const outcome = model
+			? flattenLine(sanitizeText(`recovered on ${model.provider}/${model.model}`))
+			: savedNote || "retried";
+		const error = message.errorMessage
+			? replaceTabs(shortenHomeIn(sanitizeText(normalizeLineEndings(message.errorMessage)))).trim()
+			: "";
+		const detail = error || (model ? savedNote : "");
+		const separator = " — ";
+		const remaining = TRUNCATE_LENGTHS.CONTENT - Bun.stringWidth(outcome) - Bun.stringWidth(separator);
+		// Keep the reason visible even when the route itself needs truncation.
+		const reasonWidth = remaining > 0 ? Math.min(remaining, TRUNCATE_LENGTHS.SHORT) : TRUNCATE_LENGTHS.SHORT;
+		const reason = detail && detail !== outcome ? previewLine(detail, reasonWidth) : "";
 		return {
 			kind: "compact-recovered",
-			text: sanitizeRecoveredRetryNote(message.retryRecovery.note),
+			text: previewLine(reason ? `${reason}${separator}${outcome}` : outcome, TRUNCATE_LENGTHS.CONTENT),
+			outcome,
+			detail,
 			isError: false,
 		};
 	}

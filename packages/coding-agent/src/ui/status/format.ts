@@ -8,6 +8,7 @@ import type { SymbolSet } from "@oh-my-pi/pi-tui/theme/contract";
 import { formatNumber, normalizePremiumRequests } from "@oh-my-pi/pi-utils";
 import type { TspTone } from "@oh-my-pi/pi-wire";
 import { shortenPath } from "../../utils/render-utils";
+import { type AiuTotals, formatAiuCredits } from "../../session/aiu-billing";
 
 /** How full the context window reads. */
 export type ContextLevel = "normal" | "warning" | "purple" | "error";
@@ -65,12 +66,14 @@ export interface Billing {
 	/** Subagent-tree spend, shown `(+…)` after the session's own. */
 	readonly subagentCost?: number;
 	readonly advisor?: { readonly cost: number; readonly usingSubscription: boolean };
+	/** Server-reported AI credits of the session and its tree, a separate meter from `cost`; `+` marks a lower bound. */
+	readonly aiu?: AiuTotals;
 }
 
 /**
- * `$0.42`, `$1.234 ★ 3`, `S1.20 (+0.30)`, `(sub)`…: the session's spend with
- * its unit printed once, subagent spend, the pricing period, premium requests
- * and advisor spend. Undefined when there is nothing to bill.
+ * `$0.42`, `$1.234 ★ 3`, `S1.20 (+0.30) 4.56+ cr`, `(sub)`…: the session's spend with
+ * its unit printed once, subagent spend, the pricing period, premium requests,
+ * AI credits and advisor spend. Undefined when there is nothing to bill.
  */
 export function billingSummary(billing: Billing, symbols: SymbolSet): string | undefined {
 	const premium = normalizePremiumRequests(billing.premiumRequests);
@@ -82,6 +85,7 @@ export function billingSummary(billing: Billing, symbols: SymbolSet): string | u
 		!advisorCost &&
 		!billing.usingSubscription &&
 		!premium &&
+		!billing.aiu &&
 		!billing.pricingPeriod
 	) {
 		return undefined;
@@ -101,6 +105,7 @@ export function billingSummary(billing: Billing, symbols: SymbolSet): string | u
 	if (subagentCost) parts.push(`(+${subagentCost.toFixed(billing.digits)})`);
 	if (billing.pricingPeriod) parts.push(billing.pricingPeriod === "peak" ? "↑" : "↓");
 	if (premium) parts.push(`★ ${formatNumber(premium)}`);
+	if (billing.aiu) parts.push(`${formatAiuCredits(billing.aiu, billing.digits)} cr`);
 	if (advisorCost && billing.advisor) {
 		const usingSubscription = billing.advisor.usingSubscription;
 		const unit = shown === usingSubscription ? "" : usingSubscription ? subscriptionUnit : "$";

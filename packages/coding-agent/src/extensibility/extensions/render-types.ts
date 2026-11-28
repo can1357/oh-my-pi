@@ -124,7 +124,8 @@ export type AssistantTextRenderer = (context: AssistantTextRenderContext) => str
  * add block types; answer `undefined` for a `type` you do not know.
  *
  * - `toolCall`: a model tool call, `id` its `toolCallId`. `result` arrives with the call's first
- *   result frame; `isPartial` stays true while the call still streams progress.
+ *   result frame; `isPartial` stays true while the call still streams progress, except on a plain
+ *   terminal for a backgrounded `bash` job, whose card draws each frame as a final result.
  * - `message`: a session message drawn as its own block, `id` the decimal `message.timestamp`
  *   (shared by messages recorded in the same millisecond).
  *   `custom` messages with `customType` `"advisor"`, `"skill-prompt"`, `"lsp-late-diagnostic"`,

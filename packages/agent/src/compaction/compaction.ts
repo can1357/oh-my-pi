@@ -24,7 +24,6 @@ import {
 	type Usage,
 	withAuth,
 } from "@oh-my-pi/pi-ai";
-import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createOpenAICodexCompactionRequestContext } from "@oh-my-pi/pi-ai/providers/openai-codex-compaction";
 import type { OpenAICodexCompactionBody } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
@@ -190,6 +189,13 @@ export interface CompactionSettings {
 	 * explicit value — even one equal to the default — is always honored.
 	 */
 	reserveTokens?: number;
+	/**
+	 * Opt-in output budget for regular history summaries, replacing the default
+	 * `min(floor(0.8 × reserveTokens), MAX_SUMMARY_TOKENS)` and clamped to the
+	 * summarizer's own output limit. Turn-prefix and provider-native summaries
+	 * keep their defaults. Unset keeps the default budget.
+	 */
+	summaryMaxTokens?: number;
 	keepRecentTokens: number;
 	autoContinue?: boolean;
 	remoteEnabled?: boolean;
@@ -200,6 +206,15 @@ export interface CompactionSettings {
 
 /** Reserve applied when {@link CompactionSettings.reserveTokens} is unset. */
 export const DEFAULT_RESERVE_TOKENS = 16384;
+
+/**
+ * Ceiling on the default compaction trigger (`thresholdPercent`/`thresholdTokens`
+ * unset). Every request re-reads the whole context from the prompt cache, so the
+ * cost of a long cycle grows with absolute size, not with the window's share:
+ * 1M-class windows (past ~812K, where 85% would land above this) compact here.
+ * A configured percentage, fixed trigger, or model base is not capped.
+ */
+export const DEFAULT_THRESHOLD_CEILING_TOKENS = 690_000;
 
 /**
  * Hysteresis band under the compaction trigger. Maintenance counts as having
@@ -225,6 +240,19 @@ export const COMPACTION_RECOVERY_BAND = 0.8;
  * mirrors {@link DEFAULT_RESERVE_TOKENS} so this adds no new tuning constant.
  */
 export const MAX_SUMMARY_TOKENS = DEFAULT_RESERVE_TOKENS;
+
+/**
+ * Output budget for one regular history summary. The default is the reserve
+ * fraction under {@link MAX_SUMMARY_TOKENS}; a positive configured
+ * `summaryMaxTokens` replaces it, bounded by the summarizer's output limit.
+ */
+function regularSummaryMaxTokens(model: Model, reserveTokens: number, summaryMaxTokens: number | undefined): number {
+	if (summaryMaxTokens === undefined || !Number.isFinite(summaryMaxTokens) || summaryMaxTokens <= 0) {
+		return Math.min(Math.floor(0.8 * reserveTokens), MAX_SUMMARY_TOKENS);
+	}
+	const requested = Math.floor(summaryMaxTokens);
+	return model.maxTokens && model.maxTokens > 0 ? Math.min(requested, model.maxTokens) : requested;
+}
 
 // reserveTokens is deliberately absent: an unset reserve is what marks it as
 // defaulted, which resolveBudgetReserveTokens needs to distinguish "user never
@@ -419,9 +447,9 @@ export function resolveThresholdTokens(contextWindow: number, settings: Compacti
 		return Math.min(contextWindow - 1, Math.max(1, thresholdTokens));
 	}
 	const baseWindowTokens = settings.baseWindowTokens;
-	if (typeof baseWindowTokens === "number" && Number.isFinite(baseWindowTokens) && baseWindowTokens > 0) {
-		contextWindow = Math.min(contextWindow, baseWindowTokens);
-	}
+	const scaledFromBase =
+		typeof baseWindowTokens === "number" && Number.isFinite(baseWindowTokens) && baseWindowTokens > 0;
+	if (scaledFromBase) contextWindow = Math.min(contextWindow, baseWindowTokens);
 
 	// Percentage-based threshold. The default absolute reserve can exceed bundled
 	// small-context windows, or nearly consume a 16k-class window; in those
@@ -430,7 +458,9 @@ export function resolveThresholdTokens(contextWindow: number, settings: Compacti
 	// configured reserves still define the usable prompt budget.
 	const thresholdPercent = settings.thresholdPercent;
 	if (typeof thresholdPercent !== "number" || !Number.isFinite(thresholdPercent) || thresholdPercent <= 0) {
-		return promptBudgetTokens(contextWindow, settings);
+		const budget = promptBudgetTokens(contextWindow, settings);
+		// A model entry's base is a window the user chose to scale from; only the bare default stops at the ceiling.
+		return scaledFromBase ? budget : Math.min(budget, DEFAULT_THRESHOLD_CEILING_TOKENS);
 	}
 	const clampedThresholdPercent = Math.min(99, Math.max(1, thresholdPercent));
 	return Math.floor(contextWindow * (clampedThresholdPercent / 100));
@@ -708,6 +738,8 @@ export interface SummaryOptions {
 	/** Additional summary context fetched only when a compaction request consumes it. */
 	loadExtraContext?: () => Promise<string[] | undefined>;
 	remoteEndpoint?: string;
+	/** Configured regular-summary output budget; see {@link CompactionSettings.summaryMaxTokens}. */
+	summaryMaxTokens?: number;
 	/** Stable system-prompt segments from the live turn, preserved for provider cache reuse. */
 	remoteSystemPrompt?: string[];
 	initiatorOverride?: MessageAttribution;
@@ -891,9 +923,8 @@ function createSnapcompactArchiveMigrationMessage(archiveText: string): Message 
 const DEFAULT_SUMMARY_INPUT_WINDOW = 200_000;
 
 /**
- * Floor for one summarization window, so a tiny model still makes progress.
- * Scaled down (never below 1k) for models whose window cannot host the full
- * floor next to the carried summary and output reserves.
+ * Smallest conversation window worth retrying after a provider overflow.
+ * Scaled down (never below 1k) for small-context summarizers.
  */
 const MIN_SUMMARY_INPUT_TOKENS = 16_384;
 
@@ -904,17 +935,16 @@ function minSummaryInputTokens(model: Model): number {
 }
 
 /**
- * Usable conversation input for ONE summarization call: the summarizer's window
- * minus the summary it must emit, the previous summary it carries forward, and
- * prompt scaffolding. Providers tokenize differently from the local cl100k
- * estimate, so the window is discounted before the fixed reserves come off.
+ * Input available for the conversation and carried summary together, after
+ * reserving output and discounting the window for prompt scaffolding and
+ * differences between provider and local tokenizer counts.
  */
 function summaryInputBudgetTokens(model: Model, maxTokens: number): number {
 	const window = model.contextWindow && model.contextWindow > 0 ? model.contextWindow : DEFAULT_SUMMARY_INPUT_WINDOW;
 	// 0.8, not "window minus reserves": provider tokenizers disagree with the
 	// local cl100k estimate by a few percent, and being wrong here is a hard
 	// 400 on the one call that is supposed to rescue an oversized session.
-	return Math.max(minSummaryInputTokens(model), Math.floor(window * 0.8) - maxTokens - MAX_SUMMARY_TOKENS);
+	return Math.max(1, Math.floor(window * 0.8) - maxTokens);
 }
 
 /**
@@ -930,43 +960,6 @@ function clampConversationToBudget(text: string, budgetTokens: number, tokens: n
 	return `${text.slice(0, keep)}\n\n[... ${text.length - keep} more characters truncated]`;
 }
 
-/** One planned summarization call: its messages and the budget they were packed for. */
-interface SummaryWindow {
-	messages: Message[];
-	budgetTokens: number;
-	/** Serialization reused from the fit check, so the common path serializes once. */
-	text?: string;
-}
-
-/**
- * Partition a conversation into windows that each fit `budgetTokens`, splitting
- * on message boundaries. Only called when the whole conversation does not fit —
- * the common single-window path never pays this per-message sizing pass.
- */
-function planSummaryWindows(
-	messages: Message[],
-	tokenizer: Tokenizer,
-	dialect: Dialect | undefined,
-	dropThinking: boolean,
-	budgetTokens: number,
-): Message[][] {
-	const windows: Message[][] = [];
-	let current: Message[] = [];
-	let currentTokens = 0;
-	for (const message of messages) {
-		const tokens = tokenizer.countTokens(serializeConversationForSummary([message], dialect, dropThinking));
-		if (currentTokens > 0 && currentTokens + tokens > budgetTokens) {
-			windows.push(current);
-			current = [];
-			currentTokens = 0;
-		}
-		current.push(message);
-		currentTokens += tokens;
-	}
-	if (current.length > 0) windows.push(current);
-	return windows;
-}
-
 export async function generateSummary(
 	currentMessages: AgentMessage[],
 	model: Model,
@@ -977,7 +970,7 @@ export async function generateSummary(
 	previousSummary?: string,
 	options?: SummaryOptions,
 ): Promise<string> {
-	const maxTokens = Math.min(Math.floor(0.8 * reserveTokens), MAX_SUMMARY_TOKENS);
+	const maxTokens = regularSummaryMaxTokens(model, reserveTokens, options?.summaryMaxTokens);
 
 	// Serialize conversation to text so model doesn't try to continue it
 	// Convert to LLM messages first (handles custom app messages when caller provides a transformer).
@@ -985,34 +978,50 @@ export async function generateSummary(
 	const dialect = preferredDialect(model.id);
 	const dropThinking = resolveCatalogPolicy(model).classifierCotExtraction === true;
 	const tokenizer = new Tokenizer(model);
-	const wholeConversation = serializeConversationForSummary(llmMessages, dialect, dropThinking);
-	const budgetTokens = summaryInputBudgetTokens(model, maxTokens);
-	// A span that outgrew the summarizer's window is summarized as a fold: each
-	// window updates the summary carried out of the previous one, which is the
-	// same contract the update prompt already implements for iterative
-	// compaction. The alternative is a hard provider rejection on a prompt no
-	// retry can shrink — the state a cross-provider compaction boundary
-	// (see `prepareCompaction`) puts a long session into. One window is the
-	// common case and costs exactly the one call it always did.
-	const pending: SummaryWindow[] = tokenizer.checkTokenBudget(wholeConversation, budgetTokens).fits
-		? [{ messages: llmMessages, budgetTokens, text: wholeConversation }]
-		: planSummaryWindows(llmMessages, tokenizer, dialect, dropThinking, budgetTokens).map(messages => ({
-				messages,
-				budgetTokens,
-			}));
-
 	let carriedSummary = previousSummary;
-	while (pending.length > 0) {
-		const window = pending[0];
-		const text = window.text ?? serializeConversationForSummary(window.messages, dialect, dropThinking);
-		// A budget probe, not a raw count: a window whose bytes already fit needs
-		// neither an exact count nor the clamp, and the bust path hands back the
-		// exact count the proportional clamp needs as its denominator.
-		const budget = tokenizer.checkTokenBudget(text, window.budgetTokens);
+	let start = 0;
+	const catalogBudget = summaryInputBudgetTokens(model, maxTokens);
+	let inputBudget = catalogBudget;
+	let messageTokens: number[] | undefined;
+	function nextWindow(budgetTokens: number) {
+		// Most histories fit without a per-message sizing pass.
+		if (start === 0 && inputBudget === catalogBudget) {
+			const text = serializeConversationForSummary(llmMessages, dialect, dropThinking);
+			const budget = tokenizer.checkTokenBudget(text, budgetTokens);
+			if (budget.fits || llmMessages.length <= 1) return { text, budget, end: llmMessages.length };
+		}
+		messageTokens ??= [];
+		let tokens = 0;
+		let end = start;
+		while (end < llmMessages.length) {
+			const count = (messageTokens[end] ??= tokenizer.countTokens(
+				serializeConversationForSummary([llmMessages[end]], dialect, dropThinking),
+				"strict",
+			));
+			if (end > start && tokens + count > budgetTokens) break;
+			tokens += count;
+			end++;
+		}
+		// Separators can make the packed conversation larger than the sum of
+		// its parts. Split at a message boundary rather than discard its tail.
+		for (;;) {
+			const text = serializeConversationForSummary(llmMessages.slice(start, end), dialect, dropThinking);
+			const budget = tokenizer.checkTokenBudget(text, budgetTokens);
+			if (budget.fits || end <= start + 1) return { text, budget, end };
+			end--;
+		}
+	}
+	do {
+		// The previous call's actual output is input to this one. Pack only
+		// this window, not the remaining windows against a hypothetical cap.
+		const escapedSummary = carriedSummary && escapeSummaryBoundaryTags(carriedSummary);
+		const carriedTokens = escapedSummary ? tokenizer.countTokens(escapedSummary, "strict") : 0;
+		const budgetTokens = Math.max(1, inputBudget - carriedTokens);
+		const { text, budget, end } = nextWindow(budgetTokens);
 		try {
 			carriedSummary = await summarizeConversationWindow(
-				budget.fits ? text : clampConversationToBudget(text, window.budgetTokens, budget.tokens),
-				carriedSummary,
+				budget.fits ? text : clampConversationToBudget(text, budgetTokens, budget.tokens),
+				escapedSummary,
 				model,
 				maxTokens,
 				apiKey,
@@ -1032,32 +1041,25 @@ export async function generateSummary(
 			// fit path never counted this window, so pay for the exact size here —
 			// one tokenization is nothing against the provider round trip already lost.
 			const sentTokens = budget.exact ? budget.tokens : tokenizer.countTokens(text, "strict");
-			const halved = Math.floor(Math.min(window.budgetTokens, sentTokens) / 2);
+			const sent = Math.min(budgetTokens, sentTokens);
 			if (
 				!AIError.is(AIError.classify(error), AIError.Flag.ContextOverflow) ||
-				halved < minSummaryInputTokens(model)
+				sent <= minSummaryInputTokens(model)
 			) {
 				throw error;
 			}
-			pending.splice(
-				0,
-				1,
-				...planSummaryWindows(window.messages, tokenizer, dialect, dropThinking, halved).map(messages => ({
-					messages,
-					budgetTokens: halved,
-				})),
-			);
+			inputBudget = carriedTokens + Math.max(minSummaryInputTokens(model), Math.floor(sent / 2));
 			continue;
 		}
-		pending.shift();
-	}
+		start = end;
+	} while (start < llmMessages.length);
 	return carriedSummary ?? "";
 }
 
 /** One summarization call over a single conversation window. */
 async function summarizeConversationWindow(
 	conversationText: string,
-	previousSummary: string | undefined,
+	escapedPreviousSummary: string | undefined,
 	model: Model,
 	maxTokens: number,
 	apiKey: ApiKey,
@@ -1066,7 +1068,7 @@ async function summarizeConversationWindow(
 	options: SummaryOptions | undefined,
 ): Promise<string> {
 	// Use update prompt if we have a previous summary, otherwise initial prompt
-	let basePrompt = previousSummary ? UPDATE_SUMMARIZATION_PROMPT : SUMMARIZATION_PROMPT;
+	let basePrompt = escapedPreviousSummary ? UPDATE_SUMMARIZATION_PROMPT : SUMMARIZATION_PROMPT;
 	if (options?.promptOverride) {
 		basePrompt = options.promptOverride;
 	}
@@ -1076,8 +1078,8 @@ async function summarizeConversationWindow(
 
 	// Build the prompt with conversation wrapped in tags
 	let promptText = `<conversation>\n${conversationText}\n</conversation>\n\n`;
-	if (previousSummary) {
-		promptText += `<previous-summary>\n${escapeSummaryBoundaryTags(previousSummary)}\n</previous-summary>\n\n`;
+	if (escapedPreviousSummary) {
+		promptText += `<previous-summary>\n${escapedPreviousSummary}\n</previous-summary>\n\n`;
 	}
 	promptText += formatAdditionalContext(options?.extraContext);
 	promptText += basePrompt;
@@ -1857,6 +1859,7 @@ export async function compact(
 		promptOverride: options?.promptOverride,
 		extraContext: options?.extraContext,
 		remoteEndpoint: settings.remoteEnabled === false ? undefined : settings.remoteEndpoint,
+		summaryMaxTokens: options?.summaryMaxTokens ?? settings.summaryMaxTokens,
 		remoteSystemPrompt: options?.remoteSystemPrompt,
 		initiatorOverride: options?.initiatorOverride,
 		metadata: options?.metadata,
@@ -2419,22 +2422,33 @@ export async function compact(
 		const inputTokens = getCompactionV2PreserveData(preserveData)?.usedTokens ?? 0;
 		summary = formatRemoteCompactionSummary(inputTokens);
 	} else if (isSplitTurn && turnPrefixMessages.length > 0) {
-		// Generate both summaries in parallel
-		const [historyResult, turnPrefixResult] = await Promise.all([
+		// Generate both summaries in parallel. The first failure aborts the other
+		// request with that failure as the reason, and compaction throws it only
+		// after both requests have stopped, so no summary request outlives the
+		// compaction that started it. The caller's signal, with its own reason,
+		// still reaches both requests.
+		const splitAbort = new AbortController();
+		const summarySignal = signal ? AbortSignal.any([signal, splitAbort.signal]) : splitAbort.signal;
+		const requests = [
 			messagesToSummarize.length > 0 || previousSummaryForCompaction
 				? generateSummary(
 						messagesToSummarize,
 						model,
 						reserveTokens,
 						apiKey,
-						signal,
+						summarySignal,
 						customInstructions,
 						previousSummaryForCompaction,
 						summaryOptions,
 					)
 				: Promise.resolve("No prior history."),
-			generateTurnPrefixSummary(turnPrefixMessages, model, reserveTokens, apiKey, signal, summaryOptions),
-		]);
+			generateTurnPrefixSummary(turnPrefixMessages, model, reserveTokens, apiKey, summarySignal, summaryOptions),
+		] as const;
+		const [historyResult, turnPrefixResult] = await Promise.all(requests).catch(async (error: unknown) => {
+			splitAbort.abort(error);
+			await Promise.allSettled(requests);
+			throw error;
+		});
 		// Merge into single summary
 		summary = `${historyResult}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixResult}`;
 	} else if (messagesToSummarize.length > 0) {
