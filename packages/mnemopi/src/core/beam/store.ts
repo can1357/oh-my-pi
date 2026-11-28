@@ -377,6 +377,67 @@ function rowToDict(row: Row): Row {
 const EMBED_REBUILD_BATCH = 128;
 
 /**
+ * A live memory row as an embedding rebuild reads it, before its column types are checked. The
+ * rowid is read as decimal text: it is a signed 64-bit integer, which a JS number rounds past 2^53,
+ * and for a row with no id it is the only locator.
+ */
+interface LiveMemoryRow {
+	readonly tableName: string;
+	readonly rowid: string;
+	readonly memoryId: unknown;
+	readonly content: unknown;
+}
+
+/** How many skipped rows one embedding rebuild names one by one; one more line counts them all. */
+const SKIPPED_ROWS_LOGGED = 10;
+
+/**
+ * The rows an embedding rebuild can embed: those with a text id and text to embed.
+ *
+ * SQLite does not hold a row to its declared column types: a TEXT column keeps a BLOB as it
+ * was written, and `id TEXT PRIMARY KEY` on a rowid table admits NULL. A file rebuilt by
+ * SQLite's `.recover` can hold such a row. One of them must neither stop the store from
+ * opening nor abort the rebuild for every other memory, so it is skipped. A skipped row gets
+ * no vector, so a later open can select and skip it again: each open logs the first
+ * `SKIPPED_ROWS_LOGGED` skipped rows with the table and rowid that find them, and, when it
+ * skips more, one line with the total, so a badly damaged file cannot flood the log.
+ */
+function embeddableRows(rows: readonly LiveMemoryRow[]): EmbedItem[] {
+	const items: EmbedItem[] = [];
+	let skipped = 0;
+	for (const { tableName, rowid, memoryId, content } of rows) {
+		if (typeof memoryId === "string" && typeof content === "string") {
+			items.push({ memoryId, content });
+			continue;
+		}
+		skipped += 1;
+		if (skipped > SKIPPED_ROWS_LOGGED) continue;
+		logger.warn("mnemopi: embedding rebuild skipped a memory row that has no text id or no text", {
+			table: tableName,
+			rowid,
+			id: typeof memoryId === "string" ? memoryId : null,
+			idType: sqliteStorageClass(memoryId),
+			contentType: sqliteStorageClass(content),
+		});
+	}
+	if (skipped > SKIPPED_ROWS_LOGGED) {
+		logger.warn("mnemopi: embedding rebuild skipped more memory rows that have no text id or no text", {
+			skipped,
+			logged: SKIPPED_ROWS_LOGGED,
+		});
+	}
+	return items;
+}
+
+/** SQLite storage class of a value bun:sqlite returned. */
+function sqliteStorageClass(value: unknown): string {
+	if (value === null) return "null";
+	if (value instanceof Uint8Array) return "blob";
+	if (typeof value === "string") return "text";
+	return Number.isInteger(value) ? "integer" : "real";
+}
+
+/**
  * Reconcile stored embeddings against the active embedding model at store open.
  *
  * Every `memory_embeddings` row is stamped with the model that produced it (see
@@ -427,13 +488,18 @@ export function reconcileEmbeddingModel(beam: BeamMemoryState): void {
 				const staleModels = beam.db
 					.query("SELECT DISTINCT model FROM memory_embeddings WHERE model IS NOT ?")
 					.all(active) as { model: string | null }[];
-				const live = beam.db
-					.query(`
-						SELECT id AS memoryId, COALESCE(embed_text, content) AS content FROM working_memory WHERE superseded_by IS NULL
-						UNION ALL
-						SELECT id AS memoryId, content FROM episodic_memory WHERE superseded_by IS NULL
-					`)
-					.all() as EmbedItem[];
+				const live = embeddableRows(
+					beam.db
+						.query(`
+							SELECT 'working_memory' AS tableName, CAST(rowid AS TEXT) AS rowid, id AS memoryId,
+								COALESCE(embed_text, content) AS content
+							FROM working_memory WHERE superseded_by IS NULL
+							UNION ALL
+							SELECT 'episodic_memory' AS tableName, CAST(rowid AS TEXT) AS rowid, id AS memoryId, content
+							FROM episodic_memory WHERE superseded_by IS NULL
+						`)
+						.all() as LiveMemoryRow[],
+				);
 
 				// Embed the whole corpus before touching anything stored. embed() handles the provider's
 				// per-request cap; a rejected chunk abandons the rebuild and leaves the stored vectors alone.
@@ -500,16 +566,26 @@ export function reconcileEmbeddingModel(beam: BeamMemoryState): void {
 	// No stale embeddings, but a previously-interrupted rebuild (a failed embed or a process
 	// exit after the wipe) can leave live memories with no active-model embedding. Treating an
 	// empty/partial table as "reconciled" would strand them FTS-only, so re-enqueue any live
-	// row still missing an active-model embedding.
-	const missing = beam.db
-		.query(`
-			SELECT id AS memoryId, COALESCE(embed_text, content) AS content FROM working_memory
-			WHERE superseded_by IS NULL AND id NOT IN (SELECT memory_id FROM memory_embeddings WHERE model = ?)
-			UNION ALL
-			SELECT id AS memoryId, content FROM episodic_memory
-			WHERE superseded_by IS NULL AND id NOT IN (SELECT memory_id FROM memory_embeddings WHERE model = ?)
-		`)
-		.all(active, active) as EmbedItem[];
+	// row still missing an active-model embedding. The anti-join is NOT EXISTS, not NOT IN:
+	// `x NOT IN (subquery)` is NULL, never true, when x is NULL and the subquery returns a row, or
+	// when the subquery returns a NULL. It would drop a row with no id before embeddableRows()
+	// reports it, and one active-model vector with no memory_id would hide every missing memory.
+	const missing = embeddableRows(
+		beam.db
+			.query(`
+				SELECT 'working_memory' AS tableName, CAST(m.rowid AS TEXT) AS rowid, m.id AS memoryId,
+					COALESCE(m.embed_text, m.content) AS content
+				FROM working_memory AS m
+				WHERE m.superseded_by IS NULL
+					AND NOT EXISTS (SELECT 1 FROM memory_embeddings AS e WHERE e.memory_id = m.id AND e.model = ?)
+				UNION ALL
+				SELECT 'episodic_memory' AS tableName, CAST(m.rowid AS TEXT) AS rowid, m.id AS memoryId, m.content
+				FROM episodic_memory AS m
+				WHERE m.superseded_by IS NULL
+					AND NOT EXISTS (SELECT 1 FROM memory_embeddings AS e WHERE e.memory_id = m.id AND e.model = ?)
+			`)
+			.all(active, active) as LiveMemoryRow[],
+	);
 	if (missing.length === 0) return;
 	logger.info("mnemopi: resuming interrupted embedding rebuild", { to: active, count: missing.length });
 	rebuild(missing);
