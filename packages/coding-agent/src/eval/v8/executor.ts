@@ -112,9 +112,8 @@ export async function executeV8(code: string, options: V8ExecutorOptions): Promi
 			reset: options.reset,
 			code: wrapped.source,
 			filename,
-			finalExprSuppressed: wrapped.finalExpressionSuppressed,
-			asyncWrapped: wrapped.asyncWrapped,
-			finalExprReturned: wrapped.finalExpressionReturned,
+			suppressFinalExpr: wrapped.finalExpressionSuppressed,
+			emitCompletionValue: Boolean(wrapped.asyncWrapped || wrapped.finalExpressionReturned === null),
 			timeoutMs: runtimeTimeoutMs ?? options.idleTimeoutMs,
 			runState: {
 				signal,

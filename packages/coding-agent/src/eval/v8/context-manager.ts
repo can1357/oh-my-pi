@@ -92,9 +92,8 @@ export async function executeInV8Isolate(options: {
 	reset?: boolean;
 	code: string;
 	filename: string;
-	finalExprSuppressed?: boolean;
-	asyncWrapped?: boolean;
-	finalExprReturned?: boolean | null;
+	suppressFinalExpr?: boolean;
+	emitCompletionValue?: boolean;
 	timeoutMs?: number;
 	runState: V8RunState;
 }): Promise<void> {
@@ -479,20 +478,17 @@ function handleV8Message(session: V8Session, msg: V8Outbound): void {
 			if (sanitized) pending?.runState.onDisplay?.(sanitized);
 			return;
 		}
-		case "tool-call":
-			void dispatchBridgeRequest(session, msg.id, msg.runId, bridgeOptions =>
-				handleV8ToolCall(msg.name, msg.args, bridgeOptions),
-			);
-			return;
-		case "url-read":
-			void dispatchBridgeRequest(session, msg.id, msg.runId, bridgeOptions =>
-				handleV8UrlRead(msg.path, msg.options, bridgeOptions),
-			);
-			return;
-		case "url-write":
-			void dispatchBridgeRequest(session, msg.id, msg.runId, bridgeOptions =>
-				handleV8UrlWrite(msg.path, msg.data, msg.encoding, bridgeOptions),
-			);
+		case "bridge-call":
+			void dispatchBridgeRequest(session, msg.id, msg.runId, bridgeOptions => {
+				switch (msg.op) {
+					case "tool":
+						return handleV8ToolCall(msg.name, msg.args, bridgeOptions);
+					case "read":
+						return handleV8UrlRead(msg.path, msg.options, bridgeOptions);
+					case "write":
+						return handleV8UrlWrite(msg.path, msg.data, msg.encoding, bridgeOptions);
+				}
+			});
 			return;
 		case "result":
 			settlePending(session, msg);
@@ -584,9 +580,8 @@ async function runOnce(
 		session: ToolSession;
 		code: string;
 		filename: string;
-		finalExprSuppressed?: boolean;
-		asyncWrapped?: boolean;
-		finalExprReturned?: boolean | null;
+		suppressFinalExpr?: boolean;
+		emitCompletionValue?: boolean;
 		timeoutMs?: number;
 		runState: V8RunState;
 	},
@@ -653,9 +648,8 @@ async function runOnce(
 				runId,
 				code: options.code,
 				filename: options.filename,
-				finalExprSuppressed: options.finalExprSuppressed,
-				asyncWrapped: options.asyncWrapped,
-				finalExprReturned: options.finalExprReturned,
+				suppressFinalExpr: options.suppressFinalExpr,
+				emitCompletionValue: options.emitCompletionValue,
 			});
 			if (Buffer.byteLength(encoded, "utf8") > MAX_V8_INBOUND_FRAME_BYTES) {
 				throw new ToolError("V8 cell payload exceeds 15 MiB frame limit");
@@ -849,8 +843,6 @@ function encodeV8Frame(msg: V8Inbound): string {
 			error: {
 				...(msg.error.name ? { name: msg.error.name.slice(0, 256) } : {}),
 				message: `${msg.error.message.slice(0, 64 * 1024)}... [truncated]`,
-				isAbort: msg.error.isAbort,
-				isToolError: msg.error.isToolError,
 			},
 		};
 		encoded = `${JSON.stringify(bounded)}\n`;
@@ -898,12 +890,12 @@ function sendToV8(session: V8Session, msg: V8Inbound): void {
 }
 
 function errorFromPayload(payload: V8ErrorPayload): Error {
-	if (payload.isAbort) {
+	if (payload.name === "AbortError" || payload.name === "ToolAbortError") {
 		const err = new ToolAbortError(payload.message || "Execution aborted");
 		if (payload.stack) err.stack = payload.stack;
 		return err;
 	}
-	const ctor = payload.isToolError ? ToolError : Error;
+	const ctor = payload.name === "ToolError" ? ToolError : Error;
 	const error = new ctor(payload.message);
 	if (payload.name) error.name = payload.name;
 	if (payload.stack) error.stack = payload.stack;
@@ -916,8 +908,6 @@ function toErrorPayload(error: unknown): V8ErrorPayload {
 			name: error.name,
 			message: error.message,
 			stack: error.stack,
-			isAbort: error.name === "AbortError" || error.name === "ToolAbortError",
-			isToolError: error instanceof ToolError || error.name === "ToolError",
 		};
 	}
 	return { message: String(error) };

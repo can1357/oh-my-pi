@@ -4,21 +4,18 @@ use serde::{Deserialize, Serialize};
 
 pub const MAX_INBOUND_LINE_BYTES: usize = 16 * 1024 * 1024;
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum V8Inbound {
-	Init,
 	Run {
 		#[serde(rename = "runId")]
 		run_id:                String,
 		code:                  String,
 		filename:              String,
-		#[serde(rename = "finalExprSuppressed", default)]
-		final_expr_suppressed: bool,
-		#[serde(rename = "asyncWrapped", default)]
-		async_wrapped:         bool,
-		#[serde(rename = "finalExprReturned", default)]
-		final_expr_returned:   Option<bool>,
+		#[serde(rename = "suppressFinalExpr", default)]
+		suppress_final_expr:   bool,
+		#[serde(rename = "emitCompletionValue", default)]
+		emit_completion_value: bool,
 	},
 	ToolReply {
 		id:    String,
@@ -35,7 +32,26 @@ pub enum V8Inbound {
 	Close,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "op", rename_all = "lowercase")]
+pub enum BridgeOp {
+	Tool {
+		name: String,
+		args: serde_json::Value,
+	},
+	Read {
+		path:    String,
+		#[serde(skip_serializing_if = "Option::is_none")]
+		options: Option<serde_json::Value>,
+	},
+	Write {
+		path:     String,
+		data:     String,
+		encoding: String,
+	},
+}
+
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum V8Outbound {
 	Ready,
@@ -49,28 +65,12 @@ pub enum V8Outbound {
 		run_id: String,
 		output: serde_json::Value,
 	},
-	ToolCall {
+	BridgeCall {
 		id:     String,
 		#[serde(rename = "runId")]
 		run_id: String,
-		name:   String,
-		args:   serde_json::Value,
-	},
-	UrlRead {
-		id:      String,
-		#[serde(rename = "runId")]
-		run_id:  String,
-		path:    String,
-		#[serde(skip_serializing_if = "Option::is_none")]
-		options: Option<ReadOptions>,
-	},
-	UrlWrite {
-		id:       String,
-		#[serde(rename = "runId")]
-		run_id:   String,
-		path:     String,
-		data:     String,
-		encoding: WriteEncoding,
+		#[serde(flatten)]
+		op:     BridgeOp,
 	},
 	Result {
 		#[serde(rename = "runId")]
@@ -82,72 +82,44 @@ pub enum V8Outbound {
 	Closed,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub struct ReadOptions {
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub offset: Option<i64>,
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub limit:  Option<i64>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum WriteEncoding {
-	Utf8,
-	Base64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct V8ErrorPayload {
 	#[serde(skip_serializing_if = "Option::is_none")]
-	pub name:          Option<String>,
-	pub message:       String,
+	pub name:    Option<String>,
+	pub message: String,
 	#[serde(skip_serializing_if = "Option::is_none")]
-	pub stack:         Option<String>,
-	#[serde(rename = "isAbort", skip_serializing_if = "Option::is_none")]
-	pub is_abort:      Option<bool>,
-	#[serde(rename = "isToolError", skip_serializing_if = "Option::is_none")]
-	pub is_tool_error: Option<bool>,
+	pub stack:   Option<String>,
 }
 
 impl V8ErrorPayload {
 	pub fn new(message: impl Into<String>) -> Self {
-		Self {
-			name:          None,
-			message:       message.into(),
-			stack:         None,
-			is_abort:      None,
-			is_tool_error: None,
-		}
+		Self { message: message.into(), ..Default::default() }
 	}
 }
 
-pub enum ReadFrameError {
-	Eof,
-	TooLarge,
-	Io(io::Error),
-	Json(serde_json::Error),
-}
-
-pub fn read_inbound_frame<R: BufRead>(reader: &mut R) -> Result<V8Inbound, ReadFrameError> {
+pub fn read_inbound_frame<R: BufRead>(
+	reader: &mut R,
+	buf: &mut Vec<u8>,
+) -> Result<Option<V8Inbound>, String> {
 	loop {
-		let mut buf = Vec::new();
+		buf.clear();
 		let mut limited = Read::take(&mut *reader, (MAX_INBOUND_LINE_BYTES + 1) as u64);
 		let read = limited
-			.read_until(b'\n', &mut buf)
-			.map_err(ReadFrameError::Io)?;
+			.read_until(b'\n', buf)
+			.map_err(|err| format!("stdin read error: {err}"))?;
 		if read == 0 {
-			return Err(ReadFrameError::Eof);
+			return Ok(None);
 		}
 		if buf.len() > MAX_INBOUND_LINE_BYTES {
-			return Err(ReadFrameError::TooLarge);
+			return Err("inbound frame exceeded 16 MiB limit".to_string());
 		}
-		let line = String::from_utf8_lossy(&buf);
-		let trimmed = line.trim();
+		let trimmed = buf.trim_ascii();
 		if trimmed.is_empty() {
 			continue;
 		}
-		return serde_json::from_str::<V8Inbound>(trimmed).map_err(ReadFrameError::Json);
+		return serde_json::from_slice::<V8Inbound>(trimmed)
+			.map(Some)
+			.map_err(|err| format!("malformed inbound JSON frame: {err}"));
 	}
 }
 

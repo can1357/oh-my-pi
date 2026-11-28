@@ -10,7 +10,7 @@ use std::{
 	},
 };
 
-use crate::protocol::{ReadOptions, V8ErrorPayload, V8Inbound, V8Outbound, WriteEncoding};
+use crate::protocol::{BridgeOp, V8ErrorPayload, V8Inbound, V8Outbound};
 
 const PRELUDE_JS: &str = include_str!("prelude.js");
 const NEAR_HEAP_HEADROOM_BYTES: usize = 16 * 1024 * 1024;
@@ -195,7 +195,7 @@ impl RunHandleTracker {
 				self.cancel_flag.store(true, Ordering::SeqCst);
 				self.isolate_handle.terminate_execution();
 			},
-			V8Inbound::Init | V8Inbound::Run { .. } | V8Inbound::ToolReply { .. } => {},
+			V8Inbound::Run { .. } | V8Inbound::ToolReply { .. } => {},
 		}
 	}
 
@@ -313,9 +313,8 @@ impl V8SandboxRuntime {
 		run_id: &str,
 		code: &str,
 		filename: &str,
-		final_expr_suppressed: bool,
-		async_wrapped: bool,
-		final_expr_returned: Option<bool>,
+		suppress_final_expr: bool,
+		emit_completion_value: bool,
 		rx: &Receiver<V8Inbound>,
 	) -> bool {
 		// Clear any stale termination/heap flags before starting a new run.
@@ -338,9 +337,8 @@ impl V8SandboxRuntime {
 			run_id,
 			code,
 			filename,
-			final_expr_suppressed,
-			async_wrapped,
-			final_expr_returned,
+			suppress_final_expr,
+			emit_completion_value,
 			rx,
 			&mut should_close,
 		);
@@ -368,11 +366,9 @@ impl V8SandboxRuntime {
 
 		let outcome = if outcome.is_ok() && self.cancel_flag.swap(false, Ordering::SeqCst) {
 			Err(V8ErrorPayload {
-				name:          Some("AbortError".into()),
-				message:       "Execution aborted".into(),
-				stack:         None,
-				is_abort:      Some(true),
-				is_tool_error: None,
+				name:    Some("AbortError".into()),
+				message: "Execution aborted".into(),
+				stack:   None,
 			})
 		} else {
 			outcome
@@ -399,9 +395,8 @@ impl V8SandboxRuntime {
 		run_id: &str,
 		code: &str,
 		filename: &str,
-		final_expr_suppressed: bool,
-		async_wrapped: bool,
-		final_expr_returned: Option<bool>,
+		suppress_final_expr: bool,
+		emit_completion_value: bool,
 		rx: &Receiver<V8Inbound>,
 		should_close: &mut bool,
 	) -> Result<(), V8ErrorPayload> {
@@ -487,7 +482,7 @@ impl V8SandboxRuntime {
 			tc.get_slot_mut::<BridgeState>()
 				.map_or((false, None), |state| {
 					let set = state.final_expr_set;
-					let val = if set && !final_expr_suppressed {
+					let val = if set && !suppress_final_expr {
 						state.final_expr_value.take()
 					} else {
 						state.final_expr_value = None;
@@ -512,10 +507,7 @@ impl V8SandboxRuntime {
 			} else {
 				Some(val)
 			}
-		} else if !final_expr_set
-			&& !final_expr_suppressed
-			&& (async_wrapped || final_expr_returned.is_none())
-		{
+		} else if !final_expr_set && !suppress_final_expr && emit_completion_value {
 			Some(root_settled_val)
 		} else {
 			None
@@ -616,11 +608,9 @@ fn drive_promise<'s>(
 						if cancel_id == run_id {
 							reject_all_pending(tc, "Execution aborted", true);
 							return Err(V8ErrorPayload {
-								name:          Some("AbortError".into()),
-								message:       "Execution aborted".into(),
-								stack:         None,
-								is_abort:      Some(true),
-								is_tool_error: None,
+								name:    Some("AbortError".into()),
+								message: "Execution aborted".into(),
+								stack:   None,
 							});
 						}
 					},
@@ -628,14 +618,11 @@ fn drive_promise<'s>(
 						*should_close = true;
 						reject_all_pending(tc, "V8 runtime closed", true);
 						return Err(V8ErrorPayload {
-							name:          Some("AbortError".into()),
-							message:       "V8 runtime closed".into(),
-							stack:         None,
-							is_abort:      Some(true),
-							is_tool_error: None,
+							name:    Some("AbortError".into()),
+							message: "V8 runtime closed".into(),
+							stack:   None,
 						});
 					},
-					Ok(V8Inbound::Init) => {},
 				}
 			},
 		}
@@ -647,11 +634,9 @@ fn reject_all_pending(scope: &mut v8::PinScope<'_, '_>, message: &str, is_abort:
 		.get_slot_mut::<BridgeState>()
 		.map_or_default(|state| state.pending_resolvers.drain().map(|(_, v)| v).collect());
 	let payload = V8ErrorPayload {
-		name:          Some(if is_abort { "AbortError" } else { "Error" }.into()),
-		message:       message.into(),
-		stack:         None,
-		is_abort:      if is_abort { Some(true) } else { None },
-		is_tool_error: None,
+		name:    Some(if is_abort { "AbortError" } else { "Error" }.into()),
+		message: message.into(),
+		stack:   None,
 	};
 	for resolver_global in pending {
 		let resolver = v8::Local::new(scope, &resolver_global);
@@ -766,10 +751,38 @@ fn cb_set_final_expr(
 	rv.set(val);
 }
 
+fn dispatch_bridge_call(
+	scope: &mut v8::PinScope<'_, '_>,
+	mut rv: v8::ReturnValue,
+	outside_err: &str,
+	op: BridgeOp,
+) {
+	let Some(resolver) = v8::PromiseResolver::new(scope) else {
+		throw_type_error(scope, "Failed to allocate PromiseResolver");
+		return;
+	};
+	let promise = resolver.get_promise(scope);
+	let resolver_global = v8::Global::new(scope, resolver);
+
+	if let Some(state) = scope.get_slot_mut::<BridgeState>() {
+		if let Some(run_id) = state.active_run_id.clone() {
+			let id = state.next_id();
+			state.pending_resolvers.insert(id.clone(), resolver_global);
+			state.emit(V8Outbound::BridgeCall { id, run_id, op });
+		} else {
+			let err = V8ErrorPayload::new(outside_err);
+			let err_val = v8_error_from_payload(scope, &err);
+			let local_res = v8::Local::new(scope, &resolver_global);
+			local_res.reject(scope, err_val);
+		}
+	}
+	rv.set(promise.into());
+}
+
 fn cb_call_tool(
 	scope: &mut v8::PinScope<'_, '_>,
 	args: v8::FunctionCallbackArguments,
-	mut rv: v8::ReturnValue,
+	rv: v8::ReturnValue,
 ) {
 	let name = args.get(0).to_rust_string_lossy(scope);
 	let arg_val = args.get(1);
@@ -784,33 +797,16 @@ fn cb_call_tool(
 			},
 		}
 	};
-
-	let Some(resolver) = v8::PromiseResolver::new(scope) else {
-		throw_type_error(scope, "Failed to allocate PromiseResolver");
-		return;
-	};
-	let promise = resolver.get_promise(scope);
-	let resolver_global = v8::Global::new(scope, resolver);
-
-	if let Some(state) = scope.get_slot_mut::<BridgeState>() {
-		if let Some(run_id) = state.active_run_id.clone() {
-			let id = state.next_id();
-			state.pending_resolvers.insert(id.clone(), resolver_global);
-			state.emit(V8Outbound::ToolCall { id, run_id, name, args: tool_args });
-		} else {
-			let err = V8ErrorPayload::new("tool call outside active V8 run");
-			let err_val = v8_error_from_payload(scope, &err);
-			let local_res = v8::Local::new(scope, &resolver_global);
-			local_res.reject(scope, err_val);
-		}
-	}
-	rv.set(promise.into());
+	dispatch_bridge_call(scope, rv, "tool call outside active V8 run", BridgeOp::Tool {
+		name,
+		args: tool_args,
+	});
 }
 
 fn cb_url_read(
 	scope: &mut v8::PinScope<'_, '_>,
 	args: v8::FunctionCallbackArguments,
-	mut rv: v8::ReturnValue,
+	rv: v8::ReturnValue,
 ) {
 	let path = args.get(0).to_rust_string_lossy(scope);
 	let opt_val = args.get(1);
@@ -819,20 +815,24 @@ fn cb_url_read(
 	} else {
 		match v8_to_json(scope, opt_val) {
 			Ok(val) => {
-				if let Ok(parsed) = serde_json::from_value::<ReadOptions>(val) {
-					if parsed.offset.is_some_and(|n| n < 1) {
-						throw_type_error(scope, "read() offset must be an integer >= 1");
-						return;
+				let obj = val.as_object();
+				let valid_int = |k: &str, min: i64| -> Result<(), &'static str> {
+					match obj.and_then(|m| m.get(k)) {
+						None | Some(serde_json::Value::Null) => Ok(()),
+						Some(v) => match v.as_i64() {
+							Some(n) if n >= min => Ok(()),
+							_ => Err("read() options offset must be >= 1 and limit >= 0"),
+						},
 					}
-					if parsed.limit.is_some_and(|n| n < 0) {
-						throw_type_error(scope, "read() limit must be an integer >= 0");
-						return;
-					}
-					Some(parsed)
-				} else {
-					throw_type_error(scope, "read() options offset and limit must be integers");
+				};
+				if obj.is_none() || valid_int("offset", 1).is_err() || valid_int("limit", 0).is_err() {
+					throw_type_error(
+						scope,
+						"read() options offset (>= 1) and limit (>= 0) must be integers",
+					);
 					return;
 				}
+				Some(val)
 			},
 			Err(msg) => {
 				throw_type_error(scope, &msg);
@@ -840,63 +840,29 @@ fn cb_url_read(
 			},
 		}
 	};
-
-	let Some(resolver) = v8::PromiseResolver::new(scope) else {
-		throw_type_error(scope, "Failed to allocate PromiseResolver");
-		return;
-	};
-	let promise = resolver.get_promise(scope);
-	let resolver_global = v8::Global::new(scope, resolver);
-
-	if let Some(state) = scope.get_slot_mut::<BridgeState>() {
-		if let Some(run_id) = state.active_run_id.clone() {
-			let id = state.next_id();
-			state.pending_resolvers.insert(id.clone(), resolver_global);
-			state.emit(V8Outbound::UrlRead { id, run_id, path, options });
-		} else {
-			let err = V8ErrorPayload::new("url read outside active V8 run");
-			let err_val = v8_error_from_payload(scope, &err);
-			let local_res = v8::Local::new(scope, &resolver_global);
-			local_res.reject(scope, err_val);
-		}
-	}
-	rv.set(promise.into());
+	dispatch_bridge_call(scope, rv, "url read outside active V8 run", BridgeOp::Read {
+		path,
+		options,
+	});
 }
 
 fn cb_url_write(
 	scope: &mut v8::PinScope<'_, '_>,
 	args: v8::FunctionCallbackArguments,
-	mut rv: v8::ReturnValue,
+	rv: v8::ReturnValue,
 ) {
 	let path = args.get(0).to_rust_string_lossy(scope);
 	let data = args.get(1).to_rust_string_lossy(scope);
-	let enc_str = args.get(2).to_rust_string_lossy(scope);
-	let encoding = if enc_str == "base64" {
-		WriteEncoding::Base64
+	let encoding = if args.get(2).to_rust_string_lossy(scope) == "base64" {
+		"base64".to_string()
 	} else {
-		WriteEncoding::Utf8
+		"utf8".to_string()
 	};
-
-	let Some(resolver) = v8::PromiseResolver::new(scope) else {
-		throw_type_error(scope, "Failed to allocate PromiseResolver");
-		return;
-	};
-	let promise = resolver.get_promise(scope);
-	let resolver_global = v8::Global::new(scope, resolver);
-
-	if let Some(state) = scope.get_slot_mut::<BridgeState>() {
-		if let Some(run_id) = state.active_run_id.clone() {
-			let id = state.next_id();
-			state.pending_resolvers.insert(id.clone(), resolver_global);
-			state.emit(V8Outbound::UrlWrite { id, run_id, path, data, encoding });
-		} else {
-			let err = V8ErrorPayload::new("url write outside active V8 run");
-			let err_val = v8_error_from_payload(scope, &err);
-			let local_res = v8::Local::new(scope, &resolver_global);
-			local_res.reject(scope, err_val);
-		}
-	}
-	rv.set(promise.into());
+	dispatch_bridge_call(scope, rv, "url write outside active V8 run", BridgeOp::Write {
+		path,
+		data,
+		encoding,
+	});
 }
 
 fn throw_type_error(scope: &v8::PinScope<'_, '_>, message: &str) {
@@ -965,13 +931,12 @@ fn v8_error_from_payload<'s>(
 		{
 			obj.set(scope, k.into(), v.into());
 		}
-		if payload.is_abort == Some(true)
-			&& let Some(k) = v8::String::new(scope, "isAbort")
-		{
+		let is_abort = matches!(payload.name.as_deref(), Some("AbortError" | "ToolAbortError"));
+		if is_abort && let Some(k) = v8::String::new(scope, "isAbort") {
 			let v = v8::Boolean::new(scope, true);
 			obj.set(scope, k.into(), v.into());
 		}
-		if payload.is_tool_error == Some(true)
+		if payload.name.as_deref() == Some("ToolError")
 			&& let Some(k) = v8::String::new(scope, "isToolError")
 		{
 			let v = v8::Boolean::new(scope, true);
@@ -993,20 +958,16 @@ fn extract_try_catch_error(
 		if heap_exceeded.swap(false, Ordering::SeqCst) {
 			*should_close = true;
 			return V8ErrorPayload {
-				name:          Some("RangeError".into()),
-				message:       format!("V8 isolate heap limit exceeded ({max_heap_mb} MiB)"),
-				stack:         None,
-				is_abort:      None,
-				is_tool_error: None,
+				name:    Some("RangeError".into()),
+				message: format!("V8 isolate heap limit exceeded ({max_heap_mb} MiB)"),
+				stack:   None,
 			};
 		}
 		if cancel_flag.load(Ordering::SeqCst) {
 			return V8ErrorPayload {
-				name:          Some("AbortError".into()),
-				message:       "Execution aborted".into(),
-				stack:         None,
-				is_abort:      Some(true),
-				is_tool_error: None,
+				name:    Some("AbortError".into()),
+				message: "Execution aborted".into(),
+				stack:   None,
 			};
 		}
 		return V8ErrorPayload::new("V8 execution terminated");
@@ -1048,16 +1009,7 @@ fn format_js_value_error(
 				None => format!("{message}\n    at {resource}:{line}:{col}"),
 			});
 		}
-		let is_abort =
-			name.as_deref() == Some("AbortError") || name.as_deref() == Some("ToolAbortError");
-		let is_tool_error = name.as_deref() == Some("ToolError");
-		return V8ErrorPayload {
-			name,
-			message,
-			stack,
-			is_abort: if is_abort { Some(true) } else { None },
-			is_tool_error: if is_tool_error { Some(true) } else { None },
-		};
+		return V8ErrorPayload { name, message, stack };
 	}
 	V8ErrorPayload::new(value.to_rust_string_lossy(scope))
 }

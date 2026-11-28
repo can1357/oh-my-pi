@@ -10,7 +10,7 @@ use std::{
 };
 
 use crate::{
-	protocol::{ReadFrameError, V8Inbound, V8Outbound, read_inbound_frame, write_outbound_frame},
+	protocol::{V8Inbound, V8Outbound, read_inbound_frame, write_outbound_frame},
 	runtime::V8SandboxRuntime,
 };
 
@@ -68,32 +68,23 @@ fn main() -> ExitCode {
 	std::thread::spawn(move || {
 		let stdin = io::stdin();
 		let mut reader = stdin.lock();
+		let mut buf = Vec::new();
 		loop {
-			match read_inbound_frame(&mut reader) {
-				Ok(msg) => {
+			match read_inbound_frame(&mut reader, &mut buf) {
+				Ok(Some(msg)) => {
 					tracker.handle_async_inbound(&msg);
 					let is_close = matches!(msg, V8Inbound::Close);
 					if tx.send(msg).is_err() || is_close {
 						break;
 					}
 				},
-				Err(ReadFrameError::Eof) => {
+				Ok(None) => {
 					tracker.terminate_on_eof();
 					break;
 				},
-				Err(ReadFrameError::TooLarge) => {
+				Err(err) => {
 					tracker.terminate_on_eof();
-					let _ = err_tx.send("inbound frame exceeded 16 MiB limit".to_string());
-					break;
-				},
-				Err(ReadFrameError::Json(err)) => {
-					tracker.terminate_on_eof();
-					let _ = err_tx.send(format!("malformed inbound JSON frame: {err}"));
-					break;
-				},
-				Err(ReadFrameError::Io(err)) => {
-					tracker.terminate_on_eof();
-					let _ = err_tx.send(format!("stdin read error: {err}"));
+					let _ = err_tx.send(err);
 					break;
 				},
 			}
@@ -106,24 +97,13 @@ fn main() -> ExitCode {
 
 	while let Ok(msg) = rx.recv() {
 		match msg {
-			V8Inbound::Init => {
-				// Runtime initialized at startup; ready frame already emitted.
-			},
-			V8Inbound::Run {
-				run_id,
-				code,
-				filename,
-				final_expr_suppressed,
-				async_wrapped,
-				final_expr_returned,
-			} => {
+			V8Inbound::Run { run_id, code, filename, suppress_final_expr, emit_completion_value } => {
 				if runtime.run_cell(
 					&run_id,
 					&code,
 					&filename,
-					final_expr_suppressed,
-					async_wrapped,
-					final_expr_returned,
+					suppress_final_expr,
+					emit_completion_value,
 					&rx,
 				) {
 					if let Ok(err) = err_rx.try_recv() {
@@ -164,7 +144,7 @@ mod tests {
 	) -> Vec<V8Outbound> {
 		events.borrow_mut().clear();
 		let (_tx, rx) = mpsc::channel();
-		rt.run_cell(run_id, code, "test.js", false, false, Some(true), &rx);
+		rt.run_cell(run_id, code, "test.js", false, true, &rx);
 		events.borrow().clone()
 	}
 
@@ -261,7 +241,12 @@ mod tests {
 		let mut rt = V8SandboxRuntime::new(
 			64,
 			Box::new(move |msg| {
-				if let V8Outbound::ToolCall { id, name, .. } = &msg {
+				if let V8Outbound::BridgeCall {
+					id,
+					op: crate::protocol::BridgeOp::Tool { name, .. },
+					..
+				} = &msg
+				{
 					assert_eq!(name, "echo");
 					let _ = tx.send(V8Inbound::ToolReply {
 						id:    id.clone(),
@@ -282,7 +267,6 @@ mod tests {
 			"test.js",
 			false,
 			true,
-			Some(true),
 			&rx,
 		);
 		let out = events.borrow();
@@ -315,11 +299,11 @@ mod tests {
 		});
 
 		let (_tx, rx) = mpsc::channel();
-		rt.run_cell("r_inf", "while (true) {}", "inf.js", false, false, Some(false), &rx);
+		rt.run_cell("r_inf", "while (true) {}", "inf.js", false, false, &rx);
 		let out = events.borrow();
 		assert!(out.iter().any(|m| matches!(
 			m,
-			V8Outbound::Result { ok: false, error: Some(err), .. } if err.is_abort == Some(true)
+			V8Outbound::Result { ok: false, error: Some(err), .. } if err.name.as_deref() == Some("AbortError")
 		)));
 	}
 
@@ -342,7 +326,6 @@ mod tests {
 			"oom.js",
 			false,
 			false,
-			Some(false),
 			&rx,
 		);
 		assert!(should_close, "heap limit must retire isolate instead of ratcheting");
@@ -419,7 +402,6 @@ mod tests {
 			"ret.js",
 			false,
 			true,
-			Some(false),
 			&rx,
 		);
 		assert!(
