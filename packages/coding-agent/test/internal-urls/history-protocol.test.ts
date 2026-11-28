@@ -33,6 +33,7 @@ import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 import { cfgCompactionExperimentalContextManagement } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { resourceText } from "../helpers/resource-text";
+import { nestedChainJson } from "../../../ai/test/helpers/deep-nesting";
 
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "history-protocol-"));
@@ -405,6 +406,51 @@ describe("history:// protocol", () => {
 		expect(resource.content).not.toContain(siblingOnly);
 		expect(resource.sourcePath).toBeUndefined();
 	});
+
+	// A branch's entries nest as deep as JSON.parse reads (millions of levels); JSON.stringify gives out at 40,000.
+	it("renders entries nested deeper than JSON.stringify recurses, without indentation", async () => {
+		const deepText = nestedChainJson();
+		const timestamp = new Date(0).toISOString();
+		const branch = [
+			{
+				type: "message",
+				id: "deep-call",
+				parentId: null,
+				timestamp,
+				message: {
+					role: "assistant",
+					content: [
+						{ type: "toolCall", id: "call-1", name: "inspect", arguments: { tree: JSON.parse(deepText) } },
+					],
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "test-model",
+					usage: {},
+					stopReason: "toolUse",
+					timestamp: 1,
+				},
+			},
+			{
+				type: "custom",
+				id: "deep-custom",
+				parentId: "deep-call",
+				timestamp,
+				customType: "probe",
+				data: JSON.parse(deepText),
+			},
+		] as unknown as SessionEntry[];
+
+		const resource = await InternalUrlRouter.instance().resolve("history://current/full", {
+			experimentalContextManagement: true,
+			getSessionBranch: () => branch,
+		});
+
+		const fence = (json: string): string => `\`\`\`json\n${json}\n\`\`\``;
+		expect(resource.content).toContain("#### tool call: inspect (call-1)");
+		expect(resource.content).toContain(fence(`{"tree":${deepText}}`));
+		const custom = `{"type":"custom","id":"deep-custom","parentId":"deep-call","timestamp":"${timestamp}","customType":"probe","data":${deepText}}`;
+		expect(resource.content).toContain(fence(custom));
+	}, 20_000);
 
 	it("reads bare history://current as the caller's own branch when no agent is named current", async () => {
 		const resource = await InternalUrlRouter.instance().resolve("history://current", {

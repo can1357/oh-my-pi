@@ -17,10 +17,16 @@ import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy
 import {
 	$env,
 	$flag,
+	ContainerPath,
+	isNonNullObject,
+	jsonDeepEquals,
 	logger,
+	type NestedWalk,
 	parseJsonWithRepair,
 	parseStreamingJsonThrottled,
 	readSseEvents,
+	runNested,
+	structuredCloneDeep,
 } from "@oh-my-pi/pi-utils";
 import { NO_AUTH_SENTINEL } from "../auth-retry";
 import { renderDemotedThinking } from "../dialect/demotion";
@@ -1338,9 +1344,12 @@ function withoutDeclinedFallbackOutput(content: AssistantMessage["content"]): As
  * A `fallback` boundary stays exactly where it appeared: the API accepts it on
  * any request, beta or not, and uses its position to validate the thinking
  * blocks on either side, so the echo must not collapse or move it.
+ *
+ * A server tool call's input is JSON the model wrote, as deep as `JSON.parse`
+ * reads, so the copy is one that does not run out of stack.
  */
 function refusalContinuationPrefix(content: AssistantMessage["content"]): AssistantMessage["content"] {
-	const prefix = structuredClone(content.filter(block => block.type !== "toolCall"));
+	const prefix = structuredCloneDeep(content.filter(block => block.type !== "toolCall"));
 	const last = prefix.at(-1);
 	if (last?.type === "text") last.text = last.text.trimEnd();
 	return prefix;
@@ -1386,7 +1395,7 @@ function fallbackCreditRequestBody(
 	targetModelId: string,
 	continuation: ContentBlockParam[] | undefined,
 ): MessageCreateParamsStreaming {
-	const body = structuredClone(redemption.params);
+	const body = structuredCloneDeep(redemption.params);
 	body.model = targetModelId;
 	body.fallback_credit_token = redemption.token;
 	delete body.fallbacks;
@@ -2582,12 +2591,12 @@ const streamAnthropicOnce = (
 					}
 					clearStreamingPartialJson(block);
 				} else if (block.type === "toolCall") {
-					const finalJson =
-						block[kStreamingPartialJson].length > 0
-							? block[kStreamingPartialJson]
-							: JSON.stringify(block.arguments ?? {});
-					// Keep malformed calls non-fatal, but never execute their auto-closed previews.
-					block.arguments = parseToolCallArguments(finalJson);
+					// A call whose input arrived whole in `content_block_start` keeps it as parsed from the SSE line,
+					// as deep as `JSON.parse` reads. Keep malformed streamed calls non-fatal, but never execute their
+					// auto-closed previews.
+					if (block[kStreamingPartialJson].length > 0) {
+						block.arguments = parseToolCallArguments(block[kStreamingPartialJson]);
+					}
 					if (isRecord(block.arguments) && "__parseError" in block.arguments) {
 						reportAnthropicEnvelopeAnomaly(
 							`tool_use ${block.id} arguments are not valid JSON: ${block.arguments.__parseError}`,
@@ -3329,11 +3338,11 @@ const streamAnthropicOnce = (
 									output.fallbackCreditHandle = {
 										token: stopDetails.fallback_credit_token,
 										prefillClaim: stopDetails.fallback_has_prefill_claim,
-										params: structuredClone(params),
+										params: structuredCloneDeep(params),
 										betas: Array.from(requestExtraBetas),
 										betaHeader: sentBetaHeader,
 										expiresAt: Date.now() + FALLBACK_CREDIT_TTL_MS,
-										refusedContent: output.content ? structuredClone(output.content) : undefined,
+										refusedContent: output.content ? structuredCloneDeep(output.content) : undefined,
 										demotedReasoningBlocks,
 									};
 								}
@@ -4010,11 +4019,13 @@ function experimentalBetasDisabled(model: Model<"anthropic-messages">): boolean 
  * Whether a request body carries a field the kill switch withholds. A frozen
  * fallback-credit body that does cannot be redeemed under the switch. Defined
  * as "the sanitizer would change it" so detection and stripping cannot drift.
+ * The copy and the comparison keep their own stack: the body replays the
+ * conversation, whose tool calls' arguments are any JSON.
  */
 function carriesKillSwitchField(params: MessageCreateParamsStreaming): boolean {
-	const sanitized = structuredClone(params);
+	const sanitized = structuredCloneDeep(params);
 	withholdKillSwitchFields(sanitized);
-	return !Bun.deepEquals(sanitized, params);
+	return !jsonDeepEquals(sanitized, params);
 }
 
 /**
@@ -5915,35 +5926,51 @@ function buildToolResultBlock(
 export type AnthropicMessageParam = MessageParam;
 
 /**
- * Recursively replace lone surrogates in string leaves. Identity-preserving:
- * returns the input object/array when nothing changed.
+ * Replace lone surrogates in string leaves. Identity-preserving: returns the
+ * input object/array when nothing changed. The walk keeps its own stack
+ * ({@link runNested}): a tool call's arguments are any JSON, as deep as a
+ * transcript line holds.
  */
 function toWellFormedDeep(value: unknown): unknown {
-	if (typeof value === "string") {
-		const wellFormed = value.toWellFormed();
-		return wellFormed === value ? value : wellFormed;
-	}
+	return isNonNullObject(value) ? runNested(wellFormedNode(value, new ContainerPath())) : wellFormedLeaf(value);
+}
+
+/** {@link toWellFormedDeep} of a value it does not walk into: a string well-formed, any other as it is. */
+function wellFormedLeaf(value: unknown): unknown {
+	return typeof value === "string" ? value.toWellFormed() : value;
+}
+
+/** {@link toWellFormedDeep} of `value`, an array or object `path` is inside of; each child array or object is a nested step. */
+function* wellFormedNode(value: object, path: ContainerPath): NestedWalk {
+	path.enter(value);
 	if (Array.isArray(value)) {
-		let changed = false;
-		const next = value.map(entry => {
-			const sanitized = toWellFormedDeep(entry);
-			if (sanitized !== entry) changed = true;
-			return sanitized;
-		});
-		return changed ? next : value;
-	}
-	if (isRecord(value)) {
-		let changed = false;
-		const next: Record<string, unknown> = {};
-		for (const [key, entry] of Object.entries(value)) {
-			// The compaction signature covers this opaque list; don't sanitize any nested values.
-			const sanitized = value.type === "compaction" && key === "tool_changes" ? entry : toWellFormedDeep(entry);
-			if (sanitized !== entry) changed = true;
-			next[key] = sanitized;
+		let out: unknown[] | undefined;
+		for (let index = 0; index < value.length; index++) {
+			const entry = value[index];
+			const sanitized = isNonNullObject(entry) ? yield wellFormedNode(entry, path) : wellFormedLeaf(entry);
+			if (sanitized === entry) continue;
+			out ??= value.slice();
+			out[index] = sanitized;
 		}
-		return changed ? next : value;
+		path.leave(value);
+		return out ?? value;
 	}
-	return value;
+	// A non-array object here, as `JSON.parse` makes one.
+	const record = value as Record<string, unknown>;
+	// The compaction signature covers this opaque list; don't sanitize any nested values.
+	const opaqueKey = record.type === "compaction" ? "tool_changes" : undefined;
+	let out: Record<string, unknown> | undefined;
+	for (const [key, entry] of Object.entries(record)) {
+		const sanitized =
+			key === opaqueKey ? entry : isNonNullObject(entry) ? yield wellFormedNode(entry, path) : wellFormedLeaf(entry);
+		if (sanitized === entry) continue;
+		// The spread copies a `__proto__` key JSON.parse made as an own key, which this assignment then
+		// writes; assigned to a fresh object, that key would set the copy's prototype instead.
+		out ??= { ...record };
+		out[key] = sanitized;
+	}
+	path.leave(value);
+	return out ?? value;
 }
 
 /**

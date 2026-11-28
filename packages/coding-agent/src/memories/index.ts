@@ -20,6 +20,7 @@ import {
 	parseJsonlLenient,
 	peekFile,
 	prompt,
+	stringifyDeepJson,
 } from "@oh-my-pi/pi-utils";
 
 import { cfgOffline } from "../config/auxiliary-model-policy";
@@ -850,6 +851,9 @@ async function* persistableMessagesFromBack(file: Bun.BunFile, size: number): As
 	}
 }
 
+/** Each stage-1 run writes the rollout's messages again: a deep one skips the `JSON.stringify` that would fail on it. */
+const STAGE1_MESSAGE_JSON = { probeDepth: true } as const;
+
 /**
  * Build the stage-1 `response_items_json` payload for a rollout file.
  *
@@ -870,7 +874,8 @@ export async function buildStage1RolloutItems(rolloutPath: string, tokenLimit: n
 	let head = "[";
 	let truncated = false;
 	for await (const message of persistableMessagesFromFront(file, size)) {
-		head += head.length === 1 ? JSON.stringify(message) : `,${JSON.stringify(message)}`;
+		const json = stringifyDeepJson(message, STAGE1_MESSAGE_JSON);
+		head += head.length === 1 ? json : `,${json}`;
 		if (head.length > maxChars) {
 			truncated = true;
 			break;
@@ -884,7 +889,7 @@ export async function buildStage1RolloutItems(rolloutPath: string, tokenLimit: n
 	let tail = "]";
 	let exhausted = true;
 	for await (const message of persistableMessagesFromBack(file, size)) {
-		tail = `,${JSON.stringify(message)}${tail}`;
+		tail = `,${stringifyDeepJson(message, STAGE1_MESSAGE_JSON)}${tail}`;
 		if (tail.length >= tailChars) {
 			exhausted = false;
 			break;

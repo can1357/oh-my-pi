@@ -1,12 +1,14 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type StreamFn, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { Context, FetchImpl, Message, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Context, FetchImpl, Message, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { nestedChain } from "../../ai/test/helpers/deep-nesting";
 
 const model = getBundledModel("openai", "gpt-5-mini") as Model<"openai-responses">;
 
@@ -333,5 +335,117 @@ describe("one-shot side request state", () => {
 		});
 		await expect(session.runEphemeralTurn({ promptText: "Question" })).rejects.toThrow("Factory failed");
 		expect(retained.size).toBe(0);
+	});
+
+	// A tool call's arguments are any JSON and a transcript line holds them as deep as `JSON.parse` reads: a side
+	// question's context holds the conversation, measured against `maxContextBytes`, and its history what the caller
+	// passes, which the turn copies.
+	it("measures and sends a side question whose conversation and history hold arguments nested 50,000 levels", async () => {
+		const deep = nestedChain({ leaf: "bottom" });
+		const usage = {
+			input: 1,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 2,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const call: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: "call-1", name: "inspect", arguments: deep }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			timestamp: 2,
+			stopReason: "toolUse",
+			usage,
+		};
+		let sent: Context | undefined;
+		const session = createSession((_model, context) => {
+			sent = context;
+			const stream = new AssistantMessageEventStream();
+			const message: AssistantMessage = { ...call, content: [{ type: "text", text: "Answer" }], stopReason: "stop" };
+			queueMicrotask(() => {
+				stream.push({ type: "start", partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		});
+		session.agent.replaceMessages([
+			{ role: "user", content: "Main question", timestamp: 1 },
+			call,
+			{
+				role: "toolResult",
+				toolCallId: "call-1",
+				toolName: "inspect",
+				content: [{ type: "text", text: "ok" }],
+				isError: false,
+				timestamp: 3,
+			},
+		]);
+
+		const turn = await session.runEphemeralTurn({
+			promptText: "Side question",
+			maxContextBytes: 1_000_000_000,
+			history: [{ role: "user", content: "Earlier side question", timestamp: 4 }, call],
+		});
+		expect(turn.assistantMessage.content).toEqual([{ type: "text", text: "Answer" }]);
+		expect(
+			sent?.messages.some(message => message.role === "user" && message.content === "Earlier side question"),
+		).toBe(true);
+	}, 30_000);
+
+	// The turn copies the history the caller passes, so its pipeline cannot change the caller's messages: the copy must
+	// keep what `structuredClone` keeps, not turn a tool call's `Date` into a string and a result's `Map` into `{}`.
+	it("sends a side question's history with a Date and a Map as the caller passed them", async () => {
+		const usage = {
+			input: 1,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 2,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const call: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: "call-1", name: "inspect", arguments: { since: new Date(0) } }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			timestamp: 2,
+			stopReason: "toolUse",
+			usage,
+		};
+		const result: Message = {
+			role: "toolResult",
+			toolCallId: "call-1",
+			toolName: "inspect",
+			content: [{ type: "text", text: "ok" }],
+			details: { files: new Map([["a.ts", 1]]) },
+			isError: false,
+			timestamp: 3,
+		};
+		let sent: Context | undefined;
+		const session = createSession((_model, context) => {
+			sent = context;
+			const stream = new AssistantMessageEventStream();
+			const message: AssistantMessage = { ...call, content: [{ type: "text", text: "Answer" }], stopReason: "stop" };
+			queueMicrotask(() => {
+				stream.push({ type: "start", partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		});
+
+		await session.runEphemeralTurn({ promptText: "Side question", history: [call, result] });
+
+		const sentCall = sent?.messages.find(message => message.role === "assistant");
+		const sentArguments = sentCall?.role === "assistant" ? sentCall.content[0] : undefined;
+		expect(sentArguments?.type === "toolCall" && sentArguments.arguments.since).toBeInstanceOf(Date);
+		const sentResult = sent?.messages.find(message => message.role === "toolResult");
+		const details = sentResult?.role === "toolResult" ? sentResult.details : undefined;
+		expect(typeof details === "object" && details !== null && "files" in details && details.files).toBeInstanceOf(
+			Map,
+		);
 	});
 });

@@ -1,5 +1,6 @@
-import { isDeepStrictEqual } from "node:util";
-import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
+import { type DeepJsonTextOptions, jsonDeepEquals, stringifyDeepJson } from "@oh-my-pi/pi-utils/json";
+import { ContainerPath, type NestedWalk, runNested } from "@oh-my-pi/pi-utils/nested-walk";
+import { isNonNullObject, isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import type { RpcChunkFrame } from "./rpc-types";
 
 /** Maximum UTF-8 size of one newline-delimited RPC frame, including the newline. */
@@ -49,17 +50,63 @@ function isStructureHeavy(content: unknown): boolean {
 }
 
 /**
- * `JSON.stringify(frame)`, byte for byte. A streaming `message_update` aliases
- * one cumulative snapshot as both `message` and `assistantMessageEvent.partial`;
- * when that snapshot is structure-heavy it is serialized once and spliced into
- * both positions instead of being re-serialized per position on every token.
+ * `JSON.stringify(value)` of a frame or a part of one, also where it nests
+ * deeper than `JSON.stringify` recurses (`get_tree` nests each entry of a long
+ * session under its parent). Typed as `JSON.stringify` is: a frame is an
+ * object, which has JSON text.
+ */
+function frameJson(value: unknown, options?: DeepJsonTextOptions): string {
+	return stringifyDeepJson(value, options) as string;
+}
+
+/**
+ * Tree depth, in entries, past which a `get_tree` answer is written by
+ * `stringifyJsonIteratively` instead of `JSON.stringify`: about 4,000 levels,
+ * since a node and its `children` each nest one. Bun's `JSON.stringify` slows
+ * with depth. Measured on chains of 1 KB messages, a chain of cold entries
+ * (whose large values are getters) took it 57 ms at 1,000 entries against
+ * the writer's 76 ms, 328 ms at 4,000 against 172 ms and 4.9 s at 12,000
+ * against 0.65 s. Whole entries stay faster natively up to about 12,000
+ * entries (145 ms against 0.83 s), then take it 4.9 s at 14,000 entries,
+ * against the writer's 1.0 s, and run it out of stack at 20,000, after 9.4 s.
+ */
+export const RPC_TREE_WRITER_DEPTH = 2_000;
+
+/** Whether `frame` answers `get_tree` with a tree deeper than {@link RPC_TREE_WRITER_DEPTH}; the walk stops at the first path past it. */
+function isDeepTreeAnswer(frame: Record<string, unknown>): boolean {
+	if (frame.type !== "response" || frame.command !== "get_tree" || !isRecord(frame.data)) return false;
+	const roots = frame.data.tree;
+	if (!Array.isArray(roots)) return false;
+	const nodes: unknown[] = [...roots];
+	const depths: number[] = roots.map(() => 1);
+	while (nodes.length > 0) {
+		const node = nodes.pop();
+		const depth = depths.pop()!;
+		if (depth > RPC_TREE_WRITER_DEPTH) return true;
+		if (!isRecord(node) || !Array.isArray(node.children)) continue;
+		for (const child of node.children) {
+			nodes.push(child);
+			depths.push(depth + 1);
+		}
+	}
+	return false;
+}
+
+/**
+ * `JSON.stringify(frame)`, byte for byte. A `get_tree` answer deeper than
+ * {@link RPC_TREE_WRITER_DEPTH} is written by the iterative writer. A
+ * streaming `message_update` aliases one cumulative snapshot as both `message`
+ * and `assistantMessageEvent.partial`; when that snapshot is structure-heavy
+ * it is serialized once and spliced into both positions instead of being
+ * re-serialized per position on every token.
  */
 function serializeFrame(frame: object): string {
+	if (isRecord(frame) && isDeepTreeAnswer(frame)) return frameJson(frame, { deep: true });
 	if (isRecord(frame) && frame.type === "message_update" && isRecord(frame.message)) {
 		const event = frame.assistantMessageEvent;
 		if (isRecord(event) && event.partial === frame.message && isStructureHeavy(frame.message.content)) {
-			const messageJson = JSON.stringify(frame.message);
-			const skeleton = JSON.stringify({
+			const messageJson = frameJson(frame.message);
+			const skeleton = frameJson({
 				...frame,
 				message: SHARED_MESSAGE_PLACEHOLDER,
 				assistantMessageEvent: { ...event, partial: SHARED_MESSAGE_PLACEHOLDER },
@@ -67,7 +114,7 @@ function serializeFrame(frame: object): string {
 			return skeleton.split(SHARED_MESSAGE_PLACEHOLDER_JSON).join(messageJson);
 		}
 	}
-	return JSON.stringify(frame);
+	return frameJson(frame);
 }
 
 interface PendingRpcChunks {
@@ -108,32 +155,56 @@ function shrinkString(value: string, cap: number): string {
 	return `${value.slice(0, headLength)}\n…[${value.length - headLength} chars elided for RPC frame]`;
 }
 
+/**
+ * `value` with each string past the pass's cap shortened and each array and object past its
+ * limits cut. The walk keeps its own stack ({@link runNested}): an event frame carries a tool's
+ * result, as deep as a transcript line holds.
+ */
 function shrinkValue(value: unknown, pass: ShrinkPass): unknown {
-	if (typeof value === "string") return shrinkString(value, pass.stringCap);
+	return isNonNullObject(value) ? runNested(shrunkNode(value, pass, new ContainerPath())) : shrunkLeaf(value, pass);
+}
+
+/** {@link shrinkValue} of `value`, no array or record: a string past the pass's cap shortened, anything else as it is. */
+function shrunkLeaf(value: unknown, pass: ShrinkPass): unknown {
+	return typeof value === "string" ? shrinkString(value, pass.stringCap) : value;
+}
+
+/** {@link shrinkValue} of `value`, an array or record `path` is inside of; each child array or record is a nested step. */
+function* shrunkNode(value: object, pass: ShrinkPass, path: ContainerPath): NestedWalk {
+	path.enter(value);
 	if (Array.isArray(value)) {
 		const keep = Math.min(value.length, pass.arrayLimit);
 		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 		const output: unknown[] = new Array(keep + (keep < value.length ? 1 : 0));
-		for (let index = 0; index < keep; index++) output[index] = shrinkValue(value[index], pass);
-		if (keep < value.length) output[keep] = `…[${value.length - keep} items elided for RPC frame]`;
-		return output;
-	}
-	if (isRecord(value)) {
-		const entries = Object.entries(value);
-		const keep = Math.min(entries.length, pass.objectLimit);
-		const output: Record<string, unknown> = {};
 		for (let index = 0; index < keep; index++) {
-			const [key, item] = entries[index];
-			output[key] = shrinkValue(item, pass);
+			const item: unknown = value[index];
+			output[index] = isNonNullObject(item) ? yield shrunkNode(item, pass, path) : shrunkLeaf(item, pass);
 		}
-		if (keep < entries.length) output.rpcFrameElidedKeys = entries.length - keep;
+		if (keep < value.length) output[keep] = `…[${value.length - keep} items elided for RPC frame]`;
+		path.leave(value);
 		return output;
 	}
-	return value;
+	const entries = Object.entries(value);
+	const keep = Math.min(entries.length, pass.objectLimit);
+	const output: Record<string, unknown> = {};
+	for (let index = 0; index < keep; index++) {
+		const [key, item] = entries[index];
+		const child = isNonNullObject(item) ? yield shrunkNode(item, pass, path) : shrunkLeaf(item, pass);
+		// Assigning `__proto__` would swap the copy's prototype instead of
+		// creating the own data property JSON.parse produces.
+		if (key === "__proto__") {
+			Object.defineProperty(output, key, { value: child, enumerable: true, writable: true, configurable: true });
+		} else {
+			output[key] = child;
+		}
+	}
+	if (keep < entries.length) output.rpcFrameElidedKeys = entries.length - keep;
+	path.leave(value);
+	return output;
 }
 
 function jsonSnapshot(value: unknown): unknown {
-	const json = JSON.stringify(value);
+	const json = stringifyDeepJson(value);
 	return json === undefined ? undefined : JSON.parse(json);
 }
 
@@ -153,7 +224,7 @@ function encodedMessageSnapshot(encoded: string): { message: unknown } | undefin
 function* encodeChunkedRpcFrames(frame: object, json: string, chunkId: string): Generator<string> {
 	const byteLength = Buffer.byteLength(json, "utf8");
 	if (byteLength > MAX_RPC_REASSEMBLED_BYTES) {
-		yield `${JSON.stringify(overflowFrame(frame))}\n`;
+		yield `${frameJson(overflowFrame(frame))}\n`;
 		return;
 	}
 	const bytes = Buffer.from(json, "utf8");
@@ -169,7 +240,7 @@ function* encodeChunkedRpcFrames(frame: object, json: string, chunkId: string): 
 				.subarray(index * RPC_CHUNK_PAYLOAD_BYTES, (index + 1) * RPC_CHUNK_PAYLOAD_BYTES)
 				.toString("base64"),
 		};
-		const line = `${JSON.stringify(chunk)}\n`;
+		const line = `${frameJson(chunk)}\n`;
 		if (serializedFrameBytes(line.slice(0, -1)) > MAX_RPC_FRAME_BYTES)
 			throw new Error("RPC chunk exceeded the transport limit");
 		yield line;
@@ -260,10 +331,7 @@ function compactTerminalFrame(
 	if (streamedMessages) {
 		streamed = 0;
 		const limit = Math.min(streamedMessages.length, frame.messages.length);
-		while (
-			streamed < limit &&
-			isDeepStrictEqual(streamedMessages[streamed], jsonSnapshot(frame.messages[streamed]))
-		) {
+		while (streamed < limit && jsonDeepEquals(streamedMessages[streamed], jsonSnapshot(frame.messages[streamed]))) {
 			streamed++;
 		}
 	}
@@ -307,19 +375,19 @@ function encodeRpcFrameFromJson(
 ): string {
 	if (serializedFrameBytes(json) <= MAX_RPC_FRAME_BYTES) return `${json}\n`;
 	if (isRecord(frame) && frame.type === "response") {
-		return `${JSON.stringify(overflowFrame(frame))}\n`;
+		return `${frameJson(overflowFrame(frame))}\n`;
 	}
 
 	const compacted = compactTerminalFrame(frame, streamedMessageCount, streamedMessages);
-	json = JSON.stringify(compacted);
+	json = frameJson(compacted);
 	if (serializedFrameBytes(json) <= MAX_RPC_FRAME_BYTES) return `${json}\n`;
 
 	for (const pass of SHRINK_PASSES) {
-		json = JSON.stringify(shrinkValue(compacted, pass));
+		json = frameJson(shrinkValue(compacted, pass));
 		if (serializedFrameBytes(json) <= MAX_RPC_FRAME_BYTES) return `${json}\n`;
 	}
 
-	return `${JSON.stringify(overflowFrame(compacted))}\n`;
+	return `${frameJson(overflowFrame(compacted))}\n`;
 }
 
 /** Serialize a complete JSONL frame while enforcing the transport byte ceiling. */
@@ -360,7 +428,7 @@ export class RpcFrameEncoder {
 		if (this.#protocolVersion === 2 && serializedFrameBytes(json) > MAX_RPC_FRAME_BYTES) {
 			const compacted = compactTerminalFrame(frame, this.#streamedMessages.length, this.#streamedMessages);
 			// Reuse the original serialization when compaction was a no-op.
-			const compactedJson = compacted === frame ? json : JSON.stringify(compacted);
+			const compactedJson = compacted === frame ? json : frameJson(compacted);
 			if (serializedFrameBytes(compactedJson) > MAX_RPC_FRAME_BYTES) {
 				frames = encodeChunkedRpcFrames(compacted, compactedJson, `rpc-${++this.#chunkCounter}`);
 			} else {

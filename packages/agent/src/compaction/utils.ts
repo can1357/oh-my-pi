@@ -5,7 +5,7 @@
 import type { Message, ToolCall } from "@oh-my-pi/pi-ai";
 import { type Dialect, getDialectDefinition } from "@oh-my-pi/pi-ai/dialect";
 import { escapeHarmonyControlTokens } from "@oh-my-pi/pi-ai/utils/harmony-leak";
-import { prompt, stringifyJson } from "@oh-my-pi/pi-utils";
+import { prompt, stringifyDeepJson } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { AgentMessage } from "../types";
 import summarizationSystemPrompt from "./prompts/summarization-system.md" with { type: "text" };
@@ -262,6 +262,13 @@ export function serializeConversation(messages: Message[], dialect?: Dialect, dr
 }
 
 /**
+ * A summary writes every tool call of the conversation: an argument nested past `JSON.stringify`'s
+ * recursion (arguments are any JSON) skips the attempt that would run out of stack (1.5 s or more
+ * each time) and goes to the deep writer. A bigint is written as its decimal string.
+ */
+const ARGUMENT_JSON = { bigintAsString: true, probeDepth: true } as const;
+
+/**
  * Render an assistant turn's tool calls as a compact `name(args)` list for the
  * legacy serializer.
  */
@@ -269,7 +276,7 @@ function renderToolCalls(calls: ToolCall[]): string {
 	return calls
 		.map(call => {
 			const argsStr = Object.entries(call.arguments as Record<string, unknown>)
-				.map(([k, v]) => `${k}=${stringifyJson(v) ?? "null"}`)
+				.map(([k, v]) => `${k}=${stringifyDeepJson(v, ARGUMENT_JSON) ?? "null"}`)
 				.join(", ");
 			return `${call.name}(${argsStr})`;
 		})

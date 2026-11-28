@@ -43,6 +43,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import * as piUtils from "@oh-my-pi/pi-utils";
+import { nestedChain, nestedChainJson } from "../../ai/test/helpers/deep-nesting";
 
 const { isRecord } = piUtils;
 const TEST_INSTALLATION_ID = "00000000-0000-4000-8000-000000000001";
@@ -317,6 +318,31 @@ describe("buildOpenAiNativeHistory custom tool calls", () => {
 		const call = items.find(item => item.type === "function_call");
 
 		expect(call?.arguments).toBe('{"rowId":"9007199254740993"}');
+	});
+
+	// A tool call's arguments are any JSON, as deep as JSON.parse reads.
+	test("writes tool arguments nested past JSON.stringify's reach whole", () => {
+		const assistant: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: "call_read_1|fc_read_1", name: "read_file", arguments: nestedChain() }],
+			timestamp: Date.now(),
+			provider: "openai",
+			model: "gpt-5",
+			api: "openai-responses",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+		};
+
+		const items = buildOpenAiNativeHistory([assistant], makeOpenAiModel());
+
+		expect(items.find(item => item.type === "function_call")?.arguments).toBe(nestedChainJson());
 	});
 });
 

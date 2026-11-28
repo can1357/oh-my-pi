@@ -12,6 +12,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { OpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import * as natives from "@oh-my-pi/pi-natives";
 import { isRecord } from "@oh-my-pi/pi-utils";
+import { nestedChain } from "../../ai/test/helpers/deep-nesting";
 import { Agent } from "../src/agent";
 import type { SessionMessageEntry } from "../src/compaction/entries";
 import { applyShakeRegions, collectShakeRegions, RESCUE_SHAKE_CONFIG } from "../src/compaction/shake";
@@ -1155,3 +1156,33 @@ function inToolResultImageEstimate(tokenizer: Tokenizer): number {
 		timestamp: 0,
 	} as unknown as AgentMessage);
 }
+
+// A tool call's arguments are any JSON and a transcript line holds them as deep as `JSON.parse` reads; the count
+// runs on the first prompt after a resume, at each turn's end and for every context-usage reading.
+describe("Tokenizer on a tool call nested past where JSON.stringify stops", () => {
+	test("counts the JSON text of arguments nested 50,000 levels", () => {
+		const deep = nestedChain({ leaf: "bottom" });
+		const call = (args: Record<string, unknown>) =>
+			({
+				role: "assistant",
+				content: [{ type: "toolCall", id: "call-1", name: "inspect", arguments: args }],
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "claude-sonnet-4-5",
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				timestamp: 1,
+			}) as AgentMessage;
+		const tokenizer = new Tokenizer();
+		// `{"next":` is 8 bytes a level: 400,000 bytes of JSON text, far more tokens than the shallow call's.
+		expect(tokenizer.countMessage(call(deep))).toBeGreaterThan(50_000);
+		expect(tokenizer.countMessage(call({ leaf: "bottom" }))).toBeLessThan(100);
+	}, 20_000);
+});

@@ -1305,6 +1305,7 @@ export class SessionTools {
 					}
 					// Preserve the exact arguments authorized by a selected or
 					// persisted ACP grant; inner handlers may mutate `args` in place.
+					// The copy reaches any depth `JSON.parse` reads (a transcript line's).
 					const approvedCtx = (ctx ? { ...ctx, acpApprovedArgs: structuredCloneJSON(args) } : ctx) as never;
 					const command =
 						target.name === "bash" && args && typeof args === "object" && !Array.isArray(args)

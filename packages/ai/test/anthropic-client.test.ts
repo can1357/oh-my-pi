@@ -3,6 +3,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { AnthropicMessagesClient } from "@oh-my-pi/pi-ai/providers/anthropic-client";
 import type { MessageCreateParamsStreaming } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
+import { nestedChain, nestedChainJson } from "./helpers/deep-nesting";
 
 const params: MessageCreateParamsStreaming = {
 	model: "claude-sonnet-4-5",
@@ -283,6 +284,44 @@ describe("AnthropicMessagesClient request assembly", () => {
 		expect(headers.authorization).toBe("Bearer right-token");
 		expect(headers.Authorization).toBeUndefined();
 		expect(calls[0].url).toBe("https://api.anthropic.com/v1/messages");
+	});
+
+	it("sends a conversation whose tool input nests past JSON.stringify's reach", async () => {
+		const { calls, fetch } = createFetchMock([new Response("{}", { status: 200 })]);
+		const client = new AnthropicMessagesClient({ apiKey: "sk-test", fetch });
+		const toolUse = { type: "tool_use", id: "toolu_1", name: "read", input: nestedChain() } as const;
+
+		await client.messages
+			.create({ ...params, messages: [...params.messages, { role: "assistant", content: [toolUse] }] })
+			.asResponse();
+
+		expect(String(calls[0].init.body)).toBe(
+			`{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"read","input":${nestedChainJson()}}]}],"max_tokens":64,"stream":true}`,
+		);
+	});
+
+	// The body's depth check runs before its writer. A proxy's `has` trap is the caller's code, which
+	// `JSON.stringify` never calls; a check that asked it for a `toJSON` threw, and the request was not sent.
+	it("sends a tool input held in a proxy whose has trap throws", async () => {
+		const { calls, fetch } = createFetchMock([new Response("{}", { status: 200 })]);
+		const client = new AnthropicMessagesClient({ apiKey: "sk-test", fetch });
+		const input = new Proxy(
+			{ path: "a.ts" },
+			{
+				has() {
+					throw new Error("has trap called");
+				},
+			},
+		);
+		const toolUse = { type: "tool_use", id: "toolu_1", name: "read", input } as const;
+
+		await client.messages
+			.create({ ...params, messages: [...params.messages, { role: "assistant", content: [toolUse] }] })
+			.asResponse();
+
+		expect(String(calls[0].init.body)).toBe(
+			'{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"read","input":{"path":"a.ts"}}]}],"max_tokens":64,"stream":true}',
+		);
 	});
 });
 

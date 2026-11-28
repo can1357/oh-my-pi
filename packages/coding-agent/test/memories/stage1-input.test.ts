@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { buildStage1RolloutItems } from "@oh-my-pi/pi-coding-agent/memories";
 import { parseJsonlLenient } from "@oh-my-pi/pi-utils";
+import { nestedChainJson } from "../../../ai/test/helpers/deep-nesting";
 
 /** Reference: the whole-file read + stringify + head/tail truncation the streaming builder replaces. */
 function referenceItems(raw: string, tokenLimit: number): string {
@@ -22,7 +23,11 @@ function referenceItems(raw: string, tokenLimit: number): string {
 		const text = content.map(item => (item.type === "text" ? (item.text ?? "") : "")).join("\n");
 		if (text.length > 0 && text.length <= 32_000) messages.push(message);
 	}
-	const text = JSON.stringify(messages);
+	return truncateItems(JSON.stringify(messages), tokenLimit);
+}
+
+/** The reference's head and tail truncation of the payload `text`, `[…]` of the messages' JSON. */
+function truncateItems(text: string, tokenLimit: number): string {
 	if (tokenLimit <= 0) return "";
 	const maxChars = tokenLimit * 4;
 	if (text.length <= maxChars) return text;
@@ -114,6 +119,26 @@ describe("buildStage1RolloutItems", () => {
 			{ ...messages[3], content: messages[3].content.slice(1) },
 		]);
 	});
+
+	// A transcript line holds JSON as deep as JSON.parse reads (millions of levels); JSON.stringify gives out at 40,000.
+	it("writes a message nested deeper than JSON.stringify recurses, whole and in the tail of a truncated payload", async () => {
+		const deepArguments = nestedChainJson();
+		const messages = [
+			JSON.stringify({ role: "user", content: [{ type: "text", text: "Inspect the tree" }] }),
+			JSON.stringify({
+				role: "assistant",
+				content: [{ type: "toolCall", id: "call-1", name: "inspect", arguments: "DEEP" }],
+			}).replace('"DEEP"', deepArguments),
+			JSON.stringify({ role: "user", content: [{ type: "text", text: "Now summarize it" }] }),
+		];
+		const filePath = path.join(tempDir, "deep.jsonl");
+		await Bun.write(filePath, `${messages.map(message => `{"type":"message","message":${message}}`).join("\n")}\n`);
+		const text = `[${messages.join(",")}]`;
+
+		// The whole payload fits 1,000,000 tokens; at 50,000 the deep message spans the cut.
+		expect(await buildStage1RolloutItems(filePath, 1_000_000)).toBe(text);
+		expect(await buildStage1RolloutItems(filePath, 50_000)).toBe(truncateItems(text, 50_000));
+	}, 20_000);
 
 	it("rejects missing rollouts", async () => {
 		await expect(buildStage1RolloutItems(path.join(tempDir, "missing.jsonl"), 100)).rejects.toThrow();

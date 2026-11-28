@@ -4,6 +4,7 @@
  * + text blocks, tool args/result, user text, subagent task text.
  */
 
+import { stringifyDeepJson } from "@oh-my-pi/pi-utils/json";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
 import { Check, Copy, X } from "lucide-react";
 import { type ReactNode, useEffect, useRef, useState } from "react";
@@ -127,7 +128,7 @@ export function SpanDrawer({
 
 	const handleCopy = async () => {
 		try {
-			await navigator.clipboard.writeText(JSON.stringify(entry ?? span, null, 2));
+			await navigator.clipboard.writeText(stringifyDeepJson(entry ?? span, { space: 2 }) ?? "");
 			setCopied(true);
 			window.clearTimeout(copyResetRef.current);
 			copyResetRef.current = window.setTimeout(() => setCopied(false), 1500);

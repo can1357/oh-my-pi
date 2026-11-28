@@ -5,6 +5,7 @@ import type { AssistantMessage, Context, Model, ToolResultMessage, Usage } from 
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
+import { nestedChain, nestedChainJson } from "./helpers/deep-nesting";
 
 const emptyUsage: Usage = {
 	input: 0,
@@ -319,6 +320,34 @@ describe("openai-completions convertMessages", () => {
 		expect(assistantParam?.tool_calls).toBeDefined();
 		const serializedArgs = assistantParam!.tool_calls![0].function.arguments;
 		expect(JSON.parse(serializedArgs)).toEqual({ path: "README.md" });
+	});
+
+	it("replays tool arguments nested past JSON.stringify's reach whole, as an object or as JSON text", () => {
+		const baseModel = getBundledModel("openai", "gpt-4o-mini") as Model<"openai-completions">;
+		const model: Model<"openai-completions"> = { ...baseModel, api: "openai-completions", input: ["text"] };
+		const replayed = (args: unknown) => {
+			const assistantMessage: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "toolCall", id: "tool-1", name: "read", arguments: args as Record<string, unknown> }],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				usage: emptyUsage,
+				stopReason: "toolUse",
+				timestamp: 1,
+			};
+			const messages = convertMessages(
+				model,
+				{ messages: [{ role: "user", content: "Read README", timestamp: 0 }, assistantMessage] },
+				compat,
+			);
+			const assistantParam = messages.find(message => message.role === "assistant") as
+				| { role: "assistant"; tool_calls?: Array<{ function: { arguments: string } }> }
+				| undefined;
+			return assistantParam?.tool_calls?.[0]?.function.arguments;
+		};
+		expect(replayed(nestedChain())).toBe(nestedChainJson());
+		expect(replayed(nestedChainJson())).toBe(nestedChainJson());
 	});
 	it("strips image_url content for DashScope compatible-mode text-only Qwen models (issue #1859)", () => {
 		// Reproduces the bailian/qwen3.7-max + dashscope.aliyuncs.com/compatible-mode

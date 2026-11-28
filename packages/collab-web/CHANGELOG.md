@@ -7,6 +7,11 @@
 - Added a `gitlab` tool renderer for shared sessions and HTML exports.
 - Shared-session and HTML-exported edit cards now display cross-worktree edit notices when an edit modifies a sibling Git worktree ([#20823](https://github.com/can1357/oh-my-pi/pull/20823) by [@Quantum-Quasar](https://github.com/Quantum-Quasar)).
 
+### Fixed
+
+- An HTML export's trace view shows a span's raw entry nested more than 1,000 levels deep on one line instead of indented; an entry nested past the browser's `JSON.stringify` stack limit is shown, and its copy buttons copy it, instead of failing to render the span's details; a shallower entry is indented as before
+- The card of a tool without a view of its own (an MCP or extension tool) shows a call whose arguments nest more than 1,000 levels deep (a `"toJSON": null` key among them included) as the start of their JSON on one line, where it showed `[object Object]`; shallower arguments are shown as before
+
 ## [19.1.0] - 2026-11-21
 
 ### Added

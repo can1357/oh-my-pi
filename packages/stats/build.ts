@@ -1,4 +1,5 @@
 import * as fs from "node:fs/promises";
+import { clientBundlePlugins } from "./src/client-bundle";
 
 // Clean dist
 await fs.rm("./dist/client", { recursive: true, force: true });
@@ -10,6 +11,7 @@ const result = await Bun.build({
 	outdir: "./dist/client",
 	minify: true,
 	naming: "[dir]/[name].[ext]",
+	plugins: clientBundlePlugins,
 });
 
 if (!result.success) {

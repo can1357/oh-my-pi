@@ -1,3 +1,4 @@
+import { ContainerPath, type NestedWalk, runNested, stringifyDeepJson } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type { AssistantMessage, ToolCall, ToolResultMessage } from "../types";
 
@@ -11,6 +12,12 @@ const PROGRESS_ARGUMENT_KEY =
 	/(?:^|[_-])(?:skip|offset|limit|page(?:num|index|size)?|cursor|since|before|after|start|from|first|take)(?:[_-]|$)/i;
 /** A whitespace-delimited token that names a distinct filesystem target. Digits inside it stay. */
 const PATH_LIKE_TOKEN = /[/\\]|\.[A-Za-z0-9_-]{1,8}$/;
+
+/**
+ * Each turn writes its calls' arguments: arguments nested past `JSON.stringify`'s recursion skip the
+ * attempt that would run out of stack (1.5 s or more each time) and go to the deep writer.
+ */
+const CANONICAL_JSON = { probeDepth: true } as const;
 
 /** Runtime settings for cross-turn tool-call repetition detection. */
 export interface ToolCallLoopGuardOptions {
@@ -45,20 +52,35 @@ export interface RepeatedToolCallDetection {
 	readonly argumentsSummary: string;
 }
 
+/**
+ * `value` with each object's keys sorted and its intent fields left out, arrays in order. The walk
+ * keeps its own stack ({@link runNested}): a tool call's arguments are any JSON, as deep as
+ * `JSON.parse` reads (millions of levels), where a recursive walk stops near 22,000.
+ */
 function canonicalizeToolCallValue(value: unknown): unknown {
+	return value && typeof value === "object" ? runNested(canonicalToolCallNode(value, new ContainerPath())) : value;
+}
+
+/** {@link canonicalizeToolCallValue} of `value`, an object `path` is inside of; each child object is a nested step. */
+function* canonicalToolCallNode(value: object, path: ContainerPath): NestedWalk {
+	path.enter(value);
 	if (Array.isArray(value)) {
-		return value.map(item => canonicalizeToolCallValue(item));
-	}
-	if (!value || typeof value !== "object") {
-		return value;
+		const items: unknown[] = [];
+		for (const item of value) {
+			items.push(item && typeof item === "object" ? yield canonicalToolCallNode(item, path) : item);
+		}
+		path.leave(value);
+		return items;
 	}
 
 	const input = value as Record<string, unknown>;
 	const output: Record<string, unknown> = {};
 	for (const key of Object.keys(input).sort()) {
 		if (key === INTENT_FIELD || key === LEGACY_INTENT_FIELD) continue;
-		output[key] = canonicalizeToolCallValue(input[key]);
+		const item = input[key];
+		output[key] = item && typeof item === "object" ? yield canonicalToolCallNode(item, path) : item;
 	}
+	path.leave(value);
 	return output;
 }
 
@@ -70,27 +92,59 @@ function normalizeStringDigits(value: string): string {
 		.join("");
 }
 
-function normalizeToolCallValue(value: unknown, key?: string): unknown {
-	if (Array.isArray(value)) {
-		return value.map(item => normalizeToolCallValue(item, key));
-	}
+/**
+ * {@link canonicalizeToolCallValue} with the digits of each string's prose ({@link normalizeStringDigits})
+ * and each number erased, except under a key that names a path or advances through a result set
+ * ({@link normalizedLeaf}). The walk keeps its own stack, as the canonical one does.
+ */
+function normalizeToolCallValue(value: unknown): unknown {
+	return value && typeof value === "object"
+		? runNested(normalizedToolCallNode(value, undefined, new ContainerPath()))
+		: normalizedLeaf(value, undefined);
+}
+
+/** {@link normalizeToolCallValue} of `value`, not an object, held under `key` (an array's items under the array's). */
+function normalizedLeaf(value: unknown, key: string | undefined): unknown {
+	if (typeof value !== "string" && typeof value !== "number") return value;
 	const snakeKey = key?.replace(/([a-z0-9])([A-Z])/g, "$1_$2");
 	const verbatimValue =
 		snakeKey !== undefined && (PATH_ARGUMENT_KEY.test(snakeKey) || PROGRESS_ARGUMENT_KEY.test(snakeKey));
 	if (typeof value === "string") {
 		return ["string", verbatimValue ? value : normalizeStringDigits(value)];
 	}
-	if (typeof value === "number") return verbatimValue ? value : ["number"];
-	if (!value || typeof value !== "object") {
-		return value;
+	return verbatimValue ? value : ["number"];
+}
+
+/**
+ * {@link normalizeToolCallValue} of `value`, an object held under `key` that `path` is inside of; each child
+ * object is a nested step. An array's items stay under the key that holds the array.
+ */
+function* normalizedToolCallNode(value: object, key: string | undefined, path: ContainerPath): NestedWalk {
+	path.enter(value);
+	if (Array.isArray(value)) {
+		const items: unknown[] = [];
+		for (const item of value) {
+			items.push(
+				item && typeof item === "object"
+					? yield normalizedToolCallNode(item, key, path)
+					: normalizedLeaf(item, key),
+			);
+		}
+		path.leave(value);
+		return items;
 	}
 
 	const input = value as Record<string, unknown>;
 	const output: Record<string, unknown> = {};
-	for (const key of Object.keys(input).sort()) {
-		if (key === INTENT_FIELD || key === LEGACY_INTENT_FIELD) continue;
-		output[key] = normalizeToolCallValue(input[key], key);
+	for (const childKey of Object.keys(input).sort()) {
+		if (childKey === INTENT_FIELD || childKey === LEGACY_INTENT_FIELD) continue;
+		const item = input[childKey];
+		output[childKey] =
+			item && typeof item === "object"
+				? yield normalizedToolCallNode(item, childKey, path)
+				: normalizedLeaf(item, childKey);
 	}
+	path.leave(value);
 	return output;
 }
 
@@ -190,11 +244,11 @@ export class ToolCallLoopGuard {
 		}
 
 		const canonicalCalls = toolCalls
-			.map(tc => JSON.stringify([tc.name, canonicalizeToolCallValue(tc.arguments)]))
+			.map(tc => stringifyDeepJson([tc.name, canonicalizeToolCallValue(tc.arguments)], CANONICAL_JSON))
 			.sort();
 		const turnHash = JSON.stringify(canonicalCalls);
 		const normalizedCalls = toolCalls
-			.map(tc => JSON.stringify([tc.name, normalizeToolCallValue(tc.arguments)]))
+			.map(tc => stringifyDeepJson([tc.name, normalizeToolCallValue(tc.arguments)], CANONICAL_JSON))
 			.sort();
 		const normalizedHash = JSON.stringify(normalizedCalls);
 		const assistantText = normalizeAssistantText(turn.message);
@@ -240,7 +294,7 @@ export class ToolCallLoopGuard {
 			count,
 			resultSummary: summarizeToolResult(turn.toolResults, reportCall.id),
 			argumentsSummary: summarizeText(
-				JSON.stringify(canonicalizeToolCallValue(reportCall.arguments)),
+				stringifyDeepJson(canonicalizeToolCallValue(reportCall.arguments), CANONICAL_JSON) ?? "",
 				ARGUMENT_SUMMARY_LIMIT,
 			),
 		};

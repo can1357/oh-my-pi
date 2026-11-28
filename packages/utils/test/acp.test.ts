@@ -9,6 +9,7 @@ import {
 	RpcConnection,
 	schema,
 } from "../src/acp";
+import { nestedChain, nestedChainJson } from "../../ai/test/helpers/deep-nesting";
 
 function transportPair() {
 	const leftToRight = new TransformStream<Uint8Array, Uint8Array>();
@@ -102,6 +103,21 @@ describe("ACP JSON-RPC transport", () => {
 		expect(await reader.read()).toMatchObject({ value: { method: "b" } });
 		writer.releaseLock();
 		reader.releaseLock();
+	});
+
+	// A session update carries a tool call's arguments, which are any JSON, as deep as JSON.parse reads.
+	it("writes a message nested past JSON.stringify's reach", async () => {
+		const output = new TransformStream<Uint8Array, Uint8Array>();
+		const stream = ndJsonStream(output.writable, new TransformStream<Uint8Array, Uint8Array>().readable);
+		const writer = stream.writable.getWriter();
+		const written = new Response(output.readable).text();
+
+		await writer.write({ jsonrpc: "2.0", method: "session/update", params: { rawInput: nestedChain() } });
+		await writer.close();
+
+		expect(await written).toBe(
+			`{"jsonrpc":"2.0","method":"session/update","params":{"rawInput":${nestedChainJson()}}}\n`,
+		);
 	});
 	it("drains accepted inbound requests before resolving closed on clean EOF", async () => {
 		const inbound = new TransformStream<AnyMessage, AnyMessage>();

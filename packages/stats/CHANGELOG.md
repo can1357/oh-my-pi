@@ -13,6 +13,8 @@
 - Fixed `omp stats` dropping a session's cost when a `/tan` clone of it was synced first: the clone's copied requests, prompts, tool calls, approvals and Spotlight rows now count toward the original session, and stats databases that already credited them to the clone are repaired on the next sync ([#20805](https://github.com/can1357/oh-my-pi/pull/20805) by [@wapenshaw](https://github.com/wapenshaw))
 - Fixed forked requests disappearing from stats when a transcript was temporarily unreadable during reconciliation.
 - Fixed usage history failing entirely when one session file cannot be read (e.g. blocked by antivirus); unreadable transcripts are now skipped and logged ([#18566](https://github.com/can1357/oh-my-pi/issues/18566))
+- A session holding an entry nested more than about 40,000 levels deep no longer makes the trace's span drawer and the request detail answer HTTP 500, and the trace now shows the head of such a tool call's arguments and the tools dashboard counts their characters; a Spotlight experiment session's tool call nested more than about 25,000 levels deep no longer fails its ingest
+- The dashboard's JSON views (the span drawer's raw entry and copy button, the request drawer's payloads) show an entry nested more than 1,000 levels deep on one line instead of indented; an entry nested past the browser's `JSON.stringify` stack limit is shown instead of failing to render; a shallower entry is indented as before
 
 ## [19.1.1] - 2026-11-23
 

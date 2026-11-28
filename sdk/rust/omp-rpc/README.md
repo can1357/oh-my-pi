@@ -113,8 +113,12 @@ Once the server sends `host_uri_cancel`, nothing is sent for that request, even 
 
 `get_messages()` on v2 reads `get_messages_page` 256 messages at a time. If the session changes mid-way (`session_busy` / `stale_cursor`), it falls back to the single `get_messages` command, which it also uses on v1.
 
+## Session tree
+
+`call(&GetTreeCommand {})` returns the session tree whatever its depth. Each entry nests two JSON levels under its parent, so the tree of a long session is tens of thousands of levels deep, and a `Value` that deep overflows the thread's stack when it drops by recursion. `SessionTree::tree` is therefore a `DeepJson<Vec<Map<String, Value>>>`: it derefs to the list of roots and drops it with a loop. `into_inner()` takes the list out; drop what you take out with `drop_deep`, one root at a time (`drop_deep(Value::Object(root))`), or take it apart node by node. Only the `tree` in the `data` of a `get_tree` answer may nest deeper than `serde_json` reads (128 levels), and only a successful answer to a `get_tree` call keeps it: a late answer (its call timed out) arrives as `Event::UnmatchedResponse`, and one that does not decode as `Event::Undecodable`, without that `data`, and a failed answer drops it. Any other frame that deep, or a `get_tree` answer that deep anywhere but in `data.tree` (in a member that a later duplicate replaces too), closes the client with `Error::Protocol`.
+
 ## Tests
 
 `cargo test` runs the wire tests and the transport tests, which use a scripted server on in-memory pipes.
 
-`cargo test -- --ignored --nocapture` also runs two smoke tests against the repository's server (`bun packages/coding-agent/src/cli.ts --mode rpc`). The first never calls a model. The second uses the scripted model in `packages/coding-agent/test/rpc-wire/fake-openai-server.ts`.
+`cargo test -- --ignored --nocapture` also runs three smoke tests against the repository's server (`bun packages/coding-agent/src/cli.ts --mode rpc`). The first never calls a model. The second uses the scripted model in `packages/coding-agent/test/rpc-wire/fake-openai-server.ts`. The third reads the tree of a 100,000-entry session through `packages/coding-agent/test/fixtures/tree-rpc-agent.ts`.

@@ -8,12 +8,14 @@
 #[rustfmt::skip]
 pub mod wire;
 pub mod client;
+mod deep;
 mod frame;
 pub mod host_tool;
 pub mod host_uri;
 pub mod turn;
 
 pub use client::{Client, ClientOptions, DEFAULT_PROMPT_TIMEOUT, Error, Event, encode_command};
+pub use deep::{DeepJson, DeepJsonValue, drop_deep};
 pub use host_tool::{HostTool, HostToolContext, HostToolError, HostToolOutput};
 pub use host_uri::{HostUri, HostUriContext, HostUriError, HostUriRead};
 pub use turn::PromptTurn;

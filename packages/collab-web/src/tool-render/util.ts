@@ -2,6 +2,8 @@
  * Pure helpers shared by tool renderers. Host-agnostic; no DOM beyond
  * `globalThis` feature probes, no host package imports.
  */
+import { stringifyJsonIteratively } from "@oh-my-pi/pi-utils/json";
+import { nestsDeeperThan } from "@oh-my-pi/pi-utils/nested-walk";
 import type { ToolResultImage, ToolResultLike } from "./types";
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
@@ -173,11 +175,21 @@ export function detailsRecord(result: ToolResultLike | undefined): Record<string
 	return result && isRecord(result.details) ? result.details : null;
 }
 
+/**
+ * Levels past which a card shows a tool call's arguments on one line, cut (`stringifyJsonIteratively` with a
+ * `limit`): indented, their text grows with the square of the depth, and a browser's `JSON.stringify` runs out of
+ * stack long before the depth a session entry holds (as deep as `JSON.parse` reads).
+ */
+export const DEEP_ARGS_LEVELS = 1_000;
+
 /** Compact one-line JSON digest of arbitrary args (generic summary fallback). */
 export function argsDigest(args: unknown, maxLen = 96): string {
 	if (args == null) return "";
 	if (isRecord(args) && Object.keys(args).length === 0) return "";
-	return truncate(normalizeWs(display(args)), maxLen);
+	const text = nestsDeeperThan(args, DEEP_ARGS_LEVELS)
+		? (stringifyJsonIteratively(args, { limit: maxLen }) ?? "")
+		: display(args);
+	return truncate(normalizeWs(text), maxLen);
 }
 
 interface HljsLike {

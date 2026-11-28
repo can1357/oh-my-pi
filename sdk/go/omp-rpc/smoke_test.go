@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -371,6 +372,151 @@ func TestSmokeModel(t *testing.T) {
 	}
 	t.Logf("get_messages: %d messages (messageCount %d)", len(messages), state.MessageCount)
 	finish()
+}
+
+// deepChainEntries is past every depth the decoders once stopped at:
+// encoding/json refuses 10,000 levels (5,000 entries, since get_tree nests each
+// entry two levels under its parent).
+const deepChainEntries = 100_000
+
+// writeChainSession writes, as test/rpc-get-tree.test.ts does, a session that
+// is one chain of deepChainEntries custom entries, e0 its root.
+func writeChainSession(t *testing.T, dir string) string {
+	t.Helper()
+	const timestamp = "2026-01-01T00:00:00.000Z"
+	header, err := json.Marshal(map[string]any{"type": "session", "version": 3, "id": "deep-chain", "timestamp": timestamp, "cwd": dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var session bytes.Buffer
+	session.Write(append(header, '\n'))
+	for index := range deepChainEntries {
+		parent := "null"
+		if index > 0 {
+			parent = fmt.Sprintf(`"e%d"`, index-1)
+		}
+		fmt.Fprintf(&session, `{"type":"custom","id":"e%d","parentId":%s,"timestamp":%q,"customType":"probe","data":{"index":%d}}`+"\n", index, parent, timestamp, index)
+	}
+	file := filepath.Join(dir, "sessions", "chain.jsonl")
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, session.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return file
+}
+
+// walkChain follows the chain of tree nodes from root, each the only child of
+// the one before, checking each entry's id and parent; it returns how many
+// nodes the chain has and its last entry's id. The json v2 backend of
+// encoding/json (the one Go 1.27 builds) reads no value nested 10,000 levels
+// deep, even token by token, so it walks root's raw children once as the host
+// writes them (compact, each node's entry before its children) and decodes
+// each entry alone, which works on the v1 backend too.
+func walkChain(t *testing.T, root map[string]json.RawMessage) (int, string) {
+	t.Helper()
+	type chainEntry struct {
+		ID       string  `json:"id"`
+		ParentID *string `json:"parentId"`
+	}
+	check := func(depth int, entry chainEntry) {
+		placed := entry.ID == fmt.Sprintf("e%d", depth)
+		if depth == 0 {
+			placed = placed && entry.ParentID == nil
+		} else {
+			placed = placed && entry.ParentID != nil && *entry.ParentID == fmt.Sprintf("e%d", depth-1)
+		}
+		if !placed {
+			t.Fatalf("node %d: entry %q, parent %q", depth, entry.ID, deref(entry.ParentID))
+		}
+	}
+	var entry chainEntry
+	if err := json.Unmarshal(root["entry"], &entry); err != nil {
+		t.Fatalf("root entry: %v", err)
+	}
+	check(0, entry)
+	depth, deepest := 1, entry.ID
+	children := []byte(root["children"])
+	expect := func(at int, want string) int {
+		if !bytes.HasPrefix(children[at:], []byte(want)) {
+			t.Fatalf("node %d: %.40q at offset %d, want %q", depth, children[at:], at, want)
+		}
+		return at + len(want)
+	}
+	at := 0
+	for {
+		// The children of the node at depth - 1: none, or the node at depth.
+		at = expect(at, "[")
+		if bytes.HasPrefix(children[at:], []byte("]")) {
+			at++
+			break
+		}
+		at = expect(at, `{"entry":`)
+		decoder := json.NewDecoder(bytes.NewReader(children[at:]))
+		entry = chainEntry{}
+		if err := decoder.Decode(&entry); err != nil {
+			t.Fatalf("node %d: entry: %v", depth, err)
+		}
+		at += int(decoder.InputOffset())
+		check(depth, entry)
+		deepest = entry.ID
+		depth++
+		at = expect(at, `,"children":`)
+	}
+	// Past the leaf each node and the children holding it close: a node with a
+	// second child or another member would show here.
+	if rest := string(children[at:]); rest != strings.Repeat("}]", depth-1) {
+		t.Fatalf("after the leaf: %.80q, want %d closing nodes", rest, depth-1)
+	}
+	return depth, deepest
+}
+
+// If this regresses, get_tree on a long session (a long session can be one
+// chain of tens of thousands of entries) fails with "exceeded max depth", or
+// waits out its 30 s timeout while the decode error goes to Frames.
+func TestSmokeGetTreeDeepChain(t *testing.T) {
+	root := repoRoot(t)
+	dir := t.TempDir()
+	sessionFile := writeChainSession(t, dir)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	// Real RPC dispatch over the session file; its mock model is never called here.
+	cmd := exec.Command("bun", "packages/coding-agent/test/fixtures/tree-rpc-agent.ts", dir, sessionFile)
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(), "PI_CODING_AGENT_DIR="+dir, "PI_NO_TITLE=1")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	client, err := Start(ctx, cmd)
+	if err != nil {
+		t.Fatalf("start: %v\n%s", err, stderr.String())
+	}
+	t.Cleanup(func() {
+		_ = client.Close()
+	})
+	if client.ProtocolVersion() != 2 {
+		t.Fatalf("negotiated protocol %d", client.ProtocolVersion())
+	}
+
+	tree, err := client.GetTree(ctx)
+	if err != nil {
+		t.Fatalf("get_tree: %v", err)
+	}
+	leaf := fmt.Sprintf("e%d", deepChainEntries-1)
+	if len(tree.Tree) != 1 || deref(tree.LeafID) != leaf {
+		t.Fatalf("get_tree: %d roots, leaf %q", len(tree.Tree), deref(tree.LeafID))
+	}
+	depth, deepest := walkChain(t, tree.Tree[0])
+	if depth != deepChainEntries || deepest != leaf {
+		t.Fatalf("get_tree: chain of %d nodes ending at %q", depth, deepest)
+	}
+	// The client still serves commands after the deep answer.
+	if _, err := client.GetState(ctx); err != nil {
+		t.Fatalf("get_state: %v", err)
+	}
+	if err := client.Close(); err != nil {
+		t.Errorf("close: %v\n%s", err, stderr.String())
+	}
 }
 
 func messageText(content MessageContent) string {

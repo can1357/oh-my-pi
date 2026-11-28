@@ -21,6 +21,7 @@
  *   with up to 25% jitter).
  */
 import { scheduler } from "node:timers/promises";
+import { stringifyDeepJson } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { AnthropicApiError, AnthropicConnectionError, AnthropicConnectionTimeoutError } from "../error";
 
@@ -38,6 +39,12 @@ const DEFAULT_MAX_RETRIES = 2;
 const DEFAULT_BASE_URL = "https://api.anthropic.com";
 const INITIAL_RETRY_DELAY_S = 0.5;
 const MAX_RETRY_DELAY_S = 8;
+/**
+ * Each request writes the whole conversation, whose tool calls' arguments are any JSON: a body
+ * nested past `JSON.stringify`'s recursion skips the attempt that would run out of stack (1.5 s or
+ * more each time) and goes to the deep writer.
+ */
+const REQUEST_BODY_JSON = { probeDepth: true } as const;
 
 /** Per-request options accepted by {@link AnthropicMessages.create}. */
 export interface AnthropicRequestOptions {
@@ -263,7 +270,7 @@ export class AnthropicHttpClient {
 		const maxRetryDelayMs = options?.maxRetryDelayMs ?? opts.maxRetryDelayMs ?? 60_000;
 		const url = `${this.baseURL}${path}`;
 		const headers = this.#buildHeaders(options?.headers);
-		const body = params === undefined ? undefined : JSON.stringify(params);
+		const body = params === undefined ? undefined : stringifyDeepJson(params, REQUEST_BODY_JSON);
 
 		for (let attempt = 0; ; attempt++) {
 			if (callerSignal?.aborted) throw createAbortError();

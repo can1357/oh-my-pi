@@ -1,5 +1,6 @@
+import { stringifyDeepJson } from "@oh-my-pi/pi-utils/json";
 import { Check, ChevronDown, ChevronRight, Copy } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 export interface JsonBlockProps {
 	data: unknown;
@@ -7,12 +8,16 @@ export interface JsonBlockProps {
 	initialCollapsed?: boolean;
 }
 
-/** Collapsible, copyable pretty-printed JSON. */
+/**
+ * Collapsible, copyable pretty-printed JSON. A value nested past `INDENTED_JSON_LEVELS` (1,000) levels, which a
+ * transcript entry can be (a line nests up to millions), is shown on one line: indented text grows with the square of
+ * the depth, and a browser's `JSON.stringify` runs out of stack long before that depth.
+ */
 export function JsonBlock({ data, title = "JSON", initialCollapsed = false }: JsonBlockProps) {
 	const [collapsed, setCollapsed] = useState(initialCollapsed);
 	const [copied, setCopied] = useState(false);
 	const copyResetRef = useRef<number>(0);
-	const json = JSON.stringify(data, null, 2);
+	const json = useMemo(() => stringifyDeepJson(data, { space: 2 }) ?? "", [data]);
 
 	// Clear the pending "Copied" reset if the block unmounts (e.g. drawer close).
 	useEffect(() => () => window.clearTimeout(copyResetRef.current), []);

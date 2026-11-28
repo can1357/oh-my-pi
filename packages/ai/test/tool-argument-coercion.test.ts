@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import type { Tool, ToolCall } from "@oh-my-pi/pi-ai/types";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
+import { DEEP_LEVELS, nestedChain, nestedChainJson, nestingOf } from "./helpers/deep-nesting";
 
 function createHistoryTool(keyword: "anyOf" | "oneOf"): Tool {
 	return {
@@ -103,6 +104,122 @@ describe("Tool argument coercion", () => {
 
 		expect(result.payload).toBe('{"a":1,"nested":["x"]}');
 	});
+
+	// A tool call's arguments are any JSON, as deep as JSON.parse reads.
+	it("stringifies an object nested past JSON.stringify's reach when schema expects string", () => {
+		const tool: Tool = { name: "object-string", description: "", parameters: type({ payload: type("string") }) };
+
+		const result = validateToolArguments(tool, {
+			type: "toolCall",
+			id: "call-object-string",
+			name: "object-string",
+			arguments: { payload: nestedChain() },
+		}) as { payload: string };
+
+		expect(result.payload).toBe(nestedChainJson());
+	});
+
+	// A repair copies the arguments before it writes: an in-process caller's `Date` beside the repaired field must
+	// reach the tool as a `Date`, not as the string a JSON copy makes of it.
+	it("keeps a Date beside a coerced field", () => {
+		const tool: Tool = { name: "flagged", description: "", parameters: type({ flag: "boolean", when: "unknown" }) };
+
+		const result = validateToolArguments(tool, {
+			type: "toolCall",
+			id: "call-flagged",
+			name: "flagged",
+			arguments: { flag: "true", when: new Date(0) },
+		}) as { flag: unknown; when: unknown };
+
+		expect(result.flag).toBe(true);
+		expect(result.when).toBeInstanceOf(Date);
+		expect((result.when as Date).getTime()).toBe(0);
+	});
+
+	// A tool's JSON Schema can describe a tree by referring to itself, and its arguments nest as deep as `JSON.parse`
+	// reads; a validator that recursed ran out of stack on them, so the call failed whatever the arguments held.
+	it("repairs and rejects arguments nested 50,000 levels against a recursive JSON Schema", () => {
+		const tool: Tool = {
+			name: "chain",
+			description: "",
+			parameters: { type: "object", properties: { next: { $ref: "#" }, flag: { type: "boolean" } } },
+		};
+		const call = (args: Record<string, unknown>): ToolCall => ({
+			type: "toolCall",
+			id: "call-chain",
+			name: "chain",
+			arguments: args,
+		});
+
+		const repaired = validateToolArguments(tool, call(nestedChain({ flag: "true" })));
+
+		expect(nestingOf(repaired)).toEqual({ levels: DEEP_LEVELS, bottom: { flag: true } });
+		expect(() => validateToolArguments(tool, call(nestedChain({ next: "leaf" })))).toThrow(
+			`${"next/".repeat(DEEP_LEVELS)}next: expected object, received string`,
+		);
+	}, 30_000);
+
+	const uniqueTool: Tool = {
+		name: "unique",
+		description: "",
+		parameters: { type: "object", properties: { items: { type: "array", uniqueItems: true } } },
+	};
+	const uniqueCall = (items: unknown[]): ToolCall => ({
+		type: "toolCall",
+		id: "call-unique",
+		name: "unique",
+		arguments: { items },
+	});
+
+	// `uniqueItems` compares a call's items with each other, and they nest as deep as `JSON.parse` reads; a
+	// comparison that recursed ran out of stack on two equal ones instead of reporting them.
+	it("rejects two equal items nested 50,000 levels under uniqueItems, and accepts two that differ", () => {
+		const equal = [nestedChain(), nestedChain()];
+		expect(() => validateToolArguments(uniqueTool, uniqueCall(equal))).toThrow("items/1: must be unique");
+		const distinct = [nestedChain({ leaf: "a" }), nestedChain({ leaf: "b" })];
+		const accepted = validateToolArguments(uniqueTool, uniqueCall(distinct)) as { items: unknown[] };
+		expect(accepted.items.map(item => nestingOf(item))).toEqual([
+			{ levels: DEEP_LEVELS, bottom: { leaf: "a" } },
+			{ levels: DEEP_LEVELS, bottom: { leaf: "b" } },
+		]);
+	}, 30_000);
+
+	// `uniqueItems` compares a value JSON does not hold, which an in-process caller can pass, as `Bun.deepEquals`
+	// does: two `Date`s by their time, where any two compared equal (neither has an enumerable key) and the call failed.
+	it("accepts two different Dates under uniqueItems and rejects two equal ones", () => {
+		const accepted = validateToolArguments(uniqueTool, uniqueCall([new Date(0), new Date(1)])) as {
+			items: unknown[];
+		};
+		expect(accepted.items.map(item => (item instanceof Date ? item.getTime() : item))).toEqual([0, 1]);
+		expect(() => validateToolArguments(uniqueTool, uniqueCall([new Date(0), new Date(0)]))).toThrow(
+			"items/1: must be unique",
+		);
+	});
+
+	// JSON can carry an own `__proto__` key (`JSON.parse` makes one), and `uniqueItems` and `const` compare it as a key.
+	// Read through `Object.prototype`'s accessor instead, `{"__proto__":{}}` equalled any one-key object whose value
+	// had no keys: `uniqueItems` rejected `[{"__proto__":{}},{"b":1}]` and `const: {"mode":"a"}` accepted it.
+	it("compares an own __proto__ key as a key under uniqueItems", () => {
+		const items: unknown[] = JSON.parse('[{"__proto__":{}},{"b":1}]');
+		const accepted = validateToolArguments(uniqueTool, uniqueCall(items)) as { items: object[] };
+		expect(accepted.items.map(item => Object.keys(item))).toEqual([["__proto__"], ["b"]]);
+	});
+
+	it("compares an own __proto__ key as a key under const", () => {
+		const constTool: Tool = {
+			name: "mode",
+			description: "",
+			parameters: { type: "object", properties: { value: { const: { mode: "a" } } } },
+		};
+		const call: ToolCall = {
+			type: "toolCall",
+			id: "call-mode",
+			name: "mode",
+			arguments: JSON.parse('{"value":{"__proto__":{}}}'),
+		};
+		expect(() => validateToolArguments(constTool, call)).toThrow("value: must equal const value");
+	});
+
 	it("stringifies container values when a string union branch matches", () => {
 		const tool: Tool = {
 			name: "union-string",

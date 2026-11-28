@@ -7,8 +7,10 @@ import {
 	isEisdir,
 	isEnoent,
 	isEnotdir,
+	type NestedWalk,
 	parseJsonlLenient,
 	peekFile,
+	runNested,
 } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { Semaphore } from "../task/parallel";
@@ -600,29 +602,52 @@ interface BlobRefSite {
 /**
  * Collect the blob references in session image blocks and provider image URLs.
  * Snapcompact frames stay as references until context rebuilding selects them.
+ * The walk keeps its own stack ({@link runNested}), so it reads a value as deep
+ * as `JSON.parse` reads (over a hundred times what a recursive walk's stack allows).
+ * A container met again inside itself (a cycle, never in parsed JSON) is not
+ * walked again.
  */
-function collectBlobRefSites(value: unknown, sites: BlobRefSite[], key?: string): void {
-	if (key !== "frames" && isExternalizableImagePosition(value, key) && isBlobRef(value.data)) {
-		sites.push({ holder: value, key: "data", ref: value.data, asDataUrl: false });
+function collectBlobRefSites(value: unknown, sites: BlobRefSite[]): void {
+	if (typeof value === "object" && value !== null) runNested(blobRefSitesIn(value, undefined, sites, new Set()));
+}
+
+/** {@link collectBlobRefSites} of `node`, under `key` of its holder, skipping a container in `open`, which it is inside. */
+function* blobRefSitesIn(
+	node: object,
+	key: string | undefined,
+	sites: BlobRefSite[],
+	open: Set<object>,
+): NestedWalk<void> {
+	if (open.has(node)) return;
+	if (key !== "frames" && isExternalizableImagePosition(node, key) && isBlobRef(node.data)) {
+		sites.push({ holder: node, key: "data", ref: node.data, asDataUrl: false });
 		return;
 	}
 
-	if (Array.isArray(value)) {
-		for (const item of value) collectBlobRefSites(item, sites, key);
+	if (Array.isArray(node)) {
+		open.add(node);
+		for (const item of node) {
+			if (typeof item === "object" && item !== null) yield blobRefSitesIn(item, key, sites, open);
+		}
+		open.delete(node);
 		return;
 	}
 
-	if (typeof value !== "object" || value === null) return;
-	const holder = value as Record<string, unknown>;
+	const holder = node as Record<string, unknown>;
 	if (holder.type === "image_generation_call" && typeof holder.result === "string" && isBlobRef(holder.result)) {
 		sites.push({ holder, key: "result", ref: holder.result, asDataUrl: false });
 	}
 
-	if (hasImageUrl(value) && isBlobRef(value.image_url)) {
-		sites.push({ holder, key: "image_url", ref: value.image_url, asDataUrl: true });
+	if (hasImageUrl(node) && isBlobRef(node.image_url)) {
+		sites.push({ holder, key: "image_url", ref: node.image_url, asDataUrl: true });
 	}
 
-	for (const childKey in holder) collectBlobRefSites(holder[childKey], sites, childKey);
+	open.add(holder);
+	for (const childKey in holder) {
+		const child = holder[childKey];
+		if (typeof child === "object" && child !== null) yield blobRefSitesIn(child, childKey, sites, open);
+	}
+	open.delete(holder);
 }
 
 /**
@@ -630,18 +655,28 @@ function collectBlobRefSites(value: unknown, sites: BlobRefSite[], key?: string)
  * Early-exits on the first hit, so blob-free entries skip the
  * {@link collectBlobRefSites} descent entirely. Conservative — a blob ref in a
  * non-resolved position still returns true, which only costs an extra (no-op) walk.
+ * Iterative so it reads a value as deep as {@link collectBlobRefSites} does.
  */
 function containsBlobRef(value: unknown): boolean {
 	if (typeof value === "string") return isBlobRef(value);
-	if (Array.isArray(value)) {
-		for (const item of value) {
-			if (containsBlobRef(item)) return true;
-		}
-		return false;
-	}
 	if (typeof value !== "object" || value === null) return false;
-	for (const key in value) {
-		if (containsBlobRef((value as Record<string, unknown>)[key])) return true;
+	const seen = new Set<object>();
+	const pending: object[] = [value];
+	// Whether `member` is a blob reference; a container is left to walk.
+	const isRef = (member: unknown): boolean => {
+		if (typeof member === "string") return isBlobRef(member);
+		if (typeof member === "object" && member !== null) pending.push(member);
+		return false;
+	};
+	while (pending.length > 0) {
+		const container = pending.pop()!;
+		if (seen.has(container)) continue;
+		seen.add(container);
+		if (Array.isArray(container)) {
+			for (const member of container) if (isRef(member)) return true;
+		} else {
+			for (const key in container) if (isRef(Reflect.get(container, key))) return true;
+		}
 	}
 	return false;
 }

@@ -8,6 +8,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { clientBundlePlugins } from "@oh-my-pi/omp-stats/client-bundle";
 import { exportThemeStyles, webExportThemeVars } from "../../coding-agent/src/export/html/web-palette";
 
 const collabDir = path.join(import.meta.dir, "..");
@@ -43,6 +44,8 @@ export async function buildExportViewer(options: ExportViewerBuildOptions = {}):
 		minify: true,
 		define: { "process.env.NODE_ENV": JSON.stringify("production") },
 		plugins: [
+			// The trace views come from the stats client, which needs its plugins in any browser bundle.
+			...clientBundlePlugins,
 			{
 				name: "shared-export-markdown",
 				setup(build) {

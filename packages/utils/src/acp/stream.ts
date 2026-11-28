@@ -1,4 +1,12 @@
+import { stringifyDeepJson } from "../json";
 import type { AnyMessage } from "./transport";
+
+/**
+ * A session update carries a tool call's arguments, which are any JSON: a message nested past
+ * `JSON.stringify`'s recursion skips the attempt that would run out of stack (1.5 s or more each
+ * time) and goes to the deep writer.
+ */
+const MESSAGE_JSON = { probeDepth: true } as const;
 
 /** Bidirectional JSON-RPC message transport. */
 export interface Stream {
@@ -14,7 +22,7 @@ export function ndJsonStream(output: WritableStream<Uint8Array>, input: Readable
 		async write(message) {
 			const writer = output.getWriter();
 			try {
-				await writer.write(encoder.encode(`${JSON.stringify(message)}\n`));
+				await writer.write(encoder.encode(`${stringifyDeepJson(message, MESSAGE_JSON)}\n`));
 			} finally {
 				writer.releaseLock();
 			}

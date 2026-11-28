@@ -14,7 +14,7 @@ import {
 	type Usage,
 } from "@oh-my-pi/pi-ai";
 import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
-import { getSessionsDir, isEnoent, readLines } from "@oh-my-pi/pi-utils";
+import { getSessionsDir, isEnoent, readLines, stringifyDeepJson } from "@oh-my-pi/pi-utils";
 import type {
 	AgentType,
 	MessageStatsInput,
@@ -493,7 +493,7 @@ function extractToolCalls(
 		if (toolName === null) continue;
 		let argsChars = 0;
 		try {
-			argsChars = JSON.stringify(block.arguments ?? {}).length;
+			argsChars = stringifyDeepJson(block.arguments ?? {})?.length ?? 0;
 		} catch {
 			// Non-serializable arguments (shouldn't happen in persisted JSONL); size unknown.
 		}

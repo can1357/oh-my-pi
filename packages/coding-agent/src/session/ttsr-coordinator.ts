@@ -31,7 +31,7 @@ import ttsrWarningTemplate from "../prompts/system/ttsr-warning.md" with { type:
 import type { AgentSessionEvent } from "./agent-session-events";
 import { escapeHarnessTags } from "./harness-tags";
 import type { SessionManager } from "./session-manager";
-import { TtsrToolInspector } from "./ttsr-outputs";
+import { TtsrToolInspector, toolArgumentsText } from "./ttsr-outputs";
 
 type TtsrContinueSkipReason =
 	| "aborted"
@@ -690,10 +690,12 @@ export class TtsrCoordinator {
 		// that emit toolcall_start -> toolcall_end with no intermediate deltas
 		// (Cursor exec synthesis, OpenAI lossy-proxy fallback) leave that buffer
 		// empty, so the finalized arguments must seed the snapshot themselves.
+		// Arguments with no JSON text (a `toJSON` that returns undefined) seed
+		// nothing, as absent ones do.
 		const finalArgs = options.final ? toolCall?.arguments : undefined;
 		if (finalArgs !== undefined && finalArgs !== null) {
-			const snapshot = typeof finalArgs === "string" ? finalArgs : JSON.stringify(finalArgs);
-			return this.#manager.checkSnapshot(snapshot, matchContext, options);
+			const snapshot = toolArgumentsText(finalArgs);
+			if (snapshot !== undefined) return this.#manager.checkSnapshot(snapshot, matchContext, options);
 		}
 		return this.#manager.checkDelta(delta, matchContext, options);
 	}

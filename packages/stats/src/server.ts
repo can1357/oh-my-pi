@@ -1,7 +1,7 @@
 import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger, stringifyDeepJson } from "@oh-my-pi/pi-utils";
 import { $, type Server } from "bun";
 import {
 	getCostDashboardStats,
@@ -181,6 +181,15 @@ let spotlightBuilds = new AbortController();
 let spotlightQueue: Promise<unknown> = Promise.resolve();
 
 /**
+ * `Response.json(value)` for a value that holds a transcript's entries, which
+ * nest as deep as a session line (millions of levels): written by
+ * `stringifyDeepJson`, where `Response.json` runs out of stack at 40,000.
+ */
+function sessionContentResponse(value: unknown): Response {
+	return new Response(stringifyDeepJson(value), { headers: { "content-type": "application/json;charset=utf-8" } });
+}
+
+/**
  * The Spotlight dashboard as JSON, built once per data version and view. Every open page refetches on each version
  * bump and a build takes seconds of a worker's CPU and memory, so pages showing the same view share one build and
  * different views wait their turn.
@@ -316,7 +325,7 @@ export async function handleApi(req: Request): Promise<Response> {
 		if (!id) return new Response("Bad Request", { status: 400 });
 		const details = await getRequestDetails(parseInt(id, 10));
 		if (!details) return new Response("Not Found", { status: 404 });
-		return Response.json(details);
+		return sessionContentResponse(details);
 	}
 
 	if (path === "/api/close") {
@@ -400,7 +409,7 @@ export async function handleApi(req: Request): Promise<Response> {
 		try {
 			const entry = await getTraceEntry(file, id);
 			if (!entry) return Response.json({ error: "entry not found" }, { status: 404 });
-			return Response.json({ entry });
+			return sessionContentResponse({ entry });
 		} catch (err) {
 			if (err instanceof TracePathError) return Response.json({ error: err.message }, { status: 400 });
 			throw err;

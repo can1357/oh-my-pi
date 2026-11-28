@@ -3534,7 +3534,7 @@ pub struct SessionEntries {
 /// Raw session tree roots.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionTree {
-	pub tree: Vec<Map<String, Value>>,
+	pub tree: crate::DeepJson<Vec<Map<String, Value>>>,
 	#[serde(rename = "leafId", deserialize_with = "Deserialize::deserialize")]
 	pub leaf_id: Option<String>,
 }
@@ -6719,7 +6719,12 @@ impl Command for GetEntriesCommand {
 	type Output = SessionEntries;
 
 	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
-		serde_json::from_value::<SessionEntries>(data.unwrap_or_else(|| Value::Object(Map::new())))
+		let mut data = data.unwrap_or_else(|| Value::Object(Map::new()));
+		// Raw JSON is moved into its fields, not rebuilt through serde (see `crate::deep`).
+		let mut raw = crate::deep::Detached::new(&mut data, [("entries", Value::Array(Vec::new()))]);
+		let mut result = serde_json::from_value::<SessionEntries>(data)?;
+		raw.place(0, "entries", &mut result.entries)?;
+		Ok(result)
 	}
 }
 
@@ -6733,7 +6738,12 @@ impl Command for GetTreeCommand {
 	type Output = SessionTree;
 
 	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
-		serde_json::from_value::<SessionTree>(data.unwrap_or_else(|| Value::Object(Map::new())))
+		let mut data = data.unwrap_or_else(|| Value::Object(Map::new()));
+		// Raw JSON is moved into its fields, not rebuilt through serde (see `crate::deep`).
+		let mut raw = crate::deep::Detached::new(&mut data, [("tree", Value::Array(Vec::new()))]);
+		let mut result = serde_json::from_value::<SessionTree>(data)?;
+		raw.place(0, "tree", &mut result.tree)?;
+		Ok(result)
 	}
 }
 
@@ -6849,7 +6859,12 @@ impl Command for GetSubagentMessagesCommand {
 	type Output = SubagentMessages;
 
 	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
-		serde_json::from_value::<SubagentMessages>(data.unwrap_or_else(|| Value::Object(Map::new())))
+		let mut data = data.unwrap_or_else(|| Value::Object(Map::new()));
+		// Raw JSON is moved into its fields, not rebuilt through serde (see `crate::deep`).
+		let mut raw = crate::deep::Detached::new(&mut data, [("entries", Value::Array(Vec::new()))]);
+		let mut result = serde_json::from_value::<SubagentMessages>(data)?;
+		raw.place(0, "entries", &mut result.entries)?;
+		Ok(result)
 	}
 }
 
@@ -7013,7 +7028,12 @@ impl Command for SetModelCommand {
 	type Output = ModelInfo;
 
 	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
-		serde_json::from_value::<ModelInfo>(data.unwrap_or_else(|| Value::Object(Map::new())))
+		let mut data = data.unwrap_or_else(|| Value::Object(Map::new()));
+		// Raw JSON is moved into its fields, not rebuilt through serde (see `crate::deep`).
+		let mut raw = crate::deep::Detached::new(&mut data, [("compat", Value::Null)]);
+		let mut result = serde_json::from_value::<ModelInfo>(data)?;
+		raw.place(0, "compat", &mut result.compat)?;
+		Ok(result)
 	}
 }
 
@@ -7182,7 +7202,13 @@ impl Command for CompactCommand {
 	type Output = CompactionResult;
 
 	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
-		serde_json::from_value::<CompactionResult>(data.unwrap_or_else(|| Value::Object(Map::new())))
+		let mut data = data.unwrap_or_else(|| Value::Object(Map::new()));
+		// Raw JSON is moved into its fields, not rebuilt through serde (see `crate::deep`).
+		let mut raw = crate::deep::Detached::new(&mut data, [("details", Value::Null), ("preserveData", Value::Null)]);
+		let mut result = serde_json::from_value::<CompactionResult>(data)?;
+		raw.place(0, "details", &mut result.details)?;
+		raw.place(1, "preserveData", &mut result.preserve_data)?;
+		Ok(result)
 	}
 }
 
@@ -7265,7 +7291,14 @@ impl Command for BashCommand {
 	type Output = BashResult;
 
 	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
-		serde_json::from_value::<BashResult>(data.unwrap_or_else(|| Value::Object(Map::new())))
+		let mut data = data.unwrap_or_else(|| Value::Object(Map::new()));
+		// Raw JSON is moved into its fields, not rebuilt through serde (see `crate::deep`).
+		let mut raw = crate::deep::Detached::new(&mut data, [("artifactError", Value::Null), ("minimized", Value::Null), ("trace", Value::Null)]);
+		let mut result = serde_json::from_value::<BashResult>(data)?;
+		raw.place(0, "artifactError", &mut result.artifact_error)?;
+		raw.place(1, "minimized", &mut result.minimized)?;
+		raw.place(2, "trace", &mut result.trace)?;
+		Ok(result)
 	}
 }
 

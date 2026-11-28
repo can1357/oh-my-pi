@@ -7,6 +7,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { clientBundlePlugins } from "@oh-my-pi/omp-stats/client-bundle";
 import { $ } from "bun";
 import {
 	stampRelayExtensionManifest,
@@ -119,7 +120,12 @@ async function buildId(extensionDir: string, files: readonly string[]): Promise<
 	return hasher.digest("hex").slice(0, 16);
 }
 
-async function bundle(outDir: string, entry: string, name: string, format: "iife" | "esm"): Promise<void> {
+/**
+ * Bundle `entry` (relative to `extension/`) into `outDir` as `<name>.js` for the browser. The panel's tool cards use
+ * pi-utils' JSON helpers, which read `node:util/types`, so every script gets the stats client's browser plugins.
+ * Exported for tests.
+ */
+export async function bundle(outDir: string, entry: string, name: string, format: "iife" | "esm"): Promise<void> {
 	const result = await Bun.build({
 		entrypoints: [path.join(source, entry)],
 		outdir: outDir,
@@ -128,6 +134,7 @@ async function bundle(outDir: string, entry: string, name: string, format: "iife
 		naming: { entry: `${name}.[ext]` },
 		minify: name === "panel",
 		define: { "process.env.NODE_ENV": JSON.stringify("production") },
+		plugins: clientBundlePlugins,
 	});
 	if (!result.success) throw new AggregateError(result.logs, `Failed to bundle ${entry}`);
 	if (!(await Bun.file(path.join(outDir, `${name}.js`)).exists())) {

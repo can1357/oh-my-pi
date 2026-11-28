@@ -31,6 +31,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { runCli } from "../src/cli";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
+import { DEEP_LEVELS, nestedChainJson, nestingOf } from "../../ai/test/helpers/deep-nesting";
 
 let root: string;
 let writes: string[] = [];
@@ -3476,4 +3477,36 @@ describe("runGcCommand replay data stripping", () => {
 			.slice(0, -1);
 		expectStripped(lines, replayLines(id));
 	});
+
+	// A line holds JSON as deep as JSON.parse reads (millions of levels); JSON.stringify gives out at 40,000.
+	test("strips a turn whose tool call's arguments nest deeper than JSON.stringify recurses", async () => {
+		const deepArguments = nestedChainJson();
+		const id = Bun.randomUUIDv7();
+		const file = path.join(getSessionsDir(root), "project", `${id}.jsonl`);
+		const lines = [
+			header(id),
+			assistant(
+				[
+					{ type: "thinking", thinking: "earlier", thinkingSignature: "EqQBearly", itemId: "rs_0" },
+					{ type: "toolCall", id: "call_0", name: "inspect", arguments: "DEEP", thoughtSignature: "c2ln" },
+				],
+				{ stopReason: "toolUse" },
+			).replace('"DEEP"', deepArguments),
+			toolResult("call_0"),
+			prompt("keep going"),
+			assistant([{ type: "text", text: "done" }]),
+		];
+		await writeTranscript(file, lines, 40);
+
+		const result = await runGcCommand({ flags: { agentDir: root, strip: true, apply: true } });
+
+		expect(result.strip).toMatchObject({ wouldStrip: 1, stripped: 1, records: 1, errors: [] });
+		const after = (await Bun.file(file).text()).split("\n").slice(0, -1);
+		expect(result.strip?.bytes).toBe(Buffer.byteLength(lines[1]) - Buffer.byteLength(after[1]));
+		for (const index of [0, 2, 3, 4]) expect(after[index]).toBe(lines[index]);
+		const [thinking, call] = JSON.parse(after[1]).message.content;
+		expect(thinking).toEqual({ type: "thinking", thinking: "earlier" });
+		expect(call.thoughtSignature).toBeUndefined();
+		expect(nestingOf(call.arguments)).toEqual({ levels: DEEP_LEVELS, bottom: { leaf: "bottom" } });
+	}, 20_000);
 });

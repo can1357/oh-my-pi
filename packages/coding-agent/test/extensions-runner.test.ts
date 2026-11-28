@@ -44,8 +44,9 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { createEvalCustomTools, describeEvalTools } from "@oh-my-pi/pi-coding-agent/task/eval-tools";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
-import { getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
+import { getProjectAgentDir, isRecord, logger, TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
+import { DEEP_LEVELS, nestedChain, nestingOf } from "../../ai/test/helpers/deep-nesting";
 
 describe("ExtensionRunner", () => {
 	let tempDir: TempDir;
@@ -1031,6 +1032,181 @@ export default function (pi) {
 			expect(await runner.emitAssistantMessage(message)).toBeUndefined();
 			expect(errors).toHaveLength(1);
 			expect(errors[0]?.error).toContain("non-text blocks");
+		});
+
+		// A tool call's arguments are any JSON, as deep as JSON.parse reads; handlers see a copy that is compared back.
+		it("rewrites text beside a tool call nested past JSON.stringify's reach", async () => {
+			await Bun.write(
+				path.join(extensionsDir, "assistant-message-deep.ts"),
+				`export default pi => pi.on("assistant_message", event => ({
+					content: [{ ...event.message.content[0], text: "rewritten" }, event.message.content[1]],
+				}));`,
+			);
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const toolCall = { type: "toolCall" as const, id: "call-1", name: "read", arguments: { note: nestedChain() } };
+			const message = {
+				...createAssistantMessage("original"),
+				content: [{ type: "text" as const, text: "original" }, toolCall],
+			};
+
+			const rewritten = await runner.emitAssistantMessage(message);
+
+			expect(rewritten?.[0]).toEqual({ type: "text", text: "rewritten" });
+			expect(rewritten?.[1]).toBe(toolCall);
+		});
+	});
+
+	describe("context", () => {
+		// A tool call's arguments are any JSON, as deep as JSON.parse reads; the handler edits a copy of the history.
+		it("hands a handler a copy of a history holding a tool call nested past JSON.stringify's reach", async () => {
+			await Bun.write(
+				path.join(extensionsDir, "context-deep.ts"),
+				`export default pi => pi.on("context", event => {
+					event.messages.find(message => message.role === "assistant").content.push({ type: "text", text: "noted" });
+					return { messages: event.messages.map(message => ({ ...message })) };
+				});`,
+			);
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const toolCall = { type: "toolCall" as const, id: "call-1", name: "read", arguments: { note: nestedChain() } };
+			const assistant = { ...createAssistantMessage("reading"), content: [toolCall] };
+
+			const projected = await runner.emitContext([{ role: "user", content: "read it", timestamp: 1 }, assistant]);
+
+			// The handler's edit stays on its copy; the history keeps the call alone.
+			expect(assistant.content).toHaveLength(1);
+			const rewritten = projected[1];
+			if (rewritten?.role !== "assistant") throw new Error("Expected the assistant message");
+			expect(rewritten.content.map(block => block.type)).toEqual(["toolCall", "text"]);
+			const call = rewritten.content[0];
+			expect(call?.type === "toolCall" && nestingOf(call.arguments.note)).toEqual({
+				levels: DEEP_LEVELS,
+				bottom: { leaf: "bottom" },
+			});
+			// A rewrite seen for the first time keeps its place in the cached prefix.
+			expect(isPerCallContextMessage(rewritten)).toBe(false);
+		});
+
+		// A tool result's details are any value the tool returned; a handler reading a Map in them must get a Map.
+		it("hands a handler the Map a tool result's details hold, not the `{}` a JSON copy leaves", async () => {
+			await Bun.write(
+				path.join(extensionsDir, "context-details-map.ts"),
+				`export default pi => pi.on("context", event => ({
+					messages: event.messages.map(message => {
+						if (message.role !== "toolResult") return message;
+						const lines = message.details.lines;
+						const text = lines instanceof Map ? "a.ts has " + lines.get("a.ts") : "lines is " + JSON.stringify(lines);
+						return { ...message, content: [{ type: "text", text }] };
+					}),
+				}));`,
+			);
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const toolResult: AgentMessage = {
+				role: "toolResult",
+				toolCallId: "call-1",
+				toolName: "read",
+				content: [{ type: "text", text: "read a.ts" }],
+				details: { lines: new Map([["a.ts", 12]]) },
+				isError: false,
+				timestamp: 2,
+			};
+
+			const projected = await runner.emitContext([{ role: "user", content: "read it", timestamp: 1 }, toolResult]);
+
+			const rewritten = projected[1];
+			expect(rewritten?.role === "toolResult" && rewritten.content).toEqual([{ type: "text", text: "a.ts has 12" }]);
+		});
+
+		// A tool result's details are any value the tool returned, and a live one can refer to itself. The handler's
+		// copy keeps the cycle, and comparing that copy back with the history answers as `Bun.deepEquals` does,
+		// instead of failing the request before it reaches the provider.
+		const cyclicToolResult = (): AgentMessage => {
+			const details: Record<string, unknown> = { path: "a.ts" };
+			details.self = details;
+			return {
+				role: "toolResult",
+				toolCallId: "call-1",
+				toolName: "read",
+				content: [{ type: "text", text: "read a.ts" }],
+				details,
+				isError: false,
+				timestamp: 2,
+			};
+		};
+
+		it("keeps the copy a no-op handler leaves of tool result details that refer to themselves", async () => {
+			await Bun.write(
+				path.join(extensionsDir, "context-noop.ts"),
+				`export default pi => pi.on("context", () => undefined);`,
+			);
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const toolResult = cyclicToolResult();
+
+			const projected = await runner.emitContext([{ role: "user", content: "read it", timestamp: 1 }, toolResult]);
+
+			const copy = projected[1];
+			if (copy?.role !== "toolResult" || !isRecord(copy.details)) throw new Error("Expected the tool result");
+			expect(copy).not.toBe(toolResult);
+			expect(copy.details.self).toBe(copy.details);
+			// Unchanged from the history, so it keeps its place in the cached prefix.
+			expect(projected.map(message => isPerCallContextMessage(message))).toEqual([false, false]);
+		});
+
+		it("marks per-call a handler's rewrite of self-referring details to a cycle of another shape", async () => {
+			await Bun.write(
+				path.join(extensionsDir, "context-cycle.ts"),
+				`export default pi => pi.on("context", event => ({
+					messages: event.messages.map(message => {
+						if (message.role !== "toolResult") return message;
+						const outer = { path: "a.ts" };
+						outer.self = { path: "a.ts", self: outer };
+						return { ...message, details: outer };
+					}),
+				}));`,
+			);
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			const projected = await runner.emitContext([
+				{ role: "user", content: "read it", timestamp: 1 },
+				cyclicToolResult(),
+			]);
+
+			// Two objects that refer to each other differ from one that refers to itself, as `Bun.deepEquals` answers.
+			expect(projected.map(message => isPerCallContextMessage(message))).toEqual([false, true]);
 		});
 	});
 

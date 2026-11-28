@@ -29,6 +29,7 @@ import type { HarmonyDetection } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import * as harmonyLeak from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { createAssistantMessage, createHarmonyMitigationModel, createUserMessage } from "./helpers";
+import { DEEP_LEVELS, nestedChain, nestedChainJson, nestingOf } from "../../ai/test/helpers/deep-nesting";
 
 declare module "@oh-my-pi/pi-agent-core/types" {
 	interface CustomAgentMessages {
@@ -847,6 +848,80 @@ describe("agentLoop with AgentMessage", () => {
 		expect(toolStart.args).toBeDefined();
 		expect(toolStart.args.__rawJson).toBeUndefined();
 		expect(toolStart.args.__parseError).toBeDefined(); // keeps __parseError for visibility of parse failure
+	});
+
+	// A tool call's arguments are any JSON, as deep as JSON.parse reads; validation walks them before the tool runs.
+	it("runs a strict tool whose valid arguments nest past JSON.stringify's reach", async () => {
+		const received: unknown[] = [];
+		const toolSchema = type({ data: "object" });
+		const tool: AgentTool<typeof toolSchema, { data: object }> = {
+			name: "store",
+			label: "Store",
+			description: "Store tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				received.push(params.data);
+				return { content: [{ type: "text", text: "stored" }] };
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "store", arguments: { data: nestedChain() } }] },
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
+
+		const messages = await agentLoop(
+			[createUserMessage("store it")],
+			context,
+			config,
+			undefined,
+			mock.stream,
+		).result();
+
+		const result = messages.find((message): message is ToolResultMessage => message.role === "toolResult");
+		expect(result?.isError).toBe(false);
+		expect(received.map(nestingOf)).toEqual([{ levels: DEEP_LEVELS, bottom: { leaf: "bottom" } }]);
+	});
+
+	it("reports a schema failure of arguments nested past JSON.stringify's reach as the validation error", async () => {
+		const toolSchema = type({ count: "number" });
+		const tool: AgentTool<typeof toolSchema, { count: number }> = {
+			name: "count",
+			label: "Count",
+			description: "Count tool",
+			parameters: toolSchema,
+			async execute() {
+				return { content: [] };
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "count", arguments: { count: nestedChain() } }] },
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
+
+		const messages = await agentLoop(
+			[createUserMessage("count it")],
+			context,
+			config,
+			undefined,
+			mock.stream,
+		).result();
+
+		const result = messages.find((message): message is ToolResultMessage => message.role === "toolResult");
+		expect(result?.isError).toBe(true);
+		const text = toolResultText(result!);
+		expect(text).toStartWith(
+			'Validation failed for tool "count":\n  - count: count must be a number (was an object)',
+		);
+		// The received arguments are written whole, on one line past the depth indentation would square.
+		expect(text).toEndWith(`Received arguments:\n{"count":${nestedChainJson()}}`);
 	});
 
 	it("reports malformed JSON to the model instead of running a lenient tool with empty args", async () => {

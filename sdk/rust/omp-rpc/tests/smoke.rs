@@ -4,11 +4,18 @@
 //! scripted OpenAI-compatible server in `test/rpc-wire/fake-openai-server.ts`.
 
 use std::{
+	ffi::OsStr,
+	fs::DirBuilder,
 	io::{BufRead, BufReader},
+	os::unix::fs::DirBuilderExt,
 	path::{Path, PathBuf},
 	process::{Command as Process, Stdio},
-	sync::{Arc, Mutex, mpsc::Receiver},
-	time::{Duration, Instant},
+	sync::{
+		Arc, Mutex,
+		atomic::{AtomicU32, Ordering},
+		mpsc::Receiver,
+	},
+	time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use omp_rpc::*;
@@ -35,6 +42,49 @@ fn repo_root() -> PathBuf {
 		.join("../../..")
 		.canonicalize()
 		.unwrap()
+}
+
+/// A directory of the test's own under the temp dir, removed on drop. It is
+/// made new with mode 0700 (`create`, not `create_dir_all`), so a directory
+/// another account made first under that name fails the test instead of
+/// serving as the host's agent directory.
+struct PrivateDir(PathBuf);
+
+impl PrivateDir {
+	fn new(prefix: &str) -> Self {
+		static MADE: AtomicU32 = AtomicU32::new(0);
+		for _ in 0..16 {
+			let nanos = SystemTime::now()
+				.duration_since(UNIX_EPOCH)
+				.unwrap()
+				.subsec_nanos();
+			let made = MADE.fetch_add(1, Ordering::Relaxed);
+			let name = format!("{prefix}-{}-{nanos:08x}-{made}", std::process::id());
+			let path = std::env::temp_dir().join(name);
+			match DirBuilder::new().mode(0o700).create(&path) {
+				Ok(()) => return Self(path),
+				Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {},
+				Err(error) => panic!("make {}: {error}", path.display()),
+			}
+		}
+		panic!("no free name for a private directory under {}", std::env::temp_dir().display());
+	}
+
+	fn path(&self) -> &Path {
+		&self.0
+	}
+}
+
+impl AsRef<OsStr> for PrivateDir {
+	fn as_ref(&self) -> &OsStr {
+		self.0.as_os_str()
+	}
+}
+
+impl Drop for PrivateDir {
+	fn drop(&mut self) {
+		let _ = std::fs::remove_dir_all(&self.0);
+	}
 }
 
 fn assert_clean(seen: &[Event]) {
@@ -76,8 +126,7 @@ fn notification_type(event: &Event) -> String {
 #[ignore = "spawns the real omp server; run with --ignored"]
 fn smoke_real_server() {
 	let repo = repo_root();
-	let agent_dir = std::env::temp_dir().join(format!("omp-rpc-rust-smoke-{}", std::process::id()));
-	std::fs::create_dir_all(&agent_dir).unwrap();
+	let agent_dir = PrivateDir::new("omp-rpc-rust-smoke");
 	let mut process = Process::new("bun");
 	process
 		.args(["packages/coding-agent/src/cli.ts", "--mode", "rpc", "--no-session"])
@@ -196,7 +245,6 @@ fn smoke_real_server() {
 		std::thread::sleep(Duration::from_millis(20));
 	}
 	println!("server group gone {:?} after drop", dropped.elapsed());
-	let _ = std::fs::remove_dir_all(&agent_dir);
 }
 
 fn tool_names(turn: &PromptTurn) -> Vec<(&'static str, String)> {
@@ -216,8 +264,7 @@ fn tool_names(turn: &PromptTurn) -> Vec<(&'static str, String)> {
 #[ignore = "spawns the real omp server and a scripted model; run with --ignored"]
 fn smoke_scripted_model() {
 	let repo = repo_root();
-	let agent_dir = std::env::temp_dir().join(format!("omp-rpc-rust-model-{}", std::process::id()));
-	std::fs::create_dir_all(&agent_dir).unwrap();
+	let agent_dir = PrivateDir::new("omp-rpc-rust-model");
 	let mut model = Process::new("bun")
 		.arg("packages/coding-agent/test/rpc-wire/fake-openai-server.ts")
 		.arg(&agent_dir)
@@ -383,7 +430,6 @@ fn smoke_scripted_model() {
 	drop(client);
 	drop(model.stdin.take());
 	let _ = model.wait();
-	let _ = std::fs::remove_dir_all(&agent_dir);
 }
 
 fn prompt(message: &str) -> PromptCommand {
@@ -392,4 +438,111 @@ fn prompt(message: &str) -> PromptCommand {
 		images:             None,
 		streaming_behavior: None,
 	}
+}
+
+/// More entries than any limit a decoder once stopped at: `serde_json` reads
+/// 128 levels (64 entries, since `get_tree` nests each entry two levels under
+/// its parent), and decoding or dropping a `Value` recurses once per level.
+const DEEP_CHAIN_ENTRIES: usize = 100_000;
+
+/// Writes, as `test/rpc-get-tree.test.ts` does, a session that is one chain of
+/// [`DEEP_CHAIN_ENTRIES`] custom entries, `e0` its root.
+fn write_chain_session(dir: &Path) -> PathBuf {
+	const TIMESTAMP: &str = "2026-01-01T00:00:00.000Z";
+	let header = json!({
+		"type": "session",
+		"version": 3,
+		"id": "deep-chain",
+		"timestamp": TIMESTAMP,
+		"cwd": dir,
+	});
+	let mut lines = vec![header.to_string()];
+	for index in 0..DEEP_CHAIN_ENTRIES {
+		let parent = if index == 0 {
+			Value::Null
+		} else {
+			Value::String(format!("e{}", index - 1))
+		};
+		let entry = json!({
+			"type": "custom",
+			"id": format!("e{index}"),
+			"parentId": parent,
+			"timestamp": TIMESTAMP,
+			"customType": "probe",
+			"data": {"index": index},
+		});
+		lines.push(entry.to_string());
+	}
+	let file = dir.join("sessions").join("chain.jsonl");
+	std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+	std::fs::write(&file, lines.join("\n") + "\n").unwrap();
+	file
+}
+
+// If this regresses, `get_tree` on a long session (a long session can be one
+// chain of tens of thousands of entries) closes the client with "Failed to
+// decode reassembled RPC frame", or overflows a thread's stack and aborts the
+// process.
+#[test]
+#[ignore = "spawns the real omp server; run with --ignored"]
+fn smoke_get_tree_deep_chain() {
+	let repo = repo_root();
+	let dir = PrivateDir::new("omp-rpc-rust-tree");
+	let session = write_chain_session(dir.path());
+	// Real RPC dispatch over the session file; its mock model is never called
+	// here.
+	let mut process = Process::new("bun");
+	process
+		.arg("packages/coding-agent/test/fixtures/tree-rpc-agent.ts")
+		.arg(&dir)
+		.arg(&session)
+		.current_dir(&repo)
+		.env("PI_CODING_AGENT_DIR", &dir)
+		.env("PI_NO_TITLE", "1");
+	let (client, _events) = Client::spawn(process, ClientOptions::default()).expect("spawn + ready");
+	assert_eq!(client.protocol_version(), 2);
+
+	let SessionTree { tree, leaf_id } = client.call(&GetTreeCommand {}).expect("get_tree");
+	let leaf = format!("e{}", DEEP_CHAIN_ENTRIES - 1);
+	assert_eq!(leaf_id.as_deref(), Some(leaf.as_str()));
+	assert_eq!(tree.len(), 1);
+	// Walked down by reference: comparing the tree whole recurses once per
+	// level, past any thread's stack. Dropping it is `DeepJson`'s loop.
+	let mut misplaced = Vec::new();
+	let mut depth = 0;
+	let mut deepest = "";
+	let mut next = tree.first();
+	while let Some(node) = next {
+		let entry = node.get("entry").and_then(Value::as_object);
+		let id = entry
+			.and_then(|entry| entry.get("id"))
+			.and_then(Value::as_str)
+			.unwrap_or_default();
+		let parent = entry.and_then(|entry| entry.get("parentId"));
+		let expected_parent = if depth == 0 {
+			Value::Null
+		} else {
+			Value::String(format!("e{}", depth - 1))
+		};
+		let children = node
+			.get("children")
+			.and_then(Value::as_array)
+			.map_or(&[][..], Vec::as_slice);
+		if id != format!("e{depth}") || parent != Some(&expected_parent) || children.len() > 1 {
+			misplaced.push(id.to_owned());
+		}
+		deepest = id;
+		depth += 1;
+		next = children.first().and_then(Value::as_object);
+	}
+	assert_eq!(misplaced, Vec::<String>::new());
+	assert_eq!(depth, DEEP_CHAIN_ENTRIES);
+	assert_eq!(deepest, leaf);
+	drop(tree);
+
+	// The client still serves commands after the deep answer.
+	client
+		.call(&GetStateCommand {})
+		.expect("get_state after get_tree");
+	drop(client);
 }

@@ -16,6 +16,7 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 import { readArchiveEntries } from "@oh-my-pi/pi-utils/ar";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+import { DEEP_LEVELS, nestedChain, nestingOf } from "../../../ai/test/helpers/deep-nesting";
 
 function subagentJsonl(id: string, userText: string | null): string {
 	const lines = [
@@ -278,4 +279,37 @@ describe("AgentSession.dumpSessionArchiveToTmpDir", () => {
 		session.agent.state.messages = [];
 		expect(await session.dumpSessionArchiveToTmpDir()).toBeUndefined();
 	});
+
+	// A tool call's arguments are any JSON and a transcript line holds them as deep as `JSON.parse` reads.
+	it("writes the LLM request JSON of a conversation whose tool call's arguments nest 50,000 levels", async () => {
+		session.agent.replaceMessages([
+			{ role: "user", content: "main prompt", timestamp: 1 },
+			{
+				role: "assistant",
+				content: [{ type: "toolCall", id: "call-1", name: "inspect", arguments: nestedChain({ leaf: "bottom" }) }],
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "claude-sonnet-4-5",
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				timestamp: 2,
+			},
+		]);
+
+		const file = await session.dumpLlmRequestToTmpDir();
+		if (!file) throw new Error("Expected a request file");
+		archives.push(file);
+		const request = JSON.parse(await Bun.file(file).text());
+		expect(nestingOf(request.messages[1].content[0].arguments)).toEqual({
+			levels: DEEP_LEVELS,
+			bottom: { leaf: "bottom" },
+		});
+	}, 30_000);
 });

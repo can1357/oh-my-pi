@@ -10,6 +10,7 @@ import type {
 	UserMessage,
 } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { DEEP_LEVELS, nestedChain, nestingOf } from "./helpers/deep-nesting";
 
 /**
  * Regression: Anthropic-compatible reasoning endpoints often emit `thinking`
@@ -165,6 +166,37 @@ describe("Anthropic-compatible unsigned thinking replay (#2005)", () => {
 		const sameToolUse = sameBlocks.find(block => block.type === "tool_use") as WireToolUseBlock;
 		expect(sameToolUse.input.text).toBe("broken \ufffd end");
 		expect((sameToolUse.input.nested as { parts: string[] }).parts[0]).toBe("broken \ufffd end");
+	});
+
+	// A tool call's arguments are any JSON, and a resumed session holds them as deep as a transcript line does.
+	it("sanitizes a lone surrogate at the bottom of tool arguments nested 50,000 levels", () => {
+		const assistant: AssistantMessage = {
+			...makeAssistantThinking("plan"),
+			content: [
+				{ type: "toolCall", id: "call_1", name: "write", arguments: nestedChain({ text: "broken \ud83d end" }) },
+			],
+		};
+		const toolUse = assistantWireBlocks([makeUser(), assistant], makeModel()).find(
+			block => block.type === "tool_use",
+		) as WireToolUseBlock;
+		expect(nestingOf(toolUse.input)).toEqual({ levels: DEEP_LEVELS, bottom: { text: "broken \ufffd end" } });
+	});
+
+	// `JSON.parse` makes `__proto__` an own key of tool arguments; a copy that assigns it sets its prototype instead.
+	it("keeps a __proto__ key of tool arguments when it fixes a string beside it or in it", () => {
+		const replayed = (json: string) => {
+			const assistant: AssistantMessage = {
+				...makeAssistantThinking("plan"),
+				content: [{ type: "toolCall", id: "call_1", name: "write", arguments: JSON.parse(json) }],
+			};
+			const toolUse = assistantWireBlocks([makeUser(), assistant], makeModel()).find(
+				block => block.type === "tool_use",
+			) as WireToolUseBlock;
+			expect(Object.getPrototypeOf(toolUse.input)).toBe(Object.prototype);
+			return JSON.stringify(toolUse.input);
+		};
+		expect(replayed('{"__proto__":{"a":1},"text":"bad \\ud83d"}')).toBe('{"__proto__":{"a":1},"text":"bad \ufffd"}');
+		expect(replayed('{"__proto__":"bad \\ud83d","text":"ok"}')).toBe('{"__proto__":"bad \ufffd","text":"ok"}');
 	});
 
 	it("sanitizes payload replacements before SDK JSON serialization", async () => {

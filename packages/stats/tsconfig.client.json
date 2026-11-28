@@ -2,7 +2,8 @@
 	"extends": "../tsconfig.workspace.json",
 	"include": [
 		"src/client",
-		"test/errors-route-range.test.tsx"
+		"test/errors-route-range.test.tsx",
+		"test/client-json-block.test.tsx"
 	],
 	"compilerOptions": {
 		"jsx": "react-jsx",

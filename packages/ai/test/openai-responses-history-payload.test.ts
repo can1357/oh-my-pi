@@ -31,6 +31,7 @@ import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/mo
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import * as piUtils from "@oh-my-pi/pi-utils";
 import { createCodexModel } from "./helpers";
+import { nestedChain, nestedChainJson } from "./helpers/deep-nesting";
 
 const TEST_INSTALLATION_ID = "00000000-0000-4000-8000-000000000001";
 
@@ -1021,6 +1022,42 @@ describe("OpenAI responses history payload", () => {
 			'{"path": "note.txt"}',
 		);
 		expect(cold.input).toEqual(warm.input);
+	});
+
+	it("rebuilds a tool call whose arguments nest past JSON.stringify's reach whole", () => {
+		// Another model's turn carries no native items for this one, so its blocks are encoded again.
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "Read note.txt.", timestamp: Date.now() },
+				{
+					role: "assistant",
+					content: [{ type: "toolCall", id: "call_1", name: "read", arguments: nestedChain() }],
+					api: "openai-completions",
+					provider: "other-host",
+					model: "other-model",
+					usage: zeroUsage,
+					stopReason: "toolUse",
+					timestamp: Date.now(),
+				},
+				{
+					role: "toolResult",
+					toolCallId: "call_1",
+					toolName: "read",
+					content: [{ type: "text", text: "hello" }],
+					isError: false,
+					timestamp: Date.now(),
+				},
+				{ role: "user", content: "Read it again.", timestamp: Date.now() },
+			],
+		};
+
+		const input = buildResponsesInput({
+			model: plaintextReasoningModel,
+			context,
+			strictResponsesPairing: true,
+			supportsImageDetailOriginal: true,
+		});
+		expect(findResponsesInputItemByCallId(input, "function_call", "call_1")?.arguments).toBe(nestedChainJson());
 	});
 
 	it("replays only plaintext reasoning turns without server-issued state on a cold session", async () => {

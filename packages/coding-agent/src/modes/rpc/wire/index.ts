@@ -101,10 +101,15 @@ const notificationDefs = {
  *   newer event set than its parent client knows).
  * - `x-scalar-or-array`: an array field that servers before ordered system
  *   prompts (May 2026) sent as a bare scalar; decoders wrap the scalar.
+ * - `x-deep-json`: a raw JSON field that can nest deeper than a recursive
+ *   decoder or destructor reaches (`get_tree` nests each entry two levels under
+ *   its parent); a binding whose values drop by recursion holds it in a type
+ *   that drops it with a loop (the Rust binding's `DeepJson`).
  */
 const PROPERTY_MARKERS: Record<string, Record<string, readonly string[]>> = {
 	"x-unknown-fallback": { SubagentEventPayload: ["event"] },
 	"x-scalar-or-array": { SessionState: ["systemPrompt"] },
+	"x-deep-json": { SessionTree: ["tree"] },
 };
 
 function markProperties(name: string, schema: Record<string, unknown>): Record<string, unknown> {

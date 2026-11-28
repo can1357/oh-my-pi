@@ -32,6 +32,8 @@ export interface WireField {
 	unknownFallback?: boolean;
 	/** `x-scalar-or-array`: an array field older servers sent as a bare scalar. */
 	scalarOrArray?: boolean;
+	/** `x-deep-json`: raw JSON that can nest deeper than a recursive decoder or destructor reaches. */
+	deepJson?: boolean;
 }
 
 /** A named definition. */
@@ -128,6 +130,7 @@ function parseDef(name: string, schema: JsonSchema): WireDef {
 				doc: typeof property.description === "string" ? property.description : undefined,
 				unknownFallback: property["x-unknown-fallback"] === true,
 				scalarOrArray: property["x-scalar-or-array"] === true,
+				deepJson: property["x-deep-json"] === true,
 			});
 		}
 		return { name, doc, kind: "object", fields, open: schema["x-open"] === true };

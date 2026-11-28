@@ -25,6 +25,73 @@ func TestKnownFrameWithBadPayloadDegradesToUnknown(t *testing.T) {
 	}
 }
 
+// If this regresses, a command whose response frame does not decode (a deep
+// get_tree answer did, before the decoders read any depth) waits out its whole
+// timeout instead of failing at once.
+func TestUndecodableResponseFailsItsCall(t *testing.T) {
+	c, s := startFake(t, readyV1, nil)
+	result := make(chan error, 1)
+	go func() {
+		_, err := c.GetState(context.Background())
+		result <- err
+	}()
+	command := s.recv()
+	s.send(fmt.Sprintf(`{"type":"response","id":%q,"command":"get_state","success":"yes"}`, command.str("id")))
+	select {
+	case err := <-result:
+		if err == nil || !strings.Contains(err.Error(), "get_state response") {
+			t.Fatalf("got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("get_state still waits for its response")
+	}
+	if c.Err() != nil {
+		t.Fatalf("connection closed: %v", c.Err())
+	}
+}
+
+// If this regresses, get_tree on a long session (one chain of tens of thousands
+// of entries, each two levels under its parent) fails with "exceeded max
+// depth", or waits out its timeout while the decode error goes to Frames. The
+// answer is written here by hand, so a plain go test reads it without a host.
+func TestGetTreeReadsAnAnswerOfAnyDepth(t *testing.T) {
+	c, s := startFake(t, readyV1, nil)
+	go func() {
+		command := s.recv()
+		var data strings.Builder
+		data.WriteString(`{"tree":[`)
+		for index := range deepChainEntries {
+			parent := "null"
+			if index > 0 {
+				parent = fmt.Sprintf(`"e%d"`, index-1)
+			}
+			fmt.Fprintf(&data, `{"entry":{"id":"e%d","parentId":%s},"children":[`, index, parent)
+		}
+		data.WriteString(strings.Repeat("]}", deepChainEntries))
+		fmt.Fprintf(&data, `],"leafId":"e%d"}`, deepChainEntries-1)
+		s.respond(command, data.String())
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	tree, err := c.GetTree(ctx)
+	if err != nil {
+		t.Fatalf("get_tree: %v", err)
+	}
+	leaf := fmt.Sprintf("e%d", deepChainEntries-1)
+	if len(tree.Tree) != 1 || deref(tree.LeafID) != leaf {
+		t.Fatalf("get_tree: %d roots, leaf %q", len(tree.Tree), deref(tree.LeafID))
+	}
+	depth, deepest := walkChain(t, tree.Tree[0])
+	if depth != deepChainEntries || deepest != leaf {
+		t.Fatalf("get_tree: chain of %d nodes ending at %q", depth, deepest)
+	}
+	// The client still serves commands after the deep answer.
+	if c.Err() != nil {
+		t.Fatalf("connection closed: %v", c.Err())
+	}
+}
+
 func TestChunkReassembly(t *testing.T) {
 	c, s := startFake(t, readyV2, negotiateV2)
 	if c.ProtocolVersion() != 2 {

@@ -65,7 +65,16 @@ import {
 	OPENAI_HEADER_VALUES,
 	OPENAI_HEADERS,
 } from "@oh-my-pi/pi-catalog/wire/codex";
-import { $env, isRecord, logger, prompt, ptree, stringifyJson, structuredCloneJSON } from "@oh-my-pi/pi-utils";
+import {
+	$env,
+	isRecord,
+	logger,
+	prompt,
+	ptree,
+	stringifyDeepJson,
+	stringifyJson,
+	structuredCloneJSON,
+} from "@oh-my-pi/pi-utils";
 import { dataUrlImageSize } from "../image-tokens";
 import { Tokenizer } from "../tokenizer";
 import { appendAzureApiVersion, resolveAzureOpenAiBaseUrl } from "./azure-openai-endpoint";
@@ -597,6 +606,13 @@ function computerFailureNote(call: Record<string, unknown>, output: string): Rec
 // ============================================================================
 
 /**
+ * The history writes every tool call's arguments, which are any JSON: arguments nested past
+ * `JSON.stringify`'s recursion skip the attempt that would run out of stack (1.5 s or more each
+ * time) and go to the deep writer. A bigint is written as its decimal string, as `stringifyJson` does.
+ */
+const CALL_ARGUMENTS_JSON = { bigintAsString: true, probeDepth: true } as const;
+
+/**
  * Build the OpenAI Responses-API native history array from LLM messages.
  *
  * Caller is responsible for converting any custom message types to
@@ -793,7 +809,7 @@ export function buildOpenAiNativeHistory(
 						id: itemId,
 						call_id: normalized.callId,
 						name: block.name,
-						arguments: stringifyJson(block.arguments) ?? "null",
+						arguments: stringifyDeepJson(block.arguments, CALL_ARGUMENTS_JSON) ?? "null",
 					});
 				}
 			}

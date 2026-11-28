@@ -35,7 +35,7 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ProviderPayload } from "@oh-my-pi/pi-ai";
 import { isReplayTurnBoundary, isSurvivingAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { isReasoningSourceSignature, parseReasoningDetailsSignature } from "@oh-my-pi/pi-ai/utils/reasoning-source";
-import { isRecord, readLines, tryParseJson } from "@oh-my-pi/pi-utils";
+import { isRecord, readLines, stringifyDeepJson, tryParseJson } from "@oh-my-pi/pi-utils";
 import { convertMessagesForContextView } from "../session/messages";
 import { buildSessionContext } from "../session/session-context";
 import type { FileEntry, RawFileEntry, SessionEntry } from "../session/session-entries";
@@ -261,7 +261,7 @@ export async function planStrip(file: string, idleBeforeMs: number): Promise<Str
 		if (keep.has(lineIndex) || !stripRecord(record)) continue;
 		strip.add(lineIndex);
 		plan.records += 1;
-		plan.bytes += byteLength - Buffer.byteLength(JSON.stringify(record));
+		plan.bytes += byteLength - Buffer.byteLength(stringifyDeepJson(record)!);
 	}
 	return plan.records > 0 ? plan : undefined;
 }
@@ -274,7 +274,7 @@ async function* strippedChunks(plan: StripPlan): AsyncGenerator<Buffer> {
 	for await (const { bytes, text } of transcriptLines(plan.file)) {
 		index += 1;
 		const record = plan.strip.has(index) ? parseRecord(text) : undefined;
-		const line = stripRecord(record) ? Buffer.from(JSON.stringify(record)) : bytes;
+		const line = stripRecord(record) ? Buffer.from(stringifyDeepJson(record)!) : bytes;
 		parts.push(line, NEWLINE);
 		size += line.length + 1;
 		if (size < WRITE_CHUNK_BYTES) continue;

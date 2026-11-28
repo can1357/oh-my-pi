@@ -21,6 +21,7 @@
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { stringifyDeepJson } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { readerIncludesThinking, textWithoutThinking } from "@oh-my-pi/snapcompact";
 import type { AgentRef } from "../registry/agent-registry";
@@ -199,6 +200,16 @@ function jsonFence(text: string): string {
 	return `${fence}json\n${text}\n${fence}`;
 }
 
+/**
+ * `value`, part of a session entry, as a fenced JSON block: indented, or on
+ * one line when it nests past `INDENTED_JSON_LEVELS` levels, where indented
+ * text grows with the square of the depth and `JSON.stringify` runs out of
+ * stack near 40,000 levels while an entry nests up to millions.
+ */
+function entryJsonFence(value: unknown): string {
+	return jsonFence(stringifyDeepJson(value, { space: 2 }) ?? "null");
+}
+
 function appendTextContent(lines: string[], content: string | readonly { type: string; text?: string }[]): void {
 	if (typeof content === "string") {
 		lines.push(content);
@@ -231,7 +242,7 @@ function appendRawMessage(lines: string[], message: AgentMessage, includeThinkin
 					if (includeThinking) lines.push("<thinking>", block.thinking, "</thinking>");
 				} else if (block.type === "toolCall") {
 					lines.push(`#### tool call: ${block.name} (${block.id})`);
-					lines.push(jsonFence(JSON.stringify(block.arguments, null, 2) ?? "null"));
+					lines.push(entryJsonFence(block.arguments));
 				} else if (block.type === "redactedThinking") {
 					// Opaque provider-encrypted reasoning: keep a marker for the
 					// block's presence, not the undecipherable blob.
@@ -242,7 +253,7 @@ function appendRawMessage(lines: string[], message: AgentMessage, includeThinkin
 					// recovery may need, and server-side search results can hold the
 					// only copy of research from before the rollover.
 					lines.push(`#### server tool: ${block.block.type}`);
-					lines.push(jsonFence(JSON.stringify(block.block, null, 2) ?? "null"));
+					lines.push(entryJsonFence(block.block));
 				} else if (block.type === "image") {
 					// Metadata only: base64 bytes are not recoverable text and would
 					// dominate the rendered history.
@@ -333,7 +344,7 @@ function appendRawMessage(lines: string[], message: AgentMessage, includeThinkin
 			return;
 		}
 		default:
-			lines.push(jsonFence(JSON.stringify(message, null, 2) ?? "null"));
+			lines.push(entryJsonFence(message));
 			return;
 	}
 }
@@ -369,7 +380,7 @@ function renderRawEntry(lines: string[], entry: SessionEntry, includeThinking: b
 		lines.push(`From entry: ${entry.fromId}`, "", summaryText(entry.summary, includeThinking));
 		return;
 	}
-	lines.push(jsonFence(JSON.stringify(entry, null, 2) ?? "null"));
+	lines.push(entryJsonFence(entry));
 }
 
 /**
