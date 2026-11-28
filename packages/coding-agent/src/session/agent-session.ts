@@ -819,6 +819,7 @@ type AgentEndEvent = Extract<AgentEvent, { type: "agent_end" }>;
 export type StopRoute =
 	| "normal"
 	| "no-assistant-message"
+	| "skip-post-turn-maintenance"
 	| "skip-superseded-speculative-maintenance"
 	| "successful-yield"
 	| "active-goal-compaction-blocked"
@@ -832,6 +833,7 @@ export type StopContinuation = "allowed" | "refused";
 const STOP_CONTINUATION: Record<StopRoute, StopContinuation> = {
 	normal: "allowed",
 	"no-assistant-message": "refused",
+	"skip-post-turn-maintenance": "allowed",
 	"skip-superseded-speculative-maintenance": "refused",
 	"successful-yield": "refused",
 	"active-goal-compaction-blocked": "refused",
@@ -5359,7 +5361,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				await this.#settleServiceTier(assistantMsg);
 				this.#ttsr.onAssistantMessageEnd(assistantMsg);
 				const speculativeHandoff = this.#maintenance.speculationCompletion("handoff");
-				// Mark eligible replies so a length or overflow stop can await the handoff before maintenance.
+				// Mark completed replies for a stop pass without maintenance, and length or overflow stops to await the handoff.
 				if (
 					speculativeHandoff &&
 					(assistantMsg.stopReason !== "stop" ||
@@ -5567,6 +5569,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 						(msg.stopReason === "error" && AIError.isContextOverflow(msg, model.contextWindow ?? 0)));
 				const speculationCompletion = requiresSpeculativeRecovery ? handoffCompletion : undefined;
 				if (!speculationCompletion) {
+					if (msg.stopReason === "stop") {
+						// A marked reply delivered output. Don't retry it as an unexpected stop.
+						maintenanceRoute("skip-post-turn-maintenance");
+						await stopLoop("skip-post-turn-maintenance");
+						return;
+					}
 					maintenanceRoute("speculative-handoff-running");
 				} else {
 					const promptSequence = this.#promptSequence;

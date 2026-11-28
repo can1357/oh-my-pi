@@ -508,6 +508,11 @@ const routes: Record<StopRoute, Case> = {
 			expect(passCount(f)).toBe(0);
 		},
 	},
+	"skip-post-turn-maintenance": {
+		name: "openai-responses notifies while speculative handoff is pending",
+		continuation: "allowed",
+		drive: answer => runningSpeculation("openai-responses", answer),
+	},
 	"skip-superseded-speculative-maintenance": {
 		name: "superseded length stop refuses continuation but notifies",
 		continuation: "refused",
@@ -694,11 +699,6 @@ function register(row: Case): void {
 }
 
 for (const row of Object.values(routes)) register(row);
-register({
-	name: "openai-responses notifies while speculative handoff is pending",
-	continuation: "allowed",
-	drive: answer => runningSpeculation("openai-responses", answer),
-});
 register({
 	name: "anthropic-messages notifies while speculative handoff is pending",
 	continuation: "allowed",
