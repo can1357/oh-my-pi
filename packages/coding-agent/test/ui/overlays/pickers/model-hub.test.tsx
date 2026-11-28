@@ -181,18 +181,37 @@ describe("model hub fallback chains reject non-chat models (#20897)", () => {
 		maxTokens: 8192,
 	});
 
-	// `default` is the chat role: it rejects models with an explicit non-chat kind.
+	const tinyModel: Model = buildModel({
+		id: "tiny-helper",
+		name: "tiny-helper",
+		api: "ollama-chat",
+		provider: "ollama",
+		baseUrl: "https://x",
+		reasoning: false,
+		input: ["text"],
+		kind: "tiny",
+		cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: 8192,
+	});
+
+	const kindOf = (model: Model) => model.kind ?? "chat";
+	// Mirror production: chat-section roles accept chat, and tiny/memory also accept tiny.
 	const kindSource: ModelHubSource = {
 		...source,
 		fallbackChains: {},
 		knownRoleIds: ["default"],
 		getRoleInfo: role =>
-			role === "default"
-				? { name: role, section: "chat", accepts: model => (model.kind ?? "chat") === "chat" }
-				: { name: role, section: "chat", accepts: () => true },
+			role === "tiny" || role === "memory"
+				? {
+						name: role,
+						section: "chat",
+						accepts: model => kindOf(model) === "tiny" || kindOf(model) === "chat",
+					}
+				: { name: role, section: "chat", accepts: model => kindOf(model) === "chat" },
 	};
 
-	const chatModels = [models[0]!, imageModel];
+	const chatModels = [models[0]!, tinyModel, imageModel];
 
 	function makeHub(items: Model[]) {
 		return new ModelHubState(
@@ -206,6 +225,7 @@ describe("model hub fallback chains reject non-chat models (#20897)", () => {
 	test("a non-chat model's role strip offers no fallback chips", () => {
 		const hub = makeHub(chatModels);
 		press(hub, "\r"); // sidebar to rows
+		press(hub, "\x1b[B"); // past the chat model
 		press(hub, "\x1b[B"); // highlight the image model row
 		press(hub, "\r");
 		const strip = hub.strip;
@@ -240,15 +260,28 @@ describe("model hub fallback chains reject non-chat models (#20897)", () => {
 		press(hub, "\x1b[C"); // move to `fallbacks:claude-sonnet-4-5`
 		press(hub, "\r"); // browse candidates for the chain key `anthropic/claude-sonnet-4-5`
 		expect(hub.strip).toBeNull();
+		expect(hub.candidateItems.map(item => item.model.id)).toEqual(["claude-sonnet-4-5", "tiny-helper"]);
+		hub.dispose();
+	});
+
+	test("the brand-new-chain-key browser filters to the highlighted role's accepts", () => {
+		const hub = makeHub(chatModels);
+		hub.clickSidebarEntry("roles");
+		press(hub, "f"); // add a fallback to the highlighted `default` role
 		expect(hub.candidateItems.map(item => item.model.id)).toEqual(["claude-sonnet-4-5"]);
 		hub.dispose();
 	});
 
-	test("the brand-new-chain-key browser filters to chat-capable models", () => {
+	test("a tiny-kind model's role strip still offers the fallback chips", () => {
 		const hub = makeHub(chatModels);
-		hub.clickSidebarEntry("roles");
-		press(hub, "f"); // `+ New fallback…`
-		expect(hub.candidateItems.map(item => item.model.id)).toEqual(["claude-sonnet-4-5"]);
+		press(hub, "\r"); // sidebar to rows
+		press(hub, "\x1b[B"); // highlight the tiny model row
+		press(hub, "\r");
+		const strip = hub.strip;
+		expect(strip?.kind).toBe("role");
+		if (strip?.kind !== "role") return;
+		expect(strip.item.model.id).toBe("tiny-helper");
+		expect(strip.chips.map(chip => chip.label)).toEqual(["fallbacks:tiny-helper", "fallbacks:ollama/*", "fallback"]);
 		hub.dispose();
 	});
 });
