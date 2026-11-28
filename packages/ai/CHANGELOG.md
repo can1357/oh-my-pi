@@ -33,6 +33,7 @@
 - Fixed DeepSeek sessions failing every request with `400 … image special token` after a tool result quoted DeepSeek's chat template: `<｜…｜>` and `｜DSML｜` tokens in outgoing message text are now broken with a zero-width space ([#20832](https://github.com/can1357/oh-my-pi/pull/20832) by [@dany-on-demand](https://github.com/dany-on-demand))
 - Usage checks no longer send a private gateway’s configured credential to a built-in provider’s public quota service.
 - Fixed auth-gateway (`pi-native`) requests sending options the gateway discards, such as `providerOptions`, `cwd`, and fallback-credit replay bodies
+- Fixed free (`*-free`) OpenCode Zen models failing with a 429 `FreeUsageLimitError` before the model was reached ([#19112](https://github.com/can1357/oh-my-pi/pull/19112) by [@Xytronix](https://github.com/Xytronix))
 - Speech synthesis rejects a 2xx response with a JSON body as a `ProviderHttpError` (using the status the body reports, else 502) instead of returning it as audio ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
 - Added xAI speech-to-text support, including use through the authentication gateway.
 - Added the `priority` service tier for Devin models, using the fast lane and corresponding fast pricing.

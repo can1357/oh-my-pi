@@ -54,6 +54,12 @@ const checks: VersionCheck[] = [
 		fetchLatest: () => fetchLatestNpmVersion("@openai/codex"),
 	},
 	{
+		name: "OpenCode",
+		file: "packages/catalog/src/wire/opencode.ts",
+		sourcePattern: /OPENCODE_CLIENT_VERSION\s*=\s*"(\d+\.\d+\.\d+)"/,
+		fetchLatest: () => fetchLatestNpmVersion("opencode-ai"),
+	},
+	{
 		// `latest`, not `stable`: Anthropic gates new models on the newest release.
 		name: "Claude Code",
 		file: "packages/ai/src/providers/claude-code-fingerprint.ts",

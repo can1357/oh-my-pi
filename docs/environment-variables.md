@@ -344,6 +344,14 @@ An invalid `KIRO_API_REGION` is an error rather than a silent fallback. `/login 
 | `PI_OPENROUTER_RESPONSES`           | Responses API is enabled unless set to `0`; `0` selects the OpenAI Completions route                                                                                                                                                          |
 | `UMANS_WEBSEARCH_PROVIDER`          | Default Umans Anthropic web-search provider selection when not supplied explicitly                                                                                                                                                            |
 
+### OpenCode compatibility
+
+| Variable                         | Default / behavior                                                                                    |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `PI_AI_OPENCODE_VERSION`         | Overrides the OpenCode client user-agent version used on free OpenCode Zen models (`1.19.5` if unset) |
+| `PI_AI_OPENCODE_AI_SDK_VERSION`  | Overrides the `ai-sdk/provider-utils` segment of that user agent (`4.0.23` if unset)                  |
+| `PI_AI_OPENCODE_RUNTIME_VERSION` | Overrides the `runtime/bun` segment of that user agent (`1.4.4` if unset)                             |
+
 ### Anthropic OAuth
 
 | Variable                           | Default / behavior                                                                                                          |

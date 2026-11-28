@@ -54,6 +54,7 @@ import { streamKimi } from "./providers/kimi";
 import type { KiroOptions } from "./providers/kiro/stream";
 import type { OllamaChatOptions } from "./providers/ollama";
 import type { OpenAICompletionsOptions } from "./providers/openai-completions";
+import { usesOpenCodeClientIdentity, withOpenCodeFreeSystemPrompt } from "./providers/opencode-free";
 import { streamPiNative } from "./providers/pi-native-client";
 import { streamSynthetic } from "./providers/synthetic";
 import {
@@ -422,6 +423,9 @@ export function stream<TApi extends Api>(
 	if (model.resolveHeaders) {
 		return withResolvedModelHeaders(model, options?.signal, resolvedModel => stream(resolvedModel, context, options));
 	}
+	// Free Zen lanes are gated on the OpenCode client's prompt too; the
+	// headers that go with it are set in applyInferenceHeaders.
+	if (usesOpenCodeClientIdentity(model.compat)) context = withOpenCodeFreeSystemPrompt(context);
 	if (!model.requiresGlyphTokenization) {
 		return withThinkingLoopGuard(model, options, opts =>
 			withProviderInFlightLimit(model, opts, limited => streamDispatch(model, context, opts, limited)),
