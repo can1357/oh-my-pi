@@ -17,6 +17,46 @@
 
 	delete globalThis.WebAssembly;
 
+	const guardBufferConstructor = (OrigCtor, label) => {
+		if (typeof OrigCtor !== "function") return OrigCtor;
+		const Guarded = new Proxy(OrigCtor, {
+			construct(target, args, newTarget) {
+				if (args.length > 1 && args[1] !== undefined) {
+					throw new RangeError(`${label} options (resizable/growable buffers) are not supported in V8 sandbox`);
+				}
+				return Reflect.construct(target, [args[0]], newTarget === Guarded ? target : newTarget);
+			},
+		});
+		try {
+			Object.defineProperty(Guarded, Symbol.species, { get: () => Guarded, configurable: false });
+		} catch {
+			// Ignore if non-configurable.
+		}
+		if (OrigCtor.prototype) {
+			Object.defineProperty(OrigCtor.prototype, "constructor", {
+				value: Guarded,
+				writable: false,
+				configurable: false,
+			});
+		}
+		return Guarded;
+	};
+
+	if (typeof globalThis.ArrayBuffer === "function") {
+		const OrigArrayBuffer = globalThis.ArrayBuffer;
+		if (OrigArrayBuffer.prototype && "resize" in OrigArrayBuffer.prototype) {
+			delete OrigArrayBuffer.prototype.resize;
+		}
+		globalThis.ArrayBuffer = guardBufferConstructor(OrigArrayBuffer, "ArrayBuffer");
+	}
+	if (typeof globalThis.SharedArrayBuffer === "function") {
+		const OrigSharedArrayBuffer = globalThis.SharedArrayBuffer;
+		if (OrigSharedArrayBuffer.prototype && "grow" in OrigSharedArrayBuffer.prototype) {
+			delete OrigSharedArrayBuffer.prototype.grow;
+		}
+		globalThis.SharedArrayBuffer = guardBufferConstructor(OrigSharedArrayBuffer, "SharedArrayBuffer");
+	}
+
 	const isNil = value => value === undefined || value === null;
 	const isPlainObject = value => value !== null && typeof value === "object" && !Array.isArray(value);
 

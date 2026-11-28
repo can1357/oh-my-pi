@@ -122,19 +122,24 @@ export async function executeV8(code: string, options: V8ExecutorOptions): Promi
 				parentToolCallId: options.parentToolCallId,
 				onText: chunk => outputSink.push(chunk),
 				onDisplay: output => {
-					if (output.type === "status") {
+					if (output.type === "status" && isEvalTimeoutControlEvent(output.event)) {
 						options.onStatus?.(output.event);
-						if (isEvalTimeoutControlEvent(output.event)) return;
+						return;
 					}
 					if (displayCapped) return;
-					const approxBytes =
-						output.type === "image" ? output.data.length : output.type === "view" ? output.text.length : 256;
-					if (displayFrames >= MAX_V8_DISPLAY_FRAMES || displayBytes + approxBytes > MAX_V8_DISPLAY_BYTES) {
+					let frameBytes: number;
+					try {
+						frameBytes = Buffer.byteLength(JSON.stringify(output), "utf8");
+					} catch {
+						return;
+					}
+					if (displayFrames >= MAX_V8_DISPLAY_FRAMES || displayBytes + frameBytes > MAX_V8_DISPLAY_BYTES) {
 						displayCapped = true;
 						return;
 					}
 					displayFrames++;
-					displayBytes += approxBytes;
+					displayBytes += frameBytes;
+					if (output.type === "status") options.onStatus?.(output.event);
 					display.push(output);
 				},
 			},

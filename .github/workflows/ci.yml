@@ -276,9 +276,9 @@ jobs:
          - name: Rustfmt
            run: bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build --config=rustfmt //crates/...
 
-   # Provides the linux-x64 addon pair every downstream TS job installs.
+   # Provides the linux-x64 addon pair and omp_v8_eval companion binary every downstream TS job installs.
    #
-   # PRs never build. They restore the pair main built for the same native
+   # PRs never build. They restore the bundle main built for the same native
    # sources from actions/cache (key = hash of every native build input:
    # toolchain and build settings plus crates/** and BUILD.bazel). With no
    # exact entry (the PR changes native inputs, or main has not built this
@@ -389,6 +389,7 @@ jobs:
                 mkdir -p "ci-natives/$target"
                 cp -L bazel-bin/"$target"/omp_v8_eval.* "ci-natives/$target/"
               done
+         # Cache-hit visibility: a supposedly warm build that executes
          # thousands of actions is the failure mode that made CI slow — make
          # it visible in the run summary instead of discovering it weeks in.
          - name: Report bazel cache stats
@@ -425,6 +426,9 @@ jobs:
               "$loader" "$RUNNER_TEMP/smoke-addons.js" \
                 "$PWD/ci-natives/natives-linux-x64-baseline/pi_natives.linux-x64-baseline.node" \
                 "$PWD/ci-natives/natives-linux-x64-modern/pi_natives.linux-x64-modern.node"
+              if [ -x "$PWD/ci-natives/v8-eval-linux-x64/omp_v8_eval.linux-x64" ]; then
+                printf '{"type":"init"}\n{"type":"close"}\n' | "$PWD/ci-natives/v8-eval-linux-x64/omp_v8_eval.linux-x64" --max-heap-mb 32 | grep -q '"ready"'
+              fi
          # Only main saves: an entry saved on any other ref is readable by
          # that ref alone yet counts against the shared 10 GB repo quota,
          # whose LRU eviction has already cost the darwin release archives.

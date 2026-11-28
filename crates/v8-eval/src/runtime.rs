@@ -347,6 +347,17 @@ impl V8SandboxRuntime {
 		if let Ok(mut guard) = self.active_run_tracker.lock() {
 			*guard = None;
 		}
+		let has_dangling = self
+			.isolate
+			.get_slot::<BridgeState>()
+			.is_some_and(|state| !state.pending_resolvers.is_empty());
+		if has_dangling {
+			let context_global = self.context.clone();
+			v8::scope!(let scope, &mut self.isolate);
+			let context = v8::Local::new(scope, &context_global);
+			let mut ctx_scope = v8::ContextScope::new(scope, context);
+			reject_all_pending(&mut ctx_scope, "V8 cell finished before host call settled", false);
+		}
 		if let Some(state) = self.isolate.get_slot_mut::<BridgeState>() {
 			state.active_run_id = None;
 			state.pending_resolvers.clear();

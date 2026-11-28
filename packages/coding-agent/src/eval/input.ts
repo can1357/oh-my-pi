@@ -8,6 +8,8 @@ import { parseCommandArgs } from "../utils/command-args";
 import { normalizePackageRequirements } from "./package-requirements";
 import { isDirectReadableV8Url } from "./v8/url-policy";
 
+const MAX_V8_LOAD_BYTES = 2 * 1024 * 1024;
+
 /** Code-only eval input; standalone percent commands prepare files or dependencies. */
 export interface EvalSourceInput {
 	language: "py" | "js" | "v8";
@@ -78,11 +80,32 @@ export async function prepareEvalSource(
 				"V8 sandbox %load only supports safe internal URLs (e.g. local://...). Use await tool.read(...) for host files.",
 			);
 		}
-		filename = await router.requireLocal(
-			policy.normalized,
-			"load",
-			sessionResolveContext(session, { signal, containSkillPaths: true }),
-		);
+		const resolveCtx = sessionResolveContext(session, { signal, containSkillPaths: true });
+		const target = await router.target(policy.normalized, resolveCtx);
+		if (!target || target.kind !== "file" || target.sel) {
+			throw new ToolError(
+				`Cannot %load ${file} in V8 sandbox: only un-sliced file-backed safe internal URLs (e.g. local://...) are supported.`,
+			);
+		}
+		filename = target.path;
+		try {
+			const fileHandle = Bun.file(filename);
+			const stat = await fileHandle.stat();
+			if (!stat.isFile()) {
+				throw new ToolError(`Cannot load eval script ${file}: target is not a file`);
+			}
+			if (stat.size > MAX_V8_LOAD_BYTES) {
+				throw new ToolError(`Cannot load eval script ${file}: exceeds ${MAX_V8_LOAD_BYTES} byte limit`);
+			}
+			const code = await fileHandle.text();
+			throwIfAborted(signal);
+			return { code, filename };
+		} catch (error) {
+			if (error instanceof ToolError) throw error;
+			throw new ToolError(
+				`Cannot load eval script ${file}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
 	} else if (router.canHandle(file)) {
 		filename = await router.requireLocal(file, "load", sessionResolveContext(session, { signal }));
 	} else {

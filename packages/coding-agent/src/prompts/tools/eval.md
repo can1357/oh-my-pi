@@ -74,10 +74,10 @@ await tool.<name>(args)            // session tool (normal tool approval)
 {{#if toolNames}}Session tool names: {{#each toolNames}}{{this}}{{#unless @last}}, {{/unless}}{{/each}}.{{/if}}
 </prelude>
 
+{{#ifAny py js}}
 {{#if inlineTopics}}
 {{{inlineTopics}}}
 {{else}}
-{{#ifAny py js}}
 <namespaces>
 More globals; `read` the linked docs before first use:
 - `judge`, {{#ifAll py js}}`judge_batch` (Py) / `judgeBatch` (JS){{else}}{{#if py}}`judge_batch`{{else}}`judgeBatch`{{/if}}{{/ifAll}}, `completion`: classification, bulk judgment, model calls → help://eval/judge
@@ -95,8 +95,6 @@ No `read` needed before first use; the guide follows the first call's result (fu
 {{/each}}
 {{/if}}
 </namespaces>
-{{/ifAny}}
-{{#ifAny py js}}
 {{#each inlinePreludes}}
 
 <{{name}}>
@@ -104,8 +102,8 @@ Global `{{name}}`, documented here in full (no `read` needed):
 {{{documentation}}}
 </{{name}}>
 {{/each}}
-{{/ifAny}}
 {{/if}}
+{{/ifAny}}
 
 <critical>
 NEVER repeat successful setup. Kernel-loss notice means reload setup.

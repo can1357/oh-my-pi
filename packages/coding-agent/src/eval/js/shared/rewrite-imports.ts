@@ -1089,22 +1089,17 @@ async function assertNoV8ModuleSyntax(code: string): Promise<boolean> {
 	const ast = await parseProgram(code);
 	if (!ast) return false;
 	let foundModuleSyntax = false;
-	for (const node of ast.program.body) {
+	walkNodes(ast, node => {
 		if (
 			node.type === "ImportDeclaration" ||
 			node.type === "ExportNamedDeclaration" ||
 			node.type === "ExportDefaultDeclaration" ||
-			node.type === "ExportAllDeclaration"
+			node.type === "ExportAllDeclaration" ||
+			node.type === "ImportExpression"
 		) {
 			foundModuleSyntax = true;
-			break;
 		}
-	}
-	if (!foundModuleSyntax) {
-		walkNodes(ast, node => {
-			if (node.type === "ImportExpression") foundModuleSyntax = true;
-		});
-	}
+	});
 	if (foundModuleSyntax) {
 		throw new SyntaxError(
 			"Module import/export syntax is not supported in the V8 sandbox. Use await read('local://...') or await tool.read({ path }) instead.",

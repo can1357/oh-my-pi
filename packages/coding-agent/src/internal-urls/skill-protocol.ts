@@ -323,9 +323,9 @@ export class SkillProtocolHandler implements ProtocolHandler {
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource<string | Buffer>> {
 		let target: LocatedSkillTarget;
 		try {
-			target = await locateSkillTarget(url, context, false);
+			target = await locateSkillTarget(url, context, false, false, context?.containSkillPaths === true);
 		} catch (error) {
-			if (!(error instanceof UnknownSkillError)) throw error;
+			if (!(error instanceof UnknownSkillError) || context?.containSkillPaths === true) throw error;
 			// Loaded skills always win; otherwise serve the resource an MCP server advertises under
 			// exactly this URI (Figma's `skill://figma/figma-use/SKILL.md`). Templates stay behind `mcp://`.
 			// A deferred MCP startup that fails cannot change the diagnosis: the skill is still unknown.
@@ -364,7 +364,10 @@ export class SkillProtocolHandler implements ProtocolHandler {
 			// The target was removed after it was located: an upgrade published the plugin's new
 			// version and deleted the old directory between the check and the read. Locate it again,
 			// which now finds the old skill gone and rediscovers it.
-			return readSkillTarget(url, await locateSkillTarget(url, context, false));
+			return readSkillTarget(
+				url,
+				await locateSkillTarget(url, context, false, false, context?.containSkillPaths === true),
+			);
 		}
 	}
 

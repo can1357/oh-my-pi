@@ -5,6 +5,8 @@ import type { AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { cfgEvalV8, cfgEvalV8MaxHeapMb } from "@oh-my-pi/pi-coding-agent/eval/settings";
+import { isDirectWritableV8Url } from "@oh-my-pi/pi-coding-agent/eval/v8/url-policy";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { disposeV8IsolatesByOwner, executeInV8Isolate } from "@oh-my-pi/pi-coding-agent/eval/v8/context-manager";
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
@@ -497,22 +499,23 @@ describe("V8 sandbox eval mode", () => {
 			);
 			expect(cfgEvalV8.get(h.toolSession.settings)).toBe(true);
 			expect(cfgEvalV8MaxHeapMb.get(h.toolSession.settings)).toBe(32);
-			// Macro import must be rejected before Bun.Transpiler can execute it.
+			// Macro import (including TS-annotated and nested block forms) must be rejected before Bun.Transpiler runs.
 			const macroMarker = path.join(cwd, "macro-ran.txt");
-			const macroRes = await h.evalWrapper.execute(
-				"v8-macro",
-				{
-					language: "v8",
-					code: `import { writeFileSync } from "node:fs" with { type: "macro" };\nwriteFileSync(${JSON.stringify(macroMarker)}, "pwned");`,
-				},
-				undefined,
-				undefined,
-				h.context,
-			);
-			expect(macroRes.isError).toBe(true);
-			expect(resultText(macroRes)).toContain("Module import/export syntax is not supported");
-			expect(fs.existsSync(macroMarker)).toBe(false);
-
+			for (const macroCode of [
+				`const m: string = ${JSON.stringify(macroMarker)};\nimport { writeFileSync } from "node:fs" with { type: "macro" };\nwriteFileSync(m, "pwned");`,
+				`const m: string = ${JSON.stringify(macroMarker)};\n{\nimport { writeFileSync } from "node:fs" with { type: "macro" };\nwriteFileSync(m, "pwned");\n}`,
+			]) {
+				const macroRes = await h.evalWrapper.execute(
+					"v8-macro",
+					{ language: "v8", code: macroCode },
+					undefined,
+					undefined,
+					h.context,
+				);
+				expect(macroRes.isError).toBe(true);
+				expect(resultText(macroRes)).toContain("Module import/export syntax is not supported");
+				expect(fs.existsSync(macroMarker)).toBe(false);
+			}
 			// Early return in async cell and trailing Promise expression both surface values.
 			const earlyAsync = await h.evalWrapper.execute(
 				"v8-early-async",
@@ -602,6 +605,203 @@ describe("V8 sandbox eval mode", () => {
 			);
 			expect(nestedEval.isError).toBe(true);
 			expect(resultText(nestedEval)).toContain("Nested language: 'v8' calls");
+		},
+	);
+
+	it.skipIf(!hasV8Binary)(
+		"blocks resizable/growable ArrayBuffers, strips guest image URL metadata, rejects malformed views, settles dangling promises, rejects non-file %load, enforces write-tier boundary, and aborts queued cells deterministically",
+		async () => {
+			const h = createHarness({
+				"tools.approvalMode": "always-ask",
+				"eval.v8": true,
+				"eval.v8MaxHeapMb": 32,
+			});
+
+			// Resizable ArrayBuffer, constructor bypass, and SharedArrayBuffer options are all blocked.
+			const rabRes = await h.evalWrapper.execute(
+				"v8-rab",
+				{
+					language: "v8",
+					code: [
+						"const errs = [];",
+						"try { new ArrayBuffer(0, { maxByteLength: 1 << 30 }); } catch (e) { errs.push(e.name); }",
+						"try { new ((new Uint8Array(1)).buffer.constructor)(0, { maxByteLength: 1 << 30 }); } catch (e) { errs.push(e.name); }",
+						"try { new SharedArrayBuffer(0, { maxByteLength: 1 << 30 }); } catch (e) { errs.push(e.name); }",
+						"JSON.stringify({ errs, resize: typeof ArrayBuffer.prototype.resize, grow: typeof SharedArrayBuffer.prototype.grow });",
+					].join("\n"),
+				},
+				undefined,
+				undefined,
+				h.context,
+			);
+			expect(rabRes.isError).toBeFalsy();
+			const rab = JSON.parse(resultText(rabRes).trim()) as { errs: string[]; resize: string; grow: string };
+			expect(rab.errs).toEqual(["RangeError", "RangeError", "RangeError"]);
+			expect(rab.resize).toBe("undefined");
+			expect(rab.grow).toBe("undefined");
+
+			// Guest image url/providerFile/detail spoofing is stripped and malformed view payloads are dropped.
+			const png1x1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+			const imgRes = await h.evalWrapper.execute(
+				"v8-img-spoof",
+				{
+					language: "v8",
+					code: [
+						"Object.prototype.toJSON = function () {",
+						'  if (this && this.type === "image") {',
+						'    return { type: "image", data: this.data, mimeType: this.mimeType, detail: "original", url: "https://attacker.example/leak", providerFile: { provider: "openai", id: "file-1" } };',
+						"  }",
+						'  if (this && this.type === "view") {',
+						'    return { type: "view", text: "fallback-text", view: { kind: "table" } };',
+						"  }",
+						"  return this;",
+						"};",
+						"try {",
+						`  print({ type: "image", data: ${JSON.stringify(png1x1)}, mimeType: "image/png" });`,
+						'  print("{\\"a\\": 1, \\"b\\": 2, \\"c\\": \\"fallback-text\\"}");',
+						"} finally {",
+						"  delete Object.prototype.toJSON;",
+						"}",
+						'"ok"',
+					].join("\n"),
+				},
+				undefined,
+				undefined,
+				h.context,
+			);
+			expect(imgRes.isError).toBeFalsy();
+			const images = imgRes.content.filter(b => b.type === "image");
+			expect(images).toHaveLength(1);
+			expect(images[0]).not.toHaveProperty("url");
+			expect(images[0]).not.toHaveProperty("providerFile");
+			expect(images[0]).not.toHaveProperty("detail");
+			expect(imgRes.details?.cells?.[0]?.views).toBeUndefined();
+			expect(resultText(imgRes)).toContain("fallback-text");
+
+			// Un-awaited host promise stored in persistent state is rejected when cell finishes.
+			const seedDangling = await h.evalWrapper.execute(
+				"v8-dangling-seed",
+				{ language: "v8", code: 'globalThis.dangling = read("local://does-not-exist.txt"); "seeded"' },
+				undefined,
+				undefined,
+				h.context,
+			);
+			expect(seedDangling.isError).toBeFalsy();
+			const checkDangling = await h.evalWrapper.execute(
+				"v8-dangling-check",
+				{
+					language: "v8",
+					code: 'let msg = ""; try { await globalThis.dangling; } catch (e) { msg = e.message; } msg',
+				},
+				undefined,
+				undefined,
+				h.context,
+			);
+			expect(checkDangling.isError).toBeFalsy();
+			expect(resultText(checkDangling)).toContain("V8 cell finished before host call settled");
+
+			// %load rejects virtual resources like history:// in V8 sandbox.
+			await expect(
+				h.evalWrapper.execute(
+					"v8-load-history",
+					{ language: "v8", code: "%load history://current" },
+					undefined,
+					undefined,
+					h.context,
+				),
+			).rejects.toThrow(/%load|safe internal URLs/i);
+
+			// isDirectWritableV8Url requires tier === "read" even when policy === "allow".
+			const router = InternalUrlRouter.instance();
+			const testScheme = `v8testwrite${++ownerCounter}`;
+			router.register({
+				scheme: testScheme,
+				spec: {
+					backing: "device",
+					selectors: "none",
+					immutable: false,
+					write: {
+						via: "handler",
+						payload: "text",
+						scope: "coordination",
+						tier: () => ({ tier: "write", policy: "allow" }),
+					},
+				},
+				resolve: async () => ({
+					url: `${testScheme}://x`,
+					content: "",
+					contentType: "text/plain",
+					size: 0,
+					notes: [],
+				}),
+				write: async () => undefined,
+			});
+			try {
+				expect(isDirectWritableV8Url(`${testScheme}://x`, "hi", h.toolSession).allowed).toBe(false);
+			} finally {
+				router.unregister(testScheme);
+			}
+
+			// Queued cell aborting while predecessor holds the isolate fails immediately without unblocking cell #3 ahead of #1.
+			const c1Started = Promise.withResolvers<void>();
+			const c1Gate = Promise.withResolvers<void>();
+			const queueOrder: string[] = [];
+			const queueHarnessSession: ToolSession = {
+				...h.toolSession,
+				getToolByName: name =>
+					name === "gate"
+						? ({
+								name: "gate",
+								label: "Gate",
+								description: "Gate",
+								parameters: {} as AgentTool["parameters"],
+								execute: async () => {
+									c1Started.resolve();
+									await c1Gate.promise;
+									return { content: [{ type: "text", text: "released" }] };
+								},
+							} as unknown as AgentTool)
+						: h.toolSession.getToolByName?.(name),
+				getToolForEvalBridge: name => queueHarnessSession.getToolByName?.(name),
+			};
+			const sessionId = queueHarnessSession.getEvalSessionId!()!;
+			const sessionKey = `v8:${sessionId}`;
+			const c1 = executeInV8Isolate({
+				sessionKey,
+				sessionId,
+				ownerId: queueHarnessSession.getEvalKernelOwnerId!() ?? undefined,
+				session: queueHarnessSession,
+				code: '(async () => { await tool.gate({}); globalThis.qOrder = ["c1"]; })()',
+				filename: "c1.js",
+				asyncWrapped: true,
+				runState: {},
+			}).then(() => queueOrder.push("c1"));
+			await c1Started.promise;
+			const c2Ctrl = new AbortController();
+			const c2 = executeInV8Isolate({
+				sessionKey,
+				sessionId,
+				ownerId: queueHarnessSession.getEvalKernelOwnerId!() ?? undefined,
+				session: queueHarnessSession,
+				code: 'globalThis.qOrder.push("c2");',
+				filename: "c2.js",
+				runState: { signal: c2Ctrl.signal },
+			});
+			const c3 = executeInV8Isolate({
+				sessionKey,
+				sessionId,
+				ownerId: queueHarnessSession.getEvalKernelOwnerId!() ?? undefined,
+				session: queueHarnessSession,
+				code: 'globalThis.qOrder.push("c3");',
+				filename: "c3.js",
+				runState: {},
+			}).then(() => queueOrder.push("c3"));
+			c2Ctrl.abort(new Error("queued cancel"));
+			await expect(c2).rejects.toThrow(/queued cancel/i);
+			expect(queueOrder).toEqual([]);
+			c1Gate.resolve();
+			await Promise.all([c1, c3]);
+			expect(queueOrder).toEqual(["c1", "c3"]);
 		},
 	);
 });

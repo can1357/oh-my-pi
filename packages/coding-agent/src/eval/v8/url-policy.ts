@@ -67,7 +67,7 @@ export function isDirectWritableV8Url(
 			return { allowed: false, denyReason: decision.reason ?? `Cannot write ${normalized}` };
 		}
 		if (decision.policy === "prompt") return { allowed: false };
-		if (decision.tier !== "read" && decision.policy !== "allow") return { allowed: false };
+		if (decision.tier !== "read") return { allowed: false };
 	} else if (decision !== "read") {
 		return { allowed: false };
 	}

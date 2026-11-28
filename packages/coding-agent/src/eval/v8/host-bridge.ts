@@ -1,6 +1,7 @@
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { InternalUrlRouter } from "../../internal-urls";
 import { sessionResolveContext, sessionWriteContext } from "../../internal-urls/context";
+import { buildDirectoryResource } from "../../internal-urls/filesystem-resource";
 import { parseSel, resolveTailSelector } from "../../tools/read-selector";
 import { ToolError } from "../../tools/tool-errors";
 import {
@@ -14,6 +15,8 @@ import { withEvalBridgeToolCall } from "../tool-bridge-policy";
 import { type EvalDisplayOutput, evalImageMetadata } from "../types";
 import type { V8ReadOptions, V8WriteEncoding } from "./protocol";
 import { isDirectReadableV8Url, isDirectWritableV8Url } from "./url-policy";
+
+const MAX_V8_DIRECT_READ_BYTES = 4 * 1024 * 1024;
 
 export interface V8HostBridgeOptions extends ToolBridgeOptions {
 	onDisplay?: (output: EvalDisplayOutput) => void;
@@ -113,17 +116,22 @@ export async function handleV8UrlRead(
 		try {
 			const stat = await file.stat();
 			if (stat.isDirectory()) {
-				const listing = await router.resolve(target.url.href, resolveCtx);
-				text = typeof listing.content === "string" ? listing.content : listing.content.toString("utf-8");
+				const listing = await buildDirectoryResource(target.url.href, target.path);
+				text = listing.content;
+			} else if (stat.size > MAX_V8_DIRECT_READ_BYTES) {
+				const delegatedPath = formatDelegatedReadPath(rawPath, readOptions);
+				if (delegatedPath === null) return "";
+				const res = await handleV8ToolCall("read", { path: delegatedPath }, options);
+				return isRecord(res) && typeof res.text === "string" ? res.text : String(res ?? "");
 			} else {
-				const bytes = await file.bytes();
-				if (bytes.subarray(0, 8192).includes(0)) {
+				const head = await file.slice(0, 8192).bytes();
+				if (head.includes(0)) {
 					const delegatedPath = formatDelegatedReadPath(rawPath, readOptions);
 					if (delegatedPath === null) return "";
 					const res = await handleV8ToolCall("read", { path: delegatedPath }, options);
 					return isRecord(res) && typeof res.text === "string" ? res.text : String(res ?? "");
 				}
-				text = new TextDecoder().decode(bytes);
+				text = await file.text();
 			}
 		} catch (error) {
 			throw new ToolError(

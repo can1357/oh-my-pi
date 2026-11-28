@@ -242,14 +242,20 @@ export function resolveV8EvalBinary() {
 		path.join(import.meta.dir, filename),
 		path.join(versionedDir, filename),
 	];
-	if (!isCompiled) {
+	const isWorkspaceCheckout =
+		!isCompiled &&
+		!import.meta.dir.toLowerCase().includes(`${path.sep}node_modules${path.sep}`) &&
+		!import.meta.dir.toLowerCase().includes("/node_modules/");
+	if (isWorkspaceCheckout) {
 		const repoRoot = path.resolve(import.meta.dir, "..", "..", "..");
-		const cargoName = process.platform === "win32" ? "omp-v8-eval.exe" : "omp-v8-eval";
-		candidates.push(
-			path.join(repoRoot, "target", "local", cargoName),
-			path.join(repoRoot, "target", "release", cargoName),
-			path.join(repoRoot, "target", "debug", cargoName),
-		);
+		if (fs.existsSync(path.join(repoRoot, "crates", "v8-eval", "Cargo.toml"))) {
+			const cargoName = process.platform === "win32" ? "omp-v8-eval.exe" : "omp-v8-eval";
+			candidates.push(
+				path.join(repoRoot, "target", "local", cargoName),
+				path.join(repoRoot, "target", "release", cargoName),
+				path.join(repoRoot, "target", "debug", cargoName),
+			);
+		}
 	}
 
 	for (const candidate of candidates) {

@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import * as os from "node:os";
 import * as path from "node:path";
 import { resolveV8EvalBinary } from "@oh-my-pi/pi-natives";
-import { isRecord, logger, readJsonl, Snowflake, withTimeout } from "@oh-my-pi/pi-utils";
+import { ConcatSink, isRecord, logger, Snowflake, withTimeout } from "@oh-my-pi/pi-utils";
 import { registerOnBoard } from "../../daemon/client";
 import type { ToolSession } from "../../tools";
 import { ToolAbortError, ToolError } from "../../tools/tool-errors";
@@ -13,16 +13,19 @@ import {
 	formatKernelRestartNotice,
 	type SessionOwners,
 } from "../executor-base";
+import type { EvalTableColumn, EvalView } from "../../tools/details/eval";
 import { cfgEvalV8MaxHeapMb } from "../settings";
 import { updateEvalState } from "../state";
-import { type EvalDisplayOutput, evalImageMetadata } from "../types";
+import type { EvalDisplayOutput } from "../types";
 import { handleV8ToolCall, handleV8UrlRead, handleV8UrlWrite, type V8HostBridgeOptions } from "./host-bridge";
 import type { V8ErrorPayload, V8Inbound, V8Outbound } from "./protocol";
 
 const V8_INIT_TIMEOUT_MS = 10_000;
 const V8_CANCEL_GRACE_MS = 250;
 const V8_CLOSE_TIMEOUT_MS = 1_000;
-const MAX_V8_BRIDGE_REPLY_BYTES = 15 * 1024 * 1024;
+const MAX_V8_INBOUND_FRAME_BYTES = 15 * 1024 * 1024;
+const MAX_V8_OUTBOUND_FRAME_BYTES = 16 * 1024 * 1024;
+const ALLOWED_GUEST_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const activeV8BridgeSession = new AsyncLocalStorage<string>();
 export interface V8RunState {
 	signal?: AbortSignal;
@@ -129,9 +132,9 @@ export async function executeInV8Isolate(options: {
 	}
 	const prevTail = session.runTail.catch(() => undefined);
 	const { promise: currentRun, resolve: releaseRun } = Promise.withResolvers<void>();
-	session.runTail = currentRun;
+	session.runTail = Promise.allSettled([prevTail, currentRun]).then(() => undefined);
 	try {
-		await prevTail;
+		await raceAbort(prevTail, options.runState.signal, "V8 execution aborted while queued");
 		if (session.state !== "alive") {
 			throw new ToolError("V8 isolate exited before starting cell");
 		}
@@ -378,9 +381,55 @@ function spawnV8Session(sessionKey: string, sessionId: string, maxHeapMb: number
 }
 
 async function pumpV8Stdout(session: V8Session): Promise<void> {
+	const reader = (session.proc.stdout as ReadableStream<Uint8Array>).getReader();
+	const buffer = new ConcatSink();
+	const decoder = new TextDecoder();
+	let bufferedBytes = 0;
 	try {
-		for await (const msg of readJsonl<V8Outbound>(session.proc.stdout)) {
-			handleV8Message(session, msg);
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			let pos = 0;
+			while (pos < value.length) {
+				const nl = value.indexOf(0x0a, pos);
+				if (nl === -1) {
+					const rem = value.length - pos;
+					if (bufferedBytes + rem > MAX_V8_OUTBOUND_FRAME_BYTES) {
+						throw new ToolError("V8 isolate outbound frame exceeded 16 MiB limit");
+					}
+					buffer.append(value.subarray(pos));
+					bufferedBytes += rem;
+					break;
+				}
+				const segLen = nl - pos;
+				if (bufferedBytes + segLen > MAX_V8_OUTBOUND_FRAME_BYTES) {
+					throw new ToolError("V8 isolate outbound frame exceeded 16 MiB limit");
+				}
+				let lineBytes: Uint8Array;
+				if (bufferedBytes === 0) {
+					lineBytes = value.subarray(pos, nl);
+				} else {
+					buffer.append(value.subarray(pos, nl));
+					lineBytes = buffer.flush()!;
+				}
+				pos = nl + 1;
+				if (lineBytes.length > 0) {
+					const msg = JSON.parse(decoder.decode(lineBytes)) as V8Outbound;
+					handleV8Message(session, msg);
+				}
+				if (bufferedBytes > 0) {
+					buffer.clear();
+					bufferedBytes = 0;
+				}
+			}
+		}
+		if (bufferedBytes > 0) {
+			const tail = buffer.flush();
+			buffer.clear();
+			if (tail && tail.length > 0) {
+				const msg = JSON.parse(decoder.decode(tail)) as V8Outbound;
+				handleV8Message(session, msg);
+			}
 		}
 	} catch (error) {
 		if (session.state === "alive") {
@@ -390,6 +439,8 @@ async function pumpV8Stdout(session: V8Session): Promise<void> {
 			session.rejectReady(err);
 			await killV8SessionFor(session, err, { force: true });
 		}
+	} finally {
+		reader.releaseLock();
 	}
 }
 
@@ -493,7 +544,7 @@ async function dispatchBridgeRequest(
 			});
 			return;
 		}
-		if (Buffer.byteLength(encoded, "utf8") > MAX_V8_BRIDGE_REPLY_BYTES) {
+		if (Buffer.byteLength(encoded, "utf8") > MAX_V8_INBOUND_FRAME_BYTES) {
 			sendToV8(session, {
 				type: "tool-reply",
 				id: callId,
@@ -584,7 +635,7 @@ async function runOnce(
 
 	try {
 		if (!pending.settled && !pending.aborted) {
-			sendToV8(session, {
+			const encoded = encodeV8Frame({
 				type: "run",
 				runId,
 				code: options.code,
@@ -593,6 +644,10 @@ async function runOnce(
 				asyncWrapped: options.asyncWrapped,
 				finalExprReturned: options.finalExprReturned,
 			});
+			if (Buffer.byteLength(encoded, "utf8") > MAX_V8_INBOUND_FRAME_BYTES) {
+				throw new ToolError("V8 cell payload exceeds 15 MiB frame limit");
+			}
+			writeRawToV8(session, encoded);
 		}
 		await promise;
 	} finally {
@@ -684,19 +739,52 @@ function markV8SessionAlive(session: V8Session, toolSession: ToolSession): void 
 	});
 }
 
+function sanitizeGuestView(raw: unknown): EvalView | undefined {
+	if (!isRecord(raw) || typeof raw.kind !== "string") return undefined;
+	if (raw.kind === "table") {
+		if (!Array.isArray(raw.columns) || !Array.isArray(raw.rows)) return undefined;
+		const columns: EvalTableColumn[] = [];
+		for (const col of raw.columns) {
+			if (!isRecord(col) || typeof col.head !== "string") return undefined;
+			if (col.numeric !== undefined && typeof col.numeric !== "boolean") return undefined;
+			columns.push(col.numeric !== undefined ? { head: col.head, numeric: col.numeric } : { head: col.head });
+		}
+		const rows: string[][] = [];
+		for (const row of raw.rows) {
+			if (!Array.isArray(row) || !row.every(cell => typeof cell === "string")) return undefined;
+			rows.push([...row]);
+		}
+		return { kind: "table", columns, rows };
+	}
+	if (raw.kind === "json") {
+		if (!Object.hasOwn(raw, "value")) return undefined;
+		return { kind: "json", value: raw.value };
+	}
+	if (raw.kind === "markdown") {
+		if (typeof raw.text !== "string") return undefined;
+		return { kind: "markdown", text: raw.text };
+	}
+	return undefined;
+}
+
 function sanitizeGuestDisplayOutput(raw: unknown): EvalDisplayOutput | undefined {
 	if (!isRecord(raw) || typeof raw.type !== "string") return undefined;
 	if (raw.type === "image") {
-		if (typeof raw.data !== "string" || typeof raw.mimeType !== "string") return undefined;
-		return { type: "image", data: raw.data, mimeType: raw.mimeType, ...evalImageMetadata(raw) };
+		if (
+			typeof raw.data !== "string" ||
+			raw.data.length === 0 ||
+			typeof raw.mimeType !== "string" ||
+			!ALLOWED_GUEST_IMAGE_MIME_TYPES.has(raw.mimeType)
+		) {
+			return undefined;
+		}
+		return { type: "image", data: raw.data, mimeType: raw.mimeType };
 	}
 	if (raw.type === "view") {
-		if (typeof raw.text !== "string" || !isRecord(raw.view)) return undefined;
-		return {
-			type: "view",
-			text: raw.text,
-			view: raw.view as EvalDisplayOutput extends { view: infer V } ? V : never,
-		};
+		if (typeof raw.text !== "string") return undefined;
+		const view = sanitizeGuestView(raw.view);
+		if (!view) return undefined;
+		return { type: "view", text: raw.text, view };
 	}
 	if (raw.type === "status") {
 		if (!isRecord(raw.event)) return undefined;
@@ -714,6 +802,40 @@ function sanitizeGuestDisplayOutput(raw: unknown): EvalDisplayOutput | undefined
 	return undefined;
 }
 
+async function raceAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined, fallbackMessage: string): Promise<T> {
+	if (!signal) return await promise;
+	if (signal.aborted) throw abortReasonError(signal.reason, fallbackMessage);
+	const { promise: aborted, reject } = Promise.withResolvers<never>();
+	const onAbort = (): void => reject(abortReasonError(signal.reason, fallbackMessage));
+	signal.addEventListener("abort", onAbort, { once: true });
+	try {
+		return await Promise.race([promise, aborted]);
+	} finally {
+		signal.removeEventListener("abort", onAbort);
+	}
+}
+
+function encodeV8Frame(msg: V8Inbound): string {
+	let encoded = `${JSON.stringify(msg)}\n`;
+	if (Buffer.byteLength(encoded, "utf8") <= MAX_V8_INBOUND_FRAME_BYTES) return encoded;
+	if (msg.type === "tool-reply" && !msg.ok) {
+		const bounded: V8Inbound = {
+			type: "tool-reply",
+			id: msg.id,
+			ok: false,
+			error: {
+				name: msg.error.name,
+				message: `${msg.error.message.slice(0, 64 * 1024)}... [truncated]`,
+				isAbort: msg.error.isAbort,
+				isToolError: msg.error.isToolError,
+			},
+		};
+		encoded = `${JSON.stringify(bounded)}\n`;
+		if (Buffer.byteLength(encoded, "utf8") <= MAX_V8_INBOUND_FRAME_BYTES) return encoded;
+	}
+	throw new ToolError("V8 inbound frame exceeds 15 MiB limit");
+}
+
 function writeRawToV8(session: V8Session, payload: string): void {
 	if (session.state === "dead") return;
 	try {
@@ -729,7 +851,7 @@ function writeRawToV8(session: V8Session, payload: string): void {
 function sendToV8(session: V8Session, msg: V8Inbound): void {
 	if (session.state === "dead") return;
 	try {
-		writeRawToV8(session, `${JSON.stringify(msg)}\n`);
+		writeRawToV8(session, encodeV8Frame(msg));
 	} catch (err) {
 		logger.debug("v8 isolate stdin encode failed", { error: err instanceof Error ? err.message : String(err) });
 	}
