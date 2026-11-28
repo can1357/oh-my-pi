@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `!`/`!!` commands that probe the terminal, such as `gh api`, waiting about 5 seconds for a reply that never came ([#10214](https://github.com/can1357/oh-my-pi/issues/10214), [#19946](https://github.com/can1357/oh-my-pi/pull/19946) by [@JamieJ5926](https://github.com/JamieJ5926))
 ### Breaking Changes
 
 - `/fast`, `/ultrafast`, and `/computer` toggle without arguments and accept explicit `on` or `off`. Check their status with `/session info`. The legacy `/fast ultra` still enables Ultrafast.

@@ -772,6 +772,53 @@ exit 64
 		}
 	});
 
+	it("answers a terminal cursor query from a zsh shortcut command so the probe gets its reply (#10214)", async () => {
+		if (process.platform === "win32" || Bun.env.PI_NO_PTY === "1") {
+			return;
+		}
+		const zshPath = ["/bin/zsh", "/usr/bin/zsh", "/usr/local/bin/zsh", "/opt/homebrew/bin/zsh"].find(candidate =>
+			fs.existsSync(candidate),
+		);
+		if (!zshPath) {
+			return;
+		}
+
+		const shellDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-zsh-query-"));
+		fs.writeFileSync(path.join(shellDir, ".zshrc"), "");
+		cfgShellPath.set(Settings.instance, zshPath);
+
+		vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
+			shell: zshPath,
+			args: ["-l", "-c"],
+			env: {
+				PATH: Bun.env.PATH ?? "",
+				HOME: shellDir,
+				ZDOTDIR: shellDir,
+				SHELL_SESSIONS_DISABLE: "1",
+			},
+			prefix: undefined,
+		});
+
+		try {
+			// A probe writes the cursor-position query and waits 3 s for the reply, the way gh's terminal probe does.
+			const result = await executeBash(
+				"printf '\\033[6n'; if read -t 3 -s -d R pos; then echo cursor-reply-ok; else echo no-cursor-reply; fi",
+				{
+					cwd: tempDir,
+					timeout: 15000,
+					sessionKey: "zsh-query",
+					useUserShell: true,
+					pty: { cols: 80, rows: 24, onChunk: () => {} },
+				},
+			);
+
+			expect(result.cancelled).toBe(false);
+			expect(result.output).toContain("cursor-reply-ok");
+		} finally {
+			removeSyncWithRetries(shellDir);
+		}
+	});
+
 	it("lets the user answer a prompt in a zsh shortcut command through the PTY stdin writer (#17210)", async () => {
 		if (process.platform === "win32" || Bun.env.PI_NO_PTY === "1") {
 			return;
