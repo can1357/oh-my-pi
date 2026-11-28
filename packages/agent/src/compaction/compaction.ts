@@ -1012,6 +1012,8 @@ export async function generateSummary(
 		}
 	}
 	do {
+		// Cancellation ends the fold: no window starts on an aborted signal.
+		if (signal?.aborted) throw new AIError.AbortError("Summarization aborted", { cause: signal.reason });
 		// The previous call's actual output is input to this one. Pack only
 		// this window, not the remaining windows against a hypothetical cap.
 		const escapedSummary = carriedSummary && escapeSummaryBoundaryTags(carriedSummary);
@@ -1132,6 +1134,11 @@ async function summarizeConversationWindow(
 		},
 	);
 
+	// Providers report cancellation as a resolved message with partial output.
+	// It is no summary, and the next window would start on the same aborted signal.
+	if (response.stopReason === "aborted") {
+		throw new AIError.AbortError("Summarization aborted", { cause: signal?.reason });
+	}
 	if (response.stopReason === "error") {
 		throw createSummarizationError("Summarization failed", response);
 	}
