@@ -125,6 +125,15 @@ describe("auth thread service", () => {
 		expect(await probe.accountId(PROVIDER, "pinned")).toBe("acc-b");
 	});
 
+	it("reports explicit pins through the worker RPC round-trip", async () => {
+		const { b } = await storeAccounts();
+		expect(storage.sessions.isExplicit(PROVIDER, "pinned")).toBe(false);
+		storage.sessions.pin(PROVIDER, "pinned", b);
+		expect(storage.sessions.isExplicit(PROVIDER, "pinned")).toBe(true);
+		expect(await probe.isExplicit(PROVIDER, "pinned")).toBe(true);
+		expect(await probe.isExplicit(PROVIDER, "other")).toBe(false);
+	});
+
 	it("restricts main lookups with a worker lease until the worker unrestricts", async () => {
 		const { a, b } = await storeAccounts();
 		const handle = await probe.restrict(PROVIDER, "child", ["account:acc-b"]);
