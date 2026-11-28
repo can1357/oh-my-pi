@@ -75,6 +75,7 @@
 - Added the `agent_view_changed` extension event, fired when the TUI focuses a subagent or returns to the main session, so extensions can re-scope their status to the agent on screen ([#16546](https://github.com/can1357/oh-my-pi/issues/16546))
 - Added `model` and `fallback` attributes to `task` result envelopes so the parent sees which model served each subagent ([#16017](https://github.com/can1357/oh-my-pi/issues/16017))
 - Added a terminal notification when a plan is ready for approval, controlled by `completion.notify` ([#7724](https://github.com/can1357/oh-my-pi/issues/7724))
+- Storage backends can implement `readChunks` to supply transcript bytes in chunks. On storage that supplies chunks, transcripts of 8 MiB or more resume without first reading one transcript-sized text string. ([#20742](https://github.com/can1357/oh-my-pi/pull/20742) by [@sjawhar](https://github.com/sjawhar))
 
 ### Changed
 

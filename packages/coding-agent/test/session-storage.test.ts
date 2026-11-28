@@ -9,6 +9,7 @@ import {
 	type SessionStorageBackend,
 	type SessionStorageIndexEntry,
 } from "@oh-my-pi/pi-coding-agent/session/indexed-session-storage";
+import { SESSION_TITLE_SLOT_BYTES } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import {
 	FileSessionStorage,
 	SessionLockError,
@@ -884,6 +885,31 @@ describe("FileSessionStorage line streaming", () => {
 		expect(seen).toEqual(["sync:a\nb\n", "atomic:c\nd\n"]);
 		expect(fs.readFileSync(sessionPath, "utf8")).toBe("c\nd\n");
 	});
+
+	it("streams the body it opened when another storage's atomic rewrite lands after the first chunk", async () => {
+		// If this regresses, a long file-backed session that another process compacts while it is loaded,
+		// copied or exported reads as the old transcript's first chunk followed by the new one's rest.
+		const sessionPath = path.join(tempDir, "session.jsonl");
+		const original = `${"a".repeat((1 << 20) - 1)}\n`.repeat(4);
+		const replacement = `${"b".repeat((1 << 20) - 1)}\n`.repeat(4) + "appended\n";
+		const expected = Buffer.from(original);
+		const reader = new FileSessionStorage();
+		const writer = new FileSessionStorage();
+		await writer.writeTextAtomic(sessionPath, original);
+
+		let offset = 0;
+		let chunks = 0;
+		for await (const chunk of reader.readChunks(sessionPath)) {
+			const end = offset + chunk.byteLength;
+			expect(expected.subarray(offset, end).equals(chunk)).toBe(true);
+			offset = end;
+			if (++chunks === 1) await writer.writeTextAtomic(sessionPath, replacement);
+		}
+
+		expect(chunks).toBeGreaterThan(1);
+		expect(offset).toBe(expected.byteLength);
+		expect((await Bun.file(sessionPath).text()) === replacement).toBe(true);
+	});
 });
 
 describe("FileSessionStorage.updateSessionTitle", () => {
@@ -950,6 +976,115 @@ describe("IndexedSessionStorage.updateSessionTitle", () => {
 
 		const [slotLine] = (await storage.readText(sessionPath)).split("\n");
 		expect(JSON.parse(slotLine)).toMatchObject({ type: "title", title: "Second", source: "user", updatedAt: "t2" });
+	});
+});
+
+/** A backend holding one session's stored bytes under the index row `row`, which it reads whole only. */
+class StoredSessionBackend implements SessionStorageBackend {
+	readonly bytes: Buffer;
+	readonly row: SessionStorageIndexEntry;
+
+	constructor(row: SessionStorageIndexEntry, content: string) {
+		this.row = row;
+		this.bytes = Buffer.from(content, "utf-8");
+	}
+
+	init(): Promise<void> {
+		return Promise.resolve();
+	}
+	loadIndex(): Promise<Iterable<SessionStorageIndexEntry>> {
+		return Promise.resolve([this.row]);
+	}
+	readFull(path: string): Promise<string | null> {
+		return Promise.resolve(path === this.row.path ? this.bytes.toString("utf-8") : null);
+	}
+	readSlices(): Promise<[string, string]> {
+		return Promise.resolve(["", ""]);
+	}
+	writeFull(): Promise<void> {
+		return Promise.resolve();
+	}
+	append(): Promise<void> {
+		return Promise.resolve();
+	}
+	updateSessionTitle(): Promise<void> {
+		return Promise.resolve();
+	}
+	truncate(): Promise<void> {
+		return Promise.resolve();
+	}
+	remove(): Promise<void> {
+		return Promise.resolve();
+	}
+	move(): Promise<void> {
+		return Promise.resolve();
+	}
+}
+
+/** A {@link StoredSessionBackend} that also reads in chunks of `chunkBytes`, each a view of its stored bytes. */
+class ChunkedSessionBackend extends StoredSessionBackend {
+	readonly #chunkBytes: number;
+
+	constructor(row: SessionStorageIndexEntry, content: string, chunkBytes: number) {
+		super(row, content);
+		this.#chunkBytes = chunkBytes;
+	}
+
+	async *readChunks(path: string, fromByte: number): AsyncGenerator<Uint8Array> {
+		if (path !== this.row.path) throw Object.assign(new Error(`File not found: ${path}`), { code: "ENOENT" });
+		for (let start = fromByte; start < this.bytes.byteLength; start += this.#chunkBytes) {
+			yield this.bytes.subarray(start, start + this.#chunkBytes);
+		}
+	}
+}
+
+describe("IndexedSessionStorage.readChunks", () => {
+	const sessionPath = "/sessions/chunked.jsonl";
+	// The stored body carries an older title slot; every read lays the index row's newer title over it.
+	const indexedSlot = serializeTitleSlot({ title: "Indexed", source: "user", updatedAt: "t1" });
+	const stored =
+		serializeTitleSlot({ title: "Stored", source: "auto", updatedAt: "t0" }) +
+		`${JSON.stringify({ type: "session", id: "session-id", timestamp: "t0", cwd: "/cwd" })}\n` +
+		`${JSON.stringify({ type: "custom", id: "c1", data: "café ".repeat(60) })}\n`;
+	const row: SessionStorageIndexEntry = {
+		path: sessionPath,
+		size: Buffer.byteLength(stored, "utf-8"),
+		mtimeMs: 1,
+		title: "Indexed",
+		titleSource: "user",
+		titleUpdatedAt: "t1",
+	};
+
+	async function readAll(chunks: AsyncIterable<Uint8Array>): Promise<Buffer> {
+		const parts: Uint8Array[] = [];
+		for await (const chunk of chunks) parts.push(chunk);
+		return Buffer.concat(parts);
+	}
+
+	it("reads the bytes readText reads from each offset when 100-byte chunks split the title slot", async () => {
+		const backend = new ChunkedSessionBackend(row, stored, 100);
+		const storage = new IndexedSessionStorage(backend);
+		await storage.initialize();
+		const readChunks = storage.readChunks;
+		if (!readChunks) throw new Error("Expected readChunks on storage whose backend reads in chunks");
+		const text = Buffer.from(await storage.readText(sessionPath), "utf-8");
+		// From the start, inside the slot, at its end, inside a two-byte character of the body, and at the end.
+		const offsets = [0, 150, SESSION_TITLE_SLOT_BYTES, text.indexOf("é") + 1, text.byteLength];
+
+		const read = await Promise.all(offsets.map(offset => readAll(readChunks(sessionPath, offset))));
+
+		expect(text.subarray(0, SESSION_TITLE_SLOT_BYTES).toString("utf-8")).toBe(indexedSlot);
+		expect(read).toEqual(offsets.map(offset => text.subarray(offset)));
+		// The slot is laid over a copy: the chunks the backend handed out keep the stored slot.
+		expect(backend.bytes.toString("utf-8")).toBe(stored);
+	});
+
+	it("is absent when the backend reads whole only, so callers read the text", async () => {
+		const storage = new IndexedSessionStorage(new StoredSessionBackend(row, stored));
+		await storage.initialize();
+
+		expect(storage.readChunks).toBeUndefined();
+		expect(await storage.readText(sessionPath)).toBe(indexedSlot + stored.slice(SESSION_TITLE_SLOT_BYTES));
 	});
 });
 

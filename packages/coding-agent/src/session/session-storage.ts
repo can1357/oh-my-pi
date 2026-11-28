@@ -121,6 +121,45 @@ export class SessionWriteConflictError extends Error {
 }
 
 /**
+ * A chunked read ({@link SessionStorage.readChunks}) met a session that a full
+ * write or a delete replaced after the read began, so the bytes it had yielded
+ * and the rest would mix two bodies. Reading the session again from its start
+ * sees one body.
+ */
+export class SessionReadConflictError extends Error {
+	readonly path: string;
+
+	constructor(path: string) {
+		super(`Session file ${JSON.stringify(path)} was replaced or removed while it was read; read it again.`);
+		this.name = "SessionReadConflictError";
+		this.path = path;
+	}
+}
+
+/**
+ * Times a reader of a stored transcript reads it again from its start after a
+ * {@link SessionReadConflictError}, before that error surfaces. A retry
+ * starts a fresh read. The caller selects the read mode.
+ */
+export const RACED_READ_RETRIES = 3;
+
+/**
+ * Run `pass`, a read of a stored transcript from its start, and run it again
+ * after each {@link SessionReadConflictError}, at most
+ * {@link RACED_READ_RETRIES} more times. Any other error, and a conflict past
+ * the last retry, is thrown.
+ */
+export async function retryRacedRead<T>(pass: () => Promise<T>): Promise<T> {
+	for (let retries = 0; ; retries++) {
+		try {
+			return await pass();
+		} catch (error) {
+			if (!(error instanceof SessionReadConflictError) || retries >= RACED_READ_RETRIES) throw error;
+		}
+	}
+}
+
+/**
  * The file publish lock is held by another live writer, so freshness cannot
  * be established. Fail-closed: the staged rewrite is discarded without
  * publishing.
@@ -207,6 +246,13 @@ export interface SessionStorage {
 	readTextSync?(path: string): string;
 	/** Read the requested UTF-8 byte windows from the head and tail of the file. */
 	readTextSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]>;
+	/**
+	 * The file's bytes from byte `fromByte` (default 0) to its end, as chunks in
+	 * order, so a reader never holds the whole transcript. Iterating a missing
+	 * file rejects with ENOENT. Optional: callers on backends without it read the
+	 * whole text.
+	 */
+	readChunks?(path: string, fromByte?: number): AsyncIterable<Uint8Array>;
 	/**
 	 * Feed each line of the file to `visit`, in order, until it returns true or
 	 * the file ends. Lets callers find records that fall between the bounded
@@ -1119,6 +1165,12 @@ export class FileSessionStorage implements SessionStorage {
 
 	readTextSync(path: string): string {
 		return fs.readFileSync(path, "utf8");
+	}
+
+	readChunks(path: string, fromByte?: number): AsyncIterable<Uint8Array> {
+		const file = Bun.file(path);
+		// A read from the start streams the file itself, as every whole-file stream here does.
+		return (fromByte ? file.slice(fromByte) : file).stream();
 	}
 
 	async readTextSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]> {

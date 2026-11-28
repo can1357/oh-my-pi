@@ -573,7 +573,8 @@ Applied when header `version < 3`:
 `loadEntriesFromFile(path)` behavior:
 
 - Missing file (`ENOENT`) -> returns `[]`, unless `throwIfMissing: true` requests an error.
-- Current files at least 8 MiB use a streaming JSONL loader; smaller or non-file storage uses a full text read.
+- Transcripts of at least 8 MiB stream through the JSONL loader from any storage with `readChunks` (file storage, and indexed storage whose backend reads in chunks); smaller ones, and storages without it (an SDK backend without `readChunks`), use a full text read.
+- A streamed read that a full rewrite or delete cuts short (`SessionReadConflictError`, or `ENOENT` after bytes were read) starts again from the beginning, up to three times, and never returns the part read before. A path that the next read finds gone is a missing file, as above. The conflict is thrown after the last retry.
 - Malformed records are skipped and counted by the lenient JSONL parser.
 - The optional fixed-width title slot is removed and folded into the header.
 - If the first logical entry is not a valid session header (`type !== "session"` or missing string `id`) -> returns `[]`.
@@ -678,7 +679,11 @@ These projections leave the live entries unchanged. On load, ordinary persisted 
 
 ## Storage Abstractions
 
-`SessionStorage` owns filesystem-like operations used by `SessionManager`: synchronous directory/existence/write/stat/list operations; async read, sliced read, write, guarded atomic write, rename, unlink, artifact-aware deletion, title update, writer creation, and backend drain. Optional capabilities include synchronous reads, confirmed remote writes, assistant-turn scans, file locking, session ownership claims, and conditional artifact-aware deletion.
+`SessionStorage` owns filesystem-like operations used by `SessionManager`: synchronous directory/existence/write/stat/list operations; async read, sliced read, write, guarded atomic write, rename, unlink, artifact-aware deletion, title update, writer creation, and backend drain. Optional capabilities include synchronous reads, chunked reads (`readChunks`), confirmed remote writes, assistant-turn scans, file locking, session ownership claims, and conditional artifact-aware deletion.
+
+An SDK store that uses `IndexedSessionStorage` implements `SessionStorageBackend`. Its required methods are `init`, `loadIndex`, `readFull`, `readSlices`, `writeFull`, `append`, `updateSessionTitle`, `truncate`, `remove`, and `move`.
+
+The backend can also implement `readChunks(path, fromByte)` to return the stored bytes in order. Each iterator reads one consistent snapshot or throws `SessionReadConflictError` before yielding bytes from a replacement or after a delete. `ENOENT` means the path was missing when the read began.
 
 Implementations and adapters:
 
