@@ -1,5 +1,10 @@
 import { MessageFramer } from "../../src/jsonrpc/message-framing";
 
+export interface FakeLspOptions {
+	capabilities?: Record<string, unknown>;
+	responses?: Record<string, unknown>;
+}
+
 interface JsonRpcMessage {
 	jsonrpc: "2.0";
 	id?: string | number;
@@ -23,7 +28,7 @@ interface CloseDocumentParams {
 
 let initializeCount = 0;
 let processId: number | null = null;
-let initializationOptions: unknown = null;
+let initializationOptions: FakeLspOptions | null = null;
 const didOpen: Record<string, number> = {};
 const didChange: Record<string, number[]> = {};
 const didClose: string[] = [];
@@ -31,6 +36,8 @@ const notifications: string[] = [];
 const documents = new Map<string, { version: number; text: string }>();
 const workspaceFolders = new Set<string>();
 const watchedFileChanges: unknown[] = [];
+const willRenameFiles: unknown[] = [];
+const didRenameFiles: unknown[] = [];
 let nextServerRequestId = 1;
 const pendingServerRequests = new Map<
 	string | number,
@@ -84,11 +91,13 @@ async function handleRequest(message: JsonRpcMessage): Promise<void> {
 	switch (message.method) {
 		case "initialize": {
 			initializeCount++;
-			const params = message.params as { processId?: number | null; initializationOptions?: unknown } | undefined;
+			const params = message.params as
+				| { processId?: number | null; initializationOptions?: FakeLspOptions }
+				| undefined;
 			processId = params?.processId ?? null;
 			initializationOptions = params?.initializationOptions ?? null;
 			respond(id, {
-				capabilities: {},
+				capabilities: initializationOptions?.capabilities ?? {},
 				serverInfo: { name: "fake-lsp", version: String(process.pid) },
 			});
 			break;
@@ -106,6 +115,8 @@ async function handleRequest(message: JsonRpcMessage): Promise<void> {
 				notifications: [...notifications],
 				workspaceFolders: [...workspaceFolders],
 				watchedFileChanges: [...watchedFileChanges],
+				willRenameFiles: [...willRenameFiles],
+				didRenameFiles: [...didRenameFiles],
 			});
 			break;
 		}
@@ -131,8 +142,15 @@ async function handleRequest(message: JsonRpcMessage): Promise<void> {
 		case "shutdown":
 			respond(id, null);
 			break;
-		default:
-			respond(id, undefined, { code: -32601, message: `Method not found: ${message.method}` });
+		default: {
+			if (message.method === "workspace/willRenameFiles") willRenameFiles.push(message.params);
+			const response = initializationOptions?.responses?.[message.method];
+			if (response === undefined) {
+				respond(id, undefined, { code: -32601, message: `Method not found: ${message.method}` });
+			} else {
+				respond(id, response);
+			}
+		}
 	}
 }
 
@@ -177,6 +195,9 @@ function handleNotification(message: JsonRpcMessage): void {
 			watchedFileChanges.push(...changes);
 			break;
 		}
+		case "workspace/didRenameFiles":
+			didRenameFiles.push(message.params);
+			break;
 		case "test/crash":
 			process.stderr.write("error: Unknown binary 'rust-analyzer' in official toolchain\n");
 			process.exit(3);

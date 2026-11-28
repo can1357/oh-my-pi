@@ -9,6 +9,7 @@ import type {
 	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
 import { isEnoent, isFsError, logger, prompt, ptree, untilAborted } from "@oh-my-pi/pi-utils";
+import { findRepoRoot } from "../capability/fs";
 import lspDescription from "../prompts/tools/lsp.md" with { type: "text" };
 import type { ToolSession } from "../tools";
 import { truncateForPrompt } from "../tools/approval";
@@ -26,6 +27,7 @@ import {
 	getOrCreateClient,
 	isRustAnalyzerClient,
 	type LspServerStatus,
+	realPathOf,
 	reconcileFileFromDisk,
 	reconcileIdleChecker,
 	reconcileOpenFilesFromDisk,
@@ -39,6 +41,7 @@ import {
 	supportsMethod,
 	unservedCheckout,
 	waitForProjectLoaded,
+	workspaceDocumentPath,
 } from "./client";
 import { getLinterClient } from "./clients";
 import { locationsNotMentioning, missingOccurrencesNote } from "./completeness";
@@ -137,11 +140,19 @@ interface FileRenamePair {
 async function enumerateRenamePairs(
 	source: string,
 	dest: string,
+	cwd: string,
 ): Promise<{ pairs: FileRenamePair[]; directory: boolean; exceeded: boolean }> {
+	const pairFor = async (oldPath: string, newPath: string): Promise<FileRenamePair> => {
+		const [oldDocument, newDocument] = await Promise.all([
+			workspaceDocumentPath(cwd, oldPath),
+			workspaceDocumentPath(cwd, newPath),
+		]);
+		return { oldUri: fileToUri(oldDocument), newUri: fileToUri(newDocument) };
+	};
 	const stat = await fs.promises.stat(source);
 	if (!stat.isDirectory()) {
 		return {
-			pairs: [{ oldUri: fileToUri(source), newUri: fileToUri(dest) }],
+			pairs: [await pairFor(source, dest)],
 			directory: false,
 			exceeded: false,
 		};
@@ -156,10 +167,7 @@ async function enumerateRenamePairs(
 		const parent = entry.parentPath ?? source;
 		const absOld = path.join(parent, entry.name);
 		const rel = path.relative(source, absOld);
-		pairs.push({
-			oldUri: fileToUri(absOld),
-			newUri: fileToUri(path.join(dest, rel)),
-		});
+		pairs.push(await pairFor(absOld, path.join(dest, rel)));
 	}
 	return { pairs, directory: true, exceeded: false };
 }
@@ -272,6 +280,42 @@ async function offTargetNote(
 			? "; clangd has no compile_commands.json and is parsing with fallback flags"
 			: "";
 	return `\n⚠ ${misses.length} location(s) do not mention ${symbolName} (${examples})${clangdHint}`;
+}
+
+type CheckoutAnswer = Location[] | WorkspaceEdit | (CodeAction | Command)[];
+
+function* answerFileUris(answer: CheckoutAnswer): Iterable<string> {
+	if (Array.isArray(answer)) {
+		for (const item of answer) {
+			if ("uri" in item) yield item.uri;
+			else if ("edit" in item && item.edit) yield* answerFileUris(item.edit);
+		}
+		return;
+	}
+	if (answer.changes) {
+		for (const uri in answer.changes) {
+			if (answer.changes[uri].length > 0) yield uri;
+		}
+	}
+	if (answer.documentChanges) {
+		for (const change of answer.documentChanges) {
+			if ("textDocument" in change && change.edits.length > 0) yield change.textDocument.uri;
+		}
+	}
+}
+
+/** Opening one document is not evidence of indexing the checkout; answering from another file is. */
+async function answerShowsCheckout(answer: CheckoutAnswer, targetFile: string, checkout: string): Promise<boolean> {
+	const queriedFile = await realPathOf(targetFile);
+	const seen = new Set([targetFile, queriedFile]);
+	for (const uri of answerFileUris(answer)) {
+		const file = uriToFile(uri);
+		if (!path.isAbsolute(file) || seen.has(file)) continue;
+		seen.add(file);
+		const resolved = await realPathOf(file);
+		if (resolved !== queriedFile && (await findRepoRoot(path.dirname(resolved))) === checkout) return true;
+	}
+	return false;
 }
 
 const RUSTUP_PROXY_PROBE_MS = 5_000;
@@ -500,7 +544,8 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					continue;
 				}
 
-				const uri = fileToUri(resolved);
+				const documentPath = await workspaceDocumentPath(this.session.cwd, resolved);
+				const uri = fileToUri(documentPath);
 				const relPath = formatPathRelativeToCwd(resolved, this.session.cwd);
 				const allDiagnostics: Diagnostic[] = [];
 				const failedServers: string[] = [];
@@ -517,7 +562,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						throwIfAborted(signal);
 						if (serverConfig.createClient) {
 							const linterClient = getLinterClient(serverName, serverConfig, this.session.cwd);
-							const diagnostics = await linterClient.lint(resolved, signal);
+							const diagnostics = await linterClient.lint(documentPath, signal);
 							allDiagnostics.push(...diagnostics);
 							succeededServers++;
 							reportedServers.push(serverName);
@@ -533,20 +578,20 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						// build status settles.
 						let rebuildStatusSeq: number | undefined;
 						if (supportsDocumentDiagnostics(client)) {
-							await reconcileFileFromDisk(client, resolved, signal);
+							await reconcileFileFromDisk(client, documentPath, signal);
 						} else if (client.buildStatus) {
 							// clangd with build status: rebuild the main file in place, keeping the
 							// headers it can reuse, rather than paying a full rebuild on reopen.
 							const sinceSeq = client.buildStatusSeq ?? 0;
-							if (await rebuildFile(client, resolved, signal)) rebuildStatusSeq = sinceSeq;
+							if (await rebuildFile(client, documentPath, signal)) rebuildStatusSeq = sinceSeq;
 						} else if (client.publishesDocumentVersions) {
 							// A push server need not republish unchanged text (clangd does not), but
 							// it does on open, and the echoed version identifies that report at once.
-							await reopenFile(client, resolved, signal);
+							await reopenFile(client, documentPath, signal);
 						} else {
 							// Without echoed versions a reopen's report cannot be told apart from the
 							// empty one its close may publish; resend the text instead.
-							await refreshFile(client, resolved, signal);
+							await refreshFile(client, documentPath, signal);
 						}
 						const expectedDocumentVersion = client.openFiles.get(uri)?.version;
 						// Project-aware servers (Roslyn, tsserver, …) compute pull diagnostics
@@ -733,7 +778,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				}
 			}
 
-			const enumerated = await enumerateRenamePairs(source, dest);
+			const enumerated = await enumerateRenamePairs(source, dest, this.session.cwd);
 			if (enumerated.exceeded) {
 				return {
 					content: [
@@ -1141,6 +1186,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			}
 
 			const [chosenName, chosenConfig] = chosenServer;
+			const documentPath = resolvedTarget ? await workspaceDocumentPath(this.session.cwd, resolvedTarget) : null;
 			let requestParams: unknown;
 			if (params.payload !== undefined) {
 				try {
@@ -1152,10 +1198,10 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						details: { action, serverName: chosenName, success: false, request: params },
 					};
 				}
-			} else if (resolvedTarget) {
-				const uri = fileToUri(resolvedTarget);
+			} else if (documentPath) {
+				const uri = fileToUri(documentPath);
 				if (line !== undefined) {
-					const character = await resolveSymbolColumn(resolvedTarget, line, symbol);
+					const character = await resolveSymbolColumn(documentPath, line, symbol);
 					requestParams = { textDocument: { uri }, position: { line: line - 1, character } };
 				} else {
 					requestParams = { textDocument: { uri } };
@@ -1166,8 +1212,8 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 
 			try {
 				const client = await getOrCreateClient(chosenConfig, this.session.cwd, undefined, signal);
-				if (resolvedTarget) {
-					await reconcileFileFromDisk(client, resolvedTarget, signal);
+				if (documentPath) {
+					await reconcileFileFromDisk(client, documentPath, signal);
 				}
 				const result = await sendRequest(client, method, requestParams, signal);
 				const formatted =
@@ -1428,7 +1474,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			[serverName, serverConfig] = [selected.name, selected.config];
 			const { client } = selected;
 			unsupportedNotes = selected.skipped;
-			const targetFile = resolvedFile;
+			const targetFile = resolvedFile ? await workspaceDocumentPath(client.cwd, resolvedFile) : null;
 			const isRustAnalyzerServer = isRustAnalyzerClient(client) || serverName === "rust-analyzer";
 			const isProjectIndexed = PROJECT_INDEXED_ACTIONS.has(action);
 			const isCrossFile = isProjectIndexed || action === "code_actions";
@@ -1474,6 +1520,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			const symbolName = symbol ? parseSymbolSpec(symbol).symbol : undefined;
 
 			let output: string;
+			let answer: CheckoutAnswer | undefined;
 			// Set on bare empty-lookup outcomes (no definition/references/…): the
 			// result carries no information once consumed, so compaction may elide
 			// it. Clean diagnostics runs are NOT useless — they are verification
@@ -1517,6 +1564,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						output = "No definition found";
 						useless = true;
 					} else {
+						answer = locations;
 						const lines = await Promise.all(
 							locations.map(location => formatLocationWithContext(location, this.session.cwd)),
 						);
@@ -1543,6 +1591,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						output = "No type definition found";
 						useless = true;
 					} else {
+						answer = locations;
 						const lines = await Promise.all(
 							locations.map(location => formatLocationWithContext(location, this.session.cwd)),
 						);
@@ -1568,6 +1617,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						output = "No implementation found";
 						useless = true;
 					} else {
+						answer = locations;
 						const lines = await Promise.all(
 							locations.map(location => formatLocationWithContext(location, this.session.cwd)),
 						);
@@ -1605,11 +1655,12 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					if (!result || result.length === 0) {
 						output = "No references found";
 						const missing = symbolName
-							? await missingOccurrencesNote(symbolName, client.cwd, targetFile!, [], this.session.cwd, signal)
+							? await missingOccurrencesNote(symbolName, client, targetFile!, [], this.session.cwd, signal)
 							: undefined;
 						if (missing) output += `\n${missing}`;
 						else useless = true;
 					} else {
+						answer = result;
 						const contextualReferences = result.slice(0, REFERENCE_CONTEXT_LIMIT);
 						const plainReferences = result.slice(REFERENCE_CONTEXT_LIMIT);
 						const contextualLines = await Promise.all(
@@ -1626,14 +1677,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						output = `Found ${result.length} reference(s):\n${lines.join("\n")}`;
 						output += await offTargetNote(result, symbolName, serverName, this.session.cwd);
 						const missing = symbolName
-							? await missingOccurrencesNote(
-									symbolName,
-									client.cwd,
-									targetFile!,
-									result,
-									this.session.cwd,
-									signal,
-								)
+							? await missingOccurrencesNote(symbolName, client, targetFile!, result, this.session.cwd, signal)
 							: undefined;
 						if (missing) output += `\n${missing}`;
 					}
@@ -1745,7 +1789,10 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						const appliedAction = await applyCodeAction(selectedAction, {
 							resolveCodeAction: async actionItem =>
 								(await sendRequest(client, "codeAction/resolve", actionItem, signal)) as CodeAction,
-							applyWorkspaceEdit: async edit => applyWorkspaceEditWithLsp(edit, this.session.cwd, signal),
+							applyWorkspaceEdit: edit => {
+								answer = edit;
+								return applyWorkspaceEditWithLsp(edit, this.session.cwd, signal);
+							},
 							executeCommand: async commandItem => {
 								await sendRequest(
 									client,
@@ -1778,6 +1825,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						break;
 					}
 
+					answer = result;
 					const actionLines = result.map((actionItem, index) => `  ${formatCodeAction(actionItem, index)}`);
 					output = `${result.length} code action(s):\n${actionLines.join("\n")}`;
 					break;
@@ -1856,23 +1904,16 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					if (!result) {
 						output = "Rename returned no edits";
 					} else {
+						answer = result;
 						const shouldApply = apply !== false;
 						if (shouldApply) {
 							const applied = await applyWorkspaceEditWithLsp(result, this.session.cwd, signal);
 							output = `Applied rename:\n${applied.map(a => `  ${a}`).join("\n")}`;
 							// Whatever still names the old symbol was not renamed.
 							const leftover = symbolName
-								? await missingOccurrencesNote(
-										symbolName,
-										client.cwd,
-										targetFile!,
-										[],
-										this.session.cwd,
-										signal,
-										{
-											where: "remain after the rename",
-										},
-									)
+								? await missingOccurrencesNote(symbolName, client, targetFile!, [], this.session.cwd, signal, {
+										where: "remain after the rename",
+									})
 								: undefined;
 							if (leftover) output += `\n${leftover}`;
 						} else {
@@ -1898,7 +1939,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			}
 			if (targetFile && isCrossFile) {
 				const checkout = await unservedCheckout(client, targetFile);
-				if (checkout) {
+				if (checkout && (!answer || !(await answerShowsCheckout(answer, targetFile, checkout)))) {
 					output += `\nnote: ${serverName} indexes ${client.cwd} only and cannot load the checkout ${checkout}; these results may describe ${client.cwd}'s copy of the code`;
 				}
 			}

@@ -5,9 +5,10 @@
  * location without saying so; these checks name what looks missing or off.
  */
 import * as path from "node:path";
-import { grep } from "@oh-my-pi/pi-natives";
+import { grep, type GrepMatch } from "@oh-my-pi/pi-natives";
 import { formatPathRelativeToCwd } from "../tools/path-utils";
-import type { Location } from "./types";
+import { foreignCheckout, realPathOf } from "./client";
+import type { Location, LspClient } from "./types";
 import { uriToFile } from "./uri";
 import { readLocationContext } from "./utils";
 
@@ -20,13 +21,13 @@ function wordPattern(name: string): RegExp {
 }
 
 /**
- * Whole-word occurrences of `name` in `root`'s files with `filePath`'s extension
- * that no location in `locations` sits on, as a one-line warning; undefined when
- * there are none or the name is too common to check.
+ * Whole-word occurrences of `name` with `filePath`'s extension that no location
+ * in `locations` sits on. Scan the file's checkout when it differs from the
+ * client's, otherwise scan the client's cwd.
  */
 export async function missingOccurrencesNote(
 	name: string,
-	root: string,
+	client: LspClient,
 	filePath: string,
 	locations: readonly Location[],
 	cwd: string,
@@ -35,7 +36,9 @@ export async function missingOccurrencesNote(
 ): Promise<string | undefined> {
 	const ext = path.extname(filePath);
 	if (!ext || !/^[\w$]+$/.test(name)) return undefined;
-	let matches: Array<{ file: string; line: number }>;
+	const checkout = await foreignCheckout(client, filePath);
+	const root = checkout ?? client.cwd;
+	let matches: GrepMatch[];
 	try {
 		const result = await grep({
 			pattern: `(^|[^\\w$])${RegExp.escape(name)}([^\\w$]|$)`,
@@ -46,23 +49,34 @@ export async function missingOccurrencesNote(
 			timeoutMs: TEXT_CHECK_TIMEOUT_MS,
 		});
 		if (result.limitReached) return undefined;
-		matches = result.matches.map(match => ({ file: path.resolve(root, match.path), line: match.lineNumber }));
+		matches = result.matches;
 	} catch {
 		return undefined;
 	}
-	const covered = new Set<string>();
-	for (const location of locations) {
-		const file = uriToFile(location.uri);
-		for (let line = location.range.start.line; line <= location.range.end.line; line++) {
-			covered.add(`${file}:${line + 1}`);
+	let missing = matches;
+	if (locations.length > 0 && matches.length > 0) {
+		// The server can name the same checkout via a symlink, even when grep
+		// scanned its real path. Resolve the root and each distinct URI once.
+		const realRoot = checkout ?? (await realPathOf(root));
+		const resolvedUris = new Map<string, string>();
+		const covered = new Set<string>();
+		for (const location of locations) {
+			let file = resolvedUris.get(location.uri);
+			if (file === undefined) {
+				file = await realPathOf(uriToFile(location.uri));
+				resolvedUris.set(location.uri, file);
+			}
+			for (let line = location.range.start.line; line <= location.range.end.line; line++) {
+				covered.add(`${file}:${line + 1}`);
+			}
 		}
+		missing = matches.filter(match => !covered.has(`${path.resolve(realRoot, match.path)}:${match.lineNumber}`));
 	}
-	const missing = matches.filter(match => !covered.has(`${match.file}:${match.line}`));
 	if (missing.length === 0) return undefined;
-	const files = new Set(missing.map(match => match.file)).size;
+	const files = new Set(missing.map(match => match.path)).size;
 	const examples = missing
 		.slice(0, EXAMPLE_LIMIT)
-		.map(match => `${formatPathRelativeToCwd(match.file, cwd)}:${match.line}`)
+		.map(match => `${formatPathRelativeToCwd(path.resolve(root, match.path), cwd)}:${match.lineNumber}`)
 		.join(", ");
 	return `⚠ ${missing.length} textual occurrence(s) of ${name} in ${files} file(s) ${where} (comments and strings included; the server's index may be incomplete): ${examples}`;
 }

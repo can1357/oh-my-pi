@@ -915,15 +915,15 @@ function countFolderLoad(client: LspClient, delta: number): void {
 }
 
 /** `filePath` with symlinks resolved, a missing tail kept; lexical when it cannot be resolved. */
-async function realPathOf(filePath: string): Promise<string> {
+export async function realPathOf(filePath: string): Promise<string> {
 	return (await resolveSyscallTarget(filePath, true)) ?? path.resolve(filePath);
 }
 
 /**
  * The checkout to add to `client`'s workspace before it opens `filePath`: the one holding
- * the file (symlinks resolved), when it is not the checkout holding the client's root. A
- * server rooted at the session cwd never loads another checkout on its own (rust-analyzer
- * finds no references there), nested worktrees and checkouts included. Only servers that
+ * the file (symlinks resolved), when it is not the checkout holding the client's root.
+ * Some servers do not load another checkout on their own (rust-analyzer finds no
+ * references there), nested worktrees and checkouts included. Only servers that
  * accept `workspace/didChangeWorkspaceFolders` get one.
  */
 async function workspaceFolderToAdd(client: LspClient, filePath: string): Promise<string | undefined> {
@@ -934,8 +934,8 @@ async function workspaceFolderToAdd(client: LspClient, filePath: string): Promis
 /**
  * The checkout holding `filePath` when the server cannot be told about it: it is
  * not the checkout of the client's root and the server does not accept
- * `workspace/didChangeWorkspaceFolders`. Its answers for the file then come from
- * the root's checkout index.
+ * `workspace/didChangeWorkspaceFolders`. The server may still discover the
+ * checkout's project when it opens the file.
  */
 export async function unservedCheckout(client: LspClient, filePath: string): Promise<string | undefined> {
 	if (client.serverCapabilities?.workspace?.workspaceFolders?.changeNotifications) return undefined;
@@ -943,13 +943,23 @@ export async function unservedCheckout(client: LspClient, filePath: string): Pro
 }
 
 /** The checkout holding `filePath` when it differs from the one holding the client's root. */
-async function foreignCheckout(client: LspClient, filePath: string): Promise<string | undefined> {
-	const checkout = await findRepoRoot(path.dirname(await realPathOf(filePath)));
-	if (!checkout || checkout === (await findRepoRoot(await realPathOf(client.cwd)))) return undefined;
+export async function foreignCheckout(client: LspClient, filePath: string): Promise<string | undefined> {
+	return foreignCheckoutForRealPath(client.cwd, await realPathOf(filePath));
+}
+
+async function foreignCheckoutForRealPath(cwd: string, realFilePath: string): Promise<string | undefined> {
+	const checkout = await findRepoRoot(path.dirname(realFilePath));
+	if (!checkout || checkout === (await findRepoRoot(await realPathOf(cwd)))) return undefined;
 	// A repository at or above the home directory (a dotfiles checkout) would have the
 	// server index everything under it.
 	if (isPathInsideWorkspace(await realPathOf(os.homedir()), checkout)) return undefined;
 	return checkout;
+}
+
+/** Use the resolved spelling for foreign documents, with or without workspace-folder support. Leave other paths as supplied. */
+export async function workspaceDocumentPath(cwd: string, filePath: string): Promise<string> {
+	const resolved = await realPathOf(filePath);
+	return resolved !== filePath && (await foreignCheckoutForRealPath(cwd, resolved)) ? resolved : filePath;
 }
 
 /**

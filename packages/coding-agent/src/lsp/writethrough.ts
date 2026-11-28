@@ -10,6 +10,7 @@ import {
 	notifyWorkspaceWatchedFiles,
 	reconcileOpenFilesFromDisk,
 	sendRequest,
+	workspaceDocumentPath,
 } from "./client";
 import { getConfig, getServersForFile } from "./config";
 import {
@@ -299,7 +300,7 @@ function isUnverifiedOnly(diagnostics: FileDiagnosticsResult): boolean {
 }
 
 async function scheduleDeferredDiagnosticsFetch(args: {
-	dst: string;
+	documentPath: string;
 	cwd: string;
 	servers: Array<[string, ServerConfig]>;
 	minVersions: ServerVersionMap | undefined;
@@ -311,7 +312,7 @@ async function scheduleDeferredDiagnosticsFetch(args: {
 	try {
 		const deferredTimeout = AbortSignal.timeout(Math.max(25_000, args.waitMs + DIAGNOSTICS_PIPELINE_GRACE_MS));
 		const combined = AbortSignal.any([args.signal, deferredTimeout]);
-		const diagnostics = await getDiagnosticsForFile(args.dst, args.cwd, args.servers, {
+		const diagnostics = await getDiagnosticsForFile(args.documentPath, args.cwd, args.servers, {
 			signal: combined,
 			minVersions: args.minVersions,
 			expectedDocumentVersions: args.expectedDocumentVersions,
@@ -340,6 +341,7 @@ async function scheduleDeferredDiagnosticsFetch(args: {
  */
 async function fetchDiagnosticsWithDeferral(args: {
 	dst: string;
+	documentPath: string;
 	cwd: string;
 	servers: Array<[string, ServerConfig]>;
 	minVersions: ServerVersionMap | undefined;
@@ -351,6 +353,7 @@ async function fetchDiagnosticsWithDeferral(args: {
 }): Promise<FileDiagnosticsResult | undefined> {
 	const {
 		dst,
+		documentPath,
 		cwd,
 		servers,
 		minVersions,
@@ -366,7 +369,7 @@ async function fetchDiagnosticsWithDeferral(args: {
 	if (!deferred) {
 		// No late-injection channel: block for the standard budget and return inline.
 		return apply(
-			await getDiagnosticsForFile(dst, cwd, servers, {
+			await getDiagnosticsForFile(documentPath, cwd, servers, {
 				signal,
 				minVersions,
 				expectedDocumentVersions,
@@ -375,7 +378,7 @@ async function fetchDiagnosticsWithDeferral(args: {
 	}
 
 	// One background fetch with a generous inner budget; await it only briefly inline.
-	const fetchPromise = getDiagnosticsForFile(dst, cwd, servers, {
+	const fetchPromise = getDiagnosticsForFile(documentPath, cwd, servers, {
 		signal: deferred.signal,
 		minVersions,
 		expectedDocumentVersions,
@@ -417,6 +420,7 @@ async function runLspWritethrough(
 ): Promise<WritethroughResult> {
 	const { enableFormat, enableDiagnostics } = options;
 	const contentAlreadyWritten = runOptions?.contentAlreadyWritten ?? false;
+	const documentPath = await workspaceDocumentPath(cwd, dst);
 
 	let finalContent = content;
 	// Bytes this operation has committed to disk; `undefined` until they land
@@ -445,7 +449,7 @@ async function runLspWritethrough(
 		if (writeNotified) return;
 		writeNotified = true;
 		try {
-			await notifyWorkspaceWatchedFiles(cwd, [{ filePath: dst, type: changeType }], notifySignal);
+			await notifyWorkspaceWatchedFiles(cwd, [{ filePath: documentPath, type: changeType }], notifySignal);
 		} catch (error) {
 			if (notifySignal?.aborted && !signal?.aborted) {
 				// The operation budget died mid-notify while the caller is still
@@ -464,6 +468,7 @@ async function runLspWritethrough(
 	}
 
 	const config = getConfig(cwd);
+	// Match extensions and nested root markers on the input path, as the lsp tool does.
 	const servers = getServersForFile(config, dst);
 
 	if (servers.length === 0) {
@@ -489,7 +494,7 @@ async function runLspWritethrough(
 	// The overlay leads disk from the first sync below until the write commits;
 	// bar disk-reconciliation for the file so a concurrent semantic query cannot
 	// revert the server to pre-write content.
-	beginPendingDiskWrite(dst);
+	beginPendingDiskWrite(documentPath);
 	try {
 		const timeoutSignal = AbortSignal.timeout(5_000);
 		timeoutSignal.addEventListener(
@@ -516,7 +521,7 @@ async function runLspWritethrough(
 				// supports implementations that inspect the file before formatting.
 				if (diskContent !== content) await writeContent(content);
 				const [formattedContent, capturedVersions] = await Promise.all([
-					formatContent(dst, content, cwd, customLinterServers, operationSignal),
+					formatContent(documentPath, content, cwd, customLinterServers, operationSignal),
 					minVersionsPromise,
 				]);
 				finalContent = formattedContent.content;
@@ -535,7 +540,7 @@ async function runLspWritethrough(
 						createMissing: enableDiagnostics,
 					});
 				}
-				await syncFileContent(dst, finalContent, cwd, lspServers, operationSignal, enableDiagnostics);
+				await syncFileContent(documentPath, finalContent, cwd, lspServers, operationSignal, enableDiagnostics);
 			} else {
 				// Created paths must exist before their first `didOpen`. tsserver also
 				// needs an acknowledged project reload: on delayed filesystem watchers
@@ -548,11 +553,11 @@ async function runLspWritethrough(
 				}
 
 				// 1. Sync original content to LSP servers
-				await syncFileContent(dst, content, cwd, lspServers, operationSignal);
+				await syncFileContent(documentPath, content, cwd, lspServers, operationSignal);
 
 				// 2. Format in-memory via LSP
 				if (enableFormat) {
-					const formatted = await formatContent(dst, content, cwd, lspServers, operationSignal);
+					const formatted = await formatContent(documentPath, content, cwd, lspServers, operationSignal);
 					finalContent = formatted.content;
 					if (formatted.failed) {
 						formatter = FileFormatResult.FAILED;
@@ -565,7 +570,7 @@ async function runLspWritethrough(
 
 				// 3. If formatted, sync formatted content to LSP servers
 				if (finalContent !== content) {
-					await syncFileContent(dst, finalContent, cwd, lspServers, operationSignal);
+					await syncFileContent(documentPath, finalContent, cwd, lspServers, operationSignal);
 				}
 
 				// 4. Write to disk. A formatter-altered body is the only thing left to
@@ -575,11 +580,17 @@ async function runLspWritethrough(
 			}
 
 			if (enableDiagnostics) {
-				expectedDocumentVersions = await captureOpenFileVersions(dst, cwd, lspServers, operationSignal);
+				expectedDocumentVersions = await captureOpenFileVersions(documentPath, cwd, lspServers, operationSignal);
 			}
 
 			// 5. Notify saved to LSP servers
-			await notifyFileSaved(dst, cwd, lspServers, operationSignal, !useCustomFormatter || enableDiagnostics);
+			await notifyFileSaved(
+				documentPath,
+				cwd,
+				lspServers,
+				operationSignal,
+				!useCustomFormatter || enableDiagnostics,
+			);
 		});
 		synced = true;
 	} catch {
@@ -592,7 +603,7 @@ async function runLspWritethrough(
 			// Schedule background diagnostic fetch if caller wants deferred results
 			if (deferred && !deferred.signal.aborted && enableDiagnostics) {
 				void scheduleDeferredDiagnosticsFetch({
-					dst,
+					documentPath,
 					cwd,
 					servers,
 					minVersions,
@@ -608,12 +619,13 @@ async function runLspWritethrough(
 		// abort the notify before it ever reaches the server.
 		await notifyWriteCommitted();
 	} finally {
-		endPendingDiskWrite(dst);
+		endPendingDiskWrite(documentPath);
 	}
 
 	if (synced && enableDiagnostics) {
 		diagnostics = await fetchDiagnosticsWithDeferral({
 			dst,
+			documentPath,
 			cwd,
 			servers,
 			minVersions,
