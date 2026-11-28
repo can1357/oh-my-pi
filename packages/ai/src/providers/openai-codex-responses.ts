@@ -72,6 +72,7 @@ import {
 	iterateWithIdleTimeout,
 } from "../utils/idle-iterator";
 import { getProxyForUrl } from "../utils/proxy";
+import { notifyProviderResponse } from "../utils/provider-response";
 import { wrapFetchForRequestCompression } from "../utils/request-compression";
 import { getHeadersFromError, getRetryAfterMsFromHeaders, type HeadersLike } from "../utils/retry-after";
 import { adaptSchemaForStrict, NO_STRICT, sanitizeSchemaForOpenAIResponses, toolWireSchema } from "../utils/schema";
@@ -1741,7 +1742,7 @@ async function openCodexWebSocketTransport(
 		toWebSocketUrl(requestContext.url),
 		websocketHeaders,
 		model.provider,
-		requestSetup.requestSignal,
+		{ signal: requestSetup.requestSignal, captureResponseHeaders: options?.onResponse !== undefined },
 	);
 	let releaseReservation = websocketConnection.reserveForRequest();
 	try {
@@ -1771,6 +1772,8 @@ async function openCodexWebSocketTransport(
 				liveSteers.flatMap(steer => steer.items),
 			);
 			if (plan.kind === "attach") {
+				const notification = websocketConnection.notifyHandshake(options?.onResponse, model);
+				if (notification) await notification;
 				recordCodexTurnRequestDiagnostics(websocketState, chainedBody, "websocket", canAppendBeforeRequest);
 				requestContext.rawRequestDump.body = chainedBody;
 				return {
@@ -1806,7 +1809,7 @@ async function openCodexWebSocketTransport(
 					toWebSocketUrl(requestContext.url),
 					websocketHeaders,
 					model.provider,
-					requestSetup.requestSignal,
+					{ signal: requestSetup.requestSignal, captureResponseHeaders: options?.onResponse !== undefined },
 				);
 				releaseReservation = websocketConnection.reserveForRequest();
 			}
@@ -1868,6 +1871,8 @@ async function openCodexWebSocketTransport(
 				retry,
 				retryBudget: CODEX_WEBSOCKET_RETRY_BUDGET,
 			});
+		const notification = websocketConnection.notifyHandshake(options?.onResponse, model);
+		if (notification) await notification;
 		const eventStream = websocketConnection.streamRequest(
 			{ send: withCodexRoutingFieldsFirst(websocketRequest) },
 			timeouts,
@@ -1945,6 +1950,9 @@ async function openCodexSseTransport(
 				options?.codexSseMaxAttempts,
 				event => options?.onSseEvent?.(event, model),
 				wrapFetchForRequestCompression(options?.fetch ?? fetch, model),
+				options?.onResponse
+					? response => notifyProviderResponse(options, response, model, response.headers.get("x-request-id"))
+					: undefined,
 			),
 		);
 	};
@@ -3330,7 +3338,10 @@ export async function prewarmOpenAICodexResponses(
 		| "providerSessionState"
 		| "responsesLite"
 		| "serviceTier"
-	>,
+	> & {
+		/** Retain upgrade headers for the first turn's response observer. */
+		captureResponseHeaders?: boolean;
+	},
 ): Promise<void> {
 	const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
 	if (!apiKey) return;
@@ -3402,7 +3413,7 @@ export async function prewarmOpenAICodexResponses(
 			toWebSocketUrl(url),
 			headers,
 			model.provider,
-			options?.signal,
+			{ signal: options?.signal, captureResponseHeaders: options?.captureResponseHeaders },
 		);
 	} catch (error) {
 		if (error instanceof CodexWebSocketBusyError) return;
@@ -3783,6 +3794,7 @@ interface CodexSteerWaiter {
 }
 
 interface CodexWebSocketConnectionOptions {
+	captureResponseHeaders?: boolean;
 	onHandshakeHeaders?: (headers: Headers) => void;
 	proxy?: string;
 }
@@ -3792,6 +3804,7 @@ class CodexWebSocketConnection {
 	#channel: ResponsesWebSocketConnection;
 	#headers: Record<string, string>;
 	#pendingRequests = 0;
+	#handshakeObserved = false;
 	#steerWaiters: CodexSteerWaiter[] = [];
 	#acceptedSteers = new Set<string>();
 	#failedSteers = new Set<string>();
@@ -3810,6 +3823,7 @@ class CodexWebSocketConnection {
 				intervalMs: CODEX_WEBSOCKET_PING_INTERVAL_MS,
 				pongTimeoutMs: CODEX_WEBSOCKET_PONG_TIMEOUT_MS,
 			},
+			inspectUpgradeResponse: options.captureResponseHeaders,
 			onHandshakeHeaders: options.onHandshakeHeaders,
 			controlFrames: {
 				consume: frame => {
@@ -3907,6 +3921,25 @@ class CodexWebSocketConnection {
 		} catch (error) {
 			throw translateCodexWebSocketError(error);
 		}
+	}
+
+	/** Report the physical upgrade once, including for connections opened during prewarm. */
+	notifyHandshake(
+		onResponse: StreamOptions["onResponse"],
+		model: Model<"openai-codex-responses">,
+	): void | Promise<void> {
+		if (!onResponse || this.#handshakeObserved) return;
+		this.#handshakeObserved = true;
+		const headers = this.#channel.handshakeHeaders;
+		return onResponse(
+			{
+				status: 101,
+				headers: headers ? headersToRecord(headers) : {},
+				requestId: headers?.get("x-request-id"),
+				metadata: { transport: "websocket", phase: "handshake" },
+			},
+			model,
+		);
 	}
 
 	async *streamRequest(
@@ -4017,7 +4050,9 @@ class CodexWebSocketConnection {
 function translateCodexWebSocketError(error: unknown): unknown {
 	if (!(error instanceof ResponsesWebSocketTransportError)) return error;
 	if (error.reason === "busy") return new CodexWebSocketBusyError(error.message, { cause: error });
-	return new CodexWebSocketTransportError(error.message, { cause: error.cause ?? error });
+	// Inspecting the upgrade must not turn a definite rejection into repeated handshakes.
+	const message = error.reason === "upgrade" ? `websocket error: ${error.message}` : error.message;
+	return new CodexWebSocketTransportError(message, { cause: error.cause ?? error });
 }
 
 async function getOrCreateCodexWebSocketConnection(
@@ -4026,7 +4061,7 @@ async function getOrCreateCodexWebSocketConnection(
 	url: string,
 	headers: Headers,
 	provider: string,
-	signal?: AbortSignal,
+	options: { signal?: AbortSignal; captureResponseHeaders?: boolean },
 ): Promise<CodexWebSocketConnection> {
 	const proxy = getProxyForUrl(provider, new URL(url));
 	const headerRecord = headersToRecord(headers);
@@ -4077,9 +4112,10 @@ async function getOrCreateCodexWebSocketConnection(
 		onHandshakeHeaders: handshakeHeaders => {
 			updateCodexSessionMetadataFromHeaders(turnState, state, handshakeHeaders);
 		},
+		captureResponseHeaders: options.captureResponseHeaders,
 		proxy,
 	});
-	await state.connection.connect(signal);
+	await state.connection.connect(options.signal);
 	return state.connection;
 }
 
@@ -4100,6 +4136,7 @@ async function openCodexSseEventStream(
 	codexSseMaxAttempts: number | undefined,
 	onSseEvent?: OpenAICodexResponsesOptions["onSseEvent"],
 	fetchOverride?: FetchImpl,
+	onResponse?: (response: Response) => Promise<void>,
 ): Promise<AsyncGenerator<Record<string, unknown>>> {
 	const headers = createCodexHeaders(
 		requestHeaders,
@@ -4197,6 +4234,7 @@ async function openCodexSseEventStream(
 	if (!response.body) {
 		throw new CodexProviderStreamError("No response body", false);
 	}
+	if (onResponse) await onResponse(response);
 	// Attach the observer only when a diagnostic listener exists: any observer
 	// turns on per-line raw capture in `readSseJson`.
 	return readSseJson<Record<string, unknown>>(

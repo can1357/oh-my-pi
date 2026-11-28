@@ -370,6 +370,126 @@ class MockWebSocket {
 }
 
 describe("openai-codex streaming", () => {
+	it("notifies response observers of SSE metadata before reading the body", async () => {
+		const model = { ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false };
+		const order: string[] = [];
+		const onResponse = vi.fn(async () => {
+			await Promise.resolve();
+			order.push("observer");
+		});
+		const body = new ReadableStream<Uint8Array>(
+			{
+				pull(controller) {
+					order.push("body");
+					controller.enqueue(new TextEncoder().encode(createCompletedCodexSse("Hello")));
+					controller.close();
+				},
+			},
+			{ highWaterMark: 0 },
+		);
+		const result = await streamOpenAICodexResponses(model, createCodexTestContext(), {
+			apiKey: createCodexTestToken(),
+			fetch: async () =>
+				new Response(body, {
+					headers: {
+						"content-type": "text/event-stream",
+						"x-request-id": "req_sse",
+						"x-codex-primary-used-percent": "42",
+					},
+				}),
+			onResponse,
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(onResponse).toHaveBeenCalledTimes(1);
+		expect(onResponse).toHaveBeenCalledWith(
+			{
+				status: 200,
+				headers: {
+					"content-type": "text/event-stream",
+					"x-request-id": "req_sse",
+					"x-codex-primary-used-percent": "42",
+				},
+				requestId: "req_sse",
+			},
+			model,
+		);
+		expect(order).toEqual(["observer", "body"]);
+	});
+
+	it.each(["new", "prewarmed"])("notifies response observers once on a reused %s WebSocket", async opening => {
+		const order: string[] = [];
+		let upgrades = 0;
+		let requests = 0;
+		const server = Bun.serve<undefined>({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch(request, server) {
+				if (
+					server.upgrade(request, {
+						data: undefined,
+						headers: { "x-request-id": "req_upgrade", "x-codex-primary-used-percent": "43" },
+					})
+				) {
+					upgrades += 1;
+					return;
+				}
+				return new Response("Expected a WebSocket upgrade", { status: 400 });
+			},
+			websocket: {
+				message(socket) {
+					order.push("request");
+					const sse = createStatefulCodexSse("Hello", `resp_${++requests}`);
+					for (const frame of sse.trimEnd().split("\n\n")) socket.send(frame.slice("data: ".length));
+				},
+			},
+		});
+		const model = createCodexTestModel(server.url.href);
+		const onResponse = vi.fn(async () => {
+			await Promise.resolve();
+			order.push("observer");
+		});
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		try {
+			const context = createCodexTestContext();
+			const options = {
+				apiKey: createCodexTestToken(),
+				sessionId: "ws-response-observer",
+				providerSessionState,
+				onResponse,
+			};
+			if (opening === "prewarmed") {
+				await prewarmOpenAICodexResponses(model, { ...options, captureResponseHeaders: true });
+			}
+			const first = await streamOpenAICodexResponses(model, context, options).result();
+			expect(first.stopReason).toBe("stop");
+			const second = await streamOpenAICodexResponses(
+				model,
+				{ ...context, messages: [...context.messages, first, { role: "user", content: "Next", timestamp: 2 }] },
+				options,
+			).result();
+			expect(second.stopReason).toBe("stop");
+			expect(onResponse).toHaveBeenCalledTimes(1);
+			expect(onResponse).toHaveBeenCalledWith(
+				expect.objectContaining({
+					status: 101,
+					headers: expect.objectContaining({
+						"x-request-id": "req_upgrade",
+						"x-codex-primary-used-percent": "43",
+					}),
+					requestId: "req_upgrade",
+					metadata: { transport: "websocket", phase: "handshake" },
+				}),
+				model,
+			);
+			expect(upgrades).toBe(1);
+			expect(order).toEqual(["observer", "request", "request"]);
+		} finally {
+			for (const state of providerSessionState.values()) state.close();
+			await server.stop(true);
+		}
+	});
+
 	it.each(["arguments.done", "output_item.done", "terminal"])(
 		"refuses truncated final JSON via %s",
 		async finalizer => {

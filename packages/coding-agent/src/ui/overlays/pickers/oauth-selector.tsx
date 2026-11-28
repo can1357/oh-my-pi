@@ -281,9 +281,7 @@ export function OAuthSelector(props: OAuthSelectorProps): JSXNode {
 	const items = computed(() => {
 		revision();
 		return entries().map(entry =>
-			isGroup(entry)
-				? { id: entry.id, label: entry.label, mark: providerMark(entry.members[0]!.id) }
-				: item(entry),
+			isGroup(entry) ? { id: entry.id, label: entry.label, mark: providerMark(entry.members[0]!.id) } : item(entry),
 		);
 	});
 	const actions = (): TspPickerAction[] => {
@@ -386,7 +384,8 @@ export function OAuthSelector(props: OAuthSelectorProps): JSXNode {
 							setQuery({ text: "", cursor: 0 });
 							status.set(null);
 						});
-					} else if (act === "back" || act === "close" || act === "cancel" || act === sheetProp("leave")?.id) leave();
+					} else if (act === "back" || act === "close" || act === "cancel" || act === sheetProp("leave")?.id)
+						leave();
 				}}
 			/>
 		</col>
