@@ -879,10 +879,11 @@ export interface TspPickerProps {
 	 */
 	anchor?: "composer" | { caret: string };
 	/**
-	 * Where the search sits: the head (default), `"list"` (inline in the list head), or `"none"` (no search box;
-	 * query lives in the composer). Ignored on a phone.
+	 * Where the search sits: the head (default), `"list"` (inline in the list head), `"none"` (no search box;
+	 * query lives in the composer), or `"bar"`: a pill beside the list with the `scopes` as round buttons after
+	 * it; a click on one sends `action {act:"scope", value}` with the scope's id. Ignored on a phone.
 	 */
-	search?: "head" | "list" | "none";
+	search?: "head" | "list" | "none" | "bar";
 	/** How tall rows run: regular (default), or `"snug"`: 30px rows and 26px group headers, the chrome tightened to match. Ignored on a phone. */
 	density?: "regular" | "snug";
 	/**

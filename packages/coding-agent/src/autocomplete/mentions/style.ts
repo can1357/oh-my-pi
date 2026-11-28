@@ -27,7 +27,7 @@ export const MENTION_STYLES: Readonly<Record<MentionCategoryId, MentionCategoryS
 const BY_ID = new Map<string, MentionCategoryStyle>();
 for (const id of MENTION_CATEGORY_ORDER) BY_ID.set(id, MENTION_STYLES[id]);
 
-/** The style of a scope id that names a mention category; `undefined` for `all` and unknown ids. */
+/** The style of the mention category `id`; `undefined` for an unknown id. */
 export function mentionStyle(id: string): MentionCategoryStyle | undefined {
 	return BY_ID.get(id);
 }

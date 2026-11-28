@@ -2,15 +2,19 @@
  * Cross-source Intent Arbiter for the unified mention palette.
  *
  * Design principles:
- * - **Categories on bare `@`**: an empty `@` lists only namespace jump rows.
+ * - **Files on bare `@`**: an empty `@` lists what Files predicts (dirty and recent files, the folder).
  * - **Files first**: a general `@<query>` leads with workspace files.
  * - **Smart auto-switching**: once another category clearly wins (e.g. `@opus`
  *   has strong model matches and no strong file match, or `@m:`/`^`/`#123`
  *   explicitly locks a scope), that category takes over cleanly at full depth.
+ * - **Scopes**: every registered category is a scope of the palette's scope bar. A mention is in
+ *   one only when its syntax says so (`@m:`, `^`, `#123`, a path, the files lock): a clear winner
+ *   takes the list over without becoming the scope.
  */
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import type { TspPickerColumn, TspPickerGroup, TspPickerItem } from "@oh-my-pi/pi-wire";
-import { MENTION_NAMESPACES, type MentionNamespace } from "./parse";
+import { type MentionNamespace, splitMentionNamespace } from "./parse";
+import { MENTION_SCOPES, type MentionScopeDef, mentionScopeOf } from "./scopes";
 import {
 	MATCH_TIER,
 	MENTION_CATEGORY_ORDER,
@@ -18,6 +22,7 @@ import {
 	type MentionItem,
 	type MentionPaletteView,
 	type MentionQuery,
+	type MentionScopeView,
 	type MentionSourceMeta,
 	type MentionSourceResult,
 } from "./types";
@@ -28,63 +33,16 @@ const FILES_WITH_OTHERS_CAP = 6;
 const SECONDARY_CATEGORY_CAP = 2;
 const TOTAL_MIXED_CAP = 10;
 
-/** Display metadata for an `@<namespace>:` jump row. */
-interface NamespaceShortcutDef {
-	readonly name: string;
-	readonly detail: string;
-	readonly icon: string;
-	readonly symbol: string;
-}
-
-const NAMESPACE_SHORTCUTS: Readonly<Record<MentionNamespace, NamespaceShortcutDef>> = {
-	m: {
-		name: "Models",
-		detail: "Tag a model + thinking effort (or ^)",
-		icon: "cpu",
-		symbol: "mention.model",
-	},
-	p2p: {
-		name: "Agents",
-		detail: "Tag a local agent or a peer from any project",
-		icon: "users",
-		symbol: "mention.agent",
-	},
-	ses: {
-		name: "Sessions",
-		detail: "Tag a past conversation",
-		icon: "message",
-		symbol: "mention.session",
-	},
-	git: {
-		name: "Git",
-		detail: "Tag a diff, branch, commit, or tag",
-		icon: "git-branch",
-		symbol: "mention.git",
-	},
-	pr: {
-		name: "PRs",
-		detail: "Tag a GitHub pull request (or #123)",
-		icon: "pr",
-		symbol: "mention.pr",
-	},
-	iss: {
-		name: "Issues",
-		detail: "Tag a GitHub issue",
-		icon: "info",
-		symbol: "mention.issue",
-	},
-	mcp: {
-		name: "MCP",
-		detail: "Tag an MCP resource",
-		icon: "mcp",
-		symbol: "mention.mcp",
-	},
-	ssh: {
-		name: "SSH",
-		detail: "Tag an SSH host",
-		icon: "host",
-		symbol: "mention.ssh",
-	},
+/** What the jump row of each `@<namespace>:` token says it tags. */
+const NAMESPACE_DETAILS: Readonly<Record<MentionNamespace, string>> = {
+	m: "Tag a model + thinking effort (or ^)",
+	p2p: "Tag a local agent or a peer from any project",
+	ses: "Tag a past conversation",
+	git: "Tag a diff, branch, commit, or tag",
+	pr: "Tag a GitHub pull request (or #123)",
+	iss: "Tag a GitHub issue",
+	mcp: "Tag an MCP resource",
+	ssh: "Tag an SSH host",
 };
 
 /** Universal right-aligned fact columns shared by all mention categories in Tern. */
@@ -104,61 +62,34 @@ function categoryOrderIndex(id: MentionCategoryId): number {
 }
 
 /**
- * A category jump row: the display name as label, the description as detail,
- * the token as the `meta` fact and the category count as `right`.
+ * The jump row of `scope`'s `@<namespace>:` token: the display name as label, the description as
+ * detail, the token as the `meta` fact and the category count as `right`.
  */
-function makeNamespaceShortcutItem(namespace: MentionNamespace, count: number): MentionItem {
-	const def = NAMESPACE_SHORTCUTS[namespace];
-	const rule = MENTION_NAMESPACES[namespace];
-	const subKind = "subKind" in rule ? rule.subKind : undefined;
+function makeNamespaceShortcutItem(scope: MentionScopeDef, namespace: MentionNamespace, count: number): MentionItem {
+	const detail = NAMESPACE_DETAILS[namespace];
 	const token = `@${namespace}:`;
 	const facts: Record<string, string> = { meta: token };
-	const shown = subKind ? undefined : shownCount(count);
+	const shown = scope.subKind ? undefined : shownCount(count);
 	if (shown !== undefined) facts.right = String(shown);
 	return {
-		category: rule.category,
+		category: scope.category,
 		tier: MATCH_TIER.Medium,
 		value: token,
 		insertText: token,
 		appendSpace: false,
 		isNamespaceShortcut: true,
-		label: def.name,
-		description: def.detail,
-		nativeDetail: def.detail,
-		icon: currentTheme().symbols.symbol(def.symbol),
-		iconName: def.icon,
-		pickerItem: {
-			id: `ns:${subKind ?? rule.category}`,
-			label: def.name,
-			detail: def.detail,
-			icon: def.icon,
-			facts,
-		},
-	};
-}
-
-/**
- * The Files tile: no token (a path already says files), so choosing it keeps the bare `@` and
- * locks the mention to files, listing the folder.
- */
-function makeFilesShortcutItem(count: number): MentionItem {
-	const detail = "Tag a file or folder";
-	const facts: Record<string, string> = {};
-	const shown = shownCount(count);
-	if (shown !== undefined) facts.right = String(shown);
-	return {
-		category: "files",
-		tier: MATCH_TIER.Medium,
-		value: "@",
-		insertText: "@",
-		appendSpace: false,
-		isNamespaceShortcut: true,
-		label: "Files",
+		label: scope.label,
 		description: detail,
 		nativeDetail: detail,
-		icon: currentTheme().symbols.symbol("mention.file"),
-		iconName: "file",
-		pickerItem: { id: "ns:files", label: "Files", detail, icon: "file", facts },
+		icon: currentTheme().symbols.symbol(scope.symbol),
+		iconName: scope.icon,
+		pickerItem: {
+			id: `ns:${scope.subKind ?? scope.category}`,
+			label: scope.label,
+			detail,
+			icon: scope.icon,
+			facts,
+		},
 	};
 }
 
@@ -178,7 +109,9 @@ export function arbitrateMentions(
 	for (const meta of sources) metaById.set(meta.id, meta);
 	for (const res of results) byId.set(res.category, res);
 
-	const explicitLock = query.syntaxLock;
+	// A locked mention lists its category alone, and so does a bare `@`: what Files predicts for
+	// an empty query, without being locked to it (the first typed character searches everything).
+	const listed = query.syntaxLock ?? (query.query.trim() === "" ? "files" : undefined);
 
 	interface Section {
 		readonly groupId: string;
@@ -190,30 +123,17 @@ export function arbitrateMentions(
 	let selectedSections: Section[] = [];
 	let lockedScope: MentionCategoryId | undefined = query.syntaxLock;
 
-	if (explicitLock) {
-		const res = byId.get(explicitLock);
+	if (listed) {
+		const res = byId.get(listed);
 		if (res && res.items.length > 0) {
 			selectedSections = [
 				{
-					groupId: explicitLock,
-					label: metaById.get(explicitLock)?.label ?? explicitLock,
+					groupId: listed,
+					label: metaById.get(listed)?.label ?? listed,
 					items: res.items.slice(0, LOCKED_SCOPE_CAP),
 					count: shownCount(res.total),
 				},
 			];
-		}
-	} else if (query.query.trim() === "") {
-		// Bare `@`: the category jump rows alone, Files first; the composer Tab-cycles them.
-		const shortcuts: MentionItem[] = [];
-		if (metaById.has("files")) shortcuts.push(makeFilesShortcutItem(byId.get("files")?.total ?? 0));
-		for (const key in MENTION_NAMESPACES) {
-			const namespace = key as MentionNamespace;
-			const category = MENTION_NAMESPACES[namespace].category;
-			if (metaById.has(category))
-				shortcuts.push(makeNamespaceShortcutItem(namespace, byId.get(category)?.total ?? 0));
-		}
-		if (shortcuts.length > 0) {
-			selectedSections.push({ groupId: "categories", label: "Categories", items: shortcuts });
 		}
 	} else {
 		// Unlocked `@<query>`: Files stay on top whenever Files matches strongly/moderately;
@@ -246,11 +166,11 @@ export function arbitrateMentions(
 
 		// Match canonical namespace prefixes (e.g. `@se` → `@ses:`).
 		const matchingShortcuts: MentionItem[] = [];
-		for (const key in MENTION_NAMESPACES) {
-			if (!key.startsWith(lower)) continue;
-			const namespace = key as MentionNamespace;
-			const res = byId.get(MENTION_NAMESPACES[namespace].category);
-			if (res) matchingShortcuts.push(makeNamespaceShortcutItem(namespace, res.total));
+		for (const scope of MENTION_SCOPES) {
+			const namespace = scope.namespace;
+			if (!namespace?.startsWith(lower)) continue;
+			const res = byId.get(scope.category);
+			if (res) matchingShortcuts.push(makeNamespaceShortcutItem(scope, namespace, res.total));
 		}
 
 		// Case 1: Model `:effort` suffix typed or Files has no strong match while one non-file category clearly wins.
@@ -361,10 +281,25 @@ export function arbitrateMentions(
 
 	const loading = results.some(r => r.loading);
 
+	const scopes: MentionScopeView[] = [];
+	for (const def of MENTION_SCOPES) {
+		if (!metaById.has(def.category)) continue;
+		// Half a category's total (pull requests or issues) is known only while the query narrows to it.
+		const counted = def.subKind === undefined || (query.syntaxLock === def.category && query.subKind === def.subKind);
+		const count = counted ? shownCount(byId.get(def.category)?.total ?? 0) : undefined;
+		scopes.push({ id: def.id, label: def.label, icon: def.icon, ...(count !== undefined ? { count } : {}) });
+	}
+	const scopeId = mentionScopeOf(query);
+	const scope = scopes.find(view => view.id === scopeId)?.id;
+	const typed = query.trigger === "@" ? splitMentionNamespace(query.prefix.slice(1)).rest : query.rawBody;
+
 	return {
 		items,
 		palette: {
 			...(lockedScope ? { lockedScope } : {}),
+			scopes,
+			...(scope ? { scope } : {}),
+			typed,
 			columns: MENTION_PICKER_COLUMNS,
 			pickerItems,
 			order,

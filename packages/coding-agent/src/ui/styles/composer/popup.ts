@@ -18,9 +18,11 @@ import type {
 	TspPickerItem,
 	TspPickerLevel,
 	TspPickerProps,
+	TspPickerScope,
 	TspSpan,
 	TspText,
 } from "@oh-my-pi/pi-wire";
+import { mentionScopeStyle } from "../../../autocomplete/mentions/scopes";
 import { mentionStyle } from "../../../autocomplete/mentions/style";
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import { type Block, defineRolePainter, EMPTY_BLOCK, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
@@ -235,45 +237,36 @@ function factText(item: TspPickerItem, colId: string): string {
 }
 
 /**
- * `layout="tiles"` (the bare `@` categories): one strip of `<glyph> Label (count)` tiles with the lit
- * one on the selection background, and under it the lit tile's short name and description. When the
- * strip overflows, tiles fall back to their short name (the first column's fact), then to the glyph.
+ * The scope strip heading the popup (the picker's `scopes`): one `<glyph> Label` cell per scope,
+ * the active one (its `scope`) in its category's color on the selection background, the rest dim.
+ * When the strip overflows, the cells drop their labels, then the last cells go.
  */
-function paintMentionTiles(
-	props: TspPickerProps & { term?: MentionPopupTerm },
-	items: readonly TspPickerItem[],
+function paintMentionScopes(
+	scopes: readonly TspPickerScope[],
+	active: string | undefined,
 	cx: PaintContext,
 	indent: string,
-): Block {
-	const lit = items.find(item => item.id === props.selected) ?? items[0];
-	if (!lit) return EMPTY_BLOCK;
-	const [shortCol, countCol] = (props.columns ?? []).map(col => col.id);
-	const shortOf = (item: TspPickerItem) => (shortCol ? factText(item, shortCol) : "");
-	const tile = (item: TspPickerItem, caption: string, count: string): string => {
-		const glyph = props.term?.glyphs?.[item.id] ?? { t: "·" };
-		const isLit = item === lit;
-		let body = ` ${cx.theme.style(glyph.s ?? "muted", glyph.t)}`;
-		if (caption) body += ` ${cx.theme.style(isLit ? "accent strong" : "dim", caption)}`;
-		if (count) body += ` ${cx.theme.fg("dim", `(${count})`)}`;
-		body += " ";
-		return isLit ? cx.theme.bg("selectedBg", body) : body;
+): string {
+	const cell = (scope: TspPickerScope, caption: string): string => {
+		const style = mentionScopeStyle(scope.id);
+		const glyph = (style && cx.theme.symbols.symbol(style.symbol)) || "·";
+		const body = ` ${glyph}${caption ? ` ${caption}` : ""} `;
+		return scope.id === active
+			? cx.theme.bg("selectedBg", cx.theme.style(`${style?.color ?? "accent"} strong`, body))
+			: cx.theme.fg("dim", body);
 	};
 	const room = cx.width - visibleWidth(indent);
-	const forms: readonly ((item: TspPickerItem) => string)[] = [
-		item => tile(item, plain(item.label), countCol ? factText(item, countCol) : ""),
-		item => tile(item, shortOf(item), ""),
-		item => tile(item, "", ""),
+	const forms: readonly ((scope: TspPickerScope) => string)[] = [
+		scope => cell(scope, plain(scope.label)),
+		scope => cell(scope, ""),
 	];
-	let strip = "";
+	let cells: string[] = [];
 	for (const form of forms) {
-		strip = items.map(form).join("");
-		if (visibleWidth(strip) <= room) break;
+		cells = scopes.map(form);
+		if (visibleWidth(cells.join("")) <= room) break;
 	}
-	const short = shortOf(lit);
-	const about = `${short ? `${cx.theme.style("accent strong", short)}  ` : ""}${cx.theme.fg("muted", plain(lit.detail))}`;
-	return {
-		rows: [truncate(`${indent}${strip}`, cx.width, ""), truncate(`${indent}${about}`, cx.width, "…")],
-	};
+	while (cells.length > 0 && visibleWidth(cells.join("")) > room) cells.pop();
+	return `${indent}${cells.join("")}`;
 }
 
 function renderLevelFooter(cx: PaintContext, level: TspPickerLevel, width: number): string {
@@ -290,20 +283,26 @@ function paintMentionPopup(node: UiNode, cx: PaintContext): Block {
 	// Role painter is registered solely on `picker` nodes.
 	const props = node.props() as TspPickerProps & { term?: MentionPopupTerm };
 	const items = props.items ?? [];
-	if (items.length === 0) return EMPTY_BLOCK;
+	const term = props.term ?? { maxLines: 10 };
 	const marker = `${cx.theme.symbols.symbol("nav.cursor")} `;
 	const blank = " ".repeat(visibleWidth(marker));
-	if (props.layout === "tiles") return paintMentionTiles(props, items, cx, blank);
+	// A cell pads its glyph by one: a column short of the marker, the first glyph sits over the rows'.
+	const strip = props.scopes?.length ? [paintMentionScopes(props.scopes, props.scope, cx, blank.slice(1))] : [];
+	if (items.length === 0) {
+		// A scope that lists nothing still shows where Tab is, and says so once its rows are in.
+		if (strip.length === 0) return EMPTY_BLOCK;
+		const empty = props.state === "loading" ? "" : plain(props.empty);
+		return { rows: empty ? [...strip, truncate(`${blank}${cx.theme.fg("dim", empty)}`, cx.width, "")] : strip };
+	}
 	const order = props.order ?? items.map(item => item.id);
 	const selectedId = props.selected ?? undefined;
 	const level = props.level ?? undefined;
-	const term = props.term ?? { maxLines: 10 };
 
 	const byId = new Map<string, TspPickerItem>();
 	for (const item of items) byId.set(item.id, item);
 
-	const rows: string[] = [];
-	const listBudget = Math.max(3, term.maxLines - (level ? 1 : 0));
+	const rows: string[] = [...strip];
+	const listBudget = Math.max(3, term.maxLines - strip.length - (level ? 1 : 0));
 
 	const colGap = 2;
 	const colIds = (props.columns ?? []).map(col => col.id);

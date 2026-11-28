@@ -92,7 +92,7 @@ export interface AutocompleteProvider extends Pick<
 	warmMentions?(): void;
 	/**
 	 * Synchronously resolve Tier 0 unified mention suggestions (`@`, `^`, `#<N>`); `lock` keeps an
-	 * `@` token on the one category the user chose for it (the Files tile).
+	 * `@` token on the one category the user chose for it (the Files scope, which has no token).
 	 */
 	trySyncMentionCompletion?(
 		lines: string[],

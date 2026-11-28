@@ -9,7 +9,8 @@ import { getGithubRefContext } from "../github-ref";
 import { extractAtFilePrefix, isExplicitFilePath, MODEL_MENTION_CONTEXT_RE } from "../tokens";
 import type { MentionCategoryId, MentionQuery, MentionSubKind } from "./types";
 
-interface NamespaceRule {
+/** What an `@<namespace>:` token locks a mention to. */
+export interface MentionNamespaceRule {
 	readonly category: MentionCategoryId;
 	readonly subKind?: MentionSubKind;
 }
@@ -24,12 +25,22 @@ export const MENTION_NAMESPACES = {
 	iss: { category: "forge", subKind: "issue" },
 	mcp: { category: "mcp" },
 	ssh: { category: "ssh" },
-} as const satisfies Readonly<Record<string, NamespaceRule>>;
+} as const satisfies Readonly<Record<string, MentionNamespaceRule>>;
 
 export type MentionNamespace = keyof typeof MENTION_NAMESPACES;
 
 function isMentionNamespace(key: string): key is MentionNamespace {
 	return Object.hasOwn(MENTION_NAMESPACES, key);
+}
+
+/** The `<namespace>:` token the text after an `@` opens with (`m:opus` → `m`), and what follows it. */
+export function splitMentionNamespace(body: string): { readonly namespace?: MentionNamespace; readonly rest: string } {
+	const colon = body.indexOf(":");
+	if (colon > 0) {
+		const key = body.slice(0, colon).toLowerCase();
+		if (isMentionNamespace(key)) return { namespace: key, rest: body.slice(colon + 1) };
+	}
+	return { rest: body };
 }
 
 function vcsSubKind(key: string): MentionSubKind | undefined {
@@ -125,31 +136,28 @@ export function parseMentionQuery(textBeforeCursor: string, options?: MentionPar
 	}
 
 	// Explicit category tokens take precedence over provider and path inference.
-	const firstColon = rawBody.indexOf(":");
-	if (firstColon > 0) {
-		const nsKey = rawBody.slice(0, firstColon).toLowerCase();
-		if (isMentionNamespace(nsKey)) {
-			const rule: NamespaceRule = MENTION_NAMESPACES[nsKey];
-			let rest = rawBody.slice(firstColon + 1);
-			let subKind = rule.subKind;
-			if (rule.category === "vcs") {
-				const colon = rest.indexOf(":");
-				if (colon > 0) {
-					subKind = vcsSubKind(rest.slice(0, colon).toLowerCase());
-					if (subKind) rest = rest.slice(colon + 1);
-				}
+	const scoped = splitMentionNamespace(rawBody);
+	if (scoped.namespace) {
+		const rule: MentionNamespaceRule = MENTION_NAMESPACES[scoped.namespace];
+		let rest = scoped.rest;
+		let subKind = rule.subKind;
+		if (rule.category === "vcs") {
+			const colon = rest.indexOf(":");
+			if (colon > 0) {
+				subKind = vcsSubKind(rest.slice(0, colon).toLowerCase());
+				if (subKind) rest = rest.slice(colon + 1);
 			}
-			const modelSplit = rule.category === "models" ? splitModelEffortSuffix(rest) : undefined;
-			return {
-				trigger: "@",
-				prefix: atPrefix,
-				rawBody,
-				query: modelSplit?.effortSuffix !== undefined ? modelSplit.base : rest,
-				syntaxLock: rule.category,
-				...(subKind ? { subKind } : {}),
-				...(modelSplit?.effortSuffix !== undefined ? { modelEffortSuffix: modelSplit.effortSuffix } : {}),
-			};
 		}
+		const modelSplit = rule.category === "models" ? splitModelEffortSuffix(rest) : undefined;
+		return {
+			trigger: "@",
+			prefix: atPrefix,
+			rawBody,
+			query: modelSplit?.effortSuffix !== undefined ? modelSplit.base : rest,
+			syntaxLock: rule.category,
+			...(subKind ? { subKind } : {}),
+			...(modelSplit?.effortSuffix !== undefined ? { modelEffortSuffix: modelSplit.effortSuffix } : {}),
+		};
 	}
 
 	// Explicit filesystem path syntax (`@./`, `@../`, `@~/`, `@/`, `@C:\`).
