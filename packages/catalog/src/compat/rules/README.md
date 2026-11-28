@@ -220,6 +220,8 @@ One object axis carries a computed form: `long-context-cost` accepts either the 
 
 `context-window-authoritative #true` preserves a host's supplied context window through runtime model selection instead of applying inferred expansion or reference-price-tier caps. Explicit user context overrides still apply afterward. It applies to rows materialized through `buildModel` (discovery and regenerated bundles). See [`providers/factory-droid.kdl`](providers/factory-droid.kdl).
 
+`tier-cache-follows-input #true` marks a host's long-context tier as billing cache reads and writes at the same multiple of its source row as input. GitHub Copilot discovery scales the cache legs `billing.token_prices` omits on a synthesized `-1m` row by that input ratio; a reported `cache_price` wins, and unmarked tiers carry the source row's cache legs unscaled. See [`providers/github-copilot.kdl`](providers/github-copilot.kdl).
+
 `long-context-window-uncapped #true` keeps a model's `long-context-cost` tier from capping its runtime context window while extended context is off: the coding agent normally lowers the window to the tier's input threshold so compaction fires before a request crosses into premium pricing. Use it where the tier is an API-equivalent estimate on a subscription host (`xai-oauth`) or where the model is served at its full window regardless (GPT-5.4, except on GitHub Copilot). `buildModel` materializes it as `Model.longContextWindowUncapped`; explicit user context overrides still apply.
 
 `thinking-effort-map` maps served efforts to wire values. An entry for an effort the ladder does not serve whose value is a served effort is an alias instead: clamping a request for that effort follows it rather than stepping down to the next lower tier (Refuseless sends `medium` to `high` on its `low|high|max` ladder). `reasoning-effort-map` entries never alias.
@@ -371,7 +373,7 @@ behavior {
 
 ## Auth grammar
 
-Every provider has exactly one `auth "<id>" { … }` node under `auth/`; `auth/_order.kdl` holds a single `login-order "id" …` node pinning the `/login` roster order (every provider with a `login` and `show-in-login-list` unset/true must appear; providers without a login sort alphabetically after it). Runtime accessors live in `src/compat/auth.ts`; the id unions in the generated `src/compat/auth-ids.ts`. Every provider in `provider-models/descriptors.ts` needs an auth node (`@oh-my-pi/pi-ai` type-checks this).
+Every provider has exactly one `auth "<id>" { … }` node under `auth/`; `auth/_order.kdl` holds a single `login-order "id" …` node pinning the `/login` roster order (every provider with a `login` and `show-in-login-list` unset/true must appear; providers without a login sort alphabetically after it). Runtime accessors live in `src/compat/auth.ts`. Every catalog provider (a `providers/<id>.kdl` with `default-model`) needs an auth node; `gen:compat` rejects one without.
 
 ```kdl
 auth "anthropic" {
@@ -427,6 +429,9 @@ auth "anthropic" {
     login-warning "Account risk to accept"       // a new login asks the user to type "yes" first
     connected-name "Acme Pro plan"               // what linked-account surfaces call the provider; `name` stays the `/login` label
     active-notice "Using your Acme Pro plan"     // transcript line when a session starts using one of the provider's models
+    login-notice "Requests follow Acme's terms"  // shown once after each successful sign-in
+    manage-url "https://acme.example/apps"       // the host page where the user turns this app's access on or off
+    required-scope "acme.inference"              // a login without this scope stays signed in with the provider off
 }
 ```
 
@@ -440,6 +445,8 @@ auth "anthropic" {
 
 `connected-name "<text>"` names the provider on every surface after an account is linked — login success lines, model picker provider scopes, logout and account rows, usage and status output — while `name` stays the pre-sign-in label in the `/login` list. Absent, those surfaces keep showing the provider id (title-cased where they already did). `active-notice "<text>"` adds one dim transcript line, `<text> · <model name>`, when the session switches to one of the provider's models or first runs a turn on one; it shows once per model per session.
 
+`login-notice "<text>"` adds a dim line under the login success line. `manage-url "<url>"` is the host's page where the user turns the app's access on or off: login and logout output link it, and the model picker's provider pane opens it (F6). `required-scope "<scope>"` names the OAuth scope a login must hold to serve requests; a login whose granted `scope` lacks it is kept, and login output, logout rows and the model picker show the provider as off instead of signing the user out.
+
 Login kinds:
 
 - `login "api-key" { auth-url "…"; instructions "…"; prompt "…" placeholder="…"; empty-fallback "…"; normalize "strip-bearer"; validate … }` — `validate "chat-completions" base-url= model= tolerate-model-denied= max-tokens-field= max-tokens=`, `validate "anthropic-messages" base-url= model=`, or `validate "models-endpoint" url= base-url-env= base-url-path= base-url-append= headers-hook=` (`base-url-path`, default `/models`, is appended to the `base-url-env` value and needs it; `base-url-append` ensures a path segment on that value first, e.g. `/v1` for bases that may be bare origins); all accept `label=` (error-message label, defaults to `name`), `optional=#true` (only auth failures reject), and `trust-forbidden=#true` (requires `optional=#true`; a 403 no longer rejects, so only a 401 does).
@@ -451,7 +458,7 @@ Hook names are validated against the hook tables in `@oh-my-pi/pi-ai/src/registr
 
 ## Provider catalog grammar
 
-The root `provider "<id>"` node of `providers/<id>.kdl` carries the catalog entry next to the cascade rules. A file that declares `default-model` is a catalog provider (a member of the generated `KnownProvider` union in `src/compat/provider-ids.ts`); a file without it is wire-compat only (custom provider ids such as `llama.cpp`) and may not carry any other entry node. The compiled entries live in `rules.json` under `providers`, keyed by id; runtime accessors are in `src/compat/providers.ts`, and `provider-models/descriptors.ts` pairs each entry with its model-manager factory — the only provider fact that stays in code.
+The root `provider "<id>"` node of `providers/<id>.kdl` carries the catalog entry next to the cascade rules. A file that declares `default-model` is a catalog provider; a file without it is wire-compat only (custom provider ids such as `llama.cpp`) and may not carry any other entry node. The compiled entries live in `rules.json` under `providers`, keyed by id; runtime accessors are in `src/compat/providers.ts`, and `provider-models/descriptors.ts` pairs each entry with its model-manager factory — the only provider fact that stays in code.
 
 ```kdl
 provider "sakana" {

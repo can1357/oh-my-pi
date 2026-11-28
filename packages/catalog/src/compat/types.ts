@@ -484,6 +484,8 @@ export interface CompiledOAuthRequest {
 /** Callback transport configuration for authorization-code logins. */
 export interface CompiledCallback {
 	port: number;
+	/** Env var overriding `port` (`0` = random free port). */
+	portEnv?: string;
 	path: string;
 	hostname: string;
 	redirectUri?: CompiledAuthValue;
@@ -626,6 +628,15 @@ export interface CompiledAuthProvider {
 	 * models (such as "Using your Acme Pro plan").
 	 */
 	activeNotice?: string;
+	/** Shown once after each successful sign-in (such as the terms requests follow). */
+	loginNotice?: string;
+	/** The host's page where the user turns this app's access on or off. */
+	manageUrl?: string;
+	/**
+	 * OAuth scope a login must hold for the provider to serve requests. A login
+	 * whose granted scope lacks it stays signed in with the provider off.
+	 */
+	requiredScope?: string;
 	storeAs?: string;
 	callbackPort?: number;
 	pasteCode?: boolean;
@@ -746,6 +757,10 @@ export interface CompiledProvider {
 export interface CompiledCompatRules {
 	/** Compiled-format version; bump on incompatible shape changes. */
 	version: 1;
+	/** Hash of the serialized policy alone, excluding `hash` and `priceChanges`. */
+	hash: string;
+	/** Distinct effective price-change instants in the policy, ascending (Unix ms). */
+	priceChanges: number[];
 	/** Every compiled source file, `rules/`-relative, sorted. */
 	files: string[];
 	taxonomy: CompiledTaxonomy;

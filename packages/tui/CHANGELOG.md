@@ -5,16 +5,19 @@
 ### Breaking Changes
 
 - `MarkdownLook.linkUrls` is now required. Callers of `setMarkdownLook` must provide this field.
+- `TermBackendOptions.tickInterval` and `TermBackend.setReduceMotion()` are replaced by the `spinnerInterval` and `reduceMotion` options (also on `HostOptions`), and `SPINNER_INTERVAL_MS` by `DEFAULT_SPINNER_INTERVAL_MS` in `term/paint`; painters read `PaintContext.spinnerInterval` (0 = still spinners) through `spinnerIndex` ([#20844](https://github.com/can1357/oh-my-pi/issues/20844))
 
 ### Added
 
-- Added `Host.setOutputHold()` / `getOutputHold()` (and the same pair on the terminal and native backends): an explicit output hold that composes, writes and acknowledges no frame until release, then repaints from the newest state in one frame. A resize during the hold settles as an in-place repaint, so releasing never rebuilds history or clears scrollback ([#19751](https://github.com/can1357/oh-my-pi/pull/19751) by [@LangYa466](https://github.com/LangYa466)).
+- Terminal canvas views can handle mouse clicks, motion, and wheel ticks with `onMouse` ([#20819](https://github.com/can1357/oh-my-pi/issues/20819)).
 - Added `MarkdownOptions.linkUrls` and `MarkdownLook.linkUrls` to hide the URL drawn after named links whose label is an OSC 8 hyperlink ([#13162](https://github.com/can1357/oh-my-pi/pull/13162) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
+- `ProcessTerminalDriver.setResizeScrollback()` and `FrameWriter.setResizeScrollback()` change the resize scrollback policy of a running driver ([#20845](https://github.com/can1357/oh-my-pi/issues/20845))
 - Added opt-in fullscreen terminal rendering: a scrollable transcript above a pinned dock, a draggable scrollbar, character/word/line selection and incremental search. The normal exit can append the transcript or keep the original screen ([#2040](https://github.com/can1357/oh-my-pi/issues/2040), building on [#2103](https://github.com/can1357/oh-my-pi/pull/2103) by [@shoucandanghehe](https://github.com/shoucandanghehe) and [#20766](https://github.com/can1357/oh-my-pi/pull/20766) by [@camjac251](https://github.com/camjac251))
 ### Added
 
 - `TextEdit.paste` marks an edit that types a bracketed paste ([#20681](https://github.com/can1357/oh-my-pi/issues/20681))
 - `Host.requestFrame()` schedules a terminal frame even when nothing on screen changed ([#20704](https://github.com/can1357/oh-my-pi/pull/20704) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- `Host.contentInHistory(node)` reports whether the terminal acknowledged rows of a main node's own content in scrollback, not only the separator above it ([#20724](https://github.com/can1357/oh-my-pi/pull/20724) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Added `tool.gl` symbol across unicode, nerd, and ascii presets for the GitLab tool ([#20396](https://github.com/can1357/oh-my-pi/pull/20396) by [@asuffield](https://github.com/asuffield))
 - Added `MarkdownOptions.linkUrls` and `MarkdownLook.linkUrls` to control whether URLs are displayed after named OSC 8 hyperlinks.
 - Added `TextEdit.paste` to identify edits produced by bracketed paste operations.
@@ -23,6 +26,7 @@
 
 ### Fixed
 
+- Moving through a question's options in Tern with the arrow keys no longer scrolls the chat back to the question each time
 - Improved performance when editing large documents and updating or closing views with many reactive values.
 - Fixed pane resizing in Herdr to avoid repeated redraw loops.
 - Fixed SIXEL and iTerm2 images overflowing rows, scrolling the terminal unexpectedly, or rendering incorrectly when they extend beyond the visible screen.
@@ -34,8 +38,13 @@
 - Clicks in Tern now show their effect while Tern is slow to acknowledge frames: an ask form you submit leaves the screen at once instead of staying with a Submit button that no longer responds.
 - Fixed inverse video styling leaking into padding and borders at wrapped line endings.
 - Fixed win32 input-mode key records being inserted as literal composer text in certain timing conditions.
+- Fixed pastes on Windows Terminal arriving as raw `[Vk;Sc;Uc;…_` key records instead of the pasted text, CJK and line breaks included ([#20718](https://github.com/can1357/oh-my-pi/issues/20718))
 - Fixed SIXEL and iTerm2 images losing their bottom cell row in terminals that clear image cells on line erase, such as xterm.js ([#20752](https://github.com/can1357/oh-my-pi/issues/20752))
 - Fixed code blocks drawn with `codeIndent: 0` putting their ``` fence rows one column right of the code; fences now sit at column 0 with it, so copying the whole block yields its markdown ([#20752](https://github.com/can1357/oh-my-pi/issues/20752))
+- Stopped trusting an inherited `TERM_FEATURES` sync hint inside tmux/screen panes, which caused top-to-bottom redraw flashes while streaming in an inactive tmux 3.6 pane ([#20091](https://github.com/can1357/oh-my-pi/issues/20091))
+- Enabled kitty Unicode placeholder image rendering by default in Rex ([#19830](https://github.com/can1357/oh-my-pi/issues/19830))
+- Inline images inside tmux on terminals without Kitty Unicode placeholders (e.g. WezTerm) are no longer drawn at tmux's cursor; they use SIXEL when tmux renders it, else are skipped ([#19396](https://github.com/can1357/oh-my-pi/issues/19396))
+- Catppuccin, Rosé Pine, GitHub Dark and Celestial themes now draw composer and message text in their palette text color instead of the generic default ([#16374](https://github.com/can1357/oh-my-pi/issues/16374))
 
 ## [19.2.1] - 2026-11-25
 

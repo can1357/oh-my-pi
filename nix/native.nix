@@ -101,7 +101,7 @@ let
     ) (builtins.fromTOML lockText).package
   );
   # Vendored crates are built from real source in the dependency stage, since
-  # registry crates depend on their real APIs (e.g. nix -> cfg_aliases). A
+  # registry crates depend on their real APIs (e.g. grep-printer -> grep-searcher). A
   # vendored crate that depends on an OMP crate, directly or through another
   # vendored crate, would compile against a dummy there, so it stays a dummy
   # and builds with the OMP crates instead (none does today).

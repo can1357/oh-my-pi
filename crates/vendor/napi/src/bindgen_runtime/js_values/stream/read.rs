@@ -1,25 +1,33 @@
 use std::{
-  ffi::c_void,
+  cell::Cell,
+  ffi::{c_void, CStr},
+  future::Future,
   marker::PhantomData,
   mem,
   pin::Pin,
   ptr,
+  rc::Rc,
   sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
   },
   task::{Context, Poll, Waker},
+  thread::{self, ThreadId},
 };
 
 use tokio::sync::Mutex;
 
+use futures::{channel::oneshot, task::AtomicWaker};
 use futures_core::Stream;
 use tokio_stream::StreamExt;
 
+#[cfg(all(feature = "napi4", not(feature = "noop")))]
+use crate::bindgen_prelude::{custom_gc_handle_for_env, CustomGcHandle};
 use crate::{
   bindgen_prelude::{
-    BufferSlice, CallbackContext, FromNapiValue, Function, JsObjectValue, Object, PromiseRaw,
-    ToNapiValue, TypeName, Unknown, ValidateNapiValue, NAPI_AUTO_LENGTH,
+    BufferSlice, CallbackContext, Either, FromNapiValue, Function, FunctionRef, JsObjectValue,
+    Object, PromiseRaw, ToNapiValue, TypeName, Undefined, Unknown, ValidateNapiValue,
+    NAPI_AUTO_LENGTH,
   },
   check_status, sys,
   threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode},
@@ -100,7 +108,19 @@ impl<T> ReadableStream<'_, T> {
     unsafe { FromNapiValue::from_napi_value(self.env, locked) }
   }
 
-  /// The `cancel()` method of the `ReadableStream` interface returns a Promise that resolves when the stream is canceled.
+  /// Calls `stream.cancel(reason)` and returns its Promise, which resolves when the stream
+  /// is canceled. `None` passes `undefined` as the reason.
+  ///
+  /// A locked stream cannot be canceled this way: the Promise rejects with a `TypeError`
+  /// and the underlying source's `cancel` is not called. [`ReadableStream::read`] locks the
+  /// stream to its reader, so after `read()` use [`Reader::cancel`],
+  /// [`ReaderCancelHandle::cancel`] or [`ReaderCancelHandle::cancel_on_js_thread`] instead.
+  ///
+  /// The Promise also rejects when the source's `cancel` throws. Do not just drop it: a
+  /// rejected Promise that nothing handles is an unhandled rejection, and by default
+  /// Node.js then exits with code 1. Return it to JavaScript, attach a handler with
+  /// [`PromiseRaw::catch`], or turn it into a [`Promise`](crate::bindgen_prelude::Promise)
+  /// with [`PromiseRaw::into_sendable_promise`] and await it.
   pub fn cancel(&mut self, reason: Option<String>) -> Result<PromiseRaw<'_, ()>> {
     let mut cancel_fn = ptr::null_mut();
     check_status!(
@@ -108,13 +128,13 @@ impl<T> ReadableStream<'_, T> {
         sys::napi_get_named_property(
           self.env,
           self.value,
-          c"abort".as_ptr().cast(),
+          c"cancel".as_ptr().cast(),
           &mut cancel_fn,
         )
       },
-      "Get abort property failed"
+      "Get cancel property failed"
     )?;
-    let reason_value = unsafe { ToNapiValue::to_napi_value(self.env, reason)? };
+    let reason_value = unsafe { ToNapiValue::to_napi_value(self.env, cancel_reason(reason))? };
     let mut promise = ptr::null_mut();
     check_status!(
       unsafe {
@@ -127,13 +147,18 @@ impl<T> ReadableStream<'_, T> {
           &mut promise,
         )
       },
-      "Call abort function failed"
+      "Call cancel function failed"
     )?;
     Ok(PromiseRaw::new(self.env, promise))
   }
 }
 
 impl<T: FromNapiValue> ReadableStream<'_, T> {
+  /// Locks the stream to a new reader (`stream.getReader()`) and returns a [`Reader`] that
+  /// yields its chunks as a Rust [`Stream`].
+  ///
+  /// Dropping the `Reader` neither cancels the stream nor releases the lock. To stop
+  /// reading and cancel the stream, use [`Reader::cancel`] or [`Reader::cancel_handle`].
   pub fn read(&self) -> Result<Reader<T>> {
     let mut reader_function = ptr::null_mut();
     check_status!(
@@ -206,6 +231,10 @@ impl<T: FromNapiValue> ReadableStream<'_, T> {
     .callee_handled::<true>()
     .weak::<true>()
     .build()?;
+    let signal = Arc::new(CancelSignal {
+      cancelled: AtomicBool::new(false),
+      waker: AtomicWaker::new(),
+    });
     Ok(Reader {
       inner: read_function,
       state: Arc::new(ReaderState {
@@ -215,8 +244,189 @@ impl<T: FromNapiValue> ReadableStream<'_, T> {
           reading: false,
           waker: None,
         }),
+        signal: signal.clone(),
       }),
+      cancel: ReaderCancelHandle {
+        cancel_fn: bind_reader_cancel(self.env, reader).map(Arc::new),
+        signal,
+        env: ReaderEnv::current(self.env),
+      },
     })
+  }
+}
+
+/// `reader.cancel` bound to its reader, callable from any thread.
+///
+/// `CalleeHandled` is `false` so the first argument is the cancel reason itself (with
+/// `true`, napi-rs would pass `null` first and that `null` would become the reason).
+type ReaderCancelFn = ThreadsafeFunction<
+  Option<String>,
+  Unknown<'static>,
+  Either<String, Undefined>,
+  Status,
+  false,
+  true,
+>;
+
+/// `reader.cancel` bound to its reader, held two ways.
+struct BoundCancel {
+  /// For [`ReaderCancelHandle::cancel`]: callable from any thread, runs later.
+  threadsafe: ReaderCancelFn,
+  /// For [`ReaderCancelHandle::cancel_on_js_thread`]: called right away. The threadsafe
+  /// function above already holds the same function, so this reference keeps nothing
+  /// alive for longer, and `FunctionRef` can be dropped on any thread.
+  js: FunctionRef<Either<String, Undefined>, Unknown<'static>>,
+  /// The senders of calls through `threadsafe` that have not run yet.
+  queued: Arc<QueuedCancels>,
+}
+
+/// The senders of [`ReaderCancelHandle::cancel`] calls that are queued and have not run yet.
+///
+/// When the environment is torn down after a call was queued but before it ran, Node.js
+/// hands the call to the threadsafe function with a null env, and napi-rs then drops
+/// nothing: the call's closure leaks, and a sender inside it would never be dropped, so the
+/// future would stay pending. So the closure holds only a key, and the sender waits here
+/// until the call runs and takes it. The threadsafe function's callback owns a
+/// [`CloseOnDrop`], and that callback is dropped when the threadsafe function is finalized
+/// (released, or its environment torn down), after its last call that can still run. Then
+/// the senders still here are dropped, and their futures resolve to `Err`.
+#[derive(Default)]
+struct QueuedCancels {
+  state: std::sync::Mutex<QueuedCancelsState>,
+}
+
+#[derive(Default)]
+struct QueuedCancelsState {
+  /// The threadsafe function was finalized: no call can be queued or run any more.
+  closed: bool,
+  next_key: u64,
+  senders: Vec<(u64, oneshot::Sender<Result<()>>)>,
+}
+
+impl QueuedCancels {
+  fn lock(&self) -> std::sync::MutexGuard<'_, QueuedCancelsState> {
+    // Nothing panics while the lock is held, so the data is consistent even if poisoned.
+    self
+      .state
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+  }
+
+  /// Keeps `sender` for the call that gets the returned key. Returns `None`, and drops
+  /// `sender`, once the threadsafe function was finalized.
+  fn insert(&self, sender: oneshot::Sender<Result<()>>) -> Option<u64> {
+    let mut state = self.lock();
+    if state.closed {
+      return None;
+    }
+    let key = state.next_key;
+    state.next_key = key.wrapping_add(1);
+    state.senders.push((key, sender));
+    Some(key)
+  }
+
+  /// Takes the sender for the call with `key`, if it is still here.
+  fn take(&self, key: u64) -> Option<oneshot::Sender<Result<()>>> {
+    let mut state = self.lock();
+    let index = state.senders.iter().position(|(k, _)| *k == key)?;
+    Some(state.senders.swap_remove(index).1)
+  }
+
+  /// Drops every sender still here, so that their futures resolve to `Err`, and refuses
+  /// new ones.
+  fn close(&self) {
+    let senders = {
+      let mut state = self.lock();
+      state.closed = true;
+      mem::take(&mut state.senders)
+    };
+    // Dropped after the lock is released: dropping a sender wakes its receiver's task.
+    drop(senders);
+  }
+}
+
+/// Closes its [`QueuedCancels`] when dropped. Owned by the callback of the threadsafe
+/// function that queues the cancel calls.
+struct CloseOnDrop(Arc<QueuedCancels>);
+
+impl Drop for CloseOnDrop {
+  fn drop(&mut self) {
+    self.0.close();
+  }
+}
+
+/// A `None` reason is passed to JavaScript as `undefined` (what `cancel()` with no
+/// argument gives the source), not as `null`.
+fn cancel_reason(reason: Option<String>) -> Either<String, Undefined> {
+  match reason {
+    Some(reason) => Either::A(reason),
+    None => Either::B(()),
+  }
+}
+
+/// Binds `reader.cancel` to `reader`, wraps it in a weak threadsafe function like the bound
+/// `read` above, and keeps a reference to it for calls on the JavaScript thread.
+///
+/// Returns `None` instead of an error when that is not possible (for example a custom
+/// reader without a `cancel` method), so `ReadableStream::read` behaves exactly as it did
+/// before cancel support; [`ReaderCancelHandle::cancel`] reports the missing method.
+fn bind_reader_cancel(env: sys::napi_env, reader: sys::napi_value) -> Option<BoundCancel> {
+  let bind = || -> Result<BoundCancel> {
+    let mut cancel_function = ptr::null_mut();
+    check_status!(
+      unsafe {
+        sys::napi_get_named_property(env, reader, c"cancel".as_ptr().cast(), &mut cancel_function)
+      },
+      "Get cancel from ReadableStreamDefaultReader failed"
+    )?;
+    let mut value_type = 0;
+    check_status!(
+      unsafe { sys::napi_typeof(env, cancel_function, &mut value_type) },
+      "Get type of ReadableStreamDefaultReader::cancel failed"
+    )?;
+    if value_type != sys::ValueType::napi_function {
+      return Err(Error::new(
+        Status::FunctionExpected,
+        "ReadableStreamDefaultReader::cancel is not a function",
+      ));
+    }
+    let reader = unsafe { Unknown::from_raw_unchecked(env, reader) };
+    let unbound = unsafe {
+      Function::<Either<String, Undefined>, Unknown<'static>>::from_napi_value(
+        env,
+        cancel_function,
+      )?
+    };
+    let cancel_function = unbound.bind(reader)?;
+    let js = cancel_function.create_ref()?;
+    let queued = Arc::new(QueuedCancels::default());
+    let close_on_drop = CloseOnDrop(queued.clone());
+    let threadsafe = cancel_function
+      .build_threadsafe_function::<Option<String>>()
+      .callee_handled::<false>()
+      .weak::<true>()
+      .build_callback(move |ctx| {
+        // Moved into this callback, which the threadsafe function's finalizer drops.
+        let _ = &close_on_drop;
+        Ok(cancel_reason(ctx.value))
+      })?;
+    Ok(BoundCancel {
+      threadsafe,
+      js,
+      queued,
+    })
+  };
+  match bind() {
+    Ok(bound) => Some(bound),
+    Err(_) => {
+      // A throwing `cancel` getter leaves an exception pending; clear it so `read()` does
+      // not return to JavaScript with it still set.
+      let mut pending_exception = ptr::null_mut();
+      unsafe {
+        sys::napi_get_and_clear_last_exception(env, &mut pending_exception);
+      }
+      None
+    }
   }
 }
 
@@ -582,12 +792,601 @@ struct ReaderInner<T: FromNapiValue + 'static> {
 /// and waits — it can never miss a chunk yet still issue a fresh overlapping read.
 struct ReaderState<T: FromNapiValue + 'static> {
   inner: std::sync::Mutex<ReaderInner<T>>,
+  /// Shared with every cancel handle.
+  signal: Arc<CancelSignal>,
 }
 
+/// Shared by a [`Reader`] and its cancel handles. It has no type parameter, so the handle
+/// needs none either, and a cancel never takes the reader's lock.
+struct CancelSignal {
+  /// Set once a cancel was requested: the reader yields nothing more, and reads that
+  /// settle later are dropped.
+  cancelled: AtomicBool,
+  /// The task polling the reader, so that a cancel can wake it without waiting for
+  /// JavaScript to settle the read in flight. `poll_next` registers the waker before it
+  /// checks `cancelled`, and `cancel` sets `cancelled` before it wakes, so a cancel that
+  /// races with a poll is never missed.
+  waker: AtomicWaker,
+}
+
+impl CancelSignal {
+  fn cancel(&self) {
+    self.cancelled.store(true, Ordering::SeqCst);
+    self.waker.wake();
+  }
+
+  fn is_cancelled(&self) -> bool {
+    self.cancelled.load(Ordering::SeqCst)
+  }
+
+  /// Drops the waker of the task that polled last, once the reader has ended or is
+  /// dropped. No poll waits for a cancel then, and a later poll registers again before it
+  /// checks `cancelled`. Without this, a cancel handle kept after the reader ended would
+  /// keep that task's allocation alive.
+  fn release_waker(&self) {
+    drop(self.waker.take());
+  }
+}
+
+// `AtomicWaker` holds an `UnsafeCell`, so without this `CancelSignal` is not
+// `RefUnwindSafe`, and `Reader<T>` (through its `Arc`s) would lose `RefUnwindSafe` and
+// `UnwindSafe`, which it had before cancel support. A panic cannot leave a broken
+// `CancelSignal` behind for a later user: `cancelled` is an atomic, and `AtomicWaker`
+// guards its cell with its own atomic state. At worst a panicking `Waker::clone` inside
+// `register` makes later wakes do nothing, and `poll_next` still checks `cancelled`.
+// napi-rs does the same for `AbortSignal`.
+impl std::panic::RefUnwindSafe for CancelSignal {}
+
+/// The environment a [`Reader`] was made in, for the check in
+/// [`ReaderCancelHandle::cancel_on_js_thread`].
+#[derive(Clone)]
+struct ReaderEnv {
+  /// The `napi_env`, as an address. It is only compared, never used to call Node-API.
+  address: usize,
+  /// The environment's JavaScript thread. A `ThreadId` is never reused in a process, so an
+  /// environment on another thread does not pass, even when it got the address of a dead
+  /// one (a new worker, for example).
+  thread: ThreadId,
+  /// The custom-GC handle of this env when the `Reader` was made, which tells whether the
+  /// env is torn down.
+  #[cfg(all(feature = "napi4", not(feature = "noop")))]
+  custom_gc: Option<Arc<CustomGcHandle>>,
+}
+
+impl ReaderEnv {
+  /// Runs on the JavaScript thread of `env`.
+  fn current(env: sys::napi_env) -> Self {
+    Self {
+      address: env as usize,
+      thread: thread::current().id(),
+      #[cfg(all(feature = "napi4", not(feature = "noop")))]
+      custom_gc: custom_gc_handle_for_env(env),
+    }
+  }
+
+  /// Whether `env` is this environment, the current thread is its JavaScript thread, and
+  /// the environment is not torn down.
+  fn is_current(&self, env: &Env) -> bool {
+    if self.address != env.raw() as usize || self.thread != thread::current().id() {
+      return false;
+    }
+    #[cfg(all(feature = "napi4", not(feature = "noop")))]
+    if let Some(custom_gc) = &self.custom_gc {
+      return custom_gc.is_open();
+    }
+    // No custom-GC handle (a `noop` build, or none for this env): the address
+    // and the thread are all that is checked.
+    true
+  }
+}
+
+/// Reads a JavaScript `ReadableStream` as a Rust [`Stream`]; returned by
+/// [`ReadableStream::read`].
 pub struct Reader<T: FromNapiValue + 'static> {
   inner:
     ThreadsafeFunction<(), PromiseRaw<'static, IteratorValue<'static, T>>, (), Status, true, true>,
   state: Arc<ReaderState<T>>,
+  cancel: ReaderCancelHandle,
+}
+
+// `Reader<T>` was `RefUnwindSafe` and `UnwindSafe` (for a `T` that is) before cancel
+// support. Losing an auto trait is a breaking change, so this fails to compile if it
+// happens again.
+const _: fn() = || {
+  fn unwind_safe<T: std::panic::RefUnwindSafe + std::panic::UnwindSafe>() {}
+  unwind_safe::<Reader<u32>>();
+};
+
+impl<T: FromNapiValue + 'static> Reader<T> {
+  /// Returns a handle that cancels this reader's stream. It can be cloned, sent to other
+  /// threads, and used while another task is awaiting this reader's next chunk.
+  pub fn cancel_handle(&self) -> ReaderCancelHandle {
+    self.cancel.clone()
+  }
+
+  /// Cancels the stream through the reader, like `reader.cancel(reason)` in JavaScript.
+  ///
+  /// Same as `self.cancel_handle().cancel(reason)`; see [`ReaderCancelHandle::cancel`].
+  pub fn cancel(
+    &self,
+    reason: Option<String>,
+  ) -> impl Future<Output = Result<()>> + Send + 'static {
+    self.cancel.cancel(reason)
+  }
+
+  /// Cancels the stream through the reader right away, on the JavaScript thread.
+  ///
+  /// Same as `self.cancel_handle().cancel_on_js_thread(env, reason)`; see
+  /// [`ReaderCancelHandle::cancel_on_js_thread`].
+  pub fn cancel_on_js_thread(
+    &self,
+    env: &Env,
+    reason: Option<String>,
+  ) -> Result<impl Future<Output = Result<()>> + Send + 'static> {
+    self.cancel.cancel_on_js_thread(env, reason)
+  }
+}
+
+/// Cancels the stream behind a [`Reader`]. Get one with [`Reader::cancel_handle`]; it can be
+/// cloned and sent to other threads.
+#[derive(Clone)]
+pub struct ReaderCancelHandle {
+  /// `None` when the reader had no usable `cancel` method.
+  cancel_fn: Option<Arc<BoundCancel>>,
+  signal: Arc<CancelSignal>,
+  env: ReaderEnv,
+}
+
+impl ReaderCancelHandle {
+  /// Calls `reader.cancel(reason)` on the JavaScript reader, from any thread. `None` passes
+  /// `undefined`, as `reader.cancel()` does.
+  ///
+  /// What happens:
+  ///
+  /// - The call is queued to the JavaScript thread through a threadsafe function when this
+  ///   method is called (not when the future is first polled), and it runs on a later turn
+  ///   of the event loop. That is also true when this method is called on the JavaScript
+  ///   thread: the underlying source's `cancel` then runs after the current JavaScript call
+  ///   has returned. To run it inside the current call, use
+  ///   [`ReaderCancelHandle::cancel_on_js_thread`].
+  /// - The threadsafe function does not keep Node.js running. If nothing else does (a
+  ///   timer, a socket, other pending work), the process can exit before the queued call
+  ///   runs, and then the source's `cancel` never runs.
+  /// - The future does not have to be awaited: the cancel is already sent, and dropping the
+  ///   future only drops the result. The compiler's warning that futures do nothing unless
+  ///   polled is wrong here; drop it with `drop(handle.cancel(None));` (Clippy warns on
+  ///   `let _ =` with a future). Do not block the JavaScript thread on the future: it can
+  ///   only settle once that thread runs.
+  /// - The [`Reader`] ends right away, without waiting for JavaScript: a task waiting for
+  ///   its next chunk is woken, its next poll returns `None`, and any chunk that was read
+  ///   but not yet yielded is dropped. This also holds when the JavaScript read never
+  ///   settles, for example with a custom reader whose `cancel` is missing or throws. With
+  ///   a standard `ReadableStream`, a read in flight is settled by the stream as done; that
+  ///   result, like any read result that arrives later, is dropped.
+  /// - The stream stays locked to the reader (the lock is not released), as in
+  ///   JavaScript.
+  /// - Calling it again is fine: a standard `ReadableStream` is already canceled then, so
+  ///   the JavaScript call resolves and the underlying source's `cancel` is not called a
+  ///   second time.
+  ///
+  /// What `reader.cancel` returned is followed exactly as `await` follows a value, by an
+  /// `await` that runs on the JavaScript thread:
+  ///
+  /// - A native Promise (its `constructor` is the built-in `Promise`) is observed directly.
+  ///   No `then` is looked up, so its own `then`, or a replaced `Promise.prototype.then` or
+  ///   `Promise.prototype.catch`, makes no difference.
+  /// - Any other value with a callable `then` (a custom thenable, or a Promise whose
+  ///   `constructor` was changed) is adopted by calling that `then` in a microtask. A
+  ///   `then`, or a `then` getter, that throws counts as a rejection.
+  /// - Any other value (a custom reader's `cancel` may return `undefined`) counts as
+  ///   fulfilled, because the cancel did run.
+  ///
+  /// The future resolves to `Ok(())` when the value fulfills, and to `Err` with the
+  /// rejection's message when it rejects (for example the stream had errored, or the
+  /// source's `cancel` threw); the rejection is handled, as with `await`. The future also
+  /// resolves to `Err` if `cancel` throws, if the reader has no `cancel` method, or if the
+  /// call cannot be queued because the environment is shutting down. Under WebAssembly
+  /// (emnapi), the `await` is compiled through the global `eval`; where `eval` is blocked
+  /// (a Content Security Policy without `'unsafe-eval'`), the future resolves to `Err` and
+  /// the value is not followed.
+  ///
+  /// If the value never settles, the future stays pending. If in addition nothing can
+  /// settle it any more (nobody holds its `resolve` or `reject`) and it is
+  /// garbage-collected, the future resolves to `Err("ReadableStream cancel was dropped
+  /// before it settled")`. If the environment shuts down (a worker exits, for example)
+  /// after the call was queued but before it ran, or while the value is pending, the future
+  /// resolves to `Err` as well.
+  pub fn cancel(
+    &self,
+    reason: Option<String>,
+  ) -> impl Future<Output = Result<()>> + Send + 'static {
+    self.signal.cancel();
+    let receiver = match &self.cancel_fn {
+      None => Err(no_cancel_method()),
+      Some(bound) => {
+        let (sender, receiver) = oneshot::channel::<Result<()>>();
+        // The sender waits in `queued` until the call runs (see `QueuedCancels`).
+        match bound.queued.insert(sender) {
+          None => Err(Error::new(
+            Status::Closing,
+            "Failed to schedule ReadableStream cancel",
+          )),
+          Some(key) => {
+            let queued = bound.queued.clone();
+            let status = bound.threadsafe.call_with_return_value(
+              reason,
+              ThreadsafeFunctionCallMode::NonBlocking,
+              move |returned, env| {
+                // Always there: the senders are only dropped once no call can run.
+                if let Some(sender) = queued.take(key) {
+                  settle_cancel(returned, env, sender);
+                }
+                // Never return an error from here: it would go to `napi_fatal_exception`.
+                Ok(())
+              },
+            );
+            if status == Status::Ok {
+              Ok(receiver)
+            } else {
+              // Not queued, so no call will take the sender.
+              drop(bound.queued.take(key));
+              Err(Error::new(
+                status,
+                "Failed to schedule ReadableStream cancel",
+              ))
+            }
+          }
+        }
+      }
+    };
+    cancel_outcome(receiver)
+  }
+
+  /// Calls `reader.cancel(reason)` on the JavaScript reader right away. Call it on the
+  /// JavaScript thread, with the `Env` of the current call, for example in a `close()`
+  /// method. `None` passes `undefined`.
+  ///
+  /// Unlike [`ReaderCancelHandle::cancel`], nothing is queued: with a standard
+  /// `ReadableStream`, the underlying source's `cancel(reason)` has run when this method
+  /// returns, as when `ImageDecoder.close()` cancels its stream in a browser. No lock is
+  /// held while JavaScript runs, so the source's `cancel` may call back into the addon,
+  /// even into this handle. Do not call it from a finalizer, where JavaScript cannot run.
+  ///
+  /// It first checks that it runs on the stream's JavaScript thread, with the stream's
+  /// `env`. If not, it returns `Err` and does nothing else: the [`Reader`] keeps going and
+  /// no JavaScript runs. This catches a worker that got this handle, and a handle whose
+  /// environment is gone, also when a new environment got the same address. The check
+  /// comes before everything else, also for a reader without a `cancel` method.
+  ///
+  /// After the check, the [`Reader`] ends first, as with [`ReaderCancelHandle::cancel`],
+  /// and stays ended even when this returns `Err`. The stream stays locked, and calling it
+  /// again is fine. A read already queued to the JavaScript thread can still call
+  /// `reader.read()` after this returns; a standard `ReadableStream` answers it with done,
+  /// without calling the source, and the `Reader` drops the result.
+  ///
+  /// It returns `Err` right away if `cancel` throws, or if the reader has no `cancel`
+  /// method. Otherwise it returns a future that resolves the way the future of
+  /// [`ReaderCancelHandle::cancel`] does: what `reader.cancel` returned is followed exactly
+  /// as `await` follows it, including what happens when it never settles. The future is
+  /// `Send + 'static` (await it on any runtime, or turn it into a JavaScript Promise). It
+  /// does not have to be awaited: the cancel has already run, so
+  /// `let _ = handle.cancel_on_js_thread(env, None);` is fine when the outcome does not
+  /// matter.
+  pub fn cancel_on_js_thread(
+    &self,
+    env: &Env,
+    reason: Option<String>,
+  ) -> Result<impl Future<Output = Result<()>> + Send + 'static> {
+    // First, so that with a wrong or dead env nothing else happens.
+    if !self.env.is_current(env) {
+      return Err(Error::new(
+        Status::InvalidArg,
+        "ReaderCancelHandle::cancel_on_js_thread must be called on the stream's JavaScript thread, with its env",
+      ));
+    }
+    self.signal.cancel();
+    let Some(bound) = &self.cancel_fn else {
+      return Err(no_cancel_method());
+    };
+    let raw_env = env.raw();
+    let cancel_function = bound.js.borrow_back(env)?;
+    let reason = unsafe { ToNapiValue::to_napi_value(raw_env, cancel_reason(reason))? };
+    // The function is bound to the reader, so `this` does not matter.
+    let mut this = ptr::null_mut();
+    check_status!(
+      unsafe { sys::napi_get_undefined(raw_env, &mut this) },
+      "Get undefined failed"
+    )?;
+    let mut returned = ptr::null_mut();
+    let status = unsafe {
+      sys::napi_call_function(
+        raw_env,
+        this,
+        cancel_function.value,
+        1,
+        [reason].as_ptr(),
+        &mut returned,
+      )
+    };
+    if status == sys::Status::napi_pending_exception {
+      let reason = take_exception_message(raw_env)
+        .unwrap_or_else(|| "ReadableStream reader cancel threw".to_owned());
+      return Err(Error::new(Status::GenericFailure, reason));
+    }
+    check_status!(status, "Call ReadableStream reader cancel failed")?;
+    let (sender, receiver) = oneshot::channel::<Result<()>>();
+    settle_cancel(
+      Ok(unsafe { Unknown::from_raw_unchecked(raw_env, returned) }),
+      *env,
+      sender,
+    );
+    Ok(cancel_outcome(Ok(receiver)))
+  }
+}
+
+fn no_cancel_method() -> Error {
+  Error::new(
+    Status::FunctionExpected,
+    "ReadableStream reader has no cancel method",
+  )
+}
+
+/// What the future of both cancel methods resolves to: the outcome `settle_cancel` sends,
+/// or the error that kept the call from being made.
+async fn cancel_outcome(receiver: Result<oneshot::Receiver<Result<()>>>) -> Result<()> {
+  receiver?.await.unwrap_or_else(|_| {
+    Err(Error::new(
+      Status::GenericFailure,
+      "ReadableStream cancel was dropped before it settled",
+    ))
+  })
+}
+
+/// Runs on the JavaScript thread with what the bound `reader.cancel(reason)` returned.
+/// Sends the outcome through `sender` exactly once, always as an owned error that holds
+/// no `napi_ref` (the receiver may drop it on any thread).
+///
+/// The value is followed by a real `await` in a small async function
+/// ([`FOLLOW_LIKE_AWAIT`]), so it settles exactly as `await value` would: a native Promise
+/// is observed through the engine's own reaction, without looking up `then`, and any other
+/// thenable is adopted through its `then`. The function is compiled on each call; the
+/// engine caches the compiled code, and nothing is kept per env, so there is nothing to
+/// look after when the addon is loaded again or a worker ends. If the value never settles
+/// and becomes garbage, or the env is torn down, the finalizers of the two callbacks drop
+/// the sender.
+fn settle_cancel(returned: Result<Unknown<'_>>, env: Env, sender: oneshot::Sender<Result<()>>) {
+  let raw_env = env.raw();
+  // Both callbacks share the sender; only the first call sends. They run on this thread.
+  let slot: CancelSlot = Rc::new(Cell::new(Some(sender)));
+  let setup = (|| -> Result<()> {
+    // `Err` here: `cancel` threw synchronously (or its result could not be read).
+    let returned = returned?;
+    let follow = compile_follow_like_await(raw_env)?;
+    let fulfilled = settle_function(raw_env, c"fulfilled", settle_fulfilled, slot.clone())?;
+    let rejected = settle_function(raw_env, c"rejected", settle_rejected, slot.clone())?;
+    let mut this = ptr::null_mut();
+    check_status!(
+      unsafe { sys::napi_get_undefined(raw_env, &mut this) },
+      "Get undefined failed"
+    )?;
+    // The async function returns a Promise that always fulfills (its callbacks never
+    // throw), so it is dropped here.
+    let mut settled = ptr::null_mut();
+    check_status!(
+      unsafe {
+        sys::napi_call_function(
+          raw_env,
+          this,
+          follow,
+          3,
+          [returned.raw(), fulfilled, rejected].as_ptr(),
+          &mut settled,
+        )
+      },
+      "Follow what ReadableStream reader cancel returned failed"
+    )?;
+    Ok(())
+  })();
+  if let Err(err) = setup {
+    // If an exception was left pending (for example when compiling the async function
+    // failed), its message is the one to report.
+    let err = match take_exception_message(raw_env) {
+      Some(reason) => {
+        drop(err);
+        Error::new(Status::GenericFailure, reason)
+      }
+      None => into_owned_error(raw_env, err, "ReadableStream cancel failed"),
+    };
+    send_outcome(&slot, Err(err));
+  }
+}
+
+/// Follows `value` exactly as `await` does, because it is `await`: for a native Promise
+/// whose `constructor` is the built-in `Promise`, `await` uses the engine's own reaction
+/// and looks up no `then`; any other value with a callable `then` is adopted through that
+/// `then` (one that throws rejects); any other value fulfills. Both callbacks are native
+/// functions that never throw, so the Promise this function returns never rejects.
+const FOLLOW_LIKE_AWAIT: &CStr = c"(async (value, fulfilled, rejected) => {\
+  try { await value } catch (error) { rejected(error); return }\
+  fulfilled();\
+})";
+
+/// The sender of one cancel's outcome, shared by the two callbacks of `settle_cancel`.
+type CancelSlot = Rc<Cell<Option<oneshot::Sender<Result<()>>>>>;
+
+fn send_outcome(slot: &CancelSlot, result: Result<()>) {
+  if let Some(sender) = slot.take() {
+    // The receiver is gone only when the caller dropped the future.
+    let _ = sender.send(result);
+  }
+}
+
+/// Compiles and runs [`FOLLOW_LIKE_AWAIT`], which evaluates to the async function. In
+/// Node.js, `napi_run_script` compiles directly (it works even with
+/// `--disallow-code-generation-from-strings`); emnapi (WebAssembly) runs it through the
+/// global `eval`.
+fn compile_follow_like_await(env: sys::napi_env) -> Result<sys::napi_value> {
+  let mut source = ptr::null_mut();
+  check_status!(
+    unsafe {
+      sys::napi_create_string_utf8(
+        env,
+        FOLLOW_LIKE_AWAIT.as_ptr(),
+        NAPI_AUTO_LENGTH,
+        &mut source,
+      )
+    },
+    "Create the source of the ReadableStream cancel follower failed"
+  )?;
+  let mut follow = ptr::null_mut();
+  check_status!(
+    unsafe { sys::napi_run_script(env, source, &mut follow) },
+    "Compile the ReadableStream cancel follower failed"
+  )?;
+  Ok(follow)
+}
+
+/// A JavaScript function that runs `callback` with `slot`. The box holding `slot` belongs
+/// to a `napi_wrap` finalizer on the function, so it lives as long as the function can be
+/// called, and is dropped when the function is garbage-collected or the env is torn down.
+fn settle_function(
+  env: sys::napi_env,
+  name: &CStr,
+  callback: unsafe extern "C" fn(sys::napi_env, sys::napi_callback_info) -> sys::napi_value,
+  slot: CancelSlot,
+) -> Result<sys::napi_value> {
+  let data = Box::into_raw(Box::new(slot));
+  let mut function = ptr::null_mut();
+  let mut status = unsafe {
+    sys::napi_create_function(
+      env,
+      name.as_ptr(),
+      NAPI_AUTO_LENGTH,
+      Some(callback),
+      data.cast(),
+      &mut function,
+    )
+  };
+  if status == sys::Status::napi_ok {
+    status = unsafe {
+      sys::napi_wrap(
+        env,
+        function,
+        data.cast(),
+        Some(drop_cancel_slot),
+        ptr::null_mut(),
+        ptr::null_mut(),
+      )
+    };
+  }
+  if status != sys::Status::napi_ok {
+    // The finalizer does not own the box. The function, if it was made, is never handed
+    // out, so nothing can call it with `data`.
+    drop(unsafe { Box::from_raw(data) });
+  }
+  check_status!(status, "Create a ReadableStream cancel callback failed")?;
+  Ok(function)
+}
+
+/// `fulfilled()`: sends `Ok`. Never throws.
+unsafe extern "C" fn settle_fulfilled(
+  env: sys::napi_env,
+  info: sys::napi_callback_info,
+) -> sys::napi_value {
+  let mut data = ptr::null_mut();
+  let status = unsafe {
+    sys::napi_get_cb_info(
+      env,
+      info,
+      ptr::null_mut(),
+      ptr::null_mut(),
+      ptr::null_mut(),
+      &mut data,
+    )
+  };
+  if status == sys::Status::napi_ok && !data.is_null() {
+    // The box is owned by the finalizer, which cannot run while the function runs.
+    send_outcome(unsafe { &*data.cast::<CancelSlot>() }, Ok(()));
+  }
+  ptr::null_mut()
+}
+
+/// `rejected(error)`: sends `Err` with the error's message. Never throws:
+/// `rejection_message` clears what a throwing `message` getter or `toString` leaves pending.
+unsafe extern "C" fn settle_rejected(
+  env: sys::napi_env,
+  info: sys::napi_callback_info,
+) -> sys::napi_value {
+  let mut argc = 1;
+  let mut argv = [ptr::null_mut(); 1];
+  let mut data = ptr::null_mut();
+  let status = unsafe {
+    sys::napi_get_cb_info(
+      env,
+      info,
+      &mut argc,
+      argv.as_mut_ptr(),
+      ptr::null_mut(),
+      &mut data,
+    )
+  };
+  if status == sys::Status::napi_ok && !data.is_null() {
+    let reason = rejection_message(unsafe { Unknown::from_raw_unchecked(env, argv[0]) });
+    // The box is owned by the finalizer, which cannot run while the function runs.
+    send_outcome(
+      unsafe { &*data.cast::<CancelSlot>() },
+      Err(Error::new(Status::GenericFailure, reason)),
+    );
+  }
+  ptr::null_mut()
+}
+
+extern "C" fn drop_cancel_slot(
+  _env: sys::napi_env,
+  finalize_data: *mut c_void,
+  _finalize_hint: *mut c_void,
+) {
+  drop(unsafe { Box::from_raw(finalize_data.cast::<CancelSlot>()) });
+}
+
+/// Takes the exception pending on `env`, if there is one, and returns its message. Runs on
+/// the JavaScript thread and keeps no reference to the exception.
+fn take_exception_message(env: sys::napi_env) -> Option<String> {
+  let mut pending = false;
+  if unsafe { sys::napi_is_exception_pending(env, &mut pending) } != sys::Status::napi_ok
+    || !pending
+  {
+    return None;
+  }
+  let mut exception = ptr::null_mut();
+  if unsafe { sys::napi_get_and_clear_last_exception(env, &mut exception) } != sys::Status::napi_ok
+    || exception.is_null()
+  {
+    return None;
+  }
+  Some(rejection_message(unsafe {
+    Unknown::from_raw_unchecked(env, exception)
+  }))
+}
+
+/// Turns an error caught on the JavaScript thread into one that holds no `napi_ref`.
+///
+/// It clears any exception left pending (a throwing `then`/`catch` getter, for example),
+/// which would otherwise wedge later napi calls on this thread. `err` may own a reference
+/// to a JavaScript exception; it is dropped here, on the JavaScript thread, because
+/// releasing that reference on another thread aborts the process.
+fn into_owned_error(env: sys::napi_env, err: Error, context: &str) -> Error {
+  let mut pending_exception = ptr::null_mut();
+  unsafe {
+    sys::napi_get_and_clear_last_exception(env, &mut pending_exception);
+  }
+  let reason = if err.reason.is_empty() {
+    format!("{context}: {}", err.status)
+  } else {
+    err.reason.clone()
+  };
+  drop(err);
+  Error::new(Status::GenericFailure, reason)
 }
 
 /// Build an owned error message from a rejected JS value **without** retaining a napi
@@ -625,24 +1424,58 @@ fn rejection_message(value: Unknown) -> String {
   message
 }
 
+impl<T: FromNapiValue + 'static> Drop for Reader<T> {
+  fn drop(&mut self) {
+    // Cancel handles and read callbacks can keep the signal alive after the reader.
+    self.state.signal.release_waker();
+    // The callbacks of a read in flight keep `state` alive until the read settles, which
+    // may be never. They must not keep the task's waker too; their `finally` then finds
+    // no waker to wake. Dropped after the lock is released.
+    let waker = self
+      .state
+      .inner
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .waker
+      .take();
+    drop(waker);
+  }
+}
+
 impl<T: FromNapiValue + 'static> futures_core::Stream for Reader<T> {
   type Item = Result<T>;
 
   fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    // Let a cancel wake this task. Registered before the flag is checked below, so a
+    // cancel that comes after the check still wakes it (see `CancelSignal`).
+    self.state.signal.waker.register(cx.waker());
     let issue_read = {
       let mut inner = self
         .state
         .inner
         .lock()
         .map_err(|_| Error::new(Status::InvalidArg, "Poisoned lock in Reader::poll_next"))?;
+      // 0. A canceled reader ends at once; drop whatever was buffered.
+      if self.state.signal.is_cancelled() {
+        inner.chunk = Ok(None);
+        inner.done = true;
+        inner.waker = None;
+        self.state.signal.release_waker();
+        return Poll::Ready(None);
+      }
       // 1. Surface any buffered chunk or error first.
       match mem::replace(&mut inner.chunk, Ok(None)) {
         Ok(Some(chunk)) => return Poll::Ready(Some(Ok(chunk))),
-        Err(err) => return Poll::Ready(Some(Err(err))),
+        Err(err) => {
+          // An error always ends the stream (`done` is set with it).
+          self.state.signal.release_waker();
+          return Poll::Ready(Some(Err(err)));
+        }
         Ok(None) => {}
       }
       // 2. If the stream finished (or errored) and nothing is buffered, end iteration.
       if inner.done {
+        self.state.signal.release_waker();
         return Poll::Ready(None);
       }
       // 3. Remember the latest waker so the in-flight read can wake this task.
@@ -678,9 +1511,10 @@ impl<T: FromNapiValue + 'static> futures_core::Stream for Reader<T> {
                   Error::new(Status::InvalidArg, "Poisoned lock in Reader::poll_next")
                 })?;
                 // The stream may already be terminated by the setup-error path (a later
-                // handler-attach step failed *after* this `then` was registered). Drop
-                // the late settlement rather than resurrect a chunk after the end.
-                if inner.done {
+                // handler-attach step failed *after* this `then` was registered), or the
+                // reader was canceled. Drop the late settlement rather than resurrect a
+                // chunk after the end.
+                if inner.done || state.signal.is_cancelled() {
                   return Ok(());
                 }
                 if cx.value.done {
@@ -703,9 +1537,10 @@ impl<T: FromNapiValue + 'static> futures_core::Stream for Reader<T> {
                 let mut inner = state_in_catch.inner.lock().map_err(|_| {
                   Error::new(Status::InvalidArg, "Poisoned lock in Reader::poll_next")
                 })?;
-                // If the stream already terminated (setup-error path), drop this late
-                // rejection rather than surface a second terminal error after the end.
-                if inner.done {
+                // If the stream already terminated (setup-error path) or the reader was
+                // canceled, drop this late rejection rather than surface a second
+                // terminal error after the end.
+                if inner.done || state_in_catch.signal.is_cancelled() {
                   return Ok(());
                 }
                 inner.chunk = Err(Error::new(Status::GenericFailure, reason));
@@ -736,27 +1571,18 @@ impl<T: FromNapiValue + 'static> futures_core::Stream for Reader<T> {
             // `then`/`catch`/`finally` throws) leaves a JS exception *pending* on the
             // env. Left pending it wedges every subsequent napi call on this thread —
             // including the runtime's own promise resolution — which hangs the
-            // consumer. Clear it here, on the JS thread (a no-op when nothing is
-            // pending, e.g. the synchronous `read()` throw path).
-            let mut pending_exception = ptr::null_mut();
-            unsafe {
-              sys::napi_get_and_clear_last_exception(env.raw(), &mut pending_exception);
-            }
+            // consumer. `into_owned_error` clears it here, on the JS thread (a no-op
+            // when nothing is pending, e.g. the synchronous `read()` throw path).
+            //
             // `err` can also own a JS exception reference (`maybe_raw`) — e.g. when the
             // bound `read()` threw synchronously, the threadsafe call wraps the
             // exception. `Reader<T>` is `Send`, so the stored error may be surfaced or
             // dropped on the Tokio thread; dropping a `napi_ref` off the JS thread
             // aborts the process / is UB (the same hazard the `catch` path avoids).
-            // Rebuild a reference-free OWNED error here on the JS thread — the message
-            // is already mirrored into `reason` — and drop the original now so any
-            // reference is released on this (JS) thread.
-            let reason = if err.reason.is_empty() {
-              format!("ReadableStream read failed: {}", err.status)
-            } else {
-              err.reason.clone()
-            };
-            let owned = Error::new(Status::GenericFailure, reason);
-            drop(err);
+            // `into_owned_error` rebuilds a reference-free OWNED error here on the JS
+            // thread and drops the original now, so any reference is released on this
+            // (JS) thread.
+            let owned = into_owned_error(env.raw(), err, "ReadableStream read failed");
             let waker = {
               let mut inner = state_on_setup_err.inner.lock().map_err(|_| {
                 Error::new(Status::InvalidArg, "Poisoned lock in Reader::poll_next")
@@ -786,6 +1612,7 @@ impl<T: FromNapiValue + 'static> futures_core::Stream for Reader<T> {
         inner.reading = false;
         inner.done = true;
         inner.waker = None;
+        self.state.signal.release_waker();
         return Poll::Ready(Some(Err(Error::new(
           status,
           "Failed to schedule ReadableStream read",

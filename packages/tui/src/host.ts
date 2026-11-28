@@ -44,7 +44,15 @@ import { type Accessor, type Reactive, signal } from "./reactive";
 /** Configuration of {@link startHost}. */
 export interface HostOptions extends Pick<
 	TermBackendOptions,
-	"screen" | "isPrompt" | "copySelection" | "copyOnSelect" | "wheelLines" | "scrollbar" | "exitTranscript"
+	| "screen"
+	| "isPrompt"
+	| "copySelection"
+	| "copyOnSelect"
+	| "wheelLines"
+	| "scrollbar"
+	| "exitTranscript"
+	| "spinnerInterval"
+	| "reduceMotion"
 > {
 	readonly surface: Surface;
 	readonly theme: Accessor<Theme>;
@@ -123,6 +131,11 @@ export interface Host {
 	 * repaint (always false natively, where nothing retires).
 	 */
 	retired(node: UiNode): boolean;
+	/**
+	 * Whether the terminal acknowledged rows of `node`'s own content in history, not only the
+	 * separator above it (always false natively).
+	 */
+	contentInHistory(node: UiNode): boolean;
 	/** Redraw terminal history from the current main region (its retired rows changed or went away). */
 	replayHistory(): void;
 	/**
@@ -132,17 +145,6 @@ export interface Host {
 	redescribe(node: UiNode): void;
 	/** Route `event` to the focused node as if the terminal sent it (a paste the app recovered itself). */
 	dispatch(event: InputEvent): void;
-	/**
-	 * Hold the screen still: nothing is painted until the hold is released, so a
-	 * streaming turn stops scrolling the terminal while the user reads native
-	 * scrollback. Nothing is lost — the surface keeps changing and the release
-	 * paints the newest state in one frame. `notice` paints a one-line hint on
-	 * the last screen row without scrolling it. False when the state did not
-	 * change (or the renderer is between sizes).
-	 */
-	setOutputHold(hold: boolean, notice?: string): boolean;
-	/** Whether {@link setOutputHold} is holding the output. */
-	getOutputHold(): boolean;
 	/** Whether the terminal advertises TSP feature `name` (reactive; always false in the terminal renderer). */
 	feature(name: string): boolean;
 	/**
@@ -253,11 +255,10 @@ type Renderer = Pick<
 	| "native"
 	| "hour12"
 	| "retired"
+	| "contentInHistory"
 	| "replayHistory"
 	| "redescribe"
 	| "dispatch"
-	| "setOutputHold"
-	| "getOutputHold"
 	| "feature"
 	| "checkoutShown"
 	| "setMouse"
@@ -393,11 +394,10 @@ export async function startHost(options: HostOptions): Promise<Host> {
 				return connection.hello.hour12;
 			},
 			retired: () => false,
+			contentInHistory: () => false,
 			replayHistory: () => {},
 			redescribe: node => backend.redescribe(node),
 			dispatch: event => backend.dispatch(event),
-			setOutputHold: hold => backend.setOutputHold(hold),
-			getOutputHold: () => backend.getOutputHold(),
 			feature: name => connection.hasFeature(name),
 			checkoutShown: () => connection.checkout(),
 			setMouse: tracking => driver.setMouse(tracking),
@@ -438,6 +438,8 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			...(options.hyperlinks ? { hyperlinks: options.hyperlinks } : {}),
 			...(options.textSizing ? { textSizing: options.textSizing } : {}),
 			...(options.clock ? { clock: options.clock } : {}),
+			...(options.spinnerInterval === undefined ? {} : { spinnerInterval: options.spinnerInterval }),
+			...(options.reduceMotion ? { reduceMotion: options.reduceMotion } : {}),
 			...(options.screen ? { screen: options.screen } : {}),
 			...(options.isPrompt ? { isPrompt: options.isPrompt } : {}),
 			...(options.copySelection ? { copySelection: options.copySelection } : {}),
@@ -465,11 +467,10 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			native: false,
 			hour12: undefined,
 			retired: node => backend.retired(node),
+			contentInHistory: node => backend.contentInHistory(node),
 			replayHistory: () => driver.resetDisplay(),
 			redescribe: () => {},
 			dispatch: event => backend.dispatch(event),
-			setOutputHold: (hold, notice) => backend.setOutputHold(hold, notice),
-			getOutputHold: () => backend.getOutputHold(),
 			feature: () => false,
 			checkoutShown: () => false,
 			requestFrame: () => backend.requestRender(),
@@ -521,11 +522,10 @@ export async function startHost(options: HostOptions): Promise<Host> {
 		},
 		driver,
 		retired: node => renderer.retired(node),
+		contentInHistory: node => renderer.contentInHistory(node),
 		replayHistory: () => renderer.replayHistory(),
 		redescribe: node => renderer.redescribe(node),
 		dispatch: event => renderer.dispatch(event),
-		setOutputHold: (hold, notice) => renderer.setOutputHold(hold, notice),
-		getOutputHold: () => renderer.getOutputHold(),
 		feature: name => renderer.feature(name),
 		checkoutShown: () => renderer.checkoutShown(),
 		suspend: run => renderer.suspend(run),

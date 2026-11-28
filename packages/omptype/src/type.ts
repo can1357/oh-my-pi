@@ -2140,6 +2140,44 @@ function intersectResolved(a: IR, b: IR): IR {
 	return { k: "intersection", members };
 }
 
+/** Distinct required tags rule out subtyping in either direction. Use the
+ * first property so the proof doesn't skip predicates on earlier properties. */
+function hasDisjointStringTags(members: IR[]): boolean {
+	const first = members[0];
+	if (first?.k !== "object" || first.props.length === 0) return false;
+	const key = first.props[0].key;
+	const tags = new Set<string>();
+	for (const member of members) {
+		if (member.k !== "object") return false;
+		const prop = member.props[0];
+		if (prop === undefined || prop.key !== key || prop.opt) return false;
+		const value = prop.val;
+		if (value.k === "lit" && typeof value.v === "string") {
+			if (tags.has(value.v)) return false;
+			tags.add(value.v);
+		} else if (value.k === "union" && value.members.length !== 0) {
+			for (const tag of value.members) {
+				if (tag.k !== "lit" || typeof tag.v !== "string" || tags.has(tag.v)) return false;
+				tags.add(tag.v);
+			}
+		} else {
+			return false;
+		}
+	}
+	return true;
+}
+
+function keepUnionMember(member: IR, index: number, members: IR[]): boolean {
+	if (members.length < 2 || hasMorph(member)) return true;
+	for (let i = 0; i < members.length; i++) {
+		if (i === index) continue;
+		const candidate = members[i];
+		if (hasMorph(candidate) || !isSubtype(member, candidate)) continue;
+		if (!isSubtype(candidate, member) || i < index) return false;
+	}
+	return true;
+}
+
 /** Reduce parsed unions/intersections to their observable semantic form. */
 function normalizeIR(ir: IR): IR {
 	switch (ir.k) {
@@ -2149,6 +2187,7 @@ function normalizeIR(ir: IR): IR {
 			return members.slice(1).reduce(intersect, members[0]);
 		}
 		case "union": {
+			if (isSimpleIR(ir)) return ir;
 			const members: IR[] = [];
 			let changed = false;
 			for (let index = 0; index < ir.members.length; index++) {
@@ -2168,48 +2207,35 @@ function normalizeIR(ir: IR): IR {
 			}
 			if (
 				members.every(
-					member =>
+					(member): member is Extract<IR, { k: "lit" }> =>
 						member.k === "lit" &&
 						(member.v === null || (typeof member.v !== "object" && typeof member.v !== "function")),
 				)
 			) {
-				const pruned: IR[] = [];
+				let count = 0;
+				const values = new Set<unknown>();
 				for (const member of members) {
-					if (member.k === "lit" && pruned.some(candidate => candidate.k === "lit" && candidate.v === member.v)) {
+					// Keep the first equal literal, using === (NaN never matches).
+					if (!Number.isNaN(member.v) && values.has(member.v)) {
 						changed = true;
 					} else {
-						pruned.push(member);
+						values.add(member.v);
+						members[count++] = member;
 					}
 				}
-				if (pruned.length === 0) return { k: "never" };
-				if (pruned.length === 1) return pruned[0];
-				if (pruned.length === 2 && pruned.every(member => member.k === "lit" && typeof member.v === "boolean")) {
-					return { k: "boolean" };
-				}
-				return changed ? { ...ir, members: pruned } : ir;
+				members.length = count;
+				if (count === 0) return { k: "never" };
+				if (count === 1) return members[0];
+				if (count === 2 && members.every(member => typeof member.v === "boolean")) return { k: "boolean" };
+				return changed ? { ...ir, members } : ir;
 			}
-			const pruned = members.filter(
-				(member, index) =>
-					!members.some(
-						(candidate, candidateIndex) =>
-							candidateIndex !== index &&
-							!hasMorph(member) &&
-							!hasMorph(candidate) &&
-							isSubtype(member, candidate) &&
-							(!isSubtype(candidate, member) || candidateIndex < index),
-					),
-			);
+			const pruned = hasDisjointStringTags(members) ? members : members.filter(keepUnionMember);
 			if (pruned.length === 0) return { k: "never" };
 			if (pruned.length === 1) return pruned[0];
 			if (pruned.length === 2 && pruned.every(member => member.k === "lit" && typeof member.v === "boolean")) {
 				return { k: "boolean" };
 			}
-			if (
-				!changed &&
-				!pruned.some(member => member.k === "alias") &&
-				pruned.length === ir.members.length &&
-				pruned.every((member, index) => member === ir.members[index])
-			) {
+			if (!changed && pruned.length === ir.members.length && !pruned.some(member => member.k === "alias")) {
 				return ir;
 			}
 			return { ...ir, members: pruned };
@@ -2359,7 +2385,18 @@ function isSubtype(source: IR, target: IR, seen = new WeakMap<IR, Set<IR>>()): b
 	if (target.k === "union") return target.members.some(member => isSubtype(source, member, seen));
 	if (target.k === "intersection") return target.members.every(member => isSubtype(source, member, seen));
 	if (source.k === "intersection") return source.members.some(member => isSubtype(member, target, seen));
-	if (source.k === "lit") return !(walk(target, source.v) instanceof OmpErrors);
+	if (source.k === "lit") {
+		// Primitive unit comparisons need neither validation errors nor paths.
+		if (target.k === "null") return source.v === null;
+		if (target.k === "undefined") return source.v === undefined;
+		if (
+			target.k === "lit" &&
+			(target.v === null || (typeof target.v !== "object" && typeof target.v !== "function"))
+		) {
+			return source.v === target.v;
+		}
+		return !(walk(target, source.v) instanceof OmpErrors);
+	}
 	if (source.k === "refine") return isSubtype(source.base, target, seen);
 	if (source.k === "morph") return isSubtype(source.out ?? source.input, target, seen);
 	if (source.k === "sub") return isSubtype(source.schema.ir, target, seen);

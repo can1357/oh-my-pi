@@ -84,6 +84,8 @@ export interface BlockOptions {
 export interface TranscriptHost {
 	/** Whether `node` has rows in terminal scrollback. */
 	retired(node: UiNode): boolean;
+	/** Whether the terminal acknowledged rows of `node`'s own content in scrollback, not only its separator. */
+	contentInHistory(node: UiNode): boolean;
 	/** Rebuild terminal scrollback from the current main region. */
 	replayHistory(): void;
 	/** Describe again the settled block holding `node` (Tern dropped its description). */
@@ -265,6 +267,11 @@ export class Transcript {
 	/** Whether `block` has rows in terminal scrollback. */
 	retired(block: TranscriptBlock): boolean {
 		return this.#host?.retired(block.node) ?? false;
+	}
+
+	/** Whether the terminal acknowledged rows of `block`'s own content in scrollback, not only its separator. */
+	contentInHistory(block: TranscriptBlock): boolean {
+		return this.#host?.contentInHistory(block.node) ?? false;
 	}
 
 	/** Remove `block`; scrollback is rebuilt when it had rows there. */

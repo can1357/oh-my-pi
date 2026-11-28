@@ -6,7 +6,8 @@
  * decodes it. The terminal backend draws images where the terminal supports
  * a graphics protocol; transcript looks fall back to a `[Image: mime]` line.
  */
-import { computed, createRoot, effect, type JSXNode, type Reactive, read, signal } from "@oh-my-pi/pi-tui";
+import type { JSXNode } from "@oh-my-pi/pi-tui";
+import { computed, createRoot, effect, type Reactive, read, signal } from "@oh-my-pi/pi-tui/reactive";
 import { registerBlob } from "@oh-my-pi/pi-tui/native/blobs";
 import type { TspImageProps } from "@oh-my-pi/pi-wire";
 import { readImageHeaderDimensions } from "../../../utils/image-resize";

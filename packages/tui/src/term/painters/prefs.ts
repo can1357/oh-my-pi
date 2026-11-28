@@ -15,6 +15,7 @@
  * a role painter; such nodes are theirs to draw and drive (the widget leaves
  * them alone).
  */
+import { segmentGraphemes } from "@oh-my-pi/pi-utils/graphemes";
 import type { TspPrefsControl, TspPrefsProps, TspPrefsRow } from "@oh-my-pi/pi-wire";
 import type { UiNode } from "../../node";
 import type { Theme } from "../../theme/contract";
@@ -248,7 +249,7 @@ export function inputLine(text: string, cursor: number, width: number, prompt = 
 	const atEnd = at >= text.length;
 	const shown = atEnd ? `${text} ` : text;
 	// Keep the caret inside the window: drop leading cells until it fits.
-	const graphemes = [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(shown)];
+	const graphemes = [...segmentGraphemes(shown)];
 	let caret = graphemes.findIndex(g => g.index >= at);
 	if (caret < 0) caret = graphemes.length - 1;
 	let start = 0;

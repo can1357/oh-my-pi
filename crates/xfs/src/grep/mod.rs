@@ -30,6 +30,7 @@
 //! ```
 
 mod engine;
+pub mod pcre;
 mod render;
 mod run;
 mod scan;

@@ -89,7 +89,7 @@ Run one agent synchronously.
 {{/if}}
 
 Shared edits need one integration owner; give each task its files{{#unless batchEnabled}} and interfaces{{/unless}}.
-Tasks MUST NOT run full builds or whole test suites mid-flight; you run those once at the join. A check scoped to the task's own files that finishes in seconds is fine.
+Tasks NEVER run full builds or whole test suites mid-flight; you run those once at the join. A check scoped to the task's own files that finishes in seconds is fine.
 
 # Available Agents
 {{#if spawningDisabled}}Agent spawning is currently disabled.

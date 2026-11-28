@@ -1063,6 +1063,36 @@ describe("standard OpenAI Responses WebSocket opt-in", () => {
 		expect(fixture.httpRequests).toHaveLength(2);
 	});
 
+	it("does not recreate a provider session the host retired while retrying an empty completion", async () => {
+		let http = 0;
+		const fixture = endpoint(undefined, {
+			httpResponse: () => {
+				if (++http > 1) return sse(textEvents("HTTP RETRIED", "retried"));
+				// The host retires the session mid-request (a model switch); the retry must not re-create it.
+				fixture.providerSessionState.clear();
+				return sse([
+					{
+						type: "response.completed",
+						response: {
+							id: "empty_http",
+							status: "completed",
+							output: [],
+							usage: { input_tokens: 0, output_tokens: 0 },
+						},
+					},
+				]);
+			},
+		});
+		const result = await streamOpenAIResponses(fixture.model, fixture.context, {
+			...fixture.options,
+			preferWebsockets: false,
+			providerRetryWait: async () => {},
+		}).result();
+		expect(result.content).toMatchObject([{ type: "text", text: "HTTP RETRIED" }]);
+		expect(fixture.httpRequests).toHaveLength(2);
+		expect(fixture.providerSessionState.size).toBe(0);
+	});
+
 	it("does not share sticky SSE between independent calls without a logical sessionId", async () => {
 		const fixture = endpoint((socket, _body, index) => {
 			if (index === 1) socket.close(1011, "drop");
@@ -1446,7 +1476,7 @@ describe("standard OpenAI Responses WebSocket opt-in", () => {
 		expect(fixture.upgrades).toHaveLength(1);
 	});
 
-	it("keeps the sent prompt-cache marker so tool rounds continue on the socket", async () => {
+	it("appends marked tool outputs on the socket across tool rounds", async () => {
 		const fixture = endpoint((socket, _body, index) => {
 			if (index === 3) {
 				send(socket, textEvents("Done", "resp_done"));
@@ -1522,7 +1552,7 @@ describe("standard OpenAI Responses WebSocket opt-in", () => {
 				expect.objectContaining({
 					type: "function_call_output",
 					call_id: `call_${turn}`,
-					output: `result ${turn}`,
+					output: [{ type: "input_text", text: `result ${turn}`, prompt_cache_breakpoint: { mode: "explicit" } }],
 				}),
 			]);
 		}
@@ -1530,7 +1560,7 @@ describe("standard OpenAI Responses WebSocket opt-in", () => {
 		expect(fixture.httpRequests).toHaveLength(0);
 	});
 
-	it("marks a full replay when explicit caching starts mid-session, then appends user turns on the socket", async () => {
+	it("marks a full replay when explicit caching starts mid-session, then appends marked user turns on the socket", async () => {
 		const fixture = endpoint((socket, _body, index) => send(socket, textEvents(`Reply ${index}`, `resp_${index}`)));
 		const model = { ...getBundledModel("openai", "gpt-5.6"), baseUrl: fixture.model.baseUrl };
 		const context: Context = { messages: [...fixture.context.messages] };
@@ -1550,7 +1580,10 @@ describe("standard OpenAI Responses WebSocket opt-in", () => {
 		expect(JSON.stringify(bodies[1]?.input)).toContain("prompt_cache_breakpoint");
 		for (const turn of [3, 4]) {
 			expect(bodies[turn - 1]?.input).toEqual([
-				{ role: "user", content: [{ type: "input_text", text: `Next ${turn}` }] },
+				{
+					role: "user",
+					content: [{ type: "input_text", text: `Next ${turn}`, prompt_cache_breakpoint: { mode: "explicit" } }],
+				},
 			]);
 		}
 		expect(fixture.upgrades).toHaveLength(1);

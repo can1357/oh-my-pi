@@ -15,7 +15,7 @@ use std::{
 	time::{Duration, Instant},
 };
 
-use crate::openfile::OpenFile;
+use crate::openfile::{OpenFile, espipe};
 use clap::{Arg, ArgMatches, Command};
 use omp_vfs::{File, OpenOptions};
 use uucore::{
@@ -587,17 +587,6 @@ fn eoverflow() -> io::Error {
 	}
 }
 
-fn espipe() -> io::Error {
-	#[cfg(unix)]
-	{
-		io::Error::from_raw_os_error(libc::ESPIPE)
-	}
-	#[cfg(not(unix))]
-	{
-		io::Error::new(io::ErrorKind::NotSeekable, "Illegal seek")
-	}
-}
-
 fn is_espipe(error: &io::Error) -> bool {
 	error.kind() == io::ErrorKind::NotSeekable
 }
@@ -616,33 +605,6 @@ impl FileStat {
 
 	fn of_vfs(metadata: &omp_vfs::Metadata) -> Self {
 		Self { regular: metadata.is_file(), directory: metadata.is_dir(), size: metadata.len() }
-	}
-}
-
-/// `lseek` on one of the command's standard streams.
-fn seek_stream(file: &OpenFile, pos: SeekFrom) -> io::Result<u64> {
-	if let Some(mut file) = file.as_vfs() {
-		return file.seek(pos);
-	}
-	#[cfg(unix)]
-	{
-		let Ok(fd) = file.try_borrow_as_fd() else {
-			return Err(espipe());
-		};
-		let pos = match pos {
-			SeekFrom::Start(offset) => rustix::fs::SeekFrom::Start(offset),
-			SeekFrom::End(offset) => rustix::fs::SeekFrom::End(offset),
-			SeekFrom::Current(offset) => rustix::fs::SeekFrom::Current(offset),
-		};
-		Ok(rustix::fs::seek(fd, pos)?)
-	}
-	#[cfg(not(unix))]
-	match file {
-		OpenFile::File(file) => {
-			let mut file: &std::fs::File = file;
-			file.seek(pos)
-		},
-		_ => Err(espipe()),
 	}
 }
 
@@ -1121,14 +1083,14 @@ impl<'h> Copier<'h> {
 	fn seek_input(&mut self, pos: SeekFrom) -> io::Result<u64> {
 		match self.input.as_mut() {
 			Some(file) => file.seek(pos),
-			None => seek_stream(self.host.stdin.file(), pos),
+			None => self.host.stdin.file().seek(pos),
 		}
 	}
 
 	fn seek_output(&mut self, pos: SeekFrom) -> io::Result<u64> {
 		match self.output.as_mut() {
 			Some(file) => file.seek(pos),
-			None => seek_stream(&self.host.stdout, pos),
+			None => self.host.stdout.seek(pos),
 		}
 	}
 

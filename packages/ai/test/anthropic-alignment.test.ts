@@ -2684,8 +2684,10 @@ describe("Anthropic request fingerprint alignment", () => {
 					expect(tlsOptions?.serverName).toBe("foundry.example.com");
 					expect(Array.isArray(tlsOptions?.ca)).toBe(true);
 					const caValues = (tlsOptions?.ca ?? []) as string[];
-					expect(caValues.length).toBeGreaterThanOrEqual(tls.rootCertificates.length + 1);
-					expect(caValues.slice(0, tls.rootCertificates.length)).toEqual([...tls.rootCertificates]);
+					expect(caValues.length).toBeGreaterThanOrEqual(tls.getCACertificates("default").length + 1);
+					expect(caValues.slice(0, tls.getCACertificates("default").length)).toEqual([
+						...tls.getCACertificates("default"),
+					]);
 					expect(caValues.at(-1)).toContain("BEGIN CERTIFICATE");
 					expect(tlsOptions?.cert).toContain("BEGIN CERTIFICATE");
 					expect(tlsOptions?.key).toContain("BEGIN PRIVATE KEY");

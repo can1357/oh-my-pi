@@ -104,15 +104,14 @@ export function thinkingWord(facts: StatusFacts): string | undefined {
 	return facts.thinkingLevel ?? "off";
 }
 
-/** Look pieces of the thinking display (`◒ high`, `⦸ off`, `⟳ auto`); empty when hidden. */
+/** Look pieces of the thinking display (`◒ high`, `⦸ off`, `⟳ auto`, `⟳ high`); empty when hidden. */
 function thinkingPieces(facts: StatusFacts, s: string): [] | [IconPiece, ...TextPiece[]] {
 	if (!facts.model?.thinking) return [];
 	if (facts.autoThinking) {
-		const resolved = facts.autoResolvedLevel;
-		if (resolved) return [{ icon: `thinking.${resolved}`, else: resolved, s, space: "none" }];
+		// Keep the auto indicator on a resolved level so it reads differently from a pinned one.
 		return [
 			{ icon: "thinking.autoPending", s },
-			{ t: "auto", s },
+			{ t: facts.autoResolvedLevel ?? "auto", s },
 		];
 	}
 	const level = facts.thinkingLevel ?? "off";
@@ -193,10 +192,20 @@ function modelSeg(input: SegInput): SegView {
 	const showLevel = input.options.model?.showThinkingLevel !== false;
 	const thinking = showLevel ? thinkingPieces(facts, look) : [];
 	const compact = input.compactThinking && thinking.length > 0;
-	const pieces: LookPiece[] = [
-		thinking.length > 0 && compact ? { ...thinking[0], lead: true, space: "after" } : { icon: "model", s: look },
-		{ t: name, s: look },
-	];
+	const pieces: LookPiece[] = [];
+	if (thinking.length > 0 && compact) {
+		const resolved = facts.autoThinking ? facts.autoResolvedLevel : undefined;
+		pieces.push({ ...thinking[0], lead: true, space: resolved ? "none" : "after" });
+		if (resolved) {
+			pieces.push({
+				icon: resolved === "off" ? "status.disabled" : `thinking.${resolved}`,
+				else: `${resolved} `,
+				lead: true,
+				s: look,
+			});
+		}
+	} else pieces.push({ icon: "model", s: look });
+	pieces.push({ t: name, s: look });
 	const spans: TspSpan[] = [span(name, native)];
 	const advisor = facts.advisor;
 	if (advisor) {
@@ -205,9 +214,10 @@ function modelSeg(input: SegInput): SegView {
 		pieces.push({ icon, s: color, space: "before" });
 		spans.push(span(` ${glyph(input, `icon.${icon[0]}`) || glyph(input, "icon.advisor")}`, color));
 	}
-	if (facts.fastMode) {
-		pieces.push({ icon: "fast", s: look, space: "before" });
-		spans.push(span(` ${glyph(input, "icon.fast")}`, native));
+	if (facts.fastTier) {
+		const icon = facts.fastTier === "ultrafast" ? "rocket" : "fast";
+		pieces.push({ icon, s: look, space: "before" });
+		spans.push(span(` ${input.symbols.icon(icon)}`, native));
 	}
 	if (!compact && thinking.length > 0) pieces.push({ icon: "sep.dot", s: look, space: "none" }, ...thinking);
 	const level = showLevel ? thinkingWord(facts) : undefined;
@@ -485,6 +495,7 @@ function costSeg(input: SegInput): SegView | null {
 			digits: 2,
 			pricingPeriod: facts.pricingPeriod,
 			advisor: facts.advisorCost,
+			aiu: facts.usage.aiu,
 		},
 		symbols,
 	);
@@ -747,7 +758,7 @@ export function segmentView(
 			return view(input, [span(text)], [{ icon: "time" }, { t: text }], "time");
 		}
 		case "session": {
-			const text = facts.sessionId?.slice(0, 8) || "new";
+			const text = facts.sessionId?.slice(0, 13) || "new"; // full UUIDv7 timestamp; 8 chars collide for ~65s
 			return view(input, [span(text)], [{ icon: "session" }, { t: text }], "session");
 		}
 		case "hostname": {

@@ -13,7 +13,7 @@
  *   and the key-hint rule.
  */
 import { type Block, defineRolePainter, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
-import { SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-tui/term/painters/spinner";
+import { spinnerIndex } from "@oh-my-pi/pi-tui/term/painters/spinner";
 import { padTo, replaceTabs, truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { PLAIN_THEME } from "@oh-my-pi/pi-tui/theme/plain";
@@ -346,7 +346,7 @@ defineRolePainter("col", "omp.app.autoresearch", (node, cx): Block => {
 	const running = runtime.runningExperiment;
 	if (running) {
 		const frames = theme.symbols.spinnerFrames;
-		const spinner = frames.length > 0 ? frames[Math.floor(cx.now() / SPINNER_INTERVAL_MS) % frames.length] : "*";
+		const spinner = frames.length > 0 ? frames[spinnerIndex(cx, frames.length)] : "*";
 		body.push(
 			truncate(
 				theme.fg(

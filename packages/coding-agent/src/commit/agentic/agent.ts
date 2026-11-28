@@ -9,7 +9,7 @@ import type { Settings } from "../../config/settings";
 import { createAgentSession } from "../../sdk";
 import type { AgentSessionEvent } from "../../session/agent-session";
 import type { AuthStorage } from "../../session/auth-storage";
-import type { SessionManager } from "../../session/session-manager";
+import { SessionManager } from "../../session/session-manager";
 import agentUserPrompt from "./prompts/session-user.md" with { type: "text" };
 import agentSystemPrompt from "./prompts/system.md" with { type: "text" };
 import type { CommitAgentState } from "./state";
@@ -59,7 +59,7 @@ export async function runCommitAgentSession(input: CommitAgentInput): Promise<Co
 
 	const { session } = await createAgentSession({
 		cwd: input.cwd,
-		sessionManager: input.sessionManager,
+		sessionManager: input.sessionManager ?? SessionManager.inMemory(input.cwd),
 		authStorage: input.authStorage,
 		modelRegistry: input.modelRegistry,
 		cacheWarming: "off",

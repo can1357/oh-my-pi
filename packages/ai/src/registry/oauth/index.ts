@@ -9,7 +9,6 @@ import { jwtExpiryMs, NEVER_EXPIRES } from "../engine/common";
 import { getProviderDefinition, PROVIDER_REGISTRY } from "../registry";
 import type {
 	OAuthCredentials,
-	OAuthProvider,
 	OAuthProviderId,
 	OAuthProviderInfo,
 	OAuthProviderInterface,
@@ -203,7 +202,7 @@ export function normalizeOAuthCredentialExpiry<T extends OAuthCredentials>(provi
  * @throws Error if the credential is expired and must be refreshed upstream
  */
 export async function getOAuthApiKey(
-	provider: OAuthProvider,
+	provider: OAuthProviderId,
 	credentials: Record<string, OAuthCredentials>,
 ): Promise<{ newCredentials: OAuthCredentials; apiKey: string } | null> {
 	let creds = credentials[provider];
@@ -242,6 +241,7 @@ export async function getOAuthApiKey(
 					expiresAt: creds.expires,
 					email: creds.email,
 					accountId: creds.accountId,
+					tokenBasedBilling: creds.tokenBasedBilling,
 				})
 			: creds.access;
 	return { newCredentials: creds, apiKey };

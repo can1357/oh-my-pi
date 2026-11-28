@@ -200,6 +200,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"supports-steering": wire("supportsSteering", ["openai-responses"]),
 	"uncached-instructions": wire("uncachedInstructions", ["openai-responses"]),
 	"strip-deepseek-special-tokens": wire("stripDeepseekSpecialTokens", OAI),
+	"neutralize-deepseek-special-tokens": wire("neutralizeDeepseekSpecialTokens", ["openai"]),
 	"stream-markup-healing-pattern": wire("streamMarkupHealingPattern", OAI, "scalar", [
 		"kimi",
 		"dsml",
@@ -222,6 +223,11 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"supports-reasoning-summary": wire("supportsReasoningSummary", ["openai-responses"]),
 	"store-responses": wire("storeResponses", ["openai-responses"]),
 	"tool-name-prefix": wire("toolNamePrefix", ["openai-responses"], "scalar", ["_"]),
+	"reasoning-summary-default": wire("reasoningSummaryDefault", ["openai-responses"], "scalar", [
+		"auto",
+		"detailed",
+		"concise",
+	]),
 	"supports-store": wire("supportsStore", ["openai"]),
 	"supports-strict-mode": wire("supportsStrictMode", OAI),
 	"supports-tool-choice": wire("supportsToolChoice", OAI),
@@ -251,6 +257,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"zai-reasoning-effort-dialect": wire("zaiReasoningEffortDialect", ["openai"]),
 
 	// ── wire: anthropic-messages ──
+	"additive-session-header": wire("additiveSessionHeader", ["anthropic"], "scalar", ["x-client-session-id"]),
 	"bedrock-messages-api": wire("bedrockMessagesApi", ["anthropic"]),
 	"allow-anthropic-header-overrides": wire("allowAnthropicHeaderOverrides", ["anthropic"]),
 	"disable-adaptive-thinking": wire("disableAdaptiveThinking", ["anthropic"]),
@@ -358,8 +365,6 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		shape: "scalar",
 		values: ["freeform", "function"],
 	},
-	/** Paraphrase model-visible prompt prose per install (`perturbContext` in pi-ai). */
-	"prompt-perturbation": { key: "promptPerturbation", set: "catalog", shape: "scalar", values: [true, false] },
 	"requires-native-tools": { key: "requiresNativeTools", set: "catalog", shape: "scalar", values: [true, false] },
 	"tool-schemas-in-context": { key: "toolSchemasInContext", set: "catalog", shape: "scalar", values: [true, false] },
 	"requires-tool-free-history-for-tool-opt-out": {
@@ -456,6 +461,18 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	 */
 	"cache-write-rate": { key: "cacheWriteRate", set: "catalog", shape: "scalar" },
 	/**
+	 * The host's long-context tier bills cache reads and writes at the same
+	 * multiple of the row it derives from as its input price. GitHub Copilot
+	 * discovery applies it to the cache legs `billing.token_prices` omits on a
+	 * synthesized `-1m` row; a reported `cache_price` wins.
+	 */
+	"tier-cache-follows-input": {
+		key: "tierCacheFollowsInput",
+		set: "catalog",
+		shape: "scalar",
+		values: [true, false],
+	},
+	/**
 	 * How the model line bills a replayed signed thinking block as input:
 	 * `output` bills the reasoning its signature carries, at the size the turn
 	 * billed as output, and not the signature's bytes. Unassigned: estimated
@@ -521,6 +538,8 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	 * misreads indentation in frames makes inexact edits.
 	 */
 	"snapcompact-image-reads": { key: "snapcompactImageReads", set: "catalog", shape: "scalar", values: [true, false] },
+	/** Benchmarked Snapcompact grid override; frame size still follows the reader's resolution tier. */
+	"snapcompact-variant": { key: "snapcompactVariant", set: "catalog", shape: "scalar" },
 	"image-model": { key: "imageModel", set: "catalog", shape: "scalar" },
 	/** Longest image edge the host passes to the model: it downscales larger images to fit first. */
 	"image-max-edge": { key: "imageMaxEdge", set: "catalog", shape: "scalar" },
@@ -614,6 +633,8 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	 * pre-warm request.
 	 */
 	"prompt-cache-prewarm": { key: "promptCachePrewarm", set: "catalog", shape: "scalar", values: [true, false] },
+	/** The provider reports a distinct server-side AI-credit charge on usage (`usage.aiu`); a reply without it is unknown, not free. */
+	"reports-aiu": { key: "reportsAiu", set: "catalog", shape: "scalar", values: [true, false] },
 	"long-usage-limit-fallback": { key: "longUsageLimitFallback", set: "catalog", shape: "scalar" },
 	"max-context-window": { key: "maxContextWindow", set: "catalog", shape: "scalar" },
 	/**
@@ -812,7 +833,7 @@ function directiveValue(name: string, axis: AxisDef, value: unknown): unknown {
 
 /**
  * Compiles directive → value assignments, the JSON form of a KDL rule block's
- * axis lines (`{ "prompt-perturbation": true }`), into resolved axes with the
+ * axis lines (`{ "requires-native-tools": true }`), into resolved axes with the
  * same validation as the KDL compiler. Object payloads use kebab-case keys.
  *
  * @throws Error naming an unknown directive, a value of the wrong shape, a

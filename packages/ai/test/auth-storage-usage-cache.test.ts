@@ -21,6 +21,7 @@ import {
 	type StoredAuthCredential,
 } from "@oh-my-pi/pi-ai/auth-storage";
 import { usageCacheIdentity } from "@oh-my-pi/pi-ai/auth/usage-cache";
+import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import type { UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import { alibabaTokenPlanUsageProvider } from "@oh-my-pi/pi-ai/usage/alibaba-token-plan";
 import * as claudeUsage from "@oh-my-pi/pi-ai/usage/claude";
@@ -552,6 +553,49 @@ describe("AuthStorage usage cache: explicit invalidation", () => {
 			expireCachePayloads(store);
 			expect(await storage.usage.reports()).toEqual([withCredentialId(recovered)]);
 			expect(calls).toBe(2);
+		} finally {
+			storage.close();
+		}
+	});
+
+	it("retains a referenced row's auth rejection across storage recreation until the failed probe recovers", async () => {
+		const store = makeStore([
+			{ id: 4, provider: "opencode-go", credential: { type: "api_key", key: "!read-key" }, disabledCause: null },
+			{ id: 5, provider: "opencode-go", credential: { type: "api_key", key: "OTHER_KEY" }, disabledCause: null },
+		]);
+		let rejecting = true;
+		let calls = 0;
+		const provider: UsageProvider = {
+			id: "opencode-go",
+			async fetchUsage(params) {
+				calls++;
+				if (rejecting && params.credential.apiKey === "resolved-4") throw new ProviderHttpError("revoked", 403);
+				return { provider: params.provider, fetchedAt: Date.now(), limits: [] };
+			},
+		};
+		const opts = {
+			configValueResolver: async (ref: string) => (ref === "!read-key" ? "resolved-4" : "resolved-5"),
+			usageProviderResolver: () => provider,
+		};
+		let storage = new AuthStorage(store, opts);
+		const poll = () => storage.usage.reports({ provider: "opencode-go" });
+		try {
+			await storage.credentials.reload();
+			expect(await poll()).toHaveLength(1);
+			expect(storage.usage.authRejection("opencode-go", 4)).toBe(403);
+			expect(storage.usage.authRejection("opencode-go", 5)).toBeUndefined();
+			storage.close();
+
+			storage = new AuthStorage(store, opts);
+			await storage.credentials.reload();
+			rejecting = false;
+			expect(await poll()).toHaveLength(1);
+			expect(calls).toBe(2);
+			expect(storage.usage.authRejection("opencode-go", 4)).toBe(403);
+			expireCachePayloads(store);
+			await poll();
+			expect(calls).toBe(4);
+			expect(storage.usage.authRejection("opencode-go", 4)).toBeUndefined();
 		} finally {
 			storage.close();
 		}
@@ -1573,6 +1617,31 @@ describe("AuthStorage usage cache: runtime usage provider registration", () => {
 	async function extensionReports(storage: AuthStorage): Promise<UsageReport[]> {
 		return ((await storage.usage.reports()) ?? []).filter(report => report.provider === "anthropic-2");
 	}
+
+	it("keeps a gateway config key out of a fixed public adapter but supplies the registered gateway adapter", async () => {
+		const usageFetch = vi.fn(async () => new Response("{}"));
+		const storage = new AuthStorage(makeStore([]), { usageFetch: usageFetch as unknown as typeof fetch });
+		const options = { provider: "synthetic", baseUrlResolver: () => "https://gateway.example/v1" };
+		try {
+			await storage.credentials.reload();
+			storage.keys.setConfig("synthetic", "private-gateway-key");
+			expect(await storage.usage.reports(options)).toEqual([]);
+			expect(usageFetch).not.toHaveBeenCalled();
+
+			const adapter: UsageProvider = {
+				id: "synthetic",
+				async fetchUsage(params) {
+					expect(params.baseUrl).toBe(options.baseUrlResolver());
+					expect(params.credential.apiKey).toBe("private-gateway-key");
+					return { provider: params.provider, fetchedAt: Date.now(), limits: [] };
+				},
+			};
+			storage.usage.replaceConfiguredProviders(new Map([["synthetic", adapter]]));
+			expect(await storage.usage.reports(options)).toHaveLength(1);
+		} finally {
+			storage.close();
+		}
+	});
 
 	it("keeps another process's reports when an extension registers a provider with no other adapter", async () => {
 		const store = makeStore([extensionRow()]);

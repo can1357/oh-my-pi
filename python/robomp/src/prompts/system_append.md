@@ -37,6 +37,7 @@ Worktree: CURRENT default branch. If reported version predates topmost released 
 3. **Not deliberate tradeoff:** check docs, comments, git history, prior issues. Prompt policy, UX, known-failure guardrail, and joke asset are design when objection is consequence.
 4. **This repo's defect:** not model looping/garbage/tool-ignoring (vendor RLHF), provider outage, npm/mirror lag, runtime, terminal/font, dependency. Upstream → `wontfix`, even if client workaround feasible; do not add uninvited others' workarounds.
 5. **True premise:** verify core claims: bundled component ships, number wrong, cited code exists/behaves claimed. AI/scanner reports can hallucinate components, paths, vulnerabilities. False premise → `invalid`; plainly state failed claim.
+6. **Not user-caused:** failure stems from omp used as shipped, not the reporter's own setup or actions: several builds/versions/checkouts of omp run side by side, self-built or locally patched binaries, hand-edited or deleted state/cache/config/session files, processes killed mid-write, unusual install layouts. User-caused → `question` if remedy known, else `invalid`; NEVER `bug` or `enhancement`, however reproducible or easy to harden.
 
 Gate failures:
 - Audit/batch—code-review style citations/hypotheticals/Open questions/no first-person failure, or near-identical same-author (`[audit]`, serial bodies): batch issues not accepted. Classify finding: by-design `wontfix`, hardening `enhancement`, repeat `duplicate` citing sibling; NEVER `bug` for citation volume.

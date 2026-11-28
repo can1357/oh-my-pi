@@ -23,6 +23,10 @@ pub use host::read_process_umask;
 mod openfile;
 /// The embedding application's speech synthesizer, as `say` reaches it.
 mod speech;
+#[cfg(feature = "util.perl")]
+mod stack;
+#[cfg(any(feature = "util.awk", feature = "util.perl"))]
+mod deep;
 mod stdio;
 /// The shell's locale categories, shared by the locale-aware utilities.
 #[cfg(any(
@@ -55,8 +59,6 @@ mod quoting_style;
 	feature = "util.uptime"
 ))]
 mod time_zone;
-#[cfg(any(feature = "util.cp", feature = "util.mv"))]
-mod progress;
 /// Refusal of whole-disk walks, shared by the recursive search utilities.
 #[cfg(any(
 	feature = "util.ast-grep",
@@ -145,6 +147,10 @@ mod entr;
 mod env;
 #[cfg(all(feature = "util.errno", unix))]
 mod errno;
+/// Command lines sized to what one `exec` takes, for `xargs`, `find -exec +`
+/// and `fd -X`.
+#[cfg(any(feature = "util.fd", feature = "util.find", feature = "util.xargs"))]
+mod exec_line;
 #[cfg(feature = "util.fd")]
 mod fd;
 #[cfg(all(feature = "util.file", any(unix, windows)))]

@@ -44,6 +44,8 @@ export class LRUCache<K, V> {
 	readonly #updateAgeOnGet: boolean;
 	readonly #dispose: ((value: V, key: K, reason: DisposeReason) => void) | undefined;
 	#calculatedSize = 0;
+	// A hit on the most recent entry needs no Map delete/reinsert.
+	#newest: Entry<V> | undefined;
 
 	/** Creates an empty cache. */
 	constructor(options: LRUCacheOptions<K, V>) {
@@ -101,7 +103,9 @@ export class LRUCache<K, V> {
 			if (oldest === undefined) break;
 			this.#remove(oldest[0], oldest[1], "evict");
 		}
-		this.#entries.set(key, { value, size, start: this.#ttl === 0 ? 0 : performance.now() });
+		const entry = { value, size, start: this.#ttl === 0 ? 0 : performance.now() };
+		this.#entries.set(key, entry);
+		this.#newest = entry;
 		this.#calculatedSize += size;
 		return this;
 	}
@@ -110,13 +114,19 @@ export class LRUCache<K, V> {
 	get(key: K): V | undefined {
 		const entry = this.#entries.get(key);
 		if (entry === undefined) return undefined;
-		if (this.#isStale(entry)) {
-			this.#remove(key, entry, "expire");
-			return undefined;
+		if (this.#ttl !== 0) {
+			const now = performance.now();
+			if (now - entry.start > this.#ttl) {
+				this.#remove(key, entry, "expire");
+				return undefined;
+			}
+			if (this.#updateAgeOnGet) entry.start = now;
 		}
-		if (this.#updateAgeOnGet && this.#ttl !== 0) entry.start = performance.now();
-		this.#entries.delete(key);
-		this.#entries.set(key, entry);
+		if (entry !== this.#newest) {
+			this.#entries.delete(key);
+			this.#entries.set(key, entry);
+			this.#newest = entry;
+		}
 		return entry.value;
 	}
 
@@ -144,6 +154,7 @@ export class LRUCache<K, V> {
 	clear(): void {
 		for (const [key, entry] of this.#entries) this.#dispose?.(entry.value, key, "delete");
 		this.#entries.clear();
+		this.#newest = undefined;
 		this.#calculatedSize = 0;
 	}
 
@@ -180,6 +191,7 @@ export class LRUCache<K, V> {
 	#remove(key: K, entry: Entry<V>, reason: DisposeReason): void {
 		this.#dispose?.(entry.value, key, reason);
 		this.#entries.delete(key);
+		if (entry === this.#newest) this.#newest = undefined;
 		this.#calculatedSize -= entry.size;
 	}
 }
