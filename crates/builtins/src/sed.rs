@@ -74,6 +74,9 @@ pub struct ProcessingContext {
 	pub paths:            ShellPaths,
 
 	// Other context
+	/// Whether `LC_CTYPE` is a UTF-8 locale, which decides how `I` reads a
+	/// bracket range and the dotless `ı`.
+	pub utf8:                 bool,
 	/// Where GNU locates script errors found at run time: the end of the script.
 	pub script_end:           String,
 	/// Currently processed input file operand, `-` for standard input
@@ -1097,7 +1100,7 @@ fn compile_address(
 			if let Some(msg) = re.error {
 				return compilation_error_before(lines, line, msg);
 			}
-			let regex = compile_regex(&re.pattern, context, icase, multiline)
+			let regex = compile_regex(&re.pattern, context, icase, multiline, true)
 				.or_else(|msg| compilation_error_before(lines, line, msg))?;
 			Ok(Address::Re(regex.map(Rc::new)))
 		},
@@ -1173,23 +1176,35 @@ fn parse_command_ending(lines: &ScriptLineProvider, line: &mut ScriptCharProvide
 
 /// Compile the provided regular expression string into a corresponding engine.
 /// An empty pattern results in None, which means that the last RE employed
-/// at runtime will be used.
+/// at runtime will be used. `address` says the pattern selects lines.
 fn compile_regex(
 	pattern: &str,
 	context: &ProcessingContext,
 	icase: bool,
 	multiline: bool,
+	address: bool,
 ) -> Result<Option<Regex>, String> {
 	if pattern.is_empty() {
 		return Ok(None);
 	}
 
+	// glibc's `REG_ICASE` reads a range by the upper case of its ends. In the
+	// C locale GNU's dfa reads it as written too, and alone on an address
+	// with `M` ([`crate::bre::RangeCase`]).
+	let case = match (icase, context.utf8, address && multiline) {
+		(false, ..) => crate::bre::RangeCase::Exact,
+		(true, true, _) => crate::bre::RangeCase::Folded,
+		(true, false, true) => crate::bre::RangeCase::Written,
+		(true, false, false) => crate::bre::RangeCase::Filtered,
+	};
 	let translated = if context.regex_extended {
-		crate::bre::ere_to_rust(pattern, false)
+		crate::bre::ere_to_rust(pattern, false, case)
 	} else {
-		crate::bre::bre_to_ere(pattern, crate::bre::Backrefs::Supported, crate::bre::StackedRepeats::Refused).map(std::borrow::Cow::Owned)
+		crate::bre::bre_to_ere(pattern, crate::bre::Backrefs::Supported, crate::bre::StackedRepeats::Refused, case)
+			.map(std::borrow::Cow::Owned)
 	}
 	.map_err(|e| e.gnu_message().to_string())?;
+	let translated = crate::bre::fold_dotless_i(translated, icase && context.utf8);
 	let multiline_classes;
 	let pattern = if multiline {
 		multiline_classes = exclude_newline_from_negated_classes(translated.as_ref());
@@ -1224,7 +1239,8 @@ fn compile_regex(
 
 /// Adds `\n` to every negated bracket class of a translated pattern: under
 /// `M`, GNU sed's `[^x]` stops at the newlines that separate lines, as `.`
-/// does, while the Rust engine's matches them.
+/// does, while the Rust engine's matches them. The translation writes a
+/// negated list that holds nothing as `[\s\S]`, which becomes `[^\n]`.
 fn exclude_newline_from_negated_classes(pattern: &str) -> String {
 	let mut result = String::with_capacity(pattern.len() + 8);
 	let mut chars = pattern.chars().peekable();
@@ -1234,6 +1250,10 @@ fn exclude_newline_from_negated_classes(pattern: &str) -> String {
 		result.push(c);
 		match c {
 			'\\' => result.extend(chars.next()),
+			'[' if depth == 0 && chars.clone().take(5).eq(r"\s\S]".chars()) => {
+				chars.nth(4);
+				result.push_str(r"^\n]");
+			},
 			'[' => {
 				if depth == 0 && chars.next_if_eq(&'^').is_some() {
 					result.push_str(r"^\n");
@@ -1380,7 +1400,7 @@ fn compile_subst_command(
 	if let Some(msg) = parsed.error {
 		return subst_flags_error(lines, line, msg);
 	}
-	subst.regex = compile_regex(&parsed.pattern, context, subst.ignore_case, subst.multiline)
+	subst.regex = compile_regex(&parsed.pattern, context, subst.ignore_case, subst.multiline, false)
 		.or_else(|msg| subst_flags_error(lines, line, msg))?
 		.map(Rc::new);
 
@@ -2087,7 +2107,7 @@ mod tests {
 
 	#[test]
 	fn test_compile_re_basic() {
-		let regex = compile_regex("abc", &ctx(), false, false)
+		let regex = compile_regex("abc", &ctx(), false, false, false)
 			.unwrap()
 			.expect("regex should be present");
 		assert!(regex.is_match(&IOChunk::new_from_str("abc")).unwrap());
@@ -2098,7 +2118,7 @@ mod tests {
 	fn test_compile_re_extended() {
 		let mut ctx = ctx();
 		ctx.regex_extended = true;
-		let regex = compile_regex("cc{0,}", &ctx, false, false)
+		let regex = compile_regex("cc{0,}", &ctx, false, false, false)
 			.unwrap()
 			.expect("regex should be present");
 		assert!(
@@ -2113,7 +2133,7 @@ mod tests {
 		// REGRESSION: `s/^\+/X/` used to substitute at the start of EVERY
 		// line, because `\+` became `+` unconditionally and `^+` compiles as
 		// `(?:^)+`. Real sed changes only lines that begin with a plus.
-		let regex = compile_regex(r"^\+", &ctx(), false, false)
+		let regex = compile_regex(r"^\+", &ctx(), false, false, false)
 			.unwrap()
 			.expect("regex should be present");
 		assert!(regex.is_match(&IOChunk::new_from_str("+added")).unwrap());
@@ -2127,7 +2147,7 @@ mod tests {
 		// operator would give `{1,3}` or, after an anchor, `^{1,3}` - which
 		// fancy-regex accepts and matches at every line start.
 		for pattern in [r"\{1,3\}", r"^\{1,3\}"] {
-			let err = compile_regex(pattern, &ctx(), false, false)
+			let err = compile_regex(pattern, &ctx(), false, false, false)
 				.expect_err("a brace quantifier with no operand must not compile");
 			assert_eq!(err, "Invalid preceding regular expression", "{pattern}");
 		}
@@ -2136,7 +2156,7 @@ mod tests {
 	#[test]
 	fn test_compile_re_basic_caret_is_an_anchor_inside_a_group() {
 		// `\(^a\)` anchors in a BRE; escaping the caret matched nothing.
-		let regex = compile_regex(r"\(^alpha\)", &ctx(), false, false)
+		let regex = compile_regex(r"\(^alpha\)", &ctx(), false, false, false)
 			.unwrap()
 			.expect("regex should be present");
 		assert!(regex.is_match(&IOChunk::new_from_str("alpha")).unwrap());
@@ -2145,7 +2165,7 @@ mod tests {
 
 	#[test]
 	fn test_compile_re_case_insensitive() {
-		let regex = compile_regex("abc", &ctx(), true, false)
+		let regex = compile_regex("abc", &ctx(), true, false, false)
 			.unwrap()
 			.expect("regex should be present");
 		assert!(regex.is_match(&IOChunk::new_from_str("abc")).unwrap());
@@ -2155,13 +2175,13 @@ mod tests {
 
 	#[test]
 	fn test_compile_re_invalid() {
-		let result = compile_regex("a[d", &ctx(), false, false);
+		let result = compile_regex("a[d", &ctx(), false, false, false);
 		assert_eq!(result.unwrap_err(), "Unmatched [, [^, [:, [., or [=");
 	}
 
 	#[test]
 	fn test_compile_re_multiline_start() {
-		let regex = compile_regex("^bar", &ctx(), false, true)
+		let regex = compile_regex("^bar", &ctx(), false, true, false)
 			.unwrap()
 			.expect("regex should be present");
 		assert!(
@@ -2173,7 +2193,7 @@ mod tests {
 
 	#[test]
 	fn test_compile_re_multiline_end() {
-		let regex = compile_regex("foo$", &ctx(), false, true)
+		let regex = compile_regex("foo$", &ctx(), false, true, false)
 			.unwrap()
 			.expect("regex should be present");
 		assert!(
@@ -9272,6 +9292,7 @@ const USAGE: &str = "sed [OPTION]... [script] [file]...";
 fn sed_main(matches: &ArgMatches, host: &mut Host) -> SedResult<()> {
 	let (scripts, files) = get_scripts_files(matches)?;
 	let mut context = build_context(matches, host.paths());
+	context.utf8 = crate::locale::ctype_is_utf8(host);
 
 	let executable = compiler::compile_with_stdin(scripts, &mut context, host.stdin.file().clone())?;
 	process_all_files(executable, files, &mut context, host)?;
@@ -9492,6 +9513,7 @@ fn build_context(matches: &ArgMatches, paths: &ShellPaths) -> ProcessingContext 
 		paths:            paths.clone(),
 
 		// Other context
+		utf8:                 false,
 		script_end:           String::new(),
 		input_name:           PathBuf::from("-"),
 		line_number:          0,
@@ -10415,5 +10437,85 @@ mod tests {
 		// A regex reused from another `s` expands its missing groups to nothing.
 		let (code, capture) = crate::host::run_util::<Sed>(&[r"s/a/b/;s//\1/"], "aa\n", "/");
 		assert_eq!((code, capture.out().as_str()), (0, "b\n"), "{}", capture.err());
+	}
+
+	/// GNU sed 4.9's answers, measured in C.UTF-8 and in C. With `I` glibc
+	/// checks a range against the upper case of its ends, in the locale's
+	/// rules, so `[Z-a]` runs backwards. In a UTF-8 locale a character is in
+	/// the range where its upper case is: `[a-Z]` holds `b`, and `[A-z]` and
+	/// `[Z-~]` hold no `_` and no `a`; `ı` is a case of `I`, and on a line that
+	/// is not UTF-8 its two bytes count only together. In the C locale a range
+	/// reads as written, so `[a-~]` holds no `_` and `[A-z]` holds it. A list
+	/// that holds one that runs backwards holds only what it also holds with
+	/// each range read by its upper-cased ends, so `[a-Z]` holds nothing and
+	/// `[@-aa-Z]` no `_`, and a negated one leaves out what either reading
+	/// holds, so `[^a-Z]` leaves out the letters; on an address with `M` the
+	/// first reading alone decides, and `[^a-Z]` leaves out only the newline.
+	/// Such a list that also holds a member outside ASCII is refused here,
+	/// where GNU takes it: `[é@-aa-Z]`. A bracket that holds an equivalence
+	/// class or a collating symbol reads each range by its upper-cased ends,
+	/// so `[[.a.]-Z]` holds `b`.
+	/// Regressed: `[a-Z]` was refused, `[Z-a]` was taken, and `[A-z]` replaced
+	/// `_` in a UTF-8 locale.
+	#[test]
+	fn the_i_flag_reads_ranges_and_the_dotless_i_as_gnu() {
+		let (mut probe, _) = Host::for_test("sed", "", "/");
+		probe.set_test_var("LC_ALL", "C.UTF-8");
+		if !crate::locale::ctype_is_utf8(&probe) {
+			eprintln!("skipping: the C.UTF-8 locale is not installed");
+			return;
+		}
+		let dotless = "\u{131}\n".as_bytes();
+		for (locale, args, stdin, expected) in [
+			("C.UTF-8", &["s/[a-Z]/x/I"][..], &b"b\n"[..], (0, &b"x\n"[..])),
+			("C.UTF-8", &["-E", "s/[a-Z]/x/I"], b"b\n", (0, b"x\n")),
+			("C.UTF-8", &["-n", "/[a-Z]/Ip"], b"b\n", (0, b"b\n")),
+			("C.UTF-8", &["s/[A-z]/x/I"], b"_\n", (0, b"_\n")),
+			("C.UTF-8", &["s/[Z-~]/x/I"], b"a\n", (0, b"a\n")),
+			("C.UTF-8", &["s/[A-C]/x/I"], b"b\n", (0, b"x\n")),
+			("C.UTF-8", &["s/I/x/I"], dotless, (0, b"x\n")),
+			("C.UTF-8", &["s/[Z-a]/x/I"], b"b\n", (1, b"")),
+			("C.UTF-8", &["s/[Z-\u{131}]/x/I"], b"Z\n", (1, b"")),
+			("C.UTF-8", &["s/[a-z]/x/gI"], b"\xc4pfel\n", (0, b"\xc4xxxx\n")),
+			("C.UTF-8", &["s/I/x/I"], b"\xb1\n", (0, b"\xb1\n")),
+			("C.UTF-8", &["s/I/x/Ig"], b"\xc4\xb1\xff\n", (0, b"x\xff\n")),
+			("C", &["s/[a-~]/x/I"], b"_\n", (0, b"_\n")),
+			("C", &["s/[^A-z]/x/I"], b"_\n", (0, b"_\n")),
+			("C", &["-E", "s/[^A-z]/x/I"], b"_\n", (0, b"_\n")),
+			("C", &["s/[^A-z]/x/IM"], b"_\n", (0, b"_\n")),
+			("C", &["s/[^Z-z]/x/I"], b"a\n", (0, b"a\n")),
+			("C", &["-n", "/[^A-z]/Ip"], b"_\n", (0, b"")),
+			("C", &["-n", "/[A-z]/IMp"], b"_\n", (0, b"_\n")),
+			("C", &["s/[^a-Z]/x/I"], b"a\n", (0, b"a\n")),
+			("C", &["s/[^a-Z]/x/I"], b"a1\n", (0, b"ax\n")),
+			("C", &["-n", "/[^a-Z]/Ip"], b"ab\n", (0, b"")),
+			("C", &["-n", "/[^a-Z]/IMp"], b"ab\n", (0, b"ab\n")),
+			("C", &["-n", "N;/a[^a-Z]b/IMp"], b"a\nb\n", (0, b"")),
+			("C", &["s/[a-Z]/x/I"], b"b\n", (0, b"b\n")),
+			("C", &[r"s/[A-z]\|[a-~]/x/I"], b"_\n", (0, b"x\n")),
+			("C", &["s/[A-za-~]/x/I"], b"_\n", (0, b"x\n")),
+			("C", &["-E", "s/[A-za-~]/x/I"], b"_\n", (0, b"x\n")),
+			("C", &["-n", r"/[A-z]\|[a-~]/Ip"], b"_\n", (0, b"_\n")),
+			("C", &["s/[A-z]*[a-~]*/x/I"], b"_`\n", (0, b"x\n")),
+			("C", &["s/[@-aa-Z]/x/I"], b"_\n", (0, b"_\n")),
+			("C", &["s/[^a-~a-Z]/x/I"], b"_\n", (0, b"_\n")),
+			("C", &["s/[[:digit:]a-ZA-z]/x/I"], b"_\n", (0, b"_\n")),
+			("C", &["s/[é@-aa-Z]/x/I"], b"_\n", (1, b"")),
+			("C", &["s/[[.a.]-Z]/x/I"], b"b\n", (0, b"x\n")),
+			("C", &["-n", "/[[=a=]a-Z]/IMp"], b"b\n", (0, b"b\n")),
+			("C", &["s/[a-Z]/x/I"], b"b\xff\n", (0, b"b\xff\n")),
+			("C", &["s/[Z-\u{131}]/x/I"], b"Z\n", (0, b"x\n")),
+			("C", &["s/I/x/I"], dotless, (0, dotless)),
+		] {
+			let (mut host, capture) = Host::for_test("sed", stdin, "/");
+			host.set_test_var("LC_ALL", locale);
+			let status = Sed { matches: test_matches(args) }.run(&mut host);
+			assert_eq!(
+				(status, capture.stdout().as_slice()),
+				expected,
+				"LC_ALL={locale} sed {args:?}: {}",
+				capture.err()
+			);
+		}
 	}
 }

@@ -36,6 +36,8 @@ mod stdio;
 	feature = "util.du",
 	feature = "util.env",
 	feature = "util.fold",
+	feature = "util.grep",
+	feature = "util.sed",
 	feature = "util.sort",
 	feature = "util.uniq"
 ))]

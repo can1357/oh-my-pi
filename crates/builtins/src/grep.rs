@@ -818,6 +818,16 @@ fn build_matcher(
 			.map_err(|error| error.to_string());
 	}
 
+	// GNU reads `-i` by the locale: glibc's case rules in a UTF-8 one, its
+	// dfa's in the C locale ([`bre::RangeCase`]).
+	let utf8_fold = ignore_case && crate::locale::ctype_is_utf8(host);
+	let case = if utf8_fold {
+		bre::RangeCase::Folded
+	} else if ignore_case {
+		bre::RangeCase::Written
+	} else {
+		bre::RangeCase::Exact
+	};
 	let mut builder = RegexMatcherBuilder::new();
 	builder
 		.case_insensitive(ignore_case)
@@ -827,7 +837,12 @@ fn build_matcher(
 		builder.line_terminator(Some(b'\0'));
 	}
 	if mode == MatchMode::Fixed {
-		let escaped: Vec<String> = patterns.iter().map(|pattern| regex::escape(pattern)).collect();
+		let escaped: Vec<String> = patterns
+			.iter()
+			.map(|pattern| {
+				bre::fold_dotless_i(regex::escape(pattern).into(), utf8_fold).into_owned()
+			})
+			.collect();
 		return builder
 			.build_many(&escaped)
 			.map(Engine::Rust)
@@ -847,7 +862,10 @@ fn build_matcher(
 		// this translation step existed.
 		let translated: Vec<String> = patterns
 			.iter()
-			.map(|pattern| bre::bre_to_ere(pattern, bre::Backrefs::Unsupported, bre::StackedRepeats::Allowed))
+			.map(|pattern| {
+				bre::bre_to_ere(pattern, bre::Backrefs::Unsupported, bre::StackedRepeats::Allowed, case)
+					.map(|ere| bre::fold_dotless_i(ere.into(), utf8_fold).into_owned())
+			})
 			.collect::<Result<_, _>>()
 			.map_err(|error: bre::BreError| error.gnu_message().to_owned())?;
 		return build_default_matcher(&builder, &translated, patterns).map(Engine::Rust);
@@ -855,7 +873,11 @@ fn build_matcher(
 
 	let patterns = patterns
 		.iter()
-		.map(|pattern| bre::ere_to_rust(pattern, true).map_err(|error| error.gnu_message().to_owned()))
+		.map(|pattern| {
+			bre::ere_to_rust(pattern, true, case)
+				.map(|ere| bre::fold_dotless_i(ere, utf8_fold))
+				.map_err(|error| error.gnu_message().to_owned())
+		})
 		.collect::<Result<Vec<_>, _>>()?;
 
 	builder
@@ -3030,6 +3052,70 @@ mod tests {
 		] {
 			let (code, out, err) = run(&[mode, pattern], stdin).await;
 			assert_eq!((code, out.as_str(), err.as_str()), (0, expected, ""), "{mode} {pattern}");
+		}
+	}
+
+	/// GNU grep 3.11's answers, measured in C.UTF-8 and in C. Under `-i` glibc
+	/// checks a range against the upper case of its ends, in the locale's
+	/// rules: `[Z-a]` runs backwards and is refused, `[a-Z]` is taken, and
+	/// `[Z-ı]` is refused only where `ı` is a letter whose upper case is `I`.
+	/// In a UTF-8 locale a character is in the range where its upper case is,
+	/// so `[a-Z]` holds `b`, and `[A-z]` and `[Z-~]` hold no `_` and no `a`; in
+	/// the C locale GNU's dfa reads the range as written, where `[a-Z]` holds
+	/// nothing, but leaves a bracket that holds an equivalence class or a
+	/// collating symbol to glibc, which reads each range in it by its
+	/// upper-cased ends, so `[[.a.]-Z]` holds `b`. In a UTF-8 locale `ı` is a
+	/// case of `I`, also in a list or a class that holds `I`; in the C locale
+	/// `-i` folds ASCII letters only. Regressed: `[a-Z]` was refused, `[Z-a]`
+	/// was taken, `[A-z]` held `_` in every locale, and `I` did not match `ı`.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn case_insensitive_ranges_and_the_dotless_i_answer_as_gnu() {
+		let (mut probe, _) = Host::for_test_async("grep", "", "/");
+		probe.set_test_var("LC_ALL", "C.UTF-8");
+		if !crate::locale::ctype_is_utf8(&probe) {
+			eprintln!("skipping: the C.UTF-8 locale is not installed");
+			return;
+		}
+		for (locale, args, stdin, expected) in [
+			("C.UTF-8", &["-ic", "I"][..], "\u{131}\n", (0, "1\n")),
+			("C.UTF-8", &["-ic", "[^I]"], "\u{131}\n", (1, "0\n")),
+			("C.UTF-8", &["-iFc", "I"], "\u{131}\n", (0, "1\n")),
+			("C.UTF-8", &["-ic", "\u{131}"], "I\n", (0, "1\n")),
+			("C.UTF-8", &["-ic", "[[:upper:]]"], "\u{131}\n", (0, "1\n")),
+			("C.UTF-8", &["-ic", "[^[:upper:]]"], "\u{131}\n", (1, "0\n")),
+			("C", &["-ic", "I"], "\u{131}\n", (1, "0\n")),
+			("C", &["-ic", "\u{131}"], "I\n", (1, "0\n")),
+			("C", &["-ic", "[^[:upper:]]"], "\u{131}\n", (0, "1\n")),
+			("C.UTF-8", &["-ic", "[a-Z]"], "b\n", (0, "1\n")),
+			("C.UTF-8", &["-iEc", "[a-Z]"], "b\n", (0, "1\n")),
+			("C.UTF-8", &["-ic", "[^a-Z]"], "a\n\n", (1, "0\n")),
+			("C.UTF-8", &["-ic", "[A-z]"], "_\n", (1, "0\n")),
+			("C.UTF-8", &["-ic", "[Z-~]"], "a\n", (1, "0\n")),
+			("C", &["-ic", "[a-Z]"], "a\nB\n", (1, "0\n")),
+			("C", &["-iEc", "[a-Z]"], "a\nB\n", (1, "0\n")),
+			("C", &["-ic", "[^a-Z]"], "a\n\n", (0, "1\n")),
+			("C", &["-ic", "[A-z]"], "_\n", (0, "1\n")),
+			("C", &["-ic", "[Z-~]"], "a\n", (0, "1\n")),
+			("C.UTF-8", &["-ci", "[Z-a]"], "x\n", (2, "")),
+			("C", &["-ci", "[Z-a]"], "x\n", (2, "")),
+			("C", &["-ic", "[[.a.]-Z]"], "b\n", (0, "1\n")),
+			("C", &["-ic", "[[=a=]A-z]"], "_\n", (1, "0\n")),
+			("C.UTF-8", &["-c", "[Z-a]"], "Z\n", (0, "1\n")),
+			("C.UTF-8", &["-ci", "[Z-\u{131}]"], "Z\n", (2, "")),
+			("C", &["-ci", "[Z-\u{131}]"], "Z\n", (0, "1\n")),
+			("C.UTF-8", &["-ci", "-e", "^[[:lower:]]$", "-e", r"\(y\)\1"], "A\n", (0, "1\n")),
+			("C.UTF-8", &["-ci", "-e", "^I$", "-e", r"\(y\)\1"], "\u{131}\n", (0, "1\n")),
+			("C.UTF-8", &["-ci", "-e", "[A-z]", "-e", r"\(y\)\1"], "_\n", (1, "0\n")),
+		] {
+			let (mut host, capture) = Host::for_test_async("grep", stdin, "/");
+			host.set_test_var("LC_ALL", locale);
+			let code = run_parsed(args, &mut host).await;
+			assert_eq!(
+				(code, capture.out().as_str()),
+				expected,
+				"LC_ALL={locale} grep {args:?}: {}",
+				capture.err()
+			);
 		}
 	}
 
