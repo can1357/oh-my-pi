@@ -26,6 +26,7 @@
 
 ### Fixed
 
+- Kept a bottom-aligned inline dock on the last row when replaying changed transcript rows, replacing retired blocks, or rebuilding the normal screen after a resize. An explicit display reset still starts a fresh viewport ([#20912](https://github.com/can1357/oh-my-pi/pull/20912) by [@thebtf](https://github.com/thebtf))
 - Moving through a question's options in Tern with the arrow keys no longer scrolls the chat back to the question each time
 - Improved performance when editing large documents and updating or closing views with many reactive values.
 - Fixed pane resizing in Herdr to avoid repeated redraw loops.

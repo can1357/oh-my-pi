@@ -38,6 +38,7 @@ import { KITTY_PLACEHOLDER } from "../driver/images/kitty";
 import { clipViewportImages, maskOverlayImages } from "../driver/images/viewport";
 import { bubbleEvent, bubbleKey, bubblePaste, keypathOf, pathTo } from "../dispatch";
 import type { KeyEvent } from "../events";
+import type { ReplayOptions } from "../host";
 import type { ScrollRequest, UiNode } from "../node";
 import {
 	type Accessor,
@@ -221,6 +222,8 @@ interface Pin {
 	readonly height: number;
 	readonly below: number;
 	readonly bottom: boolean;
+	/** Survives intermediate frames in a resize burst until the writer rebuilds the normal screen. */
+	readonly reachedBottom: boolean;
 	readonly rows: number;
 	readonly span: number;
 }
@@ -424,8 +427,8 @@ export class TermBackend {
 	/** The next frame is the shutdown flush (see {@link flush}). */
 	#flushing = false;
 	/**
-	 * Where the inline viewport stands on screen since the last reset (a replay or a resize; a
-	 * fullscreen frame leaves the normal screen as it was): see {@link Pin}. `#nextPin` is what the frame being presented makes of it.
+	 * Position of the inline viewport on the normal screen. A fullscreen frame leaves it in place.
+	 * See {@link Pin} for the geometry carried across history rebuilds.
 	 */
 	#pin: Pin | undefined;
 	/** Blocks the retirement in the frame being composed moves into history (separators may ask). */
@@ -497,6 +500,7 @@ export class TermBackend {
 		this.#pointerFocused = true;
 		this.#clock.set(Date.now());
 		// Restarted (after a suspend): what the terminal holds is unknown, history is written again.
+		this.#pin = undefined;
 		if (this.#committed.size > 0 || this.#emitted.size > 0) this.#requestReplay();
 		this.#unsubscribe.push(
 			this.#driver.onInput(event => this.#routeInput(event, true)),
@@ -506,7 +510,12 @@ export class TermBackend {
 				this.#textSizing.set(capabilities.textSizing);
 				this.requestRender();
 			}),
-			this.#driver.onReplay(() => {
+			this.#driver.onReplay(cause => {
+				const pin = this.#pin;
+				this.#pin =
+					cause === "resize-rebuild" && pin?.reachedBottom
+						? { ...pin, width: this.#driver.columns, height: this.#driver.rows, bottom: true }
+						: undefined;
 				// A batch still unwritten (a replay included) is prepared again for the new display.
 				this.#replay = true;
 				this.#pending = undefined;
@@ -557,6 +566,14 @@ export class TermBackend {
 		if (this.#committed.has(node) || this.#emitted.has(node) || this.#retiring.has(node)) return true;
 		const pending = this.#pending;
 		return pending !== undefined && (pending.head?.node === node || pending.nodes.includes(node));
+	}
+
+	/** Clear and replay the screen, optionally keeping the dock of the same transcript anchored. */
+	replayHistory(options?: ReplayOptions): void {
+		const pin = this.#pin;
+		this.#driver.resetDisplay();
+		// resetDisplay invalidates this display synchronously; a fresh display starts without a pin.
+		if (options?.preserveDock) this.#pin = pin;
 	}
 
 	/** Whether the driver acknowledged rows of `node`'s own content in history, not only the separator above it. */
@@ -1300,19 +1317,32 @@ export class TermBackend {
 		let free = 0;
 		if (!flush) {
 			const pin = this.#pin;
-			const fresh = !pin || pin.width !== width || pin.height !== height || history?.kind === "replay";
+			const resized = !pin || pin.width !== width || pin.height !== height;
+			const replay = history?.kind === "replay";
+			const fresh = resized || replay;
 			const below = fresh ? 0 : pin.below;
 			const written = history ? history.rows.length : 0;
 			const natural = viewport.length + dockRows;
-			const bottom = (fresh ? false : pin.bottom) || below + written + natural >= height;
+			// An internal replay starts at row zero. Keep a dock that already reached the bottom
+			// there even if the replacement transcript is short. A display reset discards the pin.
+			const pinned = !resized && pin.bottom && (!replay || dockRows > 0);
+			const bottom = pinned || below + written + natural >= height;
 			// History written under a viewport at the bottom scrolls it: the rows it covered shrink by as much.
-			const hold = !fresh && pin.bottom ? Math.min(height, pin.rows - written) : 0;
+			const hold = pinned ? Math.min(height, (replay ? height : pin.rows) - written) : 0;
 			if (bottom && dockRows > 0) while (viewport.length + dockRows < hold) viewport.push("");
 			if (!bottom) free = Math.max(0, height - (below + written) - (viewport.length + dockRows));
 			// The rows from the viewport's top down: a shrunk viewport keeps its top (only a dock pads it down).
 			const held = !fresh && pin.bottom ? Math.min(height, pin.span - written) : 0;
 			const span = Math.max(viewport.length + dockRows, held);
-			this.#nextPin = { width, height, below: below + written, bottom, rows: viewport.length + dockRows, span };
+			this.#nextPin = {
+				width,
+				height,
+				below: below + written,
+				bottom,
+				reachedBottom: (bottom && dockRows > 0) || (pin?.reachedBottom ?? false),
+				rows: viewport.length + dockRows,
+				span,
+			};
 			if (joinedEnd > 0) dropCutImages(viewport, 0, joinedEnd, screenAbove(this.#nextPin, width, height));
 		} else if (joinedEnd > 0) dropCutImages(viewport, 0, joinedEnd);
 		const dockTop = viewport.length;

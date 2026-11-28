@@ -139,7 +139,7 @@ export interface FrameWriterOptions {
 	/** The frame source can answer `replay` invalidations (otherwise resizes never replay). */
 	readonly canReplay?: () => boolean;
 	/** Ask the frame source for a new frame. */
-	readonly onInvalidate?: (request: Invalidation) => void;
+	readonly onInvalidate?: (request: Invalidation, cause?: "resize-rebuild") => void;
 }
 
 function schedule(callback: () => void, ms: number): () => void {
@@ -909,7 +909,7 @@ export class FrameWriter {
 			this.#pendingClear = true;
 			this.#replayAppends = false;
 			this.#stale = false;
-			this.#options.onInvalidate?.(replay ? "replay" : "repaint");
+			this.#options.onInvalidate?.(replay ? "replay" : "repaint", tx.full ? "resize-rebuild" : undefined);
 			return;
 		}
 		this.#replayAppends = replay === "append";
@@ -987,7 +987,7 @@ export class FrameWriter {
 			// coordinates: replay instead of trusting the pulled-down copy.
 			this.#pendingClear = true;
 			this.#replayAppends = false;
-			this.#options.onInvalidate?.("replay");
+			this.#options.onInvalidate?.("replay", "resize-rebuild");
 			return;
 		}
 		const replay = this.#replayAppends;
