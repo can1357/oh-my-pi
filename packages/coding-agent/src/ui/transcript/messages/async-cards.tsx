@@ -12,6 +12,9 @@
  * - `AsyncNotify` (`async-notify`): one `Background job output` /
  *   `Supervised process output` row per reporting source with its first
  *   matching lines under it (natively the notice's body).
+ * - `ProcessWatch` (`process-watch`): one `Looks stalled|failing|up and ready`
+ *   row per running job the judge flagged, its command and last output lines
+ *   beneath, then the host strain the look saw.
  * - `IrcMessageBlock` (`irc:*` custom messages) and `ParentIrcMessage` (a
  *   consumed parent steer): IRC cards; only the former hides with tool activity.
  *
@@ -25,7 +28,7 @@ import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { formatCount, formatDuration } from "@oh-my-pi/pi-utils";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import type { PersistedSnapshot } from "../../../daemon/daemon-types";
-import type { AsyncNotifyDetails } from "../../../session/transcript/messages";
+import type { AsyncNotifyDetails, ProcessWatchNotice } from "../../../session/transcript/messages";
 import { formatArtifactErrorNotice, type OutputMeta } from "../../../tools/output-meta-format";
 import { PREVIEW_LIMITS, TRUNCATE_LENGTHS } from "../../../utils/render-utils";
 import { type IrcMessage, IrcMessageCard } from "../../tools/irc";
@@ -277,6 +280,57 @@ export function asyncNotifyRows(details: AsyncNotifyDetails | undefined): Status
 /** Output running background jobs or services were asked to report (an `async-notify` message). */
 export function AsyncNotify(props: { details?: AsyncNotifyDetails; visible: Reactive<boolean> }): JSXNode {
 	return <ActivityRows rows={asyncNotifyRows(props.details)} visible={props.visible} />;
+}
+
+// ─── process-watch ────────────────────────────────────────────────────────────
+
+const PROCESS_WATCH_VERDICTS = {
+	stalled: { label: "Looks stalled", tone: "warning", symbol: "status.warning" },
+	failing: { label: "Looks failing", tone: "error", symbol: "status.error" },
+	ready: { label: "Looks up and ready", tone: "info", symbol: "status.info" },
+} as const;
+
+/** Rows of a `process-watch` message: a verdict head per flagged job, its command and last output beneath. */
+export function processWatchRows(details: ProcessWatchNotice | undefined): StatusRow[] {
+	const symbols = currentTheme().symbols;
+	const rows: StatusRow[] = [];
+	const body = (line: string): StatusRow => {
+		const shown = replaceTabs(line);
+		return {
+			parts: [{ text: truncate(shown, TRUNCATE_LENGTHS.LINE), color: "dim" }],
+			indent: 3,
+			native: { tone: "info", body: true, message: [{ t: shown, s: "mono" }] },
+		};
+	};
+	for (const job of details?.jobs ?? []) {
+		const { label, tone, symbol } = PROCESS_WATCH_VERDICTS[job.verdict];
+		const age = `running ${formatDuration(job.ageMs)}`;
+		const quiet = job.quietMs === undefined ? undefined : `quiet ${formatDuration(job.quietMs)}`;
+		rows.push({
+			parts: [
+				{ text: `${symbols.symbol(symbol)} ${label}`, color: tone === "info" ? "accent" : tone },
+				{ text: job.jobId, color: "accent" },
+				{ text: `(${quiet ? `${age}, ${quiet}` : age})`, color: "dim" },
+			],
+			native: { tone, message: [{ t: label }, ...statusFacts([job.jobId, age, quiet])] },
+		});
+		rows.push(body(job.command));
+		for (const line of job.lastOutput?.split("\n") ?? []) rows.push(body(line));
+	}
+	if (details?.hostStrain && details.hostStrain.length > 0) {
+		const strain = `Host shows ${details.hostStrain.join(", ")}`;
+		rows.push({
+			parts: [{ text: strain, color: "warning" }],
+			indent: 3,
+			native: { tone: "warning", message: [{ t: strain }] },
+		});
+	}
+	return rows;
+}
+
+/** Running background jobs the process-watch judge flagged (a `process-watch` message). */
+export function ProcessWatch(props: { details?: ProcessWatchNotice; visible: Reactive<boolean> }): JSXNode {
+	return <ActivityRows rows={processWatchRows(props.details)} visible={props.visible} />;
 }
 
 // ─── IRC ──────────────────────────────────────────────────────────────────────

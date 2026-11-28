@@ -28,6 +28,8 @@ import {
 	ASYNC_NOTIFY_MESSAGE_TYPE,
 	type AsyncNotifyDetails,
 	type CustomMessage,
+	PROCESS_WATCH_MESSAGE_TYPE,
+	type ProcessWatchNotice,
 } from "../../session/transcript/messages";
 import { imageContent, textContent } from "../../session/transcript/transcript-entry";
 import { extensionTheme, isCompactOutput, renderExtension } from "../../ui/extensions/render-output";
@@ -41,6 +43,7 @@ import {
 	LaunchCompletion,
 	type LaunchCompletionDetails,
 	ParentIrcMessage,
+	ProcessWatch,
 } from "../../ui/transcript/messages/async-cards";
 import { FileMentions } from "../../ui/transcript/messages/file-mention";
 import { CustomMessageBlock, type FrameRenderer, HookMessageBlock } from "../../ui/transcript/messages/frame";
@@ -173,6 +176,10 @@ function customFace(message: CustomOrHookMessage, env: MessageFaceEnv): MessageF
 	if (customType === ASYNC_NOTIFY_MESSAGE_TYPE) {
 		const details = (message as CustomMessage<AsyncNotifyDetails>).details;
 		return { face: () => <AsyncNotify details={details} visible={env.activityVisible} />, presented: message };
+	}
+	if (customType === PROCESS_WATCH_MESSAGE_TYPE) {
+		const details = (message as CustomMessage<ProcessWatchNotice>).details;
+		return { face: () => <ProcessWatch details={details} visible={env.activityVisible} />, presented: message };
 	}
 	if (customType === COLLAB_PROMPT_MESSAGE_TYPE) {
 		const prompt = message as CustomMessage<{ from?: string }>;

@@ -69,6 +69,34 @@ describe("AsyncJobManager", () => {
 		expect(manager.getJob(jobId)?.status).toBe("completed");
 	});
 
+	test("counts a subagent progress report as new output even when its status line repeats", async () => {
+		const manager = new AsyncJobManager({ onJobComplete: async () => {} });
+		const gate = Promise.withResolvers<void>();
+		let report: ((text: string, details?: Record<string, unknown>) => Promise<void>) | undefined;
+		const jobId = manager.register("task", "agent a", async ({ reportProgress }) => {
+			report = reportProgress;
+			await gate.promise;
+			return "done";
+		});
+		await waitForCondition(() => report !== undefined);
+		let now = 1_000;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+
+		await report!("Running agent a...", { progress: [{ id: "a", toolCount: 1 }] });
+		expect(manager.getJob(jobId)?.lastProgressAt).toBe(1_000);
+		now = 5_000;
+		await report!("Running agent a...", { progress: [{ id: "a", toolCount: 2 }] });
+		expect(manager.getJob(jobId)?.lastProgressAt).toBe(5_000);
+		// A bash job re-reporting its unchanged tail is not new output.
+		now = 9_000;
+		await report!("Running agent a...", { async: { state: "running" } });
+		expect(manager.getJob(jobId)?.lastProgressAt).toBe(5_000);
+
+		vi.restoreAllMocks();
+		gate.resolve();
+		await manager.waitForAll();
+	});
+
 	test("swallows progress callback errors without failing the job", async () => {
 		const completions: Array<{ jobId: string; text: string }> = [];
 		const manager = new AsyncJobManager({

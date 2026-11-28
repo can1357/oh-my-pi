@@ -1,8 +1,11 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
-import { afterAll, setSystemTime } from "bun:test";
+import { afterAll, expect, setSystemTime, test } from "bun:test";
 import { signal } from "@oh-my-pi/pi-tui";
+import { paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
+import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import "../../../../src/ui/styles/tools/irc";
-import type { AsyncNotifyDetails } from "../../../../src/session/transcript/messages";
+import type { AsyncNotifyDetails, ProcessWatchNotice } from "../../../../src/session/transcript/messages";
 import { extensionOutput } from "../../../../src/ui/extensions/render-output";
 import {
 	AsyncNotify,
@@ -11,6 +14,8 @@ import {
 	LaunchCompletion,
 	type LaunchCompletionDetails,
 	ParentIrcMessage,
+	ProcessWatch,
+	processWatchRows,
 } from "../../../../src/ui/transcript/messages/async-cards";
 import type { FramedMessage, FrameRenderer } from "../../../../src/ui/transcript/messages/frame";
 import { region, screenSuite, single } from "./harness";
@@ -131,4 +136,28 @@ screenSuite("parent-irc", corpusCase => {
 		),
 		apply: t.apply,
 	};
+});
+
+test("a process-watch notice draws one row per flagged job with its command and output beneath", () => {
+	const details: ProcessWatchNotice = {
+		jobs: [
+			{
+				jobId: "bg_7",
+				command: "npm install",
+				ageMs: 120_000,
+				quietMs: 90_000,
+				lastOutput: "fetching metadata\nretrying registry",
+				verdict: "stalled",
+			},
+		],
+		hostStrain: ["memory pressure"],
+	};
+	const node = single(<ProcessWatch details={details} visible={signal(true)} />);
+	const terminal = paintNode(staticEnvironment(currentTheme()), node, 120).rows.map(stripEscapes).join("\n");
+	expect(terminal).toContain("Looks stalled bg_7");
+	expect(terminal).toContain("npm install");
+	expect(terminal).toContain("retrying registry");
+	expect(terminal).toContain("Host shows memory pressure");
+	// The job row and the host row are notices; the command and output are the job row's body.
+	expect(processWatchRows(details).filter(row => !row.native.body)).toHaveLength(2);
 });
