@@ -210,11 +210,17 @@ function paintEditorRow(theme: Theme, text: string, row: EditorRow, caret: numbe
 }
 
 /** Add an editor, returning the row after its caret for viewport anchoring. */
-function appendWrappedEditorRows(lines: string[], theme: Theme, line: LineState, width: number): number {
+function appendWrappedEditorRows(
+	lines: string[],
+	theme: Theme,
+	line: LineState,
+	width: number,
+	layouts: TextareaLayouts,
+): number {
 	const { text, cursor } = line;
 	const indent = Math.min(4, Math.max(0, width - 3));
 	const gutter = spaces(indent);
-	const rows = layoutText(text, editorWrapWidth(width, indent));
+	const rows = textareaRows(layouts, text, editorWrapWidth(width, indent));
 	const caretRow = rowOf(rows, cursor);
 	const focusEnd = lines.length + caretRow + 1;
 	for (let i = 0; i < rows.length; i++) {
@@ -352,6 +358,7 @@ function optionRows(
 	view: View,
 	width: number,
 	column: Column,
+	layouts: TextareaLayouts,
 ): void {
 	const answer = model.answer(index);
 	const rows = model.rows(index);
@@ -411,7 +418,7 @@ function optionRows(
 		if (view.note && view.note.field === index && view.note.option === row) {
 			const label = flattenLine(spansText(field.options[row]!.label));
 			lines.push(clip(`    ${theme.fg("muted", `Note for ${label} · ${noteEditHint(model)}`)}`, width));
-			column.focusEnd = appendWrappedEditorRows(lines, theme, view.note, width);
+			column.focusEnd = appendWrappedEditorRows(lines, theme, view.note, width, layouts);
 		}
 	}
 }
@@ -491,7 +498,7 @@ function openFieldLines(
 	column.focusStart = lines.length;
 	if (field.kind === "choice" && !isDropdown(field)) {
 		if (field.label.length > 0) lines.push(labelLine(theme, model, field, view, width));
-		optionRows(theme, model, index, field, view, width, column);
+		optionRows(theme, model, index, field, view, width, column, layouts);
 	} else if (field.kind === "choice") {
 		lines.push(labelLine(theme, model, field, view, width));
 		const chosen = [...model.answer(index).checked][0] ?? 0;
@@ -505,7 +512,7 @@ function openFieldLines(
 		if (view.note && view.note.field === index) {
 			const label = flattenLine(spansText(field.options[view.note.option]!.label));
 			const rows = [clip(`    ${theme.fg("muted", `Note for ${label} · ${noteEditHint(model)}`)}`, width)];
-			column.focusEnd = lines.length + appendWrappedEditorRows(rows, theme, view.note, width);
+			column.focusEnd = lines.length + appendWrappedEditorRows(rows, theme, view.note, width, layouts);
 			column.overlay = { at: lines.length, rows };
 		} else if (view.dropdown !== undefined) column.overlay = { at: lines.length, rows: [] };
 	} else {

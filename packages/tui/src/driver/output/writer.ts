@@ -645,9 +645,10 @@ export class FrameWriter {
 			// original identity of rows whose cut image was replaced, not the replacement's bytes.
 			let same = 0;
 			while (same < past.length && same < this.#pushed.length) {
+				// The pushed copy is the original row, or already the cut one when the viewport had cut it.
+				const pushed = this.#pushed[same];
 				const original = history?.originalRows?.[same];
-				const row = original === undefined ? past[same] : normalizeRow(original, width);
-				if (row !== this.#pushed[same]) break;
+				if (past[same] !== pushed && (original === undefined || normalizeRow(original, width) !== pushed)) break;
 				same++;
 			}
 			this.#pushed = same === past.length ? this.#pushed.slice(same) : [];

@@ -1049,33 +1049,41 @@ describe("final look", () => {
 		expect(tokens.filter(token => token === "word").length).toBe(42);
 	});
 
-	it("preserve: skips an image draw row a height shrink pushed when the cut image retires", async () => {
-		defineRolePainter("rows", "test.resize-cut-image", node => {
-			const props = node.props() as { lines: readonly string[] };
-			return { rows: props.lines, stable: 3 };
-		});
-		const image = anchoredRows("\x1b]1337;File=inline=1;width=2;height=3:AA==\x07", 3);
-		const driver = new VtDriver({ rows: 8, columns: 20, resizeScrollback: "preserve" });
-		const { surface, backend } = mount(
-			driver,
-			() => <rows key="reply" role="test.resize-cut-image" lines={["h0", "h1", ...image, "t0", "t1", "t2", "t3"]} />,
-			{ dock: () => <rows key="dock" lines={["dock"]} /> },
-		);
-		try {
-			// The image's first row is in history but still on screen, so its live draw row is intact.
-			expect(driver.vt.transcript()).toEqual(["h0", "h1", "", "", "", "t0", "t1", "t2", "t3", "dock"]);
-			// The shrink pushes the live reserved row and draw row into native scrollback.
-			driver.resize(20, 5);
-			backend.renderNow();
-			await driver.vt.settle();
-			backend.renderNow();
-			// Their retirement now cuts the image, but must not write the pushed rows again.
-			settle(surface.main()[0]!);
-			backend.renderNow();
-			expect(driver.vt.transcript()).toEqual(["h0", "h1", "", "", "", "t0", "t1", "t2", "t3", "dock"]);
-		} finally {
-			backend.stop();
-			await driver.stop();
-		}
-	});
+	// Before the shrink the viewport holds the image's draw row intact (its first row is still on
+	// screen), or already cut (that row scrolled off): either way the pushed rows are not written twice.
+	it.each([
+		{ live: "intact", rows: 8, shrunk: 5, tail: ["t0", "t1", "t2", "t3"] },
+		{ live: "cut", rows: 6, shrunk: 4, tail: ["t0", "t1", "t2"] },
+	])(
+		"preserve: skips an image draw row a height shrink pushed when the cut image retires ($live)",
+		async ({ rows, shrunk, tail }) => {
+			defineRolePainter("rows", "test.resize-cut-image", node => {
+				const props = node.props() as { lines: readonly string[] };
+				return { rows: props.lines, stable: 3 };
+			});
+			const image = anchoredRows("\x1b]1337;File=inline=1;width=2;height=3:AA==\x07", 3);
+			const driver = new VtDriver({ rows, columns: 20, resizeScrollback: "preserve" });
+			const { surface, backend } = mount(
+				driver,
+				() => <rows key="reply" role="test.resize-cut-image" lines={["h0", "h1", ...image, ...tail]} />,
+				{ dock: () => <rows key="dock" lines={["dock"]} /> },
+			);
+			const transcript = ["h0", "h1", "", "", "", ...tail, "dock"];
+			try {
+				expect(driver.vt.transcript()).toEqual(transcript);
+				// The shrink pushes the live reserved row and draw row into native scrollback.
+				driver.resize(20, shrunk);
+				backend.renderNow();
+				await driver.vt.settle();
+				backend.renderNow();
+				// Their retirement cuts the image, but must not write the pushed rows again.
+				settle(surface.main()[0]!);
+				backend.renderNow();
+				expect(driver.vt.transcript()).toEqual(transcript);
+			} finally {
+				backend.stop();
+				await driver.stop();
+			}
+		},
+	);
 });

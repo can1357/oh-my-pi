@@ -132,6 +132,7 @@
 
 ### Fixed
 
+- Background job results delivered while the agent is idle are freed once delivered, not kept in memory until the whole turn they started ends ([#20886](https://github.com/can1357/oh-my-pi/pull/20886) by [@sjawhar](https://github.com/sjawhar))
 - Kept the prompt at the bottom when `/compact` shortens a long session or a cancelled submission restores the draft and rebuilds the same transcript ([#20912](https://github.com/can1357/oh-my-pi/pull/20912) by [@thebtf](https://github.com/thebtf))
 - `/resume` into a session without subagents no longer keeps showing the previous session's subagents above the composer
 - Fixed stealth injection registry to preserve native function source strings across frames
