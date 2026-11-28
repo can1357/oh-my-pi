@@ -7,9 +7,10 @@
  *   a dotted box instead (an optional label at the right of its top edge),
  *   its trailing blank rows left below the box.
  * - The body scrolls just far enough to show the outline, with context when
- *   it fits. A taller outline keeps the window within the selected turn;
- *   the wheel scrolls three rows a notch. A scrollbar takes the last column
- *   while the body overflows.
+ *   it fits. A taller outline keeps the window within the selected turn:
+ *   reached from above (and at open) it shows its end, from below its top,
+ *   and the wheel scrolls three rows a notch up to its edges. A scrollbar
+ *   takes the last column while the body overflows.
  */
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import type { Block, PaintContext } from "@oh-my-pi/pi-tui/term/paint";
@@ -105,10 +106,15 @@ function bodyWindow(node: UiNode, cx: PaintContext, body: Lane, width: number, h
 	if (body.outline) {
 		const [top, bottom] = body.outline;
 		const tail = bottom - height;
-		// A tall outline contains the window; a short outline fits inside it.
 		if (top < tail) {
-			start = Math.max(top, Math.min(start, tail));
+			// A tall outline contains the window. The wheel stops at its edges; a
+			// window left outside it by a selection change lands on the far edge,
+			// so moving down opens a turn on its end and moving up on its top.
+			const wheeled = wheel !== last.wheel;
+			if (start < top) start = wheeled ? top : tail;
+			else if (start > tail) start = wheeled ? tail : top;
 		} else {
+			// A short outline fits inside the window with context around it.
 			const context = Math.min(OUTLINE_CONTEXT, Math.floor((top - tail) / 2));
 			start = Math.max(tail + context, Math.min(start, top - context));
 		}

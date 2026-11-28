@@ -92,15 +92,18 @@ test("a long selected turn stays in place when the rewind filter opens and close
 			const body = () => stripEscapes(paintNode(env, node!, 100).rows.slice(3, -2).join("\n"));
 			const press = (raw: string) => expect(bubbleKey([node!], keyFromRaw(raw))).toBe(true);
 
+			// The latest turn opens on its end, and redraws without a selection change keep it there.
 			const latest = body();
-			expect(latest).toContain("latest line");
+			expect(latest).toContain("latest line 39");
+			expect(latest).not.toMatch(/latest line 0\b/);
 			press("f");
 			expect(body()).toBe(latest);
 			press("\x1b");
 			expect(body()).toBe(latest);
 
+			// Moving up opens the earlier turn on its top; moving back down restores the latest turn's end.
 			press("\x1b[A");
-			expect(body()).toContain("earlier line");
+			expect(body()).toContain("earlier line 0");
 			press("\x1b[B");
 			expect(body()).toBe(latest);
 		} finally {
