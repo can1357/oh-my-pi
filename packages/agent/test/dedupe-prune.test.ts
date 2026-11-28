@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
 import { type AgentMessage, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import {
 	dedupedNotice,
@@ -10,6 +11,7 @@ import {
 	type SessionMessageEntry,
 	type SupersedePruneConfig,
 } from "@oh-my-pi/pi-agent-core/compaction";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core/types";
 import type { AssistantMessage, TextContent, ToolCall, ToolResultMessage } from "@oh-my-pi/pi-ai";
 
 const tokenizer = new Tokenizer();
@@ -93,6 +95,23 @@ function dedupe(entries: SessionEntry[], over: Partial<SupersedePruneConfig> = {
 
 const GIT_STATUS = { command: "git status" };
 
+function agentTool(name: string, parameters: AgentTool["parameters"]): AgentTool {
+	return {
+		name,
+		label: name,
+		description: name,
+		parameters,
+		async execute() {
+			return { content: [] };
+		},
+	};
+}
+
+/** A tool whose schema does not declare `i`: a top-level `i` on its calls is harness intent. */
+const GREP_TOOL = agentTool("grep", type({ pattern: "string", path: "string" }));
+/** An MCP-style tool whose own schema declares `i` (a page index): `i` is a real input. */
+const PAGE_TOOL = agentTool("mcp__docs__page", type({ doc: "string", i: "string" }));
+
 describe("pruneSupersededToolResults: identical-result dedupe", () => {
 	test("blanks the older copy of an identical result from a later turn", () => {
 		const [olderCall, older] = turn("bash", GIT_STATUS, STATUS_OUTPUT, T0);
@@ -108,13 +127,52 @@ describe("pruneSupersededToolResults: identical-result dedupe", () => {
 		expect(prunedAt(newer)).toBeUndefined();
 	});
 
-	test("argument key order and intent do not split a call's identity", () => {
+	test("argument key order and harness intent do not split a call's identity", () => {
 		const first = turn("grep", { pattern: "foo", path: "src", i: "look for foo" }, STATUS_OUTPUT, T0);
 		const second = turn("grep", { path: "src", pattern: "foo", i: "again" }, STATUS_OUTPUT, T0 + 1_000);
 
-		expect(dedupe([...first, ...second]).prunedCount).toBe(1);
+		expect(dedupe([...first, ...second], { tools: [GREP_TOOL] }).prunedCount).toBe(1);
 		expect(text(first[1])).toBe(dedupedNotice("grep"));
 		expect(text(second[1])).toBe(STATUS_OUTPUT);
+	});
+
+	test("a schema-owned `i` is a real input: calls differing only in it are never deduped", () => {
+		const first = turn("mcp__docs__page", { doc: "guide", i: "intro" }, STATUS_OUTPUT, T0);
+		const second = turn("mcp__docs__page", { doc: "guide", i: "setup" }, STATUS_OUTPUT, T0 + 1_000);
+
+		expect(dedupe([...first, ...second], { tools: [GREP_TOOL, PAGE_TOOL] }).prunedCount).toBe(0);
+		expect(text(first[1])).toBe(STATUS_OUTPUT);
+		expect(text(second[1])).toBe(STATUS_OUTPUT);
+	});
+
+	test("a schema-owned `i` still dedupes when it repeats", () => {
+		const first = turn("mcp__docs__page", { doc: "guide", i: "intro" }, STATUS_OUTPUT, T0);
+		const second = turn("mcp__docs__page", { i: "intro", doc: "guide" }, STATUS_OUTPUT, T0 + 1_000);
+
+		expect(dedupe([...first, ...second], { tools: [PAGE_TOOL] }).prunedCount).toBe(1);
+		expect(text(first[1])).toBe(dedupedNotice("mcp__docs__page"));
+	});
+
+	test("without the tool's schema a differing `i` keeps both copies", () => {
+		const first = turn("grep", { pattern: "foo", path: "src", i: "look for foo" }, STATUS_OUTPUT, T0);
+		const second = turn("grep", { pattern: "foo", path: "src", i: "again" }, STATUS_OUTPUT, T0 + 1_000);
+
+		expect(dedupe([...first, ...second]).prunedCount).toBe(0);
+		expect(dedupe([...first, ...second], { tools: [PAGE_TOOL] }).prunedCount).toBe(0);
+		expect(text(first[1])).toBe(STATUS_OUTPUT);
+	});
+
+	test("a nested `i` is tool data even when the top-level `i` is harness intent", () => {
+		const first = turn("grep", { pattern: "foo", path: "src", opts: { i: 1 }, i: "look" }, STATUS_OUTPUT, T0);
+		const second = turn(
+			"grep",
+			{ pattern: "foo", path: "src", opts: { i: 2 }, i: "look" },
+			STATUS_OUTPUT,
+			T0 + 1_000,
+		);
+
+		expect(dedupe([...first, ...second], { tools: [GREP_TOOL] }).prunedCount).toBe(0);
+		expect(text(first[1])).toBe(STATUS_OUTPUT);
 	});
 
 	test("different arguments are never deduped, even with identical output", () => {

@@ -2,9 +2,12 @@
  * Tool output pruning utilities for compaction.
  */
 
-import { canonicalizeToolCallValue, type ToolResultMessage } from "@oh-my-pi/pi-ai";
+import { type ToolResultMessage, toolWireSchema } from "@oh-my-pi/pi-ai";
+import { schemaDefinesProperty } from "@oh-my-pi/pi-ai/utils/schema/json-schema-validator";
+import { stableStringifyJson } from "@oh-my-pi/pi-utils";
+import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type { Tokenizer } from "../tokenizer";
-import type { AgentMessage, AgentToolCall } from "../types";
+import type { AgentMessage, AgentTool, AgentToolCall } from "../types";
 import type { SessionEntry, SessionMessageEntry } from "./entries";
 import { invalidateMessageCache } from "./message-cache";
 import { type ConvertToLlm, defaultConvertToLlm, getMessageFromEntry } from "./messages";
@@ -165,11 +168,19 @@ export interface SupersedePruneConfig extends CacheLookbackConfig {
 	/** Also prune results flagged useless by their tool. Default false. */
 	pruneUseless?: boolean;
 	/**
-	 * Also prune an older successful result whose call (tool name + canonical
-	 * arguments) and content are identical to a newer successful result issued
-	 * by a later assistant turn (see {@link collectDuplicateResults}). Default false.
+	 * Also prune an older successful result whose call (tool name + arguments,
+	 * harness intent aside) and content are identical to a newer successful
+	 * result issued by a later assistant turn (see {@link collectDuplicateResults}).
+	 * Default false.
 	 */
 	dedupeIdentical?: boolean;
+	/**
+	 * The session's tools, which tell the dedupe pass whether a call's top-level
+	 * `i` is harness intent (dropped from its identity) or a tool input its
+	 * schema owns (kept). Absent, or for a call whose tool is not listed, `i` is
+	 * kept: that can only miss a dedupe, never merge distinct calls.
+	 */
+	tools?: readonly AgentTool[];
 	/**
 	 * Prune a candidate now when all messages after it total at most this many
 	 * estimated tokens and it sits within
@@ -464,8 +475,8 @@ export const MIN_DEDUPE_TOKENS = MIN_PRUNE_TOKENS;
 
 /**
  * Collect older copies of repeated tool results. A result is a duplicate when
- * a NEWER result shares its tool name, canonical arguments
- * ({@link canonicalizeToolCallValue}) and byte-identical content blocks (text
+ * a NEWER result shares its tool name, call arguments (object keys sorted,
+ * harness intent dropped, see below) and byte-identical content blocks (text
  * and images, as the model sees them), and that newer result came from a later
  * assistant turn: parallel duplicates within one turn are left alone. Only
  * unpruned, non-error results at/after `start` and not in `exclude` qualify,
@@ -475,6 +486,13 @@ export const MIN_DEDUPE_TOKENS = MIN_PRUNE_TOKENS;
  * ({@link isArtifactRecoveryToolResult}) may serve as the reference but are
  * never blanked. The newest copy of every group always survives. Returned in
  * message order.
+ *
+ * A top-level `i` is dropped from the identity only when it is harness intent:
+ * the call's tool is in `tools` and its schema does not own `i`, the rule the
+ * agent loop applies when splitting intent from tool arguments. A schema-owned
+ * `i` (an MCP server may declare one) is a real input, and two calls that
+ * differ in it are different calls. Unlisted tools keep `i` too, and nested
+ * `i` keys are never harness intent.
  */
 function collectDuplicateResults(
 	entries: readonly SessionEntry[],
@@ -483,6 +501,7 @@ function collectDuplicateResults(
 	toolCalls: SentToolCalls,
 	protectedTools: readonly ProtectedToolMatcher[],
 	exclude: ReadonlySet<ToolResultMessage>,
+	tools: readonly AgentTool[] | undefined,
 ): SupersedeCandidate[] {
 	interface Occurrence {
 		index: number;
@@ -516,16 +535,31 @@ function collectDuplicateResults(
 		bucket.push({ index: i, message, toolCall, turn });
 	}
 
+	// Whether the named tool's schema owns `i`; an unlisted tool counts as owning it.
+	const ownsIntent = new Map<string, boolean>();
+	const keepsIntent = (toolName: string): boolean => {
+		let owns = ownsIntent.get(toolName);
+		if (owns === undefined) {
+			const tool = tools?.find(t => t.name === toolName) ?? tools?.find(t => t.customWireName === toolName);
+			owns = tool === undefined || schemaDefinesProperty(toolWireSchema(tool), INTENT_FIELD);
+			ownsIntent.set(toolName, owns);
+		}
+		return owns;
+	};
+
 	const candidates: SupersedeCandidate[] = [];
 	for (const bucket of byShape.values()) {
 		if (bucket.length < 2) continue;
-		// Exact identity inside the bucket: canonical call plus serialized content.
+		// Exact identity inside the bucket: call arguments plus content.
 		const byIdentity = new Map<string, Occurrence[]>();
 		for (const occurrence of bucket) {
-			const identity = JSON.stringify([
-				canonicalizeToolCallValue(occurrence.toolCall.arguments),
-				occurrence.message.content,
-			]);
+			const { toolCall } = occurrence;
+			let args = toolCall.arguments;
+			if (Object.hasOwn(args, INTENT_FIELD) && !keepsIntent(toolCall.name)) {
+				const { [INTENT_FIELD]: _intent, ...rest } = args;
+				args = rest;
+			}
+			const identity = stableStringifyJson([args, occurrence.message.content]);
 			let group = byIdentity.get(identity);
 			if (!group) {
 				group = [];
@@ -634,6 +668,7 @@ export function pruneSupersededToolResults(
 			toolCalls,
 			config.protectedTools,
 			exclude,
+			config.tools,
 		)) {
 			candidates.push(candidate);
 		}

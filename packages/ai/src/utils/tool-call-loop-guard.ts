@@ -45,12 +45,7 @@ export interface RepeatedToolCallDetection {
 	readonly argumentsSummary: string;
 }
 
-/**
- * Canonical form of tool-call arguments: object keys sorted recursively and the
- * model-authored intent field dropped, so `JSON.stringify` of the result is
- * equal for calls that differ only in key order or stated intent.
- */
-export function canonicalizeToolCallValue(value: unknown): unknown {
+function canonicalizeToolCallValue(value: unknown): unknown {
 	if (Array.isArray(value)) {
 		return value.map(item => canonicalizeToolCallValue(item));
 	}
