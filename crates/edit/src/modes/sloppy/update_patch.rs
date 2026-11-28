@@ -102,6 +102,12 @@ pub(super) fn inspect(input: &str, parsed: EditResult<Vec<Update<'_>>>) -> Inspe
 			digest.push_str(row);
 		}
 		inspection.entries.push((update.path.to_owned(), digest));
+		let mut section = format!("{UPDATE}{}", update.path);
+		for row in &update.rows {
+			section.push('\n');
+			section.push_str(row);
+		}
+		crate::modes::push_section(&mut inspection.sections, update.path, &section);
 	}
 	inspection
 }

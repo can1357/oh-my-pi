@@ -1311,6 +1311,16 @@ export interface AgentTool<
 	 */
 	matcherEntries?: (args: unknown) => readonly { path: string; digest: string }[] | undefined;
 
+	/**
+	 * Each touched file paired with its section of a multi-file payload, wire
+	 * grammar kept: what the call removes from that file, whether it deletes or
+	 * moves it (a move destination shares its source's section), and nothing
+	 * about the payload's other files. Pre-execution TTSR gates judge each one
+	 * under that file alone. Returns `undefined` (or empty) when the whole
+	 * payload is about one file.
+	 */
+	matcherSections?: (args: unknown) => readonly { path: string; text: string }[] | undefined;
+
 	/** Capability tier declaration used by approval gates. Omitted means "exec". */
 	approval?: ToolApproval;
 

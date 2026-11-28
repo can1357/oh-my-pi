@@ -19,7 +19,6 @@ pub mod tokenizer;
 pub mod types;
 
 use self::{
-	format::is_snapshot_tag,
 	input::{Patch, SplitOptions},
 	types::FileOp,
 };
@@ -27,7 +26,6 @@ use crate::{
 	engine::{EditMode, FileOpIntent, Inspection, ModeEngine, PreviewFile, StagedFile},
 	error::EditError,
 	files::FileSource,
-	scan,
 	store::EditStore,
 	stream_json::ArgSnapshot,
 };
@@ -92,78 +90,16 @@ impl ModeEngine for HashlineEngine {
 	}
 }
 
-/// Strip an `apply_patch` label such as `*** Update File:` from a path.
-fn strip_path_noise(value: &str) -> String {
-	let value = value.trim_start();
-	let path = value.strip_prefix("***").and_then(|rest| {
-		let rest = rest.trim_start();
-		let (action, target) = match rest.as_bytes().first()?.to_ascii_lowercase() {
-			b'a' => ("add", "file"),
-			b'u' => ("update", "file"),
-			b'd' => ("delete", "file"),
-			b'm' => ("move", "to"),
-			_ => return None,
-		};
-		let rest = scan::keyword(rest, action)?;
-		let rest = scan::keyword(scan::space(rest)?, target)?;
-		rest.trim_start().strip_prefix(':')
-	});
-	path.unwrap_or(value).trim().to_owned()
-}
-
-/// Find bracketed path rows and their full spans in a patch preview.
-fn header_parts(input: &str) -> Vec<(String, usize, usize)> {
-	let mut headers = Vec::new();
-	let mut search = input;
-	while !search.is_empty() {
-		let row = search.trim_start();
-		let (line, next) = row.split_once('\n').unwrap_or((row, ""));
-		let Some((inner, _)) = line
-			.strip_prefix('[')
-			.and_then(|line| line.split_once(']'))
-			.filter(|(inner, after)| {
-				!inner.is_empty() && !inner.contains('\r') && after.trim_start().is_empty()
-			})
-		else {
-			search = next;
-			continue;
-		};
-		let start = input.len() - search.len();
-		let tail = &row[line.len()..];
-		let nonblank = tail.trim_start();
-		let end = if nonblank.is_empty() {
-			input.len()
-		} else {
-			// Trailing blank rows belong to the header only up to a row ending.
-			let whitespace = &tail[..tail.len() - nonblank.len()];
-			input.len() - tail.len() + whitespace.rfind('\n').expect("row break")
-		};
-		let inner = inner
-			.rsplit_once('#')
-			.filter(|(_, tag)| is_snapshot_tag(tag))
-			.map_or(inner, |(path, _)| path);
-		let path = strip_path_noise(inner);
-		if !path.is_empty() {
-			headers.push((path, start, end));
-		}
-		// After a blank row, the closing boundary can also start the next row.
-		search = if end == input.len() || input.as_bytes()[end - 1] == b'\n' {
-			&input[end..]
-		} else {
-			&input[end + 1..]
-		};
-	}
-	headers
-}
-
 fn inspect_input(input: &str) -> Inspection {
-	let headers = header_parts(input);
+	let (headers, patch_end) = input::header_spans(input);
 	let paths = headers.iter().map(|(path, ..)| path.clone()).collect();
 	let mut entries = Vec::<(String, String)>::new();
-	for (index, (path, _, body_start)) in headers.iter().enumerate() {
+	let mut sections = Vec::new();
+	for (index, (path, start, body_start)) in headers.iter().enumerate() {
 		let body_end = headers
 			.get(index + 1)
-			.map_or(input.len(), |(_, start, _)| *start);
+			.map_or(patch_end, |(_, start, _)| *start);
+		super::push_section(&mut sections, path, input[*start..body_end].trim());
 		let digest = super::added_lines(input[*body_start..body_end].lines()).unwrap_or_default();
 		if digest.is_empty() {
 			continue;
@@ -187,7 +123,8 @@ fn inspect_input(input: &str) -> Inspection {
 			}
 		}
 	}
-	Inspection { paths, entries, file_ops }
+	super::pair_move_destinations(&mut sections, &file_ops);
+	Inspection { paths, entries, file_ops, sections }
 }
 
 #[cfg(test)]
@@ -200,5 +137,18 @@ mod tests {
 			inspect_input("[*** Update File: src/a.ts#ABCD]\nPUT 1.=1:\n+new\n[src/b.ts]\nCUT 2.=2");
 		assert_eq!(inspected.paths, ["src/a.ts", "src/b.ts"]);
 		assert_eq!(inspected.entries, [("src/a.ts".into(), "new".into())]);
+		assert_eq!(inspected.sections, [
+			("src/a.ts".into(), "[*** Update File: src/a.ts#ABCD]\nPUT 1.=1:\n+new".into()),
+			("src/b.ts".into(), "[src/b.ts]\nCUT 2.=2".into()),
+		]);
+	}
+
+	#[test]
+	fn an_indented_bracket_row_stays_in_its_file_section() {
+		let input = "[settings.toml#ABCD]\nPUT 3.=3:\n+[server]\n  [server.auth]\n+token = \"x\"";
+		let inspected = inspect_input(input);
+		assert_eq!(inspected.paths, ["settings.toml"]);
+		assert_eq!(inspected.entries, [("settings.toml".into(), "[server]\ntoken = \"x\"".into())]);
+		assert_eq!(inspected.sections, [("settings.toml".into(), input.into())]);
 	}
 }

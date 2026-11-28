@@ -41,6 +41,8 @@ interface Rule {
 	condition?: string[];
 	astCondition?: string[];
 	question?: string;
+	gate?: "before";
+	onJudgeError?: "block" | "allow";
 	scope?: string[];
 	agents?: string[];
 	interruptMode?: "never" | "prose-only" | "tool-only" | "always";
@@ -146,7 +148,7 @@ After rule discovery in `createAgentSession` (`sdk.ts`), `bucketRules(...)` appl
 1. Drop rules listed in `ttsr.disabledRules`.
 2. Drop rules from the `builtin-defaults` provider when `ttsr.builtinRules === false`.
 3. Drop rules whose `agents` globs do not match the session's agent name (`main` for a top-level session, otherwise the agent definition name); rules without `agents` apply to every agent.
-4. Register rules with a non-empty `condition`, `astCondition`, or `question` into `TtsrManager`; if registration succeeds, the rule is TTSR-only.
+4. Register rules with a non-empty `condition`, `astCondition`, or `question`, or a `gate`, into `TtsrManager`; if registration succeeds, the rule is TTSR-only. A gate without a `question` is refused with a warning and falls through to the next steps.
 5. Put remaining `alwaysApply === true` rules into `alwaysApplyRules`.
 6. Put remaining rules with `description` into `rulebookRules`.
 
@@ -208,6 +210,15 @@ After rule discovery in `createAgentSession` (`sdk.ts`), `bucketRules(...)` appl
    ```yaml
    question: "Does the reply claim tests pass without showing they were run?"
    scope: text
+   ```
+
+- `gate: before` turns a `question` rule into a **gate**: the question is asked about each in-scope tool call before it runs, and a yes refuses the call instead of warning after it. Gates judge tool calls only (no `scope` means every tool call) and ignore `repeatMode`/`interruptMode`. `onJudgeError: block` refuses a call the judge cannot answer (off, failing, past `ttsr.gateTimeoutMs`); the default `allow` runs it. See `ttsr-injection-lifecycle.md` §11.
+
+   ```yaml
+   question: "Does this command delete files outside the project?"
+   gate: before
+   onJudgeError: block
+   scope: tool:bash
    ```
 
 - `scope` narrows TTSR matching to an allowlist of stream surfaces. It accepts either a comma-separated YAML string or a YAML sequence. Omitting it watches assistant prose (`text`) and all tool arguments (`tool`), but not thinking.

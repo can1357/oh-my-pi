@@ -10,6 +10,7 @@ import {
 	type AgentToolUpdateCallback,
 	isNonBlankContext,
 	joinAdditionalContext,
+	type ToolTier,
 } from "@oh-my-pi/pi-agent-core";
 import type {
 	AssistantMessage,
@@ -156,6 +157,29 @@ export interface ToolCallPreflight {
 		context?: AgentToolContext,
 	) => Promise<AgentToolResult | undefined> | AgentToolResult | undefined;
 	cancel?: (toolCallId: string) => void;
+}
+
+/** A call the approval gate allowed, with the arguments that will run. */
+export interface ToolGuardCall {
+	toolCallId: string;
+	tool: AgentTool;
+	args: unknown;
+	tier: ToolTier;
+	/** The user approved this call in a prompt. */
+	prompted?: boolean;
+	/**
+	 * The name the model called the tool by (`tool.name`, or its custom wire name `apply_patch`); unset for a
+	 * call that is not the model's own (bridged from an eval cell), which may have used either.
+	 */
+	name?: string;
+}
+
+/**
+ * Screens a call the approval gate allowed. Returns the refusal shown to the model in place of the
+ * result, or undefined to run the call.
+ */
+export interface ToolCallGuard {
+	check(call: ToolGuardCall, signal?: AbortSignal): Promise<string | undefined>;
 }
 
 export const EXTENSION_HANDLER_TIMEOUT_MS = 30_000;
@@ -840,6 +864,7 @@ export class ExtensionRunner {
 	 */
 	#nativeToolResolver?: (name: string) => { tool: AgentTool; makeContext: () => AgentToolContext } | undefined;
 	#toolCallPreflight?: ToolCallPreflight;
+	#toolGuard?: ToolCallGuard;
 
 	/** Wires the native-tool resolver used by {@link invokeNativeTool}. */
 	setNativeToolResolver(
@@ -850,6 +875,15 @@ export class ExtensionRunner {
 
 	setToolCallPreflight(preflight: ToolCallPreflight | undefined): void {
 		this.#toolCallPreflight = preflight;
+	}
+
+	setToolGuard(guard: ToolCallGuard | undefined): void {
+		this.#toolGuard = guard;
+	}
+
+	/** The installed tool guard's refusal for an approved call; undefined when none is installed or it allows the call. */
+	async runToolGuard(call: ToolGuardCall, signal?: AbortSignal): Promise<string | undefined> {
+		return this.#toolGuard?.check(call, signal);
 	}
 
 	async runToolCallPreflightBefore(

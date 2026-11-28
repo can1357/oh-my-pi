@@ -15,6 +15,8 @@ This document covers the current Time Traveling Stream Rules (TTSR) runtime path
 - [`packages/coding-agent/src/prompts/system/ttsr-prose-notice.md`](../packages/coding-agent/src/prompts/system/ttsr-prose-notice.md)
 - [`packages/coding-agent/src/prompts/system/ttsr-warning.md`](../packages/coding-agent/src/prompts/system/ttsr-warning.md)
 - [`packages/coding-agent/src/prompts/system/ttsr-tool-reminder.md`](../packages/coding-agent/src/prompts/system/ttsr-tool-reminder.md)
+- [`packages/coding-agent/src/prompts/system/ttsr-gate-refused.md`](../packages/coding-agent/src/prompts/system/ttsr-gate-refused.md)
+- [`packages/coding-agent/src/tools/tool-guard.ts`](../packages/coding-agent/src/tools/tool-guard.ts)
 - [`packages/coding-agent/src/capability/index.ts`](../packages/coding-agent/src/capability/index.ts)
 - [`packages/coding-agent/src/extensibility/extensions/types.ts`](../packages/coding-agent/src/extensibility/extensions/types.ts)
 - [`packages/coding-agent/src/extensibility/hooks/types.ts`](../packages/coding-agent/src/extensibility/hooks/types.ts)
@@ -55,11 +57,12 @@ Registration is skipped when:
 - TTSR is disabled (`ttsr.enabled === false`)
 - `rule.condition` (regex), `rule.astCondition` (ast-grep patterns), and `rule.question` (judged) are all absent, or every regex condition fails to compile and there are neither AST conditions nor a question
 - a rule with the same `rule.name` was already registered in this manager
+- a gate rule (`gate: before`) has no `question` (logged as a warning)
 - the parsed rule scope excludes all monitored streams
 
 Invalid regex conditions and unreachable scopes are logged as warnings and ignored; session startup continues. AST parse/match failures are logged when matching is attempted and count as no match. If a TTSR rule defines `globs`, those globs are compiled as a global file-path gate for matching.
 
-With no explicit `scope`, a rule monitors assistant text and all tool arguments, but not thinking. Explicit scope tokens can enable `text`, `thinking`, any tool (`tool`/`toolcall`), a named tool, and optional per-tool path globs.
+With no explicit `scope`, a rule monitors assistant text and all tool arguments, but not thinking. Explicit scope tokens can enable `text`, `thinking`, any tool (`tool`/`toolcall`), a named tool, and optional per-tool path globs. A gate rule judges tool calls only: with no `scope` it covers every tool call, and `text`/`thinking` tokens are dropped with a warning.
 
 ### AST conditions (`astCondition`)
 
@@ -102,7 +105,7 @@ When assistant updates arrive and rules exist:
 
 - monitor `text_delta`, `thinking_delta`, `toolcall_delta`, and finalized `toolcall_end` arguments; final arguments seed the snapshot even when a provider emits no argument deltas
 - isolate buffers by source or tool-call stream key
-- the match context's file paths prefer the tool's `matcherPaths(args)` hook — edit strategies surface paths embedded in the wire payload (hashline `[path#TAG]` section headers, apply_patch `*** Add/Update/Delete File:` envelope markers), tolerant of partially streamed buffers — falling back to the generic top-level `path`/`paths` argument scan
+- the match context's file paths prefer the tool's `matcherPaths(args)` hook. Edit strategies surface every path the payload touches, embedded in the wire payload (hashline `[path#TAG]` section headers, apply_patch `*** Add/Update/Delete File:` envelope markers, move destinations), tolerant of partially streamed buffers, and fall back to the generic top-level `path`/`paths` argument scan
 - for tools exposing `matcherEntries(args)`, the streamed payload is projected per touched file into `{ path, digest }` entries (added lines only, same-path sections/hunks merged); each entry is checked in isolation via `checkSnapshot(entry.digest, perFileContext)` under its own file path and stream key (`<toolcall>#<path>`), so a path-scoped rule like `tool:edit(*.ts)` never fires on text belonging to a sibling Markdown hunk in a multi-file payload
 - otherwise, for tools exposing a combined `matcherDigest` (edit/write), replace the scoped buffer with the reconstructed source snapshot and call `checkSnapshot(snapshot, matchContext)`; otherwise append the delta into the scoped manager buffer and call `checkDelta(delta, matchContext)` (synchronous regex matching either way)
 - `checkDelta` skips buffering entirely for text/thinking sources when no registered rule allows that source (`canMatchText`/`canMatchThinking`), so unmatched prose/thinking deltas pay no buffering cost
@@ -305,6 +308,7 @@ During the timer window, state can change. The retry is guarded by retry token, 
 - Tool-source non-interrupting buckets are cleared when the parent assistant message ends with `stopReason === "aborted"` or `"error"`. Their match-time in-memory suppression remains until repeat policy permits another trigger (or reload discards the unpersisted record).
 - Repeat-after-gap depends on turn count increments at `turn_end`; after reload, restored injection ages restart at zero.
 - Judged (`question`) rules never appear in `checkDelta`/`checkSnapshot`/`checkAstSnapshot` results; see §10.
+- Gate rules (`gate: before`) are judged only before a call runs, never after its output (§10) and never mid-stream; `repeatMode`/`interruptMode` on a gate are ignored with a warning. See §11.
 
 ## 10. Judged rules (`question`)
 
@@ -314,8 +318,8 @@ A rule with `question` is judged: its natural-language question goes to the `jud
 
 - `ttsr.judge`: `auto` (default) judges only when the judge role resolves to a native System One model (TypeSafe jev); `on` judges with whatever the role resolves to, including the session's chat model; `off` never judges. Question rules still register either way.
 - On `message_end` of an assistant message whose `stopReason` is neither `aborted` nor `error`, `TtsrCoordinator` splits the message into outputs: all text blocks as one `text` output, all thinking blocks as one `thinking` output, and each tool call as a `tool` output. Tools exposing `matcherEntries` yield one output per file, with the `{ path, digest }` digest as content; otherwise the `matcherDigest` or the raw JSON arguments.
-- For each output, `TtsrManager.judgedCandidates()` selects question rules that pass scope, `globs`, the repeat policy, and — when the rule also declares `condition`/`astCondition` — that prefilter against the completed content. No candidates → no request.
-- One judge request per output carries every candidate's question as a `noul` question over a shared state `{ output, content }` (content cut to its longest prefix within 32,000 Jev tokens, counted locally with `Encoding.Jev`, so each branch stays under Jev's ~33k-token limit). Jev bills the state once per request, so rules sharing an output share its cost. Usage is journaled as `model_usage` with purpose `ttsr`.
+- For each output, `TtsrManager.judgedCandidates()` selects question rules that pass scope, `globs`, the repeat policy, and (when the rule also declares `condition`/`astCondition`) that prefilter against the completed content. Gate rules (§11) are never candidates here. No candidates → no request.
+- One judge request per output carries every candidate's question as a `noul` question over a shared state `{ output, content }` (content cut to its longest prefix within 32,000 Jev tokens, counted locally with `Encoding.Jev`, so each branch stays under Jev's ~33k-token limit). Jev bills the state once per request, so rules sharing an output share its cost. Usage is journaled as `model_usage` with purpose `ttsr` and counts toward the session's cost cap; once the cap is reached, the judge refuses further requests.
 
 ### Delivery
 
@@ -329,4 +333,62 @@ A rule with `question` is judged: its natural-language question goes to the `jud
 
 `/omfg` generates `condition`, `astCondition`, or `question` rules, instructed to prefer the pattern triggers. It validates candidates against conversation history through the same completed-output view (`TtsrToolInspector.outputs`); a `question` candidate must pass its scope/prefilter and get a yes from the judge on one of the 8 most recent in-scope outputs. With no judge available, the user decides whether to save it unconfirmed.
 
-`omp ttsr list` shows each rule's `question`. `omp ttsr test` never calls the judge, so question rules report as not triggered, with their question shown. `omp ttsr scan` skips question rules: their conditions are prefilters, not violations.
+`omp ttsr list` shows each rule's `question`, `gate` and `onJudgeError`, in text and in `--json`. `omp ttsr test` never calls the judge, so question rules report as not triggered, with their question shown, marked as judged before each call for a gate, and their `onJudgeError`. `omp ttsr scan` skips question rules: their conditions are prefilters, not violations.
+
+## 11. Pre-execution gates (`gate: before`)
+
+A judged rule with `gate: before` is asked about each in-scope tool call before the call runs, and a yes refuses the call: the tool does not run and the model gets the refusal in place of its result.
+
+```yaml
+---
+question: Does this command delete files outside the project?
+gate: before
+onJudgeError: block
+scope: tool:bash
+---
+Never delete files outside the working directory; ask the user first.
+```
+
+### Where the gate runs
+
+- `ExtensionToolWrapper` calls the session's tool guard (`ExtensionRunner.setToolGuard`) once per call, after the approval gate, with the arguments that will run. Agent-loop and bridged (eval, Cursor exec) calls both pass through it.
+- `ToolGuard.check()` runs the gate first on every call: calls the user approved in a prompt too, and whether or not `tools.guard.enabled` is on. Only then does the harm guard screen calls approval let through on its own. The harm guard's judge breaker never skips gates.
+- A gate refusal counts toward the tool guard's stop rule: three refusals in a row (or 20 in one run) stop the run. A call that runs ends a streak, except a read-tier call no gate rule covers, since nothing could have refused it; a read-tier call a gate rule covers and lets through does end it.
+
+### Matching and judging
+
+- `TtsrCoordinator.gateToolCall()` judges the call under the name the model called the tool by (the wrapper passes the batch's call name when it is the tool's `customWireName`, e.g. `apply_patch`), so rule scopes match as they do on completed output. A call that is not the batch's own, such as `tool.edit(…)` from an eval cell, carries no such name: a tool scope naming either the tool or its `customWireName` covers it, so `tool:apply_patch` and `tool:edit` both gate an edit an eval cell runs in `apply_patch` mode. It builds the call's outputs with `TtsrToolInspector.gateOutputs()`: the outputs of §10 (per file for `matcherEntries` tools, else the digest or JSON arguments). Per-file digests hold only added lines, so a tool exposing `matcherSections` (multi-file edit modes) also gets each file's section of the call, patch grammar kept, under that file alone: a file the call deletes, moves (the destination shares the source's section) or only removes lines from is judged there, and a file-scoped gate never sees a sibling file's text. A section equal to its file's digest is not judged twice. A `matcherEntries` tool without sections gets the whole call's arguments once more, whose paths are every file the call touches (`matcherPaths`, including moved-to paths). `TtsrManager.gateCandidates()` selects gate rules that pass scope, `globs`, and the `condition`/`astCondition` prefilter. There is no repeat policy: a refused call retried unchanged is judged again.
+- The judge is the same as §10 (`ttsr.judge`, `judge` role, purpose `ttsr`, cost cap). Each output with candidates gets one request; a yes-probability ≥ 0.7 refuses. The first refusing rule, in output and rule order, is reported.
+- Each request carries at most the first 32,000 Jev tokens of the output (§10). A yes about that prefix still refuses; otherwise a gate does not count a cut output as judged, and the candidate's `onJudgeError` decides it as below.
+- The wait is bounded by `ttsr.gateTimeoutMs` (default 10000 ms), read from the operator layers only, and by the call's abort signal. An abort at any point of the gate, including candidate prefiltering (an `astCondition` match is asynchronous) and a rule decided without a judge, rejects without a verdict: the call neither runs nor is refused, emits no `ttsr_triggered`, and does not count toward the stop rule.
+- Only that timeout is operator-only. `ttsr.enabled`, `ttsr.judge`, `ttsr.disabledRules` and the judge model come from merged settings, so a project layer can still turn a gate or its judge off.
+- When the judge is off, fails, times out, returns no number or one outside 0..1, or could read only a prefix of the output, each candidate's `onJudgeError` decides: `allow` (default) logs a warning and runs the call, `block` refuses it. A session whose gate rules have no judge logs a warning at startup.
+
+### Command probes (`command`)
+
+A gate rule can run a shell command instead of asking the judge:
+
+```yaml
+---
+condition: rm\s
+command: ~/.omp/agent/rules/check-rm.sh
+gate: before
+onJudgeError: block
+scope: tool:bash
+---
+Never delete files outside the working directory; ask the user first.
+```
+
+- The rule needs `gate: before` and a `condition` or `astCondition` prefilter; without either, loading logs a warning and does not register the rule, so a probe never runs on every call. With both `command` and `question`, loading warns and the `command` decides; the judge is not asked.
+- Only user-level rules may run a command. A rule whose source is project-level (`_source.level: "project"`, e.g. `.omp/rules/`, `.cursor/rules/`, `.github/instructions/` or any other rule file inside the checkout) logs a warning and is not registered, so a repository's own rule files cannot run a probe. `question` rules have no such check: they only ask the judge.
+- The probe runs in the session cwd, i.e. inside whatever checkout is open. Point `command` at an absolute or home-anchored script, as in the example above; a relative path such as `./scripts/check-rm.sh`, or any script inside the checkout, runs repository-supplied code with the user's privileges.
+- `TtsrCoordinator.gateToolCall()` runs the probe at the same point as the judge (after approval, inside the tool guard), once per call however many of the call's outputs the rule covers, alongside any judged gates. It is spawned with `ptree.exec` through the user's shell (`getShellConfig()` from the operator layers: `shellPath`, else bash/zsh/sh on Unix and Git Bash, then `cmd.exe`, on Windows) with that shell's command arguments (`-l -c`, `-c` under `PI_BASH_NO_LOGIN`, `/c` for `cmd.exe`, `-Command` for PowerShell) and spawn environment, in the session cwd. Write the command for that shell.
+- Contract: stdin carries one JSON object, `{"tool": "<name the model called the tool by>", "toolCallId": "<id>", "arguments": { ... }}`, the arguments that will run. Exit 0 runs the call; any other exit refuses it with the rule body (`ttsr-gate-refused.md`). Stdout is ignored; stderr is logged at debug level.
+- The probe shares the gate's `ttsr.gateTimeoutMs` deadline and the call's abort signal; its process tree is killed when either fires. Only a probe that times out, or whose shell cannot be resolved or spawned, is decided by `onJudgeError` (`allow` by default), like an unanswered judge; once the shell starts, a missing or non-executable probe script is a nonzero exit and a normal refusal.
+- The agent never authors the probe: it runs with the user's privileges on every matching call, including calls the user approved. Keep it read-only; any side effect it has is the rule author's.
+
+### Refusal
+
+- The refusal is rendered with `ttsr-gate-refused.md` (rule name, path, the refused call, and the rule body) and thrown by the wrapper, so the call ends as a tool error without running.
+- It emits `ttsr_triggered` for the rule. Nothing is persisted and no injection record is written, so a later call is gated the same way.
+- `ttsr.enabled: false` registers no rules, so no gates run.

@@ -262,20 +262,22 @@ impl ModeEngine for SloppyEngine {
 		if let Some(result) = update_patch::parse(input) {
 			return update_patch::inspect(input, result);
 		}
-		let Ok(sections) = parse::all_sections(input, false) else {
+		let Ok(parsed) = parse::all_sections(input, false) else {
 			return Inspection { paths: parse::declared_paths(input), ..Inspection::default() };
 		};
+		let mut sections = Vec::new();
+		for section in &parsed {
+			super::push_section(&mut sections, &section.path, &section.body);
+		}
 		Inspection {
-			paths:    sections
-				.iter()
-				.map(|section| section.path.clone())
-				.collect(),
-			entries:  sections
+			paths: parsed.iter().map(|section| section.path.clone()).collect(),
+			entries: parsed
 				.into_iter()
 				.filter(|section| !section.body.is_empty())
 				.map(|section| (section.path, section.body))
 				.collect(),
 			file_ops: Vec::new(),
+			sections,
 		}
 	}
 }
