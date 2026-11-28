@@ -2598,7 +2598,7 @@ export async function tryResolveStartupModelRole(
 	// ahead of a clean route. Check every spelling it could inspect for a
 	// globally registered bare variant alias before using the smaller pool.
 	for (const spelling of route ? [pattern, route.base] : [pattern]) {
-		for (let end = spelling.length; end > 0; ) {
+		for (let end = spelling.length; end > 0;) {
 			spellings.add(spelling.slice(0, end).trim());
 			end = spelling.lastIndexOf(":", end - 1);
 		}
