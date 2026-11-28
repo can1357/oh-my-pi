@@ -44,7 +44,7 @@ export function isModelMentionPrefix(prefix: string): boolean {
 }
 
 function mentionRow(value: string, description: string): AutocompleteItem {
-	return { value, label: value, description, icon: currentTheme().symbols.symbol("icon.model"), iconName: "model" };
+	return { value, label: value, description, icon: currentTheme().symbols.symbol("mention.model"), iconName: "model" };
 }
 
 /**

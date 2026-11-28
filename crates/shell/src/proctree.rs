@@ -206,10 +206,14 @@ mod platform {
 
 		/// Resolves once the process exits: its pidfd becomes readable then.
 		pub async fn exited(&self) -> std::io::Result<()> {
-			let pidfd = tokio::io::unix::AsyncFd::with_interest(
-				self.pidfd.try_clone()?,
-				tokio::io::Interest::READABLE,
-			)?;
+			// SAFETY: the cloned `OwnedFd` keeps its descriptor open and
+			// unchanged for the `AsyncFd`'s lifetime.
+			let pidfd = unsafe {
+				tokio::io::unix::AsyncFd::register_with_interest(
+					self.pidfd.try_clone()?,
+					tokio::io::Interest::READABLE,
+				)
+			}?;
 			let _ready = pidfd.readable().await?;
 			Ok(())
 		}
@@ -445,7 +449,11 @@ mod platform {
 			if self.status() != ProcessStatus::Running {
 				return Ok(());
 			}
-			let kq = tokio::io::unix::AsyncFd::with_interest(kq, tokio::io::Interest::READABLE)?;
+			// SAFETY: the `OwnedFd` keeps the kqueue open and unchanged for the
+			// `AsyncFd`'s lifetime.
+			let kq = unsafe {
+				tokio::io::unix::AsyncFd::register_with_interest(kq, tokio::io::Interest::READABLE)
+			}?;
 			let _ready = kq.readable().await?;
 			Ok(())
 		}
@@ -894,11 +902,16 @@ impl Process {
 		let process_group = if group { self.group_id() } else { None };
 		let protected = host_protected_pids();
 
-		// Polite wave: SIGTERM the group, every live descendant, then the root.
+		// Capture descendants before any signal. A group SIGTERM can end the root
+		// before the walk, and its children then lose their parent link: a child
+		// in its own session (`setsid`, a detached spawn) would get no SIGTERM.
+		let mut descendants = self.signalable_descendants(&protected);
+
+		// Polite wave: SIGTERM the group, every captured descendant, then the
+		// root.
 		if let Some(pgid) = process_group {
 			let _ = kill_process_group(pgid, TERM_SIGNAL);
 		}
-		let mut descendants = self.signalable_descendants(&protected);
 		for child in &descendants {
 			let _ = child.inner.kill(TERM_SIGNAL);
 		}
@@ -922,12 +935,21 @@ impl Process {
 			}
 		}
 
-		// Hard wave. Re-walk the tree so any grandchild spawned during the grace
-		// period — or any process re-parented to the root — is signalled too.
+		// Hard wave. Keep the captured identities: a descendant in its own
+		// session that ignored SIGTERM is outside the group and, once the root
+		// exits, no longer under it. Add anything spawned or re-parented to the
+		// root since.
 		if let Some(pgid) = process_group {
 			let _ = kill_process_group(pgid, KILL_SIGNAL);
 		}
-		descendants = self.signalable_descendants(&protected);
+		for fresh in self.signalable_descendants(&protected) {
+			let known = descendants
+				.iter()
+				.any(|known| known.pid() == fresh.pid() && known.status() == ProcessStatus::Running);
+			if !known {
+				descendants.push(fresh);
+			}
+		}
 		for child in &descendants {
 			let _ = child.inner.kill(KILL_SIGNAL);
 		}

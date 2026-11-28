@@ -103,12 +103,17 @@ export type EmbedTerm = {
 	readonly still?: FigureRaster;
 	/** Where the embed's `src` points: a local file or a web page (none for `data:`). */
 	readonly link?: EmbedLink;
+	/** Rows the picture may take (the figure's room); undefined: its natural height. */
+	readonly maxRows?: number;
 };
 
-/** An embed's link target. */
-export type EmbedLink = { readonly file: string } | { readonly url: string };
+/** An embed's link target: its address, and for a local one the file on disk. */
+export type EmbedLink = { readonly url: string } | { readonly file: string; readonly url: string };
 
-/** Where `src` points, read as {@link fetchSource} loads it: a web URL, a `file:` URL, else a path under `cwd`. */
+/**
+ * Where `src` points, read as {@link fetchSource} loads it: a web URL, a `file:` URL, else a path under `cwd`.
+ * As in an HTML `src`, a `?query` or `#fragment` after a path stays on the address, not in the file name.
+ */
 export function embedLink(src: string, cwd: string): EmbedLink | undefined {
 	if (/^data:/i.test(src)) return undefined;
 	if (/^https?:\/\//i.test(src)) {
@@ -116,9 +121,11 @@ export function embedLink(src: string, cwd: string): EmbedLink | undefined {
 		return url ? { url: url.href } : undefined;
 	}
 	try {
-		if (/^file:\/\//i.test(src)) return { file: Bun.fileURLToPath(src) };
+		if (/^file:\/\//i.test(src)) return { file: Bun.fileURLToPath(src), url: new URL(src).href };
 		if (/^[a-z][\w+.-]*:/i.test(src) && !/^[a-z]:[/\\]/i.test(src)) return undefined;
-		return { file: path.resolve(cwd, src) };
+		const at = src.search(/[?#]/);
+		const file = path.resolve(cwd, at < 0 ? src : src.slice(0, at));
+		return { file, url: new URL(at < 0 ? "" : src.slice(at), Bun.pathToFileURL(file)).href };
 	} catch {
 		return undefined;
 	}
@@ -143,15 +150,13 @@ async function fetchSource(
 		return { bytes: body, mime: data[1] || undefined };
 	}
 	if (!link) throw new Error("not a web address or file");
-	if ("url" in link) {
-		const response = await fetch(link.url, { signal });
-		if (!response.ok) throw new Error(`HTTP ${response.status}`);
-		return {
-			bytes: new Uint8Array(await response.arrayBuffer()),
-			mime: response.headers.get("content-type") ?? undefined,
-		};
-	}
-	return { bytes: await fs.readFile(link.file, { signal }) };
+	if ("file" in link) return { bytes: await fs.readFile(link.file, { signal }) };
+	const response = await fetch(link.url, { signal });
+	if (!response.ok) throw new Error(`HTTP ${response.status}`);
+	return {
+		bytes: new Uint8Array(await response.arrayBuffer()),
+		mime: response.headers.get("content-type") ?? undefined,
+	};
 }
 
 /** See the module docs. */
@@ -170,10 +175,7 @@ export function EmbedFigure(
 		const embed = read(props.embed);
 		return embed && embedLink(embed.src, props.host?.cwd() ?? process.cwd());
 	});
-	const url = computed(() => {
-		const target = link();
-		return target && ("file" in target ? Bun.pathToFileURL(target.file).href : target.url);
-	});
+	const url = computed(() => link()?.url);
 	holdSettle(() => loaded().status === "pending");
 	effect(() => {
 		const embed = read(props.embed);
@@ -220,6 +222,11 @@ export function EmbedFigure(
 			);
 		});
 	});
+	// The room follows the terminal's height without building the node again.
+	const sized = (term: EmbedTerm) => (): EmbedTerm => {
+		const rows = read(props.maxRows);
+		return rows === undefined ? term : { ...term, maxRows: rows };
+	};
 	return () => {
 		const embed = read(props.embed);
 		if (!embed) return undefined;
@@ -256,10 +263,10 @@ export function EmbedFigure(
 						role="omp.embed"
 						url={page}
 						title={embed.label.trim() || undefined}
-						term={term}
+						term={sized(term)}
 					/>
 				) : (
-					<text key={props.nodeKey} role="omp.embed" text={label} term={term} />
+					<text key={props.nodeKey} role="omp.embed" text={label} term={sized(term)} />
 				);
 			}
 			const term: EmbedTerm = { label, ...(error ? { error } : {}), ...(target ? { link: target } : {}) };
@@ -272,7 +279,7 @@ export function EmbedFigure(
 					h={raster?.h}
 					alt={label}
 					max={max}
-					term={term}
+					term={sized(term)}
 				/>
 			);
 		});

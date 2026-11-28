@@ -4,7 +4,7 @@
 mod expr;
 mod quote;
 
-use std::{collections::HashMap, fmt, rc::Rc};
+use std::{collections::HashMap, fmt, future::Future, pin::Pin, rc::Rc};
 
 use super::{
 	ast::{self, *},
@@ -179,7 +179,7 @@ pub fn parse_regex_eval(src: &PStr, file: &str, line: u32, pkg: &str, hints: Par
 	let hints = ParseHints { utf8: hints.utf8 || src.utf8, ..hints };
 	let mut parser = Parser::new(&[], file.into(), line, pkg.into(), hints, hooks);
 	parser.string_eval = true;
-	let result = parser.scope(|parser| parser.regex_eval_program(src, extended));
+	let result = unsafe { crate::deep::run(async { parser.scope(|p| Box::pin(p.regex_eval_program(src, extended))).await }) };
 	parser.finish(result)
 }
 
@@ -193,6 +193,9 @@ pub fn parse_eval(src: &PStr, file: &str, line: u32, pkg: &str, mut hints: Parse
 }
 
 type ResultOf<T> = Result<T, ParseError>;
+
+/// A boxed parser future borrowing the parser for one recursive level.
+pub(super) type Pfut<'a, T> = Pin<Box<dyn Future<Output = ResultOf<T>> + 'a>>;
 
 /// Lexical compilation hints. Pass the active value from the caller to string eval.
 #[derive(Clone, Copy, Debug, Default)]
@@ -336,10 +339,8 @@ struct LexicalSub {
 	package_name: Option<Rc<str>>,
 }
 
-// Use a fresh stack before Rust's inline parser frames exhaust the thread's stack. The
-// separate depth budget also bounds the resulting tree for callers that drop it normally.
-const STACK_RED_ZONE: usize = 256 * 1024;
-const STACK_SEGMENT: usize = 4 * 1024 * 1024;
+/// Chunk the recursive descent onto the heap every few nesting levels; debug frames are large.
+const PARSE_DESCEND_EVERY: usize = if cfg!(debug_assertions) { 1 } else { 8 };
 const MAX_DEPTH: usize = 512;
 
 struct Parser<'s, 'h> {
@@ -373,14 +374,18 @@ impl<'s, 'h> Parser<'s, 'h> {
 	}
 
 	fn program(mut self) -> ResultOf<Program> {
-		let result = self.scope(Self::program_inner);
+		let result = unsafe { crate::deep::run(self.program_root()) };
 		self.finish(result)
 	}
 
-	fn program_inner(&mut self) -> ResultOf<Program> {
+	async fn program_root(&mut self) -> ResultOf<Program> {
+		self.scope(|p| Box::pin(p.program_inner())).await
+	}
+
+	async fn program_inner(&mut self) -> ResultOf<Program> {
 		let location = self.lex.location();
 		let package = self.pkg.clone();
-		let stmts = self.statements(false)?;
+		let stmts = self.statements(false).await?;
 		let token = self.bump();
 		let data = match token.kind {
 			Kind::Data(end) => Some(DataSection {
@@ -399,11 +404,15 @@ impl<'s, 'h> Parser<'s, 'h> {
 		self.diagnostic(location, "Parsing code nesting too deep".into())
 	}
 
-	fn nested<T>(&mut self, f: impl FnOnce(&mut Self) -> ResultOf<T>) -> ResultOf<T> {
+	async fn nested<T>(&mut self, f: impl for<'a> FnOnce(&'a mut Self) -> Pfut<'a, T>) -> ResultOf<T> {
 		if self.depth >= MAX_DEPTH { return Err(self.depth_error()); }
 		self.depth += 1;
 		let previous_tree_depth = std::mem::replace(&mut self.tree_depth, self.depth);
-		let result = stacker::maybe_grow(STACK_RED_ZONE, STACK_SEGMENT, || f(self));
+		let at = self.depth;
+		let result = {
+			let child = f(self);
+			if at.is_multiple_of(PARSE_DESCEND_EVERY) { crate::deep::descend(child).await } else { child.await }
+		};
 		self.depth -= 1;
 		self.tree_depth = self.tree_depth.max(previous_tree_depth);
 		result
@@ -417,13 +426,13 @@ impl<'s, 'h> Parser<'s, 'h> {
 		Ok(())
 	}
 
-	fn scope<T>(&mut self, f: impl FnOnce(&mut Self) -> ResultOf<T>) -> ResultOf<T> {
+	async fn scope<T>(&mut self, f: impl for<'a> FnOnce(&'a mut Self) -> Pfut<'a, T>) -> ResultOf<T> {
 		let hints = self.features;
 		let pkg = self.pkg.clone();
 		self.symbols.lexical.push(HashMap::new());
 		self.symbols.typed.push(HashMap::new());
 		self.hooks.enter_scope();
-		let result = f(self);
+		let result = f(self).await;
 		self.hooks.leave_scope();
 		self.features = hints;
 		self.lex.utf8 = hints.utf8;
@@ -636,11 +645,11 @@ impl<'s, 'h> Parser<'s, 'h> {
 		self.lex.source.get(at) == Some(&b':') && self.lex.source.get(at + 1) != Some(&b':')
 	}
 
-	fn stmt(&mut self) -> ResultOf<Stmt> {
-		self.nested(Self::stmt_inner)
+	async fn stmt(&mut self) -> ResultOf<Stmt> {
+		self.nested(|p| Box::pin(p.stmt_inner())).await
 	}
 
-	fn stmt_inner(&mut self) -> ResultOf<Stmt> {
+	async fn stmt_inner(&mut self) -> ResultOf<Stmt> {
 		let term_start = std::mem::take(&mut self.deref_block_start);
 		let start = self.peek();
 		let mut label = None;
@@ -660,7 +669,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 		let fat_comma = token.kind == Kind::Word && self.lex.source.get(self.after_space(token.end)..).is_some_and(|tail| tail.starts_with(b"=>"));
 		let kind = match spelling {
 			_ if fat_comma => {
-				let expr = self.expr(0)?;
+				let expr = self.expr(0).await?;
 				terminator = true;
 				modifier_allowed = true;
 				StmtKind::Expr(expr)
@@ -673,47 +682,47 @@ impl<'s, 'h> Parser<'s, 'h> {
 			b";" => { self.bump(); StmtKind::Empty }
 			b"}" | b"" if label.is_some() => StmtKind::Empty,
 			b"{" if !term_start && !self.brace_hash(&token) => {
-				let block = self.block()?;
-				StmtKind::Block(block, self.continue_block()?)
+				let block = self.block().await?;
+				StmtKind::Block(block, self.continue_block().await?)
 			}
 			b"if" | b"unless" => {
 				self.bump();
-				let mut arms = vec![(self.condition()?, spelling == b"unless", self.block()?)];
-				while self.eat(b"elsif").is_some() { arms.push((self.condition()?, false, self.block()?)); }
-				let otherwise = if self.eat(b"else").is_some() { Some(self.block()?) } else { None };
+				let mut arms = vec![(self.condition().await?, spelling == b"unless", self.block().await?)];
+				while self.eat(b"elsif").is_some() { arms.push((self.condition().await?, false, self.block().await?)); }
+				let otherwise = if self.eat(b"else").is_some() { Some(self.block().await?) } else { None };
 				StmtKind::If(arms, otherwise)
 			}
 			b"while" | b"until" => {
 				self.bump();
-				let cond = self.loop_condition(spelling == b"while")?;
-				let block = self.block()?;
-				StmtKind::While(cond, spelling == b"until", block, self.continue_block()?)
+				let cond = self.loop_condition(spelling == b"while").await?;
+				let block = self.block().await?;
+				StmtKind::While(cond, spelling == b"until", block, self.continue_block().await?)
 			}
 			b"for" | b"foreach" => {
 				self.bump();
-				self.for_loop()?
+				self.for_loop().await?
 			}
 			b"given" | b"when" | b"CORE::given" | b"CORE::when" if self.features.switch || spelling.starts_with(b"CORE::") => {
 				self.bump();
-				let cond = self.condition()?;
-				let body = self.block()?;
+				let cond = self.condition().await?;
+				let body = self.block().await?;
 				if spelling.ends_with(b"given") { StmtKind::Given(cond, body) } else { StmtKind::When(Some(cond), body) }
 			}
 			b"default" | b"CORE::default" if self.features.switch || spelling == b"CORE::default" => {
 				self.bump();
-				StmtKind::When(None, self.block()?)
+				StmtKind::When(None, self.block().await?)
 			}
 			b"try" if self.features.try_catch => {
 				self.bump();
-				let block = self.block()?;
+				let block = self.block().await?;
 				self.expect(b"catch")?;
 				self.expect(b"(")?;
-				let exception = self.variable(false)?;
+				let exception = self.variable(false).await?;
 				if !matches!(&exception.kind, ExprKind::Variable(Sigil::Scalar, name) if !name.contains("::")) {
 					return Err(self.error());
 				}
 				self.expect(b")")?;
-				StmtKind::Try(block, exception, self.block()?)
+				StmtKind::Try(block, exception, self.block().await?)
 			}
 			b"package" => {
 				self.bump();
@@ -723,7 +732,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 				self.hooks.declare_package(&name);
 				if let Some(version) = &version { self.hooks.package_version(&name, version); }
 				let block = if self.at(b"{") {
-					let body = self.block()?;
+					let body = self.block().await?;
 					self.pkg = previous;
 					Some(body)
 				} else { terminator = true; None };
@@ -731,7 +740,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 			}
 			b"use" | b"no" => {
 				self.bump();
-				let item = self.use_stmt(spelling == b"no")?;
+				let item = self.use_stmt(spelling == b"no").await?;
 				// Consume `;` before changing lexical hints; do not pre-tokenize past it.
 				self.terminator()?;
 				self.use_hints(&item);
@@ -752,18 +761,18 @@ impl<'s, 'h> Parser<'s, 'h> {
 			}
 			word if phase(word).is_some() && self.lex.source.get(self.after_space(token.end)) == Some(&b'{') => {
 				self.bump();
-				let block = Rc::new(self.block()?);
+				let block = Rc::new(self.block().await?);
 				let kind = phase(word).ok_or_else(|| self.error_at(&token))?;
 				self.on_phase(kind, &block)?;
 				StmtKind::Phase(kind, block)
 			}
 			b"AUTOLOAD" | b"DESTROY" if self.lex.source.get(self.after_space(token.end)) == Some(&b'{') => {
-				let sub = self.subroutine(true, None)?;
+				let sub = self.subroutine(true, None).await?;
 				self.sub_statement(sub)?
 			}
 			b"sub" if self.named_sub_after(token.end) => {
 				self.bump();
-				let sub = self.subroutine(true, None)?;
+				let sub = self.subroutine(true, None).await?;
 				terminator = sub.body.is_none();
 				self.sub_statement(sub)?
 			}
@@ -772,12 +781,12 @@ impl<'s, 'h> Parser<'s, 'h> {
 				self.bump();
 				let scope = decl(spelling).ok_or_else(|| self.error_at(&token))?;
 				self.expect(b"sub")?;
-				let sub = self.subroutine(true, Some(scope))?;
+				let sub = self.subroutine(true, Some(scope)).await?;
 				terminator = sub.body.is_none();
 				self.sub_statement(sub)?
 			}
 			_ => {
-				let expr = self.expr(0)?;
+				let expr = self.expr(0).await?;
 				terminator = true;
 				modifier_allowed = true;
 				StmtKind::Expr(expr)
@@ -786,7 +795,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 		let mut stmt = Stmt { location: location.clone(), label, kind };
 		if modifier_allowed && let Some(modifier) = self.modifier() {
 			self.bump();
-			let cond = self.expr(0)?;
+			let cond = self.expr(0).await?;
 			let label = stmt.label.take();
 			stmt = Stmt { location, label, kind: StmtKind::Modifier(Box::new(stmt), modifier, cond) };
 		}
@@ -847,69 +856,69 @@ impl<'s, 'h> Parser<'s, 'h> {
 		})
 	}
 
-	fn statements(&mut self, in_block: bool) -> ResultOf<Vec<Stmt>> {
+	async fn statements(&mut self, in_block: bool) -> ResultOf<Vec<Stmt>> {
 		let mut stmts = Vec::new();
 		loop {
 			let t = self.peek();
 			if matches!(t.kind, Kind::Eof | Kind::Data(_)) || in_block && self.lex.text(&t) == b"}" { break; }
-			stmts.push(self.stmt()?);
+			stmts.push(self.stmt().await?);
 		}
 		Ok(stmts)
 	}
 
-	fn block(&mut self) -> ResultOf<Block> {
-		self.nested(|parser| {
+	async fn block(&mut self) -> ResultOf<Block> {
+		self.nested(|parser| Box::pin(async move {
 			let open = parser.expect(b"{")?;
-			parser.scope(|parser| {
-				let stmts = parser.statements(true)?;
-				if parser.peek().kind == Kind::Eof {
-					let mut error = parser.error();
+			parser.scope(|p| Box::pin(async move {
+				let stmts = p.statements(true).await?;
+				if p.peek().kind == Kind::Eof {
+					let mut error = p.error();
 					error.missing_delimiter = true;
 					return Err(error);
 				}
-				parser.expect(b"}")?;
+				p.expect(b"}")?;
 				Ok(Block { location: open.location, stmts })
-			})
-		})
+			})).await
+		})).await
 	}
 
-	fn continue_block(&mut self) -> ResultOf<Option<Block>> {
+	async fn continue_block(&mut self) -> ResultOf<Option<Block>> {
 		let token = self.peek();
 		if self.lex.text(&token) == b"continue" && self.lex.source.get(self.after_space(token.end)) == Some(&b'{') {
 			self.bump();
-			self.block().map(Some)
+			self.block().await.map(Some)
 		} else { Ok(None) }
 	}
 
-	fn condition(&mut self) -> ResultOf<Expr> {
-		self.loop_condition(false)
+	async fn condition(&mut self) -> ResultOf<Expr> {
+		self.loop_condition(false).await
 	}
 
-	fn loop_condition(&mut self, empty_is_true: bool) -> ResultOf<Expr> {
+	async fn loop_condition(&mut self, empty_is_true: bool) -> ResultOf<Expr> {
 		let open = self.expect(b"(")?;
 		if empty_is_true && self.eat(b")").is_some() {
 			return Ok(Expr { location: open.location, cache: NodeCache::default(), kind: ExprKind::Int(1) });
 		}
-		let expr = self.expr(0)?;
+		let expr = self.expr(0).await?;
 		self.expect(b")")?;
 		Ok(expr)
 	}
 
-	fn for_loop(&mut self) -> ResultOf<StmtKind> {
+	async fn for_loop(&mut self) -> ResultOf<StmtKind> {
 		if let Some(open) = self.eat(b"(") {
-			let first = if self.at(b";") || self.at(b")") { None } else { Some(self.expr(0)?) };
+			let first = if self.at(b";") || self.at(b")") { None } else { Some(self.expr(0).await?) };
 			if self.eat(b";").is_some() {
-				let cond = if self.at(b";") { None } else { Some(self.expr(0)?) };
+				let cond = if self.at(b";") { None } else { Some(self.expr(0).await?) };
 				self.expect(b";")?;
-				let step = if self.at(b")") { None } else { Some(self.expr(0)?) };
+				let step = if self.at(b")") { None } else { Some(self.expr(0).await?) };
 				self.expect(b")")?;
-				let body = self.block()?;
-				return Ok(StmtKind::For(first, cond, step, body, self.continue_block()?));
+				let body = self.block().await?;
+				return Ok(StmtKind::For(first, cond, step, body, self.continue_block().await?));
 			}
 			self.expect(b")")?;
 			let items = first.unwrap_or(Expr { location: open.location, cache: NodeCache::default(), kind: ExprKind::List(Vec::new()) });
-			let body = self.block()?;
-			return Ok(StmtKind::Foreach(None, items, body, self.continue_block()?));
+			let body = self.block().await?;
+			return Ok(StmtKind::Foreach(None, items, body, self.continue_block().await?));
 		}
 		// In a foreach header the parenthesis belongs to the iteration list,
 		// not to the prefix backslash's operand expression.
@@ -923,7 +932,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 			return Err(self.fatal(word.location, message));
 		}
 		// `for \&name (LIST)`: the list is not the call's argument list.
-		let mut var = if reference.is_some() && self.at(b"&") { self.variable(false)? } else { self.prefix()? };
+		let mut var = if reference.is_some() && self.at(b"&") { self.variable(false).await? } else { self.prefix().await? };
 		let target = match &var.kind {
 			ExprKind::Declare(DeclKind::My | DeclKind::Our | DeclKind::State, _, expr, _) => expr.as_ref(),
 			_ => &var,
@@ -939,9 +948,9 @@ impl<'s, 'h> Parser<'s, 'h> {
 		if let Some(reference) = reference {
 			var = Expr { location: reference.location, cache: NodeCache::default(), kind: ExprKind::Unary(Unary::Reference, Box::new(var)) };
 		}
-		let items = self.delimited_list(b"(", b")", false)?;
-		let body = self.block()?;
-		Ok(StmtKind::Foreach(Some(var), items, body, self.continue_block()?))
+		let items = self.delimited_list(b"(", b")", false).await?;
+		let body = self.block().await?;
+		Ok(StmtKind::Foreach(Some(var), items, body, self.continue_block().await?))
 	}
 
 	fn modifier(&mut self) -> Option<Modifier> {
@@ -985,7 +994,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 		Some(self.pstr(self.lex.text(&token)))
 	}
 
-	fn use_stmt(&mut self, negated: bool) -> ResultOf<Use> {
+	async fn use_stmt(&mut self, negated: bool) -> ResultOf<Use> {
 		if let Some(version) = self.version_token() {
 			return Ok(Use { negated, module: None, version: Some(version), args: None });
 		}
@@ -993,7 +1002,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 		let version = self.version_token();
 		let args = if self.at(b";") || self.at(b"}") || matches!(self.peek().kind, Kind::Eof | Kind::Data(_)) {
 			None
-		} else { Some(self.expr(0)?) };
+		} else { Some(self.expr(0).await?) };
 		Ok(Use { negated, module: Some(module), version, args })
 	}
 
@@ -1062,7 +1071,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 		self.ident()
 	}
 
-	fn subroutine(&mut self, named: bool, mut scope: Option<DeclKind>) -> ResultOf<Subroutine> {
+	async fn subroutine(&mut self, named: bool, mut scope: Option<DeclKind>) -> ResultOf<Subroutine> {
 		let location = self.peek().location;
 		let mut name = if named { Some(self.declaration_name()?) } else { None };
 		// pad.c pad_check_dup: a second `my`/`state sub NAME` in one scope gets a new pad entry.
@@ -1116,7 +1125,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 			attributes = self.attributes()?;
 		}
 		if self.at(b"(") && self.features.signatures {
-			signature = Some(self.signature()?.into());
+			signature = Some(self.signature().await?.into());
 			if self.eat(b":").is_some() {
 				self.attributes()?;
 				let location = self.peek().location;
@@ -1140,7 +1149,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 		// its initial body. A forward declaration's prototype still applies there.
 		let body = if named && (self.at(b";") || self.at(b"}") || self.peek().kind == Kind::Eof) { None } else {
 			if !self.at(b"{") { return Err(self.error()); }
-			Some(Rc::new(self.block()?))
+			Some(Rc::new(self.block().await?))
 		};
 		if let Some(name) = &name {
 			if scope.is_some() && let Some(visible) = self.symbols.lexical.last_mut() {
@@ -1160,7 +1169,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 
 	/// A subroutine signature, scanned like toke.c's yyl_sigvar and checked like perly.y's
 	/// sigscalarelem/sigslurpelem. Element errors are queued (yyerror) so that each is reported.
-	fn signature(&mut self) -> ResultOf<Vec<Parameter>> {
+	async fn signature(&mut self) -> ResultOf<Vec<Parameter>> {
 		let open = self.expect(b"(")?;
 		let src = self.lex.source;
 		let utf8 = self.lex.utf8;
@@ -1243,7 +1252,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 				last = pos;
 				self.lex.advance(pos + 1);
 				if !matches!(src.get(self.after_space(pos + 1)), Some(b',' | b')')) {
-					default = Some(self.expr(expr::P_ASSIGN)?);
+					default = Some(self.expr(expr::P_ASSIGN).await?);
 					if let Some(previous) = &self.previous { last = previous.start; }
 				} else if name.is_none() {
 					// `$=`: an optional placeholder whose default is never needed.
@@ -1660,24 +1669,24 @@ mod tests {
 	}
 
 	#[test]
-	fn deep_input_grows_stack_and_rejects_unbounded_trees() {
-		// The 150 nested blocks mirror t/comp/parser.t's bracket-stack regression.
-		std::thread::Builder::new().stack_size(512 * 1024).spawn(|| {
-			drop(parse(format!("{}1;{}", "{".repeat(150), "}".repeat(150)).as_bytes()));
-			let n = MAX_DEPTH + 32;
-			let inputs = [
-				format!("{}1;{}", "{".repeat(n), "}".repeat(n)),
-				format!("{}1{}", "(".repeat(n), ")".repeat(n)),
-				format!("{}1", "1+".repeat(n)),
-				format!("$r{}", "->[0]".repeat(n)),
-				format!("${}x", "$".repeat(n)),
-				format!(r#""${{[{}1{}]}}""#, "(".repeat(n), ")".repeat(n)),
-			];
-			for src in inputs {
-				let error = parse_program(src.as_bytes(), "test.pl", "main", &mut NoHooks).unwrap_err();
-				assert_eq!(error.message, "Parsing code nesting too deep");
-			}
-		}).unwrap().join().unwrap();
+	fn deep_input_rejects_unbounded_trees() {
+		// The 150 nested blocks mirror t/comp/parser.t's bracket-stack regression. The parser hands
+		// its recursion to the heap driver, so an ordinary test stack parses them; deeper input must
+		// still give the clean diagnostic, not a crash.
+		drop(parse(format!("{}1;{}", "{".repeat(150), "}".repeat(150)).as_bytes()));
+		let n = MAX_DEPTH + 32;
+		let inputs = [
+			format!("{}1;{}", "{".repeat(n), "}".repeat(n)),
+			format!("{}1{}", "(".repeat(n), ")".repeat(n)),
+			format!("{}1", "1+".repeat(n)),
+			format!("$r{}", "->[0]".repeat(n)),
+			format!("${}x", "$".repeat(n)),
+			format!(r#""${{[{}1{}]}}""#, "(".repeat(n), ")".repeat(n)),
+		];
+		for src in inputs {
+			let error = parse_program(src.as_bytes(), "test.pl", "main", &mut NoHooks).unwrap_err();
+			assert_eq!(error.message, "Parsing code nesting too deep");
+		}
 	}
 
 	#[test]

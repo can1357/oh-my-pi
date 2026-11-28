@@ -45,7 +45,11 @@ run_bun() {
 	exec bun "$@"
 }
 
-if [ -n "${PI_TIMING:-}" ]; then
-	run_bun --preload "$preload" --preload "$timing_preload" "$cli" "$@"
-fi
+# Plain timing measures startup without source instrumentation. Match whole
+# tokens, using the same option separators as the timing report.
+sep='[,:;+[:space:]]'
+case ",${PI_TIMING:-}," in
+	*${sep}modules${sep}* | *${sep}full${sep}*)
+		run_bun --preload "$preload" --preload "$timing_preload" "$cli" "$@" ;;
+esac
 run_bun --preload "$preload" "$cli" "$@"

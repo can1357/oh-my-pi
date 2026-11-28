@@ -8,7 +8,7 @@ import {
 	registerOAuthProvider,
 	unregisterOAuthProviders,
 } from "@oh-my-pi/pi-ai/registry/oauth";
-import type { OAuthCredentials, OAuthProvider } from "@oh-my-pi/pi-ai/registry/oauth/types";
+import type { OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/env-api-key";
 
 const FIXTURE_SOURCE = "provider-registry-test";
@@ -79,7 +79,6 @@ describe("provider registry auth surface", () => {
 				"devin",
 				"gitlab-duo",
 				"gitlab-duo-agent",
-				"google-antigravity",
 				"openai-codex",
 				"openrouter",
 				"snowflake",
@@ -111,9 +110,7 @@ describe("provider registry auth surface", () => {
 		expect(refreshed.refresh).toBe("r2");
 		expect(fetchSpy).toHaveBeenCalledTimes(1);
 
-		await expect(refreshOAuthToken("nonexistent-provider" as OAuthProvider, creds)).rejects.toThrow(
-			"Unknown OAuth provider",
-		);
+		await expect(refreshOAuthToken("nonexistent-provider", creds)).rejects.toThrow("Unknown OAuth provider");
 	});
 
 	test("login dispatcher handles runtime-registered extension providers", async () => {

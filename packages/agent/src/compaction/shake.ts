@@ -75,7 +75,7 @@ export const RESCUE_SHAKE_CONFIG: ShakeConfig = {
 	protectedTools: [...AGGRESSIVE_SHAKE_CONFIG.protectedTools, isArtifactRecoveryToolResult],
 };
 
-/** Rough token cost of a placeholder line; used only for the savings gate. */
+/** Rough token cost of a placeholder line; floors tool-result regions and feeds the savings gate. */
 const PLACEHOLDER_TOKEN_ESTIMATE = 16;
 
 /** A located eligible region. */
@@ -347,6 +347,8 @@ export function collectShakeRegions(entries: SessionEntry[], tokenizer: Tokenize
 				continue;
 			const text = toolResultText(toolResult, tokenizer);
 			if (!text) continue;
+			// Replacing a result no larger than its placeholder only grows context.
+			if (text.tokens <= PLACEHOLDER_TOKEN_ESTIMATE) continue;
 			regions.push({
 				kind: "toolResult",
 				entry: entry as SessionMessageEntry,

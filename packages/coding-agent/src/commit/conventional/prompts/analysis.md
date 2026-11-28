@@ -8,8 +8,8 @@ Classify the git diff into conventional commit format. Ground every choice in di
 ## 1. Scope
 
 Apply only when one component clearly dominates the semantic change or roughly 60%+ of line changes:
-- 150 lines in src/api/, 30 in src/lib.rs -> `api`
-- 50 lines in src/api/, 50 in src/types/ -> (none)
+- 150 lines in src/api/, 30 in src/lib.rs → `api`
+- 50 lines in src/api/, 50 in src/types/ → (none)
 
 Cross-cutting, evenly split, project-wide, or vague best scope → no scope.
 

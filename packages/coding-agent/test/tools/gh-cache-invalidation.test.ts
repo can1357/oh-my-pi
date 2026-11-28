@@ -4,13 +4,20 @@
  * leaving unrelated commands and read-only `gh` calls alone.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
-import { invalidateGithubCacheForBashCommand } from "@oh-my-pi/pi-coding-agent/tools/gh-cache-invalidation";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import {
+	invalidateGithubCacheForBashCommand,
+	invalidateGithubCacheForBashResult,
+} from "@oh-my-pi/pi-coding-agent/tools/gh-cache-invalidation";
 import {
 	clearAll,
 	getCached,
 	putCached,
 	resetForTests as resetCacheForTests,
 } from "@oh-my-pi/pi-coding-agent/tools/github-cache";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const REPO = "owner/example";
 
@@ -164,6 +171,22 @@ describe("invalidateGithubCacheForBashCommand", () => {
 		expect(getCached(REPO, "pr", 3, true)?.rendered).toBe(`pr-${REPO}-3`);
 	});
 
+	it("skips relationship flag values before the positional issue number", () => {
+		seedIssue(23);
+		seedIssue(100);
+		invalidateGithubCacheForBashCommand("gh issue edit --parent 100 23");
+		expect(getCached(REPO, "issue", 23, true)).toBeNull();
+		expect(getCached(REPO, "issue", 100, true)?.rendered).toBe(`issue-${REPO}-100`);
+	});
+
+	it("drops cache for every positional issue number", () => {
+		seedIssue(23);
+		seedIssue(34);
+		invalidateGithubCacheForBashCommand("gh issue edit 23 34 --add-label bug");
+		expect(getCached(REPO, "issue", 23, true)).toBeNull();
+		expect(getCached(REPO, "issue", 34, true)).toBeNull();
+	});
+
 	it("falls back to repo-wide invalidation for current-branch `gh pr merge`", () => {
 		seedPr(7);
 		invalidateGithubCacheForBashCommand("gh pr merge --squash --delete-branch");
@@ -176,5 +199,64 @@ describe("invalidateGithubCacheForBashCommand", () => {
 		invalidateGithubCacheForBashCommand("gh pr close --repo a/one");
 		expect(getCached("a/one", "pr", 7, true)).toBeNull();
 		expect(getCached("b/two", "pr", 8, true)?.rendered).toBe("pr-b/two-8");
+	});
+});
+
+describe("GitLab bash invalidation", () => {
+	const GL_PROJECT = "gitlab.example.com/acme/api";
+
+	function seedMr(iid: number, project = GL_PROJECT): void {
+		putCached({
+			repo: project,
+			kind: "mr",
+			number: iid,
+			includeComments: true,
+			payload: { state: "opened", mr: { iid } },
+			rendered: `mr-${project}-${iid}`,
+			fetchedAt: 1_000,
+		});
+		putCached({
+			repo: project,
+			kind: "mr-diff",
+			number: iid,
+			includeComments: false,
+			payload: { unified: "", files: [] },
+			rendered: `mr-diff-${project}-${iid}`,
+			fetchedAt: 1_000,
+		});
+	}
+
+	it("drops mr/mr-diff rows for glab mr update, note, and merge commands", () => {
+		seedMr(7);
+		invalidateGithubCacheForBashCommand("glab mr update 7 --ready");
+		expect(getCached(GL_PROJECT, "mr", 7, true)).toBeNull();
+
+		seedMr(8);
+		invalidateGithubCacheForBashCommand(
+			"glab mr note -m 'LGTM' https://gitlab.example.com/acme/api/-/merge_requests/8",
+		);
+		expect(getCached(GL_PROJECT, "mr", 8, true)).toBeNull();
+
+		seedMr(9);
+		invalidateGithubCacheForBashCommand("glab mr merge 9 -R https://gitlab.example.com/acme/api");
+		expect(getCached(GL_PROJECT, "mr", 9, true)).toBeNull();
+	});
+
+	it("drops mr/mr-diff rows after git push to a GitLab remote", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gl-push-inv-"));
+		try {
+			Bun.spawnSync(["git", "init", dir], { stdout: "pipe", stderr: "pipe" });
+			Bun.spawnSync(["git", "remote", "add", "origin", "https://gitlab.example.com/acme/api.git"], {
+				cwd: dir,
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			seedMr(14);
+			await invalidateGithubCacheForBashResult("git push origin HEAD", dir, { exitCode: 0 });
+			expect(getCached(GL_PROJECT, "mr", 14, true)).toBeNull();
+			expect(getCached(GL_PROJECT, "mr-diff", 14, false)).toBeNull();
+		} finally {
+			await removeWithRetries(dir);
+		}
 	});
 });

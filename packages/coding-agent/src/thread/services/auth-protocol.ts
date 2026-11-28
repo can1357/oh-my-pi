@@ -55,6 +55,8 @@ import type {
 	OAuthLoginIdentity,
 	OAuthProviderId,
 	OAuthRefreshByIdOptions,
+	OAuthSignOutOptions,
+	OAuthSignOutResult,
 	ObservedUsageInput,
 	Provider,
 	RedeemResetCreditOptions,
@@ -220,6 +222,10 @@ export type AuthStorageProtocol = {
 		[id: number, signal?: AbortSignal, options?: OAuthRefreshByIdOptions],
 		AuthCredentialSnapshotEntry
 	>;
+	"oauth.signOut": RpcMethod<
+		[provider: string, credentialId: number, options?: OAuthSignOutOptions],
+		OAuthSignOutResult
+	>;
 
 	"sessions.pin": RpcMethod<
 		[provider: string, sessionId: string, credentialId: number, options?: { restoredAtMs?: number }],
@@ -252,6 +258,7 @@ export type AuthStorageProtocol = {
 	"usage.clientSummary": RpcMethod<[sinceMs: number], ClientUsageSummary>;
 	/** Sync hooks of the returned provider are `rpcSync` wrappers. */
 	"usage.providerFor": RpcMethod<[provider: Provider], UsageProvider | undefined>;
+	"usage.authRejection": RpcMethod<[provider: Provider, credentialId: number], number | undefined>;
 	"usage.reportingModelIds": RpcMethod<
 		[provider: Provider, modelIds: readonly string[], reports: readonly UsageReport[]],
 		string[]
@@ -416,7 +423,7 @@ export type ModelRegistryProtocol = {
 	>;
 	refreshDiscoverableProviders: RpcMethod<[providerIds: string[], strategy: ModelRefreshStrategy], void>;
 	refreshRuntimeProviders: RpcMethod<[strategy: ModelRefreshStrategy], void>;
-	hydrateCredentialScopedModelCaches: RpcMethod<[], void>;
+	hydrateCredentialScopedModelCaches: RpcMethod<[providers?: readonly string[]], void>;
 	reapplyModelPolicies: RpcMethod<[], void>;
 	refreshInBackground: RpcMethod<[strategy: ModelRefreshStrategy], void>;
 	/** Sync. */

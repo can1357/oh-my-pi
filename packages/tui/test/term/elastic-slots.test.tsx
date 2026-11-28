@@ -30,6 +30,7 @@ const CAPABILITIES: TerminalCapabilities = {
 	multiplexer: null,
 	textSizing: false,
 	tsp: false,
+	emoji: { vs16Wide: false, bareFits: false },
 };
 
 type Listener = (columns: number, rows: number) => void;
@@ -311,6 +312,106 @@ describe("exactly-once in-order ledger (ECH, Lemma 4.6, Corollary 4.14)", () => 
 		expect(driver.history.length).toBeGreaterThan(0);
 		expect(driver.history.filter(row => row.length > 12)).toEqual([]);
 		backend.stop();
+	});
+
+	it("keeps content live when only its separator overflows under preserve mode", () => {
+		const driver = new FakeDriver();
+		driver.replays = false;
+		const { surface, backend } = mount(
+			driver,
+			() => [<rows lines={["Earlier"]} />, <rows lines={lines("card", 6)} />],
+			{ separator: 1 },
+		);
+		try {
+			const [earlier, card] = surface.main();
+			settle(earlier!);
+			settle(card!);
+			backend.renderNow();
+			expect(driver.history).toEqual(["Earlier", ""]);
+			expect(driver.viewport).toEqual(lines("card", 6));
+			expect(backend.contentInHistory(card!)).toBe(false);
+
+			driver.resize(20, 5);
+			backend.renderNow();
+			expect(driver.history).toEqual(["Earlier", "", ...lines("card", 6)]);
+			expect(backend.contentInHistory(card!)).toBe(true);
+		} finally {
+			backend.stop();
+			surface.dispose();
+		}
+	});
+
+	it.each([
+		["head", 5],
+		["whole card", 7],
+	] as const)("writes the latest card output when a deferred batch held its %s", (_, laterRows) => {
+		const output = signal("sample");
+		const { driver, backend, surface } = setup(() => [
+			<rows lines={() => lines(output(), 3)} />,
+			<rows lines={lines("later", laterRows)} />,
+		]);
+		try {
+			const card = surface.main()[0]!;
+			driver.ack = false;
+			settle(card);
+			backend.renderNow();
+			expect(driver.history).toEqual([]);
+			expect(backend.contentInHistory(card)).toBe(false);
+
+			output.set("final");
+			driver.ack = true;
+			backend.renderNow();
+			expect(driver.transcript).toEqual([...lines("final", 3), ...lines("later", laterRows).slice(-6)]);
+			expect(backend.contentInHistory(card)).toBe(true);
+		} finally {
+			backend.stop();
+			surface.dispose();
+		}
+	});
+
+	it("keeps a card live when the tail pressing it goes away before a deferred batch is written", () => {
+		const later = signal(true);
+		const { driver, backend, surface } = setup(() => [
+			<rows key="card" lines={lines("card", 3)} />,
+			() => (later() ? <rows key="later" lines={lines("later", 5)} /> : null),
+		]);
+		try {
+			const card = surface.main()[0]!;
+			driver.ack = false;
+			settle(card);
+			backend.renderNow();
+
+			later.set(false);
+			driver.ack = true;
+			backend.renderNow();
+			expect(driver.history).toEqual([]);
+			expect(driver.viewport).toEqual(lines("card", 3));
+			expect(backend.contentInHistory(card)).toBe(false);
+		} finally {
+			backend.stop();
+			surface.dispose();
+		}
+	});
+
+	it("does not count an empty block committed between others as content in history", () => {
+		const { backend, surface } = setup(() => [
+			<rows key="a" lines={lines("a", 4)} />,
+			<rows key="empty" lines={[]} />,
+			<rows key="b" lines={lines("b", 4)} />,
+			<rows key="c" lines={lines("c", 5)} />,
+		]);
+		try {
+			const [a, empty, b] = surface.main();
+			for (const node of [a!, empty!, b!]) settle(node);
+			backend.renderNow();
+			expect(backend.retired(empty!)).toBe(true);
+			expect(backend.contentInHistory(a!)).toBe(true);
+			expect(backend.contentInHistory(empty!)).toBe(false);
+			expect(backend.contentInHistory(b!)).toBe(true);
+		} finally {
+			backend.stop();
+			surface.dispose();
+		}
 	});
 });
 

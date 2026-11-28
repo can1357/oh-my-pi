@@ -81,9 +81,12 @@ pub fn command(program: impl AsRef<OsStr>) -> Command {
 	cmd
 }
 
-/// [`command`] for the obash under test.
+/// [`command`] for the obash under test, without pi's extras: the tests
+/// hold it to bash and zsh, whose commands come from `PATH`.
 pub fn obash() -> Command {
-	command(env!("CARGO_BIN_EXE_obash"))
+	let mut cmd = command(env!("CARGO_BIN_EXE_obash"));
+	cmd.arg("--no-extras");
+	cmd
 }
 
 /// Run `cmd` (from [`command`]) to its end within [`LIMIT`]: its output and

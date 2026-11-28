@@ -49,9 +49,14 @@ import {
 } from "@oh-my-pi/pi-tui/term/painters/editor";
 import { lineStart, nextBoundary } from "@oh-my-pi/pi-tui/term/widgets/editor";
 import { flattenLine, stripControl } from "@oh-my-pi/pi-tui/text/sanitize";
-import type { TspEditorDecoration, TspEffect, TspSpan, TspText } from "@oh-my-pi/pi-wire";
+import type { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { isSingleGrapheme } from "@oh-my-pi/pi-utils/graphemes";
+import type { TspEditorDecoration, TspEffect, TspPickerLevel, TspSpan, TspText } from "@oh-my-pi/pi-wire";
 import { terminalIdentity } from "@oh-my-pi/pi-tui/driver/session";
 import "../styles/composer";
+import type { UnifiedMentionSnapshot } from "../../autocomplete/mentions/engine";
+import { MENTION_STYLES } from "../../autocomplete/mentions/style";
+import type { MentionItem } from "../../autocomplete/mentions/types";
 import {
 	extractAtFilePrefix,
 	isDirectoryCompletionValue,
@@ -60,9 +65,11 @@ import {
 	subsequenceMatch,
 } from "../../autocomplete/tokens";
 import { getKeybindings } from "../../config/keybindings/keybindings";
+import { thinkingDotToken } from "../../modes/view-model/overlays/model-browser";
+import { AUTO_THINKING } from "../../thinking/levels";
 import { fileUriForTerminal } from "../../utils/file-links";
 import type { ComposerTerm } from "../styles/composer/frame";
-import type { PopupItemTerm, PopupTerm } from "../styles/composer/popup";
+import type { MentionPopupTerm, PopupItemTerm, PopupTerm } from "../styles/composer/popup";
 import { type ComposerStatus, caretOverflow, composerShape } from "../styles/composer/shapes";
 import {
 	type Atom,
@@ -237,6 +244,19 @@ export interface ComposerWordCompletion {
 /** `[Image #N…]` / `[Video #N…]` reference markers in submitted text (with a legacy ` attachment://N` after them). */
 const VISION_MARKER = /\[(Image|Video) #([1-9]\d*)((?:,[^\]\n]*)?)\](?: attachment:\/\/\2(?!\d))?/g;
 
+function isMentionItem(item: unknown): item is MentionItem {
+	return (
+		typeof item === "object" && item !== null && "category" in item && "insertText" in item && "pickerItem" in item
+	);
+}
+
+/** Whether `open` is the bare `@` category list, whose rows Tab cycles instead of accepting. */
+function isCategoryList(open: Completion): boolean {
+	return (
+		open.mention?.query === "" && open.items.every(item => isMentionItem(item) && item.isNamespaceShortcut === true)
+	);
+}
+
 /** A token of the draft that shows as a chip (`/skill:name` as `🧩 name`) and is sent as `expansion`. */
 export interface DraftToken {
 	/** UTF-16 range of the token in the text it was found in. */
@@ -372,6 +392,8 @@ export class Composer {
 	readonly #linksRevision = signal(0);
 	/** The terminal's hint in an empty draft (the app's live composer hint). */
 	readonly #placeholder = signal<TspText | undefined>(undefined);
+	/** A passing state the terminal shows in the hint's place, over a prediction too (the history loading). */
+	readonly #notice = signal<TspText | undefined>(undefined);
 	/** What Tern shows in an empty draft (the session's title, who the draft goes to); undefined: the default. */
 	readonly #nativePlaceholder = signal<TspText | undefined>(undefined);
 
@@ -411,6 +433,8 @@ export class Composer {
 	readonly #completion: Signal<Completion | null> = signal<Completion | null>(null);
 	#completionRequest: AbortController | undefined;
 	#forceFiles = false;
+	/** Offset of the bare `@` whose Files tile the user picked: that token lists files until it ends. */
+	#filesAt: number | undefined;
 
 	readonly #vimLayer: VimEditor;
 	readonly #vimOn: Signal<boolean>;
@@ -739,6 +763,11 @@ export class Composer {
 		if (provider && this.#text() && (!this.#vim || this.#vim.mode() === "insert")) this.#afterEdit("", false);
 	}
 
+	/** Warm the current completion provider without reopening the command or mention picker. */
+	warmAutocomplete(): void {
+		this.#autocomplete?.warmMentions?.();
+	}
+
 	/**
 	 * Handle native composer actions besides Send (`interrupt`, `thinking.cycle`, `thinking.set`
 	 * with its value, `focus:<agentId>`, `dictation.toggle`); first handler returning true wins.
@@ -841,6 +870,11 @@ export class Composer {
 	/** The hint an empty draft shows in the terminal (`undefined`: none). */
 	setPlaceholder(placeholder: TspText | undefined): void {
 		this.#placeholder.set(placeholder);
+	}
+
+	/** Show `notice` in an empty draft's hint place, a prediction's included, until cleared with `undefined`. */
+	setNotice(notice: TspText | undefined): void {
+		this.#notice.set(notice);
 	}
 
 	/** What Tern shows in an empty draft (`undefined`: the default question). */
@@ -1245,6 +1279,7 @@ export class Composer {
 		this.#completionRequest?.abort();
 		this.#completionRequest = undefined;
 		this.#forceFiles = false;
+		this.#filesAt = undefined;
 		if (this.#completion() !== null) this.#completion.set(null);
 	}
 
@@ -1282,6 +1317,51 @@ export class Composer {
 			});
 		};
 
+		const showMention = (snapshot: UnifiedMentionSnapshot | null, isFinal: boolean) => {
+			if (!current()) return;
+			if (!snapshot) {
+				this.#completion.set(null);
+				return;
+			}
+			if (snapshot.items.length === 0) {
+				if (isFinal && !snapshot.mention.loading) this.#completion.set(null);
+				return;
+			}
+			const open = this.#completion.peek();
+			const sameQuery = open?.mention?.prefix === snapshot.prefix;
+			const selectedValue = sameQuery ? open.items[open.selected]?.value : undefined;
+			const kept = selectedValue === undefined ? -1 : snapshot.items.findIndex(item => item.value === selectedValue);
+			// Anti-thrash focus stability: once the user navigated or >120ms elapsed since the query
+			// opened, late async updates never yank the highlight away from the current item.
+			const lockFocus =
+				sameQuery && (Boolean(open.chosen) || (open.openedAt !== undefined && Date.now() - open.openedAt > 120));
+			const nextSelected =
+				kept >= 0 && (lockFocus || kept === 0) ? kept : Math.max(0, kept >= 0 && sameQuery ? kept : 0);
+			const preservedEffort = sameQuery && kept === nextSelected ? open.effortOverride : undefined;
+			// Skip redundant reactive updates when the visible palette snapshot is unchanged.
+			if (
+				open?.mention &&
+				open.prefix === snapshot.prefix &&
+				open.selected === nextSelected &&
+				open.effortOverride === preservedEffort &&
+				open.mention.loading === snapshot.mention.loading &&
+				open.items.length === snapshot.items.length &&
+				open.items.every((prev, i) => prev.value === snapshot.items[i]?.value)
+			) {
+				return;
+			}
+			this.#completion.set({
+				items: snapshot.items,
+				prefix: snapshot.prefix,
+				selected: nextSelected,
+				chosen: kept >= 0 && sameQuery ? open.chosen : false,
+				revision,
+				mention: snapshot.mention,
+				effortOverride: preservedEffort,
+				openedAt: sameQuery && open.openedAt !== undefined ? open.openedAt : Date.now(),
+			});
+		};
+
 		try {
 			const commandName = inSubmittedSlashContext(before, lines, line) && !before.trimStart().includes(" ");
 			// A second Tab on an @ token with no selectable row must be able to start
@@ -1298,6 +1378,51 @@ export class Composer {
 					return;
 				}
 			}
+
+			// Unified `@`, `^`, and `#<N>` mention palette: Tier 0 sync frame + streaming async refinement.
+			// An `@` pinned to Files keeps listing files while it is the token at the caret.
+			const atPrefix = extractAtFilePrefix(before);
+			const pinned = atPrefix !== null && cursor - atPrefix.length === this.#filesAt;
+			if (!pinned) this.#filesAt = undefined;
+			const lock = pinned ? "files" : undefined;
+			if (regular && provider.trySyncMentionCompletion) {
+				const syncResult = provider.trySyncMentionCompletion(lines, line, col, lock);
+				if (syncResult) {
+					const alreadyOpen = this.#completion.peek()?.mention !== undefined;
+					if (!syncResult.hasAsyncPending || !provider.getMentionSuggestions) {
+						showMention(syncResult, true);
+						return;
+					}
+					// When already open and refining `@…`, hold briefly (45ms) for fast native
+					// fuzzyFind to settle so keystrokes paint once instead of flashing sync→async.
+					const shouldDeferInterim = alreadyOpen && syncResult.query.query.length > 0;
+					if (!shouldDeferInterim) {
+						showMention(syncResult, false);
+					}
+					let gotAsync = false;
+					const asyncTask = provider.getMentionSuggestions(
+						lines,
+						line,
+						col,
+						signal,
+						partial => {
+							gotAsync = true;
+							showMention(partial, false);
+						},
+						lock,
+					);
+					if (shouldDeferInterim) {
+						const settled = await Promise.race([asyncTask.then(() => true), Bun.sleep(45).then(() => false)]);
+						if (!current()) return;
+						if (!settled && !gotAsync) showMention(syncResult, false);
+					}
+					const final = await asyncTask;
+					if (!current()) return;
+					showMention(final, true);
+					return;
+				}
+			}
+
 			if (regular && MODEL_MENTION_CONTEXT_RE.test(before) && provider.trySyncModelMentionCompletion) {
 				const mention = provider.trySyncModelMentionCompletion(lines, line, col);
 				if (mention.kind !== "unhandled") {
@@ -1394,7 +1519,18 @@ export class Composer {
 			return;
 		}
 		const run = enter && name && value !== SKILL_NAMESPACE && this.#cursor() === this.#text().length;
-		const result = provider.applyCompletion(lines, line, col, item, open.prefix);
+		const mentionItem = open.mention !== undefined && isMentionItem(item) ? item : undefined;
+		// The Files tile has no token: the `@` stays and lists files from here on.
+		if (mentionItem?.isNamespaceShortcut && mentionItem.category === "files") {
+			this.#closeCompletion();
+			this.#filesAt = this.#cursor() - open.prefix.length;
+			void this.#complete();
+			return;
+		}
+		const result =
+			mentionItem && provider.applyMentionCompletion
+				? provider.applyMentionCompletion(lines, line, col, mentionItem, open.prefix, open.effortOverride)
+				: provider.applyCompletion(lines, line, col, item, open.prefix);
 		this.#closeCompletion();
 		const text = result.lines.join("\n");
 		let cursor = result.cursorCol;
@@ -1402,9 +1538,11 @@ export class Composer {
 		this.#change(0, this.#text().length, text, cursor, "edit");
 		this.#atomizeTyped();
 		result.onApplied?.();
+		const isDir = Boolean(mentionItem?.isDirectory) || isDirectoryCompletionValue(value);
+		const isNamespace = Boolean(mentionItem?.isNamespaceShortcut);
 		if (run) this.submit();
-		else if (name) void this.#complete();
-		else if (isDirectoryCompletionValue(value)) {
+		else if (name || isNamespace) void this.#complete();
+		else if (isDir) {
 			if (open.prefix.startsWith("@")) void this.#complete();
 			else if (!enter) void this.#complete(true);
 		}
@@ -1415,6 +1553,31 @@ export class Composer {
 		const provider = this.#autocomplete;
 		if (!provider) return;
 		const at = this.#position();
+		// On the bare `@` category strip, Space picks the lit category as Enter does (the space is not
+		// kept), and typing after cycling to one enters it: `@` + `o` → `@m:o`.
+		const pick = insert === " ";
+		const entered =
+			!deleted && previous && isCategoryList(previous) && (pick || (previous.chosen && !/\s/.test(insert)))
+				? previous.items[previous.selected]
+				: undefined;
+		if (isMentionItem(entered) && at.before.endsWith(`@${insert}`)) {
+			const cursor = this.#cursor();
+			const from = cursor - insert.length - 1;
+			const typed = pick ? "" : insert;
+			if (entered.category === "files") {
+				// The user's keystroke already recorded this undo step.
+				if (pick) this.#change(from + 1, cursor, "", from + 1, "history");
+				this.#filesAt = from;
+				void this.#complete();
+				return;
+			}
+			const replacement = `${entered.insertText}${typed}`;
+			// The user's keystroke already recorded this undo step.
+			this.#change(from, cursor, replacement, from + replacement.length, "history");
+			this.#typingAt = -1;
+			void this.#complete();
+			return;
+		}
 		if (!deleted && insert.length === 1 && provider.trySyncInlineReplace) {
 			let replacement: { replaceLen: number; insert: string } | null = null;
 			try {
@@ -1436,9 +1599,9 @@ export class Composer {
 				return;
 			}
 		}
-		// While a fuzzy walk refreshes, previously offered files that still match the extended
-		// token can be picked immediately. Never re-anchor rows across whitespace or a new `@`.
-		if (!deleted && previous?.prefix.startsWith("@")) {
+		// While a legacy fuzzy walk refreshes, previously offered files that still match the extended
+		// token can be picked immediately. Unified mentions handle prefix narrowing inside the engine.
+		if (!deleted && previous?.prefix.startsWith("@") && !previous.mention) {
 			const token = extractAtFilePrefix(at.before);
 			if (token === previous.prefix + insert) {
 				const query = token.toLowerCase();
@@ -1466,14 +1629,18 @@ export class Composer {
 			return;
 		}
 		const typed =
+			!event.paste &&
 			event.from === event.to &&
 			event.cursor === event.from + event.text.length &&
-			[...new Intl.Segmenter().segment(event.text)].length === 1;
+			isSingleGrapheme(event.text);
 		const force = this.#forceFiles;
 		const previous = event.from === this.#cursor() ? this.#completion.peek() : null;
 		this.#change(event.from, event.to, event.text, event.cursor, typed ? "type" : "edit");
 		this.#atomizeTyped();
-		this.#afterEdit(event.text, event.from < event.to, force, previous);
+		// Pasted text is content, not a request to complete: a trailing `@name` must not turn the
+		// next Enter into a file pick (#20681). Tab still completes it explicitly.
+		if (event.paste) this.#closeCompletion();
+		else this.#afterEdit(event.text, event.from < event.to, force, previous);
 		this.#notifyEdit({ from: event.from, to: event.to, insert: event.text, typed });
 	}
 
@@ -1574,6 +1741,31 @@ export class Composer {
 				this.#closeCompletion();
 				return true;
 			}
+			// The bare `@` category strip: Tab/→ and Shift+Tab/← move the lit category (↑/↓ below too);
+			// Enter or typing picks it.
+			if (isCategoryList(open)) {
+				const back = key.id === "shift+tab" || bindings.matches(key, "tui.editor.cursorLeft");
+				if (back || tab || right) {
+					const count = open.items.length;
+					const selected = (open.selected + (back ? count - 1 : 1)) % count;
+					this.#completion.set({ ...open, selected, chosen: true, effortOverride: undefined });
+					return true;
+				}
+			}
+			// Shift+Left/Right steps thinking effort on a highlighted model row.
+			if (open.mention && (key.id === "shift+left" || key.id === "shift+right")) {
+				const currentItem = open.items[open.selected];
+				const effort = isMentionItem(currentItem) ? currentItem.modelEffort : undefined;
+				if (effort && effort.supported.length > 0) {
+					const ladder: readonly (Effort | "auto")[] = [AUTO_THINKING, ...effort.supported];
+					const active = open.effortOverride ?? effort.selected;
+					const idx = Math.max(0, ladder.indexOf(active));
+					const delta = key.id === "shift+right" ? 1 : -1;
+					const nextEffort = ladder[Math.max(0, Math.min(ladder.length - 1, idx + delta))]!;
+					this.#completion.set({ ...open, effortOverride: nextEffort, chosen: true });
+					return true;
+				}
+			}
 			const count = open.items.length;
 			let selected: number;
 			if (bindings.matches(key, "tui.select.up")) selected = (open.selected + count - 1) % count;
@@ -1597,7 +1789,7 @@ export class Composer {
 				}
 				return false;
 			}
-			this.#completion.set({ ...open, selected, chosen: true });
+			this.#completion.set({ ...open, selected, chosen: true, effortOverride: undefined });
 			return true;
 		}
 		if (submit && key.raw !== "\n") {
@@ -1873,8 +2065,10 @@ export class Composer {
 				decor: termDecor(),
 				caret: terminal ? "none" : m === "insert" || m === "replace" ? "underline" : "block",
 				caretEnd: terminal ? "none" : m === null || m === "insert" || m === "replace" ? "bar" : "block",
-				// Its keys away under the terminal's own cursor, the field draws no hint.
-				placeholder: this.#shownPrediction() || (terminal && this.#faint()) ? null : (this.#placeholder() ?? null),
+				// Its keys away under the terminal's own cursor, the field draws no hint; a notice still shows.
+				placeholder:
+					this.#notice() ??
+					(this.#shownPrediction() || (terminal && this.#faint()) ? null : (this.#placeholder() ?? null)),
 				...(sel ? { selection: { from: sel.from, to: sel.to } } : {}),
 				caretOverflow: caretOverflow(shape(), paddingX),
 				...(this.#caretGlyph() ? { caretGlyph: this.#caretGlyph() } : {}),
@@ -2006,6 +2200,112 @@ export class Composer {
 		const popup = (): JSXNode => {
 			const open = this.#completion();
 			if (!open) return null;
+
+			if (open.mention) {
+				const palette = open.mention;
+				const mentionItems = open.items as readonly MentionItem[];
+				const selectedItem = mentionItems[open.selected];
+				const activeEffort = open.effortOverride ?? selectedItem?.modelEffort?.selected;
+				// Default model mentions inherit thinking (no `:level` suffix). Show the effort slider
+				// only when the user explicitly typed a `:level` suffix or stepped an override via Shift+←/→.
+				const typedEffortColon = open.prefix.startsWith("^")
+					? open.prefix.slice(1).includes(":")
+					: /^@(?:m|model|models):/i.test(open.prefix)
+						? open.prefix.slice(open.prefix.indexOf(":") + 1).includes(":")
+						: open.prefix.slice(1).includes(":");
+				const hasExplicitEffort =
+					selectedItem?.modelEffort !== undefined &&
+					(typedEffortColon || (activeEffort !== undefined && activeEffort !== AUTO_THINKING));
+				const level: TspPickerLevel | null =
+					hasExplicitEffort && selectedItem?.modelEffort
+						? {
+								label: "Thinking",
+								detail: selectedItem.modelEffort.provider,
+								steps: [
+									{ id: AUTO_THINKING, label: "default" },
+									...selectedItem.modelEffort.supported.map(step => ({ id: step, label: step })),
+								],
+								value: activeEffort ?? AUTO_THINKING,
+								keys: ["shift", "left", "right"],
+							}
+						: null;
+
+				// Reflect interactive effort override live on the highlighted model row's chips.
+				const override = open.effortOverride;
+				const renderedPickerItems =
+					selectedItem?.modelEffort && override !== undefined
+						? palette.pickerItems.map(row => {
+								if (row.id !== selectedItem.pickerItem.id) return row;
+								const baseChips = (row.chips ?? []).filter(
+									chip => !selectedItem.modelEffort!.supported.includes(chip.text as Effort),
+								);
+								if (override !== AUTO_THINKING) {
+									const dot = thinkingDotToken(override);
+									baseChips.push({ text: override, on: true, ...(dot ? { dot } : {}) });
+								}
+								return { ...row, chips: baseChips };
+							})
+						: palette.pickerItems;
+
+				// A row's status (agent state, dirty file, PR state) colors its glyph, else its category does.
+				const glyphs: Record<string, TspSpan> = {};
+				for (const item of mentionItems) {
+					if (!item.icon) continue;
+					const tone = item.pickerItem.dot ?? item.pickerItem.tone;
+					glyphs[item.pickerItem.id] = { t: plainLine(item.icon), s: tone ?? MENTION_STYLES[item.category].color };
+				}
+				const mentionTerm: MentionPopupTerm = { maxLines: this.#autocompleteMaxVisible(), glyphs };
+
+				const indexOfId = (id: string) => mentionItems.findIndex(item => item.pickerItem.id === id);
+
+				return (
+					<picker
+						key="complete"
+						role="omp.mention-picker"
+						modal={false}
+						size="md"
+						density="snug"
+						layout={isCategoryList(open) ? "tiles" : "rows"}
+						search="none"
+						preview="none"
+						anchor={{ caret: "line/input" }}
+						columns={palette.columns}
+						items={renderedPickerItems}
+						order={palette.order}
+						selected={selectedItem?.pickerItem.id ?? null}
+						level={level}
+						empty="No matching mentions"
+						term={mentionTerm}
+						onSelect={id => {
+							const idx = indexOfId(id);
+							if (idx === -1) return;
+							const target = mentionItems[idx]!;
+							// Single-clicking an unselected model row highlights it so the effort slider can be dragged;
+							// clicking again (activate) or clicking any non-model row inserts immediately.
+							if (target.modelEffort && idx !== open.selected) {
+								this.#completion.set({ ...open, selected: idx, chosen: true, effortOverride: undefined });
+								return;
+							}
+							this.#accept(open, "complete", idx);
+						}}
+						onActivate={id => {
+							const idx = indexOfId(id);
+							if (idx !== -1) this.#accept(open, "complete", idx);
+						}}
+						onAction={(act, event) => {
+							if (act === "close") {
+								this.#closeCompletion();
+								return;
+							}
+							if (act === "level" && event.value !== undefined) {
+								const nextEffort = event.value as Effort | "auto";
+								this.#completion.set({ ...open, effortOverride: nextEffort, chosen: true });
+							}
+						}}
+					/>
+				);
+			}
+
 			const mark = this.#completionMark(open.prefix);
 			const pick = (value: string) => {
 				const index = open.items.findIndex(item => item.value === value);

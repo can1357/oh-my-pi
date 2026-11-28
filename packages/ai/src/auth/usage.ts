@@ -1,4 +1,10 @@
 import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
+import {
+	discoverGitHubCopilotAccount,
+	parseGitHubCopilotApiKey,
+	rememberCopilotTokenBilling,
+	resolveCopilotTokenBilling,
+} from "@oh-my-pi/pi-catalog/wire/github-copilot";
 import { $pickenv, logger } from "@oh-my-pi/pi-utils";
 import { getEnvApiKey } from "../env-api-key";
 import * as AIError from "../error";
@@ -19,6 +25,7 @@ import type {
 	UsageProvider,
 	UsageReport,
 } from "../usage";
+import { githubApiBaseUrlFor } from "../usage/github-copilot";
 import { DEFAULT_USAGE_PROVIDERS } from "../usage/registry";
 import { raceSignal } from "./abort";
 import type { SessionAffinity } from "./affinity";
@@ -157,6 +164,10 @@ export class UsageService implements UsageApi {
 	#usageRequestInFlight: Map<string, { refreshEpoch: number; promise: Promise<UsageReport | null> }> = new Map();
 	#usageHeaderIngestAt: Map<string, number> = new Map();
 	#usageReportsInFlight: Map<string, Promise<UsageReport[] | null>> = new Map();
+	/** Background Copilot billing-mode probes, one per token hash for the life of the process. */
+	#billingModeProbes: Map<string, Promise<void>> = new Map();
+	/** Resolved failure-cache key for each stored row in the latest poll, including cache hits. */
+	#rowFailureKeys = new Map<string, string>();
 	readonly fetch: typeof fetch;
 	readonly logger: UsageLogger;
 	readonly requestTimeoutMs: number;
@@ -166,6 +177,15 @@ export class UsageService implements UsageApi {
 		this.fetch = deps.fetch;
 		this.logger = deps.logger;
 		this.requestTimeoutMs = deps.requestTimeoutMs;
+	}
+
+	authRejection(provider: Provider, credentialId: number): number | undefined {
+		const key = this.#rowFailureKeys.get(`${provider}:${credentialId}`);
+		if (!key) return undefined;
+		const failure = this.#deps.cache.get<number | null>(key);
+		return failure && failure.expiresAt > Date.now() && (failure.value === 401 || failure.value === 403)
+			? failure.value
+			: undefined;
 	}
 
 	/** Whether OAuth usage can be fetched via a provider or the store hook. */
@@ -274,8 +294,75 @@ export class UsageService implements UsageApi {
 		});
 	}
 
+	/**
+	 * Copy a report's account billing mode (`metadata.tokenBasedBilling`) onto
+	 * the stored OAuth row, so request keys built from it carry the mode. Writes
+	 * only when the mode changes. A report without the flag leaves a recorded
+	 * mode alone: GitHub omitting it says nothing, so it never clears a `true`.
+	 * Env and API-key Copilot tokens have no row; their mode is remembered for
+	 * this process instead.
+	 */
+	#recordBillingMode(provider: Provider, credential: UsageCredential, report: UsageReport): void {
+		const tokenBasedBilling = report.metadata?.tokenBasedBilling;
+		if (typeof tokenBasedBilling !== "boolean") return;
+		const token = credential.type === "oauth" ? credential.accessToken : credential.apiKey;
+		if (provider === "github-copilot" && token) {
+			rememberCopilotTokenBilling(parseGitHubCopilotApiKey(token).accessToken, tokenBasedBilling);
+		}
+		if (credential.type !== "oauth") return;
+		const credentialId = this.#deps.pool.findIdForUsageCredential(provider, credential);
+		if (credentialId === undefined) return;
+		const entry = this.#deps.pool.entries(provider).find(candidate => candidate.id === credentialId);
+		if (entry?.credential.type !== "oauth" || entry.credential.tokenBasedBilling === tokenBasedBilling) return;
+		this.#deps.pool.replaceById(provider, credentialId, { ...entry.credential, tokenBasedBilling });
+	}
+
+	/**
+	 * Learn a GitHub Copilot request key's unknown billing mode in the background,
+	 * once per token per process. Logins from before the mode was recorded and raw
+	 * `COPILOT_GITHUB_TOKEN`s otherwise keep the premium-request estimate until a
+	 * quota fetch happens to run, which a lone login in print/RPC/SDK runs never
+	 * triggers. A stored login's row keeps the result. Never fails: a failed probe
+	 * leaves the mode unknown. GitHub Enterprise logins are probed on their own
+	 * API host (as the usage provider does), never on public github.com.
+	 */
+	learnCopilotBillingMode(provider: string, resolved: { apiKey: string; credentialId?: number }): Promise<void> {
+		if (provider !== "github-copilot") return Promise.resolve();
+		const apiKey = parseGitHubCopilotApiKey(resolved.apiKey);
+		if (!apiKey.accessToken || resolveCopilotTokenBilling(apiKey) !== undefined) return Promise.resolve();
+		const probeKey = Bun.hash(apiKey.accessToken).toString(36);
+		const existing = this.#billingModeProbes.get(probeKey);
+		if (existing) return existing;
+		const { credentialId } = resolved;
+		const probe = (async () => {
+			const signal = AbortSignal.timeout(this.requestTimeoutMs);
+			const { tokenBasedBilling } = await discoverGitHubCopilotAccount(
+				apiKey.accessToken,
+				this.fetch,
+				signal,
+				githubApiBaseUrlFor(apiKey.enterpriseUrl),
+			);
+			if (tokenBasedBilling === undefined || credentialId === undefined) return;
+			const entry = this.#deps.pool.entries(provider).find(candidate => candidate.id === credentialId);
+			// The row may have been re-logged into another account while the probe ran.
+			if (
+				entry?.credential.type !== "oauth" ||
+				entry.credential.access !== apiKey.accessToken ||
+				entry.credential.tokenBasedBilling !== undefined
+			) {
+				return;
+			}
+			this.#deps.pool.replaceById(provider, credentialId, { ...entry.credential, tokenBasedBilling });
+		})().catch(error => this.logger.debug("Copilot billing mode probe failed", { error: String(error) }));
+		this.#billingModeProbes.set(probeKey, probe);
+		return probe;
+	}
+
 	/** Probe a provider endpoint, refreshing near-expiry OAuth tokens when possible. */
-	async #fetchUsageUncached(request: UsageRequestDescriptor, timeoutMs?: number): Promise<UsageReport | null> {
+	async #fetchUsageUncached(
+		request: UsageRequestDescriptor,
+		timeoutMs?: number,
+	): Promise<UsageReport | 401 | 403 | null> {
 		const providerImpl = this.providerFor(request.provider);
 		if (!providerImpl) return null;
 
@@ -373,8 +460,13 @@ export class UsageService implements UsageApi {
 					};
 				}
 			}
+			if (report) this.#recordBillingMode(request.provider, params.credential, report);
 			return report;
 		} catch (error) {
+			logger.debug("AuthStorage usage fetch failed", {
+				provider: request.provider,
+				error: String(error),
+			});
 			if (error instanceof AIError.ProviderHttpError && (error.status === 401 || error.status === 403)) {
 				// Definitive auth failure (revoked key, lapsed subscription): purge
 				// the last-good report so #fetchUsageCached's failure branch can't
@@ -384,11 +476,8 @@ export class UsageService implements UsageApi {
 					value: null,
 					expiresAt: 0,
 				});
+				return error.status;
 			}
-			logger.debug("AuthStorage usage fetch failed", {
-				provider: request.provider,
-				error: String(error),
-			});
 			return null;
 		}
 	}
@@ -401,6 +490,9 @@ export class UsageService implements UsageApi {
 		const timeoutMs = options.timeoutMs;
 		const cacheKey = this.#deps.cache.reportKey(request);
 		const failureKey = this.#deps.cache.failureKey(cacheKey);
+		if (request.credentialId !== undefined) {
+			this.#rowFailureKeys.set(`${request.provider}:${request.credentialId}`, failureKey);
+		}
 		const now = Date.now();
 		const cached = this.#deps.cache.get<UsageReport | null>(cacheKey);
 		// Fresh cache hit: return whatever's there (success or null fallback).
@@ -408,7 +500,7 @@ export class UsageService implements UsageApi {
 			return cached.value;
 		}
 
-		const failure = this.#deps.cache.get<null>(failureKey);
+		const failure = this.#deps.cache.get<number | null>(failureKey);
 		if (failure && failure.expiresAt > now) {
 			return this.#deps.cache.lastGood(cacheKey);
 		}
@@ -427,12 +519,13 @@ export class UsageService implements UsageApi {
 		const refreshEpoch = this.#deps.cache.refreshEpoch(request.provider);
 		const recoveryEpoch = this.#deps.cache.recoveryEpoch(request.provider);
 		const promise = (async () => {
-			const report = await this.#fetchUsageUncached(request, timeoutMs);
+			const result = await this.#fetchUsageUncached(request, timeoutMs);
 			// Block marks bump the generation too: a report racing a fresh 429 may
 			// predate it, so it answers this probe but is neither cached nor used
 			// to heal blocks.
 			const invalidated = usageCacheEpoch !== this.#deps.cache.epoch;
-			if (report !== null) {
+			if (result !== null && typeof result !== "number") {
+				const report = result;
 				if (invalidated) return report;
 				if (reportPassesUsageCutoff(report, options.usageAfter)) {
 					this.#deps.blocks.reconcileRequest(request, report);
@@ -465,7 +558,9 @@ export class UsageService implements UsageApi {
 			// A confirmed reset is the exception: the old failure cannot suppress
 			// the first post-reset probe.
 			if (recoveryEpoch === this.#deps.cache.recoveryEpoch(request.provider)) {
-				this.#deps.cache.set(failureKey, { value: null, expiresAt: coolDown });
+				// The cooldown owns its reason. A subsequent process can explain a cached
+				// rejection without resolving the stored reference again for display.
+				this.#deps.cache.set(failureKey, { value: result, expiresAt: coolDown });
 			}
 			if (!invalidated) this.#deps.cache.set(cacheKey, { value: lastGood, expiresAt: coolDown });
 			return lastGood;
@@ -745,13 +840,32 @@ export class UsageService implements UsageApi {
 			}
 
 			if (entries.length === 0) {
+				// Probe with the key requests send (KeyCascade): a models.yml apiKey
+				// outranks extension and env keys, and an unresolvable one fails
+				// closed instead of exposing an ambient env key.
 				const runtimeKey = this.#deps.overrides.runtimeKey(providerId);
-				const extensionUsageKeyConfig = this.#runtimeUsageProviderOverrides.get(provider)?.apiKey,
-					extensionUsageKey = extensionUsageKeyConfig
+				const configKey = this.#deps.overrides.configKey(providerId);
+				// A models.yml key belongs to its gateway, not necessarily to the public
+				// provider sharing its id. Only use it with an explicitly registered usage
+				// adapter. Built-in adapters can ignore baseUrl and call a fixed public host.
+				if (
+					configKey !== undefined &&
+					!this.#runtimeUsageProviderOverrides.has(provider) &&
+					!this.#configuredUsageProviders.has(provider)
+				)
+					continue;
+				let apiKey: string | undefined;
+				if (runtimeKey) {
+					apiKey = runtimeKey;
+				} else if (configKey !== undefined) {
+					apiKey = await this.#deps.overrides.resolve(configKey);
+				} else {
+					const extensionUsageKeyConfig = this.#runtimeUsageProviderOverrides.get(provider)?.apiKey;
+					const extensionUsageKey = extensionUsageKeyConfig
 						? await this.#deps.overrides.resolve(extensionUsageKeyConfig)
-						: undefined,
-					envKey = getEnvApiKey(providerId);
-				const apiKey = runtimeKey ?? extensionUsageKey ?? envKey;
+						: undefined;
+					apiKey = extensionUsageKey ?? getEnvApiKey(providerId);
+				}
 				if (!apiKey) continue;
 				const request = usageRequest(provider, { type: "api_key", apiKey }, baseUrl);
 				if (providerImpl.supports && !providerImpl.supports(request)) continue;

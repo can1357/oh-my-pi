@@ -1,6 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { type Type, type } from "@oh-my-pi/omptype/ark";
-import { regex } from "arkregex";
+import { type } from "@oh-my-pi/omptype/ark";
 import type { Eq } from "./type-assert";
 
 describe("intersection", () => {
@@ -60,16 +59,4 @@ describe("chained", () => {
 it("expression doesn't include string basis", () => {
 	const T = type(/^a.*z$/);
 	expect(T.allows("abz")).toBe(true);
-});
-
-it("arkregex integration", () => {
-	const T = type({
-		email: regex("^.*@.*$"),
-	});
-	const _type: Eq<
-		typeof T,
-		Type<{
-			email: `${string}@${string}`;
-		}>
-	> = true;
 });

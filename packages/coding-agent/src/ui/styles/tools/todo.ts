@@ -7,27 +7,30 @@
  * touched phase shows a walking window: its last closed item, then the
  * active items and the open ones after the first of them, at most
  * {@link COLLAPSED_ITEMS} (a `… N more todos` row for the rest). Items the
- * update just completed strike through character by character once, on the
- * spinner clock from its frame when the list first shows (the still look
- * strikes them at once). Errors use the error frame and tint.
+ * update just completed strike through character by character once, a frame
+ * every `TODO_STRIKE_FRAME_MS` from its spinner frame when the list first
+ * shows, while the card's block is live; a settled block (its rows may go to
+ * scrollback) and the still look strike them at once. Errors use the error
+ * frame and tint.
  */
-import type { UiNode } from "@oh-my-pi/pi-tui";
+import { isSettled, type UiNode } from "@oh-my-pi/pi-tui";
 import type { Block, PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { branchRows, checklistItemText, isClosedItem, phaseTitleRow } from "@oh-my-pi/pi-tui/term/painters/checklist";
-import { SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-tui/term/painters/spinner";
 import { wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import type { TspChecklistItem, TspChecklistProps } from "@oh-my-pi/pi-wire";
+import {
+	TODO_STRIKE_FRAME_MS,
+	TODO_STRIKE_HOLD_FRAMES,
+	TODO_STRIKE_REVEAL_FRAMES,
+	TODO_STRIKE_TOTAL_FRAMES,
+} from "../../../tools/details/todo";
 import { nodePlain, stillMark } from "./agent-common";
 import { frameRows } from "./frame";
 import { defineToolLook, toolProps } from "./look";
 
 /** Open items a collapsed phase shows. */
 const COLLAPSED_ITEMS = 8;
-/** Frames a completion holds before its strike sweeps in. */
-const STRIKE_HOLD = 2;
-/** Frames the strike takes to sweep across. */
-const STRIKE_REVEAL = 12;
 
 interface TodoTerm {
 	readonly ops?: readonly string[];
@@ -89,8 +92,8 @@ function collapsedSelection(items: readonly TspChecklistItem[]): {
 
 /**
  * Where each checklist's strike started: the clock time and the spinner frame
- * it showed then (the sweep runs on the spinner clock from that frame), or
- * `done` once it finished.
+ * it showed then (the sweep counts strike frames from that frame), or `done`
+ * once it finished.
  */
 const strikeStarts = new WeakMap<UiNode, { readonly at: number; readonly frame: number } | "done">();
 
@@ -102,12 +105,12 @@ function strikeFrame(cx: PaintContext, checklist: UiNode): number | undefined {
 	if (start === "done") return undefined;
 	const now = cx.now();
 	if (start === undefined) {
-		const frame = Math.floor(now / SPINNER_INTERVAL_MS) % frames;
+		const frame = Math.floor(now / TODO_STRIKE_FRAME_MS) % frames;
 		strikeStarts.set(checklist, { at: now, frame });
 		return frame;
 	}
-	const frame = start.frame + Math.floor((now - start.at) / SPINNER_INTERVAL_MS);
-	if (frame <= STRIKE_HOLD + STRIKE_REVEAL) return frame;
+	const frame = start.frame + Math.floor((now - start.at) / TODO_STRIKE_FRAME_MS);
+	if (frame <= TODO_STRIKE_TOTAL_FRAMES) return frame;
 	strikeStarts.set(checklist, "done");
 	return undefined;
 }
@@ -115,12 +118,14 @@ function strikeFrame(cx: PaintContext, checklist: UiNode): number | undefined {
 /** Leading characters of `item` struck at strike `frame`. */
 function struckChars(item: TspChecklistItem, frame: number | undefined): number | undefined {
 	if (frame === undefined) return undefined;
-	if (frame <= STRIKE_HOLD) return 0;
+	if (frame <= TODO_STRIKE_HOLD_FRAMES) return 0;
 	const count = [...(typeof item.text === "string" ? item.text : item.text.map(span => span.t).join(""))].length;
-	return Math.ceil((count * Math.min(frame - STRIKE_HOLD, STRIKE_REVEAL)) / STRIKE_REVEAL);
+	return Math.ceil(
+		(count * Math.min(frame - TODO_STRIKE_HOLD_FRAMES, TODO_STRIKE_REVEAL_FRAMES)) / TODO_STRIKE_REVEAL_FRAMES,
+	);
 }
 
-function listRows(checklist: UiNode, cx: PaintContext, expanded: boolean, width: number): string[] {
+function listRows(checklist: UiNode, cx: PaintContext, expanded: boolean, animate: boolean, width: number): string[] {
 	const theme = cx.theme;
 	const props = checklist.props() as TspChecklistProps & {
 		term?: ChecklistTerm;
@@ -129,7 +134,7 @@ function listRows(checklist: UiNode, cx: PaintContext, expanded: boolean, width:
 	const struck = new Set(props.term?.struck ?? []);
 	const touched = !expanded && phases.length > 1 && props.term?.touched ? new Set(props.term.touched) : undefined;
 	const multi = phases.length > 1;
-	const frame = struck.size > 0 ? strikeFrame(cx, checklist) : undefined;
+	const frame = animate && struck.size > 0 ? strikeFrame(cx, checklist) : undefined;
 	const rows: string[] = [];
 	phases.forEach((phase, index) => {
 		if (touched && !touched.has(phase.id)) {
@@ -195,8 +200,9 @@ function paintTodo(node: UiNode, cx: PaintContext): Block {
 	);
 	const head = `${glyph} ${theme.fg("accent", "Todo")} ${theme.fg("dim", `${total} tasks`)}`;
 	const inner = Math.max(1, width - 4);
-	// The view opens natively; the terminal follows the transcript's expand state.
-	const body = listRows(checklist, cx, props.term?.expanded === true, inner);
+	// The view opens natively; the terminal follows the transcript's expand state. Only a live block
+	// animates: a settled one's rows may go to scrollback, so its fresh completions draw struck.
+	const body = listRows(checklist, cx, props.term?.expanded === true, !isSettled(node), inner);
 	return {
 		rows: frameRows(theme, width, {
 			head,

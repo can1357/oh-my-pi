@@ -240,3 +240,27 @@ describe("normalizeTools — union-shaped schemas", () => {
 		expect(params.required).toBeUndefined();
 	});
 });
+
+describe("normalizeTools — instance state", () => {
+	// Transports that serialize the context whole (pi-native, proxy) shipped each
+	// tool's `session` with every request: megabytes per call.
+	it("emits only Tool fields from a class-based tool", () => {
+		class SessionTool implements AgentTool<typeof toolSchema> {
+			readonly name = "demo";
+			readonly label = "Demo";
+			readonly description = "reads things";
+			readonly parameters = toolSchema;
+			readonly strict = true;
+			readonly customWireName = "demo_wire";
+			constructor(readonly session: { transcript: string }) {}
+			async execute() {
+				return { content: [{ type: "text" as const, text: "ok" }] };
+			}
+		}
+		const [out] =
+			normalizeTools([new SessionTool({ transcript: "x".repeat(10_000) })], { injectIntent: false }) ?? [];
+		const wire = JSON.parse(JSON.stringify(out));
+		expect(Object.keys(wire).sort()).toEqual(["customWireName", "description", "name", "parameters", "strict"]);
+		expect(wire).toMatchObject({ name: "demo", strict: true, customWireName: "demo_wire" });
+	});
+});

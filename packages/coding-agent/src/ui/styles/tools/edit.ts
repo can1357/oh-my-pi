@@ -273,7 +273,7 @@ function headGlyph(state: PaintState, icon: EditCard["icon"]): string {
 	const symbol = (key: string, color: string): string => theme.fg(color, theme.symbols.symbol(key));
 	switch (icon) {
 		case "spin":
-			return state.spinning && !state.cx.reduceMotion ? spinnerGlyph(state.cx) : "";
+			return state.spinning && state.cx.spinnerInterval > 0 ? spinnerGlyph(state.cx) : "";
 		case "pending":
 			return symbol("status.pending", "muted");
 		case "error":
@@ -333,10 +333,11 @@ function partRows(state: PaintState, part: EditBodyPart, inner: number, width: n
 		case "files": {
 			const rows: string[] = [];
 			for (const file of part.files) {
-				if (!file.diff && !file.error) continue;
+				if (!file.diff && !file.error && !file.notice) continue;
 				// The rule's dim color opened on the blank rows before it: the rule itself reads plain.
 				rows.push(...(rows.length === 0 ? ["", ""] : [""]), `── ${headPath(file.path)} ──`);
 				if (file.error) rows.push(theme.fg("error", replaceTabs(file.error)));
+				else if (file.notice) rows.push(theme.fg("dim", replaceTabs(file.notice)));
 				else rows.push(...streamRows(theme, file.diff!, file.path, state.expanded, inner).slice(1));
 			}
 			return rows;
@@ -425,7 +426,7 @@ function paintEdit(node: UiNode, cx: PaintContext): Block {
 	if (pending > 0) {
 		if (rows.length > 0) rows.push("");
 		const theme = cx.theme;
-		const glyph = state.spinning && !cx.reduceMotion ? `${spinnerGlyph(cx)} ` : "";
+		const glyph = state.spinning && cx.spinnerInterval > 0 ? `${spinnerGlyph(cx)} ` : "";
 		rows.push(
 			truncate(
 				`${glyph}${theme.fg("accent", "Edit")}: ${theme.fg("muted", theme.fg("dim", `${pending} more file${pending > 1 ? "s" : ""} pending…`))}`,

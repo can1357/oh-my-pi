@@ -1209,6 +1209,13 @@ export class TtsrManager {
 		}
 	}
 
+	/** Start a new transcript with no repeat history while keeping the registered rules. */
+	resetSession(): void {
+		this.#injectionRecords.clear();
+		this.#messageCount = 0;
+		this.resetBuffer();
+	}
+
 	/**
 	 * Reset stream buffers. Called at every stream boundary: a new turn, a new
 	 * assistant message within a turn, and a restarted response. Buffers never

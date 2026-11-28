@@ -2,8 +2,11 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import { clearCopilotIntegrationCache } from "@oh-my-pi/pi-ai/providers/github-copilot-headers";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import { stream } from "@oh-my-pi/pi-ai/stream";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { COPILOT_API_HEADERS } from "@oh-my-pi/pi-catalog/wire/github-copilot";
 
 afterEach(() => {
 	clearCopilotIntegrationCache();
@@ -418,4 +421,81 @@ describe("GitHub Copilot working-identity cache across streams", () => {
 		expect(fetchMock).toHaveBeenCalledTimes(3);
 		expect(seenIntegrationIds).toEqual(["copilot-chat", "copilot-developer-cli", "copilot-developer-cli"]);
 	});
+});
+
+describe("GitHub Copilot Responses caller abort", () => {
+	function makeCopilotResponsesModel(baseUrl: string): Model<"openai-responses"> {
+		return buildModel({
+			id: "gpt-5-mini",
+			name: "GPT-5 Mini",
+			api: "openai-responses",
+			provider: "github-copilot",
+			baseUrl,
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128000,
+			maxTokens: 64000,
+			headers: { ...COPILOT_API_HEADERS },
+		});
+	}
+
+	// When the upstream SSE stream is held open without events and the body
+	// reader does not surface the AbortSignal, the provider must still race the
+	// caller's abort instead of waiting for the idle/first-event watchdog
+	// (default 100s). The 3s bound absorbs scheduling jitter while staying
+	// orders of magnitude tighter than the watchdog.
+	it("settles within bounded time when the caller aborts a hung Copilot response that ignores fetch abort", async () => {
+		const fetchInvoked = Promise.withResolvers<void>();
+
+		// A body that never enqueues data and never reacts to the upstream
+		// signal. Real Bun fetch normally propagates abort to the body reader,
+		// but we cannot rely on it for every transport (HTTP/2, intermediaries,
+		// native sockets).
+		const fetchMock = (async (input: string | URL | Request, _init?: RequestInit): Promise<Response> => {
+			const url = getRequestUrl(input);
+			if (!url.endsWith("/responses")) {
+				throw new Error(`Unexpected fetch to ${url}`);
+			}
+
+			const body = new ReadableStream<Uint8Array>({
+				start(_controller) {
+					// Intentionally do nothing. No enqueue, no close, no error.
+					// The body parser will hang on the first read until something
+					// closes it from outside (which here only abort can do).
+				},
+			});
+
+			fetchInvoked.resolve();
+
+			return new Response(body, {
+				status: 200,
+				headers: {
+					"Content-Type": "text/event-stream",
+					"Cache-Control": "no-cache",
+				},
+			});
+		}) as typeof fetch;
+
+		const model = makeCopilotResponsesModel("https://api.githubcopilot.example/test");
+		const controller = new AbortController();
+		const providerStream = stream(model, testContext, {
+			apiKey: JSON.stringify({ token: "ghu_test_token", enterpriseUrl: undefined }),
+			signal: controller.signal,
+			fetch: fetchMock,
+		});
+
+		await fetchInvoked.promise;
+		await Bun.sleep(50);
+		controller.abort();
+
+		const result = await Promise.race([
+			providerStream.result(),
+			Bun.sleep(3_000).then(() => {
+				throw new Error("providerStream.result() did not settle within 3s after abort");
+			}),
+		]);
+
+		expect(result.stopReason).toBe("aborted");
+	}, 10_000);
 });

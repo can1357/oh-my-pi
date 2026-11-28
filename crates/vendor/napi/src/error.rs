@@ -78,8 +78,8 @@ pub(crate) struct ErrorRef {
 // SAFETY: the raw `napi_ref`/`napi_env` are only ever dereferenced via napi FFI
 // on the owning JS thread — `Error::referenced_value` gates reads on `env`
 // identity, `owner_thread` and `current_thread_owns_custom_gc`, and
-// `ErrorRef::drop` releases on the owning thread directly, routes the release
-// through the env's custom-GC TSFN, or leaks. Moving or sharing an `ErrorRef`
+// `ErrorRef::drop` releases on the owning thread directly, hands the reference
+// to the env's custom-GC handle, or leaks. Moving or sharing an `ErrorRef`
 // (and cloning its `Arc`) only copies/reads the pointer values; it never touches
 // V8 off-thread. The captured `Arc<CustomGcHandle>` is itself `Send + Sync`.
 // Mirrors the `unsafe impl Send/Sync for Error`.
@@ -114,7 +114,7 @@ impl ErrorRef {
       env,
       owner_thread: std::thread::current().id(),
       #[cfg(all(feature = "napi4", not(feature = "noop")))]
-      custom_gc: crate::bindgen_prelude::current_custom_gc_handle(),
+      custom_gc: crate::bindgen_prelude::custom_gc_handle_for_env(env),
     }
   }
 
@@ -154,37 +154,20 @@ impl Drop for ErrorRef {
     if let Some(handle) = self.custom_gc.take() {
       let env = self.env;
       let raw = self.raw;
-      // Read-lock held across the call so the custom-GC TSFN can't be
-      // finalized mid-call (same protocol as ArrayBuffer/TypedArray drops).
-      handle.with_read_aborted(|aborted| {
-        if aborted {
-          // The owning env is gone and V8 has already invalidated the
-          // reference — releasing it now would be a use-after-free. Leaking
-          // it is safe: the env teardown reclaimed the handle's storage.
-          return;
-        }
-        if crate::bindgen_prelude::current_thread_owns_custom_gc(&handle) {
-          release_error_reference(env, raw);
-        } else {
-          // The last `Arc` dropped off the owning JS thread. Route the release
-          // through the env's custom-GC TSFN, exactly like Buffer/TypedArray
-          // drops.
-          let status =
-            unsafe { sys::napi_call_threadsafe_function(handle.get_raw(), raw.cast(), 1) };
-          assert!(
-            status == sys::Status::napi_ok || status == sys::Status::napi_closing,
-            "Call custom GC in ErrorRef::drop failed {}",
-            Status::from(status)
-          );
-        }
+      // On the env's JS thread while the env runs: release now. Anywhere else, the handle
+      // keeps the reference for the JS thread (or for env teardown) to release.
+      crate::bindgen_prelude::CustomGcHandle::release_ref(&handle, raw, || {
+        release_error_reference(env, raw)
       });
       return;
     }
     // No custom-GC handle captured (pre-napi4 build, or the reference was
     // created before module registration), so there is nothing to route the
     // release through. Releasing is only correct on the owning JS thread; from
-    // anywhere else, leak instead. The leak is bounded — env teardown reclaims
-    // the reference — whereas an off-thread `napi_reference_unref` corrupts V8's
+    // anywhere else, leak instead. The leak is bounded — env teardown resets the
+    // reference's V8 handle, though Node never frees the `napi_ref` box (48 bytes),
+    // as it frees only references it owns — whereas an off-thread
+    // `napi_reference_unref` corrupts V8's
     // `GlobalHandles` on native and, on `wasm32-wasip1-threads`, faults inside
     // the emnapi shim because the calling agent has no entry for `env`.
     if self.owner_thread != std::thread::current().id() {
@@ -595,41 +578,14 @@ fn type_without_coercion(
   Some(value_type)
 }
 
-/// The load-time `Reflect` / `Reflect.getOwnPropertyDescriptor` pair of the env
-/// this thread registered, kept as own data properties of a private holder
-/// object behind a single `napi_ref`.
-struct ReflectIntrinsics {
-  env: sys::napi_env,
-  holder: sys::napi_ref,
-  // Whether `napi_add_env_cleanup_hook` SUCCEEDED for this env. Only then does
-  // a later pointer-equal entry prove the env is alive: the hook clears the
-  // slot at teardown, so a stale entry cannot survive to be matched. Without
-  // it (pre-napi3, or a hook call that failed) an embedder can tear the env
-  // down and receive the same `napi_env` address for a new one — and deleting
-  // the superseded reference through that recycled pointer would hand a dead
-  // ref to a live env. Only `cache_reflect_intrinsics_for_env` reads it, so it
-  // goes dead when `noop` compiles that registration out.
-  #[cfg_attr(feature = "noop", allow(dead_code))]
-  cleanup_hook_installed: bool,
-}
-
-thread_local! {
-  // One slot per OS thread, keyed by env — the same one-env-per-OS-thread
-  // invariant `CURRENT_CUSTOM_GC_HANDLE` documents and relies on. Installed by
-  // `cache_reflect_intrinsics_for_env` on the registering (env's own) thread;
-  // read by `reflect_get_own_property_descriptor` on that same thread, which is
-  // the only thread whose napi implementation can resolve the env at all.
-  static REFLECT_INTRINSICS: std::cell::RefCell<Option<ReflectIntrinsics>> =
-    const { std::cell::RefCell::new(None) };
-}
-
 #[cfg(not(feature = "noop"))]
 thread_local! {
   // Counts invocations of the probe object's accessor getter, so
   // `probe_get_own_property_descriptor` can prove the candidate descriptor
-  // reader did not fall back to a `[[Get]]`. Thread-local for the same
-  // one-env-per-OS-thread reason as `REFLECT_INTRINSICS`; registration and the
-  // probe calls all run on the env's own thread.
+  // reader did not fall back to a `[[Get]]`. Thread-local because the probe
+  // runs synchronously on the registering env's own thread, from the call into
+  // the candidate to the check of the count, so the getter it counts runs there
+  // too.
   static PROBE_ACCESSOR_HITS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
@@ -860,13 +816,19 @@ fn probe_get_own_property_descriptor(
 /// to an empty reason/cause permanently, and the impostor is never invoked
 /// during capture. The retained value itself never depends on any of this.
 ///
-/// Best effort: any failure clears the pending exception and leaves the slot
-/// unchanged. `napi_get_global`, `napi_get_named_property` and
-/// `napi_create_reference` (on an object) are all implemented by emnapi, so
-/// the cache works on `wasm32-wasip1` and `wasm32-wasip1-threads` too — only
-/// the env-cleanup hook is skipped there (see below).
+/// Best effort: any failure clears the pending exception and leaves `env`
+/// without a cache. The cache lives in `env`'s own registration record
+/// (`registration`, from `env_registration::begin`), so every load of the addon
+/// keeps its own pair, and the record's env cleanup hook deletes the reference
+/// at teardown. That hook is added through emnapi's shim on wasm, so the cache
+/// works the same on `wasm32-wasip1` and `wasm32-wasip1-threads`:
+/// `napi_get_global`, `napi_get_named_property` and `napi_create_reference` (on
+/// an object) are all implemented by emnapi.
 #[cfg(not(feature = "noop"))]
-pub(crate) fn cache_reflect_intrinsics_for_env(env: sys::napi_env) {
+pub(crate) fn cache_reflect_intrinsics_for_env(
+  env: sys::napi_env,
+  registration: crate::bindgen_runtime::env_registration::RegistrationId,
+) {
   let mut global = ptr::null_mut();
   if unsafe { sys::napi_get_global(env, &mut global) } != sys::Status::napi_ok {
     clear_pending_exception(env);
@@ -901,10 +863,9 @@ pub(crate) fn cache_reflect_intrinsics_for_env(env: sys::napi_env) {
   }
   // Registration-time sanity probe: only a candidate that behaves like the
   // intrinsic on an object of known, non-interposable shape is cached. A
-  // failing candidate is dropped here — leaving the slot as it was, so this
-  // env's captures degrade to an empty reason/cause (or, on a re-registration,
-  // keep the pair the first load vetted) — rather than being invoked during
-  // every capture.
+  // failing candidate is dropped here — this env then has no cache, so its
+  // captures degrade to an empty reason/cause — rather than being invoked
+  // during every capture.
   if !probe_get_own_property_descriptor(env, reflect, get_own_property_descriptor) {
     return;
   }
@@ -948,105 +909,12 @@ pub(crate) fn cache_reflect_intrinsics_for_env(env: sys::napi_env) {
     clear_pending_exception(env);
     return;
   }
-  REFLECT_INTRINSICS.with(|slot| {
-    let mut slot = slot.borrow_mut();
-    let previous = slot.take();
-    let cleanup_hook_installed = match previous {
-      Some(superseded) if superseded.env == env => {
-        // A pointer-equal entry. Whether it belongs to a LIVE env depends on
-        // the cleanup hook: with it installed, teardown clears the slot, so a
-        // surviving entry proves this is the same live env re-registering
-        // (`delete require.cache` and re-`require`, see unload.spec.js) and
-        // the superseded holder can be released immediately. The hook from the
-        // first registration stays in place — Node aborts on a duplicate
-        // `(fn, arg)` cleanup-hook pair, so it must not be registered again.
-        //
-        // Without the hook (pre-napi3, or an installation that failed),
-        // pointer equality proves nothing: an embedder can destroy the env and
-        // recreate one at the same address on this thread, and the entry would
-        // be the DEAD env's. Deleting its already-reclaimed reference through
-        // the new env risks corrupting the live runtime, so the superseded
-        // reference is deliberately leaked instead — one reference per env
-        // recreation, bounded, and only on configurations that cannot observe
-        // teardown. On wasm the delete stays unconditional: the slot lives in
-        // the instance's own linear memory and dies with it, so a pointer
-        // match there is the same live instance by construction.
-        if superseded.cleanup_hook_installed || cfg!(target_family = "wasm") {
-          let _ = unsafe { sys::napi_delete_reference(env, superseded.holder) };
-          clear_pending_exception(env);
-        }
-        superseded.cleanup_hook_installed
-      }
-      _ => {
-        // Empty slot, or a different env owned this thread before. In the latter
-        // case that env is gone (one env per OS thread) and its teardown already
-        // reclaimed the superseded reference — reachable only on builds without
-        // napi3's cleanup hook, which would have cleared the slot — so there is
-        // nothing to release and deleting through a dead env would be the real
-        // bug. Either way this is the first hook registration for `env`.
-        //
-        // Registration is best effort, like the cache itself: without the hook
-        // the slot is cleared by thread death instead (a worker's thread dies
-        // with its env), and the reference is reclaimed by env teardown.
-        //
-        // Not on wasm: referencing `napi_add_env_cleanup_hook` from Rust imports
-        // it under the `env` wasm module, while emnapi's static archive declares
-        // it under `napi` — wasm-ld refuses the mismatch. The hook exists for a
-        // native embedder tearing an env down and reusing its thread (and
-        // possibly the env pointer); on wasm this thread-local lives inside the
-        // instance's own linear memory and dies with the instance, whose
-        // context is never reused after `Context.destroy()`, so there is no
-        // stale slot for a later env to match.
-        #[cfg(all(feature = "napi3", not(target_family = "wasm")))]
-        {
-          let hook_status = unsafe {
-            sys::napi_add_env_cleanup_hook(env, Some(reflect_intrinsics_env_cleanup), env.cast())
-          };
-          hook_status == sys::Status::napi_ok
-        }
-        #[cfg(not(all(feature = "napi3", not(target_family = "wasm"))))]
-        {
-          false
-        }
-      }
-    };
-    *slot = Some(ReflectIntrinsics {
-      env,
-      holder: reference,
-      cleanup_hook_installed,
-    });
-  });
-}
-
-/// Drops the cached `Reflect` pair if it belongs to `env`, a superseded env that was never
-/// torn down (see `release_superseded_env` in `module_register.rs`); napi calls through it
-/// are still legal.
-#[cfg(all(not(feature = "noop"), feature = "napi3", not(target_family = "wasm")))]
-pub(crate) fn release_reflect_intrinsics(env: sys::napi_env) {
-  unsafe { reflect_intrinsics_env_cleanup(env.cast()) };
-}
-
-/// Env-teardown counterpart of [`cache_reflect_intrinsics_for_env`]: drops the
-/// cached holder reference while the env can still delete it, and clears the
-/// slot so a later env reusing this thread (an embedder reload) can never match
-/// a stale entry through a recycled env pointer.
-///
-/// Runs on the env's own thread, before the env is destroyed — napi calls are
-/// still legal here.
-#[cfg(all(not(feature = "noop"), feature = "napi3", not(target_family = "wasm")))]
-unsafe extern "C" fn reflect_intrinsics_env_cleanup(arg: *mut c_void) {
-  REFLECT_INTRINSICS.with(|slot| {
-    let mut slot = slot.borrow_mut();
-    if slot
-      .as_ref()
-      .is_some_and(|cache| cache.env.cast::<c_void>() == arg)
-    {
-      if let Some(cache) = slot.take() {
-        let _ = unsafe { sys::napi_delete_reference(cache.env, cache.holder) };
-        clear_pending_exception(cache.env);
-      }
-    }
-  });
+  // The record keeps the reference and deletes it at `env`'s teardown. If the
+  // record is already gone, nothing would delete it, so drop it now.
+  if !crate::bindgen_runtime::env_registration::set_reflect_intrinsics(registration, reference) {
+    let _ = unsafe { sys::napi_delete_reference(env, reference) };
+    clear_pending_exception(env);
+  }
 }
 
 /// Resolves the env's **cached** `Reflect.getOwnPropertyDescriptor`, returning
@@ -1069,8 +937,11 @@ unsafe extern "C" fn reflect_intrinsics_env_cleanup(arg: *mut c_void) {
 /// all (a strictly stronger property than observing the patch late).
 ///
 /// `None` — an env with no usable cache, because `Reflect` was missing or
-/// unusable at registration or the env never registered this addon — makes the
-/// capture degrade to an empty reason/cause. It never falls back to a `[[Get]]`.
+/// unusable at registration, the env never registered this addon, its teardown
+/// already ran, or the build cannot observe teardown (on wasm below Node-API
+/// 3) — makes the capture degrade to an empty reason/cause. It never falls back
+/// to a `[[Get]]`. The lookup is by `env`, so several loads of the addon on one
+/// thread each read their own pair.
 ///
 /// Reading the pair back off the private holder is safe: both are its own
 /// **data** properties on an ordinary object that never escaped to JavaScript,
@@ -1079,12 +950,7 @@ unsafe extern "C" fn reflect_intrinsics_env_cleanup(arg: *mut c_void) {
 fn reflect_get_own_property_descriptor(
   env: sys::napi_env,
 ) -> Option<(sys::napi_value, sys::napi_value)> {
-  let holder = REFLECT_INTRINSICS.with(|slot| {
-    slot
-      .borrow()
-      .as_ref()
-      .and_then(|cache| (cache.env == env).then_some(cache.holder))
-  })?;
+  let holder = crate::bindgen_runtime::env_registration::reflect_intrinsics(env)?;
   let mut holder_value = ptr::null_mut();
   if unsafe { sys::napi_get_reference_value(env, holder, &mut holder_value) }
     != sys::Status::napi_ok
@@ -1230,6 +1096,20 @@ fn data_property_without_get(
   None
 }
 
+/// Whether `value` is a native error whose `name` data property, own or inherited, is
+/// `"EvalError"`. Reads it as [`data_property_without_get`] does, so no getter runs, and
+/// `napi_is_error` rules out a `Proxy` first, so no trap runs either. `false` when it cannot
+/// tell. Must be called with no exception pending.
+pub(crate) fn is_eval_error_without_get(env: sys::napi_env, value: sys::napi_value) -> bool {
+  let mut is_error = false;
+  if unsafe { sys::napi_is_error(env, value, &mut is_error) } != sys::Status::napi_ok || !is_error {
+    return false;
+  }
+  data_property_without_get(env, value, c"name")
+    .and_then(|name| owned_string_without_coercion(env, name))
+    .is_some_and(|name| name == "EvalError")
+}
+
 /// Copies `value` into an owned `String` when — and only when — it is already a
 /// JavaScript string. Returns `None` for every other value type instead of
 /// coercing it.
@@ -1238,30 +1118,41 @@ fn owned_string_without_coercion(env: sys::napi_env, value: sys::napi_value) -> 
     return None;
   }
 
-  let mut length = 0;
-  if unsafe { sys::napi_get_value_string_utf8(env, value, ptr::null_mut(), 0, &mut length) }
+  let mut len = 0;
+  if unsafe { sys::napi_get_value_string_utf8(env, value, ptr::null_mut(), 0, &mut len) }
     != sys::Status::napi_ok
   {
     clear_pending_exception(env);
     return None;
   }
-  let mut bytes = vec![0; length + 1];
-  let mut written = 0;
+
+  // `+= 1` for the NUL terminator `napi_get_value_string_utf8` writes after the string bytes
+  len += 1;
+  let mut bytes: Vec<u8> = Vec::with_capacity(len);
+
+  let mut written_byte_count = 0;
   let status = unsafe {
     sys::napi_get_value_string_utf8(
       env,
       value,
       bytes.as_mut_ptr().cast(),
-      bytes.len(),
-      &mut written,
+      len,
+      &mut written_byte_count,
     )
   };
   if status != sys::Status::napi_ok {
     clear_pending_exception(env);
     return None;
   }
-  bytes.truncate(written);
-  String::from_utf8(bytes).ok()
+
+  debug_assert!(written_byte_count < len);
+  // SAFETY: `napi_get_value_string_utf8` initialized the first `written_byte_count` bytes,
+  // followed by a NUL terminator, so `written_byte_count < len`
+  unsafe { bytes.set_len(written_byte_count) };
+
+  // SAFETY: `napi_get_value_string_utf8` only writes valid UTF-8, and `bytes` holds the whole
+  // string, so it does not end partway through a multi-byte character
+  Some(unsafe { String::from_utf8_unchecked(bytes) })
 }
 
 /// Drops any exception a failed N-API call left pending.

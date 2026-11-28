@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { buildDiscoveredModel, buildModel } from "@oh-my-pi/pi-catalog/build";
+import { COPILOT_API_HEADERS } from "@oh-my-pi/pi-catalog/wire/github-copilot";
 import { searchAnthropic } from "@oh-my-pi/pi-coding-agent/web/search/providers/anthropic";
 import { createInMemoryAuthStorage } from "../../helpers/agent-session-setup";
 import { rejectionOf } from "../../helpers/rejection";
@@ -49,6 +50,35 @@ function createCustomProviderFixture(headers?: Record<string, string>) {
 	return { authStorage, modelRegistry, model };
 }
 
+/** The key a Copilot OAuth login resolves to: a JSON envelope, not a bare token. */
+const COPILOT_OAUTH_TOKEN = "tid=copilot-oauth-token";
+const COPILOT_OAUTH_KEY = JSON.stringify({
+	token: COPILOT_OAUTH_TOKEN,
+	enterpriseUrl: "ghe.example.test",
+	apiEndpoint: "https://copilot-api.ghe.example.test",
+});
+
+/** A GitHub Copilot-hosted Claude model, reached over Copilot's `/v1/messages` proxy. */
+function createCopilotFixture(headers?: Record<string, string>, key = COPILOT_OAUTH_KEY) {
+	const authStorage = createInMemoryAuthStorage();
+	authStorage.keys.setRuntime("github-copilot", key);
+	const modelRegistry = new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true });
+	const model = buildModel({
+		id: "claude-sonnet-4.5",
+		name: "Copilot Claude Sonnet 4.5",
+		api: "anthropic-messages",
+		provider: "github-copilot",
+		baseUrl: "https://api.individual.githubcopilot.com",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: 16_384,
+		headers,
+	});
+	return { authStorage, modelRegistry, model };
+}
+
 function makeCaptureFetch(): {
 	fetch: FetchImpl;
 	body: () => Record<string, unknown> | undefined;
@@ -82,6 +112,120 @@ function makeCaptureFetch(): {
 		headers: () => capturedHeaders,
 	};
 }
+
+describe("Anthropic search session headers", () => {
+	// Copilot's `/v1/messages` proxy answers with a `msg_blocked` placeholder
+	// unless the Copilot CLI's session header is present (#20678).
+	it("reaches GitHub Copilot-hosted Claude like streaming Messages does", async () => {
+		const fixture = createCopilotFixture();
+		try {
+			const cap = makeCaptureFetch();
+			await searchAnthropic({
+				query: "copilot session header",
+				systemPrompt: "Use web search.",
+				sessionId: "session-20678",
+				authStorage: fixture.authStorage,
+				modelRegistry: fixture.modelRegistry,
+				model: fixture.model,
+				fetch: cap.fetch,
+			});
+
+			const headers = cap.headers();
+			expect(cap.url()).toBe("https://copilot-api.ghe.example.test/v1/messages");
+			expect(headers?.get("authorization")).toBe(`Bearer ${COPILOT_OAUTH_TOKEN}`);
+			expect(headers?.get("x-client-session-id")).toBe("session-20678");
+			expect(headers?.get("x-initiator")).toBe("agent");
+			expect(headers?.get("copilot-integration-id")).toBe("copilot-developer-cli");
+			// Copilot's proxy takes no Anthropic betas or Claude Code app headers.
+			expect(headers?.get("anthropic-beta")).toBeNull();
+			expect(headers?.get("x-app")).toBeNull();
+		} finally {
+			fixture.authStorage.close();
+		}
+	});
+
+	it("keeps the resolved Copilot integration id over the catalog's", async () => {
+		// Bundled Copilot models carry `Copilot-Integration-Id: copilot-developer-cli`; chat
+		// resolves `copilot-chat` for a personal login, and search must send the same.
+		const personalKey = JSON.stringify({ token: COPILOT_OAUTH_TOKEN });
+		const fixture = createCopilotFixture({ ...COPILOT_API_HEADERS }, personalKey);
+		try {
+			const cap = makeCaptureFetch();
+			await searchAnthropic({
+				query: "copilot integration id",
+				systemPrompt: "Use web search.",
+				sessionId: "session-20678",
+				authStorage: fixture.authStorage,
+				modelRegistry: fixture.modelRegistry,
+				model: fixture.model,
+				fetch: cap.fetch,
+			});
+
+			expect(cap.headers()?.get("copilot-integration-id")).toBe("copilot-chat");
+		} finally {
+			fixture.authStorage.close();
+		}
+	});
+
+	it("keeps a configured X-Client-Session-Id over the session id", async () => {
+		const fixture = createCopilotFixture({ "x-client-session-id": "configured-session" });
+		try {
+			const cap = makeCaptureFetch();
+			await searchAnthropic({
+				query: "copilot session header",
+				systemPrompt: "Use web search.",
+				sessionId: "session-20678",
+				authStorage: fixture.authStorage,
+				modelRegistry: fixture.modelRegistry,
+				model: fixture.model,
+				fetch: cap.fetch,
+			});
+
+			expect(cap.headers()?.get("x-client-session-id")).toBe("configured-session");
+		} finally {
+			fixture.authStorage.close();
+		}
+	});
+
+	it("sends Copilot's session header for a custom provider declaring the github-copilot backend", async () => {
+		// The provider id is not `github-copilot`, so search takes the generic endpoint branch;
+		// the declared backend still decides the host's session header.
+		const authStorage = createInMemoryAuthStorage();
+		authStorage.keys.setRuntime("copilot-gateway", "gateway-token");
+		const modelRegistry = new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true });
+		const model = buildDiscoveredModel(
+			{
+				id: "claude-sonnet-4.5",
+				name: "Gateway Claude Sonnet 4.5",
+				api: "anthropic-messages",
+				provider: "copilot-gateway",
+				baseUrl: "https://copilot-gateway.example.test",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 200_000,
+				maxTokens: 16_384,
+			},
+			"github-copilot",
+		);
+		try {
+			const cap = makeCaptureFetch();
+			await searchAnthropic({
+				query: "aliased copilot session header",
+				systemPrompt: "Use web search.",
+				sessionId: "session-20678",
+				authStorage,
+				modelRegistry,
+				model,
+				fetch: cap.fetch,
+			});
+
+			expect(cap.headers()?.get("x-client-session-id")).toBe("session-20678");
+		} finally {
+			authStorage.close();
+		}
+	});
+});
 
 describe("Anthropic search request body", () => {
 	it("uses the selected model transport, custom-endpoint bearer credentials, and attribution", async () => {

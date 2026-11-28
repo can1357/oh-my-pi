@@ -96,6 +96,20 @@ mise use -g github:can1357/oh-my-pi
 
 macOS · Linux · Windows · bun ≥ 1.4.4
 
+### 卸载
+
+```sh
+curl -fsSL https://omp.sh/install | sh -s -- --uninstall
+```
+
+```powershell
+& ([scriptblock]::Create((irm https://omp.sh/install.ps1))) -Uninstall
+```
+
+安装脚本当初装了什么，卸载程序就清什么：独立二进制（`~/.local/bin/omp`，或 `$PI_INSTALL_DIR/omp`；Windows 上是 `%LOCALAPPDATA%\omp\omp.exe`，以及安装程序加进用户 `PATH` 的条目），或者 bun 全局包。npm 全局安装的 `@oh-my-pi/pi-coding-agent` 也会一并移除。Homebrew 安装的，卸载程序会打印 `brew uninstall omp`，由你自己执行。
+
+omp 的状态都放在 `~/.omp`（如果设置了 `$HOME/$PI_CONFIG_DIR`，就是那个目录；如果运行过 `omp config init-xdg`，还会用到 `$XDG_*_HOME/omp`）：会话、设置、凭据、缓存，还有 omp 创建的 git worktree。这些状态默认保留，只有你在提示里确认，才会删除；提示只在交互式运行时出现（PowerShell，或 `sh install.sh --uninstall`）。`curl … | sh` 这类运行从不弹提示，因此不会自行删掉状态。想卸载时把状态一并删掉、又不想被问，就加上 `--purge`（PowerShell：`-Purge`）。你自己添加的 shell 补全文件和 `PATH` 条目会原样保留。
+
 ### Shell 补全
 
 `omp` 会根据实时的命令/参数元数据，为 **bash**、**zsh** 和 **fish** 生成自己的补全脚本，因此永远不会与实际 CLI 脱节。子命令、参数和枚举值是静态补全的；模型名（`--model`、`--smol`、`--slow`、`--plan`）会根据内置模型目录解析，`--resume` 则根据磁盘上的会话解析。
@@ -223,9 +237,9 @@ _[观看录屏 ↗](https://omp.sh/clips/web.mp4)_
 
 在 Zed 中运行 omp，你得到的就是在终端里使用的同一个智能体——读取你正在看的缓冲区，通过编辑器自身的保存流程写入，在编辑器的终端里启动 shell。有破坏性的工具会先暂停并弹出权限提示，确认一次即可。无需桥接，无需插件，也不用额外维护一套需要来回同步的智能体。
 
-### 15 · 继承你其他工具已经写好的配置
+### 15 · 直接用你仓库里现成的配置
 
-其他智能体都附带一个导入器，指望你去转换。omp 直接以原生格式读取磁盘上已有的八种格式——Cursor MDC、Cline .clinerules、Codex AGENTS.md、Copilot applyTo 等等。没有迁移脚本，没有 YAML 转 TOML，也没有“仅支持部分功能”的脚注。团队上个季度写的配置，今晚照样能用。
+你们团队已经提交到仓库里的项目文件，omp 都会按原本的格式直接读取——`AGENTS.md`、`CLAUDE.md`、`.claude/` 下的技能、命令和 MCP 服务器、Codex 的 `.codex/config.toml` 和技能、OpenCode 的 `opencode.json`，以及 `.agents/`。主目录仍然是你自己的：omp 绝不读取其他工具的 `~/` 配置；如果你以前开过这个选项，omp 会弹一次提示，问你要不要把这些配置复制或软链接到 `~/.omp/agent`。
 
 ### 16 · omp commit：原子拆分，校验过的提交信息
 
@@ -343,7 +357,7 @@ Eval 的 `computer` 辅助方法——`computer.window(...)`、`win.screenshot()
 
 直连 API 和网关。可按角色混用不同提供商。
 
-Anthropic `oauth` · OpenAI · OpenAI Codex `oauth` · Google Gemini · Google Vertex · Google Antigravity `oauth` · xAI · SuperGrok `oauth` · DeepSeek · Mistral · Groq · Cerebras · SambaNova · Fireworks · Together · Modular · Baseten · Chutes · DeepInfra · Hugging Face · NVIDIA · Meta · Inception · Amazon Bedrock · Azure OpenAI · SiliconFlow · GMI Cloud · CoreWeave · Sakana AI · Command Code · Charm Hyper · StepFun · Helmcode · OpenRouter · Synthetic · Vercel AI Gateway · Cloudflare AI Gateway · Wafer Serverless · Scaleway · Otari · Refuseless
+Anthropic `oauth` · OpenAI · OpenAI Codex `oauth` · Google Gemini · Google Vertex · xAI · SuperGrok `oauth` · DeepSeek · Mistral · Groq · Cerebras · SambaNova · Fireworks · Together · Modular · Baseten · Chutes · DeepInfra · ArkaneCloud · Hugging Face · NVIDIA · Meta · Inception · Amazon Bedrock · Azure OpenAI · SiliconFlow · GMI Cloud · CoreWeave · Sakana AI · Command Code · Charm Hyper · StepFun · Helmcode · OpenRouter · Synthetic · Vercel AI Gateway · Cloudflare AI Gateway · Wafer Serverless · Scaleway · Otari · Refuseless
 
 ### 编程套餐
 
@@ -385,7 +399,7 @@ modelRoles:
 
 ### 让路由真正好用的四个开关
 
-- **自定义提供商** — 在 `~/.omp/agent/models.yml` 中声明任何支持以下协议的服务：`openai-completions`、`openai-responses`、`openai-codex-responses`、`azure-openai-responses`、`anthropic-messages`、`bedrock-converse-stream`、`google-generative-ai`、`google-gemini-cli`、`google-vertex`、`typesafe`、`openrouter-decisions`、`openai-decisions` 或 `workers-ai-systemone`（后几个为评判类 API）。
+- **自定义提供商** — 在 `~/.omp/agent/models.yml` 中声明任何支持以下协议的服务：`openai-completions`、`openai-responses`、`openai-codex-responses`、`azure-openai-responses`、`anthropic-messages`、`bedrock-converse-stream`、`google-generative-ai`、`google-vertex`、`typesafe`、`openrouter-decisions`、`openai-decisions` 或 `workers-ai-systemone`（后几个为评判类 API）。
 - **回退链** — 在 `retry.fallbackChains` 下按角色或按模型配置回退链。当主模型返回 429 或触及配额上限时，链中下一项接管本轮剩余部分——冷却后自动恢复。
 - **按路径限定模型** — 给 `enabledModels` 和 `disabledProviders` 条目加上 `path:` 前缀，即可在某个仓库固定一组不同的模型，而无需改动全局配置。限定条目覆盖该路径及其下所有内容。
 - **轮换凭据** — 为每个提供商叠加多个 API 密钥，运行时会按会话亲和性轮换，并对每个凭据单独退避。适合一个密钥中午前就会把配额烧光的情况。
@@ -482,7 +496,7 @@ Exa 也可以通过 `/login exa` 存储 API 密钥；显式选择无密钥模式
 | keys          | Kitty 键盘协议，带 xterm 回退 · PHF 完美哈希查找                      | phf                                       |   1,740 |
 | ast           | ast-grep 模式匹配与结构化重写                                         | ast-grep-core                             |   1,510 |
 | diff          | 为工具和预览提供结构化文件 diff                                       | 自研                                      |   1,030 |
-| pty           | 为 sudo · ssh 交互式提示分配原生 PTY                                  | portable-pty                              |     630 |
+| pty           | 为 sudo · ssh 交互式提示分配原生 PTY                                  | in-tree                                   |     630 |
 | crash_handler | 原生崩溃捕获与上报                                                    | 自研                                      |     610 |
 | highlight     | 语法高亮 · 11 种语义类别 · 30+ 个别名                                 | syntect                                   |     550 |
 | appearance    | Mode 2031 + 通过 CoreFoundation FFI 实现 macOS 原生深色/浅色检测      | core-foundation                           |     450 |
@@ -573,7 +587,7 @@ omp 派生自 [Mario Zechner](https://github.com/mariozechner) 的 [Pi](https://
 
 ### 自动发现
 
-首次运行时，omp 会继承磁盘上已有的一切：来自 `.claude`、`.cursor`、`.windsurf`、`.gemini`、`.codex`、`.cline`、`.github/copilot` 和 `.vscode` 的规则、技能和 MCP 服务器。无需迁移脚本。
+omp 会从 `.claude`、`.codex`、`.opencode`/`opencode.json`、`.agents`，以及单独的 `AGENTS.md`/`CLAUDE.md` 里读取项目级上下文、技能、命令和 MCP 服务器。其他工具放在主目录里的配置，omp 一概不读。
 
 ### 可扩展性
 

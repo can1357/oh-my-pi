@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type OAuthCredential, type UsageProvider, resolvedApiKeyBearer, withAuth } from "@oh-my-pi/pi-ai";
 import * as oauth from "@oh-my-pi/pi-ai/oauth";
-import type { OAuthCredentials, OAuthProviderId } from "@oh-my-pi/pi-ai/oauth/types";
+import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
@@ -16,8 +16,8 @@ describe("AuthStorage account rotation", () => {
 	let usageExhausted = false;
 
 	const stickyInvalidationSource = "auth-storage-rotation-issue-4982";
-	const targetProvider = "issue-4982-target" as OAuthProviderId;
-	const unrelatedProvider = "issue-4982-unrelated" as OAuthProviderId;
+	const targetProvider = "issue-4982-target";
+	const unrelatedProvider = "issue-4982-unrelated";
 	let nextLoginCredential: OAuthCredentials | undefined;
 
 	const findSessionWhereFreshSelectionChanges = async (
@@ -329,7 +329,7 @@ describe("AuthStorage account rotation", () => {
 		const googleRpc429 = (message: string, reason: string, retryDelay: string) =>
 			Object.assign(
 				new Error(
-					`Cloud Code Assist API error (429): ${JSON.stringify({
+					`Google API error (429): ${JSON.stringify({
 						error: {
 							code: 429,
 							message,
@@ -351,20 +351,16 @@ describe("AuthStorage account rotation", () => {
 			async key => {
 				attemptedKeys.push(key);
 				if (key === "drained") {
-					throw googleRpc429("Individual quota reached. Resets in 114h13m4s.", "QUOTA_EXHAUSTED", "411184.67s");
+					throw googleRpc429("Quota exceeded for this account.", "QUOTA_EXHAUSTED", "411184.67s");
 				}
 				if (attemptedKeys.length === 1) {
-					throw googleRpc429(
-						"You have exhausted your capacity on this model. Resets in 0s.",
-						"RATE_LIMIT_EXCEEDED",
-						"0.3s",
-					);
+					throw googleRpc429("Quota exceeded for this model.", "QUOTA_EXHAUSTED", "0.3s");
 				}
 				return "ok";
 			},
 		);
 
-		// healthy → capacity 429 (blocked 0.3 s); drained frees first and fails for
+		// healthy → quota 429 (blocked 0.3 s); drained frees first and fails for
 		// days; the request then waits for, and resends, the healthy bearer.
 		expect(result).toBe("ok");
 		expect(attemptedKeys).toEqual(["healthy", "drained", "healthy"]);

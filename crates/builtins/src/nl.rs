@@ -214,7 +214,7 @@ impl Style {
 			Some(b't') => Ok(Self::NonEmpty),
 			Some(b'n') => Ok(Self::None),
 			Some(b'p') => {
-				let ere = bre::bre_to_ere(&spec[1..], bre::Backrefs::Supported)
+				let ere = bre::bre_to_ere(&spec[1..], bre::Backrefs::Supported, bre::StackedRepeats::Allowed)
 					.map_err(|error| Invalid::Fatal(error.message().to_owned()))?;
 				Regex::new(&ere)
 					.map(Self::Matching)
@@ -251,7 +251,7 @@ impl Style {
 			// `fancy-regex` matches `str`: invalid UTF-8 matches as U+FFFD,
 			// and valid lines (the norm) are borrowed, not copied.
 			Self::Matching(regex) => regex
-				.is_match(&String::from_utf8_lossy(text))
+				.is_match(&*String::from_utf8_lossy(text))
 				.map_err(|_| Stop::Fatal("error in regular expression search".to_owned()))?,
 		})
 	}

@@ -4,6 +4,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type AuthStorage, type Context, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { ModelRegistry, type ProviderConfigInput } from "../../src/config/model-registry";
 import { authService, prewarmModelRegistryMirror } from "../../src/thread/services/auth";
@@ -384,6 +387,28 @@ describe("worker model registry mirror", () => {
 		const second = await probe.providerModels(registry, DYNAMIC_PROVIDER);
 		expect(JSON.parse(second)).toHaveLength(2);
 		expect(second).toBe(mainProviderModels(DYNAMIC_PROVIDER));
+	});
+
+	it("makes only the requested credential-scoped roster visible on a worker mirror", async () => {
+		const id = "worker-cache-only";
+		for (const [provider, baseUrl] of [
+			["opencode-go", "https://opencode.ai/zen/go/v1"],
+			["opencode-zen", "https://opencode.ai/zen/v1"],
+		]) {
+			const apiKey = `fixture-${provider}`;
+			authStorage.keys.setRuntime(provider, apiKey);
+			const model = buildModel({ ...modelDefinition(id), provider, baseUrl, api: "openai-responses" });
+			const namespace = resolveModelCacheProviderId(provider, { apiKey });
+			writeModelCache(namespace, Date.now(), [model], true, "", path.join(dir, "models.db"));
+		}
+
+		await probe.hydrateCredentialScopedModelCaches(registry, []);
+		expect(await probe.available(registry, "opencode-go", id)).toBe(false);
+		await probe.hydrateCredentialScopedModelCaches(registry, ["OpenCode-Go"]);
+		expect(await probe.available(registry, "opencode-go", id)).toBe(true);
+		expect(await probe.available(registry, "opencode-zen", id)).toBe(false);
+		await probe.hydrateCredentialScopedModelCaches(registry);
+		expect(await probe.available(registry, "opencode-zen", id)).toBe(true);
 	});
 
 	it("drops providers main unregisters or whose extension source goes away", async () => {

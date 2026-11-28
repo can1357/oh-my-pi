@@ -21,6 +21,7 @@ import { errorMessage, sanitizeText } from "@oh-my-pi/pi-utils";
 import { handleMcpAcp } from "./helpers/mcp";
 import { markdownFenceFor } from "../utils/markdown-fence";
 import { openLocalFileInEditor } from "../modes/local-file-editor";
+import { sessionModeRows } from "./helpers/session-modes";
 import { commandConsumed, parseSubcommand, usage } from "./helpers/parse";
 import {
 	describeRedeemOutcome,
@@ -42,6 +43,9 @@ import { buildUsageReportText } from "./helpers/usage-report";
 import type { SlashCommandRuntime, SlashCommandSpec } from "./types";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { StatsNotice } from "../ui/overlays/panels/stats-notice";
+
+const SESSION_INPUT_HINT = "[info|delete|pin [account]]";
+const SESSION_USAGE = `Usage: /session ${SESSION_INPUT_HINT}`;
 
 async function handleUsageResetCommand(
 	arg: string,
@@ -250,7 +254,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		icon: "session",
 		description: "Session management commands",
 		acpDescription: "Show or configure the current session",
-		acpInputHint: "[info|delete|pin [account]]",
+		acpInputHint: SESSION_INPUT_HINT,
 		subcommands: [
 			{ name: "info", description: "Show session info and stats" },
 			{ name: "delete", description: "Delete current session and return to selector" },
@@ -269,6 +273,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 						`Session: ${runtime.session.sessionId}`,
 						`Title: ${runtime.session.sessionName}`,
 						`CWD: ${runtime.cwd}`,
+						...sessionModeRows(runtime.session).map(([label, value]) => `${label}: ${value}`),
 					].join("\n"),
 				);
 				return commandConsumed();
@@ -305,7 +310,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				await handleSessionPinCommand(rest, runtime.session, runtime.output);
 				return commandConsumed();
 			}
-			return usage("Usage: /session [info|delete|pin [account]]", runtime);
+			return usage(SESSION_USAGE, runtime);
 		},
 		handleTui: async (command, runtime) => {
 			const { verb, rest } = parseSubcommand(command.args);
@@ -327,7 +332,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			if (!verb || (verb === "info" && !rest)) {
 				await runtime.ctx.handleSessionCommand();
 			} else {
-				runtime.ctx.showStatus("Usage: /session [info|delete|pin [account]]");
+				runtime.ctx.showStatus(SESSION_USAGE);
 			}
 			clearSubmittedText(runtime);
 		},
@@ -635,9 +640,9 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		aliases: ["rewind"],
 		icon: "branch",
 		description: "Rewind to a previous message in a new session, keeping this one unchanged",
-		handleTui: (_command, runtime) => {
-			runtime.ctx.showUserMessageSelector();
+		handleTui: async (_command, runtime) => {
 			clearSubmittedText(runtime);
+			await runtime.ctx.showUserMessageSelector();
 		},
 	},
 	{
@@ -684,9 +689,9 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		name: "tree",
 		icon: "tree",
 		description: "Navigate session tree (switch branches)",
-		handleTui: (_command, runtime) => {
-			runtime.ctx.showTreeSelector();
+		handleTui: async (_command, runtime) => {
 			clearSubmittedText(runtime);
+			await runtime.ctx.showTreeSelector();
 		},
 	},
 	{

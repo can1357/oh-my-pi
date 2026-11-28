@@ -2,6 +2,8 @@ use std::io::{self, Read};
 
 use memchr::memchr;
 
+use crate::perl::value::count_utf8_starts;
+
 const CHUNK: usize = 8192;
 
 /// Bytes read ahead but not yet consumed. They remain in their on-disk
@@ -150,7 +152,7 @@ impl Input {
 	/// Read up to `count` characters, grouping UTF-8 sequences when requested.
 	pub(super) fn read_count(&mut self, src: &mut impl Read, count: usize, crlf: bool, unicode: bool) -> io::Result<Vec<u8>> {
 		let mut out = std::mem::take(&mut self.partial);
-		let done = if unicode { out.iter().filter(|&&b| b & 0xc0 != 0x80).count() } else { out.len() };
+		let done = if unicode { count_utf8_starts(&out) } else { out.len() };
 		out.reserve(count.saturating_sub(done).min(CHUNK));
 		match self.read_count_into(src, count.saturating_sub(done), crlf, unicode, &mut out) {
 			Ok(()) => Ok(out),

@@ -14,7 +14,7 @@ import {
 	writeAuthBrokerSnapshotCache,
 } from "@oh-my-pi/pi-ai/auth-broker";
 import { discoverAuthStorage } from "@oh-my-pi/pi-coding-agent/sdk";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { removeWithRetries, setInteractiveHost } from "@oh-my-pi/pi-utils";
 import { flush } from "./helpers/fake-clock";
 import { rejectionOf } from "./helpers/rejection";
 
@@ -280,6 +280,39 @@ describe("discoverAuthStorage auth-broker snapshot cache", () => {
 			server.stop(true);
 		}
 	});
+
+	// A restarting broker answers 503; a later answer the retry cannot fix (401) ends startup.
+	test.each([
+		{ interactive: true, requests: 1, notice: false },
+		{ interactive: false, requests: 2, notice: true },
+	])(
+		"retries only outside interactive omp (interactive: $interactive)",
+		async ({ interactive, requests, notice }) => {
+			let served = 0;
+			using server = Bun.serve({
+				port: 0,
+				fetch: () => new Response("unavailable", { status: ++served === 1 ? 503 : 401 }),
+			});
+			process.env.OMP_AUTH_BROKER_URL = server.url.toString();
+			process.env.OMP_AUTH_BROKER_TOKEN = TOKEN;
+			process.env.OMP_AUTH_BROKER_SNAPSHOT_TTL_MS = "0";
+			const previous = setInteractiveHost(interactive);
+			let stderr = "";
+			vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
+				stderr += String(chunk);
+				return true;
+			});
+			try {
+				await expect(discoverAuthStorage(tempDir)).rejects.toBeInstanceOf(AuthBrokerError);
+			} finally {
+				vi.restoreAllMocks();
+				setInteractiveHost(previous);
+			}
+			expect(served).toBe(requests);
+			expect(stderr.includes("Waiting for auth broker")).toBe(notice);
+		},
+		15_000,
+	);
 
 	test("fails startup once the broker stays unreachable for the whole retry budget", async () => {
 		// The broker accepts connections and never answers. Each startup fetch makes two attempts,

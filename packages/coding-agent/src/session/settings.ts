@@ -2,8 +2,11 @@ import * as path from "node:path";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { combine, effect, register, type ScopeLike, type Setting, type SettingValueOf } from "../config/registry";
 import {
+	buildServiceTierByFamily,
 	SERVICE_TIER_ANTHROPIC_OPTIONS,
 	SERVICE_TIER_ANTHROPIC_VALUES,
+	SERVICE_TIER_DEVIN_OPTIONS,
+	SERVICE_TIER_DEVIN_VALUES,
 	SERVICE_TIER_GOOGLE_OPTIONS,
 	SERVICE_TIER_GOOGLE_VALUES,
 	SERVICE_TIER_INHERIT_OPTIONS,
@@ -35,7 +38,7 @@ import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMeta
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
 const EMPTY_STRING_ARRAYS_RECORD: Record<string, string[]> = {};
 const EMPTY_STRING_RECORD: Record<string, string> = {};
-const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["wait"];
+const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["wait", "vibe_wait"];
 
 /** Scope of the resume picker's current-folder list. */
 export const cfgSessionWorktreeScope = register({
@@ -376,7 +379,7 @@ export const cfgModelToolCallLoopGuardEnabled = register({
 		tab: "model",
 		group: "Thinking",
 		label: "Tool-Call Loop Guard",
-		description: "Detect consecutive identical tool calls across turns and inject a corrective steer",
+		description: "Detect repeated tool-call patterns across turns and inject a corrective steer",
 	},
 });
 
@@ -388,7 +391,7 @@ export const cfgModelToolCallLoopGuardThreshold = register({
 		tab: "model",
 		group: "Thinking",
 		label: "Tool-Call Loop Threshold",
-		description: "Consecutive identical tool calls required before the corrective steer is injected",
+		description: "Consecutive repeated tool-call patterns required before the corrective steer is injected",
 	},
 });
 
@@ -767,6 +770,27 @@ export const cfgTierGoogle = register({
 	},
 });
 
+export const cfgTierDevin = register({
+	id: "tier.devin",
+	type: "enum",
+	values: SERVICE_TIER_DEVIN_VALUES,
+	default: "none",
+	ui: {
+		tab: "model",
+		group: "Sampling",
+		label: "Service Tier — Devin",
+		description:
+			"Processing tier for Devin requests. `priority` sends a model's fast lane (`-fast`, `-priority`, `-lightning` wire ids) where it has one; the same switch as `/fast` on a Devin model.",
+		options: SERVICE_TIER_DEVIN_OPTIONS,
+	},
+});
+
+/** Per-family service tiers configured by the `tier.<family>` settings; the starting `/fast` state of a fresh session. */
+export const cfgTiers = combine(
+	{ openai: cfgTierOpenai, anthropic: cfgTierAnthropic, google: cfgTierGoogle, devin: cfgTierDevin },
+	buildServiceTierByFamily,
+);
+
 export const cfgTierSubagent = register({
 	id: "tier.subagent",
 	type: "enum",
@@ -976,7 +1000,7 @@ export const cfgRetryFallbackChains = register({
 		group: "Retry & Fallback",
 		label: "Retry Fallback Chains",
 		description:
-			'JSON object mapping model roles, model selectors ("provider/model-id"), or provider wildcards ("provider/*") to ordered fallback selectors, e.g. {"default":["openai/gpt-4o-mini"],"google-antigravity/*":["google/*","google-vertex/*"]}. Model-oriented keys apply whenever that model/provider is active, regardless of role; a "provider/*" entry keeps the failing model\'s id and swaps the provider. An id-prefixed wildcard ("openrouter/google/*") re-prefixes the failing model\'s bare id (google-antigravity/gemini-x -> openrouter/google/gemini-x) and, used as a key, matches only that provider\'s ids under the prefix. A fallback entry may carry an explicit thinking suffix ("provider/model:low", ":high", ":max", ":off"); a bare entry inherits the failing turn\'s effort, and "provider/*" entries always inherit.',
+			'JSON object mapping model roles, model selectors ("provider/model-id"), or provider wildcards ("provider/*") to ordered fallback selectors, e.g. {"default":["openai/gpt-4o-mini"],"google/*":["google-vertex/*"]}. Model-oriented keys apply whenever that model/provider is active, regardless of role; a "provider/*" entry keeps the failing model\'s id and swaps the provider. An id-prefixed wildcard ("openrouter/google/*") re-prefixes the failing model\'s bare id (google/gemini-x -> openrouter/google/gemini-x) and, used as a key, matches only that provider\'s ids under the prefix. A fallback entry may carry an explicit thinking suffix ("provider/model:low", ":high", ":max", ":off"); a bare entry inherits the failing turn\'s effort, and "provider/*" entries always inherit.',
 	},
 });
 
@@ -1074,36 +1098,6 @@ export const cfgProvidersWebSearchTimeoutSeconds = register({
 			{ value: "120", label: "2 minutes" },
 			{ value: "180", label: "3 minutes" },
 			{ value: "300", label: "5 minutes" },
-		],
-	},
-});
-
-export const cfgProvidersAntigravityEndpoint = register({
-	id: "providers.antigravityEndpoint",
-	type: "enum",
-	values: ["auto", "production", "sandbox"] as const,
-	default: "auto",
-	ui: {
-		tab: "providers",
-		group: "Services",
-		label: "Antigravity Endpoint Mode",
-		description: "Endpoint routing strategy for google-antigravity providers (chat, search, image, discovery)",
-		options: [
-			{
-				value: "auto",
-				label: "Auto",
-				description: "Try production endpoint, fail over to sandbox on 5xx/429",
-			},
-			{
-				value: "production",
-				label: "Production Only",
-				description: "Force production endpoint only",
-			},
-			{
-				value: "sandbox",
-				label: "Sandbox Only",
-				description: "Force sandbox endpoint only",
-			},
 		],
 	},
 });
@@ -1620,6 +1614,19 @@ export const cfgCodexResetsSalvageHorizonHours = register({
 	},
 });
 
+export const cfgCodexResetsExpirySalvage = register({
+	id: "codexResets.expirySalvage",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "providers",
+		group: "Services",
+		label: "Codex Reset Expiry Salvage",
+		description:
+			"Spend saved Codex resets that are about to expire, even when no chat window is exhausted (a full reset forfeits any remaining weekly headroom and restarts the window). Off: auto-redeem only restores an exhausted, blocked account, and expiring credits are left to lapse, including the 5-minute last chance.",
+	},
+});
+
 /** Codex saved-reset auto-redeem policy (`codexResets.*`). */
 export const cfgCodexResets = combine({
 	autoRedeem5h: cfgCodexResetsAutoRedeem5h,
@@ -1627,6 +1634,7 @@ export const cfgCodexResets = combine({
 	minBlockedMinutes: cfgCodexResetsMinBlockedMinutes,
 	keepCredits: cfgCodexResetsKeepCredits,
 	salvageHorizonHours: cfgCodexResetsSalvageHorizonHours,
+	expirySalvage: cfgCodexResetsExpirySalvage,
 });
 
 /** Whether automatic reset redemption asks first, spends, or remains disabled. */

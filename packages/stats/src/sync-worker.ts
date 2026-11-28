@@ -20,7 +20,7 @@ export type SyncWorkerRequest =
 export type SyncWorkerResponse =
 	| { ok: true; kind?: "parse"; result: ParseSessionResult }
 	| { ok: true; kind: "pong" }
-	| { ok: false; error: string };
+	| { ok: false; error: string; code?: string };
 
 declare const self: Worker & {
 	onmessage: ((event: MessageEvent<SyncWorkerRequest>) => void) | null;
@@ -42,6 +42,8 @@ self.onmessage = async event => {
 		self.postMessage({ ok: true, result } satisfies SyncWorkerResponse);
 	} catch (err) {
 		const error = err instanceof Error ? (err.stack ?? err.message) : String(err);
-		self.postMessage({ ok: false, error } satisfies SyncWorkerResponse);
+		// Forward the fs error code so the main thread can skip unreadable transcripts.
+		const code = err instanceof Error && "code" in err && typeof err.code === "string" ? err.code : undefined;
+		self.postMessage({ ok: false, error, code } satisfies SyncWorkerResponse);
 	}
 };

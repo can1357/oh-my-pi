@@ -35,11 +35,11 @@
 
 ## Flow
 
-1. `ManageSkillTool.createIf(...)` exposes the tool only when `autolearn.enabled` is true and captures the session's optional `refreshSkills` callback.
+1. `ManageSkillTool.createIf(...)` exposes the tool only when `autolearn.enabled` is true and keeps the tool session (its optional `refreshSkills` callback, session id, and cwd for provenance).
 2. Schema validation requires both `description` and `body` for `create` / `update`; `delete` needs only `name`.
 3. `delete` calls `deleteManagedSkill(name)`, then refreshes active skills when the callback exists.
 4. `create` normalizes the name and checks whether an active authored skill already owns it; if yes, it returns an error result without writing.
-5. `create` / `update` call `writeManagedSkill(...)`, which normalizes/validates the name, sanitizes generated frontmatter, serializes same-name in-process writes, and writes `SKILL.md` under the managed-skills root.
+5. `create` / `update` call `writeManagedSkill(...)`, which normalizes/validates the name, sanitizes generated frontmatter, stamps provenance (see Notes), serializes same-name in-process writes, and writes `SKILL.md` under the managed-skills root.
 6. After a successful create/update, the tool refreshes active skills when the callback exists, so an interactive session can discover the change immediately.
    A refresh failure propagates after the filesystem mutation; it does not roll the skill back.
 
@@ -62,7 +62,8 @@
 - Availability requires `autolearn.enabled = true`.
 - Names are trimmed and lowercased, then must match `[a-z0-9][a-z0-9-]{0,63}`.
 - Descriptions are sanitized to one line and stripped of control/format characters, angle brackets, backticks, and repeated tildes.
-- Bodies are trimmed and must remain non-empty; generated frontmatter contains only normalized `name` and sanitized `description`.
+- Bodies are trimmed and must remain non-empty; generated frontmatter contains normalized `name`, sanitized `description`, and the `x-omp-provenance` block.
+- Provenance keeps the 20 most recent contributing session ids and project directories.
 - Final managed `SKILL.md` content is capped at `64_000` UTF-8 bytes, including frontmatter and description.
 - The managed-skills root, skill directory, and file are checked to prevent symlink escapes; update also rejects non-regular or multiply hard-linked files.
 
@@ -80,5 +81,7 @@
 ## Notes
 
 - Managed skills are generated under `<agent-dir>/managed-skills` and never edit authored skills.
-- Do not include YAML frontmatter in `body`; `writeManagedSkill(...)` generates normalized `name` and sanitized `description` frontmatter.
+- Do not include YAML frontmatter in `body`; `writeManagedSkill(...)` generates normalized `name` and sanitized `description` frontmatter plus provenance.
+- Provenance frontmatter (`x-omp-provenance`, never rendered into the system prompt): `generator` (`manage_skill` or `learn`, the last writer), `created` (absent for skills written before provenance existed), `updated`, and `sessions` / `projects` — the contributing session ids and working directories, oldest first; a repeat contributor moves to the end. `update` carries the stored block forward.
+- Users review managed skills and their provenance with `/skills learned` and delete one with `/skills forget <name>`.
 - `update` does not bypass authored-skill precedence: if an authored skill has the same name, the managed skill remains shadowed in discovery.

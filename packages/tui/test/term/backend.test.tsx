@@ -2,6 +2,7 @@
 import { describe, expect, it, vi } from "bun:test";
 import { signal } from "@oh-my-pi/pi-tui";
 import type { FramePlan, InputEvent, TerminalCapabilities, TerminalDriver } from "@oh-my-pi/pi-tui/driver/contract";
+import { anchoredRows, RESERVED_ROW } from "@oh-my-pi/pi-tui/driver/images/anchor";
 import { createSurface, settle } from "@oh-my-pi/pi-tui/surface";
 import { TermBackend } from "@oh-my-pi/pi-tui/term/backend";
 import { defineRolePainter } from "@oh-my-pi/pi-tui/term/paint";
@@ -22,6 +23,7 @@ const CAPABILITIES: TerminalCapabilities = {
 	multiplexer: null,
 	textSizing: false,
 	tsp: false,
+	emoji: { vs16Wide: false, bareFits: false },
 };
 
 /** Records frames; acknowledges every history batch; history is the concatenation of acknowledged batches. */
@@ -90,7 +92,7 @@ describe("TermBackend animation", () => {
 		});
 		const driver = new FakeDriver();
 		const surface = createSurface(() => ({ dock: <rows role="test.clock-caret" lines={[]} /> }));
-		const backend = new TermBackend({ surface, driver, theme: () => PLAIN_THEME, tickInterval: 80 });
+		const backend = new TermBackend({ surface, driver, theme: () => PLAIN_THEME, spinnerInterval: 80 });
 		try {
 			backend.start();
 			active.set(true); // Starts reading the clock, but the caret is still at 0.
@@ -112,7 +114,7 @@ describe("TermBackend animation", () => {
 		defineRolePainter("rows", "test.running-clock", (_node, cx) => ({ rows: [String(cx.now() - start)] }));
 		const driver = new FakeDriver();
 		const surface = createSurface(() => ({ dock: <rows role="test.running-clock" lines={[]} /> }));
-		const backend = new TermBackend({ surface, driver, theme: () => PLAIN_THEME, tickInterval: 80 });
+		const backend = new TermBackend({ surface, driver, theme: () => PLAIN_THEME, spinnerInterval: 80 });
 		try {
 			backend.start();
 			vi.advanceTimersByTime(79);
@@ -122,6 +124,53 @@ describe("TermBackend animation", () => {
 			expect(driver.frames.length).toBe(2);
 			vi.advanceTimersByTime(79);
 			expect(driver.viewport).toEqual(["159"]);
+		} finally {
+			backend.stop();
+			surface.dispose();
+			vi.useRealTimers();
+		}
+	});
+
+	it("picks spinner frames at the spinner interval, re-read when it changes; a 0 interval stills them", () => {
+		vi.useFakeTimers({ now: 0 });
+		const driver = new FakeDriver();
+		const surface = createSurface(() => ({ dock: <spinner /> }));
+		const interval = signal(250);
+		const backend = new TermBackend({ surface, driver, theme: () => PLAIN_THEME, spinnerInterval: interval });
+		const frames = PLAIN_THEME.symbols.spinnerFrames;
+		try {
+			backend.start();
+			backend.renderNow();
+			expect(driver.viewport).toEqual([frames[0]]);
+			// Ticks land at 80, 160, 240: still inside the first 250 ms frame.
+			vi.advanceTimersByTime(240);
+			expect(driver.viewport).toEqual([frames[0]]);
+			vi.advanceTimersByTime(80);
+			expect(driver.viewport).toEqual([frames[1]]);
+			interval.set(0);
+			backend.renderNow();
+			expect(driver.viewport).toEqual([frames[0]]);
+			const presented = driver.frames.length;
+			vi.advanceTimersByTime(1_000);
+			expect(driver.frames.length).toBe(presented);
+		} finally {
+			backend.stop();
+			surface.dispose();
+			vi.useRealTimers();
+		}
+	});
+
+	it("keeps other clock readers at the default tick under a slow spinner interval", () => {
+		vi.useFakeTimers({ now: 0 });
+		defineRolePainter("rows", "test.slow-spinner-clock", (_node, cx) => ({ rows: [String(cx.now())] }));
+		const driver = new FakeDriver();
+		const surface = createSurface(() => ({ dock: <rows role="test.slow-spinner-clock" lines={[]} /> }));
+		const backend = new TermBackend({ surface, driver, theme: () => PLAIN_THEME, spinnerInterval: 1_000 });
+		try {
+			backend.start();
+			backend.renderNow();
+			vi.advanceTimersByTime(80);
+			expect(driver.viewport).toEqual(["80"]);
 		} finally {
 			backend.stop();
 			surface.dispose();
@@ -269,6 +318,69 @@ describe("TermBackend main surface", () => {
 		backend.renderNow();
 		expect(driver.history).toEqual([]);
 		expect(driver.viewport).toEqual([...lines("a", 3), "b0", "b1", "> /x"]);
+		backend.stop();
+	});
+
+	it("leaves out a live image whose first row the viewport cuts off, until that row fits again", () => {
+		defineRolePainter("rows", "test.anchored-image", node => {
+			const props = node.props() as { lines: readonly string[] };
+			return { rows: props.lines };
+		});
+		const image = anchoredRows("\x1b]1337;File=inline=1;width=2;height=3:AA==\x07", 3);
+		const dock = signal(lines("d", 3));
+		const driver = new FakeDriver();
+		const surface = createSurface(() => ({
+			main: <rows key="reply" role="test.anchored-image" lines={["a0", ...image, "a1"]} />,
+			dock: <rows key="dock" lines={dock} />,
+		}));
+		const backend = new TermBackend({ surface, driver, theme: () => PLAIN_THEME, separator: () => 0 });
+		backend.start();
+		const main = () => driver.frames.at(-1)!.viewport.slice(0, -dock().length);
+		// Three rows for five: the tail shows, and its last image row would move up into the dock.
+		expect(main()).toEqual([RESERVED_ROW, RESERVED_ROW, "a1"]);
+		dock.set(lines("d", 2));
+		backend.renderNow();
+		expect(main()).toEqual([...image, "a1"]);
+		backend.stop();
+	});
+
+	it("leaves out a live image whose head went to history and scrolled off the screen", () => {
+		defineRolePainter("rows", "test.streamed-image", node => {
+			const props = node.props() as { lines: readonly string[] };
+			// A streaming head: its first three rows are final.
+			return { rows: props.lines, stable: 3 };
+		});
+		const image = anchoredRows("\x1b]1337;File=inline=1;width=2;height=3:AA==\x07", 3);
+		const driver = new FakeDriver();
+		const surface = createSurface(() => ({
+			main: <rows key="reply" role="test.streamed-image" lines={["h0", "h1", ...image, "t0", "t1", "t2"]} />,
+			dock: <rows key="dock" lines={["dock"]} />,
+		}));
+		const backend = new TermBackend({ surface, driver, theme: () => PLAIN_THEME, separator: () => 0 });
+		backend.start();
+		// The stable head (its image's first row included) went to history over a full screen: that row is off
+		// the screen, so the image's last row would draw it from the top row, over the tail.
+		expect(driver.history).toEqual(["h0", "h1", ""]);
+		expect(driver.frames.at(-1)!.viewport).toEqual([RESERVED_ROW, RESERVED_ROW, "t0", "t1", "t2", "dock"]);
+		backend.stop();
+	});
+
+	it("keeps leaving out that image once the tail shrinks under a viewport with no dock to hold it down", () => {
+		defineRolePainter("rows", "test.streamed-image-4", node => {
+			const props = node.props() as { lines: readonly string[] };
+			return { rows: props.lines, stable: 4 };
+		});
+		const image = anchoredRows("\x1b]1337;File=inline=1;width=2;height=3:AA==\x07", 3);
+		const tail = signal(lines("t", 4));
+		const { driver, backend } = setup(() => (
+			<rows key="reply" role="test.streamed-image-4" lines={() => ["h0", "h1", "h2", ...image, ...tail()]} />
+		));
+		expect(driver.history).toEqual(["h0", "h1", "h2", ""]);
+		expect(driver.frames.at(-1)!.viewport.slice(0, 2)).toEqual([RESERVED_ROW, RESERVED_ROW]);
+		// The viewport shrinks in place: its top stays, so the image's first row is still off the screen.
+		tail.set(["t0"]);
+		backend.renderNow();
+		expect(driver.frames.at(-1)!.viewport).toEqual([RESERVED_ROW, RESERVED_ROW, "t0"]);
 		backend.stop();
 	});
 
@@ -456,7 +568,7 @@ describe("TermBackend main surface", () => {
 		const surface = createSurface(() => ({
 			main: <canvas role="test.intro" paint={() => []} term={() => ({ running: running() })} />,
 		}));
-		const backend = new TermBackend({ surface, driver, theme: () => PLAIN_THEME, tickInterval: 5 });
+		const backend = new TermBackend({ surface, driver, theme: () => PLAIN_THEME, spinnerInterval: 5 });
 		backend.start();
 		running.set(true);
 		await Bun.sleep(100);

@@ -176,6 +176,24 @@ function syntheticToolResultTailStart(messages: readonly AgentMessage[]): number
 	return index;
 }
 
+/**
+ * Index of the assistant turn ending at `tail` (a context index), looking back
+ * over the synthetic results the loop paired with its unrun tool calls. A real
+ * result means a call ran, so a mixed tail never resolves to the turn.
+ */
+function failedTurnStart(messages: readonly AgentMessage[], tail: number): number {
+	let index = tail;
+	while (index > 0 && isSyntheticToolResultMessage(messages[index])) index--;
+	const assistant = messages[index];
+	if (index === tail || assistant?.role !== "assistant") return index;
+	const callIds = new Set(assistant.content.flatMap(block => (block.type === "toolCall" ? [block.id] : [])));
+	for (let i = index + 1; i <= tail; i++) {
+		const result = messages[i];
+		if (result.role !== "toolResult" || !callIds.has(result.toolCallId)) return tail;
+	}
+	return index;
+}
+
 function retryableAssistantTurnEnd(messages: readonly AgentMessage[]): number | undefined {
 	const turnEnd = syntheticToolResultTailStart(messages);
 	const message = messages[turnEnd - 1];
@@ -1378,9 +1396,12 @@ export class TurnRecovery {
 		// Rows kept out of context may trail the failed turn; they stay, the turn goes.
 		const index = lastContextIndex(messages);
 		const lastMessage = messages[index];
-		const lastAssistant: AssistantMessage | undefined = lastMessage?.role === "assistant" ? lastMessage : undefined;
+		// Synthetic results for its unrun tool calls trail the turn; drop them with it.
+		const start = failedTurnStart(messages, index);
+		const candidate = messages[start];
+		const lastAssistant: AssistantMessage | undefined = candidate?.role === "assistant" ? candidate : undefined;
 		if (lastAssistant !== undefined && this.#isSameAssistantMessage(lastAssistant, assistantMessage)) {
-			this.#host.agent.replaceMessages(messages.toSpliced(index, 1));
+			this.#host.agent.replaceMessages(messages.toSpliced(start, index - start + 1));
 			return;
 		}
 		// A miss means the failed turn is still in active context (or was never
@@ -1713,6 +1734,9 @@ export class TurnRecovery {
 			this.#unexecutedToolCallsReplaySafe(message);
 		if (this.#hasReplayUnsafeOutput(message) && !replaySafeUnexecutedTools) return false;
 		if (AIError.is(id, AIError.Flag.AccountPolicy) || this.isClassifierRefusal(message)) return true;
+		// Admitted only so the retry handler can walk the fallback chain; it treats the
+		// flag as this model's spent budget and never replays the same model.
+		if (AIError.is(id, AIError.Flag.RetriesExhausted)) return true;
 		return AIError.retriable(id);
 	}
 
@@ -2082,7 +2106,9 @@ export class TurnRecovery {
 		currentModel: Model | null | undefined = this.#host.model(),
 		options?: { pinnedRole?: string; roleHint?: string },
 	): string[] {
-		const pinned = options?.pinnedRole ?? this.#activeRetryFallback?.role;
+		// An explicitly supplied pin (even undefined) belongs to a separate owner, e.g. an advisor;
+		// never inherit the main session's active fallback role for it.
+		const pinned = options && "pinnedRole" in options ? options.pinnedRole : this.#activeRetryFallback?.role;
 		const current = this.resolveRetryFallbackRole(currentSelector, currentModel, options?.roleHint);
 		if (!pinned) return current ? [current] : [];
 		return current && current !== pinned ? [pinned, current] : [pinned];
@@ -3035,15 +3061,19 @@ export class TurnRecovery {
 		const maxRetries = this.#isBoundedThinkingStreamClose(message)
 			? Math.min(retrySettings.maxRetries, 1)
 			: retrySettings.maxRetries;
-		const retryBudgetExhausted =
-			this.#retryAttempt > maxRetries || this.#genericAbortStreak > GENERIC_ABORT_MAX_RETRIES;
-
 		const errorMessage = message.errorMessage || "Unknown error";
 		const id = this.#classifyRetryMessage(message);
 		// Capture the quota failure time before any recovery await: a healthy usage
 		// snapshot fetched during the redemption retry loop must still qualify as
 		// evidence newer than the failure when a fallback cooldown is recorded.
 		const quotaFailureAtMs = AIError.is(id, AIError.Flag.UsageLimit) ? Date.now() : undefined;
+		// The transport already spent this model's retry budget on the status:
+		// no same-model replay, but the fallback chain still gets its turn.
+		const transportRetriesExhausted = AIError.is(id, AIError.Flag.RetriesExhausted);
+		const retryBudgetExhausted =
+			transportRetriesExhausted ||
+			this.#retryAttempt > maxRetries ||
+			this.#genericAbortStreak > GENERIC_ABORT_MAX_RETRIES;
 		const requestProvider = (message as IssuedProviderAssistantMessage)[kUsageLimitRequestProvider];
 		const oldProviderLimitFor = (model: Model | undefined): boolean =>
 			requestProvider !== undefined &&
@@ -3505,7 +3535,11 @@ export class TurnRecovery {
 		} else if (retryBudgetExhausted) {
 			if (!switchedModel && !switchedCredential) {
 				const attempt = this.#retryAttempt - 1;
-				message.errorMessage = `Retry budget exhausted after ${attempt} ${attempt === 1 ? "retry" : "retries"}: ${terminalError}`;
+				// A transport-exhausted failure was never retried here; its own message already says what happened.
+				message.errorMessage =
+					transportRetriesExhausted && attempt === 0
+						? terminalError
+						: `Retry budget exhausted after ${attempt} ${attempt === 1 ? "retry" : "retries"}: ${terminalError}`;
 				await this.#closeRetrySaga(
 					{ success: false, attempt, finalError: terminalError },
 					{ terminalTurn: message, retryErrors: { status: "superseded" } },
@@ -3688,7 +3722,8 @@ export class TurnRecovery {
 	/**
 	 * Positional backstop for {@link removeAssistantMessageFromActiveContext}:
 	 * when the identity check missed, the failed assistant turn is still the
-	 * active tail and the scheduled continue() would reject it. An
+	 * active tail (ahead of any synthetic results for its unrun tool calls) and
+	 * the scheduled continue() would reject or replay it. An
 	 * error/aborted-stopped assistant tail is never legal continuation input
 	 * and no recovery path wants it replayed on the wire, so drop it by
 	 * position; any healthy tail is left untouched.
@@ -3696,14 +3731,15 @@ export class TurnRecovery {
 	#stripFailedAssistantTail(): void {
 		const messages = this.#host.agent.state.messages;
 		const index = lastContextIndex(messages);
-		const tail = messages[index];
+		const start = failedTurnStart(messages, index);
+		const tail = messages[start];
 		if (tail?.role !== "assistant") return;
 		if (tail.stopReason !== "error" && tail.stopReason !== "aborted") return;
 		logger.debug("agent active context failed assistant tail stripped positionally", {
 			stopReason: tail.stopReason,
 			timestamp: tail.timestamp,
 		});
-		this.#host.agent.replaceMessages(messages.toSpliced(index, 1));
+		this.#host.agent.replaceMessages(messages.toSpliced(start, index - start + 1));
 	}
 
 	/**
@@ -3854,8 +3890,15 @@ export class TurnRecovery {
 	 * tool execution). Drives the TUI's idle "F5 to Retry" status row;
 	 * {@link retry} is the matching action.
 	 */
-	get hasAbortedToolCallTail(): boolean {
+	hasAbortedToolCallTail(prunedTerminalFailure?: AssistantMessage): boolean {
 		const active = this.#host.agent.state.messages;
+		if (prunedTerminalFailure) {
+			if (prunedTerminalFailure.stopReason !== "error" && prunedTerminalFailure.stopReason !== "aborted")
+				return false;
+			if (prunedTerminalFailure.content.some(block => block.type === "toolCall")) return true;
+			const tail = active[conversationEnd(active) - 1];
+			return tail?.role === "toolResult" && tail.isError && !isSkippedToolResult(tail);
+		}
 		if (abortedToolCallTail(active)) return true;
 		// A trailing assistant message is authoritative for a live session: a
 		// settled successful turn leaves nothing to retry.

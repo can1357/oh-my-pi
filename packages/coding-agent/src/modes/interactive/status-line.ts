@@ -28,6 +28,7 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { type Accessor, computed, type Signal, signal } from "@oh-my-pi/pi-tui";
 import { getActiveProfile, getProjectDir } from "@oh-my-pi/pi-utils";
 import type { AgentViewSession } from "../../session/agent-session-handle";
+import { type AiuTotals, sessionAiu } from "../../session/aiu-billing";
 import { latestJobWidget } from "../../tools/details/job-widget";
 import { BRAND_FADE_MS, type StatusFacts, type StatusLineSettings } from "../../ui/status/facts";
 import type { CollabStatus, StatusLineModel } from "../types";
@@ -103,6 +104,8 @@ export interface StatusModes {
 	recording?: boolean;
 	pinned?: boolean;
 	subagentTreeCost?: number;
+	/** AI credits of the subagent tree, from the same roll-up as {@link subagentTreeCost}. */
+	subagentTreeAiu?: AiuTotals;
 	vibeWorkerTokenRate?: () => number | null;
 }
 
@@ -143,7 +146,7 @@ export class SessionStatusLine implements StatusLineModel {
 	/**
 	 * Active-processing time per viewed session (a focused subagent's turns never feed main's): the
 	 * completed windows since the last reset and the open one's start. A session whose file changed in
-	 * place (`/resume`, `/move`, a fork) starts a fresh meter.
+	 * place (`/resume`, `/move`, a fork) starts a fresh meter ({@link #meter}).
 	 */
 	readonly #meters = new WeakMap<AgentViewSession, ActiveMeter>();
 	/** The active model's next tariff change, and the wakeup repainting the cost at it. */
@@ -183,6 +186,7 @@ export class SessionStatusLine implements StatusLineModel {
 	#onPullRequest: ((pr: { number: number; url: string } | undefined) => void) | undefined;
 	#lastPr: { number: number; url: string } | undefined;
 	#disposed = false;
+	readonly #live: Signal<boolean>;
 
 	readonly settings: Accessor<StatusLineSettings> = computed(() => ({ ...this.#saved(), ...this.#preview() }));
 
@@ -207,7 +211,7 @@ export class SessionStatusLine implements StatusLineModel {
 		this.#toolRevision();
 		const session = this.#session;
 		const model = session.state.model ?? session.model;
-		this.#syncUsage(model?.provider, model?.id);
+		if (this.#live()) this.#syncUsage(model?.provider, model?.id);
 		return session.getAnthropicSlowModeLabel();
 	});
 	readonly #speculation = computed(() => {
@@ -262,10 +266,16 @@ export class SessionStatusLine implements StatusLineModel {
 		};
 	});
 
-	constructor(session: AgentViewSession) {
+	constructor(session: AgentViewSession, options?: { deferStartupReads?: boolean }) {
 		this.#session = session;
+		this.#live = signal(!options?.deferStartupReads);
 		this.#saved = signal(statusLineHost.getSettings());
 		this.#attach(session);
+	}
+
+	/** Start reading context, checkout and account usage once startup can spare the event loop. */
+	finishStartup(): void {
+		this.#live.set(true);
 	}
 
 	/** Called with the first PR the active branch resolves to (terminal title). */
@@ -375,9 +385,12 @@ export class SessionStatusLine implements StatusLineModel {
 		const session = this.#session;
 		const file = session.sessionFile;
 		let meter = this.#meters.get(session);
-		if (meter && file !== undefined && meter.file !== undefined && meter.file !== file) meter = undefined;
-		if (!meter) {
-			meter = { activeMs: 0, since: undefined, file };
+		if (!meter || (file !== undefined && meter.file !== undefined && meter.file !== file)) {
+			// An open window outlives a file change while the run goes on (a fork or `/wt` during a background
+			// wait), counted from this first read on the new file; its clock already ticks. A closed one
+			// stays closed: a run starting on the new file opens it.
+			const open = meter?.since !== undefined && session.runStartedAt !== undefined;
+			meter = { activeMs: 0, since: open ? Date.now() : undefined, file };
 			this.#meters.set(session, meter);
 		}
 		meter.file = file;
@@ -441,11 +454,15 @@ export class SessionStatusLine implements StatusLineModel {
 		this.#autoCompact.set(enabled);
 	}
 
-	/** The cwd moved: drop VCS state for the old checkout. */
-	applyCwdChange(): void {
+	/** The cwd or child-repository policy changed: discard facts and reads for the old checkout. */
+	invalidateVcs(): void {
 		this.#vcsGeneration++;
 		this.#vcs.set(undefined);
 		this.#vcsStale = true;
+		if (this.#lastPr) {
+			this.#lastPr = undefined;
+			this.#onPullRequest?.(undefined);
+		}
 		this.refresh();
 	}
 
@@ -558,11 +575,12 @@ export class SessionStatusLine implements StatusLineModel {
 		this.#streamRevision();
 		const session = this.#session;
 		const model = session.state.model ?? session.model;
-		const usage = session.getContextUsage();
+		const live = this.#live();
+		const usage = live ? session.getContextUsage() : undefined;
 		let contextWindow = usage?.contextWindow ?? model?.contextWindow ?? 0;
 		let tokens = usage?.tokens ?? 0;
 		let percent: number | null =
-			usage?.percent === null || contextWindow === 0 ? null : (tokens / contextWindow) * 100;
+			!live || usage?.percent === null || contextWindow === 0 ? null : (tokens / contextWindow) * 100;
 		const collab = this.#collab();
 		const override = collab?.stateOverride?.contextUsage;
 		if (override) {
@@ -590,6 +608,11 @@ export class SessionStatusLine implements StatusLineModel {
 		const advisorOverview = session.getAdvisorStatusOverview?.();
 		const advisorStatuses = advisorOverview?.configured ? advisorOverview.advisors.map(a => a.status) : [];
 		const advisorCost = session.getAdvisorCost();
+		// Own calls plus the subagent tree, pushed with its dollars so the tree is summed once.
+		const aiu = sessionAiu(
+			{ nano: stats.aiuNano ?? 0, unknownCalls: stats.aiuUnknownCalls ?? 0 },
+			this.#focusedAgentId === undefined ? modes.subagentTreeAiu : undefined,
+		);
 		const vcsFacts = this.#vcsFacts(segments);
 		const goal = modes.goal ? session.getGoalModeState()?.goal : undefined;
 		const thinkingLevel = session.state.thinkingLevel;
@@ -598,6 +621,12 @@ export class SessionStatusLine implements StatusLineModel {
 		const turnStartedAt = this.#meter().since;
 		const activeMs = this.activeMs(now);
 		this.#syncPricingTimer(segments.includes("cost") ? model?.cost : undefined, now);
+		const fastTier =
+			model && session.isFastModeActive()
+				? session.effectiveServiceTier(model) === "ultrafast"
+					? "ultrafast"
+					: "priority"
+				: undefined;
 
 		return {
 			...(model
@@ -605,6 +634,7 @@ export class SessionStatusLine implements StatusLineModel {
 						model: {
 							id: model.id,
 							...(model.name ? { name: model.name } : {}),
+							...(model.provider ? { provider: model.provider } : {}),
 							thinking: model.thinking !== undefined,
 							...(model.contextWindow ? { contextWindow: model.contextWindow } : {}),
 						},
@@ -615,7 +645,7 @@ export class SessionStatusLine implements StatusLineModel {
 			...(session.isAutoThinking && session.autoResolvedThinkingLevel()
 				? { autoResolvedLevel: session.autoResolvedThinkingLevel() }
 				: {}),
-			...(session.isFastModeActive() ? { fastMode: true } : {}),
+			...(fastTier ? { fastTier } : {}),
 			...(advisorStatuses.length > 0
 				? {
 						advisor: {
@@ -645,6 +675,7 @@ export class SessionStatusLine implements StatusLineModel {
 				premiumRequests: stats.premiumRequests,
 				cost: stats.cost,
 				subagentCost: stats.subagentCost,
+				...(aiu ? { aiu } : {}),
 			},
 			usingSubscription: model ? session.modelRegistry.isUsingSubscription(model) : false,
 			...(this.#focusedAgentId === undefined && modes.subagentTreeCost
@@ -706,7 +737,7 @@ export class SessionStatusLine implements StatusLineModel {
 	/** Git facts for the bar when a git segment shows; starts a refresh when the cached ones are stale. */
 	#vcsFacts(segments: readonly string[]): Pick<StatusFacts, "git" | "worktree" | "activeRepoRoot"> {
 		// Tern reads and shows the checkout itself: nothing to read here.
-		if (this.#checkoutHomed) return {};
+		if (!this.#live() || this.#checkoutHomed) return {};
 		const wantsGit = segments.includes("git") || segments.includes("pr");
 		const wantsPath = segments.includes("path");
 		if (!statusLineHost.gitEnabled() || (!wantsGit && !wantsPath)) return {};

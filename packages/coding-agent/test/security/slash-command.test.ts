@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { refreshDirsFromEnv } from "@oh-my-pi/pi-utils";
+import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
 import { SecurityStore } from "../../src/security";
 import { handleSecurityCommand } from "../../src/slash-commands/helpers/security";
@@ -11,6 +12,7 @@ import type { ToolSession } from "../../src/tools";
 import { SecurityScanTool } from "../../src/tools/security-scan";
 
 import { cfgSecurityEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
 const SARIF_FIXTURE = path.join(import.meta.dir, "..", "fixtures", "security", "generic-results.sarif");
 let temporaryRoot = "";
@@ -84,6 +86,29 @@ describe("/security", () => {
 			actor: "operator",
 		});
 		expect((await store.getFinding(scanId, finding.id))?.disposition.rationale).toBeUndefined();
+	});
+
+	test("enabling the tool lets status read the local operation store", async () => {
+		const authStorage = createInMemoryAuthStorage();
+		try {
+			const tool = new SecurityScanTool({
+				cwd: repositoryRoot,
+				hasUI: false,
+				getSessionFile: () => null,
+				getSessionSpawns: () => null,
+				settings,
+				authStorage,
+				modelRegistry: new ModelRegistry(authStorage, path.join(temporaryRoot, "models.yml")),
+			});
+			const request = { action: "status", operation_id: "missing-operation" } as const;
+			cfgSecurityEnabled.override(settings, false);
+			await expect(tool.execute("disabled", request)).rejects.toThrow(/Security is disabled/);
+
+			cfgSecurityEnabled.override(settings, true);
+			await expect(tool.execute("enabled", request)).rejects.toThrow("Unknown security operation: missing-operation");
+		} finally {
+			authStorage.close();
+		}
 	});
 
 	test("validation agent result is persisted through the explicit tool mutation", async () => {

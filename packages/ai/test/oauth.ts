@@ -9,7 +9,7 @@
 import * as fs from "node:fs/promises";
 import path from "node:path";
 import { getOAuthApiKey } from "@oh-my-pi/pi-ai/oauth";
-import type { OAuthCredentials, OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
+import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
 import { $flag, getAgentDir, isEnoent } from "@oh-my-pi/pi-utils";
 
 /**
@@ -62,8 +62,6 @@ async function saveAuthStorage(storage: AuthStorage): Promise<void> {
  *
  * For API key credentials, returns the key directly.
  * For OAuth credentials, returns the access token (refreshing if expired and saving back).
- *
- * For google-antigravity, returns JSON-encoded { token, projectId }
  */
 export async function resolveApiKey(provider: string): Promise<string | undefined> {
 	if (!E2E_ENABLED) return undefined;
@@ -87,7 +85,7 @@ export async function resolveApiKey(provider: string): Promise<string | undefine
 			}
 		}
 
-		const result = await getOAuthApiKey(provider as OAuthProvider, oauthCredentials);
+		const result = await getOAuthApiKey(provider, oauthCredentials);
 		if (!result) return undefined;
 
 		// Save refreshed credentials back to testauth.db

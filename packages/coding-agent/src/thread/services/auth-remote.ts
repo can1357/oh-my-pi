@@ -55,6 +55,8 @@ import type {
 	OAuthLoginIdentity,
 	OAuthProviderId,
 	OAuthRefreshByIdOptions,
+	OAuthSignOutOptions,
+	OAuthSignOutResult,
 	ObservedUsageInput,
 	Provider,
 	RedeemResetCreditOptions,
@@ -395,6 +397,9 @@ class RemoteOAuth implements OAuthApi {
 	refresh(id: number, signal?: AbortSignal, options?: OAuthRefreshByIdOptions): Promise<AuthCredentialSnapshotEntry> {
 		return this.#remote.call("oauth.refresh", id, signal, options);
 	}
+	signOut(provider: string, credentialId: number, options?: OAuthSignOutOptions): Promise<OAuthSignOutResult> {
+		return this.#remote.call("oauth.signOut", provider, credentialId, options);
+	}
 	/**
 	 * Refused: the refresher calls `credentialFromRow`, `canRefresh`, and the other
 	 * hooks synchronously on the thread that owns the store, and a worker's
@@ -515,6 +520,9 @@ class RemoteUsage implements UsageApi {
 	}
 	providerFor(provider: Provider): UsageProvider | undefined {
 		return this.#remote.callSync("usage.providerFor", provider);
+	}
+	authRejection(provider: Provider, credentialId: number): number | undefined {
+		return this.#remote.callSync("usage.authRejection", provider, credentialId);
 	}
 	reportingModelIds(provider: Provider, modelIds: readonly string[], reports: readonly UsageReport[]): string[] {
 		return this.#remote.callSync("usage.reportingModelIds", provider, modelIds, reports);

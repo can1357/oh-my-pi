@@ -169,6 +169,28 @@ function thinkingLoopErrorStream(model: Model<Api>): AssistantMessageEventStream
 	return stream;
 }
 
+/** A stream ending in a 503 its provider transport already retried to its own budget. */
+function retriesExhaustedErrorStream(model: Model<Api>): AssistantMessageEventStream {
+	const stream = new AssistantMessageEventStream();
+	queueMicrotask(() => {
+		const partial: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: emptyUsage(),
+			stopReason: "error",
+			errorStatus: 503,
+			errorMessage: "Gemini API error (503): The model is overloaded.",
+			errorId: AIError.create(AIError.Flag.Transient, AIError.Flag.RetriesExhausted),
+			timestamp: Date.now(),
+		};
+		stream.push({ type: "error", reason: "error", error: partial });
+	});
+	return stream;
+}
+
 /** Finalize a real Codex `turn_rate_limit_exceeded` 429 the way the provider does. */
 async function finalizeCodexCapacityError(retryAfterSeconds: string): Promise<AIError.FinalizeResult> {
 	const response = new Response(
@@ -1063,6 +1085,75 @@ describe("AgentSession retry fallback", () => {
 		]);
 		expect(session.model?.provider).toBe(fallbackModel.provider);
 		expect(session.model?.id).toBe(fallbackModel.id);
+	});
+
+	describe("a 503 the transport already retried to its budget", () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+
+		/** An agent whose primary always fails with an exhausted 503; other models answer. */
+		function exhaustedPrimaryAgent(primary: Model, requestedModels: string[]): Agent {
+			const mock = createMockModel();
+			return new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: primary, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					requestedModels.push(`${model.provider}/${model.id}`);
+					if (model.provider === primary.provider && model.id === primary.id) {
+						return retriesExhaustedErrorStream(model);
+					}
+					mock.push({ content: [`ok:${model.provider}/${model.id}`] });
+					return mock.stream(model, context, options);
+				},
+			});
+		}
+
+		it("walks the fallback chain at once, without another request to the primary", async () => {
+			if (!primaryModel || !fallbackModel) throw new Error("Expected bundled fallback models");
+			const requestedModels: string[] = [];
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 5,
+				"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+			});
+			settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+			session = new AgentSession({
+				agent: exhaustedPrimaryAgent(primaryModel, requestedModels),
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+			});
+
+			await session.prompt("Recover the overloaded provider");
+			await session.waitForIdle();
+
+			expect(requestedModels).toEqual([
+				`${primaryModel.provider}/${primaryModel.id}`,
+				`${fallbackModel.provider}/${fallbackModel.id}`,
+			]);
+			expect(session.model?.id).toBe(fallbackModel.id);
+		});
+
+		it("ends the turn with the provider's message when no fallback is configured", async () => {
+			if (!primaryModel) throw new Error("Expected bundled primary model");
+			const requestedModels: string[] = [];
+			const settings = Settings.isolated({ "compaction.enabled": false, "retry.baseDelayMs": 5 });
+			settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+			session = new AgentSession({
+				agent: exhaustedPrimaryAgent(primaryModel, requestedModels),
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+			});
+
+			await session.prompt("Fail on the overloaded provider");
+			await session.waitForIdle();
+
+			expect(requestedModels).toEqual([`${primaryModel.provider}/${primaryModel.id}`]);
+			const last = getLastAssistantMessage(session);
+			expect(last.stopReason).toBe("error");
+			expect(last.errorMessage).toBe("Gemini API error (503): The model is overloaded.");
+		});
 	});
 
 	it("never falls back to a model of a provider that settings disable", async () => {

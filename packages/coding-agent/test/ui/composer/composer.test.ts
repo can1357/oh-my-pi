@@ -19,7 +19,7 @@ import {
 	registerComposerShape,
 } from "../../../src/ui/composer";
 import { composerShapePreviewRows } from "../../../src/ui/styles/overlays/composer-shape-preview";
-import { key, sendKey, sendPaste } from "./harness";
+import { fixtureProvider, key, sendKey, sendPaste, settle } from "./harness";
 
 function make(options: ComposerOptions = {}): { composer: Composer; type(...keys: string[]): void } {
 	return createRoot(() => {
@@ -444,6 +444,33 @@ describe("Enter on a command completion", () => {
 		type("\r");
 		expect(sent).toEqual([]);
 		expect(composer.text()).toBe("/usr/");
+	});
+});
+
+describe("a paste ending in an @ token", () => {
+	const autocomplete = fixtureProvider({ commands: [], files: [{ value: "docs/alice-notes.md" }] });
+
+	test("Enter sends the pasted text instead of completing a file", async () => {
+		const sent: string[] = [];
+		const { composer, type } = make({ onSubmit: text => sent.push(text), autocomplete });
+		sendPaste(composer.node, composer.field, "please reply to @alice");
+		await settle();
+		expect(composer.completing()).toBe(false);
+		type("\r");
+		expect(sent).toEqual(["please reply to @alice"]);
+	});
+
+	test("closes a popup the typed token opened; typing after the paste completes again", async () => {
+		const { composer, type } = make({ autocomplete });
+		type("@ali");
+		await settle();
+		expect(composer.completing()).toBe(true);
+		sendPaste(composer.node, composer.field, "ce");
+		await settle();
+		expect(composer.completing()).toBe(false);
+		type("-");
+		await settle();
+		expect(composer.completing()).toBe(true);
 	});
 });
 

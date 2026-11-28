@@ -44,7 +44,7 @@ const OAUTH_REFRESH_SKEW_MS = 60_000;
 /** How long before expiry `provider`'s OAuth access tokens are refreshed. */
 export function oauthRefreshSkewMs(provider: string): number {
 	const refresh = authPolicyFor(provider)?.refresh;
-	return (refresh?.kind === "request" ? refresh.windowMs : undefined) ?? OAUTH_REFRESH_SKEW_MS;
+	return (refresh && refresh.kind !== "none" ? refresh.windowMs : undefined) ?? OAUTH_REFRESH_SKEW_MS;
 }
 
 /**
@@ -144,6 +144,7 @@ export function mergeRefreshedCredential<T extends OAuthCredential>(current: T, 
 		enterpriseUrl: refreshed.enterpriseUrl ?? current.enterpriseUrl,
 		apiEndpoint: refreshed.apiEndpoint ?? current.apiEndpoint,
 		kiroProfileArn: refreshed.kiroProfileArn ?? current.kiroProfileArn,
+		dpopNonce: refreshed.dpopNonce ?? current.dpopNonce,
 		...mergeRefreshedOrganizationScope(current, refreshed),
 		authorizedAt: refreshed.authorizedAt ?? current.authorizedAt,
 		// Login states when the grant ends. A refresh may report a per-rotation

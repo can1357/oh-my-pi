@@ -1,10 +1,13 @@
 import type { AgentMetricsSummary, AgentRecordLike } from "../../../registry/agent-hub-types";
 import type { ObservableSession } from "../../../task/session-observer-registry";
+import { type AiuTotals, addCallAiu, callAiu } from "../../../session/aiu-billing";
 
 export type AgentMetrics = AgentMetricsSummary;
 
 export interface AgentCostSnapshot {
 	cost: number | undefined;
+	/** Own-session AI credits beside `cost`; absent when the source carries none. */
+	aiu?: AiuTotals;
 }
 
 export interface AggregateMetrics extends AgentMetrics {
@@ -116,8 +119,8 @@ export function progressMetrics(observed: ObservableSession | undefined): AgentM
 	};
 }
 
-/** Lifetime cost from the authoritative session index, excluding task-result child billing. */
-function readSessionDirectCost(session: NonNullable<AgentRecordLike["session"]>): number | undefined {
+/** Lifetime direct spend from the authoritative session index, excluding task-result child billing. */
+function readSessionDirectSpend(session: NonNullable<AgentRecordLike["session"]>): AgentCostSnapshot | undefined {
 	try {
 		const usage = session.sessionManager?.getUsageStatistics();
 		if (
@@ -126,12 +129,33 @@ function readSessionDirectCost(session: NonNullable<AgentRecordLike["session"]>)
 			Number.isFinite(usage.subagentCost) &&
 			usage.cost >= usage.subagentCost
 		) {
-			return usage.cost - usage.subagentCost;
+			return {
+				cost: usage.cost - usage.subagentCost,
+				...(usage.aiuNano === undefined
+					? {}
+					: { aiu: { nano: usage.aiuNano, unknownCalls: usage.aiuUnknownCalls ?? 0 } }),
+			};
 		}
 	} catch {
 		// A session stopping during render may have already closed its stats host.
 	}
 	return undefined;
+}
+
+/** Lifetime direct cost; see {@link readSessionDirectSpend}. */
+function readSessionDirectCost(session: NonNullable<AgentRecordLike["session"]>): number | undefined {
+	return readSessionDirectSpend(session)?.cost;
+}
+
+/** AI credits of a session's assistant messages, for sessions without a usage index. */
+function readMessagesAiu(session: NonNullable<AgentRecordLike["session"]>): AiuTotals | undefined {
+	const messages = session.agent?.state?.messages;
+	if (!Array.isArray(messages)) return undefined;
+	const totals: AiuTotals = { nano: 0, unknownCalls: 0 };
+	for (const message of messages) {
+		if (message.role === "assistant") addCallAiu(totals, callAiu(message));
+	}
+	return totals;
 }
 
 /**
@@ -230,41 +254,49 @@ export function hubRowMetrics<TRecord extends AgentRecordLike>(
 	return projectRowMetrics(ref, observed, liveEntry?.metrics, retainedEntry?.metrics, session !== undefined);
 }
 
+/** A subagent tree's spend: dollars and server-reported AI credits. */
+export interface AgentTreeSpend {
+	cost: number;
+	aiu: AiuTotals;
+}
+
 /** Cost-only projection for frequent status updates; full roster metrics keep their own cache. */
 export function aggregateCost<TRecord extends AgentRecordLike>(args: {
 	rows: readonly TRecord[];
 	observedById: ReadonlyMap<string, ObservableSession>;
 	sessionCosts: WeakMap<object, AgentCostSnapshot>;
-}): number {
-	let total = 0;
+}): AgentTreeSpend {
+	const total: AgentTreeSpend = { cost: 0, aiu: { nano: 0, unknownCalls: 0 } };
 	const countedSessions = new Set<NonNullable<AgentRecordLike["session"]>>();
 	for (const ref of args.rows) {
 		const observed = args.observedById.get(ref.id);
 		const session = hubFallbackStatsSession(ref, observed);
 		let cached = session ? args.sessionCosts.get(session) : undefined;
 		if (session) {
-			const directCost = readSessionDirectCost(session);
-			if (directCost !== undefined) {
-				cached = { cost: directCost };
+			const direct = readSessionDirectSpend(session);
+			if (direct !== undefined) {
+				cached = direct;
 				args.sessionCosts.set(session, cached);
 			} else if (!cached || !fallbackReadCurrent(cached, session)) {
 				const stamp = fallbackReadStamp(session);
-				cached = { cost: readSessionMetrics(session, undefined)?.cost };
+				cached = { cost: readSessionMetrics(session, undefined)?.cost, aiu: readMessagesAiu(session) };
 				if (stamp) fallbackReadStamps.set(cached, stamp);
 				args.sessionCosts.set(session, cached);
 			}
 			if (cached?.cost !== undefined) args.sessionCosts.set(ref, cached);
 		}
-		const cost = projectRowMetrics(
-			ref,
-			observed,
-			cached?.cost !== undefined ? cached : undefined,
-			args.sessionCosts.get(ref),
-			session !== undefined,
-		)?.cost;
-		if (cost === undefined || (session && countedSessions.has(session))) continue;
+		const live = cached?.cost !== undefined ? cached : undefined;
+		const retained = args.sessionCosts.get(ref);
+		const cost = projectRowMetrics(ref, observed, live, retained, session !== undefined)?.cost;
+		// Same precedence as cost: the live session, then the park-time snapshot, then the retained read.
+		const aiu = live?.aiu ?? ref.history?.directAiu ?? retained?.aiu;
+		if ((cost === undefined && aiu === undefined) || (session && countedSessions.has(session))) continue;
 		if (session) countedSessions.add(session);
-		total += finiteMetric(cost);
+		total.cost += finiteMetric(cost);
+		if (aiu) {
+			total.aiu.nano += finiteMetric(aiu.nano);
+			total.aiu.unknownCalls += finiteMetric(aiu.unknownCalls);
+		}
 	}
 	return total;
 }

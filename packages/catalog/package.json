@@ -87,7 +87,7 @@
 		"@oh-my-pi/pi-utils": "catalog:"
 	},
 	"devDependencies": {
-		"@bgotink/kdl": "0.4.0",
+		"@bgotink/kdl": "0.4.2",
 		"@oh-my-pi/pi-ai": "catalog:",
 		"@types/bun": "catalog:"
 	},

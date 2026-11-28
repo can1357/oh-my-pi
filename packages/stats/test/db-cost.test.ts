@@ -331,76 +331,104 @@ describe("stats subscription cost correction", () => {
 	});
 
 	it("refreshes a historically zero-cost multi-agent row with orchestration usage on re-ingest", async () => {
-		await initDb();
-		closeDb();
-
-		// Simulate a pre-fix ingest: the row was priced from the four stored
-		// token buckets only, so its orchestration usage was dropped and the
-		// cost persisted as $0.
-		const database = new Database(getStatsDbPath());
-		database
-			.prepare(`
-				INSERT INTO messages (
-					session_file, entry_id, folder, model, provider, api, timestamp,
-					duration, ttft, stop_reason, error_message,
-					input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens, premium_requests,
-					cost_input, cost_output, cost_cache_read, cost_cache_write, cost_total
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-			`)
-			.run(
-				"/tmp/session.jsonl",
-				"multi-agent",
-				"/tmp/project",
-				"grok-4.20-multi-agent-0309",
-				"xai-oauth",
-				"openai-responses",
-				Date.now(),
-				1000,
-				100,
-				"stop",
-				null,
-				1000,
-				500,
-				200,
-				0,
-				302_700,
-				0,
-				0,
-				0,
-				0,
-				0,
-				0,
-			);
-		database.close();
-
-		await initDb();
-
-		// Re-ingest the same row with the orchestration counters the parser
-		// recovers from source; the cost-refreshing UPSERT must reprice it.
-		insertMessageStats([
-			{
-				...createXaiOAuthStats("multi-agent"),
-				model: "grok-4.20-multi-agent-0309",
-				usage: {
-					input: 1000,
-					output: 500,
-					cacheRead: 200,
+		// Pin the rate card rather than read the bundled one, whose prices follow
+		// upstream catalog refreshes: 2/6/0.2 per million tokens, and 4/12/0.4 for
+		// the whole request once prompt input reaches 200K tokens.
+		const tariff = {
+			...codexReferenceModel,
+			id: "grok-4.20-multi-agent-0309",
+			provider: "xai-oauth",
+			cost: {
+				input: 2,
+				output: 6,
+				cacheRead: 0.2,
+				cacheWrite: 0,
+				longContext: {
+					inputThreshold: 200_000,
+					inputThresholdInclusive: true,
+					input: 4,
+					output: 12,
+					cacheRead: 0.4,
 					cacheWrite: 0,
-					orchestration: { input: 300_000, output: 1000 },
-					totalTokens: 302_700,
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 				},
 			},
-		]);
+		};
+		// The isolated database holds only this request, so every lookup is for it.
+		const lookup = spyOn(catalogModels, "getBundledModel").mockReturnValue(tariff);
+		try {
+			await initDb();
+			closeDb();
 
-		// Prompt input (1000 + 200 + 300000) crosses the inclusive 200K tier, so
-		// the whole request bills at 4/12/0.4; orchestration input/output are
-		// priced alongside the conversation buckets.
-		const request = getRecentRequests(1)[0];
-		expect(request?.usage.cost.input).toBeCloseTo((4 / 1e6) * 301_000, 8);
-		expect(request?.usage.cost.output).toBeCloseTo((12 / 1e6) * 1_500, 8);
-		expect(request?.usage.cost.cacheRead).toBeCloseTo((0.4 / 1e6) * 200, 8);
-		expect(request?.usage.cost.total).toBeCloseTo(1.22208, 8);
+			// Simulate a pre-fix ingest: the row was priced from the four stored
+			// token buckets only, so its orchestration usage was dropped and the
+			// cost persisted as $0.
+			const database = new Database(getStatsDbPath());
+			database
+				.prepare(`
+					INSERT INTO messages (
+						session_file, entry_id, folder, model, provider, api, timestamp,
+						duration, ttft, stop_reason, error_message,
+						input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens, premium_requests,
+						cost_input, cost_output, cost_cache_read, cost_cache_write, cost_total
+					) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				`)
+				.run(
+					"/tmp/session.jsonl",
+					"multi-agent",
+					"/tmp/project",
+					"grok-4.20-multi-agent-0309",
+					"xai-oauth",
+					"openai-responses",
+					Date.now(),
+					1000,
+					100,
+					"stop",
+					null,
+					1000,
+					500,
+					200,
+					0,
+					302_700,
+					0,
+					0,
+					0,
+					0,
+					0,
+					0,
+				);
+			database.close();
+
+			await initDb();
+
+			// Re-ingest the same row with the orchestration counters the parser
+			// recovers from source; the cost-refreshing UPSERT must reprice it.
+			insertMessageStats([
+				{
+					...createXaiOAuthStats("multi-agent"),
+					model: "grok-4.20-multi-agent-0309",
+					usage: {
+						input: 1000,
+						output: 500,
+						cacheRead: 200,
+						cacheWrite: 0,
+						orchestration: { input: 300_000, output: 1000 },
+						totalTokens: 302_700,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+				},
+			]);
+
+			// Prompt input (1000 + 200 + 300000) crosses the inclusive 200K tier, so
+			// the whole request bills at 4/12/0.4; orchestration input/output are
+			// priced alongside the conversation buckets.
+			const request = getRecentRequests(1)[0];
+			expect(request?.usage.cost.input).toBeCloseTo((4 / 1e6) * 301_000, 8);
+			expect(request?.usage.cost.output).toBeCloseTo((12 / 1e6) * 1_500, 8);
+			expect(request?.usage.cost.cacheRead).toBeCloseTo((0.4 / 1e6) * 200, 8);
+			expect(request?.usage.cost.total).toBeCloseTo(1.22208, 8);
+		} finally {
+			lookup.mockRestore();
+		}
 	});
 });
 
@@ -453,7 +481,7 @@ describe("stats scheduled response costs", () => {
 		const dated = {
 			...codexReferenceModel,
 			id: "dated-card-model",
-			provider: "google-antigravity",
+			provider: "google",
 			cost: {
 				input: 2,
 				output: 10,
@@ -482,7 +510,7 @@ describe("stats scheduled response costs", () => {
 					const stats = createCodexGptStats(entryId);
 					stats.provider = dated.provider;
 					stats.model = dated.id;
-					stats.api = "google-gemini-cli";
+					stats.api = "google-generative-ai";
 					stats.timestamp = timestamp;
 					stats.usage = {
 						input: 1_000_000,
