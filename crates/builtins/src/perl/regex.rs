@@ -918,25 +918,22 @@ impl Sanitized {
 		let mut spans = Vec::new();
 		let mut at = 0;
 		while at < original.len() {
-			match std::str::from_utf8(&original[at..]) {
-				Ok(_) => { bytes.extend_from_slice(&original[at..]); break; }
-				Err(error) => {
-					let good = error.valid_up_to();
-					bytes.extend_from_slice(&original[at..at + good]);
-					at += good;
-					// One perl character: the lead byte's length (perl's
-					// extended UTF-8 allows up to 13 bytes) while continuation
-					// bytes follow, else the single bad byte.
-					let lead = original[at];
-					let width = match lead.leading_ones() { 0 | 1 => 1, 7 | 8 => if lead == 0xFF { 13 } else { 7 }, n => n as usize };
-					let mut end = at + 1;
-					while end < at + width && original.get(end).is_some_and(|b| b & 0xC0 == 0x80) { end += 1; }
-					let copy = bytes.len();
-					bytes.extend_from_slice(REPLACEMENT);
-					spans.push((at, end, copy, bytes.len()));
-					at = end;
-				}
+			let valid = xutf::valid_prefix(&original[at..]);
+			bytes.extend_from_slice(valid.as_bytes());
+			at += valid.len();
+			if at == original.len() {
+				break;
 			}
+			// One Perl character: the lead byte's length (up to 13 bytes)
+			// while continuation bytes follow, else the single bad byte.
+			let lead = original[at];
+			let width = match lead.leading_ones() { 0 | 1 => 1, 7 | 8 => if lead == 0xFF { 13 } else { 7 }, n => n as usize };
+			let mut end = at + 1;
+			while end < at + width && original.get(end).is_some_and(|b| b & 0xC0 == 0x80) { end += 1; }
+			let copy = bytes.len();
+			bytes.extend_from_slice(REPLACEMENT);
+			spans.push((at, end, copy, bytes.len()));
+			at = end;
 		}
 		Self { bytes, spans }
 	}
@@ -1421,10 +1418,10 @@ impl<'a> Scanner<'a> {
 		let b = self.at(i);
 		if !self.source.utf8 || b < 128 { return (u32::from(b), i + 1); }
 		let tail = self.tail(i);
-		let width = (b.leading_ones() as usize).clamp(1, 4);
-		if let Some(c) = tail.get(..width).and_then(|b| std::str::from_utf8(b).ok()).and_then(|s| s.chars().next()) {
-			(u32::from(c), i + width)
-		} else { (u32::from(b), i + 1) }
+		xutf::valid_prefix(&tail[..tail.len().min(char::MAX_LEN_UTF8)])
+			.chars()
+			.next()
+			.map_or((u32::from(b), i + 1), |c| (u32::from(c), i + c.len_utf8()))
 	}
 
 	fn err(&self, msg: &str, at: usize) -> String { diagnostic(self.source, msg, Some(at)) }
@@ -3357,7 +3354,7 @@ pub(super) fn char_by_name(name: &[u8]) -> Option<u32> {
 	};
 	if alias.is_some() { return alias; }
 	if name.bytes().any(|b| b.is_ascii_lowercase()) { return None; }
-	unicode_names2::character(name).map(u32::from)
+	super::charnames::character(name)
 }
 
 fn diagnostic(src: &PStr, reason: &str, at: Option<usize>) -> String {

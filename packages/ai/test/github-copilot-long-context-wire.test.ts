@@ -276,3 +276,62 @@ describe("GitHub Copilot Responses image detail clamp (#2822)", () => {
 		expect(await detailOnWire(model, context)).toBe("auto");
 	});
 });
+
+/**
+ * Copilot Responses requests default `reasoning.summary` to `"detailed"` on
+ * gpt-6.2-sol, the model it was verified on (`reasoning-summary-default`).
+ * Other Copilot models and other hosts keep `"auto"`, and an explicit caller
+ * choice always wins.
+ */
+describe("GitHub Copilot Responses reasoning summary default", () => {
+	async function summaryOnWire(
+		model: Model<"openai-responses">,
+		options: { reasoningSummary?: "auto" | "detailed" | "concise" | null } = {},
+	): Promise<unknown> {
+		let body: Record<string, unknown> | undefined;
+		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+			body = await getRequestBody(input, init);
+			return createUnauthorizedResponse();
+		});
+		await streamOpenAIResponses(model, testContext, {
+			apiKey: "ghu_test_copilot_token",
+			reasoning: "high",
+			fetch: fetchMock as unknown as typeof fetch,
+			...options,
+		}).result();
+		return (body?.reasoning as { summary?: unknown } | undefined)?.summary;
+	}
+
+	const sol = {
+		api: "openai-responses",
+		id: "gpt-6.2-sol",
+		requestModelId: "gpt-6.2-sol",
+		name: "GPT-6.2 Sol",
+	} as const;
+	const gpt = { api: "openai-responses", id: "gpt-5.5", requestModelId: "gpt-5.5", name: "GPT-5.5" } as const;
+
+	it("sends `detailed` on Sol when the caller names no summary level", async () => {
+		expect(await summaryOnWire(makeLongContextVariant(sol))).toBe("detailed");
+	});
+
+	it("sends `detailed` on Sol's synthesized long-context row, which keeps Sol's wire id", async () => {
+		const longSol = makeLongContextVariant({ ...sol, id: "gpt-6.2-sol-1m", name: "GPT-6.2 Sol (1M)" });
+		expect(longSol.requestModelId).toBe("gpt-6.2-sol");
+		expect(await summaryOnWire(longSol)).toBe("detailed");
+	});
+
+	it("lets an explicit caller level and an explicit omission win over the default", async () => {
+		const model = makeLongContextVariant(sol);
+		expect(await summaryOnWire(model, { reasoningSummary: "concise" })).toBe("concise");
+		expect(await summaryOnWire(model, { reasoningSummary: null })).toBeUndefined();
+	});
+
+	it("keeps `auto` on Copilot models the default was not verified on", async () => {
+		expect(await summaryOnWire(makeLongContextVariant(gpt))).toBe("auto");
+	});
+
+	it("keeps `auto` on hosts without the rule", async () => {
+		const model = makeLongContextVariant({ ...sol, provider: "openai", baseUrl: "https://api.openai.com/v1" });
+		expect(await summaryOnWire(model)).toBe("auto");
+	});
+});

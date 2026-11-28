@@ -1,8 +1,4 @@
-import type {
-	CustomCommand,
-	CustomCommandAPI,
-	CustomCommandContext,
-} from "../../../../extensibility/custom-commands/types";
+import type { CustomCommandAPI, CustomCommandContext } from "../../../../extensibility/custom-commands/types";
 import { parseCommandArgs } from "../../../../utils/command-args";
 import type { AutocompleteItem } from "../../../../autocomplete/autocomplete";
 import { CombinedAutocompleteProvider } from "../../../../autocomplete/autocomplete";
@@ -342,9 +338,8 @@ export async function runAnnotateCommand(
 	return undefined;
 }
 
-export class AnnotateCommand implements CustomCommand {
-	name = "annotate";
-	description = "Annotate a diff or text from a file, prompt, latest reply, or session";
+/** Annotation command execution and argument completion, loaded on demand by the descriptor. */
+export class AnnotationRuntime {
 	#fileCompletionProvider: CombinedAutocompleteProvider | undefined;
 	#fileCompletionCwd: string | undefined;
 
@@ -362,5 +357,3 @@ export class AnnotateCommand implements CustomCommand {
 		return runAnnotateCommand(this.api, rawArgs ?? args.join(" "), ctx);
 	}
 }
-
-export default AnnotateCommand;

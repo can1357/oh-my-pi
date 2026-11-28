@@ -26,146 +26,10 @@ from final import MODELS, cached  # noqa: E402
 from providers import llm_complete, load_env_key  # noqa: E402
 from run import CACHE, RESULTS, load_prompt, sha8  # noqa: E402
 
-SIZE = 1568
-
-# Production Shape payloads, keyed by variant name (geometry only; billing
-# fields are required by isShape but irrelevant to rendering).
-SHAPES = {
-    "doc-8on16-bw": {
-        "font": "8x13",
-        "cellWidth": 8,
-        "cellHeight": 16,
-        "stretch": False,
-        "variant": "bw",
-        "columns": 2,
-        "lineRepeat": 1,
-        "frameSize": SIZE,
-        "frameTokenEstimate": 2900,
-    },
-    "doc-8on16-sent": {
-        "font": "8x13",
-        "cellWidth": 8,
-        "cellHeight": 16,
-        "stretch": False,
-        "variant": "sent",
-        "columns": 2,
-        "lineRepeat": 1,
-        "frameSize": SIZE,
-        "frameTokenEstimate": 2900,
-    },
-    "doc-8on16-sent-dim": {
-        "font": "8x13",
-        "cellWidth": 8,
-        "cellHeight": 16,
-        "stretch": False,
-        "variant": "sent",
-        "columns": 2,
-        "stopwordDim": True,
-        "lineRepeat": 1,
-        "frameSize": SIZE,
-        "frameTokenEstimate": 2900,
-    },
-    "8on16-bw": {
-        "font": "8x13",
-        "cellWidth": 8,
-        "cellHeight": 16,
-        "stretch": False,
-        "variant": "bw",
-        "lineRepeat": 1,
-        "frameSize": SIZE,
-        "frameTokenEstimate": 2900,
-    },
-    "8on22-bw": {
-        "font": "8x13",
-        "cellWidth": 8,
-        "cellHeight": 22,
-        "stretch": False,
-        "variant": "bw",
-        "lineRepeat": 1,
-        "frameSize": SIZE,
-        "frameTokenEstimate": 2900,
-    },
-    "11on16-bw": {
-        "font": "8x13",
-        "cellWidth": 11,
-        "cellHeight": 16,
-        "stretch": False,
-        "variant": "bw",
-        "lineRepeat": 1,
-        "frameSize": SIZE,
-        "frameTokenEstimate": 2900,
-    },
-    "6x12-dim": {
-        "font": "6x12",
-        "cellWidth": 6,
-        "cellHeight": 12,
-        "variant": "bw",
-        "stopwordDim": True,
-        "lineRepeat": 1,
-        "frameSize": SIZE,
-        "frameTokenEstimate": 3300,
-    },
-    "8x13-bw": {
-        "font": "8x13",
-        "cellWidth": 8,
-        "cellHeight": 13,
-        "variant": "bw",
-        "lineRepeat": 1,
-        "frameSize": SIZE,
-        "frameTokenEstimate": 3300,
-    },
-    "8x8r-bw": {
-        "font": "8x8",
-        "cellWidth": 8,
-        "cellHeight": 8,
-        "variant": "bw",
-        "lineRepeat": 2,
-        "frameSize": SIZE,
-        "frameTokenEstimate": 3300,
-    },
-    "8x8r-sent": {
-        "font": "8x8",
-        "cellWidth": 8,
-        "cellHeight": 8,
-        "variant": "sent",
-        "lineRepeat": 2,
-        "frameSize": SIZE,
-        "frameTokenEstimate": 1100,
-    },
-    "8x8u-bw": {
-        "font": "8x8",
-        "cellWidth": 8,
-        "cellHeight": 8,
-        "variant": "bw",
-        "lineRepeat": 1,
-        "frameSize": SIZE,
-        "frameTokenEstimate": 3300,
-    },
-    "8x8u-sent": {
-        "font": "8x8",
-        "cellWidth": 8,
-        "cellHeight": 8,
-        "variant": "sent",
-        "lineRepeat": 1,
-        "frameSize": SIZE,
-        "frameTokenEstimate": 3300,
-    },
-    "6x6u-sent": {
-        "font": "8x8",
-        "cellWidth": 6,
-        "cellHeight": 6,
-        "variant": "sent",
-        "lineRepeat": 1,
-        "frameSize": SIZE,
-        "frameTokenEstimate": 3300,
-    },
-}
-
-
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument(
-        "--shape", choices=sorted(SHAPES), help="named shape from the built-in table"
+        "--shape", default="auto", help="production variant name; auto uses the model default"
     )
     ap.add_argument(
         "--shape-json", help="raw production Shape JSON (alternative to --shape)"
@@ -216,16 +80,18 @@ def main() -> None:
         if not args.name:
             ap.error("--name is required with --shape-json")
         shape, label = json.loads(args.shape_json), args.name
-    elif args.shape:
-        shape, label = SHAPES[args.shape], args.shape
     else:
-        ap.error("pass --shape or --shape-json")
+        label = args.shape
+        shape = json.loads(subprocess.check_output(
+            ["bun", str(HERE / "render_pages.ts"), "--resolve-shape", args.model, args.shape],
+            text=True,
+        ))
     cond = f"prod-{label}"
     size = shape["frameSize"]
 
     # Production frames (keyed by flow + shape so corpus changes re-render).
     frame_dir = (
-        CACHE / f"prod-frames-{label}-{sha8(flow, json.dumps(shape, sort_keys=True))}"
+        CACHE / f"prod-system-frames-{label}-{sha8(flow, json.dumps(shape, sort_keys=True))}"
     )
     if not frame_dir.exists() or not any(frame_dir.iterdir()):
         flow_file = CACHE / f"prod-flow-{sha8(flow)}.txt"

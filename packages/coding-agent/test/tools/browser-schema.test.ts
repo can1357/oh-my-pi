@@ -5,6 +5,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import { resolveWaitTimeout } from "@oh-my-pi/pi-coding-agent/tools/browser/op-timeouts";
 import { cfgBrowserEnabled } from "@oh-my-pi/pi-coding-agent/tools/browser/settings";
+import { renderTabCall } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-call";
 import * as supervisor from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 
 afterEach(() => {
@@ -163,7 +164,8 @@ describe("browser prelude", () => {
 				return {};
 			};
 			const tab = { waitForSelector };
-			const returnValue = await runInContext(`(async () => { ${opts.code} })()`, createContext({ tab }));
+			const code = opts.callChain ? renderTabCall(opts.callChain) : opts.code;
+			const returnValue = await runInContext(`(async () => { ${code} })()`, createContext({ tab }));
 			return { displays: [], returnValue, screenshots: [] };
 		});
 		const session = makeSession();

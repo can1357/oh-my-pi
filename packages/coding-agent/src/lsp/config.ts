@@ -465,6 +465,9 @@ function marketplaceConfigSource(root: ClaudePluginRoot): ConfigFileSource<Norma
  * }
  * ```
  */
+/** Default idle shutdown for language servers; `idleTimeoutMs: 0` (or negative) disables it. */
+export const DEFAULT_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
+
 export function loadConfig(cwd: string): LspConfig {
 	let mergedServers = coerceServerConfigs(DEFAULTS);
 
@@ -472,7 +475,7 @@ export function loadConfig(cwd: string): LspConfig {
 		pluginRootSource: marketplaceConfigSource,
 	}).reverse();
 
-	let idleTimeoutMs: number | undefined;
+	let idleTimeoutMs: number = DEFAULT_IDLE_TIMEOUT_MS;
 	for (const source of configSources) {
 		const parsed = source.read();
 		if (!parsed) continue;

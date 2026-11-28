@@ -8,8 +8,7 @@
  * `openai-codex` built by the
  * coding-agent runtime) still have a KDL entry but no runtime discovery here.
  */
-import type { KnownProvider } from "../compat/provider-ids";
-import { providerEntries, providerEntry } from "../compat/providers";
+import { providerEntries } from "../compat/providers";
 import type { Api } from "../types";
 import type { ModelManagerOptions } from "../model-manager";
 import type { ModelManagerConfig, ProviderDescriptor } from "./descriptor-types";
@@ -101,11 +100,9 @@ import {
 	webModelManagerOptions,
 } from "./special";
 
-export type { KnownProvider } from "../compat/provider-ids";
-
 type ModelManagerFactory = (config: ModelManagerConfig) => ModelManagerOptions<Api>;
 
-const MODEL_MANAGER_FACTORIES: Readonly<Partial<Record<KnownProvider, ModelManagerFactory>>> = {
+const MODEL_MANAGER_FACTORIES: Readonly<Partial<Record<string, ModelManagerFactory>>> = {
 	abliteration: config => abliterationModelManagerOptions(config),
 	aiand: config => aiandModelManagerOptions(config),
 	aimlapi: config => aimlApiModelManagerOptions(config),
@@ -142,6 +139,7 @@ const MODEL_MANAGER_FACTORIES: Readonly<Partial<Record<KnownProvider, ModelManag
 	inception: config => inceptionModelManagerOptions(config),
 	kilo: config => kiloModelManagerOptions(config),
 	"kimi-code": config => kimiCodeModelManagerOptions(config),
+	"kimi-code-global": config => kimiCodeModelManagerOptions(config, "kimi-code-global"),
 	liquid: () => liquidModelManagerOptions(),
 	litellm: config => litellmModelManagerOptions(config),
 	local: () => localModelManagerOptions(),
@@ -198,16 +196,12 @@ const MODEL_MANAGER_FACTORIES: Readonly<Partial<Record<KnownProvider, ModelManag
 	"zhipu-coding-plan": config => zhipuCodingPlanModelManagerOptions(config),
 };
 
-function isKnownProvider(id: string): id is KnownProvider {
-	return providerEntry(id) !== undefined;
-}
-
 /**
  * Runtime model-discovery descriptors: every catalog provider with a
  * model-manager factory, paired with its compiled KDL entry.
  */
 export const PROVIDER_DESCRIPTORS: readonly ProviderDescriptor[] = Object.values(providerEntries()).flatMap(entry => {
-	const createModelManagerOptions = isKnownProvider(entry.id) ? MODEL_MANAGER_FACTORIES[entry.id] : undefined;
+	const createModelManagerOptions = MODEL_MANAGER_FACTORIES[entry.id];
 	if (!createModelManagerOptions) return [];
 	const discovery = entry.discovery;
 	return [
@@ -224,6 +218,6 @@ export const PROVIDER_DESCRIPTORS: readonly ProviderDescriptor[] = Object.values
 });
 
 /** Default model IDs for all known providers, from their KDL entries. */
-export const DEFAULT_MODEL_PER_PROVIDER: Readonly<Record<KnownProvider, string>> = Object.fromEntries(
+export const DEFAULT_MODEL_PER_PROVIDER: Readonly<Record<string, string>> = Object.fromEntries(
 	Object.values(providerEntries()).map(entry => [entry.id, entry.defaultModel] as const),
-) as Record<KnownProvider, string>;
+);

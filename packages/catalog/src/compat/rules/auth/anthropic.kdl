@@ -15,7 +15,7 @@ auth "anthropic" {
 		pkce #true
 		authorize-params { code "true" }
 		instructions "Complete login in your browser. If the browser cannot reach this machine, paste the final redirect URL or authorization code when prompted."
-		callback port=54545 path="/callback"
+		callback port=54545 port-env="PI_ANTHROPIC_OAUTH_CALLBACK_PORT" path="/callback"
 		token url="https://api.anthropic.com/v1/oauth/token" body="json" {
 			params { state "{state}" }
 		}

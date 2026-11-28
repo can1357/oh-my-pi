@@ -271,6 +271,32 @@ describe("Factory Droid model builder", () => {
 		expect(quotaTierFor("factory-droid", "claude-haiku-5-5")).toBe("standard");
 	});
 
+	it("builds Gemini 4 Neon on the Standard pool with Google's list price and its xhigh ladder", () => {
+		const model = buildFactoryDroidModel(registryModel("gemini-4-neon"));
+		expect(model.thinking).toMatchObject({
+			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+			requiresEffort: true,
+			defaultLevel: Effort.High,
+		});
+		expect(model.contextWindow).toBe(1048576);
+		expect(model.cost).toEqual(getBundledModel("google", "gemini-4-neon").cost);
+		expect(model.factoryDroidCredits).toBe(1.2);
+		expect(quotaTierFor("factory-droid", "gemini-4-neon")).toBe("standard");
+	});
+
+	it("builds Gemini 4 Hydrogen on the Standard pool with Google's list price and its xhigh ladder", () => {
+		const model = buildFactoryDroidModel(registryModel("gemini-4-hydrogen"));
+		expect(model.thinking).toMatchObject({
+			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+			requiresEffort: true,
+			defaultLevel: Effort.High,
+		});
+		expect(model.contextWindow).toBe(1000000);
+		expect(model.cost).toEqual(getBundledModel("google", "gemini-4-hydrogen").cost);
+		expect(model.factoryDroidCredits).toBe(0.6);
+		expect(quotaTierFor("factory-droid", "gemini-4-hydrogen")).toBe("standard");
+	});
+
 	it("builds Mistral Large 4 on the Core pool without borrowing the lower Mistral list price", () => {
 		const model = buildFactoryDroidModel(registryModel("mistral-large-4"));
 		expect(model.thinking).toMatchObject({ efforts: [Effort.High], requiresEffort: false });
@@ -611,6 +637,8 @@ describe("Factory Droid discovery gates", () => {
 			"gpt-6-astra-ultrafast",
 			"claude-fable-5.2",
 			"gemini-4-carbon",
+			"gemini-4-neon",
+			"gemini-4-hydrogen",
 			"kimi-k3.1-pro",
 		];
 		const ultraFast = ["gpt-6-astra-ultrafast", "gpt-6.1-sol-ultrafast"];

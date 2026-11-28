@@ -33,15 +33,15 @@ fn empty(location: Location) -> Expr { node(location, ExprKind::List(Vec::new())
 
 impl<'s, 'h> Parser<'s, 'h> {
 	/// Parse an expression through the requested minimum precedence.
-	pub(super) fn expr(&mut self, min: u8) -> ResultOf<Expr> {
-		self.nested(|parser| {
-			let term = parser.prefix()?;
-			parser.expr_rest(term, min)
-		})
+	pub(super) async fn expr(&mut self, min: u8) -> ResultOf<Expr> {
+		self.nested(|parser| Box::pin(async move {
+			let term = parser.prefix().await?;
+			parser.expr_rest(term, min).await
+		})).await
 	}
 
-	fn expr_rest(&mut self, mut term: Expr, min: u8) -> ResultOf<Expr> {
-		if min <= P_ARROW { term = self.postfix(term)?; }
+	async fn expr_rest(&mut self, mut term: Expr, min: u8) -> ResultOf<Expr> {
+		if min <= P_ARROW { term = self.postfix(term).await?; }
 		loop {
 			let token = self.peek();
 			let spelling = self.lex.text(&token);
@@ -56,9 +56,9 @@ impl<'s, 'h> Parser<'s, 'h> {
 			}
 			if min <= P_TERNARY && spelling == b"?" {
 				self.bump();
-				let yes = self.expr(0)?;
+				let yes = self.expr(0).await?;
 				self.expect(b":")?;
-				let no = self.expr(P_TERNARY)?;
+				let no = self.expr(P_TERNARY).await?;
 				self.wrap_tree()?;
 				term = node(token.location, ExprKind::Conditional(Box::new(term), Box::new(yes), Box::new(no)));
 				continue;
@@ -70,7 +70,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 				while matches!(self.spelling(), b"," | b"=>") {
 					self.bump();
 					trailing = !self.can_term();
-					if !trailing { list.push(self.expr(P_COMMA + 1)?); }
+					if !trailing { list.push(self.expr(P_COMMA + 1).await?); }
 				}
 				self.wrap_tree()?;
 				term = node(location, ExprKind::List(list));
@@ -84,7 +84,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 			let Some((op, prec, assoc)) = infix(spelling) else { break; };
 			if prec < min { break; }
 			self.bump();
-			let mut right = self.expr(prec + u8::from(assoc != Assoc::Right))?;
+			let mut right = self.expr(prec + u8::from(assoc != Assoc::Right)).await?;
 			if let Binary::Bind(_) = op { self.bind_diagnostics(&term, &right, &token.location)?; }
 			if let Some(message) = unmodifiable_assignment(op, &term, &right) {
 				return Err(self.argument_error(message, false));
@@ -102,7 +102,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 					self.bump();
 					chain.push((op, right));
 					op = next_op;
-					right = self.expr(prec + 1)?;
+					right = self.expr(prec + 1).await?;
 				}
 				if !chain.is_empty() {
 					chain.push((op, right));
@@ -135,19 +135,19 @@ impl<'s, 'h> Parser<'s, 'h> {
 	}
 
 	/// Parse a term before any infix or postfix operator has been consumed.
-	pub(super) fn prefix(&mut self) -> ResultOf<Expr> {
+	pub(super) async fn prefix(&mut self) -> ResultOf<Expr> {
 		let token = self.peek();
 		let spelling = self.lex.text(&token);
 		let location = token.location.clone();
 		let result = match spelling {
-			b"(" => return self.delimited_list(b"(", b")", true),
-			b"[" => return self.delimited_list(b"[", b"]", false).map(|list| node(location, ExprKind::Array(Box::new(list)))),
-			b"{" => return self.delimited_list(b"{", b"}", false).map(|list| node(location, ExprKind::Hash(Box::new(list)))),
-			b"$" | b"@" | b"%" | b"&" | b"*" | b"**" | b"&." | b"%=" | b"*=" | b"&=" => return self.variable(true),
-			b"/" | b"//" | b"/=" => return self.symbolic_quote(token, b'/'),
-			b"\"" | b"'" | b"`" => return self.symbolic_quote(token, spelling[0]),
-			b"<" | b"<=" | b"<=>" => return self.angle(token),
-			b"<<" | b"<<=" => return self.here(token),
+			b"(" => return self.delimited_list(b"(", b")", true).await,
+			b"[" => return self.delimited_list(b"[", b"]", false).await.map(|list| node(location, ExprKind::Array(Box::new(list)))),
+			b"{" => return self.delimited_list(b"{", b"}", false).await.map(|list| node(location, ExprKind::Hash(Box::new(list)))),
+			b"$" | b"@" | b"%" | b"&" | b"*" | b"**" | b"&." | b"%=" | b"*=" | b"&=" => return self.variable(true).await,
+			b"/" | b"//" | b"/=" => return self.symbolic_quote(token, b'/').await,
+			b"\"" | b"'" | b"`" => return self.symbolic_quote(token, spelling[0]).await,
+			b"<" | b"<=" | b"<=>" => return self.angle(token).await,
+			b"<<" | b"<<=" => return self.here(token).await,
 			b"+" | b"-" | b"!" | b"~" | b"~." | b"~~" | b"\\" | b"++" | b"--" => {
 				self.bump();
 				if spelling == b"-" {
@@ -166,14 +166,14 @@ impl<'s, 'h> Parser<'s, 'h> {
 						let arg = if next.kind == Kind::Word && self.lex.text(&next) == b"_" {
 							self.bump();
 							Some(Box::new(node(next.location, ExprKind::Bareword("_".into()))))
-						} else if self.can_term() && !matches!(self.spelling(), b"//" | b"//=") { Some(Box::new(self.expr(P_UNARY + 1)?)) } else { None };
+						} else if self.can_term() && !matches!(self.spelling(), b"//" | b"//=") { Some(Box::new(self.expr(P_UNARY + 1).await?)) } else { None };
 						return Ok(node(location, ExprKind::FileTest(op, arg)));
 					}
 				}
 				if spelling == b"~~" || spelling == b"~." && !self.features.bitwise {
 					self.lex.rewind(&token);
 					self.lex.advance(token.start + 1);
-					return self.expr(P_PREFIX).map(|inner| unary(location, Unary::Complement, inner));
+					return self.expr(P_PREFIX).await.map(|inner| unary(location, Unary::Complement, inner));
 				}
 				let (op, prec) = match spelling {
 					b"+" => (Unary::Plus, P_PREFIX), b"-" => (Unary::Minus, P_PREFIX), b"!" => (Unary::Not, P_PREFIX),
@@ -181,9 +181,9 @@ impl<'s, 'h> Parser<'s, 'h> {
 					b"\\" => (Unary::Reference, P_PREFIX), b"++" => (Unary::PreInc, P_INC), _ => (Unary::PreDec, P_INC),
 				};
 				let rhs = if op == Unary::Reference && self.lex.source.get(self.after_space(token.end)) == Some(&b'&') {
-					let code = self.variable(false)?;
-					if self.at(b"(") { self.amp_call(code)? } else { code }
-				} else { self.expr(prec)? };
+					let code = self.variable(false).await?;
+					if self.at(b"(") { self.amp_call(code).await? } else { code }
+				} else { self.expr(prec).await? };
 				// `\(&name)` and `\(&a, &b)` take code references rather than calling.
 				let rhs = if op == Unary::Reference { uncalled_code_refs(rhs) } else { rhs };
 				return Ok(unary(location, op, rhs));
@@ -192,7 +192,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 				self.bump();
 				if short_v(spelling) {
 					if self.at(b"=>") { ExprKind::String(self.pstr(spelling)) }
-					else if matches!(self.spelling(), b"(" | b"->") || self.prototype(&self.name(spelling)).is_some() { return self.word(token); }
+					else if matches!(self.spelling(), b"(" | b"->") || self.prototype(&self.name(spelling)).is_some() { return self.word(token).await; }
 					else { parse_number(spelling).ok_or_else(|| self.error_at(&token))? }
 				} else if matches!(spelling, b"0x" | b"0X" | b"0b" | b"0B" | b"0o" | b"0O") {
 					// toke.c scan_num: a queued error; the number is 0 and parsing goes on.
@@ -211,7 +211,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 			_ if token.kind == Kind::Word => {
 				self.bump();
 				let token = self.split_builtin_apostrophe(token);
-				return self.word(token);
+				return self.word(token).await;
 			}
 			_ => return Err(self.error()),
 		};
@@ -236,7 +236,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 		} else { token }
 	}
 
-	fn word(&mut self, token: Token) -> ResultOf<Expr> {
+	async fn word(&mut self, token: Token) -> ResultOf<Expr> {
 		let spelling = self.lex.text(&token);
 		let location = token.location.clone();
 		let next = if quote_word(spelling) && self.lex.source.get(token.end) == Some(&b'#') {
@@ -266,10 +266,10 @@ impl<'s, 'h> Parser<'s, 'h> {
 		}
 		let name = self.name(spelling);
 		if let Some(proto) = self.lexical_prototype(&name).cloned() {
-			if self.class_follows(proto.as_ref()) { return self.indirect_call(name, location); }
+			if self.class_follows(proto.as_ref()) { return self.indirect_call(name, location).await; }
 			// `our sub NAME` calls its package sub from any package in scope.
 			let name = self.our_sub_name(&name).unwrap_or(name);
-			return self.known_call(name, proto, location);
+			return self.known_call(name, proto, location).await;
 		}
 		let (builtin, origin) = if let Some(b) = name.strip_prefix("CORE::GLOBAL::") {
 			(Builtin::from_name(b), BuiltinOrigin::Global)
@@ -281,25 +281,25 @@ impl<'s, 'h> Parser<'s, 'h> {
 		if let Some(builtin) = builtin && (origin != BuiltinOrigin::Implicit || self.enabled(builtin)) {
 			if origin == BuiltinOrigin::Implicit {
 				if let Some(proto) = self.builtin_override(builtin, tail.starts_with(b"{")) {
-					return self.known_call(name, proto, location);
+					return self.known_call(name, proto, location).await;
 				}
 				self.ambiguous_builtin(builtin, tail.starts_with(b"{"), &location)?;
 			}
 			use Builtin as B;
 			return match builtin {
-				B::Q | B::Qq | B::Qw | B::Qx | B::Qr | B::Match | B::Substitute | B::Tr | B::Y => self.word_quote(builtin, location),
+				B::Q | B::Qq | B::Qw | B::Qx | B::Qr | B::Match | B::Substitute | B::Tr | B::Y => self.word_quote(builtin, location).await,
 				B::File => self.special(location, Special::File),
 				B::Line => self.special(location, Special::Line),
 				B::CurrentPackage => self.special(location, Special::Package(self.pkg.clone())),
 				B::CurrentSub => self.special(location, Special::Sub),
-				B::Sub => self.subroutine(false, None).map(|sub| node(location, ExprKind::Sub(Box::new(sub)))),
-				B::My | B::Our | B::Local | B::State => self.declaration(builtin, location),
+				B::Sub => self.subroutine(false, None).await.map(|sub| node(location, ExprKind::Sub(Box::new(sub)))),
+				B::My | B::Our | B::Local | B::State => self.declaration(builtin, location).await,
 				_ if builtin.class() == BuiltinClass::Syntax => Err(self.error_at(&token)),
-				_ => self.builtin(builtin, origin, location),
+				_ => self.builtin(builtin, origin, location).await,
 			};
 		}
 		if spelling == b"not" {
-			let operand = if self.at(b"(") { self.delimited_list(b"(", b")", false)? } else { self.expr(P_NOT)? };
+			let operand = if self.at(b"(") { self.delimited_list(b"(", b")", false).await? } else { self.expr(P_NOT).await? };
 			return Ok(unary(location, Unary::Not, operand));
 		}
 		if self.keyword(spelling) { return Err(self.error_at(&token)); }
@@ -309,21 +309,21 @@ impl<'s, 'h> Parser<'s, 'h> {
 			let deref = matches!(arrow.first(), Some(b'[' | b'{' | b'(' | b'@' | b'%' | b'*' | b'&'))
 				|| arrow.starts_with(b"$*") || arrow.starts_with(b"$#*");
 			if deref {
-				if let Some(proto) = self.prototype(&name) { return self.known_call(name, proto, location); }
+				if let Some(proto) = self.prototype(&name) { return self.known_call(name, proto, location).await; }
 				return Ok(node(location, ExprKind::String(self.pstr(spelling))));
 			}
 			// perlobj: `Class->method` calls a sub named `Class` when one is known (`Class::->`
 			// always names the package).
-			if !name.ends_with("::") && let Some(proto) = self.prototype(&name) { return self.known_call(name, proto, location); }
+			if !name.ends_with("::") && let Some(proto) = self.prototype(&name) { return self.known_call(name, proto, location).await; }
 			return Ok(node(location, ExprKind::Bareword(class_name(name))));
 		}
 		if let Some(proto) = self.prototype(&name) {
-			if self.class_follows(proto.as_ref()) { return self.indirect_call(name, location); }
-			return self.known_call(name, proto, location);
+			if self.class_follows(proto.as_ref()) { return self.indirect_call(name, location).await; }
+			return self.known_call(name, proto, location).await;
 		}
-		if self.at(b"(") { return self.named_call(name, location); }
+		if self.at(b"(") { return self.named_call(name, location).await; }
 		if self.features.indirect != Some(false) && self.indirect_possible() {
-			return self.indirect_call(name, location);
+			return self.indirect_call(name, location).await;
 		}
 		Ok(node(location, ExprKind::Bareword(name)))
 	}
@@ -346,11 +346,11 @@ impl<'s, 'h> Parser<'s, 'h> {
 	}
 
 	/// `NAME INVOCANT ARGS`: indirect object syntax (perlobj).
-	fn indirect_call(&mut self, name: Rc<str>, location: Location) -> ResultOf<Expr> {
+	async fn indirect_call(&mut self, name: Rc<str>, location: Location) -> ResultOf<Expr> {
 		let obj = match self.spelling() {
-			b"$" => self.variable(false)?,
+			b"$" => self.variable(false).await?,
 			b"{" => {
-				let block = self.block()?;
+				let block = self.block().await?;
 				node(block.location.clone(), ExprKind::Block(block, false))
 			}
 			_ => {
@@ -359,7 +359,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 				node(token.location, ExprKind::Bareword(class_name(name)))
 			}
 		};
-		let args = if self.at(b"(") { Some(self.delimited_list(b"(", b")", false)?) } else { self.list_argument(false)? };
+		let args = if self.at(b"(") { Some(self.delimited_list(b"(", b")", false).await?) } else { self.list_argument(false).await? };
 		Ok(call(location, CallTarget::Method(Box::new(obj), Method::Name(name)), args, None, None))
 	}
 
@@ -415,7 +415,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 		!Builtin::from_name(&name).is_some_and(|b| self.enabled(b)) && self.prototype(&name).is_none()
 	}
 
-	fn declaration(&mut self, builtin: Builtin, location: Location) -> ResultOf<Expr> {
+	async fn declaration(&mut self, builtin: Builtin, location: Location) -> ResultOf<Expr> {
 		let kind = decl(builtin.name().as_bytes()).ok_or_else(|| self.error())?;
 		let keyword_start = self.previous.as_ref().map_or(self.lex.pos, |token| token.start);
 		let class = if kind != DeclKind::Local && self.peek().kind == Kind::Word { Some(self.ident()?) } else { None };
@@ -430,11 +430,11 @@ impl<'s, 'h> Parser<'s, 'h> {
 		let target_start = self.peek().start;
 		let target = if kind == DeclKind::Local && self.at(b"our") {
 			let location = self.bump().location;
-			self.declaration(Builtin::Our, location)?
+			Box::pin(self.declaration(Builtin::Our, location)).await?
 		} else if self.at(b"(") {
-			let list = self.delimited_list(b"(", b")", true)?;
+			let list = self.delimited_list(b"(", b")", true).await?;
 			if let Some(reference) = first_reference(&list) { self.declared_reference(reference)?; }
-			if kind == DeclKind::Local { self.postfix(list)? } else { list }
+			if kind == DeclKind::Local { self.postfix(list).await? } else { list }
 		} else {
 			// `my \$x`, `my \\$x`: each backslash takes a reference to the declared variable.
 			let mut references = Vec::new();
@@ -443,7 +443,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 				references.push(reference.location);
 			}
 			// `my \($x, @y)` declares a list of references.
-			let operand = if !references.is_empty() && self.at(b"(") { self.delimited_list(b"(", b")", true)? } else { self.variable(false)? };
+			let operand = if !references.is_empty() && self.at(b"(") { self.delimited_list(b"(", b")", true).await? } else { self.variable(false).await? };
 			// `my \$x ** 1`: `**` binds tighter than the backslash, so the declarator applies to it.
 			if !references.is_empty() && self.at(b"**") {
 				let message = if kind == DeclKind::Local { "Can't modify exponentiation (**) in local".to_owned() }
@@ -451,7 +451,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 				return Err(self.fatal(location, message));
 			}
 			if references.is_empty() {
-				if kind == DeclKind::Local { self.postfix(operand)? } else { operand }
+				if kind == DeclKind::Local { self.postfix(operand).await? } else { operand }
 			} else {
 				references.into_iter().rev().fold(operand, |operand, location| unary(location, Unary::Reference, operand))
 			}
@@ -506,11 +506,11 @@ impl<'s, 'h> Parser<'s, 'h> {
 	}
 
 	/// Parse a balanced list, optionally preserving a parenthesized group.
-	pub(super) fn delimited_list(&mut self, open: &[u8], close: &[u8], group: bool) -> ResultOf<Expr> {
+	pub(super) async fn delimited_list(&mut self, open: &[u8], close: &[u8], group: bool) -> ResultOf<Expr> {
 		let location = self.expect(open)?.location;
 		if self.eat(close).is_some() { return Ok(empty(location)); }
 		self.unclosed_bracket(close)?;
-		let inner = self.expr(0)?;
+		let inner = self.expr(0).await?;
 		self.unclosed_bracket(close)?;
 		self.expect(close)?;
 		if group { Ok(node(location, ExprKind::Group(Box::new(inner)))) } else { Ok(inner) }
@@ -537,22 +537,22 @@ impl<'s, 'h> Parser<'s, 'h> {
 		}
 	}
 
-	fn list_argument(&mut self, parens: bool) -> ResultOf<Option<Expr>> {
-		if self.can_term() { self.expr(if parens { 0 } else { P_COMMA }).map(Some) } else { Ok(None) }
+	async fn list_argument(&mut self, parens: bool) -> ResultOf<Option<Expr>> {
+		if self.can_term() { self.expr(if parens { 0 } else { P_COMMA }).await.map(Some) } else { Ok(None) }
 	}
 
-	fn named_call(&mut self, name: Rc<str>, location: Location) -> ResultOf<Expr> {
-		let args = self.delimited_list(b"(", b")", false)?;
+	async fn named_call(&mut self, name: Rc<str>, location: Location) -> ResultOf<Expr> {
+		let args = self.delimited_list(b"(", b")", false).await?;
 		Ok(call(location, CallTarget::Named(name, false), Some(args), None, None))
 	}
 
-	fn known_call(&mut self, name: Rc<str>, proto: Option<PStr>, location: Location) -> ResultOf<Expr> {
+	async fn known_call(&mut self, name: Rc<str>, proto: Option<PStr>, location: Location) -> ResultOf<Expr> {
 		let shape = proto.as_ref().and_then(|p| PrototypeShape::parse(&p.bytes));
 		let mut slot = None;
 		let parens = self.at(b"(");
 		let args = if parens {
 			let open = self.peek().end;
-			let list = self.delimited_list(b"(", b")", false)?;
+			let list = self.delimited_list(b"(", b")", false).await?;
 			// `f(())` passes one (empty-list) argument, unlike `f()`.
 			let close = self.previous.as_ref().map_or(open, |token| token.start);
 			if matches!(&list.kind, ExprKind::List(items) if items.is_empty()) && !self.lex.source[open..close.max(open)].trim_ascii().is_empty() {
@@ -561,12 +561,12 @@ impl<'s, 'h> Parser<'s, 'h> {
 		} else if shape.is_some_and(PrototypeShape::nullary) {
 			None
 		} else if shape.is_some_and(|p| p.block_first) && self.at(b"{") {
-			let block = self.block()?;
+			let block = self.block().await?;
 			slot = Some(CallSlot::Block(Rc::new(block)));
-			self.list_argument(false)?
+			self.list_argument(false).await?
 		} else if shape.is_some_and(|p| p.unary) {
-			if self.can_term() { Some(self.expr(P_UNARY + 1)?) } else { None }
-		} else { self.list_argument(false)? };
+			if self.can_term() { Some(self.expr(P_UNARY + 1).await?) } else { None }
+		} else { self.list_argument(false).await? };
 		let mut args = args;
 		if let Some(proto) = &proto && let Some(args) = &mut args {
 			star_barewords(&proto.bytes, args, slot.is_some());
@@ -614,11 +614,11 @@ impl<'s, 'h> Parser<'s, 'h> {
 		Ok(call(location, CallTarget::Named(name, false), args, slot, proto))
 	}
 
-	fn builtin(&mut self, builtin: Builtin, origin: BuiltinOrigin, location: Location) -> ResultOf<Expr> {
+	async fn builtin(&mut self, builtin: Builtin, origin: BuiltinOrigin, location: Location) -> ResultOf<Expr> {
 		use BuiltinClass as C;
 		let class = builtin.class();
 		if class == C::BlockUnary && self.at(b"{") {
-			let block = self.block()?;
+			let block = self.block().await?;
 			return Ok(node(location, ExprKind::Block(block, builtin == Builtin::Eval)));
 		}
 		// Unlike ordinary list operators, return always consumes its right-hand
@@ -651,11 +651,11 @@ impl<'s, 'h> Parser<'s, 'h> {
 			} else { None }
 		} else { None };
 		let (args, slot) = match class {
-			C::Print => self.print_args(parens)?,
-			C::Exec => self.exec_args(parens)?,
-			C::Sort => self.sort_args(parens)?,
-			C::Transform => self.transform_args(builtin, parens)?,
-			C::Control => (self.control_args(builtin, parens)?, None),
+			C::Print => self.print_args(parens).await?,
+			C::Exec => self.exec_args(parens).await?,
+			C::Sort => self.sort_args(parens).await?,
+			C::Transform => self.transform_args(builtin, parens).await?,
+			C::Control => (self.control_args(builtin, parens).await?, None),
 			C::Nullary => (None, None),
 			C::Unary | C::OptionalUnary | C::BlockUnary => {
 				let underscore = self.peek();
@@ -666,15 +666,15 @@ impl<'s, 'h> Parser<'s, 'h> {
 					self.bump();
 					Some(node(underscore.location, ExprKind::Bareword("_".into())))
 				} else if parens {
-					if self.at(b")") { Some(empty(location.clone())) } else { Some(self.expr(0)?) }
+					if self.at(b")") { Some(empty(location.clone())) } else { Some(self.expr(0).await?) }
 				// toke.c UNIDOR: after a named unary operator with an optional operand, `//` is
 				// defined-or rather than an empty pattern, and `~~` is smartmatch.
 				} else if class == C::OptionalUnary && matches!(self.spelling(), b"//" | b"//=" | b"~~") {
 					None
-				} else if self.can_term() { Some(self.expr(P_UNARY + 1)?) } else { None };
+				} else if self.can_term() { Some(self.expr(P_UNARY + 1).await?) } else { None };
 				(args, None)
 			}
-			C::List => (self.list_argument(parens)?, None),
+			C::List => (self.list_argument(parens).await?, None),
 			C::Syntax => return Err(self.error()),
 		};
 		if parens { self.expect(b")")?; }
@@ -760,8 +760,8 @@ impl<'s, 'h> Parser<'s, 'h> {
 		Ok(call(location, CallTarget::Builtin(builtin, origin), args, slot, None))
 	}
 
-	fn control_args(&mut self, builtin: Builtin, parens: bool) -> ResultOf<Option<Expr>> {
-		if parens { return if self.at(b")") { Ok(None) } else { self.expr(0).map(Some) }; }
+	async fn control_args(&mut self, builtin: Builtin, parens: bool) -> ResultOf<Option<Expr>> {
+		if parens { return if self.at(b")") { Ok(None) } else { self.expr(0).await.map(Some) }; }
 		let token = self.peek();
 		if self.is_word(&token) && !self.keyword(self.lex.text(&token)) && self.lex.text(&token) != b"not" {
 			let text = self.lex.text(&token);
@@ -772,7 +772,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 			}
 		}
 		if !self.can_term() { return Ok(None); }
-		let arg = self.expr(P_ASSIGN)?;
+		let arg = self.expr(P_ASSIGN).await?;
 		// `goto &NAME` must retain the ampersand target, not execute the call.
 		Ok(Some(if builtin == Builtin::Goto {
 			match arg {
@@ -787,15 +787,15 @@ impl<'s, 'h> Parser<'s, 'h> {
 		} else { arg }))
 	}
 
-	fn print_args(&mut self, parens: bool) -> ResultOf<(Option<Expr>, Option<CallSlot>)> {
+	async fn print_args(&mut self, parens: bool) -> ResultOf<(Option<Expr>, Option<CallSlot>)> {
 		let token = self.peek();
 		let text = self.lex.text(&token);
 		let handle = if text == b"{" && !self.brace_hash(&token) {
-			let block = self.block()?;
+			let block = self.block().await?;
 			if matches!(self.spelling(), b"," | b")" | b";" | b"}" | b"") { return Err(self.error()); }
 			Some(node(block.location.clone(), ExprKind::Block(block, false)))
 		} else if text == b"$" && let Some(end) = self.simple_scalar_end(token.end) && self.after_handle(end, false) {
-			Some(self.variable(false)?)
+			Some(self.variable(false).await?)
 		} else if token.kind == Kind::Word && !self.keyword(text) && text != b"not" {
 			let name = self.name(text);
 			let at = self.after_space(token.end);
@@ -805,7 +805,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 				Some(node(token.location, ExprKind::Bareword(name)))
 			} else { None }
 		} else { None };
-		let args = self.list_argument(parens)?;
+		let args = self.list_argument(parens).await?;
 		Ok((args, handle.map(|target| CallSlot::Handle(Box::new(target)))))
 	}
 
@@ -887,28 +887,28 @@ impl<'s, 'h> Parser<'s, 'h> {
 		matches!(word, b"if" | b"unless" | b"for" | b"foreach" | b"until" | b"while") || self.features.switch && word == b"when"
 	}
 
-	fn exec_args(&mut self, parens: bool) -> ResultOf<(Option<Expr>, Option<CallSlot>)> {
+	async fn exec_args(&mut self, parens: bool) -> ResultOf<(Option<Expr>, Option<CallSlot>)> {
 		let token = self.peek();
 		let program = if self.lex.text(&token) == b"{" && !self.brace_hash(&token) {
-			let block = self.block()?;
+			let block = self.block().await?;
 			let expr = node(block.location.clone(), ExprKind::Block(block, false));
 			Some(CallSlot::Program(Box::new(expr)))
 		} else if self.lex.text(&token) == b"$" && let Some(end) = self.simple_scalar_end(token.end) && self.after_handle(end, false) {
 			// `exec $program LIST`: the indirect-object form, like `print $fh LIST`.
-			Some(CallSlot::Program(Box::new(self.variable(false)?)))
+			Some(CallSlot::Program(Box::new(self.variable(false).await?)))
 		} else { None };
-		let args = self.list_argument(parens)?;
+		let args = self.list_argument(parens).await?;
 		if program.is_some() && args.is_none() { return Err(self.error()); }
 		Ok((args, program))
 	}
 
-	fn sort_args(&mut self, parens: bool) -> ResultOf<(Option<Expr>, Option<CallSlot>)> {
+	async fn sort_args(&mut self, parens: bool) -> ResultOf<(Option<Expr>, Option<CallSlot>)> {
 		let t = self.peek();
 		let text = self.lex.text(&t);
 		let slot = if text == b"{" && !self.brace_hash(&t) {
-			Some(CallSlot::Block(Rc::new(self.block()?)))
+			Some(CallSlot::Block(Rc::new(self.block().await?)))
 		} else if text == b"$" && let Some(end) = self.simple_scalar_end(t.end) && self.after_handle(end, false) {
-			Some(CallSlot::Comparator(Box::new(self.variable(false)?)))
+			Some(CallSlot::Comparator(Box::new(self.variable(false).await?)))
 		} else if t.kind == Kind::Word && !self.keyword(text) && !text.strip_prefix(b"CORE::").is_some_and(|core| std::str::from_utf8(core).is_ok_and(|core| Builtin::from_name(core).is_some())) && self.after_space(t.end) != t.end && self.after_handle(t.end, false) {
 			let name = self.name(text);
 			if self.lexical_prototype(&name).is_some() ||
@@ -918,17 +918,17 @@ impl<'s, 'h> Parser<'s, 'h> {
 				Some(CallSlot::Comparator(Box::new(node(t.location, ExprKind::Bareword(name)))))
 			} else { None }
 		} else { None };
-		let args = self.list_argument(parens)?;
+		let args = self.list_argument(parens).await?;
 		if slot.is_some() && args.is_none() { return Err(self.error()); }
 		Ok((args, slot))
 	}
 
-	fn transform_args(&mut self, builtin: Builtin, parens: bool) -> ResultOf<(Option<Expr>, Option<CallSlot>)> {
+	async fn transform_args(&mut self, builtin: Builtin, parens: bool) -> ResultOf<(Option<Expr>, Option<CallSlot>)> {
 		let t = self.peek();
 		let slot = if self.lex.text(&t) == b"{" && !self.brace_hash(&t) {
-			CallSlot::Block(Rc::new(self.block()?))
+			CallSlot::Block(Rc::new(self.block().await?))
 		} else {
-			let expr = self.expr(P_ASSIGN)?;
+			let expr = self.expr(P_ASSIGN).await?;
 			if self.eat(b"=>").is_none() && self.eat(b",").is_none() {
 				// `grep EXPR;` filters an empty list; anything else needs the comma (ck_fun).
 				if self.can_term() {
@@ -939,7 +939,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 			}
 			CallSlot::Expression(Box::new(expr))
 		};
-		let args = self.list_argument(parens)?;
+		let args = self.list_argument(parens).await?;
 		if args.is_none() && matches!(slot, CallSlot::Block(_)) { return Err(self.error()); }
 		Ok((Some(args.unwrap_or_else(|| empty(self.peek().location))), Some(slot)))
 	}
@@ -971,11 +971,11 @@ impl<'s, 'h> Parser<'s, 'h> {
 	}
 
 	/// Parse one variable or prefix dereference; optional `&` call interpretation.
-	pub(super) fn variable(&mut self, amp_call: bool) -> ResultOf<Expr> {
-		self.nested(|parser| parser.variable_inner(amp_call))
+	pub(super) async fn variable(&mut self, amp_call: bool) -> ResultOf<Expr> {
+		self.nested(|p| Box::pin(p.variable_inner(amp_call))).await
 	}
 
-	fn variable_inner(&mut self, amp_call: bool) -> ResultOf<Expr> {
+	async fn variable_inner(&mut self, amp_call: bool) -> ResultOf<Expr> {
 		let token = self.bump();
 		let symbol = self.lex.text(&token).first().copied().unwrap_or_default();
 		let Some(mut sigil) = sigil(symbol) else { return Err(self.error_at(&token)); };
@@ -1009,7 +1009,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 				&& !(open == b'{' && &src[at..end] == b"sub") {
 				self.lex.advance(end);
 				let base = node(location.clone(), ExprKind::Variable(sigil, self.variable_name(&src[at..end])));
-				let selected = self.postfix(base)?;
+				let selected = self.postfix(base).await?;
 				self.expect(b"}")?;
 				selected
 			} else {
@@ -1017,7 +1017,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 				if src.get(after_space(src, start + 1)) == Some(&b'}') { return Err(self.error_at(&token)); }
 				self.lex.advance(start);
 				self.deref_block_start = true;
-				let block = self.block();
+				let block = self.block().await;
 				self.deref_block_start = false;
 				let mut block = block?;
 				// Prefix dereference accepts statements, not just an expression.
@@ -1031,7 +1031,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 			}
 		} else if src.get(start) == Some(&b'$') && is_deref(src, start + 1, utf8) {
 			self.lex.advance(start);
-			let inner = self.variable(false)?;
+			let inner = self.variable(false).await?;
 			node(location.clone(), ExprKind::Deref(sigil, Box::new(inner)))
 		} else if let Some(end) = variable_end(src, start, utf8, if sigil == Sigil::LastIndex { b'@' } else { symbol }, false) {
 			self.lex.advance(end);
@@ -1050,7 +1050,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 			return Err(self.unrecognized_char_at(start, location));
 		} else { return Err(self.error_at(&token)); };
 		self.finish_raw_token();
-		if sigil == Sigil::Code && amp_call { term = self.amp_call(term)?; }
+		if sigil == Sigil::Code && amp_call { term = self.amp_call(term).await?; }
 		Ok(term)
 	}
 
@@ -1063,8 +1063,8 @@ impl<'s, 'h> Parser<'s, 'h> {
 		else { self.name(name) }
 	}
 
-	fn amp_call(&mut self, code: Expr) -> ResultOf<Expr> {
-		let args = if self.at(b"(") { Some(self.delimited_list(b"(", b")", false)?) } else { None };
+	async fn amp_call(&mut self, code: Expr) -> ResultOf<Expr> {
+		let args = if self.at(b"(") { Some(self.delimited_list(b"(", b")", false).await?) } else { None };
 		let location = code.location.clone();
 		let target = match code.kind {
 			ExprKind::Variable(Sigil::Code, name) => CallTarget::Named(name, true),
@@ -1075,7 +1075,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 	}
 
 	/// Parse arrows, element selectors and slices immediately following a term.
-	pub(super) fn postfix(&mut self, mut base: Expr) -> ResultOf<Expr> {
+	pub(super) async fn postfix(&mut self, mut base: Expr) -> ResultOf<Expr> {
 		loop {
 			let token = self.peek();
 			let text = self.lex.text(&token);
@@ -1088,23 +1088,23 @@ impl<'s, 'h> Parser<'s, 'h> {
 			if text == b"->" {
 				self.wrap_tree()?;
 				self.bump();
-				base = self.arrow(base, token.location)?;
+				base = self.arrow(base, token.location).await?;
 			} else if text == b"(" && (code_call || element) {
 				self.wrap_tree()?;
-				base = self.code_arrow(base, token.location)?;
+				base = self.code_arrow(base, token.location).await?;
 			} else if matches!(text, b"[" | b"{") && (code_call || slot.is_some() || matches!(base.kind, ExprKind::Select(..)) || text == b"[" && matches!(base.kind, ExprKind::Group(_) | ExprKind::List(_))) {
 				self.wrap_tree()?;
 				let indirect = code_call || matches!(base.kind, ExprKind::Select(..));
 				let select = if matches!(base.kind, ExprKind::Group(_) | ExprKind::List(_)) { Select::ListSlice }
 				else { select_kind(slot.unwrap_or(Sigil::Scalar), text, indirect) };
-				base = self.select(base, select)?;
+				base = self.select(base, select).await?;
 			} else { break; }
 		}
 		Ok(base)
 	}
 
 	/// Parse a balanced aggregate index following a term.
-	pub(super) fn select(&mut self, base: Expr, select: Select) -> ResultOf<Expr> {
+	pub(super) async fn select(&mut self, base: Expr, select: Select) -> ResultOf<Expr> {
 		let token = self.bump();
 		let hash = self.lex.text(&token) == b"{";
 		let close: &[u8] = if hash { b"}" } else { b"]" };
@@ -1125,7 +1125,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 				quoted = Some(node(first.location, ExprKind::String(PStr::new(bytes, self.lex.utf8))));
 			}
 		}
-		let index = if let Some(quoted) = quoted { quoted } else { self.expr(0)? };
+		let index = if let Some(quoted) = quoted { quoted } else { self.expr(0).await? };
 		self.expect(close)?;
 		// op.c check_hash_fields: constant keys of a typed lexical must be fields of its class.
 		if let Some((variable, class)) = self.typed_subscript(&base, select) {
@@ -1191,11 +1191,11 @@ impl<'s, 'h> Parser<'s, 'h> {
 	}
 
 	/// Parse the target of an already-consumed arrow.
-	pub(super) fn arrow(&mut self, base: Expr, location: Location) -> ResultOf<Expr> {
+	pub(super) async fn arrow(&mut self, base: Expr, location: Location) -> ResultOf<Expr> {
 		let token = self.peek();
 		let text = self.lex.text(&token);
-		if matches!(text, b"[" | b"{") { return self.select(base, select_kind(Sigil::Scalar, text, true)); }
-		if text == b"(" { return self.code_arrow(base, location); }
+		if matches!(text, b"[" | b"{") { return self.select(base, select_kind(Sigil::Scalar, text, true)).await; }
+		if text == b"(" { return self.code_arrow(base, location).await; }
 		let src = self.lex.source;
 		if let Some(byte) = text.first().copied() && let Some(mut slot) = sigil(byte) {
 			let mut end = token.start + 1;
@@ -1209,20 +1209,20 @@ impl<'s, 'h> Parser<'s, 'h> {
 			}
 			if matches!(slot, Sigil::Array | Sigil::Hash | Sigil::Glob) && matches!(src.get(end), Some(b'[' | b'{')) {
 				self.bump();
-				return self.select(base, select_kind(slot, &src[end..end + 1], true));
+				return self.select(base, select_kind(slot, &src[end..end + 1], true)).await;
 			}
 		}
 		let method = if text == b"$" {
-			Method::Dynamic(Box::new(self.variable(false)?))
+			Method::Dynamic(Box::new(self.variable(false).await?))
 		} else {
 			Method::Name(self.ident()?)
 		};
-		let args = if self.at(b"(") { Some(self.delimited_list(b"(", b")", false)?) } else { None };
+		let args = if self.at(b"(") { Some(self.delimited_list(b"(", b")", false).await?) } else { None };
 		Ok(call(location, CallTarget::Method(Box::new(base), method), args, None, None))
 	}
 
-	fn code_arrow(&mut self, base: Expr, location: Location) -> ResultOf<Expr> {
-		let args = self.delimited_list(b"(", b")", false)?;
+	async fn code_arrow(&mut self, base: Expr, location: Location) -> ResultOf<Expr> {
+		let args = self.delimited_list(b"(", b")", false).await?;
 		Ok(call(location, CallTarget::Code(Box::new(base), false), Some(args), None, None))
 	}
 

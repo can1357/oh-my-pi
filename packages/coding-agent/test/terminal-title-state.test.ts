@@ -48,9 +48,9 @@ describe("buildTerminalTitleWithState", () => {
 	});
 
 	it("animates spinner frames in the separator slot while working on Windows", () => {
-		expect(buildTerminalTitleWithState(LABEL, "working", 0, true, "win32")).toBe(`${BRAND} ⠋ ${LABEL}`);
-		expect(buildTerminalTitleWithState(LABEL, "working", 1, true, "win32")).toBe(`${BRAND} ⠙ ${LABEL}`);
-		expect(buildTerminalTitleWithState(undefined, "working", 1, true, "win32")).toBe(`${BRAND} ⠙`);
+		expect(buildTerminalTitleWithState(LABEL, "working", 0, true, "win32")).toBe(`${BRAND} ⠙ ${LABEL}`);
+		expect(buildTerminalTitleWithState(LABEL, "working", 1, true, "win32")).toBe(`${BRAND} ⠸ ${LABEL}`);
+		expect(buildTerminalTitleWithState(undefined, "working", 1, true, "win32")).toBe(`${BRAND} ⠸`);
 	});
 
 	it("keeps the state visible as a trailing separator when there is no label", () => {
@@ -327,7 +327,7 @@ describe("disposeTerminalTitleState", () => {
 		}
 	});
 
-	it("falls back to braille for an unknown style", () => {
+	it("falls back to the centered default for an unknown style", () => {
 		setTerminalTitleSpinnerStyle("line");
 		setTerminalTitleSpinnerStyle("nope");
 		setTerminalTitleState("working");
@@ -337,7 +337,7 @@ describe("disposeTerminalTitleState", () => {
 
 		const titles = observedTitles(writes, windowsTitleMock);
 		expect(titles.length).toBeGreaterThan(0);
-		expect(titles.some(title => title?.includes("⠋") || title?.includes("⠙"))).toBe(true);
+		expect(titles.some(title => title?.includes("⠸") || title?.includes("⢰"))).toBe(true);
 	});
 
 	it("emits pulse frames on live ticks", () => {

@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use enigo::{Axis, Button, Direction, Enigo, Mouse, Settings};
 use windows_sys::Win32::{
 	Foundation::HWND,
 	UI::{
@@ -21,12 +20,17 @@ use super::{
 	window,
 };
 
-pub(super) fn create_global_input() -> CoreResult<Enigo> {
+/// Puts the process and the desktop worker thread in per-monitor physical
+/// coordinates before input or capture observes desktop geometry.
+pub(super) fn init_global_input() -> CoreResult<()> {
 	use windows_sys::Win32::UI::HiDpi::{
-		DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE, SetThreadDpiAwarenessContext,
+		DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE, PROCESS_PER_MONITOR_DPI_AWARE,
+		SetProcessDpiAwareness, SetThreadDpiAwarenessContext,
 	};
 
-	let _ = enigo::set_dpi_awareness();
+	// SAFETY: a valid awareness value; fails harmlessly once the process
+	// already chose one.
+	let _ = unsafe { SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE) };
 	// SAFETY: the constant is a valid DPI context. Backend initialization runs
 	// on the dedicated desktop worker, whose Win32 queries must stay physical
 	// even when the embedding process has already fixed a different DPI mode.
@@ -35,13 +39,7 @@ pub(super) fn create_global_input() -> CoreResult<Enigo> {
 			"cannot enable physical desktop coordinates on the input worker",
 		));
 	}
-	Enigo::new(&Settings { open_prompt_to_get_permissions: false, ..Settings::default() }).map_err(
-		|error| DesktopError::input_failed(format!("Win32 input initialization failed: {error}")),
-	)
-}
-
-fn enigo_error(error: impl std::fmt::Display) -> DesktopError {
-	DesktopError::input_failed(format!("Win32 global input failed: {error}"))
+	Ok(())
 }
 
 /// Retains cleanup failures even when delivery itself already failed.
@@ -54,14 +52,6 @@ fn completed(result: CoreResult<()>, cleanup: CoreResult<()>) -> CoreResult<()> 
 		},
 		(Err(error), _) | (_, Err(error)) => Err(error),
 		(Ok(()), Ok(())) => Ok(()),
-	}
-}
-
-const fn button_to_enigo(button: MouseButton) -> Button {
-	match button {
-		MouseButton::Left => Button::Left,
-		MouseButton::Right => Button::Right,
-		MouseButton::Middle => Button::Middle,
 	}
 }
 
@@ -93,25 +83,21 @@ fn keyboard_layout(target: Option<HWND>) -> HKL {
 	)
 }
 
-fn global_button(input: &mut Enigo, button: MouseButton, direction: Direction) -> CoreResult<()> {
+fn global_button(button: MouseButton, down: bool) -> CoreResult<()> {
 	control::check()?;
-	input
-		.button(button_to_enigo(button), direction)
-		.map_err(enigo_error)
+	foreground::button(button, down)
 }
 
 fn with_global_keys(
-	input: &mut Enigo,
 	keys: &[KeyName],
-	operation: impl FnOnce(&mut Enigo) -> CoreResult<()>,
+	operation: impl FnOnce() -> CoreResult<()>,
 ) -> CoreResult<()> {
-	foreground::with_desktop_keys(keys, || operation(input))
+	foreground::with_desktop_keys(keys, operation)
 }
 
 fn with_global_modifiers(
-	input: &mut Enigo,
 	modifiers: Modifiers,
-	operation: impl FnOnce(&mut Enigo) -> CoreResult<()>,
+	operation: impl FnOnce() -> CoreResult<()>,
 ) -> CoreResult<()> {
 	let mut keys = [KeyName::Shift; 4];
 	let mut count = 0;
@@ -119,7 +105,7 @@ fn with_global_modifiers(
 		keys[index] = key;
 		count = index + 1;
 	}
-	with_global_keys(input, &keys[..count], operation)
+	with_global_keys(&keys[..count], operation)
 }
 
 fn scroll_steps(delta: f64) -> i32 {
@@ -131,81 +117,55 @@ fn scroll_steps(delta: f64) -> i32 {
 	}
 }
 
-fn global_pointer(input: &mut Enigo, event: PointerEvent) -> CoreResult<()> {
+fn global_pointer(event: PointerEvent) -> CoreResult<()> {
 	match event {
 		PointerEvent::Click { x, y, button, count, modifiers } => {
-			with_global_modifiers(input, modifiers, |input| {
+			with_global_modifiers(modifiers, || {
 				foreground::move_pointer(x, y)?;
 				for _ in 0..count {
 					// A press is always released: a cancel stops the next press.
 					control::check()?;
-					let pressed = global_button(input, button, Direction::Press);
-					let released = control::cleanup(|| global_button(input, button, Direction::Release));
+					let pressed = global_button(button, true);
+					let released = control::cleanup(|| global_button(button, false));
 					completed(pressed, released)?;
 				}
 				Ok(())
 			})
 		},
-		PointerEvent::Hold { x, y, button, keys, duration } => {
-			with_global_keys(input, &keys, |input| {
-				foreground::move_pointer(x, y)?;
-				control::bounded_hold(duration, |down| {
-					global_button(
-						input,
-						button,
-						if down {
-							Direction::Press
-						} else {
-							Direction::Release
-						},
-					)
-				})
-			})
-		},
+		PointerEvent::Hold { x, y, button, keys, duration } => with_global_keys(&keys, || {
+			foreground::move_pointer(x, y)?;
+			control::bounded_hold(duration, |down| global_button(button, down))
+		}),
 		PointerEvent::Move { x, y } => foreground::move_pointer(x, y),
 		PointerEvent::Drag { path, button, modifiers, mut keys } => {
 			control::add_modifiers(&mut keys, modifiers);
 			let Some(&(start_x, start_y)) = path.first() else {
 				return Err(DesktopError::input_failed("drag path is empty"));
 			};
-			with_global_keys(input, &keys, |input| {
+			with_global_keys(&keys, || {
 				foreground::move_pointer(start_x, start_y)?;
 				control::check()?;
-				let movement = global_button(input, button, Direction::Press).and_then(|()| {
+				let movement = global_button(button, true).and_then(|()| {
 					path.iter().skip(1).try_for_each(|&(x, y)| {
 						control::wait(Duration::from_millis(16))?;
 						foreground::move_pointer(x, y)
 					})
 				});
-				let release = control::cleanup(|| global_button(input, button, Direction::Release));
+				let release = control::cleanup(|| global_button(button, false));
 				completed(movement, release)
 			})
 		},
 		PointerEvent::Scroll { x, y, dx, dy } => {
 			foreground::move_pointer(x, y)?;
-			let horizontal = scroll_steps(dx);
-			let vertical = scroll_steps(dy);
-			if horizontal != 0 {
-				control::check()?;
-				input
-					.scroll(horizontal, Axis::Horizontal)
-					.map_err(enigo_error)?;
-			}
-			if vertical != 0 {
-				control::check()?;
-				input
-					.scroll(vertical, Axis::Vertical)
-					.map_err(enigo_error)?;
-			}
-			Ok(())
+			foreground::wheel(dx, dy)
 		},
 	}
 }
 
 /// Presses `keys` and releases them. A shortcut fires on its last press, so a
 /// cancel once every key is down no longer fails the call.
-fn global_key_chord(input: &mut Enigo, keys: &[KeyName]) -> CoreResult<()> {
-	with_global_keys(input, keys, |_| Ok(()))
+fn global_key_chord(keys: &[KeyName]) -> CoreResult<()> {
+	with_global_keys(keys, || Ok(()))
 }
 
 mod background {
@@ -1316,10 +1276,32 @@ mod foreground {
 	}
 
 	/// Desktop-root input intentionally moves the real cursor without restoring
-	/// it. Enigo's Windows absolute move normalizes only to the primary display;
-	/// use the same virtual-desktop packet as window takeover on every monitor.
+	/// it, with the same virtual-desktop packet as window takeover on every
+	/// monitor.
 	pub(super) fn move_pointer(x: f64, y: f64) -> CoreResult<()> {
 		send(&[move_event(x, y)?])
+	}
+
+	/// Desktop-root press (`down`) or release of `button` at the cursor.
+	pub(super) fn button(button: MouseButton, down: bool) -> CoreResult<()> {
+		let (press, release) = button_flags(button);
+		send(&[mouse_event(if down { press } else { release }, 0)])
+	}
+
+	/// Desktop-root wheel turn under the cursor.
+	pub(super) fn wheel(dx: f64, dy: f64) -> CoreResult<()> {
+		wheel_events(dx, dy).try_for_each(|event| send(&[event]))
+	}
+
+	/// The horizontal then vertical wheel packets for `dx`/`dy` (one notch per
+	/// 100 units, rounded half up; positive `dy` scrolls down).
+	fn wheel_events(dx: f64, dy: f64) -> impl Iterator<Item = INPUT> {
+		let horizontal = super::scroll_steps(dx).saturating_mul(120);
+		let vertical = super::scroll_steps(dy).saturating_mul(-120);
+		[(MOUSEEVENTF_HWHEEL, horizontal), (MOUSEEVENTF_WHEEL, vertical)]
+			.into_iter()
+			.filter(|&(_, data)| data != 0)
+			.map(|(flags, data)| mouse_event(flags, data as u32))
 	}
 
 	/// Absolute move to a physical desktop coordinate across the virtual
@@ -1435,15 +1417,7 @@ mod foreground {
 			PointerEvent::Scroll { x, y, dx, dy } => {
 				// Windows routes the wheel to the window under the cursor.
 				send_to(target, &[move_event(x, y)?])?;
-				let horizontal = super::scroll_steps(dx).saturating_mul(120);
-				let vertical = super::scroll_steps(dy).saturating_mul(-120);
-				if horizontal != 0 {
-					send_to(target, &[mouse_event(MOUSEEVENTF_HWHEEL, horizontal as u32)])?;
-				}
-				if vertical != 0 {
-					send_to(target, &[mouse_event(MOUSEEVENTF_WHEEL, vertical as u32)])?;
-				}
-				Ok(())
+				wheel_events(dx, dy).try_for_each(|event| send_to(target, &[event]))
 			},
 		}
 	}
@@ -1888,7 +1862,6 @@ mod foreground {
 }
 
 pub(super) fn pointer(
-	global: &mut Enigo,
 	ax: &mut Win32Ax,
 	target: &Target,
 	event: PointerEvent,
@@ -1896,7 +1869,7 @@ pub(super) fn pointer(
 ) -> CoreResult<()> {
 	control::check()?;
 	match target {
-		Target::Desktop | Target::Display(_) => global_pointer(global, event),
+		Target::Desktop | Target::Display(_) => global_pointer(event),
 		Target::Window(id) if mode == DeliveryMode::Background => background::pointer(ax, id, event),
 		Target::Window(id) => foreground::pointer(id, event),
 	}
@@ -1913,18 +1886,13 @@ pub(super) fn type_text(target: &Target, text: &str, mode: DeliveryMode) -> Core
 	}
 }
 
-pub(super) fn key_chord(
-	global: &mut Enigo,
-	target: &Target,
-	keys: &[KeyName],
-	mode: DeliveryMode,
-) -> CoreResult<()> {
+pub(super) fn key_chord(target: &Target, keys: &[KeyName], mode: DeliveryMode) -> CoreResult<()> {
 	control::check()?;
 	if keys.is_empty() {
 		return Err(DesktopError::input_failed("key chord is empty"));
 	}
 	match target {
-		Target::Desktop | Target::Display(_) => global_key_chord(global, keys),
+		Target::Desktop | Target::Display(_) => global_key_chord(keys),
 		Target::Window(id) if mode == DeliveryMode::Background => {
 			background::key_chord(id, keys, None)
 		},
@@ -1964,7 +1932,6 @@ pub(super) fn element_foreground(
 }
 
 pub(super) fn hold_keys(
-	global: &mut Enigo,
 	target: &Target,
 	keys: &[KeyName],
 	duration: Duration,
@@ -1972,9 +1939,7 @@ pub(super) fn hold_keys(
 ) -> CoreResult<()> {
 	control::check()?;
 	match target {
-		Target::Desktop | Target::Display(_) => {
-			with_global_keys(global, keys, |_| control::wait(duration))
-		},
+		Target::Desktop | Target::Display(_) => with_global_keys(keys, || control::wait(duration)),
 		Target::Window(id) if mode == DeliveryMode::Background => {
 			background::hold_keys(id, keys, duration, None)
 		},

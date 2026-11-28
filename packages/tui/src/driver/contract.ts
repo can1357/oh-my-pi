@@ -6,6 +6,7 @@
  * backend (`native/*`) only talk to these interfaces.
  */
 import type { KeyEvent, PasteEvent } from "../events";
+import type { EmojiSupport } from "../theme/contract";
 
 /** A mouse report (SGR), in screen cells (0-based). */
 export interface MouseEvent {
@@ -52,6 +53,8 @@ export interface TerminalCapabilities {
 	readonly multiplexer: "tmux" | "zellij" | "screen" | null;
 	/** A Tern terminal answered the TSP hello: native rendering is possible. */
 	readonly tsp: boolean;
+	/** How emoji-capable glyphs advance and draw (profile, refined by the DECRQM 2027 reply or a width probe). */
+	readonly emoji: EmojiSupport;
 }
 
 /** Control sequences that must bracket one newly committed history row in the same write. */

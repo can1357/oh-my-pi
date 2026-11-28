@@ -29,7 +29,6 @@ import {
 	untrack,
 } from "@oh-my-pi/pi-tui";
 import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
-import { SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-tui/term/painters/spinner";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { TspText } from "@oh-my-pi/pi-wire";
 import type {
@@ -43,7 +42,7 @@ import { isReplyWrite, replyDisplayMessage } from "../../session/transcript/repl
 import { messageBlock, readTranscriptPresentation } from "../../session/transcript/transcript-presentation";
 import { capturePage } from "../../tools/browser/page-shot";
 import { type SpotlightDetails, spotlightDetails } from "../../tools/details/spotlight";
-import { TODO_STRIKE_TOTAL_FRAMES } from "../../tools/details/todo";
+import { TODO_STRIKE_FRAME_MS, TODO_STRIKE_TOTAL_FRAMES } from "../../tools/details/todo";
 import { isWaitingPollDetails } from "../../tools/details/wait";
 import { presentShellInspector } from "../../ui/apps/shell-visualizer";
 import "../../ui/tools";
@@ -419,7 +418,11 @@ export class TranscriptPresenter {
 			: face.face;
 		const own = face.compact;
 		const compact = presented ? (own ? () => packed() || own() : packed) : own;
-		const block = this.#mount(factory, { before: options?.before, ...(compact ? { compact } : {}) });
+		const block = this.#mount(factory, {
+			before: options?.before,
+			prompt: message.role === "user" && !message.synthetic && !message.parentIrc,
+			...(compact ? { compact } : {}),
+		});
 		this.register(block, { kind: "message", message });
 		if (!options?.live) this.#settle(block);
 		return block;
@@ -496,6 +499,8 @@ export class TranscriptPresenter {
 					args: call.facts.args(),
 					...(result ? { result } : {}),
 					isError: result?.isError === true,
+					// What omp's own card draws: a viewport-only Bash card shows its job frames as static
+					// results, so a presenter sees no partial-to-final flip when its rows reach scrollback.
 					isPartial: result === undefined || call.facts.partial(),
 				});
 			});
@@ -816,7 +821,7 @@ function textOf(message: AssistantMessage | undefined): string {
  * How long a live `todo` result keeps its card live for its completion strike: at most the strike's
  * frames plus one from the list's first paint, which lands a frame later.
  */
-const TODO_STRIKE_HOLD_MS = (TODO_STRIKE_TOTAL_FRAMES + 2) * SPINNER_INTERVAL_MS;
+const TODO_STRIKE_HOLD_MS = (TODO_STRIKE_TOTAL_FRAMES + 2) * TODO_STRIKE_FRAME_MS;
 
 /** Whether a final `todo` result completed tasks (its card strikes them through). */
 function completesTasks(result: ToolCallResult): boolean {

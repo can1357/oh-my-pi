@@ -19,7 +19,7 @@ export interface SignOutOptions {
 	signal?: AbortSignal;
 }
 
-/** Forget an account's secrets on this machine and revoke its grant when the login is removed; may throw after a failed revocation. */
+/** Revoke an account's grant upstream when its login is removed; may throw after a failed revocation. */
 export type SignOutHook = (credentials: OAuthCredentials, options: SignOutOptions) => Promise<void>;
 
 /** Runtime context handed to `after-exchange` / `after-refresh` hooks. */

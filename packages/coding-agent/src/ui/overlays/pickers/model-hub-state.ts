@@ -39,6 +39,7 @@ import { batch, type KeyEvent, signal } from "@oh-my-pi/pi-tui";
 import { errorMessage } from "@oh-my-pi/pi-utils";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { formatModelSelectorValue, parseModelString, splitUpstreamRouting } from "../../../config/model-selector";
+import { providerAccessOff, providerManageUrl, providerRequiredScope } from "@oh-my-pi/pi-catalog/compat/auth";
 import { connectedProviderName } from "../../../modes/view-model/chrome/format";
 import {
 	buildSessionModelScope,
@@ -777,6 +778,24 @@ export class ModelHubState {
 		}
 	}
 
+	/**
+	 * Whether `providerId` is signed in with its access off: every stored login
+	 * lacks the provider's `required-scope` (declined, or turned off at the host).
+	 */
+	accessOff(providerId: string): boolean {
+		if (providerRequiredScope(providerId) === undefined) return false;
+		const scopes = this.registry.authStorage.credentials
+			.list(providerId)
+			.flatMap(({ credential }) => (credential.type === "oauth" ? [credential.scope] : []));
+		return scopes.length > 0 && scopes.every(scope => providerAccessOff(providerId, scope));
+	}
+
+	/** The signed-in provider pane's `manage-url`, where the user turns its access on or off at the host. */
+	manageUrl(entry: SidebarEntry = this.activeEntry()): string | undefined {
+		if (entry.kind !== "provider" || entry.locked || !entry.providerId) return undefined;
+		return providerManageUrl(entry.providerId);
+	}
+
 	/** How a signed-out provider signs in. */
 	lockedMessage(entry: SidebarEntry): string {
 		const envVars = entry.providerId ? (providerEntry(entry.providerId)?.envVars ?? []) : [];
@@ -1018,7 +1037,9 @@ export class ModelHubState {
 			id: `provider:${providerId}`,
 			kind: "provider",
 			// A locked provider has no linked account yet, so only unlocked ones take the connected name.
-			label: isLocked ? providerId : connectedProviderName(providerId),
+			label: isLocked
+				? providerId
+				: `${connectedProviderName(providerId)}${this.accessOff(providerId) ? " (off)" : ""}`,
 			providerId,
 			locked: isLocked,
 			...(isLocked ? {} : { annotation: String(available.get(providerId) ?? 0) }),
@@ -2245,6 +2266,10 @@ export class ModelHubState {
 				this.#scheduleProviderRefresh(entry.providerId ?? "", { force: true });
 			return;
 		}
+		if (id === "f6") {
+			this.#manageAccess();
+			return;
+		}
 		if (rolesView && (id === "ctrl+left" || id === "ctrl+right")) {
 			this.#switchPreset(id === "ctrl+left" ? -1 : 1);
 			return;
@@ -2567,6 +2592,11 @@ export class ModelHubState {
 		}
 	}
 
+	#manageAccess(): void {
+		const url = this.manageUrl();
+		if (url) this.callbacks.onManageAccess?.(url);
+	}
+
 	#requestLogin(entry: SidebarEntry): void {
 		if (entry.providerId && entry.oauth) this.callbacks.onLoginRequest?.(entry.providerId);
 	}
@@ -2802,6 +2832,9 @@ export class ModelHubState {
 				return;
 			case "login":
 				if (this.lockedView()) this.#requestLogin(entry);
+				return;
+			case "manage":
+				this.#manageAccess();
 				return;
 		}
 	}

@@ -7,19 +7,20 @@
  * touched phase shows a walking window: its last closed item, then the
  * active items and the open ones after the first of them, at most
  * {@link COLLAPSED_ITEMS} (a `… N more todos` row for the rest). Items the
- * update just completed strike through character by character once, on the
- * spinner clock from its frame when the list first shows, while the card's
- * block is live; a settled block (its rows may go to scrollback) and the still
- * look strike them at once. Errors use the error frame and tint.
+ * update just completed strike through character by character once, a frame
+ * every `TODO_STRIKE_FRAME_MS` from its spinner frame when the list first
+ * shows, while the card's block is live; a settled block (its rows may go to
+ * scrollback) and the still look strike them at once. Errors use the error
+ * frame and tint.
  */
 import { isSettled, type UiNode } from "@oh-my-pi/pi-tui";
 import type { Block, PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { branchRows, checklistItemText, isClosedItem, phaseTitleRow } from "@oh-my-pi/pi-tui/term/painters/checklist";
-import { SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-tui/term/painters/spinner";
 import { wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import type { TspChecklistItem, TspChecklistProps } from "@oh-my-pi/pi-wire";
 import {
+	TODO_STRIKE_FRAME_MS,
 	TODO_STRIKE_HOLD_FRAMES,
 	TODO_STRIKE_REVEAL_FRAMES,
 	TODO_STRIKE_TOTAL_FRAMES,
@@ -91,8 +92,8 @@ function collapsedSelection(items: readonly TspChecklistItem[]): {
 
 /**
  * Where each checklist's strike started: the clock time and the spinner frame
- * it showed then (the sweep runs on the spinner clock from that frame), or
- * `done` once it finished.
+ * it showed then (the sweep counts strike frames from that frame), or `done`
+ * once it finished.
  */
 const strikeStarts = new WeakMap<UiNode, { readonly at: number; readonly frame: number } | "done">();
 
@@ -104,11 +105,11 @@ function strikeFrame(cx: PaintContext, checklist: UiNode): number | undefined {
 	if (start === "done") return undefined;
 	const now = cx.now();
 	if (start === undefined) {
-		const frame = Math.floor(now / SPINNER_INTERVAL_MS) % frames;
+		const frame = Math.floor(now / TODO_STRIKE_FRAME_MS) % frames;
 		strikeStarts.set(checklist, { at: now, frame });
 		return frame;
 	}
-	const frame = start.frame + Math.floor((now - start.at) / SPINNER_INTERVAL_MS);
+	const frame = start.frame + Math.floor((now - start.at) / TODO_STRIKE_FRAME_MS);
 	if (frame <= TODO_STRIKE_TOTAL_FRAMES) return frame;
 	strikeStarts.set(checklist, "done");
 	return undefined;

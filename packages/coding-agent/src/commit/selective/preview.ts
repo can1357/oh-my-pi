@@ -23,13 +23,14 @@ const WORD_MARKS = ["[-", "-]", "{+", "+}"];
 const NO_EOL_MARKER = "\\ No newline at end of file";
 /** Hunk header as `formatTextPatch` prints it; the groups are the old and new line counts. */
 const HUNK = /^@@ -\d+,(\d+) \+\d+,(\d+) @@$/;
-const WORDS = new Intl.Segmenter("en", { granularity: "word" });
+let wordSegmenter: Intl.Segmenter | undefined;
 
 /** `line` as words, spaces, and punctuation, with where each starts and where the line ends. */
 function splitWords(line: string): { words: string[]; starts: number[] } {
 	const words: string[] = [];
 	const starts: number[] = [];
-	for (const { segment, index } of WORDS.segment(line)) {
+	wordSegmenter ??= new Intl.Segmenter("en", { granularity: "word" });
+	for (const { segment, index } of wordSegmenter.segment(line)) {
 		words.push(segment);
 		starts.push(index);
 	}

@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { MnemopiOptions } from "@oh-my-pi/pi-mnemopi";
-import { getMemoriesDir, logger, withLoopPhase } from "@oh-my-pi/pi-utils";
+import { $envExact, getMemoriesDir, logger, withLoopPhase } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import { expandTilde } from "../tools/path-utils";
 
@@ -113,7 +113,7 @@ export function loadMnemopiConfig(settings: Settings, agentDir: string): Mnemopi
 			debug: cfgMnemopiDebug.get(settings),
 			embeddingModel,
 			embeddingApiUrl: cfgMnemopiEmbeddingApiUrl.get(settings),
-			embeddingApiKey: cfgMnemopiEmbeddingApiKey.get(settings),
+			embeddingApiKey: resolveKeyReference(cfgMnemopiEmbeddingApiKey.get(settings)),
 			embeddings: {
 				// A blank prefix is unset; a set one keeps its whitespace (`query: `).
 				queryPrefix: cfgMnemopiEmbeddingQueryPrefix.get(settings) || undefined,
@@ -123,14 +123,14 @@ export function loadMnemopiConfig(settings: Settings, agentDir: string): Mnemopi
 				llmMode === "remote"
 					? {
 							baseUrl: cfgMnemopiLlmBaseUrl.get(settings),
-							apiKey: cfgMnemopiLlmApiKey.get(settings),
+							apiKey: resolveKeyReference(cfgMnemopiLlmApiKey.get(settings)),
 							model: cfgMnemopiLlmModel.get(settings),
 						}
 					: false,
 		},
 		llmMode,
 		llmBaseUrl: cfgMnemopiLlmBaseUrl.get(settings),
-		llmApiKey: cfgMnemopiLlmApiKey.get(settings),
+		llmApiKey: resolveKeyReference(cfgMnemopiLlmApiKey.get(settings)),
 		llmModel: cfgMnemopiLlmModel.get(settings),
 	};
 }
@@ -307,4 +307,10 @@ export function truncateApproxTokens(text: string, tokenLimit: number): string {
 	const maxChars = Math.max(0, tokenLimit * 4);
 	if (text.length <= maxChars) return text;
 	return `${text.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
+}
+
+/** Resolve an API key setting that names an environment variable, like `models.yml` `apiKey`; literals pass through. */
+function resolveKeyReference(value: string | undefined): string | undefined {
+	if (!value) return value;
+	return $envExact(value) || value;
 }

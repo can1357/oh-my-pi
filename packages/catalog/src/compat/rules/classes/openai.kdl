@@ -1,6 +1,12 @@
 // Model-lineage compat for "openai"; regenerated from the frozen census using class taxonomy selectors.
 
 class "openai" {
+	revision "=6.1" {
+		// Terra alone was measured: 25% fewer prompt tokens with near-tied held-out recall.
+		models token="terra" {
+			snapcompact-variant "8on16-bw"
+		}
+	}
 	// Replaces the o-series mandatory-reasoning fallback. o-series and GPT-5+
 	// reject explicit sampling params (`temperature`, `top_p`) with a 400 on
 	// every serving host (#5606), whichever API fronts them.

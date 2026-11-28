@@ -99,6 +99,20 @@ mise use -g github:can1357/oh-my-pi
 
 macOS · Linux · Windows · bun ≥ 1.4.4
 
+### Uninstall
+
+```sh
+curl -fsSL https://omp.sh/install | sh -s -- --uninstall
+```
+
+```powershell
+& ([scriptblock]::Create((irm https://omp.sh/install.ps1))) -Uninstall
+```
+
+The uninstaller removes what the install scripts installed: the standalone binary (`~/.local/bin/omp`, or `$PI_INSTALL_DIR/omp`; on Windows `%LOCALAPPDATA%\omp\omp.exe` and the user `PATH` entry the installer added) or the bun global package. It also removes an npm global install of `@oh-my-pi/pi-coding-agent`. For a Homebrew install it prints `brew uninstall omp` for you to run.
+
+omp keeps its state in `~/.omp` (`$HOME/$PI_CONFIG_DIR` when that is set, plus `$XDG_*_HOME/omp` if you ran `omp config init-xdg`): sessions, settings, credentials, caches, and the git worktrees omp created. The uninstaller keeps that state unless you confirm its prompt, which only interactive runs show (PowerShell, or `sh install.sh --uninstall`); `curl … | sh` runs never prompt, so they never delete it on their own. Pass `--purge` (PowerShell: `-Purge`) to uninstall and delete the state without a prompt. Shell completion files and `PATH` lines you added yourself stay in place.
+
 ### Shell completions
 
 `omp` generates its own completion scripts for **bash**, **zsh**, and **fish** from the live command/flag metadata, so they never drift from the actual CLI. Subcommands, flags, and enum values complete statically; model names (`--model`, `--smol`, `--slow`, `--plan`) resolve against the bundled model catalog and `--resume` against your on-disk sessions.
@@ -352,7 +366,7 @@ Anthropic `oauth` · OpenAI · OpenAI Codex `oauth` · Google Gemini · Google V
 
 Subscription-routed. `/login` attaches the session.
 
-Cursor `oauth` · GitHub Copilot `oauth` · Google AI Ultra plan `oauth` · GitLab Duo · Devin `oauth` · Kiro `oauth` · Kimi Code `plan` · Moonshot · MiniMax Coding Plan `plan` · MiniMax Coding Plan CN `plan` · Alibaba Coding Plan `plan` · Qwen Portal `oauth` · Z.AI / GLM Coding Plan `plan` · Zhipu Coding Plan `plan` · Xiaomi MiMo · Qianfan · Umans `plan` · NanoGPT · Novita · Venice · Kilo · ZenMux · OpenCode Go · OpenCode Zen
+Cursor `oauth` · GitHub Copilot `oauth` · GitLab Duo · Devin `oauth` · Kiro `oauth` · Kimi Code `plan` · Moonshot · MiniMax Coding Plan `plan` · MiniMax Coding Plan CN `plan` · Alibaba Coding Plan `plan` · Qwen Portal `oauth` · Z.AI / GLM Coding Plan `plan` · Zhipu Coding Plan `plan` · Xiaomi MiMo · Qianfan · Umans `plan` · NanoGPT · Novita · Venice · Kilo · ZenMux · OpenCode Go · OpenCode Zen
 
 ### Run it yourself
 
@@ -485,7 +499,7 @@ Inside `omp-natives`, the per-module breakdown (glue and tests omitted):
 | keys          | Kitty keyboard protocol with xterm fallback · PHF perfect-hash lookup             | phf                                       |  1,740 |
 | ast           | ast-grep pattern matching and structural rewrites                                 | ast-grep-core                             |  1,510 |
 | diff          | Structured file diffing for tools and previews                                    | in-tree                                   |  1,030 |
-| pty           | Native PTY allocation for sudo · ssh interactive prompts                          | portable-pty                              |    630 |
+| pty           | Native PTY allocation for sudo · ssh interactive prompts                          | in-tree                                   |    630 |
 | crash_handler | Native crash capture and reporting                                                | in-tree                                   |    610 |
 | highlight     | Syntax highlighting · 11 semantic categories · 30+ aliases                        | syntect                                   |    550 |
 | appearance    | Mode 2031 + native macOS dark/light via CoreFoundation FFI                        | core-foundation                           |    450 |

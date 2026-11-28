@@ -46,8 +46,8 @@ function sessionSearchText(session: SessionSelectorEntry): string {
 }
 
 /**
- * Lowercased per-session search haystack, built once and cached on the
- * {@link SessionSelectorEntry} itself (so it dies with the listing that produced it).
+ * Lowercased search haystack, cached by row identity. A renamed row is a
+ * copy with a new title and must not inherit the original row's haystack.
  * Rebuilding it per keystroke — a ~4KB string join plus `toLowerCase` per
  * session — was one of the costs that made resume search visibly lag.
  *
@@ -56,18 +56,13 @@ function sessionSearchText(session: SessionSelectorEntry): string {
  * indexes are built transiently per scan visit instead (see
  * {@link scoreFuzzySession} callers).
  */
-const kSearchTextLower = Symbol("session.searchTextLower");
-
-interface SearchableSessionInfo extends SessionSelectorEntry {
-	[kSearchTextLower]?: string;
-}
+const searchTextCache = new WeakMap<SessionSelectorEntry, string>();
 
 function sessionTextLower(session: SessionSelectorEntry): string {
-	const tagged = session as SearchableSessionInfo;
-	let textLower = tagged[kSearchTextLower];
+	let textLower = searchTextCache.get(session);
 	if (textLower === undefined) {
 		textLower = sessionSearchText(session).toLowerCase();
-		tagged[kSearchTextLower] = textLower;
+		searchTextCache.set(session, textLower);
 	}
 	return textLower;
 }

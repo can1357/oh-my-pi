@@ -21,7 +21,6 @@ import {
 } from "../kernel-base";
 import { type BackendProbeOptions, probeCandidates } from "../probe";
 import { stageRunnerScript } from "../runner-cache";
-import type { ShadowPlan } from "../speculation/types";
 import { PYTHON_PRELUDE } from "./prelude";
 import RUNNER_SCRIPT from "./runner.py" with { type: "text" };
 import {
@@ -94,21 +93,6 @@ export interface PythonPreludeSource {
 	name: string;
 	exports: string[];
 	source: string;
-}
-
-export interface PythonShadowSnapshot {
-	revision: number;
-	values: Readonly<Record<string, unknown>>;
-	digest: string;
-}
-
-export interface PythonShadowPlan extends ShadowPlan {
-	snapshot: PythonShadowSnapshot;
-}
-
-interface PythonKernelExecuteOptions extends KernelExecuteOptions {
-	expectedShadowRevision?: number;
-	expectedShadowDigest?: string;
 }
 
 // Retain definitive results for synchronous capability advertisement. Execution
@@ -221,7 +205,7 @@ export interface PythonKernelStartOptions extends KernelStartOptions {
 	sessionId?: string;
 }
 
-export class PythonKernel extends BaseKernel<PythonKernelExecuteOptions> {
+export class PythonKernel extends BaseKernel {
 	#installedPreludes = new Map<string, PythonPreludeSource>();
 
 	/** @param pythonPath Interpreter executable this kernel runs on; reported as the runtime in eval state. */
@@ -245,8 +229,6 @@ export class PythonKernel extends BaseKernel<PythonKernelExecuteOptions> {
 					env: opts?.env,
 					silent: opts?.silent ?? false,
 					storeHistory: opts?.storeHistory ?? !(opts?.silent ?? false),
-					expectedShadowRevision: opts?.expectedShadowRevision,
-					expectedShadowDigest: opts?.expectedShadowDigest,
 				}),
 		});
 	}
@@ -401,59 +383,6 @@ export class PythonKernel extends BaseKernel<PythonKernelExecuteOptions> {
 			await kernel.shutdown({ timeoutMs: SHUTDOWN_GRACE_MS }).catch(() => {});
 			throw err;
 		}
-	}
-
-	/**
-	 * Captures the runner's JSON-safe user namespace only when no Python cell is
-	 * executing. Ineligible or malformed responses deliberately fall back.
-	 */
-	async snapshotUserNamespace(timeoutMs?: number): Promise<PythonShadowSnapshot | null> {
-		const id = Snowflake.next();
-		const frame = await this.requestControl(JSON.stringify({ type: "shadow_snapshot", id }), id, timeoutMs);
-		if (
-			frame.type !== "shadow_snapshot" ||
-			frame.eligible !== true ||
-			typeof frame.revision !== "number" ||
-			typeof frame.digest !== "string"
-		) {
-			return null;
-		}
-		return { revision: frame.revision, digest: frame.digest, values: Object.freeze(frame.values ?? {}) };
-	}
-
-	/** Projects a candidate against an already-running, idle Python kernel. */
-	async shadowPlan(code: string, timeoutMs?: number): Promise<PythonShadowPlan | null> {
-		const id = Snowflake.next();
-		const frame = await this.requestControl(JSON.stringify({ type: "shadow_plan", id, code }), id, timeoutMs);
-		if (
-			frame.type !== "shadow_plan" ||
-			frame.eligible !== true ||
-			typeof frame.revision !== "number" ||
-			typeof frame.digest !== "string" ||
-			!Array.isArray(frame.operations)
-		) {
-			return null;
-		}
-		return {
-			snapshot: { revision: frame.revision, digest: frame.digest, values: Object.freeze(frame.values ?? {}) },
-			operations: frame.operations,
-			...(frame.controls && frame.controls.length > 0 ? { controls: frame.controls } : {}),
-			...(frame.barrier ? { barrier: frame.barrier } : {}),
-		};
-	}
-
-	/** Atomically starts a cell only if its retained shadow snapshot is still current. */
-	async executeIfSnapshotMatches(
-		code: string,
-		snapshot: Pick<PythonShadowSnapshot, "revision" | "digest">,
-		options?: KernelExecuteOptions,
-	): Promise<KernelExecuteResult | null> {
-		const result = await this.execute(code, {
-			...options,
-			expectedShadowRevision: snapshot.revision,
-			expectedShadowDigest: snapshot.digest,
-		});
-		return result.admissionRejected ? null : result;
 	}
 }
 

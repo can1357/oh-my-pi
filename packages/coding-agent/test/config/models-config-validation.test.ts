@@ -210,6 +210,23 @@ describe("models.yml compat.stripImageInput (#11697)", () => {
 	});
 });
 
+describe("models.yml compat.neutralizeDeepseekSpecialTokens", () => {
+	test("rejects a wrong-typed toggle instead of silently ignoring it", () => {
+		const parsed = getModelsConfigSchema()({
+			providers: {
+				neuralwatt: {
+					baseUrl: "http://x/v1",
+					apiKey: "K",
+					api: "openai-completions",
+					models: [{ id: "m", compat: { neutralizeDeepseekSpecialTokens: "yes" } }],
+				},
+			},
+		});
+		expect(parsed).toBeInstanceOf(OmpErrors);
+		if (parsed instanceof OmpErrors) expect(parsed.summary).toContain("neutralizeDeepseekSpecialTokens");
+	});
+});
+
 describe("model kind must match its api", () => {
 	const validate = (config: Omit<ProviderValidationConfig, "baseUrl">) => () =>
 		validateProviderConfiguration("gateway", { baseUrl, apiKey: "key", ...config }, "models-config");

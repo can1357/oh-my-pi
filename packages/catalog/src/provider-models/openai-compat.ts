@@ -11,11 +11,12 @@ import {
 	modelLimitsFor,
 } from "../compat/behavior";
 import { resolveAnthropicApiVersion } from "../compat/anthropic";
+import { AmbiguousOverlapError } from "../compat/cascade";
 import { xaiResponsesReasoningEffortMap } from "../compat/openai";
-import { hasModelScopedEffortLadder, resolveModelPolicy } from "../compat/resolve";
+import { hasModelScopedEffortLadder, resolveCatalogAxes, resolveModelPolicy } from "../compat/resolve";
 import { compareRevision, parseRevision, revisionAtLeast } from "../compat/revision";
-import { providerEntries, providerEntry, seedModels } from "../compat/providers";
-import { billingVariantPlain, classifyModel, discoveryVocabulary } from "../compat/taxonomy";
+import { providerBaseUrl, providerEntries, providerEntry, seedModels } from "../compat/providers";
+import { AmbiguousIdentityError, billingVariantPlain, classifyModel, discoveryVocabulary } from "../compat/taxonomy";
 import {
 	DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS,
 	fetchOpenAICompatibleModels,
@@ -555,12 +556,13 @@ function mapWithFeatureListMetadata<TApi extends Api>(
 }
 
 /**
- * Rates from an OpenRouter-shaped `pricing` object (USD per token, as decimal
- * strings). Missing, zero, or negative legs (`-1` marks router-priced rows)
+ * Rates from an OpenRouter-shaped `pricing` object (USD per token unless the
+ * row declares its unit). Missing, zero, or negative legs (`-1` marks router-priced rows)
  * map to 0, which the model manager fills from its reference sources.
  */
-function perTokenPricingCost(pricing: unknown): TokenCost {
-	const rates = isRecord(pricing) ? pricing : {};
+export function perTokenPricingCost(pricing: unknown): TokenCost {
+	if (isRecord(pricing) && pricing.unit === "per_million_tokens") return perMillionPricingCost(pricing);
+	const rates = isRecord(pricing) && (pricing.unit === undefined || pricing.unit === "per_token") ? pricing : {};
 	return {
 		input: toPositiveNumber(rates.prompt, 0) * 1_000_000,
 		output: toPositiveNumber(rates.completion, 0) * 1_000_000,
@@ -570,11 +572,13 @@ function perTokenPricingCost(pricing: unknown): TokenCost {
 }
 
 /**
- * Rates from NanoGPT's detailed roster: prompt and completion are USD per
- * million tokens, the cache legs per thousand. Legs the row does not price
- * keep `fallback`.
+ * Declared USD-per-million prices. NanoGPT names its cache fields separately
+ * and quotes them per thousand tokens. Absent legs keep the supplied fallback.
  */
-function nanoGptPricingCost(pricing: unknown, fallback: TokenCost): TokenCost {
+function perMillionPricingCost(
+	pricing: unknown,
+	fallback: TokenCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+): TokenCost {
 	if (!isRecord(pricing) || pricing.unit !== "per_million_tokens") return fallback;
 	const perThousand = (value: unknown, fallbackRate: number): number => {
 		const rate = toPositiveNumber(value, 0);
@@ -583,8 +587,14 @@ function nanoGptPricingCost(pricing: unknown, fallback: TokenCost): TokenCost {
 	return {
 		input: toPositiveNumber(pricing.prompt, fallback.input),
 		output: toPositiveNumber(pricing.completion, fallback.output),
-		cacheRead: perThousand(pricing.cacheReadInputPer1kTokens, fallback.cacheRead),
-		cacheWrite: perThousand(pricing.cacheWriteInputPer1kTokens, fallback.cacheWrite),
+		cacheRead: perThousand(
+			pricing.cacheReadInputPer1kTokens,
+			toPositiveNumber(pricing.input_cache_read ?? pricing.input_cache_reads, fallback.cacheRead),
+		),
+		cacheWrite: perThousand(
+			pricing.cacheWriteInputPer1kTokens,
+			toPositiveNumber(pricing.input_cache_write ?? pricing.input_cache_writes, fallback.cacheWrite),
+		),
 	};
 }
 
@@ -2799,7 +2809,6 @@ function buildClinePassFallbackModel(id: string): ModelSpec<"openai-completions"
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: CLINEPASS_FALLBACK_CONTEXT_WINDOW,
 		maxTokens: CLINEPASS_FALLBACK_MAX_TOKENS,
-		compat: { supportsReasoningEffort: false },
 	};
 }
 
@@ -2921,7 +2930,9 @@ function buildClinePassSubscriptionModel(
 ): ModelSpec<"openai-completions"> {
 	const curated = buildCuratedClinePassModel(id, "subscription");
 	if (curated) return curated;
-	const base = references.get(id) ?? buildClinePassFallbackModel(id);
+	// Effort control comes from the ClinePass KDL rules (`trust-explicit-thinking-only`
+	// plus exact-id ladders), never from compat baked into an earlier bundle row.
+	const { compat: _bakedCompat, ...base } = references.get(id) ?? buildClinePassFallbackModel(id);
 	const reference = resolveModelReference(id, getBundledModelReferenceIndex());
 	// A reference pointing back at the ClinePass bundle means the last regen
 	// knew nothing about the id and encoded fallback constants — treat as none.
@@ -4332,29 +4343,36 @@ export const KIMI_CODE_DEFAULT_MAX_TOKENS = 32_000;
  * rule-owned (`runtime/behavior.kdl` model-limits), everything else ->
  * `fallback`.
  */
-export function kimiCodeMaxTokens(modelId: string, fallback?: number): number;
-export function kimiCodeMaxTokens(modelId: string, fallback: number | null): number | null;
+export function kimiCodeMaxTokens(provider: string, modelId: string, fallback?: number): number;
+export function kimiCodeMaxTokens(provider: string, modelId: string, fallback: number | null): number | null;
 export function kimiCodeMaxTokens(
+	provider: string,
 	modelId: string,
 	fallback: number | null = KIMI_CODE_DEFAULT_MAX_TOKENS,
 ): number | null {
-	return modelLimitsFor("kimi-code", modelId.trim().toLowerCase())?.maxTokens ?? fallback;
+	return modelLimitsFor(provider, modelId.trim().toLowerCase())?.maxTokens ?? fallback;
 }
 
 export function kimiCodeModelManagerOptions(
 	config?: KimiCodeModelManagerConfig,
+	provider: string = "kimi-code",
 ): ModelManagerOptions<"openai-completions"> {
 	const apiKey = config?.apiKey;
-	const baseUrl = config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("kimi-code")!;
+	// The managed `/coding/v1` base URL is rule-owned (`base-url` node in
+	// `providers/<id>.kdl`); both Kimi Code provider entries declare one.
+	const baseUrl = config?.baseUrl ?? providerBaseUrl(provider);
+	if (!baseUrl) {
+		throw new Error(`provider \`${provider}\` declares no managed base URL (\`base-url\` in providers/<id>.kdl)`);
+	}
 	return {
-		providerId: "kimi-code",
-		cacheProviderId: resolveModelCacheProviderId("kimi-code", { apiKey, baseUrl }),
+		providerId: provider,
+		cacheProviderId: resolveModelCacheProviderId(provider, { apiKey, baseUrl }),
 		dynamicModelsAuthoritative: true,
 		...(apiKey && {
 			fetchDynamicModels: () =>
 				fetchOpenAICompatibleModels({
 					api: "openai-completions",
-					provider: "kimi-code",
+					provider,
 					baseUrl,
 					apiKey,
 					headers: {
@@ -4374,10 +4392,10 @@ export function kimiCodeModelManagerOptions(
 							name: typeof entry.display_name === "string" ? entry.display_name : defaults.name,
 							reasoning,
 							// K2.5's misreported vision support is rule-owned
-							// (`providers/kimi-code.kdl` input-modalities).
+							// (`providers/kimi-code*.kdl` input-modalities).
 							input: entry.supports_image_in === true ? ["text", "image"] : ["text"],
 							contextWindow: typeof entry.context_length === "number" ? entry.context_length : 262144,
-							maxTokens: kimiCodeMaxTokens(id),
+							maxTokens: kimiCodeMaxTokens(provider, id, KIMI_CODE_DEFAULT_MAX_TOKENS),
 							thinking,
 							compat: {
 								thinkingFormat: thinking ? "kimi" : "zai",
@@ -6797,7 +6815,7 @@ export function nanoGptModelManagerOptions(
 							...mapped,
 							api: "openai-completions",
 							provider: "nanogpt",
-							cost: { ...mapped.cost, ...nanoGptPricingCost(entry.pricing, mapped.cost) },
+							cost: { ...mapped.cost, ...perMillionPricingCost(entry.pricing, mapped.cost) },
 						};
 					},
 					filterModel: (_entry, model) => {
@@ -6950,16 +6968,30 @@ function isCopilotSelectableModel(entry: OpenAICompatibleModelRecord): boolean {
 	return typeof type !== "string" || type === "chat";
 }
 
+/**
+ * Price a Copilot tier. `token_prices` reports no per-tier cache-write price and often no
+ * `cache_price`; an omitted leg is unknown, not free, so it carries over from the row the tier
+ * derives from: the bundled Copilot row, else the cross-provider bare-id reference for the same
+ * id, the same source the cache-write leg and unbilled rows always took their prices from.
+ * `scaleCacheWithInput` (the `tier-cache-follows-input` KDL axis) scales the
+ * carried legs by the tier's input-price ratio. A reported `cache_price` wins here, though the
+ * bundled-model merge still replaces a reported zero on a bundled id.
+ */
 function copilotTierCost(
 	tier: CopilotTokenPriceTier | undefined,
-): Omit<ModelSpec<Api>["cost"], "cacheWrite"> | undefined {
+	inherited: ModelSpec<Api>["cost"],
+	scaleCacheWithInput: boolean,
+): ModelSpec<Api>["cost"] | undefined {
 	if (tier?.inputPrice === undefined || tier.outputPrice === undefined) {
 		return undefined;
 	}
+	const input = tier.inputPrice / 100;
+	const ratio = scaleCacheWithInput && inherited.input > 0 ? input / inherited.input : 1;
 	return {
-		input: tier.inputPrice / 100,
+		input,
 		output: tier.outputPrice / 100,
-		cacheRead: (tier.cachePrice ?? 0) / 100,
+		cacheRead: tier.cachePrice !== undefined ? tier.cachePrice / 100 : inherited.cacheRead * ratio,
+		cacheWrite: inherited.cacheWrite * ratio,
 	};
 }
 
@@ -6986,18 +7018,43 @@ function createCopilotLongContextVariant(
 	if (base.contextWindow === null || variantWindow <= base.contextWindow) {
 		return undefined;
 	}
-	const longCost = copilotTierCost(longContext);
-	return {
+	const variant: ModelSpec<Api> = {
 		...base,
 		id: `${base.id}${COPILOT_LONG_CONTEXT_ID_SUFFIX}`,
 		requestModelId: base.id,
 		name: `${base.name}${COPILOT_LONG_CONTEXT_NAME_SUFFIX}`,
 		contextWindow: variantWindow,
-		// Long-context tier has its own token prices (Gemini/GPT bill ~2x above
-		// the default boundary). cacheWrite is not reported per tier; inherit.
-		...(longCost && { cost: { ...longCost, cacheWrite: base.cost.cacheWrite } }),
 		contextPromotionTarget: undefined,
 	};
+	// Long-context tier has its own token prices (Gemini/GPT bill ~2x above
+	// the default boundary); see copilotTierCost for the cache legs.
+	const scaleCache = copilotTierCacheFollowsInput(variant);
+	// The rule tree cannot build this row: synthesize none, so the base row
+	// promotes nowhere instead of naming a sibling discovery would then drop.
+	if (scaleCache === undefined) return undefined;
+	const longCost = copilotTierCost(longContext, base.cost, scaleCache);
+	if (longCost) {
+		variant.cost = longCost;
+	}
+	return variant;
+}
+
+/**
+ * The `tier-cache-follows-input` axis of a synthesized long-context row; undefined when this build's
+ * rule tree cannot place the row (an equal-rank rule overlap or identity tie), which would otherwise
+ * throw out of the `/models` mapper and reject every live row rather than this one.
+ */
+function copilotTierCacheFollowsInput(variant: ModelSpec<Api>): boolean | undefined {
+	try {
+		return resolveCatalogAxes(variant).tierCacheFollowsInput === true;
+	} catch (error) {
+		if (!(error instanceof AmbiguousOverlapError || error instanceof AmbiguousIdentityError)) throw error;
+		logger.warn("Copilot discovery skipped a long-context tier the rules cannot place", {
+			model: variant.id,
+			error: error.message,
+		});
+		return undefined;
+	}
 }
 
 export function githubCopilotModelManagerOptions(config?: GithubCopilotModelManagerConfig): ModelManagerOptions<Api> {
@@ -7187,10 +7244,9 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 								delete base.thinking.effortRouting;
 							}
 						}
-						const defaultCost = copilotTierCost(tokenPrices.defaultTier);
+						const defaultCost = copilotTierCost(tokenPrices.defaultTier, base.cost, false);
 						if (defaultCost) {
-							// Cache writes are not reported per tier; retain the bundled provider rate.
-							base.cost = { ...defaultCost, cacheWrite: base.cost.cacheWrite };
+							base.cost = defaultCost;
 						}
 						const variant = createCopilotLongContextVariant(
 							base,
