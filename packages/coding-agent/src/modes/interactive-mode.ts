@@ -422,7 +422,7 @@ import type { DialogVim } from "../ui/composer/vim-editor";
 import { enabledMagicKeywords } from "../ui/composer/magic-keywords";
 import { deferredMaxRows, subagentEntries, TODO_COMPACT_ROWS, type WorkingSpec } from "../ui/dock";
 import { CodexResetFireworks, FIREWORKS_SHEET } from "../ui/overlays/panels/codex-reset-fireworks";
-import { ErrorBanner } from "../ui/overlays/panels/error-banner";
+import { ErrorBanner, type ErrorBannerAction } from "../ui/overlays/panels/error-banner";
 import { PlanReview, planReviewSheet } from "../ui/overlays/panels/plan-review";
 import { SpotlightSheet, spotlightOverlay } from "../ui/overlays/panels/spotlight-sheet";
 import { renderAssistantText } from "../ui/transcript/messages/assistant-message";
@@ -7593,7 +7593,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					onClose: () => this.#hideSessionInfo(),
 					onCopy: (text: string) => void this.#copyToClipboardWithStatus(text),
 				}),
-			{ onClose: () => this.#onSheetClosed("info") },
+			{ mouse: "off", onClose: () => this.#onSheetClosed("info") },
 		);
 	}
 
@@ -7647,7 +7647,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					...(selected ? { selected } : {}),
 					refresh: tick,
 				}),
-			{ onClose: () => this.#onSheetClosed("jobs") },
+			{ mouse: "off", onClose: () => this.#onSheetClosed("jobs") },
 		);
 	}
 
@@ -7695,11 +7695,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#uiHelpers.showError(message);
 	}
 
-	showPinnedError(message: string): void {
+	showPinnedError(message: string, actions?: readonly ErrorBannerAction[]): void {
 		this.#hidePlanReview();
 		this.shell.dock
 			.slot("errorBanner")
-			.set(() => jsx(ErrorBanner, { message, onDismiss: () => this.clearPinnedError() }));
+			.set(() => jsx(ErrorBanner, { message, actions, onDismiss: () => this.clearPinnedError() }));
 	}
 
 	clearPinnedError(): void {
@@ -8574,7 +8574,9 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	commandReportRows(): number | undefined {
 		const below = this.shell.rowsBelow("report");
-		return below === undefined ? undefined : this.shell.size().rows - below;
+		if (below === undefined) return undefined;
+		// Fullscreen keeps the screen above the editor for the transcript: every report opens as a page there.
+		return this.#frame.screen() === "fullscreen" ? 0 : this.shell.size().rows - below;
 	}
 
 	cycleThinkingLevel(): void {

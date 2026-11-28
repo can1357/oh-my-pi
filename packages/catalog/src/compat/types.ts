@@ -616,6 +616,8 @@ export interface CompiledAuthProvider {
 	showInLoginList?: boolean;
 	/** Why the provider is turned off: no login, and no credential of any source reaches it. */
 	disabled?: string;
+	/** Optional menu shared by related sign-in methods. */
+	loginGroup?: { title: string; label: string; order: number };
 	/** Account risk a user must accept (by typing "yes") before a new login starts. */
 	loginWarning?: string;
 	/**
@@ -632,6 +634,8 @@ export interface CompiledAuthProvider {
 	loginNotice?: string;
 	/** The host's page where the user turns this app's access on or off. */
 	manageUrl?: string;
+	/** Public label for the host's account management link. */
+	manageLabel?: string;
 	/**
 	 * OAuth scope a login must hold for the provider to serve requests. A login
 	 * whose granted scope lacks it stays signed in with the provider off.
@@ -646,8 +650,8 @@ export interface CompiledAuthProvider {
 	 * nor refreshes them.
 	 */
 	deviceBound?: boolean;
-	/** Runs when a login is removed: `hook` revokes the grant at the provider. */
-	signOut?: { hook: string };
+	/** Revokes the grant at the provider. A `label` opts into separate local sign-out and disconnect actions. */
+	signOut?: { hook: string; label?: string };
 	apiKeyFormat: "bearer" | "structured";
 	expiry?: "jwt-or-never";
 	/** `api-key`: an OAuth login persists only `credentials.access` as a plain API key. */
@@ -745,6 +749,8 @@ export interface CompiledProvider {
 	skipCrossProviderReferenceFills?: boolean;
 	/** Runtime discovery keeps a bundled row's display name instead of the live one. */
 	keepBundledNames?: boolean;
+	/** Use the catalog display name instead of the model ID on model picker rows. */
+	useModelNamesInPicker?: boolean;
 	/** Present only for providers enrolled in `generate-models.ts` discovery. */
 	discovery?: CompiledProviderDiscovery;
 	/** Non-chat model kinds mapped to their runtime transport APIs. */

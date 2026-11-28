@@ -1,0 +1,47 @@
+{
+	"bunVersion": "1.4.5",
+	"bunRevision": "a7733435cf40429e3b35c36072769df2052b80f1",
+	"sourceSha256": "f9815b6fbf8459d39936cf42cfd1f632b0e90eb5cd56af7437cac4b540bb6cf8",
+	"targets": {
+		"darwin-arm64": {
+			"bytes": 405783034,
+			"sha256": "fe0ca7193eee8aef8543f76ae16d5a366f0a525c4a35e800c74957ebb510b4b3",
+			"manifestSha256": "666c93ab498e57a1c02c117e0191735d9868972dac981b059b4736c4b670ea3e"
+		},
+		"darwin-x64": {
+			"bytes": 413397096,
+			"sha256": "1356bef5180a62e8c7c774c7e973b613b33608ab8c6168f4c7734d06899f7171",
+			"manifestSha256": "a21e8c5189540cac33c149eb147b589096242b13784a356bf0bcc26a5db643f8"
+		},
+		"linux-arm64": {
+			"bytes": 426525481,
+			"sha256": "b0ef8e9ddbfa3e0ccba298f3a553f551c6ac8b91f8f9ead65f1038109c9c3e2b",
+			"manifestSha256": "629bbf414b85b3ba6c61625bd8e9e20c8cdcc8384fc12e22b99fd51ab13fa672"
+		},
+		"linux-x64": {
+			"bytes": 424897927,
+			"sha256": "84eedd905ca12224d7453bece54ff941be7aafd92f093527d8ebac6d15dfa268",
+			"manifestSha256": "599d3ecac218a51a4e7d55fc2ff56c053522d0b21c7f11084a0fc418954c3403"
+		},
+		"linux-musl-arm64": {
+			"bytes": 411831516,
+			"sha256": "496222702f648035bce1da08b15cc8cf209ee2f2dbb26b468fef7dad420c55de",
+			"manifestSha256": "d207632b0158dd31b98e8bc048a84211c8dd93b6ca8edc7e42a052c364b612d4"
+		},
+		"linux-musl-x64": {
+			"bytes": 410758212,
+			"sha256": "d51817b5fd59ec87b5762ef3757f46526e563f3ecb4d107fed97cdb3f1cdd5a5",
+			"manifestSha256": "a0cfe809a9db8d9236cbe5e0b19abaa867dfb204b8a6f723481c24f121a97cc1"
+		},
+		"win32-arm64": {
+			"bytes": 352494235,
+			"sha256": "764b2913aa4c96aa0a5ddb976ced99d8eef4ed5afbed37474670a1f2b8a1e696",
+			"manifestSha256": "f40370352d732b6e83eeb3c200fa2ff0e2252d400259474dd5874cbe211c252d"
+		},
+		"win32-x64": {
+			"bytes": 358988143,
+			"sha256": "9f752ca09513b6068b99128cc3f42db0707c464fcd5e98f6083e5670f20f9f0c",
+			"manifestSha256": "6fb99710408cc874e09d262384cb395684e16ecb6e984527d8539a9404906c90"
+		}
+	}
+}

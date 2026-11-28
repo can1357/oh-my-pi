@@ -263,6 +263,7 @@ export class CommandController {
 		const { focus, ...frame } = options;
 		const sheet = this.ctx.shell.overlays.show(() => reportSheetView(content, frame), {
 			focus: root => focus ?? root,
+			mouse: "off",
 			// Closed from outside the report (the overlay stack was cleared): forget it.
 			onClose: () => {
 				if (this.#report?.sheet !== sheet) return;
@@ -276,7 +277,8 @@ export class CommandController {
 	/**
 	 * Show a read-only report, replacing the previous one. In text mode one that
 	 * fits the rows above the editor shows there like `/btw`: the editor keeps
-	 * focus and its Esc takes the report away. A taller one opens as a
+	 * focus and its Esc takes the report away. A taller one (any one in
+	 * fullscreen mode, which leaves it no rows there) opens as a
 	 * full-screen page on the terminal's alternate screen, scrolled with the
 	 * arrow/page keys and the wheel, so the main screen is never touched and
 	 * Esc returns to it as it was. Natively it is a focused sheet like
@@ -2303,7 +2305,7 @@ export class CommandController {
 				if (background) this.ctx.showStatus("Compaction complete");
 				// Rebuilding resets the transcript's emission ledger. Clear terminal
 				// scrollback before re-emitting its blocks (#12140).
-				this.ctx.shell.host?.replayHistory();
+				this.ctx.shell.host?.replayHistory({ preserveDock: true });
 			}
 		} catch (error) {
 			if (error instanceof CompactionCancelledError) {

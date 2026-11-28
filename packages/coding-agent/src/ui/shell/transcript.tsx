@@ -37,6 +37,7 @@ import {
 	useContext,
 } from "@oh-my-pi/pi-tui";
 import { holdsImage } from "@oh-my-pi/pi-tui/driver/images/anchor";
+import type { ReplayOptions } from "@oh-my-pi/pi-tui/term/backend";
 import { type Block, defineRolePainter, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
 import { mountNode, type ViewEntry, ViewList } from "./views";
@@ -87,7 +88,7 @@ export interface TranscriptHost {
 	/** Whether the terminal acknowledged rows of `node`'s own content in scrollback, not only its separator. */
 	contentInHistory(node: UiNode): boolean;
 	/** Rebuild terminal scrollback from the current main region. */
-	replayHistory(): void;
+	replayHistory(options?: ReplayOptions): void;
 	/** Describe again the settled block holding `node` (Tern dropped its description). */
 	redescribe(node: UiNode): void;
 }
@@ -230,7 +231,7 @@ export class Transcript {
 		// Asked before the removed blocks are disposed.
 		const retired = this.#blocks.peek().some(block => !keep.has(block) && this.retired(block));
 		this.#blocks.retain(block => keep.has(block));
-		if (retired) this.#host?.replayHistory();
+		if (retired) this.#host?.replayHistory({ preserveDock: true });
 	}
 
 	/** Mount a block before `anchor` (at the end when it is gone). */

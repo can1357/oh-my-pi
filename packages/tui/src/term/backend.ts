@@ -109,6 +109,12 @@ interface SessionWindow {
 	readonly wheel: boolean;
 }
 
+/** Options for replaying terminal scrollback from the current transcript. */
+export interface ReplayOptions {
+	/** Keep an inline dock that has already reached the bottom at the same terminal size. */
+	readonly preserveDock?: boolean;
+}
+
 /** Options of a {@link TermBackend}. */
 export interface TermBackendOptions {
 	readonly surface: Surface;
@@ -221,8 +227,16 @@ interface Pin {
 	readonly height: number;
 	readonly below: number;
 	readonly bottom: boolean;
+	/** Survives intermediate frames in a resize burst until the writer rebuilds the normal screen. */
+	readonly reachedBottom: boolean;
 	readonly rows: number;
 	readonly span: number;
+}
+
+/** Screen rows above an inline viewport at this size (0 without a pin that reaches it). */
+function screenAbove(pin: Pin | undefined, width: number, height: number): number {
+	if (!pin || pin.width !== width || pin.height !== height) return 0;
+	return pin.bottom ? Math.max(0, height - pin.span) : pin.below;
 }
 
 interface Placed {
@@ -418,8 +432,8 @@ export class TermBackend {
 	/** The next frame is the shutdown flush (see {@link flush}). */
 	#flushing = false;
 	/**
-	 * Where the inline viewport stands on screen since the last reset (a replay or a resize; a
-	 * fullscreen frame leaves the normal screen as it was): see {@link Pin}. `#nextPin` is what the frame being presented makes of it.
+	 * Position of the inline viewport on the normal screen. A fullscreen frame leaves it in place.
+	 * See {@link Pin} for the geometry carried across history rebuilds.
 	 */
 	#pin: Pin | undefined;
 	/** Blocks the retirement in the frame being composed moves into history (separators may ask). */
@@ -491,6 +505,7 @@ export class TermBackend {
 		this.#pointerFocused = true;
 		this.#clock.set(Date.now());
 		// Restarted (after a suspend): what the terminal holds is unknown, history is written again.
+		this.#pin = undefined;
 		if (this.#committed.size > 0 || this.#emitted.size > 0) this.#requestReplay();
 		this.#unsubscribe.push(
 			this.#driver.onInput(event => this.#routeInput(event, true)),
@@ -500,7 +515,12 @@ export class TermBackend {
 				this.#textSizing.set(capabilities.textSizing);
 				this.requestRender();
 			}),
-			this.#driver.onReplay(() => {
+			this.#driver.onReplay(cause => {
+				const pin = this.#pin;
+				this.#pin =
+					cause === "resize-rebuild" && pin?.reachedBottom
+						? { ...pin, width: this.#driver.columns, height: this.#driver.rows, bottom: true }
+						: undefined;
 				// A batch still unwritten (a replay included) is prepared again for the new display.
 				this.#replay = true;
 				this.#pending = undefined;
@@ -551,6 +571,14 @@ export class TermBackend {
 		if (this.#committed.has(node) || this.#emitted.has(node) || this.#retiring.has(node)) return true;
 		const pending = this.#pending;
 		return pending !== undefined && (pending.head?.node === node || pending.nodes.includes(node));
+	}
+
+	/** Clear and replay the screen, optionally keeping the dock of the same transcript anchored. */
+	replayHistory(options?: ReplayOptions): void {
+		const pin = this.#pin;
+		this.#driver.resetDisplay();
+		// resetDisplay invalidates this display synchronously; a fresh display starts without a pin.
+		if (options?.preserveDock) this.#pin = pin;
 	}
 
 	/** Whether the driver acknowledged rows of `node`'s own content in history, not only the separator above it. */
@@ -1126,6 +1154,11 @@ export class TermBackend {
 			const rows: string[] = ledger ?? [];
 			let last = ledgerLast;
 			let marked: Map<object, HistoryRowMark> | undefined;
+			// Where the rows of a block this batch continues end in it (0: it continues none): its
+			// earlier rows went out with an earlier batch, so an anchored image spanning that seam
+			// has its first rows only where the screen still holds them (dropped below).
+			let carriedEnd = 0;
+			let originalRows: (string | undefined)[] | undefined;
 			const appendRows = (block: Block, from: number, to: number): void => {
 				const mark = block.historyMark;
 				if (mark && mark.row >= from && mark.row < to && !this.#marked.has(mark.key) && !marked?.has(mark.key)) {
@@ -1149,6 +1182,7 @@ export class TermBackend {
 					leads[live] = undefined;
 					for (let i = leadAt(live); i > 0; i--) rows.push("");
 					appendRows(block, skip, block.rows.length);
+					if (skip > 0) carriedEnd = rows.length;
 				}
 				if (block.rows.length > 0) last = node;
 				this.#retiring.add(node);
@@ -1182,6 +1216,7 @@ export class TermBackend {
 						for (let i = lead; i > 0; i--) rows.push("");
 						const stop = Math.min(skip + take, block.rows.length);
 						appendRows(block, skip, stop);
+						if (skip > 0) carriedEnd = rows.length;
 						if (stop > skip) content.push(node);
 						head = { node, rows: block.rows, count: stop };
 						skips[live] = stop;
@@ -1190,11 +1225,21 @@ export class TermBackend {
 					}
 				}
 			}
+			// The screen rows above where this batch is written (the viewport's top before it): an
+			// anchored image carried over from an earlier batch draws over its own rows only while
+			// they reach that far down — past the top row its cursor-up clamps there and the image
+			// lands over rows that are not its own. A pin of another size leaves nothing to reach.
+			if (carriedEnd > 0) {
+				dropCutImages(rows, 0, carriedEnd, screenAbove(this.#pin, width, height), (row, original) => {
+					(originalRows ??= [])[row] = original;
+				});
+			}
 			if (rows.length > 0 || ledger) {
 				history = {
 					id: this.#nextHistoryId++,
 					rows,
 					...(ledger ? { kind: "replay" } : {}),
+					...(originalRows ? { originalRows } : {}),
 					...(marked ? { marks: [...marked.values()] } : {}),
 				};
 				this.#pending = {
@@ -1277,22 +1322,33 @@ export class TermBackend {
 		let free = 0;
 		if (!flush) {
 			const pin = this.#pin;
-			const fresh = !pin || pin.width !== width || pin.height !== height || history?.kind === "replay";
+			const resized = !pin || pin.width !== width || pin.height !== height;
+			const replay = history?.kind === "replay";
+			const fresh = resized || replay;
 			const below = fresh ? 0 : pin.below;
 			const written = history ? history.rows.length : 0;
 			const natural = viewport.length + dockRows;
-			const bottom = (fresh ? false : pin.bottom) || below + written + natural >= height;
+			// An internal replay starts at row zero. Keep a dock that already reached the bottom
+			// there even if the replacement transcript is short. A display reset discards the pin.
+			const pinned = !resized && pin.bottom && (!replay || dockRows > 0);
+			const bottom = pinned || below + written + natural >= height;
 			// History written under a viewport at the bottom scrolls it: the rows it covered shrink by as much.
-			const hold = !fresh && pin.bottom ? Math.min(height, pin.rows - written) : 0;
+			const hold = pinned ? Math.min(height, (replay ? height : pin.rows) - written) : 0;
 			if (bottom && dockRows > 0) while (viewport.length + dockRows < hold) viewport.push("");
 			if (!bottom) free = Math.max(0, height - (below + written) - (viewport.length + dockRows));
 			// The rows from the viewport's top down: a shrunk viewport keeps its top (only a dock pads it down).
 			const held = !fresh && pin.bottom ? Math.min(height, pin.span - written) : 0;
 			const span = Math.max(viewport.length + dockRows, held);
-			this.#nextPin = { width, height, below: below + written, bottom, rows: viewport.length + dockRows, span };
-			// The screen rows above the viewport: everything written so far, or (at the bottom) what it leaves.
-			const above = bottom ? Math.max(0, height - span) : below + written;
-			if (joinedEnd > 0) dropCutImages(viewport, 0, joinedEnd, above);
+			this.#nextPin = {
+				width,
+				height,
+				below: below + written,
+				bottom,
+				reachedBottom: (bottom && dockRows > 0) || (pin?.reachedBottom ?? false),
+				rows: viewport.length + dockRows,
+				span,
+			};
+			if (joinedEnd > 0) dropCutImages(viewport, 0, joinedEnd, screenAbove(this.#nextPin, width, height));
 		} else if (joinedEnd > 0) dropCutImages(viewport, 0, joinedEnd);
 		const dockTop = viewport.length;
 		for (const placed of dock) {

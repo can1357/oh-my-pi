@@ -42,6 +42,7 @@ const caps: TerminalCapabilities = {
 	textSizing: false,
 	tsp: false,
 	emoji: CONSERVATIVE_EMOJI,
+	styledUnderlines: false,
 };
 
 let cleanup: (() => void) | undefined;

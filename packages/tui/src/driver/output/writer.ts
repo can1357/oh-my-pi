@@ -139,7 +139,7 @@ export interface FrameWriterOptions {
 	/** The frame source can answer `replay` invalidations (otherwise resizes never replay). */
 	readonly canReplay?: () => boolean;
 	/** Ask the frame source for a new frame. */
-	readonly onInvalidate?: (request: Invalidation) => void;
+	readonly onInvalidate?: (request: Invalidation, cause?: "resize-rebuild") => void;
 }
 
 function schedule(callback: () => void, ms: number): () => void {
@@ -641,9 +641,16 @@ export class FrameWriter {
 		let skipped = 0;
 		if (this.#pushed.length > 0 && (this.#pendingClear || history?.kind === "replay")) this.#pushed = [];
 		if (this.#pushed.length > 0 && past.length > 0) {
-			// Rows a height shrink already pushed into scrollback are not written twice.
+			// Rows a height shrink already pushed into scrollback are not written twice. Compare the
+			// original identity of rows whose cut image was replaced, not the replacement's bytes.
 			let same = 0;
-			while (same < past.length && same < this.#pushed.length && past[same] === this.#pushed[same]) same++;
+			while (same < past.length && same < this.#pushed.length) {
+				// The pushed copy is the original row, or already the cut one when the viewport had cut it.
+				const pushed = this.#pushed[same];
+				const original = history?.originalRows?.[same];
+				if (past[same] !== pushed && (original === undefined || normalizeRow(original, width) !== pushed)) break;
+				same++;
+			}
 			this.#pushed = same === past.length ? this.#pushed.slice(same) : [];
 			skipped = same;
 			past = past.slice(skipped);
@@ -903,7 +910,7 @@ export class FrameWriter {
 			this.#pendingClear = true;
 			this.#replayAppends = false;
 			this.#stale = false;
-			this.#options.onInvalidate?.(replay ? "replay" : "repaint");
+			this.#options.onInvalidate?.(replay ? "replay" : "repaint", tx.full ? "resize-rebuild" : undefined);
 			return;
 		}
 		this.#replayAppends = replay === "append";
@@ -981,7 +988,7 @@ export class FrameWriter {
 			// coordinates: replay instead of trusting the pulled-down copy.
 			this.#pendingClear = true;
 			this.#replayAppends = false;
-			this.#options.onInvalidate?.("replay");
+			this.#options.onInvalidate?.("replay", "resize-rebuild");
 			return;
 		}
 		const replay = this.#replayAppends;

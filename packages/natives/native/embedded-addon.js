@@ -1,5 +1,5 @@
-// Always null on disk. Standalone binary builds replace this module in memory
-// with the target's manifest and one zstd frame per addon (scripts/embed-native.ts).
+// Source and npm loads resolve their addon from disk. Release bundles replace this
+// module with linked-addon.js; the Nix build supplies its own zstd manifest instead.
 
 /** @typedef {"modern" | "baseline" | "default"} EmbeddedAddonVariant */
 
@@ -21,3 +21,9 @@
 
 /** @type {EmbeddedAddon|null} */
 export const embeddedAddon = null;
+
+/**
+ * Supplied only by the standalone runtime built with pi-natives linked in.
+ * @type {null | (() => Record<string, unknown>)}
+ */
+export const openLinkedAddon = null;

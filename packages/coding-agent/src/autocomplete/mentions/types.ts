@@ -41,6 +41,12 @@ export const MATCH_TIER = {
 
 export type MatchTier = (typeof MATCH_TIER)[keyof typeof MATCH_TIER];
 
+/**
+ * A scope of the palette's scope bar: one category the user can lock a mention to, GitHub split
+ * into pull requests and issues.
+ */
+export type MentionScopeId = "files" | "models" | "agents" | "sessions" | "git" | "pr" | "issue" | "mcp" | "ssh";
+
 /** Git or forge result filter. */
 export type MentionSubKind = "pr" | "issue" | "branch" | "commit" | "tag" | "diff";
 
@@ -131,10 +137,29 @@ export interface MentionSource extends MentionSourceMeta {
 	warm?(): void;
 }
 
+/** One scope of the palette's scope bar, as the picker draws it. */
+export interface MentionScopeView {
+	readonly id: MentionScopeId;
+	readonly label: string;
+	/** Native icon name. */
+	readonly icon: string;
+	/** The matches of its category for the current query, when there are 1..99. */
+	readonly count?: number;
+}
+
 /** Structured palette payload attached to {@link AutocompleteSuggestions} for unified mentions. */
 export interface MentionPaletteView {
 	/** The category that took over the palette: a syntax lock (`@m:`, `^`, `#123`) or a clear winner. */
 	readonly lockedScope?: MentionCategoryId;
+	/** The scopes of the registered categories, in the order Tab walks them. */
+	readonly scopes: readonly MentionScopeView[];
+	/**
+	 * The scope the mention is explicitly in: its `@<namespace>:` token, the files lock, `^`, `#123`
+	 * or path syntax. A clear winner taking over the list is not one.
+	 */
+	readonly scope?: MentionScopeId;
+	/** What is typed after the trigger and any `@<namespace>:` token (`@m:opus:high` → `opus:high`). */
+	readonly typed: string;
 	readonly columns: readonly TspPickerColumn[];
 	readonly pickerItems: readonly TspPickerItem[];
 	readonly order: readonly (string | TspPickerGroup)[];

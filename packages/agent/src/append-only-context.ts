@@ -18,6 +18,7 @@ import type { AgentTool } from "./types";
 import type { Context, Message, Tool } from "@oh-my-pi/pi-ai";
 import { toolWireSchema } from "@oh-my-pi/pi-ai";
 import { normalizeTools } from "./agent-loop";
+import type { InheritedToolDescriptions } from "./inherited-tool-descriptions";
 import { messageEstimateVersion } from "./compaction/message-cache";
 import type { AgentContext, AgentMessage } from "./types";
 
@@ -86,6 +87,8 @@ export interface BuildOptions {
 	intentDescription?: string;
 	/** Strip tool descriptions from the provider-bound specs (must match normalizeTools). */
 	pruneToolDescriptions?: boolean;
+	/** A fork's owner-worded descriptions (must match normalizeTools). */
+	inheritedToolDescriptions?: InheritedToolDescriptions;
 }
 
 /**
@@ -140,6 +143,7 @@ export class StablePrefix {
 	#lastIntentTracing: boolean | undefined;
 	#lastIntentDescription: string | undefined;
 	#lastPruneToolDescriptions: boolean | undefined;
+	#lastInheritedToolDescriptions: InheritedToolDescriptions | undefined;
 
 	build(context: AgentContext, options: BuildOptions): boolean {
 		const prev = this.#snapshot;
@@ -170,7 +174,8 @@ export class StablePrefix {
 		if (
 			this.#lastIntentTracing !== options.intentTracing ||
 			this.#lastIntentDescription !== options.intentDescription ||
-			this.#lastPruneToolDescriptions !== options.pruneToolDescriptions
+			this.#lastPruneToolDescriptions !== options.pruneToolDescriptions ||
+			this.#lastInheritedToolDescriptions !== options.inheritedToolDescriptions
 		) {
 			return false;
 		}
@@ -202,6 +207,7 @@ export class StablePrefix {
 		this.#lastIntentTracing = options.intentTracing;
 		this.#lastIntentDescription = options.intentDescription;
 		this.#lastPruneToolDescriptions = options.pruneToolDescriptions;
+		this.#lastInheritedToolDescriptions = options.inheritedToolDescriptions;
 		this.#lastToolKey = renderedToolKeys;
 	}
 
@@ -212,6 +218,7 @@ export class StablePrefix {
 		this.#lastToolKey = undefined;
 		this.#lastIntentTracing = undefined;
 		this.#lastPruneToolDescriptions = undefined;
+		this.#lastInheritedToolDescriptions = undefined;
 	}
 
 	/**
@@ -489,6 +496,7 @@ function normalizeWireTools(tools: AgentContext["tools"], options: BuildOptions)
 			injectIntent: options.intentTracing,
 			intentDescription: options.intentDescription,
 			pruneDescriptions: options.pruneToolDescriptions,
+			inheritedDescriptions: options.inheritedToolDescriptions,
 		}) ?? []
 	);
 }

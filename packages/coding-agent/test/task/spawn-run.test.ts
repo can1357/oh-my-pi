@@ -8,6 +8,7 @@ import { expect, it } from "bun:test";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { SpawnRun } from "@oh-my-pi/pi-coding-agent/task/spawn-run";
 import type { TaskToolDetails } from "@oh-my-pi/pi-coding-agent/task/task-details";
+import { liveAfterGc } from "../helpers/gc";
 
 const permit = { acquire: async () => {}, release: () => {} };
 const done = { content: [{ type: "text", text: "done" }] } as AgentToolResult<TaskToolDetails>;
@@ -18,22 +19,6 @@ async function settledRunRef(signal: AbortSignal): Promise<WeakRef<SpawnRun>> {
 	run.attach({ signal, onUpdate: () => {} });
 	await run.result;
 	return new WeakRef(run);
-}
-
-/**
- * Collects across a few event-loop turns and returns how many runs are still reachable. Bun's
- * conservative stack scan can pin the most recently dropped object in a stale native stack slot
- * (deterministically so on Windows), so callers settle several runs and tolerate one survivor.
- */
-async function liveAfterGc(refs: WeakRef<object>[]): Promise<number> {
-	let live = refs.length;
-	for (let turn = 0; turn < 20; turn++) {
-		Bun.gc(true);
-		live = refs.filter(ref => ref.deref() !== undefined).length;
-		if (live === 0) break;
-		await Bun.sleep(0);
-	}
-	return live;
 }
 
 it("does not stay reachable from a long-lived owner signal once it settles", async () => {

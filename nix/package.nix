@@ -177,6 +177,9 @@ stdenv.mkDerivation {
     ''}
 
     echo "Compiling OMP"
+    # The sandbox has the pinned upstream executable, not its link inputs.
+    # Embed our Nix-built addon with its selected features and library paths.
+    OMP_COMPILED_NATIVES=embedded \
     BUN_COMPILE_EXECUTABLE_PATH="${bunRuntimeTemplate}/libexec/bun" \
       bun --cwd="$PWD/packages/coding-agent" run build
 

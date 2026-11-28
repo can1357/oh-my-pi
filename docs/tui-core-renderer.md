@@ -164,8 +164,15 @@ popup) draw over the transcript instead of taking room from it: the room for
 Once the viewport has reached the bottom of the screen it keeps its height
 there: when live content shrinks, blank rows between the live main rows and the
 dock keep the dock at the bottom. Those rows are not live rows: retirement and
-allocation never count them. A replay and a resize reset it; a fullscreen
-layer leaves the normal screen, and so the pinned viewport, as it was.
+allocation never count them. The dock stays on the bottom row when the backend
+replays history because previously emitted rows changed or retired blocks were
+replaced. A caller rebuilding the same transcript can request the same behavior
+with `replayHistory({ preserveDock: true })`, as the coding agent does during
+compaction. When a settled resize clears the normal screen and rebuilds history
+(for example, on ConPTY), a dock that already occupied the last row there
+returns to the last row at the new size. Other resize scrollback policies keep
+their existing placement. A plain `replayHistory()` or a display reset starts
+a fresh viewport. A fullscreen layer leaves the normal screen in place.
 
 ### 2.2 Fullscreen screen mode
 

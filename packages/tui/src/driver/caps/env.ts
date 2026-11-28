@@ -167,6 +167,7 @@ export function capabilitiesFromEnv(env: Env, context: EnvCapabilityContext): Te
 		multiplexer,
 		tsp: false,
 		emoji: emojiSupportFor(id, env),
+		styledUnderlines: TERMINAL_PROFILES[id].styledUnderlines,
 	};
 }
 

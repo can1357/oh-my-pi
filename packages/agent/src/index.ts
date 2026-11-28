@@ -2,6 +2,8 @@
 export * from "./agent";
 // Loop functions
 export * from "./agent-loop";
+// Owner-worded tool descriptions a fork sends to share its owner's cached prefix
+export * from "./inherited-tool-descriptions";
 // Append-only context mode
 export * from "./append-only-context";
 // Compaction

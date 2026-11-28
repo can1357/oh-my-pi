@@ -14,7 +14,15 @@ import { initTheme } from "../../../src/ui/theme/service";
 const restoreTheme = currentTheme();
 
 beforeAll(() => {
-	initTheme({ capabilities: { truecolor: true, colors: 16_777_216, dark: true, emoji: CONSERVATIVE_EMOJI } });
+	initTheme({
+		capabilities: {
+			truecolor: true,
+			colors: 16_777_216,
+			dark: true,
+			emoji: CONSERVATIVE_EMOJI,
+			styledUnderlines: false,
+		},
+	});
 });
 
 afterAll(() => {

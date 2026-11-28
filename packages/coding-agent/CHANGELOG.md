@@ -79,6 +79,8 @@
 
 ### Changed
 
+- Clarified in `/settings` and the settings reference that `statusLine.separator` applies to built-in `box` and `band` composer layouts (and `top-border`/`top-band` attachments) and is ignored by other layouts ([#20890](https://github.com/can1357/oh-my-pi/pull/20890) by [@5UM-4N](https://github.com/5UM-4N)).
+- The model picker pins only the `default`, `smol`, `slow` and `plan` role models to the top; models holding background roles (`tiny`, `memory`, `commit`, `vision`, …) sort by recent use
 - Launches with `--config` draw the composer before startup finishes unless an overlay sets a setting that frame shows (`tui.screen`, theme, symbols, composer shape, vim mode, quiet startup); `PI_CONFIG_FILES` overlays that set one now skip it too
 - OTLP export runs on OpenTelemetry JS SDK 3; `OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG`, `OTEL_BSP_*` and the span limit variables are no longer read (the documented `OTEL_*` variables work as before)
 - On public sites, browser `tab.console()` and `tab.errors()` record from the first call on a tab (the result's `captureStartedAt` marks when), so pages cannot detect the capture; local and dev pages still record from load
@@ -92,8 +94,8 @@
 - The `@` mention palette and mention chips draw their icons from the symbol preset: Nerd Font glyphs under `nerd`, plain ASCII under `ascii`, and a single-width unicode set otherwise (themes can override the `mention.*` symbols)
 - The `@` mention palette is colored: icons take their category's color, or the status of the row (running/idle/aborted agent, dirty file, open/merged/closed PR), and status badges take their tone
 - Mention categories use `@m:` for models, `@p2p:` for agents and peers, `@ses:` for sessions, `@git:` for Git, `@pr:` for pull requests, `@iss:` for issues, `@mcp:` for MCP resources, and `@ssh:` for SSH hosts. Use `@` followed by a path to mention files; Git results can be narrowed with `@git:branch:`, `@git:commit:`, `@git:tag:`, or `@git:diff:`
-- A bare `@` shows the categories as a strip of icons, Files first: Tab/Shift+Tab or ←/→ light one and show its token and description below, and Enter, Space or typing enters it (`@m:` plus what you typed). Files keeps the bare `@` and lists your folder, so `@` then Enter browses files
-- The mention palette no longer shows category scope pills or pins a category with Shift+Tab; mixed results head each category with its icon and match count instead
+- A bare `@` predicts files, and typing searches every category. Before you type, Tab and Shift+Tab walk the categories as scopes (Files, Models, Agents, Sessions, Git, PRs, Issues, MCP, SSH) in a scope bar over the list, and Backspace leaves the scope; once you type, Tab completes the highlighted row. In Tern what you type after the `@` goes into the scope bar's search field instead of showing in the message, the list stays open while nothing matches, and a click on a scope enters or leaves it
+- Mixed mention results head each category with its icon and match count
 - Role mentions now insert only the model without an explicit thinking level
 - Models with 1M-class context windows (Claude extended context, GPT-6.2 Astra and Sol at 922K) auto-compact at 690K tokens by default instead of 85% of the window, cutting cache-read cost on long sessions; set `compaction.thresholdPercent`, `compaction.thresholdTokens`, or a `/models` compaction limit to compact later
 - Back-to-back idle `wait` calls on jobs and services stretch their top window to the session's prompt-cache lifetime less 1m (up to 30m) instead of a fixed 4m, as reply waits already did
@@ -132,8 +134,16 @@
 ### Fixed
 
 - Fixed the `/model` hub offering fallback chips and listing non-chat models for fallback chains; model-keyed chains now accept models any chat-section role accepts, including `tiny` ([#20897](https://github.com/can1357/oh-my-pi/issues/20897), [#20907](https://github.com/can1357/oh-my-pi/pull/20907) by [@koeria](https://github.com/koeria)).
+- Background job results delivered while the agent is idle are freed once delivered, not kept in memory until the whole turn they started ends ([#20886](https://github.com/can1357/oh-my-pi/pull/20886) by [@sjawhar](https://github.com/sjawhar))
+- Kept the prompt at the bottom when `/compact` shortens a long session or a cancelled submission restores the draft and rebuilds the same transcript ([#20912](https://github.com/can1357/oh-my-pi/pull/20912) by [@thebtf](https://github.com/thebtf))
+- In fullscreen mode, the terminal can select and copy text in `/session` info, the background jobs sheet, and command reports (`/context`, `/changelog`, `/tools`, …), which there always open as a full-screen page instead of above the editor.
+- Scrolling a long command report (`/tools`, `/changelog`, …) past its end no longer stalls the next upward scroll.
+- Misspelled words in the prompt editor are marked with a red curly underline again in kitty, Ghostty, WezTerm and iTerm2, instead of a plain underline.
+- Restored provider logos in `/login` and `/logout` and made `/model` searchable by the name shown for a connected account.
+- `/tan` forks reuse the parent session's prompt cache: their first request no longer re-sends the whole conversation uncached, and Claude and GPT-6.2 keep the parent's earlier reasoning instead of dropping it.
 - `/resume` into a session without subagents no longer keeps showing the previous session's subagents above the composer
 - Fixed stealth injection registry to preserve native function source strings across frames
+- Sign-in prompts now refer to the address or code shown in your browser instead of authorization jargon.
 - In Tern, `/copy` and `/annotate session` share the same block picker on desktop and mobile. Clicking a side preview accepts the full item and closes the picker ([#20791](https://github.com/can1357/oh-my-pi/pull/20791) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 - Resuming a session after its omp crashed or was killed now reminds about, and at session end reaps, the background processes that omp left running, while a second live omp on the same session still leaves them alone
 - `glob` now returns up to 200 paths instead of rejecting requests for more ([#20893](https://github.com/can1357/oh-my-pi/pull/20893) by [@JustasMasiulis](https://github.com/JustasMasiulis)).
@@ -173,6 +183,7 @@
 - Discovered chat and embedding prices now honor the advertised per-token or per-million unit.
 - Oversized jq results no longer label a truncated preview as the full output, and `write` rejects incomplete read projections when creating archive members.
 - Fullscreen extension overlays can scroll with the mouse wheel again by enabling mouse reporting in `ctx.ui.custom` and handling it on the canvas ([#20819](https://github.com/can1357/oh-my-pi/issues/20819)).
+- Fixed `ExtensionRunner.emitInput` propagating `null` `text` or `images` returned by an extension input handler, which crashed interactive and RPC input handling ([#20862](https://github.com/can1357/oh-my-pi/pull/20862) by [@asuffield](https://github.com/asuffield))
 - Edit results now show the edited branch and the session branch when a file is changed in another linked Git worktree ([#20801](https://github.com/can1357/oh-my-pi/pull/20801) by [@Quantum-Quasar](https://github.com/Quantum-Quasar)).
 - Cross-worktree edit notices now also cover multi-file `magic` edits, both ends of cross-worktree moves, writes through file symlinks, Cursor-materialized edits, and browser/HTML transcript views, while skipping hashline no-ops ([#20823](https://github.com/can1357/oh-my-pi/pull/20823) by [@Quantum-Quasar](https://github.com/Quantum-Quasar)).
 - A running subagent no longer publishes a task progress update when only its elapsed time changed: such updates now go out at most every 5 seconds, which keeps elapsed timers moving and cuts task update traffic to RPC clients, session observers and transcripts by about 8x ([#20810](https://github.com/can1357/oh-my-pi/pull/20810) by [@Xytronix](https://github.com/Xytronix))
@@ -341,6 +352,8 @@
 - A long session no longer keeps every finished background job, with its full output, in memory after the job's result reaches the agent ([#20836](https://github.com/can1357/oh-my-pi/pull/20836) by [@sjawhar](https://github.com/sjawhar))
 - Skipped prompt-cache writes for one-off memory extraction and consolidation in the local memory backend ([#20783](https://github.com/can1357/oh-my-pi/pull/20783) by [@farnoy](https://github.com/farnoy))
 - Starting or resuming a session no longer prints a `Tool commands: added mcp__…` line listing every MCP tool; MCP tools mounted later are still shown ([#20643](https://github.com/can1357/oh-my-pi/pull/20643) by [@Petyok](https://github.com/Petyok)).
+- Ask form option notes wrap as you type in the terminal, with a visible caret on pasted carriage returns and title arrows when a very long draft is only partly shown ([#20880](https://github.com/can1357/oh-my-pi/pull/20880) by [@brianzilla](https://github.com/brianzilla)).
+- Model discovery reads the reasoning effort ladder, default level and mandatory flag from `/v1/models` rows that publish them as a `reasoning: { supported_efforts, default_effort, mandatory }` object (the OpenRouter shape), not only from flat `supported_reasoning_levels` ([#20879](https://github.com/can1357/oh-my-pi/pull/20879) by [@Xytronix](https://github.com/Xytronix))
 
 ### Removed
 

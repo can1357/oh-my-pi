@@ -28,6 +28,7 @@ import type { UiNode } from "./node";
 import type { Surface } from "./surface";
 import {
 	driverImages,
+	type ReplayOptions,
 	type SelectionMotion,
 	TermBackend,
 	type TermBackendOptions,
@@ -137,7 +138,7 @@ export interface Host {
 	 */
 	contentInHistory(node: UiNode): boolean;
 	/** Redraw terminal history from the current main region (its retired rows changed or went away). */
-	replayHistory(): void;
+	replayHistory(options?: ReplayOptions): void;
 	/**
 	 * The settled main block holding `node` changed after it was final: a Tern terminal, which
 	 * dropped its description, gets it again (a plain terminal replays history instead).
@@ -468,7 +469,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			hour12: undefined,
 			retired: node => backend.retired(node),
 			contentInHistory: node => backend.contentInHistory(node),
-			replayHistory: () => driver.resetDisplay(),
+			replayHistory: options => backend.replayHistory(options),
 			redescribe: () => {},
 			dispatch: event => backend.dispatch(event),
 			feature: () => false,
@@ -523,7 +524,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
 		driver,
 		retired: node => renderer.retired(node),
 		contentInHistory: node => renderer.contentInHistory(node),
-		replayHistory: () => renderer.replayHistory(),
+		replayHistory: options => renderer.replayHistory(options),
 		redescribe: node => renderer.redescribe(node),
 		dispatch: event => renderer.dispatch(event),
 		feature: name => renderer.feature(name),

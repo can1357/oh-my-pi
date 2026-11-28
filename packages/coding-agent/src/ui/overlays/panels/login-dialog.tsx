@@ -10,7 +10,7 @@
  *
  * {@link LoginDialogState} is what the OAuth flow drives (`showAuth`,
  * `showPrompt`, `showManualInput`, `showWaiting`, `showProgress`); the
- * terminal draws the flow's transcript in a box titled `Login to …`.
+ * terminal draws the flow's transcript in a titled box.
  */
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthPrompt } from "@oh-my-pi/pi-ai/oauth/types";
@@ -33,7 +33,7 @@ const PRESS_KEY_SUFFIX = /,?\s*then press\s+\S+\s*:?\s*$/i;
 /** Progress reporting a problem rather than a finished stage. */
 const PROGRESS_PROBLEM = /\b(?:fail(?:ed|ure)?|error|unavailable|in use|could ?n[o']t|unable)\b/i;
 /** The field's error when the flow asks for the manual code again. */
-const RETRY_MESSAGE = "Couldn't read a code from that. Paste the authorization code or the full redirect URL.";
+const RETRY_MESSAGE = "Couldn't complete sign-in with that. Paste the address from your browser or the code it shows.";
 /** Status while the browser half runs and the provider reports nothing. */
 const BROWSER_WAIT = "Waiting for you to finish in the browser…";
 
@@ -49,7 +49,7 @@ export interface LoginField {
 /** What the terminal transcript shows, in order. */
 export type LoginPiece =
 	| { readonly kind: "spacer" }
-	| { readonly kind: "url"; readonly url: string }
+	| { readonly kind: "url"; readonly url: string; readonly label?: string }
 	| { readonly kind: "text"; readonly text: string; readonly style: string; readonly href?: string }
 	| { readonly kind: "field"; readonly field: LoginField };
 
@@ -59,6 +59,7 @@ type LoginStep =
 
 interface LoginAuth {
 	readonly url: string;
+	readonly label?: string;
 	readonly launchUrl?: string;
 	readonly instructions?: string;
 	readonly device?: string;
@@ -93,7 +94,9 @@ function newField(secret = false, placeholder?: string): LoginField {
 
 /** The sign-in flow's live state. */
 export class LoginDialogState {
-	readonly providerName: string;
+	readonly terminalTitle: string;
+	readonly sheetTitle: string;
+	readonly #namedMethod: boolean;
 	readonly auth = signal<LoginAuth | undefined>(undefined);
 	readonly steps = signal<readonly LoginStep[]>([]);
 	readonly pieces = signal<readonly LoginPiece[]>([]);
@@ -112,7 +115,11 @@ export class LoginDialogState {
 		readonly onComplete: (success: boolean, message?: string) => void,
 		readonly openUrl: (url: string) => void,
 	) {
-		this.providerName = getOAuthProviders().find(p => p.id === providerId)?.name || providerId;
+		const provider = getOAuthProviders().find(p => p.id === providerId);
+		const name = provider?.name || providerId;
+		this.#namedMethod = provider?.loginGroup !== undefined;
+		this.terminalTitle = this.#namedMethod ? name : `Login to ${name}`;
+		this.sheetTitle = this.#namedMethod ? name : `Sign in to ${name}`;
 	}
 
 	get signal(): AbortSignal {
@@ -135,9 +142,10 @@ export class LoginDialogState {
 	}
 
 	showAuth(url: string, instructions?: string, launchUrl?: string): void {
+		const label = this.#namedMethod ? "Open sign-in page" : undefined;
 		const pieces: LoginPiece[] = [
 			{ kind: "spacer" },
-			{ kind: "url", url },
+			{ kind: "url", url, ...(label ? { label } : {}) },
 			{
 				kind: "text",
 				text: `${formatKeyHint(keyHintPlatform() === "darwin" ? "super" : "ctrl")}+click to open`,
@@ -146,7 +154,14 @@ export class LoginDialogState {
 			},
 		];
 		if (launchUrl && launchUrl !== url) {
-			pieces.push({ kind: "text", text: `Local shortcut (this machine only): ${launchUrl}`, style: "dim" });
+			pieces.push({
+				kind: "text",
+				text: this.#namedMethod
+					? `Sign-in link on this machine: ${launchUrl}`
+					: `Local shortcut (this machine only): ${launchUrl}`,
+				style: "dim",
+				...(this.#namedMethod ? { href: launchUrl } : {}),
+			});
 		}
 		if (instructions) pieces.push({ kind: "spacer" }, { kind: "text", text: instructions, style: "warning" });
 		this.pieces.set(pieces);
@@ -154,6 +169,7 @@ export class LoginDialogState {
 		const device = plain ? DEVICE_CODE_INSTRUCTIONS.exec(plain) : null;
 		this.auth.set({
 			url,
+			...(label ? { label } : {}),
 			...(launchUrl && launchUrl !== url ? { launchUrl } : {}),
 			...(plain ? { instructions: plain } : {}),
 			...(device ? { device: device[2]! } : {}),
@@ -332,7 +348,7 @@ export function LoginDialog(props: { readonly state: LoginDialogState }): JSXNod
 	return (
 		<col
 			term={() => ({
-				title: `Login to ${state.providerName}`,
+				title: state.terminalTitle,
 				pieces: state.pieces(),
 				caret: state.focused() && !state.terminalCursor(),
 			})}
@@ -362,7 +378,7 @@ export function LoginDialog(props: { readonly state: LoginDialogState }): JSXNod
 			<overlay
 				key="sheet"
 				role="omp.overlay.login"
-				head={`Sign in to ${state.providerName}`}
+				head={state.sheetTitle}
 				anchor="center"
 				size="md"
 				modal
@@ -404,8 +420,8 @@ export function LoginDialog(props: { readonly state: LoginDialogState }): JSXNod
 											role="omp.login.url"
 											truncate="middle"
 											lines={1}
-											title={auth.url}
-											spans={[{ s: "mono", t: auth.url, href: auth.url } as TspSpan]}
+											title={auth.label ?? auth.url}
+											spans={[{ s: "mono", t: auth.label ?? auth.url, href: auth.url } as TspSpan]}
 										/>
 										<ActionButton
 											id="copy"

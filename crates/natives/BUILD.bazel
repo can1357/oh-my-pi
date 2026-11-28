@@ -191,7 +191,7 @@ rust_shared_library(
         # napi addons resolve Node symbols at load time on macOS; DF_1_NODELETE
         # keeps the addon resident across Worker teardown on linux-gnu (napi
         # emits it for gnu; harmless under musl's loader). windows-msvc needs
-        # nothing — napi-sys v3 imports node.exe via raw-dylib.
+        # nothing — pinned napi-sys resolves N-API against the host at registration.
         # -adhoc_codesign: linkers sign arm64 ad hoc by default but not
         # x86_64; every shipped darwin addon carries a signature.
         # -install_name: otherwise the addon's id is its sandbox output path.

@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "bun:test";
-import type { Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
+import type { Context, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildTransformedCodexRequestBody } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { buildParams } from "@oh-my-pi/pi-ai/providers/openai-responses";
@@ -29,7 +29,7 @@ afterEach(() => {
 	AgentRegistry.resetGlobalForTests();
 });
 
-async function fixture() {
+async function fixture(settingOverrides: Record<string, unknown> = {}) {
 	const dir = TempDir.createSync("@omp-task-cache-forks-");
 	const auth = await AuthStorage.create(dir.join("auth.db"));
 	auth.keys.setRuntime("muse-code", "test-key");
@@ -39,6 +39,7 @@ async function fixture() {
 		key: unknown;
 		sessionId: string | undefined;
 		state: Map<string, ProviderSessionState> | undefined;
+		context: Context;
 	}> = [];
 	const mock = createMockModel({ handler: { content: [{ type: "text", text: "Review complete." }] } });
 	const realStreamFactory = settingsStream.createSettingsAwareStreamFn;
@@ -64,6 +65,7 @@ async function fixture() {
 					key: body.prompt_cache_key,
 					sessionId: options?.sessionId,
 					state: options?.providerSessionState,
+					context,
 				});
 				return mock.stream(model, context, options);
 			},
@@ -75,6 +77,7 @@ async function fixture() {
 		"marketplace.autoUpdate": "off",
 		"compaction.enabled": false,
 		"task.enableLsp": false,
+		...settingOverrides,
 	});
 	const common: sdk.CreateAgentSessionOptions = {
 		cwd: dir.path(),
@@ -234,6 +237,45 @@ it.each([false, true])("keeps tan's copied candidate model-gated (explicit=%s)",
 	if (!runJob) throw new Error("Tan did not register its job");
 	await runJob();
 	expect(h.requests).toHaveLength(5);
+});
+
+it("sends a tan's first request with the interactive parent's system prompt and tools", async () => {
+	// Under a prompting mode an allow rule adds approval guidance to `bash`; the tan runs in yolo mode without it.
+	await using h = await fixture({
+		"tools.approvalMode": "write",
+		"bash.patterns": [{ match: "git status", approval: "allow" }],
+	});
+	// The interactive TUI session the `/tan` command runs in (see `main.ts`).
+	const parent = await h.create({
+		sessionManager: SessionManager.create(h.dir.path(), h.dir.join("parent")),
+		hasUI: true,
+		tuiTranscript: true,
+		toolNames: ["read", "bash", "edit", "ask", "eval", "glob", "grep", "find", "task", "wait", "write"],
+	});
+	await h.request(parent, muse, undefined);
+	const parentRequest = h.requests.at(-1)!;
+	const manager = parent.asyncJobManager;
+	if (!manager) throw new Error("Missing async job manager");
+	let runJob: (() => Promise<unknown>) | undefined;
+	vi.spyOn(manager, "register").mockImplementation((_type, _label, run) => {
+		runJob = () =>
+			run({
+				jobId: "tan-test",
+				signal: new AbortController().signal,
+				reportProgress: async () => {},
+				markRunning: () => {},
+			});
+		return "tan-test";
+	});
+	await new TanCommandController(h.context(parent)).start("Review another file");
+	if (!runJob) throw new Error("Tan did not register its job");
+	await runJob();
+	const tanRequest = h.requests.at(-1)!;
+	expect(tanRequest).not.toBe(parentRequest);
+	// Any byte of drift ahead of the transcript misses the provider's prompt cache and,
+	// on prefix-bound reasoning (Claude, GPT-6.2), drops every inherited thinking block.
+	expect(tanRequest.context.systemPrompt).toEqual(parentRequest.context.systemPrompt);
+	expect(tanRequest.context.tools).toEqual(parentRequest.context.tools);
 });
 
 it("restores automatic affinity from disk without promoting a legacy fork fallback", async () => {

@@ -23,16 +23,11 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+import { COLLECT_DEADLINE_MS, collected } from "../helpers/gc";
 import { localSession } from "../helpers/local-session";
 
 const AGENT_ID = "ParkedRelease";
 const MOCK_API_SOURCE = "test/parked-subagent-session-release";
-// After earlier files warm the session code, JSC's optimizing-JIT worklist can
-// keep an object referenced by an in-flight compile reachable for a few seconds
-// (observed ~4 s locally, >8 s on loaded CI runners); collection is polled past
-// that window. A healthy release returns on the first poll that sees it collected,
-// so the deadline only bounds how long a real leak takes to fail.
-const COLLECT_DEADLINE_MS = 15_000;
 
 const ENV_KEYS = ["HOME", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"] as const;
 let savedEnv: Record<string, string | undefined> = {};
@@ -80,16 +75,6 @@ function weakRefToLiveSession(id: string): WeakRef<AgentSession> {
 	const session = AgentRegistry.global().get(id)?.session;
 	if (!session) throw new Error(`subagent ${id} has no live session to observe`);
 	return new WeakRef(localSession(session));
-}
-
-async function collected(ref: WeakRef<object>, deadlineMs: number): Promise<boolean> {
-	const deadline = Date.now() + deadlineMs;
-	for (;;) {
-		Bun.gc(true);
-		if (ref.deref() === undefined) return true;
-		if (Date.now() > deadline) return false;
-		await Bun.sleep(100);
-	}
 }
 
 /** Makes a settings write in the live session's own overlay, then observes the overlay weakly (outside the test body). */

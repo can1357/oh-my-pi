@@ -16,7 +16,12 @@ export interface OverlayOptions {
 	 * A selector follows replacements of its focused target without taking focus from another view.
 	 */
 	readonly focus?: boolean | ((root: UiNode) => UiNode);
-	/** Mouse reporting while this screen is on top; omitted overlays inherit the underlying setting. */
+	/**
+	 * Mouse reporting while this screen is on top; omitted overlays inherit the underlying setting.
+	 * Read-only text screens that take no pointer input pass `off`: the terminal then selects
+	 * their text itself (fullscreen mode's drag tracking would swallow the drag) and its
+	 * alternate-scroll wheel arrives as arrow keys.
+	 */
 	readonly mouse?: MouseTracking;
 	/** Runs once when the overlay closes, however it closes. */
 	readonly onClose?: () => void;

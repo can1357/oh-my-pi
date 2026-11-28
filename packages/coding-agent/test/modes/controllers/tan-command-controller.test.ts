@@ -76,7 +76,7 @@ function createCloneStub(overrides?: {
 	});
 	let listener: ((event: TanSessionEvent) => void) | undefined;
 	const clone = {
-		agent: { appendMessage, state: { messages } },
+		agent: { appendMessage, state: { messages }, inheritToolDescriptions: vi.fn() },
 		sessionManager: overrides?.sessionManager,
 		setTodoPhases: vi.fn(),
 		getActiveToolNames: vi.fn(() => overrides?.activeToolNames ?? ["read", "bash"]),
@@ -141,7 +141,7 @@ function createContext(overrides?: {
 	);
 	const generateTitle = vi.fn(overrides?.generateTitle ?? (async (_context: string) => null));
 	const session = {
-		agent: { promptCacheKey: overrides?.parentPromptCacheKey },
+		agent: { promptCacheKey: overrides?.parentPromptCacheKey, normalizedTools: () => [] },
 		model: overrides?.model ?? model,
 		asyncJobManager: { register },
 		sessionId: "parent-session",
