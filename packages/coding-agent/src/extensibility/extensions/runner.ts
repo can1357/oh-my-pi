@@ -2851,9 +2851,11 @@ export class ExtensionRunner {
 			currentMessages = structuredClone(messages);
 		} catch {
 			// Messages may contain non-cloneable objects (e.g. in ToolResultMessage.details
-			// or ProviderPayload). Fall back to a shallow array clone — extensions should
-			// return new message arrays rather than mutating in place.
-			currentMessages = [...messages];
+			// or ProviderPayload). Fall back to a shallow copy of each message: the copies are
+			// the hook's own, so its history stamp never lands on a session message, and a
+			// handler's in-place edit of a top-level field stays on its copy. Nested values are
+			// still the session's: extensions should return new messages rather than mutate them.
+			currentMessages = messages.map(message => ({ ...message }));
 		}
 		for (let index = 0; index < currentMessages.length; index++) {
 			const message = currentMessages[index];
@@ -2893,13 +2895,18 @@ export class ExtensionRunner {
 			}
 		}
 
-		for (const message of currentMessages) {
-			const historyIndex = getContextHistoryIndex(message);
+		// Read each returned message's history position before any stamp comes off: a handler can hand back the
+		// session's own messages, and the position loop then stamps them too.
+		const historyIndexes = currentMessages.map(message => getContextHistoryIndex(message));
+		// Clear every stamp, on the returned messages and on the session's, so a copy left unchanged equals its
+		// session message and no position stays on a session message.
+		for (const message of currentMessages) clearContextHistoryIndex(message);
+		for (const message of messages) clearContextHistoryIndex(message);
+		for (let index = 0; index < currentMessages.length; index++) {
+			const message = currentMessages[index];
+			const historyIndex = historyIndexes[index];
 			const historyMessage = historyIndex === undefined ? undefined : messages[historyIndex];
-			if (historyMessage && historyIndex !== undefined) setContextHistoryIndex(historyMessage, historyIndex);
 			const unchanged = historyMessage !== undefined && Bun.deepEquals(message, historyMessage);
-			clearContextHistoryIndex(message);
-			if (historyMessage) clearContextHistoryIndex(historyMessage);
 			if (unchanged) {
 				this.#contextProjections.set(historyMessage, null);
 				continue;
@@ -2908,7 +2915,6 @@ export class ExtensionRunner {
 				markPerCallContextMessage(message);
 			}
 		}
-		for (const message of messages) clearContextHistoryIndex(message);
 		// An aborted handler is skipped and its input kept unchanged. Never hand that
 		// untransformed (possibly unredacted) context back to a caller as if every hook ran.
 		signal?.throwIfAborted();

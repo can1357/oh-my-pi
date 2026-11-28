@@ -133,6 +133,7 @@
 
 ### Fixed
 
+- Fixed the session's messages growing in memory at every provider request while an extension handles `context` ([#20921](https://github.com/can1357/oh-my-pi/pull/20921) by [@sjawhar](https://github.com/sjawhar))
 - Background job results delivered while the agent is idle are freed once delivered, not kept in memory until the whole turn they started ends ([#20886](https://github.com/can1357/oh-my-pi/pull/20886) by [@sjawhar](https://github.com/sjawhar))
 - Kept the prompt at the bottom when `/compact` shortens a long session or a cancelled submission restores the draft and rebuilds the same transcript ([#20912](https://github.com/can1357/oh-my-pi/pull/20912) by [@thebtf](https://github.com/thebtf))
 - In fullscreen mode, the terminal can select and copy text in `/session` info, the background jobs sheet, and command reports (`/context`, `/changelog`, `/tools`, …), which there always open as a full-screen page instead of above the editor.
