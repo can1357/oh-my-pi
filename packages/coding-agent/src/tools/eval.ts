@@ -923,6 +923,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 							continue;
 						}
 						const resized = await resizeImage(output, { excludeWebP });
+						if (resized.decodeFailed && cellResult.language === "v8") continue;
 						const data = resized.data;
 						const image: ImageContent = {
 							type: "image",

@@ -347,10 +347,12 @@ impl V8SandboxRuntime {
 		if let Ok(mut guard) = self.active_run_tracker.lock() {
 			*guard = None;
 		}
-		let has_dangling = self
-			.isolate
-			.get_slot::<BridgeState>()
-			.is_some_and(|state| !state.pending_resolvers.is_empty());
+		let has_dangling = if let Some(state) = self.isolate.get_slot_mut::<BridgeState>() {
+			state.active_run_id = None;
+			!state.pending_resolvers.is_empty()
+		} else {
+			false
+		};
 		if has_dangling {
 			let context_global = self.context.clone();
 			v8::scope!(let scope, &mut self.isolate);
@@ -359,7 +361,6 @@ impl V8SandboxRuntime {
 			reject_all_pending(&mut ctx_scope, "V8 cell finished before host call settled", false);
 		}
 		if let Some(state) = self.isolate.get_slot_mut::<BridgeState>() {
-			state.active_run_id = None;
 			state.pending_resolvers.clear();
 			state.final_expr_set = false;
 			state.final_expr_value = None;
@@ -694,10 +695,29 @@ fn cb_text(
 	_rv: v8::ReturnValue,
 ) {
 	let chunk = args.get(0).to_rust_string_lossy(scope);
+	const MAX_CHUNK_BYTES: usize = 1024 * 1024;
 	if let Some(state) = scope.get_slot_mut::<BridgeState>()
 		&& let Some(run_id) = state.active_run_id.clone()
 	{
-		state.emit(V8Outbound::Text { run_id, chunk });
+		if chunk.len() <= MAX_CHUNK_BYTES {
+			state.emit(V8Outbound::Text { run_id, chunk });
+		} else {
+			let mut start = 0;
+			while start < chunk.len() {
+				let mut end = (start + MAX_CHUNK_BYTES).min(chunk.len());
+				while end > start && !chunk.is_char_boundary(end) {
+					end -= 1;
+				}
+				if end == start {
+					end = chunk.len();
+				}
+				state.emit(V8Outbound::Text {
+					run_id: run_id.clone(),
+					chunk:  chunk[start..end].to_string(),
+				});
+				start = end;
+			}
+		}
 	}
 }
 
@@ -816,12 +836,17 @@ fn cb_url_read(
 	let promise = resolver.get_promise(scope);
 	let resolver_global = v8::Global::new(scope, resolver);
 
-	if let Some(state) = scope.get_slot_mut::<BridgeState>()
-		&& let Some(run_id) = state.active_run_id.clone()
-	{
-		let id = state.next_id();
-		state.pending_resolvers.insert(id.clone(), resolver_global);
-		state.emit(V8Outbound::UrlRead { id, run_id, path, options });
+	if let Some(state) = scope.get_slot_mut::<BridgeState>() {
+		if let Some(run_id) = state.active_run_id.clone() {
+			let id = state.next_id();
+			state.pending_resolvers.insert(id.clone(), resolver_global);
+			state.emit(V8Outbound::UrlRead { id, run_id, path, options });
+		} else {
+			let err = V8ErrorPayload::new("url read outside active V8 run");
+			let err_val = v8_error_from_payload(scope, &err);
+			let local_res = v8::Local::new(scope, &resolver_global);
+			local_res.reject(scope, err_val);
+		}
 	}
 	rv.set(promise.into());
 }
@@ -847,12 +872,17 @@ fn cb_url_write(
 	let promise = resolver.get_promise(scope);
 	let resolver_global = v8::Global::new(scope, resolver);
 
-	if let Some(state) = scope.get_slot_mut::<BridgeState>()
-		&& let Some(run_id) = state.active_run_id.clone()
-	{
-		let id = state.next_id();
-		state.pending_resolvers.insert(id.clone(), resolver_global);
-		state.emit(V8Outbound::UrlWrite { id, run_id, path, data, encoding });
+	if let Some(state) = scope.get_slot_mut::<BridgeState>() {
+		if let Some(run_id) = state.active_run_id.clone() {
+			let id = state.next_id();
+			state.pending_resolvers.insert(id.clone(), resolver_global);
+			state.emit(V8Outbound::UrlWrite { id, run_id, path, data, encoding });
+		} else {
+			let err = V8ErrorPayload::new("url write outside active V8 run");
+			let err_val = v8_error_from_payload(scope, &err);
+			let local_res = v8::Local::new(scope, &resolver_global);
+			local_res.reject(scope, err_val);
+		}
 	}
 	rv.set(promise.into());
 }

@@ -1,3 +1,4 @@
+import * as fs from "node:fs/promises";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { InternalUrlRouter } from "../../internal-urls";
 import { sessionResolveContext, sessionWriteContext } from "../../internal-urls/context";
@@ -112,28 +113,54 @@ export async function handleV8UrlRead(
 
 	let text: string;
 	if (target.kind === "file") {
-		const file = Bun.file(target.path);
 		try {
-			const stat = await file.stat();
+			const stat = await fs.stat(target.path);
 			if (stat.isDirectory()) {
 				const listing = await buildDirectoryResource(target.url.href, target.path);
 				text = listing.content;
+			} else if (!stat.isFile()) {
+				throw new ToolError(`Cannot read ${policy.normalized}: target is not a regular file`);
 			} else if (stat.size > MAX_V8_DIRECT_READ_BYTES) {
 				const delegatedPath = formatDelegatedReadPath(rawPath, readOptions);
 				if (delegatedPath === null) return "";
 				const res = await handleV8ToolCall("read", { path: delegatedPath }, options);
 				return isRecord(res) && typeof res.text === "string" ? res.text : String(res ?? "");
 			} else {
-				const head = await file.slice(0, 8192).bytes();
-				if (head.includes(0)) {
-					const delegatedPath = formatDelegatedReadPath(rawPath, readOptions);
-					if (delegatedPath === null) return "";
-					const res = await handleV8ToolCall("read", { path: delegatedPath }, options);
-					return isRecord(res) && typeof res.text === "string" ? res.text : String(res ?? "");
+				const flags = fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0);
+				const fh = await fs.open(target.path, flags);
+				try {
+					const fstat = await fh.stat();
+					if (!fstat.isFile()) {
+						throw new ToolError(`Cannot read ${policy.normalized}: target is not a regular file`);
+					}
+					const buf = Buffer.allocUnsafe(MAX_V8_DIRECT_READ_BYTES + 1);
+					let total = 0;
+					while (total <= MAX_V8_DIRECT_READ_BYTES) {
+						options.signal?.throwIfAborted();
+						const { bytesRead } = await fh.read(buf, total, buf.length - total, null);
+						if (bytesRead === 0) break;
+						total += bytesRead;
+					}
+					if (total > MAX_V8_DIRECT_READ_BYTES) {
+						const delegatedPath = formatDelegatedReadPath(rawPath, readOptions);
+						if (delegatedPath === null) return "";
+						const res = await handleV8ToolCall("read", { path: delegatedPath }, options);
+						return isRecord(res) && typeof res.text === "string" ? res.text : String(res ?? "");
+					}
+					const data = buf.subarray(0, total);
+					if (data.subarray(0, 8192).includes(0)) {
+						const delegatedPath = formatDelegatedReadPath(rawPath, readOptions);
+						if (delegatedPath === null) return "";
+						const res = await handleV8ToolCall("read", { path: delegatedPath }, options);
+						return isRecord(res) && typeof res.text === "string" ? res.text : String(res ?? "");
+					}
+					text = data.toString("utf-8");
+				} finally {
+					await fh.close();
 				}
-				text = await file.text();
 			}
 		} catch (error) {
+			if (error instanceof ToolError) throw error;
 			throw new ToolError(
 				`Cannot read ${policy.normalized}: ${error instanceof Error ? error.message : String(error)}`,
 			);

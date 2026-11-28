@@ -426,7 +426,7 @@ jobs:
               "$loader" "$RUNNER_TEMP/smoke-addons.js" \
                 "$PWD/ci-natives/natives-linux-x64-baseline/pi_natives.linux-x64-baseline.node" \
                 "$PWD/ci-natives/natives-linux-x64-modern/pi_natives.linux-x64-modern.node"
-              if [ -x "$PWD/ci-natives/v8-eval-linux-x64/omp_v8_eval.linux-x64" ]; then
+              if [ -e "$PWD/ci-natives/v8-eval-linux-x64/omp_v8_eval.linux-x64" ]; then
                 printf '{"type":"init"}\n{"type":"close"}\n' | "$PWD/ci-natives/v8-eval-linux-x64/omp_v8_eval.linux-x64" --max-heap-mb 32 | grep -q '"ready"'
               fi
          # Only main saves: an entry saved on any other ref is readable by

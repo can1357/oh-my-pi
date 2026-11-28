@@ -16,6 +16,7 @@ import {
 import type { EvalTableColumn, EvalView } from "../../tools/details/eval";
 import { cfgEvalV8MaxHeapMb } from "../settings";
 import { updateEvalState } from "../state";
+import { readImageHeaderDimensions } from "../../utils/image-resize";
 import type { EvalDisplayOutput } from "../types";
 import { handleV8ToolCall, handleV8UrlRead, handleV8UrlWrite, type V8HostBridgeOptions } from "./host-bridge";
 import type { V8ErrorPayload, V8Inbound, V8Outbound } from "./protocol";
@@ -25,6 +26,7 @@ const V8_CANCEL_GRACE_MS = 250;
 const V8_CLOSE_TIMEOUT_MS = 1_000;
 const MAX_V8_INBOUND_FRAME_BYTES = 15 * 1024 * 1024;
 const MAX_V8_OUTBOUND_FRAME_BYTES = 16 * 1024 * 1024;
+const MAX_V8_INFLIGHT_BRIDGE_CALLS = 32;
 const ALLOWED_GUEST_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const activeV8BridgeSession = new AsyncLocalStorage<string>();
 export interface V8RunState {
@@ -513,6 +515,17 @@ async function dispatchBridgeRequest(
 		sendToV8(session, { type: "tool-reply", id: callId, ok: false, error: { message: "Run was interrupted" } });
 		return;
 	}
+	if (pending.toolCalls.size >= MAX_V8_INFLIGHT_BRIDGE_CALLS) {
+		sendToV8(session, {
+			type: "tool-reply",
+			id: callId,
+			ok: false,
+			error: toErrorPayload(
+				new ToolError(`Too many concurrent V8 bridge calls (limit ${MAX_V8_INFLIGHT_BRIDGE_CALLS})`),
+			),
+		});
+		return;
+	}
 
 	const ctrl = new AbortController();
 	pending.toolCalls.set(callId, ctrl);
@@ -773,12 +786,22 @@ function sanitizeGuestDisplayOutput(raw: unknown): EvalDisplayOutput | undefined
 		if (
 			typeof raw.data !== "string" ||
 			raw.data.length === 0 ||
+			raw.data.length > MAX_V8_OUTBOUND_FRAME_BYTES ||
 			typeof raw.mimeType !== "string" ||
 			!ALLOWED_GUEST_IMAGE_MIME_TYPES.has(raw.mimeType)
 		) {
 			return undefined;
 		}
-		return { type: "image", data: raw.data, mimeType: raw.mimeType };
+		const normalizedBase64 = raw.data.replace(/\s+/g, "");
+		if (!/^[A-Za-z0-9+/]+={0,2}$/.test(normalizedBase64) || normalizedBase64.length % 4 !== 0) {
+			return undefined;
+		}
+		const bytes = Buffer.from(normalizedBase64, "base64");
+		const header = readImageHeaderDimensions(bytes);
+		if (!header || header.mimeType !== raw.mimeType) {
+			return undefined;
+		}
+		return { type: "image", data: normalizedBase64, mimeType: raw.mimeType };
 	}
 	if (raw.type === "view") {
 		if (typeof raw.text !== "string") return undefined;
@@ -824,7 +847,7 @@ function encodeV8Frame(msg: V8Inbound): string {
 			id: msg.id,
 			ok: false,
 			error: {
-				name: msg.error.name,
+				...(msg.error.name ? { name: msg.error.name.slice(0, 256) } : {}),
 				message: `${msg.error.message.slice(0, 64 * 1024)}... [truncated]`,
 				isAbort: msg.error.isAbort,
 				isToolError: msg.error.isToolError,
@@ -832,6 +855,12 @@ function encodeV8Frame(msg: V8Inbound): string {
 		};
 		encoded = `${JSON.stringify(bounded)}\n`;
 		if (Buffer.byteLength(encoded, "utf8") <= MAX_V8_INBOUND_FRAME_BYTES) return encoded;
+		return `${JSON.stringify({
+			type: "tool-reply",
+			id: msg.id,
+			ok: false,
+			error: { message: "Tool error exceeded V8 bridge frame limit" },
+		})}\n`;
 	}
 	throw new ToolError("V8 inbound frame exceeds 15 MiB limit");
 }
@@ -854,6 +883,17 @@ function sendToV8(session: V8Session, msg: V8Inbound): void {
 		writeRawToV8(session, encodeV8Frame(msg));
 	} catch (err) {
 		logger.debug("v8 isolate stdin encode failed", { error: err instanceof Error ? err.message : String(err) });
+		if (msg.type === "tool-reply") {
+			writeRawToV8(
+				session,
+				`${JSON.stringify({
+					type: "tool-reply",
+					id: msg.id,
+					ok: false,
+					error: { message: "Tool reply could not be encoded for V8 bridge" },
+				})}\n`,
+			);
+		}
 	}
 }
 

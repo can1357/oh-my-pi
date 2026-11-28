@@ -1,3 +1,4 @@
+import * as fs from "node:fs/promises";
 import { ToolError } from "../tools/tool-errors";
 import { InternalUrlRouter } from "../internal-urls";
 import { sessionResolveContext } from "../internal-urls/context";
@@ -89,17 +90,37 @@ export async function prepareEvalSource(
 		}
 		filename = target.path;
 		try {
-			const fileHandle = Bun.file(filename);
-			const stat = await fileHandle.stat();
-			if (!stat.isFile()) {
-				throw new ToolError(`Cannot load eval script ${file}: target is not a file`);
+			const preStat = await fs.stat(filename);
+			if (!preStat.isFile()) {
+				throw new ToolError(`Cannot load eval script ${file}: target is not a regular file`);
 			}
-			if (stat.size > MAX_V8_LOAD_BYTES) {
+			if (preStat.size > MAX_V8_LOAD_BYTES) {
 				throw new ToolError(`Cannot load eval script ${file}: exceeds ${MAX_V8_LOAD_BYTES} byte limit`);
 			}
-			const code = await fileHandle.text();
-			throwIfAborted(signal);
-			return { code, filename };
+			const flags = fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0);
+			const fh = await fs.open(filename, flags);
+			try {
+				const fstat = await fh.stat();
+				if (!fstat.isFile()) {
+					throw new ToolError(`Cannot load eval script ${file}: target is not a regular file`);
+				}
+				const buf = Buffer.allocUnsafe(MAX_V8_LOAD_BYTES + 1);
+				let total = 0;
+				while (total <= MAX_V8_LOAD_BYTES) {
+					throwIfAborted(signal);
+					const { bytesRead } = await fh.read(buf, total, buf.length - total, null);
+					if (bytesRead === 0) break;
+					total += bytesRead;
+				}
+				if (total > MAX_V8_LOAD_BYTES) {
+					throw new ToolError(`Cannot load eval script ${file}: exceeds ${MAX_V8_LOAD_BYTES} byte limit`);
+				}
+				const code = buf.subarray(0, total).toString("utf-8");
+				throwIfAborted(signal);
+				return { code, filename };
+			} finally {
+				await fh.close();
+			}
 		} catch (error) {
 			if (error instanceof ToolError) throw error;
 			throw new ToolError(

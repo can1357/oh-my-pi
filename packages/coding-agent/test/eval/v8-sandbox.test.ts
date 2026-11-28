@@ -30,6 +30,7 @@ describe("V8 sandbox eval mode", () => {
 	let modelRegistry: ModelRegistry;
 	let originalAgentDir: string;
 	let ownerCounter = 0;
+	let schemeCounter = 0;
 
 	beforeAll(async () => {
 		root = TempDir.createSync("@omp-v8-sandbox-");
@@ -504,6 +505,7 @@ describe("V8 sandbox eval mode", () => {
 			for (const macroCode of [
 				`const m: string = ${JSON.stringify(macroMarker)};\nimport { writeFileSync } from "node:fs" with { type: "macro" };\nwriteFileSync(m, "pwned");`,
 				`const m: string = ${JSON.stringify(macroMarker)};\n{\nimport { writeFileSync } from "node:fs" with { type: "macro" };\nwriteFileSync(m, "pwned");\n}`,
+				'import fsMod = require("node:fs");\nfsMod;',
 			]) {
 				const macroRes = await h.evalWrapper.execute(
 					"v8-macro",
@@ -624,10 +626,15 @@ describe("V8 sandbox eval mode", () => {
 					language: "v8",
 					code: [
 						"const errs = [];",
+						"let leakedCtor = null;",
+						"const origReflectConstruct = Reflect.construct;",
+						"Reflect.construct = function (target, args, newTarget) { leakedCtor = target; return origReflectConstruct(target, args, newTarget); };",
 						"try { new ArrayBuffer(0, { maxByteLength: 1 << 30 }); } catch (e) { errs.push(e.name); }",
 						"try { new ((new Uint8Array(1)).buffer.constructor)(0, { maxByteLength: 1 << 30 }); } catch (e) { errs.push(e.name); }",
 						"try { new SharedArrayBuffer(0, { maxByteLength: 1 << 30 }); } catch (e) { errs.push(e.name); }",
-						"JSON.stringify({ errs, resize: typeof ArrayBuffer.prototype.resize, grow: typeof SharedArrayBuffer.prototype.grow });",
+						"new ArrayBuffer(8);",
+						"Reflect.construct = origReflectConstruct;",
+						"JSON.stringify({ errs, leakedNativeCtor: leakedCtor !== ArrayBuffer && leakedCtor !== null, resize: typeof ArrayBuffer.prototype.resize, grow: typeof SharedArrayBuffer.prototype.grow });",
 					].join("\n"),
 				},
 				undefined,
@@ -635,11 +642,16 @@ describe("V8 sandbox eval mode", () => {
 				h.context,
 			);
 			expect(rabRes.isError).toBeFalsy();
-			const rab = JSON.parse(resultText(rabRes).trim()) as { errs: string[]; resize: string; grow: string };
+			const rab = JSON.parse(resultText(rabRes).trim()) as {
+				errs: string[];
+				leakedNativeCtor: boolean;
+				resize: string;
+				grow: string;
+			};
 			expect(rab.errs).toEqual(["RangeError", "RangeError", "RangeError"]);
+			expect(rab.leakedNativeCtor).toBe(false);
 			expect(rab.resize).toBe("undefined");
 			expect(rab.grow).toBe("undefined");
-
 			// Guest image url/providerFile/detail spoofing is stripped and malformed view payloads are dropped.
 			const png1x1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 			const imgRes = await h.evalWrapper.execute(
@@ -651,14 +663,16 @@ describe("V8 sandbox eval mode", () => {
 						'  if (this && this.type === "image") {',
 						'    return { type: "image", data: this.data, mimeType: this.mimeType, detail: "original", url: "https://attacker.example/leak", providerFile: { provider: "openai", id: "file-1" } };',
 						"  }",
-						'  if (this && this.type === "view") {',
-						'    return { type: "view", text: "fallback-text", view: { kind: "table" } };',
+						'  if (this && this.type === "view" && typeof this.text === "string" && this.text.includes("fallback-text")) {',
+						'    return { type: "view", text: this.text, view: { kind: "table" } };',
 						"  }",
 						"  return this;",
 						"};",
 						"try {",
 						`  print({ type: "image", data: ${JSON.stringify(png1x1)}, mimeType: "image/png" });`,
-						'  print("{\\"a\\": 1, \\"b\\": 2, \\"c\\": \\"fallback-text\\"}");',
+						'  print({ type: "image", data: "bm90LWFuLWltYWdl", mimeType: "image/png" });',
+						'  print(JSON.stringify({ okView: "valid", pad: "x".repeat(90) }));',
+						'  print(JSON.stringify({ badView: "fallback-text", pad: "y".repeat(90) }));',
 						"} finally {",
 						"  delete Object.prototype.toJSON;",
 						"}",
@@ -675,13 +689,15 @@ describe("V8 sandbox eval mode", () => {
 			expect(images[0]).not.toHaveProperty("url");
 			expect(images[0]).not.toHaveProperty("providerFile");
 			expect(images[0]).not.toHaveProperty("detail");
-			expect(imgRes.details?.cells?.[0]?.views).toBeUndefined();
+			expect(imgRes.details?.cells?.[0]?.views).toHaveLength(1);
 			expect(resultText(imgRes)).toContain("fallback-text");
-
 			// Un-awaited host promise stored in persistent state is rejected when cell finishes.
 			const seedDangling = await h.evalWrapper.execute(
 				"v8-dangling-seed",
-				{ language: "v8", code: 'globalThis.dangling = read("local://does-not-exist.txt"); "seeded"' },
+				{
+					language: "v8",
+					code: 'globalThis.dangling = read("local://does-not-exist.txt"); globalThis.danglingFallback = globalThis.dangling.catch(() => read("local://fallback.txt")); "seeded"',
+				},
 				undefined,
 				undefined,
 				h.context,
@@ -691,15 +707,16 @@ describe("V8 sandbox eval mode", () => {
 				"v8-dangling-check",
 				{
 					language: "v8",
-					code: 'let msg = ""; try { await globalThis.dangling; } catch (e) { msg = e.message; } msg',
+					code: 'let msg = ""; let fbMsg = ""; try { await globalThis.dangling; } catch (e) { msg = e.message; } try { await globalThis.danglingFallback; } catch (e) { fbMsg = e.message; } JSON.stringify({ msg, fbMsg })',
 				},
 				undefined,
 				undefined,
 				h.context,
 			);
 			expect(checkDangling.isError).toBeFalsy();
-			expect(resultText(checkDangling)).toContain("V8 cell finished before host call settled");
-
+			const danglingOut = JSON.parse(resultText(checkDangling).trim()) as { msg: string; fbMsg: string };
+			expect(danglingOut.msg).toContain("V8 cell finished before host call settled");
+			expect(danglingOut.fbMsg).toContain("outside active V8 run");
 			// %load rejects virtual resources like history:// in V8 sandbox.
 			await expect(
 				h.evalWrapper.execute(
@@ -713,7 +730,7 @@ describe("V8 sandbox eval mode", () => {
 
 			// isDirectWritableV8Url requires tier === "read" even when policy === "allow".
 			const router = InternalUrlRouter.instance();
-			const testScheme = `v8testwrite${++ownerCounter}`;
+			const testScheme = `v8testwrite${++schemeCounter}`;
 			router.register({
 				scheme: testScheme,
 				spec: {
@@ -802,6 +819,55 @@ describe("V8 sandbox eval mode", () => {
 			c1Gate.resolve();
 			await Promise.all([c1, c3]);
 			expect(queueOrder).toEqual(["c1", "c3"]);
+
+			// Per-run bridge concurrency cap rejects excess calls cleanly without blocking admitted calls.
+			const floodGate = Promise.withResolvers<void>();
+			const floodSession: ToolSession = {
+				...queueHarnessSession,
+				getToolByName: name =>
+					name === "flood"
+						? ({
+								name: "flood",
+								label: "Flood",
+								description: "Flood",
+								parameters: {} as AgentTool["parameters"],
+								execute: async () => {
+									await floodGate.promise;
+									return { content: [{ type: "text", text: "admitted" }] };
+								},
+							} as unknown as AgentTool)
+						: queueHarnessSession.getToolByName?.(name),
+				getToolForEvalBridge: name => floodSession.getToolByName?.(name),
+			};
+			await executeInV8Isolate({
+				sessionKey,
+				sessionId,
+				ownerId: floodSession.getEvalKernelOwnerId!() ?? undefined,
+				session: floodSession,
+				code: `(async () => {
+					const ps = Array.from({ length: 35 }, () => tool.flood({}).then(() => "ok", e => e.message));
+					Promise.any(ps).then(() => print("flood-rejected"));
+					globalThis.floodResults = await Promise.all(ps);
+				})()`,
+				filename: "flood.js",
+				asyncWrapped: true,
+				runState: {
+					onText: chunk => {
+						if (chunk.includes("flood-rejected")) floodGate.resolve();
+					},
+				},
+			});
+			const floodVerify = await h.evalWrapper.execute(
+				"v8-flood-verify",
+				{ language: "v8", code: "JSON.stringify(globalThis.floodResults)" },
+				undefined,
+				undefined,
+				h.context,
+			);
+			expect(floodVerify.isError).toBeFalsy();
+			const floodResults = JSON.parse(resultText(floodVerify).trim()) as string[];
+			expect(floodResults.filter(r => r === "ok")).toHaveLength(32);
+			expect(floodResults.filter(r => r.includes("Too many concurrent V8 bridge calls"))).toHaveLength(3);
 		},
 	);
 });

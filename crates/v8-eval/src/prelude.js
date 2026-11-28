@@ -17,6 +17,8 @@
 
 	delete globalThis.WebAssembly;
 
+	const ReflectConstruct = Reflect.construct;
+	const ObjectDefineProperty = Object.defineProperty;
 	const guardBufferConstructor = (OrigCtor, label) => {
 		if (typeof OrigCtor !== "function") return OrigCtor;
 		const Guarded = new Proxy(OrigCtor, {
@@ -24,16 +26,16 @@
 				if (args.length > 1 && args[1] !== undefined) {
 					throw new RangeError(`${label} options (resizable/growable buffers) are not supported in V8 sandbox`);
 				}
-				return Reflect.construct(target, [args[0]], newTarget === Guarded ? target : newTarget);
+				return ReflectConstruct(target, [args[0]], newTarget === Guarded ? target : newTarget);
 			},
 		});
 		try {
-			Object.defineProperty(Guarded, Symbol.species, { get: () => Guarded, configurable: false });
+			ObjectDefineProperty(Guarded, Symbol.species, { get: () => Guarded, configurable: false });
 		} catch {
 			// Ignore if non-configurable.
 		}
 		if (OrigCtor.prototype) {
-			Object.defineProperty(OrigCtor.prototype, "constructor", {
+			ObjectDefineProperty(OrigCtor.prototype, "constructor", {
 				value: Guarded,
 				writable: false,
 				configurable: false,
