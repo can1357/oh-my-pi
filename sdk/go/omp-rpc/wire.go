@@ -8290,14 +8290,14 @@ type GetEntriesCommand struct {
 	Since *string `json:"since,omitempty"`
 }
 
-// GetEntries sends "get_entries": Read the append-history; with `since`, only entries strictly after that durable entry id.
+// GetEntries sends "get_entries": Read the append-history; with `since`, only entries strictly after that durable entry id. Entries carry the patched fields and list the `entry_patch` records; a caller that keeps entries applies only records from a later `since` read to them.
 func (c Commands) GetEntries(ctx context.Context, p GetEntriesCommand) (SessionEntries, error) {
 	var out SessionEntries
 	err := c.call(ctx, "get_entries", p, 0, &out)
 	return out, err
 }
 
-// GetTree sends "get_tree": Read the raw session tree.
+// GetTree sends "get_tree": Read the raw session tree; its nodes carry the patched fields and include the `entry_patch` records.
 func (c Commands) GetTree(ctx context.Context) (SessionTree, error) {
 	var out SessionTree
 	err := c.call(ctx, "get_tree", nil, 0, &out)
@@ -8378,7 +8378,7 @@ type GetSubagentMessagesCommand struct {
 	FromByte    *int64  `json:"fromByte,omitempty"`
 }
 
-// GetSubagentMessages sends "get_subagent_messages": Read a subagent transcript by id or registered session file (`subagentId` wins).
+// GetSubagentMessages sends "get_subagent_messages": Read a subagent transcript by id or registered session file (`subagentId` wins). Entries carry the fields the window's `entry_patch` records set and list those records; a caller applies them to entries it kept from earlier windows.
 func (c Commands) GetSubagentMessages(ctx context.Context, p GetSubagentMessagesCommand) (SubagentMessages, error) {
 	var out SubagentMessages
 	err := c.call(ctx, "get_subagent_messages", p, 0, &out)

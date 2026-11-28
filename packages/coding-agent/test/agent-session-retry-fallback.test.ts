@@ -9191,25 +9191,25 @@ describe("AgentSession retry fallback", () => {
 	});
 
 	describe("when a retry saga's session write throws", () => {
-		// Once SessionManager has recorded a disk failure (a full disk, an
-		// unwritable transcript), rewriteEntries rejects on every call, and a
-		// retry saga rewrites the attempts it annotates on its way out: the
-		// give-up after an exhausted budget and the close of a successful retry.
-		// The "rewrite" rows reproduce that failure. appendMessage records its
-		// own write failures instead of throwing, so the "error-turn" rows inject
-		// a throw there to cover every other exit of the saga. The saga must
-		// close anyway and publish the auto_retry_end its branch publishes when
-		// the write succeeds. Left open, the in-flight prompt() hangs behind the
-		// pending promise as in #5382, `isStreaming` stays true, and every later
-		// message, such as an extension's wake-up, is queued as a steer that
-		// never drains. A successful retry's prompt() is released elsewhere, but
-		// its subscribers never see the auto_retry_end that ends the saga.
+		// A retry saga annotates the attempts it retried on its way out (the
+		// give-up after an exhausted budget and the close of a successful retry)
+		// by appending one entry_patch record after setting the markers on the
+		// live entries. Appends record their own write failures instead of
+		// throwing, so the "record" rows inject a throw at that append, and the
+		// "error-turn" rows inject one at the append of an empty error turn, to
+		// cover every exit of the saga. The saga must close anyway and publish
+		// the auto_retry_end its branch publishes when the write succeeds. Left
+		// open, the in-flight prompt() hangs behind the pending promise as in
+		// #5382, `isStreaming` stays true, and every later message, such as an
+		// extension's wake-up, is queued as a steer that never drains. A
+		// successful retry's prompt() is released elsewhere, but its subscribers
+		// never see the auto_retry_end that ends the saga.
 		const transientError = "overloaded_error: provider returned error 503";
 		const delivery = "DELIVERY-1 from an extension";
 
 		type FailingWrite =
-			// The transcript rewrite that annotates the attempts the saga retried.
-			| "rewrite"
+			// The appended record that annotates the attempts the saga retried.
+			| "record"
 			// The append of an empty error turn.
 			| "error-turn"
 			// The same append, failing only once the saga announced its first
@@ -9247,10 +9247,12 @@ describe("AgentSession retry fallback", () => {
 			const { retryEndEvents } = trackRetryEvents(session);
 
 			let failedWrites = 0;
-			if (scenario.failingWrite === "rewrite") {
-				vi.spyOn(sessionManager, "rewriteEntries").mockImplementation(async () => {
+			if (scenario.failingWrite === "record") {
+				const appendCustomEntry = sessionManager.appendCustomEntry.bind(sessionManager);
+				vi.spyOn(sessionManager, "appendCustomEntry").mockImplementation((customType, data) => {
+					if (customType !== "entry_patch") return appendCustomEntry(customType, data);
 					failedWrites++;
-					throw new Error("EACCES: permission denied, open 'session.jsonl.tmp'");
+					throw new Error("EACCES: permission denied, open 'session.jsonl'");
 				});
 			} else {
 				let armed = scenario.failingWrite === "error-turn";
@@ -9273,6 +9275,19 @@ describe("AgentSession retry fallback", () => {
 			expect(session.isRetrying).toBe(false);
 			expect(session.isStreaming).toBe(false);
 			expect(retryEndEvents).toEqual([expect.objectContaining(scenario.end)]);
+			if (scenario.failingWrite === "record") {
+				// The markers stay set on the live attempts although their record failed to land.
+				expect(
+					sessionManager
+						.getEntries()
+						.some(
+							entry =>
+								entry.type === "message" &&
+								entry.message.role === "assistant" &&
+								entry.message.retryRecovery !== undefined,
+						),
+				).toBe(true);
+			}
 
 			const callsBeforeDelivery = mock.calls.length;
 			await session.sendCustomMessage(
@@ -9289,7 +9304,7 @@ describe("AgentSession retry fallback", () => {
 			await expectSagaClosesDespiteFailedWrite({
 				responses: [{ throw: transientError }, { throw: transientError }],
 				settings: { "retry.maxRetries": 1, "retry.modelFallback": false },
-				failingWrite: "rewrite",
+				failingWrite: "record",
 				end: { success: false, attempt: 1, finalError: transientError },
 			});
 		});
@@ -9298,7 +9313,7 @@ describe("AgentSession retry fallback", () => {
 			await expectSagaClosesDespiteFailedWrite({
 				responses: [{ throw: transientError }, { content: ["Recovered after one retry."] }],
 				settings: { "retry.maxRetries": 1, "retry.modelFallback": false },
-				failingWrite: "rewrite",
+				failingWrite: "record",
 				end: { success: true, attempt: 1 },
 			});
 		});

@@ -21,6 +21,7 @@ import {
 	resolveImageDataUrl,
 	resolveImageDataUrlSync,
 } from "./blob-store";
+import { applyEntryPatches } from "./entry-patches";
 import { buildSessionContext } from "./session-context";
 import type { FileEntry, RawFileEntry, SessionEntry, SessionHeader } from "./session-entries";
 import { migrateToCurrentVersion } from "./session-migrations";
@@ -162,7 +163,11 @@ function applyTitleSlot(entry: FileEntry | undefined, slot: SessionTitleUpdate |
 	}
 }
 
-/** Parse session JSONL while stripping and folding the optional fixed title slot. */
+/**
+ * Parse session JSONL while stripping and folding the optional fixed title slot.
+ * The entries are the lines as written: `entry_patch` records are among them,
+ * unapplied.
+ */
 export function parseSessionContent(content: string): SessionLoadResult {
 	const { body, slot } = splitTitleSlot(content);
 	let malformedRecords = 0;
@@ -209,7 +214,13 @@ export async function readSessionHeaderId(filePath: string): Promise<string | un
 	}
 }
 
-/** Parse session JSONL and visit each entry without retaining prior entries. */
+/**
+ * Parse session JSONL and visit each entry without retaining prior entries.
+ * Entries are visited as written: an `entry_patch` record is visited as an
+ * entry, and the fields it sets on an earlier entry are not set on it. A
+ * visitor that shows or derives from patched fields applies the records
+ * itself (`applyEntryPatches` of `./entry-patches`).
+ */
 export async function visitEntriesFromFileStream(
 	filePath: string,
 	visit: (entry: FileEntry) => void | boolean,
@@ -508,7 +519,13 @@ export async function hasFileAsPathComponent(filePath: string): Promise<boolean>
 	}
 }
 
-/** Load and validate a session while retaining malformed-record diagnostics. */
+/**
+ * Load and validate a session while retaining malformed-record diagnostics.
+ * The entries are the file's lines, raw: its `entry_patch` records are among
+ * them, unapplied. A caller that shows or derives from the entries migrates
+ * them, then calls `applyEntryPatches` (`./entry-patches`), as
+ * `loadSessionMessagesReadOnly` does.
+ */
 export async function loadSessionFile(
 	filePath: string,
 	storage: SessionStorage = new FileSessionStorage(),
@@ -547,7 +564,8 @@ export async function loadSessionFile(
 
 /**
  * Load the valid entries from a session file, skipping malformed records.
- * Each call returns freshly parsed entries owned by the caller.
+ * Each call returns freshly parsed entries owned by the caller, raw as
+ * {@link loadSessionFile} returns them: records unapplied.
  */
 export async function loadEntriesFromFile(
 	filePath: string,
@@ -559,7 +577,8 @@ export async function loadEntriesFromFile(
 
 /**
  * Visit session entries, using bounded streaming for large file-backed journals.
- * Small files and non-file backends keep the existing full-load path.
+ * Small files and non-file backends keep the existing full-load path. Entries
+ * are visited raw, as {@link visitEntriesFromFileStream} visits them.
  */
 export async function visitEntriesFromFile(
 	filePath: string,
@@ -734,16 +753,18 @@ export function resolveBlobRefsInEntriesSync(entries: FileEntry[], blobStore: Bl
 
 /**
  * Read-only transcript view of a session file: load entries, migrate to the
- * current version, resolve blob refs, and build the display transcript along
- * the persisted leaf path (last entry). Uses transcript mode (collapsed to the
- * latest compaction) so failed/aborted tail turns stay visible, unlike the
- * provider-context builder which drops them. Does NOT create a writer or take
- * the session lock — safe to call against a file another session is writing.
+ * current version, apply entry patch records, resolve blob refs, and build the
+ * display transcript along the persisted leaf path (last entry). Uses
+ * transcript mode (collapsed to the latest compaction) so failed/aborted tail
+ * turns stay visible, unlike the provider-context builder which drops them.
+ * Does NOT create a writer or take the session lock — safe to call against a
+ * file another session is writing.
  */
 export async function loadSessionMessagesReadOnly(filePath: string): Promise<AgentMessage[]> {
 	const entries = await loadEntriesFromFile(filePath);
 	if (entries.length === 0) return [];
 	migrateToCurrentVersion(entries);
+	applyEntryPatches(entries);
 	for (const entry of entries) repairTruncatedSnapcompactFrames(entry);
 	const blobs = new BlobStore(getBlobsDir());
 	const sessionEntries = entries.filter((e): e is SessionEntry => e.type !== "session");

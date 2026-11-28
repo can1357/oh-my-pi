@@ -1,8 +1,10 @@
+import { EntryPatchReplay } from "@oh-my-pi/pi-utils/entry-patches";
 import type { AgentSnapshot, SessionEntry, SubagentLifecyclePayload, SubagentProgressPayload } from "@oh-my-pi/pi-wire";
 import { OctagonX, RotateCcw, SendHorizontal, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 import type { GuestClient } from "../../lib/client";
+import { repaintPatchedRows, type TranscriptLine } from "../../lib/entry-patch-rows";
 import { fmtCost, fmtDuration, fmtTokens } from "../../lib/format";
 import { decideTranscriptPoll } from "../../lib/transcript-poll";
 import type { TranscriptProps } from "../transcript/Transcript";
@@ -42,8 +44,10 @@ export function AgentDrawer(props: {
 	}, [onClose]);
 
 	// Live transcript: poll the host-side session file while the drawer is
-	// open, appending parsed JSONL entries. State resets when the agent
-	// changes; the interval and any in-flight reply are dropped on cleanup.
+	// open, appending parsed JSONL entries. `entry_patch` records apply to the
+	// entries read so far, and an entry a record changed is shown again. State
+	// resets when the agent changes; the interval and any in-flight reply are
+	// dropped on cleanup.
 	// Once the agent is not running, no partial JSONL line is pending, and
 	// IDLE_POLLS_BEFORE_STOP consecutive polls find the file unchanged, the
 	// loop stops; host activity for the agent resumes it (effect below).
@@ -59,6 +63,7 @@ export function AgentDrawer(props: {
 		let cursor = 0;
 		let carry = "";
 		let acc: readonly SessionEntry[] = [];
+		const patches = new EntryPatchReplay<TranscriptLine>();
 		let idlePolls = 0;
 		let timer: Timer | null = null;
 		const stopPolling = () => {
@@ -73,7 +78,7 @@ export function AgentDrawer(props: {
 			try {
 				const reply = await client.fetchTranscript(agent.id, cursor);
 				if (disposed) return;
-				const decision = decideTranscriptPoll(reply, carry);
+				const decision = decideTranscriptPoll(reply, carry, patches);
 				switch (decision.action) {
 					case "retry":
 						return; // timeout/transient → keep polling from the same cursor
@@ -86,8 +91,9 @@ export function AgentDrawer(props: {
 						const grew = decision.newSize !== cursor;
 						cursor = decision.newSize;
 						carry = decision.carry;
-						if (decision.fresh.length > 0) {
-							acc = [...acc, ...decision.fresh];
+						if (decision.fresh.length > 0 || decision.changed.length > 0) {
+							const shown = decision.changed.length > 0 ? repaintPatchedRows(acc, decision.changed) : acc;
+							acc = [...shown, ...decision.fresh];
 							setEntries(acc);
 						}
 						idlePolls = grew || !quiescentRef.current ? 0 : idlePolls + 1;

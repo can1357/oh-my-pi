@@ -11,6 +11,7 @@ import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { isAdvisorTranscriptName } from "../advisor/transcript-names";
 import { getAgentTombstonePath } from "../registry/agent-tombstone";
+import { applyEntryPatches } from "./entry-patches";
 import { resolveSessionLeafId, type SessionEntry, type SessionHeader } from "./session-entries";
 import { loadSessionFile, parseSessionContent, type SessionLoadResult } from "./session-loader";
 
@@ -80,6 +81,7 @@ export async function collectSubSessions(
 		// Empty files load as [] and are skipped; a corrupt or missing header is reported so exports do
 		// not look complete while omitting the transcript.
 		if (!invalidHeader && fileEntries.length > 0) {
+			applyEntryPatches(fileEntries);
 			const header = (fileEntries.find(e => e.type === "session") as SessionHeader | undefined) ?? null;
 			const entries = fileEntries.filter((e): e is SessionEntry => e.type !== "session");
 			result[found.key] = {

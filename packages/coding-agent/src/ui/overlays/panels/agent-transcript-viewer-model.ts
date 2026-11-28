@@ -5,7 +5,9 @@
  * Local transcripts tail append-only growth: an unchanged file identity and
  * matching sentinel windows mean only new JSONL is parsed and appended; a
  * rewrite, truncation or rotation reloads the whole file. Remote (collab
- * guest) transcripts read the host's byte-capped increments. The message
+ * guest) transcripts read the host's byte-capped increments. The
+ * `entry_patch` records of every read apply to the entries of every read
+ * before it, and a message a later read patches is shown again. The message
  * draft revives a parked agent (or steers a live one) on send; advisors are
  * read-only.
  */
@@ -13,6 +15,7 @@ import type * as fs from "node:fs";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import { type Accessor, signal, untrack } from "@oh-my-pi/pi-tui";
 import { formatDuration, logger } from "@oh-my-pi/pi-utils";
+import { EntryPatchReplay } from "@oh-my-pi/pi-utils/entry-patches";
 import type { Settings } from "../../../config/settings";
 import { formatModelString } from "../../../config/model-resolver";
 import type { AgentHubRemote } from "../../../modes/view-model/overlays/agent-hub";
@@ -233,6 +236,10 @@ export class AgentTranscriptViewerModel {
 	#disposed = false;
 	/** The registry entry and progress last shown. */
 	#meta: string;
+	/** The messages shown, in transcript order. */
+	#shown: SessionMessageEntryLike[] = [];
+	/** Every entry read since the transcript was last read from its start, for the records of later reads. */
+	readonly #patches = new EntryPatchReplay<AgentTranscriptEntry>();
 
 	constructor(readonly deps: AgentTranscriptViewerDeps) {
 		this.revealEntry = deps.initialEntryId;
@@ -350,6 +357,7 @@ export class AgentTranscriptViewerModel {
 		this.#local = undefined;
 		this.#localUnavailable = reason;
 		this.model = undefined;
+		this.#patches.clear();
 		this.#rebuild([]);
 	}
 
@@ -405,7 +413,10 @@ export class AgentTranscriptViewerModel {
 			sentinels: sentinelsOf(data),
 		};
 		this.model = undefined;
-		this.#rebuild(this.#messages(this.deps.transcript.parseEntries(complete)));
+		this.#patches.clear();
+		const entries = this.deps.transcript.parseEntries(complete);
+		this.#patches.add(entries);
+		this.#rebuild(this.#messages(entries));
 	}
 
 	#appendLocal(file: string, stat: fs.Stats, state: LocalState, allowAsync: boolean): void {
@@ -425,9 +436,8 @@ export class AgentTranscriptViewerModel {
 		const { complete, pending } = splitComplete(state.pending + chunk);
 		this.#local = { ...state, size: stat.size, mtimeMs: stat.mtimeMs, pending, sentinels };
 		const previousModel = this.model;
-		const parsed = complete ? this.#messages(this.deps.transcript.parseEntries(complete)) : [];
-		if (parsed.length > 0) this.#append(parsed);
-		else if (this.model !== previousModel) this.touch();
+		const entries = complete ? this.deps.transcript.parseEntries(complete) : [];
+		if (!this.#showRead(entries) && this.model !== previousModel) this.touch();
 	}
 
 	#fetchRemote(): void {
@@ -462,6 +472,7 @@ export class AgentTranscriptViewerModel {
 					this.remoteError = "";
 					this.hasRemoteData = false;
 					this.model = undefined;
+					this.#patches.clear();
 					this.#rebuild([]);
 					this.#fetchRemote();
 					return;
@@ -471,14 +482,30 @@ export class AgentTranscriptViewerModel {
 				this.hasRemoteData = true;
 				const { complete } = splitComplete(result.text);
 				this.#remoteBytes = from + Buffer.byteLength(complete, "utf-8");
-				const parsed = complete ? this.#messages(this.deps.transcript.parseEntries(complete)) : [];
-				if (parsed.length > 0) this.#append(parsed);
-				else this.touch();
+				const entries = complete ? this.deps.transcript.parseEntries(complete) : [];
+				if (!this.#showRead(entries)) this.touch();
 			})
 			.catch((error: unknown) => {
 				if (token === this.#remoteToken) this.#remoteInFlight = false;
 				logger.warn("transcript viewer: remote fetch failed", { id: this.deps.agentId, error: String(error) });
 			});
+	}
+
+	/**
+	 * Show the entries of a read that follows the reads shown: append its
+	 * messages, or, when one of its records changed a message of an earlier
+	 * read, show every message again. Returns whether it showed anything.
+	 */
+	#showRead(entries: readonly AgentTranscriptEntry[]): boolean {
+		const patchedEarlier = this.#patches.add(entries).length > 0;
+		const messages = this.#messages(entries);
+		if (patchedEarlier) {
+			this.#rebuild([...this.#shown, ...messages]);
+			return true;
+		}
+		if (messages.length === 0) return false;
+		this.#append(messages);
+		return true;
 	}
 
 	/** Message entries, noting the model (the first reply's, a model change's). */
@@ -494,6 +521,7 @@ export class AgentTranscriptViewerModel {
 	}
 
 	#rebuild(entries: readonly SessionMessageEntryLike[]): void {
+		this.#shown = [];
 		this.#tools.clear();
 		this.#tally.reset();
 		this.#turnStartedAt = undefined;
@@ -504,6 +532,7 @@ export class AgentTranscriptViewerModel {
 	#append(entries: readonly SessionMessageEntryLike[]): void {
 		const added: ViewerBlock[] = [];
 		for (const entry of entries) {
+			this.#shown.push(entry);
 			const message = entry.message;
 			switch (message.role) {
 				case "user":

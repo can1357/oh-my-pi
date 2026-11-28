@@ -10,6 +10,11 @@ import random
 import time
 from typing import Any, Literal
 
+if __package__ in (None, ""):
+    from entry_patches import collect_entry_patches, last_target_lines, patch_entry
+else:
+    from .entry_patches import collect_entry_patches, last_target_lines, patch_entry
+
 LimitMode = Literal["calls", "events"]
 
 DEFAULT_MAX_ITEMS = 50_000
@@ -312,8 +317,16 @@ def extract_path(arguments: dict[str, Any]) -> str:
 
 
 def _iter_session_entries(session_file: Path) -> Iterator[dict[str, Any]]:
-    with session_file.open("r", encoding="utf-8") as handle:
-        for line in handle:
+    """The entries of `session_file`, each carrying the fields its `entry_patch` records set."""
+    with session_file.open("rb") as handle:
+        patches = collect_entry_patches(handle)
+        # When entries share an id, a record sets fields on the last of them only.
+        target_lines: dict[str, int] = {}
+        if patches:
+            handle.seek(0)
+            target_lines = last_target_lines(handle, patches)
+        handle.seek(0)
+        for line_no, line in enumerate(handle):
             line = line.strip()
             if not line:
                 continue
@@ -323,6 +336,8 @@ def _iter_session_entries(session_file: Path) -> Iterator[dict[str, Any]]:
                 continue
             payload = _as_record(entry)
             if payload is not None:
+                if patches:
+                    patch_entry(payload, patches, line_no=line_no, target_lines=target_lines)
                 yield payload
 
 

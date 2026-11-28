@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, AssistantRetryRecovery } from "@oh-my-pi/pi-ai";
 import { convertAnthropicMessages } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -10,10 +10,25 @@ import { CliUsageError } from "../src/cli/usage-error";
 import { collectPendingToolCalls } from "../src/session/exit-diagnostics";
 import { convertToLlm } from "../src/session/messages";
 import { SessionManager } from "../src/session/session-manager";
+import { FileSessionStorage } from "../src/session/session-storage";
 
 const SESSION = `${JSON.stringify({ type: "session", version: 3, id: "01a0c9ac", timestamp: "2026-10-01T00:00:00.000Z", cwd: "/tmp" })}
 ${JSON.stringify({ type: "message", id: "a1b2c3d4", parentId: null, timestamp: "2026-10-01T00:00:01.000Z", message: { role: "user", content: "keep me", timestamp: 1 } })}
 `;
+
+/** Role and content-block kinds of each message in a session's rebuilt model context. */
+type ContextShape = Array<{ role: string; blocks: string | string[] }>;
+
+function contextShape(session: SessionManager): ContextShape {
+	return session.buildSessionContext().messages.map(message => ({
+		role: message.role,
+		blocks: !("content" in message)
+			? []
+			: typeof message.content === "string"
+				? "string"
+				: message.content.map(block => block.type),
+	}));
+}
 
 describe("omp anonymize output", () => {
 	let tempDir: TempDir;
@@ -171,5 +186,108 @@ describe("omp anonymize output", () => {
 		const out = path.join(tempDir.path(), "out");
 		await runAnonymizeCommand({ session: link, out });
 		expect(await Array.fromAsync(new Bun.Glob("subagents/*.jsonl").scan(out))).toHaveLength(1);
+	});
+
+	// A session records a recovered retry (`retryRecovery`) as an appended `entry_patch` record. If this
+	// regresses, a reopened export shows the recovered turn as a plain failure and logs the record as
+	// malformed.
+	it("keeps a recovered retry that the session recorded as an appended record", async () => {
+		const assistant: Omit<AssistantMessage, "content" | "stopReason"> = {
+			role: "assistant",
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			timestamp: 1,
+			usage: {
+				input: 120,
+				output: 30,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 150,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+		};
+		const recovered: AssistantRetryRecovery = {
+			kind: "auto-retry",
+			status: "recovered",
+			attempt: 1,
+			recoveredAt: "2026-10-01T00:00:03.000Z",
+			recovery: "plain",
+			note: "error; retried",
+			supersededBy: { timestamp: 3, provider: "anthropic", model: "claude-sonnet-4-5" },
+		};
+		const writer = SessionManager.create(
+			tempDir.path(),
+			path.join(tempDir.path(), "sessions"),
+			new FileSessionStorage(),
+		);
+		let source: string | undefined;
+		try {
+			writer.appendMessage({ role: "user", content: "Update the invoice parser", timestamp: 1 });
+			const failedId = writer.appendMessage({
+				...assistant,
+				stopReason: "error",
+				errorMessage: "503 service unavailable: overloaded_error",
+				content: [{ type: "text", text: "partial answer" }],
+			});
+			writer.appendMessage({
+				...assistant,
+				stopReason: "toolUse",
+				content: [{ type: "toolCall", id: "toolu_01readabcdef", name: "read", arguments: { path: "billing.ts" } }],
+			});
+			writer.appendMessage({
+				role: "toolResult",
+				toolCallId: "toolu_01readabcdef",
+				toolName: "read",
+				content: [
+					{ type: "text", text: "export const customer = 'alice';" },
+					{ type: "text", text: "export const plan = 'gold';" },
+				],
+				isError: false,
+				timestamp: 2,
+			});
+			writer.appendMessage({ ...assistant, stopReason: "stop", content: [{ type: "text", text: "Updated." }] });
+			await writer.flush();
+			// What the end of a retry saga appends.
+			await writer.patchEntries([{ entryId: failedId, message: { retryRecovery: recovered } }]);
+			await writer.flush();
+			source = writer.getSessionFile();
+		} finally {
+			await writer.close();
+		}
+		if (!source) throw new Error("Expected a persisted session file");
+		const out = path.join(tempDir.path(), "out");
+		await runAnonymizeCommand({ session: source, out });
+
+		const original = await SessionManager.open(source, tempDir.path(), undefined, { suppressBreadcrumb: true });
+		let originalContext: ContextShape;
+		try {
+			originalContext = contextShape(original);
+		} finally {
+			await original.close();
+		}
+		const exported = await SessionManager.open(path.join(out, "session.jsonl"), tempDir.path(), undefined, {
+			initialCwd: tempDir.path(),
+			suppressBreadcrumb: true,
+		});
+		try {
+			const messages = exported.getEntries().flatMap(entry => (entry.type === "message" ? [entry.message] : []));
+			const failed = messages.find(message => message.role === "assistant" && message.stopReason === "error");
+			const context = [
+				{ role: "user", blocks: "string" },
+				{ role: "assistant", blocks: ["toolCall"] },
+				{ role: "toolResult", blocks: ["text", "text"] },
+				{ role: "assistant", blocks: ["text"] },
+			];
+			expect({
+				retryRecovery: failed?.role === "assistant" ? failed.retryRecovery : undefined,
+				context: { original: originalContext, exported: contextShape(exported) },
+			}).toEqual({
+				retryRecovery: expect.objectContaining({ kind: "auto-retry", status: "recovered", recovery: "plain" }),
+				context: { original: context, exported: context },
+			});
+		} finally {
+			await exported.close();
+		}
 	});
 });

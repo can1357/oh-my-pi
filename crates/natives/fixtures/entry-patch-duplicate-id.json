@@ -1,0 +1,29 @@
+{
+	"description": "A transcript whose two user messages share the id u1, with distinct text, and an entry_patch record for u1 between them. Every reader of a session file sets a record's fields on the last entry with the id it names: `reads` is the text of each u1 message, in file order, as every reader reads it. Read by crates/natives/src/transcripts.rs, packages/utils/test/entry-patches.test.ts, packages/stats/test/entry-patches.test.ts, packages/coding-agent/test/session/entry-patch-projections.test.ts and scripts/session-stats/test_sync.py.",
+	"lines": [
+		{ "type": "session", "version": 3, "id": "dup-session", "timestamp": "2026-11-20T10:00:00.000Z", "cwd": "/repo" },
+		{
+			"type": "message",
+			"id": "u1",
+			"parentId": null,
+			"timestamp": "2026-11-20T10:00:01.000Z",
+			"message": { "role": "user", "content": [{ "type": "text", "text": "first prompt" }], "timestamp": 1795168801000 }
+		},
+		{
+			"type": "custom",
+			"customType": "entry_patch",
+			"id": "p1",
+			"parentId": "u1",
+			"timestamp": "2026-11-20T10:00:02.000Z",
+			"data": { "patches": [{ "entryId": "u1", "message": { "content": [{ "type": "text", "text": "patched prompt text" }] } }] }
+		},
+		{
+			"type": "message",
+			"id": "u1",
+			"parentId": "p1",
+			"timestamp": "2026-11-20T10:00:03.000Z",
+			"message": { "role": "user", "content": [{ "type": "text", "text": "second prompt" }], "timestamp": 1795168803000 }
+		}
+	],
+	"reads": ["first prompt", "patched prompt text"]
+}

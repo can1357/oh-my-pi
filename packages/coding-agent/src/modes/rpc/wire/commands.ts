@@ -133,11 +133,15 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 	},
 	{
 		name: "get_entries",
-		doc: "Read the append-history; with `since`, only entries strictly after that durable entry id.",
+		doc: "Read the append-history; with `since`, only entries strictly after that durable entry id. Entries carry the patched fields and list the `entry_patch` records; a caller that keeps entries applies only records from a later `since` read to them.",
 		params: { "since?": "string" },
 		result: "SessionEntries",
 	},
-	{ name: "get_tree", doc: "Read the raw session tree.", result: "SessionTree" },
+	{
+		name: "get_tree",
+		doc: "Read the raw session tree; its nodes carry the patched fields and include the `entry_patch` records.",
+		result: "SessionTree",
+	},
 	{
 		name: "set_todos",
 		doc: "Replace the session's todo phases.",
@@ -182,7 +186,7 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 	},
 	{
 		name: "get_subagent_messages",
-		doc: "Read a subagent transcript by id or registered session file (`subagentId` wins).",
+		doc: "Read a subagent transcript by id or registered session file (`subagentId` wins). Entries carry the fields the window's `entry_patch` records set and list those records; a caller applies them to entries it kept from earlier windows.",
 		params: { "subagentId?": "string", "sessionFile?": "string", "fromByte?": "number.integer" },
 		result: "SubagentMessages",
 	},

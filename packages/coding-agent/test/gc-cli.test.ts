@@ -2015,6 +2015,108 @@ describe("runGcCommand cold-session archive", () => {
 		expect(offsets).toEqual([{ session_file: childPath, offset: childStat.size, last_modified: childStat.mtimeMs }]);
 	});
 
+	// A record sets the content of an assistant turn (its tool calls) after the line was written, and the stats
+	// ingest keys its tool_calls rows on the content the record set: the identity scans of the archived parent
+	// and the retained child must read that content too, or the row is pruned instead of moving to the child.
+	test("transfers a tool call row keyed on the content an entry_patch record set", async () => {
+		const sessionsDir = path.join(getSessionsDir(root), "project");
+		const archiveDir = path.join(root, "archive", "sessions", "project");
+		await fs.mkdir(sessionsDir, { recursive: true });
+		await fs.mkdir(archiveDir, { recursive: true });
+		const parentPath = path.join(sessionsDir, "20260625_parent.jsonl");
+		const childPath = path.join(sessionsDir, "20260726_child.jsonl");
+		const parentArchive = path.join(archiveDir, `${path.basename(parentPath)}.gz`);
+		const timestamp = "2026-06-25T12:00:00.000Z";
+		const timestampMs = Date.parse(timestamp);
+		const assistant = {
+			type: "message",
+			id: "assistant",
+			parentId: null,
+			timestamp,
+			message: { role: "assistant", content: [{ type: "toolCall", id: "first-call", name: "read", arguments: {} }] },
+		};
+		const record = {
+			type: "custom",
+			customType: "entry_patch",
+			id: "record",
+			parentId: "assistant",
+			timestamp,
+			data: {
+				patches: [
+					{
+						entryId: "assistant",
+						message: { content: [{ type: "toolCall", id: "patched-call", name: "read", arguments: {} }] },
+					},
+				],
+			},
+		};
+		await Bun.write(
+			parentArchive,
+			gzipSync(
+				[
+					JSON.stringify({ type: "session", version: 3, id: "parent", timestamp, cwd: "/tmp" }),
+					JSON.stringify(assistant),
+					JSON.stringify(record),
+					"",
+				].join("\n"),
+			),
+		);
+		await Bun.write(
+			childPath,
+			[
+				JSON.stringify({
+					type: "session",
+					version: 3,
+					id: "child",
+					timestamp,
+					cwd: "/tmp",
+					parentSession: parentPath,
+				}),
+				JSON.stringify(assistant),
+				JSON.stringify(record),
+				"",
+			].join("\n"),
+		);
+		const childStat = await fs.stat(childPath);
+
+		const statsDbPath = path.join(root, "stats.db");
+		const db = new Database(statsDbPath);
+		db.run(
+			"CREATE TABLE tool_calls (session_file TEXT NOT NULL, entry_id TEXT NOT NULL, timestamp INTEGER NOT NULL, tool_call_id TEXT NOT NULL, UNIQUE(session_file, tool_call_id))",
+		);
+		db.run(
+			"CREATE TABLE file_offsets (session_file TEXT PRIMARY KEY, offset INTEGER NOT NULL, last_modified INTEGER NOT NULL)",
+		);
+		// The row the stats ingest stored: keyed on the call the record set.
+		db.query("INSERT INTO tool_calls (session_file, entry_id, timestamp, tool_call_id) VALUES (?, ?, ?, ?)").run(
+			parentPath,
+			assistant.id,
+			timestampMs,
+			"patched-call",
+		);
+		const insertOffset = db.query("INSERT INTO file_offsets (session_file, offset, last_modified) VALUES (?, ?, ?)");
+		insertOffset.run(parentPath, 1, 1);
+		insertOffset.run(childPath, childStat.size, childStat.mtimeMs);
+		db.close();
+
+		const result = await runGcCommand({
+			flags: {
+				agentDir: root,
+				archive: true,
+				coldArchiveAfterDays: 30,
+				retainNewestGlobal: 0,
+				retainNewestPerCwd: 0,
+				apply: true,
+			},
+		});
+		const check = new Database(statsDbPath);
+		const toolCalls = check.query("SELECT session_file, entry_id, tool_call_id FROM tool_calls").all();
+		check.close();
+
+		expect(result.archive?.errors).toEqual([]);
+		expect(toolCalls).toEqual([{ session_file: childPath, entry_id: assistant.id, tool_call_id: "patched-call" }]);
+	}, 30_000);
+
 	test("prunes unbranched tool_approvals rows and transfers retained fork approvals on archive", async () => {
 		const projectDir = path.join(getSessionsDir(root), "project");
 		const unbranched = path.join(projectDir, "unbranched.jsonl");

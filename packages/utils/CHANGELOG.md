@@ -10,6 +10,8 @@
 ### Added
 
 - Added `getBunStubDir()` to expose the cache directory used for the `bun` executable stub in compiled applications.
+- Added `@oh-my-pi/pi-utils/entry-patches`, which applies a session transcript's `entry_patch` records for any reader of the file, whether it reads the whole file or reads it in windows, and skips a damaged record whole. It uses no Node API, so a browser bundle can use it; `cloneJsonTree` and `structuredCloneJSON` moved to `@oh-my-pi/pi-utils/json-clone` for the same reason and are still exported from the package root
+- Added `readFileRange(handle, start, end)`, which reads a byte range of an open file by position, so every read sees the file the handle opened
 
 ### Fixed
 

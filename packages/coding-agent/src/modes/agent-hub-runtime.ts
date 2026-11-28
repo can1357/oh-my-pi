@@ -1,8 +1,9 @@
 import * as fs from "node:fs";
+import { applyEntryPatches, isEntryPatchRecord } from "@oh-my-pi/pi-utils/entry-patches";
 import type { AgentHubRemote } from "./view-model/overlays/agent-hub";
 import type { AgentRecordLike } from "../registry/agent-hub-types";
 import { type AgentCostSnapshot, type AgentTreeSpend, aggregateCost } from "./view-model/overlays/agent-hub-projection";
-import type { AgentTranscriptSource } from "./view-model/overlays/agent-transcript-viewer";
+import type { AgentTranscriptEntry, AgentTranscriptSource } from "./view-model/overlays/agent-transcript-viewer";
 import type { ObservableSession, SessionObserverRegistry } from "../task/session-observer-registry";
 import { AgentActivityIndex } from "../activity";
 import { getRoleInfo } from "../config/model-roles";
@@ -11,18 +12,28 @@ import { IrcBus, type IrcBusApi } from "../irc/bus";
 import { type AgentLifecycleApi, AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { isSessionTreeRef, registerPersistedSubagents, sessionFileBelongsToRoot } from "../registry/persisted-agents";
+import { WINDOW_ENTRY_PATCH_HOOKS } from "../session/entry-patches";
 import { normalizeAssistantUsage, parseSessionEntries } from "../session/session-loader";
 import type { AgentHubProps } from "../ui/overlays/pickers/agent-hub";
 
-/** Filesystem and parser used by local and host-backed transcript viewers. */
+/**
+ * Filesystem and parser used by local and host-backed transcript viewers. The
+ * parser applies a read's `entry_patch` records to its entries and returns the
+ * records too, for the viewer to apply to entries of earlier reads.
+ */
 export const agentTranscriptSource: AgentTranscriptSource = {
 	fs,
 	parseEntries: text => {
-		const entries = parseSessionEntries(text).filter(
-			entry => entry.type === "message" || entry.type === "model_change",
-		);
-		for (const entry of entries) {
-			if (entry.type === "message" && entry.message.role === "assistant") normalizeAssistantUsage(entry.message);
+		const parsed = parseSessionEntries(text);
+		applyEntryPatches(parsed, WINDOW_ENTRY_PATCH_HOOKS);
+		const entries: AgentTranscriptEntry[] = [];
+		for (const entry of parsed) {
+			if (entry.type === "message") {
+				if (entry.message.role === "assistant") normalizeAssistantUsage(entry.message);
+				entries.push(entry);
+			} else if (entry.type === "model_change" || isEntryPatchRecord(entry)) {
+				entries.push(entry);
+			}
 		}
 		return entries;
 	},

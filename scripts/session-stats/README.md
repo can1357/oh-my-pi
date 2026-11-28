@@ -34,6 +34,14 @@ The sync is incremental: per-file `mtime`, `size`, `byte_offset`, and
 and only re-tokenize / re-classify what changed. A bump of `EDIT_PARSER_VERSION`
 in `sync.py` invalidates `ss_edit_*` rows on next sync.
 
+Rows carry the content a session's `entry_patch` records set, such as an elide
+pass's placeholders. When the new bytes hold a record that sets the content of
+an entry an earlier run stored, the re-run rebuilds that session's rows. A
+record sets fields on the last entry with the id it names, which can come after
+it: `ss_sessions.patch_targets` keeps the ids the records name, and a run that
+reads a new entry with one of them (the record's target, or a later entry that
+shares the id) rebuilds the rows.
+
 Tokenization is `o200k_base` (GPT-4o / GPT-5 family) via tiktoken — well
 within ~5–10% of Claude's BPE in aggregate.
 

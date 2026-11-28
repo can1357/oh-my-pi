@@ -14,6 +14,7 @@ import * as path from "node:path";
 import { pricingPeerFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { getBundledModel, type GeneratedProvider } from "@oh-my-pi/pi-catalog/models";
 import { getSessionsDir, isEnoent } from "@oh-my-pi/pi-utils";
+import { applyEntryPatches, isEntryPatchRecord } from "@oh-my-pi/pi-utils/entry-patches";
 import { initDb, isScheduledCatalogModel } from "./db";
 import { extractFolderFromPath, parseAllSessionEntries, resolveUsageTotal } from "./parser";
 import { getSessionRollups } from "./rollup";
@@ -35,7 +36,7 @@ export class TracePathError extends Error {}
  * span assembly changes so browsers don't revalidate stale cached bodies
  * against an unchanged transcript mtime.
  */
-export const TRACE_ETAG_VERSION = 6;
+export const TRACE_ETAG_VERSION = 7;
 
 const MAX_TRACK_DEPTH = 6;
 const LABEL_MAX = 80;
@@ -704,7 +705,10 @@ async function buildTrackTree(
 		throw err;
 	}
 
-	const scan = scanTranscript(parseAllSessionEntries(bytes), trackId, parentTrackId, file);
+	const entries = parseAllSessionEntries(bytes);
+	// Every span, label and marker reads the fields the transcript's `entry_patch` records set.
+	applyEntryPatches(entries);
+	const scan = scanTranscript(entries, trackId, parentTrackId, file);
 	out.push(scan.track);
 	scans.push(scan);
 
@@ -1120,7 +1124,11 @@ function assembleSessionTrace(
 	};
 }
 
-/** Fetch one full journal entry by id from a transcript, for the span drawer. */
+/**
+ * Fetch one full journal entry by id from a transcript, for the span drawer, carrying the fields its
+ * `entry_patch` records set. A record is no entry of the session: asked for a record's id, this finds
+ * nothing.
+ */
 export async function getTraceEntry(fileParam: string, entryId: string): Promise<SessionEntry | null> {
 	const resolved = resolveSessionPath(fileParam);
 	let bytes: Uint8Array;
@@ -1130,8 +1138,10 @@ export async function getTraceEntry(fileParam: string, entryId: string): Promise
 		if (isEnoent(err)) return null;
 		throw err;
 	}
-	for (const entry of parseAllSessionEntries(bytes)) {
-		if ("id" in entry && entry.id === entryId) return entry;
+	const entries = parseAllSessionEntries(bytes);
+	applyEntryPatches(entries);
+	for (const entry of entries) {
+		if (!isEntryPatchRecord(entry) && "id" in entry && entry.id === entryId) return entry;
 	}
 	return null;
 }

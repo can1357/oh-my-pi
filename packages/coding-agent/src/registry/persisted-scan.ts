@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { entryPatchesOf, isEntryPatchRecord, patchFitsMessageRole } from "@oh-my-pi/pi-utils/entry-patches";
 import { ADVISOR_TRANSCRIPT_FILENAME, isAdvisorTranscriptName } from "../advisor/transcript-names";
 import { resolveExplicitModelRole } from "../config/model-resolver";
 import { assistantTurnProducedOutput, usageContextTokens } from "../session/messages";
@@ -124,6 +125,16 @@ interface AssistantMetrics {
 	 * same verdict the session reached while running it.
 	 */
 	served: boolean;
+	/** The turn's stop reason, with which an `entry_patch` record's `content` recounts `tools` and `served`. */
+	stopReason: unknown;
+}
+
+/** What an assistant turn's `content` decides: its tool calls, and whether it produced output. */
+function contentMetrics(stopReason: unknown, content: readonly unknown[]): Pick<AssistantMetrics, "tools" | "served"> {
+	return {
+		tools: content.filter(part => recordOf(part)?.type === "toolCall").length,
+		served: assistantTurnProducedOutput({ stopReason, content } as Pick<AssistantMessage, "stopReason" | "content">),
+	};
 }
 
 function assistantMetrics(message: Record<string, unknown>): AssistantMetrics {
@@ -134,14 +145,11 @@ function assistantMetrics(message: Record<string, unknown>): AssistantMetrics {
 	const model = typeof message.model === "string" ? message.model : undefined;
 	return {
 		tokens: usageTokens(usage),
-		tools: content.filter(part => recordOf(part)?.type === "toolCall").length,
 		cost: finiteNumber(cost?.total),
 		contextTokens: usageContextTokens(usage) || undefined,
 		resolvedModel: provider && model ? `${provider}/${model}` : undefined,
-		served: assistantTurnProducedOutput({
-			stopReason: message.stopReason,
-			content,
-		} as Pick<AssistantMessage, "stopReason" | "content">),
+		...contentMetrics(message.stopReason, content),
+		stopReason: message.stopReason,
 	};
 }
 
@@ -210,6 +218,17 @@ async function readPersistedAgentHistory(
 						role: typeof record.role === "string" ? record.role : undefined,
 						resolvedModelIsFallback: record.resolvedModelIsFallback === true,
 					});
+					return;
+				}
+				if (isEntryPatchRecord(record)) {
+					// A record sets the content of a turn counted earlier (an elide pass's placeholder):
+					// its tool calls and output are counted from the content the record sets.
+					for (const patch of entryPatchesOf(record) ?? []) {
+						const content = patch.message?.content;
+						const assistant = assistantById.get(patch.entryId);
+						if (!assistant || !Array.isArray(content) || !patchFitsMessageRole(patch, "assistant")) continue;
+						Object.assign(assistant, contentMetrics(assistant.stopReason, content));
+					}
 					return;
 				}
 				if (record.type !== "message") return;

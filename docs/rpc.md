@@ -1121,11 +1121,22 @@ Subagent forwarding defaults to `"off"`. `set_subagent_subscription` selects:
 `sessionFile` (`subagentId` takes precedence); arbitrary file paths are rejected.
 `fromByte` supports incremental reads, defaults to zero, and is clamped to a
 non-negative integer. Non-finite values fail. The result contains `sessionFile`,
-`fromByte`, `nextByte`, `reset`, raw transcript `entries`, and `messages` from
+`fromByte`, `nextByte`, `reset`, transcript `entries`, and `messages` from
 message entries. Only complete newline-terminated records are consumed; reuse
 `nextByte` on the next request. A missing transcript returns empty arrays.
 If `fromByte` exceeds the current file size, reading restarts at byte zero and
 reports `reset: true`.
+Entries and messages already carry the fields set by `entry_patch` records in
+the same read. A record whose target lies before `fromByte` stays in `entries`
+unapplied; its `data.patches` name the fields for the client to set on the
+entries it kept from earlier reads.
+`get_entries` and `get_tree` return the manager's live entries, which already
+carry the patched fields, and list the session's records among them (a record
+loaded at resume, fork or adoption has its payload emptied). A client that
+keeps entries applies only the records a later `since` read returns to them,
+never the records of the read that returned the entries: replaying an older
+record can undo a later change only a full rewrite persisted, such as images an
+image drop removed from an elided result.
 
 ### Cancelling subagents
 

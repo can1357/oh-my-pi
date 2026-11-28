@@ -5,11 +5,17 @@ import type { Message } from "@oh-my-pi/pi-ai";
 import { textContent } from "./transcript/transcript-entry";
 import type { SessionListing } from "../modes/view-model/overlays/session-selector";
 import { getSessionsDir } from "@oh-my-pi/pi-utils/dirs";
+import {
+	applyEntryPatches,
+	type EntryPatchRecord,
+	entryPatchRecordsIn,
+	isEntryPatchRecord,
+} from "@oh-my-pi/pi-utils/entry-patches";
 import { hasFsCode, isEacces, isEnoent, isEnotdir } from "@oh-my-pi/pi-utils/fs-error";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { parseJsonlLenient } from "@oh-my-pi/pi-utils/stream";
-import { toError } from "@oh-my-pi/pi-utils/type-guards";
+import { isRecord, toError } from "@oh-my-pi/pi-utils/type-guards";
 import { EVAL_STATE_CONTEXT_TYPE } from "../eval/state";
 import { parseSessionOrigin, type SessionOrigin } from "./session-entries";
 import { visitEntriesFromFile } from "./session-loader";
@@ -167,33 +173,43 @@ export function sessionDisplayName(info: SessionInfo): string {
  * Derive a {@link SessionStatus} from a tail window of a session file. Entries are
  * newline-terminated on write, so within the window only the first line can be a
  * partial fragment — it simply fails to parse and is skipped. We walk backwards to
- * the last `message` entry and classify by its role / stop reason.
+ * the last `message` entry and classify by its role / stop reason, with the fields
+ * the `entry_patch` records after it set on it (an elided reply's content).
  */
 function deriveSessionStatus(suffix: string): SessionStatus {
 	if (!suffix) return "unknown";
 	const lines = suffix.split("\n");
+	// Records after the last message, newest first: only they can name it.
+	const later: EntryPatchRecord[] = [];
 	for (let i = lines.length - 1; i >= 0; i--) {
 		const line = lines[i];
 		// Every persisted entry is `JSON.stringify(obj)` → starts with `{`. This
 		// cheaply rejects blank lines and the leading partial fragment without
 		// attempting to parse a multi-KB tail of a truncated line.
 		if (line.charCodeAt(0) !== 123) continue;
-		let entry: { type?: string; message?: TailMessage };
+		let entry: unknown;
 		try {
 			entry = JSON.parse(line);
 		} catch {
 			continue;
 		}
-		if (entry.type === "message" && entry.message) {
+		if (!isRecord(entry)) continue;
+		if (isEntryPatchRecord(entry)) {
+			later.push(entry);
+			continue;
+		}
+		if (entry.type === "message" && isRecord(entry.message)) {
+			if (later.length > 0) applyEntryPatches<object>([entry, ...later.reverse()]);
 			return statusFromTailMessage(entry.message);
 		}
 	}
 	return "unknown";
 }
 
+/** The fields of a parsed tail message the status reads; any may hold any JSON value. */
 interface TailMessage {
-	role?: string;
-	stopReason?: string;
+	role?: unknown;
+	stopReason?: unknown;
 	content?: unknown;
 }
 
@@ -304,24 +320,33 @@ function countAssistantMarkers(content: string): number {
 	return countRoleMarkers(content, "assistant");
 }
 
+/** A complete `message` record line of a user or assistant turn. */
+interface TurnRecord {
+	type: "message";
+	id?: unknown;
+	message: Message;
+}
+
 /**
- * The message of a complete `message` record line when it is a user or
- * assistant turn. JSON escapes quotes inside strings, so a bare `"user"` or
+ * The complete `message` record of `line` when it is a user or assistant
+ * turn. JSON escapes quotes inside strings, so a bare `"user"` or
  * `"assistant"` can only be a key or value: lines without either skip the
  * parse, and large non-turn records (memory recall, tool results) cost one
  * substring scan. Malformed or partial lines return undefined.
  */
-function parseTurnLine(line: string): Message | undefined {
+function parseTurnLine(line: string): TurnRecord | undefined {
 	if (!line.includes('"user"') && !line.includes('"assistant"')) return undefined;
-	let record: { type?: unknown; message?: Message };
+	let record: { type?: unknown; id?: unknown; message?: Message };
 	try {
 		record = JSON.parse(line);
 	} catch {
 		return undefined;
 	}
-	if (record.type !== "message") return undefined;
-	const role = record.message?.role;
-	return role === "user" || role === "assistant" ? record.message : undefined;
+	if (record.type !== "message" || !record.message) return undefined;
+	const role = record.message.role;
+	return role === "user" || role === "assistant"
+		? { type: "message", id: record.id, message: record.message }
+		: undefined;
 }
 
 function extractFirstDisplayMessageFromPrefix(content: string): string | undefined {
@@ -431,7 +456,11 @@ function getSessionListWorkerCount(fileCount: number): number {
 /**
  * Scan a single session file into a {@link SessionInfo}. Reads the 4 KB
  * prefix, plus the 32 KB tail when `withStatus` is set; a record the windows
- * miss is recovered by one {@link SessionStorage.scanLines} pass.
+ * miss is recovered by one {@link SessionStorage.scanLines} pass. The
+ * `entry_patch` records the two windows hold apply to the prefix's entries, so
+ * a prompt an elide pass shortened previews and searches as the placeholder;
+ * a record between the windows is not read. The scan pass, when it finds the
+ * prompt, reads on to the end for the records that name it.
  */
 async function scanSessionFile(
 	file: string,
@@ -462,6 +491,9 @@ async function scanSessionFile(
 		);
 		const { size, mtime } = stat;
 		const entries = parseJsonlLenient<Record<string, unknown>>(content);
+		// The prefix's own records, then the tail's, in file order: a tail that overlaps the prefix repeats some, which changes nothing.
+		const tailRecords = entryPatchRecordsIn(suffix);
+		applyEntryPatches<object>(tailRecords.length > 0 ? [...entries, ...tailRecords] : entries);
 		const header = parseSessionListHeader(content, entries);
 		if (!header) {
 			// Cache the negative result too: an unparseable file stays unparseable
@@ -509,25 +541,38 @@ async function scanSessionFile(
 		let needPrompt = !firstMessage;
 		let needTurn = assistantTurns === 0;
 		if ((needPrompt || needTurn) && size > SESSION_LIST_PREFIX_BYTES && storage.scanLines) {
+			// The prompt the scan found, and the records after it, which may set its content.
+			let prompt: TurnRecord | undefined;
+			const records: EntryPatchRecord[] = [];
 			try {
 				await storage.scanLines(file, line => {
-					const message = parseTurnLine(line);
-					if (message?.role === "assistant" && needTurn) {
+					if (prompt) {
+						records.push(...entryPatchRecordsIn(line));
+						if (!needTurn) return false;
+					}
+					const turn = parseTurnLine(line);
+					if (turn?.message.role === "assistant" && needTurn) {
 						assistantTurns = 1;
 						needTurn = false;
-					} else if (message?.role === "user" && needPrompt) {
-						// Cap at what a prompt read from the prefix could hold.
-						const text = textContent(message.content, " ").slice(0, SESSION_LIST_PREFIX_BYTES);
-						if (text) {
-							firstMessage = text;
-							allMessages.unshift(text);
-							needPrompt = false;
-						}
+					} else if (turn?.message.role === "user" && needPrompt && textContent(turn.message.content, " ")) {
+						prompt = turn;
+						needPrompt = false;
 					}
-					return !needPrompt && !needTurn;
+					// Past a prompt found here, read on to the end: a record that names it can follow anywhere.
+					return !needPrompt && !needTurn && !prompt;
 				});
 			} catch {
 				// Backend unreadable: keep the bounded-window evidence.
+			}
+			if (prompt) {
+				// The tail's records last: they are the file's newest, so their values win.
+				applyEntryPatches<object>([prompt, ...records, ...tailRecords]);
+				// Cap at what a prompt read from the prefix could hold.
+				const text = textContent(prompt.message.content, " ").slice(0, SESSION_LIST_PREFIX_BYTES);
+				if (text) {
+					firstMessage = text;
+					allMessages.unshift(text);
+				}
 			}
 		}
 		firstMessage ||= extractFirstDisplayMessageFromPrefix(content) ?? "";

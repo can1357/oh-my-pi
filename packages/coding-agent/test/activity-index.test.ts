@@ -2,10 +2,20 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { AgentActivityIndex, activityRowsFromProgress } from "../src/activity";
+import { AgentActivityIndex, type AgentActivityRow, activityRowsFromProgress } from "../src/activity";
 
 function messageEntry(id: string, timestamp: number, message: Record<string, unknown>): string {
 	return JSON.stringify({ type: "message", id, timestamp, message: { timestamp, ...message } });
+}
+
+/** An `entry_patch` record that sets the content of the turn `entryId` to one text block. */
+function textPatchRecord(id: string, entryId: string, text: string): string {
+	return JSON.stringify({
+		type: "custom",
+		customType: "entry_patch",
+		id,
+		data: { patches: [{ entryId, message: { content: [{ type: "text", text }] } }] },
+	});
 }
 
 describe("AgentActivityIndex", () => {
@@ -212,5 +222,108 @@ describe("AgentActivityIndex", () => {
 		expect(rows).toHaveLength(256);
 		expect(rows[0]?.summary).toBe("answer 744");
 		expect(rows.at(-1)?.summary).toBe("answer 999");
+	});
+
+	// A record can give a turn read earlier a row, so the index keeps what showing a turn's rows takes.
+	// Turns that show no row (thinking only, or empty) add no row to the bound on rows: without a bound
+	// of their own, an agent's index grows with every such turn its transcript holds.
+	it("keeps a bounded number of turns that show no row, and applies a record to a recent one", async () => {
+		using tempDir = TempDir.createSync("@activity-index-rowless-");
+		const sessionFile = path.join(tempDir.path(), "worker.jsonl");
+		const visible = [
+			messageEntry("answer", 1_000, { role: "assistant", content: [{ type: "text", text: "First answer" }] }),
+			messageEntry("call", 1_001, {
+				role: "assistant",
+				content: [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "src/a.ts" } }],
+			}),
+			messageEntry("result", 1_002, {
+				role: "toolResult",
+				toolCallId: "call-1",
+				toolName: "read",
+				content: [{ type: "text", text: "ok" }],
+			}),
+		];
+		await Bun.write(sessionFile, `${visible.join("\n")}\n`);
+		const activity = new AgentActivityIndex();
+		await activity.sync("Worker", sessionFile);
+		type ShownRow = Pick<AgentActivityRow, "kind" | "summary" | "status">;
+		const rows = (): ShownRow[] =>
+			activity.query().map(row => ({ kind: row.kind, summary: row.summary, status: row.status }));
+		const shown: ShownRow[] = [
+			{ kind: "response", summary: "First answer", status: "success" },
+			{ kind: "tool", summary: "src/a.ts", status: "success" },
+		];
+		expect(rows()).toEqual(shown);
+
+		// Ten reads, each of 256 turns that show no row: thinking only, or empty.
+		for (let read = 0; read < 10; read++) {
+			const lines = Array.from({ length: 256 }, (_, n) => {
+				const turn = read * 256 + n;
+				const content = turn % 2 === 0 ? [{ type: "thinking", thinking: `step ${turn}` }] : [];
+				return messageEntry(`quiet-${turn}`, 2_000 + turn, { role: "assistant", content });
+			});
+			await fs.appendFile(sessionFile, `${lines.join("\n")}\n`);
+			await activity.sync("Worker", sessionFile);
+			// The two turns that show a row, and at most 256 that show none.
+			expect(activity.retainedTurns("Worker")).toBeLessThanOrEqual(2 + 256);
+		}
+		expect(rows()).toEqual(shown);
+
+		await fs.appendFile(sessionFile, `${textPatchRecord("p1", "quiet-2559", "Late answer")}\n`);
+		await activity.sync("Worker", sessionFile);
+		expect(rows()).toEqual([...shown, { kind: "response", summary: "Late answer", status: "success" }]);
+
+		// The turns that show a row are kept however many quiet turns followed them.
+		await fs.appendFile(sessionFile, `${textPatchRecord("p2", "answer", "ELIDEDMARK answer")}\n`);
+		await activity.sync("Worker", sessionFile);
+		expect(rows()).toEqual([
+			{ kind: "response", summary: "ELIDEDMARK answer", status: "success" },
+			...shown.slice(1),
+			{ kind: "response", summary: "Late answer", status: "success" },
+		]);
+	});
+
+	// A record can come before the turn it names, so the index holds what it set until the turn is read.
+	// Most such turns never arrive (the record names a tool result, or a turn before the read began):
+	// without a bound of their own, an agent's index grows with every such record.
+	it("keeps a bounded number of records for turns not read yet, and applies a recent one once its turn is read", async () => {
+		using tempDir = TempDir.createSync("@activity-index-early-");
+		const sessionFile = path.join(tempDir.path(), "worker.jsonl");
+		const answer = messageEntry("answer", 1_000, { role: "assistant", content: "First answer" });
+		await Bun.write(sessionFile, `${answer}\n`);
+		const activity = new AgentActivityIndex();
+		await activity.sync("Worker", sessionFile);
+
+		// Ten reads, each of 256 records for turns that never arrive.
+		for (let read = 0; read < 10; read++) {
+			const lines = Array.from({ length: 256 }, (_, n) => {
+				const record = read * 256 + n;
+				return textPatchRecord(`p${record}`, `elsewhere-${record}`, `placeholder ${record}`);
+			});
+			await fs.appendFile(sessionFile, `${lines.join("\n")}\n`);
+			await activity.sync("Worker", sessionFile);
+			expect(activity.retainedContentBeforeTurn("Worker")).toBeLessThanOrEqual(256);
+		}
+
+		await fs.appendFile(sessionFile, `${textPatchRecord("p-late", "late", "ELIDEDMARK answer")}\n`);
+		await activity.sync("Worker", sessionFile);
+		const late = messageEntry("late", 3_000, { role: "assistant", content: "HEAVYMARK answer" });
+		await fs.appendFile(sessionFile, `${late}\n`);
+		await activity.sync("Worker", sessionFile);
+		expect(activity.query().map(row => row.summary)).toEqual(["First answer", "ELIDEDMARK answer"]);
+	});
+
+	// A first read can show no row (a prompt, no response yet); the next read starts at a line boundary, and its
+	// first line is the response the panel must show.
+	it("shows the first response a later sync reads when the transcript had no rows yet", async () => {
+		using tempDir = TempDir.createSync("@activity-index-no-rows-");
+		const sessionFile = path.join(tempDir.path(), "worker.jsonl");
+		await Bun.write(sessionFile, `${messageEntry("u1", 1_000, { role: "user", content: "Do the task" })}\n`);
+		const activity = new AgentActivityIndex();
+		await activity.sync("Worker", sessionFile);
+		expect(activity.query()).toEqual([]);
+		await fs.appendFile(sessionFile, `${messageEntry("a1", 2_000, { role: "assistant", content: "Task done" })}\n`);
+		await activity.sync("Worker", sessionFile);
+		expect(activity.query().map(row => row.summary)).toEqual(["Task done"]);
 	});
 });

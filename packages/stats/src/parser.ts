@@ -14,7 +14,16 @@ import {
 	type Usage,
 } from "@oh-my-pi/pi-ai";
 import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
-import { getSessionsDir, isEnoent, readLines } from "@oh-my-pi/pi-utils";
+import { getSessionsDir, isEnoent, readFileRange, readLines } from "@oh-my-pi/pi-utils";
+import {
+	type EntryPatch,
+	entryAcceptsPatch,
+	entryPatchesOf,
+	entryPatchMarkerAt,
+	entryPatchTargetId,
+	isEntryPatchRecord,
+	setPatchedFields,
+} from "@oh-my-pi/pi-utils/entry-patches";
 import type {
 	AgentType,
 	MessageStatsInput,
@@ -575,7 +584,11 @@ function parseJsonLine(bytes: Uint8Array, start: number, end: number): SessionEn
 	}
 }
 
-function visitSessionEntriesLenient(bytes: Uint8Array, visit: (entry: SessionEntry) => void): number {
+/**
+ * Visit each well-formed entry of `bytes` with the offset of its line. Returns the bytes read: a last line
+ * without a newline counts only when it parses.
+ */
+function visitSessionEntriesLenient(bytes: Uint8Array, visit: (entry: SessionEntry, at: number) => void): number {
 	let cursor = 0;
 	let read = 0;
 
@@ -585,7 +598,7 @@ function visitSessionEntriesLenient(bytes: Uint8Array, visit: (entry: SessionEnt
 		const lineEnd = hasNewline ? newline : bytes.length;
 		const entry = parseJsonLine(bytes, cursor, lineEnd);
 		if (entry) {
-			visit(entry);
+			visit(entry, cursor);
 			read = hasNewline ? newline + 1 : lineEnd;
 		} else if (hasNewline) {
 			read = newline + 1;
@@ -598,11 +611,136 @@ function visitSessionEntriesLenient(bytes: Uint8Array, visit: (entry: SessionEnt
 	return read;
 }
 
-/** Parse every well-formed entry in a transcript buffer (malformed lines skipped). */
+/**
+ * Parse every well-formed entry in a transcript buffer (malformed lines skipped), raw: its
+ * `entry_patch` records are among the entries, and the fields they set on earlier entries are not
+ * set. A reader that shows or derives from the entries applies the records first (`applyEntryPatches`
+ * of `@oh-my-pi/pi-utils/entry-patches`), as the trace does.
+ */
 export function parseAllSessionEntries(bytes: Uint8Array): SessionEntry[] {
 	const entries: SessionEntry[] = [];
 	visitSessionEntriesLenient(bytes, entry => entries.push(entry));
 	return entries;
+}
+
+/** Patches of a transcript's `entry_patch` records, by the id of the entry each names, in file order. */
+type EntryPatchesById = Map<string, EntryPatch[]>;
+
+/** The patches of `entry` when it is a well-formed `entry_patch` record. */
+function recordPatches(entry: SessionEntry): readonly EntryPatch[] {
+	if (!isEntryPatchRecord(entry)) return [];
+	return entryPatchesOf(entry) ?? [];
+}
+
+/** The patches of the `entry_patch` records in `bytes`, parsing only the lines that hold a record's marker. */
+function collectEntryPatches(bytes: Uint8Array): EntryPatchesById {
+	const byId: EntryPatchesById = new Map();
+	let at = entryPatchMarkerAt(bytes);
+	while (at !== -1) {
+		const newline = bytes.indexOf(LF, at);
+		const entry = parseJsonLine(bytes, bytes.lastIndexOf(LF, at) + 1, newline === -1 ? bytes.length : newline);
+		for (const patch of entry ? recordPatches(entry) : []) {
+			const held = byId.get(patch.entryId);
+			if (held) held.push(patch);
+			else byId.set(patch.entryId, [patch]);
+		}
+		at = newline === -1 ? -1 : entryPatchMarkerAt(bytes, newline + 1);
+	}
+	return byId;
+}
+
+/**
+ * The patches a read applies ({@link EntryPatchesById}), with the offset, in the bytes the read collected
+ * them from, of the line of the entry each id names. When entries share an id, a record sets fields on the
+ * last of them only, as `applyEntryPatches` of `@oh-my-pi/pi-utils/entry-patches` decides.
+ */
+interface EntryPatches {
+	byId: EntryPatchesById;
+	targetAt: Map<string, number>;
+}
+
+/** Bytes of the key that names an entry's id on its line, as JSON writes it. */
+const ID_KEY = Buffer.from('"id":');
+const QUOTE = 0x22;
+const BACKSLASH = 0x5c;
+const OPEN_BRACE = 0x7b;
+const OPEN_BRACKET = 0x5b;
+
+/**
+ * Whether the line `start`..`end` of `text`, whose first {@link ID_KEY} is at `key`, can be an entry
+ * whose id `byId` holds. Not when that key is the line's own, nothing before it opening a nested value,
+ * and its value is a plain string `byId` does not hold; any other line is parsed to tell.
+ */
+function mayNameTarget(text: Buffer, start: number, key: number, end: number, byId: EntryPatchesById): boolean {
+	if (text[start] !== OPEN_BRACE) return true;
+	for (let at = start + 1; at < key; at++) if (text[at] === OPEN_BRACE || text[at] === OPEN_BRACKET) return true;
+	let value = key + ID_KEY.length;
+	while (value < end && (text[value] === 0x20 || text[value] === 0x09)) value++;
+	if (text[value] !== QUOTE) return true;
+	const close = text.indexOf(QUOTE, value + 1);
+	if (close === -1 || close >= end || text.subarray(value + 1, close).indexOf(BACKSLASH) !== -1) return true;
+	return byId.has(text.toString("utf8", value + 1, close));
+}
+
+/**
+ * {@link EntryPatches} of `byId`, the patches of the records in `bytes`. Only a line that holds
+ * {@link ID_KEY} names an id, and only the lines that can be a target ({@link mayNameTarget}) are parsed:
+ * the targets, and the lines whose id comes after a nested value (a `custom` entry writes its `data`
+ * first). A message's line names its id before its message, so no message but a target is parsed again.
+ */
+function entryPatches(bytes: Uint8Array, byId: EntryPatchesById): EntryPatches {
+	const targetAt = new Map<string, number>();
+	if (byId.size === 0) return { byId, targetAt };
+	const text = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	let key = text.indexOf(ID_KEY);
+	while (key !== -1) {
+		const start = text.lastIndexOf(LF, key) + 1;
+		const newline = text.indexOf(LF, key);
+		const end = newline === -1 ? text.length : newline;
+		if (mayNameTarget(text, start, key, end, byId)) {
+			const entry = parseJsonLine(text, start, end);
+			const id = entry ? entryPatchTargetId(entry) : undefined;
+			if (id !== undefined && byId.has(id)) targetAt.set(id, start);
+		}
+		key = newline === -1 ? -1 : text.indexOf(ID_KEY, newline + 1);
+	}
+	return { byId, targetAt };
+}
+
+/** Set on `entry` the fields of each of `patches` that fits it, in file order, so the newest value of a field wins. */
+function setFieldsOf(entry: SessionEntry, patches: readonly EntryPatch[]): void {
+	for (const patch of patches) if (entryAcceptsPatch(entry, patch)) setPatchedFields(entry, patch);
+}
+
+/**
+ * Set on `entry`, whose line starts at `at` in the bytes `patches` were collected from, the fields its
+ * records set, when it is the entry they name: the last entry with its id. An id no line was found for (a
+ * key written another way) leaves each entry with it its records. Returns its id when they are set.
+ */
+function patchEntry(entry: SessionEntry, patches: EntryPatches, at: number): string | undefined {
+	if (patches.byId.size === 0) return undefined;
+	const id = entryPatchTargetId(entry);
+	const held = id === undefined ? undefined : patches.byId.get(id);
+	if (!held) return undefined;
+	const target = patches.targetAt.get(id!);
+	if (target !== undefined && target !== at) return undefined;
+	setFieldsOf(entry, held);
+	return id;
+}
+
+/**
+ * Whether `patch` sets a field a stored row is derived from: a message's `content` (user text
+ * metrics, tool call and result sizes, Spotlight rows) or a compaction's `tokensAfter`.
+ */
+function setsStoredField(patch: EntryPatch): boolean {
+	return patch.message?.content !== undefined || patch.entry?.tokensAfter !== undefined;
+}
+
+/** Ids `byId` names in a patch that sets a stored field ({@link setsStoredField}). */
+function storedFieldTargets(byId: EntryPatchesById): string[] {
+	const ids: string[] = [];
+	for (const [id, held] of byId) if (held.some(setsStoredField)) ids.push(id);
+	return ids;
 }
 
 /**
@@ -656,15 +794,21 @@ class ReplyTracker {
 	}
 }
 
-/** Rebuild the cursor state of `bytes` (a transcript prefix): the last service tier, the awaited replies and the Spotlight state. */
+/**
+ * Rebuild the cursor state of `bytes` (a transcript prefix, at the start of the bytes `patches` were collected
+ * from): the last service tier, the awaited replies and the Spotlight state, from entries carrying the fields
+ * `patches` sets.
+ */
 function scanPrefixState(
 	bytes: Uint8Array,
 	spotlight: SpotlightCollector,
 	replies: ReplyTracker,
 	inherited: InheritedPrefix,
+	patches: EntryPatches,
 ): ServiceTierByFamily | undefined {
 	let currentServiceTier: ServiceTierByFamily | undefined;
-	visitSessionEntriesLenient(bytes, entry => {
+	visitSessionEntriesLenient(bytes, (entry, at) => {
+		patchEntry(entry, patches, at);
 		replies.visit(entry);
 		const inheritedEntry = inherited.visit(entry);
 		if (isServiceTierChange(entry)) currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
@@ -789,6 +933,12 @@ export interface SessionParserState {
 	spotlight?: SpotlightParserState;
 	/** Absent in cursors persisted before replies were tracked; such a cursor is rebuilt from the transcript prefix. */
 	pendingReplies?: Record<string, string>;
+	/**
+	 * Ids the records read so far name in a patch that sets a stored field. A record sets fields on the last entry
+	 * with its id, which may come after it, so a later read that holds an entry with one of these ids (the record's
+	 * target, or a later entry sharing a patched id) derives the whole transcript again. Absent when there is none.
+	 */
+	patchTargets?: string[];
 }
 
 export interface ParseSessionResult {
@@ -807,19 +957,6 @@ export interface ParseSessionResult {
 
 const CHECKPOINT_BYTES = 256;
 
-async function readCheckpoint(handle: fs.FileHandle, end: number): Promise<Uint8Array> {
-	// Positional reads keep the descriptor at zero for Bun.file(fd)'s subsequent tail read.
-	const start = Math.max(0, end - CHECKPOINT_BYTES);
-	const bytes = new Uint8Array(end - start);
-	let read = 0;
-	while (read < bytes.length) {
-		const result = await handle.read(bytes, read, bytes.length - read, start + read);
-		if (result.bytesRead === 0) break;
-		read += result.bytesRead;
-	}
-	return bytes.subarray(0, read);
-}
-
 /**
  * Whether `info` is still the file a cursor was taken from. The device number is deliberately not part of
  * this: ZFS and others renumber it across mounts and reboots while the transcript stays intact; `ino` +
@@ -829,48 +966,79 @@ export function matchesSessionFile(state: SessionParserState, info: nodeFs.Stats
 	return state.ino === info.ino && state.birthtimeMs === info.birthtimeMs;
 }
 
-/** Offset-only callers reconstruct service-tier state once; persisted cursors read only the appended tail. */
-export async function parseSessionFile(
+/** What a read of transcript entries derives: their rows, and the cursor state they leave. */
+interface DerivedRows {
+	stats: MessageStatsInput[];
+	userStats: UserMessageStats[];
+	userLinks: UserMessageLink[];
+	toolCalls: ToolCallStats[];
+	toolResults: ToolResultLink[];
+	toolApprovals: ToolApprovalStats[];
+	snapcompactCompactions: SnapcompactCompactionStats[];
+	/** The service tier in force after the entries. */
+	serviceTier: ServiceTierByFamily | undefined;
+	/** Bytes read, through the last complete entry. */
+	read: number;
+	/** Ids of the entries a record named. */
+	patched: Set<string>;
+	/** Whether an entry has an id of the `targets` the read was given. */
+	targetArrived: boolean;
+}
+
+/**
+ * Derive the rows of the entries in `bytes`, which start at `offset` in the bytes `patches` were collected
+ * from, each carrying the fields `patches` sets; `serviceTier`, `spotlight`, `replies` and `inherited` hold
+ * the state the entries before them left, and `targets` the ids the records of earlier reads name.
+ */
+function deriveRows(
+	bytes: Uint8Array,
+	offset: number,
 	sessionPath: string,
-	fromOffset = 0,
-	state?: SessionParserState,
-	replay = false,
-): Promise<ParseSessionResult> {
-	let bytes: Uint8Array;
-	let start = fromOffset;
-	let reset = false;
-	let currentServiceTier: ServiceTierByFamily | undefined;
-	let info: nodeFs.Stats;
-	let checkpoint: string;
-	let read: number;
+	serviceTier: ServiceTierByFamily | undefined,
+	spotlight: SpotlightCollector,
+	replies: ReplyTracker,
+	inherited: InheritedPrefix,
+	patches: EntryPatches,
+	targets: ReadonlySet<string>,
+): DerivedRows {
 	const folder = extractFolderFromPath(sessionPath);
 	const agentType = classifyAgentType(sessionPath);
-	const stats: MessageStatsInput[] = [];
-	const userStats: UserMessageStats[] = [];
-	const userLinks: UserMessageLink[] = [];
-	const toolCalls: ToolCallStats[] = [];
-	const toolResults: ToolResultLink[] = [];
+	const rows: DerivedRows = {
+		stats: [],
+		userStats: [],
+		userLinks: [],
+		toolCalls: [],
+		toolResults: [],
+		toolApprovals: [],
+		snapcompactCompactions: [],
+		serviceTier,
+		read: 0,
+		patched: new Set(),
+		targetArrived: false,
+	};
 	const approvalsById = new Map<string, ToolApprovalStats>();
-	const snapcompactCompactions: SnapcompactCompactionStats[] = [];
 	// First call per id: the row `INSERT OR IGNORE` keeps, so it can be written with its result.
 	const callsById = new Map<string, ToolCallStats>();
-	let spotlight = new SpotlightCollector(sessionPath, folder, emptySpotlightState());
-	let replies = new ReplyTracker();
-	let inherited = new InheritedPrefix();
 
 	// Reduce each entry immediately so full replays do not retain tool-output/message bodies.
-	const visit = (entry: SessionEntry): void => {
+	rows.read = visitSessionEntriesLenient(bytes, (entry, at) => {
+		const patched = patchEntry(entry, patches, offset + at);
+		if (patched !== undefined) rows.patched.add(patched);
+		if (targets.size > 0 && !rows.targetArrived) {
+			const id = entryPatchTargetId(entry);
+			rows.targetArrived = id !== undefined && targets.has(id);
+		}
 		const answered = replies.visit(entry);
 		// The parent's copied calls bill to the parent, whichever transcript syncs first.
 		const inheritedCall = inherited.visit(entry);
 		spotlight.visit(entry, inheritedCall);
 		if (isServiceTierChange(entry)) {
-			currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
+			rows.serviceTier = coerceServiceTierByFamily(entry.serviceTier);
 			return;
 		}
 		const compaction = extractSnapcompactCompaction(sessionPath, folder, entry);
 		if (compaction) {
-			snapcompactCompactions.push(compaction);
+			rows.snapcompactCompactions.push(compaction);
 			return;
 		}
 		const approval = extractToolApproval(sessionPath, folder, entry);
@@ -895,13 +1063,13 @@ export async function parseSessionFile(
 			// A copied prompt is the parent's: owning its row would leave the parent's reply link nothing to fill.
 			if (inheritedCall) return;
 			const userMsg = extractUserStats(sessionPath, folder, entry);
-			if (userMsg) userStats.push(userMsg);
+			if (userMsg) rows.userStats.push(userMsg);
 			return;
 		}
 		if (isToolResultMessage(entry)) {
 			const link = extractToolResultLink(sessionPath, entry);
 			if (!link) return;
-			toolResults.push(link);
+			rows.toolResults.push(link);
 			const call = callsById.get(link.toolCallId);
 			if (call && call.resultChars === undefined) {
 				call.resultChars = link.resultChars;
@@ -911,24 +1079,22 @@ export async function parseSessionFile(
 		}
 		if (isModelUsage(entry)) {
 			const modelUsageStats = inheritedCall ? null : extractModelUsageStats(sessionPath, folder, entry, agentType);
-			if (modelUsageStats) stats.push(modelUsageStats);
+			if (modelUsageStats) rows.stats.push(modelUsageStats);
 			return;
 		}
 		if (isAssistantMessage(entry)) {
-			const msgStats = inheritedCall
-				? null
-				: extractStats(sessionPath, folder, entry, currentServiceTier, agentType);
-			if (msgStats) stats.push(msgStats);
+			const msgStats = inheritedCall ? null : extractStats(sessionPath, folder, entry, rows.serviceTier, agentType);
+			if (msgStats) rows.stats.push(msgStats);
 			// The copied calls are the parent's too, joined to its request rows by entry id.
 			if (inheritedCall) return;
 			for (const call of extractToolCalls(sessionPath, folder, entry, agentType)) {
-				toolCalls.push(call);
+				rows.toolCalls.push(call);
 				if (!callsById.has(call.toolCallId)) callsById.set(call.toolCallId, call);
 			}
 			// Persist links even when the user entry was ingested in an earlier tail read.
 			const msg = entry.message;
 			if (answered && msg.role === "assistant" && msg.model && msg.provider) {
-				userLinks.push({
+				rows.userLinks.push({
 					sessionFile: sessionPath,
 					entryId: answered,
 					model: msg.model,
@@ -936,7 +1102,36 @@ export async function parseSessionFile(
 				});
 			}
 		}
-	};
+	});
+	rows.toolApprovals = [...approvalsById.values()];
+	return rows;
+}
+
+/**
+ * Offset-only callers reconstruct service-tier state once; persisted cursors read only the appended tail.
+ * Entries carry the fields their `entry_patch` records set. A record in the tail that sets a stored field
+ * ({@link setsStoredField}) of an entry before it makes the read derive the whole transcript again, flagged
+ * `reset`, so the rows an earlier read stored for that entry are replaced, as a rewrite of the file replaces
+ * them. So does a tail entry with an id such a record of an earlier read names
+ * ({@link SessionParserState.patchTargets}): the record's target, which came after it, or a later entry with
+ * a patched id, on which the record now sets its fields instead of the earlier one.
+ */
+export async function parseSessionFile(
+	sessionPath: string,
+	fromOffset = 0,
+	state?: SessionParserState,
+	replay = false,
+): Promise<ParseSessionResult> {
+	let start = fromOffset;
+	let reset = false;
+	let info: nodeFs.Stats;
+	let checkpoint: string;
+	let rows: DerivedRows;
+	let patchTargets: string[];
+	const folder = extractFolderFromPath(sessionPath);
+	let spotlight: SpotlightCollector;
+	let replies = new ReplyTracker();
+	let inherited = new InheritedPrefix();
 
 	try {
 		const handle = await fs.open(sessionPath, "r");
@@ -950,7 +1145,7 @@ export async function parseSessionFile(
 					info.size < state.size ||
 					(info.size === state.size && info.mtimeMs !== state.mtimeMs);
 				if (!reset) {
-					const previous = await readCheckpoint(handle, fromOffset);
+					const previous = await readFileRange(handle, Math.max(0, fromOffset - CHECKPOINT_BYTES), fromOffset);
 					reset = Bun.hash(previous).toString(16) !== state.checkpoint;
 				}
 				// A cursor written before replies were tracked rebuilds its state from the prefix instead.
@@ -959,25 +1154,79 @@ export async function parseSessionFile(
 			if (fromOffset > info.size) reset = true;
 			if (replay) resume = false;
 			start = reset || replay ? 0 : Math.max(0, fromOffset);
-			const readStart = resume ? start : 0;
-			bytes = await file.slice(readStart, info.size).bytes();
+			let readStart = resume ? start : 0;
+			let bytes = await file.slice(readStart, info.size).bytes();
+			const tail = bytes.subarray(start - readStart);
+			const tailPatches = collectEntryPatches(tail);
+			// A record of the tail names entries of the prefix scan, or of the tail.
+			const patches = entryPatches(bytes, readStart === start ? tailPatches : collectEntryPatches(bytes));
+			let serviceTier: ServiceTierByFamily | undefined;
+			// The ids the records of earlier reads name: a tail entry with one makes the read derive every row again.
+			const targets = new Set(resume ? state?.patchTargets : undefined);
 			if (resume) {
-				currentServiceTier = state?.serviceTier ?? undefined;
+				serviceTier = state?.serviceTier ?? undefined;
 				spotlight = new SpotlightCollector(sessionPath, folder, state?.spotlight ?? emptySpotlightState());
 				replies = new ReplyTracker(state?.pendingReplies);
 			} else {
 				const prefix = new SpotlightCollector(sessionPath, folder, emptySpotlightState(), false);
 				inherited = new InheritedPrefix(inheritedPrefixEnd(bytes));
-				currentServiceTier = scanPrefixState(bytes.subarray(0, start), prefix, replies, inherited);
+				serviceTier = scanPrefixState(bytes.subarray(0, start), prefix, replies, inherited, patches);
 				spotlight = new SpotlightCollector(sessionPath, folder, prefix.state);
 			}
-			read = visitSessionEntriesLenient(bytes.subarray(start - readStart), visit);
-			const newOffset = start + read;
+			const tailRows = deriveRows(
+				tail,
+				start - readStart,
+				sessionPath,
+				serviceTier,
+				spotlight,
+				replies,
+				inherited,
+				patches,
+				targets,
+			);
+			rows = tailRows;
+			// A resumed read adds the ids its records name; a read from the first byte collected every record.
+			patchTargets = resume
+				? [...new Set([...targets, ...storedFieldTargets(tailPatches)])]
+				: storedFieldTargets(patches.byId);
+			// A record of the tail sets a stored field of an entry before it, whose rows an earlier read stored:
+			// derive every row again, from entries that carry the records' fields, to replace those rows.
+			const storedTargetPatched = [...tailPatches].some(
+				([id, held]) => !tailRows.patched.has(id) && held.some(setsStoredField),
+			);
+			// A tail entry with an id a record of an earlier read names does the same: the record sets its fields on it.
+			if (start > 0 && (storedTargetPatched || tailRows.targetArrived)) {
+				reset = true;
+				start = 0;
+				// A read from the file's first byte collected `patches` from all of it.
+				let allPatches = patches;
+				if (readStart > 0) {
+					readStart = 0;
+					// `file` read the tail and left the descriptor at its end: read the whole file by position.
+					bytes = await readFileRange(handle, 0, info.size);
+					allPatches = entryPatches(bytes, collectEntryPatches(bytes));
+				}
+				spotlight = new SpotlightCollector(sessionPath, folder, emptySpotlightState());
+				replies = new ReplyTracker();
+				rows = deriveRows(
+					bytes,
+					0,
+					sessionPath,
+					undefined,
+					spotlight,
+					replies,
+					new InheritedPrefix(inheritedPrefixEnd(bytes)),
+					allPatches,
+					targets,
+				);
+				patchTargets = storedFieldTargets(allPatches.byId);
+			}
+			const newOffset = start + rows.read;
 			const checkpointStart = Math.max(0, newOffset - CHECKPOINT_BYTES);
 			const previous =
 				checkpointStart >= readStart
 					? bytes.subarray(checkpointStart - readStart, newOffset - readStart)
-					: await readCheckpoint(handle, newOffset);
+					: await readFileRange(handle, checkpointStart, newOffset);
 			checkpoint = Bun.hash(previous).toString(16);
 		} finally {
 			await handle.close();
@@ -999,15 +1248,15 @@ export async function parseSessionFile(
 	}
 
 	await spotlight.finish();
-	const newOffset = start + read;
+	const newOffset = start + rows.read;
 	return {
-		stats,
-		userStats,
-		userLinks,
-		toolCalls,
-		toolResults,
-		toolApprovals: [...approvalsById.values()],
-		snapcompactCompactions,
+		stats: rows.stats,
+		userStats: rows.userStats,
+		userLinks: rows.userLinks,
+		toolCalls: rows.toolCalls,
+		toolResults: rows.toolResults,
+		toolApprovals: rows.toolApprovals,
+		snapcompactCompactions: rows.snapcompactCompactions,
 		spotlight: spotlight.rows,
 		newOffset,
 		reset,
@@ -1019,9 +1268,10 @@ export async function parseSessionFile(
 			size: info.size,
 			mtimeMs: info.mtimeMs,
 			checkpoint,
-			serviceTier: currentServiceTier ?? null,
+			serviceTier: rows.serviceTier ?? null,
 			spotlight: spotlight.state,
 			pendingReplies: replies.state,
+			...(patchTargets.length > 0 && { patchTargets }),
 		},
 	};
 }
@@ -1081,19 +1331,35 @@ export async function listAllSessionFiles(): Promise<string[]> {
 }
 
 /**
- * Find a specific entry in a session file.
+ * Find a specific entry in a session file, carrying the fields its `entry_patch` records set. A record
+ * is no entry of the session: asked for a record's id, this finds nothing. Of entries that share the id,
+ * this finds the first, and the records set fields on the last of them only.
  */
 export async function getSessionEntry(sessionPath: string, entryId: string): Promise<SessionEntry | null> {
+	let found: SessionEntry | null = null;
+	let superseded = false;
+	const held: EntryPatch[] = [];
+	const idBytes = Buffer.from(JSON.stringify(entryId));
 	try {
 		for await (const line of readLines(Bun.file(sessionPath).stream())) {
+			if (found && entryPatchMarkerAt(line) === -1) {
+				// Past the entry, only a record, or a later entry with its id, can still change what it carries.
+				if (Buffer.from(line.buffer, line.byteOffset, line.byteLength).indexOf(idBytes) === -1) continue;
+			}
 			const entry = parseJsonLine(line, 0, line.length);
-			if (entry && "id" in entry && entry.id === entryId) {
-				return entry;
+			if (!entry) continue;
+			if (isEntryPatchRecord(entry)) {
+				for (const patch of recordPatches(entry)) if (patch.entryId === entryId) held.push(patch);
+			} else if (!found && "id" in entry && entry.id === entryId) {
+				found = entry;
+			} else if (found && entryPatchTargetId(entry) === entryId) {
+				superseded = true;
 			}
 		}
 	} catch (err) {
 		if (isEnoent(err)) return null;
 		throw err;
 	}
-	return null;
+	if (found && !superseded && entryPatchTargetId(found) !== undefined) setFieldsOf(found, held);
+	return found;
 }
