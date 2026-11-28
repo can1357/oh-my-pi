@@ -11,7 +11,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { IpcConnection, ipcEndpoint } from "@oh-my-pi/pi-natives";
+import { IpcConnection, ipcEndpoint, Process, processOutputFiles } from "@oh-my-pi/pi-natives";
 import { isSameProcess, processStartTime } from "../../src/daemon/children";
 import {
 	DAEMON_DIR_ENV,
@@ -345,23 +345,24 @@ export class TestDaemon {
 		this.#pids.clear();
 		if (process.platform === "linux") {
 			// A detached child can survive a crash before its PID reaches #track.
-			// /proc/PID/cwd disappears after that process has closed its output FDs.
+			const logs = `${this.dir}/units/`;
 			await until(async () => {
 				let found = false;
 				for (const entry of await fs.readdir("/proc")) {
 					const pid = Number(entry);
 					if (!Number.isInteger(pid) || pid <= 1 || pid === process.pid) continue;
+					const owner = Process.fromPid(pid);
+					if (!owner) continue;
 					const cwd = await fs.readlink(`/proc/${pid}/cwd`).catch(() => undefined);
-					if (cwd !== this.root && !cwd?.startsWith(`${this.root}/`)) continue;
-					found = true;
-					try {
-						process.kill(pid, "SIGKILL");
-					} catch (error) {
-						if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+					if (cwd !== this.root && !cwd?.startsWith(`${this.root}/`)) {
+						const { stdout, stderr } = processOutputFiles(pid);
+						if (!stdout?.startsWith(logs) && !stderr?.startsWith(logs)) continue;
 					}
+					found = true;
+					owner.signal(os.constants.signals.SIGKILL);
 				}
 				return found ? undefined : true;
-			}, "fixture processes to release their working dirs");
+			}, "fixture processes to release their working directories and logs");
 		}
 		await fs.rm(this.root, { recursive: true, force: true });
 	}

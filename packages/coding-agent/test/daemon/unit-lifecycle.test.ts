@@ -6,7 +6,7 @@
  */
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
-import { Process } from "@oh-my-pi/pi-natives";
+import * as children from "../../src/daemon/children";
 import { DAEMON_IDLE_EXIT_GRACE_ENV, DAEMON_RESUME_LEASE_GRACE_ENV } from "../../src/daemon/protocol";
 import { type DaemonConn, pidAlive, rejection, shProc, TestDaemon, until } from "../fixtures/daemon-proc-harness";
 
@@ -227,15 +227,19 @@ describe.skipIf(process.platform === "win32")("daemon unit lifecycle", () => {
 				},
 			});
 			try {
-				const lookup = spyOn(Process, "fromPid").mockReturnValueOnce(null);
+				const lookup = spyOn(children, "processStartTime").mockReturnValue(undefined);
 				const opened = await conn
 					.openProc(
 						"untracked",
 						{
 							application: process.execPath,
-							args: ["-e", 'import { createConnection } from "node:net"; createConnection("./hold.sock");'],
-							env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
-							cwd: root,
+							args: [
+								"-e",
+								'import { createConnection } from "node:net"; createConnection(process.argv[1]);',
+								`${root}/hold.sock`,
+							],
+							cwd: "/",
+							env: {},
 							pty: false,
 						},
 						{ policy: DETACHED_LEASES },
@@ -255,6 +259,47 @@ describe.skipIf(process.platform === "win32")("daemon unit lifecycle", () => {
 				await expect(fs.stat(root)).rejects.toMatchObject({ code: "ENOENT" });
 			} finally {
 				barrier.stop(true);
+			}
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it.skipIf(process.platform !== "linux")(
+		"disposes a cwd-only holder without signalling its non-fixture child",
+		async () => {
+			const { daemon: d, root } = await startDaemon();
+			const connected = Promise.withResolvers<number>();
+			const barrier = Bun.listen({
+				unix: `${root}/child.sock`,
+				socket: {
+					data: (_socket, data) => connected.resolve(Number(data.toString())),
+				},
+			});
+			const holder = Bun.spawn(
+				[
+					"/bin/sh",
+					"-c",
+					'(cd / && exec "$@") & wait',
+					"sh",
+					process.execPath,
+					"-e",
+					'const s = require("node:net").createConnection(process.argv[1], () => s.write(String(process.pid)))',
+					`${root}/child.sock`,
+				],
+				{ cwd: root, stdout: "ignore", stderr: "ignore" },
+			);
+			try {
+				const child = await connected.promise;
+				await d.kill();
+				await d.dispose();
+				daemon = undefined;
+				await holder.exited;
+				expect(holder.signalCode).toBe("SIGKILL");
+				expect(pidAlive(child)).toBe(true);
+			} finally {
+				barrier.stop(true);
+				holder.kill();
+				await holder.exited;
 			}
 		},
 		TEST_TIMEOUT_MS,

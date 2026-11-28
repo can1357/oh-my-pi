@@ -656,6 +656,8 @@ export declare class Process {
    * or the platform does not support process groups.
    */
   static killGroup(pgid: number, signal?: number | undefined | null): boolean
+  /** Signal only this process through its pinned identity. */
+  signal(signal: number): boolean
   /**
    * Send `signal` to this process and its descendants, children first.
    *
