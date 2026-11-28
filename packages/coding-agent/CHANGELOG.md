@@ -133,6 +133,8 @@
 
 ### Fixed
 
+- Fixed unresolved `blob:sha256:` image references leaking into provider payloads as poisoned data URLs, including a bare `image_url` in replayed native history, so later turns no longer fail with HTTP 400 ([#20903](https://github.com/can1357/oh-my-pi/issues/20903), [#20906](https://github.com/can1357/oh-my-pi/pull/20906))
+
 - Background job results delivered while the agent is idle are freed once delivered, not kept in memory until the whole turn they started ends ([#20886](https://github.com/can1357/oh-my-pi/pull/20886) by [@sjawhar](https://github.com/sjawhar))
 - Kept the prompt at the bottom when `/compact` shortens a long session or a cancelled submission restores the draft and rebuilds the same transcript ([#20912](https://github.com/can1357/oh-my-pi/pull/20912) by [@thebtf](https://github.com/thebtf))
 - In fullscreen mode, the terminal can select and copy text in `/session` info, the background jobs sheet, and command reports (`/context`, `/changelog`, `/tools`, …), which there always open as a full-screen page instead of above the editor.

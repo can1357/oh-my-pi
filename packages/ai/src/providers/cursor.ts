@@ -185,6 +185,7 @@ import { classifyJsonPrefix } from "@oh-my-pi/pi-utils/json-parse";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import * as AIError from "../error";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
+import { isUnresolvedBlobRef, UNRESOLVED_BLOB_IMAGE_PLACEHOLDER } from "../utils/blob-ref";
 import type {
 	Api,
 	AssistantMessage,
@@ -6563,7 +6564,11 @@ function buildCursorRootPromptContent(content: string | (TextContent | ImageCont
 				parts.push({ type: "text", text });
 			}
 		} else {
-			parts.push({ type: "image", image: `data:${item.mimeType};base64,${item.data}`, mediaType: item.mimeType });
+			if (isUnresolvedBlobRef(item.data) && !item.url) {
+				parts.push({ type: "text", text: UNRESOLVED_BLOB_IMAGE_PLACEHOLDER });
+			} else {
+				parts.push({ type: "image", image: `data:${item.mimeType};base64,${item.data}`, mediaType: item.mimeType });
+			}
 		}
 	}
 	return parts;

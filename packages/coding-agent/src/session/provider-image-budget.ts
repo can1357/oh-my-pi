@@ -18,6 +18,7 @@ import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { resolveInlineImageByteBudget, resolveRequestBodyByteLimit } from "@oh-my-pi/pi-catalog/compat/request-size";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
+import { isUnresolvedBlobRef } from "@oh-my-pi/pi-ai/utils/blob-ref";
 import { capFrameDataBytes, frameDataBytesBudget, providerImageBudget } from "@oh-my-pi/snapcompact";
 import { supportsRemoteImageUrls } from "../blob-broker/context-images";
 import { declaredTools } from "../utils/tool-declarations";
@@ -459,6 +460,10 @@ const IMAGE_DECODE_CACHE_MAX_ENTRIES = 512;
 const imageDecodeFailures = new LRUCache<string, string | null>({ max: IMAGE_DECODE_CACHE_MAX_ENTRIES });
 
 async function unreadableImageReason(image: ImageContent): Promise<string | null> {
+	// Fast-path unresolved blob references before the cache-key hash: decoding
+	// their text payload is meaningless, and the reason must say what the block
+	// actually is.
+	if (isUnresolvedBlobRef(image.data)) return "unresolved blob reference";
 	const key = `${image.mimeType}:${image.data.length}:${String(Bun.hash(image.data))}`;
 	const cached = imageDecodeFailures.get(key);
 	if (cached !== undefined) return cached;
@@ -562,6 +567,12 @@ async function replaceUnreadableContent(
  */
 async function replaceUnreadableNativePart(part: unknown): Promise<Record<string, unknown> | undefined> {
 	if (!isRecord(part) || part.type !== "input_image") return undefined;
+	// `resolveImageDataUrl` leaves a bare `blob:sha256:` ref when the blob is
+	// missing. `inlineImageFromDataUri` only decodes `data:` URLs, so that
+	// replayed `image_url` would otherwise go to the provider unchanged.
+	if (typeof part.image_url === "string" && isUnresolvedBlobRef(part.image_url)) {
+		return { type: "input_text", text: `[image omitted: undecodable image data (unresolved blob reference)]` };
+	}
 	const image = inlineImageFromDataUri(part.image_url);
 	if (!image) return undefined;
 	const reason = await unreadableImageReason(image);
@@ -630,6 +641,9 @@ async function unreadableComputerScreenshotReason(
 	metadata: ToolResultProviderMetadata | undefined,
 ): Promise<string | null> {
 	if (metadata?.type !== "computer") return null;
+	if (typeof metadata.screenshot.image_url === "string" && isUnresolvedBlobRef(metadata.screenshot.image_url)) {
+		return "unresolved blob reference";
+	}
 	const image = inlineImageFromDataUri(metadata.screenshot.image_url);
 	return image ? await unreadableImageReason(image) : null;
 }

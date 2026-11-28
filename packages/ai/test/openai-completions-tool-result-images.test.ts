@@ -615,3 +615,98 @@ describe("openai-completions convertMessages", () => {
 		}
 	});
 });
+
+const BLOB_REF = `blob:sha256:${"a".repeat(64)}`;
+
+describe("openai-completions unresolved blob image refs", () => {
+	const baseModel = getBundledModel("openai", "gpt-4o-mini") as Model<"openai-completions">;
+	const model: Model<"openai-completions"> = {
+		...baseModel,
+		api: "openai-completions",
+		input: ["text", "image"],
+	};
+
+	it("degrades a user-message blob ref without a url to a placeholder", () => {
+		const messages = convertMessages(
+			model,
+			{
+				messages: [
+					{
+						role: "user",
+						content: [
+							{ type: "text", text: "look" },
+							{ type: "image", data: BLOB_REF, mimeType: "image/png" },
+						],
+						timestamp: 1,
+					},
+				],
+			},
+			compat,
+		);
+
+		expect(messages).toEqual([
+			{
+				role: "user",
+				content: [
+					{ type: "text", text: "look" },
+					{ type: "text", text: "[image omitted: unresolved blob reference]" },
+				],
+			},
+		]);
+	});
+
+	it("keeps a user-message url when blob data is unresolved", () => {
+		const messages = convertMessages(
+			model,
+			{
+				messages: [
+					{
+						role: "user",
+						content: [
+							{ type: "text", text: "look" },
+							{ type: "image", data: BLOB_REF, mimeType: "image/png", url: "https://cdn.example/shot.png" },
+						],
+						timestamp: 1,
+					},
+				],
+			},
+			compat,
+		);
+
+		const parts = messages[0]?.content as Array<{ type: string; image_url?: { url: string } }>;
+		expect(parts.find(part => part.type === "image_url")?.image_url?.url).toBe("https://cdn.example/shot.png");
+		expect(JSON.stringify(messages)).not.toContain(BLOB_REF);
+	});
+
+	it("degrades a tool-result blob ref without a url to a placeholder", () => {
+		const now = Date.now();
+		const assistantMessage: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: "tool-1", name: "read", arguments: { path: "img.png" } }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: emptyUsage,
+			stopReason: "toolUse",
+			timestamp: now,
+		};
+		const result: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "tool-1",
+			toolName: "read",
+			content: [
+				{ type: "text", text: "Read image file [image/png]" },
+				{ type: "image", data: BLOB_REF, mimeType: "image/png" },
+			],
+			isError: false,
+			timestamp: now + 1,
+		};
+
+		const messages = convertMessages(model, { messages: [assistantMessage, result] }, compat);
+		const tool = messages.find(message => message.role === "tool");
+		const followUp = messages.find(message => message.role === "user");
+		expect(JSON.stringify(tool)).not.toContain(BLOB_REF);
+		expect(JSON.stringify(followUp)).toContain("[image omitted: unresolved blob reference]");
+		expect(JSON.stringify(followUp)).not.toContain(BLOB_REF);
+	});
+});
