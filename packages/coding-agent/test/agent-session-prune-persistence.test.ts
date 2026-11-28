@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { USELESS_NOTICE } from "@oh-my-pi/pi-agent-core/compaction/pruning";
-import type { Context } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Context, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AdvisorOutputQuarantinedError, AdvisorRuntime } from "@oh-my-pi/pi-coding-agent/advisor/runtime";
@@ -12,7 +12,20 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { logger, TempDir } from "@oh-my-pi/pi-utils";
+import { logger, TempDir, withTimeout } from "@oh-my-pi/pi-utils";
+import { COLLECT_DEADLINE_MS, collected } from "./helpers/gc";
+
+/** Bound on one idle drain, journal rewrite, session transition, or fixture release on this small session file. */
+const SETTLE_TIMEOUT_MS = 5_000;
+/**
+ * Bound on `AgentSession.dispose()`, whose own drains stop after 5 s (post-prompt tasks), 3 s (auto-learn
+ * capture), 3 s (owned tabs, computer sessions and MCP, in parallel) and 5 s (the run settling).
+ */
+const DISPOSE_TIMEOUT_MS = 20_000;
+/** A test's releases run one after another: the session's dispose and at most four more, each within its bound. */
+const RELEASE_ALL_TIMEOUT_MS = DISPOSE_TIMEOUT_MS + 4 * SETTLE_TIMEOUT_MS;
+/** Setup opens the auth store and, when a step fails, releases what it acquired; teardown releases everything. */
+const HOOK_TIMEOUT_MS = SETTLE_TIMEOUT_MS + RELEASE_ALL_TIMEOUT_MS + 5_000;
 
 /**
  * Regression: the per-turn supersede/useless prune pass rewrote the LIVE agent
@@ -34,12 +47,35 @@ describe("AgentSession per-turn prune persistence", () => {
 	const ADVISOR_REPLY = "ADVISOR_REPLY_SENTINEL";
 	let advisorRequests: Context[];
 
+	/**
+	 * What the running test acquired. Disposing it releases each resource newest first, every one even
+	 * after an earlier release failed; each release is bounded, so one that hangs still lets the others run.
+	 */
+	let resources: AsyncDisposableStack;
+
 	beforeEach(async () => {
-		tempDir = TempDir.createSync("@pi-prune-persistence-");
-		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+		// A failed setup releases what it acquired here: Bun may skip `afterEach` for a failed `beforeEach`.
+		await using acquired = new AsyncDisposableStack();
+		resources = acquired;
+		await createFixture();
+		resources = acquired.move();
+	}, HOOK_TIMEOUT_MS);
+
+	afterEach(() => resources.disposeAsync(), HOOK_TIMEOUT_MS);
+
+	async function createFixture(): Promise<void> {
+		const dir = TempDir.createSync("@pi-prune-persistence-");
+		tempDir = dir;
+		resources.defer(() => withTimeout(dir.remove(), SETTLE_TIMEOUT_MS, "Timed out removing the temp directory"));
+		const auth = await AuthStorage.create(path.join(dir.path(), "testauth.db"));
+		authStorage = auth;
+		resources.defer(() => auth.close());
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage);
-		sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+		const manager = SessionManager.create(dir.path(), dir.path());
+		sessionManager = manager;
+		// Recorded before the session exists, so a session constructor that throws still closes the manager.
+		resources.defer(() => withTimeout(manager.close(), SETTLE_TIMEOUT_MS, "Timed out closing the session manager"));
 
 		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!bundled) throw new Error("Expected built-in anthropic model to exist");
@@ -99,7 +135,7 @@ describe("AgentSession per-turn prune persistence", () => {
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
 			streamFn: primary.stream,
 		});
-		session = new AgentSession({
+		const created = new AgentSession({
 			agent,
 			sessionManager,
 			settings: Settings.isolated({
@@ -118,21 +154,14 @@ describe("AgentSession per-turn prune persistence", () => {
 			// Enough for `#withEvalStateContext` to append its synthetic message
 			// once the history holds an `eval` call.
 			evalToolSession: {
-				cwd: tempDir.path(),
+				cwd: dir.path(),
 				getEvalSessionId: () => "prune-persistence-eval",
 			} as unknown as ToolSession,
 		});
+		session = created;
+		resources.defer(() => withTimeout(created.dispose(), DISPOSE_TIMEOUT_MS, "Timed out disposing the session"));
 		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
-	});
-
-	afterEach(async () => {
-		try {
-			await session?.dispose();
-		} finally {
-			authStorage?.close();
-			await tempDir?.remove();
-		}
-	});
+	}
 
 	function liveResultText(): string {
 		const message = session.agent.state.messages.find(
@@ -463,6 +492,213 @@ describe("AgentSession per-turn prune persistence", () => {
 			expect(replayed).toContain("⇒ ok · 1 line");
 			expect(replayed).not.toContain("30 lines");
 			runtime.dispose();
+		});
+	});
+
+	/**
+	 * The stale pass keeps the calls the latest compaction summarized away
+	 * across turns. Once the session rewrites one of them in place, the next
+	 * pass must pair the kept result with the call as rewritten: a stale call
+	 * keys the result by the file it no longer shows, and a newer read of that
+	 * file blanks it. Once the conversation ends, the session must let go of
+	 * the entries it looked those calls up in.
+	 */
+	describe("across a compaction boundary", () => {
+		const usage = {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const fileBody = "export const value = 1;\n".repeat(200);
+
+		function assistant(content: AssistantMessage["content"]): AssistantMessage {
+			return {
+				role: "assistant",
+				content,
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "claude-sonnet-4-5",
+				stopReason: content.some(block => block.type === "toolCall") ? "toolUse" : "stop",
+				usage,
+				timestamp: Date.now(),
+			};
+		}
+
+		function readCall(toolCallId: string, path: string): AssistantMessage {
+			return assistant([{ type: "toolCall", id: toolCallId, name: "read", arguments: { path } }]);
+		}
+
+		function readResult(toolCallId: string): ToolResultMessage {
+			return {
+				role: "toolResult",
+				toolCallId,
+				toolName: "read",
+				content: [{ type: "text", text: fileBody }],
+				isError: false,
+				timestamp: Date.now(),
+			};
+		}
+
+		/** Appends a compaction that keeps a read's result and summarizes away its call, and adopts the new context. */
+		function compactAwayReadCall(): { callEntryId: string; keptId: string } {
+			const callEntryId = sessionManager.appendMessage(readCall("call-kept", "src/a.ts"));
+			const keptId = sessionManager.appendMessage(readResult("call-kept"));
+			sessionManager.appendCompaction("Read src/a.ts.", undefined, keptId, 10_000);
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+			return { callEntryId, keptId };
+		}
+
+		/** Commits a turn outside the agent loop; its agent end runs the stale pass. */
+		async function commitTurn(messages: AgentMessage[]): Promise<void> {
+			for (const message of messages) session.agent.emitExternalEvent({ type: "message_end", message });
+			session.agent.emitExternalEvent({ type: "agent_end", messages });
+			await withTimeout(session.waitForIdle(), SETTLE_TIMEOUT_MS, "Timed out waiting for the stale pass to settle");
+		}
+
+		// Two turns and a journal rewrite, each bounded by SETTLE_TIMEOUT_MS (5 s): 20 s covers them.
+		it("pairs a kept read with its summarized-away call as the session rewrote it", async () => {
+			const { callEntryId, keptId } = compactAwayReadCall();
+			// Nothing reads src/a.ts again yet: the stale pass pairs the kept result with that call and keeps it.
+			await commitTurn([assistant([{ type: "text", text: "Read it." }])]);
+
+			// The session rewrites that call in place to read src/b.ts; then src/a.ts is read again.
+			const callEntry = sessionManager.getEntry(callEntryId);
+			if (callEntry?.type !== "message") throw new Error("Expected the kept read's call entry");
+			callEntry.message = readCall("call-kept", "src/b.ts");
+			await withTimeout(sessionManager.rewriteEntries(), SETTLE_TIMEOUT_MS, "Timed out rewriting the journal");
+			await commitTurn([
+				readCall("call-newer", "src/a.ts"),
+				readResult("call-newer"),
+				assistant([{ type: "text", text: "Read it again." }]),
+			]);
+
+			// The kept result shows src/b.ts, so the newer read of src/a.ts leaves it in context.
+			const kept = sessionManager.getEntry(keptId);
+			const keptMsg = kept?.type === "message" ? kept.message : undefined;
+			expect(keptMsg).toMatchObject({ content: [{ type: "text", text: fileBody }] });
+			expect(keptMsg && "prunedAt" in keptMsg ? keptMsg.prunedAt : undefined).toBeUndefined();
+		}, 20_000);
+
+		describe("when the conversation ends", () => {
+			/** Kept out of the test body so no strong local binding outlives the capture. */
+			function weakRefToEntry(id: string): WeakRef<object> {
+				const entry = sessionManager.getEntry(id);
+				if (!entry) throw new Error(`Expected entry ${id} on the branch`);
+				return new WeakRef(entry);
+			}
+
+			/**
+			 * Compacts away a kept read's call and commits a turn, whose stale pass looks that call up
+			 * before the boundary; returns the call's entry, observed weakly.
+			 */
+			async function lookUpSummarizedAwayCall(): Promise<WeakRef<object>> {
+				const { callEntryId } = compactAwayReadCall();
+				await commitTurn([assistant([{ type: "text", text: "Read it." }])]);
+				return weakRefToEntry(callEntryId);
+			}
+
+			/** A saved session in the same directory, for this one to resume in its place. */
+			async function savedOtherSession(): Promise<string> {
+				const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "other-sessions"));
+				resources.defer(() =>
+					withTimeout(manager.close(), SETTLE_TIMEOUT_MS, "Timed out closing the other session's manager"),
+				);
+				manager.appendMessage({ role: "user", content: "Another conversation.", timestamp: Date.now() });
+				await withTimeout(manager.ensureOnDisk(), SETTLE_TIMEOUT_MS, "Timed out saving the other session");
+				const file = manager.getSessionFile();
+				if (!file) throw new Error("Expected the other session's file");
+				await withTimeout(manager.close(), SETTLE_TIMEOUT_MS, "Timed out closing the other session");
+				return file;
+			}
+
+			/**
+			 * Each way a conversation ends whose session lets go of the summarized-away entries, resolving
+			 * whether it went through. `/clear` and a `/btw` branch keep those entries on the session's tree.
+			 */
+			const endings: Array<[name: string, end: () => Promise<boolean>]> = [
+				["/new", () => session.newSession()],
+				["a resume of another session", async () => session.switchSession(await savedOtherSession())],
+				[
+					"a branch from the first prompt",
+					async () => {
+						const branch = sessionManager.getBranch();
+						const prompt = branch.find(entry => entry.type === "message" && entry.message.role === "user");
+						if (!prompt) throw new Error("Expected the seeded prompt");
+						return !(await session.branch(prompt.id)).cancelled;
+					},
+				],
+				[
+					"dispose",
+					async () => {
+						await session.dispose();
+						return true;
+					},
+				],
+			];
+
+			for (const [name, end] of endings) {
+				// A turn (SETTLE_TIMEOUT_MS, 5 s), the ending (DISPOSE_TIMEOUT_MS, 20 s), then collection
+				// (COLLECT_DEADLINE_MS, 15 s): 45 s covers them.
+				it(`releases the summarized-away call the stale pass looked up on ${name}`, async () => {
+					const call = await lookUpSummarizedAwayCall();
+
+					const ended = await withTimeout(end(), DISPOSE_TIMEOUT_MS, `Timed out ending the conversation: ${name}`);
+					expect(ended).toBe(true);
+
+					// Checked right after the ending, before a later pass could replace what the session cached.
+					expect(await collected(call, COLLECT_DEADLINE_MS)).toBe(true);
+				}, 45_000);
+			}
+
+			// A turn (SETTLE_TIMEOUT_MS, 5 s), the failed `/new` (DISPOSE_TIMEOUT_MS, 20 s), then collection
+			// (COLLECT_DEADLINE_MS, 15 s): 45 s covers them.
+			it("releases the summarized-away call the stale pass looked up when /new fails to save its new journal", async () => {
+				const call = await lookUpSummarizedAwayCall();
+				const failure = new Error("injected journal write failure");
+				const ensureOnDisk = vi.spyOn(sessionManager, "ensureOnDisk").mockRejectedValue(failure);
+				let outcome: unknown;
+				try {
+					outcome = await withTimeout(
+						session.newSession().then(
+							() => "started",
+							(error: unknown) => error,
+						),
+						DISPOSE_TIMEOUT_MS,
+						"Timed out on /new",
+					);
+				} finally {
+					ensureOnDisk.mockRestore();
+				}
+
+				// The manager dropped the old conversation, then failed to write the new journal.
+				expect(outcome).toBe(failure);
+				expect(sessionManager.getBranch()).toEqual([]);
+				expect(await collected(call, COLLECT_DEADLINE_MS)).toBe(true);
+			}, 45_000);
+
+			// Two turns and `/clear` between them, each within SETTLE_TIMEOUT_MS (5 s): 20 s covers them.
+			it("leaves the history before /clear out of the passes after it", async () => {
+				const { keptId } = compactAwayReadCall();
+				await commitTurn([assistant([{ type: "text", text: "Read it." }])]);
+				const reset = await withTimeout(session.resetSessionContext(), SETTLE_TIMEOUT_MS, "Timed out on /clear");
+				expect(reset).toBeDefined();
+
+				// src/a.ts is read again after `/clear`. The kept read before it no longer reaches the prompt, and
+				// the compaction before `/clear` bounds nothing after it, so the newer read leaves the kept one alone.
+				await commitTurn([
+					readCall("call-newer", "src/a.ts"),
+					readResult("call-newer"),
+					assistant([{ type: "text", text: "Read it again." }]),
+				]);
+
+				const kept = sessionManager.getEntry(keptId);
+				const keptMsg = kept?.type === "message" ? kept.message : undefined;
+				expect(keptMsg).toMatchObject({ content: [{ type: "text", text: fileBody }] });
+				expect(keptMsg && "prunedAt" in keptMsg ? keptMsg.prunedAt : undefined).toBeUndefined();
+			}, 20_000);
 		});
 	});
 });

@@ -2,6 +2,7 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { customMessageEntryMessage, isUserRequestEntry } from "./transcript/transcript-entry";
 import {
 	canReplayRemoteCompaction,
+	compactionKeptStart,
 	getAnthropicCompactionPayload,
 	isTurnStartEntry,
 } from "@oh-my-pi/pi-agent-core/compaction";
@@ -585,20 +586,21 @@ export function buildSessionContext(
 		const firstKeptIdx = path.findIndex(
 			(entry, index) => index < compactionIdx && entry.id === compaction.firstKeptEntryId,
 		);
-		const snapshotIdx = compaction.providerReplayThroughEntryId
-			? path.findIndex(entry => entry.id === compaction.providerReplayThroughEntryId)
-			: -1;
 		// Remote replacement items take the place of raw kept turns for the
-		// provider, but never for the display transcript.
+		// provider, but never for the display transcript: that context resumes
+		// after the replayed snapshot. Otherwise the context keeps what the
+		// compaction kept, and after an empty snapshot tail only an Anthropic
+		// summary keeps the turns appended while it ran.
 		const replaced = remoteReplacementHistory !== undefined && !options?.transcript;
-		const retainedStart =
-			!replaced && firstKeptIdx >= 0
-				? firstKeptIdx
-				: (replaced || (anthropicPayload && compaction.firstKeptEntryId === "")) &&
-					  snapshotIdx >= 0 &&
-					  snapshotIdx < compactionIdx
-					? snapshotIdx + 1
-					: compactionIdx;
+		let retainedStart = compactionIdx;
+		if (replaced) {
+			const snapshotIdx = compaction.providerReplayThroughEntryId
+				? path.findIndex(entry => entry.id === compaction.providerReplayThroughEntryId)
+				: -1;
+			if (snapshotIdx >= 0 && snapshotIdx < compactionIdx) retainedStart = snapshotIdx + 1;
+		} else if (compaction.firstKeptEntryId !== "" || anthropicPayload) {
+			retainedStart = compactionKeptStart(path, compaction, compactionIdx);
+		}
 		let historyRewriteAt: number | undefined;
 		if (anthropicPayload !== undefined) {
 			const firstRetained = path[retainedStart < compactionIdx ? retainedStart : compactionIdx + 1];

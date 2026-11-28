@@ -12,10 +12,12 @@
 - Fixed the context figure that the status line and compaction read leaving out `$` Python output, `@file` mentions and a `!` command's terminal images, and counting `!!` output that no request carries ([#20834](https://github.com/can1357/oh-my-pi/pull/20834) by [@sjawhar](https://github.com/sjawhar))
 - Fixed token counting throwing on a stored custom message whose content is neither text nor blocks ([#20834](https://github.com/can1357/oh-my-pi/pull/20834) by [@sjawhar](https://github.com/sjawhar))
 - Fixed a failed split-turn compaction leaving its other summary request running after the failure was reported ([#20713](https://github.com/can1357/oh-my-pi/pull/20713) by [@sjawhar](https://github.com/sjawhar))
+- Fixed prune and shake reading the whole history on every pass after a compaction that kept no entry ([#20714](https://github.com/can1357/oh-my-pi/pull/20714) by [@sjawhar](https://github.com/sjawhar))
 
 ### Added
 
 - Added `CompactionSettings.summaryMaxTokens` to set the output budget for regular compaction summaries; history that fits alongside the actual previous summary and requested output is retained ([#18688](https://github.com/can1357/oh-my-pi/issues/18688))
+- Added `PrefixToolCallCache`, passed to the prune and shake passes as `prefixToolCalls`, and `compactionKeptStart()` ([#20714](https://github.com/can1357/oh-my-pi/pull/20714) by [@sjawhar](https://github.com/sjawhar))
 
 ### Changed
 
