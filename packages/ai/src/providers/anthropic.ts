@@ -156,7 +156,7 @@ import {
 import { prepareAnthropicImageContext } from "./anthropic-images";
 import { isAnthropicNarrationSignature, servedModelFromAnthropicSignature } from "./anthropic-signature";
 import { getOpenAIPromptCacheKey } from "./openai-shared";
-import { applyInferenceHeaders, applySessionHeader } from "./inference-headers";
+import { applyInferenceHeaders } from "./inference-headers";
 import { hasAnthropicMessageControls, redactSensitiveCredentials, transformMessages } from "./transform-messages";
 import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
 import {
@@ -4204,11 +4204,8 @@ export function buildGitHubCopilotAnthropicHeaders(args: GitHubCopilotAnthropicH
 		protocol: "anthropic",
 		sessionId: args.sessionId,
 		parentSessionId: args.parentSessionId,
+		compat: model.compat,
 	});
-	// The host's own session header (KDL `session-header`), applied after the generic
-	// identity headers so `x-session-id` keeps being sent. Here, not in the callers, so
-	// streaming Messages and hosted web search both get it.
-	applySessionHeader(headers, model.compat, args.sessionId);
 	return headers;
 }
 
@@ -4367,10 +4364,8 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		protocol: "anthropic",
 		sessionId,
 		parentSessionId,
+		compat: model.compat,
 	});
-	// The host's own session header (KDL `session-header`), applied after the
-	// generic identity headers so `x-session-id` keeps being sent.
-	applySessionHeader(defaultHeaders, model.compat, sessionId);
 
 	if (model.provider === "cloudflare-ai-gateway") {
 		return {

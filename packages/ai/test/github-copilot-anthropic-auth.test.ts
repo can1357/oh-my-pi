@@ -301,8 +301,8 @@ describe("Anthropic Copilot auth config", () => {
 		expect(getRequestHeader(input, init, "X-Client-Session-Id")).toBeNull();
 	});
 
-	it("sends a KDL-declared session header on any Anthropic host, not only Copilot", async () => {
-		const base = buildModel({
+	it("sends a compat-declared additive session header on any Anthropic host", async () => {
+		const model = buildModel({
 			id: "claude-proxy",
 			name: "Claude via proxy",
 			api: "anthropic-messages",
@@ -313,11 +313,8 @@ describe("Anthropic Copilot auth config", () => {
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			contextWindow: 200_000,
 			maxTokens: 8_000,
+			compat: { additiveSessionHeader: "x-client-session-id" },
 		});
-		const model: Model<"anthropic-messages"> = {
-			...base,
-			compat: { ...base.compat, sessionHeader: "x-client-session-id" },
-		};
 		const fetchMock = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) =>
 			Response.json({ error: { type: "authentication_error", message: "Unauthorized" } }, { status: 401 }),
 		);
@@ -329,6 +326,7 @@ describe("Anthropic Copilot auth config", () => {
 
 		const [input, init] = fetchMock.mock.calls[0]!;
 		expect(getRequestHeader(input, init, "X-Client-Session-Id")).toBe("conversation");
+		expect(getRequestHeader(input, init, "x-session-id")).toBe("conversation");
 	});
 
 	it("keeps a caller-supplied X-Client-Session-Id on Copilot requests", () => {

@@ -50,10 +50,9 @@ provider "github-copilot" {
 	// Copilot Business `/v1/messages` answers HTTP 200 with a `msg_blocked` reply
 	// and no server-reported usage when the request omits `X-Client-Session-Id`
 	// (#20678; controlled test: adding only this header restored normal replies
-	// for Sonnet 5.5 and Opus 5.5). A caller-set value wins; the generic
-	// `x-session-id` and Claude Code session headers are still sent.
+	// for Sonnet 5.5 and Opus 5.5).
 	on-api "anthropic-messages" {
-		session-header "x-client-session-id"
+		additive-session-header "x-client-session-id"
 	}
 	// Replaces the provider check that disabled reasoning params on chat completions.
 	on-api "openai-completions" {

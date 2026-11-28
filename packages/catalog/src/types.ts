@@ -502,15 +502,8 @@ export interface OpenAICompat {
 	extraBody?: Record<string, unknown>;
 	/** Request-session header that should mirror the normalized prompt-cache key. Default: unset. */
 	promptCacheSessionHeader?: "x-grok-conv-id" | "x-session-id";
-	/**
-	 * Request header carrying the conversation session id, independent of prompt
-	 * caching. One vocabulary for the `session-header` axis across the OpenAI
-	 * and Anthropic compat records, but not one behavior: on OpenAI-compatible
-	 * rows the declared header replaces the generic `x-session-id`; on Anthropic
-	 * rows it is sent in addition to it (see `ResolvedAnthropicCompat`).
-	 * Default: unset.
-	 */
-	sessionHeader?: "x-litellm-session-id" | "x-client-session-id";
+	/** Request header carrying the conversation session id, independent of prompt caching. Default: unset. */
+	sessionHeader?: "x-litellm-session-id";
 	/** Whether chat-completions payloads should include provider-specific prompt-cache markers. */
 	cacheControlFormat?: "anthropic" | undefined;
 	/**
@@ -880,6 +873,12 @@ export interface AnthropicCompat {
 	betweenToolsEffort?: "low" | "medium" | "high";
 	/** The model is a fast-mode SKU: send `speed: "fast"` with the fast-mode beta. Default: false. */
 	fastMode?: boolean;
+	/**
+	 * Host header that also carries the conversation session id. Sent alongside
+	 * `x-session-id` and `X-Claude-Code-Session-Id`, never instead of them; a
+	 * caller-set value wins. Default: unset.
+	 */
+	additiveSessionHeader?: "x-client-session-id";
 }
 
 /**
@@ -1294,6 +1293,7 @@ export type ResolvedAnthropicCompat = Required<
 		| "betweenToolsEffort"
 		| "stripThinkingHistory"
 		| "fastMode"
+		| "additiveSessionHeader"
 		| "maxImageDimension"
 		| "maxImagePayloadBytes"
 	>
@@ -1310,14 +1310,8 @@ export type ResolvedAnthropicCompat = Required<
 	stripThinkingHistory?: AnthropicCompat["stripThinkingHistory"];
 	/** Fast-mode SKU; undefined behaves as false. */
 	fastMode?: AnthropicCompat["fastMode"];
-	/**
-	 * Request header carrying the conversation session id. Rule-owned: GitHub
-	 * Copilot's `/v1/messages` returns blocked replies without usage when it is
-	 * missing. Additive: unlike OpenAI-compatible rows, where it replaces the
-	 * generic `x-session-id`, the request builder still sends `x-session-id` and
-	 * the Claude Code session header alongside it. Undefined sends none.
-	 */
-	sessionHeader?: OpenAICompat["sessionHeader"];
+	/** Additive host session header; undefined sends none. */
+	additiveSessionHeader?: AnthropicCompat["additiveSessionHeader"];
 	/**
 	 * Largest width or height a single image block may carry. Undefined defers
 	 * to the canonical Anthropic API limit applied by the request builder.

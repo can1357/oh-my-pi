@@ -160,10 +160,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"qwen-preserve-thinking": wire("qwenPreserveThinking", ["openai"]),
 	"reject-root-object-union": wire("rejectRootObjectUnion", OAI),
 	"retry-without-strict-on-grammar-error": wire("retryWithoutStrictOnGrammarError", OAI),
-	"session-header": wire("sessionHeader", [...OAI, "anthropic"], "scalar", [
-		"x-litellm-session-id",
-		"x-client-session-id",
-	]),
+	"session-header": wire("sessionHeader", OAI, "scalar", ["x-litellm-session-id"]),
 	"reasoning-content-field": wire("reasoningContentField", OAI, "scalar", [
 		"reasoning_content",
 		"reasoning",
@@ -260,6 +257,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"zai-reasoning-effort-dialect": wire("zaiReasoningEffortDialect", ["openai"]),
 
 	// ── wire: anthropic-messages ──
+	"additive-session-header": wire("additiveSessionHeader", ["anthropic"], "scalar", ["x-client-session-id"]),
 	"bedrock-messages-api": wire("bedrockMessagesApi", ["anthropic"]),
 	"allow-anthropic-header-overrides": wire("allowAnthropicHeaderOverrides", ["anthropic"]),
 	"disable-adaptive-thinking": wire("disableAdaptiveThinking", ["anthropic"]),
