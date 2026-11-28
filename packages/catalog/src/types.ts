@@ -873,6 +873,12 @@ export interface AnthropicCompat {
 	betweenToolsEffort?: "low" | "medium" | "high";
 	/** The model is a fast-mode SKU: send `speed: "fast"` with the fast-mode beta. Default: false. */
 	fastMode?: boolean;
+	/**
+	 * Host header that also carries the conversation session id. Sent alongside
+	 * `x-session-id` and `X-Claude-Code-Session-Id`, never instead of them; a
+	 * caller-set value wins. Default: unset.
+	 */
+	additiveSessionHeader?: "x-client-session-id";
 }
 
 /**
@@ -1287,6 +1293,7 @@ export type ResolvedAnthropicCompat = Required<
 		| "betweenToolsEffort"
 		| "stripThinkingHistory"
 		| "fastMode"
+		| "additiveSessionHeader"
 		| "maxImageDimension"
 		| "maxImagePayloadBytes"
 	>
@@ -1303,6 +1310,8 @@ export type ResolvedAnthropicCompat = Required<
 	stripThinkingHistory?: AnthropicCompat["stripThinkingHistory"];
 	/** Fast-mode SKU; undefined behaves as false. */
 	fastMode?: AnthropicCompat["fastMode"];
+	/** Additive host session header; undefined sends none. */
+	additiveSessionHeader?: AnthropicCompat["additiveSessionHeader"];
 	/**
 	 * Largest width or height a single image block may carry. Undefined defers
 	 * to the canonical Anthropic API limit applied by the request builder.
