@@ -29,8 +29,8 @@ import type {
 import { flattenLine } from "../../text/sanitize";
 import type { UiNode } from "../../node";
 import { type Signal, signal } from "../../reactive";
-import { formatKey, keyHintPlatform } from "../../theme/keys";
 import type { Theme } from "../../theme/contract";
+import { formatKeyCaps, keyHintPlatform } from "../../theme/keys";
 import { padTo, spaces, truncate, visibleWidth, wrap } from "../../text/width";
 import { type Block, definePainter, EMPTY_BLOCK, type Hit, type PaintContext, type Painter } from "../paint";
 import { widgetState } from "../widgets";
@@ -324,9 +324,9 @@ export function queryRow(theme: Theme, query: string, width: number, placeholder
 
 // ─── Hints ──────────────────────────────────────────────────────────────────
 
-/** Keycaps of a key chord in `theme`'s symbol preset (`["alt","enter"]` → `⌥⏎` on macOS, `Alt+Enter` in ascii). */
+/** Draw action keycaps in the active preset, preserving chords and alternative keys. */
 export function keyCaps(theme: Theme, keys: readonly string[]): string {
-	return formatKey(keys.join("+"), { preset: theme.symbols.preset, platform: keyHintPlatform() });
+	return formatKeyCaps(keys, { preset: theme.symbols.preset, platform: keyHintPlatform() });
 }
 
 /** The hint row of `actions`: `⏎ select · ⎋ close` (actions without keys are skipped). */
