@@ -7,7 +7,7 @@ import { initDb, insertMessageStats } from "@oh-my-pi/omp-stats/db";
 import { getUsageAttribution } from "@oh-my-pi/omp-stats/rollup";
 import { classifyAgentType } from "@oh-my-pi/omp-stats/parser";
 import type { AgentType, MessageStats } from "@oh-my-pi/omp-stats/types";
-import { getConfigRootDir, getSessionsDir, getStatsDbPath } from "@oh-my-pi/pi-utils";
+import { getSessionsDir, getStatsDbPath } from "@oh-my-pi/pi-utils";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
 
 installStatsTestIsolation("@pi-stats-agent-type-");
@@ -108,8 +108,9 @@ describe("agent_type migration backfill", () => {
 
 		// Construct a pre-agent_type database: the messages schema as it existed
 		// before this feature, with rows defaulting to no classification.
-		await fs.mkdir(getConfigRootDir(), { recursive: true });
-		const legacy = new Database(getStatsDbPath());
+		const dbPath = getStatsDbPath();
+		await fs.mkdir(path.dirname(dbPath), { recursive: true });
+		const legacy = new Database(dbPath);
 		legacy.run(`
 			CREATE TABLE messages (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
