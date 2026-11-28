@@ -57,7 +57,7 @@ interface OpenedAuthConfig {
 	agentDir: string;
 	brokerConfig: AuthBrokerClientConfig | null;
 	persistedSettings?: PersistedAuthSettings;
-	storeOptions?: Pick<AuthDiscoveryOptions, "accountPool" | "cachePath" | "sourceLabel">;
+	storeOptions?: Pick<AuthDiscoveryOptions, "accountPool" | "cachePath" | "fetch" | "sourceLabel">;
 }
 
 const AUTH_OPEN_CONFIG = Symbol("auth.openConfig");
@@ -359,6 +359,7 @@ export async function discoverAuthStorage(
 		storeOptions: options && {
 			accountPool: options.accountPool,
 			cachePath: options.cachePath,
+			fetch: options.fetch,
 			sourceLabel: options.sourceLabel,
 		},
 	};
@@ -423,6 +424,11 @@ function authBrokerWaitNotice(): (retry: AuthBrokerStartupRetry) => void {
  * the underlying `AuthBrokerError` (or missing-token `MissingApiKeyError`)
  * propagates as a raw uncaught exception and the CLI dies with a stack dump
  * instead of recovery guidance (issue #8096).
+ *
+ * A broker that answered 401/403 is reachable but rejected the bearer token
+ * (rotated with `omp auth-broker token --regenerate`, or a stale
+ * `auth.broker.token`), so that case points at replacing the token rather
+ * than at starting the broker.
  */
 export async function describeAuthBrokerStartupError(error: unknown): Promise<string | null> {
 	if (error instanceof MissingApiKeyError) {
@@ -432,11 +438,20 @@ export async function describeAuthBrokerStartupError(error: unknown): Promise<st
 	}
 	if (!(error instanceof AuthBrokerError)) return null;
 	const target = error instanceof AuthBrokerStartupError ? ` at ${error.url}` : "";
+	const disable =
+		"disable it with `omp config reset auth.broker.url` and `omp config reset auth.broker.token` " +
+		"(or unset OMP_AUTH_BROKER_URL / OMP_AUTH_BROKER_TOKEN).";
+	if (error.kind === "unauthorized") {
+		return (
+			`Auth broker${target} is reachable but rejected the configured bearer token (${error.message}). ` +
+			"omp is configured to use this broker for credentials and will not fall back to local credentials automatically.\n" +
+			"Print the broker's current token with `omp auth-broker token` on the broker host and set it via " +
+			`OMP_AUTH_BROKER_TOKEN, the \`auth.broker.token\` config entry, or ${getAuthBrokerTokenFilePath()}; or ${disable}`
+		);
+	}
 	return (
 		`Auth broker${target} is unreachable (${error.message}). ` +
 		"omp is configured to use this broker for credentials and will not fall back to local credentials automatically.\n" +
-		"Start the broker with `omp auth-broker serve`, or disable it with " +
-		"`omp config reset auth.broker.url` and `omp config reset auth.broker.token` " +
-		"(or unset OMP_AUTH_BROKER_URL / OMP_AUTH_BROKER_TOKEN)."
+		`Start the broker with \`omp auth-broker serve\`, or ${disable}`
 	);
 }
