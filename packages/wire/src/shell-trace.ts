@@ -222,7 +222,10 @@ export interface ShellTrace {
 	t_ns: number;
 	/** The command text given at construction. */
 	script: string;
-	/** Compiled units, in announce order. */
+	/** Compiled units, in announce order. Scripts read at runtime (`.`, `eval`, a nested
+	 * shell's file) are kept for their first 1,024 syntax nodes and 64 KiB of source; every
+	 * later such unit, and every function defined in one, shares one unit without source,
+	 * syntax or nodes, whose events are not journaled. */
 	units: ShellTraceUnit[];
 	/** Newest ≤20,000 semantic/output records, ≤2 MiB visible output and ≤8 MiB retained payload.
 	 * Adjacent output from the same execution may coalesce; its seq changes
