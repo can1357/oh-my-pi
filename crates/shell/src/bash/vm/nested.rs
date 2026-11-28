@@ -135,16 +135,17 @@ pub fn start(
 					Ok(_) => {},
 				}
 			}
-			match command_probe(k, cx, vp, &Probe::Read { path }) {
+			let max = super::command::EXEC_HEADER_PROBE_BYTES;
+			let head = match command_probe(k, cx, vp, &Probe::ReadHead { path: path.clone(), max }) {
 				Err(key) => return Some(Flow::Block(key)),
-				Ok(ProbeResult::Bytes(Ok(text))) => {
-					let head = &text[..text.len().min(80)];
-					let first = head.split(|&c| c == b'\n').next().unwrap_or(head);
+				Ok(ProbeResult::Bytes(Ok(head))) => {
+					let prefix = &head[..head.len().min(80)];
+					let first = prefix.split(|&c| c == b'\n').next().unwrap_or(prefix);
 					if first.contains(&0) {
 						let text = message(&dollar0, name, b"cannot execute binary file");
 						return reply(vp, 2, text, 126);
 					}
-					(text, false, "")
+					head
 				},
 				Ok(ProbeResult::Bytes(Err(msg))) if msg.as_slice() == b"Is a directory" => {
 					return reply(vp, 2, message(&dollar0, name, &msg), 126);
@@ -157,7 +158,19 @@ pub fn start(
 					};
 					return reply(vp, 2, message(&args.shell_name, name, &msg), status);
 				},
-				Ok(_) => (BString::default(), false, ""),
+				Ok(_) => BString::default(),
+			};
+			if head.len() < max {
+				(head, false, "")
+			} else {
+				match command_probe(k, cx, vp, &Probe::Read { path }) {
+					Err(key) => return Some(Flow::Block(key)),
+					Ok(ProbeResult::Bytes(Ok(text))) => (text, false, ""),
+					Ok(ProbeResult::Bytes(Err(msg))) => {
+						return reply(vp, 2, message(&args.shell_name, name, &msg), 126);
+					},
+					Ok(_) => (BString::default(), false, ""),
+				}
 			}
 		},
 	};

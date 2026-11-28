@@ -231,18 +231,31 @@ pub fn perform(
 				Search::Pending(key) => return Err(key),
 			}
 		},
-		Probe::Read { path } => {
+		Probe::Read { path } | Probe::ReadHead { path, .. } => {
+			let max = match probe {
+				Probe::ReadHead { max, .. } => Some(*max),
+				_ => None,
+			};
 			if let Some(fd) = dev_fd(path) {
 				// `. /dev/stdin`: the engine's fd, not the host process's.
 				let handle = vp.fds.handle(fd);
 				let input = &mut sc.io().input;
 				loop {
+					if max.is_some_and(|m| input.len() >= m) {
+						break ProbeResult::Bytes(Ok(BString::from(std::mem::take(input))));
+					}
 					let mut buf = [0u8; 8192];
-					match handle.poll_read(&mut tcx, &mut buf) {
+					let cap = max.map_or(buf.len(), |m| (m - input.len()).min(buf.len()));
+					match handle.poll_read(&mut tcx, &mut buf[..cap]) {
 						Poll::Ready(Ok(0)) => {
 							break ProbeResult::Bytes(Ok(BString::from(std::mem::take(input))));
 						},
-						Poll::Ready(Ok(n)) => input.extend_from_slice(&buf[..n]),
+						Poll::Ready(Ok(n)) => {
+							input.extend_from_slice(&buf[..n]);
+							if max.is_some_and(|m| input.len() >= m) {
+								break ProbeResult::Bytes(Ok(BString::from(std::mem::take(input))));
+							}
+						},
 						Poll::Ready(Err(e)) => {
 							break ProbeResult::Bytes(Err(BString::from(diag::strerror(&e).as_bytes())));
 						},
@@ -250,7 +263,7 @@ pub fn perform(
 					}
 				}
 			} else {
-				match read_file(&mut tcx, cx, sc, path) {
+				match read_file(&mut tcx, cx, sc, path, max) {
 					Poll::Ready(polled) => ProbeResult::Bytes(polled),
 					Poll::Pending => return Err(WaitKey::Fs { op: FsOp::Open, path: path.clone() }),
 				}
@@ -261,7 +274,7 @@ pub fn perform(
 			let stamp = (q.mtime_ns, q.size);
 			let funcs = match k.dump_funcs(path, stamp) {
 				Some(funcs) => funcs,
-				None => match read_file(&mut tcx, cx, sc, path) {
+				None => match read_file(&mut tcx, cx, sc, path, None) {
 					Poll::Ready(Ok(data)) => {
 						let funcs = super::zsh::zwc::DumpHeader::parse(&data).map_or_else(
 							|_| std::collections::HashSet::new(),
@@ -524,6 +537,7 @@ fn read_file(
 	cx: &mut Cx<'_>,
 	sc: &mut Scratch,
 	path: &BString,
+	max: Option<usize>,
 ) -> Poll<Result<BString, BString>> {
 	let err = |e: &std::io::Error| BString::from(diag::strerror(e).as_bytes());
 	// The bytes so far, beside `sc.live` (the file).
@@ -532,6 +546,9 @@ fn read_file(
 		match &mut sc.live {
 			Live::None => {
 				input.clear();
+				if max == Some(0) {
+					return Poll::Ready(Ok(BString::default()));
+				}
 				let opened = cx.host.fs().open(BStr::new(path), OpenFlags::READ, 0);
 				match opened {
 					FsPoll::Ready(Ok(f)) => sc.live = Live::File(f),
@@ -545,12 +562,21 @@ fn read_file(
 				Poll::Pending => return Poll::Pending,
 			},
 			Live::File(f) => {
+				if max.is_some_and(|m| input.len() >= m) {
+					return Poll::Ready(Ok(BString::from(std::mem::take(input))));
+				}
 				let mut buf = [0u8; 8192];
-				match f.poll_read(tcx, &mut buf) {
+				let cap = max.map_or(buf.len(), |m| (m - input.len()).min(buf.len()));
+				match f.poll_read(tcx, &mut buf[..cap]) {
 					Poll::Ready(Ok(0)) => {
 						return Poll::Ready(Ok(BString::from(std::mem::take(input))));
 					},
-					Poll::Ready(Ok(n)) => input.extend_from_slice(&buf[..n]),
+					Poll::Ready(Ok(n)) => {
+						input.extend_from_slice(&buf[..n]);
+						if max.is_some_and(|m| input.len() >= m) {
+							return Poll::Ready(Ok(BString::from(std::mem::take(input))));
+						}
+					},
 					Poll::Ready(Err(e)) => return Poll::Ready(Err(err(&e))),
 					Poll::Pending => return Poll::Pending,
 				}

@@ -88,15 +88,17 @@ struct Faults {
 /// In-memory filesystem.
 #[derive(Clone)]
 pub struct MemFs {
-	nodes:     Arc<Mutex<BTreeMap<BString, Node>>>,
-	rng:       Arc<Mutex<Rng>>,
-	p_pending: f64,
-	max_ms:    u64,
-	faults:    Option<Faults>,
-	pending:   Arc<AtomicU64>,
-	temp_seq:  Arc<AtomicU64>,
+	nodes:      Arc<Mutex<BTreeMap<BString, Node>>>,
+	rng:        Arc<Mutex<Rng>>,
+	p_pending:  f64,
+	max_ms:     u64,
+	faults:     Option<Faults>,
+	pending:    Arc<AtomicU64>,
+	opens:      Arc<AtomicU64>,
+	bytes_read: Arc<AtomicU64>,
+	temp_seq:   Arc<AtomicU64>,
 	/// Paths with a [`Fs::lock`] held.
-	locks:     Arc<Mutex<std::collections::BTreeSet<BString>>>,
+	locks:      Arc<Mutex<std::collections::BTreeSet<BString>>>,
 }
 
 impl Default for MemFs {
@@ -127,6 +129,8 @@ impl MemFs {
 			max_ms,
 			faults: None,
 			pending: Arc::new(AtomicU64::new(0)),
+			opens: Arc::new(AtomicU64::new(0)),
+			bytes_read: Arc::new(AtomicU64::new(0)),
 			temp_seq: Arc::new(AtomicU64::new(0)),
 			locks: Arc::default(),
 		}
@@ -179,6 +183,22 @@ impl MemFs {
 	/// Operations answered `Pending` so far.
 	pub fn pending_count(&self) -> u64 {
 		self.pending.load(Ordering::Relaxed)
+	}
+
+	/// Regular-file `open` calls completed so far.
+	pub fn opens(&self) -> u64 {
+		self.opens.load(Ordering::Relaxed)
+	}
+
+	/// Regular-file bytes read via `poll_read` so far.
+	pub fn bytes_read(&self) -> u64 {
+		self.bytes_read.load(Ordering::Relaxed)
+	}
+
+	/// Reset [`MemFs::opens`] and [`MemFs::bytes_read`] counters to zero.
+	pub fn reset_io_counts(&self) {
+		self.opens.store(0, Ordering::Relaxed);
+		self.bytes_read.store(0, Ordering::Relaxed);
 	}
 
 	fn fault(&self) -> Option<io::Error> {
@@ -284,10 +304,12 @@ impl MemFs {
 		if flags.contains(OpenFlags::TRUNC) {
 			data.lock().clear();
 		}
+		self.opens.fetch_add(1, Ordering::Relaxed);
 		Ok(Box::new(MemFile {
 			data,
 			pos: 0,
 			append: flags.contains(OpenFlags::APPEND),
+			bytes_read: Arc::clone(&self.bytes_read),
 			faults: self
 				.faults
 				.clone()
@@ -408,10 +430,11 @@ impl<T: Send> FsPending<T> for Delayed<T> {
 
 /// An open in-memory file.
 struct MemFile {
-	data:   Arc<Mutex<Vec<u8>>>,
-	pos:    usize,
-	append: bool,
-	faults: Option<(Faults, Rng)>,
+	data:       Arc<Mutex<Vec<u8>>>,
+	pos:        usize,
+	append:     bool,
+	bytes_read: Arc<AtomicU64>,
+	faults:     Option<(Faults, Rng)>,
 }
 
 impl MemFile {
@@ -433,6 +456,7 @@ impl File for MemFile {
 		let n = buf.len().min(data.len().saturating_sub(self.pos));
 		buf[..n].copy_from_slice(&data[self.pos..self.pos + n]);
 		self.pos += n;
+		self.bytes_read.fetch_add(n as u64, Ordering::Relaxed);
 		Poll::Ready(Ok(n))
 	}
 
@@ -478,10 +502,11 @@ impl File for MemFile {
 
 	fn dup(&self) -> io::Result<Box<dyn File>> {
 		Ok(Box::new(Self {
-			data:   Arc::clone(&self.data),
-			pos:    self.pos,
-			append: self.append,
-			faults: self.faults.clone(),
+			data:       Arc::clone(&self.data),
+			pos:        self.pos,
+			append:     self.append,
+			bytes_read: Arc::clone(&self.bytes_read),
+			faults:     self.faults.clone(),
 		}))
 	}
 }

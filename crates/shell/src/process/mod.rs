@@ -189,14 +189,17 @@ pub fn read_script(
 		return Err(ScriptError::new(dollar0, &path, "Is a directory", 126));
 	}
 	let mut text = Vec::new();
-	file
+	(&mut file)
+		.take(80)
 		.read_to_end(&mut text)
 		.map_err(|err| ScriptError::new(dollar0, &path, &strerror(&err), 126))?;
-	let head = &text[..text.len().min(80)];
-	let first_line = head.split(|&c| c == b'\n').next().unwrap_or(head);
+	let first_line = text.split(|&c| c == b'\n').next().unwrap_or(&text);
 	if first_line.contains(&0) {
 		return Err(ScriptError::new(dollar0, &path, "cannot execute binary file", 126));
 	}
+	file
+		.read_to_end(&mut text)
+		.map_err(|err| ScriptError::new(dollar0, &path, &strerror(&err), 126))?;
 	Ok((path, text))
 }
 
