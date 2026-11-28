@@ -8,7 +8,7 @@ Primary implementation files:
 
 - `packages/coding-agent/src/config/model-registry.ts` — loads built-in + custom models, provider overrides, runtime discovery, auth integration
 - `packages/coding-agent/src/config/model-resolver.ts` — parses model patterns and selects initial/smol/slow models
-- `packages/coding-agent/src/config/model-settings.ts` — model selection settings (`modelRoles`, `enabledModels`, `enabledProviders`/`disabledProviders`, `modelProviderOrder`, `cycleOrder`)
+- `packages/coding-agent/src/config/model-settings.ts` — model selection settings (`modelRoles`, `enabledModels`, `disabledProviders`, `modelProviderOrder`, `cycleOrder`)
 - `packages/coding-agent/src/session/settings.ts` — provider transport preferences (`providers.*`)
 - `packages/coding-agent/src/config/models-config.ts` and `models-config-schema-bundle.ts` — custom provider/model validation
 - `packages/coding-agent/src/session/auth-storage.ts` — re-exports `AuthStorage` from `@oh-my-pi/pi-ai`; credential precedence is implemented in `packages/ai/src/auth/cascade.ts`
@@ -115,6 +115,21 @@ models use its `/api/alpha` sibling on the same host, e.g. a `.../api/v1` relay 
 `.../api/alpha/decisions`.
 
 `omitMaxOutputTokens` omits the model-derived output cap.
+
+Speech (`openai-speech`/`xai-tts`) models take `voice`, sent when the `tts` tool or the vocalizer names none (some OpenAI-compatible gateways, such as Bifrost, answer a voiceless speech request with 400 `voice is required`), and `speechFormats`, the only containers the endpoint returns (`mp3`, `wav`, `pcm`, `opus`, `aac`, `flac`; absent means any). A WAV-only model asked for MP3 is asked for WAV instead and the `tts` tool writes the sibling `.wav`:
+
+```yaml
+providers:
+  my-gateway:
+    baseUrl: https://gateway.example.com/v1
+    api: openai-completions
+    apiKey: GATEWAY_API_KEY
+    models:
+      - id: gemini/gemini-2.5-flash-preview-tts
+        api: openai-speech
+        voice: kore
+        speechFormats: [wav]
+```
 
 `compat.base64SkipThoughtSignature` (Google APIs, default `false`): sends the unsigned-tool-call bypass sentinel base64-encoded. Set it on a `google-generative-ai` model behind a gateway that decodes `thoughtSignature` as base64 and answers the raw `skip_thought_signature_validator` literal with a 400, for example when Gemini replays another model's tool-call history:
 
@@ -238,7 +253,6 @@ override matching model tags. These fields do not configure the Anthropic Messag
 - `anthropic-messages`
 - `bedrock-converse-stream`
 - `google-generative-ai`
-- `google-gemini-cli`
 - `google-vertex`
 - `typesafe`
 - `openrouter-decisions`
@@ -300,7 +314,7 @@ await judge(state, question, { images: ["./chart.png"] });
 await judge(state, question, images=["./chart.png"])
 ```
 
-A model or `modelOverrides` entry may also use a runner API, which serves one model `kind`; `RUNNER_API_KINDS` in `packages/catalog/src/types.ts` lists them (for example `openai-images` serves `image`, `openai-embeddings` serves `embedding`, `openai-speech` serves `tts`). `web-search` is built in and cannot be named here, so neither can `kind: search`. `kind` defaults to the api's kind (`chat` for chat transports), and an explicit `kind` must be one its api serves. Chat transports serve `chat` and `tiny` (small models for the `tiny`, `memory`, and `judge` roles); those that `generate_image` runs (`openai-responses`, `openai-codex-responses`, `google-generative-ai`, `google-gemini-cli`) also serve `image`: on `openai-responses`, the image is generated through the Responses `image_generation` tool, carried by a GPT-5+ chat model on the same provider, instead of `/images/generations`. This moves discovered gateway models to the image role:
+A model or `modelOverrides` entry may also use a runner API, which serves one model `kind`; `RUNNER_API_KINDS` in `packages/catalog/src/types.ts` lists them (for example `openai-images` serves `image`, `openai-embeddings` serves `embedding`, `openai-speech` serves `tts`). `web-search` is built in and cannot be named here, so neither can `kind: search`. `kind` defaults to the api's kind (`chat` for chat transports), and an explicit `kind` must be one its api serves. Chat transports serve `chat` and `tiny` (small models for the `tiny`, `memory`, and `judge` roles); those that `generate_image` runs (`openai-responses`, `openai-codex-responses`, `google-generative-ai`) also serve `image`: on `openai-responses`, the image is generated through the Responses `image_generation` tool, carried by a GPT-5+ chat model on the same provider, instead of `/images/generations`. This moves discovered gateway models to the image role:
 
 ```yaml
 providers:
@@ -458,7 +472,7 @@ Provider defaults vs per-model overrides:
 - Provider `headers`, `compat`, and `remoteCompaction` are baselines.
 - Model `headers` override provider header keys.
 - `modelOverrides` can override model metadata (`name`, `api`, `kind`, `reasoning`, `thinking`, `input`,
-  `imageInputDecoder`, `imageCountBudget`, `snapcompactShape`, `tokenizer`, `supportsTools`, `cost`, `promptCache`, `premiumMultiplier`, `contextWindow`,
+  `imageInputDecoder`, `imageCountBudget`, `snapcompactShape`, `tokenizer`, `supportsTools`, `cost`, `promptCache`, `premiumMultiplier`, `voice`, `speechFormats`, `contextWindow`,
   `maxContextWindow`, `maxTokens`, `omitMaxOutputTokens`, `preferWebsockets`, `headers`, `compat`,
   `contextPromotionTarget`, `compactionModel`, and `remoteCompaction`).
 - `compat` is deep-merged for nested routing blocks (`openRouterRouting`, `vercelGatewayRouting`,
@@ -515,7 +529,7 @@ For the first-party `deepseek` provider, the catalog follows [DeepSeek's officia
 - Flash pricing covers `deepseek-flash` and the retired-but-still-accepted `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` ids, all billed at the Flash card. Peak rates per million tokens are $0.30 uncached input, $0.006 cached input, and $1.20 output.
 - `deepseek-v4-pro` initially uses peak rates of $1.32 uncached input, $0.044 cached input, and $3.96 output per million tokens. From **2026-09-14 04:00 UTC**, its estimates use the Flash rate card, with the same peak/off-peak schedule.
 
-Some catalog prices change on a date without a peak/off-peak tariff. Gemini 4 Argon on `google`, `google-vertex`, `google-antigravity`, and `cursor` is estimated at $2 input / $0.10 cached input / $10 output per million tokens through 2026-11-30, and at Google's $4 / $0.20 / $20 list price from **2026-12-01 08:00 UTC** (midnight US Pacific). The request's timestamp picks the price, so a model loaded before the change prices later requests at the new rate without a catalog update, and the model browser and `omp models --json` show the price in force.
+Some catalog prices change on a date without a peak/off-peak tariff. Gemini 4 Argon on `google`, `google-vertex`, and `cursor` is estimated at $2 input / $0.10 cached input / $10 output per million tokens through 2026-11-30, and at Google's $4 / $0.20 / $20 list price from **2026-12-01 08:00 UTC** (midnight US Pacific). The request's timestamp picks the price, so a model loaded before the change prices later requests at the new rate without a catalog update, and the model browser and `omp models --json` show the price in force.
 
 Local estimates use the assistant message's **request-start timestamp** to choose both the rate card and tariff for the whole request. This is OMP's estimation convention: DeepSeek's pricing page does not specify how its server bills a request spanning a boundary. When importing historical usage without recorded cost, the stats importer leaves scheduled pricing unpriced if no request timestamp can be recovered, rather than choosing a wall-clock tariff.
 
@@ -795,8 +809,7 @@ When `OMP_AUTH_BROKER_URL` (or `auth.broker.url`) is set, the local SQLite crede
 - Availability excludes `disabledProviders` and requires a keyless provider or configured credential source. It does not execute secret commands or refresh OAuth tokens.
 
 A model can exist in the registry without being available, and a configured credential can still
-fail when resolved for a request. `enabledProviders` controls foreign configuration-source discovery,
-not an allowlist of model transports.
+fail when resolved for a request.
 
 ## Runtime model resolution
 
@@ -834,10 +847,13 @@ When a bare id matches models from multiple providers, preference order is:
 
 ### Initial model selection priority
 
-`findInitialModel(...)` uses this order:
+At startup, the session model is chosen in this order:
 
-1. explicit CLI provider+model
-2. first scoped model (if not resuming)
+1. explicit CLI `--model`
+2. when a model scope is active (`--models` or `enabledModels`) and the session is not being resumed:
+   - if the scope resolves at startup: the configured `default` role when it resolves within the scope; otherwise the first scoped model, except under `enabledModels` with a configured `default` (see the last case)
+   - if a `--models` scope resolves to nothing at startup (its selectors name only models that extension or discovery providers register later): once those providers register, the `--models` selectors are tried in order; the `default` role is not consulted
+   - if an `enabledModels` scope is empty at startup, or the configured `default` does not resolve in it yet: once extensions register, the `default` role is retried within `enabledModels`; when it still does not resolve, the choice falls through to the provider defaults below, restricted to `enabledModels`, which need not be the first listed model
 3. saved default provider/model
 4. known provider defaults (e.g. OpenAI/Anthropic/etc.) among available models; a provider whose discovery marks the account's default model (`isProviderDefault`, e.g. Devin) uses it in place of its bundled `default-model`
 5. first available model
@@ -886,6 +902,8 @@ A model preset is a named snapshot of every role assignment plus `defaultThinkin
 /modelpreset list | delete <name>
 ```
 
+Start a session on a preset without switching scopes with `omp --preset <name>`. The preset's roles and `defaultThinkingLevel` apply as runtime overrides for that run, nothing is written to config, and `--model`, `--smol`, `--slow` and `--plan` still win for the roles they name. An explicit `--thinking` or selector level outranks the preset's `defaultThinkingLevel`; so does the saved model and effort of a resumed session, which `--preset` does not re-apply. On a fresh session the preset's `defaultThinkingLevel` outranks the model's own default, matching `/modelpreset switch`. A preset defined by a project config routes the run but never widens the per-call model grants only the operator can grant. `--preset` is a reserved built-in flag name, so an extension flag of the same name no longer takes effect. A missing or malformed preset stops the launch with an error, and a bare `--preset` is a usage error.
+
 In `/models`, press `s` in the Roles view to save the current setup under a name. Presets live under `modelPresets` in `config.yml`:
 
 ```yaml
@@ -918,7 +936,7 @@ accept exact selectors, globs, and fuzzy matches. The resulting scope restricts 
 (Ctrl+P cycling, the startup model, chat roles in `/model`); judge, search, image, and speech
 models stay available for their roles, so entries naming them are accepted but have no effect.
 
-`enabledModels`, `enabledProviders`, and `disabledProviders` entries may also be scoped to a path prefix:
+`enabledModels` and `disabledProviders` entries may also be scoped to a path prefix:
 
 ```yaml
 enabledModels:
@@ -1277,7 +1295,7 @@ providers:
 `disableStrictTools` is a provider-level flag that applies to all models in the provider. It disables the Anthropic `strict` marker only for tools that OMP would otherwise mark strict; it does not change runtime tool argument validation. OMP can automatically retry without strict tools after Anthropic reports a strict-grammar-too-large error before the first streamed token, but proxies that reject the `strict` field for other reasons should set this flag explicitly. Claude on `google-vertex` can also reject strict tools when the GCP organization policy `vertexai.allowedPartnerModelFeatures` disallows `structured_outputs`; OMP retries once without `strict` and pins `strictToolsDisabled` for the session. Set `disableStrictTools: true` for `google-vertex` to skip that failed first request.
 
 Tool schemas going on the wire are normalized by the unified flow in
-`packages/ai/src/utils/schema/normalize.ts` (Google/CCA/MCP dispatchers
+`packages/ai/src/utils/schema/normalize.ts` (Google/MCP dispatchers
 plus the OpenAI strict-mode sanitize+enforce pipeline). See
 [`ai-schema-normalize.md`](./ai-schema-normalize.md) for the strict-mode
 edge cases (local `$ref` inlining, single-item `allOf` collapse,

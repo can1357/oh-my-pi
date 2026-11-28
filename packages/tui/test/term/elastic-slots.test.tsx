@@ -30,6 +30,7 @@ const CAPABILITIES: TerminalCapabilities = {
 	multiplexer: null,
 	textSizing: false,
 	tsp: false,
+	emoji: { vs16Wide: false, bareFits: false },
 };
 
 type Listener = (columns: number, rows: number) => void;
@@ -312,6 +313,106 @@ describe("exactly-once in-order ledger (ECH, Lemma 4.6, Corollary 4.14)", () => 
 		expect(driver.history.filter(row => row.length > 12)).toEqual([]);
 		backend.stop();
 	});
+
+	it("keeps content live when only its separator overflows under preserve mode", () => {
+		const driver = new FakeDriver();
+		driver.replays = false;
+		const { surface, backend } = mount(
+			driver,
+			() => [<rows lines={["Earlier"]} />, <rows lines={lines("card", 6)} />],
+			{ separator: 1 },
+		);
+		try {
+			const [earlier, card] = surface.main();
+			settle(earlier!);
+			settle(card!);
+			backend.renderNow();
+			expect(driver.history).toEqual(["Earlier", ""]);
+			expect(driver.viewport).toEqual(lines("card", 6));
+			expect(backend.contentInHistory(card!)).toBe(false);
+
+			driver.resize(20, 5);
+			backend.renderNow();
+			expect(driver.history).toEqual(["Earlier", "", ...lines("card", 6)]);
+			expect(backend.contentInHistory(card!)).toBe(true);
+		} finally {
+			backend.stop();
+			surface.dispose();
+		}
+	});
+
+	it.each([
+		["head", 5],
+		["whole card", 7],
+	] as const)("writes the latest card output when a deferred batch held its %s", (_, laterRows) => {
+		const output = signal("sample");
+		const { driver, backend, surface } = setup(() => [
+			<rows lines={() => lines(output(), 3)} />,
+			<rows lines={lines("later", laterRows)} />,
+		]);
+		try {
+			const card = surface.main()[0]!;
+			driver.ack = false;
+			settle(card);
+			backend.renderNow();
+			expect(driver.history).toEqual([]);
+			expect(backend.contentInHistory(card)).toBe(false);
+
+			output.set("final");
+			driver.ack = true;
+			backend.renderNow();
+			expect(driver.transcript).toEqual([...lines("final", 3), ...lines("later", laterRows).slice(-6)]);
+			expect(backend.contentInHistory(card)).toBe(true);
+		} finally {
+			backend.stop();
+			surface.dispose();
+		}
+	});
+
+	it("keeps a card live when the tail pressing it goes away before a deferred batch is written", () => {
+		const later = signal(true);
+		const { driver, backend, surface } = setup(() => [
+			<rows key="card" lines={lines("card", 3)} />,
+			() => (later() ? <rows key="later" lines={lines("later", 5)} /> : null),
+		]);
+		try {
+			const card = surface.main()[0]!;
+			driver.ack = false;
+			settle(card);
+			backend.renderNow();
+
+			later.set(false);
+			driver.ack = true;
+			backend.renderNow();
+			expect(driver.history).toEqual([]);
+			expect(driver.viewport).toEqual(lines("card", 3));
+			expect(backend.contentInHistory(card)).toBe(false);
+		} finally {
+			backend.stop();
+			surface.dispose();
+		}
+	});
+
+	it("does not count an empty block committed between others as content in history", () => {
+		const { backend, surface } = setup(() => [
+			<rows key="a" lines={lines("a", 4)} />,
+			<rows key="empty" lines={[]} />,
+			<rows key="b" lines={lines("b", 4)} />,
+			<rows key="c" lines={lines("c", 5)} />,
+		]);
+		try {
+			const [a, empty, b] = surface.main();
+			for (const node of [a!, empty!, b!]) settle(node);
+			backend.renderNow();
+			expect(backend.retired(empty!)).toBe(true);
+			expect(backend.contentInHistory(a!)).toBe(true);
+			expect(backend.contentInHistory(empty!)).toBe(false);
+			expect(backend.contentInHistory(b!)).toBe(true);
+		} finally {
+			backend.stop();
+			surface.dispose();
+		}
+	});
 });
 
 describe("append-only contract of the stable head (§2.4, Lemma 4.6(i))", () => {
@@ -342,6 +443,8 @@ describe("append-only contract of the stable head (§2.4, Lemma 4.6(i))", () => 
 		"a loose ordered list taking its next item": "1. one\n\n   continued\n\n2. two\n\nEnd\n",
 		"display math holding a blank line": "$$\nx = 1\n\ny = 2\n$$\n\nafter\n",
 		"indented code continuing after a blank line": "para\n\n    code\n\n    more code\n\nend\n",
+		"a code line growing into a longer closing fence": "```ts\nconst a = 1;\n``\n````\n\nafter\n",
+		"a code line that only starts like a closing fence": "```ts\nconst a = 1;\n```x\nconst b = 2;\n```\n",
 	};
 	for (const name in UNSOUND) {
 		it(`ES-03 never changes a row it reported stable: ${name}`, () => {
@@ -388,6 +491,24 @@ describe("append-only contract of the stable head (§2.4, Lemma 4.6(i))", () => 
 		expect(driver.transcript).toContain("2. two");
 		backend.stop();
 	});
+
+	// #13676: a fenced code block streamed taller than the screen showed none of its early lines,
+	// on screen or in scrollback, until the block ended. Models often open the fence right under
+	// their intro, with no blank line between them.
+	for (const intro of ["Intro.\n\n", "Intro.\n"]) {
+		it(`moves the finished lines of a fenced code block into history while it streams (${JSON.stringify(intro)})`, () => {
+			const code = lines("const v", 30);
+			const text = signal(`${intro}\`\`\`ts\n`);
+			const { driver, backend } = setup(() => <md key="answer" text={text} stream />);
+			for (const line of code) {
+				text.set(`${text()}${line}\n`);
+				backend.renderNow();
+			}
+			const reachable = driver.transcript.map(row => row.trim()).filter(row => row.startsWith("const v"));
+			expect(reachable).toEqual(code);
+			backend.stop();
+		});
+	}
 
 	// AppendStable is enabled only while D > h (§3.4): the separator rows written with the head's
 	// first rows relieve pressure too, and are not counted.

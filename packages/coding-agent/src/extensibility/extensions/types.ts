@@ -75,6 +75,7 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
 import type { KeyEvent } from "@oh-my-pi/pi-tui";
+import type { MouseTracking } from "@oh-my-pi/pi-tui/driver/io";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import type { Keybinding } from "../../config/keybindings/app-keybindings";
 import type { AutocompleteItem, AutocompleteProvider } from "../../autocomplete/autocomplete";
@@ -85,7 +86,12 @@ import type { ComposerDecorator, SubmitTransform } from "../../ui/composer/compo
 import type { ComposerShape } from "../../ui/styles/composer/shapes";
 import type { CodeReviewAnnotation, TextReviewAnnotation } from "../custom-commands/bundled/annotate/annotation-types";
 export type { ComposerDecoration, ComposerDecorator, SubmitTransform } from "../../ui/composer/composer";
-export type { ComposerChromeContext, ComposerRowContext, ComposerShape } from "../../ui/styles/composer/shapes";
+export type {
+	ComposerChromeContext,
+	ComposerRowContext,
+	ComposerRowRender,
+	ComposerShape,
+} from "../../ui/styles/composer/shapes";
 import type { ModelRegistry, ProviderConfigInput } from "../../config/model-registry";
 import type { EditToolDetails } from "../../tools/details/edit";
 import type { PythonResult } from "../../eval/py/executor";
@@ -105,7 +111,7 @@ import type { BashToolInput, GlobToolInput, GrepToolInput, ReadToolInput, WriteT
 import type { GlobToolDetails } from "../../tools/details/glob";
 import type { GrepToolDetails } from "../../tools/details/grep";
 import type { ReadToolDetails } from "../../tools/details/read";
-import type { TodoPhase } from "../../tools/details/todo";
+import type { TodoOperation, TodoPhase } from "../../tools/details/todo";
 import type { ApprovalMode } from "../../tools/approval";
 import type { BashToolDetails } from "../../tools/details/bash";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
@@ -296,6 +302,8 @@ export interface ExtensionOverlayHandle {
 	readonly closed: boolean;
 	/** Close the overlay (idempotent); the `custom()` promise stays pending until `done` is called. */
 	close(): void;
+	/** Whether keyboard focus is on the overlay or a node inside it (false once closed). */
+	isFocused(): boolean;
 }
 
 /** Options for `ExtensionUIContext.custom()`. */
@@ -304,6 +312,8 @@ export interface ExtensionCustomOptions {
 	overlay?: boolean;
 	/** Take the whole screen (the terminal's alternate screen) while the overlay is open. */
 	fullscreen?: boolean;
+	/** Terminal mouse reporting while the overlay is open; omitted inherits the underlying mode. */
+	mouse?: MouseTracking;
 	/** Invoked with the overlay handle once the overlay is open (overlay mode only). */
 	onHandle?: (handle: ExtensionOverlayHandle) => void;
 	/** Abort the custom UI and reject its promise. */
@@ -495,7 +505,7 @@ export interface ExtensionUIContext {
 	/**
 	 * Paste text into the core input editor.
 	 *
-	 * Interactive mode should route through the editor's paste handling (e.g. large paste markers).
+	 * Interactive mode should route through the editor's paste handling (e.g. large pastes collapse into a chip).
 	 * Non-interactive modes may fall back to replacing the editor text.
 	 */
 	pasteToEditor(text: string): void;
@@ -626,6 +636,12 @@ export interface ExtensionModelQuery {
 
 /** Runtime host mode exposed to Pi-compatible extensions. */
 export type ExtensionMode = "tui" | "rpc" | "json" | "print";
+
+/** Host wiring for the owning session's async jobs, backing `ctx.getAsyncJobSnapshot`/`ctx.cancelAsyncJob`. */
+export interface ExtensionAsyncJobAccess {
+	getSnapshot(): AsyncJobSnapshot | null;
+	cancel(id: string): boolean;
+}
 
 /**
  * The agent a session runs. Extension factories are rebound to every subagent session
@@ -837,6 +853,11 @@ export interface ExtensionContext {
 	getContextUsage(): ContextUsage | undefined;
 	/** Get a read-only snapshot of async jobs owned by this session. */
 	getAsyncJobSnapshot(): AsyncJobSnapshot | null;
+	/**
+	 * Cancel a running async job this session owns (an id from {@link getAsyncJobSnapshot}), as `/jobs kill <id>`
+	 * does. Returns false when this session owns no running job by that id, or no session owns the context.
+	 */
+	cancelAsyncJob(id: string): boolean;
 	/** Compact the session context (interactive mode shows UI). */
 	compact(instructionsOrOptions?: string | CompactOptions): Promise<void>;
 	/** Whether UI is available (false in print/RPC mode) */
@@ -1287,6 +1308,10 @@ export interface BeforeSubagentSpawnEvent {
 	patterns: string[];
 	/** Stable per-spawn key for deterministic selection, when the caller supplies one. */
 	spawnKey?: string;
+	/** ID of the `task` tool call that dispatched this child; absent for eval and direct SDK spawns. */
+	parentToolCallId?: string;
+	/** Position of this child's item in that call's `tasks[]` (0 for the flat shape); set with `parentToolCallId`. */
+	itemIndex?: number;
 }
 
 export type {
@@ -1648,6 +1673,20 @@ export interface ModeChangedEvent {
 	state: SessionModeState;
 }
 
+/**
+ * The interactive TUI switched the session it shows: focused a subagent, hopped to another one,
+ * or returned to the main session. Fires on the main session once the new view is attached.
+ */
+export interface AgentViewChangedEvent {
+	type: "agent_view_changed";
+	/** Agent now shown; undefined for the main session. */
+	agentId: string | undefined;
+	/** Agent shown before; undefined for the main session. */
+	previousAgentId: string | undefined;
+	/** Session id of the session now shown. */
+	sessionId: string;
+}
+
 interface ToolEventIdentity {
 	toolCallId: string;
 	/** ID of the eval or kernel-defined tool invocation that dispatched this call. Absent for direct calls. */
@@ -1834,7 +1873,8 @@ export type ExtensionEvent =
 	| PlanReviewResolvedEvent
 	| AskRequestedEvent
 	| AskResolvedEvent
-	| ModeChangedEvent;
+	| ModeChangedEvent
+	| AgentViewChangedEvent;
 
 // ============================================================================
 // Event Results
@@ -1926,9 +1966,27 @@ export type {
 // `getArgumentCompletions` and bind handlers to ExtensionCommandContext.
 export interface RegisteredCommand {
 	name: string;
+	/** Path of the extension that registered the command. */
+	extensionPath: string;
 	description?: string;
 	getArgumentCompletions?: (argumentPrefix: string) => AutocompleteItem[] | null;
 	handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
+}
+
+/** What a `todo` tool call is about to change, as handed to {@link TodoBackendDefinition.apply}. */
+export interface TodoBackendChange {
+	op: Exclude<TodoOperation, "view">;
+	/** The list omp holds now. */
+	previous: TodoPhase[];
+	/** The list omp commits if the backend accepts. */
+	next: TodoPhase[];
+}
+
+/** What {@link TodoBackendDefinition.apply} returns: `{ block: true, reason }` refuses the call, as a `tool_call` handler blocks one. */
+export interface TodoBackendApplyResult {
+	block?: boolean;
+	/** Shown to the model on one line. */
+	reason?: string;
 }
 
 /**
@@ -1956,6 +2014,17 @@ export interface TodoBackendDefinition {
 	 * up after the `session_shutdown` handler timeout, without an error.
 	 */
 	replace(phases: TodoPhase[], ctx: ExtensionContext): void | Promise<void>;
+	/**
+	 * Optional veto, asked before the main session's model commits a change with a `todo` call,
+	 * eval cells included. Return `{ block: true, reason }` to refuse; a throw is an extension
+	 * error and fails the call without refusing it. omp commits `next` only on an accept within
+	 * `min(10s, the extension handler timeout)` of an unchanged list. Writes here are tolerated:
+	 * omp resyncs through `replace` after every outcome. Full contract: `docs/extensions.md`.
+	 */
+	apply?(
+		change: TodoBackendChange,
+		ctx: ExtensionContext,
+	): TodoBackendApplyResult | void | Promise<TodoBackendApplyResult | void>;
 }
 
 // ============================================================================
@@ -1966,7 +2035,7 @@ export interface TodoBackendDefinition {
 export type ExtensionHandler<E, R = undefined> = (event: E, ctx: ExtensionContext) => Promise<R | void> | R | void;
 
 /** Service tiers accepted by each provider family. */
-export type ExtensionServiceTier<Family extends ServiceTierFamily> = Family extends "anthropic"
+export type ExtensionServiceTier<Family extends ServiceTierFamily> = Family extends "anthropic" | "devin"
 	? "priority"
 	: Family extends "google"
 		? "flex" | "priority"
@@ -2089,6 +2158,7 @@ export interface ExtensionAPI {
 	on(event: "ask_requested", handler: ExtensionHandler<AskRequestedEvent>): void;
 	on(event: "ask_resolved", handler: ExtensionHandler<AskResolvedEvent>): void;
 	on(event: "mode_changed", handler: ExtensionHandler<ModeChangedEvent>): void;
+	on(event: "agent_view_changed", handler: ExtensionHandler<AgentViewChangedEvent>): void;
 	on(event: "tool_call", handler: ExtensionHandler<ToolCallEvent, ToolCallEventResult>): void;
 	on(event: "tool_result", handler: ExtensionHandler<ToolResultEvent, ToolResultEventResult>): void;
 	on(event: "user_bash", handler: ExtensionHandler<UserBashEvent, UserBashEventResult>): void;
@@ -2239,8 +2309,9 @@ export interface ExtensionAPI {
 	 * full. Never mutate the block's `args` or `result`: they are omp's live objects. omp may ask
 	 * again at any time (a transcript rebuild, a data change) and keeps no earlier answer: answer
 	 * from the block and the extension's own state only, keyed by block id rather than by run. A
-	 * block the user expanded is always drawn in full, and `display.hideToolActivity` still hides
-	 * tool activity. A focused subagent, a collab guest and the transcript overlays draw stock
+	 * block the user expanded is always drawn in full, and `display.toolActivity: hidden` still hides
+	 * tool activity; a tool call no presenter answers for draws as `display.toolActivity` says (one
+	 * activity row under `concise`). A focused subagent, a collab guest and the transcript overlays draw stock
 	 * cards. Display only: the session, exports and model context are unchanged. Returns a
 	 * disposer that removes the presenter. Presenters run synchronously while the transcript draws,
 	 * so keep them cheap. Interactive mode only, and only while the
@@ -2330,7 +2401,11 @@ export interface ExtensionAPI {
 	/** Set the current model. Returns false if no API key available. */
 	setModel(model: Model): Promise<boolean>;
 
-	/** Get current thinking level. */
+	/**
+	 * Get current thinking level.
+	 * Returns `undefined` when the active model has no concrete effort to report
+	 * (e.g. a model limited to off/auto with `auto` selected), or before a session model is initialized.
+	 */
 	getThinkingLevel(): ThinkingLevel | undefined;
 
 	/** Set thinking level for the current session. */
@@ -2370,7 +2445,7 @@ export interface ExtensionAPI {
 	 * // Own an existing provider's wire requests and flip a KDL rule for its models
 	 * pi.registerProvider("google-generative-ai", {
 	 *   stream: myGeminiStream,
-	 *   rules: { "prompt-perturbation": true },
+	 *   rules: { "requires-native-tools": true },
 	 * });
 	 *
 	 * @example

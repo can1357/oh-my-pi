@@ -3,7 +3,8 @@
  * The composer: the prompt field and its state.
  *
  * One `col` node (role `omp.editor`, `omp.editor.bash|python|btw-ask` in
- * a draft mode, tone `pending` while a turn runs) holding the `line` row (mode
+ * a draft mode, tone `pending` while a turn runs) holding the `focus` row
+ * (the viewing header, while a subagent is viewed), the `line` row (mode
  * chip and the `editor` field), the `bar` row (status facts the app slots
  * in, then Send or Stop) and, while completing, the `complete` popup. A Tern
  * terminal draws it natively; the terminal backend paints it with the
@@ -11,16 +12,17 @@
  * popup under it.
  *
  * The composer owns the draft: text and caret (edits from the field apply
- * here; deleting into a paste marker or chip deletes all of it), undo,
- * prompt history (Up on an empty draft or the first row of a recalled one,
- * Down on its last row), collapsed pastes and attachment chips, completion
+ * here; deleting into a chip deletes all of it), undo, prompt history (Up on
+ * an empty draft or the first row of a recalled one, Down on its last row),
+ * attachment chips (a large paste collapses into one), completion
  * (`/command`, `@path`), Vim modes and submission.
  *
  * Extension hooks: {@link Composer.addKeyHandler} (consulted before the
- * composer's own bindings), {@link Composer.addDecorator} (styled ranges over
- * the draft), {@link Composer.setSubmitTransform} (rewrite or cancel what is
- * sent) and the shape ({@link Composer.setShape}; shapes are registered with
- * `registerComposerShape`).
+ * composer's own bindings), {@link Composer.addPasteHandler} (consulted
+ * before a paste is typed or collapsed), {@link Composer.addDecorator}
+ * (styled ranges over the draft), {@link Composer.setSubmitTransform}
+ * (rewrite or cancel what is sent) and the shape ({@link Composer.setShape};
+ * shapes are registered with `registerComposerShape`).
  */
 import {
 	type Accessor,
@@ -47,9 +49,14 @@ import {
 } from "@oh-my-pi/pi-tui/term/painters/editor";
 import { lineStart, nextBoundary } from "@oh-my-pi/pi-tui/term/widgets/editor";
 import { flattenLine, stripControl } from "@oh-my-pi/pi-tui/text/sanitize";
-import type { TspEditorDecoration, TspEffect, TspSpan, TspText } from "@oh-my-pi/pi-wire";
+import type { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { isSingleGrapheme } from "@oh-my-pi/pi-utils/graphemes";
+import type { TspEditorDecoration, TspEffect, TspPickerLevel, TspSpan, TspText } from "@oh-my-pi/pi-wire";
 import { terminalIdentity } from "@oh-my-pi/pi-tui/driver/session";
 import "../styles/composer";
+import type { UnifiedMentionSnapshot } from "../../autocomplete/mentions/engine";
+import { MENTION_STYLES } from "../../autocomplete/mentions/style";
+import type { MentionItem } from "../../autocomplete/mentions/types";
 import {
 	extractAtFilePrefix,
 	isDirectoryCompletionValue,
@@ -58,9 +65,11 @@ import {
 	subsequenceMatch,
 } from "../../autocomplete/tokens";
 import { getKeybindings } from "../../config/keybindings/keybindings";
+import { thinkingDotToken } from "../../modes/view-model/overlays/model-browser";
+import { AUTO_THINKING } from "../../thinking/levels";
 import { fileUriForTerminal } from "../../utils/file-links";
 import type { ComposerTerm } from "../styles/composer/frame";
-import type { PopupItemTerm, PopupTerm } from "../styles/composer/popup";
+import type { MentionPopupTerm, PopupItemTerm, PopupTerm } from "../styles/composer/popup";
 import { type ComposerStatus, caretOverflow, composerShape } from "../styles/composer/shapes";
 import {
 	type Atom,
@@ -70,8 +79,10 @@ import {
 	chipLabel,
 	collapsesPaste,
 	type DraftImage,
+	draftImageBlob,
 	expandAtoms,
-	pasteMarker,
+	type PixelSize,
+	withMarkerPixelSize,
 } from "./attachments";
 import { untilAborted } from "@oh-my-pi/pi-utils/abortable";
 import * as logger from "@oh-my-pi/pi-utils/logger";
@@ -85,7 +96,15 @@ import {
 import type { VimMode } from "./vim";
 import { UndoHistory, type UndoStacks, VimEditor } from "./vim-editor";
 import { holdText, SpaceHoldGesture, type SpaceHoldHandler } from "../../config/keybindings/space-hold";
-import { actionKey, formatTooltipKey } from "../keys/hints";
+import { MAIN_AGENT_ID } from "../../registry/agent-hub-types";
+import { actionKbd, actionKey, formatTooltipKey } from "../keys/hints";
+
+/**
+ * Action prefix of the viewing header's links: `focus:<agent id>` views that agent, the main
+ * agent's id ({@link MAIN_AGENT_ID}) goes back to the main session. The app handles them
+ * ({@link Composer.addActionHandler}).
+ */
+export const FOCUS_ACTION = "focus:";
 
 /** Live state the composer shows (set by the app). */
 export interface ComposerState {
@@ -99,11 +118,22 @@ export interface ComposerState {
 	readonly shell?: { readonly kind: "bash" | "python" | "btw"; readonly excluded?: boolean };
 	/** Drafts go to the `/btw` note the user clicked, as its follow-ups: role `omp.editor.btw`, a `btw` chip that leads back to the chat. */
 	readonly btw?: boolean;
+	/**
+	 * The viewed subagent's lineage, outermost first and the viewed agent last; undefined on the main
+	 * session. Natively the viewing header (`omp.composer.focus`) names it over the draft.
+	 */
+	readonly viewing?: readonly string[];
+	/**
+	 * Sending the draft skips the ask waiting above the composer: natively a `skips ask` chip leads
+	 * the input and Send reads Skip & send (`omp.composer.skip`).
+	 */
+	readonly skipsAsk?: boolean;
 }
 
 /** Whether two composer states draw the same composer (see {@link ComposerState}). */
 function sameComposerState(a: ComposerState, b: ComposerState): boolean {
-	if (a.running !== b.running || a.btw !== b.btw) return false;
+	if (a.running !== b.running || a.btw !== b.btw || a.skipsAsk !== b.skipsAsk) return false;
+	if (a.viewing?.length !== b.viewing?.length || a.viewing?.some((id, i) => id !== b.viewing?.[i])) return false;
 	if (a.shell === b.shell) return true;
 	return (
 		a.shell !== undefined &&
@@ -143,6 +173,8 @@ export interface ComposerDecoration {
 	 */
 	readonly gradient?: { readonly stops: readonly string[]; readonly periodMs?: number };
 	readonly fx?: TspEffect;
+	/** Terminal-only text drawn in place of the range (see {@link EditorTermRange.label}); Tern draws the range. */
+	readonly label?: string;
 }
 
 /** Decorations for the draft `text`. */
@@ -150,6 +182,9 @@ export type ComposerDecorator = (text: string) => readonly ComposerDecoration[];
 
 /** A key handler consulted before the composer's bindings; true takes the key. */
 export type ComposerKeyHandler = (key: KeyEvent, composer: Composer) => boolean;
+
+/** A paste handler consulted before the composer types or collapses the paste; true takes it. */
+export type ComposerPasteHandler = (paste: PasteEvent, composer: Composer) => boolean;
 
 /** An edit typed or pasted into the field: `[from, to)` of the old draft became `insert`. */
 export interface ComposerEdit {
@@ -209,6 +244,19 @@ export interface ComposerWordCompletion {
 /** `[Image #N…]` / `[Video #N…]` reference markers in submitted text (with a legacy ` attachment://N` after them). */
 const VISION_MARKER = /\[(Image|Video) #([1-9]\d*)((?:,[^\]\n]*)?)\](?: attachment:\/\/\2(?!\d))?/g;
 
+function isMentionItem(item: unknown): item is MentionItem {
+	return (
+		typeof item === "object" && item !== null && "category" in item && "insertText" in item && "pickerItem" in item
+	);
+}
+
+/** Whether `open` is the bare `@` category list, whose rows Tab cycles instead of accepting. */
+function isCategoryList(open: Completion): boolean {
+	return (
+		open.mention?.query === "" && open.items.every(item => isMentionItem(item) && item.isNamespaceShortcut === true)
+	);
+}
+
 /** A token of the draft that shows as a chip (`/skill:name` as `🧩 name`) and is sent as `expansion`. */
 export interface DraftToken {
 	/** UTF-16 range of the token in the text it was found in. */
@@ -264,6 +312,8 @@ export interface ComposerOptions {
 	readonly autocompleteMaxVisible?: number;
 	/** `drawn`: the caret is drawn in the text (default); `terminal`: the hardware cursor alone shows it. */
 	readonly caret?: "drawn" | "terminal";
+	/** `tui.imeSafeCursor`: move the box bottom border to its own row at the end of input. */
+	readonly imeSafeCursor?: boolean;
 	/** Symbol lookup for chip glyphs (the theme's `symbols.symbol`). */
 	readonly symbol?: (key: string) => string;
 	readonly onSubmit?: (text: string) => void;
@@ -342,11 +392,13 @@ export class Composer {
 	readonly #linksRevision = signal(0);
 	/** The terminal's hint in an empty draft (the app's live composer hint). */
 	readonly #placeholder = signal<TspText | undefined>(undefined);
+	/** A passing state the terminal shows in the hint's place, over a prediction too (the history loading). */
+	readonly #notice = signal<TspText | undefined>(undefined);
 	/** What Tern shows in an empty draft (the session's title, who the draft goes to); undefined: the default. */
 	readonly #nativePlaceholder = signal<TspText | undefined>(undefined);
 
 	readonly #atoms: Signal<readonly Atom[]> = signal<readonly Atom[]>([]);
-	readonly #counts: Record<ChipKind | "marker", number> = { paste: 0, image: 0, video: 0, marker: 0 };
+	readonly #counts: Record<ChipKind, number> = { paste: 0, image: 0, video: 0 };
 	/** Images the draft's chips stand for. */
 	readonly pendingImages: DraftImage[] = [];
 	/** Each pending image's source link (a file path or URL), parallel to {@link pendingImages}. */
@@ -381,6 +433,8 @@ export class Composer {
 	readonly #completion: Signal<Completion | null> = signal<Completion | null>(null);
 	#completionRequest: AbortController | undefined;
 	#forceFiles = false;
+	/** Offset of the bare `@` whose Files tile the user picked: that token lists files until it ends. */
+	#filesAt: number | undefined;
 
 	readonly #vimLayer: VimEditor;
 	readonly #vimOn: Signal<boolean>;
@@ -399,8 +453,10 @@ export class Composer {
 	readonly #disableSubmit: Signal<boolean>;
 	readonly #caret: Signal<"drawn" | "terminal">;
 	readonly #slots = signal<ComposerSlots>({});
+	readonly #imeSafeCursor: Signal<boolean>;
 
 	readonly #keyHandlers: ComposerKeyHandler[] = [];
+	readonly #pasteHandlers: ComposerPasteHandler[] = [];
 	readonly #editListeners: ComposerEditListener[] = [];
 	/** The open popup lists replacements for a range of the draft. */
 	#replacing: ReplacementPicker | undefined;
@@ -417,6 +473,7 @@ export class Composer {
 		this.#disableSubmit = signal(options.disableSubmit === true);
 		this.#caret = signal(options.caret ?? "drawn");
 		this.#autocomplete = options.autocomplete;
+		this.#imeSafeCursor = signal(options.imeSafeCursor === true);
 		this.#placeholder.set(options.placeholder);
 		for (const entry of options.history ?? []) this.addToHistory(entry);
 		this.#vimOn = signal(options.vim === true);
@@ -550,10 +607,18 @@ export class Composer {
 
 	// ─── Attachments ────────────────────────────────────────────────────────
 
+	/**
+	 * The token of chip `n` of `kind` in this composer's glyphs (the symbol preset's `chip.*`, see
+	 * {@link ComposerOptions.symbol}): what an attachment the app inserts ({@link insertAtom}) is labelled.
+	 */
+	chipLabel(kind: ChipKind, n: number): string {
+		return chipLabel(kind, n, this.#options.symbol);
+	}
+
 	/** Attach `content` as a text chip at the caret; the submission carries `expansion` (default: the content). */
 	insertTextAttachment(content: string, expansion: string = content): void {
 		const n = ++this.#counts.paste;
-		const label = chipLabel("paste", n, this.#options.symbol);
+		const label = this.chipLabel("paste", n);
 		this.#atoms.set([
 			...this.#atoms(),
 			{ label, kind: "paste", n, expansion, ...(expansion !== content ? { content } : {}) },
@@ -562,8 +627,8 @@ export class Composer {
 	}
 
 	/**
-	 * Insert an atom labelled `label` (a chip of `kind`, or a marker) expanding to `expansion` on
-	 * submit. An image joins {@link pendingImages} with its source `link`.
+	 * Insert an atom labelled `label` (a chip of `kind`, a text chip by default) expanding to
+	 * `expansion` on submit. An image joins {@link pendingImages} with its source `link`.
 	 */
 	insertAtom(
 		label: string,
@@ -587,7 +652,7 @@ export class Composer {
 		]);
 	}
 
-	/** The draft with every atom (paste marker, chip) replaced by what it stands for. */
+	/** The draft with every atom (chip, token) replaced by what it stands for. */
 	expandedText(): string {
 		return expandAtoms(this.#text(), this.#atoms());
 	}
@@ -623,7 +688,7 @@ export class Composer {
 						const n = Number(idx);
 						if (n > count) return match;
 						const chipKind: ChipKind = kind === "Video" ? "video" : "image";
-						const label = chipLabel(chipKind, n, this.#options.symbol);
+						const label = this.chipLabel(chipKind, n);
 						this.#counts[chipKind] = Math.max(this.#counts[chipKind], n);
 						// The chip stands for the marker alone: a legacy `attachment://N` after it goes.
 						const marker = match.replace(/ attachment:\/\/\d+$/, "");
@@ -694,6 +759,7 @@ export class Composer {
 	setAutocomplete(provider: AutocompleteProvider | undefined): void {
 		this.#autocomplete = provider;
 		this.#closeCompletion();
+		provider?.warmMentions?.();
 		// The startup composer can already contain a token when the live providers arrive.
 		if (provider && this.#text() && (!this.#vim || this.#vim.mode() === "insert")) this.#afterEdit("", false);
 	}
@@ -800,6 +866,11 @@ export class Composer {
 	/** The hint an empty draft shows in the terminal (`undefined`: none). */
 	setPlaceholder(placeholder: TspText | undefined): void {
 		this.#placeholder.set(placeholder);
+	}
+
+	/** Show `notice` in an empty draft's hint place, a prediction's included, until cleared with `undefined`. */
+	setNotice(notice: TspText | undefined): void {
+		this.#notice.set(notice);
 	}
 
 	/** What Tern shows in an empty draft (`undefined`: the default question). */
@@ -976,21 +1047,23 @@ export class Composer {
 		this.#atomizer = atomizer;
 	}
 
-	/** The attachments the draft's chips stand for, in insertion order (collapsed pastes are not chips). */
+	/** The attachments the draft's chips stand for, in insertion order (token chips are not attachments). */
 	chips(): readonly Atom[] {
 		const text = this.#text();
-		return this.#atoms().filter(atom => atom.kind !== "marker" && atom.kind !== "token" && text.includes(atom.label));
+		return this.#atoms().filter(atom => atom.kind !== "token" && text.includes(atom.label));
 	}
 
+	/**
+	 * A paste into the field: the app's handlers first ({@link addPasteHandler}), then a large
+	 * one collapses into a text chip; anything else is left for the field to type.
+	 */
 	#onPaste(paste: PasteEvent): boolean {
 		this.#jump = undefined;
+		for (const handler of this.#pasteHandlers) if (handler(paste, this)) return true;
 		const text = paste.text.replace(/\r\n?/g, "\n");
 		if (!collapsesPaste(text)) return false;
-		const n = ++this.#counts.marker;
-		const label = pasteMarker(n, text);
-		this.#atoms.set([...this.#atoms(), { label, kind: "marker", n, expansion: text }]);
 		this.#closeCompletion();
-		this.#insert(label);
+		this.insertTextAttachment(text);
 		return true;
 	}
 
@@ -1088,11 +1161,30 @@ export class Composer {
 		return at === -1 ? undefined : this.pendingImageLinks[at];
 	}
 
+	/**
+	 * Make `image`, `size` pixels, what image chip `atom` stands for (Tern's annotator handed back
+	 * the annotated picture, maybe cropped or grown): it takes the old image's place among
+	 * {@link pendingImages}, its link is resolved anew, and the chip keeps its label and number
+	 * while its marker states the new size. An atom no longer in the draft, or whose image is no
+	 * longer pending, is ignored.
+	 */
+	replaceImage(atom: Atom, image: DraftImage, size: PixelSize): void {
+		const atoms = this.#atoms.peek();
+		const index = atoms.indexOf(atom);
+		const at = atom.image ? this.pendingImages.indexOf(atom.image) : -1;
+		if (index === -1 || at === -1) return;
+		this.pendingImages[at] = image;
+		this.pendingImageLinks[at] = undefined;
+		const expansion = atom.expansion === undefined ? undefined : withMarkerPixelSize(atom.expansion, size);
+		this.#atoms.set(atoms.with(index, { ...atom, image, expansion }));
+		this.relinkImages();
+	}
+
 	/** Make `state` the draft's atoms and attachments (chip numbering continues after them). */
 	#restoreState(state: DraftState | undefined): void {
 		const atoms = state?.atoms ?? [];
 		this.#atoms.set(atoms);
-		for (const kind of ["paste", "image", "video", "marker"] as const)
+		for (const kind of ["paste", "image", "video"] as const)
 			this.#counts[kind] = Math.max(0, ...atoms.filter(atom => atom.kind === kind).map(atom => atom.n));
 		this.pendingImages.splice(0, this.pendingImages.length, ...(state?.images ?? []));
 		this.pendingImageLinks.splice(0, this.pendingImageLinks.length, ...(state?.links ?? []));
@@ -1111,7 +1203,7 @@ export class Composer {
 		this.#revision++;
 		this.#atoms.set([]);
 		this.#recalledState = false;
-		for (const kind of ["paste", "image", "video", "marker"] as const) this.#counts[kind] = 0;
+		for (const kind of ["paste", "image", "video"] as const) this.#counts[kind] = 0;
 		this.pendingImages.length = 0;
 		this.pendingImageLinks.length = 0;
 		this.#linksRevision.set(this.#linksRevision.peek() + 1);
@@ -1183,6 +1275,7 @@ export class Composer {
 		this.#completionRequest?.abort();
 		this.#completionRequest = undefined;
 		this.#forceFiles = false;
+		this.#filesAt = undefined;
 		if (this.#completion() !== null) this.#completion.set(null);
 	}
 
@@ -1220,6 +1313,51 @@ export class Composer {
 			});
 		};
 
+		const showMention = (snapshot: UnifiedMentionSnapshot | null, isFinal: boolean) => {
+			if (!current()) return;
+			if (!snapshot) {
+				this.#completion.set(null);
+				return;
+			}
+			if (snapshot.items.length === 0) {
+				if (isFinal && !snapshot.mention.loading) this.#completion.set(null);
+				return;
+			}
+			const open = this.#completion.peek();
+			const sameQuery = open?.mention?.prefix === snapshot.prefix;
+			const selectedValue = sameQuery ? open.items[open.selected]?.value : undefined;
+			const kept = selectedValue === undefined ? -1 : snapshot.items.findIndex(item => item.value === selectedValue);
+			// Anti-thrash focus stability: once the user navigated or >120ms elapsed since the query
+			// opened, late async updates never yank the highlight away from the current item.
+			const lockFocus =
+				sameQuery && (Boolean(open.chosen) || (open.openedAt !== undefined && Date.now() - open.openedAt > 120));
+			const nextSelected =
+				kept >= 0 && (lockFocus || kept === 0) ? kept : Math.max(0, kept >= 0 && sameQuery ? kept : 0);
+			const preservedEffort = sameQuery && kept === nextSelected ? open.effortOverride : undefined;
+			// Skip redundant reactive updates when the visible palette snapshot is unchanged.
+			if (
+				open?.mention &&
+				open.prefix === snapshot.prefix &&
+				open.selected === nextSelected &&
+				open.effortOverride === preservedEffort &&
+				open.mention.loading === snapshot.mention.loading &&
+				open.items.length === snapshot.items.length &&
+				open.items.every((prev, i) => prev.value === snapshot.items[i]?.value)
+			) {
+				return;
+			}
+			this.#completion.set({
+				items: snapshot.items,
+				prefix: snapshot.prefix,
+				selected: nextSelected,
+				chosen: kept >= 0 && sameQuery ? open.chosen : false,
+				revision,
+				mention: snapshot.mention,
+				effortOverride: preservedEffort,
+				openedAt: sameQuery && open.openedAt !== undefined ? open.openedAt : Date.now(),
+			});
+		};
+
 		try {
 			const commandName = inSubmittedSlashContext(before, lines, line) && !before.trimStart().includes(" ");
 			// A second Tab on an @ token with no selectable row must be able to start
@@ -1236,6 +1374,51 @@ export class Composer {
 					return;
 				}
 			}
+
+			// Unified `@`, `^`, and `#<N>` mention palette: Tier 0 sync frame + streaming async refinement.
+			// An `@` pinned to Files keeps listing files while it is the token at the caret.
+			const atPrefix = extractAtFilePrefix(before);
+			const pinned = atPrefix !== null && cursor - atPrefix.length === this.#filesAt;
+			if (!pinned) this.#filesAt = undefined;
+			const lock = pinned ? "files" : undefined;
+			if (regular && provider.trySyncMentionCompletion) {
+				const syncResult = provider.trySyncMentionCompletion(lines, line, col, lock);
+				if (syncResult) {
+					const alreadyOpen = this.#completion.peek()?.mention !== undefined;
+					if (!syncResult.hasAsyncPending || !provider.getMentionSuggestions) {
+						showMention(syncResult, true);
+						return;
+					}
+					// When already open and refining `@…`, hold briefly (45ms) for fast native
+					// fuzzyFind to settle so keystrokes paint once instead of flashing sync→async.
+					const shouldDeferInterim = alreadyOpen && syncResult.query.query.length > 0;
+					if (!shouldDeferInterim) {
+						showMention(syncResult, false);
+					}
+					let gotAsync = false;
+					const asyncTask = provider.getMentionSuggestions(
+						lines,
+						line,
+						col,
+						signal,
+						partial => {
+							gotAsync = true;
+							showMention(partial, false);
+						},
+						lock,
+					);
+					if (shouldDeferInterim) {
+						const settled = await Promise.race([asyncTask.then(() => true), Bun.sleep(45).then(() => false)]);
+						if (!current()) return;
+						if (!settled && !gotAsync) showMention(syncResult, false);
+					}
+					const final = await asyncTask;
+					if (!current()) return;
+					showMention(final, true);
+					return;
+				}
+			}
+
 			if (regular && MODEL_MENTION_CONTEXT_RE.test(before) && provider.trySyncModelMentionCompletion) {
 				const mention = provider.trySyncModelMentionCompletion(lines, line, col);
 				if (mention.kind !== "unhandled") {
@@ -1332,7 +1515,18 @@ export class Composer {
 			return;
 		}
 		const run = enter && name && value !== SKILL_NAMESPACE && this.#cursor() === this.#text().length;
-		const result = provider.applyCompletion(lines, line, col, item, open.prefix);
+		const mentionItem = open.mention !== undefined && isMentionItem(item) ? item : undefined;
+		// The Files tile has no token: the `@` stays and lists files from here on.
+		if (mentionItem?.isNamespaceShortcut && mentionItem.category === "files") {
+			this.#closeCompletion();
+			this.#filesAt = this.#cursor() - open.prefix.length;
+			void this.#complete();
+			return;
+		}
+		const result =
+			mentionItem && provider.applyMentionCompletion
+				? provider.applyMentionCompletion(lines, line, col, mentionItem, open.prefix, open.effortOverride)
+				: provider.applyCompletion(lines, line, col, item, open.prefix);
 		this.#closeCompletion();
 		const text = result.lines.join("\n");
 		let cursor = result.cursorCol;
@@ -1340,9 +1534,11 @@ export class Composer {
 		this.#change(0, this.#text().length, text, cursor, "edit");
 		this.#atomizeTyped();
 		result.onApplied?.();
+		const isDir = Boolean(mentionItem?.isDirectory) || isDirectoryCompletionValue(value);
+		const isNamespace = Boolean(mentionItem?.isNamespaceShortcut);
 		if (run) this.submit();
-		else if (name) void this.#complete();
-		else if (isDirectoryCompletionValue(value)) {
+		else if (name || isNamespace) void this.#complete();
+		else if (isDir) {
 			if (open.prefix.startsWith("@")) void this.#complete();
 			else if (!enter) void this.#complete(true);
 		}
@@ -1353,6 +1549,31 @@ export class Composer {
 		const provider = this.#autocomplete;
 		if (!provider) return;
 		const at = this.#position();
+		// On the bare `@` category strip, Space picks the lit category as Enter does (the space is not
+		// kept), and typing after cycling to one enters it: `@` + `o` → `@m:o`.
+		const pick = insert === " ";
+		const entered =
+			!deleted && previous && isCategoryList(previous) && (pick || (previous.chosen && !/\s/.test(insert)))
+				? previous.items[previous.selected]
+				: undefined;
+		if (isMentionItem(entered) && at.before.endsWith(`@${insert}`)) {
+			const cursor = this.#cursor();
+			const from = cursor - insert.length - 1;
+			const typed = pick ? "" : insert;
+			if (entered.category === "files") {
+				// The user's keystroke already recorded this undo step.
+				if (pick) this.#change(from + 1, cursor, "", from + 1, "history");
+				this.#filesAt = from;
+				void this.#complete();
+				return;
+			}
+			const replacement = `${entered.insertText}${typed}`;
+			// The user's keystroke already recorded this undo step.
+			this.#change(from, cursor, replacement, from + replacement.length, "history");
+			this.#typingAt = -1;
+			void this.#complete();
+			return;
+		}
 		if (!deleted && insert.length === 1 && provider.trySyncInlineReplace) {
 			let replacement: { replaceLen: number; insert: string } | null = null;
 			try {
@@ -1374,9 +1595,9 @@ export class Composer {
 				return;
 			}
 		}
-		// While a fuzzy walk refreshes, previously offered files that still match the extended
-		// token can be picked immediately. Never re-anchor rows across whitespace or a new `@`.
-		if (!deleted && previous?.prefix.startsWith("@")) {
+		// While a legacy fuzzy walk refreshes, previously offered files that still match the extended
+		// token can be picked immediately. Unified mentions handle prefix narrowing inside the engine.
+		if (!deleted && previous?.prefix.startsWith("@") && !previous.mention) {
 			const token = extractAtFilePrefix(at.before);
 			if (token === previous.prefix + insert) {
 				const query = token.toLowerCase();
@@ -1404,14 +1625,18 @@ export class Composer {
 			return;
 		}
 		const typed =
+			!event.paste &&
 			event.from === event.to &&
 			event.cursor === event.from + event.text.length &&
-			[...new Intl.Segmenter().segment(event.text)].length === 1;
+			isSingleGrapheme(event.text);
 		const force = this.#forceFiles;
 		const previous = event.from === this.#cursor() ? this.#completion.peek() : null;
 		this.#change(event.from, event.to, event.text, event.cursor, typed ? "type" : "edit");
 		this.#atomizeTyped();
-		this.#afterEdit(event.text, event.from < event.to, force, previous);
+		// Pasted text is content, not a request to complete: a trailing `@name` must not turn the
+		// next Enter into a file pick (#20681). Tab still completes it explicitly.
+		if (event.paste) this.#closeCompletion();
+		else this.#afterEdit(event.text, event.from < event.to, force, previous);
 		this.#notifyEdit({ from: event.from, to: event.to, insert: event.text, typed });
 	}
 
@@ -1512,6 +1737,31 @@ export class Composer {
 				this.#closeCompletion();
 				return true;
 			}
+			// The bare `@` category strip: Tab/→ and Shift+Tab/← move the lit category (↑/↓ below too);
+			// Enter or typing picks it.
+			if (isCategoryList(open)) {
+				const back = key.id === "shift+tab" || bindings.matches(key, "tui.editor.cursorLeft");
+				if (back || tab || right) {
+					const count = open.items.length;
+					const selected = (open.selected + (back ? count - 1 : 1)) % count;
+					this.#completion.set({ ...open, selected, chosen: true, effortOverride: undefined });
+					return true;
+				}
+			}
+			// Shift+Left/Right steps thinking effort on a highlighted model row.
+			if (open.mention && (key.id === "shift+left" || key.id === "shift+right")) {
+				const currentItem = open.items[open.selected];
+				const effort = isMentionItem(currentItem) ? currentItem.modelEffort : undefined;
+				if (effort && effort.supported.length > 0) {
+					const ladder: readonly (Effort | "auto")[] = [AUTO_THINKING, ...effort.supported];
+					const active = open.effortOverride ?? effort.selected;
+					const idx = Math.max(0, ladder.indexOf(active));
+					const delta = key.id === "shift+right" ? 1 : -1;
+					const nextEffort = ladder[Math.max(0, Math.min(ladder.length - 1, idx + delta))]!;
+					this.#completion.set({ ...open, effortOverride: nextEffort, chosen: true });
+					return true;
+				}
+			}
 			const count = open.items.length;
 			let selected: number;
 			if (bindings.matches(key, "tui.select.up")) selected = (open.selected + count - 1) % count;
@@ -1535,7 +1785,7 @@ export class Composer {
 				}
 				return false;
 			}
-			this.#completion.set({ ...open, selected, chosen: true });
+			this.#completion.set({ ...open, selected, chosen: true, effortOverride: undefined });
 			return true;
 		}
 		if (submit && key.raw !== "\n") {
@@ -1662,6 +1912,11 @@ export class Composer {
 		this.#caret.set(caret);
 	}
 
+	/** `tui.imeSafeCursor`: move the box bottom border to its own row at the end of input. */
+	setImeSafeCursor(enabled: boolean): void {
+		this.#imeSafeCursor.set(enabled);
+	}
+
 	setDisableSubmit(disabled: boolean): void {
 		this.#disableSubmit.set(disabled);
 	}
@@ -1679,6 +1934,15 @@ export class Composer {
 		return () => {
 			const at = this.#keyHandlers.indexOf(handler);
 			if (at !== -1) this.#keyHandlers.splice(at, 1);
+		};
+	}
+
+	/** Consult `handler` for every paste into the field before the composer types or collapses it; returns its removal. */
+	addPasteHandler(handler: ComposerPasteHandler): () => void {
+		this.#pasteHandlers.push(handler);
+		return () => {
+			const at = this.#pasteHandlers.indexOf(handler);
+			if (at !== -1) this.#pasteHandlers.splice(at, 1);
 		};
 	}
 
@@ -1749,7 +2013,7 @@ export class Composer {
 			const { ranges, extra } = decorations();
 			const out: TspEditorDecoration[] = ranges.map(({ from, to, atom }) =>
 				atom.kind === "image" && atom.image
-					? { from, to, s: "accent strong", blob: imageBlob(atom.image) }
+					? { from, to, s: "accent strong", blob: draftImageBlob(atom.image) }
 					: { from, to, s: (atom.kind === "token" && atom.s) || "accent strong" },
 			);
 			for (const d of extra)
@@ -1763,7 +2027,6 @@ export class Composer {
 			const text = this.#text();
 			const { ranges, extra } = decorations();
 			const out: EditorTermRange[] = ranges.map(({ from, to, atom }) => {
-				if (atom.kind === "marker") return { from, to, s: "accent strong", whole: true };
 				if (atom.kind === "token") {
 					const href = atom.link && chipHref(atom.link.path, atom.link.line);
 					return { from, to, s: atom.s ?? "accent strong", whole: true, ...(href ? { href } : {}) };
@@ -1774,7 +2037,14 @@ export class Composer {
 			});
 			for (const d of extra) {
 				if (d.gradient && d.gradient.stops.length > 0) out.push(...gradientRanges(text, d, d.gradient));
-				else out.push({ from: d.from, to: d.to, s: d.s, ...(d.fg ? { fg: d.fg } : {}) });
+				else
+					out.push({
+						from: d.from,
+						to: d.to,
+						s: d.s,
+						...(d.fg ? { fg: d.fg } : {}),
+						...(d.label ? { label: d.label } : {}),
+					});
 			}
 			return out.sort((a, b) => a.from - b.from);
 		});
@@ -1791,8 +2061,10 @@ export class Composer {
 				decor: termDecor(),
 				caret: terminal ? "none" : m === "insert" || m === "replace" ? "underline" : "block",
 				caretEnd: terminal ? "none" : m === null || m === "insert" || m === "replace" ? "bar" : "block",
-				// Its keys away under the terminal's own cursor, the field draws no hint.
-				placeholder: this.#shownPrediction() || (terminal && this.#faint()) ? null : (this.#placeholder() ?? null),
+				// Its keys away under the terminal's own cursor, the field draws no hint; a notice still shows.
+				placeholder:
+					this.#notice() ??
+					(this.#shownPrediction() || (terminal && this.#faint()) ? null : (this.#placeholder() ?? null)),
 				...(sel ? { selection: { from: sel.from, to: sel.to } } : {}),
 				caretOverflow: caretOverflow(shape(), paddingX),
 				...(this.#caretGlyph() ? { caretGlyph: this.#caretGlyph() } : {}),
@@ -1804,6 +2076,7 @@ export class Composer {
 			...(this.#status() ? { status: this.#status() } : {}),
 			...(this.#border() ? { border: this.#border() } : {}),
 			...(this.#borderFaint() ? { borderFaint: true } : {}),
+			...(this.#imeSafeCursor() && this.#caret() === "terminal" ? { imeSafeCursor: true } : {}),
 			...(this.#faint() ? { faint: true } : {}),
 		}));
 
@@ -1824,6 +2097,20 @@ export class Composer {
 					</row>
 				);
 			}
+			if (!s && this.#state().skipsAsk) {
+				return (
+					<row
+						key="mode"
+						role="omp.composer.mode"
+						tone="warning"
+						align="center"
+						gap="xs"
+						title="Sending this message skips the questions above"
+					>
+						<text key="label" spans={[{ s: "warning", t: "skips ask" }]} wrap="none" />
+					</row>
+				);
+			}
 			if (!s) return null;
 			const title = s.excluded ? `${SHELL_TITLES[s.kind]} · not sent to the model` : SHELL_TITLES[s.kind];
 			return (
@@ -1833,8 +2120,61 @@ export class Composer {
 				</row>
 			);
 		};
+		// The viewing header while a subagent is focused: an eye, the agent's ancestors as links
+		// (`omp.composer.crumb`), the agent itself (`omp.composer.agent`), then the way back to the
+		// main session (`omp.composer.exit`, the interrupt key's keycap: Esc on an empty draft). Tern's
+		// tray reads it: the named agent's card is marked as viewed, and its MAIN bar runs the exit's click.
+		const viewingHeader = (): JSXNode => {
+			const viewing = this.#state().viewing;
+			const agent = viewing?.at(-1);
+			if (viewing === undefined || agent === undefined) return null;
+			const back = formatTooltipKey(getKeybindings().keysFor("app.interrupt")[0] ?? "escape");
+			return (
+				<row
+					key="focus"
+					role="omp.composer.focus"
+					align="center"
+					gap="xs"
+					title={`Viewing subagent ${agent}: what you send goes to it`}
+				>
+					<icon key="icon" name="eye" />
+					<text key="label" text="Viewing" wrap="none" />
+					{viewing.slice(0, -1).map(id => (
+						<text
+							key={`crumb:${id}`}
+							role="omp.composer.crumb"
+							text={id}
+							wrap="none"
+							title={`View ${id}`}
+							actions={{ click: `${FOCUS_ACTION}${id}` }}
+						/>
+					))}
+					<text key="agent" role="omp.composer.agent" text={agent} wrap="none" />
+					<row
+						key="exit"
+						role="omp.composer.exit"
+						align="center"
+						gap="xs"
+						title={`Back to the main session  ${back}`}
+						actions={{ click: `${FOCUS_ACTION}${MAIN_AGENT_ID}` }}
+					>
+						<kbd key="key" keys={actionKbd("app.interrupt", "escape")} />
+						<text key="label" text="main" wrap="none" />
+					</row>
+				</row>
+			);
+		};
 		const submitControl = (): JSXNode =>
-			this.#state().running ? (
+			this.#state().skipsAsk ? (
+				<text
+					key="skip"
+					actions={{ click: "submit" }}
+					role="omp.composer.skip"
+					text="Skip & send"
+					title="Send this message instead of answering the questions  ⏎"
+					tone="warning"
+				/>
+			) : this.#state().running ? (
 				<text
 					key="stop"
 					actions={{ click: "interrupt" }}
@@ -1856,6 +2196,112 @@ export class Composer {
 		const popup = (): JSXNode => {
 			const open = this.#completion();
 			if (!open) return null;
+
+			if (open.mention) {
+				const palette = open.mention;
+				const mentionItems = open.items as readonly MentionItem[];
+				const selectedItem = mentionItems[open.selected];
+				const activeEffort = open.effortOverride ?? selectedItem?.modelEffort?.selected;
+				// Default model mentions inherit thinking (no `:level` suffix). Show the effort slider
+				// only when the user explicitly typed a `:level` suffix or stepped an override via Shift+←/→.
+				const typedEffortColon = open.prefix.startsWith("^")
+					? open.prefix.slice(1).includes(":")
+					: /^@(?:m|model|models):/i.test(open.prefix)
+						? open.prefix.slice(open.prefix.indexOf(":") + 1).includes(":")
+						: open.prefix.slice(1).includes(":");
+				const hasExplicitEffort =
+					selectedItem?.modelEffort !== undefined &&
+					(typedEffortColon || (activeEffort !== undefined && activeEffort !== AUTO_THINKING));
+				const level: TspPickerLevel | null =
+					hasExplicitEffort && selectedItem?.modelEffort
+						? {
+								label: "Thinking",
+								detail: selectedItem.modelEffort.provider,
+								steps: [
+									{ id: AUTO_THINKING, label: "default" },
+									...selectedItem.modelEffort.supported.map(step => ({ id: step, label: step })),
+								],
+								value: activeEffort ?? AUTO_THINKING,
+								keys: ["shift", "left", "right"],
+							}
+						: null;
+
+				// Reflect interactive effort override live on the highlighted model row's chips.
+				const override = open.effortOverride;
+				const renderedPickerItems =
+					selectedItem?.modelEffort && override !== undefined
+						? palette.pickerItems.map(row => {
+								if (row.id !== selectedItem.pickerItem.id) return row;
+								const baseChips = (row.chips ?? []).filter(
+									chip => !selectedItem.modelEffort!.supported.includes(chip.text as Effort),
+								);
+								if (override !== AUTO_THINKING) {
+									const dot = thinkingDotToken(override);
+									baseChips.push({ text: override, on: true, ...(dot ? { dot } : {}) });
+								}
+								return { ...row, chips: baseChips };
+							})
+						: palette.pickerItems;
+
+				// A row's status (agent state, dirty file, PR state) colors its glyph, else its category does.
+				const glyphs: Record<string, TspSpan> = {};
+				for (const item of mentionItems) {
+					if (!item.icon) continue;
+					const tone = item.pickerItem.dot ?? item.pickerItem.tone;
+					glyphs[item.pickerItem.id] = { t: plainLine(item.icon), s: tone ?? MENTION_STYLES[item.category].color };
+				}
+				const mentionTerm: MentionPopupTerm = { maxLines: this.#autocompleteMaxVisible(), glyphs };
+
+				const indexOfId = (id: string) => mentionItems.findIndex(item => item.pickerItem.id === id);
+
+				return (
+					<picker
+						key="complete"
+						role="omp.mention-picker"
+						modal={false}
+						size="md"
+						density="snug"
+						layout={isCategoryList(open) ? "tiles" : "rows"}
+						search="none"
+						preview="none"
+						anchor={{ caret: "line/input" }}
+						columns={palette.columns}
+						items={renderedPickerItems}
+						order={palette.order}
+						selected={selectedItem?.pickerItem.id ?? null}
+						level={level}
+						empty="No matching mentions"
+						term={mentionTerm}
+						onSelect={id => {
+							const idx = indexOfId(id);
+							if (idx === -1) return;
+							const target = mentionItems[idx]!;
+							// Single-clicking an unselected model row highlights it so the effort slider can be dragged;
+							// clicking again (activate) or clicking any non-model row inserts immediately.
+							if (target.modelEffort && idx !== open.selected) {
+								this.#completion.set({ ...open, selected: idx, chosen: true, effortOverride: undefined });
+								return;
+							}
+							this.#accept(open, "complete", idx);
+						}}
+						onActivate={id => {
+							const idx = indexOfId(id);
+							if (idx !== -1) this.#accept(open, "complete", idx);
+						}}
+						onAction={(act, event) => {
+							if (act === "close") {
+								this.#closeCompletion();
+								return;
+							}
+							if (act === "level" && event.value !== undefined) {
+								const nextEffort = event.value as Effort | "auto";
+								this.#completion.set({ ...open, effortOverride: nextEffort, chosen: true });
+							}
+						}}
+					/>
+				);
+			}
+
 			const mark = this.#completionMark(open.prefix);
 			const pick = (value: string) => {
 				const index = open.items.findIndex(item => item.value === value);
@@ -1973,6 +2419,7 @@ export class Composer {
 				}}
 			>
 				{() => this.#slots().context}
+				{viewingHeader}
 				{() => this.#slots().chips}
 				<row key="line" role="omp.composer.line" align="start" gap="sm">
 					{modeChip}
@@ -1998,19 +2445,6 @@ export class Composer {
 /** The terminal link target of a chip's file `link` (a path, opened at `line`), if any. */
 export function chipHref(link: string | undefined, line?: number): string | undefined {
 	return link ? fileUriForTerminal(link, line === undefined ? undefined : { line }, terminalIdentity().id) : undefined;
-}
-
-const kBlob = Symbol("composer.image-blob");
-
-interface BlobHolder {
-	[kBlob]?: string;
-}
-
-/** The blob id of an image's bytes (sha-256, hex), cached on the image. */
-function imageBlob(image: DraftImage): string {
-	const holder = image as DraftImage & BlobHolder;
-	holder[kBlob] ??= new Bun.CryptoHasher("sha256").update(Buffer.from(image.data, "base64")).digest("hex");
-	return holder[kBlob];
 }
 
 /**

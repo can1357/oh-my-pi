@@ -1,7 +1,7 @@
 /**
  * Context Files Capability
  *
- * System instruction files (CLAUDE.md, AGENTS.md, GEMINI.md, etc.) that provide
+ * System instruction files (CLAUDE.md, AGENTS.md, etc.) that provide
  * persistent guidance to the agent.
  */
 import * as path from "node:path";

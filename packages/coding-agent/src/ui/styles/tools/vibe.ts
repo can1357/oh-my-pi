@@ -16,7 +16,7 @@ import type { UiNode } from "@oh-my-pi/pi-tui";
 import type { Block, PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { styledText } from "@oh-my-pi/pi-tui/term/painters/layout";
 import { elapsedAt } from "@oh-my-pi/pi-tui/term/painters/elapsed";
-import { SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-tui/term/painters/spinner";
+import { spinnerIndex } from "@oh-my-pi/pi-tui/term/painters/spinner";
 import { shimmerTiers } from "@oh-my-pi/pi-tui/term/painters/shimmer";
 import { shimmerText } from "@oh-my-pi/pi-tui/text/shimmer";
 import { truncate, wrap } from "@oh-my-pi/pi-tui/text/width";
@@ -25,7 +25,7 @@ import { formatDuration } from "@oh-my-pi/pi-utils";
 import type { TspElapsedProps, TspSpan } from "@oh-my-pi/pi-wire";
 import { oneLine } from "../../tools/agent-common";
 import { nodePlain, nodeStyle, plainText, spansOf } from "./agent-common";
-import { isActive, spinnerGlyph } from "./frame";
+import { bracketed, isActive, spinnerGlyph } from "./frame";
 import { defineToolLook, isExpanded, type ToolProps, toolProps } from "./look";
 
 /** Longest composer line. */
@@ -64,13 +64,6 @@ function railRows(theme: Theme, head: string, body: readonly string[], foot?: st
 
 function cutRows(rows: readonly string[], width: number): string[] {
 	return rows.map(row => truncate(row, width));
-}
-
-/** The old status spinner index at the terminal clock (0 while stopped). */
-function spinnerIndex(cx: PaintContext): number {
-	const frames = cx.theme.symbols.spinnerFrames.length;
-	if (cx.reduceMotion || frames === 0) return 0;
-	return Math.floor(cx.now() / SPINNER_INTERVAL_MS) % frames;
 }
 
 function paintLine(node: UiNode, props: ToolProps, term: VibeTerm, cx: PaintContext): string[] {
@@ -114,7 +107,9 @@ function paintComposer(node: UiNode, props: ToolProps, term: VibeTerm, cx: Paint
 		for (const span of spans.slice(3)) {
 			if (span.t === " ") continue;
 			parts.push(
-				span.s === "accent strong" ? theme.fg("accent", `⟦${span.t}⟧`) : theme.style(span.s, oneLine(span.t, 40)),
+				span.s === "accent strong"
+					? theme.fg("accent", bracketed(theme, span.t))
+					: theme.style(span.s, oneLine(span.t, 40)),
 			);
 		}
 		head = parts.join(" ");
@@ -126,7 +121,12 @@ function paintComposer(node: UiNode, props: ToolProps, term: VibeTerm, cx: Paint
 	if (visible.length === 0) visible.push("");
 	const last = visible.length - 1;
 	if (lines.length > max) visible[last] = `${visible[last]} …`;
-	else if (spinner && isActive(props) && (spinnerIndex(cx) & 1) === 0)
+	// The cursor blinks on the spinner clock; with decorative motion off it stays shown.
+	else if (
+		spinner &&
+		isActive(props) &&
+		(cx.reduceMotion || (spinnerIndex(cx, theme.symbols.spinnerFrames.length) & 1) === 0)
+	)
 		visible[last] = `${visible[last]}${theme.fg("accent", CURSOR)}`;
 	const body = visible.map((line, index) =>
 		index === 0 ? `${theme.fg("accent", ">")} ${theme.fg("toolOutput", line)}` : `  ${theme.fg("toolOutput", line)}`,
@@ -144,7 +144,9 @@ function cardMark(cx: PaintContext, status: string | undefined): string {
 	const theme = cx.theme;
 	switch (status) {
 		case "running":
-			return cx.reduceMotion ? theme.fg("accent", theme.symbols.symbol("status.running")) : spinnerGlyph(cx);
+			return cx.spinnerInterval === 0
+				? theme.fg("accent", theme.symbols.symbol("status.running"))
+				: spinnerGlyph(cx);
 		case "pending":
 			return theme.fg("muted", theme.symbols.symbol("status.pending"));
 		case "error":
@@ -176,7 +178,7 @@ function paintCard(card: UiNode, cx: PaintContext, expanded: boolean): string[] 
 			text?: string;
 			term?: { color?: string };
 		};
-		parts.push(theme.fg(badgeProps.term?.color ?? "muted", `⟦${badgeProps.text ?? ""}⟧`));
+		parts.push(theme.fg(badgeProps.term?.color ?? "muted", bracketed(theme, badgeProps.text ?? "")));
 	}
 	const id = idSpan?.t ?? "";
 	parts.push(

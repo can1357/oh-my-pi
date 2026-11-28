@@ -231,11 +231,11 @@ Label edits in tree UI call `appendLabelChange(targetId, label)`.
 | Operation                   | Scope                 | Result                                                                            |
 | --------------------------- | --------------------- | --------------------------------------------------------------------------------- |
 | `/tree`                     | Current session file  | Moves leaf to selected point (same file)                                          |
-| `/branch` (alias `/rewind`) | Current session file  | Opens transcript rewind; moves the leaf in place and restores user-request drafts |
+| `/branch` (alias `/rewind`) | New session file      | Opens transcript rewind (also Esc Esc); branches the conversation up to the pick into a new session, restoring user-request drafts |
 | `/fork`                     | Whole current session | Duplicates session into a new persisted session file                              |
 | `/resume`                   | Session list          | Switches to another session file                                                  |
 
-Key distinction: `/tree` and `/branch` navigate inside one session file. `/fork` duplicates the file; `/resume` switches files. The programmatic `AgentSession.branch()` API still creates a separate branched session.
+Key distinction: `/tree` navigates inside one session file. `/branch` moves onto a new file holding the path up to the pick and leaves the current file unchanged; `/fork` duplicates the file; `/resume` switches files.
 
 ## Operator workflows
 

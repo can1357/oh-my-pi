@@ -18,13 +18,15 @@
 //! `-u`, `NAME=VALUE`) apply in the subshell before the command, in order.
 //!
 //! The subshell's stdin is what the utility asks for (the null device by
-//! default; `env`'s own stdin is the caller's fd 0); stdout and stderr are the
-//! caller's, which the utility writes to as well, so their output interleaves
-//! in order. Each subshell carries the call's lineage label, so a signal to
+//! default; `env`'s own stdin is the caller's fd 0). Stdout is the caller's
+//! unless the utility overrides it, and stderr is always inherited.
+//! Each subshell carries the call's lineage label, so a signal to
 //! the utility's job reaches its commands too. Externals replace their
 //! subshell through `exec`, so their actual signal deaths reach the utility
 //! as [`CommandStatus::Signaled`], distinct from an ordinary exit of `128+n`.
-//! In-engine commands report [`CommandStatus::Exited`].
+//! In-engine commands report [`CommandStatus::Exited`], except that a builtin
+//! ended by the emulated `SIGPIPE` (status `128+SIGPIPE`, which builtins use
+//! for nothing else) reports [`CommandStatus::Signaled`] as an external would.
 //!
 //! A command the utility may signal ([`ShellCommand::signals`]: `watchexec`,
 //! `entr -r`) runs under a label of its own below the call's, so each signal
@@ -82,11 +84,13 @@ enum Request {
 
 /// A command's subshell, still running.
 struct Run {
-	id:    RunId,
-	reply: Reply,
+	id:      RunId,
+	reply:   Reply,
 	/// The id and label of a command the utility may signal: its tree has a
 	/// label of its own.
-	own:   Option<(u64, u32)>,
+	own:     Option<(u64, u32)>,
+	/// Whether it runs a builtin in-engine ([`Program::Builtin`]).
+	builtin: bool,
 }
 
 /// What a requested command is, decided by the lookup before it is sent.
@@ -157,6 +161,7 @@ impl Extra {
 				turn.config,
 			);
 			invocation.cancel = Some(cancel.clone());
+			invocation.source_snapshot = call.source_snapshot;
 			let lookup = Lookup {
 				path:   invocation.env.get("PATH").cloned(),
 				cwd:    invocation.cwd.clone(),
@@ -190,9 +195,10 @@ impl Extra {
 					});
 					let label = own.map_or(self.child.label, |(_, label)| label);
 					let lineage = Lineage { label, detached: false };
+					let builtin = matches!(program, Program::Builtin);
 					let id =
 						api.run_subshell_in(script(*command, &program, &running.env_names), lineage);
-					self.runs.push(Run { id, reply, own });
+					self.runs.push(Run { id, reply, own, builtin });
 				},
 				Request::Signal { id, signal } => {
 					// A command that ended already has no tree to signal.
@@ -224,11 +230,18 @@ impl Extra {
 		let Some(at) = self.runs.iter().position(|r| r.id == run) else {
 			return false;
 		};
-		let Run { reply, own, .. } = self.runs.swap_remove(at);
+		let Run { reply, own, builtin, .. } = self.runs.swap_remove(at);
 		self.ended.extend(own.map(|(_, label)| label));
 		let code = u8::try_from(status.rem_euclid(256)).unwrap_or(u8::MAX);
+		let platform = Platform::current();
+		let outcome = match signal {
+			Some(signal) => CommandStatus::Signaled(signal),
+			None if builtin && status == Signal::Pipe.exit_status(platform) => {
+				CommandStatus::Signaled(i32::from(Signal::Pipe.number(platform)))
+			},
+			None => CommandStatus::Exited(code),
+		};
 		// The utility may have stopped waiting (cancelled).
-		let outcome = signal.map_or(CommandStatus::Exited(code), CommandStatus::Signaled);
 		let _ = reply.send(Ok(outcome));
 		true
 	}
@@ -272,6 +285,8 @@ fn signal_tree(turn: &Turn<'_>, label: u32, signal: Signal) {
 /// with none).
 fn script(mut command: ShellCommand, program: &Program, env_names: &[BString]) -> Script {
 	let stdin = child_stdin(command.take_stdin());
+	let stdout = child_output(command.take_stdout());
+	let stderr = child_output(command.take_stderr());
 	let mut source = Vec::new();
 	let mut foreign_env = Vec::new();
 	let mut unexport_env = Vec::new();
@@ -353,13 +368,14 @@ fn script(mut command: ShellCommand, program: &Program, env_names: &[BString]) -
 	let mut script = Script::command(source);
 	script.foreign_env = foreign_env;
 	script.unexport_env = unexport_env;
+	script.source_snapshot = command.take_source_snapshot();
 	script.args = Some(args);
 	// The working directory is logical, as after `cd`: `-execdir` hands over
 	// `<root>/./sub`, and the command's `$PWD` is `<root>/sub`.
 	script.cwd = command
 		.dir()
 		.map(|dir| os_bytes(omp_vfs::normalize_lexically(dir).as_os_str()));
-	script.vproc = VprocSel::NewSubshellWithStdio([stdin, RunStdio::Inherit, RunStdio::Inherit]);
+	script.vproc = VprocSel::NewSubshellWithStdio([stdin, stdout, stderr]);
 	script
 }
 
@@ -375,6 +391,17 @@ fn child_stdin(stdin: Option<Fd>) -> RunStdio {
 		Some(Fd::Closed) => return RunStdio::Closed,
 	};
 	file.map_or(RunStdio::Closed, |file| RunStdio::File(Box::new(StdFile::new(file))))
+}
+
+/// fd 1 or 2 of a command: the caller's descriptor unless the utility
+/// overrides it with a host descriptor or closes it. A provider file inherits
+/// the caller's descriptor.
+fn child_output(fd: Option<Fd>) -> RunStdio {
+	match fd {
+		Some(Fd::File(file)) => RunStdio::File(Box::new(StdFile::new(file))),
+		Some(Fd::Closed) => RunStdio::Closed,
+		Some(Fd::Vfs(_)) | None => RunStdio::Inherit,
+	}
 }
 
 fn os_bytes(s: &OsStr) -> BString {

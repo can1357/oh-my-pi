@@ -69,6 +69,12 @@ export interface ImageSource {
 export interface ImageRequest extends ImageBounds {
 	/** Fallback label (already styled), cut to `maxColumns`. */
 	readonly fallback: string;
+	/**
+	 * Draw only as cells of text (kitty Unicode placeholders), which other text may share a row
+	 * with (a thumbnail inside a border). A terminal that draws images any other way gets the
+	 * one-row fallback, and the image is neither held nor transmitted.
+	 */
+	readonly cells?: boolean;
 }
 
 /** What the rows show. */
@@ -99,6 +105,11 @@ export interface TerminalImagesOptions {
 	 * (Ghostty drops graphics commands sent right after it starts). Read reactively. Default: always.
 	 */
 	readonly kittyReady?: Accessor<boolean>;
+	/**
+	 * Rows of the screen, read reactively. SIXEL and iTerm2 images are fitted within them: they are
+	 * drawn from their first row, which must still be on screen (see `anchor.ts`). Default: unbounded.
+	 */
+	readonly screenRows?: Accessor<number>;
 }
 
 /** Converts image bytes (any format the runtime decodes) to base64 PNG. */
@@ -154,6 +165,7 @@ export class TerminalImages {
 	#queued: Record<Screen, string> = { main: "", alternate: "" };
 	readonly #convertPng: PngConverter;
 	readonly #kittyReady: Accessor<boolean>;
+	readonly #screenRows: Accessor<number>;
 	readonly #encoding = new Set<Promise<unknown>>();
 
 	constructor(options: TerminalImagesOptions) {
@@ -162,6 +174,7 @@ export class TerminalImages {
 		this.#encodeSixel = options.encodeSixel ?? encodeSixelAsync;
 		this.#convertPng = options.convertPng ?? bunPng;
 		this.#kittyReady = options.kittyReady ?? (() => true);
+		this.#screenRows = options.screenRows ?? (() => Number.POSITIVE_INFINITY);
 		this.#budget = options.budget ?? DEFAULT_IMAGE_BUDGET;
 		// A random base keeps two programs sharing one terminal (tmux panes) off each other's ids.
 		this.#idBase = 1 + Math.floor(Math.random() * (KITTY_MAX_ID - ID_RANGE));
@@ -192,7 +205,18 @@ export class TerminalImages {
 			request.maxColumns === undefined ? request.fallback : truncate(request.fallback, request.maxColumns);
 		const protocol = caps.images;
 		if (protocol === null) return { rows: [label], columns: visibleWidth(label), state: "fallback" };
-		const box = fitImage(source.widthPx, source.heightPx, request, caps.cell ?? DEFAULT_CELL);
+		const cell = caps.cell ?? DEFAULT_CELL;
+		let box = fitImage(source.widthPx, source.heightPx, request, cell);
+		if (protocol === "sixel" || protocol === "iterm") {
+			// Taller than the screen, its first row would be above the top when its last row draws it.
+			const screenRows = this.#screenRows();
+			if (box.rows > screenRows) {
+				box = fitImage(source.widthPx, source.heightPx, { ...request, maxRows: screenRows }, cell);
+			}
+		}
+		const placeholders = protocol === "kitty" && this.#placeholders() && kittyPlaceholdersFit(box.columns, box.rows);
+		// Placements and SIXEL/iTerm2 sequences address the screen: nothing else can share their rows.
+		if (request.cells && !placeholders) return { rows: [label], columns: visibleWidth(label), state: "fallback" };
 		const entry = this.#acquire(source);
 		const fallback = (): ImageRows => ({
 			rows: [label, ...Array.from({ length: box.rows - 1 }, () => RESERVED_ROW)],
@@ -208,7 +232,7 @@ export class TerminalImages {
 					return { rows: reservedRows(box.rows), columns: box.columns, state: "pending" };
 				}
 				const slot = this.#slot(entry, box);
-				if (this.#placeholders() && kittyPlaceholdersFit(box.columns, box.rows)) {
+				if (placeholders) {
 					const rows = kittyPlaceholderRows({
 						id: entry.id,
 						placement: slot + 1,

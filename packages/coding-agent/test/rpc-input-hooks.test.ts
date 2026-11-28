@@ -61,6 +61,37 @@ describe("RPC native input handlers", () => {
 		expect(userTexts(await client.getMessages())).toEqual(["slow: first", "second"]);
 	}, 30_000);
 
+	test("clear invalidates earlier input even when its hook returns during reset", async () => {
+		await client.promptAndWait("old conversation");
+		const before = await client.getState();
+		const results = new Map<string | undefined, string>();
+		const settled = Promise.withResolvers<void>();
+		const unsubscribe = client.onPromptResult(frame => {
+			results.set(frame.id, frame.status);
+			if (results.size === 3) settled.resolve();
+		});
+		try {
+			const [held, queued, cleared, after] = await Promise.all([
+				client.prompt("hold: delayed"),
+				client.prompt("queued before clear"),
+				client.clearContext(),
+				client.prompt("after clear"),
+			]);
+			await settled.promise;
+			expect([results.get(held), results.get(queued), results.get(after)]).toEqual([
+				"aborted",
+				"aborted",
+				"completed",
+			]);
+			expect(cleared.droppedCount).toBeGreaterThan(0);
+			expect((await client.getState()).sessionId).toBe(before.sessionId);
+			expect((await client.getSessionStats()).sessionId).toBe(before.sessionId);
+			expect(userTexts(await client.getMessages())).toEqual(["after clear"]);
+		} finally {
+			unsubscribe();
+		}
+	}, 30_000);
+
 	test("a prompt pipelined after new_session runs in the new session instead of being dropped", async () => {
 		await client.promptAndWait("before reset");
 		const [, events] = await Promise.all([client.newSession(), client.promptAndWait("after reset")]);

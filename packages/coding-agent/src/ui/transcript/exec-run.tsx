@@ -18,7 +18,7 @@ import type { TspCardStatus, TspTone } from "@oh-my-pi/pi-wire";
 import type { MinimizedMeta, TruncationMeta } from "../../tools/output-meta-format";
 import { formatArtifactErrorNotice, formatTruncationMetaNotice } from "../../tools/output-meta-format";
 import { formatMinimized, RunBox, RunFoot, RunInput, RunOutput, type RunState } from "../tools/run";
-import { imageBlob } from "./messages/image";
+import { imageBlob, inlineImageTerm } from "./messages/image";
 import { imagePlaceholder, imageSize } from "./tool-block";
 import { ptyKeyBytes } from "../overlays/panels/pty-console";
 import { PtyReplay, styleReplayedRow } from "./pty-replay";
@@ -327,19 +327,21 @@ export function ExecRunBlock(props: { readonly run: ExecRun }): JSXNode {
 							}
 						/>
 					</RunBox>,
-					images().list.map((image, index) =>
-						images().show ? (
+					images().list.map((image, index) => {
+						if (!images().show) return <text spans={[{ t: imagePlaceholder(image), s: "muted" }]} />;
+						const bytes = Buffer.from(image.data, "base64");
+						const size = imageSize(bytes);
+						return (
 							<image
 								key={`img${index}`}
-								blob={registerBlob(Buffer.from(image.data, "base64"), image.mimeType)}
+								term={inlineImageTerm()}
+								blob={registerBlob(bytes, image.mimeType)}
 								alt={image.mimeType}
-								w={imageSize(image.data)?.w}
-								h={imageSize(image.data)?.h}
+								w={size?.w}
+								h={size?.h}
 							/>
-						) : (
-							<text spans={[{ t: imagePlaceholder(image), s: "muted" }]} />
-						),
-					),
+						);
+					}),
 				];
 			}}
 		</tool>

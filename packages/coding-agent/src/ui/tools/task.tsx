@@ -12,7 +12,8 @@
  * their session identity colour (`agent-identity.ts`).
  */
 import type { JSXNode } from "@oh-my-pi/pi-tui";
-import { presetSymbols } from "@oh-my-pi/pi-tui/theme/symbols";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { ThemeSymbols } from "@oh-my-pi/pi-tui/theme/symbols";
 import { formatDuration, formatNumber, pluralize, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { TspAgentProps, TspPropNode, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import type { ConfiguredThinkingLevel } from "../../utils/render-utils";
@@ -27,6 +28,7 @@ import {
 } from "../../task/task-details";
 import { shortenPath } from "../../utils/render-utils";
 import { stripGeneratedOutputNotice } from "../../tools/output-meta-format";
+import { expandKeyLabel } from "../keys/hints";
 import { ErrorText, NoteText } from "./agent-common";
 import type { ToolPresenter, ToolResult, ToolView, ToolViewState } from "./contract";
 import { registerToolPresenter } from "./registry";
@@ -359,7 +361,10 @@ function resultView(
 		isError: result.isError === true,
 		isPartial: state.isPartial,
 	});
-	if (!details) {
+	// An aborted or synthetic TASK result persists details without `results`
+	// (`{}`, `{"__synthetic":true,…}`): render it as the plain result, or the
+	// task card throws on the missing list and a session holding one cannot resume.
+	if (!isTaskToolDetails(details)) {
 		const fallback = text.trim();
 		if (result.isError) {
 			return {
@@ -423,8 +428,11 @@ export const taskPresenter: ToolPresenter<Partial<TaskParams>, TaskToolDetails> 
 
 registerToolPresenter("task", taskPresenter);
 
-/** Glyphs of nested rows sent natively (the terminal look draws its theme's). */
-const UNICODE_SYMBOLS = presetSymbols("unicode");
+/**
+ * Glyphs of nested rows sent natively (the terminal look draws its theme's). Tern lays
+ * them out with its own fonts, kitty-style: U+FE0F icons are wide and bare marks fit a cell.
+ */
+const NATIVE_SYMBOLS = new ThemeSymbols({ preset: "unicode", emoji: { vs16Wide: true, bareFits: true } });
 
 /**
  * Settled child task snapshots as a tree of agent rows (the task card's
@@ -437,7 +445,8 @@ export function NestedTaskResults(props: {
 	readonly expanded: boolean;
 }): JSXNode {
 	const cx: RowContext = {
-		glyph: key => UNICODE_SYMBOLS[key] ?? "",
+		glyph: key => NATIVE_SYMBOLS.symbol(key),
+		expandKey: () => expandKeyLabel(currentTheme()),
 		expanded: props.expanded,
 		nowMs: Date.now(),
 		frozen: false,

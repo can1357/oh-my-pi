@@ -9,6 +9,7 @@
  * sends them as spans (identity colours are terminal-only). Widths are
  * cells; `Infinity` leaves rows whole.
  */
+import { flattenLine } from "@oh-my-pi/pi-tui/text/sanitize";
 import { formatDuration, formatNumber, pluralize, sanitizeText } from "@oh-my-pi/pi-utils";
 import { toolIntentLabel, type TspSpan, type TspText } from "@oh-my-pi/pi-wire";
 import { replaceTabs, truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
@@ -63,6 +64,7 @@ export type Glyph = (key: string) => string;
 /** What rows are built against. */
 export interface RowContext {
 	readonly glyph: Glyph;
+	readonly expandKey: () => string;
 	readonly expanded: boolean;
 	/** The transcript clock (ms) time-derived rows sample. */
 	readonly nowMs: number;
@@ -144,13 +146,9 @@ function textLines(text: TspText): Line[] {
 	return lines;
 }
 
-function flatten(text: string): string {
-	return text.replace(/\s+/g, " ").trim();
-}
-
 /** `text` on one line, cut to `width` cells. */
 function previewLine(text: string, width: number): string {
-	return truncate(flatten(text), width);
+	return truncate(flattenLine(text), width);
 }
 
 /** Cut to `width` only while collapsed (expanded rows wrap whole). */
@@ -167,9 +165,9 @@ function bracket(cx: RowContext, label: string): string {
 	return `${cx.glyph("format.bracketLeft")}${label}${cx.glyph("format.bracketRight")}`;
 }
 
-/** `⟦⌃O: Expand⟧`, dim. */
+/** The bracketed hint to expand the task, dim. */
 function expandHint(cx: RowContext): Seg {
-	return seg(bracket(cx, "⌃O: Expand"), "dim");
+	return seg(bracket(cx, `${cx.expandKey()}: Expand`), "dim");
 }
 
 type IconStatus = "success" | "error" | "warning" | "pending" | "running" | "aborted";
@@ -331,7 +329,7 @@ function inlineContainer(value: unknown): Seg[] | undefined {
 }
 
 /** A JSON value as `├─ key: value` rows; small containers inline, larger ones open a subtree. */
-function jsonTreeLines(value: unknown): { lines: Line[]; truncated: boolean } {
+function jsonTreeLines(cx: RowContext, value: unknown): { lines: Line[]; truncated: boolean } {
 	const lines: Line[] = [];
 	let truncated = false;
 	if (value === null || typeof value !== "object") {
@@ -347,7 +345,7 @@ function jsonTreeLines(value: unknown): { lines: Line[]; truncated: boolean } {
 			const last = index === entries.length - 1;
 			const row: Seg[] = [
 				...gutter,
-				seg(last ? "└─" : "├─", "dim"),
+				seg(cx.glyph(last ? "tree.last" : "tree.branch"), "dim"),
 				seg(" "),
 				seg(key, Array.isArray(container) ? "dim" : "muted"),
 			];
@@ -359,7 +357,8 @@ function jsonTreeLines(value: unknown): { lines: Line[]; truncated: boolean } {
 				}
 				const size = Array.isArray(entry) ? `[${entry.length}]` : `{${Object.keys(entry).length}}`;
 				lines.push([...row, seg(" "), seg(size, "dim")]);
-				if (depth < TREE_MAX_DEPTH) walk(entry, depth + 1, [...gutter, last ? seg("   ") : seg("│  ", "dim")]);
+				if (depth < TREE_MAX_DEPTH)
+					walk(entry, depth + 1, [...gutter, last ? seg("   ") : seg(`${cx.glyph("tree.vertical")}  `, "dim")]);
 				return;
 			}
 			lines.push([...row, seg(": "), seg(scalarText(entry, TREE_MAX_SCALAR), SCALAR_COLOR(entry))]);
@@ -447,11 +446,11 @@ function outputSection(
 				lines.push([...inner, seg(outputInline(parsed), "dim")]);
 				return lines;
 			}
-			const tree = jsonTreeLines(parsed);
+			const tree = jsonTreeLines(cx, parsed);
 			if (tree.lines.length > 0) {
 				if (!warning) lines.push([...cp, seg("Output", "dim")]);
-				for (const line of tree.lines) lines.push([...inner, seg("  "), ...line]);
-				if (tree.truncated) lines.push([...inner, seg("  "), seg("…", "dim")]);
+				for (const line of tree.lines) lines.push([...cp, seg("  "), ...line]);
+				if (tree.truncated) lines.push([...cp, seg("  "), seg("…", "dim")]);
 				return lines;
 			}
 		}
@@ -480,7 +479,7 @@ function reviewRows(cx: RowContext, review: ReviewVerdict, cp: Line): Line[] {
 	const lines: Line[] = [
 		[
 			...cp,
-			seg(" Patch is "),
+			seg("Patch is "),
 			seg(summary.overall_correctness, correct ? "success" : "error"),
 			seg(" "),
 			icon(cx, correct ? "success" : "error"),
@@ -544,7 +543,8 @@ function findingRows(cx: RowContext, findings: readonly FindingDetails[], cp: Li
 				lines.push([...cp, ...gutter, seg(replaceTabs(line), "dim")]);
 		}
 	}
-	if (!cx.expanded && findings.length > 3) lines.push([...cp, seg(moreItems(findings.length - 3, "finding"), "dim")]);
+	if (!cx.expanded && findings.length > 3)
+		lines.push([...cp, seg(cx.glyph("tree.last")), seg(" "), seg(moreItems(findings.length - 3, "finding"), "dim")]);
 	return lines;
 }
 
@@ -676,7 +676,7 @@ export function resultRows(
 			...cp,
 			icon(cx, "aborted"),
 			seg(" "),
-			seg(clip(flatten(sanitizeText(result.abortReason)), 80, cx.expanded), "dim"),
+			seg(clip(flattenLine(sanitizeText(result.abortReason)), 80, cx.expanded), "dim"),
 		]);
 	}
 	const review = reviewVerdict(yieldRecords(result.extractedToolData?.yield));
@@ -743,7 +743,7 @@ export function resultRows(
 	if (result.error && (!success || mergeFailed) && (!aborted || result.error !== result.abortReason)) {
 		lines.push([
 			...cp,
-			seg(clip(flatten(sanitizeText(result.error)), 70, cx.expanded), mergeFailed ? "warning" : "error"),
+			seg(clip(flattenLine(sanitizeText(result.error)), 70, cx.expanded), mergeFailed ? "warning" : "error"),
 		]);
 	}
 	return lines;
@@ -764,7 +764,7 @@ function recentOutputText(recent: readonly string[]): string {
 	for (;;) {
 		const next = stripTrailingNotice(
 			stripGeneratedOutputNotice(text),
-			line => /^Wall time: \d+(?:\.\d+)? seconds$/u.test(line) || /^Command exited with code -?\d+$/u.test(line),
+			line => /^\[took \d+(?:\.\d+)?s\]$/u.test(line) || /^\[exit code -?\d+\]$/u.test(line),
 		);
 		if (next === text) return text;
 		text = next;
@@ -970,7 +970,7 @@ function nestedLines(
 
 // ─── Card body ──────────────────────────────────────────────────────────────
 
-/** `… 21 more agents (18 pending · 3 done) ⟦⌃O: Expand⟧`: live rows folded above the visible ones. */
+/** Count of live rows folded above the visible ones, with the tool expansion hint. */
 function hiddenProgressLine(cx: RowContext, hidden: readonly AgentProgress[]): Line {
 	const counts = { completed: 0, running: 0, pending: 0, failed: 0, aborted: 0 };
 	for (const p of hidden) counts[p.status]++;

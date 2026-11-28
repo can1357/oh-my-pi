@@ -26,12 +26,16 @@ pub(crate) enum Inner<'a, V> {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum CallInput<V> {
+#[doc(hidden)]
+pub enum CallInput<V> {
     Run(V),
     Paths((V, RcList<V>)),
 }
 
 impl<V> CallInput<V> {
+    pub fn value(&self) -> &V {
+        match self { Self::Run(v) | Self::Paths((v, _)) => v }
+    }
     pub fn unwrap_run(self) -> V {
         match self {
             Self::Run(v) => v,
@@ -110,7 +114,7 @@ impl<V> Error<V> {
         }
     }
 
-    /// Create the error of a filter that [`crate::DataT::may_recurse`] refused to enter.
+    /// Create the error of a filter that exceeded the pull stack’s depth limit.
     pub(crate) fn too_deep() -> Self {
         Self(Part::Str(Vec::from([Part::Str("filter recursion too deep")])))
     }

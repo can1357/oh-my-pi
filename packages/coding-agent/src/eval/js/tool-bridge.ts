@@ -34,8 +34,6 @@ import {
 	runEvalStatus,
 	runEvalWait,
 } from "../handle-bridge";
-import type { EvalShadowCellSession } from "../speculation/cell-session";
-import { getActiveEvalShadowCell } from "../speculation/runtime-context";
 import { isEvalBridgeToolCallable, withEvalBridgeToolCall } from "../tool-bridge-policy";
 import { EVAL_WORKPOOL_BRIDGE_NAME, type EvalWorkpoolResult, runEvalWorkpool } from "../workpool-bridge";
 import {
@@ -45,7 +43,6 @@ import {
 	mcpNamespaceValue,
 	parseMCPNamespaceCall,
 } from "../../mcp/eval-namespaces";
-import type { RuntimeCallIdentity } from "./shared/runtime";
 import type { JsStatusEvent } from "./shared/types";
 
 const NO_REPLY_SINK =
@@ -60,8 +57,6 @@ export interface ToolBridgeOptions {
 	/** The cell's `timeout` in ms, the budget of a prelude call that sets none (`EvalPreludeContext.cellTimeoutMs`). */
 	cellTimeoutMs?: number;
 	emitStatus?: (event: JsStatusEvent) => void;
-	identity?: RuntimeCallIdentity;
-	shadowCell?: EvalShadowCellSession;
 	/**
 	 * Shows the user what a bridged call sent to a reply URL (`out://`): a `write`'s content, or the
 	 * `details.replies` of a call whose commands wrote there. Throws to refuse a reply. Absent: nothing
@@ -212,28 +207,6 @@ export function bridgeValueFromToolResult(
 	return value;
 }
 
-function waitForSpeculativeClaim<T>(claim: Promise<T>, signal?: AbortSignal): Promise<T> {
-	if (!signal) return claim;
-	signal.throwIfAborted();
-	const { promise, resolve, reject } = Promise.withResolvers<T>();
-	let settled = false;
-	let onAbort: () => void = () => {};
-	const finish = (settle: () => void): void => {
-		if (settled) return;
-		settled = true;
-		signal.removeEventListener("abort", onAbort);
-		settle();
-	};
-	onAbort = (): void =>
-		finish(() => reject(signal.reason ?? new DOMException("Speculative claim was interrupted", "AbortError")));
-	signal.addEventListener("abort", onAbort, { once: true });
-	void claim.then(
-		value => finish(() => resolve(value)),
-		error => finish(() => reject(error)),
-	);
-	return promise;
-}
-
 export function callSessionTool(name: string, args: unknown, options: ToolBridgeOptions): Promise<ToolValue> {
 	return withEvalBridgeToolCall(options.session.toolCommands, () => dispatchSessionTool(name, args, options));
 }
@@ -372,15 +345,6 @@ async function runSessionTool(
 	if (reply !== undefined && !options.onReply) {
 		options.emitStatus?.({ op: name, error: NO_REPLY_SINK });
 		throw new ToolError(NO_REPLY_SINK);
-	}
-	const shadowCell = options.shadowCell ?? getActiveEvalShadowCell();
-	if (shadowCell && options.identity) {
-		const claimed = await waitForSpeculativeClaim(
-			shadowCell.claim(name, validatedArgs, options.identity, Number.MAX_SAFE_INTEGER, options.signal),
-			options.signal,
-		);
-		options.signal?.throwIfAborted();
-		if (claimed) return { name, args: validatedArgs, result: claimed };
 	}
 	let settled = false;
 	const isMcpTool = "mcpServerName" in tool && typeof tool.mcpServerName === "string";

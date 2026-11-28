@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a `gitlab` tool renderer for shared sessions and HTML exports.
+- Shared-session and HTML-exported edit cards now display cross-worktree edit notices when an edit modifies a sibling Git worktree ([#20823](https://github.com/can1357/oh-my-pi/pull/20823) by [@Quantum-Quasar](https://github.com/Quantum-Quasar)).
+
 ## [19.1.0] - 2026-11-21
 
 ### Added

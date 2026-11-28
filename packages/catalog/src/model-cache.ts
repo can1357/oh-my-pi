@@ -6,6 +6,7 @@ import type { Database } from "bun:sqlite";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import {
+	cloneJsonTree,
 	getDbBusyTimeoutMs,
 	getModelDbPath,
 	isSqliteBusyError,
@@ -15,15 +16,15 @@ import {
 	VERSION,
 } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
-import RULES from "./compat/rules.json" with { type: "json" };
+import rules from "./compat/rules.json" with { type: "json" };
 import type { Api, Model } from "./types";
 
 // Rows persist fully materialized Models so compatible warm-cache reads do not
 // rerun the compat cascade. Request headers are intentionally omitted:
 // arbitrary provider-defined header names can carry credentials. v15
 // invalidates unbundled OpenAI-compatible rows that ignored provider-reported
-// token limits. v14 invalidates Antigravity rows predating per-SKU
-// `antigravityWireProfiles` (model_enum label, output cap, SKU thinking). v13 replaces
+// token limits. v14 invalidates rows predating per-SKU
+// wire profiles (model_enum label, output cap, SKU thinking). v13 replaces
 // sparse ModelSpec rows with materialized rows and records the exact app/rules/
 // builder policy that produced them. v12 invalidated Kimi Code rows carrying the blanket
 // maxTokens: 32000 that predate per-family output caps (k3/k3-256k -> 131072,
@@ -32,7 +33,7 @@ import type { Api, Model } from "./types";
 // headers and records which model ids lost headers or cannot be rebuilt.
 // v9 invalidated Kimi Code rows predating live effort and protocol metadata;
 // v8 invalidated Codex discovery rows predating provider-native V2 compaction
-// metadata; v7 invalidated rows predating the Antigravity Gemini budget-mode
+// metadata; v7 invalidated rows predating the Gemini budget-mode
 // migration (cached specs still carrying `thinking.mode: "google-level"` and
 // the old 3.5-flash effort routing); v6 invalidated rows that may contain the
 // retired unknown-limit sentinels (222222/8888); v5 invalidated rows predating
@@ -45,20 +46,12 @@ const HEADER_RESTORE_VERSION = 1;
 /**
  * Explicit compatibility gate for materialized rows. Bump whenever buildModel
  * semantics change without an app-version change. The compiled-rules content
- * hash catches every KDL policy edit even when the package version is unchanged;
- * computed lazily on first cache access and memoized, so processes that never
- * touch the model cache skip the stringify entirely.
+ * hash catches every KDL policy edit even when the package version is unchanged.
  */
 const MODEL_MATERIALIZATION_VERSION = 2;
-let cachedMaterializationPolicy: string | undefined;
-function materializationPolicy(): string {
-	if (cachedMaterializationPolicy === undefined) {
-		cachedMaterializationPolicy =
-			`app-${VERSION}:builder-${MODEL_MATERIALIZATION_VERSION}:rules-${RULES.version}-` +
-			Bun.hash(JSON.stringify(RULES)).toString(36);
-	}
-	return cachedMaterializationPolicy;
-}
+const plainModelPolicy = `app-${VERSION}:builder-${MODEL_MATERIALIZATION_VERSION}:rules-${rules.version}-${rules.hash}`;
+// Old binaries must never mistake a compact compat reference for a resolved compat record.
+const compactModelPolicy = `${plainModelPolicy}:compat-ref-1`;
 
 interface CacheRowMeta {
 	provider_id: string;
@@ -83,7 +76,8 @@ interface CacheRowMeta {
 }
 
 interface CacheRow extends CacheRowMeta {
-	models: string;
+	/** NULL only when the query recognized the reader's already-validated payload hash. */
+	models: string | null;
 }
 
 /**
@@ -127,24 +121,27 @@ const MAX_POLICIES_PER_PROVIDER = 3;
  * matches the payload row's `updated_at`, so a rewritten payload silently
  * invalidates it.
  */
-const CACHE_ROW_FROM = `
-	FROM model_cache m
-	LEFT JOIN model_cache_freshness f
-		ON f.provider_id = m.provider_id AND f.materialization_policy = m.materialization_policy
-	WHERE m.provider_id = ? AND m.materialization_policy = ?
-`;
 const CACHE_ROW_FRESHNESS_COLUMNS = `
 		f.payload_updated_at AS freshness_payload_updated_at,
 		f.updated_at AS freshness_updated_at,
 		f.authoritative AS freshness_authoritative`;
-const SELECT_CACHE_ROW = `SELECT m.*, ${CACHE_ROW_FRESHNESS_COLUMNS} ${CACHE_ROW_FROM}`;
-/** Scalar columns plus `models_hash`: validates a memoized parse without reading the multi-MB payload. */
-const SELECT_CACHE_ROW_META = `
-	SELECT m.provider_id, m.version, m.materialization_policy, m.updated_at, m.authoritative,
-		m.static_fingerprint, m.models_hash, m.header_omitted_model_ids,
-		m.unrestorable_header_model_ids, m.header_restore_version, ${CACHE_ROW_FRESHNESS_COLUMNS}
-	${CACHE_ROW_FROM}
-`;
+// Keep SQLite's overflow pages and the multi-MB JS string off the read path
+// when only freshness or header provenance changed. NULL never matches a hash.
+const CACHE_ROW_COLUMNS = `m.provider_id, m.version, m.materialization_policy, m.updated_at, m.authoritative,
+		m.static_fingerprint, m.models_hash, m.header_omitted_model_ids, m.unrestorable_header_model_ids,
+		m.header_restore_version, ${CACHE_ROW_FRESHNESS_COLUMNS}`;
+// Pick a rowid entirely within the (provider_id, materialization_policy) index.
+// Probe plain only on a compact miss, even when the preferred row has an unreadable
+// version. Check that version on the winner, in the same snapshot as its payload.
+const PREFERRED_CACHE_ROW = `FROM wanted JOIN model_cache m ON m.rowid = COALESCE(
+	(SELECT rowid FROM model_cache WHERE provider_id = wanted.id AND materialization_policy = ?),
+	(SELECT rowid FROM model_cache WHERE provider_id = wanted.id AND materialization_policy = ?))`;
+const CACHE_ROW_FROM = `${PREFERRED_CACHE_ROW} LEFT JOIN model_cache_freshness f
+	ON f.provider_id = m.provider_id AND f.materialization_policy = m.materialization_policy`;
+const SELECT_CACHE_ROWS = `SELECT ${CACHE_ROW_COLUMNS},
+	CASE WHEN m.models_hash = wanted.hash AND m.materialization_policy = wanted.policy THEN NULL ELSE m.models END AS models
+	${CACHE_ROW_FROM} WHERE m.version = ${CACHE_SCHEMA_VERSION}`;
+const SELECT_CACHE_ROW = `WITH wanted(id, hash, policy) AS (VALUES (?,?,?)) ${SELECT_CACHE_ROWS}`;
 
 /** Cumulative model-cache write counters for this process. */
 export interface ModelCacheWriteStats {
@@ -243,6 +240,8 @@ type PersistedModel<TApi extends Api = Api> = Omit<Model<TApi>, "supportsCompute
 
 /** Materialized provider snapshot with freshness and header-restoration provenance. */
 export interface CacheEntry<TApi extends Api = Api> {
+	/** Identity of the payload and its header provenance, absent on unhashable legacy rows. */
+	payloadIdentity?: string;
 	/** Trusted, fully materialized rows; request headers remain omitted. */
 	models: Model<TApi>[];
 	fresh: boolean;
@@ -282,8 +281,8 @@ interface PinnedDb {
 const pinnedDbs = new Map<string, PinnedDb>();
 
 interface ReadRowCacheEntry {
-	/** `PRAGMA data_version` of the shared connection when validated; null for per-call connections. */
-	dataVersion: number | null;
+	/** Identifies one data version of one shared or retained connection; null for per-call connections. */
+	generation: ReadGeneration | null;
 	/**
 	 * Scalar columns (plus `models_hash`) of the row the entry was parsed from;
 	 * null when the row was absent or rejected. Never the multi-MB payload itself.
@@ -292,8 +291,8 @@ interface ReadRowCacheEntry {
 	entry: CacheEntry<Api> | null;
 }
 
-const readRowCache = new Map<string, ReadRowCacheEntry>();
 const READ_ROW_CACHE_MAX = 64;
+const readRowCache = new LRUCache<string, ReadRowCacheEntry>({ max: READ_ROW_CACHE_MAX });
 
 /**
  * Parsed `models` payloads by `models_hash`, shared across database files: a
@@ -308,10 +307,19 @@ function readCacheKey(resolvedPath: string, providerId: string): string {
 	return `${resolvedPath} ${providerId}`;
 }
 
-function dbDataVersion(db: Database): number | null {
+interface ReadGeneration {
+	readonly version: number;
+}
+const kReadGeneration = Symbol("modelCache.readGeneration");
+
+/** SQLite data_version is comparable only on the same connection, not even across reopens of the same file. */
+function dbReadGeneration(db: Database & { [kReadGeneration]?: ReadGeneration }): ReadGeneration | null {
 	try {
-		const row = db.query<{ data_version: number }, []>("PRAGMA data_version").get();
-		return typeof row?.data_version === "number" ? row.data_version : null;
+		const version = db.query<{ data_version: number }, []>("PRAGMA data_version").get()?.data_version;
+		if (typeof version !== "number") return null;
+		const last = db[kReadGeneration];
+		if (last?.version === version) return last;
+		return (db[kReadGeneration] = { version });
 	} catch {
 		return null;
 	}
@@ -366,6 +374,10 @@ function initializeDb(db: Database): void {
 			PRIMARY KEY (provider_id, api, endpoint, wire_model_id)
 		)
 	`);
+	db.run(`CREATE TABLE IF NOT EXISTS composed_catalog (
+		slot INTEGER PRIMARY KEY CHECK(slot = 1), inputs TEXT NOT NULL, created_at INTEGER NOT NULL,
+		expires_at INTEGER NOT NULL, checksum TEXT NOT NULL, payload BLOB NOT NULL
+	)`);
 	migrateCacheSchema(db);
 	// `models_hash` is the only payload-change detector for the read memo and the
 	// unchanged-write skip. Writers here replace whole rows; this keeps an
@@ -429,7 +441,12 @@ export function retainModelCacheConnection(dbPath: string | undefined): Disposab
 	};
 }
 
-function runModelCacheDb<T>(resolvedPath: string, shared: boolean, useDb: (db: Database) => T): T {
+function runModelCacheDb<T>(
+	resolvedPath: string,
+	shared: boolean,
+	useDb: (db: Database) => T,
+	recoverCorruption = true,
+): T {
 	if (shared && sharedDb && sharedDbPath !== resolvedPath) closeSharedDb();
 	const pin = shared ? undefined : pinnedDbs.get(resolvedPath);
 	const heldDb = shared ? sharedDb : pin?.db;
@@ -437,7 +454,7 @@ function runModelCacheDb<T>(resolvedPath: string, shared: boolean, useDb: (db: D
 		try {
 			return useDb(heldDb);
 		} catch (error) {
-			if (!isSqliteCorruptionError(error)) throw error;
+			if (!recoverCorruption || !isSqliteCorruptionError(error)) throw error;
 			// The opener owns recovery for new handles. Drop this stale handle
 			// first so its WAL cannot remain attached to the replacement.
 			if (pin) {
@@ -467,7 +484,7 @@ function runModelCacheDb<T>(resolvedPath: string, shared: boolean, useDb: (db: D
 			return result;
 		},
 		{
-			recoverCorruption: true,
+			recoverCorruption,
 			onCorruptionPreserved: () => invalidateReadPath(resolvedPath),
 		},
 	);
@@ -476,6 +493,144 @@ function runModelCacheDb<T>(resolvedPath: string, shared: boolean, useDb: (db: D
 function withModelCacheDb<T>(dbPath: string | undefined, useDb: (db: Database) => T): T {
 	const { resolvedPath, shared } = resolveCacheDb(dbPath);
 	return runModelCacheDb(resolvedPath, shared, useDb);
+}
+
+/**
+ * Whether none of the given namespaces has a payload for this build. Stale
+ * rows also count: an offline resolver can still use them. Never reads model
+ * bytes; false means a row exists or the database could not establish absence.
+ */
+export function areModelCacheRowsAbsent(providerIds: readonly string[], dbPath?: string): boolean {
+	if (providerIds.length === 0) return true;
+	try {
+		const { resolvedPath, shared } = resolveCacheDb(dbPath);
+		return runModelCacheDb(
+			resolvedPath,
+			shared,
+			db => {
+				const stmt = db.query<{ found: number }, [string, string, string]>(`
+					WITH wanted(id) AS (SELECT value FROM json_each(?))
+					SELECT 1 AS found ${PREFERRED_CACHE_ROW} WHERE m.version = ${CACHE_SCHEMA_VERSION} LIMIT 1`);
+				return stmt.get(JSON.stringify(providerIds), compactModelPolicy, plainModelPolicy) === null;
+			},
+			false, // An unreadable database does not establish absence.
+		);
+	} catch {
+		return false;
+	}
+}
+
+/** Descriptor only: constructing a registry for a scoped lookup never reads the large catalog blob. */
+export interface ComposedCatalogDescriptor {
+	inputs: string;
+	created_at: number;
+	expires_at: number;
+}
+
+export function readComposedCatalogDescriptor(dbPath?: string): ComposedCatalogDescriptor | null {
+	try {
+		return withModelCacheDb(dbPath, db =>
+			db
+				.query<ComposedCatalogDescriptor, []>(
+					"SELECT inputs, created_at, expires_at FROM composed_catalog WHERE slot=1",
+				)
+				.get(),
+		);
+	} catch {
+		return null;
+	}
+}
+
+function payloadIdentity(row: CacheRowMeta): string | undefined {
+	return row.models_hash
+		? JSON.stringify([
+				row.models_hash,
+				row.static_fingerprint,
+				row.header_restore_version,
+				row.header_omitted_model_ids,
+				row.unrestorable_header_model_ids,
+			])
+		: undefined;
+}
+
+/** An exact identity for the data the static composition reads; timestamp-only refreshes retain it. */
+export function staticCatalogSources(
+	namespaces: readonly string[],
+	ttlMs: number,
+	now: number,
+	dbPath?: string,
+): { identity: string; members: Map<string, string>; updatedAt: Map<string, number> } | undefined {
+	try {
+		return withModelCacheDb(dbPath, db => {
+			const byNamespace = new Map<string, CacheRowMeta>();
+			if (namespaces.length > 0) {
+				const stmt = db.query<CacheRowMeta, [string, string, string]>(`
+					WITH wanted(id) AS (SELECT value FROM json_each(?))
+					SELECT ${CACHE_ROW_COLUMNS} ${CACHE_ROW_FROM} WHERE m.version = ${CACHE_SCHEMA_VERSION}`);
+				for (const row of stmt.iterate(JSON.stringify(namespaces), compactModelPolicy, plainModelPolicy)) {
+					byNamespace.set(row.provider_id, row);
+				}
+			}
+			const updatedAt = new Map<string, number>();
+			const members = new Map<string, string>();
+			const identities = [];
+			for (const id of namespaces) {
+				const row = byNamespace.get(id);
+				if (!row) {
+					identities.push([id]);
+					continue;
+				}
+				if (!row.models_hash) return undefined;
+				const state = rowState(row);
+				updatedAt.set(id, state.updatedAt);
+				const age = now - state.updatedAt;
+				const member = `${payloadIdentity(row)}:${state.authoritative}:${age >= 0 && age <= ttlMs}`;
+				members.set(id, member);
+				identities.push([id, member]);
+			}
+			return {
+				identity: `${plainModelPolicy}:${Bun.hash(JSON.stringify(identities)).toString(36)}`,
+				members,
+				updatedAt,
+			};
+		});
+	} catch {
+		return undefined;
+	}
+}
+
+export function readComposedCatalog(inputs: string, now: number, dbPath?: string): Uint8Array | undefined {
+	try {
+		return withModelCacheDb(dbPath, db => {
+			const row = db
+				.query<{ payload: Uint8Array; checksum: string }, [string, number]>(
+					"SELECT payload, checksum FROM composed_catalog WHERE slot=1 AND inputs=?1 AND created_at<=?2 AND expires_at>?2",
+				)
+				.get(inputs, now);
+			return row && Bun.hash(row.payload).toString(36) === row.checksum ? row.payload : undefined;
+		});
+	} catch {
+		return undefined;
+	}
+}
+
+export function writeComposedCatalog(
+	inputs: string,
+	createdAt: number,
+	expiresAt: number,
+	payload: Uint8Array,
+	dbPath?: string,
+): void {
+	try {
+		withModelCacheDb(dbPath, db =>
+			db.run(
+				"INSERT OR REPLACE INTO composed_catalog (slot,inputs,created_at,expires_at,checksum,payload) VALUES (1,?,?,?,?,?)",
+				[inputs, createdAt, Math.min(expiresAt, Number.MAX_SAFE_INTEGER), Bun.hash(payload).toString(36), payload],
+			),
+		);
+	} catch {
+		// A derived catalog may always be rebuilt, including on a read-only or busy database.
+	}
 }
 
 /** Secret-free identity of one probed model endpoint and request API. */
@@ -648,30 +803,76 @@ function isMaterializedModel(value: unknown): value is PersistedModel<Api> {
 	return MaterializedModel.allows(value);
 }
 
-function parseMaterializedModels<TApi extends Api>(serialized: string): Model<TApi>[] | null {
+type CompatCopy = () => Record<string, unknown>;
+
+/** Resolved compat is mostly primitive flags. Find the mutable fields once per anchor. */
+function prepareCompatCopy(anchor: Record<string, unknown>): CompatCopy {
+	const nested: string[] = [];
+	for (const key in anchor) {
+		if (!Object.hasOwn(anchor, key)) continue;
+		const value = anchor[key];
+		if (value !== null && typeof value === "object") nested.push(key);
+	}
+	return () => {
+		const copy = { ...anchor };
+		// Even "__proto__" is already an own data property of the spread.
+		for (const key of nested) copy[key] = cloneJsonTree(anchor[key]);
+		return copy;
+	};
+}
+
+function parseMaterializedModels<TApi extends Api>(serialized: string, policy: string): Model<TApi>[] | null {
 	try {
 		const parsed: unknown = JSON.parse(serialized);
-		if (!Array.isArray(parsed) || !parsed.every(isMaterializedModel)) return null;
-		return parsed.map(model => ({
-			...model,
-			supportsComputerUseConfig: model.supportsComputerUseConfig ?? undefined,
-		})) as Model<TApi>[];
+		if (!Array.isArray(parsed)) return null;
+		let copies: CompatCopy[] | undefined;
+		for (let i = 0; i < parsed.length; i++) {
+			const model = parsed[i];
+			const ref = model?.compat;
+			if (typeof ref === "number") {
+				if (policy !== compactModelPolicy || !Number.isInteger(ref) || ref < 0 || ref >= i) return null;
+				const compat = parsed[ref].compat;
+				if (compat === undefined) return null;
+				copies ??= [];
+				const copy = (copies[ref] ??= prepareCompatCopy(compat));
+				copies[i] = copy; // Backward references can themselves be referenced.
+				model.compat = copy();
+			}
+			if (!isMaterializedModel(model)) return null;
+			// JSON.parse owns these rows; restore the optional value in place rather
+			// than copying every property of every model into a second array.
+			const restoring: { supportsComputerUseConfig?: boolean | null } = model;
+			if (restoring.supportsComputerUseConfig === null) restoring.supportsComputerUseConfig = undefined;
+		}
+		return parsed as Model<TApi>[];
 	} catch {
 		return null;
 	}
 }
 
-/** {@link parseMaterializedModels}, memoized by the row's `models_hash` (rows without one always parse). */
-function parsePayload<TApi extends Api>(serialized: string, hash: string): Model<TApi>[] | null {
-	if (hash === "") return parseMaterializedModels<TApi>(serialized);
-	const cached = parsedPayloads.get(hash);
+function payloadHash(models: string): string {
+	return `${models.length.toString(36)}:${Bun.hash(models).toString(36)}`;
+}
+
+/** Include the encoding in the key: a numeric compat reference is invalid in a plain snapshot. */
+function payloadKey(serialized: string, hash: string, policy: string): string {
+	const digest = hash || payloadHash(serialized);
+	return policy === compactModelPolicy ? digest : `plain:${digest}`;
+}
+
+function parsePayload<TApi extends Api>(serialized: string, hash: string, policy: string): Model<TApi>[] | null {
+	const key = payloadKey(serialized, hash, policy);
+	const cached = parsedPayloads.get(key);
 	if (cached !== undefined) return cached as Model<TApi>[];
-	const models = parseMaterializedModels<TApi>(serialized);
-	if (models !== null) parsedPayloads.set(hash, models as Model<Api>[]);
+	const models = parseMaterializedModels<TApi>(serialized, policy);
+	if (models !== null) parsedPayloads.set(key, models as Model<Api>[]);
 	return models;
 }
 
-function parseModelIds(serialized: string): string[] | null {
+const noModelIds: readonly string[] = Object.freeze([]);
+
+function parseModelIds(serialized: string): readonly string[] | null {
+	if (serialized === "[]") return noModelIds;
 	try {
 		const parsed: unknown = JSON.parse(serialized);
 		return Array.isArray(parsed) && parsed.every((id): id is string => typeof id === "string") ? parsed : null;
@@ -679,69 +880,166 @@ function parseModelIds(serialized: string): string[] | null {
 		return null;
 	}
 }
+/** Read shared model metadata, with request headers omitted. */
 export function readModelCache<TApi extends Api>(
 	providerId: string,
 	ttlMs: number,
 	now: () => number,
 	dbPath?: string,
 ): CacheEntry<TApi> | null {
+	return readCache(providerId, ttlMs, now, dbPath, "shared");
+}
+
+/** Read resolver-owned header rows, optionally from this namespace's snapshot in the current offline batch. */
+export function readCacheForHeaderRestore<TApi extends Api>(
+	providerId: string,
+	ttlMs: number,
+	now: () => number,
+	dbPath?: string,
+	snapshots?: ReadonlyMap<string, CacheEntry<TApi>>,
+): CacheEntry<TApi> | null {
+	if (snapshots) return forReader(withFreshness(snapshots.get(providerId) ?? null, ttlMs, now), "restoreHeaders");
+	return readCache(providerId, ttlMs, now, dbPath, "restoreHeaders");
+}
+
+type CacheRead = "shared" | "restoreHeaders";
+
+function forReader<TApi extends Api>(entry: CacheEntry<TApi> | null, use: CacheRead): CacheEntry<TApi> | null {
+	if (use === "shared" || !entry?.headerOmittedModelIds.length) return entry;
+	// Another reader already owns the headerless metadata. Detach only the rows we will write.
+	const omitted = new Set(entry.headerOmittedModelIds);
+	return { ...entry, models: entry.models.map(model => (omitted.has(model.id) ? { ...model } : model)) };
+}
+
+function readCache<TApi extends Api>(
+	providerId: string,
+	ttlMs: number,
+	now: () => number,
+	dbPath: string | undefined,
+	use: CacheRead,
+): CacheEntry<TApi> | null {
 	try {
 		// Monotonic change signal: same-shaped WAL overwrites after checkpoint
 		// can leave every size:mtime pair identical, so file metadata alone
 		// cannot invalidate. PRAGMA data_version increments on each committed
 		// write transaction visible to a new reader. It is only comparable
-		// across calls on the same connection, so it gates the no-query fast
-		// path for the shared handle only.
+		// across calls on the same connection: per-call handles always query.
 		const { resolvedPath, shared } = resolveCacheDb(dbPath);
 		const key = readCacheKey(resolvedPath, providerId);
 		return runModelCacheDb(resolvedPath, shared, db => {
-			const dataVersion = shared ? dbDataVersion(db) : null;
+			const generation = shared || pinnedDbs.has(resolvedPath) ? dbReadGeneration(db) : null;
 			const cached = readRowCache.get(key);
-			if (dataVersion !== null && cached?.dataVersion === dataVersion) {
+			if (generation !== null && cached?.generation === generation) {
 				// Freshness is time-relative: recompute per call from the
 				// cached row's updatedAt so a long-lived process goes stale.
-				return withFreshness(cached.entry as CacheEntry<TApi> | null, ttlMs, now);
+				return forReader(withFreshness(cached.entry as CacheEntry<TApi> | null, ttlMs, now), use);
 			}
-			// Any commit (to any provider's row) bumps data_version. Validate the
-			// memoized parse against the row's scalar columns and payload hash
-			// first; only a changed payload pays for the multi-MB `models` read.
-			let entry: CacheEntry<TApi> | null = null;
-			let meta: CacheRowMeta | null = null;
-			if (cached?.entry && cached.meta) {
-				meta = queryRow<CacheRowMeta>(db, SELECT_CACHE_ROW_META, providerId);
-				if (meta && cacheRowsEqual(cached.meta, meta)) {
-					// Payload unchanged; only side-table freshness may have moved.
-					entry = withFreshness(withRowState(cached.entry as CacheEntry<TApi>, meta), ttlMs, now);
-				} else {
-					meta = null;
-				}
-			}
-			if (entry === null) {
-				// One statement reads payload and scalars from the same snapshot.
-				const row = queryRow<CacheRow>(db, SELECT_CACHE_ROW, providerId);
-				entry = parseCacheRow<TApi>(db, providerId, row, ttlMs, now);
-				if (entry !== null && row !== null) {
-					// Drop the payload so the memo never pins the multi-MB `models` string.
-					const { models: _models, ...rowScalars } = row;
-					meta = rowScalars;
-				}
-			}
-			if (readRowCache.size >= READ_ROW_CACHE_MAX) readRowCache.clear();
-			readRowCache.set(key, { dataVersion, meta, entry: entry as CacheEntry<Api> | null });
-			return entry;
+			// Any commit (to any provider) bumps data_version. Revalidate the
+			// scalars and fetch the payload only on a hash miss, in one snapshot.
+			const row = db
+				.query<CacheRow, [string, string | null, string | null, string, string]>(SELECT_CACHE_ROW)
+				.get(
+					providerId,
+					cached?.meta?.models_hash || null,
+					cached?.meta?.materialization_policy ?? null,
+					compactModelPolicy,
+					plainModelPolicy,
+				);
+			return rememberRow<TApi>(db, key, providerId, cached, row, generation, ttlMs, now, use);
 		});
 	} catch {
 		return null;
 	}
 }
 
-/** This build's row for `providerId`; rows of other materialization policies are invisible. */
-function queryRow<T>(db: Database, sql: string, providerId: string): T | null {
-	const stmt = db.query<T, [string, string]>(sql);
+function rememberRow<TApi extends Api>(
+	db: Database,
+	key: string,
+	providerId: string,
+	cached: ReadRowCacheEntry | undefined,
+	row: CacheRow | null,
+	generation: ReadGeneration | null,
+	ttlMs: number,
+	now: () => number,
+	use: CacheRead = "shared",
+): CacheEntry<TApi> | null {
+	const previous = row?.models === null ? (cached?.entry as CacheEntry<TApi> | null | undefined) : undefined;
+	const entry =
+		row?.models === null && previous && cached?.meta && cacheRowsEqual(cached.meta, row)
+			? withFreshness(withRowState(previous, row), ttlMs, now)
+			: parseCacheRow(db, providerId, row, ttlMs, now, previous?.models);
+	if (row) row.models = null; // Never pin the serialized payload in the memo.
+	readRowCache.set(key, { generation, meta: entry ? row : null, entry: entry as CacheEntry<Api> | null });
+	return forReader(entry, use);
+}
+
+/**
+ * Read a group of startup namespaces together: one change check, and one indexed
+ * join for all rows that need revalidation, including misses. Only changed
+ * payloads cross the SQLite boundary, just as in the single-provider reader.
+ */
+export function readModelCaches<TApi extends Api>(
+	providerIds: readonly string[],
+	ttlMs: number,
+	now: () => number,
+	dbPath?: string,
+): Map<string, CacheEntry<TApi>> {
+	const entries = new Map<string, CacheEntry<TApi>>();
+	if (providerIds.length === 0) return entries;
+	if (providerIds.length === 1) {
+		const entry = readModelCache<TApi>(providerIds[0], ttlMs, now, dbPath);
+		if (entry) entries.set(providerIds[0], entry);
+		return entries;
+	}
 	try {
-		return stmt.get(providerId, materializationPolicy());
-	} finally {
-		stmt.finalize();
+		const { resolvedPath, shared } = resolveCacheDb(dbPath);
+		return runModelCacheDb(resolvedPath, shared, db => {
+			entries.clear(); // A corruption recovery may retry this callback on a replacement database.
+			const generation = shared || pinnedDbs.has(resolvedPath) ? dbReadGeneration(db) : null;
+			const pending = new Map<string, { key: string; cached: ReadRowCacheEntry | undefined }>();
+			const bindings: (string | null)[] = [];
+			for (const id of providerIds) {
+				const key = readCacheKey(resolvedPath, id);
+				const cached = readRowCache.get(key);
+				if (generation !== null && cached?.generation === generation) {
+					const entry = withFreshness(cached.entry as CacheEntry<TApi> | null, ttlMs, now);
+					if (entry) entries.set(id, entry);
+				} else if (!pending.has(id)) {
+					pending.set(id, { key, cached });
+					bindings.push(id, cached?.meta?.models_hash || null, cached?.meta?.materialization_policy ?? null);
+				}
+			}
+			if (pending.size === 0) return entries;
+			// Stream instead of collecting all payload strings for a large catalog.
+			const values = "(?,?,?),".repeat(pending.size).slice(0, -1);
+			const stmt = db.prepare<CacheRow, (string | null)[]>(
+				`WITH wanted(id, hash, policy) AS (VALUES ${values}) ${SELECT_CACHE_ROWS}`,
+			);
+			try {
+				bindings.push(compactModelPolicy, plainModelPolicy);
+				for (const row of stmt.iterate(...bindings)) {
+					const { key, cached } = pending.get(row.provider_id)!;
+					const entry = rememberRow<TApi>(db, key, row.provider_id, cached, row, generation, ttlMs, now);
+					if (entry) entries.set(row.provider_id, entry);
+					pending.delete(row.provider_id);
+				}
+			} finally {
+				stmt.finalize();
+			}
+			for (const { key } of pending.values()) {
+				readRowCache.set(key, { generation, meta: null, entry: null });
+			}
+			return entries;
+		});
+	} catch {
+		// One unreadable row (or a group exceeding SQLite's binding limit) must
+		// not hide healthy providers. The single reader isolates per-row failures.
+		entries.clear();
+		for (const id of providerIds) {
+			const entry = readModelCache<TApi>(id, ttlMs, now, dbPath);
+			if (entry) entries.set(id, entry);
+		}
+		return entries;
 	}
 }
 
@@ -789,13 +1087,17 @@ function parseCacheRow<TApi extends Api>(
 	row: CacheRow | null,
 	ttlMs: number,
 	now: () => number,
+	knownModels: Model<TApi>[] | undefined,
 ): CacheEntry<TApi> | null {
-	if (!row || row.version !== CACHE_SCHEMA_VERSION) {
-		return null;
-	}
-	const models = parsePayload<TApi>(row.models, row.models_hash);
+	if (!row) return null;
 	const headerOmittedModelIds = parseModelIds(row.header_omitted_model_ids);
 	const unrestorableHeaderModelIds = parseModelIds(row.unrestorable_header_model_ids);
+	const models =
+		row.models === null
+			? (knownModels ?? null)
+			: headerOmittedModelIds && unrestorableHeaderModelIds
+				? parsePayload<TApi>(row.models, row.models_hash, row.materialization_policy)
+				: null;
 	if (models === null || headerOmittedModelIds === null || unrestorableHeaderModelIds === null) {
 		// Fail closed on corrupt header provenance: treating malformed
 		// markers as empty could return a model with required credentials
@@ -815,6 +1117,7 @@ function parseCacheRow<TApi extends Api>(
 		fresh,
 		authoritative,
 		payloadAuthoritative: row.authoritative === 1,
+		payloadIdentity: payloadIdentity(row),
 		updatedAt,
 		headerOmittedModelIds,
 		unrestorableHeaderModelIds,
@@ -911,6 +1214,8 @@ class CacheRowBuilder<TApi extends Api> {
 	readonly #unrestorableHeaderModelIds: string[] = [];
 	readonly #rejectedModelIds: string[] = [];
 	readonly #serializedModels: string[] = [];
+	/** First persisted row carrying each byte-identical resolved compat record. */
+	readonly #compatAnchors = new Map<string, number>();
 
 	constructor(
 		staticHeaderSources: readonly Model<TApi>[],
@@ -951,6 +1256,15 @@ class CacheRowBuilder<TApi extends Api> {
 				this.#unrestorableHeaderModelIds.push(model.id);
 			}
 		}
+		if (cachedModel.compat !== undefined) {
+			const bytes = JSON.stringify(cachedModel.compat);
+			const anchor = this.#compatAnchors.get(bytes);
+			if (anchor === undefined) this.#compatAnchors.set(bytes, this.#serializedModels.length);
+			else {
+				const encoded: { compat?: unknown } = cachedModel;
+				encoded.compat = anchor;
+			}
+		}
 		this.#serializedModels.push(JSON.stringify(cachedModel));
 	}
 
@@ -962,8 +1276,7 @@ class CacheRowBuilder<TApi extends Api> {
 				models: this.#rejectedModelIds,
 			});
 		}
-		// Joined element-wise this is byte-identical to `JSON.stringify` of the
-		// whole array, so the hash matches rows serialized in one piece.
+		// References use row order, so identical snapshots retain a stable payload hash.
 		const models = `[${this.#serializedModels.join(",")}]`;
 		return {
 			providerId,
@@ -974,7 +1287,7 @@ class CacheRowBuilder<TApi extends Api> {
 			unrestorableHeaderModelIds: JSON.stringify(this.#unrestorableHeaderModelIds),
 			models,
 			// Length prefix: a collision would also need an equal payload size.
-			modelsHash: `${models.length.toString(36)}:${Bun.hash(models).toString(36)}`,
+			modelsHash: payloadHash(models),
 		};
 	}
 }
@@ -994,7 +1307,7 @@ function matchingStoredRow(db: Database, write: CacheRowWrite): StoredRowState |
 		return stmt.get(
 			write.providerId,
 			CACHE_SCHEMA_VERSION,
-			materializationPolicy(),
+			compactModelPolicy,
 			write.staticFingerprint,
 			write.headerOmittedModelIds,
 			write.unrestorableHeaderModelIds,
@@ -1023,7 +1336,7 @@ function storedRowUnchanged(db: Database, write: CacheRowWrite): boolean {
  * drops the stale side row and prunes the provider's other policies.
  */
 function applyCacheRowWrite(db: Database, write: CacheRowWrite): "skipped" | "refreshed" | "written" {
-	const policy = materializationPolicy();
+	const policy = compactModelPolicy;
 	const authoritativeFlag = write.authoritative ? 1 : 0;
 	const stored = matchingStoredRow(db, write);
 	if (stored) {

@@ -40,6 +40,7 @@ from robomp.git_ops import DirtyState, inspect_dirty_state
 from robomp.github_backend import GitHubBackend
 from robomp.github_client import CommentInfo, IssueInfo, PullRequestInfo, RepoInfo
 from robomp.host_tools import AbortController, ReleaseToolContext, ToolBindings, _git_identity_env
+from robomp.issue_index import duplicate_candidates
 from robomp.natives_cache import NativesCache
 from robomp.natives_cache import compute_key as natives_compute_key
 from robomp.sandbox import GitTransport, Workspace, _prepare_slot_runtime_env, _safe_directory_env
@@ -482,7 +483,12 @@ def _build_prompt(
                 workspace=inputs.workspace,
                 directive=directive,
             )
-        return persona.kickoff(repo=inputs.repo, issue=inputs.issue, workspace=inputs.workspace)
+        return persona.kickoff(
+            repo=inputs.repo,
+            issue=inputs.issue,
+            workspace=inputs.workspace,
+            candidates=duplicate_candidates(inputs.db, inputs.issue),
+        )
     if task_kind == "review_pr":
         assert inputs.issue is not None
         assert pr is not None

@@ -10,7 +10,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { IpcConnection } from "@oh-my-pi/pi-natives";
+import { IpcConnection, spawnBreakaway } from "@oh-my-pi/pi-natives";
 import { isEexist, isEnoent, isPidAlive, logger, postmortem, toError } from "@oh-my-pi/pi-utils";
 import { resolveCliEntryCmd, resolveWorkerSpawnCmd, workerEnvFromParent } from "../subprocess/worker-client";
 import { daemonBuildId } from "./build";
@@ -71,12 +71,6 @@ const ABANDONED_LIMIT = 256;
 /** Server errors (`server.ts`) meaning "this daemon is going away; dial its successor". */
 const DAEMON_RESTARTING = "Daemon is restarting";
 const DAEMON_SHUTTING_DOWN = "Daemon is shutting down";
-/**
- * The daemon must outlive whichever omp process spawned it. Bun on Windows puts
- * every non-detached child in a kill-on-close job object owned by the parent,
- * so it is detached; it then has no console and its units spawn hidden.
- */
-const DAEMON_SPAWN_OPTIONS = { detached: true, windowsHide: true } as const;
 
 /** The daemon answered a request with an error. */
 export class DaemonRejectedError extends Error {}
@@ -183,16 +177,29 @@ function dial(): Promise<IpcConnection> {
  * serves every project, so it never inherits this process's cwd: on Windows a
  * running process's cwd cannot be removed or renamed. Only the no-host
  * fallback pins a cwd, because its entry path is relative to it.
+ *
+ * On Windows a detached `Bun.spawn` still leaves the child in every job object
+ * this process is in, and a terminal host that terminates its job on close
+ * would take down the daemon and every other session's units with it, so the
+ * daemon breaks away from those jobs where they permit it (issue #20722). It
+ * has no console either way, so its units spawn hidden.
  */
 function spawnDaemon(): void {
 	const spawn = resolveWorkerSpawnCmd(DAEMON_WORKER_ARG);
+	const cwd = spawn.cwd ?? daemonDir();
+	const env = workerEnvFromParent();
+	if (process.platform === "win32") {
+		const [application, ...args] = spawn.cmd;
+		spawnBreakaway({ application, args, env, cwd });
+		return;
+	}
 	const child = Bun.spawn(spawn.cmd, {
-		cwd: spawn.cwd ?? daemonDir(),
-		env: workerEnvFromParent(),
+		cwd,
+		env,
 		stdin: "ignore",
 		stdout: "ignore",
 		stderr: "ignore",
-		...DAEMON_SPAWN_OPTIONS,
+		detached: true,
 	});
 	child.unref();
 }
@@ -1021,6 +1028,24 @@ export function daemonClient(): Promise<DaemonClient> {
 		cancelExitCleanup ??= postmortem.register("daemon-client", () => closeDaemonClient());
 	}
 	return shared;
+}
+
+/**
+ * Open (find-or-start) a module unit and attach a tunnel to it. The lease is
+ * given back when the attach fails, so a failed attempt never keeps the unit alive.
+ */
+export async function openTunnel(
+	daemon: Pick<DaemonClient, "open" | "attach" | "release">,
+	request: OpenRequest,
+	signal?: AbortSignal,
+): Promise<{ tunnel: DaemonTunnel; lease: string | undefined }> {
+	const opened = await daemon.open(request, signal);
+	try {
+		return { tunnel: await daemon.attach(opened.unit.id, undefined, signal), lease: opened.lease };
+	} catch (error) {
+		if (opened.lease) void daemon.release(opened.lease).catch(() => {});
+		throw error;
+	}
 }
 
 /** What {@link registerOnBoard} lists: a process this omp process owns and the daemon only displays. */

@@ -28,6 +28,21 @@ function respond(pendingRequests: Map<string, PendingExtensionRequest>, id: stri
 	request.resolve({ type: "extension_ui_response", id, ...payload } as RpcExtensionUIResponse);
 }
 
+/** An isolated, headless child env under `temp`, marked as a test runtime so the child never reaches the OS keychain. */
+function childEnv(temp: TempDir): Record<string, string | undefined> {
+	return {
+		PATH: Bun.env.PATH,
+		HOME: temp.join("home"),
+		PI_CODING_AGENT_DIR: temp.join("agent"),
+		XDG_CONFIG_HOME: temp.join("config"),
+		XDG_DATA_HOME: temp.join("data"),
+		XDG_CACHE_HOME: temp.join("cache"),
+		CI: "true",
+		PI_NO_TITLE: "1",
+		PI_TEST_RUNTIME: "1",
+	};
+}
+
 const dbQuestion: ExtensionAskDialogQuestion = {
 	id: "db",
 	question: "Which database?",
@@ -131,16 +146,7 @@ await runRpcMode(session, {
 		);
 		const child = Bun.spawn([process.execPath, fixturePath], {
 			cwd: temp.path(),
-			env: {
-				PATH: Bun.env.PATH,
-				HOME: temp.join("home"),
-				PI_CODING_AGENT_DIR: temp.join("agent"),
-				XDG_CONFIG_HOME: temp.join("config"),
-				XDG_DATA_HOME: temp.join("data"),
-				XDG_CACHE_HOME: temp.join("cache"),
-				CI: "true",
-				PI_NO_TITLE: "1",
-			},
+			env: childEnv(temp),
 			stdin: "pipe",
 			stdout: "pipe",
 			stderr: "pipe",
@@ -210,16 +216,7 @@ await runRpcMode(session);
 		);
 		return Bun.spawn([process.execPath, fixturePath], {
 			cwd: temp.path(),
-			env: {
-				PATH: Bun.env.PATH,
-				HOME: temp.join("home"),
-				PI_CODING_AGENT_DIR: temp.join("agent"),
-				XDG_CONFIG_HOME: temp.join("config"),
-				XDG_DATA_HOME: temp.join("data"),
-				XDG_CACHE_HOME: temp.join("cache"),
-				CI: "true",
-				PI_NO_TITLE: "1",
-			},
+			env: childEnv(temp),
 			stdin: "pipe",
 			stdout: "pipe",
 			stderr: "pipe",
@@ -481,16 +478,7 @@ export default function(pi) {
 			],
 			{
 				cwd: temp.path(),
-				env: {
-					PATH: Bun.env.PATH,
-					HOME: temp.join("home"),
-					PI_CODING_AGENT_DIR: temp.join("agent"),
-					XDG_CONFIG_HOME: temp.join("config"),
-					XDG_DATA_HOME: temp.join("data"),
-					XDG_CACHE_HOME: temp.join("cache"),
-					CI: "true",
-					PI_NO_TITLE: "1",
-				},
+				env: childEnv(temp),
 				stdin: "pipe",
 				stdout: "pipe",
 				stderr: "pipe",
@@ -611,79 +599,6 @@ export default function(pi) {
 			},
 		});
 	}, 30_000);
-
-	it("routes a provider's login-warning acceptance to the host before any auth URL (#19523)", async () => {
-		await using temp = await TempDir.create("@rpc-login-warning-");
-		const child = Bun.spawn(
-			[
-				process.execPath,
-				path.join(import.meta.dir, "..", "src", "cli.ts"),
-				"--mode",
-				"rpc",
-				"--provider",
-				"anthropic",
-				"--model",
-				"claude-sonnet-4-5",
-			],
-			{
-				cwd: temp.path(),
-				env: {
-					PATH: Bun.env.PATH,
-					HOME: temp.join("home"),
-					PI_CODING_AGENT_DIR: temp.join("agent"),
-					XDG_CONFIG_HOME: temp.join("config"),
-					XDG_DATA_HOME: temp.join("data"),
-					XDG_CACHE_HOME: temp.join("cache"),
-					CI: "true",
-					PI_NO_TITLE: "1",
-				},
-				stdin: "pipe",
-				stdout: "pipe",
-				stderr: "pipe",
-				timeout: 20_000,
-			},
-		);
-		const stdout = new Response(child.stdout).body;
-		if (!stdout) throw new Error("RPC login fixture did not expose stdout");
-		const stderr = new Response(child.stderr).text();
-		const send = async (frame: object) => {
-			child.stdin.write(`${JSON.stringify(frame)}\n`);
-			await child.stdin.flush();
-		};
-		const inputTitles: string[] = [];
-		let loginResponse: unknown;
-		try {
-			// antigravity-cli declares `login-warning`; declining it must cancel before any login work starts.
-			await send({ type: "login", providerId: "antigravity-cli", id: "login" });
-			for await (const frame of readJsonl<unknown>(stdout)) {
-				if (!isRecord(frame)) continue;
-				if (frame.type === "extension_ui_request" && frame.method === "input") {
-					if (typeof frame.id !== "string" || typeof frame.title !== "string") {
-						throw new Error("RPC input request did not carry string id and title");
-					}
-					inputTitles.push(frame.title);
-					await send({ type: "extension_ui_response", id: frame.id, value: "no" });
-				} else if (frame.type === "response" && frame.id === "login") {
-					loginResponse = frame;
-					break;
-				}
-			}
-		} finally {
-			child.stdin.end();
-			child.kill();
-			await child.exited;
-		}
-
-		if (!loginResponse) throw new Error(`RPC login fixture did not finish: ${await stderr}`);
-		await stderr;
-		expect(inputTitles).toEqual([expect.stringContaining("use at your own risk")]);
-		expect(loginResponse).toMatchObject({
-			type: "response",
-			command: "login",
-			success: false,
-			error: "Login cancelled",
-		});
-	}, 30_000);
 });
 
 const DEPLOY_FORM = `<form>
@@ -741,7 +656,6 @@ describe("RPC form dialog", () => {
 			{ data: { checks: ["Rollback", "Canary bake"] } },
 			'unexpected value "Canary bake"',
 		],
-		["a number below the input's min", { data: { replicas: 0 } }, 'Form field "replicas": '],
 		["a disabled radio option", { data: { target: "legacy" } }, 'disabled option "legacy"'],
 		["a disabled checkbox option", { data: { checks: ["lint", "e2e"] } }, 'disabled option "e2e"'],
 		["a number for a text input", { data: { owner: 7 } }, 'Form field "owner" must carry a string'],
@@ -825,21 +739,6 @@ describe("RPC form dialog", () => {
 		expect(await result).toEqual({ data: { tier: "custom" } });
 	});
 
-	it("rejects a hidden fallback for an unchecked required checkbox", async () => {
-		const pendingRequests = new Map<string, PendingExtensionRequest>();
-		const output = vi.fn<(frame: object) => void>();
-		const html = `<form>
-  <input type="hidden" name="enabled" value="off">
-  <label><input type="checkbox" name="enabled" value="on" required> Enabled</label>
-</form>`;
-		const result = requestRpcFormDialog(pendingRequests, output, FRAME_LIMIT, html);
-
-		respond(pendingRequests, requireRequest(output.mock.calls[0]?.[0]).id, { data: { enabled: "off" } });
-
-		await expect(result).rejects.toThrow("Required");
-		expect(pendingRequests.size).toBe(0);
-	});
-
 	it("fails a form too large for one frame without sending a truncated copy", async () => {
 		const pendingRequests = new Map<string, PendingExtensionRequest>();
 		const output = vi.fn<(frame: object) => void>();
@@ -850,19 +749,18 @@ describe("RPC form dialog", () => {
 		expect(pendingRequests.size).toBe(0);
 	});
 
-	it("checks a shared name against every field that carries it", async () => {
+	it("accepts a host answer that breaks the form's rules, as the form dialogs only flag them", async () => {
 		const pendingRequests = new Map<string, PendingExtensionRequest>();
 		const output = vi.fn<(frame: object) => void>();
 		const html = `<form>
   <label>Name <input type="text" name="name" required></label>
-  <label>Nickname <input type="text" name="name"></label>
+  <label>Workers <input type="number" name="workers" min="1"></label>
 </form>`;
 		const result = requestRpcFormDialog(pendingRequests, output, FRAME_LIMIT, html);
 
-		// The optional second field must not hide the required first one.
-		respond(pendingRequests, requireRequest(output.mock.calls[0]?.[0]).id, { data: {} });
+		respond(pendingRequests, requireRequest(output.mock.calls[0]?.[0]).id, { data: { workers: 0 } });
 
-		await expect(result).rejects.toThrow("Required");
+		expect(await result).toEqual({ data: { name: "", workers: 0 } });
 	});
 
 	it("gives a shared name's entry to the field whose shape carries it", async () => {
@@ -1115,16 +1013,7 @@ describe("RPC ask dialog", () => {
 			],
 			{
 				cwd: temp.path(),
-				env: {
-					PATH: Bun.env.PATH,
-					HOME: temp.join("home"),
-					PI_CODING_AGENT_DIR: temp.join("agent"),
-					XDG_CONFIG_HOME: temp.join("config"),
-					XDG_DATA_HOME: temp.join("data"),
-					XDG_CACHE_HOME: temp.join("cache"),
-					CI: "true",
-					PI_NO_TITLE: "1",
-				},
+				env: childEnv(temp),
 				stdin: "pipe",
 				stdout: "pipe",
 				stderr: "pipe",

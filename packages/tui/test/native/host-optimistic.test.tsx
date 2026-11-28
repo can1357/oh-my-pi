@@ -67,12 +67,13 @@ afterEach(async () => {
 });
 
 /** A host on in-memory streams whose terminal answers nothing until the test feeds it. */
-async function start(env: Record<string, string>) {
+async function start(env: Record<string, string>, screen?: () => "inline" | "fullscreen") {
 	const stdin = new Stdin();
 	const writes: string[] = [];
 	const surface = createSurface(() => ({ main: <text>hello there</text> }));
 	const host = await startHost({
 		surface,
+		...(screen ? { screen } : {}),
 		theme: () => loadThemeSync("dark"),
 		driver: {
 			env,
@@ -102,6 +103,20 @@ async function start(env: Record<string, string>) {
 }
 
 describe("startHost optimistic native start in a Tern pane", () => {
+	it("does not consult terminal fullscreen preferences or emit terminal controls for transcript actions on Tern", async () => {
+		const h = await start({ TERM_PROGRAM: "tern" }, () => {
+			throw new Error("terminal option read on Tern");
+		});
+		h.feed(HELLO_REPLY + DA1.repeat(3));
+		await Bun.sleep(5);
+		const before = h.out();
+		expect(h.host.openSearch()).toBe(false);
+		expect(h.host.copySelection()).toBe(false);
+		expect(h.host.scroll("previous-prompt")).toBe(false);
+		expect(h.out()).toBe(before);
+		expect(before).not.toContain("\x1b[?1049h");
+	});
+
 	it("renders natively before the hello reply and stays native once it arrives", async () => {
 		const h = await start({ TERM_PROGRAM: "tern" });
 		// Nothing answered yet: the surface is already open and drawn natively.

@@ -1,7 +1,7 @@
 /**
  * Terminal looks of the dock's status rows.
  *
- * - `row` `omp.working`: a blank row, then one cell in: the interrupt key
+ * - `row` `omp.working`: a blank row, then the inset interrupt key
  *   (muted, or the accent's dim hue) and the label shimmering — or, for a
  *   maintenance run, a spinner frame (accent; warning for a retry) and the
  *   muted line. A trailer docks right when two cells stay free.
@@ -11,9 +11,11 @@
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import { type Block, defineRolePainter, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { shimmerTiers } from "@oh-my-pi/pi-tui/term/painters/shimmer";
+import { spinnerIndex } from "@oh-my-pi/pi-tui/term/painters/spinner";
 import { type ShimmerMode, type ShimmerTiers, shimmerText } from "@oh-my-pi/pi-tui/text/shimmer";
 import { truncate, visibleWidth } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
+import { terminalPaddingX } from "../terminal-padding";
 import { keyLabel } from "../../keys/hints";
 import { termOf } from "../messages/fill";
 
@@ -36,9 +38,6 @@ export type WorkingTerm = {
 	/** Drawn as given (the producer styles it). */
 	readonly trailer?: () => string | undefined;
 };
-
-/** Spinner frame period of a maintenance row, ms. */
-const SPINNER_MS = 80;
 
 function hexFg(hex: string, text: string): string {
 	const value = Number.parseInt(hex.replace("#", ""), 16);
@@ -67,7 +66,7 @@ function paintWorking(node: UiNode, cx: PaintContext): Block {
 	const theme = cx.theme;
 	const label = (key: string): string => keyLabel(theme, key);
 	const animated =
-		term.look === "maintenance" ? !cx.reduceMotion || term.countdown === true : term.shimmer !== undefined;
+		term.look === "maintenance" ? cx.spinnerInterval > 0 || term.countdown === true : term.shimmer !== undefined;
 	// Reading the clock repaints the row every frame; a still row reads it only for a live label.
 	const now = animated || term.live || term.countdown ? cx.now(term.shimmer !== undefined && !cx.reduceMotion) : 0;
 	const message = term.message(now, label);
@@ -75,8 +74,7 @@ function paintWorking(node: UiNode, cx: PaintContext): Block {
 	let text: string;
 	if (term.look === "maintenance") {
 		const frames = theme.symbols.spinnerFrames;
-		const frame =
-			frames.length === 0 ? "" : frames[cx.reduceMotion ? 0 : Math.floor(now / SPINNER_MS) % frames.length]!;
+		const frame = frames.length === 0 ? "" : frames[spinnerIndex(cx, frames.length)]!;
 		lead = theme.fg(term.tone, frame);
 		text = theme.fg("muted", message);
 	} else {
@@ -85,15 +83,16 @@ function paintWorking(node: UiNode, cx: PaintContext): Block {
 		const looks = tiers(theme, term.accent);
 		text = term.shimmer && !cx.reduceMotion ? shimmerText(message, now, term.shimmer, looks) : looks.mid(message);
 	}
-	const body = truncate(` ${lead} ${text}`, cx.width);
+	const body = truncate(`${" ".repeat(terminalPaddingX())}${lead} ${text}`, cx.width);
 	return { rows: ["", docked(body, term.trailer?.(), cx.width)] };
 }
 
 function paintRetryHint(node: UiNode, cx: PaintContext): Block {
 	const key = termOf<{ key: string }>(node).key ?? "f5";
 	const theme = cx.theme;
+	const pad = " ".repeat(terminalPaddingX() + 1);
 	return {
-		rows: ["", truncate(`  ${theme.fg("dim", keyLabel(theme, key))}${theme.fg("muted", " to retry")}`, cx.width)],
+		rows: ["", truncate(`${pad}${theme.fg("dim", keyLabel(theme, key))}${theme.fg("muted", " to retry")}`, cx.width)],
 	};
 }
 

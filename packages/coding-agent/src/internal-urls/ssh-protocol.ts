@@ -26,20 +26,30 @@ import { type SSHHost, sshCapability } from "../capability/ssh";
 import type { SSHConnectionTarget } from "../ssh/connection-manager";
 import {
 	listRemoteDir,
+	peekRemoteHomeDirectory,
+	RemoteEditPathError,
+	type RemoteFileReadResult,
 	type RemotePathKind,
 	readRemoteFile,
+	readRemoteFileForEdit,
+	RemoteFileChangedError,
 	remoteHomeDirectory,
+	sshTargetKey,
 	statRemotePath,
+	updateRemoteFileIfUnchanged,
 	writeRemoteFile,
 } from "../ssh/file-transfer";
 import sshDoc from "../prompts/internal-urls/ssh.md" with { type: "text" };
 import sshReferenceDoc from "../prompts/internal-urls/ssh-reference.md" with { type: "text" };
 import { decodeUtf8Text } from "../tools/read-format";
 import { contentTypeForPath, formatDirectoryListing } from "./filesystem-resource";
+import { posixCksum, RemoteEditConflictError, RemoteEditMissingError } from "./remote-edit";
 import type {
 	InternalResource,
 	InternalUrl,
 	ProtocolHandler,
+	RemoteEditHooks,
+	RemoteEditLocation,
 	ResolveContext,
 	SchemeSpec,
 	UrlCompletion,
@@ -55,7 +65,7 @@ const SSH_TEXT_MAX_BYTES = 1024 * 1024;
  * authority (host/user/port) stays on the WHATWG fields, which preserve case for
  * the non-special `ssh` scheme.
  */
-async function remotePathFromUrl(url: InternalUrl, target: SSHConnectionTarget, signal?: AbortSignal): Promise<string> {
+function parseRemotePath(url: InternalUrl): { homeRelative: boolean; decoded: string } {
 	// `?`/`#` are URL delimiters, so parseInternalUrl strips them from the path
 	// (`ssh://h/tmp/a?draft` → `/tmp/a`). Reject the unsupported suffix instead of
 	// silently operating on the truncated path; a literal `?`/`#` in a filename
@@ -85,26 +95,90 @@ async function remotePathFromUrl(url: InternalUrl, target: SSHConnectionTarget, 
 			"ssh:// requires an absolute path, e.g. ssh://host/etc/hosts or ssh://host/ for the root directory",
 		);
 	}
-	if (homeRelative) {
-		const home = await remoteHomeDirectory(target, { signal });
-		// Concatenate rather than normalize: remote .. and symlink semantics
-		// belong to the remote filesystem, not the local path library.
-		return `${home.replace(/\/+$/, "")}${decoded.slice(2)}` || "/";
-	}
-	if (raw.startsWith("/~") && !decoded.startsWith("/~/")) {
+	if (!homeRelative && raw.startsWith("/~") && !decoded.startsWith("/~/")) {
 		throw new Error("ssh://: named-user /~user paths are unsupported; use /~/ for the connected account's HOME");
 	}
-	return decoded;
+	return { homeRelative, decoded };
+}
+
+/** The HOME-relative `decoded` path (`/~/x`) below `home`. */
+function joinRemoteHome(home: string, decoded: string): string {
+	// Concatenate rather than normalize: remote .. and symlink semantics
+	// belong to the remote filesystem, not the local path library.
+	return `${home.replace(/\/+$/, "")}${decoded.slice(2)}` || "/";
+}
+
+/**
+ * Remote absolute path from the URL. Uses `rawPathname` (pre-normalization) so
+ * `..`/`//` and percent-escapes survive verbatim to the remote shell; the
+ * authority (host/user/port) stays on the WHATWG fields, which preserve case for
+ * the non-special `ssh` scheme.
+ */
+async function remotePathFromUrl(url: InternalUrl, target: SSHConnectionTarget, signal?: AbortSignal): Promise<string> {
+	const { homeRelative, decoded } = parseRemotePath(url);
+	return homeRelative ? joinRemoteHome(await remoteHomeDirectory(target, { signal }), decoded) : decoded;
+}
+
+/**
+ * `ssh://<authority as written>/<absolute path>`, each path segment
+ * percent-encoded, so every path spelling of one remote file (`/~/x`,
+ * `/home/u/x`, `/home/u/%78`) reads back under one URL. A literal leading `~`
+ * segment stays encoded (`/%7E`): `/~` spells HOME. The authority keeps its
+ * case, so writes go back through the alias as written; mirrors are keyed by
+ * {@link sshEditLocation} instead.
+ */
+function canonicalSshUrl(url: InternalUrl, absolute: string): string {
+	const authority = /^ssh:\/\/([^/?#]*)/i.exec(url.rawHref ?? url.href)?.[1] ?? url.host;
+	let path = absolute.split("/").map(encodeURIComponent).join("/");
+	if (path.startsWith("/~")) path = `/%7E${path.slice(2)}`;
+	return `ssh://${authority}${path}`;
+}
+
+/**
+ * The edit location of `absolute` on the destination `url` resolved to: keyed by
+ * that destination and the absolute path, so authorities that differ only in case
+ * (`ssh://Prod/x`, `ssh://prod/x`) share one mirror and one tag.
+ */
+function sshEditLocation(url: InternalUrl, target: SSHConnectionTarget, absolute: string): RemoteEditLocation {
+	return { url: canonicalSshUrl(url, absolute), target: sshTargetKey(target), path: absolute };
+}
+
+/** UTF-8 text of `bytes` with any BOM kept, so a mirror edit writes it back; `null` for binary/non-UTF-8 bytes. */
+function decodeEditableText(bytes: Uint8Array): string | null {
+	if (bytes.indexOf(0) !== -1) return null;
+	try {
+		return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+	} catch {
+		return null;
+	}
+}
+
+/** Model-facing refusal for an edit transfer on `url`. */
+function editTransferError(error: unknown, url: string): unknown {
+	if (error instanceof RemoteFileChangedError) return new RemoteEditConflictError(url);
+	if (!(error instanceof RemoteEditPathError)) return error;
+	switch (error.kind) {
+		case "missing":
+			return new RemoteEditMissingError(url);
+		case "symlink":
+			return new Error(
+				`${url} is a symbolic link${error.linkTarget ? ` to ${error.linkTarget}` : ""}; edit does not write through symbolic links. Edit the link's target instead.`,
+			);
+		case "directory":
+			return new Error(`${url} is a directory`);
+		case "special":
+			return new Error(`${url} is not a regular file (FIFO, socket, or device)`);
+	}
 }
 
 /** Load the configured SSH hosts from the `ssh` capability (`ssh.json` files and `~/.ssh/config` aliases). */
-async function loadConfiguredHosts(cwd?: string): Promise<SSHHost[]> {
+export async function loadConfiguredHosts(cwd?: string): Promise<SSHHost[]> {
 	const { items } = await capability.loadCapability<SSHHost>(sshCapability.id, cwd ? { cwd } : {});
 	return items;
 }
 
 /** One-line address for a host, e.g. `deploy@10.0.0.1:2222`. */
-function hostAddress(host: SSHHost): string {
+export function hostAddress(host: SSHHost): string {
 	return `${host.username ? `${host.username}@` : ""}${host.host}${host.port ? `:${host.port}` : ""}`;
 }
 
@@ -267,7 +341,60 @@ export class SshProtocolHandler implements ProtocolHandler {
 		portAuthority: true,
 		immutable: false,
 		readTier: "exec",
-		write: { via: "handler", payload: "text", scope: "workspace", tier: () => "exec" },
+		write: { via: "handler", payload: "text", scope: "workspace", tier: () => "exec", edits: "update" },
+	};
+
+	/**
+	 * `edit` patches a local mirror keyed by the resolved destination and the
+	 * absolute path: it fetches the file and its checksum only once the edit runs,
+	 * and writes back in place only while the remote bytes still match what it fetched.
+	 */
+	readonly edit: RemoteEditHooks = {
+		locate: async (url, context, options) => {
+			const target = await resolveTarget(url, context?.cwd);
+			const { homeRelative, decoded } = parseRemotePath(url);
+			if (!homeRelative) return sshEditLocation(url, target, decoded);
+			const home = options?.localOnly
+				? peekRemoteHomeDirectory(target)
+				: await remoteHomeDirectory(target, { signal: context?.signal });
+			if (home === undefined) return undefined;
+			return sshEditLocation(url, target, joinRemoteHome(home, decoded));
+		},
+		fetch: async (url, context) => {
+			const target = await resolveTarget(url, context?.cwd);
+			const remotePath = await remotePathFromUrl(url, target, context?.signal);
+			const location = sshEditLocation(url, target, remotePath);
+			const canonical = location.url;
+			let file: RemoteFileReadResult;
+			try {
+				file = await readRemoteFileForEdit(target, remotePath, {
+					maxBytes: SSH_TEXT_MAX_BYTES,
+					signal: context?.signal,
+				});
+			} catch (error) {
+				throw editTransferError(error, canonical);
+			}
+			if (file.truncated) {
+				throw new Error(
+					`${canonical} exceeds the 1 MiB limit; ssh:// edits text files up to 1 MiB — use an sshfs mount for larger files`,
+				);
+			}
+			const content = decodeEditableText(file.bytes);
+			if (content === null)
+				throw new Error(`${canonical} is a binary or non-UTF-8 file; ssh:// edits UTF-8 text only`);
+			return { ...location, content, checksum: posixCksum(file.bytes) };
+		},
+		update: async (url, content, checksum, context) => {
+			const target = await resolveTarget(url, context?.cwd);
+			const remotePath = await remotePathFromUrl(url, target, context?.signal);
+			try {
+				await updateRemoteFileIfUnchanged(target, remotePath, new TextEncoder().encode(content), checksum, {
+					signal: context?.signal,
+				});
+			} catch (error) {
+				throw editTransferError(error, canonicalSshUrl(url, remotePath));
+			}
+		},
 	};
 
 	/** Advertised only when an `ssh` client is on PATH. */

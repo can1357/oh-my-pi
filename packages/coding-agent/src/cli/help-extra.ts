@@ -58,6 +58,7 @@ export function getExtraHelpText(): string {
   YOLO_AUTO_API_KEY          - Yolo-Auto flat-rate Qwen models
   SINGULARITYAPI_DEV_API_KEY - SingularityAPI universal gateway (300+ models)
   SINGULARITYAPI_TECH_API_KEY - SingularityAPI reserved DeepSeek lanes
+  ARKANECLOUD_API_KEY        - ArkaneCloud inference models
   SCW_SECRET_KEY             - Scaleway Generative APIs models
   OTARI_API_KEY              - Otari AI gateway (workspace models)
   OTARI_BASE_URL             - Otari API root (EU or self-hosted, e.g. https://host/api/v1)
@@ -78,7 +79,6 @@ export function getExtraHelpText(): string {
   SOFYA_API_KEY              - Sofya web search
   FIRECRAWL_API_KEY          - Firecrawl web search + fetch reader backend
   ANTHROPIC_SEARCH_API_KEY   - Anthropic web search (override; isolates search from main ANTHROPIC_API_KEY)
-  ANTHROPIC_SEARCH_BASE_URL  - Anthropic web search base URL (override; pairs with ANTHROPIC_SEARCH_API_KEY)
   TYPESAFE_API_KEY           - TypeSafe System One judgments (auto thinking, unexpected-stop, AI staging, eval judge())
 
   ${chalk.dim("# Configuration")}

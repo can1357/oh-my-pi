@@ -1,13 +1,7 @@
 import { type } from "@oh-my-pi/omptype";
-import type {
-	AgentTool,
-	AgentToolContext,
-	AgentToolResult,
-	AgentToolUpdateCallback,
-	ToolSpeculationPolicy,
-} from "@oh-my-pi/pi-agent-core";
+import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, ToolExample } from "@oh-my-pi/pi-ai";
-import { formatBackgroundNotice } from "./details/bash";
+import { formatBackgroundNotice, formatExitCodeNotice, formatTimeoutClampNotice } from "./details/bash";
 import { replaceTabs, truncateToWidth } from "../utils/text-width";
 import { shortenEmbeddedPaths, TRUNCATE_LENGTHS } from "../utils/render-utils";
 import { parseConfiguredThinkingLevel } from "../thinking/levels";
@@ -26,8 +20,6 @@ import {
 import { prepareEvalSource } from "../eval/input";
 import type { BackendProbeOptions } from "../eval/probe";
 import { defaultEvalSessionId } from "../eval/session-id";
-import { EvalShadowCellSession } from "../eval/speculation/cell-session";
-import { runWithEvalShadowCell } from "../eval/speculation/runtime-context";
 import type { EvalCellResult, EvalLanguage, EvalStatusEvent, EvalToolDetails, EvalViewEntry } from "./details/eval";
 import evalDescription from "../prompts/tools/eval.md" with { type: "text" };
 import { type EvalToolDescriptionOptions, evalTemplateContext, getEvalDocTopics } from "./eval-doc-topics";
@@ -58,7 +50,7 @@ import {
 import { cfgTaskMaxRecursionDepth, perCallModelEnabled } from "../task/settings";
 import { getPerCallModelAdvertisement } from "../task/model-approval";
 import { shapeToolResult } from "../spotlight";
-import { cfgToolsMaxTimeout, cfgToolsSpeculativeExecutionEnabled } from "./settings";
+import { cfgToolsMaxTimeout } from "./settings";
 
 /** Language tokens the eval tool accepts, in stable display order. */
 export type EvalLanguageToken = "py" | "js";
@@ -373,36 +365,10 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		return title || `running ${language}`;
 	};
 
-	readonly speculation: ToolSpeculationPolicy = {
-		stream: {
-			open: async context => {
-				if (!this.session) return undefined;
-				// The coordinator also exists for `task.speculativeLaunch`; eval shadows
-				// belong to the read/eval speculation slice only.
-				if (!cfgToolsSpeculativeExecutionEnabled.get(this.session.settings)) return undefined;
-				if (cfgEvalAutoBackgroundEnabled.get(this.session.settings)) return undefined;
-				const parentToolCallId = context.parentToolCallId;
-				const cell = new EvalShadowCellSession({
-					coordinator: context.coordinator,
-					parentToolCallId,
-					session: this.session,
-					cwd: this.session.cwd,
-					sessionId: this.session.getEvalSessionId?.() ?? defaultEvalSessionId(this.session),
-					kernelOwnerId: this.session.getEvalKernelOwnerId?.() ?? undefined,
-					onDiscard: () => {
-						if (this.#shadowCells.get(parentToolCallId) === cell) this.#shadowCells.delete(parentToolCallId);
-					},
-				});
-				this.#shadowCells.set(parentToolCallId, cell);
-				return cell;
-			},
-		},
-	};
 	readonly #proxyExecutor?: EvalProxyExecutor;
 
 	#paramsKey?: string;
 	#cachedParams?: typeof evalSchema;
-	readonly #shadowCells = new Map<string, EvalShadowCellSession>();
 	readonly #environmentModes: Partial<Record<EvalLanguage, "managed" | "project">> = {};
 
 	/**
@@ -454,8 +420,6 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		}
 		params = validated;
 
-		const shadowCell = this.#shadowCells.get(_toolCallId);
-		this.#shadowCells.delete(_toolCallId);
 		if (this.#proxyExecutor) {
 			return this.#proxyExecutor(params, signal);
 		}
@@ -476,7 +440,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		const cellTimeoutMs = cellTimeoutSec * 1000;
 		const timeoutNotice =
 			params.timeout !== undefined && params.timeout !== cellTimeoutSec
-				? `Eval timeout clamped from ${params.timeout}s to ${cellTimeoutSec}s.`
+				? formatTimeoutClampNotice(params.timeout, cellTimeoutSec)
 				: undefined;
 		if (timeoutNotice) {
 			onUpdate?.({
@@ -487,9 +451,6 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		const resolved = await resolveBackend(session, cellLanguage, { signal, timeoutMs: cellTimeoutMs });
 		resolved.notice = [timeoutNotice, resolved.notice].filter(Boolean).join(" ") || undefined;
 		const source = await prepareEvalSource(params, session, signal);
-		if (shadowCell && (source.filename || source.packages?.length || source.environment)) {
-			await shadowCell.discard("file-backed or environment-changing eval requires authoritative execution");
-		}
 		const cells: ResolvedEvalCell[] = [
 			{
 				index: 0,
@@ -517,38 +478,18 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			emitUpdate: ((text: string, details: EvalToolDetails) => void) | undefined,
 			foreground: () => boolean,
 		): Promise<AgentToolResult<EvalToolDetails | undefined>> => {
-			// Re-check the retained namespace against the streamed planning snapshot:
-			// timers, background work, or concurrent session users may have changed
-			// it after the speculative children started. On mismatch the children
-			// were projected from stale state, so discard the session and run the
-			// cell without it (claims then miss and execution is ordinary).
-			let activeShadowCell = shadowCell;
-			const snapshotToken = shadowCell?.snapshotToken;
-			if (shadowCell && snapshotToken) {
-				const tokenIsPython = snapshotToken.language === "py";
-				let current = tokenIsPython === (cellLanguage === "python");
-				if (current) {
-					current = await shadowCell.verifySnapshotCurrent().catch(() => false);
-				}
-				if (!current) {
-					await shadowCell.discard("retained eval state changed after shadow planning").catch(() => undefined);
-					activeShadowCell = undefined;
-				}
-			}
-			const execution = runWithEvalShadowCell(activeShadowCell, () =>
-				this.#runCells({
-					session,
-					parentToolCallId: _toolCallId,
-					cells,
-					languages,
-					notice,
-					excludeWebP,
-					signal: runSignal,
-					sessionAbortController,
-					emitUpdate,
-					foreground,
-				}),
-			);
+			const execution = this.#runCells({
+				session,
+				parentToolCallId: _toolCallId,
+				cells,
+				languages,
+				notice,
+				excludeWebP,
+				signal: runSignal,
+				sessionAbortController,
+				emitUpdate,
+				foreground,
+			});
 			return session.trackEvalExecution?.(execution, sessionAbortController) ?? execution;
 		};
 
@@ -647,7 +588,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			},
 		);
 
-		const backgroundStartResult = (extraNotice?: string) =>
+		const backgroundStartResult = (reason?: string) =>
 			this.#buildBackgroundStartResult(
 				jobId,
 				cells,
@@ -656,7 +597,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				latestText,
 				latestDetails,
 				clampedCellTimeoutSec,
-				extraNotice,
+				reason,
 			);
 		if (startBackgrounded) {
 			return backgroundStartResult();
@@ -687,11 +628,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		autoBgManager.backgroundJob(jobId);
 		// "steer": a queued user/peer message arrived mid-wait — background the
 		// cell (it keeps running) so the message injects promptly.
-		const steerNotice =
-			waitResult.kind === "steer"
-				? "Backgrounded early to handle an incoming message; the cell keeps running."
-				: undefined;
-		return backgroundStartResult(steerNotice);
+		return backgroundStartResult(waitResult.kind === "steer" ? "incoming message" : undefined);
 	}
 
 	/**
@@ -708,7 +645,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		previewText: string,
 		latestDetails: EvalToolDetails | undefined,
 		timeoutSec: number | undefined,
-		extraNotice?: string,
+		reason?: string,
 	): AgentToolResult<EvalToolDetails> {
 		// latestDetails snapshots are per-update copies (buildUpdateDetails), so
 		// tagging the async marker on cannot leak into later job progress.
@@ -732,10 +669,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		if (trimmedPreview.length > 0) {
 			lines.push(trimmedPreview, "");
 		}
-		if (extraNotice) {
-			lines.push(extraNotice, "");
-		}
-		lines.push(formatBackgroundNotice(jobId, timeoutSec));
+		lines.push(formatBackgroundNotice(jobId, timeoutSec, reason));
 		return { content: [{ type: "text", text: lines.join("\n") }], details };
 	}
 
@@ -1016,12 +950,13 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					cellResult.status = "error";
 					pushUpdate();
 					const combinedOutput = cellOutputs.join("\n\n");
-					const exitLine = `Command exited with code ${result.exitCode}`;
-					const outputText = result.cancelled
-						? combinedOutput || result.output || "Command aborted"
-						: combinedOutput
-							? `${combinedOutput}\n\n${exitLine}`
-							: exitLine;
+					const exitCode = result.exitCode;
+					const outputText =
+						result.cancelled || exitCode === undefined
+							? combinedOutput || result.output || "[aborted]"
+							: combinedOutput
+								? `${combinedOutput}\n\n${formatExitCodeNotice(exitCode)}`
+								: formatExitCodeNotice(exitCode);
 
 					const summaryForMeta = await summarizeFinal(combinedOutput, finalizeOutput);
 					const details: EvalToolDetails = {

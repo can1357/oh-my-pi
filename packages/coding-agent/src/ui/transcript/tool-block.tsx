@@ -38,9 +38,15 @@ import {
 	toolIntentLabel,
 } from "@oh-my-pi/pi-wire";
 import { registerBlob } from "@oh-my-pi/pi-tui/native/blobs";
+import { truncate } from "@oh-my-pi/pi-tui/text/width";
 import { isRecord } from "@oh-my-pi/pi-utils";
+import { type AgentActivityStatus, toolCallSummary } from "../../modes/view-model/overlays/agent-activity";
+import { readImageHeaderDimensions } from "../../utils/image-resize";
 import { readMediaPath } from "../../session/transcript/tool-execution";
 import { type ShellInspectorSource, shellVizEventAction } from "../apps/shell-visualizer/model";
+import { sanitizeDisplaySingleLine } from "../../extensibility/inventory/display-text";
+import { recentActivityLine } from "../overlays/pickers/agent-hub-model";
+import type { HubRecentLine } from "../styles/pickers/agent-hub";
 import type { ToolTerm } from "../styles/tools/look";
 import type { ToolActivity, ToolPresenter, ToolResult, ToolView, ToolViewState } from "../tools/contract";
 import { defaultPresenter } from "../tools/default";
@@ -48,25 +54,25 @@ import { mcpPresenter } from "../tools/mcp";
 import { toolPresenter } from "../tools/registry";
 import { settledRevision } from "../shell/transcript";
 import { presentShellScript, presentShellTrace } from "../tools/shell-viz";
-import { imageBlob } from "./messages/image";
+import { imageBlob, inlineImageTerm } from "./messages/image";
+import { presenterRows } from "./figures/presented-block";
 import { RESULT_IMAGE_ROLE } from "./image-links";
 import { ShellVizState } from "./shell-viz-state";
 import type { ToolCommandResolver } from "../tools/tool-command";
 
+/** An extension presenter's own compact row: its label and the rows below it (theme-token spans kept). */
+export interface CompactRow {
+	readonly label?: TspText;
+	readonly rows?: readonly TspText[];
+}
+
 /**
- * How an extension transcript presenter wants a call shown: as usual, as a
- * compact line (optionally with its own label and rows), or not at all.
+ * How a call shows: as usual, as an extension presenter's compact line
+ * (optionally with its own label and rows), as its recent-activity row
+ * (`concise`: `display.toolActivity: concise` when no presenter answered), or
+ * not at all.
  */
-export type ToolPresentation =
-	| "full"
-	| "compact"
-	| "hidden"
-	| {
-			readonly compact: {
-				readonly label?: string;
-				readonly rows?: readonly string[];
-			};
-	  };
+export type ToolPresentation = "full" | "compact" | "concise" | "hidden" | { readonly compact: CompactRow };
 
 /** A tool result as the transcript receives it (images included). */
 export interface ToolCallResult extends ToolResult {
@@ -99,6 +105,8 @@ export interface ToolCallOptions {
 	readonly inspectShell?: (source: ShellInspectorSource) => { close(): void };
 	/** Draw MCP text results as Markdown (`mcp.renderMarkdownResults`; default off). */
 	readonly mcpMarkdown?: boolean;
+	/** Wall-clock ms the model made the call (a replayed call's message time); defaults to now. */
+	readonly timestamp?: number;
 }
 
 /** Wire names of MCP tools (`mcp__<server>_<tool>`). */
@@ -146,6 +154,8 @@ export class ToolCall {
 	readonly name: string;
 	readonly label: string;
 	readonly presenter: ToolPresenter;
+	/** Wall-clock ms the model made the call (the concise row's clock). */
+	readonly calledAt: number;
 	readonly #now: () => number;
 	readonly #args: Signal<unknown>;
 	readonly #argsComplete = signal(false);
@@ -191,6 +201,7 @@ export class ToolCall {
 					}) as ToolPresenter)
 				: defaultPresenter);
 		this.#now = options.now ?? Date.now;
+		this.calledAt = options.timestamp ?? this.#now();
 		this.#args = signal(options.args ?? {});
 		this.#resolveToolCommand = options.resolveToolCommand;
 		this.#inspectShell = options.inspectShell;
@@ -458,7 +469,12 @@ export class ToolCall {
 			shellTouched: this.#shellTouched,
 			activityVisible: this.#activityVisible,
 			showImages: this.#showImages,
-			presentation: () => (this.#expanded() ? "full" : this.#presentation()),
+			presentation: () => {
+				const presentation = this.#presentation();
+				// A concise row the user unfolds (Ctrl+O, or natively) opens into its full card.
+				if (this.#expanded() || (presentation === "concise" && this.#fold() === false)) return "full";
+				return presentation;
+			},
 			activity: () => this.activity(),
 			running: () => !this.#sealed() && (this.#result() === undefined || this.#partial()),
 			args: this.#args,
@@ -502,18 +518,14 @@ function withImagesAsText(result: ToolCallResult): ToolCallResult {
 /** `[Image: [image/png] 1x1]`. */
 export function imagePlaceholder(block: { readonly data?: string; readonly mimeType?: string }): string {
 	const mime = block.mimeType ?? "image";
-	const size = block.data ? imageSize(block.data) : undefined;
+	const size = block.data ? imageSize(Buffer.from(block.data, "base64")) : undefined;
 	return `[Image: [${mime}]${size ? ` ${size.w}x${size.h}` : ""}]`;
 }
 
-/** Pixel size of a base64 PNG/GIF/JPEG, when its header says. */
-export function imageSize(base64: string): { w: number; h: number } | undefined {
-	const bytes = Buffer.from(base64.slice(0, 64), "base64");
-	if (bytes.length >= 24 && bytes[0] === 0x89 && bytes[1] === 0x50)
-		return { w: bytes.readUInt32BE(16), h: bytes.readUInt32BE(20) };
-	if (bytes.length >= 10 && bytes[0] === 0x47 && bytes[1] === 0x49)
-		return { w: bytes.readUInt16LE(6), h: bytes.readUInt16LE(8) };
-	return undefined;
+/** Pixel size of decoded PNG/JPEG/GIF/WebP bytes, when the header says. */
+export function imageSize(bytes: Uint8Array): { w: number; h: number } | undefined {
+	const size = readImageHeaderDimensions(bytes);
+	return size ? { w: size.width, h: size.height } : undefined;
 }
 
 /** Call view then result view: the result's head facts win; bodies stack. */
@@ -584,12 +596,16 @@ export interface ToolNodeInput {
 	readonly presentation?: ToolPresentation;
 	/** The compact row's summary. */
 	readonly activity?: ToolActivity;
+	/** The concise row (presentation `concise`). */
+	readonly activityLine?: HubRecentLine;
 	/** Still executing (no settled result, not sealed). */
 	readonly running?: boolean;
 	readonly hasBody: boolean;
 	/** The presenter streams its body while live: the block stays open while pending/running. */
 	readonly streamsBody?: boolean;
 	readonly args?: unknown;
+	/** Whether the terminal draws inline result pictures. */
+	readonly showImages?: boolean;
 	/** The result's image placeholders and the images they link to. */
 	readonly imageLinks?: readonly ImagePlaceholderLink[];
 }
@@ -673,6 +689,7 @@ export function toolNodeProps(input: ToolNodeInput): ToolNodeProps {
 	const settled = status !== "pending" && status !== "running";
 	const tone: TspTone | undefined = input.interruptSkip ? "info" : view?.tone;
 	const inline = compact || view?.inline === true;
+	const concise = presentation === "concise" ? input.activityLine : undefined;
 	return {
 		name: input.name,
 		title: head?.title ?? view?.label ?? input.label,
@@ -681,17 +698,24 @@ export function toolNodeProps(input: ToolNodeInput): ToolNodeProps {
 		collapsible,
 		...(input.id !== undefined ? { propKey: input.id } : {}),
 		role: `omp.tool.${input.name}`,
+		// A concise row heads with its summary alone: the command, links and facts stay in the card.
 		...(compactSpec?.label !== undefined
 			? { target: compactSpec.label, targetKind: "text" as const }
+			: concise
+				? { target: concise.summary, targetKind: "text" as const }
+				: {
+						target: head?.target,
+						targetKind: head?.targetKind,
+					}),
+		...(concise
+			? {}
 			: {
-					target: head?.target,
-					targetKind: head?.targetKind,
+					lang: head?.lang,
+					command: head?.command,
+					href: head?.href,
+					meta: head?.meta,
+					badges: head?.badges,
 				}),
-		lang: head?.lang,
-		command: head?.command,
-		href: head?.href,
-		meta: head?.meta,
-		badges: head?.badges,
 		age: status === "running" ? (input.elapsedMs ?? 0) : undefined,
 		took: settled && input.elapsedMs !== undefined ? input.elapsedMs : undefined,
 		exit: head?.exit,
@@ -708,10 +732,12 @@ export function toolNodeProps(input: ToolNodeInput): ToolNodeProps {
 			label: input.label,
 			expanded: input.expanded,
 			...(input.startedAt !== undefined ? { startedAt: input.startedAt } : {}),
-			...(compact ? { compact: compactSpec ? "label" : "bare" } : {}),
+			...(compact ? { compact: compactSpec ? "label" : presentation === "concise" ? "concise" : "bare" } : {}),
 			...(input.activity ? { activity: input.activity } : {}),
+			...(input.activityLine ? { activityLine: input.activityLine } : {}),
 			...(input.running ? { running: true } : {}),
 			...(view?.inline ? { inline: true } : {}),
+			...(input.showImages === false ? { showImages: false } : {}),
 			...(input.imageLinks ? { imageLinks: input.imageLinks } : {}),
 		},
 	};
@@ -720,12 +746,13 @@ export function toolNodeProps(input: ToolNodeInput): ToolNodeProps {
 /** A result's images as `image` nodes (shown under the body while images are on). */
 function imageNodes(result: ToolCallResult | undefined): JSXNode {
 	return resultImages(result).map((image, index) => {
-		const size = imageSize(image.data);
+		const bytes = Buffer.from(image.data, "base64");
+		const size = imageSize(bytes);
 		return (
 			<image
 				key={`img${index}`}
-				term={{ role: RESULT_IMAGE_ROLE }}
-				blob={registerBlob(Buffer.from(image.data, "base64"), image.mimeType ?? "image/png")}
+				term={inlineImageTerm({ role: RESULT_IMAGE_ROLE })}
+				blob={registerBlob(bytes, image.mimeType ?? "image/png")}
 				alt={image.mimeType}
 				w={size?.w}
 				h={size?.h}
@@ -739,8 +766,7 @@ function compactBody(presentation: ToolPresentation): JSXNode {
 	if (typeof presentation !== "object") return undefined;
 	const rows = presentation.compact.rows ?? [];
 	if (rows.length === 0) return undefined;
-	const spans = rows.flatMap((row, i) => (i === 0 ? [{ t: row }] : [{ t: "\n" }, { t: row }]));
-	return <text spans={spans} wrap="none" />;
+	return <text spans={presenterRows(rows)} wrap="none" />;
 }
 
 /** The transcript tool block of `call`. */
@@ -750,14 +776,23 @@ export function ToolBlock(props: { readonly call: ToolCall }): JSXNode {
 	const body = structural((): JSXNode => {
 		const presentation = facts.presentation();
 		if (typeof presentation === "object") return compactBody(presentation);
+		// A concise row carries no body: unfolding it presents the full card, which builds its own.
+		if (presentation === "concise") return undefined;
 		const view = call.view();
 		// Result images show under the body unless the view draws them itself.
-		const drawsImages = flattenNodes(view?.body).some(node => isUiNode(node) && node.kind === "image");
+		const drawsImages = flattenNodes(view?.body).some(node => {
+			if (!isUiNode(node)) return false;
+			if (node.kind === "image") return true;
+			if (node.kind !== "media") return false;
+			const props = untrack(node.props);
+			return "path" in props && props.path === readMediaPath(facts.result()?.details);
+		});
 		const images = facts.showImages() && !drawsImages ? imageNodes(facts.result()) : undefined;
 		return [view?.body, images];
 	});
 	const bodyNodes = structural(() => flattenNodes(body()));
 	const imageLinks = computed(() => imagePlaceholderLinks(facts.result()));
+	const activityLine = computed(() => (facts.presentation() === "concise" ? conciseLine(call) : undefined));
 	const nodeProps = computed(() => {
 		const state = call.state();
 		const result = facts.result();
@@ -779,10 +814,12 @@ export function ToolBlock(props: { readonly call: ToolCall }): JSXNode {
 				(call.name === "wait" && result !== undefined && !facts.partial() && isInterruptSkip(result)),
 			presentation: facts.presentation(),
 			activity: facts.activity(),
+			activityLine: activityLine(),
 			running: facts.running(),
 			hasBody: bodyNodes().length > 0,
 			streamsBody: call.presenter.streamsBody,
 			args: facts.args(),
+			showImages: facts.showImages(),
 			imageLinks: imageLinks(),
 		});
 	});
@@ -830,6 +867,67 @@ export function ToolBlock(props: { readonly call: ToolCall }): JSXNode {
 			{() => body()}
 		</tool>
 	);
+}
+
+/** The recent-activity status a call's state reads as. */
+const ACTIVITY_STATUS: Readonly<Record<TspCardStatus, AgentActivityStatus>> = {
+	pending: "pending",
+	running: "pending",
+	done: "success",
+	error: "error",
+	cancelled: "aborted",
+};
+
+/** Summary characters a failed call's row keeps ahead of its error. */
+const CONCISE_ERROR_SUMMARY_WIDTH = 48;
+
+/** What a concise row shows of a call. */
+export interface ConciseCall {
+	readonly name: string;
+	readonly args: unknown;
+	/** Wall-clock ms the model made the call. */
+	readonly timestamp: number;
+	readonly status: AgentActivityStatus;
+	/** What a failed call reported (its result's text). */
+	readonly error?: string;
+}
+
+/**
+ * A call's concise row, in the Agent Hub's recent-activity format: when it was made, its status,
+ * the tool and its intent (else a short summary of its args). A failure appends the last line of
+ * what it reported, so the error stays readable without opening the card.
+ */
+export function conciseActivityLine(call: ConciseCall): HubRecentLine {
+	const line = recentActivityLine({
+		timestamp: call.timestamp,
+		kind: "tool",
+		status: call.status,
+		title: call.name,
+		toolName: call.name,
+		...toolCallSummary(call.name, call.args),
+	});
+	const text = call.status === "error" ? (call.error?.trimEnd() ?? "") : "";
+	const gist = text.slice(text.lastIndexOf("\n") + 1).trim();
+	// Args and tool output reach Tern's head as they are: one plain line, no control sequences.
+	return {
+		...line,
+		summary: sanitizeDisplaySingleLine(
+			gist ? `${truncate(line.summary, CONCISE_ERROR_SUMMARY_WIDTH)} — ${gist}` : line.summary,
+		),
+	};
+}
+
+/** The concise row of a tool card's call. */
+function conciseLine(call: ToolCall): HubRecentLine {
+	const status = ACTIVITY_STATUS[call.status()];
+	const result = call.facts.result();
+	return conciseActivityLine({
+		name: call.name,
+		args: call.facts.args(),
+		timestamp: call.calledAt,
+		status,
+		...(status === "error" && result ? { error: resultTextOnly(result) } : {}),
+	});
 }
 
 /** The call's intent line (`i` arg), if it gave one: its brief label (`README` of `README: reflow the intro`). */

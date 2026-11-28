@@ -37,6 +37,7 @@ function createMoveContext(sourceDir: string, settingsFlush?: () => Promise<void
 		session: { isStreaming: false, moveSession },
 		sessionManager: {
 			getCwd: () => state.cwd,
+			getSessionId: () => "session-1",
 			captureState,
 			restoreState,
 			rollbackMove,
@@ -190,7 +191,7 @@ describe("CommandController /move", () => {
 			expect(state.movedTo).toBe(targetDir);
 			expect(state.completedBtwVisible).toBe(false);
 			expect(ctx.sessionManager.dropSession).not.toHaveBeenCalled();
-			expect(ctx.applyCwdChange).toHaveBeenCalledWith(targetDir);
+			expect(ctx.applyCwdChange).toHaveBeenCalledWith(targetDir, expect.objectContaining({ restore: false }));
 			expect(ctx.updateEditorBorderColor).toHaveBeenCalled();
 			expect(ctx.reloadTodos).toHaveBeenCalled();
 			expect(present).toHaveBeenCalled();
@@ -269,8 +270,8 @@ describe("CommandController /move", () => {
 			await controller.handleMoveCommand(targetDir);
 
 			expect(ctx.applyCwdChange).toHaveBeenCalledTimes(2);
-			expect(ctx.applyCwdChange).toHaveBeenNthCalledWith(1, targetDir);
-			expect(ctx.applyCwdChange).toHaveBeenNthCalledWith(2, targetDir);
+			expect(ctx.applyCwdChange).toHaveBeenNthCalledWith(1, targetDir, expect.objectContaining({ restore: false }));
+			expect(ctx.applyCwdChange).toHaveBeenNthCalledWith(2, targetDir, expect.objectContaining({ restore: true }));
 			expect(shutdown).not.toHaveBeenCalled();
 		} finally {
 			await fs.rm(sourceDir, { recursive: true, force: true });

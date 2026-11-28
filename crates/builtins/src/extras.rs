@@ -15,7 +15,7 @@ use futures::future::BoxFuture;
 #[allow(unused_imports, reason = "the table names whichever modules the enabled features compile")]
 use super::*;
 pub use crate::{
-	host::{CommandRunner, CommandStatus, EnvChange, Invocation, ShellCommand},
+	host::{CommandRunner, CommandStatus, EnvChange, Invocation, ShellCommand, SourceSnapshot},
 	openfile::Fd,
 	speech::{SpeechAudio, SpeechHost, SpeechOutcome, SpeechRequest, SpeechVoice},
 };
@@ -94,6 +94,7 @@ macro_rules! for_each_extra {
 			)] "xdg-open" open::Open;
 			utility [all(feature = "util.open", windows)] "start" open::windows::Start;
 			utility [feature = "util.paste"] "paste" paste::Paste;
+			utility [feature = "util.perl"] "perl" perl::Perl;
 			utility [feature = "util.printenv"] "printenv" printenv::Printenv;
 			utility [feature = "util.readlink"] "readlink" readlink::Readlink;
 			utility [feature = "util.realpath"] "realpath" realpath::Realpath;

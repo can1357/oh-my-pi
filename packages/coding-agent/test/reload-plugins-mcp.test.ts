@@ -1,7 +1,7 @@
 /**
  * Regressions for `/reload-plugins` runtime surfaces that must update without a
  * process restart: MCP reconnect/rebinding (#7189) and task-agent descriptions
- * published to existing tools (#7940).
+ * published to existing tools (#7940), and the reported reload scope (#7260).
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
@@ -53,6 +53,7 @@ function createFakeCtx(cwd: string, settingsValues: Record<string, unknown> = {}
 		refreshMCPTools: vi.fn(async (_tools: unknown) => {}),
 		setMCPPromptCommands: vi.fn((_commands: unknown) => {}),
 	};
+	const showStatus = vi.fn((_message: string) => {});
 	const ctx = {
 		mcpManager,
 		session,
@@ -60,10 +61,10 @@ function createFakeCtx(cwd: string, settingsValues: Record<string, unknown> = {}
 		settings: Settings.isolated(settingsValues),
 		refreshSkillState: vi.fn(async () => {}),
 		refreshSlashCommandState: vi.fn(async () => {}),
-		showStatus: vi.fn(() => {}),
+		showStatus,
 		composer: { setText: vi.fn(() => {}) },
 	} as never as InteractiveModeContext;
-	return { ctx, mcpManager, session, mcpTools };
+	return { ctx, mcpManager, session, mcpTools, showStatus };
 }
 
 describe("/reload-plugins runtime refresh", () => {
@@ -92,6 +93,18 @@ describe("/reload-plugins runtime refresh", () => {
 		expect(session.refreshMCPTools).toHaveBeenCalledWith(mcpTools);
 		expect(session.setMCPPromptCommands).toHaveBeenCalledTimes(1);
 		expect(session.setMCPPromptCommands).toHaveBeenCalledWith([]);
+	});
+
+	test("reports the reloaded surfaces and that extension hooks/tools need a restart", async () => {
+		const { ctx, showStatus } = createFakeCtx(projectDir);
+		const runtime: TuiSlashCommandRuntime = { ctx };
+
+		await executeBuiltinSlashCommand("/reload-plugins", runtime);
+
+		expect(showStatus).toHaveBeenCalledTimes(1);
+		const status = showStatus.mock.calls[0]?.[0];
+		expect(status).toContain("skills, slash commands, task agents, and MCP servers");
+		expect(status).toContain("Extension hooks and tools are unchanged; restart omp");
 	});
 
 	test("honors mcp.enableProjectConfig=false so opted-out project servers are not started on reload", async () => {

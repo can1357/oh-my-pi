@@ -10,14 +10,15 @@
 
 import * as path from "node:path";
 import type { Context, ImageContent, Model } from "@oh-my-pi/pi-ai";
-import { getBlobsDir, logger } from "@oh-my-pi/pi-utils";
+import { errorMessage, getBlobsDir, logger } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { Settings } from "../config/settings";
 import { daemonClient } from "../daemon/client";
-import { BLOB_APPEND_METHOD, BLOB_CALL_CHUNK_CHARS, BLOB_MODULE_VERSION } from "../daemon/modules/blob";
 import { canonicalProjectDir } from "../daemon/paths";
 import { type DaemonClient, type DaemonTunnel, projectScope } from "../daemon/protocol";
-import { type BlobBackend, isServeKind, LocalBlobBackend } from "./broker";
+import type * as LocalBroker from "./broker";
+import type { BlobBackend } from "./broker";
+import { isServeKind } from "./destinations";
 import {
 	contextHasImages,
 	contextHasImageUrls,
@@ -27,7 +28,10 @@ import {
 	supportsRemoteImageUrls,
 } from "./context-images";
 import {
+	BLOB_APPEND_METHOD,
 	BLOB_BROKER_KIND,
+	BLOB_CALL_CHUNK_CHARS,
+	BLOB_MODULE_VERSION,
 	BLOB_RENDER_CHANNEL,
 	type BlobBrokerCalls,
 	type BlobBrokerDoctorRequest,
@@ -46,7 +50,8 @@ import {
 	type EnsureBlobResponse,
 } from "./protocol";
 import { ProviderFileCache } from "./provider-file-types";
-import { type ProviderFileCredentialResolver, ProviderFileManager } from "./provider-files";
+import type { ProviderFileCredentialResolver } from "./provider-file-credential";
+import { ProviderFileManager } from "./provider-files";
 import type { BlobPublication } from "./publication";
 import { BlobBrokerSavingsJournal, type BlobBrokerSavingsRecord, blobBrokerSavingsJournalPath } from "./savings";
 import type { LazyBlobFetcher } from "./store";
@@ -62,7 +67,6 @@ import {
 	cfgImagesUrlsPublicBaseUrl,
 	cfgImagesUrlsSshRemotePort,
 	cfgImagesUrlsSshTarget,
-	cfgImagesUrls,
 	cfgImagesUrlsTtlHours,
 } from "./settings";
 
@@ -131,10 +135,6 @@ async function uploadBlob(
 		);
 	}
 	return client.call<EnsureBlobResponse>(BLOB_BROKER_KIND, "blob", { key, mimeType, upload }, { unit });
-}
-
-function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
 }
 
 /** Open (find-or-start) the project's `blob` unit for `config`, with a lease on this client's connection. */
@@ -573,6 +573,8 @@ export class ImageUrlService {
 				continue;
 			}
 			try {
+				// The daemon hosts these servers and uploaders unless the local fallback is needed.
+				const { LocalBlobBackend }: typeof LocalBroker = require("./broker");
 				backends.push(new LocalBlobBackend(config));
 			} catch (error) {
 				logger.warn("blob-broker: backend unavailable; trying next backend", {
@@ -975,72 +977,7 @@ export function resolveBlobBrokerConfigs(settings: Settings, projectDir: string)
 	return configs;
 }
 
-/**
- * Settings-bound {@link ImageUrlService} holder. Consult {@link current} per
- * request: any `images.urls.*` change stops the old service and builds a new
- * one (or none when disabled). Call {@link dispose} when the session ends.
- */
-export class LiveImageUrlService implements SnapcompactFrameSink {
-	#settings: Settings;
-	#projectDir: () => string;
-	#resolveCredential: ProviderFileCredentialResolver;
-	#current: ImageUrlService | undefined;
-	#generation = 0;
-	#unwatch: () => void;
-
-	constructor(settings: Settings, projectDir: () => string, resolveCredential: ProviderFileCredentialResolver) {
-		this.#settings = settings;
-		this.#projectDir = projectDir;
-		this.#resolveCredential = resolveCredential;
-		this.#current = this.#build();
-		this.#unwatch = cfgImagesUrls.listen(settings, () => this.#rebuild());
-	}
-
-	/** Service for the next request; `undefined` when image URLs are disabled. */
-	get current(): ImageUrlService | undefined {
-		return this.#current;
-	}
-
-	/** Bumped on every rebuild: frames minted by a replaced service no longer resolve. */
-	get generation(): number {
-		return this.#generation;
-	}
-
-	/** Lazy snapcompact frames from the current service; `null` (render eagerly) while disabled. */
-	async framesFor(text: string, shape: snapcompact.Shape, maxFrames?: number): Promise<ImageContent[] | null> {
-		const service = this.#current;
-		return service ? service.frameSink.framesFor(text, shape, maxFrames) : null;
-	}
-
-	/** Decorate `context` through the current service; identity when disabled. */
-	async decorateContext(context: Context, model: Model): Promise<Context> {
-		const service = this.#current;
-		return service ? service.decorateContext(context, model) : context;
-	}
-
-	/** Stop observing settings and shut down the current service. */
-	dispose(): void {
-		this.#unwatch();
-		this.#current?.stop();
-		this.#current = undefined;
-	}
-
-	#build(): ImageUrlService | undefined {
-		const service = createImageUrlServiceFromSettings(this.#settings, this.#projectDir(), this.#resolveCredential);
-		service?.prewarm();
-		return service;
-	}
-
-	#rebuild(): void {
-		const previous = this.#current;
-		this.#generation++;
-		this.#current = this.#build();
-		previous?.stop();
-		logger.debug("blob-broker: image URL service rebuilt from settings", { enabled: this.#current !== undefined });
-	}
-}
-
-/** Resolve the settings group into a service; `undefined` when disabled. */
+/** Build the configured service; `undefined` when disabled or no destination is available. */
 export function createImageUrlServiceFromSettings(
 	settings: Settings,
 	projectDir: string,

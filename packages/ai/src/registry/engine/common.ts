@@ -7,10 +7,11 @@ import type {
 	CompiledAuthValue,
 	CompiledCredentialField,
 	CompiledCredentialMap,
+	CompiledDeadGrant,
 	CompiledOAuthRequest,
 	CompiledUserinfo,
 } from "@oh-my-pi/pi-catalog/compat/types";
-import { $env } from "@oh-my-pi/pi-utils";
+import { $env, isRecord } from "@oh-my-pi/pi-utils";
 import * as AIError from "../../error";
 import type { FetchImpl } from "../../types";
 import { HOOKS } from "../hooks";
@@ -20,6 +21,7 @@ import type {
 	HeadersHook,
 	LoginHook,
 	RefreshHook,
+	SignOutHook,
 	ValueHook,
 } from "../hooks/types";
 import type { OAuthCredentials } from "../oauth/types";
@@ -41,6 +43,10 @@ export async function loadLoginHook(name: string): Promise<LoginHook> {
 
 export async function loadRefreshHook(name: string): Promise<RefreshHook> {
 	return (HOOKS.refresh[name] ?? missingHook("refresh", name))();
+}
+
+export async function loadSignOutHook(name: string): Promise<SignOutHook> {
+	return (HOOKS.signOut[name] ?? missingHook("sign-out", name))();
 }
 
 export async function loadAfterExchangeHook(name: string): Promise<AfterExchangeHook> {
@@ -179,10 +185,23 @@ export function mapCredentials(
 		refresh: readField(map.refresh, body, claims) ?? previous?.refresh ?? "",
 		expires,
 	};
-	const optional = ["email", "accountId", "orgId", "orgName", "projectId", "apiEndpoint", "enterpriseUrl"] as const;
+	const optional = [
+		"email",
+		"accountId",
+		"orgId",
+		"orgName",
+		"projectId",
+		"apiEndpoint",
+		"enterpriseUrl",
+		"scope",
+	] as const;
 	for (const key of optional) {
 		const value = readField(map[key], body, claims);
 		if (value !== undefined) credentials[key] = value;
+	}
+	const refreshSeconds = map.refreshExpiresIn === undefined ? undefined : jsonPath(body, map.refreshExpiresIn);
+	if (typeof refreshSeconds === "number" && Number.isFinite(refreshSeconds)) {
+		credentials.refreshExpires = Date.now() + refreshSeconds * 1000;
 	}
 	return credentials;
 }
@@ -193,12 +212,41 @@ export interface RequestContext {
 	signal?: AbortSignal;
 	/** Extra headers merged under the rule's declared headers. */
 	headers?: Record<string, string>;
+	/** Refusals that prove the grant dead; when set, every failure carries that verdict. */
+	deadGrant?: CompiledDeadGrant;
+}
+
+interface OAuthRefusal {
+	code?: string;
+	description?: string;
+}
+
+/** RFC 6749 §5.2 fields of a token-endpoint refusal; some servers nest the code as `error.type`. */
+function oauthRefusal(body: unknown): OAuthRefusal {
+	if (!isRecord(body)) return {};
+	const { error, error_description: description } = body;
+	return {
+		code:
+			typeof error === "string" ? error : isRecord(error) && typeof error.type === "string" ? error.type : undefined,
+		description: typeof description === "string" ? description : undefined,
+	};
+}
+
+/** Whether a refusal proves the grant dead under `rule`; RFC 6749 refuses grants with 400 and clients with 401. */
+function isDeadGrant(rule: CompiledDeadGrant, status: number, refusal: OAuthRefusal): boolean {
+	return (
+		(status === 400 || status === 401) &&
+		refusal.code !== undefined &&
+		rule.codes.includes(refusal.code) &&
+		(rule.exceptDescription === undefined || refusal.description !== rule.exceptDescription)
+	);
 }
 
 /**
  * Performs one declared token-style POST. `standardParams` are the grant's
  * baseline (included when the rule keeps `standard=#true`), `params` the
- * rule's declared extras; both are templated with `vars`.
+ * rule's declared extras; string values are templated with `vars`, numeric
+ * ones stay numbers in JSON bodies.
  */
 export async function postTokenRequest(
 	request: CompiledOAuthRequest,
@@ -208,27 +256,40 @@ export async function postTokenRequest(
 	errorKind: "token-exchange" | "token-refresh" | "device-auth",
 ): Promise<{ body: unknown; response: Response }> {
 	const url = template(await resolveValue(request.url, context.signal), vars);
-	const params: Record<string, string> = {};
+	const params: Record<string, string | number> = {};
 	if (request.standard) {
 		for (const key in standardParams) {
 			const value = standardParams[key];
 			if (value !== undefined) params[key] = value;
 		}
 	}
-	Object.assign(params, templateMap(request.params, vars));
+	for (const key in request.params) {
+		const value = request.params[key];
+		params[key] = typeof value === "string" ? template(value, vars) : value;
+	}
 	const headers: Record<string, string> = {
 		...context.headers,
 		...templateMap(request.headers, vars),
 		"Content-Type": request.body === "json" ? "application/json" : "application/x-www-form-urlencoded",
 	};
+	let payload: string;
+	if (request.body === "json") {
+		payload = JSON.stringify(params);
+	} else {
+		const form = new URLSearchParams();
+		for (const key in params) form.set(key, String(params[key]));
+		payload = form.toString();
+	}
 	const timeoutSignal = AbortSignal.timeout(request.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
 	const signal = context.signal ? AbortSignal.any([context.signal, timeoutSignal]) : timeoutSignal;
+	// Under a dead-grant policy a failure that reached no verdict keeps the grant.
+	const kept = context.deadGrant ? false : undefined;
 	let response: Response;
 	try {
 		response = await context.fetch(url, {
 			method: "POST",
 			headers,
-			body: request.body === "json" ? JSON.stringify(params) : new URLSearchParams(params).toString(),
+			body: payload,
 			signal,
 		});
 	} catch (cause) {
@@ -236,12 +297,17 @@ export async function postTokenRequest(
 			throw new AIError.LoginCancelledError(`OAuth login cancelled: ${String(context.signal.reason)}`);
 		}
 		if (timeoutSignal.aborted) {
-			throw new AIError.OAuthError(`Timed out waiting for ${url}`, { kind: "timeout", provider: context.provider });
+			throw new AIError.OAuthError(`Timed out waiting for ${url}`, {
+				kind: "timeout",
+				provider: context.provider,
+				definitive: kept,
+			});
 		}
 		throw new AIError.OAuthError(`${context.provider} request to ${url} failed: ${describeError(cause)}`, {
 			kind: errorKind,
 			provider: context.provider,
 			cause,
+			definitive: kept,
 		});
 	}
 	const text = await response.text();
@@ -254,9 +320,16 @@ export async function postTokenRequest(
 		}
 	}
 	if (!response.ok && errorKind !== "device-auth") {
+		const refusal = oauthRefusal(body);
 		throw new AIError.OAuthError(
 			`${context.provider} ${errorKind === "token-refresh" ? "token refresh" : "token exchange"} failed: ${response.status} ${text.slice(0, 500)}`,
-			{ kind: errorKind, provider: context.provider, status: response.status },
+			{
+				kind: errorKind,
+				provider: context.provider,
+				status: response.status,
+				code: refusal.code,
+				definitive: context.deadGrant ? isDeadGrant(context.deadGrant, response.status, refusal) : undefined,
+			},
 		);
 	}
 	return { body: body ?? text, response };

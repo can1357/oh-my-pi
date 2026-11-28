@@ -5,7 +5,7 @@ import {
 	readTextFromClipboard as nativeReadTextFromClipboard,
 } from "@oh-my-pi/pi-natives/clipboard";
 import { isSsh } from "@oh-my-pi/pi-tui/driver/mux/detect";
-import { writeTerminalSequence } from "@oh-my-pi/pi-tui/driver/session";
+import { activeTerminalDriver, writeTerminalSequence } from "@oh-my-pi/pi-tui/driver/session";
 import { isWsl } from "@oh-my-pi/pi-utils";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { SUPPORTED_IMAGE_MIME_TYPES } from "@oh-my-pi/pi-utils/mime";
@@ -127,9 +127,23 @@ let macClipboardWrite = Promise.resolve();
  * frame; from a worker thread it is skipped and only the native copy runs.
  *
  * @param text - UTF-8 text to place on the clipboard.
+ * @param options - Fullscreen selection can target the client terminal alone (SSH),
+ * and request its active driver’s multiplexer envelope. Other callers keep their ordinary route.
  */
-export async function copyToClipboard(text: string): Promise<void> {
-	if (process.stdout.isTTY) writeTerminalSequence(`\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`);
+export async function copyToClipboard(
+	text: string,
+	options?: { terminalOnly?: boolean; passthrough?: boolean },
+): Promise<void> {
+	if (process.stdout.isTTY) {
+		const osc = `\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`;
+		const driver = options?.passthrough ? activeTerminalDriver() : null;
+		const wrapped = driver?.passthrough(osc) ?? osc;
+		// tmux may accept OSC 52 into its paste buffer even when passthrough is disabled.
+		writeTerminalSequence(wrapped !== osc && driver?.capabilities.multiplexer === "tmux" ? osc + wrapped : wrapped);
+	}
+
+	// A selection made over SSH belongs to the client, never to a desktop on the server.
+	if (options?.terminalOnly) return;
 
 	// Keep pbcopy, document-header writes, and native fallbacks in invocation order.
 	let releaseWrite: (() => void) | undefined;

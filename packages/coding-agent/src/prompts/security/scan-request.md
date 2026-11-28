@@ -12,7 +12,6 @@ Plan fingerprint: {{planFingerprint}}
 {{#if diffText}}
 
 Requested base-to-head diff:
-
 ```diff
 {{diffText}}
 ```

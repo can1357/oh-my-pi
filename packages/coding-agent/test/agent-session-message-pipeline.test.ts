@@ -43,12 +43,16 @@ import { createAgentSession, type ExtensionContext, type ExtensionFactory } from
 import { obfuscateProviderContext, SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { convertToLlm, wrapSteeringForModel } from "@oh-my-pi/pi-coding-agent/session/messages";
+import {
+	convertToLlm,
+	INTERRUPTED_THINKING_MESSAGE_TYPE,
+	wrapSteeringForModel,
+} from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { requestBodyText } from "@oh-my-pi/pi-ai/utils/request-body";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { createAssistantMessage } from "./helpers/agent-session-setup";
+import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 import { createTestImageDescriptions } from "./helpers/image-description";
 
 function createAgent(): Agent {
@@ -683,68 +687,67 @@ describe("AgentSession message pipeline", () => {
 		expect(hookErrors).toHaveLength(3);
 	});
 
-	it("applies transformContext before convertToLlm", async () => {
-		const inputMessages: AgentMessage[] = [{ role: "user", content: "hello", timestamp: Date.now() }];
-		const transformedMessages: AgentMessage[] = [
-			...inputMessages,
-			{ role: "user", content: "injected context", timestamp: Date.now() },
-		];
-		const convertedMessages: Message[] = [
-			{
-				role: "user",
-				content: [{ type: "text", text: "converted" }],
-				attribution: "user",
-				timestamp: Date.now(),
-			},
-		];
-		const transformContext = vi.fn(async (messages: AgentMessage[], signal?: AbortSignal) => {
-			expect(signal).toBe(abortController.signal);
-			return [...messages, ...transformedMessages.slice(messages.length)];
-		});
-		const convertToLlm = vi.fn(async (_messages: AgentMessage[]) => {
-			return convertedMessages;
-		});
-		const abortController = new AbortController();
+	it("applies the destination's reasoning policy to notes added by a context transform", async () => {
+		using tempDir = TempDir.createSync("@pi-context-reader-");
+		const authStorage = createInMemoryAuthStorage();
+		const note: AgentMessage = {
+			role: "custom",
+			customType: INTERRUPTED_THINKING_MESSAGE_TYPE,
+			content: "interrupted reasoning",
+			display: false,
+			attribution: "agent",
+			timestamp: 1,
+		};
 		const session = new AgentSession({
-			agent: createAgent(),
-			sessionManager: SessionManager.inMemory(),
+			agent: new Agent({ initialState: { model: getBundledModel("openai", "gpt-4o-mini") } }),
+			sessionManager: SessionManager.inMemory(tempDir.path()),
 			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry: {} as never,
-			transformContext,
+			modelRegistry: new ModelRegistry(authStorage, tempDir.join("models.yml")),
+			transformContext: messages => [...messages, note],
 			convertToLlm,
 		});
-		sessions.push(session);
-
-		const result = await session.convertMessagesToLlm(inputMessages, abortController.signal);
-
-		expect(transformContext).toHaveBeenCalledWith(inputMessages, abortController.signal);
-		expect(convertToLlm).toHaveBeenCalledWith(transformedMessages);
-		expect(result).toEqual(convertedMessages);
-	});
-
-	it("marks queued user steers without changing the public queue text", async () => {
-		const session = new AgentSession({
-			agent: createAgent(),
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry: {} as never,
-		});
-		sessions.push(session);
-		// #queueUserMessage schedules an idle-queue drain that would agent.continue()
-		// and pop the steer before we can inspect it; stub it out to observe the queue.
-		vi.spyOn(session.agent, "continue").mockResolvedValue(undefined);
-
-		await session.sendUserMessage("raw <steer> &", { deliverAs: "steer" });
-
-		expect(session.getQueuedMessages().steering).toEqual(["raw <steer> &"]);
-		const queued = session.agent.popLastSteer();
-		if (queued?.role !== "user") {
-			throw new Error("Expected queued user steer");
+		try {
+			const history: AgentMessage[] = [{ role: "user", content: "continue", timestamp: 0 }];
+			const claude = getBundledModel("anthropic", "claude-sonnet-4-5");
+			const restricted = await session.convertMessagesToLlm(history, undefined, claude);
+			expect(restricted.map(getConvertedUserText)).toEqual(["continue"]);
+			expect(await session.convertMessagesToLlm(history)).toContainEqual(
+				expect.objectContaining({ role: "developer", content: [{ type: "text", text: note.content }] }),
+			);
+		} finally {
+			await session.dispose();
+			authStorage.close();
 		}
-		expect(queued.steering).toBe(true);
-		expect(queued.content).toEqual([{ type: "text", text: "raw <steer> &" }]);
-		session.clearQueue();
 	});
+
+	it.each([true, false])(
+		"marks queued user steers without changing the public queue text (in-call: %s)",
+		async inCall => {
+			const session = new AgentSession({
+				agent: createAgent(),
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry: {} as never,
+			});
+			sessions.push(session);
+			// #queueUserMessage schedules an idle-queue drain that would agent.continue()
+			// and pop the steer before we can inspect it; stub it out to observe the queue.
+			vi.spyOn(session.agent, "continue").mockResolvedValue(undefined);
+
+			if (inCall) session.activeVoiceCall = Symbol("live call");
+			await session.sendUserMessage("raw <steer> &", { deliverAs: "steer" });
+
+			expect(session.getQueuedMessages().steering).toEqual(["raw <steer> &"]);
+			const queued = session.agent.popLastSteer();
+			if (queued?.role !== "user") {
+				throw new Error("Expected queued user steer");
+			}
+			expect(queued.steering).toBe(true);
+			expect(queued.content).toEqual([{ type: "text", text: "raw <steer> &" }]);
+			expect(queued.duringLiveCall).toBe(inCall ? true : undefined);
+			session.clearQueue();
+		},
+	);
 
 	it("resolves image attachments from submitted messages, not tool-result images", () => {
 		const userImage: ImageContent = { type: "image", data: "user-image", mimeType: "image/png" };
@@ -1395,7 +1398,6 @@ describe("AgentSession message pipeline", () => {
 	});
 
 	it.each([
-		["Antigravity fixed-profile transport", getBundledModel("google-antigravity", "claude-sonnet-4-6")],
 		...(["cursor-agent", "gitlab-duo-agent"] as const).map(
 			api =>
 				[
@@ -1467,9 +1469,9 @@ describe("AgentSession message pipeline", () => {
 			true,
 		],
 		[
-			"Antigravity",
+			"Gemini",
 			buildModel({
-				...getBundledModel("google-antigravity", "gemini-2.5-pro"),
+				...getBundledModel("google", "gemini-2.5-pro"),
 				thinking: { mode: "budget", efforts: [Effort.Medium] },
 			}),
 			false,

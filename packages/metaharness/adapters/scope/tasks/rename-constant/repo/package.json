@@ -4,6 +4,6 @@
 	"type": "module",
 	"scripts": {
 		"test": "bun test",
-		"check": "tsc --noEmit"
+		"check": "bun build src/*.ts test/*.ts --target=bun --outdir=node_modules/.check"
 	}
 }

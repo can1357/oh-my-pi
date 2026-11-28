@@ -1,4 +1,5 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
+import { flattenLine } from "@oh-my-pi/pi-tui/text/sanitize";
 import {
 	type ChoiceField,
 	type ChoiceOption,
@@ -278,7 +279,7 @@ export function fieldQuestions(form: HtmlForm): Map<FormField, string> {
 				const own = spansText(field.label);
 				const lone =
 					field.kind === "choice" && field.options.length === 1 ? spansText(field.options[0]!.label) : "";
-				questions.set(field, oneLine(own || caption || title || lone || field.name));
+				questions.set(field, flattenLine(own || caption || title || lone || field.name));
 				caption = "";
 				continue;
 			}
@@ -322,7 +323,7 @@ export function formContext(form: HtmlForm): string[] {
 	const parts: string[] = [];
 	for (const section of form.sections) {
 		for (const text of [spansText(section.title).trim(), ...section.blocks.map(blockText)]) {
-			if (text?.trim() && !questions.has(oneLine(text))) parts.push(text);
+			if (text?.trim() && !questions.has(flattenLine(text))) parts.push(text);
 		}
 	}
 	return parts;
@@ -352,7 +353,7 @@ export function fieldContexts(form: HtmlForm): Map<FormField, string> {
 			if (block.kind === "field") {
 				if (!block.field.name) continue;
 				const question = questions.get(block.field);
-				const own = pending.filter(part => oneLine(part) !== question);
+				const own = pending.filter(part => flattenLine(part) !== question);
 				parts.set(block.field, own);
 				pending = [];
 				last = own;
@@ -397,12 +398,8 @@ function answerText(field: FormField, value: HtmlFormValue | undefined): string 
 	if (field.kind === "text") return String(value);
 	const labelOf = (raw: string): string => {
 		const option = field.options.find(candidate => candidate.value === raw);
-		if (option) return oneLine(spansText(option.label)) || raw;
+		if (option) return flattenLine(spansText(option.label)) || raw;
 		return field.other ? `${OTHER_LABEL}: ${raw}` : raw;
 	};
 	return Array.isArray(value) ? value.map(labelOf).join(", ") : labelOf(String(value));
-}
-
-function oneLine(text: string): string {
-	return text.replace(/\s+/g, " ").trim();
 }

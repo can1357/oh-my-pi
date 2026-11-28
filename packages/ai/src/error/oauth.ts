@@ -22,8 +22,6 @@ export type OAuthErrorKind =
 	| "device-auth"
 	/** Misconfiguration (bad redirect URI, missing projectId, callback bind, …). */
 	| "configuration"
-	/** Cloud project provisioning / onboarding (loadCodeAssist, onboardUser). */
-	| "provisioning"
 	/** Subscription/payment gate: plan required or purchase action needed. */
 	| "entitlement"
 	/** OIDC / endpoint discovery failed. */
@@ -34,7 +32,13 @@ export interface OAuthErrorOptions {
 	provider?: string;
 	status?: number;
 	cause?: unknown;
-	/** Retry cannot repair the persisted grant/client; reauthorization is required. */
+	/** RFC 6749 §5.2 `error` code the token endpoint refused with. */
+	code?: string;
+	/**
+	 * Provider verdict on the persisted grant: `true` when retry cannot repair it
+	 * (reauthorization is required), `false` when it survives this failure.
+	 * Either value overrides message heuristics in `isDefinitiveOAuthFailure`.
+	 */
 	definitive?: boolean;
 }
 
@@ -50,6 +54,9 @@ export class OAuthError extends Error {
 	readonly kind: OAuthErrorKind;
 	readonly provider: string | undefined;
 	readonly status: number | undefined;
+	readonly code: string | undefined;
+	/** See {@link OAuthErrorOptions.definitive}; `undefined` when the provider gave no verdict. */
+	readonly definitive: boolean | undefined;
 
 	constructor(message: string, options: OAuthErrorOptions = {}) {
 		super(message, options.cause === undefined ? undefined : { cause: options.cause });
@@ -57,6 +64,8 @@ export class OAuthError extends Error {
 		this.kind = options.kind ?? "http";
 		this.provider = options.provider;
 		this.status = options.status;
+		this.code = options.code;
+		this.definitive = options.definitive;
 		attach(
 			this,
 			options.definitive

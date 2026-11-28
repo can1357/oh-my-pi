@@ -11,6 +11,7 @@
  * Painters never write to the terminal and never keep their own caches of
  * reactive state; they are pure functions of what they read.
  */
+import type { HistoryRowMark } from "../driver/contract";
 import type { CellSize } from "../driver/images/fit";
 import type { ImageRequest, ImageRows, ImageSource } from "../driver/images/store";
 import type { UiKind, UiNode } from "../node";
@@ -40,6 +41,8 @@ export interface Hit {
 /** What a painter returns: rows (none wider than the width it got), plus cursor and hit regions. */
 export interface Block {
 	readonly rows: readonly string[];
+	/** A one-shot mark on a top-level main block, written only when its row enters history. */
+	readonly historyMark?: HistoryRowMark & { readonly key: object };
 	/** Hardware cursor (the focused editor's caret), in this block's coordinates. */
 	readonly cursor?: Cell;
 	/** Mouse targets, in this block's coordinates. */
@@ -57,6 +60,52 @@ export interface Block {
 	 * children's.
 	 */
 	readonly covering?: number;
+	/**
+	 * Leading rows that name the block (a title that may wrap): a container
+	 * that shows only part of the block keeps them. Containers add their
+	 * offset.
+	 */
+	readonly heading?: number;
+}
+
+/** Every observable part of the block counts, including pointer routing when no cell changed. */
+function sameBlock(a: Block, b: Block): boolean {
+	if (a === b) return true;
+	if (
+		a.rows.length !== b.rows.length ||
+		a.stable !== b.stable ||
+		a.covering !== b.covering ||
+		a.heading !== b.heading ||
+		a.cursor?.row !== b.cursor?.row ||
+		a.cursor?.col !== b.cursor?.col
+	)
+		return false;
+	const x = a.historyMark;
+	const y = b.historyMark;
+	if (x !== y && (!x || !y || x.key !== y.key || x.row !== y.row || x.before !== y.before || x.after !== y.after))
+		return false;
+	if (a.rows !== b.rows) {
+		for (let i = 0; i < a.rows.length; i++) if (a.rows[i] !== b.rows[i]) return false;
+	}
+	if (a.hits !== b.hits) {
+		if (!a.hits || !b.hits || a.hits.length !== b.hits.length) return false;
+		for (let i = 0; i < a.hits.length; i++) {
+			const x = a.hits[i]!;
+			const y = b.hits[i]!;
+			if (
+				x !== y &&
+				(x.node !== y.node ||
+					x.item !== y.item ||
+					x.act !== y.act ||
+					x.row !== y.row ||
+					x.col !== y.col ||
+					x.width !== y.width ||
+					x.height !== y.height)
+			)
+				return false;
+		}
+	}
+	return true;
 }
 
 /** What a painter may consult. */
@@ -71,7 +120,7 @@ export interface PaintContext {
 	paint(node: UiNode, width: number, height?: number): Block;
 	/**
 	 * Terminal clock in ms; reading it repaints this block on every animation tick. `smooth` asks for
-	 * 30 Hz ticks while the block is drawn (a sweep that reads as motion), else the spinner cadence.
+	 * 20 Hz ticks while the block is drawn (a sweep that reads as motion), else the spinner cadence.
 	 */
 	now(smooth?: boolean): number;
 	/** Whether `node` holds keyboard focus. */
@@ -83,8 +132,10 @@ export interface PaintContext {
 	 * pointer tracking (`setMouse("any")`).
 	 */
 	hovered(node: UiNode): PointerHover | undefined;
-	/** The terminal asked for reduced motion: clocked kinds draw their still frame. */
+	/** Decorative motion is off (blink, fade, pulse, sweeps): such kinds draw their still frame. */
 	readonly reduceMotion: boolean;
+	/** Milliseconds per spinner frame; 0 draws spinners still (see `spinnerIndex`). */
+	readonly spinnerInterval: number;
 	/** The terminal draws OSC 8 hyperlinks (painters may emit them). */
 	readonly hyperlinks: boolean;
 	/**
@@ -172,6 +223,9 @@ export interface PointerHover {
 	readonly act?: string;
 }
 
+/** Milliseconds per spinner frame when the host sets no cadence. */
+export const DEFAULT_SPINNER_INTERVAL_MS = 80;
+
 /** Process-wide paint environment: theme, clock, focus, motion. One per terminal backend. */
 export interface PaintEnvironment {
 	readonly theme: Accessor<Theme>;
@@ -179,6 +233,7 @@ export interface PaintEnvironment {
 	readonly clock: (smooth?: boolean) => number;
 	readonly focus: Accessor<UiNode | null>;
 	readonly reduceMotion: Accessor<boolean>;
+	readonly spinnerInterval: Accessor<number>;
 	readonly hyperlinks: Accessor<boolean>;
 	/** Whether painters may draw OSC 66 sized text; absent: never. */
 	readonly textSizing?: Accessor<boolean>;
@@ -236,12 +291,15 @@ export function paintNode(env: PaintEnvironment, node: UiNode, width: number, he
 		const cx = createContext(env, width, height);
 		// Detached from whatever paint is running: the entry lives until the node retires or is evicted.
 		entry = createRoot(dispose => ({
-			block: computed(() => {
-				if ((node.props() as { hidden?: boolean }).hidden === true) return EMPTY_BLOCK;
-				const painter = painterFor(node);
-				if (!painter) throw new Error(`pi-tui: no terminal painter for <${node.kind}>`);
-				return painter(node, cx);
-			}),
+			block: computed(
+				() => {
+					if (node.props().hidden === true) return EMPTY_BLOCK;
+					const painter = painterFor(node);
+					if (!painter) throw new Error(`pi-tui: no terminal painter for <${node.kind}>`);
+					return painter(node, cx);
+				},
+				{ equals: sameBlock },
+			),
 			dispose,
 		}));
 		cache.entries.set(size, entry);
@@ -274,6 +332,9 @@ function createContext(env: PaintEnvironment, width: number, height: number | un
 		get reduceMotion() {
 			return env.reduceMotion();
 		},
+		get spinnerInterval() {
+			return env.spinnerInterval();
+		},
 		get hyperlinks() {
 			return env.hyperlinks();
 		},
@@ -289,6 +350,8 @@ export interface StaticEnvironment extends PaintEnvironment {
 	setFocus(node: UiNode | null): void;
 	setNow(now: number): void;
 	setTheme(theme: Theme): void;
+	setReduceMotion(reduce: boolean): void;
+	setSpinnerInterval(interval: number): void;
 }
 
 /** A paint environment with fixed inputs, for tests and offline rendering. */
@@ -298,6 +361,7 @@ export function staticEnvironment(
 		now?: number;
 		focus?: UiNode | null;
 		reduceMotion?: boolean;
+		spinnerInterval?: number;
 		hyperlinks?: boolean;
 		textSizing?: boolean;
 		images?: PaintImages;
@@ -307,17 +371,21 @@ export function staticEnvironment(
 	const clock = signal(options?.now ?? 0);
 	const focus = signal<UiNode | null>(options?.focus ?? null);
 	const reduceMotion = signal(options?.reduceMotion ?? false);
+	const spinnerInterval = signal(options?.spinnerInterval ?? DEFAULT_SPINNER_INTERVAL_MS);
 	const hyperlinks = signal(options?.hyperlinks ?? false);
 	return {
 		theme: themeSignal,
 		clock,
 		focus,
 		reduceMotion,
+		spinnerInterval,
 		hyperlinks,
 		...(options?.textSizing ? { textSizing: () => true } : {}),
 		...(options?.images ? { images: options.images } : {}),
 		setFocus: node => focus.set(node),
 		setNow: now => clock.set(now),
 		setTheme: next => themeSignal.set(next),
+		setReduceMotion: reduce => reduceMotion.set(reduce),
+		setSpinnerInterval: interval => spinnerInterval.set(interval),
 	};
 }

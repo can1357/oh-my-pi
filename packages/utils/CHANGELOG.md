@@ -2,11 +2,46 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Removed the unused `getToolsDir()` export; custom tool discovery is unchanged.
+- `@oh-my-pi/pi-utils/chalk` detects color on first use instead of at import. Use `detectColorLevel(process.env, Boolean(stream.isTTY))` in place of the `supportsColor` and `supportsColorStderr` exports.
+
+### Added
+
+- Added `getBunStubDir()` to expose the cache directory used for the `bun` executable stub in compiled applications.
+
 ### Fixed
 
-- Fatal interactive errors now print a concise cause and the path to the full log after terminal cleanup. Piped stderr still includes the stack trace.
-- `ptree` child processes spawned without an explicit `env` now inherit `Bun.env`, including values loaded from `.env` files after startup, on every platform rather than only under the Linux subreaper.
-- `<textarea>` and HTML `<title>` content now parses as text, as in a browser: `<…>` parts are kept instead of becoming child elements, and entities are still decoded ([#20299](https://github.com/can1357/oh-my-pi/issues/20299))
+- Startup timings now show elapsed wall time from Bun’s process clock, distinguish overlapping and unfinished spans, and report optional module reads and evaluations separately instead of attributing loader gaps to modules.
+- `PI_TIMING=full` includes sub-millisecond startup phases; custom tools report preparation, import, and factory time by file.
+- Fixed 429 retry guidance to honor quota reset timestamps in `rests until <ISO-8601>` responses.
+- Fixed `parseImageMetadata` failing to report dimensions for short lossless WebP (VP8L) headers.
+- Fixed requests using `NODE_EXTRA_CA_CERTS` (including remote MCP HTTP/SSE) dropping system CAs added by `NODE_USE_SYSTEM_CA=1`; the extra bundle now extends the runtime default trust store ([#18556](https://github.com/can1357/oh-my-pi/issues/18556))
+
+## [19.2.1] - 2026-11-25
+
+### Added
+
+- Added path utilities for checking whether a path exists and whether it is lexically contained within another path without resolving symlinks.
+- Added `errorMessage()` to `@oh-my-pi/pi-utils/type-guards` for retrieving message text from thrown values.
+- Added `Laps` for timing the phases of a multi-step async path as one log record.
+
+### Fixed
+
+- Fixed path containment checks for files and directories whose names begin with `..`.
+
+## [19.2.0] - 2026-11-25
+
+### Fixed
+
+- Fatal interactive errors now display a concise cause and the path to the full log after terminal cleanup, while piped stderr continues to include the stack trace.
+- Fixed HTML parsing so <textarea> and <title> content is treated as text, preserving literal angle-bracket content while still decoding entities.
+- Child processes created by ptree without an explicit environment now inherit the current Bun environment, including values loaded from .env files after startup, on all platforms.
+
+### Removed
+
+- Removed the public getProviderInFlightRoot() API; provider in-flight limits no longer rely on a lease directory.
 
 ## [19.1.0] - 2026-11-21
 

@@ -7,17 +7,32 @@
  * - `<model agent="m1" name="x"/>` mention tags show as `⬢ x`.
  * - Skill chips (`✦ name`) are kept and linked to their SKILL.md.
  *
+ * The glyphs are the active symbol preset's (`chip.*`, `icon.model`,
+ * `icon.extensionSkill`), as the composer drew the chip; reading them
+ * subscribes a reactive caller to preset switches.
+ *
  * Natively each token is an `md` mark styled as the composer decorates it;
  * the terminal colors attachment chips with their composer identity color.
  */
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { type ChipKind, chipColor, chipLabel } from "../../composer/attachments";
 
 const VISION_MARKER = /\[(Image|Video) #([1-9]\d*)(?:,[^\]\n]*)?\](?: attachment:\/\/\2)?/g;
 const MODEL_MENTION = /<model agent="m\d+" name="([^"]*)"\/>/g;
-/** Skill chip: the skill glyph, a space and a skill name (`ns/name`, dotted segments). */
-const SKILL_CHIP = /✦ ((?:[\w-]+\/)?[\w-]+(?:\.[\w-]+)*)(?![\w-])/gu;
-const MODEL_GLYPH = "⬢";
+/** A skill name after its chip glyph (`ns/name`, dotted segments). */
+const SKILL_NAME = String.raw` ((?:[\w-]+\/)?[\w-]+(?:\.[\w-]+)*)(?![\w-])`;
+
+/** The chip of skill `name`: the symbol preset's skill glyph and the name, as the composer shows an invocation. */
+export function skillChipLabel(name: string): string {
+	return `${currentTheme().symbols.symbol("icon.extensionSkill")} ${name}`;
+}
+
+/** Skill chips drawn with `glyph`; a word glyph (the ASCII preset's `SK`) does not continue a word before it. */
+function skillChips(glyph: string): RegExp {
+	const lead = /^[a-z]+$/i.test(glyph) ? `(?<![A-Za-z])${glyph}` : RegExp.escape(glyph);
+	return new RegExp(`${lead}${SKILL_NAME}`, "gu");
+}
 
 /** One chip in the display text. */
 export interface Chip {
@@ -44,10 +59,11 @@ export function chipText(
 	} = {},
 ): ChipText {
 	const chips = new Map<string, Chip>();
+	const symbols = currentTheme().symbols;
 	let out = text.replace(VISION_MARKER, (_match, kind: string, idx: string) => {
 		const n = Number(idx);
 		const chipKind: ChipKind = kind === "Video" ? "video" : "image";
-		const label = chipLabel(chipKind, n);
+		const label = chipLabel(chipKind, n, key => symbols.symbol(key));
 		if (!chips.has(label))
 			chips.set(label, {
 				label,
@@ -58,11 +74,13 @@ export function chipText(
 		return label;
 	});
 	out = out.replace(MODEL_MENTION, (_match, name: string) => {
-		const label = `${MODEL_GLYPH} ${name}`;
+		const label = `${symbols.symbol("mention.model")} ${name}`;
 		if (!chips.has(label)) chips.set(label, { label, kind: "mention" });
 		return label;
 	});
-	for (const match of out.matchAll(SKILL_CHIP)) {
+	const skillGlyph = symbols.symbol("icon.extensionSkill");
+	// A theme without a skill glyph marks no chip apart from prose.
+	for (const match of skillGlyph ? out.matchAll(skillChips(skillGlyph)) : []) {
 		const label = match[0];
 		if (!chips.has(label))
 			chips.set(label, {

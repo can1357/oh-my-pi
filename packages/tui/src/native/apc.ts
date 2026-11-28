@@ -187,6 +187,15 @@ type EventShape<E> = E extends TspEvent ? Record<Exclude<keyof E, "ev">, Check> 
 const UI = { sf: isId, id: isId };
 const isCell: Check = v =>
 	typeof v === "object" && v !== null && "w" in v && isNumber(v.w) && "h" in v && isNumber(v.h);
+/** A `TspPicture`: the annotated image a terminal hands back. */
+const isPicture: Check = v =>
+	isCell(v) &&
+	typeof v === "object" &&
+	v !== null &&
+	"mime" in v &&
+	(v.mime === "image/png" || v.mime === "image/jpeg") &&
+	"data" in v &&
+	isString(v.data);
 
 /**
  * Check each event before exposing it to typed listeners. Where the same tag has two
@@ -200,6 +209,7 @@ const EVENT_SHAPES = {
 	motion: [{ reduce: isBoolean }],
 	features: [{ features: isStrings }],
 	visible: [{ sf: optional(isId), visible: isBoolean }],
+	checkout: [{ sf: optional(isId), shown: isBoolean }],
 	toggle: [
 		{ ...UI, collapsed: isBoolean, key: optional(isString), open: absent },
 		{ ...UI, open: isBoolean, item: optional(isString) },
@@ -211,6 +221,7 @@ const EVENT_SHAPES = {
 	],
 	change: [
 		{ ...UI, item: isString, value: isChangeValue, text: absent },
+		{ ...UI, value: isPicture, item: absent, text: absent },
 		{ ...UI, text: isString },
 	],
 	comment: [

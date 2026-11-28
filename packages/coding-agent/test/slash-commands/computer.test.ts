@@ -28,14 +28,13 @@ function acpRuntime(
 		session: {
 			settings,
 			getEvalPreludes,
+			isFastModeEnabled: () => false,
+			isUltrafastModeEnabled: () => false,
 		},
 		output,
 	};
 	return { output, runtime, settings };
 }
-
-const enabledStatus =
-	"Computer use: enabled · prelude: active · configured: display=active, maxWidth=1920, maxHeight=1200, takeover=fallback";
 
 describe("/computer slash command", () => {
 	it("toggles a disabled session on without persisting", async () => {
@@ -45,7 +44,7 @@ describe("/computer slash command", () => {
 		});
 		expect(cfgComputerEnabled.get(h.settings)).toBe(true);
 		expect(h.settings.getGlobalSettings()).toEqual({});
-		expect(h.output).toHaveBeenCalledWith(`Computer use enabled for this session. ${enabledStatus}`);
+		expect(h.output).toHaveBeenCalledWith("Computer use enabled for this session.");
 	});
 
 	it("toggles an enabled session off", async () => {
@@ -55,24 +54,7 @@ describe("/computer slash command", () => {
 		expect(h.output).toHaveBeenCalledWith("Computer use disabled for this session.");
 	});
 
-	it("honors explicit on and off regardless of current state", async () => {
-		const on = acpRuntime({ enabled: true });
-		await Reflect.apply(executeAcpBuiltinSlashCommand, undefined, ["/computer on", on.runtime]);
-		expect(cfgComputerEnabled.get(on.settings)).toBe(true);
-
-		const off = acpRuntime({ enabled: false });
-		await Reflect.apply(executeAcpBuiltinSlashCommand, undefined, ["/computer off", off.runtime]);
-		expect(cfgComputerEnabled.get(off.settings)).toBe(false);
-	});
-
-	it("reports status without changing settings", async () => {
-		const h = acpRuntime({ enabled: true });
-		await Reflect.apply(executeAcpBuiltinSlashCommand, undefined, ["/computer status", h.runtime]);
-		expect(cfgComputerEnabled.get(h.settings)).toBe(true);
-		expect(h.output).toHaveBeenCalledWith(enabledStatus);
-	});
-
-	it("reports configured values", async () => {
+	it("reports effective computer use and settings in /session info without changing them", async () => {
 		const h = acpRuntime({
 			enabled: true,
 			display: "display-2",
@@ -80,24 +62,41 @@ describe("/computer slash command", () => {
 			maxHeight: 900,
 			takeover: "refuse",
 		});
-		await Reflect.apply(executeAcpBuiltinSlashCommand, undefined, ["/computer status", h.runtime]);
+		await Reflect.apply(executeAcpBuiltinSlashCommand, undefined, ["/session info", h.runtime]);
+		expect(cfgComputerEnabled.get(h.settings)).toBe(true);
+		expect(h.output).toHaveBeenCalledWith(expect.stringContaining("Computer use: enabled\nComputer prelude: active"));
 		expect(h.output).toHaveBeenCalledWith(
-			"Computer use: enabled · prelude: active · configured: display=display-2, maxWidth=1600, maxHeight=900, takeover=refuse",
+			expect.stringContaining("display=display-2, maxWidth=1600, maxHeight=900, takeover=refuse"),
 		);
 	});
 
 	it("rolls back when the session has no computer prelude", async () => {
 		const h = acpRuntime({ enabled: false, available: false });
-		await Reflect.apply(executeAcpBuiltinSlashCommand, undefined, ["/computer on", h.runtime]);
+		await Reflect.apply(executeAcpBuiltinSlashCommand, undefined, ["/computer", h.runtime]);
 		expect(cfgComputerEnabled.get(h.settings)).toBe(false);
 		expect(h.settings.getGlobalSettings()).toEqual({});
 		expect(h.output).toHaveBeenCalledWith("Computer use is unavailable in this session.");
 	});
 
-	it("rejects unknown arguments with usage", async () => {
+	it("sets computer use explicitly instead of toggling when on or off is repeated", async () => {
+		const h = acpRuntime({ enabled: false });
+		for (const { arg, enabled } of [
+			{ arg: "on", enabled: true },
+			{ arg: "off", enabled: false },
+		]) {
+			await Reflect.apply(executeAcpBuiltinSlashCommand, undefined, [`/computer ${arg}`, h.runtime]);
+			expect(cfgComputerEnabled.get(h.settings)).toBe(enabled);
+			await Reflect.apply(executeAcpBuiltinSlashCommand, undefined, [`/computer ${arg}`, h.runtime]);
+			expect(cfgComputerEnabled.get(h.settings)).toBe(enabled);
+		}
+	});
+
+	it("rejects the old status argument without toggling", async () => {
 		const h = acpRuntime();
-		await Reflect.apply(executeAcpBuiltinSlashCommand, undefined, ["/computer bogus", h.runtime]);
+		expect(await Reflect.apply(executeAcpBuiltinSlashCommand, undefined, ["/computer status", h.runtime])).toEqual({
+			consumed: true,
+			failed: true,
+		});
 		expect(cfgComputerEnabled.get(h.settings)).toBe(false);
-		expect(h.output).toHaveBeenCalledWith("Usage: /computer [on|off|status]");
 	});
 });

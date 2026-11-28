@@ -106,6 +106,7 @@ import {
 	assistantTurnDelivered,
 	convertToLlm,
 	invalidateConvertToLlmArrayCache,
+	INTERRUPTED_THINKING_MESSAGE_TYPE,
 	isUserAuthoredMessage,
 	stripImagesFromMessage,
 } from "./messages";
@@ -127,6 +128,7 @@ import {
 import type { CompactionEntry, SessionEntry } from "./session-entries";
 import type { HandoffGenerationOptions } from "./session-handoff";
 import type { SessionManager } from "./session-manager";
+import type { SessionProviderBoundary } from "./session-provider-boundary";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { resolveSpeculationLeadTokens, SPECULATION_LEAD_MIN_TOKENS } from "./speculation-lead";
 import experimentalContextNotesReminderPrompt from "../prompts/system/experimental-context-notes-reminder.md" with { type: "text" };
@@ -148,11 +150,17 @@ export type CompactionCheckResult = Readonly<{
 	continuationScheduled: boolean;
 	automaticContinuationBlocked?: boolean;
 	historyRewritten?: boolean;
+	/** A `session_before_compact` hook returned `cancel`; nothing was committed. */
+	vetoedByHook?: boolean;
 }>;
 
 /** Shared no-op result for dispatcher paths that perform no maintenance. */
 export const COMPACTION_CHECK_NONE: CompactionCheckResult = {
 	continuationScheduled: false,
+};
+const COMPACTION_CHECK_VETOED: CompactionCheckResult = {
+	continuationScheduled: false,
+	vetoedByHook: true,
 };
 const COMPACTION_CHECK_CONTINUATION: CompactionCheckResult = {
 	continuationScheduled: true,
@@ -530,7 +538,7 @@ export interface SessionMaintenanceHost {
 	/** Preserve the eval runtime snapshot at the history rewrite boundary for replay. */
 	persistEvalStateContext(): void;
 	/** With `withImageDescriptions`, images are replaced by the descriptions {@link prepareImageDescriptions} made. */
-	convertToLlmForSideRequest(messages: AgentMessage[], withImageDescriptions?: boolean): Message[];
+	convertToLlmForSideRequest: SessionProviderBoundary["convertToLlmForSideRequest"];
 	/** The model to describe images for when `reader` gets history as text; undefined when none is needed. */
 	imageDescriptionModel(reader: Model): Model | undefined;
 	/** Describe the images of `messages` for `model`, a model that cannot see them. */
@@ -847,7 +855,7 @@ export class SessionMaintenance {
 				// Prefix-bound thinking cannot survive rewrites inside a warm provider prefix.
 				cacheWarmSuffixTokens: model?.thinking?.prefixBinding === true ? 0 : PRUNE_CACHE_WARM_SUFFIX_TOKENS,
 				cacheLookbackPositions: model ? resolvePromptCacheLookback(model) : undefined,
-				convertToLlm,
+				convertToLlm: messages => convertToLlm(messages, model),
 			}),
 		);
 		if (result.prunedCount === 0) {
@@ -897,7 +905,7 @@ export class SessionMaintenance {
 				// Prefix-bound thinking cannot survive rewrites inside a warm provider prefix.
 				suffixTokenLimit: model?.thinking?.prefixBinding === true ? 0 : undefined,
 				cacheLookbackPositions: model ? resolvePromptCacheLookback(model) : undefined,
-				convertToLlm,
+				convertToLlm: messages => convertToLlm(messages, model),
 			}),
 		);
 		if (result.prunedCount === 0) {
@@ -1011,8 +1019,8 @@ export class SessionMaintenance {
 	 * Surgically reduce context by dropping heavy content ("shake").
 	 *
 	 * - `images` delegates to {@link dropImages}.
-	 * - `thinking` removes assistant reasoning blocks without replacement text
-	 *   and credits their tokens. A turn whose native payload the request
+	 * - `thinking` removes assistant reasoning blocks and their interrupted-thinking
+	 *   continuity quotes without replacement text. A turn whose native payload the request
 	 *   replays is left untouched instead: those blocks are not on the wire, so
 	 *   removing them would change nothing the model receives and would credit
 	 *   tokens that stay billed. Kept blocks are reported through
@@ -1025,7 +1033,7 @@ export class SessionMaintenance {
 	 * cache message identity — same rewrite contract as {@link dropImages}.
 	 *
 	 * No-op (zero counts) when nothing is eligible, and a `thinking` run whose
-	 * every turn is replayed returns without rewriting anything at all.
+	 * every turn is replayed and which has no quotes to clear rewrites nothing.
 	 */
 	async shake(
 		mode: ShakeMode,
@@ -1050,64 +1058,79 @@ export class SessionMaintenance {
 			const anchorIndex = findUsageAnchorIndex(branchEntries, compactionIndex);
 			let removed = 0;
 			let replayedBlocks = 0;
+			let notesDropped = 0;
 			let tokensFreed = 0;
 			let anchoredTokensRemoved = 0;
 			const countOptions = { excludeEncryptedReasoning: true } as const;
 			const model = this.#host.model();
 			const nativeHistoryReplay = openAIResponsesReplaysNativeHistory(model, this.#host.providerSessionState);
 			for (const [index, entry] of branchEntries.entries()) {
-				if (entry.type !== "message" || entry.message.role !== "assistant") continue;
-				const message = entry.message;
-				const isReasoning = (block: (typeof message.content)[number]) =>
-					block.type === "thinking" || block.type === "redactedThinking";
-				const dropped = message.content.filter(isReasoning).length;
-				if (dropped === 0) continue;
-				// Native Responses replay uses the stored payload instead of content.
-				// Leave those blocks intact: stripping them cannot save wire tokens
-				// and needlessly invalidates the provider's prompt cache. They are
-				// reported as kept, and a run that only keeps blocks rewrites nothing.
-				if (this.#replaysNativeHistory(message, nativeHistoryReplay)) {
-					replayedBlocks += dropped;
-					continue;
+				let saved: number;
+				if (entry.type === "message" && entry.message.role === "assistant") {
+					const message = entry.message;
+					let dropped = 0;
+					for (const block of message.content) {
+						if (block.type === "thinking" || block.type === "redactedThinking") dropped++;
+					}
+					if (dropped === 0) continue;
+					// The native payload still supplies this turn; removing its typed
+					// blocks would not change what the provider receives.
+					if (this.#replaysNativeHistory(message, nativeHistoryReplay)) {
+						replayedBlocks += dropped;
+						continue;
+					}
+					// Conversion already strips the unsigned run from an interrupted
+					// assistant. Only the continuity note can reclaim those tokens.
+					const before =
+						message.stopReason === "aborted"
+							? this.#tokenizer.countMessages(convertToLlm([message], model), countOptions)
+							: this.#tokenizer.countMessage(message, countOptions);
+					message.content = message.content.filter(
+						block => block.type !== "thinking" && block.type !== "redactedThinking",
+					);
+					invalidateMessageCache(message);
+					saved = Math.max(0, before - this.#tokenizer.countMessage(message, countOptions));
+					removed += dropped;
+				} else {
+					const note =
+						entry.type === "custom_message"
+							? entry
+							: entry.type === "message" && entry.message.role === "custom"
+								? entry.message
+								: undefined;
+					if (note?.customType !== INTERRUPTED_THINKING_MESSAGE_TYPE) continue;
+					if (note.content === "" && note.excludeFromContext) continue;
+					const projected = "role" in note ? note : customMessageEntryMessage(note);
+					saved = projected ? this.#tokenizer.countMessages(convertToLlm([projected], model), countOptions) : 0;
+					// Keep the ID for forks and compaction cutoffs, and the marker
+					// for its aborted assistant; never emit the emptied note itself.
+					note.content = "";
+					note.excludeFromContext = true;
+					if ("role" in note) invalidateMessageCache(note);
+					notesDropped++;
 				}
-				const kept = message.content.filter(block => !isReasoning(block));
-				// Match the stored-context floor: opaque signatures and encrypted
-				// reasoning bytes do not have a reliable provider-token equivalent.
-				const before = this.#tokenizer.countMessage(message, countOptions);
-				// Provider serializers omit empty assistant turns, so don't invent model-authored text.
-				message.content = kept;
-				invalidateMessageCache(message);
-				const saved = Math.max(0, before - this.#tokenizer.countMessage(message, countOptions));
 				tokensFreed += saved;
 				if (index < anchorIndex && (!hasRemoteReplacementHistory || index > compactionIndex)) {
 					anchoredTokensRemoved += saved;
 				}
-				removed += dropped;
 			}
-			if (removed === 0) {
-				return {
-					mode,
-					toolResultsDropped: 0,
-					blocksDropped: 0,
-					thinkingBlocksDropped: 0,
-					thinkingBlocksKept: replayedBlocks,
-					tokensFreed: 0,
-				};
-			}
+			const result: ShakeResult = {
+				mode,
+				toolResultsDropped: 0,
+				blocksDropped: 0,
+				thinkingBlocksDropped: removed,
+				thinkingBlocksKept: replayedBlocks,
+				interruptedThinkingNotesDropped: notesDropped,
+				tokensFreed,
+			};
+			if (removed === 0 && notesDropped === 0) return result;
 			this.#host.recordAnchoredHistoryRewrite(anchoredTokensRemoved);
 			await this.#host.sessionManager.rewriteEntries();
 			const sessionContext = this.#host.buildDisplaySessionContext();
 			this.#host.replaceMessagesFromSessionContext(sessionContext.messages);
 			this.#host.resetAdvisorRuntimes("shake");
 			this.#host.closeCodexProviderSessionsForHistoryRewrite();
-			return {
-				mode,
-				toolResultsDropped: 0,
-				blocksDropped: 0,
-				thinkingBlocksDropped: removed,
-				thinkingBlocksKept: replayedBlocks,
-				tokensFreed,
-			};
+			return result;
 		}
 
 		const assertCurrent = () => {
@@ -1586,9 +1609,8 @@ export class SessionMaintenance {
 				);
 				snapcompactShape = renderScan.shape;
 				if (!renderScan.isSafe) {
-					const percent = (renderScan.unrenderableRatio * 100).toFixed(1);
 					throw snapcompactFailure(
-						`snapcompact cannot render this conversation: unsupported characters for selected snapcompact font (${percent}%)`,
+						"snapcompact cannot render this conversation: no installed font covers the whole transcript",
 					);
 				}
 				// The preflight and the render each block the loop for a long history; let it breathe between them.
@@ -2234,7 +2256,7 @@ export class SessionMaintenance {
 					await this.#host.sessionManager.rewriteEntries();
 				}
 				this.#host.emitNotice("warning", warning, "compaction");
-				return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
+				return { ...COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION, historyRewritten: true };
 			}
 			if (willRetry) {
 				this.#host.scheduleAgentContinue({
@@ -2242,16 +2264,17 @@ export class SessionMaintenance {
 					delayMs: 100,
 					generation,
 				});
-				return COMPACTION_CHECK_CONTINUATION;
+				return { continuationScheduled: true, historyRewritten: true };
 			}
-			return this.#host.scheduleCompactionContinuation({
-				generation,
-				autoContinue: shouldAutoContinue,
-				terminalTextAnswer,
-				suppressContinuation,
-			})
-				? COMPACTION_CHECK_CONTINUATION
-				: COMPACTION_CHECK_NONE;
+			return {
+				continuationScheduled: this.#host.scheduleCompactionContinuation({
+					generation,
+					autoContinue: shouldAutoContinue,
+					terminalTextAnswer,
+					suppressContinuation,
+				}),
+				historyRewritten: true,
+			};
 		} catch (error) {
 			await this.#emitLifecycleEvent(
 				{
@@ -2501,16 +2524,16 @@ export class SessionMaintenance {
 		if (this.#host.extensionRunner?.hasHandlers("session_before_compact")) return;
 		const thresholdTokens = resolveThresholdTokens(contextWindow, settings);
 		if (contextTokens >= thresholdTokens) return; // real maintenance owns it now
-		if (thresholdTokens - contextTokens > resolveSpeculationLeadTokens(thresholdTokens)) return;
+		const lead = resolveSpeculationLeadTokens(thresholdTokens);
+		if (thresholdTokens - contextTokens > lead) return;
 		const current = this.#speculation;
 		if (current) {
 			// One run at a time; a bridge result waits for the boundary that commits it.
 			if (!current.armed || current.bridge) return;
-			// Refresh-on-growth: the armed summary's kept tail grows with every
-			// turn; once the growth exceeds the keep-recent budget, a fresh cut
-			// reclaims materially more context at apply time.
+			// Ordinary growth across the lead band shouldn't pay for a second
+			// summary. Branch and headroom checks can still invalidate the cut.
 			const growth = contextTokens - current.armed.contextTokensAtStart;
-			const refreshBudget = Math.max(settings.keepRecentTokens, SPECULATION_LEAD_MIN_TOKENS);
+			const refreshBudget = Math.max(settings.keepRecentTokens, lead);
 			if (
 				(growth <= refreshBudget || isRecord(current.armed.result.preserveData?.anthropicCompaction)) &&
 				this.#armedSpeculationValid(current.armed, contextTokens)
@@ -3353,7 +3376,15 @@ export class SessionMaintenance {
 
 		if (signal?.aborted) return;
 		this.#replaceActiveMessages(activeMessages);
-		logger.debug("Mid-run compaction ran between provider calls", {
+		const outcome = result.vetoedByHook
+			? "vetoed"
+			: result.automaticContinuationBlocked
+				? "dead_end"
+				: result.historyRewritten
+					? "committed"
+					: "unchanged";
+		logger.debug("Mid-run compaction attempted between provider calls", {
+			outcome,
 			contextTokens,
 			contextWindow,
 			methods: resolveCompactionMethodOrder(compactionSettings.methodOrder),
@@ -4109,7 +4140,8 @@ export class SessionMaintenance {
 				signal,
 			);
 		}
-		return messages => this.#host.convertToLlmForSideRequest(messages, describeFor !== undefined);
+		return messages =>
+			this.#host.convertToLlmForSideRequest(messages, candidate, { withImageDescriptions: !!describeFor });
 	}
 
 	async #compactWithFallbackModel(
@@ -4420,6 +4452,7 @@ export class SessionMaintenance {
 				text,
 				preparation.previousPreserveData,
 				preparation.previousSummary,
+				includeThinking,
 			);
 			return snapcompact.resolveShapeAndScan(probeText, this.#model, shapeSetting);
 		});
@@ -4446,7 +4479,7 @@ export class SessionMaintenance {
 	 * twice (the second pass absorbs per-frame variance):
 	 * - {@link snapcompact.frameDataBytesBudget} for the active model: the cap from
 	 *   {@link #computeSnapcompactMaxFrames} sizes bytes from a per-shape
-	 *   estimate, and denser frames (CJK prose drawn with fallback glyphs) run
+	 *   estimate, and denser frames (for example, CJK prose) run
 	 *   heavier, so the fit is `frames × budget / payload`;
 	 * - {@link SNAPCOMPACT_POST_COMPACTION_TARGET} of the threshold, counting
 	 *   `pendingTokens` (a pre-prompt pass's prompt, not yet in the session):
@@ -4641,7 +4674,7 @@ export class SessionMaintenance {
 		return (
 			nativeHistoryTokens +
 			this.#tokenizer.countMessages(archives, options) +
-			this.#tokenizer.countMessages(convertToLlm(rest), options)
+			this.#tokenizer.countMessages(convertToLlm(rest, this.#model), options)
 		);
 	}
 
@@ -5118,14 +5151,13 @@ export class SessionMaintenance {
 		}
 		const archive = snapcompact.getPreservedArchive(staleEntry.preserveData);
 		if (!archive || archive.frames.length <= 1) return undefined;
-		const archiveText = snapcompact.archiveSourceText(archive);
-		if (!archiveText) return undefined;
+		if (!snapcompact.archiveSourceText(archive)) return undefined;
 		const maxFrames = this.#computeSnapcompactRescueMaxFrames(settings, keptTailTokens);
 		if (maxFrames < 1 || maxFrames >= archive.frames.length) return undefined;
 
 		let result: snapcompact.CompactionResult;
 		try {
-			result = await this.#rerenderSnapcompactArchive(staleEntry, archiveText, model, maxFrames);
+			result = await this.#rerenderSnapcompactArchive(staleEntry, model, maxFrames);
 		} catch (error) {
 			logger.warn("Dead-end snapcompact frame rescue failed", {
 				error: error instanceof Error ? error.message : String(error),
@@ -5135,6 +5167,20 @@ export class SessionMaintenance {
 		if (signal.aborted) return undefined;
 		const rebuilt = snapcompact.getPreservedArchive(result.preserveData);
 		if (!rebuilt || rebuilt.frames.length >= archive.frames.length) return undefined;
+		const tokensAfter = this.#projectCompactedContextTokens({
+			summary: result.summary,
+			shortSummary: result.shortSummary,
+			tokensBefore: result.tokensBefore,
+			firstKeptEntryId: result.firstKeptEntryId,
+			preserveData: result.preserveData,
+		});
+		// A text-only rebuild is safe only if the full source fits the recovery target; an unknown window cannot show that.
+		const ctxWindow = model.contextWindow;
+		if (
+			rebuilt.frames.length === 0 &&
+			(!ctxWindow || tokensAfter > COMPACTION_RECOVERY_BAND * resolveThresholdTokens(ctxWindow, settings))
+		)
+			return undefined;
 
 		const rebuiltEntryId = this.#host.sessionManager.appendCompaction(
 			result.summary,
@@ -5145,13 +5191,7 @@ export class SessionMaintenance {
 				details: result.details,
 				preserveData: result.preserveData,
 				method: "snapcompact",
-				tokensAfter: this.#projectCompactedContextTokens({
-					summary: result.summary,
-					shortSummary: result.shortSummary,
-					tokensBefore: result.tokensBefore,
-					firstKeptEntryId: result.firstKeptEntryId,
-					preserveData: result.preserveData,
-				}),
+				tokensAfter,
 			},
 		);
 		this.#host.persistEvalStateContext();
@@ -5194,7 +5234,6 @@ export class SessionMaintenance {
 	 */
 	async #rerenderSnapcompactArchive(
 		entry: CompactionEntry,
-		archiveText: string,
 		model: Model,
 		maxFrames: number,
 	): Promise<snapcompact.CompactionResult> {
@@ -5203,7 +5242,6 @@ export class SessionMaintenance {
 		for (const file of details?.readFiles ?? []) fileOps.read.add(file);
 		for (const file of details?.modifiedFiles ?? []) fileOps.edited.add(file);
 		const shapeSetting = cfgSnapcompactShape.get(this.#host.settings);
-		const shape = snapcompact.resolveShapeForText(archiveText, model, shapeSetting);
 		return await snapcompact.compact(
 			{
 				firstKeptEntryId: entry.firstKeptEntryId,
@@ -5217,7 +5255,7 @@ export class SessionMaintenance {
 			{
 				convertToLlm,
 				model,
-				...(shapeSetting === "auto" ? {} : { shape }),
+				...(shapeSetting === "auto" ? {} : { shape: snapcompact.resolveShape(model, shapeSetting) }),
 				maxFrames,
 				includeThinking: snapcompact.readerIncludesThinking(model),
 			},
@@ -5531,7 +5569,7 @@ export class SessionMaintenance {
 		}
 		let view: snapcompact.ArchiveView;
 		try {
-			const result = await this.#rerenderSnapcompactArchive(entry, archiveText, model, archive.frames.length);
+			const result = await this.#rerenderSnapcompactArchive(entry, model, archive.frames.length);
 			const rendered = snapcompact.getPreservedArchive(result.preserveData);
 			if (!rendered) throw new Error("The re-render produced no archive");
 			// A summary an extension wrote keeps its own words, without reasoning.
@@ -5980,6 +6018,11 @@ export class SessionMaintenance {
 				})) as SessionBeforeCompactResult | undefined;
 
 				if (hookResult?.cancel) {
+					logger.debug("Automatic compaction vetoed by session_before_compact hook", {
+						reason,
+						phase: options.phase,
+						triggerContextTokens: options.triggerContextTokens,
+					});
 					await this.#emitLifecycleEvent(
 						{
 							type: "auto_compaction_end",
@@ -5990,7 +6033,7 @@ export class SessionMaintenance {
 						},
 						options.detachPostCommit === true,
 					);
-					return COMPACTION_CHECK_NONE;
+					return COMPACTION_CHECK_VETOED;
 				}
 
 				if (hookResult?.compaction) {
@@ -6063,8 +6106,8 @@ export class SessionMaintenance {
 			// + a summary message carrying the imaged archive at the reading model's
 			// frame price; #computeSnapcompactMaxFrames sizes the frame cap from the
 			// room under the trigger so the compaction leaves space for new turns
-			// instead of re-firing a few turns later. Any local blocker (unsupported
-			// snapcompact glyphs, kept-history too large, post-render overflow, no room
+			// instead of re-firing a few turns later. Any local blocker (missing
+			// font coverage, kept-history too large, post-render overflow, no room
 			// under the trigger on a threshold pass) advances automatic
 			// maintenance to the next
 			// configured preference instead of wedging the session (#3659). Manual
@@ -6081,12 +6124,11 @@ export class SessionMaintenance {
 				);
 				const shape = renderScan.shape;
 				if (!renderScan.isSafe) {
-					const percent = (renderScan.unrenderableRatio * 100).toFixed(1);
-					logger.warn("Snapcompact disabled: unsupported characters for selected snapcompact font", {
+					logger.warn("Snapcompact disabled: no installed font covers the whole transcript", {
 						model: this.#model?.id,
-						unrenderableRatio: renderScan.unrenderableRatio,
 					});
-					snapcompactBlocker = `snapcompact disabled: unsupported characters for selected snapcompact font (${percent}%); trying the next preferred compaction method.`;
+					snapcompactBlocker =
+						"snapcompact disabled: no installed font covers the whole transcript; trying the next preferred compaction method.";
 				} else {
 					const pendingTokens = options.pendingContextTokens ?? 0;
 					const maxFrames = this.#computeSnapcompactMaxFrames(preparation, effectiveSettings, pendingTokens);
@@ -6876,8 +6918,11 @@ export class SessionMaintenance {
 		if (deadEndWarning) {
 			this.#host.emitNotice("warning", deadEndWarning, "compaction");
 		}
-		if (continuationScheduled) return COMPACTION_CHECK_CONTINUATION;
-		return noProgressDeadEnd ? COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION : COMPACTION_CHECK_NONE;
+		return {
+			continuationScheduled,
+			...(noProgressDeadEnd && !continuationScheduled ? { automaticContinuationBlocked: true } : {}),
+			historyRewritten: true,
+		};
 	}
 
 	/**

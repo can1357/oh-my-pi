@@ -1,0 +1,26 @@
+# Perl corpus: references. Format and regeneration: crates/builtins/src/perl/tests.rs.
+anon-array	my $r=[qw(red blue)]; print ref($r),"|$r->[0]|$r->[1]\n";	ARRAY|red|blue␊
+anon-code	my $r=sub {$_[0]*2}; print ref($r),'|',$r->(3),"\n";	CODE|6␊
+anon-hash	my $r={red=>10}; print ref($r),"|$r->{red}\n";	HASH|10␊
+array-postfix-last	my $r=[qw(red blue)]; print $r->$#*,"\n";	1␊
+array-postfix	my $r=[qw(red blue)]; print join('|',$r->@*),"\n";	red|blue␊
+autovivify-array	my $r; $r->[1][2]=9; print ref($r), '|',ref($r->[1]),"|$r->[1][2]\n";	ARRAY|ARRAY|9␊
+autovivify-hash	my $r; $r->{x}{y}=9; print ref($r), '|',ref($r->{x}),"|$r->{x}{y}\n";	HASH|HASH|9␊
+autovivify-mixed	my %r; $r{x}[2]{y}=9; print ref($r{x}), '|',ref($r{x}[2]),"|$r{x}[2]{y}\n";	ARRAY|HASH|9␊
+autovivify-push	my %r; push @{$r{x}},6,7; print join(',',@{$r{x}}),"\n";	6,7␊
+deref-array	my $a=[1,2,[3,4]]; print $a->[2][1],"\n";	4␊
+deref-complex	my $h={x=>[{a=>7}]}; print $h->{x}->[0]->{a},"\n";	7␊
+different-reference	my ($x,$y)=(4,4); print \$x == \$y ? 1:0,"\n";	0␊
+exists-autovivify	my %r; my $e=exists $r{x}{y}; print $e?1:0,'|',ref($r{x}),"\n";	0|HASH␊
+hash-postfix	my $r={red=>9}; print join('|',$r->%*),"\n";	red|9␊
+ref-array	my @x=(1,2); my $r=\@x; push @$r,3; print "@x\n";	1 2 3␊
+ref-hash	my %x=(a=>1); my $r=\%x; $r->{a}=4; print "$x{a}\n";	4␊
+ref-list	my ($x,$y)=(4,5); my @r=\($x,$y); print ${$r[0]},'|',${$r[1]},"\n";	4|5␊
+ref-ref	my $x=4; my $r=\$x; print ref(\$r),"\n";	REF␊
+same-reference	my $x=4; my $r=\$x; my $s=\$x; print $r==$s?1:0,"\n";	1␊
+scalar-copied-ref	my $x=4; my $r=\$x; my $s=$r; $$s=8; print "$$r\n";	8␊
+scalar-postfix	my $n=7; my $r=\$n; print $r->$*,"\n";	7␊
+scalar-ref-alias	my @a=(1,2,3); my $r=\$a[0]; $$r=12; print "@a\n";	12 2 3␊
+scalar	my $x=4; my $r=\$x; $$r=8; print ref($r),"|$x\n";	SCALAR|8␊
+symbolic-array	our @foo=(3,1); my $s='foo'; print join('|',@$s),"\n";	3|1␊
+symbolic-scalar	our $foo=31; my $s='foo'; print $$s,"\n";	31␊

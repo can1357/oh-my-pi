@@ -1,15 +1,24 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, type Mock, spyOn, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
+import { type KeyEvent, UiNode } from "@oh-my-pi/pi-tui";
 import { bubbleEvent } from "@oh-my-pi/pi-tui/dispatch";
+import type { MouseEvent } from "@oh-my-pi/pi-tui/driver/contract";
+import { memoryTerminal } from "@oh-my-pi/pi-tui/testing/memory-terminal";
 import type { TestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
-import type { ExtensionAskDialogQuestion, ExtensionUIContext } from "../../../src/extensibility/extensions";
+import type {
+	ExtensionAskDialogQuestion,
+	ExtensionOverlayHandle,
+	ExtensionUIContext,
+} from "../../../src/extensibility/extensions";
 import type { ExtensionRows } from "../../../src/extensibility/extensions/render-types";
 import { isSettingsInitialized, Settings } from "../../../src/config/settings";
 import { ExtensionUiController } from "../../../src/modes/controllers/extension-ui-controller";
 import { InputController } from "../../../src/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "../../../src/modes/types";
 import { initTheme } from "../../../src/ui/theme/service";
+import * as externalEditor from "../../../src/utils/external-editor";
 import {
 	disposeProgramStatus,
 	initProgramStatus,
@@ -311,6 +320,41 @@ describe("ExtensionUiController image paste into prompts", () => {
 });
 
 describe("ExtensionUiController editor UI", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("hands the terminal to the external editor from an editor dialog and takes its text back", async () => {
+		const harness = makeHarness();
+		const ui = await harness.init();
+		let suspended = false;
+		harness.ctx.suspend = async run => {
+			suspended = true;
+			try {
+				return await run();
+			} finally {
+				suspended = false;
+			}
+		};
+		let ranSuspended: boolean | undefined;
+		spyOn(externalEditor, "getEditorCommand").mockReturnValue("vim");
+		const openInEditor = spyOn(externalEditor, "openInEditor").mockImplementation(async (_command, text) => {
+			ranSuspended = suspended;
+			return `${text} world`;
+		});
+
+		const pending = ui.editor("Focus", "hello");
+		await flushMicrotasks();
+		harness.term.press("ctrl+g");
+		await flushMicrotasks();
+		expect(openInEditor).toHaveBeenCalledWith("vim", "hello");
+		// omp must not draw over the editor or read its keys while it runs.
+		expect(ranSuspended).toBe(true);
+
+		harness.term.press("ctrl+q");
+		expect(await pending).toBe("hello world");
+	});
+
 	it("pastes and sets the composer's text for extensions", async () => {
 		const harness = makeHarness();
 		const ui = await harness.init();
@@ -433,11 +477,66 @@ describe("ExtensionUiController custom view", () => {
 		await flushMicrotasks();
 		expect(harness.ctx.shell.overlays.open()).toBe(true);
 		expect(onHandle).toHaveBeenCalledTimes(1);
-		const handle = onHandle.mock.calls[0]![0] as { closed: boolean; close(): void };
+		const handle = onHandle.mock.calls[0]![0] as ExtensionOverlayHandle;
 		expect(handle.closed).toBe(false);
+		expect(handle.isFocused()).toBe(true);
+		harness.ctx.shell.focus(harness.composer.field);
+		expect(handle.isFocused()).toBe(false);
 		handle.close();
 		expect(handle.closed).toBe(true);
+		expect(handle.isFocused()).toBe(false);
 		expect(harness.ctx.shell.overlays.open()).toBe(false);
+	});
+
+	it("captures wheel input for a fullscreen canvas and restores terminal mouse reporting on close", async () => {
+		const ctx = createInteractiveModeContext();
+		const term = memoryTerminal({ columns: 40, rows: 10 });
+		await ctx.shell.start({ theme: currentTheme, native: false, driver: term.options });
+		try {
+			const seen: MouseEvent[] = [];
+			const controller = new ExtensionUiController(ctx);
+			const start = term.output.length;
+			const shown = controller.showHookCustom<void>(
+				(_ui, _theme, _keys, done) =>
+					new UiNode("row", {
+						children: [
+							new UiNode("text", { text: "Nav", basis: 4 }),
+							new UiNode("canvas", {
+								basis: 20,
+								paint: () => ["Reader", "Pinned prompt"],
+								onMouse: (event: MouseEvent) => {
+									seen.push(event);
+									return true;
+								},
+							}),
+						],
+						onKey: (key: KeyEvent) => {
+							if (key.id !== "q") return false;
+							done();
+							return true;
+						},
+					}),
+				{ overlay: true, fullscreen: true, mouse: "click" },
+			);
+			await flushMicrotasks();
+			await ctx.shell.nextFrame();
+			expect(term.output.slice(start).join("")).toContain("\x1b[?1000h\x1b[?1006h");
+
+			// The centered two-row view starts at screen row 5; the canvas starts at column 5.
+			term.feed("\x1b[<69;1;6M");
+			term.feed("\x1b[<69;7;6M");
+			expect(seen).toEqual([{ action: "press", button: "wheel-down", row: 1, col: 2, mods: ["shift"] }]);
+
+			const closing = term.output.length;
+			term.feed("q");
+			await shown;
+			await ctx.shell.nextFrame();
+			expect(term.output.slice(closing).join("")).toContain("\x1b[?1000l\x1b[?1006l");
+		} finally {
+			ctx.shell.overlays.closeAll();
+			await ctx.shell.stop();
+			ctx.shell.surface.dispose();
+		}
 	});
 
 	it("rejects when a custom factory fails, leaving the composer in place", async () => {

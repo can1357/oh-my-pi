@@ -25,7 +25,7 @@
  *   (focus moves in; closing restores it).
  * - Working rows keep real state: `working` follows `showWorking` /
  *   `clearWorking` / `ensureWorkingRow` (all `vi.fn`).
- * - Display flags (`toolOutputExpanded`, `hideToolActivity`, `hideThinkingBlock`,
+ * - Display flags (`toolOutputExpanded`, `toolActivity`, `hideThinkingBlock`,
  *   `proseOnlyThinking`, `expandThinkingBlocks`) are signals behind plain
  *   properties ({@link contextDisplay} returns them).
  *
@@ -43,6 +43,7 @@
  * that also import the module-level `settings` need the global initialized.
  */
 import { vi } from "bun:test";
+import type { FigureCell } from "../../src/ui/transcript/figures/svg";
 import { isSettingsInitialized, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings/keybindings";
 import type { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
@@ -51,7 +52,7 @@ import type { MCPServerConnection } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { AppFrame } from "../../src/modes/interactive/frame";
 import { TranscriptPresenter } from "../../src/modes/interactive/transcript";
 import { OAuthManualInputManager } from "@oh-my-pi/pi-coding-agent/modes/oauth-manual-input";
-import { cfgTerminalShowImages } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { cfgTerminalShowImages, type ToolActivityMode } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import type {
 	InteractiveModeContext,
 	PresentOptions,
@@ -268,6 +269,7 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 			}) as unknown as StatusFacts,
 		settings: () => ({}) as StatusLineSettings,
 		refresh: vi.fn(),
+		refreshVcs: vi.fn(),
 		resetActiveTime: vi.fn(),
 		markActivityStart: vi.fn(),
 		markActivityEnd: vi.fn(),
@@ -357,11 +359,11 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 		set toolOutputExpanded(value: boolean) {
 			display.toolOutputExpanded.set(value);
 		},
-		get hideToolActivity() {
-			return display.hideToolActivity();
+		get toolActivity() {
+			return display.toolActivity();
 		},
-		set hideToolActivity(value: boolean) {
-			display.hideToolActivity.set(value);
+		set toolActivity(value: ToolActivityMode) {
+			display.toolActivity.set(value);
 		},
 		get hideThinkingBlock() {
 			return display.hideThinkingBlock();
@@ -420,9 +422,11 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 			present(factory, options);
 		}),
 		flushPendingCommandOutput: vi.fn(),
+		dismissDeferredCommandOutput: vi.fn(() => false),
 		showStatus: vi.fn(),
 		showError: vi.fn(),
 		showWarning: vi.fn(),
+		showActiveModelNotice: vi.fn(),
 		showModelCycleTrack: vi.fn(),
 		showPinnedError: vi.fn(),
 		clearPinnedError: vi.fn(),
@@ -468,11 +472,15 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 			},
 			display: {
 				toolOutputExpanded: display.toolOutputExpanded,
-				hideToolActivity: display.hideToolActivity,
+				toolActivity: display.toolActivity,
 				hideThinking: display.hideThinkingBlock,
 				proseOnlyThinking: display.proseOnlyThinking,
 				expandThinkingBlocks: display.expandThinkingBlocks,
 				showImages: signal(cfgTerminalShowImages.get(contextSettings)),
+				renderSvg: signal(false),
+				renderEmbeds: signal(false),
+				figureCell: signal<FigureCell | undefined>(undefined),
+				figureRows: signal<number | undefined>(undefined),
 				tableCharts: signal(true),
 				shellVisualization: signal(true),
 				mcpMarkdown: signal(false),
@@ -482,7 +490,7 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 			linkTargets: () => getAssistantMessageLinkTargets(built),
 			messages: {
 				expanded: () => display.toolOutputExpanded(),
-				activityVisible: () => !display.hideToolActivity(),
+				activityVisible: () => display.toolActivity() !== "hidden",
 				advisorCollapsedLines: () => 0,
 				renderer: customType => built.viewSession.extensionRunner?.getMessageRenderer(customType),
 				onRenderError: () => {},
@@ -503,7 +511,7 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 /** The display flags behind a fixture context's flag properties. */
 export interface ContextDisplay {
 	readonly toolOutputExpanded: Signal<boolean>;
-	readonly hideToolActivity: Signal<boolean>;
+	readonly toolActivity: Signal<ToolActivityMode>;
 	readonly hideThinkingBlock: Signal<boolean>;
 	readonly proseOnlyThinking: Signal<boolean>;
 	readonly expandThinkingBlocks: Signal<boolean>;
@@ -514,7 +522,7 @@ const displays = new WeakMap<object, ContextDisplay>();
 function createDisplay(): ContextDisplay {
 	return {
 		toolOutputExpanded: signal(false),
-		hideToolActivity: signal(false),
+		toolActivity: signal<ToolActivityMode>("detailed"),
 		hideThinkingBlock: signal(false),
 		proseOnlyThinking: signal(true),
 		expandThinkingBlocks: signal(false),

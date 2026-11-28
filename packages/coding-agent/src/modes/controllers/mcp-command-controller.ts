@@ -426,7 +426,7 @@ export class MCPCommandController {
 								oauth.tokenUrl,
 								oauth.clientId ?? finalConfig.oauth?.clientId ?? "",
 								finalConfig.oauth?.clientSecret ?? "",
-								oauth.scopes ?? "",
+								finalConfig.oauth?.scope?.trim() || oauth.scopes || "",
 								{
 									callbackPort: finalConfig.oauth?.callbackPort,
 									callbackPath: finalConfig.oauth?.callbackPath,
@@ -695,7 +695,10 @@ export class MCPCommandController {
 				status.set(
 					options?.suppressDisconnectedWarning
 						? currentTheme().fg("muted", `◌ Connection check complete for "${name}"`)
-						: currentTheme().fg("warning", `⚠ Could not connect to "${name}" yet`),
+						: currentTheme().fg(
+								"warning",
+								`${currentTheme().symbols.symbol("status.warning")} Could not connect to "${name}" yet`,
+							),
 				);
 			}
 			return state;
@@ -778,7 +781,12 @@ export class MCPCommandController {
 				);
 				lines.push("");
 			} else {
-				lines.push(currentTheme().fg("warning", `⚠ Server added but not yet connected`));
+				lines.push(
+					currentTheme().fg(
+						"warning",
+						`${currentTheme().symbols.symbol("status.warning")} Server added but not yet connected`,
+					),
+				);
 				lines.push(
 					currentTheme().fg(
 						"muted",
@@ -945,7 +953,7 @@ export class MCPCommandController {
 				lines.push("");
 			}
 
-			// Show discovered servers (from .claude.json, .cursor/mcp.json, .vscode/mcp.json, etc.)
+			// Show discovered servers (from .claude/.mcp.json, .codex/config.toml, opencode.json, etc.)
 			if (discoveredServers.length > 0) {
 				for (const { providerName, shortPath, items: entries } of groupBySource(discoveredServers, e => e.source)) {
 					lines.push(currentTheme().fg("accent", providerName) + currentTheme().fg("muted", ` (${shortPath}):`));

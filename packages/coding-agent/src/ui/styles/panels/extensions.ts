@@ -123,12 +123,6 @@ function listRow(
 			else if (!row.enabled) line = theme.fg("dim", line);
 			return truncate(line, width, "…");
 		}
-		case "user-source": {
-			let line = `${check(row.enabled)} ${theme.symbols.symbol("icon.folder")} Load ~/ ${row.providerName} config  ${theme.fg("muted", "(opt-in; project config always loads)")}`;
-			if (selected) line = picked(line);
-			else if (!row.enabled || masterOff) line = theme.fg("dim", line);
-			return truncate(line, width, "…");
-		}
 		case "kind-header": {
 			const line = `${theme.symbols.symbol(row.icon)} ${row.label} ${theme.fg("muted", `(${row.count})`)}`;
 			return truncate(selected ? picked(line) : theme.fg("muted", line), width, "…");

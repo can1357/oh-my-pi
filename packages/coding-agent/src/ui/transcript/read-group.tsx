@@ -11,8 +11,9 @@
  * clamped while folded) instead of a row.
  *
  * Extension presenters may draw a read as a compact row of its own or hide
- * it; a read the user opened draws in full whatever they say. The full reads
- * draw as one group at the first full read's place.
+ * it, and `display.toolActivity: concise` draws each read as its concise
+ * activity row; a read the user opened draws in full whatever they say. The
+ * full reads draw as one group at the first full read's place.
  *
  * Terminal look: `read-group` (`src/ui/styles/transcript/read-group.ts`), fed by {@link ReadGroupTerm}.
  */
@@ -26,7 +27,9 @@ import type { ReadToolDetails } from "../../tools/details/read";
 import { shortenPath } from "../../utils/render-utils";
 import { fileHref } from "../tools/file-common";
 import { ContentCode, firstSelectorLine, readLinkPath, splitTarget } from "../tools/read";
-import type { ToolPresentation } from "./tool-block";
+import { presenterRows } from "./figures/presented-block";
+import type { HubRecentLine } from "../styles/pickers/agent-hub";
+import { type CompactRow, conciseActivityLine, type ToolPresentation } from "./tool-block";
 
 /** A read's state in the group. */
 export type ReadStatus = "pending" | "success" | "warning" | "error";
@@ -76,6 +79,8 @@ export interface ReadEntry {
 	};
 	/** The user opened it: it draws in full, its preview unclamped. */
 	readonly expanded: boolean;
+	/** Wall-clock ms the model made the call (its concise row's clock). */
+	readonly timestamp: number;
 }
 
 /** How extension presenters draw a read (`undefined`: in full). */
@@ -295,8 +300,12 @@ function rowSplit(row: SummaryRow): { path: string; sel?: string } {
 
 /** The failure message of a row's failed read, `Error:` dropped. */
 function rowError(row: SummaryRow): string {
-	const failed = row.targets.find(target => target.entry.status === "error")?.entry;
-	return (failed?.contentText ?? "").replace(/^Error:\s*/, "").trim() || "Read failed";
+	return entryError(row.targets.find(target => target.entry.status === "error")?.entry);
+}
+
+/** The failure message of a failed read, `Error:` dropped. */
+function entryError(entry: ReadEntry | undefined): string {
+	return (entry?.contentText ?? "").replace(/^Error:\s*/, "").trim() || "Read failed";
 }
 
 /** Whether a read previews as rendered Markdown (tagged Markdown, not asked raw). */
@@ -399,12 +408,17 @@ export class ReadGroup {
 	};
 	readonly activityVisible: Accessor<boolean> = () => this.#activityVisible();
 	readonly sealed: Accessor<boolean> = () => this.#sealed();
+	/** Every read draws compact or hidden: the group's block packs against compact neighbours. */
+	readonly compact: Accessor<boolean> = computed(() => {
+		const entries = this.#entries();
+		return entries.length > 0 && entries.every(entry => this.presentation(entry) !== "full");
+	});
 
 	#update(id: string, change: (entry: ReadEntry) => ReadEntry): void {
 		this.#entries.set(this.#entries().map(entry => (entry.id === id ? change(entry) : entry)));
 	}
 
-	/** A read's args streamed in (adds the read when new). */
+	/** A read's args streamed in (adds the read when new, made at `timestamp`, default now). */
 	updateArgs(
 		args: {
 			readonly path?: unknown;
@@ -412,6 +426,7 @@ export class ReadGroup {
 			readonly raw?: unknown;
 		},
 		id: string,
+		timestamp?: number,
 	): void {
 		const raw = typeof args.file_path === "string" ? args.file_path : typeof args.path === "string" ? args.path : "";
 		const fields = {
@@ -432,7 +447,10 @@ export class ReadGroup {
 		const entries = this.#entries();
 		// A read joining an open group opens too.
 		const expanded = entries.length === 0 ? this.#expanded() : entries.some(entry => entry.expanded);
-		this.#entries.set([...entries, { id, status: "pending", expanded, ...fields }]);
+		this.#entries.set([
+			...entries,
+			{ id, status: "pending", expanded, timestamp: timestamp ?? Date.now(), ...fields },
+		]);
 	}
 
 	/** Re-key a read whose streamed id changed (order kept; no-op on a collision). */
@@ -693,10 +711,13 @@ export type ReadGroupTerm = {
 	/** A presenter's compact row of one read. */
 	readonly presented?: {
 		readonly status: ReadStatus;
+		/** The read's concise row (`display.toolActivity: concise`). */
+		readonly activityLine?: HubRecentLine;
 		/** The presenter's label, else the read's path after `Read`. */
-		readonly label?: string;
+		readonly label?: TspText;
 		readonly path: string;
-		readonly rows: readonly string[];
+		/** The presenter's rows as `presenterRows` spans. */
+		readonly rows: readonly TspSpan[];
 	};
 	/** Every displayed row (rows 0: ` • Read`; one: `Read <path>`; several: `Read (N)` and a tree). */
 	readonly count?: number;
@@ -841,10 +862,9 @@ interface GroupNodeProps {
 	readonly nodeKey?: string;
 	readonly hidden?: boolean;
 	/** A presenter's compact presentation of the (single) read. */
-	readonly compact?: {
-		readonly label?: string;
-		readonly rows?: readonly string[];
-	};
+	readonly compact?: CompactRow;
+	/** The (single) read's concise row. */
+	readonly activityLine?: HubRecentLine;
 	readonly onToggle: (collapsed: boolean) => void;
 }
 
@@ -938,7 +958,7 @@ function GroupNode(props: GroupNodeProps): JSXNode {
 		}
 	}
 	const compact = props.compact;
-	const term = groupTerm(group, entries, compact);
+	const term = groupTerm(group, entries, compact, props.activityLine);
 	if (compact) {
 		const compactRows = compact.rows ?? [];
 		return (
@@ -962,14 +982,7 @@ function GroupNode(props: GroupNodeProps): JSXNode {
 				term={term}
 				onToggle={props.onToggle}
 			>
-				{compactRows.length > 0 ? (
-					<text
-						spans={compactRows.flatMap((row, i) => (i === 0 ? [{ t: row }] : [{ t: "\n" }, { t: row }]))}
-						wrap="none"
-					/>
-				) : (
-					body
-				)}
+				{compactRows.length > 0 ? <text spans={presenterRows(compactRows)} wrap="none" /> : body}
 			</tool>
 		);
 	}
@@ -1003,7 +1016,8 @@ function GroupNode(props: GroupNodeProps): JSXNode {
 function groupTerm(
 	group: ReadGroup,
 	entries: readonly ReadEntry[],
-	compact: { readonly label?: string; readonly rows?: readonly string[] } | undefined,
+	compact: CompactRow | undefined,
+	activityLine: HubRecentLine | undefined,
 ): ReadGroupTerm {
 	if (compact) {
 		const entry = entries[0]!;
@@ -1011,9 +1025,10 @@ function groupTerm(
 			look: "read-group",
 			presented: {
 				status: entry.status,
+				...(activityLine ? { activityLine } : {}),
 				...(compact.label !== undefined ? { label: compact.label } : {}),
 				path: shortenPath(entry.path),
-				rows: compact.rows ?? [],
+				rows: presenterRows(compact.rows ?? []),
 			},
 		};
 	}
@@ -1072,6 +1087,18 @@ function groupTerm(
 	};
 }
 
+/** A read's concise row: a still-pending read of a sealed group was cancelled. */
+function readActivityLine(group: ReadGroup, entry: ReadEntry): HubRecentLine {
+	const error = entry.status === "error";
+	return conciseActivityLine({
+		name: "read",
+		args: entry.args,
+		timestamp: entry.timestamp,
+		status: entry.status === "pending" ? (group.sealed() ? "aborted" : "pending") : error ? "error" : "success",
+		...(error ? { error: entryError(entry) } : {}),
+	});
+}
+
 /** The group's block: one `tool` when every read draws in full, else a column of compact reads and the full group. */
 export function ReadGroupBlock(props: { readonly group: ReadGroup }): Accessor<JSXNode> {
 	const { group } = props;
@@ -1099,6 +1126,7 @@ export function ReadGroupBlock(props: { readonly group: ReadGroup }): Accessor<J
 						entries={[entry]}
 						nodeKey={`c${entry.id}`}
 						compact={spec}
+						{...(presentation === "concise" ? { activityLine: readActivityLine(group, entry) } : {})}
 						onToggle={toggle(`c${entry.id}`)}
 					/>,
 				);

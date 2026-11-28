@@ -15,7 +15,6 @@ Budget:
 Autonomous continuation; objective persists across turns. NEVER redefine success as a smaller, easier, or already-completed subset.
 
 Before `goal({op:"complete"})`, MUST audit current repo state:
-
 1. Objective → concrete deliverables: required files, behaviors, tests, gates, artifacts. Record in todo or reasoning.
 2. Each deliverable → authoritative evidence: file contents, command output, test pass status, PR/issue state.
 3. Inspect actual current state: read files; run commands/tests. NEVER rely on earlier-session memory — repo may have changed.

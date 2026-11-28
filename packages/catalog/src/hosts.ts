@@ -65,7 +65,10 @@ export const KNOWN_HOSTS = {
 	nvidia: { providers: ["nvidia"], urlMarkers: ["integrate.api.nvidia.com"] },
 	/** Venice AI (`api.venice.ai`). OpenAI-compatible; drives reasoning via top-level `reasoning_effort` (and `venice_parameters.disable_thinking`), and rejects DashScope's top-level `enable_thinking` with a 400 (`additionalProperties: false` request schema). */
 	venice: { providers: ["venice"], urlMarkers: ["api.venice.ai"] },
-	moonshotNative: { providers: ["moonshot", "kimi-code"], urlMarkers: ["api.moonshot.ai", "api.kimi.com"] },
+	moonshotNative: {
+		providers: ["moonshot", "kimi-code", "kimi-code-global"],
+		urlMarkers: ["api.moonshot.ai", "api.kimi.com", "api.kimi.ai"],
+	},
 	/** Google AI Studio's OpenAI-compatible shim (`/v1beta/openai`) — a subset of chat-completions; rejects `store` with a 400. Native Gemini uses `google-generative-ai` api instead. */
 	googleAistudio: { providers: [], urlMarkers: ["generativelanguage.googleapis.com"] },
 	opencode: { providers: ["opencode-go", "opencode-zen"], urlMarkers: ["opencode.ai"] },
@@ -109,20 +112,42 @@ export function hostMatchesUrl(baseUrl: string | undefined, host: KnownHost): bo
 	return false;
 }
 
-/** Provider-or-URL host check — the canonical `provider === id || baseUrl.includes(marker)` idiom. */
-export function modelMatchesHost(model: { provider: string; baseUrl: string }, host: KnownHost): boolean {
-	const spec: HostClassSpec = KNOWN_HOSTS[host];
+function matchesProvider(id: string, spec: HostClassSpec): boolean {
 	if (spec.providers) {
 		for (const provider of spec.providers) {
-			if (model.provider === provider) return true;
+			if (id === provider) return true;
 		}
 	}
 	if (spec.providerPrefixes) {
 		for (const prefix of spec.providerPrefixes) {
-			if (model.provider.startsWith(prefix)) return true;
+			if (id.startsWith(prefix)) return true;
 		}
 	}
-	return hostMatchesUrl(model.baseUrl, host);
+	return false;
+}
+
+/** Provider-or-URL host check — the canonical `provider === id || baseUrl.includes(marker)` idiom. */
+export function modelMatchesHost(model: { provider: string; baseUrl: string }, host: KnownHost): boolean {
+	return matchesProvider(model.provider, KNOWN_HOSTS[host]) || hostMatchesUrl(model.baseUrl, host);
+}
+
+function classifyHostClasses<K extends KnownHost>(
+	classes: Record<K, HostClassSpec>,
+	provider: string,
+	baseUrl: string,
+) {
+	const url: Record<K, boolean> = Object.create(null);
+	const model: Record<K, boolean> = Object.create(null);
+	for (const host in classes) {
+		url[host] = hostMatchesUrl(baseUrl, host);
+		model[host] = url[host] || matchesProvider(provider, classes[host]);
+	}
+	return { url, model };
+}
+
+/** Resolve both forms of host classification together when building a provider's compatibility baseline. */
+export function classifyEndpointHosts(provider: string, baseUrl: string) {
+	return classifyHostClasses(KNOWN_HOSTS, provider, baseUrl);
 }
 
 function includesAsciiCaseInsensitive(value: string, lowerNeedle: string): boolean {
@@ -174,11 +199,6 @@ export function isVertexRawPredictUrl(baseUrl: string): boolean {
  */
 export function isVertexAnthropicRawPredictUrl(baseUrl: string): boolean {
 	return baseUrl.includes("/publishers/anthropic/") && isVertexRawPredictUrl(baseUrl);
-}
-
-/** Azure OpenAI deployment-scoped path (`…/deployments/<name>/…`). */
-export function isAzureDeploymentsUrl(baseUrl: string): boolean {
-	return baseUrl.includes("/deployments/");
 }
 
 // Bedrock inference endpoints, per AWS's endpoint and PrivateLink docs:

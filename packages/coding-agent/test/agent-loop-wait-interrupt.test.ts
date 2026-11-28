@@ -200,26 +200,29 @@ describe("agent-loop wait wake delivery", () => {
 		};
 		if (needsCoordinator) {
 			const claim = SpeculativeOperationCoordinator.prototype.claim;
-			vi.spyOn(SpeculativeOperationCoordinator.prototype, "claim").mockImplementation(
-				async function (this: SpeculativeOperationCoordinator, tool, toolCall, args) {
-					const outcome = await claim.call(this, tool, toolCall, args);
-					if (tool !== wait) return outcome;
-					if (options.cancel === "claim") {
-						cancelBeforeExecute();
-					} else {
-						this.registerStreamSession(toolCall.id, {
-							update() {},
-							finalize() {},
-							commit() {},
-							async discard() {
-								await Promise.resolve();
-								cancelBeforeExecute();
-							},
-						});
-					}
-					return outcome;
-				},
-			);
+			vi.spyOn(SpeculativeOperationCoordinator.prototype, "claim").mockImplementation(async function (
+				this: SpeculativeOperationCoordinator,
+				tool,
+				toolCall,
+				args,
+			) {
+				const outcome = await claim.call(this, tool, toolCall, args);
+				if (tool !== wait) return outcome;
+				if (options.cancel === "claim") {
+					cancelBeforeExecute();
+				} else {
+					this.registerStreamSession(toolCall.id, {
+						update() {},
+						finalize() {},
+						commit() {},
+						async discard() {
+							await Promise.resolve();
+							cancelBeforeExecute();
+						},
+					});
+				}
+				return outcome;
+			});
 		}
 		let pausedBeforeExecute = false;
 		const mock = createMockModel({

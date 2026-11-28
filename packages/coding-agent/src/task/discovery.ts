@@ -21,7 +21,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
-import { isProviderEnabled, isUserSourceEnabled } from "../capability";
+import { isProviderEnabled } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { findAllNearestProjectConfigDirs, getConfigDirs } from "../config";
 import { pluginUsesClaudeModelDialect } from "../discovery/agent-plugin-format";
@@ -33,7 +33,19 @@ import { loadBundledAgents, parseAgent } from "./agents";
 import type { AgentSource } from "./task-details";
 import type { AgentDefinition } from "./types";
 
-const TASK_AGENT_CONFIG_SOURCE = ".omp";
+const enum PluginAgentSources {
+	None = 0,
+	OmpPackages = 1,
+	ClaudeMarketplace = 2,
+}
+
+/** Snapshot the provider switches that affect the task agent roster. */
+export function getAgentDiscoverySources(): PluginAgentSources {
+	return (
+		(isProviderEnabled("omp-plugins") ? PluginAgentSources.OmpPackages : PluginAgentSources.None) |
+		(isProviderEnabled("claude-plugins") ? PluginAgentSources.ClaudeMarketplace : PluginAgentSources.None)
+	);
+}
 
 /** Result of agent discovery */
 export interface DiscoveryResult {
@@ -108,27 +120,25 @@ async function loadAgentsFromDir({
  * @param cwd - Current working directory for project agent discovery
  * @param home - Home directory for user and marketplace discovery
  * @param extensionRoots - Session-local extension roots (explicit + mode + configured)
+ * @param sources - Provider switches captured by the caller when keying a shared scan
  */
 export async function discoverAgents(
 	cwd: string,
 	home: string = os.homedir(),
 	extensionRoots?: EffectiveExtensionRoots,
+	sources = getAgentDiscoverySources(),
 ): Promise<DiscoveryResult> {
 	const resolvedCwd = path.resolve(cwd);
 
-	const userDirs = getConfigDirs("agents", { project: false })
-		.filter(entry => entry.source === TASK_AGENT_CONFIG_SOURCE)
-		.map(entry => ({
-			...entry,
-			path: path.resolve(entry.path),
-		}));
+	const userDirs = getConfigDirs("agents", { project: false }).map(entry => ({
+		...entry,
+		path: path.resolve(entry.path),
+	}));
 
-	const projectDirs = findAllNearestProjectConfigDirs("agents", resolvedCwd)
-		.filter(entry => entry.source === TASK_AGENT_CONFIG_SOURCE)
-		.map(entry => ({
-			...entry,
-			path: path.resolve(entry.path),
-		}));
+	const projectDirs = findAllNearestProjectConfigDirs("agents", resolvedCwd).map(entry => ({
+		...entry,
+		path: path.resolve(entry.path),
+	}));
 
 	const orderedDirs: AgentDirectory[] = [];
 	const project = projectDirs[0];
@@ -138,40 +148,28 @@ export async function discoverAgents(
 
 	// Extension-package agents use the same effective root set as sibling
 	// skills/hooks/tools, threaded whole so explicit roots and mode survive.
-	const packageRoots = isProviderEnabled("omp-plugins")
+	const packageRoots = sources & PluginAgentSources.OmpPackages
 		? await listOmpExtensionRoots({ cwd: resolvedCwd, home, repoRoot: null, extensionRoots })
 		: [];
 	for (const root of packageRoots) {
 		orderedDirs.push({ dir: path.join(root.path, "agents"), source: root.level });
 	}
 
-	// Load agents from Claude Code marketplace plugins (respects disabledProviders and opt-in).
-	// User-scope roots whose origin is not the foreign ~/.claude/plugins tree (omp's own
-	// installs and `--plugin-dir` roots) survive the claude-plugins opt-in gate, mirroring
-	// isSourceEnabled in extensibility/skills.ts (#10743). Without this, `--plugin-dir` and
-	// omp-installed agents are dropped at user scope whenever the Claude source is disabled.
-	const claudePluginsUserEnabled = isUserSourceEnabled("claude-plugins") || isUserSourceEnabled("claude");
-	const { roots: pluginRoots } = isProviderEnabled("claude-plugins")
+	// Load agents from marketplace plugins (respects disabledProviders).
+	const { roots: pluginRoots } = sources & PluginAgentSources.ClaudeMarketplace
 		? await listClaudePluginRoots(home, resolvedCwd)
 		: { roots: [] };
-	const filteredPluginRoots = pluginRoots.filter(
-		r => r.scope === "project" || claudePluginsUserEnabled || r.origin !== "claude",
-	);
-	const sortedPluginRoots = [...filteredPluginRoots].sort((a, b) => {
+	const sortedPluginRoots = [...pluginRoots].sort((a, b) => {
 		if (a.scope === b.scope) return 0;
 		return a.scope === "project" ? -1 : 1;
 	});
 	const pluginClaudeDialect = await Promise.all(
 		// The `model:` and `tools:` dialect follows the plugin's declared manifest,
-		// not the registry that supplied it: foreign Claude roots (origin "claude")
-		// always use Claude aliases, and an omp-installed or --plugin-dir root can
-		// still ship a `.claude-plugin` package. Claude-dialect frontmatter is
-		// translated so its aliases and tool names are not misread as OMP ones
-		// (#7966); OMP-native and Agent-Plugins-standard plugin agents keep theirs
-		// (#12028).
-		sortedPluginRoots.map(
-			async plugin => plugin.origin === "claude" || (await pluginUsesClaudeModelDialect(plugin.path)),
-		),
+		// not the registry that supplied it: an omp-installed or --plugin-dir root can
+		// ship a `.claude-plugin` package. Claude-dialect frontmatter is translated so
+		// its aliases and tool names are not misread as OMP ones (#7966); OMP-native
+		// and Agent-Plugins-standard plugin agents keep theirs (#12028).
+		sortedPluginRoots.map(plugin => pluginUsesClaudeModelDialect(plugin.path)),
 	);
 	sortedPluginRoots.forEach((plugin, index) => {
 		orderedDirs.push({

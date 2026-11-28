@@ -18,6 +18,7 @@ import {
 	isCompiledBinary,
 	isEnoent,
 	logger,
+	pathIsWithinLexical,
 	VERSION,
 	WhichCachePolicy,
 } from "@oh-my-pi/pi-utils";
@@ -40,7 +41,7 @@ import {
 	fetchBuild,
 	type UpdateChannel,
 } from "./build-service";
-import { managedInstallName } from "./managed-install";
+import { isSourceCheckout, managedInstallName } from "./managed-install";
 import {
 	DEFAULT_NPM_REGISTRY,
 	loadNpmRegistryResolver,
@@ -51,6 +52,8 @@ import {
 
 import { cfgUpdateChannel } from "../modes/settings";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+export { isSourceCheckout };
 
 const PACKAGE = "@oh-my-pi/pi-coding-agent";
 const HOMEBREW_FORMULA = "can1357/tap/omp";
@@ -218,29 +221,6 @@ export interface BinaryReplacementOptions {
 	verifyInstalledVersion: (expectedVersion: string) => Promise<InstalledVersionVerification>;
 }
 
-/**
- * Parse update subcommand arguments.
- * Returns undefined if not an update command.
- */
-export function parseUpdateArgs(
-	args: string[],
-): { force: boolean; check: boolean; plugins: boolean; channel?: UpdateChannel } | undefined {
-	if (args.length === 0 || args[0] !== "update") {
-		return undefined;
-	}
-
-	const canary = args.includes("--canary");
-	const stable = args.includes("--stable");
-	if (canary && stable) throw new Error("--canary and --stable are mutually exclusive");
-
-	return {
-		force: args.includes("--force") || args.includes("-f"),
-		check: args.includes("--check") || args.includes("-c"),
-		plugins: args.includes("--plugins") || args.includes("-l"),
-		channel: canary ? "canary" : stable ? "stable" : undefined,
-	};
-}
-
 async function getBunGlobalBinDir(): Promise<string | undefined> {
 	if (!$which("bun")) return undefined;
 	try {
@@ -321,16 +301,6 @@ function tryRealpath(p: string): string | undefined {
 }
 
 /**
- * Whether this omp runs from a source checkout (the dev launcher or a `bun link` of
- * `src/cli.ts`) rather than a compiled binary or a package-manager install, which
- * always lives under `node_modules`. Checkouts update through git, so update
- * prompts are noise there.
- */
-export function isSourceCheckout(): boolean {
-	return !isCompiledBinary() && !import.meta.dir.split(path.sep).includes("node_modules");
-}
-
-/**
  * Whether the running omp may install its own updates: not a source checkout
  * (git updates it), not kept by a managing app (Tern updates its omp itself),
  * and not in the Nix store. Judged from the running build alone, without the
@@ -368,8 +338,7 @@ function bunShimMarkerPath(launcherPath: string): string {
 function isPathInDirectoryLexical(filePath: string, directoryPath: string): boolean {
 	const normalizedPath = normalizePathForComparison(path.resolve(filePath));
 	const normalizedDirectory = normalizePathForComparison(path.resolve(directoryPath));
-	const relativePath = path.relative(normalizedDirectory, normalizedPath);
-	return relativePath === "" || (!relativePath.startsWith("..") && !path.isAbsolute(relativePath));
+	return pathIsWithinLexical(normalizedDirectory, normalizedPath);
 }
 
 function isPathInDirectory(filePath: string, directoryPath: string): boolean {
@@ -2367,29 +2336,4 @@ export async function runUpdateCommand(opts: UpdateOptions): Promise<UpdateOutco
 	} finally {
 		lock?.release();
 	}
-}
-
-/**
- * Print update command help.
- */
-export function printUpdateHelp(): void {
-	console.log(`${chalk.bold(`${APP_NAME} update`)} - Check for and install updates
-
-${chalk.bold("Usage:")}
-  ${APP_NAME} update [options]
-
-${chalk.bold("Options:")}
-  -c, --check     Check for updates without installing
-  -f, --force     Force reinstall even if up to date
-  -l, --plugins   Update installed plugins
-  --canary        Switch to the canary channel and update
-  --stable        Switch back to the stable channel
-
-${chalk.bold("Examples:")}
-  ${APP_NAME} update              Update to latest version
-  ${APP_NAME} update --check      Check if updates are available
-  ${APP_NAME} update --force      Force reinstall
-  ${APP_NAME} update -l           Update installed plugins
-  ${APP_NAME} update --canary    Switch to the canary channel and update
-`);
 }
