@@ -405,13 +405,14 @@ export async function applyWorkspaceEdit(
 		}
 		// A text edit after a resource operation on its path starts from content no record explains,
 		// such as an overwrite's empty file: journaled, its new lines would be preselected while the
-		// removal of the old ones belonged to nobody. Paths compare as paths, so equivalent URI
-		// spellings of one file match.
+		// removal of the old ones belonged to nobody. Paths compare as the filesystem targets the
+		// operations wrote, so equivalent URI spellings and links to one file match.
 		const resourcePaths: string[] = [];
 		for (const op of ops) {
 			if (op.kind === "text") {
 				const filePath = uriToFile(op.uri);
-				const afterResource = resourcePaths.some(root => pathIsWithinLexical(root, filePath));
+				const target = (await resolveSyscallTarget(filePath, true)) ?? filePath;
+				const afterResource = resourcePaths.some(root => pathIsWithinLexical(root, target));
 				await applyTextEdits(filePath, op.edits, afterResource ? undefined : onFileChange);
 				applied.push(`Applied ${op.edits.length} edit(s) to ${formatPathRelativeToCwd(filePath, cwd)}`);
 				record({ kind: "edit", uri: op.uri });
@@ -433,7 +434,7 @@ export async function applyWorkspaceEdit(
 				}
 				applied.push(`Created ${formatPathRelativeToCwd(filePath, cwd)}`);
 				record({ kind: "create", uri: op.uri });
-				resourcePaths.push(filePath);
+				resourcePaths.push((await resolveSyscallTarget(filePath, true)) ?? filePath);
 			} else if (op.kind === "rename") {
 				const oldPath = uriToFile(op.oldUri);
 				const newPath = uriToFile(op.newUri);
@@ -495,7 +496,10 @@ export async function applyWorkspaceEdit(
 				}
 				applied.push(`Renamed ${formatPathRelativeToCwd(oldPath, cwd)} → ${formatPathRelativeToCwd(newPath, cwd)}`);
 				record({ kind: "rename", oldUri: op.oldUri, newUri: op.newUri });
-				resourcePaths.push(oldPath, newPath);
+				resourcePaths.push(
+					(await resolveSyscallTarget(oldPath, false)) ?? oldPath,
+					(await resolveSyscallTarget(newPath, false)) ?? newPath,
+				);
 			} else {
 				const filePath = uriToFile(op.uri);
 				try {
@@ -511,7 +515,7 @@ export async function applyWorkspaceEdit(
 				}
 				applied.push(`Deleted ${formatPathRelativeToCwd(filePath, cwd)}`);
 				record({ kind: "delete", uri: op.uri });
-				resourcePaths.push(filePath);
+				resourcePaths.push((await resolveSyscallTarget(filePath, false)) ?? filePath);
 			}
 		}
 	} else if (edit.changes) {

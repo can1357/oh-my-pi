@@ -343,6 +343,37 @@ describe("workspace edit recorder", () => {
 		expect(recorded).toEqual([{ path: plain, before: "oldName;\n", after: "newName;\n" }]);
 	});
 
+	it("leaves a text edit of a link's target unjournaled after an overwrite through the link", async () => {
+		const target = path.join(dir, "target.ts");
+		const link = path.join(dir, "link.ts");
+		await Bun.write(target, "const oldName = 1;\n");
+		await fs.symlink(target, link);
+		const recorded: WorkspaceFileChange[] = [];
+
+		await applyWorkspaceEdit(
+			{
+				documentChanges: [
+					{ kind: "create", uri: fileToUri(link), options: { overwrite: true } },
+					{
+						textDocument: { uri: fileToUri(target), version: null },
+						edits: [
+							{
+								range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+								newText: "const newName = 1;\n",
+							},
+						],
+					},
+				],
+			},
+			dir,
+			undefined,
+			change => recorded.push(change),
+		);
+
+		expect(await Bun.file(target).text()).toBe("const newName = 1;\n");
+		expect(recorded).toEqual([]);
+	});
+
 	it("keeps the executed prefix in the recorder but omits skipped and failed operations", async () => {
 		const edited = path.join(dir, "nonempty", "source.ts");
 		const target = path.join(dir, "target.ts");
