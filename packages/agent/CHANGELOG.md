@@ -16,7 +16,7 @@
 ### Added
 
 - Added `CompactionSettings.summaryMaxTokens` to set the output budget for regular compaction summaries; history that fits alongside the actual previous summary and requested output is retained ([#18688](https://github.com/can1357/oh-my-pi/issues/18688))
-- Added `SupersedePruneConfig.dedupeIdentical`: `pruneSupersededToolResults()` blanks older copies of a tool result that a later turn's identical call (same tool, same arguments, byte-identical content) returned again, writing `dedupedNotice()`; results under `MIN_DEDUPE_TOKENS` are kept. A top-level `i` may differ between the copies only where the agent loop stripped it as harness intent, which it now records per call as `ToolCall.intentStripped`; a schema-owned `i` stays part of the call even after the tool's schema changes ([#20925](https://github.com/can1357/oh-my-pi/pull/20925) by [@Xytronix](https://github.com/Xytronix))
+- Added `SupersedePruneConfig.dedupeIdentical` to blank older copies of a tool result that a later identical call returned again, writing `dedupedNotice()`; results under `MIN_DEDUPE_TOKENS` are kept ([#20925](https://github.com/can1357/oh-my-pi/pull/20925) by [@Xytronix](https://github.com/Xytronix))
 
 ### Changed
 
