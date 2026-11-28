@@ -17,3 +17,6 @@ export const SUBAGENT_WORKER_ARG = "__omp_worker_subagent";
 export const STATS_ACTIVITY_WORKER_ARG = "__omp_worker_stats_activity";
 /** Transcript-index worker selector shared by the CLI dispatcher and `transcript-index-client.ts`. */
 export const TRANSCRIPT_INDEX_WORKER_ARG = "__omp_worker_transcript_index";
+
+/** Verifies statically linked N-API registration in a fresh worker environment. */
+export const LINKED_NATIVE_WORKER_ARG = "__omp_worker_linked_native_smoke";

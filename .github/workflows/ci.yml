@@ -113,6 +113,7 @@ jobs:
       runs-on: ubuntu-22.04
       outputs:
          is-release: ${{ steps.detect.outputs.is-release }}
+         runtime-matrix: ${{ steps.runtimes.outputs.matrix }}
          release-tag: ${{ steps.detect.outputs.release-tag }}
          # Canary tags publish to npm's canary dist-tag (derived script-side), mark
          # the GitHub release prerelease, and skip the stable-only brew tap.
@@ -155,7 +156,27 @@ jobs:
                 echo "release-tag=$release_tag"
                 echo "channel=$channel"
               } >> "$GITHUB_OUTPUT"
-
+         - name: Select linked runtime builders
+           id: runtimes
+           env:
+              IS_RELEASE: ${{ steps.detect.outputs.is-release }}
+              # Only the local Linux install test consumes a template on non-release
+              # runs. On release its very same artifact also feeds standalone packaging.
+              TARGETS: |
+                 [
+                   {"target_id":"linux-x64","os":"ubuntu-22.04","triple":"x86_64-unknown-linux-gnu"},
+                   {"target_id":"linux-arm64","os":"ubuntu-24.04-arm","triple":"aarch64-unknown-linux-gnu"},
+                   {"target_id":"linux-musl-x64","os":"ubuntu-22.04","triple":"x86_64-unknown-linux-musl"},
+                   {"target_id":"linux-musl-arm64","os":"ubuntu-24.04-arm","triple":"aarch64-unknown-linux-musl"},
+                   {"target_id":"darwin-x64","os":"macos-15-intel","triple":"x86_64-apple-darwin"},
+                   {"target_id":"darwin-arm64","os":"xcode-27","triple":"aarch64-apple-darwin"},
+                   {"target_id":"win32-x64","os":"windows-2025","triple":"x86_64-pc-windows-msvc"},
+                   {"target_id":"win32-arm64","os":"windows-11-arm","triple":"aarch64-pc-windows-msvc"}
+                 ]
+           run: |
+              matrix="$(jq -c '{include: map(select(env.IS_RELEASE == "true" or .target_id == "linux-x64"))}' <<< "$TARGETS")"
+              echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+ 
    check:
       name: Lint, type check & web build
       runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'vmon-large/from=omp-ci' }}
@@ -686,18 +707,28 @@ jobs:
    install_methods:
       name: Install method smoke tests
       runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'vmon-large/from=omp-ci' }}
-      needs: [native_addons]
-      if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
+      needs: [native_addons, linked_runtime]
+      if: ${{ !cancelled() && needs.native_addons.result == 'success' && needs.linked_runtime.result == 'success' }}
       steps:
          - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+           with:
+              persist-credentials: false
          - uses: ./.github/actions/bun-install
          - uses: ./.github/actions/native-artifacts
            with:
               targets: linux-x64-baseline linux-x64-modern
+         - name: Download linked runtime for binary install smoke
+           uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+           with:
+              name: linked-runtime-linux-x64
+              path: linked-runtime
          - name: Install method smoke tests
            env:
               OMP_INSTALL_TEST_SKIP_NATIVE_BUILD: "1"
-           run: bun run ci:test:install-methods
+              BUN_COMPILE_EXECUTABLE_PATH: ${{ github.workspace }}/linked-runtime/bun
+           run: |
+              chmod +x "$BUN_COMPILE_EXECUTABLE_PATH"
+              bun run ci:test:install-methods
 
    # Aggregates every validation job so publish-side release jobs gate on one
    # result. Binary BUILDS deliberately do not wait for this gate — they run
@@ -728,74 +759,194 @@ jobs:
            run: bun scripts/gen-clippy-bazelrc.ts --check
          - run: echo "release validation green"
 
-   # Builds (does not publish) every release binary on one Linux x64 image in
-   # parallel with the test fan-out; the needs are the two native_addons jobs,
-   # whose artifacts supply their addons. bun cross-compiles every target;
-   # macOS binaries are Developer ID signed and notarized here too
-   # (rcodesign). release_smoke then runs each binary on its own platform.
-   # Publishing (npm leaves, GitHub release, build.stencil.so, core npm) is gated on
-   # release_gate downstream.
+   # Bun's object files are produced outside this workflow. A cold job fetches
+   # the immutable target kit, compiles pi-natives and runs the final linker.
+   # Never build Bun here, even on a native source change or cache miss.
+   linked_runtime:
+      name: "Link runtime: ${{ matrix.target_id }}"
+      needs: [release_metadata]
+      strategy:
+         fail-fast: false
+         matrix: ${{ fromJSON(needs.release_metadata.outputs.runtime-matrix) }}
+      runs-on: ${{ matrix.os }}
+      env:
+         # Bound Cargo and the addon's native CMake dependencies on small VMs.
+         CMAKE_BUILD_PARALLEL_LEVEL: "2"
+         CARGO_BUILD_JOBS: "2"
+         # A public HTTPS mirror, not a credential. The resolver verifies the
+         # committed size and digest even when the kit came from actions/cache.
+         OMP_BUN_KIT_BASE_URL: ${{ vars.OMP_BUN_KIT_BASE_URL }}
+      steps:
+         - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+           with:
+              persist-credentials: false
+         - name: Restore source-matched linked runtime
+           id: runtime-cache
+           uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+           with:
+              path: linked-runtime
+              key: linked-runtime-${{ matrix.target_id }}-${{ hashFiles('crates/**', 'Cargo.*', '.cargo/**', 'rust-toolchain.toml', 'scripts/linked-natives/**', 'scripts/stamp-native-version.ts', 'scripts/ci-linked-runtime-*', 'packages/natives/native/version-sentinel.js', 'packages/natives/package.json', '.github/workflows/ci.yml') }}
+         - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+           if: steps.runtime-cache.outputs.cache-hit != 'true'
+           with:
+              bun-version: 1.4.5
+         - name: Prepare space for a cold link
+           if: steps.runtime-cache.outputs.cache-hit != 'true' && runner.environment == 'github-hosted'
+           run: ${{ runner.os == 'Windows' && 'python' || 'python3' }} scripts/ci-linked-runtime-space.py
+         - name: Identify locked object kit
+           if: steps.runtime-cache.outputs.cache-hit != 'true'
+           id: kit
+           shell: bash
+           env:
+              TARGET: ${{ matrix.target_id }}
+           run: |
+              jq -er --arg id "$TARGET" '
+                .bunVersion as $version | .targets[$id].sha256 | strings | select(test("^[0-9a-f]{64}$")) |
+                "key=bun-objects-\($id)-\(.)\npath=target/linked-natives/kits/omp-bun-\($version)-\($id).tar.zst"
+              ' scripts/linked-natives/kits.json >> "$GITHUB_OUTPUT"
+         - name: Restore compressed Bun object kit
+           if: steps.runtime-cache.outputs.cache-hit != 'true'
+           id: kit-cache
+           uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+           with:
+              path: ${{ steps.kit.outputs.path }}
+              key: ${{ steps.kit.outputs.key }}
+         - name: Install pi-natives Rust toolchain
+           if: steps.runtime-cache.outputs.cache-hit != 'true'
+           shell: bash
+           run: |
+              native="$(bun -p 'Bun.TOML.parse(await Bun.file("rust-toolchain.toml").text()).toolchain.channel')"
+              rustup toolchain install "$native" --profile minimal --target "${{ matrix.triple }}"
+         # Reuse upstream's checked GNU/musl toolchain recipes for the target
+         # SDK. No upstream C/C++/Rust sources or Bun build driver are needed.
+         - name: Fetch Linux SDK recipes
+           if: runner.os == 'Linux' && steps.runtime-cache.outputs.cache-hit != 'true'
+           uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+           with:
+              repository: oven-sh/bun
+              ref: a7733435cf40429e3b35c36072769df2052b80f1
+              path: ci-bun
+              sparse-checkout-cone-mode: false
+              sparse-checkout: |
+                 /scripts/build/ci-images/spec.ts
+                 /scripts/build/error.ts
+                 /scripts/agent.ts
+                 /scripts/build/xmac.mjs
+              persist-credentials: false
+         - name: Provision LLVM and matching Linux target sysroot
+           if: runner.os == 'Linux' && steps.runtime-cache.outputs.cache-hit != 'true'
+           run: bash scripts/ci-linked-runtime-linux.sh "${{ matrix.target_id }}"
+         - name: Provision LLVM and require Apple Foundation Models
+           if: matrix.target_id == 'darwin-arm64' && steps.runtime-cache.outputs.cache-hit != 'true'
+           run: |
+              brew install llvm@23
+              echo "$(brew --prefix llvm@23)/bin" >> "$GITHUB_PATH"
+              echo "LLVM_BIN=$(brew --prefix llvm@23)/bin" >> "$GITHUB_ENV"
+              swiftc="$(xcrun --find swiftc)"
+              OMP_APPLEFM_SWIFTC="$swiftc" sh crates/natives/src/applefm/build-bridge.sh detect
+              echo "OMP_APPLEFM_SWIFTC=$swiftc" >> "$GITHUB_ENV"
+         - name: Provision Intel LLVM from MacPorts
+           if: matrix.target_id == 'darwin-x64' && steps.runtime-cache.outputs.cache-hit != 'true'
+           run: |
+              # Homebrew no longer publishes Intel macOS LLVM bottles.
+              pkg=MacPorts-2.12.7-15-Sequoia.pkg
+              curl -fsSL --retry 3 -o "$RUNNER_TEMP/$pkg" "https://github.com/macports/macports-base/releases/download/v2.12.7/$pkg"
+              echo "87b2e87ed7adc4aca947b42eb7ff991614cc0edfccb486237f2bbc75f28aae63  $RUNNER_TEMP/$pkg" | shasum -a 256 -c -
+              sudo installer -pkg "$RUNNER_TEMP/$pkg" -target /
+              sudo /opt/local/bin/port install clang-23
+              echo /opt/local/bin >> "$GITHUB_PATH"
+              echo /opt/local/libexec/llvm-23/bin >> "$GITHUB_PATH"
+              echo LLVM_BIN=/opt/local/libexec/llvm-23/bin >> "$GITHUB_ENV"
+         - name: Link runtime
+           if: runner.os != 'Windows' && steps.runtime-cache.outputs.cache-hit != 'true'
+           id: posix
+           run: python3 scripts/linked-natives/build.py "${{ matrix.target_id }}"
+         - name: Link runtime in the target MSVC environment
+           if: runner.os == 'Windows' && steps.runtime-cache.outputs.cache-hit != 'true'
+           id: windows
+           shell: pwsh
+           run: ./scripts/ci-linked-runtime-windows.ps1 "${{ matrix.target_id }}"
+         - name: Stage linked runtime
+           if: steps.runtime-cache.outputs.cache-hit != 'true'
+           shell: bash
+           env:
+              EXECUTABLE: ${{ steps.posix.outputs.executable || steps.windows.outputs.executable }}
+           run: |
+              mkdir linked-runtime
+              if [ "$RUNNER_OS" = Windows ]; then EXECUTABLE="$(cygpath -u "$EXECUTABLE")"; fi
+              cp "$EXECUTABLE" linked-runtime/
+         - name: Upload linked runtime for standalone compilation
+           uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+           with:
+              name: linked-runtime-${{ matrix.target_id }}
+              path: linked-runtime/
+              retention-days: 1
+              if-no-files-found: error
+         - name: Cache verified compressed kit for future native builds
+           if: github.ref == 'refs/heads/main' && steps.runtime-cache.outputs.cache-hit != 'true' && steps.kit-cache.outputs.cache-hit != 'true'
+           continue-on-error: true
+           uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+           with:
+              path: ${{ steps.kit.outputs.path }}
+              key: ${{ steps.kit.outputs.key }}
+         - name: Cache linked runtime
+           if: github.ref == 'refs/heads/main' && steps.runtime-cache.outputs.cache-hit != 'true'
+           continue-on-error: true
+           uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+           with:
+              path: linked-runtime
+              key: ${{ steps.runtime-cache.outputs.cache-primary-key }}
+
+   # The bundling host still owns JS asset generation and Developer ID
+   # signing/notarization; it embeds the JS into the exact target's template.
    release_binary:
       name: "Release binary: ${{ matrix.target_id }}"
       if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
-         needs.native_addons.result == 'success' &&
-         needs.native_addons_cross.result == 'success' }}
-      needs: [release_metadata, native_addons, native_addons_cross]
+         needs.linked_runtime.result == 'success' }}
+      needs: [release_metadata, linked_runtime]
       strategy:
          fail-fast: false
          matrix:
             include:
-               # Addons cross-built by Bazel (clang + ld64.lld against the
-               # Command Line Tools SDK) in native_addons_cross.
                - {
                     platform: darwin,
                     target_id: darwin-x64,
                     binary_path: packages/coding-agent/binaries/omp-darwin-x64,
-                    native_targets: darwin-x64-baseline,
                  }
                - {
                     platform: darwin,
                     target_id: darwin-arm64,
                     binary_path: packages/coding-agent/binaries/omp-darwin-arm64,
-                    native_targets: darwin-arm64,
                  }
                - {
                     platform: linux,
                     target_id: linux-x64,
                     binary_path: packages/coding-agent/binaries/omp-linux-x64,
-                    native_targets: linux-x64-baseline linux-x64-modern,
                  }
                - {
                     platform: linux,
                     target_id: linux-musl-x64,
                     binary_path: packages/coding-agent/binaries/omp-linux-musl-x64,
-                    native_targets: linux-musl-x64-baseline,
                  }
                - {
                     platform: linux,
                     target_id: linux-arm64,
                     binary_path: packages/coding-agent/binaries/omp-linux-arm64,
-                    native_targets: linux-arm64,
                  }
                - {
                     platform: linux,
                     target_id: linux-musl-arm64,
                     binary_path: packages/coding-agent/binaries/omp-linux-musl-arm64,
-                    native_targets: linux-musl-arm64,
                  }
                - {
                     platform: win32,
                     target_id: win32-x64,
                     binary_path: packages/coding-agent/binaries/omp-windows-x64.exe,
-                    native_targets: win32-x64-baseline,
                  }
-               # Addon cross-built by Bazel (clang-cl + xwin arm64 splat) in
-               # native_addons_cross.
                - {
                     platform: win32,
                     target_id: win32-arm64,
                     binary_path: packages/coding-agent/binaries/omp-windows-arm64.exe,
-                    native_targets: win32-arm64,
                  }
       runs-on: ubuntu-22.04
       permissions:
@@ -814,14 +965,18 @@ jobs:
               restore-keys: |
                  bun-${{ runner.os }}-
          - run: bun install --frozen-lockfile
-         - name: Install prebuilt native addon(s)
-           uses: ./.github/actions/native-artifacts
+         - name: Download linked runtime
+           uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
            with:
-              targets: ${{ matrix.native_targets }}
+              name: linked-runtime-${{ matrix.target_id }}
+              path: linked-runtime
          - name: Build release binary
            env:
               RELEASE_TARGETS: ${{ matrix.target_id }}
-           run: bun run ci:release:build-binaries
+              BUN_COMPILE_EXECUTABLE_PATH: ${{ github.workspace }}/linked-runtime/${{ matrix.platform == 'win32' && 'bun.exe' || 'bun' }}
+           run: |
+              chmod +x "$BUN_COMPILE_EXECUTABLE_PATH"
+              bun run ci:release:build-binaries
          - name: Sign macOS binary
            # Replaces bun's signature with a Developer ID + hardened-runtime one
            # carrying the required JIT, Apple Events, and library-validation
@@ -862,7 +1017,7 @@ jobs:
 
    # Every release binary is cross-built on Linux (release_binary); this runs
    # each one on its own platform before anything publishes: download the
-   # artifact, then `--version` and `--smoke-test` in a throwaway home. macOS
+   # artifact, then exercise main + Worker native bindings in isolation. macOS
    # legs first run Apple's own signature check, and launch under the final
    # signature (hardened runtime and entitlements included when signed). These
    # are the exact bytes release_github and release_build publish, so no job
@@ -892,6 +1047,11 @@ jobs:
       env:
          MACOS_SIGNING: ${{ secrets.APPLE_CERTIFICATE_P12 != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.APPLE_API_KEY_ID != '' && secrets.APPLE_API_ISSUER_ID != '' && secrets.APPLE_API_KEY != '' }}
       steps:
+         - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+           with:
+              sparse-checkout: scripts/ci-smoke-release.py
+              sparse-checkout-cone-mode: false
+              persist-credentials: false
          - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
            with:
               name: omp-binary-${{ matrix.target_id }}
@@ -904,9 +1064,7 @@ jobs:
               set -euo pipefail
               chmod +x "$BINARY"
               if [ "$RUNNER_OS" = macOS ]; then codesign --verify --strict --verbose=2 "$BINARY"; fi
-              runtime_dir="$(mktemp -d)"
-              HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" "$BINARY" --version
-              HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" "$BINARY" --smoke-test
+              python3 scripts/ci-smoke-release.py "$BINARY"
          # ci-macos-sign.sh signs ad hoc whenever its step lacks the APPLE_*
          # credentials, so an ad-hoc binary while the secrets exist means they
          # stopped reaching it.
@@ -933,28 +1091,19 @@ jobs:
               chmod +x "$BINARY"
               # Bun's musl-target binaries link libstdc++/libgcc dynamically;
               # Alpine users install them alongside the binary (same as bun itself).
-              docker run --rm -v "$(realpath "$BINARY"):/usr/local/bin/omp:ro" alpine:3.22 sh -ec '
-                apk add --no-cache libstdc++ libgcc >/dev/null
-                runtime_dir="$(mktemp -d)"
-                HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" omp --version
-                HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" omp --smoke-test
-              '
+              docker run --rm -v "$(realpath "$BINARY"):/usr/local/bin/omp:ro" \
+                -v "$PWD/scripts/ci-smoke-release.py:/smoke.py:ro" alpine:3.22 sh -ec '
+                  apk add --no-cache libstdc++ libgcc python3 >/dev/null
+                  python3 /smoke.py /usr/local/bin/omp
+                '
          - name: Smoke release binary (Windows)
            if: runner.os == 'Windows'
            shell: pwsh
            env:
               BINARY: binaries/${{ matrix.binary }}
            run: |
-              $runtimeDir = Join-Path $env:RUNNER_TEMP "omp-smoke"
-              $env:HOME = Join-Path $runtimeDir "home"
-              $env:USERPROFILE = $env:HOME
-              $env:LOCALAPPDATA = Join-Path $runtimeDir "local"
-              $env:XDG_DATA_HOME = Join-Path $runtimeDir "xdg"
-              New-Item -ItemType Directory -Force -Path $env:HOME, $env:LOCALAPPDATA, $env:XDG_DATA_HOME | Out-Null
-              & $env:BINARY --version
-              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-              & $env:BINARY --smoke-test
-              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+              python scripts/ci-smoke-release.py $env:BINARY
+              exit $LASTEXITCODE
 
    # Publishes the six @oh-my-pi/pi-natives-<tag> leaf packages once
    # validation passes and every binary built. Runs on one linux runner: leaf

@@ -71,7 +71,7 @@ The published core package contains loader JS, declarations, and metadata but no
 
 For a normal installed package, the platform leaf is probed before the core package's `native/` directory and `process.execPath` directory. Workspace development skips leaf resolution so local artifacts win.
 
-Compiled mode is detected by a populated embedded manifest, `PI_COMPILED`, or a Bun embedded marker in `import.meta.url`. It probes the versioned cache and legacy user-data directory before package/executable locations. `getNativesDir()` first honors `PI_NATIVES_DIR` (trimmed, `~`-expanded, and normalized; empty or relative values are ignored), then uses `$XDG_DATA_HOME/omp/natives` only when `$XDG_DATA_HOME/omp` already exists; otherwise it is `~/.omp/natives`.
+Release standalone builds link the native crate into their Bun runtime before `Bun.build` adds the JS bundle. A build-selected `linked-addon.js` calls that image's Rust initializer in the current VM; it never probes another copy on disk. `PI_NATIVES_DIR` still selects the directory for downloaded grammars. The Nix build instead embeds its separately configured native addon.
 
 A populated manifest references one `<addon>.node.zst` zstd frame per embedded variant. Extraction accepts only basename manifest filenames, decompresses missing or wrong-sized files atomically into `<getNativesDir()>/<version>`, and validates their sizes. On Windows `node_modules` installs, the loader instead stages a leaf/core addon in that versioned directory so a running process does not lock the copy Bun must replace during an update.
 
@@ -108,7 +108,7 @@ For the supporting-crate map, see [`native-crates.md`](./native-crates.md). For 
 ## Runtime flow
 
 1. A consumer imports the eager root or a lazy subpath.
-2. `loadNative()` computes mode, platform, variant, filenames, and ordered candidates.
+2. `loadNative()` uses the linked binding in a release executable; otherwise it computes the platform, variant, filenames, and ordered candidates.
 3. Embedded extraction or Windows staging may prepend a cache candidate.
 4. Candidates are required in order and install/compiled loads are release-stamp-validated.
 5. The optional post-load runtime hook runs, then stale cache versions are cleaned up best-effort.

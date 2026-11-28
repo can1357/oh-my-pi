@@ -99,6 +99,8 @@ export async function embeddedAddonFiles({
 	);
 	const manifest = `${imports.join("\n")}
 
+export const openLinkedAddon = null;
+
 export const embeddedAddon = {
 	platformTag: ${JSON.stringify(platformTag)},
 	version: ${JSON.stringify(version)},

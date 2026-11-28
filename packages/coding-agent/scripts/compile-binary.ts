@@ -1,3 +1,5 @@
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 // Deep import: the pi-utils barrel loads the host native addon, which is
 // absent on cross-compiling release runners.
 import { USER_AGENT } from "@oh-my-pi/pi-utils/dirs";
@@ -22,15 +24,12 @@ export interface CodingAgentCompileOptions {
 	readonly entrypoint: string;
 	/** Absolute standalone executable output path. */
 	readonly outfile: string;
-	/**
-	 * Native addon target embedded for the runtime loader to extract; `null`
-	 * compiles without one (probe builds that never load the addon).
-	 */
-	readonly native: NativeEmbedTarget | null;
-	/** Optional cross-compilation runtime target. */
-	readonly target?: Bun.Build.CompileTarget;
-	/** Optional unmodified Bun executable used as the standalone runtime template. */
-	readonly executablePath?: string;
+	/** Unbundled executable for the output's OS, architecture, libc and Bun version. */
+	readonly executablePath: string;
+	/** Bun uses this separately from executablePath for platform defines and virtual paths. */
+	readonly target: Bun.Build.CompileTarget;
+	/** Nix's sandbox builds its own addon; release runtimes already contain theirs. */
+	readonly embeddedNative?: NativeEmbedTarget;
 	/** Match release builds that minify identifiers while retaining names. */
 	readonly minifyIdentifiers?: boolean;
 	/** Disable Bun's built-in Darwin signing before the caller re-signs. */
@@ -47,12 +46,16 @@ export async function compileCodingAgent(options: CodingAgentCompileOptions): Pr
 		Bun.env.BUN_NO_CODESIGN_MACHO_BINARY = "1";
 	}
 	try {
+		const manifest = path.join(options.repoRoot, "packages", "natives", "native", "embedded-addon.js");
+		const nativeFiles = options.embeddedNative
+			? await embeddedAddonFiles(options.embeddedNative)
+			: { [await fs.realpath(manifest)]: 'export * from "./linked-addon.js";' };
 		const output = await Bun.build({
 			entrypoints: [options.entrypoint],
 			root: options.repoRoot,
 			external: [...COMPILED_EXTERNAL_DEPENDENCIES],
 			files: {
-				...(options.native ? await embeddedAddonFiles(options.native) : {}),
+				...nativeFiles,
 				...(await embeddedRelayExtensionFiles()),
 			},
 			define: {
@@ -79,11 +82,8 @@ export async function compileCodingAgent(options: CodingAgentCompileOptions): Pr
 				// Bun's process-wide fetch User-Agent default. Any explicit
 				// provider fingerprint (Anthropic/Codex OAuth) still wins.
 				execArgv: [`--user-agent=${USER_AGENT}`],
-				...(options.executablePath
-					? { executablePath: options.executablePath }
-					: options.target
-						? { target: options.target }
-						: {}),
+				executablePath: options.executablePath,
+				target: options.target,
 				outfile: options.outfile,
 				autoloadBunfig: false,
 				autoloadDotenv: false,
