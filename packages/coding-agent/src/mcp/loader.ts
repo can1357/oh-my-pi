@@ -37,22 +37,15 @@ export interface MCPToolsLoadOptions extends MCPDiscoverOptions {
  * @returns MCP tools in LoadedCustomTool format for integration
  */
 export async function discoverAndLoadMCPTools(cwd: string, options?: MCPToolsLoadOptions): Promise<MCPToolsLoadResult> {
-	const manager = new MCPManager(cwd, undefined, options?.idleStopMs);
-	if (options?.authStorage) {
-		manager.setAuthStorage(options.authStorage);
+	const { idleStopMs, authStorage, ...discover } = options ?? {};
+	const manager = new MCPManager(cwd, undefined, idleStopMs);
+	if (authStorage) {
+		manager.setAuthStorage(authStorage);
 	}
 
 	let result: MCPLoadResult;
 	try {
-		result = await manager.discoverAndConnect({
-			onStatus: options?.onStatus,
-			startupTimeoutMs: options?.startupTimeoutMs,
-			enableProjectConfig: options?.enableProjectConfig,
-			filterExa: options?.filterExa,
-			filterBrowser: options?.filterBrowser,
-			extensionRoots: options?.extensionRoots,
-			builtinTransforms: options?.builtinTransforms,
-		});
+		result = await manager.discoverAndConnect(discover);
 	} catch (error) {
 		// If discovery fails entirely, return empty result
 		const message = error instanceof Error ? error.message : String(error);
