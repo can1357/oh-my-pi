@@ -16,14 +16,15 @@ use std::{collections::HashMap, ffi::c_void, ptr, slice, sync::Arc};
 use grep_matcher::{Captures, Match, Matcher};
 use parking_lot::Mutex;
 use pcre2_sys::{
-	PCRE2_CASELESS, PCRE2_DOTALL, PCRE2_ERROR_NOMATCH, PCRE2_INFO_CAPTURECOUNT,
-	PCRE2_INFO_NAMECOUNT, PCRE2_INFO_NAMEENTRYSIZE, PCRE2_INFO_NAMETABLE, PCRE2_JIT_COMPLETE,
-	PCRE2_MATCH_INVALID_UTF, PCRE2_MULTILINE, PCRE2_NEWLINE_ANYCRLF, PCRE2_UCP, PCRE2_UNSET,
-	PCRE2_UTF, pcre2_code_8, pcre2_code_free_8, pcre2_compile_8, pcre2_compile_context_8,
-	pcre2_compile_context_create_8, pcre2_compile_context_free_8, pcre2_get_error_message_8,
-	pcre2_get_ovector_count_8, pcre2_get_ovector_pointer_8, pcre2_jit_compile_8, pcre2_match_8,
-	pcre2_match_data_8, pcre2_match_data_create_from_pattern_8, pcre2_match_data_free_8,
-	pcre2_pattern_info_8, pcre2_set_newline_8,
+	PCRE2_CASELESS, PCRE2_DOTALL, PCRE2_ERROR_NOMATCH, PCRE2_EXTRA_ASCII_BSD,
+	PCRE2_INFO_CAPTURECOUNT, PCRE2_INFO_NAMECOUNT, PCRE2_INFO_NAMEENTRYSIZE, PCRE2_INFO_NAMETABLE,
+	PCRE2_JIT_COMPLETE, PCRE2_MATCH_INVALID_UTF, PCRE2_MULTILINE, PCRE2_NEWLINE_ANYCRLF, PCRE2_UCP,
+	PCRE2_UNSET, PCRE2_UTF, pcre2_code_8, pcre2_code_free_8, pcre2_compile_8,
+	pcre2_compile_context_8, pcre2_compile_context_create_8, pcre2_compile_context_free_8,
+	pcre2_get_error_message_8, pcre2_get_ovector_count_8, pcre2_get_ovector_pointer_8,
+	pcre2_jit_compile_8, pcre2_match_8, pcre2_match_data_8, pcre2_match_data_create_from_pattern_8,
+	pcre2_match_data_free_8, pcre2_pattern_info_8, pcre2_set_compile_extra_options_8,
+	pcre2_set_newline_8,
 };
 
 /// A PCRE2 error.
@@ -354,6 +355,17 @@ impl CompileContext {
 		}
 	}
 
+	/// Sets the extra compile options, or reports an option error.
+	fn set_extra_options(&mut self, value: u32) -> Result<(), Error> {
+		// SAFETY: `self.0` is a valid compile context.
+		let rc = unsafe { pcre2_set_compile_extra_options_8(self.0, value) };
+		if rc == 0 {
+			Ok(())
+		} else {
+			Err(Error::option(rc))
+		}
+	}
+
 	/// The raw context pointer.
 	const fn as_mut_ptr(&self) -> *mut pcre2_compile_context_8 {
 		self.0
@@ -598,6 +610,8 @@ pub struct RegexMatcherBuilder {
 	utf:           bool,
 	/// `PCRE2_UCP` (implies UTF).
 	ucp:           bool,
+	/// `PCRE2_EXTRA_ASCII_BSD`.
+	ascii_bsd:     bool,
 	/// Attempt JIT compilation.
 	jit:           bool,
 }
@@ -658,6 +672,10 @@ impl RegexMatcherBuilder {
 		if self.crlf {
 			ctx.set_newline(PCRE2_NEWLINE_ANYCRLF)
 				.expect("PCRE2_NEWLINE_ANYCRLF is a legal value");
+		}
+		if self.ascii_bsd {
+			ctx.set_extra_options(PCRE2_EXTRA_ASCII_BSD)
+				.expect("PCRE2_EXTRA_ASCII_BSD is a legal value");
 		}
 
 		let mut code = Code::new(&singlepat, options, ctx)?;
@@ -738,6 +756,13 @@ impl RegexMatcherBuilder {
 		self
 	}
 
+	/// Makes `\d` match an ASCII digit alone, also under Unicode properties
+	/// (`PCRE2_EXTRA_ASCII_BSD`).
+	pub const fn ascii_bsd(&mut self, yes: bool) -> &mut Self {
+		self.ascii_bsd = yes;
+		self
+	}
+
 	/// Attempts JIT compilation when the regex is built, silently falling
 	/// back to non-JIT matching on failure.
 	pub const fn jit_if_available(&mut self, yes: bool) -> &mut Self {
@@ -795,5 +820,16 @@ mod tests {
 			.unwrap();
 		let result = matcher.find_at(b"\xff\xfe", 0);
 		assert!(result.is_ok(), "invalid UTF-8 should not error: {result:?}");
+	}
+
+	#[test]
+	fn ascii_bsd_keeps_d_ascii_under_ucp() {
+		let mut builder = RegexMatcherBuilder::new();
+		builder.utf(true).ucp(true);
+		let unicode = builder.build(r"\d").unwrap();
+		assert!(unicode.is_match("\u{663}".as_bytes()).unwrap());
+		let ascii = builder.ascii_bsd(true).build(r"\d").unwrap();
+		assert!(!ascii.is_match("\u{663}".as_bytes()).unwrap());
+		assert!(ascii.is_match(b"7").unwrap());
 	}
 }
