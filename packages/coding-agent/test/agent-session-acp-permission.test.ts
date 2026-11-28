@@ -6,6 +6,8 @@
  * behavior they have in the TUI.
  */
 import { afterAll, afterEach, beforeAll, expect, it, spyOn } from "bun:test";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool, type AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockModelOptions } from "@oh-my-pi/pi-ai/providers/mock";
@@ -37,6 +39,7 @@ import {
 	type ToolCommandState,
 } from "@oh-my-pi/pi-coding-agent/tools/tool-commands";
 import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
+import { $ } from "bun";
 
 // ---------------------------------------------------------------------------
 // Shared setup
@@ -459,6 +462,52 @@ it("ACP bash uses pattern decisions and scopes persistent grants to noncritical 
 	// Critical commands ask on every call, whatever was granted.
 	expect(requests).toEqual(["echo probe-1", "rm -rf /", "rm -rf /"]);
 	expect(bashTool.executeCalls).toBe(5);
+});
+
+it("ACP bash asks on every call for a guard rule its probe confirms when yolo is only the default", async () => {
+	const repo = tempDir.join("discard-repo");
+	fs.mkdirSync(repo);
+	fs.writeFileSync(path.join(repo, "a.txt"), "one\n");
+	await $`git init -q && git add a.txt && git -c user.email=t@example.com -c user.name=t commit -qm init`
+		.cwd(repo)
+		.quiet();
+	fs.writeFileSync(path.join(repo, "a.txt"), "uncommitted\n");
+	// No `tools.approvalMode`: the schema-default yolo, which the ACP gate resolves bash under as always-ask.
+	const settingsOverrides = {
+		"tools.guardRules": true,
+		"bash.patterns": [{ match: "git *", approval: "allow" }],
+	};
+	const settings = Settings.isolated(settingsOverrides);
+	const requests: string[] = [];
+	const bridge: ClientBridge = {
+		capabilities: { requestPermission: true },
+		async requestPermission(toolCall) {
+			const input = toolCall.rawInput;
+			if (!input || typeof input !== "object" || !("command" in input) || typeof input.command !== "string") {
+				throw new Error("Missing bash command");
+			}
+			requests.push(input.command);
+			return { outcome: "selected", optionId: "allow_always", kind: "allow_always" };
+		},
+	};
+	const bashTool = makeFakeTool("bash");
+	bashTool.approval = new BashTool({ ...makeToolSession(bridge), cwd: repo, settings }).approval;
+	const wrapped = new ExtensionToolWrapper(bashTool, noUiRunner()) as unknown as AgentTool;
+	session = await createSession([wrapped], bridge, settingsOverrides);
+	await session.setActiveToolsByName(["bash"]);
+	const gatedBash = session.agent.state.tools.find(tool => tool.name === "bash");
+	if (!gatedBash) throw new Error("Missing bash tool");
+	const ctx = { settings } as never;
+	const run = (command: string) =>
+		gatedBash.execute(`call-${command}`, { command }, undefined, undefined as never, ctx);
+
+	await run("git status");
+	expect(requests).toEqual([]);
+	await run("git reset --hard");
+	await run("git reset --hard");
+	// `discard_changes` outranks the `git *` allow, and an Always allow answer does not cover it.
+	expect(requests).toEqual(["git reset --hard", "git reset --hard"]);
+	expect(bashTool.executeCalls).toBe(3);
 });
 
 it("always-ask: an ordinary edit without an ACP grant still faces the inner approval gate", async () => {

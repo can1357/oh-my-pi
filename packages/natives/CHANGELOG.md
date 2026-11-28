@@ -15,6 +15,7 @@
 - Added `Reader` for step-by-step URL reading through host-provided HTTP and browser I/O, with the same reader-content and hidden-content options as `renderHtml`.
 - Added `analyzeBashApproval(command, dialect?)`, a synchronous Bash 5.3 and Zsh 5.9 AST analyzer for approving `bash` tool commands.
 - Added `spawnBreakaway(options)`, which starts a detached Windows process outside the caller's job objects when they allow breakaway ([#20722](https://github.com/can1357/oh-my-pi/issues/20722))
+- Added `vcs.discardsWorkSync()` to check, within an optional timeout, whether a git command would discard uncommitted work ([#19892](https://github.com/can1357/oh-my-pi/pull/19892) by [@Xytronix](https://github.com/Xytronix))
 
 ### Changed
 

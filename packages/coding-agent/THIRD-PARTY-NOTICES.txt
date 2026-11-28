@@ -99,6 +99,29 @@ The adjective and animal word lists come from unique-names-generator
 (https://github.com/andreasonny83/unique-names-generator), used under the MIT
 License.
 
+-------------------------------------------------------------------------------
+nace-ai/intern 0.30.1 (packages/coding-agent/src/tools/guard-rules.ts,
+packages/coding-agent/src/tools/shell-tokenize.ts)
+
+The fixed guard rules (credential_read, secret_send, discard_changes,
+kills_harness) and the top-level shell command parser (parseShellCommands) are
+derived from src/intern/guard.py of Intern (https://github.com/nace-ai/intern,
+commit e1bbd096f97d434b22851d525ea0cf9e029107d1), used under the Apache License
+2.0, whose text is reproduced below.
+
+  Copyright Nace AI. The repository names Nace AI as its author (pyproject.toml,
+  CITATION.cff) and carries no other copyright notice and no NOTICE file.
+
+Modified for omp: rewritten in TypeScript; a rule hit returns an approval
+override instead of refusing the call, and the rules are opt-in
+(tools.guardRules); credential locations include omp's own credential stores;
+discard_changes and kills_harness fire only when a read-only probe (a git
+working-tree check through @oh-my-pi/pi-natives/vcs that runs no
+repository-configured program, or pgrep) shows that uncommitted work would be
+lost or omp itself signalled, and a git stash earlier in the same && chain
+counts as keeping the work; the parser reads only top-level commands, tracks cd
+and && chains, and stops at the first nested part or heredoc.
+
 BUNDLED NPM PACKAGES
 ====================
 
@@ -167,6 +190,7 @@ LICENSE AND NOTICE TEXTS
 -------------------------------------------------------------------------------
 Used by:
 - Playwright 1.61.0 (LICENSE)
+- nace-ai/intern 0.30.1 (LICENSE)
 
                                  Apache License
                            Version 2.0, January 2004

@@ -327,16 +327,23 @@ function normalizeDecision(value: unknown): Omit<ResolvedApproval, "policy"> & {
 const PROMPTING_QUERY: ToolApprovalQuery = { prompts: true };
 const NON_PROMPTING_QUERY: ToolApprovalQuery = { prompts: false };
 
+/**
+ * Run a tool's approval declaration. `resolution`, when given, is the mode and user policies the
+ * call is being resolved under; a function-valued approval called with a context receives it there
+ * as `approvalResolution`.
+ */
 function getToolDecision(
 	tool: ApprovalSubject,
 	args: unknown,
 	query: ToolApprovalQuery,
 	context?: AgentToolContext,
+	resolution?: ResolvedExecuteTimeApproval,
 ): Omit<ResolvedApproval, "policy"> & { policy?: ApprovalPolicy } {
 	const approval = tool.approval;
-	const decision: ToolApprovalDecision | undefined =
-		typeof approval === "function" ? approval(args, context, query) : approval;
-	return normalizeDecision(decision);
+	if (typeof approval !== "function") return normalizeDecision(approval);
+	return normalizeDecision(
+		approval(args, context && resolution ? { ...context, approvalResolution: resolution } : context, query),
+	);
 }
 
 /**
@@ -426,7 +433,10 @@ function resolvePolicy(
 	context?: AgentToolContext,
 ): ResolvedApproval {
 	// Yolo honours only a decision's explicit `policy`; every other mode may prompt on it.
-	const decision = getToolDecision(tool, args, mode === "yolo" ? NON_PROMPTING_QUERY : PROMPTING_QUERY, context);
+	const decision = getToolDecision(tool, args, mode === "yolo" ? NON_PROMPTING_QUERY : PROMPTING_QUERY, context, {
+		approvalMode: mode,
+		userPolicies: userConfig,
+	});
 	const userPolicy = Object.hasOwn(userConfig, tool.name) ? normalizePolicy(userConfig[tool.name]) : undefined;
 
 	// Legacy-name fallback for renamed tools (e.g. MCP mints that gained digits).
