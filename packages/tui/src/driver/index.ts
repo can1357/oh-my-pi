@@ -11,12 +11,11 @@ import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import { restoreTerminalStderr, suppressTerminalStderr } from "@oh-my-pi/pi-utils/stderr-guard";
 import { setJamoWidth } from "../text/width";
 import { resolveJamoWidth } from "./caps/identity";
-import type { FramePlan, InputEvent, TerminalCapabilities, TerminalDriver } from "./contract";
+import type { FramePlan, InputEvent, ReplayListener, TerminalCapabilities, TerminalDriver } from "./contract";
 import { kittyPlaceholdersSupported, TerminalImages } from "./images";
 import type { CursorShape, MouseTracking, TerminalIdentity, TerminalInput, TerminalPort } from "./io";
 import {
 	FrameWriter,
-	type Invalidation,
 	type OutputSink,
 	type ResizeScrollback,
 	StallWatchdog,
@@ -54,12 +53,6 @@ export interface ProcessTerminalDriver extends TerminalDriver, Pick<TerminalInpu
 	readonly identity: TerminalIdentity;
 	/** Inline images: painters ask it for rows, frames carry its sequences. */
 	readonly images: TerminalImages;
-	/**
-	 * The display needs the history ledger again (display reset, settled
-	 * resize under `rebuild`/`append`): the next frame should carry a
-	 * `replay` batch with the complete ledger at the current width under a fresh id.
-	 */
-	onReplay(listener: () => void): () => void;
 	/** Change the retained-history policy for resizes that settle from now on (`tui.resizeScrollback` edits). */
 	setResizeScrollback(mode: ResizeScrollback): void;
 	setMouse(tracking: MouseTracking, reportFocus?: boolean): void;
@@ -142,7 +135,7 @@ export function createTerminalDriver(
 	const terminal = options.input?.(port) ?? createProcessInput(port, options);
 	half.input = terminal;
 	const capabilities: Signal<TerminalCapabilities> = signal(terminal.capabilities);
-	const replayListeners = new Set<() => void>();
+	const replayListeners = new Set<ReplayListener>();
 	const inputListeners = new Set<(event: InputEvent) => void>();
 	// DOM dispatch semantics: a listener subscribed while an event is delivered waits for the next
 	// one, and one unsubscribed before its turn is skipped. A key that opens a page (Esc Esc's
@@ -270,8 +263,8 @@ export function createTerminalDriver(
 		keyboardScreenModes: () => terminal.keyboardScreenModes(),
 		images,
 		canReplay: () => replayListeners.size > 0,
-		onInvalidate: (request: Invalidation) => {
-			if (request === "replay") for (const listener of replayListeners) listener();
+		onInvalidate: (request, cause) => {
+			if (request === "replay") for (const listener of replayListeners) listener(cause);
 			emitResize();
 		},
 	});

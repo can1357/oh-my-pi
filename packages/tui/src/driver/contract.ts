@@ -95,6 +95,9 @@ export interface FrameImageSettler {
 	settle(): boolean;
 }
 
+/** A rebuilt normal screen may retain the dock position; an ordinary display reset starts fresh. */
+export type ReplayListener = (cause?: "resize-rebuild") => void;
+
 /** The terminal a backend renders to. */
 export interface TerminalDriver {
 	readonly columns: number;
@@ -119,7 +122,7 @@ export interface TerminalDriver {
 	 * replaying policy): the next frame must carry a `replay` history batch
 	 * with the whole ledger at the current width, under a fresh id.
 	 */
-	onReplay(listener: () => void): () => void;
+	onReplay(listener: ReplayListener): () => void;
 	/** Inline images, when the driver draws them (painters reach the store through the driver's own type). */
 	readonly images?: FrameImageSettler;
 	/** Clear terminal history and the screen (explicit display resets only). */

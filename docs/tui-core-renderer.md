@@ -168,8 +168,11 @@ allocation never count them. The dock stays on the bottom row when the backend
 replays history because previously emitted rows changed or retired blocks were
 replaced. A caller rebuilding the same transcript can request the same behavior
 with `replayHistory({ preserveDock: true })`, as the coding agent does during
-compaction. A plain `replayHistory()`, a display reset, or a resize starts a fresh
-viewport. A fullscreen layer leaves the normal screen and its pinned viewport in place.
+compaction. When a settled resize clears the normal screen and rebuilds history
+(for example, on ConPTY), a dock that already occupied the last row there
+returns to the last row at the new size. Other resize scrollback policies keep
+their existing placement. A plain `replayHistory()` or a display reset starts
+a fresh viewport. A fullscreen layer leaves the normal screen in place.
 
 ### 2.2 Fullscreen screen mode
 

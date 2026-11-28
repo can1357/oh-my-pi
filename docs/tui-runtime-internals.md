@@ -65,7 +65,7 @@ A block allocated fewer rows than it has is painted at that height (`paint(node,
 
 Dock rows a painter marks `Block.covering` (the composer's completion popup) draw over the transcript: the room for `main` does not shrink for them and the live rows under them are hidden, not retired.
 
-Once the viewport has reached the bottom of the screen, it keeps its height when live content shrinks: blank rows between the live main rows and the dock hold the dock at the bottom. The padding is not live content (retirement and allocation never count it); a replay or a resize resets it (a fullscreen layer leaves the normal screen, and the pin, as they were).
+Once the viewport has reached the bottom of the screen, it keeps its height when live content shrinks: blank rows between the live main rows and the dock hold the dock at the bottom. Retirement and allocation ignore the padding. A resize that clears the normal screen and rebuilds history restores a previously bottom-aligned dock at the new height. An explicit display reset starts fresh. See the [renderer contract](tui-core-renderer.md) for transcript replays and fullscreen layers.
 
 ## Terminal write path
 

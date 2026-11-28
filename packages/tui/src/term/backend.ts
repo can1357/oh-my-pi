@@ -222,6 +222,8 @@ interface Pin {
 	readonly height: number;
 	readonly below: number;
 	readonly bottom: boolean;
+	/** Survives intermediate frames in a resize burst until the writer rebuilds the normal screen. */
+	readonly reachedBottom: boolean;
 	readonly rows: number;
 	readonly span: number;
 }
@@ -419,8 +421,8 @@ export class TermBackend {
 	/** The next frame is the shutdown flush (see {@link flush}). */
 	#flushing = false;
 	/**
-	 * Where the inline viewport stands on screen since the last reset (a replay or a resize; a
-	 * fullscreen frame leaves the normal screen as it was): see {@link Pin}. `#nextPin` is what the frame being presented makes of it.
+	 * Position of the inline viewport on the normal screen. A fullscreen frame leaves it in place.
+	 * See {@link Pin} for the geometry carried across history rebuilds.
 	 */
 	#pin: Pin | undefined;
 	/** Blocks the retirement in the frame being composed moves into history (separators may ask). */
@@ -502,8 +504,12 @@ export class TermBackend {
 				this.#textSizing.set(capabilities.textSizing);
 				this.requestRender();
 			}),
-			this.#driver.onReplay(() => {
-				this.#pin = undefined;
+			this.#driver.onReplay(cause => {
+				const pin = this.#pin;
+				this.#pin =
+					cause === "resize-rebuild" && pin?.reachedBottom
+						? { ...pin, width: this.#driver.columns, height: this.#driver.rows, bottom: true }
+						: undefined;
 				// A batch still unwritten (a replay included) is prepared again for the new display.
 				this.#replay = true;
 				this.#pending = undefined;
@@ -1305,7 +1311,15 @@ export class TermBackend {
 			// The rows from the viewport's top down: a shrunk viewport keeps its top (only a dock pads it down).
 			const held = !fresh && pin.bottom ? Math.min(height, pin.span - written) : 0;
 			const span = Math.max(viewport.length + dockRows, held);
-			this.#nextPin = { width, height, below: below + written, bottom, rows: viewport.length + dockRows, span };
+			this.#nextPin = {
+				width,
+				height,
+				below: below + written,
+				bottom,
+				reachedBottom: (bottom && dockRows > 0) || (pin?.reachedBottom ?? false),
+				rows: viewport.length + dockRows,
+				span,
+			};
 			// The screen rows above the viewport: everything written so far, or (at the bottom) what it leaves.
 			const above = bottom ? Math.max(0, height - span) : below + written;
 			if (joinedEnd > 0) dropCutImages(viewport, 0, joinedEnd, above);
