@@ -230,6 +230,16 @@ export async function fetchPrReviewTarget(cwd: string, ref: ReviewPrRef): Promis
 				iid: ref.number,
 				...(settings ? { settings } : {}),
 			});
+			const generationAt =
+				lookup.status === "disabled"
+					? null
+					: glab.retainMrDiffGeneration({
+							project: ref.repo,
+							iid: ref.number,
+							rendered: lookup.rendered,
+							files: lookup.payload.files,
+							fetchedAt: lookup.fetchedAt,
+						});
 			return createResolvedReviewTarget(
 				"pr",
 				label,
@@ -237,6 +247,7 @@ export async function fetchPrReviewTarget(cwd: string, ref: ReviewPrRef): Promis
 				`${label} has no diff content available`,
 				{
 					prDiffUrl: `mr://${ref.repo}/${ref.number}/diff`,
+					prDiffQuery: generationAt !== null ? `?at=${generationAt}` : "",
 				},
 			);
 		} catch (error) {

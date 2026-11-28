@@ -24,6 +24,7 @@ import {
 	GITLAB_HOST_PATTERN,
 	GITLAB_PATH_SEGMENT_PATTERN,
 	getOrFetchMrDiff,
+	getPinnedMrDiff,
 	isGitlabHostSegment,
 	resolveDefaultGitlabProjectMemoized,
 } from "../tools/glab-mr";
@@ -60,6 +61,8 @@ export interface ParsedMrDiffUrl {
 	iid: number;
 	mode: "list" | "all" | "slice";
 	index?: number;
+	/** Cache generation (`?at=`). When set, resolution must not read the live row. */
+	fetchedAt?: number;
 }
 
 export type ParsedMrUrl = ParsedMrListUrl | ParsedMrSingleUrl | ParsedMrDiffUrl;
@@ -150,7 +153,7 @@ export function parseMrUrl(url: InternalUrl): ParsedMrUrl {
 	if (iidIndex !== undefined && mode !== undefined) {
 		const iid = parsePositiveDecimalInt(all[iidIndex]);
 		if (iid === undefined) throw new Error(INVALID_MR_URL);
-		if (iidIndex === 0) return { kind: "diff", iid, mode, index };
+		if (iidIndex === 0) return { kind: "diff", iid, mode, index, fetchedAt: parsePinnedMrDiffGeneration(url) };
 
 		const segments = all.slice(1, iidIndex);
 		if (
@@ -160,7 +163,14 @@ export function parseMrUrl(url: InternalUrl): ParsedMrUrl {
 		) {
 			throw new Error(INVALID_MR_URL);
 		}
-		return { kind: "diff", project: `${host.toLowerCase()}/${segments.join("/")}`, iid, mode, index };
+		return {
+			kind: "diff",
+			project: `${host.toLowerCase()}/${segments.join("/")}`,
+			iid,
+			mode,
+			index,
+			fetchedAt: parsePinnedMrDiffGeneration(url),
+		};
 	}
 
 	const trailingIid = all.length >= 4 ? parsePositiveDecimalInt(all[last]) : undefined;
@@ -191,6 +201,30 @@ export function parseMrUrl(url: InternalUrl): ParsedMrUrl {
 		return parseListOptions(url, `${host.toLowerCase()}/${listSegments.join("/")}`);
 	}
 	throw new Error(INVALID_MR_URL);
+}
+
+function parsePinnedMrDiffGeneration(url: InternalUrl): number | undefined {
+	const raw = url.searchParams.get("at");
+	if (raw === null) return undefined;
+	const parsed = parsePositiveDecimalInt(raw);
+	if (parsed === undefined) {
+		throw new Error(`Invalid mr:// diff snapshot '${raw}'. Expected a positive integer cache generation.`);
+	}
+	return parsed;
+}
+
+function diffSnapshotQuery(fetchedAt: number | undefined): string {
+	return fetchedAt === undefined ? "" : `?at=${fetchedAt}`;
+}
+
+function loadPinnedMrDiff(project: string, iid: number, fetchedAt: number, settings: ResolveContext["settings"]) {
+	const pinned = getPinnedMrDiff({ project, iid, fetchedAt, settings });
+	if (!pinned) {
+		throw new Error(
+			`mr://${project}/${iid}/diff?at=${fetchedAt} is not available: the pinned snapshot expired, the GitLab cache is disabled, or it was saved under another GitLab account. Run /review again.`,
+		);
+	}
+	return pinned;
 }
 
 function formatMrListItem(project: string, item: GlMrApi): string {
@@ -317,17 +351,21 @@ export class MrProtocolHandler implements ProtocolHandler {
 		}
 
 		const project = await resolveMrProject(parsed.project, cwd, context?.signal, `mr://${parsed.iid}/diff`);
-		const lookup = await getOrFetchMrDiff({
-			cwd,
-			project,
-			iid: parsed.iid,
-			signal: context?.signal,
-			settings: context?.settings,
-		});
+		const lookup =
+			parsed.fetchedAt === undefined
+				? await getOrFetchMrDiff({
+						cwd,
+						project,
+						iid: parsed.iid,
+						signal: context?.signal,
+						settings: context?.settings,
+					})
+				: loadPinnedMrDiff(project, parsed.iid, parsed.fetchedAt, context?.settings);
 		return renderDiffFamilyResource(url, parsed.mode, parsed.index, lookup, {
 			baseUrl: `mr://${project}/${parsed.iid}`,
 			heading: `Merge Request Diff: ${project}!${parsed.iid}`,
 			noun: "MR",
+			query: diffSnapshotQuery(parsed.fetchedAt),
 		});
 	}
 }

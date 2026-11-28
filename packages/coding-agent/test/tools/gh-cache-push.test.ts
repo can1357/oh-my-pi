@@ -96,6 +96,10 @@ afterEach(async () => {
 describe("bash git push cache invalidation", () => {
 	it("drops the pushed repo's PR rows for every credential so the next diff read fetches the new head", async () => {
 		const text = vi.spyOn(github, "text").mockResolvedValue("diff --git a/old.ts b/old.ts\n");
+		vi.spyOn(github, "json").mockResolvedValue({
+			baseRefOid: "base-sha",
+			headRefOid: "head-sha",
+		} as never);
 		await getOrFetchPrDiff({ cwd, repo: REPO, number: 7 });
 		seed(REPO, "other-credential");
 		putCached({ repo: REPO, kind: "issue", number: 7, includeComments: false, payload: {}, rendered: "issue" });

@@ -15,7 +15,6 @@ import { parsePrUnifiedDiff, retainPrDiffGeneration } from "@oh-my-pi/pi-coding-
 import {
 	getCached,
 	getCachedGeneration,
-	putCached,
 	resetForTests as resetCacheForTests,
 	resolveGithubCacheAuthKey,
 } from "@oh-my-pi/pi-coding-agent/tools/github-cache";
@@ -352,6 +351,7 @@ describe("pr:// protocol handler", () => {
 
 	it("keeps the bare diff form out of the host-prefix branch", async () => {
 		const spy = vi.spyOn(github, "text").mockResolvedValue(makePrDiff([{ name: "a.ts", adds: 1, dels: 0 }]));
+		vi.spyOn(github, "json").mockResolvedValue({ baseRefOid: "base-a", headRefOid: "head-a" } as never);
 
 		const router = InternalUrlRouter.instance();
 		const resource = await router.resolve("pr://owner/example/77/diff/1");
@@ -426,6 +426,13 @@ describe("pr://.../diff family", () => {
 		{ name: "src/two.ts", adds: 2, dels: 0, mode: "added" },
 	]);
 
+	let currentRevision = { baseRefOid: "base-a", headRefOid: "head-a" };
+
+	beforeEach(() => {
+		currentRevision = { baseRefOid: "base-a", headRefOid: "head-a" };
+		vi.spyOn(github, "json").mockImplementation(async () => ({ ...currentRevision }) as never);
+	});
+
 	it("pr://owner/repo/<n>/diff lists files with per-file hint URLs", async () => {
 		const textSpy = vi.spyOn(github, "text").mockResolvedValue(diffText);
 
@@ -477,7 +484,7 @@ describe("pr://.../diff family", () => {
 		expect(second.content).not.toContain("src/one.ts");
 	});
 
-	it("serves ?at= from the pinned generation after the live row changes", async () => {
+	it("refreshes the live PR diff for base or head changes without replacing the pinned patch", async () => {
 		const oldDiff = makePrDiff([{ name: "src/old.ts", adds: 1, dels: 0 }]);
 		const newDiff = makePrDiff([{ name: "src/new.ts", adds: 4, dels: 0 }]);
 		const textSpy = vi.spyOn(github, "text").mockResolvedValue(oldDiff);
@@ -502,34 +509,25 @@ describe("pr://.../diff family", () => {
 				cacheAuthKey: authKey,
 			}),
 		).toBe(fetchedAt);
-		const fresh = parsePrUnifiedDiff(newDiff);
-		putCached({
-			authKey,
-			repo: "owner/example",
-			kind: "pr-diff",
-			number: 77,
-			includeComments: false,
-			payload: { unified: "", files: fresh.files },
-			rendered: newDiff,
-			fetchedAt: fetchedAt + 10_000,
-		});
+		currentRevision.baseRefOid = "base-b";
+		textSpy.mockResolvedValue(diffText);
+		expect((await router.resolve("pr://owner/example/77/diff/1")).content).toContain("src/one.ts");
+
+		currentRevision.headRefOid = "head-b";
+		textSpy.mockResolvedValue(newDiff);
+		const live = await router.resolve("pr://owner/example/77/diff/1");
+		expect(live.content).toContain("src/new.ts");
+		expect(textSpy).toHaveBeenCalledTimes(3);
 
 		const pinned = await router.resolve(`pr://owner/example/77/diff/1?at=${fetchedAt}`);
 		expect(pinned.content).toContain("src/old.ts");
-		expect(pinned.content).not.toContain("src/new.ts");
 		expect(pinned.notes).toContain("Pinned snapshot");
-		expect(textSpy).toHaveBeenCalledTimes(1);
-
-		const live = await router.resolve("pr://owner/example/77/diff/1");
-		expect(live.content).toContain("src/new.ts");
-		expect(live.content).not.toContain("src/old.ts");
-		expect(textSpy).toHaveBeenCalledTimes(1);
 
 		await expect(router.resolve("pr://owner/example/77/diff/1?at=1")).rejects.toThrow(/not available/);
 		await expect(router.resolve("pr://owner/example/77/diff/1?at=nope")).rejects.toThrow(
 			/Invalid pr:\/\/ diff snapshot/,
 		);
-		expect(textSpy).toHaveBeenCalledTimes(1);
+		expect(textSpy).toHaveBeenCalledTimes(3);
 	});
 
 	it("rejects a pinned diff past the hard TTL and drops that generation", async () => {

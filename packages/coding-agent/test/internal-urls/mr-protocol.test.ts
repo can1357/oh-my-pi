@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fetchPrReviewTarget } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/review";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { resetDefaultGitlabProjectMemoForTests } from "@oh-my-pi/pi-coding-agent/tools/glab-mr";
 import { resetForTests as resetCacheForTests } from "@oh-my-pi/pi-coding-agent/tools/github-cache";
@@ -29,6 +30,7 @@ diff --git a/src/two.ts b/src/two.ts
 +dos
 `;
 const secondSection = diffText.slice(diffText.indexOf("diff --git a/src/two.ts"));
+const updatedDiffText = diffText.replaceAll("src/one.ts", "src/current.ts").replace("-one\n+uno", "-old\n+new");
 
 const ENV_KEYS = [
 	"OMP_GITHUB_CACHE_DB",
@@ -74,6 +76,7 @@ afterEach(async () => {
 
 describe("mr:// diff family", () => {
 	it("lists changed files of a nested-group project with per-file mr:// links", async () => {
+		stubMrRevision();
 		const textSpy = vi.spyOn(gitlab, "text").mockResolvedValue(diffText);
 
 		const resource = await InternalUrlRouter.instance().resolve("mr://gitlab.example.com/acme/platform/api/7/diff");
@@ -87,6 +90,7 @@ describe("mr:// diff family", () => {
 	});
 
 	it("slices one file, returns the full diff, and rejects an out-of-range index", async () => {
+		stubMrRevision();
 		vi.spyOn(gitlab, "text").mockResolvedValue(diffText);
 		const router = InternalUrlRouter.instance();
 
@@ -97,7 +101,8 @@ describe("mr:// diff family", () => {
 		await expect(router.resolve("mr://gitlab.com/g/p/7/diff/3")).rejects.toThrow(/MR has 2 files/);
 	});
 
-	it("serves a repeat read from the cache without re-running glab", async () => {
+	it("reuses the patch when the live refs have not changed", async () => {
+		stubMrRevision();
 		const textSpy = vi.spyOn(gitlab, "text").mockResolvedValue(diffText);
 		const router = InternalUrlRouter.instance();
 
@@ -107,6 +112,57 @@ describe("mr:// diff family", () => {
 		expect(first.notes?.[0]).toBe("Fetched live");
 		expect(second.notes?.[0]).toMatch(/^Cached:/);
 		expect(textSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("refreshes changed MR refs and keeps a pinned diff offline", async () => {
+		const project = "gitlab.example.com/acme/api";
+		let metadata = {
+			sha: "head-a",
+			diff_refs: { base_sha: "base-a", head_sha: "head-a", start_sha: "start-a" },
+		};
+		const apiSpy = vi.spyOn(gitlab, "json").mockImplementation(async (_cwd, args) => {
+			if (args.join(" ") !== "api --hostname gitlab.example.com projects/acme%2Fapi/merge_requests/7") {
+				throw new Error(`Unexpected glab json call: ${args.join(" ")}`);
+			}
+			return metadata as never;
+		});
+		const textSpy = vi.spyOn(gitlab, "text").mockResolvedValue(diffText);
+		const router = InternalUrlRouter.instance();
+		const liveUrl = `mr://${project}/7/diff`;
+		const selected = await fetchPrReviewTarget(tempDir, {
+			forge: "gitlab",
+			repo: project,
+			number: 7,
+			raw: liveUrl,
+			kind: "mr-url",
+		});
+
+		metadata = {
+			sha: "head-b",
+			diff_refs: { base_sha: "base-b", head_sha: "head-a", start_sha: "start-b" },
+		};
+		await expect(router.resolve(liveUrl)).rejects.toThrow(/MR diff is still being prepared/);
+		expect(textSpy).toHaveBeenCalledTimes(1);
+
+		metadata = {
+			sha: "head-b",
+			diff_refs: { base_sha: "base-b", head_sha: "head-b", start_sha: "start-b" },
+		};
+		textSpy.mockResolvedValue(updatedDiffText);
+		const updated = await router.resolve(liveUrl);
+		expect(updated.content).toContain("src/current.ts");
+		expect(textSpy).toHaveBeenCalledTimes(2);
+
+		const metadataCalls = apiSpy.mock.calls.length;
+		const pinnedList = await router.resolve(`${selected.prDiffUrl}${selected.prDiffQuery}`);
+		const sliceUrl = `${liveUrl}/2${selected.prDiffQuery}`;
+		const allUrl = `${liveUrl}/all${selected.prDiffQuery}`;
+		expect(pinnedList.content).toContain(sliceUrl);
+		expect(pinnedList.content).toContain(allUrl);
+		expect((await router.resolve(sliceUrl)).content).toBe(secondSection);
+		expect((await router.resolve(allUrl)).content).toBe(diffText);
+		expect(apiSpy).toHaveBeenCalledTimes(metadataCalls);
+		expect(textSpy).toHaveBeenCalledTimes(2);
 	});
 
 	it("resolves the short form against the project glab reports for the session cwd", async () => {
@@ -133,6 +189,7 @@ describe("mr:// diff family", () => {
 	});
 
 	it("retries without --raw when the instance has no raw diff endpoint", async () => {
+		stubMrRevision();
 		const textSpy = vi
 			.spyOn(gitlab, "text")
 			.mockRejectedValueOnce(new Error("could not obtain raw diff: 404 Not Found"))
@@ -147,6 +204,7 @@ describe("mr:// diff family", () => {
 	});
 
 	it("fails with an upgrade hint instead of parsing an old glab's header-less diff", async () => {
+		stubMrRevision();
 		const textSpy = vi.spyOn(gitlab, "text").mockRejectedValue(new Error("unknown flag: --raw"));
 
 		await expect(InternalUrlRouter.instance().resolve("mr://gitlab.com/g/p/7/diff")).rejects.toThrow(
@@ -181,6 +239,12 @@ describe("mr:// diff family", () => {
 
 const spyGitlabJson = (handler: (cwd: string, args: string[]) => Promise<unknown>) =>
 	vi.spyOn(gitlab, "json").mockImplementation((cwd, args) => handler(cwd, args) as Promise<never>);
+
+const stubMrRevision = (revision = "head-a") =>
+	vi.spyOn(gitlab, "json").mockResolvedValue({
+		sha: revision,
+		diff_refs: { base_sha: "base-a", head_sha: revision, start_sha: "start-a" },
+	} as never);
 
 describe("mr:// list and single-MR views", () => {
 	const sampleMr = {
