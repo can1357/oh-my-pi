@@ -1,3 +1,4 @@
+import type * as fs from "node:fs/promises";
 import { Readable, type Transform } from "node:stream";
 import { formatBytes } from "../format";
 import { LRUCache } from "../lru";
@@ -59,6 +60,31 @@ export function fileByteSource(filePath: string): ByteSource {
 	};
 }
 
+/**
+ * The file `handle` holds open, as a {@link ByteSource}: every read goes to the
+ * file the handle opened, so a file renamed over its path meanwhile is never
+ * read. The handle stays the caller's to close.
+ */
+export async function heldFileSource(handle: fs.FileHandle): Promise<ByteSource> {
+	const { size } = await handle.stat();
+	if (!Number.isSafeInteger(size)) {
+		throw new ArchiveError("Archive is too large to read safely");
+	}
+	return {
+		size,
+		async read(start, end) {
+			assertValidRange(start, end);
+			const bytes = new Uint8Array(end - start);
+			for (let filled = 0; filled < bytes.length;) {
+				const { bytesRead } = await handle.read(bytes, filled, bytes.length - filled, start + filled);
+				if (bytesRead === 0) throw new ArchiveError("Invalid archive: truncated data");
+				filled += bytesRead;
+			}
+			return bytes;
+		},
+	};
+}
+
 /** Materialize an entire {@link ByteSource}; use only under a limits check. */
 export async function readAllBytes(source: ByteSource): Promise<Uint8Array> {
 	return source.read(0, source.size);
@@ -67,9 +93,15 @@ export async function readAllBytes(source: ByteSource): Promise<Uint8Array> {
 /** Chunk size for streamed decompression, on both the compressed and the decompressed side. */
 export const STREAM_CHUNK_SIZE = 1024 * 1024;
 
-async function* readChunks(source: ByteSource): AsyncGenerator<Uint8Array> {
-	for (let start = 0; start < source.size; start += STREAM_CHUNK_SIZE) {
-		yield await source.read(start, Math.min(source.size, start + STREAM_CHUNK_SIZE));
+/** Bytes `[start, end)` of `source` (all of it by default) as reads of at most {@link STREAM_CHUNK_SIZE} bytes. */
+export async function* readByteSourceChunks(
+	source: ByteSource,
+	start = 0,
+	end = source.size,
+): AsyncGenerator<Uint8Array> {
+	assertValidRange(start, end);
+	for (let offset = start; offset < end; offset += STREAM_CHUNK_SIZE) {
+		yield await source.read(offset, Math.min(end, offset + STREAM_CHUNK_SIZE));
 	}
 }
 
@@ -83,7 +115,7 @@ export async function* decodeByteSource(
 	decoder: Transform,
 	maxOutput: number,
 ): AsyncGenerator<Uint8Array> {
-	const input = Readable.from(readChunks(source));
+	const input = Readable.from(readByteSourceChunks(source));
 	input.once("error", error => decoder.destroy(error));
 	let output = 0;
 	try {

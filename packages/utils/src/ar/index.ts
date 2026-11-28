@@ -6,6 +6,7 @@
 export * from "./bytes";
 export * from "./entries";
 export * from "./error";
+export * from "./file-sink";
 export * from "./limits";
 export * from "./open";
 export * from "./paths";

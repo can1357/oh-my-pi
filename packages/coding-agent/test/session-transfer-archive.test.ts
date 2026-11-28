@@ -1,7 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import * as fs from "node:fs";
-import * as fsp from "node:fs/promises";
-import * as os from "node:os";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { BlobStore, isBlobRef } from "@oh-my-pi/pi-coding-agent/session/blob-store";
@@ -15,7 +13,7 @@ import {
 	SESSION_TRANSFER_MESSAGE_TYPE,
 	unpackSession,
 } from "@oh-my-pi/pi-coding-agent/session/session-transfer";
-import { getBlobsDir, getConfigRootDir, setAgentDir } from "@oh-my-pi/pi-utils";
+import { getBlobsDir, getConfigRootDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { readArchiveEntries, writeArchive } from "@oh-my-pi/pi-utils/ar";
 import { makeAssistantMessage } from "./session-manager/helpers";
 
@@ -41,6 +39,7 @@ function userImage(entries: FileEntry[]): ImageContent | undefined {
 }
 
 describe("omp session pack/unpack archive", () => {
+	let cleanup: AsyncDisposableStack;
 	let root: string;
 	let agentA: string;
 	let agentB: string;
@@ -49,26 +48,29 @@ describe("omp session pack/unpack archive", () => {
 	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 
 	beforeEach(async () => {
-		root = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-session-transfer-"));
+		// Disposed in reverse: the session index, the agent directory, then the temp directory. Each step runs
+		// even when one before it throws.
+		cleanup = new AsyncDisposableStack();
+		root = cleanup.use(await TempDir.create("@omp-session-transfer-")).path();
 		agentA = path.join(root, "agent-a");
 		agentB = path.join(root, "agent-b");
 		cwdA = path.join(root, "laptop", "project");
 		cwdB = path.join(root, "cloud", "project");
-		fs.mkdirSync(cwdA, { recursive: true });
-		fs.mkdirSync(cwdB, { recursive: true });
+		await fs.mkdir(cwdA, { recursive: true });
+		await fs.mkdir(cwdB, { recursive: true });
+		cleanup.defer(() => {
+			if (originalAgentDir) {
+				setAgentDir(originalAgentDir);
+			} else {
+				setAgentDir(path.join(getConfigRootDir(), "agent"));
+				delete process.env.PI_CODING_AGENT_DIR;
+			}
+		});
 		setAgentDir(agentA);
+		cleanup.defer(() => closeSessionIndex());
 	});
 
-	afterEach(async () => {
-		closeSessionIndex();
-		if (originalAgentDir) {
-			setAgentDir(originalAgentDir);
-		} else {
-			setAgentDir(path.join(getConfigRootDir(), "agent"));
-			delete process.env.PI_CODING_AGENT_DIR;
-		}
-		await fsp.rm(root, { recursive: true, force: true });
-	});
+	afterEach(() => cleanup.disposeAsync());
 
 	/** A laptop session with an image turn, a subagent transcript, and a tool artifact; returns its file. */
 	async function createLaptopSession(): Promise<string> {
@@ -145,6 +147,24 @@ describe("omp session pack/unpack archive", () => {
 		expect(await findSessionFiles(id)).toEqual([]);
 		expect(await new BlobStore(getBlobsDir()).has(blobName.slice("blobs/".length))).toBe(false);
 	});
+
+	// A blob the store holds but the process cannot read is not a missing blob: packing without it would lose
+	// the image on the other machine. Windows permissions and root ignore the mode bits the case relies on.
+	it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+		"fails the pack with the read error when a blob the transcript names cannot be read",
+		async () => {
+			const source = await createLaptopSession();
+			const archive = path.join(root, "out", "session.tar");
+			const blobsDir = getBlobsDir();
+			// Without search permission on the store, every stat of a blob in it fails with EACCES.
+			await fs.chmod(blobsDir, 0o000);
+			cleanup.defer(() => fs.chmod(blobsDir, 0o755));
+
+			await expect(packSession(source, archive)).rejects.toMatchObject({ code: "EACCES" });
+			// Neither the archive nor its staging file is left behind.
+			expect(await fs.readdir(path.dirname(archive))).toEqual([]);
+		},
+	);
 
 	it("rejects an archive from a newer format version", async () => {
 		const source = await createLaptopSession();

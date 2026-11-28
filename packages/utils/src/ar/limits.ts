@@ -72,13 +72,25 @@ export function assertArchiveMemberSizeField(size: number, memberPath: string): 
 /**
  * Reject a member whose declared (uncompressed) size exceeds `maxMemberSize`.
  * The declared size is metadata — a crafted entry can claim multi-GB sizes
- * that would be allocated up front before any data decompresses.
+ * that would be allocated up front before any data decompresses. `read` says
+ * how the caller reads the member, so the refusal says what it would cost: a
+ * `whole` read holds the member in memory; a `chunked` read need not, so its
+ * refusal names only the member size limit.
  */
-export function assertArchiveMemberSize(size: number, memberPath: string, limits: ArchiveLimits): void {
+export function assertArchiveMemberSize(
+	size: number,
+	memberPath: string,
+	limits: ArchiveLimits,
+	read: "whole" | "chunked" = "whole",
+): void {
 	assertArchiveMemberSizeField(size, memberPath);
 	if (size > limits.maxMemberSize) {
+		const member = `Archive member '${formatArchivePathForError(memberPath)}'`;
+		const sizes = `${formatBytes(size)} > ${formatBytes(limits.maxMemberSize)}`;
 		throw new ArchiveError(
-			`Archive member '${formatArchivePathForError(memberPath)}' is too large to extract in memory (${formatBytes(size)} > ${formatBytes(limits.maxMemberSize)} limit)`,
+			read === "chunked"
+				? `${member} exceeds the member size limit (${sizes})`
+				: `${member} is too large to extract in memory (${sizes} limit)`,
 		);
 	}
 }

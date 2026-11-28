@@ -33,8 +33,9 @@ import transferStaleForkTemplate from "../prompts/session/transfer-stale-fork.md
 import { replaceFileAtomically } from "../utils/atomic-file";
 import { BLOB_HASH_RE, BlobStore } from "./blob-store";
 import type { FileEntry, SessionEntry, SessionHeader } from "./session-entries";
+import { isValidSessionHeader } from "./session-header-id";
 import { findSessionFiles } from "./session-listing";
-import { loadEntriesFromFile, parseSessionContent, readSessionHeaderId } from "./session-loader";
+import { readSessionHeaderId, visitEntriesFromFile, visitEntriesFromFileStream } from "./session-loader";
 import { SessionManager } from "./session-manager";
 import { FileSessionStorage } from "./session-storage";
 
@@ -116,6 +117,11 @@ const SESSION_MEMBER = "session.jsonl";
 const ARTIFACTS_PREFIX = "artifacts/";
 const BLOBS_PREFIX = "blobs/";
 const BLOB_REF_RE = /\bblob:sha256:([a-f0-9]{64})\b/g;
+/**
+ * Characters one {@link BLOB_REF_RE} match spans (its prefix and 64 hex
+ * digits), plus the one before it that its leading `\b` reads.
+ */
+const BLOB_REF_SPAN = "blob:sha256:".length + 64 + 1;
 /** Ids name files and leases; anything else in an archive header is refused. */
 const SESSION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 const ARCHIVE_SIZE_LIMIT = 2 * 1024 * 1024 * 1024;
@@ -202,6 +208,16 @@ async function requireSessionId(file: string): Promise<string> {
 	return id;
 }
 
+/** The first record of the journal at `file` (title slot folded in), read from its first lines only. */
+async function firstJournalRecord(file: string): Promise<FileEntry | undefined> {
+	const first: { entry?: FileEntry } = {};
+	await visitEntriesFromFileStream(file, entry => {
+		first.entry = entry;
+		return false;
+	});
+	return first.entry;
+}
+
 /**
  * Take this process's ownership lease on session `id` at `file` — the check
  * {@link SessionManager.moveTo} uses — or refuse while another live omp process
@@ -217,8 +233,111 @@ function claimSessionOrRefuse(id: string, file: string, action: string): () => v
 	return release;
 }
 
-function collectBlobHashes(text: string, into: Set<string>): void {
-	for (const match of text.matchAll(BLOB_REF_RE)) into.add(match[1]);
+/**
+ * `chunks`, passed on as they are, after adding the blob hashes their text
+ * references to `into`: the ones {@link BLOB_REF_RE} finds in the whole text,
+ * scanned one chunk at a time. Each scan also covers the last
+ * {@link BLOB_REF_SPAN} characters of the one before, so a reference a chunk
+ * edge splits is still found.
+ */
+async function* collectingBlobHashes<C extends Uint8Array>(
+	chunks: AsyncIterable<C>,
+	into: Set<string>,
+): AsyncGenerator<C> {
+	const decoder = new TextDecoder();
+	let carried = "";
+	let atTextStart = true;
+	const scan = (text: string, final: boolean): void => {
+		for (const match of text.matchAll(BLOB_REF_RE)) {
+			// At a cut edge `\b` reads the edge, not the characters beyond it. The
+			// next scan carries the characters around such a match and decides it.
+			if (match.index === 0 && !atTextStart) continue;
+			if (!final && match.index + match[0].length === text.length) continue;
+			into.add(match[1]);
+		}
+	};
+	for await (const chunk of chunks) {
+		const text = carried + decoder.decode(chunk, { stream: true });
+		scan(text, false);
+		if (text.length > BLOB_REF_SPAN) {
+			carried = text.slice(-BLOB_REF_SPAN);
+			atTextStart = false;
+		} else {
+			carried = text;
+		}
+		yield chunk;
+	}
+	scan(carried + decoder.decode(), true);
+}
+
+/**
+ * A transcript file as an archive member that adds the blob hashes its bytes
+ * reference to `hashes` as the archive writer streams them, so the blobs
+ * packed after it are the ones the packed bytes name, whatever another writer
+ * does to the file meanwhile. Only a streaming writer (`writeTarArchive`) can
+ * take it: the member is read through `stream()` and `size`, which the writer
+ * reads for the member's header, again for its padding, on each chunk and
+ * once the stream ends, and fails on a stream that does not yield that size.
+ * `size` is the wrapped `Bun.file`'s, which stats the file once, at its first
+ * read, so every read gives the size the header holds. Every other read
+ * (`arrayBuffer()`, `bytes()`, `text()`, `slice()`) throws: this class holds no
+ * bytes of its own, so it would give 0 bytes and collect no hashes.
+ */
+class BlobScannedFile extends Blob {
+	readonly #file: Blob;
+	readonly #hashes: Set<string>;
+
+	constructor(file: Blob, hashes: Set<string>) {
+		super();
+		this.#file = file;
+		this.#hashes = hashes;
+	}
+
+	override get size(): number {
+		return this.#file.size;
+	}
+
+	override stream(): ReadableStream<Uint8Array<ArrayBuffer>> {
+		const chunks = collectingBlobHashes(this.#file.stream(), this.#hashes);
+		return new ReadableStream<Uint8Array<ArrayBuffer>>({
+			async pull(controller) {
+				const next = await chunks.next();
+				if (next.done) controller.close();
+				else controller.enqueue(next.value);
+			},
+			async cancel() {
+				await chunks.return(undefined);
+			},
+		});
+	}
+
+	override async arrayBuffer(): Promise<ArrayBuffer> {
+		throw unstreamedRead("arrayBuffer");
+	}
+
+	override async bytes(): Promise<Uint8Array<ArrayBuffer>> {
+		throw unstreamedRead("bytes");
+	}
+
+	override async text(): Promise<string> {
+		throw unstreamedRead("text");
+	}
+
+	override slice(): Blob {
+		throw unstreamedRead("slice");
+	}
+}
+
+function unstreamedRead(method: string): Error {
+	return new Error(`A scanned transcript archive member is only streamed; ${method}() cannot read it`);
+}
+
+/** `chunks`, each fed to `digest` as it passes. */
+async function* digestedChunks(chunks: AsyncIterable<Uint8Array>, digest: Bun.SHA256): AsyncGenerator<Uint8Array> {
+	for await (const chunk of chunks) {
+		digest.update(chunk);
+		yield chunk;
+	}
 }
 
 /** Files under `dir` as `/`-separated relative paths, sorted; empty when `dir` does not exist. Symlinks are skipped. */
@@ -243,15 +362,18 @@ async function listFilesRecursive(dir: string): Promise<string[]> {
 	return files;
 }
 
-/** Write a tar to a sibling staging file and rename it over `target`, so a failure leaves no partial archive. */
+/**
+ * Write a tar to a sibling staging file and rename it over `target`, so a failure leaves no partial archive.
+ * File members stream into it, so the archive is never held in memory.
+ */
 async function writeArchiveAtomically(
 	target: string,
-	members: readonly (readonly [string, Archive.ArchiveMemberContent])[],
+	members: AsyncIterable<readonly [string, Archive.ArchiveMemberContent]>,
 ): Promise<void> {
-	const { writeArchive }: typeof Archive = require("@oh-my-pi/pi-utils/ar");
+	const { writeTarArchive }: typeof Archive = require("@oh-my-pi/pi-utils/ar");
 	const staging = `${target}.${Snowflake.next()}.tmp`;
 	try {
-		await writeArchive(staging, "tar", members);
+		await writeTarArchive(staging, members);
 		await replaceFileAtomically(staging, target);
 	} catch (error) {
 		await fs.promises.rm(staging, { force: true });
@@ -278,9 +400,7 @@ export async function packSession(sessionFile: string, outPath: string): Promise
 
 	const release = claimSessionOrRefuse(id, source, "pack");
 	try {
-		const journal = await fs.promises.readFile(source);
-		const journalText = journal.toString("utf8");
-		const header = parseSessionContent(journalText).entries[0];
+		const header = await firstJournalRecord(source);
 		if (header?.type !== "session") {
 			throw new SessionTransferError(`Not an omp session file (no session header): ${source}`);
 		}
@@ -290,53 +410,57 @@ export async function packSession(sessionFile: string, outPath: string): Promise
 			cwd: header.cwd,
 			omp: VERSION,
 		};
-		const members: (readonly [string, Archive.ArchiveMemberContent])[] = [
-			[MANIFEST_MEMBER, `${JSON.stringify(manifest, null, 2)}\n`],
-			[SESSION_MEMBER, journal],
-		];
-		const hashes = new Set<string>();
-		collectBlobHashes(journalText, hashes);
-
 		// Artifacts sit beside the journal's real name (see copySessionArtifacts).
 		let realSource = source;
 		try {
 			realSource = await fs.promises.realpath(source);
 		} catch {}
 		const artifactsDir = realSource.slice(0, -".jsonl".length);
-		if (realSource.endsWith(".jsonl")) {
-			for (const relative of await listFilesRecursive(artifactsDir)) {
-				const bytes = await fs.promises.readFile(path.join(artifactsDir, ...relative.split("/")));
-				members.push([`${ARTIFACTS_PREFIX}${relative}`, bytes]);
-				if (relative.endsWith(".jsonl")) collectBlobHashes(bytes.toString("utf8"), hashes);
+		const artifacts = realSource.endsWith(".jsonl") ? await listFilesRecursive(artifactsDir) : [];
+		const hashes = new Set<string>();
+		const blobs = new BlobStore(getBlobsDir());
+		const missingBlobs: string[] = [];
+		// File members are read only while the archive is written, and the transcripts are scanned for
+		// blob references as they stream in. The blobs come last: the archive writer takes each member
+		// only once the one before it is written, so they are the blobs the packed transcripts name.
+		async function* members(): AsyncGenerator<readonly [string, Archive.ArchiveMemberContent]> {
+			yield [MANIFEST_MEMBER, `${JSON.stringify(manifest, null, 2)}\n`];
+			yield [SESSION_MEMBER, new BlobScannedFile(Bun.file(source), hashes)];
+			for (const relative of artifacts) {
+				const artifact = Bun.file(path.join(artifactsDir, ...relative.split("/")));
+				yield [
+					`${ARTIFACTS_PREFIX}${relative}`,
+					relative.endsWith(".jsonl") ? new BlobScannedFile(artifact, hashes) : artifact,
+				];
+			}
+			for (const hash of [...hashes].sort()) {
+				// Only an absent blob is left out; one the store holds but cannot read fails the pack.
+				if ((await blobs.size(hash)) === null) {
+					missingBlobs.push(hash);
+					continue;
+				}
+				yield [`${BLOBS_PREFIX}${hash}`, blobs.file(hash)];
 			}
 		}
 
-		const blobs = new BlobStore(getBlobsDir());
-		const missingBlobs: string[] = [];
-		for (const hash of [...hashes].sort()) {
-			const data = await blobs.get(hash);
-			if (data) members.push([`${BLOBS_PREFIX}${hash}`, data]);
-			else missingBlobs.push(hash);
-		}
+		await writeArchiveAtomically(archivePath, members());
 		if (missingBlobs.length > 0) {
 			logger.warn("Packing session without blobs missing from the local store", { id, missingBlobs });
 		}
-
-		await writeArchiveAtomically(archivePath, members);
 		return { archivePath, id, missingBlobs };
 	} finally {
 		release();
 	}
 }
 
-/** A validated session archive, read fully into memory. */
+/** A validated session archive, its members streamed to files in the unpack's staging directory. */
 interface SessionArchiveContents {
 	manifest: SessionArchiveManifest;
-	journal: Uint8Array;
+	/** The staged journal. */
+	journal: string;
 	header: SessionHeader;
-	entries: SessionEntry[];
-	artifacts: [relative: string, bytes: Uint8Array][];
-	blobs: [hash: string, bytes: Uint8Array][];
+	artifacts: [relative: string, file: string][];
+	blobs: [hash: string, file: string][];
 }
 
 function isSafeRelativePath(relative: string): boolean {
@@ -370,52 +494,101 @@ function parseManifest(bytes: Uint8Array, archive: string): SessionArchiveManife
 	return { version, id, cwd, omp };
 }
 
+/** The hash a `blobs/<sha256>` member is named for; `undefined` for any other member. */
+function blobMemberHash(name: string): string | undefined {
+	if (!name.startsWith(BLOBS_PREFIX)) return undefined;
+	const hash = name.slice(BLOBS_PREFIX.length);
+	return BLOB_HASH_RE.test(hash) ? hash : undefined;
+}
+
 /**
- * Read and validate the whole archive before anything is written: member
- * layout, manifest version, journal header, and every blob's sha256.
+ * Read and validate the whole archive before anything is written outside
+ * `staging`: member layout, manifest version, journal header, and every
+ * blob's sha256. The members are read one after another, each streamed to its
+ * own file in `staging`, so no member is held in memory; a blob is hashed as
+ * it streams and refused there when its bytes do not match its name. Every
+ * member is read through one handle, so all of them come from the archive the
+ * unpack opened, even when another file is renamed over its path meanwhile.
  */
-async function readSessionArchive(archive: string): Promise<SessionArchiveContents> {
+async function readSessionArchive(archive: string, staging: TempDir): Promise<SessionArchiveContents> {
 	await requireFile(archive, "Archive");
-	const { readArchiveEntries, ArchiveError, formatArchivePathForError }: typeof Archive = require("@oh-my-pi/pi-utils/ar");
-	let members: Map<string, Uint8Array>;
+	const {
+		ArchiveError,
+		assertInMemorySize,
+		formatArchivePathForError,
+		heldFileSource,
+		openArchive,
+		writeChunksToFile,
+	}: typeof Archive = require("@oh-my-pi/pi-utils/ar");
+	const members: [name: string, file: string][] = [];
+	const handle = await fs.promises.open(archive, "r");
 	try {
-		members = await readArchiveEntries(
-			{ path: archive, format: "tar" },
+		const reader = await openArchive(
+			{ source: await heldFileSource(handle), format: "tar", path: archive },
 			{ limits: { maxInMemorySize: ARCHIVE_SIZE_LIMIT, maxMemberSize: ARCHIVE_SIZE_LIMIT } },
 		);
+		// Invariant: the bytes staged below total at most ARCHIVE_SIZE_LIMIT
+		// (2 GiB), checked here before any member is staged. Each member counts
+		// the bytes `readFileChunks` reads for it: those of the entry its path
+		// resolves to through directory symlinks, which can be another, larger
+		// member. A path that resolves to no entry counts its own size; staging
+		// refuses it. `assertInMemorySize` words the refusal as users already see it.
+		let total = 0;
+		for (const entry of reader.indexEntries()) {
+			if (entry.isDirectory) continue;
+			total += reader.getNode(entry.path)?.size ?? entry.size;
+			assertInMemorySize(total, reader.limits);
+		}
+		for (const entry of reader.indexEntries()) {
+			if (entry.isDirectory) continue;
+			const file = staging.join(`member-${members.length}`);
+			const hash = blobMemberHash(entry.path);
+			const digest = hash === undefined ? undefined : new Bun.SHA256();
+			const chunks = reader.readFileChunks(entry.path);
+			await writeChunksToFile(file, digest ? digestedChunks(chunks, digest) : chunks);
+			const actual = digest?.digest("hex");
+			if (actual !== hash) {
+				throw new SessionTransferError(
+					`Bad session archive ${archive}: blob ${hash} fails its sha256 check (content hashes to ${actual}). Nothing was unpacked.`,
+				);
+			}
+			members.push([entry.path, file]);
+		}
 	} catch (error) {
 		if (error instanceof ArchiveError) {
 			throw new SessionTransferError(`Bad session archive ${archive}: ${error.message}`);
 		}
 		throw error;
+	} finally {
+		await handle.close();
 	}
 
-	let manifestBytes: Uint8Array | undefined;
-	let journal: Uint8Array | undefined;
-	const artifacts: [string, Uint8Array][] = [];
-	const blobs: [string, Uint8Array][] = [];
-	for (const [name, bytes] of members) {
+	let manifestFile: string | undefined;
+	let journal: string | undefined;
+	const artifacts: [string, string][] = [];
+	const blobs: [string, string][] = [];
+	for (const [name, file] of members) {
+		const blobHash = blobMemberHash(name);
 		if (name === MANIFEST_MEMBER) {
-			manifestBytes = bytes;
+			manifestFile = file;
 		} else if (name === SESSION_MEMBER) {
-			journal = bytes;
+			journal = file;
 		} else if (name.startsWith(ARTIFACTS_PREFIX) && isSafeRelativePath(name.slice(ARTIFACTS_PREFIX.length))) {
-			artifacts.push([name.slice(ARTIFACTS_PREFIX.length), bytes]);
-		} else if (name.startsWith(BLOBS_PREFIX) && BLOB_HASH_RE.test(name.slice(BLOBS_PREFIX.length))) {
-			blobs.push([name.slice(BLOBS_PREFIX.length), bytes]);
+			artifacts.push([name.slice(ARTIFACTS_PREFIX.length), file]);
+		} else if (blobHash !== undefined) {
+			blobs.push([blobHash, file]);
 		} else {
 			throw new SessionTransferError(
 				`Bad session archive ${archive}: unexpected member "${formatArchivePathForError(name)}".`,
 			);
 		}
 	}
-	if (!manifestBytes) throw new SessionTransferError(`Bad session archive ${archive}: no manifest.json.`);
-	const manifest = parseManifest(manifestBytes, archive);
+	if (!manifestFile) throw new SessionTransferError(`Bad session archive ${archive}: no manifest.json.`);
+	const manifest = parseManifest(await Bun.file(manifestFile).bytes(), archive);
 	if (!journal) throw new SessionTransferError(`Bad session archive ${archive}: no session.jsonl.`);
 
-	const parsed = parseSessionContent(TEXT_DECODER.decode(journal));
-	const header = parsed.entries[0];
-	if (parsed.invalidHeader || header?.type !== "session") {
+	const header = await firstJournalRecord(journal);
+	if (!isValidSessionHeader(header)) {
 		throw new SessionTransferError(`Bad session archive ${archive}: session.jsonl has no session header.`);
 	}
 	if (header.id !== manifest.id) {
@@ -426,33 +599,44 @@ async function readSessionArchive(archive: string): Promise<SessionArchiveConten
 	if (!SESSION_ID_RE.test(header.id)) {
 		throw new SessionTransferError(`Bad session archive ${archive}: invalid session id.`);
 	}
-	for (const [hash, bytes] of blobs) {
-		const actual = new Bun.SHA256().update(bytes).digest("hex");
-		if (actual !== hash) {
-			throw new SessionTransferError(
-				`Bad session archive ${archive}: blob ${hash} fails its sha256 check (content hashes to ${actual}). Nothing was unpacked.`,
-			);
-		}
-	}
-	return { manifest, journal, header, entries: parsed.entries.filter(isBodyEntry), artifacts, blobs };
+	return { manifest, journal, header, artifacts, blobs };
+}
+
+/** Ids of the body entries of the journal at `file`, in file order, visited one entry at a time. */
+async function bodyEntryIds(file: string): Promise<string[]> {
+	const ids: string[] = [];
+	await visitEntriesFromFile(file, entry => {
+		if (isBodyEntry(entry)) ids.push(entry.id);
+	});
+	return ids;
 }
 
 /**
- * Whether `local` is a prefix of `incoming` by entry id. `departed` markers
- * only `local` has are skipped: they are appended to the copy left behind
- * after it was packed, so they never reach the copy that moved on.
+ * Whether the session at `local` is a prefix of `incoming` (body entry ids)
+ * by entry id, visiting `local` one entry at a time. `departed` markers only
+ * `local` has are skipped: they are appended to the copy left behind after it
+ * was packed, so they never reach the copy that moved on. A copy removed since
+ * it was found holds no entries, so it is a prefix; any other read error throws.
  */
-function isTranscriptPrefix(local: readonly SessionEntry[], incoming: readonly SessionEntry[]): boolean {
+async function isTranscriptPrefix(local: string, incoming: readonly string[]): Promise<boolean> {
 	let next = 0;
-	for (const entry of local) {
-		if (next < incoming.length && incoming[next].id === entry.id) {
-			next++;
-			continue;
-		}
-		if (sessionTransferDetails(entry)?.kind === "departed") continue;
-		return false;
+	let prefix = true;
+	try {
+		await visitEntriesFromFile(local, entry => {
+			if (!isBodyEntry(entry)) return;
+			if (next < incoming.length && incoming[next] === entry.id) {
+				next++;
+				return;
+			}
+			if (sessionTransferDetails(entry)?.kind === "departed") return;
+			prefix = false;
+			return false;
+		});
+	} catch (error) {
+		if (isEnoent(error)) return true;
+		throw error;
 	}
-	return true;
+	return prefix;
 }
 
 /** Top-level session files holding session `id`: every project bucket, plus `sessionDir` when it lies elsewhere. */
@@ -558,11 +742,12 @@ async function placeSession(
 
 /**
  * Unpack a {@link packSession} archive so the session continues in
- * `options.cwd`. The archive is validated in full (manifest version, member
- * layout, every blob's sha256) before anything is written. Blobs go into the
- * local blob store; the journal and artifacts are staged in a temp directory
- * and moved with {@link SessionManager.openRelocated}, which rewrites the
- * header `cwd`. An `arrived` marker is appended.
+ * `options.cwd`. The archive's members stream one by one into a temp
+ * directory and are validated in full there (manifest version, member layout,
+ * every blob's sha256) before anything else is written. Blobs go into the
+ * local blob store; the journal and artifacts are moved with
+ * {@link SessionManager.openRelocated}, which rewrites the header `cwd`. An
+ * `arrived` marker is appended.
  *
  * One live copy: local copies of the same session whose entries are a prefix
  * of the incoming ones are replaced (restored if placing fails); if any local
@@ -573,34 +758,41 @@ export async function unpackSession(archivePath: string, options: UnpackSessionO
 	const archive = path.resolve(archivePath);
 	const cwd = path.resolve(options.cwd);
 	await requireDirectory(cwd);
-	const contents = await readSessionArchive(archive);
-	const { header } = contents;
-	const id = header.id;
-	const recordedCwd = header.cwd || contents.manifest.cwd;
-	const sessionDir = options.sessionDir ? path.resolve(options.sessionDir) : SessionManager.getDefaultSessionDir(cwd);
-	const arrival: SessionTransferDetails = { kind: "arrived", fromCwd: recordedCwd, cwd };
-
-	// Blobs first: the loader hydrates image refs while the journal is opened.
-	// Content-addressed and verified, so an aborted unpack leaves nothing wrong.
-	const blobStore = new BlobStore(getBlobsDir());
-	for (const [hash, bytes] of contents.blobs) {
-		await blobStore.put(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength), { hash });
-	}
-
 	const staging = await TempDir.create("@omp-session-unpack-");
 	try {
+		const contents = await readSessionArchive(archive, staging);
+		const { header } = contents;
+		const id = header.id;
+		const recordedCwd = header.cwd || contents.manifest.cwd;
+		const sessionDir = options.sessionDir
+			? path.resolve(options.sessionDir)
+			: SessionManager.getDefaultSessionDir(cwd);
+		const arrival: SessionTransferDetails = { kind: "arrived", fromCwd: recordedCwd, cwd };
+
+		// Blobs first: the loader hydrates image refs while the journal is opened.
+		// Content-addressed and verified, so an aborted unpack leaves nothing wrong.
+		// One stored image at a time is read into memory to file it.
+		const blobStore = new BlobStore(getBlobsDir());
+		for (const [hash, file] of contents.blobs) {
+			await blobStore.put(await fs.promises.readFile(file), { hash });
+		}
+
 		const stagedFile = staging.join(`${header.timestamp.replace(/[^\w-]/g, "-")}_${id}.jsonl`);
-		await Bun.write(stagedFile, contents.journal);
+		await fs.promises.rename(contents.journal, stagedFile);
 		const stagedArtifacts = stagedFile.slice(0, -".jsonl".length);
-		for (const [relative, bytes] of contents.artifacts) {
-			await Bun.write(path.join(stagedArtifacts, ...relative.split("/")), bytes);
+		for (const [relative, file] of contents.artifacts) {
+			const target = path.join(stagedArtifacts, ...relative.split("/"));
+			await fs.promises.mkdir(path.dirname(target), { recursive: true });
+			await fs.promises.rename(file, target);
 		}
 
 		const localCopies = await findLocalCopies(id, sessionDir);
 		let diverged = false;
-		for (const file of localCopies) {
-			const entries = (await loadEntriesFromFile(file)).filter(isBodyEntry);
-			if (!isTranscriptPrefix(entries, contents.entries)) diverged = true;
+		if (localCopies.length > 0) {
+			const incoming = await bodyEntryIds(stagedFile);
+			for (const file of localCopies) {
+				if (!(await isTranscriptPrefix(file, incoming))) diverged = true;
+			}
 		}
 
 		if (diverged) {
