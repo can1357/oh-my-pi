@@ -1389,8 +1389,11 @@ mod tests {
 			if len == 0 || len > 64 * 1024 {
 				continue;
 			}
+			// Skip a file that does not fit rather than end the sample there: a
+			// file added anywhere before that point shifts every later stride
+			// pick, and ending at the first misfit made the count hinge on it.
 			if used + len > budget {
-				break;
+				continue;
 			}
 			used += len;
 			picked.push(path.clone());

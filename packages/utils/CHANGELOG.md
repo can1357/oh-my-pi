@@ -10,6 +10,7 @@
 ### Added
 
 - Added `getBunStubDir()` to expose the cache directory used for the `bun` executable stub in compiled applications.
+- Added `ptree.spawnToolProcess`, `ptree.exec`'s `toolOomScore` option, and `setToolOomScore`/`toolShellScript` (`@oh-my-pi/pi-utils/oom-score`) to start Linux tool processes with `oom_score_adj` 1000 ([#20824](https://github.com/can1357/oh-my-pi/pull/20824) by [@sjawhar](https://github.com/sjawhar))
 
 ### Fixed
 

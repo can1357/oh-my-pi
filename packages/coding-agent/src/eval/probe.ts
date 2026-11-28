@@ -15,10 +15,14 @@
  *
  * {@link runBoundedProbe} spawns with stdin/stdout/stderr detached, enforces a
  * wall-clock timeout, and honors an optional AbortSignal so a turn abort tears
- * the probe down instead of leaking the subprocess.
+ * the probe down instead of leaking the subprocess. The probe is a tool
+ * process: on Linux it runs with the OOM adjustment of tool processes from
+ * its first instruction (`ptree.spawnToolProcess`).
  */
 
 import { Process } from "@oh-my-pi/pi-natives";
+import { ptree } from "@oh-my-pi/pi-utils";
+import type { Subprocess } from "bun";
 
 /** Wall-clock ceiling for a runtime-availability probe when no smaller bound is supplied. */
 export const DEFAULT_PROBE_TIMEOUT_MS = 10_000;
@@ -79,19 +83,15 @@ export async function runBoundedProbe(
 	const ceiling = Math.max(timeoutCeilingMs ?? 0, DEFAULT_PROBE_TIMEOUT_MS);
 	const bound = Math.min(timeoutMs && timeoutMs > 0 ? timeoutMs : ceiling, ceiling);
 	const detached = process.platform !== "win32";
-	const proc = Bun.spawn(command, {
-		cwd,
-		env,
-		stdin: "ignore",
-		stdout: "ignore",
-		stderr: "ignore",
-		windowsHide: true,
-		detached,
-	});
-	const root = detached ? null : Process.fromPid(proc.pid);
+	// Ends the probe's start (its launcher) at the bound or on abort; the kill below ends the probe once started.
+	const starting = new AbortController();
+	let proc: Subprocess<"ignore", "ignore", "ignore"> | undefined;
+	let root: Process | null = null;
 	let timedOut = false;
 	let aborted = false;
 	const forceKill = (): void => {
+		starting.abort();
+		if (!proc) return;
 		if (detached) {
 			// Bun makes the spawned PID the group ID. Signal it even if the
 			// leader has exited, because its interpreter can still be in the group.
@@ -118,6 +118,26 @@ export async function runBoundedProbe(
 	};
 	signal?.addEventListener("abort", onAbort, { once: true });
 	try {
+		try {
+			proc = await ptree.spawnToolProcess(command, {
+				cwd,
+				env,
+				stdin: "ignore",
+				stdout: "ignore",
+				stderr: "ignore",
+				windowsHide: true,
+				detached,
+				signal: starting.signal,
+				killSignal: "SIGKILL",
+			});
+		} catch (error) {
+			// The bound or the abort ended the start: nothing runs.
+			if (timedOut || aborted) return { exitCode: null, timedOut, aborted };
+			throw error;
+		}
+		root = detached ? null : Process.fromPid(proc.pid);
+		// The bound or the abort came while it started.
+		if (timedOut || aborted) forceKill();
 		const exitCode = await proc.exited;
 		return { exitCode: timedOut || aborted ? null : exitCode, timedOut, aborted };
 	} finally {

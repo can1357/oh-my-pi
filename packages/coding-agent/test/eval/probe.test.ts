@@ -2,7 +2,7 @@
 // timeout/abort teardown is inherently wall-clock bound. Fake timers cannot
 // advance a child process's execution or resolve its `exited` promise, so the
 // real-timer exception in ts-no-test-timers applies here.
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -106,6 +106,36 @@ describe("runBoundedProbe", () => {
 		expect(result.exitCode).toBeNull();
 		expect(Date.now() - start).toBeLessThan(5_000);
 	});
+
+	// Failure mode: the abort comes while the probe's launcher starts (Linux), and the probe is then spawned in the
+	// launcher's place with the aborted signal, which `Bun.spawn` refuses with an `AbortError`: the probe rejects
+	// instead of reporting the abort. The launcher's spawn is where the abort lands here.
+	test.skipIf(process.platform !== "linux")(
+		"an abort while the probe's launcher starts is reported, and nothing is spawned in its place",
+		async () => {
+			const launcher = `/proc/${process.pid}/exe`;
+			const caller = new AbortController();
+			const spawned: string[] = [];
+			const spawn = Bun.spawn.bind(Bun);
+			const spy = spyOn(Bun, "spawn").mockImplementation(((cmd: string[], options?: object) => {
+				spawned.push(cmd[0]);
+				if (cmd[0] === launcher) caller.abort();
+				return spawn(cmd, options as never);
+			}) as unknown as typeof Bun.spawn);
+			let outcome: unknown;
+			try {
+				outcome = await runBoundedProbe(HANG, {
+					cwd: process.cwd(),
+					env: baseEnv(),
+					signal: caller.signal,
+				}).catch((error: unknown) => error);
+			} finally {
+				spy.mockRestore();
+			}
+			expect(outcome).toEqual({ exitCode: null, timedOut: false, aborted: true });
+			expect(spawned).toEqual([launcher]);
+		},
+	);
 
 	test("a fast probe reports its real exit code", async () => {
 		const ok = await runBoundedProbe([bun, "-e", "process.exit(0)"], {

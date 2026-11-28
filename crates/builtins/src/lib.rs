@@ -18,6 +18,8 @@ mod file_backup;
 #[cfg(any(feature = "util.ls", feature = "util.stat", feature = "util.find"))]
 mod fsmeta;
 mod host;
+#[cfg(target_os = "linux")]
+pub use host::prefer_oom_kill;
 #[cfg(unix)]
 pub use host::read_process_umask;
 mod openfile;

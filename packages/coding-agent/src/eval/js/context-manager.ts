@@ -971,6 +971,8 @@ function spawnBunWorker(): JsEvalWorkerHandle {
 
 function spawnJsProcess(sessionId?: string): JsEvalWorkerHandle {
 	const spawned = createWorkerSubprocess<WorkerOutbound>({
+		// A tool process, as the Python kernel is: its entry (`cli.ts`) sets its OOM adjustment first,
+		// and every process its cells start inherits it.
 		spawnCommand: resolveWorkerSpawnCmd(JS_EVAL_PROCESS_ARG, { sameBuild: true }),
 		env: jsKernelEnv(workerEnvFromParent()),
 		exitLabel: "JS eval worker",

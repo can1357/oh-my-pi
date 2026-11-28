@@ -8043,6 +8043,8 @@ fn shell_command(cmd: &[u8], host: &Host) -> io::Result<ProcessCommand> {
 	// `output()` captures the child's stdio instead of inheriting the TUI's.
 	c.current_dir(host.native_cwd()?);
 	c.env_clear().envs(host.env());
+	// On Linux `sh` gets the OOM adjustment of tool processes.
+	crate::host::tool_process(&mut c, None, crate::host::ToolEnv::Cleared);
 	Ok(c)
 }
 
@@ -9755,6 +9757,57 @@ mod tests {
 		assert_eq!(code, 0);
 		assert_eq!(capture.out(), "world\n");
 		assert_eq!(capture.err(), "");
+	}
+
+	/// Failure mode: the command an `s///e` runs, its child included, keeps
+	/// Oh My Pi's OOM adjustment, so the kernel, picking one process to kill
+	/// for lack of memory, may kill Oh My Pi in its place; or the spawn
+	/// changes Oh My Pi's own value.
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn builtin_execute_substitution_sets_tool_oom_score() {
+		let score = "/proc/self/oom_score_adj";
+		let Some(before) =
+			crate::host::below_tool_score(module_path!(), "builtin_execute_substitution_sets_tool_oom_score")
+		else {
+			return;
+		};
+		let (code, capture) = crate::host::run_util::<Sed>(
+			&["s/^run //e"],
+			"run read -r score < /proc/self/oom_score_adj; printf '%s\\n' \"$score\"; \
+			 /bin/cat /proc/self/oom_score_adj; :\n",
+			"/",
+		);
+		assert_eq!(std::fs::read_to_string(score).unwrap(), before);
+		assert_eq!((code, capture.out().as_str(), capture.err().as_str()), (0, "1000\n1000\n", ""));
+	}
+
+	/// A test host whose `PATH` holds only an `sh` that is `script`, for
+	/// `s///e` to run.
+	#[cfg(target_os = "linux")]
+	fn host_with_sh(script: &str) -> (tempfile::TempDir, Host, crate::host::Capture) {
+		let dir = tempfile::tempdir().unwrap();
+		crate::host::executable(dir.path(), "sh", script);
+		let (mut host, capture) = Host::for_test("sed", "run true\n", "/");
+		host.set_test_var("PATH", dir.path().to_str().unwrap());
+		(dir, host, capture)
+	}
+
+	/// Failure mode: an `sh` for `s///e` that cannot start (a script whose
+	/// `#!` interpreter is missing, a file without `#!` that the kernel
+	/// cannot load) runs as a command that printed nothing, or as shell
+	/// code, where sed reports an error in the subprocess and exits 4, as
+	/// GNU sed does.
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn builtin_execute_substitution_reports_a_shell_that_cannot_exec() {
+		for script in ["#!/nonexistent/interpreter\n", "echo ran as shell code\n"] {
+			let (_dir, mut host, capture) = host_with_sh(script);
+			let status = Sed { matches: test_matches(&["s/^run //e"]) }.run(&mut host);
+			let err = capture.err();
+			assert_eq!(status, 4, "{script:?}: {err}");
+			assert!(err.contains("error in subprocess"), "{script:?}: {err}");
+		}
 	}
 
 	#[test]

@@ -1144,6 +1144,8 @@ pub(crate) fn spawn_shell(
 	let mut cmd = env.command(program).map_err(|err| exec_error(&err))?;
 	cmd.args(&argv[1..]);
 	cmd.envs(cfg.env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+	// On Linux the remote shell gets the OOM adjustment of tool processes.
+	crate::host::tool_process(&mut cmd, None, crate::host::ToolEnv::Cleared);
 	let blocking = cfg.blocking_io || rsh_like;
 
 	let ctl = ConnCtl::default();

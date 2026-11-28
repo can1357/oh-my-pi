@@ -34,6 +34,18 @@ frames (a `view` pretty-prints text the cell already printed).
 
 from __future__ import annotations
 
+# A tool process: the host starts this interpreter through its tool process
+# launcher (`ptree.spawnToolProcess`), which sets its OOM adjustment to 1000
+# before Python's own startup (`site`, `sitecustomize`) runs, so the kernel
+# prefers to kill it, and what its cells start, over the host when it picks
+# one process to kill for lack of memory. Set it here too (Linux, best
+# effort) for a start where the launcher could not run.
+try:
+    with open("/proc/self/oom_score_adj", "w") as _oom_score_adj:
+        _oom_score_adj.write("1000")
+except OSError:
+    pass
+
 import ast
 import asyncio
 import base64

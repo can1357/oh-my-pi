@@ -1752,6 +1752,8 @@ fn notify(host: &Host, title: &'static str, body: String) {
 		.stdin(std::process::Stdio::null())
 		.stdout(std::process::Stdio::null())
 		.stderr(std::process::Stdio::null());
+	// On Linux the notifier gets the OOM adjustment of tool processes.
+	crate::host::tool_process(&mut command, None, crate::host::ToolEnv::Cleared);
 	// Spawned and reaped off the runtime; a missing notifier is not an error.
 	std::thread::spawn(move || {
 		if let Ok(mut child) = command.spawn() {

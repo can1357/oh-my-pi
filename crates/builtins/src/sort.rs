@@ -45,6 +45,8 @@ impl Compressor {
 		if decompress {
 			command.arg("-d");
 		}
+		// On Linux the compressor gets the OOM adjustment of tool processes.
+		crate::host::tool_process(&mut command, None, crate::host::ToolEnv::Cleared);
 		let mut child = command
 			.spawn()
 			.map_err(|err| SortError::CompressProgExecutionFailed {
@@ -1729,7 +1731,7 @@ pub fn ext_sort(
 	let mut effective_settings = settings.clone();
 	if let Some(compress) = &settings.compress {
 		let probe = compress.env.command(&compress.prog).and_then(|mut probe| {
-			probe
+			crate::host::tool_process(&mut probe, None, crate::host::ToolEnv::Cleared)
 				.stdin(std::process::Stdio::null())
 				.stdout(std::process::Stdio::null())
 				.stderr(std::process::Stdio::null())

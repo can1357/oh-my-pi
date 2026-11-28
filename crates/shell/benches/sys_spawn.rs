@@ -3,8 +3,9 @@
 //!
 //! - `std_command`: `std::process::Command` spawn + wait, the baseline.
 //! - `posix_spawn`: `NativeSpawner`, umask equal to the process's, nothing
-//!   ignored: the `posix_spawn` path.
-//! - `fork_exec`: the same with a different umask: the fork + `pre_exec` path.
+//!   ignored: the `posix_spawn` path on macOS, the vfork path on Linux.
+//! - `fork_exec`: the same with a different umask: the fork + `pre_exec` path
+//!   on macOS and other Unix systems, the vfork path on Linux.
 //! - `posix_spawn_pumped`: `posix_spawn` with stdout pumped into an engine file
 //!   (pump thread + completion on drain).
 //!

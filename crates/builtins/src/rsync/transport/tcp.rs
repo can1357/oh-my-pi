@@ -559,6 +559,8 @@ fn sock_exec(
 	{
 		use std::os::fd::OwnedFd;
 		let mut cmd = cmd;
+		// On Linux the connect program gets the OOM adjustment of tool processes.
+		crate::host::tool_process(&mut cmd, None, crate::host::ToolEnv::Cleared);
 		let (ours, theirs) = socketpair_tcp(&cancel).map_err(|err| {
 			if is_cancel(&err) {
 				RsyncError::cancelled()

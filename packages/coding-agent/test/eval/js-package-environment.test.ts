@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -7,9 +7,18 @@ import { Settings } from "../../src/config/settings";
 import { disposeAllVmContexts } from "../../src/eval/js/context-manager";
 import { executeJs } from "../../src/eval/js/executor";
 import type { JsExecutorOptions } from "../../src/eval/js/executor";
-import { resolveJsPackageEnvironment } from "../../src/eval/js/package-installer";
+import { installJsPackages, resolveJsPackageEnvironment } from "../../src/eval/js/package-installer";
+import * as workerClient from "../../src/subprocess/worker-client";
 import type { ToolSession } from "../../src/tools";
-import { beginSettingsTest, restoreSettingsTestState } from "../helpers/settings-test-state";
+import {
+	BELOW_TOOL_SCORE,
+	BELOW_TOOL_SCORE_TIMEOUT_MS,
+	belowToolScore,
+} from "../../../utils/test/helpers/tool-process";
+import { beginSettingsTest, restoreEnvValue, restoreSettingsTestState } from "../helpers/settings-test-state";
+
+/** The timeout of a case that runs an installer: its launch, its run and the lock around it. */
+const INSTALL_TIMEOUT_MS = 30_000;
 
 function makeSession(cwd: string, evalSessionId: string, options?: { autoProvision?: boolean }): ToolSession {
 	return {
@@ -77,6 +86,146 @@ describe("persistent JavaScript package environments", () => {
 				]),
 		);
 	});
+
+	/** Install a package into a project environment with `executable` as the runtime that installs it. */
+	async function installWithRuntime(workspace: TempDir, executable: string): Promise<void> {
+		const state = beginSettingsTest();
+		setAgentDir(workspace.join("agent"));
+		const resolve = spyOn(workerClient, "resolveExecutablePath").mockReturnValue(executable);
+		try {
+			await installJsPackages({
+				packages: ["example-package"],
+				cwd: workspace.path(),
+				environment: "project",
+				autoProvision: false,
+			});
+		} finally {
+			resolve.mockRestore();
+			restoreSettingsTestState(state);
+		}
+	}
+
+	// Failure mode: the package installer, its child included, keeps Oh My Pi's OOM adjustment, so the kernel, picking
+	// one process to kill for lack of memory, may kill Oh My Pi in its place; or the spawn changes Oh My Pi's value.
+	const INSTALLER_SCORE = "sets the score of the package installer and its child, not the host";
+	it.skipIf(!BELOW_TOOL_SCORE)(
+		INSTALLER_SCORE,
+		async () => {
+			await belowToolScore(import.meta.path, INSTALLER_SCORE, async before => {
+				using workspace = TempDir.createSync("@omp-js-package-score-");
+				const executable = workspace.join("bun");
+				const score = "/proc/self/oom_score_adj";
+				await fs.writeFile(
+					executable,
+					[
+						"#!/bin/sh",
+						'exec > "$3/installer-scores"',
+						`read -r score < ${score}`,
+						`printf '%s\\n' "$score"`,
+						`/bin/cat ${score}; :`,
+					].join("\n"),
+					{ mode: 0o700 },
+				);
+				await installWithRuntime(workspace, executable);
+				expect(await Bun.file(score).text()).toBe(before);
+				expect(await Bun.file(workspace.join("installer-scores")).text()).toBe("1000\n1000\n");
+			});
+		},
+		BELOW_TOOL_SCORE_TIMEOUT_MS,
+	);
+
+	// Failure mode: the installer gets the environment a shell imports instead of this process's: `dash` drops
+	// names that are not shell identifiers (an exported Bash function) and resets `IFS` and `OPTIND`.
+	it.skipIf(process.platform !== "linux" || !Bun.which("python3"))(
+		"starts the package installer with this process's environment unchanged",
+		async () => {
+			using workspace = TempDir.createSync("@omp-js-package-env-");
+			const executable = workspace.join("bun");
+			const vars: Record<string, string> = { "BASH_FUNC_f%%": "() { echo f; }", "a.b": "1", IFS: ":", OPTIND: "5" };
+			await fs.writeFile(
+				executable,
+				[
+					"#!/usr/bin/env python3",
+					"import json, os, sys",
+					`names = ${JSON.stringify(Object.keys(vars))}`,
+					'with open(os.path.join(sys.argv[3], "installer-env"), "w") as out:',
+					"    json.dump({name: os.environ.get(name) for name in names}, out)",
+				].join("\n"),
+				{ mode: 0o700 },
+			);
+			const saved = Object.keys(vars).map(name => [name, Bun.env[name]] as const);
+			Object.assign(Bun.env, vars);
+			try {
+				await installWithRuntime(workspace, executable);
+			} finally {
+				for (const [name, value] of saved) restoreEnvValue(name, value);
+			}
+			expect(await Bun.file(workspace.join("installer-env")).json()).toEqual(vars);
+		},
+		INSTALL_TIMEOUT_MS,
+	);
+
+	/** A spawn's or an install's failure: its code, its errno (positive) and its message. */
+	interface Failure {
+		code: string | undefined;
+		errno: number | undefined;
+		message: string;
+	}
+
+	/**
+	 * Install a package into a project environment with `body`, an executable file, as the runtime that installs
+	 * it: that file, what the install throws, and what a spawn of that file throws.
+	 */
+	async function installWith(
+		body: string,
+	): Promise<{ executable: string; install: Failure | "installed"; spawn: Failure | "started" }> {
+		using workspace = TempDir.createSync("@omp-js-package-installer-");
+		const executable = workspace.join("bun");
+		await fs.writeFile(executable, body, { mode: 0o700 });
+		const failure = (error: NodeJS.ErrnoException): Failure => ({
+			code: error.code,
+			errno: error.errno === undefined ? undefined : Math.abs(error.errno),
+			message: error.message,
+		});
+		let spawn: Failure | "started" = "started";
+		try {
+			Bun.spawn([executable], { stdout: "ignore", stderr: "ignore" }).kill();
+		} catch (error) {
+			spawn = failure(error as NodeJS.ErrnoException);
+		}
+		const install = await installWithRuntime(workspace, executable).then(() => "installed" as const, failure);
+		return { executable, install, spawn };
+	}
+
+	// Failure mode: an installer that cannot start (a script whose `#!` interpreter is missing, a file without
+	// `#!` that the kernel cannot load) is reported as a Bun that ran and exited 127, or runs as shell code. The
+	// install fails with the errno of the installer's exec, the one its own spawn fails with.
+	it.skipIf(process.platform !== "linux")(
+		"fails an installer that cannot exec with the error of its exec",
+		async () => {
+			for (const [body, code] of [
+				["#!/nonexistent/interpreter\n", "ENOENT"],
+				["echo ran as shell code\n", "ENOEXEC"],
+			]) {
+				const { executable, install, spawn } = await installWith(body);
+				expect(spawn).toMatchObject({ code });
+				if (spawn === "started") throw new Error(`${executable} started`);
+				expect(install).toMatchObject({ code: spawn.code, errno: spawn.errno });
+				expect(install).toMatchObject({ message: expect.stringContaining(executable) });
+			}
+		},
+		INSTALL_TIMEOUT_MS,
+	);
+
+	// Failure mode: an installer that starts and exits 127 is taken for one that could not start.
+	it.skipIf(process.platform !== "linux")(
+		"reports an installer that exits 127 by its exit",
+		async () => {
+			const { install } = await installWith("#!/bin/sh\nexit 127\n");
+			expect(install).toMatchObject({ code: undefined, message: expect.stringContaining("(exit 127)") });
+		},
+		INSTALL_TIMEOUT_MS,
+	);
 
 	it("refuses an implicit managed environment bootstrap when auto-provisioning is disabled", async () => {
 		using workspace = TempDir.createSync("@omp-js-package-policy-");

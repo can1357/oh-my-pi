@@ -9,6 +9,7 @@ import * as path from "node:path";
 import { PtySession } from "@oh-my-pi/pi-natives";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { shellMounts, shellProcessCommand } from "../src/exec/shell-process";
+import { BELOW_TOOL_SCORE, BELOW_TOOL_SCORE_TIMEOUT_MS, belowToolScore } from "../../utils/test/helpers/tool-process";
 import type { ShellProcessSpec } from "../src/exec/shell-process-protocol";
 import type { Skill } from "../src/extensibility/skills";
 import type { ToolSession } from "../src/tools";
@@ -92,7 +93,27 @@ function onTerminal(
 	};
 }
 
+const OOM_SCORE_PATH = "/proc/self/oom_score_adj";
+// Bare cat is an in-process builtin; /bin/cat is a real child.
+const OOM_SCORE_COMMAND = `cat ${OOM_SCORE_PATH}; /bin/cat ${OOM_SCORE_PATH}; :`;
+
 describe("shell process on pipes", () => {
+	// Failure mode: the bash tool's shell process, or its child, keeps Oh My Pi's OOM adjustment, so Linux, picking
+	// one process to kill for lack of memory, may kill Oh My Pi in its place; or the spawn changes Oh My Pi's value.
+	const PIPES_SCORE = "sets the score of the service shell and its child, not the host";
+	it.skipIf(!BELOW_TOOL_SCORE)(
+		PIPES_SCORE,
+		async () => {
+			await belowToolScore(import.meta.path, PIPES_SCORE, async before => {
+				const result = await run({ command: OOM_SCORE_COMMAND });
+				expect(await Bun.file(OOM_SCORE_PATH).text()).toBe(before);
+				expect(result.exitCode, result.stderr).toBe(0);
+				expect(result.stdout).toBe("1000\n1000\n");
+			});
+		},
+		BELOW_TOOL_SCORE_TIMEOUT_MS,
+	);
+
 	it("runs omp's utilities and tools ahead of PATH on its own stdin, and exits with the command's status", async () => {
 		using tempDir = TempDir.createSync("@omp-shell-process-");
 		// No directory on the search path has any of them.
@@ -369,6 +390,23 @@ describe.skipIf(process.platform === "win32")("shell process URL paths", () => {
 });
 
 describe.skipIf(process.platform === "win32")("shell process on a pseudo-terminal", () => {
+	// Failure mode: the shell process on a terminal, or its child, keeps Oh My Pi's OOM adjustment, so Linux, picking
+	// one process to kill for lack of memory, may kill Oh My Pi in its place; or the spawn changes Oh My Pi's value.
+	const PTY_SCORE = "sets the score of the PTY shell and its child, not the host";
+	it.skipIf(!BELOW_TOOL_SCORE)(
+		PTY_SCORE,
+		async () => {
+			await belowToolScore(import.meta.path, PTY_SCORE, async before => {
+				using tempDir = TempDir.createSync("@omp-shell-process-tty-");
+				const shell = onTerminal(OOM_SCORE_COMMAND, tempDir.path());
+				expect(await shell.done).toBe(0);
+				expect(await Bun.file(OOM_SCORE_PATH).text()).toBe(before);
+				expect(shell.output().trim()).toBe("1000\n1000");
+			});
+		},
+		BELOW_TOOL_SCORE_TIMEOUT_MS,
+	);
+
 	it("is the terminal's shell: its programs see a terminal and reach it through /dev/tty", async () => {
 		using tempDir = TempDir.createSync("@omp-shell-process-tty-");
 		const shell = onTerminal(

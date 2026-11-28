@@ -1,19 +1,34 @@
 //! Unix spawning.
 //!
-//! **Paths.** `posix_spawn` (macOS; Linux with glibc ≥ 2.29) whenever it can
-//! express the spec: placement via `POSIX_SPAWN_SETSID`/`SETPGROUP`, stdio
-//! and extra fds via `adddup2`, cwd via `addchdir_np`, every signal not to be
-//! ignored reset to its default (`SETSIGDEF`, which restores `SIGPIPE` that
-//! Rust hosts ignore), an empty signal mask, and on macOS
-//! `POSIX_SPAWN_CLOEXEC_DEFAULT` so no stray host fd leaks into the child.
-//! It cannot set a umask or *ignore* a signal, so a spec whose umask differs
-//! from the process's, or that ignores a signal the host does not ignore,
-//! takes the fork path: std's `Command` with an async-signal-safe `pre_exec`
-//! hook (umask, extra fds, dispositions, `setsid`). A spec with
-//! redirections for the process to apply ([`SpawnSpec::redirs`]) takes a
-//! bare `fork`: std's `Command` and `posix_spawn` both wait for the exec,
-//! and an open in the child may wait for a FIFO's other end, which only the
-//! child may do (`fork_redirs`).
+//! **Paths.** On Linux an external starts in a vfork child (`vfork`): a
+//! `clone(CLONE_VM | CLONE_VFORK)` child, cloned by a launcher thread of the
+//! spawning thread (whose own signal mask never changes), that, on data
+//! prepared before the clone, places itself, takes a foreground job's
+//! terminal, sets the umask and cwd, installs the fds, sets every signal's
+//! disposition, empties its signal mask, sets its OOM adjustment and the
+//! resource limits, and execs the program. The clone copies none of the
+//! host's memory, and the kernel lets a vfork child set its own OOM
+//! adjustment without changing the host's. The adjustment, 1000, has the
+//! kernel kill the external and what it starts before the host when it
+//! picks one process to kill for lack of memory; it does not spare the host
+//! when a cgroup is killed as a whole (`memory.oom.group=1`).
+//!
+//! On macOS, `posix_spawn` whenever it can express the spec: placement via
+//! `POSIX_SPAWN_SETSID`/`SETPGROUP`, stdio and extra fds via `adddup2`, cwd
+//! via `addchdir_np`, every signal not to be ignored reset to its default
+//! (`SETSIGDEF`, which restores `SIGPIPE` that Rust hosts ignore), an empty
+//! signal mask, and `POSIX_SPAWN_CLOEXEC_DEFAULT` so no stray host fd leaks
+//! into the child. It cannot set a umask or *ignore* a signal, so a spec
+//! whose umask differs from the process's, or that ignores a signal the host
+//! does not ignore, takes the fork path: std's `Command` with an
+//! async-signal-safe `pre_exec` hook (umask, extra fds, dispositions,
+//! `setsid`), the only path on other Unix systems.
+//!
+//! A spec with redirections for the process to apply
+//! ([`SpawnSpec::redirs`]) takes a bare `fork`: the other paths wait for the
+//! exec, and an open in the child may wait for a FIFO's other end, which
+//! only the child may do (`fork_redirs`). On Linux that child sets its OOM
+//! adjustment too.
 //!
 //! **Placement** follows [`Sessions`]: `Detach` makes every external a
 //! session leader; `Share` uses the `setpgid` leader idiom (`New` leads a
@@ -24,9 +39,9 @@
 //! then targets the child's pid alone (a [`Scope`]). A job-controlled spawn
 //! (`PgroupSpec::Job`, under `Share` or `Inherit`) is placed like a `Share`
 //! one; a foreground job's child also takes the shell's terminal before it
-//! execs (the fork path: `posix_spawn` cannot), and the parent places it
-//! and hands over the terminal again after the spawn, so neither side
-//! races the other.
+//! execs (the vfork child on Linux, the fork path elsewhere: `posix_spawn`
+//! cannot), and the parent places it and hands over the terminal again
+//! after the spawn, so neither side races the other.
 //!
 //! **Waiting** reports stops and continues besides the exit
 //! ([`ExtProc::poll_event`]).
@@ -35,6 +50,8 @@
 //! Linux, so its peak resident set is its own rather than the host's
 //! (`measure`).
 
+#[cfg(target_os = "macos")]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
 	cell::RefCell,
 	ffi::{CString, OsStr, c_char},
@@ -42,17 +59,18 @@ use std::{
 	io::Read as _,
 	os::{
 		fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd},
-		unix::{ffi::OsStrExt, fs::OpenOptionsExt as _, process::CommandExt},
+		unix::{ffi::OsStrExt, fs::OpenOptionsExt as _},
 	},
 	path::Path,
-	process::{Command, Stdio},
-	sync::{
-		Arc, LazyLock,
-		atomic::{AtomicU64, Ordering},
-	},
+	sync::{Arc, LazyLock},
 	task::{Context, Poll},
 	thread,
 	time::{Duration, Instant},
+};
+#[cfg(not(target_os = "linux"))]
+use std::{
+	os::unix::process::CommandExt,
+	process::{Command, Stdio},
 };
 
 use bstr::BString;
@@ -170,17 +188,13 @@ fn next_wait(mb: &Arc<Mailbox>) -> Option<Wait> {
 
 /// Platform state of a spawner.
 pub(super) struct State {
-	/// The process umask when the spawner was created: `posix_spawn` cannot
-	/// set one, so specs asking for another take the fork path.
+	/// The process umask when the spawner was created. On macOS
+	/// `posix_spawn` cannot set another, so specs asking for one take the
+	/// fork path there.
 	umask:     Option<u32>,
 	groups:    Mutex<Groups>,
-	/// Optional libc extension: without it `posix_spawn` cannot set the cwd
-	/// (glibc < 2.29), so such libcs take the fork path. The gate also keeps
-	/// `POSIX_SPAWN_SETSID` (glibc 2.26+) off libcs older than that, where
-	/// `Place::Session` spawns would be refused with `EINVAL`. Never relax it
-	/// into "the cwd is already right, skip `addchdir`": glibc 2.17–2.25 would
-	/// then reach `posix_spawn` and fail every `Place::Session` spawn.
-	#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+	/// The libc extension that lets `posix_spawn` set the child's cwd.
+	#[cfg(target_os = "macos")]
 	add_chdir: Option<posix::AddChdir>,
 }
 
@@ -297,7 +311,7 @@ impl State {
 		Self {
 			umask: umask.or_else(process_umask),
 			groups: Mutex::new(Groups { list: Vec::new(), next_sweep: SWEEP }),
-			#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+			#[cfg(target_os = "macos")]
 			add_chdir: posix::add_chdir(),
 		}
 	}
@@ -321,10 +335,7 @@ impl State {
 	/// Whether `posix_spawn` can express a spec with this umask and these
 	/// ignored signals (it can neither set a umask nor ignore a signal; the
 	/// child inherits both from the host).
-	#[cfg_attr(
-		not(any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))),
-		allow(dead_code, reason = "no posix_spawn path on this target")
-	)]
+	#[cfg(target_os = "macos")]
 	fn posix_eligible(&self, umask: u32, ign: SigSet) -> bool {
 		self.umask == Some(umask) && ign.iter().all(host_ignores)
 	}
@@ -475,8 +486,10 @@ fn job_terminal(place: Place, pgroup: PgroupSpec) -> io::Result<Option<RawFd>> {
 
 /// Make `pgid` the foreground group of terminal `tty` (zsh `attachtty`),
 /// with `SIGTTOU` blocked: the caller may itself be in a background group
-/// by now (the shell after its job took the terminal). Async-signal-safe:
-/// the forked child calls it before it execs.
+/// by now (the shell after its job took the terminal). The mask goes back
+/// through `crate::sys::restore_mask`, which keeps a block of glibc's
+/// signals 32 and 33. Async-signal-safe: the forked child calls it before
+/// it execs.
 fn attach_tty(tty: RawFd, pgid: i32) {
 	// SAFETY: sigset_t is plain data; the calls only read and write the sets
 	// passed, and tcsetpgrp takes no pointers.
@@ -487,7 +500,7 @@ fn attach_tty(tty: RawFd, pgid: i32) {
 		libc::sigaddset(&raw mut ttou, libc::SIGTTOU);
 		libc::pthread_sigmask(libc::SIG_BLOCK, &raw const ttou, &raw mut old);
 		libc::tcsetpgrp(tty, pgid);
-		libc::pthread_sigmask(libc::SIG_SETMASK, &raw const old, std::ptr::null_mut());
+		crate::sys::restore_mask(&old);
 	}
 }
 
@@ -515,19 +528,23 @@ fn ignored(ign: SigSet) -> [bool; NSIG] {
 
 /// Generation of the process's signal dispositions, bumped by
 /// [`dispositions_changed`].
+#[cfg(target_os = "macos")]
 static DISPOSITIONS: AtomicU64 = AtomicU64::new(1);
 
 /// The signals the process ignores, as [`host_ignored`] last read them, and
 /// the [`DISPOSITIONS`] generation of that reading.
+#[cfg(target_os = "macos")]
 static HOST_IGNORED: Mutex<(u64, [bool; NSIG])> = Mutex::new((0, [false; NSIG]));
 
 /// See [`crate::sys::dispositions_changed`].
+#[cfg(target_os = "macos")]
 pub(super) fn dispositions_changed() {
 	DISPOSITIONS.fetch_add(1, Ordering::Release);
 }
 
 /// The signals the process ignores (`true` at their numbers): read once per
 /// generation of the dispositions, not per spawn.
+#[cfg(target_os = "macos")]
 fn host_ignored() -> [bool; NSIG] {
 	let generation = DISPOSITIONS.load(Ordering::Acquire);
 	let mut cached = HOST_IGNORED.lock();
@@ -547,6 +564,7 @@ fn host_ignored() -> [bool; NSIG] {
 
 /// Whether the host itself ignores `sig` (children inherit that through
 /// `posix_spawn`).
+#[cfg(target_os = "macos")]
 fn host_ignores(sig: Signal) -> bool {
 	let n = usize::from(sig.number(Platform::current()));
 	host_ignored().get(n).copied().unwrap_or(false)
@@ -563,7 +581,8 @@ struct Program<'a> {
 	/// `(resource, soft, hard)` set in the child before exec.
 	rlimits: &'a [(Rlimit, Option<u64>, Option<u64>)],
 	/// A foreground job's terminal: the child makes its group the
-	/// terminal's foreground before it execs ([`attach_tty`]).
+	/// terminal's foreground before it execs ([`attach_tty`] on the fork
+	/// paths).
 	tty:     Option<RawFd>,
 	/// Targets the child gets closed ([`StdioSpec::Closed`]): each is
 	/// installed from a null-device placeholder, then closed.
@@ -762,28 +781,43 @@ fn launch(
 ) -> io::Result<(i32, Place)> {
 	// `posix_spawn` cannot set resource limits either, nor hand a terminal
 	// to the child's group before the exec.
-	#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+	#[cfg(target_os = "macos")]
 	if prog.rlimits.is_empty()
 		&& prog.tty.is_none()
 		&& state.posix_eligible(prog.umask, prog.ign)
 		&& let Some(add_chdir) = state.add_chdir
 	{
 		let exec = Exec::new(prog)?;
-		return retry_join(place, |p| posix::spawn(&exec, fds, prog.closed, p, prog.ign, add_chdir));
+		// `posix_spawn` fails only before the exec: a refused join started
+		// nothing.
+		return retry_join(
+			place,
+			|p| posix::spawn(&exec, fds, prog.closed, p, prog.ign, add_chdir),
+			|e: &io::Error| e.raw_os_error() == Some(libc::EPERM),
+		);
 	}
-	#[cfg(not(any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))))]
+	#[cfg(not(target_os = "macos"))]
 	let _ = state;
+	#[cfg(target_os = "linux")]
+	{
+		vfork_exec(prog, fds, place)
+	}
+	#[cfg(not(target_os = "linux"))]
 	fork_exec(prog, fds, place)
 }
 
-/// Run `spawn` at `place`; a join refused with `EPERM` (the group emptied
-/// or moved sessions since `joinable`) retries as the leader of a new group.
-fn retry_join(
+/// Run `spawn` at `place`; a join that `refused_join` says was refused, its
+/// `setpgid` failing with `EPERM` (the group emptied or moved sessions since
+/// `joinable`) before anything of the program ran, retries as the leader of
+/// a new group. Any other failure, and above all one after the program's
+/// exec, is the spawn's: the program is never started twice.
+fn retry_join<E>(
 	place: Place,
-	mut spawn: impl FnMut(Place) -> io::Result<i32>,
-) -> io::Result<(i32, Place)> {
+	mut spawn: impl FnMut(Place) -> Result<i32, E>,
+	refused_join: impl Fn(&E) -> bool,
+) -> Result<(i32, Place), E> {
 	match spawn(place) {
-		Err(e) if place.joins() && e.raw_os_error() == Some(libc::EPERM) => {
+		Err(e) if place.joins() && refused_join(&e) => {
 			let lead = Place::Group(0);
 			spawn(lead).map(|pid| (pid, lead))
 		},
@@ -892,11 +926,60 @@ impl Exec {
 	}
 }
 
+/// The Linux path: a vfork child (`vfork`) that sets up and execs the
+/// program from what is prepared here, before the clone. A spawn that failed
+/// after the program's exec fails with an error [`vfork::program_ran`] tells
+/// apart, and is not retried.
+#[cfg(target_os = "linux")]
+fn vfork_exec(prog: &Program<'_>, fds: &[(i32, Source)], place: Place) -> io::Result<(i32, Place)> {
+	let exec = Exec::new(prog)?;
+	let fds: Vec<(i32, RawFd)> = fds.iter().map(|(t, fd)| (*t, fd.as_raw_fd())).collect();
+	let limits = limits(prog);
+	let ignored_set = ignored(prog.ign)
+		.iter()
+		.enumerate()
+		.skip(1)
+		.filter(|&(_, &ign)| ign)
+		.fold(0u64, |set, (n, _)| set | (1 << (n - 1)));
+	let mut child = vfork::Child {
+		path:    exec.path(),
+		argv:    exec.argv.as_ptr().cast(),
+		envp:    exec.env.ptrs.as_ptr().cast(),
+		cwd:     exec.cwd(),
+		session: false,
+		group:   None,
+		tty:     prog.tty,
+		umask:   prog.umask as libc::mode_t,
+		fds:     &fds,
+		closed:  prog.closed,
+		ignored: ignored_set,
+		limits:  &limits,
+	};
+	// The thread's launcher starts before the spawn: its start allocates.
+	vfork::prepare()?;
+	retry_join(
+		place,
+		|p| {
+			(child.session, child.group) = match p {
+				Place::Session => (true, None),
+				Place::Group(pgid) => (false, Some(pgid)),
+				Place::Inherit => (false, None),
+			};
+			// SAFETY: `child` points into `exec`, `fds`, `limits` and `prog`,
+			// alive for the call.
+			unsafe { vfork::spawn(&child) }
+		},
+		vfork::Failure::refused_join,
+	)
+	.map_err(io::Error::from)
+}
+
 /// The fork path: std's `Command` (fork, stdio, cwd, process group) plus an
 /// async-signal-safe `pre_exec` that finishes the setup and calls `execve`
 /// itself. std would `execvp`, whose libc retries a file without `#!` as a
 /// `/bin/sh` script; the engine must see `ENOEXEC` instead and run such a
 /// script in-engine, like bash.
+#[cfg(not(target_os = "linux"))]
 fn fork_exec(prog: &Program<'_>, fds: &[(i32, Source)], place: Place) -> io::Result<(i32, Place)> {
 	let exec = Exec::new(prog)?;
 	let mut cmd = Command::new(OsStr::from_bytes(prog.path));
@@ -968,13 +1051,19 @@ fn fork_exec(prog: &Program<'_>, fds: &[(i32, Source)], place: Place) -> io::Res
 			Err(io::Error::last_os_error())
 		});
 	}
-	retry_join(place, |p| {
-		if let Place::Group(pgid) = p {
-			cmd.process_group(pgid);
-		}
-		// Dropping the `Child` neither waits nor kills; the waiter owns it.
-		cmd.spawn().map(|child| child.id() as i32)
-	})
+	// The child reports a failure only before its exec: a refused join
+	// started nothing.
+	retry_join(
+		place,
+		|p| {
+			if let Place::Group(pgid) = p {
+				cmd.process_group(pgid);
+			}
+			// Dropping the `Child` neither waits nor kills; the waiter owns it.
+			cmd.spawn().map(|child| child.id() as i32)
+		},
+		|e: &io::Error| e.raw_os_error() == Some(libc::EPERM),
+	)
 }
 
 /// The resource limits to set in the child; resources this platform lacks
@@ -1069,7 +1158,8 @@ fn errno() -> i32 {
 /// The spawn of a process that applies redirections itself
 /// ([`ChildRedirs`]): a bare `fork` whose child installs its fds, applies
 /// the redirections in order (an open may wait for a FIFO's other end:
-/// only the child waits, as bash's does) and execs. The parent returns at
+/// only the child waits, as bash's does) and execs; on Linux it sets its
+/// OOM adjustment first, as the vfork child does. The parent returns at
 /// once with the pid; a failure in the child is reported on its own fd 2
 /// and its exit status (1 for a redirection, 127 or 126 for the exec).
 fn fork_redirs(
@@ -1108,16 +1198,23 @@ fn fork_redirs(
 	// SAFETY: the child calls only async-signal-safe functions on data
 	// prepared above, without allocating, and ends in `execve` or `_exit`.
 	let pid = unsafe { libc::fork() };
+	// Read before the restore below, which sets `errno` where it fails.
+	let forked = (pid < 0).then(io::Error::last_os_error);
 	if pid != 0 {
-		// SAFETY: restores the mask saved above.
-		unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &raw const old, std::ptr::null_mut()) };
+		// Restores the mask saved above, a block of glibc's signals 32 and
+		// 33 included (`restore_mask`).
+		crate::sys::restore_mask(&old);
 	}
-	if pid < 0 {
-		return Err(io::Error::last_os_error());
+	if let Some(err) = forked {
+		return Err(err);
 	}
 	if pid == 0 {
 		// SAFETY: as above (the forked child).
 		unsafe {
+			// A fork child has memory of its own: the write changes only its
+			// value.
+			#[cfg(target_os = "linux")]
+			omp_builtins::prefer_oom_kill();
 			match place {
 				Place::Session => {
 					libc::setsid();
@@ -1213,7 +1310,7 @@ fn fork_redirs(
 	Ok((pid, place))
 }
 
-#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+#[cfg(target_os = "macos")]
 mod posix {
 	use std::{cell::RefCell, io, mem::MaybeUninit, os::fd::AsRawFd};
 
@@ -1287,38 +1384,17 @@ mod posix {
 		*const libc::c_char,
 	) -> libc::c_int;
 
-	#[cfg(target_os = "macos")]
-	#[allow(clippy::unnecessary_wraps, reason = "the libc extension is optional on Linux")]
+	#[allow(
+		clippy::unnecessary_wraps,
+		reason = "tests exercise the fallback without this extension"
+	)]
 	pub(super) const fn add_chdir() -> Option<AddChdir> {
 		Some(libc::posix_spawn_file_actions_addchdir_np)
 	}
 
-	#[cfg(target_os = "linux")]
-	pub(super) fn add_chdir() -> Option<AddChdir> {
-		// A direct reference prevents loading on glibc < 2.29 before the
-		// spawner can choose its existing fork fallback.
-		static ADD_CHDIR: std::sync::LazyLock<Option<AddChdir>> = std::sync::LazyLock::new(|| {
-			// SAFETY: RTLD_DEFAULT and this NUL-terminated symbol name are valid.
-			let symbol = unsafe {
-				libc::dlsym(libc::RTLD_DEFAULT, c"posix_spawn_file_actions_addchdir_np".as_ptr())
-			};
-			if symbol.is_null() {
-				None
-			} else {
-				// SAFETY: the resolved libc function has the AddChdir signature
-				// and remains available for the lifetime of the process.
-				Some(unsafe { std::mem::transmute::<*mut libc::c_void, AddChdir>(symbol) })
-			}
-		});
-		*ADD_CHDIR
-	}
-
 	/// `POSIX_SPAWN_SETSID` (`<sys/spawn.h>`, macOS 10.15+; absent from the
 	/// libc crate).
-	#[cfg(target_os = "macos")]
 	const SETSID: libc::c_int = 0x0400;
-	#[cfg(target_os = "linux")]
-	const SETSID: libc::c_int = libc::POSIX_SPAWN_SETSID as libc::c_int;
 
 	fn check(rc: libc::c_int) -> io::Result<()> {
 		if rc == 0 {
@@ -1426,10 +1502,7 @@ mod posix {
 				},
 				Place::Inherit => {},
 			}
-			#[cfg(target_os = "macos")]
-			{
-				flags |= libc::POSIX_SPAWN_CLOEXEC_DEFAULT;
-			}
+			flags |= libc::POSIX_SPAWN_CLOEXEC_DEFAULT;
 			// SAFETY: sigset_t is plain data, initialized by sigemptyset below.
 			let mut empty: libc::sigset_t = unsafe { std::mem::zeroed() };
 			// SAFETY: as above.
@@ -1972,3 +2045,5 @@ pub(super) fn kill_leftovers(shared: &Shared) -> io::Result<Vec<Leftover>> {
 mod measure;
 #[cfg(test)]
 mod tests;
+#[cfg(target_os = "linux")]
+mod vfork;
