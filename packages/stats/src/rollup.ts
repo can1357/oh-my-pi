@@ -57,7 +57,7 @@ const DAY_MS = 24 * HOUR_MS;
  * Bump when the rollup schema or fact definitions change: the tables are then
  * dropped and every hour is rebuilt from the raw tables.
  */
-const ROLLUP_VERSION = "3";
+const ROLLUP_VERSION = "4";
 const ROLLUP_VERSION_KEY = "rollup_version";
 /** Bump when the dirty-marking triggers change; they are then recreated in place. */
 const TRIGGER_VERSION = "4";
@@ -110,6 +110,7 @@ function messageFacts(bucketExpr: string, p: string): string {
 		SUM(${p}cache_write_tokens) AS cache_write_tokens,
 		SUM(${p}total_tokens) AS total_tokens,
 		TOTAL(${p}premium_requests) AS premium_requests,
+		SUM(${p}aiu_nano) AS aiu_nano,
 		TOTAL(${p}cost_total) AS cost_total,
 		TOTAL(${p}cost_input) AS cost_input,
 		TOTAL(${p}cost_output) AS cost_output,
@@ -130,7 +131,7 @@ function messageFacts(bucketExpr: string, p: string): string {
 }
 
 const MESSAGE_ROLLUP_COLUMNS = `bucket, ${MESSAGE_DIMENSIONS}, requests, failed, input_tokens, output_tokens,
-	cache_read_tokens, cache_write_tokens, total_tokens, premium_requests, cost_total, cost_input, cost_output,
+	cache_read_tokens, cache_write_tokens, total_tokens, premium_requests, aiu_nano, cost_total, cost_input, cost_output,
 	cost_cache_read, cost_cache_write, unpriced, cached_prompt_cost, no_cache_input_cost, duration_sum, duration_n,
 	ttft_sum, ttft_n, tps_sum, tps_n, first_ts, last_ts`;
 
@@ -252,6 +253,7 @@ export function ensureRollupSchema(database: Database): void {
 				cache_write_tokens INTEGER NOT NULL,
 				total_tokens INTEGER NOT NULL,
 				premium_requests REAL NOT NULL,
+				aiu_nano REAL,
 				cost_total REAL NOT NULL,
 				cost_input REAL NOT NULL,
 				cost_output REAL NOT NULL,
@@ -657,6 +659,7 @@ const AGGREGATE_COLUMNS = `
 	SUM(f.cache_read_tokens) AS cache_read_tokens,
 	SUM(f.cache_write_tokens) AS cache_write_tokens,
 	TOTAL(f.premium_requests) AS premium_requests,
+	SUM(f.aiu_nano) AS aiu_nano,
 	TOTAL(f.cost_total) AS cost_total,
 	SUM(f.unpriced) AS unpriced,
 	TOTAL(f.cached_prompt_cost) AS cached_prompt_cost,
@@ -675,6 +678,7 @@ interface AggregateRow {
 	cache_read_tokens: number | null;
 	cache_write_tokens: number | null;
 	premium_requests: number | null;
+	aiu_nano: number | null;
 	cost_total: number | null;
 	unpriced: number | null;
 	cached_prompt_cost: number | null;
@@ -710,6 +714,8 @@ function toAggregatedStats(row: AggregateRow | undefined): AggregatedStats {
 		totalCost: row?.cost_total ?? 0,
 		unpricedRequests: row?.unpriced ?? 0,
 		totalPremiumRequests: row?.premium_requests ?? 0,
+		// SUM over all-NULL rows is NULL: no request reported credits, which is unknown rather than 0.
+		totalAiuNano: row?.aiu_nano ?? null,
 		avgDuration: row?.avg_duration ?? null,
 		avgTtft: row?.avg_ttft ?? null,
 		avgTokensPerSecond: row?.avg_tps ?? null,
@@ -915,6 +921,7 @@ export function getStatsByProvider(cutoff: number | null = null): ProviderAggreg
 		cost_total: number;
 		unpriced: number;
 		premium_requests: number;
+		aiu_nano: number | null;
 		avg_tps: number | null;
 	}>(
 		{ cutoff },
@@ -922,6 +929,7 @@ export function getStatsByProvider(cutoff: number | null = null): ProviderAggreg
 		 COUNT(DISTINCT f.model) AS models, SUM(f.input_tokens) AS input_tokens, SUM(f.output_tokens) AS output_tokens,
 		 SUM(f.cache_read_tokens) AS cache_read_tokens, SUM(f.cache_write_tokens) AS cache_write_tokens,
 		 TOTAL(f.cost_total) AS cost_total, SUM(f.unpriced) AS unpriced, TOTAL(f.premium_requests) AS premium_requests,
+		 SUM(f.aiu_nano) AS aiu_nano,
 		 TOTAL(f.tps_sum) / NULLIF(SUM(f.tps_n), 0) AS avg_tps`,
 		"GROUP BY f.provider",
 	)
@@ -938,6 +946,7 @@ export function getStatsByProvider(cutoff: number | null = null): ProviderAggreg
 			totalCost: row.cost_total,
 			unpricedRequests: row.unpriced,
 			totalPremiumRequests: row.premium_requests,
+			totalAiuNano: row.aiu_nano,
 			avgTokensPerSecond: row.avg_tps,
 		}))
 		.sort((a, b) => b.totalTokens - a.totalTokens);

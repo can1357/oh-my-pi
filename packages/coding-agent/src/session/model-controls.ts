@@ -30,7 +30,7 @@ import {
 	resolveModelOverride,
 	resolveModelRoleValue,
 } from "../config/model-resolver";
-import { buildServiceTierByFamily } from "../config/service-tier";
+import type { FastServiceTier } from "../config/service-tier";
 import type { Settings } from "../config/settings";
 import { containsMagicKeyword } from "./magic-keywords";
 import type { ModelRoleLookup } from "../modes/view-model/overlays/model-browser";
@@ -55,13 +55,7 @@ import { formatRoleModelValue, resolveRoleModelFull } from "./role-models";
 import { EPHEMERAL_MODEL_CHANGE_ROLE, PREWALK_MODEL_CHANGE_ROLE, TEMPORARY_MODEL_CHANGE_ROLE } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 
-import {
-	cfgDefaultThinkingLevel,
-	cfgProvidersFireworksTier,
-	cfgTierAnthropic,
-	cfgTierGoogle,
-	cfgTierOpenai,
-} from "./settings";
+import { cfgDefaultThinkingLevel, cfgProvidersFireworksTier, cfgTiers } from "./settings";
 import { cfgDisabledProviders, cfgEnabledModels } from "../config/model-settings";
 
 /**
@@ -829,11 +823,9 @@ export class ModelControls {
 	}
 
 	/**
-	 * True when the currently selected model's family is set to a fast tier —
-	 * `priority`, or `ultrafast` on the OpenAI family — the `/fast` on/off state
-	 * for the active model. Returns false when no model is selected or the
-	 * model exposes no service-tier family (e.g. Fireworks, which has its own
-	 * Providers › Fireworks Tier toggle).
+	 * True when the active model's family has selected `priority` or `ultrafast`.
+	 * Returns false when there is no model or service-tier family, e.g. Fireworks
+	 * (which has its own Providers › Fireworks Tier toggle).
 	 *
 	 * For "is a fast tier actually applied to the next request?" use
 	 * {@link isFastModeActive} instead.
@@ -844,7 +836,7 @@ export class ModelControls {
 		return tier === "priority" || tier === "ultrafast";
 	}
 
-	/** True when the active model's OpenAI family is set to `ultrafast` (`/fast ultra`). */
+	/** True when the active model's OpenAI family is set to `ultrafast`. */
 	isUltrafastModeEnabled(): boolean {
 		const model = this.#model;
 		return (
@@ -863,7 +855,7 @@ export class ModelControls {
 	 */
 	isFastModeActive(): boolean {
 		const model = this.#model;
-		if (!model || !this.#realizesFastTier(model, this.#serviceTierByFamily)) return false;
+		if (!model || !this.#realizedFastTier(model, this.#serviceTierByFamily)) return false;
 		const family = serviceTierFamily(model);
 		if (family && this.#withheldTierFamilies.has(family)) return false;
 		return (
@@ -872,23 +864,17 @@ export class ModelControls {
 	}
 
 	/**
-	 * Whether a fresh session started on `model` would realize a fast tier from
-	 * the configured `tier.*` settings, ignoring this session's `/fast` toggles.
-	 * Feeds the next launch's startup status prepaint.
+	 * The fast tier a fresh session on `model` would realize from `tier.*` settings,
+	 * ignoring live session toggles. Feeds the next launch's startup status prepaint.
 	 */
-	isFastModeConfiguredFor(model: Model): boolean {
-		const settings = this.#host.settings;
-		const tiers = buildServiceTierByFamily(
-			cfgTierOpenai.get(settings),
-			cfgTierAnthropic.get(settings),
-			cfgTierGoogle.get(settings),
-		);
-		return this.#realizesFastTier(model, tiers);
+	configuredFastTier(model: Model): FastServiceTier | undefined {
+		return this.#realizedFastTier(model, cfgTiers.get(this.#host.settings));
 	}
 
-	#realizesFastTier(model: Model, tiers: ServiceTierByFamily): boolean {
+	#realizedFastTier(model: Model, tiers: ServiceTierByFamily): FastServiceTier | undefined {
 		const tier = serviceTierForModel(this.#host.settings, model, tiers);
-		return tier === "ultrafast" ? shouldSendServiceTier(tier, model) : realizesPriorityServiceTier(tier, model);
+		if (tier === "ultrafast") return shouldSendServiceTier(tier, model) ? tier : undefined;
+		return realizesPriorityServiceTier(tier, model) ? "priority" : undefined;
 	}
 
 	/**
@@ -954,8 +940,8 @@ export class ModelControls {
 	}
 
 	/**
-	 * `/fast on|off` targets the family of the currently selected model: it sets
-	 * (or clears) that family's `priority` tier. `off` also clears `ultrafast`.
+	 * Sets the active model family's tier to `priority`, or clears its fast tier
+	 * (`priority` or `ultrafast`) when disabling.
 	 * Returns `false` when the model has no service-tier family, or when it is an
 	 * OpenAI-family model that cannot take `priority` (a Codex model whose
 	 * discovered tier list omits it), so callers can report that fast mode is
@@ -994,7 +980,7 @@ export class ModelControls {
 	}
 
 	/**
-	 * `/fast ultra` sets the OpenAI family to `ultrafast`. Enabling requires the
+	 * Sets the OpenAI family to `ultrafast`. Enabling requires the
 	 * active model to realize it (first-party OpenAI, or a Codex model whose
 	 * discovery advertises the tier); otherwise the tier is left unchanged and
 	 * `false` is returned. Disabling clears only an `ultrafast` selection.

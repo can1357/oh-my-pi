@@ -12,7 +12,7 @@ import {
 import type { ModelCost } from "@oh-my-pi/pi-catalog/types";
 import { $envpos, getConfigRootDir, getStatsDbPath, VERSION } from "@oh-my-pi/pi-utils";
 import { ChunkedInsert } from "./chunked-insert";
-import { classifyAgentType, type ParseSessionResult, type SessionParserState } from "./parser";
+import { classifyAgentType, type ParseSessionResult, readResetFork, type SessionParserState } from "./parser";
 import { ensureRollupSchema, getDailyActivityFromRollup } from "./rollup";
 import {
 	mergeRanges,
@@ -30,6 +30,7 @@ import type {
 	MessageStats,
 	MessageStatsInput,
 	SnapcompactCompactionStats,
+	ToolApprovalStats,
 	ToolCallStats,
 	ToolResultLink,
 	UserMessageLink,
@@ -165,6 +166,17 @@ const SNAPCOMPACT_COMPACTIONS_SINCE_MS = Date.parse("2026-08-20T00:00:00Z");
 // since this date, so older cursors stay put.
 const MODEL_USAGE_PURPOSE_BACKFILL_KEY = "model_usage_purpose_v1";
 const MODEL_USAGE_SINCE_MS = Date.parse("2026-08-31T00:00:00Z");
+// Tool approval prompts are filled by the parser from `tool_approval_requested`
+// and `tool_approval_resolved` custom entries; transcripts modified since
+// approval recording shipped are re-parsed once so older cursors stay put.
+const TOOL_APPROVALS_BACKFILL_KEY = "tool_approvals_v1";
+const TOOL_APPROVALS_SINCE_MS = Date.parse("2026-11-01T00:00:00Z");
+// A reset fork (`/tan`) now leaves the requests, prompts, tool calls, approvals and Spotlight rows of its
+// copied prefix to its parent; a clone an older build synced before its parent still owns them. Re-parsing
+// the reset forks and their parents from byte zero once hands them back (see `replayInheritedPrefixes`).
+const INHERITED_PREFIX_REPLAY_KEY = "inherited_prefix_replay_v1";
+/** Header reads {@link replayInheritedPrefixes} keeps in flight. */
+const INHERITED_PREFIX_SCAN_FILES = 64;
 function shouldResetBackfill(value: string | undefined): boolean {
 	return value !== BACKFILL_COMPLETE && value !== BACKFILL_PENDING;
 }
@@ -233,6 +245,7 @@ export async function initDb(): Promise<Database> {
 			cache_write_tokens INTEGER NOT NULL,
 			total_tokens INTEGER NOT NULL,
 			premium_requests REAL NOT NULL,
+			aiu_nano REAL,
 			cost_input REAL NOT NULL,
 			cost_output REAL NOT NULL,
 			cost_cache_read REAL NOT NULL,
@@ -429,6 +442,25 @@ export async function initDb(): Promise<Database> {
 			PRIMARY KEY (session_file, entry_id)
 		) WITHOUT ROWID;
 		CREATE INDEX IF NOT EXISTS idx_snapcompact_compactions_entry ON snapcompact_compactions(entry_id, timestamp);
+
+		-- Tool approval prompts and their resolutions, keyed by (session_file, tool_call_id).
+		CREATE TABLE IF NOT EXISTS tool_approvals (
+			session_file TEXT NOT NULL,
+			tool_call_id TEXT NOT NULL,
+			parent_tool_call_id TEXT,
+			folder TEXT NOT NULL,
+			tool_name TEXT NOT NULL,
+			approval_mode TEXT,
+			requested_at INTEGER,
+			request_reason TEXT,
+			approved INTEGER,
+			resolved_at INTEGER,
+			resolve_reason TEXT,
+			PRIMARY KEY (session_file, tool_call_id)
+		) WITHOUT ROWID;
+		CREATE INDEX IF NOT EXISTS idx_tool_approvals_tool_requested ON tool_approvals(tool_name, requested_at);
+		CREATE INDEX IF NOT EXISTS idx_tool_approvals_call ON tool_approvals(tool_call_id);
+		CREATE INDEX IF NOT EXISTS idx_tool_approvals_requested ON tool_approvals(requested_at);
 	`);
 
 	const offsetColumns = db.query("PRAGMA table_info(file_offsets)").all() as { name: string }[];
@@ -475,6 +507,10 @@ export async function initDb(): Promise<Database> {
 	const messageColumns = db.query("PRAGMA table_info(messages)").all() as { name: string }[];
 	if (!messageColumns.some(column => column.name === "premium_requests")) {
 		db.run("ALTER TABLE messages ADD COLUMN premium_requests REAL NOT NULL DEFAULT 0");
+	}
+	// Server-reported Copilot AI credits (nano-AIU). NULL means unknown, never zero.
+	if (!messageColumns.some(column => column.name === "aiu_nano")) {
+		db.run("ALTER TABLE messages ADD COLUMN aiu_nano REAL");
 	}
 	if (!messageColumns.some(column => column.name === "cost_no_cache_input")) {
 		db.run("ALTER TABLE messages ADD COLUMN cost_no_cache_input REAL");
@@ -598,6 +634,7 @@ export async function initDb(): Promise<Database> {
 	reparseModifiedSince(db, SPOTLIGHT_TOGGLE_BACKFILL_KEY, SPOTLIGHT_SINCE_MS);
 	reparseModifiedSince(db, SNAPCOMPACT_COMPACTIONS_BACKFILL_KEY, SNAPCOMPACT_COMPACTIONS_SINCE_MS);
 	reparseModifiedSince(db, MODEL_USAGE_PURPOSE_BACKFILL_KEY, MODEL_USAGE_SINCE_MS);
+	reparseModifiedSince(db, TOOL_APPROVALS_BACKFILL_KEY, TOOL_APPROVALS_SINCE_MS);
 	ensureRollupSchema(db);
 	return db;
 }
@@ -854,6 +891,49 @@ function reparseModifiedSince(database: Database, key: string, sinceMs: number):
 }
 
 /**
+ * Hand each reset fork's copied prefix back to its parent once ({@link INHERITED_PREFIX_REPLAY_KEY}) by
+ * dropping the cursors of the reset forks ({@link readResetFork}) and their parents: the sync rebuilds both
+ * from byte zero, so a fork gives up every copied row and its parent takes them back when both land in
+ * one batch. A parent ingested in an earlier batch is blocked by the fork's old rows, whose removal marks
+ * a reconciliation replay; a full sync runs it before returning. Only the header line of any other
+ * transcript is read, and nothing of it is re-parsed. Runs under the sync lock, before the sync reads cursors.
+ */
+export async function replayInheritedPrefixes(): Promise<void> {
+	const database = db;
+	if (!database) return;
+	const row = database
+		.query<{ value: string }, [string]>("SELECT value FROM meta WHERE key = ?")
+		.get(INHERITED_PREFIX_REPLAY_KEY);
+	if (row?.value === BACKFILL_COMPLETE) return;
+	const files = database
+		.query<{ session_file: string }, []>("SELECT session_file FROM file_offsets")
+		.all()
+		.map(offset => offset.session_file);
+	const fileById = new Map<string, string>();
+	const forks: { sessionFile: string; parentSession?: string }[] = [];
+	for (let start = 0; start < files.length; start += INHERITED_PREFIX_SCAN_FILES) {
+		const batch = files.slice(start, start + INHERITED_PREFIX_SCAN_FILES);
+		const headers = await Promise.all(batch.map(readResetFork));
+		headers.forEach((header, index) => {
+			if (!header) return;
+			if (header.id !== undefined) fileById.set(header.id, batch[index]);
+			if (header.resetFork) forks.push({ sessionFile: batch[index], parentSession: header.parentSession });
+		});
+	}
+	const dropCursor = database.query("DELETE FROM file_offsets WHERE session_file = ?");
+	database.transaction(() => {
+		for (const { sessionFile, parentSession } of forks) {
+			dropCursor.run(sessionFile);
+			// A fork names its parent by session id; a branch, by file.
+			if (parentSession !== undefined) dropCursor.run(fileById.get(parentSession) ?? parentSession);
+		}
+		database
+			.query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
+			.run(INHERITED_PREFIX_REPLAY_KEY, BACKFILL_COMPLETE);
+	})();
+}
+
+/**
  * Drop the arm columns of a database written while sessions drew arms, once
  * (while `spotlight_sessions.arm` exists). Sessions of any arm but the one that shipped
  * were never shaped with the shipped algorithm: their Spotlight rows go now,
@@ -994,6 +1074,10 @@ function* parsedRows<T>(
 	for (const result of results) yield* select(result);
 }
 
+function isValidAiuNano(value: unknown): value is number {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
 /**
  * Commit distinct transcripts' rows, reconciliation state, and cursors together; failure rolls back the batch.
  * `changes` counts stored rows inserted, updated or deleted (cursor bookkeeping excluded), so callers can
@@ -1116,6 +1200,20 @@ export function applySessionParseResults(sessions: ParsedSession[]): {
 					for (const table of SPOTLIGHT_TABLES) {
 						changes += database.query(`DELETE FROM ${table} WHERE session_file = ?`).run(sessionFile).changes;
 					}
+					const parsedApprovalIds = new Set(result.toolApprovals.map(row => row.toolCallId));
+					const storedApprovals = database
+						.query<{ tool_call_id: string }, [string]>(
+							"SELECT tool_call_id FROM tool_approvals WHERE session_file = ?",
+						)
+						.all(sessionFile);
+					if (storedApprovals.some(row => !parsedApprovalIds.has(row.tool_call_id))) {
+						reconcile = true;
+					}
+					if (storedApprovals.length > 0) {
+						changes += database
+							.query("DELETE FROM tool_approvals WHERE session_file = ?")
+							.run(sessionFile).changes;
+					}
 				}
 				// The parse covers the whole transcript: drop compactions it no longer holds or has
 				// rewritten. A removed one may live on in a fork, which only another replay can credit.
@@ -1162,6 +1260,7 @@ export function applySessionParseResults(sessions: ParsedSession[]): {
 			updateUserMessageLinks(parsedRows(writes, result => result.userLinks)) +
 			insertToolCalls(parsedRows(writes, result => result.toolCalls)) +
 			updateToolResults(parsedRows(writes, result => result.toolResults)) +
+			upsertToolApprovals(parsedRows(writes, result => result.toolApprovals)) +
 			insertSnapcompactCompactions(parsedRows(writes, result => result.snapcompactCompactions)) +
 			insertSpotlightSessions(parsedRows(writes, result => result.spotlight.sessions)) +
 			updateSpotlightTitles(parsedRows(writes, result => result.spotlight.titles)) +
@@ -1242,6 +1341,7 @@ export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 			"cache_write_tokens",
 			"total_tokens",
 			"premium_requests",
+			"aiu_nano",
 			"cost_input",
 			"cost_output",
 			"cost_cache_read",
@@ -1259,6 +1359,7 @@ export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 			ttft = excluded.ttft,
 			purpose = excluded.purpose,
 			premium_requests = MAX(messages.premium_requests, excluded.premium_requests),
+			aiu_nano = excluded.aiu_nano,
 			cost_input = excluded.cost_input,
 			cost_output = excluded.cost_output,
 			cost_cache_read = excluded.cost_cache_read,
@@ -1272,6 +1373,8 @@ export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 		for (const s of stats) {
 			const { cost, unpriced } = resolveStoredCost(s);
 			const noCacheInputCost = calculateNoCacheInputCost(s.provider, s.model, s.usage, s.timestamp) ?? 0;
+			const reportedNano = s.usage.aiu?.nano;
+			const aiuNano = isValidAiuNano(reportedNano) ? reportedNano : null;
 			writer.add(
 				s.sessionFile,
 				[s.entryId, s.timestamp],
@@ -1293,6 +1396,7 @@ export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 					s.usage.cacheWrite,
 					s.usage.totalTokens,
 					s.usage.premiumRequests ?? 0,
+					aiuNano,
 					cost.input,
 					cost.output,
 					cost.cacheRead,
@@ -1351,6 +1455,7 @@ function rowToMessageStats(row: any): MessageStats {
 			cacheWrite: row.cache_write_tokens,
 			totalTokens: row.total_tokens,
 			premiumRequests: row.premium_requests ?? 0,
+			...(row.aiu_nano !== null && row.aiu_nano !== undefined ? { aiu: { nano: row.aiu_nano as number } } : {}),
 			cost: {
 				input: row.cost_input,
 				output: row.cost_output,
@@ -2063,6 +2168,81 @@ export function insertSnapcompactCompactions(rows: Iterable<SnapcompactCompactio
 				row.sessionFile,
 				[row.entryId, row.timestamp],
 				[row.sessionFile, row.entryId, row.folder, row.timestamp, row.tokensBefore, row.tokensAfter],
+			);
+		}
+		return writer.finish();
+	});
+}
+
+/**
+ * Upsert tool approval prompt records. Request and resolution entries can land
+ * in different incremental sync passes; `COALESCE` merges whichever arrives
+ * later without clobbering fields already persisted. Fork copies sharing the
+ * same `tool_call_id` route to the existing owner's `session_file` so a new
+ * outcome recorded only in a fork still merges into the deduplicated row.
+ */
+export function upsertToolApprovals(rows: Iterable<ToolApprovalStats>): number {
+	if (!db) return 0;
+	const mergeColumns = [
+		"parent_tool_call_id",
+		"approval_mode",
+		"requested_at",
+		"request_reason",
+		"approved",
+		"resolved_at",
+		"resolve_reason",
+	] as const;
+	const coalesce = (column: string) => `${column} = COALESCE(tool_approvals.${column}, excluded.${column})`;
+	const changed = (column: string) =>
+		`COALESCE(tool_approvals.${column}, excluded.${column}) IS NOT tool_approvals.${column}`;
+	const writer = new ChunkedInsert(db, {
+		verb: "INSERT",
+		table: "tool_approvals",
+		columns: [
+			"session_file",
+			"tool_call_id",
+			"parent_tool_call_id",
+			"folder",
+			"tool_name",
+			"approval_mode",
+			"requested_at",
+			"request_reason",
+			"approved",
+			"resolved_at",
+			"resolve_reason",
+		],
+		identity: ["tool_call_id"],
+		upsert: `ON CONFLICT(session_file, tool_call_id) DO UPDATE SET
+			${mergeColumns.map(coalesce).join(",\n")}
+			WHERE ${mergeColumns.map(changed).join("\n\t\t\tOR ")}`,
+	});
+	const findOwner = db.query<{ session_file: string }, [string]>(
+		"SELECT session_file FROM tool_approvals WHERE tool_call_id = ? LIMIT 1",
+	);
+	const ownerByCallId = new Map<string, string>();
+	return atomically(db, () => {
+		for (const row of rows) {
+			let owner = ownerByCallId.get(row.toolCallId);
+			if (owner === undefined) {
+				owner = findOwner.get(row.toolCallId)?.session_file ?? row.sessionFile;
+				ownerByCallId.set(row.toolCallId, owner);
+			}
+			writer.add(
+				owner,
+				[row.toolCallId],
+				[
+					owner,
+					row.toolCallId,
+					row.parentToolCallId ?? null,
+					row.folder,
+					row.toolName,
+					row.approvalMode ?? null,
+					row.requestedAt ?? null,
+					row.requestReason ?? null,
+					row.approved === undefined ? null : row.approved ? 1 : 0,
+					row.resolvedAt ?? null,
+					row.resolveReason ?? null,
+				],
 			);
 		}
 		return writer.finish();

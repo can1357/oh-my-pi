@@ -16,7 +16,6 @@ describe("Claude plugin MCP timeout compatibility", () => {
 	let originalAgentDirEnv: string | undefined;
 	let originalOmpProfileEnv: string | undefined;
 	let originalPiProfileEnv: string | undefined;
-	let originalClaudeConfigDir: string | undefined;
 
 	beforeEach(async () => {
 		clearClaudePluginRootsCache();
@@ -25,8 +24,6 @@ describe("Claude plugin MCP timeout compatibility", () => {
 		originalAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
 		originalOmpProfileEnv = process.env.OMP_PROFILE;
 		originalPiProfileEnv = process.env.PI_PROFILE;
-		originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
-		delete process.env.CLAUDE_CONFIG_DIR;
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "claude-plugins-test-"));
 		testAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "claude-plugins-test-agent-"));
 		process.env.HOME = tempDir;
@@ -51,8 +48,6 @@ describe("Claude plugin MCP timeout compatibility", () => {
 		else process.env.PI_PROFILE = originalPiProfileEnv;
 		if (originalAgentDirEnv === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = originalAgentDirEnv;
-		if (originalClaudeConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
-		else process.env.CLAUDE_CONFIG_DIR = originalClaudeConfigDir;
 		__resetDirsFromEnvForTests();
 		await removeWithRetries(tempDir);
 		await removeWithRetries(testAgentDir);

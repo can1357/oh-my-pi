@@ -22,7 +22,14 @@ import type { PromptCacheStatus } from "../../modes/view-model/status-line/host"
 import { promptCacheBrief } from "../../modes/view-model/status-line/prompt-cache";
 import type { StatusLineSettings } from "../../modes/view-model/status-line/types";
 import type { StatusFacts } from "./facts";
-import { effectiveStatusSettings, type SegMotion, type SegView, segmentView, thinkingWord } from "./segments";
+import {
+	effectiveStatusSettings,
+	type SegMotion,
+	type SegView,
+	segmentView,
+	spendTotals,
+	thinkingWord,
+} from "./segments";
 import { SegMotionNode } from "./status-line";
 
 /** Segments a native terminal shows outside the composer's facts. */
@@ -225,12 +232,17 @@ export function composerFacts(props: {
 				.join("") ?? "",
 	);
 
-	const modelView = computed(() =>
-		segmentView("model", props.facts(), {
-			...effective(),
-			segmentOptions: { ...effective().segmentOptions, model: { showThinkingLevel: false } },
-		}),
-	);
+	// The composer shows effort in its own chip; keep the user's other model options (`showProvider`, `display`).
+	const modelView = computed(() => {
+		const options = effective();
+		return segmentView("model", props.facts(), {
+			...options,
+			segmentOptions: {
+				...options.segmentOptions,
+				model: { ...options.segmentOptions.model, showThinkingLevel: false },
+			},
+		});
+	});
 
 	return {
 		context: (
@@ -279,6 +291,7 @@ export function composerFacts(props: {
 				key="usage"
 				role="omp.composer.usage"
 				text={cost}
+				spend={() => (cost() ? spendTotals(props.facts()) : undefined)}
 				wrap="none"
 				title={() => (cost() ? `Session cost ${cost()}` : undefined)}
 				actions={props.click("status.cost")}

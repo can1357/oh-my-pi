@@ -30,6 +30,7 @@ import {
 	createCustomMessage,
 } from "@oh-my-pi/pi-agent-core/compaction/messages";
 import { type AuthCredential, SqliteAuthCredentialStore, type TSchema } from "@oh-my-pi/pi-ai";
+import { unlockedCredentialCipher } from "@oh-my-pi/pi-ai/auth/credential-cipher";
 import { piEscapeRegexLiteral, piJoinPath } from "@oh-my-pi/pi-ai/providers/cursor-pi-args";
 import { highlightCode as highlightWithTheme } from "@oh-my-pi/pi-tui/text/highlight";
 import { wrap } from "@oh-my-pi/pi-tui/text/width";
@@ -559,16 +560,9 @@ export function createBashToolDefinition(cwd: string, options?: BashToolOptions)
 			// configuration and is rejected outside it. A hook's env reaches `!` user
 			// shells through `shellEnv` above and the `operations` branch through its
 			// exec options.
-			return tool.execute(
-				toolCallId,
-				{
-					command: spawn?.command ?? command,
-					cwd: spawn?.cwd ?? cwd,
-					timeout,
-				},
-				signal,
-				onUpdate,
-			);
+			const spawnCwd = spawn?.cwd ?? cwd;
+			const runner = spawnCwd === cwd ? tool : createRegistryTool(spawnCwd, "bash");
+			return runner.execute(toolCallId, { command: spawn?.command ?? command, timeout }, signal, onUpdate);
 		},
 	});
 }
@@ -1508,7 +1502,10 @@ export class AuthStorage {
 	}
 
 	get(provider: string): AuthCredential | undefined {
-		const store = new SqliteAuthCredentialStore(new Database(getAgentDbPath()));
+		// Synchronous by contract: sealed rows open only once this process has loaded the vault key.
+		const store = new SqliteAuthCredentialStore(new Database(getAgentDbPath()), {
+			cipher: unlockedCredentialCipher(),
+		});
 		try {
 			return store.listAuthCredentials(provider)[0]?.credential;
 		} finally {
@@ -1517,7 +1514,9 @@ export class AuthStorage {
 	}
 
 	async set(provider: string, credential: AuthCredential): Promise<void> {
-		const store = new SqliteAuthCredentialStore(new Database(getAgentDbPath()));
+		const store = new SqliteAuthCredentialStore(new Database(getAgentDbPath()), {
+			cipher: unlockedCredentialCipher(),
+		});
 		try {
 			await store.upsertAuthCredential(provider, credential);
 		} finally {

@@ -49,10 +49,10 @@ const sessions = (): SessionSelectorEntry[] => [
 const tick = (): Promise<void> => Bun.sleep(5);
 const noop = (): void => {};
 
-test("terminal rename accepts typed input and returns to the picker after cancel and save", async () => {
+test("terminal rename preserves the query on cancel and updates search matches on save", async () => {
 	const term = memoryTerminal({ columns: 100, rows: 30 });
 	const shell = new Shell();
-	const selected = mk(1, "Alpha", "first message");
+	const selected = mk(1, "Quartz", "first message");
 	const picked = vi.fn();
 	const renamed = vi.fn(async (_session: SessionSelectorEntry, title: string) => title);
 	await shell.start({ theme: currentTheme, driver: term.options, role: "omp.session" });
@@ -65,12 +65,15 @@ test("terminal rename accepts typed input and returns to the picker after cancel
 				),
 			{ focus: sessionSelectorFocus },
 		);
+		term.feed("Quartz");
 		term.feed("\x1bOQ Draft\x03");
-		term.feed("\x1bOQ Saved\x1b[13u");
+		term.feed("\x1bOQ\x15Zebra\x1b[13u");
 		await Promise.resolve();
-		expect(renamed.mock.calls).toEqual([[selected, "Alpha Saved"]]);
+		expect(renamed.mock.calls).toEqual([[selected, "Zebra"]]);
 		term.feed("\x1b[13u");
-		expect(picked).toHaveBeenCalledWith(expect.objectContaining({ path: selected.path, title: "Alpha Saved" }));
+		expect(picked).not.toHaveBeenCalled();
+		term.feed("\x15Zebra\x1b[13u");
+		expect(picked).toHaveBeenCalledWith(expect.objectContaining({ path: selected.path, title: "Zebra" }));
 	} finally {
 		shell.overlays.closeAll();
 		await shell.stop();

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
+import { SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
@@ -123,8 +124,14 @@ describe("read URL: Jina response validation", () => {
 		delete process.env.JINA_API_KEY;
 		const tempDir = TempDir.createSync("@omp-jina-reader-auth-");
 		try {
-			const storage = await AgentStorage.open(path.join(tempDir.path(), "agent.db"));
-			await storage.replaceAuthCredentials("jina", [{ type: "api_key", key: "stored-jina-key" }]);
+			const dbPath = path.join(tempDir.path(), "agent.db");
+			const auth = await SqliteAuthCredentialStore.open(dbPath);
+			try {
+				await auth.saveApiKey("jina", "stored-jina-key");
+			} finally {
+				auth.close();
+			}
+			const storage = await AgentStorage.open(dbPath);
 			let authorization: string | null | undefined;
 			const transport = withJina(init => {
 				authorization = new Headers(init?.headers).get("authorization");

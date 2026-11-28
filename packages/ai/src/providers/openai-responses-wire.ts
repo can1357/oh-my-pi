@@ -827,6 +827,11 @@ export interface Response {
 	 */
 	usage?: ResponseUsage;
 	/**
+	 * Input rewrites the API applied, e.g. reasoning items removed with reason
+	 * `prefix_mismatch` after earlier content changed (GPT-6.2+).
+	 */
+	input_transformations?: unknown[];
+	/**
 	 * @deprecated This field is being replaced by `safety_identifier` and
 	 * `prompt_cache_key`. Use `prompt_cache_key` instead to maintain caching
 	 * optimizations. A stable identifier for your end-users. Used to boost cache hit
@@ -2871,6 +2876,8 @@ export interface ResponseInputFileContent {
 	 * The name of the file to be sent to the model.
 	 */
 	filename?: string | null;
+	/** Explicit OpenAI prompt-cache breakpoint. */
+	prompt_cache_breakpoint?: { mode: "explicit" };
 }
 /**
  * An image input to the model. Learn about
@@ -2921,6 +2928,8 @@ export interface ResponseInputImageContent {
 	 * encoded image in a data URL.
 	 */
 	image_url?: string | null;
+	/** Explicit OpenAI prompt-cache breakpoint. */
+	prompt_cache_breakpoint?: { mode: "explicit" };
 }
 /**
  * A message input to the model with a role indicating instruction following
@@ -3630,6 +3639,8 @@ export interface ResponseInputTextContent {
 	 * The type of the input item. Always `input_text`.
 	 */
 	type: "input_text";
+	/** Explicit OpenAI prompt-cache breakpoint. */
+	prompt_cache_breakpoint?: { mode: "explicit" };
 }
 /**
  * Represents the use of a local environment to perform shell actions.

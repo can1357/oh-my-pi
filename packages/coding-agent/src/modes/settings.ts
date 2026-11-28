@@ -55,6 +55,20 @@ export const cfgGitEnabled = register({
 	},
 });
 
+/** Whether a cwd outside any repository adopts its single direct-child checkout as the active repo. */
+export const cfgGitChildRepoDiscovery = register({
+	id: "git.childRepoDiscovery",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "interaction",
+		group: "Git",
+		label: "Discover Child Repository",
+		description:
+			"Outside a repository, scan direct child directories and adopt a single child checkout for the status line, git/PR lookup, and prompt context.",
+	},
+});
+
 // ────────────────────────────────────────────────────────────────────────
 // Appearance
 // ────────────────────────────────────────────────────────────────────────
@@ -391,6 +405,96 @@ export const cfgTuiResizeScrollback = register({
 	},
 });
 
+export const cfgTuiScreen = register({
+	id: "tui.screen",
+	type: "enum",
+	values: ["inline", "fullscreen"] as const,
+	default: "inline",
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Screen",
+		get description() {
+			const shift = formatKeyHint("shift");
+			return `Where the session draws in a plain terminal (Tern draws its own): inline keeps the transcript in terminal scrollback; fullscreen uses the alternate screen with the composer pinned to the bottom and the transcript scrolled in omp (PgUp/PgDn, Ctrl+Home/Ctrl+End, mouse wheel), written to the terminal on exit unless Fullscreen Exit Transcript is off. Drag to select text; double-click selects a word, triple-click a line. ${shift}+drag (Option+drag in iTerm2) bypasses omp selection`;
+		},
+		options: [
+			{
+				value: "inline",
+				label: "Inline",
+				description: "Draw below the shell prompt; settled output goes into terminal scrollback",
+			},
+			{
+				value: "fullscreen",
+				label: "Fullscreen",
+				description: "Alternate screen, composer pinned to the bottom, transcript scrolled in omp",
+			},
+		],
+	},
+});
+
+export const cfgTuiCopyOnSelect = register({
+	id: "tui.copyOnSelect",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Fullscreen Copy on Select",
+		description: "Copy a fullscreen text selection on release (default true).",
+	},
+});
+
+export const cfgTuiWheelLines = register({
+	id: "tui.wheelLines",
+	type: "number",
+	default: 0,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Fullscreen Wheel Lines",
+		description: "Fullscreen wheel rows per report; zero follows gesture velocity.",
+	},
+});
+
+export const cfgTuiFullscreenMouse = register({
+	id: "tui.fullscreenMouse",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Fullscreen Mouse",
+		description:
+			"Use the mouse for transcript selection, scrollbar and wheel. Off leaves selection to the terminal; use keyboard scrolling instead.",
+	},
+});
+
+export const cfgTuiExitTranscript = register({
+	id: "tui.exitTranscript",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Fullscreen Exit Transcript",
+		description:
+			"Write the transcript to the normal screen on exit. Off restores the original screen without appending it.",
+	},
+});
+
+export const cfgTuiScrollbar = register({
+	id: "tui.scrollbar",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Fullscreen Scrollbar",
+		description: "Show the fullscreen scrollbar when there is overflow (default true).",
+	},
+});
+
 export const cfgTerminalShowProgress = register({
 	id: "terminal.showProgress",
 	type: "boolean",
@@ -556,16 +660,21 @@ export const cfgTuiTitleState = register({
 export const cfgTuiTitleSpinner = register({
 	id: "tui.titleSpinner",
 	type: "enum",
-	values: ["braille", "pulse", "dots", "line"] as const,
-	default: "braille",
+	values: ["braille", "centered", "pulse", "dots", "line"] as const,
+	default: "centered",
 	ui: {
 		tab: "appearance",
 		group: "Display",
 		label: "Terminal Title Spinner",
 		description:
-			"Glyph set for the working-state spinner in the terminal title — braille sweep, filling moon, single-dot cycle, or ASCII-safe line",
+			"Glyph set for the working-state spinner in the terminal title — centered braille sweep, classic braille sweep, filling moon, single-dot cycle, or ASCII-safe line",
 		options: [
-			{ value: "braille", label: "Braille", description: "Classic ⠋⠙⠹ sweep (default)" },
+			{
+				value: "centered",
+				label: "Centered",
+				description: "Three-dot ⠙⠸⢰⣠ snake around the full cell, centered on the title (default)",
+			},
+			{ value: "braille", label: "Braille", description: "Classic ⠋⠙⠹ sweep, sitting high beside the title" },
 			{ value: "pulse", label: "Pulse", description: "Moon filling ○◑● then emptying" },
 			{ value: "dots", label: "Dots", description: "Single braille dots cycling" },
 			{ value: "line", label: "Line", description: "ASCII - \\ | / for fonts without braille coverage" },
@@ -622,6 +731,19 @@ export const cfgTuiMaxFps = register({
 	},
 });
 
+export const cfgTuiShowLinkUrl = register({
+	id: "tui.showLinkUrl",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Link URLs",
+		description:
+			"Show the target URL in parentheses after named markdown links; off only hides it where terminal hyperlinks make the label clickable",
+	},
+});
+
 export const cfgTuiHyperlinks = register({
 	id: "tui.hyperlinks",
 	type: "enum",
@@ -646,7 +768,7 @@ export const cfgTuiMouse = register({
 		label: "Mouse Click-to-Focus",
 		get description() {
 			const shift = formatKeyHint("shift");
-			return `Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target, and clicks on extension-owned links reach their extension (the link-hint key picks them without the mouse). Native text selection becomes ${shift}+drag while on, and mouse capture stops wheel scrolling — the terminal reports wheel ticks to omp instead — so scroll with the terminal's keyboard scrollback keys, or turn this off`;
+			return `Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target, and clicks on extension-owned links reach their extension (the link-hint key picks them without the mouse). Native text selection becomes ${shift}+drag while on, and in inline mode mouse capture stops native wheel scrolling — the terminal reports wheel ticks to omp instead — so scroll with the terminal's keyboard scrollback keys, or turn this off`;
 		},
 	},
 });
@@ -763,17 +885,34 @@ export const cfgDisplaySmoothStreaming = register({
 	},
 });
 
-export const cfgDisplayHideToolActivity = register({
-	id: "display.hideToolActivity",
-	type: "boolean",
-	default: false,
+/** How the transcript shows model-initiated tool calls, in `app.tools.toggleVisibility` cycle order. */
+export const TOOL_ACTIVITY_MODES = ["detailed", "concise", "hidden"] as const;
+
+export const cfgDisplayToolActivity = register({
+	id: "display.toolActivity",
+	type: "enum",
+	values: TOOL_ACTIVITY_MODES,
+	default: "detailed",
 	ui: {
 		tab: "appearance",
 		group: "Display",
-		label: "Hide Tool Activity",
-		description: "Hide model-initiated tool calls and results from the transcript",
+		label: "Tool Activity",
+		description:
+			"How model-initiated tool calls show in the transcript (concise draws one status row per call; the tool-output toggle opens the full card)",
+		options: [
+			{ value: "detailed", label: "Detailed", description: "Full tool cards with arguments and output previews" },
+			{
+				value: "concise",
+				label: "Concise",
+				description: "One row per call: time, status, tool and intent; no arguments or output",
+			},
+			{ value: "hidden", label: "Hidden", description: "Hide tool calls and results from the transcript" },
+		],
 	},
 });
+
+/** {@link cfgDisplayToolActivity}'s value. */
+export type ToolActivityMode = (typeof TOOL_ACTIVITY_MODES)[number];
 
 export const cfgDisplayShowTokenUsage = register({
 	id: "display.showTokenUsage",
@@ -844,7 +983,7 @@ export const cfgDisplayAdvisorCollapsedLines = register({
 });
 /** Transcript display preferences the shell applies to its tool, message and image blocks. */
 export const cfgTranscriptDisplay = combine({
-	hideToolActivity: cfgDisplayHideToolActivity,
+	toolActivity: cfgDisplayToolActivity,
 	shellVisualization: cfgDisplayShellVisualization,
 	readToolResultPreview: cfgReadToolResultPreview,
 	showImages: cfgTerminalShowImages,
@@ -1452,7 +1591,7 @@ export const cfgCompletionNotify = register({
 		tab: "interaction",
 		group: "Notifications",
 		label: "Completion Notification",
-		description: "Notify when the agent finishes a turn",
+		description: "Notify when the agent finishes a turn or a plan is ready for approval",
 	},
 });
 

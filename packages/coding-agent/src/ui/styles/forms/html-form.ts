@@ -14,10 +14,19 @@
  */
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import { type Block, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
+import { type EditorRow, layoutText, rowOf } from "@oh-my-pi/pi-tui/term/painters/editor";
 import { paintPicture } from "@oh-my-pi/pi-tui/term/painters/image";
 import { flattenLine } from "@oh-my-pi/pi-tui/text/sanitize";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
-import { padTo, sliceCells, truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
+import {
+	padTo,
+	replaceTabs,
+	sliceCells,
+	sliceColumns,
+	truncate,
+	visibleWidth,
+	wrap,
+} from "@oh-my-pi/pi-tui/text/width";
 import type { ChoiceField, FormBlock, FormField, FormSpan } from "../../../tools/html-form/parse";
 import { spansText } from "../../../tools/html-form/parse";
 import { type FormPart, isFoldCaption } from "../../forms/html-form/layout";
@@ -135,9 +144,28 @@ function styled(theme: Theme, spans: readonly FormSpan[], base: string): string 
 			if (span.style === "code") return theme.fg("mdCode", span.text);
 			if (span.style === "strong") return theme.style("strong", theme.fg(base, span.text));
 			if (span.style === "em") return theme.style("em", theme.fg(base, span.text));
+			if (span.style === "mark") return theme.style("inverse", theme.fg(base, span.text));
 			return theme.fg(base, span.text);
 		})
 		.join("");
+}
+
+const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
+/** Crop a styled input around the caret, marking the edges with more text. */
+function caretViewport(theme: Theme, line: string, width: number, caretEnd: number, caretWidth: number): string {
+	if (width < caretWidth) return theme.style("inverse", " ");
+	line = replaceTabs(line);
+	const cells = visibleWidth(line);
+	if (cells <= width) return line;
+	if (width === caretWidth) return sliceColumns(line, caretEnd - caretWidth, caretEnd);
+	const left = caretEnd >= width;
+	const room = width - Number(left);
+	const start = left ? Math.min(cells - room, Math.max(1, caretEnd - Math.max(caretWidth, Math.ceil(room / 2)))) : 0;
+	const right = start + room < cells && caretEnd < start + room;
+	const leading = left ? theme.fg("dim", "‹") : "";
+	const trailing = right ? theme.fg("dim", "›") : "";
+	return leading + sliceColumns(line, start, start + room - Number(right)) + trailing;
 }
 
 /**
@@ -150,17 +178,21 @@ function caretLine(
 	cursor: number,
 	placeholder?: string,
 	selection?: { readonly from: number; readonly to: number } | null,
+	width?: number,
 ): string {
 	const flat = text.replaceAll("\n", " ");
-	if (selection && selection.to > selection.from)
-		return `${flat.slice(0, selection.from)}${theme.style("inverse", flat.slice(selection.from, selection.to))}${flat.slice(selection.to)}`;
 	const at = Math.max(0, Math.min(cursor, flat.length));
-	if (at >= flat.length) {
-		const caret = theme.style("inverse", " ");
-		return `${flat}${caret}${!flat && placeholder ? theme.fg("dim", placeholder) : ""}`;
-	}
-	const ch = String.fromCodePoint(flat.codePointAt(at)!);
-	return `${flat.slice(0, at)}${theme.style("inverse", ch)}${flat.slice(at + ch.length)}`;
+	const grapheme = graphemes.segment(flat).containing(at);
+	const start = grapheme?.index ?? at;
+	const ch = grapheme?.segment ?? " ";
+	const before = flat.slice(0, start);
+	const line =
+		selection && selection.to > selection.from
+			? `${flat.slice(0, selection.from)}${theme.style("inverse", flat.slice(selection.from, selection.to))}${flat.slice(selection.to)}`
+			: `${before}${theme.style("inverse", ch)}${flat.slice(start + ch.length)}${!flat && placeholder ? theme.fg("dim", placeholder) : ""}`;
+	if (width === undefined) return line;
+	const caretWidth = Math.max(1, visibleWidth(ch));
+	return caretViewport(theme, line, width, visibleWidth(before) + caretWidth, caretWidth);
 }
 
 // ─── Content blocks ─────────────────────────────────────────────────────────
@@ -192,9 +224,9 @@ function blockLines(cx: PaintContext, block: FormBlock, width: number, media: Me
 				truncate(
 					row
 						.map((cell, j) => {
-							const text = spansText(cell);
-							const pad = j === cols - 1 ? "" : " ".repeat(widths[j]! - visibleWidth(text) + 2);
-							return `${head ? theme.style("strong", text) : theme.fg("muted", text)}${pad}`;
+							const pad = j === cols - 1 ? "" : " ".repeat(widths[j]! - visibleWidth(spansText(cell)) + 2);
+							const text = styled(theme, cell, head ? "text" : "muted");
+							return `${head ? theme.style("strong", text) : text}${pad}`;
 						})
 						.join(""),
 					width,
@@ -270,7 +302,7 @@ function foldLines(theme: Theme, model: HtmlFormModel, index: number, width: num
 
 function labelLine(theme: Theme, model: HtmlFormModel, field: FormField, view: View, width: number): string {
 	const pointer = view.focused ? theme.fg("accent", "❯ ") : "  ";
-	let label = theme.fg(view.focused ? "accent" : "text", spansText(field.label));
+	let label = styled(theme, field.label, view.focused ? "accent" : "text");
 	if (field.required) label += theme.fg("error", " *");
 	if (field.kind === "text" && field.type === "number" && (field.min !== undefined || field.max !== undefined)) {
 		const range =
@@ -303,27 +335,31 @@ function optionRows(
 		if (row === OTHER_ROW) {
 			const checked = answer.otherChosen;
 			const editing = view.row === OTHER_ROW && view.active === index;
-			const text = editing
-				? caretLine(
+			// Chosen only counts once something is typed.
+			const on = checked && answer.other.text.trim() !== "";
+			const glyph = field.multi ? (on ? "☑" : "☐") : on ? "◉" : "○";
+			const label = theme.fg(selected ? "accent" : on ? "muted" : "text", "Other: ");
+			const head = `${cursor}${theme.fg(on ? "success" : "dim", glyph)} ${label}`;
+			if (editing) {
+				const room = width - visibleWidth(head);
+				if (room <= 0) lines.push(clip(head, width));
+				else {
+					const text = caretLine(
 						theme,
 						answer.other.text,
 						answer.other.cursor,
 						"type your own",
 						model.vim({ kind: "other", field: index })?.selection(),
-					)
-				: answer.other.text
-					? theme.fg(
-							checked && answer.other.text.trim() ? "muted" : "text",
-							answer.other.text.replaceAll("\n", " "),
-						)
+						room,
+					);
+					lines.push(head + text);
+				}
+			} else {
+				const text = answer.other.text
+					? theme.fg(on ? "muted" : "text", answer.other.text.replaceAll("\n", " "))
 					: theme.fg("dim", "type your own");
-			// Chosen only counts once something is typed.
-			const on = checked && answer.other.text.trim() !== "";
-			const glyph = field.multi ? (on ? "☑" : "☐") : on ? "◉" : "○";
-			const label = theme.fg(selected ? "accent" : on ? "muted" : "text", "Other: ");
-			const line = `${cursor}${theme.fg(on ? "success" : "dim", glyph)} ${label}${text}`;
-			// The field being typed in cuts like an editor: its ellipsis keeps the text's style.
-			lines.push(editing ? clip(line, width) : truncate(line, width, "…"));
+				lines.push(truncate(head + text, width, "…"));
+			}
 		} else {
 			const option = field.options[row]!;
 			const checked = answer.checked.has(row);
@@ -336,12 +372,11 @@ function optionRows(
 					: theme.fg("dim", "  ✎ draft");
 			// Long labels wrap under themselves.
 			const color = selected ? "accent" : checked ? "muted" : "text";
-			const wrapped = wrap(flattenLine(spansText(option.label)), Math.max(1, width - 4 - visibleWidth(marker)));
+			const flat = option.label.map(span => ({ text: span.text.replaceAll("\n", " "), style: span.style }));
+			const wrapped = wrap(styled(theme, flat, color), Math.max(1, width - 4 - visibleWidth(marker)));
 			wrapped.forEach((part, i) => {
 				const head = i === 0 ? `${cursor}${theme.fg(checked ? "success" : "dim", glyph)} ` : "    ";
-				lines.push(
-					truncate(`${head}${theme.fg(color, part)}${i === wrapped.length - 1 ? marker : ""}`, width, "…"),
-				);
+				lines.push(truncate(`${head}${part}${i === wrapped.length - 1 ? marker : ""}`, width, "…"));
 			});
 		}
 		if (selected) column.focusEnd = lines.length;
@@ -400,6 +435,22 @@ function dropdownRows(
 	return out;
 }
 
+/** Cells a textarea's rows wrap at in a column `width` wide: past its bar, a cell short for the caret after a full row. */
+function textareaWrap(width: number): number {
+	return Math.max(1, width - 5);
+}
+
+/** One paint's textarea layouts by wrap width, then text: a paint builds the column several times. */
+type TextareaLayouts = Map<number, Map<string, EditorRow[]>>;
+
+function textareaRows(layouts: TextareaLayouts, text: string, wrap: number): EditorRow[] {
+	let byText = layouts.get(wrap);
+	if (!byText) layouts.set(wrap, (byText = new Map()));
+	let rows = byText.get(text);
+	if (!rows) byText.set(text, (rows = layoutText(text, wrap)));
+	return rows;
+}
+
 function openFieldLines(
 	theme: Theme,
 	model: HtmlFormModel,
@@ -407,6 +458,7 @@ function openFieldLines(
 	view: View,
 	width: number,
 	column: Column,
+	layouts: TextareaLayouts,
 ): void {
 	const field = model.field(index);
 	const lines = column.lines;
@@ -441,23 +493,24 @@ function openFieldLines(
 		const bar = view.focused ? theme.fg("accent", "│") : theme.fg("dim", "│");
 		if (field.multiline) {
 			const text = answer.text.text;
-			const rows = text === "" ? [""] : text.split("\n");
-			const shown = Math.max(4, rows.length);
+			const cursor = answer.text.cursor;
 			const room = Math.max(1, width - 4);
-			// The caret's row and column (a bar after the row's end, else the character under it inverted).
-			const before = text.slice(0, answer.text.cursor).split("\n");
-			const caretRow = before.length - 1;
-			const caretCol = before[caretRow]!.length;
+			const rows = textareaRows(layouts, text, textareaWrap(width));
+			const caretRow = rowOf(rows, cursor);
+			const shown = Math.max(4, rows.length);
 			for (let r = 0; r < shown; r++) {
-				const row = rows[r] ?? "";
-				let content = theme.fgResolved("text", row);
-				if (r === caretRow && view.focused) {
-					if (caretCol >= row.length) content = theme.fgResolved("text", `${row}▏`);
+				const row = rows[r];
+				const part = row ? text.slice(row.start, row.textEnd) : "";
+				let content = theme.fgResolved("text", part);
+				// The caret: a bar after the row's text, else the character under it inverted.
+				if (row && r === caretRow && view.focused) {
+					const at = cursor - row.start;
+					if (cursor >= row.textEnd) content = theme.fgResolved("text", `${part}▏`);
 					else {
-						const ch = String.fromCodePoint(row.codePointAt(caretCol)!);
+						const ch = String.fromCodePoint(part.codePointAt(at)!);
 						content = theme.fgResolved(
 							"text",
-							`${row.slice(0, caretCol)}${theme.style("inverse", ch)}${row.slice(caretCol + ch.length)}`,
+							`${part.slice(0, at)}${theme.style("inverse", ch)}${part.slice(at + ch.length)}`,
 						);
 					}
 				}
@@ -468,18 +521,26 @@ function openFieldLines(
 					content = theme.fgResolved("text", `▏${gap >= 1 ? `${" ".repeat(gap)}${placeholder}` : ""}`);
 				}
 				lines.push(truncate(`  ${bar} ${content}`, width, "…"));
+				// A textarea taller than the box scrolls to the caret's row.
+				if (r === caretRow) column.focusEnd = lines.length;
 			}
 		} else {
-			const secret = field.type === "password";
-			const text = secret ? "•".repeat([...answer.text.text].length) : answer.text.text;
-			const line = caretLine(
-				theme,
-				text,
-				secret ? 0 : answer.text.cursor,
-				field.placeholder || undefined,
-				model.vim({ kind: "text", field: index })?.selection(),
-			);
-			lines.push(clip(`  ${bar} ${line}`, width));
+			const head = `  ${bar} `;
+			const room = width - visibleWidth(head);
+			if (room <= 0) lines.push(clip(head, width));
+			else {
+				let { text, cursor } = answer.text;
+				let selection = model.vim({ kind: "text", field: index })?.selection();
+				if (field.type === "password") {
+					// One bullet per code point: map UTF-16 offsets onto the mask.
+					const masked = (offset: number) => Array.from(text.slice(0, offset)).length;
+					cursor = masked(cursor);
+					if (selection) selection = { from: masked(selection.from), to: masked(selection.to) };
+					text = "•".repeat(Array.from(text).length);
+				}
+				const line = caretLine(theme, text, cursor, field.placeholder || undefined, selection, room);
+				lines.push(head + line);
+			}
 		}
 		if (error) lines.push(clip(`    ${theme.fg("error", error)}`, width));
 	}
@@ -490,7 +551,13 @@ function openFieldLines(
 
 // ─── The column ─────────────────────────────────────────────────────────────
 
-function buildColumn(cx: PaintContext, look: HtmlFormLook, view: View, width: number): Column {
+function buildColumn(
+	cx: PaintContext,
+	look: HtmlFormLook,
+	view: View,
+	width: number,
+	layouts: TextareaLayouts,
+): Column {
 	const theme = cx.theme;
 	const model = look.model;
 	const { intro, groups } = model.layout;
@@ -524,7 +591,7 @@ function buildColumn(cx: PaintContext, look: HtmlFormLook, view: View, width: nu
 				part(keep !== undefined);
 				keep = undefined;
 				const index = model.form.fields.indexOf(block.field);
-				if (block.field === focused) openFieldLines(theme, model, index, view, width, column);
+				if (block.field === focused) openFieldLines(theme, model, index, view, width, column, layouts);
 				else lines.push(...foldLines(theme, model, index, width));
 			}
 		}
@@ -575,14 +642,14 @@ function currentView(model: HtmlFormModel): View {
 }
 
 /** The tallest column any field could open (each opened as it would be now). */
-function tallest(cx: PaintContext, look: HtmlFormLook, width: number, current: View): number {
-	let max = buildColumn(cx, look, current, width).lines.length;
+function tallest(cx: PaintContext, look: HtmlFormLook, width: number, current: View, layouts: TextareaLayouts): number {
+	let max = buildColumn(cx, look, current, width, layouts).lines.length;
 	const views: View[] = [{ ...current, active: "submit", dropdown: undefined, note: undefined }];
 	look.model.fields.forEach((_, index) => {
 		const rows = look.model.rows(index);
 		views.push({ ...current, active: index, row: rows[0] ?? 0, dropdown: undefined, note: undefined });
 	});
-	for (const view of views) max = Math.max(max, buildColumn(cx, look, view, width).lines.length);
+	for (const view of views) max = Math.max(max, buildColumn(cx, look, view, width, layouts).lines.length);
 	return max;
 }
 
@@ -618,15 +685,20 @@ function paintHtmlForm(node: UiNode, cx: PaintContext): Block {
 	}
 	const inner = cx.width - 4;
 	const view = currentView(model);
-	const skip = look.skipNotice ? wrap(theme.fg("warning", `⚠ ${flattenLine(look.skipNotice)}`), inner) : [];
+	const skip = look.skipNotice
+		? wrap(theme.fg("warning", `${theme.symbols.symbol("status.warning")} ${flattenLine(look.skipNotice)}`), inner)
+		: [];
 	const limit = Math.max(1, Math.floor(look.terminalRows * HEIGHT_RATIO) - CHROME_ROWS);
-	let column = buildColumn(cx, look, view, inner);
-	let body = Math.min(tallest(cx, look, inner, view), limit);
+	const layouts: TextareaLayouts = new Map();
+	let column = buildColumn(cx, look, view, inner, layouts);
+	let body = Math.min(tallest(cx, look, inner, view, layouts), limit);
 	const overflow = column.lines.length > body;
 	if (overflow) {
-		column = buildColumn(cx, look, view, inner - 1);
-		body = Math.min(tallest(cx, look, inner - 1, view), limit);
+		column = buildColumn(cx, look, view, inner - 1, layouts);
+		body = Math.min(tallest(cx, look, inner - 1, view, layouts), limit);
 	}
+	// Up/Down in a textarea step through the rows drawn here.
+	model.wrapWidth = textareaWrap(overflow ? inner - 1 : inner);
 	const rows = body - skip.length;
 	const lines = column.lines;
 	if (column.overlay) {

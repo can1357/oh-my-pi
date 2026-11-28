@@ -36,12 +36,15 @@ import {
 	untrack,
 	useContext,
 } from "@oh-my-pi/pi-tui";
+import { holdsImage } from "@oh-my-pi/pi-tui/driver/images/anchor";
 import { type Block, defineRolePainter, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
 import { mountNode, type ViewEntry, ViewList } from "./views";
 
 /** A block in the transcript. */
 export interface TranscriptBlock extends ViewEntry {
+	/** A real user prompt for transcript navigation, not a synthetic message. */
+	readonly prompt?: true;
 	/** Whether the block currently draws as compact rows (reactive). */
 	readonly compact: Accessor<boolean>;
 	/** The block draws its own blank row below it: no separator follows it. */
@@ -57,6 +60,7 @@ export interface TranscriptBlock extends ViewEntry {
 
 /** Options of {@link Transcript.append}. */
 export interface BlockOptions {
+	readonly prompt?: boolean;
 	/** Pack against compact neighbours (may change over time). */
 	readonly compact?: Accessor<boolean>;
 	/**
@@ -80,6 +84,8 @@ export interface BlockOptions {
 export interface TranscriptHost {
 	/** Whether `node` has rows in terminal scrollback. */
 	retired(node: UiNode): boolean;
+	/** Whether the terminal acknowledged rows of `node`'s own content in scrollback, not only its separator. */
+	contentInHistory(node: UiNode): boolean;
 	/** Rebuild terminal scrollback from the current main region. */
 	replayHistory(): void;
 	/** Describe again the settled block holding `node` (Tern dropped its description). */
@@ -221,12 +227,9 @@ export class Transcript {
 	 * block had rows there.
 	 */
 	retain(keep: ReadonlySet<TranscriptBlock>): void {
-		let retired = false;
-		for (const block of this.#blocks.peek()) {
-			if (keep.has(block)) continue;
-			retired ||= this.retired(block);
-			this.#blocks.remove(block);
-		}
+		// Asked before the removed blocks are disposed.
+		const retired = this.#blocks.peek().some(block => !keep.has(block) && this.retired(block));
+		this.#blocks.retain(block => keep.has(block));
 		if (retired) this.#host?.replayHistory();
 	}
 
@@ -264,6 +267,11 @@ export class Transcript {
 	/** Whether `block` has rows in terminal scrollback. */
 	retired(block: TranscriptBlock): boolean {
 		return this.#host?.retired(block.node) ?? false;
+	}
+
+	/** Whether the terminal acknowledged rows of `block`'s own content in scrollback, not only its separator. */
+	contentInHistory(block: TranscriptBlock): boolean {
+		return this.#host?.contentInHistory(block.node) ?? false;
 	}
 
 	/** Remove `block`; scrollback is rebuilt when it had rows there. */
@@ -402,6 +410,7 @@ export class Transcript {
 			compact: options?.compact ?? NOT_COMPACT,
 			spacedBelow: options?.spacedBelow === true,
 			head: options?.head === true,
+			...(options?.prompt ? { prompt: true } : {}),
 			native: () => {
 				const nodes = native();
 				for (const node of nodes) this.#fallback(node);
@@ -431,9 +440,12 @@ function buildTree(node: UiNode): void {
 /** SGR that fills a cell without text: a background color, or inverse video. */
 const FILLED_ROW = /\x1b\[(?:[0-9:]*;)*(?:48[;:]|7[;m])/;
 
-/** A row with nothing on it: no text and no fill (the padding rows of a bubble or an inverse notice box are not blank). */
+/**
+ * A row with nothing on it: no text, no fill (the padding rows of a bubble or an inverse notice box
+ * are not blank) and no image.
+ */
 function blankRow(row: string): boolean {
-	return stripEscapes(row).trim() === "" && !FILLED_ROW.test(row);
+	return stripEscapes(row).trim() === "" && !FILLED_ROW.test(row) && !holdsImage(row);
 }
 
 /**

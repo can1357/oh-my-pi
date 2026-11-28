@@ -110,7 +110,7 @@ function paintGithub(node: UiNode, cx: PaintContext): Block {
 				? `  ${term.branch ? replaceTabs(term.subject) : theme.fg("muted", term.subject)}`
 				: ` ${theme.fg("dim", truncate(replaceTabs(term.subject), SUBJECT_CHARS))}`;
 		const rows = wrap(head, cx.width);
-		if (term.watch) rows.push(...wrap(theme.fg("dim", "waiting for workflow data..."), cx.width));
+		if (term.watch) rows.push(...wrap(theme.fg("dim", term.waitText ?? "waiting for workflow data..."), cx.width));
 		return { rows };
 	}
 	const glyph =
@@ -120,7 +120,7 @@ function paintGithub(node: UiNode, cx: PaintContext): Block {
 				? theme.fg("error", theme.symbols.symbol("status.error"))
 				: props.tone === "warning"
 					? theme.fg("warning", theme.symbols.symbol("status.warning"))
-					: theme.fg("accent", theme.symbols.symbol("tool.gh"));
+					: theme.fg("accent", theme.symbols.symbol(term.icon ?? "tool.gh"));
 	const inner = frameInner(cx.width);
 	const border = failed ? "error" : "borderMuted";
 	const head = `${glyph} ${title}${term.subject ? ` ${theme.fg("dim", replaceTabs(term.subject))}` : ""}`;

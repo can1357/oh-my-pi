@@ -143,7 +143,7 @@ function parseMrSchemeRef(text: string): ReviewPrRef | undefined {
 	if (!text.startsWith("mr://")) return undefined;
 	try {
 		const parsed = parseMrUrl(parseInternalUrl(text));
-		if (!parsed.project) return undefined;
+		if (parsed.kind === "list" || !parsed.project) return undefined;
 		return { forge: "gitlab", repo: parsed.project, number: parsed.iid, raw: text, kind: "mr-url" };
 	} catch {
 		return undefined;

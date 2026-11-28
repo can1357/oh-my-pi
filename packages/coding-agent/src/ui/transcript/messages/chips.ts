@@ -74,7 +74,7 @@ export function chipText(
 		return label;
 	});
 	out = out.replace(MODEL_MENTION, (_match, name: string) => {
-		const label = `${symbols.symbol("icon.model")} ${name}`;
+		const label = `${symbols.symbol("mention.model")} ${name}`;
 		if (!chips.has(label)) chips.set(label, { label, kind: "mention" });
 		return label;
 	});

@@ -24,6 +24,7 @@ import { driverImages } from "@oh-my-pi/pi-tui/term/backend";
 import { paintNode, type StaticEnvironment, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
 import { firstCellDiff } from "@oh-my-pi/pi-tui/testing/cells";
 import { CORPUS_DIR, CORPUS_NOW, type CorpusCase, describeTree, stageNative } from "@oh-my-pi/pi-tui/testing/corpus";
+import { CONSERVATIVE_EMOJI } from "@oh-my-pi/pi-tui/theme/contract";
 import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import { captureStage, skipsAt } from "../../deviations";
 import { canonicalNative, nativeDiff } from "../messages/harness";
@@ -44,6 +45,7 @@ export const KITTY: TerminalCapabilities = {
 	multiplexer: null,
 	textSizing: false,
 	tsp: false,
+	emoji: CONSERVATIVE_EMOJI,
 };
 
 /** A block under test and how its model moves through the stages. */

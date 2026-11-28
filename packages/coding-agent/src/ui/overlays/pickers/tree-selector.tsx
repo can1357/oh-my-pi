@@ -240,47 +240,61 @@ export function TreeSelector(props: TreeSelectorProps): JSXNode {
 	const leafId = props.currentLeafId;
 	const toolCalls = collectToolCalls(props.roots);
 	const partsOf = (entry: SessionTreeEntry): EntryPart[] => entryParts(entry, toolCalls);
+	// Iterative walks throughout: a long linear session nests thousands of entries deep.
 	const parentOf = new Map<string, string | null>();
-	const containsActive = new Map<TreeSelectorNode, boolean>();
-	const visit = (node: TreeSelectorNode, parent: string | null): boolean => {
-		parentOf.set(node.entry.id, parent);
-		let has = node.entry.id === leafId;
-		for (const child of node.children) if (visit(child, node.entry.id)) has = true;
-		containsActive.set(node, has);
-		return has;
-	};
-	for (const root of props.roots) visit(root, null);
+	for (const root of props.roots) parentOf.set(root.entry.id, null);
+	const unvisited = [...props.roots];
+	for (let node = unvisited.pop(); node; node = unvisited.pop()) {
+		for (const child of node.children) {
+			parentOf.set(child.entry.id, node.entry.id);
+			unvisited.push(child);
+		}
+	}
 	const activePath = new Set<string>();
 	for (let id: string | null | undefined = leafId; id; id = parentOf.get(id)) activePath.add(id);
-	const activeFirst = (nodes: readonly TreeSelectorNode[]): TreeSelectorNode[] =>
-		[...nodes].sort((a, b) => Number(containsActive.get(b)) - Number(containsActive.get(a)));
+	/** `nodes` with the branch holding the current leaf first. */
+	const activeFirst = (nodes: readonly TreeSelectorNode[]): readonly TreeSelectorNode[] =>
+		nodes.length < 2
+			? nodes
+			: [...nodes].sort((a, b) => Number(activePath.has(b.entry.id)) - Number(activePath.has(a.entry.id)));
 
-	// Structural rows: a fork's branches nest one level deeper; a linear chain stays at its head's depth.
+	// Structural rows in pre-order: a fork's branches nest one level deeper; a linear chain stays at its head's depth.
 	const rows: Row[] = [];
-	const walk = (
+	const pending: Row[] = [];
+	/** Push `nodes` as siblings onto the `pending` stack so they pop in rendered order. */
+	const pushSiblings = (
 		nodes: readonly TreeSelectorNode[],
 		depth: number,
 		parent: string | undefined,
 		guides: readonly boolean[],
 	): void => {
 		const ordered = activeFirst(nodes);
-		ordered.forEach((node, index) => {
+		for (let index = ordered.length - 1; index >= 0; index--) {
 			const lastSibling = index === ordered.length - 1;
-			rows.push({ node, depth, parent, siblings: ordered.length, lastSibling, guides });
-			const childDepth =
-				node.children.length > 1 || (props.roots.length > 1 && parent === undefined) ? depth + 1 : depth;
-			// A branch head keeps its fork's guide running down its own branch while siblings follow it:
-			// whatever the filter hides, the rows under it show where they hang.
-			const below = Array.from({ length: childDepth }, (_, level) => guides[level] ?? false);
-			if (ordered.length > 1 && depth > 0) below[depth - 1] = !lastSibling;
-			walk(node.children, childDepth, node.entry.id, below);
-		});
+			pending.push({ node: ordered[index]!, depth, parent, siblings: ordered.length, lastSibling, guides });
+		}
 	};
-	walk(props.roots, 0, undefined, []);
+	pushSiblings(props.roots, 0, undefined, []);
+	for (let row = pending.pop(); row; row = pending.pop()) {
+		rows.push(row);
+		const { node, depth, parent, siblings, lastSibling, guides } = row;
+		const childDepth =
+			node.children.length > 1 || (props.roots.length > 1 && parent === undefined) ? depth + 1 : depth;
+		// A branch head keeps its fork's guide running down its own branch while siblings follow it:
+		// whatever the filter hides, the rows under it show where they hang.
+		const forkGuide = siblings > 1 && depth > 0;
+		let below = guides;
+		if (childDepth !== depth || forkGuide) {
+			const fresh = Array.from({ length: childDepth }, (_, level) => guides[level] ?? false);
+			if (forkGuide) fresh[depth - 1] = !lastSibling;
+			below = fresh;
+		}
+		pushSiblings(node.children, childDepth, node.entry.id, below);
+	}
 	const nodeById = new Map(rows.map(row => [row.node.entry.id, row.node]));
-	const childOrder = new Map<TreeSelectorNode, TreeSelectorNode[]>();
+	const childOrder = new Map<TreeSelectorNode, readonly TreeSelectorNode[]>();
 	/** `node`'s children as rendered (the branch holding the current leaf first). */
-	const orderedChildren = (node: TreeSelectorNode): TreeSelectorNode[] => {
+	const orderedChildren = (node: TreeSelectorNode): readonly TreeSelectorNode[] => {
 		let ordered = childOrder.get(node);
 		if (!ordered) childOrder.set(node, (ordered = activeFirst(node.children)));
 		return ordered;

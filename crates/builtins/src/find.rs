@@ -556,7 +556,7 @@ pub mod matchers {
 		};
 
 		use super::{Matcher, MatcherIO, WalkEntry};
-		use crate::host::ShellCommand;
+		use crate::{exec_line::ExecLine, host::ShellCommand};
 
 		/// `{}` replacement for `-execdir`: the entry name relative to its parent.
 		fn execdir_arg(path: &Path) -> PathBuf {
@@ -666,7 +666,7 @@ pub mod matchers {
 			args:               Vec<OsString>,
 			exec_in_parent_dir: bool,
 			/// Command to build while matching.
-			command:            Mutex<Option<argmax::Command>>,
+			command:            Mutex<Option<ExecLine>>,
 		}
 
 		impl MultiExecMatcher {
@@ -685,23 +685,19 @@ pub mod matchers {
 				})
 			}
 
-			/// Starts a batch; `argmax` only sizes it against the system's
-			/// argument limit; [`Self::run_command`] runs it through the shell.
-			fn new_command(&self) -> argmax::Command {
-				let mut command = argmax::Command::new(&self.executable);
+			/// Starts a batch, sized against the system's argument limit;
+			/// [`Self::run_command`] runs it through the shell.
+			fn new_command(&self) -> ExecLine {
+				let mut command = ExecLine::new(&self.executable);
 				command.try_args(&self.args).unwrap();
 				command
 			}
 
-			async fn run_command(&self, command: &argmax::Command, matcher_io: &mut MatcherIO<'_>) {
-				let argv = std::iter::once(command.get_program())
-					.chain(command.get_args())
-					.map(OsString::from)
-					.collect();
-				// `-exec ... +` runs in find's (the shell's) working directory;
-				// `-execdir` batches carry their directory.
-				let mut shell_command = ShellCommand::new(argv);
-				if let Some(dir) = command.get_current_dir() {
+			/// Runs `command` in `dir`: an `-execdir` batch's directory, else
+			/// (`-exec ... +`) find's (the shell's) working directory.
+			async fn run_command(&self, command: ExecLine, dir: Option<&Path>, matcher_io: &mut MatcherIO<'_>) {
+				let mut shell_command = ShellCommand::new(command.into_argv());
+				if let Some(dir) = dir {
 					shell_command = shell_command.current_dir(dir);
 				}
 				// The child writes to the shared fd directly: flush what find
@@ -738,25 +734,24 @@ pub mod matchers {
 				let full = {
 					let mut slot = self.command.lock().unwrap_or_else(PoisonError::into_inner);
 					let command = slot.get_or_insert_with(|| self.new_command());
-					if command.try_arg(&path_to_file).is_err() {
+					if command.try_arg(path_to_file.as_os_str()).is_err() {
 						Some(std::mem::replace(command, self.new_command()))
 					} else {
 						None
 					}
 				};
-				if let Some(mut full) = full {
-					if self.exec_in_parent_dir
-						&& let Some(dir) = execdir_dir(file_info.path())
-					{
-						full.current_dir(dir);
-					}
-					self.run_command(&full, matcher_io).await;
+				if let Some(full) = full {
+					let dir = self
+						.exec_in_parent_dir
+						.then(|| execdir_dir(file_info.path()))
+						.flatten();
+					self.run_command(full, dir, matcher_io).await;
 
 					// Reset command status.
 					let fitted = {
 						let mut slot = self.command.lock().unwrap_or_else(PoisonError::into_inner);
 						slot.get_or_insert_with(|| self.new_command())
-							.try_arg(&path_to_file)
+							.try_arg(path_to_file.as_os_str())
 							.map(drop)
 							.map_err(|err| err.to_string())
 					};
@@ -781,9 +776,8 @@ pub mod matchers {
 						.lock()
 						.unwrap_or_else(PoisonError::into_inner)
 						.take();
-					if let Some(mut command) = taken {
-						command.current_dir(dir);
-						self.run_command(&command, matcher_io).await;
+					if let Some(command) = taken {
+						self.run_command(command, Some(dir), matcher_io).await;
 					}
 				}
 			}
@@ -797,7 +791,7 @@ pub mod matchers {
 						.unwrap_or_else(PoisonError::into_inner)
 						.take();
 					if let Some(command) = taken {
-						self.run_command(&command, matcher_io).await;
+						self.run_command(command, None, matcher_io).await;
 					}
 				}
 			}
@@ -4883,6 +4877,10 @@ pub mod matchers {
 					config.sorted_output = true;
 					Some(TrueMatcher.into_box())
 				},
+				"-allow-root" => {
+					config.allow_root = true;
+					Some(TrueMatcher.into_box())
+				},
 				"-maxdepth" => {
 					if i >= args.len() - 1 {
 						return Err(From::from(format!("missing argument to {}", args[i])));
@@ -5036,8 +5034,14 @@ use std::{
 
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::OsStringValueParser};
 
-use crate::host::{AsyncUtility, Host, matches_parser};
+use crate::{
+	host::{AsyncUtility, Host, matches_parser},
+	root_guard,
+};
 use matchers::{Follow, WalkEntry};
+
+/// `find`'s spelling of the [`root_guard`] escape hatches.
+const ROOT_FLAGS: root_guard::Flags = root_guard::Flags { allow: "-allow-root", depth: Some("-maxdepth") };
 
 pub struct Config {
 	same_file_system:  bool,
@@ -5051,6 +5055,9 @@ pub struct Config {
 	no_leaf_dirs:      bool,
 	follow:            Follow,
 	new_paths:         Option<Vec<String>>,
+	/// `-allow-root`: permits walking a filesystem root deeper than
+	/// [`root_guard::SHALLOW_DEPTH`], which [`run_find`] otherwise refuses.
+	allow_root:        bool,
 	files0_argument:   Option<String>,
 	/// `-fprint`/`-fprintf`/`-fprint0`/`-fls` outputs, closed after the search.
 	output_files:      Vec<(String, omp_vfs::File)>,
@@ -5074,6 +5081,7 @@ impl Default for Config {
 			follow:            Follow::Never,
 			new_paths:         None, // This option exclusively for -files0-from argument.
 			files0_argument:   None, //This option also is used for file0-from
+			allow_root:        false,
 			output_files:      Vec::new(),
 		}
 	}
@@ -5386,6 +5394,14 @@ async fn run_find(
 		return 0;
 	}
 
+	if !config.allow_root
+		&& let Err(refusal) =
+			root_guard::check(paths.iter().map(|path| host.resolve(path)), Some(config.max_depth), ROOT_FLAGS)
+	{
+		let _ = writeln!(host.stderr, "find: {refusal}");
+		return 1;
+	}
+
 	let mut ret = 0;
 	let mut quit = false;
 	for path in paths {
@@ -5445,6 +5461,10 @@ Early alpha implementation. Currently the only expressions supported are
  -sorted
     a non-standard extension that sorts directory contents by name before
     processing them. Less efficient, but allows for deterministic output.
+ -allow-root
+    a non-standard extension that permits searching a filesystem root such
+    as / deeper than -maxdepth 2. Without it such searches are refused: a
+    whole-disk walk can take hours to days.
 "
 	);
 }
@@ -5862,6 +5882,26 @@ mod tests {
 				.await;
 		assert_eq!(code, 0, "stderr: {err}");
 		assert_eq!(out, "1 sub/d.txt\n");
+	}
+
+	/// Failure mode: `find /` walked the whole disk for hours. A filesystem
+	/// root, however it is spelled, is refused unless the walk stays within
+	/// `-maxdepth 2` or `-allow-root` is passed.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn filesystem_root_is_refused_unless_shallow_or_allowed() {
+		let (_dir, root) = fixture();
+		// `-quit` stops a regression at the first entry instead of walking the disk.
+		for (cwd, operand) in [(root.as_path(), "/"), (root.as_path(), "/usr/.."), (Path::new("/"), ".")] {
+			let (code, capture) =
+				run_async_util::<Find>(&[operand, "-maxdepth", "3", "-print", "-quit"], "", cwd).await;
+			assert_eq!((code, capture.out().as_str()), (1, ""), "operand: {operand}");
+			assert!(capture.err().contains("-allow-root"), "stderr: {}", capture.err());
+		}
+		for args in [&["/", "-maxdepth", "2", "-print", "-quit"][..], &["/", "-allow-root", "-print", "-quit"]] {
+			let (code, capture) = run_async_util::<Find>(args, "", &root).await;
+			assert_eq!((code, capture.out().as_str(), capture.err().as_str()), (0, "/\n", ""), "{args:?}");
+		}
 	}
 
 	#[tokio::test(flavor = "multi_thread")]

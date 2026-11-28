@@ -29,9 +29,3 @@ on-api "google-vertex" {
 	tool-call-name-charset "google"
 	tool-call-name-max-length 128
 }
-
-// Code Assist's Gemini CLI proxy gets the conservative 64-character wire bound.
-on-api "google-gemini-cli" {
-	tool-call-name-charset "google"
-	tool-call-name-max-length 64
-}

@@ -6,7 +6,10 @@ import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
-import { CMUX_CONSOLE_CAPTURE_SCRIPT } from "@oh-my-pi/pi-coding-agent/tools/browser/console-capture";
+import {
+	CMUX_CONSOLE_CAPTURE_SCRIPT,
+	isLocalDocumentUrl,
+} from "@oh-my-pi/pi-coding-agent/tools/browser/console-capture";
 import { releaseAllTabs } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { chromiumAvailable } from "./chromium-probe";
@@ -44,7 +47,54 @@ interface CaptureResult {
 	entries: CaptureEntry[];
 	nextSeq: number;
 	dropped: number;
+	captureStartedAt?: number;
 }
+
+/**
+ * Counts how often logging an Error made the browser format its stack (`Error.prepareStackTrace`) or read a `stack`
+ * getter: both happen only while a CDP client has the Runtime domain enabled, which is how anti-bot scripts spot it.
+ */
+const RUNTIME_PROBE = `(() => {
+	let hits = 0;
+	let probe;
+	const original = Object.getOwnPropertyDescriptor(Error, "prepareStackTrace");
+	Error.prepareStackTrace = (error, frames) => {
+		if (error === probe) hits++;
+		return String(error);
+	};
+	try {
+		probe = new Error("probe");
+		console.debug(probe);
+	} finally {
+		if (original) Object.defineProperty(Error, "prepareStackTrace", original);
+		else delete Error.prepareStackTrace;
+	}
+	const withGetter = new Error("getter");
+	Object.defineProperty(withGetter, "stack", { configurable: false, enumerable: false, get() { hits++; return ""; } });
+	console.debug(withGetter);
+	return hits;
+})()`;
+
+/** A page whose first script records the probe in its title, before any omp call can touch it. */
+function probePage(label: string): string {
+	return `<!doctype html><title>pending</title><script>
+		console.log(${JSON.stringify(`${label} loaded`)});
+		document.title = "probe:" + ${RUNTIME_PROBE};
+	</script><a id="public" href="${PUBLIC_URL}">public</a>`;
+}
+
+const PUBLIC_URL = "http://public-site.test/";
+
+const localServer = Bun.serve({
+	hostname: "127.0.0.1",
+	port: 0,
+	fetch(request) {
+		const url = new URL(request.url);
+		if (url.pathname === "/to-public") return Response.redirect(`${PUBLIC_URL}redirected`, 302);
+		return new Response(probePage(`local ${url.pathname}`), { headers: { "content-type": "text/html" } });
+	},
+});
+const LOCAL_URL = `http://127.0.0.1:${localServer.port}`;
 
 async function invoke(parameters: unknown) {
 	return await prelude.invoke(parameters, context);
@@ -63,10 +113,62 @@ async function call(method: string, args: unknown[] = []): Promise<unknown> {
 	return valueFrom(result);
 }
 
+async function routePublicSite(): Promise<void> {
+	await call("route", [`${PUBLIC_URL}to-local`, { status: 302, headers: { location: `${LOCAL_URL}/from-public` } }]);
+	await call("route", [`${PUBLIC_URL}**`, { status: 200, contentType: "text/html", body: probePage("public") }]);
+}
+
+/** Uncaught exceptions arrive from the browser after the evaluate that scheduled them, so reads poll briefly. */
+async function pollEntries(method: "console" | "errors", text: string): Promise<CaptureResult> {
+	let result = (await call(method)) as CaptureResult;
+	for (let attempt = 0; attempt < 50 && !result.entries.some(entry => entry.text.includes(text)); attempt++) {
+		await Bun.sleep(20);
+		result = (await call(method)) as CaptureResult;
+	}
+	return result;
+}
+
 afterAll(async () => {
+	localServer.stop(true);
 	await releaseAllTabs({ kill: true });
 	await disposeAllVmContexts();
 	await fs.rm(root, { recursive: true, force: true });
+});
+
+describe("isLocalDocumentUrl", () => {
+	it("treats local schemes, local hosts and private addresses as local, everything else as public", () => {
+		const local = [
+			"file:///tmp/page.html",
+			"data:text/html,x",
+			"about:blank",
+			"blob:https://example.com/0f0e",
+			"http://localhost:3000/",
+			"http://app.localhost/",
+			"http://printer.local/",
+			"http://127.0.0.1/",
+			"http://127.8.9.1/",
+			"http://[::1]:8080/",
+			"http://10.1.2.3/",
+			"http://172.16.0.1/",
+			"http://172.31.255.255/",
+			"http://192.168.1.1/",
+			"http://169.254.10.10/",
+			"http://[fd12:3456::1]/",
+			"http://[fe80::1]/",
+		];
+		const publicUrls = [
+			"https://example.com/",
+			"http://public-site.test/",
+			"http://172.32.0.1/",
+			"http://11.0.0.1/",
+			"http://[2001:db8::1]/",
+			"https://localhost.example.com/",
+			"chrome-error://chromewebdata/",
+			"not a url",
+		];
+		expect(local.filter(url => !isLocalDocumentUrl(url))).toEqual([]);
+		expect(publicUrls.filter(url => isLocalDocumentUrl(url))).toEqual([]);
+	});
 });
 
 describe.skipIf(!CHROMIUM_AVAILABLE)("browser console capture and performance artifacts", () => {
@@ -78,6 +180,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser console capture and performance ar
 		await invoke({ action: "open", name: "console", url: `data:text/html,${encodeURIComponent(html)}` });
 		try {
 			const consoleResult = (await call("console", [{ level: "warn" }])) as CaptureResult;
+			expect(consoleResult.captureStartedAt).toBeUndefined();
 			const warning = consoleResult.entries.find(entry => entry.text.includes("fixture warning"));
 			expect(warning).toMatchObject({ type: "console", level: "warn" });
 			expect(warning?.location).toContain("data:text/html");
@@ -127,6 +230,77 @@ await wait(5_000);`,
 				timeoutMessage = error instanceof Error ? error.message : String(error);
 			}
 			expect(timeoutMessage).toContain("1 page error(s) since run start — see tab.errors()");
+		} finally {
+			await invoke({ action: "close", name: "console" });
+		}
+	}, 30_000);
+
+	it("keeps Runtime off on a public page until the first console()/errors() call, then captures", async () => {
+		await invoke({ action: "open", name: "console" });
+		try {
+			await routePublicSite();
+			await call("goto", [PUBLIC_URL]);
+			expect(await call("title")).toBe("probe:0");
+			expect(await call("evaluate", [RUNTIME_PROBE])).toBe(0);
+
+			const before = Date.now();
+			const armed = (await call("console")) as CaptureResult;
+			expect(armed.entries).toEqual([]);
+			expect(armed.captureStartedAt).toBeGreaterThanOrEqual(before);
+			expect(armed.captureStartedAt).toBeLessThanOrEqual(Date.now());
+			expect(await call("evaluate", [RUNTIME_PROBE])).toBeGreaterThan(0);
+
+			await call("evaluate", [
+				"(() => { console.info('public after arm'); setTimeout(() => { throw new Error('public boom'); }, 0); return true; })()",
+			]);
+			const logged = await pollEntries("console", "public after arm");
+			expect(logged.entries.map(entry => entry.text)).toContain("public after arm");
+			expect(logged.entries.map(entry => entry.text)).not.toContain("public loaded");
+			expect(logged.captureStartedAt).toBe(armed.captureStartedAt);
+			const errors = await pollEntries("errors", "public boom");
+			expect(errors.entries.find(entry => entry.text.includes("public boom"))).toMatchObject({ type: "pageerror" });
+			expect(errors.captureStartedAt).toBe(armed.captureStartedAt);
+
+			// Once armed by a read, capture outlives navigation to another public document.
+			await call("goto", [`${PUBLIC_URL}next`]);
+			expect(await call("title")).toBe("probe:1");
+		} finally {
+			await invoke({ action: "close", name: "console" });
+		}
+	}, 30_000);
+
+	it("records local pages from load and detaches before a public document's scripts run", async () => {
+		await invoke({ action: "open", name: "console", url: `${LOCAL_URL}/start` });
+		try {
+			await routePublicSite();
+			expect(await call("evaluate", [RUNTIME_PROBE])).toBeGreaterThan(0);
+
+			// Page-initiated navigation: detached from the main-frame document request.
+			await invoke({
+				action: "run",
+				name: "console",
+				code: `await tab.click("#public"); await tab.waitForUrl(${JSON.stringify(PUBLIC_URL)}); await tab.waitForText("public");`,
+			});
+			expect(await call("title")).toBe("probe:0");
+
+			// A local URL redirecting to a public one: detached on the redirect hop.
+			await call("goto", [`${LOCAL_URL}/to-public`]);
+			expect(await call("url")).toBe(`${PUBLIC_URL}redirected`);
+			expect(await call("title")).toBe("probe:0");
+
+			// A public URL redirecting to a local one ends armed, with the local document's load recorded.
+			await call("goto", [`${PUBLIC_URL}to-local`]);
+			expect(await call("url")).toBe(`${LOCAL_URL}/from-public`);
+			expect(await call("evaluate", [RUNTIME_PROBE])).toBeGreaterThan(0);
+			await call("evaluate", ["setTimeout(() => { throw new Error('local boom'); }, 0)"]);
+			const logged = (await call("console")) as CaptureResult;
+			expect(logged.captureStartedAt).toBeUndefined();
+			const texts = logged.entries.map(entry => entry.text);
+			expect(texts).toContain("local /start loaded");
+			expect(texts).toContain("local /from-public loaded");
+			expect(texts).not.toContain("public loaded");
+			const errors = await pollEntries("errors", "local boom");
+			expect(errors.entries.find(entry => entry.text.includes("local boom"))).toMatchObject({ type: "pageerror" });
 		} finally {
 			await invoke({ action: "close", name: "console" });
 		}

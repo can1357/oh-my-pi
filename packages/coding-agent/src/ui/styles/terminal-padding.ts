@@ -1,5 +1,5 @@
 /** Terminal padding state: settings set the density, and terminal painters read the resulting inset. */
-import { signal } from "@oh-my-pi/pi-tui";
+import { signal } from "@oh-my-pi/pi-tui/reactive";
 
 const tightLayout = signal(false);
 

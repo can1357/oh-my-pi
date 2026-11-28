@@ -101,6 +101,41 @@ export default function(pi) {
 		}
 	});
 
+	it("resolves shared imports once per directory and reuses the CommonJS native-addon scan's source", async () => {
+		const root = fs.realpathSync(tempDir.absolute());
+		const nested = path.join(root, "nested");
+		fs.mkdirSync(nested);
+		fs.writeFileSync(path.join(root, "package.json"), "{}");
+		fs.writeFileSync(path.join(root, "shared.ts"), "export const value = 2;");
+		fs.writeFileSync(path.join(nested, "shared.ts"), "export const value = 5;");
+		for (const name of ["first.ts", "second.ts", "nested/third.ts"]) {
+			fs.writeFileSync(path.join(root, name), `export { value } from "./shared";`);
+		}
+		const bridge = path.join(root, "bridge.js");
+		fs.writeFileSync(bridge, "module.exports = 3;");
+		const entry = path.join(root, "entry.ts");
+		fs.writeFileSync(
+			entry,
+			`import { value as first } from "./first";
+			 import { value as second } from "./second";
+			 import { value as third } from "./nested/third";
+			 export const total = first + second + third + require("./bridge.js");`,
+		);
+
+		const resolve = spyOn(Bun, "resolveSync");
+		try {
+			const mod = (await loadLegacyPiModule(entry)) as { total: number };
+			expect(mod.total).toBe(12);
+			expect(reads.get(bridge)).toBe(1);
+			const sharedDirs = resolve.mock.calls
+				.filter(([specifier]) => specifier === "./shared")
+				.map(([, dir]) => dir);
+			expect(sharedDirs.sort()).toEqual([root, nested].sort());
+		} finally {
+			resolve.mockRestore();
+		}
+	});
+
 	it("should read graph modules skipped by the initial import from disk at import time", async () => {
 		const cwd = tempDir.absolute();
 		const extDir = path.join(cwd, "ext");

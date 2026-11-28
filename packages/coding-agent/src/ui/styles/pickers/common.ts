@@ -9,8 +9,7 @@ import { markdownStyles } from "@oh-my-pi/pi-tui/text/markdown/styles";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { PLAIN_THEME } from "@oh-my-pi/pi-tui/theme/plain";
 import { sliceCells, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
-
-const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+import { segmentGraphemes } from "@oh-my-pi/pi-utils/graphemes";
 
 /**
  * A single-line field: `prompt` then `text` with the caret cell inverted (a
@@ -22,13 +21,13 @@ export function caretField(theme: Theme, prompt: string, text: string, cursor: n
 	const at = Math.max(0, Math.min(cursor, text.length));
 	const display = at >= text.length ? `${text} ` : text;
 	const before = display.slice(0, at);
-	const caret = [...segmenter.segment(display.slice(at))][0]?.segment ?? " ";
+	const caret = segmentGraphemes(display.slice(at)).containing(0)?.segment ?? " ";
 	const after = display.slice(at + caret.length);
 	let head = before;
 	const caretWidth = visibleWidth(caret);
 	// Keep the caret visible: drop leading cells until it fits.
 	while (head.length > 0 && visibleWidth(head) + caretWidth > room) {
-		const first = [...segmenter.segment(head)][0]!.segment;
+		const first = segmentGraphemes(head).containing(0)!.segment;
 		head = head.slice(first.length);
 	}
 	const tailRoom = Math.max(0, room - visibleWidth(head) - caretWidth);

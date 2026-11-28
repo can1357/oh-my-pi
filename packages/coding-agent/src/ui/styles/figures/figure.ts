@@ -30,14 +30,18 @@ import type { ChartTerm } from "../../transcript/figures/table-chart";
 import { propsOf, termOf } from "../messages/fill";
 import { fileLink, uriLink } from "../tools/file-common";
 
-/** `cx` at `width` cells (its getters keep reading the paint environment). */
-function narrowed(cx: PaintContext, width: number): PaintContext {
-	return Object.create(cx, { width: { value: Math.max(1, width), enumerable: true } }) as PaintContext;
+/** `cx` at `width` cells and at most `rows` rows (its getters keep reading the paint environment). */
+function narrowed(cx: PaintContext, width: number, rows?: number): PaintContext {
+	const height = rows === undefined ? cx.height : Math.min(cx.height ?? rows, rows);
+	return Object.create(cx, {
+		width: { value: Math.max(1, width), enumerable: true },
+		height: { value: height, enumerable: true },
+	}) as PaintContext;
 }
 
-/** A figure's room: two cells short of the width. */
-function figureRoom(cx: PaintContext): PaintContext {
-	return narrowed(cx, cx.width - 2);
+/** A figure's room: two cells short of the width, at most `rows` tall. */
+function figureRoom(cx: PaintContext, rows?: number): PaintContext {
+	return narrowed(cx, cx.width - 2, rows);
 }
 
 /** Markdown with the standard horizontal padding. */
@@ -80,28 +84,18 @@ defineRolePainter("text", "omp.figure.pending", (node, cx) => {
 /** A frame's `[Visit]` link to its page (a local page by its `file:` URL), drawn where the terminal draws links. */
 const VISIT = "[Visit]";
 
-function pageUrl(link: EmbedTerm["link"]): string | undefined {
-	if (!link) return undefined;
-	if ("url" in link) return link.url;
-	try {
-		return Bun.pathToFileURL(link.file).href;
-	} catch {
-		return undefined;
-	}
-}
-
 function paintEmbed(node: UiNode, cx: PaintContext): Block {
 	const term = termOf<EmbedTerm>(node);
 	const picture = node.kind === "image" ? propsOf<{ blob: string; w: number; h: number }>(node) : term.still;
 	const label = sanitizeText(term.label ?? "").replace(/\s+/g, " ");
 	const page = term.page === true;
-	const visit = page && cx.hyperlinks ? pageUrl(term.link) : undefined;
+	const visit = page && cx.hyperlinks ? term.link?.url : undefined;
 	const visitRow = (text: string): string => {
 		const room = Math.max(1, cx.width - 2 - VISIT.length);
 		return ` ${cx.theme.fg("dim", truncate(text, room))} ${uriLink(cx, cx.theme.fg("accent", VISIT), visit)}`;
 	};
 	if (cx.images && picture?.blob) {
-		const drawn = paintPicture(picture, figureRoom(cx), cx.theme.fg("dim", `▣ ${label}`));
+		const drawn = paintPicture(picture, figureRoom(cx, term.maxRows), cx.theme.fg("dim", `▣ ${label}`));
 		const room = cx.height === undefined || drawn.rows.length < cx.height;
 		return visit && room ? { rows: [...drawn.rows, visitRow(`▣ ${label}`)] } : drawn;
 	}

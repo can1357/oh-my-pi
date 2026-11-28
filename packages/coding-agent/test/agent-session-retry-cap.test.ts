@@ -21,7 +21,6 @@ import { kCursorExecResolved, kStreamingPartialJson } from "@oh-my-pi/pi-ai/util
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { SqliteAuthCredentialStore } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { opencodeGoUsageProvider } from "@oh-my-pi/pi-ai/usage/opencode-go";
-import * as compatAuth from "@oh-my-pi/pi-catalog/compat/auth";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -84,7 +83,8 @@ describe("AgentSession retry delay cap", () => {
 
 	beforeAll(async () => {
 		tempDir = TempDir.createSync("@pi-retry-cap-");
-		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+		// Fake Copilot keys must not reach github.com through the background billing probe.
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"), { copilotBillingProbe: false });
 		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 	});
 
@@ -208,20 +208,18 @@ describe("AgentSession retry delay cap", () => {
 			maxDelayMs: 1_500_000,
 			outcome: "fallback",
 		},
-	])("Antigravity $name", async ({ maxDelayMs, outcome }) => {
-		// Antigravity is paused in its auth rules; its retry handling stays for when it is turned back on.
-		vi.spyOn(compatAuth, "providerDisabledReason").mockReturnValue(undefined);
-		const model = getBundledModel("google-antigravity", "gemini-3.7-flash");
+	])("Gemini quota $name", async ({ maxDelayMs, outcome }) => {
+		const model = getBundledModel("google", "gemini-3.7-flash");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
 		if (!model || !fallbackModel) {
-			throw new Error("Expected bundled Antigravity and OpenAI fallback test models to exist");
+			throw new Error("Expected bundled Gemini and OpenAI fallback test models to exist");
 		}
 		const primarySelector = `${model.provider}/${model.id}`;
 		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
-		authStorage.keys.setRuntime(model.provider, "google-antigravity-test-key");
+		authStorage.keys.setRuntime(model.provider, "google-test-key");
 		authStorage.keys.setRuntime(fallbackModel.provider, "openai-test-key");
 
-		const quotaError = `Cloud Code Assist API error (429): ${JSON.stringify({
+		const quotaError = `Google API error (429): ${JSON.stringify({
 			error: {
 				code: 429,
 				status: "RESOURCE_EXHAUSTED",
@@ -230,7 +228,7 @@ describe("AgentSession retry delay cap", () => {
 					{
 						"@type": "type.googleapis.com/google.rpc.ErrorInfo",
 						reason: "RATE_LIMIT_EXCEEDED",
-						domain: "cloudcode-pa.googleapis.com",
+						domain: "generativelanguage.googleapis.com",
 						metadata: { quotaResetDelay: "30m" },
 					},
 				],
@@ -276,7 +274,7 @@ describe("AgentSession retry delay cap", () => {
 			if (event.type === "auto_retry_end") retryEndEvents.push(event);
 		});
 
-		await session.prompt("Trigger Antigravity quota error");
+		await session.prompt("Trigger Gemini quota error");
 		await session.waitForIdle();
 
 		if (outcome === "fail") {
@@ -935,6 +933,71 @@ describe("AgentSession retry delay cap", () => {
 		expect(retryStartEvents).toHaveLength(1);
 		expect(retryStartEvents[0].delayMs).toBe(13 * 60_000);
 		expect(requestedModels).toEqual([`${model.provider}/${model.id}`, `${model.provider}/${model.id}`]);
+		expect(retryEndEvents).toHaveLength(1);
+		expect(retryEndEvents[0]).toMatchObject({ success: true });
+		expect(lastAssistant(session).stopReason).toBe("stop");
+		expect(session.isRetrying).toBe(false);
+	});
+
+	it("waits for a 429 'rests until <ISO> (quota)' reset past retry.maxDelayMs when retry.waitForUsageReset is set", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected bundled Anthropic test model to exist");
+		}
+		const resetIso = new Date(Date.now() + 360_000).toISOString().replace(/\.\d{3}Z$/, "Z");
+		const expectedDelayMs = Date.parse(resetIso) - Date.now();
+		// Prefix with `HTTP 429` so `createMockModel` (which omits `errorStatus`) classifies it as HTTP 429.
+		const mock = createMockModel({
+			responses: [
+				{ throw: `HTTP 429 rests until ${resetIso} (quota)` },
+				{ content: ["recovered after rests until reset"], stopReason: "stop" },
+			],
+		});
+		const requestedModels: string[] = [];
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (requestedModel, context, options) => {
+				requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
+				return mock.stream(requestedModel, context, options);
+			},
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 300_000,
+			"retry.modelFallback": false,
+			"retry.waitForUsageReset": true,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		mockSchedulerWaitWithClock();
+		const retryStartEvents: AutoRetryStartEvent[] = [];
+		const retryEndEvents: AutoRetryEndEvent[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start") retryStartEvents.push(event);
+			if (event.type === "auto_retry_end") retryEndEvents.push(event);
+		});
+
+		await session.prompt("Trigger 429 rests until quota reset");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([`${model.provider}/${model.id}`, `${model.provider}/${model.id}`]);
+		expect(retryStartEvents).toHaveLength(1);
+		expect(Math.abs(retryStartEvents[0].delayMs - expectedDelayMs)).toBeLessThan(1_000);
 		expect(retryEndEvents).toHaveLength(1);
 		expect(retryEndEvents[0]).toMatchObject({ success: true });
 		expect(lastAssistant(session).stopReason).toBe("stop");

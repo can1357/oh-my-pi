@@ -633,7 +633,7 @@ mod tests {
 	/// ids prove two trees share that subtree rather than parsing it twice.
 	/// (The *root* node's id is the address of the `root` field inside the
 	/// `TSTree` struct itself, which a copy necessarily relocates.)
-	fn subtree_id(tree: &Tree, index: usize) -> usize {
+	fn subtree_id(tree: &Tree, index: u32) -> usize {
 		tree.root_node().child(index).expect("top-level decl").id()
 	}
 
@@ -1158,7 +1158,7 @@ mod tests {
 		let base = base_of(old);
 		// Keep the base alive so its subtree addresses cannot be recycled.
 		let kept = base.tree.clone();
-		let base_ids: Vec<usize> = (0..kept.root_node().child_count())
+		let base_ids: Vec<usize> = (0..kept.root_node().child_count() as u32)
 			.map(|i| subtree_id(&kept, i))
 			.collect();
 
@@ -1169,7 +1169,8 @@ mod tests {
 		assert!(tree.root_node().has_error());
 		assert_eq!(tree.root_node().to_sexp(), tree_of(broken, TS).root_node().to_sexp());
 		assert!(
-			(0..tree.root_node().child_count()).all(|i| !base_ids.contains(&subtree_id(&tree, i))),
+			(0..tree.root_node().child_count() as u32)
+				.all(|i| !base_ids.contains(&subtree_id(&tree, i))),
 			"no subtree may come from the base"
 		);
 	}

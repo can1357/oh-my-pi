@@ -505,12 +505,7 @@ function sendsInlineImageBytes(image: ImageContent, model: Model): boolean {
 				if (reference.id && model.api === "anthropic-messages") return false;
 				break;
 			case "google":
-				if (
-					reference.uri &&
-					(model.api === "google-generative-ai" ||
-						model.api === "google-gemini-cli" ||
-						model.api === "google-vertex")
-				) {
+				if (reference.uri && (model.api === "google-generative-ai" || model.api === "google-vertex")) {
 					return false;
 				}
 				break;

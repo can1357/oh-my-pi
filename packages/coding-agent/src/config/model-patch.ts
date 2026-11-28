@@ -41,11 +41,11 @@ export interface ProviderOverride {
  * (#2555). An unscoped override names the OpenRouter `/api/v1` chat root, so
  * Decisions models move to its `/api/alpha` sibling on the same host.
  */
-export function resolveProviderBaseUrl<TApi extends Api>(
+export function resolveProviderBaseUrl<TApi extends Api, TUrl extends string | undefined = string | undefined>(
 	modelApi: TApi,
-	modelBaseUrl: string | undefined,
+	modelBaseUrl: TUrl,
 	override: Pick<ProviderOverride, "baseUrl" | "baseUrlApis" | "transport"> | undefined,
-): string | undefined {
+): string | TUrl {
 	if (override?.baseUrl === undefined) return modelBaseUrl;
 	if (override.transport === "pi-native") return override.baseUrl;
 	if (override.baseUrlApis !== undefined && !override.baseUrlApis.includes(modelApi)) return modelBaseUrl;
@@ -87,58 +87,35 @@ export function resolveProviderBaseUrl<TApi extends Api>(
  */
 export function mergeDiscoveredModel<TApi extends Api>(
 	model: Model<TApi>,
-	existing: Model<Api> | undefined,
+	existing: Model<TApi> | undefined,
 	providerOverride?: Pick<
 		ProviderOverride,
-		"baseUrl" | "baseUrlApis" | "compat" | "headers" | "remoteCompaction" | "transport" | "authHeader" | "apiKey"
-	>,
+		"baseUrl" | "baseUrlApis" | "headers" | "transport" | "authHeader" | "apiKey"
+	> &
+		Pick<ModelSpec<TApi>, "compat" | "remoteCompaction">,
 ): Model<TApi> {
-	if (existing) {
-		const supportsTools = model.supportsTools ?? existing.supportsTools;
-		const merged = buildModel({
-			...toModelSpec(model),
-			baseUrl: resolveProviderBaseUrl(model.api, model.baseUrl ?? existing.baseUrl, providerOverride),
-			headers: undefined,
-			resolveHeaders: createConfigHeaderResolver(
-				[
-					existing.resolveHeaders ?? existing.headers,
-					model.resolveHeaders ?? model.headers,
-					providerOverride?.headers,
-				],
-				{
-					authHeader: providerOverride?.authHeader,
-					apiKeyConfig: providerOverride?.apiKey,
-				},
-			),
-			transport: providerOverride?.transport ?? existing.transport ?? model.transport,
-			remoteCompaction: mergeProviderRemoteCompactionConfig(
-				mergeRemoteCompactionConfig(existing.remoteCompaction, model.remoteCompaction),
-				providerOverride?.remoteCompaction,
-			),
-			...(supportsTools !== undefined ? { supportsTools } : {}),
-			compat: mergeCompat(model.compatConfig, providerOverride?.compat),
-		} as ModelSpec<TApi>);
-		return Bun.deepEquals(merged, model) ? model : merged;
+	if (!existing && !providerOverride) return model;
+	const spec = toModelSpec(model);
+	const baseUrl = existing ? (model.baseUrl ?? existing.baseUrl) : model.baseUrl;
+	spec.baseUrl = resolveProviderBaseUrl(model.api, baseUrl, providerOverride);
+	spec.headers = undefined;
+	spec.resolveHeaders = createConfigHeaderResolver(
+		[existing?.resolveHeaders ?? existing?.headers, model.resolveHeaders ?? model.headers, providerOverride?.headers],
+		{ authHeader: providerOverride?.authHeader, apiKeyConfig: providerOverride?.apiKey },
+	);
+	if (existing || providerOverride?.transport !== undefined) {
+		spec.transport = providerOverride?.transport ?? existing?.transport ?? model.transport;
 	}
-	if (providerOverride) {
-		const merged = buildModel({
-			...toModelSpec(model),
-			baseUrl: resolveProviderBaseUrl(model.api, model.baseUrl, providerOverride),
-			headers: undefined,
-			resolveHeaders: createConfigHeaderResolver([model.resolveHeaders ?? model.headers, providerOverride.headers], {
-				authHeader: providerOverride.authHeader,
-				apiKeyConfig: providerOverride.apiKey,
-			}),
-			...(providerOverride.transport !== undefined ? { transport: providerOverride.transport } : {}),
-			remoteCompaction: mergeProviderRemoteCompactionConfig(
-				model.remoteCompaction,
-				providerOverride.remoteCompaction,
-			),
-			compat: mergeCompat(model.compatConfig, providerOverride.compat),
-		} as ModelSpec<TApi>);
-		return Bun.deepEquals(merged, model) ? model : merged;
-	}
-	return model;
+	spec.remoteCompaction = mergeProviderRemoteCompactionConfig(
+		mergeRemoteCompactionConfig(existing?.remoteCompaction, model.remoteCompaction),
+		providerOverride?.remoteCompaction,
+	);
+	const supportsTools = model.supportsTools ?? existing?.supportsTools;
+	if (supportsTools !== undefined) spec.supportsTools = supportsTools;
+	type Compat = ModelSpec<TApi>["compat"];
+	spec.compat = mergeCompat<Compat, Compat>(spec.compat, providerOverride?.compat);
+	const merged = buildModel(spec);
+	return Bun.deepEquals(merged, model) ? model : merged;
 }
 
 /** Built-in providers whose KDL entry makes a successful runtime roster replace bundled chat models. */
@@ -212,7 +189,7 @@ export function mergeByModelKey<T extends { provider: string; id: string }>(
 	}
 	return merged;
 }
-export function mergeCompat<TBase extends object, TOverride extends object>(
+export function mergeCompat<TBase extends object | undefined, TOverride extends object | undefined>(
 	baseCompat: TBase | null | undefined,
 	overrideCompat: TOverride | null | undefined,
 ): (TBase & TOverride) | TBase | TOverride | undefined {
@@ -228,19 +205,19 @@ export function mergeCompat<TBase extends object, TOverride extends object>(
 	return merged as TBase & TOverride;
 }
 
-export function mergeRemoteCompactionConfig(
-	baseConfig: RemoteCompactionConfig<Api> | undefined,
-	overrideConfig: RemoteCompactionConfig<Api> | undefined,
-): RemoteCompactionConfig<Api> | undefined {
+export function mergeRemoteCompactionConfig<TApi extends Api>(
+	baseConfig: RemoteCompactionConfig<TApi> | undefined,
+	overrideConfig: RemoteCompactionConfig<TApi> | undefined,
+): RemoteCompactionConfig<TApi> | undefined {
 	if (!baseConfig) return overrideConfig;
 	if (!overrideConfig) return baseConfig;
 	return { ...baseConfig, ...overrideConfig };
 }
 
-export function mergeProviderRemoteCompactionConfig(
-	modelConfig: RemoteCompactionConfig<Api> | undefined,
-	providerConfig: RemoteCompactionConfig<Api> | undefined,
-): RemoteCompactionConfig<Api> | undefined {
+export function mergeProviderRemoteCompactionConfig<TApi extends Api>(
+	modelConfig: RemoteCompactionConfig<TApi> | undefined,
+	providerConfig: RemoteCompactionConfig<TApi> | undefined,
+): RemoteCompactionConfig<TApi> | undefined {
 	return mergeRemoteCompactionConfig(providerConfig, modelConfig);
 }
 
@@ -277,6 +254,8 @@ export interface ModelPatch {
 	compactionModel?: string;
 	remoteCompaction?: RemoteCompactionConfig<Api>;
 	premiumMultiplier?: number;
+	voice?: string;
+	speechFormats?: Model<Api>["speechFormats"];
 }
 
 /**
@@ -321,6 +300,8 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 		result.remoteCompaction = mergeRemoteCompactionConfig(base.remoteCompaction, patch.remoteCompaction);
 	}
 	if (patch.premiumMultiplier !== undefined) result.premiumMultiplier = patch.premiumMultiplier;
+	if (patch.voice !== undefined) result.voice = patch.voice;
+	if (patch.speechFormats !== undefined) result.speechFormats = patch.speechFormats;
 	if (patch.cost) {
 		const longContext = patch.cost.longContext ?? base.cost.longContext;
 		result.cost = {

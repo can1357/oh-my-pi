@@ -286,6 +286,22 @@ function readActivity(args: ReadArgs): ToolActivity {
 	return { label: "Read", detail: sanitizeText(shortenPath(rawPath)) };
 }
 
+/** The `image` node of a read image (decoded only when no native media node shows it). */
+function readPicture(image: { readonly data: string; readonly mimeType: string }, alt: string): JSXNode {
+	const bytes = Buffer.from(image.data, "base64");
+	const size = imageSize(bytes);
+	return (
+		<image
+			blob={registerBlob(bytes, image.mimeType)}
+			alt={alt}
+			w={size?.w}
+			h={size?.h}
+			role={READ_IMAGE_ROLE}
+			term={inlineImageTerm()}
+		/>
+	);
+}
+
 function readResult(result: ToolResult<ReadToolDetails>, state: ToolViewState, args?: ReadArgs): ToolView | undefined {
 	const details = result.details;
 	const rawPath = rawPathOf(args);
@@ -346,23 +362,13 @@ function readResult(result: ToolResult<ReadToolDetails>, state: ToolViewState, a
 		block => block.type === "image" && typeof (block as { data?: unknown }).data === "string",
 	) as { data: string; mimeType: string } | undefined;
 	if (image) {
-		const size = imageSize(image.data);
 		const detail = content.trim();
 		return {
 			head,
 			...(suffix ? { tone: "warning" as const } : {}),
 			inline: true,
 			body: [
-				media ?? (
-					<image
-						blob={registerBlob(Buffer.from(image.data, "base64"), image.mimeType)}
-						alt={shortenPath(suffix?.to ?? split.path) || "image"}
-						w={size?.w}
-						h={size?.h}
-						role={READ_IMAGE_ROLE}
-						term={inlineImageTerm()}
-					/>
-				),
+				media ?? readPicture(image, shortenPath(suffix?.to ?? split.path) || "image"),
 				detail.length > 0 && <ansi text={detail} />,
 				foot,
 			],

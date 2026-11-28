@@ -119,9 +119,9 @@ describe("AIError.classify — structural provider errors", () => {
 
 	it("classifies thought-only output as transient + empty-response + retryable", () => {
 		const err = new AIError.ProviderResponseError(
-			"Cloud Code Assist API returned a thought-only response without final output",
+			"Google API returned a thought-only response without final output",
 			{
-				provider: "google-antigravity",
+				provider: "google",
 				kind: "empty-output",
 			},
 		);

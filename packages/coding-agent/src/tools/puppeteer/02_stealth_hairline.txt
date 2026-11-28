@@ -28,30 +28,24 @@
     elementIdDescriptor &&
     typeof elementIdDescriptor.get === "function"
   ) {
-    const offsetHeightGetter = new Window_Proxy(offsetHeightDescriptor.get, {
-      apply(target, thisArg, args) {
-        const height = Reflect_apply(target, thisArg, args);
+    const isCollapsedProbe = (thisArg) =>
+      Object_getPrototypeOf(thisArg) === HTMLDivElement.prototype &&
+      Reflect_apply(elementIdDescriptor.get, thisArg, []) === "modernizr";
 
-        if (
-          height === 0 &&
-          Object_getPrototypeOf(thisArg) === HTMLDivElement.prototype &&
-          Reflect_apply(elementIdDescriptor.get, thisArg, []) === "modernizr"
-        ) {
-          return 1;
-        }
+    const patchMeasurement = (name) => {
+      const descriptor = Object_getOwnPropertyDescriptor(offsetHeightPrototype, name);
+      if (!descriptor || typeof descriptor.get !== "function" || !descriptor.configurable) return;
+      const getter = new Window_Proxy(descriptor.get, {
+        apply(target, thisArg, args) {
+          const measured = Reflect_apply(target, thisArg, args);
+          return measured === 0 && isCollapsedProbe(thisArg) ? 1 : measured;
+        },
+      });
+      patchToString(getter, "get " + name);
+      Object_defineProperty(offsetHeightPrototype, name, Object_assign({}, descriptor, { get: getter }));
+    };
 
-        return height;
-      },
-    });
-
-    patchToString(offsetHeightGetter, "get offsetHeight");
-
-    Object_defineProperty(
-      offsetHeightPrototype,
-      "offsetHeight",
-      Object_assign({}, offsetHeightDescriptor, {
-        get: offsetHeightGetter,
-      }),
-    );
+    patchMeasurement("offsetHeight");
+    patchMeasurement("offsetWidth");
   }
 }

@@ -49,7 +49,7 @@ import type { DevinOptions } from "./providers/devin";
 import type { FactoryDroidOptions } from "./providers/factory-droid";
 import type { GitLabDuoWorkflowOptions } from "./providers/gitlab-duo-workflow";
 import type { GoogleOptions } from "./providers/google";
-import type { GoogleGeminiCliOptions } from "./providers/google-gemini-cli";
+import type { GoogleInteractionsOptions } from "./providers/google-interactions";
 import type { GoogleVertexOptions } from "./providers/google-vertex";
 import type { KiroOptions } from "./providers/kiro/stream";
 import type { OllamaChatOptions } from "./providers/ollama";
@@ -83,7 +83,7 @@ export interface ApiOptionsMap {
 	"openai-codex-responses": OpenAICodexResponsesOptions;
 	"azure-openai-responses": AzureOpenAIResponsesOptions;
 	"google-generative-ai": GoogleOptions;
-	"google-gemini-cli": GoogleGeminiCliOptions;
+	"google-interactions": GoogleInteractionsOptions;
 	"google-vertex": GoogleVertexOptions;
 	"kiro-api": KiroOptions;
 	"ollama-chat": OllamaChatOptions;
@@ -144,6 +144,8 @@ export type CacheRetention = "none" | "short" | "long";
  *   otherwise.
  * - Direct Anthropic: `"priority"` is translated into `speed: "fast"` plus the
  *   fast-mode beta on supported Opus models. Other tiers are ignored.
+ * - Devin: `"priority"` sends the model's fast-lane wire id
+ *   ({@link Model.priorityLane}). Other tiers are ignored.
  *
  * Per-family scoping is expressed by {@link ServiceTierByFamily}, not by
  * scoped sentinel values — see {@link serviceTierFamily}.
@@ -151,7 +153,10 @@ export type CacheRetention = "none" | "short" | "long";
 export type ServiceTier = "auto" | "default" | "flex" | "scale" | "priority" | "ultrafast";
 
 /** Provider families that expose an independent service-tier knob. */
-export type ServiceTierFamily = "openai" | "anthropic" | "google";
+export const SERVICE_TIER_FAMILIES = ["openai", "anthropic", "google", "devin"] as const;
+
+/** One of {@link SERVICE_TIER_FAMILIES}. */
+export type ServiceTierFamily = (typeof SERVICE_TIER_FAMILIES)[number];
 
 /**
  * Per-family service-tier selection. A request consults only the entry for the
@@ -161,7 +166,8 @@ export type ServiceTierFamily = "openai" | "anthropic" | "google";
  */
 export type ServiceTierByFamily = Partial<Record<ServiceTierFamily, ServiceTier>>;
 
-type ServiceTierModel = Pick<Model, "provider" | "api" | "identity"> & Partial<Pick<Model, "serviceTiers">>;
+type ServiceTierModel = Pick<Model, "provider" | "api" | "identity"> &
+	Partial<Pick<Model, "serviceTiers" | "priorityLane">>;
 // The service-tier matrix below intentionally stays in TypeScript rather than
 // the KDL compat tree: `shouldSendServiceTier` accepts bare provider strings
 // (agent telemetry, google-shared header placement) and the stats parser
@@ -198,9 +204,11 @@ function isOpenAIServiceTierModel(model: ServiceTierModel): boolean {
  * anthropic family even though its provider is `amazon-bedrock`/`google-vertex`.
  * Custom OpenAI-compatible relays that serve OpenAI model ids are OpenAI family
  * too unless the provider owns a separate tier control (Fireworks) or rejects
- * OpenAI's service-tier field (GitHub Copilot).
+ * OpenAI's service-tier field (GitHub Copilot). Devin models with a fast lane
+ * share one `devin` knob whatever lineage they serve.
  */
 export function serviceTierFamily(model: ServiceTierModel): ServiceTierFamily | undefined {
+	if (model.api === "devin-agent") return model.priorityLane ? "devin" : undefined;
 	const provider = model.provider;
 	if (provider === "openrouter") {
 		if (model.identity.class === "anthropic") return "anthropic";
@@ -321,8 +329,9 @@ export function serviceTierOffersByAccount(
  * True when `priority` will actually be realized on the wire for `model`.
  * Direct Anthropic realizes fast mode; OpenAI/Google/Fireworks emit the
  * service-tier field; OpenRouter realizes it only for its OpenAI- and
- * Google-family upstreams. Bedrock/Vertex Claude and OpenRouter Anthropic
- * models do not realize priority and return `false`.
+ * Google-family upstreams; Devin routes to the model's fast lane.
+ * Bedrock/Vertex Claude and OpenRouter Anthropic models do not realize
+ * priority and return `false`.
  */
 export function realizesPriorityServiceTier(
 	serviceTier: ServiceTier | null | undefined,
@@ -330,6 +339,7 @@ export function realizesPriorityServiceTier(
 ): boolean {
 	if (serviceTier !== "priority") return false;
 	if (model.provider === "anthropic") return true;
+	if (model.api === "devin-agent") return model.priorityLane !== undefined;
 	if (model.provider === "openrouter") {
 		const family = serviceTierFamily(model);
 		return family === "openai" || family === "google";
@@ -408,7 +418,7 @@ export function coerceServiceTierByFamily(value: unknown): ServiceTierByFamily |
 	if (typeof value === "object") {
 		const src = value as Record<string, unknown>;
 		const out: ServiceTierByFamily = {};
-		for (const family of ["openai", "anthropic", "google"] as const) {
+		for (const family of SERVICE_TIER_FAMILIES) {
 			const tier = src[family];
 			if (
 				tier === "auto" ||
@@ -507,8 +517,13 @@ export interface OpenAIPromptCacheOptions {
 	 * `cacheRetention` resolves to `long`, otherwise `30m`.
 	 */
 	ttl?: "30m" | "12h";
-	/** By default, mark one existing block from stable history; `none` suppresses that marker. */
-	breakpoint?: "latest-stable-message" | "none";
+	/**
+	 * Explicit-mode marker placement. `message-boundaries` (default) marks the end
+	 * of the leading instructions, each user message, and each run of tool
+	 * outputs, so every request reads the prefix the previous one wrote; `none`
+	 * places no markers, leaving caching to markers the payload already carries.
+	 */
+	breakpoint?: "message-boundaries" | "none";
 }
 export type OpenAIResponseInclude =
 	| "file_search_call.results"
@@ -519,6 +534,9 @@ export type OpenAIResponseInclude =
 	| "code_interpreter_call.outputs"
 	| "reasoning.encrypted_content"
 	| "message.output_text.logprobs";
+
+/** Why a replay-safe retry discarded an attempt; see {@link StreamOptions.onDiscardedAttempt}. */
+export type DiscardedAttemptReason = "empty-completion" | "provider-error";
 
 export interface StreamOptions {
 	temperature?: number;
@@ -774,6 +792,13 @@ export interface StreamOptions {
 	 */
 	providerRetryWait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
 	/**
+	 * Receives each attempt a replay-safe retry discards (an empty completion, a
+	 * transient provider error) before the replacement request is sent. The
+	 * provider may have billed it; the delivered result never carries its usage.
+	 * Attempts with no tokens and no billing frame (a bare 429 or 5xx) are not reported.
+	 */
+	onDiscardedAttempt?: (message: AssistantMessage, reason: DiscardedAttemptReason) => void;
+	/**
 	 * Accept a normal provider stop with no visible text or tool call as a
 	 * successful completion. Passive callers and zero-output cache refreshes use
 	 * this because silence is their expected result; interactive agent turns
@@ -932,8 +957,6 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	 * providers ignore it. Callers own the cache lifecycle and compatibility.
 	 */
 	cachedContent?: string;
-	/** Antigravity endpoint routing mode: "auto" (default with failover), "production", "sandbox". */
-	antigravityEndpointMode?: "auto" | "production" | "sandbox";
 	/**
 	 * Anthropic `server-side-fallback-2026-06-01` fallback chain (top-level
 	 * `fallbacks` request field). Opt-in ONLY — leaving this undefined is
@@ -1327,6 +1350,8 @@ export interface UserMessage {
 	synthetic?: boolean;
 	/** True when injected mid-turn as a steer; consumed by the agent's pre-LLM transform to wrap it for emphasis. Never rendered. */
 	steering?: boolean;
+	/** The user wrote this input during a live voice call; it does not return the answer to the screen. */
+	duringLiveCall?: true;
 	/** True when the provider delivered this steer into the response it was streaming (`response.steer`). Display-only; never sent. */
 	liveSteered?: boolean;
 	/** Timestamp of a client-side history rewrite represented by this message. */

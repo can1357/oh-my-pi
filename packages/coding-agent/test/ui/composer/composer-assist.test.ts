@@ -7,10 +7,12 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createRoot, type KeyEvent } from "@oh-my-pi/pi-tui";
 import { createTestTerminal, type TestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
+import { CONSERVATIVE_EMOJI } from "@oh-my-pi/pi-tui/theme/contract";
 import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { Settings } from "../../../src/config/settings";
 import { MacOSSpellingProvider, type SpellingBackend } from "../../../src/modes/view-model/prompt/macos-spelling";
 import { Composer, ComposerChips } from "../../../src/ui/composer";
+import { chipHref } from "../../../src/ui/composer/composer";
 import { enabledMagicKeywords, magicKeywordDecorator } from "../../../src/ui/composer/magic-keywords";
 import { skillAtomizer } from "../../../src/ui/composer/skill-chips";
 import { attachSpelling } from "../../../src/ui/composer/spelling";
@@ -20,7 +22,7 @@ const restoreTheme = currentTheme();
 
 beforeAll(() => {
 	// The glow assertions read truecolor SGR: pin the depth instead of following the runner's env.
-	initTheme({ capabilities: { truecolor: true, colors: 16_777_216, dark: true } });
+	initTheme({ capabilities: { truecolor: true, colors: 16_777_216, dark: true, emoji: CONSERVATIVE_EMOJI } });
 });
 
 afterAll(() => {
@@ -163,7 +165,9 @@ describe("chip links", () => {
 				capabilities: { hyperlinks: true },
 			});
 			term.focus(composer.field);
-			const links = term.rows().filter(row => row.includes("\x1b]8;;file:///tmp/shot.png"));
+			// The file URI as this platform spells it (a drive-qualified path on Windows).
+			const href = chipHref("/tmp/shot.png");
+			const links = term.rows().filter(row => row.includes(`\x1b]8;;${href}`));
 			// The card's title and the chip in the draft.
 			expect(links.length).toBe(2);
 			term.dispose();
@@ -191,9 +195,8 @@ describe("skill chip link", () => {
 			});
 			term.focus(composer.field);
 			const row = term.rows().find(line => line.includes("now")) ?? "";
-			expect(row).toMatch(
-				/\x1b\]8;;file:\/\/\/tmp\/skills\/review\/SKILL\.md[^\x1b]*\x1b\\(?:\x1b\[[\d;]*m)*✦ review/,
-			);
+			const href = RegExp.escape(chipHref("/tmp/skills/review/SKILL.md")!);
+			expect(row).toMatch(new RegExp(`\\x1b\\]8;;${href}[^\\x1b]*\\x1b\\\\(?:\\x1b\\[[\\d;]*m)*✦ review`));
 			term.dispose();
 			dispose();
 		});

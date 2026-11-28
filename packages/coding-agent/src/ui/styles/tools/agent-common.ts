@@ -53,7 +53,7 @@ export function stillMark(theme: Theme, props: ToolProps): string {
 /** The animated status mark: spinner frame while working (uncolored), else `stillMark`; stopped spinners draw a muted `⏳`. */
 export function liveMark(cx: PaintContext, props: ToolProps): string {
 	if (!isActive(props)) return stillMark(cx.theme, props);
-	return cx.reduceMotion ? cx.theme.fg("muted", spinnerGlyph(cx)) : spinnerGlyph(cx);
+	return cx.spinnerInterval === 0 ? cx.theme.fg("muted", spinnerGlyph(cx)) : spinnerGlyph(cx);
 }
 
 /** Background key of a status box. */

@@ -6,14 +6,20 @@ use std::{
 	time::{Duration, Instant},
 };
 
-use ashpd::desktop::{
-	PersistMode, Session,
-	screencast::{CursorMode, Screencast, SourceType},
+use ashpd::{
+	desktop::{
+		CreateSessionOptions, PersistMode, Session,
+		screencast::{
+			CursorMode, OpenPipeWireRemoteOptions, Screencast, SelectSourcesOptions, SourceType,
+			StartCastOptions,
+		},
+	},
+	enumflags2::BitFlags,
 };
 use image::RgbaImage;
 
 use super::{
-	pipewire::{self, PipeWire, PixelFormat, Plane, SpaHook, SpaPod, StreamEvents, VideoFormat},
+	pipewire::{self, PipeWire, PixelFormat, SpaChunk, SpaHook, SpaPod, StreamEvents, VideoFormat},
 	portal::{read_token, store_token, until_deadline},
 };
 use crate::desktop::{
@@ -38,7 +44,7 @@ struct ScreenCast {
 	fd:       OwnedFd,
 	position: Option<(i32, i32)>,
 	size:     Option<(i32, i32)>,
-	session:  Session<'static, Screencast<'static>>,
+	session:  Session<Screencast>,
 }
 
 struct CapturedFrame {
@@ -81,7 +87,7 @@ async fn open_screencast() -> CoreResult<ScreenCast> {
 	.await?;
 	let session = picker_request(async {
 		portal
-			.create_session()
+			.create_session(CreateSessionOptions::default())
 			.await
 			.map_err(|err| format!("ScreenCast CreateSession: {err}"))
 	})
@@ -92,11 +98,12 @@ async fn open_screencast() -> CoreResult<ScreenCast> {
 			portal
 				.select_sources(
 					&session,
-					CursorMode::Embedded,
-					SourceType::Monitor.into(),
-					true,
-					restore_token.as_deref(),
-					PersistMode::ExplicitlyRevoked,
+					SelectSourcesOptions::default()
+						.set_cursor_mode(CursorMode::Embedded)
+						.set_sources(BitFlags::from(SourceType::Monitor))
+						.set_multiple(true)
+						.set_restore_token(restore_token.as_deref())
+						.set_persist_mode(PersistMode::ExplicitlyRevoked),
 				)
 				.await
 				.map_err(|err| format!("ScreenCast SelectSources: {err}"))
@@ -104,7 +111,7 @@ async fn open_screencast() -> CoreResult<ScreenCast> {
 		.await?;
 		let response = picker_request(async {
 			portal
-				.start(&session, None)
+				.start(&session, None, StartCastOptions::default())
 				.await
 				.map_err(|err| format!("ScreenCast Start: {err}"))
 		})
@@ -121,7 +128,7 @@ async fn open_screencast() -> CoreResult<ScreenCast> {
 		let size = stream.size();
 		let fd = portal_request(async {
 			portal
-				.open_pipe_wire_remote(&session)
+				.open_pipe_wire_remote(&session, OpenPipeWireRemoteOptions::default())
 				.await
 				.map_err(|err| format!("ScreenCast OpenPipeWireRemote: {err}"))
 		})
@@ -138,21 +145,22 @@ async fn open_screencast() -> CoreResult<ScreenCast> {
 	}
 }
 
-fn rgba_from_buffer(format: VideoFormat, plane: &Plane<'_>) -> Result<RgbaImage, String> {
+fn rgba_from_buffer(
+	format: VideoFormat,
+	chunk: SpaChunk,
+	source: &[u8],
+) -> Result<RgbaImage, String> {
 	let VideoFormat { width, height, .. } = format;
 	if width == 0 || height == 0 {
 		return Err("PipeWire negotiated an empty frame".to_string());
 	}
-	let offset = plane.chunk.offset as usize;
-	let bytes = plane.chunk.size as usize;
-	let stride = plane.chunk.stride;
+	let offset = chunk.offset as usize;
+	let bytes = chunk.size as usize;
+	let stride = chunk.stride;
 	if stride <= 0 {
 		return Err(format!("PipeWire returned unsupported frame stride {stride}"));
 	}
 	let stride = stride as usize;
-	let source = plane
-		.memory
-		.ok_or_else(|| "PipeWire frame buffer is not memory-mapped".to_string())?;
 	let end = offset
 		.checked_add(bytes)
 		.ok_or_else(|| "PipeWire frame size overflow".to_string())?
@@ -263,7 +271,11 @@ unsafe extern "C" fn on_process(data: *mut c_void) {
 		listener.frame = Some(if format.width == 0 || format.height == 0 {
 			Err(DesktopError::capture_failed("PipeWire negotiated an empty frame"))
 		} else if listener.pixels {
-			rgba_from_buffer(format, &plane)
+			plane
+				.with_memory(|bytes| rgba_from_buffer(format, plane.chunk, bytes))
+				.unwrap_or_else(|| {
+					Err("PipeWire frame buffer is not memory-mapped readable".to_string())
+				})
 				.map(|image| CapturedFrame {
 					image:  Some(image),
 					width:  format.width,

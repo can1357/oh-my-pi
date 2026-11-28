@@ -13,6 +13,7 @@ import "../../ui/styles/composer";
 import "../../ui/styles/status";
 import {
 	GALLERY_BAR_PLACEMENT,
+	GALLERY_CONTEXT_WINDOW,
 	GALLERY_NOW,
 	GALLERY_PROMPT_CACHE,
 	galleryStatusFacts,
@@ -42,6 +43,15 @@ export function getSegmentGalleryInventory(): readonly StatusLineSegmentId[] {
 
 const LOOP_LIMIT = { kind: "iterations", initial: 10, remaining: 4 } as const;
 
+/** A model served through a gateway, for the `model` segment's provider and id options. */
+const GALLERY_ROUTED_MODEL: NonNullable<StatusFacts["model"]> = {
+	id: "anthropic/claude-sonnet-4.5",
+	name: "Claude Sonnet 4.5",
+	provider: "openrouter",
+	thinking: true,
+	contextWindow: GALLERY_CONTEXT_WINDOW,
+};
+
 function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
 	switch (id) {
 		case "pi":
@@ -63,12 +73,33 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
 				{ label: "normal" },
 				{
 					label: "fast + advisor active",
-					facts: { fastMode: true, advisor: { status: "running", yielded: false } },
+					facts: { fastTier: "priority", advisor: { status: "running", yielded: false } },
 				},
+				{ label: "ultrafast", facts: { fastTier: "ultrafast" } },
 				{ label: "advisor warning", facts: { advisor: { status: "quota_exhausted", yielded: false } } },
 				{ label: "advisor error", facts: { advisor: { status: "error", yielded: false } } },
 				{ label: "advisor idle", facts: { advisor: { status: "idle", yielded: false } } },
 				{ label: "advisor done (yielded)", facts: { advisor: { status: "running", yielded: true } } },
+				{
+					label: "provider prefix",
+					options: { model: { showProvider: true } },
+					facts: { model: GALLERY_ROUTED_MODEL },
+				},
+				{
+					label: "provider + model id",
+					options: { model: { showProvider: true, display: "id" } },
+					facts: { model: GALLERY_ROUTED_MODEL },
+				},
+				{
+					label: "model id + name",
+					options: { model: { display: "full" } },
+					facts: { model: GALLERY_ROUTED_MODEL },
+				},
+				{
+					label: "provider + model id, max length 24",
+					options: { model: { showProvider: true, display: "id", maxLength: 24 } },
+					facts: { model: GALLERY_ROUTED_MODEL },
+				},
 			];
 		case "mode": {
 			const goal = (status: NonNullable<StatusFacts["goal"]>["status"], paused = false): Partial<StatusFacts> => ({

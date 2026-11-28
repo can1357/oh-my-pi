@@ -41,8 +41,8 @@ import { isMainThread, type ThreadId } from "./identity";
 import type { MainThreadLink, SubagentWorkerInit } from "./protocol";
 import { type RpcFrame, RpcLink } from "./rpc";
 import type { ThreadService, WorkerPeer } from "./services";
-import { prewarmModelRegistryMirror } from "./services/auth";
-import { THREAD_SERVICES } from "./services/index";
+import type * as AuthService from "./services/auth";
+import type * as Services from "./services/index";
 import { isSubagentWorkerLog, receiveWorkerLog } from "./worker-log";
 
 const DEFAULT_INIT_TIMEOUT_MS = 30_000;
@@ -115,6 +115,11 @@ function spawnBunWorker(entry: URL | undefined): Worker {
 		: new Worker(new URL("./subagent-worker-entry.ts", import.meta.url).href, { type: "module" });
 }
 
+function defaultWorkerServices(): readonly ThreadService[] {
+	const { THREAD_SERVICES }: typeof Services = require("./services/index");
+	return THREAD_SERVICES;
+}
+
 /** An idempotent release fn that runs `release` once. */
 function once(release: () => void): () => void {
 	let released = false;
@@ -146,7 +151,8 @@ export class SubagentWorker implements WorkerPeer {
 	constructor(options: SubagentWorkerOptions = {}) {
 		this.threadId = `w${nextThreadNumber++}`;
 		this.#options = options;
-		this.#services = options.services ?? THREAD_SERVICES;
+		// Sessions that never spawn a worker need none of its RPC service implementations.
+		this.#services = options.services ?? defaultWorkerServices();
 		const worker = spawnBunWorker(options.entry);
 		this.#worker = worker;
 		// Unref'd until someone holds it: a booting spare never keeps the process alive.
@@ -578,7 +584,10 @@ export function subagentWorkerPool(settings: Settings): SubagentWorkerPool | und
 				warmUp: async worker => {
 					const registry = processPoolRegistry;
 					// The warm-up session runs on the mirror, so build that first.
-					if (registry) await prewarmModelRegistryMirror(worker, registry);
+					if (registry) {
+						const { prewarmModelRegistryMirror }: typeof AuthService = require("./services/auth");
+						await prewarmModelRegistryMirror(worker, registry);
+					}
 					// A run already waiting here pays the first-session costs itself, sooner than after a
 					// throwaway session would: then only the discoveries it shares are warmed.
 					await worker.link.call("warmUp", {

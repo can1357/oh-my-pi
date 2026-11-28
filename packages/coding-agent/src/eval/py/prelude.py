@@ -4,7 +4,7 @@ from __future__ import annotations
 if "__omp_prelude_loaded__" not in globals():
     __omp_prelude_loaded__ = True
     from pathlib import Path
-    import asyncio, collections.abc, contextvars, inspect, os, json, math, re, time, types, typing
+    import asyncio, collections.abc, inspect, os, json, math, re, time, types, typing
     # Private aliases: cell code may rebind `asyncio`/`inspect` in the shared namespace.
     import asyncio as _omp_asyncio, inspect as _omp_inspect
     from urllib.parse import unquote
@@ -144,7 +144,7 @@ if "__omp_prelude_loaded__" not in globals():
             self.output = output
             self.exit_code = exit_code
 
-    def sh(command: str, cwd: str | Path | None = None, timeout: float | None = None) -> str:
+    def sh(command: str, timeout: float | None = None) -> str:
         """Run ``command`` on the embedded bash engine and return its output.
 
         The host side lives in ``eval/shell-bridge.ts``. Raises ShellError on a
@@ -153,8 +153,6 @@ if "__omp_prelude_loaded__" not in globals():
         if not isinstance(command, str):
             raise TypeError(f"sh() expects a command string (got {type(command).__name__})")
         args = {"command": command}
-        if cwd is not None:
-            args["cwd"] = str(cwd)
         if timeout is not None:
             args["timeout"] = timeout
         result = _bridge_call("__shell__", args)
@@ -405,33 +403,6 @@ if "__omp_prelude_loaded__" not in globals():
     # host-owned loopback endpoint must always connect directly.
     _BRIDGE_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
-    _OMP_CALL_IDENTITY = contextvars.ContextVar("omp_call_identity", default=None)
-    _OMP_CALL_OCCURRENCES = contextvars.ContextVar("omp_call_occurrences", default=None)
-
-    def __omp_reset_call_occurrences__():
-        _OMP_CALL_OCCURRENCES.set(None)
-
-    async def __omp_with_call_site__(site_id: str, action, args):
-        occurrences = dict(_OMP_CALL_OCCURRENCES.get() or {})
-        occurrence = occurrences.get(site_id, 0)
-        occurrences[site_id] = occurrence + 1
-        _OMP_CALL_OCCURRENCES.set(occurrences)
-        token = _OMP_CALL_IDENTITY.set(
-            {"siteId": site_id, "occurrence": occurrence}
-        )
-        try:
-            # `action` is the async `_ToolCallable.__call__`: calling it only
-            # builds the coroutine, so the identity must stay set until the
-            # coroutine body reaches `_bridge_call`. Awaiting here keeps the
-            # ContextVar alive across the await (and into `_omp_asyncio.to_thread`,
-            # which propagates the current context).
-            result = action(args)
-            if _omp_inspect.isawaitable(result):
-                return await result
-            return result
-        finally:
-            _OMP_CALL_IDENTITY.reset(token)
-
     def _bridge_call(name: str, args: dict):
         """POST one request to the host tool bridge and return its `value`."""
         base, token, session = _tool_proxy_from_env()
@@ -453,9 +424,6 @@ if "__omp_prelude_loaded__" not in globals():
             "name": name,
             "args": args,
         }
-        identity = _OMP_CALL_IDENTITY.get()
-        if identity is not None:
-            payload["identity"] = identity
         payload = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
             f"{base}/v1/tool",
@@ -653,15 +621,6 @@ if "__omp_prelude_loaded__" not in globals():
 
     class _ToolProxy:
         """Define kernel tools or invoke host-side tools by attribute."""
-
-        # Marker identifying the genuine prelude bridge to the Python shadow
-        # planner (runner.py): a retained user `tool` binding that is not
-        # JSON-safe is omitted from the shadow snapshot exactly like this
-        # proxy, so the planner consults the namespace directly and admits
-        # speculative reads only when the binding carries this marker.
-        # (`__slots__` is empty, so this lives on the class, not the
-        # instance; accidental user collision is out of threat model.)
-        __omp_tool_bridge__ = True
 
         __slots__ = ()
 

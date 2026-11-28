@@ -4,7 +4,7 @@ use std::fmt::NumBuffer;
 
 use smallvec::SmallVec;
 
-use super::{Align, Element, Layout, Reader, Style, align, attr, flag};
+use super::{Align, Element, Layout, Reader, Style, align, attr, flag, own_number};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -291,6 +291,8 @@ impl Reader<'_> {
 		let body_left = self.layout.body().left;
 		let (first, rest) = kind.map_or((body_left, body_left), |k| k.margins(level));
 		let gap = kind.map_or(1, Kind::gap);
+		// An ordered item's own visible number, which its marker shows.
+		let mut own = None;
 		match tag.name() {
 			"dt" => {
 				let on_first_line = self.lists.term_line == Some(self.layout.output.len());
@@ -310,7 +312,13 @@ impl Reader<'_> {
 					self.layout.style.left += 1;
 				} else {
 					match kind {
-						Some(Kind::Ordered) => self.lists.number(tag).label(&mut self.layout),
+						Some(Kind::Ordered) => {
+							let number = self.lists.number(tag);
+							number.label(&mut self.layout);
+							if number.kind == b'1' {
+								own = own_number(self.dom, self.dropped, tag, i64::from(number.value));
+							}
+						},
 						Some(Kind::Bullet) => {
 							self.layout.style.left += 2;
 							self.layout.push(char::from(b"*+o#@-="[level % 7]));
@@ -325,7 +333,10 @@ impl Reader<'_> {
 		}
 		// Closing LI/DT/DD is not a paragraph break: trailing sibling text stays
 		// on this line.
+		let outer = self.skip;
+		self.skip = own.or(outer);
 		self.nodes(tag.children.clone());
+		self.skip = outer;
 	}
 
 	pub(super) fn list_heading(&mut self, tag: &Element) {
