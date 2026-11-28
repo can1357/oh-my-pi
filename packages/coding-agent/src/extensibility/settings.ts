@@ -152,6 +152,19 @@ export const cfgExtensionHandlersModeControl = register({
 	},
 });
 
+export const cfgExtensionHandlersKeepSystemPromptOverride = register({
+	id: "extensionHandlers.keepSystemPromptOverride",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tools",
+		group: "Extensions",
+		label: "Keep Hook System Prompt",
+		description:
+			"Keep the system prompt a before_agent_start hook returned on later turns that do not run the hook and after a restart, while the base prompt it was built on is unchanged; the session file stores it",
+	},
+});
+
 export const cfgExtensionAssistantTextRenderers = register({
 	id: "extensionRenderers.assistantText",
 	type: "boolean",

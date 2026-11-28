@@ -851,7 +851,11 @@ interface BranchPromptCacheObservation {
 	refreshMissed: boolean;
 	/** A compaction follows the reply. */
 	compacted: boolean;
-	/** Digest of the base prompt the reply was produced under; undefined when none is recorded. */
+	/**
+	 * Digest of the prompt the branch recorded for the reply: the system prompt it was sent with when
+	 * `extensionHandlers.keepSystemPromptOverride` is on, else the base that prompt was built from;
+	 * undefined when none is recorded.
+	 */
 	promptDigest: string | undefined;
 }
 
@@ -1647,6 +1651,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// finishing has its bracket reset by it and ends here.
 		if (epoch === this.#inFlightEpoch) this.#promptInFlightCount = Math.max(0, this.#promptInFlightCount - 1);
 		if (this.#promptInFlightCount !== 0) return;
+		// No run is in flight, whichever path started it (a prompt, a wake, a queued drain, an idle delivery, a
+		// stream-guard recovery): a prompt prepared for it no longer governs rebuilds.
+		this.#tools.clearTurnSystemPromptOverride();
 		this.yieldQueue.requestIdleFlush();
 		this.#releasePowerAssertion();
 		this.#endComputerTurn();
@@ -2940,6 +2947,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			promptSequence: () => this.#promptSequence,
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
 			schedulePostPromptTask: task => this.#schedulePostPromptTask(task),
+			continueAgent: async () => {
+				// A recovery continuation is a run of its own: a queued batch it prepares ends with it.
+				const epoch = this.#beginInFlight();
+				try {
+					await this.agent.continue();
+				} finally {
+					this.#endInFlight(epoch);
+				}
+			},
 			discardAssistantTurn: message => this.#recovery.discardAssistantTurn(message),
 		};
 		this.#streamingEditGuard = new StreamingEditGuard(streamGuardsHost);
@@ -7960,8 +7976,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * Keeps a subagent transcript's latest `session_init` on the base prompt and work-pool yield items
 	 * its model calls are built from, appending a newer one when either changes: signed thinking is
 	 * bound to the system prompt and tools, so cold revival must replay them. A per-turn override is
-	 * stored as the base its hook was given, since the revived turn re-runs the hook. Transcripts
-	 * without a `session_init` are left alone.
+	 * stored as the base its hook was given. With `extensionHandlers.keepSystemPromptOverride` on, the
+	 * transcript's prompt records restore the override on that base; off, the revived session sends
+	 * the base until a turn runs the hooks again. Transcripts without a `session_init` are left alone.
 	 */
 	#recordModelCallSystemPrompt(prompt: string[]): void {
 		const sessionFile = this.sessionManager.getSessionFile();
@@ -10061,8 +10078,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					if (result?.systemPrompt !== undefined) {
 						this.#tools.setTurnSystemPromptOverride(result.systemPrompt, basePreparation.systemPrompt);
 					} else {
-						this.#tools.clearTurnSystemPromptOverride();
-						this.agent.setSystemPrompt(this.#tools.baseSystemPrompt);
+						this.#tools.setTurnBaseSystemPrompt();
 					}
 					return messages;
 				},
@@ -10379,8 +10395,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 			return true;
 		} finally {
-			// The per-turn before_agent_start override lives only for this turn.
-			this.#tools.clearTurnSystemPromptOverride();
 			this.#usagePreflightReadyForNextModelCall = false;
 			// Client ownership is released by #prompt's bracket, which settles
 			// after this frame returns; its wake re-checks parked steers
@@ -11348,8 +11362,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			await this.#waitForPostPromptRecovery();
 			return true;
 		} finally {
-			// The per-turn before_agent_start override lives only for this turn.
-			this.#tools.clearTurnSystemPromptOverride();
 			this.#usagePreflightReadyForNextModelCall = false;
 			this.#recovery.setAcceptTerminalEmptyStop(false);
 			this.#endInFlight(inFlightEpoch);
@@ -12934,6 +12946,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			for (const controller of this.#usagePreflightAbortControllers) controller.abort();
 			this.abortRetry();
 			this.#promptGeneration++;
+			// The aborted turn's policy ends here: a turn that starts before this abort finishes sets its own.
+			this.#tools.clearTurnSystemPromptOverride();
 			// Cancel any awaited pre-dispatch setup (e.g. Hindsight auto-recall) so the
 			// admitted submission unwinds now instead of at the recall timeout (#12668).
 			this.#promptSetupAbortController?.abort(options?.reason);
@@ -13856,7 +13870,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			return;
 		}
 		// The rewound turn's reply is the exploration branch's newest, so this records its prompt.
-		const explorationPromptDigest = this.#tools.recordedPromptDigest();
+		const explorationPrompt = this.#tools.recordedPrompt();
 		this.#bash.withBranchTransition(() => {
 			try {
 				this.sessionManager.branchWithSummary(checkpointState.checkpointEntryId, report, {
@@ -13894,7 +13908,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				if (calls.length > 0) {
 					const callIds = new Set(calls.map(call => call.id));
 					// The rewind branch ends at the checkpoint, whose recorded prompt may predate this reply's.
-					this.#tools.recordPromptDigest(explorationPromptDigest);
+					this.#tools.recordPrompt(explorationPrompt);
 					this.sessionManager.appendMessage(
 						sanitizeAssistantForReparentedHistory({ ...turn.message, content: calls }),
 					);
@@ -15425,6 +15439,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				this.#advisors.resetSessionState();
 				this.#closeCodexProviderSessionsForHistoryRewrite();
 			}
+			// With `extensionHandlers.keepSystemPromptOverride` on, a turn that runs no hooks sends the prompt the
+			// branched path recorded.
+			this.#tools.followBranchSystemPrompt();
 
 			this.#advisors.reattachRecorderFeeds();
 			advisorRecordersDetached = false;
@@ -15895,6 +15912,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		});
 		const displayContext = this.#withEvalStateContext(deobfuscateSessionContext(stateContext, this.#obfuscator));
 		this.replaceMessagesFromSessionContext(displayContext.messages);
+		this.#tools.followBranchSystemPrompt();
 		this.#rehydrateCheckpointRewindState();
 		this.#advisors.resetSessionState({ preserveCost: true });
 		this.#todo.syncFromBranch();

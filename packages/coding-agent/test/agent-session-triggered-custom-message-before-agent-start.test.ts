@@ -37,7 +37,10 @@ describe("AgentSession turn started by a triggered custom message", () => {
 		session = undefined;
 	});
 
-	function createSession(beforeAgentStart: () => Promise<{ systemPrompt: string[] }>) {
+	function createSession(
+		beforeAgentStart: () => Promise<{ systemPrompt: string[] }>,
+		settings: Record<string, unknown> = {},
+	) {
 		const mock = createMockModel({ responses: [{ content: ["Done"] }] });
 		const systemPrompts: string[][] = [];
 		let hookCalls = 0;
@@ -53,7 +56,7 @@ describe("AgentSession turn started by a triggered custom message", () => {
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false, "todo.enabled": false }),
+			settings: Settings.isolated({ "compaction.enabled": false, "todo.enabled": false, ...settings }),
 			modelRegistry: { getApiKey: async () => "test-key" } as never,
 			extensionRunner: {
 				emitBeforeAgentStart: async () => {
@@ -79,6 +82,23 @@ describe("AgentSession turn started by a triggered custom message", () => {
 		expect(systemPrompts).toEqual([[OVERRIDE]]);
 		await session.refreshBaseSystemPrompt();
 		expect(session.systemPrompt).toEqual(["base"]);
+	});
+
+	it("keeps the before_agent_start system prompt on its base with extensionHandlers.keepSystemPromptOverride on", async () => {
+		const { session, systemPrompts } = createSession(async () => ({ systemPrompt: [OVERRIDE] }), {
+			"extensionHandlers.keepSystemPromptOverride": true,
+		});
+
+		await session.sendCustomMessage(
+			{ customType: "relayed-user", content: "hello", display: true, attribution: "user" },
+			{ triggerTurn: true },
+		);
+		await session.waitForIdle();
+
+		expect(systemPrompts).toEqual([[OVERRIDE]]);
+		// A rebuild that leaves the base unchanged keeps the prompt the turn sent.
+		await session.refreshBaseSystemPrompt();
+		expect(session.systemPrompt).toEqual([OVERRIDE]);
 	});
 
 	it("leaves an agent-attributed wake unprepared", async () => {

@@ -77,7 +77,12 @@ import type { CustomMessage } from "./messages";
 import { SESSION_AGENT_NOTICE_TYPE } from "./queued-messages";
 import type { SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
-import { cfgDisabledExtensions, cfgSkills, type SkillsSettings } from "../extensibility/settings";
+import {
+	cfgDisabledExtensions,
+	cfgExtensionHandlersKeepSystemPromptOverride,
+	cfgSkills,
+	type SkillsSettings,
+} from "../extensibility/settings";
 import {
 	cfgExternalThinking,
 	cfgIncludeModelInPrompt,
@@ -315,8 +320,34 @@ const EVAL_PRELUDE_NOTICE_MESSAGE_TYPE = "eval-prelude-notice";
 const EVAL_PRELUDE_GUIDE_MESSAGE_TYPE = "eval-prelude-guide";
 const SKILL_NOTICE_MESSAGE_TYPE = "skill-notice";
 
-/** Custom entry holding the digest of the base prompt the branch's primary model calls are built from. */
+/**
+ * Custom entry holding the digest of the system prompt the branch's primary model calls are built from: the prompt
+ * sent with {@link cfgExtensionHandlersKeepSystemPromptOverride} on, else the base a hook prompt was built from.
+ */
 const SYSTEM_PROMPT_DIGEST_CUSTOM_TYPE = "system-prompt-digest";
+
+/**
+ * Custom entry holding a `before_agent_start` system prompt that a primary model call sent, written just before the
+ * {@link SYSTEM_PROMPT_DIGEST_CUSTOM_TYPE} record of that prompt, so the session sends it again on the same base.
+ * Written only with {@link cfgExtensionHandlersKeepSystemPromptOverride} on.
+ */
+const SYSTEM_PROMPT_OVERRIDE_CUSTOM_TYPE = "system-prompt-override";
+
+/** Data of a {@link SYSTEM_PROMPT_OVERRIDE_CUSTOM_TYPE} entry. */
+interface SystemPromptOverrideRecord {
+	/** Digest of the base prompt the hooks were given. */
+	base: string;
+	/** The system prompt the hooks returned. */
+	prompt: string[];
+}
+
+/** What a branch records of the system prompt a primary model call sent. */
+export interface RecordedSystemPrompt {
+	/** Digest of the prompt ({@link SYSTEM_PROMPT_DIGEST_CUSTOM_TYPE}). */
+	digest: string;
+	/** The hooks' prompt and its base, when the prompt was a `before_agent_start` override. */
+	override?: SystemPromptOverrideRecord;
+}
 
 /**
  * Least time between two rediscoveries started by `skill://` names no loaded skill owns, so a typo
@@ -341,6 +372,28 @@ function samePromptBlocks(left: readonly string[], right: readonly string[]): bo
 export function promptDigestOfEntry(entry: SessionEntry): string | undefined | null {
 	if (entry.type !== "custom" || entry.customType !== SYSTEM_PROMPT_DIGEST_CUSTOM_TYPE) return null;
 	return typeof entry.data === "string" ? entry.data : undefined;
+}
+
+/**
+ * The system prompt the digest record at `branch[index]` names, `undefined` for a malformed record, or `null` when the
+ * entry is not a digest record. An override record written just before the digest is that prompt when it hashes to it.
+ */
+function recordedPromptAt(branch: readonly SessionEntry[], index: number): RecordedSystemPrompt | undefined | null {
+	const digest = promptDigestOfEntry(branch[index]);
+	if (digest === null || digest === undefined) return digest;
+	const previous = index > 0 ? branch[index - 1] : undefined;
+	if (previous?.type !== "custom" || previous.customType !== SYSTEM_PROMPT_OVERRIDE_CUSTOM_TYPE) return { digest };
+	const data = previous.data as Partial<SystemPromptOverrideRecord> | undefined;
+	const prompt = data?.prompt;
+	if (
+		typeof data?.base !== "string" ||
+		!Array.isArray(prompt) ||
+		!prompt.every(block => typeof block === "string") ||
+		systemPromptDigest(prompt) !== digest
+	) {
+		return { digest };
+	}
+	return { digest, override: { base: data.base, prompt } };
 }
 
 /** Tool names added/removed by one hidden {@link TOOL_ROSTER_NOTICE_MESSAGE_TYPE} message. */
@@ -468,18 +521,20 @@ export class SessionTools {
 	 * {@link #implicitRebuildBinding}.
 	 */
 	#restoredTranscript: { reply: AgentMessage; promptDigest: string } | undefined;
-	/** Base-prompt digest of the last primary model call, until its reply ends. */
-	#capturedPromptDigest: string | undefined;
-	/** Base-prompt digest each primary reply with provider output was produced under. */
-	readonly #replyPromptDigests = new WeakMap<AgentMessage, string>();
+	/** What the branch records of the prompt the last primary model call sent, until its reply ends. */
+	#capturedPrompt: RecordedSystemPrompt | undefined;
+	/** The prompt each primary reply with provider output was produced under. */
+	readonly #replyPrompts = new WeakMap<AgentMessage, RecordedSystemPrompt>();
 	/**
-	 * Newest digest found in a branch view and how much of it was scanned. The
-	 * session manager's memoized view only grows in place, so a later read of
-	 * the same array scans just the appended entries.
+	 * Newest prompt record found in a branch view and how much of it was
+	 * scanned. The session manager's memoized view only grows in place, so a
+	 * later read of the same array scans just the appended entries.
 	 */
-	#recordedDigestScan: { branch: readonly SessionEntry[]; scanned: number; digest: string | undefined } | undefined;
-	/** {@link currentPromptDigest} for the base prompt array it hashed. */
-	#currentPromptDigest: { base: readonly string[]; digest: string } | undefined;
+	#recordedPromptScan:
+		| { branch: readonly SessionEntry[]; scanned: number; recorded: RecordedSystemPrompt | undefined }
+		| undefined;
+	/** Digest of each prompt array hashed; prompt arrays are replaced, never edited in place. */
+	readonly #promptDigests = new WeakMap<readonly string[], string>();
 	/**
 	 * Tool commands the model has already been told are mounted.
 	 * Seeded lazily from persisted history on resume (see
@@ -494,14 +549,19 @@ export class SessionTools {
 	#systemPromptSources: SystemPromptSources | undefined;
 	/**
 	 * Per-turn system prompt returned by a `before_agent_start` extension hook
-	 * ("replace the system prompt for this turn"). While set, base-prompt
-	 * rebuilds keep this override on the agent instead of the rebuilt base, so a
-	 * rebuild landing in the prompt window (compaction/promotion, memory
-	 * promotion, MCP/RPC tool refresh, hindsight MM-TTL refresh) cannot silently
-	 * drop it before the request. Cleared when the turn ends.
+	 * ("replace the system prompt for this turn"), or `null` when the turn's
+	 * hooks returned none. While set, base-prompt rebuilds keep this override
+	 * (or the rebuilt base) on the agent, so a rebuild landing in the prompt
+	 * window (compaction/promotion, memory promotion, MCP/RPC tool refresh,
+	 * hindsight MM-TTL refresh) cannot silently drop it before the request.
+	 * Cleared when the session's last run in flight ends, or when an abort
+	 * starts (`AgentSession` calls {@link clearTurnSystemPromptOverride}),
+	 * whichever path started the run; rebuilds between turns then apply the base,
+	 * or with {@link cfgExtensionHandlersKeepSystemPromptOverride} on, the prompt
+	 * the branch was last sent with on that base ({@link #applyAgentSystemPrompt}).
 	 */
-	#turnSystemPromptOverride: string[] | undefined;
-	/** The latest per-turn override and the base its hook was given; kept after the turn ends. */
+	#turnSystemPromptOverride: string[] | null | undefined;
+	/** The latest hook prompt applied to the agent and the base its hooks were given; kept after the turn ends. */
 	#lastTurnSystemPromptOverride: { prompt: string[]; base: string[] } | undefined;
 	#lastAppliedToolSignature: string | undefined;
 	/** Roster {@link #baseSystemPrompt} rendered; captured only for prefix-bound models. */
@@ -621,11 +681,13 @@ export class SessionTools {
 		this.#baseSystemPrompt = options.baseSystemPrompt;
 		this.#systemPromptSources = options.systemPromptSources;
 		const restoredReply = this.#latestReply();
-		const restoredPromptDigest = restoredReply && this.recordedPromptDigest();
+		const restoredPromptDigest = restoredReply && this.recordedPrompt()?.digest;
 		this.#restoredTranscript =
 			restoredReply && restoredPromptDigest
 				? { reply: restoredReply, promptDigest: restoredPromptDigest }
 				: undefined;
+		// A restored transcript goes on with the hook prompt it was last sent with, while that prompt's base is this one.
+		this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
 		this.#skills = options.skills ?? [];
 		this.#promptSkills = this.#skills;
 		this.#skillWarnings = options.skillWarnings ?? [];
@@ -676,24 +738,70 @@ export class SessionTools {
 	}
 
 	/**
-	 * Pushes `base` to the agent as the effective system prompt, unless an active
-	 * per-turn {@link #turnSystemPromptOverride} takes precedence. Every base
-	 * rebuild applies its result through here so a mid-turn rebuild preserves the
-	 * override.
+	 * Pushes the system prompt for `base` to the agent: the running turn's
+	 * {@link #turnSystemPromptOverride} (or `base` when its hooks returned none);
+	 * between turns with {@link cfgExtensionHandlersKeepSystemPromptOverride} on,
+	 * the hook prompt the branch was last sent with when its hooks were given this
+	 * base, so an agent-started turn, a rebuild and a resumed process send what the
+	 * last prepared turn sent; else `base`. Every base rebuild applies its result
+	 * through here.
 	 */
 	#applyAgentSystemPrompt(base: string[]): void {
-		this.#host.agent.setSystemPrompt(this.#turnSystemPromptOverride ?? base);
+		const turn = this.#turnSystemPromptOverride;
+		if (turn !== undefined) {
+			this.#host.agent.setSystemPrompt(turn ?? base);
+			return;
+		}
+		const recorded = this.#recordedOverrideOn(base);
+		if (recorded) this.#lastTurnSystemPromptOverride = { prompt: recorded, base };
+		this.#host.agent.setSystemPrompt(recorded ?? base);
+	}
+
+	/** Whether a hook prompt outlives its turn ({@link cfgExtensionHandlersKeepSystemPromptOverride}). */
+	#keepsHookPrompt(): boolean {
+		return cfgExtensionHandlersKeepSystemPromptOverride.get(this.#host.settings);
+	}
+
+	/** With the setting on, the hook prompt the branch was last sent with, when its hooks were given `base`. */
+	#recordedOverrideOn(base: readonly string[]): string[] | undefined {
+		if (!this.#keepsHookPrompt()) return undefined;
+		const override = this.recordedPrompt()?.override;
+		// Hash the base only when the branch recorded a hook prompt: most sessions never do.
+		if (!override) return undefined;
+		return override.base === this.#digestOf(base) ? override.prompt : undefined;
+	}
+
+	/**
+	 * Applies what the branch now under the leaf records for the current base, between turns with
+	 * {@link cfgExtensionHandlersKeepSystemPromptOverride} on, so a turn that does not run the hooks after a move to
+	 * another branch sends that branch's prompt, not the one the agent held for the branch it left.
+	 */
+	followBranchSystemPrompt(): void {
+		if (this.#turnSystemPromptOverride !== undefined || !this.#keepsHookPrompt()) return;
+		this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
 	}
 
 	/**
 	 * Registers the per-turn `before_agent_start` system-prompt override and
 	 * applies it to the agent. Base rebuilds during the turn preserve it until
-	 * {@link clearTurnSystemPromptOverride}.
+	 * {@link clearTurnSystemPromptOverride}. The blocks are copied: a handler may
+	 * keep its array and edit it for a later turn, and each prompt is hashed once.
 	 */
 	setTurnSystemPromptOverride(prompt: string[], base: string[]): void {
-		this.#turnSystemPromptOverride = prompt;
-		this.#lastTurnSystemPromptOverride = { prompt, base };
-		this.#host.agent.setSystemPrompt(prompt);
+		const sent = [...prompt];
+		this.#turnSystemPromptOverride = sent;
+		this.#lastTurnSystemPromptOverride = { prompt: sent, base };
+		this.#host.agent.setSystemPrompt(sent);
+	}
+
+	/**
+	 * Registers that the turn's `before_agent_start` hooks returned no system
+	 * prompt: the turn sends the base prompt, also after a rebuild, whatever
+	 * prompt the branch was last sent with.
+	 */
+	setTurnBaseSystemPrompt(): void {
+		this.#turnSystemPromptOverride = null;
+		this.#host.agent.setSystemPrompt(this.#baseSystemPrompt);
 	}
 
 	/**
@@ -704,9 +812,19 @@ export class SessionTools {
 		return prompt === this.#lastTurnSystemPromptOverride?.prompt ? this.#lastTurnSystemPromptOverride.base : prompt;
 	}
 
-	/** Drops the active per-turn override; later rebuilds fall back to the base prompt. */
+	/** Ends the turn's prompt policy; later rebuilds apply the base, or with the setting on, what the branch recorded. */
 	clearTurnSystemPromptOverride(): void {
 		this.#turnSystemPromptOverride = undefined;
+	}
+
+	/** Digest of `prompt`, hashed once per array. */
+	#digestOf(prompt: readonly string[]): string {
+		let digest = this.#promptDigests.get(prompt);
+		if (digest === undefined) {
+			digest = systemPromptDigest(prompt);
+			this.#promptDigests.set(prompt, digest);
+		}
+		return digest;
 	}
 
 	/** The live skill registry: what `skill://` and `/skill:` resolve. */
@@ -1660,12 +1778,14 @@ export class SessionTools {
 		// awaits; that prompt is bound from then on, so an implicit rebuild ends
 		// exactly as if it had frozen up front. Before that call, a resumed
 		// transcript binds the prompt it was sent with: only a rebuild that
-		// reproduces it commits.
+		// reproduces it, with the hook prompt it recorded on that base, commits.
 		let restoresTranscriptPrompt = false;
 		if (rebuiltSystemPrompt && implicitRebuildSignature !== undefined) {
 			const binding = this.#implicitRebuildBinding();
 			restoresTranscriptPrompt =
-				typeof binding === "object" && systemPromptDigest(rebuiltSystemPrompt) === binding.promptDigest;
+				typeof binding === "object" &&
+				this.#digestOf(this.#recordedOverrideOn(rebuiltSystemPrompt) ?? rebuiltSystemPrompt) ===
+					binding.promptDigest;
 			if (binding !== "free" && !restoresTranscriptPrompt) {
 				rebuiltSystemPrompt = undefined;
 				frozenSignature = implicitRebuildSignature;
@@ -1733,38 +1853,34 @@ export class SessionTools {
 		return this.#host.agent.state.messages.findLast(message => message.role === "assistant");
 	}
 
-	/** Digest of the base prompt the current branch's newest reply with provider output was produced under. */
-	recordedPromptDigest(): string | undefined {
+	/** The prompt the current branch's newest reply with provider output was sent with, as the branch records it. */
+	recordedPrompt(): RecordedSystemPrompt | undefined {
 		const branch = this.#host.sessionManager.getBranchView();
-		const scan = this.#recordedDigestScan;
+		const scan = this.#recordedPromptScan;
 		if (scan?.branch === branch) {
 			for (let index = scan.scanned; index < branch.length; index++) {
-				const digest = promptDigestOfEntry(branch[index]);
-				if (digest !== null) scan.digest = digest;
+				const recorded = recordedPromptAt(branch, index);
+				if (recorded !== null) scan.recorded = recorded;
 			}
 			scan.scanned = branch.length;
-			return scan.digest;
+			return scan.recorded;
 		}
-		let digest: string | undefined;
+		let recorded: RecordedSystemPrompt | undefined;
 		for (let index = branch.length - 1; index >= 0; index--) {
-			const found = promptDigestOfEntry(branch[index]);
+			const found = recordedPromptAt(branch, index);
 			if (found !== null) {
-				digest = found;
+				recorded = found;
 				break;
 			}
 		}
-		this.#recordedDigestScan = { branch, scanned: branch.length, digest };
-		return digest;
+		this.#recordedPromptScan = { branch, scanned: branch.length, recorded };
+		return recorded;
 	}
 
-	/** Digest of the agent's current base prompt, comparable with the digests recorded on the branch. */
+	/** Digest of the prompt the agent sends now, as the branch records it ({@link recordPrimaryModelCall}). */
 	currentPromptDigest(): string {
-		const base = this.baseOfSystemPrompt(this.#host.agent.state.systemPrompt);
-		const memo = this.#currentPromptDigest;
-		if (memo?.base === base) return memo.digest;
-		const digest = systemPromptDigest(base);
-		this.#currentPromptDigest = { base, digest };
-		return digest;
+		const prompt = this.#host.agent.state.systemPrompt;
+		return this.#digestOf(this.#keepsHookPrompt() ? prompt : this.baseOfSystemPrompt(prompt));
 	}
 
 	/**
@@ -1774,11 +1890,23 @@ export class SessionTools {
 	 * newest reply, so the restored transcript is dropped for good. The capture
 	 * is not recorded yet: the call may still stop before it is sent; see
 	 * {@link bindReplyToCapturedPrompt}. Side requests (`runEphemeralTurn`) do
-	 * not count.
+	 * not count. With {@link cfgExtensionHandlersKeepSystemPromptOverride} on, the
+	 * capture is the prompt sent, with the hook prompt and its base when it was one;
+	 * off, a hook prompt governs only its turn, and the capture is the base it was
+	 * built from.
 	 */
 	recordPrimaryModelCall(prompt: string[]): void {
 		this.#restoredTranscript = undefined;
-		this.#capturedPromptDigest = systemPromptDigest(this.baseOfSystemPrompt(prompt));
+		const hook = this.#lastTurnSystemPromptOverride;
+		const sentHookPrompt = hook !== undefined && prompt === hook.prompt;
+		if (!this.#keepsHookPrompt()) {
+			this.#capturedPrompt = { digest: this.#digestOf(sentHookPrompt ? hook.base : prompt) };
+			return;
+		}
+		const digest = this.#digestOf(prompt);
+		this.#capturedPrompt = sentHookPrompt
+			? { digest, override: { base: this.#digestOf(hook.base), prompt } }
+			: { digest };
 	}
 
 	/**
@@ -1788,34 +1916,43 @@ export class SessionTools {
 	 * so the replies before it keep their prompt.
 	 */
 	bindReplyToCapturedPrompt(reply: AgentMessage): void {
-		const digest = this.#capturedPromptDigest;
-		this.#capturedPromptDigest = undefined;
-		if (digest === undefined || reply.role !== "assistant") return;
+		const prompt = this.#capturedPrompt;
+		this.#capturedPrompt = undefined;
+		if (prompt === undefined || reply.role !== "assistant") return;
 		if (reply.content.some(block => block.type !== "text" || block.text.length > 0)) {
-			this.#replyPromptDigests.set(reply, digest);
+			this.#replyPrompts.set(reply, prompt);
 		}
 	}
 
 	/**
 	 * Called just before a primary reply is appended to the branch: records the
-	 * digest of the prompt it was produced under when it differs from the
-	 * branch's, ahead of the reply so every path to the reply carries it.
+	 * prompt it was produced under when it differs from the branch's, ahead of
+	 * the reply so every path to the reply carries it.
 	 */
 	recordReplyPrompt(reply: AgentMessage): void {
-		this.recordPromptDigest(this.#replyPromptDigests.get(reply));
+		this.recordPrompt(this.#replyPrompts.get(reply));
 	}
 
-	/** Records `digest` on the current branch unless it is already the branch's newest record. */
-	recordPromptDigest(digest: string | undefined): void {
-		if (digest !== undefined && digest !== this.recordedPromptDigest()) {
-			this.#host.sessionManager.appendCustomEntry(SYSTEM_PROMPT_DIGEST_CUSTOM_TYPE, digest);
+	/**
+	 * Records `prompt` on the current branch unless it is already the branch's newest record: a hook prompt's
+	 * override record, then the digest that names it ({@link recordedPromptAt}). The digest names the prompt, and an
+	 * override record also names the base that restores it, so the same hook prompt sent on another base is recorded
+	 * again.
+	 */
+	recordPrompt(prompt: RecordedSystemPrompt | undefined): void {
+		if (prompt === undefined) return;
+		const newest = this.recordedPrompt();
+		if (newest?.digest === prompt.digest && newest.override?.base === prompt.override?.base) return;
+		if (prompt.override) {
+			this.#host.sessionManager.appendCustomEntry(SYSTEM_PROMPT_OVERRIDE_CUSTOM_TYPE, prompt.override);
 		}
+		this.#host.sessionManager.appendCustomEntry(SYSTEM_PROMPT_DIGEST_CUSTOM_TYPE, prompt.digest);
 	}
 
 	/** Drops retained transcript references when the session is disposed. */
 	releaseRestoredTranscript(): void {
 		this.#restoredTranscript = undefined;
-		this.#recordedDigestScan = undefined;
+		this.#recordedPromptScan = undefined;
 	}
 
 	/**
