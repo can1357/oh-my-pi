@@ -190,6 +190,11 @@ interface Transaction {
 	readonly quiet: boolean;
 	/** The viewport reached the bottom row before the resize. */
 	readonly full: boolean;
+	/**
+	 * Screen row of the viewport top before the resize, when known and short of
+	 * the bottom: borrowed frames stay there. Undefined: bottom-anchored.
+	 */
+	readonly top: number | undefined;
 	cancel: (() => void) | undefined;
 }
 
@@ -449,6 +454,8 @@ export class FrameWriter {
 		this.#expectEcho = false;
 		if (!this.#resize) {
 			const inPlace = this.#options.inPlaceResize?.() ?? false;
+			const known = this.#topKnown();
+			const full = known && this.#shown.length > 0 && this.#topLo + this.#shown.length >= before.rows;
 			this.#resize = {
 				columns: before.columns,
 				rows: before.rows,
@@ -456,7 +463,8 @@ export class FrameWriter {
 				grew: false,
 				inPlace,
 				quiet: inPlace || (!this.#alt && (this.#options.resizeAvoidsAlternate?.() ?? false)),
-				full: this.#topKnown() && this.#shown.length > 0 && this.#topLo + this.#shown.length >= before.rows,
+				full,
+				top: known && !full ? this.#topLo : undefined,
 				cancel: undefined,
 			};
 		}
@@ -830,15 +838,19 @@ export class FrameWriter {
 		this.#write(body, park, show, lead);
 	}
 
-	/** The viewport tail, bottom-anchored on the borrowed alternate screen. */
+	/**
+	 * The viewport tail on the borrowed alternate screen: at the row it held
+	 * before the resize ({@link Transaction.top}) while it fits below it, else
+	 * bottom-anchored, so a short session does not jump to the bottom mid-drag.
+	 */
 	#paintBorrowed(frame: FramePlan, prefix = ""): void {
 		const height = this.#rows;
 		const tail = frame.viewport.slice(-height);
-		const pad = height - tail.length;
 		const cut = frame.viewport.length - tail.length;
-		const rows = [...Array.from({ length: pad }, () => ""), ...tail];
+		const top = Math.min(this.#resize?.top ?? height, height - tail.length);
+		const rows = [...Array.from({ length: top }, () => ""), ...tail];
 		const cursor =
-			frame.cursor && frame.cursor.row >= cut ? { row: frame.cursor.row - cut + pad, col: frame.cursor.col } : null;
+			frame.cursor && frame.cursor.row >= cut ? { row: frame.cursor.row - cut + top, col: frame.cursor.col } : null;
 		this.#paintAlternate(rows, cursor, prefix, false);
 	}
 

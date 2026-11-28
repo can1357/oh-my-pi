@@ -93,6 +93,21 @@ describe("resize", () => {
 		expect(source.vt.transcript().slice(-2)).toEqual(["live", "> prompt"]);
 	});
 
+	it("keeps a short session's viewport at its row on the borrowed screen, moving up only to fit", () => {
+		const vt = new Vt({ columns: 30, rows: 10, shell: ["$ omp"] });
+		const frame: FramePlan = { viewport: ["live", "> prompt"], cursor: { row: 1, col: 8 } };
+		vt.present({ ...frame, history: { id: 1, rows: ["header"] } });
+		expect(vt.screen().slice(0, 4)).toEqual(["$ omp", "header", "live", "> prompt"]);
+		vt.resize(24, 10);
+		vt.present(frame);
+		expect(vt.term.isMainScreen).toBe(false);
+		expect(vt.screen().slice(0, 4)).toEqual(["", "", "live", "> prompt"]);
+		expect(vt.term.cursor).toMatchObject({ x: 8, y: 3 });
+		vt.resize(24, 3);
+		vt.present(frame);
+		expect(vt.screen()).toEqual(["", "live", "> prompt"]);
+	});
+
 	it("preserve: repaints only the viewport and keeps old-width history", async () => {
 		const source = new Source({ columns: 30, rows: 10, resizeScrollback: "preserve" });
 		source.open();

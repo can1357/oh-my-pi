@@ -84,7 +84,7 @@ Viewport-only frames cannot create history. Theme changes leave native history t
 
 ## Resize
 
-During resize, the writer normally borrows the alternate buffer. Frames show their viewport tail there; history offers are never acknowledged there (the backend prepares an unwritten batch again at the new width). After a quiet window the writer restores the normal buffer and recovers its viewport anchor with a DSR (CSI 6n) round trip. The parked cursor offset and stale viewport rows are remeasured at the new width, including inside multiplexers.
+During resize, the writer normally borrows the alternate buffer. Frames show their viewport tail there, at the row the viewport held when the burst began if it did not reach the bottom (moving up only as far as the tail needs to fit), else bottom-anchored; history offers are never acknowledged there (the backend prepares an unwritten batch again at the new width). After a quiet window the writer restores the normal buffer and recovers its viewport anchor with a DSR (CSI 6n) round trip. The parked cursor offset and stale viewport rows are remeasured at the new width, including inside multiplexers.
 
 Direct terminals use a bottom-preserving bound: `max(0, min(reported − reflowedParkOffset, height − staleReflowedRows))`. Multiplexer CPR replies instead outrank that bound, because height shrink can discard rows below the cursor rather than pushing rows above it. A missing reply falls back to retained geometry and tracked growth/shrink; multiplexer or growth timeouts retry once before falling back. `FrameWriter` (`packages/tui/src/driver/output/writer.ts`) owns these distinct anchor-recovery paths.
 
