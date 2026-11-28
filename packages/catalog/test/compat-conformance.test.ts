@@ -22,6 +22,9 @@ const RUNTIME_ONLY_PROVIDERS = new Set([
 	// including its tariff and effort ladder, comes from the live /v1/models
 	// snapshot, so no rows are frozen into the bundled catalog.
 	"charm-hyper",
+	// Public gateway discovery via straitlyModelManagerOptions: the catalog,
+	// limits, modalities, and pricing come live from /v1/models.
+	"straitly",
 	// Factory has no public model-listing endpoint. Its CLI roster is a
 	// `bundle="never"` KDL seed; factoryDroidModelManagerOptions serves it
 	// offline and narrows it by account flags/org policy live.

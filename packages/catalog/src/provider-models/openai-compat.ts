@@ -49,6 +49,7 @@ import { discoveryFetch, isAnthropicOAuthToken, isRecord, toBoolean, toNumber, t
 import { ALIBABA_TOKEN_PLAN_BASE_URL, parseAlibabaTokenPlanCredential } from "../wire/alibaba-token-plan";
 import { parseOtariCredential } from "../wire/otari";
 import { normalizeCharmHyperBaseUrl } from "../wire/charm-hyper";
+import { normalizeStraitlyBaseUrl } from "../wire/straitly";
 import { CLINEPASS_API_BASE_URL, clinePassClientHeaders } from "../wire/cline-pass";
 import { CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL } from "../wire/cloudflare-ai-gateway";
 import { coreWeaveProjectHeaders } from "../wire/coreweave";
@@ -9076,5 +9077,155 @@ export function arkaneCloudModelManagerOptions(config?: ModelManagerConfig): Mod
 					fetch: config?.fetch,
 				}),
 		}),
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Straitly
+// ---------------------------------------------------------------------------
+
+function mapStraitlyThinking(
+	entry: OpenAICompatibleModelRecord,
+	spec: ModelSpec<"openai-completions">,
+): ThinkingConfig | undefined {
+	const reasoning = entry.reasoning;
+	if (!isRecord(reasoning)) return undefined;
+	const requiresEffort = typeof reasoning.mandatory === "boolean" ? reasoning.mandatory : undefined;
+	const supportedEfforts = reasoning.supported_efforts;
+	const defaultLevel =
+		typeof reasoning.default_effort === "string"
+			? THINKING_EFFORTS.find(effort => effort === reasoning.default_effort)
+			: undefined;
+	if (Array.isArray(supportedEfforts)) {
+		const efforts = THINKING_EFFORTS.filter(effort => supportedEfforts.includes(effort));
+		if (efforts.length === 0) return undefined;
+		return {
+			mode: "effort",
+			efforts,
+			...(defaultLevel !== undefined && efforts.includes(defaultLevel) ? { defaultLevel } : {}),
+			...(requiresEffort !== undefined ? { requiresEffort } : {}),
+		};
+	}
+	if (requiresEffort === undefined && defaultLevel === undefined) return undefined;
+	const ladder = spec.thinking ?? resolveModelPolicy({ ...spec, reasoning: true, thinking: undefined }).thinking;
+	if (!ladder) return undefined;
+	return {
+		...ladder,
+		...(defaultLevel !== undefined && ladder.efforts.includes(defaultLevel) ? { defaultLevel } : {}),
+		...(requiresEffort !== undefined ? { requiresEffort } : {}),
+	};
+}
+
+function mapStraitlyModel(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+): ModelSpec<"openai-completions"> {
+	const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
+	const topProvider = isRecord(entry.top_provider) ? entry.top_provider : undefined;
+	const catalogMeta = isRecord(entry.catalog) ? entry.catalog : undefined;
+	const reasoningMeta = isRecord(entry.reasoning) ? entry.reasoning : undefined;
+	const params = Array.isArray(entry.supported_parameters)
+		? entry.supported_parameters.filter((item): item is string => typeof item === "string")
+		: undefined;
+	const input: ("text" | "image")[] = Array.isArray(architecture?.input_modalities)
+		? toInputCapabilities(architecture.input_modalities)
+		: catalogMeta?.vision === true
+			? ["text", "image"]
+			: ["text"];
+	const advertisesReasoning = params !== undefined && params.includes("reasoning");
+	const advertisesReasoningEffort = params !== undefined && params.includes("reasoning_effort");
+	const reasoning =
+		advertisesReasoning ||
+		advertisesReasoningEffort ||
+		reasoningMeta !== undefined ||
+		catalogMeta?.reasoning === true;
+	const thinking = mapStraitlyThinking(entry, defaults);
+	// An explicit empty/unknown `supported_efforts` list means "no dial": keep
+	// identity or KDL fallback from regrowing a guessed effort ladder.
+	const explicitNoDial = Array.isArray(reasoningMeta?.supported_efforts) && thinking === undefined;
+	const supportsTools = params !== undefined ? params.includes("tools") : undefined;
+	const supportsToolChoice = params !== undefined ? params.includes("tool_choice") : true;
+	// `supportsSamplingParams` and `supportsPenaltyAndStopParams` are coarse gates
+	// in `openai-completions.ts`: only leave each enabled when every field that
+	// gate can emit is advertised in `supported_parameters`.
+	const supportsSamplingParams =
+		params !== undefined
+			? params.includes("temperature") &&
+				params.includes("top_p") &&
+				params.includes("top_k") &&
+				params.includes("min_p")
+			: true;
+	const supportsPenaltyAndStopParams =
+		params !== undefined
+			? params.includes("presence_penalty") &&
+				params.includes("repetition_penalty") &&
+				params.includes("frequency_penalty") &&
+				params.includes("stop")
+			: true;
+	const compatPatch: OpenAICompat = {
+		...defaults.compat,
+		...(!supportsToolChoice && { supportsToolChoice: false }),
+		...(!supportsSamplingParams && { supportsSamplingParams: false }),
+		...(!supportsPenaltyAndStopParams && { supportsPenaltyAndStopParams: false }),
+		...(reasoning && params !== undefined && !advertisesReasoningEffort && { supportsReasoningEffort: false }),
+		...(explicitNoDial && { trustExplicitThinkingOnly: true }),
+		...(reasoningMeta?.mandatory === true && { reasoningDisableMode: "lowest-effort" }),
+		...(reasoningMeta?.default_enabled === false && {
+			whenThinking: { extraBody: { reasoning: { enabled: true } } },
+		}),
+	};
+	const hasCompatPatch = Object.keys(compatPatch).length > Object.keys(defaults.compat ?? {}).length;
+	return {
+		...defaults,
+		name: toModelName(entry.name, defaults.name),
+		reasoning,
+		...(thinking && { thinking }),
+		input,
+		cost: perTokenPricingCost(entry.pricing),
+		contextWindow: toPositiveNumber(entry.context_length, defaults.contextWindow),
+		maxTokens: toPositiveNumber(
+			topProvider?.max_completion_tokens,
+			toPositiveNumber(catalogMeta?.max_output_tokens, defaults.maxTokens),
+		),
+		...(supportsTools === false && { supportsTools: false }),
+		...(hasCompatPatch && { compat: compatPatch }),
+	};
+}
+
+/**
+ * Straitly model manager: `/v1/models` is public and returns the live catalog
+ * (context window, output cap, modalities, pricing, tool support, and reasoning
+ * metadata), so nothing is frozen into the bundled catalog.
+ */
+export function straitlyModelManagerOptions(config?: ModelManagerConfig): ModelManagerOptions<"openai-completions"> {
+	const baseUrl = normalizeStraitlyBaseUrl(config?.baseUrl);
+	return {
+		providerId: "straitly",
+		cacheProviderId: resolveModelCacheProviderId("straitly", { baseUrl }),
+		dynamicCostAuthoritative: true,
+		dynamicInputAuthoritative: true,
+		dynamicReasoningAuthoritative: true,
+		dynamicModelsAuthoritative: true,
+		fetchDynamicModels: () =>
+			fetchOpenAICompatibleModels({
+				api: "openai-completions",
+				provider: "straitly",
+				baseUrl,
+				apiKey: config?.apiKey,
+				filterModel: (entry, model) => {
+					const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
+					const input = architecture?.input_modalities;
+					if (Array.isArray(input) && input.length > 0 && !input.includes("text")) {
+						return false;
+					}
+					const output = architecture?.output_modalities;
+					if (Array.isArray(output) && output.length > 0 && !output.includes("text")) {
+						return false;
+					}
+					return !isExcludedModel("straitly", model.id);
+				},
+				mapModel: mapStraitlyModel,
+				fetch: config?.fetch,
+			}),
 	};
 }

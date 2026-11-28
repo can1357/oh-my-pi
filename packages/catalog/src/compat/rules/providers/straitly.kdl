@@ -1,0 +1,33 @@
+// Straitly OpenAI-compatible gateway deployment contract.
+//
+// Capability data is discovered live from `GET https://api.straitly.ai/v1/models`
+// via `straitlyModelManagerOptions` (context window, output cap, modalities,
+// pricing, tool support, and reasoning metadata). No `discovery` node is
+// declared so `generate-models.ts` does not freeze a static snapshot into
+// `models.json`, matching `compat-conformance.test.ts` runtime-only providers.
+//
+// Discovery runs only when `STRAITLY_API_KEY` or `/login straitly` is configured
+// (no `allow-unauthenticated`), avoiding unprompted network calls for users who
+// have not configured Straitly.
+provider "straitly" {
+	default-model "claude-sonnet-5-5"
+	env "STRAITLY_API_KEY"
+	dynamic-models-authoritative #true
+	skip-cross-provider-reference-fills #true
+
+	// System prompts ride the `system` role and `store` stays off, matching
+	// sibling OpenAI-compatible gateways. The wire accepts `max_tokens`,
+	// top-level `reasoning_effort` (`thinking-format "openai"`), and
+	// `reasoning: { enabled: false }` (`cline-enabled-false`) to disable
+	// thinking on default-on models (verified live 2026-11-27 on
+	// `claude-sonnet-5-5` and `deepseek/deepseek-v4-1-flash-1017`, where
+	// default returned `reasoning_content` / `reasoning_tokens: 16` and
+	// `reasoning: { enabled: false }` returned `reasoning_tokens: 0`).
+	// Rows that report `reasoning.mandatory: true` clamp thinking-off to their
+	// lowest effort instead (`lowest-effort`, set per row by discovery).
+	supports-developer-role #false
+	supports-store #false
+	max-tokens-field "max_tokens"
+	thinking-format "openai"
+	reasoning-disable-mode "cline-enabled-false"
+}
