@@ -220,13 +220,15 @@ export interface UserMessageStats {
  * message: the first assistant message descending from it through non-message
  * entries, whether the user message was parsed in this pass or an earlier one.
  * The aggregator applies the link to the persisted `user_messages` row so it
- * stops showing up in the "unknown" model bucket.
+ * stops showing up in the "unknown" model bucket. A null `model` and
+ * `provider` retract the link: the session discarded the reply, so the row
+ * awaits the retry's link, which the parser emits after the retraction.
  */
 export interface UserMessageLink {
 	sessionFile: string;
 	entryId: string;
-	model: string;
-	provider: string;
+	model: string | null;
+	provider: string | null;
 }
 
 /**

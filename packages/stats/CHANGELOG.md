@@ -13,6 +13,7 @@
 - Fixed `omp stats` dropping a session's cost when a `/tan` clone of it was synced first: the clone's copied requests, prompts, tool calls, approvals and Spotlight rows now count toward the original session, and stats databases that already credited them to the clone are repaired on the next sync ([#20805](https://github.com/can1357/oh-my-pi/pull/20805) by [@wapenshaw](https://github.com/wapenshaw))
 - Fixed forked requests disappearing from stats when a transcript was temporarily unreadable during reconciliation.
 - Fixed usage history failing entirely when one session file cannot be read (e.g. blocked by antivirus); unreadable transcripts are now skipped and logged ([#18566](https://github.com/can1357/oh-my-pi/issues/18566))
+- `omp stats` credits a prompt to the retry that answered it when the session discarded the failed reply; the first sync after upgrading re-reads every session once to repair stored credits ([#20889](https://github.com/can1357/oh-my-pi/pull/20889) by [@sjawhar](https://github.com/sjawhar))
 
 ## [19.1.1] - 2026-11-23
 

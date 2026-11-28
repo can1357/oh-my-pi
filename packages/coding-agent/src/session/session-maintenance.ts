@@ -3797,10 +3797,8 @@ export class SessionMaintenance {
 					const attempts = this.#incompleteRecoveryAttempts;
 					this.#incompleteRecoveryAttempts = 0;
 					const droppedEntryId = await this.#host.dropPersistedAssistantTurn(assistantMessage);
-					// Reparenting the live branch is insufficient when this terminal path
-					// appends no successor: on restart, the loader selects the last physical
-					// journal entry and revives the discarded length turn. Persist the branch
-					// marker/rewrite before blocking further continuation.
+					// This terminal path appends no successor. Record the new branch
+					// before blocking continuation so reload does not select the dropped turn.
 					if (droppedEntryId) await this.#host.sessionManager.discardEntryDurably(droppedEntryId);
 					const finalError = `Length-stop recovery gave up after ${attempts} consecutive \`length\` responses from ${assistantMessage.provider}/${assistantMessage.model} with no text or tool call. Try switching models or raising the model's max output tokens.`;
 					logger.warn("response.incomplete recovery cap reached; halting retries", {

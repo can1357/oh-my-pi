@@ -30,8 +30,9 @@ sharedAuthStorage.keys.setRuntime("mock", "test-key");
 const sharedModelRegistry = new ModelRegistry(sharedAuthStorage, path.join(sharedDir.path(), "models.yml"));
 
 afterAll(() => {
-	sharedAuthStorage.close();
-	sharedDir.removeSync();
+	using cleanup = new DisposableStack();
+	cleanup.defer(() => sharedDir.removeSync());
+	cleanup.defer(() => sharedAuthStorage.close());
 });
 
 const recordTool: AgentTool<typeof recordToolSchema, { value: string }> = {
@@ -195,13 +196,17 @@ async function expectPromptCompletes(prompt: Promise<boolean>): Promise<void> {
 	await withTimeout(prompt, 1_000, "Expected session prompt to settle after empty-stop retry cap");
 }
 
+// Every harness is disposed and its directory removed, also when another cleanup throws; mocks are restored last.
 afterEach(async () => {
+	await using cleanup = new AsyncDisposableStack();
+	cleanup.defer(() => {
+		vi.restoreAllMocks();
+	});
 	for (const harness of activeHarnesses.splice(0)) {
-		await harness.session.dispose();
-		harness.tempDir.removeSync();
+		cleanup.defer(() => harness.tempDir.removeSync());
+		cleanup.defer(() => harness.session.dispose());
 	}
-	vi.restoreAllMocks();
-});
+}, 30_000);
 
 describe("AgentSession empty stop guard", () => {
 	it("retries an empty assistant stop after a tool result", async () => {
@@ -224,19 +229,28 @@ describe("AgentSession empty stop guard", () => {
 			.filter(entry => entry.type === "message")
 			.map(entry => entry.message as AgentMessage);
 		expect(emptyAssistantStops(activeBranchMessages)).toHaveLength(0);
-		// A discarded empty stop is physically removed from the journal, not just
-		// reparented off the active branch: it must never be able to resurface as
-		// the active leaf on reload (the loader rebuilds from the last physical
-		// entry) if the process is killed before the recovery turn lands.
-		expect(
-			emptyAssistantStops(
-				session.sessionManager
-					.getEntries()
-					.filter(entry => entry.type === "message")
-					.map(entry => entry.message as AgentMessage),
-			),
-		).toHaveLength(0);
-	});
+		// A discarded empty stop stays in the journal off the active branch, and a
+		// branch marker appended after it selects its parent: the loader rebuilds
+		// the leaf from the last physical entry, so the stop cannot resurface as the
+		// active leaf on reload even if the process is killed before the recovery
+		// turn lands.
+		const journalMessages = session.sessionManager
+			.getEntries()
+			.filter(entry => entry.type === "message")
+			.map(entry => entry.message as AgentMessage);
+		expect(emptyAssistantStops(journalMessages)).toHaveLength(1);
+		const journal = session.sessionManager.getEntries();
+		const stopIndex = journal.findIndex(
+			entry => entry.type === "message" && emptyAssistantStops([entry.message as AgentMessage]).length === 1,
+		);
+		expect(stopIndex).toBeGreaterThanOrEqual(0);
+		expect(journal.slice(stopIndex + 1)).toContainEqual(
+			expect.objectContaining({
+				type: "branch_summary",
+				details: { kind: "discarded-entry-branch", discardedEntryId: journal[stopIndex]?.id },
+			}),
+		);
+	}, 15_000);
 
 	it("retries a tool-use stop that has no tool call or text", async () => {
 		const { session, mock } = await createHarness([
@@ -393,20 +407,21 @@ describe("AgentSession empty stop guard", () => {
 		expect(emptyAssistantStops(activeBranchMessages)).toHaveLength(0);
 
 		// The loader reconstructs the active branch from the last physical journal
-		// entry. The empty stop is removed from history and a marker durably
-		// selects its parent, so reload cannot reactivate the discarded turn.
+		// entry. Each empty stop stays in the journal off the branch, and a marker
+		// appended after it durably selects its parent, so reload cannot reactivate
+		// a discarded turn.
 		const journalMessages = session.sessionManager
 			.getEntries()
 			.filter(entry => entry.type === "message")
 			.map(entry => entry.message as AgentMessage);
-		expect(emptyAssistantStops(journalMessages)).toHaveLength(0);
+		expect(emptyAssistantStops(journalMessages)).toHaveLength(4);
 		const lastJournalEntry = session.sessionManager.getEntries().at(-1);
 		expect(lastJournalEntry).toMatchObject({
 			type: "branch_summary",
 			summary: "",
 			details: { kind: "discarded-entry-branch" },
 		});
-	});
+	}, 15_000);
 
 	it("does not revive capped empty responses through pending todo reminders", async () => {
 		const { session, mock } = await createHarness(
