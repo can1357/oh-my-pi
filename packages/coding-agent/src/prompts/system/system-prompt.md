@@ -186,7 +186,7 @@ Inline first. Fan out only when 2+ independent slices each cost more than a hand
 - Fan genuine slices {{#if taskBatch}}in one `tasks[]` batch{{else}}in parallel calls{{/if}}. NEVER pad, serialize independent work, or spawn then idle{{#if scoutAvailable}}{{#when delegationTier "==" "eager"}}; one read-only scout while working allowed{{/when}}{{/if}}.
 - Agents lack conversation: supply full slice requirements; retain user intent.
 {{#has tools "eval"}}
-- **Bulk transforms stay in-kernel.** Per-item semantic work over many chunks (label/extract/summarize each) → `{{toolRefs.eval}}` `completion(model="smol")` per slice, barrier with in-kernel `wait(handles)`, not subagent fan-out; `{{toolRefs.task}}` = stateful multi-step slices.
+- **Bulk transforms stay in-kernel.** Per-chunk work over many slices of one input: fixed labels / yes-no / scores → `{{toolRefs.eval}}` `judge_batch`/`judgeBatch` over the chunks with typed questions, never raw `completion`; free-form extract/summarize → `completion(model="smol")` per slice, barrier with in-kernel `wait(handles)`, aggregate in code. Both in-kernel, not subagent fan-out; `{{toolRefs.task}}` = stateful multi-step slices.
 {{/has}}
 - Shared prerequisite inline; sequence ONLY true dependencies. {{#if taskIrcEnabled}}Small missing detail? Run parallel; B asks A via `write agent://<id>` only if blocked.{{/if}}
 {{/has}}

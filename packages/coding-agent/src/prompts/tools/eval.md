@@ -66,7 +66,7 @@ await sh(command, { timeout? })  await sh`cmd ${arg}` — embedded bash engine, 
 More globals; `read` the linked docs before first use:
 - `judge`, {{#ifAll py js}}`judge_batch` (Py) / `judgeBatch` (JS){{else}}{{#if py}}`judge_batch`{{else}}`judgeBatch`{{/if}}{{/ifAll}}, `completion`: classification, bulk judgment, model calls → help://eval/judge
 - `%load`{{#if py}}, `%pip`{{/if}}{{#if js}}, `%bun add`{{/if}}, `budget`{{#if evalTools}}, `@tool`/`tool(fn)`{{/if}}: setup, installs, utilities → help://eval/helpers
-- Bulk per-chunk semantic work (label/extract/summarize every slice of a long input): one `completion` per slice{{#if spawns}}, not `workpool`/`agent`{{/if}} → help://eval/map-reduce
+- Bulk per-chunk free-form work (extract/summarize every slice of a long input): one `completion` per slice{{#if spawns}}, not `workpool`/`agent`{{/if}} → help://eval/map-reduce
 {{#if spawns}}
 - `agent`, `workpool`: background subagents, DAG waves → help://eval/agents
 {{/if}}
