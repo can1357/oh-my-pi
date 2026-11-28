@@ -111,6 +111,12 @@ export interface PresentedFrame {
 	readonly rows: number;
 }
 
+/** Options for replaying terminal scrollback from the current transcript. */
+export interface ReplayOptions {
+	/** Keep an inline dock that has already reached the bottom at the same terminal size. */
+	readonly preserveDock?: boolean;
+}
+
 export interface Host {
 	/**
 	 * Whether the terminal renders the surface itself (Tern), reactive: an
@@ -137,7 +143,7 @@ export interface Host {
 	 */
 	contentInHistory(node: UiNode): boolean;
 	/** Redraw terminal history from the current main region (its retired rows changed or went away). */
-	replayHistory(options?: { preserveDock?: boolean }): void;
+	replayHistory(options?: ReplayOptions): void;
 	/**
 	 * The settled main block holding `node` changed after it was final: a Tern terminal, which
 	 * dropped its description, gets it again (a plain terminal replays history instead).

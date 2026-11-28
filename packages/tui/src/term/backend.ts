@@ -38,6 +38,7 @@ import { KITTY_PLACEHOLDER } from "../driver/images/kitty";
 import { clipViewportImages, maskOverlayImages } from "../driver/images/viewport";
 import { bubbleEvent, bubbleKey, bubblePaste, keypathOf, pathTo } from "../dispatch";
 import type { KeyEvent } from "../events";
+import type { ReplayOptions } from "../host";
 import type { ScrollRequest, UiNode } from "../node";
 import {
 	type Accessor,
@@ -556,7 +557,7 @@ export class TermBackend {
 	}
 
 	/** Clear and replay the screen, optionally keeping the dock of the same transcript anchored. */
-	replayHistory(options?: { preserveDock?: boolean }): void {
+	replayHistory(options?: ReplayOptions): void {
 		const pin = this.#pin;
 		this.#driver.resetDisplay();
 		// resetDisplay invalidates this display synchronously; a fresh display starts without a pin.

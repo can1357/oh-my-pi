@@ -27,6 +27,7 @@ import {
 	onCleanup,
 	type Owner,
 	provide,
+	type ReplayOptions,
 	runWithOwner,
 	type Signal,
 	settle,
@@ -87,7 +88,7 @@ export interface TranscriptHost {
 	/** Whether the terminal acknowledged rows of `node`'s own content in scrollback, not only its separator. */
 	contentInHistory(node: UiNode): boolean;
 	/** Rebuild terminal scrollback from the current main region. */
-	replayHistory(options?: { preserveDock?: boolean }): void;
+	replayHistory(options?: ReplayOptions): void;
 	/** Describe again the settled block holding `node` (Tern dropped its description). */
 	redescribe(node: UiNode): void;
 }

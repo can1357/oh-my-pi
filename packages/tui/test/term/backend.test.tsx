@@ -236,15 +236,17 @@ describe("TermBackend main surface", () => {
 		backend.stop();
 	});
 
-	it("holds a bottom dock when a compacted transcript replaces committed history", () => {
+	it.each(["internal", "compaction"])("keeps the dock on the last row after replay (%s)", replay => {
 		const driver = new FakeDriver();
 		const compacted = signal(false);
 		const tail = signal(["summary"]);
 		const surface = createSurface(() => ({
 			main: () =>
-				compacted()
-					? <rows key="summary" lines={tail} />
-					: [<rows key="old" lines={lines("old", 7)} />, <rows key="live" lines={lines("live", 5)} />],
+				compacted() ? (
+					<rows key="summary" lines={tail} />
+				) : (
+					[<rows key="old" lines={lines("old", 7)} />, <rows key="live" lines={lines("live", 5)} />]
+				),
 			dock: <rows key="dock" lines={["dock"]} />,
 		}));
 		const backend = new TermBackend({ surface, driver, theme: () => PLAIN_THEME, separator: () => 0 });
@@ -256,9 +258,12 @@ describe("TermBackend main surface", () => {
 			expect(driver.viewport).toEqual([...lines("live", 5), "dock"]);
 
 			compacted.set(true);
-			// Rebuilding drops the retired block, then /compact requests its final replay.
-			backend.replayHistory({ preserveDock: true });
-			backend.replayHistory({ preserveDock: true });
+			// Removing a retired block triggers the backend's own replay on the next render.
+			if (replay === "compaction") {
+				// Both Transcript.retain and /compact request a replay of the same transcript.
+				backend.replayHistory({ preserveDock: true });
+				backend.replayHistory({ preserveDock: true });
+			}
 			backend.renderNow();
 			expect(driver.frames.at(-1)?.history?.kind).toBe("replay");
 			expect(driver.history).toEqual([]);
