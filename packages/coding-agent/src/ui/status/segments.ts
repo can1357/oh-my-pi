@@ -222,11 +222,17 @@ function modelSeg(input: SegInput): SegView {
 	if (!compact && thinking.length > 0) pieces.push({ icon: "sep.dot", s: look, space: "none" }, ...thinking);
 	const level = showLevel ? thinkingWord(facts) : undefined;
 	if (level !== undefined) spans.push(span(" · ", "dim"), span(level, thinkingToken(level)));
+	// A retry fallback serving in place of the configured model, as the agent hub's `fallback →`.
+	if (facts.servingFallback) {
+		pieces.push({ icon: "sep.dot", s: "warning", space: "none" }, { t: "fallback", s: "warning" });
+		spans.push(span(`${glyph(input, "sep.dot")}fallback`, "warning"));
+	}
 	if (facts.slowModeLabel) {
 		pieces.push({ icon: "sep.dot", s: "warning", space: "none" }, { t: facts.slowModeLabel, s: "warning" });
 		spans.push(span(`${glyph(input, "sep.dot")}${facts.slowModeLabel}`, "warning"));
 	}
-	return view(input, spans, pieces, "model", facts.slowModeLabel ? "warning" : undefined);
+	const warn = facts.slowModeLabel || facts.servingFallback;
+	return view(input, spans, pieces, "model", warn ? "warning" : undefined);
 }
 
 /** Theme token of a thinking level's color. */

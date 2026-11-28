@@ -92,6 +92,8 @@ export interface StatusFacts {
 	readonly autoResolvedLevel?: string;
 	/** The fast tier the active model can serve at, if any. */
 	readonly fastTier?: FastServiceTier;
+	/** A retry fallback, not the configured model, serves the session as the displayed model. */
+	readonly servingFallback?: boolean;
 	/** Anthropic usage-limit stage label (wrap-up allowance, low priority). */
 	readonly slowModeLabel?: string;
 	readonly advisor?: StatusAdvisor;
