@@ -63,6 +63,10 @@
 
 - Panes in a background Tern tab no longer log frame-acknowledgment stall warnings.
 
+### Fixed
+
+- A theme name with a path separator, such as `../name`, no longer loads a theme file from outside the themes directory; it falls back as an unknown theme does ([#20407](https://github.com/can1357/oh-my-pi/pull/20407) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [19.2.0] - 2026-11-25
 
 ### Added

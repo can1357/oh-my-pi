@@ -99,6 +99,12 @@ describe("custom themes", () => {
 		await expect(loadTheme("__nope__")).rejects.toThrow("Theme not found: __nope__");
 	});
 
+	it("does not load a file outside the themes directory through a path-like name", async () => {
+		await Bun.write(path.join(getCustomThemesDir(), "..", "escape.json"), JSON.stringify(darkJson()));
+		await expect(loadTheme("../escape")).rejects.toThrow("Theme not found: ../escape");
+		expect(() => loadThemeSync("../escape")).toThrow("Theme not found: ../escape");
+	});
+
 	it("names every missing required color", async () => {
 		const json = darkJson();
 		delete json.colors.accent;
