@@ -238,7 +238,13 @@ pub(super) fn compile(text: &str, extended: bool, case_sensitive: bool) -> Resul
 	let pattern = if extended {
 		Some(text)
 	} else {
-		translated = bre::bre_to_ere(text, bre::Backrefs::Unsupported, bre::StackedRepeats::Allowed).ok();
+		translated = bre::bre_to_ere(
+			text,
+			bre::Backrefs::Unsupported,
+			bre::StackedRepeats::Allowed,
+			bre::Haystack::Lines,
+		)
+		.ok();
 		translated.as_deref()
 	};
 	pattern

@@ -214,8 +214,13 @@ impl Style {
 			Some(b't') => Ok(Self::NonEmpty),
 			Some(b'n') => Ok(Self::None),
 			Some(b'p') => {
-				let ere = bre::bre_to_ere(&spec[1..], bre::Backrefs::Supported, bre::StackedRepeats::Allowed)
-					.map_err(|error| Invalid::Fatal(error.message().to_owned()))?;
+				let ere = bre::bre_to_ere(
+					&spec[1..],
+					bre::Backrefs::Supported,
+					bre::StackedRepeats::Allowed,
+					bre::Haystack::Lines,
+				)
+				.map_err(|error| Invalid::Fatal(error.message().to_owned()))?;
 				Regex::new(&ere)
 					.map(Self::Matching)
 					.map_err(|error| Invalid::Fatal(error.to_string()))
