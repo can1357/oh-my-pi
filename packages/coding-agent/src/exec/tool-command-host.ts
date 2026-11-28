@@ -1,7 +1,9 @@
 import type { AgentToolContext, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { toolWireSchema } from "@oh-my-pi/pi-ai";
 import type { ShellCommandRequest, ShellCommandResult } from "@oh-my-pi/pi-natives";
+import * as fs from "node:fs/promises";
 import type { Tool, ToolSession } from "../tools";
+import { InternalUrlRouter } from "../internal-urls";
 import { specialToolCommands } from "../tools/resolve";
 import {
 	dispatchToolCommand,
@@ -42,6 +44,60 @@ function specialCommandState(state: ToolCommandState, special: Tool): ToolComman
 function appendLine(output: string, text: string): string {
 	if (!text) return output;
 	return output + text + (text.endsWith("\n") ? "" : "\n");
+}
+
+/**
+ * Whether the shell's working directory at invocation differs from the session's
+ * (same directory under different names counts as equal, so symlinked or
+ * macOS-style `/tmp` aliases do not trigger a refusal). URL cwds are skipped:
+ * they are not host paths a tool's relative arguments could silently fall back to.
+ */
+async function shellCwdMismatch(shellCwd: string, sessionCwd: string): Promise<boolean> {
+	const router = InternalUrlRouter.instance();
+	if (router.canHandle(shellCwd) || router.canHandle(sessionCwd)) return false;
+	const realpath = (directory: string): Promise<string> => fs.realpath(directory).catch(() => directory);
+	const [shell, session] = await Promise.all([realpath(shellCwd), realpath(sessionCwd)]);
+	return shell !== session;
+}
+
+/**
+ * Whether an argv token can resolve against a working directory. Flags and
+ * bare values never carry path syntax; only path-shaped tokens matter.
+ */
+function tokenMayResolveAgainstCwd(token: string): boolean {
+	if (token === "-") return false;
+	if (token.startsWith("@")) {
+		const target = token.slice(1);
+		return target !== "" && !target.startsWith("/") && !target.includes("://");
+	}
+	if (token.startsWith("-")) {
+		const eq = token.indexOf("=");
+		return eq !== -1 && tokenMayResolveAgainstCwd(token.slice(eq + 1));
+	}
+	if (token.startsWith("/") || token.includes("://")) return false;
+	return token.includes("/") || token === "." || token === "..";
+}
+
+/**
+ * Whether an invocation's arguments are independent of the working directory:
+ * no token carries path syntax that could resolve against the session root.
+ * Absolute paths, flags, bare values and URLs pass; relative paths, and `@`
+ * argument sources with relative paths, do not.
+ */
+function argvIsCwdIndependent(argv: readonly string[]): boolean {
+	return argv.every(token => !tokenMayResolveAgainstCwd(token));
+}
+
+/** Refusal for a tool command invoked after `cd`, which would otherwise resolve against the session root. */
+function cwdMismatchResult(name: string, shellCwd: string, sessionCwd: string): ShellCommandResult {
+	return {
+		stdout: "",
+		stderr:
+			`${name}: refusing to run: the shell working directory is \`${shellCwd}\`, but the session working directory is \`${sessionCwd}\`. ` +
+			`Relative tool arguments would resolve against the session root, not the shell's directory. ` +
+			`Use absolute paths, or run the command from the session root (cd back first).\n`,
+		exitCode: 2,
+	};
 }
 
 /** Shell view of a tool result: text to stdout (stderr with exit 1 on error), images as terminal graphics on stdout. */
@@ -98,6 +154,17 @@ export function createToolCommandHandler(options: {
 			return { stdout: "", stderr: `${name}: command is no longer available\n`, exitCode: 1 };
 		}
 		const dispatchState = special ? specialCommandState(state, special) : state;
+
+		// A tool command after `cd` must never silently resolve relative
+		// arguments against the session root (issue #20271). `--help` and
+		// invocations whose argv carries no relative path syntax are
+		// cwd-independent and stay answerable.
+		const isHelpOnly = request.argv.length === 1 && (request.argv[0] === "-h" || request.argv[0] === "--help");
+		if (!isHelpOnly && !argvIsCwdIndependent(request.argv) && (await shellCwdMismatch(request.cwd, session.cwd))) {
+			const refused = cwdMismatchResult(name, request.cwd, session.cwd);
+			onDispatch?.({ ...fallback, exitCode: refused.exitCode }, index);
+			return refused;
+		}
 
 		let dispatch: ToolCommandDispatch | undefined;
 		const host: ToolCliHost = {

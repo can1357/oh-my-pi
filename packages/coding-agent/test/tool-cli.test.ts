@@ -82,6 +82,20 @@ describe("schema-derived tool command argument binding", () => {
 		});
 	});
 
+	it("fills a repeatable array flag from space-separated words until the next flag", async () => {
+		expect(await parse(["safe", "--tags", "one", "two", "one", "--settings.label=fixture"])).toEqual({
+			mode: "safe",
+			tags: ["one", "two", "one"],
+			settings: { label: "fixture" },
+		});
+		expect(await parse(["safe", "--tags", "one", "--count", "2", "--settings.label=fixture"])).toEqual({
+			mode: "safe",
+			tags: ["one"],
+			count: 2,
+			settings: { label: "fixture" },
+		});
+	});
+
 	it("rejects malformed scalars and enum members", async () => {
 		await expect(parse(["bogus"])).rejects.toBeInstanceOf(ToolCliUsageError);
 		await expect(parse(["--count", "1.5"])).rejects.toBeInstanceOf(ToolCliUsageError);
