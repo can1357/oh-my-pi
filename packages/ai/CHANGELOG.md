@@ -27,6 +27,7 @@
 - Removed the `SPEECH_FORMATS` value export; import it from `@oh-my-pi/pi-catalog/types`. The `SpeechFormat` type is still exported ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
+- Fixed `400 string_above_max_length` on OpenAI-compatible endpoints after switching models mid-session: tool-call IDs from the other model that are longer than 64 characters are now shortened on replay ([#15056](https://github.com/can1357/oh-my-pi/issues/15056), [#19940](https://github.com/can1357/oh-my-pi/pull/19940) by [@JamieJ5926](https://github.com/JamieJ5926))
 
 - Fixed startup failing with `no such column: salt` when `agent.db` records auth schema v9 but its credentials table has no `salt` column
 - An OpenAI Responses request retried after an empty completion keeps the provider session it started with, so a session the host retired mid-request (a model switch) is not recreated for the next model ([#20858](https://github.com/can1357/oh-my-pi/pull/20858) by [@JustasMasiulis](https://github.com/JustasMasiulis))

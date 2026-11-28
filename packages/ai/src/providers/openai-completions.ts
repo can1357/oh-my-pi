@@ -141,7 +141,7 @@ import {
 	shouldRetryWithoutStrictTools,
 	withOpenAIPromptCacheBreakpoint,
 } from "./openai-shared";
-import { completionsSendsOwnThinking, transformMessages } from "./transform-messages";
+import { completionsSendsOwnThinking, MAX_TOOL_CALL_ID_LENGTH, transformMessages } from "./transform-messages";
 import {
 	isOpenAICompletionsVisionSupported,
 	joinTextWithImagePlaceholder,
@@ -2683,6 +2683,12 @@ export function convertMessages(
 
 		if (compat.usesOpenAIToolCallIdLimit)
 			return id.length > OPENAI_TOOL_CALL_ID_MAX_LENGTH ? id.slice(0, OPENAI_TOOL_CALL_ID_MAX_LENGTH) : id;
+		// A foreign gateway id (LiteLLM Vertex signatures run past 1000 characters) must fit the 64-character
+		// limit OpenAI-compatible endpoints enforce. Hashing keeps ids that share a long prefix distinct.
+		if (!isSameModelSource && id.length > MAX_TOOL_CALL_ID_LENGTH) {
+			const hash = Bun.hash(id).toString(36);
+			return `${id.slice(0, MAX_TOOL_CALL_ID_LENGTH - hash.length - 1)}_${hash}`;
+		}
 		return id;
 	};
 	const transformedMessages = transformMessages(
