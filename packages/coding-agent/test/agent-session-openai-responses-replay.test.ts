@@ -10,6 +10,7 @@ import type {
 	ToolResultMessage,
 	Usage,
 } from "@oh-my-pi/pi-ai/types";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { createOpenAIResponsesHistoryPayload } from "@oh-my-pi/pi-ai/utils";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -19,6 +20,7 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { SessionEntry, SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { VIBE_MODE_CONTEXT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/transcript/messages";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { getTestModel } from "./helpers/model-fixtures";
 
@@ -42,6 +44,19 @@ function createUsage(): Usage {
 		cacheWrite: 0,
 		totalTokens: 2,
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
+}
+
+function createReply(model: Model): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [{ type: "text", text: `Reply from ${model.id}` }],
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		usage: createUsage(),
+		stopReason: "stop",
+		timestamp: Date.now(),
 	};
 }
 
@@ -319,6 +334,128 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 				removeSyncWithRetries(tempDir);
 			}
 		}
+	});
+
+	it("retires provider sessions at a model switch but closes them only after the streaming run ends", async () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-model-switch-stream-${Snowflake.next()}-`));
+		tempDirs.push(tempDir);
+		const { session } = await createSessionHarness(tempDir, SessionManager.inMemory());
+		sessions.push(session);
+
+		const stateKey = `openai-responses:${openaiModel.provider}`;
+		const retired = { close: vi.fn() } satisfies ProviderSessionState;
+		const opened = { close: vi.fn() } satisfies ProviderSessionState;
+		session.providerSessionState.set(stateKey, retired);
+		const firstStream = new AssistantMessageEventStream();
+		const started = Promise.withResolvers<void>();
+		const dispatches: Array<{ model: string; state: ProviderSessionState | undefined }> = [];
+		session.agent.streamFn = (model, _context, options) => {
+			dispatches.push({ model: model.id, state: options?.providerSessionState?.get(stateKey) });
+			if (dispatches.length === 1) {
+				started.resolve();
+				return firstStream;
+			}
+			const stream = new AssistantMessageEventStream();
+			stream.push({ type: "done", reason: "stop", message: createReply(model) });
+			return stream;
+		};
+
+		const run = session.agent.prompt("First request");
+		try {
+			await started.promise;
+			await session.setModel(alternateOpenaiModel);
+			// A side request (`/btw`) on the new model opens its own session before the first response ends.
+			session.providerSessionState.set(stateKey, opened);
+			session.agent.followUp({ role: "user", content: "Follow-up request", timestamp: Date.now() });
+			expect(retired.close).not.toHaveBeenCalled();
+		} finally {
+			firstStream.push({ type: "done", reason: "stop", message: createReply(openaiModel) });
+			await run;
+		}
+
+		expect(dispatches.map(dispatch => dispatch.model)).toEqual([openaiModel.id, alternateOpenaiModel.id]);
+		expect(dispatches[1]?.state).toBe(opened);
+		expect(retired.close).toHaveBeenCalledTimes(1);
+		expect(opened.close).not.toHaveBeenCalled();
+	});
+
+	it("keeps a switch's retired sessions open when a later reset closes provider sessions mid-run", async () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-model-switch-scoped-${Snowflake.next()}-`));
+		tempDirs.push(tempDir);
+		const { session } = await createSessionHarness(tempDir, SessionManager.inMemory());
+		sessions.push(session);
+
+		const retired = { close: vi.fn() } satisfies ProviderSessionState;
+		session.providerSessionState.set(`openai-responses:${openaiModel.provider}`, retired);
+		// Exiting vibe mode rewrites history, which closes the current Codex session at once.
+		session.agent.replaceMessages([
+			{
+				role: "custom",
+				customType: VIBE_MODE_CONTEXT_MESSAGE_TYPE,
+				content: "Vibe mode directive",
+				display: false,
+				timestamp: Date.now(),
+			},
+		]);
+		const firstStream = new AssistantMessageEventStream();
+		const started = Promise.withResolvers<void>();
+		session.agent.streamFn = () => {
+			started.resolve();
+			return firstStream;
+		};
+
+		const run = session.agent.prompt("First request");
+		try {
+			await started.promise;
+			await session.setModel(codexModel);
+			const codexState = { close: vi.fn() } satisfies ProviderSessionState;
+			session.providerSessionState.set("openai-codex-responses", codexState);
+			session.setVibeModeState(undefined);
+			expect(codexState.close).toHaveBeenCalledTimes(1);
+			// The first response still streams over the session the switch retired.
+			expect(retired.close).not.toHaveBeenCalled();
+		} finally {
+			firstStream.push({ type: "done", reason: "stop", message: createReply(openaiModel) });
+			await run;
+		}
+
+		expect(retired.close).toHaveBeenCalledTimes(1);
+	});
+
+	it("closes provider sessions a model switch retired when the session is disposed before its run settles", async () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-model-switch-dispose-${Snowflake.next()}-`));
+		tempDirs.push(tempDir);
+		const { session } = await createSessionHarness(tempDir, SessionManager.inMemory());
+		sessions.push(session);
+
+		const retired = { close: vi.fn() } satisfies ProviderSessionState;
+		session.providerSessionState.set(`openai-responses:${openaiModel.provider}`, retired);
+		const firstStream = new AssistantMessageEventStream();
+		const started = Promise.withResolvers<void>();
+		session.agent.streamFn = () => {
+			started.resolve();
+			return firstStream;
+		};
+		// A step that ignores abort (an extension hook, a stuck tool) keeps the run from ever settling.
+		const stalled = Promise.withResolvers<void>();
+		let stall = false;
+		session.agent.addBeforeModelCallHook(() => {
+			if (!stall) return;
+			stalled.resolve();
+			return new Promise<void>(() => {});
+		});
+
+		void session.agent.prompt("First request");
+		await started.promise;
+		await session.setModel(alternateOpenaiModel);
+		stall = true;
+		session.agent.followUp({ role: "user", content: "Follow-up request", timestamp: Date.now() });
+		firstStream.push({ type: "done", reason: "stop", message: createReply(openaiModel) });
+		await stalled.promise;
+
+		await session.dispose({ drainTimeoutMs: 10 });
+
+		expect(retired.close).toHaveBeenCalledTimes(1);
 	});
 
 	it("sanitizes stale assistant replay metadata during startup resume while preserving user payloads", async () => {

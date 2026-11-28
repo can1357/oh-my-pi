@@ -1570,6 +1570,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#yieldTerminationPending = false;
 	#synchronouslyTerminatedYieldToolCallIds = new Set<string>();
 	#providerSessionState = new Map<string, ProviderSessionState>();
+	/** Sessions a model switch took out of `#providerSessionState` and has not closed yet, with their keys. */
+	#retiredProviderSessions = new Map<ProviderSessionState, string>();
 	readonly #cacheWarmer: CacheWarmer | undefined;
 	/** Transcript the warmer was last armed for: its confirmed entry describes no other transcript. */
 	#promptCacheArmSessionId: string | undefined;
@@ -7529,6 +7531,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	#closeAllProviderSessions(reason: string): void {
+		this.#closeRetiredProviderSessions();
 		for (const [providerKey, state] of this.#providerSessionState) {
 			try {
 				state.close();
@@ -14017,7 +14020,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const currentModel = this.model;
 		const isChanging = !routedModelsAreEqual(currentModel, model);
 		if (currentModel) {
-			this.#closeProviderSessionsForModelSwitch(currentModel, model);
+			// Requests from here on open fresh provider sessions. A response still streaming over the
+			// retired ones keeps them until its run ends — the whole run, tool turns included, so an
+			// idle Codex WebSocket stays connected that long.
+			this.#closeProviderSessionsForModelSwitch(currentModel, model, this.agent.waitForIdle());
 			if (isChanging) {
 				this.#clearInheritedProviderPromptCacheKey();
 			}
@@ -14125,7 +14131,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 	}
 
-	#closeProviderSessionsForModelSwitch(currentModel: Model, nextModel: Model): void {
+	/**
+	 * Moves the provider sessions a switch from `currentModel` to `nextModel` invalidates out of
+	 * `#providerSessionState`, so later requests open fresh ones, and closes those sessions once
+	 * `closeAfter` settles (at once without it). Sessions an earlier switch retired keep their own
+	 * deadline; `#closeAllProviderSessions` closes whatever is still retired.
+	 */
+	#closeProviderSessionsForModelSwitch(currentModel: Model, nextModel: Model, closeAfter?: Promise<void>): void {
 		const providerKeys = new Set<string>();
 		if (currentModel.api === "openai-codex-responses" || nextModel.api === "openai-codex-responses") {
 			providerKeys.add("openai-codex-responses");
@@ -14152,10 +14164,37 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 		}
 
+		const retired: ProviderSessionState[] = [];
 		for (const providerKey of providerKeys) {
 			const state = this.#providerSessionState.get(providerKey);
 			if (!state) continue;
+			retired.push(state);
+			this.#retiredProviderSessions.set(state, providerKey);
+			this.#providerSessionState.delete(providerKey);
+		}
 
+		if (completionsPrefixToEvict !== undefined) {
+			for (const [key, state] of this.#providerSessionState) {
+				if (!key.startsWith(completionsPrefixToEvict)) continue;
+				retired.push(state);
+				this.#retiredProviderSessions.set(state, key);
+				this.#providerSessionState.delete(key);
+			}
+		}
+
+		if (retired.length === 0) return;
+		if (closeAfter) void closeAfter.then(() => this.#closeRetiredProviderSessions(retired));
+		else this.#closeRetiredProviderSessions(retired);
+	}
+
+	/** Closes `states` (every retired session by default) that are still open, once each. */
+	#closeRetiredProviderSessions(
+		states: Iterable<ProviderSessionState> = [...this.#retiredProviderSessions.keys()],
+	): void {
+		for (const state of states) {
+			const providerKey = this.#retiredProviderSessions.get(state);
+			if (providerKey === undefined) continue;
+			this.#retiredProviderSessions.delete(state);
 			try {
 				state.close();
 			} catch (error) {
@@ -14163,23 +14202,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					providerKey,
 					error: String(error),
 				});
-			}
-
-			this.#providerSessionState.delete(providerKey);
-		}
-
-		if (completionsPrefixToEvict !== undefined) {
-			for (const [key, state] of this.#providerSessionState) {
-				if (!key.startsWith(completionsPrefixToEvict)) continue;
-				try {
-					state.close();
-				} catch (error) {
-					logger.warn("Failed to close provider session state during model switch", {
-						providerKey: key,
-						error: String(error),
-					});
-				}
-				this.#providerSessionState.delete(key);
 			}
 		}
 	}
