@@ -45,6 +45,6 @@ export function resolveFirecrawlUrl(endpoint: "/search" | "/scrape"): string {
 	return url.toString();
 }
 
-export function findFirecrawlApiKey(storage: AgentStorageApi | null | undefined): string | null {
+export function findFirecrawlApiKey(storage: AgentStorageApi | null | undefined): Promise<string | null> {
 	return findCredential(storage, getEnvApiKey("firecrawl"), "firecrawl");
 }

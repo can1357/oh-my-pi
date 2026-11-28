@@ -55,6 +55,7 @@ mod iconv;
 mod ids;
 mod log;
 mod matcher;
+mod md4;
 mod meta;
 mod mux;
 mod operands;

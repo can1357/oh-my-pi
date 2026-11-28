@@ -19,7 +19,7 @@ afterAll(() => {
 
 describe("Parallel web search", () => {
 	const fakeStorage = {
-		listAuthCredentials: () => [
+		listAuthCredentials: async () => [
 			{
 				id: 1,
 				credential: {
@@ -30,10 +30,6 @@ describe("Parallel web search", () => {
 				},
 			},
 		],
-		updateAuthCredential: () => undefined,
-		get authStore() {
-			return null as never;
-		},
 	} as unknown as AgentStorage;
 	const fakeAuthStorage = {
 		keys: {

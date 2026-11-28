@@ -121,12 +121,16 @@ export interface MemoryBackend {
 	 * Markdown injected as the system-prompt append section.
 	 * Returned on every prompt rebuild via `refreshBaseSystemPrompt()`.
 	 * `cwd` is the session's project directory and selects project-scoped memory.
+	 * `taskDepth` is the session's task recursion depth (0 or absent for a top-level
+	 * session). The first rebuild runs before `start`, so a backend whose instructions
+	 * differ for a subagent reads it here, not from its own session state.
 	 */
 	buildDeveloperInstructions(
 		agentDir: string,
 		cwd: string,
 		settings: Settings,
 		session?: AgentSession,
+		taskDepth?: number,
 	): Promise<string | undefined>;
 
 	/** Wipe all persisted state for this backend (slash `/memory clear`). */

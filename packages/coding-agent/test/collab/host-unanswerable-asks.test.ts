@@ -162,12 +162,14 @@ it("ignores an answer from a writer the ask was never delivered to", async () =>
 	// the second `ui-request` addressed is the outsider's.
 	const real = CollabSocket.prototype.send;
 	let uiRequests = 0;
-	const spy = spyOn(CollabSocket.prototype, "send").mockImplementation(
-		function (this: CollabSocket, frame, targetPeer) {
-			if (typeof frame === "object" && frame.t === "ui-request" && ++uiRequests === 2) return false;
-			return real.call(this, frame, targetPeer);
-		},
-	);
+	const spy = spyOn(CollabSocket.prototype, "send").mockImplementation(function (
+		this: CollabSocket,
+		frame,
+		targetPeer,
+	) {
+		if (typeof frame === "object" && frame.t === "ui-request" && ++uiRequests === 2) return false;
+		return real.call(this, frame, targetPeer);
+	});
 	cleanups.push(() => spy.mockRestore());
 
 	const ask = host.requestGuestUi({ kind: "select", title: "pick one", options: [{ label: "a" }, { label: "b" }] });

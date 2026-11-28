@@ -60,6 +60,7 @@ const compat: ResolvedOpenAICompat = {
 	isVercelGatewayHost: false,
 	wireModelIdMode: "raw",
 	stripDeepseekSpecialTokens: false,
+	neutralizeDeepseekSpecialTokens: false,
 	reasoningDeltasMayBeCumulative: false,
 	emptyLengthFinishIsContextError: false,
 	usesOpenAIToolCallIdLimit: false,

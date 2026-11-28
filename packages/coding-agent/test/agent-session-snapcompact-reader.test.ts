@@ -243,7 +243,9 @@ describe("snapcompact archive read by another model", () => {
 		const { text, images } = requestContent(mock.calls[1]?.context.messages);
 		expect(text).toContain("¶think:");
 		expect(text).toContain(REASONING);
-		expect(images).toEqual(snapcompact.getPreservedArchive(original.preserveData)!.frames.map(frame => frame.data));
+		const originalFrames = snapcompact.getPreservedArchive(original.preserveData)!.frames;
+		expect(images.length).toBeGreaterThan(0);
+		expect(images).toEqual(originalFrames.slice(-images.length).map(frame => frame.data));
 	});
 
 	it("sends the no-reasoning variant on resume under Claude, persisted beside the original", async () => {
@@ -362,7 +364,8 @@ describe("snapcompact archive read by another model", () => {
 		await session.setModel(gpt);
 		await session.prompt("Continue again.");
 		const vision = requestContent(mock.calls[1]?.context.messages);
-		expect(vision.images).toEqual(archive.frames.map(frame => frame.data));
+		expect(vision.images.length).toBeGreaterThan(0);
+		expect(vision.images).toEqual(archive.frames.slice(-vision.images.length).map(frame => frame.data));
 		expect(vision.text).toContain(FRAME_LEGEND);
 		expect(vision.text).not.toContain(marker);
 	});

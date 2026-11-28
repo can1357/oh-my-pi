@@ -22,7 +22,7 @@ const STATUS: Record<TspAgentProps["status"], { readonly symbol: string; readonl
 };
 
 function glyph(props: TspAgentProps, cx: PaintContext): string {
-	if (props.status === "running" && !cx.reduceMotion) return cx.theme.fg("accent", spinnerFrame(cx));
+	if (props.status === "running" && cx.spinnerInterval > 0) return cx.theme.fg("accent", spinnerFrame(cx));
 	const look = STATUS[props.status] ?? STATUS.pending;
 	return cx.theme.fg(look.color, cx.theme.symbols.symbol(look.symbol));
 }

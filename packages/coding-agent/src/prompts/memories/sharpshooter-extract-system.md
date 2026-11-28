@@ -5,7 +5,6 @@ Call the `record_deltas` tool exactly once with every decision delta you can def
 ## What qualifies as a delta
 
 A delta is a decision the HUMAN made or explicitly accepted, about this project:
-
 - `architecture_decision` — runtime/component boundaries, chosen abstractions, protocol or storage direction, explicit "X over Y".
 - `product_decision` — behavior, UX, defaults, naming/terminology, scope (what is in or out of the product).
 - `style_decision` — visual/aesthetic language, presentation conventions, prose/voice rules for project-facing text.
@@ -22,7 +21,6 @@ Short reply turns are decisions too: "opt 2", "go for it", "split + airgap", "no
 ## Friction tags
 
 Tag each delta honestly; consolidation admits decisions by friction, not existence:
-
 - `corrective: true` — the user is re-stating or correcting something previously settled.
 - `regression: true` — the user reports previously-working behavior broke, drifted, or "regressed".
 - `subtle: true` — a non-obvious invariant a fresh agent would plausibly get wrong from the code alone (cross-component expectations, "A is distinct from B" distinctions, intent the code does not self-describe).

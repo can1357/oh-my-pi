@@ -12,7 +12,7 @@
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import { type Block, defineRolePainter, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { imageRows } from "@oh-my-pi/pi-tui/term/painters/image";
-import { SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-tui/term/painters/spinner";
+import { spinnerIndex } from "@oh-my-pi/pi-tui/term/painters/spinner";
 import { highlightCode } from "@oh-my-pi/pi-tui/text/highlight";
 import { truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
@@ -84,7 +84,7 @@ function paintExecRun(node: UiNode, cx: PaintContext): Block {
 	let label: string | undefined;
 	if (running) {
 		const frames = theme.symbols.spinnerFrames;
-		const frame = cx.reduceMotion ? frames[0]! : frames[Math.floor(cx.now() / SPINNER_INTERVAL_MS) % frames.length]!;
+		const frame = frames[spinnerIndex(cx, frames.length)]!;
 		const interrupt = keyLabel(theme, appInterruptKeys()[0] ?? "escape");
 		label = `${theme.fg(color, frame)} ${theme.fg("muted", `Running… (${interrupt} to cancel)`)}`;
 	} else if (props.status === "cancelled") label = theme.fg("warning", "cancelled");

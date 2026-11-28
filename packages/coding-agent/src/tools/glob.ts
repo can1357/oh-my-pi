@@ -38,7 +38,7 @@ const findSchema = type({
 	"path?": "string",
 	"hidden?": "boolean",
 	"gitignore?": "boolean",
-	"limit?": "1 <= number.integer <= 200",
+	"limit?": "number.integer >= 1",
 });
 
 export type GlobToolInput = typeof findSchema.infer;
@@ -47,7 +47,7 @@ export type GlobToolInput = typeof findSchema.infer;
 const GLOB_ARGUMENTS: ReadonlySet<string> = new Set(["path", "hidden", "gitignore", "limit", "pattern"]);
 
 const DEFAULT_LIMIT = 200;
-/** The schema's `limit` bound. */
+/** Most paths one call returns; a larger `limit` is clamped to it. */
 const MAX_LIMIT = 200;
 const DEFAULT_GLOB_TIMEOUT_MS = 5000;
 
@@ -301,7 +301,9 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 
 			assertNotFilesystemRoot(targets.map(target => target.searchPath));
 
-			const effectiveLimit = limit ?? DEFAULT_LIMIT;
+			const effectiveLimit = Math.min(limit ?? DEFAULT_LIMIT, MAX_LIMIT);
+			// Reported with the reached-limit notice so a caller that asked for more learns why a larger limit cannot help (#13263).
+			const clampedFrom = limit !== undefined && limit > MAX_LIMIT ? limit : undefined;
 			const includeHidden = hidden ?? true;
 			const useGitignore = gitignore ?? true;
 			const timeoutMs = this.#timeoutMs;
@@ -368,7 +370,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 
 				// Cap the doubled suggestion at MAX_LIMIT; once the reached count
 				// is already the cap there is no larger usable limit, so suppress
-				// the advice rather than recommend a value the schema rejects (#13263).
+				// the advice rather than recommend a value that clamps back (#13263).
 				const reachedLimit = limitMeta.resultLimit;
 				const cappedSuggestion =
 					reachedLimit === undefined ? undefined : Math.min(reachedLimit.reached * 2, MAX_LIMIT);
@@ -377,7 +379,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 						? undefined
 						: cappedSuggestion !== undefined && cappedSuggestion > reachedLimit.reached
 							? { reached: reachedLimit.reached, suggestion: cappedSuggestion }
-							: { reached: reachedLimit.reached, suggestion: null };
+							: { reached: reachedLimit.reached, suggestion: null, requested: clampedFrom };
 				const resultBuilder = toolResult(details)
 					.text(truncation.content)
 					.limits({ resultLimit: resultLimitInput });

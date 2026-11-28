@@ -136,30 +136,31 @@ fn build(source: &impl VizSource, unit: &SourceUnit<'_>, depth: usize) -> Source
 }
 /// Every byte boundary is represented; interior UTF-8 bytes retain the scalar's
 /// origin.
-pub(super) fn utf16_map(bytes: &[u8]) -> Vec<u32> {
-	let mut map = vec![0; bytes.len() + 1];
-	let mut i = 0;
+pub(super) fn utf16_map(mut bytes: &[u8]) -> Vec<u32> {
+	let mut map = Vec::with_capacity(bytes.len() + 1);
 	let mut count = 0;
-	while i < bytes.len() {
-		let width = match bytes[i] {
-			0..=0x7f => 1,
-			0xc2..=0xdf => 2,
-			0xe0..=0xef => 3,
-			0xf0..=0xf4 => 4,
-			_ => 1,
+	while !bytes.is_empty() {
+		let (valid, bad, rest) = match xutf::decode(bytes) {
+			Ok(text) => (text, 0, &[][..]),
+			Err(xutf::DecodeError::Invalid { valid_prefix, invalid_sequence, remaining_input }) => {
+				(valid_prefix, invalid_sequence.len(), remaining_input)
+			},
+			Err(xutf::DecodeError::Incomplete { valid_prefix, incomplete_suffix }) => {
+				(valid_prefix, usize::from(incomplete_suffix.buffer_len), &[][..])
+			},
 		};
-		let width = if i + width <= bytes.len() && std::str::from_utf8(&bytes[i..i + width]).is_ok() {
-			width
-		} else {
-			1
-		};
-		for slot in &mut map[i..i + width] {
-			*slot = count;
+		for ch in valid.chars() {
+			map.extend(std::iter::repeat_n(count, ch.len_utf8()));
+			count += ch.len_utf16() as u32;
 		}
-		count += if width == 4 { 2 } else { 1 };
-		i += width;
-		map[i] = count;
+		// Each malformed byte has its own offset, even within one decoder error.
+		for _ in 0..bad {
+			map.push(count);
+			count += 1;
+		}
+		bytes = rest;
 	}
+	map.push(count);
 	map
 }
 /// Decode a static shell word, recording origins rather than searching for its

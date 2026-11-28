@@ -148,15 +148,179 @@ impl<S> Term<S> {
     }
 }
 
+/// Duplicate a right-hand side that must be compiled under multiple pattern scopes.
+/// Skeletons own only immediate slots; the worklist fills them bottom-up.
+pub(crate) fn clone_term<'s>(root: &Term<&'s str>) -> Term<&'s str> {
+    use Term::*;
+    enum Work<'a, 's> {
+        Term(&'a Term<&'s str>),
+        Pat(&'a Pattern<&'s str>),
+        FinishTerm(Term<&'s str>),
+        FinishPat(Pattern<&'s str>),
+    }
+    let mut work = Vec::from([Work::Term(root)]);
+    let mut terms = Vec::new();
+    let mut pats = Vec::new();
+    while let Some(item) = work.pop() {
+        let at = work.len();
+        match item {
+            Work::Term(t) => {
+                let mut children = |t| { work.push(Work::Term(t)); Id };
+                let skeleton: Term<&'s str> = match t {
+                    Id => Id,
+                    Recurse => Recurse,
+                    Num(n) => Num(*n),
+                    Bool(b) => Bool(*b),
+                    Loc(i) => Loc(*i),
+                    Null => Null,
+                    Var(v) => Var(*v),
+                    Break(v) => Break(*v),
+                    Arr(t) => Arr(t.as_ref().map(|t| Box::new(children(t)))),
+                    Neg(t) => Neg(Box::new(children(t))),
+                    Label(v, t) => Label(*v, Box::new(children(t))),
+                    Call(n, ts) => Call(*n, ts.iter().map(&mut children).collect()),
+                    Def(ds, t) => Def(ds.iter().map(|d| self::Def::new(
+                        d.name, d.args.clone(), children(&d.body)
+                    )).collect(), Box::new(children(t))),
+                    Str(f, ps) => Str(*f, ps.iter().map(|p| match p {
+                        StrPart::Str(s) => StrPart::Str(*s),
+                        StrPart::Char(c) => StrPart::Char(*c),
+                        StrPart::Term(t) => StrPart::Term(children(t)),
+                    }).collect()),
+                    Obj(o) => Obj(o.iter().map(|(k, v)| (children(k), v.as_ref().map(&mut children))).collect()),
+                    TryCatch(t, c) => TryCatch(Box::new(children(t)), c.as_ref().map(|c| Box::new(children(c)))),
+                    IfThenElse(bs, e) => IfThenElse(bs.iter().map(|(k, v)| (children(k), children(v))).collect(),
+                        e.as_ref().map(|t| Box::new(children(t)))),
+                    Path(t, p) => Path(Box::new(children(t)), p.map_ref(children)),
+                    BinOp(l, op, r) => {
+                        let (l, r) = (Box::new(children(l)), Box::new(children(r)));
+                        let op = if let BinaryOp::Pipe(Some(ps)) = op {
+                            BinaryOp::Pipe(Some(ps.iter().map(|p| {
+                                work.push(Work::Pat(p));
+                                Pattern::Arr(Vec::new())
+                            }).collect()))
+                        } else {
+                            op.clone()
+                        };
+                        BinOp(l, op, r)
+                    }
+                    Fold(n, xs, ps, args) => {
+                        let xs = Box::new(children(xs));
+                        let args = args.iter().map(&mut children).collect();
+                        let ps = ps.iter().map(|p| {
+                            work.push(Work::Pat(p));
+                            Pattern::Arr(Vec::new())
+                        }).collect();
+                        Fold(*n, xs, ps, args)
+                    }
+                };
+                if work.len() == at {
+                    terms.push(skeleton);
+                } else {
+                    work.insert(at, Work::FinishTerm(skeleton));
+                }
+            }
+            Work::Pat(p) => {
+                let mut child = |p| { work.push(Work::Pat(p)); Pattern::Arr(Vec::new()) };
+                let skeleton = match p {
+                    Pattern::Var(x) => Pattern::Var(*x),
+                    Pattern::Arr(ps) => Pattern::Arr(ps.iter().map(child).collect()),
+                    Pattern::Both(x, p) => Pattern::Both(*x, Box::new(child(p))),
+                    Pattern::Obj(o) => Pattern::Obj(o.iter().map(|(k, p)| {
+                        work.push(Work::Term(k));
+                        work.push(Work::Pat(p));
+                        (Id, Pattern::Arr(Vec::new()))
+                    }).collect()),
+                };
+                if work.len() == at {
+                    pats.push(skeleton);
+                } else {
+                    work.insert(at, Work::FinishPat(skeleton));
+                }
+            }
+            Work::FinishTerm(mut t) => {
+                let mut fill = |t: &mut Term<_>| *t = terms.pop().unwrap();
+                match &mut t {
+                    Arr(Some(t)) | Neg(t) | Label(_, t) => fill(t),
+                    BinOp(l, op, r) => {
+                        fill(l);
+                        fill(r);
+                        if let BinaryOp::Pipe(Some(ps)) = op {
+                            ps.iter_mut().for_each(|p| *p = pats.pop().unwrap());
+                        }
+                    }
+                    Fold(_, xs, ps, args) => {
+                        fill(xs);
+                        args.iter_mut().for_each(&mut fill);
+                        ps.iter_mut().for_each(|p| *p = pats.pop().unwrap());
+                    }
+                    TryCatch(t, c) => {
+                        fill(t);
+                        c.iter_mut().for_each(|c| fill(c));
+                    }
+                    IfThenElse(bs, e) => {
+                        for (k, v) in bs { fill(k); fill(v); }
+                        e.iter_mut().for_each(|e| fill(e));
+                    }
+                    Def(ds, t) => {
+                        ds.iter_mut().for_each(|d| fill(&mut d.body));
+                        fill(t);
+                    }
+                    Call(_, ts) => ts.iter_mut().for_each(fill),
+                    Str(_, ps) => {
+                        for p in ps { if let StrPart::Term(t) = p { fill(t); } }
+                    }
+                    Obj(o) => {
+                        for (k, v) in o { fill(k); v.iter_mut().for_each(&mut fill); }
+                    }
+                    Path(t, p) => {
+                        use path::Part::*;
+                        fill(t);
+                        for (part, _) in &mut p.0 {
+                            match part {
+                                Index(i) => fill(i),
+                                Range(from, upto) => {
+                                    from.iter_mut().for_each(&mut fill);
+                                    upto.iter_mut().for_each(&mut fill);
+                                }
+                            }
+                        }
+                    }
+                    Id | Recurse | Num(_) | Bool(_) | Loc(_) | Null | Var(_) | Break(_) | Arr(None) => {}
+                }
+                terms.push(t);
+            }
+            Work::FinishPat(mut p) => {
+                match &mut p {
+                    Pattern::Var(_) => {}
+                    Pattern::Arr(ps) => ps.iter_mut().for_each(|p| *p = pats.pop().unwrap()),
+                    Pattern::Both(_, p) => **p = pats.pop().unwrap(),
+                    Pattern::Obj(o) => {
+                        for (k, p) in o { *k = terms.pop().unwrap(); *p = pats.pop().unwrap(); }
+                    }
+                }
+                pats.push(p);
+            }
+        }
+    }
+    terms.pop().unwrap()
+}
+
 impl<S> Pattern<S> {
     /// Variables bound by the pattern, in the order in which they are bound.
-    pub(crate) fn vars(&self) -> Box<dyn Iterator<Item = &S> + '_> {
-        match self {
-            Pattern::Var(x) => Box::new(core::iter::once(x)),
-            Pattern::Arr(a) => Box::new(a.iter().flat_map(|p| p.vars())),
-            Pattern::Obj(o) => Box::new(o.iter().flat_map(|(_k, p)| p.vars())),
-            Pattern::Both(x, p) => Box::new(core::iter::once(x).chain(p.vars())),
-        }
+    pub(crate) fn vars(&self) -> impl Iterator<Item = &S> {
+        let mut pending = Vec::from([self]);
+        core::iter::from_fn(move || loop {
+            match pending.pop()? {
+                Pattern::Var(x) => return Some(x),
+                Pattern::Arr(a) => pending.extend(a.iter().rev()),
+                Pattern::Obj(o) => pending.extend(o.iter().rev().map(|(_, p)| p)),
+                Pattern::Both(x, p) => {
+                    pending.push(p);
+                    return Some(x);
+                }
+            }
+        })
     }
 }
 
@@ -256,11 +420,121 @@ enum Sem<'s> {
     Top(Module<&'s str, Body<&'s str>>),
 }
 
+/// Tear down discarded syntax and metadata without recursing through their children.
+fn discard<'s>(roots: impl IntoIterator<Item = Sem<'s>>) {
+    let mut pending = Vec::new();
+    for root in roots {
+        let mut item = Some(root);
+        while let Some(value) = item {
+            let mut push = |t| pending.push(Sem::Term(t));
+            match value {
+                Sem::Term(Term::Arr(Some(t)) | Term::Neg(t) | Term::Label(_, t)) => push(*t),
+                Sem::Term(Term::BinOp(l, op, r)) => {
+                    push(*l);
+                    push(*r);
+                    if let BinaryOp::Pipe(Some(pats)) = op {
+                        pending.push(Sem::Pats(pats));
+                    }
+                }
+                Sem::Term(Term::Fold(_, xs, pats, args)) => {
+                    push(*xs);
+                    pending.push(Sem::Pats(pats));
+                    pending.push(Sem::Terms(args));
+                }
+                Sem::Term(Term::TryCatch(t, c)) => {
+                    push(*t);
+                    if let Some(c) = c {
+                        push(*c);
+                    }
+                }
+                Sem::Term(Term::IfThenElse(branches, else_)) => {
+                    pending.push(Sem::Else(branches, else_.map(|t| *t)));
+                }
+                Sem::Term(Term::Def(defs, body)) => {
+                    push(*body);
+                    pending.push(Sem::Defs(defs));
+                }
+                Sem::Term(Term::Call(_, args)) => pending.push(Sem::Terms(args)),
+                Sem::Term(Term::Str(_, parts)) => pending.push(Sem::Parts(parts)),
+                Sem::Term(Term::Obj(pairs)) => pending.push(Sem::Pairs(pairs)),
+                Sem::Term(Term::Path(base, path)) => {
+                    push(*base);
+                    for (part, _) in path.0 {
+                        part.map(&mut push);
+                    }
+                }
+                Sem::Terms(ts) => pending.extend(ts.into_iter().map(Sem::Term)),
+                Sem::Parts(parts) => pending.extend(parts.into_iter().filter_map(|part| match part {
+                    StrPart::Term(t) => Some(Sem::Term(t)),
+                    _ => None,
+                })),
+                Sem::Else(branches, else_) => {
+                    for (test, yes) in branches {
+                        push(test);
+                        push(yes);
+                    }
+                    if let Some(t) = else_ {
+                        push(t);
+                    }
+                }
+                Sem::Pairs(pairs) => {
+                    for (k, v) in pairs {
+                        push(k);
+                        if let Some(v) = v {
+                            push(v);
+                        }
+                    }
+                }
+                Sem::Pat(Pattern::Arr(pats)) => pending.push(Sem::Pats(pats)),
+                Sem::Pat(Pattern::Obj(pairs)) => pending.push(Sem::ObjPats(pairs)),
+                Sem::Pat(Pattern::Both(_, p)) => pending.push(Sem::Pat(*p)),
+                Sem::Pats(pats) => pending.extend(pats.into_iter().map(Sem::Pat)),
+                Sem::ObjPats(pairs) => {
+                    for (k, p) in pairs {
+                        pending.extend([Sem::Term(k), Sem::Pat(p)]);
+                    }
+                }
+                Sem::Def(d) => push(d.body),
+                Sem::Defs(ds) => pending.extend(ds.into_iter().map(|d| Sem::Term(d.body))),
+                Sem::Top(Module { meta, deps, body }) => {
+                    pending.extend([Sem::Meta(meta), Sem::Deps(deps), match body {
+                        Body::Main(t) => Sem::Term(t),
+                        Body::Defs(ds) => Sem::Defs(ds),
+                    }]);
+                }
+                Sem::Deps(ds) => pending.extend(ds.into_iter().map(|d| Sem::Meta(d.meta))),
+                Sem::Dep(Some(d)) => pending.push(Sem::Meta(d.meta)),
+                Sem::Meta(Some(c)) => c.discard(),
+                // All remaining variants contain only leaves or flat collections.
+                Sem::None | Sem::Text(_) | Sem::Chars(_) | Sem::Fmt(_) | Sem::Params(_)
+                | Sem::From(..) | Sem::Meta(None) | Sem::Dep(None) | Sem::Pat(Pattern::Var(_))
+                | Sem::Term(Term::Id | Term::Recurse | Term::Num(_) | Term::Bool(_)
+                    | Term::Null | Term::Loc(_) | Term::Arr(None) | Term::Break(_) | Term::Var(_)) => {}
+            }
+            item = pending.pop();
+        }
+    }
+}
+
+pub(crate) fn discard_term(t: Term<&str>) {
+    discard([Sem::Term(t)]);
+}
+
+pub(super) fn discard_body(body: Body<&str>) {
+    discard(core::iter::once(match body {
+        Body::Main(t) => Sem::Term(t),
+        Body::Defs(ds) => Sem::Defs(ds),
+    }));
+}
+
 macro_rules! sem {
     ($v:expr, $p:pat => $e:expr) => {
         match $v {
             $p => $e,
-            _ => Default::default(),
+            other => {
+                discard([other]);
+                Default::default()
+            }
         }
     };
 }
@@ -275,7 +549,10 @@ impl<'s> Sem<'s> {
     fn pat(self) -> Pattern<&'s str> {
         match self {
             Sem::Pat(p) => p,
-            _ => Pattern::Arr(Vec::new()),
+            other => {
+                discard([other]);
+                Pattern::Arr(Vec::new())
+            }
         }
     }
 }
@@ -291,7 +568,7 @@ struct Yacc<'s> {
 
 /// Number of tokens that can be listed after "expecting" in a syntax error.
 const YYARGS: usize = 4;
-/// Size of the parser stack at which bison gives up.
+/// Size of the parser stack at which bison reports "memory exhausted".
 const YYMAXDEPTH: usize = 10000;
 
 impl<'s> Yacc<'s> {
@@ -355,6 +632,7 @@ impl<'s> Yacc<'s> {
             let state = *states.last().unwrap();
             if states.len() >= YYMAXDEPTH {
                 self.fail(yylloc, "memory exhausted");
+                discard(vals);
                 return None;
             }
             // the termination state is reached by shifting the end of file after `TopLevel`
@@ -362,7 +640,10 @@ impl<'s> Yacc<'s> {
                 vals.pop();
                 return match vals.pop() {
                     Some(Sem::Top(m)) => Some(m),
-                    _ => None,
+                    other => {
+                        discard(other.into_iter().chain(vals));
+                        None
+                    }
                 };
             }
 
@@ -443,7 +724,10 @@ impl<'s> Yacc<'s> {
                     error_start = yylloc.0;
                     if errstatus == 3 {
                         match &yychar {
-                            Some(tok) if tok.sym == sym::EOF => return None,
+                            Some(tok) if tok.sym == sym::EOF => {
+                                discard(vals);
+                                return None;
+                            }
                             Some(_) => yychar = None,
                             None => {}
                         }
@@ -462,11 +746,12 @@ impl<'s> Yacc<'s> {
                             }
                         }
                         if states.len() == 1 {
+                            discard(vals);
                             return None;
                         }
                         error_start = locs.last().unwrap().0;
                         states.pop();
-                        vals.pop();
+                        discard(vals.pop());
                         locs.pop();
                     };
                     vals.push(Sem::None);
@@ -481,7 +766,10 @@ impl<'s> Yacc<'s> {
     fn check_object_key(&mut self, k: &Term<&'s str>, span: Span) {
         match konst(k, self.loc_file) {
             Some(Const::Str(_)) | None => {}
-            Some(c) => self.fail(span, alloc::format!("Cannot use {} as object key", c.describe())),
+            Some(c) => {
+                self.fail(span, alloc::format!("Cannot use {} as object key", c.describe()));
+                c.discard();
+            }
         }
     }
 
@@ -490,7 +778,10 @@ impl<'s> Yacc<'s> {
         match konst(t, self.loc_file) {
             None => self.fail(span, "Module metadata must be constant"),
             Some(c @ Const::Obj(_)) => return Some(c),
-            Some(_) => self.fail(span, "Module metadata must be an object"),
+            Some(c) => {
+                self.fail(span, "Module metadata must be an object");
+                c.discard();
+            }
         }
         None
     }
@@ -505,7 +796,7 @@ impl<'s> Yacc<'s> {
         use BinaryOp::*;
         use ops::{Cmp, Math};
         let mut v = rhs.into_iter();
-        let mut next = move || v.next().unwrap_or(Sem::None);
+        let mut next = || v.next().unwrap_or(Sem::None);
         macro_rules! skip {
             ($n:expr) => {
                 for _ in 0..$n {
@@ -541,7 +832,7 @@ impl<'s> Yacc<'s> {
             Sem::Term(t.path(Part::Range(from, upto), opt))
         };
         let (essential, optional) = (Opt::Essential, Opt::Optional);
-        match rule {
+        let value = match rule {
             // TopLevel: Module Imports Query | Module Imports FuncDefs
             2 | 3 => {
                 let meta = sem!(next(), Sem::Meta(m) => m);
@@ -559,7 +850,9 @@ impl<'s> Yacc<'s> {
             5 => {
                 next();
                 let t = next().term();
-                Sem::Meta(self.meta(&t, l[1]))
+                let meta = self.meta(&t, l[1]);
+                discard([Sem::Term(t)]);
+                Sem::Meta(meta)
             }
             // Imports: %empty
             6 => Sem::Deps(Vec::new()),
@@ -632,9 +925,14 @@ impl<'s> Yacc<'s> {
             40 => {
                 let dep = sem!(next(), Sem::Dep(d) => d);
                 let t = next().term();
-                match (self.meta(&t, l[1]), dep) {
+                let meta = self.meta(&t, l[1]);
+                discard([Sem::Term(t)]);
+                match (meta, dep) {
                     (Some(meta), Some(dep)) => Sem::Dep(Some(Dep { meta: Some(meta), ..dep })),
-                    _ => Sem::Dep(None),
+                    (meta, dep) => {
+                        discard([Sem::Meta(meta), Sem::Dep(dep)]);
+                        Sem::Dep(None)
+                    }
                 }
             }
             // ImportWhat: "import" ImportFrom "as" BINDING | "import" ImportFrom "as" IDENT
@@ -1048,7 +1346,9 @@ impl<'s> Yacc<'s> {
             // DictExpr: Expr
             168 => next(),
             _ => Sem::None,
-        }
+        };
+        discard(v);
+        value
     }
 }
 
@@ -1074,8 +1374,21 @@ pub fn parse_module<'s>(
     let m = yacc.run();
     match m {
         Some(m) if yacc.errs.is_empty() => Ok(m),
-        _ => Err(yacc.errs),
+        m => {
+            discard(m.into_iter().map(Sem::Top));
+            Err(yacc.errs)
+        }
     }
+}
+
+#[test]
+fn deeply_nested_metadata_is_discarded_on_syntax_error() {
+    let source = alloc::format!("module {{ depth: {}0{} }}; . +", "[".repeat(6000), "]".repeat(6000));
+    let errors = parse_module(&source, "<test>", false).unwrap_err();
+    assert_eq!(errors.len(), 1);
+    assert!(errors[0].0.starts_with("syntax error"), "{errors:?}");
+    let span = errors[0].1.expect("error carries a span");
+    assert!(span.0 <= span.1 && span.1 <= source.len(), "{span:?}");
 }
 
 /// Parse error that stores what token it found.
@@ -1102,9 +1415,15 @@ impl<'s, 't> Parser<'s, 't> {
     pub fn defs(&mut self) -> Result<'s, 't, Vec<Def<&'s str>>> {
         let first = |errs: Vec<Error>| (errs.into_iter().next().unwrap_or_default(), PhantomData);
         let m = parse_module(self.code, "<builtin>", true).map_err(first)?;
-        match m.body {
-            Body::Defs(defs) if m.deps.is_empty() => Ok(defs),
-            _ => Err((("expected definitions".into(), None), PhantomData)),
+        match m {
+            Module { body: Body::Defs(defs), deps, meta } if deps.is_empty() => {
+                super::discard_meta(meta);
+                Ok(defs)
+            }
+            m => {
+                discard([Sem::Top(m)]);
+                Err((("expected definitions".into(), None), PhantomData))
+            }
         }
     }
 
@@ -1112,9 +1431,15 @@ impl<'s, 't> Parser<'s, 't> {
     pub fn term(&mut self) -> Result<'s, 't, Term<&'s str>> {
         let first = |errs: Vec<Error>| (errs.into_iter().next().unwrap_or_default(), PhantomData);
         let m = parse_module(self.code, "<top-level>", false).map_err(first)?;
-        match m.body {
-            Body::Main(t) if m.deps.is_empty() => Ok(t),
-            _ => Err((("expected a term".into(), None), PhantomData)),
+        match m {
+            Module { body: Body::Main(t), deps, meta } if deps.is_empty() => {
+                super::discard_meta(meta);
+                Ok(t)
+            }
+            m => {
+                discard([Sem::Top(m)]);
+                Err((("expected a term".into(), None), PhantomData))
+            }
         }
     }
 

@@ -89,17 +89,11 @@ interface KernelSessionRegistryDescriptor<
 	validateKernel?: (session: TSession, kernel: TKernel) => boolean;
 }
 
-interface KernelSessionRegistry<
-	TKernel extends RegistryKernel,
-	TOptions extends KernelSessionRegistryOptions,
-	R,
-	TSession extends KernelSession<TKernel>,
-> {
+interface KernelSessionRegistry<TKernel extends RegistryKernel, TOptions extends KernelSessionRegistryOptions, R> {
 	disposeAll(): Promise<void>;
 	disposeByOwner(ownerId: string, options?: DisposeByOwnerOptions): Promise<void>;
 	executeOnSession(code: string, cwd: string, options: TOptions): Promise<R>;
 	peekLiveKernel(cwd: string, options: TOptions): TKernel | undefined;
-	getPresentSession(cwd: string, options: TOptions): TSession | undefined;
 }
 
 export function normalizeKernelSessionCwd(cwd: string): string {
@@ -130,7 +124,7 @@ export function createKernelSessionRegistry<
 	TSession extends KernelSession<TKernel>,
 >(
 	descriptor: KernelSessionRegistryDescriptor<TKernel, TOptions, R, TSession>,
-): KernelSessionRegistry<TKernel, TOptions, R, TSession> {
+): KernelSessionRegistry<TKernel, TOptions, R> {
 	const sessions = new Map<string, TSession>();
 	const startingSessions = new Map<string, StartingKernelSession<TSession>>();
 	const resettingSessions = new Map<string, Promise<void>>();
@@ -431,11 +425,6 @@ export function createKernelSessionRegistry<
 		return kernel?.isAlive() ? kernel : undefined;
 	}
 
-	function getPresentSession(cwd: string, options: TOptions): TSession | undefined {
-		const sessionId = options.sessionId ?? `session:${cwd}`;
-		return sessions.get(descriptor.buildSessionKey(sessionId, cwd, options.interpreter));
-	}
-
 	async function executeOnSession(code: string, cwd: string, options: TOptions): Promise<R> {
 		const sessionId = options.sessionId ?? `session:${cwd}`;
 		const sessionKey = descriptor.buildSessionKey(sessionId, cwd, options.interpreter);
@@ -495,5 +484,5 @@ export function createKernelSessionRegistry<
 		return result;
 	}
 
-	return { disposeAll, disposeByOwner, executeOnSession, peekLiveKernel, getPresentSession };
+	return { disposeAll, disposeByOwner, executeOnSession, peekLiveKernel };
 }

@@ -1068,11 +1068,10 @@ impl Attrs {
 	}
 }
 
-// `VarValue` is 32 B (three 24-byte `Vec` variants: the capacity niche cannot
-// hold the other two, so it has a tag) and `Var` was 40 B with the 16-bit
-// `Attrs` already; the 64-bit `Attrs` fills that padding.
+// `VarValue` is 24 B (the `BString` capacity niche holds the pointer-sized
+// `IndexedArray` and `AssocArray` variants) and `Var` adds the 64-bit `Attrs`.
 #[cfg(target_pointer_width = "64")]
-const _: () = assert!(size_of::<Var>() == 40, "Var stays 40 bytes (zero cost)");
+const _: () = assert!(size_of::<Var>() == 32, "Var stays 32 bytes (zero cost)");
 // Every store slot holds a `Record`: bash paths copy and probe it on every
 // variable access (88 B before zsh support; `Func` grew by `Attrs` and the
 // boxed sticky emulation).

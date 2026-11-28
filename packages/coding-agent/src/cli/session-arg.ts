@@ -21,7 +21,7 @@ export async function resolveSessionFileArg(sessionArg: string | undefined, cwd:
 		if (!match) throw new Error(`Session "${sessionArg}" not found.`);
 		return match.session.path;
 	}
-	const recent = await findMostRecentSession(SessionManager.getDefaultSessionDir(cwd));
+	const recent = await findMostRecentSession(await SessionManager.getDefaultSessionDirAsync(cwd));
 	if (!recent) throw new Error(`No sessions found for ${cwd}. Pass a session file or id.`);
 	return recent;
 }

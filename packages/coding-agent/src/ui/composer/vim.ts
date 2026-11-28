@@ -9,8 +9,7 @@
  * This is a usable subset of Vim, not a reimplementation of it (see issue #3299): Normal, Visual and
  * Replace modes, the common motions, and operators built from those motions.
  */
-
-const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+import { segmentGraphemes } from "@oh-my-pi/pi-utils/graphemes";
 
 export type VimMode = "insert" | "normal" | "visual" | "visual-line" | "replace";
 
@@ -91,7 +90,7 @@ const cursorOf = (buf: VimBuffer): VimPosition => ({ line: buf.cursorLine, col: 
 /** Start offset of the grapheme after `col`, clamped to `text.length`. */
 export function nextGraphemeStart(text: string, col: number): number {
 	if (col >= text.length) return text.length;
-	for (const seg of segmenter.segment(text)) {
+	for (const seg of segmentGraphemes(text)) {
 		if (seg.index >= col) return Math.min(seg.index + seg.segment.length, text.length);
 	}
 	return text.length;
@@ -101,7 +100,7 @@ export function nextGraphemeStart(text: string, col: number): number {
 export function prevGraphemeStart(text: string, col: number): number {
 	if (col <= 0) return 0;
 	let last = 0;
-	for (const seg of segmenter.segment(text)) {
+	for (const seg of segmentGraphemes(text)) {
 		if (seg.index >= col) break;
 		last = seg.index;
 	}
@@ -115,7 +114,7 @@ export function lastGraphemeStart(text: string): number {
 
 export function countGraphemes(text: string): number {
 	let count = 0;
-	for (const _ of segmenter.segment(text)) count++;
+	for (const _ of segmentGraphemes(text)) count++;
 	return count;
 }
 
@@ -123,7 +122,7 @@ export function countGraphemes(text: string): number {
 export function stepGraphemes(text: string, offset: number, count: number, forward: boolean): number {
 	if (count <= 0) return offset;
 	const boundaries: number[] = [];
-	for (const seg of segmenter.segment(text)) boundaries.push(seg.index);
+	for (const seg of segmentGraphemes(text)) boundaries.push(seg.index);
 	boundaries.push(text.length);
 	let i = 0;
 	while (i + 1 < boundaries.length && boundaries[i + 1]! <= offset) i++;
@@ -176,7 +175,7 @@ export function diffInsertSession(before: string, cursor: number, after: string)
 /** Inclusive start offsets plus `text.length`, one entry per grapheme boundary. */
 function graphemeBoundaries(text: string): number[] {
 	const bounds = [0];
-	for (const seg of segmenter.segment(text)) {
+	for (const seg of segmentGraphemes(text)) {
 		const end = seg.index + seg.segment.length;
 		if (end !== bounds[bounds.length - 1]) bounds.push(end);
 	}
@@ -186,7 +185,7 @@ function graphemeBoundaries(text: string): number[] {
 
 /** Vim's `skipwhite`: the first non-blank, or the end of an all-blank line (Normal mode clamps it). */
 export function firstNonBlank(text: string): number {
-	for (const seg of segmenter.segment(text)) {
+	for (const seg of segmentGraphemes(text)) {
 		if (seg.segment.trim() !== "") return seg.index;
 	}
 	return text.length;
@@ -203,7 +202,7 @@ function findPendingKey(pending: { forward: boolean; till: boolean } | null): st
  */
 function findGrapheme(text: string, fromCol: number, target: string, forward: boolean, count: number): number | null {
 	if (count < 1 || target.length === 0) return null;
-	const segs = [...segmenter.segment(text)];
+	const segs = [...segmentGraphemes(text)];
 	let here = -1;
 	for (let i = 0; i < segs.length; i++) {
 		if (segs[i]!.index <= fromCol) here = i;
@@ -1026,7 +1025,7 @@ export class VimState {
 			const text = lineAt(toLine);
 			const target = Math.min(change.endCol, text.length);
 			let endCol = text.length;
-			for (const seg of segmenter.segment(text)) {
+			for (const seg of segmentGraphemes(text)) {
 				if (seg.index >= target) {
 					endCol = seg.index;
 					break;
@@ -1082,7 +1081,7 @@ export class VimState {
 			// One segmenter pass: stepping with `nextGraphemeStart` would rescan the line per grapheme.
 			let end = -1;
 			let taken = 0;
-			for (const seg of segmenter.segment(line)) {
+			for (const seg of segmentGraphemes(line)) {
 				if (seg.index < buf.cursorCol) continue;
 				if (++taken === count) {
 					end = seg.index + seg.segment.length;

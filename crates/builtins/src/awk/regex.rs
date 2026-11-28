@@ -246,15 +246,15 @@ fn push_escaped(out: &mut String, c: char) {
 
 /// The UTF-8 character at the start of `src` and its length.
 fn decode_char(src: &[u8]) -> Option<(char, usize)> {
-	let len = match src.first()? {
-		0x00..=0x7F => 1,
-		0xC0..=0xDF => 2,
-		0xE0..=0xEF => 3,
-		0xF0..=0xF7 => 4,
-		_ => return None,
-	};
-	let text = std::str::from_utf8(src.get(..len)?).ok()?;
-	text.chars().next().map(|c| (c, len))
+	if let Some(&b) = src.first()
+		&& b.is_ascii()
+	{
+		return Some((char::from(b), 1));
+	}
+	let ch = xutf::valid_prefix(&src[..src.len().min(char::MAX_LEN_UTF8)])
+		.chars()
+		.next()?;
+	Some((ch, ch.len_utf8()))
 }
 
 /// Pushes the translation of the escape whose character starts `src` (the

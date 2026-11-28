@@ -518,13 +518,13 @@ function withImagesAsText(result: ToolCallResult): ToolCallResult {
 /** `[Image: [image/png] 1x1]`. */
 export function imagePlaceholder(block: { readonly data?: string; readonly mimeType?: string }): string {
 	const mime = block.mimeType ?? "image";
-	const size = block.data ? imageSize(block.data) : undefined;
+	const size = block.data ? imageSize(Buffer.from(block.data, "base64")) : undefined;
 	return `[Image: [${mime}]${size ? ` ${size.w}x${size.h}` : ""}]`;
 }
 
-/** Pixel size of a base64 PNG/GIF/JPEG/WebP, when its header says. */
-export function imageSize(base64: string): { w: number; h: number } | undefined {
-	const size = readImageHeaderDimensions(Buffer.from(base64, "base64"));
+/** Pixel size of decoded PNG/JPEG/GIF/WebP bytes, when the header says. */
+export function imageSize(bytes: Uint8Array): { w: number; h: number } | undefined {
+	const size = readImageHeaderDimensions(bytes);
 	return size ? { w: size.width, h: size.height } : undefined;
 }
 
@@ -746,12 +746,13 @@ export function toolNodeProps(input: ToolNodeInput): ToolNodeProps {
 /** A result's images as `image` nodes (shown under the body while images are on). */
 function imageNodes(result: ToolCallResult | undefined): JSXNode {
 	return resultImages(result).map((image, index) => {
-		const size = imageSize(image.data);
+		const bytes = Buffer.from(image.data, "base64");
+		const size = imageSize(bytes);
 		return (
 			<image
 				key={`img${index}`}
 				term={inlineImageTerm({ role: RESULT_IMAGE_ROLE })}
-				blob={registerBlob(Buffer.from(image.data, "base64"), image.mimeType ?? "image/png")}
+				blob={registerBlob(bytes, image.mimeType ?? "image/png")}
 				alt={image.mimeType}
 				w={size?.w}
 				h={size?.h}

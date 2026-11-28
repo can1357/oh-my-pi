@@ -3,6 +3,7 @@
 use crate::load::{self, lex, parse};
 use crate::{ops, Bind as Arg};
 use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::vec;
 use alloc::{boxed::Box, string::String, vec::Vec};
 
 type NativeId = usize;
@@ -67,9 +68,7 @@ impl<F> Lut<F> {
 /// In particular, a *tail call* is any call to an ancestor from
 /// a position where the output is returned as-is by the ancestor.
 ///
-/// See
-/// [`Compiler::term`] for a list of filters that return outputs of sub-filters as-is, and
-/// [`Locals::call`] for how the [`CallType`] is determined.
+/// See [`Locals::call`] for how the [`CallType`] is determined.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum CallType {
     /// Run filter and return its outputs as-is
@@ -186,6 +185,27 @@ pub(crate) enum Pattern<F> {
     Both(Box<Self>),
 }
 
+impl<F> Drop for Pattern<F> {
+    fn drop(&mut self) {
+        fn take_children<F>(pat: &mut Pattern<F>, pending: &mut Vec<Pattern<F>>) {
+            match pat {
+                Pattern::Var => {}
+                Pattern::Idx(pats) => pending.extend(pats.drain(..).map(|(_, p)| p)),
+                Pattern::Both(p) if !matches!(**p, Pattern::Var) => {
+                    pending.push(core::mem::replace(p.as_mut(), Pattern::Var));
+                }
+                Pattern::Both(_) => {}
+            }
+        }
+
+        let mut pending = Vec::new();
+        take_children(self, &mut pending);
+        while let Some(mut pat) = pending.pop() {
+            take_children(&mut pat, &mut pending);
+        }
+    }
+}
+
 /// Compilation error: where it occurred and jq's message, such as `$x is not defined`.
 pub type Error<S> = (S, String);
 
@@ -208,6 +228,7 @@ pub struct Compiler<S, F> {
     imported_vars: Vec<(S, ModId)>,
 
     locals: Locals<S>,
+    tail_scopes: Vec<(TermId, TailScope)>,
 
     /// file name that `$__loc__` reports in the module being compiled
     loc_file: String,
@@ -230,6 +251,7 @@ impl<S, F> Default for Compiler<S, F> {
             global_vars: Vec::new(),
             imported_vars: Vec::new(),
             locals: Locals::default(),
+            tail_scopes: Vec::new(),
             loc_file: String::new(),
             errs: Vec::new(),
         }
@@ -391,7 +413,7 @@ impl<S: Copy + Ord> Locals<S> {
             .push((name, args.len()), (Fun::Parent(args, id), vars));
     }
 
-    fn pop_parent(&mut self, name: S, arity: Arity) -> TermId {
+    fn pop_parent(&mut self, name: S, arity: Arity) -> (Box<[Arg<S>]>, TermId) {
         let (args, id, vars) = match self.funs.pop(&(name, arity)) {
             Some((Fun::Parent(args, def), vars)) => (args, def, vars),
             _ => panic!(),
@@ -403,7 +425,7 @@ impl<S: Copy + Ord> Locals<S> {
             }
         }
         assert_eq!(self.vars.total, vars);
-        id
+        (args, id)
     }
 
     fn push_arg(&mut self, name: S) {
@@ -420,8 +442,8 @@ impl<S: Copy + Ord> Locals<S> {
         self.vars.pop(&Bind::Fun(name));
     }
 
-    /// Call `f(f_1; ...; f_n)`, allowing tail-recursive calls to `tr`.
-    fn call(&self, name: S, args: &[TermId], tr: &Tr) -> Option<(Term, Tr)> {
+    /// Call `f(f_1; ...; f_n)` in the current tail-call scope.
+    fn call(&self, name: S, args: &[TermId], allows: impl Fn(TermId) -> bool) -> Option<(Term, Tr)> {
         Some(match self.funs.get_last(&(name, args.len()))? {
             (Fun::Arg, vars) => (Term::Var(self.vars.total - *vars), Tr::new()),
             // we   may only return tail-recursive calls to `tr` and call a sibling
@@ -431,7 +453,7 @@ impl<S: Copy + Ord> Locals<S> {
                 // does the sibling return tail-recursive calls to itself?
                 let rec = tr_.remove(id);
                 // are all remaining tail-recursive calls from the sibling permitted?
-                let typ = if tr_.is_subset(tr) {
+                let typ = if tr_.iter().copied().all(&allows) {
                     if rec {
                         CallType::CatchOne
                     } else {
@@ -446,7 +468,7 @@ impl<S: Copy + Ord> Locals<S> {
             }
             (Fun::Parent(args_, id), vars) => {
                 // if we can return a tail-recursive call to the parent
-                let (typ, tr_) = if tr.contains(id) {
+                let (typ, tr_) = if allows(*id) {
                     (CallType::Throw, Tr::from([*id]))
                 } else {
                     (CallType::CatchAll, Tr::new())
@@ -462,9 +484,94 @@ impl<S: Copy + Ord> Locals<S> {
     }
 }
 
-// any ID in Tr is an ID of a function f, and
-// any call to some `f` in Tr from the current position is *not* tail-recursive
+// The tail calls the compiled term can actually produce.
 type Tr = BTreeSet<TermId>;
+
+/// An index into the compiler's ancestry list of permitted tail calls.
+/// Each function body may tail-call itself, and some child terms inherit that
+/// scope. Terms that inspect rather than forward their children's outputs
+/// start from an empty scope.
+#[derive(Clone, Copy, Default)]
+struct TailScope(Option<usize>);
+
+/// A value passed between the compilation steps of [`Compiler::drive`].
+enum CVal<'s> {
+    /// Result of a [`Prim::Term`]: the term and the tail-recursive calls it returns.
+    Term(Term, Tr),
+    /// Result of a [`Prim::ITerm`]: the term ID and the tail-recursive calls it returns.
+    Id(TermId, Tr),
+    /// Result of a [`Prim::Pattern`].
+    Pat(Pattern<TermId>),
+    /// Result of a [`Prim::OpenDef`]: the name and arity of the opened definition.
+    Opened(&'s str, usize),
+    /// Result of a [`Prim::Module`]: the module's top-level definitions.
+    Defs(Vec<Def<&'s str>>),
+}
+
+/// What a continuation returns to [`Compiler::drive`].
+enum Task<'s, F> {
+    /// Run this step.
+    Prim(Prim<'s, F>),
+    /// This value is ready.
+    Value(CVal<'s>),
+}
+
+/// One step of stack-safe compilation.
+///
+/// The compiler used to recurse once per nested term, so a deeply nested program
+/// (thousands of nested `[`/`(`, as many as the parser's `YYMAXDEPTH` permits)
+/// overflowed a normal thread stack. Instead, [`Compiler::drive`] runs these
+/// steps against a heap `Vec` of [`Frame`], keeping the native stack flat however
+/// deeply the program nests.
+enum Prim<'s, F> {
+    /// Compile a term, returning its term and tail-recursive calls.
+    Term(parse::Term<&'s str>, TailScope),
+    /// Compile a term into a freshly inserted term ID.
+    ITerm(parse::Term<&'s str>, TailScope),
+    /// Compile a pattern.
+    Pattern(parse::Pattern<&'s str>),
+    /// Compile a definition and bind it as a sibling.
+    OpenDef(parse::Def<&'s str>, TailScope),
+    /// Compile a module's top-level definitions.
+    Module(Vec<parse::Def<&'s str>>),
+    /// Run the children in order, then combine their results.
+    Sequence(Vec<Prim<'s, F>>, SeqFinish<'s, F>),
+    /// Insert a term with local variables in scope for its compilation.
+    ScopedTerm(Vec<&'s str>, parse::Term<&'s str>, TailScope),
+}
+
+/// How an object entry is compiled (see the `Obj` case of [`Compiler::step`]).
+enum ObjEntry<'s> {
+    /// `{$x}`: the key is the literal name and the value is the variable.
+    VarKey(&'s str),
+    /// `{k}`: the key is `k` and the value is `.[k]`.
+    Shorthand,
+    /// `{k: v}`.
+    Pair,
+}
+
+type SeqFinish<'s, F> = Box<dyn FnOnce(&mut Compiler<&'s str, F>, Vec<CVal<'s>>) -> Task<'s, F> + 's>;
+
+enum Frame<'s, F> {
+    PopVars(Vec<&'s str>),
+    Insert(TermId),
+    Both,
+    Definition { name: &'s str, arity: usize, id: TermId },
+    Unary(fn(TermId) -> Term),
+    Label(&'s str),
+    Sequence {
+        children: alloc::vec::IntoIter<Prim<'s, F>>,
+        values: Vec<CVal<'s>>,
+        finish: SeqFinish<'s, F>,
+    },
+}
+
+fn seq<'s, F>(
+    tasks: Vec<Prim<'s, F>>,
+    finish: impl FnOnce(&mut Compiler<&'s str, F>, Vec<CVal<'s>>) -> Task<'s, F> + 's,
+) -> Task<'s, F> {
+    Task::Prim(Prim::Sequence(tasks, Box::new(finish)))
+}
 
 impl<'s, F> Compiler<&'s str, F> {
     /// Supply functions with given signatures.
@@ -516,23 +623,6 @@ impl<'s, F> Compiler<&'s str, F> {
         errs.is_empty().then(|| Filter { id, lut }).ok_or(errs)
     }
 
-    fn with_label<T>(&mut self, label: &'s str, f: impl FnOnce(&mut Self) -> T) -> T {
-        self.locals.vars.push(Bind::Label(label));
-        let y = f(self);
-        self.locals.vars.pop(&Bind::Label(label));
-        y
-    }
-
-    fn with_vars<T>(&mut self, vars: &[&'s str], f: impl FnOnce(&mut Self) -> T) -> T {
-        vars.iter()
-            .for_each(|v| self.locals.vars.push(Bind::Var(v)));
-        let y = f(self);
-        vars.iter()
-            .rev()
-            .for_each(|v| self.locals.vars.pop(&Bind::Var(v)));
-        y
-    }
-
     fn open_module<B>(&mut self, m: load::Module<&'s str, B>) -> B {
         self.imported_mods.clear();
         self.included_mods.clear();
@@ -542,6 +632,7 @@ impl<'s, F> Compiler<&'s str, F> {
                 Some(as_) => self.imported_mods.push((mid, as_)),
             }
         }
+        load::discard_vars(m.vars);
         m.body
     }
 
@@ -552,15 +643,6 @@ impl<'s, F> Compiler<&'s str, F> {
         assert!(self.locals.is_empty());
     }
 
-    fn open_def(&mut self, def: parse::Def<&'s str>, tr: &Tr) -> (&'s str, usize) {
-        let def = param_filters(def);
-        let args: Box<[_]> = def.args.iter().map(|a| bind_from(a, *a)).collect();
-        let arity = args.len();
-        let (sig, def, tr_) = self.def(def, tr);
-        self.locals.push_sibling(sig.name, args, def, tr_);
-        (sig.name, arity)
-    }
-
     fn close_def(&mut self, (name, arity): (&'s str, usize)) -> Def<&'s str> {
         let (args, id, tr) = self.locals.pop_sibling(name, arity);
         let args = args.into_vec().into_iter().map(|a| a.map(|_| ())).collect();
@@ -568,240 +650,615 @@ impl<'s, F> Compiler<&'s str, F> {
     }
 
     fn module(&mut self, defs: Vec<parse::Def<&'s str>>) -> Vec<Def<&'s str>> {
-        let siblings = defs.into_iter().map(|def| self.open_def(def, &Tr::new()));
-        let siblings: Vec<_> = siblings.collect();
-
-        let defs = siblings.into_iter().rev().map(|sig| self.close_def(sig));
-        let mut defs: Vec<_> = defs.collect();
-
-        defs.reverse();
-        defs
+        match self.drive(Prim::Module(defs)) {
+            CVal::Defs(defs) => defs,
+            _ => unreachable!("module yields definitions"),
+        }
     }
 
-    /// Compile a definition LHS.
-    fn def(&mut self, d: parse::Def<&'s str>, tr: &Tr) -> (Sig<&'s str>, TermId, Tr) {
-        // insert placeholder
-        let id = self.lut.insert_term(Term::default());
-        let args = d.args.iter().map(|a| bind_from(a, *a)).collect();
 
-        self.locals.push_parent(d.name, args, id);
-        let mut tr = tr.clone();
-        // any function can call itself tail-recursively
-        assert!(tr.insert(id));
-        let (body, tr_) = self.term(d.body, &tr);
-        self.lut.terms[id.0] = body;
-        assert_eq!(self.locals.pop_parent(d.name, d.args.len()), id);
-        let sig = Sig {
-            name: d.name,
-            args: d.args.iter().map(|a| bind_from(a, ())).collect(),
-        };
-        (sig, id, tr_)
-    }
-
-    /// Compile a term that may call any function in `tr` tail-recursively.
+    /// Run compilation steps against a heap-allocated continuation stack.
     ///
-    /// Returns which of the functions in `tr` it actually calls tail-recursively.
-    /// The output `Tr` must be a subset of the input `Tr`.
-    ///
-    /// The following filters return the outputs of the filters `F` or `G` as-is:
-    ///
-    /// - `F, G`
-    /// - `f // G`
-    /// - `f as ... | G`
-    /// - `f        | G`
-    /// - `if p then F else G end`
-    /// - `foreach fx as ... (init; f; G)`
-    /// - `def x: f; G`
-    ///
-    /// All other filters do not return outputs of sub-filters as-is.
-    fn term(&mut self, t: parse::Term<&'s str>, tr: &Tr) -> (Term, Tr) {
-        use parse::Term::*;
-        let t = match t {
-            Id => Term::Id,
-            Recurse => Term::Recurse,
-            Bool(b) => Term::Bool(b),
-            Null => Term::Null,
-            Loc(line) => {
-                let file = Term::Str(self.loc_file.clone());
-                let line = Term::Int(line as isize);
-                let pairs = [("file", file), ("line", line)].map(|(k, v)| {
-                    Term::ObjSingle(self.lut.insert_term(Term::Str(k.into())), self.lut.insert_term(v))
-                });
-                self.obj_cat(pairs.into())
-            }
-            Arr(t) => Term::Arr(self.iterm(t.map_or_else(|| Call("!empty", Vec::new()), |t| *t))),
-            Neg(t) => Term::Neg(self.iterm(*t)),
-            Label(x, t) => Term::Label(self.with_label(x, |c| c.iterm(*t))),
-            Break(s) => self.break_(s),
-            IfThenElse(if_thens, else_) => {
-                let f = |(if_, then_)| (self.iterm(if_), self.iterm_tr(then_, tr));
-                let if_thens: Vec<_> = if_thens.into_iter().map(f).collect();
-                let else_ = else_.map_or((Term::Id, Tr::new()), |else_| self.term(*else_, tr));
-                return if_thens.into_iter().rev().fold(else_, |acc, (if_, then_)| {
-                    let else_ = self.lut.insert_term(acc.0);
-                    let tr_ = then_.1.union(&acc.1).copied().collect();
-                    (Term::Ite(if_, then_.0, else_), tr_)
-                });
-            }
-            Var(x) => self.var(x),
-            Call(name, args) => {
-                let args: Box<[_]> = args.into_iter().map(|t| self.iterm(t)).collect();
-                if let Some((module, fname)) = name.split_once("::") {
-                    self.call_mod(name, module, fname, &args)
-                } else {
-                    return self.call(name, &args, tr);
-                }
-            }
-            Def(defs, t) => {
-                let siblings: Vec<_> = defs.into_iter().map(|def| self.open_def(def, tr)).collect();
-                let (t, tr_) = self.term(*t, tr);
-                siblings.into_iter().rev().for_each(|sig| {
-                    self.close_def(sig);
-                });
-
-                return (t, tr_);
-            }
-            Num(n) => n.parse().map_or_else(|_| Term::Num(n.into()), Term::Int),
-            TryCatch(try_, catch) => {
-                let catch = catch.map_or_else(|| Call("!empty", Vec::new()), |t| *t);
-                Term::TryCatch(self.iterm(*try_), self.iterm(catch))
-            }
-            Fold(name, xs, mut pats, args) => {
-                use self::Fold::{Foreach, Reduce};
-                // `reduce xs as p1 ?// p2 (...)` binds the variables of all alternatives,
-                // so it is `reduce (xs as p1 ?// p2 | [$v1, ...]) as [$v1, ...] (...)`
-                let (xs, pat) = if pats.len() > 1 {
-                    let vars = alt_vars(&pats);
-                    let arr = vars.iter().map(|v| Var(*v)).reduce(|l, r| BinOp(Box::new(l), parse::BinaryOp::Comma, Box::new(r)));
-                    let arr = Arr(arr.map(Box::new));
-                    let xs = BinOp(xs, parse::BinaryOp::Pipe(Some(pats)), Box::new(arr));
-                    (Box::new(xs), parse::Pattern::Arr(vars.into_iter().map(parse::Pattern::Var).collect()))
-                } else {
-                    (xs, pats.pop().unwrap_or(parse::Pattern::Arr(Vec::new())))
-                };
-                let mut args = args.into_iter();
-                let (Some(init), Some(update)) = (args.next(), args.next()) else {
-                    return (Term::Id, Tr::new());
-                };
-                let vars: Vec<_> = pat.vars().copied().collect();
-                let xs = self.iterm(*xs);
-                let pat = self.pattern(pat);
-                let init = self.iterm(init);
-                let update = self.with_vars(&vars, |c| c.iterm(update));
-
-                if name == "reduce" {
-                    Term::Fold(xs, pat, init, update, Reduce)
-                } else {
-                    let (proj, tr_) = args
-                        .next()
-                        .map(|p| self.with_vars(&vars, |c| c.iterm_tr(p, tr)))
-                        .unzip();
-                    let tr_ = tr_.unwrap_or_default();
-                    return (Term::Fold(xs, pat, init, update, Foreach(proj)), tr_);
-                }
-            }
-            BinOp(l, parse::BinaryOp::Pipe(Some(pats)), r) if pats.len() > 1 => {
-                return self.pipe_alt(*l, pats, *r, tr);
-            }
-            BinOp(l, op, r) => {
-                use parse::BinaryOp::*;
-                let (l, (r, tr_)) = match op {
-                    Comma => {
-                        let (l, trl) = self.iterm_tr(*l, tr);
-                        let (r, trr) = self.iterm_tr(*r, tr);
-                        (l, (r, trl.union(&trr).copied().collect()))
-                    }
-                    Alt => (self.iterm(*l), self.iterm_tr(*r, tr)),
-                    Pipe(ref pat) => {
-                        let l = self.iterm(*l);
-                        let vars: Vec<_> = pat.iter().flatten().flat_map(|p| p.vars()).copied().collect();
-                        (l, self.with_vars(&vars, |c| c.iterm_tr(*r, tr)))
-                    }
-                    _ => (self.iterm(*l), (self.iterm(*r), Tr::new())),
-                };
-                let t = match op {
-                    Pipe(pat) => Term::Pipe(l, pat.and_then(|mut p| p.pop()).map(|pat| self.pattern(pat)), r),
-                    Comma => Term::Comma(l, r),
-                    Math(op) => Term::Math(l, op, r),
-                    Assign => Term::Assign(l, r),
-                    Update => Term::Update(l, r),
-                    UpdateMath(op) => Term::UpdateMath(l, op, r),
-                    Cmp(op) => Term::Cmp(l, op, r),
-                    Or => Term::Logic(l, true, r),
-                    And => Term::Logic(l, false, r),
-                    Alt => Term::Alt(l, r),
-                    UpdateAlt => Term::UpdateAlt(l, r),
-                };
-                return (t, tr_);
-            }
-            Path(t, path) => {
-                let t = self.iterm(*t);
-                let path = path.0.into_iter();
-                let path = path.map(|(p, opt)| (p.map(|f| self.iterm(f)), opt));
-                Term::Path(t, crate::path::Path(path.collect()))
-            }
-            Str(fmt, parts) => {
-                use lex::StrPart;
-                let fmt = match fmt {
-                    Some(fmt) => self.iterm(Call(fmt, Vec::new())),
-                    None => self.lut.insert_term(Term::ToString),
-                };
-                let mut out: Vec<Term> = Vec::new();
-                for part in parts {
-                    let lit = match part {
-                        StrPart::Str(s) => s.into(),
-                        StrPart::Char(c) => String::from(c),
-                        StrPart::Term(f) => {
-                            out.push(Term::Pipe(self.iterm(f), None, fmt));
-                            continue;
+    /// This replaces the recursion that used to walk one native stack frame per
+    /// nested term, so a deeply nested program compiles without growing the
+    /// native stack (up to the parser's `YYMAXDEPTH`).
+    fn drive(&mut self, start: Prim<'s, F>) -> CVal<'s> {
+        let mut stack = Vec::new();
+        self.tail_scopes.clear();
+        let mut task = Task::Prim(start);
+        loop {
+            task = match task {
+                Task::Value(v) => match stack.pop() {
+                    Some(Frame::PopVars(vars)) => {
+                        for x in vars.into_iter().rev() {
+                            self.locals.vars.pop(&Bind::Var(x));
                         }
-                    };
-                    match out.last_mut() {
-                        Some(Term::Str(s)) => s.push_str(&lit),
-                        _ => out.push(Term::Str(lit)),
+                        Task::Value(v)
                     }
+                    Some(Frame::Insert(id)) => {
+                        let CVal::Term(t, calls) = v else { unreachable!("term result") };
+                        self.lut.terms[id.0] = t;
+                        Task::Value(CVal::Id(id, calls))
+                    }
+                    Some(Frame::Both) => {
+                        let CVal::Pat(p) = v else { unreachable!("pattern result") };
+                        Task::Value(CVal::Pat(Pattern::Both(Box::new(p))))
+                    }
+                    Some(Frame::Definition { name, arity, id }) => {
+                        let CVal::Term(body, calls) = v else { unreachable!("definition body") };
+                        self.lut.terms[id.0] = body;
+                        let (args, parent) = self.locals.pop_parent(name, arity);
+                        assert_eq!(parent, id);
+                        self.locals.push_sibling(name, args, id, calls);
+                        Task::Value(CVal::Opened(name, arity))
+                    }
+                    Some(Frame::Unary(build)) => {
+                        let CVal::Id(id, _) = v else { unreachable!("item") };
+                        Task::Value(CVal::Term(build(id), Tr::new()))
+                    }
+                    Some(Frame::Label(x)) => {
+                        self.locals.vars.pop(&Bind::Label(x));
+                        let CVal::Id(id, _) = v else { unreachable!("item") };
+                        Task::Value(CVal::Term(Term::Label(id), Tr::new()))
+                    }
+                    Some(Frame::Sequence { mut children, mut values, finish }) => {
+                        values.push(v);
+                        if let Some(child) = children.next() {
+                            stack.push(Frame::Sequence { children, values, finish });
+                            Task::Prim(child)
+                        } else {
+                            finish(self, values)
+                        }
+                    }
+                    None => return v,
+                },
+                Task::Prim(p) => self.step(p, &mut stack),
+            };
+        }
+    }
+
+    /// Perform one [`Prim`].
+    fn step(&mut self, p: Prim<'s, F>, stack: &mut Vec<Frame<'s, F>>) -> Task<'s, F> {
+        use parse::Term as T;
+        match p {
+            Prim::Sequence(tasks, finish) => {
+                let mut children = tasks.into_iter();
+                let values = Vec::with_capacity(children.len());
+                if let Some(child) = children.next() {
+                    stack.push(Frame::Sequence { children, values, finish });
+                    Task::Prim(child)
+                } else {
+                    finish(self, values)
                 }
-                // `"a\(f)b\(g)"` is `(("a" + f) + "b") + g`, as jq builds it,
-                // so that the last interpolation varies slowest
-                let mut out = out.into_iter();
-                let first = out.next().unwrap_or_else(|| Term::Str(String::new()));
-                out.fold(first, |acc, x| {
-                    Term::Math(self.lut.insert_term(acc), ops::Math::Add, self.lut.insert_term(x))
+            }
+            Prim::ScopedTerm(vars, t, tr) => {
+                for v in &vars {
+                    self.locals.vars.push(Bind::Var(v));
+                }
+                stack.push(Frame::PopVars(vars));
+                Task::Prim(Prim::ITerm(t, tr))
+            }
+            Prim::ITerm(t, tr) => {
+                let id = self.lut.insert_term(Term::default());
+                stack.push(Frame::Insert(id));
+                Task::Prim(Prim::Term(t, tr))
+            }
+            Prim::Pattern(p) => match p {
+                parse::Pattern::Var(_) => Task::Value(CVal::Pat(Pattern::Var)),
+                parse::Pattern::Arr(a) => {
+                    let n = a.len();
+                    let tasks = a.into_iter().map(Prim::Pattern).collect();
+                    seq(tasks, move |c, vals| {
+                        let mut vals = vals.into_iter();
+                        let mut idx = Vec::with_capacity(n);
+                        for i in 0..n {
+                            let pat = match vals.next() {
+                                Some(CVal::Pat(p)) => p,
+                                _ => unreachable!("array pattern"),
+                            };
+                            idx.push((c.lut.insert_term(Term::Int(i as isize)), pat));
+                        }
+                        Task::Value(CVal::Pat(Pattern::Idx(idx)))
+                    })
+                }
+                parse::Pattern::Obj(o) => {
+                    let n = o.len();
+                    let mut tasks = Vec::with_capacity(2 * n);
+                    for (k, p) in o {
+                        tasks.push(Prim::ITerm(k, TailScope::default()));
+                        tasks.push(Prim::Pattern(p));
+                    }
+                    seq(tasks, move |_c, vals| {
+                        let mut vals = vals.into_iter();
+                        let mut idx = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            let k = match vals.next() {
+                                Some(CVal::Id(k, _)) => k,
+                                _ => unreachable!("object pattern key"),
+                            };
+                            let pat = match vals.next() {
+                                Some(CVal::Pat(p)) => p,
+                                _ => unreachable!("object pattern"),
+                            };
+                            idx.push((k, pat));
+                        }
+                        Task::Value(CVal::Pat(Pattern::Idx(idx)))
+                    })
+                }
+                parse::Pattern::Both(_, p) => {
+                    stack.push(Frame::Both);
+                    Task::Prim(Prim::Pattern(*p))
+                }
+            },
+            Prim::OpenDef(d, tr) => {
+                let parse::Def { name, args, body } = param_filters(d);
+                let id = self.lut.insert_term(Term::default());
+                let arity = args.len();
+                let args = args.into_iter().map(|a| bind_from(a, a)).collect();
+                self.locals.push_parent(name, args, id);
+                let scope = TailScope(Some(self.tail_scopes.len()));
+                self.tail_scopes.push((id, tr));
+                stack.push(Frame::Definition { name, arity, id });
+                Task::Prim(Prim::Term(body, scope))
+            }
+            Prim::Module(defs) => {
+                let n = defs.len();
+                let tasks = defs.into_iter().map(|def| Prim::OpenDef(def, TailScope::default())).collect();
+                seq(tasks, move |c, vals| {
+                    let mut vals = vals.into_iter();
+                    let mut sigs = Vec::with_capacity(n);
+                    for _ in 0..n {
+                        match vals.next() {
+                            Some(CVal::Opened(name, arity)) => sigs.push((name, arity)),
+                            _ => unreachable!("opened definition"),
+                        }
+                    }
+                    let mut defs: Vec<_> = sigs.into_iter().rev().map(|sig| c.close_def(sig)).collect();
+                    defs.reverse();
+                    Task::Value(CVal::Defs(defs))
                 })
             }
-            Obj(o) => {
-                let kvs = o.into_iter().map(|(k, v)| self.obj_entry(k, v)).collect();
-                self.obj_cat(kvs)
-            }
-        };
-        (t, Tr::new())
-    }
-
-    /// `l as p1 ?// p2 ?// ... | r`, as jq's `bind_alternation_matchers`:
-    /// every alternative binds the variables of all alternatives,
-    /// those not in its pattern to null.
-    fn pipe_alt(
-        &mut self,
-        l: parse::Term<&'s str>,
-        pats: Vec<parse::Pattern<&'s str>>,
-        r: parse::Term<&'s str>,
-        tr: &Tr,
-    ) -> (Term, Tr) {
-        let all = alt_vars(&pats);
-        let l = self.iterm(l);
-        let mut tr_ = Tr::new();
-        let alts = pats.into_iter().map(|pat| {
-            let own: Vec<_> = pat.vars().copied().collect();
-            let mut vars: Vec<_> = all.iter().copied().filter(|v| !own.contains(v)).collect();
-            let nulls = vars.len();
-            vars.extend(own);
-            let pat = self.pattern(pat);
-            let (r, trr) = self.with_vars(&vars, |c| c.iterm_tr(r.clone(), tr));
-            tr_.extend(trr);
-            (nulls, pat, r)
-        });
-        let alts = alts.collect();
-        (Term::PipeAlt(l, alts), tr_)
+            Prim::Term(t, tr) => match t {
+                T::Id => Task::Value(CVal::Term(Term::Id, Tr::new())),
+                T::Recurse => Task::Value(CVal::Term(Term::Recurse, Tr::new())),
+                T::Bool(b) => Task::Value(CVal::Term(Term::Bool(b), Tr::new())),
+                T::Null => Task::Value(CVal::Term(Term::Null, Tr::new())),
+                T::Num(n) => {
+                    let t = n.parse().map_or_else(|_| Term::Num(n.into()), Term::Int);
+                    Task::Value(CVal::Term(t, Tr::new()))
+                }
+                T::Loc(line) => {
+                    let file = Term::Str(self.loc_file.clone());
+                    let line = Term::Int(line as isize);
+                    let pairs = [("file", file), ("line", line)].map(|(k, v)| {
+                        Term::ObjSingle(self.lut.insert_term(Term::Str(k.into())), self.lut.insert_term(v))
+                    });
+                    Task::Value(CVal::Term(self.obj_cat(pairs.into()), Tr::new()))
+                }
+                T::Arr(t) => {
+                    let child = t.map_or_else(|| T::Call("!empty", Vec::new()), |t| *t);
+                    stack.push(Frame::Unary(Term::Arr));
+                    Task::Prim(Prim::ITerm(child, TailScope::default()))
+                }
+                T::Neg(t) => {
+                    stack.push(Frame::Unary(Term::Neg));
+                    Task::Prim(Prim::ITerm(*t, TailScope::default()))
+                }
+                T::Label(x, t) => {
+                    self.locals.vars.push(Bind::Label(x));
+                    stack.push(Frame::Label(x));
+                    Task::Prim(Prim::ITerm(*t, TailScope::default()))
+                }
+                T::Break(s) => Task::Value(CVal::Term(self.break_(s), Tr::new())),
+                T::Var(x) => Task::Value(CVal::Term(self.var(x), Tr::new())),
+                T::IfThenElse(if_thens, else_) => {
+                    let n = if_thens.len();
+                    let mut tasks: Vec<Prim<'s, F>> = Vec::with_capacity(2 * n + 1);
+                    for (if_, then_) in if_thens {
+                        tasks.push(Prim::ITerm(if_, TailScope::default()));
+                        tasks.push(Prim::ITerm(then_, tr));
+                    }
+                    if let Some(e) = else_ {
+                        tasks.push(Prim::Term(*e, tr));
+                    }
+                    seq(tasks, move |c, vals| {
+                        let mut vals = vals.into_iter();
+                        let mut pairs = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            let if_ = match vals.next() { Some(CVal::Id(i, _)) => i, _ => unreachable!("if") };
+                            let then_ = match vals.next() { Some(CVal::Id(i, t)) => (i, t), _ => unreachable!("then") };
+                            pairs.push((if_, then_.0, then_.1));
+                        }
+                        let mut acc = match vals.next() {
+                            Some(CVal::Term(t, tr_)) => (t, tr_),
+                            _ => (Term::Id, Tr::new()),
+                        };
+                        for (if_, then_, then_tr) in pairs.into_iter().rev() {
+                            let else_ = c.lut.insert_term(acc.0);
+                            acc.1.extend(then_tr);
+                            acc.0 = Term::Ite(if_, then_, else_);
+                        }
+                        Task::Value(CVal::Term(acc.0, acc.1))
+                    })
+                }
+                T::Call(name, args) => {
+                    if args.is_empty() {
+                        let (t, calls) = self.call(name, &[], tr);
+                        return Task::Value(CVal::Term(t, calls));
+                    }
+                    let tasks: Vec<Prim<'s, F>> =
+                        args.into_iter().map(|t| Prim::ITerm(t, TailScope::default())).collect();
+                    seq(tasks, move |c, vals| {
+                        let ids: Box<[TermId]> = vals
+                            .into_iter()
+                            .map(|v| match v {
+                                CVal::Id(id, _) => id,
+                                _ => unreachable!("argument"),
+                            })
+                            .collect();
+                        let (t, calls) = c.call(name, &ids, tr);
+                        Task::Value(CVal::Term(t, calls))
+                    })
+                }
+                T::TryCatch(try_, catch) => {
+                    let catch = catch.map_or_else(|| T::Call("!empty", Vec::new()), |t| *t);
+                    let tasks = vec![Prim::ITerm(*try_, TailScope::default()), Prim::ITerm(catch, TailScope::default())];
+                    seq(tasks, |_c, vals| {
+                        let mut vals = vals.into_iter();
+                        let try_ = match vals.next() { Some(CVal::Id(i, _)) => i, _ => unreachable!("try") };
+                        let catch = match vals.next() { Some(CVal::Id(i, _)) => i, _ => unreachable!("catch") };
+                        Task::Value(CVal::Term(Term::TryCatch(try_, catch), Tr::new()))
+                    })
+                }
+                T::Fold(name, xs, mut pats, args) => {
+                    use self::Fold::{Foreach, Reduce};
+                    if args.len() < 2 {
+                        parse::discard_term(T::Fold(name, xs, pats, args));
+                        return Task::Value(CVal::Term(Term::Id, Tr::new()));
+                    }
+                    let (xs, pat) = if pats.len() > 1 {
+                        let vars = alt_vars(&pats);
+                        let arr = vars
+                            .iter()
+                            .map(|v| T::Var(*v))
+                            .reduce(|l, r| T::BinOp(Box::new(l), parse::BinaryOp::Comma, Box::new(r)));
+                        let arr = T::Arr(arr.map(Box::new));
+                        let xs = T::BinOp(xs, parse::BinaryOp::Pipe(Some(pats)), Box::new(arr));
+                        (Box::new(xs), parse::Pattern::Arr(vars.into_iter().map(parse::Pattern::Var).collect()))
+                    } else {
+                        (xs, pats.pop().unwrap_or(parse::Pattern::Arr(Vec::new())))
+                    };
+                    let mut args = args.into_iter();
+                    let (init, update) = (args.next().unwrap(), args.next().unwrap());
+                    let reduce = name == "reduce";
+                    let proj = if reduce { None } else { args.next() };
+                    args.for_each(parse::discard_term);
+                    let vars: Vec<&'s str> = pat.vars().copied().collect();
+                    let mut tasks: Vec<Prim<'s, F>> = vec![
+                        Prim::ITerm(*xs, TailScope::default()),
+                        Prim::Pattern(pat),
+                        Prim::ITerm(init, TailScope::default()),
+                    ];
+                    if let Some(p) = proj {
+                        tasks.push(Prim::ScopedTerm(vars.clone(), update, TailScope::default()));
+                        tasks.push(Prim::ScopedTerm(vars, p, tr));
+                    } else {
+                        tasks.push(Prim::ScopedTerm(vars, update, TailScope::default()));
+                    }
+                    seq(tasks, move |_c, vals| {
+                        let mut vals = vals.into_iter();
+                        let xs = match vals.next() { Some(CVal::Id(i, _)) => i, _ => unreachable!("xs") };
+                        let pat = match vals.next() { Some(CVal::Pat(p)) => p, _ => unreachable!("pattern") };
+                        let init = match vals.next() { Some(CVal::Id(i, _)) => i, _ => unreachable!("init") };
+                        let update = match vals.next() { Some(CVal::Id(i, _)) => i, _ => unreachable!("update") };
+                        let (proj, tr_) = if reduce {
+                            (None, Tr::new())
+                        } else {
+                            match vals.next() {
+                                Some(CVal::Id(i, t)) => (Some(i), t),
+                                None => (None, Tr::new()),
+                                _ => unreachable!("project"),
+                            }
+                        };
+                        let fold = if reduce { Reduce } else { Foreach(proj) };
+                        Task::Value(CVal::Term(Term::Fold(xs, pat, init, update, fold), tr_))
+                    })
+                }
+                T::Def(defs, body) => {
+                    let n = defs.len();
+                    let mut tasks: Vec<Prim<'s, F>> = Vec::with_capacity(n + 1);
+                    for def in defs {
+                        tasks.push(Prim::OpenDef(def, tr));
+                    }
+                    tasks.push(Prim::Term(*body, tr));
+                    seq(tasks, move |c, vals| {
+                        let mut vals = vals.into_iter();
+                        let mut sigs = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            match vals.next() {
+                                Some(CVal::Opened(name, arity)) => sigs.push((name, arity)),
+                                _ => unreachable!("opened definition"),
+                            }
+                        }
+                        let body = match vals.next() {
+                            Some(CVal::Term(t, tr_)) => (t, tr_),
+                            _ => unreachable!("definition body"),
+                        };
+                        for (name, arity) in sigs.into_iter().rev() {
+                            c.locals.pop_sibling(name, arity);
+                        }
+                        Task::Value(CVal::Term(body.0, body.1))
+                    })
+                }
+                T::BinOp(l, parse::BinaryOp::Pipe(Some(pats)), r) if pats.len() > 1 => {
+                    let all = alt_vars(&pats);
+                    let mut r = Some(*r);
+                    let mut tasks: Vec<Prim<'s, F>> = vec![Prim::ITerm(*l, TailScope::default())];
+                    let mut meta = Vec::with_capacity(pats.len());
+                    let mut pats = pats.into_iter();
+                    while let Some(pat) = pats.next() {
+                        let own: Vec<&'s str> = pat.vars().copied().collect();
+                        let mut vars: Vec<&'s str> = all.iter().copied().filter(|v| !own.contains(v)).collect();
+                        let nulls = vars.len();
+                        vars.extend(own);
+                        tasks.push(Prim::Pattern(pat));
+                        let body = if pats.len() == 0 {
+                            r.take().unwrap()
+                        } else {
+                            parse::clone_term(r.as_ref().unwrap())
+                        };
+                        tasks.push(Prim::ScopedTerm(vars, body, tr));
+                        meta.push(nulls);
+                    }
+                    seq(tasks, move |_c, vals| {
+                        let mut vals = vals.into_iter();
+                        let l = match vals.next() { Some(CVal::Id(i, _)) => i, _ => unreachable!("lhs") };
+                        let mut tr_ = Tr::new();
+                        let mut alts = Vec::with_capacity(meta.len());
+                        for nulls in meta {
+                            let pat = match vals.next() {
+                                Some(CVal::Pat(p)) => p,
+                                _ => unreachable!("alternative pattern"),
+                            };
+                            let (rid, trr) = match vals.next() {
+                                Some(CVal::Id(i, t)) => (i, t),
+                                _ => unreachable!("alternative rhs"),
+                            };
+                            tr_.extend(trr);
+                            alts.push((nulls, pat, rid));
+                        }
+                        Task::Value(CVal::Term(Term::PipeAlt(l, alts.into_boxed_slice()), tr_))
+                    })
+                }
+                T::BinOp(l, op, r) => {
+                    use parse::BinaryOp::*;
+                    match op {
+                        Pipe(pat) => {
+                            let single = pat.and_then(|mut p| p.pop());
+                            let vars: Vec<&'s str> = single.iter().flat_map(|p| p.vars()).copied().collect();
+                            let has_pat = single.is_some();
+                            let rhs = if vars.is_empty() {
+                                Prim::ITerm(*r, tr)
+                            } else {
+                                Prim::ScopedTerm(vars, *r, tr)
+                            };
+                            let mut tasks: Vec<Prim<'s, F>> = vec![
+                                Prim::ITerm(*l, TailScope::default()),
+                                rhs,
+                            ];
+                            if let Some(p) = single {
+                                tasks.push(Prim::Pattern(p));
+                            }
+                            seq(tasks, move |_c, vals| {
+                                let mut vals = vals.into_iter();
+                                let l = match vals.next() { Some(CVal::Id(i, _)) => i, _ => unreachable!("lhs") };
+                                let r = match vals.next() { Some(CVal::Id(i, t)) => (i, t), _ => unreachable!("rhs") };
+                                let pat = if has_pat {
+                                    match vals.next() {
+                                        Some(CVal::Pat(p)) => Some(p),
+                                        _ => unreachable!("pattern"),
+                                    }
+                                } else {
+                                    None
+                                };
+                                Task::Value(CVal::Term(Term::Pipe(l, pat, r.0), r.1))
+                            })
+                        }
+                        Comma => {
+                            let tasks = vec![Prim::ITerm(*l, tr), Prim::ITerm(*r, tr)];
+                            seq(tasks, |_c, vals| {
+                                let mut vals = vals.into_iter();
+                                let l = match vals.next() { Some(CVal::Id(i, t)) => (i, t), _ => unreachable!("lhs") };
+                                let r = match vals.next() { Some(CVal::Id(i, t)) => (i, t), _ => unreachable!("rhs") };
+                                let (left, mut calls) = l;
+                                calls.extend(r.1);
+                                Task::Value(CVal::Term(Term::Comma(left, r.0), calls))
+                            })
+                        }
+                        Alt => {
+                            let tasks = vec![Prim::ITerm(*l, TailScope::default()), Prim::ITerm(*r, tr)];
+                            seq(tasks, |_c, vals| {
+                                let mut vals = vals.into_iter();
+                                let l = match vals.next() { Some(CVal::Id(i, _)) => i, _ => unreachable!("lhs") };
+                                let r = match vals.next() { Some(CVal::Id(i, t)) => (i, t), _ => unreachable!("rhs") };
+                                Task::Value(CVal::Term(Term::Alt(l, r.0), r.1))
+                            })
+                        }
+                        op => {
+                            let tasks = vec![Prim::ITerm(*l, TailScope::default()), Prim::ITerm(*r, TailScope::default())];
+                            seq(tasks, move |_c, vals| {
+                                let mut vals = vals.into_iter();
+                                let l = match vals.next() { Some(CVal::Id(i, _)) => i, _ => unreachable!("lhs") };
+                                let r = match vals.next() { Some(CVal::Id(i, _)) => i, _ => unreachable!("rhs") };
+                                let t = match op {
+                                    Math(op) => Term::Math(l, op, r),
+                                    Assign => Term::Assign(l, r),
+                                    Update => Term::Update(l, r),
+                                    UpdateMath(op) => Term::UpdateMath(l, op, r),
+                                    Cmp(op) => Term::Cmp(l, op, r),
+                                    Or => Term::Logic(l, true, r),
+                                    And => Term::Logic(l, false, r),
+                                    UpdateAlt => Term::UpdateAlt(l, r),
+                                    Pipe(_) | Comma | Alt => unreachable!("handled above"),
+                                };
+                                Task::Value(CVal::Term(t, Tr::new()))
+                            })
+                        }
+                    }
+                }
+                T::Path(t, path) => {
+                    let mut tasks: Vec<Prim<'s, F>> = vec![Prim::ITerm(*t, TailScope::default())];
+                    enum PartKind {
+                        Index,
+                        Range(bool, bool),
+                    }
+                    let mut kinds: Vec<(PartKind, crate::path::Opt)> = Vec::new();
+                    for (part, opt) in path.0 {
+                        match part {
+                            crate::path::Part::Index(f) => {
+                                tasks.push(Prim::ITerm(f, TailScope::default()));
+                                kinds.push((PartKind::Index, opt));
+                            }
+                            crate::path::Part::Range(from, upto) => {
+                                let hf = from.is_some();
+                                let hu = upto.is_some();
+                                if let Some(f) = from {
+                                    tasks.push(Prim::ITerm(f, TailScope::default()));
+                                }
+                                if let Some(u) = upto {
+                                    tasks.push(Prim::ITerm(u, TailScope::default()));
+                                }
+                                kinds.push((PartKind::Range(hf, hu), opt));
+                            }
+                        }
+                    }
+                    seq(tasks, move |_c, vals| {
+                        let mut vals = vals.into_iter();
+                        let t = match vals.next() { Some(CVal::Id(i, _)) => i, _ => unreachable!("path base") };
+                        let mut path = Vec::with_capacity(kinds.len());
+                        for (kind, opt) in kinds {
+                            let part = match kind {
+                                PartKind::Index => {
+                                    let f = match vals.next() { Some(CVal::Id(i, _)) => i, _ => unreachable!("index") };
+                                    crate::path::Part::Index(f)
+                                }
+                                PartKind::Range(hf, hu) => {
+                                    let from = if hf {
+                                        match vals.next() { Some(CVal::Id(i, _)) => Some(i), _ => unreachable!("from") }
+                                    } else {
+                                        None
+                                    };
+                                    let upto = if hu {
+                                        match vals.next() { Some(CVal::Id(i, _)) => Some(i), _ => unreachable!("upto") }
+                                    } else {
+                                        None
+                                    };
+                                    crate::path::Part::Range(from, upto)
+                                }
+                            };
+                            path.push((part, opt));
+                        }
+                        Task::Value(CVal::Term(Term::Path(t, crate::path::Path(path)), Tr::new()))
+                    })
+                }
+                T::Str(fmt, parts) => {
+                    use lex::StrPart;
+                    let mut tasks: Vec<Prim<'s, F>> = Vec::new();
+                    if let Some(f) = fmt {
+                        tasks.push(Prim::ITerm(T::Call(f, Vec::new()), TailScope::default()));
+                    }
+                    let parts: Vec<_> = parts.into_iter().map(|part| match part {
+                        StrPart::Str(s) => StrPart::Str(s),
+                        StrPart::Char(c) => StrPart::Char(c),
+                        StrPart::Term(f) => {
+                            tasks.push(Prim::ITerm(f, TailScope::default()));
+                            StrPart::Term(())
+                        }
+                    }).collect();
+                    let has_fmt = fmt.is_some();
+                    seq(tasks, move |c, vals| {
+                        let mut vals = vals.into_iter();
+                        let fmt = if has_fmt {
+                            match vals.next() { Some(CVal::Id(i, _)) => i, _ => unreachable!("format") }
+                        } else {
+                            c.lut.insert_term(Term::ToString)
+                        };
+                        let mut out: Vec<Term> = Vec::new();
+                        for part in parts {
+                            let lit = match part {
+                                StrPart::Str(s) => s.into(),
+                                StrPart::Char(ch) => String::from(ch),
+                                StrPart::Term(_) => {
+                                    let f = match vals.next() { Some(CVal::Id(i, _)) => i, _ => unreachable!("interpolation") };
+                                    out.push(Term::Pipe(f, None, fmt));
+                                    continue;
+                                }
+                            };
+                            match out.last_mut() {
+                                Some(Term::Str(s)) => s.push_str(&lit),
+                                _ => out.push(Term::Str(lit)),
+                            }
+                        }
+                        let mut out = out.into_iter();
+                        let first = out.next().unwrap_or_else(|| Term::Str(String::new()));
+                        let t = out.fold(first, |acc, x| {
+                            Term::Math(c.lut.insert_term(acc), ops::Math::Add, c.lut.insert_term(x))
+                        });
+                        Task::Value(CVal::Term(t, Tr::new()))
+                    })
+                }
+                T::Obj(o) => {
+                    let n = o.len();
+                    let mut tasks: Vec<Prim<'s, F>> = Vec::new();
+                    let mut kinds: Vec<ObjEntry<'s>> = Vec::with_capacity(n);
+                    for (k, v) in o {
+                        match (k, v) {
+                            (T::Var(x), None) => {
+                                tasks.push(Prim::ITerm(T::Var(x), TailScope::default()));
+                                kinds.push(ObjEntry::VarKey(&x[1..]));
+                            }
+                            (k, None) => {
+                                tasks.push(Prim::ITerm(k, TailScope::default()));
+                                kinds.push(ObjEntry::Shorthand);
+                            }
+                            (k, Some(v)) => {
+                                tasks.push(Prim::ITerm(k, TailScope::default()));
+                                tasks.push(Prim::ITerm(v, TailScope::default()));
+                                kinds.push(ObjEntry::Pair);
+                            }
+                        }
+                    }
+                    seq(tasks, move |c, vals| {
+                        use crate::path::{Part, Path};
+                        let mut vals = vals.into_iter();
+                        let mut out = Vec::with_capacity(n);
+                        for kind in kinds {
+                            let entry = match kind {
+                                ObjEntry::VarKey(name) => {
+                                    let v = match vals.next() { Some(CVal::Id(i, _)) => i, _ => unreachable!("value") };
+                                    let k = c.lut.insert_term(Term::Str(name.into()));
+                                    Term::ObjSingle(k, v)
+                                }
+                                ObjEntry::Shorthand => {
+                                    let k = match vals.next() { Some(CVal::Id(i, _)) => i, _ => unreachable!("key") };
+                                    let path = Path::from(Part::Index(k));
+                                    let id = c.lut.insert_term(Term::Id);
+                                    let v = c.lut.insert_term(Term::Path(id, path));
+                                    Term::ObjSingle(k, v)
+                                }
+                                ObjEntry::Pair => {
+                                    let k = match vals.next() { Some(CVal::Id(i, _)) => i, _ => unreachable!("key") };
+                                    let v = match vals.next() { Some(CVal::Id(i, _)) => i, _ => unreachable!("value") };
+                                    Term::ObjSingle(k, v)
+                                }
+                            };
+                            out.push(entry);
+                        }
+                        Task::Value(CVal::Term(c.obj_cat(out), Tr::new()))
+                    })
+                }
+            },
+        }
     }
 
     fn obj_cat(&mut self, terms: Vec<Term>) -> Term {
@@ -816,34 +1273,12 @@ impl<'s, F> Compiler<&'s str, F> {
     ///
     /// One example of such a term is `t` in `1 + t` or `t | .+1`.
     fn iterm(&mut self, t: parse::Term<&'s str>) -> TermId {
-        self.iterm_tr(t, &Tr::new()).0
-    }
-
-    fn iterm_tr(&mut self, t: parse::Term<&'s str>, tr: &Tr) -> (TermId, Tr) {
-        let id = self.lut.insert_term(Term::default());
-        let (t, tr_) = self.term(t, tr);
-        debug_assert!(tr_.is_subset(tr));
-        self.lut.terms[id.0] = t;
-        (id, tr_)
-    }
-
-    fn pattern(&mut self, p: parse::Pattern<&'s str>) -> Pattern<TermId> {
-        match p {
-            parse::Pattern::Var(_) => Pattern::Var,
-            parse::Pattern::Arr(a) => {
-                let iter = a
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, p)| (self.lut.insert_term(Term::Int(i as isize)), self.pattern(p)));
-                Pattern::Idx(iter.collect())
-            }
-            parse::Pattern::Obj(o) => {
-                let iter = o.into_iter().map(|(k, p)| (self.iterm(k), self.pattern(p)));
-                Pattern::Idx(iter.collect())
-            }
-            parse::Pattern::Both(_, p) => Pattern::Both(Box::new(self.pattern(*p))),
+        match self.drive(Prim::ITerm(t, TailScope::default())) {
+            CVal::Id(id, _) => id,
+            _ => unreachable!("iterm yields a term ID"),
         }
     }
+
 
     fn fail(&mut self, at: &'s str, msg: String) -> Term {
         self.errs.push((at, msg));
@@ -876,9 +1311,23 @@ impl<'s, F> Compiler<&'s str, F> {
         self.fail(full, alloc::format!("{full}/{} is not defined", args.len()))
     }
 
-    /// Resolve call to `filter(a1, ..., an)`.
-    fn call(&mut self, name: &'s str, args: &[TermId], tr: &Tr) -> (Term, Tr) {
-        if let Some(t) = self.locals.call(name, args, tr) {
+    /// Resolve call to `filter(a1, ..., an)` or `mod::filter(a1, ..., an)`.
+    fn call(&mut self, name: &'s str, args: &[TermId], tr: TailScope) -> (Term, Tr) {
+        if let Some((module, name_)) = name.split_once("::") {
+            return (self.call_mod(name, module, name_, args), Tr::new());
+        }
+        let allows = |target| {
+            let mut scope = tr;
+            while let Some(i) = scope.0 {
+                let (id, parent) = self.tail_scopes[i];
+                if id <= target {
+                    return id == target;
+                }
+                scope = parent;
+            }
+            false
+        };
+        if let Some(t) = self.locals.call(name, args, allows) {
             return t;
         }
         for mid in self.included_mods.iter().rev() {
@@ -938,24 +1387,6 @@ impl<'s, F> Compiler<&'s str, F> {
         self.fail(s, alloc::format!("$*label-{} is not defined", &x[1..]))
     }
 
-    fn obj_entry(&mut self, k: parse::Term<&'s str>, v: Option<parse::Term<&'s str>>) -> Term {
-        let (k, v) = match (k, v) {
-            (parse::Term::Var(x), None) => (
-                self.lut.insert_term(Term::Str(x[1..].into())),
-                self.iterm(parse::Term::Var(x)),
-            ),
-            (k, None) => {
-                use crate::path::{Part, Path};
-                let k = self.iterm(k);
-                let path = Path::from(Part::Index(k));
-                let path = Term::Path(self.lut.insert_term(Term::Id), path);
-                (k, self.lut.insert_term(path))
-            }
-            (k, Some(v)) => (self.iterm(k), self.iterm(v)),
-        };
-        Term::ObjSingle(k, v)
-    }
-
 }
 
 /// Variables bound by any of the alternatives `p1 ?// p2 ?// ...`, without duplicates,
@@ -983,6 +1414,71 @@ fn param_filters(mut def: parse::Def<&str>) -> parse::Def<&str> {
         }
     }
     def
+}
+
+#[test]
+fn left_nested_pipes_preserve_nested_definition_scope() {
+    let defs = 512;
+    let pipes = 1200;
+    let source = alloc::format!(
+        "{}1{}; {}f{}",
+        "def f: ".repeat(defs),
+        "; f".repeat(defs - 1),
+        "(".repeat(pipes),
+        " | .)".repeat(pipes),
+    );
+    let tm = parse::Parser::new(&source).term().unwrap();
+    let mut c = Compiler::<_, ()>::default();
+    let mut id = c.iterm(tm);
+    assert!(c.errs.is_empty());
+    for _ in 0..pipes {
+        let Term::Pipe(left, None, right) = c.lut.terms[id.0] else { panic!("expected a pipe") };
+        assert!(matches!(c.lut.terms[right.0], Term::Id));
+        id = left;
+    }
+    for _ in 0..defs {
+        let Term::CallDef(body, _, _, CallType::Inline) = c.lut.terms[id.0] else {
+            panic!("expected a resolved definition")
+        };
+        id = body;
+    }
+    assert!(matches!(c.lut.terms[id.0], Term::Int(1)));
+}
+
+#[test]
+fn deep_destructuring_preserves_scope_in_each_alternative() {
+    let depth = 1000;
+    let source = alloc::format!(
+        "null as {}$v{} ?// $fallback | {}$v{}",
+        "[".repeat(depth), "]".repeat(depth), "[".repeat(depth), "]".repeat(depth),
+    );
+    let tm = parse::Parser::new(&source).term().unwrap();
+    let mut c = Compiler::<_, ()>::default();
+    let id = c.iterm(tm);
+    assert!(c.errs.is_empty());
+    let Term::PipeAlt(_, alts) = &c.lut.terms[id.0] else { panic!("expected alternatives") };
+    assert_eq!(alts.len(), 2);
+    for (i, (nulls, pat, body)) in alts.iter().enumerate() {
+        assert_eq!(*nulls, 1);
+        let mut pat = pat;
+        let mut pat_depth = 0;
+        while let Pattern::Idx(items) = pat {
+            let [(idx, child)] = items.as_slice() else { panic!("expected one item") };
+            assert!(matches!(c.lut.terms[idx.0], Term::Int(0)));
+            pat = child;
+            pat_depth += 1;
+        }
+        assert!(matches!(pat, Pattern::Var));
+        assert_eq!(pat_depth, if i == 0 { depth } else { 0 });
+
+        let mut body = *body;
+        for _ in 0..depth {
+            let Term::Arr(inner) = c.lut.terms[body.0] else { panic!("expected an array") };
+            body = inner;
+        }
+        let Term::Var(slot) = c.lut.terms[body.0] else { panic!("expected a scoped variable") };
+        assert_eq!(slot, i);
+    }
 }
 
 /// Tail Call Optimisation.

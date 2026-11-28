@@ -12,6 +12,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools";
 import {
 	selectCollapsedTodos,
+	TODO_STRIKE_FRAME_MS,
 	TODO_STRIKE_HOLD_FRAMES,
 	TODO_STRIKE_TOTAL_FRAMES,
 	type TodoItem,
@@ -19,7 +20,6 @@ import {
 	type TodoStatus,
 	todoMatchesAnyDescription,
 } from "@oh-my-pi/pi-coding-agent/tools/details/todo";
-import { SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-tui/term/painters/spinner";
 import { createTestTerminal, type TestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
 import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import { ToolBlock, ToolCall, type ToolCallResult } from "../../src/ui/transcript/tool-block";
@@ -175,7 +175,7 @@ it("renders completed tasks as checked before revealing strikethrough", async ()
 		expect(Bun.stripANSI(firstFrame)).toContain("finish");
 		expect(firstFrame).not.toContain("\x1b[9m");
 
-		term.tick(SPINNER_INTERVAL_MS * (TODO_STRIKE_HOLD_FRAMES + 1));
+		term.tick(TODO_STRIKE_FRAME_MS * (TODO_STRIKE_HOLD_FRAMES + 1));
 		const revealFrame = term.rows().join("\n");
 		expect(Bun.stripANSI(revealFrame)).toContain("finish");
 		expect(revealFrame).toContain("\x1b[9m");
@@ -428,7 +428,7 @@ describe("TodoTool operations", () => {
 		// Editors/serializers (e.g. content pasted from a markdown renderer) escape
 		// `[` and `]`; the line still renders as a checkbox, so it must parse rather
 		// than error out and drop the user's edits (issue #9188).
-		const md = ["# Todos", "* \\[x] first", "- \\[ \\] second", "+ \\[/\\] third"].join("\n");
+		const md = ["# Todos", "* \\[x] first", "- \\[ \\] second", "  ", "  + \\[/\\] third"].join("\n");
 		const { phases, errors } = markdownToPhases(md);
 		expect(errors).toEqual([]);
 		const tasks = phases[0]?.tasks ?? [];
@@ -786,12 +786,7 @@ describe("todo result card phase collapsing", () => {
 		const lines = Bun.stripANSI(rendered)
 			.split("\n")
 			.filter(line => line.trim() !== "");
-		return lines.slice(1, -1).map(line =>
-			line
-				.replace(/^│/, "")
-				.replace(/│\s*$/, "")
-				.trim(),
-		);
+		return lines.slice(1, -1).map(line => line.replace(/^│/, "").replace(/│\s*$/, "").trim());
 	}
 	it("collapses untouched phases to a one-line summary while expanding the active phase", async () => {
 		const result = await buildThreePhaseAfterDone();
@@ -821,7 +816,7 @@ describe("todo result card phase collapsing", () => {
 		const strikeSpan = (): string => /\x1b\[9m(.*?)\x1b\[29m/.exec(term.rows().join("\n"))?.[1] ?? "";
 		try {
 			expect(strikeSpan()).toBe("");
-			term.tick(SPINNER_INTERVAL_MS * TODO_STRIKE_TOTAL_FRAMES);
+			term.tick(TODO_STRIKE_FRAME_MS * TODO_STRIKE_TOTAL_FRAMES);
 			expect(strikeSpan()).toBe("a1");
 		} finally {
 			term.dispose();

@@ -378,7 +378,8 @@ function serveModelRegistry(state: PeerAuthState): RpcServe<ModelRegistry, Model
 		refreshDiscoverableProviders: (registry, providerIds, strategy) =>
 			registry.refreshDiscoverableProviders(providerIds, strategy),
 		refreshRuntimeProviders: (registry, strategy) => registry.refreshRuntimeProviders(strategy),
-		hydrateCredentialScopedModelCaches: registry => registry.hydrateCredentialScopedModelCaches(),
+		hydrateCredentialScopedModelCaches: (registry, providers) =>
+			registry.hydrateCredentialScopedModelCaches(providers === undefined ? undefined : new Set(providers)),
 		reapplyModelPolicies: registry => registry.reapplyModelPolicies(),
 		refreshInBackground: (registry, strategy) => registry.refreshInBackground(strategy),
 		isBackgroundRefreshPending: registry => registry.isBackgroundRefreshPending(),
