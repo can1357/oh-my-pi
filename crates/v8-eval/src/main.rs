@@ -1,3 +1,4 @@
+mod allocator;
 mod protocol;
 mod runtime;
 mod sandbox;

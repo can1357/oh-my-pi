@@ -42,7 +42,7 @@ pub enum BridgeOp {
 	Read {
 		path:    String,
 		#[serde(skip_serializing_if = "Option::is_none")]
-		options: Option<serde_json::Value>,
+		options: Option<Box<serde_json::value::RawValue>>,
 	},
 	Write {
 		path:     String,
