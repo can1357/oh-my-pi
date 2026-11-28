@@ -58,6 +58,11 @@ export interface AsyncJobWire {
 	readonly process?: { readonly command: string; readonly cwd: string; readonly pids: readonly number[] };
 	/** Whether the job offers widget inputs on the root's thread. */
 	readonly hasWidgetInputs: boolean;
+	/**
+	 * Which registration from a worker this row is, unique on main for its lifetime (see
+	 * {@link AsyncJobManagerProtocol.register}); absent for a row nothing registered from a worker.
+	 */
+	readonly registrationId?: number;
 }
 
 /** New text of one widget source since the previous delta. */
@@ -96,6 +101,11 @@ export interface WireRegisterOptions {
 	readonly foreground?: boolean;
 	readonly intent?: string;
 	readonly feed?: WireJobFeed;
+	/**
+	 * Called once main discards the row of this foreground job after its release, with its id and
+	 * {@link AsyncJobWire.registrationId}; never once main promoted it.
+	 */
+	readonly onDiscard?: WireCallback<[jobId: string, registrationId: number]>;
 }
 
 /** The run context main hands a worker job body. */
@@ -121,9 +131,10 @@ export type AsyncJobManagerProtocol = {
 	atCapacity: RpcMethod<[], boolean>;
 	onJobSettled: RpcMethod<[listener: WireCallback<[]>], WireUnsubscribe>;
 	onJobsChanged: RpcMethod<[listener: WireCallback<[]>, ids: readonly string[] | undefined], WireUnsubscribe>;
+	/** The job's id and its {@link AsyncJobWire.registrationId}, which no other row ever carries. */
 	register: RpcMethod<
 		[type: AsyncJobType, label: string, run: WireJobRun, options: WireRegisterOptions | undefined],
-		string
+		{ id: string; registrationId: number }
 	>;
 	publishCompleted: RpcMethod<
 		[

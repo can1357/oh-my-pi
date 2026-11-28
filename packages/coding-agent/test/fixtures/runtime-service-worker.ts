@@ -2,6 +2,8 @@ import { type MessagePort, parentPort } from "node:worker_threads";
 import {
 	ASYNC_JOB_MANAGER_SHUTDOWN_REASON,
 	type AsyncJobManagerApi,
+	type AsyncJobRegisterOptions,
+	type AsyncJobRun,
 	type AsyncJobRunResult,
 } from "../../src/async/job-manager";
 import { Settings } from "../../src/config/settings";
@@ -19,6 +21,7 @@ import { RemoteArtifactManager, RemoteCostGate, RemoteEventBus } from "../../src
 import { settingsThreadService } from "../../src/thread/services/settings";
 import type { ToolSession } from "../../src/tools";
 import { EventBus, emitSubagentFrame } from "../../src/utils/event-bus";
+import { collectGarbage } from "../helpers/heap-snapshot";
 
 /** Worker-side probe the test calls through the function it registers at boot. */
 export type RuntimeProbe = (op: string, ...args: unknown[]) => unknown;
@@ -31,6 +34,8 @@ interface Body {
 	signal?: AbortSignal;
 	report?: (text: string, assignment?: string) => Promise<void>;
 	tap?: TextTap;
+	/** Set by `registerJob` instead of `tap`: only the product's holders keep the job's tap alive. */
+	tapRef?: WeakRef<TextTap>;
 }
 
 const bodies = new Map<string, Body>();
@@ -97,6 +102,70 @@ function registerBody(jobs: AsyncJobManagerApi, ownerId: string, withInputs: boo
 				: {}),
 		},
 	);
+	bodies.set(id, entry);
+	return id;
+}
+
+/** Options of the `registerJob` probe. */
+interface JobOptions {
+	id?: string;
+	foreground?: boolean;
+	/** Give the job a process and a tap as its widget inputs, which this fixture holds only weakly. */
+	inputs?: boolean;
+}
+
+function jobOptions(value: unknown): JobOptions {
+	if (typeof value !== "object" || value === null) return {};
+	const id = Reflect.get(value, "id");
+	return {
+		id: typeof id === "string" ? id : undefined,
+		foreground: Reflect.get(value, "foreground") === true,
+		inputs: Reflect.get(value, "inputs") === true,
+	};
+}
+
+/**
+ * A body that keeps its run context past its end, as a body may (here through `entry.report`), and
+ * reaches its tap only through `entry.tapRef`. Built apart from the tap, so no closure it leaves
+ * behind has the tap in its scope.
+ */
+function heldContextBody(entry: Body): AsyncJobRun {
+	return async ({ signal, reportProgress, markRunning }) => {
+		entry.signal = signal;
+		entry.report = (text, assignment) =>
+			reportProgress(text, assignment ? { progress: [{ assignment }] } : undefined);
+		markRunning();
+		const aborted = Promise.withResolvers<never>();
+		signal.addEventListener("abort", () => aborted.reject(new Error("aborted")), { once: true });
+		try {
+			return await Promise.race([entry.finish.promise, aborted.promise]);
+		} finally {
+			entry.tapRef?.deref()?.close();
+		}
+	};
+}
+
+/** Live inputs over a tap that `entry` holds only through a `WeakRef`. */
+function weakTapInputs(entry: Body): Pick<AsyncJobRegisterOptions, "process" | "widgetInputs"> {
+	const tap = new TextTap("out", "fixture output");
+	entry.tapRef = new WeakRef(tap);
+	return {
+		process: { command: "fixture --run", cwd: "/fixture", pids: () => [4242] },
+		widgetInputs: {
+			sources: () => [tap],
+			brief: () => ({ kind: "bash" as const, command: "fixture --run" }),
+		},
+	};
+}
+
+function registerJob(jobs: AsyncJobManagerApi, ownerId: string, options: JobOptions): string {
+	const entry: Body = { finish: Promise.withResolvers() };
+	const id = jobs.register("bash", "fixture job", heldContextBody(entry), {
+		ownerId,
+		id: options.id,
+		foreground: options.foreground,
+		...(options.inputs ? weakTapInputs(entry) : {}),
+	});
 	bodies.set(id, entry);
 	return id;
 }
@@ -169,6 +238,48 @@ const probe: RuntimeProbe = async (op, ...args) => {
 		case "localInputs": {
 			const job = manager(args[0]).getJob(String(args[1]));
 			return { hasWidgetInputs: job?.widgetInputs !== undefined, pids: job?.process?.pids() ?? null };
+		}
+		case "listedInputs": {
+			const job = manager(args[0])
+				.getAllJobs()
+				.find(row => row.id === String(args[1]));
+			return job ? { hasWidgetInputs: job.widgetInputs !== undefined, pids: job.process?.pids() ?? null } : null;
+		}
+		case "publishCompleted":
+			return manager(args[0]).publishCompleted(
+				"task",
+				"fixture result",
+				{ text: String(args[2]) },
+				{
+					id: String(args[1]),
+					ownerId: "Worker",
+				},
+			);
+		case "publishFailed":
+			return manager(args[0]).publishFailed("task", "fixture failure", String(args[2]), {
+				id: String(args[1]),
+				ownerId: "Worker",
+			});
+		case "registerJob":
+			return registerJob(manager(args[0]), String(args[1]), jobOptions(args[2]));
+		case "appendHeld":
+			body(args[0]).tapRef?.deref()?.append(String(args[1]));
+			return true;
+		case "releaseForeground":
+			manager(args[0]).releaseForegroundJob(String(args[1]));
+			return true;
+		case "gc":
+			await collectGarbage();
+			return true;
+		case "tapAlive":
+			return body(args[0]).tapRef?.deref() !== undefined;
+		case "localSources": {
+			const job = manager(args[0]).getJob(String(args[1]));
+			const sources = job?.widgetInputs?.sources() ?? [];
+			return sources.map(source => {
+				const { text, open } = source.read(0);
+				return { text, open };
+			});
 		}
 		case "cancelAllShutdown":
 			manager(args[0]).cancelAll(undefined, ASYNC_JOB_MANAGER_SHUTDOWN_REASON);

@@ -17,6 +17,12 @@ export async function rejectionOf(promise: Promise<unknown>): Promise<unknown> {
 	throw new Error("Expected promise to reject, but it resolved");
 }
 
+/** The message of `promise`'s rejection (its error's message, or the reason as text); fail if it resolves. */
+export async function rejectionMessage(promise: Promise<unknown>): Promise<string> {
+	const error = await rejectionOf(promise);
+	return error instanceof Error ? error.message : String(error);
+}
+
 /**
  * Record `unhandledRejection` events until `release()`. `capture()` reads the
  * events seen so far; `release()` detaches the listener and returns them.
