@@ -5668,7 +5668,9 @@ impl OutputBuffer {
 
 	/// Copy the file the script calls `name`, opened through `fs` at `path`, to
 	/// the output. A file that can't be opened counts as empty (POSIX); a
-	/// directory or a failed read is GNU's fatal `read error`.
+	/// directory or a failed read is GNU's fatal `read error`. A separator the
+	/// output lacks stays pending: GNU sed writes it before the text that `r`
+	/// queued, but not before `0r`'s file.
 	pub fn copy_file(&mut self, fs: &BlockingFs, path: &Path, name: &Path) -> SedResult<()> {
 		// Flush snapshot writes, if any.
 		#[cfg(unix)]
@@ -5685,7 +5687,6 @@ impl OutputBuffer {
 			Err(_) => return Ok(()),
 		};
 
-		self.flush_pending_separator()?;
 		let mut buf = [0; 8 * 1024];
 		loop {
 			let len = match file.read(&mut buf) {
@@ -5708,6 +5709,19 @@ impl OutputBuffer {
 			return Ok(());
 		}
 		self.flush_pending_separator()?;
+		#[cfg(unix)]
+		self.flush_slice(WriteRange::Complete)?;
+		self.out.write_all(bytes)?;
+		if bytes.contains(&self.separator) || bytes.contains(&b'\n') {
+			self.flush_completed_line()?;
+		}
+		Ok(())
+	}
+
+	/// Write `bytes` as they are, leaving the separator the output lacks
+	/// pending: a `w /dev/stdout` file writes into sed's output stream with a
+	/// missing separator of its own, as GNU sed's does.
+	pub(super) fn write_unpaired(&mut self, bytes: &[u8]) -> io::Result<()> {
 		#[cfg(unix)]
 		self.flush_slice(WriteRange::Complete)?;
 		self.out.write_all(bytes)?;
@@ -7638,7 +7652,7 @@ pub mod named_writer {
 
 use std::{
 	cell::RefCell,
-	io::{BufWriter, Write},
+	io::{self, BufWriter, Write},
 	path::PathBuf,
 	rc::Rc,
 };
@@ -7724,9 +7738,6 @@ impl NamedWriter {
 		context: &ProcessingContext,
 		host: &mut Host,
 	) -> SedResult<()> {
-		if matches!(self.target, Target::Stdout) && !context.in_place {
-			return output.write_chunk(pattern).map_err(|e| self.flush_error(&e));
-		}
 		self.write_record(pattern.as_bytes(), pattern.is_terminated(), output, context, host)
 	}
 
@@ -7759,7 +7770,7 @@ impl NamedWriter {
 		let result = match &mut self.target {
 			Target::File(writer) => write_record_to(writer, bytes, terminated, context, pending),
 			Target::Stdout if context.in_place => write_record_to(&mut host.stdout, bytes, terminated, context, pending),
-			Target::Stdout => output.write_owned_content(bytes, terminated),
+			Target::Stdout => write_record_to(&mut SharedStdout(output), bytes, terminated, context, pending),
 			Target::Stderr => write_record_to(&mut host.stderr, bytes, terminated, context, pending),
 			Target::Closed => Err(std::io::Error::other("file already closed")),
 		};
@@ -7787,7 +7798,22 @@ impl NamedWriter {
 	}
 }
 
-/// Write to a `w` destination other than sed's current output stream.
+/// Sed's output stream as a `w /dev/stdout` file writes into it, keeping a
+/// missing separator of its own apart from the one sed's output lacks.
+struct SharedStdout<'a>(&'a mut OutputBuffer);
+
+impl Write for SharedStdout<'_> {
+	fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+		self.0.write_unpaired(buf)?;
+		Ok(buf.len())
+	}
+
+	fn flush(&mut self) -> io::Result<()> {
+		self.0.flush()
+	}
+}
+
+/// Write to a `w` destination with its own missing separator.
 fn write_record_to(
 	writer: &mut impl Write,
 	bytes: &[u8],
@@ -8069,11 +8095,13 @@ fn shell_output(cmd: &[u8], host: &Host) -> SedResult<Vec<u8>> {
 		.map_err(|_| SedError::new(4, "error in subprocess"))
 }
 
-/// Drop one trailing line terminator from shell output that replaces the pattern space.
-fn trim_line_end(output: &mut Vec<u8>) {
-	if output.ends_with(b"\r\n") {
+/// Drop one trailing record separator from shell output that replaces the
+/// pattern space, as GNU sed does: the newline, or NUL under -z; a carriage
+/// return stays. cmd.exe ends its lines with CRLF.
+fn trim_line_end(output: &mut Vec<u8>, separator: u8) {
+	if cfg!(windows) && separator == b'\n' && output.ends_with(b"\r\n") {
 		output.truncate(output.len() - 2);
-	} else if output.ends_with(b"\n") {
+	} else if output.last() == Some(&separator) {
 		output.pop();
 	}
 }
@@ -8156,7 +8184,7 @@ fn substitute(
 
 	if sub.execute {
 		let mut shell_out = shell_output(pattern.as_bytes(), host)?;
-		trim_line_end(&mut shell_out);
+		trim_line_end(&mut shell_out, context.separator());
 		pattern.set_bytes(shell_out, pattern.is_terminated());
 	}
 
@@ -8199,6 +8227,11 @@ fn transliterate(pattern: &mut IOChunk, trans: &Transliteration) {
 
 /// Output any data queued for output at the end of the cycle.
 fn flush_appends(output: &mut OutputBuffer, context: &mut ProcessingContext) -> SedResult<()> {
+	// The separator the output lacks comes first, also for a file `r` cannot
+	// read.
+	if !context.append_elements.is_empty() {
+		output.flush_pending_separator()?;
+	}
 	for elem in &context.append_elements {
 		match elem {
 			AppendElement::Text(text) => {
@@ -8400,7 +8433,7 @@ fn process_file(
 					if shell_cmd.is_empty() {
 						// Replace the pattern space with the output of running it.
 						let mut shell_out = shell_output(pattern.as_bytes(), host)?;
-						trim_line_end(&mut shell_out);
+						trim_line_end(&mut shell_out, separator);
 						pattern.set_bytes(shell_out, pattern.is_terminated());
 					} else {
 						// Output the command's output before the end-of-cycle print.
@@ -8461,6 +8494,16 @@ fn process_file(
 					break;
 				},
 				'N' => {
+					// Like `$`, this looks past the following operands, reading
+					// a directory as empty.
+					let last_line =
+						reader.last_line().map_err(|e| read_error(&context.input_name, &e))?;
+					context.looked_past_input |= last_line;
+					// With no next line GNU sed ends the script: the pattern
+					// space is printed as it is, then the text `a` or `r` queued.
+					if last_line && (context.last_file || context.separate) {
+						break;
+					}
 					flush_appends(output, context)?;
 					// Append a separator and the next record.
 					// Rather than reading input here, which would result
@@ -8580,6 +8623,8 @@ fn process_file(
 		reader.recycle(pattern);
 
 		if context.stop_processing {
+			// `q` ends the last line written, as GNU sed does.
+			output.flush_pending_separator()?;
 			break;
 		}
 	}
@@ -10061,6 +10106,54 @@ mod tests {
 	}
 
 	#[test]
+	fn a_last_line_without_a_newline_keeps_lacking_it() {
+		// GNU sed 4.9 writes the newline a line lacks only before more output
+		// to the same stream; a `w /dev/stdout` file keeps a missing newline
+		// of its own. `nb` and `nd` hold `a\nb` and `c\nd`, each without its
+		// last newline, and `f` holds `x\n`.
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("nb"), "a\nb").unwrap();
+		std::fs::write(dir.path().join("nd"), "c\nd").unwrap();
+		std::fs::write(dir.path().join("f"), "x\n").unwrap();
+		for (args, stdin, expected) in [
+			(&["p;w /dev/stdout"][..], "a", "aa\na"),
+			(&["w /dev/stdout"], "a\nb", "a\na\nbb"),
+			(&["w /dev/stdout", "nb", "nd"], "", "a\na\nbb\nc\n\nc\ndd"),
+			// `0r` writes its file before line 1 of each file, not after the
+			// newline the last file lacks.
+			(&["-s", "0r f", "nb", "nd"], "", "x\na\nbx\n\nc\nd"),
+			// `r` ends the line before its file, also for a file it cannot read,
+			// and after an `N` that has no next line to read.
+			(&["r nonexistent"], "a", "a\n"),
+			(&["-e", "1r f", "-e", "N"], "a", "a\nx\n"),
+			// `q` ends the last line written.
+			(&["2q"], "a\nb", "a\nb\n"),
+		] {
+			let (code, capture) = crate::host::run_util::<Sed>(args, stdin, dir.path());
+			let out = capture.out();
+			assert_eq!((code, out.as_str()), (0, expected), "{args:?}: {}", capture.err());
+		}
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn execute_strips_the_record_delimiter() {
+		// GNU sed 4.9 strips one line delimiter, the NUL under -z, from the end
+		// of what the command of `s///e` or of `e` writes, and no carriage
+		// return.
+		for (args, stdin, expected) in [
+			(&["-z", "s/x/echo y/e"][..], "x\0", "y\n\0"),
+			(&["-z", r#"s/x/printf "y\\0"/e"#], "x\0", "y\0"),
+			(&["-z", "e"], "echo hi\0", "hi\n\0"),
+			(&[r#"s/x/printf "y\\r\\n"/e"#], "x\n", "y\r\n"),
+		] {
+			let (code, capture) = crate::host::run_util::<Sed>(args, stdin, "/");
+			let out = capture.out();
+			assert_eq!((code, out.as_str()), (0, expected), "{args:?}: {}", capture.err());
+		}
+	}
+
+	#[test]
 	fn builtin_edits_relative_path_in_place() {
 		let dir = tempfile::tempdir().unwrap();
 		std::fs::write(dir.path().join("file.txt"), "x marks\n").unwrap();
@@ -10354,7 +10447,8 @@ mod tests {
 	#[test]
 	fn builtin_reports_directory_operands_like_gnu() {
 		// A directory operand was "can't read" and skipped; GNU stops with a read
-		// error, unless a `$` check already read past it, and refuses it for -i.
+		// error, unless a `$` check or an `N` on the last line already read past
+		// it, and refuses it for -i.
 		let dir = tempfile::tempdir().unwrap();
 		std::fs::create_dir(dir.path().join("d")).unwrap();
 		std::fs::write(dir.path().join("f1"), "a\n").unwrap();
@@ -10363,6 +10457,7 @@ mod tests {
 			(&["p", "d"][..], "", read_error, 4),
 			(&["p", "f1", "d"][..], "a\na\n", read_error, 4),
 			(&["-n", "$p", "f1", "d"][..], "a\n", "", 0),
+			(&["N", "f1", "d"][..], "a\n", "", 0),
 			(&["r d"][..], "x\n", read_error, 4),
 			(&["-i", "p", "d"][..], "", "sed: couldn't edit d: not a regular file\n", 4),
 		] {
