@@ -189,6 +189,51 @@ describe("github-cache db layer", () => {
 		expect(getCached("gitlab.com/g/p", "mr-diff", 1, false)?.rendered).toBe("mr-diff-body");
 	});
 
+	it("adds mr-diff generations without dropping existing PR pins", () => {
+		const legacy = new Database(process.env.OMP_GITHUB_CACHE_DB!);
+		legacy.run(`
+			CREATE TABLE github_view_cache (
+				auth_key TEXT NOT NULL, repo TEXT NOT NULL,
+				kind TEXT NOT NULL CHECK (kind IN ('issue','pr','pr-diff','mr','mr-diff','gl-issue')),
+				number INTEGER NOT NULL, include_comments INTEGER NOT NULL, fetched_at INTEGER NOT NULL,
+				payload TEXT NOT NULL, rendered TEXT NOT NULL, source_url TEXT,
+				PRIMARY KEY (auth_key, repo, kind, number, include_comments)
+			);
+			CREATE TABLE github_view_cache_generation (
+				auth_key TEXT NOT NULL, repo TEXT NOT NULL,
+				kind TEXT NOT NULL CHECK (kind IN ('issue','pr','pr-diff')),
+				number INTEGER NOT NULL, include_comments INTEGER NOT NULL,
+				fetched_at INTEGER NOT NULL, retained_at INTEGER NOT NULL,
+				payload TEXT NOT NULL, rendered TEXT NOT NULL, source_url TEXT,
+				PRIMARY KEY (auth_key, repo, kind, number, include_comments, fetched_at)
+			);
+			INSERT INTO github_view_cache_generation VALUES (
+				'test-auth', 'owner/example', 'pr-diff', 321, 0, 12345, 12346,
+				'{"files":[]}', 'pinned-pr-diff', NULL
+			);
+			PRAGMA user_version = 5;
+		`);
+		legacy.close();
+		resetCacheForTests();
+
+		expect(getCachedGeneration(TEST_REPO, "pr-diff", 321, false, 12345, TEST_AUTH_KEY)?.rendered).toBe(
+			"pinned-pr-diff",
+		);
+		const mrFetchedAt = retainCachedGeneration({
+			authKey: TEST_AUTH_KEY,
+			repo: TEST_REPO,
+			kind: "mr-diff",
+			number: 321,
+			includeComments: false,
+			payload: { files: [] },
+			rendered: "mr-diff",
+		});
+		expect(mrFetchedAt).not.toBeNull();
+		expect(getCachedGeneration(TEST_REPO, "mr-diff", 321, false, mrFetchedAt!, TEST_AUTH_KEY)?.rendered).toBe(
+			"mr-diff",
+		);
+	});
+
 	it("preserves rows across openDb() and honors the configured hard TTL via per-lookup sweep", async () => {
 		const DAY_MS = 86_400_000;
 		const fourteenDaysAgo = Date.now() - 14 * DAY_MS;
@@ -212,8 +257,7 @@ describe("github-cache db layer", () => {
 		expect(getCached(TEST_REPO, "issue", 314, true, TEST_AUTH_KEY)?.rendered).toBe("fourteen-days-old");
 
 		// Configured retention of 30 days: row is well within hard TTL. Use a
-		// soft TTL >= 14d so the lookup returns "fresh" and does NOT schedule a
-		// background refresh that would clobber `fetched_at`.
+		// Soft TTL >= 14d keeps the row fresh without changing its timestamp.
 		const generousSettings = Settings.isolated({
 			"github.cache.softTtlSec": 30 * 86_400,
 			"github.cache.hardTtlSec": 30 * 86_400,
@@ -470,13 +514,14 @@ describe("getOrFetchView (TTL semantics)", () => {
 		expect(fetchFresh).toHaveBeenCalledTimes(1);
 	});
 
-	it("keeps PR diff rows stale-first past soft TTL", async () => {
+	it("reuses a diff row only when the live revision matches, regardless of soft TTL", async () => {
 		const settings = Settings.isolated({
 			"github.cache.softTtlSec": 60,
 			"github.cache.hardTtlSec": 86400,
 		});
+		const fetchRevision = vi.fn(async () => "base-a/head-a");
 		const fetchFresh = vi.fn(async () => ({
-			rendered: "refreshed-diff",
+			rendered: "live-diff",
 			sourceUrl: undefined,
 			payload: { files: [], refreshed: true },
 		}));
@@ -486,7 +531,8 @@ describe("getOrFetchView (TTL semantics)", () => {
 			number: 52,
 			includeComments: false,
 			payload: { files: [], refreshed: false },
-			rendered: "old-diff",
+			rendered: "cached-diff",
+			revision: "base-a/head-a",
 			fetchedAt: Date.now() - 5 * 60_000,
 		});
 
@@ -495,31 +541,87 @@ describe("getOrFetchView (TTL semantics)", () => {
 			kind: "pr-diff",
 			number: 52,
 			includeComments: false,
+			fetchRevision,
 			fetchFresh,
 			settings,
 		});
 
-		expect(result.status).toBe("stale");
-		expect(result.rendered).toBe("old-diff");
-
-		for (let i = 0; i < 100; i++) {
-			const refreshed = getCached<{ refreshed: boolean }>(TEST_REPO, "pr-diff", 52, false);
-			if (refreshed?.payload.refreshed) break;
-			await Bun.sleep(0);
-		}
-
-		expect(fetchFresh).toHaveBeenCalledTimes(1);
-		const updated = getCached<{ refreshed: boolean }>(TEST_REPO, "pr-diff", 52, false);
-		expect(updated?.rendered).toBe("refreshed-diff");
-		expect(updated?.payload.refreshed).toBe(true);
-		expect(getCachedGeneration(TEST_REPO, "pr-diff", 52, false, result.fetchedAt)).toBeNull();
+		expect(result.status).toBe("fresh");
+		expect(result.rendered).toBe("cached-diff");
+		expect(fetchRevision).toHaveBeenCalledTimes(1);
+		expect(fetchFresh).not.toHaveBeenCalled();
 	});
 
-	it("does not retain a generation when a pr-diff row is written or served stale", async () => {
+	it("rejects a diff when its revision changes during the live fetch", async () => {
+		const fetchRevision = vi
+			.fn<() => Promise<string | undefined>>()
+			.mockResolvedValueOnce("base-b/head-b")
+			.mockResolvedValueOnce("base-c/head-c");
+		const fetchFresh = vi.fn(async () => ({
+			rendered: "live-diff",
+			sourceUrl: undefined,
+			payload: { files: [] },
+		}));
+		putCached({
+			repo: TEST_REPO,
+			kind: "pr-diff",
+			number: 54,
+			includeComments: false,
+			payload: { files: [] },
+			rendered: "old-diff",
+			revision: "base-a/head-a",
+		});
+
+		await expect(
+			getOrFetchView({
+				repo: TEST_REPO,
+				kind: "pr-diff",
+				number: 54,
+				includeComments: false,
+				fetchRevision,
+				fetchFresh,
+			}),
+		).rejects.toThrow(/revision changed while fetching/i);
+		expect(fetchFresh).toHaveBeenCalledTimes(1);
+		expect(getCached(TEST_REPO, "pr-diff", 54, false)?.rendered).toBe("old-diff");
+	});
+
+	it("fetches live without caching when the revision is unavailable", async () => {
+		const fetchFresh = vi.fn(async () => ({
+			rendered: "live-diff",
+			sourceUrl: undefined,
+			payload: { files: [] },
+		}));
+		putCached({
+			repo: TEST_REPO,
+			kind: "pr-diff",
+			number: 55,
+			includeComments: false,
+			payload: { files: [] },
+			rendered: "unchecked-diff",
+			revision: "base-a/head-a",
+		});
+
+		const result = await getOrFetchView({
+			repo: TEST_REPO,
+			kind: "pr-diff",
+			number: 55,
+			includeComments: false,
+			fetchRevision: async () => undefined,
+			fetchFresh,
+		});
+
+		expect(result.rendered).toBe("live-diff");
+		expect(fetchFresh).toHaveBeenCalledTimes(1);
+		expect(getCached(TEST_REPO, "pr-diff", 55, false)?.rendered).toBe("unchecked-diff");
+	});
+
+	it("does not retain generations for live diff writes or reads", async () => {
 		const settings = Settings.isolated({
 			"github.cache.softTtlSec": 60,
 			"github.cache.hardTtlSec": 86400,
 		});
+		const revision = "base-a/head-a";
 		const firstAt = Date.now() - 5 * 60_000;
 		putCached({
 			repo: TEST_REPO,
@@ -528,6 +630,7 @@ describe("getOrFetchView (TTL semantics)", () => {
 			includeComments: false,
 			payload: { files: [] },
 			rendered: "same-diff",
+			revision,
 			fetchedAt: firstAt,
 		});
 		putCached({
@@ -537,6 +640,7 @@ describe("getOrFetchView (TTL semantics)", () => {
 			includeComments: false,
 			payload: { files: [] },
 			rendered: "same-diff",
+			revision,
 			fetchedAt: firstAt + 1_000,
 		});
 
@@ -545,6 +649,7 @@ describe("getOrFetchView (TTL semantics)", () => {
 			kind: "pr-diff",
 			number: 88,
 			includeComments: false,
+			fetchRevision: async () => revision,
 			fetchFresh: async () => ({
 				rendered: "should-not-run",
 				sourceUrl: undefined,
@@ -553,7 +658,7 @@ describe("getOrFetchView (TTL semantics)", () => {
 			settings,
 		});
 
-		expect(result.status).toBe("stale");
+		expect(result.status).toBe("fresh");
 		expect(result.rendered).toBe("same-diff");
 		const generations = openDb()?.query("SELECT COUNT(*) AS c FROM github_view_cache_generation").get() as
 			| { c: number }
@@ -608,47 +713,38 @@ describe("getOrFetchView (TTL semantics)", () => {
 		expect(getCachedGeneration(TEST_REPO, "pr-diff", 92, false, fetchedAt)).toBeNull();
 	});
 
-	it("does not let a refresh started before an invalidation overwrite the post-invalidation row", async () => {
+	it("does not let a diff fetch started before invalidation overwrite the post-invalidation row", async () => {
 		const oldRefresh = Promise.withResolvers<{
 			rendered: string;
 			sourceUrl: undefined;
 			payload: { head: string };
 		}>();
 		const started = Promise.withResolvers<void>();
-		putCached({
-			repo: TEST_REPO,
-			kind: "pr-diff",
-			number: 54,
-			includeComments: false,
-			rendered: "head A",
-			payload: { head: "A" },
-			fetchedAt: Date.now() - 300_000,
-		});
 		const options = {
 			repo: TEST_REPO,
 			kind: "pr-diff" as const,
 			number: 54,
 			includeComments: false,
 			settings: Settings.isolated({ "github.cache.softTtlSec": 60 }),
+			fetchRevision: async () => "base-a/head-a",
 			fetchFresh: () => {
 				started.resolve();
 				return oldRefresh.promise;
 			},
 		};
-		expect((await getOrFetchView(options)).status).toBe("stale");
+		const oldLookup = getOrFetchView(options);
 		await started.promise;
 		invalidateAllForRepo(TEST_REPO);
 		const next = await getOrFetchView({
 			...options,
+			fetchRevision: async () => "base-b/head-b",
 			fetchFresh: async () => ({ rendered: "head B", sourceUrl: undefined, payload: { head: "B" } }),
 		});
 		expect(next.rendered).toBe("head B");
 		oldRefresh.resolve({ rendered: "head A", sourceUrl: undefined, payload: { head: "A" } });
-		// Drain the queued refresh's store and finally callbacks, not an OS clock.
-		await oldRefresh.promise;
-		await Promise.resolve();
-		await Promise.resolve();
+		await oldLookup;
 		expect(getCached(TEST_REPO, "pr-diff", 54, false)?.rendered).toBe("head B");
+		expect(getCached(TEST_REPO, "pr-diff", 54, false)?.revision).toBe("base-b/head-b");
 	});
 
 	it("treats past-hard-TTL rows as cache misses (fetcher runs)", async () => {

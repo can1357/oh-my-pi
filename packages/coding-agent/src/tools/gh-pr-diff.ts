@@ -451,6 +451,27 @@ export async function fetchPrDiffFresh(
 	return { rendered: text, sourceUrl: undefined, payload: { unified: "", files: payload.files } };
 }
 
+interface GhPrRevision {
+	baseRefOid?: string;
+	headRefOid?: string;
+}
+
+async function fetchPrRevision(
+	cwd: string,
+	repo: string,
+	number: number,
+	signal: AbortSignal | undefined,
+): Promise<string | undefined> {
+	const args = ["pr", "view", String(number), "--json", "baseRefOid,headRefOid"];
+	appendRepoFlag(args, repo, String(number));
+	const revision = await github.json<GhPrRevision>(cwd, args, signal, { repoProvided: true });
+	const { baseRefOid, headRefOid } = revision;
+	if (typeof baseRefOid !== "string" || !baseRefOid || typeof headRefOid !== "string" || !headRefOid) {
+		return undefined;
+	}
+	return `${baseRefOid}:${headRefOid}`;
+}
+
 /**
  * Cache-aware PR diff fetcher. Stores the full unified diff plus a parsed
  * file index in a single `pr-diff` cache row so the listing, full-diff, and
@@ -468,6 +489,7 @@ export async function getOrFetchPrDiff(options: PrDiffLookupOptions): Promise<Vi
 		settings: options.settings,
 		authKey,
 		fetchFresh: doFetch,
+		fetchRevision: () => fetchPrRevision(options.cwd, options.repo, options.number, options.signal),
 	});
 	return {
 		rendered: lookup.rendered,

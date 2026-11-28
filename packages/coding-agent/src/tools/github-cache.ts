@@ -8,12 +8,13 @@
  *   helpers swallow open/IO failures and degrade to "no cache" so a corrupt or
  *   unreadable DB never blocks a `gh` call.
  *
- *   Soft TTL → return cached row directly. An open issue/PR row stays fresh for at
- *     most OPEN_STATE_SOFT_TTL_MS, since a merge or close can land at any moment.
- *   Stateful issue/PR rows past soft TTL but within hard TTL → refresh
- *     synchronously, falling back to the cached row if the live fetch fails.
- *   Expensive PR diff rows past soft TTL but within hard TTL → return cached
- *     row AND schedule a background refresh (errors logged, never thrown).
+ *   Soft TTL → return cached issue/PR rows directly. Open issue/PR rows use a
+ *     shorter revalidation window because their state can change at any time.
+ *   Issue/PR rows past soft TTL but within hard TTL → refresh synchronously,
+ *     falling back to the cached row if the live fetch fails.
+ *   Diff rows with a revision key → probe live revisions on every lookup and
+ *     reuse only a matching row within the hard TTL. Revision changes fetch
+ *     synchronously; they never fall back to an unchecked row.
  *     Only `/review` stores the snapshot it froze, keyed by `fetched_at`.
  *     Cache writes do not. A published generation is insert-only: a later
  *     snapshot that collides on the same millisecond gets a new id.
@@ -47,6 +48,7 @@ export interface CachedView<T = unknown> {
 	number: number;
 	includeComments: boolean;
 	fetchedAt: number;
+	revision?: string;
 	payload: T;
 	rendered: string;
 	sourceUrl: string | undefined;
@@ -62,6 +64,7 @@ interface Row {
 	payload: string;
 	rendered: string;
 	source_url: string | null;
+	revision?: string | null;
 }
 
 let cachedDb: Database | null = null;
@@ -114,11 +117,9 @@ export function openDb(): Database | null {
 			PRAGMA journal_mode=WAL;
 			PRAGMA synchronous=NORMAL;
 		`);
-		// Migrate any pre-existing table whose key/check constraint predates
-		// the current schema. The cache is regenerable, so we drop rows rather
-		// than running an in-place ALTER dance.
-		// Statements go through the query cache that close() finalizes; an unfinalized
-		// prepare() keeps the closed connection alive and the file locked on Windows.
+		// Pre-v5 live rows used an obsolete kind constraint and are regenerable.
+		// Pinned generations are not: keep those rows while upgrading their
+		// constraint below so existing PR review URLs remain valid.
 		const userVersion = (db.query("PRAGMA user_version").get() as { user_version?: number } | undefined)
 			?.user_version;
 		if (userVersion !== undefined && userVersion < 5) {
@@ -135,20 +136,8 @@ export function openDb(): Database | null {
 				payload          TEXT    NOT NULL,
 				rendered         TEXT    NOT NULL,
 				source_url       TEXT,
+				revision         TEXT,
 				PRIMARY KEY (auth_key, repo, kind, number, include_comments)
-			);
-			CREATE TABLE IF NOT EXISTS github_view_cache_generation (
-				auth_key        TEXT    NOT NULL,
-				repo             TEXT    NOT NULL,
-				kind             TEXT    NOT NULL CHECK (kind IN ('issue','pr','pr-diff')),
-				number           INTEGER NOT NULL,
-				include_comments INTEGER NOT NULL,
-				fetched_at       INTEGER NOT NULL,
-				retained_at      INTEGER NOT NULL,
-				payload          TEXT    NOT NULL,
-				rendered         TEXT    NOT NULL,
-				source_url       TEXT,
-				PRIMARY KEY (auth_key, repo, kind, number, include_comments, fetched_at)
 			);
 			CREATE TABLE IF NOT EXISTS github_forge_index (
 				auth_key   TEXT    NOT NULL,
@@ -162,10 +151,48 @@ export function openDb(): Database | null {
 				fetched_at INTEGER NOT NULL,
 				PRIMARY KEY (auth_key, repo, kind, number)
 			);
+		`);
+		db.transaction(() => {
+			const viewColumns = db.query("PRAGMA table_info(github_view_cache)").all() as { name: string }[];
+			if (!viewColumns.some(column => column.name === "revision")) {
+				db.run("ALTER TABLE github_view_cache ADD COLUMN revision TEXT");
+			}
+			const generationSchema = db
+				.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?")
+				.get("github_view_cache_generation") as { sql: string | null } | undefined;
+			const needsGenerationMigration = !!generationSchema?.sql && !generationSchema.sql.includes("'mr-diff'");
+			if (needsGenerationMigration) {
+				db.run("ALTER TABLE github_view_cache_generation RENAME TO github_view_cache_generation_legacy");
+			}
+			db.run(`
+				CREATE TABLE IF NOT EXISTS github_view_cache_generation (
+					auth_key        TEXT    NOT NULL,
+					repo             TEXT    NOT NULL,
+					kind             TEXT    NOT NULL CHECK (kind IN ('issue','pr','pr-diff','mr-diff')),
+					number           INTEGER NOT NULL,
+					include_comments INTEGER NOT NULL,
+					fetched_at       INTEGER NOT NULL,
+					retained_at      INTEGER NOT NULL,
+					payload          TEXT    NOT NULL,
+					rendered         TEXT    NOT NULL,
+					source_url       TEXT,
+					PRIMARY KEY (auth_key, repo, kind, number, include_comments, fetched_at)
+				)
+			`);
+			if (needsGenerationMigration) {
+				db.run(`
+					INSERT INTO github_view_cache_generation
+					SELECT auth_key, repo, kind, number, include_comments, fetched_at, retained_at, payload, rendered, source_url
+					FROM github_view_cache_generation_legacy
+				`);
+				db.run("DROP TABLE github_view_cache_generation_legacy");
+			}
+		}).immediate();
+		db.run(`
 			CREATE INDEX IF NOT EXISTS idx_github_view_cache_fetched ON github_view_cache(fetched_at);
 			CREATE INDEX IF NOT EXISTS idx_github_view_cache_generation_retained ON github_view_cache_generation(retained_at);
 			CREATE INDEX IF NOT EXISTS idx_github_forge_index_repo ON github_forge_index(auth_key, repo, fetched_at DESC);
-			PRAGMA user_version = 5;
+			PRAGMA user_version = 6;
 		`);
 		protectDbFiles(dbPath);
 		cachedDb = db;
@@ -363,7 +390,7 @@ export function getCached<T = unknown>(
 	try {
 		const row = db
 			.query(
-				"SELECT auth_key, repo, kind, number, include_comments, fetched_at, payload, rendered, source_url FROM github_view_cache WHERE auth_key = ? AND repo = ? AND kind = ? AND number = ? AND include_comments = ?",
+				"SELECT auth_key, repo, kind, number, include_comments, fetched_at, payload, rendered, source_url, revision FROM github_view_cache WHERE auth_key = ? AND repo = ? AND kind = ? AND number = ? AND include_comments = ?",
 			)
 			.get(authKey, normalizeRepo(repo, kind), kind, number, includeComments ? 1 : 0) as Row | undefined;
 		if (!row) return null;
@@ -384,6 +411,7 @@ export function getCached<T = unknown>(
 			payload,
 			rendered: row.rendered,
 			sourceUrl: row.source_url ?? undefined,
+			revision: row.revision ?? undefined,
 		};
 	} catch (err) {
 		logger.debug("github cache: read failed", { err: String(err) });
@@ -400,6 +428,7 @@ export interface PutCachedInput<T = unknown> {
 	payload: T;
 	rendered: string;
 	sourceUrl?: string;
+	revision?: string;
 	fetchedAt?: number;
 }
 
@@ -743,7 +772,7 @@ export function putCached<T = unknown>(input: PutCachedInput<T>): void {
 		const fetchedAt = input.fetchedAt ?? Date.now();
 		const payloadJson = JSON.stringify(input.payload);
 		db.query(
-			"INSERT OR REPLACE INTO github_view_cache (auth_key, repo, kind, number, include_comments, fetched_at, payload, rendered, source_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			"INSERT OR REPLACE INTO github_view_cache (auth_key, repo, kind, number, include_comments, fetched_at, payload, rendered, source_url, revision) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
 		).run(
 			authKey,
 			normalizedRepo,
@@ -754,6 +783,7 @@ export function putCached<T = unknown>(input: PutCachedInput<T>): void {
 			payloadJson,
 			input.rendered,
 			input.sourceUrl ?? null,
+			input.revision ?? null,
 		);
 		const summary = extractForgeIndexSummary(input.kind, input.number, input.payload);
 		if (summary) {
@@ -933,6 +963,8 @@ export interface CacheLookupOptions<T> {
 	 */
 	authKey?: string | null;
 	fetchFresh: () => Promise<FreshResult<T>>;
+	/** Live key identifying both the base and head revisions of a diff. */
+	fetchRevision?: () => Promise<string | undefined>;
 	settings?: Settings | undefined;
 	now?: number;
 }
@@ -968,75 +1000,35 @@ export function resolveCacheTtl(settings?: Settings): CacheTtl {
 	};
 }
 
-function storeResult<T>(
-	authKey: string,
-	repo: string,
-	kind: CacheKind,
-	number: number,
-	includeComments: boolean,
-	result: FreshResult<T>,
-	fetchedAt: number,
-): void {
-	putCached<T>({
-		authKey,
-		repo,
-		kind,
-		number,
-		includeComments,
-		payload: result.payload,
-		rendered: result.rendered,
-		sourceUrl: result.sourceUrl,
-		fetchedAt,
-	});
-}
-
 async function fetchAndStore<T>(
+	options: CacheLookupOptions<T>,
 	authKey: string,
-	repo: string,
-	kind: CacheKind,
-	number: number,
-	includeComments: boolean,
-	fetchFresh: () => Promise<FreshResult<T>>,
 	status: "miss" | "refreshed",
+	revision?: string,
 ): Promise<CacheLookupResult<T>> {
 	const epoch = invalidationEpoch;
-	const fresh = await fetchFresh();
+	const fresh = await options.fetchFresh();
 	const fetchedAt = Date.now();
-	if (epoch === invalidationEpoch) storeResult(authKey, repo, kind, number, includeComments, fresh, fetchedAt);
+	// The revision must bracket the separately fetched patch before it can be
+	// reused or pinned as the current review snapshot.
+	if (revision !== undefined && (await options.fetchRevision?.()) !== revision) {
+		throw new Error("Diff revision changed while fetching; try again.");
+	}
+	if (epoch === invalidationEpoch) {
+		putCached({
+			authKey,
+			repo: options.repo,
+			kind: options.kind,
+			number: options.number,
+			includeComments: options.includeComments,
+			payload: fresh.payload,
+			rendered: fresh.rendered,
+			sourceUrl: fresh.sourceUrl,
+			fetchedAt,
+			revision,
+		});
+	}
 	return { ...fresh, status, fetchedAt };
-}
-
-/**
- * In-flight background refreshes keyed by row identity. N concurrent stale
- * reads of the same row must spawn one `gh` subprocess, not N identical ones.
- */
-const inflightRefreshes = new Set<string>();
-
-function scheduleBackgroundRefresh<T>(
-	authKey: string,
-	repo: string,
-	kind: CacheKind,
-	number: number,
-	includeComments: boolean,
-	fetchFresh: () => Promise<FreshResult<T>>,
-): void {
-	const key = `${authKey}|${normalizeRepo(repo, kind)}|${kind}|${number}|${includeComments ? 1 : 0}`;
-	if (inflightRefreshes.has(key)) return;
-	inflightRefreshes.add(key);
-	queueMicrotask(() => {
-		fetchAndStore(authKey, repo, kind, number, includeComments, fetchFresh, "refreshed")
-			.catch(err => {
-				logger.debug("github cache: background refresh failed", {
-					err: String(err),
-					repo,
-					kind,
-					number,
-				});
-			})
-			.finally(() => {
-				inflightRefreshes.delete(key);
-			});
-	});
 }
 
 /**
@@ -1069,6 +1061,35 @@ export async function getOrFetchView<T>(options: CacheLookupOptions<T>): Promise
 	// suggestion the next `openDb()` call eventually honors.
 	sweepIfDue(ttl.hardMs);
 
+	const isDiff = options.kind === "pr-diff" || options.kind === "mr-diff";
+	if (isDiff && options.fetchRevision) {
+		const revision = await options.fetchRevision();
+		if (revision === undefined) {
+			const fresh = await options.fetchFresh();
+			return { ...fresh, status: "miss", fetchedAt: Date.now() };
+		}
+
+		const cached = getCached<T>(options.repo, options.kind, options.number, options.includeComments, authKey);
+		if (cached) {
+			const age = (options.now ?? Date.now()) - cached.fetchedAt;
+			if (age > ttl.hardMs) {
+				invalidate(options.repo, options.kind, options.number, options.includeComments, authKey);
+				return fetchAndStore(options, authKey, "miss", revision);
+			}
+			if (cached.revision === revision) {
+				return {
+					rendered: cached.rendered,
+					sourceUrl: cached.sourceUrl,
+					payload: cached.payload,
+					status: "fresh",
+					fetchedAt: cached.fetchedAt,
+				};
+			}
+			return fetchAndStore(options, authKey, "refreshed", revision);
+		}
+		return fetchAndStore(options, authKey, "miss", revision);
+	}
+
 	const cached: CachedView<T> | null = getCached<T>(
 		options.repo,
 		options.kind,
@@ -1095,33 +1116,9 @@ export async function getOrFetchView<T>(options: CacheLookupOptions<T>): Promise
 				status: "fresh",
 				fetchedAt: cached.fetchedAt,
 			};
-		} else if (options.kind === "pr-diff" || options.kind === "mr-diff") {
-			scheduleBackgroundRefresh(
-				authKey,
-				options.repo,
-				options.kind,
-				options.number,
-				options.includeComments,
-				options.fetchFresh,
-			);
-			return {
-				rendered: cached.rendered,
-				sourceUrl: cached.sourceUrl,
-				payload: cached.payload,
-				status: "stale",
-				fetchedAt: cached.fetchedAt,
-			};
 		} else {
 			try {
-				return await fetchAndStore(
-					authKey,
-					options.repo,
-					options.kind,
-					options.number,
-					options.includeComments,
-					options.fetchFresh,
-					"refreshed",
-				);
+				return await fetchAndStore(options, authKey, "refreshed");
 			} catch (err) {
 				if (err instanceof ToolAbortError) throw err;
 				logger.debug("github cache: synchronous refresh failed; returning stale view", {
@@ -1141,15 +1138,7 @@ export async function getOrFetchView<T>(options: CacheLookupOptions<T>): Promise
 		}
 	}
 
-	return fetchAndStore(
-		authKey,
-		options.repo,
-		options.kind,
-		options.number,
-		options.includeComments,
-		options.fetchFresh,
-		"miss",
-	);
+	return fetchAndStore(options, authKey, "miss");
 }
 
 /**
@@ -1165,7 +1154,6 @@ export function formatFreshnessNote(status: CacheStatus, fetchedAtMs: number, no
 			: ageSec < 3600
 				? `${Math.round(ageSec / 60)}m ago`
 				: `${Math.round(ageSec / 3600)}h ago`;
-	if (status === "stale")
-		return `WARNING: showing cached content from ${human}; live refresh failed or is still running`;
+	if (status === "stale") return `WARNING: showing cached content from ${human}; live refresh failed`;
 	return `Cached: ${human}`;
 }

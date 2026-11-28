@@ -986,7 +986,7 @@ export const cfgGithubCacheEnabled = register({
 		tab: "tools",
 		group: "GitHub",
 		label: "GitHub View Cache",
-		description: "Cache rendered issue/PR view output in ~/.omp/cache/github-cache.db so repeated reads are free",
+		description: "Cache forge overviews and diffs in ~/.omp/cache/github-cache.db",
 	},
 });
 
@@ -998,7 +998,8 @@ export const cfgGithubCacheSoftTtlSec = register({
 		tab: "tools",
 		group: "GitHub",
 		label: "GitHub Cache Soft TTL",
-		description: "Within this window, cached issue/PR view rows are returned directly (seconds; default 5 minutes)",
+		description:
+			"Revalidate cached forge overviews after this many seconds; diffs check revisions on every live read",
 	},
 });
 
@@ -1010,8 +1011,7 @@ export const cfgGithubCacheHardTtlSec = register({
 		tab: "tools",
 		group: "GitHub",
 		label: "GitHub Cache Hard TTL",
-		description:
-			"Past the soft TTL the cached row is returned and refreshed in the background; past the hard TTL it is dropped (seconds; default 7 days)",
+		description: "Maximum age of cached forge rows and retained diff snapshots (seconds; default 7 days)",
 	},
 });
 
