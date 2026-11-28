@@ -1,5 +1,6 @@
 mod protocol;
 mod runtime;
+mod sandbox;
 
 use std::{
 	env,
@@ -98,6 +99,8 @@ fn main() -> ExitCode {
 			}
 		}
 	});
+
+	sandbox::apply_os_sandbox(max_heap_mb);
 
 	runtime.emit_outbound(V8Outbound::Ready);
 
