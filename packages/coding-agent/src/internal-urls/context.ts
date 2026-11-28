@@ -6,6 +6,7 @@
 import type { ToolSession } from "../tools";
 import { owningSessionId } from "../tools/session-id";
 import { getExperimentalContextSession } from "../tools/context-notes";
+import type { MCPElicitHandler } from "../mcp/types";
 import type { LocalProtocolOptions } from "./local-protocol";
 import type { ResolveContext, WriteContext } from "./types";
 
@@ -41,12 +42,18 @@ export function contextLocalProtocolOptions(session: ToolSession): LocalProtocol
 /** The single ResolveContext builder for a tool session; replaces per-tool literal assembly. */
 export function sessionResolveContext(
 	session: ToolSession,
-	options: { signal?: AbortSignal; skipDirectoryListing?: boolean; containSkillPaths?: boolean } = {},
+	options: {
+		signal?: AbortSignal;
+		elicit?: MCPElicitHandler;
+		skipDirectoryListing?: boolean;
+		containSkillPaths?: boolean;
+	} = {},
 ): ResolveContext {
 	return {
 		cwd: session.cwd,
 		settings: session.settings,
 		signal: options.signal,
+		elicit: options.elicit,
 		sessionFile: session.getSessionFile() ?? undefined,
 		experimentalContextManagement: cfgCompactionExperimentalContextManagement.get(session.settings) === true,
 		getSessionBranch: () => getExperimentalContextSession(session).getBranch(),

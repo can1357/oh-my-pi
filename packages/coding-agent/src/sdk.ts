@@ -183,6 +183,7 @@ import {
 	resolveMCPTransformContext,
 	shouldFilterBrowserMCPForPrelude,
 } from "./mcp";
+import { elicitHandler } from "./mcp/elicitation";
 import { parseMCPToolName } from "./tools/details/mcp";
 import { isEvalNamespaceTool, MCPEvalNamespaceCatalog } from "./mcp/eval-namespaces";
 import { mapPromptArguments } from "./mcp/prompt-args";
@@ -1370,6 +1371,10 @@ function createCustomToolContext(ctx: ExtensionContext): CustomToolContext {
 		hasQueuedMessages: ctx.hasPendingMessages,
 		abort: ctx.abort,
 		localProtocolOptions: ctx.localProtocolOptions,
+		// The call's own UI, not the extension's: plain RPC mode gives tools none.
+		ui: ctx.toolContext?.ui,
+		hasUI: ctx.toolContext?.hasUI,
+		toolCall: ctx.toolContext?.toolCall,
 	};
 }
 
@@ -1589,9 +1594,13 @@ function buildMCPPromptCommands(manager: MCPManager): LoadedCustomCommand[] {
 				command: {
 					name: commandName,
 					description: prompt.description ?? `MCP prompt from ${serverName}`,
-					async execute(args: string[]) {
+					async execute(args, ctx) {
 						const promptArgs = mapPromptArguments(prompt.arguments, args);
-						const result = await manager.executePrompt(serverName, prompt.name, promptArgs);
+						// The server may ask the user while it builds the prompt.
+						const result = await manager.executePrompt(serverName, prompt.name, promptArgs, {
+							signal: ctx.signal,
+							elicit: elicitHandler(ctx),
+						});
 						if (!result) return "";
 						const parts: string[] = [];
 						for (const msg of result.messages) {

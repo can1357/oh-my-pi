@@ -715,7 +715,7 @@ export class HostLink implements MCPTransport {
 				jsonrpc: "2.0",
 				id,
 				method,
-				params: withRequestMeta(progressSink ? withProgressToken(params, id) : params),
+				params: withRequestMeta(progressSink ? withProgressToken(params, id) : params, options?.capabilities),
 			});
 		} catch (error) {
 			// Nothing was sent and sending it again cannot go better.

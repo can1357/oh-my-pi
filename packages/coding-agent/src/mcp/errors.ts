@@ -1,4 +1,5 @@
 import { isRecord } from "@oh-my-pi/pi-utils";
+import { MCPErrorCode } from "./protocol";
 import type { JsonRpcError } from "./types";
 
 /** MCP transport used by a failed operation. */
@@ -206,13 +207,29 @@ export function createMCPJsonRpcError(
 		transport,
 		stage: "protocol",
 		failure: "json_rpc",
-		message: `MCP error ${error.code}: ${error.message}`,
+		message:
+			error.code === MCPErrorCode.MissingRequiredClientCapability
+				? missingCapabilityMessage(error)
+				: `MCP error ${error.code}: ${error.message}`,
 		retryable: false,
 		code: error.code,
 		data: serializeData(error.data),
 		traceId: safeTraceId(traceId) ?? findTraceId(error.data),
 		rpc: error,
 	});
+}
+
+/** The capabilities a `MissingRequiredClientCapabilityError` (-32021) lists in `data.requiredCapabilities`. */
+function requiredCapabilities(error: JsonRpcError): string[] {
+	const required = isRecord(error.data) ? error.data.requiredCapabilities : undefined;
+	return isRecord(required) ? Object.keys(required) : [];
+}
+
+/** The message of a `MissingRequiredClientCapabilityError`: which capabilities the server needs. */
+function missingCapabilityMessage(error: JsonRpcError): string {
+	const names = requiredCapabilities(error);
+	const listed = names.length > 0 ? names.map(name => `"${name}"`).join(", ") : "it did not name";
+	return `MCP error ${error.code}: the server needs the client capability ${listed}, which this request did not declare`;
 }
 
 /** Classify an arbitrary transport exception while removing runtime-only advice. */
@@ -301,6 +318,11 @@ function nextStep(error: MCPTransportError): string {
 		case "malformed_response":
 			return "Inspect the MCP server logs for an invalid JSON-RPC response.";
 		case "json_rpc":
+			if (error.rpc?.code === MCPErrorCode.MissingRequiredClientCapability) {
+				return requiredCapabilities(error.rpc).includes("elicitation")
+					? "The server asks questions, which omp can answer only where it can show a form: the TUI, --mode rpc-ui, or an ACP client with forms. Retrying here fails the same way."
+					: "omp does not offer this capability, so retrying fails the same way.";
+			}
 			return "Address the server-reported MCP error before retrying.";
 		case "http_status":
 			return error.retryable

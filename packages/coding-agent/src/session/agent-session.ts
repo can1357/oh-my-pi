@@ -1397,6 +1397,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#usageReports: UsageReport[] | undefined;
 	#usageFallbackConfirmer: UsageFallbackConfirmer | undefined;
 	#usagePreflightAbortControllers = new Set<AbortController>();
+	/** Custom and MCP prompt commands still running; abort() cancels them. */
+	#commandAbortControllers = new Set<AbortController>();
 	#queuedMessageDrainBlocked = false;
 	#queueDrainPauseDepth = 0;
 	#usagePreflightReadyForNextModelCall = false;
@@ -10530,9 +10532,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 		// Get command context from extension runner (includes session control methods)
 		const baseCtx = this.#createCommandContext();
+		const controller = new AbortController();
+		this.#commandAbortControllers.add(controller);
 		const ctx = {
 			...baseCtx,
 			hasQueuedMessages: baseCtx.hasPendingMessages,
+			signal: controller.signal,
 		} as unknown as CustomCommandContext;
 
 		try {
@@ -10544,6 +10549,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// If void/undefined, command handled everything
 			return result ?? "";
 		} catch (err) {
+			// An aborted command is done, not failed.
+			if (controller.signal.aborted) return "";
 			// Emit error via extension runner
 			if (this.#extensionRunner) {
 				this.#extensionRunner.emitError({
@@ -10556,6 +10563,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				logger.error("Custom command failed", { commandName, error: message });
 			}
 			return ""; // Command was handled (with error)
+		} finally {
+			this.#commandAbortControllers.delete(controller);
 		}
 	}
 
@@ -12932,6 +12941,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (!this.#isDisposed) this.#titleGenerationAbortController = new AbortController();
 			this.#abortAutolearnCapture();
 			for (const controller of this.#usagePreflightAbortControllers) controller.abort();
+			for (const controller of this.#commandAbortControllers) controller.abort(options?.reason);
 			this.abortRetry();
 			this.#promptGeneration++;
 			// Cancel any awaited pre-dispatch setup (e.g. Hindsight auto-recall) so the

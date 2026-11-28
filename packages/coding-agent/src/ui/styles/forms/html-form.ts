@@ -34,13 +34,13 @@ import { spansText } from "../../../tools/html-form/parse";
 import { type FormPart, isFoldCaption } from "../../forms/html-form/layout";
 import type { MediaState } from "../../forms/html-form/media";
 import { rasterLabel } from "../../transcript/figures/svg";
-import { type Active, type HtmlFormModel, isDropdown, OTHER_ROW } from "../../forms/html-form/model";
+import { type Active, CANCEL_ENTRY, type HtmlFormModel, isDropdown, OTHER_ROW } from "../../forms/html-form/model";
 import { foldPills } from "../../overlays/panels/ask-dialog";
 import type { LineState } from "../../overlays/settings/line-edit";
 import { defineAskCardLook } from "../panels/ask-dialog";
 import { bindingGlyph, boxRows } from "../panels/common";
 import { getKeybindings } from "../../../config/keybindings/keybindings";
-import { actionKey, formatKeyHint } from "../../keys/hints";
+import { actionKey, formatKeyHint, formatKeyHints } from "../../keys/hints";
 
 /** Terminal facts of the dialog card. */
 export type HtmlFormLook = {
@@ -88,8 +88,10 @@ export function htmlFormKeyHints(model: HtmlFormModel): string {
 	if (model.dropdown() !== undefined) return `${upDown} highlight · ${enter} choose${note} · ${cancel} close`;
 	const next = model.sole ? "submit" : "next";
 	let action: string;
-	if (!field) action = `${enter} submit`;
-	else if (field.kind === "text") action = `${enter} ${next}`;
+	if (!field) {
+		const press = `${enter} ${model.pressed()?.label.toLowerCase() ?? "submit"}`;
+		action = model.actions.length > 0 ? `${formatKeyHints(["left", "right"])} choose · ${press}` : press;
+	} else if (field.kind === "text") action = `${enter} ${next}`;
 	else if (dropdown)
 		action = `${formatKeyHint("space")} open · ${formatKeyHint("left")}/${formatKeyHint("right")} change · ${enter} ${next}`;
 	else if (!option) action = `type your own · ${enter} ${next}`;
@@ -632,15 +634,18 @@ function buildColumn(
 	const submitFocused = view.active === "submit" && view.focused;
 	if (view.active === "submit") column.groupStart = column.focusStart = lines.length;
 	const fix = errors > 0 ? theme.fg("error", `  ${errors} flagged`) : "";
-	lines.push(
-		truncate(
-			submitFocused
-				? `${theme.style("strong", theme.fg("accent", "❯ Submit"))}${fix}`
-				: `${theme.fg("muted", "  Submit")}${fix}`,
-			width,
-			"…",
-		),
-	);
+	// Submit, then a form's actions and Cancel in ←/→ order; the one Enter presses is highlighted while focused.
+	const pressed = model.pressed();
+	const entries = model.actions.length > 0 ? [undefined, ...model.actions, CANCEL_ENTRY] : [undefined];
+	const buttons = entries
+		.map(entry => {
+			const label = entry?.label ?? "Submit";
+			return submitFocused && entry === pressed
+				? theme.style("strong", theme.fg("accent", `❯ ${label}`))
+				: theme.fg("muted", `  ${label}`);
+		})
+		.join("  ");
+	lines.push(truncate(`${buttons}${fix}`, width, "…"));
 	if (view.active === "submit") column.focusEnd = lines.length;
 	// Apply the note at its overlay position before counting rows. The picker itself needs the viewport height.
 	if (column.overlay) {

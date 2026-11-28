@@ -18,6 +18,7 @@ import type { MCPProgress } from "../tools/mcp-progress";
 // =============================================================================
 
 import type { SourceMeta } from "../capability/types";
+import type { MCPElicitRequest, MCPElicitResult } from "./protocol";
 
 export interface JsonRpcRequest {
 	jsonrpc: "2.0";
@@ -190,6 +191,8 @@ export interface MCPImplementation {
 export interface MCPClientCapabilities {
 	roots?: { listChanged?: boolean };
 	sampling?: Record<string, never>;
+	/** Elicitation modes the client can show the user; see {@link MCPElicitHandler}. */
+	elicitation?: { form?: Record<string, never>; url?: Record<string, never> };
 	experimental?: Record<string, unknown>;
 }
 
@@ -299,6 +302,28 @@ export interface MCPRequestOptions {
 	 * notifications are tagged with that id.
 	 */
 	onRequestId?: (id: string | number) => void;
+	/** Client capabilities declared in this request's `_meta`; {@link MCP_CLIENT_CAPABILITIES} when absent. */
+	capabilities?: MCPClientCapabilities;
+}
+
+/**
+ * Asks the user server `serverName`'s form-mode `elicitation/create` and
+ * resolves with their answer. Rejects with the abort reason when `signal` aborts.
+ */
+export type MCPElicitHandler = (
+	serverName: string,
+	request: MCPElicitRequest,
+	signal: AbortSignal | undefined,
+) => Promise<MCPElicitResult>;
+
+/** Options of a request a server may answer with `input_required` (`tools/call`, `prompts/get`, `resources/read`). */
+export interface MCPInputRequestOptions extends MCPRequestOptions {
+	/**
+	 * Answers the server's elicitations. When set the request declares
+	 * form-mode elicitation, so a server may ask the user mid-call; when
+	 * absent nothing is declared and a server must not ask.
+	 */
+	elicit?: MCPElicitHandler;
 }
 
 /** Transport interface - abstracts stdio/http */

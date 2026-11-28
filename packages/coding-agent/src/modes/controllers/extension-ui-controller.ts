@@ -4,6 +4,7 @@ import { bubblePaste, pathTo } from "@oh-my-pi/pi-tui/dispatch";
 import { decodeInput } from "@oh-my-pi/pi-tui/driver/input/decoder";
 import { widgetContext, widgetFor } from "@oh-my-pi/pi-tui/term/widgets";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { logger } from "@oh-my-pi/pi-utils";
 import type { CollabUiRequestDraft, CollabUiSelectItem } from "@oh-my-pi/pi-wire";
 import type { CollabHost } from "../../collab/host";
 import type {
@@ -50,7 +51,7 @@ import {
 } from "../../tools/html-form/data";
 import { type ChoiceField, type HtmlForm, parseHtmlForm, spansText, type TextField } from "../../tools/html-form/parse";
 import { extensionOutput, extensionTheme, singleNode } from "../../ui/extensions/render-output";
-import { formMedia, HtmlFormDialog, HtmlFormModel } from "../../ui/forms/html-form";
+import { formMedia, type HtmlFormAction, HtmlFormDialog, HtmlFormModel } from "../../ui/forms/html-form";
 import { htmlFormKeyHints } from "../../ui/styles/forms/html-form";
 import { formatKeyHint, formatKeyHints } from "../../ui/keys/hints";
 import { type ApprovalChoice, ApprovalDialog } from "../../ui/overlays/panels/approval-dialog";
@@ -176,6 +177,9 @@ function givenFormAnswers(
 	}
 	return changed || notes.length > 0 ? { data, ...(notes.length ? { notes } : {}) } : undefined;
 }
+
+/** The Decline button of a caller that tells declining from cancelling; see `ExtensionUIDialogOptions.onDismiss`. */
+const DECLINE_ACTIONS: readonly HtmlFormAction[] = [{ id: "decline", label: "Decline" }];
 
 export class ExtensionUiController {
 	#extensionTerminalInputUnsubscribers = new Set<() => void>();
@@ -904,13 +908,24 @@ export class ExtensionUiController {
 	): Promise<ExtensionFormDialogResult | undefined> {
 		const first = form.fields.find(field => field.name);
 		const prompt = { kind: "question", msg: first && fieldQuestions(form).get(first) } as const;
+		const onDismiss = dialogOptions?.onDismiss;
 		return this.#presentDialog<ExtensionFormDialogResult>(prompt, dialogOptions?.signal, settle => {
 			const withNotes = (data: HtmlFormData, notes: OptionNote[]) => ({ data, ...(notes.length ? { notes } : {}) });
+			// Tell a caller that tells declining from cancelling how the form ended; the dialog closes whatever it does.
+			const dismiss = (action: "decline" | "cancel" | undefined): void => {
+				try {
+					if (action) onDismiss?.(action);
+				} catch (error) {
+					logger.warn("Form dialog onDismiss threw", { action, error: String(error) });
+				}
+				settle(undefined);
+			};
 			const model = new HtmlFormModel(
 				form,
 				{
 					onSubmit: (data, notes) => settle(withNotes(data, notes)),
-					onCancel: () => settle(undefined),
+					onCancel: () => dismiss("cancel"),
+					onAction: id => dismiss(id === "decline" ? "decline" : undefined),
 					onTimeout: (data, notes) => {
 						dialogOptions?.onTimeout?.();
 						settle({ ...withNotes(data, notes), timedOut: true });
@@ -926,7 +941,13 @@ export class ExtensionUiController {
 							}
 						: {}),
 				},
-				{ focused: false, vim: this.ctx.dialogVim(), native: () => this.ctx.shell.native() },
+				{
+					focused: false,
+					vim: this.ctx.dialogVim(),
+					native: () => this.ctx.shell.native(),
+					// A caller that tells declining from cancelling (an MCP elicitation) also gets Decline beside Cancel.
+					actions: onDismiss ? DECLINE_ACTIONS : undefined,
+				},
 			);
 			const media = formMedia(form, this.ctx.sessionManager.getCwd());
 			const timeout = dialogOptions?.timeout;

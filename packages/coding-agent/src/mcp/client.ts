@@ -24,6 +24,9 @@ import { HostLink, type HostLinkReattach } from "./link";
 import {
 	MCP_SUBSCRIPTION_ACKNOWLEDGED,
 	type MCPDiscoverResult,
+	MCP_ELICITING_CLIENT_CAPABILITIES,
+	type MCPElicitFieldSchema,
+	type MCPElicitRequest,
 	MCPErrorCode,
 	type MCPInputRequiredResult,
 	MCPMeta,
@@ -35,6 +38,7 @@ import { describeMCPTimeout, isMCPTimeoutEnabled, resolveMCPTimeoutMs } from "./
 import type {
 	MCPGetPromptResult,
 	MCPImplementation,
+	MCPInputRequestOptions,
 	MCPPrompt,
 	MCPPromptsListResult,
 	MCPRequestOptions,
@@ -540,20 +544,25 @@ async function listAll<R extends { nextCursor?: string }, T>(
 
 /**
  * Send a request a server may answer with `input_required`, supplying the
- * input and retrying until the result is complete. Roots are the only input
- * omp declares, so they are the only one it supplies.
+ * input and retrying until the result is complete. Roots are always supplied;
+ * form-mode elicitations only when `options.elicit` can ask the user, which is
+ * also the only case the request declares them.
  *
- * @throws when the server asks for anything else, sends an empty ask, or keeps asking past {@link MCP_MAX_ROUND_TRIPS} round trips.
+ * @throws when the server asks for anything else, sends an empty or malformed ask, or keeps asking past {@link MCP_MAX_ROUND_TRIPS} round trips; the abort reason when `options.signal` aborts while the user is asked.
  */
 async function requestWithInput<T>(
 	connection: MCPServerConnection,
 	method: string,
 	params: Record<string, unknown>,
-	options: MCPRequestOptions | undefined,
+	options: MCPInputRequestOptions | undefined,
 ): Promise<T> {
+	const elicit = options?.elicit;
+	const requestOptions: MCPRequestOptions | undefined = elicit
+		? { ...options, capabilities: MCP_ELICITING_CLIENT_CAPABILITIES }
+		: options;
 	let attempt = params;
 	for (let round = 0; round < MCP_MAX_ROUND_TRIPS; round++) {
-		const result = await connection.transport.request<T | MCPInputRequiredResult>(method, attempt, options);
+		const result = await connection.transport.request<T | MCPInputRequiredResult>(method, attempt, requestOptions);
 		if (resultTypeOf(result) === "complete") return result as T;
 		const { inputRequests, requestState } = result as MCPInputRequiredResult;
 		if (inputRequests === undefined && requestState === undefined) {
@@ -565,21 +574,136 @@ async function requestWithInput<T>(
 		if (inputRequests === undefined) continue;
 		// No prototype: a server may name an ask `__proto__`, and its answer must be a field like any other.
 		const inputResponses: Record<string, unknown> = Object.create(null);
+		// Asks are answered one after another: a user sees one question at a time.
 		for (const key in inputRequests) {
 			const ask: unknown = inputRequests[key];
 			const asked = isRecord(ask) ? ask.method : undefined;
-			if (asked !== "roots/list") {
+			if (asked === "roots/list") {
+				inputResponses[key] = { roots: connection.roots?.() ?? projectRoots(getProjectDir()) };
+			} else if (asked === "elicitation/create" && elicit) {
+				const request = elicitRequestOf(connection, method, isRecord(ask) ? ask.params : undefined);
+				inputResponses[key] = await elicit(connection.name, request, options?.signal);
+			} else {
 				throw new Error(
 					`MCP server "${connection.name}" asked for unsupported input "${String(asked)}" on ${method}`,
 				);
 			}
-			inputResponses[key] = { roots: connection.roots?.() ?? projectRoots(getProjectDir()) };
 		}
 		attempt.inputResponses = inputResponses;
 	}
 	throw new Error(
 		`MCP server "${connection.name}" still asked for input on ${method} after ${MCP_MAX_ROUND_TRIPS} round trips`,
 	);
+}
+
+/**
+ * Decode the params of an `elicitation/create` ask into a form-mode request.
+ * Every field is rebuilt from the keys form mode defines, each checked for
+ * its type, so nothing else a server sends reaches the form.
+ *
+ * @throws when the ask is URL mode (never declared), lacks a message, or has a schema or field form mode does not allow.
+ */
+function elicitRequestOf(connection: MCPServerConnection, method: string, params: unknown): MCPElicitRequest {
+	const fail = (why: string): never => {
+		throw new Error(`MCP server "${connection.name}" sent an elicitation on ${method} ${why}`);
+	};
+	if (!isRecord(params)) return fail("without params");
+	if (params.mode !== undefined && params.mode !== "form") return fail(`in undeclared mode "${String(params.mode)}"`);
+	if (typeof params.message !== "string") return fail("without a message");
+	const schema = params.requestedSchema;
+	if (!isRecord(schema) || !isRecord(schema.properties)) return fail("without an object schema");
+	if (schema.required !== undefined && !isStringArray(schema.required)) return fail("with a malformed required list");
+	// No prototype: a field may be named `__proto__`.
+	const properties: Record<string, MCPElicitFieldSchema> = Object.create(null);
+	for (const name of Object.keys(schema.properties)) {
+		properties[name] = elicitFieldOf(schema.properties[name]) ?? fail(`with an unsupported field "${name}"`);
+	}
+	return {
+		message: params.message,
+		requestedSchema: { type: "object", properties, required: schema.required },
+	};
+}
+
+/** A form-mode field schema rebuilt from `value`, or undefined when `value` is not one. */
+function elicitFieldOf(value: unknown): MCPElicitFieldSchema | undefined {
+	if (!isRecord(value)) return undefined;
+	const text = (key: string) => (typeof value[key] === "string" ? value[key] : undefined);
+	const count = (key: string) =>
+		typeof value[key] === "number" && Number.isFinite(value[key]) ? value[key] : undefined;
+	const common = { title: text("title"), description: text("description") };
+	switch (value.type) {
+		case "boolean":
+			return intact(value, {
+				type: "boolean",
+				...common,
+				default: typeof value.default === "boolean" ? value.default : undefined,
+			});
+		case "number":
+		case "integer":
+			return intact(value, {
+				type: value.type,
+				...common,
+				minimum: count("minimum"),
+				maximum: count("maximum"),
+				default: count("default"),
+			});
+		case "string":
+			return intact(value, {
+				type: "string",
+				...common,
+				minLength: count("minLength"),
+				maxLength: count("maxLength"),
+				format: ELICIT_FORMATS.find(known => known === value.format),
+				default: text("default"),
+				enum: stringsOf(value.enum),
+				oneOf: choicesOf(value.oneOf),
+			});
+		case "array": {
+			if (!isRecord(value.items)) return undefined;
+			const items = intact(value.items, { enum: stringsOf(value.items.enum), anyOf: choicesOf(value.items.anyOf) });
+			if (!items || (items.enum === undefined && items.anyOf === undefined)) return undefined;
+			return intact(value, {
+				type: "array",
+				...common,
+				minItems: count("minItems"),
+				maxItems: count("maxItems"),
+				items,
+				default: stringsOf(value.default),
+			});
+		}
+		default:
+			return undefined;
+	}
+}
+
+/** `rebuilt`, unless a key `source` sent did not survive rebuilding: a value of the wrong type. */
+function intact<F extends object>(source: Record<string, unknown>, rebuilt: F): F | undefined {
+	for (const [key, value] of Object.entries(rebuilt)) {
+		if (value === undefined && source[key] !== undefined) return undefined;
+	}
+	return rebuilt;
+}
+
+function stringsOf(value: unknown): string[] | undefined {
+	return isStringArray(value) ? value : undefined;
+}
+
+const ELICIT_FORMATS = ["email", "uri", "date", "date-time"] as const;
+
+/** Titled choices (`oneOf`/`anyOf` entries of `const` and optional `title`), or undefined when `value` is not a list of them. */
+function choicesOf(value: unknown): { const: string; title?: string }[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const choices: { const: string; title?: string }[] = [];
+	for (const entry of value) {
+		if (!isRecord(entry) || typeof entry.const !== "string") return undefined;
+		if (entry.title !== undefined && typeof entry.title !== "string") return undefined;
+		choices.push({ const: entry.const, title: entry.title });
+	}
+	return choices;
+}
+
+function isStringArray(value: unknown): value is string[] {
+	return Array.isArray(value) && value.every(item => typeof item === "string");
 }
 
 /**
@@ -606,7 +730,7 @@ export async function callTool(
 	connection: MCPServerConnection,
 	toolName: string,
 	args: Record<string, unknown> = {},
-	options?: MCPRequestOptions,
+	options?: MCPInputRequestOptions,
 ): Promise<MCPToolCallResult> {
 	return requestWithInput<MCPToolCallResult>(connection, "tools/call", { name: toolName, arguments: args }, options);
 }
@@ -669,7 +793,7 @@ export async function listResourceTemplates(
 export async function readResource(
 	connection: MCPServerConnection,
 	uri: string,
-	options?: MCPRequestOptions,
+	options?: MCPInputRequestOptions,
 ): Promise<MCPResourceReadResult> {
 	return requestWithInput<MCPResourceReadResult>(connection, "resources/read", { uri }, options);
 }
@@ -742,7 +866,7 @@ export async function getPrompt(
 	connection: MCPServerConnection,
 	name: string,
 	args?: Record<string, string>,
-	options?: MCPRequestOptions,
+	options?: MCPInputRequestOptions,
 ): Promise<MCPGetPromptResult> {
 	const params: Record<string, unknown> = { name };
 	if (args && Object.keys(args).length > 0) params.arguments = args;

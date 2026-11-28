@@ -2213,6 +2213,11 @@ export class ExtensionRunner {
 			setTimeout: (callback, ms, ...args) => this.#managedTimers.setTimeout(callback, ms, ...args),
 			clearTimer: timer => this.#managedTimers.clear(timer),
 			addAdditionalContext: delegation?.context?.addAdditionalContext,
+			toolContext: delegation?.context && {
+				ui: delegation.context.ui,
+				hasUI: delegation.context.hasUI,
+				toolCall: delegation.context.toolCall,
+			},
 			invokeTool:
 				delegation !== undefined && this.hasNativeTool(delegation.toolName)
 					? (params, options) =>

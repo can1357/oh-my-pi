@@ -45,6 +45,38 @@ function clipboardRead() {
 }
 
 describe("html form model", () => {
+	it("picks Submit, an action or Cancel with ←/→ on the Submit row, and presses it without submitting", () => {
+		const onAction = vi.fn();
+		const onCancel = vi.fn();
+		const onSubmit = vi.fn<(data: HtmlFormData, notes: OptionNote[]) => void>();
+		const model = new HtmlFormModel(
+			parseHtmlForm(`<form><label>Name <input name="name" required></label></form>`),
+			{ onSubmit, onCancel, onAction },
+			{ actions: [{ id: "decline", label: "Decline" }] },
+		);
+		model.key(keyEvent("tab")); // the Submit row
+		model.key(keyEvent("right")); // Decline
+		model.key(keyEvent("enter"));
+		expect(onAction).toHaveBeenCalledWith("decline");
+		model.key(keyEvent("left")); // Submit
+		model.key(keyEvent("left")); // wraps to Cancel, the form's own
+		model.key(keyEvent("enter"));
+		expect(onCancel).toHaveBeenCalledTimes(1);
+		// A click on the action's button in Tern.
+		model.action("action:decline", "actions/action:decline");
+		expect(onAction).toHaveBeenCalledTimes(2);
+		expect(onSubmit).not.toHaveBeenCalled();
+
+		// Leaving the row forgets the pick: back on it, Enter submits.
+		model.key(keyEvent("left")); // Decline
+		model.key(keyEvent("shift+tab")); // the name field
+		for (const ch of "ada") model.key(keyEvent(ch));
+		model.key(keyEvent("tab")); // the Submit row again
+		model.key(keyEvent("enter"));
+		expect(onSubmit).toHaveBeenCalledWith({ name: "ada" }, []);
+		expect(onAction).toHaveBeenCalledTimes(2);
+	});
+
 	it("flags rule breaks without blocking Submit, an empty required field once passed over", () => {
 		const { model, press, onSubmit } = dialog(`<form>
 <label>Name <input name="name" required></label>

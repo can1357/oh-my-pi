@@ -37,6 +37,9 @@ import { listKeyId, matchesSelectCancel } from "../../../config/keybindings/matc
 /** The free-text answer row of a choice field. */
 export const OTHER_ROW = -1;
 
+/** Action id prefix of an {@link HtmlFormAction} button: `action:<id>`. */
+export const ACTION_ACT = "action:";
+
 /** Where the dialog's keys go: a field (by index) or the Submit row. */
 export type Active = number | "submit";
 
@@ -64,10 +67,21 @@ export interface NoteDraft {
 	readonly images: readonly ImageContent[];
 }
 
+/** A button beside Cancel and Submit that ends the form without submitting it (e.g. Decline): its `label`, and the `id` {@link HtmlFormCallbacks.onAction} receives. */
+export interface HtmlFormAction {
+	readonly id: string;
+	readonly label: string;
+}
+
+/** The form's own Cancel button as a Submit-row entry: once a form has actions, ←/→ reaches it too. */
+export const CANCEL_ENTRY: HtmlFormAction = { id: "cancel", label: "Cancel" };
+
 /** How the host hears from the dialog. */
 export interface HtmlFormCallbacks {
 	onSubmit(data: HtmlFormData, notes: OptionNote[]): void;
 	onCancel(): void;
+	/** One of the form's {@link HtmlFormAction}s was pressed. */
+	onAction?(id: string): void;
 	/** The dialog gives keys back to the composer (Escape, Tab past Submit). */
 	releaseKeys?(): void;
 	/** A pointer event in the dialog: it takes keys again. */
@@ -170,6 +184,10 @@ export class HtmlFormModel {
 	 */
 	wrapWidth: number | undefined;
 	readonly focused: Signal<boolean>;
+	/** The buttons beside Cancel and Submit; empty when the host passed none. */
+	readonly actions: readonly HtmlFormAction[];
+	/** The Submit row's button Enter presses: undefined for Submit, else an action or {@link CANCEL_ENTRY}. */
+	readonly pressed = signal<HtmlFormAction | undefined>(undefined);
 	readonly #callbacks: HtmlFormCallbacks;
 	#done = false;
 	/** Clipboard pastes still reading, oldest first; a submit waits for them. */
@@ -189,8 +207,14 @@ export class HtmlFormModel {
 			vim?: DialogVim;
 			/** Whether Tern draws the form (reactive); a plain terminal when omitted. */
 			native?: () => boolean;
+			/**
+			 * Buttons beside Cancel and Submit that end the form without submitting it. With any, ←/→ on
+			 * the Submit row picks among Submit, them and Cancel, and Enter presses the one picked.
+			 */
+			actions?: readonly HtmlFormAction[];
 		} = {},
 	) {
+		this.actions = options.actions ?? [];
 		this.form = form;
 		this.questions = fieldQuestions(form);
 		this.layout = formLayout(form);
@@ -454,6 +478,8 @@ export class HtmlFormModel {
 			this.active.set(index);
 			this.row.set(row);
 			this.dropdown.set(undefined);
+			// Leaving the Submit row forgets the button picked on it: back on it, Enter submits again.
+			this.pressed.set(undefined);
 		});
 	}
 
@@ -564,6 +590,13 @@ export class HtmlFormModel {
 	cancel(): void {
 		this.#submitAfterPastes = false;
 		this.#callbacks.onCancel();
+	}
+
+	/** End the form with one of its {@link actions}, whatever the fields hold. */
+	act(id: string): void {
+		if (this.#done) return;
+		this.#submitAfterPastes = false;
+		this.#callbacks.onAction?.(id);
 	}
 
 	timeout(): void {
@@ -735,10 +768,20 @@ export class HtmlFormModel {
 
 	#submitKey(key: KeyEvent): boolean {
 		const id = listKeyId(key);
+		if (this.actions.length > 0 && (id === "left" || id === "right")) {
+			const row = [undefined, ...this.actions, CANCEL_ENTRY];
+			const at = row.indexOf(untrack(this.pressed));
+			this.pressed.set(row[(at + (id === "right" ? 1 : row.length - 1)) % row.length]);
+			return true;
+		}
 		switch (id) {
-			case "enter":
-				this.submit();
+			case "enter": {
+				const pressed = untrack(this.pressed);
+				if (pressed === CANCEL_ENTRY) this.cancel();
+				else if (pressed) this.act(pressed.id);
+				else this.submit();
 				return true;
+			}
 			case "tab":
 				this.#callbacks.releaseKeys?.();
 				return true;
@@ -1014,6 +1057,7 @@ export class HtmlFormModel {
 		if (open) return this.open(Number(open[1]));
 		const pick = /^pick:(\d+):(\d+)$/.exec(act);
 		if (pick) return this.pick(Number(pick[1]), Number(pick[2]));
+		if (act.startsWith(ACTION_ACT)) return this.act(act.slice(ACTION_ACT.length));
 		switch (act) {
 			case "note": {
 				const row = /(?:^|\/)f(\d+)\/o(\d+)$/.exec(key);

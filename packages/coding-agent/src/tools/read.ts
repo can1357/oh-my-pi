@@ -33,6 +33,7 @@ import { isRemoteTextWritable, writeRemoteMirror } from "../edit/remote-mirror";
 import { writeResourceBackingFile } from "../internal-urls/filesystem-resource";
 import { getEditStore, recordFullySeenRows } from "../edit/store";
 import { extractUriScheme, InternalUrlRouter, type SchemeSpec, sessionResolveContext } from "../internal-urls";
+import { elicitHandler } from "../mcp/elicitation";
 import { isMarkdownPath } from "../utils/lang-from-path";
 import readDescription from "../prompts/tools/read.md" with { type: "text" };
 import readSourcesDoc from "../prompts/tools/read-sources.md" with { type: "text" };
@@ -3270,7 +3271,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			}
 			throw new ToolError("The ':img' selector requires a file-backed path.");
 		}
-		const resource = await InternalUrlRouter.instance().resolve(url, sessionResolveContext(this.session, { signal }));
+		// An MCP resource read may ask the user, as a tool call may.
+		const resource = await InternalUrlRouter.instance().resolve(
+			url,
+			sessionResolveContext(this.session, { signal, elicit: elicitHandler(toolContext) }),
+		);
 		if (typeof resource.content !== "string") {
 			// Bytes take the file pipeline under the URL's identity: images and documents by their
 			// content and type, anything else as a binary file (`:raw` reads it verbatim).

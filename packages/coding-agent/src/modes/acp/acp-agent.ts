@@ -619,6 +619,9 @@ async function elicitFormFromAcpClient(
 			settle(() => reject(new Error(`ACP client failed the ${method} elicitation: ${reason}`, { cause: error })));
 		});
 	const response = await promise;
+	if (response?.action === "decline" || response?.action === "cancel") {
+		dialogOptions?.onDismiss?.(response.action);
+	}
 	if (!isAcceptedElicitation(response) || !response.content) {
 		return undefined;
 	}

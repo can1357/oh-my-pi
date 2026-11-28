@@ -55,10 +55,19 @@ export function isModernErrorCode(code: unknown): boolean {
 export const MCP_CLIENT_INFO: MCPImplementation = { name: "omp-coding-agent", version: "1.0.0" };
 
 /**
- * Capabilities omp declares on every request. Roots are the only server ask it
- * answers, so `roots/list` is the only input request a server may return.
+ * Capabilities omp declares on a request by default. Roots are the only server
+ * ask it answers, so `roots/list` is the only input request a server may return.
  */
 export const MCP_CLIENT_CAPABILITIES: MCPClientCapabilities = { roots: {} };
+
+/**
+ * Capabilities of a request whose caller can put a question to the user: a
+ * server may also return form-mode `elicitation/create` asks.
+ */
+export const MCP_ELICITING_CLIENT_CAPABILITIES: MCPClientCapabilities = {
+	...MCP_CLIENT_CAPABILITIES,
+	elicitation: { form: {} },
+};
 
 const CACHEABLE_METHODS: Record<string, true> = {
 	"server/discover": true,
@@ -117,6 +126,79 @@ export interface MCPInputRequiredResult extends MCPResult {
 	requestState?: string;
 }
 
+/** A string field of an elicitation form; `enum`/`oneOf` make it a single choice. */
+export interface MCPElicitStringSchema {
+	type: "string";
+	title?: string;
+	description?: string;
+	minLength?: number;
+	maxLength?: number;
+	format?: "email" | "uri" | "date" | "date-time";
+	default?: string;
+	/** Untitled single choice. */
+	enum?: string[];
+	/** Titled single choice. */
+	oneOf?: { const: string; title?: string }[];
+}
+
+/** A numeric field of an elicitation form. */
+export interface MCPElicitNumberSchema {
+	type: "number" | "integer";
+	title?: string;
+	description?: string;
+	minimum?: number;
+	maximum?: number;
+	default?: number;
+}
+
+/** A yes/no field of an elicitation form. */
+export interface MCPElicitBooleanSchema {
+	type: "boolean";
+	title?: string;
+	description?: string;
+	default?: boolean;
+}
+
+/** A multiple-choice field of an elicitation form: untitled (`items.enum`) or titled (`items.anyOf`). */
+export interface MCPElicitArraySchema {
+	type: "array";
+	title?: string;
+	description?: string;
+	minItems?: number;
+	maxItems?: number;
+	items: { type?: "string"; enum?: string[]; anyOf?: { const: string; title?: string }[] };
+	default?: string[];
+}
+
+/** One field of an elicitation form: the flat primitive schemas form mode allows. */
+export type MCPElicitFieldSchema =
+	| MCPElicitStringSchema
+	| MCPElicitNumberSchema
+	| MCPElicitBooleanSchema
+	| MCPElicitArraySchema;
+
+/** Params of a form-mode `elicitation/create` ask. */
+export interface MCPElicitRequest {
+	/** What the server asks and why, shown to the user. */
+	message: string;
+	requestedSchema: {
+		type: "object";
+		properties: Record<string, MCPElicitFieldSchema>;
+		required?: string[];
+	};
+}
+
+/** A value of an accepted elicitation's `content`. */
+export type MCPElicitValue = string | number | boolean | string[];
+
+/**
+ * The user's answer to an elicitation: `accept` with the form's content,
+ * `decline` when they refused, `cancel` when they dismissed it without choosing.
+ */
+export type MCPElicitResult =
+	| { action: "accept"; content: Record<string, MCPElicitValue> }
+	| { action: "decline" | "cancel" };
+
 /** Opt-in notification filter of `subscriptions/listen`. */
 export interface MCPSubscriptionFilter {
 	toolsListChanged?: boolean;
@@ -129,21 +211,24 @@ export interface MCPSubscriptionFilter {
 export const MCP_SUBSCRIPTION_ACKNOWLEDGED = "notifications/subscriptions/acknowledged";
 
 /** `_meta` every request must carry: revision, capabilities, identity. */
-export function requestMeta(): Record<string, unknown> {
+export function requestMeta(capabilities: MCPClientCapabilities = MCP_CLIENT_CAPABILITIES): Record<string, unknown> {
 	return {
 		[MCPMeta.protocolVersion]: MCP_PROTOCOL_VERSION,
-		[MCPMeta.clientCapabilities]: MCP_CLIENT_CAPABILITIES,
+		[MCPMeta.clientCapabilities]: capabilities,
 		[MCPMeta.clientInfo]: MCP_CLIENT_INFO,
 	};
 }
 
 /**
  * `params` with the required request metadata merged over any caller `_meta`
- * (a progress token, private host hints). Never mutates `params`.
+ * (a progress token, private host hints), declaring `capabilities`. Never mutates `params`.
  */
-export function withRequestMeta(params: Record<string, unknown> | undefined): Record<string, unknown> {
+export function withRequestMeta(
+	params: Record<string, unknown> | undefined,
+	capabilities?: MCPClientCapabilities,
+): Record<string, unknown> {
 	const callerMeta = isRecord(params?._meta) ? params._meta : undefined;
-	return { ...params, _meta: { ...callerMeta, ...requestMeta() } };
+	return { ...params, _meta: { ...callerMeta, ...requestMeta(capabilities) } };
 }
 
 /**

@@ -9,6 +9,7 @@ import type { type as ArkType } from "@oh-my-pi/omptype";
 import type * as TypeBox from "@oh-my-pi/omptype/typebox";
 import type * as zod from "@oh-my-pi/omptype/zod";
 import type {
+	AgentToolContext,
 	AgentToolResult,
 	AgentToolUpdateCallback,
 	ToolApproval,
@@ -105,6 +106,12 @@ export interface CustomToolContext {
 	localProtocolOptions?: LocalProtocolOptions;
 	/** Whether to auto-approve all destructive tool operations (--auto-approve CLI flag) */
 	autoApprove?: boolean;
+	/** The calling tool call's UI, when it can reach the user (MCP elicitations ask through it). */
+	ui?: AgentToolContext["ui"];
+	/** Whether {@link ui} can reach the user for this call. */
+	hasUI?: boolean;
+	/** The calling tool call, for its steering signal. */
+	toolCall?: AgentToolContext["toolCall"];
 }
 
 /** Session event passed to onSession callback */

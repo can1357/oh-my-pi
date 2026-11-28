@@ -56,7 +56,7 @@ import type {
 	MCPAuthChallenge,
 	MCPGetPromptResult,
 	MCPPrompt,
-	MCPRequestOptions,
+	MCPInputRequestOptions,
 	MCPResource,
 	MCPResourceReadResult,
 	MCPResourceTemplate,
@@ -277,7 +277,7 @@ export interface MCPManagerApi {
 	readServerResource(
 		name: string,
 		uri: string,
-		options?: MCPRequestOptions,
+		options?: MCPInputRequestOptions,
 	): Promise<MCPResourceReadResult | undefined>;
 	/** Server-provided instructions by server name. */
 	getServerInstructions(): Map<string, string>;
@@ -2190,7 +2190,7 @@ export class MCPManager implements MCPManagerApi {
 	async readServerResource(
 		name: string,
 		uri: string,
-		options?: MCPRequestOptions,
+		options?: MCPInputRequestOptions,
 	): Promise<MCPResourceReadResult | undefined> {
 		const connection = this.#connections.get(name);
 		if (!connection) return undefined;
@@ -2213,7 +2213,7 @@ export class MCPManager implements MCPManagerApi {
 		name: string,
 		promptName: string,
 		args?: Record<string, string>,
-		options?: MCPRequestOptions,
+		options?: MCPInputRequestOptions,
 	): Promise<MCPGetPromptResult | undefined> {
 		const connection = this.#connections.get(name);
 		if (!connection) return undefined;
