@@ -106,11 +106,12 @@ export function toLogoutAccounts(
 			const credential = row.credential;
 			const linked = credential.type === "oauth" && connection !== undefined;
 			const label = linked ? (nonEmpty(credential.email) ?? "Account") : oauthLabel(row);
-			const detail = linked
-				? providerAccessOff(loginProvider, credential.scope)
-					? `Connected · ${connectedProviderName(loginProvider)} off`
-					: "Connected"
-				: oauthDetail(provider, row, label);
+			const detail =
+				linked
+					? providerAccessOff(loginProvider, credential.scope)
+						? `Connected · ${connectedProviderName(loginProvider)} off`
+						: "Connected"
+					: oauthDetail(provider, row, label);
 			const active =
 				credential.type === "oauth"
 					? oauthMatchesActiveIdentity(row, options.activeIdentity)

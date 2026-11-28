@@ -1685,128 +1685,131 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		"standard cache shadow",
 		"disabled shadow",
 		"unkeyed variant alias",
-	] as const)("preserves default model precedence at startup with %s", async selection => {
-		const authStorage = createInMemoryAuthStorage();
-		authStoragesToClose.push(authStorage);
-		const source = authStorage.keys.source.bind(authStorage.keys);
-		vi.spyOn(authStorage.keys, "source").mockImplementation((provider, options) => {
-			const auth = source(provider, options);
-			return auth?.kind === "env" ? undefined : auth;
-		});
-		const provider = `startup-${selection.replaceAll(" ", "-")}`;
-		const id = "reasoner";
-		const aliasTarget = "startup-alias-target";
-		const routes = selection === "routing" || selection === "literal shadow";
-		const literal =
-			selection === "literal shadow" || selection === "standard cache shadow" || selection === "disabled shadow";
-		if (selection === "unrelated available roster") authStorage.keys.setRuntime("openrouter", "test-key");
-		const variantAlias = selection === "unkeyed variant alias";
-		const selector = `${provider}/${id}${routes ? "@test-upstream" : ""}:high`;
-		const model = {
-			id,
-			name: "Startup Reasoner",
-			reasoning: true,
-			contextWindow: 128_000,
-			maxTokens: 16_384,
-		};
-		const modelsPath = path.join(tempDir, "models.yml");
-		await Bun.write(
-			modelsPath,
-			JSON.stringify({
-				providers: {
-					[provider]: {
-						baseUrl: `http://127.0.0.1:8998${routes ? "/openrouter.ai" : ""}/v1`,
-						api: "openai-completions",
-						auth: "none",
-						models: [model, { ...model, id: aliasTarget }],
-					},
-				},
-			}),
-		);
-		const settings = Settings.isolated({
-			disabledProviders: selection === "disabled shadow" ? ["opencode-go"] : [],
-			modelRoles: {
-				default: `@startupTest, ${provider}/${aliasTarget}`,
-				startupTest: selector,
-			},
-		});
-		if (literal || variantAlias || selection === "thinking") {
-			// A cached unkeyed roster by itself is not a competing model.
-			const cacheProvider =
-				selection === "standard cache shadow" ? "openai" : literal ? "opencode-go" : "factory-droid";
-			const apiKey = literal ? "test-key" : undefined;
-			if (apiKey) authStorage.keys.setRuntime(cacheProvider, apiKey);
-			const cached = buildModel({
-				...model,
-				id: literal ? selector : variantAlias ? aliasTarget : "unrelated-public-model",
-				provider: cacheProvider,
-				api: literal ? "openai-responses" : "factory-droid-agent",
-				baseUrl: literal ? "https://opencode.ai/zen/go/v1" : "https://api.factory.ai",
-				input: ["text"],
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				...(variantAlias
-					? {
-							thinking: {
-								mode: "effort",
-								efforts: [Effort.High],
-								effortRouting: { [Effort.High]: selector },
-							},
-						}
-					: {}),
+	] as const)(
+		"preserves default model precedence at startup with %s",
+		async selection => {
+			const authStorage = createInMemoryAuthStorage();
+			authStoragesToClose.push(authStorage);
+			const source = authStorage.keys.source.bind(authStorage.keys);
+			vi.spyOn(authStorage.keys, "source").mockImplementation((provider, options) => {
+				const auth = source(provider, options);
+				return auth?.kind === "env" ? undefined : auth;
 			});
-			writeModelCache(
-				selection === "standard cache shadow"
-					? cacheProvider
-					: resolveModelCacheProviderId(cacheProvider, { apiKey }),
-				Date.now(),
-				[cached],
-				true,
-				"",
-				path.join(tempDir, "models.db"),
+			const provider = `startup-${selection.replaceAll(" ", "-")}`;
+			const id = "reasoner";
+			const aliasTarget = "startup-alias-target";
+			const routes = selection === "routing" || selection === "literal shadow";
+			const literal =
+				selection === "literal shadow" || selection === "standard cache shadow" || selection === "disabled shadow";
+			if (selection === "unrelated available roster") authStorage.keys.setRuntime("openrouter", "test-key");
+			const variantAlias = selection === "unkeyed variant alias";
+			const selector = `${provider}/${id}${routes ? "@test-upstream" : ""}:high`;
+			const model = {
+				id,
+				name: "Startup Reasoner",
+				reasoning: true,
+				contextWindow: 128_000,
+				maxTokens: 16_384,
+			};
+			const modelsPath = path.join(tempDir, "models.yml");
+			await Bun.write(
+				modelsPath,
+				JSON.stringify({
+					providers: {
+						[provider]: {
+							baseUrl: `http://127.0.0.1:8998${routes ? "/openrouter.ai" : ""}/v1`,
+							api: "openai-completions",
+							auth: "none",
+							models: [model, { ...model, id: aliasTarget }],
+						},
+					},
+				}),
 			);
-		}
-		const modelRegistry = new ModelRegistry(authStorage, modelsPath, { settings });
-		const hydrate = modelRegistry.createStartupModelCacheHydrator();
-		const broad = vi.spyOn(modelRegistry, "getAvailable");
-		let broadReadsAtSelection: number | undefined;
-		const events: string[] = [];
-		vi.spyOn(authStorage.keys, "prefetchUsage").mockImplementation(async () => {
-			broadReadsAtSelection ??= broad.mock.calls.length;
-			events.push("selected");
-		});
-		const { session } = await createAgentSession({
-			...buildSessionOptions(""),
-			authStorage,
-			modelRegistry,
-			settings,
-			extensions: [],
-			hydrateStartupModelCaches: providers => {
-				if (!providers) events.push("hydrate-all");
-				return hydrate(providers);
-			},
-		});
-
-		try {
-			if (selection === "literal shadow" || selection === "standard cache shadow") {
-				expect(session.model?.provider).toBe(selection === "standard cache shadow" ? "openai" : "opencode-go");
-				expect(session.model?.id).toBe(selector);
-				expect(events[0]).toBe("hydrate-all");
-			} else if (variantAlias) {
-				expect(session.model?.provider).toBe(provider);
-				expect(session.model?.id).toBe(aliasTarget);
-				expect(events[0]).toBe("hydrate-all");
-			} else {
-				expect(session.model && formatModelStringWithRouting(session.model)).toBe(
-					`${provider}/${id}${routes ? "@test-upstream" : ""}`,
+			const settings = Settings.isolated({
+				disabledProviders: selection === "disabled shadow" ? ["opencode-go"] : [],
+				modelRoles: {
+					default: `@startupTest, ${provider}/${aliasTarget}`,
+					startupTest: selector,
+				},
+			});
+			if (literal || variantAlias || selection === "thinking") {
+				// A cached unkeyed roster by itself is not a competing model.
+				const cacheProvider =
+					selection === "standard cache shadow" ? "openai" : literal ? "opencode-go" : "factory-droid";
+				const apiKey = literal ? "test-key" : undefined;
+				if (apiKey) authStorage.keys.setRuntime(cacheProvider, apiKey);
+				const cached = buildModel({
+					...model,
+					id: literal ? selector : variantAlias ? aliasTarget : "unrelated-public-model",
+					provider: cacheProvider,
+					api: literal ? "openai-responses" : "factory-droid-agent",
+					baseUrl: literal ? "https://opencode.ai/zen/go/v1" : "https://api.factory.ai",
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					...(variantAlias
+						? {
+								thinking: {
+									mode: "effort",
+									efforts: [Effort.High],
+									effortRouting: { [Effort.High]: selector },
+								},
+							}
+						: {}),
+				});
+				writeModelCache(
+					selection === "standard cache shadow"
+						? cacheProvider
+						: resolveModelCacheProviderId(cacheProvider, { apiKey }),
+					Date.now(),
+					[cached],
+					true,
+					"",
+					path.join(tempDir, "models.db"),
 				);
-				expect(session.configuredThinkingLevel()).toBe(Effort.High);
-				expect(events[0]).toBe(selection === "unrelated available roster" ? "hydrate-all" : "selected");
-				if (selection === "unrelated available roster") expect(broadReadsAtSelection).toBe(0);
 			}
-		} finally {
-			await session.dispose();
-		}
-	});
+			const modelRegistry = new ModelRegistry(authStorage, modelsPath, { settings });
+			const hydrate = modelRegistry.createStartupModelCacheHydrator();
+			const broad = vi.spyOn(modelRegistry, "getAvailable");
+			let broadReadsAtSelection: number | undefined;
+			const events: string[] = [];
+			vi.spyOn(authStorage.keys, "prefetchUsage").mockImplementation(async () => {
+				broadReadsAtSelection ??= broad.mock.calls.length;
+				events.push("selected");
+			});
+			const { session } = await createAgentSession({
+				...buildSessionOptions(""),
+				authStorage,
+				modelRegistry,
+				settings,
+				extensions: [],
+				hydrateStartupModelCaches: providers => {
+					if (!providers) events.push("hydrate-all");
+					return hydrate(providers);
+				},
+			});
+
+			try {
+				if (selection === "literal shadow" || selection === "standard cache shadow") {
+					expect(session.model?.provider).toBe(selection === "standard cache shadow" ? "openai" : "opencode-go");
+					expect(session.model?.id).toBe(selector);
+					expect(events[0]).toBe("hydrate-all");
+				} else if (variantAlias) {
+					expect(session.model?.provider).toBe(provider);
+					expect(session.model?.id).toBe(aliasTarget);
+					expect(events[0]).toBe("hydrate-all");
+				} else {
+					expect(session.model && formatModelStringWithRouting(session.model)).toBe(
+						`${provider}/${id}${routes ? "@test-upstream" : ""}`,
+					);
+					expect(session.configuredThinkingLevel()).toBe(Effort.High);
+					expect(events[0]).toBe(selection === "unrelated available roster" ? "hydrate-all" : "selected");
+					if (selection === "unrelated available roster") expect(broadReadsAtSelection).toBe(0);
+				}
+			} finally {
+				await session.dispose();
+			}
+		},
+	);
 
 	test.each(["default role", "discovered default role", "default retry chain"] as const)(
 		"honors enabledModels pins when selecting from the %s",
