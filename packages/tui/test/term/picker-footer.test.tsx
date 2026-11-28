@@ -30,7 +30,10 @@ test("picker footer preserves alternative keys and keeps modifier chords togethe
 	}
 });
 
-test("custom picker looks can omit the theme and still get compact Unicode keycaps", () => {
+test("legacy picker helpers keep compact Unicode keycaps and ignore extra JS arguments", () => {
 	expect(keyCaps(["ctrl", "p"])).toBe("⌃P");
-	expect(actionHint([{ id: "choose", label: "Choose", keys: ["left", "right"] }])).toBe("←→ choose");
+	const actions = [{ id: "choose", label: "Choose", keys: ["left", "right"] }];
+	expect(actionHint(actions)).toBe("←→ choose");
+	expect(Reflect.apply(keyCaps, undefined, [["ctrl", "p"], {}])).toBe("⌃P");
+	expect(Reflect.apply(actionHint, undefined, [actions, {}])).toBe("←→ choose");
 });

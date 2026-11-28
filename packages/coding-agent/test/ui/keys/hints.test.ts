@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings/keybindings";
-import { formatKey, kbdKeys, setKeyHintPlatform } from "@oh-my-pi/pi-tui/theme/keys";
+// Exercise the published formatter subpath that existing extensions still import.
+import { formatKey, kbdKeys, setKeyHintPlatform } from "@oh-my-pi/pi-coding-agent/ui/keys/format";
 import {
 	actionHintSpans,
 	actionKey,

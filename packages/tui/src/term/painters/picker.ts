@@ -14,9 +14,10 @@
  * ({@link pickerWindow}, {@link scrollWindow}, {@link scrollbar}), frame rows ({@link boxTop},
  * {@link boxRow}, {@link boxRule}, {@link boxBottom}), list rows
  * ({@link selectRow}, {@link inlineRow}), the search row ({@link queryRow})
- * and the hint bar ({@link actionHint}, {@link keyCaps}). The `picker`
+ * and the hint bar ({@link actionHintFor}, {@link keyCapsFor}). The `picker`
  * widget (`../widgets/picker`) navigates through {@link pickerNavIds} and
  * {@link pickerPage}, so it works whichever painter draws the node.
+ * Custom looks can use {@link actionHint} and {@link keyCaps} for legacy Unicode hints.
  */
 import type {
 	TspPickerAction,
@@ -324,7 +325,7 @@ export function queryRow(theme: Theme, query: string, width: number, placeholder
 
 // ─── Hints ──────────────────────────────────────────────────────────────────
 
-// Published picker looks without a theme use the original compact Unicode keycaps on every platform.
+// Preserve the published Unicode output through the current major.
 const KEY_CAPS: Readonly<Record<string, string>> = {
 	enter: "⏎",
 	return: "⏎",
@@ -348,18 +349,38 @@ const KEY_CAPS: Readonly<Record<string, string>> = {
 	end: "End",
 };
 
-/** Draw keycaps in `theme`'s preset, or as compact Unicode keycaps if no theme is supplied. */
-export function keyCaps(keys: readonly string[], theme?: Theme): string {
-	if (theme) return formatKeyCaps(keys, { preset: theme.symbols.preset, platform: keyHintPlatform() });
+/**
+ * Keycaps of a key chord (`["alt","enter"]` → `⌥⏎`).
+ * @deprecated Use {@link keyCapsFor} to honor the theme's symbol preset.
+ */
+export function keyCaps(keys: readonly string[]): string {
 	return keys.map(key => KEY_CAPS[key.toLowerCase()] ?? (key.length === 1 ? key.toUpperCase() : key)).join("");
 }
 
-/** The hint row of `actions`: `⏎ select · ⎋ close` (actions without keys are skipped). */
-export function actionHint(actions: readonly TspPickerAction[] | undefined, theme?: Theme): string {
+/**
+ * The hint row of `actions`: `⏎ select · ⎋ close` (actions without keys are skipped).
+ * @deprecated Use {@link actionHintFor} to honor the theme's symbol preset.
+ */
+export function actionHint(actions: readonly TspPickerAction[] | undefined): string {
 	const parts: string[] = [];
 	for (const action of actions ?? []) {
 		if (!action.keys || action.keys.length === 0 || action.disabled) continue;
-		parts.push(`${keyCaps(action.keys, theme)} ${action.label.toLowerCase()}`);
+		parts.push(`${keyCaps(action.keys)} ${action.label.toLowerCase()}`);
+	}
+	return parts.join(" · ");
+}
+
+/** Draw keycaps in the theme's symbol preset, preserving chords and alternative keys. */
+export function keyCapsFor(theme: Theme, keys: readonly string[]): string {
+	return formatKeyCaps(keys, { preset: theme.symbols.preset, platform: keyHintPlatform() });
+}
+
+/** Draw enabled picker action hints with keycaps in the theme's symbol preset. */
+export function actionHintFor(theme: Theme, actions: readonly TspPickerAction[] | undefined): string {
+	const parts: string[] = [];
+	for (const action of actions ?? []) {
+		if (!action.keys || action.keys.length === 0 || action.disabled) continue;
+		parts.push(`${keyCapsFor(theme, action.keys)} ${action.label.toLowerCase()}`);
 	}
 	return parts.join(" · ");
 }
@@ -425,7 +446,7 @@ export function paintPickerFooter(node: UiNode, theme: Theme, width: number): st
 	const props = node.props() as TspPickerProps;
 	const term = pickerTerm(node);
 	const rows: string[] = [];
-	const hint = term.hint === undefined ? actionHint(props.actions, theme) : term.hint;
+	const hint = term.hint === undefined ? actionHintFor(theme, props.actions) : term.hint;
 	if (hint !== null && plainText(hint).length > 0) {
 		// A plain hint is muted; spans carry their own styles (a warning in its place).
 		const text = typeof hint === "string" ? theme.style("muted", hint) : styledText(theme, hint);
