@@ -452,6 +452,10 @@ export interface CompiledCredentialMap {
 	projectId?: CompiledCredentialField;
 	apiEndpoint?: CompiledCredentialField;
 	enterpriseUrl?: CompiledCredentialField;
+	/** Dot path to the refresh token's remaining lifetime in seconds (`OAuthCredentials.refreshExpires`). */
+	refreshExpiresIn?: string;
+	/** Granted scopes (`OAuthCredentials.scope`), usually the response's `scope`. */
+	scope?: CompiledCredentialField;
 }
 
 /** Bearer GET that enriches credentials with identity fields. */
@@ -462,16 +466,17 @@ export interface CompiledUserinfo {
 }
 
 /**
- * One token-endpoint style request. `params` values may use `{placeholders}`
- * (`code`, `state`, `redirect_uri`, `code_verifier`, `client_id`,
- * `client_secret`, `refresh_token`, `device_code`, `scope`, `base`).
+ * One token-endpoint style request. String `params` values may use
+ * `{placeholders}` (`code`, `state`, `redirect_uri`, `code_verifier`,
+ * `client_id`, `client_secret`, `refresh_token`, `device_code`, `scope`,
+ * `base`); numeric values go out as JSON numbers.
  */
 export interface CompiledOAuthRequest {
 	url: CompiledAuthValue;
 	body: "form" | "json";
 	/** Include the grant's standard parameter set before `params`. */
 	standard: boolean;
-	params: Record<string, string>;
+	params: Record<string, string | number>;
 	headers: Record<string, string>;
 	timeoutMs?: number;
 }
@@ -479,6 +484,8 @@ export interface CompiledOAuthRequest {
 /** Callback transport configuration for authorization-code logins. */
 export interface CompiledCallback {
 	port: number;
+	/** Env var overriding `port` (`0` = random free port). */
+	portEnv?: string;
 	path: string;
 	hostname: string;
 	redirectUri?: CompiledAuthValue;
@@ -555,15 +562,36 @@ export type CompiledLogin =
 	| CompiledDeviceCodeLogin
 	| CompiledCustomLogin;
 
+/**
+ * Token-endpoint refusals that prove a refresh grant dead: a 400/401 whose
+ * RFC 6749 `error` code is in `codes`, unless its `error_description` equals
+ * `exceptDescription`.
+ */
+export interface CompiledDeadGrant {
+	codes: string[];
+	exceptDescription?: string;
+}
+
 /** Refresh-token grant declared for a provider. */
 export type CompiledRefresh =
 	| { kind: "none" }
-	| { kind: "hook"; hook: string }
+	| {
+			kind: "hook";
+			hook: string;
+			/** Refresh once the access token is this close to expiry; the engine default otherwise. */
+			windowMs?: number;
+	  }
 	| {
 			kind: "request";
 			token: CompiledOAuthRequest;
 			/** Stored credential fields that must be present before refreshing. */
 			require: string[];
+			/** Sent space-joined as `scope`; a 400 `invalid_scope` retries once without it. */
+			scopes?: string[];
+			/** Refresh once the access token is this close to expiry; the engine default otherwise. */
+			windowMs?: number;
+			/** When set, only these refusals disable the login; every other refresh failure keeps it. */
+			deadGrant?: CompiledDeadGrant;
 			credential: CompiledCredentialMap;
 			userinfo?: CompiledUserinfo;
 			afterRefresh?: string;
@@ -590,9 +618,36 @@ export interface CompiledAuthProvider {
 	disabled?: string;
 	/** Account risk a user must accept (by typing "yes") before a new login starts. */
 	loginWarning?: string;
+	/**
+	 * What every surface calls the provider once an account is linked (such as
+	 * "Acme Pro plan"); `name` stays the pre-sign-in `/login` label.
+	 */
+	connectedName?: string;
+	/**
+	 * One transcript line shown when a session starts using one of the provider's
+	 * models (such as "Using your Acme Pro plan").
+	 */
+	activeNotice?: string;
+	/** Shown once after each successful sign-in (such as the terms requests follow). */
+	loginNotice?: string;
+	/** The host's page where the user turns this app's access on or off. */
+	manageUrl?: string;
+	/**
+	 * OAuth scope a login must hold for the provider to serve requests. A login
+	 * whose granted scope lacks it stays signed in with the provider off.
+	 */
+	requiredScope?: string;
 	storeAs?: string;
 	callbackPort?: number;
 	pasteCode?: boolean;
+	/**
+	 * Logins are bound to a key that must stay on this machine (such as a DPoP
+	 * key), so they stay in the local `agent.db`: the auth broker neither stores
+	 * nor refreshes them.
+	 */
+	deviceBound?: boolean;
+	/** Runs when a login is removed: `hook` revokes the grant at the provider. */
+	signOut?: { hook: string };
 	apiKeyFormat: "bearer" | "structured";
 	expiry?: "jwt-or-never";
 	/** `api-key`: an OAuth login persists only `credentials.access` as a plain API key. */
@@ -678,6 +733,10 @@ export interface CompiledProvider {
 	automaticDefault?: boolean;
 	/** Env vars consulted, in order, for the runtime API-key fallback. */
 	envVars?: string[];
+	/** The provider's own managed API base URL when its deployment has one (chat, discovery, usages, search). */
+	baseUrl?: string;
+	/** Env var naming an alternate base URL for that deployment; consumers keep override resolution in code. */
+	baseUrlEnv?: string;
 	/** The runtime creates a model manager even without a valid API key. */
 	allowUnauthenticated?: boolean;
 	/** Successful runtime discovery replaces bundled provider models instead of merging. */
@@ -698,6 +757,10 @@ export interface CompiledProvider {
 export interface CompiledCompatRules {
 	/** Compiled-format version; bump on incompatible shape changes. */
 	version: 1;
+	/** Hash of the serialized policy alone, excluding `hash` and `priceChanges`. */
+	hash: string;
+	/** Distinct effective price-change instants in the policy, ascending (Unix ms). */
+	priceChanges: number[];
 	/** Every compiled source file, `rules/`-relative, sorted. */
 	files: string[];
 	taxonomy: CompiledTaxonomy;

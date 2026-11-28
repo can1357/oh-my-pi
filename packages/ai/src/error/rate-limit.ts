@@ -2,7 +2,6 @@ import { extractRetryHint } from "@oh-my-pi/pi-utils/fetch-retry";
 
 /**
  * Rate limit reason classification and backoff calculation utilities.
- * Ported from opencode-antigravity-auth plugin for consistency.
  */
 
 export type RateLimitReason =
@@ -58,6 +57,16 @@ function matchesSubscriptionCapText(errorMessage: string): boolean {
 	return SUBSCRIPTION_CAP_PATTERN.test(errorMessage) && !TRANSIENT_INTERVAL_RATE_LIMIT_PATTERN.test(errorMessage);
 }
 const OPENROUTER_DAILY_FREE_LIMIT_PATTERN = /\bfree[-_ ]models[-_ ]per[-_ ]day\b/i;
+// Daily caps worded as a rate limit: Gemini's per-user quota answers "Rate limit
+// exceeded for model … (tokens per day)" or "You've reached today's … limit
+// for …". The window reopens only at the daily reset, so it is quota
+// exhaustion, never a per-minute throttle.
+const DAILY_QUOTA_CAP_PATTERN = /\b(?:tokens|requests) per day\b|\breached today's\b[^\n]{0,80}\blimit\b/i;
+
+/** Whether an error message reports a daily quota cap (resets at the day boundary, not within minutes). */
+export function isDailyQuotaCapText(errorMessage: string): boolean {
+	return DAILY_QUOTA_CAP_PATTERN.test(errorMessage);
+}
 // ClinePass subscription-window exhaustion ("clinepass limit …") and free-tier
 // model caps ("free limit reached on model … try again in …") are account-local
 // quota exhaustion, not per-minute rate limiting.
@@ -152,7 +161,6 @@ export function formatZeroAllowanceNotice(header: string): string {
 const GOOGLE_RPC_ERROR_INFO_TYPE = "type.googleapis.com/google.rpc.ErrorInfo";
 const GOOGLE_RPC_QUOTA_FAILURE_TYPE = "type.googleapis.com/google.rpc.QuotaFailure";
 const GOOGLE_RPC_RETRY_INFO_TYPE = "type.googleapis.com/google.rpc.RetryInfo";
-const ANTIGRAVITY_MODEL_QUOTA_PATTERN = /\bexhausted your capacity on this model\b/i;
 const LONG_RATE_LIMIT_DELAY_MS = 5 * 60 * 1000;
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -176,7 +184,7 @@ export function parseJsonBody(errorMessage: string): Record<string, unknown> | u
 
 /**
  * Classify structured Google RESOURCE_EXHAUSTED bodies before consulting text.
- * Cloud Code Assist prefixes the JSON with its HTTP error label, so accept an
+ * Some transports prefix the JSON with an HTTP error label, so accept an
  * embedded top-level object as well as a raw JSON body.
  */
 function parseGoogleRpcRateLimitReason(errorMessage: string): RateLimitReason | undefined {
@@ -205,18 +213,9 @@ function parseGoogleRpcRateLimitReason(errorMessage: string): RateLimitReason | 
 				// Keep Google's specific credit-balance reason available to logs
 				// and callers while treating it as credential-rotatable below.
 				return "INSUFFICIENT_G1_CREDITS_BALANCE";
-			case "RATE_LIMIT_EXCEEDED": {
-				// Cloud Code Assist also uses this reason for an account's
-				// per-model quota, even when that quota resets within seconds.
-				if (
-					(typeof error.message === "string" && ANTIGRAVITY_MODEL_QUOTA_PATTERN.test(error.message)) ||
-					ANTIGRAVITY_MODEL_QUOTA_PATTERN.test(errorMessage)
-				) {
-					return "QUOTA_EXHAUSTED";
-				}
+			case "RATE_LIMIT_EXCEEDED":
 				sawGenericRateLimitInfo = true;
 				break;
-			}
 		}
 	}
 
@@ -281,7 +280,7 @@ function isQuotaExhaustedReason(reason: RateLimitReason): boolean {
 /**
  * Classify a rate-limit error message into a reason category.
  * Priority order: explicit details in a resource-exhausted error > QUOTA
- * (Antigravity "quota will reset") > CN quota > DASHSCOPE_TOKEN_LIMIT (TPM/TPS
+ * (zero allowance) > CN quota > DASHSCOPE_TOKEN_LIMIT (TPM/TPS
  * throttle) > CONCURRENT_LIMIT > MODEL_CAPACITY > QUOTA (account) > RATE_LIMIT
  * (including TPM/RPM rolling windows) > QUOTA (generic) > SERVER_ERROR > bare
  * resource-exhausted > UNKNOWN.
@@ -296,18 +295,9 @@ export function parseRateLimitReason(errorMessage: string): RateLimitReason {
 	const lower = lowerWithStatus.replace(RESOURCE_EXHAUSTED_PATTERN, "");
 	const hasResourceExhaustedStatus = lower !== lowerWithStatus;
 
-	// Antigravity / Cloud Code Assist surface multi-hour daily-quota exhaustion as
-	// "You have exhausted your capacity on this model. Your quota will reset after …".
-	// The literal "capacity" used to pre-empt the QUOTA branch even though "quota
-	// will reset" is the long-wait signal — short-circuit here before the
-	// MODEL_CAPACITY fallthrough so credential rotation (not 60s backoff) kicks in.
-	// A zero-allowance notice is the same quota state, though its "Rate limit
-	// exceeded" body would otherwise land in RATE_LIMIT_EXCEEDED below.
-	if (
-		lower.includes("quota will reset") ||
-		lower.includes("exhausted your capacity") ||
-		ZERO_ALLOWANCE_PATTERN.test(errorMessage)
-	) {
+	// A zero-allowance notice is a quota state, though its "Rate limit exceeded"
+	// body would otherwise land in RATE_LIMIT_EXCEEDED below.
+	if (ZERO_ALLOWANCE_PATTERN.test(errorMessage)) {
 		return "QUOTA_EXHAUSTED";
 	}
 
@@ -350,6 +340,10 @@ export function parseRateLimitReason(errorMessage: string): RateLimitReason {
 	}
 
 	if (OPENROUTER_DAILY_FREE_LIMIT_PATTERN.test(errorMessage)) {
+		return "QUOTA_EXHAUSTED";
+	}
+
+	if (DAILY_QUOTA_CAP_PATTERN.test(errorMessage)) {
 		return "QUOTA_EXHAUSTED";
 	}
 
@@ -425,9 +419,17 @@ export function calculateRateLimitBackoffMs(reason: RateLimitReason): number {
 	}
 }
 
-/** Detect usage/quota limit errors in error messages (persistent, requires credential switch). */
+/**
+ * Detect usage/quota limit errors in error messages (persistent, requires credential switch).
+ * `(daily|weekly) usage quota has been exhausted` matches any provider, Devin's account allowance
+ * refusal included. Devin's weekly form names no reset time ("Your weekly usage quota has been
+ * exhausted. Visit … to purchase on-demand usage"), so this phrase is all that marks it; the window
+ * word keeps a per-minute throttle phrased the same way out. With no usage report, the session
+ * retry path blocks a spent weekly login only for the default `QUOTA_EXHAUSTED` backoff (30 min),
+ * so it costs one refused request per backoff window until the weekly reset.
+ */
 const USAGE_LIMIT_PATTERN =
-	/usage.?limit|usage_limit_reached|usage_not_included|limit_reached|quota.?(?:exceeded|reached|insufficient)|额度不足|额度耗尽|resource.?exhausted|exhausted your capacity|quota will reset|insufficient.?(?:balance|quota)|balance.?exhausted|run out of credits|out of credits|out of (?:extra )?usage|spending[- _]?limit|personal-team-blocked|clinepass limit|free limit reached on model|access_terminated_error/i;
+	/usage.?limit|usage_limit_reached|usage_not_included|limit_reached|quota.?(?:exceeded|reached|insufficient)|额度不足|额度耗尽|resource.?exhausted|(?:daily|weekly) usage quota has been exhausted|insufficient.?(?:balance|quota)|balance.?exhausted|run out of credits|out of credits|out of (?:extra )?usage|spending[- _]?limit|personal-team-blocked|clinepass limit|free limit reached on model|access_terminated_error/i;
 
 /**
  * HTTP status codes that, absent richer body classification, represent an
@@ -609,6 +611,7 @@ export function matchesUsageLimitText(errorMessage: string): boolean {
 		ACCOUNT_RATE_LIMIT_PATTERN.test(errorMessage) ||
 		matchesSubscriptionCapText(errorMessage) ||
 		OPENROUTER_DAILY_FREE_LIMIT_PATTERN.test(errorMessage) ||
+		DAILY_QUOTA_CAP_PATTERN.test(errorMessage) ||
 		ZERO_ALLOWANCE_PATTERN.test(errorMessage)
 	);
 }

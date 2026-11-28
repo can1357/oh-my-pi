@@ -4,9 +4,11 @@
  */
 import * as os from "node:os";
 import * as path from "node:path";
+import type { SymbolSet } from "@oh-my-pi/pi-tui/theme/contract";
 import { formatNumber, normalizePremiumRequests } from "@oh-my-pi/pi-utils";
 import type { TspTone } from "@oh-my-pi/pi-wire";
 import { shortenPath } from "../../utils/render-utils";
+import { type AiuTotals, formatAiuCredits } from "../../session/aiu-billing";
 
 /** How full the context window reads. */
 export type ContextLevel = "normal" | "warning" | "purple" | "error";
@@ -64,30 +66,16 @@ export interface Billing {
 	/** Subagent-tree spend, shown `(+…)` after the session's own. */
 	readonly subagentCost?: number;
 	readonly advisor?: { readonly cost: number; readonly usingSubscription: boolean };
-}
-
-/** Glyphs a billing summary needs from the symbol preset. */
-export interface BillingGlyphs {
-	readonly nerd: boolean;
-	/** `icon.subscription`. */
-	readonly subscription: string;
-	/** `icon.advisor`. */
-	readonly advisor: string;
-}
-
-function spend(amount: number, subscription: boolean, digits: number, glyphs: BillingGlyphs, unit: boolean): string {
-	const value = amount.toFixed(digits);
-	if (!unit) return value;
-	if (!subscription) return `$${value}`;
-	return glyphs.nerd && glyphs.subscription ? `${glyphs.subscription} ${value}` : `S${value}`;
+	/** Server-reported AI credits of the session and its tree, a separate meter from `cost`; `+` marks a lower bound. */
+	readonly aiu?: AiuTotals;
 }
 
 /**
- * `$0.42`, `$1.234 ★ 3`, `S1.20 (+0.30)`, `(sub)`…: the session's spend with
- * its unit printed once, subagent spend, the pricing period, premium requests
- * and advisor spend. Undefined when there is nothing to bill.
+ * `$0.42`, `$1.234 ★ 3`, `S1.20 (+0.30) 4.56+ cr`, `(sub)`…: the session's spend with
+ * its unit printed once, subagent spend, the pricing period, premium requests,
+ * AI credits and advisor spend. Undefined when there is nothing to bill.
  */
-export function billingSummary(billing: Billing, glyphs: BillingGlyphs): string | undefined {
+export function billingSummary(billing: Billing, symbols: SymbolSet): string | undefined {
 	const premium = normalizePremiumRequests(billing.premiumRequests);
 	const advisorCost = billing.advisor?.cost ?? 0;
 	const subagentCost = billing.subagentCost ?? 0;
@@ -97,31 +85,33 @@ export function billingSummary(billing: Billing, glyphs: BillingGlyphs): string 
 		!advisorCost &&
 		!billing.usingSubscription &&
 		!premium &&
+		!billing.aiu &&
 		!billing.pricingPeriod
 	) {
 		return undefined;
 	}
 	const parts: string[] = [];
+	const subscription = symbols.icon("subscription");
+	const subscriptionUnit = symbols.preset === "nerd" && subscription ? `${subscription} ` : "S";
 	let shown: boolean | undefined;
 	if (billing.cost || billing.pricingPeriod || subagentCost) {
-		parts.push(spend(billing.cost, billing.usingSubscription, billing.digits, glyphs, true));
+		const unit = billing.usingSubscription ? subscriptionUnit : "$";
+		parts.push(`${unit}${billing.cost.toFixed(billing.digits)}`);
 		shown = billing.usingSubscription;
 	} else if (billing.usingSubscription) {
-		parts.push(glyphs.nerd && glyphs.subscription ? glyphs.subscription : "(sub)");
+		parts.push(subscription || "(sub)");
 		shown = true;
 	}
 	if (subagentCost) parts.push(`(+${subagentCost.toFixed(billing.digits)})`);
 	if (billing.pricingPeriod) parts.push(billing.pricingPeriod === "peak" ? "↑" : "↓");
 	if (premium) parts.push(`★ ${formatNumber(premium)}`);
+	if (billing.aiu) parts.push(`${formatAiuCredits(billing.aiu, billing.digits)} cr`);
 	if (advisorCost && billing.advisor) {
-		const amount = spend(
-			advisorCost,
-			billing.advisor.usingSubscription,
-			billing.digits,
-			glyphs,
-			shown !== billing.advisor.usingSubscription,
-		);
-		const labelled = glyphs.advisor && glyphs.advisor !== "(adv)" ? `${glyphs.advisor} ${amount}` : `${amount} (adv)`;
+		const usingSubscription = billing.advisor.usingSubscription;
+		const unit = shown === usingSubscription ? "" : usingSubscription ? subscriptionUnit : "$";
+		const amount = `${unit}${advisorCost.toFixed(billing.digits)}`;
+		const advisor = symbols.icon("advisor") || "(adv)";
+		const labelled = advisor === "(adv)" ? `${amount} ${advisor}` : `${advisor} ${amount}`;
 		parts.push(parts.length > 0 ? `+ ${labelled}` : labelled);
 	}
 	return parts.length > 0 ? parts.join(" ") : undefined;

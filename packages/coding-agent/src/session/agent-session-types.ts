@@ -231,6 +231,8 @@ export interface AgentSessionConfig {
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Hard ceiling on the session's thinking effort (e.g. a task spawn's `task.maxEffort`-capped hint); every later change, including retry-fallback recovery, is re-clamped to it. */
 	thinkingLevelCeiling?: Effort;
+	/** Validate a candidate for a model change against the session's dispatch restrictions. */
+	assertDispatchModel?: (model: Model) => void;
 	/**
 	 * Disable retry fallback, context promotion and usage-aware fallback: the turn retries on, or fails
 	 * with, its own model instead. Startup model selection, and the return to the primary after a
@@ -375,8 +377,8 @@ export interface AgentSessionConfig {
 	onSseEvent?: SimpleStreamOptions["onSseEvent"];
 	/** Per-session raw SSE diagnostic buffer. */
 	rawSseDebugBuffer?: RawSseDebugBuffer;
-	/** Current session message-to-LLM conversion pipeline. */
-	convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
+	/** Current session message-to-LLM conversion pipeline, for the destination receiving the request. */
+	convertToLlm?: (messages: AgentMessage[], model: Model | undefined) => Message[] | Promise<Message[]>;
 	/** System prompt builder that can consider tool availability. */
 	rebuildSystemPrompt?: SystemPromptRebuilder;
 	/** Sources of the initial base prompt, as returned by `buildSystemPrompt`. */
@@ -450,6 +452,8 @@ export interface AgentSessionConfig {
 	advisorConfigs?: AdvisorConfig[];
 	/** Config problems collected during WATCHDOG.yml discovery. */
 	advisorConfigWarnings?: string[];
+	/** User configuration directory used to rediscover the advisor roster. */
+	advisorConfigDir?: string;
 	/** Disconnect the MCP manager owned by this session during disposal. */
 	disconnectOwnedMcpManager?: () => Promise<void>;
 	/**
@@ -470,6 +474,8 @@ export interface AgentSessionConfig {
 
 /** Options for AgentSession.prompt(). */
 export interface PromptOptions {
+	/** Original submission time when the host has already displayed the prompt. */
+	submittedAt?: number;
 	/** Whether to expand file-based prompt templates (default: true). */
 	expandPromptTemplates?: boolean;
 	/**
@@ -593,6 +599,7 @@ export interface RoleModelCycleResult {
 
 import type { ResolvedRoleModel } from "../modes/view-model/overlays/model-picker";
 export type { ResolvedRoleModel } from "../modes/view-model/overlays/model-picker";
+import type { AiuTotals } from "./aiu-billing";
 
 /** Resolvable role models and the currently active index. */
 export interface RoleModelCycle {
@@ -637,6 +644,8 @@ export interface SessionStats {
 		committedCost: number;
 		acuCost: number;
 	};
+	/** Server-reported AI credits of the session and its subagent tree; absent until a call reported or missed one. */
+	aiu?: AiuTotals;
 	/** Concrete provider-routed model ids with finalized turn counts. */
 	routedModels?: Record<string, number>;
 	/** Failed edits by the engine's `errorKind`. */

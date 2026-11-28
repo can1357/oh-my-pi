@@ -88,16 +88,17 @@ pub(crate) fn load_index_or_head(
 ) -> Result<gix::index::File> {
 	match repo.open_index() {
 		Ok(index) => Ok(index),
-		Err(gix::worktree::open_index::Error::IndexFile(gix::index::file::init::Error::Io(err)))
-			if err.kind() == std::io::ErrorKind::NotFound =>
-		{
-			Ok(repo
-				.index_or_load_from_head_or_empty()
-				.map_err(|err| Error::backend(op, err))?
-				.into_owned())
-		},
+		Err(err) if is_missing_index_file(&err) => Ok(repo
+			.index_or_load_from_head_or_empty()
+			.map_err(|err| Error::backend(op, err))?
+			.into_owned()),
 		Err(err) => Err(Error::backend(op, err)),
 	}
+}
+
+fn is_missing_index_file(err: &gix::Error) -> bool {
+	err.downcast_any_ref::<gix::index::file::init::OpenError>()
+		.is_some_and(|err| err.source.kind() == std::io::ErrorKind::NotFound)
 }
 
 /// Load the persisted worktree index straight from disk, falling back to an
@@ -111,14 +112,10 @@ pub(crate) fn load_index_or_empty(
 ) -> Result<gix::index::File> {
 	match repo.open_index() {
 		Ok(index) => Ok(index),
-		Err(gix::worktree::open_index::Error::IndexFile(gix::index::file::init::Error::Io(err)))
-			if err.kind() == std::io::ErrorKind::NotFound =>
-		{
-			Ok(repo
-				.index_or_empty()
-				.map_err(|err| Error::backend(op, err))?
-				.into_owned_or_cloned())
-		},
+		Err(err) if is_missing_index_file(&err) => Ok(repo
+			.index_or_empty()
+			.map_err(|err| Error::backend(op, err))?
+			.into_owned_or_cloned()),
 		Err(err) => Err(Error::backend(op, err)),
 	}
 }
@@ -167,6 +164,7 @@ fn open_options() -> Options {
 				identity:        Permission::Allow,
 				objects:         Permission::Deny,
 				git_prefix:      Permission::Deny,
+				other:           Permission::Deny,
 				ssh_prefix:      Permission::Deny,
 			},
 			config:     permissions::Config::all(),

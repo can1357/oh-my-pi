@@ -18,19 +18,12 @@
  *   reported through `onError` (the mount point then shows its own default);
  *   rows that throw while painting draw one error row instead.
  */
-import {
-	type Accessor,
-	isUiNode,
-	type JSXNode,
-	type KeyEvent,
-	onCleanup,
-	type PasteEvent,
-	signal,
-	type UiNode,
-	untrack,
-} from "@oh-my-pi/pi-tui";
+import type { JSXNode, KeyEvent, PasteEvent } from "@oh-my-pi/pi-tui";
+import { isUiNode, type UiNode } from "@oh-my-pi/pi-tui/node";
+import { type Accessor, onCleanup, signal, untrack } from "@oh-my-pi/pi-tui/reactive";
 import { truncate } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { bold, inverse, italic, strikethrough, underline } from "@oh-my-pi/pi-tui/theme/theme";
 import type { ExtensionRows, ExtensionTheme } from "../../extensibility/extensions/render-types";
 
@@ -112,7 +105,9 @@ export function paintRows(rows: ExtensionRows, width: number, onError?: (error: 
 	} catch (error) {
 		onError?.(error);
 		const message = error instanceof Error ? error.message : String(error);
-		return [truncate(`⚠ extension render failed: ${message}`, width)];
+		return [
+			truncate(`${currentTheme().symbols.symbol("status.warning")} extension render failed: ${message}`, width),
+		];
 	}
 }
 

@@ -8,12 +8,14 @@
  * (choice menu, text field, multi-select) replaces the rows; editors the
  * page has no control for arrive as `omp.prefs.editor` children and are
  * drawn in their place. While the program searches (`query`), the strip
- * lists the pages with matches first and the rows are the results.
+ * lists the pages with matches first and the rows are the results, under a
+ * banner showing the `omp.prefs.search` child's text and caret.
  *
  * Screens that need a different window give the node a `role` and register
  * a role painter; such nodes are theirs to draw and drive (the widget leaves
  * them alone).
  */
+import { segmentGraphemes } from "@oh-my-pi/pi-utils/graphemes";
 import type { TspPrefsControl, TspPrefsProps, TspPrefsRow } from "@oh-my-pi/pi-wire";
 import type { UiNode } from "../../node";
 import type { Theme } from "../../theme/contract";
@@ -49,6 +51,11 @@ export const PREFS_PREVIEW_ROLE = "omp.prefs.preview.status";
 export const PREFS_EDITOR_ROLE = "omp.prefs.editor";
 /** A child drawn under an open choice menu (a preview of the highlighted option). */
 export const PREFS_MENU_FOOTER_ROLE = "omp.prefs.menu.footer";
+/**
+ * The search field: an `input` child holding the query as typed and its caret. Tern draws it in
+ * the nav's search pill and edits it natively; the terminal draws its caret in the search banner.
+ */
+export const PREFS_SEARCH_ROLE = "omp.prefs.search";
 
 /** Fallback window height when the parent does not fix one. */
 const DEFAULT_HEIGHT = 40;
@@ -242,7 +249,7 @@ export function inputLine(text: string, cursor: number, width: number, prompt = 
 	const atEnd = at >= text.length;
 	const shown = atEnd ? `${text} ` : text;
 	// Keep the caret inside the window: drop leading cells until it fits.
-	const graphemes = [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(shown)];
+	const graphemes = [...segmentGraphemes(shown)];
 	let caret = graphemes.findIndex(g => g.index >= at);
 	if (caret < 0) caret = graphemes.length - 1;
 	let start = 0;
@@ -653,7 +660,7 @@ function stripTabs(props: TspPrefsProps, theme: Theme): TabStripItem[] {
 
 // ─── The window ─────────────────────────────────────────────────────────────
 
-function searchBanner(theme: Theme, props: TspPrefsProps, width: number): string {
+function searchBanner(theme: Theme, props: TspPrefsProps, cursor: number | undefined, width: number): string {
 	let count = 0;
 	for (const section of props.sections) count += section.rows.length;
 	const icon = theme.symbols.icon("search");
@@ -661,7 +668,7 @@ function searchBanner(theme: Theme, props: TspPrefsProps, width: number): string
 	const prefix = ` ${theme.fg("accent", icon)} `;
 	const inputWidth = Math.max(4, width - visibleWidth(prefix) - (visibleWidth(countText) + 1) - 1);
 	const query = props.query ?? "";
-	const field = inputLine(query, props.cursor ?? query.length, inputWidth, "");
+	const field = inputLine(query, cursor ?? query.length, inputWidth, "");
 	return truncate(
 		`${prefix}${theme.style("strong", field)} ${theme.fg(count > 0 ? "dim" : "warning", countText)} `,
 		width,
@@ -679,6 +686,7 @@ function paintWindow(node: UiNode, cx: PaintContext): Block {
 	const children = node.children();
 	const previewNode = children.find(child => (child.props() as { role?: string }).role === PREFS_PREVIEW_ROLE);
 	const editorNode = children.find(child => (child.props() as { role?: string }).role === PREFS_EDITOR_ROLE);
+	const searchNode = children.find(child => (child.props() as { role?: string }).role === PREFS_SEARCH_ROLE);
 
 	const strip = tabBar(
 		theme,
@@ -784,7 +792,11 @@ function paintWindow(node: UiNode, cx: PaintContext): Block {
 			item: `tab:${zone.id}`,
 		});
 	rows.push(frameRule(theme, width, theme.symbols.box.teeRight, theme.symbols.box.teeLeft));
-	if (searching) rows.push(frameRow(theme, searchBanner(theme, props, inner), width));
+	if (searching) {
+		const field = searchNode?.props();
+		const cursor = field && "cursor" in field && typeof field.cursor === "number" ? field.cursor : undefined;
+		rows.push(frameRow(theme, searchBanner(theme, props, cursor, inner), width));
+	}
 	for (let i = 0; i < contentRows; i++) rows.push(frameRow(theme, content[i] ?? "", width));
 	for (const line of previewRows) rows.push(frameRow(theme, line, width));
 	rows.push(frameRule(theme, width, theme.symbols.box.teeRight, theme.symbols.box.teeLeft));

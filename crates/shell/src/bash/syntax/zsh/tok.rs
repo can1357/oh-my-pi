@@ -154,6 +154,12 @@ pub fn head<T>(s: &[T], b: usize) -> &[T] {
 /// zsh `metafy`: `raw` bytes with every [`is_meta`] byte escaped.
 pub fn metafy(raw: &[u8]) -> Vec<u8> {
 	let mut out = Vec::with_capacity(raw.len());
+	metafy_into(raw, &mut out);
+	out
+}
+
+/// Appends raw bytes to a zsh string, escaping every [`is_meta`] byte.
+pub(crate) fn metafy_into(raw: &[u8], out: &mut Vec<u8>) {
 	for &c in raw {
 		if is_meta(c) {
 			out.push(META);
@@ -162,7 +168,6 @@ pub fn metafy(raw: &[u8]) -> Vec<u8> {
 			out.push(c);
 		}
 	}
-	out
 }
 
 /// zsh `unmetafy`: the raw bytes of a metafied string (tokens kept as

@@ -5,6 +5,7 @@
 //! `LANG`).
 
 use encoding_rs::{DecoderResult, Encoding};
+use xutf::{Utf8Decoder, Utf8Step};
 
 use super::{Kernel, proc::Vproc, state};
 use crate::bash::store::{StateStore, StoreError};
@@ -152,19 +153,18 @@ pub fn char_len(cs: Charset, bytes: &[u8], more: bool) -> Option<usize> {
 	match cs {
 		Charset::Bytes | Charset::Latin1 => Some(1),
 		Charset::Utf8 => {
-			let need = match bytes[0] {
-				0xc2..=0xdf => 2,
-				0xe0..=0xef => 3,
-				0xf0..=0xf4 => 4,
-				_ => return Some(1),
-			};
-			match core::str::from_utf8(&bytes[..need.min(bytes.len())]) {
-				Ok(_) if bytes.len() >= need => Some(need),
-				// A valid start that the input ended inside.
-				Ok(_) => incomplete(),
-				Err(e) if e.error_len().is_none() => incomplete(),
-				Err(_) => Some(1),
+			if bytes[0].is_ascii() {
+				return Some(1);
 			}
+			let mut decoder = Utf8Decoder::new();
+			for &byte in bytes.iter().take(char::MAX_LEN_UTF8) {
+				match decoder.push(byte) {
+					Utf8Step::Pending => {},
+					Utf8Step::Char(ch) => return Some(ch.len_utf8()),
+					Utf8Step::Reject => return Some(1),
+				}
+			}
+			incomplete()
 		},
 		Charset::Encoding(enc) => {
 			if enc.is_single_byte() {

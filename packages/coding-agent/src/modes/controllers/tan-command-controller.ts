@@ -3,13 +3,11 @@ import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { logger, prompt, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
-import backgroundTanDispatchPrompt from "../../prompts/system/background-tan-dispatch.md" with { type: "text" };
 import tanContextSwitchPrompt from "../../prompts/system/tan-context-switch.md" with { type: "text" };
 import tanNamePrompt from "../../prompts/system/tan-name.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import * as sdk from "../../sdk";
 import type { AgentSession } from "../../session/agent-session";
-import { escapeHarnessTags } from "../../session/harness-tags";
 import { BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE, buildTitleDriftTurns } from "../../session/messages";
 import { isHiddenUserCompanion } from "../../session/queued-messages";
 import { TAN_FORK_BOUNDARY_CUSTOM_TYPE } from "../../session/session-entries";
@@ -19,6 +17,7 @@ import { generateTaskName } from "../../task/name-generator";
 import { AgentOutputManager } from "../../task/output-manager";
 import { cleanTinyMessage, formatTitleConversationContext, MAX_TINY_MESSAGE_CHARS } from "../../tiny/message-preproc";
 import { USER_TODO_EDIT_CUSTOM_TYPE } from "../../tools/todo";
+import type { TodoPhase } from "../../tools/details/todo";
 import type { InteractiveModeContext } from "../types";
 
 import { cfgTaskEnableLsp } from "../../task/settings";
@@ -289,16 +288,24 @@ export class TanCommandController {
 						signal.addEventListener("abort", abortClone, { once: true });
 						// The fork inherits the parent's todo list via session entries;
 						// its reminders would drag the tan back onto the parent's task.
-						// Clear runtime state and persist an empty edit so reloads agree.
-						clone.setTodoPhases([]);
-						cloneManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: [] });
+						// Replace it with the assignment as the only item, so todo
+						// reminders point at the tan's own work, and persist the edit so
+						// reloads agree.
+						const assignment: TodoPhase[] = [
+							{ name: "Assignment", tasks: [{ content: previewWork(trimmedWork), status: "in_progress" }] },
+						];
+						clone.setTodoPhases(assignment);
+						cloneManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: assignment });
 						const injectContextSwitch = () => {
 							const fork = clone;
 							if (!fork) return;
+							const tools = fork.getEnabledToolNames();
 							fork.agent.appendMessage({
 								role: "developer",
 								content: prompt.render(tanContextSwitchPrompt, {
-									waitTool: fork.getEnabledToolNames().includes("wait"),
+									name: cloneId,
+									todoTool: tools.includes("todo"),
+									waitTool: tools.includes("wait"),
 								}),
 								attribution: "agent",
 								timestamp: Date.now(),
@@ -416,25 +423,18 @@ export class TanCommandController {
 			return false;
 		}
 
-		const content = prompt.render(backgroundTanDispatchPrompt, {
-			jobId: escapeHarnessTags(jobId),
-			work: escapeHarnessTags(trimmedWork),
+		// A breadcrumb for the user only. Kept out of the model's context: shown the
+		// user's work mid-turn, the agent reads it as an instruction or as its own job.
+		// Mid-run it is drawn when the run ends; idle, it is appended and painted now.
+		// Its completion reaches the agent only as a record (see `buildTanResultMessages`).
+		await session.sendCustomMessage({
+			customType: BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE,
+			content: trimmedWork,
+			display: true,
+			excludeFromContext: true,
+			attribution: "agent",
+			details: { jobId, work: trimmedWork, sessionFile: cloneFile },
 		});
-		// Steer the notice into a running turn at its next step boundary so the agent
-		// learns of the tangent now, not after it finishes; idle, the same call appends,
-		// persists and paints it without starting a turn. Harness-authored (agent
-		// attribution): no editable queue chip, and an interrupt records it instead of
-		// restoring the raw notice into the editor.
-		await session.sendCustomMessage(
-			{
-				customType: BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE,
-				content,
-				display: true,
-				attribution: "agent",
-				details: { jobId, work: trimmedWork, sessionFile: cloneFile },
-			},
-			{ triggerTurn: false, deliverAs: "steer" },
-		);
 		this.ctx.showStatus(`Dispatched background tan ${jobId}`);
 		return true;
 	}

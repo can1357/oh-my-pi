@@ -3,7 +3,9 @@ import * as path from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { cfgMagicKeywordsEnabled } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { imageLinksForMessage } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
+import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { presetSymbols } from "@oh-my-pi/pi-tui/theme/symbols";
 import { chipLabel } from "../../../src/ui/composer/attachments";
 import { enabledMagicKeywords } from "../../../src/ui/composer/magic-keywords";
 import { printRows } from "../../../src/ui/print-rows";
@@ -66,6 +68,22 @@ describe("user message bubble", () => {
 		const text = bubbleText({ text: "please inspect [Image #1, 800x600] before continuing" });
 		expect(text).toContain(`${chipLabel("image", 1)} before continuing`);
 		expect(text).not.toContain("[Image #1");
+	});
+
+	it("draws chips in the symbol preset's glyphs, the ones the composer drew them with", () => {
+		// A Nerd Font session (every Tern session is one) must not fall back to the unicode preset's emoji.
+		const nerd = presetSymbols("nerd");
+		setCurrentTheme(loadThemeSync("dark", { symbolPreset: "nerd" }));
+		try {
+			const text = bubbleText({
+				text: 'ask <model agent="m1" name="Fast"/> about [Image #1, 800x600] and [Video #2]',
+			});
+			expect(text).toContain(
+				`${nerd["mention.model"]} Fast about ${nerd["chip.image"]} #1 and ${nerd["chip.video"]} #2`,
+			);
+		} finally {
+			setCurrentTheme(restoreTheme);
+		}
 	});
 });
 

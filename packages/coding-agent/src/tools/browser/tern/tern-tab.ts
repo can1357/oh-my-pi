@@ -163,6 +163,7 @@ import {
 	type DomReply,
 	type DomRequest,
 	type DomResolveAction,
+	type DomResolved,
 	type DomWaitState,
 	describeDomNode,
 	domCandidateSelector,
@@ -378,7 +379,9 @@ interface TargetFailure {
 }
 
 /** The error of an action whose element did not become actionable within `elapsedMs`. */
-function targetTimeout(label: string, elapsedMs: number, failure: TargetFailure): ToolError {
+function targetTimeout(label: string, elapsedMs: number, failure?: TargetFailure): ToolError {
+	const message = `${label} timed out after ${elapsedMs}ms`;
+	if (!failure) return new ToolError(message);
 	const why =
 		failure.reason === "missing"
 			? "no element matches (wrong page or selector?)"
@@ -393,7 +396,20 @@ function targetTimeout(label: string, elapsedMs: number, failure: TargetFailure)
 							: failure.reason === "offViewport"
 								? "the element is outside the viewport"
 								: "the element keeps moving";
-	return new ToolError(`${label} timed out after ${elapsedMs}ms: ${why} (${failure.count} match(es))`);
+	return new ToolError(`${message}: ${why} (${failure.count} match(es))`);
+}
+
+/** Only a read that exhausted this action's deadline can give way to its last observed refusal. */
+function rethrowTargetReadFailure(
+	error: unknown,
+	last: TargetFailure | undefined,
+	deadline: number,
+	signal?: AbortSignal,
+): void {
+	if (last && !signal?.aborted && error instanceof TernError && error.kind === "timeout" && Date.now() >= deadline) {
+		return;
+	}
+	throw error;
 }
 
 /** The error of an observation id whose element left the page. */
@@ -502,7 +518,7 @@ export class TernTab implements InProcessRunTab {
 	readonly #events: TernEvent[] = [];
 	#pulling: Promise<void> | undefined;
 	#runContext: InProcessRunContext | undefined;
-	readonly #readScope = new AsyncLocalStorage<{ deadline: number; signal: AbortSignal }>();
+	readonly #readScope = new AsyncLocalStorage<{ deadline: number; signal?: AbortSignal }>();
 	#rendererFailure: ToolError | undefined;
 	#rendererProbe: Promise<void> | undefined;
 	/** Set once the backend no longer has this tab's block ({@link gone}): every later op fails with it. */
@@ -941,7 +957,7 @@ export class TernTab implements InProcessRunTab {
 			op,
 			block: this.block,
 			...fields,
-			...(scope && this.#client.supports("responsive") ? { failUnresponsive: true } : {}),
+			...(scope?.signal && this.#client.supports("responsive") ? { failUnresponsive: true } : {}),
 		};
 		const dialogMode = PAGE_OP_DIALOG[op];
 		if (!dialogMode) return await this.#client.request(request, options);
@@ -1794,7 +1810,10 @@ export class TernTab implements InProcessRunTab {
 	// ─── Selectors and targets ────────────────────────────────────────────
 
 	#spec(selector: string | TernSelector): TernSelector {
-		return typeof selector === "string" ? parseTernSelector(selector) : selector;
+		if (typeof selector === "object" && selector !== null && typeof selector.engine === "string") return selector;
+		// Eval code reaches here unchecked: `waitFor(1500)`, `waitFor(() => …)` or null must fail as a selector
+		// naming what to call instead, not inside the page kit as `Unsupported selector engine undefined`.
+		return parseTernSelector(selector as string);
 	}
 
 	/** Viewport offset of `frame`'s content box in the main frame. */
@@ -1831,22 +1850,31 @@ export class TernTab implements InProcessRunTab {
 	): Promise<BoundingBox> {
 		const spec = this.#spec(selector);
 		if (this.#native) return await this.#resolveTarget(label, spec, action, frame, explicitTimeout);
+		const started = Date.now();
 		const timeoutMs =
 			explicitTimeout === undefined
 				? resolveOpTimeouts(this.#cellMs).actionOpMs
 				: resolveWaitTimeout(this.#cellMs, explicitTimeout);
-		const started = Date.now();
+		const deadline = started + timeoutMs;
 		let delay = 30;
-		let last: TernTarget;
-		for (;;) {
-			last = await this.#kit<TernTarget>("target", [spec, action], frame);
-			if (last.ok) {
-				const offset = await this.#frameOffset(frame);
-				return { x: last.x + offset.x, y: last.y + offset.y, width: last.width, height: last.height };
+		let last: TargetFailure | undefined;
+		while (Date.now() < deadline) {
+			let target: TernTarget;
+			try {
+				target = await this.#kit<TernTarget>("target", [spec, action], frame);
+			} catch (error) {
+				rethrowTargetReadFailure(error, last, deadline, this.#signal);
+				break;
 			}
+			if (target.ok) {
+				const offset = await this.#frameOffset(frame);
+				if (Date.now() >= deadline) break;
+				return { x: target.x + offset.x, y: target.y + offset.y, width: target.width, height: target.height };
+			}
+			last = target;
 			const elapsed = Date.now() - started;
 			// A round starting at the deadline has no budget left for its reads: under a
-			// binding cell budget they time out and mask the diagnosis below.
+			// binding cell budget they would only time out.
 			if (elapsed + delay >= timeoutMs) break;
 			if (last.reason === "missing" && explicitTimeout === undefined && elapsed >= ZERO_MATCH_FAIL_FAST_MS) break;
 			await untilAborted(this.#signal, () => Bun.sleep(delay));
@@ -1972,30 +2000,44 @@ export class TernTab implements InProcessRunTab {
 		explicitTimeout?: number,
 		enabled = false,
 	): Promise<ResolvedTarget> {
+		const started = Date.now();
 		const timeoutMs =
 			explicitTimeout === undefined
 				? resolveOpTimeouts(this.#cellMs).actionOpMs
 				: resolveWaitTimeout(this.#cellMs, explicitTimeout);
 		const resolveAction = RESOLVE_ACTIONS[action];
-		const started = Date.now();
-		let delay = 30;
-		let wheels = 0;
-		let recentred = false;
-		let last: TargetFailure;
-		for (;;) {
-			const found = await this.#locate(spec, frame);
-			if (!found) {
-				last = { reason: "missing", count: 0 };
-			} else {
-				const resolved = await this.#dom({
-					read: "resolve",
-					ref: found.ref,
-					action: resolveAction,
-					// A wheel omp just sent may still be moving the page under a read that checks nothing else.
-					stable: resolveAction !== "none" || wheels > 0 ? RESOLVE_STABLE_UPDATES : 0,
-					timeout: Math.max(1, Math.min(RESOLVE_SETTLE_MS, timeoutMs - (Date.now() - started))),
-				});
-				if (resolved.state === "ok") {
+		// Bind the wire reads to the same deadline as the retries, including frame/selector preparation.
+		const outer = this.#readScope.getStore();
+		const deadline = Math.min(started + timeoutMs, outer?.deadline ?? Infinity);
+		return this.#readScope.run({ ...outer, deadline }, async () => {
+			let delay = 30;
+			let wheels = 0;
+			let recentred = false;
+			let last: TargetFailure | undefined;
+			while (Date.now() < deadline) {
+				let found: { ref: DomRef; count: number } | null;
+				let resolved: DomResolved | undefined;
+				try {
+					found = await this.#locate(spec, frame);
+					if (found) {
+						const remaining = deadline - Date.now();
+						if (remaining <= 0) break;
+						resolved = await this.#dom({
+							read: "resolve",
+							ref: found.ref,
+							action: resolveAction,
+							// A wheel omp just sent may still be moving the page under a read that checks nothing else.
+							stable: resolveAction !== "none" || wheels > 0 ? RESOLVE_STABLE_UPDATES : 0,
+							timeout: Math.min(RESOLVE_SETTLE_MS, remaining),
+						});
+					}
+				} catch (error) {
+					rethrowTargetReadFailure(error, last, deadline, this.#signal);
+					break;
+				}
+				if (!found || !resolved) {
+					last = { reason: "missing", count: 0 };
+				} else if (resolved.state === "ok") {
 					if (!resolved.point || !resolved.node) {
 						throw new TernError(
 							"protocol",
@@ -2003,6 +2045,7 @@ export class TernTab implements InProcessRunTab {
 						);
 					}
 					if (!enabled || !resolved.node.states?.includes("disabled")) {
+						if (Date.now() >= deadline) break;
 						return {
 							x: resolved.point[0],
 							y: resolved.point[1],
@@ -2013,41 +2056,44 @@ export class TernTab implements InProcessRunTab {
 						};
 					}
 					last = { reason: "disabled", count: found.count };
-				} else if (
-					resolved.scroll &&
-					(resolved.state === "offViewport"
-						? wheels < SCROLL_WHEEL_LIMIT
-						: resolved.state === "covered" && !recentred)
-				) {
-					if (resolved.state === "covered") recentred = true;
-					wheels++;
-					const { at, dx, dy } = resolved.scroll;
-					await this.#input([{ type: "wheel", x: at[0], y: at[1], dx, dy, mods: [] }]);
-					continue;
 				} else if (resolved.state === "detached") {
 					if (spec.engine === "id") throw staleId(spec.id);
 					last = { reason: "missing", count: 0 };
 					// A dead ref never names an element again.
 					if (spec.engine === "ref") break;
-				} else if (resolved.state === "covered") {
-					last = {
-						reason: "covered",
-						count: found.count,
-						detail: resolved.coveredBy ? describeDomNode(resolved.coveredBy) : undefined,
-					};
 				} else {
 					last = { reason: resolved.state, count: found.count };
+					if (resolved.state === "covered" && resolved.coveredBy) {
+						last.detail = describeDomNode(resolved.coveredBy);
+					}
+					if (
+						resolved.scroll &&
+						(resolved.state === "offViewport"
+							? wheels < SCROLL_WHEEL_LIMIT
+							: resolved.state === "covered" && !recentred)
+					) {
+						if (Date.now() >= deadline) break;
+						if (resolved.state === "covered") recentred = true;
+						wheels++;
+						const { at, dx, dy } = resolved.scroll;
+						await this.#input([{ type: "wheel", x: at[0], y: at[1], dx, dy, mods: [] }]);
+						continue;
+					}
 				}
+				const now = Date.now();
+				if (now + delay >= deadline) break;
+				if (
+					last.reason === "missing" &&
+					explicitTimeout === undefined &&
+					now - started >= ZERO_MATCH_FAIL_FAST_MS
+				) {
+					break;
+				}
+				await untilAborted(this.#signal, () => Bun.sleep(delay));
+				delay = Math.min(250, Math.round(delay * 1.5));
 			}
-			const elapsed = Date.now() - started;
-			// A round starting at the deadline has no budget left for its reads: under a
-			// binding cell budget they time out and mask the diagnosis below.
-			if (elapsed + delay >= timeoutMs) break;
-			if (last.reason === "missing" && explicitTimeout === undefined && elapsed >= ZERO_MATCH_FAIL_FAST_MS) break;
-			await untilAborted(this.#signal, () => Bun.sleep(delay));
-			delay = Math.min(250, Math.round(delay * 1.5));
-		}
-		throw targetTimeout(label, Date.now() - started, last);
+			throw targetTimeout(label, Date.now() - started, last);
+		});
 	}
 
 	/**
@@ -2993,7 +3039,8 @@ export class TernTab implements InProcessRunTab {
 	}
 
 	/** Readable text/markdown of the page. */
-	async extract(format: ReadableFormat = "markdown", opts?: ReadableExtractOptions): Promise<string> {
+	async extract(formatArg?: ReadableFormat | null, opts?: ReadableExtractOptions): Promise<string> {
+		const format = formatArg ?? "markdown";
 		return await this.#quickRead("tab.extract()", async () => {
 			const html = await this.pageContent();
 			const readable = await extractReadableFromHtml(html, this.#url, format, opts);
@@ -4514,6 +4561,16 @@ export class TernPageFacade {
 
 	async setCookie(...cookies: unknown[]): Promise<void> {
 		await this.#tab.setCookies(...cookies);
+	}
+
+	/** Puppeteer's header override; the web view sends only its own headers, so non-empty ones say what works. */
+	async setExtraHTTPHeaders(headers: Record<string, string>): Promise<void> {
+		if (headers !== null && typeof headers === "object" && Object.keys(headers).length === 0) return;
+		throw new ToolError(
+			`page.setExtraHTTPHeaders() is not supported on the ${this.#tab.product} browser backend: extra HTTP headers cannot be added to the web view's navigations and subresources. ` +
+				"For HTTP basic auth, use tab.emulate({ credentials: { username, password } }); " +
+				'for other headers, open a tab in omp\'s own browser with browser.open({ name, app: "own", url }) and call tab.emulate({ headers }).',
+		);
 	}
 
 	on(event: unknown, _handler?: unknown): never {

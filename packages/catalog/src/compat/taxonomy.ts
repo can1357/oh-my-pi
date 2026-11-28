@@ -48,6 +48,12 @@ const MATCHER_RANK: Record<CompiledMatcher["kind"], number> = {
 	glob: 0,
 };
 
+// Visit stronger candidates first; stable sorting preserves declaration order
+// for the ambiguity diagnostic when distinct classes share the winning rank.
+const classMatchers = rules.taxonomy.classes
+	.flatMap(cls => cls.matchers.map(matcher => ({ cls, matcher, priority: MATCHER_RANK[matcher.kind] })))
+	.sort((a, b) => b.priority - a.priority || b.matcher.token.length - a.matcher.token.length);
+
 function bareOf(id: string): string {
 	const slash = id.lastIndexOf("/");
 	return slash === -1 ? id : id.slice(slash + 1);
@@ -67,6 +73,8 @@ function matcherMatches(matcher: CompiledMatcher, lower: string, bare: string): 
 		case "bounded":
 			return boundedMatch(bare, matcher.token);
 		case "namespace": {
+			// Most ids don't mention this namespace. Split only plausible matches.
+			if (!lower.includes(matcher.token)) return false;
 			const parts = matcher.bounded ? lower.split(/[/.:]/) : lower.split("/");
 			for (const part of parts) {
 				if (!part) continue;
@@ -162,25 +170,24 @@ interface ClassRanks {
 function classifyRanks(model: string, lenient: boolean): ClassRanks {
 	const lower = model.trim().toLowerCase();
 	const bare = bareOf(lower);
-	let winner: { rank: readonly [number, number]; cls: CompiledClass } | undefined;
-	let tied: readonly [string, string] | undefined;
-	for (const cls of rules.taxonomy.classes) {
-		for (const matcher of cls.matchers) {
-			if (!matcherMatches(matcher, lower, bare)) continue;
-			const rank = [MATCHER_RANK[matcher.kind], matcher.token.length] as const;
-			if (winner && winner.rank[0] === rank[0] && winner.rank[1] === rank[1] && winner.cls.id !== cls.id) {
-				tied = [winner.cls.id, cls.id];
-			} else if (!winner || winner.rank[0] < rank[0] || (winner.rank[0] === rank[0] && winner.rank[1] < rank[1])) {
-				winner = { rank, cls };
-				tied = undefined;
-			}
+	let winner: (typeof classMatchers)[number] | undefined;
+	let tiedClass: string | undefined;
+	for (const candidate of classMatchers) {
+		if (
+			winner &&
+			(candidate.priority !== winner.priority || candidate.matcher.token.length !== winner.matcher.token.length)
+		) {
+			break;
 		}
-	}
-	if (tied) {
-		if (lenient) return { class: "unknown" };
-		throw new AmbiguousIdentityError(lower, tied[0], tied[1], "class");
+		if (!matcherMatches(candidate.matcher, lower, bare)) continue;
+		if (!winner) winner = candidate;
+		else if (winner.cls.id !== candidate.cls.id) tiedClass = candidate.cls.id;
 	}
 	if (!winner) return { class: "unknown" };
+	if (tiedClass !== undefined) {
+		if (lenient) return { class: "unknown" };
+		throw new AmbiguousIdentityError(lower, winner.cls.id, tiedClass, "class");
+	}
 	const ranks: ClassRanks = { class: winner.cls.id };
 	const family = classifyFamily(winner.cls, bare, lower, lenient);
 	if (family !== undefined) ranks.family = family;
@@ -424,8 +431,10 @@ export function stripThinkingVariantSuffix(model: string): string | undefined {
  * Classifies a model into its structured identity: reviewed override first,
  * then suffix collapse, then class/family/revision ranks over the logical id.
  *
- * Results are memoized per (provider, model, lenient) — the rule tree is
- * static per process. Cached identities are frozen and each caller receives
+ * Results are memoized per (provider, model) — the rule tree is static per
+ * process. A successful strict classification also serves lenient tokenizer
+ * and discovery lookups. A lenient classification may have suppressed an
+ * ambiguity, so it never serves a strict lookup. Each caller receives
  * a shallow copy, so a consumer that mutates its copy (e.g. `buildModel`
  * storing `policy.identity` on the model) cannot poison the cache or any
  * other model classified under the same key. Calls with an explicit
@@ -435,19 +444,16 @@ export function stripThinkingVariantSuffix(model: string): string | undefined {
  * reviewed-pattern matches unless `opts.lenient`.
  */
 // LRU sized above the bundled catalog so catalog-wide passes stay hot (a full `clear()` thrashed them).
-const classifyMemo = new LRUCache<string, ModelIdentity>({ max: 16384 });
-
-function classifyMemoKey(provider: string, modelId: string, lenient: boolean): string {
-	return `${provider.length}:${provider}${modelId.length}:${modelId}${lenient ? 1 : 0}`;
-}
+const classifyMemo = new LRUCache<string, { identity: ModelIdentity; strict: boolean }>({ max: 16384 });
 
 export function classifyModel(provider: string, modelId: string, opts?: ClassifyOptions): ModelIdentity {
 	if (opts?.observedAtMs === undefined) {
-		const key = classifyMemoKey(provider, modelId, opts?.lenient === true);
+		const key = `${provider.length}:${provider}${modelId}`;
+		const lenient = opts?.lenient === true;
 		const cached = classifyMemo.get(key);
-		if (cached !== undefined) return { ...cached };
+		if (cached && (cached.strict || lenient)) return { ...cached.identity };
 		const identity = classifyModelUncached(provider, modelId, opts);
-		classifyMemo.set(key, Object.freeze(identity));
+		classifyMemo.set(key, { identity, strict: !lenient });
 		return { ...identity };
 	}
 	return classifyModelUncached(provider, modelId, opts);
@@ -512,12 +518,6 @@ export function routingVariantPlain(provider: string, wireModel: string): string
 		if (wireModel.slice(split).toLowerCase() === rule.suffix) return wireModel.slice(0, split);
 	}
 	return undefined;
-}
-
-/** Whether any routing-variant suffix is declared for `provider`. */
-export function hasRoutingVariants(provider: string): boolean {
-	const lower = provider.toLowerCase();
-	return rules.taxonomy.collapse.routingVariants.some(rule => rule.providers.includes(lower));
 }
 
 /** Whether `provider`'s discovery recovers canonical intrinsic parameters. */

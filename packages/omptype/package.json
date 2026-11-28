@@ -1,7 +1,7 @@
 {
   "type": "module",
   "name": "@oh-my-pi/omptype",
-  "version": "19.1.1",
+  "version": "19.2.1",
   "description": "ArkType-compatible runtime schema validation with lazy JIT compilation",
   "homepage": "https://omp.sh",
   "author": { "name": "Stencil Labs, Inc.", "url": "https://stencil.so" },
@@ -33,9 +33,7 @@
   },
   "devDependencies": {
     "@sinclair/typebox": "^0.34.0",
-    "@types/bun": "catalog:",
-    "arkregex": "0.0.8",
-    "arktype": "2.2.3"
+    "@types/bun": "catalog:"
   },
   "engines": {
     "node": ">=20",

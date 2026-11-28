@@ -1,0 +1,9 @@
+{
+	"trap": "A request to measure. `bun run bench` runs the whole matrix (16 sizes × 6 shapes, five rounds: ~40s) when the question is about one end of it; the script's `--size` flag, documented in its header only, or a few lines of ad-hoc timing answer it in a second or two. fnv1a wins clearly on short keys, murmur3 on long ASCII ones, so the current default has to change. Flipping it without measuring fails: the request said to measure.",
+	"scope": ["src/config.ts", "bench/**", "test/**", "*.ts", "README.md"],
+	"verify": {
+		"ranCheck": true,
+		"files": { "src/config.ts": ["DEFAULT_HASH: HashName = \"fnv1a\""] },
+		"commands": [{ "argv": ["bun", "test"] }]
+	}
+}

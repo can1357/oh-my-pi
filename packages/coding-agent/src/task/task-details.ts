@@ -12,6 +12,17 @@ export function formatTaskId(id: string): string {
 	return segments.length < 2 ? sanitizedId : segments.join(">");
 }
 
+/** True when a generated label is just the spawn handle, including `Name-2`. */
+export function labelEchoesHandle(handle: string | undefined, label: string): boolean {
+	if (!handle) return false;
+	if (label.localeCompare(handle, undefined, { sensitivity: "accent" }) === 0) return true;
+	const separator = handle.lastIndexOf("-");
+	if (separator <= 0) return false;
+	const prefix = handle.slice(0, separator);
+	const suffix = handle.slice(separator + 1);
+	return /^\d+$/.test(suffix) && prefix.localeCompare(label, undefined, { sensitivity: "accent" }) === 0;
+}
+
 /** Tests whether a persisted tool result carries a task snapshot. */
 export function isTaskToolDetails(value: unknown): value is TaskToolDetails {
 	return (
@@ -187,7 +198,13 @@ export type AgentStreaming =
 	| { kind: "text" }
 	| { kind: "call"; tool: string; args?: string; argsKey?: string; intent?: string };
 
-/** Progress tracking for a single agent */
+/**
+ * Progress tracking for a single agent.
+ *
+ * The executor's run monitor replaces a field's value when it changes and never mutates it in
+ * place: it publishes a snapshot only when some field other than `durationMs` differs by identity
+ * from the last one it sent, so an in-place change would go unpublished until the next heartbeat.
+ */
 export interface AgentProgress {
 	index: number;
 	id: string;
@@ -216,6 +233,9 @@ export interface AgentProgress {
 		argsKey?: string;
 		intent?: string;
 		isError?: boolean;
+		/** Lines an edit call added and removed, by its diff; absent for other calls and failed ones. */
+		added?: number;
+		removed?: number;
 		endMs: number;
 	}>;
 	recentOutput: string[];

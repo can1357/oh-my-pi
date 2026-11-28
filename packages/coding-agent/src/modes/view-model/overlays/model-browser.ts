@@ -3,7 +3,7 @@
  * order, search ranking, and the price/mark facts every model list shows
  * (the alt+p picker, the /models hub, setup, RPC `get_model_picker`).
  */
-import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import type { Model } from "@oh-my-pi/pi-ai";
 import {
 	getEffectiveTokenCost,
@@ -12,10 +12,12 @@ import {
 	modelsAreEqual,
 } from "@oh-my-pi/pi-catalog/models";
 import { type ModelKind, type ModelPricingStatus, modelKind } from "@oh-my-pi/pi-catalog/types";
+import { errorMessage } from "@oh-my-pi/pi-utils";
 import type { TspPickerColumn, TspPickerMark } from "@oh-my-pi/pi-wire";
 import { AUTO_THINKING, parseConfiguredThinkingLevel } from "../../../thinking/levels";
-import { FuzzyQuery, FuzzyText, fuzzyRank } from "../../../utils/fuzzy";
+import { type FuzzyFilterResult, type FuzzyMatch, FuzzyQuery, FuzzyText, fuzzyRank } from "../../../utils/fuzzy";
 import { type ConfiguredThinkingLevel } from "../../../utils/render-utils";
+import { drainWork } from "../../../utils/sliced-work";
 
 /** Canonical display ordering of built-in model roles. */
 export type ModelRole =
@@ -109,6 +111,12 @@ export interface ModelBrowserSource extends ModelRoleLookup {
 	 * except the storage-backed `mruOrder` and `modelPerf`. Keys derived-scope caches.
 	 */
 	readonly revision: number;
+	/**
+	 * The preference store behind this source (its {@link revision} counts that
+	 * store's changes): sources sharing it resolve roles alike, so derived-scope
+	 * caches outlive one source. Absent: the source itself.
+	 */
+	readonly preferences?: object;
 	readonly defaultThinkingLevel: string;
 	readonly modelProviderOrder: readonly string[];
 	readonly knownRoleIds: readonly string[];
@@ -147,6 +155,8 @@ export interface ModelCompactionPoint {
 
 /** Read-only catalog surface consumed by model browsers. */
 export interface ModelBrowserRegistry {
+	/** Identity of the full catalog snapshot; without one, compare its rows. Availability can change independently. */
+	readonly catalogRevision?: object;
 	getError(): unknown;
 	getAvailable(kind?: ModelKind | "all"): Model[];
 	getAll(kind?: ModelKind | "all"): Model[];
@@ -247,6 +257,19 @@ export function buildSearchAffinity(
 
 // ─── Role assignments ───────────────────────────────────────────────────────
 
+// A new catalog/availability snapshot or role predicate gets a new filtered pool.
+// Reusing the pool also reuses the model resolver's indexes on that array.
+const kEligiblePools = Symbol("model-browser.eligiblePools");
+type RolePool = ReadonlyArray<Model> & { [kEligiblePools]?: Map<ModelBrowserRoleInfo["accepts"], Model[]> };
+
+function eligible(pool: RolePool, accepts: ModelBrowserRoleInfo["accepts"]): Model[] {
+	if (!pool[kEligiblePools] && !Object.isExtensible(pool)) return pool.filter(accepts);
+	const byAccepts = (pool[kEligiblePools] ??= new Map());
+	let models = byAccepts.get(accepts);
+	if (!models) byAccepts.set(accepts, (models = pool.filter(accepts)));
+	return models;
+}
+
 /**
  * Resolve every known role to its display assignment: configured role values
  * resolve against `allModels`; unconfigured roles fall back to auto-selection
@@ -257,6 +280,15 @@ export function resolveRoleAssignments(
 	allModels: ReadonlyArray<Model>,
 	autoCandidates: ReadonlyArray<Model>,
 ): RoleAssignments {
+	return drainWork(roleAssignmentsWork(settings, allModels, autoCandidates));
+}
+
+/** {@link resolveRoleAssignments}, pausing after each role it resolves. */
+function* roleAssignmentsWork(
+	settings: ModelBrowserSource,
+	allModels: ReadonlyArray<Model>,
+	autoCandidates: ReadonlyArray<Model>,
+): Generator<void, RoleAssignments, undefined> {
 	const levelOf = (
 		role: string,
 		resolved: { explicitThinkingLevel: boolean; thinkingLevel?: ConfiguredThinkingLevel },
@@ -266,39 +298,28 @@ export function resolveRoleAssignments(
 			return parseConfiguredThinkingLevel(settings.defaultThinkingLevel) ?? ThinkingLevel.Inherit;
 		return ThinkingLevel.Inherit;
 	};
-	// Roles sharing an `accepts` predicate share one filtered pool.
-	const eligible = (
-		pool: ReadonlyArray<Model>,
-		byAccepts: Map<ModelBrowserRoleInfo["accepts"], Model[]>,
-		role: string,
-	): Model[] => {
-		const accepts = settings.getRoleInfo(role).accepts;
-		let models = byAccepts.get(accepts);
-		if (!models) {
-			models = pool.filter(accepts);
-			byAccepts.set(accepts, models);
-		}
-		return models;
-	};
 
 	const roles: RoleAssignments = {};
 	const configured = new Set<string>();
-	const catalogPools = new Map<ModelBrowserRoleInfo["accepts"], Model[]>();
 	for (const role of settings.knownRoleIds) {
 		const value = settings.getModelRole(role);
 		if (!value) continue;
 		configured.add(role);
-		const resolved = settings.resolveRoleValue(value, eligible(allModels, catalogPools, role));
+		const resolved = settings.resolveRoleValue(value, eligible(allModels, settings.getRoleInfo(role).accepts));
 		if (resolved.model)
 			roles[role] = { model: resolved.model, thinkingLevel: levelOf(role, resolved), autoSelected: false };
+		yield;
 	}
 	if (autoCandidates.length > 0) {
-		const candidatePools = new Map<ModelBrowserRoleInfo["accepts"], Model[]>();
 		for (const role of settings.knownRoleIds) {
 			if (configured.has(role)) continue;
-			const resolved = settings.resolveRoleValue(`pi/${role}`, eligible(autoCandidates, candidatePools, role));
+			const resolved = settings.resolveRoleValue(
+				`pi/${role}`,
+				eligible(autoCandidates, settings.getRoleInfo(role).accepts),
+			);
 			if (resolved.model)
 				roles[role] = { model: resolved.model, thinkingLevel: levelOf(role, resolved), autoSelected: true };
+			yield;
 		}
 	}
 	return roles;
@@ -346,18 +367,46 @@ export function heldRoles(
 	settings: Pick<ModelBrowserSource, "getRoleInfo">,
 ): HeldRole[] {
 	const held: HeldRole[] = [];
+	eachAssignedRole(roles, (role, assignment) => {
+		if (!modelsAreEqual(assignment.model, model)) return;
+		if (settings.getRoleInfo(role).hidden) return;
+		held.push({ role, assignment });
+	});
+	return held;
+}
+
+/** {@link heldRoles} of every model at once, keyed by {@link modelIdentityKey}; models holding none are absent. */
+export function heldRolesByModel(
+	roles: RoleAssignments,
+	settings: Pick<ModelBrowserSource, "getRoleInfo">,
+): Map<string, HeldRole[]> {
+	const byModel = new Map<string, HeldRole[]>();
+	eachAssignedRole(roles, (role, assignment) => {
+		if (settings.getRoleInfo(role).hidden) return;
+		const key = modelIdentityKey(assignment.model);
+		const held = byModel.get(key);
+		if (held) held.push({ role, assignment });
+		else byModel.set(key, [{ role, assignment }]);
+	});
+	return byModel;
+}
+
+/** A model's identity as {@link modelsAreEqual} compares it, as one map key. */
+export function modelIdentityKey(model: Pick<Model, "provider" | "id">): string {
+	return `${model.provider}\0${model.id}`;
+}
+
+/** Each assigned role once, built-in order first. */
+function eachAssignedRole(roles: RoleAssignments, visit: (role: string, assignment: RoleAssignment) => void): void {
 	const seen = new Set<string>();
 	const push = (role: string): void => {
 		if (seen.has(role)) return;
 		seen.add(role);
 		const assignment = roles[role];
-		if (!assignment || !modelsAreEqual(assignment.model, model)) return;
-		if (settings.getRoleInfo(role).hidden) return;
-		held.push({ role, assignment });
+		if (assignment) visit(role, assignment);
 	};
 	for (const role of MODEL_ROLE_IDS) push(role);
 	for (const role in roles) push(role);
-	return held;
 }
 
 function isRecentOrRole(item: ModelBrowserItem, roles: RoleAssignments, mruOrder: ReadonlyArray<string>): boolean {
@@ -394,14 +443,14 @@ function versionNumber(id: string): number {
 	return single ? Number.parseFloat(single[1]!) : 0;
 }
 
-/** The first built-in role `model` holds (lower = earlier); past the list when none. */
-function roleRank(model: Model, roles: RoleAssignments): number {
-	let i = 0;
-	for (; i < MODEL_ROLE_IDS.length; i++) {
+/** The first built-in role each assigned model holds (lower = earlier), keyed by {@link modelIdentityKey}. */
+function roleRanks(roles: RoleAssignments): Map<string, number> {
+	const ranks = new Map<string, number>();
+	for (let i = MODEL_ROLE_IDS.length - 1; i >= 0; i--) {
 		const assigned = roles[MODEL_ROLE_IDS[i]!];
-		if (assigned && modelsAreEqual(assigned.model, model)) break;
+		if (assigned) ranks.set(modelIdentityKey(assigned.model), i);
 	}
-	return i;
+	return ranks;
 }
 
 /** Options for {@link sortModelItems}. */
@@ -414,47 +463,88 @@ export interface SortModelItemsOptions {
 
 /** Order models for display: role-assigned first, then most recently used, then per provider by priority, version and recency. */
 export function sortModelItems(items: ModelBrowserItem[], options: SortModelItemsOptions = {}): void {
-	items.sort(modelItemComparator(options));
+	const compare = modelItemComparator(items, options);
+	items.sort(compare);
 }
 
 const DATED_ID = /-(\d{8})$/;
 const LATEST_ID = /-latest$/;
 
-function modelItemComparator(options: SortModelItemsOptions): (a: ModelBrowserItem, b: ModelBrowserItem) => number {
+/** One item's {@link modelItemComparator} keys, computed once per sort. */
+interface OrderKeys {
+	roleRank: number;
+	mru: number;
+	/** Position of the provider in `localeCompare` order (equal-comparing providers share one). */
+	provider: number;
+	priority: number;
+	version: number;
+	latest: boolean;
+	/** `YYYYMMDD` of a dated id, else empty. */
+	date: string;
+}
+
+/** The display-order comparator over `items` (only those): keys are computed once per item, not per comparison. */
+function modelItemComparator(
+	items: readonly ModelBrowserItem[],
+	options: SortModelItemsOptions,
+): (a: ModelBrowserItem, b: ModelBrowserItem) => number {
 	const { roles = {}, mruOrder = [], skipRoleRank = false } = options;
 	const mru = new Map(mruOrder.map((key, i) => [key, i]));
+	const ranks = skipRoleRank ? undefined : roleRanks(roles);
+	const providers = [...new Set(items.map(item => item.provider))].sort((a, b) => a.localeCompare(b));
+	const providerRank = new Map<string, number>();
+	let rank = 0;
+	for (let i = 0; i < providers.length; i++) {
+		if (i > 0 && providers[i - 1]!.localeCompare(providers[i]!) !== 0) rank++;
+		providerRank.set(providers[i]!, rank);
+	}
+	const keys = new Map<ModelBrowserItem, OrderKeys>();
+	for (const item of items) {
+		keys.set(item, {
+			roleRank: ranks?.get(modelIdentityKey(item.model)) ?? MODEL_ROLE_IDS.length,
+			mru: mru.get(item.selector) ?? Number.MAX_SAFE_INTEGER,
+			provider: providerRank.get(item.provider)!,
+			priority: item.model.priority ?? Number.MAX_SAFE_INTEGER,
+			version: versionNumber(item.id),
+			latest: LATEST_ID.test(item.id),
+			date: item.id.match(DATED_ID)?.[1] ?? "",
+		});
+	}
 	return (a, b) => {
+		const ka = keys.get(a)!;
+		const kb = keys.get(b)!;
 		if (!skipRoleRank) {
-			const byRole = roleRank(a.model, roles) - roleRank(b.model, roles);
+			const byRole = ka.roleRank - kb.roleRank;
 			if (byRole !== 0) return byRole;
 		}
-		const byMru = (mru.get(a.selector) ?? Number.MAX_SAFE_INTEGER) - (mru.get(b.selector) ?? Number.MAX_SAFE_INTEGER);
+		const byMru = ka.mru - kb.mru;
 		if (byMru !== 0) return byMru;
-		const byProvider = a.provider.localeCompare(b.provider);
+		const byProvider = ka.provider - kb.provider;
 		if (byProvider !== 0) return byProvider;
-		const byPriority = (a.model.priority ?? Number.MAX_SAFE_INTEGER) - (b.model.priority ?? Number.MAX_SAFE_INTEGER);
+		const byPriority = ka.priority - kb.priority;
 		if (byPriority !== 0) return byPriority;
-		const byVersion = versionNumber(b.id) - versionNumber(a.id);
+		const byVersion = kb.version - ka.version;
 		if (byVersion !== 0) return byVersion;
-		const aLatest = LATEST_ID.test(a.id);
-		const bLatest = LATEST_ID.test(b.id);
-		const aDate = a.id.match(DATED_ID)?.[1] ?? "";
-		const bDate = b.id.match(DATED_ID)?.[1] ?? "";
-		const aRecency = aLatest || aDate !== "";
-		const bRecency = bLatest || bDate !== "";
+		const aRecency = ka.latest || ka.date !== "";
+		const bRecency = kb.latest || kb.date !== "";
 		if (aRecency !== bRecency) return aRecency ? -1 : 1;
 		if (!aRecency) return a.id.localeCompare(b.id);
-		if (aLatest !== bLatest) return aLatest ? -1 : 1;
-		if (aDate && bDate) return bDate.localeCompare(aDate);
+		if (ka.latest !== kb.latest) return ka.latest ? -1 : 1;
+		if (ka.date && kb.date) return kb.date.localeCompare(ka.date);
 		return a.id.localeCompare(b.id);
 	};
 }
 
 // ─── The session's model scope ──────────────────────────────────────────────
 
-/** Picker candidates and ordering inputs shared with composer model mentions. */
+/** The model hub and session picker share the same assignments, item objects, and display order. */
 export interface SessionModelScope {
+	/** Chat models (or the explicit `--models` list), for session picks and composer mentions. */
 	items: ModelBrowserItem[];
+	/** All available kinds, including runners for the hub's kind-specific roles. */
+	availableItems: ModelBrowserItem[];
+	/** The full or scoped catalog, including models the hub shows under locked providers. */
+	catalogModels: readonly Model[];
 	roles: RoleAssignments;
 	mruOrder: ReadonlyArray<string>;
 	error: string | undefined;
@@ -462,8 +552,8 @@ export interface SessionModelScope {
 
 /** Catalog inputs a {@link SessionModelScope} is derived from. */
 interface SessionModelScopeInputs {
-	/** Chat models listed as rows. */
-	models: ReadonlyArray<Model>;
+	/** The `--models` scope listed as rows; undefined lists the chat models of {@link roleModels}. */
+	scoped: ReadonlyArray<Model> | undefined;
 	/** Catalog configured role values resolve against. */
 	allModels: ReadonlyArray<Model>;
 	/** Available models of every kind unconfigured roles auto-select from. */
@@ -471,99 +561,154 @@ interface SessionModelScopeInputs {
 	error: string | undefined;
 }
 
-function errorText(cause: unknown): string {
-	return cause instanceof Error ? cause.message : String(cause);
-}
-
 function readScopeInputs(registry: ModelBrowserRegistry, scopedModels: ReadonlyArray<Model>): SessionModelScopeInputs {
 	if (scopedModels.length > 0) {
 		try {
 			const pool = scopedRolePool(scopedModels, registry);
-			return { models: scopedModels, allModels: pool, roleModels: pool, error: undefined };
+			return { scoped: scopedModels, allModels: pool, roleModels: pool, error: undefined };
 		} catch (cause) {
-			return { models: scopedModels, allModels: scopedModels, roleModels: scopedModels, error: errorText(cause) };
+			return { scoped: scopedModels, allModels: scopedModels, roleModels: scopedModels, error: errorMessage(cause) };
 		}
 	}
 	const loadError = registry.getError();
 	let error = loadError ? String(loadError) : undefined;
+	// The whole catalog first: composing it once lets the available models filter it
+	// rather than compose their own providers' slice of it first.
+	const allModels = registry.getAll("all");
 	let roleModels: ReadonlyArray<Model>;
 	try {
 		roleModels = registry.getAvailable("all");
 	} catch (cause) {
-		error = errorText(cause);
+		error = errorMessage(cause);
 		roleModels = [];
 	}
-	return {
-		models: roleModels.filter(model => modelKind(model) === "chat"),
-		allModels: registry.getAll("all"),
-		roleModels,
-		error,
-	};
+	return { scoped: undefined, allModels, roleModels, error };
 }
 
-function scopeFromInputs(settings: ModelBrowserSource, inputs: SessionModelScopeInputs): SessionModelScope {
-	const roles = resolveRoleAssignments(settings, inputs.allModels, inputs.roleModels);
-	const mruOrder = settings.mruOrder;
-	const items = buildBrowserItems(inputs.models);
-	sortModelItems(items, { roles, mruOrder });
-	return { items, roles, mruOrder, error: inputs.error };
-}
-
-/** The session picker's model scope: chat models (or the `--models` scope) in display order, with roles and MRU. */
-export function buildSessionModelScope(
+function* scopeFromInputs(
 	settings: ModelBrowserSource,
-	registry: ModelBrowserRegistry,
-	scopedModels: ReadonlyArray<Model>,
-): SessionModelScope {
-	return scopeFromInputs(settings, readScopeInputs(registry, scopedModels));
+	inputs: SessionModelScopeKey,
+): Generator<void, SessionModelScope, undefined> {
+	const { allModels, roleModels, scoped, mruOrder, error } = inputs;
+	const roles = yield* roleAssignmentsWork(settings, allModels, roleModels);
+	const availableItems = buildBrowserItems(roleModels);
+	yield;
+	sortModelItems(availableItems, { roles, mruOrder });
+	let items = availableItems;
+	if (!scoped) {
+		items = availableItems.filter(item => modelKind(item.model) === "chat");
+	} else if (scoped.length !== availableItems.length) {
+		// scopedRolePool appended non-chat runners; only explicit entries are session picks.
+		const listed = new Set(scoped);
+		items = availableItems.filter(item => listed.has(item.model));
+	}
+	return { items, availableItems, catalogModels: allModels, roles, mruOrder, error };
 }
 
-function sameItems<T>(a: readonly T[], b: readonly T[]): boolean {
-	if (a === b) return true;
+/** Whether two lists hold the same elements (by identity), in order. */
+export function sameItems<T>(a: readonly T[], b: readonly T[]): boolean {
 	if (a.length !== b.length) return false;
 	for (let i = 0; i < a.length; i++) if (!Object.is(a[i], b[i])) return false;
 	return true;
 }
 
+/** Everything a {@link SessionModelScope} is derived from, as read at one moment. */
+interface SessionModelScopeKey extends SessionModelScopeInputs {
+	preferences: object;
+	revision: number;
+	catalogRevision: object | undefined;
+	mruOrder: ReadonlyArray<string>;
+}
+
+/** The last scope built from one registry, with snapshots of its inputs. */
+interface CachedSessionModelScope {
+	key: SessionModelScopeKey;
+	scope: SessionModelScope;
+}
+
+const kSessionModelScope = Symbol("model-browser.sessionModelScope");
+
+/** A registry tagged with the last scope built from it. */
+interface ScopeTagged {
+	[kSessionModelScope]?: CachedSessionModelScope;
+}
+
+/** The registry's last scope when it was built from `key`'s inputs. */
+function cachedSessionModelScope(
+	cached: CachedSessionModelScope | undefined,
+	key: SessionModelScopeKey,
+): SessionModelScope | undefined {
+	if (!cached) return undefined;
+	const last = cached.key;
+	return last.preferences === key.preferences &&
+		last.revision === key.revision &&
+		last.catalogRevision === key.catalogRevision &&
+		last.error === key.error &&
+		(last.scoped === undefined) === (key.scoped === undefined) &&
+		(!key.scoped || sameItems(last.scoped!, key.scoped)) &&
+		(key.scoped || key.catalogRevision || sameItems(last.allModels, key.allModels)) &&
+		sameItems(last.roleModels, key.roleModels) &&
+		sameItems(last.mruOrder, key.mruOrder)
+		? cached.scope
+		: undefined;
+}
+
 /**
- * {@link buildSessionModelScope} for per-keystroke callers: the same scope
- * until the source revision, MRU order, scoped models, or the registry's
- * models or load error change.
+ * The hub's and session picker's models in display order, with roles and MRU.
+ * The last scope per registry is reused
+ * (shared by every caller: treat it as read-only) until the source's
+ * preferences or revision, the MRU order, the scoped models, or the
+ * registry's models or load error change.
  */
-export class SessionModelScopeCache {
-	#settings: ModelBrowserSource;
-	#registry: ModelBrowserRegistry;
-	#revision = 0;
-	#inputs: SessionModelScopeInputs | undefined;
-	#scope: SessionModelScope | undefined;
+export function buildSessionModelScope(
+	settings: ModelBrowserSource,
+	registry: ModelBrowserRegistry,
+	scopedModels: ReadonlyArray<Model>,
+): SessionModelScope {
+	return drainWork(sessionModelScopeWork(settings, registry, scopedModels));
+}
 
-	constructor(settings: ModelBrowserSource, registry: ModelBrowserRegistry) {
-		this.#settings = settings;
-		this.#registry = registry;
-	}
+/**
+ * {@link buildSessionModelScope} as pausable work (between role resolutions
+ * and before the sort), for building it ahead of the first picker. The inputs
+ * are read when it starts; a scope another caller built meanwhile from the
+ * same inputs wins over this one, so readers keep one scope's rows.
+ */
+export function* sessionModelScopeWork(
+	settings: ModelBrowserSource,
+	registry: ModelBrowserRegistry,
+	scopedModels: ReadonlyArray<Model>,
+): Generator<void, SessionModelScope, undefined> {
+	const key: SessionModelScopeKey = {
+		// Reading the models can materialize the snapshot: read its revision afterwards.
+		...readScopeInputs(registry, scopedModels),
+		catalogRevision: registry.catalogRevision,
+		preferences: settings.preferences ?? settings,
+		revision: settings.revision,
+		mruOrder: settings.mruOrder,
+	};
+	const tagged = registry as ModelBrowserRegistry & ScopeTagged;
+	const previous = tagged[kSessionModelScope];
+	const cached = cachedSessionModelScope(previous, key);
+	if (cached) return cached;
 
-	get(scopedModels: ReadonlyArray<Model>): SessionModelScope {
-		const revision = this.#settings.revision;
-		const inputs = readScopeInputs(this.#registry, scopedModels);
-		const before = this.#inputs;
-		const cached = this.#scope;
-		if (
-			cached &&
-			before &&
-			revision === this.#revision &&
-			inputs.error === before.error &&
-			sameItems(inputs.models, before.models) &&
-			sameItems(inputs.allModels, before.allModels) &&
-			sameItems(inputs.roleModels, before.roleModels) &&
-			sameItems(this.#settings.mruOrder, cached.mruOrder)
-		)
-			return cached;
-		const scope = scopeFromInputs(this.#settings, inputs);
-		this.#revision = revision;
-		this.#inputs = inputs;
-		this.#scope = scope;
-		return scope;
+	// The prewarm yields between roles. Keep the data we read, even for hosts
+	// returning mutable arrays; a versioned full catalog is already a snapshot.
+	const roleModels = [...key.roleModels];
+	const snapshot = {
+		...key,
+		scoped: key.scoped && [...key.scoped],
+		roleModels,
+		allModels: key.scoped ? roleModels : key.catalogRevision ? key.allModels : [...key.allModels],
+		mruOrder: [...key.mruOrder],
+	};
+	const scope = yield* scopeFromInputs(settings, snapshot);
+	if (previous !== tagged[kSessionModelScope]) {
+		// A foreground reader won; never evict its newer scope with older prewarm work.
+		return cachedSessionModelScope(tagged[kSessionModelScope], snapshot) ?? scope;
 	}
+	tagged[kSessionModelScope] = { key: snapshot, scope };
+	return scope;
 }
 
 // ─── Search ─────────────────────────────────────────────────────────────────
@@ -628,6 +773,59 @@ function modelIdSearchText({ id, model }: ModelBrowserItem): string {
 	return isFreeModel(model) ? `${id} free` : id;
 }
 
+interface ModelSearchEntry {
+	text: FuzzyText;
+	/** Only time-dependent pricing needs its haystack checked again. */
+	dynamicText?: string;
+	query?: FuzzyQuery;
+	match?: FuzzyMatch;
+}
+
+/** Whole-text membership shared by the visible pane and the hub's catalog-wide counts. */
+export class ModelSearchIndex {
+	readonly #entries = new WeakMap<ModelBrowserItem, ModelSearchEntry>();
+	#raw?: string;
+	#query?: FuzzyQuery;
+
+	prepare(raw: string): FuzzyQuery {
+		if (raw !== this.#raw || !this.#query) {
+			this.#raw = raw;
+			this.#query = new FuzzyQuery(raw);
+		}
+		return this.#query;
+	}
+
+	warm(item: ModelBrowserItem): ModelSearchEntry {
+		const entry = this.#entries.get(item);
+		if (entry && entry.dynamicText === undefined) return entry;
+		const raw = modelSearchText(item);
+		if (entry?.dynamicText === raw) return entry;
+		const fresh: ModelSearchEntry = { text: new FuzzyText(raw) };
+		if (item.model.cost?.timeBased || item.model.factoryDroidCreditCards?.length) fresh.dynamicText = raw;
+		this.#entries.set(item, fresh);
+		return fresh;
+	}
+
+	match(item: ModelBrowserItem, query: FuzzyQuery): FuzzyMatch {
+		const entry = this.warm(item);
+		if (entry.query !== query || !entry.match) {
+			entry.match = query.match(entry.text);
+			entry.query = query;
+		}
+		return entry.match;
+	}
+
+	rank(items: readonly ModelBrowserItem[], raw: string): FuzzyFilterResult<ModelBrowserItem>[] {
+		const query = this.prepare(raw);
+		const results: FuzzyFilterResult<ModelBrowserItem>[] = [];
+		for (const item of items) {
+			const match = this.match(item, query);
+			if (match.matches) results.push({ item, score: match.score });
+		}
+		return results.sort((a, b) => a.score - b.score);
+	}
+}
+
 /** Inputs to {@link ModelItemRanker}. */
 export interface ModelRankOptions {
 	roles: RoleAssignments;
@@ -669,7 +867,11 @@ export class ModelItemRanker {
 	constructor(items: ReadonlyArray<ModelBrowserItem>, options: ModelRankOptions) {
 		this.items = items;
 		this.options = options;
-		const compare = modelItemComparator({ roles: options.roles, mruOrder: options.mruOrder, skipRoleRank: true });
+		const compare = modelItemComparator(items, {
+			roles: options.roles,
+			mruOrder: options.mruOrder,
+			skipRoleRank: true,
+		});
 		const ordered = [...items].sort(compare);
 		let group = 0;
 		for (let i = 0; i < ordered.length; i++) {
@@ -691,13 +893,13 @@ export class ModelItemRanker {
 	 * `provider/model` query lists the prefixed providers' models first,
 	 * matched on the model part; whole-text matches follow.
 	 */
-	rank(query: string): ModelBrowserItem[] {
+	rank(query: string, index?: ModelSearchIndex): ModelBrowserItem[] {
 		if (!query.trim()) return [...this.items];
 		const rows = new Map<ModelBrowserItem, RankRow>();
 		const scoped = parseProviderScopedQuery(query);
 		if (scoped) this.#rankScoped(scoped, rows);
 		const queryKey = compactModelSearchText(query);
-		for (const { item, score } of fuzzyRank(this.items, query, modelSearchText)) {
+		for (const { item, score } of index?.rank(this.items, query) ?? fuzzyRank(this.items, query, modelSearchText)) {
 			if (rows.has(item)) continue;
 			const keys = this.#keys.get(item)!;
 			rows.set(item, {
@@ -752,43 +954,6 @@ export function rankModelItems(
 	options: ModelRankOptions,
 ): ModelBrowserItem[] {
 	return new ModelItemRanker(items, options).rank(query);
-}
-
-/**
- * Hit ranges of `query` in `label`: each whitespace token marks its first
- * case-insensitive substring, else its characters as a greedy in-order
- * subsequence. Undefined when nothing matches.
- */
-export function fuzzyHits(label: string, query: string): [number, number][] | undefined {
-	const tokens = query
-		.toLowerCase()
-		.split(/\s+/)
-		.filter(token => token.length > 0);
-	if (tokens.length === 0) return undefined;
-	const lower = label.toLowerCase();
-	const marked = new Uint8Array(lower.length);
-	for (const token of tokens) {
-		const at = lower.indexOf(token);
-		if (at >= 0) {
-			marked.fill(1, at, at + token.length);
-			continue;
-		}
-		let from = 0;
-		for (const ch of token) {
-			const index = lower.indexOf(ch, from);
-			if (index < 0) break;
-			marked[index] = 1;
-			from = index + ch.length;
-		}
-	}
-	const ranges: [number, number][] = [];
-	for (let i = 0; i < marked.length; i++) {
-		if (!marked[i]) continue;
-		const start = i;
-		while (i < marked.length && marked[i]) i++;
-		ranges.push([start, i]);
-	}
-	return ranges.length > 0 ? ranges : undefined;
 }
 
 // ─── Facts ──────────────────────────────────────────────────────────────────
@@ -859,6 +1024,23 @@ export function formatCostDetail(model: Model): string {
 	return declared !== undefined ? PRICING_LABELS[declared].detail : `${formatCostPair(model)} per M`;
 }
 
+/**
+ * When the price facts of `model` (its price, `free`, the credit badge) may
+ * next change: the earliest dated rate or credit card still ahead; infinity
+ * when none is pending. Reads the clock only for rows with dated cards.
+ */
+export function nextPriceChange(model: Model): number {
+	const rates = model.cost?.timeBased?.effectiveRates;
+	const credits = model.factoryDroidCreditCards;
+	if (!rates?.length && !credits?.length) return Number.POSITIVE_INFINITY;
+	const now = Date.now();
+	let next = Number.POSITIVE_INFINITY;
+	for (const card of rates ?? []) if (card.effectiveFrom > now && card.effectiveFrom < next) next = card.effectiveFrom;
+	for (const card of credits ?? [])
+		if (card.effectiveFrom > now && card.effectiveFrom < next) next = card.effectiveFrom;
+	return next;
+}
+
 /** `$3·15` price fact of a picker row. */
 export function pickerPrice(model: Model): string {
 	return priceWith(model, "·");
@@ -884,14 +1066,21 @@ export const MODEL_PICKER_COLUMNS: readonly TspPickerColumn[] = [
 	{ id: "price", head: "$/M", format: "price", priority: 2 },
 ];
 
+/** {@link providerMark} texts by provider id (a few dozen providers). */
+const markTexts = new Map<string, string>();
+
 /** A provider's picker mark: the terminal's logo, else its initials (`amazon-bedrock` → `AB`, `anthropic` → `An`). */
 export function providerMark(providerId: string): TspPickerMark {
-	const words = providerId.split(/[-_\s.]+/).filter(word => word.length > 0);
-	const word = words[0] ?? providerId;
-	const text =
-		words.length >= 2
-			? `${words[0]!.charAt(0)}${words[1]!.charAt(0)}`.toUpperCase()
-			: `${word.charAt(0).toUpperCase()}${word.charAt(1)}`;
+	let text = markTexts.get(providerId);
+	if (text === undefined) {
+		const words = providerId.split(/[-_\s.]+/).filter(word => word.length > 0);
+		const word = words[0] ?? providerId;
+		text =
+			words.length >= 2
+				? `${words[0]!.charAt(0)}${words[1]!.charAt(0)}`.toUpperCase()
+				: `${word.charAt(0).toUpperCase()}${word.charAt(1)}`;
+		markTexts.set(providerId, text);
+	}
 	return { text, seed: providerId, icon: `provider:${providerId}` };
 }
 
@@ -910,6 +1099,7 @@ export function measuredPerf(
 	perf: ReadonlyMap<string, ModelBrowserPerf>,
 	item: ModelBrowserItem,
 	serviceTier: string | undefined,
+	tiers?: TieredPerf,
 ): { perf: ModelBrowserPerf; tier?: string } | undefined {
 	if (perf.size === 0) return undefined;
 	if (serviceTier) {
@@ -918,11 +1108,42 @@ export function measuredPerf(
 	}
 	const standard = perf.get(item.selector);
 	if (standard) return { perf: standard };
-	let best: { perf: ModelBrowserPerf; tier: string } | undefined;
-	const prefix = `${item.selector}@`;
+	const best = (tiers ?? tieredPerf(perf)).get(item.selector);
+	return best && { perf: best.perf, tier: best.tier };
+}
+
+/** Whether `selector` has measured tier aggregates (`selector@tier`): only then does the service tier pick its perf. */
+export function hasTieredPerf(perf: ReadonlyMap<string, ModelBrowserPerf>, selector: string): boolean {
+	return perf.size > 0 && tieredPerf(perf).has(selector);
+}
+
+const kTierIndex = Symbol("model-browser.tierIndex");
+
+/** A perf map tagged with its {@link tieredPerf} index and the size it was built at. */
+interface TierIndexed {
+	[kTierIndex]?: { size: number; best: Map<string, { perf: ModelBrowserPerf; tier: string }> };
+}
+
+/** The fastest `selector@tier` aggregate per selector of one perf map (see {@link tieredPerf}). */
+export type TieredPerf = ReadonlyMap<string, { perf: ModelBrowserPerf; tier: string }>;
+
+/**
+ * The fastest `selector@tier` aggregate per selector (the first of equals), for
+ * every `@` a key could split at. Pass it to {@link measuredPerf} when looking
+ * up many rows of one perf map.
+ */
+export function tieredPerf(perf: ReadonlyMap<string, ModelBrowserPerf>): TieredPerf {
+	const tagged = perf as ReadonlyMap<string, ModelBrowserPerf> & TierIndexed;
+	const indexed = tagged[kTierIndex];
+	if (indexed && indexed.size === perf.size) return indexed.best;
+	const best = new Map<string, { perf: ModelBrowserPerf; tier: string }>();
 	for (const [key, entry] of perf) {
-		if (!key.startsWith(prefix)) continue;
-		if (!best || entry.tps > best.perf.tps) best = { perf: entry, tier: key.slice(prefix.length) };
+		for (let at = key.indexOf("@"); at >= 0; at = key.indexOf("@", at + 1)) {
+			const selector = key.slice(0, at);
+			const current = best.get(selector);
+			if (!current || entry.tps > current.perf.tps) best.set(selector, { perf: entry, tier: key.slice(at + 1) });
+		}
 	}
+	tagged[kTierIndex] = { size: perf.size, best };
 	return best;
 }

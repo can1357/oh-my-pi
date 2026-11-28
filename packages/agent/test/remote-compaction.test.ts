@@ -1042,20 +1042,21 @@ describe("requestCompactionV2Streaming", () => {
 		let requestBody: { model: string; input: Array<Record<string, unknown>>; prompt_cache_key?: string } | undefined;
 		let sessionHeader: string | undefined;
 		let clientRequestHeader: string | undefined;
-		let legacySessionHeader: string | undefined;
+		let underscoreSessionHeader: string | undefined;
 		let betaFeaturesHeader: string | undefined;
 		const fetchMock: FetchImpl = async (input, init) => {
 			expect(String(input)).toBe("https://compact.example/v1/responses");
 			if (!init?.headers || init.headers instanceof Headers || Array.isArray(init.headers)) {
 				throw new Error("Expected V2 compaction to send headers as a plain object");
 			}
-			const rawSessionHeader = init.headers.session_id;
+			const rawSessionHeader = init.headers["session-id"];
 			const rawClientRequestHeader = init.headers["x-client-request-id"];
-			const rawLegacySessionHeader = init.headers["session-id"];
+			const rawUnderscoreSessionHeader = init.headers.session_id;
 			const rawBetaFeaturesHeader = init.headers["x-codex-beta-features"];
 			sessionHeader = typeof rawSessionHeader === "string" ? rawSessionHeader : undefined;
 			clientRequestHeader = typeof rawClientRequestHeader === "string" ? rawClientRequestHeader : undefined;
-			legacySessionHeader = typeof rawLegacySessionHeader === "string" ? rawLegacySessionHeader : undefined;
+			underscoreSessionHeader =
+				typeof rawUnderscoreSessionHeader === "string" ? rawUnderscoreSessionHeader : undefined;
 			betaFeaturesHeader = typeof rawBetaFeaturesHeader === "string" ? rawBetaFeaturesHeader : undefined;
 			requestBody = JSON.parse(String(init.body)) as {
 				model: string;
@@ -1089,7 +1090,7 @@ describe("requestCompactionV2Streaming", () => {
 
 		expect(sessionHeader).toBe("session-1");
 		expect(clientRequestHeader).toBe("session-1");
-		expect(legacySessionHeader).toBeUndefined();
+		expect(underscoreSessionHeader).toBeUndefined();
 		expect(betaFeaturesHeader).toBeUndefined();
 		expect(requestBody?.model).toBe("gpt-5-compact");
 		expect(requestBody?.prompt_cache_key).toBe("cache-1");

@@ -104,8 +104,8 @@ test("legacy extension parse cache drops obsolete CommonJS export-analysis colum
 			.all()
 			.map(column => column.name);
 		const schemaVersion = migrated.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version;
-		expect(columns).toEqual(["cache_key", "source_type", "references", "commonjs_syntax"]);
-		expect(schemaVersion).toBe(3);
+		expect(columns).toEqual(["cache_key", "source_type", "references", "jsx_import_sources", "commonjs_syntax"]);
+		expect(schemaVersion).toBe(4);
 	} finally {
 		migrated.close();
 	}
@@ -143,10 +143,10 @@ test("oversized-cache eviction keeps the parse cache usable when a concurrent pr
 	// Seed a cache whose main db file exceeds the 8 MiB eviction cap.
 	const seed = new Database(cachePath, { create: true });
 	seed.run(
-		"CREATE TABLE extension_parse_cache (cache_key TEXT PRIMARY KEY, source_type TEXT NOT NULL, [references] TEXT NOT NULL, commonjs_syntax INTEGER NOT NULL)",
+		"CREATE TABLE extension_parse_cache (cache_key TEXT PRIMARY KEY, source_type TEXT NOT NULL, [references] TEXT NOT NULL, jsx_import_sources TEXT NOT NULL, commonjs_syntax INTEGER NOT NULL)",
 	);
-	seed.run("PRAGMA user_version = 3");
-	seed.run("INSERT INTO extension_parse_cache VALUES ('big', 'module', ?, 0)", ["x".repeat(9 * 1024 * 1024)]);
+	seed.run("PRAGMA user_version = 4");
+	seed.run("INSERT INTO extension_parse_cache VALUES ('big', 'module', ?, '[]', 0)", ["x".repeat(9 * 1024 * 1024)]);
 	seed.close();
 
 	// A concurrent omp process holds the cache open in WAL mode with
@@ -156,7 +156,9 @@ test("oversized-cache eviction keeps the parse cache usable when a concurrent pr
 	try {
 		concurrent.run("PRAGMA busy_timeout = 5000");
 		concurrent.run("PRAGMA journal_mode=WAL");
-		const insert = concurrent.prepare("INSERT OR REPLACE INTO extension_parse_cache VALUES (?, 'module', ?, 0)");
+		const insert = concurrent.prepare(
+			"INSERT OR REPLACE INTO extension_parse_cache VALUES (?, 'module', ?, '[]', 0)",
+		);
 		for (let i = 0; i < 500; i++) insert.run(`live-${i}`, "y".repeat(4096));
 
 		// The probe opens the cache, sees the oversized main file, and evicts.

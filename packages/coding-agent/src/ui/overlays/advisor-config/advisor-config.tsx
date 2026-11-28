@@ -27,6 +27,7 @@ import {
 	type UiEvent,
 	untrack,
 } from "@oh-my-pi/pi-tui";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import type { TspPickerAction, TspPickerItem, TspPrefsProps, TspPrefsRow } from "@oh-my-pi/pi-wire";
 import {
 	ADVISOR_REVIEW_MODES,
@@ -876,7 +877,7 @@ export function AdvisorConfigOverlay(props: AdvisorConfigOverlayProps): JSXNode 
 			}
 			case "change": {
 				const advisor = index < 0 ? undefined : untrack(advisors)[index];
-				if (!advisor) return;
+				if (!advisor || !("item" in event)) return;
 				const value = event.value;
 				if (event.item === "toggleEnabled" && typeof value === "boolean") {
 					if (value !== (advisor.enabled !== false)) detailSelect(index, "toggleEnabled");
@@ -1150,7 +1151,10 @@ export function AdvisorConfigOverlay(props: AdvisorConfigOverlayProps): JSXNode 
 		const lines: AdvisorPreviewLine[] = [];
 		// The fullscreen overlay hides the host's warning toasts: the file's load problems stay pinned on top.
 		if (current.warnings?.length) {
-			lines.push({ text: "⚠ Config problems — dropped while loading:", style: "warning" });
+			lines.push({
+				text: `${currentTheme().symbols.symbol("status.warning")} Config problems — dropped while loading:`,
+				style: "warning",
+			});
 			for (const warning of sanitizeDisplayWarnings(current.warnings))
 				lines.push({ text: warning, style: "warning", wrap: true });
 			lines.push({ text: "" });

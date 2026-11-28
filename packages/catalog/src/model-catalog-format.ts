@@ -18,6 +18,8 @@ interface CatalogData {
 	nodes: Node[];
 	compat: [string, EncodedValue][];
 	providers: ProviderRow[];
+	/** Digest of each decoded slice in runtime row/property order, not encoder input order. */
+	providerHashes?: Record<string, string>;
 }
 
 /**
@@ -182,7 +184,16 @@ export function encodeModelCatalog(models: Record<string, Record<string, Model<A
 		}
 		providers.push([provider, encodedConstants, rows]);
 	}
-	return JSON.stringify({ version: 1, keys, booleanShapes, nodes, compat, providers } satisfies CatalogData);
+	const data: CatalogData = { version: 1, keys, booleanShapes, nodes, compat, providers };
+	const catalog = openModelCatalog(data);
+	const hashes: Record<string, string> = Object.create(null);
+	for (const [provider] of providers) {
+		const rows = Object.values(getCatalogProvider(catalog, provider)!);
+		// A legacy row missing identity is classified on first use; only bake
+		// identities for slices the runtime consumes without changing any row.
+		if (rows.every(row => row.identity != null)) hashes[provider] = Bun.hash(JSON.stringify(rows)).toString(36);
+	}
+	return JSON.stringify({ ...data, providerHashes: hashes } satisfies CatalogData);
 }
 
 /** Open a parsed catalog without materializing its provider models. */

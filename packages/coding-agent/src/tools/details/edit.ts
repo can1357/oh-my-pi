@@ -19,12 +19,14 @@ export type EditMode = "replace" | "patch" | "hashline" | "apply_patch" | "slopp
 /** Filesystem operation represented by an edit. */
 export type Operation = "create" | "delete" | "update";
 
-/** Computed streaming diff or preview error for one file. */
+/** Computed streaming diff, preview error, or notice for one file. */
 export interface PerFileDiffPreview {
 	path: string;
 	diff?: string;
 	firstChangedLine?: number;
 	error?: string;
+	/** Why the file has no diff yet, when that is not a failure (a remote file fetched only once the edit runs). */
+	notice?: string;
 }
 
 type EditDiffPreview =
@@ -34,6 +36,8 @@ type EditDiffPreview =
 /** Result metadata for one edited file. */
 export interface EditToolPerFileResult {
 	path: string;
+	/** The edited worktree differs from the session's checkout of the same Git repository. */
+	checkoutNotice?: string;
 	diff: string;
 	firstChangedLine?: number;
 	diagnostics?: FileDiagnosticsResult;
@@ -75,6 +79,8 @@ export interface EditToolDetails {
 	perFileResults?: EditToolPerFileResult[];
 	/** Absolute file path for single-file edit results. Required by ACP diff metadata consumers. */
 	path?: string;
+	/** The edited worktree differs from the session's checkout of the same Git repository. */
+	checkoutNotice?: string;
 	/** Source-of-truth content before the edit; `undefined` for create operations. */
 	oldText?: string;
 	/** Source-of-truth content after the edit; `undefined` for delete operations. */
@@ -83,6 +89,17 @@ export interface EditToolDetails {
 	snapshotsPruned?: boolean;
 	/** Pre-move source path; set only when the edit moved/renamed the file. The header renders `sourcePath → path`. */
 	sourcePath?: string;
+}
+
+/** Added and removed lines of an edit's diff ({@link EditToolDetails.diff}). */
+export function diffStats(diff: string): { added: number; removed: number } {
+	let added = 0;
+	let removed = 0;
+	for (const line of diff ? diff.split("\n") : []) {
+		if (line.startsWith("+")) added++;
+		else if (line.startsWith("-")) removed++;
+	}
+	return { added, removed };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

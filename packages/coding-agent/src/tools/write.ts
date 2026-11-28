@@ -299,7 +299,13 @@ function assertNotShorterReadProjection(
 	writeContent: string = rawContent,
 ): void {
 	const rawPayloadLength = readProjectionPayloadLength(rawContent);
-	if (rawPayloadLength === undefined || currentContent === undefined) return;
+	if (rawPayloadLength === undefined) return;
+	if (currentContent === undefined) {
+		// No source to discard, but the new file would be a silently incomplete copy ending in the notice.
+		throw new ToolError(
+			`Refusing to create '${displayPath}' from an incomplete read projection: the content ends with an omp read truncation notice, so the new file would be missing the omitted content and contain the notice. Re-read the omitted ranges and write the complete file.`,
+		);
+	}
 	// A column-cap notice proves the page lossy at any length: a cut line ends in `…` in place of
 	// its tail, and a line one column past the cap renders exactly as long as its source. So does
 	// a truncation notice carrying the column clause, whose line-number prefixes pad the payload.
@@ -707,12 +713,13 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				if (sel !== undefined && !entries.has(resolvedArchivePath.archiveSubPath)) {
 					throwReadSelectorMisfire(writeTarget, sel);
 				}
-				const existingTarget = entries.get(resolvedArchivePath.archiveSubPath);
-				if (existingTarget !== undefined && endsWithReadTruncationNotice(rawContent)) {
+				if (endsWithReadTruncationNotice(rawContent)) {
+					const existingTarget = entries.get(resolvedArchivePath.archiveSubPath);
 					const existingBytes =
 						existingTarget instanceof Blob ? new Uint8Array(await existingTarget.arrayBuffer()) : existingTarget;
-					const existingText = typeof existingBytes === "string" ? existingBytes : decodeUtf8Text(existingBytes);
-					assertNotShorterReadProjection(writeTarget, rawContent, existingText ?? undefined, content);
+					const existingText =
+						existingBytes instanceof Uint8Array ? (decodeUtf8Text(existingBytes) ?? undefined) : existingBytes;
+					assertNotShorterReadProjection(writeTarget, rawContent, existingText, content);
 				}
 				entries.set(resolvedArchivePath.archiveSubPath, content);
 

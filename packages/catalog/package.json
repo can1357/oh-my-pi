@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/pi-catalog",
-	"version": "19.1.1",
+	"version": "19.2.1",
 	"description": "Model catalog for omp: bundled model database, provider discovery descriptors, model identity, classification, and equivalence",
 	"keywords": [
 		"ai",
@@ -87,7 +87,7 @@
 		"@oh-my-pi/pi-utils": "catalog:"
 	},
 	"devDependencies": {
-		"@bgotink/kdl": "0.4.0",
+		"@bgotink/kdl": "0.4.2",
 		"@oh-my-pi/pi-ai": "catalog:",
 		"@types/bun": "catalog:"
 	},

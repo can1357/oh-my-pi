@@ -1,47 +1,43 @@
-/**
- * Shared contract between the {@link module-timer} preload and {@link logger}'s
- * timing tree. Kept in its own dependency-free module so the preload can import
- * it without pulling in winston (via logger) and the logger can drain the buffer
- * without importing the Bun-plugin preload.
- */
-
+/** Observed wall-clock intervals from the optional Bun development preload, in performance.now() milliseconds. */
 export interface ModuleLoadEvent {
-	/** Absolute or Bun-resolved module path. */
 	path: string;
-	/** `performance.now()` timestamp captured at Bun `onLoad` entry. */
-	start: number;
-	/** Inclusive module window: `onLoad` entry → appended final marker. */
-	durationMs: number;
-	/** Own top-level body / TLA time: prepended body marker → appended final marker. */
-	bodyMs?: number;
-	/** Resolved static children imported by this module. */
-	imports: string[];
+	readStart: number;
+	readEnd: number;
+	/** First instrumented statement through completion, including top-level await. Not CPU time. */
+	bodyStart: number;
+	bodyEnd: number;
 }
 
-/**
- * Registry-global key under which the preload accumulates module-load events.
- * `Symbol.for` so both modules resolve the same symbol independently.
- */
-const KEY: symbol = Symbol.for("omp.moduleLoadBuffer");
-
-type Store = Record<symbol, ModuleLoadEvent[] | undefined>;
-
-/** The append-only buffer the preload pushes into (created on first access). */
-export function moduleLoadBuffer(): ModuleLoadEvent[] {
-	const store = globalThis as unknown as Store;
-	let buffer = store[KEY];
-	if (!buffer) {
-		buffer = [];
-		store[KEY] = buffer;
+export function timingModeIncludes(option: "full" | "modules" | "x"): boolean {
+	const value = process.env.PI_TIMING;
+	if (!value) return false;
+	if (value === option) return true;
+	let start = 0;
+	for (let i = 0; i <= value.length; i++) {
+		const code = i === value.length ? 44 : value.charCodeAt(i);
+		const separator = code === 44 || code === 58 || code === 59 || code === 43 || code <= 32;
+		if (!separator) continue;
+		if (i > start && value.slice(start, i) === option) return true;
+		start = i + 1;
 	}
-	return buffer;
+	return false;
 }
 
-/** Drain and return all buffered events, leaving the buffer empty. */
+/** Set only by the optional startup preload. Ending ordinary timing needs no plugin import. */
+export const STOP_MODULE_LOAD_TIMING = Symbol.for("omp.stopModuleLoadTiming");
+
+export function stopModuleLoadTiming(): void {
+	(globalThis as { [STOP_MODULE_LOAD_TIMING]?: () => void })[STOP_MODULE_LOAD_TIMING]?.();
+}
+
+const KEY = Symbol.for("omp.moduleLoadBuffer");
+type Store = { [KEY]?: ModuleLoadEvent[] };
+
+/** Keep the same queue across drains: the preload holds a reference to it. */
+export function moduleLoadBuffer(): ModuleLoadEvent[] {
+	return ((globalThis as Store)[KEY] ??= []);
+}
+
 export function drainModuleLoadEvents(): ModuleLoadEvent[] {
-	const store = globalThis as unknown as Store;
-	const buffer = store[KEY];
-	if (!buffer || buffer.length === 0) return [];
-	store[KEY] = [];
-	return buffer;
+	return (globalThis as Store)[KEY]?.splice(0) ?? [];
 }

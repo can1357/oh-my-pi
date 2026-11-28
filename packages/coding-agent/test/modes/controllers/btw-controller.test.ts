@@ -243,9 +243,12 @@ describe("BtwController", () => {
 		expect(note.text()).toContain("Because streaming.");
 
 		expect(controller.hasActiveRequest()).toBe(false);
+		// Only the head takes the click: one in the answer (reading, selecting) leaves the composer alone.
+		expect(note.clicks("btw-focus")).toEqual(["omp.btw.note.head"]);
 		note.press("btw-focus");
 		expect(controller.isFocused()).toBe(true);
 		expect(note.role).toBe("omp.btw.note.active");
+		expect(note.clicks("btw-focus")).toEqual(["omp.btw.note.head"]);
 		expect(controller.hasActiveRequest()).toBe(true);
 		expect(controller.handleEscape()).toBe(true);
 		expect(controller.isFocused()).toBe(false);
@@ -263,6 +266,30 @@ describe("BtwController", () => {
 
 		pending.resolve({ replyText: "Because streaming.", assistantMessage: createAssistantMessage("x") });
 		await drainBtwRequest();
+		await controller.dispose();
+	});
+
+	it("in Tern lets go of the focused note on a press outside it, however many arrive", async () => {
+		const runEphemeralTurn = vi.fn(async () => ({
+			replyText: "Answer",
+			assistantMessage: createAssistantMessage("Answer"),
+		}));
+		const ctx = makeCtx(makeFakeSession(runEphemeralTurn));
+		setNative(ctx.shell, true);
+		const controller = new BtwController(ctx);
+
+		await controller.start("Why?");
+		await drainBtwRequest();
+		const note = noteIn(ctx.shell);
+		expect(note.outside).toBeUndefined();
+		note.press("btw-focus");
+		expect(note.outside).toBe("btw-blur");
+		note.press("btw-blur");
+		expect(controller.isFocused()).toBe(false);
+		expect(note.role).toBe("omp.btw.note");
+		// A second press before Tern drew the first one's answer leaves it alone, unlike a click.
+		note.press("btw-blur");
+		expect(controller.isFocused()).toBe(false);
 		await controller.dispose();
 	});
 

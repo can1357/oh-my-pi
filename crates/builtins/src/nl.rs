@@ -251,7 +251,7 @@ impl Style {
 			// `fancy-regex` matches `str`: invalid UTF-8 matches as U+FFFD,
 			// and valid lines (the norm) are borrowed, not copied.
 			Self::Matching(regex) => regex
-				.is_match(&String::from_utf8_lossy(text))
+				.is_match(&*String::from_utf8_lossy(text))
 				.map_err(|_| Stop::Fatal("error in regular expression search".to_owned()))?,
 		})
 	}

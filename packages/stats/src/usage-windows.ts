@@ -233,7 +233,7 @@ interface WindowGroup {
  * when it adds information ("Usage (Google) · Daily"). The limit label alone
  * distinguishes same-duration windows ("Claude 7 Day" vs "Claude 7 Day
  * (Fable)"); the window-label suffix distinguishes same-named limits with
- * different durations (Antigravity's daily vs weekly "Usage (Google)").
+ * different durations (a daily vs weekly "Usage").
  */
 function windowDisplayLabel(row: UsageSnapshotRow): string {
 	const { label, windowLabel } = row;

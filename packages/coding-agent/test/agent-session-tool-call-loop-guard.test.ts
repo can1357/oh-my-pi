@@ -198,4 +198,103 @@ describe("AgentSession tool-call loop guard", () => {
 			),
 		).toHaveLength(redirects);
 	});
+
+	it("exempts repeated vibe_wait calls by default (issue #15011)", async () => {
+		const tool: AgentTool = {
+			name: "vibe_wait",
+			label: "Vibe Wait",
+			description: "Mock vibe wait",
+			parameters: type({ "sessions?": "string[]", "timeout?": "number" }),
+			execute: async () => ({ content: [{ type: "text", text: "Still running" }] }),
+		};
+		const args = { sessions: ["worker"], timeout: 600 };
+		const mock = createMockModel({
+			provider: "openai",
+			responses: [
+				{ content: [{ type: "toolCall", name: "vibe_wait", arguments: args }] },
+				{ content: [{ type: "toolCall", name: "vibe_wait", arguments: args }] },
+				{ content: [{ type: "toolCall", name: "vibe_wait", arguments: args }] },
+				{ content: ["Worker finished."] },
+			],
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"todo.enabled": false,
+			"model.toolCallLoopGuard.enabled": true,
+			"model.toolCallLoopGuard.threshold": 2,
+		});
+		settings.setModelRole("default", `${mock.provider}/${mock.id}`);
+		session = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model: mock, systemPrompt: ["Test"], tools: [tool], messages: [] },
+				convertToLlm,
+				streamFn: mock.stream,
+			}),
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage),
+			toolRegistry: new Map([["vibe_wait", tool]]),
+		});
+
+		await session.prompt("wait for the worker");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(4);
+		expect(
+			session.agent.state.messages.filter(
+				message => message.role === "custom" && message.customType === "tool-call-loop-redirect",
+			),
+		).toHaveLength(0);
+	});
+
+	it("redirects a streak of varied calls to tools that do not exist (issue #10876)", async () => {
+		const tool: AgentTool = {
+			name: "write",
+			label: "Write",
+			description: "Mock write tool",
+			parameters: type({ "path?": "string" }),
+			execute: async () => ({ content: [{ type: "text", text: "written" }] }),
+		};
+		const mock = createMockModel({
+			provider: "openai",
+			responses: [
+				{ content: [{ type: "toolCall", name: "wri", arguments: { path: "a.txt" } }] },
+				{ content: [{ type: "toolCall", name: "ed", arguments: { path: "b.txt" } }] },
+				{ content: ["Stopped guessing tool names."] },
+			],
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"todo.enabled": false,
+			"model.toolCallLoopGuard.enabled": true,
+			"model.toolCallLoopGuard.threshold": 2,
+			"model.toolCallLoopGuard.exemptTools": [],
+		});
+		settings.setModelRole("default", `${mock.provider}/${mock.id}`);
+		session = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model: mock, systemPrompt: ["Test"], tools: [tool], messages: [] },
+				convertToLlm,
+				streamFn: mock.stream,
+			}),
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage),
+			toolRegistry: new Map([["write", tool]]),
+		});
+
+		await session.prompt("write the files");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(3);
+		const redirects = session.agent.state.messages.filter(
+			(message): message is CustomMessage =>
+				message.role === "custom" && message.customType === "tool-call-loop-redirect",
+		);
+		expect(redirects).toHaveLength(1);
+		expect(redirects[0]!.details).toMatchObject({ kind: "unresolved_tool_call", toolName: "ed", count: 2 });
+		expect(JSON.stringify(redirects[0]!.content)).toContain("tools that do not exist");
+	});
 });

@@ -24,6 +24,7 @@ import { formatBytes, getProjectDir, logger, TempDir } from "@oh-my-pi/pi-utils"
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
 import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
+import { cfgBashReapBackground } from "../exec/settings";
 import { AppFrame } from "../modes/interactive/frame";
 import { InteractiveMode } from "../modes/interactive-mode";
 import { AgentSession } from "../session/agent-session";
@@ -65,17 +66,6 @@ function transcriptRows(mode: InteractiveMode, width: number): string[] {
 	return rows;
 }
 
-/** Resolves with the next frame the terminal renderer presents. */
-function nextFrame(mode: InteractiveMode): Promise<void> {
-	const { promise, resolve } = Promise.withResolvers<void>();
-	const stop = mode.shell.host?.onFrame(() => {
-		stop?.();
-		resolve();
-	});
-	if (!stop) resolve();
-	return promise;
-}
-
 function formatMs(ms: number): string {
 	return `${ms.toFixed(0)} ms`;
 }
@@ -84,6 +74,9 @@ function formatMs(ms: number): string {
 export async function runRenderCommand(args: RenderCommandArgs): Promise<number> {
 	const cwd = getProjectDir();
 	const settings = await Settings.init({ cwd });
+	// Read-only: the copy keeps the live session's id, and render runs no tool calls, so its
+	// teardown has no leftovers of its own to reap.
+	cfgBashReapBackground.override(settings, false);
 	initTheme();
 
 	const sourcePath = await resolveSessionFileArg(args.session, cwd);
@@ -128,7 +121,7 @@ export async function runRenderCommand(args: RenderCommandArgs): Promise<number>
 		// Replay: transcript context build + block construction (the phase
 		// renderInitialMessages runs after /tree navigation and on resume).
 		const replayStart = performance.now();
-		const painted = nextFrame(mode);
+		const painted = mode.shell.nextFrame();
 		await mode.renderInitialMessages({ clearTerminalHistory: true });
 		const replayMs = performance.now() - replayStart;
 
@@ -150,7 +143,7 @@ export async function runRenderCommand(args: RenderCommandArgs): Promise<number>
 		for (let i = 0; i < (args.repaint ?? 0); i++) {
 			const start = performance.now();
 			const before = terminal.bytes();
-			const repainted = nextFrame(mode);
+			const repainted = mode.shell.nextFrame();
 			mode.shell.host?.replayHistory();
 			await repainted;
 			repaints.push({ ms: performance.now() - start, bytes: terminal.bytes() - before });

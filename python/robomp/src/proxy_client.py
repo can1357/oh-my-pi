@@ -627,6 +627,7 @@ def _issue_from(data: Any) -> IssueInfo:
         author=str(data.get("author") or ""),
         labels=tuple(str(x) for x in labels),
         is_pull_request=bool(data.get("is_pull_request", False)),
+        state_reason=str(data.get("state_reason") or ""),
     )
 
 

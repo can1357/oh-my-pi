@@ -1,18 +1,19 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
 /**
- * The realtime-call panel: the phase (a spinner while the model works), the
- * mic level as a meter, the user's streaming transcript and Mute / End call
- * buttons. Escape, Ctrl+C and the configured stop chords end the call;
- * Space toggles mute.
+ * The realtime-call panel: the call's voice as a wave, the user's streaming
+ * transcript, then the phase (a spinner while the model works) beside Mute /
+ * End call buttons. Escape, Ctrl+C and the configured stop chords end the
+ * call; Space toggles mute.
  *
  * The terminal draws a rounded box with a two-row spectrum animated by the
- * call's frame counter (the `omp.app.live` look); natively the frame ticks
- * leave the tree unchanged.
+ * call's frame counter (the `omp.app.live` look); natively the host animates
+ * the wave meter, so the frame ticks leave the tree unchanged.
  */
 import type { JSXNode, KeyEvent } from "@oh-my-pi/pi-tui";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import "../../styles/apps/live-visualizer/look";
 import { callEnergy, type LiveCallModel, meterValue, PHASE_COLORS, PHASE_ICONS, PHASE_TONES } from "./model";
+import { formatTooltipKey } from "../../keys/hints";
 import { ActionButton } from "../../overlays/panels/common";
 
 export interface LiveVisualizerProps {
@@ -51,10 +52,16 @@ export function LiveVisualizer(props: LiveVisualizerProps): JSXNode {
 	const status = (): JSXNode => {
 		const phase = model.phase();
 		const color = PHASE_COLORS[phase];
-		if (phase === "working") return <spinner label={[{ s: color, t: phase }]} tone={PHASE_TONES[phase]} />;
-		return <text spans={[{ s: color, t: `${PHASE_ICONS[phase]} ${phase}` }]} />;
+		if (phase === "working") {
+			return <spinner key="working" label={[{ s: color, t: phase }]} tone={PHASE_TONES[phase]} />;
+		}
+		return (
+			<row key="phase" role="omp.app.live.phase" gap="xs" align="center">
+				<text role="omp.app.live.dot" spans={[{ s: color, t: PHASE_ICONS[phase] }]} />
+				<text spans={[{ s: color, t: phase }]} />
+			</row>
+		);
 	};
-	const meterTone = () => (model.phase() === "muted" ? "muted" : model.phase() === "error" ? "error" : "success");
 	return (
 		<card
 			role="omp.app.live"
@@ -63,24 +70,29 @@ export function LiveVisualizer(props: LiveVisualizerProps): JSXNode {
 			onKey={onKey}
 			onAction={onAction}
 		>
-			<row key="head" gap="sm" align="center">
-				{status}
-			</row>
-			<row role="omp.app.live.level" gap="sm" align="center">
-				<text spans={[{ s: "muted", t: "mic" }]} />
-				<meter value={() => meterValue(energy())} style="bar" size="md" tone={meterTone} grow={1} />
-			</row>
+			<meter
+				key="wave"
+				role="omp.app.live.wave"
+				value={() => meterValue(energy())}
+				style="wave"
+				size="lg"
+				tone={() => PHASE_TONES[model.phase()]}
+			/>
 			<text
+				key="transcript"
+				role="omp.app.live.transcript"
 				spans={() => [{ s: "accent", t: model.transcript() }] satisfies TspSpan[]}
 				wrap="none"
 				truncate="start"
+				hidden={() => model.transcript() === ""}
 			/>
 			<row key="actions" role="omp.actions" gap="sm" align="center">
+				{status}
 				<spacer grow={1} />
 				<ActionButton
 					id="mute"
 					label={() => (model.phase() === "muted" ? "Unmute" : "Mute")}
-					title={() => `${model.phase() === "muted" ? "Unmute" : "Mute"}  ␣`}
+					title={() => `${model.phase() === "muted" ? "Unmute" : "Mute"}  ${formatTooltipKey("space")}`}
 					keys={["space"]}
 				/>
 				<ActionButton id="end" label="End call" title="End call  esc" tone="error" keys={["escape"]} />

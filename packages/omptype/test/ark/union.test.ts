@@ -29,6 +29,19 @@ it("multiple subtypes pruned", () => {
 	expect(T.json).toEqual(Expected.json);
 });
 
+it("keeps disjoint tags in order and prunes an overlapping tag", () => {
+	const read = type({ action: "'get' | 'list'" });
+	const write = type({ action: "'write'" });
+	const commands = write.or(read);
+	expect(commands.json).toEqual([write.json, read.json]);
+	expect(commands.or({ action: "'list'", limit: "number" }).json).toEqual(commands.json);
+});
+
+it("prunes duplicates and covered literals in nullable unions without reordering", () => {
+	expect(type("'get' | null | 'list' | null").json).toEqual(type("'get' | null | 'list'").json);
+	expect(type("'get' | undefined | string").json).toEqual(type("undefined | string").json);
+});
+
 it("boolean is a union of true | false", () => {
 	const T = type("true|false");
 

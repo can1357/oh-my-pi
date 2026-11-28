@@ -15,18 +15,17 @@
  * holds the focus. Chrome around the field (frames, gutters, status) belongs
  * to the screen's role painter, which paints the field through `cx.paint`.
  */
+import { segmentGraphemes } from "@oh-my-pi/pi-utils/graphemes";
 import type { TspEditorDecoration, TspSpan, TspText } from "@oh-my-pi/pi-wire";
 import type { UiNode } from "../../node";
 import { fgSgr } from "../../theme/color";
 import type { Theme } from "../../theme/contract";
 import { hyperlink } from "../../text/osc";
-import { TAB_WIDTH, truncate, visibleWidth } from "../../text/width";
+import { TAB_WIDTH, truncate, visibleWidth, widthEpoch } from "../../text/width";
 import { widgetState } from "../widgets";
 import { type Block, type Cell, definePainter, type PaintContext } from "../paint";
 
 // ─── Graphemes ──────────────────────────────────────────────────────────────
-
-const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
 /** One grapheme of a text: its UTF-16 offset, length and cells. */
 export interface Grapheme {
@@ -45,7 +44,7 @@ export function graphemeWidth(text: string): number {
 export function graphemes(text: string, from = 0, to = text.length): Grapheme[] {
 	const out: Grapheme[] = [];
 	if (to <= from) return out;
-	for (const { segment, index } of segmenter.segment(text.slice(from, to))) {
+	for (const { segment, index } of segmentGraphemes(text.slice(from, to))) {
 		out.push({ at: from + index, text: segment, width: graphemeWidth(segment) });
 	}
 	return out;
@@ -154,11 +153,16 @@ function wrapLine(line: string, width: number): Chunk[] {
 
 /** Lay `text` out in rows of `width` cells (see {@link EditorRow}). */
 export function layoutText(text: string, width: number): EditorRow[] {
+	return layoutLines(text, line => wrapLine(line, Math.max(1, width)));
+}
+
+/** Rows of `text`, each logical line wrapped by `wrap` (chunk offsets relative to the line). */
+function layoutLines(text: string, wrap: (line: string) => readonly Chunk[]): EditorRow[] {
 	const rows: EditorRow[] = [];
 	let offset = 0;
 	let line = 0;
 	for (const lineText of text.split("\n")) {
-		const chunks = wrapLine(lineText, Math.max(1, width));
+		const chunks = wrap(lineText);
 		for (let k = 0; k < chunks.length; k++) {
 			const c = chunks[k]!;
 			rows.push({
@@ -176,12 +180,56 @@ export function layoutText(text: string, width: number): EditorRow[] {
 	return rows;
 }
 
+const kLayout = Symbol("pi-tui.editor.layout");
+
+/** A field's last layout, and the wrapped chunks of each of its lines (reused by the next layout at that width). */
+interface FieldLayout {
+	readonly text: string;
+	readonly width: number;
+	/** The {@link widthEpoch} the lines were measured under. */
+	readonly epoch: number;
+	readonly rows: readonly EditorRow[];
+	readonly lines: ReadonlyMap<string, readonly Chunk[]>;
+}
+
+interface LayoutHolder {
+	[kLayout]?: FieldLayout;
+}
+
+/**
+ * {@link layoutText} for a field, through its last layout: the same text at the same width is laid
+ * out once (painting and key handling ask for it several times per keystroke), and an edit
+ * re-wraps only the lines it changed.
+ */
+function layoutField(node: UiNode, text: string, width: number): readonly EditorRow[] {
+	const holder = node as LayoutHolder;
+	const epoch = widthEpoch();
+	const last = holder[kLayout]?.epoch === epoch ? holder[kLayout] : undefined;
+	if (last && last.width === width && last.text === text) return last.rows;
+	const reuse = last?.width === width ? last.lines : undefined;
+	const lines = new Map<string, readonly Chunk[]>();
+	const wrapWidth = Math.max(1, width);
+	const rows = layoutLines(text, line => {
+		const chunks = lines.get(line) ?? reuse?.get(line) ?? wrapLine(line, wrapWidth);
+		lines.set(line, chunks);
+		return chunks;
+	});
+	holder[kLayout] = { text, width, epoch, rows, lines };
+	return rows;
+}
+
 /** The row holding `offset` (a soft-break boundary belongs to the next row). */
 export function rowOf(rows: readonly EditorRow[], offset: number): number {
-	for (let r = 0; r < rows.length; r++) {
-		const row = rows[r]!;
-		if (offset >= row.start && (offset < row.end || (offset === row.end && row.last))) return r;
+	// Rows start in ascending order: the only row that can hold `offset` is the last one starting at or before it.
+	let lo = 0;
+	let hi = rows.length;
+	while (lo < hi) {
+		const mid = (lo + hi) >>> 1;
+		if (rows[mid]!.start <= offset) lo = mid + 1;
+		else hi = mid;
 	}
+	const row = rows[lo - 1];
+	if (row && (offset < row.end || (offset === row.end && row.last))) return lo - 1;
 	return Math.max(0, rows.length - 1);
 }
 
@@ -233,9 +281,9 @@ export function lastWrapWidth(node: UiNode): number | undefined {
 }
 
 /** The rows of `node`'s text as it was last painted (one row per logical line before any paint). */
-export function lastLayout(node: UiNode): EditorRow[] {
+export function lastLayout(node: UiNode): readonly EditorRow[] {
 	const text = (node.props() as EditorProps).text ?? "";
-	return layoutText(text, lastWrapWidth(node) ?? Number.MAX_SAFE_INTEGER);
+	return layoutField(node, text, lastWrapWidth(node) ?? Number.MAX_SAFE_INTEGER);
 }
 
 // ─── Props ──────────────────────────────────────────────────────────────────
@@ -258,6 +306,12 @@ export interface EditorTermRange {
 	readonly href?: string;
 	/** Draw the range only whole: on a row holding all of it, the caret not drawn inside it (a cut token shows plain). */
 	readonly whole?: boolean;
+	/**
+	 * Text drawn in the range's style in place of its characters, on a row holding all of it with
+	 * the caret and selection outside it and room for the label; elsewhere its characters show.
+	 * The row is not rewrapped, so it suits a range alone on its line (a header).
+	 */
+	readonly label?: string;
 }
 
 /** Terminal-only look facts of an `editor`/`input` node (its `term` prop). */
@@ -334,6 +388,7 @@ interface Style {
 	readonly whole: boolean;
 	readonly from: number;
 	readonly to: number;
+	readonly label?: string;
 }
 
 function rangeStyles(theme: Theme, props: EditorProps, now: () => number, links: () => boolean): Style[] {
@@ -356,7 +411,15 @@ function rangeStyles(theme: Theme, props: EditorProps, now: () => number, links:
 				open = `${open}${linkOpen}`;
 				close = `${linkClose}${close}`;
 			}
-			out.push({ open, close, hidden, whole: range.whole === true, from: range.from, to: range.to });
+			out.push({
+				open,
+				close,
+				hidden,
+				whole: range.whole === true,
+				from: range.from,
+				to: range.to,
+				...(range.label !== undefined ? { label: range.label } : {}),
+			});
 		}
 		return out;
 	}
@@ -415,6 +478,59 @@ function paintRun(
 
 const PLAIN: CellLook = { style: undefined, inverse: false, underline: false };
 
+/** A labeled range drawn as its label on a row, and the cells the label adds over the range's own. */
+interface RowLabel {
+	readonly style: Style;
+	readonly label: string;
+	readonly width: number;
+	readonly grow: number;
+}
+
+/** The labeled `styles` drawn as their labels on `row` (see {@link EditorTermRange.label}); `caret` is -1 off the row. */
+function rowLabels(
+	text: string,
+	styles: readonly Style[],
+	row: EditorRow,
+	caret: number,
+	selection: { readonly from: number; readonly to: number } | null,
+): RowLabel[] {
+	const out: RowLabel[] = [];
+	let end = row.start;
+	for (const style of styles) {
+		const { label, from, to } = style;
+		if (label === undefined || from >= to || from < end || to > row.textEnd) continue;
+		if (caret >= from && caret < to) continue;
+		if (selection !== null && selection.from < to && selection.to > from) continue;
+		let own = 0;
+		for (const g of graphemes(text, from, to)) own += g.width;
+		const width = visibleWidth(label);
+		out.push({ style, label, width, grow: width - own });
+		end = to;
+	}
+	return out;
+}
+
+/** Paint `row` (see {@link paintRun}) with each of `labels` drawn in place of its range. */
+function paintRow(
+	text: string,
+	row: EditorRow,
+	labels: readonly RowLabel[],
+	look: (g: Grapheme) => CellLook | null,
+	base: readonly [string, string],
+): { out: string; width: number } {
+	let out = "";
+	let width = 0;
+	let at = row.start;
+	for (const { style, label, width: cells } of labels) {
+		const run = paintRun(text, at, style.from, look, base);
+		out += `${run.out}${style.open}${label}${style.close}${base[0]}`;
+		width += run.width + cells;
+		at = style.to;
+	}
+	const run = paintRun(text, at, row.textEnd, look, base);
+	return { out: out + run.out, width: width + run.width };
+}
+
 /**
  * Paint an editable field. With `wrap: false` (an `input`) the text stays on
  * one row as wide as it is; the caller scrolls it horizontally.
@@ -435,7 +551,7 @@ export function paintField(node: UiNode, cx: PaintContext, options?: { wrap?: bo
 	const wrapWidth = options?.wrap === false ? Number.MAX_SAFE_INTEGER : Math.max(1, room - overflow);
 	(node as WrapWidthHolder)[kWrapWidth] = wrapWidth;
 
-	const rows = layoutText(text, wrapWidth);
+	const rows = layoutField(node, text, wrapWidth);
 	const caretRow = rowOf(rows, caret);
 	const base = sgrPair(theme.fgResolved("text", MARK)) as [string, string];
 	const styles = rangeStyles(
@@ -497,7 +613,17 @@ export function paintField(node: UiNode, cx: PaintContext, options?: { wrap?: bo
 				underline: !sel && onCaret && caretMid === "underline",
 			};
 		};
-		let { out: body, width } = paintRun(text, row.start, row.textEnd, look, base);
+		let labels = rowLabels(text, styles, row, hasCaret ? caret : -1, selection);
+		let { out: body, width } = paintRow(text, row, labels, look, base);
+		// A label the row has no room for (the end-of-row caret included) shows the range's own characters.
+		if (
+			labels.length > 0 &&
+			options?.wrap !== false &&
+			(width > wrapWidth || (hasCaret && !caretOnText && width + 1 > room))
+		) {
+			labels = [];
+			({ out: body, width } = paintRun(text, row.start, row.textEnd, look, base));
+		}
 		let tail = "";
 		// The newline ending a selected line shows as one inverse blank.
 		if (row.last && selected(row.end) && row.end < text.length) {
@@ -515,10 +641,10 @@ export function paintField(node: UiNode, cx: PaintContext, options?: { wrap?: bo
 				// No cell left for the bar: the last grapheme carries the caret.
 				const lastAt = graphemes(text, row.start, row.textEnd).at(-1)?.at;
 				if (lastAt !== undefined) {
-					({ out: body, width } = paintRun(
+					({ out: body, width } = paintRow(
 						text,
-						row.start,
-						row.textEnd,
+						row,
+						labels,
 						g => {
 							const l = look(g);
 							return l && g.at === lastAt ? { ...l, inverse: true } : l;
@@ -548,7 +674,11 @@ export function paintField(node: UiNode, cx: PaintContext, options?: { wrap?: bo
 		}
 		const lead = promptWidth === 0 ? "" : r === 0 ? truncate(promptText, promptWidth, "") : " ".repeat(promptWidth);
 		out.push(`${lead}${base[0]}${body}${tail}${base[1]}`);
-		if (hasCaret && focused) cursor = { row: r - top, col: promptWidth + columnOf(text, row, caret) };
+		if (hasCaret && focused) {
+			let col = promptWidth + columnOf(text, row, caret);
+			for (const { style, grow } of labels) if (style.to <= caret) col += grow;
+			cursor = { row: r - top, col };
+		}
 	}
 	return { rows: out, ...(cursor ? { cursor } : {}) };
 }

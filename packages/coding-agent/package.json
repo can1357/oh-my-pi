@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/pi-coding-agent",
-	"version": "19.1.1",
+	"version": "19.2.1",
 	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
 	"keywords": [
 		"agent",
@@ -38,7 +38,6 @@
 		"dist/CHANGELOG-*.md",
 		"dist/*.node",
 		"dist/*.json-*.zst",
-		"dist/perturbation-pool.json-*.txt",
 		"scripts",
 		"examples",
 		"README.md",
@@ -509,10 +508,6 @@
 			"types": "./src/web/*.ts",
 			"import": "./src/web/*.ts"
 		},
-		"./web/scrapers": {
-			"types": "./src/web/scrapers/index.ts",
-			"import": "./src/web/scrapers/index.ts"
-		},
 		"./web/scrapers/*": {
 			"types": "./src/web/scrapers/*.ts",
 			"import": "./src/web/scrapers/*.ts"
@@ -561,7 +556,6 @@
 		"@oh-my-pi/pi-wire": "catalog:",
 		"@oh-my-pi/snapcompact": "catalog:",
 		"@opentelemetry/api": "catalog:",
-		"@opentelemetry/api-logs": "catalog:",
 		"@opentelemetry/context-async-hooks": "catalog:",
 		"@opentelemetry/exporter-logs-otlp-proto": "catalog:",
 		"@opentelemetry/exporter-metrics-otlp-proto": "catalog:",
@@ -569,9 +563,8 @@
 		"@opentelemetry/resources": "catalog:",
 		"@opentelemetry/sdk-logs": "catalog:",
 		"@opentelemetry/sdk-metrics": "catalog:",
-		"@opentelemetry/sdk-trace-base": "catalog:",
-		"@opentelemetry/sdk-trace-node": "catalog:",
-		"axe-core": "4.13.0",
+		"@opentelemetry/sdk-trace": "catalog:",
+		"axe-core": "4.14.1",
 		"puppeteer-core": "catalog:"
 	},
 	"devDependencies": {

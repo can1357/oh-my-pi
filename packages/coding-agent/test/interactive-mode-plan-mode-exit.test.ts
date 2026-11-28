@@ -8,6 +8,10 @@
  * planning until it writes a plan, so a mid-turn user exit appeared to do nothing
  * — the agent kept acting in plan mode until it produced a plan. Exit must now
  * abort the streaming turn (mirroring `#exitVibeMode`).
+ *
+ * Contract: `/plan` cycles plan → plan_paused → none. Three consecutive
+ * invocations from a fresh session land on `enabled=false, paused=false` with a
+ * `mode_change` to `"none"`, so mode-gated commands such as `/goal` unblock.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent, type StreamFn } from "@oh-my-pi/pi-agent-core";
@@ -15,6 +19,7 @@ import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream"
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
+import { cfgPlanEnabled } from "@oh-my-pi/pi-coding-agent/plan-mode/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -119,5 +124,51 @@ describe("InteractiveMode plan mode exit", () => {
 		expect(session.isStreaming).toBe(false);
 		expect(session.getPlanModeState()).toBeUndefined();
 		expect(abortReason).toBe(USER_INTERRUPT_LABEL);
+	});
+
+	it("third /plan returns the session to mode 'none' instead of re-entering plan", async () => {
+		// First /plan → enter plan mode.
+		await mode.handlePlanModeCommand();
+		expect(mode.planModeEnabled).toBe(true);
+		expect(mode.planModePaused).toBe(false);
+		expect(session.sessionManager.buildSessionContext().mode).toBe("plan");
+
+		// Second /plan → pause (PLAN.md is empty so no confirm prompt).
+		await mode.handlePlanModeCommand();
+		expect(mode.planModeEnabled).toBe(false);
+		expect(mode.planModePaused).toBe(true);
+		expect(session.sessionManager.buildSessionContext().mode).toBe("plan_paused");
+
+		// Third /plan → fully disable instead of cycling back into plan mode.
+		await mode.handlePlanModeCommand();
+		expect(mode.planModeEnabled).toBe(false);
+		expect(mode.planModePaused).toBe(false);
+		expect(session.sessionManager.buildSessionContext().mode).toBe("none");
+	});
+
+	it("after exiting through paused, /plan starts a fresh plan session (not a re-entry)", async () => {
+		await mode.handlePlanModeCommand(); // enter
+		await mode.handlePlanModeCommand(); // pause
+		await mode.handlePlanModeCommand(); // off — clears the reentry marker
+
+		await mode.handlePlanModeCommand();
+		expect(mode.planModeEnabled).toBe(true);
+		// `reentry` mirrors `#planModeHasEntered`. The fresh /plan after a full
+		// exit should look like a first entry, not a resume, so plan-mode prompts
+		// don't read "you're back in plan mode" on what is logically a new run.
+		expect(session.getPlanModeState()?.reentry).toBe(false);
+	});
+
+	it("allows /plan to pause an active plan mode after plan.enabled is disabled", async () => {
+		await mode.handlePlanModeCommand();
+		expect(mode.planModeEnabled).toBe(true);
+
+		cfgPlanEnabled.set(session.settings, false);
+		vi.spyOn(mode, "showHookConfirm").mockResolvedValue(true);
+
+		await mode.handlePlanModeCommand();
+
+		expect(mode.planModeEnabled).toBe(false);
+		expect(mode.planModePaused).toBe(true);
 	});
 });

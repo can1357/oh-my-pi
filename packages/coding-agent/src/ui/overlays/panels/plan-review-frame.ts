@@ -5,14 +5,16 @@
  * model slider and the options, then the key hints, the note editor or the
  * note chooser. Also where clicks land (option, Contents and body rows).
  */
+import { markdownLook } from "@oh-my-pi/pi-tui/text/markdown/look";
 import { renderMarkdown } from "@oh-my-pi/pi-tui/text/markdown/render";
-import { padTo, replaceTabs, truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
+import { padTo, replaceTabs, truncate, truncateMiddle, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { sanitizeDisplaySingleLine } from "../../../extensibility/inventory/display-text";
 import { sanitizeStatusText } from "../../../modes/view-model/chrome/shared";
 import { keyGlyph } from "../../styles/panels/common";
 import type { PlanAnnotation, PlanReviewModel } from "./plan-review-model";
-import { stripInlineMarkdown } from "./plan-sections";
+import { stripInlineMarkdown } from "../../../plan-mode/plan-toc";
 import type { Keybinding } from "../../../config/keybindings/app-keybindings";
 import { actionKeyId } from "../../keys/hints";
 
@@ -80,7 +82,8 @@ export function sectionRows(raw: string, width: number, theme: Theme): string[] 
 	const holder = theme as Theme & ThemeWithRows;
 	holder[kRendered] ??= new Map();
 	const cache = holder[kRendered];
-	const key = `${width}\u0000${raw}`;
+	const look = markdownLook();
+	const key = `${width}\u0000${look.colorful}\u0000${look.mermaid}\u0000${raw}`;
 	let rows = cache.get(key);
 	if (!rows) {
 		rows = renderMarkdown(raw, width, { theme, paddingX: 1 });
@@ -414,7 +417,10 @@ function footerRows(
 		const editorMax = Math.max(1, Math.min(MAX_EDITOR_ROWS, rows - 12));
 		return [caption, ...editorRows(model, inner, editorMax, theme), theme.fg("dim", hints.join(" · "))];
 	}
-	return [theme.fg("dim", helpText(model))];
+	const hints = theme.fg("dim", helpText(model));
+	if (!model.saveNotice) return [hints];
+	const notice = truncateMiddle(sanitizeDisplaySingleLine(model.saveNotice), inner, theme.symbols.ellipsis);
+	return [theme.fg("success", notice), hints];
 }
 
 function tocEntry(model: PlanReviewModel, pos: number, cursor: number, width: number, theme: Theme): string {

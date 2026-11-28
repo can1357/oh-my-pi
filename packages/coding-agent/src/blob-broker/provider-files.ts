@@ -11,12 +11,10 @@ import {
 	type ProviderFileHandle,
 	toProviderFileReference,
 } from "./provider-file-types";
+import type { ProviderFileCredentialResolver } from "./provider-file-credential";
 import { createAnthropicFileClient } from "./provider-files-anthropic";
 import { createGeminiProviderFileClient } from "./provider-files-gemini";
 import { createOpenAIFileClient } from "./provider-files-openai";
-
-/** Resolve the current account credential for a model without retaining it. */
-export type ProviderFileCredentialResolver = (model: Model) => Promise<string | undefined>;
 
 /** Select a provider-native file client for a model and resolved credential. */
 export type ProviderFileClientFactory = (model: Model, credential: string) => ProviderFileClient | null;

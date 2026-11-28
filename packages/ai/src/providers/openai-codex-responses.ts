@@ -48,7 +48,7 @@ import type {
 	ToolResultMessage,
 	Usage,
 } from "../types";
-import { getPremiumServiceTierRequests, parseServiceTier } from "../types";
+import { getPremiumServiceTierRequests, parseServiceTier, serviceTierOffersByAccount } from "../types";
 import {
 	clampOpenAIResponsesImageDetailForReplay,
 	createOpenAIResponsesHistoryPayload,
@@ -158,6 +158,7 @@ import {
 	pickUnrecordedResponsesToolCalls,
 	populateResponsesUsageFromResponse,
 	parseAssistantMessagePhase,
+	recordResponsesInputTransformations,
 	promoteResponsesToolUseStopReason,
 	settleReasoningSummary,
 	type SequentialCutoffSummaryState,
@@ -1210,6 +1211,20 @@ function applyCodexServiceTierPricing(
 	return resolvedTier;
 }
 
+/**
+ * Drop a tier the request's own account does not offer. The body was built
+ * against {@link Model.serviceTiers}, the union across accounts, and the
+ * backend refuses a plan-gated tier (Ultrafast) from an account without it.
+ */
+function dropUnofferedServiceTier(
+	body: Pick<RequestBody, "service_tier">,
+	model: Model<"openai-codex-responses">,
+	accountId: string | undefined,
+): void {
+	if (!body.service_tier || !accountId) return;
+	if (serviceTierOffersByAccount(model, body.service_tier)?.[accountId] === false) delete body.service_tier;
+}
+
 function resetOutputState(output: AssistantMessage): void {
 	output.content.length = 0;
 	output.usage = {
@@ -1273,6 +1288,7 @@ function createCodexRequestContext(
 
 	const accountId = getCodexAccountId(apiKey);
 	applyCodexAccessPrograms(transformedBody, model, accountId, options?.codexAccessPrograms);
+	dropUnofferedServiceTier(transformedBody, model, accountId);
 	const baseUrl = model.baseUrl || CODEX_BASE_URL;
 	const url = resolveCodexResponsesUrl(baseUrl);
 
@@ -2602,6 +2618,9 @@ class CodexStreamProcessor {
 		const endTurn = response && "end_turn" in response ? response.end_turn : undefined;
 
 		populateResponsesUsageFromResponse(output, usage);
+		if (response && "input_transformations" in response) {
+			recordResponsesInputTransformations(output, response.input_transformations);
+		}
 		recordCodexTurnUsageDiagnostics(runtime.websocketState, usage, output.usage);
 		if (responseId) {
 			output.responseId = responseId;
@@ -3339,6 +3358,7 @@ export async function prewarmOpenAICodexResponses(
 		model: model.requestModelId ?? model.id,
 	};
 	applyOpenAIServiceTier(routedRequest, options?.serviceTier, model);
+	dropUnofferedServiceTier(routedRequest, model, accountId);
 	const headers = logger.time(
 		"prewarmCodex:createHeaders",
 		createCodexHeaders,

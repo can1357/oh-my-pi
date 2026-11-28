@@ -20,6 +20,7 @@ import type { AgentProgress, SingleResult, StructuredSubagentSchemaMode } from "
 import type { NestedRepoPatch } from "../task/task-details";
 import type { ToolSession } from "../tools";
 import { ToolError } from "../tools/tool-errors";
+import { assertEvalSpawnBudget } from "./budget-bridge";
 import type { JsStatusEvent } from "./js/shared/types";
 
 /** Synthetic bridge name reserved for the `agent()` helper across both runtimes. */
@@ -176,12 +177,7 @@ async function buildEvalAgentResult(execution: StructuredSubagentResult): Promis
 /** Register a background subagent and return its handle immediately. */
 export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOptions): Promise<EvalAgentHandleResult> {
 	const parsed = parseAgentArgs(args, options.session.settings);
-	const turnBudget = options.session.getTurnBudget?.();
-	if (turnBudget?.hard && turnBudget.total !== null && turnBudget.spent >= turnBudget.total) {
-		throw new ToolError(
-			`agent() blocked: turn token budget exhausted (${turnBudget.spent}/${turnBudget.total} output tokens). Raise or drop the +Nk! ceiling to continue.`,
-		);
-	}
+	assertEvalSpawnBudget(options.session);
 	if (parsed.tools?.length && options.session.getPlanModeState?.()?.enabled === true) {
 		throw new ToolError("Eval-defined tools are unavailable in plan mode.");
 	}

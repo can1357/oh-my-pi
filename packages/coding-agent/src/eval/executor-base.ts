@@ -12,7 +12,6 @@ import {
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP, isEvalTimeoutControlEvent } from "./bridge-timeout";
 import type { JsStatusEvent } from "./js/shared/types";
 import { registerPyToolBridge } from "./py/tool-bridge";
-import { getActiveEvalShadowCell } from "./speculation/runtime-context";
 import type { EvalDisplayOutput } from "./types";
 
 /**
@@ -108,9 +107,9 @@ export interface KernelExecutionResult {
 	stdinRequested: boolean;
 }
 
-/** Mirrors the `eval-state-context` reminder wording so agents recognise it. */
+/** Opens the first cell run on a replacement runtime: what earlier cells defined is gone. */
 export function formatKernelRestartNotice(runtimeLabel: string): string {
-	return `Kernel restarted: the previous ${runtimeLabel} is dead; state is unavailable. Re-run needed setup: variables, imports and definitions from earlier cells are gone.`;
+	return `[${runtimeLabel} restarted; earlier state gone]`;
 }
 
 /** Minimal kernel surface the base executor drives, satisfied by every backend kernel. */
@@ -547,7 +546,6 @@ export async function executeWithKernelBase<
 					shieldedSignal: abortShield.signal,
 					emitStatus,
 					onReply: options.onReply,
-					shadowCell: getActiveEvalShadowCell(),
 					abortRequested: () => {
 						return abortShield.abortRequested;
 					},
@@ -578,7 +576,7 @@ export async function executeWithKernelBase<
 			const annotation = timedOut
 				? formatKernelTimeoutAnnotation(executionTimeoutMs ?? options?.idleTimeoutMs, result.kernelKilled ?? false)
 				: result.kernelKilled && !abortShield.abortRequested
-					? "Kernel died during execution; completion is uncertain. The cell was not replayed; check for partial side effects before retrying."
+					? "kernel died mid-cell; completion uncertain, not replayed"
 					: undefined;
 			const dumped = await sink.dump(annotation);
 			return {
@@ -599,7 +597,7 @@ export async function executeWithKernelBase<
 		}
 
 		if (result.stdinRequested) {
-			const dumped = await sink.dump("Kernel requested stdin; interactive input is not supported.");
+			const dumped = await sink.dump("stdin unsupported");
 			return {
 				exitCode: 1,
 				cancelled: false,

@@ -30,12 +30,6 @@ export function toPositiveNumber(value: unknown, fallback: number | null): numbe
 	return parsed !== undefined && parsed > 0 ? parsed : fallback;
 }
 
-/** Positive finite number, or `null` when the value is missing/non-positive. */
-export function toPositiveNumberOrNull(value: unknown): number | null {
-	const parsed = toNumber(value);
-	return parsed !== undefined && parsed > 0 ? parsed : null;
-}
-
 export function toBoolean(value: unknown): boolean | undefined {
 	return typeof value === "boolean" ? value : undefined;
 }
@@ -69,12 +63,11 @@ export function isAnthropicOAuthToken(key: string): boolean {
 const AUTHOR_PREFIX = /^[A-Za-z][A-Za-z0-9 .+&'-]{0,23}: /;
 
 /**
- * Model-extrinsic name decorations: alias markers ("(latest)"), provider
- * attribution ("(Antigravity)"), price tiers ("($$$$)"), and promo/lifecycle
+ * Model-extrinsic name decorations: alias markers ("(latest)"), price tiers ("($$$$)"), and promo/lifecycle
  * tags ("(20% off)", "(retires Jun 5)"). Variant tags that map to distinct
  * wire ids — "(Thinking)", "(free)", "(Fast)", dates, regions, sizes — stay.
  */
-const NOISE_TAGS = /\s*\((?:latest|Antigravity|\$+|>?\d+% off|retires [^)]*)\)/g;
+const NOISE_TAGS = /\s*\((?:latest|\$+|>?\d+% off|retires [^)]*)\)/g;
 
 /**
  * Normalize a model display name: drop the gateway author prefix and

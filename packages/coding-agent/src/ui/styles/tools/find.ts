@@ -16,6 +16,7 @@ import type { TspProgressProps, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import { splitUrlScheme } from "../../../internal-urls/url-scheme";
 import type { FindTerm } from "../../tools/find";
 import { fileLink, uriLink } from "./file-common";
+import { standaloneErrorRows } from "./frame";
 import { defineToolLook, toolProps } from "./look";
 import { moreItem, pathText, searchGlyph, searchHeadRows, type TreeItem, treeRows } from "./search";
 
@@ -74,10 +75,7 @@ function paintFind(node: UiNode, cx: PaintContext): Block {
 	const props = toolProps(node);
 	const term = (props.term ?? { look: "find" }) as FindTerm;
 	const theme = cx.theme;
-	if (term.error !== undefined)
-		return {
-			rows: wrap(`${searchGlyph(theme, "error")} ${theme.fg("error", `Error: ${term.error}`)}`, cx.width),
-		};
+	if (term.error !== undefined) return { rows: standaloneErrorRows(cx, term.error) };
 	const target = term.query ? `"${term.query}"` : undefined;
 	const meta = [...(term.facts ?? [])];
 	if (!term.result) {
@@ -99,6 +97,7 @@ function paintFind(node: UiNode, cx: PaintContext): Block {
 		target,
 		meta,
 	});
+	const heading = rows.length;
 	const failures = (term.failures ?? []).map(failure => truncate(theme.fg("warning", failure), cx.width, ""));
 	if (term.empty !== undefined) {
 		rows.push(...wrap(`${searchGlyph(theme, "warning")} ${theme.fg("muted", term.empty)}`, cx.width));
@@ -110,7 +109,7 @@ function paintFind(node: UiNode, cx: PaintContext): Block {
 					"",
 				),
 			);
-		return { rows: [...rows, ...failures] };
+		return { rows: [...rows, ...failures], heading };
 	}
 	const items = node
 		.children()
@@ -122,7 +121,7 @@ function paintFind(node: UiNode, cx: PaintContext): Block {
 		if (term.keywords) rows.push(truncate(theme.fg("dim", term.keywords), cx.width, ""));
 		rows.push(...failures);
 	}
-	return { rows };
+	return { rows, heading };
 }
 
 defineToolLook("find", { paint: paintFind, margin: true, inset: true, animated: true });

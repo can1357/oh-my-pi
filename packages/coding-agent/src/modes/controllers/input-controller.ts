@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { createRoot, effect, type KeyEvent, type UiNode, untrack } from "@oh-my-pi/pi-tui";
+import { createRoot, effect, type KeyEvent, type PasteEvent, type UiNode, untrack } from "@oh-my-pi/pi-tui";
 import type { InputEvent } from "@oh-my-pi/pi-tui/driver/index";
 import { emergencyTerminalRestore } from "@oh-my-pi/pi-tui/driver/session";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
@@ -31,9 +31,11 @@ import { isTinyLocalModelKey } from "../../tiny/models";
 import { tinyTitleClient } from "../../tiny/title-client";
 import { resolveReadPath } from "../../tools/path-utils";
 import { vocalizer } from "../../tts/vocalizer";
-import { chipLabel, collapsesPaste } from "../../ui/composer/attachments";
+import { collapsesPaste } from "../../ui/composer/attachments";
 import { enabledMagicKeywords, magicKeywordDecorator } from "../../ui/composer/magic-keywords";
-import { combineAtomizers } from "../../ui/composer/composer";
+import { attachQueueShorthand } from "../../ui/composer/queue-shorthand";
+import { combineAtomizers, FOCUS_ACTION } from "../../ui/composer/composer";
+import { mentionChipAtomizer } from "../../ui/composer/mention-chips";
 import { modelMentionAtomizer } from "../../ui/composer/model-mention-chips";
 import { skillAtomizer } from "../../ui/composer/skill-chips";
 import { getSkillSlashCommandName } from "../../extensibility/skills";
@@ -57,6 +59,7 @@ import { resizeImage } from "../../utils/image-resize";
 import { type ImageAttachmentSource, tagImageAttachmentSource } from "../../utils/image-source";
 import { shortenPath, TRUNCATE_LENGTHS } from "../../utils/render-utils";
 import { resendProgramStatus } from "../../utils/run-status";
+import { resendProgramResume } from "../../utils/program-resume";
 import { truncateToWidth } from "../../utils/text-width";
 import { commandUsage, hintUsage } from "../../utils/usage-counter";
 import { buildVideoContactSheetPng, probeVideo, VideoError } from "../../utils/video";
@@ -66,7 +69,7 @@ import { createModelBrowserSource } from "../model-browser-source";
 import {
 	cfgBareExitOnEmptySession,
 	cfgBareSlashCommands,
-	cfgDisplayHideToolActivity,
+	cfgDisplayToolActivity,
 	cfgDoubleEscapeAction,
 	cfgEmojiAutocomplete,
 	cfgImagesAutoResize,
@@ -74,6 +77,7 @@ import {
 	cfgPasteLargeMenuThreshold,
 	cfgSpellingAutocorrect,
 	cfgSpellingTypoDetection,
+	TOOL_ACTIVITY_MODES,
 } from "../settings";
 import { type ConversationPosition, continuesConversation, conversationPosition } from "../utils/conversation-position";
 import { materializeImageChipLinks } from "../utils/ui-helpers";
@@ -159,6 +163,7 @@ const FOCUSED_VIEW_COMMANDS: Record<string, (args: string) => boolean> = {
 		return !verb || (verb === "full" && !rest);
 	},
 	model: () => true,
+	retry: () => true,
 	switch: () => true,
 	usage: args => {
 		const { verb, rest } = parseSubcommand(args);
@@ -244,9 +249,6 @@ function safeAbort(label: string, fn: () => void): void {
 // deliberate human double-tap is always tens of milliseconds apart.
 const LEFT_DOUBLE_TAP_MIN_GAP_MS = 40;
 const LEFT_DOUBLE_TAP_MAX_GAP_MS = 500;
-
-/** Native composer action prefix for the viewing header's agent crumbs. */
-const FOCUS_ACTION = "focus:";
 
 /** Whether `node` is `root` or lies below it. */
 function containsNode(root: UiNode, node: UiNode): boolean {
@@ -343,7 +345,7 @@ export class InputController {
 		void this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
 	}
 
-	/** Paste `text` into the composer: a marker-sized paste goes through the large-paste flow. */
+	/** Paste `text` read from the clipboard into the composer: one big enough to collapse goes through the large-paste flow. */
 	#pasteIntoComposer(text: string): void {
 		const normalized = text.replace(/\r\n?/g, "\n");
 		if (collapsesPaste(normalized)) this.handleLargePaste(normalized, normalized.split("\n").length);
@@ -384,9 +386,9 @@ export class InputController {
 	}
 
 	/**
-	 * Wire the composer's key bindings, the app-wide shortcuts, input interception (link hints,
-	 * pastes into the composer, enhanced paste) and draft tracking. Re-running replaces the earlier
-	 * wiring.
+	 * Wire the composer's key bindings and paste handling, the app-wide shortcuts, input
+	 * interception (link hints, enhanced paste) and draft tracking. Re-running replaces the
+	 * earlier wiring.
 	 */
 	setupKeyHandlers(): void {
 		for (const remove of this.#keyHooks.splice(0)) remove();
@@ -394,8 +396,9 @@ export class InputController {
 		this.#draftText ??= composer.text();
 		this.#keyHooks.push(
 			composer.addKeyHandler(key => this.#onComposerKey(key)),
+			composer.addPasteHandler(paste => this.#onComposerPaste(paste)),
 			this.ctx.addGlobalKeyHandler(key => this.#onGlobalKey(key)),
-			this.ctx.interceptInput(event => this.#onComposerInput(event)),
+			this.ctx.interceptInput(event => this.#stagePendingPaste(event)),
 			// Newest interceptor first: a tag letter typed in link-hint mode reaches nothing else.
 			this.ctx.interceptInput(event => this.#handleLinkHintInput(event)),
 			// Input arriving while an image paste lands waits for it, ahead of every other hook.
@@ -424,6 +427,7 @@ export class InputController {
 				}),
 				isSuggestionsKey: key => this.ctx.keybindings.matches(key, "tui.editor.spellingSuggestions"),
 			}),
+			attachQueueShorthand(composer, () => currentTheme().symbols.symbol("nav.selected")),
 		);
 		// A `/skill:<name>` of a known skill shows as a chip linking to its SKILL.md; a `^provider/id`
 		// mention of a taggable model as a model chip.
@@ -436,8 +440,9 @@ export class InputController {
 				modelMentionAtomizer({
 					resolve: selector => this.ctx.session.resolveModelMention(selector),
 					selectorOf: agent => this.ctx.session.modelMentions.find(mention => mention.agent === agent)?.selector,
-					icon: () => currentTheme().symbols.symbol("icon.model"),
+					icon: () => currentTheme().symbols.symbol("mention.model"),
 				}),
+				mentionChipAtomizer(),
 			),
 		);
 		this.#keyHooks.push(() => composer.setAtomizer(undefined));
@@ -515,7 +520,7 @@ export class InputController {
 			void this.cycleRoleModel("forward");
 			return true;
 		}
-		if (km.matches(key, "app.thinking.cycle")) {
+		if (km.matches(key, "app.thinking.cycle") && !this.ctx.composer.completing()) {
 			this.cycleThinkingFromComposer();
 			return true;
 		}
@@ -565,8 +570,8 @@ export class InputController {
 		const actions: [Keybinding, () => void][] = [
 			["app.plan.toggle", () => void this.ctx.handlePlanModeCommand()],
 			["app.session.new", () => void this.ctx.handleNewCommand()],
-			["app.session.tree", () => this.ctx.showTreeSelector()],
-			["app.session.fork", () => this.ctx.showUserMessageSelector()],
+			["app.session.tree", () => void this.ctx.showTreeSelector()],
+			["app.session.fork", () => void this.ctx.showUserMessageSelector()],
 			["app.session.resume", () => this.ctx.showSessionSelector()],
 			["app.message.followUp", () => void this.handleFollowUp()],
 			["app.stt.toggle", () => void this.ctx.handleSTTToggle()],
@@ -658,7 +663,7 @@ export class InputController {
 			return true;
 		}
 		if (km.matches(key, "app.tools.toggleVisibility")) {
-			this.toggleToolActivityVisibility();
+			this.cycleToolActivity();
 			return true;
 		}
 		if (km.matches(key, "app.display.reset")) {
@@ -677,28 +682,33 @@ export class InputController {
 	}
 
 	/**
-	 * A paste into the composer: an empty bracketed paste is the terminal's cue that the clipboard
-	 * holds an image (#3601), explicit image or video paths attach (#3506), and a marker-sized
-	 * paste goes through the large-paste flow. Anything else is the composer's own paste. A submit
-	 * key sent in the same read as a menu-sized paste stages the paste before it submits.
+	 * A submit key sent in the same read as a menu-sized paste stages the paste before it
+	 * submits: nobody could have answered the menu in between.
 	 */
-	#onComposerInput(event: InputEvent): boolean {
-		if (event.type === "key") {
-			const pending = this.#pendingLargePaste;
-			if (
-				pending &&
-				event.key.afterPaste &&
-				event.key.raw !== "\n" &&
-				this.ctx.keybindings.matches(event.key, "tui.input.submit")
-			) {
-				this.#pendingLargePaste = undefined;
-				this.ctx.composer.insertTextAttachment(pending.text);
-			}
-			return false;
+	#stagePendingPaste(event: InputEvent): boolean {
+		const pending = this.#pendingLargePaste;
+		if (
+			pending &&
+			event.type === "key" &&
+			event.key.afterPaste &&
+			event.key.raw !== "\n" &&
+			this.ctx.keybindings.matches(event.key, "tui.input.submit")
+		) {
+			this.#pendingLargePaste = undefined;
+			this.ctx.composer.insertTextAttachment(pending.text);
 		}
-		if (event.type !== "paste") return false;
-		if (!this.#composerFocused() && !(this.ctx.approvalOwnsComposer && this.#composerTakesPaste())) return false;
-		const content = event.paste.text;
+		return false;
+	}
+
+	/**
+	 * A paste into the composer, however it got there (the terminal's bracketed paste, an
+	 * enhanced paste's text, a dialog or an extension handing one over): an empty one is the
+	 * terminal's cue that the clipboard holds an image (#3601), explicit image or video paths
+	 * attach (#3506), and a menu-sized one waits for the large-paste menu. Anything else is the
+	 * composer's own paste: typed, or collapsed into a text chip.
+	 */
+	#onComposerPaste(paste: PasteEvent): boolean {
+		const content = paste.text;
 		if (content.length === 0) {
 			void this.handleImagePaste();
 			return true;
@@ -713,9 +723,8 @@ export class InputController {
 			return true;
 		}
 		const text = content.replace(/\r\n?/g, "\n");
-		if (!collapsesPaste(text)) return false;
 		const lineCount = text.split("\n").length;
-		if (!this.#largePasteOpensMenu(lineCount)) return this.handleLargePaste(text, lineCount);
+		if (!collapsesPaste(text) || !this.#largePasteOpensMenu(lineCount)) return false;
 		// The menu opens once the rest of this read is in: a submit key sent with the paste takes it.
 		const pending = { text, lineCount };
 		this.#pendingLargePaste = pending;
@@ -793,6 +802,10 @@ export class InputController {
 			return;
 		}
 		if (this.ctx.dismissCommandReport()) {
+			return;
+		}
+		// Command output queued mid-turn is hidden, not dropped: it still enters the transcript at the settle.
+		if (this.ctx.dismissDeferredCommandOutput()) {
 			return;
 		}
 
@@ -895,9 +908,9 @@ export class InputController {
 				const now = Date.now();
 				if (now - this.ctx.lastEscapeTime < 500) {
 					if (doubleEscapeAction === "tree") {
-						this.ctx.showTreeSelector();
+						void this.ctx.showTreeSelector();
 					} else {
-						this.ctx.showUserMessageSelector();
+						void this.ctx.showUserMessageSelector();
 					}
 					this.ctx.lastEscapeTime = 0;
 				} else {
@@ -1165,7 +1178,11 @@ export class InputController {
 			// agent-core queue.
 			if (!text && !hasPendingImages && this.ctx.session.isStreaming) {
 				if (this.ctx.session.hasInterruptibleInput) {
-					const aborting = this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL, deliverQueuedMessages: true });
+					const aborting = this.ctx.session.abort({
+						reason: USER_INTERRUPT_LABEL,
+						deliverQueuedMessages: true,
+						detachTools: true,
+					});
 					await aborting;
 					this.ctx.updatePendingMessagesDisplay();
 				}
@@ -1690,7 +1707,11 @@ export class InputController {
 				: undefined;
 		if (!text && !images) {
 			if (target.isStreaming && target.hasInterruptibleInput) {
-				const aborting = target.abort({ reason: USER_INTERRUPT_LABEL, deliverQueuedMessages: true });
+				const aborting = target.abort({
+					reason: USER_INTERRUPT_LABEL,
+					deliverQueuedMessages: true,
+					detachTools: true,
+				});
 				await aborting;
 				this.ctx.updatePendingMessagesDisplay();
 			}
@@ -1703,7 +1724,8 @@ export class InputController {
 				// Viewer-scoped commands: /btw asks about the focused transcript, /copy picks
 				// from it, /export writes it (with its own subagents), /jobs lists the focused
 				// agent's jobs without a way to cancel them, /usage reports account-wide limits,
-				// and /model, /switch, /effort change the focused agent's model and thinking.
+				// /model, /switch, /effort change the focused agent's model and thinking, and
+				// /retry retries the focused agent's last failed turn.
 				this.#recordSlashCommandUsage(text);
 				const input = images ? { images, imageLinks } : undefined;
 				if ((await executeBuiltinSlashCommand(text, { ctx: this.ctx, input })) === true) {
@@ -1876,6 +1898,7 @@ export class InputController {
 			.then(
 				() => {
 					resendProgramStatus();
+					resendProgramResume();
 				},
 				(err: unknown) => {
 					const reason = err instanceof Error ? err.message : String(err);
@@ -2352,7 +2375,7 @@ export class InputController {
 		];
 		const restored = this.#restoreEntriesToEditor(allQueued, { currentText: options?.currentText });
 		if (options?.abort) {
-			void this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
+			void this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL, detachTools: allQueued.length > 0 });
 		}
 		return restored;
 	}
@@ -2485,7 +2508,8 @@ export class InputController {
 		const kind = source?.kind ?? "image";
 		// The buffer holds the compact chip token; the atom table expands it to the bracketed
 		// marker (the wire/transcript format) on submit.
-		this.ctx.composer.insertAtom(chipLabel(kind, imageNum), formatVisionMarker(kind, imageNum, dims), {
+		const composer = this.ctx.composer;
+		composer.insertAtom(composer.chipLabel(kind, imageNum), formatVisionMarker(kind, imageNum, dims), {
 			kind,
 			image,
 			link: imageLink,
@@ -2957,20 +2981,13 @@ export class InputController {
 	}
 
 	/**
-	 * A marker-sized paste into the composer: gate it behind the large-paste menu. Returns
-	 * `true` to intercept (the editor skips its default `[Paste]` marker) once the paste reaches the
-	 * configured `paste.largeMenuThreshold` line count; otherwise `false` for default collapse-to-marker
-	 * behavior. The async menu is fired and forgotten — the editor only needs the synchronous verdict.
+	 * A paste big enough to collapse, read from the clipboard into the composer: at the configured
+	 * `paste.largeMenuThreshold` line count the large-paste menu decides what it becomes (fired and
+	 * forgotten); below it, or with the menu off, it is staged as a text chip.
 	 */
-	handleLargePaste(text: string, lineCount: number): boolean {
-		if (!this.#largePasteOpensMenu(lineCount)) {
-			// Below the menu threshold: stage the paste as a text-attachment chip
-			// (a compact token in the draft).
-			this.ctx.composer.insertTextAttachment(text);
-			return true;
-		}
-		void this.presentLargePasteMenu(text, lineCount);
-		return true;
+	handleLargePaste(text: string, lineCount: number): void {
+		if (this.#largePasteOpensMenu(lineCount)) void this.presentLargePasteMenu(text, lineCount);
+		else this.ctx.composer.insertTextAttachment(text);
 	}
 
 	/** Whether a paste of `lineCount` lines reaches the large-paste menu (`paste.largeMenuThreshold`). */
@@ -2980,27 +2997,31 @@ export class InputController {
 	}
 
 	/**
-	 * Present the large-paste menu and apply the chosen action: wrap in `<attachment>` tags (collapsed
-	 * to a `[Paste]` marker that expands on submit), save the text to a file and reference its path so
-	 * the agent can `read` it on demand, or paste inline. Cancelling (Esc) falls back to the default
-	 * inline paste marker, so the pasted content is never lost.
+	 * Present the large-paste menu and apply the chosen action: wrap in `<attachment>` tags (a text
+	 * chip that expands to the wrapped block on submit), save the text to a file and reference its
+	 * path so the agent can `read` it on demand, paste inline (a text chip), or insert the raw text
+	 * into the editor as ordinary editable text (useful when the clipboard lives on a remote client
+	 * and the host-clipboard raw-paste shortcut cannot reach it). Cancelling (Esc) falls back to the
+	 * inline chip, so the pasted content is never lost.
 	 */
 	async presentLargePasteMenu(text: string, lineCount: number): Promise<void> {
 		const WRAPPED_BLOCK = "Attach as a wrapped block";
 		const LOCAL_FILE = "Attach as local file";
 		const INLINE = "Paste inline";
+		const EDITABLE_TEXT = "Insert as editable text";
 
 		let choice: string | undefined;
 		try {
 			choice = await this.ctx.showHookSelector(
 				`Pasted ${lineCount} lines`,
 				[
-					{ label: WRAPPED_BLOCK, description: "Wrap the text in <attachment> tags, collapsed to a marker" },
+					{ label: WRAPPED_BLOCK, description: "Wrap the text in <attachment> tags, collapsed to a chip" },
 					{
 						label: LOCAL_FILE,
 						description: "Save the text to a local://paste file",
 					},
-					{ label: INLINE, description: "Collapse the text to an inline paste marker" },
+					{ label: INLINE, description: "Collapse the text to an inline chip" },
+					{ label: EDITABLE_TEXT, description: "Insert the raw text into the editor, uncollapsed" },
 				],
 				{
 					helpText: `${actionKey("tui.select.cancel", this.ctx.keybindings)} to paste inline`,
@@ -3021,6 +3042,9 @@ export class InputController {
 			case INLINE:
 				this.ctx.composer.insertTextAttachment(text);
 				break;
+			case EDITABLE_TEXT:
+				this.ctx.composer.insertText(text);
+				break;
 			default:
 				// Esc / cancel: keep the original behavior — stage as a text-attachment chip.
 				this.ctx.composer.insertTextAttachment(text);
@@ -3031,7 +3055,7 @@ export class InputController {
 	/**
 	 * Save a large paste to the session's `local://` store and insert a clean `local://paste-N.md`
 	 * reference into the editor so the agent can `read` it on demand — instead of inlining the text or
-	 * leaking a raw temp path. Falls back to an inline paste marker when the write fails, so the
+	 * leaking a raw temp path. Falls back to an inline text chip when the write fails, so the
 	 * content is never lost.
 	 */
 	async #attachPasteAsFile(text: string, lineCount: number): Promise<void> {
@@ -3082,16 +3106,18 @@ export class InputController {
 
 	createAutocompleteProvider(commands: SlashCommand[], basePath: string): AutocompleteProvider {
 		void commandUsage.load();
+		const modelHost = {
+			source: createModelBrowserSource(this.ctx.settings, model => this.ctx.session.effectiveServiceTier(model)),
+			registry: this.ctx.session.modelRegistry,
+			scopedModels: () => this.ctx.session.scopedModels.map(s => s.model),
+		};
 		return createPromptActionAutocompleteProvider({
 			commands,
 			basePath,
 			commandUsage: name => commandUsage.get(name),
 			emojiAutocomplete: () => cfgEmojiAutocomplete.get(this.ctx.settings),
-			modelMentions: createModelMentionSource({
-				source: createModelBrowserSource(this.ctx.settings, model => this.ctx.session.effectiveServiceTier(model)),
-				registry: this.ctx.session.modelRegistry,
-				scopedModels: () => this.ctx.session.scopedModels.map(s => s.model),
-			}),
+			modelMentions: createModelMentionSource(modelHost),
+			mentionModels: modelHost,
 			// The interactive host uses the default registry; the receiving session can change with focus.
 			internalUrlCaller: () => {
 				const manager = this.ctx.viewSession.sessionManager;
@@ -3188,7 +3214,7 @@ export class InputController {
 	}
 
 	toggleToolOutputExpansion(): void {
-		if (this.ctx.hideToolActivity) {
+		if (this.ctx.toolActivity === "hidden") {
 			const visibilityKey = actionKey("app.tools.toggleVisibility", this.ctx.keybindings);
 			const visibilityHint = visibilityKey ? `${visibilityKey} or /settings` : "/settings";
 			this.ctx.showStatus(`Tool activity is hidden — show it with ${visibilityHint} before expanding`);
@@ -3198,14 +3224,18 @@ export class InputController {
 		this.ctx.showStatus(`Tool output expansion: ${this.ctx.toolOutputExpanded ? "enabled" : "disabled"}`);
 	}
 
-	toggleToolActivityVisibility(): void {
-		this.ctx.hideToolActivity = !this.ctx.hideToolActivity;
-		cfgDisplayHideToolActivity.set(this.ctx.settings, this.ctx.hideToolActivity);
-		if (!this.ctx.hideToolActivity) this.ctx.toolOutputExpanded = false;
-		// Live blocks follow the flag; tool rows already retired to terminal history change only
+	/** `app.tools.toggleVisibility`: tool activity detailed → concise → hidden → detailed. */
+	cycleToolActivity(): void {
+		const next =
+			TOOL_ACTIVITY_MODES[(TOOL_ACTIVITY_MODES.indexOf(this.ctx.toolActivity) + 1) % TOOL_ACTIVITY_MODES.length]!;
+		this.ctx.toolActivity = next;
+		cfgDisplayToolActivity.set(this.ctx.settings, next);
+		// A new mode starts folded: Ctrl+O left on would draw every concise row as its full card.
+		this.ctx.toolOutputExpanded = false;
+		// Live blocks follow the mode; tool rows already retired to terminal history change only
 		// when the scrollback is rebuilt.
 		this.ctx.shell.host?.replayHistory();
-		this.ctx.showStatus(`Tool activity: ${this.ctx.hideToolActivity ? "hidden" : "visible"}`);
+		this.ctx.showStatus(`Tool activity: ${next}`);
 	}
 
 	setToolsExpanded(expanded: boolean): void {
@@ -3270,7 +3300,7 @@ export class InputController {
 			this.#extensionShortcuts.set(id, () => {
 				// Bound once at startup; a live `disabledExtensions` edit may have suspended the owner since.
 				if (!runner.isExtensionActive(shortcut.extensionPath)) return;
-				const ctx = runner.createCommandContext();
+				const ctx = runner.createCommandContext(shortcut.extensionPath);
 				try {
 					runner.runScoped(() => shortcut.handler(ctx));
 				} catch (err) {

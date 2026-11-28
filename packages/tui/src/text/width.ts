@@ -19,6 +19,7 @@ import {
 	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-natives";
 import { DEFAULT_TAB_WIDTH } from "@oh-my-pi/pi-utils";
+import { segmentGraphemes } from "@oh-my-pi/pi-utils/graphemes";
 import { escapeLength, SgrState, stripEscapes, tokens } from "./ansi";
 
 /** Cells one tab occupies. */
@@ -156,8 +157,6 @@ function measureWidth(text: string): number {
 	return width;
 }
 
-const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
-
 /** One grapheme, or one escape sequence, of styled text. */
 export interface Piece {
 	readonly text: string;
@@ -175,7 +174,11 @@ export function pieces(text: string): Piece[] {
 			out.push({ text: token.text, width: sized ? sizedWidth(token.text) : 0, escape: !sized });
 			continue;
 		}
-		for (const { segment } of segmenter.segment(token.text)) {
+		if (PRINTABLE_ASCII.test(token.text)) {
+			for (let i = 0; i < token.text.length; i++) out.push({ text: token.text[i]!, width: 1, escape: false });
+			continue;
+		}
+		for (const { segment } of segmentGraphemes(token.text)) {
 			out.push({ text: segment, width: visibleWidth(segment), escape: false });
 		}
 	}
@@ -317,8 +320,9 @@ export function replaceTabs(text: string): string {
 /**
  * Wrap styled text to `width` cells per row: by words, breaking between CJK
  * ideographs, hard-breaking words longer than a row. `\n` ends a row. Styles
- * open at a break are closed at the row end (except colors, which carry into
- * the padding) and re-opened at the next row's start.
+ * open at a break are closed at the row end and re-opened at the next row's
+ * start: underline, strikethrough and inverse video, which would otherwise paint
+ * the row's padding. Colors stay open and carry into the padding.
  */
 export function wrap(text: string, width: number): string[] {
 	if (width <= 0) return [];

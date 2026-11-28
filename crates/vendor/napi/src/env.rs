@@ -184,13 +184,18 @@ impl Env {
 
   /// This API creates a new JavaScript string from a Rust type that can be converted to a `&str`
   pub fn create_string<S: AsRef<str>>(&self, s: S) -> Result<JsString<'_>> {
-    let s = s.as_ref();
-    unsafe { self.create_string_from_c_char(s.as_ptr().cast(), s.len() as isize) }
+    let mut raw_value = ptr::null_mut();
+    check_status!(unsafe {
+      crate::bindgen_runtime::create_js_string(self.0, s.as_ref(), &mut raw_value)
+    })?;
+    unsafe { JsString::from_napi_value(self.0, raw_value) }
   }
 
   /// This API creates a new JavaScript string from a Rust `String`
   pub fn create_string_from_std<'env>(&self, s: String) -> Result<JsString<'env>> {
-    unsafe { self.create_string_from_c_char(s.as_ptr().cast(), s.len() as isize) }
+    let mut raw_value = ptr::null_mut();
+    check_status!(unsafe { crate::bindgen_runtime::create_js_string(self.0, &s, &mut raw_value) })?;
+    unsafe { JsString::from_napi_value(self.0, raw_value) }
   }
 
   /// This API is used for C ffi scenario.
@@ -460,17 +465,19 @@ impl Env {
   {
     let length = data_to_copy.as_ref().len();
     let data_ptr = data_to_copy.as_ref().as_ptr();
-    let mut copy_data = ptr::null_mut();
     let mut raw_value = ptr::null_mut();
     check_status!(unsafe {
       sys::napi_create_buffer_copy(
         self.0,
         length,
         data_ptr as *mut c_void,
-        &mut copy_data,
+        ptr::null_mut(),
         &mut raw_value,
       )
     })?;
+    // Not the `result_data` out-param: under emnapi it points at a wasm mirror
+    // that is still all zeros. See `buffer_data_ptr`.
+    let copy_data = unsafe { crate::bindgen_runtime::buffer_data_ptr(self.0, raw_value)? };
     Ok(JsBufferValue::new(
       JsBuffer(Value {
         env: self.0,
@@ -480,13 +487,16 @@ impl Env {
       mem::ManuallyDrop::new(if length == 0 {
         Vec::new()
       } else {
-        unsafe { Vec::from_raw_parts(copy_data as *mut u8, length, length) }
+        unsafe { Vec::from_raw_parts(copy_data, length, length) }
       }),
     ))
   }
 
   #[cfg(feature = "compat-mode")]
   #[deprecated(since = "3.0.0", note = "Use `ArrayBuffer::from_data` instead")]
+  /// On wasm, the bytes written through the returned value reach JS when you
+  /// call `into_raw()` or `into_unknown()`. Moving out the `value` field skips
+  /// that copy, and JS writes made before that call are overwritten.
   pub fn create_arraybuffer(&self, length: usize) -> Result<JsArrayBufferValue> {
     let mut raw_value = ptr::null_mut();
     let mut data_ptr = ptr::null_mut();
@@ -494,11 +504,14 @@ impl Env {
       sys::napi_create_arraybuffer(self.0, length, &mut data_ptr, &mut raw_value)
     })?;
 
-    Ok(JsArrayBufferValue::new(
-      unsafe { JsArrayBuffer::from_raw_unchecked(self.0, raw_value) },
-      data_ptr as *mut c_void,
-      length,
-    ))
+    Ok(JsArrayBufferValue {
+      value: unsafe { JsArrayBuffer::from_raw_unchecked(self.0, raw_value) },
+      data: data_ptr as *mut c_void,
+      len: length,
+      // Under emnapi `data_ptr` is a wasm-side copy of the new buffer.
+      #[cfg(target_family = "wasm")]
+      sync_to_js: true,
+    })
   }
 
   #[cfg(feature = "compat-mode")]
@@ -822,6 +835,12 @@ impl Env {
   }
 
   /// Create JavaScript class
+  ///
+  /// Closures passed through `with_getter_closure` or `with_setter_closure`
+  /// live as long as the environment, not the class. On native runtimes they
+  /// are dropped when the environment is torn down, after the last JavaScript
+  /// has run. On WebAssembly (emnapi) they are never dropped: emnapi runs env
+  /// cleanup hooks while JavaScript can still call the accessors.
   pub fn define_class<Args: JsValuesTupleIntoVec>(
     &self,
     name: &str,
@@ -829,11 +848,32 @@ impl Env {
     properties: &[Property],
   ) -> Result<Function<'_, Args, Unknown<'_>>> {
     let mut raw_result = ptr::null_mut();
-    let raw_properties = properties
-      .iter()
-      .map(|prop| prop.raw())
-      .collect::<Vec<sys::napi_property_descriptor>>();
-    check_status!(unsafe {
+    let mut raw_properties = Vec::with_capacity(properties.len());
+    // `raw()` boxes the data of closure-backed accessors. Node-API leaves that
+    // data to us. Freeing it when the constructor is collected is not safe: an
+    // accessor taken off the prototype can outlive the constructor. Free it
+    // when the environment is torn down instead. See below for WebAssembly.
+    #[cfg(feature = "napi5")]
+    let mut closures = Vec::new();
+    for property in properties {
+      let descriptor = match property.raw(self.0) {
+        Ok(descriptor) => descriptor,
+        Err(err) => {
+          // Free the data boxed for the properties before this one.
+          #[cfg(feature = "napi5")]
+          unsafe {
+            crate::bindgen_runtime::drop_property_closures(closures)
+          }
+          return Err(err);
+        }
+      };
+      #[cfg(feature = "napi5")]
+      if property.has_closure_data() && !descriptor.data.is_null() {
+        closures.push(descriptor.data.cast::<crate::PropertyClosuresData>());
+      }
+      raw_properties.push(descriptor);
+    }
+    let status = unsafe {
       sys::napi_define_class(
         self.0,
         name.as_ptr().cast(),
@@ -844,7 +884,25 @@ impl Env {
         raw_properties.as_ptr(),
         &mut raw_result,
       )
-    })?;
+    };
+    #[cfg(feature = "napi5")]
+    if !closures.is_empty() {
+      if status != sys::Status::napi_ok {
+        // No class holds the data, free it now.
+        unsafe { crate::bindgen_runtime::drop_property_closures(closures) };
+      } else if cfg!(not(target_family = "wasm")) {
+        // Native runtimes run env cleanup hooks only after the last
+        // JavaScript: Node disallows JavaScript before `RunCleanup`.
+        self.add_env_cleanup_hook(closures, |closures| unsafe {
+          crate::bindgen_runtime::drop_property_closures(closures)
+        })?;
+      }
+      // On WebAssembly the data is leaked. emnapi runs env cleanup hooks from
+      // `Context.destroy()`, at `beforeExit`, at the loader's `exit` listener
+      // or on an explicit dispose, and JavaScript can still call the accessors
+      // after that, for example from a later `exit` listener.
+    }
+    check_status!(status)?;
 
     unsafe { Function::from_napi_value(self.0, raw_result) }
   }
@@ -1067,11 +1125,16 @@ impl Env {
   }
 
   /// Run [Task](./trait.Task.html) in libuv thread pool, return [AsyncWorkPromise](./struct.AsyncWorkPromise.html)
+  ///
+  /// A task spawned mid-callback does not inherit the borrow-scope rooting generated glue
+  /// defers for `&T`/`&self` arguments — that scope is claimed by the callback's own returned
+  /// `AsyncTask`/`AsyncBlock`. Tasks spawned here that capture borrowed `#[napi]` class
+  /// references must keep the JavaScript wrappers alive by other means.
   pub fn spawn<'env, T: 'env + ScopedTask<'env>>(
     &self,
     task: T,
   ) -> Result<AsyncWorkPromise<T::JsValue>> {
-    async_work::run(self.0, task, None)
+    async_work::run(self.0, task, None, None)
   }
 
   pub fn run_in_scope<T, F>(&self, executor: F) -> Result<T>
@@ -1240,6 +1303,16 @@ impl Env {
     feature = "napi4"
   ))]
   /// Spawn a future, return a JavaScript Promise which takes the result of the future
+  ///
+  /// On native targets the promise is rejected with `Error("task was cancelled before
+  /// completion")` (`code` `GenericFailure`) when the task is dropped before it completed, for
+  /// example by a runtime shutdown. Return the promise to JavaScript: a promise dropped in Rust
+  /// has no handler, so that rejection (like an `Err` of the future) is an unhandled rejection.
+  ///
+  /// A future spawned mid-callback does not inherit the borrow-scope rooting generated glue
+  /// defers for `&T`/`&self` arguments — that scope is claimable only by the callback's own
+  /// returned `AsyncTask`/`AsyncBlock` while its return value is converted. A spawned future
+  /// that captures such references must keep the JavaScript wrappers alive by other means.
   pub fn spawn_future<
     T: 'static + Send + ToNapiValue,
     F: 'static + Send + Future<Output = Result<T>>,
@@ -1262,6 +1335,8 @@ impl Env {
   ))]
   /// Spawn a future with a callback
   /// So you can access the `Env` and resolved value after the future completed
+  ///
+  /// A task dropped before it completed rejects the promise, as in [`Env::spawn_future`].
   pub fn spawn_future_with_callback<
     'env,
     T: 'static + Send,
@@ -1286,6 +1361,46 @@ impl Env {
   }
 
   /// Creates a deferred promise, which can be resolved or rejected from a background thread.
+  ///
+  /// # Warning
+  ///
+  /// This is a low-level API. Always settle the deferred: call [`JsDeferred::resolve`] or
+  /// [`JsDeferred::reject`] on every path, also on the error paths. Do not drop it without
+  /// settling it:
+  ///
+  /// * dropped on its own JavaScript thread, its promise stays pending for ever, so JavaScript
+  ///   that awaits it never continues;
+  /// * dropped on another thread, its promise is rejected. If nothing handles that rejection
+  ///   (for example the promise was never returned to JavaScript), it is an unhandled rejection:
+  ///   Node ends the process with exit code 1 on the main thread, and a worker emits `'error'`.
+  ///
+  /// The details are below. A `#[napi] async fn` or [`Env::spawn_future`] settles its promise
+  /// for you; prefer them when they fit.
+  ///
+  /// # Details
+  ///
+  /// In a worker, an Electron renderer and the other envs that can be torn down before the
+  /// process ends, the promise is made without a `napi_deferred`, so a promise that never
+  /// settles before its env is torn down leaks nothing. See [`JsDeferred`] for what is
+  /// observable there. `#[napi] async fn` and `Env::spawn_future` promises are made the same
+  /// way.
+  ///
+  /// Dropping the deferred (and every clone) without settling it, on native targets:
+  ///
+  /// * on its own JavaScript thread (for example an early `?` before the promise is returned),
+  ///   cleans up at once, before control returns to JavaScript. The promise is not rejected: it
+  ///   stays pending for ever, held by nothing, so it and its awaiters can be collected. This
+  ///   holds even when JavaScript already has the promise (dropped in a later call, or after the
+  ///   promise went to a JavaScript callback): settle it explicitly then.
+  /// * on another thread, rejects the promise with
+  ///   `Error("JsDeferred was dropped without being settled")` (`code` `GenericFailure`), even
+  ///   when the promise never reached JavaScript: that is an unhandled rejection (Node exits with
+  ///   code 1 on the main thread; a worker emits `'error'`). Settle it explicitly instead.
+  ///
+  /// In deferred mode (the main thread of Node and Bun) the cleanup resolves the promise's
+  /// `napi_deferred` with an inert thenable inside the `Drop`, so a promise hook can run
+  /// JavaScript there. On wasm, dropping still does nothing, as before. The settle-time callback
+  /// is dropped without running, as before. See [`JsDeferred`].
   #[cfg(feature = "napi4")]
   pub fn create_deferred<Data: ToNapiValue, Resolver: FnOnce(Env) -> Result<Data>>(
     &self,
@@ -1707,6 +1822,7 @@ pub(crate) unsafe extern "C" fn trampoline<
   raw_env: sys::napi_env,
   cb_info: sys::napi_callback_info,
 ) -> sys::napi_value {
+  let _napi_native_borrow_barrier = crate::bindgen_runtime::NativeBorrowBarrier::new();
   // Fast path for 4 arguments or less.
   let mut argc = 4;
   let mut raw_args = Vec::with_capacity(4);
@@ -1778,6 +1894,7 @@ pub(crate) unsafe extern "C" fn trampoline_setter<
 ) -> sys::napi_value {
   use crate::bindgen_runtime::This;
 
+  let _napi_native_borrow_barrier = crate::bindgen_runtime::NativeBorrowBarrier::new();
   let (raw_args, raw_this, closure_data_ptr) = {
     let mut argc = 1;
     let mut raw_args = vec![ptr::null_mut(); 1];
@@ -1836,6 +1953,7 @@ pub(crate) unsafe extern "C" fn trampoline_getter<
   raw_env: sys::napi_env,
   cb_info: sys::napi_callback_info,
 ) -> sys::napi_value {
+  let _napi_native_borrow_barrier = crate::bindgen_runtime::NativeBorrowBarrier::new();
   let (raw_this, closure_data_ptr) = {
     let mut raw_this = ptr::null_mut();
     let mut data_ptr = ptr::null_mut();

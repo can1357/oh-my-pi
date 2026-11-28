@@ -25,7 +25,6 @@ import type { SessionManager } from "./session-manager";
 import {
 	cfgModelLoopGuardCheckAssistantContent,
 	cfgModelLoopGuardEnabled,
-	cfgProvidersAntigravityEndpoint,
 	cfgProvidersMaxInFlightRequests,
 	cfgProvidersOpenrouterVariant,
 	validateProviderMaxInFlightRequests,
@@ -43,7 +42,7 @@ export interface SessionProviderBoundaryHost {
 	/** Input-image descriptions for models that cannot see images; side requests carrying history as text use them. */
 	imageDescriptions: ImageDescriptions | undefined;
 	transformContext(messages: AgentMessage[], signal?: AbortSignal): AgentMessage[] | Promise<AgentMessage[]>;
-	convertToLlm(messages: AgentMessage[]): Message[] | Promise<Message[]>;
+	convertToLlm(messages: AgentMessage[], model: Model | undefined): Message[] | Promise<Message[]>;
 	onPayload: SimpleStreamOptions["onPayload"] | undefined;
 	onResponse: SimpleStreamOptions["onResponse"] | undefined;
 	onSseEvent: SimpleStreamOptions["onSseEvent"] | undefined;
@@ -211,10 +210,14 @@ export class SessionProviderBoundary {
 	 * image with a description {@link prepareImageDescriptions} made is replaced by it, before obfuscation so
 	 * secrets read off an image are redacted too.
 	 */
-	convertToLlmForSideRequest(messages: AgentMessage[], withImageDescriptions = false): Message[] {
-		let converted = convertToLlm(messages);
+	convertToLlmForSideRequest(
+		messages: AgentMessage[],
+		reader: Model,
+		options?: { withImageDescriptions: boolean },
+	): Message[] {
+		let converted = convertToLlm(messages, reader);
 		const descriptions = this.#host.imageDescriptions;
-		if (withImageDescriptions && descriptions) {
+		if (options?.withImageDescriptions && descriptions) {
 			converted = converted.map(message => descriptions.withDescriptions(message));
 		}
 		const obfuscator = this.#host.obfuscator();
@@ -236,9 +239,13 @@ export class SessionProviderBoundary {
 	}
 
 	/** Converts session messages using the configured pre-LLM pipeline. */
-	async convertMessagesToLlm(messages: AgentMessage[], signal?: AbortSignal): Promise<Message[]> {
+	async convertMessagesToLlm(
+		messages: AgentMessage[],
+		model: Model | undefined,
+		signal?: AbortSignal,
+	): Promise<Message[]> {
 		const transformedMessages = await this.#host.transformContext(messages, signal);
-		return await this.#host.convertToLlm(transformedMessages);
+		return await this.#host.convertToLlm(transformedMessages, model);
 	}
 
 	/** Applies session-level stream hooks and provider defaults to a side request. */
@@ -253,13 +260,9 @@ export class SessionProviderBoundary {
 			openrouterRoutingPreset !== "default" && options.openrouterVariant === undefined
 				? openrouterRoutingPreset
 				: undefined;
-		const antigravityEndpointMode =
-			provider === "google-antigravity" ? cfgProvidersAntigravityEndpoint.get(this.#host.settings) : undefined;
-
 		const preparedOptions: SimpleStreamOptions = {
 			...options,
 			...(openrouterVariant !== undefined && { openrouterVariant }),
-			...(antigravityEndpointMode !== undefined && { antigravityEndpointMode }),
 			maxInFlightRequests: validateProviderMaxInFlightRequests(
 				options.maxInFlightRequests ?? cfgProvidersMaxInFlightRequests.get(this.#host.settings),
 			),

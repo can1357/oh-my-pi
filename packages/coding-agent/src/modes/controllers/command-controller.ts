@@ -45,6 +45,7 @@ import type { InteractiveModeContext } from "../../modes/types";
 import { continuesConversation } from "../utils/conversation-position";
 import { computeSessionContextBreakdown } from "../../session/context-usage-runtime";
 import { buildSessionContextView } from "../../session/context-view";
+import { sessionModeRows } from "../../slash-commands/helpers/session-modes";
 import { buildToolsMarkdown } from "../../slash-commands/helpers/tools-markdown";
 import type { AsyncJobSnapshotItem } from "../../session/agent-session";
 import { buildJobTree, jobTreeGuide, jobTreeIndent } from "../view-model/overlays/job-tree";
@@ -74,8 +75,8 @@ import {
 } from "../../slash-commands/helpers/active-oauth-account";
 import { formatProviderName } from "../view-model/chrome/format";
 import { formatCompactQuota } from "../../advisor/advisor-config-types";
-import { resolveTernPane } from "../../tools/browser/tern/kind";
-import { TernError, type TernErrorKind, TernSocketClient } from "../../tools/browser/tern/wire";
+import { resolveTernPane, type TernPane } from "../../tools/browser/tern/kind";
+import { TernError, type TernErrorKind, type TernForked, TernSocketClient } from "../../tools/browser/tern/wire";
 import { outputMeta } from "../../tools/output-meta";
 import { resolveToCwd, stripOuterDoubleQuotes } from "../../tools/path-utils";
 import { replaceTabs, truncateToWidth, wrapTextWithAnsi } from "../../utils/text-width";
@@ -93,6 +94,7 @@ import { openPath } from "../../utils/open";
 import { resumeCommand } from "../../utils/resume-command";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
 import { collapseSharedUsageReports, formatLimitTitle, summarizeUsageResetCredits } from "../../session/usage-display";
+import { formatAiuCredits } from "../../session/aiu-billing";
 import { formatRemainingOnlyTotal, isUsedOnlyAbsoluteAmount } from "../../slash-commands/helpers/usage-amounts";
 import type { UnavailableUsageAccount } from "../view-model/overlays/usage-dashboard";
 
@@ -325,8 +327,10 @@ export class CommandController {
 		this.showCommandReport({ title, body: () => markdownView(markdown.trim()) });
 	}
 
+	/** Roll a failed move back, applying each cwd through `applyCwdChange` as a return to where the session was. */
 	async #restoreAfterMoveFailure(
 		previousState: Parameters<InteractiveModeContext["sessionManager"]["rollbackMove"]>[0],
+		applyCwdChange: (cwd: string, restore: boolean) => Promise<boolean>,
 		initialError?: unknown,
 	): Promise<void> {
 		if (initialError !== undefined) {
@@ -341,7 +345,7 @@ export class CommandController {
 			const actual = this.ctx.sessionManager.getCwd();
 			let realigned = false;
 			try {
-				realigned = await this.ctx.applyCwdChange(actual);
+				realigned = await applyCwdChange(actual, true);
 			} catch {}
 			if (!realigned) {
 				this.ctx.showError(
@@ -358,14 +362,14 @@ export class CommandController {
 
 		let sourceRestored = false;
 		try {
-			sourceRestored = await this.ctx.applyCwdChange(previousState.cwd);
+			sourceRestored = await applyCwdChange(previousState.cwd, true);
 		} catch {}
 		if (sourceRestored) return;
 
 		const actual = this.ctx.sessionManager.getCwd();
 		let realigned = false;
 		try {
-			realigned = await this.ctx.applyCwdChange(actual);
+			realigned = await applyCwdChange(actual, true);
 		} catch {}
 		if (!realigned) {
 			this.ctx.showError(`Failed to restore source workspace after rollback: workspace remains at ${actual}`);
@@ -620,6 +624,10 @@ export class CommandController {
 		if (!sameRuntimeIdentity(builds[builds.length - 1], running)) {
 			info += `${currentTheme().fg("dim", "Running:")} ${replaceTabs(sanitizeText(formatRuntimeIdentity(running)))}\n`;
 		}
+		info += `\n${bold("Modes")}\n`;
+		for (const [label, value] of sessionModeRows(this.ctx.session)) {
+			info += `${currentTheme().fg("dim", `${label}:`)} ${replaceTabs(sanitizeText(value))}\n`;
+		}
 		info += `\n${bold("Provider")}\n`;
 		const model = this.ctx.session.model;
 		if (!model) {
@@ -695,10 +703,16 @@ export class CommandController {
 			}
 		}
 
-		if (stats.cost > 0 || normalizedPremiumRequests > 0 || stats.credits !== undefined) {
+		if (stats.cost > 0 || normalizedPremiumRequests > 0 || stats.credits !== undefined || stats.aiu !== undefined) {
 			info += `\n${bold("Cost")}\n`;
 			if (stats.cost > 0) {
 				info += `${currentTheme().fg("dim", "Total:")} ${stats.cost.toFixed(4)}\n`;
+			}
+			if (stats.aiu !== undefined) {
+				info += `${currentTheme().fg("dim", "AI Credits (reported):")} ${formatAiuCredits(stats.aiu, 4)}\n`;
+				if (stats.aiu.unknownCalls > 0) {
+					info += `${currentTheme().fg("dim", "Calls without billing frame:")} ${stats.aiu.unknownCalls.toLocaleString()}\n`;
+				}
 			}
 			if (normalizedPremiumRequests > 0) {
 				info += `${currentTheme().fg("dim", "Premium Requests:")} ${normalizedPremiumRequests.toLocaleString()}\n`;
@@ -947,7 +961,9 @@ export class CommandController {
 		if (!usageReports) {
 			const provider = this.ctx.session as { fetchUsageReports?: () => Promise<UsageReport[] | null> };
 			if (!provider.fetchUsageReports) {
-				this.ctx.showWarning("Usage reporting is not configured for this session.");
+				const sessionAiu = this.ctx.session.getSessionStats().aiu;
+				if (sessionAiu) this.ctx.showUsageDashboard([], sessionAiu);
+				else this.ctx.showWarning("Usage reporting is not configured for this session.");
 				return;
 			}
 			try {
@@ -957,7 +973,7 @@ export class CommandController {
 			}
 		}
 
-		this.ctx.showUsageDashboard(usageReports ?? []);
+		this.ctx.showUsageDashboard(usageReports ?? [], this.ctx.session.getSessionStats().aiu);
 	}
 
 	async handleChangelogCommand(args = ""): Promise<void> {
@@ -1475,7 +1491,8 @@ export class CommandController {
 		}
 
 		// A Tern pane fork leaves this session untouched, so it may run mid-turn.
-		if (await this.#forkIntoTernPane()) return;
+		const tern = resolveTernPane(this.#forkTerminalDependencies.environment());
+		if (tern && (await this.#forkIntoTern(tern, "pane")) === undefined) return;
 
 		// An in-place fork moves this process onto the new file; a running turn
 		// would finish there and leave the original transcript cut mid-turn.
@@ -1509,6 +1526,13 @@ export class CommandController {
 		const dependencies = this.#forkTerminalDependencies;
 		const environment = dependencies.environment();
 		const multiplexer = dependencies.classifyMultiplexer(environment);
+		// Tern is no multiplexer, but opens the fork in a pane or tab of its own.
+		const tern = multiplexer === null ? resolveTernPane(environment) : null;
+		if (tern) {
+			const refusal = await this.#forkIntoTern(tern, placement);
+			if (refusal !== undefined) this.ctx.showError(`Tern could not open the fork: ${refusal}`);
+			return;
+		}
 		const placementInfo = getTerminalLaunchPlacement(multiplexer, placement);
 		if ("error" in placementInfo) {
 			this.ctx.showError(placementInfo.error);
@@ -1635,47 +1659,54 @@ export class CommandController {
 	}
 
 	/**
-	 * `/fork` inside a Tern pane: ask Tern to run `omp --fork` of this session in a new pane beside
-	 * this one, which keeps the original session. False means fork in place instead: outside Tern,
-	 * an unsaved session, a Tern without `fork`, or Tern refusing it. Once the request is out, an
-	 * unconfirmed one is reported rather than retried in place, since Tern may still open the pane.
+	 * `/fork` inside Tern pane `tern`: ask Tern to run `omp --fork` of this session in a new pane beside
+	 * this one, or for `window` in a new tab after this one's, which keeps the original session (a Tern
+	 * from before fork tabs opens a pane). Resolves undefined once the fork is Tern's, else why Tern did
+	 * not take it (an unsaved session, Tern unreachable or without `fork`, or Tern refusing it) for bare
+	 * `/fork` to fork in place and `/fork pane|window` to report. Once the request is out, an
+	 * unconfirmed one is reported here rather than retried, since Tern may still open the fork.
 	 */
-	async #forkIntoTernPane(): Promise<boolean> {
-		const tern = resolveTernPane();
-		if (!tern || !this.ctx.sessionManager.isSessionOnDisk()) return false;
+	async #forkIntoTern(tern: TernPane, placement: "pane" | "window"): Promise<string | undefined> {
+		if (!this.ctx.sessionManager.isSessionOnDisk()) return "the current session has not been persisted yet";
 		const client = new TernSocketClient({ socketPath: tern.socketPath });
+		let forked: TernForked;
 		try {
 			try {
 				await client.connect();
 			} catch (error) {
-				logger.debug("Tern unreachable for /fork; forking in place", {
-					error: error instanceof Error ? error.message : String(error),
-				});
-				return false;
+				const message = error instanceof Error ? error.message : String(error);
+				logger.debug("Tern unreachable for /fork", { error: message });
+				return message;
 			}
-			if (!client.supports("fork")) return false;
+			if (!client.supports("fork")) return "this Tern build cannot open forks; update Tern";
 			// The new pane's omp reads the session file as it starts.
 			await this.ctx.session.flushToDisk();
 			try {
-				await client.fork({ block: tern.pane }, { timeoutMs: TERN_FORK_TIMEOUT_MS });
+				forked = await client.fork(
+					placement === "window" ? { block: tern.pane, tab: true } : { block: tern.pane },
+					{ timeoutMs: TERN_FORK_TIMEOUT_MS },
+				);
 			} catch (error) {
 				if (error instanceof TernError && !TERN_FORK_UNCONFIRMED[error.kind]) {
 					const details = { kind: error.kind, error: error.message };
-					if (error.kind === "failed") logger.warn("Tern could not open the fork pane; forking in place", details);
-					else logger.debug("Tern refused the fork; forking in place", details);
-					return false;
+					if (error.kind === "failed") logger.warn("Tern could not open the fork", details);
+					else logger.debug("Tern refused the fork", details);
+					return error.message;
 				}
 				this.ctx.showError(
 					`Tern did not confirm the fork: ${error instanceof Error ? error.message : String(error)}`,
 				);
-				return true;
+				return undefined;
 			}
 		} finally {
 			client.close();
 		}
-		const note = this.ctx.session.isStreaming ? " · the running response continues here, not in the fork" : "";
-		this.ctx.present(() => successLineView(`Session forked into a new pane${note}`));
-		return true;
+		const notes: string[] = [];
+		if (placement === "window" && forked.tab === undefined) notes.push("this Tern opens forks only in panes");
+		if (this.ctx.session.isStreaming) notes.push("the running response continues here, not in the fork");
+		const where = forked.tab === undefined ? "pane" : "tab";
+		this.ctx.present(() => successLineView([`Session forked into a new ${where}`, ...notes].join(" · ")));
+		return undefined;
 	}
 
 	/**
@@ -1779,7 +1810,10 @@ export class CommandController {
 			this.ctx.showWorking("maintenance", { label: `Creating worktree on ${branchName}…`, startedAt: Date.now() });
 			let worktree: SessionWorktree;
 			try {
-				worktree = await createSessionWorktree(cwd, this.ctx.settings, branchName, options);
+				worktree = await createSessionWorktree(cwd, this.ctx.settings, branchName, {
+					...options,
+					session: this.ctx.sessionManager.getSessionId(),
+				});
 			} catch (err) {
 				this.ctx.showError(`Worktree creation failed: ${err instanceof Error ? err.message : String(err)}`);
 				return false;
@@ -1847,21 +1881,38 @@ export class CommandController {
 			this.ctx.showError(`Move failed: ${err instanceof Error ? err.message : String(err)}`);
 			return false;
 		}
-		let applied = false;
+		// A failed move applies the source cwd again after rolling the session file back. Only the last
+		// application's memory warning names where the session ends up, so it shows once they all settled.
+		let memoryWarning: string | undefined;
+		const applyCwdChange = (cwd: string, restore: boolean): Promise<boolean> => {
+			memoryWarning = undefined;
+			return this.ctx.applyCwdChange(cwd, {
+				restore,
+				onWarning: warning => {
+					memoryWarning = warning;
+				},
+			});
+		};
 		try {
-			applied = await this.ctx.applyCwdChange(resolvedPath);
-		} catch (error) {
-			await this.#restoreAfterMoveFailure(previousState, error);
-			return false;
-		}
-		if (!applied) {
-			await this.#restoreAfterMoveFailure(previousState);
-			return false;
-		}
+			let applied = false;
+			try {
+				applied = await applyCwdChange(resolvedPath, false);
+			} catch (error) {
+				await this.#restoreAfterMoveFailure(previousState, applyCwdChange, error);
+				return false;
+			}
+			if (!applied) {
+				await this.#restoreAfterMoveFailure(previousState, applyCwdChange);
+				return false;
+			}
 
-		this.ctx.updateEditorBorderColor();
-		await this.ctx.reloadTodos();
-		return true;
+			this.ctx.updateEditorBorderColor();
+			await this.ctx.reloadTodos();
+			return true;
+		} finally {
+			// A rollback that ended in shutdown disposed the session; nothing is left to warn about.
+			if (memoryWarning && !this.ctx.session.isDisposed) this.ctx.showWarning(memoryWarning);
+		}
 	}
 
 	async handleRenameCommand(title: string): Promise<void> {
@@ -1974,8 +2025,8 @@ export class CommandController {
 			detachInput?.();
 			if (detachInput) this.ctx.composer.setKeyPassthrough(false);
 			if (this.ctx.bashRun === run) this.ctx.bashRun = undefined;
-			// The recorded run is context now: the context meter counts it.
-			this.ctx.statusLine.refresh();
+			// The recorded run is context now (the context meter counts it), and it may have moved HEAD.
+			this.ctx.statusLine.refreshVcs();
 		}
 		return false;
 	}
@@ -2050,8 +2101,8 @@ export class CommandController {
 		}
 
 		if (this.ctx.pythonRun === run) this.ctx.pythonRun = undefined;
-		// The recorded cell is context now: the context meter counts it.
-		this.ctx.statusLine.refresh();
+		// The recorded cell is context now (the context meter counts it), and it may have moved HEAD.
+		this.ctx.statusLine.refreshVcs();
 	}
 
 	async handleCompactCommand(
@@ -2166,9 +2217,8 @@ export class CommandController {
 	/**
 	 * TUI handler for `/shake`. `elide` drops heavy structural content,
 	 * `images` strips image blocks, and `thinking` drops the thinking blocks the
-	 * request rebuilds from them, keeping the turns it replays natively (they
-	 * are reported as kept and the transcript is left alone). Rebuilds the chat
-	 * and reports counts.
+	 * request rebuilds and clears interrupted-thinking notes, keeping the turns
+	 * it replays natively. Rebuilds the chat and reports counts.
 	 */
 	async handleShakeCommand(mode: ShakeMode): Promise<void> {
 		let result: ShakeResult;
@@ -2183,7 +2233,8 @@ export class CommandController {
 			result.toolResultsDropped +
 			result.blocksDropped +
 			(result.imagesDropped ?? 0) +
-			(result.thinkingBlocksDropped ?? 0);
+			(result.thinkingBlocksDropped ?? 0) +
+			(result.interruptedThinkingNotesDropped ?? 0);
 		if (dropped === 0) {
 			// Replayed thinking was left in place: nothing to rebuild, but say so.
 			this.ctx.showStatus((result.thinkingBlocksKept ?? 0) > 0 ? formatShakeSummary(result) : "Nothing to shake.");
@@ -2638,8 +2689,8 @@ export function renderUsageReports(
 		for (const report of providerReports) {
 			for (const limit of report.limits) {
 				const windowId = limit.window?.id ?? limit.scope.windowId ?? "default";
-				// Distinct buckets can share a label and window (Antigravity's Gemini
-				// vs Gemini (Argon) weekly) and must stay separate rows instead of
+				// Distinct buckets can share a label and window (e.g. two weekly
+				// buckets both labelled "Gemini") and must stay separate rows instead of
 				// averaging into "50% free", so the id joins the key. Label and window
 				// stay in it too: some providers build ids positionally or per plan
 				// (kimi's `${index}`, copilot's allowance), where ids differ across

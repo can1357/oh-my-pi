@@ -36,7 +36,7 @@ import { ToolAbortError } from "./tool-errors";
 // Storage layer
 // ────────────────────────────────────────────────────────────────────────────
 
-export type CacheKind = "issue" | "pr" | "pr-diff" | "mr-diff";
+export type CacheKind = "issue" | "pr" | "pr-diff" | "mr" | "mr-diff" | "gl-issue";
 
 const DEFAULT_CACHE_AUTH_KEY = "default";
 
@@ -121,14 +121,14 @@ export function openDb(): Database | null {
 		// prepare() keeps the closed connection alive and the file locked on Windows.
 		const userVersion = (db.query("PRAGMA user_version").get() as { user_version?: number } | undefined)
 			?.user_version;
-		if (userVersion !== undefined && userVersion < 4) {
+		if (userVersion !== undefined && userVersion < 5) {
 			db.run("DROP TABLE IF EXISTS github_view_cache");
 		}
 		db.run(`
 			CREATE TABLE IF NOT EXISTS github_view_cache (
 				auth_key        TEXT    NOT NULL,
 				repo             TEXT    NOT NULL,
-				kind             TEXT    NOT NULL CHECK (kind IN ('issue','pr','pr-diff','mr-diff')),
+				kind             TEXT    NOT NULL CHECK (kind IN ('issue','pr','pr-diff','mr','mr-diff','gl-issue')),
 				number           INTEGER NOT NULL,
 				include_comments INTEGER NOT NULL,
 				fetched_at       INTEGER NOT NULL,
@@ -150,9 +150,22 @@ export function openDb(): Database | null {
 				source_url       TEXT,
 				PRIMARY KEY (auth_key, repo, kind, number, include_comments, fetched_at)
 			);
+			CREATE TABLE IF NOT EXISTS github_forge_index (
+				auth_key   TEXT    NOT NULL,
+				repo       TEXT    NOT NULL,
+				kind       TEXT    NOT NULL CHECK (kind IN ('pr','issue')),
+				number     INTEGER NOT NULL,
+				title      TEXT    NOT NULL,
+				state      TEXT    NOT NULL,
+				author     TEXT    NOT NULL,
+				updated_at TEXT    NOT NULL,
+				fetched_at INTEGER NOT NULL,
+				PRIMARY KEY (auth_key, repo, kind, number)
+			);
 			CREATE INDEX IF NOT EXISTS idx_github_view_cache_fetched ON github_view_cache(fetched_at);
 			CREATE INDEX IF NOT EXISTS idx_github_view_cache_generation_retained ON github_view_cache_generation(retained_at);
-			PRAGMA user_version = 4;
+			CREATE INDEX IF NOT EXISTS idx_github_forge_index_repo ON github_forge_index(auth_key, repo, fetched_at DESC);
+			PRAGMA user_version = 5;
 		`);
 		protectDbFiles(dbPath);
 		cachedDb = db;
@@ -173,6 +186,7 @@ function evictExpired(db: Database, hardTtlMs: number): void {
 		const cutoff = Date.now() - hardTtlMs;
 		db.query("DELETE FROM github_view_cache WHERE fetched_at < ?").run(cutoff);
 		db.query("DELETE FROM github_view_cache_generation WHERE retained_at < ?").run(cutoff);
+		db.query("DELETE FROM github_forge_index WHERE fetched_at < ?").run(cutoff);
 	} catch (err) {
 		logger.debug("github cache: eviction failed", { err: String(err) });
 	}
@@ -330,8 +344,10 @@ export function resolveGitlabCacheAuthKey(host: string): string | undefined {
  * instance, so an explicit `github.com/` prefix then stays and keeps its own
  * rows instead of answering with another host's issue.
  */
-function normalizeRepo(repo: string): string {
-	const ref = parseRepoRef(repo.toLowerCase());
+function normalizeRepo(repo: string, kind?: CacheKind): string {
+	const lower = repo.toLowerCase();
+	if (kind === "mr" || kind === "mr-diff" || kind === "gl-issue") return lower;
+	const ref = parseRepoRef(lower);
 	return ref.host && ref.host !== defaultGhHost() ? `${ref.host}/${ref.slug}` : ref.slug;
 }
 
@@ -349,7 +365,7 @@ export function getCached<T = unknown>(
 			.query(
 				"SELECT auth_key, repo, kind, number, include_comments, fetched_at, payload, rendered, source_url FROM github_view_cache WHERE auth_key = ? AND repo = ? AND kind = ? AND number = ? AND include_comments = ?",
 			)
-			.get(authKey, normalizeRepo(repo), kind, number, includeComments ? 1 : 0) as Row | undefined;
+			.get(authKey, normalizeRepo(repo, kind), kind, number, includeComments ? 1 : 0) as Row | undefined;
 		if (!row) return null;
 		let payload: T;
 		try {
@@ -416,7 +432,7 @@ export function retainCachedGeneration<T = unknown>(input: PutCachedInput<T>): n
 	const db = openDb();
 	if (!db) return null;
 	const authKey = input.authKey ?? DEFAULT_CACHE_AUTH_KEY;
-	const repo = normalizeRepo(input.repo);
+	const repo = normalizeRepo(input.repo, input.kind);
 	const includeComments = input.includeComments ? 1 : 0;
 	const payloadJson = JSON.stringify(input.payload);
 	let fetchedAt = input.fetchedAt ?? Date.now();
@@ -495,7 +511,7 @@ export function getCachedGeneration<T = unknown>(
 			.query(
 				"SELECT auth_key, repo, kind, number, include_comments, fetched_at, retained_at, payload, rendered, source_url FROM github_view_cache_generation WHERE auth_key = ? AND repo = ? AND kind = ? AND number = ? AND include_comments = ? AND fetched_at = ?",
 			)
-			.get(authKey, normalizeRepo(repo), kind, number, includeComments ? 1 : 0, fetchedAt) as
+			.get(authKey, normalizeRepo(repo, kind), kind, number, includeComments ? 1 : 0, fetchedAt) as
 			| (Row & { retained_at: number })
 			| undefined;
 		if (!row) return null;
@@ -537,7 +553,7 @@ function deleteCachedGeneration(
 	try {
 		db.query(
 			"DELETE FROM github_view_cache_generation WHERE auth_key = ? AND repo = ? AND kind = ? AND number = ? AND include_comments = ? AND fetched_at = ?",
-		).run(authKey, normalizeRepo(repo), kind, number, includeComments ? 1 : 0, fetchedAt);
+		).run(authKey, normalizeRepo(repo, kind), kind, number, includeComments ? 1 : 0, fetchedAt);
 	} catch (err) {
 		logger.debug("github cache: generation delete failed", { err: String(err) });
 	}
@@ -571,17 +587,166 @@ export function getRetainedGeneration<T = unknown>(
 	return row;
 }
 
+export interface ForgeIndexEntry {
+	readonly kind: "pr" | "issue";
+	readonly number: number;
+	readonly title: string;
+	readonly state: string;
+	readonly author: string;
+	readonly updatedAt: string;
+	readonly fetchedAt: number;
+}
+
+interface ForgeIndexRow {
+	kind: "pr" | "issue";
+	number: number;
+	title: string;
+	state: string;
+	author: string;
+	updated_at: string;
+	fetched_at: number;
+}
+
+const FORGE_INDEX_READ_LIMIT = 200;
+
+function extractForgeIndexSummary(
+	kind: CacheKind,
+	number: number,
+	payload: unknown,
+): Omit<ForgeIndexEntry, "fetchedAt"> | null {
+	if (kind !== "pr" && kind !== "issue") return null;
+	if (payload === null || typeof payload !== "object") return null;
+	const record = payload as Record<string, unknown>;
+	if (typeof record.title !== "string") return null;
+	const state = typeof record.state === "string" ? record.state : "";
+	let author = "";
+	if (typeof record.author === "string") {
+		author = record.author;
+	} else if (record.author !== null && typeof record.author === "object") {
+		const login = (record.author as Record<string, unknown>).login;
+		if (typeof login === "string") author = login;
+	}
+	const updatedAt =
+		typeof record.updatedAt === "string"
+			? record.updatedAt
+			: typeof record.updated_at === "string"
+				? record.updated_at
+				: "";
+	return { kind, number, title: record.title, state, author, updatedAt };
+}
+
+function upsertForgeIndexRows(
+	db: Database,
+	authKey: string,
+	normalizedRepo: string,
+	entries: readonly Omit<ForgeIndexEntry, "fetchedAt">[],
+	fetchedAt: number,
+): void {
+	const stmt = db.query(
+		"INSERT OR REPLACE INTO github_forge_index (auth_key, repo, kind, number, title, state, author, updated_at, fetched_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+	);
+	const writeAll = db.transaction((items: readonly Omit<ForgeIndexEntry, "fetchedAt">[]) => {
+		for (const entry of items) {
+			stmt.run(
+				authKey,
+				normalizedRepo,
+				entry.kind,
+				entry.number,
+				entry.title,
+				entry.state,
+				entry.author,
+				entry.updatedAt,
+				fetchedAt,
+			);
+		}
+	});
+	writeAll(entries);
+}
+
+/**
+ * Synchronously read cached PR/issue summaries for autocomplete (ordered newest-updated first).
+ * Returns `[]` when `authKey === null` or the SQLite cache is unavailable.
+ */
+export function readForgeIndexSync(repo: string, authKey?: string | null): ForgeIndexEntry[] {
+	if (authKey === null) return [];
+	const db = openDb();
+	if (!db) return [];
+	try {
+		const resolvedAuthKey = authKey ?? DEFAULT_CACHE_AUTH_KEY;
+		const rows = db
+			.query(
+				"SELECT kind, number, title, state, author, updated_at, fetched_at FROM github_forge_index WHERE auth_key = ? AND repo = ? ORDER BY updated_at DESC, number DESC LIMIT ?",
+			)
+			.all(resolvedAuthKey, normalizeRepo(repo), FORGE_INDEX_READ_LIMIT) as ForgeIndexRow[];
+		return rows.map(row => ({
+			kind: row.kind,
+			number: row.number,
+			title: row.title,
+			state: row.state,
+			author: row.author,
+			updatedAt: row.updated_at,
+			fetchedAt: row.fetched_at,
+		}));
+	} catch (err) {
+		logger.debug("github cache: forge index read failed", { err: String(err) });
+		return [];
+	}
+}
+
+/**
+ * Synchronously read the latest `fetched_at` timestamp for a repo's forge index,
+ * or `null` when empty, unavailable, or `authKey === null`.
+ */
+export function getForgeIndexFreshnessSync(repo: string, authKey?: string | null): number | null {
+	if (authKey === null) return null;
+	const db = openDb();
+	if (!db) return null;
+	try {
+		const resolvedAuthKey = authKey ?? DEFAULT_CACHE_AUTH_KEY;
+		const row = db
+			.query("SELECT MAX(fetched_at) AS latest FROM github_forge_index WHERE auth_key = ? AND repo = ?")
+			.get(resolvedAuthKey, normalizeRepo(repo)) as { latest: number | null } | undefined;
+		return typeof row?.latest === "number" ? row.latest : null;
+	} catch (err) {
+		logger.debug("github cache: forge index freshness read failed", { err: String(err) });
+		return null;
+	}
+}
+
+/**
+ * Transactionally upsert PR/issue summaries into `github_forge_index`.
+ * No-op when `authKey === null`, `entries` is empty, or the DB is unavailable.
+ */
+export function upsertForgeIndex(
+	repo: string,
+	entries: readonly Omit<ForgeIndexEntry, "fetchedAt">[],
+	authKey?: string | null,
+): void {
+	if (authKey === null || entries.length === 0) return;
+	const db = openDb();
+	if (!db) return;
+	try {
+		const resolvedAuthKey = authKey ?? DEFAULT_CACHE_AUTH_KEY;
+		upsertForgeIndexRows(db, resolvedAuthKey, normalizeRepo(repo), entries, Date.now());
+		protectDbFiles(getGithubCacheDbPath());
+	} catch (err) {
+		logger.debug("github cache: forge index write failed", { err: String(err) });
+	}
+}
+
 export function putCached<T = unknown>(input: PutCachedInput<T>): void {
 	const db = openDb();
 	if (!db) return;
 	try {
+		const authKey = input.authKey ?? DEFAULT_CACHE_AUTH_KEY;
+		const normalizedRepo = normalizeRepo(input.repo, input.kind);
 		const fetchedAt = input.fetchedAt ?? Date.now();
 		const payloadJson = JSON.stringify(input.payload);
 		db.query(
 			"INSERT OR REPLACE INTO github_view_cache (auth_key, repo, kind, number, include_comments, fetched_at, payload, rendered, source_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
 		).run(
-			input.authKey ?? DEFAULT_CACHE_AUTH_KEY,
-			normalizeRepo(input.repo),
+			authKey,
+			normalizedRepo,
 			input.kind,
 			input.number,
 			input.includeComments ? 1 : 0,
@@ -590,6 +755,10 @@ export function putCached<T = unknown>(input: PutCachedInput<T>): void {
 			input.rendered,
 			input.sourceUrl ?? null,
 		);
+		const summary = extractForgeIndexSummary(input.kind, input.number, input.payload);
+		if (summary) {
+			upsertForgeIndexRows(db, authKey, normalizedRepo, [summary], fetchedAt);
+		}
 		protectDbFiles(getGithubCacheDbPath());
 	} catch (err) {
 		logger.debug("github cache: write failed", { err: String(err) });
@@ -611,14 +780,14 @@ export function invalidate(
 		if (includeComments === undefined) {
 			db.query("DELETE FROM github_view_cache WHERE auth_key = ? AND repo = ? AND kind = ? AND number = ?").run(
 				authKey,
-				normalizeRepo(repo),
+				normalizeRepo(repo, kind),
 				kind,
 				number,
 			);
 		} else {
 			db.query(
 				"DELETE FROM github_view_cache WHERE auth_key = ? AND repo = ? AND kind = ? AND number = ? AND include_comments = ?",
-			).run(authKey, normalizeRepo(repo), kind, number, includeComments ? 1 : 0);
+			).run(authKey, normalizeRepo(repo, kind), kind, number, includeComments ? 1 : 0);
 		}
 	} catch (err) {
 		logger.debug("github cache: invalidate failed", { err: String(err) });
@@ -644,7 +813,13 @@ export function invalidateAllForNumber(number: number, repo?: string): void {
 		if (repo === undefined) {
 			db.query("DELETE FROM github_view_cache WHERE number = ?").run(number);
 		} else {
-			db.query("DELETE FROM github_view_cache WHERE number = ? AND repo = ?").run(number, normalizeRepo(repo));
+			const ghRepo = normalizeRepo(repo);
+			const glRepo = normalizeRepo(repo, "mr");
+			if (ghRepo === glRepo) {
+				db.query("DELETE FROM github_view_cache WHERE number = ? AND repo = ?").run(number, ghRepo);
+			} else {
+				db.query("DELETE FROM github_view_cache WHERE number = ? AND repo IN (?, ?)").run(number, ghRepo, glRepo);
+			}
 		}
 	} catch (err) {
 		logger.debug("github cache: invalidateAllForNumber failed", { err: String(err) });
@@ -659,6 +834,7 @@ export function clearAll(): void {
 	try {
 		db.query("DELETE FROM github_view_cache").run();
 		db.query("DELETE FROM github_view_cache_generation").run();
+		db.query("DELETE FROM github_forge_index").run();
 	} catch (err) {
 		logger.debug("github cache: clear failed", { err: String(err) });
 	}
@@ -677,8 +853,16 @@ export function invalidateAllForRepo(repo?: string): void {
 	try {
 		if (repo === undefined) {
 			db.query("DELETE FROM github_view_cache").run();
+			db.query("DELETE FROM github_forge_index").run();
 		} else {
-			db.query("DELETE FROM github_view_cache WHERE repo = ?").run(normalizeRepo(repo));
+			const ghRepo = normalizeRepo(repo);
+			const glRepo = normalizeRepo(repo, "mr");
+			if (ghRepo === glRepo) {
+				db.query("DELETE FROM github_view_cache WHERE repo = ?").run(ghRepo);
+			} else {
+				db.query("DELETE FROM github_view_cache WHERE repo IN (?, ?)").run(ghRepo, glRepo);
+			}
+			db.query("DELETE FROM github_forge_index WHERE repo = ?").run(ghRepo);
 		}
 	} catch (err) {
 		logger.debug("github cache: invalidateAllForRepo failed", { err: String(err) });
@@ -688,11 +872,21 @@ export function invalidateAllForRepo(repo?: string): void {
 /** Drop live PR rows after a push, leaving issues and retained snapshots alone. */
 export function invalidatePullRequestsForRepo(repo: string): void {
 	invalidationEpoch++;
-	const normalized = normalizeRepo(repo);
+	const ghRepo = normalizeRepo(repo);
+	const glRepo = normalizeRepo(repo, "mr");
 	const db = openDb();
 	if (!db) return;
 	try {
-		db.query("DELETE FROM github_view_cache WHERE repo = ? AND kind IN ('pr', 'pr-diff')").run(normalized);
+		if (ghRepo === glRepo) {
+			db.query("DELETE FROM github_view_cache WHERE repo = ? AND kind IN ('pr', 'pr-diff', 'mr', 'mr-diff')").run(
+				ghRepo,
+			);
+		} else {
+			db.query(
+				"DELETE FROM github_view_cache WHERE (repo = ? AND kind IN ('pr', 'pr-diff')) OR (repo = ? AND kind IN ('mr', 'mr-diff'))",
+			).run(ghRepo, glRepo);
+		}
+		db.query("DELETE FROM github_forge_index WHERE repo = ? AND kind = 'pr'").run(ghRepo);
 	} catch (err) {
 		logger.debug("github cache: invalidatePullRequestsForRepo failed", { err: String(err) });
 	}
@@ -826,7 +1020,7 @@ function scheduleBackgroundRefresh<T>(
 	includeComments: boolean,
 	fetchFresh: () => Promise<FreshResult<T>>,
 ): void {
-	const key = `${authKey}|${normalizeRepo(repo)}|${kind}|${number}|${includeComments ? 1 : 0}`;
+	const key = `${authKey}|${normalizeRepo(repo, kind)}|${kind}|${number}|${includeComments ? 1 : 0}`;
 	if (inflightRefreshes.has(key)) return;
 	inflightRefreshes.add(key);
 	queueMicrotask(() => {
@@ -853,9 +1047,11 @@ const OPEN_STATE_SOFT_TTL_MS = 15_000;
 
 /** Whether `payload` is an open issue/PR view, whose state can still change. */
 function isOpenView(kind: CacheKind, payload: unknown): boolean {
-	if (kind !== "issue" && kind !== "pr") return false;
-	const state = payload !== null && typeof payload === "object" ? (payload as { state?: unknown }).state : undefined;
-	return typeof state === "string" && state.toUpperCase() === "OPEN";
+	const state = payload !== null && typeof payload === "object" && "state" in payload ? payload.state : undefined;
+	if (typeof state !== "string") return false;
+	if (kind === "issue" || kind === "pr") return state.toUpperCase() === "OPEN";
+	if (kind === "mr" || kind === "gl-issue") return state.toLowerCase() === "opened";
+	return false;
 }
 
 export async function getOrFetchView<T>(options: CacheLookupOptions<T>): Promise<CacheLookupResult<T>> {

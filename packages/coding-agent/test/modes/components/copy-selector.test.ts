@@ -7,14 +7,23 @@
  */
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessage, ToolCall, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import {
+	getKeybindings,
+	KeybindingsManager,
+	setKeybindings,
+} from "@oh-my-pi/pi-coding-agent/config/keybindings/keybindings";
 import "@oh-my-pi/pi-coding-agent/internal-urls/router";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { CopyPickSource } from "@oh-my-pi/pi-coding-agent/modes/view-model/overlays/copy-selector";
 import type { SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { createRoot, isUiNode } from "@oh-my-pi/pi-tui";
+import { paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
 import type { TestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
+import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { CopySelector } from "../../../src/ui/overlays/pickers/copy-selector";
 import { mountOverlay } from "../../helpers/overlay-terminal";
-import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
 const restoreTheme = currentTheme();
 afterAll(() => setCurrentTheme(restoreTheme));
@@ -258,12 +267,75 @@ function promptChain(count: number): SessionMessageEntry[] {
 	return entries;
 }
 
+/**
+ * One prompt, then 700 bash calls with their results: a final turn far longer than the replay cap.
+ * `answer` closes the run with a reply, which moves the replay cap's cut onto a tool result.
+ */
+function longFinalTurn(answer?: string): SessionMessageEntry[] {
+	const reply = (
+		content: AssistantMessage["content"],
+		stopReason: AssistantMessage["stopReason"],
+		timestamp: number,
+	): AssistantMessage => ({
+		role: "assistant",
+		content,
+		api: "anthropic-messages",
+		provider: "anthropic",
+		model: "claude-sonnet-4-5",
+		stopReason,
+		usage: {
+			input: 1,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 2,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		timestamp,
+	});
+	const entries: SessionMessageEntry[] = [entry("u1", null, { role: "user", content: "run the sweep", timestamp: 1 })];
+	for (let index = 0; index < 700; index++) {
+		const call = `call-${index}`;
+		const bash: ToolCall = { type: "toolCall", id: call, name: "bash", arguments: { command: `step ${index}` } };
+		entries.push(entry(`a${index}`, entries.at(-1)!.id, reply([bash], "toolUse", 2 + index * 2)));
+		const result: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: call,
+			toolName: "bash",
+			content: [{ type: "text", text: `output ${index}` }],
+			isError: false,
+			timestamp: 3 + index * 2,
+		};
+		entries.push(entry(`t${index}`, entries.at(-1)!.id, result));
+	}
+	if (answer) entries.push(entry("answer", entries.at(-1)!.id, reply([{ type: "text", text: answer }], "stop", 1500)));
+	return entries;
+}
+
 describe("copy selector", () => {
+	const previousKeybindings = getKeybindings();
 	beforeEach(async () => {
 		await Settings.init({ inMemory: true, cwd: process.cwd() });
 	});
 	afterEach(() => {
 		resetSettingsForTest();
+		setKeybindings(previousKeybindings);
+	});
+
+	it("paints the bound expand key in the painter's symbol preset", () => {
+		setKeybindings(KeybindingsManager.inMemory({ "app.tools.expand": "up" }));
+		createRoot(dispose => {
+			try {
+				const picker = CopySelector({ entries: makeEntries(), onPick() {}, onCancel() {} });
+				if (!isUiNode(picker)) throw new Error("expected one picker node");
+				const ascii = staticEnvironment(loadThemeSync("dark", { symbolPreset: "ascii" }));
+				const unicode = staticEnvironment(loadThemeSync("dark", { symbolPreset: "unicode" }));
+				expect(paintNode(ascii, picker, 100).rows.join("\n")).toContain("Up expand");
+				expect(paintNode(unicode, picker, 100).rows.join("\n")).toContain("↑ expand");
+			} finally {
+				dispose();
+			}
+		});
 	});
 
 	it("keeps whole-turn picks exact and ties them to the native transcript entries", () => {
@@ -460,45 +532,10 @@ describe("copy selector", () => {
 	});
 
 	it("keeps a copyable target when the final turn is longer than the replay cap", () => {
-		// Cutting blindly at `length - limit` would start the tail inside the
-		// tool results, whose calls are gone: the picker would mount with nothing to copy.
-		const entries: SessionMessageEntry[] = [
-			entry("u1", null, { role: "user", content: "run the sweep", timestamp: 1 } as AgentMessage),
-		];
-		for (let index = 0; index < 700; index++) {
-			const call = `call-${index}`;
-			entries.push(
-				entry(`a${index}`, entries.at(-1)!.id, {
-					role: "assistant",
-					content: [{ type: "toolCall", id: call, name: "bash", arguments: { command: `step ${index}` } }],
-					api: "anthropic-messages",
-					provider: "anthropic",
-					model: "claude-sonnet-4-5",
-					stopReason: "toolUse",
-					usage: {
-						input: 1,
-						output: 1,
-						cacheRead: 0,
-						cacheWrite: 0,
-						totalTokens: 2,
-						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-					},
-					timestamp: 2 + index * 2,
-				} as unknown as AgentMessage),
-			);
-			entries.push(
-				entry(`t${index}`, entries.at(-1)!.id, {
-					role: "toolResult",
-					toolCallId: call,
-					toolName: "bash",
-					content: [{ type: "text", text: `output ${index}` }],
-					isError: false,
-					timestamp: 3 + index * 2,
-				} as unknown as AgentMessage),
-			);
-		}
+		// The run alone outgrows the replay cap: the tail opens on a call inside it, so the newest
+		// call still copies with its output.
 		const picks: Pick[] = [];
-		const term = makeSelector(picks, () => {}, undefined, entries);
+		const term = makeSelector(picks, () => {}, undefined, longFinalTurn());
 		try {
 			press(term, "enter");
 			expect(picks).toHaveLength(1);
@@ -506,5 +543,22 @@ describe("copy selector", () => {
 		} finally {
 			term.dispose();
 		}
+	});
+
+	it("opens a final turn longer than the replay cap on its recent calls, not the whole branch", () => {
+		// The tail once reached back to the turn's prompt, replaying all 701 turns of a branch with one prompt.
+		// The cut lands on a tool result whose call is cut off: the tail starts at the next call
+		// (a blind cut would list the orphan result as a 301st turn).
+		createRoot(dispose => {
+			try {
+				const picker = CopySelector({ entries: longFinalTurn("swept"), onPick() {}, onCancel() {} });
+				if (!isUiNode(picker)) throw new Error("expected one picker node");
+				const screen = paintNode(staticEnvironment(loadThemeSync("dark")), picker, 100).rows.join("\n");
+				expect(screen).toContain("300/300");
+				expect(screen).toContain("a earlier turns");
+			} finally {
+				dispose();
+			}
+		});
 	});
 });

@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -10,13 +10,15 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { defaultSupportedEffort } from "@oh-my-pi/pi-catalog/model-thinking";
 import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { fingerprintStaticModels, resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import * as bundled from "@oh-my-pi/pi-catalog/models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import {
 	deepinfraModelManagerOptions,
 	openrouterModelManagerOptions,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { Api, Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
+
+const { getBundledModel, getBundledModels, getBundledModelSlice } = bundled;
 
 function completionsSpec(overrides: Partial<ModelSpec<"openai-completions">> = {}): ModelSpec<"openai-completions"> {
 	return {
@@ -257,7 +259,6 @@ describe("buildModel", () => {
 		const cases: [string, string][] = [
 			["Anthropic: Claude Opus 4.6 (Fast) ($$$$)", "Claude Opus 4.6 (Fast)"],
 			["Claude Opus 4.5 (latest)", "Claude Opus 4.5"],
-			["Gemini 2.5 Flash (Thinking) (Antigravity)", "Gemini 2.5 Flash (Thinking)"],
 			["Stealth: Claude Opus 4.6 (20% off)", "Claude Opus 4.6"],
 			["NousResearch: Hermes 2 Pro (retires Jun 5)", "Hermes 2 Pro"],
 			["Z.ai: GLM 5", "GLM 5"],
@@ -1471,9 +1472,9 @@ describe("OpenRouter model discovery", () => {
 });
 
 describe("GitHub Copilot catalog corrections", () => {
-	it("prices Copilot Haiku 5.5 cache legs per tier without a second long-context tier", () => {
-		// `billing.token_prices` carries no cache prices for Haiku 5.5, so both
-		// discovered tiers arrive with $0 cache legs.
+	it("prices Copilot Haiku 5.5 cache legs and gives its -1m row no second long-context tier", () => {
+		// `billing.token_prices` carries no cache prices for Haiku 5.5, so the
+		// discovered default tier arrives with $0 cache legs.
 		const base = buildModel(
 			completionsSpec({
 				id: "claude-haiku-5.5",
@@ -1487,10 +1488,10 @@ describe("GitHub Copilot catalog corrections", () => {
 			completionsSpec({
 				id: "claude-haiku-5.5-1m",
 				provider: "github-copilot",
-				cost: { input: 0.5, output: 2.5, cacheRead: 0, cacheWrite: 0 },
+				cost: { input: 0.5, output: 2.5, cacheRead: 0.05, cacheWrite: 0.625 },
 			}),
 		);
-		expect(long.cost).toEqual({ input: 0.5, output: 2.5, cacheRead: 0.05, cacheWrite: 0.625 });
+		expect(long.cost.longContext).toBeUndefined();
 	});
 });
 
@@ -1502,7 +1503,54 @@ describe("model cache materialized round trip", () => {
 		expect(fingerprintStaticModels(staticModels)).not.toBe(initial);
 
 		const frozen = Object.freeze([completionsSpec({ id: "frozen-fingerprint-model" })]);
-		expect(() => fingerprintStaticModels(frozen)).not.toThrow();
+		const initialFrozen = fingerprintStaticModels(frozen);
+		frozen[0]!.name = "Changed inside frozen array";
+		expect(fingerprintStaticModels(frozen)).not.toBe(initialFrozen);
+	});
+
+	it("preserves bundled content and policy identities across shared slice lookups", () => {
+		const shared = getBundledModelSlice("anthropic");
+		const copy = getBundledModels("anthropic");
+		expect(getBundledModelSlice("anthropic")).toBe(shared);
+		expect(Object.isFrozen(shared)).toBe(true);
+		for (const policy of [{}, { additive: true }, { authoritative: true }, { authoritative: true, additive: true }]) {
+			expect(fingerprintStaticModels(shared, policy)).toBe(fingerprintStaticModels(copy, policy));
+		}
+	});
+
+	it("skips bundled rows for a matching scoped cache unless omitted headers need restoring", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-lazy-bundled-"));
+		const cacheDbPath = path.join(dir, "models.db");
+		const cacheProviderId = "copilot-test-scope";
+		const rows = getBundledModels("github-copilot");
+		const model = rows.find(row => row.headers)!;
+		const fingerprint = fingerprintStaticModels(rows, { authoritative: true, additive: true });
+		const options = {
+			providerId: "github-copilot",
+			cacheProviderId,
+			cacheDbPath,
+			now: () => 1_000,
+			dynamicModelsAuthoritative: true,
+			modelsDev: { additiveOnly: true, fetch: async () => [], map: () => [] },
+		};
+		const slice = spyOn(bundled, "getBundledModelSlice");
+		try {
+			writeModelCache(cacheProviderId, 1_000, [{ ...model, headers: undefined }], true, fingerprint, cacheDbPath);
+			const headerless = await resolveProviderModels(options, "offline");
+			expect(headerless.models.map(row => row.id)).toEqual([model.id]);
+			expect(headerless.models[0]?.headers).toBeUndefined();
+			expect(headerless.source).toBe("cache");
+			expect(slice).not.toHaveBeenCalled();
+
+			writeModelCache(cacheProviderId, 1_000, [model], true, fingerprint, cacheDbPath, rows);
+			const restored = await resolveProviderModels(options, "offline");
+			expect(restored.models.map(row => row.id)).toEqual([model.id]);
+			expect(restored.models[0]?.headers).toEqual(model.headers);
+			expect(slice).toHaveBeenCalledWith(options.providerId);
+		} finally {
+			slice.mockRestore();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
 	});
 
 	it("uses generator-materialized bundled rows without rebuilding them", async () => {
@@ -2192,6 +2240,41 @@ describe("model cache materialized round trip", () => {
 			const fresh = await resolveProviderModels(options, "online-if-uncached");
 			expect(fresh.models[0]?.headers).toEqual({ "X-Project-Id": "project-42" });
 			expect(fetches).toBe(1);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps restored headers private across cold, shared and concurrent reads of one payload", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-private-headers-"));
+		const dbPath = path.join(tempDir, "models.db");
+		const providerId = "header-isolation-test";
+		const model = buildModel(
+			completionsSpec({ id: "private-route", provider: providerId, headers: { "X-Route": "seed" } }),
+		);
+		const resolveFor = async (route: string) => {
+			const result = await resolveProviderModels(
+				{
+					providerId,
+					cacheDbPath: dbPath,
+					staticModels: [],
+					restoreCachedHeaders: () => ({ headers: { "X-Route": route } }),
+				},
+				"offline",
+			);
+			return result.models.find(row => row.id === model.id);
+		};
+		try {
+			writeModelCache(providerId, Date.now(), [model], true, "", dbPath);
+			const first = await resolveFor("tenant-a");
+			const raw = readModelCache(providerId, 60_000, Date.now, dbPath);
+			const [second, third] = await Promise.all([resolveFor("tenant-b"), resolveFor("tenant-c")]);
+			expect([first, second, third].map(row => row?.headers?.["X-Route"])).toEqual([
+				"tenant-a",
+				"tenant-b",
+				"tenant-c",
+			]);
+			expect(raw?.models.map(row => row.headers)).toEqual([undefined]);
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}

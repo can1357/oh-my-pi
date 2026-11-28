@@ -3,8 +3,9 @@
  *
  * The transcript's tool block (`omp.tool.*`, see `./block.ts`) handles what
  * every tool shares: transcript margins, hidden activity, compact presenter
- * lines and viewport allocations. Everything inside is the look's: the frame,
- * the head, the sections, the footer. A look is chosen by the node's
+ * lines, concise activity rows and viewport allocations. Everything inside
+ * is the look's: the frame, the head, the sections, the footer. A look is
+ * chosen by the node's
  * `term.look` (set by the presenter's view), else the tool name, else the
  * generic `default` card.
  *
@@ -14,6 +15,7 @@
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import type { Block, PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import type { TspTone, TspToolProps } from "@oh-my-pi/pi-wire";
+import type { HubRecentLine } from "../pickers/agent-hub";
 
 /** Terminal-only facts on a `tool` node's `term` prop (the tool block's plus the view's). */
 export interface ToolTerm {
@@ -23,8 +25,13 @@ export interface ToolTerm {
 	readonly label?: string;
 	/** Application clock time the call started executing; running clocks count from it. */
 	readonly startedAt?: number;
-	/** An extension presenter's compact presentation: its own label and rows, or the bare summary row. */
-	readonly compact?: "label" | "bare";
+	/**
+	 * A one-row presentation: an extension presenter's own label and rows, its bare summary row, or
+	 * the concise row ({@link activityLine}, `display.toolActivity: concise`).
+	 */
+	readonly compact?: "label" | "bare" | "concise";
+	/** The concise row: the call in the Agent Hub's recent-activity format. */
+	readonly activityLine?: HubRecentLine;
 	/** The compact row's summary: bold label, muted detail. */
 	readonly activity?: { readonly label: string; readonly detail?: string };
 	/** Still executing (no settled result, not sealed): compact rows spin (animated looks) and count seconds. */
@@ -39,6 +46,8 @@ export interface ToolTerm {
 	readonly expanded?: boolean;
 	/** The call's args. */
 	readonly args?: unknown;
+	/** False when the terminal should suppress inline result pictures. */
+	readonly showImages?: false;
 	/** The result's image placeholders in order: where a look draws one, it links to its image. */
 	readonly imageLinks?: readonly {
 		readonly text: string;
@@ -76,7 +85,7 @@ export interface ToolLook {
 	 * setting, while its compact row stays still unless {@link animated}.
 	 */
 	readonly clocked?: boolean;
-	/** A frameless look set in by one cell, in line with prose and the read row. */
+	/** A frameless look that takes the standard terminal inset, like prose. */
 	readonly inset?: boolean;
 	/** The transcript wraps the look in the custom-tool box: one blank row and one cell of padding around it, tinted by status. */
 	readonly boxed?: boolean;

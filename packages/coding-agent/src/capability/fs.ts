@@ -8,28 +8,38 @@ function resolvePath(filePath: string): string {
 	return path.resolve(filePath);
 }
 
-export async function readFile(filePath: string): Promise<string | null> {
+/** Read discovery files through a cache scoped to one scan. */
+export function createFileReader(): (filePath: string) => Promise<string | null> {
+	const cache = new Map<string, string | null>();
+	return filePath => readFileWithCache(filePath, cache);
+}
+
+/** Read a discovery file through the process-local content cache. */
+export function readFile(filePath: string): Promise<string | null> {
+	return readFileWithCache(filePath, contentCache);
+}
+
+async function readFileWithCache(filePath: string, cache: Map<string, string | null>): Promise<string | null> {
 	const abs = resolvePath(filePath);
-	if (contentCache.has(abs)) {
-		return contentCache.get(abs) ?? null;
-	}
+	const cached = cache.get(abs);
+	if (cached !== undefined) return cached;
 
 	try {
 		// Gate on the file type first: discovery scans foreign config dirs
-		// (~/.claude, ~/.cursor, project trees), and reading a FIFO/socket/char
+		// (`.claude`, `.codex`, project trees), and reading a FIFO/socket/char
 		// device with `.text()` blocks until EOF — i.e. forever — hanging
 		// startup with zero output. `stat` follows symlinks, so symlinked
 		// context files (CLAUDE.md -> AGENTS.md) still resolve.
 		const stats = await fs.promises.stat(abs);
 		if (!stats.isFile()) {
-			contentCache.set(abs, null);
+			cache.set(abs, null);
 			return null;
 		}
 		const content = await Bun.file(abs).text();
-		contentCache.set(abs, content);
+		cache.set(abs, content);
 		return content;
 	} catch {
-		contentCache.set(abs, null);
+		cache.set(abs, null);
 		return null;
 	}
 }

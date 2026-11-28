@@ -25,15 +25,16 @@ import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { padTo, spaces, truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
 import { sanitizeDisplaySingleLine } from "../../../extensibility/inventory/display-text";
 import type { AggregateMetrics, AgentMetrics } from "../../../modes/view-model/overlays/agent-hub-projection";
+import { formatCost } from "../../../modes/view-model/overlays/agent-hub-renderer";
 import type { AgentStatus } from "../../../registry/agent-hub-types";
 import {
-	formatCost,
 	formatMetricDuration,
 	type HubModel,
 	metricsText,
 	STATUS_COLOR,
 	STATUS_SYMBOL,
 } from "../../overlays/pickers/agent-hub-model";
+import { keyLabel } from "../../keys/hints";
 import { agentColored } from "../../tools/agent-identity";
 import { bindingGlyph } from "../panels/common";
 
@@ -201,9 +202,18 @@ function statusGlyph(pen: Pen, status: AgentStatus): string {
 	return pen.theme.fg(STATUS_COLOR[status], pen.glyph(STATUS_SYMBOL[status]));
 }
 
-function glyphText(pen: Pen, glyph: HubGlyph | undefined): string {
+function glyphText(theme: Theme, glyph: HubGlyph | undefined): string {
 	if (!glyph) return "";
-	return pen.theme.fg(glyph.color, glyph.text ?? pen.glyph(glyph.symbol!));
+	return theme.fg(glyph.color, glyph.text ?? theme.symbols.symbol(glyph.symbol!));
+}
+
+/**
+ * One recent-activity row, `21:59:20 ✓ bash Checking repo states`, cut to `width`: the hub
+ * inspector's rows, and the transcript's tool calls under `display.toolActivity: concise`.
+ */
+export function recentActivityRow(theme: Theme, line: HubRecentLine, width: number): string {
+	const prefix = `${theme.fg("dim", line.clock)} ${glyphText(theme, line.glyph)} ${theme.fg("muted", oneLine(line.title, width))} `;
+	return `${prefix}${oneLine(line.summary, Math.max(1, width - visibleWidth(prefix)))}`;
 }
 
 /** `claude-haiku ◒ high`, a fallback led by `fallback →`. */
@@ -596,10 +606,7 @@ function detailPanel(
 	const budget = Math.max(0, rows - lines.length);
 	const recent = budget > 0 ? detail.recent.slice(-budget) : [];
 	if (recent.length === 0 && budget > 0) add(theme.fg("muted", "No response or tool activity yet"));
-	for (const event of recent) {
-		const prefix = `${theme.fg("dim", event.clock)} ${glyphText(pen, event.glyph)} ${theme.fg("muted", oneLine(event.title, width))} `;
-		add(`${prefix}${oneLine(event.summary, Math.max(1, width - visibleWidth(prefix)))}`);
-	}
+	for (const event of recent) add(recentActivityRow(theme, event, width));
 	const max = Math.max(0, lines.length - rows);
 	const offset = Math.min(scroll, max);
 	const visible = lines.slice(offset, offset + rows);
@@ -616,16 +623,21 @@ function keyHints(pen: Pen, view: HubAgentsView, narrowDetails: boolean, inner: 
 		: view.filter.text
 			? `/${view.filter.text}  ·  `
 			: "";
-	const ok = bindingGlyph("tui.select.confirm", "enter");
-	const esc = bindingGlyph("tui.select.cancel", "escape");
-	const pages = `${bindingGlyph("tui.select.pageUp", "pageUp")}/${bindingGlyph("tui.select.pageDown", "pageDown")}`;
+	const theme = pen.theme;
+	const ok = bindingGlyph("tui.select.confirm", "enter", theme);
+	const esc = bindingGlyph("tui.select.cancel", "escape", theme);
+	const pages = `${bindingGlyph("tui.select.pageUp", "pageUp", theme)}/${bindingGlyph("tui.select.pageDown", "pageDown", theme)}`;
+	const tab = keyLabel(theme, "tab");
 	if (narrowDetails)
 		return pen.theme.fg(
 			"dim",
-			`${filter}1:agents  2:activity  ⇥:roster  ${pages}:scroll  ${ok}:open  t:${next}  ${esc}:roster`,
+			`${filter}1:agents  2:activity  ${tab}:roster  ${pages}:scroll  ${ok}:open  t:${next}  ${esc}:roster`,
 		);
 	if (inner < FULL_HINTS_WIDTH)
-		return pen.theme.fg("dim", `${filter}j/k:select  ${ok}:open  t:${next}  ⇥:details  r/x:manage  ${esc}:close`);
+		return pen.theme.fg(
+			"dim",
+			`${filter}j/k:select  ${ok}:open  t:${next}  ${tab}:details  r/x:manage  ${esc}:close`,
+		);
 	return pen.theme.fg(
 		"dim",
 		`${filter}1:agents  2:activity  j/k/wheel:select  ${pages}:details  ${ok}/click:open  t:${next}  r:revive  x:kill  ${esc}:close`,
@@ -703,7 +715,7 @@ function activityRow(pen: Pen, row: HubActivityLine, selected: boolean, width: n
 	const role = row.role ? `${theme.fg(row.role.color, row.role.text)} ` : "";
 	const agent = oneLine(row.agent, Math.max(8, Math.min(18, Math.floor(width * 0.18))));
 	const title = oneLine(row.title, width);
-	const prefix = `${cursor} ${theme.fg("dim", row.clock)} ${glyphText(pen, row.glyph)} ${role}${theme.style("strong", agent)} ${theme.fg(row.response ? "success" : "muted", title)}`;
+	const prefix = `${cursor} ${theme.fg("dim", row.clock)} ${glyphText(theme, row.glyph)} ${role}${theme.style("strong", agent)} ${theme.fg(row.response ? "success" : "muted", title)}`;
 	const available = Math.max(1, width - visibleWidth(prefix) - visibleWidth(pen.sep));
 	return `${prefix}${pen.dimSep}${oneLine(row.summary, available)}`;
 }
@@ -748,7 +760,7 @@ function paintActivity(pen: Pen, view: HubActivityView, width: number, height: n
 			pen,
 			theme.fg(
 				"dim",
-				`1:agents  j/k:select  ${bindingGlyph("tui.select.confirm", "enter")}:transcript  ␣:follow  f:filter  s:scope  /:search  ${bindingGlyph("tui.select.cancel", "escape")}:close`,
+				`1:agents  j/k:select  ${bindingGlyph("tui.select.confirm", "enter", theme)}:transcript  ${keyLabel(theme, "space")}:follow  f:filter  s:scope  /:search  ${bindingGlyph("tui.select.cancel", "escape", theme)}:close`,
 			),
 			width,
 		),

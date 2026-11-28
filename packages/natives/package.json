@@ -1,6 +1,6 @@
 {
   "name": "@oh-my-pi/pi-natives",
-  "version": "19.1.1",
+  "version": "19.2.1",
   "description": "Native Rust bindings for PDF conversion, audio, WebRTC, grep, clipboard, image processing, syntax highlighting, PTY, and shell operations via N-API",
   "type": "module",
   "homepage": "https://omp.sh",
@@ -45,12 +45,12 @@
   "devDependencies": {
     "@napi-rs/cli": "catalog:",
     "@types/bun": "catalog:",
-    "cli-truncate": "6.1.1",
-    "gpt-tokenizer": "4.0.0",
+    "cli-truncate": "6.2.0",
+    "gpt-tokenizer": "4.1.2",
     "mitata": "1.0.34",
-    "slice-ansi": "9.0.0",
-    "string-width": "8.2.2",
-    "wrap-ansi": "10.0.0"
+    "slice-ansi": "10.0.1",
+    "string-width": "9.0.0",
+    "wrap-ansi": "10.0.2"
   },
   "engines": {
     "bun": ">=1.4.4"
@@ -91,6 +91,11 @@
       "types": "./native/vcs.d.ts",
       "import": "./native/vcs.js",
       "default": "./native/vcs.js"
+    },
+    "./file-poll": {
+      "types": "./native/file-poll.d.ts",
+      "import": "./native/file-poll.js",
+      "default": "./native/file-poll.js"
     },
     "./sqlite-locks": {
       "types": "./native/sqlite-locks.d.ts",

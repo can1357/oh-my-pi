@@ -905,6 +905,9 @@ describe("hindsightBackend live bank routing", () => {
 });
 
 describe("hindsightBackend cwd rebind", () => {
+	// Every move here starts from a running Hindsight state.
+	const hindsightRan = { memoryRan: true };
+
 	beforeEach(() => {
 		resetSettingsForTest();
 	});
@@ -935,7 +938,7 @@ describe("hindsightBackend cwd rebind", () => {
 		expect(session.getHindsightSessionState()?.bankId).toBe("omp-source");
 
 		deps.cwd = "/work/destination";
-		await rebindMemoryBackendForCwd(session as never);
+		await rebindMemoryBackendForCwd(session as never, hindsightRan);
 
 		const next = session.getHindsightSessionState();
 		expect(next?.bankId).toBe("omp-destination");
@@ -976,7 +979,7 @@ describe("hindsightBackend cwd rebind", () => {
 			expect(createBank).toHaveBeenCalledTimes(1);
 
 			missionSetting.override(settings, "destination mission");
-			await rebindMemoryBackendForCwd(session as never);
+			await rebindMemoryBackendForCwd(session as never, hindsightRan);
 			const rebound = session.getHindsightSessionState();
 			if (!rebound) throw new Error("Hindsight fixture lost its state");
 			await rebound.enqueueRetain("call-rebound", [{ content: "destination fact" }]);
@@ -1029,7 +1032,7 @@ describe("hindsightBackend cwd rebind", () => {
 		const secondEdit = hindsightBackend.applySettings!(session as never, ["hindsight.bankId"]);
 		gate.resolve();
 
-		await rebindMemoryBackendForCwd(session as never);
+		await rebindMemoryBackendForCwd(session as never, hindsightRan);
 
 		await Promise.all([firstEdit, secondEdit]);
 		expect(session.getHindsightSessionState()?.bankId).toBe("second");
@@ -1048,7 +1051,7 @@ describe("hindsightBackend cwd rebind", () => {
 			);
 			return settledState;
 		});
-		await rebindMemoryBackendForCwd(session as never);
+		await rebindMemoryBackendForCwd(session as never, hindsightRan);
 		expect(session.getHindsightSessionState()?.bankId).toBe("third");
 		await thirdEdit;
 		session.getHindsightSessionState()?.dispose();
@@ -1090,7 +1093,7 @@ describe("hindsightBackend cwd rebind", () => {
 			await parked.promise;
 			// Requested while the doomed attempt is still in flight, so it
 			// coalesces onto the same task; the retry clears the failure for both.
-			const move = rebindMemoryBackendForCwd(session as never);
+			const move = rebindMemoryBackendForCwd(session as never, hindsightRan);
 			gate.resolve();
 			await Promise.all([edit, move]);
 

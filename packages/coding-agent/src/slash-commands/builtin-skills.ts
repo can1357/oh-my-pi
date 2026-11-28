@@ -1,3 +1,10 @@
+import { errorMessage, pluralize } from "@oh-my-pi/pi-utils";
+import {
+	deleteManagedSkill,
+	getManagedSkillsDir,
+	listManagedSkills,
+	type ManagedSkillEntry,
+} from "../autolearn/managed-skills";
 import type { InteractiveModeContext } from "../modes/types";
 import { SkillshareClient } from "../skillshare/client";
 import {
@@ -11,8 +18,9 @@ import {
 	type SkillInstallHooks,
 	updateSkillPackages,
 } from "../skillshare/installer";
+import { shortenPath } from "../utils/render-utils";
 import { clearSubmittedText } from "./helpers/draft";
-import { errorMessage, parseSubcommand } from "./helpers/parse";
+import { parseSubcommand } from "./helpers/parse";
 import type { SlashCommandSpec } from "./types";
 
 const USAGE = [
@@ -21,7 +29,36 @@ const USAGE = [
 	"  /skills install <@scope/name[@range]>… [-g]   Install into this project (-g: user-global)",
 	"  /skills installed                             List installed registry skills",
 	"  /skills update [@scope/name…] [-g]            Update within the ranges in skills.json",
+	"",
+	"Learned (auto-learn managed) skills:",
+	"  /skills learned                               Review learned skills and their provenance",
+	"  /skills forget <name>                         Delete a learned skill",
 ].join("\n");
+
+/** Render the `/skills learned` review listing: each managed skill with its provenance. */
+export function formatManagedSkills(entries: readonly ManagedSkillEntry[]): string {
+	const root = shortenPath(getManagedSkillsDir());
+	if (entries.length === 0) return `No learned skills in ${root}.`;
+	const lines = [`Learned skills (${root}):`];
+	for (const entry of entries) {
+		lines.push(`  ${entry.name} — ${entry.description || "(no description)"}`);
+		const provenance = entry.provenance;
+		if (!provenance) {
+			lines.push("    no provenance recorded");
+			continue;
+		}
+		const details = [`updated ${provenance.updated.slice(0, 10)} via ${provenance.generator}`];
+		if (provenance.created) details.push(`created ${provenance.created.slice(0, 10)}`);
+		details.push(`${provenance.sessions.length} ${pluralize("session", provenance.sessions.length)}`);
+		lines.push(`    ${details.join(" · ")}`);
+		if (provenance.projects.length > 0) {
+			lines.push(`    projects: ${provenance.projects.map(project => shortenPath(project)).join(", ")}`);
+		}
+		const latestSession = provenance.sessions.at(-1);
+		if (latestSession) lines.push(`    latest session: ${latestSession}`);
+	}
+	return lines.join("\n");
+}
 
 /** Split `<name…> [--global|-g]`; unknown flags are errors. */
 function parseTargets(rest: string): { names: string[]; global: boolean } | { error: string } {
@@ -65,7 +102,7 @@ export const BUILTIN_SKILLS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "skills",
 		icon: "skill",
-		description: "Search, install, and update skills from the skills.omp.sh registry",
+		description: "Search, install, and update registry skills; review learned skills",
 		subcommands: [
 			{ name: "search", description: "Search the skill registry", usage: "<query>" },
 			{ name: "install", description: "Install registry skills", usage: "<@scope/name[@range]>… [--global]" },
@@ -75,6 +112,8 @@ export const BUILTIN_SKILLS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				description: "Update registry skills within their ranges",
 				usage: "[@scope/name…] [--global]",
 			},
+			{ name: "learned", description: "Review learned (auto-learn) skills and their provenance" },
+			{ name: "forget", description: "Delete a learned skill", usage: "<name>" },
 		],
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
@@ -129,6 +168,20 @@ export const BUILTIN_SKILLS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 							updateSkillPackages(client, { names: targets.names, global: targets.global, cwd }, tuiHooks(ctx)),
 						);
 						await reportChanges(ctx, changes);
+						return;
+					}
+					case "learned": {
+						ctx.showStatus(formatManagedSkills(await listManagedSkills()));
+						return;
+					}
+					case "forget": {
+						if (!rest || /\s/.test(rest)) {
+							ctx.showError("Usage: /skills forget <name>");
+							return;
+						}
+						await deleteManagedSkill(rest);
+						await ctx.refreshSkillState();
+						ctx.showStatus(`Forgot learned skill "${rest}".`);
 						return;
 					}
 					case "":

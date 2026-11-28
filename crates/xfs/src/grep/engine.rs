@@ -10,8 +10,9 @@
 use std::{borrow::Cow, fmt, sync::LazyLock};
 
 use grep_matcher::Matcher;
-use grep_pcre2::{RegexMatcher as PcreMatcher, RegexMatcherBuilder as PcreMatcherBuilder};
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
+
+use super::pcre::{RegexMatcher as PcreMatcher, RegexMatcherBuilder as PcreMatcherBuilder};
 
 /// `OMP_PCRE2_JIT` from the process environment, read once.
 static PCRE2_JIT: LazyLock<bool> =
@@ -31,7 +32,7 @@ pub enum EngineError {
 	/// Rust `regex` (never fails at search time).
 	Rust(grep_matcher::NoError),
 	/// PCRE2 (match limits, JIT stack exhaustion).
-	Pcre(grep_pcre2::Error),
+	Pcre(super::pcre::Error),
 }
 
 impl fmt::Display for EngineError {
@@ -174,7 +175,7 @@ fn build_rust(
 }
 
 /// PCRE2 with UTF and Unicode properties, JIT per [`PCRE2_JIT`].
-fn build_pcre(pattern: &str, ignore_case: bool) -> Result<PcreMatcher, grep_pcre2::Error> {
+fn build_pcre(pattern: &str, ignore_case: bool) -> Result<PcreMatcher, super::pcre::Error> {
 	PcreMatcherBuilder::new()
 		.caseless(ignore_case)
 		.multi_line(true)

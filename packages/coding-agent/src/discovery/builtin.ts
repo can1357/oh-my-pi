@@ -9,7 +9,6 @@ import { YAML } from "bun";
 import { getManagedSkillsDir, MANAGED_SKILLS_PROVIDER_ID } from "../autolearn/managed-skills";
 import { registerProvider } from "../capability";
 import { type ContextFile, contextFileCapability } from "../capability/context-file";
-import { type Extension, type ExtensionManifest, extensionCapability } from "../capability/extension";
 import { type ExtensionModule, extensionModuleCapability } from "../capability/extension-module";
 import { readDirEntries, readFile } from "../capability/fs";
 import { type Hook, hookCapability } from "../capability/hook";
@@ -34,6 +33,7 @@ import {
 	isForeignUserConfigRoot,
 	isUserConfigRoot,
 	loadFilesFromDir,
+	mergeLoadResults,
 	parseRequestIdFormat,
 	SOURCE_PATHS,
 	scanSkillsFromDir,
@@ -330,10 +330,7 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 	});
 
 	const results = await Promise.all([...projectScans, userScan]);
-	return {
-		items: results.flatMap(r => r.items),
-		warnings: results.flatMap(r => r.warnings ?? []),
-	};
+	return mergeLoadResults(results);
 }
 
 // Managed skills (auto-learn) are a SEPARATE provider at the lowest skill
@@ -597,75 +594,6 @@ registerProvider<ExtensionModule>(extensionModuleCapability.id, {
 	description: DESCRIPTION,
 	priority: PRIORITY,
 	load: loadExtensionModules,
-});
-
-// Extensions
-async function loadExtensions(ctx: LoadContext): Promise<LoadResult<Extension>> {
-	const items: Extension[] = [];
-	const warnings: string[] = [];
-
-	const configDirs = await getConfigDirs(ctx);
-	const entriesResults = await Promise.all(configDirs.map(({ dir }) => readDirEntries(path.join(dir, "extensions"))));
-
-	const manifestCandidates: Array<{
-		extDir: string;
-		manifestPath: string;
-		entryName: string;
-		level: "user" | "project";
-	}> = [];
-
-	for (let i = 0; i < configDirs.length; i++) {
-		const { dir, level } = configDirs[i];
-		const entries = entriesResults[i];
-		const extensionsDir = path.join(dir, "extensions");
-
-		for (const entry of entries) {
-			if (entry.name.startsWith(".")) continue;
-			// A linked extension package reports as a link, not a directory; the manifest
-			// probe below narrows it back to a real directory.
-			if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
-
-			const extDir = path.join(extensionsDir, entry.name);
-			manifestCandidates.push({
-				extDir,
-				manifestPath: path.join(extDir, "gemini-extension.json"),
-				entryName: entry.name,
-				level,
-			});
-		}
-	}
-
-	const manifestContents = await Promise.all(manifestCandidates.map(({ manifestPath }) => readFile(manifestPath)));
-
-	for (let i = 0; i < manifestCandidates.length; i++) {
-		const content = manifestContents[i];
-		if (!content) continue;
-
-		const { extDir, manifestPath, entryName, level } = manifestCandidates[i];
-		const manifest = tryParseJson<ExtensionManifest>(content);
-		if (!manifest) {
-			warnings.push(`Failed to parse ${manifestPath}`);
-			continue;
-		}
-
-		items.push({
-			name: manifest.name || entryName,
-			path: extDir,
-			manifest,
-			level,
-			_source: createSourceMeta(PROVIDER_ID, manifestPath, level),
-		});
-	}
-
-	return { items, warnings };
-}
-
-registerProvider<Extension>(extensionCapability.id, {
-	id: PROVIDER_ID,
-	displayName: DISPLAY_NAME,
-	description: DESCRIPTION,
-	priority: PRIORITY,
-	load: loadExtensions,
 });
 
 // Instructions

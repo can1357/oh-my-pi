@@ -1,11 +1,14 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
 import { expect, test, vi } from "bun:test";
 import type { TspPickerProps } from "@oh-my-pi/pi-wire";
-import { fullscreenMenuView, layerContent } from "../../../../src/modes/controllers/selector-views";
+import { fullscreenMenuView } from "../../../../src/modes/controllers/selector-views";
 import { nativeShell } from "../../../helpers/native-shell";
 import { signal, type UiEvent } from "@oh-my-pi/pi-tui";
+import { memoryTerminal } from "@oh-my-pi/pi-tui/testing/memory-terminal";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import type { SessionSelectorEntry } from "../../../../src/modes/view-model/overlays/session-selector";
-import { SessionSelector } from "../../../../src/ui/overlays/pickers/session-selector";
+import { SessionSelector, sessionSelectorFocus } from "../../../../src/ui/overlays/pickers/session-selector";
+import { Shell } from "../../../../src/ui/shell/shell";
 import { type Driver, pickerSuite } from "./harness";
 
 /** The capture's clock: sessions are aged from it. */
@@ -45,6 +48,39 @@ const sessions = (): SessionSelectorEntry[] => [
 ];
 const tick = (): Promise<void> => Bun.sleep(5);
 const noop = (): void => {};
+
+test("terminal rename preserves the query on cancel and updates search matches on save", async () => {
+	const term = memoryTerminal({ columns: 100, rows: 30 });
+	const shell = new Shell();
+	const selected = mk(1, "Quartz", "first message");
+	const picked = vi.fn();
+	const renamed = vi.fn(async (_session: SessionSelectorEntry, title: string) => title);
+	await shell.start({ theme: currentTheme, driver: term.options, role: "omp.session" });
+	try {
+		shell.overlays.show(
+			() =>
+				fullscreenMenuView(
+					"sessions",
+					<SessionSelector sessions={[selected]} onRename={renamed} onSelect={picked} onCancel={noop} />,
+				),
+			{ focus: sessionSelectorFocus },
+		);
+		term.feed("Quartz");
+		term.feed("\x1bOQ Draft\x03");
+		term.feed("\x1bOQ\x15Zebra\x1b[13u");
+		await Promise.resolve();
+		expect(renamed.mock.calls).toEqual([[selected, "Zebra"]]);
+		term.feed("\x1b[13u");
+		expect(picked).not.toHaveBeenCalled();
+		term.feed("\x15Zebra\x1b[13u");
+		expect(picked).toHaveBeenCalledWith(expect.objectContaining({ path: selected.path, title: "Zebra" }));
+	} finally {
+		shell.overlays.closeAll();
+		await shell.stop();
+		shell.surface.dispose();
+	}
+});
+
 test("native session selection, rename/edit, and Resume address the same session", async () => {
 	await using ui = await nativeShell();
 	const picked = vi.fn();
@@ -55,7 +91,7 @@ test("native session selection, rename/edit, and Resume address the same session
 				"sessions",
 				<SessionSelector sessions={sessions()} onRename={renamed} onSelect={picked} onCancel={noop} />,
 			),
-		{ focus: layerContent },
+		{ focus: sessionSelectorFocus },
 	);
 	const shown = (): TspPickerProps => ui.node("picker").p;
 	const target = shown().items!.find(item => item.label === "Beta")!;
@@ -68,7 +104,7 @@ test("native session selection, rename/edit, and Resume address the same session
 	action("Rename");
 	const input = ui.node("input");
 	expect(input.p.text).toBe("Beta");
-	ui.send({ ev: "focus", sf: ui.sf, id: input.id });
+	expect(ui.surface().focus).toBe(input.id);
 	ui.send({ ev: "edit", sf: ui.sf, id: input.id, len: 4, from: 0, to: 4, text: "Renamed", cursor: 7 });
 	expect(ui.node("input").p.text).toBe("Renamed");
 	ui.type("\r");

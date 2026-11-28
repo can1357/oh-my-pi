@@ -10,8 +10,8 @@ import { type Choice, ChoiceList, ChoiceModel } from "./choice";
 const NERD_SAMPLE = "\uf00c \ue0b0 \uec19 \u{f024b} \ue725";
 
 const GLYPH_CHOICES: readonly Choice<GlyphPreset>[] = [
-	{ value: "nerd", label: "1 Nerd Font", detail: `${NERD_SAMPLE} ╭─╮ ├─ ◆ ✔ ✖` },
-	{ value: "unicode", label: "2 Unicode", detail: "✔ ✖ 📁 ⬢ ╭─╮ ├─ • ⠋ →" },
+	{ value: "nerd", label: "1 Nerd Font", detail: `${NERD_SAMPLE} ╭─╮ ├─ ◆ ✓ ✗` },
+	{ value: "unicode", label: "2 Unicode", detail: "✔️ ✖️ 📁 ⬢ ╭─╮ ├─ • ⠋ →" },
 	{ value: "ascii", label: "3 ASCII", detail: "[+] [-] > + [D] +-+ |- * ->" },
 ];
 

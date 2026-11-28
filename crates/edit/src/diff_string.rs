@@ -1,12 +1,14 @@
 //! Model-facing diff rendering and unified-diff hunk parsing.
 
-use std::{collections::BTreeSet, sync::LazyLock};
+use std::collections::BTreeSet;
 
 use omp_ast::block::{EnclosingBoundaryOptions, LineRange, enclosing_block_boundaries};
 use omp_diff::HunkLine;
-use regex::Regex;
 
-use crate::error::EditError;
+use crate::{
+	error::EditError,
+	scan::{digits, keyword, space},
+};
 
 const DIFF_GAP_ROW: &str = "";
 const EOF_MARKER: &str = "*** End of File";
@@ -919,29 +921,72 @@ struct UnifiedHunkHeader {
 	change_context: Option<String>,
 }
 
-static UNIFIED_HUNK_HEADER_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-	Regex::new(r"^@@\s*-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s*@@(?:\s*(.*))?$")
-		.expect("valid unified hunk header regex")
-});
-static LINE_HINT_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-	Regex::new(r"(?i)^lines?\s+(\d+)(?:\s*-\s*(\d+))?(?:\s*@@)?$").expect("valid line hint regex")
-});
-static TOP_OF_FILE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-	Regex::new(r"(?i)^(top|start|beginning)\s+of\s+file$").expect("valid top-of-file regex")
-});
-static NUMBERED_LINE_REGEX: LazyLock<Regex> =
-	LazyLock::new(|| Regex::new(r"^\s*(\d{1,6})\s+(.+)$").expect("valid numbered-line regex"));
+/// Splits `12` or `12,3` off the front of `s`: the start line and the rest.
+fn range(s: &str) -> Option<(&str, &str)> {
+	let (start, rest) = digits(s)?;
+	match rest.strip_prefix(',') {
+		Some(count) => Some((start, digits(count)?.1)),
+		None => Some((start, rest)),
+	}
+}
 
+/// Parses `@@ -old[,count] +new[,count] @@ [context]`.
 fn parse_unified_hunk_header(line: &str) -> Option<UnifiedHunkHeader> {
-	let captures = UNIFIED_HUNK_HEADER_REGEX.captures(line)?;
-	let old_start_line = captures.get(1)?.as_str().parse().ok()?;
-	let new_start_line = captures.get(3)?.as_str().parse().ok()?;
-	let change_context = captures
-		.get(5)
-		.map(|value| value.as_str().trim())
-		.filter(|value| !value.is_empty())
-		.map(str::to_owned);
-	Some(UnifiedHunkHeader { old_start_line, new_start_line, change_context })
+	let (old_start, rest) = range(line.strip_prefix("@@")?.trim_start().strip_prefix('-')?)?;
+	let new = space(rest)?;
+	let (new_start, rest) = range(new.strip_prefix('+')?)?;
+	let context = rest.trim_start().strip_prefix("@@")?.trim();
+	Some(UnifiedHunkHeader {
+		old_start_line: old_start.parse().ok()?,
+		new_start_line: new_start.parse().ok()?,
+		change_context: (!context.is_empty()).then(|| context.to_owned()),
+	})
+}
+
+/// Parses a starting line from `line 12`, `lines 12-15`, or either with a
+/// closing `@@`.
+fn parse_line_hint(line: &str) -> Option<u32> {
+	let rest = keyword(line, "line")?;
+	let rest = keyword(rest, "s").unwrap_or(rest);
+	let (start, rest) = digits(space(rest)?)?;
+	let tail = rest.trim_start();
+	let rest = if let Some(end) = tail.strip_prefix('-') {
+		digits(end.trim_start())?.1
+	} else {
+		rest
+	};
+	(rest.is_empty() || rest.trim_start() == "@@").then(|| start.parse().unwrap_or(0))
+}
+
+/// Recognizes an explicit top-of-file context hint.
+fn is_top_of_file_hint(line: &str) -> bool {
+	["top", "start", "beginning"].iter().any(|word| {
+		keyword(line, word)
+			.and_then(space)
+			.and_then(|rest| keyword(rest, "of"))
+			.and_then(space)
+			.is_some_and(|rest| rest.eq_ignore_ascii_case("file"))
+	})
+}
+
+/// Splits a line number and separator from a numbered diff line.
+fn numbered_line(line: &str) -> Option<(u32, usize)> {
+	let (number, rest) = digits(line.trim_start())?;
+	if number.len() > 6 {
+		return None;
+	}
+	let body = space(rest)?;
+	let offset = if body.is_empty() {
+		// A suffix made entirely of whitespace still needs one body character.
+		let (last, _) = rest.char_indices().next_back()?;
+		if last == 0 {
+			return None;
+		}
+		line.len() - rest.len() + last
+	} else {
+		line.len() - body.len()
+	};
+	Some((number.parse().ok()?, offset))
 }
 
 fn parse_error(message: impl AsRef<str>, line_number: u32) -> EditError {
@@ -951,44 +996,36 @@ fn parse_error(message: impl AsRef<str>, line_number: u32) -> EditError {
 	}
 }
 
+/// Removes line numbers when most nonempty lines have sequential prefixes.
 fn strip_line_number_prefixes(hunk: &mut DiffHunk) {
-	let all_lines = hunk
-		.old_lines
-		.iter()
-		.chain(&hunk.new_lines)
-		.filter(|line| !line.trim().is_empty())
-		.collect::<Vec<_>>();
-	if all_lines.len() < 2 {
+	let mut nonempty = 0_usize;
+	let mut sequential = 0;
+	let mut previous = None;
+	let mut prefixes = Vec::new();
+	for (index, line) in hunk.old_lines.iter().chain(&hunk.new_lines).enumerate() {
+		if line.trim().is_empty() {
+			continue;
+		}
+		nonempty += 1;
+		if let Some((number, offset)) = numbered_line(line) {
+			sequential += usize::from(previous.is_some_and(|value| number == value + 1));
+			previous = Some(number);
+			prefixes.push((index, offset));
+		}
+	}
+	let matched = prefixes.len();
+	if matched < 2_usize.max((nonempty * 6).div_ceil(10)) || sequential < matched - 2 {
 		return;
 	}
-	let number_matches = all_lines
-		.iter()
-		.filter_map(|line| NUMBERED_LINE_REGEX.captures(line))
-		.collect::<Vec<_>>();
-	// Math.ceil(length * 0.6), without floating point.
-	let minimum_matches = 2_usize.max((all_lines.len() * 6).div_ceil(10));
-	if number_matches.len() < minimum_matches {
-		return;
+	let old_len = hunk.old_lines.len();
+	for (index, offset) in prefixes {
+		let line = if index < old_len {
+			&mut hunk.old_lines[index]
+		} else {
+			&mut hunk.new_lines[index - old_len]
+		};
+		line.replace_range(..offset, "");
 	}
-	let numbers = number_matches
-		.iter()
-		.filter_map(|captures| captures.get(1)?.as_str().parse::<u32>().ok())
-		.collect::<Vec<_>>();
-	let sequential = numbers
-		.array_windows()
-		.filter(|&&[previous, next]| next == previous + 1)
-		.count();
-	if numbers.len() >= 3 && sequential < 1_usize.max(numbers.len() - 2) {
-		return;
-	}
-	let strip = |line: &String| {
-		NUMBERED_LINE_REGEX
-			.captures(line)
-			.and_then(|captures| captures.get(2).map(|value| value.as_str().to_owned()))
-			.unwrap_or_else(|| line.clone())
-	};
-	hunk.old_lines = hunk.old_lines.iter().map(strip).collect();
-	hunk.new_lines = hunk.new_lines.iter().map(strip).collect();
 }
 
 struct ParseHunkResult {
@@ -1037,19 +1074,13 @@ fn parse_one_hunk(
 		let normalized_context_value = trimmed_context_value
 			.strip_prefix("@@")
 			.map_or(trimmed_context_value, str::trim_start);
-		if let Some(captures) = LINE_HINT_REGEX.captures(normalized_context_value) {
-			let value = captures
-				.get(1)
-				.expect("line hint capture")
-				.as_str()
-				.parse::<u32>()
-				.unwrap_or(0);
+		if let Some(value) = parse_line_hint(normalized_context_value) {
 			old_start_line = Some(value);
 			new_start_line = Some(value);
 			if value < 1 {
 				return Err(parse_error("Line hint must be >= 1", line_number));
 			}
-		} else if TOP_OF_FILE_REGEX.is_match(normalized_context_value) {
+		} else if is_top_of_file_hint(normalized_context_value) {
 			old_start_line = Some(1);
 			new_start_line = Some(1);
 		} else if !trimmed_context_value.is_empty() {

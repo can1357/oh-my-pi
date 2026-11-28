@@ -19,6 +19,8 @@ import {
 	createCustomMessage,
 	INTERRUPTED_THINKING_MESSAGE_TYPE,
 	isEmptyErrorTurn,
+	liveVoiceScopeChange,
+	PLAN_MODE_CONTEXT_MESSAGE_TYPE,
 	PREWALK_PLAN_MESSAGE_TYPE,
 	REWIND_REPORT_MESSAGE_TYPE,
 	VIBE_MODE_CONTEXT_MESSAGE_TYPE,
@@ -489,7 +491,9 @@ export function buildSessionContext(
 		} else if (entry.type === "custom_message") {
 			if (
 				!options?.transcript &&
-				(entry.customType === PREWALK_PLAN_MESSAGE_TYPE || entry.customType === VIBE_MODE_CONTEXT_MESSAGE_TYPE)
+				(entry.customType === PREWALK_PLAN_MESSAGE_TYPE ||
+					entry.customType === VIBE_MODE_CONTEXT_MESSAGE_TYPE ||
+					entry.customType === PLAN_MODE_CONTEXT_MESSAGE_TYPE)
 			) {
 				return;
 			}
@@ -578,17 +582,26 @@ export function buildSessionContext(
 		// marker before the first retained entry instead (other lanes use the
 		// commit timestamp). The summary itself keeps the commit timestamp, which
 		// still retires the tail's pre-compaction usage reports.
+		const firstKeptIdx = path.findIndex(
+			(entry, index) => index < compactionIdx && entry.id === compaction.firstKeptEntryId,
+		);
+		const snapshotIdx = compaction.providerReplayThroughEntryId
+			? path.findIndex(entry => entry.id === compaction.providerReplayThroughEntryId)
+			: -1;
+		// Remote replacement items take the place of raw kept turns for the
+		// provider, but never for the display transcript.
+		const replaced = remoteReplacementHistory !== undefined && !options?.transcript;
+		const retainedStart =
+			!replaced && firstKeptIdx >= 0
+				? firstKeptIdx
+				: (replaced || (anthropicPayload && compaction.firstKeptEntryId === "")) &&
+					  snapshotIdx >= 0 &&
+					  snapshotIdx < compactionIdx
+					? snapshotIdx + 1
+					: compactionIdx;
 		let historyRewriteAt: number | undefined;
 		if (anthropicPayload !== undefined) {
-			const firstKeptIdx = path.findIndex(entry => entry.id === compaction.firstKeptEntryId);
-			const snapshotIdx =
-				compaction.firstKeptEntryId === "" && compaction.providerReplayThroughEntryId
-					? path.findIndex(entry => entry.id === compaction.providerReplayThroughEntryId)
-					: -1;
-			const firstRetained =
-				(firstKeptIdx >= 0 && firstKeptIdx < compactionIdx ? path[firstKeptIdx] : undefined) ??
-				(snapshotIdx >= 0 && snapshotIdx < compactionIdx - 1 ? path[snapshotIdx + 1] : undefined) ??
-				path[compactionIdx + 1];
+			const firstRetained = path[retainedStart < compactionIdx ? retainedStart : compactionIdx + 1];
 			// The message's own time, not the entry's: an assistant message is
 			// stamped when its stream starts and saved after it ends, so a marker
 			// derived from the entry would postdate that turn and strip its thinking.
@@ -619,6 +632,25 @@ export function buildSessionContext(
 				historyRewriteAt,
 			},
 		);
+		// A live-ended notice paired with a kept prompt belongs to the tail,
+		// not to the summarized prefix. Rebuild the converter state at the cut
+		// so that the kept answer (including signed thinking) replays unchanged.
+		if (!options?.transcript) {
+			for (let i = retainedStart - 1; i > resetBoundaryIdx; --i) {
+				const entry = path[i];
+				const message =
+					entry.type === "message"
+						? entry.message
+						: entry.type === "custom_message"
+							? customMessageEntryMessage(entry)
+							: undefined;
+				const change = message && liveVoiceScopeChange(message);
+				if (change !== undefined) {
+					if (change) compactionSummaryMsg.liveVoiceOpen = true;
+					break;
+				}
+			}
+		}
 		// Agent context (non-transcript): summary first so the LLM sees the
 		// compacted context before recent messages.
 		if (!options?.transcript) {
@@ -640,7 +672,6 @@ export function buildSessionContext(
 			isRecord(compaction.details) &&
 			compaction.details.kind === "experimental-context-rollover"
 		) {
-			const firstKeptIdx = path.findIndex(entry => entry.id === compaction.firstKeptEntryId);
 			for (let i = compactionIdx - 1; i > resetBoundaryIdx; i--) {
 				const entry = path[i];
 				if (!isRolloverRequestEntry(entry)) continue;
@@ -656,15 +687,7 @@ export function buildSessionContext(
 		// turns visible instead of showing only the summary and post-compaction.
 		if (!remoteReplacementHistory || options?.transcript) {
 			// Emit kept messages (before compaction, starting from firstKeptEntryId).
-			const firstKeptIdx = path.findIndex(
-				(entry, index) => index < compactionIdx && entry.id === compaction.firstKeptEntryId,
-			);
-			const snapshotIdx =
-				anthropicPayload && compaction.firstKeptEntryId === "" && compaction.providerReplayThroughEntryId
-					? path.findIndex(entry => entry.id === compaction.providerReplayThroughEntryId)
-					: -1;
-			const retainedStart = firstKeptIdx >= 0 ? firstKeptIdx : snapshotIdx >= 0 ? snapshotIdx + 1 : -1;
-			if (retainedStart >= 0 && retainedStart < compactionIdx) {
+			if (retainedStart < compactionIdx) {
 				let displayStartIdx = retainedStart;
 				if (options?.transcript) {
 					// `findCutPoint` may leave the collapsed display's kept region
@@ -693,13 +716,8 @@ export function buildSessionContext(
 					appendMessage(entry);
 				}
 			}
-		} else if (compaction.providerReplayThroughEntryId) {
-			const replayThroughIdx = path.findIndex(entry => entry.id === compaction.providerReplayThroughEntryId);
-			if (replayThroughIdx >= 0 && replayThroughIdx < compactionIdx) {
-				for (let i = replayThroughIdx + 1; i < compactionIdx; i++) {
-					appendMessage(path[i]);
-				}
-			}
+		} else {
+			for (let i = retainedStart; i < compactionIdx; i++) appendMessage(path[i]);
 		}
 
 		// Display transcript: emit the summary at the chronological compaction

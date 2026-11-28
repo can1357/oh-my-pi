@@ -1,5 +1,4 @@
-import { discoverRelayEndpoints } from "../../src/tools/browser/relay/discovery";
-import { afterEach, describe, expect, it, test } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -15,7 +14,10 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/native-host";
 import { requestRelayRestart, waitForRelayExtension } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/probe";
 import { RELAY_RESTART_PATH } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/protocol";
+import * as dirs from "@oh-my-pi/pi-utils/dirs";
 import type { FromNativeHost, ToNativeHost } from "../../../browser-relay/extension/messages";
+import { discoverRelayEndpoints } from "../../src/tools/browser/relay/discovery";
+import * as wslNetworking from "../../src/tools/browser/relay/wsl-networking";
 
 /**
  * Stand-in for `omp --mode rpc`: announces protocol v2, answers negotiation, echoes `echo` commands with the protocol
@@ -250,17 +252,68 @@ test("chat child discovers its browser over the chat port, not the terminal rela
 	await expect(fetch(`${data.url}/json/version`)).rejects.toThrow();
 });
 
+test("local discovery ignores malformed records and returns live endpoints newest first", async () => {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-relay-record-"));
+	const registry = spyOn(dirs, "getBrowserRelayInstallRegistryFile").mockReturnValue(path.join(dir, "installs.json"));
+	const networking = spyOn(wslNetworking, "getWslNetworkingMode").mockReturnValue(undefined);
+	try {
+		expect(await discoverRelayEndpoints()).toEqual([]);
+		for (const [name, mtime] of [
+			[`${process.pid}-9201`, 1],
+			[`${process.pid}-9202`, 2],
+			[`${process.pid}-65536`, 3],
+			["not-an-endpoint", 4],
+		] as const) {
+			const file = path.join(dir, "endpoints", name);
+			await Bun.write(file, "");
+			await fs.utimes(file, mtime, mtime);
+		}
+		expect(await discoverRelayEndpoints()).toEqual(["http://127.0.0.1:9202", "http://127.0.0.1:9201"]);
+	} finally {
+		networking.mockRestore();
+		registry.mockRestore();
+		await fs.rm(dir, { recursive: true, force: true });
+	}
+});
+
+test.skipIf(process.platform !== "linux").each([
+	["mirrored", true],
+	["nat", false],
+	["wsl1", false],
+	["unknown", true],
+	[undefined, false],
+] as const)("local relay discovery with WSL mode %s", async (mode, requireOwner) => {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-relay-record-"));
+	const registry = spyOn(dirs, "getBrowserRelayInstallRegistryFile").mockReturnValue(path.join(dir, "installs.json"));
+	const networking = spyOn(wslNetworking, "getWslNetworkingMode").mockReturnValue(mode);
+	const listener = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
+	try {
+		const url = `http://127.0.0.1:${listener.port}`;
+		const record = (pid: number) => path.join(dir, "endpoints", `${pid}-${listener.port}`);
+		await Bun.write(record(process.ppid), "");
+		expect(await discoverRelayEndpoints()).toEqual(requireOwner ? [] : [url]);
+		await fs.unlink(record(process.ppid));
+		await Bun.write(record(process.pid), "");
+		expect(await discoverRelayEndpoints()).toEqual([url]);
+	} finally {
+		listener.stop(true);
+		networking.mockRestore();
+		registry.mockRestore();
+		await fs.rm(dir, { recursive: true, force: true });
+	}
+});
+
 test("terminal relay publishes its assigned port and retires it when Chrome disconnects", async () => {
-	const before = new Set(discoverRelayEndpoints());
+	const before = new Set(await discoverRelayEndpoints());
 	const host = await startHost();
 	host.send({ t: "link", extensionId: "a".repeat(32) });
 	await link(host, "dynamic-browser");
-	const url = discoverRelayEndpoints().find(endpoint => !before.has(endpoint));
+	const url = (await discoverRelayEndpoints()).find(endpoint => !before.has(endpoint));
 	if (!url) throw new Error("relay did not publish an endpoint");
 	expect(await waitForRelayExtension(url)).toBe("ready");
 	host.disconnect();
 	await host.done;
-	expect(discoverRelayEndpoints()).not.toContain(url);
+	expect(await discoverRelayEndpoints()).not.toContain(url);
 });
 
 describe("native host relay link", () => {
