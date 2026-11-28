@@ -8632,6 +8632,28 @@ export function scalewayModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// Verda
+// ---------------------------------------------------------------------------
+
+/** Verda discovery: authoritative per-project roster; the KDL seed is each live row's reference. */
+export function verdaModelManagerOptions(config?: SimpleProviderConfig): ModelManagerOptions<"openai-completions"> {
+	const defaultBaseUrl = getDefaultModelDiscoveryBaseUrl("verda")!;
+	return createOpenAICompatibleModelManagerOptions({
+		api: "openai-completions",
+		providerId: "verda",
+		defaultBaseUrl,
+		config,
+		cacheProviderId: resolveModelCacheProviderId("verda", {
+			apiKey: config?.apiKey,
+			baseUrl: config?.baseUrl ?? defaultBaseUrl,
+		}),
+		dynamicModelsAuthoritative: true,
+		requireApiKey: true,
+		mapModel: mapWithBundledReference,
+	});
+}
+
+// ---------------------------------------------------------------------------
 // Otari
 // ---------------------------------------------------------------------------
 

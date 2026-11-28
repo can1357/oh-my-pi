@@ -1,0 +1,35 @@
+provider "verda" {
+	default-model "kimi-k3-1-pro"
+	env "VERDA_INFERENCE_API_KEY"
+	dynamic-models-authoritative #true
+	skip-cross-provider-reference-fills #true
+	discovery label="Verda"
+
+	seed api="openai-completions" base-url="https://inference.verda.com/v1" bundle="always" precedence="seed" {
+		model "kimi-k3-1-pro" name="Kimi K3.1 Pro" {
+			reasoning #true
+			input "text" "image"
+			cost input=2 output=10 cache-read=0.2 cache-write=0
+			limits context=1048576 max-tokens=131072
+		}
+		model "deepseek-4-1-flash-1017" name="DeepSeek V4.1 Flash 1017" {
+			reasoning #true
+			input "text" "image"
+			cost input=0.15 output=0.6 cache-read=0.006 cache-write=0
+			limits context=1048576 max-tokens=393216
+		}
+	}
+
+	thinking-mode "effort"
+	reasoning-content-field "reasoning_content"
+	requires-reasoning-content-for-tool-calls #true
+
+	// The dashed id does not match the DeepSeek flash family rules.
+	models "deepseek-4-1-flash-1017" {
+		thinking-upgrade-neutral #true
+		thinking-efforts "low" "high" "max"
+		reasoning-disable-mode "none-effort"
+		input-modalities "text" "image"
+		strip-image-input #false
+	}
+}

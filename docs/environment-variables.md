@@ -132,6 +132,7 @@ Plain provider credential names come from `env` entries in `packages/catalog/src
 | `SCW_SECRET_KEY`                      | Scaleway Generative APIs auth                      | Using `scaleway` provider                                      | Serverless open-weight chat models; validated against `https://api.scaleway.ai/v1/models`; `SCW_API_KEY` is accepted as a legacy alias       |
 | `OTARI_API_KEY`                       | Otari gateway auth                                 | Using `otari` provider                                         | Workspace key (plain, no region); `/login otari` asks for the region (US, EU, or custom) instead |
 | `OTARI_BASE_URL`                      | Otari API root override                            | Using `otari` provider                                         | API root including its prefix (`https://eu.api.otari.ai/api/v1` for EU, `https://host.example.com/api/v1` self-hosted); skips the `/login otari` region prompt and redirects discovery and requests for credentials that store no region |
+| `VERDA_INFERENCE_API_KEY`             | Verda Inference auth                               | Using `verda` provider                                         | Project-scoped key; validated against `https://inference.verda.com/v1/models` |
 
 ### GitHub/Copilot tokens
 

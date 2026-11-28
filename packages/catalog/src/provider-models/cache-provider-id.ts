@@ -57,6 +57,7 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	// A Refuseless key lists its account's private models and bills its
 	// account rates, and discovery is authoritative.
 	refuseless: true,
+	verda: true,
 };
 
 /**
@@ -108,6 +109,8 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 			return "https://opencode.ai/zen/v1";
 		case "vllm":
 			return "http://127.0.0.1:8000/v1";
+		case "verda":
+			return "https://inference.verda.com/v1";
 		default:
 			return providerEntry(providerId)?.baseUrl;
 	}
@@ -223,7 +226,8 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 		case "otari":
 		case "arkanecloud":
 		case "bifrost":
-		case "refuseless": {
+		case "refuseless":
+		case "verda": {
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
 			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
 			return `${providerId}:models-v1:${Bun.hash(scope).toString(36)}`;
