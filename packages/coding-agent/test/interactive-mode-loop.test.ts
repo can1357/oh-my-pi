@@ -16,6 +16,7 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 import { cfgLoopMode } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { initTheme } from "../src/ui/theme/service";
 import { createModeTerminal } from "./helpers/mode-terminal";
+import { key, sendKey } from "./ui/composer/harness";
 
 async function flushMicrotasks(): Promise<void> {
 	await Promise.resolve();
@@ -71,6 +72,11 @@ describe("InteractiveMode loop auto-submit", () => {
 		}
 		await pendingInput;
 		pendingInput = undefined;
+		// Vibe tests mock tool activation but still persist the mode on this shared session.
+		if (session.getVibeModeState()?.enabled) {
+			session.setVibeModeState(undefined);
+			session.sessionManager.appendModeChange("none");
+		}
 		mode.vibeModeEnabled = false;
 		Reflect.deleteProperty(session, "isCompacting");
 		Reflect.deleteProperty(session, "isStreaming");
@@ -546,6 +552,42 @@ describe("InteractiveMode loop auto-submit", () => {
 		// custom message instead.
 		expect(mode.addMessageToChat).not.toHaveBeenCalled();
 		mode.skillCommands.delete("skill:recap");
+	});
+
+	it("resubmits consecutive loop iterations without clearing an untouched restored stash", async () => {
+		await mode.init({ suppressWelcomeIntro: true });
+		vi.useFakeTimers();
+		Object.defineProperty(session, "isCompacting", { configurable: true, get: () => false });
+		Object.defineProperty(session, "isStreaming", { configurable: true, get: () => false });
+		const image = { type: "image" as const, data: "aGVsbG8=", mimeType: "image/png" as const };
+		mode.composer.pendingImages.splice(0, mode.composer.pendingImages.length, image);
+		mode.composer.pendingImageLinks.splice(0, mode.composer.pendingImageLinks.length, "file:///stash.png");
+		mode.composer.setText("draft [Image #1]");
+		sendKey(mode.composer.node, mode.composer.field, key("\x13"));
+		sendKey(mode.composer.node, mode.composer.field, key("\x13"));
+		expect(mode.composer.expandedText()).toBe("draft [Image #1]");
+
+		mode.loopModeEnabled = true;
+		mode.loopPrompt = "repeat this";
+		for (let iteration = 0; iteration < 2; iteration++) {
+			pendingInput = mode.getUserInput();
+			vi.advanceTimersByTime(800);
+			const input = await pendingInput;
+			expect(input.text).toBe("repeat this");
+			expect(mode.composer.expandedText()).toBe("draft [Image #1]");
+			expect(mode.composer.pendingImages).toEqual([image]);
+			expect(mode.composer.pendingImageLinks).toEqual(["file:///stash.png"]);
+			mode.markPendingSubmissionStarted(input);
+			mode.finishPendingSubmission(input);
+		}
+
+		// Only an untouched restored stash is special; ordinary user edits are
+		// cleared by loop auto-submit as before.
+		sendKey(mode.composer.node, mode.composer.field, key("x"));
+		pendingInput = mode.getUserInput();
+		vi.advanceTimersByTime(800);
+		expect((await pendingInput).text).toBe("repeat this");
+		expect(mode.composer.text()).toBe("");
 	});
 
 	it("paints an optimistic user row for a resubmitted plain loop prompt", async () => {

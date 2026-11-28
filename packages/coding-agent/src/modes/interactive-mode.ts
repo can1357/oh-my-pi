@@ -272,6 +272,7 @@ import type {
 	InteractiveModeContext,
 	InteractiveModeInitOptions,
 	InteractiveSelectorDialogOptions,
+	ModeCommandResult,
 	RenderInitialMessagesOptions,
 	RenderSessionContextOptions,
 	ResumeSessionOptions,
@@ -666,6 +667,8 @@ export interface InteractiveModeOptions {
 }
 
 const SUBAGENT_OBSERVER_UI_COALESCE_MS = 100;
+/** How long the empty composer reports a successfully stashed prompt. */
+const COMPOSER_STASH_NOTICE_MS = 1_500;
 
 const CTRL_L_APPEARANCE_RESPONSE_DEADLINE_MS = 2000;
 
@@ -1386,6 +1389,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.hud.queue.groups.set([]);
 		this.#clearJudgmentBatchProgress();
 		this.hud.modelCycle.clear();
+		this.cancelComposerStashNotice();
 		this.#pendingCommandOutput = [];
 		this.#pendingCommandOutputSessionId = undefined;
 		this.#pendingCommandOutputCommands = 0;
@@ -1433,6 +1437,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	readonly #wordCompletion = new WordCompletionProvider(textPredictionBackend);
 	/** Bumped when state the composer hint reads (running agents, the conversation) may have changed. */
 	readonly #composerHintRevision = signal(0);
+	#composerStashNoticeTimer: NodeJS.Timeout | undefined;
 	/** Agents the hub can show, running or not: keeps the HUD agents segment up after the last one finishes. */
 	#inspectableSubagentCount = 0;
 	#agentRegistryUnsubscribe?: () => void;
@@ -2777,8 +2782,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (!this.goalModeEnabled || this.goalModePaused) return;
 		if (this.#goalSuppressNextContinuation) return;
 		if (this.#pendingSubmittedInput) return;
-		if (this.composer.text().trim().length > 0) return;
-		if (this.composer.pendingImages.length > 0) return;
+		if (this.composer.text().trim().length > 0 && !this.#inputController.isRestoredStashDraft()) return;
+		if (this.composer.pendingImages.length > 0 && !this.#inputController.isRestoredStashDraft()) return;
 		const state = this.session.getGoalModeState();
 		if (!state?.enabled || state.goal.status !== "active") return;
 		const prompt = this.session.goalRuntime.buildContinuationPrompt();
@@ -2797,17 +2802,20 @@ export class InteractiveMode implements InteractiveModeContext {
 				// on the next `agent_end`.
 				if (this.#isAutoSubmitBlocked()) return;
 				if (this.#pendingSubmittedInput) return;
-				if (this.composer.text().trim().length > 0) return;
-				if (this.composer.pendingImages.length > 0) return;
+				if (this.composer.text().trim().length > 0 && !this.#inputController.isRestoredStashDraft()) return;
+				if (this.composer.pendingImages.length > 0 && !this.#inputController.isRestoredStashDraft()) return;
 				const latestState = this.session.getGoalModeState();
 				if (!latestState?.enabled || latestState.goal.status !== "active") return;
 				this.#pendingGoalContinuationTurns++;
 				this.onInputCallback(
-					this.startPendingSubmission({
-						text: prompt,
-						customType: "goal-continuation",
-						display: false,
-					}),
+					this.startPendingSubmission(
+						{
+							text: prompt,
+							customType: "goal-continuation",
+							display: false,
+						},
+						{ preserveDraft: this.#inputController.isRestoredStashDraft() },
+					),
 				);
 			} finally {
 				this.syncIdleMaintenanceView();
@@ -2860,7 +2868,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#deferLoopAutoSubmit(() => this.#submitLoopPromptWhenReady(prompt));
 			return;
 		}
-		this.onInputCallback(this.startPendingSubmission({ text: prompt }));
+		this.onInputCallback(
+			this.startPendingSubmission({ text: prompt }, { preserveDraft: this.#inputController.isRestoredStashDraft() }),
+		);
 	}
 
 	/** One loop iteration; while it runs, idle maintenance treats the loop's next turn as scheduled. */
@@ -3429,6 +3439,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			display?: boolean;
 			streamingBehavior?: "steer" | "followUp";
 			followUps?: string[];
+			onAccepted?: () => void;
 		},
 		options?: { preserveDraft?: boolean; clearEditor?: boolean },
 	): SubmittedUserInput {
@@ -3441,6 +3452,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			display: input.display,
 			streamingBehavior: input.streamingBehavior,
 			followUps: input.followUps,
+			...(input.onAccepted ? { onAccepted: input.onAccepted } : {}),
 			cancelled: false,
 			started: false,
 		};
@@ -4059,9 +4071,34 @@ export class InteractiveMode implements InteractiveModeContext {
 		return changed;
 	}
 
+	/** Show a transient confirmation in the empty composer's placeholder. */
+	notifyComposerStash(): void {
+		this.#clearComposerStashNoticeTimer();
+		this.#composerStashNoticeTimer = setTimeout(() => {
+			this.#composerStashNoticeTimer = undefined;
+			this.#composerHintRevision.set(this.#composerHintRevision.peek() + 1);
+		}, COMPOSER_STASH_NOTICE_MS);
+		this.#composerStashNoticeTimer.unref?.();
+		this.#composerHintRevision.set(this.#composerHintRevision.peek() + 1);
+	}
+
+	/** Cancel stash feedback when the saved draft is restored to the composer. */
+	cancelComposerStashNotice(): void {
+		if (!this.#composerStashNoticeTimer) return;
+		this.#clearComposerStashNoticeTimer();
+		this.#composerHintRevision.set(this.#composerHintRevision.peek() + 1);
+	}
+
+	#clearComposerStashNoticeTimer(): void {
+		if (!this.#composerStashNoticeTimer) return;
+		clearTimeout(this.#composerStashNoticeTimer);
+		this.#composerStashNoticeTimer = undefined;
+	}
+
 	/** Placeholder for the empty composer; see `COMPOSER_HINTS` for the registered hints. */
 	#composerHint(): TspText | undefined {
 		this.#composerHintRevision();
+		if (this.#composerStashNoticeTimer) return [{ t: "Prompt stashed", s: "dim" }];
 		// An ask above holding the keys: its key hints; the keys here: what typing does.
 		if (this.#extensionUiController.composerAsk()) {
 			const keys = this.#extensionUiController.askKeyHints();
@@ -4082,6 +4119,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	 */
 	#nativeComposerPlaceholder(): TspText | undefined {
 		this.#composerHintRevision();
+		if (this.#composerStashNoticeTimer) return [{ t: "Prompt stashed", s: "dim" }];
 		if (this.isBtwFocused) return "Ask about this…";
 		if (this.#extensionUiController.composerAsk()) return NATIVE_ASK_PLACEHOLDER;
 		const agent = this.focusedAgentId;
@@ -5832,8 +5870,8 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	async handlePlanModeCommand(
 		initialPrompt?: string,
-		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
-	): Promise<boolean> {
+		input?: Pick<SubmittedUserInput, "images" | "imageLinks" | "onAccepted">,
+	): Promise<ModeCommandResult> {
 		if (this.goalModeEnabled || this.goalModePaused) {
 			this.showWarning("Exit goal mode first.");
 			return false;
@@ -5849,31 +5887,32 @@ export class InteractiveMode implements InteractiveModeContext {
 					"Exit plan mode?",
 					"This exits plan mode without approving a plan.",
 				);
-				if (!confirmed) return false;
+				if (!confirmed) return "consumed";
 			}
 			// An open review must not outlive the plan mode it approves: a later pick
 			// would autosave and dispatch the plan while plan mode is paused.
 			this.#hidePlanReview();
 			await this.#exitPlanMode({ paused: true, interruptActiveTurn: true });
-			return false;
+			return "consumed";
 		}
 		if (this.planModePaused && !initialPrompt) {
 			// No-arg third toggle. Prompted /plan invocations fall through to
 			// #enterPlanMode below so the supplied prompt is still submitted as the
 			// first plan-mode turn.
 			this.#disablePausedPlanMode();
-			return false;
+			return "consumed";
 		}
 		if (!cfgPlanEnabled.get(this.session.settings)) {
 			this.showWarning("Plan mode is disabled. Enable it in settings (plan.enabled).");
 			return false;
 		}
 		await this.#enterPlanMode();
-		if (!initialPrompt) return false;
+		if (!initialPrompt) return "consumed";
 		if (isKnownSkillCommand(this, initialPrompt)) {
 			await invokeSkillCommandFromText(this, initialPrompt, "steer", {
 				images: input?.images,
 				propagateErrors: true,
+				...(input?.onAccepted ? { onAccepted: input.onAccepted } : {}),
 			});
 			return true;
 		}
@@ -5885,6 +5924,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.session.prompt(initialPrompt, {
 						streamingBehavior: "steer",
 						images,
+						...(input?.onAccepted ? { onAccepted: input.onAccepted } : {}),
 					}),
 				{ imageCount: images?.length ?? 0 },
 			);
@@ -5906,11 +5946,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	 */
 	async handleVibeModeCommand(
 		initialPrompt?: string,
-		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
-	): Promise<boolean> {
+		input?: Pick<SubmittedUserInput, "images" | "imageLinks" | "onAccepted">,
+	): Promise<ModeCommandResult> {
 		if (this.vibeModeEnabled) {
 			await this.#exitVibeMode();
-			return false;
+			return "consumed";
 		}
 		if (this.planModeEnabled || this.planModePaused) {
 			this.#warnPlanModeBlocks();
@@ -5921,7 +5961,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			return false;
 		}
 		await this.#enterVibeMode();
-		if (!initialPrompt) return false;
+		if (!initialPrompt) return "consumed";
 		if (isKnownSkillCommand(this, initialPrompt)) {
 			// Append synchronously: the skill file read below yields before the
 			// turn reserves, so a concurrent plain prompt must see this claim
@@ -5936,6 +5976,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					await invokeSkillCommandFromText(this, initialPrompt, "steer", {
 						images: input?.images,
 						propagateErrors: true,
+						...(input?.onAccepted ? { onAccepted: input.onAccepted } : {}),
 					});
 				} finally {
 					this.#vibeSkillInFlight--;
@@ -5957,6 +5998,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.session.prompt(initialPrompt, {
 						streamingBehavior: "steer",
 						images,
+						...(input?.onAccepted ? { onAccepted: input.onAccepted } : {}),
 					}),
 				{ imageCount: images?.length ?? 0 },
 			);
@@ -5988,6 +6030,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.session.prompt(initialPrompt, {
 					streamingBehavior: "steer",
 					images,
+					...(input?.onAccepted ? { onAccepted: input.onAccepted } : {}),
 				}),
 			{ imageCount: images?.length ?? 0 },
 		);
@@ -6141,8 +6184,8 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	async handleGoalModeCommand(
 		rest?: string,
-		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
-	): Promise<boolean> {
+		input?: Pick<SubmittedUserInput, "images" | "imageLinks" | "onAccepted">,
+	): Promise<ModeCommandResult> {
 		if (this.planModeEnabled || this.planModePaused) {
 			this.#warnPlanModeBlocks();
 			return false;
@@ -6163,7 +6206,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				return false;
 			}
 			await this.#openGoalMenu("active");
-			return false;
+			return "consumed";
 		}
 		const pausedState = this.#getPausedGoalState();
 		if (pausedState) {
@@ -6172,7 +6215,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				return false;
 			}
 			await this.#openGoalMenu("paused");
-			return false;
+			return "consumed";
 		}
 		if (subRest) return await this.#startGoalFromObjective(subRest, input);
 		const objective = (
@@ -6180,12 +6223,12 @@ export class InteractiveMode implements InteractiveModeContext {
 				promptStyle: true,
 			})
 		)?.trim();
-		if (!objective) return false;
+		if (!objective) return "consumed";
 		return await this.#startGoalFromObjective(objective, input);
 	}
 	async handleGuidedGoalCommand(
 		rest?: string,
-		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
+		input?: Pick<SubmittedUserInput, "images" | "imageLinks" | "onAccepted">,
 	): Promise<boolean> {
 		try {
 			if (this.planModeEnabled || this.planModePaused) {
@@ -6228,14 +6271,22 @@ export class InteractiveMode implements InteractiveModeContext {
 				initial: rest?.trim() || undefined,
 			});
 			const images = input?.images?.length ? input.images : undefined;
+			const followUpOptions = input?.onAccepted
+				? { synthetic: true, onAccepted: input.onAccepted }
+				: { synthetic: true };
 			if (this.session.isStreaming) {
-				await this.session.followUp(kickoff, images, { synthetic: true });
+				await this.session.followUp(kickoff, images, followUpOptions);
 			} else {
 				try {
-					await this.session.prompt(kickoff, images ? { synthetic: true, images } : { synthetic: true });
+					const accepted = await this.session.prompt(kickoff, {
+						synthetic: true,
+						...(images ? { images } : {}),
+						...(input?.onAccepted ? { onAccepted: input.onAccepted } : {}),
+					});
+					if (!accepted) return false;
 				} catch (error) {
 					if (!(error instanceof AgentBusyError)) throw error;
-					await this.session.followUp(kickoff, images, { synthetic: true });
+					await this.session.followUp(kickoff, images, followUpOptions);
 				}
 			}
 			return true;
@@ -6249,36 +6300,36 @@ export class InteractiveMode implements InteractiveModeContext {
 	async #dispatchGoalSubcommand(
 		sub: GoalSubcommand,
 		rest: string,
-		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
-	): Promise<boolean> {
+		input?: Pick<SubmittedUserInput, "images" | "imageLinks" | "onAccepted">,
+	): Promise<ModeCommandResult> {
 		switch (sub) {
 			case "set":
 				return await this.#handleGoalSetSubcommand(rest, input);
 			case "show":
 				this.#showGoalDetails();
-				return false;
+				return "consumed";
 			case "pause":
 				await this.#pauseGoalAction();
-				return false;
+				return "consumed";
 			case "resume":
 				await this.#resumeGoalAction();
-				return false;
+				return "consumed";
 			case "drop":
 				await this.#confirmAndDropGoal();
-				return false;
+				return "consumed";
 			case "budget":
 				if (!this.goalModeEnabled) {
 					this.showWarning(
 						this.#getPausedGoalState() ? "Resume the goal before adjusting the budget." : "No active goal.",
 					);
-					return false;
+					return "consumed";
 				}
 				if (!rest) {
 					await this.#promptGoalBudgetEdit();
-					return false;
+					return "consumed";
 				}
 				await this.#handleGoalBudgetCommand(rest);
-				return false;
+				return "consumed";
 		}
 	}
 
@@ -6394,7 +6445,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	async #startGoalFromObjective(
 		objective: string,
-		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
+		input?: Pick<SubmittedUserInput, "images" | "imageLinks" | "onAccepted">,
 	): Promise<boolean> {
 		await this.#enterGoalMode({ objective, silent: true });
 		this.#resetGoalContinuationSuppression();
@@ -6406,6 +6457,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.session.prompt(objective, {
 						streamingBehavior: "steer",
 						images,
+						...(input?.onAccepted ? { onAccepted: input.onAccepted } : {}),
 					}),
 				{ imageCount: images?.length ?? 0 },
 			);
@@ -6420,7 +6472,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	async #replaceGoalFromObjective(
 		objective: string,
-		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
+		input?: Pick<SubmittedUserInput, "images" | "imageLinks" | "onAccepted">,
 	): Promise<boolean> {
 		const state = await this.session.goalRuntime.replaceGoal({ objective });
 		this.session.setGoalModeState(state);
@@ -6437,6 +6489,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.session.prompt(objective, {
 						streamingBehavior: "steer",
 						images,
+						...(input?.onAccepted ? { onAccepted: input.onAccepted } : {}),
 					}),
 				{ imageCount: images?.length ?? 0 },
 			);
@@ -6451,8 +6504,8 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	async #handleGoalSetSubcommand(
 		rest: string,
-		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
-	): Promise<boolean> {
+		input?: Pick<SubmittedUserInput, "images" | "imageLinks" | "onAccepted">,
+	): Promise<ModeCommandResult> {
 		if (!this.goalModeEnabled && this.#getPausedGoalState()) {
 			this.showWarning("Resume the current goal first, or drop it before setting a new objective.");
 			return false;
@@ -6464,7 +6517,7 @@ export class InteractiveMode implements InteractiveModeContext {
 						promptStyle: true,
 					})
 				)?.trim();
-		if (!objective) return false;
+		if (!objective) return "consumed";
 		if (this.goalModeEnabled) return await this.#replaceGoalFromObjective(objective, input);
 		return await this.#startGoalFromObjective(objective, input);
 	}
@@ -6974,6 +7027,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.hud.progress.downloads.dispose();
 		this.hud.modelCycle.clear();
 		this.#cancelTodoAutoClearTimer();
+		this.#clearComposerStashNoticeTimer();
 		this.#cancelObserverUiSyncTimer();
 		this.#cancelGoalContinuation();
 		clearInterval(this.#jobsSheetTimer);
@@ -8444,9 +8498,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** Queue slash-command input behind the active turn. */
 	handleQueueCommand(
 		message: string,
-		detached?: Pick<SubmittedUserInput, "text" | "images" | "imageLinks">,
+		input?: Pick<SubmittedUserInput, "images" | "imageLinks" | "onAccepted"> & { text?: string },
 	): Promise<void> {
-		return this.#inputController.handleQueueCommand(message, detached);
+		return this.#inputController.handleQueueCommand(message, input);
 	}
 
 	handleBtwCommand(question: string, images?: ImageContent[], title?: string): Promise<boolean> {

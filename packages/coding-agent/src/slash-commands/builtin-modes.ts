@@ -286,9 +286,10 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			return "Plan: off";
 		},
 		handleTui: async (command, runtime) => {
-			await runWithDetachedDraft(command, runtime, () =>
+			const submitted = await runWithDetachedDraft(command, runtime, () =>
 				runtime.ctx.handlePlanModeCommand(command.args || undefined, runtime.input),
 			);
+			if (submitted) return commandConsumed({ agentInvoked: true });
 		},
 	},
 	{
@@ -315,9 +316,10 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			return "Vibe: off";
 		},
 		handleTui: async (command, runtime) => {
-			await runWithDetachedDraft(command, runtime, () =>
+			const submitted = await runWithDetachedDraft(command, runtime, () =>
 				runtime.ctx.handleVibeModeCommand(command.args || undefined, runtime.input),
 			);
+			if (submitted) return commandConsumed({ agentInvoked: true });
 		},
 	},
 	{
@@ -341,9 +343,10 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			return state ? `Goal: ${state.goal.status} (${shortDetail(state.goal.objective)})` : "Goal: off";
 		},
 		handleTui: async (command, runtime) => {
-			await runWithDetachedDraft(command, runtime, () =>
+			const submitted = await runWithDetachedDraft(command, runtime, () =>
 				runtime.ctx.handleGoalModeCommand(command.args || undefined, runtime.input),
 			);
+			if (submitted) return commandConsumed({ agentInvoked: true });
 		},
 	},
 	{
@@ -353,9 +356,10 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		inlineHint: "[rough objective]",
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
-			await runWithDetachedDraft(command, runtime, () =>
+			const submitted = await runWithDetachedDraft(command, runtime, () =>
 				runtime.ctx.handleGuidedGoalCommand(command.args || undefined, runtime.input),
 			);
+			if (submitted) return commandConsumed({ agentInvoked: true });
 		},
 	},
 	{
@@ -392,10 +396,11 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		inlineHint: "<message>",
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
-			await runtime.ctx.handleQueueCommand(
-				command.args,
-				runtime.draftDetached ? { ...runtime.input, text: command.text } : undefined,
-			);
+			await runtime.ctx.handleQueueCommand(command.args, {
+				...runtime.input,
+				text: runtime.draftDetached ? command.text : undefined,
+			});
+			if (command.args.trim() || runtime.input?.images?.length) return commandConsumed({ agentInvoked: true });
 		},
 	},
 	{

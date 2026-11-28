@@ -253,7 +253,7 @@ export type SessionHostProtocol = {
 	flushSession: RpcMethod<[], void>;
 	ensureOnDisk: RpcMethod<[], void>;
 	getArtifactPath: RpcMethod<[id: string], string | null>;
-	resume: RpcMethod<[], void>;
+	resume: RpcMethod<[options?: { onAdmitted?: () => void; onAccepted?: () => void }], void>;
 	retry: RpcMethod<[], boolean>;
 	abortRetry: RpcMethod<[], void>;
 	abortCompaction: RpcMethod<[reason?: unknown], void>;

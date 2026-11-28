@@ -2754,10 +2754,7 @@ export class SelectorController {
 			return true;
 		};
 		if (reuseOpenHub()) return;
-		const hubKeys = [
-			...this.ctx.keybindings.keysFor("app.agents.hub"),
-			...this.ctx.keybindings.keysFor("app.session.observe"),
-		];
+		const hubKeys = this.ctx.keybindings.keysFor("app.agents.hub");
 		const remote = this.ctx.collabGuest?.hubRemote;
 		const sessionFile = this.ctx.sessionManager.getSessionFile() ?? null;
 		const runtime = createAgentHubRuntime({

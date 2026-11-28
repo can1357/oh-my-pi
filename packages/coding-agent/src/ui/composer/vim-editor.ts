@@ -33,6 +33,12 @@ export interface VimSnapshot {
 	readonly cursor: number;
 }
 
+/** Vim mode state saved with a stashed composer draft. */
+export interface VimModeSnapshot {
+	readonly mode: VimMode;
+	readonly anchor: VimPosition | null;
+}
+
 /** Undo-stack position to fold later snapshots back to; `shifts` counts snapshots evicted from the front. */
 export interface UndoMark {
 	readonly depth: number;
@@ -297,6 +303,38 @@ export class VimEditor {
 			const mark = history.mark();
 			history.pinned = mark;
 			this.#startSession(mark, false);
+		} else {
+			this.#load();
+			this.#clampCursor();
+			this.#commit();
+		}
+		this.#sync();
+	}
+
+	/** Snapshot the current Vim mode and visual anchor for a stashed draft. */
+	captureMode(): VimModeSnapshot {
+		return {
+			mode: this.#vim.mode,
+			anchor: this.#vim.anchor ? { ...this.#vim.anchor } : null,
+		};
+	}
+
+	/** Restore a previously captured Vim mode and visual anchor on the current buffer. */
+	restoreMode(snapshot: VimModeSnapshot): void {
+		const vim = this.#vim;
+		const history = this.#host.history;
+		this.#session = null;
+		history.pinned = null;
+		this.#replaceLog.length = 0;
+		this.#overwriting = false;
+		vim.reset();
+		vim.mode = snapshot.mode;
+		vim.anchor = snapshot.anchor ? { ...snapshot.anchor } : null;
+		if (editing(vim.mode)) {
+			this.#load();
+			const mark = history.mark();
+			history.pinned = mark;
+			this.#startSession(mark, vim.mode === "replace");
 		} else {
 			this.#load();
 			this.#clampCursor();

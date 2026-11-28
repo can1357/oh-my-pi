@@ -24,6 +24,7 @@ interface AppKeybindings {
 	"app.approval.approve": true;
 	"app.editor.external": true;
 	"app.local.open": true;
+	"app.editor.stash": true;
 	"app.message.followUp": true;
 	"app.retry": true;
 	"app.message.dequeue": true;
@@ -56,7 +57,6 @@ interface AppKeybindings {
 	"app.session.tree": true;
 	"app.session.fork": true;
 	"app.session.resume": true;
-	"app.session.observe": true;
 	"app.session.togglePath": true;
 	"app.session.toggleSort": true;
 	"app.session.rename": true;
@@ -165,6 +165,10 @@ export const KEYBINDINGS = {
 	"app.local.open": {
 		defaultKeys: "alt+g",
 		description: "Open a local:// file in external editor",
+	},
+	"app.editor.stash": {
+		defaultKeys: "ctrl+s",
+		description: "Stash or restore the prompt draft",
 	},
 	"app.message.followUp": {
 		// Ctrl+Enter is preserved for terminals that deliver it (Kitty/iTerm2/WezTerm/Ghostty),
@@ -301,10 +305,6 @@ export const KEYBINDINGS = {
 	},
 	"app.agents.hub": {
 		defaultKeys: "alt+a",
-		description: "Open the agent hub",
-	},
-	"app.session.observe": {
-		defaultKeys: "ctrl+s",
 		description: "Open the agent hub",
 	},
 	"app.session.togglePath": {

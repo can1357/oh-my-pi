@@ -24,7 +24,6 @@ const TEST_CWD = path.resolve("agent-transcript-cwd");
 const PROMPT_AT = Date.UTC(2026, 6, 30, 9, 45);
 const KEYS: Record<string, string[]> = {
 	"app.agents.hub": ["alt+a"],
-	"app.session.observe": ["ctrl+s"],
 	"app.tools.expand": ["ctrl+o"],
 };
 

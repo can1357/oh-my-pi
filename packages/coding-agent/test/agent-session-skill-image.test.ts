@@ -1,4 +1,4 @@
-import { afterEach, expect, it, spyOn } from "bun:test";
+import { afterEach, expect, it, spyOn, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { Message } from "@oh-my-pi/pi-ai";
@@ -122,8 +122,14 @@ it("drops an image-bearing skill when aborted while its image is normalized", as
 
 it("describes a queued user-invoked skill image when it is delivered", async () => {
 	const { session, mock, visionCalls } = setup();
+	const accepted = vi.fn();
 	await session.withQueueDrainPaused(async () => {
-		await session.promptCustomMessage(skill, { streamingBehavior: "followUp", queueOnly: true });
+		await session.promptCustomMessage(skill, {
+			streamingBehavior: "followUp",
+			queueOnly: true,
+			onAccepted: accepted,
+		});
+		expect(accepted).toHaveBeenCalledTimes(1);
 		expect(session.getQueuedMessages().followUp).toHaveLength(1);
 		expect(visionCalls).toHaveLength(0);
 	});

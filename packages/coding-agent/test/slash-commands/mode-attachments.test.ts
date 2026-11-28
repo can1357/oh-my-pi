@@ -1,19 +1,42 @@
 import { describe, expect, it, vi } from "bun:test";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
-import type { InteractiveModeContext, SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
+import type {
+	InteractiveModeContext,
+	ModeCommandResult,
+	SubmittedUserInput,
+} from "@oh-my-pi/pi-coding-agent/modes/types";
+import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
+import type { Composer } from "../../src/ui/composer/composer";
 import { draftComposer } from "../helpers/input-harness";
 
 type Attachments = Pick<SubmittedUserInput, "images" | "imageLinks">;
+
+function replaceImages(
+	composer: Composer,
+	images: readonly ImageContent[],
+	links: readonly (string | undefined)[],
+): void {
+	composer.pendingImages.splice(0, composer.pendingImages.length, ...images);
+	composer.pendingImageLinks.splice(0, composer.pendingImageLinks.length, ...links);
+}
 
 function createHarness(
 	inputResult: { images?: ImageContent[]; text?: string } | Promise<{ images?: ImageContent[]; text?: string }>,
 ) {
 	const oldImage: ImageContent = { type: "image", data: "b2xk", mimeType: "image/png" };
-	const handlePlanModeCommand = vi.fn(async (_prompt?: string, _input?: Attachments) => true);
-	const handleVibeModeCommand = vi.fn(async (_prompt?: string, _input?: Attachments) => true);
-	const handleGoalModeCommand = vi.fn(async (_prompt?: string, _input?: Attachments) => true);
-	const handleGuidedGoalCommand = vi.fn(async (_prompt?: string, _input?: Attachments) => true);
+	const handlePlanModeCommand = vi.fn(
+		async (_prompt?: string, _input?: Attachments): Promise<ModeCommandResult> => true,
+	);
+	const handleVibeModeCommand = vi.fn(
+		async (_prompt?: string, _input?: Attachments): Promise<ModeCommandResult> => true,
+	);
+	const handleGoalModeCommand = vi.fn(
+		async (_prompt?: string, _input?: Attachments): Promise<ModeCommandResult> => true,
+	);
+	const handleGuidedGoalCommand = vi.fn(
+		async (_prompt?: string, _input?: Attachments): Promise<ModeCommandResult> => true,
+	);
 	const editor = draftComposer([oldImage], ["file:///old.png"]);
 	vi.spyOn(editor, "addToHistory");
 	const showError = vi.fn();
@@ -46,6 +69,8 @@ function createHarness(
 		compactionQueuedMessages: [],
 		updatePendingMessagesDisplay: vi.fn(),
 		showStatus: vi.fn(),
+		notifyComposerStash: vi.fn(),
+		cancelComposerStashNotice: vi.fn(),
 		showWarning: vi.fn(),
 		showError,
 		handlePlanModeCommand,
@@ -55,7 +80,16 @@ function createHarness(
 	} as unknown as InteractiveModeContext;
 	const controller = new InputController(ctx);
 	controller.setupEditorSubmitHandler();
+	const submit = editor.onSubmit;
+	editor.onSubmit = text => {
+		// Enter removes the submitted text before invoking its handler, but
+		// leaves images for the controller to claim.
+		editor.setText("");
+		return submit?.(text);
+	};
 	return {
+		ctx,
+		controller,
 		editor,
 		showError,
 		handlePlanModeCommand,
@@ -66,6 +100,37 @@ function createHarness(
 }
 
 describe("mode command attachments", () => {
+	for (const withImages of [false, true]) {
+		it(`restores a rejected non-detached side command once with a stash (images=${withImages})`, async () => {
+			const harness = createHarness({});
+			harness.editor.setText("saved draft [Image #1]");
+			harness.controller.handleStash();
+			const images: ImageContent[] = withImages ? [{ type: "image", data: "bmV3", mimeType: "image/png" }] : [];
+			const imageLinks = images.map(() => "file:///attempted.png");
+			const command = withImages ? "/tan inspect [Image #1]" : "/tan";
+			harness.editor.setText(command);
+			replaceImages(harness.editor, images, imageLinks);
+			const onAccepted = vi.fn();
+			harness.ctx.handleTanCommand = vi.fn(async () => false);
+
+			// Bare-word normalization can route to /tan after Enter has already
+			// decided that this submission is non-detached.
+			await executeBuiltinSlashCommand(command, {
+				ctx: harness.ctx,
+				input: { images, imageLinks, onAccepted },
+				draftDetached: false,
+			});
+
+			expect(harness.editor.expandedText()).toBe(command);
+			expect(harness.editor.pendingImages).toEqual(images);
+			expect(harness.editor.pendingImageLinks).toEqual(imageLinks);
+			expect(onAccepted).not.toHaveBeenCalled();
+			harness.editor.clearDraft({ recall: false });
+			harness.controller.handleStash();
+			expect(harness.editor.expandedText()).toBe("saved draft [Image #1]");
+			expect(harness.editor.pendingImages).toEqual([{ type: "image", data: "b2xk", mimeType: "image/png" }]);
+		});
+	}
 	it("uses extension-replaced images and regenerated links", async () => {
 		const replacements: ImageContent[] = [{ type: "image", data: "bmV3", mimeType: "image/jpeg" }];
 		const harness = createHarness({ images: replacements });
@@ -105,10 +170,113 @@ describe("mode command attachments", () => {
 		const harness = createHarness({});
 		harness.handleGoalModeCommand.mockResolvedValueOnce(false);
 
-		await harness.editor.onSubmit?.("/goal show [Image #1]");
+		await harness.editor.onSubmit?.("/goal blocked [Image #1]");
 
+		expect(harness.editor.expandedText()).toBe("/goal blocked [Image #1]");
 		expect(harness.editor.pendingImages).toHaveLength(1);
 		expect(harness.editor.pendingImageLinks).toEqual(["file:///old.png"]);
+	});
+
+	for (const [command, handler] of [
+		["/plan blocked [Image #1]", "handlePlanModeCommand"],
+		["/vibe blocked [Image #1]", "handleVibeModeCommand"],
+		["/guided-goal blocked [Image #1]", "handleGuidedGoalCommand"],
+	] as const) {
+		it(`keeps ${command} and its images when rejected, without consuming an existing stash`, async () => {
+			const attemptedImage: ImageContent = { type: "image", data: "bmV3", mimeType: "image/png" };
+			for (const withStash of [false, true]) {
+				const harness = createHarness({});
+				const stashedImage = harness.editor.pendingImages[0];
+				if (withStash) {
+					harness.editor.setText("original draft [Image #1]");
+					harness.controller.handleStash();
+				}
+				harness.editor.setText(command);
+				replaceImages(harness.editor, [attemptedImage], ["file:///attempted.png"]);
+				harness[handler].mockResolvedValueOnce(false);
+
+				await harness.editor.onSubmit?.(command);
+
+				expect(harness.editor.expandedText()).toBe(command);
+				expect(harness.editor.pendingImages).toEqual([attemptedImage]);
+				expect(harness.editor.pendingImageLinks).toEqual(["file:///attempted.png"]);
+				if (withStash) {
+					harness.editor.clearDraft({ recall: false });
+					harness.controller.handleStash();
+					expect(harness.editor.expandedText()).toBe("original draft [Image #1]");
+					expect(harness.editor.pendingImages).toEqual([stashedImage]);
+					expect(harness.editor.pendingImageLinks).toEqual(["file:///old.png"]);
+				}
+			}
+		});
+	}
+
+	it("consumes a rejected text-only mode command when no stash exists", async () => {
+		const harness = createHarness({});
+		replaceImages(harness.editor, [], []);
+		harness.editor.setText("/plan blocked");
+		harness.handlePlanModeCommand.mockResolvedValueOnce(false);
+
+		await harness.editor.onSubmit?.("/plan blocked");
+
+		expect(harness.editor.expandedText()).toBe("");
+		expect(harness.editor.pendingImages).toEqual([]);
+	});
+
+	for (const [command, handler] of [
+		["/goal pause", "handleGoalModeCommand"],
+		["/goal show", "handleGoalModeCommand"],
+		["/goal resume", "handleGoalModeCommand"],
+		["/goal drop", "handleGoalModeCommand"],
+		["/goal budget 120", "handleGoalModeCommand"],
+		["/plan exit", "handlePlanModeCommand"],
+		["/vibe exit", "handleVibeModeCommand"],
+	] as const) {
+		it(`restores ${command} and its detached image when the mode command starts no turn`, async () => {
+			const harness = createHarness({});
+			harness[handler].mockResolvedValueOnce("consumed");
+			await harness.editor.onSubmit?.(`${command} [Image #1]`);
+			expect(harness.editor.expandedText()).toBe(`${command} [Image #1]`);
+			expect(harness.editor.pendingImages).toEqual([{ type: "image", data: "b2xk", mimeType: "image/png" }]);
+			expect(harness.editor.pendingImageLinks).toEqual(["file:///old.png"]);
+		});
+	}
+
+	it("consumes a text-only mode toggle without reviving its command", async () => {
+		const harness = createHarness({});
+		replaceImages(harness.editor, [], []);
+		harness.editor.setText("/plan exit");
+		harness.handlePlanModeCommand.mockResolvedValueOnce("consumed");
+
+		await harness.editor.onSubmit?.("/plan exit");
+
+		expect(harness.editor.expandedText()).toBe("");
+		expect(harness.editor.pendingImages).toEqual([]);
+	});
+
+	it("returns a consumed mode command and its image beside typing added during dispatch", async () => {
+		const harness = createHarness({});
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		harness.handlePlanModeCommand.mockImplementationOnce(async () => {
+			entered.resolve();
+			await release.promise;
+			return "consumed";
+		});
+		const submitting = harness.editor.onSubmit?.("/plan inspect [Image #1]");
+		await entered.promise;
+		const newerImage: ImageContent = { type: "image", data: "bmV3", mimeType: "image/jpeg" };
+		harness.editor.setText("newer [Image #1]");
+		replaceImages(harness.editor, [newerImage], ["file:///newer.jpeg"]);
+		release.resolve();
+		await submitting;
+
+		expect(harness.editor.expandedText()).toBe("/plan inspect [Image #2]\n\nnewer [Image #1]");
+		expect(harness.editor.pendingImages).toEqual([
+			newerImage,
+			{ type: "image", data: "b2xk", mimeType: "image/png" },
+		]);
+		expect(harness.editor.pendingImageLinks).toEqual(["file:///newer.jpeg", "file:///old.png"]);
 	});
 
 	it("detaches submitted images before awaiting input extensions", async () => {
@@ -129,6 +297,25 @@ describe("mode command attachments", () => {
 		expect(harness.editor.pendingImages).toEqual([laterImage]);
 		expect(harness.editor.pendingImageLinks).toEqual(["file:///later.png"]);
 	});
+
+	it("keeps an identical mode draft retyped while its input hook awaited", async () => {
+		const inputResult = Promise.withResolvers<{ images?: ImageContent[]; text?: string }>();
+		const harness = createHarness(inputResult.promise);
+		const command = "/plan inspect [Image #1]";
+		const submitting = harness.editor.onSubmit?.(command);
+		const newerImage: ImageContent = { type: "image", data: "bmV3", mimeType: "image/png" };
+		harness.editor.setText(command);
+		harness.editor.pendingImages.push(newerImage);
+		harness.editor.pendingImageLinks.push("file:///newer.png");
+		inputResult.resolve({});
+		await submitting;
+
+		expect(harness.handlePlanModeCommand).toHaveBeenCalled();
+		expect(harness.editor.expandedText()).toBe(command);
+		expect(harness.editor.pendingImages).toEqual([newerImage]);
+		expect(harness.editor.pendingImageLinks).toEqual(["file:///newer.png"]);
+	});
+
 	it("preserves later images when an extension rewrites input into a mode command", async () => {
 		const inputResult = Promise.withResolvers<{ images?: ImageContent[]; text?: string }>();
 		const harness = createHarness(inputResult.promise);

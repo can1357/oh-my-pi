@@ -629,3 +629,39 @@ describe("IME-safe cursor layout", () => {
 		expect(rows.at(-1)).not.toBe(`╰${"─".repeat(18)}╯`);
 	});
 });
+
+describe("rich composer draft snapshots", () => {
+	test("restores the cursor, Vim mode, paste expansion, chip links, and independent attachment numbering", () => {
+		const { composer, type } = make({ vim: true });
+		const image = { type: "image" as const, data: "aGVsbG8=", mimeType: "image/png" };
+		composer.insertAtom(composer.chipLabel("image", 1), "[Image #1]", {
+			kind: "image",
+			image,
+			link: "/tmp/image.png",
+		});
+		composer.insertTextAttachment("first\nsecond");
+		type("\x1b"); // Vim Normal mode
+		type("0"); // Move cursor to start of the same line
+		const text = composer.text();
+		const cursor = composer.cursor();
+		const draft = composer.captureDraft();
+
+		composer.clearDraft({ recall: false });
+		composer.insertTextAttachment("unrelated");
+		expect(composer.expandedText()).toContain("unrelated");
+		composer.clearDraft({ recall: false });
+		composer.restoreDraft(draft);
+
+		expect(composer.text()).toBe(text);
+		expect(composer.cursor()).toBe(cursor);
+		expect(composer.vimMode()).toBe("normal");
+		expect(composer.expandedText()).toContain("[Image #1]");
+		expect(composer.expandedText()).toContain("first\nsecond");
+		expect(composer.chips().map(chip => chip.kind)).toEqual(["image", "paste"]);
+		expect(composer.pendingImages).toEqual([image]);
+		expect(composer.pendingImageLinks).toEqual(["/tmp/image.png"]);
+		composer.insertTextAttachment("third");
+		expect(composer.chips().at(-1)?.n).toBe(2);
+		expect(composer.expandedText()).toContain("third");
+	});
+});
