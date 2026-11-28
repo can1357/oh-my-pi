@@ -23,12 +23,12 @@ class FailingPublishBackend implements SessionStorageBackend {
 		return Promise.resolve([]);
 	}
 
-	readFull(): Promise<string | null> {
+	readFull(): Promise<null> {
 		return Promise.resolve(null);
 	}
 
-	readSlices(): Promise<[string, string]> {
-		return Promise.resolve(["", ""]);
+	readSlices(): Promise<[string, string, undefined]> {
+		return Promise.resolve(["", "", undefined]);
 	}
 
 	writeFull(): Promise<void> {

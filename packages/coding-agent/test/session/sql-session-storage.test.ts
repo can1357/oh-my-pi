@@ -7,14 +7,54 @@
  */
 
 import { describe, expect, it } from "bun:test";
-import { serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
+import { type SessionTitleUpdate, serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 import { SqlSessionStorage, type SqlSessionStorageClient } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import { SQL } from "bun";
 
 async function createSqlite(): Promise<{ client: InstanceType<typeof SQL>; storage: SqlSessionStorage }> {
 	const client = new SQL("sqlite::memory:");
 	const storage = await SqlSessionStorage.create({ client });
 	return { client, storage };
+}
+
+/**
+ * {@link createSqlite} whose client `cleanup` ends, registered before the store opens: it ends with the case, also when
+ * the store fails to open or an assertion fails.
+ */
+async function openSqlite(
+	cleanup: AsyncDisposableStack,
+): Promise<{ client: InstanceType<typeof SQL>; storage: SqlSessionStorage }> {
+	const client = new SQL("sqlite::memory:");
+	cleanup.defer(() => client.end());
+	return { client, storage: await SqlSessionStorage.create({ client }) };
+}
+
+const SESSION_HEADER = `${JSON.stringify({ type: "session", id: "s", timestamp: "t1", cwd: "/repo" })}\n`;
+
+/** The first line every reader of `storage` gives `path`: its text, its head slice and its line scan. */
+async function headsOf(storage: SqlSessionStorage, path: string): Promise<Record<string, string>> {
+	const firstLine = (text: string): string => text.split("\n")[0] ?? "";
+	let scanned = "";
+	await storage.scanLines(path, line => {
+		scanned = line;
+		return true;
+	});
+	return {
+		readText: firstLine(await storage.readText(path)),
+		readTextSlices: firstLine((await storage.readTextSlices(path, 4096, 0))[0]),
+		scanLines: scanned,
+	};
+}
+
+/** `line` as the first line of every reader {@link headsOf} asks. */
+function everywhere(line: string): Record<string, string> {
+	return { readText: line, readTextSlices: line, scanLines: line };
+}
+
+/** The title slot `update` makes, as a line. */
+function slotLine(update: SessionTitleUpdate): string {
+	return serializeTitleSlot(update).slice(0, -1);
 }
 
 describe("SqlSessionStorage (SQLite backend)", () => {
@@ -262,6 +302,33 @@ describe("SqlSessionStorage (SQLite backend)", () => {
 		await client.end();
 	});
 
+	// If this regresses, a title update for a session another process deleted resolves as if stored: the session
+	// manager then marks the session current instead of rewriting it, so the session stays missing from the table.
+	// The PostgreSQL and MySQL legs are in indexed-session-index-entry.test.ts.
+	it("rejects a title update with ENOENT when another process deleted the session's row, and leaves the session deleted", async () => {
+		await using cleanup = new AsyncDisposableStack();
+		// A database file, so a second client reaches the table the store's client does; removed after both end.
+		const dir = await TempDir.create("@omp-sql-title-");
+		cleanup.defer(() => dir.remove());
+		const connect = (): InstanceType<typeof SQL> => {
+			const client = new SQL({ adapter: "sqlite", filename: dir.join("sessions.db") });
+			cleanup.defer(() => client.end());
+			return client;
+		};
+		const storage = await SqlSessionStorage.create({ client: connect() });
+		const sessionPath = "/sessions/p/deleted.jsonl";
+		await storage.writeText(sessionPath, SESSION_HEADER);
+		const other = connect();
+		await other.unsafe(`DELETE FROM omp_session_files WHERE path = ?`, [sessionPath]);
+
+		await expect(
+			storage.updateSessionTitle(sessionPath, { title: "Stale", source: "user", updatedAt: "t2" }),
+		).rejects.toMatchObject({ code: "ENOENT" });
+		expect(
+			Array.from(await other.unsafe(`SELECT path FROM omp_session_files WHERE path = ?`, [sessionPath])),
+		).toEqual([]);
+	}, 30_000);
+
 	it("refresh() reloads the mirror from SQL after out-of-band writes", async () => {
 		const { client, storage } = await createSqlite();
 		// Simulate a peer process inserting directly.
@@ -331,6 +398,123 @@ describe("SqlSessionStorage (SQLite backend)", () => {
 		});
 		await client.end();
 	});
+
+	// If this regresses, a store that opened a session before another store renamed or cleared its title shows the
+	// old title until it refreshes, a cleared title shows the one the stored head carries, or a row written before
+	// title metadata existed shows a title it never had.
+	it("reads another store's rename and clear without a refresh, and a row without title metadata as stored", async () => {
+		await using cleanup = new AsyncDisposableStack();
+		const { client, storage } = await openSqlite(cleanup);
+		const peer = await SqlSessionStorage.create({ client });
+		const sessionPath = "/s/peer.jsonl";
+		const old: SessionTitleUpdate = { title: "Old", source: "auto", updatedAt: "t1" };
+		await storage.writeText(sessionPath, `${serializeTitleSlot(old)}${SESSION_HEADER}`);
+		await peer.refresh();
+		const before = await headsOf(peer, sessionPath);
+		const renamed: SessionTitleUpdate = { title: "New", source: "user", updatedAt: "t2" };
+		await storage.updateSessionTitle(sessionPath, renamed);
+		const afterRename = await headsOf(peer, sessionPath);
+		const cleared: SessionTitleUpdate = { title: "", source: "user", updatedAt: "t3" };
+		await storage.updateSessionTitle(sessionPath, cleared);
+		const afterClear = await headsOf(peer, sessionPath);
+
+		// Rows as a build before title metadata wrote them: NULL title columns.
+		const storedSlot = serializeTitleSlot({ title: "Stored", source: "auto", updatedAt: "t0" });
+		for (const [rowPath, content] of [
+			["/s/stored-slot.jsonl", `${storedSlot}${SESSION_HEADER}`],
+			["/s/legacy.jsonl", SESSION_HEADER],
+		]) {
+			await client.unsafe(`INSERT INTO omp_session_files (path, content, mtime_ms) VALUES (?, ?, ?)`, [
+				rowPath,
+				content,
+				1,
+			]);
+		}
+		await peer.refresh();
+		expect({
+			before,
+			afterRename,
+			afterClear,
+			storedSlot: await headsOf(peer, "/s/stored-slot.jsonl"),
+			legacy: await peer.readText("/s/legacy.jsonl"),
+			legacyHeads: await headsOf(peer, "/s/legacy.jsonl"),
+		}).toEqual({
+			before: everywhere(slotLine(old)),
+			afterRename: everywhere(slotLine(renamed)),
+			afterClear: everywhere(slotLine(cleared)),
+			storedSlot: everywhere(storedSlot.slice(0, -1)),
+			legacy: SESSION_HEADER,
+			legacyHeads: everywhere(SESSION_HEADER.slice(0, -1)),
+		});
+	}, 30_000);
+
+	// If this regresses, the title of what a path held before shows over what it holds next: after a rewrite with
+	// no title slot, after its writer empties it, or on the path a session was moved onto.
+	it("carries no earlier title over a rewrite without one, a truncation, or a move onto a titled path", async () => {
+		await using cleanup = new AsyncDisposableStack();
+		const { client, storage } = await openSqlite(cleanup);
+		const peer = await SqlSessionStorage.create({ client });
+		const titled = `${serializeTitleSlot({ title: "Before", source: "user", updatedAt: "t1" })}${SESSION_HEADER}`;
+		for (const sessionPath of ["/s/rewritten.jsonl", "/s/truncated.jsonl", "/s/target.jsonl"]) {
+			await storage.writeText(sessionPath, titled);
+			await storage.updateSessionTitle(sessionPath, { title: "Renamed before", source: "user", updatedAt: "t2" });
+		}
+		await storage.writeText("/s/moved.jsonl", SESSION_HEADER);
+
+		await storage.writeText("/s/rewritten.jsonl", SESSION_HEADER);
+		const writer = storage.openWriter("/s/truncated.jsonl", { flags: "w" });
+		cleanup.defer(() => writer.close());
+		await writer.append(SESSION_HEADER);
+		await writer.close();
+		await storage.rename("/s/moved.jsonl", "/s/target.jsonl");
+		await storage.drain();
+
+		await peer.refresh();
+		const header = everywhere(SESSION_HEADER.slice(0, -1));
+		for (const view of [storage, peer]) {
+			expect({
+				rewritten: await headsOf(view, "/s/rewritten.jsonl"),
+				truncated: await headsOf(view, "/s/truncated.jsonl"),
+				target: await headsOf(view, "/s/target.jsonl"),
+			}).toEqual({ rewritten: header, truncated: header, target: header });
+		}
+	}, 30_000);
+
+	// If this regresses, a title update the database never stored shows on this store (or its time does) until a
+	// refresh, or a later update after a failed one is lost on another store.
+	it("keeps the durable title and time on this store and another when a title write fails before it commits, and a later one wins", async () => {
+		await using cleanup = new AsyncDisposableStack();
+		const { client, storage } = await openSqlite(cleanup);
+		const peer = await SqlSessionStorage.create({ client });
+		const sessionPath = "/s/failed-title.jsonl";
+		const durable: SessionTitleUpdate = { title: "Durable", source: "auto", updatedAt: "t1" };
+		await storage.writeText(sessionPath, `${serializeTitleSlot(durable)}${SESSION_HEADER}`);
+		await peer.refresh();
+		const before = storage.statSync(sessionPath).mtimeMs;
+
+		await client.unsafe(
+			`CREATE TRIGGER reject_title_write BEFORE UPDATE OF title ON omp_session_files ` +
+				`BEGIN SELECT RAISE(ABORT, 'title write refused'); END`,
+		);
+		await expect(
+			storage.updateSessionTitle(sessionPath, { title: "Lost", source: "user", updatedAt: "t2" }),
+		).rejects.toThrow("title write refused");
+		const afterFailure = {
+			local: await headsOf(storage, sessionPath),
+			peer: await headsOf(peer, sessionPath),
+			time: storage.statSync(sessionPath).mtimeMs,
+		};
+		await client.unsafe("DROP TRIGGER reject_title_write");
+		const later: SessionTitleUpdate = { title: "Later", source: "user", updatedAt: "t3" };
+		await storage.updateSessionTitle(sessionPath, later);
+		expect({
+			afterFailure,
+			afterLater: { local: await headsOf(storage, sessionPath), peer: await headsOf(peer, sessionPath) },
+		}).toEqual({
+			afterFailure: { local: everywhere(slotLine(durable)), peer: everywhere(slotLine(durable)), time: before },
+			afterLater: { local: everywhere(slotLine(later)), peer: everywhere(slotLine(later)) },
+		});
+	}, 30_000);
 
 	it("readTextSlices uses bounded SQL byte substrings instead of a full content select", async () => {
 		const client = new SQL("sqlite::memory:");

@@ -14,6 +14,7 @@ import { describe, expect, it } from "bun:test";
 import {
 	IndexedSessionStorage,
 	type SessionStorageBackend,
+	type SessionStorageFullRead,
 	type SessionStorageIndexEntry,
 } from "@oh-my-pi/pi-coding-agent/session/indexed-session-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -40,15 +41,16 @@ class FakeBackend implements SessionStorageBackend {
 		}));
 	}
 
-	async readFull(path: string): Promise<string | null> {
-		return this.files.get(path) ?? null;
+	async readFull(path: string): Promise<SessionStorageFullRead | null> {
+		const text = this.files.get(path);
+		return text === undefined ? null : { text, title: undefined };
 	}
 
-	async readSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]> {
+	async readSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string, undefined]> {
 		const bytes = Buffer.from(this.files.get(path) ?? "", "utf8");
 		const prefix = bytes.subarray(0, prefixBytes).toString("utf8");
 		const suffix = suffixBytes > 0 ? bytes.subarray(Math.max(0, bytes.length - suffixBytes)).toString("utf8") : "";
-		return [prefix, suffix];
+		return [prefix, suffix, undefined];
 	}
 
 	async append(path: string, line: string): Promise<void> {
