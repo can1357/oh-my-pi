@@ -230,7 +230,8 @@ export class AppFrame {
 
 	/**
 	 * Start rendering on the process terminal, focus resting on the composer; `clearHistory`
-	 * clears the terminal's scrollback first (a fresh screen for an inline session).
+	 * erases the terminal's screen and scrollback with the first frame (a fresh screen for an
+	 * inline session).
 	 */
 	async start(options: AppFrameStartOptions): Promise<void> {
 		// Before the host starts: keys typed while it probes the terminal are delivered to the focused node.
@@ -257,9 +258,9 @@ export class AppFrame {
 			exitTranscript: this.exitTranscript,
 			fullscreenMouse: this.fullscreenMouse,
 			...(this.#terminal?.clock ? { clock: this.#terminal.clock } : {}),
+			// A fresh screen is an inline concern: the fullscreen session leaves the shell's scrollback alone.
+			...(options.clearHistory && this.screen.peek() === "inline" ? { clear: true } : {}),
 		});
-		// A fresh screen is an inline concern: the fullscreen session leaves the shell's scrollback alone.
-		if (options.clearHistory && this.screen.peek() === "inline") this.shell.host?.replayHistory();
 		// Tern draws omp's icons with its own Nerd Font: a native surface always uses those symbols.
 		if (this.shell.native()) await setSymbolPreset("nerd");
 	}

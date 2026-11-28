@@ -89,6 +89,12 @@ export interface HostOptions extends Pick<
 	/** Driver configuration (resize policy, image budget, test streams). */
 	readonly driver?: TerminalDriverOptions;
 	/**
+	 * Start the terminal renderer on an erased display: its first frame clears the screen and
+	 * scrollback in the same write, so it never shows below what the terminal held. Not applied
+	 * when the surface opens natively.
+	 */
+	readonly clear?: boolean;
+	/**
 	 * Called synchronously right before the in-process terminal renderer starts
 	 * (initial rows launch or optimistic-Tern fallback). Lets callers register
 	 * terminal-only painters lazily so native Tern sessions never load them.
@@ -557,6 +563,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			}
 		},
 	};
+	if (!connection && options.clear) driver.resetDisplay();
 	renderer = connection ? nativeRenderer(connection) : termRenderer();
 	offEarly();
 	for (const event of early) if (!options.intercept?.(event)) renderer.dispatch(event);

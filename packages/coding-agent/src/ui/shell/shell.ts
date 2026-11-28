@@ -58,7 +58,14 @@ import { Transcript } from "./transcript";
 /** Configuration of {@link Shell.start}. */
 export interface ShellStartOptions extends Pick<
 	HostOptions,
-	"screen" | "copyOnSelect" | "wheelLines" | "scrollbar" | "exitTranscript" | "spinnerInterval" | "reduceMotion"
+	| "screen"
+	| "copyOnSelect"
+	| "wheelLines"
+	| "scrollbar"
+	| "exitTranscript"
+	| "spinnerInterval"
+	| "reduceMotion"
+	| "clear"
 > {
 	readonly theme: Accessor<Theme>;
 	readonly title?: string;
@@ -204,6 +211,7 @@ export class Shell {
 			...(options.wheelLines ? { wheelLines: options.wheelLines } : {}),
 			...(options.scrollbar ? { scrollbar: options.scrollbar } : {}),
 			...(options.exitTranscript ? { exitTranscript: options.exitTranscript } : {}),
+			...(options.clear ? { clear: true } : {}),
 			beforeTerminalRenderer: ensureTerminalStylesLoaded,
 		});
 		this.#host = host;
