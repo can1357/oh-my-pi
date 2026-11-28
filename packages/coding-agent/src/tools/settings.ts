@@ -1135,6 +1135,35 @@ export const cfgAsyncMaxJobs = register({
 	default: 100,
 });
 
+export const cfgWaitMaxMs = register({
+	id: "wait.maxMs",
+	type: "number",
+	default: 30 * 60_000,
+	ui: {
+		tab: "tools",
+		group: "Execution",
+		label: "Wait Safety Cap",
+		description:
+			"Longest a `wait` call blocks on still-running background work before it returns a snapshot, in milliseconds. Set to 0 to wait until a result, a message, or a steering interrupt.",
+		options: [
+			{ value: "0", label: "No cap" },
+			{ value: "1800000", label: "30 minutes" },
+			{ value: "3600000", label: "1 hour" },
+			{ value: "7200000", label: "2 hours" },
+		],
+	},
+	// 0 is the explicit no-cap escape; anything else must be a real delay the timer can take
+	// (setTimeout overflows past 2^31-1 ms and fires immediately, and a negative would read as 0).
+	validate: raw => {
+		if (raw === undefined || raw === null) return;
+		if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 0 || raw > 2_147_483_647) {
+			throw new Error(
+				`Invalid wait.maxMs: expected 0 (no cap) or a positive number of milliseconds up to 2147483647, got ${Bun.inspect(raw)}.`,
+			);
+		}
+	},
+});
+
 // Print mode is single-shot by default: it disposes after the last prompt, cancelling the
 // run's background jobs. Opting in keeps `-p` alive so each job's async-result wakes the same
 // session, as the TUI does, before exiting (issue #10363).

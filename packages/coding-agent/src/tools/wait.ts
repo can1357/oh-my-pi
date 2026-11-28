@@ -24,7 +24,7 @@ import type { IrcMessage } from "../irc/irc-types";
 import type { CoordinationDetails } from "./details/wait";
 import { throwIfAborted } from "./tool-errors";
 
-import { cfgLaunchEnabled, type WaitIdleTimeout, waitIdleTimeout } from "./settings";
+import { cfgLaunchEnabled, cfgWaitMaxMs, type WaitIdleTimeout, waitIdleTimeout } from "./settings";
 
 const waitSchema = type({});
 /**
@@ -148,8 +148,8 @@ interface PendingReplies {
  * Agents the caller messaged during its current run that have not answered
  * yet, split by whether a reply can still come. A message back answers, and
  * so does a settled job of the agent the caller owns, which delivers its
- * result. A running agent, or one still holding the question for a turn of
- * its own (a subagent answers a message that reached it as it finished after
+ * result. A running agent, or one still holding the question for a turn
+ * of its own (a subagent answers a message that reached it as it finished after
  * its result is out), can answer, and so can a live one that sent progress
  * promising a later reply while something can still wake it. Any other idle
  * agent has finished the turn it got the question in, and any automatic reply
@@ -539,7 +539,8 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 			message: replyWait,
 		});
 		const { promise: timeout, resolve: timedOut } = Promise.withResolvers<void>();
-		const timer = span ? setTimeout(timedOut, span.ms) : undefined;
+		const maxMs = cfgWaitMaxMs.get(this.session.settings);
+		const timer = span && maxMs > 0 ? setTimeout(timedOut, Math.min(span.ms, maxMs)) : undefined;
 		const abort = Promise.withResolvers<void>();
 		const onAbort = () => abort.resolve();
 		if (signal) {
