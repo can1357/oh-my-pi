@@ -44,7 +44,8 @@ describe("color depth", () => {
 	});
 
 	it("resolves a whole theme at the requested depth", () => {
-		const dark = builtinThemes().dark!;
+		const builtin = builtinThemes().dark!;
+		const dark = { ...builtin, colors: { ...builtin.colors, muted: "#777d88" } };
 		expect(createTheme(dark, { depth: "truecolor" }).fg("muted", "x")).toBe("\x1b[38;2;119;125;136mx\x1b[39m");
 		expect(createTheme(dark, { depth: "256" }).fg("muted", "x")).toBe("\x1b[38;5;244mx\x1b[39m");
 		expect(createTheme(dark, { depth: "16" }).fg("muted", "x")).toMatch(/^\x1b\[(?:3[0-7]|9[0-7])mx\x1b\[39m$/);

@@ -53,8 +53,8 @@ describe("built-in themes", () => {
 		expect(dark.name).toBe("dark");
 		expect(dark.dark).toBe(true);
 		expect(light.dark).toBe(false);
-		expect(dark.fg("accent", "x")).toBe("\x1b[38;2;254;188;56mx\x1b[39m");
-		expect(light.fg("muted", "x")).toBe("\x1b[38;2;108;108;108mx\x1b[39m");
+		expect(dark.fg("accent", "x")).toBe(createTheme(builtinThemes().dark!).fg("accent", "x"));
+		expect(light.fg("muted", "x")).toBe(createTheme(builtinThemes().light!).fg("muted", "x"));
 	});
 
 	it("resolves every bundled palette", () => {

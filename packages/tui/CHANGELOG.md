@@ -26,6 +26,10 @@
 - Added `tool.gl` symbols to the Unicode, Nerd Font, and ASCII presets for the GitLab tool.
 - Terminal painters can attach one-shot marks to rows as they enter scrollback without re-emitting them on redraw.
 
+### Changed
+
+- Updated dark and light theme color palettes for improved readability and consistency
+
 ### Fixed
 
 - Kept a bottom-aligned inline dock on the last row when replaying changed transcript rows, replacing retired blocks, or rebuilding the normal screen after a resize. An explicit display reset still starts a fresh viewport ([#20912](https://github.com/can1357/oh-my-pi/pull/20912) by [@thebtf](https://github.com/thebtf))

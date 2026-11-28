@@ -54,8 +54,9 @@ describe("fg / bg", () => {
 	});
 
 	it("paints terminal.ansi slots, or the terminal's own slot when the theme has none", () => {
-		expect(dark.palette(5, "x")).toBe("\x1b[38;2;188;63;188mx\x1b[39m");
 		const json: ThemeJson = structuredClone(builtinThemes().dark!);
+		json.terminal!.ansi![5] = "#bc3fbc";
+		expect(createTheme(json).palette(5, "x")).toBe("\x1b[38;2;188;63;188mx\x1b[39m");
 		delete json.terminal;
 		expect(createTheme(json).palette(5, "x")).toBe("\x1b[38;5;5mx\x1b[39m");
 	});
