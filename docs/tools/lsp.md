@@ -265,6 +265,7 @@ Uses the same location normalization and output shape as `definition`, but sends
 - Workspace mode invalidates the per-cwd configuration cache, reloads configuration from disk, stops clients whose initialization identity is absent from the new configuration, then reloads every newly configured non-custom LSP server. A teardown failure is surfaced rather than leaving a duplicate stale client silently running. Checkouts added as workspace folders stay added until the client exits.
 - Single-file mode keeps the cached configuration and reloads the primary server for that file.
 - Both modes clear matching recent initialization failures before starting a server. For rust-analyzer, `reloadServer()` first sends `rust-analyzer/reloadWorkspace`; success returns immediately, method-not-found falls back, and other errors propagate. Generic reload sends a `workspace/didChangeConfiguration` notification carrying configured settings, then refreshes open files. If delivery fails, it tears down the client and confirms process exit so the next request cold-starts it. Shared-mux teardown first sends the mux restart notification.
+- When `typescript-language-server` reports that its TypeScript analysis child exited, requests fail instead of returning empty results. Both reload modes stop the wrapper so the next request starts a fresh process.
 
 **Output text**
 

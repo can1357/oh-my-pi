@@ -6885,6 +6885,52 @@ describe("lsp regressions", () => {
 	});
 
 	describe("reload and truthful teardown", () => {
+		for (const scope of ["single-file", "workspace"] as const) {
+			it(`restarts typescript-language-server on ${scope} reload without a configuration change (#19238)`, async () => {
+				const tempDir = TempDir.createSync("@omp-lsp-typescript-restart-");
+				const cwd = tempDir.path();
+				try {
+					const sourcePath = path.join(cwd, "index.ts");
+					const source = "export const answer = 42;\n";
+					await Bun.write(sourcePath, source);
+					const config: ServerConfig = {
+						command: "typescript-language-server",
+						resolvedCommand: process.execPath,
+						args: ["run", path.join(import.meta.dir, "..", "fixtures", "fake-lsp-server.ts")],
+						fileTypes: [".ts"],
+						rootMarkers: [],
+						watchFiles: false,
+					};
+					const name = scope === "workspace" ? config.command : "custom-typescript";
+					vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: { [name]: config } });
+
+					const oldClient = await lspClient.getOrCreateClient(config, cwd, 5_000);
+					const tool = new LspTool(makeLspSession(cwd));
+					const reloaded = await tool.execute("reload-typescript", {
+						action: "reload",
+						file: scope === "workspace" ? "*" : sourcePath,
+					});
+					expect(textResult(reloaded)).toContain(`Restarted ${name}`);
+					expect(oldClient.proc.exitCode).toBe(0);
+
+					const result = await tool.execute("request-after-typescript-reload", {
+						action: "request",
+						file: sourcePath,
+						query: "test/documentText",
+						payload: JSON.stringify({ uri: fileToUri(sourcePath) }),
+					});
+					expect(textResult(result)).toContain(source);
+					const replacement = await lspClient.getActiveOrPendingClient(config, cwd);
+					expect(replacement?.proc.pid).toBeGreaterThan(0);
+					expect(replacement?.proc.pid).not.toBe(oldClient.proc.pid);
+				} finally {
+					configCache.delete(cwd);
+					await lspClient.shutdownAll();
+					tempDir.removeSync();
+				}
+			}, 15_000);
+		}
+
 		it("refreshes open document diagnostics after a generic reload", async () => {
 			const tempDir = TempDir.createSync("@omp-lsp-reload-diagnostics-");
 			try {
@@ -7326,6 +7372,79 @@ describe("lsp regressions", () => {
 		});
 	});
 	describe("reader exit ordering (#7041)", () => {
+		it("rejects a request on a stale client with the process exit diagnostic (#19238)", async () => {
+			const server = installFakeLsp(
+				(message, srv) => {
+					if (message.method === "initialize") {
+						srv.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
+					}
+				},
+				{ stderr: "[10:00:00 INF] started\nsimulated LSP crash" },
+			);
+			const tempDir = TempDir.createSync("@omp-lsp-stale-client-");
+			try {
+				const config: ServerConfig = { command: "fake-lsp", fileTypes: [".ts"], rootMarkers: [] };
+				const client = await lspClient.getOrCreateClient(config, tempDir.path(), 1_000);
+				server.exit(23);
+				// Cleanup is registered first. This client's fake stdin still accepts a write
+				// after exit, so the request would otherwise wait for its own deadline.
+				await client.proc.exited;
+				const params = {
+					textDocument: { uri: fileToUri(path.join(tempDir.path(), "index.ts")) },
+					position: { line: 0, character: 0 },
+					context: { includeDeclaration: true },
+				};
+				const request = lspClient.sendRequest(client, "textDocument/references", params, undefined, 50);
+				await expect(request).rejects.toThrow("LSP server exited (code 23): simulated LSP crash");
+			} finally {
+				await lspClient.shutdownAll();
+				tempDir.removeSync();
+			}
+		});
+
+		it("rejects TypeScript results after the wrapper reports its tsserver child exited (#19238)", async () => {
+			let childExited = false;
+			installFakeLsp((message, srv) => {
+				if (message.method === "initialize") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: { referencesProvider: true } } });
+				} else if (message.method === "textDocument/references") {
+					if (childExited) {
+						srv.send({
+							jsonrpc: "2.0",
+							method: "window/logMessage",
+							params: { type: 1, message: "[tsclient] [tsserver] Exited. Code: null. Signal: SIGABRT" },
+						});
+					}
+					srv.send({ jsonrpc: "2.0", id: message.id, result: [] });
+				}
+			});
+			const tempDir = TempDir.createSync("@omp-lsp-tsserver-exit-");
+			try {
+				const config: ServerConfig = { command: "typescript-language-server", fileTypes: [".ts"], rootMarkers: [] };
+				const client = await lspClient.getOrCreateClient(config, tempDir.path(), 1_000);
+				const reference = () =>
+					lspClient.sendRequest(
+						client,
+						"textDocument/references",
+						{
+							textDocument: { uri: fileToUri(path.join(tempDir.path(), "index.ts")) },
+							position: { line: 0, character: 0 },
+							context: { includeDeclaration: true },
+						},
+						undefined,
+						1_000,
+					);
+				expect(await reference()).toEqual([]);
+				childExited = true;
+				await expect(reference()).rejects.toThrow(/tsserver.*SIGABRT.*lsp reload/);
+				await expect(reference()).rejects.toThrow(/tsserver.*SIGABRT/);
+				expect(lspClient.getActiveClients().find(server => server.name === config.command)?.status).toBe("error");
+			} finally {
+				await lspClient.shutdownAll();
+				tempDir.removeSync();
+			}
+		});
+
 		it("surfaces the process diagnostic when stdout closes before exit publication", async () => {
 			installFakeLsp(
 				(message, server) => {

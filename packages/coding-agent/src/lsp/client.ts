@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { glob } from "@oh-my-pi/pi-natives";
 import {
 	isEnoent,
+	isRecord,
 	logger,
 	pathIsWithinLexical,
 	postmortem,
@@ -84,6 +85,7 @@ export class LspRequestTimeoutError extends Error {
 // =============================================================================
 
 const clients = new Map<string, LspClient>();
+const clientExitErrors = new WeakMap<LspClient, Error>();
 interface PendingClient {
 	promise: Promise<LspClient>;
 	cwd: string;
@@ -758,6 +760,20 @@ async function startMessageReader(client: LspClient): Promise<void> {
 								if (params.state === "idle") status.idleSeq = seq;
 								else status.busySeq = seq;
 								buildStatus.set(params.uri, status);
+							} else if (message.method === "window/logMessage" && isTypeScriptLanguageServerClient(client)) {
+								const params = message.params;
+								// The wrapper may stay alive and return empty success after tsserver exits.
+								// Its error notification distinguishes that from a healthy empty response.
+								if (
+									isRecord(params) &&
+									params.type === 1 &&
+									typeof params.message === "string" &&
+									/^\[tsclient\] \[tsserver\] Exited(?:\. Code: | with error\. )/.test(params.message)
+								) {
+									client.status = "error";
+									recordClientExit(client, new Error(`${params.message} Run lsp reload to restart TypeScript analysis.`));
+									client.resolveProjectLoaded();
+								}
 							}
 						}
 					} else if ("id" in message && message.id !== undefined) {
@@ -1389,6 +1405,25 @@ export function isRustAnalyzerClient(client: LspClient): boolean {
 	);
 }
 
+const TYPESCRIPT_LANGUAGE_SERVER_BASENAME_RE = /^typescript-language-server(?:\.cmd|\.exe)?$/i;
+
+export function isTypeScriptLanguageServerClient(client: LspClient): boolean {
+	const { command, resolvedCommand } = client.config;
+	return (
+		TYPESCRIPT_LANGUAGE_SERVER_BASENAME_RE.test(commandBasename(command)) ||
+		(resolvedCommand !== undefined && TYPESCRIPT_LANGUAGE_SERVER_BASENAME_RE.test(commandBasename(resolvedCommand)))
+	);
+}
+
+function recordClientExit(client: LspClient, error: Error): void {
+	const failure = clientExitErrors.get(client) ?? error;
+	clientExitErrors.set(client, failure);
+	for (const pending of client.pendingRequests.values()) {
+		pending.reject(failure);
+	}
+	client.pendingRequests.clear();
+}
+
 const CLANGD_BASENAME_RE = /^clangd(?:-\d+)?(?:\.exe)?$/i;
 
 /** True when the configured or resolved binary is clangd (`clangd`, `clangd-18`, `clangd.exe`). */
@@ -1721,30 +1756,25 @@ export async function getOrCreateClient(
 
 		// Register crash recovery - remove client on process exit
 		proc.exited.then(() => {
+			// Strip informational log lines (e.g. marksman's [INF]/[DBG] prefix)
+			// — they are startup noise, not actionable errors.
+			const stderr = proc
+				.peekStderr()
+				.trim()
+				.split("\n")
+				.filter(line => !/^\[\d{2}:\d{2}:\d{2} (?:INF|DBG|VRB)\]/.test(line))
+				.join("\n")
+				.trim();
+			const code = proc.exitCode;
+			const err = new Error(
+				stderr ? `LSP server exited (code ${code}): ${stderr}` : `LSP server exited unexpectedly (code ${code})`,
+			);
 			if (clients.get(key) === client) clients.delete(key);
 			maybeStopIdleChecker();
 			client.resolveProjectLoaded();
 			client.watchedFiles?.close();
 
-			// Reject any pending requests — the server is gone, they will never complete.
-			if (client.pendingRequests.size > 0) {
-				// Strip informational log lines (e.g. marksman's [INF]/[DBG] prefix)
-				// — they are startup noise, not actionable errors.
-				const rawStderr = proc.peekStderr().trim();
-				const stderr = rawStderr
-					.split("\n")
-					.filter(line => !/^\[\d{2}:\d{2}:\d{2} (?:INF|DBG|VRB)\]/.test(line))
-					.join("\n")
-					.trim();
-				const code = proc.exitCode;
-				const err = new Error(
-					stderr ? `LSP server exited (code ${code}): ${stderr}` : `LSP server exited unexpectedly (code ${code})`,
-				);
-				for (const pending of client.pendingRequests.values()) {
-					pending.reject(err);
-				}
-				client.pendingRequests.clear();
-			}
+			recordClientExit(client, err);
 		});
 
 		// Start background message reader. The client is shared by every session
@@ -2716,13 +2746,15 @@ function sendRequestOnce(
 	signal?: AbortSignal,
 	timeoutMs?: number,
 ): Promise<unknown> {
-	// Atomically increment and capture request ID
-	const id = ++client.requestId;
 	if (signal?.aborted) {
 		const reason = signal.reason instanceof Error ? signal.reason : new ToolAbortError();
 		return Promise.reject(reason);
 	}
+	// A caller can still hold the client after exit cleanup drained its pending requests.
+	const exitError = clientExitErrors.get(client);
+	if (exitError) return Promise.reject(exitError);
 
+	const id = ++client.requestId;
 	const request: LspJsonRpcRequest = {
 		jsonrpc: "2.0",
 		id,

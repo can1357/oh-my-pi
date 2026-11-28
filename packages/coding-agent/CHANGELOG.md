@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- LSP requests now report server exits, including TypeScript analysis child exits reported by the wrapper, instead of timing out or returning empty results. `lsp reload` restarts TypeScript analysis ([#19238](https://github.com/can1357/oh-my-pi/issues/19238)) ([#20459](https://github.com/can1357/oh-my-pi/pull/20459) by [@J4ck1e2000](https://github.com/J4ck1e2000)).
 ### Breaking Changes
 
 - `/fast`, `/ultrafast`, and `/computer` toggle without arguments and accept explicit `on` or `off`. Check their status with `/session info`. The legacy `/fast ultra` still enables Ultrafast.

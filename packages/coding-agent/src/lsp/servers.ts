@@ -5,6 +5,7 @@ import {
 	getActiveOrPendingClient,
 	getOrCreateClient,
 	isRustAnalyzerClient,
+	isTypeScriptLanguageServerClient,
 	listCargoManifests,
 	type LspServerStatus,
 	notifySaved,
@@ -258,6 +259,11 @@ export function reloadConfigurationParams(config: ServerConfig): { settings: Rec
 
 export async function reloadServer(client: LspClient, serverName: string, signal?: AbortSignal): Promise<string> {
 	throwIfAborted(signal);
+	if (serverName === "typescript-language-server" || isTypeScriptLanguageServerClient(client)) {
+		// The wrapper can still acknowledge writes after its tsserver child dies.
+		// Replacing the wrapper, not refreshing its settings, recovers that child.
+		return restartServer(client, serverName);
+	}
 	// Gate on the binary: some servers (Roslyn) crash on an unknown method (#8571).
 	if (isRustAnalyzerClient(client) || serverName === "rust-analyzer") {
 		// reloadWorkspace refreshes only the projects found at initialize; a new crate needs a restart.
