@@ -90,6 +90,7 @@ import { prewarmModelConnection } from "@oh-my-pi/pi-ai/providers/connection-pre
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-state";
 import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { presentNarrationAsAnswer } from "@oh-my-pi/pi-ai/utils/narration";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { supportsOutputTokenLimit } from "@oh-my-pi/pi-catalog/compat/output-limits";
@@ -152,7 +153,7 @@ import {
 	withUpstreamPinOf,
 } from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
-import { isServiceTierForFamily, serviceTierSettingToTier } from "../config/service-tier";
+import { type FastServiceTier, isServiceTierForFamily, serviceTierSettingToTier } from "../config/service-tier";
 import { combine, type SettingsScope } from "../config/registry";
 import { type Settings, withActiveSettings } from "../config/settings";
 import { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
@@ -176,6 +177,7 @@ import type {
 	SessionBeforeSwitchResult,
 	SessionBeforeTreeResult,
 	SessionStopEventResult,
+	TodoBackendChange,
 	ToolInfo,
 	TreePreparation,
 } from "../extensibility/extensions";
@@ -280,7 +282,7 @@ import {
 	resumeComputerTurnForOwner,
 	resumeComputerUseForOwner,
 	revokeComputerControlForOwner,
-} from "../tools/computer/supervisor";
+} from "../tools/computer/owner-state";
 import { isAutoQaEnabled } from "../tools/report-tool-issue";
 import {
 	buildResolveReminderMessage,
@@ -294,7 +296,7 @@ import { toolCommandDispatches } from "../tools/tool-commands";
 import { PROPOSE_COMMAND_NAME, REJECT_COMMAND_NAME } from "../tools/details/resolve";
 import { supportsExternalThinking } from "../tools/think";
 import { USER_TODO_EDIT_CUSTOM_TYPE } from "../tools/todo";
-import type { TodoPhase } from "../tools/details/todo";
+import type { TodoApplyOutcome, TodoPhase } from "../tools/details/todo";
 import { ToolError } from "../tools/tool-errors";
 import { currentThreadId, isMainThread } from "../thread/identity";
 import { registerLocalSession } from "../thread/session-directory";
@@ -439,6 +441,7 @@ import {
 	type LaunchCompletionEntry,
 } from "./launch-completion";
 import {
+	assistantTurnDelivered,
 	type BashExecutionMessage,
 	buildReplanTitleContext,
 	buildTitleDriftTurns,
@@ -1454,7 +1457,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * bounded, so its system prompt already carries the MCP routes and instructions;
 	 * otherwise the prompt changes on the next turn and the provider prompt cache misses.
 	 */
-	#pendingMCPDiscovery: Promise<void> | undefined;
+	#pendingMCPDiscovery: Promise<void> | (() => Promise<void>) | undefined;
+	/** Whether a tool name belongs to an MCP server still in its startup connect (its mount is no change). */
+	#mcpStartupMount: ((toolName: string) => boolean) | undefined;
 	/**
 	 * Startup-deferred extensions (see `startup-deferral.ts`): the loader binding
 	 * them into this session, then its in-flight run once started. Submissions and
@@ -1569,6 +1574,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#yieldTerminationPending = false;
 	#synchronouslyTerminatedYieldToolCallIds = new Set<string>();
 	#providerSessionState = new Map<string, ProviderSessionState>();
+	/** Sessions a model switch took out of `#providerSessionState` and has not closed yet, with their keys. */
+	#retiredProviderSessions = new Map<ProviderSessionState, string>();
 	readonly #cacheWarmer: CacheWarmer | undefined;
 	/** Transcript the warmer was last armed for: its confirmed entry describes no other transcript. */
 	#promptCacheArmSessionId: string | undefined;
@@ -2843,6 +2850,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			clientBridge: () => this.#clientBridge,
 			agentKind: () => this.#agentKind,
 			isDisposed: () => this.#isDisposed,
+			mcpStartupMount: toolName => this.#mcpStartupMount?.(toolName) === true,
 			isStreaming: () => this.isStreaming,
 			steeringArrivalSignal: () => this.#steeringArrivalSignal(),
 			steeringArrivalSeq: () => this.#steeringArrivalSeq(),
@@ -4978,7 +4986,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
-	 * Drops queued `todo-error-reminder`s superseded by a successful `todo` call.
+	 * Drops queued `todo-error-reminder`s superseded by a successful `todo` call, or by one whose
+	 * valid payload a todo backend kept from committing.
 	 * Exact retries clear every matching failure. Otherwise the call is treated
 	 * as a corrected retry of the oldest outstanding failure with the same op
 	 * (placeholder task text, missing items, ...); failures of other ops stay queued.
@@ -5315,7 +5324,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				await this.#settleServiceTier(assistantMsg);
 				this.#ttsr.onAssistantMessageEnd(assistantMsg);
 				const speculativeHandoff = this.#maintenance.speculationCompletion("handoff");
-				if (speculativeHandoff) {
+				// Empty and thinking-only stops still need recovery while the handoff runs.
+				// Preserve the existing settle path for completed server-tool output.
+				if (
+					speculativeHandoff &&
+					(assistantMsg.stopReason !== "stop" ||
+						assistantTurnDelivered(presentNarrationAsAnswer(assistantMsg)) ||
+						assistantMsg.content.some(content => content.type === "anthropicServerTool"))
+				) {
 					this.#maintenance.skipPostTurnMaintenanceAssistantTimestamp = assistantMsg.timestamp;
 					this.#skippedPostTurnSpeculationCompletion = speculativeHandoff;
 				}
@@ -5352,11 +5368,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				if (toolName === "todo" && !isError && details && this.#todo.onTodoResultDetails(details, toolCallId)) {
 					this.#scheduleTitleRefresh("replan");
 				}
-				if (toolName === "todo" && !isError && details?.op !== "view") {
+				if (toolName === "todo" && (!isError || details?.uncommitted !== undefined) && details?.op !== "view") {
 					const retry = this.#todoCallArguments(toolCallId);
 					if (retry) this.#dropSupersededTodoReminders(retry, details && stringProperty(details, "op"));
 				}
-				if (toolName === "todo" && isError) {
+				// A call the todo backend kept from committing had a valid payload: retrying it unchanged is the model's call.
+				if (toolName === "todo" && isError && details?.uncommitted === undefined) {
 					const errorText = content.find(part => part.type === "text")?.text;
 					const attemptedArgs = this.#todoCallArguments(toolCallId);
 					// The tool result already contains the full snapshot. Only carry the
@@ -7546,6 +7563,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	#closeAllProviderSessions(reason: string): void {
+		this.#closeRetiredProviderSessions();
 		for (const [providerKey, state] of this.#providerSessionState) {
 			try {
 				state.close();
@@ -8304,13 +8322,30 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#setMcpServerInstructionsSource?.(source);
 	}
 
-	/** Makes turns wait, bounded, for in-flight MCP discovery before building their system prompt. */
-	setPendingMCPDiscovery(discovery: Promise<void>): void {
+	/** Makes turns start or join MCP discovery, with a bounded wait before building their system prompt. */
+	setPendingMCPDiscovery(discovery: Promise<void> | (() => Promise<void>)): void {
+		if (typeof discovery === "function") this.#pendingMCPDiscovery = discovery;
+		else this.#trackMCPDiscovery(discovery);
+	}
+
+	/** Start deferred MCP discovery, or join the current connection pass. */
+	startPendingMCPDiscovery(): Promise<void> | undefined {
+		const pending = this.#pendingMCPDiscovery;
+		return typeof pending === "function" ? this.#trackMCPDiscovery(Promise.resolve().then(pending)) : pending;
+	}
+
+	#trackMCPDiscovery(discovery: Promise<void>): Promise<void> {
 		const settled = () => {
 			if (this.#pendingMCPDiscovery === pending) this.#pendingMCPDiscovery = undefined;
 		};
 		const pending = discovery.then(settled, settled);
 		this.#pendingMCPDiscovery = pending;
+		return pending;
+	}
+
+	/** Names the tools of MCP servers still in their startup connect: their mounts are not announced as changes. */
+	setMCPStartupMounts(isStartupMount: (toolName: string) => boolean): void {
+		this.#mcpStartupMount = isStartupMount;
 	}
 
 	/** Bind startup-deferred extensions on the first {@link loadDeferredExtensions} call. */
@@ -9974,7 +10009,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const laps = new Laps();
 		if (this.hasPendingDeferredExtensions) await this.loadDeferredExtensions();
 		laps.lap("extensionsMs");
-		const pendingMCPDiscovery = this.#pendingMCPDiscovery;
+		const pendingMCPDiscovery = this.startPendingMCPDiscovery();
 		if (pendingMCPDiscovery) {
 			const timedOut = new Error("MCP discovery still pending");
 			// Abort ends the wait at once.
@@ -12219,6 +12254,28 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (backend !== undefined) this.#extensionRunner?.syncTodoBackend(backend, this.#todo.phases);
 	}
 
+	/** Put a `todo` call's change to the selected todo backend; see {@link ExtensionRunner.applyTodoBackend}. */
+	applyTodoChange(
+		change: TodoBackendChange,
+		commit: () => void,
+		signal?: AbortSignal,
+	): TodoApplyOutcome | Promise<TodoApplyOutcome> {
+		const backend = this.#todoBackend();
+		if (backend === undefined || !this.#extensionRunner) {
+			commit();
+			return { kind: "committed" };
+		}
+		return this.#extensionRunner.applyTodoBackend({
+			backend,
+			change,
+			current: () => this.#todo.phases,
+			commit,
+			closing: () => this.#isDisposed,
+			selected: () => this.#todoBackend(),
+			signal,
+		});
+	}
+
 	/** Active item labels accepted by this pooled turn's incremental yield tool. */
 	getWorkPoolYieldItems(): readonly WorkPoolYieldItem[] {
 		return this.#workPoolYieldItems;
@@ -13050,6 +13107,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					...options,
 					additionalDirectories: cfgWorkspaceAdditionalDirectories.get(this.settings),
 				});
+				this.ttsrManager?.resetSession();
 				this.#bash.markSessionTransition(bashTransition);
 				// The new session owns the transcript from here, so the previous
 				// conversation's advisor spend is retired with it. Clearing at the commit
@@ -13405,19 +13463,19 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#models.getAvailableEffortSelectors();
 	}
 
-	/** Reports whether `/fast` is enabled for the active model family. */
+	/** Reports whether the active model family has selected Fast or Ultrafast. */
 	isFastModeEnabled(): boolean {
 		return this.#models.isFastModeEnabled();
 	}
 
-	/** Reports whether priority service is realized by the active model. */
+	/** Reports whether Fast or Ultrafast service is realized by the active model. */
 	isFastModeActive(): boolean {
 		return this.#models.isFastModeActive();
 	}
 
-	/** Reports whether a fresh session on `model` realizes a fast tier from configured `tier.*` settings. */
-	isFastModeConfiguredFor(model: Model): boolean {
-		return this.#models.isFastModeConfiguredFor(model);
+	/** Returns the fast tier a fresh session on `model` realizes from configured `tier.*` settings. */
+	configuredFastTier(model: Model): FastServiceTier | undefined {
+		return this.#models.configuredFastTier(model);
 	}
 
 	/** Effective wire service tier for a request to `model` under the live per-family tiers. */
@@ -13555,7 +13613,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 	}
 
-	/** Reports whether `/fast ultra` (the OpenAI `ultrafast` tier) is selected for the active model. */
+	/** Reports whether the OpenAI `ultrafast` tier is selected for the active model. */
 	isUltrafastModeEnabled(): boolean {
 		return this.#models.isUltrafastModeEnabled();
 	}
@@ -14006,7 +14064,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const currentModel = this.model;
 		const isChanging = !routedModelsAreEqual(currentModel, model);
 		if (currentModel) {
-			this.#closeProviderSessionsForModelSwitch(currentModel, model);
+			// Requests from here on open fresh provider sessions. A response still streaming over the
+			// retired ones keeps them until its run ends — the whole run, tool turns included, so an
+			// idle Codex WebSocket stays connected that long.
+			this.#closeProviderSessionsForModelSwitch(currentModel, model, this.agent.waitForIdle());
 			if (isChanging) {
 				this.#clearInheritedProviderPromptCacheKey();
 			}
@@ -14114,7 +14175,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 	}
 
-	#closeProviderSessionsForModelSwitch(currentModel: Model, nextModel: Model): void {
+	/**
+	 * Moves the provider sessions a switch from `currentModel` to `nextModel` invalidates out of
+	 * `#providerSessionState`, so later requests open fresh ones, and closes those sessions once
+	 * `closeAfter` settles (at once without it). Sessions an earlier switch retired keep their own
+	 * deadline; `#closeAllProviderSessions` closes whatever is still retired.
+	 */
+	#closeProviderSessionsForModelSwitch(currentModel: Model, nextModel: Model, closeAfter?: Promise<void>): void {
 		const providerKeys = new Set<string>();
 		if (currentModel.api === "openai-codex-responses" || nextModel.api === "openai-codex-responses") {
 			providerKeys.add("openai-codex-responses");
@@ -14141,10 +14208,37 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 		}
 
+		const retired: ProviderSessionState[] = [];
 		for (const providerKey of providerKeys) {
 			const state = this.#providerSessionState.get(providerKey);
 			if (!state) continue;
+			retired.push(state);
+			this.#retiredProviderSessions.set(state, providerKey);
+			this.#providerSessionState.delete(providerKey);
+		}
 
+		if (completionsPrefixToEvict !== undefined) {
+			for (const [key, state] of this.#providerSessionState) {
+				if (!key.startsWith(completionsPrefixToEvict)) continue;
+				retired.push(state);
+				this.#retiredProviderSessions.set(state, key);
+				this.#providerSessionState.delete(key);
+			}
+		}
+
+		if (retired.length === 0) return;
+		if (closeAfter) void closeAfter.then(() => this.#closeRetiredProviderSessions(retired));
+		else this.#closeRetiredProviderSessions(retired);
+	}
+
+	/** Closes `states` (every retired session by default) that are still open, once each. */
+	#closeRetiredProviderSessions(
+		states: Iterable<ProviderSessionState> = [...this.#retiredProviderSessions.keys()],
+	): void {
+		for (const state of states) {
+			const providerKey = this.#retiredProviderSessions.get(state);
+			if (providerKey === undefined) continue;
+			this.#retiredProviderSessions.delete(state);
 			try {
 				state.close();
 			} catch (error) {
@@ -14152,23 +14246,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					providerKey,
 					error: String(error),
 				});
-			}
-
-			this.#providerSessionState.delete(providerKey);
-		}
-
-		if (completionsPrefixToEvict !== undefined) {
-			for (const [key, state] of this.#providerSessionState) {
-				if (!key.startsWith(completionsPrefixToEvict)) continue;
-				try {
-					state.close();
-				} catch (error) {
-					logger.warn("Failed to close provider session state during model switch", {
-						providerKey: key,
-						error: String(error),
-					});
-				}
-				this.#providerSessionState.delete(key);
 			}
 		}
 	}

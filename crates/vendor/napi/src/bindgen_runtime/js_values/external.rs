@@ -7,8 +7,9 @@ use std::{
 
 use crate::{
   bindgen_runtime::{
-    sys, Env, FromNapiMutRef, FromNapiRef, FromNapiValue, Result, Status, ToNapiValue, TypeName,
-    Unknown, ValidateNapiValue,
+    acquire_native_borrow, register_legacy_native_borrow_with_value, sys, Env, FromNapiMutRef,
+    FromNapiRef, FromNapiValue, NativeBorrowGuard, Result, Status, ToNapiValue, TypeName, Unknown,
+    ValidateNapiValue,
   },
   check_status, check_status_or_throw, finalize_external_payload, is_registered_native_payload,
   register_native_payload, Error, JsExternal,
@@ -62,13 +63,8 @@ impl<T: 'static> External<T> {
     }
   }
 
-  /// Turn a raw pointer (from napi) pointing to an External into a reference to the inner object.
-  ///
-  /// # Safety
-  /// The `unknown_tagged_object` raw pointer must point to an `External<T>` struct.
-  pub(crate) unsafe fn from_raw_impl(
-    unknown_tagged_object: *mut c_void,
-  ) -> Option<&'static mut Self> {
+  /// Validate a raw pointer (from napi) pointing to an `External<T>` without creating a reference.
+  pub(crate) fn from_raw_ptr(unknown_tagged_object: *mut c_void) -> Option<*mut Self> {
     // `napi_get_value_external` hands back whatever `data` pointer the external
     // was created with, and externals produced by foreign native code can carry
     // arbitrary payloads. Registry membership proves the pointer is a live
@@ -79,23 +75,57 @@ impl<T: 'static> External<T> {
     {
       return None;
     }
-    Some(unsafe { &mut *(unknown_tagged_object as *mut External<T>) })
+    Some(unknown_tagged_object as *mut External<T>)
+  }
+
+  /// Turn a raw pointer (from napi) pointing to an External into a reference to the inner object.
+  ///
+  /// # Safety
+  /// The `unknown_tagged_object` raw pointer must point to an `External<T>` struct, and no other
+  /// reference to that `External<T>` may alias the returned mutable reference.
+  pub(crate) unsafe fn from_raw_impl(
+    unknown_tagged_object: *mut c_void,
+  ) -> Option<&'static mut Self> {
+    Self::from_raw_ptr(unknown_tagged_object).map(|ptr| unsafe { &mut *ptr })
+  }
+
+  unsafe fn extract_raw_ptr(
+    env: sys::napi_env,
+    napi_val: sys::napi_value,
+  ) -> crate::Result<*mut Self> {
+    let mut unknown_tagged_object = ptr::null_mut();
+    check_status!(
+      unsafe { sys::napi_get_value_external(env, napi_val, &mut unknown_tagged_object) },
+      "Failed to get external value"
+    )?;
+
+    Self::from_raw_ptr(unknown_tagged_object).ok_or_else(|| {
+      Error::new(
+        Status::InvalidArg,
+        format!(
+          "<{}> on `External` is not the type of wrapped object",
+          std::any::type_name::<T>()
+        ),
+      )
+    })
   }
 
   /// Turn a raw pointer (from napi) pointing to an External into a mutable reference to the inner object.
   ///
   /// # Safety
-  /// The `unknown_tagged_object` raw pointer must point to an `External<T>` struct.
+  /// The `unknown_tagged_object` raw pointer must point to an `External<T>` struct, and no other
+  /// reference to that `External<T>` may alias the returned mutable reference.
   pub unsafe fn inner_from_raw_mut(unknown_tagged_object: *mut c_void) -> Option<&'static mut T> {
-    Self::from_raw_impl(unknown_tagged_object).map(|external| &mut external.obj)
+    Self::from_raw_ptr(unknown_tagged_object).map(|external| unsafe { &mut (*external).obj })
   }
 
   /// Turn a raw pointer (from napi) pointing to an External into a reference inner object.
   ///
   /// # Safety
-  /// The `unknown_tagged_object` raw pointer must point to an `External<T>` struct.
+  /// The `unknown_tagged_object` raw pointer must point to an `External<T>` struct, and no active
+  /// mutable reference to that `External<T>` may exist while the returned reference is live.
   pub unsafe fn inner_from_raw(unknown_tagged_object: *mut c_void) -> Option<&'static T> {
-    Self::from_raw_impl(unknown_tagged_object).map(|external| &external.obj)
+    Self::from_raw_ptr(unknown_tagged_object).map(|external| unsafe { &(*external).obj })
   }
 
   /// `size_hint` is a value to tell Node.js GC how much memory is used by this `External` object.
@@ -183,22 +213,9 @@ impl<T: 'static> FromNapiMutRef for External<T> {
     env: sys::napi_env,
     napi_val: sys::napi_value,
   ) -> crate::Result<&'static mut Self> {
-    let mut unknown_tagged_object = ptr::null_mut();
-    check_status!(
-      unsafe { sys::napi_get_value_external(env, napi_val, &mut unknown_tagged_object) },
-      "Failed to get external value"
-    )?;
-
-    match Self::from_raw_impl(unknown_tagged_object) {
-      Some(external) => Ok(external),
-      None => Err(Error::new(
-        Status::InvalidArg,
-        format!(
-          "<{}> on `External` is not the type of wrapped object",
-          std::any::type_name::<T>()
-        ),
-      )),
-    }
+    let external = unsafe { Self::extract_raw_ptr(env, napi_val)? };
+    unsafe { register_legacy_native_borrow_with_value(env, napi_val, external, true)? };
+    Ok(unsafe { &mut *external })
   }
 }
 
@@ -207,7 +224,9 @@ impl<T: 'static> FromNapiRef for External<T> {
     env: sys::napi_env,
     napi_val: sys::napi_value,
   ) -> crate::Result<&'static Self> {
-    unsafe { Self::from_napi_mut_ref(env, napi_val) }.map(|v| v as &Self)
+    let external = unsafe { Self::extract_raw_ptr(env, napi_val)? };
+    unsafe { register_legacy_native_borrow_with_value(env, napi_val, external, false)? };
+    Ok(unsafe { &*external })
   }
 }
 
@@ -246,9 +265,10 @@ impl<T: 'static> ToNapiValue for External<T> {
 
 /// `ExternalRef` is a reference to an `External` object
 pub struct ExternalRef<T: 'static> {
-  pub(crate) obj: &'static mut External<T>,
+  pub(crate) obj: *mut External<T>,
   pub(crate) raw: sys::napi_ref,
   pub(crate) env: sys::napi_env,
+  guard: Option<NativeBorrowGuard>,
 }
 
 unsafe impl<T: Sync + 'static> Sync for ExternalRef<T> {}
@@ -267,6 +287,9 @@ impl<T: 'static> ValidateNapiValue for ExternalRef<T> {}
 
 impl<T: 'static> Drop for ExternalRef<T> {
   fn drop(&mut self) {
+    // Release the borrow guard before deleting the Node-API reference so the
+    // payload address is unregistered before finalization could reuse it.
+    drop(self.guard.take());
     check_status_or_throw!(
       self.env,
       unsafe { sys::napi_delete_reference(self.env, self.raw) },
@@ -280,14 +303,16 @@ impl<T: 'static> ExternalRef<T> {
     let external = External::new(value);
     let mut ref_ptr = ptr::null_mut();
     let (napi_val, external) = unsafe { external.to_napi_value_impl(env.0)? };
+    let guard = acquire_native_borrow(external, true)?;
     check_status!(
       unsafe { sys::napi_create_reference(env.0, napi_val, 1, &mut ref_ptr) },
       "Failed to create reference on external value"
     )?;
     Ok(ExternalRef {
-      obj: Box::leak(unsafe { Box::from_raw(external) }),
+      obj: external,
       raw: ref_ptr,
       env: env.0,
+      guard: Some(guard),
     })
   }
 
@@ -304,24 +329,8 @@ impl<T: 'static> ExternalRef<T> {
 
 impl<T: 'static> FromNapiValue for ExternalRef<T> {
   unsafe fn from_napi_value(env: sys::napi_env, napi_val: sys::napi_value) -> crate::Result<Self> {
-    let mut unknown_tagged_object = ptr::null_mut();
-    check_status!(
-      unsafe { sys::napi_get_value_external(env, napi_val, &mut unknown_tagged_object) },
-      "Failed to get external value"
-    )?;
-
-    let external = match unsafe { External::from_raw_impl(unknown_tagged_object) } {
-      Some(external) => external,
-      None => {
-        return Err(Error::new(
-          Status::InvalidArg,
-          format!(
-            "<{}> on `External` is not the type of wrapped object",
-            std::any::type_name::<T>()
-          ),
-        ));
-      }
-    };
+    let external = unsafe { External::extract_raw_ptr(env, napi_val)? };
+    let guard = acquire_native_borrow(external, true)?;
 
     let mut ref_ptr = ptr::null_mut();
     check_status!(
@@ -333,6 +342,7 @@ impl<T: 'static> FromNapiValue for ExternalRef<T> {
       obj: external,
       raw: ref_ptr,
       env,
+      guard: Some(guard),
     })
   }
 }
@@ -363,12 +373,12 @@ impl<T: 'static> Deref for ExternalRef<T> {
   type Target = T;
 
   fn deref(&self) -> &Self::Target {
-    self.obj
+    unsafe { &*self.obj }
   }
 }
 
 impl<T: 'static> DerefMut for ExternalRef<T> {
   fn deref_mut(&mut self) -> &mut Self::Target {
-    self.obj
+    unsafe { &mut *self.obj }
   }
 }

@@ -387,12 +387,9 @@ fn sniffed(path: &Path) -> &'static str {
 		return mime;
 	}
 	// A multi-byte character cut by the buffer's end is still text.
-	let text = match std::str::from_utf8(head) {
-		Ok(text) => text,
-		Err(err) if err.error_len().is_none() => {
-			std::str::from_utf8(&head[..err.valid_up_to()]).unwrap_or_default()
-		},
-		Err(_) => return "application/octet-stream",
+	let text = match xutf::decode(head) {
+		Ok(text) | Err(xutf::DecodeError::Incomplete { valid_prefix: text, .. }) => text,
+		Err(xutf::DecodeError::Invalid { .. }) => return "application/octet-stream",
 	};
 	if text.contains('\0') {
 		return "application/octet-stream";

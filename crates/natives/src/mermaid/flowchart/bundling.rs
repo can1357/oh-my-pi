@@ -59,6 +59,15 @@ pub fn analyze_edge_bundles(graph: &mut AsciiGraph) {
 				.any(|earlier| (earlier.from, earlier.to) == (edge.from, edge.to))
 		})
 		.collect();
+	// A bundle enters its targets from the row above, which the pathfinder
+	// cannot reach for a node on the top row.
+	let below_top_row = |node: usize| {
+		graph
+			.nodes
+			.get(node)
+			.and_then(|node| node.grid_coord)
+			.is_some_and(|coord| coord.y > 0)
+	};
 	let mut edges_by_target = Vec::new();
 	for (edge_id, edge) in graph.edges.iter().enumerate() {
 		if edge.from != edge.to && !claimed[edge_id] {
@@ -68,6 +77,14 @@ pub fn analyze_edge_bundles(graph: &mut AsciiGraph) {
 
 	for (target, edges) in edges_by_target {
 		if !can_bundle(&edges, graph) || edges.iter().any(|&edge| claimed[edge]) {
+			continue;
+		}
+		// Keep skipped fan-in edges out of source groups, where they would
+		// block a fan-out of their source's other edges.
+		for &edge in &edges {
+			claimed[edge] = true;
+		}
+		if !below_top_row(target) {
 			continue;
 		}
 		let bundle_id = graph.bundles.len();
@@ -84,7 +101,6 @@ pub fn analyze_edge_bundles(graph: &mut AsciiGraph) {
 		});
 		for edge in edges {
 			graph.edges[edge].bundle = Some(bundle_id);
-			claimed[edge] = true;
 		}
 	}
 
@@ -96,7 +112,7 @@ pub fn analyze_edge_bundles(graph: &mut AsciiGraph) {
 	}
 
 	for (source, edges) in edges_by_source {
-		if !can_bundle(&edges, graph) {
+		if !can_bundle(&edges, graph) || !edges.iter().all(|&id| below_top_row(graph.edges[id].to)) {
 			continue;
 		}
 		let bundle_id = graph.bundles.len();

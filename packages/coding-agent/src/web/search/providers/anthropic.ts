@@ -199,6 +199,10 @@ function resolveSearchEndpoint(
 		extraBetas: serverSideFallback ? [SERVER_SIDE_FALLBACK_BETA] : undefined,
 		provider: model.provider,
 		providerType: model.providerType,
+		additiveSessionHeader:
+			model.compat !== undefined && "additiveSessionHeader" in model.compat
+				? model.compat.additiveSessionHeader
+				: undefined,
 		sessionId,
 	});
 	return {

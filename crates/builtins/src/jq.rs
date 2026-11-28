@@ -25,17 +25,9 @@ use crate::host::{Host, Utility};
 use cli::Cli;
 use filter::FileReports;
 
-/// Stack a `jq` invocation runs on. Evaluation, parsing, printing, comparing
-/// and dropping values all recurse once per nesting level, and an overflow
-/// kills the whole host process; the shell's 2 MiB worker stacks overflow on
-/// a 2000-deep `tojson`. Only reserved: pages are committed as they are used.
-const STACK: usize = 128 << 20;
-
-/// Stack kept free below the deepest filter: [`filter::Kind`] fails a filter
-/// rather than enter it with less left, so natives that recurse over a deep
-/// value (`tojson` up to [`jaq_json::write::MAX_DEPTH`], `==`, `sort`,
-/// dropping it) still fit under it.
-const NATIVE_HEADROOM: usize = 32 << 20;
+// Evaluation runs on the caller's stack: jaq evaluates filters through a heap
+// pull driver (see `jaq_core::pull`), so deep filters and recursion do not grow
+// the native stack. Value operations follow jaq-json's depth limits.
 
 mod cli {
 	//! Command-line argument parsing, as jq's `main`.
@@ -517,9 +509,6 @@ mod filter {
 			data.session.cancelled()
 		}
 
-		fn may_recurse(_data: &Self::Data<'_>) -> bool {
-			stacker::remaining_stack().is_none_or(|left| left >= super::NATIVE_HEADROOM)
-		}
 	}
 
 	/// What natives see while a filter runs.
@@ -690,6 +679,42 @@ def tonumber: tonumber_;
 		origin:   PathBuf,
 	}
 
+	fn defs() -> impl Iterator<Item = load::parse::Def<&'static str>> {
+		let ours = load::parse(DEFS, |p| p.defs()).expect("builtin definitions parse");
+		jaq_core::defs().chain(jaq_std::defs()).chain(jaq_json::defs()).chain(ours)
+	}
+
+	fn funs() -> impl Iterator<Item = native::Filter<jaq_core::Native<Kind>>> {
+		let run = native::run::<Kind>;
+		let inputs = input::funs::<Kind>().into_vec().into_iter().map(run);
+		natives()
+			.into_iter()
+			.chain(linker_natives())
+			.map(run)
+			.chain(jaq_core::funs())
+			.chain(jaq_std::funs())
+			.chain(jaq_json::funs())
+			.chain(inputs)
+			.chain([run(("builtins", native::v(0), |_| box_once(Ok(BUILTINS.with(Val::clone)))))])
+	}
+
+	// This list describes the static registry, not the program's imports or
+	// user definitions. Construct it only if requested; don't generate and
+	// compile a comma expression with one string term per builtin on every run.
+	thread_local! {
+		static BUILTINS: Val = {
+			let signatures = defs().map(|d| (d.name, d.args.len())).chain(funs().map(|(name, args, _)| (name, args.len())));
+			let mut seen = std::collections::HashSet::new();
+			signatures
+				.filter(|(name, arity)| name.starts_with(char::is_alphabetic) && seen.insert((*name, *arity)))
+				.map(|(name, arity)| Val::from(format!("{name}/{arity}")))
+				// The prelude listed its own `builtins` definition before
+				// appending the embedded registry's `builtins/0` entry.
+				.chain([Val::from("builtins/0".to_owned())])
+				.collect()
+		};
+	}
+
 	pub fn parse_compile(
 		fs: &BlockingFs,
 		path: &PathBuf,
@@ -709,42 +734,13 @@ def tonumber: tonumber_;
 
 		let vars: Vec<_> = vars.iter().map(|v| format!("${v}")).collect();
 		let arena = Arena::default();
-		let ours = load::parse(DEFS, |p| p.defs()).expect("builtin definitions parse");
-		let mut defs: Vec<_> = jaq_core::defs()
-			.chain(jaq_std::defs())
-			.chain(jaq_json::defs())
-			.chain(ours)
-			.collect();
 		let read = |import: load::Import<PathBuf>| -> Result<File<String, PathBuf>, String> {
 			let path = find_import(&linker, &import, ".jq")?;
 			let code = fs.read_to_string(&path).map_err(|e| e.to_string())?;
 			Ok(File { code, path })
 		};
-		let run = native::run::<Kind>;
-		let inputs = input::funs::<Kind>().into_vec().into_iter().map(run);
-		let funs: Vec<_> = natives()
-			.into_iter()
-			.chain(linker_natives())
-			.map(run)
-			.chain(jaq_core::funs())
-			.chain(jaq_std::funs())
-			.chain(jaq_json::funs())
-			.chain(inputs)
-			.collect();
-		// `builtins` lists every filter a program can call, as `name/arity`,
-		// except those that jq hides behind an underscore
-		let mut builtins: Vec<String> = Vec::new();
-		let sigs = defs.iter().map(|d| (d.name, d.args.len())).chain(funs.iter().map(|f| (f.0, f.1.len())));
-		for (name, arity) in sigs {
-			let sig = format!("{name}/{arity}");
-			if name.starts_with(char::is_alphabetic) && !builtins.contains(&sig) {
-				builtins.push(sig);
-			}
-		}
-		builtins.push("builtins/0".into());
-		let builtins = format!("def builtins: {};", Const::Arr(builtins.into_iter().map(Const::Str).collect()).dump());
-		defs.extend(load::parse(arena.alloc(builtins), |p| p.defs()).expect("builtins parse"));
-		let mut loader = Loader::new(defs).with_read(read);
+		// The embedded registry replaces jaq-std's hard-coded builtin list.
+		let mut loader = Loader::new(defs().filter(|d| d.name != "builtins" || !d.args.is_empty())).with_read(read);
 		// jq includes `~/.jq` if it is a file, ignoring it if it cannot be loaded
 		if let Some(home) = home() {
 			let home = Const::Str(home.to_string_lossy().into_owned());
@@ -755,16 +751,18 @@ def tonumber: tonumber_;
 		let modules = loader.load(&arena, main).map_err(|e| load_errors(e, path))?;
 
 		let mut vals = Vec::new();
-		import(&modules, |p| {
+		if let Err(errs) = import(&modules, |p| {
 			let path = find_import(&linker, &p, ".json")?;
 			let data = read::json_array(fs, &path);
 			vals.push(data.map_err(|e| format!("jq: error loading data file {}: {e}", path.display()))?);
 			Ok(())
-		})
-		.map_err(|e| load_errors(e, path))?;
+		}) {
+			modules.discard();
+			return Err(load_errors(errs, path));
+		}
 
 		let compiler = Compiler::default()
-			.with_funs(funs)
+			.with_funs(funs())
 			.with_global_vars(vars.iter().map(|v| &**v));
 		let filter = compiler.compile(modules).map_err(|e| compile_errors(e, path))?;
 		Ok(Program { vals, filter, linker })
@@ -807,7 +805,7 @@ def tonumber: tonumber_;
 		let Ok(meta) = load::module_meta(&code, &fname) else { return Ok(Val::Null) };
 
 		let set = |kvs: &mut Vec<(String, Const)>, k: &str, v: Const| match kvs.iter_mut().find(|(k_, _)| k_ == k) {
-			Some(kv) => kv.1 = v,
+			Some(kv) => std::mem::replace(&mut kv.1, v).discard(),
 			None => kvs.push((k.into(), v)),
 		};
 		let mut obj = match meta.meta {
@@ -829,7 +827,10 @@ def tonumber: tonumber_;
 		});
 		set(&mut obj, "deps", Const::Arr(deps.collect()));
 		set(&mut obj, "defs", Const::Arr(meta.defs.into_iter().map(Const::Str).collect()));
-		jaq_json::read::parse_single(Const::Obj(obj).dump().as_bytes()).map_err(|e| CoreError::str(e.to_string()))
+		let obj = Const::Obj(obj);
+		let json = obj.dump();
+		obj.discard();
+		jaq_json::read::parse_single(json.as_bytes()).map_err(|e| CoreError::str(e.to_string()))
 	}
 
 	fn home() -> Option<PathBuf> {
@@ -1357,7 +1358,7 @@ mod output {
 	//! Values written as jq's `jv_dump_term` writes them.
 	use std::io::{self, Write};
 
-	use jaq_json::{Num, Val, write::write_str};
+	use jaq_json::{Map, Num, Val, write::write_str};
 
 	use super::cli::{Cli, Indent};
 
@@ -1487,66 +1488,91 @@ mod output {
 		}
 
 		/// As jq's `jv_dump_term`, escape sequences included.
+		///
+		/// Iterative with an explicit stack: a value may nest as deeply as
+		/// `jaq_json::write::MAX_DEPTH`, so recursing once per level here would
+		/// overflow a normal thread.
 		fn dump<W: Write + ?Sized>(&self, w: &mut W, v: &Val, level: usize) -> Result<(), WriteError> {
-			let color = self.colors.as_ref().map(|colors| colors.of(v));
-			let paint = |w: &mut W, bytes: &[u8]| -> io::Result<()> {
-				if let Some(color) = color {
-					w.write_all(color)?;
-				}
-				w.write_all(bytes)
-			};
-			let reset = |w: &mut W| if color.is_some() { w.write_all(COLRESET) } else { Ok(()) };
-			if let Some(color) = color {
-				w.write_all(color)?;
+			enum Entries<'a> {
+				Insertion(&'a Map),
+				Sorted(Vec<(&'a Val, &'a Val)>),
 			}
-			if level > jaq_json::write::MAX_DEPTH {
-				w.write_all(jaq_json::write::TOO_DEEP.as_bytes())?;
-			} else {
-				match v {
-					Val::Null => w.write_all(b"null")?,
-					Val::Bool(b) => w.write_all(if *b { b"true" } else { b"false" })?,
-					Val::Num(Num::Float(x)) if x.is_nan() => self.dump(w, &Val::Null, level)?,
-					Val::Num(n) => write!(w, "{n}")?,
-					Val::TStr(s) | Val::BStr(s) => write_str(w, s, self.ascii)?,
-					Val::Arr(a) if a.is_empty() => w.write_all(b"[]")?,
-					Val::Arr(a) => {
-						w.write_all(b"[")?;
-						for (i, x) in a.iter().enumerate() {
-							if i != 0 {
-								paint(w, b",")?;
+			enum Frame<'a> {
+				Items { items: &'a [Val], next: usize, level: usize, color: Option<&'a [u8]> },
+				Entries { entries: Entries<'a>, next: usize, level: usize, color: Option<&'a [u8]> },
+			}
+			macro_rules! reset {
+				($color:expr) => {
+					if $color.is_some() {
+						w.write_all(COLRESET)?;
+					}
+				};
+			}
+			macro_rules! paint {
+				($color:expr, $bytes:expr) => {{
+					if let Some(color) = $color {
+						w.write_all(color)?;
+					}
+					w.write_all($bytes)?;
+				}};
+			}
+
+			let mut stack: Vec<Frame> = Vec::new();
+			let mut pending: Option<(&Val, usize, Option<&[u8]>)> =
+				Some((v, level, self.colors.as_ref().map(|colors| colors.of(v))));
+
+			loop {
+				if let Some((v, level, color)) = pending.take() {
+					if let Some(color) = color {
+						w.write_all(color)?;
+					}
+					if level > jaq_json::write::MAX_DEPTH {
+						w.write_all(jaq_json::write::TOO_DEEP.as_bytes())?;
+						reset!(color);
+						continue;
+					}
+					match v {
+						Val::Null => {
+							w.write_all(b"null")?;
+							reset!(color);
+						},
+						Val::Bool(b) => {
+							w.write_all(if *b { b"true" } else { b"false" })?;
+							reset!(color);
+						},
+						Val::Num(Num::Float(x)) if x.is_nan() => {
+							let null_color = self.colors.as_ref().map(|colors| colors.of(&Val::Null));
+							if let Some(color) = null_color {
+								w.write_all(color)?;
 							}
-							reset(w)?;
-							self.newline(w, level + 1)?;
-							self.dump(w, x, level + 1)?;
-						}
-						self.newline(w, level)?;
-						paint(w, b"]")?;
-					},
-					Val::Obj(o) if o.is_empty() => w.write_all(b"{}")?,
-					Val::Obj(o) => {
-						w.write_all(b"{")?;
-						let entry = |w: &mut W, i: usize, k: &Val, v: &Val| -> Result<(), WriteError> {
-							let (Val::TStr(k) | Val::BStr(k)) = k else {
-								return Err(WriteError::Key(k.clone()));
-							};
-							if i != 0 {
-								paint(w, b",")?;
+							w.write_all(b"null")?;
+							if null_color.is_some() {
+								w.write_all(COLRESET)?;
 							}
-							reset(w)?;
-							self.newline(w, level + 1)?;
-							if let Some(colors) = &self.colors {
-								w.write_all(colors.field())?;
-							}
-							write_str(w, k, self.ascii)?;
-							reset(w)?;
-							paint(w, b":")?;
-							reset(w)?;
-							if self.indent != Indent::Compact {
-								w.write_all(b" ")?;
-							}
-							self.dump(w, v, level + 1)
-						};
-						if self.sort_keys {
+							reset!(color);
+						},
+						Val::Num(n) => {
+							write!(w, "{n}")?;
+							reset!(color);
+						},
+						Val::TStr(s) | Val::BStr(s) => {
+							write_str(w, s, self.ascii)?;
+							reset!(color);
+						},
+						Val::Arr(a) if a.is_empty() => {
+							w.write_all(b"[]")?;
+							reset!(color);
+						},
+						Val::Arr(a) => {
+							w.write_all(b"[")?;
+							stack.push(Frame::Items { items: &a[..], next: 0, level, color });
+						},
+						Val::Obj(o) if o.is_empty() => {
+							w.write_all(b"{}")?;
+							reset!(color);
+						},
+						Val::Obj(o) => {
+							w.write_all(b"{")?;
 							// jq's `jv_keys`: byte order
 							fn bytes(k: &Val) -> &[u8] {
 								match k {
@@ -1554,22 +1580,74 @@ mod output {
 									_ => &[],
 								}
 							}
-							let mut entries: Vec<_> = o.iter().collect();
-							entries.sort_by(|(a, _), (b, _)| bytes(a).cmp(bytes(b)));
-							for (i, (k, v)) in entries.into_iter().enumerate() {
-								entry(w, i, k, v)?;
+							let entries = if self.sort_keys && o.len() > 1 {
+								let mut sorted: Vec<_> = o.iter().collect();
+								sorted.sort_by(|(a, _), (b, _)| bytes(a).cmp(bytes(b)));
+								Entries::Sorted(sorted)
+							} else {
+								Entries::Insertion(o)
+							};
+							stack.push(Frame::Entries { entries, next: 0, level, color });
+						},
+					}
+					continue;
+				}
+				let Some(frame) = stack.last_mut() else { return Ok(()) };
+				match frame {
+					Frame::Items { items, next, level, color } => {
+						if *next < items.len() {
+							let i = *next;
+							*next += 1;
+							if i != 0 {
+								paint!(*color, b",");
 							}
+							reset!(*color);
+							self.newline(w, *level + 1)?;
+							let x = &items[i];
+							pending = Some((x, *level + 1, self.colors.as_ref().map(|colors| colors.of(x))));
 						} else {
-							for (i, (k, v)) in o.iter().enumerate() {
-								entry(w, i, k, v)?;
-							}
+							self.newline(w, *level)?;
+							paint!(*color, b"]");
+							reset!(*color);
+							stack.pop();
 						}
-						self.newline(w, level)?;
-						paint(w, b"}")?;
+					},
+					Frame::Entries { entries, next, level, color } => {
+						let entry = match entries {
+							Entries::Insertion(obj) => obj.get_index(*next),
+							Entries::Sorted(sorted) => sorted.get(*next).copied(),
+						};
+						if let Some((k, x)) = entry {
+							let i = *next;
+							*next += 1;
+							let (Val::TStr(k) | Val::BStr(k)) = k else {
+								return Err(WriteError::Key(k.clone()));
+							};
+							if i != 0 {
+								paint!(*color, b",");
+							}
+							reset!(*color);
+							self.newline(w, *level + 1)?;
+							if let Some(colors) = &self.colors {
+								w.write_all(colors.field())?;
+							}
+							write_str(w, k, self.ascii)?;
+							reset!(*color);
+							paint!(*color, b":");
+							reset!(*color);
+							if self.indent != Indent::Compact {
+								w.write_all(b" ")?;
+							}
+							pending = Some((x, *level + 1, self.colors.as_ref().map(|colors| colors.of(x))));
+						} else {
+							self.newline(w, *level)?;
+							paint!(*color, b"}");
+							reset!(*color);
+							stack.pop();
+						}
 					},
 				}
 			}
-			Ok(reset(w)?)
 		}
 	}
 
@@ -1714,11 +1792,8 @@ impl Parser for Jq {
 impl Utility for Jq {
 	const NAME: &'static str = "jq";
 	const USAGE_ERROR: u8 = 2;
-
 	fn run(self, host: &mut Host) -> i32 {
-		// Everything that holds a value stays inside: dropping a deep value
-		// recurses too.
-		stacker::grow(STACK, || match self.action {
+		match self.action {
 			cli::Action::Exit { stdout, stderr, code } => {
 				let _ = host.stdout.write_all(stdout.as_bytes());
 				let _ = host.stderr.write_all(stderr.as_bytes());
@@ -1766,7 +1841,7 @@ impl Utility for Jq {
 				let code = if exit_status { ret.abs() } else { ret.max(0) };
 				code & 0xff
 			},
-		})
+		}
 	}
 }
 
@@ -2486,7 +2561,8 @@ mod tests {
 			host.set_test_var(&key, &value);
 		}
 		let argv = std::iter::once("jq").chain(args.iter().copied());
-		let code = Jq::try_parse_from(argv).expect("jq parses any argv").run(&mut host);
+		let parsed = Jq::try_parse_from(argv).expect("jq parses any argv");
+		let code = parsed.run(&mut host);
 		(code, capture.out(), capture.err())
 	}
 
@@ -2526,12 +2602,12 @@ mod tests {
 		let cli::Action::Run(cli) = Jq::try_parse_from(argv).expect("parses").action else {
 			panic!("not a run");
 		};
-		let (ret, _) = stacker::grow(super::STACK, || {
+		let (ret, _) = {
 			let session = super::Session::new(&host);
 			let printer = super::output::Printer::new(cli.indent, cli.sort_keys, cli.ascii_output, None);
 			let output = super::output::Output::new(&cli, printer);
 			super::real_main(&cli, &mut host, out, &output, &session)
-		});
+		};
 		(ret, capture.err())
 	}
 
@@ -3098,6 +3174,23 @@ mod tests {
 		let (code, out, _) = run_jq(&["-n", "def f: 1 + f; try f catch \"caught\", 2"], "");
 		assert_eq!((code, out.as_str()), (0, "\"caught\"\n2\n"), "catchable, and the run goes on");
 	}
+	/// A non-tail recursive `def` keeps its caller pending at every level
+	/// (unlike a tail call, which jaq trampolines on the heap), so its depth
+	/// follows the input's nesting and the value case must return the right
+	/// value. Unbounded recursion of the same shape must still be rejected
+	/// instead of overflowing the host stack.
+	#[test]
+	fn non_tail_def_recursion_walks_a_deep_value() {
+		let nest = |n: usize| format!("reduce range({n}) as $_ ([]; [.])");
+		let depth = "def depth: if type == \"array\" then 1 + ([.[] | depth] | add // 0) else 0 end";
+		let filter = format!("{depth}; {} | depth", nest(2000));
+		let (code, out, err) = run_jq(&["-nc", &filter], "");
+		assert_eq!((code, out.as_str(), err.as_str()), (0, "2001\n", ""), "2001 nested arrays");
+
+		let (code, out, err) = run_jq(&["-n", "def f: [f]; f"], "");
+		assert_eq!((code, out.as_str()), (5, ""), "no base case still fails");
+		assert_eq!(err, "jq: error (at <unknown>): filter recursion too deep\n");
+	}
 
 	#[test]
 	fn halt_returns_instead_of_killing_process() {
@@ -3224,10 +3317,141 @@ Test #7: '.' at line number 27
 		assert_eq!((code, out.as_str(), err.as_str()), (1, "", "fopen: No such file or directory\n"));
 	}
 
+	/// Deep filter recursion runs on a deliberately small native stack, because
+	/// the pull driver keeps evaluation nesting on the heap. Unbounded recursion
+	/// is rejected by the driver's logical depth limit, not by the stack.
+	#[test]
+	fn deep_recursion_runs_on_a_small_stack() {
+		let nest = |n: usize| format!("reduce range({n}) as $_ ([]; [.])");
+		let run = |filter: String| {
+			thread::Builder::new()
+				.stack_size(2 << 20)
+				.spawn(move || run_jq(&["-nc", &filter], ""))
+				.expect("spawn")
+				.join()
+				.expect("join")
+		};
+
+		let depth = "def depth: if type == \"array\" then 1 + ([.[] | depth] | add // 0) else 0 end";
+		let (code, out, err) = run(format!("{depth}; {} | depth", nest(2000)));
+		assert_eq!((code, out.as_str(), err.as_str()), (0, "2001\n", ""), "2001 nested arrays");
+
+		let (code, out, err) = run(format!("{} | flatten", nest(9999)));
+		assert_eq!((code, out.as_str(), err.as_str()), (0, "[]\n", ""), "10000-deep flatten");
+
+		let (code, out, err) = run("def f: 1 + f; f".to_string());
+		assert_eq!((code, out.as_str(), err.as_str()), (5, "", "jq: error (at <unknown>): filter recursion too deep\n"));
+	}
+
+	/// A multi-output filter feeding a native stays lazy: `first` must take one
+	/// output without materialising the rest.
+	#[test]
+	fn multi_output_filter_is_consumed_lazily() {
+		let (code, out, err) = run_jq(&["-nc", "first(range(0; 100000000))"], "");
+		assert_eq!((code, out.as_str(), err.as_str()), (0, "0\n", ""));
+	}
+
+	fn on_jq_stack(stack: usize, filter: &'static str, input: String) -> (i32, String, String) {
+		thread::Builder::new()
+			.stack_size(stack)
+			.spawn(move || run_jq(&["-c", filter], &input))
+			.expect("spawn")
+			.join()
+			.expect("join")
+	}
+
+	#[test]
+	fn recursive_path_arguments_share_the_pull_stack() {
+		let input = format!("{}0{}", "[".repeat(2001), "]".repeat(2001));
+		let filter = r#"def choose(p): first(p); def f: if type == "array" then choose(.[0] | f) else . end; path(f)"#;
+		let (code, out, err) = on_jq_stack(512 << 10, filter, input);
+		let expected = format!("[{}0]\n", "0,".repeat(2000));
+		assert_eq!((code, out, err.as_str()), (0, expected, ""));
+	}
+
+	#[test]
+	fn recursive_update_walks_a_deep_value() {
+		let input = format!("{}0{}", "[".repeat(2001), "]".repeat(2001));
+		let expected = format!("{}1{}\n", "[".repeat(2001), "]".repeat(2001));
+		for stack in [512 << 10, 2 << 20] {
+			for filter in [
+				r#"def f: if type == "array" then .[] |= f else . + 1 end; f"#,
+				r#"def f: if type == "array" then .[0] = (.[0] | f) else . + 1 end; f"#,
+			] {
+				let (code, out, err) = on_jq_stack(stack, filter, input.clone());
+				assert_eq!((code, out.as_str(), err.as_str()), (0, expected.as_str(), ""));
+			}
+		}
+	}
+
+	#[test]
+	fn unbounded_pull_callbacks_are_catchable() {
+		for filter in [
+			"def f: first(f); (try f catch .), 2",
+			"def f: . | f; (try (f = 1) catch .), 2",
+			"def f: .[f]; (try f catch .), 2",
+		] {
+			let (code, out, err) = on_jq_stack(512 << 10, filter, "null".into());
+			assert_eq!((code, out.as_str(), err.as_str()), (0, "\"filter recursion too deep\"\n2\n", ""), "{filter}");
+		}
+	}
+
+	#[test]
+	fn reduce_replays_consumed_inputs_only_for_remaining_branches() {
+		let filter = "[reduce inputs as $n ((0,100); if $n == 2 then .+$n, .-$n else .+$n end)]";
+		let (code, out, err) = run_jq(&["-nc", filter], "1\n2\n4\n");
+		assert_eq!((code, out.as_str(), err.as_str()), (0, "[7,3,107,103]\n", ""));
+	}
+
+	#[test]
+	fn path_and_update_callbacks_keep_order_and_stop_early() {
+		for (input, filter, expected) in [
+			("[1,2]", r#"first(.[0, error("late")])"#, "1\n"),
+			("[[1,2],[3,4]]", r#"[.[][1,0]]"#, "[2,4,1,3]\n"),
+			("[1,2]", r#"(try .[0,error("index"),1] catch .), 9"#, "1\n\"index\"\n9\n"),
+			("[1,2]", r#".[0] |= (.+1, error("late"))"#, "[2,2]\n"),
+			("[1,2]", r#".[0] |= (.+1, ("late" | stderr))"#, "[2,2]\n"),
+			("[1,2,3]", r#"(.[0], .[1]) |= empty"#, "[3]\n"),
+			("[1,2]", r#".[] += (10,20)"#, "[11,12]\n[21,22]\n"),
+			("[[1]]", r#".. = 0"#, "0\n"),
+			("[1,2,3]", r#"[path(limit(2;.[])), path(skip(1;.[])), path(first(.[])), path(last(.[]))]"#, "[[0],[1],[1],[2],[0],[2]]\n"),
+			("null", r#"[def f($n): if $n > 0 then f($n-1), $n else 0 end; f(2)]"#, "[0,1,2]\n"),
+			("null", r#"[foreach (1,2) as $x (0; (.+$x, .+$x+10); .)]"#, "[1,3,13,11,13,23]\n"),
+			("null", r#"first(foreach 1 as $x (0; (. + $x, error("late")); .))"#, "1\n"),
+			("null", r#"try [error("early"), ("late" | stderr)] catch ."#, "\"early\"\n"),
+			("null", r#"try (. = error("rhs")) catch ."#, "\"rhs\"\n"),
+		] {
+			let (code, out, err) = run_jq(&["-c", filter], input);
+			assert_eq!((code, out.as_str(), err.as_str()), (0, expected, ""), "{filter}");
+		}
+	}
+
 	#[test]
 	fn positional_args_after_double_dash_args() {
 		let (code, out, _) = run_jq(&["-nc", "$ARGS.positional", "--args", "x", "y"], "");
 		assert_eq!(code, 0);
 		assert_eq!(out, "[\"x\",\"y\"]\n");
+	}
+
+	/// A deeply nested program source compiles and runs: the compiler walks the
+	/// AST on the heap, not the native stack, so 1000 nested array literals
+	/// compile and evaluate on a deliberately small stack. Beyond the parser's
+	/// own `YYMAXDEPTH`, a program is still rejected cleanly.
+	#[test]
+	fn deeply_nested_program_compiles_and_runs() {
+		let program = format!("{}null{}", "[".repeat(1000), "]".repeat(1000));
+		let expected = format!("{}null{}\n", "[".repeat(1000), "]".repeat(1000));
+		let (code, out, err) = thread::Builder::new()
+			.stack_size(2 << 20)
+			.spawn(move || run_jq(&["-nc", &program], ""))
+			.expect("spawn")
+			.join()
+			.expect("join");
+		assert_eq!((code, out.as_str(), err.as_str()), (0, expected.as_str(), ""), "1000 nested arrays");
+
+		let too_deep = format!("{}null{}", "[".repeat(20000), "]".repeat(20000));
+		let (code, out, err) = run_jq(&["-nc", &too_deep], "");
+		assert_eq!((code, out.as_str()), (3, ""), "over the parser bound");
+		assert!(err.contains("memory exhausted"), "clean parse bound: {err:?}");
 	}
 }

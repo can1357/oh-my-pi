@@ -1546,7 +1546,7 @@ mod tests {
 			if node.is_named() && node_content_end_line(node) != raw_end {
 				count += 1;
 			}
-			for index in 0..node.child_count() {
+			for index in 0..node.child_count() as u32 {
 				stack.push(node.child(index).expect("child in range"));
 			}
 		}

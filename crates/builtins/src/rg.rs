@@ -24,7 +24,7 @@ use std::{
 use clap::{ArgAction, Parser, ValueEnum};
 use grep_cli::DecompressionMatcher;
 use grep_matcher::{Captures, LineTerminator, Matcher};
-use grep_pcre2::{RegexMatcher as PcreMatcher, RegexMatcherBuilder as PcreMatcherBuilder};
+use omp_xfs::grep::pcre::{RegexMatcher as PcreMatcher, RegexMatcherBuilder as PcreMatcherBuilder};
 use grep_printer::{JSONBuilder, Stats};
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{

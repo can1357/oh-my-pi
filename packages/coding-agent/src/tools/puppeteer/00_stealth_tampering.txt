@@ -22,7 +22,11 @@ for (const [fn, name] of patchedFns) {
 
 // Patch Object.getOwnPropertyDescriptor to return native-looking accessor
 // source through the shared Function.prototype.toString registry.
-const patchedGetOwnPropertyDescriptor = function getOwnPropertyDescriptor(obj, prop) {
+// A method shorthand is what the platform's own builtin looks like: non-constructible, no own
+// `prototype`, and a name/length that match — a `function` declaration is constructible and shows
+// an own `prototype`, which a shape check sees even through a masked toString.
+const patchedGetOwnPropertyDescriptor = {
+  getOwnPropertyDescriptor(obj, prop) {
   const descriptor = Reflect_apply(Object_getOwnPropertyDescriptor, this, [obj, prop]);
   if (!descriptor) return descriptor;
 
@@ -33,8 +37,9 @@ const patchedGetOwnPropertyDescriptor = function getOwnPropertyDescriptor(obj, p
     patchToString(descriptor.set, "set " + String(prop));
   }
 
-  return descriptor;
-};
+    return descriptor;
+  },
+}.getOwnPropertyDescriptor;
 patchToString(patchedGetOwnPropertyDescriptor, "getOwnPropertyDescriptor");
 Object_defineProperty(Object, "getOwnPropertyDescriptor", {
   value: patchedGetOwnPropertyDescriptor,

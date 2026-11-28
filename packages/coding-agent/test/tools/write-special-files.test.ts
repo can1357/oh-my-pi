@@ -27,7 +27,7 @@ function createSession(cwd: string): ToolSession {
 async function writeInChild(
 	target: string,
 	cwd: string,
-): Promise<{ code: number | null; signal: string | null; output: string }> {
+): Promise<{ code: number | null; signal: NodeJS.Signals | number | null; output: string }> {
 	const script = `
 		import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 		import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";

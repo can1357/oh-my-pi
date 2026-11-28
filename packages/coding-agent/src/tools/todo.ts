@@ -585,6 +585,8 @@ const STATUS_TO_MARKER: Record<TodoStatus, string> = {
 	abandoned: "-",
 };
 
+const TODO_CONTINUATION_INDENT = "  ";
+
 export function resolveTodoMarkdownPath(input: string, cwd: string): string {
 	const raw = normalizePathLikeInput(input) || "TODO.md";
 	return resolveToCwd(raw, cwd);
@@ -598,7 +600,13 @@ export function phasesToMarkdown(phases: TodoPhase[]): string {
 		if (i > 0) out.push("");
 		out.push(`# ${phases[i].name}`);
 		for (const task of phases[i].tasks) {
-			out.push(`- [${STATUS_TO_MARKER[task.status]}] ${task.content}`);
+			const [firstLine, ...continuations] = task.content.split("\n");
+			out.push(`- [${STATUS_TO_MARKER[task.status]}] ${firstLine}`);
+			for (const line of continuations) {
+				// Escape heading/list prefixes and mark blank lines that belong to the task.
+				const escaped = line.replace(/^(\s*)(?=[#*+\\-]|$)/, "$1\\");
+				out.push(`${TODO_CONTINUATION_INDENT}${escaped}`);
+			}
 		}
 	}
 	return `${out.join("\n")}\n`;
@@ -615,6 +623,10 @@ const MARKER_TO_STATUS: Record<string, TodoStatus> = {
 	"~": "abandoned",
 };
 
+const TODO_HEADING_PATTERN = /^#{1,6}\s+(.+?)\s*$/;
+// Some editors and Markdown serializers escape the checkbox brackets.
+const TODO_CHECKBOX_PATTERN = /^[-*+]\s*\\?\[(.?)\\?\](?:\s(.*))?$/s;
+
 /** Parse a Markdown checklist back into todo phases. */
 export function markdownToPhases(md: string): { phases: TodoPhase[]; errors: string[] } {
 	const errors: string[] = [];
@@ -628,33 +640,45 @@ export function markdownToPhases(md: string): { phases: TodoPhase[]; errors: str
 		const trimmed = raw.trim();
 		if (!trimmed) continue;
 
-		const headingMatch = /^#{1,6}\s+(.+?)\s*$/.exec(trimmed);
+		const headingMatch = TODO_HEADING_PATTERN.exec(trimmed);
 		if (headingMatch) {
 			currentPhase = { name: headingMatch[1].trim(), tasks: [] };
 			phases.push(currentPhase);
 			continue;
 		}
 
-		// Tolerate backslash-escaped brackets (`- \[x\]`): some editors and
-		// markdown serializers escape `[` (and `]`) when round-tripping, yet the
-		// line still renders as a normal `[x]` checkbox. Accept either form.
-		const taskMatch = /^[-*+]\s*\\?\[(.?)\\?\]\s+(.+?)\s*$/.exec(trimmed);
-		if (taskMatch) {
-			if (!currentPhase) {
-				currentPhase = { name: "Todos", tasks: [] };
-				phases.push(currentPhase);
-			}
-			const marker = taskMatch[1];
-			const status = MARKER_TO_STATUS[marker];
-			if (!status) {
-				errors.push(`Line ${lineNum + 1}: unknown status marker "[${marker}]" (use [ ], [x], [/], [-])`);
-				continue;
-			}
-			currentPhase.tasks.push({ content: taskMatch[2].trim(), status });
+		const taskMatch = TODO_CHECKBOX_PATTERN.exec(raw.trimStart());
+		const taskLine = lineNum + 1;
+		if (!taskMatch) {
+			errors.push(`Line ${taskLine}: unrecognized syntax "${trimmed}"`);
 			continue;
 		}
 
-		errors.push(`Line ${lineNum + 1}: unrecognized syntax "${trimmed}"`);
+		const contentLines = [taskMatch[2] ?? ""];
+		while (lines[lineNum + 1]?.startsWith(TODO_CONTINUATION_INDENT)) {
+			const line = lines[lineNum + 1].slice(TODO_CONTINUATION_INDENT.length);
+			// Preserve blank separators and indented headings and checkboxes.
+			const trimmedLine = line.trim();
+			if (!trimmedLine || TODO_HEADING_PATTERN.test(trimmedLine) || TODO_CHECKBOX_PATTERN.test(trimmedLine)) break;
+			contentLines.push(line.replace(/^(\s*)\\(?=[#*+\\-]|$)/, "$1"));
+			lineNum++;
+		}
+		const content = contentLines.length === 1 ? contentLines[0].trim() : contentLines.join("\n");
+		if (!content) {
+			errors.push(`Line ${taskLine}: unrecognized syntax "${trimmed}"`);
+			continue;
+		}
+		if (!currentPhase) {
+			currentPhase = { name: "Todos", tasks: [] };
+			phases.push(currentPhase);
+		}
+		const marker = taskMatch[1];
+		const status = MARKER_TO_STATUS[marker];
+		if (!status) {
+			errors.push(`Line ${taskLine}: unknown status marker "[${marker}]" (use [ ], [x], [/], [-])`);
+			continue;
+		}
+		currentPhase.tasks.push({ content, status });
 	}
 
 	normalizeInProgressTask(phases);
@@ -750,7 +774,7 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 	async execute(
 		_toolCallId: string,
 		params: TodoParams,
-		_signal?: AbortSignal,
+		signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<TodoToolDetails>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<TodoToolDetails>> {
@@ -771,14 +795,30 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 		const { phases: updated, errors } = readOnly
 			? { phases: previousPhases, errors: [] as string[] }
 			: applyParams(clonePhases(previousPhases), entry);
+		let current = previousPhases;
+		let uncommitted: TodoToolDetails["uncommitted"];
+		if (op !== "view" && errors.length === 0) {
+			const commit = () => this.session.setTodoPhases?.(updated);
+			const asked = this.session.applyTodoChange?.({ op, previous: previousPhases, next: updated }, commit, signal);
+			if (!asked) commit();
+			else {
+				// A decider that commits does so before returning, so awaiting a plain result adds no delay to the commit.
+				const outcome = await asked;
+				if (outcome.kind !== "committed") {
+					errors.push(outcome.message);
+					uncommitted = outcome.kind;
+					current = clonePhases(this.session.getTodoPhases?.() ?? []);
+				}
+			}
+		}
 		// A batch with any error is discarded wholesale: persisting a
 		// half-applied batch makes the natural retry hit "already exists" for
-		// the ops that did land. State and rendered summary stay at previous.
+		// the ops that did land. State and rendered summary stay as they are.
 		const failed = errors.length > 0;
-		const effective = failed ? previousPhases : updated;
+		const effective = failed ? current : updated;
 		const completedTasks = readOnly || failed ? [] : getCompletionTransitions(previousPhases, updated);
-		if (!readOnly && !failed) this.session.setTodoPhases?.(updated);
 		const details: TodoToolDetails = { op, phases: effective, storage };
+		if (uncommitted) details.uncommitted = uncommitted;
 		if (completedTasks.length > 0) details.completedTasks = completedTasks;
 
 		return {

@@ -11,7 +11,7 @@ import {
 	StreamingRevealController,
 	visibleUnits,
 } from "@oh-my-pi/pi-coding-agent/modes/controllers/streaming-reveal";
-import { getSegmenter } from "@oh-my-pi/pi-coding-agent/utils/text-width";
+import { segmentGraphemes } from "@oh-my-pi/pi-utils/graphemes";
 
 function makeUsage(): AssistantMessage["usage"] {
 	return {
@@ -308,7 +308,7 @@ describe("streaming reveal", () => {
 /** Pure Intl.Segmenter grapheme count, independent of BlockUnitCounter's memoization. */
 function refCount(text: string): number {
 	let n = 0;
-	for (const _segment of getSegmenter().segment(text)) n += 1;
+	for (const _segment of segmentGraphemes(text)) n += 1;
 	return n;
 }
 
@@ -316,7 +316,7 @@ function refCount(text: string): number {
 function refSlice(text: string, units: number): string {
 	if (units <= 0) return "";
 	let n = 0;
-	for (const { index, segment } of getSegmenter().segment(text)) {
+	for (const { index, segment } of segmentGraphemes(text)) {
 		n += 1;
 		if (n >= units) return text.slice(0, index + segment.length);
 	}

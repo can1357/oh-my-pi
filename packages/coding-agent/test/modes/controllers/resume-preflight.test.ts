@@ -32,7 +32,12 @@ type ResumeSwitchOptions = {
 
 function createResumeContext(opts: { flushFails?: boolean; sourceCwd?: string; previousSessionFile?: string } = {}) {
 	const sourceCwd = opts.sourceCwd ?? "/tmp/source-project";
-	const state = { cwd: sourceCwd };
+	const state = {
+		cwd: sourceCwd,
+		file: opts.previousSessionFile,
+		/** The session file each observer-registry reset saw. */
+		resets: [] as (string | undefined)[],
+	};
 	const switchSession = vi.fn(async (_sessionPath: string, _options?: ResumeSwitchOptions) => true);
 	const applyCwdChange = vi.fn(async () => true);
 	const moveTo = vi.fn(async (cwd: string) => {
@@ -56,12 +61,14 @@ function createResumeContext(opts: { flushFails?: boolean; sourceCwd?: string; p
 			getCwd: () => state.cwd,
 			getRecordedCwd: () => state.cwd,
 			getSessionDir: () => "/tmp",
-			getSessionFile: () => opts.previousSessionFile,
+			getSessionFile: () => state.file,
 			moveTo,
 		},
 		settings,
 		prepareSessionSwitch: vi.fn(async () => {}),
-		resetObserverRegistry: vi.fn(),
+		resetObserverRegistry: vi.fn(() => {
+			state.resets.push(state.file);
+		}),
 		clearTransientSessionUi: vi.fn(),
 		applyCwdChange,
 		updateEditorBorderColor: vi.fn(),
@@ -131,7 +138,7 @@ describe("SelectorController.handleResumeSession preflight flush", () => {
 				"/tmp/some-session.jsonl",
 				expect.objectContaining({ onCwdChange: expect.any(Function) }),
 			);
-			expect(applyCwdChange).toHaveBeenCalledWith(targetCwd);
+			expect(applyCwdChange).toHaveBeenCalledWith(targetCwd, expect.objectContaining({ restore: false }));
 			expect(ctx.showError).not.toHaveBeenCalled();
 			expect(ctx.showStatus).toHaveBeenCalled();
 
@@ -161,11 +168,28 @@ describe("SelectorController.handleResumeSession preflight flush", () => {
 			expect(state.cwd).toBe(sourceCwd);
 			expect(moveTo).not.toHaveBeenCalled();
 			expect(ctx.clearTransientSessionUi).not.toHaveBeenCalled();
+			// The source session stays active, and so do its subagents in the tray.
+			expect(state.resets).toEqual([]);
 			expect(ctx.showStatus).not.toHaveBeenCalled();
 		} finally {
 			await fs.rm(sourceCwd, { recursive: true, force: true });
 			await fs.rm(targetCwd, { recursive: true, force: true });
 		}
+	});
+
+	it("points the subagent registry at the resumed session, not the one it left", async () => {
+		const { ctx, switchSession, state } = createResumeContext({
+			previousSessionFile: "/tmp/with-subagents.jsonl",
+		});
+		switchSession.mockImplementation(async sessionPath => {
+			state.file = sessionPath;
+			return true;
+		});
+		const controller = new SelectorController(ctx);
+
+		expect(await controller.handleResumeSession("/tmp/without-subagents.jsonl")).toBe(true);
+
+		expect(state.resets).toEqual(["/tmp/without-subagents.jsonl"]);
 	});
 
 	it("does not retry a cancelled rollback switch", async () => {

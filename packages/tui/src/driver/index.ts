@@ -60,6 +60,8 @@ export interface ProcessTerminalDriver extends TerminalDriver, Pick<TerminalInpu
 	 * `replay` batch with the complete ledger at the current width under a fresh id.
 	 */
 	onReplay(listener: () => void): () => void;
+	/** Change the retained-history policy for resizes that settle from now on (`tui.resizeScrollback` edits). */
+	setResizeScrollback(mode: ResizeScrollback): void;
 	setMouse(tracking: MouseTracking, reportFocus?: boolean): void;
 	refreshAppearance(): void;
 	/** `sequence` wrapped so it reaches the outer terminal through a multiplexer. */
@@ -151,7 +153,7 @@ export function createTerminalDriver(
 	terminal.onInput(deliver);
 	const resizeListeners = new Set<(columns: number, rows: number) => void>();
 
-	const resizeScrollback =
+	let resizeScrollback =
 		options.resizeScrollback ?? SCROLLBACK_MODES[env.PI_TUI_RESIZE_SCROLLBACK ?? ""] ?? "preserve";
 	const forcedInPlace = options.inPlaceResize ?? envFlag(env.PI_TUI_RESIZE_IN_PLACE);
 	const multiplexed = (): boolean => terminal.identity.multiplexer !== null;
@@ -408,6 +410,10 @@ export function createTerminalDriver(
 		onReplay(listener) {
 			replayListeners.add(listener);
 			return () => replayListeners.delete(listener);
+		},
+		setResizeScrollback(mode) {
+			resizeScrollback = mode;
+			writer.setResizeScrollback(mode);
 		},
 		resetDisplay() {
 			images.reset();

@@ -6,9 +6,15 @@ use std::{
 	time::{Duration, Instant},
 };
 
-use ashpd::desktop::{
-	PersistMode, Session,
-	screencast::{CursorMode, Screencast, SourceType},
+use ashpd::{
+	desktop::{
+		CreateSessionOptions, PersistMode, Session,
+		screencast::{
+			CursorMode, OpenPipeWireRemoteOptions, Screencast, SelectSourcesOptions, SourceType,
+			StartCastOptions,
+		},
+	},
+	enumflags2::BitFlags,
 };
 use image::RgbaImage;
 
@@ -38,7 +44,7 @@ struct ScreenCast {
 	fd:       OwnedFd,
 	position: Option<(i32, i32)>,
 	size:     Option<(i32, i32)>,
-	session:  Session<'static, Screencast<'static>>,
+	session:  Session<Screencast>,
 }
 
 struct CapturedFrame {
@@ -81,7 +87,7 @@ async fn open_screencast() -> CoreResult<ScreenCast> {
 	.await?;
 	let session = picker_request(async {
 		portal
-			.create_session()
+			.create_session(CreateSessionOptions::default())
 			.await
 			.map_err(|err| format!("ScreenCast CreateSession: {err}"))
 	})
@@ -92,11 +98,12 @@ async fn open_screencast() -> CoreResult<ScreenCast> {
 			portal
 				.select_sources(
 					&session,
-					CursorMode::Embedded,
-					SourceType::Monitor.into(),
-					true,
-					restore_token.as_deref(),
-					PersistMode::ExplicitlyRevoked,
+					SelectSourcesOptions::default()
+						.set_cursor_mode(CursorMode::Embedded)
+						.set_sources(BitFlags::from(SourceType::Monitor))
+						.set_multiple(true)
+						.set_restore_token(restore_token.as_deref())
+						.set_persist_mode(PersistMode::ExplicitlyRevoked),
 				)
 				.await
 				.map_err(|err| format!("ScreenCast SelectSources: {err}"))
@@ -104,7 +111,7 @@ async fn open_screencast() -> CoreResult<ScreenCast> {
 		.await?;
 		let response = picker_request(async {
 			portal
-				.start(&session, None)
+				.start(&session, None, StartCastOptions::default())
 				.await
 				.map_err(|err| format!("ScreenCast Start: {err}"))
 		})
@@ -121,7 +128,7 @@ async fn open_screencast() -> CoreResult<ScreenCast> {
 		let size = stream.size();
 		let fd = portal_request(async {
 			portal
-				.open_pipe_wire_remote(&session)
+				.open_pipe_wire_remote(&session, OpenPipeWireRemoteOptions::default())
 				.await
 				.map_err(|err| format!("ScreenCast OpenPipeWireRemote: {err}"))
 		})

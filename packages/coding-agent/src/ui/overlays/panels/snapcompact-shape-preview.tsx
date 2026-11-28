@@ -94,10 +94,9 @@ function variantOf(shape: Shape): ShapeVariantName {
 	for (const name of SHAPE_VARIANT_NAMES) {
 		const v: ShapeGeometry = SHAPE_VARIANTS[name];
 		if (
-			v.font === shape.font &&
 			v.cellWidth === shape.cellWidth &&
 			v.cellHeight === shape.cellHeight &&
-			v.stretch === shape.stretch &&
+			v.wideCells === shape.wideCells &&
 			v.variant === shape.variant &&
 			v.stopwordDim === shape.stopwordDim &&
 			v.columns === shape.columns &&
