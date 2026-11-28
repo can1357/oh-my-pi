@@ -132,7 +132,7 @@
 
 ### Fixed
 
-- A system prompt `before_agent_start` returns for a queued message, an agent wake or a background result now ends with the run that delivered it, including a streamed-edit or Gemini tool-call recovery run, and when an interrupt starts; a later prompt rebuild (a tool, model or settings change) then sends the base prompt, or the prompt `extensionHandlers.keepSystemPromptOverride` keeps for that base, instead of keeping the run's prompt until the next one ([#20896](https://github.com/can1357/oh-my-pi/pull/20896) by [@sjawhar](https://github.com/sjawhar))
+- A system prompt `before_agent_start` returns for a queued message, an agent wake or a background result now ends with that run instead of lasting until the next prompt, unless `extensionHandlers.keepSystemPromptOverride` keeps it ([#20896](https://github.com/can1357/oh-my-pi/pull/20896) by [@sjawhar](https://github.com/sjawhar))
 - `/resume` into a session without subagents no longer keeps showing the previous session's subagents above the composer
 - Fixed stealth injection registry to preserve native function source strings across frames
 - In Tern, `/copy` and `/annotate session` share the same block picker on desktop and mobile. Clicking a side preview accepts the full item and closes the picker ([#20791](https://github.com/can1357/oh-my-pi/pull/20791) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).

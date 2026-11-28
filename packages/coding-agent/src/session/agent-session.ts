@@ -15439,7 +15439,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				this.#advisors.resetSessionState();
 				this.#closeCodexProviderSessionsForHistoryRewrite();
 			}
-			// The new session holds the branched path's prompt records; a turn that runs no hooks sends them.
+			// With `extensionHandlers.keepSystemPromptOverride` on, a turn that runs no hooks sends the prompt the
+			// branched path recorded.
 			this.#tools.followBranchSystemPrompt();
 
 			this.#advisors.reattachRecorderFeeds();

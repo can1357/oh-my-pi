@@ -106,7 +106,7 @@ const textStream = (opts: {
 		stream.push({ type: "done", reason: "stop", message });
 	};
 	if (opts.after === undefined) queueMicrotask(answer);
-	else void opts.after.then(answer);
+	else void opts.after.finally(answer);
 	return stream;
 };
 
