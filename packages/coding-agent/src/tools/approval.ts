@@ -565,10 +565,10 @@ function restrictionSubjects(
 		}
 		return subjects;
 	}
-	if (tool.approvalTouchesFilesystem?.(args) === false) return [];
 	const subjects = (tool.approvalRestrictionPaths?.(args) ?? [])
 		.filter(target => path.isAbsolute(target))
 		.map(target => ({ path: approvalCacheKeyForPath(target), recursive: false }));
+	if (tool.approvalTouchesFilesystem?.(args) === false) return subjects;
 	if (cwd === undefined) return subjects;
 	let workingDirectory = cwd;
 	const requested = isRecord(args) ? args.cwd : undefined;

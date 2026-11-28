@@ -2,10 +2,21 @@ import { extractUriScheme, InternalUrlRouter } from "../../internal-urls";
 import type { SchemeWriteScope } from "../../internal-urls/url-scheme";
 import type { ToolSession } from "../../tools";
 
-/** Schemes whose reads always delegate through `tool.read` for user-visible policy/approval. */
-const DIRECT_READ_BLOCKED_SCHEMES: Readonly<Record<string, true>> = {
-	cfg: true,
-	vault: true,
+/**
+ * Explicit allowlist of non-workspace, non-network schemes safe for prompt-free
+ * direct reads in the V8 sandbox. Everything else (git, conflict, session,
+ * memory, proc, security, cfg, vault, ssh, remote/extension schemes) delegates
+ * through `tool.read`.
+ */
+const DIRECT_READ_ALLOWED_SCHEMES: Readonly<Record<string, true>> = {
+	local: true,
+	help: true,
+	omp: true,
+	history: true,
+	agent: true,
+	attachment: true,
+	rule: true,
+	skill: true,
 };
 
 const DIRECT_WRITE_SCOPES: Readonly<Partial<Record<SchemeWriteScope, true>>> = {
@@ -31,7 +42,7 @@ export function isDirectReadableV8Url(rawPath: string): DirectReadPolicy {
 	const normalized = router.normalize(rawPath);
 	if (!router.canHandle(normalized)) return { allowed: false };
 	const scheme = extractUriScheme(normalized);
-	if (!scheme || DIRECT_READ_BLOCKED_SCHEMES[scheme]) return { allowed: false };
+	if (!scheme || !DIRECT_READ_ALLOWED_SCHEMES[scheme]) return { allowed: false };
 	const spec = router.spec(scheme);
 	if (!spec || spec.backing === "remote") return { allowed: false };
 	if (router.readTier(normalized) !== "read") return { allowed: false };
@@ -55,6 +66,7 @@ export function isDirectWritableV8Url(
 		if (decision.policy === "deny") {
 			return { allowed: false, denyReason: decision.reason ?? `Cannot write ${normalized}` };
 		}
+		if (decision.policy === "prompt") return { allowed: false };
 		if (decision.tier !== "read" && decision.policy !== "allow") return { allowed: false };
 	} else if (decision !== "read") {
 		return { allowed: false };

@@ -1,7 +1,8 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import * as os from "node:os";
 import * as path from "node:path";
 import { resolveV8EvalBinary } from "@oh-my-pi/pi-natives";
-import { isRecord, logger, readJsonl, Snowflake } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, readJsonl, Snowflake, withTimeout } from "@oh-my-pi/pi-utils";
 import { registerOnBoard } from "../../daemon/client";
 import type { ToolSession } from "../../tools";
 import { ToolAbortError, ToolError } from "../../tools/tool-errors";
@@ -14,14 +15,15 @@ import {
 } from "../executor-base";
 import { cfgEvalV8MaxHeapMb } from "../settings";
 import { updateEvalState } from "../state";
-import type { EvalDisplayOutput } from "../types";
+import { type EvalDisplayOutput, evalImageMetadata } from "../types";
 import { handleV8ToolCall, handleV8UrlRead, handleV8UrlWrite, type V8HostBridgeOptions } from "./host-bridge";
 import type { V8ErrorPayload, V8Inbound, V8Outbound } from "./protocol";
 
 const V8_INIT_TIMEOUT_MS = 10_000;
 const V8_CANCEL_GRACE_MS = 250;
 const V8_CLOSE_TIMEOUT_MS = 1_000;
-
+const MAX_V8_BRIDGE_REPLY_BYTES = 15 * 1024 * 1024;
+const activeV8BridgeSession = new AsyncLocalStorage<string>();
 export interface V8RunState {
 	signal?: AbortSignal;
 	parentToolCallId?: string;
@@ -48,9 +50,10 @@ interface V8Session {
 	sessionId: string;
 	kernelId: string;
 	proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
-	state: "alive" | "dead";
+	state: "alive" | "closing" | "dead";
 	stateSessions: Set<ToolSession>;
 	pending: Map<string, PendingV8Run>;
+	runTail: Promise<void>;
 	ownerIds: Set<string>;
 	hasFallbackOwner: boolean;
 	readyPromise: Promise<void>;
@@ -85,10 +88,15 @@ export async function executeInV8Isolate(options: {
 	code: string;
 	filename: string;
 	finalExprSuppressed?: boolean;
+	asyncWrapped?: boolean;
+	finalExprReturned?: boolean | null;
 	timeoutMs?: number;
 	runState: V8RunState;
 }): Promise<void> {
 	const { sessionKey } = options;
+	if (activeV8BridgeSession.getStore() === sessionKey) {
+		throw new ToolError("Nested language: 'v8' calls on the same session are not supported.");
+	}
 	if (options.reset) {
 		const inFlight = resettingSessions.get(sessionKey);
 		if (inFlight) await inFlight.catch(() => undefined);
@@ -119,7 +127,18 @@ export async function executeInV8Isolate(options: {
 	if (!options.reset && lostSessions.delete(sessionKey)) {
 		options.runState.onText?.(`${formatKernelRestartNotice("V8 isolate")}\n`);
 	}
-	await runOnce(session, options);
+	const prevTail = session.runTail.catch(() => undefined);
+	const { promise: currentRun, resolve: releaseRun } = Promise.withResolvers<void>();
+	session.runTail = currentRun;
+	try {
+		await prevTail;
+		if (session.state !== "alive") {
+			throw new ToolError("V8 isolate exited before starting cell");
+		}
+		await runOnce(session, options);
+	} finally {
+		releaseRun();
+	}
 	if (session.state === "alive" && path.isAbsolute(options.filename)) {
 		updateEvalState(options.session, {
 			language: "v8",
@@ -185,7 +204,7 @@ export async function smokeTestV8EvalProcess(): Promise<void> {
 
 	const session = spawnV8Session("smoke", "smoke", 32);
 	try {
-		await raceWithTimeout(session.readyPromise, V8_INIT_TIMEOUT_MS, "Timed out waiting for omp-v8-eval ready");
+		await withTimeout(session.readyPromise, V8_INIT_TIMEOUT_MS, "Timed out waiting for omp-v8-eval ready");
 		const { promise, resolve, reject } = Promise.withResolvers<void>();
 		let output = "";
 		const pending: PendingV8Run = {
@@ -209,7 +228,7 @@ export async function smokeTestV8EvalProcess(): Promise<void> {
 			code: "print(JSON.stringify({ bun: typeof Bun, proc: typeof process, fetch: typeof fetch, sum: 40 + 2 }))",
 			filename: "smoke.js",
 		});
-		await raceWithTimeout(promise, V8_INIT_TIMEOUT_MS, "Timed out running omp-v8-eval smoke cell");
+		await withTimeout(promise, V8_INIT_TIMEOUT_MS, "Timed out running omp-v8-eval smoke cell");
 		const parsed: unknown = JSON.parse(output.trim().split("\n").at(-1) ?? "null");
 		if (
 			!isRecord(parsed) ||
@@ -261,9 +280,11 @@ async function acquireV8Session(
 		})();
 		starting = entry;
 		startingSessions.set(sessionKey, entry);
-		void entry.promise.finally(() => {
-			if (startingSessions.get(sessionKey) === entry) startingSessions.delete(sessionKey);
-		});
+		void entry.promise
+			.catch(() => undefined)
+			.finally(() => {
+				if (startingSessions.get(sessionKey) === entry) startingSessions.delete(sessionKey);
+			});
 	}
 	attachSessionOwner(starting, sessionId, ownerId);
 	const session = await starting.promise;
@@ -284,7 +305,7 @@ async function startV8Session(
 	const session = spawnV8Session(sessionKey, sessionId, maxHeapMb);
 	const initTimeout = Math.max(V8_INIT_TIMEOUT_MS, timeoutMs ?? 0);
 	try {
-		await raceWithTimeout(session.readyPromise, initTimeout, "Timed out waiting for V8 isolate to initialize");
+		await withTimeout(session.readyPromise, initTimeout, "Timed out waiting for V8 isolate to initialize");
 		return session;
 	} catch (error) {
 		await killV8Session(session, error instanceof Error ? error : new Error(String(error)), { force: true });
@@ -325,6 +346,7 @@ function spawnV8Session(sessionKey: string, sessionId: string, maxHeapMb: number
 		state: "alive",
 		stateSessions: new Set(),
 		pending: new Map(),
+		runTail: Promise.resolve(),
 		ownerIds: new Set(),
 		hasFallbackOwner: false,
 		readyPromise,
@@ -335,7 +357,6 @@ function spawnV8Session(sessionKey: string, sessionId: string, maxHeapMb: number
 		stderrLines: [],
 		boardDispose: () => board.dispose(),
 	};
-
 	const stdoutDone = pumpV8Stdout(session);
 	const stderrDone = pumpV8Stderr(session);
 	void proc.exited.then(async exitCode => {
@@ -401,7 +422,8 @@ function handleV8Message(session: V8Session, msg: V8Outbound): void {
 		}
 		case "display": {
 			const pending = session.pending.get(msg.runId);
-			pending?.runState.onDisplay?.(msg.output as EvalDisplayOutput);
+			const sanitized = sanitizeGuestDisplayOutput(msg.output);
+			if (sanitized) pending?.runState.onDisplay?.(sanitized);
 			return;
 		}
 		case "tool-call":
@@ -444,16 +466,43 @@ async function dispatchBridgeRequest(
 	const ctrl = new AbortController();
 	pending.toolCalls.set(callId, ctrl);
 	try {
-		const value = await executor({
-			session: pending.toolSession,
-			parentToolCallId: pending.runState.parentToolCallId,
-			signal: ctrl.signal,
-			cellTimeoutMs: pending.cellTimeoutMs,
-			onReply: pending.runState.onReply,
-			onDisplay: output => pending.runState.onDisplay?.(output),
-			emitStatus: event => pending.runState.onDisplay?.({ type: "status", event }),
-		});
-		sendToV8(session, { type: "tool-reply", id: callId, ok: true, value });
+		const value = await activeV8BridgeSession.run(session.sessionKey, () =>
+			executor({
+				session: pending.toolSession,
+				parentToolCallId: pending.runState.parentToolCallId,
+				signal: ctrl.signal,
+				cellTimeoutMs: pending.cellTimeoutMs,
+				onReply: pending.runState.onReply,
+				onDisplay: output => pending.runState.onDisplay?.(output),
+				emitStatus: event => pending.runState.onDisplay?.({ type: "status", event }),
+			}),
+		);
+		let encoded: string;
+		try {
+			encoded = `${JSON.stringify({ type: "tool-reply", id: callId, ok: true, value })}\n`;
+		} catch (serError) {
+			sendToV8(session, {
+				type: "tool-reply",
+				id: callId,
+				ok: false,
+				error: toErrorPayload(
+					new ToolError(
+						`Tool reply is not JSON-serializable: ${serError instanceof Error ? serError.message : String(serError)}`,
+					),
+				),
+			});
+			return;
+		}
+		if (Buffer.byteLength(encoded, "utf8") > MAX_V8_BRIDGE_REPLY_BYTES) {
+			sendToV8(session, {
+				type: "tool-reply",
+				id: callId,
+				ok: false,
+				error: toErrorPayload(new ToolError("Tool reply exceeds 15 MiB V8 bridge limit")),
+			});
+			return;
+		}
+		writeRawToV8(session, encoded);
 	} catch (error) {
 		sendToV8(session, { type: "tool-reply", id: callId, ok: false, error: toErrorPayload(error) });
 	} finally {
@@ -472,6 +521,8 @@ async function runOnce(
 		code: string;
 		filename: string;
 		finalExprSuppressed?: boolean;
+		asyncWrapped?: boolean;
+		finalExprReturned?: boolean | null;
 		timeoutMs?: number;
 		runState: V8RunState;
 	},
@@ -539,6 +590,8 @@ async function runOnce(
 				code: options.code,
 				filename: options.filename,
 				finalExprSuppressed: options.finalExprSuppressed,
+				asyncWrapped: options.asyncWrapped,
+				finalExprReturned: options.finalExprReturned,
 			});
 		}
 		await promise;
@@ -582,8 +635,8 @@ async function killV8SessionFor(session: V8Session, error: Error, options: { for
 }
 
 async function killV8Session(session: V8Session, error: Error, options: { force: boolean }): Promise<void> {
-	if (session.state === "dead") return;
-	session.state = "dead";
+	if (session.state === "dead" || session.state === "closing") return;
+	session.state = "closing";
 	for (const toolSession of session.stateSessions) {
 		updateEvalState(toolSession, { language: "v8", kernelId: session.kernelId, alive: false });
 	}
@@ -597,6 +650,7 @@ async function killV8Session(session: V8Session, error: Error, options: { force:
 		sendToV8(session, { type: "close" });
 		closedGracefully = await Promise.race([session.closedPromise, Bun.sleep(V8_CLOSE_TIMEOUT_MS).then(() => false)]);
 	}
+	session.state = "dead";
 	if (!closedGracefully) {
 		try {
 			session.proc.kill("SIGKILL");
@@ -630,12 +684,54 @@ function markV8SessionAlive(session: V8Session, toolSession: ToolSession): void 
 	});
 }
 
-function sendToV8(session: V8Session, msg: V8Inbound): void {
-	if (session.state !== "alive") return;
+function sanitizeGuestDisplayOutput(raw: unknown): EvalDisplayOutput | undefined {
+	if (!isRecord(raw) || typeof raw.type !== "string") return undefined;
+	if (raw.type === "image") {
+		if (typeof raw.data !== "string" || typeof raw.mimeType !== "string") return undefined;
+		return { type: "image", data: raw.data, mimeType: raw.mimeType, ...evalImageMetadata(raw) };
+	}
+	if (raw.type === "view") {
+		if (typeof raw.text !== "string" || !isRecord(raw.view)) return undefined;
+		return {
+			type: "view",
+			text: raw.text,
+			view: raw.view as EvalDisplayOutput extends { view: infer V } ? V : never,
+		};
+	}
+	if (raw.type === "status") {
+		if (!isRecord(raw.event)) return undefined;
+		const op = raw.event.op;
+		if (op !== "log" && op !== "phase") return undefined;
+		return {
+			type: "status",
+			event: {
+				op,
+				...(typeof raw.event.message === "string" ? { message: raw.event.message } : {}),
+				...(typeof raw.event.title === "string" ? { title: raw.event.title } : {}),
+			},
+		};
+	}
+	return undefined;
+}
+
+function writeRawToV8(session: V8Session, payload: string): void {
+	if (session.state === "dead") return;
 	try {
-		session.proc.stdin.write(`${JSON.stringify(msg)}\n`);
+		const res = session.proc.stdin.write(payload);
+		void Promise.resolve(res).catch(err => {
+			logger.debug("v8 isolate stdin write failed", { error: err instanceof Error ? err.message : String(err) });
+		});
 	} catch (err) {
 		logger.debug("v8 isolate stdin write failed", { error: err instanceof Error ? err.message : String(err) });
+	}
+}
+
+function sendToV8(session: V8Session, msg: V8Inbound): void {
+	if (session.state === "dead") return;
+	try {
+		writeRawToV8(session, `${JSON.stringify(msg)}\n`);
+	} catch (err) {
+		logger.debug("v8 isolate stdin encode failed", { error: err instanceof Error ? err.message : String(err) });
 	}
 }
 
@@ -663,16 +759,4 @@ function toErrorPayload(error: unknown): V8ErrorPayload {
 		};
 	}
 	return { message: String(error) };
-}
-
-async function raceWithTimeout<T>(promise: Promise<T>, timeoutMs: number, reason: string): Promise<T> {
-	const timeoutSignal = AbortSignal.timeout(timeoutMs);
-	const { promise: timeoutPromise, reject } = Promise.withResolvers<never>();
-	const onAbort = (): void => reject(new ToolError(reason));
-	timeoutSignal.addEventListener("abort", onAbort, { once: true });
-	try {
-		return await Promise.race([promise, timeoutPromise]);
-	} finally {
-		timeoutSignal.removeEventListener("abort", onAbort);
-	}
 }

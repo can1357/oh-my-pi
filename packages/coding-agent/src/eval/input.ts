@@ -78,7 +78,11 @@ export async function prepareEvalSource(
 				"V8 sandbox %load only supports safe internal URLs (e.g. local://...). Use await tool.read(...) for host files.",
 			);
 		}
-		filename = await router.requireLocal(policy.normalized, "load", sessionResolveContext(session, { signal }));
+		filename = await router.requireLocal(
+			policy.normalized,
+			"load",
+			sessionResolveContext(session, { signal, containSkillPaths: true }),
+		);
 	} else if (router.canHandle(file)) {
 		filename = await router.requireLocal(file, "load", sessionResolveContext(session, { signal }));
 	} else {

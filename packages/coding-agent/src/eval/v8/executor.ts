@@ -94,6 +94,11 @@ export async function executeV8(code: string, options: V8ExecutorOptions): Promi
 	const filename = options.filename ?? `v8-cell-${crypto.randomUUID()}.js`;
 	const cwd = options.cwd ?? options.session.cwd;
 	let runtimeEntered = false;
+	const MAX_V8_DISPLAY_FRAMES = 256;
+	const MAX_V8_DISPLAY_BYTES = 8 * 1024 * 1024;
+	let displayFrames = 0;
+	let displayBytes = 0;
+	let displayCapped = false;
 
 	try {
 		signal?.throwIfAborted();
@@ -108,6 +113,8 @@ export async function executeV8(code: string, options: V8ExecutorOptions): Promi
 			code: wrapped.source,
 			filename,
 			finalExprSuppressed: wrapped.finalExpressionSuppressed,
+			asyncWrapped: wrapped.asyncWrapped,
+			finalExprReturned: wrapped.finalExpressionReturned,
 			timeoutMs: runtimeTimeoutMs ?? options.idleTimeoutMs,
 			runState: {
 				signal,
@@ -119,6 +126,15 @@ export async function executeV8(code: string, options: V8ExecutorOptions): Promi
 						options.onStatus?.(output.event);
 						if (isEvalTimeoutControlEvent(output.event)) return;
 					}
+					if (displayCapped) return;
+					const approxBytes =
+						output.type === "image" ? output.data.length : output.type === "view" ? output.text.length : 256;
+					if (displayFrames >= MAX_V8_DISPLAY_FRAMES || displayBytes + approxBytes > MAX_V8_DISPLAY_BYTES) {
+						displayCapped = true;
+						return;
+					}
+					displayFrames++;
+					displayBytes += approxBytes;
 					display.push(output);
 				},
 			},

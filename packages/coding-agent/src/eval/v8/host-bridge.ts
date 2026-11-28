@@ -11,7 +11,7 @@ import {
 	type ToolBridgeOptions,
 } from "../js/tool-bridge";
 import { withEvalBridgeToolCall } from "../tool-bridge-policy";
-import type { EvalDisplayOutput } from "../types";
+import { type EvalDisplayOutput, evalImageMetadata } from "../types";
 import type { V8ReadOptions, V8WriteEncoding } from "./protocol";
 import { isDirectReadableV8Url, isDirectWritableV8Url } from "./url-policy";
 
@@ -24,7 +24,7 @@ function surfaceV8ToolImages(value: unknown, onDisplay?: (output: EvalDisplayOut
 	let displayed = 0;
 	for (const image of value.images) {
 		if (!isRecord(image) || typeof image.data !== "string" || typeof image.mimeType !== "string") continue;
-		onDisplay?.({ type: "image", data: image.data, mimeType: image.mimeType });
+		onDisplay?.({ type: "image", data: image.data, mimeType: image.mimeType, ...evalImageMetadata(image) });
 		displayed++;
 	}
 	if (displayed === 0) return value;
@@ -98,9 +98,9 @@ export async function handleV8UrlRead(
 	}
 
 	const router = InternalUrlRouter.instance();
-	const resolveCtx = sessionResolveContext(options.session, { signal: options.signal });
+	const resolveCtx = sessionResolveContext(options.session, { signal: options.signal, containSkillPaths: true });
 	const target = await router.target(policy.normalized, resolveCtx);
-	if (!target) {
+	if (!target || (target.url.protocol === "skill:" && target.kind === "resource")) {
 		const delegatedPath = formatDelegatedReadPath(rawPath, readOptions);
 		if (delegatedPath === null) return "";
 		const res = await handleV8ToolCall("read", { path: delegatedPath }, options);
@@ -166,7 +166,10 @@ export async function handleV8UrlWrite(
 		if (encoding !== "utf8") {
 			throw new ToolError("Binary writes are only supported for local:// URLs.");
 		}
-		await handleV8ToolCall("write", { path: rawPath, content: data }, options);
+		const res = await handleV8ToolCall("write", { path: rawPath, content: data }, options);
+		if (isRecord(res) && (res.hasError === true || res.isError === true)) {
+			throw new ToolError(typeof res.text === "string" && res.text ? res.text : `Write failed for ${rawPath}`);
+		}
 		return rawPath;
 	}
 
@@ -195,7 +198,18 @@ export async function handleV8UrlWrite(
 		options.emitStatus?.({ op: "write", path: policy.peeled, error: NO_REPLY_SINK });
 		throw new ToolError(NO_REPLY_SINK);
 	}
-	await router.write(policy.peeled, data, sessionWriteContext(options.session, { signal: options.signal }));
+	const writeResult = await router.write(
+		policy.peeled,
+		data,
+		sessionWriteContext(options.session, { signal: options.signal }),
+	);
+	if (writeResult?.isError) {
+		const message = writeResult.content
+			.flatMap(block => (block.type === "text" && typeof block.text === "string" ? [block.text] : []))
+			.join("\n")
+			.trim();
+		throw new ToolError(message || `Write failed for ${policy.peeled}`);
+	}
 	if (policy.scope === "reply") {
 		options.onReply?.(data);
 	}

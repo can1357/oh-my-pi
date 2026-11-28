@@ -106,8 +106,23 @@ fn main() -> ExitCode {
 			V8Inbound::Init => {
 				// Runtime initialized at startup; ready frame already emitted.
 			},
-			V8Inbound::Run { run_id, code, filename, final_expr_suppressed } => {
-				if runtime.run_cell(&run_id, &code, &filename, final_expr_suppressed, &rx) {
+			V8Inbound::Run {
+				run_id,
+				code,
+				filename,
+				final_expr_suppressed,
+				async_wrapped,
+				final_expr_returned,
+			} => {
+				if runtime.run_cell(
+					&run_id,
+					&code,
+					&filename,
+					final_expr_suppressed,
+					async_wrapped,
+					final_expr_returned,
+					&rx,
+				) {
 					if let Ok(err) = err_rx.try_recv() {
 						eprintln!("{err}");
 						return ExitCode::FAILURE;
@@ -146,7 +161,7 @@ mod tests {
 	) -> Vec<V8Outbound> {
 		events.borrow_mut().clear();
 		let (_tx, rx) = mpsc::channel();
-		rt.run_cell(run_id, code, "test.js", false, &rx);
+		rt.run_cell(run_id, code, "test.js", false, false, Some(true), &rx);
 		events.borrow().clone()
 	}
 
@@ -204,8 +219,8 @@ mod tests {
 			&events,
 			"r1",
 			"__omp_set_final_expr__(({ bun: typeof Bun, deno: typeof Deno, proc: typeof process, \
-			 req: typeof require, f: typeof fetch, ws: typeof WebSocket, st: typeof setTimeout, \
-			 v8raw: typeof __v8_call_tool }));",
+			 req: typeof require, f: typeof fetch, ws: typeof WebSocket, wasm: typeof WebAssembly, \
+			 st: typeof setTimeout, v8raw: typeof __v8_call_tool }));",
 		);
 		let text = out
 			.iter()
@@ -218,6 +233,12 @@ mod tests {
 			text.contains("bun: 'undefined'")
 				|| text.contains("bun: \"undefined\"")
 				|| text.contains("bun: undefined"),
+			"got: {text}"
+		);
+		assert!(
+			text.contains("wasm: 'undefined'")
+				|| text.contains("wasm: \"undefined\"")
+				|| text.contains("wasm: undefined"),
 			"got: {text}"
 		);
 		assert!(!text.contains("function"), "unexpected function in {text}");
@@ -257,6 +278,8 @@ mod tests {
 			 })()",
 			"test.js",
 			false,
+			true,
+			Some(true),
 			&rx,
 		);
 		let out = events.borrow();
@@ -289,7 +312,7 @@ mod tests {
 		});
 
 		let (_tx, rx) = mpsc::channel();
-		rt.run_cell("r_inf", "while (true) {}", "inf.js", false, &rx);
+		rt.run_cell("r_inf", "while (true) {}", "inf.js", false, false, Some(false), &rx);
 		let out = events.borrow();
 		assert!(out.iter().any(|m| matches!(
 			m,
@@ -310,13 +333,16 @@ mod tests {
 		.expect("runtime");
 
 		let (_tx, rx) = mpsc::channel();
-		rt.run_cell(
+		let should_close = rt.run_cell(
 			"r_oom",
 			"const arr = []; while (true) { arr.push(new Array(10000).fill('x')); }",
 			"oom.js",
 			false,
+			false,
+			Some(false),
 			&rx,
 		);
+		assert!(should_close, "heap limit must retire isolate instead of ratcheting");
 		let out = events.borrow();
 		assert!(out.iter().any(|m| matches!(
 			m,
@@ -343,5 +369,69 @@ mod tests {
 			V8Outbound::Result { ok: false, error: Some(err), .. }
 				if err.message.contains("no pending host operations")
 		)));
+	}
+
+	#[test]
+	fn array_buffer_allocation_capped_and_atob_error_clean() {
+		let events = Rc::new(RefCell::new(Vec::new()));
+		let events_clone = Rc::clone(&events);
+		let mut rt = V8SandboxRuntime::new(
+			16,
+			Box::new(move |msg| {
+				events_clone.borrow_mut().push(msg);
+			}),
+		)
+		.expect("runtime");
+
+		let out_ab = run_with_events(&mut rt, &events, "r_ab", "new Uint8Array(64 * 1024 * 1024)");
+		assert!(out_ab.iter().any(|m| matches!(
+			m,
+			V8Outbound::Result { ok: false, error: Some(err), .. } if err.name.as_deref() == Some("RangeError")
+		)));
+
+		let out_atob = run_with_events(&mut rt, &events, "r_atob", "atob('a')");
+		assert!(out_atob.iter().any(|m| matches!(
+			m,
+			V8Outbound::Result { ok: false, error: Some(err), .. } if err.name.as_deref() == Some("InvalidCharacterError")
+		)));
+	}
+
+	#[test]
+	fn early_return_and_trailing_promise_emit_values() {
+		let events = Rc::new(RefCell::new(Vec::new()));
+		let events_clone = Rc::clone(&events);
+		let mut rt = V8SandboxRuntime::new(
+			64,
+			Box::new(move |msg| {
+				events_clone.borrow_mut().push(msg);
+			}),
+		)
+		.expect("runtime");
+
+		events.borrow_mut().clear();
+		let (_tx, rx) = mpsc::channel();
+		rt.run_cell(
+			"r_ret",
+			"(async () => { if (true) return 42; __omp_set_final_expr__((99)); })()",
+			"ret.js",
+			false,
+			true,
+			Some(false),
+			&rx,
+		);
+		assert!(
+			events
+				.borrow()
+				.iter()
+				.any(|m| matches!(m, V8Outbound::Text { chunk, .. } if chunk.trim() == "42"))
+		);
+
+		let out_p =
+			run_with_events(&mut rt, &events, "r_p", "__omp_set_final_expr__((Promise.resolve(99)));");
+		assert!(
+			out_p
+				.iter()
+				.any(|m| matches!(m, V8Outbound::Text { chunk, .. } if chunk.trim() == "99"))
+		);
 	}
 }

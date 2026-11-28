@@ -15,6 +15,10 @@ pub enum V8Inbound {
 		filename:              String,
 		#[serde(rename = "finalExprSuppressed", default)]
 		final_expr_suppressed: bool,
+		#[serde(rename = "asyncWrapped", default)]
+		async_wrapped:         bool,
+		#[serde(rename = "finalExprReturned", default)]
+		final_expr_returned:   Option<bool>,
 	},
 	ToolReply {
 		id:    String,

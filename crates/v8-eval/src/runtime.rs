@@ -1,9 +1,11 @@
 use std::{
+	alloc::{Layout, alloc, alloc_zeroed, dealloc},
 	collections::HashMap,
 	ffi::c_void,
+	ptr::NonNull,
 	sync::{
 		Arc, Mutex, Once,
-		atomic::{AtomicBool, Ordering},
+		atomic::{AtomicBool, AtomicUsize, Ordering},
 		mpsc::Receiver,
 	},
 };
@@ -17,12 +19,98 @@ static V8_INIT: Once = Once::new();
 
 pub fn init_v8_platform() {
 	V8_INIT.call_once(|| {
-		v8::V8::set_flags_from_string("--no-expose-wasm");
 		let platform = v8::new_default_platform(1, false).make_shared();
 		v8::V8::initialize_platform(platform);
 		v8::V8::initialize();
 	});
 }
+
+struct BoundedArrayBufferAllocator {
+	allocated: AtomicUsize,
+	limit:     usize,
+}
+
+impl BoundedArrayBufferAllocator {
+	fn try_reserve(&self, len: usize) -> bool {
+		self
+			.allocated
+			.try_update(Ordering::SeqCst, Ordering::SeqCst, |cur| {
+				cur.checked_add(len).filter(|&next| next <= self.limit)
+			})
+			.is_ok()
+	}
+}
+
+unsafe extern "C" fn ab_allocate(handle: &BoundedArrayBufferAllocator, len: usize) -> *mut c_void {
+	if len == 0 {
+		return NonNull::<u8>::dangling().as_ptr().cast();
+	}
+	if !handle.try_reserve(len) {
+		return std::ptr::null_mut();
+	}
+	let Ok(layout) = Layout::from_size_align(len, 16) else {
+		handle.allocated.fetch_sub(len, Ordering::SeqCst);
+		return std::ptr::null_mut();
+	};
+	// SAFETY: `layout` has non-zero size and power-of-two alignment 16.
+	let ptr = unsafe { alloc_zeroed(layout) };
+	if ptr.is_null() {
+		handle.allocated.fetch_sub(len, Ordering::SeqCst);
+		return std::ptr::null_mut();
+	}
+	ptr.cast()
+}
+
+unsafe extern "C" fn ab_allocate_uninitialized(
+	handle: &BoundedArrayBufferAllocator,
+	len: usize,
+) -> *mut c_void {
+	if len == 0 {
+		return NonNull::<u8>::dangling().as_ptr().cast();
+	}
+	if !handle.try_reserve(len) {
+		return std::ptr::null_mut();
+	}
+	let Ok(layout) = Layout::from_size_align(len, 16) else {
+		handle.allocated.fetch_sub(len, Ordering::SeqCst);
+		return std::ptr::null_mut();
+	};
+	// SAFETY: `layout` has non-zero size and power-of-two alignment 16.
+	let ptr = unsafe { alloc(layout) };
+	if ptr.is_null() {
+		handle.allocated.fetch_sub(len, Ordering::SeqCst);
+		return std::ptr::null_mut();
+	}
+	ptr.cast()
+}
+
+unsafe extern "C" fn ab_free(handle: &BoundedArrayBufferAllocator, data: *mut c_void, len: usize) {
+	if len == 0 || data.is_null() {
+		return;
+	}
+	if let Ok(layout) = Layout::from_size_align(len, 16) {
+		// SAFETY: `data` was allocated by
+		// `ab_allocate`/`ab_allocate_uninitialized` with the same `len` and align
+		// 16.
+		unsafe { dealloc(data.cast(), layout) };
+		handle.allocated.fetch_sub(len, Ordering::SeqCst);
+	}
+}
+
+unsafe extern "C" fn ab_drop(handle: *const BoundedArrayBufferAllocator) {
+	if !handle.is_null() {
+		// SAFETY: `handle` was created with `Arc::into_raw` when constructing the
+		// V8 allocator.
+		unsafe { drop(Arc::from_raw(handle)) };
+	}
+}
+
+static AB_VTABLE: v8::RustAllocatorVtable<BoundedArrayBufferAllocator> = v8::RustAllocatorVtable {
+	allocate:               ab_allocate,
+	allocate_uninitialized: ab_allocate_uninitialized,
+	free:                   ab_free,
+	drop:                   ab_drop,
+};
 
 struct NearHeapState {
 	handle:   v8::IsolateHandle,
@@ -44,6 +132,13 @@ unsafe extern "C" fn on_near_heap_limit(
 	current_heap_limit.saturating_add(NEAR_HEAP_HEADROOM_BYTES)
 }
 
+const unsafe extern "C" fn disallow_wasm_codegen(
+	_context: v8::Local<v8::Context>,
+	_source: v8::Local<v8::String>,
+) -> bool {
+	false
+}
+
 fn host_import_module_dynamically<'s>(
 	scope: &mut v8::PinScope<'s, '_>,
 	_host_defined_options: v8::Local<'s, v8::Data>,
@@ -57,7 +152,6 @@ fn host_import_module_dynamically<'s>(
 	resolver.reject(scope, err);
 	Some(resolver.get_promise(scope))
 }
-
 struct BridgeState {
 	active_run_id:     Option<String>,
 	next_call_seq:     u64,
@@ -124,8 +218,11 @@ pub struct V8SandboxRuntime {
 impl Drop for V8SandboxRuntime {
 	fn drop(&mut self) {
 		if !self.near_heap_ptr.is_null() {
+			self
+				.isolate
+				.remove_near_heap_limit_callback(on_near_heap_limit, 0);
 			// SAFETY: `near_heap_ptr` was allocated via `Box::into_raw` when
-			// registering the callback.
+			// registering the callback and callback is now unregistered.
 			unsafe {
 				drop(Box::from_raw(self.near_heap_ptr));
 			}
@@ -138,9 +235,20 @@ impl V8SandboxRuntime {
 	pub fn new(max_heap_mb: u64, emit: Box<dyn FnMut(V8Outbound)>) -> Result<Self, String> {
 		init_v8_platform();
 		let clamped_mb = max_heap_mb.clamp(16, 2048);
-		let params = v8::CreateParams::default().heap_limits(0, (clamped_mb as usize) * 1024 * 1024);
+		let max_bytes = (clamped_mb as usize) * 1024 * 1024;
+		let ab_alloc = Arc::new(BoundedArrayBufferAllocator {
+			allocated: AtomicUsize::new(0),
+			limit:     max_bytes,
+		});
+		// SAFETY: `AB_VTABLE` matches `BoundedArrayBufferAllocator` and `ab_drop`
+		// reclaims the Arc.
+		let v8_ab_alloc = unsafe { v8::new_rust_allocator(Arc::into_raw(ab_alloc), &AB_VTABLE) };
+		let params = v8::CreateParams::default()
+			.heap_limits(0, max_bytes)
+			.array_buffer_allocator(v8_ab_alloc);
 		let mut isolate = v8::Isolate::new(params);
 		isolate.set_host_import_module_dynamically_callback(host_import_module_dynamically);
+		isolate.set_allow_wasm_code_generation_callback(disallow_wasm_codegen);
 
 		let isolate_handle = isolate.thread_safe_handle();
 		let heap_limit_exceeded = Arc::new(AtomicBool::new(false));
@@ -159,23 +267,31 @@ impl V8SandboxRuntime {
 			emit,
 		});
 
-		let context = {
+		let context_result = {
 			v8::scope!(let scope, &mut isolate);
 			let context = v8::Context::new(scope, Default::default());
 			let mut ctx_scope = v8::ContextScope::new(scope, context);
-			install_prelude(&mut ctx_scope)?;
-			v8::Global::new(&ctx_scope, context)
+			install_prelude(&mut ctx_scope).map(|()| v8::Global::new(&ctx_scope, context))
 		};
 
-		Ok(Self {
-			isolate,
-			context,
-			max_heap_mb: clamped_mb,
-			heap_limit_exceeded,
-			cancel_flag: Arc::new(AtomicBool::new(false)),
-			active_run_tracker: Arc::new(Mutex::new(None)),
-			near_heap_ptr,
-		})
+		match context_result {
+			Ok(context) => Ok(Self {
+				isolate,
+				context,
+				max_heap_mb: clamped_mb,
+				heap_limit_exceeded,
+				cancel_flag: Arc::new(AtomicBool::new(false)),
+				active_run_tracker: Arc::new(Mutex::new(None)),
+				near_heap_ptr,
+			}),
+			Err(err) => {
+				isolate.remove_near_heap_limit_callback(on_near_heap_limit, 0);
+				// SAFETY: `near_heap_ptr` was allocated above and callback is now
+				// unregistered.
+				unsafe { drop(Box::from_raw(near_heap_ptr)) };
+				Err(err)
+			},
+		}
 	}
 
 	pub fn tracker(&self) -> RunHandleTracker {
@@ -198,6 +314,8 @@ impl V8SandboxRuntime {
 		code: &str,
 		filename: &str,
 		final_expr_suppressed: bool,
+		async_wrapped: bool,
+		final_expr_returned: Option<bool>,
 		rx: &Receiver<V8Inbound>,
 	) -> bool {
 		// Clear any stale termination/heap flags before starting a new run.
@@ -216,9 +334,16 @@ impl V8SandboxRuntime {
 		}
 
 		let mut should_close = false;
-		let outcome =
-			self.run_cell_inner(run_id, code, filename, final_expr_suppressed, rx, &mut should_close);
-
+		let outcome = self.run_cell_inner(
+			run_id,
+			code,
+			filename,
+			final_expr_suppressed,
+			async_wrapped,
+			final_expr_returned,
+			rx,
+			&mut should_close,
+		);
 		if let Ok(mut guard) = self.active_run_tracker.lock() {
 			*guard = None;
 		}
@@ -251,6 +376,8 @@ impl V8SandboxRuntime {
 		code: &str,
 		filename: &str,
 		final_expr_suppressed: bool,
+		async_wrapped: bool,
+		final_expr_returned: Option<bool>,
 		rx: &Receiver<V8Inbound>,
 		should_close: &mut bool,
 	) -> Result<(), V8ErrorPayload> {
@@ -287,108 +414,90 @@ impl V8SandboxRuntime {
 		);
 
 		let Some(script) = v8::Script::compile(&tc, source, Some(&origin)) else {
-			return Err(extract_try_catch_error(&tc, max_heap_mb, &heap_exceeded, &cancel_flag));
+			return Err(extract_try_catch_error(
+				&tc,
+				max_heap_mb,
+				&heap_exceeded,
+				&cancel_flag,
+				should_close,
+			));
 		};
 
 		let Some(result_val) = script.run(&tc) else {
-			return Err(extract_try_catch_error(&tc, max_heap_mb, &heap_exceeded, &cancel_flag));
+			return Err(extract_try_catch_error(
+				&tc,
+				max_heap_mb,
+				&heap_exceeded,
+				&cancel_flag,
+				should_close,
+			));
 		};
 
 		tc.perform_microtask_checkpoint();
 		if tc.has_caught() || tc.has_terminated() {
-			return Err(extract_try_catch_error(&tc, max_heap_mb, &heap_exceeded, &cancel_flag));
+			return Err(extract_try_catch_error(
+				&tc,
+				max_heap_mb,
+				&heap_exceeded,
+				&cancel_flag,
+				should_close,
+			));
 		}
 
-		if let Ok(promise) = v8::Local::<v8::Promise>::try_from(result_val) {
-			loop {
-				match promise.state() {
-					v8::PromiseState::Fulfilled => break,
-					v8::PromiseState::Rejected => {
-						let reason = promise.result(&tc);
-						return Err(format_js_value_error(&tc, reason, None));
-					},
-					v8::PromiseState::Pending => {
-						let has_pending = tc
-							.get_slot::<BridgeState>()
-							.is_some_and(|s| !s.pending_resolvers.is_empty());
-						if !has_pending {
-							return Err(V8ErrorPayload::new(
-								"Top-level Promise settled neither resolved nor rejected (no pending host \
-								 operations)",
-							));
-						}
-						match rx.recv() {
-							Ok(V8Inbound::ToolReply { id, ok, value, error }) => {
-								let resolver_global = tc
-									.get_slot_mut::<BridgeState>()
-									.and_then(|s| s.pending_resolvers.remove(&id));
-								if let Some(resolver_global) = resolver_global {
-									let resolver = v8::Local::new(&tc, &resolver_global);
-									if ok {
-										let val = json_to_v8(
-											&tc,
-											value.as_ref().unwrap_or(&serde_json::Value::Null),
-										)
-										.unwrap_or_else(|_| v8::undefined(&tc).into());
-										resolver.resolve(&tc, val);
-									} else {
-										let err_payload =
-											error.unwrap_or_else(|| V8ErrorPayload::new("Tool call failed"));
-										let err_val = v8_error_from_payload(&tc, &err_payload);
-										resolver.reject(&tc, err_val);
-									}
-								}
-								tc.perform_microtask_checkpoint();
-								if tc.has_caught() || tc.has_terminated() {
-									return Err(extract_try_catch_error(
-										&tc,
-										max_heap_mb,
-										&heap_exceeded,
-										&cancel_flag,
-									));
-								}
-							},
-							Ok(V8Inbound::Cancel { run_id: cancel_id }) => {
-								if cancel_id == run_id {
-									reject_all_pending(&mut tc, "Execution aborted", true);
-									return Err(V8ErrorPayload {
-										name:          Some("AbortError".into()),
-										message:       "Execution aborted".into(),
-										stack:         None,
-										is_abort:      Some(true),
-										is_tool_error: None,
-									});
-								}
-							},
-							Ok(V8Inbound::Close) | Err(_) => {
-								*should_close = true;
-								reject_all_pending(&mut tc, "V8 runtime closed", true);
-								return Err(V8ErrorPayload {
-									name:          Some("AbortError".into()),
-									message:       "V8 runtime closed".into(),
-									stack:         None,
-									is_abort:      Some(true),
-									is_tool_error: None,
-								});
-							},
-							Ok(V8Inbound::Init | V8Inbound::Run { .. }) => {},
-						}
-					},
-				}
-			}
-		}
+		let root_settled_val = if let Ok(promise) = v8::Local::<v8::Promise>::try_from(result_val) {
+			drive_promise(
+				&mut tc,
+				promise,
+				run_id,
+				rx,
+				max_heap_mb,
+				&heap_exceeded,
+				&cancel_flag,
+				should_close,
+			)?
+		} else {
+			result_val
+		};
 
-		let final_val_global = tc.get_slot_mut::<BridgeState>().and_then(|state| {
-			if state.final_expr_set && !final_expr_suppressed {
-				state.final_expr_value.take()
-			} else {
-				state.final_expr_value = None;
-				None
-			}
-		});
+		let (final_expr_set, final_val_global) =
+			tc.get_slot_mut::<BridgeState>()
+				.map_or((false, None), |state| {
+					let set = state.final_expr_set;
+					let val = if set && !final_expr_suppressed {
+						state.final_expr_value.take()
+					} else {
+						state.final_expr_value = None;
+						None
+					};
+					(set, val)
+				});
 
-		if let Some(val_global) = final_val_global {
+		let value_to_emit = if let Some(val_global) = final_val_global {
 			let val = v8::Local::new(&tc, &val_global);
+			if let Ok(promise) = v8::Local::<v8::Promise>::try_from(val) {
+				Some(drive_promise(
+					&mut tc,
+					promise,
+					run_id,
+					rx,
+					max_heap_mb,
+					&heap_exceeded,
+					&cancel_flag,
+					should_close,
+				)?)
+			} else {
+				Some(val)
+			}
+		} else if !final_expr_set
+			&& !final_expr_suppressed
+			&& (async_wrapped || final_expr_returned.is_none())
+		{
+			Some(root_settled_val)
+		} else {
+			None
+		};
+
+		if let Some(val) = value_to_emit {
 			let global = context.global(&tc);
 			if let Some(key) = v8::String::new(&tc, "__omp_emit_final_expr__")
 				&& let Some(emit_val) = global.get(&tc, key.into())
@@ -396,12 +505,116 @@ impl V8SandboxRuntime {
 			{
 				emit_fn.call(&tc, global.into(), &[val]);
 				if tc.has_caught() || tc.has_terminated() {
-					return Err(extract_try_catch_error(&tc, max_heap_mb, &heap_exceeded, &cancel_flag));
+					return Err(extract_try_catch_error(
+						&tc,
+						max_heap_mb,
+						&heap_exceeded,
+						&cancel_flag,
+						should_close,
+					));
 				}
 			}
 		}
 
 		Ok(())
+	}
+}
+
+fn drive_promise<'s>(
+	tc: &mut v8::PinnedRef<'s, v8::TryCatch<'_, '_, v8::HandleScope<'_>>>,
+	promise: v8::Local<'s, v8::Promise>,
+	run_id: &str,
+	rx: &Receiver<V8Inbound>,
+	max_heap_mb: u64,
+	heap_exceeded: &AtomicBool,
+	cancel_flag: &AtomicBool,
+	should_close: &mut bool,
+) -> Result<v8::Local<'s, v8::Value>, V8ErrorPayload> {
+	loop {
+		match promise.state() {
+			v8::PromiseState::Fulfilled => return Ok(promise.result(tc)),
+			v8::PromiseState::Rejected => {
+				let reason = promise.result(tc);
+				return Err(format_js_value_error(tc, reason, None));
+			},
+			v8::PromiseState::Pending => {
+				let has_pending = tc
+					.get_slot::<BridgeState>()
+					.is_some_and(|s| !s.pending_resolvers.is_empty());
+				if !has_pending {
+					return Err(V8ErrorPayload::new(
+						"Top-level Promise settled neither resolved nor rejected (no pending host \
+						 operations)",
+					));
+				}
+				match rx.recv() {
+					Ok(V8Inbound::ToolReply { id, ok, value, error }) => {
+						let resolver_global = tc
+							.get_slot_mut::<BridgeState>()
+							.and_then(|s| s.pending_resolvers.remove(&id));
+						if let Some(resolver_global) = resolver_global {
+							let resolver = v8::Local::new(tc, &resolver_global);
+							if ok {
+								let val =
+									json_to_v8(tc, value.as_ref().unwrap_or(&serde_json::Value::Null))
+										.unwrap_or_else(|_| v8::undefined(tc).into());
+								resolver.resolve(tc, val);
+							} else {
+								let err_payload =
+									error.unwrap_or_else(|| V8ErrorPayload::new("Tool call failed"));
+								let err_val = v8_error_from_payload(tc, &err_payload);
+								resolver.reject(tc, err_val);
+							}
+						}
+						tc.perform_microtask_checkpoint();
+						if tc.has_caught() || tc.has_terminated() {
+							return Err(extract_try_catch_error(
+								tc,
+								max_heap_mb,
+								heap_exceeded,
+								cancel_flag,
+								should_close,
+							));
+						}
+					},
+					Ok(V8Inbound::Run { run_id: busy_id, .. }) => {
+						if let Some(state) = tc.get_slot_mut::<BridgeState>() {
+							state.emit(V8Outbound::Result {
+								run_id: busy_id,
+								ok:     false,
+								error:  Some(V8ErrorPayload::new(
+									"V8 isolate is busy executing another cell",
+								)),
+							});
+						}
+					},
+					Ok(V8Inbound::Cancel { run_id: cancel_id }) => {
+						if cancel_id == run_id {
+							reject_all_pending(tc, "Execution aborted", true);
+							return Err(V8ErrorPayload {
+								name:          Some("AbortError".into()),
+								message:       "Execution aborted".into(),
+								stack:         None,
+								is_abort:      Some(true),
+								is_tool_error: None,
+							});
+						}
+					},
+					Ok(V8Inbound::Close) | Err(_) => {
+						*should_close = true;
+						reject_all_pending(tc, "V8 runtime closed", true);
+						return Err(V8ErrorPayload {
+							name:          Some("AbortError".into()),
+							message:       "V8 runtime closed".into(),
+							stack:         None,
+							is_abort:      Some(true),
+							is_tool_error: None,
+						});
+					},
+					Ok(V8Inbound::Init) => {},
+				}
+			},
+		}
 	}
 }
 
@@ -562,7 +775,22 @@ fn cb_url_read(
 		None
 	} else {
 		match v8_to_json(scope, opt_val) {
-			Ok(val) => serde_json::from_value::<ReadOptions>(val).ok(),
+			Ok(val) => {
+				if let Ok(parsed) = serde_json::from_value::<ReadOptions>(val) {
+					if parsed.offset.is_some_and(|n| n < 1) {
+						throw_type_error(scope, "read() offset must be an integer >= 1");
+						return;
+					}
+					if parsed.limit.is_some_and(|n| n < 0) {
+						throw_type_error(scope, "read() limit must be an integer >= 0");
+						return;
+					}
+					Some(parsed)
+				} else {
+					throw_type_error(scope, "read() options offset and limit must be integers");
+					return;
+				}
+			},
 			Err(msg) => {
 				throw_type_error(scope, &msg);
 				return;
@@ -705,10 +933,12 @@ fn extract_try_catch_error(
 	max_heap_mb: u64,
 	heap_exceeded: &AtomicBool,
 	cancel_flag: &AtomicBool,
+	should_close: &mut bool,
 ) -> V8ErrorPayload {
 	if tc.has_terminated() {
 		tc.cancel_terminate_execution();
 		if heap_exceeded.swap(false, Ordering::SeqCst) {
+			*should_close = true;
 			return V8ErrorPayload {
 				name:          Some("RangeError".into()),
 				message:       format!("V8 isolate heap limit exceeded ({max_heap_mb} MiB)"),

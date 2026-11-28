@@ -15,6 +15,8 @@
 	delete globalThis.__v8_url_write;
 	delete globalThis.__v8_set_final_expr;
 
+	delete globalThis.WebAssembly;
+
 	const isNil = value => value === undefined || value === null;
 	const isPlainObject = value => value !== null && typeof value === "object" && !Array.isArray(value);
 
@@ -79,7 +81,9 @@
 	const decodeBase64Bytes = input => {
 		const cleaned = String(input).replace(/[\t\n\f\r ]+/g, "");
 		if (cleaned.length % 4 === 1) {
-			throw new DOMException("The string to be decoded is not correctly encoded.", "InvalidCharacterError");
+			const err = new Error("The string to be decoded is not correctly encoded.");
+			err.name = "InvalidCharacterError";
+			throw err;
 		}
 		const padLen = cleaned.endsWith("==") ? 2 : cleaned.endsWith("=") ? 1 : 0;
 		const bodyLen = cleaned.length - padLen;
@@ -91,14 +95,18 @@
 			const v0 = c0 < 128 ? BASE64_LOOKUP[c0] : -1;
 			const v1 = c1 < 128 ? BASE64_LOOKUP[c1] : -1;
 			if (v0 < 0 || v1 < 0) {
-				throw new DOMException("The string to be decoded is not correctly encoded.", "InvalidCharacterError");
+				const err = new Error("The string to be decoded is not correctly encoded.");
+				err.name = "InvalidCharacterError";
+				throw err;
 			}
 			const c2 = i + 2 < bodyLen ? cleaned.charCodeAt(i + 2) : -1;
 			const c3 = i + 3 < bodyLen ? cleaned.charCodeAt(i + 3) : -1;
 			const v2 = c2 === -1 ? 0 : c2 < 128 ? BASE64_LOOKUP[c2] : -1;
 			const v3 = c3 === -1 ? 0 : c3 < 128 ? BASE64_LOOKUP[c3] : -1;
 			if (v2 < 0 || v3 < 0) {
-				throw new DOMException("The string to be decoded is not correctly encoded.", "InvalidCharacterError");
+				const err = new Error("The string to be decoded is not correctly encoded.");
+				err.name = "InvalidCharacterError";
+				throw err;
 			}
 			const n = (v0 << 18) | (v1 << 12) | (v2 << 6) | v3;
 			out[outIdx++] = (n >> 16) & 0xff;

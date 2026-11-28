@@ -1085,10 +1085,9 @@ export async function wrapCode(code: string): Promise<{
 	};
 }
 
-async function assertNoV8ModuleSyntax(code: string): Promise<void> {
-	if (!code.includes("import") && !code.includes("export")) return;
+async function assertNoV8ModuleSyntax(code: string): Promise<boolean> {
 	const ast = await parseProgram(code);
-	if (!ast) return;
+	if (!ast) return false;
 	let foundModuleSyntax = false;
 	for (const node of ast.program.body) {
 		if (
@@ -1111,6 +1110,7 @@ async function assertNoV8ModuleSyntax(code: string): Promise<void> {
 			"Module import/export syntax is not supported in the V8 sandbox. Use await read('local://...') or await tool.read({ path }) instead.",
 		);
 	}
+	return true;
 }
 
 export async function wrapV8CellCode(code: string): Promise<{
@@ -1119,6 +1119,15 @@ export async function wrapV8CellCode(code: string): Promise<{
 	finalExpressionReturned: boolean | null;
 	finalExpressionSuppressed?: boolean;
 }> {
+	// Check module/macro syntax BEFORE TypeScript transpilation so Bun.Transpiler never executes macros.
+	const parsedOriginal = await assertNoV8ModuleSyntax(code);
+	if (!parsedOriginal) {
+		return {
+			source: code,
+			asyncWrapped: false,
+			finalExpressionReturned: null,
+		};
+	}
 	const finalExpression = await returnFinalExpression(code);
 	const stripped = stripTypeScript(finalExpression.source);
 	await assertNoV8ModuleSyntax(stripped);

@@ -250,7 +250,8 @@ async function resolveBackend(
 		const availability = await pythonBackend.checkAvailability(session, probeOpts);
 		throwIfAborted(probeOpts?.signal);
 		if (!availability.ok) {
-			const fallbacks = [...(allowJs ? ['"js"'] : []), ...(backends.v8 ? ['"v8"'] : [])];
+			const advertised = resolveAdvertisedEvalBackends(session);
+			const fallbacks = [...(allowJs ? ['"js"'] : []), ...(advertised.v8 ? ['"v8"'] : [])];
 			const remedy =
 				fallbacks.length > 0
 					? `Python backend is unavailable in this session. Pass language: ${joinWithOr(fallbacks)}, or provide a working Python 3.8+ on PATH (or set python.interpreter).`

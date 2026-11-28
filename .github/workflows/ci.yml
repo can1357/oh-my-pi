@@ -83,6 +83,8 @@ env:
    # rest. Together they must equal //:natives-all (checked in the cross job),
    # so a filegroup addition cannot silently skip both.
    NATIVES_X64_TARGETS: natives-linux-x64-baseline natives-linux-x64-modern
+   V8_EVAL_X64_TARGETS: v8-eval-linux-x64
+   V8_EVAL_CROSS_TARGETS: v8-eval-darwin-arm64 v8-eval-darwin-x64 v8-eval-linux-arm64 v8-eval-win32-x64
    NATIVES_CROSS_TARGETS: natives-darwin-arm64 natives-darwin-x64-baseline natives-linux-arm64 natives-linux-musl-arm64 natives-linux-musl-x64-baseline natives-win32-arm64 natives-win32-x64-baseline
    # Per-test wall-clock ceiling (seconds) for scripts/ci-test-ts.ts. The
    # SQLite/subprocess-heavy coding-agent suites ran 1.5-2x slower on the
@@ -261,11 +263,11 @@ jobs:
          # Cargo honors that via `[lints]`, Bazel via the clippy-ported config.
          - name: Clippy (workspace lint policy on opted-in crates)
            run: |
-              bazelisk query "kind('rust_library|rust_shared_library|rust_binary', //crates/ast/... + //crates/diff/... + //crates/edit/... + //crates/iso/... + //crates/natives/... + //crates/shell/... + //crates/vcs/... + //crates/voice/... + //crates/xfs/...)" \
+              bazelisk query "kind('rust_library|rust_shared_library|rust_binary', //crates/ast/... + //crates/diff/... + //crates/edit/... + //crates/iso/... + //crates/natives/... + //crates/shell/... + //crates/v8-eval/... + //crates/vcs/... + //crates/voice/... + //crates/xfs/...)" \
                 | xargs bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build --config=clippy-strict --
          - name: Clippy (default lints elsewhere)
            run: |
-              bazelisk query "kind('rust_library|rust_shared_library', //crates/... - (//crates/ast/... + //crates/diff/... + //crates/edit/... + //crates/iso/... + //crates/natives/... + //crates/shell/... + //crates/vcs/... + //crates/voice/... + //crates/xfs/...) - //crates/builtins/...)" \
+              bazelisk query "kind('rust_library|rust_shared_library', //crates/... - (//crates/ast/... + //crates/diff/... + //crates/edit/... + //crates/iso/... + //crates/natives/... + //crates/shell/... + //crates/v8-eval/... + //crates/vcs/... + //crates/voice/... + //crates/xfs/...) - //crates/builtins/...)" \
                 | xargs bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build --config=clippy --
          - name: Clippy (manifest allows on ported omp-builtins)
            run: |
@@ -337,6 +339,10 @@ jobs:
               mkdir -p ci-natives/natives-linux-x64-baseline ci-natives/natives-linux-x64-modern
               cp "$RUNNER_TEMP/package/pi_natives.linux-x64-baseline.node" ci-natives/natives-linux-x64-baseline/
               cp "$RUNNER_TEMP/package/pi_natives.linux-x64-modern.node" ci-natives/natives-linux-x64-modern/
+              if [ -f "$RUNNER_TEMP/package/omp_v8_eval.linux-x64" ]; then
+                mkdir -p ci-natives/v8-eval-linux-x64
+                cp "$RUNNER_TEMP/package/omp_v8_eval.linux-x64" ci-natives/v8-eval-linux-x64/
+              fi
          # Make the addon source visible whenever it is not source-matched,
          # instead of leaving a reviewer to wonder which addons the tests ran.
          - name: Report native addon source
@@ -374,14 +380,15 @@ jobs:
               for target in $NATIVES_X64_TARGETS; do
                 bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build "//:$target" 2>&1 | tee -a "$RUNNER_TEMP/bazel-build.log"
               done
-             for target in $NATIVES_X64_TARGETS; do
-               mkdir -p "ci-natives/$target"
-               cp -L bazel-bin/"$target"/*.node "ci-natives/$target/"
-             done
-             bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build //:v8-eval-linux-x64 2>&1 | tee -a "$RUNNER_TEMP/bazel-build.log"
-             mkdir -p ci-natives/v8-eval-linux-x64
-             cp -L bazel-bin/v8-eval-linux-x64/omp_v8_eval.linux-x64 ci-natives/v8-eval-linux-x64/
-         # Cache-hit visibility: a supposedly warm build that executes
+              for target in $NATIVES_X64_TARGETS; do
+                mkdir -p "ci-natives/$target"
+                cp -L bazel-bin/"$target"/*.node "ci-natives/$target/"
+              done
+              for target in $V8_EVAL_X64_TARGETS; do
+                bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build "//:$target" 2>&1 | tee -a "$RUNNER_TEMP/bazel-build.log"
+                mkdir -p "ci-natives/$target"
+                cp -L bazel-bin/"$target"/omp_v8_eval.* "ci-natives/$target/"
+              done
          # thousands of actions is the failure mode that made CI slow — make
          # it visible in the run summary instead of discovering it weeks in.
          - name: Report bazel cache stats
@@ -475,12 +482,12 @@ jobs:
          - name: Upload linux-x64 native addon artifact
            uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
            with:
-              name: natives-linux-x64
+             name: natives-linux-x64
              path: |
                 ci-natives/natives-linux-x64-*/*.node
                 ci-natives/v8-eval-linux-x64/omp_v8_eval.*
              if-no-files-found: error
-              retention-days: 1
+             retention-days: 1
 
    # The remaining targets (darwin, arm64, musl and win32 cross builds). Only
    # release jobs consume them, so they build beside the TS fan-out instead of
@@ -501,13 +508,10 @@ jobs:
               if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
               # One addon per invocation, for the OOM reason in native_addons.
               : > "$RUNNER_TEMP/bazel-build.log"
-             for target in $NATIVES_CROSS_TARGETS; do
-               bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build "//:$target" 2>&1 | tee -a "$RUNNER_TEMP/bazel-build.log"
-             done
-             for target in v8-eval-darwin-arm64 v8-eval-darwin-x64 v8-eval-linux-arm64 v8-eval-win32-x64; do
-               bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build "//:$target" 2>&1 | tee -a "$RUNNER_TEMP/bazel-build.log"
-             done
-         # The two jobs' target lists must together cover //:natives-all
+              for target in $NATIVES_CROSS_TARGETS $V8_EVAL_CROSS_TARGETS; do
+                bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build "//:$target" 2>&1 | tee -a "$RUNNER_TEMP/bazel-build.log"
+              done
+         # The two jobs' target lists must together cover //:natives-all and //:v8-eval-all
          # exactly; a target added to the filegroup but to neither list would
          # otherwise silently never build or ship. cquery, not query: the rc's
          # --config=ci is defined for build only, which cquery inherits and
@@ -515,14 +519,14 @@ jobs:
          - name: Check addon target lists cover natives-all
            run: |
               set -euo pipefail
-              read -r -a listed <<< "$NATIVES_X64_TARGETS $NATIVES_CROSS_TARGETS"
+              read -r -a listed <<< "$NATIVES_X64_TARGETS $NATIVES_CROSS_TARGETS $V8_EVAL_X64_TARGETS $V8_EVAL_CROSS_TARGETS"
               expected="$(printf '%s\n' "${listed[@]}" | sort)"
-              actual="$(bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" cquery 'labels(srcs, //:natives-all)' 2>"$RUNNER_TEMP/query.err" | sed -E 's/ \(.*\)$//; s/.*://' | sort)" || {
+              actual="$(bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" cquery 'labels(srcs, //:natives-all) + labels(srcs, //:v8-eval-all)' 2>"$RUNNER_TEMP/query.err" | sed -E 's/ \(.*\)$//; s/.*://' | sort)" || {
                 cat "$RUNNER_TEMP/query.err"
                 exit 1
               }
               if [ "$expected" != "$actual" ]; then
-                echo "::error title=Native addon target lists::NATIVES_X64_TARGETS + NATIVES_CROSS_TARGETS must equal //:natives-all srcs"
+                echo "::error title=Native target lists::NATIVES_*/V8_EVAL_* lists must equal //:natives-all + //:v8-eval-all srcs"
                 diff <(echo "$expected") <(echo "$actual") || true
                 exit 1
               fi
@@ -549,12 +553,13 @@ jobs:
          - name: Upload remaining native addon artifacts
            uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
            with:
-              name: native-addons
+             name: native-addons
              path: |
                 bazel-bin/natives-*/*.node
                 !bazel-bin/natives-linux-x64-*/*.node
                 bazel-bin/v8-eval-*/omp_v8_eval.*
                 !bazel-bin/v8-eval-linux-x64/omp_v8_eval.*
+             if-no-files-found: error
              retention-days: 1
 
    test_coding_agent_native:

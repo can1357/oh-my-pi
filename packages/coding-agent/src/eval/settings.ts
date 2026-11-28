@@ -45,7 +45,7 @@ export const cfgEvalV8 = register({
 });
 
 export const cfgEvalV8MaxHeapMb = register({
-	id: "eval.v8.maxHeapMb",
+	id: "eval.v8MaxHeapMb",
 	type: "number",
 	default: 256,
 	ui: {

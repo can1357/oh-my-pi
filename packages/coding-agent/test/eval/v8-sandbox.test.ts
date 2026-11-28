@@ -4,6 +4,7 @@ import * as path from "node:path";
 import type { AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgEvalV8, cfgEvalV8MaxHeapMb } from "@oh-my-pi/pi-coding-agent/eval/settings";
 import { disposeV8IsolatesByOwner, executeInV8Isolate } from "@oh-my-pi/pi-coding-agent/eval/v8/context-manager";
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
@@ -461,9 +462,9 @@ describe("V8 sandbox eval mode", () => {
 			const preAborted = AbortSignal.abort(new Error("already aborted"));
 			await expect(
 				executeInV8Isolate({
-					sessionKey: `v8:${h.toolSession.getEvalSessionId!()}`,
-					sessionId: h.toolSession.getEvalSessionId!(),
-					ownerId: h.toolSession.getEvalKernelOwnerId!(),
+					sessionKey: `v8:${h.toolSession.getEvalSessionId!()!}`,
+					sessionId: h.toolSession.getEvalSessionId!()!,
+					ownerId: h.toolSession.getEvalKernelOwnerId!() ?? undefined,
 					session: h.toolSession,
 					code: "1 + 1",
 					filename: "pre-abort.js",
@@ -479,6 +480,128 @@ describe("V8 sandbox eval mode", () => {
 			);
 			expect(afterPreAbort.isError).toBeFalsy();
 			expect(resultText(afterPreAbort)).toContain("80");
+		},
+	);
+
+	it.skipIf(!hasV8Binary)(
+		"rejects TS/Bun macro imports before transpilation, blocks WebAssembly and oversized ArrayBuffers, awaits trailing promises/early returns, and rejects nested v8 eval",
+		async () => {
+			const h = createHarness(
+				{
+					"tools.approvalMode": "always-ask",
+					"tools.restrictedFolders": [cwd],
+					"eval.v8": true,
+					"eval.v8MaxHeapMb": 32,
+				},
+				async () => "Deny",
+			);
+			expect(cfgEvalV8.get(h.toolSession.settings)).toBe(true);
+			expect(cfgEvalV8MaxHeapMb.get(h.toolSession.settings)).toBe(32);
+			// Macro import must be rejected before Bun.Transpiler can execute it.
+			const macroMarker = path.join(cwd, "macro-ran.txt");
+			const macroRes = await h.evalWrapper.execute(
+				"v8-macro",
+				{
+					language: "v8",
+					code: `import { writeFileSync } from "node:fs" with { type: "macro" };\nwriteFileSync(${JSON.stringify(macroMarker)}, "pwned");`,
+				},
+				undefined,
+				undefined,
+				h.context,
+			);
+			expect(macroRes.isError).toBe(true);
+			expect(resultText(macroRes)).toContain("Module import/export syntax is not supported");
+			expect(fs.existsSync(macroMarker)).toBe(false);
+
+			// Early return in async cell and trailing Promise expression both surface values.
+			const earlyAsync = await h.evalWrapper.execute(
+				"v8-early-async",
+				{ language: "v8", code: "await Promise.resolve(1);\nreturn 77;\n99;" },
+				undefined,
+				undefined,
+				h.context,
+			);
+			expect(earlyAsync.isError).toBeFalsy();
+			expect(resultText(earlyAsync)).toContain("77");
+
+			const trailingPromise = await h.evalWrapper.execute(
+				"v8-trailing-promise",
+				{ language: "v8", code: "Promise.resolve(88)" },
+				undefined,
+				undefined,
+				h.context,
+			);
+			expect(trailingPromise.isError).toBeFalsy();
+			expect(resultText(trailingPromise)).toContain("88");
+
+			// WebAssembly is disabled.
+			const wasmCheck = await h.evalWrapper.execute(
+				"v8-wasm",
+				{ language: "v8", code: "typeof WebAssembly" },
+				undefined,
+				undefined,
+				h.context,
+			);
+			expect(wasmCheck.isError).toBeFalsy();
+			expect(resultText(wasmCheck).trim()).toBe("undefined");
+
+			// Oversized ArrayBuffer allocation hits the 32 MiB limit cleanly and the isolate recovers on the next cell.
+			const abOom = await h.evalWrapper.execute(
+				"v8-ab-oom",
+				{ language: "v8", code: "new ArrayBuffer(128 * 1024 * 1024)" },
+				undefined,
+				undefined,
+				h.context,
+			);
+			expect(abOom.isError).toBe(true);
+			expect(resultText(abOom)).toMatch(/heap limit|allocation failed/i);
+
+			const postOom = await h.evalWrapper.execute(
+				"v8-post-oom",
+				{ language: "v8", code: "6 * 7" },
+				undefined,
+				undefined,
+				h.context,
+			);
+			expect(postOom.isError).toBeFalsy();
+			expect(resultText(postOom)).toContain("42");
+
+			// Privileged / non-allowlisted schemes delegate to tool.read rather than bypassing approval:
+			// ssh:// has readTier "exec" (prompts under always-ask), and git:// prompts under always-ask-cached.
+			const sshRead = await h.evalWrapper.execute(
+				"v8-ssh-read",
+				{ language: "v8", code: 'await read("ssh://host/etc/passwd")' },
+				undefined,
+				undefined,
+				h.context,
+			);
+			expect(h.select).toHaveBeenCalledTimes(1);
+			expect(sshRead.isError).toBe(true);
+
+			const cachedHarness = createHarness({ "tools.approvalMode": "always-ask-cached" }, async () => "Deny");
+			const gitRead = await cachedHarness.evalWrapper.execute(
+				"v8-git-read",
+				{ language: "v8", code: 'await read("git://status")' },
+				undefined,
+				undefined,
+				cachedHarness.context,
+			);
+			expect(cachedHarness.select).toHaveBeenCalledTimes(1);
+			expect(gitRead.isError).toBe(true);
+
+			// Re-entrant tool.eval({ language: "v8" }) on the same session rejects immediately instead of deadlocking.
+			const nestedEval = await h.evalWrapper.execute(
+				"v8-nested",
+				{
+					language: "v8",
+					code: 'const r = await tool.eval({ language: "v8", code: "1+1" }); if (r?.hasError) throw new Error(r.text); r',
+				},
+				undefined,
+				undefined,
+				h.context,
+			);
+			expect(nestedEval.isError).toBe(true);
+			expect(resultText(nestedEval)).toContain("Nested language: 'v8' calls");
 		},
 	);
 });

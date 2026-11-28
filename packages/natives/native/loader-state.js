@@ -150,6 +150,36 @@ export function getV8EvalBinaryFilename(platform = process.platform, arch = proc
 	return `omp_v8_eval.${platform}-${arch}${platform === "win32" ? ".exe" : ""}`;
 }
 
+function isLinuxMusl() {
+	if (process.platform !== "linux") return false;
+	let fd;
+	try {
+		fd = fs.openSync("/proc/self/exe", "r");
+		const header = Buffer.alloc(64);
+		if (fs.readSync(fd, header, 0, 64, 0) < 64) return false;
+		if (header.readUInt32BE(0) !== 0x7f454c46 || header[4] !== 2 || header[5] !== 1) return false;
+		const phoff = Number(header.readBigUInt64LE(32));
+		const phentsize = header.readUInt16LE(54);
+		const phnum = header.readUInt16LE(56);
+		const entry = Buffer.alloc(phentsize);
+		for (let i = 0; i < phnum; i++) {
+			if (fs.readSync(fd, entry, 0, phentsize, phoff + i * phentsize) < 32) break;
+			if (entry.readUInt32LE(0) !== 3) continue;
+			const offset = Number(entry.readBigUInt64LE(8));
+			const filesz = Number(entry.readBigUInt64LE(32));
+			if (filesz === 0 || filesz > 4096) return false;
+			const interp = Buffer.alloc(filesz);
+			const read = fs.readSync(fd, interp, 0, filesz, offset);
+			return interp.subarray(0, read).toString("utf8").replace(/\0+$/, "").includes("musl");
+		}
+	} catch {
+		return false;
+	} finally {
+		if (fd !== undefined) fs.closeSync(fd);
+	}
+	return false;
+}
+
 /** @type {string | null} */
 let cachedV8EvalBinaryPath = null;
 
@@ -177,6 +207,7 @@ export function resolveV8EvalBinary() {
 		cachedV8EvalBinaryPath = null;
 	}
 
+	if (isLinuxMusl()) return null;
 	const platformTag = `${process.platform}-${process.arch}`;
 	const filename = getV8EvalBinaryFilename(process.platform, process.arch);
 	const isCompiled = detectCompiledBinary({

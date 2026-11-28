@@ -1,5 +1,6 @@
 One cell per call; top-level state persists, including across compaction.{{#if spawns}} Subagents have separate kernels.{{/if}}
 A cell without `timeout` stops after {{timeoutDefault}}s{{#if timeoutRaisable}}; pass a larger `timeout` for slow subprocesses, network calls or large scans{{/if}}.
+{{#ifAny py js}}
 {{#if spawns}}
 {{#if eagerDelegation}}
 For 2+ independent items, use a named `workpool()`; results auto-deliver.
@@ -8,13 +9,14 @@ If blocked, leave `eval` and call `wait`.
 {{/if}}
 {{/if}}
 {{/if}}
+{{/ifAny}}
 {{#if py}}
 Python: plain Python subprocess, not IPython (no `get_ipython()`, `obj?`, or %matplotlib).
 Magics like %pip, %load, %time and `!cmd` are rewritten to Python.
 Top-level `await` works; `asyncio.run(…)` fails.
 {{/if}}
 {{#if js}}JS: Bun (Bun.file, Bun.write, Bun.$); top-level `await`/`return` work.{{/if}}
-{{#if v8}}V8 Sandbox (`language: "v8"`): isolated V8 process with persistent top-level state and top-level `await`/`return`; NO snippet approval prompt, NO host filesystem/network/env/packages/subagents. Inside `v8`, only `print`/`console`/`log`/`phase`, isolate-local `env()`, `await tool.<name>(args)` (normal tool approval), and `await read(...)`/`await write(...)` (direct for safe internal URLs like `local://`; delegates host paths and privileged URLs to `tool.read`/`tool.write`) exist; `%load` accepts safe internal URLs only.{{/if}}
+{{#if v8}}V8 Sandbox (`language: "v8"`): isolated V8 process with persistent top-level state and top-level `await`/`return`; no snippet approval prompt by default (explicit `tools.approval.eval` overrides still apply), NO host filesystem/network/env/packages/subagents. Inside `v8`, only `print`/`console`/`log`/`phase`, isolate-local `env()`, `await tool.<name>(args)` (normal tool approval), and `await read(...)`/`await write(...)` (direct for safe internal URLs like `local://`; delegates host paths and privileged URLs to `tool.read`/`tool.write`) exist; `%load` accepts safe internal URLs only.{{/if}}
 On error, retry only the failed step; earlier steps may have taken effect.
 Printing an image{{#if py}} or figure{{/if}} attaches it.
 
@@ -94,6 +96,7 @@ No `read` needed before first use; the guide follows the first call's result (fu
 {{/if}}
 </namespaces>
 {{/ifAny}}
+{{#ifAny py js}}
 {{#each inlinePreludes}}
 
 <{{name}}>
@@ -101,6 +104,7 @@ Global `{{name}}`, documented here in full (no `read` needed):
 {{{documentation}}}
 </{{name}}>
 {{/each}}
+{{/ifAny}}
 {{/if}}
 
 <critical>

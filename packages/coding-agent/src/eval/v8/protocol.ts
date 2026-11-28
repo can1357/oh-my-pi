@@ -21,6 +21,8 @@ export type V8Inbound =
 			code: string;
 			filename: string;
 			finalExprSuppressed?: boolean;
+			asyncWrapped?: boolean;
+			finalExprReturned?: boolean | null;
 	  }
 	| {
 			type: "tool-reply";

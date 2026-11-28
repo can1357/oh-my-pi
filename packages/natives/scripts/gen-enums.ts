@@ -42,6 +42,9 @@ const FUNCTION_RE = /^export declare function (\w+)/gm;
  */
 const RELEASE_IDENTITY_NAME_RE = /^__piNatives(?:BuildVersion$|V)/;
 
+// JS-implemented helpers appended to index.d.ts; excluded from generated nativeBindings exports.
+const JS_HELPER_EXPORTS = new Set(["resolveV8EvalBinary"]);
+
 interface EnumExport {
 	name: string;
 	entries: string[];
@@ -84,7 +87,7 @@ function collectMatches(dts: string, re: RegExp): string[] {
 
 function buildGeneratedBlock(dts: string): string {
 	const classes = collectMatches(dts, CLASS_RE);
-	const functions = collectMatches(dts, FUNCTION_RE);
+	const functions = collectMatches(dts, FUNCTION_RE).filter(name => !JS_HELPER_EXPORTS.has(name));
 	const enums = collectEnums(dts);
 
 	if (classes.length === 0 && functions.length === 0 && enums.length === 0) {

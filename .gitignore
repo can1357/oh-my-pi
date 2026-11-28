@@ -11,6 +11,7 @@ target/
 .xwin-cache/
 *.tsbuildinfo
 *.node
+omp_v8_eval.*
 *.b64.js
 /result
 /result-*
