@@ -499,6 +499,8 @@ export class TranscriptPresenter {
 					args: call.facts.args(),
 					...(result ? { result } : {}),
 					isError: result?.isError === true,
+					// What omp's own card draws: a viewport-only Bash card shows its job frames as static
+					// results, so a presenter sees no partial-to-final flip when its rows reach scrollback.
 					isPartial: result === undefined || call.facts.partial(),
 				});
 			});

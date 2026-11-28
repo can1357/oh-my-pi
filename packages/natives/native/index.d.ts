@@ -3221,8 +3221,8 @@ export interface LineRange {
 }
 
 /**
- * Live processes (never the caller) whose environment contains exactly
- * `name=value`.
+ * Live processes (never the caller) whose environment sets `name` to a
+ * value starting with `prefix`, each with that value.
  *
  * Reads the environment each process was exec'd with: only
  * the caller's user's processes are readable, others are skipped. macOS
@@ -3230,7 +3230,7 @@ export interface LineRange {
  * `/bin/sleep`, …) even from the same user, so those never match there.
  * Empty on platforms without a readable process environment (Windows).
  */
-export declare function listProcessesWithEnv(name: string, value: string): Array<TaggedProcess>
+export declare function listProcessesWithEnvPrefix(name: string, prefix: string): Array<TaggedProcess>
 
 /**
  * Walk the workspace once and return tree entries plus AGENTS.md candidates.
@@ -4981,7 +4981,7 @@ export interface SvgCell {
   heightPx: number
 }
 
-/** A live process whose environment carries a given `NAME=value` entry. */
+/** A live process, as an environment scan or a pid lookup found it. */
 export interface TaggedProcess {
   pid: number
   ppid: number
@@ -4992,6 +4992,11 @@ export interface TaggedProcess {
   /** SIGHUP is ignored (nohup) */
   ignoresHangup: boolean
   stopped: boolean
+  /**
+   * The scanned variable's value ([`list_processes_with_env_prefix`]);
+   * unset for a pid lookup.
+   */
+  envValue?: string
 }
 
 /** Options for [`TextPredictor::new`]. */

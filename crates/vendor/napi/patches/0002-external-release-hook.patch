@@ -1,8 +1,6 @@
-diff --git a/src/bindgen_runtime/js_values/arraybuffer.rs b/src/bindgen_runtime/js_values/arraybuffer.rs
-index 7c8d3603d3..08ab16bc40 100644
 --- a/src/bindgen_runtime/js_values/arraybuffer.rs
 +++ b/src/bindgen_runtime/js_values/arraybuffer.rs
-@@ -1534,6 +1534,7 @@ unsafe extern "C" fn finalizer<Data, T: Finalizer<RustType = Data> + AsRef<[Data
+@@ -1580,6 +1580,7 @@
  ) {
    let data = unsafe { *Box::from_raw(finalize_hint as *mut T) };
    drop(data);
@@ -10,7 +8,7 @@ index 7c8d3603d3..08ab16bc40 100644
  }
  
  unsafe extern "C" fn finalize_slice<Data>(
-@@ -1547,6 +1548,7 @@ unsafe extern "C" fn finalize_slice<Data>(
+@@ -1593,6 +1594,7 @@
      return;
    }
    unsafe { Vec::from_raw_parts(finalize_data as *mut Data, length, capacity) };
@@ -18,8 +16,6 @@ index 7c8d3603d3..08ab16bc40 100644
  }
  
  impl_typed_array!(Int8Array, i8, TypedArrayType::Int8);
-diff --git a/src/bindgen_runtime/mod.rs b/src/bindgen_runtime/mod.rs
-index efd0f06ea7..916e34d812 100644
 --- a/src/bindgen_runtime/mod.rs
 +++ b/src/bindgen_runtime/mod.rs
 @@ -1,5 +1,5 @@
@@ -29,8 +25,8 @@ index efd0f06ea7..916e34d812 100644
  
  pub use callback_info::*;
  pub use class_accessor::*;
-@@ -104,6 +104,21 @@ pub(crate) unsafe extern "C" fn raw_finalize_unchecked<T: ObjectFinalize>(
-   }
+@@ -119,6 +119,21 @@
+   unsafe { free_empty_class_placeholder::<T>(finalize_data) };
  }
  
 +static EXTERNAL_RELEASE_HOOK: OnceLock<fn()> = OnceLock::new();
@@ -51,7 +47,7 @@ index efd0f06ea7..916e34d812 100644
  /// # Safety
  ///
  /// called when node buffer is ready for gc
-@@ -123,6 +138,7 @@ pub unsafe extern "C" fn drop_buffer(
+@@ -138,6 +153,7 @@
    unsafe {
      drop(Box::from_raw(finalize_hint as *mut Buffer));
    }
@@ -59,7 +55,7 @@ index efd0f06ea7..916e34d812 100644
  }
  
  /// # Safety
-@@ -148,6 +164,7 @@ pub unsafe extern "C" fn drop_buffer_slice(
+@@ -163,6 +179,7 @@
    unsafe {
      drop(Vec::from_raw_parts(finalize_data, len, cap));
    }

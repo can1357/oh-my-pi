@@ -270,8 +270,9 @@ unsafe fn map_from_napi_value(
   );
 
   let mut map = Map::new();
-  for key in Object::keys(&obj)?.into_iter() {
-    if let Some(val) = obj.get_inner(&key)? {
+  let (names, len) = obj.property_names_raw()?;
+  for index in 0..len {
+    if let Some((key, val)) = obj.property_at(names, index)? {
       map.insert(key, unsafe {
         value_from_napi_value(env, val, remaining_depth - 1, remaining_nodes)?
       });

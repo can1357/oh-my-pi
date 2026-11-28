@@ -24,7 +24,9 @@
 //! the utility's job reaches its commands too. Externals replace their
 //! subshell through `exec`, so their actual signal deaths reach the utility
 //! as [`CommandStatus::Signaled`], distinct from an ordinary exit of `128+n`.
-//! In-engine commands report [`CommandStatus::Exited`].
+//! In-engine commands report [`CommandStatus::Exited`], except that a builtin
+//! ended by the emulated `SIGPIPE` (status `128+SIGPIPE`, which builtins use
+//! for nothing else) reports [`CommandStatus::Signaled`] as an external would.
 //!
 //! A command the utility may signal ([`ShellCommand::signals`]: `watchexec`,
 //! `entr -r`) runs under a label of its own below the call's, so each signal
@@ -82,11 +84,13 @@ enum Request {
 
 /// A command's subshell, still running.
 struct Run {
-	id:    RunId,
-	reply: Reply,
+	id:      RunId,
+	reply:   Reply,
 	/// The id and label of a command the utility may signal: its tree has a
 	/// label of its own.
-	own:   Option<(u64, u32)>,
+	own:     Option<(u64, u32)>,
+	/// Whether it runs a builtin in-engine ([`Program::Builtin`]).
+	builtin: bool,
 }
 
 /// What a requested command is, decided by the lookup before it is sent.
@@ -191,9 +195,10 @@ impl Extra {
 					});
 					let label = own.map_or(self.child.label, |(_, label)| label);
 					let lineage = Lineage { label, detached: false };
+					let builtin = matches!(program, Program::Builtin);
 					let id =
 						api.run_subshell_in(script(*command, &program, &running.env_names), lineage);
-					self.runs.push(Run { id, reply, own });
+					self.runs.push(Run { id, reply, own, builtin });
 				},
 				Request::Signal { id, signal } => {
 					// A command that ended already has no tree to signal.
@@ -225,11 +230,18 @@ impl Extra {
 		let Some(at) = self.runs.iter().position(|r| r.id == run) else {
 			return false;
 		};
-		let Run { reply, own, .. } = self.runs.swap_remove(at);
+		let Run { reply, own, builtin, .. } = self.runs.swap_remove(at);
 		self.ended.extend(own.map(|(_, label)| label));
 		let code = u8::try_from(status.rem_euclid(256)).unwrap_or(u8::MAX);
+		let platform = Platform::current();
+		let outcome = match signal {
+			Some(signal) => CommandStatus::Signaled(signal),
+			None if builtin && status == Signal::Pipe.exit_status(platform) => {
+				CommandStatus::Signaled(i32::from(Signal::Pipe.number(platform)))
+			},
+			None => CommandStatus::Exited(code),
+		};
 		// The utility may have stopped waiting (cancelled).
-		let outcome = signal.map_or(CommandStatus::Exited(code), CommandStatus::Signaled);
 		let _ = reply.send(Ok(outcome));
 		true
 	}

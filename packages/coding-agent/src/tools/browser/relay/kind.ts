@@ -43,17 +43,30 @@ export interface ResolveRelayKindOptions {
 }
 
 /**
- * Resolve the relay browser kind, or null when relay mode is disabled.
+ * Select the relay without probing the filesystem, or return null when disabled.
  * Mirrors `resolveCmuxKind`: the setting opts in, the env var is the final
  * override in both directions.
  */
-export function resolveRelayKind(
+export function selectRelayKind(
 	options?: ResolveRelayKindOptions | null,
 	env: Record<string, string | undefined> = process.env,
 ): RelayKind | null {
 	if (!isRelayOnly(env) && !parseFlag(env.PI_BROWSER_RELAY, options?.settingEnabled ?? false)) {
 		return null;
 	}
-	const url = options?.url?.trim() || discoverRelayEndpoints()[0] || "";
-	return { kind: "relay", cdpUrl: url.replace(/\/+$/, "") };
+	return { kind: "relay", cdpUrl: options?.url?.trim() ?? "" };
+}
+
+/** Resolve a selected relay's endpoint when it is needed for a browser operation. */
+export async function resolveRelayEndpoint(kind: RelayKind): Promise<RelayKind> {
+	const url = kind.cdpUrl || (await discoverRelayEndpoints())[0] || "";
+	return { ...kind, cdpUrl: url.replace(/\/+$/, "") };
+}
+
+export async function resolveRelayKind(
+	options?: ResolveRelayKindOptions | null,
+	env: Record<string, string | undefined> = process.env,
+): Promise<RelayKind | null> {
+	const kind = selectRelayKind(options, env);
+	return kind && resolveRelayEndpoint(kind);
 }

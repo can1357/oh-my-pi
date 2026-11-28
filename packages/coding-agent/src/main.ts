@@ -39,16 +39,16 @@ import {
 	validateToolNames,
 } from "./cli/args";
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
-import { processFileArguments } from "./cli/file-processor";
+import type * as FileProcessor from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
 import { KeybindingsManager } from "./config/keybindings/keybindings";
 import { formatKeyHint } from "./ui/keys/hints";
 import type { SessionPickerOptions } from "./modes/view-model/apps/session-picker";
-import { fetchBuild } from "./cli/build-service";
+import type * as BuildService from "./cli/build-service";
+import type * as AutoUpdate from "./cli/auto-update";
+import type * as UpdateCli from "./cli/update-cli";
 import { applyStartupCwd } from "./cli/startup-cwd";
-import { runAutoUpdate } from "./cli/auto-update";
-import { managedInstallName } from "./cli/managed-install";
-import { getLatestRelease, isSourceCheckout } from "./cli/update-cli";
+import { isSourceCheckout, managedInstallName } from "./cli/managed-install";
 import { findConfigFile } from "./config";
 import { cfgNoJudge, cfgNoSpotlight, cfgOffline } from "./config/auxiliary-model-policy";
 import { type HydrateStartupModelCaches, ModelRegistry } from "./config/model-registry";
@@ -81,9 +81,13 @@ import {
 	resolveActiveProjectRegistryPath,
 } from "./discovery/helpers";
 import { injectOmpExtensionCliRoots } from "./discovery/omp-extension-roots";
+import { aggregateExtensionFlags } from "./extensibility/extensions/flags";
 import { formatExtensionLoadNotifications } from "./extensibility/extensions/load-errors";
-import { loadExtensions } from "./extensibility/extensions/loader";
-import { ExtensionRunner } from "./extensibility/extensions/runner";
+import {
+	loadSessionExtensions,
+	loadTrustedSessionExtensions,
+	resolveTrustedExtensionPaths,
+} from "./extensibility/extensions/session-discovery";
 import type { ExtensionUIContext } from "./extensibility/extensions/types";
 import {
 	scheduleMarketplaceAutoUpdate,
@@ -118,12 +122,9 @@ import {
 } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
 import { describePendingToolCalls } from "./session/exit-diagnostics";
-import {
-	createForeignSessionStore,
-	foreignSessionInfoToSessionInfo,
-	foreignSessionSourceName,
-	persistForeignSession,
-} from "./session/foreign-session-import";
+import { SessionModelRestoreError } from "./session/model-restore-error";
+import { resolvePrewalkTarget } from "./session/prewalk-target";
+import type * as ForeignSessionImport from "./session/foreign-session-import";
 import type { ForeignSessionInfo, ForeignSessionSource, ForeignSessionStore } from "./session/foreign-session-store";
 import {
 	findSessionContinuation,
@@ -153,7 +154,7 @@ import { getChangelogPath, readLastChangelogVersion, resolveStartupChangelogForD
 import { EventBus } from "./utils/event-bus";
 import { resolveFirstLaunchPythonEvalWarning } from "./eval/startup-warning";
 import { CliUsageError } from "./cli/usage-error";
-import { scheduleGcAutoCompress } from "./cli/gc-auto-compress";
+import type * as GcAutoCompress from "./cli/gc-auto-compress";
 import { cfgGcAutoCompress } from "./cli/gc-settings";
 import { cfgGoalEnabled } from "./goals/settings";
 import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "./plan-mode/settings";
@@ -300,9 +301,14 @@ async function checkForNewVersion(currentVersion: string): Promise<string | unde
 		const channel = cfgUpdateChannel.get(settings);
 		// A compiled binary updates from the build service; naming the running
 		// version lets the service prepare the patch `omp update` will then use.
-		const { version } = isCompiledBinary()
-			? await fetchBuild({ channel }, { timeoutMs: 5_000, fromVersion: currentVersion })
-			: await getLatestRelease({ timeoutMs: 5_000, channel });
+		let version: string;
+		if (isCompiledBinary()) {
+			const { fetchBuild } = require("./cli/build-service") as typeof BuildService;
+			({ version } = await fetchBuild({ channel }, { timeoutMs: 5_000, fromVersion: currentVersion }));
+		} else {
+			const { getLatestRelease } = require("./cli/update-cli") as typeof UpdateCli;
+			({ version } = await getLatestRelease({ timeoutMs: 5_000, channel }));
+		}
 		return Bun.semver.order(version, currentVersion) > 0 ? version : undefined;
 	} catch {
 		return undefined;
@@ -575,26 +581,6 @@ export interface AcpSessionFactoryOptions {
 	createSession: (options: CreateAgentSessionOptions) => Promise<CreateAgentSessionResult>;
 }
 
-async function loadTrustedSessionExtensions(
-	options: Pick<CreateAgentSessionOptions, "additionalExtensionPaths">,
-	cwd: string,
-	eventBus: EventBus,
-) {
-	const paths = options.additionalExtensionPaths ?? [];
-	for (const trustedPath of paths) {
-		let stat: fsSync.Stats;
-		try {
-			stat = fsSync.statSync(trustedPath);
-		} catch {
-			throw new Error(`Trusted extension must be an existing module file: ${trustedPath}`);
-		}
-		if (!stat.isFile()) {
-			throw new Error(`Trusted extension must be a module file, not a directory: ${trustedPath}`);
-		}
-	}
-	return loadExtensions(paths, cwd, eventBus);
-}
-
 /**
  * The provider an ACP `--api-key` belongs to when no launch model names one: the provider of the model the
  * launch scope starts on, else the one provider a declared launch scope names. Without a launch scope, or
@@ -674,7 +660,10 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 			if (nextOptions.model) bindApiKey(nextOptions.model.provider, apiKey);
 		}
 
-		const nextSessionManager = SessionManager.create(cwd, args.sessionDir);
+		const nextSessionManager = SessionManager.create(
+			cwd,
+			args.sessionDir ?? (await SessionManager.getDefaultSessionDirAsync(cwd)),
+		);
 		const agentId = `acp:${nextSessionManager.getSessionId()}`;
 		// `baseOptions.titleSystemPrompt` is resolved from the launch cwd; an ACP
 		// host can open `session/new` for any client-supplied workspace, so
@@ -855,6 +844,7 @@ async function runInteractiveMode(
 				suppressWelcomeIntro: resuming || setupScenes.length > 0 || playStartupSplash,
 				clearInitialTerminalHistory: true,
 				autoStartCollab: joinLink === undefined,
+				startupBackgroundWork: startDeferredStartupWork && (() => startDeferredStartupWork(mode)),
 				// Setup scenes, the startup worktree question and the foreign-config offer wait on
 				// the user before any prompt runs, so they keep the boot `idle`. The worktree check
 				// runs before its async git check, so a folder where the question never shows also
@@ -866,7 +856,6 @@ async function runInteractiveMode(
 					(startupGoal !== undefined || initialMessage !== undefined || initialMessages.length > 0),
 			}),
 		);
-		startDeferredStartupWork?.(mode);
 
 		if (setupWizard && playStartupSplash) {
 			await setupWizard.runStartupSplash(mode);
@@ -891,6 +880,7 @@ async function runInteractiveMode(
 			if (cfgStartupCheckUpdate.get(settings)) mode.showNewVersionNotification(newVersion);
 		};
 		if (cfgUpdateAuto.get(settings)) {
+			const { runAutoUpdate } = require("./cli/auto-update") as typeof AutoUpdate;
 			void runAutoUpdate(checkedVersionPromise, {
 				show: update => mode.showVersionUpdate(update),
 				notify: notifyNewVersion,
@@ -1893,7 +1883,6 @@ export async function buildSessionOptions(
 		const targetPatterns = configuredPatterns.length > 0 ? configuredPatterns : [targetSelector];
 
 		await hydrateModelCaches();
-		const { resolvePrewalkTarget } = await import("./sdk");
 		const selection = await resolvePrewalkTarget(
 			targetPatterns,
 			target,
@@ -1987,22 +1976,8 @@ export async function buildSessionOptions(
 
 	// Trusted extension paths are an exact allowlist for extension modules.
 	if (parsed.trustedExtensions && parsed.trustedExtensions.length > 0) {
-		const trustedPaths = parsed.trustedExtensions.map(trustedPath => {
-			let resolvedPath: string;
-			let stat: fsSync.Stats;
-			try {
-				resolvedPath = fsSync.realpathSync.native(trustedPath);
-				stat = fsSync.statSync(resolvedPath);
-			} catch {
-				throw new Error(`Trusted extension must be an existing module file: ${trustedPath}`);
-			}
-			if (!stat.isFile()) {
-				throw new Error(`Trusted extension must be a module file, not a directory: ${trustedPath}`);
-			}
-			return resolvedPath;
-		});
 		options.disableExtensionDiscovery = true;
-		options.additionalExtensionPaths = trustedPaths;
+		options.additionalExtensionPaths = resolveTrustedExtensionPaths(parsed.trustedExtensions);
 	} else {
 		// Additional extension paths from CLI
 		const cliExtensionPaths = [...(parsed.extensions ?? []), ...(parsed.hooks ?? [])];
@@ -2371,6 +2346,12 @@ export async function runRootCommand(
 				if (isProtocolMode) {
 					throw new SessionResolutionError(`--from-${foreignSource} is not supported in ${mode} mode`);
 				}
+				const {
+					createForeignSessionStore,
+					foreignSessionInfoToSessionInfo,
+					foreignSessionSourceName,
+					persistForeignSession,
+				} = require("./session/foreign-session-import") as typeof ForeignSessionImport;
 				const sourceName = foreignSessionSourceName(foreignSource);
 				const store = (deps.createForeignSessionStore ?? createForeignSessionStore)(foreignSource);
 				let foreignSessions: ForeignSessionInfo[];
@@ -2659,7 +2640,12 @@ export async function runRootCommand(
 				// ACP sessions select their own workspace's model, so only the launch scope can name the provider.
 				const launchKey =
 					mode === "acp"
-						? await resolveAcpApiKeyProvider(parsedArgs, modelRegistry, settingsInstance, hydrateLaunchModelCaches)
+						? await resolveAcpApiKeyProvider(
+								parsedArgs,
+								modelRegistry,
+								settingsInstance,
+								hydrateLaunchModelCaches,
+							)
 						: { error: API_KEY_REQUIRES_MODEL };
 				if ("error" in launchKey) {
 					process.stderr.write(`${chalk.red(launchKey.error)}\n`);
@@ -2672,9 +2658,15 @@ export async function runRootCommand(
 			}
 		}
 
-		const sdk = await logger.time("loadStartupSdk", () => import("./sdk"));
-		const createAgentSessionImpl = deps.createAgentSession ?? sdk.createAgentSession;
+		// Keep SDK evaluation off argv error paths and defer it to `session/new` in ACP.
+		let startupSessionCreator: Promise<typeof createAgentSession> | undefined;
+		const loadStartupSessionCreator = () =>
+			(startupSessionCreator ??= logger.time(
+				"loadStartupSdk",
+				async () => (await import("./sdk")).createAgentSession,
+			));
 		const createSession = async (options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> => {
+			const createAgentSessionImpl = deps.createAgentSession ?? (await loadStartupSessionCreator());
 			const result = await logger.time("createAgentSession", createAgentSessionImpl, options);
 			// Kick off background model discovery only after createAgentSession finishes its parallel
 			// discovery arms; running these concurrently contends for the event loop and stretches
@@ -2746,11 +2738,11 @@ export async function runRootCommand(
 				!(parsedArgs.continue || parsedArgs.resume || parsedArgs.fork || parsedArgs.restore || foreignSource);
 			const extensionsResult = parsedArgs.trustedExtensions?.length
 				? { ...(await loadTrustedSessionExtensions(sessionOptions, cwd, eventBus)), deferredPaths: [] }
-				: await sdk.loadSessionExtensions(sessionOptions, cwd, settingsInstance, eventBus, {
+				: await loadSessionExtensions(sessionOptions, cwd, settingsInstance, eventBus, {
 						deferStartupSafe: deferStartupSafeExtensions,
 					});
 			const extensionFlagSink: ExtensionFlagSink = {
-				getFlags: () => ExtensionRunner.aggregateFlags(extensionsResult.extensions),
+				getFlags: () => aggregateExtensionFlags(extensionsResult.extensions),
 				setFlagValue: (name, value) => {
 					extensionsResult.runtime.flagValues.set(name, value);
 				},
@@ -2805,11 +2797,12 @@ export async function runRootCommand(
 			}
 			const processedFiles =
 				initialArgs.fileArgs.length > 0
-					? await logger.time("processFileArguments", () =>
-							processFileArguments(initialArgs.fileArgs, {
+					? await logger.time("processFileArguments", () => {
+							const { processFileArguments } = require("./cli/file-processor") as typeof FileProcessor;
+							return processFileArguments(initialArgs.fileArgs, {
 								autoResizeImages: cfgImagesAutoResize.get(settingsInstance),
-							}),
-						)
+							});
+						})
 					: undefined;
 			const { initialMessage, initialImages } = buildInitialMessage({
 				parsed: initialArgs,
@@ -2836,6 +2829,9 @@ export async function runRootCommand(
 			let lastChangelogVersion: string | undefined;
 			let pythonEvalWarningPromise: Promise<string | undefined> | undefined;
 			if (isInteractive) {
+				// Args and files are settled. Overlap the SDK with the changelog read
+				// and probe; the cached promise still surfaces import errors at use.
+				if (!deps.createAgentSession) void loadStartupSessionCreator().catch(() => {});
 				lastChangelogVersion = await readLastChangelogVersion();
 				const pythonEvalProbeAbort = new AbortController();
 				const unregisterPythonEvalProbe = postmortem.register(
@@ -2864,6 +2860,11 @@ export async function runRootCommand(
 				deferredExtensionPaths: extensionsResult.deferredPaths,
 				// Validation waits for background refresh and the first interactive frame.
 				deferRetryFallbackValidation: true,
+				deferInteractiveStartupWork: isInteractive,
+				deferStartupModelCacheHydration:
+					isInteractive &&
+					deps.createAgentSession === undefined &&
+					!(cfgPlanEnabled.get(settingsInstance) && cfgPlanDefaultOnStartup.get(settingsInstance)),
 			};
 			let createdSession: CreateAgentSessionResult;
 			try {
@@ -2873,8 +2874,8 @@ export async function runRootCommand(
 					hydrateStartupModelCaches: hydrateLaunchModelCaches,
 				});
 			} catch (error) {
-				if (!isInteractive || !autoResumed || !sessionManager || !(error instanceof sdk.SessionModelRestoreError)) {
-					if ((mode === "rpc" || mode === "rpc-ui") && error instanceof sdk.SessionModelRestoreError) {
+				if (!isInteractive || !autoResumed || !sessionManager || !(error instanceof SessionModelRestoreError)) {
+					if ((mode === "rpc" || mode === "rpc-ui") && error instanceof SessionModelRestoreError) {
 						await writeRpcModelRestoreNotice(error.message);
 					}
 					throw error;
@@ -2906,6 +2907,8 @@ export async function runRootCommand(
 				lspServers,
 				mcpManager,
 				startBackgroundModelDiscovery,
+				hydrateDeferredModelCaches,
+				startDeferredInteractiveWork,
 			} = createdSession;
 			if (isInteractive)
 				session.addDisposer(bindAgentMesh(sessionOptions.cwd ?? getProjectDir(), settingsInstance, session));
@@ -2997,11 +3000,10 @@ export async function runRootCommand(
 			// /models list and Ctrl+P cycle, including scopes that initially resolved
 			// empty (issue #9220). Fire-and-forget: the prompt must never block on the
 			// background pass.
-			// Interactive-only work that must not delay the first session-bound frame:
-			// runInteractiveMode calls it once init has painted. None feeds the first
-			// prompt: fallback-chain validation and the startup changelog only add header
-			// rows, and the background refresh already raced the first prompt when it ran earlier.
+			// Interactive-only warmup runs after the live composer has had time to handle input.
+			// First-turn dependencies (deferred extensions and MCP) also start on demand.
 			const startDeferredStartupWork = (interactive: InteractiveMode): void => {
+				startDeferredInteractiveWork?.();
 				if (showsStartupChangelog) {
 					void resolveStartupChangelogForDisplay({
 						mode: cfgStartupChangelogMode.get(settingsInstance),
@@ -3013,17 +3015,31 @@ export async function runRootCommand(
 						.catch(error => logger.warn("Startup changelog failed", { error: String(error) }));
 				}
 				void session.loadDeferredExtensions();
-				session.startHintCompression();
-				modelRegistry.refreshInBackground();
-				session.validateRetryFallbackChains();
-				if (configuredScope.length > 0) {
-					// Must follow refreshInBackground: it waits on the in-flight refresh.
-					void rebuildScopedModelsAfterDiscovery(session, parsedArgs, modelRegistry, settingsInstance).catch(
-						error => logger.warn("Scoped model rebuild after discovery failed", { error: String(error) }),
-					);
+				const startCatalogDependentWork = () => {
+					session.startHintCompression();
+					session.validateRetryFallbackChains();
+					if (configuredScope.length > 0) {
+						// It waits on the tracked background refresh, including deferred offline reads.
+						void rebuildScopedModelsAfterDiscovery(session, parsedArgs, modelRegistry, settingsInstance).catch(
+							error => logger.warn("Scoped model rebuild after discovery failed", { error: String(error) }),
+						);
+					}
+					void startBackgroundModelDiscovery?.();
+				};
+				if (hydrateDeferredModelCaches) {
+					modelRegistry.refreshInBackgroundAfterStartup(async () => {
+						try {
+							await hydrateDeferredModelCaches();
+						} finally {
+							if (!session.isDisposed) startCatalogDependentWork();
+						}
+					});
+				} else {
+					modelRegistry.refreshInBackground();
+					startCatalogDependentWork();
 				}
-				void startBackgroundModelDiscovery?.();
 				if (cfgGcAutoCompress.get(settingsInstance)) {
+					const { scheduleGcAutoCompress } = require("./cli/gc-auto-compress") as typeof GcAutoCompress;
 					void scheduleGcAutoCompress(getAgentDir()).catch(error =>
 						logger.warn("Background session compression failed to start", { error: String(error) }),
 					);
@@ -3137,7 +3153,7 @@ export async function runRootCommand(
 				}
 
 				if ($env.PI_TIMING) {
-					logger.printTimings();
+					logger.printTimings("interactive handoff, before TUI");
 					if (logger.shouldExitAfterTimings()) {
 						process.exit(0);
 					}
@@ -3195,7 +3211,7 @@ export async function runRootCommand(
 					deadline: sessionOptions.deadline,
 				});
 				if ($env.PI_TIMING) {
-					logger.printTimings();
+					logger.printTimings("print batch complete, including prompts");
 				}
 				await disposeSessionQuietly(session);
 				stopThemeWatcher();

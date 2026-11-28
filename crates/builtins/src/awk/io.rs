@@ -11,7 +11,7 @@ use crate::openfile::OpenFile;
 /// How `RS` separates records.
 #[derive(Clone)]
 pub(super) enum RecordSep {
-	/// `RS="\n"`: lines, with a `\r` before the newline dropped (as GoAWK).
+	/// `RS="\n"`: lines separated by LF, with CR preserved as data.
 	Newline,
 	/// A single-byte `RS`.
 	Byte(u8),
@@ -123,24 +123,17 @@ impl RecordReader {
 					if let Some(found) = memchr::memchr(byte, &data[self.scanned.min(data.len())..]) {
 						let len = self.scanned + found;
 						self.take(out, len, 1);
-						if byte == b'\n' && out.last() == Some(&b'\r') {
-							out.pop();
-						}
 						return Ok(true);
 					}
 					self.scanned = data.len();
 					if !self.fill()? {
-						let got = self.take_rest(out, false);
-						if byte == b'\n' && out.last() == Some(&b'\r') {
-							out.pop();
-						}
-						return Ok(got);
+						return Ok(self.take_rest(out, false));
 					}
 				}
 			},
 			RecordSep::Paragraph => {
 				loop {
-					while self.start < self.buf.len() && matches!(self.buf[self.start], b'\n' | b'\r') {
+					while self.buf.get(self.start) == Some(&b'\n') {
 						self.start += 1;
 					}
 					if self.start < self.buf.len() || !self.fill()? {
@@ -151,33 +144,22 @@ impl RecordReader {
 				loop {
 					let data = &self.buf[self.start..];
 					let mut found = None;
-					let mut i = self.scanned.saturating_sub(2);
+					let mut i = self.scanned.saturating_sub(1);
 					while let Some(nl) = memchr::memchr(b'\n', &data[i..]) {
 						let at = i + nl;
 						if data.get(at + 1) == Some(&b'\n') {
-							found = Some((at, 2));
-							break;
-						}
-						if data.get(at + 1) == Some(&b'\r') && data.get(at + 2) == Some(&b'\n') {
-							found = Some((at, 3));
+							found = Some(at);
 							break;
 						}
 						i = at + 1;
 					}
-					if let Some((at, skip)) = found {
-						self.take(out, at, skip);
-						if out.last() == Some(&b'\r') {
-							out.pop();
-						}
+					if let Some(at) = found {
+						self.take(out, at, 2);
 						return Ok(true);
 					}
 					self.scanned = data.len();
 					if !self.fill()? {
-						let got = self.take_rest(out, true);
-						if out.last() == Some(&b'\r') {
-							out.pop();
-						}
-						return Ok(got);
+						return Ok(self.take_rest(out, true));
 					}
 				}
 			},
@@ -242,7 +224,7 @@ mod tests {
 
 	#[test]
 	fn splits_lines_and_bytes() {
-		assert_eq!(records("a\r\nb\nc", "\n"), ["a", "b", "c"]);
+		assert_eq!(records("a\r\nb\nc\r", "\n"), ["a\r", "b", "c\r"]);
 		assert_eq!(records("a;b;", ";"), ["a", "b"]);
 		assert_eq!(records("", "\n"), Vec::<String>::new());
 	}

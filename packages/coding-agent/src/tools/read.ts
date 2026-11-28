@@ -101,7 +101,7 @@ import {
 } from "./path-utils";
 import { type LineRange } from "./line-ranges";
 import { splitPathAndSel } from "./details/read";
-import { readArchive, resolveArchiveReadPath } from "./read-archive";
+import { resolveArchiveReadPath } from "./read-archive-path";
 import {
 	appendReadNotice,
 	BRACKET_CONTEXT_ELLIPSIS,
@@ -2116,6 +2116,8 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				const archiveSubPath = located
 					? { path: archivePath.archiveSubPath, sel: located.sel }
 					: splitPathAndSel(archivePath.archiveSubPath);
+				// Only a resolved archive needs the member reader and its index cache.
+				const { readArchive } = await import("./read-archive");
 				return readArchive(
 					this.session,
 					located?.url ?? readPath,

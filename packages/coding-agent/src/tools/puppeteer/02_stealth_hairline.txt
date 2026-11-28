@@ -1,0 +1,51 @@
+{
+  const htmlElementOffsetHeightDescriptor =
+    typeof HTMLElement === "undefined"
+      ? undefined
+      : Object_getOwnPropertyDescriptor(HTMLElement.prototype, "offsetHeight");
+  const htmlDivElementOffsetHeightDescriptor =
+    typeof HTMLDivElement === "undefined"
+      ? undefined
+      : Object_getOwnPropertyDescriptor(HTMLDivElement.prototype, "offsetHeight");
+  const offsetHeightDescriptor =
+    htmlDivElementOffsetHeightDescriptor || htmlElementOffsetHeightDescriptor;
+  const offsetHeightPrototype = htmlDivElementOffsetHeightDescriptor
+    ? HTMLDivElement.prototype
+    : htmlElementOffsetHeightDescriptor
+      ? HTMLElement.prototype
+      : undefined;
+  const elementIdDescriptor =
+    typeof Element === "undefined"
+      ? undefined
+      : Object_getOwnPropertyDescriptor(Element.prototype, "id");
+
+  if (
+    typeof HTMLDivElement !== "undefined" &&
+    offsetHeightPrototype &&
+    offsetHeightDescriptor &&
+    typeof offsetHeightDescriptor.get === "function" &&
+    offsetHeightDescriptor.configurable &&
+    elementIdDescriptor &&
+    typeof elementIdDescriptor.get === "function"
+  ) {
+    const isCollapsedProbe = (thisArg) =>
+      Object_getPrototypeOf(thisArg) === HTMLDivElement.prototype &&
+      Reflect_apply(elementIdDescriptor.get, thisArg, []) === "modernizr";
+
+    const patchMeasurement = (name) => {
+      const descriptor = Object_getOwnPropertyDescriptor(offsetHeightPrototype, name);
+      if (!descriptor || typeof descriptor.get !== "function" || !descriptor.configurable) return;
+      const getter = new Window_Proxy(descriptor.get, {
+        apply(target, thisArg, args) {
+          const measured = Reflect_apply(target, thisArg, args);
+          return measured === 0 && isCollapsedProbe(thisArg) ? 1 : measured;
+        },
+      });
+      patchToString(getter, "get " + name);
+      Object_defineProperty(offsetHeightPrototype, name, Object_assign({}, descriptor, { get: getter }));
+    };
+
+    patchMeasurement("offsetHeight");
+    patchMeasurement("offsetWidth");
+  }
+}

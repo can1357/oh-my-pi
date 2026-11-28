@@ -1,7 +1,8 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { bypassCascadeMemoForTesting } from "@oh-my-pi/pi-catalog/compat/cascade";
+import { bypassCascadeMemoForTesting, setRuntimeProviderRule } from "@oh-my-pi/pi-catalog/compat/cascade";
+import { clampsContextOverride, resolveMaxContextWindow } from "@oh-my-pi/pi-catalog/compat/context-window";
 import { hasModelScopedEffortLadder, resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import {
 	getModelCacheWriteStats,
@@ -60,6 +61,23 @@ function resolvePolicyOutputs(spec: ModelSpec<Api>) {
 }
 
 describe("model policy resolution memo", () => {
+	it("uses the backend's context limits when a configured provider changes backends", () => {
+		const backend = "refresh-yield-context-backend";
+		const original = buildModel(refreshSpec(0, "v1"));
+		const rerouted = { ...original, providerType: backend };
+		setRuntimeProviderRule(backend, { "max-context-window": 256_000, "clamp-context-override": true });
+		try {
+			expect(resolveMaxContextWindow(original)).toBeUndefined();
+			expect(resolveMaxContextWindow(rerouted)).toBe(256_000);
+			expect(clampsContextOverride(original)).toBe(false);
+			expect(clampsContextOverride(rerouted)).toBe(true);
+		} finally {
+			setRuntimeProviderRule(backend, undefined);
+		}
+		expect(resolveMaxContextWindow(rerouted)).toBeUndefined();
+		expect(clampsContextOverride(rerouted)).toBe(false);
+	});
+
 	it("resolves 2,000 models of one provider identically with and without the rule-ranking memo", () => {
 		const bundled = getBundledModels("openrouter");
 		expect(bundled.length).toBeGreaterThan(0);

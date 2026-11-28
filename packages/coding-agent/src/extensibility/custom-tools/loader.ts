@@ -96,7 +96,9 @@ async function loadTool(
 		// `reload: false`: a tool module and its helpers are evaluated once per
 		// process and shared, as with a native import; each session still calls
 		// the factory with its own API.
-		const module = (await withHostGuard(() => loadLegacyPiModule(resolvedPath, { reload: false }))) as {
+		const module = (await logger.time("module", () =>
+			withHostGuard(() => loadLegacyPiModule(resolvedPath, { reload: false })),
+		)) as {
 			default?: unknown;
 		};
 		const factory = customToolFactoryOf(module);
@@ -105,7 +107,7 @@ async function loadTool(
 			return { tools: [], errors: [{ path: toolPath, error: "Tool must export a default function", source }] };
 		}
 
-		const toolResult: unknown = await withHostGuard(async () => factory(sharedApi));
+		const toolResult: unknown = await logger.time("factory", () => withHostGuard(async () => factory(sharedApi)));
 		const toolsArray = Array.isArray(toolResult) ? toolResult : [toolResult];
 
 		const loadedTools: LoadedCustomTool[] = [];
@@ -192,7 +194,14 @@ export class CustomToolLoader {
 
 	async load(pathsWithSources: ToolPathWithSource[]): Promise<void> {
 		for (const { path: toolPath, source } of pathsWithSources) {
-			const { tools: loadedTools, errors } = await loadTool(toolPath, this.#sharedApi.cwd, this.#sharedApi, source);
+			const { tools: loadedTools, errors } = await logger.time(
+				`customTool:${logger.timingPath(toolPath, this.#sharedApi.cwd)}`,
+				loadTool,
+				toolPath,
+				this.#sharedApi.cwd,
+				this.#sharedApi,
+				source,
+			);
 			this.errors.push(...errors);
 
 			for (const loadedTool of loadedTools) {

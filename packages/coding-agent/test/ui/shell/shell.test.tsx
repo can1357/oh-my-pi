@@ -76,7 +76,12 @@ describe("Transcript", () => {
 		const transcript = new Transcript();
 		const retired = new Set<UiNode>();
 		let replays = 0;
-		transcript.attach({ retired: node => retired.has(node), replayHistory: () => replays++, redescribe: () => {} });
+		transcript.attach({
+			retired: node => retired.has(node),
+			contentInHistory: () => false,
+			replayHistory: () => replays++,
+			redescribe: () => {},
+		});
 		const blocks = ["a", "b", "c"].map(t => transcript.append(() => <text text={t} />));
 		retired.add(blocks[1]!.node);
 
@@ -94,7 +99,12 @@ describe("Transcript", () => {
 		const transcript = new Transcript();
 		const retired = new Set<UiNode>();
 		let replays = 0;
-		transcript.attach({ retired: node => retired.has(node), replayHistory: () => replays++, redescribe: () => {} });
+		transcript.attach({
+			retired: node => retired.has(node),
+			contentInHistory: () => false,
+			replayHistory: () => replays++,
+			redescribe: () => {},
+		});
 		const blocks = ["a", "b", "c", "d", "e"].map(t => transcript.append(() => <text text={t} />));
 		retired.add(blocks[0]!.node);
 		retired.add(blocks[2]!.node);

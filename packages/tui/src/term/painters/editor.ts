@@ -15,6 +15,7 @@
  * holds the focus. Chrome around the field (frames, gutters, status) belongs
  * to the screen's role painter, which paints the field through `cx.paint`.
  */
+import { segmentGraphemes } from "@oh-my-pi/pi-utils/graphemes";
 import type { TspEditorDecoration, TspSpan, TspText } from "@oh-my-pi/pi-wire";
 import type { UiNode } from "../../node";
 import { fgSgr } from "../../theme/color";
@@ -25,8 +26,6 @@ import { widgetState } from "../widgets";
 import { type Block, type Cell, definePainter, type PaintContext } from "../paint";
 
 // ─── Graphemes ──────────────────────────────────────────────────────────────
-
-const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
 /** One grapheme of a text: its UTF-16 offset, length and cells. */
 export interface Grapheme {
@@ -45,7 +44,7 @@ export function graphemeWidth(text: string): number {
 export function graphemes(text: string, from = 0, to = text.length): Grapheme[] {
 	const out: Grapheme[] = [];
 	if (to <= from) return out;
-	for (const { segment, index } of segmenter.segment(text.slice(from, to))) {
+	for (const { segment, index } of segmentGraphemes(text.slice(from, to))) {
 		out.push({ at: from + index, text: segment, width: graphemeWidth(segment) });
 	}
 	return out;

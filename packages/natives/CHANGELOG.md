@@ -4,6 +4,8 @@
 
 ### Breaking Changes
 
+- The embedded `cp`, `mv`, and `rm` no longer accept `-g` or `--progress`.
+
 - Snapcompact renders with one installed font per transcript instead of shipping bitmap and Silver fonts.
 - Removed `htmlToMarkdown`, `htmlToText`, and `LynxSession`. Use `renderHtml` for offline HTML rendering or `Reader` for URL reads; interactive terminal browsing is no longer available.
 
@@ -14,6 +16,11 @@
 - Added `analyzeBashApproval(command, dialect?)`, a synchronous Bash 5.3 and Zsh 5.9 AST analyzer for approving `bash` tool commands.
 - Added `spawnBreakaway(options)`, which starts a detached Windows process outside the caller's job objects when they allow breakaway ([#20722](https://github.com/can1357/oh-my-pi/issues/20722))
 - Added `vcs.discardsWorkSync()` to check, within an optional timeout, whether a git command would discard uncommitted work ([#19892](https://github.com/can1357/oh-my-pi/pull/19892) by [@Xytronix](https://github.com/Xytronix))
+
+### Changed
+
+- Embedded `ls` now separates columns with spaces regardless of `--tabsize`; without `LS_COLORS`, it colors by file type rather than filename extension.
+- Git cherry-picks, stash applies, and three-way patch applies now report a conflict when both sides edit adjacent lines, matching `git merge-file`.
 
 ### Fixed
 

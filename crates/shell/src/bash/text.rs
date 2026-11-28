@@ -36,8 +36,8 @@ pub fn cut(bytes: &[u8], max: usize) -> &[u8] {
 		return bytes;
 	}
 	let head = &bytes[..max];
-	match std::str::from_utf8(head) {
-		Err(e) if e.error_len().is_none() => &head[..e.valid_up_to()],
+	match xutf::decode(head) {
+		Err(xutf::DecodeError::Incomplete { valid_prefix, .. }) => valid_prefix.as_bytes(),
 		_ => head,
 	}
 }

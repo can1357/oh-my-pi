@@ -25,43 +25,135 @@ impl Val {
     }
 
     /// jq's `jvp_contains`: `None` if the values nest deeper than jq allows.
-    fn contains(&self, other: &Self, depth: usize) -> Option<bool> {
+    ///
+    /// Nested values are checked through an explicit stack, so deeply nested
+    /// values never recurse on the native stack.
+    pub(crate) fn contains(&self, other: &Self, depth: usize) -> Option<bool> {
         const MAX_CONTAINS_DEPTH: usize = 10000;
-        if depth > MAX_CONTAINS_DEPTH {
-            return None;
+
+        /// A containment obligation still being checked.
+        enum Frame<'a> {
+            /// Every entry of `r_it` must be contained in `lm`.
+            Obj {
+                lm: &'a crate::Map<Val, Val>,
+                r_it: indexmap::map::Iter<'a, Val, Val>,
+                depth: usize,
+            },
+            /// Every element of `r_it` must be contained in some element of
+            /// `l`; `cur` scans the candidates of the current element.
+            Arr {
+                l: &'a [Val],
+                r_it: core::slice::Iter<'a, Val>,
+                cur: Option<(&'a Val, core::slice::Iter<'a, Val>)>,
+                depth: usize,
+            },
         }
-        Some(match (self, other) {
-            (Self::BStr(l) | Self::TStr(l), Self::BStr(r) | Self::TStr(r)) => l.contains_str(&**r),
-            (Self::Obj(l), Self::Obj(r)) => {
-                for (k, r) in r.iter() {
-                    match l.get(k) {
-                        Some(l) => {
-                            if !l.contains(r, depth + 1)? {
-                                return Some(false);
+
+        /// Either a child obligation to check or the obligation's result.
+        enum Outcome<'a> {
+            Child(&'a Val, &'a Val, usize),
+            Settled(bool),
+        }
+
+        impl<'a> Frame<'a> {
+            /// Advance the obligation; `incoming` is the result of its current
+            /// child (or `None` to start it).
+            fn step(&mut self, mut incoming: Option<bool>) -> Outcome<'a> {
+                match self {
+                    Frame::Obj { lm, r_it, depth } => {
+                        if let Some(false) = incoming {
+                            return Outcome::Settled(false);
+                        }
+                        match r_it.next() {
+                            Some((k, r)) => match (*lm).get(k) {
+                                Some(l) => Outcome::Child(l, r, *depth + 1),
+                                None => Outcome::Settled(false),
+                            },
+                            None => Outcome::Settled(true),
+                        }
+                    }
+                    Frame::Arr { l, r_it, cur, depth } => loop {
+                        if let Some(v) = incoming.take() {
+                            let (r, scan) = cur.as_mut().expect("a candidate scan is active");
+                            if v {
+                                *cur = None;
+                            } else {
+                                match scan.next() {
+                                    Some(l) => return Outcome::Child(l, r, *depth + 1),
+                                    None => return Outcome::Settled(false),
+                                }
                             }
                         }
-                        None => return Some(false),
-                    }
-                }
-                true
-            }
-            (Self::Arr(l), Self::Arr(r)) => {
-                for r in r.iter() {
-                    let mut found = false;
-                    for l in l.iter() {
-                        if l.contains(r, depth + 1)? {
-                            found = true;
-                            break;
+                        match r_it.next() {
+                            Some(r) => {
+                                let mut scan = (*l).iter();
+                                match scan.next() {
+                                    Some(l) => {
+                                        *cur = Some((r, scan));
+                                        return Outcome::Child(l, r, *depth + 1);
+                                    }
+                                    None => return Outcome::Settled(false),
+                                }
+                            }
+                            None => return Outcome::Settled(true),
                         }
+                    },
+                }
+            }
+        }
+
+        let mut stack: Vec<Frame> = Vec::new();
+        let mut current: Option<(&Val, &Val, usize)> = Some((self, other, depth));
+        let mut result: Option<bool> = None;
+        loop {
+            if let Some((a, b, d)) = current.take() {
+                if d > MAX_CONTAINS_DEPTH {
+                    return None;
+                }
+                match (a, b) {
+                    (Self::BStr(x) | Self::TStr(x), Self::BStr(y) | Self::TStr(y)) => {
+                        result = Some(x.contains_str(&**y));
                     }
-                    if !found {
-                        return Some(false);
+                    (Self::Obj(lm), Self::Obj(rm)) => {
+                        stack.push(Frame::Obj { lm, r_it: rm.iter(), depth: d });
+                    }
+                    (Self::Arr(la), Self::Arr(ra)) => {
+                        let l: &[Val] = la;
+                        stack.push(Frame::Arr { l, r_it: ra.iter(), cur: None, depth: d });
+                    }
+                    _ => result = Some(a == b),
+                }
+            }
+            // Obtain a child or a settled value from the obligation stack.
+            while result.is_none() {
+                let Some(frame) = stack.last_mut() else { return Some(false) };
+                match frame.step(None) {
+                    Outcome::Child(x, y, d) => {
+                        current = Some((x, y, d));
+                        break;
+                    }
+                    Outcome::Settled(v) => {
+                        stack.pop();
+                        result = Some(v);
                     }
                 }
-                true
             }
-            _ => self == other,
-        })
+            // Feed the settled value into the parent obligation.
+            let Some(mut v) = result.take() else { continue };
+            loop {
+                let Some(frame) = stack.last_mut() else { return Some(v) };
+                match frame.step(Some(v)) {
+                    Outcome::Child(x, y, d) => {
+                        current = Some((x, y, d));
+                        break;
+                    }
+                    Outcome::Settled(w) => {
+                        stack.pop();
+                        v = w;
+                    }
+                }
+            }
+        }
     }
 
     /// jq's `jv_has`.
