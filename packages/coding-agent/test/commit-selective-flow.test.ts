@@ -680,6 +680,83 @@ describe("selective commit flow", () => {
 		expect(await git(root, ["status", "--porcelain"])).toBe("?? second.txt\n");
 	});
 
+	it("lists deselected agent edits separately from unrecorded paths", async () => {
+		const { root, journal, write } = await emptyRepo();
+		await write("Main", undefined, "first.txt", "first\n");
+		await write("Main", undefined, "second.txt", "second\n");
+		await Bun.write(path.join(root, "unrecorded.txt"), "outside the journal\n");
+		await journal.flush();
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main", agents: "self" });
+		expect(draft.summary()).toContain("✓ second.txt  +1  [Main]");
+		draft.only(["first.txt"]);
+
+		const [beforeUnrecorded, unrecorded] = draft.summary().split("\nUnrecorded:");
+		expect(beforeUnrecorded).toContain("Left out: 1 path(s)");
+		expect(beforeUnrecorded).toContain("take(path) to select");
+		expect(beforeUnrecorded).toContain("  · second.txt  +1  [Main]");
+		expect(unrecorded).toContain("1 path(s)");
+		expect(unrecorded).toContain("  · unrecorded.txt  +1");
+		expect(unrecorded).not.toContain("second.txt");
+	});
+
+	it("shows mixed ownership and unit selection for a deselected path", async () => {
+		const { root, journal, write } = await emptyRepo();
+		const file = "mixed.txt";
+		const absolute = path.join(root, file);
+		await Bun.write(absolute, "base\n");
+		await git(root, ["add", file]);
+		await git(root, ["commit", "-qm", "seed"]);
+		await write("Main", undefined, file, "base\nagent line\n");
+		await Bun.write(absolute, "base\nagent line\nmanual line\n");
+		await journal.flush();
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main", agents: "self" });
+		draft.drop({ path: file });
+		const summary = draft.summary();
+		expect(summary).toContain("  · mixed.txt  +1 of +2; also: unrecorded  [Main]");
+		expect(summary).toContain("show(path)");
+		expect(summary).toContain("take(path, units)");
+		expect(summary).not.toContain("take()");
+
+		const unit = draft.show(file).match(/^ {2}(\d+[a-z]+) · Main$/m)?.[1];
+		if (!unit) throw new Error("Expected show() to list Main's deselected unit");
+		draft.take({ path: file, units: [unit] });
+		const patch = draft.diff();
+		expect(patch).toContain("+agent line");
+		expect(patch).not.toContain("manual line");
+	});
+
+	it("keeps review hunks distinct from deselected agent lines on a mixed path", async () => {
+		const { root, journal, write } = await emptyRepo();
+		const file = "mixed.txt";
+		const absolute = path.join(root, file);
+		const context = Array.from({ length: 12 }, (_, index) => `line ${index}\n`).join("");
+		await Bun.write(absolute, `start\n${context}`);
+		await git(root, ["add", file]);
+		await git(root, ["commit", "-qm", "seed"]);
+		await Bun.write(absolute, `start\npre-existing line\n${context}`);
+		await write("Other", undefined, file, `start\npre-existing line\noutside scope\n${context}`);
+		const owned = `start\npre-existing line\noutside scope\nagent line\n${context}`;
+		await write("Main", undefined, file, `${owned}format me\n`);
+		await Bun.write(absolute, `${owned}formatted\n`);
+		await write("Main", undefined, "whole.txt", "whole\n");
+		await journal.flush();
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main", agents: "self" });
+		draft.drop({ path: file });
+		draft.drop({ path: "whole.txt" });
+		const summary = draft.summary();
+		expect(summary).toContain("  ? mixed.txt  hunk");
+		const row = summary.split("\n").find(line => line.startsWith("  · mixed.txt  "));
+		expect(row).toContain("+1 of +4");
+		expect(row).toContain("pre-existing");
+		expect(row).toContain("Other");
+		expect(row).toContain("unrecorded (review)");
+		expect(summary).toContain("take(path) for paths without other edits");
+		expect(summary).toContain("for mixed paths, show(path) then take(path, units)");
+	});
+
 	it("rejects all-unmatched keep targets without changing a curated selection", async () => {
 		const { root, journal, write } = await emptyRepo();
 		await write("Main", undefined, "first.txt", "first\n");
