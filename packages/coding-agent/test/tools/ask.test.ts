@@ -1051,12 +1051,8 @@ describe("AskTool answered by an extension", () => {
 			expect(text(checked.result!)).toContain(JSON.stringify({ tags: ["a"], region: "eu", agree: "yes" }, null, 2));
 			expect((await answer({ agree: ["yes", "no"] })).accepted).toBe(false);
 		});
-		it("refuses an answer to a name several controls share, or that leaves its shared default invalid", async () => {
-			const SHARED = `<form>
-  <label>Contact <input type="email" name="contact" required></label>
-  <label>Contact <select name="contact"><option value="phone">Phone</option></select></label>
-  <label>Region <select name="region"><option value="eu">EU</option><option value="us">US</option></select></label>
-</form>`;
+		/** Opens `html` in a form dialog that waits, and returns whether each extension answer is accepted. */
+		const openForm = async (html: string) => {
 			const ext = channel();
 			const opened = Promise.withResolvers<void>();
 			const formDialog = vi.fn<FormDialog>(async (_html, options) => {
@@ -1067,21 +1063,54 @@ describe("AskTool answered by an extension", () => {
 				return undefined;
 			});
 			const outcome = new AskTool(createSession()).execute(
-				"call-shared",
-				{ html: SHARED },
+				"call-form",
+				{ html },
 				undefined,
 				undefined,
 				withChannel(createContext({ formDialog }), ext.extensionAsk),
 			);
 			await opened.promise;
 			const askId = ext.requested[0]?.askId ?? "missing";
+			return {
+				accepts: (data: ExtensionAskData) => ext.pending.resolveAsk(askId, { data }),
+				close: async () => {
+					ext.pending.resolveAsk(askId, "cancel");
+					await outcome.catch(() => undefined);
+				},
+			};
+		};
+		it("refuses an answer to a name several controls share, or that leaves its shared default invalid", async () => {
+			const form = await openForm(`<form>
+  <label>Contact <input type="email" name="contact" required></label>
+  <label>Contact <select name="contact"><option value="phone">Phone</option></select></label>
+  <label>Region <select name="region"><option value="eu">EU</option><option value="us">US</option></select></label>
+</form>`);
 			// The select's option would skip the email field's validation.
-			expect(ext.pending.resolveAsk(askId, { data: { contact: "phone" } })).toBe(false);
+			expect(form.accepts({ contact: "phone" })).toBe(false);
 			// Left alone, the select's default `phone` is what the name submits: still not a valid email.
-			expect(ext.pending.resolveAsk(askId, { data: {} })).toBe(false);
-			expect(ext.pending.resolveAsk(askId, { data: { region: "us" } })).toBe(false);
-			expect(ext.pending.resolveAsk(askId, "cancel")).toBe(true);
-			await outcome.catch(() => undefined);
+			expect(form.accepts({})).toBe(false);
+			expect(form.accepts({ region: "us" })).toBe(false);
+			await form.close();
+		});
+		it("refuses a shared choice default that an earlier choice does not offer", async () => {
+			// A select offers no Other answer, so the later select's `enterprise` is not one of its values.
+			const form = await openForm(`<form>
+  <label>Plan <select name="plan"><option value="free">Free</option><option value="pro">Pro</option></select></label>
+  <label>Plan <select name="plan"><option value="enterprise">Enterprise</option></select></label>
+  <label>Region <select name="region"><option value="eu">EU</option><option value="us">US</option></select></label>
+</form>`);
+			expect(form.accepts({})).toBe(false);
+			expect(form.accepts({ region: "us" })).toBe(false);
+			await form.close();
+		});
+		it("refuses a required select's empty placeholder", async () => {
+			const form = await openForm(`<form>
+  <label>Region <select name="region" required><option value="">Choose…</option><option value="eu">EU</option></select></label>
+</form>`);
+			expect(form.accepts({ region: "" })).toBe(false);
+			expect(form.accepts({})).toBe(false);
+			expect(form.accepts({ region: "eu" })).toBe(true);
+			await form.close();
 		});
 	});
 

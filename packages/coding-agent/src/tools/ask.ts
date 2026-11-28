@@ -511,11 +511,21 @@ function extensionFormData(form: HtmlForm, data: Record<string, unknown>): HtmlF
 		submitted[name] = textValue(field, String(value));
 	}
 	// Each control against the value its name submits: a name several controls share carries one value,
-	// which has to satisfy every one of them (a later select's default cannot stand in for an empty email).
+	// which has to satisfy every one of them (a later select's default cannot stand in for an empty email,
+	// nor for an option an earlier choice does not offer).
 	for (const field of form.fields) {
-		if (field.name && fieldError(field, submitted[field.name]) !== undefined) return undefined;
+		if (field.name && !extensionFieldAccepts(field, submitted[field.name])) return undefined;
 	}
 	return submitted;
+}
+
+/** Whether `value` (what the field's name submits, `undefined` when nothing) is valid for `field`. */
+function extensionFieldAccepts(field: FormField, value: HtmlFormValue | undefined): boolean {
+	if (fieldError(field, value) !== undefined) return false;
+	if (field.kind !== "choice" || value === undefined) return true;
+	// A required select's `<option value="">` placeholder is no answer.
+	if (field.required && (value === "" || (Array.isArray(value) && value.every(item => item === "")))) return false;
+	return extensionChoiceValue(field, value) !== undefined;
 }
 
 // =============================================================================
