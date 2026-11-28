@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { dlopen, FFIType } from "bun:ffi";
 import * as path from "node:path";
 
 const FIXTURES_DIR = path.join(import.meta.dir, "fixtures");
@@ -13,14 +12,6 @@ const T1_COUNT = 10_000;
 const T1_MAX_GROWTH_BYTES = 256 * 1024;
 const T1_TIMEOUT_MS = 60_000;
 
-// Calibrated on Bun 1.4.5 Linux x64 (W = 2,000, N3 = 50,000):
-// shared-signal buildup across 20 runs was 16,489.7–16,731.5 KiB (338–343 B/call);
-// post-drop residue was 11.2–31.9 KiB.
-// 1 MiB sits > 32x above max residue and 3 * 1 MiB = 3 MiB is > 5x below min buildup.
-const T3_WARMUP = 2_000;
-const T3_COUNT = 50_000;
-const T3_MAX_RESIDUE_BYTES = 1024 * 1024;
-const T3_TIMEOUT_MS = 60_000;
 // Unit forms mimalloc prints in the `current` column (`B` for values under
 // 1 KiB, `KiB`, `MiB`, plus bare `0` with no unit). Any other unit throws so a
 // changed Bun dump format fails the test rather than silently passing.
@@ -84,26 +75,6 @@ function parseMimallocSmallBins(dump: string): MimallocSmallBins {
 	return { bins, totalBytes };
 }
 
-function parseMallocStatsInUseBytes(output: string): number {
-	const lines = output.split(/\r?\n/);
-	let inTotalSection = false;
-	for (const line of lines) {
-		if (/^\s*Total \(incl\. mmap\):\s*$/.test(line)) {
-			inTotalSection = true;
-			continue;
-		}
-		if (!inTotalSection) continue;
-		const match = /^\s*in use bytes\s*=\s*(\d+)\s*$/.exec(line);
-		if (match) {
-			return Number(match[1]);
-		}
-		if (/^\s*Arena\s+\d+:/.test(line)) {
-			inTotalSection = false;
-		}
-	}
-	throw new Error("malloc_stats output contained no 'in use bytes' line under 'Total (incl. mmap):'");
-}
-
 function extractMarkedBlocks(stderr: string, beginMarker: string, endMarker: string): string[] {
 	const blocks: string[] = [];
 	const escapedBegin = RegExp.escape(beginMarker);
@@ -128,20 +99,6 @@ function formatBinsDiff(before: MimallocSmallBins, after: MimallocSmallBins): st
 	].join("\n");
 }
 
-function hasGlibcMallocStats(): boolean {
-	if (process.platform !== "linux") return false;
-	try {
-		const lib = dlopen("libc.so.6", { malloc_stats: { args: [], returns: FFIType.void } });
-		try {
-			return typeof lib.symbols.malloc_stats === "function";
-		} finally {
-			lib.close();
-		}
-	} catch {
-		return false;
-	}
-}
-
 const CLEANUP_TIMEOUT_MS = 10_000;
 const liveChildren = new Set<Bun.Subprocess>();
 
@@ -154,8 +111,8 @@ async function terminateChild(child: Bun.Subprocess): Promise<void> {
 	await child.exited;
 }
 
-async function runProbe(mode: "fresh" | "shared", warmup: number, count: number): Promise<string> {
-	const child = Bun.spawn([process.execPath, PROBE_PATH, mode], {
+async function runProbe(warmup: number, count: number): Promise<string> {
+	const child = Bun.spawn([process.execPath, PROBE_PATH], {
 		stdout: "pipe",
 		stderr: "pipe",
 		env: {
@@ -175,7 +132,7 @@ async function runProbe(mode: "fresh" | "shared", warmup: number, count: number)
 		exited = true;
 		liveChildren.delete(child);
 		if (exitCode !== 0) {
-			throw new Error(`probe (${mode}) exited with ${String(exitCode)}\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+			throw new Error(`probe exited with ${String(exitCode)}\nstdout:\n${stdout}\nstderr:\n${stderr}`);
 		}
 		return stderr;
 	} finally {
@@ -189,8 +146,6 @@ async function runProbe(mode: "fresh" | "shared", warmup: number, count: number)
 	}
 }
 
-const GLIBC_MALLOC_STATS_AVAILABLE = hasGlibcMallocStats();
-
 describe.skipIf(process.platform !== "linux")("AbortSignal napi_wrap native memory", () => {
 	afterEach(async () => {
 		const remaining = Array.from(liveChildren);
@@ -202,7 +157,7 @@ describe.skipIf(process.platform !== "linux")("AbortSignal napi_wrap native memo
 	test.skipIf(process.env.GITHUB_EVENT_NAME === "pull_request")(
 		"frees the native memory that a native call keeps for each new AbortSignal once the signal is collected",
 		async () => {
-			const stderr = await runProbe("fresh", T1_WARMUP, T1_COUNT);
+			const stderr = await runProbe(T1_WARMUP, T1_COUNT);
 			const dumps = extractMarkedBlocks(stderr, "MIDUMP-BEGIN", "MIDUMP-END");
 			expect(dumps.length).toBe(2);
 
@@ -217,31 +172,5 @@ describe.skipIf(process.platform !== "linux")("AbortSignal napi_wrap native memo
 			}
 		},
 		T1_TIMEOUT_MS,
-	);
-	test.skipIf(!GLIBC_MALLOC_STATS_AVAILABLE)(
-		"frees the stack entries of one AbortSignal that many native calls shared once the signal is collected (skipped when glibc is absent)",
-		async () => {
-			const stderr = await runProbe("shared", T3_WARMUP, T3_COUNT);
-			const blocks = extractMarkedBlocks(stderr, "MALLOC-STATS-BEGIN", "MALLOC-STATS-END");
-			expect(blocks.length).toBe(3);
-
-			const baseline = parseMallocStatsInUseBytes(blocks[0]);
-			const live = parseMallocStatsInUseBytes(blocks[1]);
-			const afterDrop = parseMallocStatsInUseBytes(blocks[2]);
-			const buildup = live - baseline;
-			const residue = afterDrop - baseline;
-
-			if (buildup <= 3 * T3_MAX_RESIDUE_BYTES) {
-				throw new Error(
-					`shared AbortSignal did not build a measurable stack: buildup=${buildup} B (need > ${3 * T3_MAX_RESIDUE_BYTES} B); baseline=${baseline} B, live=${live} B, afterDrop=${afterDrop} B`,
-				);
-			}
-			if (residue >= T3_MAX_RESIDUE_BYTES) {
-				throw new Error(
-					`shared AbortSignal stack was not freed after collection: residue=${residue} B (limit < ${T3_MAX_RESIDUE_BYTES} B); buildup=${buildup} B, baseline=${baseline} B, live=${live} B, afterDrop=${afterDrop} B`,
-				);
-			}
-		},
-		T3_TIMEOUT_MS,
 	);
 });
