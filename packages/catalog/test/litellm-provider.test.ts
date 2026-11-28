@@ -579,7 +579,60 @@ describe("LiteLLM provider discovery", () => {
 		expect(models?.find(model => model.id === "backend-reasoner")?.api).toBe("openai-responses");
 		expect(models?.find(model => model.id === "base-reasoner")?.api).toBe("openai-responses");
 		expect(models?.find(model => model.id === "mixed-gpt")?.api).toBe("openai-completions");
-		expect(models?.find(model => model.id === "claude-proxy")?.api).toBe("openai-completions");
+		expect(models?.find(model => model.id === "claude-proxy")?.api).toBe("anthropic-messages");
+	});
+
+	test("routes Claude rich models through Anthropic Messages and keeps other groups on the fallback", async () => {
+		const fetchMock = vi.fn(async (input: string | URL | Request) => {
+			const url = inputUrl(input);
+			if (url === MODELS_DEV_URL) {
+				return Response.json({});
+			}
+			if (url === "http://primary:4000/v1/models") {
+				return Response.json({
+					data: ["claude-opus-5-5", "team-sonnet", "team-alias", "gpt-oss-120b", "configured-claude"].map(id => ({
+						id,
+					})),
+				});
+			}
+			if (url === "http://primary:4000/model_group/info") {
+				return Response.json({
+					data: [
+						// Bedrock + Anthropic deployments of one Claude model.
+						{ model_group: "claude-opus-5-5", providers: ["bedrock", "anthropic"], supports_vision: true },
+						// A Bedrock-hosted Claude group behind an alias names its backend.
+						{
+							model_group: "team-sonnet",
+							litellm_params: { model: "bedrock/us.anthropic.claude-sonnet-5-5" },
+							supports_vision: true,
+						},
+						// Nothing identifies Claude behind a Bedrock-only alias.
+						{ model_group: "team-alias", providers: ["bedrock"], supports_vision: false },
+						{ model_group: "gpt-oss-120b", providers: ["bedrock", "baseten"], supports_vision: false },
+						{
+							model_group: "configured-claude",
+							litellm_params: { custom_llm_provider: "vertex_ai", model: "claude-haiku-5-5" },
+							supports_vision: true,
+						},
+					],
+				});
+			}
+			return new Response("Not Found", { status: 404 });
+		}) as FetchImpl;
+
+		const models = await litellmModelManagerOptions({
+			apiKey: "sk-rich",
+			baseUrl: "http://primary:4000/v1",
+			fetch: fetchMock,
+		}).fetchDynamicModels?.();
+
+		expect(models?.map(model => ({ id: model.id, api: model.api }))).toEqual([
+			{ id: "claude-opus-5-5", api: "anthropic-messages" },
+			{ id: "configured-claude", api: "anthropic-messages" },
+			{ id: "gpt-oss-120b", api: "openai-completions" },
+			{ id: "team-alias", api: "openai-completions" },
+			{ id: "team-sonnet", api: "anthropic-messages" },
+		]);
 	});
 
 	test("enriches scoped /v1/models entries with matching rich LiteLLM metadata", async () => {
@@ -921,7 +974,7 @@ describe("LiteLLM provider discovery", () => {
 
 		const routes = models?.map(model => ({ id: model.id, api: model.api, kind: model.kind }));
 		expect(routes).toEqual([
-			{ id: "claude-proxy", api: "openai-completions", kind: undefined },
+			{ id: "claude-proxy", api: "anthropic-messages", kind: undefined },
 			{ id: "luna", api: "openai-decisions", kind: "judge" },
 			{ id: "typesafe/jev-1.14", api: "openai-decisions", kind: "judge" },
 		]);
@@ -1927,6 +1980,35 @@ describe("LiteLLM provider discovery", () => {
 		expect(routes).toEqual([
 			{ id: "keep-chat", api: "openai-completions", kind: undefined },
 			{ id: "typesafe/jev-1.14", api: "openai-decisions", kind: "judge" },
+		]);
+	});
+
+	test("routes Claude rows from the /v1/models fallback through Anthropic Messages", async () => {
+		// A key without access to the management endpoints leaves only the ids.
+		const fetchMock = vi.fn(async (input: string | URL | Request) => {
+			const url = inputUrl(input);
+			if (url === MODELS_DEV_URL) {
+				return Response.json({});
+			}
+			if (url === "http://fallback:4000/v1/models") {
+				return Response.json({
+					data: [
+						{ id: "claude-haiku-5-5", mode: "chat" },
+						{ id: "deepseek-v4-flash", mode: "chat" },
+					],
+				});
+			}
+			return new Response("Forbidden", { status: 403 });
+		}) as FetchImpl;
+
+		const models = await litellmModelManagerOptions({
+			baseUrl: "http://fallback:4000/v1",
+			fetch: fetchMock,
+		}).fetchDynamicModels?.();
+
+		expect(models?.map(model => ({ id: model.id, api: model.api }))).toEqual([
+			{ id: "claude-haiku-5-5", api: "anthropic-messages" },
+			{ id: "deepseek-v4-flash", api: "openai-completions" },
 		]);
 	});
 

@@ -5185,7 +5185,7 @@ describe("ModelRegistry runtime discovery", () => {
 							providers: ["typesafe"],
 							supports_vision: false,
 						},
-						{ model_group: "keep-chat", mode: "chat", providers: ["anthropic"], supports_vision: false },
+						{ model_group: "keep-chat", mode: "chat", providers: ["mistral"], supports_vision: false },
 					],
 				});
 			}

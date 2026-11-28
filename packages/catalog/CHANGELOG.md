@@ -42,6 +42,10 @@
 - Devin models now expose their fast lane through `/fast` instead of listing separate `-fast` model entries.
 - `KIMI_API_KEY` moved from the `kimi-code` discovery block to provider level so runtime credential resolution and usage probing resolve it as the `kimi-code` env credential; discovery still inherits it via the provider-envVars fallback ([#12405](https://github.com/can1357/oh-my-pi/pull/12405) by [@evanmaranzano](https://github.com/evanmaranzano), API-key login design from [#960](https://github.com/can1357/oh-my-pi/pull/960) by [@tsubus](https://github.com/tsubus), [#20509](https://github.com/can1357/oh-my-pi/pull/20509) by [@digi4care](https://github.com/digi4care)).
 
+### Changed
+
+- LiteLLM discovery now routes Claude model groups through the proxy's Anthropic Messages endpoint (`/v1/messages`), so Claude keeps prompt caching and native thinking ([#19927](https://github.com/can1357/oh-my-pi/pull/19927) by [@cassfij](https://github.com/cassfij))
+
 ### Fixed
 
 - Fixed QwenCloud Token Plan (`alibaba-token-plan`) DeepSeek V4.1 Flash models (`deepseek-v4.1-flash`, `deepseek-v4.1-flash-1017`) dropping attached images as text-only; they now accept image input ([#20773](https://github.com/can1357/oh-my-pi/issues/20773))
