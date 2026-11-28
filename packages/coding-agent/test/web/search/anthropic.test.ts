@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { buildDiscoveredModel, buildModel } from "@oh-my-pi/pi-catalog/build";
 import { COPILOT_API_HEADERS } from "@oh-my-pi/pi-catalog/wire/github-copilot";
 import { searchAnthropic } from "@oh-my-pi/pi-coding-agent/web/search/providers/anthropic";
 import { createInMemoryAuthStorage } from "../../helpers/agent-session-setup";
@@ -184,6 +184,45 @@ describe("Anthropic search session headers", () => {
 			expect(cap.headers()?.get("x-client-session-id")).toBe("configured-session");
 		} finally {
 			fixture.authStorage.close();
+		}
+	});
+
+	it("sends Copilot's session header for a custom provider declaring the github-copilot backend", async () => {
+		// The provider id is not `github-copilot`, so search takes the generic endpoint branch;
+		// the declared backend still decides the host's session header.
+		const authStorage = createInMemoryAuthStorage();
+		authStorage.keys.setRuntime("copilot-gateway", "gateway-token");
+		const modelRegistry = new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true });
+		const model = buildDiscoveredModel(
+			{
+				id: "claude-sonnet-4.5",
+				name: "Gateway Claude Sonnet 4.5",
+				api: "anthropic-messages",
+				provider: "copilot-gateway",
+				baseUrl: "https://copilot-gateway.example.test",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 200_000,
+				maxTokens: 16_384,
+			},
+			"github-copilot",
+		);
+		try {
+			const cap = makeCaptureFetch();
+			await searchAnthropic({
+				query: "aliased copilot session header",
+				systemPrompt: "Use web search.",
+				sessionId: "session-20678",
+				authStorage,
+				modelRegistry,
+				model,
+				fetch: cap.fetch,
+			});
+
+			expect(cap.headers()?.get("x-client-session-id")).toBe("session-20678");
+		} finally {
+			authStorage.close();
 		}
 	});
 });

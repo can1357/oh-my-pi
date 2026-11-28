@@ -373,7 +373,7 @@ behavior {
 
 ## Auth grammar
 
-Every provider has exactly one `auth "<id>" { … }` node under `auth/`; `auth/_order.kdl` holds a single `login-order "id" …` node pinning the `/login` roster order (every provider with a `login` and `show-in-login-list` unset/true must appear; providers without a login sort alphabetically after it). Runtime accessors live in `src/compat/auth.ts`; the id unions in the generated `src/compat/auth-ids.ts`. Every provider in `provider-models/descriptors.ts` needs an auth node (`@oh-my-pi/pi-ai` type-checks this).
+Every provider has exactly one `auth "<id>" { … }` node under `auth/`; `auth/_order.kdl` holds a single `login-order "id" …` node pinning the `/login` roster order (every provider with a `login` and `show-in-login-list` unset/true must appear; providers without a login sort alphabetically after it). Runtime accessors live in `src/compat/auth.ts`. Every catalog provider (a `providers/<id>.kdl` with `default-model`) needs an auth node; `gen:compat` rejects one without.
 
 ```kdl
 auth "anthropic" {
@@ -458,7 +458,7 @@ Hook names are validated against the hook tables in `@oh-my-pi/pi-ai/src/registr
 
 ## Provider catalog grammar
 
-The root `provider "<id>"` node of `providers/<id>.kdl` carries the catalog entry next to the cascade rules. A file that declares `default-model` is a catalog provider (a member of the generated `KnownProvider` union in `src/compat/provider-ids.ts`); a file without it is wire-compat only (custom provider ids such as `llama.cpp`) and may not carry any other entry node. The compiled entries live in `rules.json` under `providers`, keyed by id; runtime accessors are in `src/compat/providers.ts`, and `provider-models/descriptors.ts` pairs each entry with its model-manager factory — the only provider fact that stays in code.
+The root `provider "<id>"` node of `providers/<id>.kdl` carries the catalog entry next to the cascade rules. A file that declares `default-model` is a catalog provider; a file without it is wire-compat only (custom provider ids such as `llama.cpp`) and may not carry any other entry node. The compiled entries live in `rules.json` under `providers`, keyed by id; runtime accessors are in `src/compat/providers.ts`, and `provider-models/descriptors.ts` pairs each entry with its model-manager factory — the only provider fact that stays in code.
 
 ```kdl
 provider "sakana" {

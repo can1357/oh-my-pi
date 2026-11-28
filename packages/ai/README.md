@@ -1110,7 +1110,6 @@ import {
 	getProviderDefinition,
 	refreshOAuthToken, // (provider, credentials) => new credentials
 	getOAuthApiKey, // (provider, credentialsMap) => { newCredentials, apiKey } | null
-	type OAuthProvider,
 	type OAuthCredentials,
 } from "@oh-my-pi/pi-ai";
 

@@ -8,6 +8,9 @@ import { untrack } from "@oh-my-pi/pi-tui";
 import type { TerminalCapabilities } from "@oh-my-pi/pi-tui/driver/contract";
 import type { TerminalDriverOptions } from "@oh-my-pi/pi-tui/driver/index";
 import { getProjectDir } from "@oh-my-pi/pi-utils/dirs";
+import { exitProcess } from "@oh-my-pi/pi-utils/postmortem";
+import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
+import { configOverlayPaths, readConfigOverlay } from "../config/config-overlays";
 import { initTheme } from "../ui/theme/service";
 import { composerBorderColor } from "./interactive/border-color";
 import { AppFrame } from "./interactive/frame";
@@ -31,7 +34,7 @@ const STARTUP_DEFAULTS: StartupPreferences = {
 export interface PrepaintComposerOptions {
 	/** Driver options (test streams). */
 	readonly driver?: TerminalDriverOptions;
-	/** Emergency exit before the interactive mode's keys take over (default: `process.exit`). */
+	/** Override the host's emergency exit before interactive keybindings take over. */
 	readonly exit?: (code: number) => void;
 	readonly version?: string;
 	readonly cwd?: string;
@@ -47,6 +50,40 @@ export interface PrepaintComposerOptions {
 /** Start the frame with the cached preferences. */
 export function beginStartupComposer(options: PrepaintComposerOptions = {}): void {
 	ownStartupFrame(() => startFrame(options));
+}
+
+/**
+ * Whether the config overlays (`PI_CONFIG_FILES`, then the `--config` `files`) leave the cached first
+ * frame valid: none sets a setting declared `prepaint`, nor a scalar at a group holding one (legacy
+ * `theme: <name>` migrates into `theme.dark`). An unreadable overlay fails the launch, so nothing
+ * paints before its error.
+ */
+export async function overlaysKeepPrepaint(files: readonly string[]): Promise<boolean> {
+	const paths = configOverlayPaths(getProjectDir(), files);
+	if (paths.length === 0) return true;
+	// Latency boundary: only a launch with overlays loads the declarations that mark prepaint settings.
+	const [{ all }] = await Promise.all([import("../config/registry"), import("./settings")]);
+	const ids = all().flatMap(setting => (setting.definition.prepaint ? [setting.id] : []));
+	try {
+		for (const file of paths) {
+			if (configuresAny(await readConfigOverlay(file), ids)) return false;
+		}
+	} catch {
+		return false;
+	}
+	return true;
+}
+
+/** Whether `layer` (nested under `prefix`) sets one of `ids` or a scalar at a group holding one. */
+function configuresAny(layer: Record<string, unknown>, ids: readonly string[], prefix = ""): boolean {
+	for (const key in layer) {
+		const value = layer[key];
+		const id = prefix ? `${prefix}.${key}` : key;
+		if (ids.includes(id)) return true;
+		if (!ids.some(target => target.startsWith(`${id}.`))) continue;
+		if (!isRecord(value) || configuresAny(value, ids, id)) return true;
+	}
+	return false;
 }
 
 function startFrame(options: PrepaintComposerOptions) {
@@ -87,7 +124,8 @@ function startFrame(options: PrepaintComposerOptions) {
 			thinkingLevel: status?.facts.thinkingLevel ?? "off",
 		}),
 	);
-	const exit = options.exit ?? ((code: number) => process.exit(code));
+	// The keyboard belongs to the host even while a tool factory has guarded process.exit.
+	const exit = options.exit ?? ((code: number) => exitProcess(code, { emitExitEvent: true }));
 	// Until the interactive mode's keys exist: Ctrl+C clears a draft, then exits (130); Ctrl+D
 	// forward-deletes in a draft and exits (0) on an empty one, so a raw-mode user can always abort.
 	// Ahead of the focused composer, which takes both keys for its own editing.

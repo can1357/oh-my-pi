@@ -119,6 +119,21 @@ impl<S, P> Modules<S, P> {
     }
 }
 
+impl<P> Modules<&str, P> {
+    /// Dispose loaded modules without recursively dropping the syntax trees.
+    ///
+    /// Call this if compilation is abandoned after loading the modules.
+    pub fn discard(self) {
+        for (_, module) in self.deps {
+            discard_vars(module.vars);
+            parse::discard_body(Body::Defs(module.body));
+        }
+        let (_, main) = self.main;
+        discard_vars(main.vars);
+        parse::discard_body(Body::Main(main.body));
+    }
+}
+
 /// Errors occurring during loading of multiple modules, in the order jq reports them.
 pub type Errors<S, P, E = Error<S>> = Vec<(File<S, P>, E)>;
 
@@ -201,6 +216,16 @@ impl<'s, P, R> Loader<&'s str, P, R> {
     }
 }
 
+pub(crate) fn discard_meta(meta: Option<Const>) {
+    if let Some(c) = meta {
+        c.discard();
+    }
+}
+
+pub(crate) fn discard_vars<S>(vars: Vars<S>) {
+    vars.into_iter().for_each(|(_, _, meta)| discard_meta(meta));
+}
+
 fn is_optional(meta: &Option<Const>) -> bool {
     matches!(meta.as_ref().and_then(|m| m.get("optional")), Some(Const::Bool(true)))
 }
@@ -212,22 +237,57 @@ impl<'s, P: Clone + Eq + FileName, R: FnMut(Import<P>) -> ReadResult<P>> Loader<
         arena: &'s Arena,
         file: File<&'s str, P>,
     ) -> Result<Modules<&'s str, P>, Errors<&'s str, P>> {
-        let m = match parse::parse_module(file.code, "<top-level>", false) {
-            Ok(m) => m,
-            Err(e) => return Err(Vec::from([(file, Error::Parse(e))])),
-        };
-        let Body::Main(body) = m.body else {
-            let msg = "Top-level program not given (try \".\")";
-            return Err(Vec::from([(file, Error::Parse(Vec::from([(msg.into(), None)])))]));
-        };
-        let deps = self.implicit.take().into_iter().chain(m.deps).collect();
-        let main = self.deps(arena, &file, true, deps).map(|(mods, vars)| Module { mods, vars, body });
+        let main = self.load_main(arena, &file);
         match main {
             Some(main) if self.errs.is_empty() => {
                 let deps = self.mods.into_iter().map(|(f, m)| (f, m.unwrap_or_default()));
                 Ok(Modules { deps: deps.collect(), main: (file, main) })
             }
-            _ => Err(self.errs),
+            main => {
+                if let Some(dep) = self.implicit {
+                    discard_meta(dep.meta);
+                }
+                for (_, m) in self.mods {
+                    if let Some(m) = m {
+                        discard_vars(m.vars);
+                        parse::discard_body(Body::Defs(m.body));
+                    }
+                }
+                if let Some(main) = main {
+                    discard_vars(main.vars);
+                    parse::discard_body(Body::Main(main.body));
+                }
+                Err(self.errs)
+            }
+        }
+    }
+
+    fn load_main(&mut self, arena: &'s Arena, file: &File<&'s str, P>) -> Option<Module<&'s str, Term<&'s str>>> {
+        let m = match parse::parse_module(file.code, "<top-level>", false) {
+            Ok(m) => m,
+            Err(e) => {
+                self.errs.push((file.clone(), Error::Parse(e)));
+                return None;
+            }
+        };
+        discard_meta(m.meta);
+        let body = match m.body {
+            Body::Main(body) => body,
+            body => {
+                let msg = "Top-level program not given (try \".\")";
+                self.errs.push((file.clone(), Error::Parse(Vec::from([(msg.into(), None)]))));
+                parse::discard_body(body);
+                m.deps.into_iter().for_each(|d| discard_meta(d.meta));
+                return None;
+            }
+        };
+        let deps = self.implicit.take().into_iter().chain(m.deps).collect();
+        match self.deps(arena, file, true, deps) {
+            Some((mods, vars)) => Some(Module { mods, vars, body }),
+            None => {
+                parse::discard_body(Body::Main(body));
+                None
+            }
         }
     }
 
@@ -244,7 +304,8 @@ impl<'s, P: Clone + Eq + FileName, R: FnMut(Import<P>) -> ReadResult<P>> Loader<
         // the prelude module is included implicitly in every module
         let mut mods = Vec::new();
         let mut vars = Vec::new();
-        for dep in deps.into_iter().rev() {
+        let mut deps = deps.into_iter().rev();
+        while let Some(dep) = deps.next() {
             match dep.name {
                 Some(x) if x.starts_with('$') => vars.push((dep.path, x, dep.meta)),
                 name => {
@@ -256,9 +317,13 @@ impl<'s, P: Clone + Eq + FileName, R: FnMut(Import<P>) -> ReadResult<P>> Loader<
                         Err(e) => {
                             let err = Error::Io(Vec::from([(dep.path_span, e)]));
                             self.errs.push((file.clone(), err));
+                            discard_meta(dep.meta);
+                            deps.for_each(|d| discard_meta(d.meta));
+                            discard_vars(vars);
                             return None;
                         }
                     }
+                    discard_meta(dep.meta);
                 }
             }
         }
@@ -289,17 +354,29 @@ impl<'s, P: Clone + Eq + FileName, R: FnMut(Import<P>) -> ReadResult<P>> Loader<
                 return Ok(None);
             }
         };
-        let Body::Defs(body) = m.body else {
-            let msg = "jq: error: library should only have function definitions, not a main expression";
-            self.errs.push((file, Error::Parse(Vec::from([(msg.into(), None)]))));
-            return Ok(None);
+        discard_meta(m.meta);
+        let body = match m.body {
+            Body::Defs(body) => body,
+            body => {
+                let msg = "jq: error: library should only have function definitions, not a main expression";
+                self.errs.push((file, Error::Parse(Vec::from([(msg.into(), None)]))));
+                parse::discard_body(body);
+                m.deps.into_iter().for_each(|d| discard_meta(d.meta));
+                return Ok(None);
+            }
         };
 
         // a module is stored after the modules it depends on, which are compiled first
         self.open.push(file.path.clone());
         let deps = self.deps(arena, &file, false, m.deps);
         self.open.pop();
-        let module = deps.map(|(mods, vars)| Module { mods, vars, body });
+        let module = match deps {
+            Some((mods, vars)) => Some(Module { mods, vars, body }),
+            None => {
+                parse::discard_body(Body::Defs(body));
+                None
+            }
+        };
         let ok = module.is_some();
         let id = self.mods.len();
         self.mods.push((file, module));
@@ -321,9 +398,15 @@ pub struct ModuleMeta<'s> {
 /// Parse a module to obtain what `modulemeta` reports, or jq's parse errors.
 pub fn module_meta<'s>(code: &'s str, fname: &'s str) -> Result<ModuleMeta<'s>, Vec<parse::Error>> {
     let m = parse::parse_module(code, fname, false)?;
-    let Body::Defs(body) = m.body else {
-        let msg = "jq: error: library should only have function definitions, not a main expression";
-        return Err(Vec::from([(msg.into(), None)]));
+    let body = match m.body {
+        Body::Defs(body) => body,
+        body => {
+            let msg = "jq: error: library should only have function definitions, not a main expression";
+            parse::discard_body(body);
+            discard_meta(m.meta);
+            m.deps.into_iter().for_each(|d| discard_meta(d.meta));
+            return Err(Vec::from([(msg.into(), None)]));
+        }
     };
     let mut defs: Vec<String> = Vec::new();
     for d in body {
@@ -331,6 +414,7 @@ pub fn module_meta<'s>(code: &'s str, fname: &'s str) -> Result<ModuleMeta<'s>, 
         if !defs.contains(&name) {
             defs.push(name);
         }
+        parse::discard_term(d.body);
     }
     Ok(ModuleMeta { meta: m.meta, deps: m.deps, defs })
 }

@@ -45,7 +45,7 @@ import { type AgentDefinition, canSpawnAtDepth, getTaskSchema, type TaskToolSche
 import type { AgentProgress, SingleResult, TaskItem, TaskParams, TaskToolDetails } from "./task-details";
 import { AsyncJobError, type AsyncJobManagerApi } from "../async";
 import { hasResolvableTranscript } from "../internal-urls/registry-helpers";
-import { type DiscoveryResult, discoverAgents } from "./discovery";
+import { type DiscoveryResult, discoverAgents, getAgentDiscoverySources } from "./discovery";
 import { createEvalCustomTools, describeEvalTools, evalToolsEnabled } from "./eval-tools";
 import { getPerCallModelAdvertisement, type PerCallModelAdvertisement } from "./model-approval";
 import { generateTaskName } from "./name-generator";
@@ -600,53 +600,58 @@ class TaskJobError extends AsyncJobError {}
 
 /**
  * Process-level create-time discovery memo and published reload snapshots,
- * keyed by resolved cwd plus the exact effective `extensions` array.
+ * keyed by resolved cwd, effective extension roots and discovery providers.
  *
- * `TaskTool.create` runs for every (sub)agent session in this process. Sessions
- * may share a cwd while carrying different overlay/runtime extension settings,
- * so cwd alone is not an isolation boundary. Explicit plugin reloads replace
- * only the matching cwd+extensions snapshot. Execution-time discovery
- * (`#runSpawn`) intentionally stays fresh. The memo also tracks the live
- * `discoverAgents` binding: test spies swap that binding, which invalidates
+ * Startup can begin the scan before a ToolSession exists. `TaskTool.create`
+ * looks up the session's current identity so it shares that work only if the
+ * scope and settings still match. Explicit reloads replace only the matching
+ * snapshot; execution-time discovery stays fresh.
+ * The memo tracks the live `discoverAgents` binding, so a test spy invalidates
  * both caches automatically.
  */
 const discoveryMemo = new Map<string, Promise<DiscoveryResult>>();
 const discoverySnapshots = new Map<string, AgentDefinition[]>();
 let discoveryMemoFn: typeof discoverAgents | undefined;
 
-/** Stable cache identity for the filesystem root and the full effective extension-root struct. */
-function discoveryCacheKey(cwd: string, extensionRoots?: EffectiveExtensionRoots): string {
-	return `${path.resolve(cwd)}\0${JSON.stringify(extensionRoots ?? null)}`;
+function discoveryCacheKey(
+	cwd: string,
+	extensionRoots?: EffectiveExtensionRoots,
+	sources = getAgentDiscoverySources(),
+): string {
+	return `${path.resolve(cwd)}\0${sources}\0${JSON.stringify(extensionRoots ?? null)}`;
 }
 
-function discoverAgentsForCreate(cwd: string, extensionRoots?: EffectiveExtensionRoots): Promise<DiscoveryResult> {
+function discoverAgentsForCreate(
+	cwd: string,
+	extensionRoots?: EffectiveExtensionRoots,
+	refresh = false,
+): Promise<DiscoveryResult> {
 	const fn = discoverAgents;
 	if (discoveryMemoFn !== fn) {
 		discoveryMemoFn = fn;
 		discoveryMemo.clear();
 		discoverySnapshots.clear();
 	}
-	const key = discoveryCacheKey(cwd, extensionRoots);
-	let pending = discoveryMemo.get(key);
+	const sources = getAgentDiscoverySources();
+	const key = discoveryCacheKey(cwd, extensionRoots, sources);
+	let pending = refresh ? undefined : discoveryMemo.get(key);
 	if (!pending) {
-		pending = fn(cwd, undefined, extensionRoots);
+		pending = fn(cwd, undefined, extensionRoots, sources);
 		discoveryMemo.set(key, pending);
 		pending.catch(() => {
 			if (discoveryMemo.get(key) === pending) discoveryMemo.delete(key);
 		});
 	}
-	return pending;
+	if (!refresh) return pending;
+	return pending.then(result => {
+		if (discoveryMemo.get(key) === pending) discoverySnapshots.set(key, result.agents);
+		return result;
+	});
 }
 
 /** Rescan one cwd and publish its definitions to existing and future task tools. */
 export async function refreshAgentDiscovery(cwd: string, extensionRoots?: EffectiveExtensionRoots): Promise<void> {
-	const key = discoveryCacheKey(cwd, extensionRoots);
-	discoveryMemo.delete(key);
-	const pending = discoverAgentsForCreate(cwd, extensionRoots);
-	const { agents } = await pending;
-	if (discoveryMemo.get(key) === pending) {
-		discoverySnapshots.set(key, agents);
-	}
+	await discoverAgentsForCreate(cwd, extensionRoots, true);
 }
 
 /** A spawn's `assignment`, labelling and displaying the run: its `task`, or every step as one brief. */
@@ -1014,8 +1019,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		});
 	}
 
-	/** Agents a TaskTool for `session` offers at construction; memoized per cwd and extension roots. */
-	static async discoverAgents(session: ToolSession): Promise<AgentDefinition[]> {
+	/** Start or reuse discovery of the agents a TaskTool will offer for this session scope. */
+	static async discoverAgents(session: Pick<ToolSession, "cwd" | "effectiveExtensionRoots">): Promise<AgentDefinition[]> {
 		return (await discoverAgentsForCreate(session.cwd, session.effectiveExtensionRoots?.())).agents;
 	}
 

@@ -1,6 +1,5 @@
 import type { OAuthRefreshReason } from "../../auth/types";
 import type { FetchImpl } from "../../types";
-import type { OAuthProviderUnion } from "../registry";
 import type { DpopPrivateJwk } from "./dpop";
 
 export type OAuthCredentials = {
@@ -78,9 +77,8 @@ export type OAuthCredentials = {
 	scope?: string;
 };
 
-export type OAuthProvider = OAuthProviderUnion;
-
-export type OAuthProviderId = OAuthProvider | (string & {});
+/** Id of a provider whose auth policy declares a `login` flow, or of a `registerOAuthProvider` custom provider. */
+export type OAuthProviderId = string;
 
 export type OAuthPrompt = {
 	message: string;

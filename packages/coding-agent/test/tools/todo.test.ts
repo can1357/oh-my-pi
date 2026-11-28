@@ -786,12 +786,7 @@ describe("todo result card phase collapsing", () => {
 		const lines = Bun.stripANSI(rendered)
 			.split("\n")
 			.filter(line => line.trim() !== "");
-		return lines.slice(1, -1).map(line =>
-			line
-				.replace(/^│/, "")
-				.replace(/│\s*$/, "")
-				.trim(),
-		);
+		return lines.slice(1, -1).map(line => line.replace(/^│/, "").replace(/│\s*$/, "").trim());
 	}
 	it("collapses untouched phases to a one-line summary while expanding the active phase", async () => {
 		const result = await buildThreePhaseAfterDone();

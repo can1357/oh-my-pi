@@ -246,3 +246,72 @@ async fn corpus() {
 	assert!(selected > 0, "no Perl corpus cases matched {filter:?}");
 	assert_eq!(failed, 0, "{failed}/{selected} Perl corpus cases failed");
 }
+
+#[tokio::test]
+async fn sub_arguments_keep_aliases_context_and_magic() {
+	let cwd = tempfile::tempdir().unwrap();
+	let script = r#"
+sub add { $_[0] += $_[1]; return $_[0] }
+my $fn = \&add; my $x = 2; print $fn->($x,3), ':', $x, ':';
+eval { $fn->(1,4) }; print $@ =~ /read-only/ ? 'ro:' : 'bad:';
+sub context { my $a = shift; my $n = $a+1; wantarray ? ($n,scalar @_) : $n }
+print join(',',context(8,7)), ':', scalar(context(2)), ':';
+{ package T; sub TIESCALAR { bless [$_[1],0], $_[0] } sub FETCH { ++$_[0][1]; $_[0][0] } }
+tie my $t, 'T', 11; sub takeone { my $v = shift; $v }
+print takeone($t), ':', tied($t)->[1], ':';
+sub forward { shift; goto &takeone } print forward(1,9), ':';
+sub fail { local $main::tag='inner'; my $n=shift; die "$n/$main::tag\n" }
+$main::tag='outer'; eval { fail(7) }; print "$@$main::tag\n";
+our $v = 10; sub global { eval q{$v} } my $v = 3;
+my $cb = sub { my $v = $_[0]+$v; (global(),eval q{$v}) }; print join ':', $cb->(4);
+my $z = 2; my $hits = 0; sub bump { $hits++; $z+=3; $z }
+sub observe { $_[0]=10; print ':', join(':',@_), ":$z:$hits" } observe($z,bump(),$z+1);
+"#;
+	let (status, stdout, stderr) =
+		run_extra_bytes(&["perl", "-e", script], b"", cwd.path(), &[("OMP_PERL_FALLBACK", "0")]).await;
+	assert_eq!(status, 0, "{}", String::from_utf8_lossy(&stderr));
+	assert_eq!(stdout, b"5:5:ro:9,1:3:11:1:9:7/inner\nouter\n10:7:10:5:6:10:1");
+}
+
+#[tokio::test]
+async fn escaped_call_storage_and_caller_location() {
+	let cwd = tempfile::tempdir().unwrap();
+	let script = r#"use Scalar::Util qw(weaken);
+sub keeper { my $n=shift; \$n }
+my $a=keeper(4); my $b=keeper(5); print "$$a:$$b:";
+my $w=keeper(6); weaken($w); print defined($w) ? 'bad:' : 'gone:';
+sub remaining { my $x=shift; my $p=\@_; @$p=(8); $p }
+my $one=remaining(3); my $two=remaining(4); $one->[0]=7; print "$one->[0]:$two->[0]:";
+sub who { my $n=shift; my $v=$n+1; my @c=caller(0); print "$c[2]:$c[3]:$v\n" }
+who(5);"#;
+	let (status, stdout, stderr) =
+		run_extra_bytes(&["perl", "-e", script], b"", cwd.path(), &[("OMP_PERL_FALLBACK", "0")]).await;
+	assert_eq!(status, 0, "{}", String::from_utf8_lossy(&stderr));
+	assert_eq!(stdout, b"4:5:gone:7:8:8:main::who:6\n");
+}
+
+/// Heap-driven recursion and unwind on an ordinary worker stack: mutual sub
+/// recursion far deeper than the native stack, then a `die` caught by `eval`.
+#[tokio::test]
+	async fn deep_mutual_recursion_and_die_unwind() {
+		let cwd = tempfile::tempdir().unwrap();
+		let script = "sub even { my $n = shift; return 1 if $n == 0; odd($n - 1) } \
+sub odd { my $n = shift; return 0 if $n == 0; even($n - 1) } \
+print(even(1500) ? \"even\" : \"odd\", \"\\n\"); \
+eval { die \"boom\\n\" }; print($@ =~ /boom/ ? \"caught\" : \"missed\", \"\\n\");";
+		let (status, stdout, stderr) =
+			run_extra_bytes(&["perl", "-e", script], b"", cwd.path(), &[("OMP_PERL_FALLBACK", "0")]).await;
+		assert_eq!(status, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+		assert_eq!(stdout, b"even\ncaught\n");
+
+		// Past the depth limit the failure is the clean Perl diagnostic, not a native overflow.
+		let over = "sub f { my $n = shift; return 0 if $n == 0; f($n - 1) } f(100000);";
+		let (status, _out, stderr) =
+			run_extra_bytes(&["perl", "-e", over], b"", cwd.path(), &[("OMP_PERL_FALLBACK", "0")]).await;
+		assert_ne!(status, 0);
+		assert!(
+			String::from_utf8_lossy(&stderr).contains("Deep recursion limit exceeded"),
+			"stderr: {}",
+			String::from_utf8_lossy(&stderr)
+		);
+	}

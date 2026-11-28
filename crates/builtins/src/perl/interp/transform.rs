@@ -182,7 +182,7 @@ impl Interp<'_> {
 	pub(super) fn transform_array_rhs(&mut self, rhs: &Expr) -> PResult<Option<Vec<Sv>>> {
 		let ExprKind::Call(call @ Call { target: CallTarget::Builtin(b @ (Builtin::Map | Builtin::Sort), origin), .. }) = &rhs.kind else { return Ok(None); };
 		if !self.builtin_uses_core(*b, *origin) || self.pending.is_some() { return Ok(None); }
-		self.at_location(&rhs.location, |i| i.nested(|i| {
+		self.at_location_sync(&rhs.location, |i| i.nested_sync(|i| {
 			let result = match b {
 				Builtin::Map => i.map_numeric_range(call, Cx::List, new_sv).map(|v| v.map(|(_, cells)| cells)),
 				_ => i.sort_array_cells(call).map(Some),

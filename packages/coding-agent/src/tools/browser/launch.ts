@@ -29,7 +29,20 @@ import type {
 	Target,
 	Viewport,
 } from "puppeteer-core";
-import webglMaskSource from "../puppeteer/webgl-mask.txt" with { type: "text" };
+import stealthTamperingScript from "../puppeteer/00_stealth_tampering.txt" with { type: "text" };
+import stealthActivityScript from "../puppeteer/01_stealth_activity.txt" with { type: "text" };
+import stealthHairlineScript from "../puppeteer/02_stealth_hairline.txt" with { type: "text" };
+import stealthBotdScript from "../puppeteer/03_stealth_botd.txt" with { type: "text" };
+import stealthIframeScript from "../puppeteer/04_stealth_iframe.txt" with { type: "text" };
+import stealthWebglScript from "../puppeteer/05_stealth_webgl.txt" with { type: "text" };
+import stealthScreenScript from "../puppeteer/06_stealth_screen.txt" with { type: "text" };
+import stealthFontsScript from "../puppeteer/07_stealth_fonts.txt" with { type: "text" };
+import stealthAudioScript from "../puppeteer/08_stealth_audio.txt" with { type: "text" };
+import stealthLocaleScript from "../puppeteer/09_stealth_locale.txt" with { type: "text" };
+import stealthPluginsScript from "../puppeteer/10_stealth_plugins.txt" with { type: "text" };
+import stealthHardwareScript from "../puppeteer/11_stealth_hardware.txt" with { type: "text" };
+import stealthCodecsScript from "../puppeteer/12_stealth_codecs.txt" with { type: "text" };
+import stealthWorkerScript from "../puppeteer/13_stealth_worker.txt" with { type: "text" };
 import { ToolError } from "../tool-errors";
 import { withDownload } from "../../downloads/activity";
 import { TOOL_TIMEOUTS } from "../tool-timeouts";
@@ -1202,7 +1215,7 @@ async function sendUserAgentOverride(client: PuppeteerCdpClient, override: UserA
 /** Configure UA override on the browser + auto-attach to new targets. */
 async function configureUserAgentTargets(
 	browser: Browser,
-	state: { browserSession: CDPSession | null; override: UserAgentOverride },
+	state: { browserSession: CDPSession | null; override: UserAgentOverride; stealthSource?: string },
 	targetTimeoutMs = USER_AGENT_TARGET_TIMEOUT_MS,
 ): Promise<void> {
 	if (!state.browserSession) {
@@ -1220,6 +1233,13 @@ async function configureUserAgentTargets(
 				const session = state.browserSession?.connection()?.session(event.sessionId);
 				if (!session) return;
 				try {
+					// A cross-origin frame is its own target: `Page.addScriptToEvaluateOnNewDocument`
+					// on the page never reaches it, so replay the bootstrap on the paused frame.
+					if (event.targetInfo?.type === "iframe" && state.stealthSource) {
+						await session
+							.send("Page.addScriptToEvaluateOnNewDocument", { source: state.stealthSource })
+							.catch(() => undefined);
+					}
 					if (targetInfoSupportsUserAgentOverride(event.targetInfo)) {
 						await withSoftTimeout(
 							sendUserAgentOverride(wrapSession(session), state.override),
@@ -1235,6 +1255,17 @@ async function configureUserAgentTargets(
 		);
 	}
 
+	if (state.stealthSource) {
+		for (const target of browser.targets()) {
+			if ((target.type() as string) !== "iframe") continue;
+			const session = await target.createCDPSession().catch(() => undefined);
+			if (!session) continue;
+			await session
+				.send("Page.addScriptToEvaluateOnNewDocument", { source: state.stealthSource })
+				.catch(() => undefined);
+			await session.detach().catch(() => undefined);
+		}
+	}
 	const targets = browser.targets().filter(targetSupportsUserAgentOverride);
 	await Promise.all(
 		targets.map(async target => {
@@ -1285,24 +1316,76 @@ async function withSoftTimeout<T>(promise: Promise<T>, timeoutMs: number, label:
 	}
 }
 
+/** Every patch, by the tell it corrects; tests exercise them one at a time. */
+export const STEALTH_SCRIPTS = {
+	tampering: stealthTamperingScript,
+	activity: stealthActivityScript,
+	hairline: stealthHairlineScript,
+	botd: stealthBotdScript,
+	iframe: stealthIframeScript,
+	webgl: stealthWebglScript,
+	screen: stealthScreenScript,
+	fonts: stealthFontsScript,
+	audio: stealthAudioScript,
+	locale: stealthLocaleScript,
+	plugins: stealthPluginsScript,
+	hardware: stealthHardwareScript,
+	codecs: stealthCodecsScript,
+	worker: stealthWorkerScript,
+} as const;
+
+const STEALTH_PATCH_SCRIPTS = [
+	stealthTamperingScript,
+	stealthActivityScript,
+	stealthHairlineScript,
+	stealthBotdScript,
+	stealthIframeScript,
+	stealthWebglScript,
+	stealthScreenScript,
+	stealthFontsScript,
+	stealthAudioScript,
+	stealthLocaleScript,
+	stealthPluginsScript,
+	stealthHardwareScript,
+	stealthCodecsScript,
+	stealthWorkerScript,
+];
+
 /**
- * Page bootstrap that masks the WebGL renderer: pristine natives from a throwaway iframe, a
- * `Function.prototype.toString` proxy reporting patched functions as native, then the mask.
- * Every native patch is detectable, so it is injected only where the real renderer would give the
- * browser away (see {@link webglNeedsMask}).
+ * Page bootstrap carrying the stealth patches: pristine natives from a throwaway iframe, the
+ * patches, then a `Function.prototype.toString` proxy over whatever they replaced.
+ *
+ * Nothing is patched unless it has to be, so the mask itself exists only when a patch ran: on a
+ * browser whose native values already look right, `Function.prototype.toString` stays native and
+ * no patched-native tell remains.
  */
-function buildWebglMaskScript(): string {
+function buildStealthInjectionScript(scripts: readonly string[] = STEALTH_PATCH_SCRIPTS): string {
+	const patches = scripts.filter(script => script !== stealthTamperingScript);
+	const joint = patches
+		.map(
+			script => `
+		try {
+			${script};
+		} catch (e) {}
+	`,
+		)
+		.join(";\n");
+
 	return `(() => {
 				const Page_Function_toString = Function.prototype.toString;
 				const Page_FunctionToStringDescriptor = Object.getOwnPropertyDescriptor(Function.prototype, "toString");
 				const Page_Proxy = Proxy;
+				const Page_registryKey = Symbol.for("omp.stealth.registry");
 				const Page_WeakMap = WeakMap;
 				const Page_WeakMap_get = Page_WeakMap.prototype.get;
 				const Page_WeakMap_set = Page_WeakMap.prototype.set;
+				// Native function cache - captured before any tampering.
 				// A same-origin iframe yields natives uncontaminated by page-level
 				// tampering, but at document-start (when this preload runs) there is
-				// no documentElement to attach it to. The page has not run yet then,
-				// so window's own natives are still pristine.
+				// no documentElement to attach it to. In that case the page itself
+				// hasn't executed yet, so window's own natives are still pristine —
+				// fall back to window instead of bailing, otherwise none of the
+				// fingerprint patches below would ever run.
 				let iframe = null;
 				const container = document.head ?? document.documentElement;
 				if (container) {
@@ -1314,66 +1397,154 @@ function buildWebglMaskScript(): string {
 				try {
 					const nativeWindow = iframe ? iframe.contentWindow : window;
 
+					// Cache pristine native functions
+					const Function_toString = nativeWindow.Function.prototype.toString;
 					const Object_getOwnPropertyDescriptor = nativeWindow.Object.getOwnPropertyDescriptor;
+					const Object_getOwnPropertyDescriptors = nativeWindow.Object.getOwnPropertyDescriptors;
 					const Object_getPrototypeOf = nativeWindow.Object.getPrototypeOf;
 					const Object_defineProperty = nativeWindow.Object.defineProperty;
+					const Object_getOwnPropertyDescriptorOriginal = nativeWindow.Object.getOwnPropertyDescriptor;
 					const Object_create = nativeWindow.Object.create;
+					const Object_keys = nativeWindow.Object.keys;
+					const Object_getOwnPropertyNames = nativeWindow.Object.getOwnPropertyNames;
+					const Object_entries = nativeWindow.Object.entries;
+					const Object_setPrototypeOf = nativeWindow.Object.setPrototypeOf;
+					const Object_assign = nativeWindow.Object.assign;
+					const Window_setTimeout = nativeWindow.setTimeout;
+					const Math_random = nativeWindow.Math.random;
+					const Math_floor = nativeWindow.Math.floor;
 					const Math_max = nativeWindow.Math.max;
+					const Math_min = nativeWindow.Math.min;
+					const Window_Event = nativeWindow.Event;
+					const Promise_resolve = nativeWindow.Promise.resolve.bind(nativeWindow.Promise);
+					const Window_Blob = nativeWindow.Blob;
 					const Window_Proxy = nativeWindow.Proxy;
 					const Reflect_get = nativeWindow.Reflect.get;
+					const Reflect_set = nativeWindow.Reflect.set;
 					const Reflect_apply = nativeWindow.Reflect.apply;
+					const Reflect_construct = nativeWindow.Reflect.construct;
+					const Reflect_defineProperty = nativeWindow.Reflect.defineProperty;
+					const Reflect_deleteProperty = nativeWindow.Reflect.deleteProperty;
+					const Reflect_getOwnPropertyDescriptor = nativeWindow.Reflect.getOwnPropertyDescriptor;
+					const Reflect_getPrototypeOf = nativeWindow.Reflect.getPrototypeOf;
+					const Reflect_has = nativeWindow.Reflect.has;
+					const Reflect_isExtensible = nativeWindow.Reflect.isExtensible;
 					const Reflect_ownKeys = nativeWindow.Reflect.ownKeys;
+					const Reflect_preventExtensions = nativeWindow.Reflect.preventExtensions;
+					const Reflect_setPrototypeOf = nativeWindow.Reflect.setPrototypeOf;
+					const Intl_DateTimeFormat = nativeWindow.Intl.DateTimeFormat;
+					const Date_constructor = nativeWindow.Date;
 
-					const nativeFunctionSources = new Page_WeakMap();
+					// Same-origin frames get this bootstrap too, so a detector's throwaway iframe is a
+					// patched realm, not a pristine one: share one source registry between them and a
+					// parent-registered function keeps its native name there instead of leaking its body.
+					const nativeFunctionSources = (() => {
+						try {
+							const top = window.top;
+							if (!top) return new Page_WeakMap();
+							const shared = top[Page_registryKey];
+							if (shared) return shared;
+							const created = new Page_WeakMap();
+							Object_defineProperty(top, Page_registryKey, { value: created, configurable: true });
+							return created;
+						} catch (e) {
+							return new Page_WeakMap();
+						}
+					})();
+					let patchedNatives = 0;
 					const makeNativeString = (name) => "function " + (name || "") + "() { [native code] }";
 					const registerNativeSource = (fn, source) => {
-						if (typeof fn === "function") Reflect_apply(Page_WeakMap_set, nativeFunctionSources, [fn, source]);
+						if (typeof fn === "function") {
+							Reflect_apply(Page_WeakMap_set, nativeFunctionSources, [fn, source]);
+							patchedNatives += 1;
+						}
 						return fn;
 					};
 					const patchToString = (fn, name) => registerNativeSource(fn, makeNativeString(name));
-					const functionToStringProxy = new Page_Proxy(Page_Function_toString, {
-						apply(target, thisArg, args) {
-							const source = Reflect_apply(Page_WeakMap_get, nativeFunctionSources, [thisArg]);
-							if (source) return source;
-							return Reflect_apply(target, thisArg, args || []);
-						},
-						get(target, key, receiver) {
-							return Reflect_get(target, key, receiver);
-						},
-					});
-					registerNativeSource(functionToStringProxy, makeNativeString("toString"));
-					Object_defineProperty(Function.prototype, "toString", {
-						...(Page_FunctionToStringDescriptor || {
-							writable: true,
-							configurable: true,
-							enumerable: false,
-						}),
-						value: functionToStringProxy,
-					});
+					${joint}
 
-					try {
-						${webglMaskSource};
-					} catch (e) {}
+					// A tell only exists once something was replaced: until then leave toString alone.
+					if (patchedNatives > 0) {
+						try {
+							${stealthTamperingScript};
+						} catch (e) {}
+						const functionToStringProxy = new Page_Proxy(Page_Function_toString, {
+							apply(target, thisArg, args) {
+								const source = Reflect_apply(Page_WeakMap_get, nativeFunctionSources, [thisArg]);
+								if (source) return source;
+								return Reflect_apply(target, thisArg, args || []);
+							},
+							get(target, key, receiver) {
+								return Reflect_get(target, key, receiver);
+							},
+						});
+						registerNativeSource(functionToStringProxy, makeNativeString("toString"));
+						Object_defineProperty(Function.prototype, "toString", {
+							...(Page_FunctionToStringDescriptor || {
+								writable: true,
+								configurable: true,
+								enumerable: false,
+							}),
+							value: functionToStringProxy,
+						});
+					}
 				} finally {
 					if (iframe && iframe.parentNode) iframe.parentNode.removeChild(iframe);
 				}})();`;
 }
 
-/** Reads the unmasked WebGL renderer in an isolated world; empty when the page gets no WebGL. */
-const WEBGL_RENDERER_PROBE = `(() => {
+/** Builds the bootstrap for a chosen set of patches, for regression tests. */
+export function buildStealthInjectionScriptForTest(scripts: readonly string[] = STEALTH_PATCH_SCRIPTS): string {
+	return buildStealthInjectionScript(scripts);
+}
+
+/** Values the patches correct, read from the live browser before the tab's first navigation. */
+const STEALTH_PROBE = `(() => {
 	const gl = document.createElement("canvas").getContext("webgl");
 	const info = gl && gl.getExtension("WEBGL_debug_renderer_info");
-	return info ? String(gl.getParameter(info.UNMASKED_RENDERER_WEBGL)) : "";
+	const hairline = document.createElement("div");
+	hairline.style.border = ".5px solid transparent";
+	document.documentElement?.append(hairline);
+	const hairlineHeight = hairline.offsetHeight;
+	hairline.remove();
+	const video = document.createElement("video");
+	return {
+		webgl: info ? String(gl.getParameter(info.UNMASKED_RENDERER_WEBGL)) : "",
+		plugins: navigator.plugins?.length ?? 0,
+		cores: navigator.hardwareConcurrency,
+		language: navigator.languages?.[0] ?? navigator.language,
+		h264: video.canPlayType('video/mp4; codecs="avc1.42E01E"'),
+		webdriver: navigator.webdriver,
+		focused: document.hasFocus(),
+		hairlineHeight,
+		outerWidth: window.outerWidth,
+		outerHeight: window.outerHeight,
+		innerWidth: window.innerWidth,
+		innerHeight: window.innerHeight,
+		screenWidth: window.screen?.width ?? 0,
+		screenHeight: window.screen?.height ?? 0,
+	};
 })()`;
 
-/**
- * Whether the browser's real WebGL renderer would give it away: a software rasterizer, or a GPU
- * the claimed platform cannot have (Linux hosts claim Windows). A GPU matching the claim needs no
- * mask, and no WebGL leaves nothing to mask.
- */
-async function webglNeedsMask(page: Page, platform: string): Promise<boolean> {
-	const probed = await page.evaluate(WEBGL_RENDERER_PROBE).catch(() => "");
-	const renderer = typeof probed === "string" ? probed.toLowerCase() : "";
+interface StealthProbe {
+	webgl: string;
+	plugins: number;
+	cores: number;
+	language: string;
+	h264: string;
+	webdriver: boolean;
+	focused: boolean;
+	hairlineHeight: number;
+	outerWidth: number;
+	outerHeight: number;
+	innerWidth: number;
+	innerHeight: number;
+	screenWidth: number;
+	screenHeight: number;
+}
+
+/** Whether the real WebGL renderer would give the browser away: software, or a GPU the claim cannot have. */
+function webglBetrays(renderer: string, platform: string): boolean {
 	if (!renderer) return false;
 	if (/swiftshader|llvmpipe|lavapipe|software|mesa offscreen/.test(renderer)) return true;
 	if (platform === "Win32") return /apple|mesa|opengl engine/.test(renderer);
@@ -1381,12 +1552,45 @@ async function webglNeedsMask(page: Page, platform: string): Promise<boolean> {
 	return /direct3d|d3d|apple/.test(renderer);
 }
 
+/**
+ * The patches a page needs, chosen from what the browser actually reports. A native value that
+ * already looks right gets no patch, which is what keeps a patched native (and the `toString` mask
+ * that hides it) from becoming a tell of its own.
+ */
+function stealthScriptsFor(probe: StealthProbe, platform: string): readonly string[] {
+	const scripts: string[] = [];
+	if (webglBetrays(probe.webgl.toLowerCase(), platform)) scripts.push(stealthWebglScript);
+	if (probe.plugins === 0) scripts.push(stealthPluginsScript);
+	// A single-core report is the usual headless tell; the worker needs the same answer.
+	if (probe.cores > 0 && probe.cores < 4) scripts.push(stealthHardwareScript, stealthWorkerScript);
+	const language = STEALTH_ACCEPT_LANGUAGE.split(",")[0];
+	if (probe.language !== language) scripts.push(stealthLocaleScript, stealthWorkerScript);
+	if (!probe.h264) scripts.push(stealthCodecsScript);
+	if (
+		probe.outerHeight <= probe.innerHeight ||
+		probe.outerWidth < probe.innerWidth ||
+		probe.screenWidth < probe.outerWidth ||
+		probe.screenHeight < probe.outerHeight
+	) {
+		scripts.push(stealthScreenScript);
+	}
+	// `--disable-blink-features=AutomationControlled` already reports `webdriver: false`; the botd
+	// patch only adds a fabricated `chrome.runtime` plus permission shims, which its audit found
+	// more telling than native APIs. It stays available for tests but is not selected.
+	// if (probe.webdriver !== false) scripts.push(stealthBotdScript);
+	if (probe.hairlineHeight === 0) scripts.push(stealthHairlineScript);
+	if (!probe.focused) scripts.push(stealthActivityScript);
+	return [...new Set(scripts)];
+}
+
 /** Per-browser stealth state {@link applyStealthPatches} fills in on first use and reuses after. */
 export interface StealthState {
 	browserSession: CDPSession | null;
 	override: UserAgentOverride | null;
-	/** Whether pages need {@link buildWebglMaskScript}; probed once per browser. */
-	webglMask?: boolean;
+	/** Patches this page needs, chosen once from {@link STEALTH_PROBE}. */
+	stealthScripts?: readonly string[];
+	/** Bootstrap replayed into cross-origin (out-of-process) frames, which page-level injection misses. */
+	stealthSource?: string;
 }
 
 /** Apply stealth patches + UA override to a headless page. Idempotent within a tab. */
@@ -1400,11 +1604,26 @@ export async function applyStealthPatches(browser: Browser, page: Page, state: S
 	if (client) {
 		await sendUserAgentOverride(client, state.override);
 	}
-	const targetState = { browserSession: state.browserSession, override: state.override };
+	state.stealthScripts ??= stealthScriptsFor(await probeStealth(page), state.override.platform);
+	const scripts = state.stealthScripts ?? [];
+	state.stealthSource = scripts.length > 0 ? buildStealthInjectionScript(scripts) : undefined;
+	const targetState = {
+		browserSession: state.browserSession,
+		override: state.override,
+		stealthSource: state.stealthSource,
+	};
 	await configureUserAgentTargets(browser, targetState);
 	state.browserSession = targetState.browserSession;
-	state.webglMask ??= await webglNeedsMask(page, state.override.platform);
-	if (state.webglMask) await page.evaluateOnNewDocument(buildWebglMaskScript());
+	state.stealthScripts ??= stealthScriptsFor(await probeStealth(page), state.override.platform);
+	// No patch needed means no bootstrap at all: every native the page can inspect stays native.
+	if (state.stealthScripts.length > 0) {
+		await page.evaluateOnNewDocument(buildStealthInjectionScript(state.stealthScripts));
+	}
+}
+
+async function probeStealth(page: Page): Promise<StealthProbe> {
+	const probed = await page.evaluate(STEALTH_PROBE).catch(() => undefined);
+	return { ...(probed as StealthProbe) };
 }
 
 /** Exposes executable candidates for detection tests. */

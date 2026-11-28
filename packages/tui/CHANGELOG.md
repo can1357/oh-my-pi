@@ -17,6 +17,7 @@
 
 - `TextEdit.paste` marks an edit that types a bracketed paste ([#20681](https://github.com/can1357/oh-my-pi/issues/20681))
 - `Host.requestFrame()` schedules a terminal frame even when nothing on screen changed ([#20704](https://github.com/can1357/oh-my-pi/pull/20704) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- `Host.contentInHistory(node)` reports whether the terminal acknowledged rows of a main node's own content in scrollback, not only the separator above it ([#20724](https://github.com/can1357/oh-my-pi/pull/20724) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Added `tool.gl` symbol across unicode, nerd, and ascii presets for the GitLab tool ([#20396](https://github.com/can1357/oh-my-pi/pull/20396) by [@asuffield](https://github.com/asuffield))
 - Added `MarkdownOptions.linkUrls` and `MarkdownLook.linkUrls` to control whether URLs are displayed after named OSC 8 hyperlinks.
 - Added `TextEdit.paste` to identify edits produced by bracketed paste operations.
@@ -25,6 +26,7 @@
 
 ### Fixed
 
+- Moving through a question's options in Tern with the arrow keys no longer scrolls the chat back to the question each time
 - Improved performance when editing large documents and updating or closing views with many reactive values.
 - Fixed pane resizing in Herdr to avoid repeated redraw loops.
 - Fixed SIXEL and iTerm2 images overflowing rows, scrolling the terminal unexpectedly, or rendering incorrectly when they extend beyond the visible screen.

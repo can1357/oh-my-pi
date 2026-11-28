@@ -32,6 +32,7 @@ import { isReplyWrite, replyDisplayMessage, toolResultReplies } from "../../sess
 import { canonicalizeMessage } from "../../session/transcript/thinking-display";
 import {
 	asyncJobState,
+	followsViewportOnly,
 	isSettledJobFrame,
 	parksAsBackground,
 	readMediaPath,
@@ -2272,13 +2273,22 @@ export class EventController {
 		this.#showToolReplies(event.toolCallId, event.partialResult.details);
 		const component = this.ctx.pendingTools.get(event.toolCallId);
 		if (component) {
+			const parked = this.#backgroundCallIds.has(event.toolCallId);
+			const viewportOnly = parked && followsViewportOnly(event.toolName, this.ctx.shell.native());
+			if (viewportOnly && this.ctx.shell.transcript.contentInHistory(component.block)) {
+				// Its content is in scrollback: later frames would rewrite rows history already holds.
+				component.seal();
+				this.#releasePendingTool(event.toolCallId, component);
+				this.#backgroundCallIds.delete(event.toolCallId);
+				return;
+			}
 			const isFinalAsyncState = isSettledJobFrame(event.partialResult.details);
 			// A final async snapshot is terminal only for a parked background
 			// block (the call already returned and was kept alive for its jobs).
 			// While the call is still executing — a mixed blocking+async task
 			// call whose jobs settle before its blocking subset — treat it as a
 			// partial frame: `tool_execution_end` still owns the terminal result.
-			const isParkedFinal = isFinalAsyncState && this.#backgroundCallIds.has(event.toolCallId);
+			const isParkedFinal = isFinalAsyncState && parked;
 			if (isParkedFinal) {
 				settleWithJobFrame(component, event.partialResult, event.toolCallId);
 				this.#releasePendingTool(event.toolCallId, component);
@@ -2286,7 +2296,7 @@ export class EventController {
 			} else {
 				if (isFinalAsyncState) this.#settledBeforeReturn.set(event.toolCallId, event);
 				const isError = asyncJobState(event.partialResult.details) === "failed";
-				component.updateResult({ ...event.partialResult, isError }, true, event.toolCallId);
+				component.updateResult({ ...event.partialResult, isError }, !viewportOnly, event.toolCallId);
 			}
 		}
 	}
@@ -2344,7 +2354,8 @@ export class EventController {
 	): void {
 		const settled = this.#settledBeforeReturn.get(event.toolCallId)?.partialResult;
 		this.#settledBeforeReturn.delete(event.toolCallId);
-		const parks = parksAsBackground(event.toolName, event.result.details, this.ctx.shell.native());
+		const native = this.ctx.shell.native();
+		const parks = parksAsBackground(event.toolName, event.result.details, native);
 		if (parks && settled) {
 			// The job finished before the call returned: its settled frame, not the
 			// `running` start result, is the card's final state.
@@ -2352,7 +2363,9 @@ export class EventController {
 			this.#releasePendingTool(event.toolCallId, component);
 			return;
 		}
-		component.updateResult({ ...event.result, isError: event.isError }, parks, event.toolCallId);
+		// A viewport-only card draws its frames as static results, so its rows can retire as shown.
+		const partial = parks && !followsViewportOnly(event.toolName, native);
+		component.updateResult({ ...event.result, isError: event.isError }, partial, event.toolCallId);
 		if (parks) {
 			component.parkAsBackground();
 			// The call returned: its card is final for the transcript (a native terminal still

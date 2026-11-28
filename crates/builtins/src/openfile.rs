@@ -258,6 +258,19 @@ impl OpenFile {
 		}
 	}
 
+	/// [`Self::seek`] for async callers: a provider-backed file seeks through
+	/// its async API instead of blocking the runtime thread.
+	///
+	/// # Errors
+	///
+	/// As [`Self::seek`].
+	pub async fn seek_async(&self, pos: SeekFrom) -> io::Result<u64> {
+		match self.as_vfs() {
+			Some(file) => file.seek_async(pos).await,
+			None => self.seek(pos),
+		}
+	}
+
 	/// Whether the open file is the write end of a pipe whose reader has
 	/// exited, as GNU `tail -f` checks while idle. Never blocks or writes data.
 	///
