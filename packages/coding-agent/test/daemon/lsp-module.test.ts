@@ -6,10 +6,11 @@
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import * as daemonClientModule from "@oh-my-pi/pi-coding-agent/daemon/client";
 import { daemonClient, isolateDaemonForSmokeTest } from "@oh-my-pi/pi-coding-agent/daemon/client";
-import type { DaemonClient, DaemonTunnel } from "@oh-my-pi/pi-coding-agent/daemon/protocol";
+import { type DaemonClient, type DaemonTunnel, projectScope } from "@oh-my-pi/pi-coding-agent/daemon/protocol";
 import { encodeMessageFrame, MessageFramer } from "@oh-my-pi/pi-coding-agent/jsonrpc/message-framing";
 import { getOrCreateClient, holdSharedLsp, sendRequest, shutdownAll } from "@oh-my-pi/pi-coding-agent/lsp/client";
 import {
@@ -27,6 +28,8 @@ import { Process } from "@oh-my-pi/pi-natives";
 import { isEnoent, isRecord, TempDir } from "@oh-my-pi/pi-utils";
 
 const FIXTURE = path.join(import.meta.dir, "..", "fixtures", "fake-language-server.ts");
+/** Fixture that records notifications and workspace folders and can issue server-to-client requests. */
+const REQUESTING_FIXTURE = path.join(import.meta.dir, "..", "fixtures", "fake-lsp-server.ts");
 const DAEMON_TEST_TIMEOUT_MS = 60_000;
 const WAIT_MS = 15_000;
 
@@ -423,6 +426,126 @@ describe("daemon lsp module", () => {
 
 			expect(await session.request<EchoResult>("fake/split", { value: "server-split" })).toEqual({
 				value: "server-split",
+			});
+		},
+		DAEMON_TEST_TIMEOUT_MS,
+	);
+});
+
+describe("daemon lsp module workspace roots", () => {
+	interface RequestingState {
+		initializeCount: number;
+		notifications: string[];
+		workspaceFolders: string[];
+	}
+
+	const UNSAFE_ROOT = "Refusing LSP workspace root";
+
+	function requestingServer(overrides: Partial<LspServerParams> = {}): LspServerParams {
+		return { command: process.execPath, args: ["run", REQUESTING_FIXTURE], cwd, ...overrides };
+	}
+
+	function requestingState(session: LspSession): Promise<RequestingState> {
+		return session.request<RequestingState>("test/state", {});
+	}
+
+	async function lspUnitCount(client: DaemonClient): Promise<number> {
+		return (await client.request({ op: "list", kind: LSP_MODULE_KIND })).units.length;
+	}
+
+	const unsafeRoots: Array<{ name: string; root: () => Promise<string> }> = [
+		{ name: "filesystem root", root: async () => path.parse(cwd).root },
+		{ name: "OS temporary directory", root: async () => os.tmpdir() },
+		{
+			name: "symlink to the filesystem root",
+			root: async () => {
+				const alias = path.join(cwd, "root-alias");
+				await fs.symlink(path.parse(cwd).root, alias, "junction");
+				return alias;
+			},
+		},
+	];
+	for (const row of unsafeRoots) {
+		test(
+			`refuses the ${row.name} as a server root before spawning`,
+			async () => {
+				const client = await daemon();
+				const server = requestingServer({ cwd: await row.root() });
+				await expect(acquire(client, server)).rejects.toThrow(UNSAFE_ROOT);
+				await expect(
+					client.open({
+						kind: LSP_MODULE_KIND,
+						scope: projectScope(server.cwd),
+						key: lspInstanceKey(muxServerKey(server), 0),
+						params: { ...server, spawnEnv: baseEnv() } satisfies LspUnitParams,
+					}),
+				).rejects.toThrow(UNSAFE_ROOT);
+				expect(await lspUnitCount(client)).toBe(0);
+			},
+			DAEMON_TEST_TIMEOUT_MS,
+		);
+	}
+
+	for (const field of ["rootPath", "rootUri", "workspaceFolders", "relativeRootPath"]) {
+		test(
+			`refuses an initialize with an unsafe ${field} before forwarding or cache replay`,
+			async () => {
+				const client = await daemon();
+				const session = await connect(client, requestingServer());
+				const key = field === "relativeRootPath" ? "rootPath" : field;
+				const value =
+					field === "relativeRootPath"
+						? ".."
+						: field === "rootPath"
+							? os.tmpdir()
+							: field === "rootUri"
+								? Bun.pathToFileURL(os.tmpdir()).href
+								: [{ uri: Bun.pathToFileURL(os.tmpdir()).href, name: "temp" }];
+				const unsafeParams = { processId: process.pid, rootUri: null, capabilities: {}, [key]: value };
+				await expect(session.request("initialize", unsafeParams)).rejects.toThrow(UNSAFE_ROOT);
+				expect((await requestingState(session)).initializeCount).toBe(0);
+				await session.initialize();
+				await expect(session.request("initialize", unsafeParams)).rejects.toThrow(UNSAFE_ROOT);
+				expect((await requestingState(session)).initializeCount).toBe(1);
+			},
+			DAEMON_TEST_TIMEOUT_MS,
+		);
+	}
+
+	test(
+		"does not forward unsafe workspace additions sent as requests or notifications",
+		async () => {
+			const client = await daemon();
+			const session = await connect(client, requestingServer());
+			await session.initialize();
+			const params = { event: { added: [{ uri: Bun.pathToFileURL(os.tmpdir()).href, name: "temp" }], removed: [] } };
+			await expect(session.request("workspace/didChangeWorkspaceFolders", params)).rejects.toThrow(UNSAFE_ROOT);
+			session.notify("workspace/didChangeWorkspaceFolders", params);
+			expect((await requestingState(session)).notifications).not.toContain("workspace/didChangeWorkspaceFolders");
+			session.notify("workspace/didChangeWorkspaceFolders", {
+				event: { added: [{ uri: Bun.pathToFileURL(cwd).href, name: "project" }], removed: params.event.added },
+			});
+			expect((await requestingState(session)).notifications).toContain("workspace/didChangeWorkspaceFolders");
+		},
+		DAEMON_TEST_TIMEOUT_MS,
+	);
+
+	test(
+		"answers a server's workspaceFolders request with the root and the folders sessions added",
+		async () => {
+			const client = await daemon();
+			const session = await connect(client, requestingServer());
+			await session.initialize();
+			const checkout = path.join(cwd, "other-checkout");
+			await fs.mkdir(checkout);
+			const added = { uri: Bun.pathToFileURL(checkout).href, name: "other-checkout" };
+			session.notify("workspace/didChangeWorkspaceFolders", { event: { added: [added], removed: [] } });
+			expect((await requestingState(session)).workspaceFolders).toEqual([added.uri]);
+
+			const response = await session.request("test/serverRequest", { method: "workspace/workspaceFolders" });
+			expect(response).toEqual({
+				error: null,
+				result: [{ uri: Bun.pathToFileURL(cwd).href, name: path.basename(cwd) }, added],
 			});
 		},
 		DAEMON_TEST_TIMEOUT_MS,

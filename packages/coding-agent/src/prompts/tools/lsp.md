@@ -9,6 +9,7 @@ Symbol-aware code intelligence from language servers — navigation, refactors, 
 - `symbols` — `file` lists file symbols; `file: "*"` + `query` searches workspace.
 - `reload` — restart one server (`file`) or all (`*`); `reload *` re-reads LSP config.
 - `request` — raw: `query` = method, `payload` = JSON params (else auto-built).
+- Filesystem roots, shared temporary-directory roots, and home directories without `.git` cannot be workspaces; open a project directory or pass a file inside one.
 </operations>
 
 <timeout>

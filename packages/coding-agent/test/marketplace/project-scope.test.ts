@@ -147,7 +147,34 @@ describe("resolveActiveProjectRegistryPath", () => {
 		expect(await resolveOrDefaultProjectRegistryPath(tempRoot)).toBeUndefined();
 	});
 
-	it.skipIf(process.platform === "win32").each(["/tmp", "/var/tmp"])(
+	it.each(["TMPDIR", "TMP", "TEMP"])("uses %s and its aliases as project discovery ceilings", async key => {
+		const original = process.env[key];
+		const tempRoot = path.join(tmpDir, "shared-temp");
+		const alias = path.join(tmpDir, "shared-temp-link");
+		fs.mkdirSync(path.join(tempRoot, ".omp", "plugins"), { recursive: true });
+		fs.mkdirSync(path.join(tempRoot, ".git"));
+		fs.mkdirSync(path.join(tempRoot, "scratch"));
+		fs.symlinkSync(tempRoot, alias, "junction");
+		vi.spyOn(os, "tmpdir").mockReturnValue(tmpDir);
+		vi.spyOn(os, "homedir").mockReturnValue(path.join(tmpDir, "home"));
+		process.env[key] = alias;
+		try {
+			for (const root of [tempRoot, alias]) {
+				expect(await resolveActiveProjectRegistryPath(path.join(root, "scratch"))).toBeNull();
+				expect(await resolveOrDefaultProjectRegistryPath(root)).toBeUndefined();
+			}
+
+			const project = path.join(alias, "project");
+			fs.mkdirSync(path.join(project, ".omp"), { recursive: true });
+			expect(await resolveActiveProjectRegistryPath(project)).toBe(
+				path.join(project, ".omp", "plugins", "installed_plugins.json"),
+			);
+		} finally {
+			restoreEnvValue(key, original);
+		}
+	});
+
+	it.skipIf(process.platform === "win32").each(["/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp"])(
 		"does not create a project registry at the shared %s root even with another tmpdir",
 		async root => {
 			vi.spyOn(os, "tmpdir").mockReturnValue(tmpDir);

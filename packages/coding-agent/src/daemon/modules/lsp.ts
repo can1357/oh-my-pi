@@ -16,6 +16,7 @@ import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import { encodeMessageFrame, MessageFramer } from "../../jsonrpc/message-framing";
+import { assertSafeLspRoot, assertSafeLspWorkspaceMessage } from "../../lsp/config";
 import {
 	LSP_ACQUIRE_METHOD,
 	LSP_MODULE_KIND,
@@ -445,6 +446,14 @@ class LspServerUnit implements ModuleUnit {
 			return;
 		}
 		const request = hasRequestId(message);
+		try {
+			if (message.method === "initialize") assertSafeLspRoot(this.#cwd);
+			assertSafeLspWorkspaceMessage(message.method, message.params);
+		} catch (error) {
+			if (request) session.send(rpcError(message.id, -32602, String(error)));
+			else logger.warn("LSP unit rejected unsafe workspace", { error: String(error) });
+			return;
+		}
 		switch (message.method) {
 			case MUX_RESTART_METHOD:
 				if (!request) {
@@ -666,6 +675,19 @@ class LspServerUnit implements ModuleUnit {
 	}
 
 	#handleServerRequest(message: LspJsonRpcRequest): void {
+		if (message.method === "workspace/workspaceFolders") {
+			const root = assertSafeLspRoot(this.#cwd);
+			const rootUri = Bun.pathToFileURL(root).href;
+			const folders = new Map<string, unknown>([
+				[rootUri, { uri: rootUri, name: path.basename(root) || "workspace" }],
+			]);
+			// Checkouts sessions added through didChangeWorkspaceFolders stay part of the workspace.
+			for (const session of this.#sessions) {
+				for (const [uri, folder] of session.workspaceFolders) if (!folders.has(uri)) folders.set(uri, folder);
+			}
+			this.#writeServer(rpcResult(message.id, [...folders.values()]));
+			return;
+		}
 		if (
 			message.method === "client/registerCapability" ||
 			message.method === "client/unregisterCapability" ||
@@ -851,6 +873,7 @@ class LspServerUnit implements ModuleUnit {
 async function acquire(context: ModuleContext, params: unknown, client: ModuleClient): Promise<LspAcquireResult> {
 	const server = ServerParams(params);
 	if (server instanceof type.errors) throw new Error(`invalid lsp acquire params: ${server.summary}`);
+	assertSafeLspRoot(server.cwd);
 	const pending = { gone: false };
 	let connectionAcquires = pendingAcquires.get(client.connectionId);
 	if (!connectionAcquires) {
@@ -900,16 +923,17 @@ export const lspModule: DaemonModule = {
 	open(context, request) {
 		const params = UnitParams(request.params);
 		if (params instanceof type.errors) throw new Error(`invalid lsp unit params: ${params.summary}`);
+		const cwd = assertSafeLspRoot(params.cwd);
 		const child = context.spawn({
 			application: params.command,
 			args: params.args,
 			env: params.spawnEnv,
-			cwd: params.cwd,
+			cwd,
 		});
 		return new LspServerUnit({
 			child,
 			slot: slotKey(request.scope, request.key),
-			cwd: params.cwd,
+			cwd,
 			label: serverLabel(params.command, request.key),
 		});
 	},

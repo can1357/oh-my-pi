@@ -42,7 +42,14 @@ import {
 } from "./client";
 import { getLinterClient } from "./clients";
 import { locationsNotMentioning, missingOccurrencesNote } from "./completeness";
-import { configCache, describeMissingServers, getConfig, getServersForFile } from "./config";
+import {
+	configCache,
+	describeMissingServers,
+	getConfig,
+	getServersForFile,
+	resolveLspRoot,
+	UnsafeLspRootError,
+} from "./config";
 import {
 	formatLocationWithContext,
 	hasRustWorkspaceAncestor,
@@ -106,6 +113,7 @@ import {
 	formatMatchingDocumentSymbols,
 	formatSymbolInformation,
 	formatWorkspaceEdit,
+	hasGlobPattern,
 	mergeCodeActions,
 	parseSymbolSpec,
 	resolveDiagnosticTargets,
@@ -376,7 +384,24 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			throw new ToolAbortError();
 		};
 
-		const config = getConfig(this.session.cwd);
+		// A real path may contain glob characters (e.g. Next.js `app/[slug]/page.tsx`).
+		const candidatePath = file && file !== "*" ? resolveToCwd(file, this.session.cwd) : undefined;
+		const targetPath =
+			file && candidatePath && (!hasGlobPattern(file) || fs.existsSync(candidatePath)) ? candidatePath : undefined;
+		let workspaceRoot: string;
+		try {
+			workspaceRoot = resolveLspRoot(this.session.cwd, targetPath);
+		} catch (error) {
+			if (!(error instanceof UnsafeLspRootError)) throw error;
+			// Independent linters do not initialize or index an LSP workspace.
+			const fallback = getConfig(this.session.cwd);
+			const servers = targetPath ? getServersForFile(fallback, targetPath) : [];
+			if (action !== "status" && (action !== "diagnostics" || servers.length === 0)) {
+				throw error;
+			}
+			workspaceRoot = this.session.cwd;
+		}
+		const config = getConfig(workspaceRoot);
 
 		// Status action doesn't need a file
 		if (action === "status") {
@@ -435,7 +460,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		if (action === "diagnostics") {
 			if (file === "*") {
 				// `*` => run workspace diagnostics across all configured servers
-				const result = await runWorkspaceDiagnostics(this.session.cwd, signal).catch(err => {
+				const result = await runWorkspaceDiagnostics(workspaceRoot, signal).catch(err => {
 					rethrowAbort(err);
 					throw err;
 				});
@@ -516,14 +541,14 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					try {
 						throwIfAborted(signal);
 						if (serverConfig.createClient) {
-							const linterClient = getLinterClient(serverName, serverConfig, this.session.cwd);
+							const linterClient = getLinterClient(serverName, serverConfig, workspaceRoot);
 							const diagnostics = await linterClient.lint(resolved, signal);
 							allDiagnostics.push(...diagnostics);
 							succeededServers++;
 							reportedServers.push(serverName);
 							continue;
 						}
-						const client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
+						const client = await getOrCreateClient(serverConfig, workspaceRoot, undefined, signal);
 						// Sync open dependencies, then make the server compute the target's
 						// diagnostics against current disk state. A report cached from an earlier
 						// call cannot be trusted: a dependency OMP never opened may have changed.
@@ -792,7 +817,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				// A server that never received the rename's checkouts answers without them.
 				let folderError: unknown;
 				try {
-					client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
+					client = await getOrCreateClient(serverConfig, workspaceRoot, undefined, signal);
 					// Per renamed file, both sides, not per directory: a rename can span checkouts.
 					// One file per directory is enough, and one notification adds them all.
 					const byDir = new Map<string, string>();
@@ -1018,7 +1043,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 
 			for (const [serverName, serverConfig] of servers) {
 				try {
-					const client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
+					const client = await getOrCreateClient(serverConfig, workspaceRoot, undefined, signal);
 					for (const { oldUri } of pairs) {
 						if (client.openFiles.has(oldUri)) {
 							await sendNotification(client, "textDocument/didClose", { textDocument: { uri: oldUri } }, signal);
@@ -1079,7 +1104,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			for (const [serverName, serverConfig] of serverList) {
 				throwIfAborted(signal);
 				try {
-					const client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
+					const client = await getOrCreateClient(serverConfig, workspaceRoot, undefined, signal);
 					respondingServers.add(serverName);
 					const caps = client.serverCapabilities ?? {};
 					sections.push(`${serverName}:`);
@@ -1165,7 +1190,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			}
 
 			try {
-				const client = await getOrCreateClient(chosenConfig, this.session.cwd, undefined, signal);
+				const client = await getOrCreateClient(chosenConfig, workspaceRoot, undefined, signal);
 				if (resolvedTarget) {
 					await reconcileFileFromDisk(client, resolvedTarget, signal);
 				}
@@ -1239,12 +1264,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			for (const [workspaceServerName, workspaceServerConfig] of servers) {
 				throwIfAborted(signal);
 				try {
-					const workspaceClient = await getOrCreateClient(
-						workspaceServerConfig,
-						this.session.cwd,
-						undefined,
-						signal,
-					);
+					const workspaceClient = await getOrCreateClient(workspaceServerConfig, workspaceRoot, undefined, signal);
 					if (!clientServes(workspaceClient, workspaceSymbolProvider)) {
 						nonProviders.push(workspaceServerName);
 						continue;
@@ -1339,8 +1359,8 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			// and plugin configs added after the first LSP call become visible —
 			// otherwise `getConfig` returns the first observation for the rest of
 			// the process lifetime (#3546).
-			configCache.delete(this.session.cwd);
-			const refreshedConfig = getConfig(this.session.cwd);
+			configCache.delete(workspaceRoot);
+			const refreshedConfig = getConfig(workspaceRoot);
 			reconcileIdleChecker();
 			const servers = getLspServers(refreshedConfig);
 			// Identity-aware client keys make a changed server resolve to a fresh
@@ -1348,7 +1368,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			// would stay registered and running otherwise (#8384). This also
 			// clears every old client when the refreshed config removes all servers.
 			const stopped = await shutdownStaleClients(
-				this.session.cwd,
+				workspaceRoot,
 				servers.map(([, serverConfig]) => serverConfig),
 				signal,
 			);
@@ -1364,14 +1384,9 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			}
 			for (const [workspaceServerName, workspaceServerConfig] of servers) {
 				throwIfAborted(signal);
-				clearInitializationFailure(workspaceServerConfig, this.session.cwd);
+				clearInitializationFailure(workspaceServerConfig, workspaceRoot);
 				try {
-					const workspaceClient = await getOrCreateClient(
-						workspaceServerConfig,
-						this.session.cwd,
-						undefined,
-						signal,
-					);
+					const workspaceClient = await getOrCreateClient(workspaceServerConfig, workspaceRoot, undefined, signal);
 					outputs.push(await reloadServer(workspaceClient, workspaceServerName, signal));
 				} catch (err) {
 					if (err instanceof ToolAbortError || signal?.aborted) {
@@ -1406,10 +1421,10 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		// Candidates passed over for not advertising the action; reported if the one used lacks it too.
 		let unsupportedNotes: string[] = [];
 
-		if (action === "reload") clearInitializationFailure(serverConfig, this.session.cwd);
+		if (action === "reload") clearInitializationFailure(serverConfig, workspaceRoot);
 
 		try {
-			const selected = await selectClientForAction(candidates, action, this.session.cwd, signal);
+			const selected = await selectClientForAction(candidates, action, workspaceRoot, signal);
 			if ("unsupported" in selected) {
 				const ext = path.extname(resolvedFile!) || path.basename(resolvedFile!);
 				const notes = selected.unsupported.map(note => `  ${note}`).join("\n");
@@ -1745,7 +1760,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						const appliedAction = await applyCodeAction(selectedAction, {
 							resolveCodeAction: async actionItem =>
 								(await sendRequest(client, "codeAction/resolve", actionItem, signal)) as CodeAction,
-							applyWorkspaceEdit: async edit => applyWorkspaceEditWithLsp(edit, this.session.cwd, signal),
+							applyWorkspaceEdit: async edit => applyWorkspaceEditWithLsp(edit, workspaceRoot, signal),
 							executeCommand: async commandItem => {
 								await sendRequest(
 									client,
@@ -1858,7 +1873,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					} else {
 						const shouldApply = apply !== false;
 						if (shouldApply) {
-							const applied = await applyWorkspaceEditWithLsp(result, this.session.cwd, signal);
+							const applied = await applyWorkspaceEditWithLsp(result, workspaceRoot, signal);
 							output = `Applied rename:\n${applied.map(a => `  ${a}`).join("\n")}`;
 							// Whatever still names the old symbol was not renamed.
 							const leftover = symbolName
