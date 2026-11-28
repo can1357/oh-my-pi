@@ -349,7 +349,7 @@ function paintWait(node: UiNode, cx: PaintContext): Block {
 		width,
 		expanded: term.expanded === true,
 		partial: term.spinning === true,
-		live: term.spinning === true && !cx.reduceMotion,
+		live: term.spinning === true && cx.spinnerInterval > 0,
 	};
 	return { rows: jobsRows(paint, wait) };
 }

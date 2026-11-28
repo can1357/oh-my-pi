@@ -499,7 +499,7 @@ Inside `omp-natives`, the per-module breakdown (glue and tests omitted):
 | keys          | Kitty keyboard protocol with xterm fallback · PHF perfect-hash lookup             | phf                                       |  1,740 |
 | ast           | ast-grep pattern matching and structural rewrites                                 | ast-grep-core                             |  1,510 |
 | diff          | Structured file diffing for tools and previews                                    | in-tree                                   |  1,030 |
-| pty           | Native PTY allocation for sudo · ssh interactive prompts                          | portable-pty                              |    630 |
+| pty           | Native PTY allocation for sudo · ssh interactive prompts                          | in-tree                                   |    630 |
 | crash_handler | Native crash capture and reporting                                                | in-tree                                   |    610 |
 | highlight     | Syntax highlighting · 11 semantic categories · 30+ aliases                        | syntect                                   |    550 |
 | appearance    | Mode 2031 + native macOS dark/light via CoreFoundation FFI                        | core-foundation                           |    450 |

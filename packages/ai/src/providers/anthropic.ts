@@ -442,7 +442,7 @@ function createAnthropicProviderSessionState(): AnthropicProviderSessionState {
 type AnthropicOpaqueClientAnchor = ProviderSessionState & {
 	stores: WeakMap<AnthropicMessagesClientLike, Map<string, ProviderSessionState>>;
 	/**
-	 * Bumped once per `/fast on` re-arm. Anchored states carry the value they
+	 * Bumped once per fast-mode re-arm. Anchored states carry the value they
 	 * last observed in `fastModeRearmGeneration`; a mismatch is a re-arm they
 	 * have not picked up yet. Never reset by `close()`: the sweep discards the
 	 * states themselves, so a monotone counter needs no second reset path.
@@ -989,12 +989,27 @@ function isEmptyContentDelta(event: AnthropicStreamEvent): boolean {
 }
 
 /**
+ * The HTTP status the Anthropic API answers with for an error type it also
+ * streams in an `error` frame of a 200 response. A rate limit or an overload
+ * reported in the stream is the same refusal as the HTTP 429 or 529 one, so it
+ * carries that status and reads as one downstream (the message's
+ * `errorStatus`, slow mode, turn recovery's rate-limit handling). No other type
+ * is given a status.
+ */
+const ANTHROPIC_STREAM_ERROR_STATUS: Readonly<Record<string, number>> = {
+	rate_limit_error: 429,
+	overloaded_error: 529,
+};
+
+/**
  * In-stream `error` SSE frames carry an Anthropic error envelope:
  * `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`.
  * Surface the structured type, code and message instead of the raw JSON blob;
  * the error type token (e.g. `overloaded_error`, `rate_limit_error`) is kept in
  * the message so `isProviderRetryableError`'s classification keys off the
- * structured type rather than incidental JSON substrings.
+ * structured type rather than incidental JSON substrings. A type in
+ * {@link ANTHROPIC_STREAM_ERROR_STATUS} becomes a {@link AIError.ProviderHttpError}
+ * with that status and the type as its code, as the HTTP response would.
  *
  * `midMessage` marks a frame that lands inside an open message envelope — after
  * `message_start`, before the terminal frame (`message_stop`, or a
@@ -1009,7 +1024,9 @@ function isEmptyContentDelta(event: AnthropicStreamEvent): boolean {
  * Codex native-lane steer rejection uses, so a gateway-cut stream is
  * identifiable after the `Error` instance is gone.
  *
- * Only frame types the provider loop already retries take the truncation path.
+ * Only frame types the provider loop already retries take the truncation path,
+ * and `rate_limit_error` does not: a rate limit is the provider refusing the
+ * request, not a cut wire, so it stays the 429 inside an open message too.
  * A deterministic rejection (`invalid_request_error`, `authentication_error`,
  * `billing_error`, `permission_error`, an account cap) is a decision the
  * provider made about the request, not a cut wire: rewriting it as a truncation
@@ -1030,15 +1047,20 @@ function createAnthropicSseStreamError(data: string, midMessage: boolean): Error
 	const errorType = typeof parsed?.error?.type === "string" ? parsed.error.type : undefined;
 	const errorCode = typeof parsed?.error?.code === "string" ? parsed.error.code : undefined;
 	const message = typeof parsed?.error?.message === "string" ? parsed.error.message : undefined;
-	const rejection = new AIError.ProviderResponseError(
-		message
-			? errorType
-				? `Anthropic stream error (${errorType}): ${message}`
-				: `Anthropic stream error: ${message}`
-			: data,
-		{ provider: "anthropic", kind: "output" },
-	);
-	if (!midMessage || !AIError.isProviderRetryableError(rejection)) {
+	const text = message
+		? errorType
+			? `Anthropic stream error (${errorType}): ${message}`
+			: `Anthropic stream error: ${message}`
+		: data;
+	const httpStatus =
+		errorType !== undefined && Object.hasOwn(ANTHROPIC_STREAM_ERROR_STATUS, errorType)
+			? ANTHROPIC_STREAM_ERROR_STATUS[errorType]
+			: undefined;
+	const rejection =
+		httpStatus === undefined
+			? new AIError.ProviderResponseError(text, { provider: "anthropic", kind: "output" })
+			: new AIError.ProviderHttpError(text, httpStatus, { code: errorType });
+	if (!midMessage || httpStatus === 429 || !AIError.isProviderRetryableError(rejection)) {
 		return rejection;
 	}
 	const fields = [errorType ? `type=${errorType}` : undefined, errorCode ? `code=${errorCode}` : undefined]
@@ -4137,7 +4159,7 @@ export function buildAnthropicSystemBlocks(
 
 /** Inputs for {@link buildGitHubCopilotAnthropicHeaders}. */
 export interface GitHubCopilotAnthropicHeaderArgs {
-	model: Pick<Model<"anthropic-messages">, "provider" | "providerType" | "headers">;
+	model: Pick<Model<Api>, "provider" | "providerType" | "headers" | "compat">;
 	/** Copilot credential: a bare token or the OAuth login's JSON envelope. */
 	apiKey: string;
 	/** Effective endpoint (`resolveAnthropicBaseUrl`); selects the `anthropic-version`. */
@@ -4182,6 +4204,7 @@ export function buildGitHubCopilotAnthropicHeaders(args: GitHubCopilotAnthropicH
 		protocol: "anthropic",
 		sessionId: args.sessionId,
 		parentSessionId: args.parentSessionId,
+		compat: model.compat,
 	});
 	return headers;
 }
@@ -4341,6 +4364,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		protocol: "anthropic",
 		sessionId,
 		parentSessionId,
+		compat: model.compat,
 	});
 
 	if (model.provider === "cloudflare-ai-gateway") {

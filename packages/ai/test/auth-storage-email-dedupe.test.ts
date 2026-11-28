@@ -153,6 +153,20 @@ describe("AuthStorage openai-codex email dedupe", () => {
 		expect(remaining.credential.accountId).toBe("account-b");
 	});
 
+	it("uses the preferred explicit identity before conflicting JWT claims", async () => {
+		if (!store || !db) throw new Error("test setup failed");
+		const credential = {
+			...createJwtOnlyCredential({ suffix: "first", accountId: "jwt-account", email: "jwt@example.com" }),
+			accountId: " explicit-account ",
+			email: " EXPLICIT@example.com ",
+			orgId: " org-1 ",
+		};
+		await store.upsertAuthCredential("openai-codex", credential);
+		await store.upsertAuthCredential("fixture-account-first", credential);
+		expect(readStoredIdentityRows(db, "openai-codex")[0]?.identity_key).toBe("email:explicit@example.com|org:org-1");
+		expect(readStoredIdentityRows(db, "fixture-account-first")[0]?.identity_key).toBe("account:explicit-account");
+	});
+
 	it("updates in-place when a codex credential with matching email replaces another account", async () => {
 		if (!store || !db) throw new Error("test setup failed");
 
@@ -536,6 +550,40 @@ describe("AuthStorage openai-codex email dedupe", () => {
 		const reopenedStore = new SqliteAuthCredentialStore(futureDb);
 		try {
 			expect(readAuthSchemaVersion(futureDb)).toBe(10);
+		} finally {
+			reopenedStore.close();
+		}
+	});
+
+	it("opens a store that records v9 but lacks the salt column", async () => {
+		const stampedDb = new Database(":memory:");
+		stampedDb.run(`
+			CREATE TABLE auth_schema_version (
+				id INTEGER PRIMARY KEY CHECK (id = 1),
+				version INTEGER NOT NULL
+			);
+			INSERT INTO auth_schema_version(id, version) VALUES (1, 9);
+			CREATE TABLE auth_credentials (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				provider TEXT NOT NULL,
+				credential_type TEXT NOT NULL,
+				data TEXT NOT NULL,
+				disabled_cause TEXT DEFAULT NULL,
+				identity_key TEXT DEFAULT NULL,
+				created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+				updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+			);
+		`);
+		stampedDb
+			.query("INSERT INTO auth_credentials (provider, credential_type, data) VALUES (?, ?, ?)")
+			.run("openai", "api_key", JSON.stringify({ key: "sk-stamped-v9" }));
+
+		const reopenedStore = new SqliteAuthCredentialStore(stampedDb);
+		try {
+			// The stored row stays readable, and writes (which bind `salt`) succeed.
+			expect(reopenedStore.getApiKey("openai")).toBe("sk-stamped-v9");
+			await reopenedStore.saveApiKey("openai", "sk-after-repair");
+			expect(reopenedStore.getApiKey("openai")).toBe("sk-after-repair");
 		} finally {
 			reopenedStore.close();
 		}

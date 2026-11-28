@@ -302,7 +302,7 @@ fn collect_elidable_tree(
 	// When the run's total line span meets `min_body_lines`, elide the lines
 	// strictly between the first and last sibling's content, leaving the
 	// boundary statements visible.
-	let child_count = node.child_count();
+	let child_count = node.child_count() as u32;
 	let mut run_first: Option<Node<'_>> = None;
 	let mut run_last: Option<Node<'_>> = None;
 	let mut run_count: u32 = 0;

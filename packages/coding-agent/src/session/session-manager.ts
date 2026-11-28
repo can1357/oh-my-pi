@@ -40,7 +40,7 @@ import { hasAnnotationDraftsSync } from "../extensibility/custom-commands/bundle
 import { resolveLocalRoot } from "../internal-urls/local-root";
 import { ArtifactManager, type ArtifactManagerApi } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore, lazyImageDataSync } from "./blob-store";
-import type { CompactionMethod } from "./compaction-method-ids";
+import type { CompactionMethod } from "./compaction-methods";
 import {
 	type BashExecutionMessage,
 	type CustomMessage,
@@ -126,6 +126,7 @@ import {
 import { generateId, migrateToCurrentVersion } from "./session-migrations";
 import {
 	computeDefaultSessionDir,
+	computeDefaultSessionDirAsync,
 	hasPositiveMovedProjectEvidence,
 	readTerminalBreadcrumbEntry,
 	resolveManagedSessionRoot,
@@ -4455,6 +4456,15 @@ export class SessionManager {
 		return computeDefaultSessionDir(cwd, storage, getSessionsDir(agentDir));
 	}
 
+	/** Resolve and migrate the default directory without blocking on directory enumeration. */
+	static getDefaultSessionDirAsync(
+		cwd: string,
+		agentDir?: string,
+		storage: SessionStorage = new FileSessionStorage(),
+	): Promise<string> {
+		return computeDefaultSessionDirAsync(cwd, storage, getSessionsDir(agentDir));
+	}
+
 	/**
 	 * Create a new session.
 	 * @param cwd Working directory (stored in the session header)
@@ -4653,7 +4663,7 @@ export class SessionManager {
 		const dir =
 			sessionDir ??
 			(recordedCwd && !recordedCwdUsable
-				? SessionManager.getDefaultSessionDir(cwd, undefined, storage)
+				? await SessionManager.getDefaultSessionDirAsync(cwd, undefined, storage)
 				: path.dirname(path.resolve(filePath)));
 		const manager = new SessionManager(cwd, dir, true, storage);
 		manager.#suppressBreadcrumb = options?.suppressBreadcrumb === true;
@@ -4782,7 +4792,7 @@ export class SessionManager {
 		storage: SessionStorage = new FileSessionStorage(),
 		options: { onSessionContinuation?: (continuation: SessionContinuation) => void } = {},
 	): Promise<SessionManager> {
-		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
+		const dir = sessionDir ?? (await SessionManager.getDefaultSessionDirAsync(cwd, undefined, storage));
 		const resolvedCwd = path.resolve(cwd);
 		const breadcrumb = await readTerminalBreadcrumbEntry();
 		let chosenSession: string | null | undefined;
@@ -4940,7 +4950,7 @@ export class SessionManager {
 		sessionDir?: string,
 		storage: SessionStorage = new FileSessionStorage(),
 	): Promise<SessionInfo[]> {
-		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
+		const dir = sessionDir ?? (await SessionManager.getDefaultSessionDirAsync(cwd, undefined, storage));
 		const sessions = await listSessions(dir, storage);
 		return sortPinnedFirst(sessions, await loadPinnedSessionIds());
 	}
@@ -4967,7 +4977,7 @@ export class SessionManager {
 		worktreeScope: "directory" | "repo" = "repo",
 		settings?: Settings,
 	): Promise<PickerListing> {
-		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
+		const dir = sessionDir ?? (await SessionManager.getDefaultSessionDirAsync(cwd, undefined, storage));
 		const [pinned, siblingDirs] = await Promise.all([
 			loadPinnedSessionIds(),
 			worktreeScope === "repo" ? worktreeSessionDirs(cwd, dir, { settings }) : [],

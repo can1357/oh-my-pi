@@ -128,6 +128,9 @@ export function AnnotationReview(props: { readonly model: AnnotationReviewModel 
 		</list>
 	);
 
+	const monoSpans = (spans: readonly TspSpan[]): TspSpan[] =>
+		spans.map(span => ({ ...span, s: span.s ? `${span.s} mono` : "mono" }));
+
 	const note = (key: string, body: string, scope?: string) => (
 		<item
 			key={key}
@@ -148,11 +151,17 @@ export function AnnotationReview(props: { readonly model: AnnotationReviewModel 
 			});
 			const mono = model.textSource.kind !== "message" && model.textSource.kind !== "prompt";
 			const width = String(model.textLines.length).length;
+			const syntax = model.sourceSyntax();
 			model.textLines.forEach((line, sourceIndex) => {
+				const highlighted = syntax?.[sourceIndex];
+				const label =
+					highlighted === undefined
+						? [{ t: replaceTabs(sanitizeText(line)), ...(mono ? { s: "mono" } : {}) }]
+						: monoSpans(highlighted);
 				items.push(
 					<item
 						key={`l${sourceIndex}`}
-						label={[{ t: replaceTabs(sanitizeText(line)), ...(mono ? { s: "mono" } : {}) }]}
+						label={label}
 						value={[{ s: "mono", t: String(sourceIndex + 1).padStart(width) }]}
 					/>,
 				);
@@ -177,6 +186,7 @@ export function AnnotationReview(props: { readonly model: AnnotationReviewModel 
 		else if (file.rows.length === 0)
 			items.push(notice("empty", "No hunks: this looks like a rename-only change", "forward"));
 		const rows = file.isBinary ? [] : file.rows;
+		const syntax = model.sourceSyntax();
 		let numberWidth = 1;
 		for (const row of rows) {
 			if (isSourceRow(row))
@@ -214,13 +224,15 @@ export function AnnotationReview(props: { readonly model: AnnotationReviewModel 
 			const oldCell = String((added ? undefined : row.oldLine) ?? "").padStart(numberWidth);
 			const newCell = String((removed ? undefined : row.newLine) ?? "").padStart(numberWidth);
 			const current = sourceIndex;
+			const highlighted = syntax?.[sourceIndex];
+			const content =
+				highlighted === undefined
+					? [{ s: "mono", t: replaceTabs(sanitizeText(row.content)) }]
+					: monoSpans(highlighted);
 			items.push(
 				<item
 					key={`l${current}`}
-					label={[
-						{ s: `${color} mono`, t: added ? "+ " : removed ? "- " : "  " },
-						{ s: "mono", t: replaceTabs(sanitizeText(row.content)) },
-					]}
+					label={[{ s: `${color} mono`, t: added ? "+ " : removed ? "- " : "  " }, ...content]}
 					value={[{ s: "mono", t: `${oldCell} ${newCell}` }]}
 					tone={added ? "success" : removed ? "error" : undefined}
 				/>,

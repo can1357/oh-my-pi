@@ -1,14 +1,17 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
+import * as path from "node:path";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { createRoot } from "@oh-my-pi/pi-tui";
 import { paintNode } from "@oh-my-pi/pi-tui/term/paint";
 import { plainRows } from "@oh-my-pi/pi-tui/testing/cells";
 import { corpusEnvironment } from "@oh-my-pi/pi-tui/testing/corpus";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import {
 	arbitrateMentions,
 	AgentsMentionSource,
 	MATCH_TIER,
 	McpMentionSource,
+	SessionsMentionSource,
 	SshMentionSource,
 	type MentionItem,
 	type MentionMesh,
@@ -23,6 +26,8 @@ import { createPromptActionAutocompleteProvider } from "../../src/autocomplete/p
 import { KeybindingsManager } from "../../src/config/keybindings/keybindings";
 import type { MeshPeer } from "../../src/irc/mesh-protocol";
 import type { AgentRef } from "../../src/registry/agent-registry";
+import * as sessionIndex from "../../src/session/session-index";
+import * as sessionPaths from "../../src/session/session-paths";
 import { Composer } from "../../src/ui/composer/composer";
 import { key, sendKey } from "../ui/composer/harness";
 
@@ -44,6 +49,43 @@ function fakeItem(
 		...extra,
 	};
 }
+
+it("warms indexed sessions without hiding the unindexed sessions on the first query", async () => {
+	const temp = TempDir.createSync("@pi-session-mentions-");
+	const cwd = temp.path();
+	const indexed = "01900000-0000-7000-8000-000000000001";
+	const unindexed = "01900000-0000-7000-8000-000000000002";
+	const sessionDir = spyOn(sessionPaths, "sessionDirForCwd").mockReturnValue(cwd);
+	const titles = spyOn(sessionIndex, "listSessionTitles").mockReturnValue(new Map([[indexed, "Indexed session"]]));
+	const recordTitles = spyOn(sessionIndex, "recordSessionTitles").mockImplementation(() => {});
+	try {
+		for (const [id, title] of [
+			[indexed, "Indexed session"],
+			[unindexed, "Unindexed session"],
+		]) {
+			const timestamp = "2026-06-27T00:00:00.000Z";
+			await Bun.write(
+				path.join(cwd, `2026-06-27T00-00-00-000Z_${id}.jsonl`),
+				`${JSON.stringify({ type: "session", id, cwd, title, timestamp })}\n`,
+			);
+		}
+		const query = parseMentionQuery("@ses:");
+		if (!query) throw new Error("Expected a session mention query");
+		const source = new SessionsMentionSource({ getCwd: () => cwd });
+		await source.warm();
+		expect(source.querySync(query).items.map(item => item.insertText)).toEqual([`session://${indexed}`]);
+		const refined = await source.queryAsync(query, new AbortController().signal, () => {});
+		expect(refined?.items.map(item => item.insertText).sort()).toEqual([
+			`session://${indexed}`,
+			`session://${unindexed}`,
+		]);
+	} finally {
+		recordTitles.mockRestore();
+		titles.mockRestore();
+		sessionDir.mockRestore();
+		await temp.remove();
+	}
+});
 
 describe("parseMentionQuery", () => {
 	it("routes @, ^, and #<N> into unified mention queries with proper syntax locks", () => {

@@ -23,7 +23,7 @@ use std::{
 #[cfg(feature = "tokio_rt")]
 use tokio::runtime::Runtime;
 
-use crate::{bindgen_runtime::ToNapiValue, sys, Env, Error, Result};
+use crate::{bindgen_runtime::ToNapiValue, js_values::FinalizeCallback, sys, Env, Error, Result};
 #[cfg(not(feature = "noop"))]
 use crate::{JsDeferred, SendableResolver, Unknown};
 
@@ -39,7 +39,7 @@ const LATE_RUNTIME_REGISTRATION_ERROR: &str = "register_async_runtime must be ca
 ))]
 const MISSING_RUNTIME_BACKEND_ERROR: &str = "no AsyncRuntime backend is registered; call `register_async_runtime` from `#[module_init]` before invoking runtime-backed operations";
 #[cfg(all(feature = "async-runtime", not(feature = "noop")))]
-const TASK_CANCELLED_ERROR: &str = "task was cancelled before completion";
+use crate::js_values::TASK_CANCELLED_ERROR;
 
 #[cfg(all(target_family = "wasm", not(feature = "noop")))]
 const WASM_ENV_DISPOSING_ERROR: &str = "the wasm environment is being disposed: its async runtime was shut down by napi_prepare_wasm_env_cleanup and cannot accept new work";
@@ -288,8 +288,11 @@ pub(crate) fn drain_wasm_cancel_mailbox() {
 /// A parked entry is a callback *and* an [`Error`], and neither is inert. `Error` carries
 /// `maybe_ref: Option<Arc<ErrorRef>>`, whose `Drop` calls `napi_delete_reference` on the owning
 /// thread (`error.rs`) — this thread — against exactly the environment that must not be touched.
-/// The callback owns the task's `JsDeferred`, whose `DeferredHandle` has no `Drop` at all, so
-/// dropping it would not settle or release anything anyway. So each entry is `mem::forget`ed:
+/// The callback owns the task's `JsDeferred`. On native its `Drop` cleans the promise up or
+/// rejects it (see `JsDeferred`); on wasm, the only target of this function, it has no `Drop`, so
+/// dropping it would not settle or release anything anyway. The `mem::forget` stays load-bearing
+/// for the `Error`, and for the `JsDeferred` should wasm ever get a `Drop`. So each entry is
+/// `mem::forget`ed:
 /// the leak is bounded by the cancellations of one abandoned teardown, it happens only on this
 /// path, and it buys the guarantee that unwinding an abandoned cleanup makes no napi call.
 ///
@@ -353,14 +356,23 @@ fn park_cancel_for_js_thread(
 ///
 /// Dropping a task destroys its captured promise/resolver state on the dropping thread —
 /// exactly as the built-in Tokio path does for `Err`-completing futures and for futures dropped
-/// at shutdown, so the hazard is not specific to custom backends.
+/// at shutdown, so the hazard is not specific to custom backends. The built-in Tokio path rejects
+/// the promise of a task dropped at shutdown too, with the same message and code (on native; see
+/// `JsDeferred`).
+///
+/// A cancelled task (dropped, declined, or panicked in `poll`) drops its future before the
+/// cancellation callback runs. The callback rejects the promise, and for a generated `async fn`
+/// the JavaScript thread then releases the `&self`/`&T` alias guards and deletes the roots of
+/// those arguments; the future holds those references, so it must be gone first. A panic from
+/// the future's `Drop` is contained and the callback still runs.
 ///
 /// The first poll commits ownership and may run user code immediately. napi wraps every poll in
 /// `catch_unwind` on unwind-enabled builds, so a panicking future settles its promise as rejected
 /// instead of tearing down the backend's worker; do not add another panic-containment layer.
 #[cfg(all(feature = "async-runtime", not(feature = "noop")))]
 pub struct AsyncRuntimeTask {
-  fut: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
+  /// `None` only after a cancellation, which also took `on_cancel`.
+  fut: Option<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>,
   on_cancel: Option<AsyncRuntimeTaskCancelCallback>,
 }
 
@@ -371,7 +383,7 @@ impl AsyncRuntimeTask {
     on_cancel: AsyncRuntimeTaskCancelCallback,
   ) -> Self {
     Self {
-      fut,
+      fut: Some(fut),
       on_cancel: Some(on_cancel),
     }
   }
@@ -381,8 +393,27 @@ impl AsyncRuntimeTask {
   /// callback is disarmed, so the subsequent drop is a no-op.
   fn reject_with(mut self, error: Error) {
     if let Some(on_cancel) = self.on_cancel.take() {
-      invoke_cancel_callback(on_cancel, error);
+      self.cancel_after_dropping_future(on_cancel, error);
     }
+  }
+
+  /// Drop the future, then invoke `on_cancel` (see the type docs for why in this order).
+  ///
+  /// The future's `Drop` is user code. A panic from it is caught and its payload disposed of
+  /// with [`drop_contained`], like a panic from the callback itself: an unwind here would skip
+  /// the callback and leave the promise pending, and this often runs inside `Drop`, where a
+  /// second unwind aborts.
+  fn cancel_after_dropping_future(
+    &mut self,
+    on_cancel: AsyncRuntimeTaskCancelCallback,
+    error: Error,
+  ) {
+    if let Some(fut) = self.fut.take() {
+      if let Err(payload) = catch_unwind(AssertUnwindSafe(move || drop(fut))) {
+        drop_contained(payload);
+      }
+    }
+    invoke_cancel_callback(on_cancel, error);
   }
 }
 
@@ -398,7 +429,10 @@ impl Future for AsyncRuntimeTask {
       // Already completed, panicked, or rejected — never touch the inner future again.
       return Poll::Ready(());
     }
-    match catch_unwind(AssertUnwindSafe(|| this.fut.as_mut().poll(cx))) {
+    let Some(fut) = this.fut.as_mut() else {
+      return Poll::Ready(());
+    };
+    match catch_unwind(AssertUnwindSafe(|| fut.as_mut().poll(cx))) {
       Ok(Poll::Pending) => Poll::Pending,
       Ok(Poll::Ready(())) => {
         // Completed: disarm the cancellation callback without invoking it.
@@ -409,7 +443,7 @@ impl Future for AsyncRuntimeTask {
         // A panicking future settles its promise as rejected rather than aborting the
         // backend's worker thread. Exactly-once is guaranteed by taking the callback.
         if let Some(on_cancel) = this.on_cancel.take() {
-          invoke_cancel_callback(on_cancel, async_task_panic_error(panic_payload));
+          this.cancel_after_dropping_future(on_cancel, async_task_panic_error(panic_payload));
         }
         Poll::Ready(())
       }
@@ -423,7 +457,7 @@ impl Drop for AsyncRuntimeTask {
     // Dropping an accepted task before completion (backend shutdown, queue teardown, …)
     // cancels it: the callback fires exactly once and rejects the associated promise.
     if let Some(on_cancel) = self.on_cancel.take() {
-      invoke_cancel_callback(
+      self.cancel_after_dropping_future(
         on_cancel,
         Error::new(crate::Status::GenericFailure, TASK_CANCELLED_ERROR),
       );
@@ -1262,9 +1296,10 @@ pub fn try_register_async_runtime<R: AsyncRuntime>(runtime: R) -> Result<()> {
 
 #[cfg(all(feature = "tokio_rt", not(feature = "noop")))]
 fn create_runtime() -> Runtime {
-  // `RT` is process-global and its worker threads are never joined at
-  // environment teardown, so their task wakers keep vtable pointers into this
-  // addon's image after Node may have unloaded it. Pin the image first.
+  // `RT` is process-global and environment teardown joins its worker threads
+  // only for a bounded time (see `shutdown_tokio_runtime`), so a worker that is
+  // still busy outlives the teardown and its task wakers keep vtable pointers
+  // into this addon's image after Node may have unloaded it. Pin the image first.
   #[cfg(not(target_family = "wasm"))]
   crate::bindgen_runtime::retain_current_module_for_unload_safety();
 
@@ -1317,6 +1352,22 @@ static RT: LazyLock<RwLock<Option<Runtime>>> = LazyLock::new(|| {
   RwLock::new(Some(create_runtime()))
 });
 
+/// Create the built-in Tokio runtime if `RT` is empty.
+///
+/// Check with the read lock first, and take the write lock only when `RT` is empty. Otherwise a
+/// module registration in a new `worker_threads` env deadlocks: [`block_on`] holds the read lock
+/// while its future waits for that env, and the write lock waits for [`block_on`].
+#[cfg(all(feature = "tokio_rt", not(feature = "noop")))]
+fn fill_empty_tokio_runtime() {
+  if RT.read().map_or(true, |rt| rt.is_none()) {
+    if let Ok(mut rt) = RT.write() {
+      if rt.is_none() {
+        *rt = Some(create_runtime());
+      }
+    }
+  }
+}
+
 /// Refill the built-in Tokio runtime's slot after a combined-build drain: when a custom
 /// backend owns the runtime lifecycle, `shutdown_async_runtime` takes a lazily-created
 /// runtime out of `RT`, and every Tokio compatibility helper (`spawn`, `block_on`,
@@ -1326,11 +1377,7 @@ static RT: LazyLock<RwLock<Option<Runtime>>> = LazyLock::new(|| {
 #[cfg(all(feature = "async-runtime", feature = "tokio_rt", not(feature = "noop")))]
 fn refill_drained_tokio_runtime() {
   if RT_CONSTRUCTED.load(Ordering::SeqCst) {
-    if let Ok(mut rt) = RT.write() {
-      if rt.is_none() {
-        *rt = Some(create_runtime());
-      }
-    }
+    fill_empty_tokio_runtime();
   }
 }
 
@@ -1413,11 +1460,7 @@ pub fn start_async_runtime() {
     return;
   }
   #[cfg(feature = "tokio_rt")]
-  if let Ok(mut rt) = RT.write() {
-    if rt.is_none() {
-      *rt = Some(create_runtime());
-    }
-  }
+  fill_empty_tokio_runtime();
 }
 
 #[cfg(not(feature = "noop"))]
@@ -1428,17 +1471,32 @@ pub fn start_async_runtime() {
 /// In combined `async-runtime` + `tokio_rt` builds a built-in Tokio runtime that a Tokio
 /// compatibility helper constructed lazily is also drained, on a best-effort basis: a helper's
 /// very first Tokio construction racing this teardown can leave the built-in runtime running,
-/// the same teardown-race window the plain `tokio_rt` path has (whose background shutdown never
-/// waits for Tokio quiescence either). The drained pair is restored together: the next
+/// the same teardown-race window the plain `tokio_rt` path has (whose bounded shutdown does not
+/// guarantee Tokio quiescence either). The drained pair is restored together: the next
 /// [`start_async_runtime`] *or* the next runtime-backed dispatch (which self-heals the idle
 /// custom backend) refills the drained Tokio runtime alongside the backend restart. Tokio
 /// compatibility helpers called after this shutdown but before either of those still panic on
 /// the empty slot, exactly as they do after a `tokio_rt`-only shutdown. Otherwise the built-in
-/// Tokio runtime is shut down in the background.
+/// Tokio runtime is shut down, waiting up to 100 ms for its threads to exit; threads still busy
+/// after that keep running in the background. Called from inside a Tokio runtime context, or on
+/// wasm, it does not wait at all.
 ///
 /// On wasm targets this is a no-op past the environment cleanup barrier, mirroring
 /// [`start_async_runtime`]: from the moment `napi_prepare_wasm_env_cleanup`(`_begin`) latches the
 /// disposal, the loader owns the teardown and its `…_finish` call is the one that joins.
+///
+/// # Warning
+///
+/// You do not need to call this: napi-rs shuts the runtime down when the last environment that
+/// loaded the addon is torn down. Do not call it while a `#[napi] async fn`, `Env::spawn_future`
+/// or `AsyncBlock` promise is still pending. The shutdown drops the tasks that did not complete,
+/// and on native targets each of their promises is rejected with
+/// `Error("task was cancelled before completion")` (`code` `GenericFailure`). JavaScript that
+/// awaits such a promise gets that error. A promise that nothing handles (a call whose result
+/// JavaScript ignored) becomes an unhandled rejection: Node ends the process with exit code 1 on
+/// the main thread, and a worker emits `'error'`. The shutdown at environment teardown delivers
+/// no rejection, because that environment can no longer run JavaScript. On wasm the promises of
+/// dropped tasks stay pending.
 pub fn shutdown_async_runtime() {
   // Past the wasm environment cleanup barrier the loader owns the teardown, so this must not
   // perform the join itself. The two-phase handshake yields real event-loop turns between
@@ -1463,8 +1521,51 @@ pub fn shutdown_async_runtime() {
   }
   #[cfg(feature = "tokio_rt")]
   if let Some(rt) = RT.write().ok().and_then(|mut rt| rt.take()) {
-    rt.shutdown_background();
+    shutdown_tokio_runtime(rt);
   }
+}
+
+/// How long [`shutdown_tokio_runtime`] waits for the built-in Tokio runtime's threads to exit
+/// before it detaches the ones still running.
+///
+/// Woken idle threads exit right away, so this only has to absorb scheduler latency on a loaded
+/// host; it is the worst-case delay a busy `spawn_blocking` closure adds to environment teardown.
+/// 100 ms is the value Tokio's own `shutdown_timeout` documentation uses.
+#[cfg(all(
+  feature = "tokio_rt",
+  not(feature = "noop"),
+  not(target_family = "wasm")
+))]
+const TOKIO_SHUTDOWN_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Shut a built-in Tokio runtime down, joining its threads for a bounded time.
+///
+/// `Runtime::shutdown_background` is `shutdown_timeout(0)`: Tokio's blocking pool then drops every
+/// thread's `JoinHandle` without joining it, and each drop calls `pthread_detach` on a thread
+/// that was just woken to exit. glibc before 2.43 races `pthread_detach` against the exit of its
+/// target (Sourceware BZ #19951): the exiting thread can free and unmap its own descriptor
+/// after `pthread_detach` has claimed it but before it reads it again, and that read segfaults.
+/// That crashed processes at exit from the env cleanup hook (#3591).
+///
+/// Waiting lets the pool *join* every thread when they all exit within
+/// [`TOKIO_SHUTDOWN_JOIN_TIMEOUT`], so none of them is detached. Past the timeout the pool still
+/// detaches the rest, which is only racy for a thread exiting at that very moment, not for one
+/// that already exited or is still busy. The wait is bounded because the thread running this is
+/// the JavaScript thread at environment teardown, which a blocking closure may be waiting on (a
+/// threadsafe-function call that is never going to be answered).
+///
+/// Tokio panics when a runtime is shut down with a non-zero timeout from inside a runtime context
+/// (a `block_on` future or a Tokio worker, e.g. an explicit [`shutdown_async_runtime`] made from
+/// async code), so that case keeps the non-blocking `shutdown_background`. So does wasm, where
+/// the JavaScript thread must not block (see `napi_prepare_wasm_env_cleanup`).
+#[cfg(all(feature = "tokio_rt", not(feature = "noop")))]
+fn shutdown_tokio_runtime(rt: Runtime) {
+  #[cfg(not(target_family = "wasm"))]
+  if tokio::runtime::Handle::try_current().is_err() {
+    rt.shutdown_timeout(TOKIO_SHUTDOWN_JOIN_TIMEOUT);
+    return;
+  }
+  rt.shutdown_background();
 }
 
 /// Drain a built-in Tokio runtime that lives *beside* a custom backend, after that backend's
@@ -1488,7 +1589,7 @@ fn drain_tokio_peer_after_backend_shutdown() {
     .then(|| RT.write().ok().and_then(|mut rt| rt.take()))
     .flatten()
   {
-    rt.shutdown_background();
+    shutdown_tokio_runtime(rt);
   }
   // Also drain a user-supplied runtime that `create_custom_tokio_runtime` parked in
   // `USER_DEFINED_RT` but no Tokio helper ever forced into `RT` (so `RT_CONSTRUCTED` is
@@ -1502,7 +1603,7 @@ fn drain_tokio_peer_after_backend_shutdown() {
     .get()
     .and_then(|rt| rt.write().ok().and_then(|mut rt| rt.take()))
   {
-    user_rt.shutdown_background();
+    shutdown_tokio_runtime(user_rt);
   }
 }
 
@@ -1754,20 +1855,349 @@ pub fn execute_tokio_future<
   fut: Fut,
   resolver: Resolver,
 ) -> Result<sys::napi_value> {
-  execute_future_impl(env, fut, resolver, None)
+  execute_future_impl(env, fut, resolver, None).map(|(promise, _)| promise)
+}
+
+/// A future and the `JsDeferred` it settles, in the order they must drop. Struct fields drop in
+/// declaration order; the captures of a closure or an async block have no specified order.
+#[cfg(not(feature = "noop"))]
+struct FutThenDeferred<F, D> {
+  fut: F,
+  deferred: D,
+}
+
+/// Awaits `fut`, then hands its output and `deferred` to `settle`.
+///
+/// A task dropped before it finished (runtime shutdown, a backend dropping it) must drop `fut`
+/// before `deferred`. This wrapper gives that order to the built-in tokio path; a custom
+/// `AsyncRuntime` backend that cancels a task gets it from `AsyncRuntimeTask`, which drops this
+/// future before its cancellation callback rejects the promise through the last `JsDeferred`
+/// clone (the rejection runs the settle-time callback on the JavaScript thread, which releases
+/// the same guards and roots). On the built-in path the last `JsDeferred` clone drops the
+/// settle-time callback unrun, also when its drop rejects the promise (see `JsDeferred`),
+/// and for a generated `async fn` that drops its `NativeBorrowScopeRelease`: the alias guards are
+/// released and the roots of the `&T` arguments go to the custom-GC handle, which deletes them on
+/// the JavaScript thread. Those roots are the only roots of the arguments, so this must not happen
+/// while `fut` still holds the references (the value could be collected under it). Dropped before
+/// its first poll, the returned future drops `parts` (so `fut`, then `deferred`); dropped while
+/// suspended, it drops the awaited `fut` (a temporary of the last expression) before the local
+/// `deferred`. The unit test `fut_then_settle_drop_order` checks both.
+#[cfg(not(feature = "noop"))]
+fn fut_then_settle<F: Future, D, S: FnOnce(F::Output, D)>(
+  fut: F,
+  deferred: D,
+  settle: S,
+) -> impl Future<Output = ()> {
+  let parts = FutThenDeferred { fut, deferred };
+  async move {
+    // Moved as a whole, so the unpolled future holds `parts` and not its fields one by one.
+    let parts = { parts };
+    let deferred = parts.deferred;
+    let fut = parts.fut;
+    settle(fut.await, deferred)
+  }
+}
+
+#[cfg(all(test, not(feature = "noop")))]
+mod fut_then_settle_tests {
+  use std::{
+    pin::pin,
+    sync::{Arc, Mutex},
+    task::{Context, Poll, Waker},
+  };
+
+  use super::*;
+
+  struct Record(&'static str, Arc<Mutex<Vec<&'static str>>>);
+
+  impl Drop for Record {
+    fn drop(&mut self) {
+      self.1.lock().unwrap().push(self.0);
+    }
+  }
+
+  /// Pending for ever, and records its drop.
+  struct PendingFut {
+    _record: Record,
+  }
+
+  impl Future for PendingFut {
+    type Output = ();
+    fn poll(self: std::pin::Pin<&mut Self>, _: &mut Context<'_>) -> Poll<()> {
+      Poll::Pending
+    }
+  }
+
+  fn task(log: &Arc<Mutex<Vec<&'static str>>>) -> impl Future<Output = ()> {
+    fut_then_settle(
+      PendingFut {
+        _record: Record("fut", log.clone()),
+      },
+      Record("deferred", log.clone()),
+      |(), _deferred| unreachable!("the future never completes"),
+    )
+  }
+
+  #[test]
+  fn fut_then_settle_drop_order() {
+    // Dropped before its first poll.
+    let log = Arc::new(Mutex::new(Vec::new()));
+    drop(task(&log));
+    assert_eq!(*log.lock().unwrap(), ["fut", "deferred"]);
+
+    // Dropped while suspended on `fut`.
+    let log = Arc::new(Mutex::new(Vec::new()));
+    {
+      let mut fut = Box::pin(task(&log));
+      let mut cx = Context::from_waker(Waker::noop());
+      assert!(fut.as_mut().poll(&mut cx).is_pending());
+      assert!(log.lock().unwrap().is_empty());
+      drop(fut);
+    }
+    assert_eq!(*log.lock().unwrap(), ["fut", "deferred"]);
+
+    // Completed: `settle` gets the output and the deferred.
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let done = fut_then_settle(
+      std::future::ready(()),
+      Record("deferred", log.clone()),
+      |(), deferred| {
+        log.lock().unwrap().push("settle");
+        drop(deferred);
+      },
+    );
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(pin!(done).poll(&mut cx).is_ready());
+    assert_eq!(*log.lock().unwrap(), ["settle", "deferred"]);
+  }
+}
+
+/// The second half of a settle: runs on the JavaScript thread and converts the output a future
+/// produced into the value its promise resolves with.
+#[cfg(not(feature = "noop"))]
+type ErasedSettle = Box<dyn FnOnce(sys::napi_env) -> Result<sys::napi_value> + Send>;
+
+/// The resolver of a future that resolved to an error, uncalled. It travels next to the error so
+/// that the bridge drops it after it queued the rejection, as it did before the erasure: a
+/// resolver whose drop panics does not replace the error the promise rejects with. `None` when the
+/// resolver needs no drop glue, avoiding both a heap allocation and a `dyn Send` vtable.
+#[cfg(not(feature = "noop"))]
+type UnusedResolver = Option<Box<dyn Send>>;
+
+/// What an [`ErasedFuture`] resolves to.
+#[cfg(not(feature = "noop"))]
+type ErasedOutput = std::result::Result<ErasedSettle, (Error, UnusedResolver)>;
+
+/// A future with its own type, its output type and its resolver erased.
+#[cfg(not(feature = "noop"))]
+type ErasedFuture = std::pin::Pin<Box<dyn Future<Output = ErasedOutput> + Send>>;
+
+/// Awaits `fut` and boxes the call of `resolver` on its output. This is the only part of the
+/// future → Promise bridge that is instantiated per future type.
+///
+/// [`execute_erased_future`] takes the result and is compiled once. That matters for compile
+/// times: the built-in Tokio path spawns two tasks per call, and Tokio instantiates its task
+/// machinery (cell, vtable, harness, one set per scheduler flavor) for every future type it is
+/// given. Spawning the caller's future type directly makes an addon pay that for each of its
+/// `async fn` exports.
+///
+/// The cost is at most two allocations per call: the boxed future, and the boxed settle closure
+/// or, on the error path when the resolver needs drop glue, the boxed resolver.
+///
+/// The erased future owns `fut` for its whole life, and `resolver` until it completes. It is the
+/// `fut` of [`fut_then_settle`], so `fut` drops before the task's `JsDeferred` however the task
+/// ends, and so does `resolver` when the task is dropped before it completes.
+///
+/// A future that completes hands `resolver` over in its output, and from there its life is not
+/// tied to that `JsDeferred`:
+/// - on success it is inside the [`ErasedSettle`], which the `JsDeferred` queues for the
+///   JavaScript thread as its resolve callback. It can outlive the `JsDeferred`.
+/// - on error it comes back uncalled as the [`UnusedResolver`] (when it needs drop glue), and the
+///   bridge drops it once the rejection is queued.
+///
+/// `resolver` is not `Send`. It is called on the JavaScript thread only, and dropped uncalled on
+/// the thread that drops the future or completes it with an error, as it was before the erasure.
+#[cfg(not(feature = "noop"))]
+fn erase_future<
+  Data: 'static + Send,
+  Fut: 'static + Send + Future<Output = std::result::Result<Data, impl Into<Error>>>,
+  Resolver: 'static + FnOnce(sys::napi_env, Data) -> Result<sys::napi_value>,
+>(
+  fut: Fut,
+  resolver: Resolver,
+) -> ErasedFuture {
+  let sendable_resolver = SendableResolver::new(resolver);
+  Box::pin(async move {
+    match fut.await {
+      Ok(v) => Ok(Box::new(move |env| sendable_resolver.resolve(env, v)) as ErasedSettle),
+      Err(e) => {
+        let unused_resolver = if std::mem::needs_drop::<SendableResolver<Data, Resolver>>() {
+          Some(Box::new(sendable_resolver) as Box<dyn Send>)
+        } else {
+          None
+        };
+        Err((e.into(), unused_resolver))
+      }
+    }
+  })
+}
+
+#[cfg(all(test, not(feature = "noop")))]
+mod erase_future_tests {
+  use std::{
+    rc::Rc,
+    sync::{Arc, Mutex},
+    task::{Context, Poll, Waker},
+  };
+
+  use super::*;
+
+  type Log = Arc<Mutex<Vec<&'static str>>>;
+
+  struct Record(&'static str, Log);
+
+  impl Drop for Record {
+    fn drop(&mut self) {
+      self.1.lock().unwrap().push(self.0);
+    }
+  }
+
+  /// Pending for ever, and records its drop.
+  struct PendingFut {
+    _record: Record,
+  }
+
+  impl Future for PendingFut {
+    type Output = Result<u32>;
+    fn poll(self: std::pin::Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
+      Poll::Pending
+    }
+  }
+
+  /// A `!Send` resolver that records its call and its drop.
+  fn resolver(log: &Log) -> impl FnOnce(sys::napi_env, u32) -> Result<sys::napi_value> + 'static {
+    let (log, record, not_send) = (
+      log.clone(),
+      Record("resolver dropped", log.clone()),
+      Rc::new(()),
+    );
+    move |_env, v| {
+      let _not_send = not_send;
+      let _record = record;
+      assert_eq!(v, 7);
+      log.lock().unwrap().push("resolver called");
+      Ok(std::ptr::null_mut())
+    }
+  }
+
+  fn poll(fut: &mut ErasedFuture) -> Poll<ErasedOutput> {
+    fut.as_mut().poll(&mut Context::from_waker(Waker::noop()))
+  }
+
+  #[test]
+  fn resolver_runs_only_when_the_settle_is_called() {
+    let log = Log::default();
+    let mut fut = erase_future(async { Ok::<_, Error>(7) }, resolver(&log));
+    let Poll::Ready(Ok(settle)) = poll(&mut fut) else {
+      panic!("the future resolves on its first poll");
+    };
+    drop(fut);
+    assert!(log.lock().unwrap().is_empty());
+    assert!(settle(std::ptr::null_mut()).unwrap().is_null());
+    assert_eq!(
+      *log.lock().unwrap(),
+      ["resolver called", "resolver dropped"]
+    );
+  }
+
+  #[test]
+  fn uncalled_settle_drops_the_resolver() {
+    let log = Log::default();
+    let mut fut = erase_future(async { Ok::<_, Error>(7) }, resolver(&log));
+    let Poll::Ready(Ok(settle)) = poll(&mut fut) else {
+      panic!("the future resolves on its first poll");
+    };
+    drop(settle);
+    assert_eq!(*log.lock().unwrap(), ["resolver dropped"]);
+  }
+
+  #[test]
+  fn error_is_converted_and_carries_the_resolver_uncalled() {
+    struct Boom;
+    impl From<Boom> for Error {
+      fn from(_: Boom) -> Self {
+        Error::new(crate::Status::InvalidArg, "boom")
+      }
+    }
+
+    let log = Log::default();
+    let mut fut = erase_future(async { Err::<u32, _>(Boom) }, resolver(&log));
+    let Poll::Ready(Err((error, unused_resolver))) = poll(&mut fut) else {
+      panic!("the future fails on its first poll");
+    };
+    drop(fut);
+    assert_eq!(error.status, crate::Status::InvalidArg);
+    assert_eq!(error.reason, "boom");
+    assert!(unused_resolver.is_some());
+    // Still alive: the bridge queues the rejection before it drops the resolver.
+    assert!(log.lock().unwrap().is_empty());
+    drop(unused_resolver);
+    assert_eq!(*log.lock().unwrap(), ["resolver dropped"]);
+
+    // A resolver that needs no drop glue skips boxing on the error path.
+    let dispose: Option<fn(Env) -> Result<()>> = None;
+    let mut fut = erase_future(async { Err::<u32, _>(Boom) }, move |_env, _v| {
+      let _ = dispose;
+      Ok(std::ptr::null_mut())
+    });
+    let Poll::Ready(Err((error, unused_resolver))) = poll(&mut fut) else {
+      panic!("the future fails on its first poll");
+    };
+    assert_eq!(error.status, crate::Status::InvalidArg);
+    assert_eq!(error.reason, "boom");
+    assert!(unused_resolver.is_none());
+  }
+
+  #[test]
+  fn dropped_future_drops_the_resolver_uncalled() {
+    // Dropped before its first poll.
+    let log = Log::default();
+    let pending = PendingFut {
+      _record: Record("fut dropped", log.clone()),
+    };
+    drop(erase_future(pending, resolver(&log)));
+    {
+      let entries = log.lock().unwrap();
+      assert_eq!(entries.len(), 2);
+      assert!(entries.contains(&"fut dropped"));
+      assert!(entries.contains(&"resolver dropped"));
+      assert!(!entries.contains(&"resolver called"));
+    }
+
+    // Dropped while suspended on `fut`.
+    let log = Log::default();
+    let pending = PendingFut {
+      _record: Record("fut dropped", log.clone()),
+    };
+    let mut fut = erase_future(pending, resolver(&log));
+    assert!(poll(&mut fut).is_pending());
+    assert!(log.lock().unwrap().is_empty());
+    drop(fut);
+    {
+      let entries = log.lock().unwrap();
+      assert_eq!(entries.len(), 2);
+      assert!(entries.contains(&"fut dropped"));
+      assert!(entries.contains(&"resolver dropped"));
+      assert!(!entries.contains(&"resolver called"));
+    }
+  }
 }
 
 /// Shared future → Promise bridge behind [`execute_tokio_future`] and
-/// [`execute_tokio_future_with_finalize_callback`].
-///
-/// Routing:
-/// 1. a deferred duplicate/late registration error rejects the promise (loud misconfiguration),
-/// 2. a registered custom [`AsyncRuntime`] backend receives the work as an [`AsyncRuntimeTask`],
-/// 3. otherwise the built-in Tokio runtime is used (combined and `tokio_rt`-only builds); in a
-///    pure `async-runtime` build the promise rejects with a missing-backend error instead.
+/// [`execute_tokio_future_with_finalize_callback`]: erases the future (see [`erase_future`]) and
+/// hands it to [`execute_erased_future`].
 #[cfg(not(feature = "noop"))]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-fn execute_future_impl<
+pub(crate) fn execute_future_impl<
   Data: 'static + Send,
   Fut: 'static + Send + Future<Output = std::result::Result<Data, impl Into<Error>>>,
   Resolver: 'static + FnOnce(sys::napi_env, Data) -> Result<sys::napi_value>,
@@ -1776,11 +2206,35 @@ fn execute_future_impl<
   fut: Fut,
   resolver: Resolver,
   finalize_callback: Option<Box<dyn FnOnce(sys::napi_env)>>,
-) -> Result<sys::napi_value> {
+) -> Result<(sys::napi_value, FinalizeCallback)> {
+  execute_erased_future(env, erase_future(fut, resolver), finalize_callback)
+}
+
+/// The non-generic body of [`execute_future_impl`].
+///
+/// Routing:
+/// 1. a deferred duplicate/late registration error rejects the promise (loud misconfiguration),
+/// 2. a registered custom [`AsyncRuntime`] backend receives the work as an [`AsyncRuntimeTask`],
+/// 3. otherwise the built-in Tokio runtime is used (combined and `tokio_rt`-only builds); in a
+///    pure `async-runtime` build the promise rejects with a missing-backend error instead.
+#[cfg(not(feature = "noop"))]
+fn execute_erased_future(
+  env: sys::napi_env,
+  fut: ErasedFuture,
+  finalize_callback: Option<Box<dyn FnOnce(sys::napi_env)>>,
+) -> Result<(sys::napi_value, FinalizeCallback)> {
   let env = Env::from_raw(env);
-  let (mut deferred, promise) = JsDeferred::new(&env)?;
+  // A task's deferred: dropped unsettled once its promise was handed to JavaScript, the promise
+  // is rejected (see `JsDeferred`).
+  let (mut deferred, promise) = JsDeferred::new_task(&env)?;
+  // Generated `async fn` callbacks already pass a finalize callback that releases their
+  // borrow scope. A synchronous callback returning an `AsyncBlock` defers its borrow scope
+  // around the return-value conversion instead: `AsyncBlock::to_napi_value` claims it and
+  // writes the release into the returned slot, so unrelated futures spawned inside the
+  // callback body can never claim a scope that is not theirs.
   deferred.set_finalize_callback(finalize_callback);
   let promise_value = promise.0.value;
+  let finalize_slot = deferred.finalize_callback_handle();
 
   // Past the wasm environment cleanup barrier the runtime is gone for good: the custom backend
   // has been shut down and, on the built-in Tokio path, `RT` has been drained (where `spawn`
@@ -1796,13 +2250,13 @@ fn execute_future_impl<
       crate::Status::Cancelled,
       WASM_ENV_DISPOSING_ERROR,
     ));
-    return Ok(promise_value);
+    return Ok((promise_value, finalize_slot.clone()));
   }
 
   #[cfg(feature = "async-runtime")]
   if let Some(reason) = ASYNC_RUNTIME_REGISTRY.deferred_registration_error() {
     deferred.reject(Error::new(crate::Status::GenericFailure, reason));
-    return Ok(promise_value);
+    return Ok((promise_value, finalize_slot.clone()));
   }
 
   #[cfg(all(feature = "async-runtime", not(feature = "tokio_rt")))]
@@ -1813,7 +2267,7 @@ fn execute_future_impl<
       crate::Status::GenericFailure,
       MISSING_RUNTIME_BACKEND_ERROR,
     ));
-    return Ok(promise_value);
+    return Ok((promise_value, finalize_slot.clone()));
   }
 
   #[cfg(feature = "async-runtime")]
@@ -1828,18 +2282,18 @@ fn execute_future_impl<
   let deferred_for_panic = deferred.clone();
   #[cfg(all(feature = "tokio_rt", target_family = "wasm", not(tokio_unstable)))]
   let deferred_for_threadless = deferred.clone();
-  let sendable_resolver = SendableResolver::new(resolver);
 
-  let inner = async move {
-    match fut.await {
-      Ok(v) => deferred.resolve(move |env| {
-        sendable_resolver
-          .resolve(env.raw(), v)
-          .map(|v| unsafe { Unknown::from_raw_unchecked(env.raw(), v) })
-      }),
-      Err(e) => deferred.reject(e.into()),
+  // `fut` drops before `deferred` however the task ends (see `fut_then_settle`).
+  let inner = fut_then_settle(fut, deferred, move |output, deferred| match output {
+    Ok(settle) => deferred.resolve(move |env| {
+      settle(env.raw()).map(|v| unsafe { Unknown::from_raw_unchecked(env.raw(), v) })
+    }),
+    Err((e, unused_resolver)) => {
+      deferred.reject(e);
+      // After the rejection is queued, so that a panic in its drop does not replace the error.
+      drop(unused_resolver);
     }
-  };
+  });
 
   #[cfg(feature = "async-runtime")]
   if let Some(backend) = ASYNC_RUNTIME_REGISTRY.commit_selection(cfg!(feature = "tokio_rt")) {
@@ -1864,7 +2318,7 @@ fn execute_future_impl<
       // of without letting a panicking payload `Drop` unwind into the extern "C" trampoline.
       Err(payload) => drop_contained(payload),
     }
-    return Ok(promise_value);
+    return Ok((promise_value, finalize_slot.clone()));
   }
 
   #[cfg(feature = "tokio_rt")]
@@ -1873,26 +2327,45 @@ fn execute_future_impl<
       all(target_family = "wasm", tokio_unstable),
       not(target_family = "wasm")
     ))]
-    let jh = spawn(inner);
-
-    #[cfg(any(
-      all(target_family = "wasm", tokio_unstable),
-      not(target_family = "wasm")
-    ))]
-    spawn(async move {
-      if let Err(err) = jh.await {
-        if let Ok(reason) = err.try_into_panic() {
-          if let Some(s) = reason.downcast_ref::<&str>() {
-            deferred_for_panic.reject(Error::new(crate::Status::GenericFailure, s));
-          } else {
-            deferred_for_panic.reject(Error::new(
-              crate::Status::GenericFailure,
-              "Panic in async function",
-            ));
+    {
+      // The same refusal as `spawn`, before `RT` is touched (see there).
+      #[cfg(target_family = "wasm")]
+      if wasm_env_disposing() {
+        refuse_tokio_helper_during_wasm_env_disposal("spawn");
+      }
+      // Both spawns under ONE read guard: `shutdown_async_runtime` takes the runtime under the
+      // write lock, so once `inner` is accepted the watcher spawn cannot fail. With two guards a
+      // shutdown on another thread could slip between them: the watcher spawn panicked,
+      // JavaScript got an exception instead of the promise, and `inner`, dropped later on a
+      // worker, rejected the promise no one held (an unhandled rejection).
+      let guard = RT.read().ok();
+      let rt = guard
+        .as_ref()
+        .and_then(|rt| rt.as_ref())
+        .expect("Access tokio runtime failed in spawn");
+      let jh = rt.spawn(inner);
+      // Accepted: the promise is returned to JavaScript below, so a drop of the task now rejects
+      // it, even one on this thread (a `current_thread` runtime shut down on the JavaScript
+      // thread drops its tasks there). Not before: when the spawn panics (no runtime), the
+      // deferred is dropped on this thread unmarked, and cleaned up without a rejection no one
+      // could handle.
+      deferred_for_panic.mark_returned();
+      rt.spawn(async move {
+        if let Err(err) = jh.await {
+          if let Ok(reason) = err.try_into_panic() {
+            if let Some(s) = reason.downcast_ref::<&str>() {
+              deferred_for_panic.reject(Error::new(crate::Status::GenericFailure, s));
+            } else {
+              deferred_for_panic.reject(Error::new(
+                crate::Status::GenericFailure,
+                "Panic in async function",
+              ));
+            }
           }
         }
-      }
-    });
+      });
+      drop(guard);
+    }
 
     #[cfg(all(target_family = "wasm", not(tokio_unstable)))]
     {
@@ -1912,7 +2385,7 @@ fn execute_future_impl<
       ));
     }
 
-    Ok(promise_value)
+    Ok((promise_value, finalize_slot))
   }
 
   // Pure `async-runtime` build: unreachable in practice — the missing-backend check above
@@ -1920,8 +2393,23 @@ fn execute_future_impl<
   #[cfg(all(feature = "async-runtime", not(feature = "tokio_rt")))]
   {
     drop(inner);
-    Ok(promise_value)
+    Ok((promise_value, finalize_slot))
   }
+}
+
+#[cfg(feature = "noop")]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub(crate) fn execute_future_impl<
+  Data: 'static + Send,
+  Fut: 'static + Send + Future<Output = std::result::Result<Data, impl Into<Error>>>,
+  Resolver: 'static + FnOnce(sys::napi_env, Data) -> Result<sys::napi_value>,
+>(
+  _env: sys::napi_env,
+  _fut: Fut,
+  _resolver: Resolver,
+  _finalize_callback: Option<Box<dyn FnOnce(sys::napi_env)>>,
+) -> Result<(sys::napi_value, FinalizeCallback)> {
+  Ok((std::ptr::null_mut(), FinalizeCallback::default()))
 }
 
 #[doc(hidden)]
@@ -1937,7 +2425,7 @@ pub fn execute_tokio_future_with_finalize_callback<
   resolver: Resolver,
   finalize_callback: Option<Box<dyn FnOnce(sys::napi_env)>>,
 ) -> Result<sys::napi_value> {
-  execute_future_impl(env, fut, resolver, finalize_callback)
+  execute_future_impl(env, fut, resolver, finalize_callback).map(|(promise, _)| promise)
 }
 
 #[cfg(feature = "noop")]
@@ -1994,15 +2482,27 @@ impl<
     self
   }
 
+  /// Spawns the future. On native targets the promise of the returned [`AsyncBlock`] is rejected
+  /// with `Error("task was cancelled before completion")` (`code` `GenericFailure`) when the task
+  /// is dropped before it completed, for example by a runtime shutdown. Return the `AsyncBlock`
+  /// to JavaScript: one dropped in Rust leaves a promise with no handler, so that rejection is
+  /// an unhandled rejection.
   pub fn build(self, env: &Env) -> Result<AsyncBlock<V>> {
-    Ok(AsyncBlock {
-      inner: execute_tokio_future(env.0, self.inner, |env, v| unsafe {
+    let (promise, finalize_callback) = execute_future_impl(
+      env.0,
+      self.inner,
+      |env, v| unsafe {
         if let Some(dispose) = self.dispose {
           let env = Env::from_raw(env);
           dispose(env)?;
         }
         V::to_napi_value(env, v)
-      })?,
+      },
+      None,
+    )?;
+    Ok(AsyncBlock {
+      inner: promise,
+      finalize_callback,
       _phantom: PhantomData,
     })
   }
@@ -2015,11 +2515,18 @@ impl<V: Send + 'static, F: Future<Output = Result<V>> + Send + 'static> AsyncBlo
     inner: F,
     map: Map,
   ) -> Result<AsyncBlock<T>> {
-    Ok(AsyncBlock {
-      inner: execute_tokio_future(env.0, inner, |env, v| unsafe {
+    let (promise, finalize_callback) = execute_future_impl(
+      env.0,
+      inner,
+      |env, v| unsafe {
         let v = map(Env::from_raw(env), v)?;
         T::to_napi_value(env, v)
-      })?,
+      },
+      None,
+    )?;
+    Ok(AsyncBlock {
+      inner: promise,
+      finalize_callback,
       _phantom: PhantomData,
     })
   }
@@ -2027,11 +2534,26 @@ impl<V: Send + 'static, F: Future<Output = Result<V>> + Send + 'static> AsyncBlo
 
 pub struct AsyncBlock<T: ToNapiValue + 'static> {
   inner: sys::napi_value,
+  /// Settle-time callback slot shared with this block's `JsDeferred`. The borrow scope
+  /// generated glue deferred for `&T`/`&self` arguments is leased here — while the
+  /// returned value is converted — so futures spawned earlier in the callback body can
+  /// never claim it. The deferred settles after conversion, on the owner thread, and
+  /// releases the lease there; the scope's guards and roots go out with the last lease.
+  finalize_callback: FinalizeCallback,
   _phantom: PhantomData<T>,
 }
 
 impl<T: ToNapiValue + 'static> ToNapiValue for AsyncBlock<T> {
   unsafe fn to_napi_value(_: napi_sys::napi_env, val: Self) -> Result<napi_sys::napi_value> {
+    if let Some(lease) = crate::bindgen_runtime::claim_deferred_native_borrow_lease()? {
+      // The bare lease (not a `release`d scope) travels in the settle slot: if the
+      // deferred never settles — env teardown aborts the threadsafe function, or the
+      // queued settle drains with a null env — the closure is dropped uninvoked,
+      // possibly on a foreign thread, and the lease's `Drop` delegates the roots
+      // through the env's custom-GC threadsafe function rather than calling napi.
+      *val.finalize_callback.write().expect("RwLock Poison") =
+        Some(Box::new(move |env| lease.release(env)));
+    }
     Ok(val.inner)
   }
 }
@@ -2525,6 +3047,173 @@ mod spi_tests {
     );
   }
 
+  /// Pushes its label into the shared log when dropped.
+  struct OrderRecord(&'static str, Arc<Mutex<Vec<&'static str>>>);
+
+  impl Drop for OrderRecord {
+    fn drop(&mut self) {
+      self.1.lock().unwrap().push(self.0);
+    }
+  }
+
+  /// A cancellation callback that only pushes "callback fired" into the log.
+  fn ordering_cancel_callback(
+    log: &Arc<Mutex<Vec<&'static str>>>,
+  ) -> AsyncRuntimeTaskCancelCallback {
+    let log = log.clone();
+    Box::new(move |_error: Error| log.lock().unwrap().push("callback fired"))
+  }
+
+  /// The cancellation callback rejects the promise; for a generated `async fn` the JS thread then
+  /// runs the settle-time callback, which releases the `&self`/`&T` alias guards and deletes the
+  /// roots of those arguments. So the future (which still holds those references) must be gone
+  /// before the callback fires. Path: an accepted task, polled once (suspended), then dropped by
+  /// the backend.
+  #[test]
+  fn cancel_order_drop_of_suspended_task_drops_future_before_callback() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let record = OrderRecord("future dropped", log.clone());
+    let mut task = AsyncRuntimeTask::new(
+      Box::pin(async move {
+        let _local_guard = record;
+        std::future::pending::<()>().await;
+      }),
+      ordering_cancel_callback(&log),
+    );
+    let mut cx = Context::from_waker(std::task::Waker::noop());
+    assert!(Pin::new(&mut task).poll(&mut cx).is_pending());
+    assert!(log.lock().unwrap().is_empty());
+    drop(task);
+    assert_eq!(*log.lock().unwrap(), ["future dropped", "callback fired"]);
+  }
+
+  /// Same question for `reject_with` (the backend declined the task and handed it back unpolled).
+  #[test]
+  fn cancel_order_reject_with_drops_future_before_callback() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let record = OrderRecord("future dropped", log.clone());
+    let task = AsyncRuntimeTask::new(
+      Box::pin(async move {
+        let _local_guard = record;
+        std::future::pending::<()>().await;
+      }),
+      ordering_cancel_callback(&log),
+    );
+    task.reject_with(Error::new(crate::Status::GenericFailure, "declined"));
+    assert_eq!(*log.lock().unwrap(), ["future dropped", "callback fired"]);
+  }
+
+  /// Same question for a future that panics inside `poll` while it holds a local guard.
+  #[test]
+  fn cancel_order_panic_in_poll_drops_future_before_callback() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let record = OrderRecord("future dropped", log.clone());
+    let mut task = AsyncRuntimeTask::new(
+      Box::pin(async move {
+        let _local_guard = record;
+        panic!("boom while holding a guard");
+      }),
+      ordering_cancel_callback(&log),
+    );
+    let mut cx = Context::from_waker(std::task::Waker::noop());
+    assert!(Pin::new(&mut task).poll(&mut cx).is_ready());
+    let after_poll = log.lock().unwrap().clone();
+    drop(task);
+    assert_eq!(after_poll, ["future dropped", "callback fired"]);
+    assert_eq!(*log.lock().unwrap(), ["future dropped", "callback fired"]);
+  }
+
+  /// Panics in `poll` and keeps its fields: the unwind of a hand-written future does not drop
+  /// them, unlike the locals of an async block.
+  struct PanickingPoll {
+    _record: OrderRecord,
+  }
+
+  impl Future for PanickingPoll {
+    type Output = ();
+    fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<()> {
+      panic!("boom in a hand-written poll");
+    }
+  }
+
+  /// The panic branch drops the future itself before it fires the callback, whatever future
+  /// was boxed.
+  #[test]
+  fn cancel_order_panic_in_hand_written_poll_drops_future_before_callback() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut task = AsyncRuntimeTask::new(
+      Box::pin(PanickingPoll {
+        _record: OrderRecord("future dropped", log.clone()),
+      }),
+      ordering_cancel_callback(&log),
+    );
+    let mut cx = Context::from_waker(std::task::Waker::noop());
+    assert!(Pin::new(&mut task).poll(&mut cx).is_ready());
+    assert_eq!(*log.lock().unwrap(), ["future dropped", "callback fired"]);
+    drop(task);
+    assert_eq!(*log.lock().unwrap(), ["future dropped", "callback fired"]);
+  }
+
+  /// Pending for ever; its `Drop` logs and then panics.
+  struct PanickingDrop(Arc<Mutex<Vec<&'static str>>>);
+
+  impl Future for PanickingDrop {
+    type Output = ();
+    fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<()> {
+      Poll::Pending
+    }
+  }
+
+  impl Drop for PanickingDrop {
+    fn drop(&mut self) {
+      self.0.lock().unwrap().push("future dropped");
+      panic!("boom in the future's Drop");
+    }
+  }
+
+  /// A panic from the future's `Drop` neither escapes the cancellation nor skips the callback,
+  /// on every cancel path, and also when the task drops during an unrelated unwind (where an
+  /// escaping second panic would abort the test binary).
+  #[test]
+  fn cancel_contains_a_panicking_future_drop_and_still_fires_callback() {
+    let mut cx = Context::from_waker(std::task::Waker::noop());
+
+    // Drop of a suspended task.
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut task = AsyncRuntimeTask::new(
+      Box::pin(PanickingDrop(log.clone())),
+      ordering_cancel_callback(&log),
+    );
+    assert!(Pin::new(&mut task).poll(&mut cx).is_pending());
+    assert!(catch_unwind(AssertUnwindSafe(move || drop(task))).is_ok());
+    assert_eq!(*log.lock().unwrap(), ["future dropped", "callback fired"]);
+
+    // reject_with.
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let task = AsyncRuntimeTask::new(
+      Box::pin(PanickingDrop(log.clone())),
+      ordering_cancel_callback(&log),
+    );
+    let declined = Error::new(crate::Status::GenericFailure, "declined");
+    assert!(catch_unwind(AssertUnwindSafe(move || task.reject_with(declined))).is_ok());
+    assert_eq!(*log.lock().unwrap(), ["future dropped", "callback fired"]);
+
+    // Dropped while the thread is already unwinding.
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut task = AsyncRuntimeTask::new(
+      Box::pin(PanickingDrop(log.clone())),
+      ordering_cancel_callback(&log),
+    );
+    assert!(Pin::new(&mut task).poll(&mut cx).is_pending());
+    let outer = catch_unwind(AssertUnwindSafe(move || {
+      let _task = task;
+      panic!("outer unwind");
+    }))
+    .unwrap_err();
+    assert_eq!(outer.downcast_ref::<&str>(), Some(&"outer unwind"));
+    assert_eq!(*log.lock().unwrap(), ["future dropped", "callback fired"]);
+  }
+
   #[test]
   fn pre_activation_dispatch_starts_backend_before_first_spawn() {
     let registry = AsyncRuntimeRegistry::new();
@@ -2892,5 +3581,97 @@ mod spi_tests {
         tokio::runtime::Handle::try_current().is_ok()
       }));
     }
+  }
+}
+
+#[cfg(all(
+  test,
+  feature = "tokio_rt",
+  not(feature = "noop"),
+  not(target_family = "wasm")
+))]
+mod tokio_shutdown_tests {
+  use std::{
+    sync::{
+      atomic::{AtomicUsize, Ordering as AtomicOrdering},
+      mpsc, Arc,
+    },
+    time::{Duration, Instant},
+  };
+
+  use super::*;
+
+  const WORKERS: usize = 4;
+
+  fn counting_runtime(started: &Arc<AtomicUsize>, stopped: &Arc<AtomicUsize>) -> Runtime {
+    let (started, stopped) = (Arc::clone(started), Arc::clone(stopped));
+    tokio::runtime::Builder::new_multi_thread()
+      .worker_threads(WORKERS)
+      .enable_all()
+      .on_thread_start(move || {
+        started.fetch_add(1, AtomicOrdering::SeqCst);
+      })
+      .on_thread_stop(move || {
+        stopped.fetch_add(1, AtomicOrdering::SeqCst);
+      })
+      .build()
+      .unwrap()
+  }
+
+  /// #3591: threads that exit within the timeout are joined, never detached, so none of them can
+  /// hit the glibc `pthread_detach`-vs-exit race.
+  #[test]
+  fn shutdown_joins_idle_runtime_threads() {
+    let started = Arc::new(AtomicUsize::new(0));
+    let stopped = Arc::new(AtomicUsize::new(0));
+    let rt = counting_runtime(&started, &stopped);
+    rt.block_on(async {});
+
+    let begin = Instant::now();
+    shutdown_tokio_runtime(rt);
+    // Past the timeout the pool detaches whatever is left, so only a shutdown that returned
+    // early proves the join. An overloaded host can miss the window; that is not a failure.
+    if begin.elapsed() < TOKIO_SHUTDOWN_JOIN_TIMEOUT {
+      assert_eq!(started.load(AtomicOrdering::SeqCst), WORKERS);
+      assert_eq!(stopped.load(AtomicOrdering::SeqCst), WORKERS);
+    }
+  }
+
+  /// A closure that never finishes must not hold environment teardown hostage.
+  #[test]
+  fn shutdown_is_bounded_by_busy_blocking_task() {
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let (entered_tx, entered_rx) = mpsc::channel::<()>();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+      .worker_threads(1)
+      .build()
+      .unwrap();
+    rt.spawn_blocking(move || {
+      entered_tx.send(()).unwrap();
+      let _ = release_rx.recv();
+    });
+    entered_rx.recv().unwrap();
+
+    let begin = Instant::now();
+    shutdown_tokio_runtime(rt);
+    let elapsed = begin.elapsed();
+    release_tx.send(()).unwrap();
+    assert!(elapsed >= TOKIO_SHUTDOWN_JOIN_TIMEOUT, "{elapsed:?}");
+    // Hang protection only: the bound is the timeout, plus scheduling slack.
+    assert!(elapsed < Duration::from_secs(30), "{elapsed:?}");
+  }
+
+  /// Tokio panics on a waiting shutdown from inside a runtime context; that case must fall back
+  /// to the non-blocking shutdown.
+  #[test]
+  fn shutdown_from_runtime_context_does_not_panic() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+      .worker_threads(1)
+      .build()
+      .unwrap();
+    let outer = tokio::runtime::Builder::new_current_thread()
+      .build()
+      .unwrap();
+    outer.block_on(async move { shutdown_tokio_runtime(rt) });
   }
 }

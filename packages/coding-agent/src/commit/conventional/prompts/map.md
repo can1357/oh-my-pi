@@ -34,7 +34,7 @@ You MUST return the result in this format WITHOUT the fences:
 ```
 
 Rules:
-- One `# ` header per input file, using the `path` exactly as shown in `<file path="...">`.
+- One `# ` header per input file, using the `path` exactly as shown in `<file path="…">`.
 - List observations as `-` bullets under each header.
 - Include EVERY input file. If a file has no relevant observations, emit just its `# ` header with no bullets.
 </output_format>

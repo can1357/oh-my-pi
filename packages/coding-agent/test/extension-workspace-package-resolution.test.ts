@@ -36,13 +36,15 @@ test("bare workspace-member imports resolve through the workspace root manifest"
 	const repoRoot = path.join(root, "plugins", "node_modules", "monorepo-plugin");
 	const importer = path.join(repoRoot, "packages", "extension", "extensions", "entry.ts");
 	const memberRoot = path.join(repoRoot, "packages", "contracts");
+	const alternateRoot = path.join(repoRoot, "alternate", "contracts");
 	await fs.mkdir(path.dirname(importer), { recursive: true });
 	await fs.mkdir(path.join(memberRoot, "src"), { recursive: true });
+	await fs.mkdir(alternateRoot, { recursive: true });
 	await Bun.write(importer, "export {};\n");
 	await writeJson(path.join(repoRoot, "package.json"), {
 		name: "monorepo-plugin",
 		version: "1.0.0",
-		workspaces: ["packages/*"],
+		workspaces: ["packages/*", "alternate/*"],
 	});
 	await writeJson(path.join(memberRoot, "package.json"), {
 		name: "@monorepo/contracts",
@@ -51,6 +53,11 @@ test("bare workspace-member imports resolve through the workspace root manifest"
 		exports: { ".": { bun: "./src/index.ts", default: "./dist/index.js" } },
 	});
 	await Bun.write(path.join(memberRoot, "src", "index.ts"), "export const marker = 1;\n");
+	await writeJson(path.join(alternateRoot, "package.json"), {
+		name: "@monorepo/contracts",
+		main: "index.ts",
+	});
+	await Bun.write(path.join(alternateRoot, "index.ts"), "export const marker = 2;\n");
 
 	spyOn(Bun, "resolveSync").mockImplementation(() => {
 		throw new Error("compiled fallback");

@@ -57,15 +57,15 @@ const SERVICE_NAME = "runtime";
 registerRpcError("CostCapError", message => new CostCapError({ spent: 0, cap: 0, message }));
 
 /** Listeners and subscriptions workers made on main's gates and buses. */
-const cleanups = new PeerCleanups(SERVICE_NAME);
+let cleanups: PeerCleanups | undefined;
 
-function serveCostGate(peer: WorkerPeer): RpcServe<CostGate, CostGateProtocol> {
+function serveCostGate(peer: WorkerPeer, subscriptions: PeerCleanups): RpcServe<CostGate, CostGateProtocol> {
 	return {
 		spent: gate => gate.spent,
 		check: gate => gate.check(),
 		record: (gate, cost) => gate.record(cost),
 		watchCap: (gate, listener) => {
-			const stop = cleanups.track(
+			const stop = subscriptions.track(
 				peer.threadId,
 				gate.onCapChange(() => {
 					// A closed link rejects; the worker's exit releases the watch.
@@ -82,16 +82,16 @@ function serveCostGate(peer: WorkerPeer): RpcServe<CostGate, CostGateProtocol> {
 	};
 }
 
-function serveEventBus(peer: WorkerPeer): RpcServe<EventBus, EventBusProtocol> {
+function serveEventBus(peer: WorkerPeer, subscriptions: PeerCleanups): RpcServe<EventBus, EventBusProtocol> {
 	return {
 		emit: (bus, channel, data) => bus.emit(channel, data),
 		on: (bus, channel, handler) =>
-			cleanups.track(
+			subscriptions.track(
 				peer.threadId,
 				bus.on(channel, data => handler(data)),
 			),
 		watch: (bus, channel, onChange) => {
-			cleanups.track(
+			subscriptions.track(
 				peer.threadId,
 				bus.watchListeners(channel, present => ignoreSettle(onChange(present))),
 			);
@@ -127,15 +127,16 @@ export const runtimeThreadService: ThreadService = {
 	name: SERVICE_NAME,
 	installMain(peer) {
 		const { link } = peer;
+		const subscriptions = (cleanups ??= new PeerCleanups(SERVICE_NAME));
 		link.exportClass<CostGate, CostGateProtocol>(
 			COST_GATE_KIND,
 			(value): value is CostGate => value instanceof CostGate,
-			serveCostGate(peer),
+			serveCostGate(peer, subscriptions),
 		);
 		link.exportClass<EventBus, EventBusProtocol>(
 			EVENT_BUS_KIND,
 			(value): value is EventBus => value instanceof EventBus,
-			serveEventBus(peer),
+			serveEventBus(peer, subscriptions),
 		);
 		link.exportClass<ArtifactManager, ArtifactManagerProtocol>(
 			ARTIFACT_MANAGER_KIND,
@@ -148,7 +149,7 @@ export const runtimeThreadService: ThreadService = {
 			serveAgentStorage,
 		);
 	},
-	onWorkerExit: peer => cleanups.release(peer.threadId),
+	onWorkerExit: peer => cleanups?.release(peer.threadId),
 	installWorker(link) {
 		link.importClass<RemoteCostGate, CostGateProtocol>(COST_GATE_KIND, remote => new RemoteCostGate(remote));
 		link.importClass<RemoteEventBus, EventBusProtocol>(EVENT_BUS_KIND, remote => new RemoteEventBus(remote));

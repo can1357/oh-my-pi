@@ -60,8 +60,11 @@ export interface DiagnosticMeta {
  */
 export interface LimitsMeta {
 	matchLimit?: { reached: number; suggestion: number };
-	/** `suggestion` is omitted when the tool is already at its hard cap, so no larger usable limit exists to advise. */
-	resultLimit?: { reached: number; suggestion?: number };
+	/**
+	 * `suggestion` is omitted when the tool is already at its hard cap, so no larger usable limit exists to advise.
+	 * `requested` is the caller's `limit` when it exceeded that cap and was clamped to `reached`.
+	 */
+	resultLimit?: { reached: number; suggestion?: number; requested?: number };
 	headLimit?: { reached: number; suggestion: number };
 	/**
 	 * `unit` may be absent in sessions persisted before it was recorded. `lines` is
@@ -242,7 +245,7 @@ function isGeneratedOutputNoticeLine(line: string): boolean {
 	return (
 		body.startsWith("Showing ") ||
 		/^\d+ matches limit reached\. Use limit=\d+ for more/u.test(body) ||
-		/^\d+ results limit reached(?:\.|$)/u.test(body) ||
+		/^\d+ results limit reached(?: \(limit=\d+ clamped to the max of \d+\))?(?:\.|$)/u.test(body) ||
 		isColumnTruncationNotice(line)
 	);
 }
@@ -350,10 +353,11 @@ export function formatOutputNotice(meta: OutputMeta | undefined): string {
 		// At the tool's hard cap there is no larger usable limit, so the
 		// "Use limit=" advice would name a value that gets clamped right
 		// back — emit the bare reached notice instead (#13263).
+		const clamp = l.requested === undefined ? "" : ` (limit=${l.requested} clamped to the max of ${l.reached})`;
 		parts.push(
 			l.suggestion === undefined
-				? `${l.reached} results limit reached`
-				: `${l.reached} results limit reached. Use limit=${l.suggestion} for more`,
+				? `${l.reached} results limit reached${clamp}`
+				: `${l.reached} results limit reached${clamp}. Use limit=${l.suggestion} for more`,
 		);
 	}
 	if (meta.limits?.headLimit) {
