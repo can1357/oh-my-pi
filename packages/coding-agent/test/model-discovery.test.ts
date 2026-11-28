@@ -2848,7 +2848,7 @@ describe("ModelRegistry runtime discovery", () => {
 		});
 		const bundled = getBundledModels("openai")[0];
 		writeModelCache(
-			`${provider}:proxy-v2-${advertisedReasoning ? "" : "advertised-off-"}context-v6`,
+			`${provider}:proxy-v2-${advertisedReasoning ? "" : "advertised-off-"}context-v7`,
 			Date.now(),
 			[{ ...bundled, provider, baseUrl, id: "offline-only" }],
 			true,
@@ -2915,6 +2915,62 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(registry.find("vllm-fast", "Fresh")?.contextWindow).toBe(262_144);
 		expect(registry.find("vllm-fast", "Stale")).toBeUndefined();
 	});
+
+	test.each([
+		["openai-models-list", "gw:openai-models-list-context-v8"],
+		["proxy", "gw:proxy-v2-context-v6"],
+	] as const)(
+		"%s discovery refetches rows cached before the reasoning object ladder was read",
+		async (type, retiredCacheProviderId) => {
+			writeRawModelsJson({
+				gw: { baseUrl: "https://gw.example/v1", auth: "none", api: "openai-completions", discovery: { type } },
+			});
+			// A pre-fix build ignored the object and cached the row without its ladder.
+			writeModelCache(
+				retiredCacheProviderId,
+				Date.now(),
+				[
+					buildModel({
+						id: "acme-object",
+						name: "acme-object",
+						provider: "gw",
+						api: "openai-completions",
+						baseUrl: "https://gw.example/v1",
+						contextWindow: 128_000,
+						maxTokens: 32_768,
+						reasoning: false,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					}),
+				],
+				true,
+				"",
+				cacheDbPath,
+			);
+			let modelListCalls = 0;
+			const fetchMock: FetchImpl = async input => {
+				if (String(input) !== "https://gw.example/v1/models") throw new Error(`Unexpected URL: ${String(input)}`);
+				modelListCalls++;
+				return Response.json({
+					data: [
+						{
+							id: "acme-object",
+							reasoning: { supported_efforts: ["none", "low", "high"], default_effort: "high" },
+						},
+					],
+				});
+			};
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+			await registry.refreshDiscoverableProviders(["gw"], "online-if-uncached");
+
+			expect(modelListCalls).toBe(1);
+			expect(registry.find("gw", "acme-object")?.thinking).toMatchObject({
+				mode: "effort",
+				efforts: [Effort.Low, Effort.High],
+				defaultLevel: Effort.High,
+			});
+		},
+	);
 
 	test("uses default vllm baseUrl override for built-in discovery", async () => {
 		writeRawModelsJson({ vllm: { baseUrl: "http://192.168.5.3:8085/v1", auth: "none" } });
