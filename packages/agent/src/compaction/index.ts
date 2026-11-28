@@ -9,6 +9,7 @@ export * from "./entries";
 export * from "./errors";
 export * from "./message-cache";
 export * from "./messages";
+export * from "./number-check";
 export * from "./openai";
 export * from "./pruning";
 export * from "./shake";

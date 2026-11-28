@@ -126,7 +126,7 @@ import {
 	isTranscriptEntry,
 } from "./session-context";
 import type { CompactionEntry, SessionEntry } from "./session-entries";
-import type { HandoffGenerationOptions } from "./session-handoff";
+import type { HandoffDocument, HandoffGenerationOptions } from "./session-handoff";
 import type { SessionManager } from "./session-manager";
 import type { SessionProviderBoundary } from "./session-provider-boundary";
 import type { ShakeMode, ShakeResult } from "./shake-types";
@@ -449,13 +449,13 @@ function mergeLlmCompactionPreserveData(
 
 /** Wrap a handoff document as a compaction summary: append the cumulative file-operations tag and derive entry details. */
 function handoffSummaryFromDocument(
-	document: string,
+	handoff: HandoffDocument,
 	preparation: CompactionPreparation,
 ): { summary: string; details: CompactionDetails } {
 	const { readFiles, modifiedFiles } = snapcompact.computeFileLists(preparation.fileOps);
 	return {
-		summary: snapcompact.upsertFileOperations(document, readFiles, modifiedFiles, preparation.fileOps.read),
-		details: { readFiles, modifiedFiles },
+		summary: snapcompact.upsertFileOperations(handoff.text, readFiles, modifiedFiles, preparation.fileOps.read),
+		details: { readFiles, modifiedFiles, ...(handoff.numberCheck ? { numberCheck: handoff.numberCheck } : {}) },
 	};
 }
 
@@ -574,7 +574,7 @@ export interface SessionMaintenanceHost {
 	generateHandoffDocument(
 		customInstructions: string | undefined,
 		options: HandoffGenerationOptions,
-	): Promise<string | undefined>;
+	): Promise<HandoffDocument | undefined>;
 	removeAssistantMessageFromActiveContext(message: AssistantMessage): void;
 	dropPersistedAssistantTurn(message: AssistantMessage): Promise<string | undefined>;
 	/**
@@ -6052,7 +6052,7 @@ export class SessionMaintenance {
 			// context (cache-friendly side request), then commit it like any other
 			// compaction summary. A failed generation advances to the next
 			// configured preference.
-			let handoffDocument: string | undefined;
+			let handoffDocument: HandoffDocument | undefined;
 			if (action === "handoff" && compactionPrep.kind !== "fromHook") {
 				const model = this.#model;
 				if (!model) throw new Error("No model selected for handoff");

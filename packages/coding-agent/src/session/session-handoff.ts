@@ -11,7 +11,9 @@ import {
 import {
 	CompactionCancelledError,
 	generateHandoffFromContext,
+	type NumberCheckReport,
 	renderHandoffPrompt,
+	SummaryNumberCheck,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, Message, Model, ServiceTier, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import { logger, ptree, Snowflake } from "@oh-my-pi/pi-utils";
@@ -22,7 +24,11 @@ import type { SecretObfuscator } from "../secrets/obfuscator";
 import { journalCompletion } from "./model-usage-journal";
 import type { SessionManager } from "./session-manager";
 
-import { cfgCompactionHandoffSaveToDisk, cfgCompactionHandoffTimeoutSeconds } from "./context-settings";
+import {
+	cfgCompactionHandoffSaveToDisk,
+	cfgCompactionHandoffTimeoutSeconds,
+	cfgCompactionNumberCheck,
+} from "./context-settings";
 
 function createHandoffFileName(date = new Date()): string {
 	const fileTimestamp = date.toISOString().replace(/[:.]/g, "-");
@@ -48,6 +54,13 @@ export interface HandoffGenerationOptions {
 	autoTriggered?: boolean;
 	/** Sees every provider attempt's response, billed or failed, beside the spend journal. */
 	onAttempt?: (message: AssistantMessage) => void;
+}
+
+/** A generated handoff document, with the number check's findings when it ran and found any. */
+export interface HandoffDocument {
+	text: string;
+	/** Numbers the document gave that its input never showed, when `compaction.numberCheck` found any. */
+	numberCheck?: NumberCheckReport;
 }
 
 /** Capabilities borrowed from the owning AgentSession. */
@@ -89,7 +102,7 @@ export class SessionHandoff {
 	async generateDocument(
 		customInstructions: string | undefined,
 		{ model, signal: cancelSignal, messages, autoTriggered, onAttempt }: HandoffGenerationOptions,
-	): Promise<string | undefined> {
+	): Promise<HandoffDocument | undefined> {
 		const timeoutSeconds = cfgCompactionHandoffTimeoutSeconds.get(this.#host.settings);
 		const deadline = timeoutSeconds > 0 ? AbortSignal.timeout(timeoutSeconds * 1000) : undefined;
 		// Every request step observes the deadline; cancellation checks keep reading
@@ -152,6 +165,9 @@ export class SessionHandoff {
 				model.provider,
 			);
 			throwIfHandoffAborted(cancelSignal);
+			// Checked in the provider's (obfuscated) text space: the document and its
+			// input are compared before deobfuscation.
+			const numberCheck = cfgCompactionNumberCheck.get(this.#host.settings) ? new SummaryNumberCheck() : undefined;
 			const rawHandoffText = await generateHandoffFromContext(
 				obfuscateProviderContext(this.#host.obfuscator(), handoffContext),
 				model,
@@ -171,6 +187,7 @@ export class SessionHandoff {
 					// resolveCompactionEffort so unsupported-effort models don't trip
 					// requireSupportedEffort.
 					thinkingLevel: this.#host.thinkingLevel(),
+					numberCheck,
 				},
 			);
 			const handoffText = this.#host.deobfuscateFromProvider(rawHandoffText);
@@ -214,7 +231,7 @@ export class SessionHandoff {
 			}
 
 			throwIfHandoffAborted(cancelSignal);
-			return handoffText;
+			return { text: handoffText, ...(numberCheck?.report ? { numberCheck: numberCheck.report } : {}) };
 		} catch (error) {
 			throwIfHandoffAborted(cancelSignal);
 			throwIfHandoffTimedOut(deadline, timeoutSeconds);

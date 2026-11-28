@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an opt-in numeric faithfulness check for compaction summaries and handoff documents (`CompactionSettings.numberCheck`): numbers the summarizer was never shown go back to it once for a line-level fix, any left are replaced with `?`, and the findings are recorded in `details.numberCheck` ([#19905](https://github.com/can1357/oh-my-pi/pull/19905) by [@Xytronix](https://github.com/Xytronix))
+
 ### Fixed
 
 - Fixed turn-end hooks being unable to tell which tool calls named no tool: `AgentTurnEndContext.unresolvedToolCallIds` now lists them ([#10876](https://github.com/can1357/oh-my-pi/issues/10876))

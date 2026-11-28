@@ -714,7 +714,7 @@ describe("async speculative compaction", () => {
 			persistTurnMessagesForMidRunCompaction: async () => true,
 			generateHandoffDocument: async (_instructions, options) => {
 				handoffMessages = options.messages;
-				return "## Goal\nFinish once the tool returns.\n";
+				return { text: "## Goal\nFinish once the tool returns.\n" };
 			},
 		});
 		// The live loop holds the call while its tool runs.
@@ -1079,7 +1079,7 @@ describe("async speculative compaction", () => {
 	it.each([404, 400, 403])(
 		"drops the remote method for the cycle after the endpoint rejects it with %d",
 		async status => {
-			const generateHandoffDocument = vi.fn(async () => "## Goal\nContinue from the handoff.\n");
+			const generateHandoffDocument = vi.fn(async () => ({ text: "## Goal\nContinue from the handoff.\n" }));
 			useRemoteEndpoint(generateHandoffDocument);
 			const endpointCalls = stubRemoteEndpoint(status);
 
@@ -1105,7 +1105,7 @@ describe("async speculative compaction", () => {
 	);
 
 	it("keeps the remote method after a retriable endpoint rejection", async () => {
-		const generateHandoffDocument = vi.fn(async () => "## Goal\nContinue from the handoff.\n");
+		const generateHandoffDocument = vi.fn(async () => ({ text: "## Goal\nContinue from the handoff.\n" }));
 		useRemoteEndpoint(generateHandoffDocument);
 		const endpointCalls = stubRemoteEndpoint(429);
 
@@ -1203,7 +1203,7 @@ describe("async speculative compaction", () => {
 
 	it("discards an armed handoff summary when post-snapshot branch growth prevents recovery headroom", async () => {
 		let handoffInvocation = 0;
-		const generateHandoffDocument = vi.fn(async () => `handoff plan ${++handoffInvocation}`);
+		const generateHandoffDocument = vi.fn(async () => ({ text: `handoff plan ${++handoffInvocation}` }));
 		maintenance = createMaintenance({
 			methodOrder: ["handoff"],
 			generateHandoffDocument,
@@ -1232,7 +1232,7 @@ describe("async speculative compaction", () => {
 		const threshold = 196_000;
 		model = { ...model, contextWindow };
 		let handoffInvocation = 0;
-		const generateHandoffDocument = vi.fn(async () => `handoff plan ${++handoffInvocation}`);
+		const generateHandoffDocument = vi.fn(async () => ({ text: `handoff plan ${++handoffInvocation}` }));
 		maintenance = createMaintenance({
 			methodOrder: ["handoff"],
 			generateHandoffDocument,
@@ -1264,7 +1264,7 @@ describe("async speculative compaction", () => {
 
 	it("re-summarizes a rewritten branch inside the lead band before reaching threshold", async () => {
 		let handoffInvocation = 0;
-		const generateHandoffDocument = vi.fn(async () => `handoff plan ${++handoffInvocation}`);
+		const generateHandoffDocument = vi.fn(async () => ({ text: `handoff plan ${++handoffInvocation}` }));
 		maintenance = createMaintenance({ methodOrder: ["handoff"], generateHandoffDocument });
 		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
 		await waitForState("armed");
