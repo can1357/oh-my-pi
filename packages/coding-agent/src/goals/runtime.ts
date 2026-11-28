@@ -10,7 +10,7 @@ export interface GoalRuntimeHost {
 	setState(state: GoalModeState | undefined): void;
 	getCurrentUsage(): GoalTokenUsage;
 	emit(event: GoalRuntimeEvent): void | Promise<void>;
-	persist(mode: "goal" | "goal_paused" | "none", state?: GoalModeState): void;
+	persist(mode: "goal" | "goal_paused" | "none", state?: GoalModeState, persistUsage?: boolean): void;
 	sendHiddenMessage(message: {
 		customType: string;
 		content: string;
@@ -170,18 +170,18 @@ export class GoalRuntime {
 		return state ? cloneState(state) : undefined;
 	}
 
-	async #commitState(
-		state: GoalModeState | undefined,
-		options?: { persist?: "goal" | "goal_paused" | "none"; emit?: boolean },
-	): Promise<void> {
-		this.#host.setState(state ? cloneState(state) : undefined);
-		if (options?.persist) {
-			this.#host.persist(options.persist, state);
-		}
-		if (options?.emit !== false) {
-			await this.#host.emit({ type: "goal_updated", goal: state ? cloneGoal(state.goal) : null, state });
-		}
+async #commitState(
+	state: GoalModeState | undefined,
+	options?: { persist?: "goal" | "goal_paused" | "none"; persistUsage?: boolean; emit?: boolean },
+): Promise<void> {
+	this.#host.setState(state ? cloneState(state) : undefined);
+	if (options?.persist) {
+		this.#host.persist(options.persist, state, options.persistUsage);
 	}
+	if (options?.emit !== false) {
+		await this.#host.emit({ type: "goal_updated", goal: state ? cloneGoal(state.goal) : null, state });
+	}
+}
 
 	#markActiveAccounting(goal: Goal, resetWallClock = false): void {
 		if (resetWallClock || this.#wallClock.activeGoalId !== goal.id) {
@@ -362,7 +362,10 @@ export class GoalRuntime {
 		// objective snapshots. Keep normal tool flushes in memory/UI only, but make wall-clock
 		// usage durable before internal session switches because the active runtime is leaving.
 		const shouldPersistUsage = tokenDelta > 0 || flippedToBudgetLimited || (persistWallClock && wallSeconds > 0);
-		await this.#commitState(state, { persist: shouldPersistUsage ? "goal" : undefined });
+		await this.#commitState(state, {
+			persist: shouldPersistUsage ? "goal" : undefined,
+			persistUsage: shouldPersistUsage && !flippedToBudgetLimited,
+		});
 
 		if (state.goal.status !== "budget-limited") {
 			this.#budgetReportedFor = undefined;

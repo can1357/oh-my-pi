@@ -199,7 +199,7 @@ import {
 import { expandSlashCommand, type FileSlashCommand, loadSlashCommands } from "../extensibility/slash-commands";
 import { normalizeToolEventInput, resolveToolEventInput } from "../extensibility/tool-event-input";
 import { GoalRuntime } from "../goals/runtime";
-import type { GoalModeState, GoalTokenUsage } from "../goals/state";
+import { GOAL_USAGE_ENTRY_TYPE, goalUsageEntryData, type GoalModeState, type GoalTokenUsage } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
 import {
 	InternalUrlRouter,
@@ -3026,9 +3026,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					return this.#emitSessionEvent({ type: "goal_updated", goal: event.goal, state: event.state });
 				}
 			},
-			persist: (mode, state) => {
+			persist: (mode, state, persistUsage) => {
 				if (mode === "none") {
 					this.sessionManager.appendModeChange("none");
+				} else if (state && persistUsage) {
+					this.sessionManager.appendCustomEntry(GOAL_USAGE_ENTRY_TYPE, goalUsageEntryData(state));
 				} else if (state) {
 					this.sessionManager.appendModeChange(mode, { goal: state.goal });
 				}

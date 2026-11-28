@@ -1,3 +1,4 @@
+import { GOAL_USAGE_ENTRY_TYPE, mergeGoalUsage } from "../goals/state";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { customMessageEntryMessage, isUserRequestEntry } from "./transcript/transcript-entry";
 import {
@@ -398,6 +399,8 @@ export function buildSessionContext(
 		} else if (entry.type === "mode_change") {
 			mode = entry.mode;
 			modeData = entry.data;
+		} else if (entry.type === "custom" && entry.customType === GOAL_USAGE_ENTRY_TYPE) {
+			modeData = mergeGoalUsage(modeData, entry.data);
 		}
 		previous = entry;
 	}

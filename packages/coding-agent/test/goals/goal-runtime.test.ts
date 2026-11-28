@@ -7,7 +7,12 @@ import {
 	renderTrustedObjective,
 } from "@oh-my-pi/pi-coding-agent/goals/runtime";
 import type { Goal } from "@oh-my-pi/pi-coding-agent/tools/details/goal";
-import type { GoalModeState, GoalRuntimeEvent, GoalTokenUsage } from "@oh-my-pi/pi-coding-agent/goals/state";
+import {
+	mergeGoalUsage,
+	type GoalModeState,
+	type GoalRuntimeEvent,
+	type GoalTokenUsage,
+} from "@oh-my-pi/pi-coding-agent/goals/state";
 import { escapeXmlText } from "@oh-my-pi/pi-utils";
 
 function createUsage(overrides: Partial<GoalTokenUsage> = {}): GoalTokenUsage {
@@ -58,7 +63,7 @@ function createHarness(initial: { state?: GoalModeState; usage?: GoalTokenUsage;
 	let usage = createUsage(initial.usage);
 	let now = initial.now ?? 0;
 	const events: GoalRuntimeEvent[] = [];
-	const persists: Array<{ mode: "goal" | "goal_paused" | "none"; state?: GoalModeState }> = [];
+	const persists: Array<{ mode: "goal" | "goal_paused" | "none"; state?: GoalModeState; persistUsage?: boolean }> = [];
 	const hiddenMessages: Array<{ customType: string; content: string; deliverAs?: "steer" | "followUp" | "nextTurn" }> =
 		[];
 	const host: GoalRuntimeHost = {
@@ -70,8 +75,8 @@ function createHarness(initial: { state?: GoalModeState; usage?: GoalTokenUsage;
 		emit: async event => {
 			events.push(cloneEvent(event));
 		},
-		persist: (mode, persistedState) => {
-			persists.push({ mode, state: cloneState(persistedState) });
+		persist: (mode, persistedState, persistUsage) => {
+			persists.push({ mode, state: cloneState(persistedState), persistUsage });
 		},
 		sendHiddenMessage: async message => {
 			hiddenMessages.push({ ...message });
@@ -229,6 +234,11 @@ describe("goal runtime", () => {
 		harness.setUsage({ input: 2 });
 		await harness.runtime.flushUsage("allowed");
 		expect(harness.getState()?.goal.status).toBe("budget-limited");
+		expect(harness.persists[0]).toMatchObject({
+			mode: "goal",
+			state: { goal: { tokensUsed: 10, status: "budget-limited" } },
+			persistUsage: false,
+		});
 		expect(harness.hiddenMessages).toHaveLength(1);
 		expect(harness.hiddenMessages[0]).toMatchObject({
 			customType: "goal-budget-limit",
@@ -409,5 +419,61 @@ describe("goal runtime", () => {
 		expect(next.goal.timeUsedSeconds).toBe(0);
 		expect(next.goal.id).not.toBe("goal-1");
 		expect(harness.persists.at(-1)?.state?.goal.objective).toBe("Second");
+	});
+});
+
+describe("goal usage journal replay", () => {
+	it("ignores a stale goal_usage entry whose id does not match the active goal", () => {
+		const modeData = { goal: { ...createGoal({ id: "goal-2", tokensUsed: 5 }), objective: "Current" } };
+		const stale = {
+			goal: { ...createGoal({ id: "goal-1", tokensUsed: 999 }), objective: "Dropped" },
+		};
+
+		expect(
+			mergeGoalUsage(modeData, {
+				id: "goal-1",
+				tokensUsed: 999,
+				timeUsedSeconds: 99,
+				updatedAt: 99,
+			}),
+		).toBe(modeData);
+		expect(mergeGoalUsage(stale, { id: "goal-2", tokensUsed: 3, timeUsedSeconds: 1, updatedAt: 2 })).toBe(stale);
+	});
+
+	it("replays a matching goal_usage entry onto the active goal counters", () => {
+		const modeData = { goal: createGoal({ id: "goal-1", tokensUsed: 5, timeUsedSeconds: 2 }) };
+
+		const merged = mergeGoalUsage(modeData, {
+			id: "goal-1",
+			tokensUsed: 15,
+			timeUsedSeconds: 4,
+			updatedAt: 12,
+		});
+
+		expect(merged?.goal).toMatchObject({
+			id: "goal-1",
+			tokensUsed: 15,
+			timeUsedSeconds: 4,
+			updatedAt: 12,
+			objective: "Ship <fast> & safely",
+		});
+	});
+
+	it("keeps mode data unchanged for malformed goal_usage payloads", () => {
+		const modeData = { goal: createGoal({ id: "goal-1", tokensUsed: 5 }) };
+		const malformed: unknown[] = [
+			undefined,
+			null,
+			"x",
+			{ id: "goal-1" },
+			{ id: "goal-1", tokensUsed: -1, timeUsedSeconds: 0, updatedAt: 0 },
+			{ id: 42, tokensUsed: 1, timeUsedSeconds: 0, updatedAt: 0 },
+		];
+		for (const data of malformed) {
+			expect(mergeGoalUsage(modeData, data)).toBe(modeData);
+		}
+		expect(mergeGoalUsage(undefined, { id: "goal-1", tokensUsed: 1, timeUsedSeconds: 0, updatedAt: 0 })).toBe(
+			undefined,
+		);
 	});
 });
