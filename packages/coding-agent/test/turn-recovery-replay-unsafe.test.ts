@@ -9,6 +9,8 @@ import type { Model, Usage } from "@oh-my-pi/pi-catalog/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { buildSessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import {
 	type RecoveryCompactionResult,
 	kUsageLimitRequestProvider,
@@ -467,8 +469,6 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		// hop's own entries remain and resume restores the original effort.
 		const fallback = getBundledModel("openai", "gpt-4o-mini");
 		if (!fallback) throw new Error("Expected bundled fallback model");
-		const { SessionManager } = await import("@oh-my-pi/pi-coding-agent/session/session-manager");
-		const { buildSessionContext } = await import("@oh-my-pi/pi-coding-agent/session/session-context");
 		const temp = TempDir.createSync("@omp-cancelled-restore-journal-");
 		const sessionManager = SessionManager.create(temp.path());
 		const primarySelector = `${model.provider}/${model.id}:high`;
@@ -489,6 +489,11 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		// fix, `#maybeRestoreRetryFallbackPrimary` discards this entry instead.
 		const primaryChangeId = sessionManager.appendModelChange(primarySelector, "fallback");
 		sessionManager.appendThinkingLevelChange("high", "high");
+		// The live-effort reapply for the cancelled restore now lands BEFORE the
+		// durable discard, on this doomed branch. Writing it after the discard
+		// appended an ordinary `thinking_level_change(low)` to the surviving branch,
+		// which `buildSessionContext()` read as a non-fallback effort selection and
+		// a later resume applied to the primary.
 		sessionManager.appendThinkingLevelChange("low", "low");
 
 		const unfixContext = buildSessionContext(sessionManager.getEntries());

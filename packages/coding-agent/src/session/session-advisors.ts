@@ -2263,6 +2263,10 @@ export class SessionAdvisors {
 		let usageReportResetAtMs: number | undefined;
 		let usagePriorBlockedUntilMs: number | undefined;
 		let usagePriorBlockedUntilTimed: boolean | undefined;
+		// Capture the quota failure time before any recovery await: a healthy usage
+		// snapshot fetched while markReached() waits must still qualify as evidence
+		// newer than the failure when a fallback cooldown is recorded.
+		const usageFailureAtMs = usageLimit ? Date.now() : undefined;
 		if (usageLimit) {
 			const outcome = await this.#host.modelRegistry.authStorage.limits.markReached(
 				currentModel.provider,
@@ -2342,7 +2346,7 @@ export class SessionAdvisors {
 				currentSelector,
 				retryAfterMs,
 				message,
-				usageLimit ? Date.now() : undefined,
+				usageFailureAtMs,
 				// Attribute the cooldown to the advisor's own provider session so the
 				// per-session suppression map matches the probes that read it back;
 				// the primary session id would leave advisor entries missing and let

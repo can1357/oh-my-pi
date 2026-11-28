@@ -2954,8 +2954,17 @@ export class TurnRecovery {
 			// effort. Only reapply the fallback's effort when this continuation
 			// still owns the session and the fallback model is active.
 			if (generation !== this.#fallbackGeneration || this.#host.model() !== currentModel) return false;
+			// Reapply the fallback's effort before the durable discard: `setThinkingLevel`
+			// appends its journal entry on the primary-restore branch that the discard is
+			// about to remove. Writing it after the discard would leave a fresh ordinary
+			// `thinking_level_change` on the surviving branch, which `buildSessionContext()`
+			// reads as a non-fallback effort selection and a later resume would restore the
+			// primary at the fallback's effort. The level clamps against the active model,
+			// and the fallback model is already reinstated here, so the entry matches what
+			// the fallback hop journaled.
+			this.#host.setThinkingLevel(currentThinkingLevel);
 			// Durably discard the restore attempt's journal entries (the primary's
-			// ordinary `model_change` and the thinking-level writes under it). Keeping
+			// ordinary `model_change`, the thinking-level writes under it, and the
 			// them on the branch cleared `preFallbackThinking` in
 			// `buildSessionContext()`, so a session closed and resumed later selected
 			// the primary at the fallback's effort: the trailing ordinary
@@ -2971,11 +2980,6 @@ export class TurnRecovery {
 			// the active model here; a newer explicit selection owns both the model
 			// and its effort, and the fallback's saved level must not overwrite it.
 			if (generation !== this.#fallbackGeneration || this.#host.model() !== currentModel) return false;
-			// `setThinkingLevel(thinkingToApply)` already installed the primary's
-			// effort; reapply the fallback's after reinstating the fallback model
-			// (the model restore never reapplies thinking, and the level clamps
-			// against the active model).
-			this.#host.setThinkingLevel(currentThinkingLevel);
 			// The pre-cancellation synchronization may already have committed the
 			// primary's base prompt (edit-mode or inline-descriptor change). The
 			// fallback model restore reconciles archive/think-tool state only, so
