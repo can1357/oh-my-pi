@@ -13,6 +13,7 @@ import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import {
 	fetchWellKnownModels,
 	MODELS_DEV_PROVIDER_DESCRIPTORS,
+	type ModelsDevModel,
 	modelsDevCatalogFallback,
 	opencodeGoModelManagerOptions,
 	opencodeZenModelManagerOptions,
@@ -1366,6 +1367,74 @@ describe("OpenCode provider discovery", () => {
 		const plain = discovered("deepseek-v4-flash");
 		expect(plain.input).toEqual(["text"]);
 		expect(sendsImageInputOnWire(plain)).toBe(false);
+	});
+});
+
+describe("OpenCode MiniMax M3 routing", () => {
+	const OPENCODE_ZEN_BASE = "https://opencode.ai/zen/v1";
+	const OPENCODE_GO_BASE = "https://opencode.ai/inference/go/v1";
+	const zenDescriptor = MODELS_DEV_PROVIDER_DESCRIPTORS.find(d => d.providerId === "opencode-zen");
+	const goDescriptor = MODELS_DEV_PROVIDER_DESCRIPTORS.find(d => d.providerId === "opencode-go");
+
+	// stencil.so declares these ids with `provider.npm = "@ai-sdk/anthropic"`,
+	// but the gateways serve them only at /v1/chat/completions; the per-id
+	// overrides must win over the @ai-sdk/anthropic → /v1/messages rule.
+	const npmAnthropic: ModelsDevModel = { provider: { npm: "@ai-sdk/anthropic" }, tool_call: true };
+
+	describe("opencode-zen", () => {
+		test.each([["minimax-m3"], ["minimax-m3-free"]])(
+			"%s resolves to openai-completions on /v1/chat/completions",
+			modelId => {
+				const resolved = zenDescriptor?.resolveApi?.(modelId, npmAnthropic);
+				expect(resolved).toEqual({ api: "openai-completions", baseUrl: OPENCODE_ZEN_BASE });
+			},
+		);
+	});
+
+	describe("opencode-go", () => {
+		test.each([["minimax-m3"], ["minimax-m3-free"]])(
+			"%s resolves to openai-completions on /v1/chat/completions",
+			modelId => {
+				const resolved = goDescriptor?.resolveApi?.(modelId, npmAnthropic);
+				expect(resolved).toEqual({ api: "openai-completions", baseUrl: OPENCODE_GO_BASE });
+			},
+		);
+	});
+
+	test("opencode-zen /v1/models refresh routes a freshly-discovered M3 to openai-completions", async () => {
+		let requestedUrl = "";
+		const mockFetch: FetchImpl = async input => {
+			requestedUrl = input instanceof Request ? input.url : String(input);
+			return Response.json({
+				data: [{ id: "minimax-m3-free", name: "MiniMax M3 Free", context_length: 200000 }],
+			});
+		};
+
+		const options = opencodeZenModelManagerOptions({ apiKey: "opencode-test-key", fetch: mockFetch });
+		const models = await options.fetchDynamicModels?.();
+		const m3 = models?.find(model => model.id === "minimax-m3-free");
+
+		expect(requestedUrl).toBe("https://opencode.ai/zen/v1/models");
+		expect(m3?.api).toBe("openai-completions");
+		expect(m3?.baseUrl).toBe("https://opencode.ai/zen/v1");
+	});
+
+	test("opencode-go /v1/models refresh routes a freshly-discovered M3 to openai-completions", async () => {
+		let requestedUrl = "";
+		const mockFetch: FetchImpl = async input => {
+			requestedUrl = input instanceof Request ? input.url : String(input);
+			return Response.json({
+				data: [{ id: "minimax-m3", name: "MiniMax M3", context_length: 200000 }],
+			});
+		};
+
+		const options = opencodeGoModelManagerOptions({ apiKey: "opencode-test-key", fetch: mockFetch });
+		const models = await options.fetchDynamicModels?.();
+		const m3 = models?.find(model => model.id === "minimax-m3");
+
+		expect(requestedUrl).toBe(`${OPENCODE_GO_BASE}/models`);
+		expect(m3?.api).toBe("openai-completions");
+		expect(m3?.baseUrl).toBe(OPENCODE_GO_BASE);
 	});
 });
 

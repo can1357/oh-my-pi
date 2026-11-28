@@ -28,10 +28,9 @@ import { e2eApiKey, resolveApiKey } from "./oauth";
 const oauthTokens = await Promise.all([
 	resolveApiKey("anthropic"),
 	resolveApiKey("github-copilot"),
-	resolveApiKey("google-antigravity"),
 	resolveApiKey("openai-codex"),
 ]);
-const [anthropicOAuthToken, githubCopilotToken, antigravityToken, openaiCodexToken] = oauthTokens;
+const [anthropicOAuthToken, githubCopilotToken, openaiCodexToken] = oauthTokens;
 
 function hasBedrockCredentials(): boolean {
 	const region = e2eApiKey("AWS_REGION") ?? e2eApiKey("AWS_DEFAULT_REGION");
@@ -1620,122 +1619,6 @@ describe("Generate E2E Tests", () => {
 			"should handle image input",
 			async () => {
 				await handleImage(llm, { apiKey: githubCopilotToken });
-			},
-			{ retry: 3 },
-		);
-	});
-	describe("Google Antigravity Provider (gemini-3-pro-high)", () => {
-		const llm = getBundledModel("google-antigravity", "gemini-3-pro-high");
-
-		it.skipIf(!antigravityToken)(
-			"should complete basic text generation",
-			async () => {
-				await basicTextGeneration(llm, { apiKey: antigravityToken });
-			},
-			{ retry: 3 },
-		);
-
-		it.skipIf(!antigravityToken)(
-			"should handle tool calling",
-			async () => {
-				await handleToolCall(llm, { apiKey: antigravityToken });
-			},
-			{ retry: 3 },
-		);
-
-		it.skipIf(!antigravityToken)(
-			"should handle streaming",
-			async () => {
-				await handleStreaming(llm, { apiKey: antigravityToken });
-			},
-			{ retry: 3 },
-		);
-
-		it.skipIf(!antigravityToken)(
-			"should handle thinking with thinkingLevel",
-			async () => {
-				// gemini-3-pro only supports LOW/HIGH
-				await handleThinking(llm, {
-					apiKey: antigravityToken,
-					thinking: { enabled: true, level: "LOW" },
-				});
-			},
-			{ retry: 3 },
-		);
-
-		it.skipIf(!antigravityToken)(
-			"should handle multi-turn with thinking and tools",
-			async () => {
-				await multiTurn(llm, { apiKey: antigravityToken, thinking: { enabled: true, level: "HIGH" } });
-			},
-			{ retry: 3 },
-		);
-
-		it.skipIf(!antigravityToken)(
-			"should handle image input",
-			async () => {
-				await handleImage(llm, { apiKey: antigravityToken });
-			},
-			{ retry: 3 },
-		);
-	});
-
-	describe("Google Antigravity Provider (claude-sonnet-4-5)", () => {
-		const llm = getBundledModel("google-antigravity", "claude-sonnet-4-5");
-
-		it.skipIf(!antigravityToken)(
-			"should complete basic text generation",
-			async () => {
-				await basicTextGeneration(llm, { apiKey: antigravityToken });
-			},
-			{ retry: 3 },
-		);
-
-		it.skipIf(!antigravityToken)(
-			"should handle tool calling",
-			async () => {
-				await handleToolCall(llm, { apiKey: antigravityToken });
-			},
-			{ retry: 3 },
-		);
-
-		it.skipIf(!antigravityToken)(
-			"should handle streaming",
-			async () => {
-				await handleStreaming(llm, { apiKey: antigravityToken });
-			},
-			{ retry: 3 },
-		);
-
-		it.skipIf(!antigravityToken)(
-			"should handle thinking",
-			async () => {
-				// claude-sonnet-4-5 has reasoning: false, use claude-sonnet-4-5-thinking
-				const thinkingModel = getBundledModel("google-antigravity", "claude-sonnet-4-5-thinking");
-				await handleThinking(thinkingModel, {
-					apiKey: antigravityToken,
-					thinking: { enabled: true, budgetTokens: 4096 },
-				});
-			},
-			{ retry: 3 },
-		);
-
-		it.skipIf(!antigravityToken)(
-			"should handle multi-turn with thinking and tools",
-			async () => {
-				const thinkingModel = getBundledModel("google-antigravity", "claude-sonnet-4-5-thinking");
-				await multiTurn(thinkingModel, {
-					apiKey: antigravityToken,
-					thinking: { enabled: true, budgetTokens: 4096 },
-				});
-			},
-			{ retry: 3 },
-		);
-
-		it.skipIf(!antigravityToken)(
-			"should handle image input",
-			async () => {
-				await handleImage(llm, { apiKey: antigravityToken });
 			},
 			{ retry: 3 },
 		);

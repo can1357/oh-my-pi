@@ -22,7 +22,7 @@ describe("login dialog", () => {
 	it("opens the authorization URL and links every wrapped URL row to the complete URL", () => {
 		const opened: string[] = [];
 		const state = new LoginDialogState(
-			"google-antigravity",
+			"anthropic",
 			() => {},
 			url => opened.push(url),
 		);

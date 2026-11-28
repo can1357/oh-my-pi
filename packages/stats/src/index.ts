@@ -80,6 +80,9 @@ export async function printStatsSummary(): Promise<void> {
 	console.log(`  Cache Savings: ${formatPercent(overall.cacheSavings)}`);
 	console.log(`  API-equivalent estimate: ${formatCost(overall.totalCost, overall.unpricedRequests)}`);
 	console.log(`  Premium Requests: ${formatNumber(normalizePremiumRequests(overall.totalPremiumRequests ?? 0))}`);
+	if (overall.totalAiuNano !== null) {
+		console.log(`  AI Credits (reported): ${(overall.totalAiuNano / 1e9).toFixed(2)}`);
+	}
 	console.log(`  Avg Duration: ${overall.avgDuration !== null ? formatDuration(overall.avgDuration) : "-"}`);
 	console.log(`  Avg TTFT: ${overall.avgTtft !== null ? formatDuration(overall.avgTtft) : "-"}`);
 	if (overall.avgTokensPerSecond !== null) {

@@ -11,6 +11,7 @@
 
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AgentSessionHandle } from "../session/agent-session-handle";
+import type { AiuTotals } from "../session/aiu-billing";
 import { AgentAwaits, type AgentAwaitsApi } from "./agent-awaits";
 import { oneLineLabel } from "../task/task-details";
 import { type AgentMetricsSummary, type AgentStatus, MAIN_AGENT_ID } from "./agent-hub-types";
@@ -52,6 +53,8 @@ export interface AgentHistorySummary {
 	metrics?: AgentMetricsSummary;
 	/** Cumulative own-session assistant and model_usage cost, excluding nested task results. */
 	directCost?: number;
+	/** Cumulative own-session AI credits (assistant and model_usage calls), excluding nested task results. */
+	directAiu?: AiuTotals;
 	readOnly?: boolean;
 	/** Durable task output artifact, when the executor wrote one. */
 	outputPath?: string;
@@ -70,6 +73,8 @@ export interface AgentRef {
 	displayName: string;
 	kind: AgentKind;
 	parentId?: string;
+	/** Identity of the live spawner, independent of its registry name. */
+	parentSessionKey?: string;
 	status: AgentStatus;
 	/** Null exactly when parked/aborted. */
 	session: AgentSessionHandle | null;
@@ -117,6 +122,8 @@ export interface RegisterInput {
 	displayName: string;
 	kind: AgentKind;
 	parentId?: string;
+	/** Live identity of the session that spawned this agent. */
+	parentSessionKey?: string;
 	session: AgentSessionHandle | null;
 	sessionFile?: string | null;
 	status?: AgentStatus;
@@ -222,6 +229,7 @@ export class AgentRegistry implements AgentRegistryApi {
 			displayName: input.displayName,
 			kind: input.kind,
 			parentId: input.parentId,
+			parentSessionKey: input.parentSessionKey,
 			status: input.status ?? "running",
 			session: input.session,
 			sessionFile: input.sessionFile ?? null,
@@ -266,6 +274,7 @@ export class AgentRegistry implements AgentRegistryApi {
 			displayName: current.displayName,
 			kind: current.kind,
 			parentId: current.parentId,
+			parentSessionKey: current.parentSessionKey,
 			session: null,
 			sessionFile: current.sessionFile,
 			status: "parked",
@@ -296,6 +305,14 @@ export class AgentRegistry implements AgentRegistryApi {
 			incomingDirectCost >= 0
 		) {
 			definedHistory.directCost = Math.max(previousDirectCost, incomingDirectCost);
+		}
+		const previousAiu = ref.history?.directAiu;
+		const incomingAiu = definedHistory.directAiu;
+		if (expectedSessionFile !== undefined && previousAiu && incomingAiu) {
+			definedHistory.directAiu = {
+				nano: Math.max(previousAiu.nano, incomingAiu.nano),
+				unknownCalls: Math.max(previousAiu.unknownCalls, incomingAiu.unknownCalls),
+			};
 		}
 		ref.history = { ...ref.history, ...definedHistory };
 		this.#emit({ type: "metadata_changed", ref });
@@ -416,8 +433,11 @@ export class AgentRegistry implements AgentRegistryApi {
 		ref.session = session;
 		if (sessionFile !== undefined) {
 			// A replacement transcript starts a new cumulative-cost identity.
-			if (ref.sessionFile !== sessionFile && ref.history?.directCost !== undefined) {
-				ref.history = { ...ref.history, directCost: undefined };
+			if (
+				ref.sessionFile !== sessionFile &&
+				(ref.history?.directCost !== undefined || ref.history?.directAiu !== undefined)
+			) {
+				ref.history = { ...ref.history, directCost: undefined, directAiu: undefined };
 			}
 			ref.sessionFile = sessionFile;
 		}

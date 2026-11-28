@@ -14,6 +14,7 @@ import {
 	isCompiledBinary,
 	isRecord,
 	logger,
+	relativePathWithinNormalizedRoot,
 	stripWindowsExtendedLengthPathPrefix,
 } from "@oh-my-pi/pi-utils";
 import { registerPluginCacheInvalidator } from "../../discovery/helpers";
@@ -60,11 +61,25 @@ interface ExtensionSpecifierReference {
 	readonly end: number;
 }
 
+/** Specifier of a `@jsxImportSource` pragma comment; offsets span the specifier text alone. */
+interface JsxImportSourcePragma {
+	readonly specifier: string;
+	readonly start: number;
+	readonly end: number;
+}
+
+/** Replacement text for a source range. */
+interface SourceEdit {
+	readonly start: number;
+	readonly end: number;
+	readonly text: string;
+}
+
 function parseExtensionSource(source: string, importerPath: string): ParseResult {
 	// Installing specifier hooks needs no parser; only a real source rewrite does.
 	const { parse: parseBabel }: typeof BabelParser = require("@babel/parser");
 	const extension = path.extname(importerPath).toLowerCase();
-	const plugins: ParserPlugin[] = ["decorators-legacy", "explicitResourceManagement"];
+	const plugins: ParserPlugin[] = ["decorators-legacy"];
 	if (extension === ".ts" || extension === ".mts" || extension === ".cts" || extension === ".tsx") {
 		plugins.push("typescript");
 	}
@@ -460,11 +475,7 @@ function staticMemberPropertyName(node: StructuralAstNode): string | null {
 	return null;
 }
 
-function collectExtensionSpecifierReferences(
-	source: string,
-	importerPath: string,
-	ast: ParseResult = parseExtensionSource(source, importerPath),
-): ExtensionSpecifierReference[] {
+function collectExtensionSpecifierReferences(nodes: readonly ScopedAstNode[]): ExtensionSpecifierReference[] {
 	const references: ExtensionSpecifierReference[] = [];
 	const record = (kind: ExtensionSpecifierReference["kind"], literal: unknown): void => {
 		const node = asAstNode(literal);
@@ -479,7 +490,8 @@ function collectExtensionSpecifierReferences(
 	};
 	const createRequireBindings = new Set<string>();
 	const moduleNamespaceBindings = new Set<string>();
-	for (const { node } of collectScopedAstNodes(ast, candidate => candidate.type === "ImportDeclaration")) {
+	for (const { node } of nodes) {
+		if (node.type !== "ImportDeclaration") continue;
 		const source = asAstNode(node.source);
 		if (source?.type !== "StringLiteral" || (source.value !== "node:module" && source.value !== "module")) continue;
 		for (const value of Array.isArray(node.specifiers) ? node.specifiers : []) {
@@ -499,7 +511,7 @@ function collectExtensionSpecifierReferences(
 			}
 		}
 	}
-	for (const { node, scope } of collectScopedAstNodes(ast, isSpecifierReferenceNode)) {
+	for (const { node, scope } of nodes) {
 		if (
 			node.type === "ImportDeclaration" ||
 			node.type === "ExportNamedDeclaration" ||
@@ -515,9 +527,7 @@ function collectExtensionSpecifierReferences(
 			}
 		} else if (node.type === "CallExpression") {
 			const callee = asAstNode(node.callee);
-			if (callee?.type === "Import") {
-				record("import", nodeArgument(node, 0));
-			} else if (isIdentifier(callee, "require") && !scopeHasBinding(scope, REQUIRE_BINDING)) {
+			if (isIdentifier(callee, "require") && !scopeHasBinding(scope, REQUIRE_BINDING)) {
 				record("require", nodeArgument(node, 0));
 			} else if (isCreateRequireInvocation(callee, createRequireBindings, moduleNamespaceBindings)) {
 				// `createRequire(base)(spec)` — pin the invoked bare dependency so it
@@ -537,15 +547,43 @@ function collectExtensionSpecifierReferences(
 	return references;
 }
 
-const EXTENSION_PARSE_CACHE_SCHEMA_VERSION = 3;
+// A negative test only, not a JS parser: every dependency syntax we rewrite
+// contains one of these strings (or a Unicode escape in a require identifier).
+// False positives, including occurrences in comments, take the normal AST path.
+const POSSIBLE_EXTENSION_REFERENCE = /import|from|require|@jsxImportSource|\\u/;
+
+const JSX_IMPORT_SOURCE_PRAGMA = /@jsxImportSource\s+(\S+)/g;
+
+/**
+ * Collect the `@jsxImportSource` pragmas Bun reads when transpiling JSX. Bun honors them in any
+ * comment, so every match is recorded; the runtime import it injects from them never passes
+ * through the specifier rewrite in {@link rewriteLegacyExtensionSource}.
+ */
+function collectJsxImportSourcePragmas(ast: ParseResult): JsxImportSourcePragma[] {
+	const pragmas: JsxImportSourcePragma[] = [];
+	for (const comment of ast.comments ?? []) {
+		if (typeof comment.start !== "number") continue;
+		// Both `//` and `/*` open the comment two characters before its value.
+		const valueStart = comment.start + 2;
+		for (const match of comment.value.matchAll(JSX_IMPORT_SOURCE_PRAGMA)) {
+			const specifier = match[1];
+			const start = valueStart + match.index + match[0].length - specifier.length;
+			pragmas.push({ specifier, start, end: start + specifier.length });
+		}
+	}
+	return pragmas;
+}
+
+const EXTENSION_PARSE_CACHE_SCHEMA_VERSION = 4;
 const CREATE_EXTENSION_PARSE_CACHE_TABLE =
-	"CREATE TABLE IF NOT EXISTS extension_parse_cache (cache_key TEXT PRIMARY KEY, source_type TEXT NOT NULL, [references] TEXT NOT NULL, commonjs_syntax INTEGER NOT NULL)";
+	"CREATE TABLE IF NOT EXISTS extension_parse_cache (cache_key TEXT PRIMARY KEY, source_type TEXT NOT NULL, [references] TEXT NOT NULL, jsx_import_sources TEXT NOT NULL, commonjs_syntax INTEGER NOT NULL)";
 const EXTENSION_PARSE_CACHE_MAX_BYTES = 8 * 1024 * 1024;
 const EXTENSION_PARSE_CACHE_MAX_ENTRIES = 10_000;
 
 interface ExtensionSourceAnalysis {
 	readonly sourceType: "script" | "module";
 	readonly references: readonly ExtensionSpecifierReference[];
+	readonly jsxImportSources: readonly JsxImportSourcePragma[];
 	/** Script source with an unshadowed `require(...)`, `exports`, or `module.exports` use. Always false for modules. */
 	readonly hasCommonJsSyntax: boolean;
 }
@@ -553,6 +591,7 @@ interface ExtensionSourceAnalysis {
 interface ExtensionParseCacheRow {
 	source_type: "script" | "module";
 	references: string;
+	jsx_import_sources: string;
 	commonjs_syntax: number;
 }
 
@@ -647,28 +686,35 @@ function parseCachedAnalysis(row: ExtensionParseCacheRow): ExtensionSourceAnalys
 	try {
 		if (row.source_type !== "script" && row.source_type !== "module") return null;
 		const references = JSON.parse(row.references) as unknown;
+		const jsxImportSources = JSON.parse(row.jsx_import_sources) as unknown;
 		if (
 			!Array.isArray(references) ||
 			!references.every(
-				reference =>
-					reference &&
-					typeof reference === "object" &&
-					(reference.kind === "import" || reference.kind === "require") &&
-					typeof reference.specifier === "string" &&
-					typeof reference.start === "number" &&
-					typeof reference.end === "number",
-			)
+				reference => isSourceSpan(reference) && (reference.kind === "import" || reference.kind === "require"),
+			) ||
+			!Array.isArray(jsxImportSources) ||
+			!jsxImportSources.every(isSourceSpan)
 		) {
 			return null;
 		}
 		return {
 			sourceType: row.source_type,
 			references: references as ExtensionSpecifierReference[],
+			jsxImportSources: jsxImportSources as JsxImportSourcePragma[],
 			hasCommonJsSyntax: row.commonjs_syntax === 1,
 		};
 	} catch {
 		return null;
 	}
+}
+
+function isSourceSpan(value: unknown): value is JsxImportSourcePragma & Record<string, unknown> {
+	return (
+		isRecord(value) &&
+		typeof value.specifier === "string" &&
+		typeof value.start === "number" &&
+		typeof value.end === "number"
+	);
 }
 
 function writeExtensionSourceAnalysis(cacheKey: string, analysis: ExtensionSourceAnalysis): void {
@@ -677,8 +723,14 @@ function writeExtensionSourceAnalysis(cacheKey: string, analysis: ExtensionSourc
 			const db = getExtensionParseCacheDb();
 			if (!db) return;
 			db.run(
-				"INSERT OR REPLACE INTO extension_parse_cache (cache_key, source_type, [references], commonjs_syntax) VALUES (?, ?, ?, ?)",
-				[cacheKey, analysis.sourceType, JSON.stringify(analysis.references), analysis.hasCommonJsSyntax ? 1 : 0],
+				"INSERT OR REPLACE INTO extension_parse_cache (cache_key, source_type, [references], jsx_import_sources, commonjs_syntax) VALUES (?, ?, ?, ?, ?)",
+				[
+					cacheKey,
+					analysis.sourceType,
+					JSON.stringify(analysis.references),
+					JSON.stringify(analysis.jsxImportSources),
+					analysis.hasCommonJsSyntax ? 1 : 0,
+				],
 			);
 			const count =
 				db.query<{ count: number }, []>("SELECT count(*) AS count FROM extension_parse_cache").get()?.count ?? 0;
@@ -702,7 +754,7 @@ function getExtensionSourceAnalysis(source: string, importerPath: string): Exten
 	try {
 		const row = db
 			?.query<ExtensionParseCacheRow, [string]>(
-				"SELECT source_type, [references], commonjs_syntax FROM extension_parse_cache WHERE cache_key = ?",
+				"SELECT source_type, [references], jsx_import_sources, commonjs_syntax FROM extension_parse_cache WHERE cache_key = ?",
 			)
 			.get(cacheKey);
 		if (row) {
@@ -720,33 +772,35 @@ function getExtensionSourceAnalysis(source: string, importerPath: string): Exten
 
 	const ast = parseExtensionSource(source, importerPath);
 	const sourceType = ast.program.sourceType;
+	const nodes = collectScopedAstNodes(
+		ast,
+		node => isSpecifierReferenceNode(node) || (sourceType === "script" && node.type === "MemberExpression"),
+	);
 	const analysis: ExtensionSourceAnalysis = {
 		sourceType,
-		references: collectExtensionSpecifierReferences(source, importerPath, ast),
+		references: collectExtensionSpecifierReferences(nodes),
+		jsxImportSources: collectJsxImportSourcePragmas(ast),
 		hasCommonJsSyntax:
 			sourceType === "script" &&
-			collectScopedAstNodes(ast, node => node.type === "CallExpression" || node.type === "MemberExpression").some(
-				({ node, scope }) => {
-					if (isGlobalRequireCall(node, scope)) return true;
-					if (node.type !== "MemberExpression") return false;
-					return (
-						isUnshadowedExportsTarget(node, scope) || isUnshadowedExportsTarget(asAstNode(node.object), scope)
-					);
-				},
-			),
+			nodes.some(({ node, scope }) => {
+				if (isGlobalRequireCall(node, scope)) return true;
+				if (node.type !== "MemberExpression") return false;
+				return isUnshadowedExportsTarget(node, scope) || isUnshadowedExportsTarget(asAstNode(node.object), scope);
+			}),
 	};
 	extensionSourceAnalysisCache.set(cacheKey, analysis);
 	writeExtensionSourceAnalysis(cacheKey, analysis);
 	return analysis;
 }
 
-function applySpecifierReplacements(
-	source: string,
-	replacements: ReadonlyArray<ExtensionSpecifierReference & { readonly replacement: string }>,
-): string {
+function toSpecifierEdit(reference: ExtensionSpecifierReference & { readonly replacement: string }): SourceEdit {
+	return { start: reference.start, end: reference.end, text: JSON.stringify(reference.replacement) };
+}
+
+function applySourceEdits(source: string, edits: readonly SourceEdit[]): string {
 	let rewritten = source;
-	for (const reference of [...replacements].sort((left, right) => right.start - left.start)) {
-		rewritten = `${rewritten.slice(0, reference.start)}${JSON.stringify(reference.replacement)}${rewritten.slice(reference.end)}`;
+	for (const edit of [...edits].sort((left, right) => right.start - left.start)) {
+		rewritten = `${rewritten.slice(0, edit.start)}${edit.text}${rewritten.slice(edit.end)}`;
 	}
 	return rewritten;
 }
@@ -845,7 +899,10 @@ const PI_TUI_SPECIFIER = new RegExp(
 /** Docs section describing the pi-tui → pi-tui migration. */
 export const PI_TUI_MIGRATION_DOC = "docs/extensions.md#migrating-from-pi-tui";
 
-/** An extension module imports upstream pi-tui, whose API omp no longer provides. */
+/**
+ * An extension module imports upstream pi-tui, or an `@oh-my-pi/pi-tui` subpath of the old API the
+ * host package no longer provides, either way an API omp no longer has.
+ */
 export class PiTuiImportError extends Error {
 	constructor(
 		readonly specifier: string,
@@ -865,6 +922,17 @@ export class PiTuiImportError extends Error {
 /** Throw {@link PiTuiImportError} when `specifier` names upstream pi-tui. */
 function assertNoPiTuiImport(specifier: string, importerPath: string): void {
 	if (PI_TUI_SPECIFIER.test(specifier)) throw new PiTuiImportError(specifier, importerPath);
+}
+
+const HOST_PI_TUI_SUBPATH_PREFIX = `${CANONICAL_PI_SCOPE}/pi-tui/`;
+
+/**
+ * Throw {@link PiTuiImportError} when the host failed to resolve `remappedSpecifier`, an
+ * `@oh-my-pi/pi-tui` subpath. Falling through to the extension's own resolution would load an
+ * alternate (old-API) pi-tui copy or surface a raw resolver error naming an unrelated package.
+ */
+function assertHostPiTuiSubpathResolved(remappedSpecifier: string, specifier: string, importerPath: string): void {
+	if (remappedSpecifier.startsWith(HOST_PI_TUI_SUBPATH_PREFIX)) throw new PiTuiImportError(specifier, importerPath);
 }
 
 const PI_SCOPE_ALTERNATION = PI_SCOPE_ALIASES.join("|");
@@ -1191,11 +1259,14 @@ async function rewriteLegacyExtensionSource(
 	importerPath: string,
 	mtimeTag: string | null = null,
 	resolvedImportMtimeTag: string | null = mtimeTag,
+	sources?: ExtensionGraphSources,
 ): Promise<string> {
+	if (sources?.isPlainLeafEntry(importerPath, source)) return source;
 	// Compiled mode completes the override map from the build-supplied module
 	// keys on first use; every rewrite path must see the full map.
 	await ensureLegacyPiOverridesReady();
-	const references = getExtensionSourceAnalysis(source, importerPath).references;
+	const analysis = sources ? await sources.analyze(importerPath) : getExtensionSourceAnalysis(source, importerPath);
+	const references = analysis.references;
 	const replacements: Array<ExtensionSpecifierReference & { replacement: string }> = [];
 	for (const reference of references) {
 		assertNoPiTuiImport(reference.specifier, importerPath);
@@ -1210,6 +1281,7 @@ async function rewriteLegacyExtensionSource(
 			} catch {
 				// Compiled fallback may be absent from a malformed build. Continue to
 				// the extension's on-disk peer dependency resolution below.
+				assertHostPiTuiSubpathResolved(remappedSpecifier, specifier, importerPath);
 			}
 		}
 		if (!replacement && TYPEBOX_SHIM_PATH && (specifier === "typebox" || specifier === "@sinclair/typebox")) {
@@ -1234,8 +1306,30 @@ async function rewriteLegacyExtensionSource(
 	// import-rewritten text: the rewrite embeds the load's `?mtime=` tag, which
 	// changes on every same-process reload and would force a Babel reparse.
 	// Import and require references never overlap, so one pass applies both.
-	replacements.push(...(await collectExtensionSpecifierReplacements(source, importerPath)));
-	return applySpecifierReplacements(source, replacements);
+	replacements.push(...(await collectExtensionSpecifierReplacements(references, importerPath, false, sources)));
+	return applySourceEdits(source, [
+		...replacements.map(toSpecifierEdit),
+		...jsxImportSourceEdits(analysis.jsxImportSources),
+	]);
+}
+
+/**
+ * Point `@jsxImportSource` pragmas naming a host package at its bundled module. Bun appends
+ * `/jsx-runtime` (or `/jsx-dev-runtime`) to the pragma value and imports the result while it
+ * transpiles, after this rewrite, and compiled binaries fire no resolve hook for that import.
+ * A bundled virtual specifier keeps resolving with the suffix appended; source mode needs no
+ * edit because `installLegacyPiSpecifierShim()` still resolves the injected import there.
+ */
+function jsxImportSourceEdits(pragmas: readonly JsxImportSourcePragma[]): SourceEdit[] {
+	const edits: SourceEdit[] = [];
+	for (const pragma of pragmas) {
+		const remappedSpecifier = remapLegacyPiSpecifier(pragma.specifier);
+		const host = remappedSpecifier ? legacyPiPackageRootOverrides[remappedSpecifier] : undefined;
+		if (host && isBundledVirtualSpecifier(host)) {
+			edits.push({ start: pragma.start, end: pragma.end, text: host });
+		}
+	}
+	return edits;
 }
 
 /** Test seam for compiled-binary legacy extension source rewriting. */
@@ -1281,7 +1375,7 @@ function hasSourceModuleExtension(p: string): boolean {
 	return (SOURCE_MODULE_EXTENSIONS as readonly string[]).includes(ext);
 }
 
-async function resolveSourceModuleFile(basePath: string): Promise<string | null> {
+async function resolveSourceModuleFile(basePath: string, preferDirectoryMain = false): Promise<string | null> {
 	try {
 		const stats = await fs.promises.stat(basePath);
 		if (stats.isFile()) {
@@ -1291,6 +1385,13 @@ async function resolveSourceModuleFile(basePath: string): Promise<string | null>
 			return hasSourceModuleExtension(basePath) ? realpathOrSelf(basePath) : null;
 		}
 		if (stats.isDirectory()) {
+			if (preferDirectoryMain) {
+				const manifest = await readPackageManifest(basePath);
+				if (typeof manifest?.main === "string") {
+					const main = await resolveSourceModuleFile(path.resolve(basePath, manifest.main));
+					if (main) return main;
+				}
+			}
 			for (const extension of SOURCE_MODULE_EXTENSIONS) {
 				const resolved = await resolveSourceModuleFile(path.join(basePath, `index${extension}`));
 				if (resolved) return resolved;
@@ -1311,26 +1412,8 @@ async function resolveSourceModuleFile(basePath: string): Promise<string | null>
 	return null;
 }
 
-async function resolveRelativeCommonJsRequire(specifier: string, importerPath: string): Promise<string | null> {
-	const candidate = path.resolve(path.dirname(importerPath), specifier);
-	try {
-		const stats = await fs.promises.stat(candidate);
-		if (stats.isDirectory()) {
-			const manifest = await readPackageManifest(candidate);
-			if (typeof manifest?.main === "string") {
-				const main = await resolveSourceModuleFile(path.resolve(candidate, manifest.main));
-				if (main) return main;
-			}
-		}
-	} catch {
-		// Missing candidates fall through to extension and index resolution.
-	}
-	return resolveSourceModuleFile(candidate);
-}
-
 function isPathInsideRoot(rootPath: string, candidatePath: string): boolean {
-	const relative = path.relative(rootPath, candidatePath);
-	return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+	return relativePathWithinNormalizedRoot(rootPath, candidatePath) !== null;
 }
 
 async function resolvePackageSourceTarget(packageRoot: string, targetPath: string): Promise<string | null> {
@@ -1641,7 +1724,7 @@ async function readPackageManifestUncached(packageRoot: string): Promise<Record<
 type ExtensionModuleKind = "commonjs" | "esm";
 
 /**
- * Per-walk memo of source text, analysis, and relative `require()` resolution.
+ * Per-walk memo of source text, analysis, and relative import/require resolution.
  * Every edge into a module asks for its CommonJS verdict, and every extensionless
  * `require("./x")` probes up to nine paths; without this each edge repeated the
  * reads, hashes, and stats. Scoped to a single walk so reloads still see edits.
@@ -1650,12 +1733,31 @@ class ExtensionGraphSources {
 	readonly #sources = new Map<string, Promise<string>>();
 	readonly #analyses = new Map<string, Promise<ExtensionSourceAnalysis>>();
 	readonly #relativeRequires = new Map<string, Promise<string | null>>();
+	readonly #relativeImports = new Map<string, string>();
+
+	constructor(readonly plainEntry?: string) {}
+
+	// Only the entry is necessarily compiled now. Helpers may be lazy, and
+	// tagged reloads must still walk and validate the full edited graph.
+	isPlainLeafEntry(modulePath: string, source: string): boolean {
+		return this.plainEntry === modulePath && !POSSIBLE_EXTENSION_REFERENCE.test(source);
+	}
+
+	resolveRelativeImport(specifier: string, dir: string): string {
+		const key = `${dir}\0${specifier}`;
+		let resolved = this.#relativeImports.get(key);
+		if (resolved === undefined) {
+			resolved = Bun.resolveSync(specifier, dir);
+			this.#relativeImports.set(key, resolved);
+		}
+		return resolved;
+	}
 
 	resolveRelativeRequire(specifier: string, importerPath: string): Promise<string | null> {
 		const key = path.resolve(path.dirname(importerPath), specifier);
 		let resolved = this.#relativeRequires.get(key);
 		if (!resolved) {
-			resolved = resolveRelativeCommonJsRequire(specifier, importerPath);
+			resolved = resolveSourceModuleFile(key, true);
 			this.#relativeRequires.set(key, resolved);
 		}
 		return resolved;
@@ -1978,7 +2080,7 @@ async function resolveExtensionCommonJsRequire(
 	if (specifier.startsWith(".")) {
 		return sources
 			? sources.resolveRelativeRequire(specifier, importerPath)
-			: resolveRelativeCommonJsRequire(specifier, importerPath);
+			: resolveSourceModuleFile(path.resolve(path.dirname(importerPath), specifier), true);
 	}
 	const remappedSpecifier = remapLegacyPiSpecifier(specifier);
 	if (remappedSpecifier) {
@@ -1988,6 +2090,7 @@ async function resolveExtensionCommonJsRequire(
 		} catch {
 			// A malformed compiled registry can still fall through to an
 			// extension-installed legacy peer dependency.
+			assertHostPiTuiSubpathResolved(remappedSpecifier, specifier, importerPath);
 		}
 		if (resolved) {
 			if (isBundledVirtualSpecifier(resolved)) {
@@ -2014,15 +2117,11 @@ async function resolveExtensionCommonJsRequire(
  * lazy hydration after load-time source caches clear.
  */
 async function collectExtensionSpecifierReplacements(
-	source: string,
+	references: readonly ExtensionSpecifierReference[],
 	importerPath: string,
-	rewriteImports = false,
-	/** The walk that read `source` for `importerPath`; its analysis memo is keyed by path. */
+	rewriteImports: boolean,
 	sources?: ExtensionGraphSources,
 ): Promise<Array<ExtensionSpecifierReference & { replacement: string }>> {
-	const { references } = sources
-		? await sources.analyze(importerPath)
-		: getExtensionSourceAnalysis(source, importerPath);
 	const resolvedSpecifierTargets = new Map<string, string>();
 	const replacements: Array<ExtensionSpecifierReference & { replacement: string }> = [];
 	for (const reference of references) {
@@ -2031,7 +2130,10 @@ async function collectExtensionSpecifierReplacements(
 			resolved = await resolveExtensionCommonJsRequire(reference.specifier, importerPath, sources);
 		} else if (rewriteImports) {
 			if (reference.specifier.startsWith(".")) {
-				const candidate = Bun.resolveSync(reference.specifier, path.dirname(importerPath));
+				const dir = path.dirname(importerPath);
+				const candidate = sources
+					? sources.resolveRelativeImport(reference.specifier, dir)
+					: Bun.resolveSync(reference.specifier, dir);
 				resolved = hasSourceModuleExtension(candidate) ? await realpathOrSelf(candidate) : null;
 			} else if (reference.specifier.startsWith("#")) {
 				resolved = packageImportPath(
@@ -2063,7 +2165,7 @@ function rewriteExtensionSpecifiersFromCache(source: string, importerPath: strin
 			replacements.push({ ...reference, replacement });
 		}
 	}
-	return applySpecifierReplacements(source, replacements);
+	return applySourceEdits(source, replacements.map(toSpecifierEdit));
 }
 
 /**
@@ -2072,23 +2174,22 @@ function rewriteExtensionSpecifiersFromCache(source: string, importerPath: strin
  * extension graph so {@link collectExtensionSpecifierReplacements} can pin its
  * platform-package requires to absolute paths.
  */
-async function moduleRequiresNativeAddon(modulePath: string): Promise<boolean> {
+async function moduleRequiresNativeAddon(sources: ExtensionGraphSources, modulePath: string): Promise<boolean> {
 	const cached = nativeAddonRequireScanCache.get(modulePath);
 	if (cached) return cached;
 
-	const promise = moduleRequiresNativeAddonUncached(modulePath);
+	const promise = moduleRequiresNativeAddonUncached(sources, modulePath);
 	nativeAddonRequireScanCache.set(modulePath, promise);
 	return promise;
 }
 
-async function moduleRequiresNativeAddonUncached(modulePath: string): Promise<boolean> {
-	let source: string;
+async function moduleRequiresNativeAddonUncached(sources: ExtensionGraphSources, modulePath: string): Promise<boolean> {
 	try {
-		source = await Bun.file(modulePath).text();
+		await sources.read(modulePath);
 	} catch {
 		return false;
 	}
-	for (const reference of getExtensionSourceAnalysis(source, modulePath).references) {
+	for (const reference of (await sources.analyze(modulePath)).references) {
 		if (reference.kind === "require" && (await resolveExtensionNativeAddon(reference.specifier, modulePath))) {
 			return true;
 		}
@@ -2305,14 +2406,16 @@ interface ExtensionModuleGraph {
  * synchronous bridge. Resolved ESM imports inside third-party dependencies
  * omit the reload tag so their importer paths stay query-free.
  */
-async function collectExtensionModules(entryRealPath: string): Promise<ExtensionModuleGraph> {
+async function collectExtensionModules(
+	entryRealPath: string,
+	sources: ExtensionGraphSources,
+): Promise<ExtensionModuleGraph> {
 	const modules = new Map<string, string>();
 	const commonJsPaths = new Set<string>();
 	const synchronousSourcePaths = new Set<string>();
 	const queuedCacheBustResolvedImports = new Map<string, boolean>([[entryRealPath, true]]);
 	const queuedModuleKinds = new Map<string, ExtensionModuleKind>([[entryRealPath, "esm"]]);
 	const queuedEsmBranchPaths = new Set<string>();
-	const sources = new ExtensionGraphSources();
 	const queue: Array<{
 		file: string;
 		cacheBustResolvedImports: boolean;
@@ -2338,6 +2441,9 @@ async function collectExtensionModules(entryRealPath: string): Promise<Extension
 			continue;
 		}
 		modules.set(file, source);
+		// Tools often use only their injected API. Bun will compile this entry;
+		// there are no edges for the graph walker or rewriter to prepare.
+		if (sources.isPlainLeafEntry(file, source)) continue;
 		const analysis = await sources.analyze(file);
 		const sourceIsCommonJs = await isGraphOwnedCommonJsModule(
 			sources,
@@ -2367,7 +2473,7 @@ async function collectExtensionModules(entryRealPath: string): Promise<Extension
 				if (specifier.startsWith(".")) {
 					const candidate = isRequired
 						? await sources.resolveRelativeRequire(specifier, file)
-						: Bun.resolveSync(specifier, dir);
+						: sources.resolveRelativeImport(specifier, dir);
 					if (candidate && hasSourceModuleExtension(candidate)) {
 						const inheritedTargetKind = isRequired
 							? sourceIsCommonJs
@@ -2386,7 +2492,7 @@ async function collectExtensionModules(entryRealPath: string): Promise<Extension
 						);
 						const isCommonJsDescendant = isRequired && sourceIsCommonJs && targetIsCommonJs;
 						requiresNativeAddonRewrite =
-							isRequired && !isCommonJsDescendant && (await moduleRequiresNativeAddon(candidate));
+							isRequired && !isCommonJsDescendant && (await moduleRequiresNativeAddon(sources, candidate));
 						if (!isRequired || isCommonJsDescendant || requiresNativeAddonRewrite || !targetIsCommonJs) {
 							resolved = await realpathOrSelf(candidate);
 							resolvedModuleKind = targetIsCommonJs ? "commonjs" : "esm";
@@ -2414,7 +2520,7 @@ async function collectExtensionModules(entryRealPath: string): Promise<Extension
 						);
 						const isCommonJsDescendant = isRequired && sourceIsCommonJs && targetIsCommonJs;
 						requiresNativeAddonRewrite =
-							isRequired && !isCommonJsDescendant && (await moduleRequiresNativeAddon(candidate));
+							isRequired && !isCommonJsDescendant && (await moduleRequiresNativeAddon(sources, candidate));
 						if (!isRequired || isCommonJsDescendant || requiresNativeAddonRewrite || !targetIsCommonJs) {
 							resolved = candidate;
 							resolvedModuleKind = targetIsCommonJs ? "commonjs" : "esm";
@@ -2454,7 +2560,7 @@ async function collectExtensionModules(entryRealPath: string): Promise<Extension
 						resolved = await realpathOrSelf(dependencyEntry);
 						requiresSynchronousSourceHook = true;
 					} else if (isHookableEntry && dependencyEntry && isRequired) {
-						requiresNativeAddonRewrite = await moduleRequiresNativeAddon(dependencyEntry);
+						requiresNativeAddonRewrite = await moduleRequiresNativeAddon(sources, dependencyEntry);
 						if (requiresNativeAddonRewrite) {
 							resolved = await realpathOrSelf(dependencyEntry);
 						}
@@ -2512,15 +2618,11 @@ async function collectExtensionModules(entryRealPath: string): Promise<Extension
 	}
 	for (const [modulePath, source] of modules) {
 		if (commonJsPaths.has(modulePath)) {
-			modules.set(
-				modulePath,
-				applySpecifierReplacements(
-					source,
-					await collectExtensionSpecifierReplacements(source, modulePath, true, sources),
-				),
-			);
+			const { references } = await sources.analyze(modulePath);
+			const replacements = await collectExtensionSpecifierReplacements(references, modulePath, true, sources);
+			modules.set(modulePath, applySourceEdits(source, replacements.map(toSpecifierEdit)));
 		} else if (synchronousSourcePaths.has(modulePath)) {
-			modules.set(modulePath, await rewriteLegacyExtensionSource(source, modulePath));
+			modules.set(modulePath, await rewriteLegacyExtensionSource(source, modulePath, null, null, sources));
 		}
 	}
 	return {
@@ -2540,7 +2642,7 @@ export async function __collectLegacyPiExtensionSourcesForTests(
 	entryPath: string,
 ): Promise<ReadonlyMap<string, string>> {
 	const entryRealPath = await realpathOrSelf(path.resolve(entryPath));
-	const graph = await collectExtensionModules(entryRealPath);
+	const graph = await collectExtensionModules(entryRealPath, new ExtensionGraphSources());
 	return graph.modules;
 }
 
@@ -2592,13 +2694,14 @@ async function prepareGraphCommonJsModule(modulePath: string, source: string): P
  * loaders stay synchronous because Bun rejects `require()` targets backed by
  * async `onLoad` callbacks.
  */
-async function installExtensionGraphHook(
+function installExtensionGraphHook(
 	entryRealPath: string,
 	modules: Map<string, string>,
 	commonJsPaths: Set<string>,
 	synchronousSourcePaths: ReadonlySet<string>,
 	cacheBustResolvedImportModules: ReadonlySet<string>,
-): Promise<{ asyncModules: Map<string, string> }> {
+	initialSources: ExtensionGraphSources | undefined,
+): () => void {
 	const asyncModules = new Map<string, string>();
 	for (const [modulePath, source] of modules) {
 		if (commonJsPaths.has(modulePath) || synchronousSourcePaths.has(modulePath)) {
@@ -2628,6 +2731,7 @@ async function installExtensionGraphHook(
 						return { contents: synchronousSource, loader: getLoader(sourcePath) };
 					}
 					const cached = asyncModules.get(sourcePath);
+					const sources = cached === undefined ? undefined : initialSources;
 					const resolvedImportMtimeTag = cacheBustResolvedImportModules.has(sourcePath) ? mtimeTag : null;
 					return (async () => {
 						let raw: string;
@@ -2639,7 +2743,13 @@ async function installExtensionGraphHook(
 							raw = await Bun.file(sourcePath).text();
 						}
 						return {
-							contents: await rewriteLegacyExtensionSource(raw, sourcePath, mtimeTag, resolvedImportMtimeTag),
+							contents: await rewriteLegacyExtensionSource(
+								raw,
+								sourcePath,
+								mtimeTag,
+								resolvedImportMtimeTag,
+								sources,
+							),
 							loader: getLoader(sourcePath),
 						};
 					})();
@@ -2696,7 +2806,11 @@ async function installExtensionGraphHook(
 			},
 		});
 	}
-	return { asyncModules };
+	return () => {
+		asyncModules.clear();
+		// The permanent hook must neither retain the walk nor reuse it on a late import.
+		initialSources = undefined;
+	};
 }
 
 /**
@@ -2707,13 +2821,19 @@ async function installExtensionGraphHook(
  * Returns a clearable handle to drop cached sources that weren't consumed
  * during the initial load; `undefined` when no new modules were discovered.
  */
-async function ensureExtensionGraphHook(entryRealPath: string): Promise<{ clear(): void } | undefined> {
+async function ensureExtensionGraphHook(
+	entryRealPath: string,
+	reload: boolean,
+): Promise<{ clear(): void } | undefined> {
+	// The CommonJS bridge still needs its definitions even when there are no edges.
+	const plainEntry = reload || /\.(?:cjs|cts)$/i.test(entryRealPath) ? undefined : entryRealPath;
+	const sources = new ExtensionGraphSources(plainEntry);
 	const {
 		modules: currentModules,
 		commonJsPaths,
 		cacheBustResolvedImportModules: discoveredCacheBustModules,
 		synchronousSourcePaths,
-	} = await collectExtensionModules(entryRealPath);
+	} = await collectExtensionModules(entryRealPath, sources);
 	let cacheBustResolvedImportModules = extensionGraphCacheBustResolvedImportModules.get(entryRealPath);
 	if (!cacheBustResolvedImportModules) {
 		cacheBustResolvedImportModules = new Set<string>();
@@ -2760,22 +2880,23 @@ async function ensureExtensionGraphHook(entryRealPath: string): Promise<{ clear(
 		return undefined;
 	}
 
-	let asyncModules = new Map<string, string>();
+	let clearInitialSources: (() => void) | undefined;
 	if (pendingModules.size > 0) {
-		({ asyncModules } = await installExtensionGraphHook(
+		clearInitialSources = installExtensionGraphHook(
 			entryRealPath,
 			pendingModules,
 			pendingCommonJsPaths,
 			pendingSynchronousSourcePaths,
 			cacheBustResolvedImportModules,
-		));
+			sources,
+		);
 		for (const modulePath of pendingModules.keys()) {
 			hookedModules.add(modulePath);
 		}
 	}
 	return {
 		clear() {
-			asyncModules.clear();
+			clearInitialSources?.();
 			for (const modulePath of commonJsPaths) {
 				commonJsModuleDefinitions.delete(modulePath);
 				commonJsModuleCache.delete(modulePath);
@@ -2783,6 +2904,10 @@ async function ensureExtensionGraphHook(entryRealPath: string): Promise<{ clear(
 		},
 	};
 }
+
+// Plain-path imports are shared by Bun. Share the loader work as well, keyed
+// by that same identity (never cache reload-tagged evaluations or failures).
+const plainModuleLoads = new Map<string, Promise<unknown>>();
 
 /**
  * Load a legacy Pi extension module from its real on-disk location.
@@ -2804,10 +2929,25 @@ export async function loadLegacyPiModule(resolvedPath: string, options: { reload
 	// `bun link`/pnpm installs) so the rewrite filter matches the path Bun
 	// actually hands the hook.
 	const entryRealPath = await realpathOrSelf(path.resolve(resolvedPath));
-	// The entry is imported by its real path, so that is the one Bun must read.
-	if (!isBundledVirtualSpecifier(entryRealPath)) await assertBunCanImport(entryRealPath);
-	await ensureLegacyPiOverridesReady();
-	const pendingSources = await ensureExtensionGraphHook(entryRealPath);
+	if (options.reload !== false) return importLegacyPiModule(entryRealPath, true);
+	let load = plainModuleLoads.get(entryRealPath);
+	if (!load) {
+		load = importLegacyPiModule(entryRealPath, false).catch(error => {
+			plainModuleLoads.delete(entryRealPath);
+			throw error;
+		});
+		plainModuleLoads.set(entryRealPath, load);
+	}
+	return load;
+}
+
+async function importLegacyPiModule(entryRealPath: string, reload: boolean): Promise<unknown> {
+	const pendingSources = await logger.time("prepareModule", async () => {
+		// The entry is imported by its real path, so that is the one Bun must read.
+		if (!isBundledVirtualSpecifier(entryRealPath)) await assertBunCanImport(entryRealPath);
+		await ensureLegacyPiOverridesReady();
+		return ensureExtensionGraphHook(entryRealPath, reload);
+	});
 	try {
 		// Dynamic import is required: legacy extension entry paths are user/plugin supplied at runtime.
 		// Use the raw filesystem path so Bun keys the `?mtime` suffix as part of
@@ -2816,8 +2956,8 @@ export async function loadLegacyPiModule(resolvedPath: string, options: { reload
 		const entrySpecifier = isBundledVirtualSpecifier(entryRealPath)
 			? toImportSpecifier(entryRealPath)
 			: stripWindowsExtendedLengthPathPrefix(entryRealPath);
-		if (options.reload === false) return await import(entrySpecifier);
-		return await import(`${entrySpecifier}?mtime=${nextLegacyPiLoadTag(entryRealPath)}`);
+		const specifier = reload ? `${entrySpecifier}?mtime=${nextLegacyPiLoadTag(entryRealPath)}` : entrySpecifier;
+		return await logger.time("importModule", () => import(specifier));
 	} finally {
 		// Drop whatever the initial import didn't consume: graph modules only
 		// reached by lazy dynamic imports must be read from disk at their actual

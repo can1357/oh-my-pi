@@ -10,6 +10,7 @@ import { applyDescribedChange, parseMagicInput } from "@oh-my-pi/pi-coding-agent
 import { applyReplace, readBufferLines } from "@oh-my-pi/pi-coding-agent/edit/magic-tools";
 import { fileViews } from "@oh-my-pi/pi-coding-agent/edit/magic-view";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { initWorktreeFixture } from "./helpers/git-worktree";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 import { rejectionOf } from "./helpers/rejection";
@@ -614,6 +615,32 @@ describe("edit tool in magic mode", () => {
 			input: "# sample.ts\n- Make total return sum + 1.",
 		});
 		expect(used).toEqual(["role-model", "role-model"]);
+	});
+
+	it("preserves checkoutNotice on perFileResults when a multi-file magic edit touches a sibling worktree", async () => {
+		using tempDir = TempDir.createSync("@omp-magic-worktree-");
+		const { cwd, paths } = await initWorktreeFixture(tempDir, [{ name: "linked", branch: "preview" }], {
+			files: { "local.ts": "export const value = 1;\n" },
+		});
+
+		const siblingFile = path.join(paths.linked, "local.ts");
+		const { tool } = magicTool(cwd, messages =>
+			messages.length === 1
+				? toolMsg([
+						{
+							name: "replace",
+							arguments: { old_string: "export const value = 1;", new_string: "export const value = 2;" },
+						},
+					])
+				: textMsg("DONE"),
+		);
+		const result = await tool.execute("magic-multi-worktree", {
+			input: `# local.ts\n- Change value to 2.\n# ${siblingFile}\n- Change value to 2.\n`,
+		});
+		expect(result.isError).toBeUndefined();
+		expect(result.details?.perFileResults).toHaveLength(2);
+		expect(result.details?.perFileResults?.[0]?.checkoutNotice).toBeUndefined();
+		expect(result.details?.perFileResults?.[1]?.checkoutNotice).toBe("Edited worktree: preview (session: main)");
 	});
 
 	it("applies each file of a batch on its own and reports the one that was refused", async () => {

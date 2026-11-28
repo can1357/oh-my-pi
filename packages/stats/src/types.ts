@@ -99,6 +99,10 @@ export interface SessionHeader {
 	timestamp: string;
 	cwd: string;
 	title?: string;
+	/** The session this one was forked or branched from: its id, or its file for a branch. */
+	parentSession?: string;
+	/** Last entry a reset fork copied from its parent; model calls at or before it are the parent's. */
+	inheritedThroughEntryId?: string;
 }
 
 export interface SessionMessageEntry {
@@ -284,4 +288,23 @@ export interface SnapcompactCompactionStats {
 	timestamp: number;
 	tokensBefore: number;
 	tokensAfter: number;
+}
+
+/**
+ * Tool approval prompt lifecycle extracted from `tool_approval_requested` and
+ * `tool_approval_resolved` custom journal entries. Request and resolution can
+ * land in different incremental sync passes and are merged by `(sessionFile, toolCallId)`.
+ */
+export interface ToolApprovalStats {
+	sessionFile: string;
+	toolCallId: string;
+	parentToolCallId?: string;
+	folder: string;
+	toolName: string;
+	approvalMode?: string;
+	requestedAt?: number;
+	requestReason?: string;
+	approved?: boolean;
+	resolvedAt?: number;
+	resolveReason?: string;
 }

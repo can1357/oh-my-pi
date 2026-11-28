@@ -14,6 +14,7 @@ import { evalRenderer } from "./tools/eval";
 import { fetchRenderer } from "./tools/fetch";
 import { generateImageRenderer } from "./tools/generate-image";
 import { githubRenderer } from "./tools/github";
+import { gitlabRenderer } from "./tools/gitlab";
 import { globRenderer } from "./tools/glob";
 import { goalRenderer } from "./tools/goal";
 import { grepRenderer } from "./tools/grep";
@@ -51,6 +52,7 @@ const RENDERERS: Record<string, ToolRenderer> = {
 	find: globRenderer,
 	generate_image: generateImageRenderer,
 	github: githubRenderer,
+	gitlab: gitlabRenderer,
 	goal: goalRenderer,
 	wait: waitRenderer,
 	lsp: lspRenderer,

@@ -6,6 +6,7 @@
  */
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import {
+	type HeldProcess,
 	type MinimizerOptions,
 	type PipeStreams,
 	PtySession,
@@ -18,6 +19,7 @@ import {
 } from "@oh-my-pi/pi-natives";
 import { isShellTrace, type ShellTrace } from "@oh-my-pi/pi-wire";
 import { logger } from "@oh-my-pi/pi-utils";
+import { formatTimeoutNotice } from "../tools/details/bash";
 import { formatRawOutputNotice } from "../tools/output-meta-format";
 import { $env } from "@oh-my-pi/pi-utils/env";
 import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
@@ -44,6 +46,19 @@ import {
 	cfgShellPath,
 	type ShellMinimizerSettings,
 } from "./settings";
+
+/**
+ * Environment naming the agent session a command runs for: `PI_SESSION_ID` and
+ * `PI_SESSION_FILE` (its transcript's absolute path). Every command omp runs
+ * for a session carries it (bash tool calls and their services, eval `sh()`,
+ * `!` commands, loop conditions, autoresearch runs), so programs such as
+ * `ovnfs new` can tie what they create to the session. Both keys are always
+ * set: an empty value replaces a stale one inherited from a parent omp
+ * process, since an env overlay cannot unset.
+ */
+export function sessionShellEnv(session: { id?: string | null; file?: string | null }): Record<string, string> {
+	return { PI_SESSION_ID: session.id ?? "", PI_SESSION_FILE: session.file ?? "" };
+}
 
 export interface BashExecutorOptions {
 	cwd?: string;
@@ -259,7 +274,7 @@ export interface DirenvPreflightOptions {
  * variables the `.envrc` removes (skipping any the caller re-supplied).
  *
  * Returns the possibly-prefixed command plus the merged env, or the inputs
- * unchanged (`env` = `callerEnv`) when direnv is off, absent, or has no `.envrc`.
+ * unchanged (`env` = `callerEnv`) when direnv is off or no trusted environment loaded.
  * Pure transform: does NOT layer non-interactive env defaults — that stays the
  * caller's job (so interactive PTY/ACP paths keep their own env shape).
  */
@@ -275,7 +290,7 @@ export async function applyDirenvPreflight(
 	// backend routes through here, so the clamp lives in one place.
 	const loadTimeoutMs =
 		opts.callerTimeoutMs !== undefined && opts.callerTimeoutMs > 0
-			? Math.min(opts.timeoutMs ?? opts.callerTimeoutMs, opts.callerTimeoutMs)
+			? Math.min(opts.timeoutMs ?? cfgBashDirenvLoadTimeoutMs.default, opts.callerTimeoutMs)
 			: opts.timeoutMs;
 	const direnvDiff =
 		opts.direnvSetting === "off" ? null : await loadDirenvEnv(cwd, { timeoutMs: loadTimeoutMs, signal: opts.signal });
@@ -289,7 +304,7 @@ export async function applyDirenvPreflight(
 	// real `unset` for those — unless the caller re-supplied the same var
 	// explicitly, in which case the caller wins.
 	const direnvUnsets = direnvDiff.unset.filter(
-		name => !(opts.callerEnv && name in opts.callerEnv) && SAFE_ENV_NAME.test(name),
+		name => !(opts.callerEnv && Object.hasOwn(opts.callerEnv, name)) && SAFE_ENV_NAME.test(name),
 	);
 	const unsetPrefix = direnvUnsets.length > 0 ? `unset -v ${direnvUnsets.join(" ")}; ` : "";
 	return { command: `${unsetPrefix}${withPrefix(command)}`, env: mergedEnv };
@@ -307,8 +322,9 @@ const shellSessionsInUse = new Set<string>();
  * dropped once its last
  * background job exits (reaped by the poll loop below). Children stay
  * kill-on-drop, so they still die when the harness tears the Shell down on exit.
+ * Each maps to the session key it ran under, for {@link heldShellProcesses}.
  */
-const retainedShells = new Set<Shell>();
+const retainedShells = new Map<Shell, string>();
 const RETAIN_REAP_INTERVAL_MS = 5_000;
 // Native cancellation may spend two seconds unwinding the shell before its
 // N-API chunk bridge drains. The JS watchdog must not race that teardown.
@@ -360,7 +376,7 @@ export async function drainAbortedShells(agentSessionKey: string | undefined): P
 }
 
 /** Keeps `shell` alive while it has live background jobs; whether it had any. */
-async function retainShellWithLiveBackgroundJobs(shell: Shell): Promise<boolean> {
+async function retainShellWithLiveBackgroundJobs(shell: Shell, sessionKey: string): Promise<boolean> {
 	let live: number;
 	try {
 		live = await shell.liveBackgroundJobCount();
@@ -368,7 +384,7 @@ async function retainShellWithLiveBackgroundJobs(shell: Shell): Promise<boolean>
 		return false;
 	}
 	if (live <= 0) return false;
-	retainedShells.add(shell);
+	retainedShells.set(shell, sessionKey);
 	const interval = setInterval(() => {
 		void shell
 			.liveBackgroundJobCount()
@@ -438,7 +454,7 @@ async function releasePersistentShell(
 	// reaped once its last job exits and still dies with the harness. A reset
 	// session tears down.
 	if (!reset) {
-		await retainShellWithLiveBackgroundJobs(shell);
+		await retainShellWithLiveBackgroundJobs(shell, sessionKey);
 	}
 }
 
@@ -494,8 +510,25 @@ export function releaseShellSessions(agentSessionKey: string | undefined): void 
 	for (const [key, shell] of shellSessions) {
 		if (!isShellSessionOwnedBy(key, agentSessionKey)) continue;
 		shellSessions.delete(key);
-		if (!shellSessionsInUse.has(key)) void retainShellWithLiveBackgroundJobs(shell);
+		if (!shellSessionsInUse.has(key)) void retainShellWithLiveBackgroundJobs(shell, key);
 	}
+}
+
+/**
+ * Every live external the shells of an agent session hold, in or between runs (`&`/`nohup &`
+ * jobs left running included), with whether the shell's `nohup` started it: its persistent
+ * shells, its per-job `:async:` shells, and the shells retained for their background jobs.
+ * Covers what the `OMP_BASH_SESSION` environment scan cannot see (macOS hides platform
+ * binaries' env), and tells the shell's `nohup` (which does not mask SIGHUP) apart.
+ */
+export function heldShellProcesses(agentSessionKey: string | undefined): HeldProcess[] {
+	if (!agentSessionKey) return [];
+	const asyncPrefix = `${agentSessionKey}:async:`;
+	const owned = (key: string) => isShellSessionOwnedBy(key, agentSessionKey) || key.startsWith(asyncPrefix);
+	const held: HeldProcess[] = [];
+	for (const [key, shell] of shellSessions) if (owned(key)) held.push(...shell.heldProcesses());
+	for (const [shell, key] of retainedShells) if (owned(key)) held.push(...shell.heldProcesses());
+	return held;
 }
 
 function resolveShellCwd(cwd: string | undefined): string | undefined {
@@ -712,18 +745,14 @@ async function executeUserShellPty(run: {
 			exitCode: undefined,
 			cancelled: true,
 			timedOut: true,
-			...(await run.dump(
-				run.timeoutMs !== undefined
-					? `Command timed out after ${Math.round(run.timeoutMs / 1000)} seconds`
-					: "Command timed out",
-			)),
+			...(await run.dump(formatTimeoutNotice(run.timeoutMs))),
 		};
 	}
 	if (result.cancelled) {
 		return {
 			exitCode: undefined,
 			cancelled: true,
-			...(await run.dump("Command cancelled")),
+			...(await run.dump("cancelled")),
 		};
 	}
 	return {
@@ -836,7 +865,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		return {
 			exitCode: undefined,
 			cancelled: true,
-			...(await dump("Command cancelled")),
+			...(await dump("cancelled")),
 		};
 	}
 
@@ -902,7 +931,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	const settleFork = async (): Promise<{ fork?: ShellForkOutcome }> => {
 		if (!sessionBusy) return {};
 		const carried = busyShell?.adopt(executionShell) ?? false;
-		const jobs = await retainShellWithLiveBackgroundJobs(executionShell);
+		const jobs = await retainShellWithLiveBackgroundJobs(executionShell, sessionKey);
 		return { fork: { carried, jobs } };
 	};
 	const userSignal = options?.signal;
@@ -1014,16 +1043,14 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			if (winner.kind === "abort") {
 				trackAbortedShell(options?.sessionKey, runPromise, cleanupPromise);
 			}
-			let notice = "Command cancelled";
+			let notice = "cancelled";
 			if (winner.kind === "timeout" && deadlineTimeoutMs !== undefined) {
-				const seconds = Math.round(deadlineTimeoutMs / 1000);
 				// With an explicit timeout the native shell owns enforcement and
 				// this JS timer is only a backstop. If it still wins, the native
 				// run never returned — any output is stuck in the undrained pipe,
 				// so this is not a confirmed empty run (#10308).
-				notice = nativeOwnsTimeout
-					? `Command timed out after ${seconds} seconds; the shell backend did not respond, so any output above may be incomplete`
-					: `Command timed out after ${seconds} seconds`;
+				notice = formatTimeoutNotice(deadlineTimeoutMs);
+				if (nativeOwnsTimeout) notice += "; shell unresponsive, output may be incomplete";
 			}
 			return {
 				exitCode: undefined,
@@ -1040,9 +1067,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 
 		// Handle timeout
 		if (winner.result.timedOut) {
-			const annotation = options?.timeout
-				? `Command timed out after ${Math.round(options.timeout / 1000)} seconds`
-				: "Command timed out";
+			const annotation = formatTimeoutNotice(options?.timeout || undefined);
 			return {
 				exitCode: undefined,
 				cancelled: true,
@@ -1060,7 +1085,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				cancelled: true,
 				...settleTrace(),
 				...(await settleFork()),
-				...(await dump("Command cancelled")),
+				...(await dump("cancelled")),
 			};
 		}
 

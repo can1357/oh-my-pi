@@ -20,8 +20,18 @@ import { cfgRetryFallbackChains } from "@oh-my-pi/pi-coding-agent/session/settin
 import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking/levels";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { createModelBrowserSource } from "../src/modes/model-browser-source";
+import {
+	buildBrowserItems,
+	buildSearchAffinity,
+	buildSessionModelScope,
+	modelSearchText,
+	rankModelItems,
+} from "../src/modes/view-model/overlays/model-browser";
+import { isSeparator } from "../src/ui/overlays/pickers/model-browser-state";
 import { ModelHub } from "../src/ui/overlays/pickers/model-hub";
-import { resetProviderAutoRefreshGuard } from "../src/ui/overlays/pickers/model-hub-state";
+import { ModelHubState, resetProviderAutoRefreshGuard } from "../src/ui/overlays/pickers/model-hub-state";
+import { prewarmModelPicker } from "../src/ui/overlays/pickers/model-picker";
+import { fuzzyRank } from "../src/utils/fuzzy";
 import { type LayerTerminal, mountLayer } from "./helpers/layer-terminal";
 
 function normalize(lines: readonly string[]): string {
@@ -56,19 +66,20 @@ function makeModel(
 }
 
 interface RegistryOverrides {
-	refresh?: (mode: string) => Promise<void>;
+	refreshIfStale?: () => Promise<boolean>;
 	refreshProvider?: ModelRegistry["refreshProvider"];
 	getAvailable?: (kind?: ModelKind | "all") => Model[];
 	getAll?: () => Model[];
 	getDiscoverableProviders?: () => string[];
 	getProviderDiscoveryState?: (providerId: string) => unknown;
 	find?: (provider: string, id: string) => Model | undefined;
+	hasAuth?: (providerId: string) => boolean;
 }
 
 function makeRegistry(models: () => Model[], overrides: RegistryOverrides = {}): ModelRegistry {
 	const getAll = overrides.getAll ?? models;
 	return {
-		refresh: overrides.refresh ?? (async () => {}),
+		refreshIfStale: overrides.refreshIfStale ?? (async () => false),
 		refreshProvider: overrides.refreshProvider ?? (async () => {}),
 		getError: () => undefined,
 		getAvailable: overrides.getAvailable ?? models,
@@ -85,7 +96,12 @@ function makeRegistry(models: () => Model[], overrides: RegistryOverrides = {}):
 				)),
 		getDiscoverableProviders: overrides.getDiscoverableProviders ?? (() => []),
 		getProviderDiscoveryState: overrides.getProviderDiscoveryState ?? (() => undefined),
-		authStorage: { keys: { source: () => undefined } },
+		authStorage: {
+			keys: {
+				source: (providerId: string) =>
+					overrides.hasAuth?.(providerId) ? { kind: "api_key", concrete: true } : undefined,
+			},
+		},
 	} as unknown as ModelRegistry;
 }
 
@@ -128,6 +144,7 @@ function createHub(options: {
 		cfgRetryFallbackChains.override(settings, chains);
 	});
 	const callbacks: ModelHubCallbacks = {
+		onCatalogRefreshed: options.callbacks?.onCatalogRefreshed,
 		onAssign: options.callbacks?.onAssign ?? onAssign,
 		onUnassign: options.callbacks?.onUnassign ?? onUnassign,
 		onLoginRequest: options.callbacks?.onLoginRequest ?? onLoginRequest,
@@ -171,6 +188,44 @@ const CTRL_RIGHT = "\x1b[1;5C";
 const ESC = "\x1b";
 
 describe("ModelHub", () => {
+	test("scoped browser ranking and catalog-wide provider counts match independent searches on every edit", () => {
+		const models = [makeModel("demo", "axxxbc"), makeModel("demo", "abc"), makeModel("other", "abc")];
+		const source = createModelBrowserSource(Settings.isolated({}));
+		const items = buildBrowserItems(models);
+		const state = new ModelHubState(
+			source,
+			makeRegistry(() => models),
+			models.map(model => ({ model })),
+			{ onAssign: vi.fn(), onUnassign: vi.fn(), onCancel: vi.fn() },
+			{ initialProviderId: "demo" },
+		);
+		try {
+			for (const query of ["ab", "abc", "ab", "de/abc", "free"]) {
+				state.browser.editQuery({ text: query, cursor: query.length });
+				const counts = new Map<string, number>();
+				for (const { item } of fuzzyRank(items, query, modelSearchText)) {
+					counts.set(item.provider, (counts.get(item.provider) ?? 0) + 1);
+				}
+				expect(state.searchCounts).toEqual(counts);
+				const provider = state.activeEntry().providerId;
+				const ranked = rankModelItems(
+					query,
+					items.filter(item => !provider || item.provider === provider),
+					{
+						roles: {},
+						mruOrder: [],
+						affinity: buildSearchAffinity(source.modelProviderOrder, {}, []),
+					},
+				);
+				expect(state.browser.visible.flatMap(row => (isSeparator(row) ? [] : [row.selector]))).toEqual(
+					ranked.map(item => item.selector),
+				);
+			}
+		} finally {
+			state.dispose();
+		}
+	});
+
 	test("a native /model role action changes the quick-switch cycle in isolated settings", async () => {
 		await using ui = await nativeShell();
 		const settings = Settings.isolated();
@@ -236,6 +291,33 @@ describe("ModelHub", () => {
 	});
 
 	describe("role chips and roles view", () => {
+		test("a prewarmed chat picker opens the hub without resolving roles again or hiding kind runners", async () => {
+			const chat = makeModel("test", "chat");
+			const image = makeModel("test", "image", 128_000, undefined, "image");
+			const settings = Settings.isolated({ modelRoles: { image: "test/image" } });
+			const registry = Object.assign(
+				makeRegistry(() => [chat, image]),
+				{ prewarmCatalog: () => undefined },
+			);
+			await prewarmModelPicker({ source: createModelBrowserSource(settings), registry, scopedModels: [chat] });
+
+			const source = createModelBrowserSource(settings);
+			const resolve = vi.spyOn(source, "resolveRoleValue");
+			const hub = new ModelHubState(source, registry, [{ model: chat }], {
+				onAssign: () => {},
+				onUnassign: () => {},
+				onCancel: () => {},
+			});
+			try {
+				expect(hub.roles.image?.model).toBe(image);
+				expect(hub.availableItems.map(item => item.model)).toContain(image);
+				expect(buildSessionModelScope(source, registry, [chat]).items.map(item => item.model)).toEqual([chat]);
+				expect(resolve).not.toHaveBeenCalled();
+			} finally {
+				hub.dispose();
+			}
+		});
+
 		test("separates chat and kind roles and filters role tabs", () => {
 			const chat = makeModel("test", "chat-model");
 			const image = makeModel("test", "image-model", 128_000, undefined, "image");
@@ -550,6 +632,194 @@ describe("ModelHub", () => {
 		});
 	});
 
+	describe("discoverable provider sidebar visibility", () => {
+		// Optional discoverable providers (implicit ollama, llama.cpp, lm-studio)
+		// stay hidden while discovery is "idle" or "unavailable"; explicitly
+		// configured or authed providers stay visible, and hidden ones are
+		// re-probed once per open so a freshly started server resurfaces its tab.
+		function discoveryState(provider: string, status: string, optional = true): unknown {
+			return { provider, status, optional, stale: false, models: [] };
+		}
+
+		/** Flush the constructor's freshness-check promise chain and any re-probes. */
+		async function settle(): Promise<void> {
+			for (let i = 0; i < 5; i++) {
+				await Bun.sleep(0);
+			}
+		}
+
+		test("hides an implicit local provider whose discovery never ran (idle)", async () => {
+			const { hub } = createHub({
+				models: [makeModel("prov-a", "model-a")],
+				registry: {
+					getDiscoverableProviders: () => ["lm-studio"],
+					getProviderDiscoveryState: id => discoveryState(id, "idle"),
+				},
+			});
+			await settle();
+			const rendered = normalize(hub.render(220));
+			expect(rendered).toContain("prov-a");
+			expect(rendered).not.toContain("lm-studio");
+		});
+
+		test("hides an implicit local provider whose endpoint is unreachable (unavailable)", async () => {
+			const { hub } = createHub({
+				models: [makeModel("prov-a", "model-a")],
+				registry: {
+					getDiscoverableProviders: () => ["lm-studio"],
+					getProviderDiscoveryState: id => discoveryState(id, "unavailable"),
+				},
+			});
+			await settle();
+			expect(normalize(hub.render(220))).not.toContain("lm-studio");
+		});
+
+		test("keeps a reachable local provider visible even when it serves zero models (empty)", async () => {
+			const { hub } = createHub({
+				models: [makeModel("prov-a", "model-a")],
+				registry: {
+					getDiscoverableProviders: () => ["lm-studio"],
+					getProviderDiscoveryState: id => discoveryState(id, "empty"),
+				},
+			});
+			await settle();
+			expect(normalize(hub.render(220))).toContain("lm-studio");
+		});
+
+		test("keeps an explicitly configured discovery provider visible when unreachable", async () => {
+			// models.yml discovery providers carry optional: false; hiding them
+			// would bury a misconfigured baseUrl instead of surfacing it.
+			const { hub } = createHub({
+				models: [makeModel("prov-a", "model-a")],
+				registry: {
+					getDiscoverableProviders: () => ["my-endpoint"],
+					getProviderDiscoveryState: id => discoveryState(id, "unavailable", false),
+				},
+			});
+			await settle();
+			expect(normalize(hub.render(220))).toContain("my-endpoint");
+		});
+
+		test("keeps a discoverable provider with stored auth visible", async () => {
+			const { hub } = createHub({
+				models: [makeModel("prov-a", "model-a")],
+				registry: {
+					getDiscoverableProviders: () => ["lm-studio"],
+					getProviderDiscoveryState: id => discoveryState(id, "unavailable"),
+					hasAuth: id => id === "lm-studio",
+				},
+			});
+			await settle();
+			expect(normalize(hub.render(220))).toContain("lm-studio");
+		});
+
+		test("keeps a discoverable provider visible when discovery state is unknown", async () => {
+			// Fail open: no recorded discovery state means the registry has not
+			// probed at all yet, so the tab stays until discovery says otherwise.
+			const { hub } = createHub({
+				models: [makeModel("prov-a", "model-a")],
+				registry: {
+					getDiscoverableProviders: () => ["lm-studio"],
+					getProviderDiscoveryState: () => undefined,
+				},
+			});
+			await settle();
+			expect(normalize(hub.render(220))).toContain("lm-studio");
+		});
+
+		test("a stale catalog refresh resurfaces a hidden local when its server appears", async () => {
+			let serving = false;
+			let checks = 0;
+			const { hub } = createHub({
+				models: () => {
+					if (serving) return [makeModel("prov-a", "model-a"), makeModel("lm-studio", "local-model")];
+					return [makeModel("prov-a", "model-a")];
+				},
+				registry: {
+					getDiscoverableProviders: () => ["lm-studio"],
+					getProviderDiscoveryState: id => discoveryState(id, serving ? "ok" : "unavailable"),
+					refreshIfStale: async () => {
+						checks++;
+						serving = true;
+						return true;
+					},
+				},
+			});
+			await settle();
+			expect(checks).toBe(1);
+			const rendered = normalize(hub.render(220));
+			expect(rendered).toContain("lm-studio");
+			expect(rendered).toContain("local-model");
+		});
+
+		test("does not refresh a hidden local that stays down more than once when the hub opens", async () => {
+			let checks = 0;
+			const { hub } = createHub({
+				models: [makeModel("prov-a", "model-a")],
+				registry: {
+					getDiscoverableProviders: () => ["lm-studio"],
+					getProviderDiscoveryState: id => discoveryState(id, "unavailable"),
+					refreshIfStale: async () => {
+						checks++;
+						return true;
+					},
+				},
+			});
+			await settle();
+			expect(checks).toBe(1);
+			expect(normalize(hub.render(220))).not.toContain("lm-studio");
+		});
+	});
+
+	describe("discovery status hints", () => {
+		async function openProviderTab(state: Record<string, unknown>): Promise<LayerTerminal> {
+			const { hub } = createHub({
+				models: [],
+				registry: {
+					getDiscoverableProviders: () => ["vllm"],
+					getProviderDiscoveryState: () => state,
+				},
+			});
+			await Bun.sleep(0);
+			// Scope-hop is the default arrow mode: one Down moves All models → the
+			// sole provider entry (separators are skipped).
+			hub.handleInput(DOWN);
+			await Bun.sleep(0);
+			return hub;
+		}
+
+		test("shows a provider-tab hint when discovery succeeds but returns zero models", async () => {
+			const hub = await openProviderTab({
+				provider: "vllm",
+				status: "empty",
+				optional: false,
+				stale: false,
+				fetchedAt: Date.now(),
+				models: [],
+			});
+
+			const rendered = normalize(hub.render(200));
+			expect(rendered).toContain("Discovery succeeded but returned 0 models");
+			expect(rendered).toContain("/models returns { data: [{ id }] }");
+		});
+
+		test("shows a provider-tab hint when the discovery endpoint returns 404", async () => {
+			const hub = await openProviderTab({
+				provider: "vllm",
+				status: "unavailable",
+				optional: false,
+				stale: false,
+				fetchedAt: Date.now(),
+				models: [],
+				error: "HTTP 404 from http://192.168.5.3:8085/v1/models",
+			});
+
+			const rendered = normalize(hub.render(200));
+			expect(rendered).toContain("http://192.168.5.3:8085/v1/models returned 404");
+			expect(rendered).toContain("baseUrl");
+		});
+	});
+
 	describe("typing focus", () => {
 		test("typing on All models switches focus to model list and navigates results with arrows", () => {
 			const modelA = makeModel("test", "model-a");
@@ -827,7 +1097,7 @@ describe("ModelHub", () => {
 		test("a model with no reasoning surface is assigned without a thinking strip", () => {
 			// inherit/off/auto are all no-ops for an STT/TTS/image model, so the
 			// assignment completes instead of parking on a dead strip (#13111).
-			const model = makeModel("local", "parakeet-tdt-0.6b-v3", 128_000, undefined, "stt");
+			const model = makeModel("local", "fluid-speech-pro", 128_000, undefined, "stt");
 			const { hub, onAssign } = createHub({ models: [model], scoped: true });
 
 			hub.handleInput("\n"); // Sidebar → model list.
@@ -843,9 +1113,9 @@ describe("ModelHub", () => {
 			expect(footer).not.toContain("auto");
 		});
 		test("t and its hint stay inert on a role row whose model cannot reason", () => {
-			const model = makeModel("local", "parakeet-tdt-0.6b-v3", 128_000, undefined, "stt");
+			const model = makeModel("local", "fluid-speech-pro", 128_000, undefined, "stt");
 			const settings = Settings.isolated({
-				modelRoles: { dictation: "local/parakeet-tdt-0.6b-v3" },
+				modelRoles: { dictation: "local/fluid-speech-pro" },
 			});
 			const { hub } = createHub({ models: [model], scoped: true, settings });
 
@@ -1940,6 +2210,15 @@ describe("ModelHub", () => {
 	});
 
 	describe("provider refresh lifecycle", () => {
+		test("a fresh catalog opens without forcing discovery or reloading the session scope", async () => {
+			const refreshIfStale = vi.fn(async () => false);
+			const onCatalogRefreshed = vi.fn(async () => undefined);
+			createHub({ models: [], registry: { refreshIfStale }, callbacks: { onCatalogRefreshed } });
+			await Bun.sleep(0);
+			expect(refreshIfStale).toHaveBeenCalledTimes(1);
+			expect(onCatalogRefreshed).not.toHaveBeenCalled();
+		});
+
 		test("auto-refreshes a provider once per process; F5 forces a re-fetch", async () => {
 			const model = makeModel("prov-a", "model-a");
 			const refreshProvider = vi.fn<ModelRegistry["refreshProvider"]>(async () => {});

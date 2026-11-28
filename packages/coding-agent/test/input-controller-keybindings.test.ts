@@ -130,7 +130,7 @@ function createContext() {
 		isBashMode: false,
 		isPythonMode: false,
 		isBtwMode: false,
-		hideToolActivity: false,
+		toolActivity: "detailed",
 		toolOutputExpanded: false,
 		settings: Settings.isolated(),
 		handleHotkeysCommand: vi.fn(),
@@ -251,6 +251,11 @@ function dispatchEnhancedTextPaste(target: Dispatcher, text: string): void {
 	]) {
 		dispatchOsc(target, raw);
 	}
+}
+
+/** Make `shellPaste` deliver to the focused `composer` as the shell does: past the interceptors, to its field. */
+function deliverPastesToComposer(shellPaste: Mock<(text: string) => boolean>, composer: Composer): void {
+	shellPaste.mockImplementation(text => composer.field.handlers.onPaste?.({ text }) ?? false);
 }
 
 /** Replay a kitty OSC 5522 listing that offers plain text and HTML; the controller then requests one of them. */
@@ -490,16 +495,37 @@ describe("InputController keybinding setup", () => {
 		expect(context.editor.text()).toBe("");
 	});
 
-	it("delivers an enhanced text paste to the composer as a paste so image paths attach", async () => {
+	it("attaches an image path an enhanced text paste delivers to the composer", async () => {
 		const context = createContext();
+		deliverPastesToComposer(context.spies.shellPaste, context.editor);
 		const pasted = nextCall(context.spies.shellPaste);
-		new InputController(context.ctx).setupKeyHandlers();
+		const controller = new InputController(context.ctx);
+		const attach = vi.spyOn(controller, "handleImagePathPaste").mockResolvedValue();
+		controller.setupKeyHandlers();
 
-		const path = "/tmp/Screenshot\\ 2026-10-19\\ at\\ 14.25.32.png";
-		dispatchEnhancedTextPaste(context, path);
+		dispatchEnhancedTextPaste(context, "/tmp/Screenshot\\ 2026-10-19\\ at\\ 14.25.32.png");
 
 		await pasted;
-		expect(context.spies.shellPaste).toHaveBeenCalledWith(path);
+		expect(attach).toHaveBeenCalledWith("/tmp/Screenshot 2026-10-19 at 14.25.32.png");
+		expect(context.editor.text()).toBe("");
+	});
+
+	it("collapses a large enhanced text paste into the chip a bracketed paste makes", async () => {
+		const text = Array.from({ length: 12 }, (_, i) => `line ${i}`).join("\n");
+		const bracketed = createContext();
+		new InputController(bracketed.ctx).setupKeyHandlers();
+		bracketed.input.paste(bracketed.ctx, text);
+
+		const enhanced = createContext();
+		deliverPastesToComposer(enhanced.spies.shellPaste, enhanced.editor);
+		const pasted = nextCall(enhanced.spies.shellPaste);
+		new InputController(enhanced.ctx).setupKeyHandlers();
+		dispatchEnhancedTextPaste(enhanced, text);
+		await pasted;
+
+		expect(enhanced.editor.text()).toBe(bracketed.editor.text());
+		expect(enhanced.editor.chips().map(chip => chip.kind)).toEqual(["paste"]);
+		expect(enhanced.editor.expandedText()).toBe(`${text} `);
 	});
 
 	it("enables enhanced paste on the terminal once input is wired", () => {
@@ -1395,7 +1421,7 @@ describe("InputController global editor actions", () => {
 		expect(context.press("ctrl+g")).toBe("global");
 		expect(openExternalEditor).toHaveBeenCalledTimes(1);
 		expect(context.press("ctrl+shift+o")).toBe("global");
-		expect(context.ctx.hideToolActivity).toBe(true);
+		expect(context.ctx.toolActivity).toBe("concise");
 		expect(context.press("alt+l")).toBe("global");
 		expect(context.spies.resetDisplayAfterAppearanceRefresh).toHaveBeenCalledTimes(1);
 	});
@@ -1433,7 +1459,7 @@ describe("InputController global editor actions", () => {
 		expect(context.press("alt+l")).toBe("focused");
 		expect(context.press("ctrl+shift+o")).toBe("focused");
 		expect(context.spies.resetDisplayAfterAppearanceRefresh).not.toHaveBeenCalled();
-		expect(context.ctx.hideToolActivity).toBe(false);
+		expect(context.ctx.toolActivity).toBe("detailed");
 
 		// A remapped display reset reaches the app again.
 		context.setKeybinding("app.display.reset", ["ctrl+l"]);

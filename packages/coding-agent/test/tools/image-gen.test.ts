@@ -1,7 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
-import * as compatAuth from "@oh-my-pi/pi-catalog/compat/auth";
 import { type Api, type FetchImpl, type Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { factoryDroidRegistry } from "@oh-my-pi/pi-catalog/compat/factory-droid";
@@ -336,8 +335,11 @@ describe("imageGenTool catalog routing", () => {
 			"https://deepinfra.example/v1/images/edits",
 			"https://deepinfra.example/v1/images/generations",
 		]);
-		expect(bodies[0]).toMatchObject({ model: "flux-selected", input_references: [{ type: "image_url" }] });
-		expect(bodies[1]).toMatchObject({ model: "flux-selected", input_references: [{ type: "image_url" }] });
+		const [edit, fallback] = bodies;
+		expect(edit?.model).toBe("flux-selected");
+		expect(edit?.images).toEqual([{ image_url: `data:image/png;base64,${PNG_DATA}` }]);
+		expect(edit).not.toHaveProperty("input_references");
+		expect(fallback).toEqual(edit);
 	});
 
 	it("uses OpenRouter native images with edit references and response media types", async () => {
@@ -454,38 +456,6 @@ describe("imageGenTool catalog routing", () => {
 			expect(urls).toEqual([XAI_GENERATE]);
 			expect(result?.details?.provider).toBe("xai");
 		});
-	});
-
-	it("falls back to the selected Antigravity id when discovery advertises no image model", async () => {
-		// Antigravity is paused in its auth rules; its image transport stays for when it is turned back on.
-		vi.spyOn(compatAuth, "providerDisabledReason").mockReturnValue(undefined);
-		const model = catalogModel("google-antigravity", "gemini-selected-image", "google-gemini-cli");
-		const requestBodies: Array<Record<string, unknown>> = [];
-		const fetchMock: FetchImpl = async (input, init) => {
-			const url = input.toString();
-			if (url.endsWith("/v1internal:fetchAvailableModels")) {
-				return new Response(JSON.stringify({ imageGenerationModelIds: [] }), { status: 200 });
-			}
-			requestBodies.push(JSON.parse(String(init?.body)));
-			return new Response(
-				`data: ${JSON.stringify({ response: { candidates: [{ content: { role: "model", parts: [{ inlineData: { data: PNG_DATA, mimeType: "image/png" } }] } }] } })}\n\n`,
-				{ status: 200, headers: { "content-type": "text/event-stream" } },
-			);
-		};
-		const credentials = JSON.stringify({ token: "antigravity-token", projectId: "catalog-project" });
-		const settings = Settings.isolated({ modelRoles: { image: "google-antigravity/gemini-selected-image" } });
-		const ctx = createContext({
-			models: [model],
-			settings,
-			fetch: fetchMock,
-			credentials: { "google-antigravity": credentials },
-		});
-
-		const result = await imageGenTool.execute("antigravity", { subject: "fallback id" }, undefined, ctx);
-		collectPaths(result);
-
-		expect(requestBodies[0]).toMatchObject({ model: "gemini-selected-image", project: "catalog-project" });
-		expect(result.details?.model).toBe("gemini-selected-image");
 	});
 
 	it("uses a same-provider hosted chat carrier and places the selected OpenAI image id on the tool", async () => {

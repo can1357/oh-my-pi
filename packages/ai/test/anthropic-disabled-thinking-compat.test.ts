@@ -262,6 +262,9 @@ describe("Anthropic thinking-binding beta follows block_binding", () => {
 
 	const VERTEX_RAW_PREDICT =
 		"https://us-east5-aiplatform.googleapis.com/v1/projects/test/locations/us-east5/publishers/anthropic/models/claude-fable-5-1:streamRawPredict";
+	// Catalog Vertex rows keep binding controls off (Vertex rejects
+	// `block_binding`, #20765); an explicit compat opt-in still binds, so the
+	// rawPredict body path that carries the beta stays reachable.
 	const vertexFable = buildModel({
 		id: "claude-fable-5-1",
 		name: "claude-fable-5-1",
@@ -273,6 +276,7 @@ describe("Anthropic thinking-binding beta follows block_binding", () => {
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 1_000_000,
 		maxTokens: 128_000,
+		compat: { supportsThinkingBindingControls: true },
 	});
 	it.each([
 		[

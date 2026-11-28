@@ -88,6 +88,19 @@ const patchWorkerConstructor = (name, OriginalWorker) => {
 		};
 		addNavigatorString("userAgent");
 		addNavigatorString("platform");
+		// Workers expose their own navigator: a page-level numeric patch (hardwareConcurrency) has to
+		// be mirrored here or the page and its workers disagree, which is its own tell.
+		const addNavigatorNumber = (prop) => {
+			try {
+				const value = navigator[prop];
+				if (typeof value === "number") values.push([prop, value]);
+			} catch {}
+		};
+		addNavigatorNumber("hardwareConcurrency");
+		try {
+			const languages = navigator.languages;
+			if (languages && typeof languages.length === "number") values.push(["languages", Array.prototype.slice.call(languages)]);
+		} catch {}
 		if (!values.length) return "";
 
 		return `(() => {

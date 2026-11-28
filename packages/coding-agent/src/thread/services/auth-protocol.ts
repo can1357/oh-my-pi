@@ -41,6 +41,7 @@ import type {
 	DisabledCredentialSummary,
 	InvalidateCredentialMatchingOptions,
 	ListResetCreditsOptions,
+	MarkServiceTierUnavailableOptions,
 	MarkUsageLimitOptions,
 	Model,
 	ModelUsageHealth,
@@ -54,6 +55,8 @@ import type {
 	OAuthLoginIdentity,
 	OAuthProviderId,
 	OAuthRefreshByIdOptions,
+	OAuthSignOutOptions,
+	OAuthSignOutResult,
 	ObservedUsageInput,
 	Provider,
 	RedeemResetCreditOptions,
@@ -61,6 +64,7 @@ import type {
 	ResetCreditRedeemOutcome,
 	ResolvedApiKey,
 	RotateCredentialOptions,
+	ServiceTier,
 	StoredAuthCredential,
 	StoredCredentialBlock,
 	UsageHistoryEntry,
@@ -218,6 +222,10 @@ export type AuthStorageProtocol = {
 		[id: number, signal?: AbortSignal, options?: OAuthRefreshByIdOptions],
 		AuthCredentialSnapshotEntry
 	>;
+	"oauth.signOut": RpcMethod<
+		[provider: string, credentialId: number, options?: OAuthSignOutOptions],
+		OAuthSignOutResult
+	>;
 
 	"sessions.pin": RpcMethod<
 		[provider: string, sessionId: string, credentialId: number, options?: { restoredAtMs?: number }],
@@ -249,6 +257,7 @@ export type AuthStorageProtocol = {
 	"usage.clientSummary": RpcMethod<[sinceMs: number], ClientUsageSummary>;
 	/** Sync hooks of the returned provider are `rpcSync` wrappers. */
 	"usage.providerFor": RpcMethod<[provider: Provider], UsageProvider | undefined>;
+	"usage.authRejection": RpcMethod<[provider: Provider, credentialId: number], number | undefined>;
 	"usage.reportingModelIds": RpcMethod<
 		[provider: Provider, modelIds: readonly string[], reports: readonly UsageReport[]],
 		string[]
@@ -268,6 +277,11 @@ export type AuthStorageProtocol = {
 		[provider: string, sessionId: string | undefined, options?: RotateCredentialOptions],
 		CredentialRotation
 	>;
+	"limits.markServiceTierUnavailable": RpcMethod<
+		[provider: string, options: MarkServiceTierUnavailableOptions],
+		boolean
+	>;
+	"limits.rearmServiceTier": RpcMethod<[provider: string, serviceTier: ServiceTier, modelId: string], void>;
 	"limits.invalidateMatching": RpcMethod<
 		[provider: string, apiKey: string, options?: InvalidateCredentialMatchingOptions],
 		boolean
@@ -408,7 +422,7 @@ export type ModelRegistryProtocol = {
 	>;
 	refreshDiscoverableProviders: RpcMethod<[providerIds: string[], strategy: ModelRefreshStrategy], void>;
 	refreshRuntimeProviders: RpcMethod<[strategy: ModelRefreshStrategy], void>;
-	hydrateCredentialScopedModelCaches: RpcMethod<[], void>;
+	hydrateCredentialScopedModelCaches: RpcMethod<[providers?: readonly string[]], void>;
 	reapplyModelPolicies: RpcMethod<[], void>;
 	refreshInBackground: RpcMethod<[strategy: ModelRefreshStrategy], void>;
 	/** Sync. */

@@ -497,6 +497,9 @@ type Usage struct {
 	Cttl            map[string]json.RawMessage `json:"cttl,omitempty"`
 	Server          map[string]json.RawMessage `json:"server,omitempty"`
 	Credits         map[string]json.RawMessage `json:"credits,omitempty"`
+	Aiu             map[string]json.RawMessage `json:"aiu,omitempty"`
+	// The model reports AI credits and this call's billing frame never arrived.
+	AiuMissing *bool `json:"aiuMissing,omitempty"`
 	// Extra holds undeclared keys and declared keys whose value did not decode (that field stays zero).
 	// Encoding writes them back, over a declared field with the same key.
 	Extra map[string]json.RawMessage `json:"-"`
@@ -522,6 +525,8 @@ func (v *Usage) decodeFrom(raw map[string]json.RawMessage) error {
 	d.optional("cttl", &out.Cttl)
 	d.optional("server", &out.Server)
 	d.optional("credits", &out.Credits)
+	d.optional("aiu", &out.Aiu)
+	d.optional("aiuMissing", &out.AiuMissing)
 	out.Extra = d.rest()
 	if d.err != nil {
 		return d.err
@@ -2237,11 +2242,11 @@ func (v *ContextUsage) decodeFrom(raw map[string]json.RawMessage) error {
 	return nil
 }
 
-// Displayable queue-chip text for pending user-authored messages; accepted verbatim by `remove_queued_message`.
+// Displayable queue-chip text for pending user-authored messages; accepted verbatim by `remove_queued_message`. Input the agent already took leads its list until the transcript records it.
 type QueuedMessagesState struct {
 	Steering []string `json:"steering"`
 	FollowUp []string `json:"followUp"`
-	// Leading `steering` entries are live steering already sent into the streaming response; `remove_queued_message` cannot reach them.
+	// Leading `steering` entries the agent already took (live steering inside the streaming response, or steering on its way into the next request); `remove_queued_message` cannot reach them.
 	LiveSteered int64 `json:"liveSteered"`
 }
 
@@ -3186,19 +3191,44 @@ func (v *SessionCredits) decodeFrom(raw map[string]json.RawMessage) error {
 	return nil
 }
 
+type SessionAiu struct {
+	// Reported charge in nano-AIU (1e9 = 1 AI credit).
+	Nano float64 `json:"nano"`
+	// Calls whose billing frame never arrived; positive makes `nano` a lower bound.
+	UnknownCalls int64 `json:"unknownCalls"`
+}
+
+func (v *SessionAiu) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "SessionAiu", v.decodeFrom)
+}
+
+func (v *SessionAiu) decodeFrom(raw map[string]json.RawMessage) error {
+	var out SessionAiu
+	d := fieldDecoder{raw: raw, owner: "SessionAiu"}
+	d.required("nano", &out.Nano)
+	d.required("unknownCalls", &out.UnknownCalls)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
 type SessionStats struct {
-	SessionID         string             `json:"sessionId"`
-	UserMessages      int64              `json:"userMessages"`
-	AssistantMessages int64              `json:"assistantMessages"`
-	ToolCalls         int64              `json:"toolCalls"`
-	ToolResults       int64              `json:"toolResults"`
-	TotalMessages     int64              `json:"totalMessages"`
-	Tokens            TokenUsage         `json:"tokens"`
-	PremiumRequests   float64            `json:"premiumRequests"`
-	Cost              float64            `json:"cost"`
-	SessionFile       *string            `json:"sessionFile,omitempty"`
-	Credits           *SessionCredits    `json:"credits,omitempty"`
-	RoutedModels      map[string]float64 `json:"routedModels,omitempty"`
+	SessionID         string          `json:"sessionId"`
+	UserMessages      int64           `json:"userMessages"`
+	AssistantMessages int64           `json:"assistantMessages"`
+	ToolCalls         int64           `json:"toolCalls"`
+	ToolResults       int64           `json:"toolResults"`
+	TotalMessages     int64           `json:"totalMessages"`
+	Tokens            TokenUsage      `json:"tokens"`
+	PremiumRequests   float64         `json:"premiumRequests"`
+	Cost              float64         `json:"cost"`
+	SessionFile       *string         `json:"sessionFile,omitempty"`
+	Credits           *SessionCredits `json:"credits,omitempty"`
+	// Server-reported AI credits of the session and its subagent tree.
+	Aiu          *SessionAiu        `json:"aiu,omitempty"`
+	RoutedModels map[string]float64 `json:"routedModels,omitempty"`
 	// Failed edits by the engine's `errorKind`.
 	EditRejections map[string]float64 `json:"editRejections,omitempty"`
 	ContextUsage   *ContextUsage      `json:"contextUsage,omitempty"`
@@ -3222,6 +3252,7 @@ func (v *SessionStats) decodeFrom(raw map[string]json.RawMessage) error {
 	d.required("cost", &out.Cost)
 	d.optional("sessionFile", &out.SessionFile)
 	d.optional("credits", &out.Credits)
+	d.optional("aiu", &out.Aiu)
 	d.optional("routedModels", &out.RoutedModels)
 	d.optional("editRejections", &out.EditRejections)
 	d.optional("contextUsage", &out.ContextUsage)
@@ -4711,7 +4742,7 @@ func (v GoalUpdatedEvent) MarshalJSON() ([]byte, error) {
 type QueueUpdateEvent struct {
 	Steering []string `json:"steering"`
 	FollowUp []string `json:"followUp"`
-	// Leading `steering` entries are live steering already sent into the streaming response; `remove_queued_message` cannot reach them.
+	// Leading `steering` entries the agent already took (live steering inside the streaming response, or steering on its way into the next request); `remove_queued_message` cannot reach them.
 	LiveSteered int64 `json:"liveSteered"`
 }
 
@@ -7446,6 +7477,25 @@ func (v *AbortAndDeliverQueueResult) decodeFrom(raw map[string]json.RawMessage) 
 	return nil
 }
 
+type ClearContextResult struct {
+	DroppedCount float64 `json:"droppedCount"`
+}
+
+func (v *ClearContextResult) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "ClearContextResult", v.decodeFrom)
+}
+
+func (v *ClearContextResult) decodeFrom(raw map[string]json.RawMessage) error {
+	var out ClearContextResult
+	d := fieldDecoder{raw: raw, owner: "ClearContextResult"}
+	d.required("droppedCount", &out.DroppedCount)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
 type SetSlowModeResult struct {
 	Enabled bool `json:"enabled"`
 }
@@ -7929,6 +7979,7 @@ func (v *GetLogoutAccountsResult) decodeFrom(raw map[string]json.RawMessage) err
 
 type LogoutResult struct {
 	RemainingSource *string `json:"remainingSource,omitempty"`
+	SignOutError    *string `json:"signOutError,omitempty"`
 }
 
 func (v *LogoutResult) UnmarshalJSON(data []byte) error {
@@ -7939,6 +7990,7 @@ func (v *LogoutResult) decodeFrom(raw map[string]json.RawMessage) error {
 	var out LogoutResult
 	d := fieldDecoder{raw: raw, owner: "LogoutResult"}
 	d.optional("remainingSource", &out.RemainingSource)
+	d.optional("signOutError", &out.SignOutError)
 	if d.err != nil {
 		return d.err
 	}
@@ -8145,6 +8197,13 @@ type NewSessionCommand struct {
 func (c Commands) NewSession(ctx context.Context, p NewSessionCommand) (CancellationResult, error) {
 	var out CancellationResult
 	err := c.call(ctx, "new_session", p, 0, &out)
+	return out, err
+}
+
+// ClearContext sends "clear_context": Clear the conversation in place, as the TUI's `/clear` does: the session id, title, model, settings and transcript file survive. Fails with `session_busy` while a response streams or a foreground bash/eval runs.
+func (c Commands) ClearContext(ctx context.Context) (ClearContextResult, error) {
+	var out ClearContextResult
+	err := c.call(ctx, "clear_context", nil, 0, &out)
 	return out, err
 }
 
@@ -8772,7 +8831,7 @@ type LogoutCommand struct {
 	CredentialID int64  `json:"credentialId"`
 }
 
-// Logout sends "logout": Remove one stored credential; fails when it is no longer stored. `remainingSource` names auth that still applies.
+// Logout sends "logout": Remove one stored credential, revoking it at the provider when one supports it; fails when it is no longer stored. `remainingSource` names auth that still applies; `signOutError` says why the provider's sign-out failed (the credential is removed regardless).
 func (c Commands) Logout(ctx context.Context, p LogoutCommand) (LogoutResult, error) {
 	var out LogoutResult
 	err := c.call(ctx, "logout", p, 0, &out)

@@ -28,12 +28,8 @@ function isContextOverflow(message: AssistantMessage, contextWindow: number | nu
 import { e2eApiKey, resolveApiKey } from "./oauth";
 
 // Resolve OAuth tokens at module level (async, runs before tests)
-const oauthTokens = await Promise.all([
-	resolveApiKey("github-copilot"),
-	resolveApiKey("google-antigravity"),
-	resolveApiKey("openai-codex"),
-]);
-const [githubCopilotToken, antigravityToken, openaiCodexToken] = oauthTokens;
+const oauthTokens = await Promise.all([resolveApiKey("github-copilot"), resolveApiKey("openai-codex")]);
+const [githubCopilotToken, openaiCodexToken] = oauthTokens;
 
 // Lorem ipsum paragraph for realistic token estimation
 const LOREM_IPSUM = `Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum. `;
@@ -328,44 +324,6 @@ describe("Context overflow error handling", () => {
 			expect(result.errorMessage).toMatch(/input token count.*exceeds the maximum/i);
 			expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
 		}, 120000);
-	});
-
-	// =============================================================================
-	// Google Antigravity (OAuth)
-	// Tests both Gemini and Anthropic models via Antigravity
-	// =============================================================================
-
-	describe("Google Antigravity (OAuth)", () => {
-		// Gemini model
-		it.skipIf(!antigravityToken)(
-			"gemini-3.8-flash - should detect overflow via isContextOverflow",
-			async () => {
-				const model = getBundledModel("google-antigravity", "gemini-3.8-flash");
-				const result = await testContextOverflow(model, antigravityToken!);
-				logResult(result);
-
-				expect(result.stopReason).toBe("error");
-				expect(result.errorMessage).toMatch(/input token count.*exceeds the maximum/i);
-				expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
-			},
-			120000,
-		);
-
-		// Anthropic model via Antigravity
-		it.skipIf(!antigravityToken)(
-			"claude-sonnet-4-5 - should detect overflow via isContextOverflow",
-			async () => {
-				const model = getBundledModel("google-antigravity", "claude-sonnet-4-5");
-				const result = await testContextOverflow(model, antigravityToken!);
-				logResult(result);
-
-				expect(result.stopReason).toBe("error");
-				// Anthropic models return "prompt is too long" pattern
-				expect(result.errorMessage).toMatch(/prompt is too long/i);
-				expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
-			},
-			120000,
-		);
 	});
 
 	// =============================================================================

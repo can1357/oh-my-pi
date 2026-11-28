@@ -45,7 +45,6 @@ import { getLinterClient } from "./clients";
 import { locationsNotMentioning, missingOccurrencesNote } from "./completeness";
 import { configCache, describeMissingServers, getConfig, getServersForFile } from "./config";
 import {
-	BATCH_DIAGNOSTICS_WAIT_TIMEOUT_MS,
 	formatLocationWithContext,
 	hasRustWorkspaceAncestor,
 	isOnlyQueriedDeclaration,
@@ -126,9 +125,6 @@ import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { type Theme } from "@oh-my-pi/pi-tui/theme/contract";
 
 const MAX_RENAME_PAIRS = 1000;
-
-/** File actions whose answer can draw on other open documents; those are synced from disk first. */
-const CROSS_FILE_ACTIONS: ReadonlySet<string> = new Set([...PROJECT_INDEXED_ACTIONS, "code_actions"]);
 
 interface FileRenamePair {
 	oldUri: string;
@@ -373,6 +369,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		const rethrowAbort = (err: unknown, serverName?: string): void => {
 			if (!(err instanceof ToolAbortError) && !signal?.aborted) return;
 			if (timeoutSignal.aborted && !callerSignal?.aborted) {
+				if (err instanceof ToolError) throw err;
 				const server = serverName ? ` on ${serverName}` : "";
 				throw new ToolError(
 					`LSP ${action} timed out after ${timeoutSec}s${server}. The server may still be indexing; try again or pass timeout=<larger>.`,
@@ -490,7 +487,13 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				);
 			}
 
-			for (const target of targets) {
+			for (const [index, target] of targets.entries()) {
+				if (detailed && timeoutSignal.aborted && !callerSignal?.aborted) {
+					results.push(
+						`${statusSymbol("warning")} Deadline reached; unverified: ${targets.slice(index).join(", ")}`,
+					);
+					break;
+				}
 				throwIfAborted(signal);
 				const resolved = resolveToCwd(target, this.session.cwd);
 				const servers = getServersForFile(config, resolved);
@@ -509,7 +512,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				const unreportedServers: string[] = [];
 
 				// Query all applicable servers for this file
-				for (const [serverName, serverConfig] of servers) {
+				for (const [index, [serverName, serverConfig]] of servers.entries()) {
 					allServerNames.add(serverName);
 					totalServerAttempts++;
 					try {
@@ -553,11 +556,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						// budget, which would otherwise surface as a false "OK". An explicit
 						// diagnostics request can afford to wait: `lsp.requestTimeout`, or the
 						// call's `timeout`, bounded by the tool timeout.
-						const waitCapMs = detailed
-							? BATCH_DIAGNOSTICS_WAIT_TIMEOUT_MS
-							: isProjectAwareLspServer(serverConfig)
-								? waitMs
-								: SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS;
+						const waitCapMs = isProjectAwareLspServer(serverConfig) ? waitMs : SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS;
 						const timeoutMs = Math.min(waitCapMs, timeoutSec * 1000);
 						const diagnostics =
 							rebuildStatusSeq !== undefined && expectedDocumentVersion !== undefined
@@ -583,6 +582,10 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						succeededServers++;
 						reportedServers.push(serverName);
 					} catch (err) {
+						if (detailed && timeoutSignal.aborted && !callerSignal?.aborted) {
+							unreportedServers.push(...servers.slice(index).map(([name]) => name));
+							break;
+						}
 						rethrowAbort(err, serverName);
 						// Server failed; record it so a total failure is not reported as clean.
 						failedServers.push(serverName);
@@ -610,7 +613,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 
 				const notes: string[] = [];
 				if (unreportedServers.length > 0) {
-					const hint = detailed ? "query the file alone for a longer wait" : "retry once it finishes analyzing";
+					const hint = "retry once it finishes analyzing";
 					notes.push(
 						`${statusSymbol("warning")} ${relPath}: no diagnostics report yet from ${unreportedServers.join(", ")}; ${hint}`,
 					);
@@ -1439,8 +1442,9 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			unsupportedNotes = selected.skipped;
 			const targetFile = resolvedFile;
 			const isRustAnalyzerServer = isRustAnalyzerClient(client) || serverName === "rust-analyzer";
-			const needsProjectIndex =
-				targetFile !== null && PROJECT_INDEXED_ACTIONS.has(action) && isProjectAwareLspServer(serverConfig);
+			const isProjectIndexed = PROJECT_INDEXED_ACTIONS.has(action);
+			const isCrossFile = isProjectIndexed || action === "code_actions";
+			const needsProjectIndex = targetFile !== null && isProjectIndexed && isProjectAwareLspServer(serverConfig);
 			const rustWorkspaceWait =
 				needsProjectIndex && isRustAnalyzerServer && targetFile !== null && hasRustWorkspaceAncestor(targetFile);
 
@@ -1498,7 +1502,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			// writes its edits onto them. Sync them all after the waits, right
 			// before the request. An action that writes edits fails on an open file
 			// it cannot read; a read-only query closes that file and goes on.
-			if (CROSS_FILE_ACTIONS.has(action)) {
+			if (isCrossFile) {
 				const writesEdits = action === "rename" || (action === "code_actions" && apply === true);
 				await reconcileOpenFilesFromDisk(client, signal, undefined, writesEdits ? "throw" : "close");
 			}
@@ -1899,10 +1903,10 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			}
 
 			if (located) output = `${symbol} at line ${located.line}:\n${output}`;
-			if (CROSS_FILE_ACTIONS.has(action) && client.activeProgressTokens.size > 0) {
+			if (isCrossFile && client.activeProgressTokens.size > 0) {
 				output += `\nnote: ${serverName} is still indexing; results may be incomplete`;
 			}
-			if (targetFile && CROSS_FILE_ACTIONS.has(action)) {
+			if (targetFile && isCrossFile) {
 				const checkout = await unservedCheckout(client, targetFile);
 				if (checkout) {
 					output += `\nnote: ${serverName} indexes ${client.cwd} only and cannot load the checkout ${checkout}; these results may describe ${client.cwd}'s copy of the code`;

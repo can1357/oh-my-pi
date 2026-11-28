@@ -5,6 +5,7 @@ import { type BtwInjectState } from "./btw-inject";
 /** What a press on a note asks of its controller; also the ids of its menu entries. */
 export type BtwNoteAction =
 	| "btw-focus"
+	| "btw-blur"
 	| "btw-expand"
 	| "btw-fold"
 	| "btw-copy"
@@ -19,6 +20,6 @@ export interface BtwNoteHost {
 	menu(record: BtwHistoryRecord, folded: boolean): readonly TspMenuEntry[];
 	/** How turn `turnIndex`'s `<inject>` block shows apart from its prose; undefined: as plain text. */
 	injectState(record: BtwHistoryRecord, turnIndex: number): BtwInjectState | undefined;
-	/** A click on the note, its folded line or its tools, or a chosen menu entry. */
+	/** A click on the note's head, its folded line or its tools, or a chosen menu entry. */
 	run(record: BtwHistoryRecord, action: BtwNoteAction): void;
 }

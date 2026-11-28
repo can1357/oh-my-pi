@@ -3,7 +3,7 @@
  *
  * Phase labels cover only a handful of call sites, so most blocks used to log
  * as "unknown". JavaScriptCore's sampling profiler records the JS thread's
- * stack every millisecond while it runs JS and nothing while the loop idles,
+ * stack every ten milliseconds while it runs JS and nothing while the loop idles,
  * so the samples taken during a block name the code that caused it.
  */
 import { profile, type SamplingProfileStackTraces, samplingProfilerStackTraces, startSamplingProfiler } from "bun:jsc";
@@ -35,6 +35,8 @@ export interface LoopSampler {
 	stop(): void;
 	/** Returns the samples taken since the previous drain, oldest first, and forgets them. */
 	drain(): LoopSample[];
+	/** Clears samples without converting their stacks to watchdog frames. */
+	discard(): void;
 }
 
 /** What dominated a blocked window, from {@link summarizeBlock}. */
@@ -56,6 +58,7 @@ const TOP_LIMIT = 4;
 // them does. Each sample it records keeps the functions on its stack, and what
 // they close over, alive until drained.
 let runningSamplers = 0;
+const SAMPLE_INTERVAL_US = 10_000;
 
 /**
  * The bun:jsc-backed sampler, or null when sampling is disabled: by env
@@ -73,14 +76,18 @@ export function createJscLoopSampler(): LoopSampler | null {
 		start(): void {
 			if (running) return;
 			running = true;
-			if (runningSamplers++ === 0) startSamplingProfiler();
+			if (runningSamplers++ === 0) startSamplingProfiler(undefined, SAMPLE_INTERVAL_US);
 		},
 		stop(): void {
 			if (!running) return;
 			running = false;
 			// bun:jsc has no stop call; profile() pauses the shared profiler and
-			// clears its buffer once its callback returns.
-			if (--runningSamplers === 0) profile(() => {});
+			// clears its buffer once its callback returns. Keep its sampling interval:
+			// returning to Bun's 1 ms default here costs idle CPU on Windows.
+			if (--runningSamplers === 0) profile(() => {}, SAMPLE_INTERVAL_US);
+		},
+		discard(): void {
+			samplingProfilerStackTraces();
 		},
 		drain(): LoopSample[] {
 			const { traces } = samplingProfilerStackTraces();

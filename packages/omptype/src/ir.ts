@@ -181,7 +181,16 @@ type Tok =
 	| { t: "str"; v: string }
 	| { t: "op"; v: string };
 
-const SIMPLE_OPS = "|&()[]=?%,#";
+// Tokens are never mutated. Use one token per operator instead of allocating
+// one for every bracket, pipe and comparator in every compound definition.
+const operators: Record<string, Tok> = Object.create(null);
+for (const v of ["|", "&", "(", ")", "[", "]", "=", "?", "%", ",", "#", "<", ">", "<=", ">=", "=="]) {
+	operators[v] = { t: "op", v };
+}
+
+function isIdentifierStart(code: number): boolean {
+	return (code >= 65 && code <= 90) || (code >= 97 && code <= 122) || code === 95 || code === 36;
+}
 
 function tokenize(src: string): Tok[] {
 	const toks: Tok[] = [];
@@ -191,6 +200,17 @@ function tokenize(src: string): Tok[] {
 		const c = src[i];
 		if (c === " " || c === "\t" || c === "\n" || c === "\r") {
 			i++;
+			continue;
+		}
+		const op = operators[c];
+		if (op) {
+			if ((c === "=" || c === "<" || c === ">") && src[i + 1] === "=") {
+				toks.push(operators[`${c}=`]);
+				i += 2;
+			} else {
+				toks.push(op);
+				i++;
+			}
 			continue;
 		}
 		if (c === "d" && (src[i + 1] === "'" || src[i + 1] === '"')) {
@@ -245,39 +265,22 @@ function tokenize(src: string): Tok[] {
 			if (/^-?(?:0|[1-9]\d*)n$/.test(raw) && raw !== "-0n") {
 				toks.push({ t: "bigint", v: BigInt(raw.slice(0, -1)) });
 			} else {
-				const valid =
-					/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(raw) && !Object.is(Number(raw), -0) && String(Number(raw)) === raw;
+				const value = Number(raw);
+				const valid = /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(raw) && !Object.is(value, -0) && String(value) === raw;
 				if (!valid) throw new OmpTypeError(`Malformed number literal '${raw}'`);
-				toks.push({ t: "num", v: Number(raw) });
+				toks.push({ t: "num", v: value });
 			}
 			i = j;
 			continue;
 		}
-		if (/[a-zA-Z_$]/.test(c)) {
+		if (isIdentifierStart(src.charCodeAt(i))) {
 			let j = i + 1;
-			while (j < n && /[\w.$]/.test(src[j])) j++;
+			for (; j < n; j++) {
+				const code = src.charCodeAt(j);
+				if (!isIdentifierStart(code) && (code < 48 || code > 57) && code !== 46) break;
+			}
 			toks.push({ t: "id", v: src.slice(i, j) });
 			i = j;
-			continue;
-		}
-		if (c === "<" || c === ">") {
-			if (src[i + 1] === "=") {
-				toks.push({ t: "op", v: `${c}=` });
-				i += 2;
-			} else {
-				toks.push({ t: "op", v: c });
-				i++;
-			}
-			continue;
-		}
-		if (c === "=" && src[i + 1] === "=") {
-			toks.push({ t: "op", v: "==" });
-			i += 2;
-			continue;
-		}
-		if (SIMPLE_OPS.includes(c)) {
-			toks.push({ t: "op", v: c });
-			i++;
 			continue;
 		}
 		throw new OmpTypeError(`unexpected character '${c}' in "${src}"`);
@@ -288,23 +291,6 @@ function tokenize(src: string): Tok[] {
 // ── string-definition parser ─────────────────────────────────────────────────
 
 const CMP: Record<string, true> = { "<": true, "<=": true, ">": true, ">=": true };
-
-const KEYWORDS: Record<string, () => IR> = {
-	number: () => ({ k: "number" }),
-	"number.integer": () => ({ k: "number", int: true }),
-	boolean: () => ({ k: "boolean" }),
-	bigint: () => ({ k: "bigint" }),
-	symbol: () => ({ k: "symbol" }),
-	never: () => ({ k: "never" }),
-	null: () => ({ k: "null" }),
-	undefined: () => ({ k: "undefined" }),
-	unknown: () => ({ k: "unknown" }),
-	any: () => ({ k: "unknown" }),
-	object: () => ({ k: "anyobject" }),
-	Date: () => ({ k: "instance", ctor: Date, expected: "a Date" }),
-	true: () => ({ k: "lit", v: true }),
-	false: () => ({ k: "lit", v: false }),
-};
 
 /** Resolve named scope aliases and, when present, scoped generic invocations. */
 export interface AliasResolver {
@@ -323,6 +309,12 @@ const THIS_ONLY_RESOLVERS = new WeakSet<AliasResolver>();
 /** Declare that `resolve` only intercepts `this` (see THIS_ONLY_RESOLVERS). */
 export function markThisOnlyResolver(resolve: AliasResolver): void {
 	THIS_ONLY_RESOLVERS.add(resolve);
+}
+
+function resolveIdentifier(name: string, src: string, resolve?: AliasResolver): IR {
+	const ir = resolve?.(name) ?? keywordIR(name);
+	if (!ir) throw new OmpTypeError(`unknown keyword "${name}" in "${src}"`);
+	return ir;
 }
 
 interface ParsedTop {
@@ -566,11 +558,7 @@ class StrParser {
 				if (!instantiated) throw new OmpTypeError(`unknown generic "${t.v}" in "${this.#src}"`);
 				return instantiated;
 			}
-			const scoped = this.#resolve?.(t.v);
-			const make = KEYWORDS[t.v];
-			const keyword = scoped ?? make?.() ?? keywordIR(t.v);
-			if (!keyword) throw new OmpTypeError(`unknown keyword "${t.v}" in "${this.#src}"`);
-			return keyword;
+			return resolveIdentifier(t.v, this.#src, this.#resolve);
 		}
 		throw new OmpTypeError(`unexpected token in "${this.#src}"`);
 	}
@@ -586,7 +574,7 @@ function isWhitespaceAt(src: string, index: number): boolean {
 
 /** Fast path for the literal unions pervasive in command schemas. */
 function parseLiteralUnion(src: string): IR | undefined {
-	const members: Extract<IR, { k: "lit" }>[] = [];
+	let members: Extract<IR, { k: "lit" }>[] | undefined;
 	let index = 0;
 	while (index < src.length && isWhitespaceAt(src, index)) index++;
 	for (;;) {
@@ -594,25 +582,21 @@ function parseLiteralUnion(src: string): IR | undefined {
 		if (quote !== "'" && quote !== '"') return undefined;
 		const end = src.indexOf(quote, index + 1);
 		if (end < 0) return undefined;
-		members.push({ k: "lit", v: src.slice(index + 1, end) });
+		const value = src.slice(index + 1, end);
+		if (value.includes("\\")) return undefined; // Let the tokenizer decode escapes.
+		const member = { k: "lit", v: value } as const;
+		members?.push(member);
 		index = end + 1;
 		while (index < src.length && isWhitespaceAt(src, index)) index++;
 		if (index === src.length) {
-			const ir: IR = members.length === 1 ? members[0] : { k: "union", members };
-			let simple = true;
-			for (let member = 1; simple && member < members.length; member++) {
-				for (let previous = 0; previous < member; previous++) {
-					if (members[previous].k === "lit" && members[previous].v === members[member].v) {
-						simple = false;
-						break;
-					}
-				}
-			}
-			ir[kSimple] = simple;
+			if (!members) return member;
+			const ir: IR = { k: "union", members };
+			ir[kSimple] = isSimpleUnion(members);
 			ir[kSimpleOwner] = ir;
 			return ir;
 		}
 		if (src[index] !== "|") return undefined;
+		members ??= [member];
 		index++;
 		while (index < src.length && isWhitespaceAt(src, index)) index++;
 	}
@@ -758,9 +742,7 @@ export function distributeFilter(base: IR, target: IR, keepAssignable: boolean):
 	return retained.length === 1 ? retained[0] : { k: "union", members: retained };
 }
 
-/** Parse recurring global DSL fragments once; scoped aliases bypass the cache. */
-function parseRegexExec(src: string): IR | undefined {
-	if (!src.startsWith("x/")) return undefined;
+function parseRegexExec(src: string): IR {
 	const end = src.lastIndexOf("/");
 	if (end < 2) throw new OmpTypeError(`unterminated regular expression in "${src}"`);
 	let regex: RegExp;
@@ -779,11 +761,26 @@ function parseRegexExec(src: string): IR | undefined {
 	};
 }
 
+/** Parse recurring global DSL fragments once; scoped aliases bypass the cache. */
 function parseStringDef(src: string, resolve?: AliasResolver): ParsedTop {
 	const cacheable = resolve === undefined || (!src.includes("this") && THIS_ONLY_RESOLVERS.has(resolve));
 	if (cacheable) {
 		const cached = stringDefCache.get(src);
 		if (cached) return cached;
+	}
+	if (/^[A-Za-z_$][\w.$]*(?:\[\])?$/.test(src)) {
+		const array = src.endsWith("]");
+		const name = array ? src.slice(0, -2) : src;
+		if (name !== "keyof") {
+			const element = resolveIdentifier(name, src, resolve);
+			const parsed: ParsedTop = {
+				ir: array ? { k: "array", el: element } : element,
+				hasDefault: false,
+				optional: false,
+			};
+			if (cacheable && stringDefCache.size < STRING_DEF_CACHE_MAX) stringDefCache.set(src, parsed);
+			return parsed;
+		}
 	}
 	const pipeIndex = src.indexOf("|>");
 	if (pipeIndex >= 0) {
@@ -809,9 +806,13 @@ function parseStringDef(src: string, resolve?: AliasResolver): ParsedTop {
 		if (cacheable && stringDefCache.size < STRING_DEF_CACHE_MAX) stringDefCache.set(src, parsed);
 		return parsed;
 	}
-	let ir = parseLiteralUnion(src) ?? parseRegexExec(src) ?? parseGeneric(src, resolve);
-	if (ir === undefined && src.startsWith("`") && src.endsWith("`")) {
-		ir = templateIR(src.slice(1, -1));
+	const first = src[0];
+	let ir: IR | undefined;
+	if (first === "'" || first === '"' || isWhitespaceAt(src, 0)) ir = parseLiteralUnion(src);
+	if (ir === undefined) {
+		if (src.startsWith("x/")) ir = parseRegexExec(src);
+		else if (src.endsWith(">")) ir = parseGeneric(src, resolve);
+		else if (first === "`" && src.endsWith("`")) ir = templateIR(src.slice(1, -1));
 	}
 
 	const parsed: ParsedTop =
@@ -1292,6 +1293,9 @@ function parseObjectDefinition(def: Record<PropertyKey, unknown>, resolve?: Alia
 	let spreadKeys: Set<PropertyKey> | undefined;
 	let normalizedKey: PropertyKey | undefined;
 	let normalizedKeys: PropertyKey[] | undefined;
+	// Distinct unescaped "key?" names remain distinct when the suffix is
+	// stripped. A run of them need only check against the preceding properties.
+	let optionalRunStart = 0;
 	let indexes:
 		| {
 				string?: IR;
@@ -1334,9 +1338,10 @@ function parseObjectDefinition(def: Record<PropertyKey, unknown>, resolve?: Alia
 				if (spread.patternIndexes !== undefined) objectIndexes.patterns.push(...spread.patternIndexes);
 			}
 			if (spread.extras !== "keep") extras = spread.extras;
+			optionalRunStart = props.length;
 			continue;
 		}
-		if (typeof originalKey === "string" && originalKey.startsWith("[") && originalKey.endsWith("]")) {
+		if (originalKey[0] === "[" && originalKey.endsWith("]")) {
 			let value: IR;
 			if (typeof val === "string") {
 				const parsed = parseStringDef(val, resolve);
@@ -1366,20 +1371,22 @@ function parseObjectDefinition(def: Record<PropertyKey, unknown>, resolve?: Alia
 			const objectIndexes = indexes ?? { patterns: [] };
 			indexes = objectIndexes;
 			indexKeyKind(key, value, props, objectIndexes);
+			optionalRunStart = props.length;
 			if (simple && (!isSimpleIR(key) || !isSimpleIR(value))) simple = false;
 			continue;
 		}
-		const escapedOptional = typeof originalKey === "string" && originalKey.endsWith("\\?");
+		const question = originalKey.endsWith("?");
+		const escapedOptional = question && originalKey.endsWith("\\?");
 		const escapedMeta =
-			typeof originalKey === "string" &&
-			(originalKey === "\\+" || originalKey === "\\..." || originalKey.startsWith("\\["));
-		const rawKey = escapedOptional
-			? `${originalKey.slice(0, -2)}?`
-			: escapedMeta
-				? originalKey.slice(1)
-				: originalKey;
-		const opt = typeof rawKey === "string" && !escapedOptional && !escapedMeta && rawKey.endsWith("?");
-		const key = opt ? rawKey.slice(0, -1) : rawKey;
+			originalKey[0] === "\\" && (originalKey === "\\+" || originalKey === "\\..." || originalKey.startsWith("\\["));
+		const opt = question && !escapedOptional && !escapedMeta;
+		const key = opt
+			? originalKey.slice(0, -1)
+			: escapedOptional
+				? `${originalKey.slice(0, -2)}?`
+				: escapedMeta
+					? originalKey.slice(1)
+					: originalKey;
 		let prop: PropIR;
 		if (typeof val === "string") {
 			const parsed = parseStringDef(val, resolve);
@@ -1419,8 +1426,11 @@ function parseObjectDefinition(def: Record<PropertyKey, unknown>, resolve?: Alia
 			};
 		}
 		if (key !== originalKey) {
-			if (!spreadKeys?.has(key) && props.some(candidate => candidate.key === key)) {
-				throw new OmpTypeError(`duplicate object key ${String(key)}`);
+			if (!spreadKeys?.has(key)) {
+				const end = opt ? optionalRunStart : props.length;
+				for (let i = 0; i < end; i++) {
+					if (props[i].key === key) throw new OmpTypeError(`duplicate object key ${String(key)}`);
+				}
 			}
 			if (normalizedKey === undefined) normalizedKey = key;
 			else {
@@ -1433,6 +1443,7 @@ function parseObjectDefinition(def: Record<PropertyKey, unknown>, resolve?: Alia
 		if (opt && prop.hasDefault) throw new OmpTypeError(`optional key ${String(key)} cannot specify a default`);
 		if (simple && (prop.hasDefault || !isSimpleIR(prop.val))) simple = false;
 		addObjectProp(props, spreadKeys, prop);
+		if (!opt) optionalRunStart = props.length;
 	}
 	for (const key of Object.getOwnPropertySymbols(def)) {
 		if (!Object.prototype.propertyIsEnumerable.call(def, key)) continue;
@@ -1533,6 +1544,45 @@ export function isSimpleIR(ir: IR): boolean {
 	return simple;
 }
 
+const nonUnit = Symbol("non-primitive-unit");
+
+function primitiveUnit(ir: IR): unknown {
+	if (ir.k === "null") return null;
+	if (ir.k === "undefined") return undefined;
+	if (ir.k === "lit" && (ir.v === null || (typeof ir.v !== "object" && typeof ir.v !== "function"))) return ir.v;
+	return nonUnit;
+}
+
+/** Distinct primitive units cannot prune each other. Also recognize nullable
+ * primitive domains, without allocating a set for the common binary unions. */
+function isSimpleUnion(members: IR[]): boolean {
+	if (members.length < 2) return false;
+	if (members.length === 2) {
+		const a = primitiveUnit(members[0]);
+		const b = primitiveUnit(members[1]);
+		if (a !== nonUnit && b !== nonUnit) return a !== b && !(typeof a === "boolean" && typeof b === "boolean");
+		const other =
+			a === null || a === undefined ? members[1] : b === null || b === undefined ? members[0] : undefined;
+		return (
+			other?.k === "string" ||
+			other?.k === "number" ||
+			other?.k === "boolean" ||
+			other?.k === "bigint" ||
+			other?.k === "symbol"
+		);
+	}
+	const first = primitiveUnit(members[0]);
+	if (first === nonUnit) return false;
+	const values = new Set<unknown>();
+	values.add(first);
+	for (let i = 1; i < members.length; i++) {
+		const value = primitiveUnit(members[i]);
+		if (value === nonUnit || values.has(value)) return false;
+		values.add(value);
+	}
+	return true;
+}
+
 function scanSimpleIR(ir: IR): boolean {
 	switch (ir.k) {
 		case "intersection":
@@ -1543,27 +1593,7 @@ function scanSimpleIR(ir: IR): boolean {
 		case "refine":
 			return scanSimpleIR(ir.base);
 		case "union":
-			if (ir.members.length < 2) return false;
-			if (
-				ir.members.length === 2 &&
-				ir.members.every(member => member.k === "lit" && typeof member.v === "boolean")
-			) {
-				return false;
-			}
-			for (let index = 0; index < ir.members.length; index++) {
-				const member = ir.members[index];
-				if (
-					member.k !== "lit" ||
-					(member.v !== null && (typeof member.v === "object" || typeof member.v === "function"))
-				) {
-					return false;
-				}
-				for (let previous = 0; previous < index; previous++) {
-					const candidate = ir.members[previous];
-					if (candidate.k === "lit" && candidate.v === member.v) return false;
-				}
-			}
-			return true;
+			return isSimpleUnion(ir.members);
 		case "array":
 			return scanSimpleIR(ir.el);
 		case "tuple":

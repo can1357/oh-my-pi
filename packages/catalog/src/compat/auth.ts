@@ -24,9 +24,49 @@ export function providerDisabledReason(provider: string): string | undefined {
 	return byId[provider]?.disabled;
 }
 
+/** Whether `provider`'s logins hinge on a key only this machine holds (`device-bound #true`), so no auth broker stores them. */
+export function providerDeviceBound(provider: string): boolean {
+	return byId[provider]?.deviceBound === true;
+}
+
 /** The account risk a new login must accept first (`login-warning "<text>"`), if declared. */
 export function providerLoginWarning(provider: string): string | undefined {
 	return byId[provider]?.loginWarning;
+}
+
+/** What surfaces call `provider` once an account is linked (`connected-name "<text>"`), if declared. */
+export function providerConnectedName(provider: string): string | undefined {
+	return byId[provider]?.connectedName;
+}
+
+/** The transcript line shown when a session starts using a `provider` model (`active-notice "<text>"`), if declared. */
+export function providerActiveNotice(provider: string): string | undefined {
+	return byId[provider]?.activeNotice;
+}
+
+/** The notice shown once after a successful `provider` sign-in (`login-notice "<text>"`), if declared. */
+export function providerLoginNotice(provider: string): string | undefined {
+	return byId[provider]?.loginNotice;
+}
+
+/** Where the user turns `provider`'s access on or off at the host (`manage-url "<url>"`), if declared. */
+export function providerManageUrl(provider: string): string | undefined {
+	return byId[provider]?.manageUrl;
+}
+
+/** The OAuth scope `provider` logins must hold to serve requests (`required-scope "<scope>"`), if declared. */
+export function providerRequiredScope(provider: string): string | undefined {
+	return byId[provider]?.requiredScope;
+}
+
+/**
+ * Whether a `provider` login granted `scope` leaves the provider off: it
+ * declares a `required-scope` the grant lacks. An unknown grant (`scope`
+ * undefined) is not off.
+ */
+export function providerAccessOff(provider: string, scope: string | undefined): boolean {
+	const required = providerRequiredScope(provider);
+	return required !== undefined && scope !== undefined && !scope.split(" ").includes(required);
 }
 
 /** Every hook name referenced anywhere in the auth stratum, for registry completeness checks. */
@@ -57,6 +97,7 @@ export function authHookNames(): Record<string, string[]> {
 			add("value", login.device.url.hook);
 			add("value", login.token.url.hook);
 		}
+		add("sign-out", p.signOut?.hook);
 		const refresh = p.refresh;
 		if (refresh?.kind === "hook") add("refresh", refresh.hook);
 		if (refresh?.kind === "request") {

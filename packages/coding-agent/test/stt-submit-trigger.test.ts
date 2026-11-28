@@ -194,6 +194,7 @@ describe("STTController submit trigger integration", () => {
 		return {
 			showWarning: vi.fn(),
 			showStatus: vi.fn(),
+			clearStatus: vi.fn(),
 			onStateChange: vi.fn(),
 		};
 	}

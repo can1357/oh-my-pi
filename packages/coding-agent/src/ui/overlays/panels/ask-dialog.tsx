@@ -16,6 +16,7 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { type Accessor, type JSXNode, onCleanup, signal, untrack } from "@oh-my-pi/pi-tui";
 import { replaceTabs, truncate } from "@oh-my-pi/pi-tui/text/width";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import {
 	type AskDialogPrompt,
@@ -337,16 +338,10 @@ export class AskDialogModel {
 		if (state.noteRowKey !== undefined && state.noteRowKey !== rowKey) clearNote(state);
 	}
 
-	submitOrOpenUnanswered(): void {
-		const unanswered = this.states.findIndex(state => !isAnswered(state));
-		if (unanswered < 0 || unanswered === this.current) this.finishSubmit();
-		else this.openAt(unanswered);
-	}
-
 	advance(): void {
 		const current = this.current;
 		if (current + 1 < this.questions.length) this.openAt(current + 1);
-		else this.submitOrOpenUnanswered();
+		else this.finishSubmit();
 	}
 
 	/** Enter (`enter`) or a multi-select Space on a row. */
@@ -365,7 +360,11 @@ export class AskDialogModel {
 		if (!question.multi) this.advance();
 	}
 
-	/** Keys over the stacked questions; true when the key was the dialog's. */
+	/**
+	 * Keys over the stacked questions; true when the key was the dialog's. Keys it does not bind
+	 * return false so app-wide shortcuts (Alt+L display reset, Ctrl+T, Ctrl+R, …) still reach the
+	 * shell's global handlers while the ask holds focus (#11213, #12217, #20771).
+	 */
 	key(id: string, text: string | undefined): boolean {
 		if (this.closed || this.#promptActive) return true;
 		this.resetCountdown();
@@ -387,16 +386,15 @@ export class AskDialogModel {
 		}
 		const nav = selectKeyId(id);
 		if (this.hidden) {
-			if (nav === "enter") {
-				this.hidden = false;
-				this.touch();
-			}
+			if (nav !== "enter") return false;
+			this.hidden = false;
+			this.touch();
 			return true;
 		}
 		const index = this.current;
 		const question = this.questions[index];
 		const state = this.states[index];
-		if (!question || !state) return true;
+		if (!question || !state) return false;
 		const rows = this.rows(question);
 		const last = Math.max(0, rows.length - 1);
 		state.cursor = clamp(state.cursor, 0, last);
@@ -434,13 +432,13 @@ export class AskDialogModel {
 				return true;
 		}
 		const row = rows[state.cursor];
-		if (!row) return true;
+		if (!row) return false;
 		if (text === "n" || text === "N") {
 			void this.#promptNote(row);
 			return true;
 		}
 		const enter = nav === "enter" || id === "ctrl+j";
-		if (!enter && !(question.multi && id === "space")) return true;
+		if (!enter && !(question.multi && id === "space")) return false;
 		this.commit(row, enter);
 		this.touch();
 		return true;
@@ -453,7 +451,7 @@ export class AskDialogModel {
 		if (act === "cancel") return this.finishCancel();
 		if (act === "submit") {
 			this.resetCountdown();
-			this.submitOrOpenUnanswered();
+			this.finishSubmit();
 		} else if (act === "note") this.#noteFromPointer(keypath);
 		else {
 			const open = /^open:(\d+)$/.exec(act);
@@ -866,7 +864,7 @@ export function AskDialog(props: AskDialogProps): JSXNode {
 							motionKey="skip"
 							role="omp.ask.skip"
 							wrap="word"
-							spans={[{ s: "warning", t: `⚠ ${notice}` }]}
+							spans={[{ s: "warning", t: `${currentTheme().symbols.symbol("status.warning")} ${notice}` }]}
 						/>
 					)
 				);

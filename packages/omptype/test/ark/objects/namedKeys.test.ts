@@ -120,6 +120,19 @@ it("intersections", () => {
 	const _type28: Eq<typeof Abc.infer, { a?: string; b: string; c?: string }> = true;
 });
 
+it("detects collisions with normalized names in either order and after index signatures", () => {
+	for (const def of [
+		{ name: "string", "name?": "number" },
+		{ "name?": "number", name: "string" },
+		{ "a?": "number", "['name']": "string", "name?": "number" },
+	]) {
+		expect(() => type(def)).toThrow("duplicate object key name");
+	}
+	const merged = type({ "...": { name: "number" }, "name?": "string" });
+	expect(merged.allows({})).toBe(true);
+	expect(merged.allows({ name: 42 })).toBe(false);
+});
+
 it("escaped optional token", () => {
 	const T = type({ "a\\?": "string" });
 	const _type33: Eq<typeof T.infer, { "a?": string }> = true;

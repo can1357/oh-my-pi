@@ -10,7 +10,6 @@ use std::{
 };
 
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser, error::ErrorKind};
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use omp_vfs::{
 	BlockingFs, CanonicalizeOptions, MissingHandling, ResolveMode, child_path, file_name,
 	is_virtual_path, parent_path,
@@ -30,7 +29,6 @@ use crate::{
 	cp::{CpError, MoveCopier},
 	file_backup::{backup_display, backup_path, determine_backup_mode, determine_backup_suffix},
 	host::{Host, Utility, format_usage, matches_parser},
-	progress::stderr_draw_target,
 };
 
 #[derive(Debug, Error)]
@@ -80,13 +78,6 @@ pub(crate) struct Mv {
 
 matches_parser!(Mv, app);
 
-fn progress_manager(host: &Host, enabled: bool) -> Option<MultiProgress> {
-	if !enabled {
-		return None;
-	}
-	stderr_draw_target(host).map(MultiProgress::with_draw_target)
-}
-
 /// Options contains all the possible behaviors and flags for mv.
 ///
 /// All options are public so that the options can be programmatically
@@ -126,9 +117,6 @@ pub struct Options {
 	/// '--strip-trailing-slashes'
 	pub strip_slashes: bool,
 
-	/// '-g, --progress'
-	pub progress_bar: bool,
-
 	/// `--debug`
 	pub debug: bool,
 
@@ -147,7 +135,6 @@ impl Default for Options {
 			no_target_dir: false,
 			verbose:       false,
 			strip_slashes: false,
-			progress_bar:  false,
 			debug:         false,
 			context:       None,
 		}
@@ -175,7 +162,6 @@ static OPT_STRIP_TRAILING_SLASHES: &str = "strip-trailing-slashes";
 static OPT_TARGET_DIRECTORY: &str = "target-directory";
 static OPT_NO_TARGET_DIRECTORY: &str = "no-target-directory";
 static OPT_VERBOSE: &str = "verbose";
-static OPT_PROGRESS: &str = "progress";
 static ARG_FILES: &str = "files";
 static OPT_DEBUG: &str = "debug";
 static OPT_CONTEXT: &str = "context";
@@ -254,7 +240,6 @@ fn run_matches(matches: &ArgMatches, host: &mut Host) -> MvResult<()> {
 		no_target_dir: matches.get_flag(OPT_NO_TARGET_DIRECTORY),
 		verbose: matches.get_flag(OPT_VERBOSE) || matches.get_flag(OPT_DEBUG),
 		strip_slashes: matches.get_flag(OPT_STRIP_TRAILING_SLASHES),
-		progress_bar: matches.get_flag(OPT_PROGRESS),
 		debug: matches.get_flag(OPT_DEBUG),
 		context,
 	};
@@ -347,13 +332,6 @@ fn app() -> Command {
 				.short('v')
 				.long(OPT_VERBOSE)
 				.help("explain what is being done")
-				.action(ArgAction::SetTrue),
-		)
-		.arg(
-			Arg::new(OPT_PROGRESS)
-				.short('g')
-				.long(OPT_PROGRESS)
-				.help("Display a progress bar.\nNote: this feature is not supported by GNU coreutils.")
 				.action(ArgAction::SetTrue),
 		)
 		.arg(
@@ -495,7 +473,7 @@ fn handle_two_paths(host: &mut Host, source: &Path, target: &Path, opts: &Option
 		);
 	}
 
-	match rename(host, source, target, opts, None, &mut MoveCopier::new(opts.verbose)) {
+	match rename(host, source, target, opts, &mut MoveCopier::new(opts.verbose)) {
 		Ok(()) => Ok(()),
 		Err(e) if e.get_ref().is_some_and(|e| e.is::<Reported>()) => {
 			host.fail(1);
@@ -666,35 +644,10 @@ fn move_files_into_dir(host: &mut Host, files: &[PathBuf], target_dir: &Path, op
 		return Err(MvError::NotADirectory(target_dir.quote().to_string()).into());
 	}
 
-	let display_manager = progress_manager(host, options.progress_bar);
-
-	let count_progress = if let Some(display_manager) = &display_manager
-		&& files.len() > 1
-	{
-		Some(
-			display_manager.add(
-				ProgressBar::new(files.len().try_into().unwrap()).with_style(
-					ProgressStyle::with_template(&format!(
-						"{} {{msg}} {{wide_bar}} {{pos}}/{{len}}",
-						"moving"
-					))
-					.unwrap(),
-				),
-			),
-		)
-	} else {
-		None
-	};
-
 	for sourcepath in files {
 		if host.fs().symlink_metadata(host.resolve(sourcepath)).is_err() {
 			show(host, &MvError::NoSuchFile(sourcepath.quote().to_string()));
 			continue;
-		}
-
-		if let Some(pb) = &count_progress {
-			let msg = format!("{} (scanning hardlinks)", sourcepath.display());
-			pb.set_message(msg);
 		}
 
 		let targetpath = if let Some(name) = file_name(sourcepath) {
@@ -722,20 +675,13 @@ fn move_files_into_dir(host: &mut Host, files: &[PathBuf], target_dir: &Path, op
 			continue;
 		}
 
-		match rename(host, sourcepath, &targetpath, options, display_manager.as_ref(), &mut copier) {
+		match rename(host, sourcepath, &targetpath, options, &mut copier) {
 			Err(e) if e.to_string().is_empty() => host.fail(1),
 			Err(e) => {
 				let e = format!("cannot move {} to {}: {e}", sourcepath.quote(), targetpath.quote());
-				if let Some(pb) = &display_manager {
-					pb.suspend(|| show(host, e));
-				} else {
-					show(host, e);
-				}
+				show(host, e);
 			},
 			Ok(()) => (),
-		}
-		if let Some(pb) = &count_progress {
-			pb.inc(1);
 		}
 		moved_destinations.insert(targetpath.clone());
 	}
@@ -747,7 +693,6 @@ fn rename(
 	from: &Path,
 	to: &Path,
 	opts: &Options,
-	display_manager: Option<&MultiProgress>,
 	copier: &mut MoveCopier,
 ) -> io::Result<()> {
 	let mut backup = None;
@@ -798,7 +743,7 @@ fn rename(
 		if let Some(backup) = &backup {
 			// The existing file is only moved aside: its copy, if any, is
 			// neither reported nor linked to the moved files.
-			rename_with_fallback(host, to, backup, display_manager, &mut MoveCopier::new(false))?;
+			rename_with_fallback(host, to, backup, &mut MoveCopier::new(false))?;
 		}
 	}
 
@@ -814,7 +759,7 @@ fn rename(
 		}
 	}
 
-	rename_with_fallback(host, from, to, display_manager, copier)?;
+	rename_with_fallback(host, from, to, copier)?;
 
 	if opts.verbose {
 		let message = if let Some(path) = &backup {
@@ -825,14 +770,7 @@ fn rename(
 			format!("renamed {} -> {}", from.quote(), to.quote())
 		};
 
-		match display_manager {
-			Some(pb) => pb.suspend(|| {
-				let _ = writeln!(host.stdout, "{message}");
-			}),
-			None => {
-				let _ = writeln!(host.stdout, "{message}");
-			},
-		}
+		let _ = writeln!(host.stdout, "{message}");
 	}
 	Ok(())
 }
@@ -849,7 +787,6 @@ fn rename_with_fallback(
 	host: &mut Host,
 	from: &Path,
 	to: &Path,
-	display_manager: Option<&MultiProgress>,
 	copier: &mut MoveCopier,
 ) -> io::Result<()> {
 	let filesystem = host.fs().clone();
@@ -901,7 +838,7 @@ fn rename_with_fallback(
 		filesystem.remove_file(&to_fs)?;
 	}
 
-	match copier.copy(host, from, to, metadata, display_manager) {
+	match copier.copy(host, from, to, metadata) {
 		Ok(()) => {},
 		Err(CpError::IoErr(error) | CpError::IoErrContext(error, _)) => return Err(describe(error)),
 		Err(CpError::Error(message) | CpError::Usage(message)) => {

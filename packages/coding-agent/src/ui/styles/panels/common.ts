@@ -4,13 +4,14 @@
  */
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import type { PaintContext } from "@oh-my-pi/pi-tui/term/paint";
-import { SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-tui/term/painters/spinner";
+import { spinnerIndex } from "@oh-my-pi/pi-tui/term/painters/spinner";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { padTo, truncate, visibleWidth } from "@oh-my-pi/pi-tui/text/width";
 import type { TspKbdProps, TspSpan, TspText, TspTextProps } from "@oh-my-pi/pi-wire";
 import type { Keybinding } from "../../../config/keybindings/app-keybindings";
 import { canonicalKeyId } from "../../../config/keybindings/key-id";
-import { formatKeyHint, formatTooltipKey } from "../../keys/hints";
+import { formatKeys, keyHintPlatform } from "../../keys/format";
+import { formatKeyHint, formatTooltipKey, keyLabel } from "../../keys/hints";
 import { getKeybindings } from "../../../config/keybindings/keybindings";
 
 /** The terminal-only facts (`term` prop) of `node`. */
@@ -64,13 +65,19 @@ export function keyTitle(key: string): string {
 }
 
 /** The glyphs of the primary key bound to `action` (`⎋`, `⌃G`), else of `fallback`. */
-export function bindingGlyph(action: Keybinding, fallback: string): string {
-	return keyGlyph(canonicalKeyId(getKeybindings().keysFor(action)[0] ?? fallback));
+export function bindingGlyph(action: Keybinding, fallback: string, theme?: Theme): string {
+	const key = canonicalKeyId(getKeybindings().keysFor(action)[0] ?? fallback);
+	return theme ? keyLabel(theme, key) : keyGlyph(key);
 }
 
 /** The selector up/down keys (`tui.select.up`/`down`) as glyphs, slash-joined (`↑/↓`). */
-export function selectNavGlyphs(): string {
-	return `${bindingGlyph("tui.select.up", "up")}/${bindingGlyph("tui.select.down", "down")}`;
+export function selectNavGlyphs(theme?: Theme): string {
+	return `${bindingGlyph("tui.select.up", "up", theme)}/${bindingGlyph("tui.select.down", "down", theme)}`;
+}
+
+/** Preset keycaps for fixed alternative keys, slash-separated. */
+export function keyLabels(theme: Theme, keys: readonly string[]): string {
+	return formatKeys(keys, { preset: theme.symbols.preset, platform: keyHintPlatform() });
 }
 
 /** The glyphs of a `kbd`'s keys (`["alt", "i"]` → `⌥I`). */
@@ -113,8 +120,7 @@ export function hintText(hints: UiNode, separator = "  "): string {
 export function activityFrame(cx: PaintContext): string {
 	const frames = cx.theme.symbols.activityFrames;
 	if (frames.length === 0) return "";
-	if (cx.reduceMotion) return frames[0]!;
-	return frames[Math.floor(cx.now() / SPINNER_INTERVAL_MS) % frames.length]!;
+	return frames[spinnerIndex(cx, frames.length)]!;
 }
 
 /**

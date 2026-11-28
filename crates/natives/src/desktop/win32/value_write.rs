@@ -1,3 +1,5 @@
+use xutf::{GeneralCategoryGroup, Ucd};
+
 use super::{
 	super::{ax::text_readback, error::CoreResult},
 	delivery::is_native_class,
@@ -451,10 +453,9 @@ pub(super) fn set_edit(
 	// char.IsLetter, not signs or punctuation. .NET tests UTF-16 code units.
 	// https://github.com/dotnet/wpf/blob/main/src/Microsoft.DotNet.Wpf/src/UIAutomation/UIAutomationClientSideProviders/MS/Internal/AutomationProxies/WindowsEditBox.cs
 	if style & ES_NUMBER as u32 != 0 {
-		static LETTER: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-			regex::Regex::new(r"[\p{L}&&[\u0000-\uFFFF]]").expect("valid letter category")
-		});
-		if LETTER.is_match(text) {
+		let letter =
+			|c: char| c.len_utf16() == 1 && c.general_category_group() == GeneralCategoryGroup::Letter;
+		if text.chars().any(letter) {
 			return Err(unsent("the numeric text field does not accept letters"));
 		}
 	}

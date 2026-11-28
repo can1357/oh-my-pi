@@ -15,6 +15,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as discovery from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { runStructuredSubagent } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
+import type { TaskEffort } from "@oh-my-pi/pi-coding-agent/thinking/levels";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 const perCallSettings = (model: Model, extra: Record<string, unknown> = {}) =>
@@ -34,6 +35,8 @@ let runs = 0;
 async function runWorker(options: {
 	model: Model;
 	perCallModel: string;
+	effort?: TaskEffort;
+	spawnHookModel?: string;
 	settings?: Settings;
 	assignment?: string;
 	setup?: (modelRegistry: ModelRegistry) => void;
@@ -78,6 +81,7 @@ async function runWorker(options: {
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		getSessionAgents: () => [],
+		emitBeforeSubagentSpawn: options.spawnHookModel ? async () => ({ model: options.spawnHookModel }) : undefined,
 	} as unknown as ToolSession;
 	const execution = await runStructuredSubagent({
 		session,
@@ -85,6 +89,7 @@ async function runWorker(options: {
 		assignment: options.assignment ?? "Answer the question.",
 		agent: "worker",
 		perCallModel: options.perCallModel,
+		effort: options.effort,
 		structured: false,
 		identity: { id: agentId },
 		keepAlive: false,
@@ -187,6 +192,31 @@ describe("per-call exact selection after background discovery", () => {
 			expect(failure(result)).toMatch(/no supported thinking effort at or below task\.maxEffort=low/);
 		}
 	});
+
+	it.each([
+		{ suffix: ":medium", reasoning: Effort.Medium },
+		{ suffix: "", hookSuffix: ":low", reasoning: Effort.High },
+		{ suffix: "", reasoning: Effort.High },
+		{ suffix: ":auto", reasoning: Effort.High },
+	])(
+		"resolves caller suffix '$suffix' and effort: hi against routing hooks",
+		async ({ suffix, hookSuffix, reasoning }) => {
+			const model = Object.assign(
+				createMockModel({ id: "hinted", reasoning: true, handler: () => ({ content: ["Hinted answer."] }) }),
+				{
+					thinking: { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High] } satisfies ThinkingConfig,
+				},
+			);
+			const result = await runWorker({
+				model,
+				perCallModel: `mock/${model.id}${suffix}`,
+				spawnHookModel: hookSuffix ? `mock/${model.id}${hookSuffix}` : undefined,
+				effort: "hi",
+			});
+			expect(result.exitCode).toBe(0);
+			expect(model.calls.map(call => call.options?.reasoning)).toEqual([reasoning]);
+		},
+	);
 
 	it.each([
 		{ id: "coding-router", selector: "mock/coding-router:low", identity: "mock/coding-router", level: Effort.Low },

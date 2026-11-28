@@ -12,6 +12,14 @@ export function asRecord(value: unknown): Record<string, unknown> | null {
 	return isRecord(value) ? value : null;
 }
 
+/**
+ * Message text of a thrown value: `Error.message` for errors, `String(value)` otherwise.
+ * `String()` can itself throw (a null-prototype object, a throwing `toString`); that error propagates.
+ */
+export function errorMessage(value: unknown): string {
+	return value instanceof Error ? value.message : String(value);
+}
+
 export function toError(value: unknown): Error {
 	return value instanceof Error ? value : new Error(String(value));
 }

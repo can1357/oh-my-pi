@@ -1,6 +1,7 @@
 import * as path from "node:path";
 
 import { logger } from "@oh-my-pi/pi-utils";
+import { formatTimeoutNotice } from "../tools/details/bash";
 import {
 	attachSessionOwner,
 	type CancelledErrorClass,
@@ -88,17 +89,11 @@ interface KernelSessionRegistryDescriptor<
 	validateKernel?: (session: TSession, kernel: TKernel) => boolean;
 }
 
-interface KernelSessionRegistry<
-	TKernel extends RegistryKernel,
-	TOptions extends KernelSessionRegistryOptions,
-	R,
-	TSession extends KernelSession<TKernel>,
-> {
+interface KernelSessionRegistry<TKernel extends RegistryKernel, TOptions extends KernelSessionRegistryOptions, R> {
 	disposeAll(): Promise<void>;
 	disposeByOwner(ownerId: string, options?: DisposeByOwnerOptions): Promise<void>;
 	executeOnSession(code: string, cwd: string, options: TOptions): Promise<R>;
 	peekLiveKernel(cwd: string, options: TOptions): TKernel | undefined;
-	getPresentSession(cwd: string, options: TOptions): TSession | undefined;
 }
 
 export function normalizeKernelSessionCwd(cwd: string): string {
@@ -117,19 +112,9 @@ export function requireRemainingKernelTimeoutMs(
 	return remainingMs;
 }
 
-export function formatSessionTimeoutAnnotation(timeoutMs?: number): string {
-	if (timeoutMs === undefined) return "Command timed out";
-	const secs = Math.max(1, Math.round(timeoutMs / 1000));
-	return `Command timed out after ${secs} seconds`;
-}
-
 export function formatSessionKernelTimeoutAnnotation(timeoutMs: number | undefined, kernelKilled: boolean): string {
-	const secs = timeoutMs === undefined ? undefined : Math.max(1, Math.round(timeoutMs / 1000));
-	if (kernelKilled) {
-		return "eval cell timed out and the kernel was unresponsive to interrupt; the kernel has been killed and will be recreated on the next call.";
-	}
-	const duration = secs === undefined ? "the configured timeout" : `${secs}s`;
-	return `eval cell timed out after ${duration}; kernel interrupted but remains running. Reset the kernel via { reset: true } if state appears corrupted.`;
+	const timedOut = formatTimeoutNotice(timeoutMs);
+	return kernelKilled ? `${timedOut}; kernel killed, state gone` : `${timedOut}; kernel interrupted, state kept`;
 }
 
 export function createKernelSessionRegistry<
@@ -139,7 +124,7 @@ export function createKernelSessionRegistry<
 	TSession extends KernelSession<TKernel>,
 >(
 	descriptor: KernelSessionRegistryDescriptor<TKernel, TOptions, R, TSession>,
-): KernelSessionRegistry<TKernel, TOptions, R, TSession> {
+): KernelSessionRegistry<TKernel, TOptions, R> {
 	const sessions = new Map<string, TSession>();
 	const startingSessions = new Map<string, StartingKernelSession<TSession>>();
 	const resettingSessions = new Map<string, Promise<void>>();
@@ -440,11 +425,6 @@ export function createKernelSessionRegistry<
 		return kernel?.isAlive() ? kernel : undefined;
 	}
 
-	function getPresentSession(cwd: string, options: TOptions): TSession | undefined {
-		const sessionId = options.sessionId ?? `session:${cwd}`;
-		return sessions.get(descriptor.buildSessionKey(sessionId, cwd, options.interpreter));
-	}
-
 	async function executeOnSession(code: string, cwd: string, options: TOptions): Promise<R> {
 		const sessionId = options.sessionId ?? `session:${cwd}`;
 		const sessionKey = descriptor.buildSessionKey(sessionId, cwd, options.interpreter);
@@ -504,5 +484,5 @@ export function createKernelSessionRegistry<
 		return result;
 	}
 
-	return { disposeAll, disposeByOwner, executeOnSession, peekLiveKernel, getPresentSession };
+	return { disposeAll, disposeByOwner, executeOnSession, peekLiveKernel };
 }

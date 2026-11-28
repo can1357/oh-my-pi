@@ -4,8 +4,9 @@
 //! [`extras`].
 #![cfg_attr(unix, feature(process_setsid))]
 
-/// Atomic whole-file replacement behind `sponge FILE` and `sd`'s in-place edits.
-#[cfg(any(feature = "util.sd", feature = "util.sponge"))]
+/// Atomic whole-file replacement behind `sponge FILE` and the in-place edits
+/// of `sd` and `perl -i`.
+#[cfg(any(feature = "util.perl", feature = "util.sd", feature = "util.sponge"))]
 mod atomic_write;
 /// Output block sizes for `du` and `df`.
 #[cfg(any(feature = "util.du", feature = "util.df"))]
@@ -22,6 +23,10 @@ pub use host::read_process_umask;
 mod openfile;
 /// The embedding application's speech synthesizer, as `say` reaches it.
 mod speech;
+#[cfg(feature = "util.perl")]
+mod stack;
+#[cfg(any(feature = "util.awk", feature = "util.perl"))]
+mod deep;
 mod stdio;
 /// The shell's locale categories, shared by the locale-aware utilities.
 #[cfg(any(
@@ -47,14 +52,22 @@ mod quoting_style;
 	feature = "util.file",
 	feature = "util.fswatch",
 	feature = "util.ls",
+	feature = "util.perl",
 	feature = "util.rsync",
 	feature = "util.tar",
 	feature = "util.touch",
 	feature = "util.uptime"
 ))]
 mod time_zone;
-#[cfg(any(feature = "util.cp", feature = "util.mv"))]
-mod progress;
+/// Refusal of whole-disk walks, shared by the recursive search utilities.
+#[cfg(any(
+	feature = "util.ast-grep",
+	feature = "util.fd",
+	feature = "util.find",
+	feature = "util.grep",
+	feature = "util.rg"
+))]
+mod root_guard;
 
 // ── Utility builtins ──────────────────────────────────────────────────────────
 // Ports of the standalone command-line utilities the shell ships in-process.
@@ -134,6 +147,10 @@ mod entr;
 mod env;
 #[cfg(all(feature = "util.errno", unix))]
 mod errno;
+/// Command lines sized to what one `exec` takes, for `xargs`, `find -exec +`
+/// and `fd -X`.
+#[cfg(any(feature = "util.fd", feature = "util.find", feature = "util.xargs"))]
+mod exec_line;
 #[cfg(feature = "util.fd")]
 mod fd;
 #[cfg(all(feature = "util.file", any(unix, windows)))]
@@ -185,6 +202,8 @@ mod od;
 mod open;
 #[cfg(feature = "util.paste")]
 mod paste;
+#[cfg(feature = "util.perl")]
+mod perl;
 #[cfg(feature = "util.pgrep")]
 mod pgrep;
 #[cfg(feature = "util.pidwait")]

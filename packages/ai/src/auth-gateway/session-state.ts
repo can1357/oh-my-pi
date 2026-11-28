@@ -204,7 +204,7 @@ function conversationKeys(request: AuthGatewaySessionStateRequest): string[] {
  * fields are serialized on their own, so two histories hash alike exactly when
  * their role + content serialize alike.
  */
-function hashMessage(message: Message, seed: number | bigint): number | bigint {
+function hashMessage(message: Message, seed: bigint): bigint {
 	let hash = Bun.hash(message.role, seed);
 	const { content } = message;
 	if (typeof content === "string") return Bun.hash(content, hash);
@@ -268,8 +268,8 @@ export class AuthGatewaySessionStateStore {
 	 * Keyed by provider + model + conversation (see {@link sessionKeys}). A
 	 * client is free to reuse one session id across models, and the coarsest
 	 * provider entries do not separate models themselves (`openai-responses`
-	 * keys its strict-tools / history-replay record by provider alone,
-	 * Antigravity by a single constant), so the model belongs in the key here.
+	 * keys its strict-tools / history-replay record by provider alone), so the
+	 * model belongs in the key here.
 	 * Endpoint is deliberately absent: every provider whose learning is
 	 * endpoint-specific already sub-keys it internally
 	 * (`anthropic-messages:${baseUrl}\0${modelId}`,

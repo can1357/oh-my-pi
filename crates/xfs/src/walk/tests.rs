@@ -1571,3 +1571,57 @@ async fn a_caller_held_stop_ends_the_record_loop() {
 	.expect("collect");
 	assert_eq!(seen.load(Ordering::Acquire), 0, "a walk started stopped still examined entries");
 }
+
+/// A walk started under [`Stop::scope`] ends on that flag, set by something
+/// that neither drives nor drops the walk, and a walk ending on its own does
+/// not set it for the others in the scope.
+///
+/// This is how a native call's cancellation reaches its walks: the caller's
+/// aborts land only when a filesystem worker next polls the aborted task, and
+/// with several walks in flight every worker is busy in a walker's listing
+/// loop, so the walks ran on over the whole tree after their caller gave up.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_scope_stop_ends_walks_started_under_it() {
+	let names: Vec<String> = (0..512).map(|index| format!("f{index}")).collect();
+	let specs: Vec<&str> = names.iter().map(String::as_str).collect();
+	let tmp = make_tree("scope-stop", &specs);
+	let root = tmp.path().to_path_buf();
+
+	let scope = Stop::new();
+	let flag = scope.clone();
+	let (finished, stopped) = scope
+		.clone()
+		.scope(async move {
+			// Ends on its own: the scope must still be clear afterwards.
+			let finished = Arc::new(AtomicUsize::new(0));
+			let counted = Arc::clone(&finished);
+			collect(&Fs::native(), &root, &Options::default(), false, move |_, _| {
+				counted.fetch_add(1, Ordering::AcqRel);
+				Action::Stop
+			})
+			.await
+			.expect("collect");
+			assert!(!flag.stopped(), "a walk ending set the scope flag every other walk reads");
+
+			// The scope flag set partway, by neither the visitor's verdict nor
+			// this walk's own halt.
+			let stopped = Arc::new(AtomicUsize::new(0));
+			let counted = Arc::clone(&stopped);
+			collect(&Fs::native(), &root, &Options::default(), false, move |_, _| {
+				if counted.fetch_add(1, Ordering::AcqRel) == 0 {
+					flag.stop();
+				}
+				Action::Skip
+			})
+			.await
+			.expect("collect");
+			(finished.load(Ordering::Acquire), stopped.load(Ordering::Acquire))
+		})
+		.await;
+	assert_eq!(finished, 1, "a visitor's stop did not end its own walk");
+	assert_eq!(
+		stopped, 1,
+		"the walk examined further entries after its scope's flag was set, so cancelling a native \
+		 call leaves its walks running"
+	);
+}

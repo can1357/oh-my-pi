@@ -14,6 +14,14 @@ export type LoginHook = (callbacks: OAuthController) => Promise<OAuthCredentials
 /** Whole-flow refresh implementation (`refresh hook=…`). */
 export type RefreshHook = (credentials: OAuthCredentials, signal?: AbortSignal) => Promise<OAuthCredentials>;
 
+/** What removing a login asks of its provider (`sign-out hook=…`). */
+export interface SignOutOptions {
+	signal?: AbortSignal;
+}
+
+/** Revoke an account's grant upstream when its login is removed; may throw after a failed revocation. */
+export type SignOutHook = (credentials: OAuthCredentials, options: SignOutOptions) => Promise<void>;
+
 /** Runtime context handed to `after-exchange` / `after-refresh` hooks. */
 export interface ExchangeContext {
 	provider: string;
@@ -49,5 +57,6 @@ export interface HookTables {
 	value: Record<string, Lazy<ValueHook>>;
 	login: Record<string, Lazy<LoginHook>>;
 	refresh: Record<string, Lazy<RefreshHook>>;
+	signOut: Record<string, Lazy<SignOutHook>>;
 	afterExchange: Record<string, Lazy<AfterExchangeHook>>;
 }

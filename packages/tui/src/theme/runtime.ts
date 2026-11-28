@@ -5,10 +5,12 @@
  * of custom theme files.
  */
 import * as fs from "node:fs";
-import { logger } from "@oh-my-pi/pi-utils";
+import { pollFile } from "@oh-my-pi/pi-natives/file-poll";
+import { errorMessage, logger } from "@oh-my-pi/pi-utils";
 import type { TerminalCapabilities } from "../driver/contract";
 import { type Accessor, signal } from "../reactive";
 import { type ColorDepth, depthOf } from "./color";
+import { CONSERVATIVE_EMOJI, type EmojiSupport } from "./contract";
 import DARK from "./data/dark.json" with { type: "json" };
 import { customThemePath, loadTheme, loadThemeSync } from "./loader";
 import type { SymbolPreset, ThemeJson } from "./schema";
@@ -23,6 +25,9 @@ export const currentTheme: Accessor<ResolvedTheme> = active;
 export function setCurrentTheme(theme: ResolvedTheme): void {
 	active.set(theme);
 }
+
+/** Terminal capabilities the theme follows: color support, the background's appearance, emoji drawing. */
+export type ThemeCapabilities = Pick<TerminalCapabilities, "truecolor" | "colors" | "dark" | "emoji">;
 
 /** Theme settings the controller reads. */
 export interface ThemeSettings {
@@ -55,10 +60,8 @@ export interface ThemeResult {
 const FALLBACK_THEME = "dark";
 /** Delay after the last change to a watched theme file before reloading it. */
 const RELOAD_DEBOUNCE_MS = 100;
-
-function message(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
-}
+/** Stat-poll interval for the watched custom theme file. */
+const POLL_INTERVAL_MS = 500;
 
 /**
  * Chooses and publishes the active theme. In auto mode the terminal's
@@ -72,10 +75,11 @@ export class ThemeController {
 	#colorBlindMode: boolean;
 	#depth: ColorDepth = "truecolor";
 	#appearance: "dark" | "light" = "dark";
+	#emoji: EmojiSupport = CONSERVATIVE_EMOJI;
 	#auto = true;
 	#name: string;
 	#request = 0;
-	#watcher: fs.FSWatcher | undefined;
+	#stopPoll: (() => void) | undefined;
 	#reloadTimer: NodeJS.Timeout | undefined;
 	#watching = false;
 	readonly #publish: (theme: ResolvedTheme, cause: ThemeChangeCause) => void;
@@ -110,7 +114,12 @@ export class ThemeController {
 	}
 
 	get options(): ThemeOptions {
-		return { depth: this.#depth, symbolPreset: this.#symbolPreset, colorBlindMode: this.#colorBlindMode };
+		return {
+			depth: this.#depth,
+			symbolPreset: this.#symbolPreset,
+			colorBlindMode: this.#colorBlindMode,
+			emoji: this.#emoji,
+		};
 	}
 
 	#autoName(): string {
@@ -118,32 +127,38 @@ export class ThemeController {
 	}
 
 	/** Load the starting theme synchronously (first paint); falls back to `dark` when it cannot load. */
-	initSync(capabilities?: Pick<TerminalCapabilities, "truecolor" | "colors" | "dark">): void {
+	initSync(capabilities?: ThemeCapabilities): void {
 		if (capabilities) this.#absorb(capabilities);
 		const name = this.#auto ? this.#autoName() : this.#name;
 		try {
 			this.#apply(name, loadThemeSync(name, this.options), "switch");
 		} catch (error) {
-			logger.debug("Theme loading failed, falling back to dark theme", { name, error: message(error) });
+			logger.debug("Theme loading failed, falling back to dark theme", { name, error: errorMessage(error) });
 			this.#apply(FALLBACK_THEME, loadThemeSync(FALLBACK_THEME, this.options), "switch");
 		}
 	}
 
 	/**
 	 * Follow the terminal: depth from its color support, the auto slot from its
-	 * appearance. Reloads only when either changed.
+	 * appearance, emoji glyph forms from its emoji support. Reloads only when one changed.
 	 */
-	async applyCapabilities(capabilities: Pick<TerminalCapabilities, "truecolor" | "colors" | "dark">): Promise<void> {
+	async applyCapabilities(capabilities: ThemeCapabilities): Promise<void> {
 		if (!this.#absorb(capabilities)) return;
 		await this.#reload("terminal");
 	}
 
-	#absorb(capabilities: Pick<TerminalCapabilities, "truecolor" | "colors" | "dark">): boolean {
+	#absorb(capabilities: ThemeCapabilities): boolean {
 		const depth = depthOf(capabilities);
 		const appearance = capabilities.dark ? "dark" : "light";
-		const changed = depth !== this.#depth || (this.#auto && appearance !== this.#appearance);
+		const { emoji } = capabilities;
+		const changed =
+			depth !== this.#depth ||
+			(this.#auto && appearance !== this.#appearance) ||
+			emoji.vs16Wide !== this.#emoji.vs16Wide ||
+			emoji.bareFits !== this.#emoji.bareFits;
 		this.#depth = depth;
 		this.#appearance = appearance;
+		this.#emoji = emoji;
 		return changed;
 	}
 
@@ -160,7 +175,7 @@ export class ThemeController {
 			if (request !== this.#request) return { success: false, error: "Theme change superseded by a newer request" };
 			const fallback = await loadTheme(FALLBACK_THEME, this.options);
 			this.#apply(FALLBACK_THEME, fallback, "switch");
-			return { success: false, error: message(error) };
+			return { success: false, error: errorMessage(error) };
 		}
 	}
 
@@ -173,7 +188,7 @@ export class ThemeController {
 			this.#publish(theme, "preview");
 			return { success: true };
 		} catch (error) {
-			return { success: false, error: message(error) };
+			return { success: false, error: errorMessage(error) };
 		}
 	}
 
@@ -227,7 +242,7 @@ export class ThemeController {
 			const theme = await loadTheme(name, this.options);
 			if (request === this.#request) this.#apply(name, theme, cause);
 		} catch (error) {
-			logger.debug("Theme reload failed", { name, error: message(error) });
+			logger.debug("Theme reload failed", { name, error: errorMessage(error) });
 			if (request !== this.#request || !this.#auto) return;
 			const fallback = await loadTheme(FALLBACK_THEME, this.options);
 			if (request === this.#request) this.#apply(FALLBACK_THEME, fallback, cause);
@@ -242,8 +257,8 @@ export class ThemeController {
 	}
 
 	#unwatch(): void {
-		this.#watcher?.close();
-		this.#watcher = undefined;
+		this.#stopPoll?.();
+		this.#stopPoll = undefined;
 		clearTimeout(this.#reloadTimer);
 		this.#reloadTimer = undefined;
 	}
@@ -253,17 +268,19 @@ export class ThemeController {
 		const name = this.#name;
 		const file = customThemePath(name);
 		if (!fs.existsSync(file)) return;
-		try {
-			this.#watcher = fs.watch(file, () => {
+		// A poll, not `fs.watch`: editors that save by renaming a new file over
+		// the old one would leave an inode watch on the deleted file.
+		this.#stopPoll = pollFile(
+			file,
+			() => {
 				clearTimeout(this.#reloadTimer);
 				this.#reloadTimer = setTimeout(() => {
 					this.#reloadTimer = undefined;
 					void this.#reloadWatched(name);
 				}, RELOAD_DEBOUNCE_MS);
-			});
-		} catch (error) {
-			logger.debug("Theme watcher failed to start", { file, error: message(error) });
-		}
+			},
+			POLL_INTERVAL_MS,
+		);
 	}
 
 	async #reloadWatched(name: string): Promise<void> {
@@ -273,7 +290,7 @@ export class ThemeController {
 			const theme = await loadTheme(name, this.options);
 			if (request === this.#request && name === this.#name) this.#publish(theme, "file");
 		} catch (error) {
-			logger.debug("Theme file reload failed; keeping the last good theme", { name, error: message(error) });
+			logger.debug("Theme file reload failed; keeping the last good theme", { name, error: errorMessage(error) });
 		}
 	}
 }

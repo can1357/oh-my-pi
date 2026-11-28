@@ -287,6 +287,22 @@ describe("InputDecoder: every family, byte by byte", () => {
 		]);
 	});
 
+	it("drops a malformed TSP reply whose stalled tail starts with a space, preserving the next key", () => {
+		const { clock, decoder, keys } = setup();
+		decoder.process('\x1b_tsp;;{"ev":"error","msg":"unknown surface');
+		clock.advance(200);
+		decoder.process(' s:1"}\x1b\\x');
+		expect(keys()).toEqual(["x"]);
+	});
+
+	it("does not type the spaced tail of a TSP reply after the string watchdog expires", () => {
+		const { clock, decoder, keys } = setup();
+		decoder.process('\x1b_tsp;e;{"ev":"error","msg":"unknow');
+		clock.advance(5000);
+		decoder.process('surface s:1"}\x1b\\x');
+		expect(keys()).toEqual(["x"]);
+	});
+
 	it("routes every probe reply to its owner and never to input", () => {
 		const { bytes, events, replies } = setup();
 		bytes("\x1b[?62;4;22c");
@@ -362,8 +378,8 @@ describe("InputDecoder: win32-input-mode records", () => {
 		`\x1b[${vk};${sc};${uc};${down};${state};${repeat}_`;
 	const relay = (text: string) => [...text].map(ch => record(0, 0, ch.charCodeAt(0), 1, 0)).join("");
 
-	function win32() {
-		const harness = setup();
+	function win32(options: InputDecoderOptions = {}) {
+		const harness = setup(options);
 		harness.decoder.win32 = true;
 		return harness;
 	}
@@ -438,6 +454,69 @@ describe("InputDecoder: win32-input-mode records", () => {
 		decoder.process(relay("\x1b[200~a"));
 		decoder.process(record(13, 28, 13, 1, 0) + relay("b\x1b[201~"));
 		expect(events).toEqual([{ type: "paste", paste: { text: "a\rb" } }]);
+	});
+
+	it("types the characters of records inside a literal bracketed paste, split anywhere", () => {
+		const press = (vk: number, sc: number, uc: number, state = 0) =>
+			record(vk, sc, uc, 1, state) + record(vk, sc, uc, 0, state);
+		const held = (vk: number, sc: number, flag: number, keys: string) =>
+			record(vk, sc, 0, 1, flag) + keys + record(vk, sc, 0, 0, 0);
+		const shift = (keys: string) => held(16, 42, 16, keys);
+		const ctrl = (keys: string) => held(17, 29, 8, keys);
+		// What ConPTY synthesizes for pasted text: real keys with modifiers, LF as Ctrl+Enter (or
+		// Ctrl+J on other layouts), relayed units for CJK and surrogate halves, Alt+Numpad for é.
+		const body =
+			shift(press(68, 32, 68, 16)) +
+			shift(press(186, 39, 58, 16)) +
+			press(220, 43, 92) +
+			press(13, 28, 13) +
+			ctrl(press(13, 28, 10, 8)) +
+			ctrl(press(74, 36, 10, 8)) +
+			relay("中文") +
+			press(231, 0, 0xd83d) +
+			press(231, 0, 0xde00) +
+			record(18, 56, 0, 1, 2) +
+			press(96, 82, 0, 2) +
+			press(98, 80, 0, 2) +
+			press(99, 81, 0, 2) +
+			press(99, 81, 0, 2) +
+			record(18, 56, 233, 0, 0);
+		const input = `\x1b[200~${body}\x1b[201~`;
+		const expected: InputEvent[] = [{ type: "paste", paste: { text: "D:\\\r\n\n中文😀é" } }];
+		for (let at = 0; at < input.length; at++) {
+			const { decoder, events } = win32();
+			decoder.process(input.slice(0, at));
+			decoder.process(input.slice(at));
+			expect(events).toEqual(expected);
+		}
+	});
+
+	it("caps a repeated record at the paste byte limit", () => {
+		const { decoder, events } = win32({ pasteByteLimit: 8 });
+		decoder.process(`\x1b[200~${record(65, 30, 97, 1, 0, 65535)}\x1b[201~`);
+		expect(events).toEqual([{ type: "paste", paste: { text: "aaaaaaaa" } }]);
+	});
+
+	it("keeps record-shaped text in a paste the records relayed", () => {
+		const { decoder, events } = win32();
+		const literal = record(65, 30, 97, 1, 0);
+		decoder.process(relay(`\x1b[200~${literal}\x1b[201~`));
+		expect(events).toEqual([{ type: "paste", paste: { text: literal } }]);
+	});
+
+	it("keeps Win32 Backspace before direct text in the same read", () => {
+		const { decoder, keys } = win32();
+		const backspace = record(8, 14, 8, 1, 0) + record(8, 14, 8, 0, 0);
+		decoder.process("chon");
+		decoder.process(backspace);
+		decoder.process(new TextEncoder().encode(`${backspace}ọn`));
+		expect(keys()).toEqual(["c", "h", "o", "n", "backspace", "backspace", "ọ", "n"]);
+	});
+
+	it("keeps Win32 Backspace before direct paste in the same read", () => {
+		const { decoder, events } = win32();
+		decoder.process(record(8, 14, 8, 1, 0) + "\x1b[200~ọn\x1b[201~");
+		expect(events.map(event => event.type)).toEqual(["key", "paste"]);
 	});
 
 	it("still decodes direct terminal replies and keys while records are on", () => {

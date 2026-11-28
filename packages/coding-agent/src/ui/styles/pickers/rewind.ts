@@ -11,7 +11,8 @@
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import { type Block, defineRolePainter, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { truncate } from "@oh-my-pi/pi-tui/text/width";
-import { termOf } from "../panels/common";
+import { expandKeyLabel, keyLabel } from "../../keys/hints";
+import { bindingGlyph, selectNavGlyphs, termOf } from "../panels/common";
 import { caretField } from "./common";
 import { type Lane, type LaneItem, laneRows, transcriptScreen } from "./transcript-view";
 
@@ -36,6 +37,8 @@ export type RewindLookTerm = {
 	readonly filter?: { readonly text: string; readonly cursor: number };
 	/** What ←/→ move between: user turns, or a fork's branches. */
 	readonly sideLabel: string;
+	/** Older turns are not drawn yet (`a` draws them). */
+	readonly truncated: boolean;
 	/** Screen rows when the layer allots no height. */
 	readonly rows?: number;
 };
@@ -54,7 +57,7 @@ function forkRows(cx: PaintContext, columns: readonly RewindLookColumn[], width:
 	const join = (cells: readonly string[]): string => cells.map(cell => truncate(cell, column, "", true)).join(gap);
 	const heads = columns.map(
 		(branch, index) =>
-			` ${theme.style(branch.active ? "accent" : "dim", `⑂ ${index + 1}/${count}  ·  ${branch.label}`)}`,
+			` ${theme.style(branch.active ? "accent" : "dim", `${theme.symbols.icon("branch")} ${index + 1}/${count}${theme.symbols.symbol("sep.dot")}${branch.label}`)}`,
 	);
 	const rows = [join(heads), join(columns.map(() => ""))];
 	const lanes = columns.map(branch => laneRows(cx, branch.turns, column, "accent"));
@@ -70,9 +73,13 @@ function paintRewind(node: UiNode, cx: PaintContext): Block {
 	const width = cx.width;
 	if (!term.turns || !term.columns || !term.counter || !term.sideLabel || width < 8) return { rows: [] };
 	const counter = theme.style(term.counter.s, term.counter.t);
+	const steps = `${selectNavGlyphs(theme)} step  ${keyLabel(theme, "left")}/${keyLabel(theme, "right")} ${term.sideLabel}`;
+	const rewind = `${keyLabel(theme, "enter")} rewind`;
+	const cancel = bindingGlyph("tui.select.cancel", "escape", theme);
+	const earlier = term.truncated ? `  ${keyLabel(theme, "a")} earlier turns` : "";
 	const hints = term.filter
-		? `↑/↓ step  ←/→ ${term.sideLabel}  ⏎ rewind  ⎋ show all`
-		: `↑/↓ step  ←/→ ${term.sideLabel}  f filter  ⏎ rewind  ⌃O expand  ⎋ cancel`;
+		? `${steps}  ${rewind}  ${cancel} show all`
+		: `${steps}  ${keyLabel(theme, "f")} filter  ${rewind}${earlier}  ${expandKeyLabel(theme)} expand  ${cancel} cancel`;
 	const status = `${counter}  ${theme.style("dim", hints)}`;
 	const footer = term.filter
 		? `${caretField(theme, ` ${theme.style("accent", "filter:")} `, term.filter.text, term.filter.cursor, width)}  ${status}`
@@ -89,7 +96,7 @@ function paintRewind(node: UiNode, cx: PaintContext): Block {
 			outline: lane.outline ?? (fork?.outline && [fork.outline[0] + offset, fork.outline[1] + offset]),
 		};
 	}
-	const head = ` ↶ ${theme.style("strong", "Rewind")} · ${theme.style("dim", "pick the point to continue from")}`;
+	const head = ` ${theme.symbols.icon("rewind")} ${theme.style("strong", "Rewind")}${theme.symbols.symbol("sep.dot")}${theme.style("dim", "pick the point to continue from")}`;
 	return transcriptScreen(node, cx, { head, body, footer, rows: term.rows });
 }
 

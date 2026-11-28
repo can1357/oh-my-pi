@@ -1,10 +1,9 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
-import * as toolsManager from "@oh-my-pi/pi-coding-agent/utils/tools-manager";
 import { mockFetch } from "../helpers/fetch-mock";
 
 function makeSession(fetch?: FetchImpl): ToolSession {
@@ -17,26 +16,16 @@ function makeSession(fetch?: FetchImpl): ToolSession {
 		getArtifactsDir: () => artifactsDir,
 		getSessionSpawns: () => null,
 		allocateOutputArtifact: async () => ({ id: "test", path: path.join(artifactsDir, `test.log`) }),
-		settings: Settings.isolated({ "fetch.enabled": true }),
+		settings: Settings.isolated({ "fetch.enabled": true, "providers.webKeyless": true }),
 		fetch,
 	};
 }
 
 describe("read URL HTTP status without a body", () => {
-	const servers: Bun.Server<undefined>[] = [];
-	afterEach(() => {
-		for (const server of servers) server.stop(true);
-		servers.length = 0;
-	});
-
 	it("reports a bodyless 204 as a successful empty read, not a failed fetch", async () => {
-		const server = Bun.serve({
-			port: 0,
-			fetch: () => new Response(null, { status: 204, headers: { "content-type": "text/html" } }),
-		});
-		servers.push(server);
-		const result = await new ReadTool(makeSession()).execute("call", {
-			path: `http://127.0.0.1:${server.port}/healthz`,
+		const transport = mockFetch(() => new Response(null, { status: 204, headers: { "content-type": "text/html" } }));
+		const result = await new ReadTool(makeSession(transport)).execute("call", {
+			path: "https://example.com/healthz",
 		});
 		const text = result.content.find(block => block.type === "text")?.text;
 
@@ -46,10 +35,9 @@ describe("read URL HTTP status without a body", () => {
 	});
 
 	it("reports a bodyless 503 as a failed fetch", async () => {
-		const server = Bun.serve({ port: 0, fetch: () => new Response(null, { status: 503 }) });
-		servers.push(server);
-		const result = await new ReadTool(makeSession()).execute("call", {
-			path: `http://127.0.0.1:${server.port}/healthz`,
+		const transport = mockFetch(() => new Response(null, { status: 503 }));
+		const result = await new ReadTool(makeSession(transport)).execute("call", {
+			path: "https://example.com/healthz",
 		});
 		const text = result.content.find(block => block.type === "text")?.text;
 
@@ -69,24 +57,25 @@ const POST_MARKDOWN = `# Software 2.0\n\n${"Neural networks are not just another
 describe("read URL answered by a bot wall", () => {
 	const servers: Bun.Server<undefined>[] = [];
 	afterEach(() => {
-		vi.restoreAllMocks();
 		for (const server of servers) server.stop(true);
 		servers.length = 0;
 	});
 
 	async function read(wall: (request: Request) => Response, readerBody: string, raw?: true) {
-		vi.spyOn(toolsManager, "ensureTool").mockResolvedValue(undefined);
 		const server = Bun.serve({ port: 0, fetch: wall });
 		servers.push(server);
 		const remoteCalls: string[] = [];
-		const remote = mockFetch(input => {
-			remoteCalls.push(String(input));
-			return String(input).startsWith("https://r.jina.ai/")
+		const origin = `http://127.0.0.1:${server.port}`;
+		const transport = mockFetch((input, init) => {
+			const url = String(input);
+			if (new URL(url).origin === origin) return fetch(input, init);
+			remoteCalls.push(url);
+			return url.startsWith("https://r.jina.ai/")
 				? new Response(readerBody)
 				: new Response("unavailable", { status: 503 });
 		});
-		const result = await new ReadTool(makeSession(remote)).execute("call", {
-			path: `http://127.0.0.1:${server.port}/post${raw ? ":raw" : ""}`,
+		const result = await new ReadTool(makeSession(transport)).execute("call", {
+			path: `${origin}/post${raw ? ":raw" : ""}`,
 		});
 		const text = result.content.find(block => block.type === "text")?.text ?? "";
 		return {
@@ -138,10 +127,9 @@ describe("read URL answered by a bot wall", () => {
 		if (method === "jina") {
 			expect(result.text).toContain("Neural networks are not just another classifier");
 			expect(result.finalUrl).toEndWith("/canonical");
-			expect(result.remoteCalls[0]).toEndWith("/canonical");
+			expect(result.remoteCalls.find(url => url.startsWith("https://r.jina.ai/"))).toEndWith("/canonical");
 		} else {
 			expect(result.text).not.toMatch(/blocked by network security|(Enable|Turn on) JavaScript/);
-			expect(result.notes).toContain("the browser tool");
 		}
 	});
 
@@ -205,7 +193,7 @@ describe("read URL answered by a bot wall", () => {
 			`Markdown Content:\n${POST_MARKDOWN}`,
 		);
 
-		expect(result.method).toBe("native");
 		expect(result.text).toContain("A challenge page carries markers");
+		expect(result.remoteCalls).toEqual([]);
 	});
 });

@@ -26,7 +26,7 @@ export type PredictedStatusFacts = Pick<
 	| "model"
 	| "thinkingLevel"
 	| "autoThinking"
-	| "fastMode"
+	| "fastTier"
 	| "usingSubscription"
 	| "autoCompact"
 	| "compaction"
@@ -44,8 +44,8 @@ export interface StatusPrediction {
 export interface FreshSession {
 	/** The occupancy a fresh session starts with (system prompt and tools). */
 	readonly context: StatusContext;
-	/** Whether the configured service tier makes the model fast. */
-	readonly fastMode: boolean;
+	/** The fast tier realized by the configured service tier, if any. */
+	readonly fastTier: StatusFacts["fastTier"];
 }
 
 /** The prediction a live bar makes for the next launch's fresh session. */
@@ -60,7 +60,7 @@ export function predictStatus(facts: StatusFacts, settings: StatusLineSettings, 
 			...(facts.profile !== undefined ? { profile: facts.profile } : {}),
 			usingSubscription: facts.usingSubscription,
 			autoCompact: facts.autoCompact,
-			fastMode: fresh.fastMode,
+			...(fresh.fastTier ? { fastTier: fresh.fastTier } : {}),
 			context: fresh.context,
 		},
 	};
@@ -126,6 +126,7 @@ function isModel(value: unknown): value is StatusModel {
 		isString(value.id) &&
 		isBoolean(value.thinking) &&
 		isOptional(value.name, isString) &&
+		isOptional(value.provider, isString) &&
 		isOptional(value.contextWindow, isNumber)
 	);
 }
@@ -153,7 +154,7 @@ function isFacts(value: unknown): value is PredictedStatusFacts {
 		isOptional(value.model, isModel) &&
 		isOptional(value.thinkingLevel, isString) &&
 		isOptional(value.autoThinking, isBoolean) &&
-		isOptional(value.fastMode, isBoolean) &&
+		(value.fastTier === undefined || value.fastTier === "priority" || value.fastTier === "ultrafast") &&
 		isOptional(value.compaction, isCompaction) &&
 		isOptional(value.profile, isString) &&
 		isBoolean(value.usingSubscription) &&

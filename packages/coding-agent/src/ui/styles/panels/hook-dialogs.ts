@@ -12,14 +12,15 @@ import { type Block, defineRolePainter, EMPTY_BLOCK } from "@oh-my-pi/pi-tui/ter
 import { inputLine } from "@oh-my-pi/pi-tui/term/painters/prefs";
 import { visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { TspEditorProps, TspInputProps } from "@oh-my-pi/pi-wire";
-import { type ComposerChromeContext, composerShape } from "../composer/shapes";
-import { bindingGlyph, boxRows, findNode, keyGlyph, propsOf, termOf } from "./common";
+import { type ComposerChromeContext, composerRowLines, composerShape } from "../composer/shapes";
+import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
+import { keyLabel } from "../../keys/hints";
+import { bindingGlyph, boxRows, findNode, keyLabels, propsOf, termOf } from "./common";
 import { appExternalEditorKeys, appFollowUpKeys, appInterruptKeys } from "../../../config/keybindings/matchers";
-import { canonicalKeyId } from "../../../config/keybindings/key-id";
 
 /** The interrupt key (`app.interrupt`) as hint glyphs. */
-function interruptGlyph(): string {
-	return keyGlyph(canonicalKeyId(appInterruptKeys()[0] ?? "escape"));
+function interruptGlyph(theme: Theme): string {
+	return keyLabel(theme, appInterruptKeys()[0] ?? "escape");
 }
 
 defineRolePainter("col", "omp.overlay.hook-input", (node, cx): Block => {
@@ -30,7 +31,10 @@ defineRolePainter("col", "omp.overlay.hook-input", (node, cx): Block => {
 	const props = input ? propsOf<TspInputProps>(input) : {};
 	const text = props.text ?? "";
 	const field = `> ${inputLine(text, props.cursor ?? text.length, inner - 2, "")}`;
-	const hints = theme.fg("dim", `${bindingGlyph("tui.input.submit", "enter")} submit  ${interruptGlyph()} cancel`);
+	const hints = theme.fg(
+		"dim",
+		`${bindingGlyph("tui.input.submit", "enter", theme)} submit  ${interruptGlyph(theme)} cancel`,
+	);
 	const title = termOf<{ title: string }>(node).title ?? "";
 	return { rows: boxRows(theme, title, ["", field, "", ...wrap(hints, inner), ""], cx.width) };
 });
@@ -94,7 +98,7 @@ defineRolePainter("col", "omp.overlay.hook-editor", (node, cx): Block => {
 			const text = theme.fgResolved("text", plain);
 			const width = visibleWidth(plain);
 			content.push(
-				...shape.row({
+				...composerRowLines(shape, {
 					...chrome,
 					text,
 					pad: " ".repeat(Math.max(0, contentWidth - width)),
@@ -106,11 +110,12 @@ defineRolePainter("col", "omp.overlay.hook-editor", (node, cx): Block => {
 			);
 		});
 	}
-	const glyphs = (keys: readonly string[]): string => keys.map(key => keyGlyph(canonicalKeyId(key))).join("/");
-	const tail = `${interruptGlyph()} cancel  ${glyphs(appExternalEditorKeys().slice(0, 1))} external editor`;
+	const cancel = term.prompt ? keyLabel(theme, "escape") : interruptGlyph(theme);
+	const tail = `${cancel} cancel  ${keyLabel(theme, appExternalEditorKeys()[0] ?? "ctrl+g")} external editor`;
+	const followUp = appFollowUpKeys();
 	const hint = term.prompt
-		? `⏎ or ${glyphs(appFollowUpKeys().slice(0, 1))} submit  ${tail}`
-		: `${glyphs(appFollowUpKeys())} submit  ${tail}`;
+		? `${keyLabel(theme, "enter")} or ${keyLabel(theme, followUp[0]!)} submit  ${tail}`
+		: `${keyLabels(theme, followUp)} submit  ${tail}`;
 	content.push("", ...wrap(theme.fg("dim", hint), inner), "");
 	return { rows: boxRows(theme, term.title ?? "", content, cx.width) };
 });

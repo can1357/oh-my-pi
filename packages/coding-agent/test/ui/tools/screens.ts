@@ -11,9 +11,14 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, setSystemTime } from "bun:test";
 import { capturing, type StageResult, stageTest } from "../deviations";
-import { createRoot, isUiNode, type JSXNode, jsx, resolveChildren, type Signal, type UiNode } from "@oh-my-pi/pi-tui";
-import { defineRolePainter, paintNode, type StaticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
-import { SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-tui/term/painters/spinner";
+import { createRoot, isUiNode, type JSXNode, jsx, resolveChildren, type UiNode } from "@oh-my-pi/pi-tui";
+import {
+	DEFAULT_SPINNER_INTERVAL_MS,
+	defineRolePainter,
+	type PaintEnvironment,
+	paintNode,
+	type StaticEnvironment,
+} from "@oh-my-pi/pi-tui/term/paint";
 import { firstCellDiff } from "@oh-my-pi/pi-tui/testing/cells";
 import {
 	CORPUS_DIR,
@@ -28,7 +33,20 @@ import type { TspCardStatus } from "@oh-my-pi/pi-wire";
 import { paintToolLook } from "../../../src/ui/styles/tools/block";
 import "../../../src/ui/styles/tools";
 import type { ToolPresenter, ToolResult, ToolView, ToolViewState } from "../../../src/ui/tools/contract";
-import { toolNodeProps } from "../../../src/ui/transcript/tool-block";
+import { ToolBlock, type ToolCall, toolNodeProps } from "../../../src/ui/transcript/tool-block";
+
+/** The visible rows of a real transcript block, without ANSI styling or right padding. */
+export function plainToolRows(call: ToolCall, env: PaintEnvironment, width = 100): string[] {
+	return createRoot(dispose => {
+		try {
+			const node = ToolBlock({ call });
+			if (!isUiNode(node)) throw new Error("Expected a transcript tool node");
+			return paintNode(env, node, width).rows.map(row => Bun.stripANSI(row).trimEnd());
+		} finally {
+			dispose();
+		}
+	});
+}
 
 /** What a `tools/<name>` case records about the renderer call. */
 export interface ToolCaseInputs {
@@ -152,18 +170,20 @@ export function replayStages(screen: ToolScreen, corpusCase: CorpusCase): ToolSt
 
 /**
  * Move `env` to a stage: the clock at the stage time, advanced to the
- * recorded spinner frame; reduced motion once the spinner stopped.
+ * recorded spinner frame; still spinners and reduced motion once the spinner stopped.
  */
 export function applyStage(env: StaticEnvironment, stage: ToolStage): void {
 	const frames = env.theme().symbols.spinnerFrames.length;
 	let now = stage.now;
 	if (stage.spinnerFrame !== undefined && frames > 0) {
-		const at = Math.floor(now / SPINNER_INTERVAL_MS) % frames;
+		const at = Math.floor(now / DEFAULT_SPINNER_INTERVAL_MS) % frames;
 		const ahead = (((stage.spinnerFrame - at) % frames) + frames) % frames;
-		now = (Math.floor(now / SPINNER_INTERVAL_MS) + ahead) * SPINNER_INTERVAL_MS;
+		now = (Math.floor(now / DEFAULT_SPINNER_INTERVAL_MS) + ahead) * DEFAULT_SPINNER_INTERVAL_MS;
 	}
 	env.setNow(now);
-	(env.reduceMotion as Signal<boolean>).set(stage.spinnerFrame === undefined);
+	const still = stage.spinnerFrame === undefined;
+	env.setReduceMotion(still);
+	env.setSpinnerInterval(still ? 0 : DEFAULT_SPINNER_INTERVAL_MS);
 }
 
 function caseArgs(screen: ToolScreen, inputs: ToolCaseInputs): unknown {

@@ -24,7 +24,6 @@ import {
 	cfgOmitThinking,
 	cfgProvidersAnthropicServerSideFallback,
 	cfgProvidersAnthropicSlowMode,
-	cfgProvidersAntigravityEndpoint,
 	cfgProvidersCacheRetention,
 	cfgProvidersMaxInFlightRequests,
 	cfgProvidersMuseCodeStoreResponses,
@@ -101,7 +100,6 @@ export function createSettingsAwareStreamFn(
 		const openrouterRoutingPreset = cfgProvidersOpenrouterVariant.get(settings);
 		const openrouterVariant =
 			openrouterRoutingPreset && openrouterRoutingPreset !== "default" ? openrouterRoutingPreset : undefined;
-		const antigravityEndpointMode = cfgProvidersAntigravityEndpoint.get(settings);
 		const textVerbosity =
 			model.api === "openai-codex-responses" || model.api === "openai-responses"
 				? cfgTextVerbosity.get(settings)
@@ -173,7 +171,6 @@ export function createSettingsAwareStreamFn(
 			maxTokens,
 			preferWebsockets: resolveWebsocketPreference(settings, model, streamOptions?.preferWebsockets),
 			openrouterVariant: streamOptions?.openrouterVariant ?? openrouterVariant,
-			antigravityEndpointMode: streamOptions?.antigravityEndpointMode ?? antigravityEndpointMode,
 			textVerbosity: streamOptions?.textVerbosity ?? textVerbosity,
 			cacheRetention: streamOptions?.cacheRetention ?? cacheRetention,
 			streamFirstEventTimeoutMs: streamOptions?.streamFirstEventTimeoutMs ?? streamFirstEventTimeoutMs,

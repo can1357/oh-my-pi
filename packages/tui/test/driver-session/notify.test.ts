@@ -110,7 +110,7 @@ describe("notification formatting", () => {
 		// Kitty tracks ids per terminal process, so two omp processes in one kitty
 		// instance must never reuse each other's ids.
 		const script = `
-			import { formatNotification } from "${new URL("../../src/driver/notify.ts", import.meta.url).pathname}";
+			import { formatNotification } from "${new URL("../../src/driver/notify.ts", import.meta.url).href}";
 			for (let i = 0; i < 2; i++) console.log(formatNotification({ title: "omp", body: "Complete" }, "osc99", true));
 		`;
 		const idsFromProcess = () => {

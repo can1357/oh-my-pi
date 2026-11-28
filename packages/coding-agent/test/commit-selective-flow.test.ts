@@ -15,7 +15,7 @@ import { fileToUri } from "@oh-my-pi/pi-coding-agent/lsp/uri";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { $which, removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const tempDirs: string[] = [];
 
@@ -81,6 +81,25 @@ async function installSubjectRewriteHook(root: string): Promise<void> {
 }
 
 const CHANGELOG = "# Changelog\n\n## [Unreleased]\n\n### Fixed\n\n- Fixed an old bug\n";
+
+const jjBinary = $which("jj");
+
+async function jj(cwd: string, args: readonly string[]): Promise<string> {
+	if (!jjBinary) throw new Error("jj is unavailable");
+	const proc = Bun.spawn([jjBinary, ...args], {
+		cwd,
+		env: { ...process.env, HOME: cwd, JJ_CONFIG: "", JJ_USER: "test", JJ_EMAIL: "test@example.com" },
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	const [out, err, code] = await Promise.all([
+		new Response(proc.stdout).text(),
+		new Response(proc.stderr).text(),
+		proc.exited,
+	]);
+	if (code !== 0) throw new Error(`jj ${args.join(" ")} failed (${code}): ${err}`);
+	return out;
+}
 
 /** Repository without commits, and a writer that edits files the way agent edit tools do: journaled. */
 async function emptyRepo() {
@@ -211,6 +230,25 @@ describe("selective commit flow", () => {
 			if (kind === "symlink") expect(await fs.readlink(edited)).toBe("declaration.ts");
 		},
 	);
+
+	it.skipIf(!jjBinary)("refuses a colocated Jujutsu workspace without advancing Git HEAD", async () => {
+		const { root, journal, write } = await emptyRepo();
+		await Bun.write(path.join(root, "a.txt"), "one\n");
+		await git(root, ["add", "a.txt"]);
+		await git(root, ["commit", "-qm", "base"]);
+		await write("Main", undefined, "a.txt", "one\ntwo\n");
+		await journal.flush();
+		const staleDraft = await createDraft({ cwd: root, journal, caller: "Main" });
+		await jj(root, ["git", "init", "--colocate"]);
+		await jj(root, ["status"]); // snapshots the edit into jj's working-copy change
+		const before = await git(root, ["rev-parse", "HEAD"]);
+
+		await expect(createDraft({ cwd: root, journal, caller: "Main" })).rejects.toThrow(/Jujutsu.*`jj`/);
+		await expect(
+			commitSelection(staleDraft, { subject: "describe the edit" }, { journal, agent: { agent: "Main" } }),
+		).rejects.toThrow(/Jujutsu.*`jj`/);
+		expect(await git(root, ["rev-parse", "HEAD"])).toBe(before);
+	});
 
 	it("commits an inserted statement before a return changed only in the worktree", async () => {
 		const { root, journal, write } = await emptyRepo();
@@ -792,6 +830,7 @@ describe("selective commit flow", () => {
 		expect(draft.summary()).toContain(
 			"? lib.rs  hunk 1: in-scope lines rewritten afterwards by an unrecorded change",
 		);
+		expect(draft.summary()).toContain('show("lib.rs") lists unit ids; take("lib.rs", units)');
 		expect(draft.show()).toContain("+    let x = 1;");
 
 		draft.take({ path: "lib.rs", units: ["1"] });

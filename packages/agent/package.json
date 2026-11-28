@@ -1,7 +1,7 @@
 {
   "type": "module",
   "name": "@oh-my-pi/pi-agent-core",
-  "version": "19.1.1",
+  "version": "19.2.1",
   "description": "General-purpose agent with transport abstraction, state management, and attachment support",
   "homepage": "https://omp.sh",
   "author": { "name": "Stencil Labs, Inc.", "url": "https://stencil.so" },
@@ -46,7 +46,7 @@
   "devDependencies": {
     "@oh-my-pi/omptype": "catalog:",
     "@opentelemetry/context-async-hooks": "catalog:",
-    "@opentelemetry/sdk-trace-base": "catalog:",
+    "@opentelemetry/sdk-trace": "catalog:",
     "@types/bun": "catalog:"
   },
   "engines": {

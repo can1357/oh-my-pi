@@ -12,6 +12,8 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { Model } from "@oh-my-pi/pi-ai";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import {
@@ -193,9 +195,34 @@ describe("history:// protocol", () => {
 		const resource = await InternalUrlRouter.instance().resolve("history://HubAgent");
 
 		expect(resource.content).toContain("# HubAgent (idle)");
-		expect(resource.content).toContain("## user");
-		expect(resource.content).toContain("hello from live");
+		expect(resource.content).toMatch(/^#1 · .* · user: hello from live$/m);
 		expect(resource.notes).toContain("Source: live session");
+	});
+
+	it("history://<id> narrows and compacts by query like archive.transcript", async () => {
+		AgentRegistry.global().register({
+			id: "HubAgent",
+			displayName: "task",
+			kind: "sub",
+			session: fakeLiveSession([
+				{ role: "user", content: "first ask", timestamp: 1 },
+				{ role: "user", content: "second ask", timestamp: 2 },
+				{ role: "assistant", content: [{ type: "thinking", thinking: "pondering" }], timestamp: 3 },
+			]),
+			status: "idle",
+		});
+
+		const bare = await InternalUrlRouter.instance().resolve("history://HubAgent");
+		expect(bare.content).not.toContain("pondering");
+
+		const last = await InternalUrlRouter.instance().resolve("history://HubAgent?turns=-1&detail=thinking:full");
+		expect(last.content).toContain("turn 2 of 2");
+		expect(last.content).not.toContain("first ask");
+		expect(last.content).toContain("thinking: pondering");
+
+		await expect(InternalUrlRouter.instance().resolve("history://HubAgent?detail=loud")).rejects.toThrow(
+			"history:// detail takes",
+		);
 	});
 
 	it("preserves the existing bare history://current named-agent route", async () => {
@@ -323,6 +350,45 @@ describe("history:// protocol", () => {
 		expect(content).toContain("[provider fallback: claude-primary to claude-backup]");
 	});
 
+	it("leaves own reasoning out of current-branch full history for a reasoning-refusing reader (#19740)", async () => {
+		const entries = [
+			{
+				type: "message",
+				id: "assistant-entry",
+				parentId: null,
+				timestamp: new Date().toISOString(),
+				message: {
+					role: "assistant",
+					content: [
+						{ type: "thinking", thinking: "private chain of thought" },
+						{ type: "text", text: "answer text" },
+					],
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "test-model",
+					usage: {},
+					stopReason: "stop",
+					timestamp: 3,
+				},
+			},
+		] as unknown as SessionEntry[];
+
+		const read = (model: Model) =>
+			InternalUrlRouter.instance().resolve("history://current/full", {
+				experimentalContextManagement: true,
+				getSessionBranch: () => entries,
+				session: { getActiveModel: () => model } as unknown as ToolSession,
+			});
+
+		const claude = await read(getBundledModel("anthropic", "claude-sonnet-4-5"));
+		expect(claude.content).toContain("answer text");
+		expect(claude.content).not.toContain("private chain of thought");
+		expect(claude.content).not.toContain("<thinking>");
+
+		const gpt = await read(getBundledModel("openai", "gpt-4o-mini"));
+		expect(gpt.content).toContain("private chain of thought");
+	});
+
 	it("renders the caller-bound branch's full pre-compaction transcript without a disk source", async () => {
 		const branch = currentBranchFixture();
 		const siblingOnly = "sibling branch text must not leak";
@@ -406,11 +472,13 @@ describe("history:// protocol", () => {
 	});
 
 	it("read applies line selectors to history transcripts", async () => {
+		// The read tool shows three lines after a range, so the checked turn sits past them.
+		const earlier = ["one", "two", "three"].map(content => ({ role: "user", content, timestamp: 1 }));
 		AgentRegistry.global().register({
 			id: "HubAgent",
 			displayName: "task",
 			kind: "sub",
-			session: fakeLiveSession([{ role: "user", content: "hello from live", timestamp: 1 }]),
+			session: fakeLiveSession([...earlier, { role: "user", content: "hello from live", timestamp: 1 }]),
 			status: "idle",
 		});
 		const tool = new ReadTool(makeToolSession(os.tmpdir()));

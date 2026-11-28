@@ -9,19 +9,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- *(napi)* lock the allocator on threaded WASI and never hang after a worker crash ([#3552](https://github.com/napi-rs/napi-rs/pull/3552))
 - Initial vendor import of napi-rs 3.13.0
 
 ### Changed
 
 - Updated the vendor import to napi-rs 3.14.2
+- Updated the vendor import to napi-rs 3.16.3
+
+## [3.16.3](https://github.com/napi-rs/napi-rs/compare/napi-v3.16.2...napi-v3.16.3) - 2026-11-23
 
 ### Fixed
 
-- *(napi)* create objects with napi_define_properties on every Node version ([#3560](https://github.com/napi-rs/napi-rs/pull/3560))
-- *(napi)* register the wasm cleanup through the env cleanup hook ([#3571](https://github.com/napi-rs/napi-rs/pull/3571))
-- *(napi)* own NativeBorrowScope storage via NonNull to fix aliasing violation ([#3573](https://github.com/napi-rs/napi-rs/pull/3573))
-- *(napi)* bound serde_json::Value conversion depth at 128 levels ([#3568](https://github.com/napi-rs/napi-rs/pull/3568))
+- *(napi)* nest dotted namespaces at runtime ([#3735](https://github.com/napi-rs/napi-rs/pull/3735))
+- *(napi)* retain JS values and names stored in Property ([#3726](https://github.com/napi-rs/napi-rs/pull/3726))
+- *(napi)* deserialize whole numbers outside the i64 range as f64 ([#3705](https://github.com/napi-rs/napi-rs/pull/3705))
+- *(cli,macro,napi)* harden type-def cache keying, locking, rollback, and emission ([#3725](https://github.com/napi-rs/napi-rs/pull/3725))
+
+### Other
+
+- *(napi)* transcode non-ASCII strings before creating them ([#3732](https://github.com/napi-rs/napi-rs/pull/3732))
+- *(napi)* drop the global locks from class method calls ([#3730](https://github.com/napi-rs/napi-rs/pull/3730))
+- *(napi)* skip the borrow scope allocation on calls that don't borrow ([#3731](https://github.com/napi-rs/napi-rs/pull/3731))
+- *(napi)* reuse property keys when reading maps ([#3733](https://github.com/napi-rs/napi-rs/pull/3733))
+- Merge commit from fork
+- Merge commit from fork
+- *(napi)* omit unused JS callback in custom-GC TSFN and reverse-scan env registrations ([#3728](https://github.com/napi-rs/napi-rs/pull/3728))
+- *(napi)* polish future erasure bridge, docs, and tests ([#3723](https://github.com/napi-rs/napi-rs/pull/3723))
+- *(napi)* erase the future type before the future → Promise bridge ([#3717](https://github.com/napi-rs/napi-rs/pull/3717))
+- *(napi)* `JsStringUtf8` avoid memory copies in `into_owned` and `take` ([#3711](https://github.com/napi-rs/napi-rs/pull/3711))
+- *(napi)* `JsStringUtf8` contain a `String` ([#3710](https://github.com/napi-rs/napi-rs/pull/3710))
+- *(napi)* `owned_string_without_coercion` use unchecked string conversion ([#3709](https://github.com/napi-rs/napi-rs/pull/3709))
+- *(napi)* avoid zero-initializing string conversion buffers ([#3708](https://github.com/napi-rs/napi-rs/pull/3708))
+- *(napi)* drop `mem::forget` round-trip in `JsString::into_*` ([#3707](https://github.com/napi-rs/napi-rs/pull/3707))
+- *(napi)* clarify naming and comments in string conversions ([#3706](https://github.com/napi-rs/napi-rs/pull/3706))
+
+## [3.16.2](https://github.com/napi-rs/napi-rs/compare/napi-v3.16.1...napi-v3.16.2) - 2026-11-11
+
+### Fixed
+
+- *(napi)* per-env teardown for multi-load addons and leak-free AsyncTask promises ([#3689](https://github.com/napi-rs/napi-rs/pull/3689))
+
+## [3.16.1](https://github.com/napi-rs/napi-rs/compare/napi-v3.16.0...napi-v3.16.1) - 2026-10-30
+
+### Fixed
+
+- *(napi)* avoid a deadlock when a worker loads the addon during `block_on` ([#3670](https://github.com/napi-rs/napi-rs/pull/3670))
+
+## [3.16.0](https://github.com/napi-rs/napi-rs/compare/napi-v3.15.0...napi-v3.16.0) - 2026-10-30
+
+### Added
+
+- *(napi)* support well-known symbol keys for class members ([#3665](https://github.com/napi-rs/napi-rs/pull/3665))
+- *(napi)* support symbol_for keys for class members ([#3661](https://github.com/napi-rs/napi-rs/pull/3661))
+
+### Fixed
+
+- *(napi)* compact class identity metadata ([#3667](https://github.com/napi-rs/napi-rs/pull/3667))
+- *(napi)* keep the registered classes when a later load fails ([#3666](https://github.com/napi-rs/napi-rs/pull/3666))
+- *(napi)* free define_class closures, honour static flags, avoid TS1016 in constructors ([#3662](https://github.com/napi-rs/napi-rs/pull/3662))
+- *(napi)* free threadsafe function call data when the call fails ([#3656](https://github.com/napi-rs/napi-rs/pull/3656))
+
+## [3.15.0](https://github.com/napi-rs/napi-rs/compare/napi-v3.14.2...napi-v3.15.0) - 2026-10-21
+
+### Added
+
+- *(napi)* cancel a ReadableStream through its Reader, and fix ReadableStream::cancel ([#3623](https://github.com/napi-rs/napi-rs/pull/3623))
+
+### Fixed
+
+- *(napi)* set the custom GC aborted flag before Node closes its tsfn ([#3626](https://github.com/napi-rs/napi-rs/pull/3626))
+- *(napi)* TypedArray input leaks and compat buffer copies on wasm ([#3612](https://github.com/napi-rs/napi-rs/pull/3612))
+- *(napi)* copy managed array inputs ([#3607](https://github.com/napi-rs/napi-rs/pull/3607))
+- *(napi)* reject a value of another class on builds without type tags ([#3610](https://github.com/napi-rs/napi-rs/pull/3610))
+- *(napi)* drop unadopted class value and reset factory flag on failed conversion ([#3603](https://github.com/napi-rs/napi-rs/pull/3603))
+- *(napi)* join the Tokio runtime threads at env teardown ([#3592](https://github.com/napi-rs/napi-rs/pull/3592))
+- *(napi)* keep borrowed class args alive across AsyncTask/AsyncBlock ([#3584](https://github.com/napi-rs/napi-rs/pull/3584))
+
+### Other
+
+- *(cli)* cover FreeBSD arm64 ([#3620](https://github.com/napi-rs/napi-rs/pull/3620))
+- *(cli)* record the design behind the threaded WASI heap sync ([#3581](https://github.com/napi-rs/napi-rs/pull/3581))
 
 ## [3.14.2](https://github.com/napi-rs/napi-rs/compare/napi-v3.14.1...napi-v3.14.2) - 2026-10-06
 

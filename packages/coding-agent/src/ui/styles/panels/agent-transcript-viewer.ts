@@ -19,10 +19,11 @@ import type {
 	ViewerAgentStatus,
 } from "../../overlays/panels/agent-transcript-viewer-model";
 import { formatContextUsage } from "../../status/format";
-import { type ComposerChromeContext, caretOverflow, composerShape } from "../composer/shapes";
+import { type ComposerChromeContext, caretOverflow, composerRowLines, composerShape } from "../composer/shapes";
 import "../messages";
 import "../tools";
-import { findNode, keyGlyph, roleOf, termOf } from "./common";
+import { keyLabel } from "../../keys/hints";
+import { bindingGlyph, findNode, roleOf, termOf } from "./common";
 
 const STATUS_COLOR: Readonly<Record<ViewerAgentStatus, string>> = {
 	running: "success",
@@ -73,12 +74,12 @@ function statsLine(theme: Theme, model: AgentTranscriptViewerModel): string | un
 
 function hintLine(theme: Theme, model: AgentTranscriptViewerModel): string {
 	const keys = [
-		`${keyGlyph("escape")}:close`,
-		`${keyGlyph(model.deps.expandKeys[0] ?? "ctrl+o")}:expand`,
+		`${keyLabel(theme, "escape")}:close`,
+		`${keyLabel(theme, model.deps.expandKeys[0] ?? "ctrl+o")}:expand`,
 		`${model.sendable ? "empty input → " : ""}j/k:scroll`,
-		`g/${keyGlyph("shift+g")}:top/bottom`,
+		`g/${keyLabel(theme, "shift+g")}:top/bottom`,
 	].join("  ");
-	return theme.fg("dim", model.sendable ? `${keyGlyph("enter")}:send  ${keys}` : keys);
+	return theme.fg("dim", model.sendable ? `${bindingGlyph("tui.input.submit", "enter", theme)}:send  ${keys}` : keys);
 }
 
 /** The draft in the rounded field (its last row merged into the bottom border). */
@@ -105,7 +106,7 @@ function fieldRows(cx: PaintContext, editor: UiNode, width: number): string[] {
 	lines.forEach((text, index) => {
 		const used = visibleWidth(text);
 		rows.push(
-			...shape.row({
+			...composerRowLines(shape, {
 				...chrome,
 				text,
 				pad: " ".repeat(Math.max(0, content - used)),

@@ -37,7 +37,7 @@ app.history.search: []
 | `app.plan.toggle`            | `Alt+Shift+P`                                                         | Toggle plan mode                                                                                                                                       |
 | `app.history.search`         | `Ctrl+R`                                                              | Search prompt history                                                                                                                                  |
 | `app.tools.expand`           | `Ctrl+O`                                                              | Toggle tool-output expansion                                                                                                                           |
-| `app.tools.toggleVisibility` | `Ctrl+Shift+O`                                                        | Show or hide tool activity                                                                                                                             |
+| `app.tools.toggleVisibility` | `Ctrl+Shift+O`                                                        | Cycle tool activity: detailed, concise, hidden (`display.toolActivity`)                                                                                |
 | `app.links.hint`             | `Alt+O`                                                               | Tag each [extension link](./extensions.md#extension-link-schemes) on screen; type a tag to pick it, `Esc` cancels; again or `Page Up` browses all      |
 | `app.ask.hide`               | `Alt+H`                                                               | Hide a pending `ask` question to one line (the Hide button in Tern); the same key, `Enter`, or Show brings it back                                     |
 | `app.ask.note`               | `N`, `Alt+N`                                                          | Add or edit a note on the highlighted `ask` option; dropdowns use the first key that does not type text, since letters jump to options                 |
@@ -53,6 +53,16 @@ app.history.search: []
 | `app.display.reset`          | `Alt+L`                                                               | Reset terminal display                                                                                                                                 |
 | `app.clipboard.copyLine`     | `Alt+Shift+L`                                                         | Copy the current line                                                                                                                                  |
 | `app.clipboard.copyPrompt`   | `Alt+Shift+C`                                                         | Copy the whole prompt                                                                                                                                  |
+| `app.transcript.pageUp`      | `PageUp`                                                              | Scroll the fullscreen transcript up a page (`tui.screen: fullscreen`; inline the key reaches the editor)                                               |
+| `app.transcript.pageDown`    | `PageDown`                                                            | Scroll the fullscreen transcript down a page; at the end it follows new output again                                                                   |
+| `app.transcript.top`         | `Ctrl+Home`                                                           | Scroll the fullscreen transcript to its start                                                                                                          |
+| `app.transcript.bottom`      | `Ctrl+End`                                                            | Scroll the fullscreen transcript to its end and follow new output                                                                                      |
+| `app.transcript.lineUp` / `lineDown` | `Ctrl+Shift+Up` / `Ctrl+Shift+Down`, `Ctrl+Up` / `Ctrl+Down` | Scroll the fullscreen transcript by one line, like a terminal's own scrollback keys (which cannot reach the alternate screen). Inline, these keys reach the editor. |
+| `app.transcript.halfPageUp` / `halfPageDown` | Unbound | Scroll by half the fullscreen transcript window. |
+| `app.transcript.previousPrompt` / `nextPrompt` | `Alt+PageUp` / `Alt+PageDown` | Go to the previous or next user prompt. |
+| `app.transcript.search` | `Alt+/` | Find text without replacing the draft. Enter / Shift+Enter step through results; Escape cancels and returns to the original position; Ctrl+Enter closes at the match. |
+| `app.transcript.selectLeft` / `selectRight` / `selectUp` / `selectDown` / `selectLineStart` / `selectLineEnd` / `clearSelection` | Unbound | Adjust or clear the active transcript selection without reaching for the mouse. Bind these explicitly to avoid taking composer selection and dequeue keys. |
+| `app.transcript.copySelection` | `Alt+C`, `Ctrl+Shift+C`, `Super+C` | Copy the selected transcript text, including when automatic copying is disabled. |
 | `app.clipboard.pasteTextRaw` | `Ctrl+Shift+V`, `Alt+Shift+V`                                         | Paste clipboard text without collapsing it                                                                                                             |
 | `app.clipboard.pasteImage`   | Linux: `Ctrl+V`; macOS: `Ctrl+V`, `Cmd+V`; Windows: `Ctrl+V`, `Alt+V` | Paste from the clipboard (image preferred, text fallback)                                                                                              |
 | `app.stt.pushToTalk`         | `Space`                                                               | Hold to record and release to transcribe. Remap this action or set it to `[]` to disable push-to-talk without disabling speech-to-text.                |
@@ -190,7 +200,7 @@ Text killed in Insert mode (`Ctrl+K`, `Ctrl+W`) is what an unnamed `p` puts unti
 
 Only `"+y` and `"*y` copy to the system clipboard, as in Vim. Turn on **Vim Yanks Copy to Clipboard** (`tui.vimYankToClipboard: true`) to make every yank copy there too, as in Vim with `clipboard=unnamed`. Deletes reach the clipboard only through `"+` / `"*`.
 
-A selection that would cut through an attachment placeholder such as `[Image #1, 800x600]` or `[Paste #2, +30 lines]` takes the whole placeholder with it, so a delete can never leave a corrupt fragment behind.
+A selection that would cut through an attachment chip such as `📷 #1` or `📄 #2` takes the whole chip with it, so a delete can never leave a corrupt fragment behind.
 
 ### Escape
 

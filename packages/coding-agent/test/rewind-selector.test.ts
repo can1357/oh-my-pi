@@ -11,6 +11,7 @@ import { KeybindingsManager, setKeybindings } from "@oh-my-pi/pi-coding-agent/co
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { BranchVariantPath } from "@oh-my-pi/pi-coding-agent/modes/view-model/overlays/rewind-selector";
 import type { SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import type { BashExecutionMessage } from "@oh-my-pi/pi-coding-agent/session/transcript/messages";
 import { RewindSelector } from "../src/ui/overlays/pickers/rewind-selector";
 import { type LayerTerminal, mountLayer } from "./helpers/layer-terminal";
 
@@ -73,6 +74,19 @@ function bashResult(callId: string): AgentMessage {
 	} as unknown as AgentMessage;
 }
 
+/** A `!` command the user ran: a transcript entry that is no rewind point. */
+function bashExecution(index: number): BashExecutionMessage {
+	return {
+		role: "bashExecution",
+		command: `echo ${index}`,
+		output: String(index),
+		exitCode: 0,
+		cancelled: false,
+		truncated: false,
+		timestamp: 10 + index,
+	};
+}
+
 /** u1 → a1(bash call) → tr1 → hidden notice → u2. */
 function makeEntries(): SessionMessageEntry[] {
 	return [
@@ -90,7 +104,7 @@ function makeEntries(): SessionMessageEntry[] {
 	];
 }
 
-/** The cutoff falls on a tool result; keep its call and user turn. */
+/** The replay cap's cut falls on a tool result: the tail starts after it, and its exchange loads whole with the rest. */
 function longEntriesWithBoundaryTool(): SessionMessageEntry[] {
 	const entries: SessionMessageEntry[] = [];
 	for (let index = 0; index < 40; index++) {
@@ -137,11 +151,12 @@ describe("RewindSelector", () => {
 		try {
 			selector.render(120);
 
-			// The tail starts at u39 (601 targets): 600 steps reach its oldest turn.
+			// The tail skips the cut-off tool result and starts at u40 (599 targets): the 599th step
+			// loads the earlier history and the 600th reaches u39.
 			for (let index = 0; index < 600; index++) selector.handleInput(UP);
 			selector.handleInput(ENTER);
 
-			// Left past the oldest replayed turn loads the earlier history.
+			// Left steps to the previous user turn.
 			selector.handleInput(LEFT);
 			selector.render(120);
 			selector.handleInput(ENTER);
@@ -173,6 +188,53 @@ describe("RewindSelector", () => {
 			selector.handleInput(ENTER);
 
 			expect(selected).toEqual(["u0"]);
+		} finally {
+			selector.dispose();
+		}
+	});
+
+	it("keeps the startup tail while the filter has no query, and steps above it into the earlier history", () => {
+		const selected: string[] = [];
+		const selector = makeSelector(id => selected.push(id), undefined, longEntriesWithBoundaryTool());
+		try {
+			selector.render(120);
+			selector.handleInput("f");
+			// Opening the filter replays nothing more: it still counts the tail's 599 turns, not the branch's 640.
+			expect(Bun.stripANSI(selector.render(120).join("\n"))).toContain("599/599");
+
+			// The 599th step loads the earlier history and lands on the exchange above the tail.
+			for (let index = 0; index < 599; index++) selector.handleInput(UP);
+			selector.handleInput(ENTER);
+
+			expect(selected).toEqual(["t39"]);
+		} finally {
+			selector.dispose();
+		}
+	});
+
+	it("opens a tail of `!` commands on the newest reply above it", () => {
+		// The terminal look draws prompts and replies only: a tail of 600 commands opened on `1/0`,
+		// with nothing for Enter to rewind to.
+		const selected: string[] = [];
+		const entries = [
+			entry("u0", null, userMessage("first prompt")),
+			entry("a0", "u0", assistantWithBashCall("call-0")),
+			entry("t0", "a0", bashResult("call-0")),
+		];
+		for (let index = 0; index < 700; index++) {
+			entries.push(entry(`b${index}`, entries.at(-1)!.id, bashExecution(index)));
+		}
+		const selector = makeSelector(id => selected.push(id), undefined, entries);
+		try {
+			const screen = Bun.stripANSI(selector.render(120).join("\n"));
+			expect(screen).toContain("1/1");
+			expect(screen).toContain("earlier turns");
+			selector.handleInput(ENTER);
+
+			selector.handleInput(UP);
+			selector.handleInput(ENTER);
+
+			expect(selected).toEqual(["t0", "u0"]);
 		} finally {
 			selector.dispose();
 		}

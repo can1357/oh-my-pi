@@ -343,6 +343,63 @@ describe("read image questions", () => {
 		expect(stub.calls).toHaveLength(0);
 	});
 
+	it("refuses cross-provider image questions under active-only routing", async () => {
+		const otherProviderVision: Model<"openai-responses"> = { ...visionModel, provider: "other", id: "other-vision" };
+		const stub = createCompleteSimpleForbiddenStub();
+		const session = createSession(
+			testDir,
+			otherProviderVision,
+			"test-key",
+			Settings.isolated({ "images.questionRouting": "active" }),
+			{ activeModel: textOnlyModel, availableModels: [textOnlyModel, otherProviderVision] },
+		);
+
+		await expect(
+			new ReadTool(session, stub.fn).execute("call", { path: `${imagePath}?q=What is visible?` }),
+		).rejects.toThrow(/Active model openai\/gpt-4\.1 does not support image input/);
+		expect(stub.calls).toHaveLength(0);
+
+		const metadata = await new ReadTool(session).execute("call", { path: imagePath });
+		expect(textOf(metadata)).not.toContain("?q=");
+	});
+
+	it("answers with the exact active SDK endpoint instead of its catalog namesake or the vision role", async () => {
+		const privateModel = { ...visionModel, baseUrl: "https://private.example/v1" };
+		const otherProviderVision: Model<"openai-responses"> = { ...visionModel, provider: "other", id: "other-vision" };
+		const stub = createCompleteSimpleSuccessStub("Active answer");
+		const session = createSession(
+			testDir,
+			otherProviderVision,
+			"test-key",
+			Settings.isolated({ "images.questionRouting": "active" }),
+			{ activeModel: privateModel, availableModels: [otherProviderVision, visionModel] },
+		);
+
+		const result = await new ReadTool(session, stub.fn).execute("call", { path: `${imagePath}?q=What is visible?` });
+
+		expect(result.content).toEqual([{ type: "text", text: "Active answer" }]);
+		expect(stub.calls[0]?.[0]).toBe(privateModel);
+	});
+
+	it("answers with an SDK model and its credential without a model registry", async () => {
+		const session = createSession(
+			testDir,
+			visionModel,
+			undefined,
+			Settings.isolated({ "images.questionRouting": "active" }),
+		);
+		session.modelRegistry = undefined;
+		session.getApiKey = model => {
+			expect(model).toBe(visionModel);
+			return "sdk-key";
+		};
+		const stub = createCompleteSimpleSuccessStub("SDK answer");
+		const result = await new ReadTool(session, stub.fn).execute("call", { path: `${imagePath}?q=What is visible?` });
+		expect(result.content).toEqual([{ type: "text", text: "SDK answer" }]);
+		expect(stub.calls[0]?.[0]).toBe(visionModel);
+		expect(stub.calls[0]?.[2]).toMatchObject({ apiKey: "sdk-key" });
+	});
+
 	it("returns metadata and a question hint without pixels for text-only active models", async () => {
 		const session = createSession(testDir, visionModel, "test-key", Settings.isolated(), {
 			activeModel: textOnlyModel,

@@ -1,5 +1,9 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
-import { afterEach } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
+import { resolveChildren } from "@oh-my-pi/pi-tui";
+import { paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
+import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
+import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import { KeybindingsManager, setKeybindings } from "../../../../src/config/keybindings/keybindings";
 import type { CodexResetFireworksEvent } from "../../../../src/modes/view-model/overlays/codex-reset-fireworks";
 import { BorderedLoader } from "../../../../src/ui/overlays/panels/bordered-loader";
@@ -21,6 +25,12 @@ import { type Driver, panelSuite } from "./harness";
 
 const noop = (): void => {};
 const action = (act: string) => (d: Driver) => void d.emit({ type: "action", key: "", act, mods: [] });
+
+test("the pinned error headline uses the ASCII status mark", () => {
+	const theme = loadThemeSync("dark", { symbolPreset: "ascii" });
+	const [banner] = resolveChildren(<ErrorBanner message="Request timed out" />)();
+	expect(paintNode(staticEnvironment(theme), banner!, 48).rows.map(stripEscapes)).toContain(" [-] Request timed out");
+});
 
 const ERROR_MESSAGES: Record<string, string> = {
 	short: "Output blocked by content filtering policy",
@@ -161,7 +171,7 @@ panelSuite({
 			),
 			steps: {
 				settle,
-				variant: () => value.set("silver16-bw"),
+				variant: () => value.set("cjk16-bw"),
 				"settle 2": settle,
 				bogus: () => value.set("bogus"),
 				"variant 5x8": () => value.set("5x8-bw"),
