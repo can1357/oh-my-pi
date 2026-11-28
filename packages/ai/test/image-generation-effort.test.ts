@@ -70,4 +70,23 @@ describe("Gemini image thinking effort", () => {
 			{ responseModalities: ["IMAGE"] },
 		]);
 	});
+
+	test("bills thinking tokens as output, as chat does", async () => {
+		const fetch: FetchImpl = async () =>
+			Response.json({
+				candidates: [{ content: { parts: [{ inlineData: { data: IMAGE_DATA, mimeType: "image/png" } }] } }],
+				usageMetadata: {
+					promptTokenCount: 12,
+					candidatesTokenCount: 1290,
+					thoughtsTokenCount: 310,
+					totalTokenCount: 1612,
+				},
+			});
+		const result = await generateGoogleImage(
+			googleImageModel("gemini-3.1-flash-image", true),
+			{ prompt: "a fox", reasoning: Effort.High },
+			{ apiKey: "key", fetch },
+		);
+		expect(result.usage).toMatchObject({ input: 12, output: 1600, reasoningTokens: 310, totalTokens: 1612 });
+	});
 });

@@ -1022,31 +1022,24 @@ const ADVERTISED_REASONING_EFFORTS: readonly Effort[] = [
 	Effort.Max,
 ];
 
-/**
- * Image generators keep `minimal`: Gemini image models accept it and default to
- * it, and the GPT-6 rejection behind the chat ladder does not apply to them.
- */
-const ADVERTISED_IMAGE_REASONING_EFFORTS: readonly Effort[] = [Effort.Minimal, ...ADVERTISED_REASONING_EFFORTS];
-
-function advertisedReasoningEffort(
-	value: unknown,
-	ladder: readonly Effort[] = ADVERTISED_REASONING_EFFORTS,
-): Effort | undefined {
+function advertisedReasoningEffort(value: unknown): Effort | undefined {
 	if (typeof value !== "string") return undefined;
 	const normalized = value.toLowerCase();
-	return (ladder as readonly string[]).includes(normalized) ? (normalized as Effort) : undefined;
+	return (ADVERTISED_REASONING_EFFORTS as readonly string[]).includes(normalized) ? (normalized as Effort) : undefined;
 }
 
-function extractReasoningLevels(value: unknown, ladder: readonly Effort[]): Effort[] | undefined {
+function extractReasoningLevels(value: unknown): Effort[] | undefined {
 	if (!Array.isArray(value)) return undefined;
 	const efforts: Effort[] = [];
 	for (const entry of value) {
-		const effort = advertisedReasoningEffort(isRecord(entry) ? entry.effort : entry, ladder);
+		const effort = isRecord(entry) ? advertisedReasoningEffort(entry.effort) : advertisedReasoningEffort(entry);
 		if (effort !== undefined && !efforts.includes(effort)) efforts.push(effort);
 	}
 	if (efforts.length === 0) return undefined;
 	// Report the canonical least-to-most order regardless of wire order.
-	efforts.sort((left, right) => ladder.indexOf(left) - ladder.indexOf(right));
+	efforts.sort(
+		(left, right) => ADVERTISED_REASONING_EFFORTS.indexOf(left) - ADVERTISED_REASONING_EFFORTS.indexOf(right),
+	);
 	return efforts;
 }
 
@@ -1076,17 +1069,6 @@ type AdvertisedReasoning =
 			requiresEffort?: boolean;
 	  };
 
-/** Wire fields of a `/v1/models` row that carry advertised reasoning metadata. */
-interface AdvertisedReasoningRow {
-	metadata?: unknown;
-	pricing?: unknown;
-	supported_reasoning_levels?: unknown;
-	default_reasoning_level?: unknown;
-	reasoning?: unknown;
-	reasoning_effort_map?: unknown;
-	reasoning_required?: unknown;
-}
-
 /**
  * Read server-advertised reasoning support from an OpenAI-compatible
  * `/v1/models` row. codex-lb nests the Codex registry fields under `metadata`
@@ -1102,22 +1084,27 @@ interface AdvertisedReasoningRow {
  * reference) from "the endpoint is silent" (which leaves the reference in
  * charge). A stray ladder beside `reasoning: false` is ignored.
  */
-function extractAdvertisedReasoning(
-	item: AdvertisedReasoningRow,
-	ladder: readonly Effort[] = ADVERTISED_REASONING_EFFORTS,
-): AdvertisedReasoning | undefined {
+function extractAdvertisedReasoning(item: {
+	metadata?: unknown;
+	pricing?: unknown;
+	supported_reasoning_levels?: unknown;
+	default_reasoning_level?: unknown;
+	reasoning?: unknown;
+	reasoning_effort_map?: unknown;
+	reasoning_required?: unknown;
+}): AdvertisedReasoning | undefined {
 	const metadata = isRecord(item.metadata) ? item.metadata : undefined;
 	// codex-lb nests every reasoning field under `metadata`; read the denial from
 	// the same place the ladder below comes from, or a nested `reasoning: false`
 	// would keep the reference dial alive.
 	if ((metadata?.reasoning ?? item.reasoning) === false) return { kind: "none" };
 	const raw = metadata?.supported_reasoning_levels ?? item.supported_reasoning_levels;
-	const efforts = extractReasoningLevels(raw, ladder);
+	const efforts = extractReasoningLevels(raw);
 	if (efforts === undefined) {
 		return (metadata?.reasoning ?? item.reasoning) === true ? { kind: "native" } : undefined;
 	}
 	const rawDefault = metadata?.default_reasoning_level ?? item.default_reasoning_level;
-	const defaultLevel = advertisedReasoningEffort(rawDefault, ladder);
+	const defaultLevel = advertisedReasoningEffort(rawDefault);
 	const effortMap = extractReasoningEffortMap(metadata?.reasoning_effort_map ?? item.reasoning_effort_map);
 	const requiresEffort = metadata?.reasoning_required ?? item.reasoning_required;
 	return {
@@ -1249,28 +1236,6 @@ function withoutReasoning(spec: ModelSpec<Api>, isAnthropic: boolean): ModelSpec
 		thinking: undefined,
 		compat: { ...stripBorrowedEffortCompat(spec), supportsReasoningEffort: false },
 	} as ModelSpec<Api>;
-}
-
-/**
- * Reasoning surface of an image-generation row: only the ladder the row itself
- * advertises. Rows without a ladder stay non-reasoning.
- */
-function advertisedImageThinking(
-	providerConfig: DiscoveryProviderConfig,
-	item: AdvertisedReasoningRow,
-): { reasoning: boolean; thinking?: ThinkingConfig } {
-	const advertised = advertisedReasoningEnabled(providerConfig)
-		? extractAdvertisedReasoning(item, ADVERTISED_IMAGE_REASONING_EFFORTS)
-		: undefined;
-	if (advertised?.kind !== "ladder") return { reasoning: false };
-	return {
-		reasoning: true,
-		thinking: {
-			mode: "effort",
-			efforts: advertised.efforts,
-			defaultLevel: advertised.defaultLevel ?? advertised.efforts[0],
-		},
-	};
 }
 
 export async function discoverOpenAIModelsList(
@@ -1406,7 +1371,7 @@ export async function discoverOpenAIModelsList(
 				kind: task.kind,
 				provider: providerConfig.provider,
 				baseUrl,
-				...(task.kind === "image" ? advertisedImageThinking(providerConfig, item) : { reasoning: false }),
+				reasoning: false,
 				input,
 				supportsTools: false,
 				cost: perTokenPricingCost(task.kind === "embedding" ? item.pricing : undefined),

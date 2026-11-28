@@ -397,10 +397,10 @@ describe("imageGenTool catalog routing", () => {
 	});
 
 	describe("thinking effort", () => {
-		const effortModel = (): Model<Api> =>
+		const effortModel = (id = "gemini-3.1-flash-image"): Model<Api> =>
 			buildModel({
-				id: "gemini-3.1-flash-image",
-				name: "Gemini 3.1 Flash Image",
+				id,
+				name: id,
 				api: "google-generative-ai",
 				provider: "google",
 				baseUrl: "https://google.example/v1beta",
@@ -421,17 +421,21 @@ describe("imageGenTool catalog routing", () => {
 				settings: Settings.isolated({ modelRoles: { image: role } }),
 				fetch: async (_input, init) => {
 					configs.push(JSON.parse(String(init?.body)).generationConfig.thinkingConfig);
-					return new Response(
-						JSON.stringify({
-							candidates: [{ content: { parts: [{ inlineData: { data: PNG_DATA, mimeType: "image/png" } }] } }],
-						}),
-						{ status: 200 },
-					);
+					return geminiImageResponse();
 				},
 			});
 			collectPaths(await imageGenTool.execute("effort", params, undefined, ctx));
 			expect(configs).toHaveLength(1);
 			return configs[0];
+		}
+
+		function geminiImageResponse(): Response {
+			return new Response(
+				JSON.stringify({
+					candidates: [{ content: { parts: [{ inlineData: { data: PNG_DATA, mimeType: "image/png" } }] } }],
+				}),
+				{ status: 200 },
+			);
 		}
 
 		it("sends the thinking level of the role entry, and none without one", async () => {
@@ -453,6 +457,28 @@ describe("imageGenTool catalog routing", () => {
 			expect(await thinkingConfig({ subject: "a banana" }, "google/gemini-3.1-flash-image:xhigh")).toEqual({
 				thinkingLevel: "HIGH",
 			});
+		});
+
+		it("sends each fallback candidate its own thinking level", async () => {
+			const configs: unknown[] = [];
+			const ctx = createContext({
+				models: [effortModel(), effortModel("gemini-3.1-flash-lite-image")],
+				settings: Settings.isolated({
+					modelRoles: { image: "google/gemini-3.1-flash-image:high" },
+					"retry.fallbackChains": { image: ["google/gemini-3.1-flash-lite-image:minimal"] },
+				}),
+				fetch: async (_input, init) => {
+					configs.push(JSON.parse(String(init?.body)).generationConfig.thinkingConfig);
+					if (configs.length === 1) {
+						return new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 503 });
+					}
+					return geminiImageResponse();
+				},
+			});
+			const result = await imageGenTool.execute("effort-fallback", { subject: "a banana" }, undefined, ctx);
+			collectPaths(result);
+			expect(result.details?.model).toBe("gemini-3.1-flash-lite-image");
+			expect(configs).toEqual([{ thinkingLevel: "HIGH" }, { thinkingLevel: "MINIMAL" }]);
 		});
 	});
 

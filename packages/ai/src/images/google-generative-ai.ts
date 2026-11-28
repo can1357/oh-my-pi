@@ -2,7 +2,9 @@ import { getSupportedEfforts, mapEffortToGoogleThinkingLevel } from "@oh-my-pi/p
 import type { Model } from "@oh-my-pi/pi-catalog/types";
 import { withAuth } from "../auth-retry";
 import * as AIError from "../error";
-import { errorMessage, ImageApiError, imageBaseUrl, modelHeaders, usageFromWire, validateImageInput } from "./shared";
+import { mapGoogleUsage } from "../providers/google-shared";
+import type { UsageMetadata } from "../providers/google-types";
+import { emptyUsage, errorMessage, ImageApiError, imageBaseUrl, modelHeaders, validateImageInput } from "./shared";
 import type { GeneratedImage, ImageGenerationOptions, ImageGenerationRequest, ImageGenerationResult } from "./types";
 
 interface GeminiPart {
@@ -13,7 +15,7 @@ interface GeminiPart {
 /** One `generateContent` response, or one chunk of its SSE stream. */
 export interface GeminiImageResponse {
 	candidates?: Array<{ content?: { parts?: GeminiPart[] }; finishReason?: string }>;
-	usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number; totalTokenCount?: number };
+	usageMetadata?: UsageMetadata;
 }
 
 /** The user turn of a Gemini image request: reference images first, then the prompt. */
@@ -46,11 +48,7 @@ export function geminiImageResult(responses: Iterable<GeminiImageResponse>): Ima
 		wireUsage = response.usageMetadata ?? wireUsage;
 	}
 	text = text.trim();
-	const usage = usageFromWire(
-		wireUsage
-			? { input_tokens: wireUsage.promptTokenCount, output_tokens: wireUsage.candidatesTokenCount }
-			: undefined,
-	);
+	const usage = wireUsage ? mapGoogleUsage(wireUsage) : emptyUsage();
 	return { images, ...(text ? { text } : {}), usage };
 }
 
