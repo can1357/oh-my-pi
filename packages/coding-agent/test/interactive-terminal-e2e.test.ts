@@ -371,12 +371,12 @@ describe("libkitty end-to-end", () => {
 			`<form><p>Pick one?</p>${options.join("")}<textarea name="notes"></textarea></form>`,
 			{ signal: closed.signal },
 		);
-		await term.waitFor(screen => screen.some(row => row.includes("Option 7")));
 		const misplaced = () => {
 			const rows = buffer();
 			return markers.filter(marker => rows.filter(row => row.includes(marker)).length !== 1);
 		};
 		try {
+			await term.waitFor(screen => screen.some(row => row.includes("Option 7")));
 			for (let i = 0; i < 10 && misplaced().length > 0; i++) await term.settle();
 			expect(misplaced()).toEqual([]);
 			expect(viewport().some(row => row.includes(markers.at(-1)!))).toBe(true);
