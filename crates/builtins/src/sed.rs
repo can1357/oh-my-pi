@@ -8450,16 +8450,20 @@ fn process_file(
 					list(output, &pattern, width)?;
 				},
 				'n' => {
-					// With no next line, end the script: the pattern space is
-					// printed as at the end of any cycle.
-					if is_last_line(reader, context)? {
-						break;
-					}
-					// Print the pattern space, and go on with the next command
-					// once the next line is read in its place, as for `N`.
+					// Print the pattern space first: looking for the next line
+					// waits on a pipe, whose writer may wait for this line
+					// (`sed -u n`).
 					if !context.quiet {
 						write_chunk(output, context, &pattern)?;
 					}
+					// With no next line, end the script without printing the
+					// pattern space again.
+					if is_last_line(reader, context)? {
+						pattern.clear();
+						break;
+					}
+					// Go on with the next command once the next line is read in
+					// its place, as for `N`; the queued text comes before it.
 					flush_appends(output, context)?;
 					context.input_action = Some(InputAction {
 						next_command: command.next.clone(),
@@ -10031,6 +10035,8 @@ mod tests {
 			(&["n;s/^/X/"], "a\nb", "a\nXb"),
 			// The text of `a` comes before the line `n` reads.
 			(&["-e", "1{a A", "-e", "n;s/^/Y/}", "-e", "s/^/X/"], "a\nb\nc\n", "a\nA\nXYb\nXc\n"),
+			// With no next line, `n` prints the pattern space once, then that text.
+			(&["-e", "a X", "-e", "n;s/^/Y/"], "a\n", "a\nX\n"),
 			// `n` reads on into the next file, but not under `-s`.
 			(&["n;n;n;s/^/X/", "in", "in"], "", "1\n2\n3\nX1\n2\n3\n"),
 			(&["-s", "n;n;n;s/^/X/", "in", "in"], "", "1\n2\n3\n1\n2\n3\n"),
@@ -10042,6 +10048,47 @@ mod tests {
 			let out = capture.out();
 			assert_eq!((code, out.as_str()), (0, expected), "{args:?}: {}", capture.err());
 		}
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn n_prints_before_it_waits_for_the_next_line() {
+		// As in GNU sed 4.9, `n` prints the pattern space before it reads on, so
+		// under -u a writer that waits for that line before it sends the next
+		// one gets it instead of waiting forever.
+		use std::{
+			io::{BufRead as _, BufReader},
+			sync::mpsc,
+			time::Duration,
+		};
+
+		use crate::openfile::OpenFile;
+
+		let (mut host, capture) = Host::for_test("sed", "", "/");
+		let (stdin, mut input) = std::io::pipe().unwrap();
+		let (output, stdout) = std::io::pipe().unwrap();
+		host.set_test_stdin(OpenFile::from(stdin));
+		host.set_test_stdout(OpenFile::from(stdout));
+		let (line_tx, lines) = mpsc::channel();
+		let reader = std::thread::spawn(move || {
+			for line in BufReader::new(output).lines() {
+				let _ = line_tx.send(line.unwrap());
+			}
+		});
+		let writer = std::thread::spawn(move || {
+			input.write_all(b"a\n").unwrap();
+			let first = lines.recv_timeout(Duration::from_secs(10));
+			input.write_all(b"b\nc\n").unwrap();
+			(first, lines)
+		});
+		let parsed = <Sed as clap::Parser>::try_parse_from(["sed", "-u", "n;d"]).unwrap();
+		let code = crate::host::run_caught::<Sed>(parsed, &mut host);
+		drop(host);
+		reader.join().unwrap();
+		let (first, lines) = writer.join().unwrap();
+		let rest: Vec<String> = lines.try_iter().collect();
+		assert_eq!(first, Ok("a".to_string()), "the first line came only after the next one was sent");
+		assert_eq!((code, rest), (0, vec!["c".to_string()]), "{}", capture.err());
 	}
 
 	#[test]
