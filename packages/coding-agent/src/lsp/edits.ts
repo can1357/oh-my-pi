@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEexist, isEnoent, logger } from "@oh-my-pi/pi-utils";
-import { readSnapshot } from "../commit/selective/journal";
+import { MAX_SNAPSHOT_CHARS, readSnapshot } from "../commit/selective/journal";
 import { stripBom } from "../edit/normalize";
 import { formatPathRelativeToCwd } from "../tools/path-utils";
 import { ToolError } from "../tools/tool-errors";
@@ -201,15 +201,16 @@ export interface RenameMove {
  *
  * The reference edits (import/usage rewrites in other files) must be written
  * before the move so their positions match the pre-move file contents, but a
- * failure must not leave those files half-rewritten: if a later edit, the
- * journal snapshot, or `mkdir`/`rename` throws, every edited file gets its
- * original bytes back before the error propagates. A failed rename therefore
- * leaves the source, destination, and every reference file exactly as they were.
+ * failure must not leave those files half-rewritten: if a later edit, a journal
+ * path, or `mkdir`/`rename` throws, every edited file gets its original bytes
+ * back before the error propagates. A failed rename therefore leaves the
+ * source, destination, and every reference file exactly as they were.
  *
  * `onFileChange` receives the reference edits and then each moved regular file
  * (symlinks are left out) as a deletion at `from` and a creation at `to`, only
  * once the move succeeded. Paths keep the moved entry itself, resolving only its
- * directory.
+ * directory. Moved files are read one at a time after the move, and a file over
+ * the journal's snapshot limit is left out unread.
  *
  * @throws the original error, after rolling back the edits.
  */
@@ -233,24 +234,17 @@ export async function applyEditsThenRename(
 	};
 	const edited: Array<{ filePath: string; outcome: TextEditOutcome }> = [];
 	const editChanges: WorkspaceFileChange[] = [];
-	let moved: Array<{ from: string; to: string; text: string } | undefined> = [];
+	let moved: RenameMove[] = [];
 	try {
 		for (const { filePath, edits } of references) {
 			edited.push({ filePath, outcome: await applyTextEdits(filePath, edits) });
 		}
-		// Journal paths and moved contents must be taken before the move takes them away.
+		// Journal paths must be resolved before the move takes the old directories away.
 		if (onFileChange) {
 			for (const { filePath, outcome } of edited) {
 				editChanges.push({ path: await fs.realpath(filePath), ...outcome });
 			}
-			moved = await Promise.all(
-				moves.map(async ({ from, to }) => {
-					if (!(await fs.lstat(from)).isFile()) return undefined;
-					const snapshot = await readSnapshot(from);
-					if (snapshot?.text == null) return undefined;
-					return { from: await entryLocation(from), to, text: snapshot.text };
-				}),
-			);
+			moved = await Promise.all(moves.map(async ({ from, to }) => ({ from: await entryLocation(from), to })));
 		}
 		await fs.mkdir(path.dirname(dest), { recursive: true });
 		await fs.rename(source, dest);
@@ -260,10 +254,15 @@ export async function applyEditsThenRename(
 	}
 	if (!onFileChange) return;
 	for (const change of editChanges) onFileChange(change);
-	for (const entry of moved) {
-		if (!entry) continue;
-		onFileChange({ path: entry.from, before: entry.text, after: null });
-		onFileChange({ path: await entryLocation(entry.to), before: null, after: entry.text });
+	// UTF-8 never decodes to more UTF-16 units than it has bytes, so only a file over the
+	// limit can exceed it; the journal would record such a file without its text.
+	for (const { from, to } of moved) {
+		const stat = await fs.lstat(to).catch(() => undefined);
+		if (!stat?.isFile() || stat.size > MAX_SNAPSHOT_CHARS) continue;
+		const snapshot = await readSnapshot(to);
+		if (snapshot?.text == null) continue;
+		onFileChange({ path: from, before: snapshot.text, after: null });
+		onFileChange({ path: await entryLocation(to), before: null, after: snapshot.text });
 	}
 }
 
@@ -385,7 +384,8 @@ export interface WorkspaceEditResult {
  * returned {@link WorkspaceEditResult} is lost on failure.
  * `onFileChange` reports the before/after contents of each successful text edit,
  * including the executed prefix when a later operation fails. Resource operations
- * remain unjournaled.
+ * remain unjournaled, and so does a text edit after one on the same path or inside
+ * a folder one moved or deleted.
  */
 export async function applyWorkspaceEdit(
 	edit: WorkspaceEdit,
@@ -405,10 +405,16 @@ export async function applyWorkspaceEdit(
 		for (const op of ops) {
 			if (op.kind === "text") sortAndValidateTextEdits(op.edits);
 		}
+		// A text edit after a resource operation on its path starts from content no record explains,
+		// such as an overwrite's empty file: journaled, its new lines would be preselected while the
+		// removal of the old ones belonged to nobody.
+		const resourceUris: string[] = [];
+		const afterResource = (uri: string) =>
+			resourceUris.some(target => uri === target || uri.startsWith(target.endsWith("/") ? target : `${target}/`));
 		for (const op of ops) {
 			if (op.kind === "text") {
 				const filePath = uriToFile(op.uri);
-				await applyTextEdits(filePath, op.edits, onFileChange);
+				await applyTextEdits(filePath, op.edits, afterResource(op.uri) ? undefined : onFileChange);
 				applied.push(`Applied ${op.edits.length} edit(s) to ${formatPathRelativeToCwd(filePath, cwd)}`);
 				record({ kind: "edit", uri: op.uri });
 			} else if (op.kind === "create") {
@@ -429,6 +435,7 @@ export async function applyWorkspaceEdit(
 				}
 				applied.push(`Created ${formatPathRelativeToCwd(filePath, cwd)}`);
 				record({ kind: "create", uri: op.uri });
+				resourceUris.push(op.uri);
 			} else if (op.kind === "rename") {
 				const oldPath = uriToFile(op.oldUri);
 				const newPath = uriToFile(op.newUri);
@@ -490,6 +497,7 @@ export async function applyWorkspaceEdit(
 				}
 				applied.push(`Renamed ${formatPathRelativeToCwd(oldPath, cwd)} → ${formatPathRelativeToCwd(newPath, cwd)}`);
 				record({ kind: "rename", oldUri: op.oldUri, newUri: op.newUri });
+				resourceUris.push(op.oldUri, op.newUri);
 			} else {
 				const filePath = uriToFile(op.uri);
 				try {
@@ -505,6 +513,7 @@ export async function applyWorkspaceEdit(
 				}
 				applied.push(`Deleted ${formatPathRelativeToCwd(filePath, cwd)}`);
 				record({ kind: "delete", uri: op.uri });
+				resourceUris.push(op.uri);
 			}
 		}
 	} else if (edit.changes) {

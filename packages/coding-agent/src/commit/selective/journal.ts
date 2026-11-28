@@ -27,7 +27,7 @@ const JOURNAL_FILE = "changes.jsonl";
 /** Blob directory name inside the artifacts directory. */
 const BLOB_DIR = "blobs";
 /** Larger snapshots are not stored; their record leaves the path without replayable history. */
-const MAX_SNAPSHOT_CHARS = 8 * 1024 * 1024;
+export const MAX_SNAPSHOT_CHARS = 8 * 1024 * 1024;
 /** Deltas whose JSON is longer go to the blob store instead of the journal line. */
 const INLINE_DELTA_CHARS = 4096;
 /** Added or removed lines up to which a write is diffed exactly; a larger rewrite is one replaced block. */

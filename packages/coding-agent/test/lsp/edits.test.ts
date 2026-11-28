@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { MAX_SNAPSHOT_CHARS } from "@oh-my-pi/pi-coding-agent/commit/selective/journal";
 import {
 	applyEditsThenRename,
 	applyWorkspaceEdit,
@@ -83,6 +84,34 @@ describe("applyEditsThenRename", () => {
 		expect(await Bun.file(source).exists()).toBe(true);
 		expect(await Bun.file(dest).exists()).toBe(false);
 		expect(recorded).toEqual([]);
+	});
+
+	it("leaves a moved file over the journal's snapshot limit out of the journal", async () => {
+		const pkg = path.join(dir, "pkg");
+		const small = path.join(pkg, "small.ts");
+		const large = path.join(pkg, "large.txt");
+		await Bun.write(small, "export const small = 1;\n");
+		await Bun.write(large, "x".repeat(MAX_SNAPSHOT_CHARS + 1));
+		const dest = path.join(dir, "out", "pkg");
+		const recorded: WorkspaceFileChange[] = [];
+
+		await applyEditsThenRename(
+			[],
+			pkg,
+			dest,
+			[
+				{ from: small, to: path.join(dest, "small.ts") },
+				{ from: large, to: path.join(dest, "large.txt") },
+			],
+			change => recorded.push(change),
+		);
+
+		const real = await fs.realpath(dir);
+		expect((await fs.stat(path.join(dest, "large.txt"))).size).toBe(MAX_SNAPSHOT_CHARS + 1);
+		expect(recorded).toEqual([
+			{ path: path.join(real, "pkg", "small.ts"), before: "export const small = 1;\n", after: null },
+			{ path: path.join(real, "out", "pkg", "small.ts"), before: null, after: "export const small = 1;\n" },
+		]);
 	});
 });
 
@@ -233,6 +262,46 @@ describe("workspace edit recorder", () => {
 		expect(await Bun.file(displaced).exists()).toBe(false);
 		expect(await Bun.file(deleted).exists()).toBe(false);
 		expect(recorded).toEqual([]);
+	});
+
+	it("leaves a text edit after a resource operation on its path unjournaled", async () => {
+		const overwritten = path.join(dir, "overwritten.ts");
+		const moved = path.join(dir, "renamed", "moved.ts");
+		const plain = path.join(dir, "plain.ts");
+		await Bun.write(overwritten, "const oldName = 1;\n");
+		await Bun.write(path.join(dir, "folder", "moved.ts"), "oldName;\n");
+		await Bun.write(plain, "oldName;\n");
+		const rename: TextEdit[] = [
+			{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 7 } }, newText: "newName" },
+		];
+		const recorded: WorkspaceFileChange[] = [];
+
+		await applyWorkspaceEdit(
+			{
+				documentChanges: [
+					{ kind: "create", uri: fileToUri(overwritten), options: { overwrite: true } },
+					{
+						textDocument: { uri: fileToUri(overwritten), version: null },
+						edits: [
+							{
+								range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+								newText: "const newName = 1;\n",
+							},
+						],
+					},
+					{ kind: "rename", oldUri: fileToUri(path.join(dir, "folder")), newUri: fileToUri(path.dirname(moved)) },
+					{ textDocument: { uri: fileToUri(moved), version: null }, edits: rename },
+					{ textDocument: { uri: fileToUri(plain), version: null }, edits: rename },
+				],
+			},
+			dir,
+			undefined,
+			change => recorded.push(change),
+		);
+
+		expect(await Bun.file(overwritten).text()).toBe("const newName = 1;\n");
+		expect(await Bun.file(moved).text()).toBe("newName;\n");
+		expect(recorded).toEqual([{ path: plain, before: "oldName;\n", after: "newName;\n" }]);
 	});
 
 	it("keeps the executed prefix in the recorder but omits skipped and failed operations", async () => {

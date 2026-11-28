@@ -2864,6 +2864,7 @@ describe("lsp regressions", () => {
 			await Bun.write(filePath, "const oldName = 1;\n");
 			const uri = fileToUri(filePath);
 			const held = Promise.withResolvers<void>();
+			const rawHeld = Promise.withResolvers<void>();
 			let nextEditId = 1_000;
 			const fakeServer = installFakeLsp((message, server) => {
 				if (message.method === "initialize") {
@@ -2874,8 +2875,9 @@ describe("lsp regressions", () => {
 					});
 				} else if (message.method === "workspace/executeCommand") {
 					const { command, arguments: args } = message.params as { command: string; arguments: string[] };
-					if (command === "hold") {
-						void held.promise.then(() => server.send({ jsonrpc: "2.0", id: message.id, result: null }));
+					if (command === "hold" || command === "rawHold") {
+						const gate = command === "hold" ? held : rawHeld;
+						void gate.promise.then(() => server.send({ jsonrpc: "2.0", id: message.id, result: null }));
 						return;
 					}
 					// Like a real server: apply the edit, wait for the client's answer, then answer the command.
@@ -2922,8 +2924,24 @@ describe("lsp regressions", () => {
 			);
 			held.resolve();
 			await hold;
+			// A command sent as a raw `lsp` request is in flight too, so the owner stays unknown.
+			const rawHold = lspClient.sendRequest(client, "workspace/executeCommand", {
+				command: "rawHold",
+				arguments: [],
+			});
+			await fakeServer.waitFor(
+				message => (message.params as { command?: string } | undefined)?.command === "rawHold",
+			);
+			await lspClient.executeCommandWithLsp(
+				client,
+				{ command: "rename", arguments: ["lastName", "finalName"] },
+				undefined,
+				record,
+			);
+			rawHeld.resolve();
+			await rawHold;
 
-			expect(await Bun.file(filePath).text()).toBe("const lastName = 1;\n");
+			expect(await Bun.file(filePath).text()).toBe("const finalName = 1;\n");
 			expect(recorded).toEqual([
 				{
 					path: await fsp.realpath(filePath),
