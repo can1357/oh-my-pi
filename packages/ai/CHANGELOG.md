@@ -28,6 +28,7 @@
 
 ### Fixed
 
+- Fixed Codex and OpenAI Responses usage recording cache writes as 0 when the provider reported only `cache_write_tokens_details` TTL buckets ([#20952](https://github.com/can1357/oh-my-pi/issues/20952), [#20955](https://github.com/can1357/oh-my-pi/pull/20955) by [@koeria](https://github.com/koeria))
 - Fixed startup failing with `no such column: salt` when `agent.db` records auth schema v9 but its credentials table has no `salt` column
 - An OpenAI Responses request retried after an empty completion keeps the provider session it started with, so a session the host retired mid-request (a model switch) is not recreated for the next model ([#20858](https://github.com/can1357/oh-my-pi/pull/20858) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Fixed DeepSeek sessions failing every request with `400 … image special token` after a tool result quoted DeepSeek's chat template: `<｜…｜>` and `｜DSML｜` tokens in outgoing message text are now broken with a zero-width space ([#20832](https://github.com/can1357/oh-my-pi/pull/20832) by [@dany-on-demand](https://github.com/dany-on-demand))

@@ -432,6 +432,69 @@ describe("openai-responses usage attribution", () => {
 
 		expect(output.usage.cacheWrite).toBe(70);
 	});
+
+	it("attributes documented nested input_tokens_details.cache_write_tokens_details to cacheWrite", () => {
+		const output: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: "openai-responses",
+			provider: "openai",
+			model: "gpt-5.1",
+			usage: blankUsage(),
+			stopReason: "stop",
+			timestamp: 0,
+		};
+
+		populateResponsesUsageFromResponse(output, {
+			input_tokens: 200,
+			output_tokens: 50,
+			total_tokens: 300,
+			input_tokens_details: {
+				cached_tokens: 100,
+				cache_write_tokens_details: {
+					ttl_30m_tokens: 60,
+					ttl_12h_tokens: 40,
+				},
+			},
+		});
+
+		expect(output.usage.cacheWrite).toBe(100);
+		expect(output.usage.cacheRead).toBe(100);
+		expect(output.usage.input).toBe(0);
+		expect(output.usage.output).toBe(50);
+	});
+
+	it("prefers nested cache_write_tokens_details over a top-level breakdown", () => {
+		const output: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: "openai-responses",
+			provider: "openai",
+			model: "gpt-5.1",
+			usage: blankUsage(),
+			stopReason: "stop",
+			timestamp: 0,
+		};
+
+		populateResponsesUsageFromResponse(output, {
+			input_tokens: 200,
+			output_tokens: 50,
+			total_tokens: 300,
+			input_tokens_details: {
+				cached_tokens: 100,
+				cache_write_tokens_details: {
+					ttl_30m_tokens: 25,
+					ttl_12h_tokens: 15,
+				},
+			},
+			cache_write_tokens_details: {
+				ttl_30m_tokens: 60,
+				ttl_12h_tokens: 40,
+			},
+		});
+
+		expect(output.usage.cacheWrite).toBe(40);
+	});
 });
 
 describe("anthropic applyAnthropicUsageExtras", () => {

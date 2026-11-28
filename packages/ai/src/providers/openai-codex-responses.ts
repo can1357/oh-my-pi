@@ -351,6 +351,10 @@ interface CodexResponseUsage {
 	input_tokens_details?: {
 		cached_tokens?: number;
 		cache_write_tokens?: number;
+		cache_write_tokens_details?: {
+			ttl_30m_tokens?: number;
+			ttl_12h_tokens?: number;
+		};
 		orchestration_input_tokens?: number;
 		orchestration_input_cached_tokens?: number;
 	};
@@ -3560,6 +3564,13 @@ function parseCodexResponseUsage(value: unknown): CodexResponseUsage | undefined
 			parsedDetails.cache_write_tokens = details.cache_write_tokens;
 			hasDetails = true;
 		}
+		const nestedCacheWriteDetails = parseCacheWriteTokensDetails(
+			"cache_write_tokens_details" in details ? details.cache_write_tokens_details : undefined,
+		);
+		if (nestedCacheWriteDetails) {
+			parsedDetails.cache_write_tokens_details = nestedCacheWriteDetails;
+			hasDetails = true;
+		}
 		if ("orchestration_input_tokens" in details && typeof details.orchestration_input_tokens === "number") {
 			parsedDetails.orchestration_input_tokens = details.orchestration_input_tokens;
 			hasDetails = true;
@@ -3597,7 +3608,31 @@ function parseCodexResponseUsage(value: unknown): CodexResponseUsage | undefined
 			hasUsage = true;
 		}
 	}
+	const topLevelCacheWriteDetails = parseCacheWriteTokensDetails(
+		"cache_write_tokens_details" in value ? value.cache_write_tokens_details : undefined,
+	);
+	if (topLevelCacheWriteDetails) {
+		usage.cache_write_tokens_details = topLevelCacheWriteDetails;
+		hasUsage = true;
+	}
 	return hasUsage ? usage : undefined;
+}
+
+function parseCacheWriteTokensDetails(
+	value: unknown,
+): NonNullable<CodexResponseUsage["cache_write_tokens_details"]> | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	const details: NonNullable<CodexResponseUsage["cache_write_tokens_details"]> = {};
+	let hasDetails = false;
+	if ("ttl_30m_tokens" in value && typeof value.ttl_30m_tokens === "number") {
+		details.ttl_30m_tokens = value.ttl_30m_tokens;
+		hasDetails = true;
+	}
+	if ("ttl_12h_tokens" in value && typeof value.ttl_12h_tokens === "number") {
+		details.ttl_12h_tokens = value.ttl_12h_tokens;
+		hasDetails = true;
+	}
+	return hasDetails ? details : undefined;
 }
 
 function describeCodexInputItemType(item: unknown): string {

@@ -526,7 +526,8 @@ export function applyProviderReportedCost(model: Pick<Model, "provider">, usage:
 /**
  * Cache writes reported by OpenAI Responses-family usage: prefer the scalar
  * `input_tokens_details.cache_write_tokens`; when absent, sum the TTL
- * breakdown in `cache_write_tokens_details` (Codex reports writes only there).
+ * breakdown in `input_tokens_details.cache_write_tokens_details` (the documented
+ * OpenAI shape) or top-level `cache_write_tokens_details` (Codex).
  */
 function responsesCacheWriteTokens(
 	cacheWriteTokens: number | null | undefined,
@@ -4565,6 +4566,10 @@ export function populateResponsesUsageFromResponse(
 				input_tokens_details?: {
 					cached_tokens?: number | null;
 					cache_write_tokens?: number | null;
+					cache_write_tokens_details?: {
+						ttl_30m_tokens?: number | null;
+						ttl_12h_tokens?: number | null;
+					} | null;
 					orchestration_input_tokens?: number | null;
 					orchestration_input_cached_tokens?: number | null;
 				} | null;
@@ -4605,7 +4610,10 @@ export function populateResponsesUsageFromResponse(
 		outputTokens: Math.max(0, reportedOutputTokens - (primaryIncludesOrchestration ? orchestrationOutputTokens : 0)),
 		cachedTokens: Math.max(0, reportedCachedTokens - (primaryIncludesOrchestration ? orchestrationInputCached : 0)),
 		reasoningTokens: outputDetails?.reasoning_tokens ?? 0,
-		cacheWriteOpenRouter: responsesCacheWriteTokens(details?.cache_write_tokens, usage.cache_write_tokens_details),
+		cacheWriteOpenRouter: responsesCacheWriteTokens(
+			details?.cache_write_tokens,
+			details?.cache_write_tokens_details ?? usage.cache_write_tokens_details,
+		),
 		cacheWriteDeepSeek: usage.prompt_cache_miss_tokens ?? undefined,
 		hasDeepSeekCacheHitAndMiss:
 			usage.prompt_cache_hit_tokens !== undefined && usage.prompt_cache_miss_tokens !== undefined,
