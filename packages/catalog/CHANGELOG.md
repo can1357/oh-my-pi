@@ -50,6 +50,7 @@
 - Fixed `google-vertex` Claude Fable 5.1+ requests failing their first attempt with 400 `thinking.adaptive.block_binding: Extra inputs are not permitted` ([#20765](https://github.com/can1357/oh-my-pi/issues/20765))
 - Fixed ClinePass subscription `deepseek-v4.1-flash-1017` offering no thinking levels; it now exposes `low`/`high`/`max` and sends the selected `reasoning_effort` ([#16414](https://github.com/can1357/oh-my-pi/issues/16414), [#16417](https://github.com/can1357/oh-my-pi/pull/16417) by [@jhste102lab](https://github.com/jhste102lab))
 - Fixed OpenRouter `typesafe/jev-router` being classified as a judge model, which aborted startup for custom providers registering the OpenRouter roster on the `openrouter` chat API ([#15244](https://github.com/can1357/oh-my-pi/issues/15244))
+- Fixed Google Gemini 3.1 Flash Image and Flash Lite Image offering no thinking levels; they now expose `minimal` (the default) and `high`, the ladder Google documents for them ([#20881](https://github.com/can1357/oh-my-pi/pull/20881) by [@Xytronix](https://github.com/Xytronix))
 
 ### Added
 

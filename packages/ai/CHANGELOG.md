@@ -20,6 +20,7 @@
 - Added the `onDiscardedAttempt` stream option: it receives each attempt a replay-safe retry throws away (an empty completion, a transient provider error), which the provider may still have billed; attempts with no tokens and no charge are skipped ([#20667](https://github.com/can1357/oh-my-pi/issues/20667), [#20806](https://github.com/can1357/oh-my-pi/pull/20806) by [@wapenshaw](https://github.com/wapenshaw))
 - Factory Droid Gemini requests send the `xhigh` thinking level for models whose ladder offers it (Gemini 4 Neon) instead of capping at `HIGH` ([#19841](https://github.com/can1357/oh-my-pi/issues/19841))
 - Added `PI_ANTHROPIC_OAUTH_CALLBACK_PORT` to override the Anthropic login callback port (default `54545`, `0` for a random free port) ([#14135](https://github.com/can1357/oh-my-pi/issues/14135))
+- Added `ImageGenerationRequest.reasoning`, a thinking effort for image models with a reasoning ladder: Gemini image models send it as `generationConfig.thinkingConfig.thinkingLevel`, and an effort outside the model's ladder is omitted ([#20881](https://github.com/can1357/oh-my-pi/pull/20881) by [@Xytronix](https://github.com/Xytronix))
 
 ### Removed
 
@@ -46,6 +47,7 @@
 - Fixed `google-vertex` API-key mode ignoring `GOOGLE_CLOUD_PROJECT`: with a project configured, requests now use the `projects/{project}/locations/{location}` path so models published only on `locations/global` no longer 404 in the key's default region ([#18827](https://github.com/can1357/oh-my-pi/issues/18827))
 - Fixed OAuth login failing on Android/Termux when interface enumeration (`getifaddrs`) is denied; the callback server now falls back to IPv4 loopback ([#16127](https://github.com/can1357/oh-my-pi/issues/16127))
 - Fixed Anthropic rate limits sent inside a streaming response carrying no HTTP status: they now report 429 like a rate limit returned as an HTTP response, also after text has streamed, where they were treated as a dropped connection. An overload sent before the response starts now reports 529 ([#20835](https://github.com/can1357/oh-my-pi/pull/20835) by [@sjawhar](https://github.com/sjawhar))
+- Fixed Gemini image generation leaving thinking tokens out of its usage: Google bills them as output, so they now count toward output and total tokens and are reported as reasoning tokens, as for chat ([#20881](https://github.com/can1357/oh-my-pi/pull/20881) by [@Xytronix](https://github.com/Xytronix))
 
 ### Changed
 

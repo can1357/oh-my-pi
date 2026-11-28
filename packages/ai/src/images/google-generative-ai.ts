@@ -1,7 +1,10 @@
+import { getSupportedEfforts, mapEffortToGoogleThinkingLevel } from "@oh-my-pi/pi-catalog/model-thinking";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
 import { withAuth } from "../auth-retry";
 import * as AIError from "../error";
-import { errorMessage, ImageApiError, imageBaseUrl, modelHeaders, usageFromWire, validateImageInput } from "./shared";
+import { mapGoogleUsage } from "../providers/google-shared";
+import type { UsageMetadata } from "../providers/google-types";
+import { emptyUsage, errorMessage, ImageApiError, imageBaseUrl, modelHeaders, validateImageInput } from "./shared";
 import type { GeneratedImage, ImageGenerationOptions, ImageGenerationRequest, ImageGenerationResult } from "./types";
 
 interface GeminiPart {
@@ -12,7 +15,7 @@ interface GeminiPart {
 /** One `generateContent` response, or one chunk of its SSE stream. */
 export interface GeminiImageResponse {
 	candidates?: Array<{ content?: { parts?: GeminiPart[] }; finishReason?: string }>;
-	usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number; totalTokenCount?: number };
+	usageMetadata?: UsageMetadata;
 }
 
 /** The user turn of a Gemini image request: reference images first, then the prompt. */
@@ -45,11 +48,14 @@ export function geminiImageResult(responses: Iterable<GeminiImageResponse>): Ima
 		wireUsage = response.usageMetadata ?? wireUsage;
 	}
 	text = text.trim();
-	const usage = usageFromWire(
-		wireUsage
-			? { input_tokens: wireUsage.promptTokenCount, output_tokens: wireUsage.candidatesTokenCount }
-			: undefined,
-	);
+	const usage = wireUsage ? mapGoogleUsage(wireUsage) : emptyUsage();
+	// `totalTokenCount` is optional on the wire, and mapGoogleUsage reports 0 without it.
+	if (wireUsage && !wireUsage.totalTokenCount) {
+		usage.totalTokens =
+			(wireUsage.promptTokenCount ?? 0) +
+			(wireUsage.candidatesTokenCount ?? 0) +
+			(wireUsage.thoughtsTokenCount ?? 0);
+	}
 	return { images, ...(text ? { text } : {}), usage };
 }
 
@@ -62,6 +68,13 @@ export async function generateGoogleImage(
 		request.aspectRatio || request.imageSize
 			? { aspectRatio: request.aspectRatio, imageSize: request.imageSize }
 			: undefined;
+	// Gemini 3.x image models take chat's `thinkingLevel`; an effort off the model's ladder is omitted.
+	const thinkingLevel =
+		request.reasoning !== undefined &&
+		model.thinking?.mode === "google-level" &&
+		getSupportedEfforts(model).includes(request.reasoning)
+			? mapEffortToGoogleThinkingLevel(request.reasoning, model)
+			: undefined;
 	const fetchImpl = options.fetch ?? fetch;
 	const body = {
 		contents: geminiImageContents(request),
@@ -69,6 +82,7 @@ export async function generateGoogleImage(
 			responseModalities: ["IMAGE"],
 			...(imageConfig ? { imageConfig } : {}),
 			...(request.count ? { candidateCount: request.count } : {}),
+			...(thinkingLevel ? { thinkingConfig: { thinkingLevel } } : {}),
 		},
 	};
 	const response = await withAuth(
