@@ -141,7 +141,7 @@ export async function detectProjectTypes(cwd: string, signal?: AbortSignal): Pro
 /** Interpret an empty checker result without mistaking a crash for a clean workspace. */
 export function interpretEmptyDiagnosticsResult(
 	exitCode: number,
-	signalCode: string | null,
+	signalCode: NodeJS.Signals | number | null,
 	command: readonly string[],
 ): string {
 	if (exitCode === 0) return "No issues found";

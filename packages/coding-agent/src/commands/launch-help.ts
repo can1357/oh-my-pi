@@ -21,6 +21,9 @@ export const launchHelp = {
 		smol: Flags.string({ description: "Smol/fast model for lightweight tasks (or PI_SMOL_MODEL env)" }),
 		slow: Flags.string({ description: "Slow/reasoning model for thorough analysis (or PI_SLOW_MODEL env)" }),
 		plan: Flags.string({ description: "Plan model for architectural planning (or PI_PLAN_MODEL env)" }),
+		preset: Flags.string({
+			description: "Start on a saved model preset (its role models and default thinking level)",
+		}),
 		goal: Flags.string({
 			description:
 				"Start fresh in goal mode (interactive only; bypasses autoResume; no positional prompt, startup plan mode, or explicit resume)",
@@ -129,7 +132,7 @@ export const launchHelp = {
 		"no-title": Flags.boolean({ description: "Disable title auto-generation" }),
 		"spinner-interval": Flags.string({
 			description:
-				"Milliseconds between spinner frames (default 80; 0 = static). Overrides tui.spinnerInterval and PI_SPINNER_INTERVAL for this run",
+				"Milliseconds between spinner frames (default 80, terminal title 250; 0 = static). Overrides tui.spinnerInterval and PI_SPINNER_INTERVAL for this run",
 		}),
 		"max-fps": Flags.string({
 			description:
@@ -170,6 +173,7 @@ export const launchHelp = {
 		`# Pick a session back up after a crash, subagents included\n  ${APP_NAME} --restore ~/.omp/agent/sessions/--path--/session.jsonl`,
 		`# Create a shell shortcut for a work profile\n  ${APP_NAME} --profile work --alias omp-work`,
 		`# Use different model (fuzzy matching)\n  ${APP_NAME} --model opus "Help me refactor this code"`,
+		`# Start on a saved model preset\n  ${APP_NAME} --preset deep "Help me refactor this code"`,
 		`# Limit model cycling to specific models\n  ${APP_NAME} --models claude-sonnet,claude-haiku,gpt-4o`,
 		`# Export a session file to HTML\n  ${APP_NAME} --export ~/.omp/agent/sessions/--path--/session.jsonl`,
 	],

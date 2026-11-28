@@ -44,6 +44,17 @@ provider "openai" {
 		// audio-input/output-token rates directly. Whisper's $0.006/min duration
 		// tariff has no token-cost representation, so it remains zero and the
 		// transcription response's provider-reported usage/cost is authoritative.
+		// GPT-Transcribe bills $0.0045 per audio minute, so it stays zero too.
+		// whisper-1 and the GPT-4o transcribers are deprecated in favor of
+		// gpt-transcribe and shut down 2027-02-26
+		// (https://developers.openai.com/api/docs/deprecations); drop them then.
+		model "gpt-transcribe" name="GPT-Transcribe" api="openai-transcriptions" base-url="https://api.openai.com/v1" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
 		model "whisper-1" name="Whisper 1" api="openai-transcriptions" base-url="https://api.openai.com/v1" {
 			reasoning #false
 			input "text"
@@ -105,7 +116,7 @@ provider "openai" {
 	models "gpt-6-luna-decisions" {
 		kind "judge"
 	}
-	models "whisper-1" "gpt-4o-transcribe" "gpt-4o-mini-transcribe" {
+	models "gpt-transcribe" "whisper-1" "gpt-4o-transcribe" "gpt-4o-mini-transcribe" {
 		kind "stt"
 	}
 	models "text-embedding-3-small" "text-embedding-3-large" "text-embedding-ada-002" {

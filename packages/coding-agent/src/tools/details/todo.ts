@@ -40,7 +40,17 @@ export interface TodoToolDetails {
 	phases: TodoPhase[];
 	storage: "session" | "memory";
 	completedTasks?: TodoCompletionTransition[];
+	/** The todo backend kept a valid change from committing: the payload was fine, so the call gets no retry reminder. */
+	uncommitted?: "refused" | "stale";
 }
+
+/** How a `todo` call's change fared with the selected todo backend. Host-only: the package root does not export it. */
+export type TodoApplyOutcome =
+	| { kind: "committed" }
+	/** The backend's `apply` returned `{ block: true }`. */
+	| { kind: "refused"; message: string }
+	/** Nothing committed for another reason: `apply` threw or timed out, list, session or backend changed, abort, closing. */
+	| { kind: "stale"; message: string };
 
 /** Minimum overlap (after normalization) required for a substring match.
  * Picked at six chars to admit single-word identifiers like "review" /
@@ -327,3 +337,6 @@ export const TODO_STRIKE_REVEAL_FRAMES = 12;
 
 /** Total frames in the completion strike animation. */
 export const TODO_STRIKE_TOTAL_FRAMES = TODO_STRIKE_HOLD_FRAMES + TODO_STRIKE_REVEAL_FRAMES;
+
+/** Milliseconds per completion strike frame. */
+export const TODO_STRIKE_FRAME_MS = 80;

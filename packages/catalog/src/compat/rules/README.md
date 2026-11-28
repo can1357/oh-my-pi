@@ -120,7 +120,6 @@ collapse {
     effort-family "cursor" "gpt-5.6-luna"
     routing-variant-suffix "-wm" "openai-codex" "openai-codex-device"
     variant-family "devin" "claude-opus-5" name="Claude Opus 5" { /* reviewed routing */ }
-    variant-family "google-antigravity" "gemini-{rev}-flash" name="Gemini {rev} Flash" revision=">=3.6" { /* per-revision template */ }
     provider-alias "devin" "opus" "claude-opus-5"
 }
 ```
@@ -196,7 +195,7 @@ An `on-api` nested inside `on` under a class requires both the selected provider
 
 A `models` string without `*` is an exact, case-sensitive match against the provider-relative model identifier. A string containing `*` is an anchored, ASCII-case-insensitive wildcard match. Prefer taxonomy ranks; retain exact/glob lists only when they isolate the census member set exactly, and keep a `// residue:` comment explaining why ranks do not.
 
-A row whose own id classifies as `unknown` but whose `requestModelId` does not resolves under the wire id: classification and `models` matching both use it, so the model the row sends gets its own rules. Devin Fusion pairings (`fusion-<lead>-sidekick-*`) resolve as their lead this way.
+A row whose own id classifies as `unknown` but whose `requestModelId` does not resolves under the wire id: classification and `models` matching both use it, so the model the row sends gets its own rules.
 
 `priority=N` is an optional signed integer property on the block that owns axis assignments. Its default is zero. Use it only to resolve an intentional equal-specificity overlap; do not use it to encode declaration order.
 
@@ -221,9 +220,13 @@ One object axis carries a computed form: `long-context-cost` accepts either the 
 
 `context-window-authoritative #true` preserves a host's supplied context window through runtime model selection instead of applying inferred expansion or reference-price-tier caps. Explicit user context overrides still apply afterward. It applies to rows materialized through `buildModel` (discovery and regenerated bundles). See [`providers/factory-droid.kdl`](providers/factory-droid.kdl).
 
+`tier-cache-follows-input #true` marks a host's long-context tier as billing cache reads and writes at the same multiple of its source row as input. GitHub Copilot discovery scales the cache legs `billing.token_prices` omits on a synthesized `-1m` row by that input ratio; a reported `cache_price` wins, and unmarked tiers carry the source row's cache legs unscaled. See [`providers/github-copilot.kdl`](providers/github-copilot.kdl).
+
 `long-context-window-uncapped #true` keeps a model's `long-context-cost` tier from capping its runtime context window while extended context is off: the coding agent normally lowers the window to the tier's input threshold so compaction fires before a request crosses into premium pricing. Use it where the tier is an API-equivalent estimate on a subscription host (`xai-oauth`) or where the model is served at its full window regardless (GPT-5.4, except on GitHub Copilot). `buildModel` materializes it as `Model.longContextWindowUncapped`; explicit user context overrides still apply.
 
-`max-tokens-fallback` seeds `maxTokens` only when the row reports none, and `max-tokens-ceiling` lowers a larger reported `maxTokens` to the host's output cap (an unknown budget stays unknown unless a fallback seeded it); the ceiling also lowers discovered Antigravity per-SKU `maxOutputTokens` (`antigravityWireProfiles`, row and per-account), which the transport sends verbatim. Both apply in `buildModel` after `limits-patch`, so discovery mappers pass upstream output budgets through verbatim. See the Kimi rules in [`providers/fireworks.kdl`](providers/fireworks.kdl).
+`thinking-effort-map` maps served efforts to wire values. An entry for an effort the ladder does not serve whose value is a served effort is an alias instead: clamping a request for that effort follows it rather than stepping down to the next lower tier (Refuseless sends `medium` to `high` on its `low|high|max` ladder). `reasoning-effort-map` entries never alias.
+
+`max-tokens-fallback` seeds `maxTokens` only when the row reports none, and `max-tokens-ceiling` lowers a larger reported `maxTokens` to the host's output cap (an unknown budget stays unknown unless a fallback seeded it). Both apply in `buildModel` after `limits-patch`, so discovery mappers pass upstream output budgets through verbatim. See the Kimi rules in [`providers/fireworks.kdl`](providers/fireworks.kdl).
 
 `inline-image-byte-budget` caps retained base64 image characters for a deployment's request body. It leaves room for tool schemas and text beneath the provider's body-size limit; the coding agent reads it through `resolveInlineImageByteBudget` before sending live history, and snapcompact gives its archive frames half of it (`frameDataBytesBudget`). The budget applies only while the request reaches the host the rules describe (the Anthropic API, first-party OpenAI, the Codex backend at its default URL, DeepSeek's API, or Factory Droid's own global or EU API host), which callers decide with pi-ai's `reachesBudgetedHost`: `compat.officialEndpoint` for the configured `baseUrl`, for first-party Anthropic models also the `ANTHROPIC_BASE_URL` or Foundry `FOUNDRY_BASE_URL` reroute applied at request time, and for Factory Droid models the `baseUrl` origin. A custom or rerouted endpoint imposes its own body limit.
 
@@ -253,6 +256,8 @@ One object axis carries a computed form: `long-context-cost` accepts either the 
 - OpenCode Go (`providerType ?? provider` is `opencode-go`) sends any explicit prompt-cache key as `x-opencode-session`, so siblings, forks, and their parent share one gateway cache. Without an explicit key the header keeps the conversation id. Credentials and response state stay per conversation.
 
 Opted in: Muse Code `muse-spark-1.3`, `muse-spark-1.3-contributor`, and the four Wonder variants over `openai-responses` (Meta documents shared-prefix `prompt_cache_key` routing; sibling reuse measured on Spark 1.3 Contributor). OpenCode Go `muse-spark-1.3-contributor`, `muse-spark-1.2-contributor`, `gpt-5.6-luna`, `gpt-6-luna`, and `grok-4.6` over `openai-responses`, and `deepseek-v4-pro` and `omen-alpha` over `openai-completions`. A Go lane qualifies only when a cold / different-family / same-family probe warms on the repeated key and stays cold under the different key; [`providers/opencode-go.kdl`](providers/opencode-go.kdl) records the per-lane tallies and the lanes that warmed under any key (and so gain nothing). The standard Go `muse-spark-1.3`/`1.2` ids stay off: the gateway answers "Model is unavailable". Custom providers opt in only by declaring a matching `providerType`.
+
+`kimi-code-endpoint #true` marks a Kimi Code managed `/coding/v1` deployment (declared at the provider root of [`providers/kimi-code.kdl`](providers/kimi-code.kdl) and [`providers/kimi-code-global.kdl`](providers/kimi-code-global.kdl)). The AI runtime reads it through `isKimiCodeEndpoint` and routes these streams through the dedicated Kimi stream dispatcher, prepends the shared Kimi CLI client headers on the OpenAI-completions transport, and sends the shared prompt-cache affinity identity on the Anthropic transport so both transports warm one cache. The provider's regional base URL and its override env name come from the same files' `base-url` node via `providerBaseUrl` / `providerBaseUrlEnv`; consumers keep env override resolution and any gateway/proxy-specific behavior in code. Unassigned keeps generic dispatch.
 
 `image-max-edge` is the longest image edge, in pixels, a host passes to the model; it downscales larger images to fit first (Cursor: 1024 for Claude and GPT). Snapcompact reads it through `resolveImageMaxEdge` and renders frames no wider, so their glyphs reach the model at the size they were drawn; unassigned means the host keeps the image's size.
 
@@ -331,7 +336,7 @@ behavior {
         exclude-substring "embedding"
     }
     model-operations provider="openai" { exact "o3"; prefix "gpt-"; operation "generate_image" }
-    append-only-context-providers "deepseek" "ollama" "google-antigravity" "google" "google-vertex"
+    append-only-context-providers "deepseek" "ollama" "google" "google-vertex"
     cursor-effort family-marker="gpt-" { tier "minimal" "low" "medium" "high" "xhigh" "max" }
     cursor-model-parameter model="composer-2.5" id="fast" value="false"
     quota-tiers provider="openai-codex" {
@@ -348,8 +353,8 @@ behavior {
     exclude-models provider="nanogpt" substring="embed" substring="tts"
     plan-requirement provider="openai-codex" { tier "pro" substring="-spark" }
     retry-reset-timezone provider="zhipu-coding-plan" base-url="https://open.bigmodel.cn/api/coding/paas/v4" offset="+08:00"
-    pricing-peer provider="google-antigravity" peers="google" "google-vertex" {
-        alias "gemini-3-pro" peer-id="gemini-3-pro-preview"
+    pricing-peer provider="xai-oauth" peers="xai" {
+        alias "grok-4.20-multi-agent-0309" peer-id="grok-4.20-multi-agent-beta-latest"
     }
     role-defaults "smol" {
         model "claude-haiku-5-5"
@@ -390,21 +395,27 @@ auth "anthropic" {
             access "access_token"                // dot path; `claim="a|b"` reads JWT claims; `literal="…"` pins a value
             refresh "refresh_token"
             expires "seconds" path="expires_in" from="created_at" skew-ms=300000 fallback-ms=3600000   // or `expires "jwt" fallback-ms=N` / `expires "never"`
-            email "account.email_address"        // also account-id, org-id, org-name, project-id, api-endpoint, enterprise-url
+            refresh-expires-in "refresh_token_expires_in"   // seconds until the refresh token ends → `refreshExpires`
+            email "account.email_address"        // also account-id, org-id, org-name, project-id, api-endpoint, enterprise-url, scope
         }
         userinfo url="https://…/userinfo" email="email" account-id="sub"
         after-exchange hook="anthropic-identity"
         paste-key prefix="sk-or-" validate-url="https://…"   // manual input starting with prefix is an API key
     }
-    refresh {                                   // or `refresh "none"` / `refresh hook="name"`
-        token url="…" body="json" { headers { anthropic-beta "oauth-2025-04-20" } }   // defaults to the login token request
+    refresh {                                   // or `refresh "none"` / `refresh hook="name"` (optionally `{ window-ms … }`)
+        token url="…" body="json" { headers { User-Agent "…" } }   // defaults to the login token request
         require "projectId"
+        scopes "user:profile" "user:inference"   // sent space-joined as `scope`; a 400 `invalid_scope` retries once without it
+        window-ms 300000                         // renew this close to expiry (default 60000)
+        dead-grant "invalid_grant" except-description="account_on_hold"   // only 400/401 refusals with these codes disable the login
         credential { … }                        // defaults to the login map
         after-refresh hook="…"
     }
     store-as "openai-codex"                      // persist under another provider id
     callback-port 54545                          // defaults to the oauth-code callback port
     paste-code #true                             // defaults to #true for oauth-code logins
+    device-bound #true                           // logins need a key only this machine holds: kept out of the auth broker
+    sign-out hook="name"                          // runs when a login is removed: revokes the grant upstream
     api-key-format "structured"                  // bearer (default) | structured (JSON credential as API key)
     expiry "jwt-or-never"                        // session-JWT expiry policy
     result "api-key"                             // OAuth login persists only credentials.access as a plain API key
@@ -416,6 +427,11 @@ auth "anthropic" {
     show-in-login-list #false
     disabled "Why it is paused, shown to users"  // turns the provider off: no login, no credential reaches it
     login-warning "Account risk to accept"       // a new login asks the user to type "yes" first
+    connected-name "Acme Pro plan"               // what linked-account surfaces call the provider; `name` stays the `/login` label
+    active-notice "Using your Acme Pro plan"     // transcript line when a session starts using one of the provider's models
+    login-notice "Requests follow Acme's terms"  // shown once after each successful sign-in
+    manage-url "https://acme.example/apps"       // the host page where the user turns this app's access on or off
+    required-scope "acme.inference"              // a login without this scope stays signed in with the provider off
 }
 ```
 
@@ -427,10 +443,14 @@ auth "anthropic" {
 
 `login-warning "<text>"` keeps a provider usable but makes every new login accept a risk first: the login list marks it "(at your own risk)", and `login` shows the text and starts the flow only after the user types `yes`; any other answer or a cancel stores nothing. Stored logins, token refresh and requests are not asked again. An extension that registers its own OAuth login under the id owns that prompt instead.
 
+`connected-name "<text>"` names the provider on every surface after an account is linked — login success lines, model picker provider scopes, logout and account rows, usage and status output — while `name` stays the pre-sign-in label in the `/login` list. Absent, those surfaces keep showing the provider id (title-cased where they already did). `active-notice "<text>"` adds one dim transcript line, `<text> · <model name>`, when the session switches to one of the provider's models or first runs a turn on one; it shows once per model per session.
+
+`login-notice "<text>"` adds a dim line under the login success line. `manage-url "<url>"` is the host's page where the user turns the app's access on or off: login and logout output link it, and the model picker's provider pane opens it (F6). `required-scope "<scope>"` names the OAuth scope a login must hold to serve requests; a login whose granted `scope` lacks it is kept, and login output, logout rows and the model picker show the provider as off instead of signing the user out.
+
 Login kinds:
 
 - `login "api-key" { auth-url "…"; instructions "…"; prompt "…" placeholder="…"; empty-fallback "…"; normalize "strip-bearer"; validate … }` — `validate "chat-completions" base-url= model= tolerate-model-denied= max-tokens-field= max-tokens=`, `validate "anthropic-messages" base-url= model=`, or `validate "models-endpoint" url= base-url-env= base-url-path= base-url-append= headers-hook=` (`base-url-path`, default `/models`, is appended to the `base-url-env` value and needs it; `base-url-append` ensures a path segment on that value first, e.g. `/v1` for bases that may be bare origins); all accept `label=` (error-message label, defaults to `name`), `optional=#true` (only auth failures reject), and `trust-forbidden=#true` (requires `optional=#true`; a 403 no longer rejects, so only a 401 does).
-- `login "oauth-code" { … }` as above; `token`/`refresh` `params` values may use `{code}`, `{state}`, `{redirect_uri}`, `{code_verifier}`, `{client_id}`, `{client_secret}`, `{refresh_token}`, `{scope}`; the standard grant parameters are sent unless `standard=#false`.
+- `login "oauth-code" { … }` as above; `token`/`refresh` `params` string values may use `{code}`, `{state}`, `{redirect_uri}`, `{code_verifier}`, `{client_id}`, `{client_secret}`, `{refresh_token}`, `{scope}`, and a numeric value (`expires_in 31536000`) is sent as a JSON number; the standard grant parameters are sent unless `standard=#false`.
 - `login "device-code" { client-id …; base-url "…"; scopes …; headers-hook "…"; device url="{base}/…" body="form" { params {…} headers {…} }; token url="…" url-hook="…"; response user-code= device-code= verification-uri= verification-uri-complete= interval= expires-in=; instructions "Enter code: {user_code}"; credential {…}; userinfo …; after-exchange hook=… }`.
 - `login "custom" hook="name"` — the whole flow is a named `@oh-my-pi/pi-ai` hook (`src/registry/hooks/custom.ts`).
 
@@ -444,6 +464,9 @@ The root `provider "<id>"` node of `providers/<id>.kdl` carries the catalog entr
 provider "sakana" {
     default-model "fugu"                          // required for a catalog entry
     env "SAKANA_API_KEY" "FUGU_API_KEY"           // runtime API-key env fallback, in order
+    base-url "https://api.sakana.ai/v1" {         // optional managed deployment URL (chat,
+        env "SAKANA_BASE_URL"                     // discovery, usages, search); optional override env
+    }
     dynamic-models-authoritative #true            // discovery replaces bundled rows
     allow-unauthenticated #true                   // runtime manager without a key
     skip-cross-provider-reference-fills #true     // generator never backfills from same-id rows elsewhere

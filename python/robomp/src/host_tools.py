@@ -27,7 +27,7 @@ from robomp.db import Database, IssueState, issue_key
 from robomp.git_ops import GitCommandError, HeadDriftError
 from robomp.github_backend import GitHubBackend
 from robomp.github_client import GitHubError, IssueInfo, PullRequestFileInfo, RepoInfo
-from robomp.issue_index import parse_search_query
+from robomp.issue_index import entry_state, parse_search_query
 from robomp.sandbox import (
     GitTransport,
     Workspace,
@@ -1271,6 +1271,10 @@ def _build_push_branch(bindings: ToolBindings) -> HostTool[Any, Any]:
                     "type": "string",
                     "description": persona.host_tool_parameter_description("gh_push_branch", "branch"),
                 },
+                "base": {
+                    "type": "string",
+                    "description": persona.host_tool_parameter_description("gh_push_branch", "base"),
+                },
                 "skip_checks": {
                     "type": "boolean",
                     "description": persona.host_tool_parameter_description("gh_push_branch", "skip_checks"),
@@ -1598,21 +1602,21 @@ def _build_abort_task(bindings: ToolBindings) -> HostTool[Any, Any]:
 
 # ---------- fetch_issue_thread ----------
 def _build_fetch_thread(bindings: ToolBindings) -> HostTool[Any, Any]:
+    """Read an issue/PR thread of the current repo: the originating issue, or
+    `number` (e.g. a duplicate candidate) so triage compares bodies, not titles."""
+
     def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
+        number = args["number"] if isinstance(args.get("number"), int) else _require_issue(bindings).number
         try:
-            issue = _run_coro(
-                bindings.loop,
-                bindings.github.get_issue(bindings.repo.full_name, _require_issue(bindings).number),
-            )
-            comments = _run_coro(
-                bindings.loop,
-                bindings.github.list_comments(bindings.repo.full_name, _require_issue(bindings).number),
-            )
+            issue = _run_coro(bindings.loop, bindings.github.get_issue(bindings.repo.full_name, number))
+            comments = _run_coro(bindings.loop, bindings.github.list_comments(bindings.repo.full_name, number))
         except GitHubError as exc:
             _audit(bindings, "fetch_issue_thread", args, error=str(exc))
             _raise_command(f"GitHub fetch failed: {exc.status} {exc.message}")
+        kind = "PR" if issue.is_pull_request else "issue"
+        state = f"{issue.state}, {issue.state_reason}" if issue.state_reason else issue.state
         lines = [
-            f"# {issue.repo}#{issue.number} ({issue.state})",
+            f"# {issue.repo}#{issue.number} ({kind}, {state})",
             f"title: {issue.title}",
             f"author: @{issue.author}",
             f"labels: {', '.join(issue.labels) if issue.labels else '(none)'}",
@@ -1633,7 +1637,12 @@ def _build_fetch_thread(bindings: ToolBindings) -> HostTool[Any, Any]:
         description=persona.host_tool_description("fetch_issue_thread"),
         parameters={
             "type": "object",
-            "properties": {},
+            "properties": {
+                "number": {
+                    "type": "integer",
+                    "description": persona.host_tool_parameter_description("fetch_issue_thread", "number"),
+                },
+            },
             "additionalProperties": False,
         },
         execute=execute,
@@ -1694,15 +1703,10 @@ def _build_search_issues(bindings: ToolBindings) -> HostTool[Any, Any]:
                 limit=limit + 1,  # headroom for the self-filter below
             )
             entries = [e for e in entries if e.is_pull_request or e.number != _require_issue(bindings).number][:limit]
-            rows = []
-            for e in entries:
-                if e.is_pull_request and e.merged_at:
-                    state = "merged"
-                elif e.state_reason:
-                    state = f"{e.state} ({e.state_reason})"
-                else:
-                    state = e.state
-                rows.append((e.is_pull_request, e.number, state, e.title, e.author, e.labels, e.updated_at))
+            rows = [
+                (e.is_pull_request, e.number, entry_state(e), e.title, e.author, e.labels, e.updated_at)
+                for e in entries
+            ]
             source = "local"
         else:
             # Index not backfilled yet — fall through to the GitHub search API.
@@ -1760,6 +1764,13 @@ def _build_search_issues(bindings: ToolBindings) -> HostTool[Any, Any]:
 _COMMIT_SEARCH_TIMEOUT_SECONDS = 120.0
 
 
+def _default_branch_rev(bindings: ToolBindings) -> str:
+    """`origin/<default>` when the worktree has it, else `HEAD` (branched from the default)."""
+    rev = f"origin/{bindings.repo.default_branch}"
+    probe = _run_repo_command(bindings, ["git", "rev-parse", "--verify", "--quiet", rev], timeout=30.0)
+    return rev if probe.returncode == 0 else "HEAD"
+
+
 def _build_search_commits(bindings: ToolBindings) -> HostTool[Any, Any]:
     """Local `git log` search over the default branch's history.
 
@@ -1786,10 +1797,7 @@ def _build_search_commits(bindings: ToolBindings) -> HostTool[Any, Any]:
         limit = max(1, min(int(limit_raw), 30)) if isinstance(limit_raw, int) else 10
         paths = [p for p in (args.get("paths") or ()) if isinstance(p, str) and p.strip()]
 
-        rev = f"origin/{bindings.repo.default_branch}"
-        probe = _run_repo_command(bindings, ["git", "rev-parse", "--verify", "--quiet", rev], timeout=30.0)
-        if probe.returncode != 0:
-            rev = "HEAD"
+        rev = _default_branch_rev(bindings)
         cmd = ["git", "log", rev, "-n", str(limit), "--date=short", "--pretty=format:%h %ad %an — %s"]
         if mode == "message":
             cmd += [f"--grep={query}", "--regexp-ignore-case"]
@@ -1842,6 +1850,138 @@ def _build_search_commits(bindings: ToolBindings) -> HostTool[Any, Any]:
                 },
             },
             "required": ["query"],
+            "additionalProperties": False,
+        },
+        execute=execute,
+    )
+
+
+# ---------- gh_close_duplicate ----------
+_COMMIT_SHA_RE = re.compile(r"[0-9a-fA-F]{7,40}")
+
+
+def _default_branch_commit(bindings: ToolBindings, ref: str) -> str | None:
+    """Full SHA of `ref` when it names a commit on the default branch, else None."""
+    if not _COMMIT_SHA_RE.fullmatch(ref):
+        return None
+    resolved = _run_repo_command(
+        bindings, ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], timeout=30.0
+    )
+    if resolved.returncode != 0:
+        return None
+    sha = resolved.stdout.strip()
+    on_default = _run_repo_command(
+        bindings, ["git", "merge-base", "--is-ancestor", sha, _default_branch_rev(bindings)], timeout=30.0
+    )
+    return sha if on_default.returncode == 0 else None
+
+
+def _build_close_duplicate(bindings: ToolBindings) -> HostTool[Any, Any]:
+    """Close the originating issue because another issue/PR tracks it or a commit already fixed it.
+
+    Posts one comment headed `Duplicate of #N` (GitHub's duplicate-marking
+    syntax, which links both threads) or `Fixed in <sha>`, labels it
+    `duplicate`, then closes it with `state_reason` `duplicate` / `completed`.
+    Refuses an issue whose live `state_reason` is `reopened`: a human reopen
+    overrides a close, so the bot never re-closes what a maintainer reopened.
+    """
+
+    def refuse(args: Mapping[str, Any], message: str) -> NoReturn:
+        _audit(bindings, "gh_close_duplicate", args, error=message)
+        _raise_command(message)
+
+    def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
+        if bindings.inbound_is_pr:
+            refuse(args, "gh_close_duplicate closes issues only; this thread is a PR.")
+        issue = _require_issue(bindings)
+        row = bindings.db.get_issue(bindings.issue_key)
+        if row is None or not row.classification:
+            refuse(args, "Call classify_issue before gh_close_duplicate.")
+        body = args.get("body")
+        if not isinstance(body, str) or not body.strip():
+            refuse(args, "gh_close_duplicate requires a non-empty 'body'.")
+        duplicate_of = args.get("duplicate_of")
+        fixed_in = args.get("fixed_in")
+        # Placeholder `0` / "" count as absent: some models fill every property.
+        by_number = isinstance(duplicate_of, int) and duplicate_of > 0
+        by_commit = isinstance(fixed_in, str) and bool(fixed_in.strip())
+        if by_number == by_commit:
+            refuse(args, "Pass exactly one of 'duplicate_of' (issue/PR number) or 'fixed_in' (commit SHA).")
+        repo = bindings.repo.full_name
+
+        if by_number:
+            if duplicate_of == issue.number:
+                refuse(args, f"'duplicate_of' must name another issue or PR, not #{duplicate_of} itself.")
+            try:
+                _run_coro(bindings.loop, bindings.github.get_issue(repo, duplicate_of))
+            except GitHubError as exc:
+                if exc.status == 404:
+                    refuse(args, f"#{duplicate_of} is not an issue or PR in {repo}.")
+                refuse(args, f"GitHub lookup of #{duplicate_of} failed: {exc.status} {exc.message}")
+            header = f"Duplicate of #{duplicate_of}"
+            reason = "duplicate"
+        else:
+            sha = _default_branch_commit(bindings, fixed_in.strip())
+            if sha is None:
+                refuse(
+                    args,
+                    f"{fixed_in!r} is not a commit on `{bindings.repo.default_branch}`; pass a SHA from search_commits.",
+                )
+            header = f"Fixed in {sha[:12]}"
+            reason = "completed"
+
+        try:
+            live = _run_coro(bindings.loop, bindings.github.get_issue(repo, issue.number))
+        except GitHubError as exc:
+            refuse(args, f"GitHub fetch of #{issue.number} failed: {exc.status} {exc.message}")
+        if live.state != "open":
+            refuse(args, f"#{issue.number} is already closed.")
+        if live.state_reason == "reopened":
+            refuse(
+                args,
+                f"#{issue.number} was reopened after an earlier close, so it stays open. If it still "
+                "duplicates another issue, say so in one gh_post_comment and leave the call to the maintainer.",
+            )
+
+        comment_body = persona.duplicate_close_comment(header=header, body=body.strip())
+        try:
+            comment = _run_coro(bindings.loop, bindings.github.post_comment(repo, issue.number, comment_body))
+        except GitHubError as exc:
+            refuse(args, f"GitHub rejected the comment: {exc.status} {exc.message}")
+        try:
+            if "duplicate" not in live.labels:
+                _run_coro(bindings.loop, bindings.github.add_issue_labels(repo, issue.number, ["duplicate"]))
+            _run_coro(bindings.loop, bindings.github.close_issue(repo, issue.number, reason=reason))
+        except GitHubError as exc:
+            refuse(
+                args,
+                f"Comment {comment.id} posted, but closing failed: {exc.status} {exc.message}. "
+                "Do not call gh_close_duplicate again; the maintainer will close it.",
+            )
+        bindings.db.set_issue_classification(bindings.issue_key, "duplicate")
+        _audit(bindings, "gh_close_duplicate", args, result={"comment_id": comment.id, "reason": reason})
+        return f"#{issue.number} closed as {reason} ({header}); comment id={comment.id}. Nothing else to do."
+
+    return host_tool(
+        name="gh_close_duplicate",
+        description=persona.host_tool_description("gh_close_duplicate"),
+        parameters={
+            "type": "object",
+            "properties": {
+                "duplicate_of": {
+                    "type": "integer",
+                    "description": persona.host_tool_parameter_description("gh_close_duplicate", "duplicate_of"),
+                },
+                "fixed_in": {
+                    "type": "string",
+                    "description": persona.host_tool_parameter_description("gh_close_duplicate", "fixed_in"),
+                },
+                "body": {
+                    "type": "string",
+                    "description": persona.host_tool_parameter_description("gh_close_duplicate", "body"),
+                },
+            },
+            "required": ["body"],
             "additionalProperties": False,
         },
         execute=execute,
@@ -2604,6 +2744,7 @@ def build(bindings: ToolBindings) -> tuple[HostTool[Any, Any], ...]:
         _build_pr_review_comment(bindings),
         _build_submit_pr_review(bindings),
         _build_post_comment(bindings),
+        _build_close_duplicate(bindings),
         _build_push_branch(bindings),
         _build_release_ci_status(bindings),
         _build_release_job_log(bindings),

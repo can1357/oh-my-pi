@@ -2,9 +2,17 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { glob } from "@oh-my-pi/pi-natives";
-import { isEnoent, logger, postmortem, ptree, stableStringifyJson, untilAborted } from "@oh-my-pi/pi-utils";
+import {
+	isEnoent,
+	logger,
+	pathIsWithinLexical,
+	postmortem,
+	ptree,
+	stableStringifyJson,
+	untilAborted,
+} from "@oh-my-pi/pi-utils";
 import { encodeMessageFrame, MessageFramer } from "../jsonrpc/message-framing";
-import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
+import { ToolAbortError, ToolError, throwIfAborted } from "../tools/tool-errors";
 import { resolveSyscallTarget } from "../tools/path-utils";
 import { findRepoRoot } from "../capability/fs";
 import { getConfig } from "./config";
@@ -13,10 +21,12 @@ import { getLspmuxCommand, isLspmuxSupported } from "./lspmux";
 import { daemonClient } from "../daemon/client";
 import type { DaemonTunnel } from "../daemon/protocol";
 import { workerEnvFromParent } from "../subprocess/worker-client";
+import { isTimeoutError } from "../utils/fetch-timeout";
 import {
 	LSP_ACQUIRE_METHOD,
 	LSP_MODULE_KIND,
 	LSP_MODULE_VERSION,
+	LSP_STARTUP_MAX_MS,
 	LSP_UNRESERVE_METHOD,
 	type LspAcquireResult,
 	type LspUnitParams,
@@ -1198,8 +1208,11 @@ function ownWatchedFiles(client: LspClient): WatchedFilesForwarder | undefined {
 	if (client.proc.sharedMux || client.config.watchFiles === false) return undefined;
 	client.watchedFiles ??= new WatchedFilesForwarder({
 		roots: () => currentWorkspaceFolders(client).map(folder => uriToFile(folder.uri)),
+		// Changes made by other processes keep the server current but are not use
+		// of it: stamping `lastActivity` here would let any busy workspace pin an
+		// otherwise idle server past `idleTimeoutMs` (issue #20451).
 		send: changes =>
-			sendNotification(
+			writeNotification(
 				client,
 				WATCHED_FILES_METHOD,
 				{ changes },
@@ -1599,11 +1612,8 @@ export function clearInitializationFailure(config: ServerConfig, cwd: string): v
  * Get or create an LSP client for the given server configuration and working directory.
  * @param config - Server configuration
  * @param cwd - Working directory
- * @param initTimeoutMs - Optional hard deadline for the initialize handshake (warmup / other
- *   short-lived callers). When set it takes precedence over `signal` inside `sendRequest`.
- * @param signal - Optional caller abort signal. Threaded into the initialize `sendRequest`
- *   and the `initialized` notification so a wedged server surfaces the caller's
- *   timeout/cancel instead of falling back to the internal 30s default.
+ * @param initTimeoutMs - Optional startup deadline for warmup or other short-lived callers.
+ * @param signal - Caller cancellation or a shorter deadline, observed throughout the handshake.
  */
 export async function getOrCreateClient(
 	config: ServerConfig,
@@ -1682,15 +1692,18 @@ export async function getOrCreateClient(
 		// Prefer the daemon-shared server unless an external lspmux wrapper is
 		// already multiplexing this command. Any shared-path failure falls back
 		// to a private spawn so LSP never regresses on daemon trouble.
-		let proc: LspTransport | null = null;
-		if (isSharedLspEnabled() && command === baseCommand) {
-			proc = await connectSharedLspTransport({ command, args, cwd, env, initializationOptions, signal });
-		}
-		proc ??= ptree.spawn([command, ...args], {
-			cwd,
-			stdin: "pipe",
-			env: env ? { ...Bun.env, ...env } : undefined,
-		});
+		const sharedProc =
+			isSharedLspEnabled() && command === baseCommand
+				? await connectSharedLspTransport({ command, args, cwd, env, initializationOptions, signal })
+				: null;
+		const proc =
+			sharedProc ??
+			ptree.spawn([command, ...args], {
+				cwd,
+				stdin: "pipe",
+				detached: process.platform !== "win32",
+				env: env ? { ...Bun.env, ...env } : undefined,
+			});
 
 		const projectLoad = createProjectLoad();
 		const client: LspClient = {
@@ -1720,7 +1733,6 @@ export async function getOrCreateClient(
 		proc.exited.then(() => {
 			if (clients.get(key) === client) clients.delete(key);
 			maybeStopIdleChecker();
-			if (clientLocks.get(key)?.token === lockToken) clientLocks.delete(key);
 			client.resolveProjectLoaded();
 			client.watchedFiles?.close();
 
@@ -1749,6 +1761,14 @@ export async function getOrCreateClient(
 		// in the process, so its reader's records name none of them.
 		logger.withoutContext(() => startMessageReader(client));
 
+		const defaultStartupMs = signal ? LSP_STARTUP_MAX_MS : DEFAULT_REQUEST_TIMEOUT_MS;
+		const startupMs = Math.min(initTimeoutMs ?? defaultStartupMs, LSP_STARTUP_MAX_MS);
+		const startup = new AbortController();
+		const startupTimer = setTimeout(
+			() => startup.abort(new LspRequestTimeoutError("initialize", startupMs)),
+			startupMs,
+		);
+		const startupSignal = signal ? AbortSignal.any([signal, startup.signal]) : startup.signal;
 		try {
 			// Send initialize request
 			const initResult = (await sendRequest(
@@ -1762,8 +1782,7 @@ export async function getOrCreateClient(
 					initializationOptions,
 					workspaceFolders: currentWorkspaceFolders(client),
 				},
-				signal,
-				initTimeoutMs,
+				startupSignal,
 			)) as { capabilities?: unknown };
 
 			if (!initResult) {
@@ -1773,12 +1792,12 @@ export async function getOrCreateClient(
 			client.serverCapabilities = initResult.capabilities as LspClient["serverCapabilities"];
 
 			// Finish the initialize handshake before publishing the client as ready.
-			await sendNotification(client, "initialized", {}, signal);
+			await sendNotification(client, "initialized", {}, startupSignal);
 			await sendNotification(
 				client,
 				"workspace/didChangeConfiguration",
 				{ settings: config.settings ?? {} },
-				signal,
+				startupSignal,
 			);
 
 			client.status = "ready";
@@ -1798,17 +1817,25 @@ export async function getOrCreateClient(
 			// Clean up on initialization failure
 			client.status = "error";
 			if (clients.get(key) === client) clients.delete(key);
-			proc.kill();
-			const message = err instanceof Error ? err.message : String(err);
-			// Negative-cache deterministic failures. Timeouts under a
-			// caller-shortened deadline (warmup/writethrough) and caller-signal
-			// aborts are transient — the server may simply be slow or the user may
-			// have cancelled, so a later call with a fresh deadline should retry.
-			if (!signal?.aborted && !(initTimeoutMs !== undefined && message.includes("timed out"))) {
+			// An uninitialized launcher has no LSP shutdown handshake. Kill the local
+			// process group immediately, or detach so the daemon kills its group.
+			if (proc instanceof ptree.ChildProcess) proc.kill(undefined, -1);
+			else proc.kill();
+			const cause = err instanceof Error ? err.message : String(err);
+			const message = `Failed to initialize LSP server ${command}: ${cause}`;
+			if (signal?.aborted) {
+				// Preserve explicit caller cancellation. Tool deadlines still need the command
+				// in their reported error, rather than the generic post-start request timeout.
+				if (!isTimeoutError(signal.reason)) throw err;
+				throw new ToolError(message);
+			}
+			// Short warmup/writethrough budgets don't prove the server is broken.
+			if (initTimeoutMs === undefined || !startup.signal.aborted || startupMs === LSP_STARTUP_MAX_MS) {
 				initFailures.set(key, { at: Date.now(), message });
 			}
-			throw err;
+			throw new Error(message, { cause: err });
 		} finally {
+			clearTimeout(startupTimer);
 			if (clientLocks.get(key)?.token === lockToken) clientLocks.delete(key);
 		}
 	})();
@@ -2296,8 +2323,7 @@ export async function notifySaved(client: LspClient, filePath: string, signal?: 
 }
 
 function isPathInsideWorkspace(filePath: string, workspace: string): boolean {
-	const relative = path.relative(workspace, path.resolve(filePath));
-	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+	return pathIsWithinLexical(workspace, path.resolve(filePath));
 }
 
 /** Budget for the one-way watched-files notification: a wedged server that
@@ -2789,7 +2815,8 @@ function sendRequestOnce(
 }
 
 /**
- * Send an LSP notification (no response expected).
+ * Send an LSP notification (no response expected) and count it as activity
+ * for the idle timeout.
  * `signal` bounds the underlying `sink.flush()` — without it a server that
  * stops draining stdin blocks every future write on the client's write queue.
  */
@@ -2799,14 +2826,21 @@ export async function sendNotification(
 	params: unknown,
 	signal?: AbortSignal,
 ): Promise<void> {
+	client.lastActivity = Date.now();
+	await writeNotification(client, method, params, signal);
+}
+
+/**
+ * Write an LSP notification without counting it as activity: for traffic omp
+ * relays rather than initiates, such as forwarded watched-file changes.
+ */
+function writeNotification(client: LspClient, method: string, params: unknown, signal?: AbortSignal): Promise<void> {
 	const notification: LspJsonRpcNotification = {
 		jsonrpc: "2.0",
 		method,
 		params,
 	};
-
-	client.lastActivity = Date.now();
-	await queueWriteMessage(client, notification, signal);
+	return queueWriteMessage(client, notification, signal);
 }
 
 /**

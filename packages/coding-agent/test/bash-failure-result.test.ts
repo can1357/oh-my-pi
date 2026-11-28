@@ -59,16 +59,16 @@ describe("BashTool execution results", () => {
 		});
 		const tool = new BashTool(makeSession());
 		const args = {
-			command: `printf 'Wall time: %.2f seconds\\n' ${wallTimeMs / 1000}`,
+			command: `printf '[took %.2fs]\\n' ${wallTimeMs / 1000}`,
 		};
 		const result = await tool.execute("call-timing-output", args);
-		const timingOutput = `Wall time: ${(wallTimeMs / 1000).toFixed(2)} seconds`;
+		const timingOutput = `[took ${(wallTimeMs / 1000).toFixed(2)}s]`;
 		const text = result.content.find(c => c.type === "text")?.text ?? "";
 		expect(result.details?.wallTimeMs).toBe(wallTimeMs);
-		expect(text.match(/Wall time: \d+\.\d{2} seconds/gu)).toHaveLength(noticeCount);
+		expect(text.match(/\[took \d+\.\d{2}s\]/gu)).toHaveLength(noticeCount);
 		for (const expanded of [false, true]) {
 			const rendered = toolText({ name: "bash", args, result, expanded });
-			expect(rendered.match(/Wall time: \d+\.\d{2} seconds/gu)).toEqual([timingOutput]);
+			expect(rendered.match(/\[took \d+\.\d{2}s\]/gu)).toEqual([timingOutput]);
 		}
 	});
 
@@ -85,7 +85,7 @@ describe("BashTool execution results", () => {
 
 		// The LLM-facing text still states the exit code verbatim.
 		const text = result.content.find(c => c.type === "text")?.text ?? "";
-		expect(text).toContain("Command exited with code 3");
+		expect(text).toContain("[exit code 3]");
 	});
 
 	it("says a command that printed nothing exited cleanly, so an empty result reads as success", async () => {
@@ -113,7 +113,7 @@ describe("BashTool execution results", () => {
 		expect(result.isError).toBe(true);
 		expect(result.details?.timedOut).toBe(true);
 		const text = result.content.find(c => c.type === "text")?.text ?? "";
-		expect(text.match(/\[Command timed out after 1 seconds\]/gu)).toHaveLength(1);
+		expect(text.match(/\[timed out after 1s\]/gu)).toHaveLength(1);
 	});
 
 	it("preserves the executor cancellation notice without classifying it as a timeout", async () => {
@@ -132,8 +132,8 @@ describe("BashTool execution results", () => {
 		const error = await execution.catch(error => error);
 		expect(error).toBeInstanceOf(Error);
 		const message = (error as Error).message;
-		expect(message.match(/\[Command cancelled\]/gu)).toHaveLength(1);
-		expect(message).not.toContain("Command aborted");
+		expect(message.match(/\[cancelled\]/gu)).toHaveLength(1);
+		expect(message).not.toContain("[aborted]");
 	});
 
 	it("returns a success result with no exit-code detail for a zero exit", async () => {
@@ -144,7 +144,7 @@ describe("BashTool execution results", () => {
 		expect(result.details?.exitCode).toBeUndefined();
 		const text = result.content.find(c => c.type === "text")?.text ?? "";
 		expect(text).toContain("hi");
-		expect(text).not.toContain("Command exited with code");
+		expect(text).not.toContain("[exit code");
 	});
 
 	it("exposes the session identity to the command over a stale value in its shell", async () => {
@@ -158,10 +158,12 @@ describe("BashTool execution results", () => {
 			command: "export PI_SESSION_FILE=/stale/parent.jsonl",
 		});
 		const result = await tool.execute("call-env", {
-			command: `printf '%s|%s|' "$PI_SESSION_ID" "$PI_SESSION_FILE"`,
+			command: `printf '%s|%s|%s|' "$PI_SESSION_ID" "$PI_SESSION_FILE" "$OMP_BASH_SESSION"`,
 		});
-		const [id, file] = (result.content.find(c => c.type === "text")?.text ?? "").split("|");
+		const [id, file, tag] = (result.content.find(c => c.type === "text")?.text ?? "").split("|");
 		expect(id).toBe("session-fg");
+		// The leftover-process membership tag (exec/session-processes.ts), scoped to this process.
+		expect(tag).toBe(`session-fg@${process.pid}`);
 		// Empty, not the stale path: the session is not persisted.
 		expect(file).toBe("");
 	});
@@ -305,7 +307,7 @@ describe("BashTool execution results", () => {
 		]) {
 			const result = await tool.execute(`call-pipeline-${scenario.expected[0]}`, { command: scenario.command });
 			const text = result.content.find(c => c.type === "text")?.text ?? "";
-			const stdout = text.replace(/\n\nWall time: \d+\.\d{2} seconds$/, "").trimEnd();
+			const stdout = text.replace(/\n\n\[took \d+\.\d{2}s\]$/, "").trimEnd();
 
 			expect(result.isError).toBeUndefined();
 			expect(stdout).toBe(scenario.expected);
@@ -335,24 +337,6 @@ describe("BashTool skill:// working directory", () => {
 			},
 		};
 	}
-
-	it("runs a command with a bare skill URI as cwd, resolving relative paths inside it", async () => {
-		const { dir, skill } = await skillFixture();
-		try {
-			const tool = new BashTool({ ...makeSession(), skills: [skill] });
-			const result = await tool.execute("call-skill-cwd", {
-				command: "pwd; cat SKILL.md",
-				cwd: "skill://docs",
-			});
-			const text = result.content.find(c => c.type === "text")?.text ?? "";
-
-			expect(result.isError).toBeUndefined();
-			expect(text).toContain("skill://docs");
-			expect(text).toContain("body");
-		} finally {
-			await fs.rm(dir, { recursive: true, force: true });
-		}
-	});
 
 	it("runs a leading cd into a bare skill URI", async () => {
 		const { dir, skill } = await skillFixture();
@@ -432,8 +416,7 @@ describe("BashTool skill:// containment failures", () => {
 
 			await expect(
 				tool.execute("call-skill-leak-cwd", {
-					command: "pwd",
-					cwd: "skill://docs",
+					command: "cd skill://docs && pwd",
 				}),
 			).rejects.toThrow("resolves outside the plugin root");
 		} finally {

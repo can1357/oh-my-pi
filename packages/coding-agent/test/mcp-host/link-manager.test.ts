@@ -160,6 +160,99 @@ describe("MCPManager on a scripted host", () => {
 		expect(manager.getTools()).toHaveLength(1);
 	});
 
+	/** A manager whose config discovery finds `config` as the only server. */
+	function discovering(config: MCPHttpServerConfig): MCPManager {
+		return new MCPManager(
+			workDir,
+			async () => ({ configs: { [SERVER]: config }, sources: {}, exaApiKeys: [] }),
+			undefined,
+			host,
+		);
+	}
+
+	it("names a startup server's tools while its first mount runs, never a later reconnect's", async () => {
+		manager = discovering({ type: "http", url: URL });
+		const seen: boolean[] = [];
+		manager.setOnToolsChanged(async tools => {
+			for (const tool of tools) seen.push(manager.isStartupMount(tool.name));
+		});
+		await manager.discoverAndConnect({ startup: true });
+		await manager.waitForStartup(0);
+
+		// The first mount ran inside the startup; once it is done, the server is past it.
+		expect(seen.length).toBeGreaterThan(0);
+		expect(seen.every(Boolean)).toBe(true);
+		const [tool] = manager.getTools();
+		expect(manager.isStartupMount(tool!.name)).toBe(false);
+
+		seen.length = 0;
+		expect(await manager.reconnectServer(SERVER)).not.toBeNull();
+		await settled();
+		expect(seen.length).toBeGreaterThan(0);
+		expect(seen.some(Boolean)).toBe(false);
+	});
+
+	it("keeps a timed-out startup connect's retry in the startup until the refresh it starts is done", async () => {
+		// The first discovery never answers, so the startup connect times out and retries; the retry is answered.
+		const answered = answers["server/discover"];
+		let discovers = 0;
+		answers["server/discover"] = (message, tunnel) => (++discovers === 1 ? undefined : answered?.(message, tunnel));
+		// A real 50 ms connect timeout: the timeout is what starts the retry under test.
+		manager = discovering({ type: "http", url: URL, timeout: 50 });
+		const refreshing = Promise.withResolvers<string>();
+		const release = Promise.withResolvers<void>();
+		manager.setOnToolsChanged(async tools => {
+			const [tool] = tools;
+			if (!tool) return;
+			refreshing.resolve(tool.name);
+			await release.promise;
+		});
+		await manager.discoverAndConnect({ startup: true });
+
+		// The retry mounted the tools and settled; the owner's refresh it fired is still running: still the startup.
+		const name = await refreshing.promise;
+		await settled();
+		expect(manager.isStartupMount(name)).toBe(true);
+		release.resolve();
+		await settled();
+		expect(manager.isStartupMount(name)).toBe(false);
+	});
+
+	it("does not claim a server an earlier connect already brought up for the startup", async () => {
+		// `/extensions` enabled the server before the deferred startup discovery found it.
+		manager = discovering({ type: "http", url: URL });
+		await manager.connectServers({ [SERVER]: { type: "http", url: URL } }, {});
+		await manager.waitForStartup(0);
+		await manager.discoverAndConnect({ startup: true });
+		await manager.waitForStartup(0);
+
+		const [tool] = manager.getTools();
+		expect(manager.isStartupMount(tool!.name)).toBe(false);
+	});
+
+	it("still names a startup tool the server removed while its first mount runs", async () => {
+		manager = discovering({ type: "http", url: URL });
+		const mounted = Promise.withResolvers<string>();
+		const release = Promise.withResolvers<void>();
+		manager.setOnToolsChanged(async tools => {
+			const [tool] = tools;
+			if (!tool) return;
+			mounted.resolve(tool.name);
+			await release.promise;
+		});
+		await manager.discoverAndConnect({ startup: true });
+		const name = await mounted.promise;
+
+		// The server drops the tool before the first mount's refresh is done.
+		answers["tools/list"] = () => ({ result: { tools: [] } });
+		const refresh = manager.refreshServerTools(SERVER);
+		await settled();
+		expect(manager.getTools()).toHaveLength(0);
+		expect(manager.isStartupMount(name)).toBe(true);
+		release.resolve();
+		await refresh;
+	});
+
 	it("reports a reauth reconnect by its outcome, not by the link being attached", async () => {
 		const config: MCPHttpServerConfig = { type: "http", url: URL };
 		await connect(config);

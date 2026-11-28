@@ -36,18 +36,13 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AssistantMessageEventStream, type EventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { context, SpanStatusCode, trace } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
-import {
-	BasicTracerProvider,
-	InMemorySpanExporter,
-	type ReadableSpan,
-	SimpleSpanProcessor,
-} from "@opentelemetry/sdk-trace-base";
+import { InMemorySpanExporter, type ReadableSpan, SimpleSpanProcessor, TracerProvider } from "@opentelemetry/sdk-trace";
 import { createUserMessage } from "./helpers";
 
 const MOCK_IDENT = { id: "mock-model", provider: "mock-provider" } as const;
 
 const exporter = new InMemorySpanExporter();
-let provider: BasicTracerProvider;
+let provider: TracerProvider;
 let contextManager: AsyncLocalStorageContextManager;
 
 beforeAll(() => {
@@ -55,7 +50,7 @@ beforeAll(() => {
 	context.disable();
 	contextManager = new AsyncLocalStorageContextManager().enable();
 	context.setGlobalContextManager(contextManager);
-	provider = new BasicTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] });
+	provider = new TracerProvider({ spanProcessors: [new SimpleSpanProcessor({ exporter })] });
 	trace.setGlobalTracerProvider(provider);
 });
 
@@ -211,6 +206,68 @@ describe("agent-loop OTEL instrumentation", () => {
 		const openAiChat = findSpan(exporter.getFinishedSpans(), "chat gpt-mock");
 		expect(openAiChat?.attributes[OpenAIAttr.RequestServiceTier]).toBe("priority");
 		expect(openAiChat?.attributes["gen_ai.request.service_tier"]).toBeUndefined();
+	});
+
+	it("reports the model a router served as gen_ai.response.model", async () => {
+		const routed = createMockModel({
+			id: "group/fast",
+			provider: "magpie",
+			responses: [{ content: ["ok"], upstreamModel: "kimi-k3" }, { content: ["ok"] }],
+		});
+		for (let turn = 0; turn < 2; turn++) {
+			await runAndDrain(
+				agentLoop(
+					[createUserMessage("hi")],
+					{ systemPrompt: [], messages: [], tools: [] },
+					{ model: routed.model, convertToLlm: identityConverter, telemetry: {} },
+					undefined,
+					routed.stream,
+				),
+			);
+		}
+
+		const [served, unreported] = spansByName(exporter.getFinishedSpans(), "chat group/fast");
+		expect(served?.attributes[GenAIAttr.RequestModel]).toBe("group/fast");
+		expect(served?.attributes[GenAIAttr.ResponseModel]).toBe("kimi-k3");
+		expect(unreported?.attributes[GenAIAttr.ResponseModel]).toBe("group/fast");
+	});
+
+	it("reports a promoted fallback model over a declined primary's upstream model", async () => {
+		const primary = createMockModel({
+			id: "claude-primary",
+			provider: "anthropic",
+			responses: [{ content: ["ok"] }],
+		});
+		// A server-side fallback promotes `model` to the fallback that served the turn, while
+		// `upstreamModel` still holds the id the declined primary's signed thinking named.
+		const fallbackStream: StreamFn = (model, ctx, options) => {
+			const out = new AssistantMessageEventStream();
+			void (async () => {
+				for await (const event of primary.stream(model, ctx, options)) {
+					if (event.type === "done") {
+						out.push({
+							...event,
+							message: { ...event.message, model: "claude-fallback", upstreamModel: "claude-primary-0915" },
+						});
+					} else {
+						out.push(event);
+					}
+				}
+			})();
+			return out;
+		};
+		await runAndDrain(
+			agentLoop(
+				[createUserMessage("hi")],
+				{ systemPrompt: [], messages: [], tools: [] },
+				{ model: primary.model, convertToLlm: identityConverter, telemetry: {} },
+				undefined,
+				fallbackStream,
+			),
+		);
+
+		const chat = findSpan(exporter.getFinishedSpans(), "chat claude-primary");
+		expect(chat?.attributes[GenAIAttr.ResponseModel]).toBe("claude-fallback");
 	});
 
 	it("emits execute_tool spans parented to invoke_agent (not chat) per semconv", async () => {

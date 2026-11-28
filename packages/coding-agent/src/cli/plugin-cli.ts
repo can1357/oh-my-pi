@@ -55,90 +55,6 @@ export interface PluginCommandArgs {
 	};
 }
 
-// =============================================================================
-// Argument Parser
-// =============================================================================
-
-const VALID_ACTIONS: PluginAction[] = [
-	"install",
-	"uninstall",
-	"list",
-	"link",
-	"doctor",
-	"features",
-	"config",
-	"enable",
-	"disable",
-	"marketplace",
-	"discover",
-	"upgrade",
-];
-
-/**
- * Parse plugin subcommand arguments.
- * Returns undefined if not a plugin command.
- */
-export function parsePluginArgs(args: string[]): PluginCommandArgs | undefined {
-	if (args.length === 0 || args[0] !== "plugin") {
-		return undefined;
-	}
-
-	if (args.length < 2) {
-		return { action: "list", args: [], flags: {} };
-	}
-
-	const action = args[1];
-	if (!VALID_ACTIONS.includes(action as PluginAction)) {
-		console.error(chalk.red(`Unknown plugin command: ${action}`));
-		console.error(`Valid commands: ${VALID_ACTIONS.join(", ")}`);
-		process.exit(1);
-	}
-
-	const result: PluginCommandArgs = {
-		action: action as PluginAction,
-		args: [],
-		flags: {},
-	};
-
-	// Parse remaining arguments
-	for (let i = 2; i < args.length; i++) {
-		const arg = args[i];
-		if (arg === "--json") {
-			result.flags.json = true;
-		} else if (arg === "--fix") {
-			result.flags.fix = true;
-		} else if (arg === "--force") {
-			result.flags.force = true;
-		} else if (arg === "--dry-run") {
-			result.flags.dryRun = true;
-		} else if (arg === "-l" || arg === "--local") {
-			result.flags.local = true;
-		} else if (arg === "--enable" && i + 1 < args.length) {
-			result.flags.enable = args[++i];
-		} else if (arg === "--disable" && i + 1 < args.length) {
-			result.flags.disable = args[++i];
-		} else if (arg === "--set" && i + 1 < args.length) {
-			result.flags.set = args[++i];
-		} else if (arg === "--scope" && i + 1 < args.length && !args[i + 1].startsWith("-")) {
-			const s = args[++i];
-			if (s === "user" || s === "project") {
-				result.flags.scope = s;
-			} else {
-				console.error(chalk.red(`Invalid --scope value: "${s}". Must be "user" or "project".`));
-				process.exit(1);
-			}
-		} else if (arg === "--scope") {
-			// --scope with no value following
-			console.error(chalk.red(`--scope requires a value: "user" or "project".`));
-			process.exit(1);
-		} else if (!arg.startsWith("-")) {
-			result.args.push(arg);
-		}
-	}
-
-	return result;
-}
-
 import { classifyInstallTarget, handleMarketplaceInstall } from "./classify-install-target";
 
 export { classifyInstallTarget } from "./classify-install-target";
@@ -494,7 +410,7 @@ function printLinkPreview(pluginPath: string, json?: boolean): void {
 async function handleInstall(
 	manager: PluginManager,
 	packages: string[],
-	flags: { json?: boolean; force?: boolean; dryRun?: boolean; scope?: "user" | "project" },
+	flags: { json?: boolean; force?: boolean; dryRun?: boolean; local?: boolean; scope?: "user" | "project" },
 ): Promise<void> {
 	if (packages.length === 0) {
 		console.error(chalk.red(`Usage: ${APP_NAME} plugin install <source>[features] ...`));
@@ -510,6 +426,30 @@ async function handleInstall(
 	// Build known marketplace set for classification
 	const mktMgr = await makeMarketplaceManager();
 	const knownMarketplaces = new Set((await mktMgr.listMarketplaces()).map(m => m.name));
+
+	// Validate every spec before mutating anything: npm and local-path installs
+	// always land in the user plugin registry, so a project destination cannot be honored.
+	if (flags.local) {
+		console.error(
+			chalk.red(
+				`${currentTheme().symbols.symbol("status.error")} --local is not supported for install. Use --scope project with a marketplace install (name@marketplace).`,
+			),
+		);
+		process.exit(1);
+	}
+	if (flags.scope === "project") {
+		const unsupported = packages.filter(
+			spec => classifyInstallTarget(spec, knownMarketplaces).type !== "marketplace",
+		);
+		if (unsupported.length > 0) {
+			console.error(
+				chalk.red(
+					`${currentTheme().symbols.symbol("status.error")} --scope project is only supported for marketplace installs (name@marketplace). Unsupported: ${unsupported.join(", ")}`,
+				),
+			);
+			process.exit(1);
+		}
+	}
 
 	for (const spec of packages) {
 		const target = classifyInstallTarget(spec, knownMarketplaces);
@@ -558,13 +498,6 @@ async function handleInstall(
 			// Local paths route to link(): symlink the directory into the plugins
 			// node_modules tree so source edits show up without a reinstall. Matches
 			// `omp plugin link <path>` so users can use either verb interchangeably.
-			if (flags.scope) {
-				console.error(
-					chalk.yellow(
-						`Warning: --scope is only supported for marketplace installs (name@marketplace). Ignoring for ${spec}.`,
-					),
-				);
-			}
 			if (flags.force) {
 				console.error(
 					chalk.yellow(
@@ -595,15 +528,6 @@ async function handleInstall(
 				process.exit(1);
 			}
 			continue;
-		}
-
-		// --scope only applies to marketplace installs; warn when it would be silently no-op'd for npm.
-		if (flags.scope) {
-			console.error(
-				chalk.yellow(
-					`Warning: --scope is only supported for marketplace installs (name@marketplace). Ignoring for ${spec}.`,
-				),
-			);
 		}
 
 		// npm path
@@ -1204,6 +1128,7 @@ async function handleSetEnabled(
 				console.log(JSON.stringify({ [jsonKey]: name }));
 			} else {
 				console.log(chalk.green(`${currentTheme().symbols.symbol("status.success")} ${pastTense} ${name}`));
+				if (!enabled) console.log(chalk.dim(`  Running sessions keep ${name} until they restart.`));
 			}
 		} catch (err) {
 			console.error(
@@ -1212,63 +1137,4 @@ async function handleSetEnabled(
 			process.exit(1);
 		}
 	}
-}
-
-// =============================================================================
-// Help
-// =============================================================================
-
-export function printPluginHelp(): void {
-	console.log(`${chalk.bold(`${APP_NAME} plugin`)} - Plugin lifecycle management
-
-${chalk.bold("Commands:")}
-  install <source>[features]     Install plugins from npm, GitHub, or git URL
-  uninstall <pkg>                Remove plugins
-  list                           Show installed plugins
-  link <path>                    Link local plugin for development
-  doctor                         Check plugin health
-  features <pkg>                 View/modify enabled features
-  config <cmd> <pkg> [key] [val] Manage plugin settings
-  enable <pkg>                   Enable a disabled plugin
-  disable <pkg>                  Disable plugin without uninstalling
-  marketplace <cmd>            Manage marketplace sources (add, remove, update, list)
-  discover [marketplace]        Browse available marketplace plugins
-
-${chalk.bold("Feature Syntax:")}
-  pkg                Install with default features
-  pkg[feat1,feat2]   Install with specific features
-  pkg[*]             Install with all features
-  pkg[]              Install with no optional features
-
-${chalk.bold("Sources:")}
-  pkg, pkg@1.2.3                  npm package (optionally pinned)
-  github:user/repo[#ref]          GitHub shorthand (also gitlab:, bitbucket:, codeberg:, sourcehut:)
-  https://github.com/user/repo    Full git URL (https, ssh, or git protocol)
-  name@marketplace                Marketplace plugin (see marketplace command)
-  ./path, ../path, /abs, ~/path   Local plugin directory (symlinked, same as plugin link)
-
-${chalk.bold("Config Subcommands:")}
-  config list <pkg>              List all settings
-  config get <pkg> <key>         Get a setting value
-  config set <pkg> <key> <val>   Set a setting value
-  config delete <pkg> <key>      Delete a setting
-  config validate                Validate all plugin settings
-
-${chalk.bold("Options:")}
-  --json           Output as JSON
-  --fix            Attempt automatic fixes (doctor)
-  --force          Overwrite without prompting (install)
-  --scope <scope>  Install scope: user (default) or project (install name@marketplace)
-  --dry-run        Preview changes without applying (install, uninstall, link, upgrade of marketplace plugins)
-  -l, --local      Use project-local overrides
-
-${chalk.bold("Examples:")}
-  ${APP_NAME} plugin install @oh-my-pi/exa[search]
-  ${APP_NAME} plugin list --json
-  ${APP_NAME} plugin features my-plugin --enable search,web
-  ${APP_NAME} plugin config set my-plugin apiKey sk-xxx
-  ${APP_NAME} plugin doctor --fix
-  ${APP_NAME} plugin install --scope project name@marketplace
-  ${APP_NAME} plugin install github:user/repo#v1.0
-`);
 }

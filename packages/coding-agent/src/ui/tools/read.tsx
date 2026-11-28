@@ -12,7 +12,7 @@
  * Terminal look: `read` (`src/ui/styles/tools/read.ts`), fed by {@link ReadTerm}.
  */
 import { formatBytes, sanitizeText } from "@oh-my-pi/pi-utils";
-import type { JSXNode } from "@oh-my-pi/pi-tui";
+import { type JSXNode, nativeSupports } from "@oh-my-pi/pi-tui";
 import { registerBlob } from "@oh-my-pi/pi-tui/native/blobs";
 import { languageFromPath } from "@oh-my-pi/pi-tui/text/lang";
 import { splitUrlScheme } from "../../internal-urls/url-scheme";
@@ -27,6 +27,8 @@ import { shortenPath } from "../../utils/render-utils";
 import type { ToolActivity, ToolHead, ToolPresenter, ToolResult, ToolView, ToolViewState } from "./contract";
 import { resultText } from "./default";
 import { fileHref, pendingLinkPath } from "./file-common";
+import { READ_IMAGE_ROLE } from "../transcript/image-links";
+import { InlineMedia, inlineImageTerm } from "../transcript/messages/image";
 import { imageSize } from "../transcript/tool-block";
 import { isReadableUrlPath, readUrlPresenter } from "./read-url";
 import { registerToolPresenter } from "./registry";
@@ -254,7 +256,7 @@ function readWarnings(details: ReadToolDetails | undefined): { text: string; col
 	const warnings: { text: string; color: string }[] = [];
 	if (details?.resolvedPath)
 		warnings.push({
-			text: `⟦Resolved path: ${shortenPath(details.resolvedPath)}⟧`,
+			text: `Resolved path: ${shortenPath(details.resolvedPath)}`,
 			color: "dim",
 		});
 	const truncation = details?.meta?.truncation;
@@ -263,11 +265,11 @@ function readWarnings(details: ReadToolDetails | undefined): { text: string; col
 		if (fallback?.firstLineExceedsLimit) {
 			let warning = `First line exceeds ${formatBytes(fallback.outputBytes ?? fallback.totalBytes)} limit`;
 			if (truncation.artifactId) warning += `. ${formatFullOutputReference(truncation.artifactId)}`;
-			warnings.push({ text: `⟦${warning}⟧`, color: "warning" });
+			warnings.push({ text: warning, color: "warning" });
 		} else {
 			const parts = [formatTruncationMetaNotice(truncation, details?.meta?.source)];
 			if (details?.meta?.artifactError) parts.push(formatArtifactErrorNotice(details.meta.artifactError));
-			warnings.push({ text: `⟦${parts.join(". ")}⟧`, color: "warning" });
+			warnings.push({ text: parts.join(". "), color: "warning" });
 		}
 	}
 	return warnings;
@@ -282,6 +284,22 @@ function readActivity(args: ReadArgs): ToolActivity {
 			detail: routed.target || routed.scheme.rootDetail,
 		};
 	return { label: "Read", detail: sanitizeText(shortenPath(rawPath)) };
+}
+
+/** The `image` node of a read image (decoded only when no native media node shows it). */
+function readPicture(image: { readonly data: string; readonly mimeType: string }, alt: string): JSXNode {
+	const bytes = Buffer.from(image.data, "base64");
+	const size = imageSize(bytes);
+	return (
+		<image
+			blob={registerBlob(bytes, image.mimeType)}
+			alt={alt}
+			w={size?.w}
+			h={size?.h}
+			role={READ_IMAGE_ROLE}
+			term={inlineImageTerm()}
+		/>
+	);
 }
 
 function readResult(result: ToolResult<ReadToolDetails>, state: ToolViewState, args?: ReadArgs): ToolView | undefined {
@@ -338,24 +356,19 @@ function readResult(result: ToolResult<ReadToolDetails>, state: ToolViewState, a
 	const content = details?.displayContent?.text ?? stripOutputNotice(resultText(result), details?.meta);
 	const split = splitTarget(rawPath);
 	const warnings = readWarnings(details);
+	const mediaPath = details?.mediaPath;
+	const media = mediaPath && nativeSupports("media") ? <InlineMedia nodeKey="media" path={mediaPath} /> : undefined;
 	const image = result.content.find(
 		block => block.type === "image" && typeof (block as { data?: unknown }).data === "string",
 	) as { data: string; mimeType: string } | undefined;
 	if (image) {
-		const size = imageSize(image.data);
 		const detail = content.trim();
 		return {
 			head,
 			...(suffix ? { tone: "warning" as const } : {}),
 			inline: true,
 			body: [
-				<image
-					blob={registerBlob(Buffer.from(image.data, "base64"), image.mimeType)}
-					alt={shortenPath(suffix?.to ?? split.path) || "image"}
-					w={size?.w}
-					h={size?.h}
-					role="omp.tool.read.image"
-				/>,
+				media ?? readPicture(image, shortenPath(suffix?.to ?? split.path) || "image"),
 				detail.length > 0 && <ansi text={detail} />,
 				foot,
 			],
@@ -377,6 +390,7 @@ function readResult(result: ToolResult<ReadToolDetails>, state: ToolViewState, a
 		head,
 		inline: true,
 		body: [
+			media,
 			markdown ? (
 				<md text={content} />
 			) : (

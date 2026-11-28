@@ -555,6 +555,10 @@ function fakeSampler() {
 			starts++;
 		},
 		stop() {},
+		discard() {
+			drains++;
+			pending = [];
+		},
 		drain() {
 			drains++;
 			const out = pending;
@@ -693,6 +697,28 @@ function blockLoopInSamplerProbe(ms: number): number {
 }
 
 describe("LoopWatchdog with the JSC sampler", () => {
+	test("keeps the sampling interval when the last watchdog pauses the profiler", async () => {
+		const samplerModule = Bun.resolveSync("@oh-my-pi/pi-tui/diag/loop-sampler", import.meta.dir);
+		const script = [
+			'import { spyOn } from "bun:test";',
+			'import * as jsc from "bun:jsc";',
+			`import { createJscLoopSampler } from ${JSON.stringify(samplerModule)};`,
+			'const start = spyOn(jsc, "startSamplingProfiler");',
+			'const pause = spyOn(jsc, "profile");',
+			"const first = createJscLoopSampler();",
+			"const second = createJscLoopSampler();",
+			"first.start(); second.start(); first.stop(); second.stop();",
+			"console.log(JSON.stringify([start.mock.calls, pause.mock.calls.map(call => call[1])]));",
+		].join("\n");
+		const proc = Bun.spawnSync([process.execPath, "--no-env-file", "--no-install", "--eval", script], {
+			env: { ...process.env, PI_LOOP_SAMPLER: "1" },
+		});
+		expect(proc.exitCode, proc.stderr.toString()).toBe(0);
+		const [starts, pauses] = JSON.parse(proc.stdout.toString());
+		expect(starts).toHaveLength(1);
+		expect(pauses).toEqual([starts[0][1]]);
+	});
+
 	test.skipIf(createJscLoopSampler() === null)("names the function that blocked the loop", () => {
 		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
 		let scheduled: (() => void) | undefined;

@@ -1,0 +1,1 @@
+mr:// bare listing takes ?state=&limit=&author=&reviewer=&label=&source_branch=. Single MR takes ?comments=0&unresolved=1. MR diff: mr://<iid>/diff (files), /diff/<i>, /diff/all.

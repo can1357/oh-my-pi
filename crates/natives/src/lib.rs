@@ -49,7 +49,6 @@ pub mod held_files;
 pub mod highlight;
 /// HDiffPatch single-stream binary patch application.
 pub mod hpatch;
-pub mod html;
 /// Local IPC over Unix domain sockets / Windows named pipes.
 pub mod ipc;
 pub mod js;
@@ -68,6 +67,7 @@ pub mod spelling;
 pub mod svg;
 pub mod utok;
 pub mod vcs;
+pub mod web;
 pub use omp_ast::language;
 
 pub mod power;

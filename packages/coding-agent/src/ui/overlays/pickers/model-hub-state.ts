@@ -21,17 +21,19 @@ import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { MODEL_KINDS, type ModelKind, modelKind } from "@oh-my-pi/pi-catalog/types";
 import { batch, type KeyEvent, signal } from "@oh-my-pi/pi-tui";
+import { errorMessage } from "@oh-my-pi/pi-utils";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { formatModelSelectorValue, parseModelString, splitUpstreamRouting } from "../../../config/model-selector";
+import { providerAccessOff, providerManageUrl, providerRequiredScope } from "@oh-my-pi/pi-catalog/compat/auth";
+import { connectedProviderName } from "../../../modes/view-model/chrome/format";
 import {
-	buildBrowserItems,
+	buildSessionModelScope,
+	ModelSearchIndex,
 	type ModelBrowserItem,
 	type ModelRoleLookup,
 	type ResolvedModelRoleValue,
 	type RoleAssignments,
-	resolveRoleAssignments,
 	scopedRolePool,
-	sortModelItems,
 } from "../../../modes/view-model/overlays/model-browser";
 import type {
 	ModelHubCallbacks,
@@ -42,9 +44,8 @@ import type {
 	ScopedModelItem,
 } from "../../../modes/view-model/overlays/model-hub";
 import { AUTO_THINKING, getConfiguredThinkingLevelMetadata } from "../../../thinking/levels";
-import { fuzzyRank } from "../../../utils/fuzzy";
+import { END_SLICE, runSlicedWork, type SlicedWork } from "../../../utils/sliced-work";
 import type { ConfiguredThinkingLevel } from "../../../utils/render-utils";
-import { modelSearchText } from "../../../modes/view-model/overlays/model-browser";
 import { hubGeometry } from "../../styles/pickers/hub-frame";
 import { editLine, type LineState } from "../settings/line-edit";
 import { glyph, ModelBrowserState, thinkingGlyph } from "./model-browser-state";
@@ -203,10 +204,6 @@ function printable(key: KeyEvent): string | undefined {
 	return text !== undefined && text !== "" && !/[\x00-\x1f\x7f]/.test(text) ? text : undefined;
 }
 
-function errorText(cause: unknown): string {
-	return cause instanceof Error ? cause.message : String(cause);
-}
-
 /** The hub state. */
 export class ModelHubState {
 	readonly source: ModelHubSource;
@@ -219,6 +216,7 @@ export class ModelHubState {
 
 	#scopedModels: ReadonlyArray<ScopedModelItem>;
 	#roles: RoleAssignments = {};
+	readonly #searchIndex = new ModelSearchIndex();
 	#availableItems: ModelBrowserItem[] = [];
 	#recentItems: ModelBrowserItem[] = [];
 	#recentSelectors: ReadonlySet<string> = new Set();
@@ -258,7 +256,7 @@ export class ModelHubState {
 	#scheduledRefreshes = new Map<string, Timer>();
 	#pendingCredentialRefreshes = new Set<string>();
 	#currentSelector: string | undefined;
-	/** The opening online refresh is in flight (an empty scope shows as loading). */
+	/** The opening freshness check is in flight (an empty scope shows as loading). */
 	#catalogRefreshing = false;
 
 	constructor(
@@ -274,7 +272,10 @@ export class ModelHubState {
 		this.#scopedModels = scopedModels;
 		this.#currentSelector = options.currentSelector;
 		this.#rows = options.terminalRows ?? (() => 40);
-		this.browser = new ModelBrowserState(source, { emptyText: () => this.emptyStateMessage() });
+		this.browser = new ModelBrowserState(source, {
+			emptyText: () => this.emptyStateMessage(),
+			searchIndex: this.#searchIndex,
+		});
 		this.browser.onActivate = item => this.#activateItem(item);
 		this.browser.onCancel = () => this.callbacks.onCancel();
 		this.browser.onQueryChange = query => this.#onQueryChanged(query);
@@ -289,14 +290,16 @@ export class ModelHubState {
 			initial && this.#entries.some(entry => entry.providerId === initial) ? `provider:${initial}` : "all",
 		);
 
-		// Online discovery only (no credential helpers); a --models scope does not depend on it.
+		// An explicit --models scope does not depend on catalog freshness.
 		if (this.#scopedModels.length === 0) {
 			this.#catalogRefreshing = true;
 			this.registry
-				.refresh("online")
-				.then(() => this.#afterRegistryRefresh())
+				.refreshIfStale()
+				.then(changed => {
+					if (changed) return this.#afterRegistryRefresh();
+				})
 				.catch(error => {
-					this.#configError = errorText(error);
+					this.#configError = errorMessage(error);
 				})
 				.finally(() => {
 					this.#catalogRefreshing = false;
@@ -585,6 +588,24 @@ export class ModelHubState {
 		}
 	}
 
+	/**
+	 * Whether `providerId` is signed in with its access off: every stored login
+	 * lacks the provider's `required-scope` (declined, or turned off at the host).
+	 */
+	accessOff(providerId: string): boolean {
+		if (providerRequiredScope(providerId) === undefined) return false;
+		const scopes = this.registry.authStorage.credentials
+			.list(providerId)
+			.flatMap(({ credential }) => (credential.type === "oauth" ? [credential.scope] : []));
+		return scopes.length > 0 && scopes.every(scope => providerAccessOff(providerId, scope));
+	}
+
+	/** The signed-in provider pane's `manage-url`, where the user turns its access on or off at the host. */
+	manageUrl(entry: SidebarEntry = this.activeEntry()): string | undefined {
+		if (entry.kind !== "provider" || entry.locked || !entry.providerId) return undefined;
+		return providerManageUrl(entry.providerId);
+	}
+
 	/** How a signed-out provider signs in. */
 	lockedMessage(entry: SidebarEntry): string {
 		const envVars = entry.providerId ? (providerEntry(entry.providerId)?.envVars ?? []) : [];
@@ -640,38 +661,20 @@ export class ModelHubState {
 	#sync(): void {
 		const anchorIndex = this.#entries.findIndex(entry => entry.id === this.#activeEntryId);
 		const anchor = { id: this.#activeEntryId, index: anchorIndex, offset: anchorIndex - this.#sidebarScroll };
-		let allModels: ReadonlyArray<Model>;
-		let availableModels: ReadonlyArray<Model>;
-		if (this.scoped) {
-			this.#configError = undefined;
-			try {
-				allModels = scopedRolePool(
-					this.#scopedModels.map(entry => entry.model),
-					this.registry,
-				);
-			} catch (error) {
-				this.#configError = errorText(error);
-				allModels = this.#scopedModels.map(entry => entry.model);
-			}
-			availableModels = allModels;
-		} else {
-			const loadError = this.registry.getError();
-			this.#configError = loadError ? String(loadError) : undefined;
-			allModels = this.registry.getAll("all");
-			try {
-				availableModels = this.registry.getAvailable("all");
-			} catch (error) {
-				this.#configError = errorText(error);
-				availableModels = [];
-			}
-		}
-		const rolePool = this.scoped ? availableModels : this.registry.getAll("all");
-		this.#roles = resolveRoleAssignments(this.source, rolePool, availableModels);
+		const scope = buildSessionModelScope(
+			this.source,
+			this.registry,
+			this.#scopedModels.map(entry => entry.model),
+		);
+		this.#configError = scope.error;
+		this.#roles = scope.roles;
 		this.#buildRolesRows();
 
-		const mruOrder = this.source.mruOrder;
-		this.#availableItems = buildBrowserItems(availableModels);
-		sortModelItems(this.#availableItems, { roles: this.#roles, mruOrder });
+		const { mruOrder } = scope;
+		if (this.#availableItems !== scope.availableItems) {
+			this.#availableItems = scope.availableItems;
+			void runSlicedWork(this.#warmSearch(this.#availableItems));
+		}
 		this.browser.setRoles(this.#roles);
 		this.browser.setMruOrder(mruOrder);
 		this.browser.setPerfStats(this.source.modelPerf);
@@ -683,7 +686,7 @@ export class ModelHubState {
 			if (this.#recentItems.length >= RECENT_LIMIT) break;
 		}
 		this.#recentSelectors = new Set(this.#recentItems.map(item => item.selector));
-		this.#buildSidebar(allModels, availableModels);
+		this.#buildSidebar(scope.catalogModels, scope.availableItems);
 		// A background rebuild keeps the focused entry's screen row (or its nearest survivor's).
 		if (anchor.index >= 0) {
 			const survivor = this.#entries.findIndex(entry => entry.id === anchor.id);
@@ -700,7 +703,7 @@ export class ModelHubState {
 		this.#bump();
 	}
 
-	#buildSidebar(allModels: ReadonlyArray<Model>, availableModels: ReadonlyArray<Model>): void {
+	#buildSidebar(allModels: ReadonlyArray<Model>, availableItems: ReadonlyArray<ModelBrowserItem>): void {
 		let disabled: ReadonlySet<string>;
 		try {
 			disabled = new Set(this.source.disabledProviders);
@@ -708,7 +711,7 @@ export class ModelHubState {
 			disabled = new Set();
 		}
 		const available = new Map<string, number>();
-		for (const model of availableModels) available.set(model.provider, (available.get(model.provider) ?? 0) + 1);
+		for (const item of availableItems) available.set(item.provider, (available.get(item.provider) ?? 0) + 1);
 		const catalog = new Map<string, number>();
 		for (const model of allModels) catalog.set(model.provider, (catalog.get(model.provider) ?? 0) + 1);
 
@@ -735,7 +738,10 @@ export class ModelHubState {
 		const providerEntryOf = (providerId: string, isLocked: boolean): SidebarEntry => ({
 			id: `provider:${providerId}`,
 			kind: "provider",
-			label: providerId,
+			// A locked provider has no linked account yet, so only unlocked ones take the connected name.
+			label: isLocked
+				? providerId
+				: `${connectedProviderName(providerId)}${this.accessOff(providerId) ? " (off)" : ""}`,
 			providerId,
 			locked: isLocked,
 			...(isLocked ? {} : { annotation: String(available.get(providerId) ?? 0) }),
@@ -751,7 +757,7 @@ export class ModelHubState {
 		// Roles leads, so downward hops head into model scopes.
 		this.#fixedEntries = [
 			{ id: "roles", kind: "roles", label: "Roles", annotation: `${assigned}/${visibleRoles.length}` },
-			{ id: "all", kind: "all", label: "All models", annotation: String(availableModels.length) },
+			{ id: "all", kind: "all", label: "All models", annotation: String(availableItems.length) },
 		];
 		this.#unlockedProviders = [...unlocked].sort((a, b) => a.localeCompare(b)).map(id => providerEntryOf(id, false));
 		this.#lockedProviders = [...locked].sort((a, b) => a.localeCompare(b)).map(id => providerEntryOf(id, true));
@@ -903,6 +909,15 @@ export class ModelHubState {
 		this.#sync();
 	}
 
+	*#warmSearch(items: readonly ModelBrowserItem[]): SlicedWork {
+		yield END_SLICE; // Let the picker paint before indexing any rows.
+		for (const item of items) {
+			if (this.#disposed || items !== this.#availableItems) return;
+			this.#searchIndex.warm(item);
+			yield;
+		}
+	}
+
 	/** Match counts per provider for the live query; a provider scope without matches falls back to All. */
 	#onQueryChanged(query: string): void {
 		if (!query.trim()) {
@@ -911,15 +926,18 @@ export class ModelHubState {
 			this.#bump();
 			return;
 		}
-		const matches = fuzzyRank(this.#availableItems, query, modelSearchText).map(result => result.item);
+		const prepared = this.#searchIndex.prepare(query);
+		let total = 0;
 		const counts = new Map<string, number>();
 		let recent = 0;
-		for (const item of matches) {
+		for (const item of this.#availableItems) {
+			if (!this.#searchIndex.match(item, prepared).matches) continue;
+			total++;
 			counts.set(item.provider, (counts.get(item.provider) ?? 0) + 1);
 			if (this.#recentSelectors.has(item.selector)) recent++;
 		}
 		this.#recentSearchCount = recent;
-		this.#searchTotal = matches.length;
+		this.#searchTotal = total;
 		this.#searchCounts = counts;
 		this.#composeEntries();
 		const entry = this.activeEntry();
@@ -991,7 +1009,9 @@ export class ModelHubState {
 	}
 
 	async #afterRegistryRefresh(providerId?: string): Promise<void> {
+		if (this.#disposed) return;
 		const scope = await this.callbacks.onCatalogRefreshed?.(providerId);
+		if (this.#disposed) return;
 		if (scope) this.#scopedModels = scope;
 		this.#sync();
 	}
@@ -1003,7 +1023,7 @@ export class ModelHubState {
 			else await this.registry.refreshProvider(providerId, "online");
 			await this.#afterRegistryRefresh(providerId);
 		} catch (error) {
-			this.#configError = errorText(error);
+			this.#configError = errorMessage(error);
 		} finally {
 			this.#setProviderRefreshing(providerId, false);
 			if (!this.#disposed && this.#pendingCredentialRefreshes.delete(providerId)) {
@@ -1506,6 +1526,10 @@ export class ModelHubState {
 				this.#scheduleProviderRefresh(entry.providerId ?? "", { force: true });
 			return;
 		}
+		if (id === "f6") {
+			this.#manageAccess();
+			return;
+		}
 		if (rolesView && (id === "ctrl+left" || id === "ctrl+right")) {
 			this.#switchPreset(id === "ctrl+left" ? -1 : 1);
 			return;
@@ -1824,6 +1848,11 @@ export class ModelHubState {
 		}
 	}
 
+	#manageAccess(): void {
+		const url = this.manageUrl();
+		if (url) this.callbacks.onManageAccess?.(url);
+	}
+
 	#requestLogin(entry: SidebarEntry): void {
 		if (entry.providerId && entry.oauth) this.callbacks.onLoginRequest?.(entry.providerId);
 	}
@@ -2031,6 +2060,9 @@ export class ModelHubState {
 				return;
 			case "login":
 				if (this.lockedView()) this.#requestLogin(entry);
+				return;
+			case "manage":
+				this.#manageAccess();
 				return;
 		}
 	}

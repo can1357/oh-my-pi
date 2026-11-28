@@ -3,6 +3,7 @@ import { type } from "@oh-my-pi/omptype";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { Context, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import type { EffectiveExtensionRoots } from "@oh-my-pi/pi-coding-agent/capability/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
@@ -68,7 +69,14 @@ function taskResults(messages: AgentMessage[]): ToolResultMessage[] {
 	);
 }
 
-async function harness(options: Partial<CreateAgentSessionOptions> = {}, inline = "off") {
+async function harness(
+	options: Partial<CreateAgentSessionOptions> = {},
+	inline = "off",
+	discover: typeof discoveryModule.discoverAgents = async () => ({
+		agents: [{ name: "task", description: "Task worker", systemPrompt: "Worker", source: "bundled" }],
+		projectAgentsDir: null,
+	}),
+) {
 	const root = TempDir.createSync("@pi-task-guidance-");
 	roots.push(root);
 	const auth = createInMemoryAuthStorage();
@@ -77,10 +85,7 @@ async function harness(options: Partial<CreateAgentSessionOptions> = {}, inline 
 	stores.push(modelRegistry);
 	const gate = Promise.withResolvers<void>();
 	releases.push(gate.resolve);
-	vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
-		agents: [{ name: "task", description: "Task worker", systemPrompt: "Worker", source: "bundled" }],
-		projectAgentsDir: null,
-	});
+	vi.spyOn(discoveryModule, "discoverAgents").mockImplementation(discover);
 	vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
 		await gate.promise;
 		return {
@@ -151,6 +156,48 @@ async function harness(options: Partial<CreateAgentSessionOptions> = {}, inline 
 	};
 	return { session, requests, mock };
 }
+
+it("overlaps task agent discovery with session startup and advertises the resumed project's agents", async () => {
+	const project = TempDir.createSync("@pi-task-resumed-project-");
+	roots.push(project);
+	const sessionManager = SessionManager.inMemory(project.path());
+	const extensionRoots: EffectiveExtensionRoots = {
+		explicit: ["./extension"],
+		mode: "merge",
+		configured: ["./configured-extension"],
+		configuredLevel: "project",
+	};
+	const discovered: discoveryModule.DiscoveryResult = {
+		agents: [{ name: "task", description: "Resumed project worker", systemPrompt: "Worker", source: "project" }],
+		projectAgentsDir: null,
+	};
+	const scan = Promise.withResolvers<discoveryModule.DiscoveryResult>();
+	releases.push(() => scan.resolve(discovered));
+	const startupEvents: Array<string | { cwd: string; effectiveRoots?: EffectiveExtensionRoots }> = [];
+	const setAdditionalDirectories = sessionManager.setAdditionalDirectories.bind(sessionManager);
+	vi.spyOn(sessionManager, "setAdditionalDirectories").mockImplementation(directories => {
+		startupEvents.push("workspace directories");
+		scan.resolve(discovered);
+		return setAdditionalDirectories(directories);
+	});
+
+	const { session } = await harness(
+		{
+			sessionManager,
+			additionalDirectories: [project.join("workspace")],
+			extensionRoots: () => extensionRoots,
+			toolNames: ["TASK", "wait"],
+		},
+		"off",
+		(cwd, _home, effectiveRoots) => {
+			startupEvents.push({ cwd, effectiveRoots });
+			return scan.promise;
+		},
+	);
+
+	expect(startupEvents).toEqual([{ cwd: project.path(), effectiveRoots: extensionRoots }, "workspace directories"]);
+	expect(session.getToolByName("task")?.description).toContain("Resumed project worker");
+});
 
 describe("SDK async task guidance", () => {
 	it("preserves the native lifecycle contract through a wrapper with its own input schema", async () => {

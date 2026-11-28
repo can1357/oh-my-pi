@@ -230,6 +230,23 @@ describe("EventController paces streamed tool args", () => {
 		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 5);
 		expect(blockText(component.block, 80)).toContain("/tmp/exec.ts");
 	});
+	it("names a streaming hashline edit's file from its payload header before the args close", async () => {
+		await Settings.init({ inMemory: true, cwd: process.cwd() });
+		// The path lives only inside `input`: the card must parse it with the tool's mode.
+		const partial = `{"input":"[src/streamed-target.ts#A1B2]\\nPUT 3\\n+hello`;
+		const streaming = makeStreamingMessage([
+			{ type: "toolCall", id: "tc-hl", name: "edit", arguments: {}, [kStreamingPartialJson]: partial },
+		]);
+		const tool = { mode: "hashline" } as unknown as AgentTool;
+		const { controller, pendingTools } = createFixture(streaming, tool);
+
+		await dispatch(controller, streaming);
+
+		const card = pendingTools.get("tc-hl");
+		if (!card) throw new Error("expected the edit card");
+		expect(blockText(card.block, 100)).toContain("src/streamed-target.ts");
+	});
+
 	it("holds approval until the native final edit preview is ready", async () => {
 		await Settings.init({ inMemory: true, cwd: process.cwd() });
 		const args = {

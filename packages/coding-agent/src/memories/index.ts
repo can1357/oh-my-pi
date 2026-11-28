@@ -3,7 +3,14 @@ import type * as fsNode from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { type ApiKey, completeSimple, Effort, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
+import {
+	type ApiKey,
+	type CacheRetention,
+	completeSimple,
+	Effort,
+	type Model,
+	retryTransientCompletion,
+} from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import {
 	getAgentDbPath,
@@ -794,6 +801,14 @@ function extractPersistableMessages(payload: string): AgentMessage[] {
 	return messages;
 }
 
+/**
+ * Memory requests are one-shot: each sends a prompt built from one rollout (or
+ * the current raw memories) and nothing reads its prefix again. A cache write
+ * would only add the write premium on top of the input price, and Anthropic
+ * OAuth would otherwise default it to the 1h tier (twice the input price).
+ */
+const MEMORY_CACHE_RETENTION: CacheRetention = "none";
+
 /** Byte window used when streaming rollout head/tail for stage-1 input. */
 const STAGE1_ROLLOUT_WINDOW_BYTES = 1024 * 1024;
 
@@ -929,6 +944,7 @@ async function runStage1Job(options: {
 						metadata: options.metadata,
 						maxTokens: Math.max(1024, Math.min(4096, Math.floor(modelMaxTokens * 0.2))),
 						reasoning: clampThinkingLevelForModel(model, Effort.Low),
+						cacheRetention: MEMORY_CACHE_RETENTION,
 						// OpenAI chat-completions owns its transient retries in the HTTP
 						// transport; never restart that budget at the provider/oneshot layers.
 						maxHttpAttempts: model.api === "openai-completions" ? 3 : undefined,
@@ -1082,6 +1098,7 @@ async function runConsolidationModel(options: {
 					metadata: options.metadata,
 					maxTokens: 8192,
 					reasoning: clampThinkingLevelForModel(model, Effort.Medium),
+					cacheRetention: MEMORY_CACHE_RETENTION,
 					maxHttpAttempts: model.api === "openai-completions" ? 3 : undefined,
 					onAttempt: message => journal?.(message, input),
 				},

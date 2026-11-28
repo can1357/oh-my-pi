@@ -23,16 +23,33 @@ export const LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE = "lsp-late-diagnostic";
 
 export const BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE = "background-tan-dispatch";
 
+/** `customType` of both rows a finished `/tan` leaves in its owner's session; see {@link TanResultDetails}. */
+export const TAN_RESULT_MESSAGE_TYPE = "tan-result";
+
 export const PREWALK_PLAN_MESSAGE_TYPE = "prewalk-plan";
 
 /** Custom message type for the transient Vibe mode directive. */
 export const VIBE_MODE_CONTEXT_MESSAGE_TYPE = "vibe-mode-context";
+
+/**
+ * Custom message type for the transient plan mode rules (read-only working
+ * tree). Injected per turn only while plan mode is on; never persisted, and
+ * dropped from live history when plan mode ends so later turns do not obey a
+ * lifted restriction (#20375).
+ */
+export const PLAN_MODE_CONTEXT_MESSAGE_TYPE = "plan-mode-context";
 
 /** Fallback type for extension-injected messages that omit a custom type. */
 export const DEFAULT_CUSTOM_MESSAGE_TYPE = "custom-message";
 
 /** Custom message carrying a coding request delegated by the live voice model. */
 export const LIVE_DELEGATION_MESSAGE_TYPE = "live-delegation";
+
+/**
+ * Custom type of the notice telling the coding agent that the live voice session ended. LLM conversion
+ * places it before the first prompt the user writes after spoken requests; nothing saves it.
+ */
+export const LIVE_ENDED_MESSAGE_TYPE = "live-ended";
 
 /** Content shape accepted for extension-injected messages. */
 export type CustomMessageContent = string | (TextContent | ImageContent)[];
@@ -58,6 +75,20 @@ export interface BackgroundTanDispatchDetails {
 	work: string;
 	/** Forked clone session file, named `<agentId>.jsonl`; the Agent Hub reads its transcript. */
 	sessionFile: string;
+}
+
+/**
+ * Details on the rows a finished `/tan` leaves in its owner's session: a
+ * breadcrumb the user sees (kept out of context) and a hidden record that
+ * links the clone's output for the model.
+ */
+export interface TanResultDetails {
+	jobId: string;
+	/** The clone's agent id; `agent://` and `history://` resolve its output and transcript. */
+	agentId: string;
+	work: string;
+	failed: boolean;
+	durationMs: number;
 }
 
 export interface SkillPromptDetails {

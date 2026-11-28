@@ -1,20 +1,21 @@
 import { describe, expect, it } from "bun:test";
 import {
+	createInbandScanner,
 	type Dialect,
 	getDialectDefinition,
 	type InbandScanEvent,
 	ThinkingInbandScanner,
 } from "@oh-my-pi/pi-ai/dialect";
-import { streamGoogleGeminiCli } from "@oh-my-pi/pi-ai/providers/google-gemini-cli";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { stream } from "@oh-my-pi/pi-ai/stream";
-import type { Context, FetchImpl, Model, TextContent, ThinkingContent, Tool, ToolCall } from "@oh-my-pi/pi-ai/types";
+import type { Context, FetchImpl, Model, ThinkingContent, Tool, ToolCall } from "@oh-my-pi/pi-ai/types";
 import { getStreamMarkupHealingPattern, StreamMarkupHealing } from "@oh-my-pi/pi-ai/utils/stream-markup-healing";
 import { stripDsmlToolMarkup } from "@oh-my-pi/pi-ai/utils/dsml-leak";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
+import { minimaxTokenPlanOpenAIModel } from "./helpers";
 
 interface SseToolCallDelta {
 	index: number;
@@ -24,6 +25,7 @@ interface SseToolCallDelta {
 }
 
 interface SseChoiceDelta {
+	role?: "assistant";
 	content?: string;
 	tool_calls?: SseToolCallDelta[];
 	reasoning_content?: string;
@@ -146,21 +148,6 @@ const deepseekCloudModel: Model<"ollama-chat"> = buildModel({
 	contextWindow: 131_072,
 	maxTokens: 8_192,
 });
-
-function geminiCliModel(): Model<"google-gemini-cli"> {
-	return buildModel({
-		id: "gemini-3.5-flash",
-		name: "Gemini 3.5 Flash",
-		api: "google-gemini-cli",
-		provider: "google-antigravity",
-		baseUrl: "https://antigravity.test",
-		reasoning: true,
-		input: ["text"],
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: 1_000_000,
-		maxTokens: 8_192,
-	});
-}
 
 function ndjsonResponse(lines: ReadonlyArray<unknown>): Response {
 	const body = `${lines.map(line => JSON.stringify(line)).join("\n")}\n`;
@@ -307,73 +294,6 @@ describe("official OpenAI leaked thinking healing exemption", () => {
 		expect(result.content.map(b => b.type)).toEqual(["text"]);
 		expect(result.content.filter((b): b is ThinkingContent => b.type === "thinking")).toHaveLength(0);
 		expect(result.content.map(b => (b.type === "text" ? b.text : "")).join("")).toBe(leaked);
-	});
-});
-
-describe("google-gemini-cli leaked thinking healing", () => {
-	it("lifts a leaked Gemini thinking fence before a native tool call", async () => {
-		const model = geminiCliModel();
-		const fetchMock = mockFetch([
-			{
-				response: {
-					candidates: [
-						{
-							content: {
-								role: "model",
-								parts: [
-									{
-										text: "```thinking\nCheck the provider path.\n```\nI will inspect the file.",
-										thoughtSignature: "visible-text-signature",
-									},
-									{
-										functionCall: {
-											name: "read",
-											args: { path: "packages/ai/src/providers/google-gemini-cli.ts" },
-											id: "call_read_1",
-										},
-										thoughtSignature: "function-call-signature",
-									},
-								],
-							},
-							finishReason: "STOP",
-						},
-					],
-					usageMetadata: {
-						promptTokenCount: 10,
-						candidatesTokenCount: 5,
-						thoughtsTokenCount: 3,
-						totalTokenCount: 18,
-					},
-				},
-			},
-		]);
-
-		const result = await streamGoogleGeminiCli(
-			model,
-			{ ...baseContext(), tools: [readTool] },
-			{
-				apiKey: JSON.stringify({ token: "test-token", projectId: "test-project" }),
-				fetch: fetchMock,
-			},
-		).result();
-
-		expect(result.content.map(block => block.type)).toEqual(["thinking", "text", "toolCall"]);
-		const thinking = result.content
-			.filter((block): block is ThinkingContent => block.type === "thinking")
-			.map(block => block.thinking)
-			.join("");
-		const textBlocks = result.content.filter((block): block is TextContent => block.type === "text");
-		const text = textBlocks.map(block => block.text).join("");
-		const calls = result.content.filter((block): block is ToolCall => block.type === "toolCall");
-
-		expect(thinking).toBe("Check the provider path.\n");
-		expect(text).toBe("\nI will inspect the file.");
-		expect(text).not.toContain("```thinking");
-		expect(calls).toHaveLength(1);
-		expect(textBlocks[0]?.textSignature).toBe("visible-text-signature");
-		expect(calls[0]?.id).toBe("call_read_1");
-		expect(calls[0]?.thoughtSignature).toBe("function-call-signature");
-		expect(result.stopReason).toBe("toolUse");
 	});
 });
 
@@ -650,6 +570,19 @@ describe("StreamMarkupHealing DeepSeek template-token spellings", () => {
 				JSON.parse(RESPELLED_TEMPLATE_ARGS),
 			]);
 		}
+	});
+
+	it("retains the same text events while a long quoted token waits for its split closing run", () => {
+		const scanner = createInbandScanner("deepseek");
+		const token = "<｜tool_calls_begin｜>";
+		expect(scanner.feed(`Example: \`\`${token}`)).toEqual([{ type: "text", text: "Example: ``" }]);
+		const parts = Array.from({ length: 4096 }, (_, i) => (i % 4 === 0 ? "\n " : "word "));
+		const heldEvents = parts.flatMap(part => scanner.feed(part));
+		expect(heldEvents).toEqual([]);
+		expect(scanner.feed("`")).toEqual([]);
+		expect(scanner.feed("`")).toEqual([]);
+		expect(scanner.feed(".")).toEqual([{ type: "text", text: `${token}${parts.join("")}\`\`.` }]);
+		expect(scanner.flush()).toEqual([]);
 	});
 
 	it("heals a re-spelled call after an unmatched backtick, which Markdown renders as plain text", () => {
@@ -1294,6 +1227,57 @@ describe("OpenAI completions MiniMax thinking healing", () => {
 			{ type: "text", text: "visible " },
 			{ type: "thinking", thinking: "hidden reasoning", thinkingSignature: undefined, summary: false },
 			{ type: "text", text: " answer" },
+		]);
+	});
+
+	it("parses minimax-code-cn <think> content into a thinking block", async () => {
+		const model = minimaxTokenPlanOpenAIModel("minimax-code-cn", "MiniMax-M2.5");
+		const fetchMock = mockFetch([
+			chunk(model.id, { content: "<think>", role: "assistant" }),
+			chunk(model.id, { content: "hidden reasoning", role: "assistant" }),
+			chunk(model.id, { content: "</think>", role: "assistant" }),
+			chunk(model.id, { content: "visible answer", role: "assistant" }),
+			chunk(model.id, {}, "stop"),
+			"[DONE]",
+		]);
+
+		const result = await streamOpenAICompletions(model, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+
+		expect(result.content).toEqual([
+			{ type: "thinking", thinking: "hidden reasoning", thinkingSignature: undefined, summary: false },
+			{ type: "text", text: "visible answer" },
+		]);
+	});
+
+	it("dedupes MiniMax-M3 cumulative reasoning snapshots after answer text has started", async () => {
+		const model = minimaxTokenPlanOpenAIModel("minimax-code-cn", "MiniMax-M3");
+		const fetchMock = mockFetch([
+			chunk(model.id, { role: "assistant", content: "<think>The user just", reasoning_content: "The user just" }),
+			chunk(model.id, { content: " said hi.</think>Hello!", reasoning_content: "The user just said hi." }),
+			// Visible text continues, yet the host keeps echoing the same cumulative
+			// reasoning snapshot. The current block is now text, so a block-scoped
+			// dedup would re-emit the entire snapshot as a second thinking block.
+			chunk(model.id, { content: " How can I help?", reasoning_content: "The user just said hi." }),
+			chunk(model.id, {}, "stop"),
+			"[DONE]",
+		]);
+
+		const result = await streamOpenAICompletions(model, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+
+		expect(result.content).toEqual([
+			{
+				type: "thinking",
+				thinking: "The user just said hi.",
+				thinkingSignature: "reasoning_content",
+				summary: false,
+			},
+			{ type: "text", text: "Hello! How can I help?" },
 		]);
 	});
 });

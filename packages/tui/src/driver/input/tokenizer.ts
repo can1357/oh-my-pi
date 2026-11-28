@@ -10,7 +10,8 @@
  * held much longer and never leak as typed text.
  *
  * Also handled here because they need the raw read boundaries:
- * - bracketed paste, delivered whole, with TSP messages routed out of it, a
+ * - bracketed paste, delivered whole, with TSP messages routed out of it,
+ *   win32-input-mode records turned back into the characters they type, a
  *   byte cap and an inactivity watchdog for a lost end marker;
  * - unbracketed multi-line bursts (two line breaks with text after them,
  *   gathered for `burstTimeout` from the first break) coalesced into one
@@ -24,6 +25,7 @@
  */
 import { type Clock, systemClock } from "./clock";
 import { TSP_OPENERS } from "./tsp";
+import { isWin32RecordHead, readWin32PasteRecord } from "./win32";
 
 export interface TokenSink {
 	/** One complete sequence: a single character, an escape sequence, or an unterminated head flushed on timeout. */
@@ -111,6 +113,13 @@ function replyLike(head: string): "yes" | "maybe" | "no" {
 	return "no";
 }
 
+/** A late TSP tail can contain spaces and end in the same read as real typing. */
+function closesTspString(data: string, head: string): boolean {
+	if (!TSP_OPENERS.some(opener => head.startsWith(opener))) return false;
+	if (head.endsWith(ESC)) return data.startsWith("\\");
+	return /^[^\x00-\x1f\x7f]*(?:\x1b\\|\x07)/.test(data);
+}
+
 /**
  * A read that cannot continue a pending string payload: a key arrived instead.
  * A new escape sequence always interrupts; a control key does too (DCS
@@ -121,7 +130,7 @@ function interruptsString(data: string, head: string, stalled: boolean): boolean
 	const code = data.charCodeAt(0);
 	if (code === 0x1b) return data.length > 1 && data[1] !== "\\";
 	if (code === 0x07) return false;
-	if (code === 0x20) return stalled;
+	if (code === 0x20) return stalled && !closesTspString(data, head);
 	if (code === 0x0d || code === 0x0a) return stalled || head[1] !== "P";
 	return code < 0x20 || code === 0x7f;
 }
@@ -176,6 +185,8 @@ interface PasteState {
 export class InputTokenizer {
 	/** The kitty keyboard protocol is active: a bare ESC is always the head of a sequence. */
 	kitty = false;
+	/** The raw stream can carry win32-input-mode CSI key records; those in a paste body are decoded here. */
+	win32 = false;
 	/** Whether the event loop was stalled (a multi-line burst is then batched typing, not a paste). */
 	isStalled: (() => boolean) | undefined;
 
@@ -261,7 +272,7 @@ export class InputTokenizer {
 		if (this.#dormant) {
 			const dormant = this.#dormant;
 			this.#dormant = null;
-			if (now <= dormant.until && continuesString(data)) {
+			if (now <= dormant.until && (closesTspString(data, dormant.head) || continuesString(data))) {
 				this.#buf = dormant.head;
 				this.#hint = 0;
 				this.#str = { lastRead: now, suspects: [], resumed: true };
@@ -579,11 +590,21 @@ export class InputTokenizer {
 		} else {
 			timeout = this.#keyTimeout;
 		}
-		this.#cancelPartial = this.#clock.schedule(timeout, () => {
-			this.#cancelPartial = null;
-			this.#scan(true);
-		});
+		this.#cancelPartial = this.#clock.schedule(
+			timeout,
+			this.win32 && (head === ESC || head[1] === "[")
+				? () => {
+						// An overdue timer can run before stdin delivers the rest of the record.
+						this.#cancelPartial = this.#clock.schedule(0, this.#flushPartial);
+					}
+				: this.#flushPartial,
+		);
 	}
+
+	readonly #flushPartial = (): void => {
+		this.#cancelPartial = null;
+		this.#scan(true);
+	};
 
 	#trackString(): void {
 		if (!this.#str) this.#str = { lastRead: this.#clock.now(), suspects: [], resumed: false };
@@ -778,8 +799,21 @@ export class InputTokenizer {
 				i = end;
 				continue;
 			}
+			const record = this.win32 ? readWin32PasteRecord(text, k) : null;
+			if (record) {
+				if (record.text) {
+					// A repeat count never carries the paste far past its byte cap.
+					const room = (this.#pasteByteLimit - paste.bytes) / Buffer.byteLength(record.text, "utf8");
+					add(record.text.repeat(Math.min(record.repeat, Math.max(1, Math.ceil(room)))));
+				}
+				i = record.end;
+				continue;
+			}
 			const tail = text.slice(k);
-			if ([PASTE_END, PASTE_START, ...TSP_OPENERS].some(prefix => prefix.startsWith(tail))) {
+			if (
+				[PASTE_END, PASTE_START, ...TSP_OPENERS].some(prefix => prefix.startsWith(tail)) ||
+				(this.win32 && isWin32RecordHead(tail))
+			) {
 				paste.pending = tail;
 				break;
 			}

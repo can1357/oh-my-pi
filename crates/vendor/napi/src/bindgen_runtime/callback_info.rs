@@ -89,6 +89,7 @@ impl<const N: usize> CallbackInfo<N> {
     js_name: &str,
     obj: T,
   ) -> Result<(sys::napi_value, *mut T)> {
+    let class_id = class_id_of::<T>()?;
     let obj = Box::new(obj);
     let this = self.this();
     let mut value_ref = Box::into_raw(obj);
@@ -98,6 +99,22 @@ impl<const N: usize> CallbackInfo<N> {
       value_ref = Box::into_raw(Box::new(EmptyStructPlaceholder(0))).cast();
     }
     let mut object_ref = ptr::null_mut();
+    let status = unsafe {
+      sys::napi_wrap(
+        self.env,
+        this,
+        value_ref.cast(),
+        Some(raw_finalize_unchecked::<T>),
+        ptr::null_mut(),
+        &mut object_ref,
+      )
+    };
+    if status != sys::Status::napi_ok {
+      // Not adopted by a finalizer, so reclaim it here instead of leaking.
+      unsafe { drop_unadopted_class_value::<T>(value_ref.cast()) };
+      check_status!(status, "Failed to initialize class `{js_name}`")?;
+    }
+    // Allocated only after `napi_wrap` succeeds so a wrap failure cannot leak it.
     let initial_finalize: Box<dyn FnOnce()> = Box::new(|| {});
     // `Reference` needs atomic ref-counting for its `unsafe impl Sync`, so the finalize
     // callbacks slot is an `Arc`. The inner `Cell` is only ever accessed on the JS thread
@@ -105,24 +122,13 @@ impl<const N: usize> CallbackInfo<N> {
     #[allow(clippy::arc_with_non_send_sync)]
     let finalize_callbacks_ptr =
       Arc::into_raw(Arc::new(Cell::new(Box::into_raw(initial_finalize))));
-    unsafe {
-      check_status!(
-        sys::napi_wrap(
-          self.env,
-          this,
-          value_ref.cast(),
-          Some(raw_finalize_unchecked::<T>),
-          ptr::null_mut(),
-          &mut object_ref
-        ),
-        "Failed to initialize class `{js_name}`",
-      )?;
-    };
 
-    Reference::<T>::add_ref(
+    // Record the wrapped class for builds without type tags (#3608).
+    crate::bindgen_runtime::add_ref(
       self.env,
       value_ref.cast(),
       (value_ref.cast(), object_ref, finalize_callbacks_ptr),
+      class_id,
     );
 
     // Stamp the object's type tag AFTER `add_ref` has adopted the Arc + napi_ref
@@ -225,6 +231,8 @@ impl<const N: usize> CallbackInfo<N> {
         "Failed to delete reference for `this` in async class factory"
       )?;
     }
+    // Intern after releasing the factory reference so saturation cannot leak it.
+    let class_id = class_id_of::<T>()?;
     ___CALL_FROM_FACTORY.with(|s| s.set(true));
     let status =
       unsafe { sys::napi_new_instance(self.env, this, 0, ptr::null_mut(), &mut instance) };
@@ -238,12 +246,6 @@ impl<const N: usize> CallbackInfo<N> {
     }
     check_status!(status, "Failed to create instance of class `{}`", js_name)?;
     let obj = Box::new(obj);
-    let initial_finalize: Box<dyn FnOnce()> = Box::new(|| {});
-    // See `_construct`: `Arc` is required for `Reference`'s `Sync` impl; the `Cell` is
-    // only touched on the JS thread.
-    #[allow(clippy::arc_with_non_send_sync)]
-    let finalize_callbacks_ptr =
-      Arc::into_raw(Arc::new(Cell::new(Box::into_raw(initial_finalize))));
     let mut object_ref = ptr::null_mut();
     let mut value_ref = Box::into_raw(obj);
 
@@ -252,25 +254,35 @@ impl<const N: usize> CallbackInfo<N> {
     if value_ref as usize == 0x1 {
       value_ref = Box::into_raw(Box::new(EmptyStructPlaceholder(0))).cast();
     }
-    check_status!(
-      unsafe {
-        sys::napi_wrap(
-          self.env,
-          instance,
-          value_ref.cast(),
-          Some(raw_finalize_unchecked::<T>),
-          ptr::null_mut(),
-          &mut object_ref,
-        )
-      },
-      "Failed to initialize class `{}`",
-      js_name,
-    )?;
+    let status = unsafe {
+      sys::napi_wrap(
+        self.env,
+        instance,
+        value_ref.cast(),
+        Some(raw_finalize_unchecked::<T>),
+        ptr::null_mut(),
+        &mut object_ref,
+      )
+    };
+    if status != sys::Status::napi_ok {
+      // Not adopted by a finalizer, so reclaim it here instead of leaking.
+      unsafe { drop_unadopted_class_value::<T>(value_ref.cast()) };
+      check_status!(status, "Failed to initialize class `{}`", js_name)?;
+    }
+    // Allocated only after `napi_wrap` succeeds so a wrap failure cannot leak it.
+    let initial_finalize: Box<dyn FnOnce()> = Box::new(|| {});
+    // See `_construct`: `Arc` is required for `Reference`'s `Sync` impl; the `Cell` is
+    // only touched on the JS thread.
+    #[allow(clippy::arc_with_non_send_sync)]
+    let finalize_callbacks_ptr =
+      Arc::into_raw(Arc::new(Cell::new(Box::into_raw(initial_finalize))));
 
-    Reference::<T>::add_ref(
+    // Record the wrapped class for builds without type tags (#3608).
+    crate::bindgen_runtime::add_ref(
       self.env,
       value_ref.cast(),
       (value_ref.cast(), object_ref, finalize_callbacks_ptr),
+      class_id,
     );
 
     // Stamp the type tag AFTER `add_ref` so a tag failure cannot leak the Arc +
@@ -319,14 +331,17 @@ impl<const N: usize> CallbackInfo<N> {
       // rejected by the V8 FunctionTemplate signature that `napi_define_class`
       // installs on instance methods ("Illegal invocation", before the callback
       // runs) — but that signature is NOT enforced by every supported Node-API
-      // runtime: Bun (exercised by CI's `test-latest-bun` job) invokes the
-      // callback with a wrong-class receiver where Node throws. Without this tag
-      // check `napi_unwrap` hands back the other class's pointer and the cast
-      // below is type-confused (UB). Compiled only on napi8 NATIVE targets (the
-      // `T: MaybeTypeTag` bound provides `T::type_tag()` only there; elsewhere
-      // this is the pre-tag unchecked cast).
+      // runtime: Bun (exercised by CI's `test-latest-bun` job) and emnapi on wasm
+      // invoke the callback with a wrong-class receiver where Node throws, and
+      // it does not help when the receiver itself holds another class's value
+      // (#3608). Without this check `napi_unwrap` hands back the other class's
+      // pointer and the cast below is type-confused (UB). The tag check is
+      // compiled only on napi8 NATIVE targets (the `T: MaybeTypeTag` bound
+      // provides `T::type_tag()` only there); elsewhere `check_class_identity`
+      // checks the class recorded at wrap time.
       #[cfg(all(feature = "napi8", not(target_family = "wasm")))]
       validate_type_tag(self.env, self.this, &T::type_tag(), T::type_name())?;
+      check_class_identity::<T>(wrapped_val, T::type_name)?;
 
       Ok(wrapped_val.cast())
     }

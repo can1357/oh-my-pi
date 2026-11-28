@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/pi-utils",
-	"version": "19.1.1",
+	"version": "19.2.1",
 	"description": "Shared utilities for pi packages",
 	"keywords": [
 		"cli",
@@ -32,10 +32,7 @@
 			"types": "./src/index.ts",
 			"import": "./src/index.ts"
 		},
-		"./ar": {
-			"types": "./src/ar/index.ts",
-			"import": "./src/ar/index.ts"
-		},
+		"./ar": "./src/ar/index.ts",
 		"./*": {
 			"types": "./src/*.ts",
 			"import": "./src/*.ts"

@@ -20,10 +20,9 @@ import {
 	type ResolvedReviewTarget,
 	readUncommittedReviewTarget,
 } from "../review/target";
-import { promptTextReviewSource, readFileTextReviewSource } from "./direct-source";
+import { latestAssistantTextReviewSource, promptTextReviewSource, readFileTextReviewSource } from "./direct-source";
 import { showCodeReviewOverlay, showTextReviewOverlay } from "./fullscreen";
 import { buildTextReviewPrompt } from "./text-review";
-import { latestAssistantTextReviewSource } from "./text-source";
 
 /** The slice of an extension context the annotation API reads. */
 export type AnnotationContext = Pick<ExtensionContext, "ui" | "mode" | "hasUI" | "cwd" | "sessionManager" | "isIdle">;

@@ -17,17 +17,20 @@ import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { modelsAreEqual, routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
 import { classifyDifficulty } from "../auto-thinking/classifier";
+import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import {
+	disabledProviderIds,
 	filterAvailableModelsByEnabledPatterns,
 	findScopedModelIndex,
 	formatModelStringWithRouting,
 	getModelMatchPreferences,
 	type ResolvedModelRoleValue,
 	resolveImplicitDefaultRole,
+	resolveModelOverride,
 	resolveModelRoleValue,
 } from "../config/model-resolver";
-import { buildServiceTierByFamily } from "../config/service-tier";
+import type { FastServiceTier } from "../config/service-tier";
 import type { Settings } from "../config/settings";
 import { containsMagicKeyword } from "./magic-keywords";
 import type { ModelRoleLookup } from "../modes/view-model/overlays/model-browser";
@@ -37,6 +40,7 @@ import {
 	automaticThinkingLevel,
 	clampAutoThinkingEffort,
 	clampThinkingLevelToCeiling,
+	modelSupportsEffortCeiling,
 	resolveProvisionalAutoLevel,
 	resolveThinkingLevelForModel,
 	shouldDisableReasoning,
@@ -45,18 +49,13 @@ import {
 import { type ConfiguredThinkingLevel } from "../utils/render-utils";
 import type { EditModeSetting } from "../edit/settings";
 import type { AgentSessionEvent } from "./agent-session-events";
+import type { AgentKindModelChange } from "./agent-session-handle";
 import type { ModelCycleResult, ResolvedRoleModel, RoleModelCycle, RoleModelCycleResult } from "./agent-session-types";
 import { formatRoleModelValue, resolveRoleModelFull } from "./role-models";
 import { EPHEMERAL_MODEL_CHANGE_ROLE, PREWALK_MODEL_CHANGE_ROLE, TEMPORARY_MODEL_CHANGE_ROLE } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 
-import {
-	cfgDefaultThinkingLevel,
-	cfgProvidersFireworksTier,
-	cfgTierAnthropic,
-	cfgTierGoogle,
-	cfgTierOpenai,
-} from "./settings";
+import { cfgDefaultThinkingLevel, cfgProvidersFireworksTier, cfgTiers } from "./settings";
 import { cfgDisabledProviders, cfgEnabledModels } from "../config/model-settings";
 
 /**
@@ -146,6 +145,7 @@ export interface ModelControlsHost {
 	modelRegistry: ModelRegistry;
 	sessionManager: SessionManager;
 	providerSessionState: Map<string, ProviderSessionState>;
+	assertDispatchModel?: (model: Model) => void;
 	model(): Model | undefined;
 	sessionId(): string;
 	promptGeneration(): number;
@@ -170,6 +170,8 @@ export class ModelControls {
 	#autoThinking = false;
 	#autoResolvedLevel: Effort | undefined;
 	#serviceTierByFamily: ServiceTierByFamily;
+	/** Families whose latest turn ran without its tier because the serving account does not offer it. */
+	#withheldTierFamilies = new Set<ServiceTierFamily>();
 
 	constructor(
 		host: ModelControlsHost,
@@ -342,7 +344,7 @@ export class ModelControls {
 	async setModelTemporary(
 		model: Model,
 		thinkingLevel?: ConfiguredThinkingLevel,
-		options?: { ephemeral?: boolean; prewalk?: boolean },
+		options?: { ephemeral?: boolean; prewalk?: boolean; metadataResolved?: boolean },
 		selection: "explicit" | "automatic" = "explicit",
 		isCurrent?: () => boolean,
 	): Promise<boolean> {
@@ -351,7 +353,10 @@ export class ModelControls {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
 		}
 
-		const targetModel = await this.#host.modelRegistry.refreshSelectedModelMetadata(model);
+		// A caller that loaded the metadata ahead of time (auto-prewalk, while its judge ran) skips the second probe.
+		const targetModel = options?.metadataResolved
+			? model
+			: await this.#host.modelRegistry.refreshSelectedModelMetadata(model);
 		if (isCurrent?.() === false) return false;
 
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
@@ -382,6 +387,44 @@ export class ModelControls {
 		}
 		await this.#host.syncAfterModelChange(previousEditMode);
 		return isCurrent?.() !== false && landed;
+	}
+
+	/** Select the first usable configured model for an authorized agent kind. */
+	async selectAgentModel(change: AgentKindModelChange, isCurrent: () => boolean): Promise<void> {
+		const { settings, modelRegistry, assertDispatchModel } = this.#host;
+		const offline = cfgOffline.get(settings);
+		const provider = this.#model?.provider;
+		const disabled = disabledProviderIds(settings);
+		const ceiling = this.#thinkingLevelCeiling;
+		const models = modelRegistry
+			.getAvailable()
+			.filter(
+				model =>
+					!disabled.has(model.provider) &&
+					(!offline || model.provider === provider) &&
+					(ceiling === undefined || modelSupportsEffortCeiling(model, ceiling)),
+			);
+		const lookup = { getAvailable: () => models };
+		let refused: unknown;
+		for (const pattern of change.patterns) {
+			const selection = resolveModelOverride([pattern], lookup, settings);
+			if (!selection.model) continue;
+			try {
+				assertDispatchModel?.(selection.model);
+			} catch (error) {
+				refused ??= error;
+				continue;
+			}
+			const level =
+				change.thinkingLevel ??
+				(selection.explicitThinkingLevel ? selection.thinkingLevel : change.defaultThinkingLevel);
+			if (!(await this.setModelTemporary(selection.model, level, undefined, "explicit", isCurrent))) {
+				throw new Error("Agent model change was superseded.");
+			}
+			return;
+		}
+		if (refused) throw refused;
+		throw new Error(`Agent kind "${change.kind}" has no available model for this session.`);
 	}
 
 	/**
@@ -586,10 +629,11 @@ export class ModelControls {
 		const wasAuto = this.#autoThinking;
 		this.#autoThinking = false;
 		this.#autoResolvedLevel = undefined;
-		const effectiveLevel = resolveThinkingLevelForModel(
-			this.#model,
-			clampThinkingLevelToCeiling(this.#model, level, this.#thinkingLevelCeiling),
-		);
+		const model = this.#model;
+		const ceiling = this.#thinkingLevelCeiling;
+		const resolved = resolveThinkingLevelForModel(model, clampThinkingLevelToCeiling(model, level, ceiling));
+		const effectiveLevel =
+			resolved === ThinkingLevel.Off ? resolved : clampThinkingLevelToCeiling(model, resolved, ceiling);
 		// Leaving auto must persist even when the resolved effort is unchanged (e.g.
 		// auto resolved to medium, then the user pins medium): otherwise the latest
 		// session entry keeps `configured: "auto"` and resume re-enables auto.
@@ -779,11 +823,9 @@ export class ModelControls {
 	}
 
 	/**
-	 * True when the currently selected model's family is set to a fast tier —
-	 * `priority`, or `ultrafast` on the OpenAI family — the `/fast` on/off state
-	 * for the active model. Returns false when no model is selected or the
-	 * model exposes no service-tier family (e.g. Fireworks, which has its own
-	 * Providers › Fireworks Tier toggle).
+	 * True when the active model's family has selected `priority` or `ultrafast`.
+	 * Returns false when there is no model or service-tier family, e.g. Fireworks
+	 * (which has its own Providers › Fireworks Tier toggle).
 	 *
 	 * For "is a fast tier actually applied to the next request?" use
 	 * {@link isFastModeActive} instead.
@@ -794,7 +836,7 @@ export class ModelControls {
 		return tier === "priority" || tier === "ultrafast";
 	}
 
-	/** True when the active model's OpenAI family is set to `ultrafast` (`/fast ultra`). */
+	/** True when the active model's OpenAI family is set to `ultrafast`. */
 	isUltrafastModeEnabled(): boolean {
 		const model = this.#model;
 		return (
@@ -813,30 +855,26 @@ export class ModelControls {
 	 */
 	isFastModeActive(): boolean {
 		const model = this.#model;
-		if (!model || !this.#realizesFastTier(model, this.#serviceTierByFamily)) return false;
+		if (!model || !this.#realizedFastTier(model, this.#serviceTierByFamily)) return false;
+		const family = serviceTierFamily(model);
+		if (family && this.#withheldTierFamilies.has(family)) return false;
 		return (
 			model.provider !== "anthropic" || !isAnthropicFastModeFallbackDisabled(this.#host.providerSessionState, model)
 		);
 	}
 
 	/**
-	 * Whether a fresh session started on `model` would realize a fast tier from
-	 * the configured `tier.*` settings, ignoring this session's `/fast` toggles.
-	 * Feeds the next launch's startup status prepaint.
+	 * The fast tier a fresh session on `model` would realize from `tier.*` settings,
+	 * ignoring live session toggles. Feeds the next launch's startup status prepaint.
 	 */
-	isFastModeConfiguredFor(model: Model): boolean {
-		const settings = this.#host.settings;
-		const tiers = buildServiceTierByFamily(
-			cfgTierOpenai.get(settings),
-			cfgTierAnthropic.get(settings),
-			cfgTierGoogle.get(settings),
-		);
-		return this.#realizesFastTier(model, tiers);
+	configuredFastTier(model: Model): FastServiceTier | undefined {
+		return this.#realizedFastTier(model, cfgTiers.get(this.#host.settings));
 	}
 
-	#realizesFastTier(model: Model, tiers: ServiceTierByFamily): boolean {
+	#realizedFastTier(model: Model, tiers: ServiceTierByFamily): FastServiceTier | undefined {
 		const tier = serviceTierForModel(this.#host.settings, model, tiers);
-		return tier === "ultrafast" ? shouldSendServiceTier(tier, model) : realizesPriorityServiceTier(tier, model);
+		if (tier === "ultrafast") return shouldSendServiceTier(tier, model) ? tier : undefined;
+		return realizesPriorityServiceTier(tier, model) ? "priority" : undefined;
 	}
 
 	/**
@@ -855,8 +893,34 @@ export class ModelControls {
 		return Object.keys(this.#serviceTierByFamily).length > 0 ? this.#serviceTierByFamily : null;
 	}
 
+	/**
+	 * Record whether the latest turn on `model` ran without its service tier
+	 * because the account that served it does not offer one. Returns whether
+	 * that is a change, so the session announces each transition once.
+	 */
+	noteServiceTierWithheld(model: Model, withheld: boolean): boolean {
+		const family = serviceTierFamily(model);
+		if (!family || this.#withheldTierFamilies.has(family) === withheld) return false;
+		if (withheld) this.#withheldTierFamilies.add(family);
+		else this.#withheldTierFamilies.delete(family);
+		return true;
+	}
+
+	/**
+	 * Forget the provider refusals recorded for `tier` on `model`, so turning a
+	 * fast tier on again probes every credential afresh instead of waiting out
+	 * a cooldown the user may have just fixed (usage credits enabled, plan
+	 * upgraded).
+	 */
+	#rearmServiceTier(model: Model, tier: ServiceTier): void {
+		void this.#host.modelRegistry.authStorage.limits.rearmServiceTier(model.provider, tier, model.id).catch(error => {
+			logger.debug("Service tier re-arm failed", { provider: model.provider, tier, error: String(error) });
+		});
+	}
+
 	/** Set one family's tier (or clear it with `undefined`); persists the change. */
 	setServiceTierFamily(family: ServiceTierFamily, tier: ServiceTier | undefined): void {
+		this.#withheldTierFamilies.delete(family);
 		if (this.#serviceTierByFamily[family] === tier) return;
 		const next: ServiceTierByFamily = { ...this.#serviceTierByFamily };
 		if (tier) next[family] = tier;
@@ -876,8 +940,8 @@ export class ModelControls {
 	}
 
 	/**
-	 * `/fast on|off` targets the family of the currently selected model: it sets
-	 * (or clears) that family's `priority` tier. `off` also clears `ultrafast`.
+	 * Sets the active model family's tier to `priority`, or clears its fast tier
+	 * (`priority` or `ultrafast`) when disabling.
 	 * Returns `false` when the model has no service-tier family, or when it is an
 	 * OpenAI-family model that cannot take `priority` (a Codex model whose
 	 * discovered tier list omits it), so callers can report that fast mode is
@@ -910,12 +974,13 @@ export class ModelControls {
 		if (family === "anthropic" && this.#serviceTierByFamily.anthropic === "priority") {
 			clearAnthropicFastModeFallback(this.#host.providerSessionState);
 		}
+		this.#rearmServiceTier(model, "priority");
 		this.setServiceTierFamily(family, "priority");
 		return true;
 	}
 
 	/**
-	 * `/fast ultra` sets the OpenAI family to `ultrafast`. Enabling requires the
+	 * Sets the OpenAI family to `ultrafast`. Enabling requires the
 	 * active model to realize it (first-party OpenAI, or a Codex model whose
 	 * discovery advertises the tier); otherwise the tier is left unchanged and
 	 * `false` is returned. Disabling clears only an `ultrafast` selection.
@@ -930,6 +995,7 @@ export class ModelControls {
 			this.#host.emitNotice("info", "The current model does not offer the Ultrafast service tier.", "priority");
 			return false;
 		}
+		this.#rearmServiceTier(model, "ultrafast");
 		this.setServiceTierFamily("openai", "ultrafast");
 		return true;
 	}

@@ -11,7 +11,7 @@
  */
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import type { Block, PaintContext } from "@oh-my-pi/pi-tui/term/paint";
-import { SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-tui/term/painters/spinner";
+import { spinnerIndex } from "@oh-my-pi/pi-tui/term/painters/spinner";
 import { renderMarkdown } from "@oh-my-pi/pi-tui/text/markdown/index";
 import { replaceTabs, truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
@@ -19,6 +19,7 @@ import { formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
 import { type EvalStatusEvent, splitEvalOutput } from "../../../tools/details/eval";
 import { formatArtifactErrorNotice, formatTruncationMetaNotice } from "../../../tools/output-meta-format";
 import { FEED_MODEL_BADGE_WIDTH, isFeedModelBadgeEnabled, shortenPath } from "../../../utils/render-utils";
+import { expandKeyLabel } from "../../keys/hints";
 import { feedModel } from "../../tools/agent-common";
 import { type EvalTerm, type EvalTermCell, formatMcpProgress, highlightLanguage, mcpProgress } from "../../tools/eval";
 import { styledModelBadge } from "./agent-common";
@@ -296,9 +297,9 @@ function cellOutputRows(
 /** The spinner (or the still running glyph) in the accent color. */
 function runningGlyph(cx: PaintContext): string {
 	const theme = cx.theme;
-	if (cx.reduceMotion) return theme.fg("accent", theme.symbols.symbol("status.running"));
+	if (cx.spinnerInterval === 0) return theme.fg("accent", theme.symbols.symbol("status.running"));
 	const frames = theme.symbols.spinnerFrames;
-	return theme.fg("accent", frames[Math.floor(cx.now() / SPINNER_INTERVAL_MS) % frames.length]!);
+	return theme.fg("accent", frames[spinnerIndex(cx, frames.length)]!);
 }
 
 /** `agent()` progress rows under a cell. */
@@ -441,7 +442,7 @@ function paintEval(node: UiNode, cx: PaintContext): Block {
 						index: i,
 						total: cells.length,
 						...(cell.title !== undefined ? { title: cell.title } : {}),
-						status: cx.reduceMotion ? "pending" : "running",
+						status: cx.spinnerInterval === 0 ? "pending" : "running",
 						codeTail: true,
 						codeMaxLines: PREVIEW_WINDOW_ROWS,
 						expanded,
@@ -461,7 +462,7 @@ function paintEval(node: UiNode, cx: PaintContext): Block {
 			const output = cellOutputRows(theme, cell, expanded, previewLines, width);
 			const lines = [...output.rows];
 			if (!expanded && output.hidden > 0)
-				lines.push(theme.fg("dim", `… ${output.hidden} more lines (⌃O to expand)`));
+				lines.push(theme.fg("dim", `… ${output.hidden} more lines (${expandKeyLabel(theme)} to expand)`));
 			if (status.length > 0) {
 				if (lines.length > 0) lines.push(theme.fg("dim", "Status"));
 				lines.push(...status);
@@ -514,7 +515,7 @@ function paintEval(node: UiNode, cx: PaintContext): Block {
 			truncate(
 				theme.fg(
 					"dim",
-					`… (${tail.skipped} earlier lines, showing ${tail.rows.length} of ${tail.skipped + tail.rows.length}) (⌃O to expand)`,
+					`… (${tail.skipped} earlier lines, showing ${tail.rows.length} of ${tail.skipped + tail.rows.length}) (${expandKeyLabel(theme)} to expand)`,
 				),
 				width,
 			),

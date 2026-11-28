@@ -10,6 +10,10 @@
  */
 
 const RECORD = /^\x1b\[(\d+);(\d+);(\d+);(\d+);(\d+);(\d+)_$/;
+/** A record starting at `lastIndex` of a longer string. */
+const RECORD_AT = /\x1b\[(\d+);(\d+);(\d+);(\d+);(\d+);(\d+)_/y;
+/** A record cut off by the end of a read; the fields are bounded so a junk head stays short. */
+const RECORD_HEAD = /^\x1b(?:\[(?:\d{1,5};){0,5}\d{0,5})?$/;
 
 const RIGHT_ALT = 0x1;
 const LEFT_ALT = 0x2;
@@ -55,6 +59,46 @@ const NAV_KEYS: Readonly<Record<number, { readonly final?: string; readonly tild
 /** Whether `seq` is one win32-input-mode record. */
 export function isWin32Record(seq: string): boolean {
 	return RECORD.test(seq);
+}
+
+/** One record inside a bracketed paste body (see {@link readWin32PasteRecord}). */
+export interface Win32PasteRecord {
+	/** Index just past the record. */
+	readonly end: number;
+	/** The UTF-16 unit the record types; empty for releases, bare modifiers and keys without text. */
+	readonly text: string;
+	/** How many times `text` was typed: the record's repeat count, at least 1. */
+	readonly repeat: number;
+}
+
+/**
+ * Read the record at `at` in a bracketed paste body, or null when none starts there.
+ *
+ * A console host that re-encodes pasted text as records (Windows Terminal through ConPTY)
+ * synthesizes whatever key types each character: Shift+D for `D`, Ctrl+Enter or Ctrl+J for LF,
+ * Alt+Numpad for characters off the keyboard layout. Only the character belongs in the paste,
+ * never the key protocol {@link Win32RecordDecoder} produces for typed keys. Halves of a
+ * surrogate pair come back one unit each and rejoin in the paste text.
+ */
+export function readWin32PasteRecord(body: string, at: number): Win32PasteRecord | null {
+	RECORD_AT.lastIndex = at;
+	const match = RECORD_AT.exec(body);
+	if (!match) return null;
+	const vk = Number(match[1]);
+	const uc = Number(match[3]);
+	const down = Number(match[4]) !== 0;
+	// Alt+Numpad composition types its character on the Alt release.
+	const typed = uc !== 0 && (down || vk === 18);
+	return {
+		end: RECORD_AT.lastIndex,
+		text: typed ? String.fromCharCode(uc) : "",
+		repeat: down ? Math.min(Math.max(Number(match[6]), 1), 0xffff) : 1,
+	};
+}
+
+/** Whether the tail of a paste body may be a record that the next read completes. */
+export function isWin32RecordHead(tail: string): boolean {
+	return RECORD_HEAD.test(tail);
 }
 
 export class Win32RecordDecoder {

@@ -14,17 +14,26 @@
  *
  * URL forms:
  * - history:// - Index of all registry + on-disk agents (id, status, kind, last activity)
- * - history://<agentId> - Concise markdown transcript of that agent
+ * - history://<agentId> - Transcript of that agent (`session/transcript-view.ts`):
+ *   complete by default; `?detail=`, `?budget=`, `?turns=` compact or narrow it
  * - history://current/full - Full, caller-bound current branch history (experimental);
  *   bare history://current reads the same unless an agent is named `current`
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
+import { readerIncludesThinking, textWithoutThinking } from "@oh-my-pi/snapcompact";
 import type { AgentRef } from "../registry/agent-registry";
 import { AgentRegistry } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
-import { formatSessionHistoryMarkdown } from "../session/session-history-format";
+import {
+	renderTranscriptMessages,
+	TRANSCRIPT_KINDS,
+	TRANSCRIPT_LEVELS,
+	type TranscriptDetailRequest,
+	type TranscriptDetails,
+	type TranscriptViewOptions,
+} from "../session/transcript-view";
 import {
 	bashExecutionToText,
 	pythonExecutionToText,
@@ -64,6 +73,76 @@ function diskIdsForCompletion(): Promise<string[]> {
 	completionDiskIds.set(key, ids);
 	ids.catch(() => completionDiskIds.delete(key));
 	return ids;
+}
+
+/**
+ * Detail of a bare `history://<id>`: user and assistant text whole, calls one
+ * line each, thinking and results left out.
+ */
+const COMPLETE_DETAIL: TranscriptDetails = {
+	user: "full",
+	assistant: "full",
+	thinking: "omit",
+	call: "normal",
+	result: "omit",
+};
+/** Smallest `?budget=`, as for `archive.transcript`. */
+const MIN_BUDGET = 500;
+
+/**
+ * Transcript view options of a `history://<id>` URL. Bare, the view is
+ * {@link COMPLETE_DETAIL} without a budget, so `grep` and line selectors see
+ * every turn. `?detail=` (`brief`, or `user:full,call:brief`), `?budget=`
+ * (characters; kinds left to `auto` compact until it fits), and `?turns=`
+ * (`-1`, `3,5`) work as in `archive.transcript`.
+ *
+ * @throws {Error} when a parameter is malformed.
+ */
+function historyViewOptions(url: InternalUrl, title: string): TranscriptViewOptions {
+	const detail = url.searchParams.get("detail");
+	const budget = url.searchParams.get("budget");
+	const turns = url.searchParams.get("turns");
+	return {
+		budget: budget === null ? Number.POSITIVE_INFINITY : parseBudget(budget),
+		detail: detail !== null ? parseDetail(detail) : budget !== null ? "auto" : COMPLETE_DETAIL,
+		turns: turns === null ? undefined : parseTurns(turns),
+		window: undefined,
+		title,
+	};
+}
+
+/** `brief`, or per-kind `user:full,call:brief`. */
+function parseDetail(text: string): TranscriptDetailRequest {
+	const all = TRANSCRIPT_LEVELS.find(level => level === text);
+	if (all) return all;
+	const request: Partial<TranscriptDetails> = {};
+	for (const pair of text.split(",")) {
+		const [name, value] = pair.split(":");
+		const kind = TRANSCRIPT_KINDS.find(candidate => candidate === name);
+		const level = TRANSCRIPT_LEVELS.find(candidate => candidate === value);
+		if (!kind || !level) {
+			throw new Error(
+				`history:// detail takes ${TRANSCRIPT_LEVELS.join(", ")}, or kind:level pairs like user:full,call:brief; got "${text}"`,
+			);
+		}
+		if (level !== "auto") request[kind] = level;
+	}
+	return request;
+}
+
+function parseBudget(text: string): number {
+	const budget = /^\d+$/.test(text) ? Number(text) : Number.NaN;
+	if (!(budget >= MIN_BUDGET)) {
+		throw new Error(`history:// budget must be a whole number of characters, at least ${MIN_BUDGET}; got "${text}"`);
+	}
+	return budget;
+}
+
+/** `3` (one turn), `3,5` (inclusive); negatives count back from the last turn. */
+function parseTurns(text: string): number | [number, number] {
+	const match = /^(-?\d+)(?:,(-?\d+))?$/.exec(text);
+	if (!match) throw new Error(`history:// turns takes a turn or a range like 3,5 or -3,-1; got "${text}"`);
+	return match[2] === undefined ? Number(match[1]) : [Number(match[1]), Number(match[2])];
 }
 
 /** Registry lookup for a `history://<id>` URL, bound to the caller's root. */
@@ -131,7 +210,12 @@ function appendTextContent(lines: string[], content: string | readonly { type: s
 	}
 }
 
-function appendRawMessage(lines: string[], message: AgentMessage): void {
+/** A summary as the reader may see it: snapcompact `¶think:` sections go when it excludes reasoning. */
+function summaryText(text: string, includeThinking: boolean): string {
+	return includeThinking ? text : textWithoutThinking(text);
+}
+
+function appendRawMessage(lines: string[], message: AgentMessage, includeThinking: boolean): void {
 	switch (message.role) {
 		case "user":
 		case "developer":
@@ -143,8 +227,9 @@ function appendRawMessage(lines: string[], message: AgentMessage): void {
 			lines.push("### assistant");
 			for (const block of assistantMessage.content) {
 				if (block.type === "text") lines.push(block.text);
-				else if (block.type === "thinking") lines.push("<thinking>", block.thinking, "</thinking>");
-				else if (block.type === "toolCall") {
+				else if (block.type === "thinking") {
+					if (includeThinking) lines.push("<thinking>", block.thinking, "</thinking>");
+				} else if (block.type === "toolCall") {
 					lines.push(`#### tool call: ${block.name} (${block.id})`);
 					lines.push(jsonFence(JSON.stringify(block.arguments, null, 2) ?? "null"));
 				} else if (block.type === "redactedThinking") {
@@ -222,14 +307,17 @@ function appendRawMessage(lines: string[], message: AgentMessage): void {
 		}
 		case "branchSummary": {
 			const branchSummary = message as BranchSummaryMessage;
-			lines.push(`### branch summary (from ${branchSummary.fromId})`, branchSummary.summary);
+			lines.push(
+				`### branch summary (from ${branchSummary.fromId})`,
+				summaryText(branchSummary.summary, includeThinking),
+			);
 			return;
 		}
 		case "compactionSummary": {
 			const compactionSummary = message as CompactionSummaryMessage;
 			lines.push(
 				`### compaction summary (${compactionSummary.tokensBefore} tokens before)`,
-				compactionSummary.summary,
+				summaryText(compactionSummary.summary, includeThinking),
 			);
 			return;
 		}
@@ -250,7 +338,7 @@ function appendRawMessage(lines: string[], message: AgentMessage): void {
 	}
 }
 
-function renderRawEntry(lines: string[], entry: SessionEntry): void {
+function renderRawEntry(lines: string[], entry: SessionEntry, includeThinking: boolean): void {
 	lines.push(
 		`## Entry ${entry.id} · ${entry.type}`,
 		"",
@@ -259,7 +347,7 @@ function renderRawEntry(lines: string[], entry: SessionEntry): void {
 		"",
 	);
 	if (entry.type === "message") {
-		appendRawMessage(lines, entry.message);
+		appendRawMessage(lines, entry.message, includeThinking);
 		return;
 	}
 	if (entry.type === "compaction") {
@@ -269,7 +357,7 @@ function renderRawEntry(lines: string[], entry: SessionEntry): void {
 			`First kept entry: ${entry.firstKeptEntryId}`,
 			`Tokens before: ${entry.tokensBefore}`,
 			"",
-			entry.summary,
+			summaryText(entry.summary, includeThinking),
 		);
 		return;
 	}
@@ -278,7 +366,7 @@ function renderRawEntry(lines: string[], entry: SessionEntry): void {
 		return;
 	}
 	if (entry.type === "branch_summary") {
-		lines.push(`From entry: ${entry.fromId}`, "", entry.summary);
+		lines.push(`From entry: ${entry.fromId}`, "", summaryText(entry.summary, includeThinking));
 		return;
 	}
 	lines.push(jsonFence(JSON.stringify(entry, null, 2) ?? "null"));
@@ -288,9 +376,14 @@ function renderRawEntry(lines: string[], entry: SessionEntry): void {
  * Render every persisted entry on the caller's live branch without the
  * compaction filters that shape model context. Each block begins with the
  * durable session-entry id, making references unambiguous across compactions
- * and branch rewinds.
+ * and branch rewinds. `includeThinking: false` leaves assistant reasoning out,
+ * for a reader whose classifier refuses its own reasoning quoted back as text
+ * (`classifier-cot-extraction`, Claude's `reasoning_extraction`).
  */
-export function formatCurrentBranchFullHistory(entries: readonly SessionEntry[]): string {
+export function formatCurrentBranchFullHistory(
+	entries: readonly SessionEntry[],
+	options: { includeThinking: boolean } = { includeThinking: true },
+): string {
 	const lines = [
 		"# Current branch — full history",
 		"",
@@ -298,7 +391,7 @@ export function formatCurrentBranchFullHistory(entries: readonly SessionEntry[])
 		"",
 	];
 	for (const entry of entries) {
-		renderRawEntry(lines, entry);
+		renderRawEntry(lines, entry, options.includeThinking);
 		lines.push("");
 	}
 	return `${lines.join("\n").trim()}\n`;
@@ -387,7 +480,11 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		if (!branch) {
 			throw new Error("history://current/full requires a bound live session branch");
 		}
-		const content = formatCurrentBranchFullHistory(branch);
+		// The caller reads its own branch: reasoning goes back to the model that wrote it.
+		const reader = context.session?.getActiveModel?.();
+		const content = formatCurrentBranchFullHistory(branch, {
+			includeThinking: reader !== undefined && readerIncludesThinking(reader),
+		});
 		return {
 			url: url.href,
 			content,
@@ -417,7 +514,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		if (!ref) {
 			// Registry miss — the agent may have been unregistered or lost on resume.
 			// Serve its transcript straight from disk if the session file persists.
-			const disk = await this.#resolveFromDisk(agentId, preferredArtifactDir);
+			const disk = await this.#resolveFromDisk(url, agentId, preferredArtifactDir);
 			if (disk) return { ...disk, url: url.href };
 
 			const known = visible.map(candidate => candidate.id);
@@ -426,7 +523,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		}
 
 		const notes: string[] = [];
-		let messages: unknown[];
+		let messages: readonly AgentMessage[];
 		if (ref.session) {
 			messages = ref.session.messages;
 			notes.push("Source: live session");
@@ -436,7 +533,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		} else {
 			// No live session and no retained sessionFile — try the disk scan before
 			// giving up, in case the transcript lingers under an artifacts dir.
-			const disk = await this.#resolveFromDisk(ref.id, preferredArtifactDir);
+			const disk = await this.#resolveFromDisk(url, ref.id, preferredArtifactDir);
 			if (disk) return { ...disk, url: url.href };
 			if (ref.status === "running") {
 				// Registered before its session or JSONL exists: the worker is alive,
@@ -459,7 +556,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 			throw new Error(`Agent ${ref.id} has no transcript: session is gone and no session file was retained`);
 		}
 
-		const content = formatSessionHistoryMarkdown(messages, { title: `${ref.id} (${ref.status})` });
+		const content = renderTranscriptMessages(messages, historyViewOptions(url, `# ${ref.id} (${ref.status})`)).text;
 		return {
 			url: url.href,
 			content,
@@ -477,11 +574,15 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 	 * known — is scanned before every registry-derived dir, so a same-id
 	 * transcript from another root cannot shadow the caller's own.
 	 */
-	async #resolveFromDisk(agentId: string, preferredArtifactDir?: string): Promise<InternalResource | undefined> {
+	async #resolveFromDisk(
+		url: InternalUrl,
+		agentId: string,
+		preferredArtifactDir?: string,
+	): Promise<InternalResource | undefined> {
 		const match = await this.#findOnDisk(agentId, preferredArtifactDir);
 		if (!match) return undefined;
 		const messages = await loadSessionMessagesReadOnly(match.file);
-		const content = formatSessionHistoryMarkdown(messages, { title: `${match.id} (on disk)` });
+		const content = renderTranscriptMessages(messages, historyViewOptions(url, `# ${match.id} (on disk)`)).text;
 		return {
 			url: "",
 			content,

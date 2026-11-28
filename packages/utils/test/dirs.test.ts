@@ -11,7 +11,9 @@ import {
 	getProjectDir,
 	getTestTempDir,
 	localDay,
+	relativePathWithinNormalizedRoot,
 	relativePathWithinRoot,
+	resolveEquivalentPath,
 	setProjectDir,
 } from "@oh-my-pi/pi-utils/dirs";
 
@@ -66,6 +68,16 @@ describe("project directory state", () => {
 		} finally {
 			stat.mockRestore();
 		}
+	});
+
+	it("treats a child whose name starts with two dots as inside, and a parent or sibling as outside", () => {
+		const root = path.resolve("containment-root");
+		expect(relativePathWithinNormalizedRoot(root, path.join(root, "..hidden", "file"))).toBe(
+			path.join("..hidden", "file"),
+		);
+		expect(relativePathWithinNormalizedRoot(root, root)).toBe("");
+		expect(relativePathWithinNormalizedRoot(root, path.dirname(root))).toBeNull();
+		expect(relativePathWithinNormalizedRoot(root, path.join(root, "..", "sibling"))).toBeNull();
 	});
 
 	it("normalizes each containment operand only once", () => {
@@ -149,6 +161,41 @@ describe("getTestTempDir", () => {
 			} else {
 				Reflect.deleteProperty(process, "getuid");
 			}
+		}
+	});
+});
+
+describe("resolveEquivalentPath", () => {
+	it("falls back to the lexical project path when realpath fails", () => {
+		const inputPath = path.resolve("/sessions/link-project");
+		const realpathSpy = vi.spyOn(fs, "realpathSync").mockImplementation((() => {
+			const error = new Error("ENOENT: no such file or directory, realpath");
+			(error as NodeJS.ErrnoException).code = "ENOENT";
+			throw error;
+		}) as unknown as typeof fs.realpathSync);
+
+		expect(resolveEquivalentPath(inputPath)).toBe(inputPath);
+		expect(realpathSpy).toHaveBeenCalledWith(inputPath);
+	});
+
+	it("resolves a missing path through its deepest existing ancestor only when asked", () => {
+		const temp = fs.mkdtempSync(path.join(os.tmpdir(), "omp-through-missing-"));
+		try {
+			const real = path.join(temp, "real");
+			const link = path.join(temp, "link");
+			fs.mkdirSync(real);
+			try {
+				fs.symlinkSync(real, link, "junction");
+			} catch {
+				return; // Symlinks unavailable on this host.
+			}
+			const missing = path.join(link, "sub", "new.ts");
+			expect(resolveEquivalentPath(missing)).toBe(missing);
+			expect(resolveEquivalentPath(missing, { throughMissing: true })).toBe(
+				path.join(fs.realpathSync(real), "sub", "new.ts"),
+			);
+		} finally {
+			fs.rmSync(temp, { recursive: true, force: true });
 		}
 	});
 });

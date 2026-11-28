@@ -25,7 +25,13 @@ use omp_vfs::Metadata;
 use regex::{Regex, RegexBuilder};
 
 use self::exec::{Exec, ExecArgs};
-use crate::host::{AsyncUtility, Host, forward_slash_display};
+use crate::{
+	host::{AsyncUtility, Host, forward_slash_display},
+	root_guard,
+};
+
+/// `fd`'s spelling of the [`root_guard`] escape hatches.
+const ROOT_FLAGS: root_guard::Flags = root_guard::Flags { allow: "--allow-root", depth: Some("--max-depth") };
 
 #[derive(Parser, Debug)]
 #[command(
@@ -156,6 +162,10 @@ pub(crate) struct FdCli {
 	/// Only show search results at the exact given depth.
 	#[arg(long = "exact-depth", value_name = "depth")]
 	exact_depth: Option<usize>,
+
+	/// Permit searching a filesystem root such as / deeper than --max-depth 2.
+	#[arg(long = "allow-root")]
+	allow_root: bool,
 
 	/// Exclude files/directories that match the given glob pattern.
 	#[arg(short = 'E', long = "exclude", value_name = "pattern")]
@@ -570,6 +580,14 @@ async fn search(cli: FdCli, base_dir: PathBuf, host: &mut Host) -> io::Result<Se
 
 	let fs = host.vfs();
 	let search_paths = resolve_search_paths(&cli, &base_dir, host)?;
+	if !cli.allow_root {
+		root_guard::check(
+			search_paths.iter().map(|path| &path.resolved),
+			cli.exact_depth.or(cli.max_depth),
+			ROOT_FLAGS,
+		)
+		.map_err(io::Error::other)?;
+	}
 	let mut exec = Exec::new(&cli, &base_dir)?;
 	let types = build_type_filter(&cli.types)?;
 	let filter = Arc::new(Filter {
@@ -1430,6 +1448,17 @@ mod tests {
 		fs::write(tree.path().join("filler.txt"), b"filler\n")
 			.expect("filler file should be written");
 		tree
+	}
+
+	/// Failure mode: `fd x /` walked the whole disk for hours.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn refuses_to_search_the_filesystem_root() {
+		let tree = seeded_tree("root");
+		let (code, capture) = run_async_util::<FdCli>(&["--max-depth", "3", "needle", "/"], "", tree.path()).await;
+		assert_eq!((code, capture.out().as_str()), (2, ""));
+		let err = capture.err();
+		assert!(err.starts_with("fd: refusing") && err.contains("--allow-root"), "stderr: {err}");
 	}
 
 	/// Matches print in path order; `.fdignore` beats `.gitignore` and prunes

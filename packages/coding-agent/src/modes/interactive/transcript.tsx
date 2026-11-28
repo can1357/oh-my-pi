@@ -8,12 +8,14 @@
  * Settle rules: a reply settles when its view is finalized; a card on its
  * final result (a parked background card keeps taking frames: natively they
  * repaint, a terminal retires it as it was) unless the result gives way to the
- * next call (a `wait` poll whose jobs still run, a `todo`
- * snapshot), which the event controller seals; a read group only when sealed;
- * a run once it completes.
+ * next call (a `wait` poll whose jobs still run), which the event controller
+ * seals; a read group only when sealed; a run once it completes. A live block
+ * holds every block after it out of terminal scrollback, so a `todo` snapshot
+ * settles too, though a later update may still replace it; a live one that
+ * completed tasks stays live while their strike plays.
  */
 import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import {
 	type Accessor,
 	batch,
@@ -21,6 +23,7 @@ import {
 	effect,
 	type Host,
 	type JSXNode,
+	onCleanup,
 	type Signal,
 	signal,
 	untrack,
@@ -34,9 +37,12 @@ import type {
 } from "../../extensibility/extensions/render-types";
 import type { AgentViewSession } from "../../session/agent-session-handle";
 import type { BashExecutionMessage, PythonExecutionMessage } from "../../session/transcript/messages";
+import type { ToolActivityMode } from "../settings";
 import { isReplyWrite, replyDisplayMessage } from "../../session/transcript/reply-write";
 import { messageBlock, readTranscriptPresentation } from "../../session/transcript/transcript-presentation";
+import { capturePage } from "../../tools/browser/page-shot";
 import { type SpotlightDetails, spotlightDetails } from "../../tools/details/spotlight";
+import { TODO_STRIKE_FRAME_MS, TODO_STRIKE_TOTAL_FRAMES } from "../../tools/details/todo";
 import { isWaitingPollDetails } from "../../tools/details/wait";
 import { presentShellInspector } from "../../ui/apps/shell-visualizer";
 import "../../ui/tools";
@@ -46,19 +52,22 @@ import "../../ui/styles/tools";
 import "../../ui/styles/transcript/exec-run";
 import "../../ui/styles/transcript/read-group";
 import { defaultPresenter } from "../../ui/tools/default";
+import { toolEditMode } from "../../ui/tools/edit";
 import { legacyPresenter, type LegacyToolRenderer } from "../../ui/tools/legacy";
 import { toolPresenter } from "../../ui/tools/registry";
 import type { ToolCommandMounted } from "../../ui/tools/tool-command";
 import type { BlockOptions, Shell, TranscriptBlock, ViewList } from "../../ui/shell";
-import { mountNode } from "../../ui/shell";
+import { holdSettle, mountNode } from "../../ui/shell";
 import { type ExecRun, ExecRunBlock } from "../../ui/transcript/exec-run";
 import { cardExpansion } from "../../ui/transcript/expansion";
-import { PresentedBlock } from "../../ui/transcript/figures/presented-block";
+import { PresentedBlock, presentedMode } from "../../ui/transcript/figures/presented-block";
 import { SpotlightNotice } from "../../ui/transcript/figures/spotlight";
+import type { FigureCell } from "../../ui/transcript/figures/svg";
 import {
 	AssistantMessageBlock,
 	type AssistantMessageModel,
 	thinkingTail,
+	type ToolResultMedia,
 } from "../../ui/transcript/messages/assistant-message";
 import { ThinkingRateMeter } from "../../session/transcript/thinking-speed";
 import { ReadGroup, ReadGroupBlock, type ReadResult } from "../../ui/transcript/read-group";
@@ -76,13 +85,22 @@ import type {
 /** The view's display flags, as signals every block reads. */
 export interface DisplayFlags {
 	readonly toolOutputExpanded: Signal<boolean>;
-	readonly hideToolActivity: Signal<boolean>;
+	/** `display.toolActivity`. */
+	readonly toolActivity: Signal<ToolActivityMode>;
 	/** Thinking hidden (the effective state: the setting, or thinking off with nothing to reveal). */
 	readonly hideThinking: Signal<boolean>;
 	readonly proseOnlyThinking: Signal<boolean>;
 	readonly expandThinkingBlocks: Signal<boolean>;
 	/** `terminal.showImages`. */
 	readonly showImages: Signal<boolean>;
+	/** `tui.renderSvg`. */
+	readonly renderSvg: Signal<boolean>;
+	/** `tui.renderEmbeds`. */
+	readonly renderEmbeds: Signal<boolean>;
+	/** Cell size when the terminal supports inline pictures. */
+	readonly figureCell: Signal<FigureCell | undefined>;
+	/** Rows a reply's figure may take (a share of the terminal's); undefined: as tall as it draws. */
+	readonly figureRows: Signal<number | undefined>;
 	/** Tables get charts (the main session's do, a focused subagent's do not). */
 	readonly tableCharts: Accessor<boolean>;
 	/** Show bash commands through the shell engine's presentation (`display.shellVisualization`). */
@@ -265,7 +283,7 @@ export class TranscriptPresenter {
 			transient: signal(false),
 			finalized: signal(message !== undefined),
 			linkTargets: signal<ReadonlyMap<string, string>>(options?.linkTargets ?? this.#host.linkTargets()),
-			toolResultImages: signal<ReadonlyMap<string, readonly ImageContent[]>>(new Map()),
+			toolResultMedia: signal<ReadonlyMap<string, ToolResultMedia>>(new Map()),
 			cacheInvalidation: signal<AssistantView["cacheInvalidation"] extends Signal<infer T> ? T : never>(undefined),
 			servedModelMismatch:
 				signal<AssistantView["servedModelMismatch"] extends Signal<infer T> ? T : never>(undefined),
@@ -275,6 +293,7 @@ export class TranscriptPresenter {
 			errorExpanded: signal(false),
 		};
 		const thinkingRate = signal(0);
+		const sessionManager = this.#host.viewSession.sessionManager;
 		const model: AssistantMessageModel = {
 			message: signals.message,
 			transient: signals.transient,
@@ -283,9 +302,14 @@ export class TranscriptPresenter {
 			expandThinking: display.expandThinkingBlocks,
 			proseOnlyThinking: display.proseOnlyThinking.peek(),
 			showImages: display.showImages,
-			showToolResultImages: () => !display.hideToolActivity(),
+			renderSvg: display.renderSvg,
+			renderEmbeds: display.renderEmbeds,
+			figureCell: display.figureCell,
+			figureRows: display.figureRows,
+			embedHost: { cwd: () => sessionManager.getCwd(), capturePage },
+			showToolResultImages: () => display.toolActivity() !== "hidden",
 			tableCharts: display.tableCharts,
-			toolResultImages: signals.toolResultImages,
+			toolResultMedia: signals.toolResultMedia,
 			linkTargets: signals.linkTargets,
 			...(options?.tone ? { tone: options.tone } : {}),
 			errorExpanded: () => signals.errorExpanded() || display.toolOutputExpanded(),
@@ -345,8 +369,14 @@ export class TranscriptPresenter {
 			});
 			return <AssistantMessageBlock model={model} />;
 		};
-		const block = this.#mount(factory, options?.before);
-		const view: AssistantView = { block, model, ...signals };
+		const block = this.#mount(factory, { before: options?.before });
+		const view: AssistantView = {
+			block,
+			model,
+			...signals,
+			setToolResultMedia: (toolCallId, media) =>
+				signals.toolResultMedia.update(current => new Map(current).set(toolCallId, media)),
+		};
 		this.register(block, { kind: "assistant", view });
 		return view;
 	}
@@ -366,6 +396,7 @@ export class TranscriptPresenter {
 		const { display } = this.#host;
 		if (face.reaction) this.#reactionTarget = face.reaction;
 		const presented = face.presented;
+		const packed = signal(false);
 		const factory = presented
 			? () => {
 					const fold = cardExpansion(display.toolOutputExpanded);
@@ -377,14 +408,21 @@ export class TranscriptPresenter {
 							presentation={presentation}
 							expanded={fold.expanded}
 							onToggle={fold.toggle}
-							activityVisible={() => !display.hideToolActivity()}
+							activityVisible={() => display.toolActivity() !== "hidden"}
+							packed={packed}
 						>
 							{face.face({ expanded: fold.expanded, onToggle: expanded => fold.toggle(!expanded) })}
 						</PresentedBlockNode>
 					);
 				}
 			: face.face;
-		const block = this.#mount(factory, options?.before, face.compact ? { compact: face.compact } : undefined);
+		const own = face.compact;
+		const compact = presented ? (own ? () => packed() || own() : packed) : own;
+		const block = this.#mount(factory, {
+			before: options?.before,
+			prompt: message.role === "user" && !message.synthetic && !message.parentIrc,
+			...(compact ? { compact } : {}),
+		});
 		this.register(block, { kind: "message", message });
 		if (!options?.live) this.#settle(block);
 		return block;
@@ -423,15 +461,29 @@ export class TranscriptPresenter {
 			shellVisualization: display.shellVisualization.peek(),
 			inspectShell: source => presentShellInspector(this.#host.shell, source),
 			mcpMarkdown: display.mcpMarkdown.peek(),
+			...(spec.timestamp !== undefined ? { timestamp: spec.timestamp } : {}),
 		});
+		const editMode = toolEditMode(spec.name, spec.tool);
+		if (editMode) call.setRenderContext({ editMode });
 		const presentedId = signal(spec.id);
-		const block = this.#mount(() => {
+		// A live `todo` result strikes the tasks it completed through on the spinner clock, which the
+		// look plays only while the block is live: the card holds its settle for the strike while it
+		// draws its look (not with tool activity hidden or a compact presentation). A replayed one
+		// does not hold (a rebuild would pin the transcript behind it).
+		const striking = spec.name === "todo" ? signal(false) : undefined;
+		let strikeEnd: Timer | undefined;
+		const factory = () => {
+			if (striking) {
+				const facts = call.facts;
+				holdSettle(() => striking() && facts.activityVisible() && facts.presentation() === "full");
+				onCleanup(() => clearTimeout(strikeEnd));
+			}
 			effect(() => {
 				const value = display.toolOutputExpanded();
 				untrack(() => call.setExpanded(value));
 			});
 			effect(() => {
-				const value = !display.hideToolActivity();
+				const value = display.toolActivity() !== "hidden";
 				untrack(() => call.setActivityVisible(value));
 			});
 			effect(() => {
@@ -447,11 +499,13 @@ export class TranscriptPresenter {
 					args: call.facts.args(),
 					...(result ? { result } : {}),
 					isError: result?.isError === true,
+					// What omp's own card draws: a viewport-only Bash card shows its job frames as static
+					// results, so a presenter sees no partial-to-final flip when its rows reach scrollback.
 					isPartial: result === undefined || call.facts.partial(),
 				});
 			});
 			effect(() => {
-				const presentation = toolPresentation(answer());
+				const presentation = toolPresentation(answer(), display.toolActivity());
 				untrack(() => call.setPresentation(presentation));
 			});
 			this.#watchPresentation(() => block, answer);
@@ -461,13 +515,11 @@ export class TranscriptPresenter {
 				return result && !call.facts.partial() ? this.#spotlightNotice(call.id, result) : undefined;
 			};
 			return [<ToolBlock call={call} />, notice];
-		}, before);
+		};
+		const block = this.#mount(factory, { before, compact: () => call.facts.presentation() !== "full" });
 		const settleIfFinal = (result: ToolCallResult, partial: boolean): void => {
 			if (partial) return;
-			if (result.isError !== true) {
-				if (spec.name === "wait" && isWaitingPollDetails(result.details)) return;
-				if (spec.name === "todo" && hasTodoPhases(result.details)) return;
-			}
+			if (spec.name === "wait" && result.isError !== true && isWaitingPollDetails(result.details)) return;
 			this.#settle(block);
 		};
 		return {
@@ -477,6 +529,11 @@ export class TranscriptPresenter {
 			updateStreamPreview: preview => call.updateStreamPreview(preview),
 			updateResult: (result, partial) => {
 				call.updateResult(result, partial);
+				if (striking && !partial && completesTasks(result) && untrack(call.facts.startedAt) !== undefined) {
+					clearTimeout(strikeEnd);
+					striking.set(true);
+					strikeEnd = setTimeout(() => striking.set(false), TODO_STRIKE_HOLD_MS);
+				}
 				settleIfFinal(result, partial);
 			},
 			setArgsComplete: () => call.setArgsComplete(),
@@ -533,7 +590,7 @@ export class TranscriptPresenter {
 			<SpotlightNotice
 				toolCallId={toolCallId}
 				spotlight={spotlight}
-				hidden={() => this.#host.display.hideToolActivity()}
+				hidden={() => this.#host.display.toolActivity() === "hidden"}
 				onOpen={() => this.#host.openSpotlight?.(spotlight, reduced)}
 			/>
 		);
@@ -553,15 +610,15 @@ export class TranscriptPresenter {
 			answers.set(read.id, key);
 			if (last !== undefined && last !== key && untrack(() => this.#host.shell.transcript.retired(block)))
 				this.#oweReplay();
-			return toolPresentation(answer);
+			return toolPresentation(answer, display.toolActivity());
 		});
-		const block = this.#mount(() => {
+		const factory = () => {
 			effect(() => {
 				const value = display.toolOutputExpanded();
 				untrack(() => group.setExpanded(value));
 			});
 			effect(() => {
-				const value = !display.hideToolActivity();
+				const value = display.toolActivity() !== "hidden";
 				untrack(() => group.setActivityVisible(value));
 			});
 			effect(() => {
@@ -572,11 +629,12 @@ export class TranscriptPresenter {
 			const notices = (): JSXNode[] =>
 				[...finals().entries()].map(([id, result]) => this.#spotlightNotice(id, result));
 			return [ReadGroupBlock({ group }), notices];
-		}, options?.before);
+		};
+		const block = this.#mount(factory, { before: options?.before, compact: group.compact });
 		const pending: PendingTool = {
 			block,
 			group,
-			updateArgs: (args, id) => group.updateArgs(isRecord(args) ? args : {}, id),
+			updateArgs: (args, id, timestamp) => group.updateArgs(isRecord(args) ? args : {}, id, timestamp),
 			updateStreamPreview: () => {},
 			updateResult: (result, partial, id) => {
 				group.updateResult(result as ReadResult, partial, id);
@@ -639,21 +697,27 @@ export class TranscriptPresenter {
 	}
 
 	#mountRun(run: ExecRun, message: Signal<BashExecutionMessage | PythonExecutionMessage>): TranscriptBlock {
-		const block = this.#mount(() => {
+		const packed = signal(false);
+		const factory = () => {
 			effect(() => {
 				if (run.status() !== "running") this.#settleSoon(() => block);
 			});
-			return this.#runFace(run, message, () => block);
-		}, undefined);
+			return this.#runFace(run, message, () => block, packed);
+		};
+		const block = this.#mount(factory, { compact: packed });
 		this.register(block, { kind: "exec", run });
 		return block;
 	}
 
-	/** A `!`/`$` run's face; `block` is its transcript block once mounted (none while deferred). */
+	/**
+	 * A `!`/`$` run's face; `block` is its transcript block once mounted (none while deferred), and
+	 * `packed` follows whether presenters draw it compact or hidden.
+	 */
 	#runFace(
 		run: ExecRun,
 		message: Signal<BashExecutionMessage | PythonExecutionMessage>,
 		block: () => TranscriptBlock | undefined,
+		packed?: Signal<boolean>,
 	): JSXNode {
 		const { display } = this.#host;
 		effect(() => {
@@ -669,16 +733,22 @@ export class TranscriptPresenter {
 				presentation={presentation}
 				expanded={run.expanded}
 				onToggle={collapsed => run.toggle(collapsed)}
-				activityVisible={() => !display.hideToolActivity()}
+				activityVisible={() => display.toolActivity() !== "hidden"}
+				{...(packed ? { packed } : {})}
 			>
 				<ExecRunBlock run={run} />
 			</PresentedBlockNode>
 		);
 	}
 
-	#mount(factory: () => JSXNode, before: TranscriptBlock | undefined, options?: BlockOptions): TranscriptBlock {
+	/** Mount a transcript block, before `options.before` when given, else at the end. */
+	#mount(
+		factory: () => JSXNode,
+		options: BlockOptions & { readonly before?: TranscriptBlock | undefined },
+	): TranscriptBlock {
+		const { before, ...rest } = options;
 		const transcript = this.#host.shell.transcript;
-		return before ? transcript.insertBefore(before, factory, options) : transcript.append(factory, options);
+		return before ? transcript.insertBefore(before, factory, rest) : transcript.append(factory, rest);
 	}
 
 	#settle(block: TranscriptBlock): void {
@@ -698,8 +768,16 @@ function PresentedBlockNode(props: {
 	readonly expanded: () => boolean;
 	readonly onToggle: (collapsed: boolean) => void;
 	readonly activityVisible: () => boolean;
+	/** Set while the block draws compact or hidden: its transcript block then packs against compact neighbours. */
+	readonly packed?: Signal<boolean>;
 	readonly children: JSXNode;
 }): JSXNode {
+	const packed = props.packed;
+	if (packed)
+		effect(() => {
+			const value = presentedMode(props.block(), props.presentation(), props.expanded()) !== "full";
+			untrack(() => packed.set(value));
+		});
 	return () => (
 		<PresentedBlock
 			block={props.block()}
@@ -713,29 +791,47 @@ function PresentedBlockNode(props: {
 	);
 }
 
-/** A presenters' answer as a tool card's presentation. */
-function toolPresentation(answer: TranscriptPresentation): ToolPresentation {
-	if (answer === undefined || answer === "full") return "full";
+/**
+ * A presenters' answer as a tool card's presentation (a string label or row loses its control
+ * sequences); without an answer the call draws as `display.toolActivity` says.
+ */
+function toolPresentation(answer: TranscriptPresentation, mode: ToolActivityMode): ToolPresentation {
+	if (answer === undefined) return mode === "concise" ? "concise" : "full";
+	if (answer === "full") return "full";
 	if (answer === "hidden" || answer === "compact") return answer;
 	const { label, rows } = answer.compact;
 	return {
 		compact: {
-			...(label !== undefined ? { label: spanText(label) } : {}),
-			...(rows ? { rows: rows.map(spanText) } : {}),
+			...(label !== undefined ? { label: plainText(label) } : {}),
+			...(rows ? { rows: rows.map(plainText) } : {}),
 		},
 	};
 }
 
-function spanText(text: TspText): string {
-	return typeof text === "string" ? stripEscapes(text) : text.map(part => part.t).join("");
+/** `text` without control sequences when a string; spans keep their theme tokens. */
+function plainText(text: TspText): TspText {
+	return typeof text === "string" ? stripEscapes(text) : text;
 }
 
 function textOf(message: AssistantMessage | undefined): string {
 	return (message?.content ?? []).map(part => (part.type === "text" ? part.text : "")).join("");
 }
 
-function hasTodoPhases(details: unknown): boolean {
-	return isRecord(details) && Array.isArray(details.phases);
+/**
+ * How long a live `todo` result keeps its card live for its completion strike: at most the strike's
+ * frames plus one from the list's first paint, which lands a frame later.
+ */
+const TODO_STRIKE_HOLD_MS = (TODO_STRIKE_TOTAL_FRAMES + 2) * TODO_STRIKE_FRAME_MS;
+
+/** Whether a final `todo` result completed tasks (its card strikes them through). */
+function completesTasks(result: ToolCallResult): boolean {
+	const details = result.details;
+	return (
+		result.isError !== true &&
+		isRecord(details) &&
+		Array.isArray(details.completedTasks) &&
+		details.completedTasks.length > 0
+	);
 }
 
 /** An extension tool's render hooks, when it has any. */

@@ -8,11 +8,13 @@ import { untrack } from "@oh-my-pi/pi-tui";
 import type { TerminalCapabilities } from "@oh-my-pi/pi-tui/driver/contract";
 import type { TerminalDriverOptions } from "@oh-my-pi/pi-tui/driver/index";
 import { getProjectDir } from "@oh-my-pi/pi-utils/dirs";
+import { exitProcess } from "@oh-my-pi/pi-utils/postmortem";
 import { initTheme } from "../ui/theme/service";
 import { composerBorderColor } from "./interactive/border-color";
 import { AppFrame } from "./interactive/frame";
 import { type StartupCache, type StartupPreferences, sharedStartupCache } from "./interactive/startup-cache";
 import { predictedStatusLine, type StatusPrediction } from "./interactive/status-prediction";
+import { ownStartupFrame } from "./startup-frame";
 import type { ComposerThemePreferences } from "./view-model/prompt/composer-cache";
 
 /** The preferences a frame starts with when nothing is cached. */
@@ -22,13 +24,15 @@ const STARTUP_DEFAULTS: StartupPreferences = {
 	resizeScrollback: "rebuild",
 	autocompleteMaxVisible: 5,
 	vim: false,
+	imeSafeCursor: false,
+	screen: "inline",
 };
 
 /** Inputs available at the CLI prepaint boundary before command modules load. */
 export interface PrepaintComposerOptions {
 	/** Driver options (test streams). */
 	readonly driver?: TerminalDriverOptions;
-	/** Emergency exit before the interactive mode's keys take over (default: `process.exit`). */
+	/** Override the host's emergency exit before interactive keybindings take over. */
 	readonly exit?: (code: number) => void;
 	readonly version?: string;
 	readonly cwd?: string;
@@ -41,59 +45,12 @@ export interface PrepaintComposerOptions {
 	readonly cache?: boolean;
 }
 
-/** Final settings pushed into the live frame after Settings and the theme resolve. */
-export interface PrepaintComposerPreferences extends StartupPreferences {
-	readonly theme: ComposerThemePreferences;
-}
-
-interface PendingFrame {
-	readonly frame: AppFrame;
-	/** Settles once the frame drew its first frame. */
-	readonly started: Promise<void>;
-	readonly cwd: string;
-	/** Speculation store to refresh; `undefined` when caching is off or unavailable. */
-	readonly cache: StartupCache | undefined;
-	/** Drops the prepaint key handler (emergency Ctrl+C / Ctrl+D). */
-	readonly releaseKeys: () => void;
-}
-
-let pending: PendingFrame | undefined;
-
-/** Ownership token that transfers one started frame to InteractiveMode. */
-export class ComposerLease {
-	readonly frame: AppFrame;
-	/** Settles once the frame drew its first frame (the interactive mode adopts a started frame). */
-	readonly ready: Promise<void>;
-	readonly #releaseKeys: () => void;
-	#adopted = false;
-
-	constructor(frame: AppFrame, ready: Promise<void>, releaseKeys: () => void) {
-		this.frame = frame;
-		this.ready = ready;
-		this.#releaseKeys = releaseKeys;
-	}
-
-	/**
-	 * The interactive mode owns the frame from now on. The emergency keys stay live until its own key
-	 * handlers are installed ({@link AppFrame.releaseStartupKeys}): a stalled startup still exits.
-	 */
-	adopt(): void {
-		if (this.#adopted) return;
-		this.frame.holdStartupKeys(this.#releaseKeys);
-		this.#adopted = true;
-	}
-
-	/** Stop an unadopted frame when startup exits before InteractiveMode. */
-	dispose(): void {
-		if (this.#adopted) return;
-		this.#releaseKeys();
-		void this.frame.shell.stop();
-	}
-}
-
 /** Start the frame with the cached preferences. */
 export function beginStartupComposer(options: PrepaintComposerOptions = {}): void {
-	if (pending) throw new Error("A prepaint composer is already active");
+	ownStartupFrame(() => startFrame(options));
+}
+
+function startFrame(options: PrepaintComposerOptions) {
 	// The project dir the session will report (macOS `/private/tmp` → `/tmp`): the cache key the
 	// live bar writes under, and the path the predicted bar shows.
 	const cwd = options.cwd ?? getProjectDir();
@@ -115,7 +72,9 @@ export function beginStartupComposer(options: PrepaintComposerOptions = {}): voi
 		intro: true,
 		vim: preferences.vim,
 		autocompleteMaxVisible: preferences.autocompleteMaxVisible,
+		imeSafeCursor: preferences.imeSafeCursor,
 	});
+	frame.screen.set(preferences.screen);
 	// Nothing would submit yet: the interactive mode lifts this once its pipeline exists.
 	frame.composer.setDisableSubmit(true);
 	// The bar and border a fresh session here will show; the interactive mode swaps in the live ones.
@@ -129,7 +88,8 @@ export function beginStartupComposer(options: PrepaintComposerOptions = {}): voi
 			thinkingLevel: status?.facts.thinkingLevel ?? "off",
 		}),
 	);
-	const exit = options.exit ?? ((code: number) => process.exit(code));
+	// The keyboard belongs to the host even while a tool factory has guarded process.exit.
+	const exit = options.exit ?? ((code: number) => exitProcess(code, { emitExitEvent: true }));
 	// Until the interactive mode's keys exist: Ctrl+C clears a draft, then exits (130); Ctrl+D
 	// forward-deletes in a draft and exits (0) on an empty one, so a raw-mode user can always abort.
 	// Ahead of the focused composer, which takes both keys for its own editing.
@@ -152,7 +112,7 @@ export function beginStartupComposer(options: PrepaintComposerOptions = {}): voi
 	});
 	// Remember the background the terminal reports (OSC 11), so the next launch paints for it.
 	if (cache) void started.then(() => rememberAppearance(frame, cache, cwd));
-	pending = { frame, started, cwd, cache, releaseKeys };
+	return { frame, started, cwd, cache, releaseKeys };
 }
 
 /** Cache each appearance the terminal reports for the frame's lifetime (its driver's). */
@@ -165,32 +125,4 @@ function rememberAppearance(frame: AppFrame, cache: StartupCache, cwd: string): 
 	};
 	record(driver.capabilities);
 	driver.onCapabilities(record);
-}
-
-/** Take the prepaint frame away from the module-level startup owner. */
-export function takeStartupComposerLease(): ComposerLease | undefined {
-	const current = pending;
-	pending = undefined;
-	return current ? new ComposerLease(current.frame, current.started, current.releaseKeys) : undefined;
-}
-
-/** Stop and forget a prepaint frame that never reached InteractiveMode. */
-export function stopPendingStartupComposer(): void {
-	if (!pending) return;
-	pending.releaseKeys();
-	void pending.frame.shell.stop();
-	pending = undefined;
-}
-
-/** Apply the resolved settings to the pending frame and cache them for the next first frame. */
-export function applyStartupComposerPreferences(update: PrepaintComposerPreferences): void {
-	const current = pending;
-	if (!current) return;
-	const { theme, ...preferences } = update;
-	const { frame } = current;
-	frame.setShape(preferences.composerShape);
-	frame.setQuiet(preferences.quiet);
-	frame.composer.setVim(preferences.vim);
-	frame.composer.setAutocompleteMaxVisible(preferences.autocompleteMaxVisible);
-	current.cache?.write(current.cwd, preferences, theme);
 }

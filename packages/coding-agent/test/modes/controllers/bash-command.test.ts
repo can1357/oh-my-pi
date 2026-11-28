@@ -99,7 +99,7 @@ function createCwdContext(sourceDir: string, isStreaming = false, showImages = t
 		shutdown: vi.fn(async () => {}),
 		updateEditorBorderColor: vi.fn(),
 		reloadTodos: vi.fn(async () => {}),
-		statusLine: { refresh: statusRefresh },
+		statusLine: { refreshVcs: statusRefresh },
 	} as unknown as InteractiveModeContext;
 	return { ctx, executeBash, presentExecRun, runs, state, statusRefresh };
 }
@@ -180,8 +180,8 @@ describe("bash shortcut command", () => {
 			expect(ctx.session.moveSession).toHaveBeenNthCalledWith(2, sourceDir);
 			expect(state.executedCwds).toEqual([sourceDir, childDir, sourceDir]);
 			expect(executeBash).toHaveBeenCalledTimes(3);
-			expect(ctx.applyCwdChange).toHaveBeenNthCalledWith(1, childDir);
-			expect(ctx.applyCwdChange).toHaveBeenNthCalledWith(2, sourceDir);
+			expect(ctx.applyCwdChange).toHaveBeenNthCalledWith(1, childDir, expect.objectContaining({ restore: false }));
+			expect(ctx.applyCwdChange).toHaveBeenNthCalledWith(2, sourceDir, expect.objectContaining({ restore: false }));
 			expect(ctx.updateEditorBorderColor).toHaveBeenCalledTimes(2);
 			expect(ctx.reloadTodos).toHaveBeenCalledTimes(2);
 			expect(ctx.showError).not.toHaveBeenCalled();

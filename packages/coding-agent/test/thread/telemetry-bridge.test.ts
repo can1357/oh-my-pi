@@ -10,12 +10,7 @@ import type {
 } from "@oh-my-pi/pi-agent-core";
 import { context, type Span, SpanStatusCode, trace } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
-import {
-	BasicTracerProvider,
-	InMemorySpanExporter,
-	type ReadableSpan,
-	SimpleSpanProcessor,
-} from "@opentelemetry/sdk-trace-base";
+import { InMemorySpanExporter, type ReadableSpan, SimpleSpanProcessor, TracerProvider } from "@opentelemetry/sdk-trace";
 import type { MainThreadLink } from "../../src/thread/protocol";
 import { type RpcFrame, RpcLink } from "../../src/thread/rpc";
 import type { WorkerPeer } from "../../src/thread/services";
@@ -24,7 +19,7 @@ import type { TelemetryProbe, TelemetryTestGlobals } from "../fixtures/telemetry
 
 describe("telemetry thread service", () => {
 	const exporter = new InMemorySpanExporter();
-	const provider = new BasicTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] });
+	const provider = new TracerProvider({ spanProcessors: [new SimpleSpanProcessor({ exporter })] });
 	const tracer = provider.getTracer("telemetry-bridge-test");
 	let contextManager: AsyncLocalStorageContextManager | undefined;
 	let worker: Worker | undefined;

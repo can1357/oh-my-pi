@@ -100,7 +100,7 @@ impl Rules {
 				None => std::mem::take(&mut data),
 			};
 			let Ok(mut line) = std::str::from_utf8(raw) else {
-				break;
+				continue;
 			};
 			if first {
 				line = line.trim_start_matches('\u{feff}');
@@ -199,11 +199,7 @@ fn parse_rule(line: &str) -> Option<Rule> {
 	if line.starts_with('#') {
 		return None;
 	}
-	let mut line = if line.ends_with("\\ ") {
-		line
-	} else {
-		line.trim_end()
-	};
+	let mut line = trim_trailing_unescaped_spaces(line);
 	if line.is_empty() {
 		return None;
 	}
@@ -221,6 +217,10 @@ fn parse_rule(line: &str) -> Option<Rule> {
 			absolute = true;
 		}
 	}
+	// A bare `!` or `/` leaves no pattern: git treats the line as a no-op.
+	if line.is_empty() {
+		return None;
+	}
 	let mut dir_only = false;
 	if let Some(rest) = line.strip_suffix('/') {
 		dir_only = true;
@@ -237,6 +237,34 @@ fn parse_rule(line: &str) -> Option<Rule> {
 	}
 	let glob = Glob::with_dialect(&actual, RULE_DIALECT).ok()?;
 	Some(Rule { glob, dir_only, whitelist })
+}
+
+/// Drops trailing spaces unless backslash-escaped, as gitignore(5) says;
+/// `foo\  ` keeps its escaped space and loses the rest.
+fn trim_trailing_unescaped_spaces(line: &str) -> &str {
+	let bytes = line.as_bytes();
+	let mut last_space = None;
+	let mut i = 0;
+	while i < bytes.len() {
+		match bytes[i] {
+			b'\\' => {
+				if i + 1 >= bytes.len() {
+					return line;
+				}
+				i += 2;
+				last_space = None;
+			},
+			b' ' => {
+				last_space.get_or_insert(i);
+				i += 1;
+			},
+			_ => {
+				last_space = None;
+				i += 1;
+			},
+		}
+	}
+	&line[..last_space.unwrap_or(line.len())]
 }
 
 /// Which ignore files a walk honours.
@@ -841,7 +869,8 @@ fn git_configs() -> GitConfigs {
 /// Extracts `core.excludesFile` from raw git config contents: byte-for-byte
 /// the `ignore` crate's lazy
 /// `(?im-u)^\s*excludesfile\s*=\s*"?\s*(\S+?)\s*"?\s*$` (first match wins),
-/// then every `~` replaced with the home directory.
+/// then a leading `~` (alone or before a separator) replaced with the home
+/// directory; `C:/PROGRA~1` and `~user` stay as written.
 fn parse_excludes_file(data: &[u8], home: Option<&Path>) -> Option<PathBuf> {
 	const KEY: &[u8] = b"excludesfile";
 	let is_space = |b: u8| matches!(b, b'\t' | b'\n' | 0x0b | 0x0c | b'\r' | b' ');
@@ -887,10 +916,12 @@ fn parse_excludes_file(data: &[u8], home: Option<&Path>) -> Option<PathBuf> {
 			.or_else(|| capture_at(value_start))
 	})?;
 	let value = std::str::from_utf8(value).ok()?;
-	Some(PathBuf::from(match home {
-		Some(home) => value.replace('~', &home.to_string_lossy()),
-		None => value.to_owned(),
-	}))
+	let expanded = value
+		.strip_prefix('~')
+		.filter(|rest| rest.is_empty() || rest.starts_with(std::path::is_separator))
+		.zip(home)
+		.map(|(rest, home)| format!("{}{rest}", home.display()));
+	Some(PathBuf::from(expanded.unwrap_or_else(|| value.to_owned())))
 }
 
 #[cfg(test)]

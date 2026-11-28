@@ -1,18 +1,23 @@
 /**
- * `read-group`: a run of reads. No read yet: ` • Read`. One row: ` ✔ Read
- * src/a.ts:1-20` (status glyph, accent path) with its usage indented under
- * it. Several: ` • Read (2)` over a branch tree of rows (dim directory, file
- * name in the file color, muted selectors, a status glyph unless it
- * succeeded) with each request's usage under its last row. Content previews
- * are framed code (or Markdown) cells titled `Read <path>`, three rows while
- * folded, each followed by its read's usage. A presenter's compact read is
- * its glyph and label over its rows. Reads {@link ReadGroupTerm}.
+ * `read-group`: a run of reads with the standard prose inset. No read yet:
+ * `• Read`. One read: `✔ Read src/a.ts:1-20` (status glyph, then the path)
+ * with usage indented below. Several: `• Read (2)` over a branch tree of rows
+ * (a status glyph unless it succeeded, then the path) with each request's
+ * usage under its last row. The single head, tree rows and preview titles paint
+ * their path alike: dim directory, colored file name (a URL whole), muted selectors.
+ * At the edge, content previews are framed code or Markdown cells titled
+ * `Read <path>`, three rows while folded, each followed by its read's usage.
+ * A presenter's compact read keeps its glyph and label at the edge over its rows;
+ * a concise read (`display.toolActivity: concise`) is its recent-activity row.
+ * Reads {@link ReadGroupTerm}.
  */
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import type { Block, PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { languageFromPath } from "@oh-my-pi/pi-tui/text/lang";
 import { renderMarkdown } from "@oh-my-pi/pi-tui/text/markdown/index";
 import { truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
+import { styledText } from "@oh-my-pi/pi-tui/term/painters/layout";
+import { terminalPaddingX } from "../terminal-padding";
 import {
 	READ_PREVIEW_LINES,
 	type ReadGroupTerm,
@@ -20,6 +25,8 @@ import {
 	type ReadTermPreview,
 	type ReadTermRow,
 } from "../../transcript/read-group";
+import { paintPresenterRows } from "../figures/presented";
+import { recentActivityRow } from "../pickers/agent-hub";
 import { codeCellRows, markdownCellRows } from "../tools/code-cell";
 import { fileLink, webLink } from "../tools/file-common";
 import { frameInner, hangingWrap, statusIcon } from "../tools/frame";
@@ -40,16 +47,8 @@ function link(cx: PaintContext, row: ReadTermRow, text: string): string {
 	return webLink(cx, text, row.link?.url);
 }
 
-/** A head path: accent path and selectors, then the dim correction and the conflict warning. */
-function headPath(cx: PaintContext, row: ReadTermRow): string {
-	const theme = cx.theme;
-	let out = row.path ? link(cx, row, theme.fg("accent", row.path)) : theme.fg("toolOutput", "…");
-	if (row.selectors) out += theme.fg("accent", row.selectors);
-	return out + notes(cx, row);
-}
-
-/** A tree row's path: dim directory, the name in the file color (a URL whole), muted selectors. */
-function rowPath(cx: PaintContext, row: ReadTermRow): string {
+/** A read's path: dim directory, the name in the file color (a URL whole), muted selectors, then the notes. */
+function readPath(cx: PaintContext, row: ReadTermRow): string {
 	const theme = cx.theme;
 	let out = row.path
 		? link(cx, row, row.url ? theme.fg("customMessageLabel", row.path) : pathText(theme, row.path))
@@ -63,7 +62,7 @@ function notes(cx: PaintContext, row: ReadTermRow): string {
 	let out = "";
 	if (row.correctedFrom) out += theme.fg("dim", ` (corrected from ${row.correctedFrom})`);
 	if (row.conflicts)
-		out += ` ${theme.fg("warning", `(⚠ ${row.conflicts} conflict${row.conflicts === 1 ? "" : "s"})`)}`;
+		out += ` ${theme.fg("warning", `(${theme.symbols.symbol("status.warning")} ${row.conflicts} conflict${row.conflicts === 1 ? "" : "s"})`)}`;
 	return out;
 }
 
@@ -73,7 +72,7 @@ function title(cx: PaintContext): string {
 
 function previewRows(cx: PaintContext, preview: ReadTermPreview, width: number): string[] {
 	const theme = cx.theme;
-	const head = preview.head.path ? `Read ${headPath(cx, preview.head)}` : "Read";
+	const head = preview.head.path ? `Read ${readPath(cx, preview.head)}` : "Read";
 	const status = preview.status === "success" ? "complete" : preview.status;
 	const rows = preview.markdown
 		? markdownCellRows(
@@ -101,8 +100,11 @@ function previewRows(cx: PaintContext, preview: ReadTermPreview, width: number):
 				},
 				width,
 			);
-	if (preview.usage)
-		rows.push(...wrap(theme.fg("dim", preview.usage), Math.max(1, width - 6)).map(row => `   ${row}`));
+	if (preview.usage) {
+		const paddingX = terminalPaddingX(3);
+		const pad = " ".repeat(paddingX);
+		rows.push(...wrap(theme.fg("dim", preview.usage), Math.max(1, width - 2 * paddingX)).map(row => pad + row));
+	}
 	return rows;
 }
 
@@ -112,25 +114,34 @@ function paintReadGroup(node: UiNode, cx: PaintContext): Block {
 	const width = cx.width;
 	if (term.presented) {
 		const compact = term.presented;
+		if (compact.activityLine) return { rows: [recentActivityRow(theme, compact.activityLine, width)] };
 		const mark = compact.status === "success" ? theme.fg("dim", "•") : glyph(cx, compact.status);
-		const label = compact.label ?? `${title(cx)}${compact.path ? theme.fg("muted", ` ${compact.path}`) : ""}`;
-		return {
-			rows: [truncate(`${mark} ${label}`, width), ...compact.rows.map(row => truncate(`  ${row}`, width))],
-		};
+		const label =
+			compact.label !== undefined
+				? styledText(theme, compact.label)
+				: `${title(cx)}${compact.path ? theme.fg("muted", ` ${compact.path}`) : ""}`;
+		return { rows: [truncate(`${mark} ${label}`, width), ...paintPresenterRows(compact.rows, cx)] };
 	}
 	const bullet = theme.symbols.symbol("format.bullet");
+	const pad = " ".repeat(terminalPaddingX());
+	const indent = `${pad}  `;
 	const previews = (term.previews ?? []).flatMap(preview => previewRows(cx, preview, width));
-	if (!term.count) return { rows: wrap(` ${bullet} ${title(cx)}`, width) };
+	const bulletPrefix = `${pad}${bullet} `;
+	const bulletHang = " ".repeat(visibleWidth(bulletPrefix));
+	if (!term.count) return { rows: hangingWrap(bulletPrefix, bulletHang, title(cx), width) };
 	if (term.count === 1) {
 		const rows: string[] = [];
 		const single = term.single;
 		if (single) {
-			rows.push(...wrap(` ${glyph(cx, single.status)} ${title(cx)} ${headPath(cx, single)}`.trimEnd(), width));
-			for (const usage of single.usage) rows.push(...wrap(theme.fg("dim", `   ${usage}`), width));
+			const prefix = `${pad}${glyph(cx, single.status)} `;
+			rows.push(
+				...hangingWrap(prefix, " ".repeat(visibleWidth(prefix)), `${title(cx)} ${readPath(cx, single)}`, width),
+			);
+			for (const usage of single.usage) rows.push(...hangingWrap(indent, indent, theme.fg("dim", usage), width));
 		}
 		return { rows: [...rows, ...previews] };
 	}
-	const rows = wrap(` ${bullet} ${title(cx)}${theme.fg("dim", ` (${term.count})`)}`, width);
+	const rows = hangingWrap(bulletPrefix, bulletHang, `${title(cx)}${theme.fg("dim", ` (${term.count})`)}`, width);
 	const tree = term.tree ?? [];
 	const branch = theme.symbols.symbol("tree.branch");
 	const last = theme.symbols.symbol("tree.last");
@@ -144,13 +155,14 @@ function paintReadGroup(node: UiNode, cx: PaintContext): Block {
 		const status = row.status === "success" ? "" : `${glyph(cx, row.status)} `;
 		rows.push(
 			...hangingWrap(
-				`   ${theme.fg("dim", connector)} `,
-				`   ${continuation} `,
-				`${status}${rowPath(cx, row)}`,
+				`${indent}${theme.fg("dim", connector)} `,
+				`${indent}${continuation} `,
+				`${status}${readPath(cx, row)}`,
 				width,
 			),
 		);
-		for (const usage of row.usage) rows.push(...wrap(theme.fg("dim", `   ${continuation} ${usage}`), width));
+		const usagePrefix = theme.fg("dim", `${indent}${continuation} `);
+		for (const usage of row.usage) rows.push(...hangingWrap(usagePrefix, usagePrefix, theme.fg("dim", usage), width));
 	});
 	return { rows: [...rows, ...previews] };
 }

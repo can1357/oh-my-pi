@@ -241,7 +241,7 @@ describe("single-instance menus", () => {
 		const failed = Promise.withResolvers<void>();
 		let load: () => Promise<void> = () => failed.promise;
 		const hubs = spyOn(agentsHubModule, "AgentsHub").mockImplementation(props => {
-			props.ref?.({ reload: () => load() });
+			props.ref?.({ reload: () => load(), onKey: () => false });
 			return screen();
 		});
 		const { ctx, overlays } = shellContext({
@@ -262,6 +262,43 @@ describe("single-instance menus", () => {
 		expect(overlays.nodes()).toHaveLength(1);
 	});
 
+	it("refreshes rejected-account hints with the dashboard's reports, in overview and details", async () => {
+		spyOn(activityClient, "loadDailyActivity").mockResolvedValue(undefined);
+		const dashboards = spyOn(usageDashboardModule, "UsageDashboard").mockImplementation(() => jsx("col", {}));
+		const reports = [{ provider: "opencode-go", fetchedAt: Date.now(), limits: [] }];
+		let rejected = true;
+		const { ctx } = shellContext({
+			session: {
+				getUsageReportingModelSelectors: () => [],
+				fetchUsageReports: async () => {
+					rejected = false;
+					return reports;
+				},
+				modelRegistry: {
+					authStorage: {
+						credentials: {
+							snapshot: () => ({
+								credentials: [{ id: 9, provider: "opencode-go", credential: { type: "api_key", key: "test" } }],
+							}),
+						},
+						usage: {
+							providerFor: () => ({}),
+							authRejection: (_provider: string, id: number) => (rejected && id === 9 ? 401 : undefined),
+						},
+					},
+				},
+			},
+		});
+		new SelectorController(ctx).showUsageDashboard([]);
+		const { model } = dashboards.mock.calls[0]![0];
+		expect(model.cards[0]?.unavailableAccounts[0]).toContain("usage auth rejected (401)");
+		expect(model.detailLines(160).join("\n")).toContain("usage auth rejected (401)");
+		await model.refresh();
+		expect(model.cards[0]?.unavailableAccounts).toEqual([]);
+		expect(model.detailLines(160).join("\n")).not.toContain("usage auth rejected");
+		model.close();
+	});
+
 	// Regression: a second /usage (or status-line cost click) while the dashboard
 	// was open stacked another fullscreen dashboard on top of the first.
 	it("opens one usage dashboard per close, focusing it on repeat requests", () => {
@@ -274,7 +311,7 @@ describe("single-instance menus", () => {
 				fetchUsageReports: async () => null,
 				modelRegistry: {
 					authStorage: {
-						credentials: { all: () => ({}) },
+						credentials: { snapshot: () => ({ credentials: [] }) },
 						usage: { providerFor: () => undefined },
 						oauth: { identity: () => undefined },
 					},

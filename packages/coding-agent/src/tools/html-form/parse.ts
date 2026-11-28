@@ -1,7 +1,7 @@
 import { Comment, type Document, Element, type Node, parseHTML, Text } from "@oh-my-pi/pi-utils/dom";
 
-/** Inline emphasis a span keeps from `<code>`, `<strong>`/`<b>` and `<em>`/`<i>`. */
-export type FormSpanStyle = "code" | "strong" | "em";
+/** Inline emphasis a span keeps from `<code>`, `<strong>`/`<b>`, `<em>`/`<i>` and `<mark>`. */
+export type FormSpanStyle = "code" | "strong" | "em" | "mark";
 
 /** A run of inline text; `"\n"` inside `text` is a hard line break (`<br>`). */
 export interface FormSpan {
@@ -131,6 +131,7 @@ const STYLE_OF: Record<string, FormSpanStyle> = {
 	em: "em",
 	i: "em",
 	kbd: "code",
+	mark: "mark",
 	samp: "code",
 	strong: "strong",
 	tt: "code",
@@ -182,6 +183,11 @@ function svgTitle(svg: Element): string {
 	if (label) return label.trim();
 	const title = svg.children.find(child => child.localName === "title");
 	return (title?.textContent ?? "").replace(/\s+/g, " ").trim();
+}
+
+/** A placeholder paints as one hint row: its line breaks collapse to single spaces. */
+function placeholderAttr(control: Element): string {
+	return (control.getAttribute("placeholder") ?? "").replace(/[^\S\n]*\r?\n\s*/g, " ");
 }
 
 function numberAttr(element: Element, name: string): number | undefined {
@@ -485,7 +491,7 @@ class FormBuilder {
 				multiline: true,
 				label: label.length > 0 ? label : this.#nameLabel(name),
 				value: (control.textContent ?? "").replace(/^\r?\n/, ""),
-				placeholder: control.getAttribute("placeholder") ?? "",
+				placeholder: placeholderAttr(control),
 				required,
 				minLength: numberAttr(control, "minlength"),
 				maxLength: numberAttr(control, "maxlength"),
@@ -537,7 +543,7 @@ class FormBuilder {
 			multiline: false,
 			label: label.length > 0 ? label : this.#nameLabel(name),
 			value: value ?? "",
-			placeholder: control.getAttribute("placeholder") ?? "",
+			placeholder: placeholderAttr(control),
 			required,
 			min: numberAttr(control, "min"),
 			max: numberAttr(control, "max"),

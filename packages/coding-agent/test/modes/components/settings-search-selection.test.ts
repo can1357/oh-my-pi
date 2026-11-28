@@ -1,9 +1,9 @@
-import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { afterAll, describe, expect, it } from "bun:test";
+import { settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { cfgComposerPredictions } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import type { TestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
-import { mountSettingsWindow, settingsScreen } from "../../helpers/settings-window";
+import { settingsScreen, setupSettingsWindow } from "../../helpers/settings-window";
 
 const restoreTheme = currentTheme();
 afterAll(() => setCurrentTheme(restoreTheme));
@@ -28,11 +28,7 @@ function highlightedTab(term: TestTerminal): string {
 }
 
 describe("settings search selection", () => {
-	beforeEach(async () => {
-		resetSettingsForTest();
-		await Settings.init({ inMemory: true });
-	});
-	afterEach(() => resetSettingsForTest());
+	const mountSettingsWindow = setupSettingsWindow();
 
 	it("ends on the last match of the query, and its tab, as the released build does", () => {
 		// The measured case: with prediction alternatives off, `composer` has six
@@ -42,7 +38,6 @@ describe("settings search selection", () => {
 		term.type("composer");
 		expect(selectedRow(term)).toContain("Recall Cleared Drafts");
 		expect(highlightedTab(term)).toContain("Interaction");
-		term.dispose();
 	});
 
 	it("clamps a row that a longer query drops to its previous index, not the first row", () => {
@@ -52,9 +47,8 @@ describe("settings search selection", () => {
 		// `Omit Thinking summaries` leaves the `compo` results; the released rule
 		// falls to its previous (last) index instead of restarting at the top.
 		term.type("o");
-		expect(selectedRow(term)).toContain("Experimental Speculative Execution");
-		expect(highlightedTab(term)).toContain("Tools");
-		term.dispose();
+		expect(selectedRow(term)).toContain("Cache Bridge Compaction Tokens");
+		expect(highlightedTab(term)).toContain("Providers");
 	});
 
 	it("keeps the selected row when deleting a character, while it still matches", () => {
@@ -65,7 +59,6 @@ describe("settings search selection", () => {
 		term.press("backspace");
 		expect(selectedRow(term)).toBe(before);
 		expect(highlightedTab(term)).toContain("Interaction");
-		term.dispose();
 	});
 
 	it("selects nothing and highlights no tab when the query has no matches", () => {
@@ -74,6 +67,5 @@ describe("settings search selection", () => {
 		expect(selectedRow(term)).toBe("");
 		expect(highlightedTab(term)).toBe("");
 		expect(settingsScreen(term)).toContain("No matching settings");
-		term.dispose();
 	});
 });

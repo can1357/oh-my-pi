@@ -9,6 +9,7 @@
  * blank cells without visible decoration are ignored, and so are the
  * invisible parts of a space's style (its foreground, weight and slant).
  */
+import { segmentGraphemes } from "@oh-my-pi/pi-utils/graphemes";
 
 /** One terminal cell. A wide grapheme fills its first cell; the cells it covers hold `""`. */
 export interface Cell {
@@ -200,7 +201,6 @@ function applySgr(pen: Pen, body: string): void {
 
 const ESCAPE =
 	/\x1b(?:\[([0-?]*)([ -/]*)([@-~])|\]([^\x07\x1b]*)(?:\x07|\x1b\\)|_[^\x07\x1b]*(?:\x07|\x1b\\)|P[^\x1b]*\x1b\\|[0-?@-Z\\-_])/y;
-const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
 function osc(pen: Pen, body: string): void {
 	if (!body.startsWith("8;")) return;
@@ -216,7 +216,7 @@ export function cellRow(row: string): Cell[] {
 	let plainStart = 0;
 	const flush = (end: number): void => {
 		if (end <= plainStart) return;
-		for (const { segment } of segmenter.segment(row.slice(plainStart, end))) {
+		for (const { segment } of segmentGraphemes(row.slice(plainStart, end))) {
 			const width = Bun.stringWidth(segment);
 			if (width === 0) {
 				// Combining marks and zero-width joiners attach to the previous grapheme's cell.

@@ -9,7 +9,17 @@
  * Enter resumes; Backspace (on an empty query) asks to delete; F2 renames in
  * a form that takes the sheet's place; Alt+K / Alt+Shift+K pin and unpin.
  */
-import { batch, computed, type JSXNode, type KeyEvent, onCleanup, type Reactive, read, signal } from "@oh-my-pi/pi-tui";
+import {
+	batch,
+	computed,
+	type JSXNode,
+	type KeyEvent,
+	onCleanup,
+	type Reactive,
+	read,
+	signal,
+	type UiNode,
+} from "@oh-my-pi/pi-tui";
 import { formatBytes } from "@oh-my-pi/pi-utils";
 import type { TspPickerAction, TspPickerGroup, TspPickerItem, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import {
@@ -22,6 +32,7 @@ import {
 import { tokenHits } from "../../styles/pickers/common";
 import "../../styles/pickers/sessions";
 import type { SessionsLookTerm } from "../../styles/pickers/sessions";
+import { findNode } from "../../styles/panels/common";
 import { applyEdit } from "../panels/common";
 import { editLine, type LineState } from "../settings/line-edit";
 import { pickerAge, pickerDate } from "./format";
@@ -72,6 +83,11 @@ export interface SessionSelectorProps {
 	now?(): number;
 	/** Local midnight of the day groups (default: from `now`). */
 	dayStart?(): number;
+}
+
+/** Focus the picker or the title field when the rename form takes its place. */
+export function sessionSelectorFocus(root: UiNode): UiNode {
+	return findNode(root, node => node.kind === "picker" || node.kind === "input") ?? root;
 }
 
 const DAY_MS = 86_400_000;
@@ -197,12 +213,19 @@ export function SessionSelector(props: SessionSelectorProps): JSXNode {
 	onCleanup(() => {
 		alive = false;
 	});
-	void props.completeSessions?.then(
-		sessions => {
-			if (alive) folderSessions.set(sessions);
-		},
-		() => {},
-	);
+	/** Swaps a listing's full scan into `target` when it settles, unless the picker closed first. */
+	const adoptComplete = (
+		complete: Promise<readonly SessionSelectorEntry[]> | undefined,
+		target: (sessions: readonly SessionSelectorEntry[]) => void,
+	): void => {
+		void complete?.then(
+			sessions => {
+				if (alive) target(sessions);
+			},
+			() => {},
+		);
+	};
+	adoptComplete(props.completeSessions, sessions => folderSessions.set(sessions));
 
 	const withEdits = (list: readonly SessionSelectorEntry[]): SessionSelectorEntry[] =>
 		list
@@ -379,6 +402,7 @@ export function SessionSelector(props: SessionSelectorProps): JSXNode {
 			try {
 				const listing = await props.loadAllSessions();
 				global.set(listing.sessions);
+				adoptComplete(listing.complete, sessions => global.set(sessions));
 				message.set(undefined);
 			} catch (err) {
 				toggling = false;

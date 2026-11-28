@@ -1,7 +1,7 @@
 //! Paths and their parts.
 
-use crate::box_iter::{box_once, flat_map_with, map_with, then, BoxIter};
-use crate::val::{ValRs, ValT, ValX, ValXs};
+use crate::box_iter::box_once;
+use crate::val::{ValRs, ValT};
 use crate::RcList;
 use alloc::{boxed::Box, vec::Vec};
 
@@ -48,88 +48,6 @@ impl Opt {
     }
 }
 
-impl<'a, U: Clone + 'a, E: Clone + 'a, T: Clone + IntoIterator<Item = Result<U, E>> + 'a> Path<T> {
-    pub(crate) fn explode(self) -> impl Iterator<Item = Result<Path<U>, E>> + 'a {
-        Path(Vec::new())
-            .combinations(self.0.into_iter())
-            .map(Path::transpose)
-    }
-}
-
-impl<'a, U: Clone + 'a> Path<U> {
-    fn combinations<I, F>(self, mut iter: I) -> BoxIter<'a, Self>
-    where
-        I: Iterator<Item = (Part<F>, Opt)> + Clone + 'a,
-        F: IntoIterator<Item = U> + Clone + 'a,
-    {
-        if let Some((part, opt)) = iter.next() {
-            let parts = part.into_iter();
-            flat_map_with(parts, (self, iter), move |part, (mut prev, iter)| {
-                prev.0.push((part, opt));
-                prev.combinations(iter)
-            })
-        } else {
-            box_once(self)
-        }
-    }
-}
-
-impl<'a, V: ValT + 'a> Path<V> {
-    pub(crate) fn run(self, v: V) -> ValRs<'a, V> {
-        run(self.0.into_iter(), v, |part, v| part.run(v))
-    }
-
-    pub(crate) fn paths(self, vp: (V, RcList<V>)) -> ValRs<'a, (V, RcList<V>), V> {
-        // a value that is not at a path cannot be indexed in a path expression,
-        // even optionally, as jq's `path_intact` checks
-        if vp.1.is_invalid() {
-            if let Some((part, _)) = self.0.first() {
-                return box_once(Err(part.not_at_path(&vp.0)));
-            }
-        }
-        run(self.0.into_iter(), vp, |part, vp| part.paths(vp))
-    }
-
-    pub(crate) fn update<F>(mut self, v: V, f: F) -> ValX<'a, V>
-    where
-        F: Fn(V) -> ValXs<'a, V>,
-    {
-        if let Some(last) = self.0.pop() {
-            update(self.0.into_iter(), last, v, &f)
-        } else {
-            // should be unreachable
-            Ok(v)
-        }
-    }
-}
-
-fn run<'a, V: 'a, T: 'a>(
-    mut iter: impl Iterator<Item = (Part<V>, Opt)> + Clone + 'a,
-    val: T,
-    f: fn(Part<V>, T) -> ValRs<'a, T, V>,
-) -> ValRs<'a, T, V> {
-    if let Some((part, opt)) = iter.next() {
-        let essential = matches!(opt, Opt::Essential);
-        let ys = f(part, val).filter(move |v| essential || v.is_ok());
-        flat_map_with(ys, iter, move |v, iter| then(v, |v| run(iter, v, f)))
-    } else {
-        box_once(Ok(val))
-    }
-}
-
-fn update<'a, V: ValT + 'a, P, F>(mut iter: P, last: (Part<V>, Opt), v: V, f: &F) -> ValX<'a, V>
-where
-    P: Iterator<Item = (Part<V>, Opt)> + Clone,
-    F: Fn(V) -> ValXs<'a, V>,
-{
-    if let Some((part, opt)) = iter.next() {
-        use core::iter::once;
-        part.update(v, opt, |v| once(update(iter.clone(), last.clone(), v, f)))
-    } else {
-        last.0.update(v, last.1, f)
-    }
-}
-
 impl<'a, V: ValT + 'a> Part<V> {
     /// Error of applying the part to `v` in a path expression where `v` is not at a path.
     pub(crate) fn not_at_path(&self, v: &V) -> crate::Error<V> {
@@ -140,7 +58,7 @@ impl<'a, V: ValT + 'a> Part<V> {
         }
     }
 
-    fn run(&self, v: V) -> ValRs<'a, V> {
+    pub(crate) fn run(&self, v: V) -> ValRs<'a, V> {
         match self {
             Self::Index(idx) => box_once(v.index(idx)),
             Self::Range(None, None) => Box::new(v.values()),
@@ -148,7 +66,7 @@ impl<'a, V: ValT + 'a> Part<V> {
         }
     }
 
-    fn paths(&self, (v, p): (V, RcList<V>)) -> ValRs<'a, (V, RcList<V>), V> {
+    pub(crate) fn paths(&self, (v, p): (V, RcList<V>)) -> ValRs<'a, (V, RcList<V>), V> {
         match self {
             Self::Index(idx) => box_once(v.index(idx).map(|v| (v, p.cons(idx.clone())))),
             Self::Range(None, None) => Box::new(
@@ -162,47 +80,17 @@ impl<'a, V: ValT + 'a> Part<V> {
         }
     }
 
-    fn update<F, I>(&self, v: V, opt: Opt, f: F) -> ValX<'a, V>
-    where
-        F: Fn(V) -> I,
-        I: Iterator<Item = ValX<'a, V>>,
-    {
-        match self {
-            Self::Index(idx) => v.map_index(idx, opt, f),
-            Self::Range(None, None) => v.map_values(opt, f),
-            Self::Range(from, upto) => v.map_range(from.as_ref()..upto.as_ref(), opt, f),
-        }
-    }
-}
-
-impl<'a, U: Clone + 'a, F: IntoIterator<Item = U> + Clone + 'a> Part<F> {
-    fn into_iter(self) -> BoxIter<'a, Part<U>> {
-        use Part::{Index, Range};
-        match self {
-            Index(i) => Box::new(i.into_iter().map(Index)),
-            Range(None, None) => box_once(Range(None, None)),
-            Range(Some(from), None) => {
-                Box::new(from.into_iter().map(|from| Range(Some(from), None)))
-            }
-            Range(None, Some(upto)) => {
-                Box::new(upto.into_iter().map(|upto| Range(None, Some(upto))))
-            }
-            Range(Some(from), Some(upto)) => {
-                Box::new(flat_map_with(from.into_iter(), upto, move |from, upto| {
-                    map_with(upto.into_iter(), from, move |upto, from| {
-                        Range(Some(from), Some(upto))
-                    })
-                }))
-            }
-        }
-    }
 }
 
 impl<T> Path<T> {
     pub(crate) fn map_ref<'a, U>(&'a self, mut f: impl FnMut(&'a T) -> U) -> Path<U> {
-        let path = self.0.iter();
-        let path = path.map(move |(part, opt)| (part.as_ref().map(&mut f), *opt));
-        Path(path.collect())
+        Path(self.0.iter().map(|(part, opt)| {
+            let part = match part {
+                Part::Index(i) => Part::Index(f(i)),
+                Part::Range(lo, hi) => Part::Range(lo.as_ref().map(&mut f), hi.as_ref().map(&mut f)),
+            };
+            (part, *opt)
+        }).collect())
     }
 }
 
@@ -217,30 +105,11 @@ impl<T> Part<T> {
     }
 }
 
-impl<T, E> Path<Result<T, E>> {
-    fn transpose(self) -> Result<Path<T>, E> {
-        self.0
-            .into_iter()
-            .map(|(part, opt)| Ok((part.transpose()?, opt)))
-            .collect::<Result<_, _>>()
-            .map(Path)
-    }
-}
-
 impl<T, E> Part<Result<T, E>> {
-    fn transpose(self) -> Result<Part<T>, E> {
+    pub(crate) fn transpose(self) -> Result<Part<T>, E> {
         match self {
             Self::Index(i) => Ok(Part::Index(i?)),
             Self::Range(from, upto) => Ok(Part::Range(from.transpose()?, upto.transpose()?)),
-        }
-    }
-}
-
-impl<F> Part<F> {
-    fn as_ref(&self) -> Part<&F> {
-        match self {
-            Self::Index(i) => Part::Index(i),
-            Self::Range(from, upto) => Part::Range(from.as_ref(), upto.as_ref()),
         }
     }
 }

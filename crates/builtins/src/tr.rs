@@ -860,6 +860,9 @@ impl Utility for Tr {
 	}
 }
 
+/// GNU's pointer to `--help`, printed after an operand-count error.
+const TRY_HELP: &str = "\nTry 'tr --help' for more information.";
+
 fn tr_main(matches: &clap::ArgMatches, host: &mut Host) -> Result<(), String> {
 	let delete_flag = matches.get_flag(options::DELETE);
 	let complement_flag = matches.get_flag(options::COMPLEMENT);
@@ -874,20 +877,20 @@ fn tr_main(matches: &clap::ArgMatches, host: &mut Host) -> Result<(), String> {
 		.collect();
 
 	if sets.is_empty() {
-		return Err("missing operand".to_string());
+		return Err(format!("missing operand{TRY_HELP}"));
 	}
 
 	let sets_len = sets.len();
 	if !(delete_flag || squeeze_flag) && sets_len == 1 {
 		return Err(format!(
-			"missing operand after {}\nTwo strings must be given when translating.",
+			"missing operand after {}\nTwo strings must be given when translating.{TRY_HELP}",
 			sets[0].quote()
 		));
 	}
 
 	if delete_flag && squeeze_flag && sets_len == 1 {
 		return Err(format!(
-			"missing operand after {}\nTwo strings must be given when deleting and squeezing.",
+			"missing operand after {}\nTwo strings must be given when deleting and squeezing.{TRY_HELP}",
 			sets[0].quote()
 		));
 	}
@@ -898,15 +901,15 @@ fn tr_main(matches: &clap::ArgMatches, host: &mut Host) -> Result<(), String> {
 			let message = if sets_len == 2 {
 				format!(
 					"extra operand {operand}\nOnly one string may be given when deleting without \
-					 squeezing repeats."
+					 squeezing repeats.{TRY_HELP}"
 				)
 			} else {
-				format!("extra operand {operand}")
+				format!("extra operand {operand}{TRY_HELP}")
 			};
 			return Err(message);
 		}
 		if sets_len > 2 {
-			return Err(format!("extra operand {}", sets[2].quote()));
+			return Err(format!("extra operand {}{TRY_HELP}", sets[2].quote()));
 		}
 	}
 
@@ -1156,7 +1159,7 @@ mod tests {
 		assert_eq!(code, 1);
 		assert_eq!(
 			capture.err(),
-			"tr: missing operand after 'abc'\nTwo strings must be given when translating.\n"
+			"tr: missing operand after 'abc'\nTwo strings must be given when translating.\nTry 'tr --help' for more information.\n"
 		);
 	}
 

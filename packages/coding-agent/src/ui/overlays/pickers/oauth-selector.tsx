@@ -24,6 +24,7 @@ import {
 	signal,
 } from "@oh-my-pi/pi-tui";
 import type { TspPickerAction, TspPickerItem, TspText, TspTone } from "@oh-my-pi/pi-wire";
+import { connectedProviderName } from "../../../modes/view-model/chrome/format";
 import { fuzzyFilter } from "../../../utils/fuzzy";
 import "../../styles/pickers/oauth";
 import type { OAuthLookTerm, OAuthRowStatus } from "../../styles/pickers/oauth";
@@ -122,8 +123,11 @@ export function OAuthSelector(props: OAuthSelectorProps): JSXNode {
 				!disabled.has(provider.id) && !(provider.storeCredentialsAs && disabled.has(provider.storeCredentialsAs)),
 		);
 	});
+	// `/login` keeps each provider's sign-in label; `/logout` lists linked accounts under their connected name.
+	const nameOf = (provider: OAuthProviderInfo): string =>
+		login ? provider.name : connectedProviderName(provider.id, provider.name);
 	const searchText = (provider: OAuthProviderInfo): string => {
-		let text = `${provider.name} ${provider.id}`;
+		let text = `${nameOf(provider)} ${provider.name} ${provider.id}`;
 		const origin = auth.keys.source(provider.id);
 		if (origin) {
 			text += ` logged in authenticated ${ORIGIN_LABELS[origin.kind]}`;
@@ -205,7 +209,7 @@ export function OAuthSelector(props: OAuthSelectorProps): JSXNode {
 				: `API key · ${source}`;
 		return {
 			id: provider.id,
-			label: provider.name,
+			label: nameOf(provider),
 			detail,
 			mark: { text: initials(provider.name), seed: provider.id },
 			dot,
