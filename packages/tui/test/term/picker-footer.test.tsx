@@ -1,11 +1,15 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
-import { expect, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
 import { actionHint, keyCaps } from "@oh-my-pi/pi-tui/term/painters/picker";
 import { createRoot, isUiNode } from "../../src";
 import { paintNode, staticEnvironment } from "../../src/term/paint";
+import { setKeyHintPlatform } from "../../src/theme/keys";
 import { loadThemeSync } from "../../src/theme/loader";
 
+afterEach(() => setKeyHintPlatform(undefined));
+
 test("picker footer preserves alternative keys and keeps modifier chords together", () => {
+	setKeyHintPlatform("linux");
 	const theme = loadThemeSync("dark", { symbolPreset: "ascii" });
 	const { node, dispose } = createRoot(dispose => {
 		const node = (
