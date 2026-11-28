@@ -90,5 +90,5 @@
 
 - Use this tool sparingly. One precise reusable lesson is better than several vague memories.
 - Put `skill` only on repeatable procedures; ordinary facts should remain memory-only.
-- Managed skill frontmatter is generated from the normalized name and sanitized description; `body` must not include frontmatter. Leading YAML-mapping frontmatter blocks in `skill.body` are stripped; the explicit `skill.description` wins over theirs.
+- Managed skill frontmatter is generated from the normalized name and sanitized description; `body` must not include frontmatter. Leading `---` blocks in `skill.body` that parse as a YAML mapping with a `name`, `description`, or `x-omp-provenance` key are stripped (any other leading horizontal rule stays, including one followed by a `Key: value` Setext heading). Their values are discarded; the explicit `skill.name` and `skill.description` always win.
 - Managed skills are isolated from authored skills. `learn` writes them for a later discovery refresh; use `manage_skill` when the active session must refresh immediately after a mutation.
