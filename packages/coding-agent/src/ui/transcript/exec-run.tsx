@@ -241,8 +241,14 @@ function runNotices(run: ExecRun): ExecRunTerm["notices"] {
 export function ExecRunBlock(props: { readonly run: ExecRun }): JSXNode {
 	const { run } = props;
 	const shell = run.kind === "bash";
-	const lang = shell ? "bash" : run.language === "js" ? "javascript" : "python";
-	const title = shell ? "Bash" : run.language === "js" ? "JavaScript" : "Python";
+	const lang = shell ? "bash" : run.language === "js" || run.language === "v8" ? "javascript" : "python";
+	const title = shell
+		? "Bash"
+		: run.language === "js"
+			? "JavaScript"
+			: run.language === "v8"
+				? "V8 Sandbox"
+				: "Python";
 	const color = run.excluded ? "dim" : shell ? "bashMode" : "pythonMode";
 	const badges: { text: string; tone?: TspTone; title?: string }[] = [{ text: "you", tone: "user" }];
 	if (run.excluded) badges.push({ text: "not sent", title: "Not sent to the model", tone: "muted" });

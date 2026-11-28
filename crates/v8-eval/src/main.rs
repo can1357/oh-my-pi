@@ -108,6 +108,10 @@ fn main() -> ExitCode {
 			},
 			V8Inbound::Run { run_id, code, filename, final_expr_suppressed } => {
 				if runtime.run_cell(&run_id, &code, &filename, final_expr_suppressed, &rx) {
+					if let Ok(err) = err_rx.try_recv() {
+						eprintln!("{err}");
+						return ExitCode::FAILURE;
+					}
 					runtime.emit_outbound(V8Outbound::Closed);
 					return ExitCode::SUCCESS;
 				}

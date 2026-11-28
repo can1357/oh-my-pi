@@ -58,8 +58,10 @@ function getExecutionTimeoutMs(options: Pick<V8ExecutorOptions, "deadlineMs" | "
 }
 
 function isTimeoutReason(reason: unknown): boolean {
-	if (!(reason instanceof Error)) return false;
-	return reason.name === "TimeoutError" || reason.name === "IdleTimeoutError";
+	return (
+		(reason instanceof DOMException && reason.name === "TimeoutError") ||
+		(reason instanceof Error && (reason.name === "TimeoutError" || reason.name === "IdleTimeoutError"))
+	);
 }
 
 function formatV8TimeoutAnnotation(timeoutMs: number | undefined, sessionKey: string): string {

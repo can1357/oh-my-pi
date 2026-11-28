@@ -27,6 +27,7 @@ import {
 	type ApprovalSimpleCommand,
 	type BashApprovalAnalysis,
 	PipeStreams,
+	resolveV8EvalBinary,
 	repairHeredocContinuations,
 	type ShellCommands,
 	shellBuiltins,
@@ -1128,7 +1129,10 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					(cfgSkillful.get(this.session.settings) && (this.session.skills?.length ?? 0) > 0)) === true,
 			hasLaunch: this.#launchEnabled,
 			hasPty: this.#ptyAvailable || this.#launchEnabled,
-			hasEval: isToolActive("eval", evalBackends.python || evalBackends.js),
+			hasEval: isToolActive(
+				"eval",
+				evalBackends.python || evalBackends.js || (evalBackends.v8 && resolveV8EvalBinary() !== null),
+			),
 			// The embedded shell's session env is the shell config env (see bash-executor).
 			builtins: shellBuiltins(shellConfig.env),
 			isWindows: process.platform === "win32",

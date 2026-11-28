@@ -20,13 +20,16 @@ describe("eval Python availability contract", () => {
 	let dir: TempDir;
 	let savedPy: string | undefined;
 	let savedJs: string | undefined;
+	let savedV8: string | undefined;
 
 	beforeEach(() => {
 		dir = TempDir.createSync("@eval-availability-contract-");
 		savedPy = Bun.env.PI_PY;
 		savedJs = Bun.env.PI_JS;
+		savedV8 = Bun.env.PI_V8;
 		delete Bun.env.PI_PY;
 		delete Bun.env.PI_JS;
+		delete Bun.env.PI_V8;
 		vi.spyOn(pyRuntime, "enumeratePythonRuntimes").mockReturnValue([{ pythonPath: "/tmp/broken-python", env: {} }]);
 	});
 
@@ -34,16 +37,16 @@ describe("eval Python availability contract", () => {
 		vi.restoreAllMocks();
 		restoreEnvValue("PI_PY", savedPy);
 		restoreEnvValue("PI_JS", savedJs);
+		restoreEnvValue("PI_V8", savedV8);
 		await dir.remove();
 	});
-
 	function session(overrides: Record<string, unknown> = {}): ToolSession {
 		return {
 			cwd: dir.path(),
 			hasUI: false,
 			getSessionFile: () => null,
 			getSessionSpawns: () => null,
-			settings: Settings.isolated(overrides),
+			settings: Settings.isolated({ "eval.v8": false, ...overrides }),
 		};
 	}
 

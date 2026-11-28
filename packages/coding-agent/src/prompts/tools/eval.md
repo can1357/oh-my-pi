@@ -19,6 +19,7 @@ On error, retry only the failed step; earlier steps may have taken effect.
 Printing an image{{#if py}} or figure{{/if}} attaches it.
 
 <prelude>
+{{#ifAny py js}}
 {{#ifAll py js}}
 Python helpers take kwargs; JS helpers take the same parameters (camelCase) as positional args or ONE trailing options object.
 `await` marks async helpers; the rest are sync.
@@ -57,12 +58,24 @@ await sh(command, { timeout? })  await sh`cmd ${arg}` — embedded bash engine, 
 ```
 {{/if}}
 {{/ifAll}}
+{{else}}
+{{#if v8}}
+V8 Sandbox (positional args or ONE trailing options object; `await` marks async helpers):
+```v8
+print(value, ...)  log(message)  phase(title)  env(key?, value?)  // env() is isolate-local
+await read(path, offset?, limit?)  // direct for safe internal URLs; delegates host paths/privileged URLs to tool.read
+await write(path, content)         // direct for local://, agent://, out://; delegates host paths/privileged URLs to tool.write
+await tool.<name>(args)            // session tool (normal tool approval)
+```
+{{/if}}
+{{/ifAny}}
 {{#if toolNames}}Session tool names: {{#each toolNames}}{{this}}{{#unless @last}}, {{/unless}}{{/each}}.{{/if}}
 </prelude>
 
 {{#if inlineTopics}}
 {{{inlineTopics}}}
 {{else}}
+{{#ifAny py js}}
 <namespaces>
 More globals; `read` the linked docs before first use:
 - `judge`, {{#ifAll py js}}`judge_batch` (Py) / `judgeBatch` (JS){{else}}{{#if py}}`judge_batch`{{else}}`judgeBatch`{{/if}}{{/ifAll}}, `completion`: classification, bulk judgment, model calls → help://eval/judge
@@ -80,6 +93,7 @@ No `read` needed before first use; the guide follows the first call's result (fu
 {{/each}}
 {{/if}}
 </namespaces>
+{{/ifAny}}
 {{#each inlinePreludes}}
 
 <{{name}}>

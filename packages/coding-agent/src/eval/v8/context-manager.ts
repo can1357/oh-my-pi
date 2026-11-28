@@ -246,8 +246,19 @@ async function acquireV8Session(
 			sessionId,
 			ownerIds: new Set(),
 			hasFallbackOwner: false,
-			promise: startV8Session(sessionKey, sessionId, maxHeapMb, timeoutMs),
+			promise: undefined as unknown as Promise<V8Session>,
 		};
+		entry.promise = (async (): Promise<V8Session> => {
+			const session = await startV8Session(sessionKey, sessionId, maxHeapMb, timeoutMs);
+			session.ownerIds = new Set(entry.ownerIds);
+			session.hasFallbackOwner = entry.hasFallbackOwner;
+			if (startingSessions.get(sessionKey) === entry && session.state === "alive") {
+				sessions.set(sessionKey, session);
+			} else {
+				await killV8Session(session, new ToolError("V8 isolate disposed before ready"), { force: false });
+			}
+			return session;
+		})();
 		starting = entry;
 		startingSessions.set(sessionKey, entry);
 		void entry.promise.finally(() => {
@@ -259,9 +270,6 @@ async function acquireV8Session(
 	attachSessionOwner(session, sessionId, ownerId);
 	if (session.state !== "alive") {
 		throw new ToolError("V8 isolate exited before starting cell");
-	}
-	if (!sessions.has(sessionKey)) {
-		sessions.set(sessionKey, session);
 	}
 	markV8SessionAlive(session, toolSession);
 	return session;
@@ -328,10 +336,11 @@ function spawnV8Session(sessionKey: string, sessionId: string, maxHeapMb: number
 		boardDispose: () => board.dispose(),
 	};
 
-	void pumpV8Stdout(session);
-	void pumpV8Stderr(session);
-	void proc.exited.then(exitCode => {
+	const stdoutDone = pumpV8Stdout(session);
+	const stderrDone = pumpV8Stderr(session);
+	void proc.exited.then(async exitCode => {
 		board.dispose();
+		await Promise.allSettled([stdoutDone, stderrDone]);
 		session.resolveClosed(exitCode === 0);
 		if (session.state === "alive") {
 			const detail = session.stderrLines.slice(-6).join("\n").trim();
@@ -340,7 +349,7 @@ function spawnV8Session(sessionKey: string, sessionId: string, maxHeapMb: number
 				: `V8 isolate exited unexpectedly (code ${exitCode}; possible out-of-memory); state cleared`;
 			const err = new ToolError(reason);
 			session.rejectReady(err);
-			void killV8SessionFor(session, err, { force: true });
+			await killV8SessionFor(session, err, { force: true });
 		}
 	});
 
@@ -515,7 +524,9 @@ async function runOnce(
 		void triggerAbort();
 	};
 	if (options.runState.signal?.aborted) {
-		await triggerAbort();
+		pending.aborted = true;
+		pending.settled = true;
+		reject(abortReasonError(options.runState.signal.reason, "V8 execution aborted"));
 	} else {
 		options.runState.signal?.addEventListener("abort", onAbort, { once: true });
 	}

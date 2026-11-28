@@ -157,10 +157,23 @@ export function resolveTargetMembers(names: string[], host: HostInfo): string[] 
 
 /**
  * Workspace-relative output paths by bazel-bin convention:
- * bazel-bin/natives-<t>/<canonical>.node. Fallback when cquery is unavailable.
+ * bazel-bin/natives-<t>/<canonical>.node plus bazel-bin/v8-eval-<t>/<canonical>.
+ * Fallback when cquery is unavailable or when installing from `--source`.
  */
-export function conventionOutputPaths(names: string[], host: HostInfo): string[] {
-	return resolveTargetMembers(names, host).map(member => `bazel-bin/natives-${member}/${ADDON_OUTPUTS[member]}`);
+export function conventionOutputPaths(names: string[], host: HostInfo, v8Only = false): string[] {
+	const paths: string[] = [];
+	for (const member of resolveTargetMembers(names, host)) {
+		if (!v8Only) {
+			const addonOut = `bazel-bin/natives-${member}/${ADDON_OUTPUTS[member]}`;
+			if (!paths.includes(addonOut)) paths.push(addonOut);
+		}
+		const v8 = V8_EVAL_OUTPUTS[member];
+		if (v8) {
+			const v8Out = `bazel-bin/v8-eval-${v8.target}/${v8.filename}`;
+			if (!paths.includes(v8Out)) paths.push(v8Out);
+		}
+	}
+	return paths;
 }
 
 /**
@@ -586,7 +599,7 @@ async function main(): Promise<void> {
 
 	if (options.source) {
 		const sourceDir = path.resolve(options.source);
-		outputs = conventionOutputPaths(options.targets, host).map(output =>
+		outputs = conventionOutputPaths(options.targets, host, options.v8Only).map(output =>
 			path.join(sourceDir, path.relative("bazel-bin", output)),
 		);
 	} else {
@@ -637,7 +650,7 @@ async function main(): Promise<void> {
 			outputs = parseBazelFilesOutput(cquery.stdout);
 		} else {
 			console.warn(`bazel cquery failed (exit ${cquery.exitCode}); falling back to bazel-bin path convention`);
-			outputs = conventionOutputPaths(options.targets, host);
+			outputs = conventionOutputPaths(options.targets, host, options.v8Only);
 		}
 		if (outputs.length === 0) {
 			console.error("bazel build succeeded but no .node outputs were located");
@@ -668,8 +681,14 @@ async function main(): Promise<void> {
 		const absolute = path.isAbsolute(output) ? output : path.join(repoRoot, output);
 		const destPath = path.join(destDir, base);
 		if (base.startsWith("omp_v8_eval.")) {
-			await fs.copyFile(absolute, destPath);
-			if (!base.endsWith(".exe")) await fs.chmod(destPath, 0o755);
+			if (options.source && !options.v8Only && !(await Bun.file(absolute).exists())) {
+				console.log(`skipping ${base}: not present in ${options.source}`);
+				continue;
+			}
+			const tempPath = `${destPath}.tmp-${process.pid}-${Date.now()}`;
+			await fs.copyFile(absolute, tempPath);
+			if (!base.endsWith(".exe")) await fs.chmod(tempPath, 0o755);
+			await fs.rename(tempPath, destPath);
 			console.log(`installed ${base} → ${destPath}`);
 			continue;
 		}

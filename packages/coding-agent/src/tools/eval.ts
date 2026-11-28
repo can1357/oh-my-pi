@@ -86,9 +86,11 @@ function describeLanguageField(langs: readonly EvalLanguageToken[]): string {
 /** One-line discovery summary listing the runtimes available this session. */
 function summarizeEvalLanguages(langs: readonly EvalLanguageToken[]): string {
 	const names = langs.map(lang => EVAL_LANGUAGE_NAME[lang]);
-	return names.length > 0
+	if (names.length === 0) return "No eval runtimes are currently available";
+	const hasPackageOrLoad = langs.includes("py") || langs.includes("js");
+	return hasPackageOrLoad
 		? `Execute ${joinWithOr(names)} in persistent kernels; load scripts or install packages`
-		: "No eval runtimes are currently available";
+		: `Execute ${joinWithOr(names)} in persistent sandboxed isolates`;
 }
 
 /** Resolved-allowance → enabled language tokens, preserving display order. */
@@ -248,9 +250,11 @@ async function resolveBackend(
 		const availability = await pythonBackend.checkAvailability(session, probeOpts);
 		throwIfAborted(probeOpts?.signal);
 		if (!availability.ok) {
-			const remedy = allowJs
-				? 'Python backend is unavailable in this session. Pass language: "js", or provide a working Python 3.8+ on PATH (or set python.interpreter).'
-				: 'Python backend is unavailable in this session. Provide a working Python 3.8+ on PATH (or set python.interpreter) to use language: "py".';
+			const fallbacks = [...(allowJs ? ['"js"'] : []), ...(backends.v8 ? ['"v8"'] : [])];
+			const remedy =
+				fallbacks.length > 0
+					? `Python backend is unavailable in this session. Pass language: ${joinWithOr(fallbacks)}, or provide a working Python 3.8+ on PATH (or set python.interpreter).`
+					: 'Python backend is unavailable in this session. Provide a working Python 3.8+ on PATH (or set python.interpreter) to use language: "py".';
 			const reason = availability.reason
 				? truncateToWidth(
 						replaceTabs(sanitizeText(shortenEmbeddedPaths(availability.reason))).replaceAll("\n", " "),
@@ -395,7 +399,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 
 	/**
 	 * Languages enabled for this session, in display order. Detached tools (no
-	 * session) fall back to the shipped defaults (py/js). Synchronous reads use
+	 * session) fall back to the shipped defaults (py/js/v8). Synchronous reads use
 	 * only definitive memoized probes, never blocking runtime discovery.
 	 */
 	#enabledLanguages(): EvalLanguageToken[] {

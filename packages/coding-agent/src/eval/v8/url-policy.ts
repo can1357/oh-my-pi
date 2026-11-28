@@ -24,7 +24,7 @@ export type DirectWritePolicy =
 			via: "file" | "handler";
 			maxBytes?: number;
 	  }
-	| { allowed: false };
+	| { allowed: false; denyReason?: string };
 
 export function isDirectReadableV8Url(rawPath: string): DirectReadPolicy {
 	const router = InternalUrlRouter.instance();
@@ -48,10 +48,17 @@ export function isDirectWritableV8Url(
 	const target = router.writeTarget(normalized);
 	if (!target) return { allowed: false };
 	const { url, spec } = target;
-	if (!spec.write || spec.immutable) return { allowed: false };
+	if (!spec.write || (spec.write.via === "file" && spec.immutable)) return { allowed: false };
 	if (!DIRECT_WRITE_SCOPES[spec.write.scope]) return { allowed: false };
 	const decision = spec.write.tier(url, content, session);
-	if (decision !== "read") return { allowed: false };
+	if (typeof decision !== "string") {
+		if (decision.policy === "deny") {
+			return { allowed: false, denyReason: decision.reason ?? `Cannot write ${normalized}` };
+		}
+		if (decision.tier !== "read" && decision.policy !== "allow") return { allowed: false };
+	} else if (decision !== "read") {
+		return { allowed: false };
+	}
 	const peeled = router.peelWriteSelector(normalized, "write");
 	return {
 		allowed: true,

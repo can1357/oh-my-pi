@@ -12,6 +12,7 @@
 
 ### Added
 
+- Added `AgentTool.approvalTouchesFilesystem` so tools without direct host filesystem access can opt out of restricted-folder `cwd` fallbacks.
 - Added `CompactionSettings.summaryMaxTokens` to set the output budget for regular compaction summaries; history that fits alongside the actual previous summary and requested output is retained ([#18688](https://github.com/can1357/oh-my-pi/issues/18688))
 
 ### Changed

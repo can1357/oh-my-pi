@@ -9,6 +9,7 @@
 
 ### Added
 
+- Added the `omp-v8-eval` companion binary and `resolveV8EvalBinary()` export for running sandboxed V8 eval isolates.
 - Added `renderHtml` for rendering HTML as Markdown or plain text, with automatic reader-content selection by default, a `mode: "full"` option for retaining all visible content, and configurable hidden-content handling.
 - Added `Reader` for step-by-step URL reading through host-provided HTTP and browser I/O, with the same reader-content and hidden-content options as `renderHtml`.
 - Added `analyzeBashApproval(command, dialect?)`, a synchronous Bash 5.3 and Zsh 5.9 AST analyzer for approving `bash` tool commands.

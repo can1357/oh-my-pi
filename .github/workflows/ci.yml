@@ -374,10 +374,13 @@ jobs:
               for target in $NATIVES_X64_TARGETS; do
                 bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build "//:$target" 2>&1 | tee -a "$RUNNER_TEMP/bazel-build.log"
               done
-              for target in $NATIVES_X64_TARGETS; do
-                mkdir -p "ci-natives/$target"
-                cp -L bazel-bin/"$target"/*.node "ci-natives/$target/"
-              done
+             for target in $NATIVES_X64_TARGETS; do
+               mkdir -p "ci-natives/$target"
+               cp -L bazel-bin/"$target"/*.node "ci-natives/$target/"
+             done
+             bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build //:v8-eval-linux-x64 2>&1 | tee -a "$RUNNER_TEMP/bazel-build.log"
+             mkdir -p ci-natives/v8-eval-linux-x64
+             cp -L bazel-bin/v8-eval-linux-x64/omp_v8_eval.linux-x64 ci-natives/v8-eval-linux-x64/
          # Cache-hit visibility: a supposedly warm build that executes
          # thousands of actions is the failure mode that made CI slow — make
          # it visible in the run summary instead of discovering it weeks in.
@@ -473,8 +476,10 @@ jobs:
            uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
            with:
               name: natives-linux-x64
-              path: ci-natives/natives-linux-x64-*/*.node
-              if-no-files-found: error
+             path: |
+                ci-natives/natives-linux-x64-*/*.node
+                ci-natives/v8-eval-linux-x64/omp_v8_eval.*
+             if-no-files-found: error
               retention-days: 1
 
    # The remaining targets (darwin, arm64, musl and win32 cross builds). Only
@@ -496,9 +501,12 @@ jobs:
               if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
               # One addon per invocation, for the OOM reason in native_addons.
               : > "$RUNNER_TEMP/bazel-build.log"
-              for target in $NATIVES_CROSS_TARGETS; do
-                bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build "//:$target" 2>&1 | tee -a "$RUNNER_TEMP/bazel-build.log"
-              done
+             for target in $NATIVES_CROSS_TARGETS; do
+               bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build "//:$target" 2>&1 | tee -a "$RUNNER_TEMP/bazel-build.log"
+             done
+             for target in v8-eval-darwin-arm64 v8-eval-darwin-x64 v8-eval-linux-arm64 v8-eval-win32-x64; do
+               bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build "//:$target" 2>&1 | tee -a "$RUNNER_TEMP/bazel-build.log"
+             done
          # The two jobs' target lists must together cover //:natives-all
          # exactly; a target added to the filegroup but to neither list would
          # otherwise silently never build or ship. cquery, not query: the rc's
@@ -542,11 +550,12 @@ jobs:
            uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
            with:
               name: native-addons
-              path: |
-                 bazel-bin/natives-*/*.node
-                 !bazel-bin/natives-linux-x64-*/*.node
-              if-no-files-found: error
-              retention-days: 1
+             path: |
+                bazel-bin/natives-*/*.node
+                !bazel-bin/natives-linux-x64-*/*.node
+                bazel-bin/v8-eval-*/omp_v8_eval.*
+                !bazel-bin/v8-eval-linux-x64/omp_v8_eval.*
+             retention-days: 1
 
    test_coding_agent_native:
       name: "Test coding-agent native/unit (TS) ${{ matrix.shard }}"

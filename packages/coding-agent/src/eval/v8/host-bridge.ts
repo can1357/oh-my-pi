@@ -1,6 +1,7 @@
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { InternalUrlRouter } from "../../internal-urls";
 import { sessionResolveContext, sessionWriteContext } from "../../internal-urls/context";
+import { parseSel, resolveTailSelector } from "../../tools/read-selector";
 import { ToolError } from "../../tools/tool-errors";
 import {
 	bridgeValueFromToolResult,
@@ -55,6 +56,22 @@ function sliceLines(text: string, options?: V8ReadOptions): string {
 	return lines.slice(start, end).join("\n");
 }
 
+function applyTargetSelector(text: string, sel: string): string | null {
+	const parsed = parseSel(sel);
+	if (parsed.kind === "none" || parsed.kind === "raw") return text;
+	if (parsed.kind === "image" || parsed.kind === "conflicts") return null;
+	const lines = text.split(/\r?\n/);
+	const resolved = resolveTailSelector(parsed, lines.length);
+	if (resolved.kind !== "lines") return text;
+	const chunks: string[] = [];
+	for (const range of resolved.ranges) {
+		const start = Math.max(0, range.startLine - 1);
+		const end = range.endLine !== undefined ? range.endLine : lines.length;
+		chunks.push(lines.slice(start, end).join("\n"));
+	}
+	return chunks.join("\n");
+}
+
 export async function handleV8ToolCall(name: string, args: unknown, options: V8HostBridgeOptions): Promise<unknown> {
 	if (name.startsWith("__")) {
 		throw new ToolError(`Unknown tool in V8 sandbox: ${name}`);
@@ -99,7 +116,14 @@ export async function handleV8UrlRead(
 				const listing = await router.resolve(target.url.href, resolveCtx);
 				text = typeof listing.content === "string" ? listing.content : listing.content.toString("utf-8");
 			} else {
-				text = await file.text();
+				const bytes = await file.bytes();
+				if (bytes.subarray(0, 8192).includes(0)) {
+					const delegatedPath = formatDelegatedReadPath(rawPath, readOptions);
+					if (delegatedPath === null) return "";
+					const res = await handleV8ToolCall("read", { path: delegatedPath }, options);
+					return isRecord(res) && typeof res.text === "string" ? res.text : String(res ?? "");
+				}
+				text = new TextDecoder().decode(bytes);
 			}
 		} catch (error) {
 			throw new ToolError(
@@ -109,6 +133,17 @@ export async function handleV8UrlRead(
 	} else {
 		const resource = await router.resolve(target.url.href, resolveCtx);
 		text = typeof resource.content === "string" ? resource.content : resource.content.toString("utf-8");
+	}
+
+	if (target.sel) {
+		const selected = applyTargetSelector(text, target.sel);
+		if (selected === null) {
+			const delegatedPath = formatDelegatedReadPath(rawPath, readOptions);
+			if (delegatedPath === null) return "";
+			const res = await handleV8ToolCall("read", { path: delegatedPath }, options);
+			return isRecord(res) && typeof res.text === "string" ? res.text : String(res ?? "");
+		}
+		text = selected;
 	}
 
 	const sliced = sliceLines(text, readOptions);
@@ -125,6 +160,9 @@ export async function handleV8UrlWrite(
 	const textData = encoding === "utf8" ? data : undefined;
 	const policy = isDirectWritableV8Url(rawPath, textData, options.session);
 	if (!policy.allowed) {
+		if (policy.denyReason) {
+			throw new ToolError(policy.denyReason);
+		}
 		if (encoding !== "utf8") {
 			throw new ToolError("Binary writes are only supported for local:// URLs.");
 		}
