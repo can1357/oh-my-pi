@@ -6,7 +6,7 @@
 import { expect, test, vi } from "bun:test";
 import { nativeShell } from "../../helpers/native-shell";
 import { paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
-import { createRoot, resolveChildren, signal } from "@oh-my-pi/pi-tui";
+import { batch, createRoot, resolveChildren, signal } from "@oh-my-pi/pi-tui";
 import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
 import { styledSpans } from "@oh-my-pi/pi-tui/text/styled-spans";
 import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
@@ -14,6 +14,7 @@ import { CORPUS_NOW } from "@oh-my-pi/pi-tui/testing/corpus";
 import { createTestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
 import { parseHtmlForm } from "../../../src/tools/html-form/parse";
 import { formMedia, HtmlFormDialog, HtmlFormModel } from "../../../src/ui/forms/html-form";
+import "../../../src/ui/styles/dock/covering";
 import "../../../src/ui/styles/panels/ask-dialog";
 import { figureWorkSettled } from "../../../src/ui/transcript/figures";
 import { corpusSuite, type Driver, type Mounted, settle } from "../setup/harness";
@@ -250,6 +251,434 @@ test("places the masked password caret after one bullet for an emoji", () => {
 		term.type("x");
 		term.press("enter");
 		expect(onSubmit).toHaveBeenCalledWith({ code: "😀xab" }, []);
+	} finally {
+		term.dispose();
+	}
+});
+
+test("Up at the top of a question taller than the card scrolls up through its text before leaving it", () => {
+	const context = (name: string) => Array.from({ length: 12 }, (_, i) => `<p>${name} context ${i + 1}</p>`).join("");
+	const model = new HtmlFormModel(
+		parseHtmlForm(`<form>
+			<fieldset><legend>First question</legend>${context("first")}
+				<label><input type="radio" name="a" value="alpha" checked> Alpha</label>
+				<label><input type="radio" name="a" value="beta"> Beta</label>
+			</fieldset>
+			<fieldset><legend>Second question</legend>${context("second")}
+				<label><input type="radio" name="b" value="gamma" checked> Gamma</label>
+				<label><input type="radio" name="b" value="delta"> Delta</label>
+			</fieldset>
+		</form>`),
+		{ onSubmit: () => {}, onCancel: () => {} },
+	);
+	const term = createTestTerminal(() => ({ dock: <HtmlFormDialog model={model} terminalRows={() => 16} /> }), {
+		columns: 60,
+		rows: 16,
+	});
+	const shows = (text: string) => term.screen().some(row => row.includes(text));
+	/** Presses `key` until `text` shows (at most 60 times); the presses it took, or -1 when it never shows. */
+	const pressUntil = (key: string, text: string) => {
+		let presses = 0;
+		while (!shows(text) && presses < 60) {
+			term.press(key);
+			presses++;
+		}
+		return shows(text) ? presses : -1;
+	};
+	try {
+		term.focus(term.surface.dock()[0]!);
+		expect(shows("Alpha")).toBe(true);
+		expect(shows("First question")).toBe(false);
+		// The first question's own text, then back down to its options: once the highlight shows, Down moves it.
+		expect(pressUntil("up", "First question")).toBeGreaterThan(1);
+		expect(model.active()).toBe(0);
+		// Neither a key release nor Up past the top of the form scrolls back down.
+		term.press("up", { kind: "release" });
+		term.press("up");
+		expect(shows("First question")).toBe(true);
+		pressUntil("down", "Alpha");
+		expect(model.row()).toBe(0);
+		term.press("down");
+		expect(model.row()).toBe(1);
+
+		term.press("pageDown");
+		expect(model.active()).toBe(1);
+		expect(shows("Second question")).toBe(false);
+		expect(pressUntil("up", "Second question")).toBeGreaterThan(1);
+		expect(model.active()).toBe(1);
+		// With its text all shown, Up leaves for the question above.
+		term.press("up");
+		expect(model.active()).toBe(0);
+	} finally {
+		term.dispose();
+	}
+});
+
+test("Down reads text below a question's last option before leaving, and Up scrolls back to its highlight", () => {
+	const context = Array.from(
+		{ length: 12 },
+		(_, i) => `<p>after context ${i + 1}${i === 11 ? " AFTER-END" : ""}</p>`,
+	).join("");
+	const question = (n: number, after = "") => `<fieldset><legend>Question ${n}</legend>
+		<label><input type="radio" name="q${n}" value="a" checked> Q${n} first</label>
+		<label><input type="radio" name="q${n}" value="b"> Q${n} second</label>
+		${after}</fieldset>`;
+	const model = new HtmlFormModel(parseHtmlForm(`<form>${question(1)}${question(2, context)}${question(3)}</form>`), {
+		onSubmit: () => {},
+		onCancel: () => {},
+	});
+	/** Question 2's last row: its "Other" row, under both options. */
+	const last = model.rows(1).at(-1)!;
+	const term = createTestTerminal(() => ({ dock: <HtmlFormDialog model={model} terminalRows={() => 16} /> }), {
+		columns: 60,
+		rows: 16,
+	});
+	const shows = (text: string) =>
+		term
+			.screen()
+			.slice(-16)
+			.some(row => row.includes(text));
+	try {
+		term.focus(term.surface.dock()[0]!);
+		// Neither the field nor its last row has painted yet: Down must not skip its text.
+		batch(() => {
+			for (const id of ["pageDown", "down", "down", "down"])
+				term.backend.dispatch({ type: "key", key: { id, kind: "press", raw: "" } });
+		});
+		term.render();
+		expect(model.active()).toBe(1);
+		expect(model.row()).toBe(last);
+		expect(model.scroll()).toBeLessThan(0);
+		for (let presses = 0; presses < 60 && !shows("AFTER-END"); presses++) {
+			term.press("down");
+			expect(model.active()).toBe(1);
+			expect(model.row()).toBe(last);
+		}
+		expect(shows("AFTER-END")).toBe(true);
+		expect(shows("Other:")).toBe(false);
+		const scroll = model.scroll();
+		term.press("up", { kind: "release" });
+		expect(model.scroll()).toBe(scroll);
+		term.press("up");
+		expect(model.scroll()).toBe(scroll + 1);
+		expect(model.row()).toBe(last);
+		for (let presses = 0; presses < 60 && !shows("Other:"); presses++) term.press("up");
+		expect(shows("Other:")).toBe(true);
+		expect(model.active()).toBe(1);
+		expect(model.row()).toBe(last);
+		term.press("up");
+		expect(model.row()).toBe(1);
+		expect(model.scroll()).toBe(0);
+		for (let presses = 0; presses < 60 && model.active() === 1; presses++) term.press("down");
+		expect(model.active()).toBe(2);
+		expect(shows("Q3 first")).toBe(true);
+		term.press("up");
+		expect(model.active()).toBe(1);
+		expect(model.row()).toBe(last);
+		expect(shows("Other:")).toBe(true);
+	} finally {
+		term.dispose();
+	}
+});
+
+test("arrow keys read a tall gap between fields in the same question before moving focus", () => {
+	const gap = Array.from(
+		{ length: 12 },
+		(_, i) => `<p>${i === 0 ? "GAP-START " : ""}gap context ${i + 1}${i === 11 ? " GAP-END" : ""}</p>`,
+	).join("");
+	const model = new HtmlFormModel(
+		parseHtmlForm(`<form><fieldset><legend>Question</legend>
+			<label><input type="radio" name="answer" value="a" checked> Alpha</label>
+			<label><input type="radio" name="answer" value="b"> Beta</label>
+			${gap}<label>Additional note <input name="note"></label>
+		</fieldset></form>`),
+		{ onSubmit: () => {}, onCancel: () => {} },
+	);
+	const last = model.rows(0).at(-1)!;
+	const term = createTestTerminal(() => ({ dock: <HtmlFormDialog model={model} terminalRows={() => 16} /> }), {
+		columns: 60,
+		rows: 16,
+	});
+	const shows = (text: string) =>
+		term
+			.screen()
+			.slice(-16)
+			.some(row => row.includes(text));
+	try {
+		term.focus(term.surface.dock()[0]!);
+		for (let presses = 0; presses < 3 && model.row() !== last; presses++) term.press("down");
+		expect(model.row()).toBe(last);
+		expect(shows("Other:")).toBe(true);
+		for (let presses = 0; presses < 60 && !shows("GAP-END"); presses++) {
+			term.press("down");
+			expect(model.active()).toBe(0);
+			expect(model.row()).toBe(last);
+		}
+		expect(shows("GAP-END")).toBe(true);
+		for (let presses = 0; presses < 60 && model.active() === 0; presses++) term.press("down");
+		expect(model.active()).toBe(1);
+		expect(shows("Additional note")).toBe(true);
+		expect(shows("GAP-START")).toBe(false);
+		for (let presses = 0; presses < 60 && !shows("GAP-START"); presses++) {
+			term.press("up");
+			expect(model.active()).toBe(1);
+		}
+		expect(shows("GAP-START")).toBe(true);
+		for (let presses = 0; presses < 60 && model.active() === 1; presses++) term.press("up");
+		expect(model.active()).toBe(0);
+		expect(model.row()).toBe(last);
+		expect(shows("Other:")).toBe(true);
+	} finally {
+		term.dispose();
+	}
+});
+
+test.each([12, 13])("a wrapped skip warning leaves a form row above %s dock rows", widgets => {
+	const model = new HtmlFormModel(
+		parseHtmlForm(`<form><fieldset><legend>Confirm</legend>
+			<label><input type="radio" name="answer" value="yes" checked> Approve</label>
+		</fieldset></form>`),
+		{ onSubmit: () => {}, onCancel: () => {} },
+	);
+	const term = createTestTerminal(
+		() => ({
+			dock: [
+				<col key="ask" role="omp.dock.covering">
+					<HtmlFormDialog
+						model={model}
+						terminalRows={() => 16}
+						skipNotice={() => `SKIP-NOTICE ${"sending the draft skips this form ".repeat(12)}`}
+					/>
+				</col>,
+				<col key="widgets">
+					{Array.from({ length: widgets }, (_, i) => (
+						<text key={`w${i}`} spans={[{ t: `widget ${i + 1}` }]} />
+					))}
+				</col>,
+			],
+		}),
+		{ columns: 40, rows: 16 },
+	);
+	try {
+		term.focus(term.surface.dock()[0]!.children()[0]!);
+		const visible = term.screen().slice(-16).join("\n");
+		expect(visible).toContain("Approve");
+		expect(visible.includes("SKIP-NOTICE")).toBe(widgets === 12);
+	} finally {
+		term.dispose();
+	}
+});
+
+test.each([
+	["k", "j"],
+	["-", "+"],
+])("Vim %s scrolls back to a text box hidden above the card after %s reads its trailing text", (up, down) => {
+	const context = Array.from(
+		{ length: 12 },
+		(_, i) => `<p>context ${i + 1}${i === 11 ? " VIM-AFTER-END" : ""}</p>`,
+	).join("");
+	const model = new HtmlFormModel(
+		parseHtmlForm(`<form>
+			<fieldset><legend>First question</legend><label>First <input name="a"></label>${context}</fieldset>
+			<fieldset><legend>Second question</legend><label>Second <input name="b"></label></fieldset>
+		</form>`),
+		{ onSubmit: () => {}, onCancel: () => {} },
+		{ vim: { startMode: () => "normal" } },
+	);
+	const term = createTestTerminal(() => ({ dock: <HtmlFormDialog model={model} terminalRows={() => 16} /> }), {
+		columns: 60,
+		rows: 16,
+	});
+	const shows = (text: string) =>
+		term
+			.screen()
+			.slice(-16)
+			.some(row => row.includes(text));
+	try {
+		term.focus(term.surface.dock()[0]!);
+		for (let presses = 0; presses < 60 && !shows("VIM-AFTER-END"); presses++) term.type(down);
+		expect(shows("VIM-AFTER-END")).toBe(true);
+		expect(shows("First")).toBe(false);
+		expect(model.active()).toBe(0);
+		const scroll = model.scroll();
+		term.type(up);
+		expect(model.scroll()).toBe(scroll + 1);
+		expect(model.active()).toBe(0);
+		for (let presses = 0; presses < 60 && !shows("First"); presses++) term.type(up);
+		expect(shows("First")).toBe(true);
+		for (let presses = 0; presses < 60 && model.active() === 0; presses++) term.type(down);
+		expect(model.active()).toBe(1);
+	} finally {
+		term.dispose();
+	}
+});
+
+test("keys that arrive before the next frame scroll and move the ask form as if each were drawn", () => {
+	const context = Array.from({ length: 12 }, (_, i) => `<p>second context ${i + 1}</p>`).join("");
+	const model = new HtmlFormModel(
+		parseHtmlForm(`<form>
+			<fieldset><legend>First question</legend>
+				<label><input type="radio" name="a" value="alpha" checked> Alpha</label>
+			</fieldset>
+			<fieldset><legend>Second question</legend>${context}
+				<label><input type="radio" name="b" value="gamma" checked> Gamma</label>
+				<label><input type="radio" name="b" value="delta"> Delta</label>
+			</fieldset>
+		</form>`),
+		{ onSubmit: () => {}, onCancel: () => {} },
+	);
+	const term = createTestTerminal(() => ({ dock: <HtmlFormDialog model={model} terminalRows={() => 16} /> }), {
+		columns: 60,
+		rows: 16,
+	});
+	/** Dispatches the keys in one reactive batch, so the card paints only after the last of them. */
+	const burst = (...ids: string[]) => {
+		batch(() => {
+			for (const id of ids) term.backend.dispatch({ type: "key", key: { id, kind: "press", raw: "" } });
+		});
+		term.render();
+	};
+	const shows = (text: string) => term.screen().some(row => row.includes(text));
+	try {
+		term.focus(term.surface.dock()[0]!);
+		// The short first question was drawn last; Up right after PageDown scrolls the tall second one instead of leaving it.
+		burst("pageDown", "up");
+		expect(model.active()).toBe(1);
+		// Scroll until the highlighted option just leaves the card: one Down brings it back, the next moves it.
+		for (let presses = 0; presses < 60 && shows("Gamma"); presses++) term.press("up");
+		expect(shows("Gamma")).toBe(false);
+		burst("down", "down");
+		expect(model.active()).toBe(1);
+		expect(model.row()).toBe(1);
+	} finally {
+		term.dispose();
+	}
+});
+
+test("a long question above other dock rows scrolls to its title on the screen, not above it", () => {
+	const context = Array.from({ length: 20 }, (_, i) => `<p>context ${i + 1}</p>`).join("");
+	const model = new HtmlFormModel(
+		parseHtmlForm(`<form><fieldset><legend>Confirm the release</legend>${context}
+			<label><input type="radio" name="a" value="approve" checked> Approve</label>
+			<label><input type="radio" name="a" value="reject"> Reject</label>
+		</fieldset></form>`),
+		{ onSubmit: () => {}, onCancel: () => {} },
+	);
+	const widgets = Array.from({ length: 10 }, (_, i) => <text key={`w${i}`} spans={[{ t: `widget ${i + 1}` }]} />);
+	const term = createTestTerminal(
+		() => ({
+			dock: [
+				<col key="ask" role="omp.dock.covering">
+					<HtmlFormDialog model={model} terminalRows={() => 24} />
+				</col>,
+				<col key="widgets">{widgets}</col>,
+			],
+		}),
+		{ columns: 60, rows: 24 },
+	);
+	// What a 24-row terminal shows: the frame's last 24 rows (a taller frame scrolls its top away).
+	const shows = (text: string) =>
+		term
+			.screen()
+			.slice(-24)
+			.some(row => row.includes(text));
+	try {
+		term.focus(term.surface.dock()[0]!.children()[0]!);
+		for (let presses = 0; presses < 60 && !shows("Confirm the release"); presses++) term.press("up");
+		expect(shows("Confirm the release")).toBe(true);
+		expect(shows("widget 10")).toBe(true);
+		for (let presses = 0; presses < 60 && !shows("Approve"); presses++) term.press("down");
+		expect(model.row()).toBe(0);
+	} finally {
+		term.dispose();
+	}
+});
+
+test.each([
+	{ paragraphs: 3, rows: 40, fits: true },
+	{ paragraphs: 12, rows: 16, fits: false },
+])(
+	"context between two questions is readable from its top after Down opens the next ($paragraphs paragraphs, $rows rows)",
+	({ paragraphs, rows, fits }) => {
+		const context = Array.from(
+			{ length: paragraphs },
+			(_, i) => `<p>${i === 0 ? "MID-TOP " : ""}middle ${i + 1}</p>`,
+		).join("");
+		const question = (n: number) => `<fieldset><legend>Question ${n}</legend>
+		<label><input type="radio" name="q${n}" value="a" checked> Q${n} first</label>
+		<label><input type="radio" name="q${n}" value="b"> Q${n} second</label>
+	</fieldset>`;
+		const model = new HtmlFormModel(
+			parseHtmlForm(`<form>${question(1)}${question(2)}${context}${question(3)}</form>`),
+			{
+				onSubmit: () => {},
+				onCancel: () => {},
+			},
+		);
+		const term = createTestTerminal(() => ({ dock: <HtmlFormDialog model={model} terminalRows={() => rows} /> }), {
+			columns: 60,
+			rows,
+		});
+		const shows = (text: string) =>
+			term
+				.screen()
+				.slice(-rows)
+				.some(row => row.includes(text));
+		try {
+			term.focus(term.surface.dock()[0]!);
+			// Down from the second question's last row onto the third's first option.
+			for (let presses = 0; presses < 20 && model.active() !== 2; presses++) term.press("down");
+			expect(model.active()).toBe(2);
+			expect(shows("Q3 first")).toBe(true);
+			// Context that fits shows from its top at once; taller context scrolls there with Up, the question still open.
+			let ups = 0;
+			for (; ups < 60 && !shows("MID-TOP"); ups++) term.press("up");
+			expect(shows("MID-TOP")).toBe(true);
+			expect(ups === 0).toBe(fits);
+			expect(model.active()).toBe(2);
+			for (let presses = 0; presses < 60 && !shows("Q3 first"); presses++) term.press("down");
+			expect(model.row()).toBe(0);
+		} finally {
+			term.dispose();
+		}
+	},
+);
+
+test.each([
+	["k", "j"],
+	["-", "+"],
+])("Vim %s scrolls a tall question's text and %s scrolls back before leaving its text box", (up, down) => {
+	const context = Array.from({ length: 12 }, (_, i) => `<p>${i === 0 ? "TOP " : ""}context ${i + 1}</p>`).join("");
+	const model = new HtmlFormModel(
+		parseHtmlForm(
+			`<form>${context}<label>First <input name="a"></label><label>Second <input name="b"></label></form>`,
+		),
+		{ onSubmit: () => {}, onCancel: () => {} },
+		{ vim: { startMode: () => "normal" } },
+	);
+	const term = createTestTerminal(() => ({ dock: <HtmlFormDialog model={model} terminalRows={() => 16} /> }), {
+		columns: 60,
+		rows: 16,
+	});
+	const shows = (text: string) =>
+		term
+			.screen()
+			.slice(-16)
+			.some(row => row.includes(text));
+	try {
+		term.focus(term.surface.dock()[0]!);
+		for (let presses = 0; presses < 60 && !shows("TOP"); presses++) term.type(up);
+		expect(shows("TOP")).toBe(true);
+		// Back down: the first box keeps the keys, scrolling, until it is on screen again.
+		let presses = 0;
+		let shownBeforeLeaving = false;
+		for (; presses < 60 && model.active() === 0; presses++) {
+			shownBeforeLeaving = shows("First");
+			term.type(down);
+		}
+		expect(model.active()).toBe(1);
+		expect(presses).toBeGreaterThan(1);
+		expect(shownBeforeLeaving).toBe(true);
 	} finally {
 		term.dispose();
 	}

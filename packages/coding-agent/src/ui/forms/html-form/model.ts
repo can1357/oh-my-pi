@@ -157,12 +157,18 @@ export class HtmlFormModel {
 	readonly dropdown = signal<number | undefined>(undefined);
 	readonly note = signal<NoteDraft | undefined>(undefined);
 	readonly hidden = signal(false);
+	/** Rows the card is scrolled past where the highlight anchors it: positive up, negative down. */
+	readonly scroll = signal(0);
 	/**
-	 * Where the highlighted row sits when the open group is taller than the
-	 * card: on top, or on the bottom after Up at the very first row (showing
-	 * the text above it).
+	 * The card as the terminal last drew it, for the field and row it drew: rows of the open group
+	 * above and below the anchored card, and how far it can scroll with the highlight still on it.
+	 * Undefined before the first paint and in Tern, where arrow keys never scroll.
 	 */
-	readonly scrollAnchor = signal<"top" | "bottom">("top");
+	painted:
+		| { active: Active; row: number; above: number; below: number; upReveal: number; downReveal: number }
+		| undefined;
+	/** Set by a key that scrolled the card or stopped at the top of the form: the scroll stays. */
+	#keepScroll = false;
 	/**
 	 * Cells a textarea's rows wrap at as the terminal card last drew them, so
 	 * Up/Down step through the rows on screen; undefined before that paint
@@ -207,7 +213,7 @@ export class HtmlFormModel {
 			});
 			this.#addVim(vim, { kind: "note" });
 		}
-		const reachable = form.fields.flatMap((_, index) => (this.#reachable(index) ? [index] : []));
+		const reachable = form.fields.flatMap((_, index) => (this.reachable(index) ? [index] : []));
 		this.sole = reachable.length === 1;
 		// Open where the answer is, so Enter accepts a preselected choice instead of overwriting it.
 		if (reachable.length > 0) this.#enter(reachable[0]!);
@@ -321,7 +327,7 @@ export class HtmlFormModel {
 	 * An empty required field is flagged only once the highlight has moved past it.
 	 */
 	error(index: number): string | undefined {
-		if (!this.#reachable(index)) return undefined;
+		if (!this.reachable(index)) return undefined;
 		const value = this.value(index);
 		const active = this.active();
 		if (isBlank(value) && active !== "submit" && active <= index) return undefined;
@@ -361,7 +367,7 @@ export class HtmlFormModel {
 
 	/** `2 of 5 answered`, for forms of two or more named questions the keyboard reaches. */
 	progress(): string | undefined {
-		const named = this.fields.flatMap((field, index) => (field.name && this.#reachable(index) ? [index] : []));
+		const named = this.fields.flatMap((field, index) => (field.name && this.reachable(index) ? [index] : []));
 		if (named.length < 2) return undefined;
 		return `${named.filter(index => this.answered(index)).length} of ${named.length} answered`;
 	}
@@ -421,14 +427,14 @@ export class HtmlFormModel {
 	}
 
 	/** Whether the keyboard can reach field `index`: a text field, or a choice with an enabled option or an Other answer. */
-	#reachable(index: number): boolean {
+	reachable(index: number): boolean {
 		return this.field(index).kind === "text" || this.rows(index).length > 0;
 	}
 
 	/** The reachable field after (`1`) or before (`-1`) field `from`; undefined past either end. */
 	#fieldFrom(from: number, delta: 1 | -1): number | undefined {
 		for (let index = from + delta; index >= 0 && index < this.fields.length; index += delta)
-			if (this.#reachable(index)) return index;
+			if (this.reachable(index)) return index;
 		return undefined;
 	}
 
@@ -459,7 +465,7 @@ export class HtmlFormModel {
 
 	/** Open field `index` at its answer; nothing for a field the keyboard cannot reach. */
 	open(index: number): void {
-		if (index >= 0 && index < this.fields.length && this.#reachable(index)) this.#enter(index);
+		if (index >= 0 && index < this.fields.length && this.reachable(index)) this.#enter(index);
 	}
 
 	/** The next field at its answer, or the Submit row after the last. */
@@ -495,19 +501,45 @@ export class HtmlFormModel {
 			this.active.set("submit");
 			return;
 		}
-		const field = groups[target]?.fields.find(index => this.#reachable(index));
+		const field = groups[target]?.fields.find(index => this.reachable(index));
 		if (field !== undefined) this.#enter(field);
 	}
 
-	/** The highlight moves a row: through the open field's rows, then onto the neighbouring field's nearest row. */
+	/** Move through the field's rows, scroll through the gap, then enter the neighbouring field's nearest row. */
 	#move(delta: 1 | -1): void {
 		const active = untrack(this.active);
-		if (active !== "submit" && !isDropdown(this.field(active))) {
-			const rows = this.rows(active);
-			const next = rows.indexOf(untrack(this.row)) + delta;
-			if (next >= 0 && next < rows.length) {
-				this.row.set(rows[next]!);
-				return;
+		if (active !== "submit") {
+			if (!isDropdown(this.field(active))) {
+				const rows = this.rows(active);
+				const next = rows.indexOf(untrack(this.row)) + delta;
+				if (next >= 0 && next < rows.length) {
+					this.row.set(rows[next]!);
+					return;
+				}
+			}
+			const group = this.layout.groups.find(g => g.fields.includes(active));
+			if (delta < 0) {
+				// Up reads the gap before this field first; at the top of the form the scroll stays.
+				// Drawn for another field or row (keys ahead of the frame): scroll, which the painter clamps, rather than skip unseen text.
+				const here = this.#paintedHere();
+				const scroll = untrack(this.scroll);
+				const more = this.painted !== undefined && (!here || scroll < here.above);
+				if (more) this.scroll.set(scroll + 1);
+				this.#keepScroll =
+					more ||
+					(group?.fields.find(i => this.reachable(i)) === active && this.#fieldFrom(active, -1) === undefined);
+				if (this.#keepScroll) return;
+			}
+			if (delta > 0) {
+				// Down reads the gap after this field before leaving, including keys ahead of the frame.
+				const here = this.#paintedHere();
+				const scroll = untrack(this.scroll);
+				const more = this.painted !== undefined && (!here || scroll > -here.below);
+				if (more) {
+					this.scroll.set(scroll - 1);
+					this.#keepScroll = true;
+					return;
+				}
 			}
 		}
 		const target = this.#fieldFrom(active === "submit" ? this.fields.length : active, delta);
@@ -650,13 +682,36 @@ export class HtmlFormModel {
 	key(key: KeyEvent): boolean {
 		const step = this.#vimRowStep(key);
 		const routed: KeyEvent = step ? { id: step, kind: key.kind, raw: key.raw } : key;
-		const active = untrack(this.active);
-		const first = active === 0 && untrack(this.row) === this.rows(0)[0];
-		const id = listKeyId(routed);
-		this.scrollAnchor.set(
-			id === "up" && first ? "bottom" : id === "up" || id === "down" ? "top" : untrack(this.scrollAnchor),
-		);
-		return this.#key(routed);
+		// A key release neither scrolls nor drops the scroll.
+		if (key.kind === "release") return this.#key(routed);
+		const here = this.#paintedHere();
+		const scroll = untrack(this.scroll);
+		// The scroll actually on screen: a resize may have shrunk what fits.
+		const shown = here ? Math.max(-here.below, Math.min(scroll, here.above)) : scroll;
+		const box = this.#activeBox();
+		const vim = box && this.vim(box);
+		const vimNormal = vim && untrack(vim.mode) === "normal" && vim.pendingText() === "";
+		const down = listKeyId(routed) === "down" || (vimNormal === true && (key.text === "j" || key.text === "+"));
+		const up = listKeyId(routed) === "up" || (vimNormal === true && (key.text === "k" || key.text === "-"));
+		// Scroll back until the highlight shows, then move it (including Vim's text-box keys).
+		if (down && shown > Math.max(0, here?.upReveal ?? 0)) {
+			this.scroll.set(shown - 1);
+			return true;
+		}
+		if (up && shown < -Math.max(0, here?.downReveal ?? 0)) {
+			this.scroll.set(shown + 1);
+			return true;
+		}
+		this.#keepScroll = false;
+		const handled = this.#key(routed);
+		if (!this.#keepScroll) this.scroll.set(0);
+		return handled;
+	}
+
+	/** {@link painted} when it is of the open field and row; keys since the last frame may have moved on. */
+	#paintedHere(): HtmlFormModel["painted"] {
+		const painted = this.painted;
+		return painted?.active === untrack(this.active) && painted.row === untrack(this.row) ? painted : undefined;
 	}
 
 	/**

@@ -63,6 +63,7 @@ import {
 	type PaintImages,
 	paintNode,
 	type PointerHover,
+	releasePaintCache,
 } from "./paint";
 import { TranscriptSearch } from "./transcript-search";
 import { type TranscriptDocument, type TranscriptIndex, transcriptIndex } from "./transcript-document";
@@ -383,6 +384,12 @@ function lowerBound(values: readonly number[], value: number): number {
 	return lo;
 }
 
+/** Drop a covering block's caches together with the child blocks it composes. */
+function releasePaintTree(node: UiNode): void {
+	releasePaintCache(node);
+	for (const child of node.children()) releasePaintTree(child);
+}
+
 /** See the module docs. */
 export class TermBackend {
 	readonly #surface: Surface;
@@ -415,6 +422,8 @@ export class TermBackend {
 	readonly #emitted = new Map<UiNode, Emitted>();
 	/** Main nodes with rows of their own in terminal history: a separator alone does not count. */
 	readonly #withContent = new Set<UiNode>();
+	/** Covering dock nodes composed at a fixed height while the dock overflowed, with the block composed (absent: natural). */
+	readonly #dockFit = new WeakMap<UiNode, { readonly height: number; readonly block: Block }>();
 	/** The next frame is the shutdown flush (see {@link flush}). */
 	#flushing = false;
 	/**
@@ -785,6 +794,41 @@ export class TermBackend {
 		return paintNode(this.#env, node, width, height);
 	}
 
+	/**
+	 * The dock's blocks at `width`, first painted at their remembered heights. A covering block keeps
+	 * its natural height while the dock fits; when it would not, the block gets the rows every other
+	 * block actually takes (a fixed `cx.height`), so earlier covers shrink first. A fitted block whose
+	 * room or contents changed is measured at its natural height again. Every height change repaints
+	 * the subtree, so the painter's last run is the block composed on screen.
+	 */
+	#paintDock(width: number, height: number): Block[] {
+		const nodes = this.#surface.dock();
+		const blocks = nodes.map(node => this.#paint(node, width, this.#dockFit.get(node)?.height));
+		let total = blocks.reduce((sum, block) => sum + block.rows.length, 0);
+		for (let i = 0; i < blocks.length; i++) {
+			const node = nodes[i]!;
+			const block = blocks[i]!;
+			if (!block.covering) continue;
+			const room = Math.max(1, height - (total - block.rows.length));
+			const fit = this.#dockFit.get(node);
+			if (fit === undefined ? block.rows.length <= room : room === fit.height && block === fit.block) continue;
+			let next = block;
+			if (fit !== undefined) {
+				releasePaintTree(node);
+				next = this.#paint(node, width);
+				this.#dockFit.delete(node);
+			}
+			if (next.rows.length > room) {
+				releasePaintTree(node);
+				next = this.#paint(node, width, room);
+				this.#dockFit.set(node, { height: room, block: next });
+			}
+			total += next.rows.length - block.rows.length;
+			blocks[i] = next;
+		}
+		return blocks;
+	}
+
 	/** History must be written again: the next frame prepares a replay (a batch not yet written is dropped). */
 	#requestReplay(): void {
 		this.#replay = true;
@@ -985,8 +1029,7 @@ export class TermBackend {
 		let dockRows = 0;
 		/** Dock rows drawn over the transcript (a completion popup): they take no room from `main`. */
 		let covering = 0;
-		for (const node of this.#surface.dock()) {
-			const block = this.#paint(node, width);
+		for (const block of this.#paintDock(width, height)) {
 			dock.push({ block, top: dockRows, left: 0 });
 			dockRows += block.rows.length;
 			covering += Math.min(block.covering ?? 0, block.rows.length);
@@ -1391,8 +1434,7 @@ export class TermBackend {
 		const search = this.#search;
 		const dock: Placed[] = [];
 		let dockRows = search ? 1 : 0;
-		for (const node of search ? [] : this.#surface.dock()) {
-			const block = this.#paint(node, screenWidth);
+		for (const block of search ? [] : this.#paintDock(screenWidth, height)) {
 			// Inline dock painters include breathing room between the ledger and controls.
 			// On the fixed screen give leading, purely decorative blank rows back to the transcript.
 			let skip = 0;

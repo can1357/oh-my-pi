@@ -27,6 +27,7 @@
 ### Fixed
 
 - Moving through a question's options in Tern with the arrow keys no longer scrolls the chat back to the question each time
+- Docked reports and ask prompts now shrink to the rows the rest of the dock leaves when the dock is taller than the terminal, instead of having their top pushed off the screen ([#20788](https://github.com/can1357/oh-my-pi/pull/20788) by [@jaredlyon](https://github.com/jaredlyon))
 - Improved performance when editing large documents and updating or closing views with many reactive values.
 - Fixed pane resizing in Herdr to avoid repeated redraw loops.
 - Fixed SIXEL and iTerm2 images overflowing rows, scrolling the terminal unexpectedly, or rendering incorrectly when they extend beyond the visible screen.
