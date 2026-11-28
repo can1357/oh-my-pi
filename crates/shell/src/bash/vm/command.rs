@@ -2648,7 +2648,8 @@ fn spawned_external(
 		Err(err)
 			if vp.mode.dialect() == crate::bash::ids::Dialect::Zsh
 				&& !interp
-				&& (is_enoexec(&err) || err.kind() == std::io::ErrorKind::NotFound)
+				&& (is_enoexec(&err, k.engine.config().platform)
+					|| err.kind() == std::io::ErrorKind::NotFound)
 				&& err.raw_os_error().is_some() =>
 		{
 			// zsh `zexecve` looks at the file (`#!` line): retried as
@@ -2656,7 +2657,7 @@ fn spawned_external(
 			let code = err.raw_os_error().unwrap_or_default();
 			st(vp).target = Some(Target::Refused { path, code });
 		},
-		Err(err) if is_enoexec(&err) && !interp => {
+		Err(err) if is_enoexec(&err, k.engine.config().platform) && !interp => {
 			// Retried as `Target::Script` (stage stays `Dispatch`).
 			st(vp).target = Some(Target::Script(path));
 		},
@@ -2667,7 +2668,9 @@ fn spawned_external(
 			let msg = format!("{}: {name}", super::redir::zsh_errno(&err)).into();
 			k.diag(cx, vp, line, Diag::Usage { msg });
 			let s = st(vp);
-			s.status = if err.kind() == std::io::ErrorKind::PermissionDenied || is_enoexec(&err) {
+			s.status = if err.kind() == std::io::ErrorKind::PermissionDenied
+				|| is_enoexec(&err, k.engine.config().platform)
+			{
 				126
 			} else {
 				127
@@ -4874,11 +4877,35 @@ fn lost(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32, what
 	137
 }
 
+/// Maximum prefix bytes read when inspecting `#!` interpreters or binary
+/// headers on failed/non-native execution.
+pub(super) const EXEC_HEADER_PROBE_BYTES: usize = 1024;
+
 /// The OS refused to execute a file without `#!` (`ENOEXEC`; Windows
 /// `ERROR_BAD_EXE_FORMAT`).
-fn is_enoexec(err: &std::io::Error) -> bool {
-	let code = if cfg!(windows) { 193 } else { 8 };
+fn is_enoexec(err: &std::io::Error, platform: crate::bash::ids::Platform) -> bool {
+	let code = if platform == crate::bash::ids::Platform::Windows {
+		193
+	} else {
+		8
+	};
 	err.raw_os_error() == Some(code)
+}
+
+/// Whether `err` is an OS out-of-memory or commit-limit spawn refusal.
+///
+/// Rust maps Unix `ENOMEM` to [`std::io::ErrorKind::OutOfMemory`], while
+/// Windows `CreateProcessW` surfaces `ERROR_NOT_ENOUGH_MEMORY` (8),
+/// `ERROR_OUTOFMEMORY` (14) and `ERROR_COMMITMENT_LIMIT` (1455) as
+/// uncategorized raw OS errors.
+fn is_spawn_oom(err: &std::io::Error, platform: crate::bash::ids::Platform) -> bool {
+	if matches!(err.kind(), std::io::ErrorKind::OutOfMemory) {
+		return true;
+	}
+	matches!(
+		(platform, err.raw_os_error()),
+		(crate::bash::ids::Platform::Windows, Some(8 | 14 | 1455))
+	)
 }
 
 /// bash `check_binary_file`: a NUL before the first newline in the first
@@ -4902,16 +4929,10 @@ fn run_script_file(
 	line: u32,
 	path: BString,
 ) -> Option<Flow> {
-	let probe_req = Probe::Read { path: path.clone() };
-	let mut sc = exec::take_scratch(vp);
-	let answer = match probe::cached(&sc, &probe_req) {
-		Some(r) => Ok(r.clone()),
-		None => probe::perform(k, cx, vp, &mut sc, &probe_req),
-	};
-	vp.frames.last_mut().expect("frame").scratch = Some(sc);
-	let text = match answer {
+	let head_req = Probe::ReadHead { path: path.clone(), max: EXEC_HEADER_PROBE_BYTES };
+	let head = match command_probe(k, cx, vp, &head_req) {
 		Err(key) => return Some(Flow::Block(key)),
-		Ok(ProbeResult::Bytes(Ok(text))) => text,
+		Ok(ProbeResult::Bytes(Ok(head))) => head,
 		Ok(ProbeResult::Bytes(Err(msg))) => {
 			let name = st(vp).argv[0].clone();
 			k.diag(cx, vp, line, Diag::Usage { msg: format!("{name}: {msg}").into() });
@@ -4923,7 +4944,7 @@ fn run_script_file(
 		},
 		Ok(_) => BString::default(),
 	};
-	if looks_binary(&text) {
+	if looks_binary(&head) {
 		let name = st(vp).argv[0].clone();
 		k.diag(cx, vp, line, Diag::BinaryFile { name });
 		let s = st(vp);
@@ -4932,6 +4953,24 @@ fn run_script_file(
 		exec_failed(k, cx, vp);
 		return None;
 	}
+	let text = if head.len() < EXEC_HEADER_PROBE_BYTES {
+		head
+	} else {
+		match command_probe(k, cx, vp, &Probe::Read { path: path.clone() }) {
+			Err(key) => return Some(Flow::Block(key)),
+			Ok(ProbeResult::Bytes(Ok(text))) => text,
+			Ok(ProbeResult::Bytes(Err(msg))) => {
+				let name = st(vp).argv[0].clone();
+				k.diag(cx, vp, line, Diag::Usage { msg: format!("{name}: {msg}").into() });
+				let s = st(vp);
+				s.status = 126;
+				s.stage = Stage::Finish;
+				exec_failed(k, cx, vp);
+				return None;
+			},
+			Ok(_) => BString::default(),
+		}
+	};
 	// The environment the program would have been given (`exec -c`: none).
 	let env = if st(vp).exec_as.as_ref().is_some_and(|e| e.clear_env) {
 		EnvView::new(Vec::new())
@@ -5127,11 +5166,13 @@ fn refused(
 				Ok(_) => false,
 			};
 		if !executable
-			|| matches!(err.kind(), ErrorKind::ArgumentListTooLong | ErrorKind::OutOfMemory)
+			|| matches!(err.kind(), ErrorKind::ArgumentListTooLong)
+			|| is_spawn_oom(&err, k.engine.config().platform)
 		{
 			Diag::Refused { name, err }
 		} else {
-			let text = match command_probe(k, cx, vp, &Probe::Read { path: path.clone() }) {
+			let head_req = Probe::ReadHead { path: path.clone(), max: EXEC_HEADER_PROBE_BYTES };
+			let text = match command_probe(k, cx, vp, &head_req) {
 				Err(key) => return Some(Flow::Block(key)),
 				Ok(ProbeResult::Bytes(Ok(text))) => text,
 				Ok(_) => BString::default(),
@@ -5172,7 +5213,7 @@ fn zsh_refused(
 	code: i32,
 ) -> Option<Flow> {
 	let err = std::io::Error::from_raw_os_error(code);
-	let enoexec = is_enoexec(&err);
+	let enoexec = is_enoexec(&err, k.engine.config().platform);
 	let status = if enoexec { 126 } else { 127 };
 	let name = st(vp).argv[0].clone();
 	let pth = if names_path(k, &name) {
@@ -5180,7 +5221,8 @@ fn zsh_refused(
 	} else {
 		path.clone()
 	};
-	let text = match command_probe(k, cx, vp, &Probe::Read { path: path.clone() }) {
+	let head_req = Probe::ReadHead { path: path.clone(), max: EXEC_HEADER_PROBE_BYTES };
+	let text = match command_probe(k, cx, vp, &head_req) {
 		Err(key) => return Some(Flow::Block(key)),
 		Ok(ProbeResult::Bytes(Ok(text))) => text,
 		Ok(_) => BString::default(),

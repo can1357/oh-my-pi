@@ -1420,6 +1420,9 @@ pub enum Probe {
 	Path { name: BString, path: BString },
 	/// Whole-file read (`source`).
 	Read { path: BString },
+	/// Bounded prefix read (shebang and binary-header inspection): at most
+	/// `max` bytes from the start of `path`.
+	ReadHead { path: BString, max: usize },
 	/// `cd` target validation.
 	Chdir { path: BString },
 	/// Input from an fd up to a delimiter (`read`): `delim` `None` reads
