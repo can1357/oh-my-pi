@@ -1,28 +1,16 @@
-(() => {
-	"use strict";
+"use strict";
 
-	const rawText = globalThis.__v8_text;
-	const rawDisplay = globalThis.__v8_display;
-	const rawCallTool = globalThis.__v8_call_tool;
-	const rawUrlRead = globalThis.__v8_url_read;
-	const rawUrlWrite = globalThis.__v8_url_write;
-	const rawSetFinalExpr = globalThis.__v8_set_final_expr;
-	const rawUtf8Encode = globalThis.__v8_utf8_encode;
-	const rawUtf8Decode = globalThis.__v8_utf8_decode;
-
-	for (const key of [
-		"__v8_text",
-		"__v8_display",
-		"__v8_call_tool",
-		"__v8_url_read",
-		"__v8_url_write",
-		"__v8_set_final_expr",
-		"__v8_utf8_encode",
-		"__v8_utf8_decode",
-		"WebAssembly",
-	]) {
-		delete globalThis[key];
-	}
+(({
+	text: rawText,
+	display: rawDisplay,
+	callTool: rawCallTool,
+	urlRead: rawUrlRead,
+	urlWrite: rawUrlWrite,
+	setFinalExpr: rawSetFinalExpr,
+	utf8Encode: rawUtf8Encode,
+	utf8Decode: rawUtf8Decode,
+}) => {
+	delete globalThis.WebAssembly;
 
 	const ReflectConstruct = Reflect.construct;
 	const ObjectDefineProperty = Object.defineProperty;
@@ -70,6 +58,14 @@
 		return null;
 	};
 
+	const validateReadInt = (val, min) => {
+		if (isNil(val)) return undefined;
+		if (typeof val !== "number" || !Number.isInteger(val) || val < min) {
+			throw new TypeError("read() options offset (>= 1) and limit (>= 0) must be integers");
+		}
+		return val;
+	};
+
 	const parseReadOptions = (value, rest) => {
 		if (isPlainObject(value)) {
 			if (rest.some(arg => !isNil(arg))) {
@@ -77,7 +73,7 @@
 					"read() takes either a single trailing options object like { offset, limit } or positional optional args; do not mix both forms.",
 				);
 			}
-			return value;
+			return [validateReadInt(value.offset, 1), validateReadInt(value.limit, 0)];
 		}
 		if (!isNil(value) && typeof value === "object") {
 			const kind = Array.isArray(value) ? "an array" : (value.constructor?.name ?? "object");
@@ -93,10 +89,7 @@
 				);
 			}
 		}
-		const options = {};
-		if (!isNil(args[0])) options.offset = args[0];
-		if (!isNil(args[1])) options.limit = args[1];
-		return options;
+		return [validateReadInt(args[0], 1), validateReadInt(args[1], 0)];
 	};
 
 	const btoa = data => {
@@ -439,7 +432,10 @@
 		return text;
 	}
 
-	const read = async (path, opts, ...rest) => await rawUrlRead(String(path), parseReadOptions(opts, rest));
+	const read = async (path, opts, ...rest) => {
+		const [offset, limit] = parseReadOptions(opts, rest);
+		return await rawUrlRead(String(path), offset, limit);
+	};
 
 	const write = async (path, data) => {
 		if (typeof data === "string") return await rawUrlWrite(String(path), data, "utf8");
@@ -468,15 +464,14 @@
 		atob,
 		TextEncoder,
 		TextDecoder,
-		__omp_set_final_expr__: value => {
-			rawSetFinalExpr(value);
-		},
-		__omp_emit_final_expr__: value => {
-			if (value !== undefined) logLine(value);
-		},
+		__omp_set_final_expr__: rawSetFinalExpr,
 	});
 
 	// Warm up V8 PRNG and stack-trace symbolization before OS sandbox drops FS access.
 	void Math.random();
 	void new Error().stack;
-})();
+
+	return value => {
+		if (value !== undefined) logLine(value);
+	};
+})

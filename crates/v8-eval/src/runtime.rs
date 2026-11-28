@@ -8,11 +8,9 @@ use std::{
 	},
 };
 
-use serde::Deserialize;
-
 use crate::{
 	allocator::bounded_allocator,
-	protocol::{BridgeOp, V8ErrorPayload, V8Inbound, V8Outbound},
+	protocol::{BridgeOp, ReadOptions, V8ErrorPayload, V8Inbound, V8Outbound},
 };
 
 const PRELUDE_JS: &str = include_str!("prelude.js");
@@ -139,11 +137,12 @@ impl BridgeState {
 }
 
 pub struct V8SandboxRuntime {
-	// Drop order matters: `context` before `isolate`, `isolate` before
-	// `control`.
-	context: v8::Global<v8::Context>,
-	isolate: v8::OwnedIsolate,
-	control: Arc<RunControl>,
+	// Drop order matters: V8 handles (`emit_final_expr`, `context`) before
+	// `isolate`, `isolate` before `control`.
+	emit_final_expr: v8::Global<v8::Function>,
+	context:         v8::Global<v8::Context>,
+	isolate:         v8::OwnedIsolate,
+	control:         Arc<RunControl>,
 }
 
 impl Drop for V8SandboxRuntime {
@@ -182,17 +181,17 @@ impl V8SandboxRuntime {
 			emit,
 		});
 
-		let context = {
+		let (context, emit_final_expr) = {
 			v8::scope!(let scope, &mut isolate);
 			let context = v8::Context::new(scope, Default::default());
 			let mut ctx_scope = v8::ContextScope::new(scope, context);
-			install_prelude(&mut ctx_scope)?;
-			v8::Global::new(&ctx_scope, context)
+			let emit_fn = install_prelude(&mut ctx_scope)?;
+			(v8::Global::new(&ctx_scope, context), v8::Global::new(&ctx_scope, emit_fn))
 		};
 
 		isolate
 			.add_near_heap_limit_callback(on_near_heap_limit, Arc::as_ptr(&control).cast_mut().cast());
-		Ok(Self { context, isolate, control })
+		Ok(Self { emit_final_expr, context, isolate, control })
 	}
 
 	pub fn tracker(&self) -> Arc<RunControl> {
@@ -346,14 +345,10 @@ impl V8SandboxRuntime {
 
 			if let Some(val) = value_to_emit {
 				let global = context.global(&tc);
-				if let Some(key) = v8::String::new(&tc, "__omp_emit_final_expr__")
-					&& let Some(emit_val) = global.get(&tc, key.into())
-					&& let Ok(emit_fn) = v8::Local::<v8::Function>::try_from(emit_val)
-				{
-					emit_fn.call(&tc, global.into(), &[val]);
-					if tc.has_caught() || tc.has_terminated() {
-						return Err(extract_try_catch_error(&mut tc));
-					}
+				let emit_fn = v8::Local::new(&tc, &self.emit_final_expr);
+				emit_fn.call(&tc, global.into(), &[val]);
+				if tc.has_caught() || tc.has_terminated() {
+					return Err(extract_try_catch_error(&mut tc));
 				}
 			}
 
@@ -483,16 +478,18 @@ fn reject_resolvers(
 	}
 }
 
-fn install_prelude(scope: &mut v8::PinScope<'_, '_>) -> Result<(), String> {
-	let global = scope.get_current_context().global(scope);
-	bind_fn(scope, global, "__v8_text", cb_text)?;
-	bind_fn(scope, global, "__v8_display", cb_display)?;
-	bind_fn(scope, global, "__v8_call_tool", cb_call_tool)?;
-	bind_fn(scope, global, "__v8_url_read", cb_url_read)?;
-	bind_fn(scope, global, "__v8_url_write", cb_url_write)?;
-	bind_fn(scope, global, "__v8_set_final_expr", cb_set_final_expr)?;
-	bind_fn(scope, global, "__v8_utf8_encode", cb_utf8_encode)?;
-	bind_fn(scope, global, "__v8_utf8_decode", cb_utf8_decode)?;
+fn install_prelude<'s>(
+	scope: &mut v8::PinScope<'s, '_>,
+) -> Result<v8::Local<'s, v8::Function>, String> {
+	let bridge = v8::Object::new(scope);
+	bind_fn(scope, bridge, "text", cb_text)?;
+	bind_fn(scope, bridge, "display", cb_display)?;
+	bind_fn(scope, bridge, "callTool", cb_call_tool)?;
+	bind_fn(scope, bridge, "urlRead", cb_url_read)?;
+	bind_fn(scope, bridge, "urlWrite", cb_url_write)?;
+	bind_fn(scope, bridge, "setFinalExpr", cb_set_final_expr)?;
+	bind_fn(scope, bridge, "utf8Encode", cb_utf8_encode)?;
+	bind_fn(scope, bridge, "utf8Decode", cb_utf8_decode)?;
 
 	let tc = std::pin::pin!(v8::TryCatch::new(scope));
 	let tc = tc.init();
@@ -502,14 +499,26 @@ fn install_prelude(scope: &mut v8::PinScope<'_, '_>) -> Result<(), String> {
 		v8::ScriptOrigin::new(&tc, name.into(), 0, 0, false, -1, None, false, false, false, None);
 	let script =
 		v8::Script::compile(&tc, src, Some(&origin)).ok_or("Failed to compile V8 prelude")?;
-	if script.run(&tc).is_none() || tc.has_caught() {
+	let Some(boot_val) = script.run(&tc) else {
 		let msg = tc.exception().and_then(|e| e.to_string(&tc)).map_or_else(
 			|| "Unknown prelude initialization error".to_string(),
 			|s| s.to_rust_string_lossy(&tc),
 		);
 		return Err(msg);
-	}
-	Ok(())
+	};
+	let Ok(boot_fn) = v8::Local::<v8::Function>::try_from(boot_val) else {
+		return Err("V8 prelude did not return a bootstrap function".to_string());
+	};
+	let global = tc.get_current_context().global(&tc);
+	let Some(emit_val) = boot_fn.call(&tc, global.into(), &[bridge.into()]) else {
+		let msg = tc.exception().and_then(|e| e.to_string(&tc)).map_or_else(
+			|| "Unknown prelude initialization error".to_string(),
+			|s| s.to_rust_string_lossy(&tc),
+		);
+		return Err(msg);
+	};
+	v8::Local::<v8::Function>::try_from(emit_val)
+		.map_err(|_| "V8 prelude did not return an emitFinalExpr function".to_string())
 }
 
 fn bind_fn(
@@ -633,7 +642,7 @@ fn cb_display(
 fn cb_set_final_expr(
 	scope: &mut v8::PinScope<'_, '_>,
 	args: v8::FunctionCallbackArguments,
-	mut rv: v8::ReturnValue,
+	_rv: v8::ReturnValue,
 ) {
 	let val = args.get(0);
 	let global_val = v8::Global::new(scope, val);
@@ -643,7 +652,6 @@ fn cb_set_final_expr(
 	{
 		run.final_expr = Some(global_val);
 	}
-	rv.set(val);
 }
 
 fn dispatch_bridge_call(
@@ -703,42 +711,32 @@ fn cb_call_tool(
 	});
 }
 
-#[derive(Deserialize)]
-struct ReadOptions {
-	offset: Option<u64>,
-	#[expect(dead_code, reason = "validated during serde deserialization")]
-	limit:  Option<u64>,
-}
-
 fn cb_url_read(
 	scope: &mut v8::PinScope<'_, '_>,
 	args: v8::FunctionCallbackArguments,
 	rv: v8::ReturnValue,
 ) {
 	let path = args.get(0).to_rust_string_lossy(scope);
-	let opt_val = args.get(1);
-	let options = if opt_val.is_undefined() || opt_val.is_null() {
-		None
-	} else {
-		match v8_to_raw_json(scope, opt_val) {
-			Ok(raw)
-				if serde_json::from_str::<ReadOptions>(raw.get())
-					.is_ok_and(|o| o.offset != Some(0)) =>
-			{
-				Some(raw)
-			},
-			Ok(_) => {
-				throw_type_error(
-					scope,
-					"read() options offset (>= 1) and limit (>= 0) must be integers",
-				);
-				return;
-			},
-			Err(msg) => {
-				throw_type_error(scope, &msg);
-				return;
-			},
+	let parse_opt = |arg: v8::Local<'_, v8::Value>, min: u64| -> Result<Option<u64>, ()> {
+		if arg.is_undefined() || arg.is_null() {
+			return Ok(None);
 		}
+		let Some(n) = arg.number_value(scope) else {
+			return Err(());
+		};
+		if !n.is_finite() || n.fract() != 0.0 || n < min as f64 {
+			return Err(());
+		}
+		Ok(Some(n as u64))
+	};
+	let (Ok(offset), Ok(limit)) = (parse_opt(args.get(1), 1), parse_opt(args.get(2), 0)) else {
+		throw_type_error(scope, "read() options offset (>= 1) and limit (>= 0) must be integers");
+		return;
+	};
+	let options = if offset.is_some() || limit.is_some() {
+		Some(ReadOptions { offset, limit })
+	} else {
+		None
 	};
 	dispatch_bridge_call(scope, rv, "url read outside active V8 run", BridgeOp::Read {
 		path,

@@ -33,6 +33,14 @@ pub enum V8Inbound {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ReadOptions {
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub offset: Option<u64>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub limit:  Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "op", rename_all = "lowercase")]
 pub enum BridgeOp {
 	Tool {
@@ -42,7 +50,7 @@ pub enum BridgeOp {
 	Read {
 		path:    String,
 		#[serde(skip_serializing_if = "Option::is_none")]
-		options: Option<Box<serde_json::value::RawValue>>,
+		options: Option<ReadOptions>,
 	},
 	Write {
 		path:     String,
