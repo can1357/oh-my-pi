@@ -7682,13 +7682,16 @@ pub struct NamedWriter {
 
 impl NamedWriter {
 	/// Return the writer for `path`: the one an earlier `w` or `W` opened for
-	/// the same name, as GNU shares them, or a new one that truncates the file
-	/// and is registered for flushing.
+	/// the same name as written, as GNU shares them, or a new one that
+	/// truncates the file and is registered for flushing. Names are compared
+	/// as written: `Path` equality would make `d/o`, `d/./o` and `d//o` one.
 	///
 	/// `paths` resolves `path` the way the shell would open it and supplies
 	/// the filesystem that opens it.
 	pub fn new(path: PathBuf, paths: &ShellPaths) -> SedResult<Rc<RefCell<Self>>> {
-		let shared = FLUSH_LIST.with(|list| list.borrow().iter().find(|writer| writer.borrow().path == path).cloned());
+		let name = path.as_os_str();
+		let shared = FLUSH_LIST
+			.with(|list| list.borrow().iter().find(|writer| writer.borrow().path.as_os_str() == name).cloned());
 		if let Some(writer) = shared {
 			return Ok(writer);
 		}
@@ -10405,5 +10408,23 @@ mod tests {
 		// A regex reused from another `s` expands its missing groups to nothing.
 		let (code, capture) = crate::host::run_util::<Sed>(&[r"s/a/b/;s//\1/"], "aa\n", "/");
 		assert_eq!((code, capture.out().as_str()), (0, "b\n"), "{}", capture.err());
+	}
+
+	/// GNU sed 4.9 keeps one `w` file for each name as written: `w d/o`
+	/// twice writes one stream, while `d/./o` and `d//o` open the file again,
+	/// and each writes it from its start.
+	#[test]
+	fn w_files_are_one_for_each_name_as_written() {
+		for (second, written) in
+			[("w d/o", "1\n1\n2\n2\n3\n3\n"), ("w d/./o", "1\n2\n3\n"), ("w d//o", "1\n2\n3\n")]
+		{
+			let dir = tempfile::tempdir().unwrap();
+			std::fs::create_dir(dir.path().join("d")).unwrap();
+			let args = ["-n", "-e", "w d/o", "-e", second];
+			let (code, capture) = crate::host::run_util::<Sed>(&args, "1\n2\n3\n", dir.path());
+			assert_eq!((code, capture.err().as_str()), (0, ""), "{second}");
+			let file = std::fs::read_to_string(dir.path().join("d/o")).unwrap();
+			assert_eq!(file, written, "{second}");
+		}
 	}
 }
