@@ -16,6 +16,7 @@
 
 ### Added
 
+- Added `Agent.inheritToolDescriptions()` and `Agent.normalizedTools()`: a fork sends its owner's tool descriptions where only the wording differs, so it shares the owner's prompt cache
 - Added `CompactionSettings.summaryMaxTokens` to set the output budget for regular compaction summaries; history that fits alongside the actual previous summary and requested output is retained ([#18688](https://github.com/can1357/oh-my-pi/issues/18688))
 
 ### Changed

@@ -77,6 +77,7 @@ import {
 	startExecuteToolSpan,
 	startInvokeAgentSpan,
 } from "./telemetry";
+import type { InheritedToolDescriptions } from "./inherited-tool-descriptions";
 import { validateAgentToolArguments } from "./tool-arguments";
 import {
 	createAdditionalContextMessage,
@@ -1092,6 +1093,8 @@ export interface NormalizeToolsOptions {
 	intentDescription?: string;
 	/** Strip descriptions from the wire specs when the catalog rides in the system prompt. */
 	pruneDescriptions?: boolean;
+	/** A fork's owner-worded descriptions; see {@link InheritedToolDescriptions}. */
+	inheritedDescriptions?: InheritedToolDescriptions;
 }
 
 export function normalizeTools(tools: AgentContext["tools"], options: NormalizeToolsOptions): Context["tools"] {
@@ -1122,7 +1125,11 @@ export function normalizeTools(tools: AgentContext["tools"], options: NormalizeT
 		const description = t.description ?? "";
 		const examplesBlock = renderToolExamples({ ...t, parameters }, doInjectIntent ? INTENT_FIELD : undefined);
 		const finalDescription = examplesBlock ? `${description}\n\n${examplesBlock}` : description;
-		return toolSpec(t, parameters, finalDescription);
+		return toolSpec(
+			t,
+			parameters,
+			options.inheritedDescriptions?.resolve(t.name, finalDescription) ?? finalDescription,
+		);
 	});
 }
 
@@ -2126,6 +2133,7 @@ async function prepareProviderCall(
 		injectIntent: !!config.intentTracing,
 		intentDescription: config.intentDescription,
 		pruneDescriptions: !!config.pruneToolDescriptions && !ownedDialect,
+		inheritedDescriptions: config.inheritedToolDescriptions,
 	};
 	let llmContext: Context;
 	if (config.appendOnlyContext) {
@@ -2134,6 +2142,7 @@ async function prepareProviderCall(
 			intentTracing: toolOptions.injectIntent,
 			intentDescription: toolOptions.intentDescription,
 			pruneToolDescriptions: toolOptions.pruneDescriptions,
+			inheritedToolDescriptions: toolOptions.inheritedDescriptions,
 		});
 	} else {
 		llmContext = {
