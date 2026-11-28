@@ -850,15 +850,18 @@ export class ModelHubState {
 		}
 	}
 
-	/** The scope's rows; while assigning a role (or a role's fallback) only models the role accepts. */
+	/** Reapply assignment eligibility after every scope change, before the kind tab filter. */
 	#setCandidateItems(items: ReadonlyArray<ModelBrowserItem>): void {
 		const assigning = this.#assigning;
-		const role =
-			assigning?.kind === "role" || (assigning?.kind === "fallback" && !assigning.role.includes("/"))
-				? assigning.role
-				: undefined;
-		this.#candidateItems =
-			role !== undefined ? items.filter(item => this.source.getRoleInfo(role).accepts(item.model)) : [...items];
+		if (assigning) {
+			// Model and provider keys protect chat sessions; named chains follow their role.
+			const role =
+				assigning.kind === "fallbackKey" || (assigning.kind === "fallback" && assigning.role.includes("/"))
+					? "default"
+					: assigning.role;
+			const { accepts } = this.source.getRoleInfo(role);
+			this.#candidateItems = items.filter(item => accepts(item.model));
+		} else this.#candidateItems = [...items];
 		this.#applyModelKind();
 	}
 
@@ -1167,12 +1170,14 @@ export class ModelHubState {
 				});
 			}
 		}
-		chips.push(
-			{ label: `fallbacks:${item.model.id}`, action: "fallbackModel" },
-			{ label: `fallbacks:${item.model.provider}/*`, action: "fallbackProvider" },
-		);
-		// `retry-fallback` appends to the default chain: chat-capable models only.
-		if (this.source.getRoleInfo("default").accepts(item.model)) chips.push({ label: "fallback", action: "fallback" });
+		if (this.source.getRoleInfo("default").accepts(item.model)) {
+			chips.push(
+				{ label: `fallbacks:${item.model.id}`, action: "fallbackModel" },
+				{ label: `fallbacks:${item.model.provider}/*`, action: "fallbackProvider" },
+				{ label: "fallback", action: "fallback" },
+			);
+		}
+		if (chips.length === 0) return;
 		this.#strip = { kind: "role", item, chips, index: 0, returnToRoles: false };
 	}
 

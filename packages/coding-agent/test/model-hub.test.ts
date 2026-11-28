@@ -1513,7 +1513,7 @@ describe("ModelHub", () => {
 			hub.handleInput("\n");
 			const searchStrip = footerLine(hub.render(400));
 			expect(searchStrip).toContain("web");
-			expect(searchStrip).toContain("fallbacks:perplexity");
+			expect(searchStrip).not.toContain("fallbacks:");
 			expect(searchStrip).not.toContain("default");
 			expect(searchStrip).not.toContain("smol");
 			expect(searchStrip).not.toContain("judge");
@@ -1618,19 +1618,50 @@ describe("ModelHub", () => {
 			expect(rendered).not.toContain("image-model");
 		});
 
-		test("model-keyed fallback candidates are not filtered by a role", () => {
+		test.each([
+			["test/*", [LEFT, LEFT]],
+			["test/chat-model", [LEFT, LEFT, LEFT]],
+		])("%s accepts a chat fallback but cannot save an image model", (key, keys) => {
 			const chat = makeModel("test", "chat-model");
 			const image = makeModel("test", "image-model", 128_000, undefined, "image");
-			const { hub } = createHub({ models: [chat, image], scoped: true });
+			const other = makeModel("other", "backup-chat");
+			const settings = Settings.isolated({});
+			const { hub } = createHub({ models: [chat, image, other], scoped: true, settings });
 
-			for (const ch of "chat-model") hub.handleInput(ch);
-			hub.handleInput("\n"); // open the strip for chat-model
-			hub.handleInput(LEFT); // retry-fallback
-			hub.handleInput(LEFT); // fallbacks:test/*
+			for (const ch of chat.id) hub.handleInput(ch);
 			hub.handleInput("\n");
-			const rendered = normalize(hub.render(220));
-			expect(rendered).toContain("Adding fallback for test/*");
-			expect(rendered).toContain("image-model");
+			for (const direction of keys) hub.handleInput(direction);
+			hub.handleInput("\n");
+			expect(normalize(hub.render(220))).toContain(`Adding fallback for ${key}`);
+
+			for (const ch of image.id) hub.handleInput(ch);
+			hub.handleInput("\n");
+			expect(cfgRetryFallbackChains.get(settings)?.[key]).toBeUndefined();
+
+			for (const _ of image.id) hub.handleInput("\x7f");
+			for (const ch of other.id) hub.handleInput(ch);
+			hub.handleInput("\n");
+			expect(cfgRetryFallbackChains.get(settings)?.[key]).toEqual(["other/backup-chat"]);
+		});
+
+		test("New fallback chain only offers chat models as protected keys", () => {
+			const chat = makeModel("test", "chat-model");
+			const image = makeModel("test", "image-model", 128_000, undefined, "image");
+			const other = makeModel("other", "backup-chat");
+			const settings = Settings.isolated({});
+			const { hub } = createHub({ models: [chat, image, other], scoped: true, settings });
+
+			enterRolesView(hub);
+			hub.handleInput(UP); // wrap to New fallback chain
+			hub.handleInput("\n");
+			expect(normalize(hub.render(220))).not.toContain(image.id);
+
+			for (const ch of chat.id) hub.handleInput(ch);
+			hub.handleInput("\n"); // choose the protected model
+			hub.handleInput("\n"); // choose the exact-model key
+			for (const ch of other.id) hub.handleInput(ch);
+			hub.handleInput("\n");
+			expect(cfgRetryFallbackChains.get(settings)?.["test/chat-model"]).toEqual(["other/backup-chat"]);
 		});
 
 		test("x removes a chain entry and Enter on an entry replaces it", () => {

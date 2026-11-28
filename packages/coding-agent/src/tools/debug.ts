@@ -531,7 +531,10 @@ function requireCapability(
 	}
 }
 
-function resolveDisassemblyReference(dapSessionManager: DapSessionManager, memoryReference: string | undefined): string {
+function resolveDisassemblyReference(
+	dapSessionManager: DapSessionManager,
+	memoryReference: string | undefined,
+): string {
 	if (memoryReference) {
 		return memoryReference;
 	}
