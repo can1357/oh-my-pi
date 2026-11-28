@@ -1,4 +1,3 @@
-import { mkdirSync } from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as nodePath from "node:path";
 import { type ApiKey, getOpenRouterHeaders, withAuth } from "@oh-my-pi/pi-ai";
@@ -15,6 +14,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import type { EmbeddingModel } from "fastembed";
+import { embedViaIpc } from "../embed-ipc-client";
 import { loadFastembed, withEmbedSessionBudget } from "./fastembed-runtime";
 import {
 	type EmbeddingOutput,
@@ -58,7 +58,7 @@ let providerOverride: EmbeddingProvider | null = null;
 // init evicts only that model's entry so other models' encoders stay warm.
 const localModelPromises = new Map<string, Promise<LocalEmbeddingModel>>();
 const readyLocalModels = new Set<string>();
-let localModelInitializer: LocalModelInitializer = defaultLocalModelInitializer;
+let localModelInitializer: LocalModelInitializer | null = null;
 let apiCallCount = 0;
 const queryCache = new LRUCache<string, Vector>({ max: QUERY_CACHE_MAX });
 
@@ -360,12 +360,14 @@ async function getLocalModel(): Promise<LocalEmbeddingModel | null> {
 	}
 
 	const cacheDir = getFastembedCacheDir();
-	mkdirSync(cacheDir, { recursive: true });
-	const loading = localModelInitializer({
-		model: modelName,
-		cacheDir,
-		showDownloadProgress: false,
-	});
+	const initializer = localModelInitializer ?? sharedOrLocalModelInitializer;
+	const loading = fsp.mkdir(cacheDir, { recursive: true }).then(() =>
+		initializer({
+			model: modelName,
+			cacheDir,
+			showDownloadProgress: false,
+		}),
+	);
 	localModelPromises.set(modelName, loading);
 	try {
 		const model = await loading;
@@ -420,6 +422,26 @@ function reportRequestFailure(baseUrl: string, status: number | undefined, messa
 	} catch {
 		// A host's reporting hook must not turn a failed embedding into a thrown one.
 	}
+}
+
+/** Hosts install their own initializer; otherwise discover the shared model before loading locally. */
+async function sharedOrLocalModelInitializer(options: LocalModelInitOptions): Promise<LocalEmbeddingModel> {
+	let loading: Promise<LocalEmbeddingModel> | undefined;
+	return {
+		async *embed(texts, batchSize) {
+			const vectors = await embedViaIpc(options, texts, batchSize);
+			if (vectors !== null) {
+				yield vectors;
+				return;
+			}
+			loading ??= defaultLocalModelInitializer(options).catch(error => {
+				loading = undefined;
+				throw error;
+			});
+			const local = await loading;
+			yield* local.embed(texts, batchSize);
+		},
+	};
 }
 
 async function embedApi(texts: readonly string[], role: EmbeddingRole): Promise<EmbeddingMatrix | null> {
@@ -543,7 +565,7 @@ export function setEmbeddingProviderForTests(provider: EmbeddingProvider | null 
 export const setEmbeddingProvider = setEmbeddingProviderForTests;
 
 export function setLocalModelInitializerForTests(initializer: LocalModelInitializer | null | undefined): void {
-	localModelInitializer = initializer ?? defaultLocalModelInitializer;
+	localModelInitializer = initializer ?? null;
 	localModelPromises.clear();
 	readyLocalModels.clear();
 	queryCache.clear();
@@ -563,7 +585,7 @@ export function resetEmbeddingProviderForTests(): void {
 	providerOverride = null;
 	localModelPromises.clear();
 	readyLocalModels.clear();
-	localModelInitializer = defaultLocalModelInitializer;
+	localModelInitializer = null;
 	apiCallCount = 0;
 	queryCache.clear();
 }
