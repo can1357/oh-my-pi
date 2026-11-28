@@ -111,6 +111,18 @@ test("terminal: a <mark> in a legend and a field label is highlighted", () => {
 	expect(highlighted(painted)).toEqual(["lease", "lease", " "]);
 });
 
+test("terminal: wrapping and detached labels with for each appear once", () => {
+	const painted = rows(
+		`<form>
+			<label for="notes">Anything to add? <input id="notes" name="notes"></label>
+			<label for="owner">Who owns this?</label><input id="owner" name="owner">
+		</form>`,
+		60,
+	);
+	const text = painted.map(row => stripEscapes(row)).join("\n");
+	expect(text.match(/Anything to add\?|Who owns this\?/g)).toEqual(["Anything to add?", "Who owns this?"]);
+});
+
 test("terminal: a <mark> in an option row is highlighted, wrapped rows too", () => {
 	const paint = (label: string) =>
 		rows(`<form><label><input type="radio" name="r" value="fix" checked> ${label}</label></form>`, 30);
