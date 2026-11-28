@@ -3796,6 +3796,19 @@ describe("ModelRegistry runtime discovery", () => {
 							supported_reasoning_levels: ["low", "high"],
 							reasoning: { supported_efforts: ["medium", "high"], default_effort: "high" },
 						},
+						{
+							id: "acme-object-mandatory",
+							reasoning: { supported_efforts: ["low", "high"], mandatory: true },
+						},
+						{
+							id: "acme-object-mandatory-vetoed",
+							reasoning_required: false,
+							reasoning: { supported_efforts: ["low", "high"], mandatory: true },
+						},
+						{
+							id: "acme-object-thinking",
+							reasoning: { supported_efforts: ["low", "high"], mandatory: false },
+						},
 					],
 				});
 			}
@@ -3832,6 +3845,11 @@ describe("ModelRegistry runtime discovery", () => {
 			efforts: [Effort.Low, Effort.High],
 			defaultLevel: Effort.Low,
 		});
+		// `mandatory: true` locks reasoning on unless a flat `reasoning_required` says otherwise,
+		// and `mandatory: false` leaves the identity lock of a `-thinking` id alone.
+		expect(find("acme-object-mandatory")?.thinking?.requiresEffort).toBe(true);
+		expect(find("acme-object-mandatory-vetoed")?.thinking?.requiresEffort).toBe(false);
+		expect(find("acme-object-thinking")?.thinking?.requiresEffort).toBe(true);
 		if (!object || object.api !== "openai-completions") {
 			throw new Error("expected the discovered model to use OpenAI Completions");
 		}

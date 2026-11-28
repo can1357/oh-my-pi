@@ -1076,9 +1076,10 @@ type AdvertisedReasoning =
  * other gateways may advertise the same fields top-level, along with
  * `reasoning_effort_map` (where an unserved request lands) and
  * `reasoning_required`. OpenRouter-style rows carry the ladder as an object,
- * `reasoning: { supported_efforts, default_effort }`. A row sending both shapes
- * keeps the flat ladder, and each default applies only to the ladder of its own
- * shape. Returns undefined when the row says nothing usable about reasoning.
+ * `reasoning: { supported_efforts, default_effort, mandatory }`. A row sending
+ * both shapes keeps the flat ladder and ignores the object, and each default
+ * applies only to the ladder of its own shape. Returns undefined when the row
+ * says nothing usable about reasoning.
  *
  * An explicit non-reasoning declaration is reported as `{ kind: "none" }`
  * rather than `undefined`: the caller must be able to tell "this endpoint says
@@ -1113,7 +1114,12 @@ function extractAdvertisedReasoning(item: {
 		: (metadata?.default_reasoning_level ?? item.default_reasoning_level);
 	const defaultLevel = advertisedReasoningEffort(rawDefault);
 	const effortMap = extractReasoningEffortMap(metadata?.reasoning_effort_map ?? item.reasoning_effort_map);
-	const requiresEffort = metadata?.reasoning_required ?? item.reasoning_required;
+	// Like the OpenRouter catalog mapper, read only `mandatory: true`: a defaulted
+	// `false` must not veto an identity lock.
+	const requiresEffort =
+		metadata?.reasoning_required ??
+		item.reasoning_required ??
+		(reasoningObject?.mandatory === true ? true : undefined);
 	return {
 		kind: "ladder",
 		efforts,
