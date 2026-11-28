@@ -3,6 +3,8 @@
  */
 
 import type { ToolResultMessage } from "@oh-my-pi/pi-ai";
+import { stableStringifyJson } from "@oh-my-pi/pi-utils";
+import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type { Tokenizer } from "../tokenizer";
 import type { AgentMessage, AgentToolCall } from "../types";
 import type { SessionEntry, SessionMessageEntry } from "./entries";
@@ -11,6 +13,7 @@ import { type ConvertToLlm, defaultConvertToLlm, getMessageFromEntry } from "./m
 import {
 	collectToolCallsById,
 	getToolResultMessage,
+	isArtifactRecoveryToolResult,
 	isProtectedToolResult,
 	isSkillReadToolResult,
 	type ProtectedToolMatcher,
@@ -121,6 +124,14 @@ export const SUPERSEDED_NOTICE = "[Superseded by a newer read of this file]";
 export const USELESS_NOTICE = "[Uneventful result elided]";
 
 /**
+ * Exact placeholder written over an older tool result whose content is
+ * identical to a newer result of the same call (same tool, same arguments).
+ */
+export function dedupedNotice(toolName: string): string {
+	return `[Result identical to newer ${toolName} call - see the most recent result]`;
+}
+
+/**
  * Maps a tool call to a supersede key. Results sharing a key form a group in
  * which a newer successful result supersedes every older one. A key `K` also
  * covers keys with prefix `K + "\u0000"`: they are superseded only when the
@@ -155,6 +166,13 @@ export interface SupersedePruneConfig extends CacheLookbackConfig {
 	supersedeComplete?: SupersedeCompleteFn;
 	/** Also prune results flagged useless by their tool. Default false. */
 	pruneUseless?: boolean;
+	/**
+	 * Also prune an older successful result whose call (tool name + arguments,
+	 * harness intent aside) and content are identical to a newer successful
+	 * result issued by a later assistant turn (see {@link collectDuplicateResults}).
+	 * Default false.
+	 */
+	dedupeIdentical?: boolean;
 	/**
 	 * Prune a candidate now when all messages after it total at most this many
 	 * estimated tokens and it sits within
@@ -440,14 +458,215 @@ function collectUselessResults(
 }
 
 /**
+ * Dedupe floor: an older identical copy is blanked only from this many tokens.
+ * Below it the copy is nearly as cheap as the notice, and rewriting it would
+ * churn the prompt cache for almost nothing (same reasoning as
+ * {@link MIN_PRUNE_TOKENS}).
+ */
+export const MIN_DEDUPE_TOKENS = MIN_PRUNE_TOKENS;
+
+/**
+ * Collect older copies of repeated tool results. A result is a duplicate when
+ * a NEWER result shares its tool name, call arguments (object keys sorted,
+ * harness intent dropped, see below) and byte-identical content blocks (text
+ * and images, as the model sees them), and that newer result came from a later
+ * assistant turn: parallel duplicates within one turn are left alone. Only
+ * unpruned, non-error results at/after `start` and not in `exclude` qualify,
+ * both as candidates and as the newer reference: a notice is never a result,
+ * and a reference this pass blanks for another reason cannot vouch for the
+ * copy. Protected results and spill recovery reads
+ * ({@link isArtifactRecoveryToolResult}) may serve as the reference but are
+ * never blanked. The newest copy of every group always survives. Returned in
+ * message order.
+ *
+ * A top-level `i` is dropped from the identity only when the call records that
+ * intent tracing stripped it before execution (`toolCall.intentStripped`, set
+ * by the agent loop against the tool the call was dispatched to): the tool
+ * never received it. Every other `i` stays: a schema-owned `i` (an MCP server
+ * may declare one) is a real input, and two calls that differ in it are
+ * different calls. The live tools are never consulted, since an MCP
+ * `tools/list_changed` can replace a schema after its calls ran. Nested `i`
+ * keys are never harness intent. A call whose arguments JSON cannot encode
+ * losslessly ({@link isLosslessJsonTree}) is never deduped.
+ */
+function collectDuplicateResults(
+	entries: readonly SessionEntry[],
+	start: number,
+	tokenizer: Tokenizer,
+	toolCalls: SentToolCalls,
+	protectedTools: readonly ProtectedToolMatcher[],
+	exclude: ReadonlySet<ToolResultMessage>,
+): SupersedeCandidate[] {
+	interface Occurrence {
+		index: number;
+		message: ToolResultMessage;
+		toolCall: AgentToolCall;
+		/** Entry index of the issuing assistant turn (-1: issued before `start`). */
+		turn: number;
+	}
+	// This pass runs every turn, so it buckets by a cheap shape key first (tool
+	// name, block types and text/image lengths). Identical calls with identical
+	// content always share a shape, so arguments are canonicalized and content
+	// serialized only for results whose shape repeats.
+	const byShape = new Map<string, Occurrence[]>();
+	let turn = -1;
+	for (let i = start; i < entries.length; i++) {
+		const entry = entries[i];
+		if (entry.type === "message" && (entry.message as AgentMessage).role === "assistant") {
+			turn = i;
+			continue;
+		}
+		const message = getToolResultMessage(entry);
+		if (!message || message.prunedAt !== undefined || message.isError === true || exclude.has(message)) continue;
+		const toolCall = toolCalls.get(message.toolCallId);
+		if (!toolCall) continue;
+		const shapeKey = contentShapeKey(message);
+		let bucket = byShape.get(shapeKey);
+		if (!bucket) {
+			bucket = [];
+			byShape.set(shapeKey, bucket);
+		}
+		bucket.push({ index: i, message, toolCall, turn });
+	}
+
+	const candidates: SupersedeCandidate[] = [];
+	for (const bucket of byShape.values()) {
+		if (bucket.length < 2) continue;
+		// Exact identity inside the bucket: call arguments plus content.
+		const byIdentity = new Map<string, Occurrence[]>();
+		for (const occurrence of bucket) {
+			const { toolCall } = occurrence;
+			let args = toolCall.arguments;
+			if (toolCall.intentStripped === true && Object.hasOwn(args, INTENT_FIELD)) {
+				const { [INTENT_FIELD]: _intent, ...rest } = args;
+				args = rest;
+			}
+			// Arguments from extension hooks or host integrations reach the tool
+			// as raw JavaScript values, never through a JSON round-trip, so a tree
+			// JSON cannot spell losslessly (own `undefined`, NaN, a bigint, a
+			// cycle, a class instance) may mean something its JSON encoding does
+			// not: `{ v: undefined }` and `{}` stringify alike. Such a call is
+			// never deduped; skipping it cannot abort this per-turn pass and
+			// cannot merge two distinct calls.
+			if (!isLosslessJsonTree(args, [])) continue;
+			// Content blocks are what the model sees, so their JSON spelling is
+			// their identity; only an unserializable block (a stray bigint in an
+			// extra field) is skipped.
+			let identity: string;
+			try {
+				identity = stableStringifyJson([args, occurrence.message.content]);
+			} catch {
+				continue;
+			}
+			let group = byIdentity.get(identity);
+			if (!group) {
+				group = [];
+				byIdentity.set(identity, group);
+			}
+			group.push(occurrence);
+		}
+		for (const group of byIdentity.values()) {
+			if (group.length < 2) continue;
+			// The newest copy is the reference for every older one.
+			const newestTurn = group[group.length - 1].turn;
+			for (let k = group.length - 2; k >= 0; k--) {
+				const occurrence = group[k];
+				if (occurrence.turn === newestTurn) continue;
+				const { message, toolCall } = occurrence;
+				if (
+					isProtectedToolResult(message, toolCall, protectedTools) ||
+					isArtifactRecoveryToolResult({ toolResult: message, toolCall })
+				) {
+					continue;
+				}
+				const tokens = tokenizer.countMessage(message as AgentMessage);
+				if (tokens < MIN_DEDUPE_TOKENS) continue;
+				const notice = dedupedNotice(message.toolName);
+				if (estimatePrunedSavings(tokens, notice) <= 0) continue;
+				candidates.push({
+					entry: entries[occurrence.index] as SessionMessageEntry,
+					message,
+					index: occurrence.index,
+					tokens,
+					notice,
+				});
+			}
+		}
+	}
+	return candidates.sort((a, b) => a.index - b.index);
+}
+
+/**
+ * Whether `JSON.stringify` encodes `value` without losing information a tool
+ * could observe: only strings, booleans, null, finite numbers other than -0,
+ * dense arrays without extra properties, and plain objects (prototype
+ * `Object.prototype` or null, no symbol keys) whose own values all qualify.
+ * Cycles are rejected via the `ancestors` stack; shared acyclic references are
+ * fine.
+ */
+function isLosslessJsonTree(value: unknown, ancestors: object[]): boolean {
+	if (value === null) return true;
+	switch (typeof value) {
+		case "string":
+		case "boolean":
+			return true;
+		case "number":
+			return Number.isFinite(value) && !Object.is(value, -0);
+		case "object":
+			break;
+		default:
+			return false;
+	}
+	const node = value as object;
+	if (ancestors.includes(node)) return false;
+	let children: unknown[];
+	if (Array.isArray(node)) {
+		// Holes and extra own keys both make the key count differ from length.
+		if (Object.keys(node).length !== node.length) return false;
+		children = node;
+	} else {
+		const proto = Object.getPrototypeOf(node);
+		if (proto !== Object.prototype && proto !== null) return false;
+		children = Object.values(node);
+	}
+	if (Object.getOwnPropertySymbols(node).length > 0) return false;
+	ancestors.push(node);
+	for (const child of children) {
+		if (!isLosslessJsonTree(child, ancestors)) return false;
+	}
+	ancestors.pop();
+	return true;
+}
+
+/**
+ * Cheap bucketing key for {@link collectDuplicateResults}: tool name plus each
+ * content block's type and text or image-data length. Equal tool names and
+ * byte-identical content always produce equal keys; it serializes nothing
+ * beyond the tool name.
+ */
+function contentShapeKey(message: ToolResultMessage): string {
+	let key = message.toolName;
+	for (const block of message.content) {
+		const size = block.type === "text" ? block.text.length : block.type === "image" ? block.data.length : -1;
+		key += `\0${block.type}:${size}`;
+	}
+	return key;
+}
+
+/**
  * Prune superseded tool results (e.g. stale `read` outputs replaced by a newer
- * read of the same file) and, when `pruneUseless` is set, results their tool
- * flagged contextually useless. Cheap, incremental, and prompt-cache-aware: a
+ * read of the same file), when `pruneUseless` is set results their tool
+ * flagged contextually useless, and when `dedupeIdentical` is set older copies
+ * of repeated identical results. Cheap, incremental, and prompt-cache-aware: a
  * candidate is pruned now only when the suffix after it is small (tail case —
  * the read→edit→read loop) or when the context has been idle long enough that
  * the provider cache is cold anyway (then all still-sent candidates flush).
  * Never mutates entries before `keepBoundaryId` (summarized away — not sent),
  * and never walks them unless a sent result's call lives there.
+ *
+ * Precedence: supersede, then useless, then dedupe. Each later pass skips the
+ * earlier passes' candidates, so a result gets exactly one notice and a dedupe
+ * reference is always a result that stays in context this pass.
  */
 export function pruneSupersededToolResults(
 	entries: readonly SessionEntry[],
@@ -479,8 +698,21 @@ export function pruneSupersededToolResults(
 		)) {
 			candidates.push(candidate);
 		}
-		candidates.sort((a, b) => a.index - b.index);
 	}
+	if (config.dedupeIdentical) {
+		const exclude = new Set(candidates.map(candidate => candidate.message));
+		for (const candidate of collectDuplicateResults(
+			entries,
+			boundaryIndex,
+			tokenizer,
+			toolCalls,
+			config.protectedTools,
+			exclude,
+		)) {
+			candidates.push(candidate);
+		}
+	}
+	candidates.sort((a, b) => a.index - b.index);
 	if (candidates.length === 0) return NOTHING_PRUNED;
 
 	const now = config.now ?? Date.now();

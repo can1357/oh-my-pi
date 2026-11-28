@@ -270,6 +270,15 @@ Tools can flag a finished result as contextually useless — a search with zero 
 
 The flag never reaches provider wire formats, and flagged pairs are never removed from history (only blanked in place), so tool-call/result pairing and provider-native history replay stay intact.
 
+### Identical-result dedupe
+
+When a later assistant turn repeats a tool call (same tool name, same arguments with object keys sorted recursively and the harness intent field dropped) and the result's content blocks are byte-identical, the older copy carries no information the model does not already have. The per-turn stale-result pass (`pruneSupersededToolResults`, gated by `compaction.dedupeIdenticalResults`, default on) blanks every older copy to `[Result identical to newer <tool> call - see the most recent result]` with the same cache-aware timing and compaction-boundary rule as superseded reads. The newest copy always stays.
+
+- Identity is the call plus exact content; side effects are irrelevant to it: a repeated `git status` whose output did not change gives the model nothing new, and a changed output (or any result between two identical copies) is never deduped.
+- Intent: a top-level `i` is dropped only when the call itself records that intent tracing stripped it before execution (`ToolCall.intentStripped`, set by the agent loop against the tool the call was dispatched to), so the tool never received it. Any other `i` stays in the identity: a schema-owned `i`, as an MCP server may declare, is a real input. The live tools are never consulted, because an MCP `tools/list_changed` can replace a schema after its calls ran; nested `i` keys are always kept.
+- Kept: results under `MIN_DEDUPE_TOKENS` (50, like `MIN_PRUNE_TOKENS`), error results (never deduped nor used as the newer reference), protected tools (skill reads, the plan file), spill recovery reads, and duplicates issued in parallel by one assistant turn.
+- Precedence: supersede, then useless, then dedupe. A result claimed by an earlier pass gets that pass's notice and cannot serve as a dedupe reference; already-pruned notices are never results.
+
 ### Boundary and cut-point logic
 
 `prepareCompaction()` builds one effective message sequence for estimation, cut-point selection, and the history-summary, turn-prefix, and retained-message regions.
@@ -557,6 +566,7 @@ Defined in `packages/coding-agent/src/session/context-settings.ts`:
 - `compaction.idleTimeoutSeconds` = `300` (fallback unless a confirmed 1h prompt-cache entry sets the timing)
 - `compaction.supersedeReads` = `true`
 - `compaction.dropUseless` = `true`
+- `compaction.dedupeIdenticalResults` = `true`
 - `snapcompact.systemPrompt` = `"none"` (`"agents-md"` and `"all"` opt into transient system-prompt imaging)
 - `snapcompact.toolResults` = `false` (transient imaging of large tool results, the newest one included; `read` results stay text unless the model's catalog rule sets `snapcompact-image-reads` (Opus 5.5+). An imaged `read` draws each row's leading indentation as a count bracket (`[»2]` two tabs, `[·4]` four spaces) because frames collapse whitespace, and keeps its `[path#TAG]` header as text beside the frames, so edits can copy both. The planner keeps a result in the form it was first sent in until the `snapcompact.*` settings, the model or earlier history change, or later images push the request past the provider's image cap; a downstream request-byte limit can still drop older inline frames, as it can any inline image)
 - `snapcompact.shape` = `"auto"`

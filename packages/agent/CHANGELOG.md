@@ -18,6 +18,7 @@
 
 - Added `Agent.inheritToolDescriptions()` and `Agent.normalizedTools()`: a fork sends its owner's tool descriptions where only the wording differs, so it shares the owner's prompt cache
 - Added `CompactionSettings.summaryMaxTokens` to set the output budget for regular compaction summaries; history that fits alongside the actual previous summary and requested output is retained ([#18688](https://github.com/can1357/oh-my-pi/issues/18688))
+- Added `SupersedePruneConfig.dedupeIdentical` to blank older copies of a tool result that a later identical call returned again, writing `dedupedNotice()`; results under `MIN_DEDUPE_TOKENS` are kept ([#20925](https://github.com/can1357/oh-my-pi/pull/20925) by [@Xytronix](https://github.com/Xytronix))
 
 ### Changed
 

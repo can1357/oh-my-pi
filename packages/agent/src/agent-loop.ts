@@ -3301,6 +3301,10 @@ async function prepareToolCallDispatch(
 			const { intent, strippedArgs } = ownsIntent
 				? { intent: undefined, strippedArgs: argsForExecution }
 				: extractIntent(toolCall.arguments);
+			// Record the split on the call itself: a later reader of this history
+			// (compaction dedupe) cannot recover it from the live tools, whose
+			// schemas an MCP `tools/list_changed` may have replaced since.
+			if (!ownsIntent && Object.hasOwn(toolCall.arguments, INTENT_FIELD)) toolCall.intentStripped = true;
 			argsForExecution = strippedArgs;
 			if (intent) {
 				toolCall.intent = intent;
@@ -3361,6 +3365,9 @@ async function prepareToolCallDispatch(
 			// precedes every consumer snapshot, so there is exactly one version of
 			// the call anywhere downstream.
 			toolCall.arguments = beforeResult.args;
+			// The revision reaches the tool unstripped, so an `i` in it is no
+			// longer provably harness intent.
+			delete toolCall.intentStripped;
 			entry.args = revised;
 		}
 	}

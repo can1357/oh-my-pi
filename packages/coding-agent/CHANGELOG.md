@@ -18,6 +18,7 @@
 
 ### Added
 
+- Added the `compaction.dedupeIdenticalResults` setting (default on): an older tool result is replaced with a short notice when a later turn repeats the same call and gets identical output back ([#20925](https://github.com/can1357/oh-my-pi/pull/20925) by [@Xytronix](https://github.com/Xytronix))
 - Added `--prepaint=on|off|force` to control the composer drawn before startup finishes: `off` waits for the full interface, `force` draws it even for flags that would change it
 - Todo backends can define an optional `apply`: the selected backend is asked before the model's `todo` call commits, and returning `{ block: true, reason }` refuses the call with the list unchanged ([#20355](https://github.com/can1357/oh-my-pi/pull/20355) by [@Dangerboi](https://github.com/Dangerboi))
 - `models.yml` `compat.neutralizeDeepseekSpecialTokens` turns DeepSeek chat-template token breaking on or off per model (on by default for DeepSeek-class models on chat-completions) ([#20832](https://github.com/can1357/oh-my-pi/pull/20832) by [@dany-on-demand](https://github.com/dany-on-demand))

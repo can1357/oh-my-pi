@@ -1146,6 +1146,13 @@ export interface ToolCall {
 	thoughtSignature?: string; // Google-specific: opaque signature for reusing thought context
 	intent?: string; // Harness-level intent metadata extracted from traced tool arguments
 	/**
+	 * Set by intent tracing when it stripped this call's top-level `i` as harness
+	 * intent before execution: the dispatched tool's schema did not own `i`, so
+	 * the tool never received it (the recorded `arguments` keep it). Absent when
+	 * `i` was a tool argument, tracing was off, or the call carried no `i`.
+	 */
+	intentStripped?: true;
+	/**
 	 * Verbatim in-band syntax block that produced this synthetic `ptc_*` call.
 	 * Present only for owned prompt/tool-call formats; provider-native calls omit it.
 	 */
