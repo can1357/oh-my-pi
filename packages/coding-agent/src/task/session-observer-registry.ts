@@ -258,6 +258,12 @@ export class SessionObserverRegistry {
 						const progress = payload.progress;
 						const id = progress.id;
 						const existing = this.#sessions.get(id);
+						// Progress never revives a settled agent: a straggler frame (a coalesced flush or
+						// heartbeat racing the terminal lifecycle frame) would otherwise leave a ghost row.
+						// Only a `started` lifecycle frame reopens a finished agent for its next turn; the
+						// settled snapshot itself still lands, since it carries the run's final totals.
+						const progressActive = progress.status === "pending" || progress.status === "running";
+						if (existing && existing.status !== "active" && progressActive) return;
 
 						const sortOrder = this.#ensureSortOrder(id);
 						this.#ensureParentSortOrder(payload.parentToolCallId, sortOrder);
@@ -272,13 +278,16 @@ export class SessionObserverRegistry {
 							if (progress.description) existing.description = progress.description;
 							if (payload.sessionFile) existing.sessionFile = payload.sessionFile;
 						} else {
+							// An agent first seen through progress (its `started` frame not yet emitted,
+							// or emitted before this observer joined: a collab guest, a session reset)
+							// takes its status from the snapshot, so a settled snapshot never reads as active.
 							this.#sessions.set(id, {
 								id,
 								kind: "subagent",
 								label: progress.description ?? `Subagent #${payload.index}`,
 								agent: payload.agent,
 								description: progress.description,
-								status: "active",
+								status: progressActive ? "active" : (progress.status as ObservableSession["status"]),
 								sessionFile: payload.sessionFile,
 								parentToolCallId: payload.parentToolCallId,
 								detached: payload.detached,
