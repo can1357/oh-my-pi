@@ -50,6 +50,7 @@ interface Options {
 	kind?: "main" | "sub";
 	jobs?: AsyncJobManager;
 	registry?: AgentRegistry;
+	skipStopHandler?: boolean;
 	onStop?: () => void;
 }
 interface Case {
@@ -149,17 +150,19 @@ async function setup(responses: MockHandler[], answer: Answer, options: Options 
 	const eventBus = new EventBus();
 	const first = await loadExtensionFromFactory(
 		pi => {
-			pi.on("session_stop", async event => {
-				// Record completion so the order assertion checks that the host awaits the handler.
-				await scheduler.yield();
-				const text = assistantText(event.last_assistant_message);
-				events.push(stop(text));
-				if (target === undefined || text !== target) return;
-				target = undefined;
-				options.onStop?.();
-				if (answer === "continue") return { continue: true, additionalContext: HIDDEN };
-				if (answer === "block") return { decision: "block", reason: HIDDEN };
-			});
+			if (!options.skipStopHandler) {
+				pi.on("session_stop", async event => {
+					// Record completion so the order assertion checks that the host awaits the handler.
+					await scheduler.yield();
+					const text = assistantText(event.last_assistant_message);
+					events.push(stop(text));
+					if (target === undefined || text !== target) return;
+					target = undefined;
+					options.onStop?.();
+					if (answer === "continue") return { continue: true, additionalContext: HIDDEN };
+					if (answer === "block") return { decision: "block", reason: HIDDEN };
+				});
+			}
 			pi.on("agent_end", (event: AgentEndEvent) => {
 				const message = event.messages.findLast(message => message.role === "assistant");
 				events.push(end(assistantText(message), event.willContinue === true, event.awaitingAsyncWork === true));
@@ -171,7 +174,7 @@ async function setup(responses: MockHandler[], answer: Answer, options: Options 
 		"stop-observer",
 	);
 	const extensions = [first];
-	if (answer === "block") {
+	if (answer === "block" && !options.skipStopHandler) {
 		extensions.push(
 			await loadExtensionFromFactory(
 				pi => {
@@ -790,25 +793,34 @@ for (const suppressDelivery of [false, true]) {
 	});
 }
 
+function setupStallRegistry(): AgentRegistry {
+	const registry = new AgentRegistry();
+	vi.spyOn(IrcBus, "global").mockReturnValue(new IrcBus(registry));
+	return registry;
+}
+
+function registerWaitingChild(registry: AgentRegistry): void {
+	const childSession = { runStartedAt: Date.now() } as unknown as AgentSessionHandle;
+	registry.register({
+		id: "Child",
+		displayName: "Child",
+		kind: "sub",
+		parentId: "Main",
+		session: childSession,
+	});
+	cleanups.push(registry.awaits.hold("Child", ["Main"], { interruptible: true, message: true }));
+}
+
 for (const route of ["normal", "compaction-blocked"] as const) {
 	it(`a waiter arriving during the ${route} stop pass does not restart the run`, async () => {
-		const registry = new AgentRegistry();
-		vi.spyOn(IrcBus, "global").mockReturnValue(new IrcBus(registry));
+		const registry = setupStallRegistry();
 		const jobs = route === "compaction-blocked" ? new AsyncJobManager({}) : undefined;
 		if (jobs) cleanups.push(() => jobs.dispose().then(() => undefined));
 		const f = await setup([reply(TARGET), reply(FOLLOW_UP)], "observe", {
 			registry,
 			jobs,
 			onStop() {
-				const childSession = { runStartedAt: Date.now() } as unknown as AgentSessionHandle;
-				registry.register({
-					id: "Child",
-					displayName: "Child",
-					kind: "sub",
-					parentId: "Main",
-					session: childSession,
-				});
-				cleanups.push(registry.awaits.hold("Child", ["Main"], { interruptible: true, message: true }));
+				registerWaitingChild(registry);
 			},
 		});
 		const waiting = jobs ? [end(TARGET, true, true)] : [];
@@ -833,6 +845,58 @@ for (const route of ["normal", "compaction-blocked"] as const) {
 		expect(f.mock.calls).toHaveLength(1);
 	});
 }
+
+for (const route of ["compaction-blocked", "maintenance-failed"] as const) {
+	for (const skipStopHandler of [false, true]) {
+		it(`a waiter already present at ${route} gets a notice ${skipStopHandler ? "without" : "with"} a stop handler`, async () => {
+			const registry = setupStallRegistry();
+			const f = await setup([reply(TARGET), reply(FOLLOW_UP)], "observe", { registry, skipStopHandler });
+			registerWaitingChild(registry);
+			const check = vi.spyOn(SessionMaintenance.prototype, "checkCompaction");
+			if (route === "maintenance-failed") check.mockRejectedValueOnce(new Error("Maintenance failed"));
+			else check.mockResolvedValueOnce({ continuationScheduled: false, automaticContinuationBlocked: true });
+
+			await prompt(f);
+
+			expect(f.session.isRunActive).toBe(false);
+			expect(f.mock.calls).toHaveLength(2);
+			expect(requestContains(f, 1, "waiting for your next message")).toBe(true);
+			expect(f.events).toEqual([end(TARGET, true), ...(skipStopHandler ? [] : [stop(FOLLOW_UP)]), end(FOLLOW_UP)]);
+		});
+	}
+}
+
+it("a waiter arriving during a background pause started by a stop handler gets a notice", async () => {
+	const registry = setupStallRegistry();
+	const jobs = new AsyncJobManager({});
+	cleanups.push(() => jobs.dispose().then(() => undefined));
+	let completeJob: (() => Promise<unknown>) | undefined;
+	const f = await setup([reply(TARGET), reply(FOLLOW_UP)], "observe", {
+		registry,
+		jobs,
+		onStop() {
+			const { job, result } = holdOwnedJob(jobs, true);
+			completeJob = () => {
+				result.resolve("Background result");
+				return job.promise;
+			};
+		},
+	});
+	await prompt(f);
+	const waiting = end(TARGET, true, true);
+	expect(f.events).toEqual([stop(TARGET), waiting]);
+	expect(f.session.isRunActive).toBe(true);
+	if (!completeJob) throw new Error("Expected the stop handler to register a background job");
+
+	registerWaitingChild(registry);
+	await completeJob();
+	await idle(f);
+
+	expect(f.session.isRunActive).toBe(false);
+	expect(f.mock.calls).toHaveLength(2);
+	expect(requestContains(f, 1, "waiting for your next message")).toBe(true);
+	expect(f.events).toEqual([stop(TARGET), waiting, stop(FOLLOW_UP), end(FOLLOW_UP)]);
+});
 
 it("user interrupt during the reply runs no stop handler", async () => {
 	const entered = Promise.withResolvers<void>();

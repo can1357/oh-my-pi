@@ -6514,6 +6514,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			return;
 		}
 		if (this.#wakeSources()) {
+			// The run is waiting again, so a waiter that arrives during this pause can get a notice.
+			this.#loopEnd.stopPassTerminal = false;
 			this.#pauseLoop(this.#loopEnd, true);
 			return;
 		}
@@ -6588,6 +6590,21 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (!superseded && this.#wakeSources()) {
 				this.#endLoop(event, messages, loopEpoch, {
 					deferredStop: { ...stop, route: route === "normal" ? "async-wait-ended" : route, continuation },
+				});
+				return;
+			}
+			// Normal routing checks for a stall before it reaches this stop path.
+			if (
+				route !== "normal" &&
+				!superseded &&
+				loopEpoch === this.#runEpoch &&
+				this.#lastTurnSettledCleanly() &&
+				this.#continueForStalledWaiters()
+			) {
+				logger.debug("agent_end maintenance routing", { route: "stalled-waiters-notice", stopRoute: route });
+				this.#endLoop(event, messages, loopEpoch, {
+					continuing: true,
+					deferredStop: { ...stop, continuation },
 				});
 				return;
 			}
