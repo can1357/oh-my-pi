@@ -182,13 +182,47 @@ export function toSkillFrontmatter(name: string, description: string, provenance
 	return `---\n${frontmatter}\n---\n`;
 }
 
+/**
+ * `create` needs both fields. `update` needs at least one: a missing field keeps
+ * what the stored skill already has, so a one-line change need not resend a
+ * long body.
+ */
 export interface WriteManagedSkillInput {
 	action: "create" | "update";
 	name: string;
-	description: string;
-	body: string;
+	description?: string;
+	body?: string;
 	/** Who is writing; stamped into the skill's provenance. */
 	origin: ManagedSkillOrigin;
+}
+
+const LEADING_FRONTMATTER = /^\uFEFF?\s*---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/;
+
+/**
+ * Strip the `---` frontmatter blocks a body leads with. Callers often include one
+ * although the tool generates it, which would leave the stored file with two.
+ * Only a block that parses as a YAML mapping carrying a skill metadata key
+ * (`name`, `description`, or the provenance key) counts, so a body opening with
+ * a horizontal rule (even one followed by a `Key: value` Setext heading) keeps
+ * it. The stripped blocks' values are discarded: the explicit `name` and
+ * `description` (or the stored ones on `update`) always win.
+ */
+export function stripBodyFrontmatter(raw: string): string {
+	let body = raw;
+	for (;;) {
+		const match = LEADING_FRONTMATTER.exec(body);
+		if (!match) break;
+		let parsed: unknown;
+		try {
+			parsed = YAML.parse(match[1]);
+		} catch {
+			break;
+		}
+		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) break;
+		if (!("name" in parsed || "description" in parsed || MANAGED_SKILL_PROVENANCE_KEY in parsed)) break;
+		body = body.slice(match[0].length);
+	}
+	return body;
 }
 
 /**
@@ -265,20 +299,28 @@ async function openManagedSkillFileForUpdate(name: string, file: string) {
 /** Create or update a managed `SKILL.md`. Returns the resolved file path. */
 export async function writeManagedSkill(input: WriteManagedSkillInput): Promise<{ path: string }> {
 	const name = sanitizeSkillName(input.name);
-	const description = sanitizeManagedDescription(input.description);
-	const body = input.body.trim();
-	// Reject empty content: an all-whitespace/control description sanitizes to ""
-	// and the `requireDescription` discovery scan then silently drops the skill,
-	// so the tool would report success for a skill that never appears.
-	if (!description) {
-		throw new Error(`Managed skill "${name}" needs a non-empty description.`);
+	const strippedBody = input.body === undefined ? undefined : stripBodyFrontmatter(input.body);
+	const description = input.description;
+	if (input.action === "create" && (description === undefined || strippedBody === undefined)) {
+		throw new Error(`Creating managed skill "${name}" requires both a description and a body.`);
 	}
-	if (!body) {
-		throw new Error(`Managed skill "${name}" needs a non-empty body.`);
+	if (description === undefined && strippedBody === undefined) {
+		throw new Error(`Updating managed skill "${name}" requires a description, a body, or both.`);
 	}
-	const render = (prior: ManagedSkillProvenance | undefined): Buffer => {
+	const render = (rawDescription: string, rawBody: string, prior: ManagedSkillProvenance | undefined): Buffer => {
+		const sanitizedDescription = sanitizeManagedDescription(rawDescription);
+		const body = rawBody.trim();
+		// Reject empty content: an all-whitespace/control description sanitizes to ""
+		// and the `requireDescription` discovery scan then silently drops the skill,
+		// so the tool would report success for a skill that never appears.
+		if (!sanitizedDescription) {
+			throw new Error(`Managed skill "${name}" needs a non-empty description.`);
+		}
+		if (!body) {
+			throw new Error(`Managed skill "${name}" needs a non-empty body.`);
+		}
 		const provenance = nextProvenance(input.action, prior, input.origin, new Date().toISOString());
-		const content = Buffer.from(`${toSkillFrontmatter(name, description, provenance)}\n${body}\n`, "utf8");
+		const content = Buffer.from(`${toSkillFrontmatter(name, sanitizedDescription, provenance)}\n${body}\n`, "utf8");
 		// Cap the UTF-8 byte size of the FINAL file (body + description + frontmatter),
 		// not the UTF-16 code-unit length of the body alone.
 		if (content.byteLength > MAX_MANAGED_SKILL_BYTES) {
@@ -288,9 +330,10 @@ export async function writeManagedSkill(input: WriteManagedSkillInput): Promise<
 		}
 		return content;
 	};
-	// Fail an oversized create/update before touching the filesystem; an update
-	// re-renders below once the stored provenance is known.
-	render(undefined);
+	// Fail an empty or oversized create/update before touching the filesystem; an
+	// update re-renders below once the stored skill (provenance and any field the
+	// call left out) is known.
+	if (description !== undefined && strippedBody !== undefined) render(description, strippedBody, undefined);
 	return serializeSkillMutation(name, async () => {
 		await assertManagedRootSafe();
 		const dir = path.join(getManagedSkillsDir(), name);
@@ -308,7 +351,11 @@ export async function writeManagedSkill(input: WriteManagedSkillInput): Promise<
 			);
 		}
 		if (input.action === "create") {
-			const content = render(undefined);
+			// Unreachable after the checks above; narrows both fields for the compiler.
+			if (description === undefined || strippedBody === undefined) {
+				throw new Error(`Creating managed skill "${name}" requires both a description and a body.`);
+			}
+			const content = render(description, strippedBody, undefined);
 			await fs.mkdir(dir, { recursive: true });
 			// O_CREAT|O_EXCL ("wx"): atomic create that fails if the file already
 			// exists (closing the check-then-write race) and refuses a symlinked SKILL.md.
@@ -341,13 +388,23 @@ export async function writeManagedSkill(input: WriteManagedSkillInput): Promise<
 		try {
 			const openStat = await handle.stat();
 			assertManagedSkillFileSafeForUpdate(name, openStat);
-			// Carry the stored provenance forward (created date, contributing sessions/projects).
-			const { frontmatter } = parseFrontmatter(await handle.readFile({ encoding: "utf8" }), {
+			// Carry the stored provenance forward (created date, contributing sessions/projects)
+			// and keep any field the call left out. Read through the checked handle so a path
+			// swap cannot feed it another file.
+			// `normalize: false` keeps the stored body's line endings byte-for-byte when
+			// it is carried forward unchanged.
+			const stored = parseFrontmatter(await handle.readFile({ encoding: "utf8" }), {
 				source: file,
 				rawKeys: true,
 				level: "off",
+				normalize: false,
 			});
-			const content = render(readManagedSkillProvenance(frontmatter));
+			const storedDescription = stored.frontmatter.description;
+			const content = render(
+				description ?? (typeof storedDescription === "string" ? storedDescription : ""),
+				strippedBody ?? stored.body,
+				readManagedSkillProvenance(stored.frontmatter),
+			);
 			await handle.truncate(0);
 			// Positional writes: the read above advanced the handle's file position.
 			let offset = 0;

@@ -128,9 +128,11 @@
 - `omp plugin disable` and the Settings → Plugins enable toggle now note that running sessions keep the plugin until they restart ([#9722](https://github.com/can1357/oh-my-pi/issues/9722))
 - Status line keeps the auto indicator on an auto-resolved thinking effort (e.g. `⟳ high`) so it is distinguishable from a pinned level ([#5951](https://github.com/can1357/oh-my-pi/issues/5951))
 - A configured MCP `oauth.scope` now overrides scopes advertised by the server on initial authorization and `/mcp reauth`, so you can request a narrower (or different) scope set than discovery reports ([#7841](https://github.com/can1357/oh-my-pi/issues/7841))
+- `manage_skill` `update` now takes `description`, `body`, or both; an omitted field keeps its stored value, so a one-line change no longer resends the whole skill ([#20923](https://github.com/can1357/oh-my-pi/pull/20923) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
 
+- Fixed `manage_skill` and `learn` writing a skill with two frontmatter blocks when the body began with its own `---` block ([#20923](https://github.com/can1357/oh-my-pi/pull/20923) by [@Xytronix](https://github.com/Xytronix))
 - `/resume` into a session without subagents no longer keeps showing the previous session's subagents above the composer
 - Fixed stealth injection registry to preserve native function source strings across frames
 - In Tern, `/copy` and `/annotate session` share the same block picker on desktop and mobile. Clicking a side preview accepts the full item and closes the picker ([#20791](https://github.com/can1357/oh-my-pi/pull/20791) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).

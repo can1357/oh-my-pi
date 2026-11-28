@@ -17,18 +17,26 @@ const manageSkillSchema = type({
 	action: "'create' | 'update' | 'delete'",
 	name: type("string").describe("kebab-case skill name"),
 	"description?": type("string").describe(
-		"one-line description of when to use the skill (required for create/update)",
+		"one-line description of when to use the skill (required for create; optional for update, kept when omitted)",
 	),
-	"body?": type("string").describe("the SKILL.md body in markdown, no frontmatter (required for create/update)"),
+	"body?": type("string").describe(
+		"the SKILL.md body in markdown, no frontmatter (required for create; optional for update, kept when omitted)",
+	),
 }).narrow(
 	(p, ctx) =>
 		p.action === "delete" ||
-		(p.description !== undefined && p.body !== undefined) ||
+		(p.action === "create"
+			? p.description !== undefined && p.body !== undefined
+			: p.description !== undefined || p.body !== undefined) ||
 		// Enforce the action/field contract at validation time rather than only in
 		// execute. Kept as a cross-field narrow (not a discriminated union) so the
-		// wire schema stays a single root object — strict structured-output mode and
+		// wire schema stays a single root object; strict structured-output mode and
 		// the Anthropic tool-schema builder both require that.
-		ctx.mustBe('used with both "description" and "body" for "create" and "update"'),
+		ctx.mustBe(
+			p.action === "create"
+				? 'used with both "description" and "body" for "create"'
+				: 'used with "description", "body", or both for "update"',
+		),
 );
 
 export type ManageSkillParams = typeof manageSkillSchema.infer;
@@ -64,11 +72,14 @@ export class ManageSkillTool implements AgentTool<typeof manageSkillSchema> {
 			};
 		}
 
-		// Defensive narrowing: the schema refine already rejects create/update
-		// without both fields, so this is unreachable for valid input — it only
-		// proves the strings are present to `writeManagedSkill`'s typed contract.
-		if (!params.description || !params.body) {
-			throw new Error(`"${params.action}" requires both "description" and "body".`);
+		// Defensive check: the schema refine already rejects these, so this is
+		// unreachable for valid input.
+		if (params.action === "create" ? !params.description || !params.body : !params.description && !params.body) {
+			throw new Error(
+				params.action === "create"
+					? `"create" requires both "description" and "body".`
+					: `"update" requires "description", "body", or both.`,
+			);
 		}
 		// A managed skill resolves below any authored skill of the same name
 		// (authored always wins in discovery), so creating one under a name an

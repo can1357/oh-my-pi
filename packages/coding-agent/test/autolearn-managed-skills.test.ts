@@ -269,6 +269,93 @@ describe("managed-skills primitives", () => {
 			).rejects.toThrow(/does not exist/);
 		});
 
+		it("strips a frontmatter block the body leads with, keeping the explicit name and description", async () => {
+			const body = "---\nname: other-name\ndescription: From the body.\n---\n\n# Foo\n\nSteps.";
+			await writeManagedSkill({ origin, action: "create", name: "foo", description: "Explicit.", body });
+			const content = await Bun.file(skillFile("foo")).text();
+			expect(content.match(/^---$/gm)).toHaveLength(2);
+			const parsed = parseFrontmatter(content, { source: "test" });
+			expect(parsed.frontmatter.name).toBe("foo");
+			expect(parsed.frontmatter.description).toBe("Explicit.");
+			expect(parsed.body).toBe("# Foo\n\nSteps.");
+		});
+
+		it("never takes the description from a stripped body block", async () => {
+			const body = "---\ndescription: From the body.\n---\nnew";
+			await expect(writeManagedSkill({ origin, action: "create", name: "foo", body })).rejects.toThrow(
+				/requires both/,
+			);
+			expect(await Bun.file(skillFile("foo")).exists()).toBe(false);
+
+			await writeManagedSkill({ origin, action: "create", name: "foo", description: "Stored.", body });
+			// A body-only update strips the block but keeps the stored description.
+			await writeManagedSkill({
+				origin,
+				action: "update",
+				name: "foo",
+				body: "---\nname: foo\ndescription: Replaced.\n---\nnewer",
+			});
+			const parsed = parseFrontmatter(await Bun.file(skillFile("foo")).text(), { source: "test" });
+			expect(parsed.frontmatter.description).toBe("Stored.");
+			expect(parsed.body).toBe("newer");
+		});
+
+		it("keeps a leading horizontal rule, including one followed by a colon-bearing Setext heading", async () => {
+			await writeManagedSkill({ origin, action: "create", name: "foo", description: "Old.", body: "old" });
+			await writeManagedSkill({ origin, action: "update", name: "foo", body: "---\n\nAfter a rule." });
+			let parsed = parseFrontmatter(await Bun.file(skillFile("foo")).text(), { source: "test" });
+			expect(parsed.body).toBe("---\n\nAfter a rule.");
+
+			const setext = "---\n\nStatus: ready\n---\n\n# Steps";
+			await writeManagedSkill({ origin, action: "update", name: "foo", body: setext });
+			parsed = parseFrontmatter(await Bun.file(skillFile("foo")).text(), { source: "test" });
+			expect(parsed.frontmatter.description).toBe("Old.");
+			expect(parsed.body).toBe(setext);
+
+			await writeManagedSkill({ origin, action: "create", name: "bar", description: "Bar.", body: setext });
+			parsed = parseFrontmatter(await Bun.file(skillFile("bar")).text(), { source: "test" });
+			expect(parsed.body).toBe(setext);
+		});
+
+		it("a description-only update keeps the stored body's CRLF line endings", async () => {
+			const body = "# Foo\r\n\r\nStep one.\r\nStep two.";
+			await writeManagedSkill({ origin, action: "create", name: "foo", description: "Old.", body });
+			expect(await Bun.file(skillFile("foo")).text()).toEndWith(`\n${body}\n`);
+
+			await writeManagedSkill({ origin, action: "update", name: "foo", description: "New." });
+			const raw = await Bun.file(skillFile("foo")).text();
+			expect(raw).toEndWith(`\n${body}\n`);
+			expect(parseFrontmatter(raw, { source: "test" }).frontmatter.description).toBe("New.");
+		});
+
+		it("partial updates keep the stored field the call leaves out", async () => {
+			await writeManagedSkill({
+				origin,
+				action: "create",
+				name: "foo",
+				description: "When to foo.",
+				body: "# Foo\nv1",
+			});
+
+			await writeManagedSkill({ origin, action: "update", name: "foo", description: "When fooing." });
+			let parsed = parseFrontmatter(await Bun.file(skillFile("foo")).text(), { source: "test" });
+			expect(parsed.frontmatter.description).toBe("When fooing.");
+			expect(parsed.body).toBe("# Foo\nv1");
+
+			await writeManagedSkill({ origin, action: "update", name: "foo", body: "# Foo\nv2" });
+			parsed = parseFrontmatter(await Bun.file(skillFile("foo")).text(), { source: "test" });
+			expect(parsed.frontmatter.description).toBe("When fooing.");
+			expect(parsed.body).toBe("# Foo\nv2");
+
+			await expect(writeManagedSkill({ origin, action: "update", name: "foo" })).rejects.toThrow(/requires/);
+			await expect(writeManagedSkill({ origin, action: "create", name: "baz", body: "b" })).rejects.toThrow(
+				/requires both/,
+			);
+			await expect(writeManagedSkill({ origin, action: "update", name: "missing", body: "b" })).rejects.toThrow(
+				/does not exist/,
+			);
+		});
+
 		it("rejects an oversized body and writes nothing", async () => {
 			const huge = "a".repeat(MAX_MANAGED_SKILL_BYTES + 1);
 			await expect(

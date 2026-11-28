@@ -11,7 +11,7 @@ import type { MnemopiSessionState } from "@oh-my-pi/pi-coding-agent/mnemopi/stat
 import { createTools, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { LearnTool } from "@oh-my-pi/pi-coding-agent/tools/learn";
 import { ManageSkillTool } from "@oh-my-pi/pi-coding-agent/tools/manage-skill";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { parseFrontmatter, removeWithRetries } from "@oh-my-pi/pi-utils";
 import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
 
 function makeSession(settingsOverrides: Record<string, unknown> = {}, extra: Partial<ToolSession> = {}): ToolSession {
@@ -143,19 +143,40 @@ describe("manage_skill execute", () => {
 		expect(await Bun.file(file).exists()).toBe(false);
 	});
 
-	it("rejects create without a body and delete of a missing skill", async () => {
+	it("rejects create without a body, and update or delete of a missing skill", async () => {
 		await expect(tool().execute("3", { action: "create", name: "nobody", description: "d" })).rejects.toThrow(
 			/requires/,
 		);
 		await expect(tool().execute("4", { action: "delete", name: "absent" })).rejects.toThrow(/does not exist/);
+		await expect(tool().execute("5", { action: "update", name: "absent", body: "b" })).rejects.toThrow(
+			/does not exist/,
+		);
 	});
 
-	it("schema rejects create/update without description+body but allows delete", () => {
+	it("schema requires both fields for create, at least one for update, none for delete", () => {
 		const schema = tool().parameters;
 		expect(schema({ action: "create", name: "x" }) instanceof type.errors).toBe(true);
-		expect(schema({ action: "update", name: "x", description: "d" }) instanceof type.errors).toBe(true);
+		expect(schema({ action: "create", name: "x", description: "d" }) instanceof type.errors).toBe(true);
+		expect(schema({ action: "update", name: "x" }) instanceof type.errors).toBe(true);
+		expect(schema({ action: "update", name: "x", description: "d" }) instanceof type.errors).toBe(false);
+		expect(schema({ action: "update", name: "x", body: "b" }) instanceof type.errors).toBe(false);
 		expect(schema({ action: "create", name: "x", description: "d", body: "b" }) instanceof type.errors).toBe(false);
 		expect(schema({ action: "delete", name: "x" }) instanceof type.errors).toBe(false);
+	});
+
+	it("update with only a body keeps the description, and only a description keeps the body", async () => {
+		const file = path.join(getManagedSkillsDir(), "demo", "SKILL.md");
+		await tool().execute("6", { action: "create", name: "demo", description: "When to demo.", body: "# Demo\nv1" });
+
+		await tool().execute("7", { action: "update", name: "demo", body: "# Demo\nv2" });
+		let parsed = parseFrontmatter(await Bun.file(file).text(), { source: "test" });
+		expect(parsed.frontmatter.description).toBe("When to demo.");
+		expect(parsed.body).toBe("# Demo\nv2");
+
+		await tool().execute("8", { action: "update", name: "demo", description: "When demoing." });
+		parsed = parseFrontmatter(await Bun.file(file).text(), { source: "test" });
+		expect(parsed.frontmatter.description).toBe("When demoing.");
+		expect(parsed.body).toBe("# Demo\nv2");
 	});
 
 	it("refuses to create a managed skill an authored skill of the same name would shadow", async () => {

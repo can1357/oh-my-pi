@@ -18,12 +18,12 @@
 
 ## Inputs
 
-| Field         | Type                               |      Required | Description                                                                                                          |
-| ------------- | ---------------------------------- | ------------: | -------------------------------------------------------------------------------------------------------------------- |
-| `action`      | `"create" \| "update" \| "delete"` |           Yes | Managed-skill mutation.                                                                                              |
-| `name`        | `string`                           |           Yes | Managed skill name; trimmed and lowercased before path resolution, then validated against `[a-z0-9][a-z0-9-]{0,63}`. |
-| `description` | `string`                           | Create/update | One-line description used for skill discovery.                                                                       |
-| `body`        | `string`                           | Create/update | Markdown body for `SKILL.md`; do not include frontmatter.                                                            |
+| Field         | Type                               | Required | Description                                                                                                                                                                                                                      |
+| ------------- | ---------------------------------- | -------: | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `action`      | `"create" \| "update" \| "delete"` |      Yes | Managed-skill mutation.                                                                                                                                                                                                          |
+| `name`        | `string`                           |      Yes | Managed skill name; trimmed and lowercased before path resolution, then validated against `[a-z0-9][a-z0-9-]{0,63}`.                                                                                                             |
+| `description` | `string`                           |   Create | One-line description used for skill discovery. `update` needs `description`, `body`, or both; an omitted field keeps its stored value.                                                                                           |
+| `body`        | `string`                           |   Create | Markdown body for `SKILL.md`; replaces the whole stored body. Do not include frontmatter: leading frontmatter blocks are stripped and their values ignored.                                                                      |
 
 ## Outputs
 
@@ -36,10 +36,10 @@
 ## Flow
 
 1. `ManageSkillTool.createIf(...)` exposes the tool only when `autolearn.enabled` is true and keeps the tool session (its optional `refreshSkills` callback, session id, and cwd for provenance).
-2. Schema validation requires both `description` and `body` for `create` / `update`; `delete` needs only `name`.
+2. Schema validation requires both `description` and `body` for `create`, and at least one of them for `update`; `delete` needs only `name`.
 3. `delete` calls `deleteManagedSkill(name)`, then refreshes active skills when the callback exists.
 4. `create` normalizes the name and checks whether an active authored skill already owns it; if yes, it returns an error result without writing.
-5. `create` / `update` call `writeManagedSkill(...)`, which normalizes/validates the name, sanitizes generated frontmatter, stamps provenance (see Notes), serializes same-name in-process writes, and writes `SKILL.md` under the managed-skills root.
+5. `create` / `update` call `writeManagedSkill(...)`, which normalizes/validates the name, strips leading frontmatter blocks from `body`, fills fields an `update` left out from the stored `SKILL.md`, sanitizes generated frontmatter, stamps provenance (see Notes), serializes same-name in-process writes, and writes `SKILL.md` under the managed-skills root.
 6. After a successful create/update, the tool refreshes active skills when the callback exists, so an interactive session can discover the change immediately.
    A refresh failure propagates after the filesystem mutation; it does not roll the skill back.
 
@@ -62,7 +62,7 @@
 - Availability requires `autolearn.enabled = true`.
 - Names are trimmed and lowercased, then must match `[a-z0-9][a-z0-9-]{0,63}`.
 - Descriptions are sanitized to one line and stripped of control/format characters, angle brackets, backticks, and repeated tildes.
-- Bodies are trimmed and must remain non-empty; generated frontmatter contains normalized `name`, sanitized `description`, and the `x-omp-provenance` block.
+- Bodies are stripped of leading frontmatter blocks, trimmed, and must remain non-empty; generated frontmatter contains normalized `name`, sanitized `description`, and the `x-omp-provenance` block.
 - Provenance keeps the 20 most recent contributing session ids and project directories.
 - Final managed `SKILL.md` content is capped at `64_000` UTF-8 bytes, including frontmatter and description.
 - The managed-skills root, skill directory, and file are checked to prevent symlink escapes; update also rejects non-regular or multiply hard-linked files.
@@ -70,7 +70,7 @@
 ## Errors
 
 - Invalid names throw `Invalid skill name "<raw>"...`.
-- Create/update without both `description` and `body` is rejected by schema validation; the execute-time defensive error is `"<action>" requires both "description" and "body".`
+- Missing fields are rejected by schema validation (`create` without both `description` and `body`, `update` with neither). The execute-time defensive errors are `"create" requires both "description" and "body".` and `"update" requires "description", "body", or both.`
 - Empty sanitized descriptions throw `Managed skill "<name>" needs a non-empty description.`
 - Empty trimmed bodies throw `Managed skill "<name>" needs a non-empty body.`
 - Oversized final files throw `Managed skill is <bytes> bytes; the limit is 64000.`
@@ -81,7 +81,7 @@
 ## Notes
 
 - Managed skills are generated under `<agent-dir>/managed-skills` and never edit authored skills.
-- Do not include YAML frontmatter in `body`; `writeManagedSkill(...)` generates normalized `name` and sanitized `description` frontmatter plus provenance.
+- Do not include YAML frontmatter in `body`; `writeManagedSkill(...)` generates normalized `name` and sanitized `description` frontmatter plus provenance. Leading `---` blocks that parse as a YAML mapping with a `name`, `description`, or `x-omp-provenance` key are stripped from `body` (any other leading horizontal rule stays, including one followed by a `Key: value` Setext heading). Their values are discarded: the explicit `name` and `description` always win, and on `update` an omitted `description` keeps the stored one.
 - Provenance frontmatter (`x-omp-provenance`, never rendered into the system prompt): `generator` (`manage_skill` or `learn`, the last writer), `created` (absent for skills written before provenance existed), `updated`, and `sessions` / `projects` — the contributing session ids and working directories, oldest first; a repeat contributor moves to the end. `update` carries the stored block forward.
 - Users review managed skills and their provenance with `/skills learned` and delete one with `/skills forget <name>`.
 - `update` does not bypass authored-skill precedence: if an authored skill has the same name, the managed skill remains shadowed in discovery.
