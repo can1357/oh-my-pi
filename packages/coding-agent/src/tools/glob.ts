@@ -7,7 +7,7 @@ import { formatGroupedPaths, hasFsCode, isEnoent, prompt, untilAborted } from "@
 import { InternalUrlRouter, sessionResolveContext } from "../internal-urls";
 import { InternalUrlFilesystem, type UrlFileStat } from "../internal-urls/url-filesystem";
 import globDescription from "../prompts/tools/glob.md" with { type: "text" };
-import { DEFAULT_MAX_BYTES, truncateHead } from "./streaming-output";
+import { truncateHead } from "./streaming-output";
 import { sessionDelegationBias } from "../task/prompt-policy";
 import { isScoutSpawnable } from "../task/spawn-policy";
 import type { ToolSession } from ".";
@@ -302,11 +302,8 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			assertNotFilesystemRoot(targets.map(target => target.searchPath));
 
 			const effectiveLimit = Math.min(limit ?? DEFAULT_LIMIT, MAX_LIMIT);
-			// Results cut at the cap tell a caller that asked for more why a larger limit cannot help (#13263).
-			const clampNotice =
-				limit !== undefined && limit > MAX_LIMIT
-					? `Requested limit ${limit} clamped to the max of ${MAX_LIMIT}`
-					: undefined;
+			// Reported with the reached-limit notice so a caller that asked for more learns why a larger limit cannot help (#13263).
+			const clampedFrom = limit !== undefined && limit > MAX_LIMIT ? limit : undefined;
 			const includeHidden = hidden ?? true;
 			const useGitignore = gitignore ?? true;
 			const timeoutMs = this.#timeoutMs;
@@ -355,20 +352,9 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 				const baseOutput = formatGroupedPaths(limited);
 				const trailingNotes: string[] = [];
 				if (notice) trailingNotes.push(notice);
-				if (clampNotice && limitMeta.resultLimit) trailingNotes.push(clampNotice);
 				if (missingPathsNote) trailingNotes.push(missingPathsNote);
-				// The short timeout and clamp notices lead, so cutting the notes to the byte cap keeps them; the paths
-				// get the bytes left. A long listing cannot push the notes out, and the output never exceeds the cap.
-				const separator = "\n\n";
-				const notes = truncateHead(trailingNotes.join("\n"), {
-					maxLines: Number.MAX_SAFE_INTEGER,
-					maxBytes: DEFAULT_MAX_BYTES - separator.length,
-				}).content;
-				const notesBlock = notes ? separator + notes : "";
-				const truncation = truncateHead(baseOutput, {
-					maxLines: Number.MAX_SAFE_INTEGER,
-					maxBytes: DEFAULT_MAX_BYTES - Buffer.byteLength(notesBlock),
-				});
+				const rawOutput = trailingNotes.length > 0 ? `${baseOutput}\n\n${trailingNotes.join("\n")}` : baseOutput;
+				const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
 
 				const details: GlobToolDetails = {
 					scopePath,
@@ -393,9 +379,9 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 						? undefined
 						: cappedSuggestion !== undefined && cappedSuggestion > reachedLimit.reached
 							? { reached: reachedLimit.reached, suggestion: cappedSuggestion }
-							: { reached: reachedLimit.reached, suggestion: null };
+							: { reached: reachedLimit.reached, suggestion: null, requested: clampedFrom };
 				const resultBuilder = toolResult(details)
-					.text(truncation.content + notesBlock)
+					.text(truncation.content)
 					.limits({ resultLimit: resultLimitInput });
 				if (truncation.truncated) {
 					resultBuilder.truncation(truncation, { direction: "head" });

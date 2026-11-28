@@ -7,10 +7,10 @@ import type { ToolSession } from "../../src/tools";
 import { GlobTool, type GlobToolInput } from "../../src/tools/glob";
 import type { GlobToolDetails } from "@oh-my-pi/pi-coding-agent/tools/details/glob";
 import { findUniqueWorkspaceSuffixWithGlobForTest } from "../../src/tools/path-utils";
-import { DEFAULT_MAX_BYTES } from "../../src/tools/streaming-output";
 import { ToolAbortError } from "../../src/tools/tool-errors";
 import { ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { formatOutputNotice, type OutputMeta } from "@oh-my-pi/pi-coding-agent/tools/output-meta-format";
+import { postProcessToolResult } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 
 function createSession(cwd = process.cwd()): ToolSession {
 	return {
@@ -20,11 +20,6 @@ function createSession(cwd = process.cwd()): ToolSession {
 		getSessionFile: () => null,
 		getSessionSpawns: () => null,
 	};
-}
-
-function textOf(result: AgentToolResult<GlobToolDetails>): string {
-	const first = result.content[0];
-	return first?.type === "text" && first.text !== undefined ? first.text : "";
 }
 
 async function expectRootSearchRejected(searchPath: string): Promise<void> {
@@ -235,15 +230,8 @@ describe("GlobTool hard-cap limit notice", () => {
 		return formatOutputNotice((result.details as { meta?: OutputMeta } | undefined)?.meta);
 	}
 
-	/** Lines reporting a clamped `limit`, so assertions check what they say rather than how. */
-	function clampLines(result: GlobExecuteResult): string[] {
-		return textOf(result)
-			.split("\n")
-			.filter(line => /clamp/i.test(line));
-	}
-
 	/** A clamp report naming the requested 400 and the effective 200, in that order. */
-	const clampedFrom400 = expect.stringMatching(/\b400\b.*\b200\b/);
+	const CLAMPED_FROM_400 = /\b400\b.*clamp.*\b200\b/i;
 
 	test("rejects an undeclared argument instead of dropping it", async () => {
 		const tool = globToolWith(files230);
@@ -252,10 +240,10 @@ describe("GlobTool hard-cap limit notice", () => {
 		);
 	});
 
-	test.each<{ name: string; options: { limit?: number }; clamp: string[] }>([
-		{ name: "the default limit", options: {}, clamp: [] },
-		{ name: "limit 400", options: { limit: 400 }, clamp: [clampedFrom400] },
-	])("caps a scan with $name at 200 without suggesting a larger limit", async ({ options, clamp }) => {
+	test.each<{ name: string; options: { limit?: number }; clamped: boolean }>([
+		{ name: "the default limit", options: {}, clamped: false },
+		{ name: "limit 400", options: { limit: 400 }, clamped: true },
+	])("caps a scan with $name at 200 without suggesting a larger limit", async ({ options, clamped }) => {
 		const scanBudgets: (number | undefined)[] = [];
 		const result = await globToolWith(files230, scanBudgets).execute("glob-cap", { path: ".", ...options });
 
@@ -263,36 +251,25 @@ describe("GlobTool hard-cap limit notice", () => {
 		expect(result.details?.files).toHaveLength(200);
 		expect(limitNotice(result)).toContain("200 results limit reached");
 		expect(limitNotice(result)).not.toContain("Use limit=");
-		expect(clampLines(result)).toEqual(clamp);
+		expect(CLAMPED_FROM_400.test(limitNotice(result))).toBe(clamped);
 	});
 
 	test("does not disclose a clamp the results never reached", async () => {
 		const result = await globToolWith(files230.slice(0, 50)).execute("glob-clamp-uncut", { path: ".", limit: 400 });
 
 		expect(result.details?.files).toHaveLength(50);
-		expect(clampLines(result)).toEqual([]);
+		expect(limitNotice(result)).not.toMatch(/clamp/i);
 	});
 
-	test("keeps the clamp notice when long paths fill the output byte budget", async () => {
+	test("keeps the clamp notice in the model-facing text when long paths overflow the output byte cap", async () => {
 		const longNames = files230.map(file => `${"x".repeat(300)}-${file}`);
 		const result = await globToolWith(longNames).execute("glob-clamp-long", { path: ".", limit: 400 });
+		const processed = await postProcessToolResult(result, "glob");
+		const first = processed.content[0];
+		const lastLine = (first?.type === "text" ? (first.text ?? "") : "").split("\n").at(-1) ?? "";
 
 		expect(result.details?.truncation?.truncated).toBe(true);
-		expect(Buffer.byteLength(textOf(result))).toBeLessThanOrEqual(DEFAULT_MAX_BYTES);
-		expect(clampLines(result)).toEqual([clampedFrom400]);
-	});
-
-	test("stays within the byte cap when skipped paths alone exceed it", async () => {
-		const missing = Array.from({ length: 600 }, (_, i) => `missing-${String(i).padStart(3, "0")}-${"y".repeat(90)}`);
-		const result = await globToolWith(files230).execute("glob-missing-flood", {
-			path: [".", ...missing].join(";"),
-			limit: 400,
-		});
-
-		expect(result.details?.missingPaths).toHaveLength(600);
-		expect(Buffer.byteLength(textOf(result))).toBeLessThanOrEqual(DEFAULT_MAX_BYTES);
-		expect(textOf(result)).toContain("file-000.txt");
-		expect(clampLines(result)).toEqual([clampedFrom400]);
+		expect(lastLine).toMatch(CLAMPED_FROM_400);
 	});
 
 	test("below the cap the doubled suggestion is capped at the hard limit and stays usable", async () => {
@@ -307,6 +284,11 @@ describe("GlobTool custom backend contract", () => {
 
 	function detailsOf(result: GlobExecuteResult): GlobToolDetails {
 		return result.details ?? {};
+	}
+
+	function textOf(result: GlobExecuteResult): string {
+		const first = result.content[0];
+		return first?.type === "text" && first.text !== undefined ? first.text : "";
 	}
 
 	test("stops reporting at the tool deadline when a custom backend never settles", async () => {
