@@ -19,20 +19,51 @@ import {
 } from "./session-title-slot";
 import { purgeDeletedSessionRows } from "./session-db-purge";
 
+/** A session a backend holds, as its index load lists it: its path, size in bytes and time, never its title. */
 export interface SessionStorageIndexEntry {
 	path: string;
 	size: number;
 	mtimeMs: number;
-	title?: string;
-	titleSource?: SessionTitleUpdate["source"];
-	titleUpdatedAt?: string;
 }
 
+/**
+ * The title metadata a backend read returns with the bytes it read, from the
+ * same snapshot of the session: `undefined` when the session records none (no
+ * title update or titled full write set it). A title update with an empty
+ * title is a title (a clear), not `undefined`. The storage lays it over the
+ * head of the bytes as the session's title slot.
+ */
+export type SessionStorageReadTitle = SessionTitleUpdate | undefined;
+
+/** {@link SessionStorageBackend.readFull}: the stored text as it is, and the title metadata stored with it. */
+export interface SessionStorageFullRead {
+	text: string;
+	title: SessionStorageReadTitle;
+}
+
+/**
+ * A store of session files under {@link IndexedSessionStorage}. Every read
+ * returns the bytes as they are stored, with the title metadata the store
+ * holds for the session from the same snapshot as those bytes: the storage
+ * lays the title over the head it returns, so a reader never gets one
+ * version's title with another's bytes, and keeps no title of its own.
+ */
 export interface SessionStorageBackend {
 	init(): Promise<void>;
+	/** Every session the store holds, with its size and time; no title. */
 	loadIndex(): Promise<Iterable<SessionStorageIndexEntry>>;
-	readFull(path: string): Promise<string | null>;
-	readSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]>;
+	/** The stored text and its title metadata, from one read; `null` when `path` holds no session. */
+	readFull(path: string): Promise<SessionStorageFullRead | null>;
+	/**
+	 * At most the first `prefixBytes` and the last `suffixBytes` of the
+	 * stored bytes, as text, and the title metadata, from one read. Each count
+	 * is one {@link normalizeByteLimit} gave: a whole number, 0 for no window.
+	 */
+	readSlices(
+		path: string,
+		prefixBytes: number,
+		suffixBytes: number,
+	): Promise<[prefix: string, suffix: string, title: SessionStorageReadTitle]>;
 	/**
 	 * Replace content, atomically rejecting when the shared backend's current
 	 * UTF-8 byte length differs from `expectedSize`.
@@ -45,18 +76,27 @@ export interface SessionStorageBackend {
 		expectedSize?: number | null,
 	): Promise<void>;
 	append(path: string, line: string, mtimeMs: number): Promise<void>;
+	/**
+	 * Set the session's title metadata and time; its stored bytes and size
+	 * stay as they are. Rejects with `ENOENT`, writing nothing, when the store
+	 * holds no session at `path`.
+	 */
 	updateSessionTitle(path: string, title: SessionTitleUpdate, mtimeMs: number): Promise<void>;
 	truncate(path: string, mtimeMs: number): Promise<void>;
+	/** Remove each path with its time and title metadata. */
 	remove(paths: string[]): Promise<void>;
+	/** Move `src`'s bytes, time and title metadata to `dst`, replacing what `dst` held. */
 	move(src: string, dst: string, mtimeMs: number): Promise<void>;
 }
 
+/**
+ * What the index keeps of a path: its size and time, for the synchronous
+ * answers (`existsSync`, `statSync`, the listings). No title: every read
+ * takes the title from the backend read it makes, with the bytes.
+ */
 interface IndexEntry {
 	size: number;
 	mtimeMs: number;
-	title?: string;
-	titleSource?: SessionTitleUpdate["source"];
-	titleUpdatedAt?: string;
 	/**
 	 * Set on an entry restored after a failed removal: the backend may have
 	 * deleted part of the path (Redis deletes the file key before the
@@ -112,10 +152,6 @@ function uniquePaths(paths: readonly string[]): string[] {
 	}
 	return out;
 }
-function titleUpdateForIndex(entry: IndexEntry): SessionTitleUpdate | undefined {
-	if (!entry.titleUpdatedAt) return undefined;
-	return { title: entry.title, source: entry.titleSource, updatedAt: entry.titleUpdatedAt };
-}
 
 export class IndexedSessionStorage implements SessionStorage {
 	/**
@@ -162,12 +198,7 @@ export class IndexedSessionStorage implements SessionStorage {
 		await this.drain();
 		const rows = await this.#backend.loadIndex();
 		this.#index.clear();
-		for (const row of rows) {
-			const title = row.titleUpdatedAt
-				? { title: row.title, source: row.titleSource, updatedAt: row.titleUpdatedAt }
-				: null;
-			this.#setIndex(row.path, row.size, row.mtimeMs, title);
-		}
+		for (const row of rows) this.#setIndex(row.path, row.size, row.mtimeMs);
 	}
 
 	async drain(): Promise<void> {
@@ -198,8 +229,8 @@ export class IndexedSessionStorage implements SessionStorage {
 			const entry = this.#index.get(path);
 			return entry !== undefined && !entry.unconfirmed;
 		}
-		// A removal in flight can delete the content before its op settles (Redis deletes the
-		// file key before the metadata), so the path is unconfirmed until the removal settles.
+		// A removal in flight can remove the content before its op settles (the store runs it before its reply
+		// arrives), so the path is unconfirmed until the removal settles.
 		if (frames.some(frame => frame.removal)) return false;
 		// The oldest live frame's previous entry is the last state the backend confirmed.
 		const confirmed = frames[0]?.previous;
@@ -221,7 +252,7 @@ export class IndexedSessionStorage implements SessionStorage {
 		const previous = this.#index.get(path);
 		const mtimeMs = this.#allocMtimeMs();
 		const title = titleUpdateFromSlot(parseTitleSlotFromContent(content));
-		this.#setIndex(path, byteLength(content), mtimeMs, title ?? null);
+		this.#setIndex(path, byteLength(content), mtimeMs);
 		this.#pushFrame(path, { mtimeMs, previous });
 		const write = this.#enqueuePath(
 			path,
@@ -231,19 +262,16 @@ export class IndexedSessionStorage implements SessionStorage {
 		this.#trackFrame(path, mtimeMs, write);
 	}
 
+	/**
+	 * Set `path`'s title in the backend's metadata. The index takes only the
+	 * update's time: readers read the title with the bytes, from the backend.
+	 */
 	async updateSessionTitle(path: string, title: SessionTitleUpdate): Promise<void> {
 		await this.#awaitPath(path);
 		const previous = this.#index.get(path);
 		if (!previous) throw enoent(path);
 		const mtimeMs = this.#allocMtimeMs();
-		const next = {
-			...previous,
-			title: title.title,
-			titleSource: title.source,
-			titleUpdatedAt: title.updatedAt,
-			mtimeMs,
-		};
-		this.#index.set(path, next);
+		this.#index.set(path, { ...previous, mtimeMs });
 		this.#pushFrame(path, { mtimeMs, previous });
 		const pending = this.#enqueuePath(path, () => this.#backend.updateSessionTitle(path, title, mtimeMs), {
 			trackDrain: false,
@@ -281,25 +309,27 @@ export class IndexedSessionStorage implements SessionStorage {
 		return Promise.resolve(this.existsSync(path));
 	}
 
+	/** The text, with the title slot the read's own title makes laid over the stored head ({@link overlayTitleSlotContent}). */
 	async readText(path: string): Promise<string> {
-		const entry = this.#index.get(path);
-		if (!entry) throw enoent(path);
+		if (!this.#index.has(path)) throw enoent(path);
 		await this.#awaitPath(path);
-		const content = await this.#backend.readFull(path);
-		if (content === null) throw enoent(path);
-		const title = titleUpdateForIndex(entry);
-		return title ? overlayTitleSlotContent(content, title) : content;
+		const read = await this.#backend.readFull(path);
+		if (read === null) throw enoent(path);
+		return read.title ? overlayTitleSlotContent(read.text, read.title) : read.text;
 	}
 
+	/**
+	 * The text's first `prefixBytes` and last `suffixBytes`, with the title
+	 * slot the read's own title makes laid over the prefix
+	 * ({@link overlayTitleSlotPrefix}); the suffix is the stored one.
+	 */
 	async readTextSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]> {
-		const entry = this.#index.get(path);
-		if (!entry) throw enoent(path);
+		if (!this.#index.has(path)) throw enoent(path);
 		const prefixLimit = normalizeByteLimit(prefixBytes);
 		const suffixLimit = normalizeByteLimit(suffixBytes);
 		if (prefixLimit === 0 && suffixLimit === 0) return ["", ""];
 		await this.#awaitPath(path);
-		const [prefix, suffix] = await this.#backend.readSlices(path, prefixLimit, suffixLimit);
-		const title = titleUpdateForIndex(entry);
+		const [prefix, suffix, title] = await this.#backend.readSlices(path, prefixLimit, suffixLimit);
 		return [title ? overlayTitleSlotPrefix(prefix, prefixLimit, title) : prefix, suffix];
 	}
 
@@ -314,7 +344,7 @@ export class IndexedSessionStorage implements SessionStorage {
 		const previous = this.#index.get(path);
 		const mtimeMs = this.#allocMtimeMs();
 		const title = titleUpdateFromSlot(parseTitleSlotFromContent(content));
-		this.#setIndex(path, byteLength(content), mtimeMs, title ?? null);
+		this.#setIndex(path, byteLength(content), mtimeMs);
 		this.#pushFrame(path, { mtimeMs, previous });
 		const pending = this.#enqueuePath(path, () => this.#backend.writeFull(path, content, mtimeMs, title), {
 			trackDrain: false,
@@ -335,7 +365,7 @@ export class IndexedSessionStorage implements SessionStorage {
 		const previous = this.#index.get(path);
 		const mtimeMs = this.#allocMtimeMs();
 		const title = titleUpdateFromSlot(parseTitleSlotFromContent(content));
-		this.#setIndex(path, byteLength(content), mtimeMs, title ?? null);
+		this.#setIndex(path, byteLength(content), mtimeMs);
 		this.#pushFrame(path, { mtimeMs, previous });
 		try {
 			await this.#enqueuePath(
@@ -360,7 +390,8 @@ export class IndexedSessionStorage implements SessionStorage {
 		} catch (err) {
 			const error = toError(err);
 			try {
-				if ((await this.#backend.readFull(path)) === content) {
+				// The stored text as it is: the title metadata the read returns beside it is not the body's.
+				if ((await this.#backend.readFull(path))?.text === content) {
 					this.#dropFrame(path, mtimeMs);
 					return;
 				}
@@ -478,7 +509,7 @@ export class IndexedSessionStorage implements SessionStorage {
 	_truncateForWriter(path: string): number {
 		const mtimeMs = this.#allocMtimeMs();
 		this.#pushFrame(path, { mtimeMs, previous: this.#index.get(path) });
-		this.#setIndex(path, 0, mtimeMs, null);
+		this.#setIndex(path, 0, mtimeMs);
 		return mtimeMs;
 	}
 
@@ -500,7 +531,7 @@ export class IndexedSessionStorage implements SessionStorage {
 		const mtimeMs = this.#allocMtimeMs();
 		const previous = this.#index.get(path);
 		const size = (previous?.size ?? 0) + byteLength(line);
-		this.#setIndex(path, size, mtimeMs);
+		this.#setIndex(path, size, mtimeMs, previous);
 		return { mtimeMs, previous };
 	}
 
@@ -528,22 +559,14 @@ export class IndexedSessionStorage implements SessionStorage {
 		}
 	}
 
-	#setIndex(
-		path: string,
-		size: number,
-		mtimeMs: number,
-		title: SessionTitleUpdate | null | undefined = undefined,
-	): void {
-		const current = title === undefined ? this.#index.get(path) : undefined;
-		this.#index.set(path, {
-			size,
-			mtimeMs,
-			title: title === undefined ? current?.title : (title?.title ?? undefined),
-			titleSource: title === undefined ? current?.titleSource : (title?.source ?? undefined),
-			titleUpdatedAt: title === undefined ? current?.titleUpdatedAt : (title?.updatedAt ?? undefined),
-			// An append extends the current content, so it does not restore what a failed removal deleted.
-			...(current?.unconfirmed ? { unconfirmed: true } : {}),
-		});
+	/**
+	 * Set `path`'s size and time. An append passes the entry it extends,
+	 * whose unconfirmed mark it keeps: it does not restore what a failed
+	 * removal deleted. A full write, a truncation or a refreshed row passes
+	 * none, and a full write confirms the path.
+	 */
+	#setIndex(path: string, size: number, mtimeMs: number, extended?: IndexEntry): void {
+		this.#index.set(path, extended?.unconfirmed ? { size, mtimeMs, unconfirmed: true } : { size, mtimeMs });
 		if (mtimeMs > this.#nextMtimeMs) this.#nextMtimeMs = mtimeMs;
 	}
 

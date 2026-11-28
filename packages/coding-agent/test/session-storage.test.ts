@@ -7,7 +7,9 @@ import * as path from "node:path";
 import {
 	IndexedSessionStorage,
 	type SessionStorageBackend,
+	type SessionStorageFullRead,
 	type SessionStorageIndexEntry,
+	type SessionStorageReadTitle,
 } from "@oh-my-pi/pi-coding-agent/session/indexed-session-storage";
 import {
 	FileSessionStorage,
@@ -15,26 +17,32 @@ import {
 	SessionWriteConflictError,
 	type WriteTextAtomicOptions,
 } from "@oh-my-pi/pi-coding-agent/session/session-storage";
-import { type SessionTitleUpdate, serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
+import {
+	parseTitleSlotLine,
+	type SessionTitleUpdate,
+	serializeTitleSlot,
+} from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 
+/**
+ * One session whose title metadata holds only the title updates that
+ * committed: the first one waits until the test fails it
+ * ({@link rejectFirstUpdate}), which commits nothing, and every later one
+ * commits at once. Readers get that title with the bytes, as a shared backend
+ * gives it to every store over it.
+ */
 class ControlledTitleUpdateBackend implements SessionStorageBackend {
 	readonly #sessionPath: string;
-	readonly #initialEntry: SessionStorageIndexEntry;
 	#content: string;
+	#mtimeMs = 1;
+	#title: SessionStorageReadTitle = { title: "Old", source: "auto", updatedAt: "t0" };
 	#firstUpdate: PromiseWithResolvers<void> | undefined;
 	#updateCount = 0;
+	/** Resolves once the first title update reached this backend. */
+	readonly firstUpdateStarted = Promise.withResolvers<void>();
 
 	constructor(sessionPath: string, content: string) {
 		this.#sessionPath = sessionPath;
 		this.#content = content;
-		this.#initialEntry = {
-			path: sessionPath,
-			size: content.length,
-			mtimeMs: 1,
-			title: "Old",
-			titleSource: "auto",
-			titleUpdatedAt: "t0",
-		};
 	}
 
 	init(): Promise<void> {
@@ -42,40 +50,53 @@ class ControlledTitleUpdateBackend implements SessionStorageBackend {
 	}
 
 	loadIndex(): Promise<Iterable<SessionStorageIndexEntry>> {
-		return Promise.resolve([this.#initialEntry]);
+		return Promise.resolve([
+			{ path: this.#sessionPath, size: Buffer.byteLength(this.#content), mtimeMs: this.#mtimeMs },
+		]);
 	}
 
-	readFull(path: string): Promise<string | null> {
-		return Promise.resolve(path === this.#sessionPath ? this.#content : null);
+	readFull(path: string): Promise<SessionStorageFullRead | null> {
+		return Promise.resolve(path === this.#sessionPath ? { text: this.#content, title: this.#title } : null);
 	}
 
-	readSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]> {
-		if (path !== this.#sessionPath) return Promise.resolve(["", ""]);
+	readSlices(
+		path: string,
+		prefixBytes: number,
+		suffixBytes: number,
+	): Promise<[string, string, SessionStorageReadTitle]> {
+		if (path !== this.#sessionPath) return Promise.resolve(["", "", undefined]);
 		const suffix = suffixBytes > 0 ? this.#content.slice(-suffixBytes) : "";
-		return Promise.resolve([this.#content.slice(0, prefixBytes), suffix]);
+		return Promise.resolve([this.#content.slice(0, prefixBytes), suffix, this.#title]);
 	}
 
-	writeFull(_path: string, content: string, _mtimeMs: number, _title?: SessionTitleUpdate): Promise<void> {
+	writeFull(_path: string, content: string, mtimeMs: number, title?: SessionTitleUpdate): Promise<void> {
 		this.#content = content;
+		this.#mtimeMs = mtimeMs;
+		this.#title = title;
 		return Promise.resolve();
 	}
 
-	append(_path: string, line: string, _mtimeMs: number): Promise<void> {
+	append(_path: string, line: string, mtimeMs: number): Promise<void> {
 		this.#content += line;
+		this.#mtimeMs = mtimeMs;
 		return Promise.resolve();
 	}
 
-	updateSessionTitle(_path: string, _title: SessionTitleUpdate, _mtimeMs: number): Promise<void> {
+	async updateSessionTitle(_path: string, title: SessionTitleUpdate, mtimeMs: number): Promise<void> {
 		this.#updateCount++;
 		if (this.#updateCount === 1) {
 			this.#firstUpdate = Promise.withResolvers<void>();
-			return this.#firstUpdate.promise;
+			this.firstUpdateStarted.resolve();
+			await this.#firstUpdate.promise;
 		}
-		return Promise.resolve();
+		this.#title = title;
+		this.#mtimeMs = mtimeMs;
 	}
 
-	truncate(_path: string, _mtimeMs: number): Promise<void> {
+	truncate(_path: string, mtimeMs: number): Promise<void> {
 		this.#content = "";
+		this.#mtimeMs = mtimeMs;
+		this.#title = undefined;
 		return Promise.resolve();
 	}
 
@@ -88,6 +109,7 @@ class ControlledTitleUpdateBackend implements SessionStorageBackend {
 		return Promise.resolve();
 	}
 
+	/** Fail the first title update before it commits anything. */
 	rejectFirstUpdate(error: Error): void {
 		if (!this.#firstUpdate) throw new Error("First title update has not started");
 		this.#firstUpdate.reject(error);
@@ -109,20 +131,20 @@ class FileBackedSessionBackend implements SessionStorageBackend {
 		return Promise.resolve([{ path: this.#sessionPath, size: 1, mtimeMs: 1 }]);
 	}
 
-	readFull(path: string): Promise<string | null> {
+	readFull(path: string): Promise<SessionStorageFullRead | null> {
 		if (path !== this.#sessionPath) return Promise.resolve(null);
 		try {
-			return Promise.resolve(fs.readFileSync(path, "utf8"));
+			return Promise.resolve({ text: fs.readFileSync(path, "utf8"), title: undefined });
 		} catch {
 			return Promise.resolve(null);
 		}
 	}
 
-	readSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]> {
-		if (path !== this.#sessionPath) return Promise.resolve(["", ""]);
+	readSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string, undefined]> {
+		if (path !== this.#sessionPath) return Promise.resolve(["", "", undefined]);
 		const content = fs.readFileSync(path, "utf8");
 		const suffix = suffixBytes > 0 ? content.slice(-suffixBytes) : "";
-		return Promise.resolve([content.slice(0, prefixBytes), suffix]);
+		return Promise.resolve([content.slice(0, prefixBytes), suffix, undefined]);
 	}
 
 	writeFull(): Promise<void> {
@@ -928,21 +950,46 @@ describe("FileSessionStorage.updateSessionTitle", () => {
 });
 
 describe("IndexedSessionStorage.updateSessionTitle", () => {
+	const sessionPath = "/sessions/session.jsonl";
+	const content = `${serializeTitleSlot({ title: "Old", source: "auto", updatedAt: "t0" })}${JSON.stringify({
+		type: "session",
+		id: "session-id",
+		timestamp: "t0",
+		cwd: "/cwd",
+	})}\n`;
+
+	/** The title each reader of `storage` gives the session: its text, its head slice and its first line. */
+	async function titlesOf(storage: IndexedSessionStorage): Promise<Record<string, string | undefined>> {
+		const titleOf = (text: string): string | undefined => parseTitleSlotLine(text.split("\n")[0] ?? "")?.title;
+		let firstLine = "";
+		await storage.scanLines(sessionPath, line => {
+			firstLine = line;
+			return true;
+		});
+		return {
+			readText: titleOf(await storage.readText(sessionPath)),
+			readTextSlices: titleOf((await storage.readTextSlices(sessionPath, 256, 0))[0]),
+			scanLines: titleOf(firstLine),
+		};
+	}
+
+	/** `title` from every reader {@link titlesOf} asks. */
+	function everywhere(title: string): Record<string, string> {
+		return { readText: title, readTextSlices: title, scanLines: title };
+	}
+
+	// If this regresses, a title update that fails after a newer one was queued puts the old title back over the
+	// newer one, or the newer one's time, on this store or on another store over the same backend.
 	it("does not roll a newer optimistic title back when an older backend write fails", async () => {
-		const sessionPath = "/sessions/session.jsonl";
-		const content = `${serializeTitleSlot({ title: "Old", source: "auto", updatedAt: "t0" })}${JSON.stringify({
-			type: "session",
-			id: "session-id",
-			timestamp: "t0",
-			cwd: "/cwd",
-		})}\n`;
 		const backend = new ControlledTitleUpdateBackend(sessionPath, content);
 		const storage = new IndexedSessionStorage(backend);
 		await storage.initialize();
+		const peer = new IndexedSessionStorage(backend);
+		await peer.initialize();
 
 		const first = storage.updateSessionTitle(sessionPath, { title: "First", source: "auto", updatedAt: "t1" });
 		const second = storage.updateSessionTitle(sessionPath, { title: "Second", source: "user", updatedAt: "t2" });
-		for (let i = 0; i < 10; i++) await Promise.resolve();
+		await backend.firstUpdateStarted.promise;
 
 		backend.rejectFirstUpdate(new Error("first title write failed"));
 		await expect(first).rejects.toThrow("first title write failed");
@@ -950,6 +997,40 @@ describe("IndexedSessionStorage.updateSessionTitle", () => {
 
 		const [slotLine] = (await storage.readText(sessionPath)).split("\n");
 		expect(JSON.parse(slotLine)).toMatchObject({ type: "title", title: "Second", source: "user", updatedAt: "t2" });
+		const local = storage.statSync(sessionPath).mtimeMs;
+		await peer.refresh();
+		expect({
+			local: await titlesOf(storage),
+			peer: await titlesOf(peer),
+			timeIsTheCommittedOne: local === peer.statSync(sessionPath).mtimeMs && local > 1,
+		}).toEqual({ local: everywhere("Second"), peer: everywhere("Second"), timeIsTheCommittedOne: true });
+	});
+
+	// If this regresses, a title update the backend never stored shows on this store (or the update's time does)
+	// until a refresh, or a later update after it is lost on another store over the same backend.
+	it("keeps the durable title and time after a title write fails before it commits, and a later one wins everywhere", async () => {
+		const backend = new ControlledTitleUpdateBackend(sessionPath, content);
+		const storage = new IndexedSessionStorage(backend);
+		await storage.initialize();
+		const peer = new IndexedSessionStorage(backend);
+		await peer.initialize();
+		const before = storage.statSync(sessionPath).mtimeMs;
+
+		const failed = storage.updateSessionTitle(sessionPath, { title: "Lost", source: "user", updatedAt: "t1" });
+		await backend.firstUpdateStarted.promise;
+		backend.rejectFirstUpdate(new Error("title write failed before its commit"));
+		await expect(failed).rejects.toThrow("title write failed before its commit");
+		expect({
+			local: await titlesOf(storage),
+			peer: await titlesOf(peer),
+			time: storage.statSync(sessionPath).mtimeMs,
+		}).toEqual({ local: everywhere("Old"), peer: everywhere("Old"), time: before });
+
+		await storage.updateSessionTitle(sessionPath, { title: "Later", source: "user", updatedAt: "t2" });
+		expect({ local: await titlesOf(storage), peer: await titlesOf(peer) }).toEqual({
+			local: everywhere("Later"),
+			peer: everywhere("Later"),
+		});
 	});
 });
 
@@ -965,11 +1046,11 @@ class PausableWriteFullBackend implements SessionStorageBackend {
 	loadIndex(): Promise<Iterable<SessionStorageIndexEntry>> {
 		return Promise.resolve([]);
 	}
-	readFull(): Promise<string | null> {
+	readFull(): Promise<null> {
 		return Promise.resolve(null);
 	}
-	readSlices(): Promise<[string, string]> {
-		return Promise.resolve(["", ""]);
+	readSlices(): Promise<[string, string, undefined]> {
+		return Promise.resolve(["", "", undefined]);
 	}
 	async writeFull(_path: string, content: string, mtimeMs: number): Promise<void> {
 		if (!this.#firstReleased) {

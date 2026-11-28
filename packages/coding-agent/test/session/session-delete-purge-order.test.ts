@@ -8,6 +8,7 @@ import { isEnoent } from "@oh-my-pi/pi-utils";
 import {
 	IndexedSessionStorage,
 	type SessionStorageBackend,
+	type SessionStorageFullRead,
 	type SessionStorageIndexEntry,
 } from "@oh-my-pi/pi-coding-agent/session/indexed-session-storage";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
@@ -35,13 +36,13 @@ class FailOnceRemoveBackend implements SessionStorageBackend {
 		return Promise.resolve([{ path: this.#sessionPath, size: Buffer.byteLength(this.#content), mtimeMs: 1 }]);
 	}
 
-	readFull(target: string): Promise<string | null> {
+	readFull(target: string): Promise<SessionStorageFullRead | null> {
 		if (target !== this.#sessionPath || this.#content === "") return Promise.resolve(null);
-		return Promise.resolve(this.#content);
+		return Promise.resolve({ text: this.#content, title: undefined });
 	}
 
-	readSlices(): Promise<[string, string]> {
-		return Promise.resolve(["", ""]);
+	readSlices(): Promise<[string, string, undefined]> {
+		return Promise.resolve(["", "", undefined]);
 	}
 
 	writeFull(): Promise<void> {

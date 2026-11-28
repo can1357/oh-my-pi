@@ -5,6 +5,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	IndexedSessionStorage,
 	type SessionStorageBackend,
+	type SessionStorageFullRead,
 } from "@oh-my-pi/pi-coding-agent/session/indexed-session-storage";
 import {
 	SessionManager,
@@ -1232,13 +1233,13 @@ class CommitThenThrowIndexedBackend implements SessionStorageBackend {
 		return [];
 	}
 
-	async readFull(): Promise<string | null> {
+	async readFull(): Promise<SessionStorageFullRead | null> {
 		if (this.#atomicWriteFailed) await this.newerWriteFinished.promise;
-		return this.content;
+		return this.content === null ? null : { text: this.content, title: undefined };
 	}
 
-	async readSlices(): Promise<[string, string]> {
-		return [this.content ?? "", this.content ?? ""];
+	async readSlices(): Promise<[string, string, undefined]> {
+		return [this.content ?? "", this.content ?? "", undefined];
 	}
 
 	async writeFull(_path: string, content: string): Promise<void> {
