@@ -2596,6 +2596,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				throw new DOMException("Usage preflight cancelled", "AbortError");
 			}
 		});
+		// Past the point where a storage makes turns wait on its queued transcript appends, each model request
+		// waits until it admits more: a backend that falls behind slows the turn, and the loop's abort signal ends
+		// the wait.
+		this.addDisposer(this.agent.addBeforeModelCallHook(signal => this.sessionManager.waitForAppendAdmission(signal)));
 		const statsHost: SessionStatsTrackerHost = {
 			session: this,
 			agent: this.agent,
@@ -2996,7 +3000,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#loopGuards.onAssistantEvent(message, assistantMessageEvent);
 		});
 		// Tool-result hook owns synchronous post-tool actions that must affect the current loop.
-		this.agent.afterToolCall = ctx => this.#afterToolCall(ctx);
+		this.agent.afterToolCall = (ctx, signal) => this.#afterToolCall(ctx, signal);
 		// Pre-scheduling tool_call wiring: extension handlers run at arg-prep
 		// time so a block/revision lands before concurrency resolution,
 		// tool_execution_start, and the wrapper's approval gate.
@@ -6174,7 +6178,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 	}
 
-	#afterToolCall(ctx: AfterToolCallContext): AfterToolCallResult | undefined {
+	#afterToolCall(
+		ctx: AfterToolCallContext,
+		signal: AbortSignal | undefined,
+	): Promise<AfterToolCallResult | undefined> | AfterToolCallResult | undefined {
 		if (
 			this.#isTerminalYieldToolResult({
 				toolName: ctx.toolCall.name,
@@ -6187,7 +6194,19 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#synchronouslyTerminatedYieldToolCallIds.add(ctx.toolCall.id);
 			this.agent.abort(TERMINAL_TOOL_RESULT_ABORT_REASON);
 		}
-		return this.#ttsr.afterToolCall(ctx);
+		const result = this.#ttsr.afterToolCall(ctx);
+		// The loop appends the tool result once this returns: hold it until the storage admits more appends. A
+		// failed wait must not throw here, where the loop would replace a completed tool's result with the error.
+		const admissionFailed = (error: unknown) => {
+			logger.warn("Append admission wait failed", { error: String(error) });
+			return result;
+		};
+		try {
+			const admission = this.sessionManager.waitForAppendAdmission(signal);
+			return admission ? admission.then(() => result, admissionFailed) : result;
+		} catch (error) {
+			return admissionFailed(error);
+		}
 	}
 	/**
 	 * Emits the extension `tool_call` event for a loop-dispatched call at

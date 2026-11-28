@@ -75,6 +75,8 @@
 - Added the `agent_view_changed` extension event, fired when the TUI focuses a subagent or returns to the main session, so extensions can re-scope their status to the agent on screen ([#16546](https://github.com/can1357/oh-my-pi/issues/16546))
 - Added `model` and `fallback` attributes to `task` result envelopes so the parent sees which model served each subagent ([#16017](https://github.com/can1357/oh-my-pi/issues/16017))
 - Added a terminal notification when a plan is ready for approval, controlled by `completion.notify` ([#7724](https://github.com/can1357/oh-my-pi/issues/7724))
+- Indexed session storage backends can implement `writeFullStream` to receive session rewrites as a stream instead of one transcript-sized string ([#20735](https://github.com/can1357/oh-my-pi/pull/20735) by [@sjawhar](https://github.com/sjawhar))
+- Indexed session storage backends can implement `appendBatch` to store queued transcript lines in one write ([#20735](https://github.com/can1357/oh-my-pi/pull/20735) by [@sjawhar](https://github.com/sjawhar))
 
 ### Changed
 
@@ -123,6 +125,7 @@
 - `omp plugin disable` and the Settings → Plugins enable toggle now note that running sessions keep the plugin until they restart ([#9722](https://github.com/can1357/oh-my-pi/issues/9722))
 - Status line keeps the auto indicator on an auto-resolved thinking effort (e.g. `⟳ high`) so it is distinguishable from a pinned level ([#5951](https://github.com/can1357/oh-my-pi/issues/5951))
 - A configured MCP `oauth.scope` now overrides scopes advertised by the server on initial authorization and `/mcp reauth`, so you can request a narrower (or different) scope set than discovery reports ([#7841](https://github.com/can1357/oh-my-pi/issues/7841))
+- On SQL, Redis and SDK indexed session storage, a turn pauses before its next model request or tool result while its store has more than 64 MiB of transcript writes queued; custom session storages can opt in with `waitForAppendAdmission` ([#20735](https://github.com/can1357/oh-my-pi/pull/20735) by [@sjawhar](https://github.com/sjawhar))
 
 ### Fixed
 
