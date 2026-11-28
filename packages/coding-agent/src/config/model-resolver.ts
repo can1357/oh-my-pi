@@ -210,11 +210,10 @@ export function modelsHaveSameRequestTarget(actual: Model<Api> | undefined, expe
 	if (!actual) return false;
 	if (actual === expected) return true;
 	return (
-		modelsAreEqual(actual, expected) &&
+		routedModelsAreEqual(actual, expected) &&
 		actual.api === expected.api &&
 		actual.baseUrl === expected.baseUrl &&
-		actual.requestModelId === expected.requestModelId &&
-		(actual.compat === expected.compat || getSingleUpstreamRoute(actual) === getSingleUpstreamRoute(expected))
+		actual.requestModelId === expected.requestModelId
 	);
 }
 
