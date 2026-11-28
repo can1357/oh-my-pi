@@ -5,7 +5,11 @@
 // `stopReason: "error"` on the first turn after compaction. transformMessages
 // must normalize such content to a harmless placeholder instead.
 import { describe, expect, it } from "bun:test";
-import { transformMessages } from "@oh-my-pi/pi-ai/providers/transform-messages";
+import {
+	MALFORMED_MESSAGE_CONTENT_PLACEHOLDER,
+	transformMessages,
+	withCredentialRedaction,
+} from "@oh-my-pi/pi-ai/providers/transform-messages";
 import type { Message, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
@@ -39,6 +43,16 @@ describe("transformMessages malformed-content normalization", () => {
 		expect(user.role).toBe("user");
 		expect(Array.isArray(user.content)).toBe(true);
 		expect(user.content[0].type).toBe("text");
+		expect(user.content[0].text).toBe(MALFORMED_MESSAGE_CONTENT_PLACEHOLDER);
+	});
+
+	it("normalizes undefined user content before credential redaction", () => {
+		const messages: Message[] = [malformedUser()];
+		const out = withCredentialRedaction(true, () => transformMessages(messages, makeModel()));
+		expect(out).toHaveLength(1);
+		const user = out[0] as { role: string; content: Array<{ type: string; text: string }> };
+		expect(user.role).toBe("user");
+		expect(user.content).toEqual([{ type: "text", text: MALFORMED_MESSAGE_CONTENT_PLACEHOLDER }]);
 	});
 
 	it("leaves well-formed string and array content untouched", () => {

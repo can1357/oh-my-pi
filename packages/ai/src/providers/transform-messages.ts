@@ -3,6 +3,7 @@ import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy
 import { carriesReasoning } from "@oh-my-pi/pi-catalog/compat/reasoning-carry";
 import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import type { ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
+import * as logger from "@oh-my-pi/pi-utils/logger";
 import { renderDemotedThinking } from "../dialect/demotion";
 import type {
 	Api,
@@ -23,6 +24,28 @@ import {
 	type SyntheticUserCarrier,
 } from "../utils/block-symbols";
 import { dropReasoningDetailsEnvelopes } from "../utils/reasoning-source";
+
+/** Placeholder text used when a message's `content` is neither a string nor a block array. */
+export const MALFORMED_MESSAGE_CONTENT_PLACEHOLDER = "[malformed message content omitted]";
+
+function isStringOrBlockArray(content: unknown): content is string | unknown[] {
+	return typeof content === "string" || Array.isArray(content);
+}
+
+function warnMalformedMessageContent(role: string, timestamp: number): void {
+	logger.warn("omitting malformed message content from provider request", { role, timestamp });
+}
+
+/** Replace user/developer `content` that is neither a string nor a block array. */
+export function normalizeMalformedUserContent(messages: Message[]): Message[] {
+	return messages.map((msg): Message => {
+		if (msg.role !== "user" && msg.role !== "developer") return msg;
+		const content: unknown = msg.content;
+		if (isStringOrBlockArray(content)) return msg;
+		warnMalformedMessageContent(msg.role, msg.timestamp);
+		return { ...msg, content: [{ type: "text", text: MALFORMED_MESSAGE_CONTENT_PLACEHOLDER }] };
+	});
+}
 
 const enum ToolCallStatus {
 	/** A tool result has already been emitted for this tool call; later duplicates must be skipped. */
@@ -816,14 +839,15 @@ function redactSensitiveCredentialsInMessages(messages: Message[]): Message[] {
 	return messages.map((msg): Message => {
 		if (msg.role === "user" || msg.role === "developer") {
 			const userMsg = msg as UserMessage | DeveloperMessage;
-			if (typeof userMsg.content === "string") {
-				const redacted = redactSensitiveCredentials(userMsg.content);
-				if (redacted === userMsg.content) return msg;
+			const raw: unknown = userMsg.content;
+			if (typeof raw === "string") {
+				const redacted = redactSensitiveCredentials(raw);
+				if (redacted === raw) return msg;
 				return { ...userMsg, content: redacted } as Message;
 			}
-			const contentArray = userMsg.content;
+			if (!Array.isArray(raw)) return msg;
 			let changed = false;
-			const content = contentArray.map((block): UserMessage["content"][number] => {
+			const content = raw.map((block): UserMessage["content"][number] => {
 				if (block.type === "text") {
 					const redacted = redactSensitiveCredentials(block.text);
 					if (redacted !== block.text) {
@@ -838,8 +862,10 @@ function redactSensitiveCredentialsInMessages(messages: Message[]): Message[] {
 
 		if (msg.role === "toolResult") {
 			const toolResultMsg = msg as ToolResultMessage;
+			const raw: unknown = toolResultMsg.content;
+			if (!Array.isArray(raw)) return msg;
 			let changed = false;
-			const content = toolResultMsg.content.map((block): ToolResultMessage["content"][number] => {
+			const content = raw.map((block): ToolResultMessage["content"][number] => {
 				if (block.type === "text") {
 					const redacted = redactSensitiveCredentials(block.text);
 					if (redacted !== block.text) {
@@ -854,6 +880,8 @@ function redactSensitiveCredentialsInMessages(messages: Message[]): Message[] {
 
 		if (msg.role === "assistant") {
 			const assistantMsg = msg as AssistantMessage;
+			const raw: unknown = assistantMsg.content;
+			if (!Array.isArray(raw)) return msg;
 			let changed = false;
 			// Rewritten thinking or arguments invalidate the turn's `reasoning_details`
 			// envelope, which still holds the original text and call signatures.
@@ -912,26 +940,19 @@ export function transformMessages<TApi extends Api>(
 	targetCompat: Model<TApi>["compat"] = model.compat,
 	targetCredentialId?: number,
 ): Message[] {
+	// Defensive normalization must run first: a user/developer message whose
+	// `content` is neither a string nor a block array (e.g. produced by a
+	// lossy session rebuild or a third-party extension) would crash the
+	// credential-redaction `.map` and later provider request builds with a
+	// bare `for...of`/`.map` over `content`, surfacing as a mysterious
+	// `stopReason: "error"` on the first turn. Degrade such messages to a
+	// harmless placeholder instead of killing the turn. Regression: #20910.
+	messages = normalizeMalformedUserContent(messages);
+
 	// Redact sensitive credential-like patterns from all outbound messages when
 	// the host opted in via `configureCredentialRedaction` — prevents security
 	// block errors from LLM providers (e.g. invalid_prompt).
 	messages = redactSensitiveCredentialsInMessages(messages);
-
-	// Defensive normalization: a user/developer message whose `content` is
-	// neither a string nor a block array (e.g. produced by a lossy session
-	// rebuild or a third-party extension) would crash every provider request
-	// build with a bare `for...of`/`.map` over `content`, surfacing as a
-	// mysterious `stopReason: "error"` on the first turn. Degrade such
-	// messages to a harmless placeholder instead of killing the turn.
-	messages = messages.map((msg): Message => {
-		if (msg.role !== "user" && msg.role !== "developer") return msg;
-		const content: unknown = (msg as { content?: unknown }).content;
-		if (typeof content === "string" || Array.isArray(content)) return msg;
-		return {
-			...msg,
-			content: [{ type: "text", text: "[malformed message content omitted]" }],
-		} as Message;
-	});
 
 	// Drop assistant `toolCall` blocks whose id or name the target cannot replay
 	// (and their matched `toolResult` messages) before anything else looks at

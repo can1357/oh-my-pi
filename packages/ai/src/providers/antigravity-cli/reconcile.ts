@@ -2,6 +2,8 @@
 import { createHash } from "node:crypto";
 import { prompt, stableStringifyJson } from "@oh-my-pi/pi-utils";
 import type { ContentBlock } from "@oh-my-pi/pi-utils/acp";
+import * as logger from "@oh-my-pi/pi-utils/logger";
+import { MALFORMED_MESSAGE_CONTENT_PLACEHOLDER } from "../transform-messages";
 import type {
 	AntigravityCliCheckpoint,
 	DeveloperMessage,
@@ -164,7 +166,14 @@ export function toolResultImagesPrompt(result: ToolResultMessage): ContentBlock[
 
 /** ACP input preserves text/image ordering and the complete image bytes. */
 export function inputBlocks(message: InputMessage): ContentBlock[] {
-	return contentBlocks(message.content);
+	const content: unknown = message.content;
+	if (typeof content !== "string" && !Array.isArray(content)) {
+		logger.warn("omitting malformed message content from provider request", {
+			role: message.role,
+			timestamp: message.timestamp,
+		});
+	}
+	return contentBlocks(content);
 }
 
 /** Whether a transcript message can be sent directly as ACP user input. */
@@ -172,9 +181,10 @@ export function isInputMessage(message: Message): message is InputMessage {
 	return message.role === "user" || message.role === "developer";
 }
 
-function contentBlocks(content: string | readonly (TextContent | ImageContent)[]): ContentBlock[] {
+function contentBlocks(content: unknown): ContentBlock[] {
 	if (typeof content === "string") return [{ type: "text", text: content }];
-	return content.map(part =>
+	if (!Array.isArray(content)) return [{ type: "text", text: MALFORMED_MESSAGE_CONTENT_PLACEHOLDER }];
+	return content.map((part: TextContent | ImageContent) =>
 		part.type === "text"
 			? { type: "text", text: part.text }
 			: { type: "image", data: part.data, mimeType: part.mimeType },
@@ -182,24 +192,33 @@ function contentBlocks(content: string | readonly (TextContent | ImageContent)[]
 }
 
 function messageContent(message: Message): unknown {
+	const raw: unknown = message.content;
 	const content =
-		typeof message.content === "string"
-			? [{ type: "text", text: message.content }]
-			: message.content.flatMap((part): unknown[] => {
-					switch (part.type) {
-						case "text":
-							return [{ type: part.type, text: part.text }];
-						case "image":
-							return [{ type: part.type, data: part.data, mimeType: part.mimeType }];
-						case "thinking":
-							return [{ type: part.type, thinking: part.thinking }];
-						case "toolCall":
-							return [{ type: part.type, id: part.id, name: part.name, arguments: part.arguments }];
-						// Opaque blocks from other providers are not sent to agy.
-						default:
-							return [];
-					}
-				});
+		typeof raw === "string"
+			? [{ type: "text", text: raw }]
+			: Array.isArray(raw)
+				? raw.flatMap((part): unknown[] => {
+						switch (part.type) {
+							case "text":
+								return [{ type: part.type, text: part.text }];
+							case "image":
+								return [{ type: part.type, data: part.data, mimeType: part.mimeType }];
+							case "thinking":
+								return [{ type: part.type, thinking: part.thinking }];
+							case "toolCall":
+								return [{ type: part.type, id: part.id, name: part.name, arguments: part.arguments }];
+							// Opaque blocks from other providers are not sent to agy.
+							default:
+								return [];
+						}
+					})
+				: [{ type: "text", text: MALFORMED_MESSAGE_CONTENT_PLACEHOLDER }];
+	if (typeof raw !== "string" && !Array.isArray(raw)) {
+		logger.warn("omitting malformed message content from provider request", {
+			role: message.role,
+			timestamp: message.timestamp,
+		});
+	}
 	return message.role === "toolResult"
 		? {
 				role: message.role,

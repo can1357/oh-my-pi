@@ -253,6 +253,9 @@
 - Improved reliability of managed Antigravity CLI downloads on slow connections and provided more useful progress and timeout errors.
 - Fixed Antigravity CLI host tools with mixed-type union schemas being published incorrectly, allowing subagents to submit results.
 - Fixed Codex assistant messages in the `partial_answer` phase losing their phase when stored and replayed.
+### Fixed
+
+- `transformMessages` now normalizes malformed user/developer `content` (neither a string nor a block array) before credential redaction, so a missing `content` after compaction no longer crashes the turn; the antigravity-acp path is guarded the same way ([#20910](https://github.com/can1357/oh-my-pi/issues/20910), [#20914](https://github.com/can1357/oh-my-pi/pull/20914) by [@koeria](https://github.com/koeria)).
 
 ## [18.22.0] - 2026-11-16
 
