@@ -221,6 +221,7 @@ describe("openai-completions compatibility", () => {
 			isVercelGatewayHost: false,
 			wireModelIdMode: "raw",
 			stripDeepseekSpecialTokens: false,
+			neutralizeDeepseekSpecialTokens: false,
 			reasoningDeltasMayBeCumulative: false,
 			emptyLengthFinishIsContextError: false,
 			usesOpenAIToolCallIdLimit: false,
@@ -3577,5 +3578,81 @@ describe("custom API OpenAI-completions compatibility", () => {
 		});
 		const model = customModel(api);
 		expect(model.compat).toBeUndefined();
+	});
+});
+
+describe("DeepSeek special tokens in outgoing text", () => {
+	// DeepSeek V4.1's encoder rejects this placeholder anywhere in message text, so a
+	// tool result quoting the chat template would fail every later request.
+	const IMAGE_MARKER = "<｜deepseek_image｜>";
+	const NEUTRALIZED_MARKER = "<\u200b｜deepseek_image｜>";
+	const DSML_CALL = "<｜DSML｜tool_calls>";
+
+	function quotingContext(model: Model<"openai-completions">): Context {
+		const assistant: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: `plan ${IMAGE_MARKER}`, thinkingSignature: "reasoning_content" },
+				{ type: "toolCall", id: "call_1", name: "write", arguments: { content: IMAGE_MARKER } },
+			],
+			api: "openai-completions",
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		};
+		const result: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call_1",
+			toolName: "write",
+			content: [{ type: "text", text: `{{ "${IMAGE_MARKER}" }} ${DSML_CALL} <|im_start|>` }],
+			isError: false,
+			timestamp: Date.now(),
+		};
+		return {
+			messages: [{ role: "user", content: `quote ${IMAGE_MARKER}`, timestamp: Date.now() }, assistant, result],
+		};
+	}
+
+	it.each([
+		// reasoning replays as top-level `reasoning_content`
+		["deepseek", "deepseek-v4.1-flash", "https://api.deepseek.com"],
+		// reasoning replays as nested Mistral `thinking` content parts
+		["mistral", "deepseek-v4-1-flash-1017", "https://api.mistral.ai/v1"],
+	])("breaks DeepSeek tokens in every replayed text field on %s", (provider, id, baseUrl) => {
+		const model = buildModel({
+			id,
+			name: id,
+			api: "openai-completions",
+			provider,
+			baseUrl,
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 8_192,
+		} satisfies ModelSpec<"openai-completions">);
+		const wire = JSON.stringify(convertMessages(model, quotingContext(model), model.compat));
+		expect(wire).not.toContain(IMAGE_MARKER);
+		expect(wire).not.toContain("｜DSML｜");
+		expect(wire).toContain(`plan ${NEUTRALIZED_MARKER}`);
+		expect(wire).toContain(`quote ${NEUTRALIZED_MARKER}`);
+		// ASCII-pipe spellings are left alone: they are common in ordinary text.
+		expect(wire).toContain("<|im_start|>");
+	});
+
+	it("leaves the marker intact for non-DeepSeek models", () => {
+		const model = buildModel(gpt4oMiniSpec);
+		const wire = JSON.stringify(convertMessages(model, quotingContext(model), model.compat));
+		expect(wire).toContain(`quote ${IMAGE_MARKER}`);
+		expect(wire).not.toContain("\u200b");
 	});
 });

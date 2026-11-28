@@ -73,15 +73,11 @@ export class TempDir {
 	}
 }
 
-const kTempDir = os.tmpdir();
+let tempDir: string | undefined;
 
 function normalizePrefix(prefix?: string): string {
-	if (!prefix) {
-		return `${kTempDir}${path.sep}pi-temp-`;
-	} else if (prefix.startsWith("@")) {
-		return path.join(kTempDir, prefix.slice(1));
-	}
-	return prefix;
+	if (prefix && !prefix.startsWith("@")) return prefix;
+	return path.join((tempDir ??= os.tmpdir()), prefix ? prefix.slice(1) : "pi-temp-");
 }
 
 const kRemoveOptions = { recursive: true, force: true } as const;

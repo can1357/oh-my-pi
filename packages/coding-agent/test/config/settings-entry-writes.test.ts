@@ -1,13 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { RawSettings } from "@oh-my-pi/pi-coding-agent/config/raw-settings";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { type RawSettings, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { cfgRetryFallbackChains } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { cfgTaskDisabledAgents } from "@oh-my-pi/pi-coding-agent/task/settings";
-import * as atomicFile from "@oh-my-pi/pi-coding-agent/utils/atomic-file";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { acquireFileLock, TempDir } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "../helpers/settings-test-state";
 
@@ -81,35 +79,20 @@ describe("Settings entry-level writes", () => {
 		expect(cfgRetryFallbackChains.get(settings)).toEqual({ slow: ["user/slow"] });
 	});
 
-	it("saves a whole-record write made while a save of one of its entries is in flight", async () => {
+	it("saves a whole-record write made while a save of one of its entries waits for the config lock", async () => {
 		const settings = await load({ retry: { fallbackChains: { slow: ["old/slow"], smol: ["old/smol"] } } }, {});
 		cfgRetryFallbackChains.setEntry(settings, "slow", ["intermediate/slow"]);
 
-		const original = atomicFile.writeFileAtomically;
-		const reached = Promise.withResolvers<void>();
-		const gate = Promise.withResolvers<void>();
-		let paused = false;
-		const spy = spyOn(atomicFile, "writeFileAtomically").mockImplementation(
-			async (...args: Parameters<typeof original>) => {
-				if (!paused) {
-					paused = true;
-					reached.resolve();
-					await gate.promise;
-				}
-				return original(...args);
-			},
-		);
+		const lock = await acquireFileLock(configPath());
+		let entrySave: Promise<void> | undefined;
 		try {
-			// This save captures the entry write, then stalls writing config.yml while the whole record is set.
-			const entrySave = settings.flush();
-			await reached.promise;
+			// This save captures the entry write, then cannot read config.yml before the whole record is set.
+			entrySave = settings.flush();
 			cfgRetryFallbackChains.set(settings, { slow: ["final/slow"], smol: ["final/smol"] });
-			gate.resolve();
-			await entrySave;
 		} finally {
-			gate.resolve();
-			spy.mockRestore();
+			lock.release();
 		}
+		await entrySave;
 		await settings.flush();
 
 		expect(await readConfig()).toEqual({

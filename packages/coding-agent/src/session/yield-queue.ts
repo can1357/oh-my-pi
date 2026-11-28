@@ -278,22 +278,31 @@ export class YieldQueue {
 	}
 
 	#attachEntrySettlement(built: BuiltMessage): void {
-		let settled = false;
-		Object.defineProperties(built.message, {
+		const { message } = built;
+		// The message stays in the agent's context for the session's life. Once it settles, neither
+		// the message nor these hooks may keep the entries reachable: an entry's value can hold a
+		// finished job and everything that job references.
+		let pending: StoredEntry[] | undefined = built.entries;
+		const settle = (): StoredEntry[] | undefined => {
+			const entries = pending;
+			pending = undefined;
+			Reflect.deleteProperty(message, ASIDE_MESSAGE_COMMIT);
+			Reflect.deleteProperty(message, ASIDE_MESSAGE_DISCARD);
+			return entries;
+		};
+		Object.defineProperties(message, {
 			[ASIDE_MESSAGE_COMMIT]: {
 				configurable: true,
 				value: () => {
-					if (settled) return;
-					settled = true;
-					this.#resolveEntries(built.entries);
+					const entries = settle();
+					if (entries) this.#resolveEntries(entries);
 				},
 			},
 			[ASIDE_MESSAGE_DISCARD]: {
 				configurable: true,
 				value: (error: Error) => {
-					if (settled) return;
-					settled = true;
-					this.#rejectEntries(built.entries, error);
+					const entries = settle();
+					if (entries) this.#rejectEntries(entries, error);
 				},
 			},
 		});

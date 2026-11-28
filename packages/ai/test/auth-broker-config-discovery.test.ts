@@ -14,6 +14,7 @@ const SUPPRESS_AUTH_BROKER_ENV = {
 	OMP_AUTH_BROKER_URL: undefined,
 	OMP_AUTH_BROKER_TOKEN: undefined,
 	OMP_AUTH_BROKER_ACCOUNT_POOL_FILE: undefined,
+	OMP_AUTH_ENCRYPT: undefined,
 } as const;
 
 describe("resolveAuthBrokerConfig config discovery", () => {
@@ -60,6 +61,53 @@ describe("resolveAuthBrokerConfig config discovery", () => {
 				url: "https://yml-broker.example/v1",
 				token: "yml-token",
 			});
+		});
+	});
+
+	test("shares one main config read across broker resolution, policies and encryption", async () => {
+		const configPath = path.join(agentDir, "config.yml");
+		await Bun.write(
+			configPath,
+			[
+				"auth:",
+				"  broker:",
+				'    url: "!no-broker"',
+				'    token: "!must-not-run"',
+				"  accountPolicies:",
+				"    - provider: openai-codex",
+				"      account: {accountId: preferred}",
+				"      priority: 40",
+				"  encrypt: false",
+			].join("\n"),
+		);
+
+		await withEnv(SUPPRESS_AUTH_BROKER_ENV, async () => {
+			const resolver = vi.fn(async (_config: string) => {
+				// Further main-config reads would now fail instead of seeing the initial policy.
+				await Bun.write(configPath, "auth: [");
+				return undefined;
+			});
+			const storage = await discoverAuthStorage({ agentDir, configValueResolver: resolver });
+			try {
+				expect(resolver.mock.calls).toEqual([["!no-broker"]]);
+				expect(storage.oauth.policy("openai-codex", { accountId: "preferred" })?.priority).toBe(40);
+			} finally {
+				storage.close();
+			}
+		});
+	});
+
+	test("never evaluates configured values masked by env", async () => {
+		await withEnv({ ...SUPPRESS_AUTH_BROKER_ENV, OMP_AUTH_BROKER_TOKEN: "env-token" }, async () => {
+			const resolver = vi.fn(async (_config: string) => "https://resolved.example");
+			await expect(
+				resolveAuthBrokerConfig({
+					agentDir,
+					persistedSettings: { url: "!url", token: "!must-not-run" },
+					configValueResolver: resolver,
+				}),
+			).resolves.toEqual({ url: "https://resolved.example", token: "env-token" });
+			expect(resolver.mock.calls).toEqual([["!url"]]);
 		});
 	});
 

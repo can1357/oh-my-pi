@@ -214,9 +214,10 @@ function modelSeg(input: SegInput): SegView {
 		pieces.push({ icon, s: color, space: "before" });
 		spans.push(span(` ${glyph(input, `icon.${icon[0]}`) || glyph(input, "icon.advisor")}`, color));
 	}
-	if (facts.fastMode) {
-		pieces.push({ icon: "fast", s: look, space: "before" });
-		spans.push(span(` ${glyph(input, "icon.fast")}`, native));
+	if (facts.fastTier) {
+		const icon = facts.fastTier === "ultrafast" ? "rocket" : "fast";
+		pieces.push({ icon, s: look, space: "before" });
+		spans.push(span(` ${input.symbols.icon(icon)}`, native));
 	}
 	if (!compact && thinking.length > 0) pieces.push({ icon: "sep.dot", s: look, space: "none" }, ...thinking);
 	const level = showLevel ? thinkingWord(facts) : undefined;

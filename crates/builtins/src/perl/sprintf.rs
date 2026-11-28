@@ -5,7 +5,7 @@ use std::{borrow::Cow, fmt::Write as _};
 use super::{
 	pack::{encode_utf8, int_bits, sprintf_char},
 	limits::check_len,
-	value::{Num, PStr, Stringify, Value, format_float},
+	value::{Num, PStr, Stringify, Value, count_utf8_starts, format_float},
 };
 
 #[derive(Clone, Copy, Default)]
@@ -651,7 +651,7 @@ pub(super) fn sprintf(fmt: &PStr, args: &[Value], cx: &mut dyn Stringify) -> Res
 				char_count = out.char_len();
 				was_utf8 = true;
 			} else if out.utf8 {
-				char_count += out.bytes[counted..].iter().filter(|&&b| b & 0xc0 != 0x80).count();
+				char_count += count_utf8_starts(&out.bytes[counted..]);
 			} else {
 				char_count = out.bytes.len();
 			}

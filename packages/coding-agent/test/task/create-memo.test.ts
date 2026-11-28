@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { initializeWithSettings } from "@oh-my-pi/pi-coding-agent/capability";
+import { cfgDisabledProviders } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { refreshAgentDiscovery, TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
@@ -123,6 +125,33 @@ describe("TaskTool.create discovery memo", () => {
 		const after = await TaskTool.create(session);
 		expect(after.description).toContain("Refreshed task agent");
 		expect(spy).toHaveBeenCalledTimes(2);
+	});
+
+	it("does not advertise a pending scan's agents after the discovery provider settings change", async () => {
+		const session = createSession("/tmp/omp-memo-provider-switch");
+		const release = initializeWithSettings(session.settings);
+		try {
+			const earlier = Promise.withResolvers<discoveryModule.DiscoveryResult>();
+			const spy = vi
+				.spyOn(discoveryModule, "discoverAgents")
+				.mockReturnValueOnce(earlier.promise)
+				.mockResolvedValueOnce({ agents: REFRESHED_AGENTS, projectAgentsDir: null });
+
+			const startup = TaskTool.discoverAgents({
+				cwd: session.cwd,
+				effectiveExtensionRoots: session.effectiveExtensionRoots,
+			});
+			cfgDisabledProviders.override(session.settings, ["omp-plugins"]);
+			const current = TaskTool.create(session);
+			earlier.resolve({ agents: TEST_AGENTS, projectAgentsDir: null });
+			const [, tool] = await Promise.all([startup, current]);
+
+			expect(spy).toHaveBeenCalledTimes(2);
+			expect(tool.description).toContain("Refreshed task agent");
+			expect(tool.description).not.toContain("General-purpose task agent");
+		} finally {
+			release();
+		}
 	});
 
 	it("publishes refreshed definitions to existing and future tools", async () => {

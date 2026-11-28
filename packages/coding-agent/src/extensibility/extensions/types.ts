@@ -111,7 +111,7 @@ import type { BashToolInput, GlobToolInput, GrepToolInput, ReadToolInput, WriteT
 import type { GlobToolDetails } from "../../tools/details/glob";
 import type { GrepToolDetails } from "../../tools/details/grep";
 import type { ReadToolDetails } from "../../tools/details/read";
-import type { TodoPhase } from "../../tools/details/todo";
+import type { TodoOperation, TodoPhase } from "../../tools/details/todo";
 import type { ApprovalMode } from "../../tools/approval";
 import type { BashToolDetails } from "../../tools/details/bash";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
@@ -1905,6 +1905,22 @@ export interface RegisteredCommand {
 	handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
 }
 
+/** What a `todo` tool call is about to change, as handed to {@link TodoBackendDefinition.apply}. */
+export interface TodoBackendChange {
+	op: Exclude<TodoOperation, "view">;
+	/** The list omp holds now. */
+	previous: TodoPhase[];
+	/** The list omp commits if the backend accepts. */
+	next: TodoPhase[];
+}
+
+/** What {@link TodoBackendDefinition.apply} returns: `{ block: true, reason }` refuses the call, as a `tool_call` handler blocks one. */
+export interface TodoBackendApplyResult {
+	block?: boolean;
+	/** Shown to the model on one line. */
+	reason?: string;
+}
+
 /**
  * A todo backend registered with `pi.registerTodoBackend()`. omp keeps the todo list; the backend
  * the `todo.backend` setting selects is told about every change to it.
@@ -1930,6 +1946,17 @@ export interface TodoBackendDefinition {
 	 * up after the `session_shutdown` handler timeout, without an error.
 	 */
 	replace(phases: TodoPhase[], ctx: ExtensionContext): void | Promise<void>;
+	/**
+	 * Optional veto, asked before the main session's model commits a change with a `todo` call,
+	 * eval cells included. Return `{ block: true, reason }` to refuse; a throw is an extension
+	 * error and fails the call without refusing it. omp commits `next` only on an accept within
+	 * `min(10s, the extension handler timeout)` of an unchanged list. Writes here are tolerated:
+	 * omp resyncs through `replace` after every outcome. Full contract: `docs/extensions.md`.
+	 */
+	apply?(
+		change: TodoBackendChange,
+		ctx: ExtensionContext,
+	): TodoBackendApplyResult | void | Promise<TodoBackendApplyResult | void>;
 }
 
 // ============================================================================

@@ -1,5 +1,4 @@
 import type { EvalDisplayOutput } from "../types";
-import type { RuntimeCallIdentity, ShadowSnapshot } from "./shared/runtime";
 
 export interface EvalPreludeSource {
 	name: string;
@@ -43,17 +42,6 @@ export type WorkerInbound =
 	| { type: "init"; snapshot: SessionSnapshot }
 	| { type: "run"; runId: string; code: string; filename: string; snapshot: SessionSnapshot }
 	| ({ type: "tool"; runId: string } & JsToolRequest)
-	| { type: "shadow-snapshot"; id: string; snapshot: SessionSnapshot }
-	| {
-			type: "run-if-snapshot-matches";
-			id: string;
-			runId: string;
-			code: string;
-			filename: string;
-			snapshot: SessionSnapshot;
-			expectedRevision: number;
-			expectedDigest: string;
-	  }
 	| { type: "tool-reply"; id: string; reply: ToolReply }
 	| { type: "close" };
 
@@ -62,13 +50,11 @@ export type WorkerOutbound =
 	| { type: "init-failed"; error: RunErrorPayload }
 	| { type: "text"; runId: string; chunk: string }
 	| { type: "display"; runId: string; output: EvalDisplayOutput }
-	| { type: "tool-call"; id: string; runId: string; name: string; args: unknown; identity?: RuntimeCallIdentity }
+	| { type: "tool-call"; id: string; runId: string; name: string; args: unknown }
 	/** `value` carries a tool-bridge envelope (`describe`/`call`); cell runs omit it. */
 	| { type: "result"; runId: string; ok: true; value?: unknown }
 	| { type: "result"; runId: string; ok: false; error: RunErrorPayload }
 	| { type: "log"; level: "debug" | "warn" | "error"; msg: string; meta?: Record<string, unknown> }
-	| { type: "shadow-snapshot"; id: string; eligible: boolean; reason?: string; snapshot?: ShadowSnapshot }
-	| { type: "shadow-run"; id: string; eligible: boolean; reason?: string }
 	| { type: "closed" };
 
 /**

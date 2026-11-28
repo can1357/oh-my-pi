@@ -8,6 +8,7 @@
  * instance, so nested `\textbf` closes and re-opens bold while a color
  * change simply switches color.
  */
+import { segmentGraphemes } from "@oh-my-pi/pi-utils/graphemes";
 import type { LatexOptions } from "../latex";
 import type { ColorSpec, FontName, MathNode, StyleChange } from "./parse";
 import { fontGlyph, SUBSCRIPTS, SUPERSCRIPTS, VULGAR_FRACTIONS } from "./symbols";
@@ -193,11 +194,9 @@ export function plainText(segments: readonly Segment[]): string {
 	return out;
 }
 
-const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
-
 function graphemeCount(text: string): number {
 	let count = 0;
-	for (const _ of segmenter.segment(text)) count++;
+	for (const _ of segmentGraphemes(text)) count++;
 	return count;
 }
 
@@ -255,7 +254,7 @@ export function applyAccent(segments: Segment[], mark: string, each: boolean): S
 	if (each) {
 		return segments.map(segment => {
 			let t = "";
-			for (const { segment: grapheme } of segmenter.segment(segment.t))
+			for (const { segment: grapheme } of segmentGraphemes(segment.t))
 				t += grapheme.trim() === "" ? grapheme : grapheme + mark;
 			return { t, f: segment.f };
 		});

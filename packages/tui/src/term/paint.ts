@@ -60,6 +60,12 @@ export interface Block {
 	 * children's.
 	 */
 	readonly covering?: number;
+	/**
+	 * Leading rows that name the block (a title that may wrap): a container
+	 * that shows only part of the block keeps them. Containers add their
+	 * offset.
+	 */
+	readonly heading?: number;
 }
 
 /** Every observable part of the block counts, including pointer routing when no cell changed. */
@@ -69,6 +75,7 @@ function sameBlock(a: Block, b: Block): boolean {
 		a.rows.length !== b.rows.length ||
 		a.stable !== b.stable ||
 		a.covering !== b.covering ||
+		a.heading !== b.heading ||
 		a.cursor?.row !== b.cursor?.row ||
 		a.cursor?.col !== b.cursor?.col
 	)
@@ -125,8 +132,10 @@ export interface PaintContext {
 	 * pointer tracking (`setMouse("any")`).
 	 */
 	hovered(node: UiNode): PointerHover | undefined;
-	/** The terminal asked for reduced motion: clocked kinds draw their still frame. */
+	/** Decorative motion is off (blink, fade, pulse, sweeps): such kinds draw their still frame. */
 	readonly reduceMotion: boolean;
+	/** Milliseconds per spinner frame; 0 draws spinners still (see `spinnerIndex`). */
+	readonly spinnerInterval: number;
 	/** The terminal draws OSC 8 hyperlinks (painters may emit them). */
 	readonly hyperlinks: boolean;
 	/**
@@ -214,6 +223,9 @@ export interface PointerHover {
 	readonly act?: string;
 }
 
+/** Milliseconds per spinner frame when the host sets no cadence. */
+export const DEFAULT_SPINNER_INTERVAL_MS = 80;
+
 /** Process-wide paint environment: theme, clock, focus, motion. One per terminal backend. */
 export interface PaintEnvironment {
 	readonly theme: Accessor<Theme>;
@@ -221,6 +233,7 @@ export interface PaintEnvironment {
 	readonly clock: (smooth?: boolean) => number;
 	readonly focus: Accessor<UiNode | null>;
 	readonly reduceMotion: Accessor<boolean>;
+	readonly spinnerInterval: Accessor<number>;
 	readonly hyperlinks: Accessor<boolean>;
 	/** Whether painters may draw OSC 66 sized text; absent: never. */
 	readonly textSizing?: Accessor<boolean>;
@@ -319,6 +332,9 @@ function createContext(env: PaintEnvironment, width: number, height: number | un
 		get reduceMotion() {
 			return env.reduceMotion();
 		},
+		get spinnerInterval() {
+			return env.spinnerInterval();
+		},
 		get hyperlinks() {
 			return env.hyperlinks();
 		},
@@ -334,6 +350,8 @@ export interface StaticEnvironment extends PaintEnvironment {
 	setFocus(node: UiNode | null): void;
 	setNow(now: number): void;
 	setTheme(theme: Theme): void;
+	setReduceMotion(reduce: boolean): void;
+	setSpinnerInterval(interval: number): void;
 }
 
 /** A paint environment with fixed inputs, for tests and offline rendering. */
@@ -343,6 +361,7 @@ export function staticEnvironment(
 		now?: number;
 		focus?: UiNode | null;
 		reduceMotion?: boolean;
+		spinnerInterval?: number;
 		hyperlinks?: boolean;
 		textSizing?: boolean;
 		images?: PaintImages;
@@ -352,17 +371,21 @@ export function staticEnvironment(
 	const clock = signal(options?.now ?? 0);
 	const focus = signal<UiNode | null>(options?.focus ?? null);
 	const reduceMotion = signal(options?.reduceMotion ?? false);
+	const spinnerInterval = signal(options?.spinnerInterval ?? DEFAULT_SPINNER_INTERVAL_MS);
 	const hyperlinks = signal(options?.hyperlinks ?? false);
 	return {
 		theme: themeSignal,
 		clock,
 		focus,
 		reduceMotion,
+		spinnerInterval,
 		hyperlinks,
 		...(options?.textSizing ? { textSizing: () => true } : {}),
 		...(options?.images ? { images: options.images } : {}),
 		setFocus: node => focus.set(node),
 		setNow: now => clock.set(now),
 		setTheme: next => themeSignal.set(next),
+		setReduceMotion: reduce => reduceMotion.set(reduce),
+		setSpinnerInterval: interval => spinnerInterval.set(interval),
 	};
 }

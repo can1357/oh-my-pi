@@ -200,6 +200,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"supports-steering": wire("supportsSteering", ["openai-responses"]),
 	"uncached-instructions": wire("uncachedInstructions", ["openai-responses"]),
 	"strip-deepseek-special-tokens": wire("stripDeepseekSpecialTokens", OAI),
+	"neutralize-deepseek-special-tokens": wire("neutralizeDeepseekSpecialTokens", ["openai"]),
 	"stream-markup-healing-pattern": wire("streamMarkupHealingPattern", OAI, "scalar", [
 		"kimi",
 		"dsml",
@@ -222,6 +223,11 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"supports-reasoning-summary": wire("supportsReasoningSummary", ["openai-responses"]),
 	"store-responses": wire("storeResponses", ["openai-responses"]),
 	"tool-name-prefix": wire("toolNamePrefix", ["openai-responses"], "scalar", ["_"]),
+	"reasoning-summary-default": wire("reasoningSummaryDefault", ["openai-responses"], "scalar", [
+		"auto",
+		"detailed",
+		"concise",
+	]),
 	"supports-store": wire("supportsStore", ["openai"]),
 	"supports-strict-mode": wire("supportsStrictMode", OAI),
 	"supports-tool-choice": wire("supportsToolChoice", OAI),
@@ -251,6 +257,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"zai-reasoning-effort-dialect": wire("zaiReasoningEffortDialect", ["openai"]),
 
 	// ── wire: anthropic-messages ──
+	"additive-session-header": wire("additiveSessionHeader", ["anthropic"], "scalar", ["x-client-session-id"]),
 	"bedrock-messages-api": wire("bedrockMessagesApi", ["anthropic"]),
 	"allow-anthropic-header-overrides": wire("allowAnthropicHeaderOverrides", ["anthropic"]),
 	"disable-adaptive-thinking": wire("disableAdaptiveThinking", ["anthropic"]),
@@ -531,6 +538,8 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	 * misreads indentation in frames makes inexact edits.
 	 */
 	"snapcompact-image-reads": { key: "snapcompactImageReads", set: "catalog", shape: "scalar", values: [true, false] },
+	/** Benchmarked Snapcompact grid override; frame size still follows the reader's resolution tier. */
+	"snapcompact-variant": { key: "snapcompactVariant", set: "catalog", shape: "scalar" },
 	"image-model": { key: "imageModel", set: "catalog", shape: "scalar" },
 	/** Longest image edge the host passes to the model: it downscales larger images to fit first. */
 	"image-max-edge": { key: "imageMaxEdge", set: "catalog", shape: "scalar" },

@@ -9,7 +9,7 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import type { StructuredSubagentSchemaMode } from "../task/task-details";
 import type { ConfiguredThinkingLevel } from "../utils/render-utils";
-import type { CompactionMethod } from "./compaction-method-ids";
+import type { CompactionMethod } from "./compaction-methods";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { RetryFallbackRole } from "./retry-fallback-chains";
 import type { RuntimeIdentity } from "./runtime-identity";

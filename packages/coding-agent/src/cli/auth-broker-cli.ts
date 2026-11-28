@@ -27,7 +27,6 @@ import {
 	listProvidersWithEnvKey,
 	matchesReplacementCredential,
 	type OAuthCredential,
-	type OAuthProvider,
 	SqliteAuthCredentialStore,
 } from "@oh-my-pi/pi-ai";
 import {
@@ -127,7 +126,7 @@ export function refreshBrokerOAuthCredential(
 	}
 	// Non-MCP rows: same per-provider path AuthStorage would take by default
 	// (the serve process registers no custom OAuth providers).
-	return refreshOAuthToken(provider as OAuthProvider, credential, signal);
+	return refreshOAuthToken(provider, credential, signal);
 }
 
 /** The `omp auth-broker serve` vault: tokens refresh in this process through {@link refreshBrokerOAuthCredential}. */

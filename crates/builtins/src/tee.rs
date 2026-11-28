@@ -83,10 +83,10 @@ impl Utility for Tee {
 
 		match tee(&options, host) {
 			Ok(()) => 0,
-			Err(err) => {
-				let _ = writeln!(host.stderr, "tee: {err}");
-				1
+			Err(err) if err.kind() == ErrorKind::BrokenPipe && options.output_error.is_none() => {
+				crate::host::SIGPIPE_EXIT_CODE
 			},
+			Err(_) => 1,
 		}
 	}
 }
@@ -123,7 +123,7 @@ fn tee(options: &Options, host: &mut Host) -> io::Result<()> {
 
 	let mut output = MultiWriter::new(writers, options.output_error.clone(), host.stderr_clone());
 	let copy_result = copy(&mut host.stdin, &mut output, &mut host.stderr);
-	let flush_result = output.flush();
+	let flush_result = if copy_result.is_ok() { output.flush() } else { Ok(()) };
 	let close_result = output.close();
 	if had_open_errors
 		|| copy_result.is_err()
@@ -143,11 +143,11 @@ fn tee(options: &Options, host: &mut Host) -> io::Result<()> {
 	}
 }
 
-fn copy(mut input: impl Read, mut output: impl Write, stderr: &mut impl Write) -> io::Result<usize> {
+fn copy(mut input: impl Read, output: &mut MultiWriter, stderr: &mut impl Write) -> io::Result<usize> {
 	const FIRST_BUF_SIZE: usize = 8 * 1024;
 	let mut buffer = [0_u8; FIRST_BUF_SIZE];
 	let mut len = 0;
-	loop {
+	while !output.writers.is_empty() {
 		match input.read(&mut buffer) {
 			Ok(0) => return Ok(len),
 			Ok(received) => {
@@ -162,6 +162,7 @@ fn copy(mut input: impl Read, mut output: impl Write, stderr: &mut impl Write) -
 			},
 		}
 	}
+	Ok(len)
 }
 
 fn open(fs: &BlockingFs, name: &OsString, path: &Path, append: bool) -> io::Result<NamedWriter> {
@@ -211,7 +212,7 @@ impl MultiWriter {
 					let _ = writeln!(self.stderr, "tee: {}: {err}", writer.name.maybe_quote());
 					self.ignored_errors += 1;
 				}
-				if exit && aborted.is_none() {
+				if (exit || (mode.is_none() && err.kind() == ErrorKind::BrokenPipe)) && aborted.is_none() {
 					aborted = Some(err);
 				}
 			}
@@ -225,6 +226,9 @@ impl MultiWriter {
 		let mut errors = 0;
 		let stderr = &mut self.stderr;
 		self.writers.retain_mut(|writer| {
+			if aborted.is_some() {
+				return true;
+			}
 			let result = if flush { writer.flush() } else { writer.write_all(buf) };
 			match result {
 				Ok(()) => true,
@@ -234,7 +238,7 @@ impl MultiWriter {
 						let _ = writeln!(stderr, "tee: {}: {err}", writer.name.maybe_quote());
 						errors += 1;
 					}
-					if exit && aborted.is_none() {
+					if exit || (mode.is_none() && err.kind() == ErrorKind::BrokenPipe) {
 						aborted = Some(err);
 					}
 					false
@@ -244,8 +248,6 @@ impl MultiWriter {
 		self.ignored_errors += errors;
 		if let Some(err) = aborted {
 			Err(err)
-		} else if self.writers.is_empty() {
-			Err(Error::other("all outputs failed"))
 		} else {
 			Ok(())
 		}
@@ -386,7 +388,7 @@ mod tests {
 	use crate::openfile::OpenFile;
 	use omp_vfs::OpenOptions;
 
-	use super::{MultiWriter, NamedWriter, OutputErrorMode, Tee, Writer};
+	use super::{MultiWriter, NamedWriter, OutputErrorMode, Tee, Writer, copy};
 	#[cfg(unix)]
 	use crate::host::{SIGPIPE_EXIT_CODE, run_caught};
 	use crate::host::{Host, run_util};
@@ -403,6 +405,60 @@ mod tests {
 		}
 	}
 
+	// A closed downstream pipe must stop tee after preserving earlier file writes.
+	#[test]
+	fn default_broken_pipe_stops_copying() {
+		struct CloseAfterFirstWrite(bool);
+		impl Write for CloseAfterFirstWrite {
+			fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+				if self.0 {
+					Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed pipe"))
+				} else {
+					self.0 = true;
+					Ok(buf.len())
+				}
+			}
+
+			fn flush(&mut self) -> io::Result<()> {
+				Ok(())
+			}
+		}
+
+		let destination = tempfile::NamedTempFile::new().unwrap();
+		let (mut host, capture) = Host::for_test("tee", Vec::new(), "/");
+		let file = host.fs().open_with(destination.path(), OpenOptions::new().write(true)).unwrap();
+		let mut output = MultiWriter::new(
+			vec![
+				NamedWriter {
+					name: OsString::from("standard output"),
+					inner: Writer::Test(Box::new(CloseAfterFirstWrite(false))),
+				},
+				NamedWriter { name: OsString::from("file"), inner: Writer::File(file) },
+			],
+			None,
+			host.stderr_clone(),
+		);
+		let input = vec![b'x'; 16 * 1024];
+		let err = copy(&input[..], &mut output, &mut host.stderr).unwrap_err();
+		assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+		output.close().unwrap();
+		assert_eq!(std::fs::read(destination.path()).unwrap(), vec![b'x'; 8192]);
+		assert_eq!(capture.err(), "");
+	}
+
+	// With -p, losing every output must stop reading without an error.
+	#[cfg(unix)]
+	#[test]
+	fn nopipe_all_outputs_closed_succeeds() {
+		let (mut host, capture) = Host::for_test("tee", "contents", "/");
+		let (reader, writer) = std::io::pipe().unwrap();
+		drop(reader);
+		host.set_test_stdout(OpenFile::from(writer));
+		let parsed = <Tee as clap::Parser>::try_parse_from(["tee", "-p"]).unwrap();
+		assert_eq!(run_caught::<Tee>(parsed, &mut host), 0);
+		assert_eq!(capture.err(), "");
+	}
+
 	#[test]
 	fn copies_to_stdout() {
 		let (code, capture) = run_util::<Tee>(&[], "hello\n", "/");
@@ -411,6 +467,7 @@ mod tests {
 		assert_eq!(capture.err(), "");
 	}
 
+	// Default tee must exit with SIGPIPE when its downstream reader closes.
 	#[cfg(unix)]
 	#[test]
 	fn output_error_mode_controls_sigpipe_policy() {
