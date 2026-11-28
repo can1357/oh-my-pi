@@ -154,6 +154,7 @@ function attachTerminal(fixture: Fixture): { readonly term: TestTerminal; readon
 	let replays = 0;
 	transcript.attach({
 		retired: node => term.backend.retired(node),
+		contentInHistory: node => term.backend.contentInHistory(node),
 		replayHistory: () => replays++,
 		redescribe: () => {},
 	});

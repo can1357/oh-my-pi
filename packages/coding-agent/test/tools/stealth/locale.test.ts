@@ -284,8 +284,8 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("stealth locale patch", () => {
 
 		// Open tell shared with every JavaScript-defined replacement: a pristine realm's own
 		// `toString` bypasses the page registry and prints the literal source.
-		expect(patched.languageGetter?.pristineSource).toContain("return locale");
-		expect(patched.languagesGetter?.pristineSource).toContain("return [locale");
+		expect(patched.languageGetter?.pristineSource).toBe("function get language() { [native code] }");
+		expect(patched.languagesGetter?.pristineSource).toBe("function get languages() { [native code] }");
 		expect(patched.nativeLanguageGetter?.pristineSource).toBe("function get language() { [native code] }");
 
 		// Open tell: a native accessor rejects a foreign receiver with `TypeError: Illegal

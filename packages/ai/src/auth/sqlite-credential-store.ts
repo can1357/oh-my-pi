@@ -428,9 +428,17 @@ function extractOAuthTokenIdentifiers(token: string | undefined): string[] | und
 }
 /**
  * Whether a store seals new writes: `true` always (generating the master key on
- * first use), `false` never, `"auto"` per {@link SqliteAuthCredentialStore.unlock}.
+ * first use), `false` never and unseals rows sealed earlier, `"auto"` per
+ * {@link SqliteAuthCredentialStore.unlock}.
  */
 export type CredentialEncryption = boolean | "auto";
+
+/** A credential row's id with its sealed `data` column and salt. */
+interface SealedRow {
+	id: number;
+	data: string;
+	salt: string;
+}
 
 /** How a {@link SqliteAuthCredentialStore} treats sealed credential rows. */
 export interface SqliteAuthCredentialStoreOptions {
@@ -676,8 +684,9 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	 * holding sealed rows keeps sealing, one holding only plaintext rows stays
 	 * plaintext, and an empty store seals only when the vault answers without
 	 * prompting ({@link credentialVaultAvailable}; never on headless hosts).
-	 * Without sealing the vault is touched only to read sealed rows. A host
-	 * without a vault keeps writing plaintext.
+	 * Without sealing the vault is touched only to read sealed rows; `false`
+	 * rewrites those it opens in plaintext, so later opens never read the vault.
+	 * A host without a vault keeps writing plaintext.
 	 */
 	async unlock(options: { encrypt?: CredentialEncryption } = {}): Promise<void> {
 		const sealedRows = this.#db.query("SELECT 1 FROM auth_credentials WHERE salt IS NOT NULL LIMIT 1").get() !== null;
@@ -702,6 +711,27 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			}
 		}
 		this.#encrypt = encrypt && this.#cipher !== undefined;
+		if (options.encrypt === false && sealedRows && this.#cipher) this.#unseal(this.#cipher);
+	}
+
+	/** Rewrite every row `cipher` opens in plaintext; rows sealed under another key stay sealed. */
+	#unseal(cipher: CredentialCipher): void {
+		this.#db
+			.transaction(() => {
+				const rows = this.#db
+					.query<SealedRow, []>("SELECT id, data, salt FROM auth_credentials WHERE salt IS NOT NULL")
+					.all();
+				for (const row of rows) {
+					let data: string;
+					try {
+						data = cipher.open(row);
+					} catch {
+						continue;
+					}
+					this.#db.run("UPDATE auth_credentials SET data = ?, salt = NULL WHERE id = ?", [data, row.id]);
+				}
+			})
+			.immediate();
 	}
 
 	/**
@@ -1026,6 +1056,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		} else if (schemaVersion < AUTH_SCHEMA_VERSION) {
 			this.#migrateAuthSchema(schemaVersion);
 		}
+		this.#ensureAuthCredentialSaltColumn();
 
 		this.#createAuthCredentialIndexes();
 		this.#createAuthCredentialBlocksTable();
@@ -1360,9 +1391,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		if (fromVersion < 8) {
 			this.#migrateAuthSchemaV7ToV8();
 		}
-		if (fromVersion < 9) {
-			this.#migrateAuthSchemaV8ToV9();
-		}
+		// v8 → v9 (the `salt` column) runs on every open in #initializeSchema.
 	}
 
 	#migrateAuthSchemaV0ToV1(): void {
@@ -1575,10 +1604,13 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	/**
-	 * Add the per-row `salt` that marks a sealed `data` column. Tables rebuilt by the
-	 * v1–v4 migrations already have it (they use the current DDL).
+	 * Add the per-row `salt` that marks a sealed `data` column (auth schema v9).
+	 * Checked on every open, not gated on the recorded version: every credential
+	 * read selects `salt`, and stores exist that record v9 without the column,
+	 * which trusting the version row would leave unopenable. Tables rebuilt by
+	 * the v1–v4 migrations already have it (they use the current DDL).
 	 */
-	#migrateAuthSchemaV8ToV9(): void {
+	#ensureAuthCredentialSaltColumn(): void {
 		const columns = this.#db.query("PRAGMA table_info(auth_credentials)").all() as Array<{ name: string }>;
 		if (!columns.some(column => column.name === "salt")) {
 			this.#db.run("ALTER TABLE auth_credentials ADD COLUMN salt TEXT DEFAULT NULL");

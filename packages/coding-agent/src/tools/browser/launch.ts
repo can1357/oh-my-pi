@@ -1215,7 +1215,7 @@ async function sendUserAgentOverride(client: PuppeteerCdpClient, override: UserA
 /** Configure UA override on the browser + auto-attach to new targets. */
 async function configureUserAgentTargets(
 	browser: Browser,
-	state: { browserSession: CDPSession | null; override: UserAgentOverride },
+	state: { browserSession: CDPSession | null; override: UserAgentOverride; stealthSource?: string },
 	targetTimeoutMs = USER_AGENT_TARGET_TIMEOUT_MS,
 ): Promise<void> {
 	if (!state.browserSession) {
@@ -1233,6 +1233,13 @@ async function configureUserAgentTargets(
 				const session = state.browserSession?.connection()?.session(event.sessionId);
 				if (!session) return;
 				try {
+					// A cross-origin frame is its own target: `Page.addScriptToEvaluateOnNewDocument`
+					// on the page never reaches it, so replay the bootstrap on the paused frame.
+					if (event.targetInfo?.type === "iframe" && state.stealthSource) {
+						await session
+							.send("Page.addScriptToEvaluateOnNewDocument", { source: state.stealthSource })
+							.catch(() => undefined);
+					}
 					if (targetInfoSupportsUserAgentOverride(event.targetInfo)) {
 						await withSoftTimeout(
 							sendUserAgentOverride(wrapSession(session), state.override),
@@ -1248,6 +1255,17 @@ async function configureUserAgentTargets(
 		);
 	}
 
+	if (state.stealthSource) {
+		for (const target of browser.targets()) {
+			if ((target.type() as string) !== "iframe") continue;
+			const session = await target.createCDPSession().catch(() => undefined);
+			if (!session) continue;
+			await session
+				.send("Page.addScriptToEvaluateOnNewDocument", { source: state.stealthSource })
+				.catch(() => undefined);
+			await session.detach().catch(() => undefined);
+		}
+	}
 	const targets = browser.targets().filter(targetSupportsUserAgentOverride);
 	await Promise.all(
 		targets.map(async target => {
@@ -1357,6 +1375,7 @@ function buildStealthInjectionScript(scripts: readonly string[] = STEALTH_PATCH_
 				const Page_Function_toString = Function.prototype.toString;
 				const Page_FunctionToStringDescriptor = Object.getOwnPropertyDescriptor(Function.prototype, "toString");
 				const Page_Proxy = Proxy;
+				const Page_registryKey = Symbol.for("omp.stealth.registry");
 				const Page_WeakMap = WeakMap;
 				const Page_WeakMap_get = Page_WeakMap.prototype.get;
 				const Page_WeakMap_set = Page_WeakMap.prototype.set;
@@ -1416,7 +1435,22 @@ function buildStealthInjectionScript(scripts: readonly string[] = STEALTH_PATCH_
 					const Intl_DateTimeFormat = nativeWindow.Intl.DateTimeFormat;
 					const Date_constructor = nativeWindow.Date;
 
-					const nativeFunctionSources = new Page_WeakMap();
+					// Same-origin frames get this bootstrap too, so a detector's throwaway iframe is a
+					// patched realm, not a pristine one: share one source registry between them and a
+					// parent-registered function keeps its native name there instead of leaking its body.
+					const nativeFunctionSources = (() => {
+						try {
+							const top = window.top;
+							if (!top) return new Page_WeakMap();
+							const shared = top[Page_registryKey];
+							if (shared) return shared;
+							const created = new Page_WeakMap();
+							Object_defineProperty(top, Page_registryKey, { value: created, configurable: true });
+							return created;
+						} catch (e) {
+							return new Page_WeakMap();
+						}
+					})();
 					let patchedNatives = 0;
 					const makeNativeString = (name) => "function " + (name || "") + "() { [native code] }";
 					const registerNativeSource = (fn, source) => {
@@ -1555,6 +1589,8 @@ export interface StealthState {
 	override: UserAgentOverride | null;
 	/** Patches this page needs, chosen once from {@link STEALTH_PROBE}. */
 	stealthScripts?: readonly string[];
+	/** Bootstrap replayed into cross-origin (out-of-process) frames, which page-level injection misses. */
+	stealthSource?: string;
 }
 
 /** Apply stealth patches + UA override to a headless page. Idempotent within a tab. */
@@ -1568,7 +1604,14 @@ export async function applyStealthPatches(browser: Browser, page: Page, state: S
 	if (client) {
 		await sendUserAgentOverride(client, state.override);
 	}
-	const targetState = { browserSession: state.browserSession, override: state.override };
+	state.stealthScripts ??= stealthScriptsFor(await probeStealth(page), state.override.platform);
+	const scripts = state.stealthScripts ?? [];
+	state.stealthSource = scripts.length > 0 ? buildStealthInjectionScript(scripts) : undefined;
+	const targetState = {
+		browserSession: state.browserSession,
+		override: state.override,
+		stealthSource: state.stealthSource,
+	};
 	await configureUserAgentTargets(browser, targetState);
 	state.browserSession = targetState.browserSession;
 	state.stealthScripts ??= stealthScriptsFor(await probeStealth(page), state.override.platform);

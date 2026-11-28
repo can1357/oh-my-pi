@@ -172,12 +172,23 @@ interface PendingBatch {
 	readonly marked?: ReadonlyMap<object, HistoryRowMark>;
 	/** Live main nodes the batch writes whole (committed on acknowledgement). */
 	readonly nodes: readonly UiNode[];
+	/** The `main` list the batch was prepared from: a block added or removed prepares it again. */
+	readonly main: readonly UiNode[];
+	/**
+	 * Live blocks painted to decide the batch, indexed from the commit frontier (`nodes` first): any
+	 * repaint prepares it again, since a block that shrank or grew changes the pressure.
+	 */
+	readonly blocks: readonly (Block | undefined)[];
+	/** Nodes whose own rows the batch writes (not only a separator): see {@link TermBackend.contentInHistory}. */
+	readonly content: readonly UiNode[];
 	/** A streaming node's stable head moved into history: its emitted rows after this batch. */
 	readonly head?: { readonly node: UiNode; readonly rows: readonly string[]; readonly count: number };
 	/** The last non-empty block whose rows this batch writes. */
 	readonly last: UiNode | undefined;
 	/** Columns the rows were painted at: a batch still unwritten at another width is prepared again. */
 	readonly width: number;
+	/** Rows the live tail had: a dock or screen height change prepares the batch again. */
+	readonly capacity: number;
 }
 
 /**
@@ -311,12 +322,6 @@ function sliceAfter(text: string, column: number): string {
 	return Bun.stripANSI(text).slice(index);
 }
 
-/** Whether `batch` (never written) still writes the blocks right after the commit frontier `start`, in order. */
-function heads(batch: PendingBatch, main: readonly UiNode[], start: number): boolean {
-	for (let k = 0; k < batch.nodes.length; k++) if (main[start + k] !== batch.nodes[k]) return false;
-	return !batch.head || main[start + batch.nodes.length] === batch.head.node;
-}
-
 /** Whether `rows` start with the `count` rows of `emitted` in history. */
 function startsWith(rows: readonly string[], emitted: readonly string[], count: number): boolean {
 	if (rows !== emitted) {
@@ -408,6 +413,8 @@ export class TermBackend {
 	#historyTail: UiNode | undefined;
 	/** Rows of live main nodes already moved into history (streaming heads), not repainted in the viewport. */
 	readonly #emitted = new Map<UiNode, Emitted>();
+	/** Main nodes with rows of their own in terminal history: a separator alone does not count. */
+	readonly #withContent = new Set<UiNode>();
 	/** The next frame is the shutdown flush (see {@link flush}). */
 	#flushing = false;
 	/**
@@ -544,6 +551,11 @@ export class TermBackend {
 		if (this.#committed.has(node) || this.#emitted.has(node) || this.#retiring.has(node)) return true;
 		const pending = this.#pending;
 		return pending !== undefined && (pending.head?.node === node || pending.nodes.includes(node));
+	}
+
+	/** Whether the driver acknowledged rows of `node`'s own content in history, not only the separator above it. */
+	contentInHistory(node: UiNode): boolean {
+		return this.#withContent.has(node);
 	}
 
 	/**
@@ -702,6 +714,8 @@ export class TermBackend {
 		if (pending && written === pending.history.id) {
 			const replay = pending.history.kind === "replay";
 			if (pending.marked) for (const key of pending.marked.keys()) this.#marked.add(key);
+			if (replay) this.#withContent.clear();
+			for (const node of pending.content) this.#withContent.add(node);
 			for (const node of pending.nodes) {
 				this.#committed.add(node);
 				this.#emitted.delete(node);
@@ -987,14 +1001,26 @@ export class TermBackend {
 		// Whether a resize replays history at its new width (else blocks leave history whole: see below).
 		const rowWise = this.#driver.replaysOnResize?.() ?? true;
 		this.#checkEmitted(main, start, width, rowWise);
-		// A batch never written is prepared again when it no longer fits: another width, or blocks that
-		// moved under it (a replay it was stays owed).
+		const capacity = flush ? 0 : Math.max(0, height - dockRows + covering);
+		// An unwritten batch is prepared again when anything that decided it changed: the geometry, the
+		// blocks in `main`, or the rows of a block it painted (a replay it was stays owed).
 		const offered = this.#pending;
-		if (offered && (offered.width !== width || !heads(offered, main, start))) this.#pending = undefined;
+		if (
+			offered &&
+			(offered.width !== width ||
+				offered.capacity !== capacity ||
+				offered.main !== main ||
+				offered.blocks.some(
+					(block, i) => block !== undefined && this.#paint(main[start + i]!, width).rows !== block.rows,
+				))
+		) {
+			this.#pending = undefined;
+		}
 		// A lost display gets the committed ledger back under a fresh id, followed by whatever retires
 		// in the same frame; streaming heads start over (their stable rows go out again under pressure).
 		let ledger: string[] | undefined;
 		let ledgerLast: UiNode | undefined;
+		const ledgerContent: UiNode[] = [];
 		if (this.#replay && !this.#pending) {
 			this.#emitted.clear();
 			this.#committed = new Set(main.slice(0, start));
@@ -1005,12 +1031,12 @@ export class TermBackend {
 				if (block.rows.length === 0) continue;
 				if (ledgerLast) for (let n = separator(ledgerLast, node); n > 0; n--) ledger.push("");
 				for (const row of block.rows) ledger.push(row);
+				ledgerContent.push(node);
 				ledgerLast = node;
 			}
 		}
 		const pending = this.#pending;
 		const pendingHead = pending?.head;
-		const capacity = flush ? 0 : Math.max(0, height - dockRows + covering);
 		// Live main nodes are `main[first + i]`, `i < count`. A batch still being written to history
 		// is not live; the blocks it writes are what the first live block is separated from.
 		let first = start;
@@ -1020,10 +1046,10 @@ export class TermBackend {
 				? (pending.last ?? (pending.history.kind === "replay" ? undefined : this.#historyTail))
 				: this.#historyTail;
 		if (pending) {
-			const retiring = new Set(pending.nodes);
-			for (; first < main.length && retiring.has(main[first]!); first++) {
-				if (this.#paint(main[first]!, width).rows.length > 0) aboveLive = main[first];
+			for (let i = 0; i < pending.nodes.length; i++) {
+				if (pending.blocks[i]!.rows.length > 0) aboveLive = pending.nodes[i];
 			}
+			first += pending.nodes.length;
 		}
 		const count = main.length - first;
 		// Live blocks are painted (and so watched) only as the frame needs them: from the tail up
@@ -1096,6 +1122,7 @@ export class TermBackend {
 			history = pending.history;
 		} else if (boundary >= 0 || ledger) {
 			const retired: UiNode[] = [];
+			const content = ledgerContent;
 			const rows: string[] = ledger ?? [];
 			let last = ledgerLast;
 			let marked: Map<object, HistoryRowMark> | undefined;
@@ -1117,6 +1144,7 @@ export class TermBackend {
 				const skip = skipAt(live);
 				retired.push(node);
 				if (block.rows.length > skip) {
+					content.push(node);
 					// The separator may depend on whether the block above retires (it just did, in this batch).
 					leads[live] = undefined;
 					for (let i = leadAt(live); i > 0; i--) rows.push("");
@@ -1133,7 +1161,7 @@ export class TermBackend {
 			// block's rows are final, a streaming one offers its stable head. The rest stays live (a
 			// settled block still repaints them: a tool card collapses below the rows already in history).
 			// A driver that keeps history at its old width on a resize (`preserve`, in-place) gets whole
-			// blocks and whole stable heads instead, which map exactly to the new width.
+			// blocks and whole stable heads when content overflows, which map exactly to the new width.
 			let head: PendingBatch["head"];
 			if (!flush && live < count && live <= boundary) {
 				const node = main[first + live]!;
@@ -1147,12 +1175,14 @@ export class TermBackend {
 					// Only the pressure: the separator written with the first rows relieves it too (it may
 					// alone; the block's rows then stay live).
 					const lead = leadAt(live);
-					const take = rowWise ? Math.min(stable - skip, Math.max(0, liveRows - capacity - lead)) : stable - skip;
+					const overflow = Math.max(0, liveRows - capacity - lead);
+					const take = overflow === 0 ? 0 : rowWise ? Math.min(stable - skip, overflow) : stable - skip;
 					if (settled && skip + take >= block.rows.length) retireWhole();
 					else if (take > 0 || lead > 0) {
 						for (let i = lead; i > 0; i--) rows.push("");
 						const stop = Math.min(skip + take, block.rows.length);
 						appendRows(block, skip, stop);
+						if (stop > skip) content.push(node);
 						head = { node, rows: block.rows, count: stop };
 						skips[live] = stop;
 						leads[live] = 0;
@@ -1170,10 +1200,14 @@ export class TermBackend {
 				this.#pending = {
 					history,
 					nodes: retired,
+					main,
+					blocks,
+					content,
 					...(marked ? { marked } : {}),
 					...(head ? { head } : {}),
 					last,
 					width,
+					capacity,
 				};
 			} else {
 				// Nothing to write: the blocks stay live (committed with the next batch that has rows).
