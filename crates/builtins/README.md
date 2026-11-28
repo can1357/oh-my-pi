@@ -69,6 +69,6 @@ $ cargo nextest run -p omp-builtins --no-default-features --features util.sed
 ## Licensing
 
 MIT throughout, but the ported utilities carry upstream notices — uutils
-coreutils, uutils findutils, uutils sed, jaq, sd, rust-utf8, GoAWK, and libproc-rs, and
+coreutils, uutils findutils, uutils sed, jaq, sd, GoAWK, and libproc-rs, and
 `perl`'s generated Unicode tables carry the Unicode data license. See `LICENSE`, which
 reproduces each in full and lists which commands it covers.

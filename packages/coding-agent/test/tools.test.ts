@@ -1058,6 +1058,22 @@ describe("Coding Agent Tools", () => {
 			expect(output).not.toContain("Use :3- to continue");
 		});
 
+		it("keeps an oversized jq line a partial preview below the spill threshold", async () => {
+			const target = path.join(testDir, "large.json");
+			await Bun.write(target, JSON.stringify("x".repeat(100 * 1024)));
+			const settings = Settings.isolated({ "tools.artifactSpillThreshold": 20 });
+			const tool = wrapToolWithMetaNotice(new ReadTool(createTestToolSession(testDir, settings)));
+			const context = { ...createTestToolContext(["read"]), settings };
+			const result = await tool.execute("query", { path: `${target}?q=.&raw=true` }, undefined, undefined, context);
+			expect(result.details?.meta?.truncation).toMatchObject({
+				partialLine: true,
+				outputBytes: 20 * 1024,
+				totalBytes: 100 * 1024,
+			});
+			expect(result.details?.meta?.truncation?.artifactId).toBeUndefined();
+			expect(getTextOutput(result)).toContain("partial, 20.0KB of 100.0KB");
+		});
+
 		it("pages oversized file reads at the spill threshold instead of eliding their middle (#16277)", async () => {
 			const testFile = path.join(testDir, "oversized-read.txt");
 			const row = (n: number) => `row-${String(n).padStart(4, "0")} ${"0123456789".repeat(20)}`;

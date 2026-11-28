@@ -5,8 +5,9 @@
  * Credential Manager, a Secret Service keyring on Linux). Every sealed row
  * carries its own random salt; HKDF-SHA256 derives that row's AES-256-GCM key and
  * nonce from the master key and the salt, so no key/nonce pair repeats. Hosts
- * without a vault (headless Linux, WSL, containers) get no cipher, and their
- * credentials stay plaintext in the owner-only `agent.db`.
+ * without a vault (headless Linux, WSL, containers, macOS with `HOME` pointed away
+ * from the login keychain) get no cipher, and their credentials stay plaintext in
+ * the owner-only `agent.db`.
  *
  * Uses `node:crypto`: the SQLite store is synchronous and WebCrypto is not.
  *
@@ -18,6 +19,8 @@
  * ```
  */
 import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from "node:crypto";
+import * as os from "node:os";
+import * as path from "node:path";
 import { isBunTestRuntime, logger } from "@oh-my-pi/pi-utils";
 
 /** The master key's vault entry, shared by every agent dir and profile on this machine. */
@@ -79,6 +82,17 @@ export class CredentialCipher {
 let unlocked: CredentialCipher | undefined;
 
 /**
+ * Whether storing a vault entry can land without a dialog. macOS resolves the
+ * user's keychains under `$HOME`; with HOME overridden (test harnesses spawning
+ * the CLI, sandboxes) there is no default keychain, reads quietly find nothing,
+ * and a store pops "Keychain Not Found" instead of failing.
+ */
+async function vaultWritable(): Promise<boolean> {
+	if (process.platform !== "darwin") return true;
+	return Bun.file(path.join(os.homedir(), "Library", "Keychains", "login.keychain-db")).exists();
+}
+
+/**
  * The cipher for the master key in the OS credential vault; with `create`, a
  * missing key is generated and stored first. Memoized once found. `undefined`
  * when the vault is unavailable or, without `create`, holds no key. Callers that
@@ -91,7 +105,7 @@ export async function loadCredentialCipher(options: { create?: boolean } = {}): 
 	if (TEST_PROCESS) return undefined;
 	try {
 		let stored = await Bun.secrets.get(VAULT_ENTRY);
-		if (stored === null && options.create) {
+		if (stored === null && options.create && (await vaultWritable())) {
 			await Bun.secrets.set({ ...VAULT_ENTRY, value: randomBytes(KEY_BYTES).toString("base64") });
 			// Seal under what the vault returns, not what was handed to it.
 			stored = await Bun.secrets.get(VAULT_ENTRY);

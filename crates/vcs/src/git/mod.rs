@@ -12,6 +12,7 @@
 
 mod cli;
 mod diff;
+mod discard;
 mod filter;
 mod mutate;
 mod open;
@@ -23,6 +24,7 @@ use std::{
 };
 
 pub use cli::{COMMAND_TIMEOUT, NETWORK_TIMEOUT, OUTPUT_LIMIT_BYTES, SYNC_TIMEOUT, clone};
+pub use discard::discards_work;
 pub use mutate::detach_git_dir;
 pub use patch::{join_patches, validate_hunk_selections};
 

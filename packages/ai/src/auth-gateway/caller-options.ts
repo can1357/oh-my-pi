@@ -80,6 +80,7 @@ const OPTION_TIERS = {
 	providerSessionState: "server",
 	thinkingCapabilityDbPath: "server",
 	providerRetryWait: "server",
+	onDiscardedAttempt: "server",
 	parentSessionId: "server",
 	minimizeEffort: "server",
 	liveSteering: "server",

@@ -2,6 +2,7 @@ import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { batch, isSettled, type Signal, signal } from "@oh-my-pi/pi-tui";
 import { notifyTerminal } from "@oh-my-pi/pi-tui/driver/session";
 import { formatDuration, isRecord, logger, sanitizeText } from "@oh-my-pi/pi-utils";
@@ -244,6 +245,18 @@ function mergeRules(rules: readonly NotificationRule[], added: readonly Notifica
 	return merged;
 }
 
+/**
+ * Human label for a classified account usage/quota limit. Providers often send
+ * these as generic `rate_limit_error` bodies, which read like a transient
+ * throttle; the raw text stays in the transcript message and logs.
+ */
+function usageLimitLabel(errorMessage: string, provider?: string, baseUrl?: string): string {
+	const subject = provider ? `${provider.charAt(0).toUpperCase()}${provider.slice(1)} account` : "Account";
+	const resetMs = extractProviderRetryHint(provider, errorMessage, baseUrl);
+	const reset = resetMs !== undefined && resetMs > 0 ? `; resets in ${formatDuration(resetMs)}` : "";
+	return `${subject} usage limit reached${reset}`;
+}
+
 export class EventController {
 	#lastReadGroup: PendingTool | undefined = undefined;
 	/** Read groups closed to new reads whose block settles once their last pending read lands. */
@@ -468,7 +481,7 @@ export class EventController {
 			agent_start: e => this.#handleAgentStart(e),
 			agent_pause: e => this.#handleAgentPause(e),
 			agent_end: e => this.#handleAgentEnd(e),
-			turn_start: async () => {},
+			turn_start: async () => this.#handleTurnStart(),
 			turn_end: async e => this.#handleTurnEnd(e),
 			message_start: e => this.#handleMessageStart(e),
 			message_update: e => this.#handleMessageUpdate(e),
@@ -1724,6 +1737,17 @@ export class EventController {
 	}
 
 	/**
+	 * A new turn means a fresh model request: drop the previous turn's tool
+	 * intent (e.g. a lone `todo init`) so the row stops naming finished work
+	 * while the provider is still thinking.
+	 */
+	#handleTurnStart(): void {
+		if (this.#lastIntent === undefined || this.#showingAsyncWait) return;
+		this.#lastIntent = undefined;
+		this.ctx.setWorkingMessage();
+	}
+
+	/**
 	 * End-of-turn vocalization: yield mode speaks the final assistant message in
 	 * one shot here (the only mode that is post-hoc); every other mode just makes
 	 * sure the live buffer's trailing partial gets flushed.
@@ -2150,7 +2174,19 @@ export class EventController {
 				this.#pinnedErrorComponent = lastAssistant;
 				this.#pinnedErrorMessage = event.message;
 				this.#restorePinnedErrorInline = !recoverableEmptyOutput;
-				if (!recoverableEmptyOutput) this.ctx.showPinnedError(event.message.errorMessage);
+				if (!recoverableEmptyOutput) {
+					const usageLimit = AIError.is(AIError.classifyMessage(event.message), AIError.Flag.UsageLimit);
+					const model = this.ctx.viewSession.model;
+					this.ctx.showPinnedError(
+						usageLimit
+							? usageLimitLabel(
+									event.message.errorMessage,
+									event.message.provider,
+									model?.provider === event.message.provider ? model.baseUrl : undefined,
+								)
+							: event.message.errorMessage,
+					);
+				}
 			}
 			this.ctx.statusLine.refresh();
 		}
@@ -2766,11 +2802,28 @@ export class EventController {
 		// leaves no error in the transcript. The retry row names the reason;
 		// `auto_retry_end` marks the attempt recovered or superseded, or restores
 		// its error when the saga fails without accounting for it.
+		const model = this.ctx.viewSession.model;
+		const provider = this.#pinnedErrorMessage?.provider ?? model?.provider;
 		this.#pinnedErrorComponent = undefined;
 		this.#pinnedErrorMessage = undefined;
 		this.#restorePinnedErrorInline = true;
 		this.ctx.clearPinnedError();
-		const reason = previewLine(sanitizeText(event.errorMessage), TRUNCATE_LENGTHS.CONTENT);
+		const usageLimit =
+			event.errorId !== undefined
+				? AIError.is(event.errorId, AIError.Flag.UsageLimit)
+				: AIError.isUsageLimit(event.errorMessage);
+		const reason = previewLine(
+			sanitizeText(
+				usageLimit
+					? usageLimitLabel(
+							event.errorMessage,
+							provider,
+							model?.provider === provider ? model?.baseUrl : undefined,
+						)
+					: event.errorMessage,
+			),
+			TRUNCATE_LENGTHS.CONTENT,
+		);
 		// Replaces the turn's row with the countdown.
 		this.ctx.showWorking("retry", {
 			label: `Retrying (${event.attempt}/${event.maxAttempts})`,

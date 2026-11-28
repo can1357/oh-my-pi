@@ -172,13 +172,13 @@ function editTransferError(error: unknown, url: string): unknown {
 }
 
 /** Load the configured SSH hosts from the `ssh` capability (`ssh.json` files and `~/.ssh/config` aliases). */
-async function loadConfiguredHosts(cwd?: string): Promise<SSHHost[]> {
+export async function loadConfiguredHosts(cwd?: string): Promise<SSHHost[]> {
 	const { items } = await capability.loadCapability<SSHHost>(sshCapability.id, cwd ? { cwd } : {});
 	return items;
 }
 
 /** One-line address for a host, e.g. `deploy@10.0.0.1:2222`. */
-function hostAddress(host: SSHHost): string {
+export function hostAddress(host: SSHHost): string {
 	return `${host.username ? `${host.username}@` : ""}${host.host}${host.port ? `:${host.port}` : ""}`;
 }
 

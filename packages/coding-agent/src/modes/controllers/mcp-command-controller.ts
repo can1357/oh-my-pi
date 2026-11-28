@@ -426,7 +426,7 @@ export class MCPCommandController {
 								oauth.tokenUrl,
 								oauth.clientId ?? finalConfig.oauth?.clientId ?? "",
 								finalConfig.oauth?.clientSecret ?? "",
-								oauth.scopes ?? "",
+								finalConfig.oauth?.scope?.trim() || oauth.scopes || "",
 								{
 									callbackPort: finalConfig.oauth?.callbackPort,
 									callbackPath: finalConfig.oauth?.callbackPath,

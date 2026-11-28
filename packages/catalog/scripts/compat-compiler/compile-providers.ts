@@ -4,10 +4,10 @@
  *
  * A provider file's root `provider "<id>"` node mixes two vocabularies: the
  * cascade (selectors + compat axes, `compile-cascade.ts`) and the catalog
- * entry nodes handled here — `default-model`, `env`, the boolean flags,
- * `discovery`, `kind-apis`, and `seed`. A file that declares `default-model`
- * is a catalog provider; a file without it is wire-compat only and may not
- * carry any other catalog node.
+ * entry nodes handled here — `default-model`, `env`, `base-url`, the boolean
+ * flags, `discovery`, `kind-apis`, and `seed`. A file that declares
+ * `default-model` is a catalog provider; a file without it is wire-compat only
+ * and may not carry any other catalog node.
  *
  * Seed rows *define* models rather than patching them. Wire and thinking axis
  * directives inside a seed `model` block become the row's explicit `compat` /
@@ -80,6 +80,7 @@ const DISCOVERY_PROPS = ["label", "oauth-provider", "allow-unauthenticated"] as 
 export const PROVIDER_CATALOG_NODES: ReadonlySet<string> = new Set([
 	"default-model",
 	"env",
+	"base-url",
 	"allow-unauthenticated",
 	"automatic-default",
 	"dynamic-models-authoritative",
@@ -141,6 +142,13 @@ function stringList(node: KdlNodeView): string[] {
 	const values = positionalStrings(node);
 	if (values.length === 0) malformed(node);
 	return values;
+}
+
+/** The single optional `env "<NAME>"` override child of a `base-url` node. */
+function parseBaseUrlEnv(node: KdlNodeView): string | undefined {
+	if (!node.children) return undefined;
+	if (node.children.length !== 1 || node.children[0].name !== "env") malformed(node);
+	return singleString(node.children[0]);
 }
 
 function parseCost(node: KdlNodeView): TokenCost {
@@ -378,6 +386,13 @@ function parseProvider(node: KdlNodeView): ParsedProvider | undefined {
 			case "env":
 				if (provider.envVars !== undefined) malformed(child);
 				provider.envVars = stringList(child);
+				break;
+			case "base-url":
+				if (provider.baseUrl !== undefined) malformed(child);
+				validateProps(child, []);
+				if (child.args.length !== 1 || typeof child.args[0] !== "string" || !child.args[0]) malformed(child);
+				provider.baseUrl = child.args[0];
+				provider.baseUrlEnv = parseBaseUrlEnv(child);
 				break;
 			case "allow-unauthenticated":
 				if (provider.allowUnauthenticated !== undefined) malformed(child);

@@ -63,8 +63,9 @@ describe("ModelRegistry", () => {
 		modelsJsonPath = path.join(tempDir, "models.json");
 		// In-memory auth DB: tests need a fresh, isolated credential store per case but
 		// never reopen it from disk, so :memory: avoids the WAL/chmod disk-open cost
-		// (~3ms/test) while preserving per-test isolation.
-		authStorage = await AuthStorage.create(":memory:");
+		// (~3ms/test) while preserving per-test isolation. Fake Copilot tokens must
+		// not reach github.com through the background billing probe.
+		authStorage = await AuthStorage.create(":memory:", { copilotBillingProbe: false });
 	});
 
 	afterEach(() => {
@@ -951,6 +952,7 @@ describe("ModelRegistry", () => {
 						api: "openai-responses",
 						compat: {
 							supportsConfigurationUpdate: false,
+							supportsPromptCacheBreakpoints: true,
 						},
 						models: [
 							{
@@ -1097,6 +1099,11 @@ describe("ModelRegistry", () => {
 			expect(getOpenAICompat(model)?.supportsConfigurationUpdate).toBe(false);
 			// …and beats the gpt-6-astra class rule on the resolved view the driver reads.
 			expect(getSupportsConfigurationUpdate(model)).toBe(false);
+		});
+
+		test("custom Responses providers can declare explicit prompt-cache breakpoints", () => {
+			const model = customAstraProxyCompat.find("astra-proxy", "gpt-6-astra");
+			expect(getOpenAICompat(model)?.supportsPromptCacheBreakpoints).toBe(true);
 		});
 
 		test("custom Responses providers preserve compaction config", () => {
@@ -3788,7 +3795,7 @@ describe("ModelRegistry", () => {
 				{
 					seedCache: dbPath =>
 						writeModelCache(
-							"cached-compact-proxy:openai-models-list-context-v6",
+							"cached-compact-proxy:openai-models-list-context-v8",
 							Date.now(),
 							[
 								buildModel({

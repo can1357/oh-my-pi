@@ -20,7 +20,8 @@ use std::os::fd::AsRawFd as AsRawPipe;
 #[cfg(windows)]
 use std::os::windows::io::AsRawHandle as AsRawPipe;
 use std::{
-	ffi::OsStr,
+	collections::BTreeSet,
+	ffi::{OsStr, OsString},
 	path::Path,
 	process::Stdio,
 	sync::{Arc, Mutex},
@@ -388,7 +389,7 @@ pub(crate) fn run_sync(cwd: &Path, args: &[String], timeout: Duration) -> Result
 	run_sync_capped(cwd, args, timeout, OUTPUT_LIMIT_BYTES)
 }
 
-/// Stdin and environment for a [`run_sync_write`] invocation.
+/// Stdin and environment for a [`run_sync_write`] or [`InertGit`] invocation.
 pub(crate) struct SyncWrite<'a> {
 	/// Bytes piped to the child's stdin, then closed.
 	pub stdin: &'a [u8],
@@ -404,7 +405,7 @@ pub(crate) fn run_sync_write(
 	timeout: Duration,
 	input: &SyncWrite<'_>,
 ) -> Result<CliOutput> {
-	run_sync_impl(cwd, args, timeout, OUTPUT_LIMIT_BYTES, Some(input))
+	run_sync_impl(cwd, args, timeout, OUTPUT_LIMIT_BYTES, SyncMode::Write(input))
 }
 
 /// [`run_sync`] with an explicit retention cap. The cap is a parameter rather
@@ -417,34 +418,187 @@ pub(crate) fn run_sync_capped(
 	timeout: Duration,
 	limit: usize,
 ) -> Result<CliOutput> {
-	run_sync_impl(cwd, args, timeout, limit, None)
+	run_sync_impl(cwd, args, timeout, limit, SyncMode::Read)
 }
 
-/// Shared synchronous runner: read-only when `write` is `None`.
+/// What [`InertGit`] sets every filter driver variable to: no command, and a
+/// failure to filter is no error.
+const BLANKED_FILTER_VARS: [(&str, &str); 4] =
+	[("clean", ""), ("smudge", ""), ("process", ""), ("required", "false")];
+
+/// Git for reads made before the user has approved anything, in a repository
+/// the agent may just have rewritten (an approval mode that allows file edits
+/// lets it write `.git/config` without a prompt). It runs no program the
+/// repository configures: `--no-optional-locks` as for every read,
+/// `core.fsmonitor` and the untracked cache pinned off as on the write path,
+/// and every filter driver the configuration names blanked for the call. A
+/// stat-dirty file a blanked driver filters is therefore compared raw against
+/// its filtered blob: whenever the filter transforms the content (git-lfs,
+/// git-crypt), git reports it modified even when only its stat data changed,
+/// so callers must not take that answer as an edit ([`Self::blanked_filters`]
+/// names those drivers). A missing object is never fetched from a promisor
+/// remote, which would run the transport, upload-pack or ssh command the
+/// configuration names: `GIT_NO_LAZY_FETCH` turns lazy fetches off (git
+/// 2.45+), and an empty `GIT_ALLOW_PROTOCOL` refuses every transport on older
+/// git. Promisor remotes cannot be unset for the call instead, because
+/// `extensions.partialClone` is read from the repository's own config file
+/// only. Every inherited `GIT_*` variable is dropped, not only the
+/// repository-location family [`apply_env`] strips: `GIT_CONFIG_*`,
+/// `GIT_EXEC_PATH` and the like would otherwise reach the child. Submodules
+/// are the caller's to exclude.
+pub(crate) struct InertGit {
+	/// Set on every call: the repository location, then the blanked drivers.
+	env:     Vec<(String, OsString)>,
+	/// The filter drivers the configuration defines.
+	drivers: BTreeSet<String>,
+}
+
+impl InertGit {
+	/// Prepares calls in the repository and work tree `repository` names
+	/// (`GIT_DIR`, `GIT_WORK_TREE`); empty, git discovers them from the
+	/// directory each call runs in. Reads which filter drivers the
+	/// configuration seen from `cwd` defines.
+	pub(crate) fn open(
+		cwd: &Path,
+		repository: &[(&str, &OsStr)],
+		timeout: Duration,
+	) -> Result<Self> {
+		let drivers = filter_drivers(cwd, repository, timeout)?;
+		let mut env: Vec<(String, OsString)> = repository
+			.iter()
+			.map(|&(key, value)| (key.to_owned(), value.to_owned()))
+			.collect();
+		// `-c` splits its argument at the first `=`, so it cannot name a driver
+		// whose name contains one; `GIT_CONFIG_KEY_<n>` carries the key whole.
+		let count = drivers.len() * BLANKED_FILTER_VARS.len();
+		env.push(("GIT_CONFIG_COUNT".to_owned(), count.to_string().into()));
+		let blanked = drivers.iter().flat_map(|driver| {
+			BLANKED_FILTER_VARS.map(|(var, value)| (format!("filter.{driver}.{var}"), value))
+		});
+		for (index, (key, value)) in blanked.enumerate() {
+			env.push((format!("GIT_CONFIG_KEY_{index}"), key.into()));
+			env.push((format!("GIT_CONFIG_VALUE_{index}"), value.into()));
+		}
+		Ok(Self { env, drivers })
+	}
+
+	/// The filter drivers the configuration defines, which every call runs
+	/// blanked.
+	pub(crate) const fn blanked_filters(&self) -> &BTreeSet<String> {
+		&self.drivers
+	}
+
+	/// Runs git with `args` in `cwd`, feeding it `stdin`, and retains up to
+	/// `limit` bytes of each output stream.
+	pub(crate) fn run(
+		&self,
+		cwd: &Path,
+		args: &[String],
+		stdin: &[u8],
+		timeout: Duration,
+		limit: usize,
+	) -> Result<CliOutput> {
+		let env: Vec<(&str, &OsStr)> = self
+			.env
+			.iter()
+			.map(|(key, value)| (key.as_str(), value.as_os_str()))
+			.collect();
+		run_sync_impl(cwd, args, timeout, limit, SyncMode::Inert(&SyncWrite { stdin, env: &env }))
+	}
+}
+
+/// The names of the filter drivers git's configuration defines for the
+/// repository `repository` names, or the one git discovers from `cwd`.
+/// Reading configuration runs no program.
+fn filter_drivers(
+	cwd: &Path,
+	repository: &[(&str, &OsStr)],
+	timeout: Duration,
+) -> Result<BTreeSet<String>> {
+	let args: Vec<String> = ["config", "--null", "--name-only", "--get-regexp", r"^filter\."]
+		.map(str::to_owned)
+		.to_vec();
+	let input = SyncWrite { stdin: &[], env: repository };
+	let output = run_sync_impl(cwd, &args, timeout, OUTPUT_LIMIT_BYTES, SyncMode::Inert(&input))?;
+	// Exit status 1: no key matched.
+	if output.exit_code == 1 && output.stdout.is_empty() {
+		return Ok(BTreeSet::new());
+	}
+	let output = output.into_checked(&args)?;
+	if is_truncated(&output.stdout) {
+		return Err(Error::backend("git config", "filter driver list exceeds the capture limit"));
+	}
+	let mut drivers = BTreeSet::new();
+	for key in output.stdout.split('\0') {
+		let Some((driver, var)) = key
+			.strip_prefix("filter.")
+			.and_then(|rest| rest.rsplit_once('.'))
+		else {
+			continue;
+		};
+		if matches!(var, "clean" | "smudge" | "process" | "required") {
+			drivers.insert(driver.to_owned());
+		}
+	}
+	Ok(drivers)
+}
+
+/// How [`run_sync_impl`] hardens one invocation.
+#[derive(Clone, Copy)]
+enum SyncMode<'a> {
+	/// `--no-optional-locks`.
+	Read,
+	/// fsmonitor/untracked cache pinned off, with stdin and extra variables.
+	Write(&'a SyncWrite<'a>),
+	/// Both, every inherited `GIT_*` variable dropped, lazy fetches and
+	/// transports refused, then the input's variables set and its stdin fed
+	/// when not empty (see [`InertGit`]).
+	Inert(&'a SyncWrite<'a>),
+}
+
+/// Shared synchronous runner.
 fn run_sync_impl(
 	cwd: &Path,
 	args: &[String],
 	timeout: Duration,
 	limit: usize,
-	write: Option<&SyncWrite<'_>>,
+	mode: SyncMode<'_>,
 ) -> Result<CliOutput> {
-	let argv = hardened_args(args, write.is_none());
+	let argv = match mode {
+		SyncMode::Read => hardened_args(args, true),
+		SyncMode::Write(_) => hardened_args(args, false),
+		SyncMode::Inert(_) => hardened_args(&hardened_args(args, false), true),
+	};
+	let (stdin, env): (Option<&[u8]>, &[(&str, &OsStr)]) = match mode {
+		SyncMode::Read => (None, &[]),
+		SyncMode::Write(input) => (Some(input.stdin), input.env),
+		SyncMode::Inert(input) => ((!input.stdin.is_empty()).then_some(input.stdin), input.env),
+	};
 	let mut cmd = std::process::Command::new("git");
 	cmd.args(&argv)
 		.current_dir(cwd)
-		.stdin(if write.is_some() {
+		.stdin(if stdin.is_some() {
 			Stdio::piped()
 		} else {
 			Stdio::null()
 		})
 		.stdout(Stdio::piped())
 		.stderr(Stdio::piped());
+	if let SyncMode::Inert(_) = mode {
+		for (key, _) in std::env::vars_os() {
+			if key.as_encoded_bytes().starts_with(b"GIT_") {
+				cmd.env_remove(key);
+			}
+		}
+	}
 	apply_env(&mut cmd);
 	detach_from_terminal(&mut cmd);
-	if let Some(write) = write {
-		for (key, value) in write.env {
-			cmd.env(key, value);
-		}
+	if let SyncMode::Inert(_) = mode {
+		cmd.env("GIT_NO_LAZY_FETCH", "1")
+			.env("GIT_ALLOW_PROTOCOL", "");
+	}
+	for (key, value) in env {
+		cmd.env(key, value);
 	}
 	let mut child = cmd.spawn().map_err(|err| spawn_error(cwd, err))?;
 	let stdout = spawn_sync_reader("git-cli-stdout", child.stdout.take(), limit);
@@ -453,7 +607,7 @@ fn run_sync_impl(
 		// The writer runs beside the deadline loop: a child that stops reading
 		// must still be killed on time, and the kill closes the pipe, which
 		// unblocks the writer before the scope joins it.
-		if let Some(write) = write
+		if let Some(stdin) = stdin
 			&& let Some(mut pipe) = child.stdin.take()
 		{
 			let writer = std::thread::Builder::new()
@@ -462,7 +616,7 @@ fn run_sync_impl(
 					use std::io::Write;
 					// A child that exits early closes the pipe; its exit status
 					// is the answer, not this write error.
-					let _ = pipe.write_all(write.stdin);
+					let _ = pipe.write_all(stdin);
 				});
 			if let Err(err) = writer {
 				// The dropped pipe reads as an empty input; the child must not

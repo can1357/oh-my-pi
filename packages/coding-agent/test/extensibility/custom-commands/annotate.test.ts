@@ -16,10 +16,8 @@ import type {
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { extensionOutput, extensionTheme, singleNode } from "../../../src/ui/extensions/render-output";
 import type { SessionPick } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/annotate/text-source";
-import {
-	AnnotateCommand,
-	runAnnotateCommand,
-} from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/annotate";
+import { runAnnotateCommand } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/annotate";
+import { AnnotateCommand } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/annotate/command";
 import {
 	type AnnotationOverlayContext,
 	showCodeReviewOverlay,

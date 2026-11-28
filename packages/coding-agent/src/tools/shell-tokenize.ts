@@ -2,7 +2,7 @@
 // derived from `src/intern/guard.py` of nace-ai/intern (https://github.com/nace-ai/intern, v0.30.1,
 // commit e1bbd096f9), Copyright Nace AI, licensed under the Apache License, Version 2.0
 // (http://www.apache.org/licenses/LICENSE-2.0). Modified for omp: rewritten in TypeScript, reading
-// only top-level commands up to the first nested part, with `cd` tracking. See
+// only top-level commands up to the first nested part, with `cd` and `&&`-chain tracking. See
 // packages/coding-agent/THIRD-PARTY-NOTICES.txt.
 // It reads shell text best-effort for the opt-in guard rules and is not a security boundary: it
 // stops at the first nested part, and values it cannot know (most variables) stay unexpanded.
@@ -529,6 +529,8 @@ export interface ShellCommand {
 	 * does not read (`env -S '...'`).
 	 */
 	argv: string[];
+	/** Variable assignments the command runs with: its `NAME=value` prefixes and those `env` and `sudo` set, in order. */
+	assignments: string[];
 	/** Targets of `<` and `<>` input redirections. */
 	reads: string[];
 	/** Whether an earlier stage of its pipeline, or an input redirection (`<`, `<>`, `<&`), gives it input. */
@@ -556,6 +558,12 @@ export interface ShellCommand {
 	 */
 	spawned: boolean;
 	/**
+	 * Commands known to have succeeded by the time this one starts, latest first (see
+	 * {@link SucceededLink}): the last command of each earlier pipeline in its `&&` chain, none once
+	 * an `||` makes them optional.
+	 */
+	succeeded: SucceededLink | undefined;
+	/**
 	 * Arguments and redirection targets whose leading `~` was quoted or escaped (`"~/.ssh/id_rsa"`,
 	 * `\~/x`), so the shell does not expand it; a word the command also has with a bare `~` is not here.
 	 */
@@ -568,10 +576,43 @@ export interface ShellCommand {
 	literalBraces: ReadonlySet<string>;
 }
 
-/** Where a command line runs: its starting directory and the home `~` and `$HOME` expand to. */
+/**
+ * One command known to have succeeded before a command starts, and the links before it. Links are
+ * shared between commands, so a long `&&` chain costs one link per command.
+ */
+export interface SucceededLink {
+	readonly command: ShellCommand;
+	readonly before: SucceededLink | undefined;
+}
+
+/**
+ * Where a command line runs: its starting directory, `undefined` when the guard cannot place it,
+ * and the home `~` and `$HOME` expand to.
+ */
 export interface ShellScope {
-	cwd: string;
+	cwd: string | undefined;
 	home: string;
+}
+
+/** A command line as {@link parseShellCommands} reads it. */
+export interface ShellLine {
+	/**
+	 * Its top-level simple commands up to its first nested part, one entry per pipeline, in order,
+	 * empty for one with no simple command (`a=1`, `{ ...; }`).
+	 */
+	pipelines: ShellCommand[][];
+	/**
+	 * For each pipeline, by index, the first later one that may start before it finishes, from
+	 * which on the rest of the line may run while it does: the first after its and-or list when `&`
+	 * runs that list in the background. `undefined` when every later pipeline waits for it.
+	 */
+	overlapFrom: (number | undefined)[];
+	/**
+	 * Whether it has a part the guard does not read as commands, where commands can run unseen: a
+	 * nested part, where reading stops ({@link nestedAt}: a substitution, any `(`, a heredoc), a
+	 * compound command or function definition, or an `env -S` string.
+	 */
+	nested: boolean;
 }
 
 /** `$HOME` (also in braces) at the start of a word. */
@@ -596,7 +637,7 @@ export function resolveShellWordPath(word: string, cwd: string | undefined, home
  * The absolute path a word of `command` names, as {@link resolveShellWordPath} resolves it, except
  * that a leading `~` the source quoted ({@link ShellCommand.literalTildes}) stays a plain character.
  */
-function resolveCommandWordPath(
+export function resolveCommandWordPath(
 	command: ShellCommand,
 	word: string,
 	cwd: string | undefined,
@@ -1091,6 +1132,14 @@ const ENV_SPLIT_OPTION = { letter: "S", long: "--split-string", shortest: "--s" 
  */
 const WRAPPER_ASSIGNMENT_RE = /^[^=-][^=]*=/;
 
+/** A simple command's words with its wrappers peeled off ({@link unwrapShellCommand}). */
+interface UnwrappedCommand {
+	argv: string[];
+	moved: boolean;
+	spawned: boolean;
+	assignments: string[];
+}
+
 /**
  * Whether `command`'s options from `words[start]` on ask it to describe its operand instead of
  * running it: a `-v` or `-V` anywhere among them (`command -p -v cat`, `command -pV cat`).
@@ -1108,17 +1157,19 @@ function looksUpCommand(words: readonly string[], start: number): boolean {
  * The command a wrapper chain runs in `words` (`sudo env X=1 timeout 5 rm ...` runs `rm ...`), after
  * the shell's own assignments (an identifier name only: bash runs `A-B=1 cmd` as a command named
  * `A-B=1`) and a `!`, whether a wrapper's directory option ({@link SHELL_WRAPPER_CHDIRS}) moves it
- * to another directory, and whether a process wrapper ran it ({@link ShellCommand.spawned}). A long
- * option may be abbreviated, as getopt allows (`--us root`); in a bundle of short options
- * (`-nu root`), the first that takes a value takes the rest of the word, or the next word when it
- * ends the bundle. env and sudo also take the variables they set ({@link WRAPPER_ASSIGNMENT_RE}).
- * `undefined` when env runs the command an `env -S` string holds, which the guard does not split.
+ * to another directory, whether a process wrapper ran it ({@link ShellCommand.spawned}), and the
+ * variable assignments it runs with, the shell's own and those env and sudo set
+ * ({@link WRAPPER_ASSIGNMENT_RE}), in order. A long option may be abbreviated, as getopt allows
+ * (`--us root`); in a bundle of short options (`-nu root`), the first that takes a value takes the
+ * rest of the word, or the next word when it ends the bundle. `undefined` when env runs the command
+ * an `env -S` string holds, which the guard does not split.
  */
-function unwrapShellCommand(
-	words: readonly string[],
-): { argv: string[]; moved: boolean; spawned: boolean } | undefined {
+function unwrapShellCommand(words: readonly string[]): UnwrappedCommand | undefined {
 	let i = 0;
-	while (i < words.length && (SHELL_ASSIGNMENT.test(words[i]) || words[i] === "!")) i++;
+	const assignments: string[] = [];
+	for (; i < words.length && (SHELL_ASSIGNMENT.test(words[i]) || words[i] === "!"); i++) {
+		if (words[i] !== "!") assignments.push(words[i]);
+	}
 	let moved = false;
 	let wrapper: string | undefined;
 	let spawned = false;
@@ -1137,7 +1188,7 @@ function unwrapShellCommand(
 			if (options && arg === "--") {
 				options = false;
 			} else if (assigns && WRAPPER_ASSIGNMENT_RE.test(arg)) {
-				// A variable it sets.
+				assignments.push(arg);
 			} else if (options && name === "env" && arg === "-") {
 				// `env -`, the same as `env -i`.
 			} else if (options && arg.startsWith("--")) {
@@ -1168,7 +1219,7 @@ function unwrapShellCommand(
 	const argv = words.slice(i);
 	// `env` alone prints the environment.
 	if (argv.length === 0 && wrapper !== undefined) argv.push(wrapper);
-	return { argv, moved, spawned };
+	return { argv, moved, spawned, assignments };
 }
 
 /** Directories `pushd` saved, the one `popd` returns to first; what is below them is unknown. */
@@ -1226,6 +1277,46 @@ function changeDirectory(command: ShellCommand, dirs: ShellDirectories, home: st
 	return rest.includes("-n") ? { ...dirs, stack: undefined } : moveTo(undefined, undefined);
 }
 
+/**
+ * Which commands are known to have succeeded before the next one starts, as a command line runs.
+ * The pipelines of an and-or list run left to right, each after the status of what ran before it:
+ * after `&&` only when that succeeded, after `||` only when it failed. A pipeline after `&&`
+ * therefore runs only once the pipeline before it ran and succeeded, unless that one followed an
+ * `||` and may have been skipped; one after `||` follows a failure, after which nothing is known to
+ * have succeeded. A pipeline's status is its last stage's, and a negated (`!`) one succeeds when
+ * that fails, so it adds nothing; nor does one that ends in a compound command, whose commands the
+ * guard does not read.
+ */
+class SucceededCommands {
+	/** Known to have succeeded when the current pipeline starts. */
+	#chain: SucceededLink | undefined;
+	/** The current pipeline follows an `||`: it may not have run. */
+	#afterOr = false;
+	/** What the pipeline that just ended leaves known if it ran and succeeded, until the operator after it says. */
+	#ended: SucceededLink | undefined;
+
+	get current(): SucceededLink | undefined {
+		return this.#chain;
+	}
+
+	/** A pipeline ended, `last` the simple command of its last stage, if that is one. */
+	finish(last: ShellCommand | undefined, negated: boolean): void {
+		this.#ended = !negated && last && last.argv.length > 0 ? { command: last, before: this.#chain } : undefined;
+	}
+
+	/** The operator after a pipeline: `&&`, `||`, or one that ends the and-or list (`;`, a newline, `&`). */
+	operator(operator: string): void {
+		if (operator === "&&") {
+			if (!this.#afterOr && this.#ended) this.#chain = this.#ended;
+			this.#afterOr = false;
+		} else {
+			this.#chain = undefined;
+			this.#afterOr = operator === "||";
+		}
+		this.#ended = undefined;
+	}
+}
+
 /** A top-level simple command's words and redirections, as read. */
 class Segment {
 	words: string[] = [];
@@ -1258,23 +1349,31 @@ function markLiteral(literal: Set<string>, bare: Set<string>, word: string, quot
 }
 
 /**
- * The simple command `segment` runs from `cwd`, or `undefined` when it runs none that reads
- * anything; `piped` when an earlier pipeline stage feeds it. The program runs in an unknown
- * directory when a wrapper's directory option moves it (`env -C`).
+ * The simple command `segment` runs from `cwd`, as `unwrapped` unwraps it, after the commands
+ * `succeeded`, or `undefined` when it runs none that reads anything; `piped` when an earlier
+ * pipeline stage feeds it. The program runs in an unknown directory when a wrapper's directory
+ * option moves it (`env -C`).
  */
-function shellCommand(segment: Segment, cwd: string | undefined, piped: boolean): ShellCommand | undefined {
-	const unwrapped = unwrapShellCommand(segment.words);
+function shellCommand(
+	segment: Segment,
+	unwrapped: UnwrappedCommand | undefined,
+	cwd: string | undefined,
+	piped: boolean,
+	succeeded: SucceededLink | undefined,
+): ShellCommand | undefined {
 	const argv = unwrapped?.argv ?? [];
 	if (argv.length === 0 && segment.reads.length === 0) return undefined;
 	if (argv.length > 0 && argv[0].includes("/")) argv[0] = path.posix.basename(argv[0]);
 	return {
 		argv,
+		assignments: unwrapped?.assignments ?? [],
 		reads: segment.reads,
 		fedInput: piped || segment.input,
 		pipedInput: piped && !segment.stdinReplaced,
 		cwd: unwrapped?.moved ? undefined : cwd,
 		shellCwd: cwd,
 		spawned: unwrapped?.spawned === true,
+		succeeded,
 		literalTildes: segment.literalTildes,
 		literalBraces: segment.literalBraces,
 	};
@@ -1295,11 +1394,19 @@ function shellCommand(segment: Segment, cwd: string | undefined, piped: boolean)
  * `eval` and `env -S` strings and scripts fed to a shell are arguments like any other. After a
  * `{ }`, `if`, loop or `case`, or an `eval` or `source`, each of which can change the directory, the
  * directory is unknown. It is a tokenizer, not a shell: variables other than a leading `$HOME`,
- * aliases, and calls to functions are not followed.
+ * aliases, and calls to functions are not followed. Also tracks which commands are known to have
+ * succeeded before each one ({@link ShellCommand.succeeded}), which later pipelines wait for each
+ * one to finish ({@link ShellLine.overlapFrom}), and whether the line has a part it does not read
+ * ({@link ShellLine.nested}).
  */
-export function parseShellCommands(command: string, scope: ShellScope): ShellCommand[][] {
+export function parseShellCommands(command: string, scope: ShellScope): ShellLine {
 	const pipelines: ShellCommand[][] = [];
+	const overlapFrom: (number | undefined)[] = [];
+	// The first pipeline of the current and-or list.
+	let listStart = 0;
 	let dirs: ShellDirectories = { cwd: boundedDirectory(scope.cwd), previous: undefined, stack: undefined };
+	const done = new SucceededCommands();
+	let nested = false;
 	let segment = new Segment();
 	let skipper: CompoundSkipper | undefined;
 	let pipeline: ShellCommand[] = [];
@@ -1308,6 +1415,8 @@ export function parseShellCommands(command: string, scope: ShellScope): ShellCom
 	let stages = 0;
 	let last: ShellCommand | undefined;
 	let changesShell = false;
+	// Whether the current pipeline is negated (`! cmd`, `time ! cmd`).
+	let negated = false;
 	let redirect: string | undefined;
 	// Whether a word here starts a command, where a reserved word opens a compound command: the
 	// words before it can only be `!`, `time`, and the `-p` and `--` of `time`.
@@ -1321,7 +1430,10 @@ export function parseShellCommands(command: string, scope: ShellScope): ShellCom
 			changesShell = skipper.changesShell;
 		} else if (segment.used) {
 			stages++;
-			last = shellCommand(segment, dirs.cwd, stages > 1);
+			const unwrapped = unwrapShellCommand(segment.words);
+			// An `env -S` string, which the guard does not split.
+			if (!unwrapped) nested = true;
+			last = shellCommand(segment, unwrapped, dirs.cwd, stages > 1, done.current);
 			if (last) pipeline.push(last);
 			changesShell = false;
 		}
@@ -1338,10 +1450,17 @@ export function parseShellCommands(command: string, scope: ShellScope): ShellCom
 		} else if (stages === 1 && (changesShell || (last && Object.hasOwn(SHELL_EVALUATORS, last.argv[0])))) {
 			dirs = UNKNOWN_DIRECTORIES;
 		}
+		done.finish(last, negated);
 		pipeline = [];
 		stages = 0;
 		last = undefined;
 		changesShell = false;
+		negated = false;
+	};
+	// An and-or list ended; `&` runs it in the background, so what comes after it can start before it
+	// finishes.
+	const endList = (background: boolean) => {
+		for (; listStart < pipelines.length; listStart++) overlapFrom.push(background ? pipelines.length : undefined);
 	};
 	const { tokens, cut } = lexCommandLine(command);
 	for (const token of tokens) {
@@ -1374,10 +1493,12 @@ export function parseShellCommands(command: string, scope: ShellScope): ShellCom
 				reserved !== undefined &&
 				(Object.hasOwn(COMPOUND_CLOSERS, reserved) || reserved === "function")
 			) {
+				nested = true;
 				skipper = new CompoundSkipper();
 				skipper.add(token);
 				continue;
 			}
+			if (atCommand && stages === 0 && reserved === "!") negated = true;
 			segment.words.push(token.text);
 			atCommand = reserved === "!" || reserved === "time" || (afterTime && (reserved === "-p" || reserved === "--"));
 			afterTime = reserved === "time" || (afterTime && reserved === "-p");
@@ -1390,10 +1511,15 @@ export function parseShellCommands(command: string, scope: ShellScope): ShellCom
 			atCommand = false;
 		} else {
 			endStage();
-			if (!Object.hasOwn(SHELL_PIPES, op)) endPipeline();
+			if (!Object.hasOwn(SHELL_PIPES, op)) {
+				endPipeline();
+				done.operator(op);
+				if (op !== "&&" && op !== "||") endList(op === "&");
+			}
 		}
 	}
 	if (!cut) endStage();
 	endPipeline();
-	return pipelines;
+	endList(false);
+	return { pipelines, overlapFrom, nested: nested || cut };
 }

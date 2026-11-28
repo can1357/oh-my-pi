@@ -51,19 +51,23 @@ import { managedInstallName } from "./cli/managed-install";
 import { getLatestRelease, isSourceCheckout } from "./cli/update-cli";
 import { findConfigFile } from "./config";
 import { cfgNoJudge, cfgNoSpotlight, cfgOffline } from "./config/auxiliary-model-policy";
-import { ModelRegistry } from "./config/model-registry";
+import { type HydrateStartupModelCaches, ModelRegistry } from "./config/model-registry";
+import { applyModelPresetOverrides, applyPresetLaunchThinkingLevel } from "./config/model-presets";
 import { formatModelSelectorValue } from "./config/model-selector";
+import { type ConfiguredThinkingLevel, sanitizeDisplayWarnings } from "./utils/render-utils";
 import {
 	disabledProviderIds,
 	expandRoleAlias,
 	formatModelStringWithRouting,
 	getModelMatchPreferences,
+	modelSelectorProviderHint,
 	resolveCliModel,
 	resolveConfiguredModelPatterns,
 	resolveModelRoleValue,
 	resolveModelScope,
 	type ScopedModel,
 	scopeAllowList,
+	tryResolveExplicitProviderCliModel,
 } from "./config/model-resolver";
 import { ModelsConfigFile } from "./config/models-config";
 import { serviceTierSettingToTier } from "./config/service-tier";
@@ -101,7 +105,7 @@ import {
 	type ComposerLease,
 	stopPendingStartupComposer,
 	takeStartupComposerLease,
-} from "./modes/startup-composer";
+} from "./modes/startup-frame";
 import type { SubmittedUserInput } from "./modes/types";
 import { createWarpEventBridgeExtension } from "./modes/warp-events";
 import { AgentLifecycleManager, type PersistedSubagentReviverFactory } from "./registry/agent-lifecycle";
@@ -145,7 +149,6 @@ import { cfgTelemetryOtlpExportEnabled } from "./telemetry-settings";
 import { registerLocalInferenceApi } from "./tiny/local-inference-api";
 import { automaticThinkingLevel, concreteThinkingLevel, parseConfiguredThinkingLevel } from "./thinking/levels";
 import type { LspStartupServerInfo } from "./tools";
-import { sanitizeDisplayWarnings } from "./utils/render-utils";
 import { getChangelogPath, readLastChangelogVersion, resolveStartupChangelogForDisplay } from "./utils/changelog";
 import { EventBus } from "./utils/event-bus";
 import { resolveFirstLaunchPythonEvalWarning } from "./eval/startup-warning";
@@ -198,7 +201,8 @@ import {
 	cfgSessionWorktreeScope,
 } from "./session/settings";
 import { cfgDisabledProviders, cfgEnabledModels, cfgModelProviderOrder, cfgModelRoles } from "./config/model-settings";
-import { cfgTaskAgentIdleTtlMs } from "./task/settings";
+import { cfgTaskAgentIdleTtlMs, cfgTaskMaxRecursionDepth } from "./task/settings";
+import { canSpawnAtDepth } from "./task/types";
 import { cfgSkillsIncludeSkills } from "./extensibility/settings";
 import { cfgWorkspaceAdditionalDirectories } from "./session/context-settings";
 import { ensureTheme, getTerminalAppearance, initTheme, stopThemeWatcher } from "./ui/theme/service";
@@ -600,13 +604,14 @@ async function resolveAcpApiKeyProvider(
 	parsed: Pick<Args, "model" | "models" | "thinking">,
 	modelRegistry: ModelRegistry,
 	settings: Settings,
+	hydrateModelCaches: HydrateStartupModelCaches,
 ): Promise<{ provider: string } | { error: string }> {
 	// The launch scope names the credential's provider, but must not select the workspace's model.
 	const keyTarget: CreateAgentSessionOptions = {};
 	applyStartupScopedModels(
 		keyTarget,
 		parsed,
-		await resolveScopedModels(parsed, modelRegistry, settings),
+		await resolveScopedModels(parsed, modelRegistry, settings, hydrateModelCaches),
 		settings,
 		false,
 	);
@@ -653,9 +658,15 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 	};
 	return async (cwd, factoryOptions) => {
 		const nextSettings = await args.settings.cloneForCwd(cwd);
-		const nextOptions = { ...args.baseOptions };
+		const hydrateStartupModelCaches = args.modelRegistry.createStartupModelCacheHydrator();
+		const nextOptions = { ...args.baseOptions, hydrateStartupModelCaches };
 		if (args.parsedArgs.models === undefined) {
-			const scope = await resolveScopedModels(args.parsedArgs, args.modelRegistry, nextSettings);
+			const scope = await resolveScopedModels(
+				args.parsedArgs,
+				args.modelRegistry,
+				nextSettings,
+				hydrateStartupModelCaches,
+			);
 			applyStartupScopedModels(nextOptions, args.parsedArgs, scope, nextSettings, false);
 		}
 		if (apiKey) {
@@ -1216,9 +1227,10 @@ function notifyResumeCwdFallback(
 
 /**
  * Resolve the effective model allow-list from an explicit `--models` scope or,
- * failing that, the active project's `enabledModels`. A totally collapsed scope
- * gets one cache-aware discovery pass before session construction: otherwise an
- * all-discovery `--models` launch can select an unrelated static model before the
+ * failing that, the active project's `enabledModels`. Hydrate credential-scoped
+ * catalogs before matching so cached-only models can join the scope. A collapsed
+ * scope gets one cache-aware discovery pass before session construction:
+ * otherwise an all-discovery `--models` launch can select an unrelated static model before the
  * later background rebuild activates the requested scope. The pass only helps
  * providers already known to be discoverable (models.yml `discovery:`, runtime
  * managers); a scope naming only extension-supplied models stays empty here
@@ -1231,11 +1243,13 @@ export async function resolveScopedModels(
 	parsed: Pick<Args, "models">,
 	modelRegistry: Pick<ModelRegistry, "getAvailable" | "getDiscoverableProviders" | "refresh">,
 	activeSettings: Settings,
+	hydrateModelCaches?: HydrateStartupModelCaches,
 ): Promise<ScopedModel[]> {
 	const modelPatterns = parsed.models ?? cfgEnabledModels.get(activeSettings);
 	if (!modelPatterns || modelPatterns.length === 0) {
 		return [];
 	}
+	await hydrateModelCaches?.();
 	const preferences = getModelMatchPreferences(activeSettings);
 	const scopedModels = await resolveModelScope(modelPatterns, modelRegistry, preferences, activeSettings);
 	if (scopedModels.length > 0 || modelRegistry.getDiscoverableProviders().length === 0) {
@@ -1688,6 +1702,7 @@ export async function buildSessionOptions(
 	modelRegistry: ModelRegistry,
 	activeSettings: Settings,
 	warn: (warning: string) => void = writeStartupWarning,
+	hydrateModelCaches: HydrateStartupModelCaches = modelRegistry.createStartupModelCacheHydrator(),
 ): Promise<CreateAgentSessionOptions> {
 	const options: CreateAgentSessionOptions = {
 		cwd: parsed.cwd ?? getProjectDir(),
@@ -1775,13 +1790,23 @@ export async function buildSessionOptions(
 	// against the value that existed when the CLI was invoked.
 	const preModelOverrideDefaultRole = activeSettings.getModelRole("default");
 	if (parsed.model) {
-		const resolved = resolveCliModel({
-			cliProvider: parsed.provider,
-			cliModel: parsed.model,
-			modelRegistry,
-			settings: activeSettings,
-			preferences: modelMatchPreferences,
-		});
+		const provider = parsed.provider?.trim().toLowerCase() || modelSelectorProviderHint(parsed.model);
+		if (provider) await hydrateModelCaches(new Set([provider]));
+		const exact = provider
+			? tryResolveExplicitProviderCliModel(parsed.provider, parsed.model, modelRegistry, disabledProviders)
+			: undefined;
+		// A slash can also belong to a flat id (e.g. an aggregator roster);
+		// only an exact provider-local winner lets us skip the broad fallback.
+		if (!exact) await hydrateModelCaches();
+		const resolved =
+			exact ??
+			resolveCliModel({
+				cliProvider: parsed.provider,
+				cliModel: parsed.model,
+				modelRegistry,
+				settings: activeSettings,
+				preferences: modelMatchPreferences,
+			});
 		if (resolved.warning) warn(resolved.warning);
 		if (resolved.disabledProvider !== undefined) {
 			// Deferring a disabled pin to post-extension resolution would let it
@@ -1867,6 +1892,7 @@ export async function buildSessionOptions(
 		const configuredPatterns = resolveConfiguredModelPatterns(targetSelector, roleLookup);
 		const targetPatterns = configuredPatterns.length > 0 ? configuredPatterns : [targetSelector];
 
+		await hydrateModelCaches();
 		const { resolvePrewalkTarget } = await import("./sdk");
 		const selection = await resolvePrewalkTarget(
 			targetPatterns,
@@ -1889,6 +1915,7 @@ export async function buildSessionOptions(
 		throw new Error("--plan-yolo-into requires --plan-yolo");
 	}
 	if (parsed.planYolo) {
+		await hydrateModelCaches();
 		const rolePattern = expandRoleAlias(parsed.planYoloInto ?? "@smol", activeSettings);
 		const resolved = resolveCliModel({ cliModel: rolePattern, modelRegistry, preferences: modelMatchPreferences });
 		if (resolved.warning) warn(resolved.warning);
@@ -2148,17 +2175,20 @@ export async function runRootCommand(
 		// Account routing must use the effective settings, including `--config` and
 		// `PI_CONFIG_FILES` overlays, rather than independently re-reading only the
 		// main config file during auth discovery.
-		const settingsPromise = deps.settings
-			? Promise.resolve(deps.settings)
-			: logger.time("settings:init", Settings.init, { cwd, configFiles: parsedArgs.config });
-		settingsPromise.catch(() => {});
-		const authStoragePromise = logger.time("discoverAuthStorage", async () =>
-			(deps.discoverAuthStorage ?? discoverAuthStorage)(undefined, { settings: await settingsPromise }),
-		);
-		authStoragePromise.catch(() => {});
+		let settingsInstance: Settings;
 		let authStorage: AuthStorage;
 		try {
-			authStorage = await authStoragePromise;
+			settingsInstance =
+				deps.settings ??
+				(await logger.time("settings:init", Settings.init, { cwd, configFiles: parsedArgs.config }));
+			authStorage = await logger.time(
+				"discoverAuthStorage",
+				deps.discoverAuthStorage ?? discoverAuthStorage,
+				undefined,
+				{
+					settings: settingsInstance,
+				},
+			);
 		} catch (error) {
 			const message = await describeAuthBrokerStartupError(error);
 			if (message === null) throw error;
@@ -2166,7 +2196,6 @@ export async function runRootCommand(
 			process.exit(1);
 		}
 
-		const settingsInstance = await settingsPromise;
 		if (parsedArgs.approvalMode) {
 			// Runtime override (not persisted): every `tools.approvalMode` read downstream
 			// sees this value. The wrapper still honours --auto-approve / --yolo on top of it.
@@ -2198,15 +2227,6 @@ export async function runRootCommand(
 		);
 		// Process-lifetime: broker/account-policy/paused-provider edits reconfigure the shared credential store.
 		createAuthStorageSettingsSync(settingsInstance, authStorage, modelRegistry);
-		// Credential-scoped catalogs (e.g. GitHub Copilot) load from their cache
-		// rows only after credentials resolve. `--model` and `enabledModels` below
-		// resolve against the registry before `createAgentSession` hydrates it, so
-		// without this a cached-only model is absent and its selector fuzzy-matches
-		// a bundled sibling (issue #14075). Local-only and never rejects; awaited
-		// right before the first catalog read so its I/O overlaps theme setup.
-		const credentialScopedCacheHydration = logger.time("hydrateCredentialScopedModelCaches", () =>
-			modelRegistry.hydrateCredentialScopedModelCaches(),
-		);
 		if (parsedArgs.noPty || parsedArgs.mode === "rpc-ui") {
 			Bun.env.PI_NO_PTY = "1";
 		}
@@ -2221,6 +2241,25 @@ export async function runRootCommand(
 
 		// Initialize discovery system with settings for provider persistence
 		logger.time("initializeWithSettings", initializeWithSettings, settingsInstance);
+
+		// Apply --preset first. A later --smol/--slow/--plan flag overrides the
+		// preset's value for that role (ephemeral).
+		let presetThinkingLevel: ConfiguredThinkingLevel | undefined;
+		if (parsedArgs.preset !== undefined) {
+			const presetResult = applyModelPresetOverrides(settingsInstance, parsedArgs.preset);
+			if (presetResult.kind !== "applied") {
+				const rawMessage =
+					presetResult.kind === "missing"
+						? `Model preset not found: ${parsedArgs.preset}`
+						: `Model preset "${parsedArgs.preset}" is malformed: ${presetResult.reason}`;
+				// Both the flag value and a malformed project-config role key reach this
+				// line verbatim, so strip terminal controls and stray whitespace before it
+				// reaches the terminal.
+				process.stderr.write(`${chalk.red(sanitizeDisplayWarnings([rawMessage])[0] ?? rawMessage)}\n`);
+				process.exit(1);
+			}
+			presetThinkingLevel = presetResult.defaultThinkingLevel;
+		}
 
 		// Apply model role overrides from CLI args or env vars (ephemeral, not persisted)
 		const smolModel = parsedArgs.smol ?? $env.PI_SMOL_MODEL;
@@ -2300,12 +2339,12 @@ export async function runRootCommand(
 			},
 		});
 
-		await credentialScopedCacheHydration;
+		let hydrateLaunchModelCaches = modelRegistry.createStartupModelCacheHydrator();
 		// ACP's settings-derived scope belongs to each session/new workspace.
 		const resolveStartupScopedModels = () =>
 			mode === "acp" && parsedArgs.models === undefined
 				? Promise.resolve([])
-				: resolveScopedModels(parsedArgs, modelRegistry, settingsInstance);
+				: resolveScopedModels(parsedArgs, modelRegistry, settingsInstance, hydrateLaunchModelCaches);
 		let scopedModels = await logger.time("resolveModelScope", resolveStartupScopedModels);
 
 		// Resolve an explicit `--continue <id>` before extension flags are loaded.
@@ -2570,6 +2609,7 @@ export async function runRootCommand(
 				modelRegistry,
 				settingsInstance,
 				startupWarning,
+				hydrateLaunchModelCaches,
 			);
 			options.authStorage = authStorage;
 			options.modelRegistry = modelRegistry;
@@ -2619,7 +2659,7 @@ export async function runRootCommand(
 				// ACP sessions select their own workspace's model, so only the launch scope can name the provider.
 				const launchKey =
 					mode === "acp"
-						? await resolveAcpApiKeyProvider(parsedArgs, modelRegistry, settingsInstance)
+						? await resolveAcpApiKeyProvider(parsedArgs, modelRegistry, settingsInstance, hydrateLaunchModelCaches)
 						: { error: API_KEY_REQUIRES_MODEL };
 				if ("error" in launchKey) {
 					process.stderr.write(`${chalk.red(launchKey.error)}\n`);
@@ -2632,7 +2672,7 @@ export async function runRootCommand(
 			}
 		}
 
-		const sdk = await import("./sdk");
+		const sdk = await logger.time("loadStartupSdk", () => import("./sdk"));
 		const createAgentSessionImpl = deps.createAgentSession ?? sdk.createAgentSession;
 		const createSession = async (options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> => {
 			const result = await logger.time("createAgentSession", createAgentSessionImpl, options);
@@ -2827,7 +2867,11 @@ export async function runRootCommand(
 			};
 			let createdSession: CreateAgentSessionResult;
 			try {
-				createdSession = await createSession({ ...sessionOptions, ...startupContext });
+				createdSession = await createSession({
+					...sessionOptions,
+					...startupContext,
+					hydrateStartupModelCaches: hydrateLaunchModelCaches,
+				});
 			} catch (error) {
 				if (!isInteractive || !autoResumed || !sessionManager || !(error instanceof sdk.SessionModelRestoreError)) {
 					if ((mode === "rpc" || mode === "rpc-ui") && error instanceof sdk.SessionModelRestoreError) {
@@ -2842,9 +2886,14 @@ export async function runRootCommand(
 				// source registrations again before applying it.
 				extensionsResult.runtime.pendingProviderRegistrations.unshift(...preloadProviderRegistrations);
 				const startupDeadline = sessionOptions.deadline;
+				hydrateLaunchModelCaches = modelRegistry.createStartupModelCacheHydrator();
 				sessionOptions = await buildStartupSessionOptions(undefined);
 				sessionOptions.deadline = startupDeadline;
-				createdSession = await createSession({ ...sessionOptions, ...startupContext });
+				createdSession = await createSession({
+					...sessionOptions,
+					...startupContext,
+					hydrateStartupModelCaches: hydrateLaunchModelCaches,
+				});
 				notifs.push({
 					kind: "warn",
 					message: `Auto resume skipped: ${sanitizeDisplayWarnings([error.message])[0]}. Started a new session without the saved history.`,
@@ -2861,6 +2910,13 @@ export async function runRootCommand(
 			if (isInteractive)
 				session.addDisposer(bindAgentMesh(sessionOptions.cwd ?? getProjectDir(), settingsInstance, session));
 			if (!isInteractive) session.validateRetryFallbackChains();
+			// The preset's thinking level seeds the session the way `/modelpreset switch`
+			// applies it, past the model's own default. An explicit `--thinking` or selector
+			// level already set `sessionOptions.thinkingLevel`; a resumed, imported or
+			// auto-resumed session keeps the effort it saved. Seed only a fresh session.
+			if (presetThinkingLevel !== undefined && !explicitSessionSelection && !autoResumed) {
+				applyPresetLaunchThinkingLevel(session, presetThinkingLevel, sessionOptions.thinkingLevel);
+			}
 
 			const sessionToolNames = session.getAllToolNames();
 			try {
@@ -2872,6 +2928,17 @@ export async function runRootCommand(
 				const evalWarning = sessionToolNames.includes("eval") ? undefined : await pythonEvalWarningPromise;
 				if (evalWarning && error instanceof CliUsageError) {
 					throw new CliUsageError(`${error.message}\n${evalWarning}`);
+				}
+				const maxRecursionDepth = cfgTaskMaxRecursionDepth.get(settingsInstance);
+				if (
+					error instanceof CliUsageError &&
+					initialArgs.tools?.includes("task") &&
+					!sessionToolNames.includes("task") &&
+					!canSpawnAtDepth(maxRecursionDepth, 0)
+				) {
+					throw new CliUsageError(
+						`${error.message}\n\`task\` is disabled by task.maxRecursionDepth: ${maxRecursionDepth}; set it to 1 or higher to allow subagents.`,
+					);
 				}
 				throw error;
 			}

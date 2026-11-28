@@ -23,6 +23,7 @@
  */
 import { logger } from "@oh-my-pi/pi-utils";
 import type { FramePlan } from "../contract";
+import { alternatePlacement, rasterDamage } from "../images/viewport";
 import type { KeyboardScreenModes } from "../io";
 import {
 	ALT_ENTER,
@@ -124,7 +125,7 @@ export interface FrameWriterOptions {
 	 * replays history instead of trusting the damaged copy.
 	 */
 	readonly growsBeforeResize?: () => boolean;
-	/** Default `preserve`. */
+	/** Initial {@link FrameWriter.setResizeScrollback} policy. Default `preserve`. */
 	readonly resizeScrollback?: ResizeScrollback;
 	/** Quiet window ending a resize burst, in ms. Default 100. */
 	readonly settleMs?: number;
@@ -213,6 +214,8 @@ export class FrameWriter {
 	/** Cursor row/column relative to the viewport top (column -1: unknown). */
 	#cursorRow = 0;
 	#cursorCol = 0;
+	/** The shell's line may be partial (including a missing CPR); only the first inline frame may advance it. */
+	#partialShellLine = false;
 	/** Rows clipped from the start of the last inline frame. */
 	#clipped = 0;
 	/** Bounds on the viewport top's screen row; equal when known. */
@@ -229,6 +232,9 @@ export class FrameWriter {
 	#fullscreen = false;
 	/** Rows on the alternate screen, null to repaint all. */
 	#altShown: string[] | null = null;
+	/** Deletes for direct Kitty bands on alt. Resizing invalidates row diffs but need not discard placements. */
+	#altPlacements?: Set<string>;
+	#altAnchors = false;
 
 	/** The next inline frame clears screen and scrollback first (display reset, rebuild). */
 	#pendingClear = false;
@@ -262,12 +268,19 @@ export class FrameWriter {
 	#pushed: string[] = [];
 	/** Where the cursor report after that shrink must find the cursor for `#pushed` to hold; undefined once checked. */
 	#pushedCursor: number | undefined;
+	#resizeScrollback: ResizeScrollback;
 
 	constructor(options: FrameWriterOptions) {
 		this.#options = options;
 		this.#sink = options.sink;
 		this.#columns = Math.max(1, options.columns);
 		this.#rows = Math.max(1, options.rows);
+		this.#resizeScrollback = options.resizeScrollback ?? "preserve";
+	}
+
+	/** Retained-history policy for resizes that settle from now on (`tui.resizeScrollback`, changeable live). */
+	setResizeScrollback(mode: ResizeScrollback): void {
+		this.#resizeScrollback = mode;
 	}
 
 	get columns(): number {
@@ -302,7 +315,7 @@ export class FrameWriter {
 	 * known (CPR at startup); otherwise the viewport top stays unknown until
 	 * content fills the screen.
 	 */
-	start(cursor?: { readonly row: number; readonly col: number } | null): void {
+	start(cursor?: { readonly row: number; readonly col: number } | null, deferShellLine = false): void {
 		this.#epoch++;
 		this.#started = true;
 		this.#shown = [];
@@ -321,9 +334,10 @@ export class FrameWriter {
 		this.#deferred = undefined;
 		this.#pushed = [];
 		this.#pushedCursor = undefined;
+		this.#partialShellLine = deferShellLine && (!cursor || cursor.col > 0);
 		if (cursor) {
 			let row = Math.min(Math.max(0, cursor.row), this.#rows - 1);
-			if (cursor.col > 0) {
+			if (cursor.col > 0 && !this.#partialShellLine) {
 				// Leave a partial line the shell left behind.
 				this.#send("\r\n");
 				row = Math.min(row + 1, this.#rows - 1);
@@ -378,13 +392,13 @@ export class FrameWriter {
 	 * the writer stops, so a shutdown flush is not lost.
 	 */
 	hold(frame: FramePlan): void {
-		if (this.#started && !frame.fullscreen) this.#deferred = frame;
+		if (this.#started) this.#deferred = frame.fullscreen ? undefined : frame;
 	}
 
 	/** Whether a settled width change replays history (the policy rebuilds or appends it, not in place). */
 	replaysOnWidthChange(): boolean {
 		if (this.#options.inPlaceResize?.() || !(this.#options.canReplay?.() ?? false)) return false;
-		return (this.#options.hostOwnsGrid?.() ?? false) || (this.#options.resizeScrollback ?? "preserve") !== "preserve";
+		return (this.#options.hostOwnsGrid?.() ?? false) || this.#resizeScrollback !== "preserve";
 	}
 
 	/** Write bytes that bypass frame diffing (protocol messages). */
@@ -498,14 +512,15 @@ export class FrameWriter {
 	 * autowrap and the cursor. The caller restores input modes and flushes the
 	 * sink.
 	 */
-	stop(): void {
+	stop(emergency = false): void {
 		if (!this.#started) return;
 		this.#epoch++;
 		this.#started = false;
 		this.#anchoring = false;
 		this.#resize?.cancel?.();
 		this.#resize = undefined;
-		const deferred = this.#deferred;
+		// Do not take a cached transcript flush through the renderer when urgently handing back alt.
+		const deferred = emergency && this.#alt ? undefined : this.#deferred;
 		this.#deferred = undefined;
 		if (deferred) {
 			// The cursor is where the viewport starts (an alternate-screen exit restores it there); a viewport
@@ -517,6 +532,11 @@ export class FrameWriter {
 		}
 		let out = "";
 		if (this.#alt) out += this.#leaveAlt();
+		if (this.#partialShellLine) {
+			// Nothing took the normal-screen cursor. Even CR would move the next shell output.
+			this.#send(`${out}${AUTOWRAP_ON}${CURSOR_SHOW}`);
+			return;
+		}
 		const content = this.#shown.findLastIndex(row => row !== "");
 		if (this.#stale) {
 			// Mid-resize: the cursor sits where the reflow left it.
@@ -587,25 +607,29 @@ export class FrameWriter {
 	#paintInline(frame: FramePlan, prefix: string): number | undefined {
 		const width = this.#columns;
 		const height = this.#rows;
-		let body = prefix;
+		let body = "";
 		const offered = frame.history;
 		const history = offered && offered.id > this.#written ? offered : undefined;
 		if (history?.kind === "replay") {
 			if (this.#replayAppends) this.#replayAppends = false;
 			else this.#pendingClear = true;
 		}
-		let lead = "";
+		let lead = prefix;
 		if (this.#pendingClear) {
-			// The erase goes before the image sequences: it frees images without a placement.
-			lead = body + CLEAR_ALL;
-			body = "";
+			// Switch buffers and erase before uploading pictures to the destination buffer.
+			lead += CLEAR_ALL;
 			this.#options.images?.cleared?.();
 			this.#pendingClear = false;
 			this.#shown = [];
 			this.#cursorRow = 0;
 			this.#topLo = this.#topHi = 0;
 			this.#extent = height;
+		} else if (this.#partialShellLine) {
+			lead += "\r\n";
+			this.#topLo = Math.min(this.#topLo + 1, height - 1);
+			this.#topHi = Math.min(this.#topHi + 1, height - 1);
 		}
+		this.#partialShellLine = false;
 		const previousGraphics = this.#shown.length > 0 && this.#shownGraphics;
 		this.#clipped = Math.max(0, frame.viewport.length - height);
 		let viewport = this.#normalizeViewport(frame.viewport, width, this.#clipped);
@@ -741,6 +765,7 @@ export class FrameWriter {
 
 	#enterAlt(): string {
 		this.#options.images?.enteredAlternate?.();
+		this.#altPlacements = undefined;
 		this.#alt = true;
 		this.#altShown = null;
 		this.#visible = undefined;
@@ -754,6 +779,7 @@ export class FrameWriter {
 		this.#fullscreen = false;
 		this.#altShown = null;
 		this.#visible = undefined;
+		this.#altPlacements = undefined;
 		this.#expectEcho = this.#echoes();
 		return `${modes?.leaveAltBefore ?? ""}${ALT_LEAVE}${modes?.leaveAltAfter ?? ""}`;
 	}
@@ -764,23 +790,37 @@ export class FrameWriter {
 	}
 
 	#paintAlternate(rows: readonly string[], cursor: FramePlan["cursor"], prefix: string, fullscreen: boolean): void {
-		let body = prefix;
-		if (!this.#alt) body += this.#enterAlt();
+		let lead = this.#alt ? prefix : prefix + this.#enterAlt();
+		let body = "";
 		this.#fullscreen = fullscreen;
 		const height = this.#rows;
 		const width = this.#columns;
 		const shown = this.#altShown ?? [];
 		const next: string[] = [];
+		let placements: Set<string> | undefined;
+		let anchors = false;
 		for (let row = 0; row < height; row++) {
 			const text = normalizeRow(rows[row] ?? "", width);
-			next.push(text);
-			if (this.#altShown && shown[row] === text) continue;
+			anchors ||= text.includes("\x1b7\x1b[");
+			const placement = alternatePlacement(text, row);
+			next.push(placement?.row ?? text);
+			if (placement) (placements ??= new Set()).add(placement.deletion);
+		}
+		if (this.#altPlacements) {
+			for (const deletion of this.#altPlacements) if (!placements?.has(deletion)) lead += deletion;
+		}
+		this.#altPlacements = placements;
+		const damaged = this.#altShown && (anchors || this.#altAnchors) ? rasterDamage(shown, next) : undefined;
+		this.#altAnchors = anchors;
+		for (let row = 0; row < height; row++) {
+			const text = next[row]!;
+			if (this.#altShown && shown[row] === text && !damaged?.[row]) continue;
 			body += `${position(row, 0)}${drawRow(text, width, coveredCells(next, row))}`;
 		}
 		this.#altShown = next;
 		const show = cursor !== null && cursor.row >= 0 && cursor.row < height;
 		const park = show ? position(cursor.row, Math.min(cursor.col, width - 1)) : body ? position(height - 1, 0) : "";
-		this.#write(body, park, show);
+		this.#write(body, park, show, lead);
 	}
 
 	/** The viewport tail, bottom-anchored on the borrowed alternate screen. */
@@ -841,7 +881,7 @@ export class FrameWriter {
 		const widthChanged = tx.columns !== this.#columns;
 		const ownsGrid = this.#options.hostOwnsGrid?.() ?? false;
 		const canReplay = this.#options.canReplay?.() ?? false;
-		const mode = this.#options.resizeScrollback ?? "preserve";
+		const mode = this.#resizeScrollback;
 		if (this.#alt && this.#fullscreen && !this.#inlineWritten) {
 			// Only fullscreen frames so far: nothing of ours on the normal screen to rebuild or re-anchor.
 			// The first inline frame (the shutdown flush) starts wherever the cursor is.
@@ -933,7 +973,7 @@ export class FrameWriter {
 			tx?.grew &&
 			tx.full &&
 			this.#topLo + stale < height &&
-			(this.#options.resizeScrollback ?? "preserve") === "rebuild" &&
+			this.#resizeScrollback === "rebuild" &&
 			(this.#options.canReplay?.() ?? false) &&
 			(this.#options.growsBeforeResize?.() ?? false)
 		) {

@@ -425,6 +425,7 @@ function apiKeyLogin(node: KdlNodeView): CompiledApiKeyLogin {
 function callback(node: KdlNodeView): CompiledCallback {
 	validateProps(node, [
 		"port",
+		"port-env",
 		"path",
 		"hostname",
 		"redirect-uri",
@@ -444,6 +445,11 @@ function callback(node: KdlNodeView): CompiledCallback {
 		manualOnly: propBool(node, "manual-only") ?? false,
 		nativeScheme: propBool(node, "native-scheme") ?? false,
 	};
+	const portEnv = propString(node, "port-env");
+	if (portEnv !== undefined) {
+		if (!portEnv) malformed(node);
+		result.portEnv = portEnv;
+	}
 	const redirectUri = propString(node, "redirect-uri");
 	const redirectUriEnv = propString(node, "redirect-uri-env");
 	if (redirectUri !== undefined || redirectUriEnv !== undefined) {
@@ -817,6 +823,21 @@ function provider(node: KdlNodeView): CompiledAuthProvider {
 				leaf(child, []);
 				result.activeNotice = singleString(child);
 				if (!result.activeNotice.trim()) malformed(child);
+				break;
+			case "login-notice":
+				leaf(child, []);
+				result.loginNotice = singleString(child);
+				if (!result.loginNotice.trim()) malformed(child);
+				break;
+			case "manage-url":
+				leaf(child, []);
+				result.manageUrl = singleString(child);
+				if (!URL.canParse(result.manageUrl)) malformed(child);
+				break;
+			case "required-scope":
+				leaf(child, []);
+				result.requiredScope = singleString(child);
+				if (!result.requiredScope.trim() || /\s/.test(result.requiredScope)) malformed(child);
 				break;
 			case "store-as":
 				leaf(child, []);

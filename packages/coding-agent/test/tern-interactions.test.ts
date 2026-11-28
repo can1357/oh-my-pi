@@ -14,7 +14,7 @@ type Element = typeof element.infer;
 const tern = $which("tern");
 const available = Boolean(tern) && process.platform !== "win32";
 test.skipIf(!available && Bun.env.OMP_REQUIRE_TERN !== "1")(
-	"real Tern pointer controls change the model without losing the composed draft",
+	"real Tern pointer controls preserve the draft and annotate a highlighted source line",
 	async () => {
 		if (!tern || !available)
 			throw new Error("test:tern requires Tern with `serve` and `ctl` on PATH and a POSIX shell");
@@ -31,6 +31,11 @@ test.skipIf(!available && Bun.env.OMP_REQUIRE_TERN !== "1")(
 		};
 		await fs.mkdir(home);
 		await Bun.write(dir.join("sample-note.txt"), "Local completion target\n");
+		const annotationSource = ['const greeting = "hello";', "const answer = 42;", "console.log(greeting);", ""].join(
+			"\n",
+		);
+		const annotationNote = "Check this exact value.";
+		await Bun.write(dir.join("sample-source.ts"), annotationSource);
 		await Bun.write(
 			path.join(agent, "models.yml"),
 			JSON.stringify({
@@ -106,6 +111,7 @@ test.skipIf(!available && Bun.env.OMP_REQUIRE_TERN !== "1")(
 			}
 			await ctl("size", "1200", "800", "2");
 			await ctl("ready");
+			// The temporary cwd and HOME isolate discovery. --no-extensions also hides bundled /annotate.
 			await enterText(
 				`${quotePosixArgv(["cd", dir.path()])} && exec ${quotePosixArgv([
 					"env",
@@ -117,9 +123,10 @@ test.skipIf(!available && Bun.env.OMP_REQUIRE_TERN !== "1")(
 					"TERM=xterm-256color",
 					"TERM_PROGRAM=tern",
 					"OMP_SKIP_SETUP=1",
+					// Test runtime: keeps omp off the OS keychain.
+					"PI_TEST_RUNTIME=1",
 					process.execPath,
 					path.resolve(import.meta.dir, "../src/cli.ts"),
-					"--no-extensions",
 					"--no-skills",
 					"--no-rules",
 					"--no-lsp",
@@ -136,7 +143,7 @@ test.skipIf(!available && Bun.env.OMP_REQUIRE_TERN !== "1")(
 			await draft("discard me");
 			await ctl("key", process.platform === "darwin" ? "Meta+a" : "Ctrl+a");
 			await enterText("keep @sample-no");
-			await click(await visible(".sf-item", n => n.text?.includes("sample-note.txt") === true, "file suggestion"));
+			await click(await visible(".pk-row", n => n.text?.includes("sample-note.txt") === true, "file suggestion"));
 			const kept = "keep @sample-note.txt";
 			await draft(kept);
 
@@ -153,7 +160,41 @@ test.skipIf(!available && Bun.env.OMP_REQUIRE_TERN !== "1")(
 			await click(await visible(".pk-row.sel", n => n.text?.includes("beta") === true, "selected beta result"));
 			await chip("beta");
 			await draft(kept);
-			expect((await ctl("tree", ".sf-layer > .sf-picker")).nodes).toEqual([]);
+			// The chip update and closing the native picker are separate frames.
+			const closeDeadline = performance.now() + 10_000;
+			let pickers = (await ctl("tree", ".sf-layer > .sf-picker")).nodes;
+			while (pickers?.length && performance.now() < closeDeadline && server.exitCode === null) {
+				await Bun.sleep(25);
+				pickers = (await ctl("tree", ".sf-layer > .sf-picker")).nodes;
+			}
+			expect(pickers).toEqual([]);
+			await ctl("key", process.platform === "darwin" ? "Meta+a" : "Ctrl+a");
+			await enterText("/annotate sample-source.ts");
+			await ctl("key", "Enter");
+
+			const reviewList = '.sf-list[data-role="omp.review.text"]';
+			await visible(`${reviewList} .sf-t-info`, node => node.text === "const", "highlighted TypeScript keyword");
+			await ctl("size", "850", "700", "2");
+			const isSecondLine = (node: Element) => node.text?.includes("const answer = 42;") === true;
+			await click(await visible(`${reviewList} .sf-item`, isSecondLine, "visible source line 2"));
+			await visible(`${reviewList} .sf-item[aria-selected="true"]`, isSecondLine, "selected source line 2");
+			await ctl("key", "a");
+			await visible(".sf-text", node => node.text === "Note on line 2", "note editor for the selected line");
+			await enterText(annotationNote);
+			await ctl("key", "Enter");
+			await visible(`${reviewList} .sf-item`, node => node.text?.includes(annotationNote) === true, "saved note");
+			await click(
+				await visible(
+					'[data-role="omp.actions"] [data-role="omp.btn"]',
+					node => node.text === "Paste into prompt",
+					"paste annotations action",
+				),
+			);
+			await visible(
+				'.sf-card[data-role="omp.composer.chip"]',
+				node => node.text?.includes("Feedback on") === true,
+				"annotation feedback pasted into the composer",
+			);
 		} catch (error) {
 			if (await log.exists()) console.error((await log.text()).slice(-1600));
 			throw error;

@@ -44,7 +44,7 @@ import {
 import { shellChangeSnapshots } from "../commit/selective/journal";
 import { type BoardEntry, registerOnBoard } from "../daemon/client";
 import { applyDirenvPreflight, type BashResult, executeBash, sessionShellEnv } from "../exec/bash-executor";
-import { BASH_SESSION_ENV } from "../exec/session-processes";
+import { BASH_SESSION_ENV, bashSessionTag } from "../exec/session-processes";
 import { shellMounts, shellProcessCommand } from "../exec/shell-process";
 import { createToolCommandHandler, toolCommandNames } from "../exec/tool-command-host";
 import { InternalUrlRouter } from "../internal-urls";
@@ -68,7 +68,7 @@ import { TerminalGraphicsDecoder } from "../utils/terminal-graphics";
 import { appendImageLinks } from "../utils/image-temp";
 import type { ToolSession } from ".";
 import { owningSessionId } from "./session-id";
-import { canToolAllowAvoidPrompt, truncateForPrompt } from "./approval";
+import { canToolAllowAvoidPrompt, resolveApprovalFromContext, truncateForPrompt } from "./approval";
 import { type BashInteractiveResult, runInteractiveBashPty } from "./bash-interactive";
 import type { ShellTrace } from "@oh-my-pi/pi-wire";
 import { applyPatchShellInput } from "./bash-apply-patch";
@@ -100,7 +100,16 @@ import {
 	tokenizeShellSegments,
 	withoutLeadingEnvironmentAssignments,
 } from "./shell-tokenize";
-import { findPipelineGuardHits, findShellGuardHit, type GuardHit } from "./guard-rules";
+import {
+	bindGuardProbeScope,
+	callProbeBudget,
+	findPipelineGuardHits,
+	findShellGuardHit,
+	type GuardHit,
+	type GuardScope,
+	inGuardProbeScope,
+	type ShellGuardOptions,
+} from "./guard-rules";
 import { ToolAbortError } from "./tool-errors";
 import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
@@ -167,19 +176,28 @@ export function wrapShellLineForClientTerminal(
 	return { command: shellConfig.shell, args: [...shellConfig.args, finalLine] };
 }
 
+// Scan complete operands so a protected target can follow ordinary paths, but
+// never borrow an operand from a later shell command.
+const RM_WORD = /(?!#)(?:[^\s;&|()<>"'`\\]|\\[^\n]|"[^"\\]*(?:\\.[^"\\]*)*"|'[^']*')+/u;
+// Include individual home roots and the macOS backing paths for /etc and /var.
+const RM_PROTECTED_TARGET =
+	/(?:\/+(?:\.\/+)*(?:(?:Applications|bin|boot|dev|etc|lib(?:32|64|x32)?|opt|proc|root|sbin|sys|usr|var|Library|System|(?:home|Users)(?:\/+[^/\s;&|()<>"'`\\]+)?|private(?:\/+(?:etc|var))?)(?:\/+\.)*(?:\/+\*?)?|[.*])?|(?:~|\$(?:HOME|\{HOME\}))(?:\/+\.)*(?:\/+\*?)?)/u;
+const CRITICAL_RM_PATTERN = new RegExp(
+	String.raw`\brm[ \t]+(?:-[^\s;&|()<>"'\x60]+[ \t]+)*(?:-[a-z]*[rf][a-z]*|--recursive|--force)[ \t]+` +
+		String.raw`(?:${RM_WORD.source}[ \t]+)*?(["']?)${RM_PROTECTED_TARGET.source}\1(?=["'\x60]?(?:[\s;&|()<>]|$))`,
+	"iu",
+);
+
 /**
  * Bash patterns flagged as safety critical for approval policy.
  *
- * Kept intentionally tight — the cost of a false negative is data loss or a compromised host,
- * while false positives remain actionable through user policy control.
+ * Kept intentionally tight: outside yolo, built-in critical patterns force a
+ * prompt even when the user allows bash.
  * New patterns should target shapes that are virtually never legitimate in automation.
  */
 export const CRITICAL_BASH_PATTERNS = [
-	// Recursive destruction.
-	// Options may sit on either side of the recursive/force flag, so only that flag is pinned and
-	// any other options are skipped: `rm -rf /`, `rm -rf -- /`, `rm --recursive --force /`,
-	// `rm -rf -v /`, `rm -v -rf /`. An absolute target is still required.
-	/\brm\s+(?:-\S+\s+)*(?:-[a-z]*[rRfF][a-z]*|--recursive|--force)\s+(?:-\S+\s+)*\//i,
+	// Recursive/forced removal of the filesystem, system-directory, or home roots.
+	CRITICAL_RM_PATTERN,
 	// `--no-preserve-root` defeats coreutils' own refusal to recurse on `/`, so it is critical
 	// wherever it appears — including forms this list would otherwise reach only via the target.
 	/\brm\s+(?:-\S+\s+)*--no-preserve-root\b/i,
@@ -871,7 +889,35 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		return isToolCommandLine(command, new Set(toolCommandNames(this.session)));
 	}
 
-	readonly approval = (args: unknown, ctx?: AgentToolContext, query?: ToolApprovalQuery): ToolApprovalDecision => {
+	readonly approval = (args: unknown, ctx?: AgentToolContext, query?: ToolApprovalQuery): ToolApprovalDecision =>
+		this.#decide(args, ctx, query, this.#probeCanChangeDecision(ctx));
+
+	/** The extension wrapper's binding before its final gate: the gate and the prompt rows share a probe budget. */
+	readonly bindApprovalTargets = (): void => bindGuardProbeScope();
+
+	/**
+	 * Whether a `discard_changes`/`kills_harness` probe can change how this call resolves. A lookup
+	 * with no call context outside the call's own approval (the agent loop's scheduling lookup) only
+	 * reads the tier, which no probe changes. Under `yolo` a bare safety override is ignored, so a
+	 * hit only matters when the user set a `tools.approval.bash` policy (a hit then replaces a
+	 * `bash.patterns` allow). The mode is the one `resolveApproval` resolves this call under, which a
+	 * caller can choose apart from the settings (the ACP permission gate asks under `always-ask` when
+	 * `yolo` is only the schema default); a direct call resolves it the way the extension wrapper
+	 * does: from the call context, else the session settings.
+	 */
+	#probeCanChangeDecision(ctx: AgentToolContext | undefined): boolean {
+		if (!ctx && !inGuardProbeScope()) return false;
+		const { approvalMode, userPolicies } =
+			ctx?.approvalResolution ?? resolveApprovalFromContext(ctx ?? { settings: this.session.settings });
+		return approvalMode !== "yolo" || Object.hasOwn(userPolicies, this.name);
+	}
+
+	#decide(
+		args: unknown,
+		ctx: AgentToolContext | undefined,
+		query: ToolApprovalQuery | undefined,
+		probe: boolean,
+	): ToolApprovalDecision {
 		const input = (args ?? {}) as Partial<BashToolInput>;
 		const rawCommand = input.command;
 		const command = typeof rawCommand === "string" ? rawCommand : "";
@@ -890,11 +936,15 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		if (interception) {
 			return { tier: "exec", override: true, policy: "deny", reason: interception.replace(/^Blocked:\s*/u, "") };
 		}
+		// A line made only of tool commands runs no program: its text is tool arguments, so
+		// `bash.patterns` and critical patterns would only match data. Each tool command passes
+		// its own approval when it runs; the line itself only reads.
+		if (isToolCommandLine(command, toolCommands)) return "read";
 		const { session: policy, authority } = this.#patternPolicies();
 		// Without `bash.patterns` rules the native analysis only feeds critical-command prompts,
 		// which a caller that cannot prompt (yolo, tier-only reads) never shows.
 		if (query?.prompts === false && policy.rules.length === 0 && authority.rules.length === 0) {
-			return isToolCommandLine(command, toolCommands) ? "read" : "exec";
+			return "exec";
 		}
 		const allowCompound = cfgBashAllowCompoundCommands.get(this.session.settings);
 		const shell = this.session.settings.getShellConfig().shell;
@@ -966,23 +1016,41 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				}
 			}
 		}
-		const guardHit = this.#guardHit(command);
+		const guardHit = this.#guardHit(command, {
+			probe,
+			budget: probe ? callProbeBudget(command, ctx?.toolCall) : undefined,
+		});
 		if (guardHit) return { tier: "exec", override: true, reason: guardHit.reason };
-		// Each tool command passes its own approval when it runs; the line itself only reads.
-		if (isToolCommandLine(command, toolCommands)) return "read";
 		if (decision.kind === "allow") return { tier: "write", policy: "allow" };
 		return "exec";
-	};
+	}
 	/**
 	 * The fixed guard rule (`tools.guardRules`) `command` breaks over its top-level commands, or
 	 * `undefined`, as always with the setting off. The critical patterns are not among the rules:
 	 * they match the raw command line either way. The rules see the call start in the session cwd
 	 * and follow a leading `cd` that execution hoists as part of the command.
 	 */
-	#guardHit(command: string): GuardHit | undefined {
+	#guardHit(command: string, options: ShellGuardOptions): GuardHit | undefined {
 		return cfgToolsGuardRules.get(this.session.settings)
-			? findShellGuardHit(command, { cwd: this.session.cwd ?? process.cwd(), home: os.homedir() })
+			? findShellGuardHit(command, this.#guardScope(command), options)
 			: undefined;
+	}
+	/**
+	 * Where the fixed guard rules see `command` start: the session cwd. A leading `cd ... &&` that
+	 * execution hoists onto a target with no host directory the guard can place (an internal URL such
+	 * as `local://notes`, or one execution cannot resolve, such as `@local://notes`) leaves the
+	 * probing rules an unknown starting directory ({@link GuardScope.cwdStandIn}).
+	 */
+	#guardScope(command: string): GuardScope {
+		const scope: GuardScope = { cwd: this.session.cwd ?? process.cwd(), home: os.homedir() };
+		const cd = extractLeadingCdTarget(command);
+		if (cd?.separator !== "&&") return scope;
+		try {
+			resolveShellDirectory(cd.path, scope.cwd);
+			return scope;
+		} catch {
+			return { ...scope, cwdStandIn: true };
+		}
 	}
 	/**
 	 * `bash.patterns` rules and env allowlist for the session (`session`) and for the operator layers
@@ -1051,12 +1119,18 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			!segmentCritical.some(Boolean);
 		if (wholeChainOnlyCritical) return null;
 		// Each clause is one pipeline of the guard's parse of the whole chain, checked from the directory
-		// the clauses before it leave. A hit no clause can carry (`size_limit`), or a parse with more
-		// pipelines than clauses, leaves the chain to the plain command row.
+		// the clauses before it leave, after the commands known to have succeeded before it. A hit no
+		// clause can carry (`size_limit`), or a parse with more pipelines than clauses, leaves the chain
+		// to the plain command row. The rows are checks for this call: their probes share the budget of
+		// the call's approval paths, so they ask nothing the gate already asked.
+		const budget = callProbeBudget(command);
 		const segmentGuards = cfgToolsGuardRules.get(this.session.settings)
-			? findPipelineGuardHits(command, { cwd: this.session.cwd ?? process.cwd(), home: os.homedir() })
+			? findPipelineGuardHits(command, this.#guardScope(command), { budget })
 			: [];
-		if (segmentGuards.length > clauses.length || (!segmentGuards.some(Boolean) && this.#guardHit(command))) {
+		if (
+			segmentGuards.length > clauses.length ||
+			(!segmentGuards.some(Boolean) && this.#guardHit(command, { budget }))
+		) {
 			return null;
 		}
 
@@ -1244,8 +1318,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const sessionId = owningSessionId(this.session) ?? "";
 		return {
 			...sessionShellEnv({ id: sessionId, file: this.session.getSessionFile() }),
-			// Membership tag for processes the call leaves running (session-processes.ts).
-			[BASH_SESSION_ENV]: sessionId,
+			// Membership tag for processes the call leaves running, scoped to this omp process
+			// (session-processes.ts).
+			[BASH_SESSION_ENV]: bashSessionTag(sessionId),
 			PI_TOOL_CALL_ID: toolCallId,
 		};
 	}
@@ -2065,7 +2140,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// tier this command was approved at. A URL cwd stays a URL: only that
 		// filesystem can enter it, so a service's or pty command's shell process
 		// starts on the host and enters it, and the client terminal never runs there.
-		const approval = this.approval({ command: rawCommand }, undefined, { prompts: false });
+		// The call is already approved, so no guard probe runs here: a probe hit
+		// could only raise the tier this lookup grants.
+		const approval = this.#decide({ command: rawCommand }, undefined, { prompts: false }, false);
 		const approvalTier = typeof approval === "string" ? approval : approval.tier;
 		const router = InternalUrlRouter.instance();
 		const virtualCwd = cwd && router.canHandle(cwd) ? router.normalize(cwd) : undefined;

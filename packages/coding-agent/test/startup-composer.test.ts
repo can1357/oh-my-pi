@@ -12,13 +12,13 @@ import * as pluginHelpers from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { clearOmpExtensionCliRoots } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
 import { runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
+import { beginStartupComposer } from "@oh-my-pi/pi-coding-agent/modes/startup-composer";
 import {
 	applyStartupComposerPreferences,
-	beginStartupComposer,
 	type ComposerLease,
 	stopPendingStartupComposer,
 	takeStartupComposerLease,
-} from "@oh-my-pi/pi-coding-agent/modes/startup-composer";
+} from "@oh-my-pi/pi-coding-agent/modes/startup-frame";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { memoryTerminal } from "@oh-my-pi/pi-tui/testing/memory-terminal";
@@ -443,6 +443,21 @@ describe("startup prepaint frame", () => {
 		}
 	});
 
+	it("applies tui.motion to an adopted prepaint frame's renderer", async () => {
+		const lease = await prepaint();
+		const testSession = await createTestSession({ inMemory: true, settingsOverrides: { "tui.motion": "none" } });
+		const mode = adopt(lease, testSession.session);
+		try {
+			await mode.init({ suppressWelcomeIntro: true });
+			expect(lease.frame.spinnerInterval.peek()).toBe(0);
+			expect(lease.frame.reduceMotion.peek()).toBe(true);
+		} finally {
+			mode.stop();
+			await mode.shell.stop();
+			await testSession.cleanup();
+		}
+	});
+
 	it("accepts input while the initial CLI prompt's first turn is still running", async () => {
 		const lease = await prepaint();
 		const testSession = await createTestSession({ inMemory: true });
@@ -610,7 +625,6 @@ describe("startup prepaint frame", () => {
 					thinkingLevel: "high",
 					usingSubscription: false,
 					autoCompact: true,
-					fastMode: false,
 					context: { tokens: 6_000, window: 200_000, percent: 3 },
 				},
 			},
@@ -641,7 +655,6 @@ describe("startup prepaint frame", () => {
 					model: { id: "prophet-9", name: "Prophet 9", thinking: true, contextWindow: 200_000 },
 					usingSubscription: false,
 					autoCompact: true,
-					fastMode: false,
 					context: { tokens: 6_000, window: 200_000, percent: 3 },
 				},
 			},

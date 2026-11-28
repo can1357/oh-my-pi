@@ -43,8 +43,6 @@
     "@oh-my-pi/pi-ai": "catalog:"
   },
   "devDependencies": {
-    "@types/babel__generator": "catalog:",
-    "@types/babel__traverse": "catalog:",
     "@types/bun": "catalog:"
   },
   "engines": {

@@ -25,6 +25,7 @@ num-bigint = { version = "0.4.6", default-features = false }
 num-traits = { version = "0.2.19", default-features = false }
 ryu = "1.0.20"
 self_cell = "1.2.0"
+xutf.workspace = true
 
 [lints]
 workspace = true

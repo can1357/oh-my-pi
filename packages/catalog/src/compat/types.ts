@@ -484,6 +484,8 @@ export interface CompiledOAuthRequest {
 /** Callback transport configuration for authorization-code logins. */
 export interface CompiledCallback {
 	port: number;
+	/** Env var overriding `port` (`0` = random free port). */
+	portEnv?: string;
 	path: string;
 	hostname: string;
 	redirectUri?: CompiledAuthValue;
@@ -626,19 +628,25 @@ export interface CompiledAuthProvider {
 	 * models (such as "Using your Acme Pro plan").
 	 */
 	activeNotice?: string;
+	/** Shown once after each successful sign-in (such as the terms requests follow). */
+	loginNotice?: string;
+	/** The host's page where the user turns this app's access on or off. */
+	manageUrl?: string;
+	/**
+	 * OAuth scope a login must hold for the provider to serve requests. A login
+	 * whose granted scope lacks it stays signed in with the provider off.
+	 */
+	requiredScope?: string;
 	storeAs?: string;
 	callbackPort?: number;
 	pasteCode?: boolean;
 	/**
-	 * Logins are bound to a key only this machine holds (such as a proof-of-possession key in
-	 * the OS vault), so they stay in the local `agent.db`: the auth broker
-	 * neither stores nor refreshes them.
+	 * Logins are bound to a key that must stay on this machine (such as a DPoP
+	 * key), so they stay in the local `agent.db`: the auth broker neither stores
+	 * nor refreshes them.
 	 */
 	deviceBound?: boolean;
-	/**
-	 * Runs when a login is removed: `hook` forgets the account's secrets kept
-	 * outside the credential store and revokes the grant at the provider.
-	 */
+	/** Runs when a login is removed: `hook` revokes the grant at the provider. */
 	signOut?: { hook: string };
 	apiKeyFormat: "bearer" | "structured";
 	expiry?: "jwt-or-never";
@@ -725,6 +733,10 @@ export interface CompiledProvider {
 	automaticDefault?: boolean;
 	/** Env vars consulted, in order, for the runtime API-key fallback. */
 	envVars?: string[];
+	/** The provider's own managed API base URL when its deployment has one (chat, discovery, usages, search). */
+	baseUrl?: string;
+	/** Env var naming an alternate base URL for that deployment; consumers keep override resolution in code. */
+	baseUrlEnv?: string;
 	/** The runtime creates a model manager even without a valid API key. */
 	allowUnauthenticated?: boolean;
 	/** Successful runtime discovery replaces bundled provider models instead of merging. */

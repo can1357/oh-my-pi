@@ -21,25 +21,29 @@
 //! the ACP switch is permanent, so once it has shown ACP text, later bytes
 //! that are also valid UTF-8 still decode as ACP.
 
-use std::{str, sync::Arc};
+#[cfg(windows)]
+use std::str;
+use std::{mem, sync::Arc};
+
+use xutf::{DecodeError, Incomplete, REPLACEMENT_CHARACTER};
 
 use crate::sys::{ByteDecoder, OutputDecoding};
 
-const REPLACEMENT: &str = "\u{FFFD}";
 /// UTF-8 console / system code page. Fallback is a no-op: invalid UTF-8 stays
 /// replacement characters rather than being re-decoded as itself.
 #[cfg(windows)]
 const CP_UTF8: u32 = 65001;
 
+/// The encoding an output decodes from, with the start of a character the
+/// last read cut off.
 enum Mode {
-	Utf8,
+	Utf8(Incomplete),
 	#[cfg(windows)]
-	Acp,
+	Acp(Vec<u8>),
 }
 
 /// Incremental decoder for one stdout/stderr stream.
 pub struct OutputDecoder {
-	pending:           Vec<u8>,
 	mode:              Mode,
 	#[cfg(windows)]
 	fallback_codepage: u32,
@@ -62,14 +66,13 @@ impl OutputDecoder {
 	/// Decode as UTF-8 only; no ANSI fallback exists off Windows.
 	#[cfg(not(windows))]
 	pub const fn new() -> Self {
-		Self { pending: Vec::new(), mode: Mode::Utf8 }
+		Self { mode: Mode::Utf8(Incomplete::empty()) }
 	}
 
 	/// Decode as UTF-8 only, with invalid sequences as U+FFFD.
 	pub const fn utf8() -> Self {
 		Self {
-			pending: Vec::new(),
-			mode: Mode::Utf8,
+			mode: Mode::Utf8(Incomplete::empty()),
 			#[cfg(windows)]
 			fallback_codepage: CP_UTF8,
 		}
@@ -79,117 +82,116 @@ impl OutputDecoder {
 	/// run on any Windows host, not only a Chinese ACP.
 	#[cfg(windows)]
 	pub const fn with_fallback_codepage(codepage: u32) -> Self {
-		Self {
-			pending:           Vec::new(),
-			mode:              Mode::Utf8,
-			fallback_codepage: codepage,
-		}
+		Self { mode: Mode::Utf8(Incomplete::empty()), fallback_codepage: codepage }
 	}
 
 	/// Push the next pipe read. Returns text that is safe to emit now;
 	/// incomplete UTF-8 / DBCS sequences stay buffered.
 	pub fn push(&mut self, bytes: &[u8]) -> String {
-		if bytes.is_empty() {
-			return String::new();
+		match &mut self.mode {
+			Mode::Utf8(held) => {
+				let held = mem::replace(held, Incomplete::empty());
+				self.push_utf8(held, bytes)
+			},
+			#[cfg(windows)]
+			Mode::Acp(held) => {
+				held.extend_from_slice(bytes);
+				decode_acp(self.fallback_codepage, held, false)
+			},
 		}
-		// Common case: nothing held back and the read is valid UTF-8.
-		if self.pending.is_empty()
-			&& matches!(self.mode, Mode::Utf8)
-			&& let Ok(text) = str::from_utf8(bytes)
-		{
-			return text.to_owned();
-		}
-		self.pending.extend_from_slice(bytes);
-		self.drain(false)
 	}
 
 	/// Flush held bytes at EOF.
 	pub fn finish(&mut self) -> String {
-		self.drain(true)
-	}
-
-	fn drain(&mut self, eof: bool) -> String {
-		match self.mode {
-			Mode::Utf8 => self.drain_utf8(eof),
+		match &mut self.mode {
+			Mode::Utf8(held) if held.is_empty() => String::new(),
+			Mode::Utf8(held) => {
+				// The output ends in the middle of a character.
+				let held = mem::replace(held, Incomplete::empty());
+				self
+					.fall_back(&held.buffer[..usize::from(held.buffer_len)], &[], true)
+					.unwrap_or_else(|| REPLACEMENT_CHARACTER.to_owned())
+			},
 			#[cfg(windows)]
-			Mode::Acp => self.drain_acp(eof),
+			Mode::Acp(held) => decode_acp(self.fallback_codepage, held, true),
 		}
 	}
 
-	/// Decodes `pending` with a cursor and compacts it once at the end, so a
-	/// buffer with many invalid sequences costs linear time (draining the
-	/// prefix per sequence made it quadratic).
-	fn drain_utf8(&mut self, eof: bool) -> String {
-		let mut out = String::with_capacity(self.pending.len());
-		let mut start = 0;
-		while start < self.pending.len() {
-			let err = match str::from_utf8(&self.pending[start..]) {
+	/// Decodes `bytes` as UTF-8 after `held`, the start of a character the
+	/// last read cut off, and holds the character `bytes` cut off in turn.
+	fn push_utf8(&mut self, mut held: Incomplete, mut bytes: &[u8]) -> String {
+		let mut out = String::with_capacity(bytes.len());
+		if !held.is_empty() {
+			let Some((completed, rest)) = held.try_complete(bytes) else {
+				self.mode = Mode::Utf8(held);
+				return out;
+			};
+			match completed {
+				Ok(text) => out.push_str(text),
+				Err(malformed) => match self.fall_back(malformed, rest, false) {
+					Some(text) => return text,
+					None => out.push_str(REPLACEMENT_CHARACTER),
+				},
+			}
+			bytes = rest;
+		}
+		loop {
+			match xutf::decode(bytes) {
 				Ok(text) => {
 					out.push_str(text);
-					start = self.pending.len();
-					break;
+					return out;
 				},
-				Err(err) => err,
-			};
-			let valid_end = start + err.valid_up_to();
-			// SAFETY: [start..valid_end] is valid UTF-8 by valid_up_to().
-			out.push_str(unsafe { str::from_utf8_unchecked(&self.pending[start..valid_end]) });
-			start = valid_end;
-			if let Some(invalid_len) = err.error_len() {
-				#[cfg(windows)]
-				if self.can_fallback_to_acp() {
-					// One encoding per command. Do not resume UTF-8 after
-					// a bad byte: later UTF-8 would be ACP-mojibake, but
-					// cmd/chcp emit ACP for the whole stream.
-					self.pending.drain(..start);
-					self.mode = Mode::Acp;
-					out.push_str(&self.drain_acp(eof));
+				Err(DecodeError::Invalid { valid_prefix, invalid_sequence, remaining_input }) => {
+					out.push_str(valid_prefix);
+					if let Some(text) = self.fall_back(invalid_sequence, remaining_input, false) {
+						out.push_str(&text);
+						return out;
+					}
+					out.push_str(REPLACEMENT_CHARACTER);
+					bytes = remaining_input;
+				},
+				Err(DecodeError::Incomplete { valid_prefix, incomplete_suffix }) => {
+					out.push_str(valid_prefix);
+					self.mode = Mode::Utf8(incomplete_suffix);
 					return out;
-				}
-
-				out.push_str(REPLACEMENT);
-				start += invalid_len;
-				continue;
+				},
 			}
-			// An incomplete sequence ends the buffer: hold it for the next
-			// read, or resolve it at EOF.
-			if eof {
-				#[cfg(windows)]
-				if self.can_fallback_to_acp() {
-					self.pending.drain(..start);
-					self.mode = Mode::Acp;
-					out.push_str(&self.drain_acp(true));
-					return out;
-				}
-
-				out.push_str(REPLACEMENT);
-				start = self.pending.len();
-			}
-			break;
 		}
-		self.pending.drain(..start);
-		out
 	}
 
+	/// Decodes `malformed` UTF-8 and the `rest` after it from the ANSI code
+	/// page, which then decodes the rest of the output: one encoding per
+	/// command, since cmd/chcp write ACP for the whole stream and UTF-8
+	/// resumed after a bad byte would be ACP mojibake. `None` when the code
+	/// page cannot decode what UTF-8 cannot.
 	#[cfg(windows)]
-	const fn can_fallback_to_acp(&self) -> bool {
-		has_acp_fallback(self.fallback_codepage)
+	fn fall_back(&mut self, malformed: &[u8], rest: &[u8], eof: bool) -> Option<String> {
+		if !has_acp_fallback(self.fallback_codepage) {
+			return None;
+		}
+		let mut held = [malformed, rest].concat();
+		let text = decode_acp(self.fallback_codepage, &mut held, eof);
+		self.mode = Mode::Acp(held);
+		Some(text)
 	}
 
-	#[cfg(windows)]
-	fn drain_acp(&mut self, eof: bool) -> String {
-		if self.pending.is_empty() {
-			return String::new();
-		}
-		let len = complete_acp_len(self.fallback_codepage, &self.pending, eof);
-		if len == 0 {
-			return String::new();
-		}
-		let decoded = decode_codepage(self.fallback_codepage, &self.pending[..len], 0)
-			.unwrap_or_else(|| String::from_utf8_lossy(&self.pending[..len]).into_owned());
-		self.pending.drain(..len);
-		decoded
+	/// No ANSI fallback exists off Windows: malformed UTF-8 stays U+FFFD.
+	#[cfg(not(windows))]
+	#[expect(clippy::unused_self, reason = "the Windows fallback switches the decoding mode")]
+	const fn fall_back(&self, _: &[u8], _: &[u8], _: bool) -> Option<String> {
+		None
 	}
+}
+
+/// Decodes the complete characters of `held` from `codepage`, keeping a DBCS
+/// lead byte the last read cut off unless at `eof`.
+#[cfg(windows)]
+fn decode_acp(codepage: u32, held: &mut Vec<u8>, eof: bool) -> String {
+	let len = complete_acp_len(codepage, held, eof);
+	let text = decode_codepage(codepage, &held[..len], 0)
+		.unwrap_or_else(|| String::from_utf8_lossy(&held[..len]).into_owned());
+	held.drain(..len);
+	text
 }
 
 /// The hook that decodes each external program's output with the host ANSI
@@ -225,7 +227,11 @@ impl ByteDecoder for OutputDecoder {
 	}
 
 	fn holds_bytes(&self) -> bool {
-		!self.pending.is_empty()
+		match &self.mode {
+			Mode::Utf8(held) => !held.is_empty(),
+			#[cfg(windows)]
+			Mode::Acp(held) => !held.is_empty(),
+		}
 	}
 
 	fn finish(&mut self) -> String {
@@ -489,8 +495,10 @@ impl LineDecoder {
 fn incomplete_utf8_tail(bytes: &[u8]) -> usize {
 	(1..=bytes.len().min(3))
 		.find(|&len| {
-			str::from_utf8(&bytes[bytes.len() - len..])
-				.is_err_and(|err| err.valid_up_to() == 0 && err.error_len().is_none())
+			matches!(
+				xutf::decode(&bytes[bytes.len() - len..]),
+				Err(DecodeError::Incomplete { valid_prefix: "", .. })
+			)
 		})
 		.unwrap_or(0)
 }
@@ -524,26 +532,20 @@ impl Utf8Shape {
 	fn of(mut bytes: &[u8]) -> Self {
 		let mut shape = Self { multibyte: 0, invalid: 0, cut_tail: false };
 		loop {
-			let (valid, rest) = match str::from_utf8(bytes) {
+			let (valid, rest) = match xutf::decode(bytes) {
 				Ok(text) => (text, None),
-				Err(err) => {
-					// SAFETY: `valid_up_to` bytes are valid UTF-8.
-					let valid = unsafe { str::from_utf8_unchecked(&bytes[..err.valid_up_to()]) };
-					(valid, Some((err.valid_up_to(), err.error_len())))
+				Err(DecodeError::Invalid { valid_prefix, remaining_input, .. }) => {
+					(valid_prefix, Some(remaining_input))
+				},
+				Err(DecodeError::Incomplete { valid_prefix, .. }) => {
+					shape.cut_tail = true;
+					(valid_prefix, None)
 				},
 			};
 			shape.multibyte += valid.chars().filter(|ch| !ch.is_ascii()).count();
-			match rest {
-				None => return shape,
-				Some((_, None)) => {
-					shape.cut_tail = true;
-					return shape;
-				},
-				Some((start, Some(len))) => {
-					shape.invalid += 1;
-					bytes = &bytes[start + len..];
-				},
-			}
+			let Some(rest) = rest else { return shape };
+			shape.invalid += 1;
+			bytes = rest;
 		}
 	}
 }

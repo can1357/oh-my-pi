@@ -5,6 +5,9 @@ import type { Model, ServiceTier, ServiceTierByFamily, ServiceTierFamily } from 
 import { SERVICE_TIER_FAMILIES, serviceTierFamily } from "@oh-my-pi/pi-ai/types";
 import type { SubmenuOption } from "./settings-defs";
 
+/** Service tiers that the session displays as Fast or Ultrafast. */
+export type FastServiceTier = "priority" | "ultrafast";
+
 /**
  * Per-family service-tier setting values. `"none"` is the omit-the-parameter
  * sentinel; the rest mirror the wire {@link ServiceTier} values each provider

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { getEnvApiKey } from "@oh-my-pi/pi-ai/env-api-key";
 import { type OpenAICompletionsOptions, streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import type { AssistantMessage, Context } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -7,7 +8,6 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { calculateCost, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { moonshotModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl, Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
-import { $pickenv } from "@oh-my-pi/pi-utils";
 
 function moonshotKimiModel(id: string, reasoning: boolean): Model<"openai-completions"> {
 	const reference = getBundledModel("openai", "gpt-4o-mini");
@@ -366,6 +366,7 @@ describe("Moonshot China platform", () => {
 		MOONSHOT_BASE_URL: Bun.env.MOONSHOT_BASE_URL,
 		MOONSHOT_API_KEY: Bun.env.MOONSHOT_API_KEY,
 		KIMI_API_KEY: Bun.env.KIMI_API_KEY,
+		KIMI_CODE_GLOBAL_API_KEY: Bun.env.KIMI_CODE_GLOBAL_API_KEY,
 	};
 
 	function inputUrl(input: string | URL | Request): string {
@@ -400,22 +401,35 @@ describe("Moonshot China platform", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("moonshot accepts KIMI_API_KEY as an env-key fallback for MOONSHOT_API_KEY", () => {
-		// `getEnvApiKey("moonshot")` resolves a catalog provider via `$pickenv(...envVars)`
-		// (see ai/src/stream.ts), so the descriptor's env-var order IS the resolution order.
-		const envVars = providerEntry("moonshot")?.envVars;
-		expect(envVars).toEqual(["MOONSHOT_API_KEY", "KIMI_API_KEY"]);
+	it("Kimi Code resolves region-scoped API keys without crossing regions", () => {
+		delete Bun.env.KIMI_API_KEY;
+		delete Bun.env.KIMI_CODE_GLOBAL_API_KEY;
+		Bun.env.MOONSHOT_API_KEY = "moonshot-only-key";
+		expect(getEnvApiKey("kimi-code")).toBeUndefined();
+		expect(getEnvApiKey("kimi-code-global")).toBeUndefined();
 
-		delete Bun.env.MOONSHOT_API_KEY;
-		Bun.env.KIMI_API_KEY = "kimi-china-key";
-		expect($pickenv(...(envVars ?? []))).toBe("kimi-china-key");
+		Bun.env.KIMI_API_KEY = "kimi-mainland-key";
+		expect(getEnvApiKey("kimi-code")).toBe("kimi-mainland-key");
+		expect(getEnvApiKey("kimi-code-global")).toBeUndefined();
+
+		Bun.env.KIMI_CODE_GLOBAL_API_KEY = "kimi-global-key";
+		expect(getEnvApiKey("kimi-code")).toBe("kimi-mainland-key");
+		expect(getEnvApiKey("kimi-code-global")).toBe("kimi-global-key");
+
+		delete Bun.env.KIMI_API_KEY;
+		expect(getEnvApiKey("kimi-code")).toBeUndefined();
+		expect(getEnvApiKey("kimi-code-global")).toBe("kimi-global-key");
 	});
 
-	it("MOONSHOT_API_KEY keeps precedence over the KIMI_API_KEY alias", () => {
-		const envVars = providerEntry("moonshot")?.envVars ?? [];
-		Bun.env.MOONSHOT_API_KEY = "moonshot-primary-key";
-		Bun.env.KIMI_API_KEY = "kimi-fallback-key";
-		expect($pickenv(...envVars)).toBe("moonshot-primary-key");
+	it("Moonshot resolves only MOONSHOT_API_KEY and does not consume Kimi Code keys", () => {
+		expect(providerEntry("moonshot")?.envVars).toEqual(["MOONSHOT_API_KEY"]);
+		delete Bun.env.MOONSHOT_API_KEY;
+		delete Bun.env.KIMI_CODE_GLOBAL_API_KEY;
+		Bun.env.KIMI_API_KEY = "kimi-mainland-key";
+		expect(getEnvApiKey("moonshot")).toBeUndefined();
+
+		Bun.env.MOONSHOT_API_KEY = "moonshot-key";
+		expect(getEnvApiKey("moonshot")).toBe("moonshot-key");
 	});
 
 	it("discovers models against api.moonshot.cn when MOONSHOT_BASE_URL is set", async () => {

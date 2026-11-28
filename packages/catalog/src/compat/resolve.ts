@@ -591,6 +591,7 @@ function detectOpenAICompat(
 		streamFirstEventTimeoutMs: d.isLocalServingBackend ? 0 : undefined,
 		streamIdleTimeoutMs,
 		stripDeepseekSpecialTokens: false,
+		neutralizeDeepseekSpecialTokens: false,
 		// Present as a key so models.yml `compat` can set it; unset unless a rule assigns it.
 		stripThinkingHistory: undefined,
 		// URL-derived like the Responses field; unset off the official OpenAI API.
@@ -633,9 +634,11 @@ function detectStreamMarkupHealing(
 	baseUrl: string,
 ): ResolvedOpenAISharedCompat["streamMarkupHealingPattern"] {
 	// The dedicated Kimi grammar targets the K2 chat template; K3 and unranked
-	// Kimi ids keep the generic healer, matching the census.
+	// Kimi ids keep the generic healer, matching the census. The Kimi Code
+	// providers own the pattern in their provider rules instead
+	// (`stream-markup-healing-pattern "kimi"` in rules/providers/kimi-code*.kdl).
 	const isKimiK2 = facts.is("kimi") && facts.identity.family?.startsWith("k2") === true;
-	if (provider === "kimi-code" || provider === "moonshot" || isKimiK2) return "kimi";
+	if (provider === "moonshot" || isKimiK2) return "kimi";
 	if (facts.is("deepseek")) return "dsml";
 	if (isOfficialOpenAIEndpoint(provider, baseUrl)) return undefined;
 	return "thinking";
