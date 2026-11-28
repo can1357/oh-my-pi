@@ -80,8 +80,12 @@ const streamingEditFailureStream = (opts: {
 	return stream;
 };
 
-/** Second-call stream: the re-driven turn answers with plain text, after `delayMs` when given. */
-const textStream = (opts: { model: Model<Api>; text: string; delayMs?: number }): AssistantMessageEventStream => {
+/** Second-call stream: the re-driven turn answers with plain text, once `after` settles when given. */
+const textStream = (opts: {
+	model: Model<Api>;
+	text: string;
+	after?: Promise<unknown>;
+}): AssistantMessageEventStream => {
 	const { model, text } = opts;
 	const stream = new AssistantMessageEventStream();
 	const answer = (): void => {
@@ -101,8 +105,8 @@ const textStream = (opts: { model: Model<Api>; text: string; delayMs?: number })
 		stream.push({ type: "text_end", contentIndex: 0, content: text, partial: message });
 		stream.push({ type: "done", reason: "stop", message });
 	};
-	if (opts.delayMs === undefined) queueMicrotask(answer);
-	else setTimeout(answer, opts.delayMs);
+	if (opts.after === undefined) queueMicrotask(answer);
+	else void opts.after.then(answer);
 	return stream;
 };
 
@@ -285,9 +289,9 @@ describe("AgentSession streaming edit preview recovery", () => {
 						});
 					}
 					if (call === 2) {
-						// The recovery run is streaming: a user follow-up arrives and is queued into it.
-						void active.prompt("Follow up.", { streamingBehavior: "followUp" });
-						return textStream({ model: streamModel, text: "Recovered.", delayMs: 200 });
+						// The recovery run is streaming: a user follow-up arrives, and the reply ends once it is queued.
+						const queued = active.prompt("Follow up.", { streamingBehavior: "followUp" });
+						return textStream({ model: streamModel, text: "Recovered.", after: queued });
 					}
 					return textStream({ model: streamModel, text: "Followed up." });
 				},

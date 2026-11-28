@@ -851,7 +851,11 @@ interface BranchPromptCacheObservation {
 	refreshMissed: boolean;
 	/** A compaction follows the reply. */
 	compacted: boolean;
-	/** Digest of the system prompt the reply was sent with; undefined when none is recorded. */
+	/**
+	 * Digest of the prompt the branch recorded for the reply: the system prompt it was sent with when
+	 * `extensionHandlers.keepSystemPromptOverride` is on, else the base that prompt was built from;
+	 * undefined when none is recorded.
+	 */
 	promptDigest: string | undefined;
 }
 
@@ -7972,8 +7976,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * Keeps a subagent transcript's latest `session_init` on the base prompt and work-pool yield items
 	 * its model calls are built from, appending a newer one when either changes: signed thinking is
 	 * bound to the system prompt and tools, so cold revival must replay them. A per-turn override is
-	 * stored as the base its hook was given: the transcript's prompt records restore the override on
-	 * that base. Transcripts without a `session_init` are left alone.
+	 * stored as the base its hook was given. With `extensionHandlers.keepSystemPromptOverride` on, the
+	 * transcript's prompt records restore the override on that base; off, the revived session sends
+	 * the base until a turn runs the hooks again. Transcripts without a `session_init` are left alone.
 	 */
 	#recordModelCallSystemPrompt(prompt: string[]): void {
 		const sessionFile = this.sessionManager.getSessionFile();
@@ -15434,6 +15439,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				this.#advisors.resetSessionState();
 				this.#closeCodexProviderSessionsForHistoryRewrite();
 			}
+			// The new session holds the branched path's prompt records; a turn that runs no hooks sends them.
+			this.#tools.followBranchSystemPrompt();
 
 			this.#advisors.reattachRecorderFeeds();
 			advisorRecordersDetached = false;

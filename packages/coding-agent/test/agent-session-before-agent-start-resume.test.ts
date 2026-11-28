@@ -71,6 +71,13 @@ function expectAppendOnly(requests: string[][]): void {
 	}
 }
 
+/** The digests the session's `system-prompt-digest` records hold, oldest first. */
+function digestRecords(session: AgentSession): unknown[] {
+	return session.sessionManager
+		.getEntries()
+		.flatMap(entry => (entry.type === "custom" && entry.customType === "system-prompt-digest" ? [entry.data] : []));
+}
+
 /** The prompts the session holds `system-prompt-override` records of, oldest first. */
 function overrideRecords(session: AgentSession): Array<{ base: unknown; prompt: unknown }> {
 	return session.sessionManager
@@ -289,5 +296,44 @@ describe("before_agent_start system prompt across turn kinds", () => {
 		expect(systemOf(requests[1]!)).toEqual([systemBlock("Policy 2.")]);
 		expect(systemOf(requests[2]!)).toEqual([systemBlock("Policy 1.")]);
 		expectAppendOnly([requests[0]!, requests[2]!]);
+	});
+	it("sends the hook prompt of the branch a fork starts from on a turn that runs no hook", async () => {
+		const { requests, open, create } = await harness("test-before-agent-start-fork");
+		const session = await open(create(), numbersPolicies, { settings: KEEP });
+		await userTurn(session, "first");
+		const firstReply = session.sessionManager
+			.getEntries()
+			.find(entry => entry.type === "message" && entry.message.role === "assistant");
+		if (!firstReply) throw new Error("the first turn persisted no reply");
+		await userTurn(session, "second");
+
+		await session.fork(firstReply.id);
+		await deliverCard(session);
+
+		expect(requests).toHaveLength(3);
+		expect(systemOf(requests[1]!)).toEqual([systemBlock("Policy 2.")]);
+		expect(systemOf(requests[2]!)).toEqual([systemBlock("Policy 1.")]);
+		expectAppendOnly([requests[0]!, requests[2]!]);
+	});
+
+	it("records the digest of the base a hook prompt was built on with the setting off", async () => {
+		// A session whose turn runs no hook records the digest of its base; with the setting off, a hook prompt on the
+		// same base records that same digest and no override, and with it on, the digest of the prompt sent.
+		const recorded = async (api: string, extension: ExtensionFactory, settings?: Record<string, unknown>) => {
+			const { open, create } = await harness(api);
+			const session = await open(create(), extension, { settings, base: () => "Only base." });
+			await userTurn(session, "first");
+			return { digests: digestRecords(session), overrides: overrideRecords(session) };
+		};
+		const hookless = await recorded("test-before-agent-start-digest-hookless", () => {});
+		const off = await recorded("test-before-agent-start-digest-off", addsGuidelines);
+		const on = await recorded("test-before-agent-start-digest-on", addsGuidelines, KEEP);
+
+		expect(hookless.digests).toHaveLength(1);
+		expect(off.digests).toEqual(hookless.digests);
+		expect(off.overrides).toEqual([]);
+		expect(on.digests).toHaveLength(1);
+		expect(on.digests).not.toEqual(hookless.digests);
+		expect(on.overrides.map(record => record.prompt)).toEqual([["Only base.", GUIDELINES]]);
 	});
 });
