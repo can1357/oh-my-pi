@@ -20,6 +20,7 @@
 - Added the `onDiscardedAttempt` stream option: it receives each attempt a replay-safe retry throws away (an empty completion, a transient provider error), which the provider may still have billed; attempts with no tokens and no charge are skipped ([#20667](https://github.com/can1357/oh-my-pi/issues/20667), [#20806](https://github.com/can1357/oh-my-pi/pull/20806) by [@wapenshaw](https://github.com/wapenshaw))
 - Factory Droid Gemini requests send the `xhigh` thinking level for models whose ladder offers it (Gemini 4 Neon) instead of capping at `HIGH` ([#19841](https://github.com/can1357/oh-my-pi/issues/19841))
 - Added `PI_ANTHROPIC_OAUTH_CALLBACK_PORT` to override the Anthropic login callback port (default `54545`, `0` for a random free port) ([#14135](https://github.com/can1357/oh-my-pi/issues/14135))
+- `withoutUnreplayedBlocks` and `replaysAnthropicServerTools` in `providers/transform-messages`: an assistant turn without the tool calls and native server-tool blocks its replay to the target drops, so callers outside `transformMessages` count the blocks the request sends ([#20888](https://github.com/can1357/oh-my-pi/pull/20888) by [@sjawhar](https://github.com/sjawhar))
 
 ### Removed
 

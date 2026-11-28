@@ -3243,6 +3243,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			recordAnchoredHistoryRewrite: tokensRemoved => this.#stats.recordAnchoredHistoryRewrite(tokensRemoved),
 			getContextBreakdown: options => this.getContextBreakdown(options),
 			getContextUsage: options => this.getContextUsage(options),
+			getContextAnswer: reader => this.#stats.getContextAnswer(reader),
 			shake: (mode, options) => this.shake(mode, options),
 			dropImages: () => this.dropImages(),
 			generateHandoffDocument: (customInstructions, options) =>

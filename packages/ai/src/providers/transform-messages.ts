@@ -508,6 +508,49 @@ export function isSurvivingAssistant(msg: AssistantMessage, model?: Model): bool
 	);
 }
 
+/**
+ * Whether `model`'s replay keeps `source`'s native Anthropic server-tool
+ * blocks (`anthropicServerTool`): Anthropic requires server-tool calls and
+ * results to be replayed unchanged, and they are meaningful only to the
+ * provider that produced them, so only an Anthropic Messages turn replayed to
+ * the same provider's Anthropic Messages model keeps them; every other target
+ * drops them. Without a target, they are kept.
+ */
+export function replaysAnthropicServerTools(source: AssistantMessage, model?: Model): boolean {
+	return (
+		model === undefined ||
+		(isAnthropicMessagesModel(model) && source.api === "anthropic-messages" && source.provider === model.provider)
+	);
+}
+
+/**
+ * `msg` without the blocks {@link transformMessages} drops whatever their
+ * position when it replays `msg` to `model`: the tool calls whose id or name
+ * {@link sanitizeMalformedToolCalls} cannot replay, and the native server-tool
+ * blocks the target does not read ({@link replaysAnthropicServerTools}); `msg`
+ * itself when it has neither. Pass the target `model` to apply its limits;
+ * without one, any provider-declarable tool name and every server-tool block
+ * survive.
+ */
+export function withoutUnreplayedBlocks(msg: AssistantMessage, model?: Model): AssistantMessage {
+	const { allowedName, maxLength } = toolCallNameLimits(model);
+	const keepsServerTools = replaysAnthropicServerTools(msg, model);
+	let content: AssistantMessage["content"] | undefined;
+	for (let index = 0; index < msg.content.length; index++) {
+		const block = msg.content[index];
+		const dropped =
+			block.type === "toolCall"
+				? isMalformedToolCall(block, allowedName, maxLength)
+				: block.type === "anthropicServerTool" && !keepsServerTools;
+		if (dropped) {
+			content ??= msg.content.slice(0, index);
+		} else {
+			content?.push(block);
+		}
+	}
+	return content ? { ...msg, content } : msg;
+}
+
 /** Whether `msg` carries mid-conversation Anthropic request controls (`clearAt`, `effort`, `toolChanges`). */
 export function hasAnthropicMessageControls(msg: Message): boolean {
 	if (msg.role !== "developer" || msg.providerPayload?.type !== "anthropicMessage") return false;
@@ -1273,11 +1316,7 @@ export function transformMessages<TApi extends Api>(
 				}
 
 				if (block.type === "anthropicServerTool") {
-					// Anthropic requires native server-tool calls and results to be
-					// replayed unchanged. They are meaningful only to the provider
-					// that produced them; every cross-provider target drops them.
-					if (isAnthropicReplay && assistantMsg.provider === model.provider) return block;
-					return [];
+					return replaysAnthropicServerTools(assistantMsg, model) ? block : [];
 				}
 
 				if (block.type === "fallback") {

@@ -16,6 +16,7 @@
 ### Added
 
 - Added `CompactionSettings.summaryMaxTokens` to set the output budget for regular compaction summaries; history that fits alongside the actual previous summary and requested output is retained ([#18688](https://github.com/can1357/oh-my-pi/issues/18688))
+- `promptTokensOmitOutput` in `compaction`: whether `calculatePromptTokens` reads a usage's prompt buckets, which leave out the turn's own output ([#20888](https://github.com/can1357/oh-my-pi/pull/20888) by [@sjawhar](https://github.com/sjawhar))
 
 ### Changed
 
