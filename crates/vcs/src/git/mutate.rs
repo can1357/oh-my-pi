@@ -1985,9 +1985,28 @@ fn checkout_tree(
 			}
 		}
 	}
+	// Build everything against `repo` so the filter pipeline, filter-driver
+	// config overrides (e.g. a linked worktree's `config.worktree`) and the
+	// drivers' GIT_DIR/GIT_WORK_TREE environment all come from the worktree
+	// being checked out. Only the `$GIT_DIR/info/attributes` lookup has to be
+	// redirected: a linked worktree's private git dir has none, and the shared
+	// copy lives in the common dir — without it, `filter.<driver>.smudge`
+	// bindings registered there never apply and blobs are written unfiltered.
+	// The attribute globals are process-wide (system/git-install/user), so
+	// swapping in the common repo's attribute state changes nothing else.
 	let mut opts = repo
 		.checkout_options(gix::worktree::stack::state::attributes::Source::IdMapping)
 		.map_err(|e| Error::backend("git checkout", e))?;
+	if owner.info().git_dir != owner.info().common_dir {
+		let common = super::open::open_options()
+			.open(&owner.info().common_dir)
+			.map_err(|e| Error::backend("git checkout", e))?
+			.to_thread_local();
+		opts.attributes = common
+			.checkout_options(gix::worktree::stack::state::attributes::Source::IdMapping)
+			.map_err(|e| Error::backend("git checkout", e))?
+			.attributes;
+	}
 	opts.overwrite_existing = true;
 	let progress = gix::progress::Discard;
 	let interrupt = std::sync::atomic::AtomicBool::new(false);
