@@ -64,7 +64,9 @@ class FakeDriver implements TerminalDriver {
 	replay(): void {
 		for (const listener of this.#replay) listener();
 	}
-	resetDisplay(): void {}
+	resetDisplay(): void {
+		this.replay();
+	}
 	setTitle(): void {}
 	get viewport(): string[] {
 		return this.frames.at(-1)!.viewport.map(row => stripEscapes(row).trimEnd());
@@ -232,6 +234,47 @@ describe("TermBackend main surface", () => {
 		expect(driver.history).toEqual(["one", "", "two", "", "three", "", "four"]);
 		expect(driver.viewport).toEqual(["", "five", "", "six"]);
 		backend.stop();
+	});
+
+	it("holds a bottom dock when a compacted transcript replaces committed history", () => {
+		const driver = new FakeDriver();
+		const compacted = signal(false);
+		const tail = signal(["summary"]);
+		const surface = createSurface(() => ({
+			main: () =>
+				compacted()
+					? <rows key="summary" lines={tail} />
+					: [<rows key="old" lines={lines("old", 7)} />, <rows key="live" lines={lines("live", 5)} />],
+			dock: <rows key="dock" lines={["dock"]} />,
+		}));
+		const backend = new TermBackend({ surface, driver, theme: () => PLAIN_THEME, separator: () => 0 });
+		try {
+			backend.start();
+			settle(surface.main()[0]!);
+			backend.renderNow();
+			expect(driver.history).toEqual(lines("old", 7));
+			expect(driver.viewport).toEqual([...lines("live", 5), "dock"]);
+
+			compacted.set(true);
+			// Rebuilding drops the retired block, then /compact requests its final replay.
+			backend.replayHistory({ preserveDock: true });
+			backend.replayHistory({ preserveDock: true });
+			backend.renderNow();
+			expect(driver.frames.at(-1)?.history?.kind).toBe("replay");
+			expect(driver.history).toEqual([]);
+			expect(driver.viewport).toEqual(["summary", "", "", "", "", "dock"]);
+
+			tail.set(["summary", "next"]);
+			backend.renderNow();
+			expect(driver.viewport).toEqual(["summary", "next", "", "", "", "dock"]);
+			expect(driver.history).toEqual([]);
+			driver.resetDisplay();
+			backend.renderNow();
+			expect(driver.viewport).toEqual(["summary", "next", "dock"]);
+		} finally {
+			backend.stop();
+			surface.dispose();
+		}
 	});
 
 	it("keeps the dock at the bottom once the viewport filled the screen", () => {

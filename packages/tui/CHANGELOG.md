@@ -26,6 +26,7 @@
 
 ### Fixed
 
+- Kept a bottom-aligned input dock in place when an inline view replays a shorter version of the same transcript
 - Moving through a question's options in Tern with the arrow keys no longer scrolls the chat back to the question each time
 - Improved performance when editing large documents and updating or closing views with many reactive values.
 - Fixed pane resizing in Herdr to avoid repeated redraw loops.

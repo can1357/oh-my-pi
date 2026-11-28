@@ -2303,7 +2303,7 @@ export class CommandController {
 				if (background) this.ctx.showStatus("Compaction complete");
 				// Rebuilding resets the transcript's emission ledger. Clear terminal
 				// scrollback before re-emitting its blocks (#12140).
-				this.ctx.shell.host?.replayHistory();
+				this.ctx.shell.host?.replayHistory({ preserveDock: true });
 			}
 		} catch (error) {
 			if (error instanceof CompactionCancelledError) {

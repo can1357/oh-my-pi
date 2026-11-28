@@ -491,6 +491,7 @@ export class TermBackend {
 		this.#pointerFocused = true;
 		this.#clock.set(Date.now());
 		// Restarted (after a suspend): what the terminal holds is unknown, history is written again.
+		this.#pin = undefined;
 		if (this.#committed.size > 0 || this.#emitted.size > 0) this.#requestReplay();
 		this.#unsubscribe.push(
 			this.#driver.onInput(event => this.#routeInput(event, true)),
@@ -501,6 +502,7 @@ export class TermBackend {
 				this.requestRender();
 			}),
 			this.#driver.onReplay(() => {
+				this.#pin = undefined;
 				// A batch still unwritten (a replay included) is prepared again for the new display.
 				this.#replay = true;
 				this.#pending = undefined;
@@ -551,6 +553,14 @@ export class TermBackend {
 		if (this.#committed.has(node) || this.#emitted.has(node) || this.#retiring.has(node)) return true;
 		const pending = this.#pending;
 		return pending !== undefined && (pending.head?.node === node || pending.nodes.includes(node));
+	}
+
+	/** Clear and replay the screen, optionally keeping the dock of the same transcript anchored. */
+	replayHistory(options?: { preserveDock?: boolean }): void {
+		const pin = this.#pin;
+		this.#driver.resetDisplay();
+		// resetDisplay invalidates this display synchronously; a fresh display starts without a pin.
+		if (options?.preserveDock) this.#pin = pin;
 	}
 
 	/** Whether the driver acknowledged rows of `node`'s own content in history, not only the separator above it. */
@@ -1277,13 +1287,18 @@ export class TermBackend {
 		let free = 0;
 		if (!flush) {
 			const pin = this.#pin;
-			const fresh = !pin || pin.width !== width || pin.height !== height || history?.kind === "replay";
+			const resized = !pin || pin.width !== width || pin.height !== height;
+			const replay = history?.kind === "replay";
+			const fresh = resized || replay;
 			const below = fresh ? 0 : pin.below;
 			const written = history ? history.rows.length : 0;
 			const natural = viewport.length + dockRows;
-			const bottom = (fresh ? false : pin.bottom) || below + written + natural >= height;
+			// An internal replay starts at row zero. Keep a dock that already reached the bottom
+			// there even if the replacement transcript is short. A display reset discards the pin.
+			const pinned = !resized && pin.bottom && (!replay || dockRows > 0);
+			const bottom = pinned || below + written + natural >= height;
 			// History written under a viewport at the bottom scrolls it: the rows it covered shrink by as much.
-			const hold = !fresh && pin.bottom ? Math.min(height, pin.rows - written) : 0;
+			const hold = pinned ? Math.min(height, (replay ? height : pin.rows) - written) : 0;
 			if (bottom && dockRows > 0) while (viewport.length + dockRows < hold) viewport.push("");
 			if (!bottom) free = Math.max(0, height - (below + written) - (viewport.length + dockRows));
 			// The rows from the viewport's top down: a shrunk viewport keeps its top (only a dock pads it down).
