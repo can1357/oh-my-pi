@@ -131,6 +131,8 @@ export interface Completion {
 	readonly revision?: number;
 	/** Structured palette metadata when showing unified `@` / `^` / `#<N>` mentions. */
 	readonly mention?: MentionPaletteView;
+	/** Offset in the draft where the mention starts: `prefix` ran from it to the caret when the popup was set. */
+	readonly mentionStart?: number;
 	/** Interactive thinking-effort override chosen via Shift+←/→ or Tern's level slider. */
 	readonly effortOverride?: Effort | "auto";
 	/** Timestamp when the query last changed, for 120ms anti-thrash focus stability. */

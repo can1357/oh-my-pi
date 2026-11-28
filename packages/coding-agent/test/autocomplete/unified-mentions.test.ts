@@ -1,7 +1,7 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as path from "node:path";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { createRoot, type UiNode } from "@oh-my-pi/pi-tui";
+import { createRoot, setNativeRenderingForTest, type UiNode } from "@oh-my-pi/pi-tui";
 import { bubbleEvent } from "@oh-my-pi/pi-tui/dispatch";
 import { paintNode } from "@oh-my-pi/pi-tui/term/paint";
 import { plainRows } from "@oh-my-pi/pi-tui/testing/cells";
@@ -538,6 +538,10 @@ describe("UnifiedMentionEngine async streaming & composer integration", () => {
 });
 
 describe("mention scope bar in Composer", () => {
+	afterEach(() => {
+		setNativeRenderingForTest(false);
+	});
+
 	function findPicker(node: UiNode): UiNode<"picker"> | undefined {
 		if (node.kind === "picker") return node as UiNode<"picker">;
 		for (const child of node.children()) {
@@ -614,6 +618,8 @@ describe("mention scope bar in Composer", () => {
 			tab: () => composer.handleDraftKey({ id: "tab", kind: "press", raw: "\t" }),
 			shiftTab: () => composer.handleDraftKey({ id: "shift+tab", kind: "press", raw: "\x1b[Z" }),
 			backspace: () => sendKey(composer.node, composer.field, key("\x7f")),
+			/** A click on the empty state's Clear search. */
+			clear: () => bubbleEvent([findPicker(composer.node)!], { type: "action", key: "", act: "clear", mods: [] }),
 			/** A click on a scope button of the bar. */
 			click: (scope: string) =>
 				bubbleEvent([findPicker(composer.node)!], {
@@ -815,6 +821,137 @@ describe("mention scope bar in Composer", () => {
 			expect(bar()).toEqual({ layout: "rows", search: "bar", scope: "models", query: "", placeholder: "Models" });
 			ui.tab();
 			expect(ui.composer.text()).toBe("^anthropic/claude-opus-4-6 ");
+		});
+	});
+
+	it("tells the native picker which range of the draft its query is typed as", () => {
+		createRoot(() => {
+			const ui = mentionComposer();
+			const typedAs = () => {
+				const { anchor, query } = ui.picker() ?? {};
+				return { anchor, query };
+			};
+			// A bare `@`: an empty range right after it, where the caret is.
+			ui.type("look at @");
+			expect(typedAs()).toEqual({ anchor: { caret: "line/input", query: [9, 9] }, query: "" });
+			ui.type("fo");
+			expect(typedAs()).toEqual({ anchor: { caret: "line/input", query: [9, 11] }, query: "fo" });
+			ui.backspace();
+			expect(typedAs()).toEqual({ anchor: { caret: "line/input", query: [9, 10] }, query: "f" });
+
+			// A scope's token is typed text too: the range covers it, the query is what follows it.
+			ui.composer.setText("");
+			ui.type("look at @m:op");
+			expect(typedAs()).toEqual({ anchor: { caret: "line/input", query: [9, 13] }, query: "op" });
+
+			// Tab into Files leaves the `@` alone; into Models writes its token, with nothing typed yet.
+			ui.composer.setText("");
+			ui.type("@");
+			ui.tab();
+			expect(typedAs()).toEqual({ anchor: { caret: "line/input", query: [1, 1] }, query: "" });
+			ui.tab();
+			expect(ui.composer.text()).toBe("@m:");
+			expect(typedAs()).toEqual({ anchor: { caret: "line/input", query: [1, 3] }, query: "" });
+
+			// `^` has no token: what follows it.
+			ui.composer.setText("");
+			ui.type("^cl");
+			expect(typedAs()).toEqual({ anchor: { caret: "line/input", query: [1, 3] }, query: "cl" });
+		});
+	});
+
+	it("follows a keystroke in the picker's query and range while its rows are still being looked up", () => {
+		// The lookup never settles: what the picker says comes from the draft alone.
+		const slowFiles: MentionSource = {
+			...fileSource,
+			querySync: query => ({ ...fileSource.querySync(query), loading: true }),
+			queryAsync: () => new Promise<MentionSourceResult>(() => {}),
+		};
+		createRoot(() => {
+			const ui = mentionComposer([slowFiles]);
+			ui.type("@");
+			for (const [char, typed] of [
+				["i", "i"],
+				["n", "in"],
+				["d", "ind"],
+			] as const) {
+				ui.type(char);
+				expect(ui.picker()).toMatchObject({
+					anchor: { caret: "line/input", query: [1, 1 + typed.length] },
+					query: typed,
+				});
+			}
+		});
+	});
+
+	it("keeps an unmatched mention open natively until Space, and closes it in a terminal", () => {
+		// Files predict on a bare `@` and match nothing once something is typed.
+		const noMatches: MentionSource = {
+			id: "files",
+			label: "Files",
+			querySync: query =>
+				query.query === ""
+					? fileSource.querySync(query)
+					: { category: "files", items: [], bestTier: MATCH_TIER.None, total: 0, available: true },
+		};
+		createRoot(() => {
+			const ui = mentionComposer([noMatches]);
+			ui.type("@zz");
+			expect(ui.composer.completing()).toBe(false);
+
+			ui.composer.setText("");
+			setNativeRenderingForTest(true);
+			ui.type("@");
+			expect(ui.picker()?.items).toHaveLength(1);
+			ui.type("zz");
+			expect(ui.picker()).toMatchObject({
+				items: [],
+				query: "zz",
+				anchor: { caret: "line/input", query: [1, 3] },
+				empty: "No matching mentions",
+			});
+			expect(ui.picker()?.state).toBeUndefined();
+			// A match brings the rows back into the same picker.
+			ui.backspace();
+			ui.backspace();
+			expect(ui.picker()?.items).toHaveLength(1);
+			ui.type("zz ");
+			expect(ui.composer.completing()).toBe(false);
+			expect(ui.composer.text()).toBe("@zz ");
+		});
+	});
+
+	it("clears what is typed on the native picker's clear action, keeping the mention and its scope", () => {
+		// Each category predicts with nothing typed and matches nothing once something is.
+		const unmatched = (source: MentionSource): MentionSource => ({
+			...source,
+			querySync: query =>
+				query.query === ""
+					? source.querySync(query)
+					: { category: source.id, items: [], bestTier: MATCH_TIER.None, total: 0, available: true },
+		});
+		createRoot(() => {
+			setNativeRenderingForTest(true);
+			const ui = mentionComposer([unmatched(fileSource), unmatched(modelSource)]);
+			ui.type("look at @zzqx");
+			expect(ui.picker()).toMatchObject({ items: [], query: "zzqx" });
+			ui.clear();
+			expect(ui.state()).toEqual({ text: "look at @", scope: undefined });
+			expect(ui.picker()).toMatchObject({ query: "", anchor: { caret: "line/input", query: [9, 9] } });
+			expect(ui.picker()?.items?.map(item => item.label)).toEqual(["index.ts"]);
+			// One undo step brings the query back.
+			ui.composer.undo();
+			expect(ui.composer.text()).toBe("look at @zzqx");
+
+			ui.composer.setText("");
+			ui.type("@m:zz");
+			expect(ui.picker()).toMatchObject({ items: [], scope: "models", query: "zz" });
+			ui.clear();
+			expect(ui.state()).toEqual({ text: "@m:", scope: "models" });
+			expect(ui.picker()?.items?.map(item => item.label)).toEqual(["Claude Opus 4.6"]);
+			// Nothing typed: nothing to clear.
+			ui.clear();
+			expect(ui.state()).toEqual({ text: "@m:", scope: "models" });
 		});
 	});
 });

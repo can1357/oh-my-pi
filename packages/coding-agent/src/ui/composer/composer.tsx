@@ -34,6 +34,7 @@ import {
 	type Signal,
 	signal,
 	isUiNode,
+	nativeRendering,
 	type TextEdit,
 	type UiNode,
 	effect,
@@ -55,6 +56,7 @@ import type { TspEditorDecoration, TspEffect, TspPickerLevel, TspSpan, TspText }
 import { terminalIdentity } from "@oh-my-pi/pi-tui/driver/session";
 import "../styles/composer";
 import type { UnifiedMentionSnapshot } from "../../autocomplete/mentions/engine";
+import { mentionTypedPart } from "../../autocomplete/mentions/parse";
 import { mentionScopeToken } from "../../autocomplete/mentions/scopes";
 import { MENTION_STYLES } from "../../autocomplete/mentions/style";
 import type { MentionItem, MentionPaletteView, MentionScopeId } from "../../autocomplete/mentions/types";
@@ -1325,8 +1327,10 @@ export class Composer {
 				this.#completion.set(null);
 				return;
 			}
-			// A scope that lists nothing stays open while nothing is typed: Tab walks on from it.
-			if (snapshot.items.length === 0 && !isScopeEntry(snapshot.mention)) {
+			// A scope that lists nothing stays open while nothing is typed: Tab walks on from it. Drawn
+			// natively every mention stays open: its bar is where the query is typed, so it must not
+			// come and go with the matches.
+			if (snapshot.items.length === 0 && !isScopeEntry(snapshot.mention) && !nativeRendering()) {
 				if (isFinal && !snapshot.mention.loading) this.#completion.set(null);
 				return;
 			}
@@ -1362,6 +1366,7 @@ export class Composer {
 				chosen: kept >= 0 && sameQuery ? open.chosen : false,
 				revision,
 				mention: snapshot.mention,
+				mentionStart: cursor - snapshot.prefix.length,
 				effortOverride: preservedEffort,
 				openedAt: sameQuery && open.openedAt !== undefined ? open.openedAt : Date.now(),
 			});
@@ -1560,6 +1565,46 @@ export class Composer {
 		const token = mentionScopeToken(scope, palette.typed);
 		if (token !== open.prefix) this.#change(from, cursor, token, from + token.length, "edit");
 		this.#filesAt = scope === "files" ? from : undefined;
+		void this.#complete();
+		return true;
+	}
+
+	/**
+	 * What is typed for the open mention and where it sits in the draft (right after the trigger
+	 * character up to the caret), read from the draft as it is now (reactive) so the picker's search
+	 * follows a keystroke without waiting for its completion. The snapshot's while the draft from
+	 * the mention's start to the caret is no longer one token: the popup is closing then.
+	 */
+	#mentionQuery(open: Completion, palette: MentionPaletteView): { typed: string; range: [number, number] } {
+		const cursor = this.#cursor();
+		const start = open.mentionStart ?? cursor - open.prefix.length;
+		const shown = mentionTypedPart(palette.trigger, palette.prefix);
+		const draft = this.#text().slice(start, Math.max(start, cursor));
+		const live = mentionTypedPart(palette.trigger, draft);
+		const body = draft.slice(live.from);
+		// A quoted path (`@"my file`) is one token with its blanks.
+		const oneToken = body.startsWith('"') || !/\s/.test(body);
+		if (oneToken && draft.slice(0, live.from) === palette.prefix.slice(0, shown.from))
+			return { typed: live.typed, range: [start + live.from, cursor] };
+		return { typed: shown.typed, range: [start + shown.from, start + palette.prefix.length] };
+	}
+
+	/**
+	 * Delete what is typed for the open mention in one undo step, keeping its trigger character and
+	 * its scope (the token, or the Files pin). False when nothing is typed or `open` no longer
+	 * describes the draft.
+	 */
+	#clearMentionQuery(open: Completion): boolean {
+		const palette = open.mention;
+		const cursor = this.#cursor();
+		const from = cursor - open.prefix.length;
+		if (!palette || open.revision !== this.#revision || this.#text().slice(Math.max(0, from), cursor) !== open.prefix)
+			return false;
+		const { typed } = this.#mentionQuery(open, palette);
+		if (typed === "") return false;
+		const pinned = this.#filesAt === from;
+		this.#change(cursor - typed.length, cursor, "", cursor - typed.length, "edit");
+		this.#filesAt = pinned ? from : undefined;
 		void this.#complete();
 		return true;
 	}
@@ -2263,6 +2308,7 @@ export class Composer {
 				}
 				const mentionTerm: MentionPopupTerm = { maxLines: this.#autocompleteMaxVisible(), glyphs };
 				const scopeLabel = palette.scopes.find(scope => scope.id === palette.scope)?.label;
+				const typed = this.#mentionQuery(open, palette);
 
 				const indexOfId = (id: string) => mentionItems.findIndex(item => item.pickerItem.id === id);
 
@@ -2275,12 +2321,12 @@ export class Composer {
 						density="snug"
 						layout="rows"
 						search="bar"
-						query={palette.typed}
+						query={typed.typed}
 						placeholder={scopeLabel ?? "Search"}
 						scopes={palette.scopes}
 						scope={palette.scope}
 						preview="none"
-						anchor={{ caret: "line/input" }}
+						anchor={{ caret: "line/input", query: typed.range }}
 						columns={palette.columns}
 						items={renderedPickerItems}
 						order={palette.order}
@@ -2308,6 +2354,11 @@ export class Composer {
 						onAction={(act, event) => {
 							if (act === "close") {
 								this.#closeCompletion();
+								return;
+							}
+							// The empty state's Clear search: the query goes, the mention and its scope stay.
+							if (act === "clear") {
+								this.#clearMentionQuery(open);
 								return;
 							}
 							if (act === "level" && event.value !== undefined) {

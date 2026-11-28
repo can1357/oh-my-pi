@@ -876,8 +876,11 @@ export interface TspPickerProps {
 	 * Where the sheet sits: absent, its size's place in the layer; `"composer"`, rising from the program's composer
 	 * (its `composerPart: "composer"` column), left edges aligned; `{ caret }`, rising from the composer aligned near
 	 * that editor's caret clamped to the composer bounds. Placed as if absent while no composer is drawn, and on a phone.
+	 * `query`: `[from, to]`, UTF-16 offsets into that editor's `text`: the part of the draft the picker's `query` is
+	 * typed as. While the search shows as a `"bar"`, that range and the editor's caret are left out of the editor's
+	 * drawing (the bar shows the query and the caret); ignored with any other `search` and on a phone.
 	 */
-	anchor?: "composer" | { caret: string };
+	anchor?: "composer" | { caret: string; query?: [number, number] };
 	/**
 	 * Where the search sits: the head (default), `"list"` (inline in the list head), `"none"` (no search box;
 	 * query lives in the composer), or `"bar"`: a pill beside the list with the `scopes` as round buttons after

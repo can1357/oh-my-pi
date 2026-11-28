@@ -43,6 +43,20 @@ export function splitMentionNamespace(body: string): { readonly namespace?: Ment
 	return { rest: body };
 }
 
+/**
+ * Where what is typed for a mention sits in its `prefix` (the draft from the mention's start to
+ * the caret): `from`, the offset right after the trigger character, and `typed`, the text from
+ * there with any `@<namespace>:` token stripped (`@m:opus` → 1 and `opus`, `pr #12` → 4 and `12`).
+ */
+export function mentionTypedPart(
+	trigger: MentionQuery["trigger"],
+	prefix: string,
+): { readonly from: number; readonly typed: string } {
+	const from = prefix.indexOf(trigger) + 1;
+	const body = prefix.slice(from);
+	return { from, typed: trigger === "@" ? splitMentionNamespace(body).rest : body };
+}
+
 function vcsSubKind(key: string): MentionSubKind | undefined {
 	switch (key) {
 		case "branch":

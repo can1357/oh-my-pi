@@ -13,7 +13,7 @@
  */
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import type { TspPickerColumn, TspPickerGroup, TspPickerItem } from "@oh-my-pi/pi-wire";
-import { type MentionNamespace, splitMentionNamespace } from "./parse";
+import { type MentionNamespace, mentionTypedPart } from "./parse";
 import { MENTION_SCOPES, type MentionScopeDef, mentionScopeOf } from "./scopes";
 import {
 	MATCH_TIER,
@@ -291,7 +291,7 @@ export function arbitrateMentions(
 	}
 	const scopeId = mentionScopeOf(query);
 	const scope = scopes.find(view => view.id === scopeId)?.id;
-	const typed = query.trigger === "@" ? splitMentionNamespace(query.prefix.slice(1)).rest : query.rawBody;
+	const { typed } = mentionTypedPart(query.trigger, query.prefix);
 
 	return {
 		items,
