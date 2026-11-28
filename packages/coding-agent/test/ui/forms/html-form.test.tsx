@@ -251,6 +251,33 @@ test("wraps a long option note and keeps its caret on screen", () => {
 	}
 });
 
+test("inverts the whole grapheme under a wrapped option note's caret", () => {
+	const model = new HtmlFormModel(
+		parseHtmlForm(`<form><label><input type="radio" name="r" value="keep" checked> Keep</label></form>`),
+		{ onSubmit: () => {}, onCancel: () => {} },
+	);
+	const term = createTestTerminal(() => ({ dock: <HtmlFormDialog model={model} terminalRows={() => 24} /> }), {
+		columns: 42,
+		rows: 24,
+		theme: loadThemeSync("dark"),
+	});
+	try {
+		term.focus(term.surface.dock()[0]!);
+		term.press("n");
+		const family = "👨‍👩‍👧‍👦";
+		term.paste(`${"x".repeat(33)} Go ${family}!`);
+		term.press("left"); // onto the exclamation mark
+		term.press("left"); // onto the family emoji
+		const screen = term.screen();
+		const first = screen.findIndex(row => row.includes("x".repeat(30)));
+		expect(first).toBeGreaterThanOrEqual(0);
+		expect(screen[first + 1]).toContain(`Go ${family}!`);
+		expect(highlighted(term.rows())).toEqual([family]);
+	} finally {
+		term.dispose();
+	}
+});
+
 test("keeps a long ordinary input visible and editable at both ends", () => {
 	const onSubmit = vi.fn();
 	const model = new HtmlFormModel(parseHtmlForm(`<form><label>Route <input name="route"></label></form>`), {

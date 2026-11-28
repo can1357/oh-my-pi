@@ -27,6 +27,7 @@ import {
 	visibleWidth,
 	wrap,
 } from "@oh-my-pi/pi-tui/text/width";
+import { segmentGraphemes } from "@oh-my-pi/pi-utils/graphemes";
 import type { ChoiceField, FormBlock, FormField, FormSpan } from "../../../tools/html-form/parse";
 import { spansText } from "../../../tools/html-form/parse";
 import { type FormPart, isFoldCaption } from "../../forms/html-form/layout";
@@ -150,8 +151,6 @@ function styled(theme: Theme, spans: readonly FormSpan[], base: string): string 
 		.join("");
 }
 
-const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
-
 /** Crop a styled input around the caret, marking the edges with more text. */
 function caretViewport(theme: Theme, line: string, width: number, caretEnd: number, caretWidth: number): string {
 	if (width < caretWidth) return theme.style("inverse", " ");
@@ -182,7 +181,7 @@ function caretLine(
 ): string {
 	const flat = text.replaceAll("\n", " ");
 	const at = Math.max(0, Math.min(cursor, flat.length));
-	const grapheme = graphemes.segment(flat).containing(at);
+	const grapheme = segmentGraphemes(flat).containing(at);
 	const start = grapheme?.index ?? at;
 	const ch = grapheme?.segment ?? " ";
 	const before = flat.slice(0, start);
@@ -200,9 +199,11 @@ function paintEditorRow(theme: Theme, text: string, row: EditorRow, caret: numbe
 	const part = text.slice(row.start, row.textEnd);
 	if (caret === undefined) return theme.fgResolved("text", part);
 	if (caret >= row.textEnd) return theme.fgResolved("text", `${part}▏`);
-	const at = caret - row.start;
-	const ch = String.fromCodePoint(part.codePointAt(at)!);
-	return theme.fgResolved("text", `${part.slice(0, at)}${theme.style("inverse", ch)}${part.slice(at + ch.length)}`);
+	const { index, segment } = segmentGraphemes(part).containing(caret - row.start)!;
+	return theme.fgResolved(
+		"text",
+		`${part.slice(0, index)}${theme.style("inverse", segment)}${part.slice(index + segment.length)}`,
+	);
 }
 
 /** Add an indented note, returning the row after its caret for viewport anchoring. */
