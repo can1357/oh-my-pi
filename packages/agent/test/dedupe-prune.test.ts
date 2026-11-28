@@ -102,7 +102,6 @@ describe("pruneSupersededToolResults: identical-result dedupe", () => {
 
 		expect(pruned.prunedCount).toBe(1);
 		expect(pruned.tokensSaved).toBeGreaterThan(0);
-		expect(text(older)).toBe("[Result identical to newer bash call - see the most recent result]");
 		expect(text(older)).toBe(dedupedNotice("bash"));
 		expect(prunedAt(older)).toBeDefined();
 		expect(text(newer)).toBe(STATUS_OUTPUT);
