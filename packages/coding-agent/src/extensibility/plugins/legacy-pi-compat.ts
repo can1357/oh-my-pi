@@ -981,7 +981,8 @@ const SUPPORTED_PACKAGE_REQUIRE_CONDITIONS = new Set(["bun", "node", "require", 
 const packageRootCache = new Map<string, string | null>();
 const packageImportsCache = new Map<string, Record<string, unknown> | null>();
 const nodePackageRootCache = new Map<string, Promise<string | null>>();
-const packageManifestCache = new Map<string, Promise<Record<string, unknown> | null>>();
+type PackageManifestCache = Map<string, Promise<Record<string, unknown> | null>>;
+let packageManifestCache: PackageManifestCache = new Map();
 const bareDependencyResolutionCache = new Map<string, Promise<string | null>>();
 const bareRequireResolutionCache = new Map<string, Promise<string | null>>();
 const realpathCache = new Map<string, Promise<string>>();
@@ -993,7 +994,7 @@ function clearLegacyPiResolutionCaches(): void {
 	packageRootCache.clear();
 	packageImportsCache.clear();
 	nodePackageRootCache.clear();
-	packageManifestCache.clear();
+	packageManifestCache = new Map();
 	bareDependencyResolutionCache.clear();
 	bareRequireResolutionCache.clear();
 	nativeAddonResolutionCache.clear();
@@ -1677,6 +1678,7 @@ async function findWorkspaceMemberPackageRoot(dir: string, packageName: string):
 	if (!(await pathExists(path.join(dir, "package.json")))) {
 		return null;
 	}
+	const manifestCache = packageManifestCache;
 	const manifest = await readPackageManifest(dir);
 	const rawWorkspaces = manifest?.workspaces;
 	const patterns = Array.isArray(rawWorkspaces)
@@ -1692,13 +1694,40 @@ async function findWorkspaceMemberPackageRoot(dir: string, packageName: string):
 			continue;
 		}
 		const glob = new Bun.Glob(path.join(pattern, "package.json"));
+		// Overlap a bounded batch of manifest reads rather than serializing the
+		// workspace scan on a missing optional dependency.
+		const candidates: PackageManifestCache = new Map();
 		for await (const match of glob.scan({ cwd: dir, onlyFiles: true })) {
 			const memberRoot = path.dirname(path.join(dir, match));
-			const memberManifest = await readPackageManifest(memberRoot);
-			if (memberManifest?.name === packageName) {
-				return memberRoot;
+			candidates.set(memberRoot, manifestCache.get(memberRoot) ?? readPackageManifestUncached(memberRoot));
+			if (candidates.size === 8) {
+				const found = await findMatchingWorkspaceMember(candidates, packageName, manifestCache);
+				if (found) return found;
+				candidates.clear();
 			}
 		}
+		if (candidates.size > 0) {
+			const found = await findMatchingWorkspaceMember(candidates, packageName, manifestCache);
+			if (found) return found;
+		}
+	}
+	return null;
+}
+
+async function findMatchingWorkspaceMember(
+	candidates: PackageManifestCache,
+	packageName: string,
+	manifestCache: PackageManifestCache,
+): Promise<string | null> {
+	// Only publish the ordered prefix through the first match. This scan's
+	// cache instance also prevents publishing into a newly invalidated cache.
+	for (const [root, prefetched] of candidates) {
+		let manifest = manifestCache.get(root);
+		if (!manifest) {
+			manifest = prefetched;
+			manifestCache.set(root, manifest);
+		}
+		if ((await manifest)?.name === packageName) return root;
 	}
 	return null;
 }
@@ -2057,7 +2086,7 @@ async function resolveExtensionBareRequire(specifier: string, importerPath: stri
 		}
 		const packageResolved = await resolveNodePackageRequire(specifier, importerPath);
 		if (packageResolved) {
-			return realpathOrSelf(packageResolved);
+			return packageResolved;
 		}
 		try {
 			const resolved = createRequire(importerPath).resolve(specifier);
@@ -2494,7 +2523,8 @@ async function collectExtensionModules(
 						requiresNativeAddonRewrite =
 							isRequired && !isCommonJsDescendant && (await moduleRequiresNativeAddon(sources, candidate));
 						if (!isRequired || isCommonJsDescendant || requiresNativeAddonRewrite || !targetIsCommonJs) {
-							resolved = await realpathOrSelf(candidate);
+							// The manual require resolver already returns the realpath.
+							resolved = isRequired ? candidate : await realpathOrSelf(candidate);
 							resolvedModuleKind = targetIsCommonJs ? "commonjs" : "esm";
 							resolvedEsmBranch = !targetIsCommonJs && esmBranch;
 							requiresSynchronousSourceHook = isRequired && !targetIsCommonJs;
@@ -2554,15 +2584,14 @@ async function collectExtensionModules(
 						isHookableEntry && dependencyEntry
 							? await isCommonJsModulePath(sources, dependencyEntry, undefined, inheritedTargetKind)
 							: false;
-					if (isHookableEntry && dependencyEntry && (!isRequired || (sourceIsCommonJs && isCommonJsEntry))) {
-						resolved = await realpathOrSelf(dependencyEntry);
-					} else if (isHookableEntry && dependencyEntry && isRequired && !isCommonJsEntry) {
-						resolved = await realpathOrSelf(dependencyEntry);
-						requiresSynchronousSourceHook = true;
-					} else if (isHookableEntry && dependencyEntry && isRequired) {
-						requiresNativeAddonRewrite = await moduleRequiresNativeAddon(sources, dependencyEntry);
-						if (requiresNativeAddonRewrite) {
-							resolved = await realpathOrSelf(dependencyEntry);
+					if (isHookableEntry && dependencyEntry) {
+						// Both bare resolvers already canonicalized the package target.
+						if (!isRequired || sourceIsCommonJs || !isCommonJsEntry) {
+							resolved = dependencyEntry;
+							requiresSynchronousSourceHook = isRequired && !isCommonJsEntry;
+						} else {
+							requiresNativeAddonRewrite = await moduleRequiresNativeAddon(sources, dependencyEntry);
+							if (requiresNativeAddonRewrite) resolved = dependencyEntry;
 						}
 					}
 					if (resolved) {

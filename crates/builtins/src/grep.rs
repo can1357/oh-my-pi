@@ -847,7 +847,7 @@ fn build_matcher(
 		// this translation step existed.
 		let translated: Vec<String> = patterns
 			.iter()
-			.map(|pattern| bre::bre_to_ere(pattern, bre::Backrefs::Unsupported))
+			.map(|pattern| bre::bre_to_ere(pattern, bre::Backrefs::Unsupported, bre::StackedRepeats::Allowed))
 			.collect::<Result<_, _>>()
 			.map_err(|error: bre::BreError| error.gnu_message().to_owned())?;
 		return build_default_matcher(&builder, &translated, patterns).map(Engine::Rust);
@@ -1873,7 +1873,10 @@ async fn search_stdin<M: Matcher>(
 	out: &mut StreamWriter,
 ) -> io::Result<SearchResult> {
 	let limit = opts.max_count.filter(|_| !opts.quiet && !opts.files_with_matches && !opts.files_without_match);
-	let start = limit.and_then(|_| host.stdin.file().seek(SeekFrom::Current(0)).ok());
+	let start = match limit {
+		Some(_) => host.stdin.file().seek_async(SeekFrom::Current(0)).await.ok(),
+		None => None,
+	};
 	let mut buf = vec![0u8; READ_CHUNK];
 	let result = scan(
 		&mut ScanInput::Stdin(host),
@@ -1889,7 +1892,7 @@ async fn search_stdin<M: Matcher>(
 	if limit == Some(result.count)
 		&& let (Some(start), Some(end)) = (start, result.last_end)
 	{
-		host.stdin.file().seek(SeekFrom::Start(start + end))?;
+		host.stdin.file().seek_async(SeekFrom::Start(start + end)).await?;
 	}
 	Ok(result)
 }

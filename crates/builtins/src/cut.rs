@@ -354,12 +354,41 @@ impl Default for Delimiter<'_> {
 	}
 }
 
-fn list_to_ranges(list: &str, complement: bool) -> Result<Vec<Range>, String> {
+fn list_to_ranges(list: &str, complement: bool, fields: bool) -> Result<Vec<Range>, String> {
+	check_list(list, fields).map_err(|message| format!("{message}\nTry 'cut --help' for more information."))?;
 	if complement {
 		Range::from_list(list).map(|r| uucore::ranges::complement(&r))
 	} else {
 		Range::from_list(list)
 	}
+}
+
+/// Rejects a malformed `-b`/`-c` (`fields` false) or `-f` list with GNU cut's
+/// diagnostic; uucore's parser words the same failures differently.
+fn check_list(list: &str, fields: bool) -> Result<(), String> {
+	let number = |text: &str| match text.parse::<usize>() {
+		Ok(0) if fields => Err("fields are numbered from 1".to_owned()),
+		Ok(0) => Err("byte/character positions are numbered from 1".to_owned()),
+		Ok(usize::MAX) if fields => Err(format!("field number {} is too large", text.quote())),
+		Ok(usize::MAX) => Err(format!("byte/character offset {} is too large", text.quote())),
+		Ok(value) => Ok(value),
+		Err(_) if fields => Err(format!("invalid field value {}", text.quote())),
+		Err(_) => Err(format!("invalid byte/character position {}", text.quote())),
+	};
+	for item in list.split([',', ' ']) {
+		match item.split_once('-') {
+			None => _ = number(item)?,
+			Some(("", "")) => return Err("invalid range with no endpoint: -".to_owned()),
+			Some((low, "")) => _ = number(low)?,
+			Some(("", high)) => _ = number(high)?,
+			Some((low, high)) => {
+				if number(low)? > number(high)? {
+					return Err("invalid decreasing range".to_owned());
+				}
+			},
+		}
+	}
+	Ok(())
 }
 
 fn cut_bytes<R: Read, W: Write>(
@@ -875,13 +904,13 @@ fn cut_main(matches: &ArgMatches, host: &mut Host) -> Result<i32, String> {
 		matches.get_one::<String>(options::CHARACTERS),
 		matches.get_one::<String>(options::FIELDS),
 	) {
-		(1, Some(ranges), None, None) => list_to_ranges(ranges, complement).map(|ranges| {
+		(1, Some(ranges), None, None) => list_to_ranges(ranges, complement, false).map(|ranges| {
 			Mode::Bytes(ranges, Options { out_delimiter, line_ending, field_opts: None })
 		}),
-		(1, None, Some(ranges), None) => list_to_ranges(ranges, complement).map(|ranges| {
+		(1, None, Some(ranges), None) => list_to_ranges(ranges, complement, false).map(|ranges| {
 			Mode::Characters(ranges, Options { out_delimiter, line_ending, field_opts: None })
 		}),
-		(1, None, None, Some(ranges)) => list_to_ranges(ranges, complement).map(|ranges| {
+		(1, None, None, Some(ranges)) => list_to_ranges(ranges, complement, true).map(|ranges| {
 			Mode::Fields(ranges, Options {
 				out_delimiter,
 				line_ending,
@@ -1054,6 +1083,27 @@ mod integration_tests {
 		assert_eq!(code, 0);
 		assert_eq!(capture.out(), "bcd\n");
 		assert_eq!(capture.err(), "");
+	}
+
+	// Failure: a bad list printed uucore's `range '0' was invalid: …` wording
+	// instead of GNU cut's message and pointer to `--help`.
+	#[test]
+	fn bad_lists_use_gnu_diagnostics() {
+		for (args, message) in [
+			(&["-f0"][..], "fields are numbered from 1"),
+			(&["-c0"][..], "byte/character positions are numbered from 1"),
+			(&["-f3-1"][..], "invalid decreasing range"),
+			(&["-b-"][..], "invalid range with no endpoint: -"),
+			(&["-fx"][..], "invalid field value 'x'"),
+		] {
+			let (code, capture) = run_util::<Cut>(args, "a\n", "/");
+			assert_eq!(code, 1, "{args:?}");
+			assert_eq!(
+				capture.err(),
+				format!("cut: {message}\nTry 'cut --help' for more information.\n"),
+				"{args:?}"
+			);
+		}
 	}
 
 	#[test]

@@ -192,7 +192,7 @@ pub(crate) fn n_map<'a, D: DataT>(child: INode<'a, D>, f: impl FnMut(Item<'a, D>
 }
 
 fn n_flat<'a, D: DataT>(child: INode<'a, D>, mut f: impl FnMut(Item<'a, D>) -> INode<'a, D> + 'a) -> INode<'a, D> {
-    Box::new(pull::FlatMap::new(child, move |x| Ok(f(x))))
+    Box::new(pull::FlatMap::new(child, move |x, _| Ok(f(x))))
 }
 
 fn n_collect<'a,D:DataT>(child: INode<'a,D>) -> INode<'a,D> {
@@ -231,31 +231,32 @@ fn deep<'a, D: DataT>() -> Item<'a, D> {
     Err(Exn::from(Error::too_deep()))
 }
 
-/// Build the node for `id`.
-///
-/// Terms with sub-filters are built lazily, so a deeply nested filter graph is
-/// constructed one level at a time on the driver's heap stack instead of
-/// recursing through `build_run` on the native stack. Childless terms are built
-/// directly, keeping the common case at its previous allocation cost.
+/// Construct one term on first poll. An atomic result is yielded directly
+/// from this frame; a suspending producer is installed at the same depth.
 pub(crate) fn run_node<'a, D: DataT>(id: Id, cv: Cv<'a, D>) -> INode<'a, D> {
-    let leaf = matches!(
-        &cv.0.lut().terms[id.0],
-        Ast::Id
-            | Ast::Recurse
-            | Ast::ToString
-            | Ast::Int(_)
-            | Ast::Num(_)
-            | Ast::Str(_)
-            | Ast::Bool(_)
-            | Ast::Null
-            | Ast::Fail(_)
-            | Ast::ObjEmpty
-    );
-    let build = move || checked_build(cv, |cv| build_run(id, cv));
-    if leaf {
-        build()
-    } else {
-        pull::lazy(build)
+    Box::new(RunNode { id, cv: Some(cv) })
+}
+
+struct RunNode<'a, D: DataT> {
+    id: Id,
+    cv: Option<Cv<'a, D>>,
+}
+
+impl<'a, D: DataT> NodeT<'a, Item<'a, D>> for RunNode<'a, D> {
+    fn last(&self, _: bool) -> bool { true }
+
+    fn resume(&mut self, _: Input<Item<'a,D>>) -> Action<'a,Item<'a,D>> {
+        let Some(cv) = self.cv.take() else { return Action::Done };
+        if D::CHECK_CANCELLATION && D::cancelled(&cv.0.data) { return Action::Done }
+        let data = D::CHECK_CANCELLATION.then(|| cv.0.data.clone());
+        match build_run(self.id, cv) {
+            Built::One(_) if data.as_ref().is_some_and(D::cancelled) => Action::Done,
+            Built::One(x) => Action::Yield(x.map(Payload::Val)),
+            Built::Node(inner) => Action::Install(match data {
+                Some(data) => Box::new(CancelNode { data, inner }),
+                None => inner,
+            }),
+        }
     }
 }
 
@@ -288,59 +289,94 @@ impl<'a, D: DataT> NodeT<'a, Item<'a, D>> for CancelNode<'a, D> {
     }
 }
 
-fn build_run<'a, D: DataT>(id: Id, cv: Cv<'a, D>) -> INode<'a, D> {
-    match &cv.0.lut().terms[id.0] {
-        Ast::Id => n_once(Ok(cv.1)),
+// Atomic filters have no producer to suspend. Ask for the input only for
+// operations that use it, so a literal RHS does not share the accumulator.
+fn atom<'a, D: DataT>(
+    ctx: &Ctx<'a, D>, id: Id, input: impl FnOnce() -> Value<'a, D>,
+) -> Option<ValX<'a, Value<'a, D>>> {
+    Some(match &ctx.lut().terms[id.0] {
+        Ast::Id => Ok(input()),
+        Ast::ToString => Ok(input().into_string()),
+        Ast::Int(x) => Ok(D::V::from(*x)),
+        Ast::Num(x) => D::V::from_num(x).map_err(Exn::from),
+        Ast::Str(x) => Ok(D::V::from(x.clone())),
+        Ast::Bool(x) => Ok(D::V::from(*x)),
+        Ast::Null => Ok(D::V::null()),
+        Ast::ObjEmpty => D::V::from_map([]).map_err(Exn::from),
+        Ast::Fail(s) => Err(Exn::from(Error::str(s.clone()))),
+        Ast::Var(i) => match ctx.vars.get(*i).unwrap() {
+            Bind::Var(v) => Ok(v.clone()),
+            Bind::Label(l) => Err(Exn(exn::Inner::Break(*l))),
+            Bind::Fun(_) => return None,
+        },
+        _ => return None,
+    })
+}
+
+enum Built<'a, D: DataT> {
+    One(ValX<'a, Value<'a,D>>),
+    Node(INode<'a,D>),
+}
+
+impl<'a, D: DataT> Built<'a,D> {
+    fn into_node(self) -> INode<'a,D> {
+        match self { Self::One(x) => n_once(x), Self::Node(node) => node }
+    }
+}
+
+// The outer operand varies slowest (the RHS for math and comparisons, the
+// key for an object entry). Only atoms can bypass the driver; user filters
+// remain lazy regardless of how many outputs they eventually produce.
+fn binary<'a, D: DataT>(
+    inner: Id, outer: Id, cv: Cv<'a,D>,
+    op: impl Fn(Value<'a,D>, Value<'a,D>) -> ValR<Value<'a,D>> + Clone + 'a,
+) -> Built<'a,D> {
+    let apply = move |(ctx, v): Cv<'a,D>, y: Value<'a,D>| {
+        let mut v = Some(v);
+        if let Some(x) = atom(&ctx, inner, || v.take().unwrap()) {
+            Built::One(x.and_then(|x| op(x, y).map_err(Exn::from)))
+        } else {
+            let op = op.clone();
+            Built::Node(n_map(run_node(inner, (ctx, v.unwrap())), move |x| {
+                val::<D>(x).and_then(|x| op(x, y.clone()).map_err(Exn::from)).map(Payload::Val)
+            }))
+        }
+    };
+    match atom(&cv.0, outer, || cv.1.clone()) {
+        Some(Ok(y)) => apply(cv, y),
+        Some(Err(e)) => Built::One(Err(e)),
+        None => Built::Node(n_with_input(run_node(outer, cv.clone()), cv, move |y, cv| {
+            let Payload::Val(y) = y else { unreachable!() };
+            apply(cv, y).into_node()
+        })),
+    }
+}
+
+fn build_run<'a, D: DataT>(id: Id, (ctx, input): Cv<'a, D>) -> Built<'a, D> {
+    let mut input = Some(input);
+    if let Some(x) = atom(&ctx, id, || input.take().unwrap()) {
+        return Built::One(x);
+    }
+    let cv = (ctx, input.unwrap());
+    Built::Node(match &cv.0.lut().terms[id.0] {
         Ast::Recurse => Box::new(RecurseRun::new(cv.1)),
-        Ast::ToString => n_once(Ok(cv.1.into_string())),
-        Ast::Int(x) => n_once(Ok(D::V::from(*x))),
-        Ast::Num(x) => n_once(D::V::from_num(x).map_err(Exn::from)),
-        Ast::Str(s) => n_once(Ok(D::V::from(s.clone()))),
-        Ast::Bool(b) => n_once(Ok(D::V::from(*b))),
-        Ast::Null => n_once(Ok(D::V::null())),
-        Ast::Fail(s) => n_once(Err(Exn::from(Error::str(s.clone())))),
         Ast::Arr(f) => n_collect(run_node(*f, (cv.0, cv.1))),
-        Ast::ObjEmpty => n_once(D::V::from_map([]).map_err(Exn::from)),
-        Ast::ObjSingle(k, v) => {
-            let (c0, c1) = (cv.0.clone(), cv.1.clone());
-            n_flat(run_node(*k, (cv.0, cv.1)), move |it| match it {
-                Ok(Payload::Val(k)) => {
-                    let (c0, c1) = (c0.clone(), c1.clone());
-                    n_map(run_node(*v, (c0, c1)), move |it| match it {
-                        Ok(Payload::Val(v)) => D::V::from_map([(k.clone(), v)]).map(Payload::Val).map_err(Exn::from),
-                        other => other,
-                    })
-                },
-                other => Box::new(pull::Once::new(other)),
-            })
-        },
-        Ast::ObjCat(l, r) => {
-            let (c0, c1) = (cv.0.clone(), cv.1.clone());
-            n_flat(run_node(*l, (cv.0, cv.1)), move |it| match it {
-                Ok(Payload::Val(l)) => {
-                    let (c0, c1) = (c0.clone(), c1.clone());
-                    n_map(run_node(*r, (c0, c1)), move |it| match it {
-                        Ok(Payload::Val(r)) => (l.clone() + r).map(Payload::Val).map_err(Exn::from),
-                        other => other,
-                    })
-                },
-                other => Box::new(pull::Once::new(other)),
-            })
-        },
+        Ast::ObjSingle(k, v) => return binary(*v, *k, cv, |v, k| D::V::from_map([(k, v)])),
+        Ast::ObjCat(l, r) => return binary(*r, *l, cv, |r, l| l + r),
         Ast::Neg(f) => n_map(run_node(*f, (cv.0, cv.1)), |it| match it {
             Ok(Payload::Val(v)) => (-v).map(Payload::Val).map_err(Exn::from),
             other => other,
         }),
         Ast::Pipe(l, None, r) => {
             let c0 = cv.0.clone();
-            n_flat(run_node(*l, (cv.0, cv.1)), move |it| match it {
-                Ok(Payload::Val(y)) => run_node(*r, (c0.clone(), y)),
-                other => Box::new(pull::Once::new(other)),
+            n_with_input(run_node(*l, cv), c0, move |y, ctx| {
+                let Payload::Val(y) = y else { unreachable!() };
+                run_node(*r, (ctx, y))
             })
         },
-        Ast::Pipe(l, Some(pat), r) => n_flat(run_node(*l, (cv.0.clone(), cv.1.clone())), move |it| match it {
-            Ok(Payload::Val(y)) => nbind_run(pat, r, cv.clone(), y, run_node),
-            other => Box::new(pull::Once::new(other)),
+        Ast::Pipe(l, Some(pat), r) => n_with_input(run_node(*l, cv.clone()), cv, move |y, cv| {
+            let Payload::Val(y) = y else { unreachable!() };
+            nbind_run(pat, r, cv, y, run_node)
         }),
         Ast::PipeAlt(l, alts) => n_flat(run_node(*l, (cv.0.clone(), cv.1.clone())), move |it| match it {
             Ok(Payload::Val(y)) => Box::new(AltChain::new(alts, cv.clone(), y, run_node)),
@@ -355,11 +391,11 @@ fn build_run<'a, D: DataT>(id: Id, cv: Cv<'a, D>) -> INode<'a, D> {
             run_node(*r, cv),
             |it| item_truthy(it),
         )),
-        Ast::Ite(if_, then_, else_) => n_flat(run_node(*if_, (cv.0.clone(), cv.1.clone())), move |it| match it {
-            Ok(Payload::Val(v)) => run_node(if v.as_bool() { *then_ } else { *else_ }, cv.clone()),
-            other => Box::new(pull::Once::new(other)),
+        Ast::Ite(if_, then_, else_) => n_with_input(run_node(*if_, cv.clone()), cv, move |v, cv| {
+            let Payload::Val(v) = v else { unreachable!() };
+            run_node(if v.as_bool() { *then_ } else { *else_ }, cv)
         }),
-        Ast::Path(..) => path_run_node(id, cv),
+        Ast::Path(..) => return path_run_node(id, cv),
         Ast::Update(path, f) => {
             let (ctx, acc) = cv;
             Box::new(ModifyNode {
@@ -390,32 +426,8 @@ fn build_run<'a, D: DataT>(id: Id, cv: Cv<'a, D>) -> INode<'a, D> {
                 other => Box::new(pull::Once::new(other)),
             })
         },
-        Ast::Math(l, op, r) => {
-            let (op, c0, c1) = (*op, cv.0.clone(), cv.1.clone());
-            n_flat(run_node(*r, (c0.clone(), c1.clone())), move |it| match it {
-                Ok(Payload::Val(y)) => {
-                    let (c0, c1, y) = (c0.clone(), c1.clone(), y);
-                    n_map(run_node(*l, (c0, c1)), move |it| match it {
-                        Ok(Payload::Val(x)) => op.run(x, y.clone()).map(Payload::Val).map_err(Exn::from),
-                        other => other,
-                    })
-                },
-                other => Box::new(pull::Once::new(other)),
-            })
-        },
-        Ast::Cmp(l, op, r) => {
-            let (op, c0, c1) = (*op, cv.0.clone(), cv.1.clone());
-            n_flat(run_node(*r, (c0.clone(), c1.clone())), move |it| match it {
-                Ok(Payload::Val(y)) => {
-                    let (c0, c1, y) = (c0.clone(), c1.clone(), y);
-                    n_map(run_node(*l, (c0, c1)), move |it| match it {
-                        Ok(Payload::Val(x)) => x.cmp_op(op, &y).map(|b| Payload::Val(D::V::from(b))).map_err(Exn::from),
-                        other => other,
-                    })
-                },
-                other => Box::new(pull::Once::new(other)),
-            })
-        },
+        Ast::Math(l, op, r) => return binary(*l, *r, cv, move |x, y| op.run(x, y)),
+        Ast::Cmp(l, op, r) => return binary(*l, *r, cv, move |x, y| x.cmp_op(*op, &y).map(D::V::from)),
         Ast::TryCatch(f, c) => Box::new(TryCatchNode {
             child:    run_node(*f, (cv.0.clone(), cv.1)),
             ctx:      cv.0.clone(),
@@ -431,25 +443,33 @@ fn build_run<'a, D: DataT>(id: Id, cv: Cv<'a, D>) -> INode<'a, D> {
             },
         ),
         Ast::Var(v) => {
-            let bind = cv.0.vars.get(*v).unwrap().clone();
-            match bind {
-                Bind::Var(v) => n_once(Ok(v)),
-                Bind::Fun((id, vars)) => run_node(id, (cv.0.with_vars(vars), cv.1)),
-                Bind::Label(l) => Box::new(pull::Once::new(Err(Exn(exn::Inner::Break(l))))),
-            }
+            let Bind::Fun((id, vars)) = cv.0.vars.get(*v).unwrap() else { unreachable!() };
+            run_node(*id, (cv.0.with_vars(vars.clone()), cv.1))
         },
         Ast::CallDef(id, args, skip, call_typ) => {
+            // Inline calls have no tail exception to catch. Function
+            // arguments are bindings, not producers, so this is exactly one
+            // argument context. Still descend to the body: dynamic callback
+            // cycles must spend driver depth just like ordinary calls.
+            if matches!(call_typ, CallType::Inline) && args.iter().all(|a| matches!(a, Arg::Fun(_))) {
+                let mut ctx = cv.0.clone().skip_vars(*skip);
+                for arg in args.iter() {
+                    let Arg::Fun(arg) = arg else { unreachable!() };
+                    ctx = ctx.cons_fun((*arg, cv.0.clone()));
+                }
+                return Built::Node(n_map(run_node(*id, (ctx, cv.1)), core::convert::identity));
+            }
             let data = cv.0.data.clone();
             let labels = cv.0.labels;
             let ctx = cv.0.clone().skip_vars(*skip);
             let cvs = nbind_vars(args, ctx, (cv.0, exn::CallInput::Run(cv.1)));
-            let with_vars = move |vars| Ctx { vars, data: data.clone(), labels };
             Box::new(DefNode {
                 cvs,
                 id,
                 all: matches!(call_typ, CallType::CatchAll),
                 throw: matches!(call_typ, CallType::Throw),
-                with_vars: Box::new(with_vars),
+                data,
+                labels,
                 body: |id, (ctx, v)| run_node(id, (ctx, v.unwrap_run())),
                 phase: DefPhase::Init,
                 suspended: 0,
@@ -473,7 +493,9 @@ fn build_run<'a, D: DataT>(id: Id, cv: Cv<'a, D>) -> INode<'a, D> {
             let label = ctx.labels;
             Box::new(LabelNode { child: run_node(*f, (ctx, cv.1)), label, started: false })
         },
-    }
+        Ast::Id | Ast::ToString | Ast::Int(_) | Ast::Num(_) | Ast::Str(_) | Ast::Bool(_)
+        | Ast::Null | Ast::Fail(_) | Ast::ObjEmpty => unreachable!("atomic term"),
+    })
 }
 
 use crate::path::{Opt, Part, Path};
@@ -534,7 +556,20 @@ fn path_value<'a, D: DataT>(x: Payload<'a, D>) -> Vp<'a, D> {
 }
 
 fn n_ok<'a, D: DataT>(node: INode<'a, D>, mut f: impl FnMut(Payload<'a, D>) -> INode<'a, D> + 'a) -> INode<'a, D> {
-    Box::new(pull::FlatMap::new(node, move |x| x.map(&mut f).map_err(Err)))
+    Box::new(pull::FlatMap::new(node, move |x, _| x.map(&mut f).map_err(Err)))
+}
+
+// For a Cartesian continuation, keep the original input only as long as
+// another branch might need it. The last branch receives it by move so
+// jq arrays/objects can be updated in place.
+fn n_with_input<'a, D: DataT, T: Clone + 'a>(
+    node: INode<'a,D>, input: T, mut f: impl FnMut(Payload<'a,D>, T) -> INode<'a,D> + 'a,
+) -> INode<'a,D> {
+    let mut input = Some(input);
+    Box::new(pull::FlatMap::new(node, move |x, last| x.map(|x| {
+        let input = if last { input.take().unwrap() } else { input.as_ref().unwrap().clone() };
+        f(x, input)
+    }).map_err(Err)))
 }
 
 fn part_node<'a, D: DataT>(part: &'a Part<Id>, cv: Cv<'a, D>) -> INode<'a, D> {
@@ -604,9 +639,42 @@ fn path_access<'a, D: DataT>(base: INode<'a, D>, path: &'a Path<Id>, cv: Cv<'a, 
     })
 }
 
-fn path_run_node<'a, D: DataT>(id: Id, cv: Cv<'a, D>) -> INode<'a, D> {
+// Only an identity base can be bypassed. An arbitrary base might yield
+// nothing (so the index must never run), fail, or yield several values.
+fn single_index<'a, D: DataT>(
+    base: Id, path: &Path<Id>, cv: &Cv<'a,D>,
+) -> Option<(Built<'a,D>, Opt)> {
+    if !matches!(cv.0.lut().terms[base.0], Ast::Id) {
+        return None;
+    }
+    let [(Part::Index(i), opt)] = path.0.as_slice() else { return None };
+    // Prepare at most one binary operation, using the same operand ordering
+    // as in value mode. Its non-atomic operands remain lazy driver nodes.
+    let key = match &cv.0.lut().terms[i.0] {
+        Ast::Math(l, op, r) => binary(*l, *r, cv.clone(), move |x, y| op.run(x, y)),
+        Ast::Cmp(l, op, r) => binary(*l, *r, cv.clone(), move |x, y| x.cmp_op(*op, &y).map(D::V::from)),
+        _ => atom(&cv.0, *i, || cv.1.clone()).map_or_else(|| Built::Node(run_node(*i, cv.clone())), Built::One),
+    };
+    Some((key, *opt))
+}
+
+fn path_run_node<'a, D: DataT>(id: Id, cv: Cv<'a, D>) -> Built<'a, D> {
     let Ast::Path(f, path) = &cv.0.lut().terms[id.0] else { unreachable!() };
-    path_access(run_node(*f, cv.clone()), path, cv)
+    if let Some((key, opt)) = single_index(*f, path, &cv) {
+        let access = move |v: Value<'a,D>, k: Value<'a,D>| match v.index(&k) {
+            Err(_) if matches!(opt, Opt::Optional) => Built::Node(Box::new(pull::Empty)),
+            v => Built::One(v.map_err(Exn::from)),
+        };
+        return match key {
+            Built::One(Err(e)) => Built::One(Err(e)),
+            Built::One(Ok(k)) => access(cv.1, k),
+            Built::Node(keys) => Built::Node(n_with_input(keys, cv.1, move |k, v| {
+                let Payload::Val(k) = k else { unreachable!() };
+                access(v, k).into_node()
+            })),
+        };
+    }
+    Built::Node(path_access(run_node(*f, cv.clone()), path, cv))
 }
 
 fn path_update_node<'a, D: DataT>(id: Id, cv: Cv<'a, D>) -> INode<'a, D> {
@@ -616,16 +684,23 @@ fn path_update_node<'a, D: DataT>(id: Id, cv: Cv<'a, D>) -> INode<'a, D> {
         Ast::Assign(path, f) => (*path, *f, None),
         _ => unreachable!(),
     };
-    n_ok(run_node(f, cv.clone()), move |y| {
-        let Payload::Val(y) = y else { unreachable!() };
-        update_node(path, cv.clone(), Updater::new(move |x| {
+    let apply = move |cv, y: Value<'a,D>| {
+        update_node(path, cv, Updater::new(move |x| {
             n_once(match op {
                 Some(Some(op)) => op.run(x, y.clone()).map_err(Exn::from),
                 Some(None) if x.as_bool() => Ok(x),
                 _ => Ok(y.clone()),
             })
         }))
-    })
+    };
+    match atom(&cv.0, f, || cv.1.clone()) {
+        Some(Ok(y)) => apply(cv, y),
+        Some(Err(e)) => n_once(Err(e)),
+        None => n_with_input(run_node(f, cv.clone()), cv, move |y, cv| {
+            let Payload::Val(y) = y else { unreachable!() };
+            apply(cv, y)
+        }),
+    }
 }
 
 // ---- variable and pattern binding ----
@@ -816,7 +891,8 @@ struct DefNode<'a, D: DataT> {
     id:        &'a Id,
     all:       bool,
     throw:     bool,
-    with_vars: Box<dyn Fn(Vars<D::V<'a>>) -> Ctx<'a, D> + 'a>,
+    data:      D::Data<'a>,
+    labels:    usize,
     body:      fn(Id, Cv<'a, D, exn::CallInput<D::V<'a>>>) -> INode<'a, D>,
     phase:     DefPhase,
     suspended: usize,
@@ -857,7 +933,7 @@ impl<'a, D: DataT> NodeT<'a, Item<'a, D>> for DefNode<'a, D> {
             DefPhase::Inner => match input {
                 Input::Start => Action::Continue,
                 Input::Item(Err(Exn(exn::Inner::TailCall(tc)))) if self.all || tc.0 == self.id => {
-                    let ctx = (self.with_vars)(tc.1);
+                    let ctx = Ctx { vars: tc.1, data: self.data.clone(), labels: self.labels };
                     let body = (self.body)(*tc.0, (ctx, tc.2));
                     if last { Action::Replace(body) } else {
                         self.suspended += 1;
@@ -1000,7 +1076,7 @@ fn build_paths<'a, D: DataT>(id: Id, cv: Cvp<'a, D>) -> INode<'a, D> {
             let cvs = nbind_vars(args, ctx, (cv.0, exn::CallInput::Paths(cv.1)));
             Box::new(DefNode {
                 cvs, id: f, all: matches!(call, CallType::CatchAll), throw: matches!(call, CallType::Throw),
-                with_vars: Box::new(move |vars| Ctx { vars, data: data.clone(), labels }),
+                data, labels,
                 body: |id, (ctx, v)| paths_node(id, (ctx, v.unwrap_paths())), phase: DefPhase::Init, suspended: 0, outer_last: false,
             })
         },
@@ -1084,7 +1160,10 @@ fn replay_item<'a,D: DataT>(replay: Replay<'a,D>, index: usize, f: impl FnOnce(O
                 return match input { Input::Start => Action::Continue, Input::Item(x) => Action::Yield(x), Input::End => Action::Done };
             };
             match input {
-                Input::Start if !self.started => { self.started = true; Action::Read(self.replay.clone(), self.index) },
+                Input::Start if !self.started => {
+                    self.started = true;
+                    Action::Read { replay: self.replay.clone(), index: self.index, retain: true }
+                },
                 Input::Item(x) => Action::Descend(self.pending.take().unwrap()(Some(x))),
                 Input::End => Action::Descend(self.pending.take().unwrap()(None)),
                 Input::Start => unreachable!(),
@@ -1121,6 +1200,7 @@ struct FoldNode<'a,D:DataT> {
     xs: Replay<'a,D>,
     step: Step<'a,D>,
     project: Option<Project<'a,D>>,
+    final_init: bool,
     branches: Vec<(usize, Option<Payload<'a,D>>)>,
     pos: usize,
     acc: Option<Payload<'a,D>>,
@@ -1130,7 +1210,7 @@ struct FoldNode<'a,D:DataT> {
 impl<'a,D:DataT> FoldNode<'a,D> {
     fn read(&mut self) -> Action<'a,Item<'a,D>> {
         self.mode = FoldMode::Read;
-        Action::Read(self.xs.clone(),self.pos)
+        Action::Read { replay: self.xs.clone(), index: self.pos, retain: !self.final_init || !self.branches.is_empty() }
     }
 
     fn backtrack(&mut self) -> Action<'a,Item<'a,D>> {
@@ -1216,8 +1296,8 @@ impl<'a,D:DataT> NodeT<'a,Item<'a,D>> for FoldNode<'a,D> {
     }
 }
 
-fn fold_step<'a,D:DataT>(xs: Replay<'a,D>, acc: Payload<'a,D>, step: Step<'a,D>, project: Option<Project<'a,D>>) -> INode<'a,D> {
-    Box::new(FoldNode { xs, step, project, branches: Vec::new(), pos: 0, acc: Some(acc), mode: FoldMode::Start })
+fn fold_step<'a,D:DataT>(xs: Replay<'a,D>, acc: Payload<'a,D>, step: Step<'a,D>, project: Option<Project<'a,D>>, final_init: bool) -> INode<'a,D> {
+    Box::new(FoldNode { xs, step, project, final_init, branches: Vec::new(), pos: 0, acc: Some(acc), mode: FoldMode::Start })
 }
 
 fn fold_node<'a,D:DataT,T:'a>(xs: INode<'a,D>, init: INode<'a,D>, update: Id, fold: &'a Fold<Id>, eval: Eval<'a,D,T>, take: fn(Payload<'a,D>) -> T) -> INode<'a,D> {
@@ -1234,7 +1314,11 @@ fn fold_node<'a,D:DataT,T:'a>(xs: INode<'a,D>, init: INode<'a,D>, update: Id, fo
         })),
     };
     let cache = Replay::new(copy_fold_item::<D>);
-    pull::with_replay(cache.clone(), xs, n_ok(init, move |init| fold_step(cache.clone(), init, step.clone(), project.clone())))
+    let source = cache.clone();
+    let body = pull::FlatMap::new(init, move |init, last| {
+        init.map(|init| fold_step(cache.clone(), init, step.clone(), project.clone(), last)).map_err(Err)
+    });
+    pull::with_replay(source, xs, Box::new(body))
 }
 
 fn n_reduce<'a,D:DataT>(xs: INode<'a,D>, init: Value<'a,D>, f: impl Fn(Payload<'a,D>, Value<'a,D>) -> INode<'a,D> + 'a) -> INode<'a,D> {
@@ -1243,7 +1327,7 @@ fn n_reduce<'a,D:DataT>(xs: INode<'a,D>, init: Value<'a,D>, f: impl Fn(Payload<'
         let Payload::Val(acc) = acc else { unreachable!() };
         f(x, acc)
     });
-    pull::with_replay(cache.clone(), xs, fold_step(cache, Payload::Val(init), step, None))
+    pull::with_replay(cache.clone(), xs, fold_step(cache, Payload::Val(init), step, None, true))
 }
 
 // Take exactly one child output (including errors). Do not poll its tail.
@@ -1398,6 +1482,19 @@ fn build_update<'a,D:DataT>(id: Id, cv: Cv<'a,D>, f: Updater<'a,D>) -> INode<'a,
         Ast::Id => f.apply(cv.1),
         Ast::Recurse => recurse_update_node(cv.1, f),
         Ast::Path(base,path) => {
+            // One index does not need to build a Cartesian path product.
+            // Its values and all replacement callbacks still use the driver.
+            if let Some((key, opt)) = single_index(*base, path, &cv) {
+                let node = match key {
+                    Built::One(Err(e)) => return n_item(Err(seal(e))),
+                    Built::One(Ok(k)) => map_update(cv.1.update_index(&k, opt), f),
+                    Built::Node(keys) => n_reduce(keys, cv.1, move |k, v| {
+                        let Payload::Val(k) = k else { unreachable!() };
+                        map_update(v.update_index(&k, opt), f.clone())
+                    }),
+                };
+                return n_map(node, |x| x.map_err(seal));
+            }
             let input = cv.clone();
             let diagnostic = cv.clone();
             let callback = f.wrap(move |v, f| {

@@ -109,6 +109,13 @@ interface DefinitionBase {
 	 */
 	protocolDefault?: readonly ProtocolHost[];
 	/**
+	 * The prepaint frame (`modes/startup-composer.ts`) draws this setting from the last launch's
+	 * startup cache before settings load, so a `--config` / `PI_CONFIG_FILES` overlay configuring it
+	 * skips that frame (`overlaysKeepPrepaint`). Declare it only in `modes/settings.ts`: the CLI loads
+	 * that module alone to find these.
+	 */
+	prepaint?: true;
+	/**
 	 * Rejects a malformed configured value with a descriptive error. Runs on every load/reload and
 	 * before every write, so a typo fails loudly instead of silently reading as the default.
 	 */

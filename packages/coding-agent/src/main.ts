@@ -844,6 +844,7 @@ async function runInteractiveMode(
 				suppressWelcomeIntro: resuming || setupScenes.length > 0 || playStartupSplash,
 				clearInitialTerminalHistory: true,
 				autoStartCollab: joinLink === undefined,
+				startupBackgroundWork: startDeferredStartupWork && (() => startDeferredStartupWork(mode)),
 				// Setup scenes, the startup worktree question and the foreign-config offer wait on
 				// the user before any prompt runs, so they keep the boot `idle`. The worktree check
 				// runs before its async git check, so a folder where the question never shows also
@@ -855,7 +856,6 @@ async function runInteractiveMode(
 					(startupGoal !== undefined || initialMessage !== undefined || initialMessages.length > 0),
 			}),
 		);
-		startDeferredStartupWork?.(mode);
 
 		if (setupWizard && playStartupSplash) {
 			await setupWizard.runStartupSplash(mode);
@@ -2640,7 +2640,12 @@ export async function runRootCommand(
 				// ACP sessions select their own workspace's model, so only the launch scope can name the provider.
 				const launchKey =
 					mode === "acp"
-						? await resolveAcpApiKeyProvider(parsedArgs, modelRegistry, settingsInstance, hydrateLaunchModelCaches)
+						? await resolveAcpApiKeyProvider(
+								parsedArgs,
+								modelRegistry,
+								settingsInstance,
+								hydrateLaunchModelCaches,
+							)
 						: { error: API_KEY_REQUIRES_MODEL };
 				if ("error" in launchKey) {
 					process.stderr.write(`${chalk.red(launchKey.error)}\n`);
@@ -2656,7 +2661,10 @@ export async function runRootCommand(
 		// Keep SDK evaluation off argv error paths and defer it to `session/new` in ACP.
 		let startupSessionCreator: Promise<typeof createAgentSession> | undefined;
 		const loadStartupSessionCreator = () =>
-			(startupSessionCreator ??= logger.time("loadStartupSdk", async () => (await import("./sdk")).createAgentSession));
+			(startupSessionCreator ??= logger.time(
+				"loadStartupSdk",
+				async () => (await import("./sdk")).createAgentSession,
+			));
 		const createSession = async (options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> => {
 			const createAgentSessionImpl = deps.createAgentSession ?? (await loadStartupSessionCreator());
 			const result = await logger.time("createAgentSession", createAgentSessionImpl, options);
@@ -2852,6 +2860,7 @@ export async function runRootCommand(
 				deferredExtensionPaths: extensionsResult.deferredPaths,
 				// Validation waits for background refresh and the first interactive frame.
 				deferRetryFallbackValidation: true,
+				deferInteractiveStartupWork: isInteractive,
 				deferStartupModelCacheHydration:
 					isInteractive &&
 					deps.createAgentSession === undefined &&
@@ -2899,6 +2908,7 @@ export async function runRootCommand(
 				mcpManager,
 				startBackgroundModelDiscovery,
 				hydrateDeferredModelCaches,
+				startDeferredInteractiveWork,
 			} = createdSession;
 			if (isInteractive)
 				session.addDisposer(bindAgentMesh(sessionOptions.cwd ?? getProjectDir(), settingsInstance, session));
@@ -2990,11 +3000,10 @@ export async function runRootCommand(
 			// /models list and Ctrl+P cycle, including scopes that initially resolved
 			// empty (issue #9220). Fire-and-forget: the prompt must never block on the
 			// background pass.
-			// Interactive-only work that must not delay the first session-bound frame:
-			// runInteractiveMode calls it once init has painted. None feeds the first
-			// prompt: fallback-chain validation and the startup changelog only add header
-			// rows, and the background refresh already raced the first prompt when it ran earlier.
+			// Interactive-only warmup runs after the live composer has had time to handle input.
+			// First-turn dependencies (deferred extensions and MCP) also start on demand.
 			const startDeferredStartupWork = (interactive: InteractiveMode): void => {
+				startDeferredInteractiveWork?.();
 				if (showsStartupChangelog) {
 					void resolveStartupChangelogForDisplay({
 						mode: cfgStartupChangelogMode.get(settingsInstance),

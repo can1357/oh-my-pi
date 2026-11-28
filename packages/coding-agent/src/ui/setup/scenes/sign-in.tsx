@@ -6,7 +6,7 @@
  * scene never advances on its own: Escape on the sheet leaves it, reading
  * "Continue" once a sign-in succeeded.
  */
-import { type OAuthProvider, PASTE_CODE_LOGIN_PROVIDERS } from "@oh-my-pi/pi-ai";
+import { PASTE_CODE_LOGIN_PROVIDERS } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { batch, computed, type JSXNode, signal, type UiNode, untrack } from "@oh-my-pi/pi-tui";
 import type { TspText } from "@oh-my-pi/pi-wire";
@@ -128,7 +128,7 @@ export const signInScene: SetupScene = {
 				dialog.set(state);
 			});
 			try {
-				await host.authStorage.oauth.login(providerId as OAuthProvider, {
+				await host.authStorage.oauth.login(providerId, {
 					signal: AbortSignal.any([state.signal, lifetime.signal]),
 					onAuth: info => state.showAuth(info.url, info.instructions, info.launchUrl),
 					onPrompt: prompt => state.showPrompt(prompt),

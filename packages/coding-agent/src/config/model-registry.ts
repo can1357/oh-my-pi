@@ -4845,9 +4845,16 @@ export class ModelRegistry {
 			// overrides can contribute spellings beyond those on the input rows.
 			// Ordinary derived thinking pairs only combine two existing IDs.
 			const table = reviewedCollapseTable(other);
-			if (other === "cursor") return "conservative:synthesized-families:cursor";
-			if (table?.families.length || table?.templates?.length) return `conservative:reviewed-table:${other}`;
-			if (this.#modelOverrides.has(other)) return `conservative:model-overrides:${other}`;
+			if (
+				other === "cursor" ||
+				table?.families.length ||
+				table?.templates?.length ||
+				this.#modelOverrides.has(other)
+			) {
+				const collision = startupRoleRowCollision(this.#modelsForProviderLookup(other), selectors);
+				if (collision) return collision;
+				continue;
+			}
 			const bundledCollision = startupRoleRowCollision(getBundledModelSlice(other), selectors);
 			if (bundledCollision) return bundledCollision;
 			const cached = this.#cachedStandardModelsByProvider.get(other);

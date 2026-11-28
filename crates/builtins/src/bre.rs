@@ -18,6 +18,17 @@ pub(crate) enum Backrefs {
 	Unsupported,
 }
 
+/// Whether a `*` or `\{…\}` may follow another repetition (`a**`, `a\+*`).
+///
+/// GNU sed refuses it ("Invalid preceding regular expression"); GNU grep and
+/// `nl` accept it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[allow(dead_code, reason = "each variant is used by a different utility feature")]
+pub(crate) enum StackedRepeats {
+	Allowed,
+	Refused,
+}
+
 /// A pattern the BRE dialect cannot express.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[cfg_attr(
@@ -39,7 +50,7 @@ pub(crate) enum BreError {
 	InvalidCharacterRange,
 	/// A `(` (ERE) or `\(` (BRE) that is never closed.
 	UnmatchedParen,
-	/// A BRE `\)` that closes no group.
+	/// A `)` (sed's ERE) or `\)` (BRE) that closes no group.
 	UnmatchedCloseParen,
 	/// A BRE `\{` with no closing `\}`.
 	UnmatchedBrace,
@@ -54,12 +65,9 @@ pub(crate) enum BreError {
 }
 
 impl BreError {
-	/// The BSD wording `sed` and `nl` print; conditions only grep's ERE
-	/// validation raises have no BSD form and use glibc's.
-	#[cfg_attr(
-		not(any(feature = "util.sed", feature = "util.nl")),
-		allow(dead_code, reason = "only sed and nl print the BSD wording")
-	)]
+	/// The BSD wording `nl` prints; conditions only the ERE validation raises
+	/// have no BSD form and use glibc's.
+	#[cfg_attr(not(feature = "util.nl"), allow(dead_code, reason = "only nl prints the BSD wording"))]
 	pub(crate) fn message(self) -> &'static str {
 		match self {
 			Self::RepetitionOperandMissing => "repetition-operator operand invalid",
@@ -108,7 +116,7 @@ impl BreError {
 /// Malformed patterns are refused with glibc's error, as GNU grep and sed do:
 /// unbalanced `\(`/`\)`, an unclosed or malformed `\{…\}`, a back-reference
 /// to a group not yet closed, a trailing `\`, and bad bracket expressions.
-pub(crate) fn bre_to_ere(pattern: &str, backrefs: Backrefs) -> Result<String, BreError> {
+pub(crate) fn bre_to_ere(pattern: &str, backrefs: Backrefs, stacked: StackedRepeats) -> Result<String, BreError> {
 	let mut result = String::with_capacity(pattern.len());
 	let mut chars = pattern.chars().peekable();
 	// Numbers of the groups still open, how many were opened, and a bit per
@@ -116,6 +124,10 @@ pub(crate) fn bre_to_ere(pattern: &str, backrefs: Backrefs) -> Result<String, Br
 	let mut open_groups = Vec::new();
 	let mut groups = 0u32;
 	let mut closed_groups = 0u16;
+	// Where each open group starts in `result`, and where the last repeatable
+	// piece starts: a quantifier stacked on another wraps that piece.
+	let mut group_starts = Vec::new();
+	let mut piece_start = 0usize;
 
 	// Whether something repeatable precedes the current position. False at the
 	// start of the pattern and directly after `\(` or `\|`, which are exactly
@@ -128,11 +140,21 @@ pub(crate) fn bre_to_ere(pattern: &str, backrefs: Backrefs) -> Result<String, Br
 	// those, so a second caret is an ordinary character. Keyed off `has_atom`
 	// alone, both carets became zero-width anchors and every line matched.
 	let mut anchored = false;
+	// Whether the previous token was a repetition operator, for `stacked`.
+	let mut after_repeat = false;
 	while let Some(c) = chars.next() {
+		let token_start = result.len();
+		let was_repeat = after_repeat;
+		let stacking = was_repeat && stacked == StackedRepeats::Refused;
+		after_repeat = false;
+		// Set by tokens that are not atoms of their own: anchors, and a group
+		// end, whose piece starts at its `(`.
+		let mut not_atom = false;
 		if c == '\\' {
 			match chars.peek() {
 				Some('(') => {
 					chars.next();
+					group_starts.push(result.len());
 					result.push('('); // Group start
 					groups += 1;
 					open_groups.push(groups);
@@ -146,12 +168,16 @@ pub(crate) fn bre_to_ere(pattern: &str, backrefs: Backrefs) -> Result<String, Br
 						closed_groups |= 1 << group;
 					}
 					result.push(')'); // Group end
+					piece_start = group_starts.pop().unwrap_or(token_start);
+					not_atom = true;
 					has_atom = true;
 				},
 				Some('?') => {
 					chars.next();
 					if has_atom {
+						group_stacked(&mut result, piece_start, was_repeat);
 						result.push('?'); // Quantifier 0 or 1
+						after_repeat = true;
 					} else {
 						result.push_str(r"\?"); // Nothing to repeat: literal
 						has_atom = true;
@@ -160,7 +186,9 @@ pub(crate) fn bre_to_ere(pattern: &str, backrefs: Backrefs) -> Result<String, Br
 				Some('+') => {
 					chars.next();
 					if has_atom {
+						group_stacked(&mut result, piece_start, was_repeat);
 						result.push('+'); // Quantifier 1 or more
+						after_repeat = true;
 					} else {
 						result.push_str(r"\+"); // Nothing to repeat: literal
 						has_atom = true;
@@ -186,10 +214,12 @@ pub(crate) fn bre_to_ere(pattern: &str, backrefs: Backrefs) -> Result<String, Br
 					// selects every line with a success exit status. That is
 					// the same fail-open this module exists to close, and it
 					// has to be refused here because no later layer sees it.
-					if !has_atom {
+					if !has_atom || stacking {
 						return Err(BreError::RepetitionOperandMissing);
 					}
+					group_stacked(&mut result, piece_start, was_repeat);
 					push_bre_interval(&mut result, &mut chars)?;
+					after_repeat = true;
 				},
 				Some('}') => {
 					// Closes no interval: an ordinary brace.
@@ -242,8 +272,13 @@ pub(crate) fn bre_to_ere(pattern: &str, backrefs: Backrefs) -> Result<String, Br
 					has_atom = true;
 				},
 				'*' => {
+					if stacking {
+						return Err(BreError::RepetitionOperandMissing);
+					}
 					if has_atom {
+						group_stacked(&mut result, piece_start, was_repeat);
 						result.push('*'); // Quantifier 0 or more
+						after_repeat = true;
 					} else {
 						result.push_str(r"\*"); // Nothing to repeat: literal
 						has_atom = true;
@@ -281,13 +316,20 @@ pub(crate) fn bre_to_ere(pattern: &str, backrefs: Backrefs) -> Result<String, Br
 				'^' => {
 					result.push(c);
 					anchored = true;
+					not_atom = true;
 				},
-				'$' => result.push(c),
+				'$' => {
+					result.push(c);
+					not_atom = true;
+				},
 				_ => {
 					result.push(c);
 					has_atom = true;
 				},
 			}
+		}
+		if has_atom && !after_repeat && !not_atom {
+			piece_start = token_start;
 		}
 	}
 
@@ -295,6 +337,16 @@ pub(crate) fn bre_to_ere(pattern: &str, backrefs: Backrefs) -> Result<String, Br
 		return Err(BreError::UnmatchedParen);
 	}
 	Ok(result)
+}
+
+/// Wraps the piece at `start` in a non-capturing group when the quantifier
+/// about to follow is `stacked` on another: POSIX reads `a*\?` as `(a*)?`,
+/// while the target engines read `a*?` as a lazy star.
+fn group_stacked(result: &mut String, start: usize, stacked: bool) {
+	if stacked {
+		result.insert_str(start, "(?:");
+		result.push(')');
+	}
 }
 
 /// Append a BRE interval as an ERE `{min,max}`; the `\{` is already consumed.
@@ -472,84 +524,116 @@ fn push_class_literal(result: &mut String, c: char) {
 	result.push(c);
 }
 
-/// Translate bracket expressions in an ERE. Grep additionally reads a
-/// non-interval `{` and an unopened `)` as literals, and rejects repetition
-/// without an operand and the other patterns glibc refuses.
+/// Translate bracket expressions in an ERE, rejecting repetition without an
+/// operand and the other patterns glibc refuses. Both tools read a
+/// non-interval `{` as a literal; grep also reads an unopened `)` as one,
+/// where sed rejects it.
 #[cfg(any(feature = "util.grep", feature = "util.sed"))]
 pub(crate) fn ere_to_rust(pattern: &str, grep: bool) -> Result<Cow<'_, str>, BreError> {
-	if !grep && !pattern.contains('[') {
-		return Ok(Cow::Borrowed(pattern));
-	}
-
 	let mut result = String::with_capacity(pattern.len());
 	let mut chars = pattern.chars().peekable();
 	let mut has_atom = false;
-	// Grep only: numbers of the groups still open, the count opened so far,
-	// and a bit per closed group `\1`-`\9` may name.
+	// Numbers of the groups still open, the count opened so far, and a bit
+	// per closed group `\1`-`\9` may name.
 	let mut open_groups = Vec::new();
 	let mut groups = 0u32;
 	let mut closed_groups = 0u16;
+	// Where each open group starts in `result`, where the last repeatable
+	// piece starts, and whether the previous token was a quantifier: glibc
+	// reads `a*?` as `(a*)?`, the target engines as a lazy star.
+	let mut group_starts = Vec::new();
+	let mut piece_start = 0usize;
+	let mut after_repeat = false;
 	while let Some(c) = chars.next() {
+		let token_start = result.len();
+		let was_repeat = std::mem::take(&mut after_repeat);
 		match c {
 			'\\' => {
 				result.push(c);
 				match chars.next() {
 					Some(next) => {
-						if grep
-							&& let Some(group @ 1..=9) = next.to_digit(10)
+						if let Some(group @ 1..=9) = next.to_digit(10)
 							&& closed_groups & (1 << group) == 0
 						{
 							return Err(BreError::InvalidBackReference);
 						}
 						result.push(next);
 					},
-					None if grep => return Err(BreError::TrailingBackslash),
-					None => {},
+					None => return Err(BreError::TrailingBackslash),
 				}
 				has_atom = true;
+				piece_start = token_start;
 				continue;
 			},
 			'[' => {
 				push_bracket_expression(&mut result, &mut chars)?;
 				has_atom = true;
+				piece_start = token_start;
 				continue;
 			},
-			'(' if grep => {
+			'(' => {
 				groups += 1;
 				open_groups.push(groups);
+				group_starts.push(token_start);
 				has_atom = false;
 			},
-			')' if grep => {
+			')' => {
 				match open_groups.pop() {
-					Some(group) if group <= 9 => closed_groups |= 1 << group,
-					Some(_) => {},
+					Some(group) => {
+						if group <= 9 {
+							closed_groups |= 1 << group;
+						}
+						piece_start = group_starts.pop().unwrap_or(token_start);
+					},
 					// GNU grep reads a `)` that closes no group as a literal.
-					None => result.push('\\'),
+					None if grep => {
+						result.push('\\');
+						piece_start = token_start;
+					},
+					None => return Err(BreError::UnmatchedCloseParen),
 				}
 				has_atom = true;
 			},
-			'(' | '|' | '^' | '$' => has_atom = false,
-			'*' | '+' | '?' if grep && !has_atom => {
+			'|' | '^' | '$' => has_atom = false,
+			'*' | '+' | '?' if !has_atom => {
 				return Err(BreError::RepetitionOperandMissing);
 			},
-			'{' if grep => match classify_brace(chars.clone()) {
+			'*' | '+' | '?' => {
+				group_stacked(&mut result, piece_start, was_repeat);
+				after_repeat = true;
+			},
+			'{' => match classify_brace(chars.clone()) {
 				Brace::Interval | Brace::Invalid(BreError::IntervalTooBig) if !has_atom => {
 					return Err(BreError::RepetitionOperandMissing);
 				},
-				// The engine needs the lower bound glibc leaves implicit.
-				Brace::Interval if chars.peek() == Some(&',') => {
-					result.push_str("{0");
+				Brace::Interval => {
+					group_stacked(&mut result, piece_start, was_repeat);
+					result.push('{');
+					// The engine needs the lower bound glibc leaves implicit.
+					if chars.peek() == Some(&',') {
+						result.push('0');
+					}
+					for next in chars.by_ref() {
+						result.push(next);
+						if next == '}' {
+							break;
+						}
+					}
+					after_repeat = true;
 					continue;
 				},
-				Brace::Interval => {},
 				Brace::Invalid(error) if has_atom => return Err(error),
 				// glibc reads a brace with nothing to repeat as a literal.
 				Brace::Literal | Brace::Invalid(_) => {
 					result.push('\\');
 					has_atom = true;
+					piece_start = token_start;
 				},
 			},
-			_ => has_atom = true,
+			_ => {
+				has_atom = true;
+				piece_start = token_start;
+			},
 		}
 		result.push(c);
 	}
@@ -611,11 +695,11 @@ mod tests {
 	use super::*;
 
 	fn ere(pattern: &str) -> String {
-		bre_to_ere(pattern, Backrefs::Supported).expect("translatable")
+		bre_to_ere(pattern, Backrefs::Supported, StackedRepeats::Allowed).expect("translatable")
 	}
 
 	fn ere_err(pattern: &str) -> Option<BreError> {
-		bre_to_ere(pattern, Backrefs::Supported).err()
+		bre_to_ere(pattern, Backrefs::Supported, StackedRepeats::Allowed).err()
 	}
 
 	// Relocated from `sed`, which owned this translation before `grep` shared it.
@@ -679,6 +763,30 @@ mod tests {
 		assert_eq!(ere(r"^a.*b$"), "^a.*b$");
 	}
 
+	// Failure: `a*\?` became `a*?`, a lazy star that matches the empty string
+	// where POSIX's `(a*)?` takes every `a`.
+	#[test]
+	fn stacked_quantifiers_group_the_piece_before_them() {
+		assert_eq!(ere(r"a*\?"), "(?:a*)?");
+		assert_eq!(ere("a**"), "(?:a*)*");
+		assert_eq!(ere(r"x\(ab\)*\+"), "x(?:(ab)*)+");
+		assert_eq!(ere(r"[ab]\{2\}*\?"), "(?:(?:[ab]{2})*)?");
+		assert_eq!(ere(r"^**"), r"^\**");
+		let sed = |pattern| bre_to_ere(pattern, Backrefs::Supported, StackedRepeats::Refused);
+		assert_eq!(sed(r"a**"), Err(BreError::RepetitionOperandMissing));
+		assert_eq!(sed(r"a\?\{2\}"), Err(BreError::RepetitionOperandMissing));
+		assert_eq!(sed(r"a*\+").as_deref(), Ok("(?:a*)+"));
+	}
+
+	// Failure: the ERE `a*?` reached the engine as a lazy star.
+	#[cfg(any(feature = "util.grep", feature = "util.sed"))]
+	#[test]
+	fn stacked_ere_quantifiers_group_the_piece_before_them() {
+		for (pattern, rust) in [("a*?", "(?:a*)?"), ("a+*", "(?:a+)*"), ("(ab)?+", "(?:(ab)?)+"), ("a{2}*", "(?:a{2})*")] {
+			assert_eq!(ere_to_rust(pattern, true).as_deref(), Ok(rust), "{pattern}");
+		}
+	}
+
 	#[test]
 	fn test_trailing_backslash_is_an_error() {
 		assert_eq!(ere_err(r"abc\"), Some(BreError::TrailingBackslash));
@@ -710,7 +818,7 @@ mod tests {
 		// happened before this module existed. The behaviour is unchanged by
 		// the refactor; it is not an endorsement of matching `\1` literally.
 		assert_eq!(
-			bre_to_ere(r"\(a\)\1", Backrefs::Unsupported).expect("translatable"),
+			bre_to_ere(r"\(a\)\1", Backrefs::Unsupported, StackedRepeats::Allowed).expect("translatable"),
 			r"(a)\1"
 		);
 		// The grouping exists only for engines that support them, where a
@@ -841,6 +949,23 @@ mod tests {
 		] {
 			assert!(ere_to_rust(pattern, true).is_ok(), "should accept {pattern}");
 		}
+	}
+
+	#[cfg(feature = "util.sed")]
+	#[test]
+	fn sed_ere_rejects_what_glibc_refuses() {
+		// `sed -E 's/a)/x/'` must fail like GNU sed, not match a literal `)`.
+		for (pattern, error) in [
+			("a)", BreError::UnmatchedCloseParen),
+			("(a", BreError::UnmatchedParen),
+			("*a", BreError::RepetitionOperandMissing),
+			("a|*b", BreError::RepetitionOperandMissing),
+			("{1}", BreError::RepetitionOperandMissing),
+			(r"(a)\2", BreError::InvalidBackReference),
+		] {
+			assert_eq!(ere_to_rust(pattern, false), Err(error), "{pattern}");
+		}
+		assert!(ere_to_rust("(a)+{1}|b**", false).is_ok());
 	}
 
 	#[cfg(feature = "util.grep")]

@@ -2,7 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, type Mock, spyOn } from "b
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
-import { loadLegacyPiModule } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
+import {
+	__collectLegacyPiExtensionSourcesForTests,
+	loadLegacyPiModule,
+} from "@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import type { BunFile } from "bun";
 
@@ -133,6 +136,31 @@ export default function(pi) {
 			expect(sharedDirs.sort()).toEqual([root, nested].sort());
 		} finally {
 			resolve.mockRestore();
+		}
+	});
+
+	it("reuses the canonical path already found for a symlinked bare dependency", async () => {
+		const root = fs.realpathSync(tempDir.absolute());
+		const packageRoot = path.join(root, "dependency");
+		const nodeModules = path.join(root, "node_modules");
+		fs.mkdirSync(packageRoot);
+		fs.mkdirSync(nodeModules);
+		fs.writeFileSync(path.join(packageRoot, "package.json"), '{"main":"index.ts"}');
+		const target = path.join(packageRoot, "index.ts");
+		fs.writeFileSync(target, "export default 1;");
+		const link = path.join(nodeModules, "test-dep");
+		fs.symlinkSync(packageRoot, link, "junction");
+		const entry = path.join(root, "entry.ts");
+		fs.writeFileSync(entry, 'export { default } from "test-dep";');
+
+		const realpath = spyOn(fs.promises, "realpath");
+		try {
+			const graph = await __collectLegacyPiExtensionSourcesForTests(entry);
+			expect(graph.has(target)).toBe(true);
+			expect(realpath.mock.calls.filter(([probe]) => probe === path.join(link, "index.ts"))).toHaveLength(1);
+			expect(realpath.mock.calls.filter(([probe]) => probe === target)).toHaveLength(0);
+		} finally {
+			realpath.mockRestore();
 		}
 	});
 

@@ -679,6 +679,42 @@ def tonumber: tonumber_;
 		origin:   PathBuf,
 	}
 
+	fn defs() -> impl Iterator<Item = load::parse::Def<&'static str>> {
+		let ours = load::parse(DEFS, |p| p.defs()).expect("builtin definitions parse");
+		jaq_core::defs().chain(jaq_std::defs()).chain(jaq_json::defs()).chain(ours)
+	}
+
+	fn funs() -> impl Iterator<Item = native::Filter<jaq_core::Native<Kind>>> {
+		let run = native::run::<Kind>;
+		let inputs = input::funs::<Kind>().into_vec().into_iter().map(run);
+		natives()
+			.into_iter()
+			.chain(linker_natives())
+			.map(run)
+			.chain(jaq_core::funs())
+			.chain(jaq_std::funs())
+			.chain(jaq_json::funs())
+			.chain(inputs)
+			.chain([run(("builtins", native::v(0), |_| box_once(Ok(BUILTINS.with(Val::clone)))))])
+	}
+
+	// This list describes the static registry, not the program's imports or
+	// user definitions. Construct it only if requested; don't generate and
+	// compile a comma expression with one string term per builtin on every run.
+	thread_local! {
+		static BUILTINS: Val = {
+			let signatures = defs().map(|d| (d.name, d.args.len())).chain(funs().map(|(name, args, _)| (name, args.len())));
+			let mut seen = std::collections::HashSet::new();
+			signatures
+				.filter(|(name, arity)| name.starts_with(char::is_alphabetic) && seen.insert((*name, *arity)))
+				.map(|(name, arity)| Val::from(format!("{name}/{arity}")))
+				// The prelude listed its own `builtins` definition before
+				// appending the embedded registry's `builtins/0` entry.
+				.chain([Val::from("builtins/0".to_owned())])
+				.collect()
+		};
+	}
+
 	pub fn parse_compile(
 		fs: &BlockingFs,
 		path: &PathBuf,
@@ -698,42 +734,13 @@ def tonumber: tonumber_;
 
 		let vars: Vec<_> = vars.iter().map(|v| format!("${v}")).collect();
 		let arena = Arena::default();
-		let ours = load::parse(DEFS, |p| p.defs()).expect("builtin definitions parse");
-		let mut defs: Vec<_> = jaq_core::defs()
-			.chain(jaq_std::defs())
-			.chain(jaq_json::defs())
-			.chain(ours)
-			.collect();
 		let read = |import: load::Import<PathBuf>| -> Result<File<String, PathBuf>, String> {
 			let path = find_import(&linker, &import, ".jq")?;
 			let code = fs.read_to_string(&path).map_err(|e| e.to_string())?;
 			Ok(File { code, path })
 		};
-		let run = native::run::<Kind>;
-		let inputs = input::funs::<Kind>().into_vec().into_iter().map(run);
-		let funs: Vec<_> = natives()
-			.into_iter()
-			.chain(linker_natives())
-			.map(run)
-			.chain(jaq_core::funs())
-			.chain(jaq_std::funs())
-			.chain(jaq_json::funs())
-			.chain(inputs)
-			.collect();
-		// `builtins` lists every filter a program can call, as `name/arity`,
-		// except those that jq hides behind an underscore
-		let mut builtins: Vec<String> = Vec::new();
-		let sigs = defs.iter().map(|d| (d.name, d.args.len())).chain(funs.iter().map(|f| (f.0, f.1.len())));
-		for (name, arity) in sigs {
-			let sig = format!("{name}/{arity}");
-			if name.starts_with(char::is_alphabetic) && !builtins.contains(&sig) {
-				builtins.push(sig);
-			}
-		}
-		builtins.push("builtins/0".into());
-		let builtins = format!("def builtins: {};", Const::Arr(builtins.into_iter().map(Const::Str).collect()).dump());
-		defs.extend(load::parse(arena.alloc(builtins), |p| p.defs()).expect("builtins parse"));
-		let mut loader = Loader::new(defs).with_read(read);
+		// The embedded registry replaces jaq-std's hard-coded builtin list.
+		let mut loader = Loader::new(defs().filter(|d| d.name != "builtins" || !d.args.is_empty())).with_read(read);
 		// jq includes `~/.jq` if it is a file, ignoring it if it cannot be loaded
 		if let Some(home) = home() {
 			let home = Const::Str(home.to_string_lossy().into_owned());
@@ -755,7 +762,7 @@ def tonumber: tonumber_;
 		}
 
 		let compiler = Compiler::default()
-			.with_funs(funs)
+			.with_funs(funs())
 			.with_global_vars(vars.iter().map(|v| &**v));
 		let filter = compiler.compile(modules).map_err(|e| compile_errors(e, path))?;
 		Ok(Program { vals, filter, linker })
@@ -3387,6 +3394,13 @@ Test #7: '.' at line number 27
 			let (code, out, err) = on_jq_stack(512 << 10, filter, "null".into());
 			assert_eq!((code, out.as_str(), err.as_str()), (0, "\"filter recursion too deep\"\n2\n", ""), "{filter}");
 		}
+	}
+
+	#[test]
+	fn reduce_replays_consumed_inputs_only_for_remaining_branches() {
+		let filter = "[reduce inputs as $n ((0,100); if $n == 2 then .+$n, .-$n else .+$n end)]";
+		let (code, out, err) = run_jq(&["-nc", filter], "1\n2\n4\n");
+		assert_eq!((code, out.as_str(), err.as_str()), (0, "[7,3,107,103]\n", ""));
 	}
 
 	#[test]

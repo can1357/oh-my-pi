@@ -2167,3 +2167,16 @@ async fn external_started_after_reader_exit_gets_sigpipe() {
 	.expect("xargs must stop once its output pipe is gone");
 	assert_eq!(output, "1\n2\nxargs: /bin/echo: terminated by signal 13\nPS=125\n");
 }
+/// A builtin that `xargs` ran and the emulated SIGPIPE ended reached xargs as
+/// an ordinary exit of 141, so xargs went on instead of reporting the signal.
+#[tokio::test(flavor = "multi_thread")]
+async fn xargs_reports_builtin_sigpipe_as_a_signal() {
+	let command = "yes | xargs -n1 echo | head -2; echo \"PS=${PIPESTATUS[1]}\"";
+	let (_, output) = tokio::time::timeout(
+		std::time::Duration::from_secs(20),
+		execute_captured(command.to_owned()),
+	)
+	.await
+	.expect("xargs must stop once its output pipe is gone");
+	assert_eq!(output, "y\ny\nxargs: echo: terminated by signal 13\nPS=125\n");
+}

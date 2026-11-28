@@ -759,9 +759,13 @@ export class Composer {
 	setAutocomplete(provider: AutocompleteProvider | undefined): void {
 		this.#autocomplete = provider;
 		this.#closeCompletion();
-		provider?.warmMentions?.();
 		// The startup composer can already contain a token when the live providers arrive.
 		if (provider && this.#text() && (!this.#vim || this.#vim.mode() === "insert")) this.#afterEdit("", false);
+	}
+
+	/** Warm the current completion provider without reopening the command or mention picker. */
+	warmAutocomplete(): void {
+		this.#autocomplete?.warmMentions?.();
 	}
 
 	/**

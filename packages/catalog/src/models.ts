@@ -6,7 +6,6 @@ import { dueDatedCard, dueEffectiveRate } from "./pricing";
 import type {
 	Api,
 	EffectiveTokenCost,
-	KnownProvider,
 	Model,
 	ModelCost,
 	ModelPricingStatus,
@@ -30,7 +29,7 @@ let bundledCatalogHash: string | undefined;
 export function getBundledCatalogHash(): string {
 	return (bundledCatalogHash ??= Bun.hash(JSON.stringify(modelsData)).toString(36));
 }
-const bundledProviders: readonly KnownProvider[] = Object.freeze(getCatalogProviders(catalog) as KnownProvider[]);
+const bundledProviders: readonly GeneratedProvider[] = Object.freeze(getCatalogProviders(catalog));
 const bundledProviderSet = new Set<string>(bundledProviders);
 const modelRegistry = new Map<string, Map<string, Model<Api>>>();
 
@@ -68,7 +67,7 @@ export function getBundledModel<TApi extends Api = Api>(provider: GeneratedProvi
 }
 
 /** List providers with bundled rows; the array is shared and frozen. */
-export function getBundledProviders(): readonly KnownProvider[] {
+export function getBundledProviders(): readonly GeneratedProvider[] {
 	return bundledProviders;
 }
 
