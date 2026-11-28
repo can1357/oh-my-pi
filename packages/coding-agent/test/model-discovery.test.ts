@@ -3950,11 +3950,13 @@ describe("ModelRegistry runtime discovery", () => {
 				},
 			);
 		const [silent] = await discover([{ id: "gpt-5" }]);
+		const [lockedSilent] = await discover([{ id: "gemini-3-pro" }]);
 		const models = await discover([
 			{ id: "gpt-5", reasoning: { mandatory: true } },
 			{ id: "acme-native", reasoning: true },
 			{ id: "acme-mandatory", reasoning: { mandatory: true } },
 			{ id: "acme-mandatory-vetoed", reasoning_required: false, reasoning: { mandatory: true } },
+			{ id: "gemini-3-pro", reasoning_required: false, reasoning: { mandatory: true } },
 		]);
 		const find = (id: string) => models.find(model => model.id === id);
 		// A referenced id keeps the bundled reference's ladder and gains the lock.
@@ -3969,8 +3971,11 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(mandatory?.reasoning).toBe(true);
 		expect(mandatory?.thinking).toMatchObject({ efforts: native?.thinking?.efforts, requiresEffort: true });
 		expect(mandatory?.thinking?.unverified).not.toBe(true);
-		// A flat `reasoning_required: false` still outranks `mandatory`.
-		expect(find("acme-mandatory-vetoed")?.thinking?.requiresEffort).not.toBe(true);
+		// A flat `reasoning_required: false` still outranks `mandatory`, and overrides the
+		// lock `gemini-3-pro` keeps from the catalog when its row is silent.
+		expect(lockedSilent?.thinking?.requiresEffort).toBe(true);
+		expect(find("gemini-3-pro")?.thinking?.requiresEffort).toBe(false);
+		expect(find("acme-mandatory-vetoed")?.thinking?.requiresEffort).toBe(false);
 	});
 
 	test("openai-models-list discovery carries advertised effort aliases and mandatory reasoning", async () => {

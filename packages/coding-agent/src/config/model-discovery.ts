@@ -1057,8 +1057,8 @@ function advertisedReasoningEnabled(providerConfig: DiscoveryProviderConfig): bo
 type AdvertisedReasoning =
 	/** The row states it does not reason. */
 	| { kind: "none" }
-	/** The row confirms reasoning without advertising a controllable ladder, and may declare it mandatory. */
-	| { kind: "native"; requiresEffort?: true }
+	/** The row confirms reasoning without advertising a controllable ladder, and may state whether thinking can be off. */
+	| { kind: "native"; requiresEffort?: boolean }
 	/** The row advertises an effort ladder, whether it accepts `none`, its aliases, and whether thinking can be off. */
 	| {
 			kind: "ladder";
@@ -1114,8 +1114,8 @@ function extractAdvertisedReasoning(item: {
 	const efforts = extractReasoningLevels(raw);
 	if (efforts === undefined) {
 		if (reasoning === true) return { kind: "native" };
-		return requiresEffort === true && reasoningObject?.mandatory === true
-			? { kind: "native", requiresEffort: true }
+		return reasoningObject?.mandatory === true && typeof requiresEffort === "boolean"
+			? { kind: "native", requiresEffort }
 			: undefined;
 	}
 	const rawDefault = reasoningObject
@@ -1186,11 +1186,11 @@ function withAdvertisedEfforts(
 	if (advertised === undefined) return spec;
 	if (advertised.kind === "none") return withoutReasoning(spec, isAnthropic);
 	if (advertised.kind === "native") {
-		if (advertised.requiresEffort !== true) return { ...spec, reasoning: true };
-		// Like `mapOpenRouterThinking`: keep the inherited or identity-derived ladder,
-		// but a thinking-off request must clamp to a tier instead of omitting it.
+		if (advertised.requiresEffort === undefined) return { ...spec, reasoning: true };
+		// Like `mapOpenRouterThinking`: keep the inherited or identity-derived ladder
+		// under the row's own lock; an explicit `false` overrides an identity lock.
 		const ladder = spec.thinking ?? resolveModelPolicy({ ...spec, reasoning: true }).thinking;
-		return { ...spec, reasoning: true, thinking: ladder && { ...ladder, requiresEffort: true } };
+		return { ...spec, reasoning: true, thinking: ladder && { ...ladder, requiresEffort: advertised.requiresEffort } };
 	}
 	// `defaultLevel` is not decoration: `pickInitialThinkingLevel` (sdk.ts) and
 	// the model switcher read it ahead of the user's `defaultThinkingLevel`
