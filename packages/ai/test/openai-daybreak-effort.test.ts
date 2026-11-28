@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { buildParams } from "@oh-my-pi/pi-ai/providers/openai-responses";
-import type { Context } from "@oh-my-pi/pi-ai/types";
+import type { Context, OpenAICompat } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -38,6 +38,44 @@ describe("OpenAI GPT-5.6 Responses reasoning payload", () => {
 			}
 		});
 	}
+});
+
+describe("custom model Responses reasoning payload", () => {
+	test("maps configured xhigh thinking effort before sending Responses reasoning payload", () => {
+		const compat: OpenAICompat = {
+			supportsReasoningEffort: true,
+			reasoningEffortMap: {
+				minimal: "low",
+				low: "low",
+				medium: "medium",
+				high: "high",
+				xhigh: "max",
+			},
+		};
+		// Resolve compat through the production constructor: sparse user overrides on
+		// top of host detection, exactly as a configured custom model is built.
+		const model = buildModel<"openai-responses">({
+			id: "deepseek-v4-flash:cloud",
+			name: "deepseek-v4-flash:cloud",
+			api: "openai-responses",
+			provider: "custom",
+			baseUrl: "http://127.0.0.1:11434/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1_048_576,
+			maxTokens: 65_536,
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+				effortMap: compat.reasoningEffortMap,
+			},
+			compat,
+		});
+
+		const built = buildParams(model, CONTEXT, { reasoning: "xhigh", reasoningSummary: "auto" }, undefined);
+		expect(built.params.reasoning).toEqual({ effort: "max", summary: "auto" });
+	});
 });
 
 describe("OpenAI GPT-6.1 Responses reasoning payload", () => {

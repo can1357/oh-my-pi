@@ -18,6 +18,7 @@ import { keyCaps } from "@oh-my-pi/pi-tui/term/painters/picker";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import type { TspPickerLevel, TspPickerScope } from "@oh-my-pi/pi-wire";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
+import { connectedProviderName } from "../../../modes/view-model/chrome/format";
 import type { ScopedModelItem } from "../../../modes/view-model/overlays/model-hub";
 import {
 	buildSessionModelScope,
@@ -231,7 +232,7 @@ export function ModelPicker(props: ModelPickerProps): JSXNode {
 			.sort((a, b) => a.localeCompare(b))
 			.map(provider => ({
 				id: `${PROVIDER_SCOPE}${provider}`,
-				label: provider,
+				label: connectedProviderName(provider),
 				mark: providerMark(provider),
 				count: counts.get(provider),
 			}));

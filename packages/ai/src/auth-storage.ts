@@ -373,6 +373,9 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
 			blocks,
 			affinity,
 			rotate: (provider, sessionId, rotateOptions) => limits.rotate(provider, sessionId, rotateOptions),
+			learnBillingMode: (provider, resolved) => {
+				if (options.copilotBillingProbe !== false) void usage.learnCopilotBillingMode(provider, resolved);
+			},
 			sourceLabel,
 		});
 		const oauth = new OAuthAccounts({ pool, overrides, policies, selector, affinity, refresher });

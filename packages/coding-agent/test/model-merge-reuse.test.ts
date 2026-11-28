@@ -2,9 +2,11 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import * as path from "node:path";
 import type { Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { setRuntimeProviderRule } from "@oh-my-pi/pi-catalog/compat/cascade";
 import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { fingerprintStaticModels } from "@oh-my-pi/pi-catalog/model-manager";
 import * as catalogModels from "@oh-my-pi/pi-catalog/models";
+import { EARLIEST_EFFECTIVE_FROM, NO_RECURRING_TARIFF } from "@oh-my-pi/pi-catalog/pricing";
 import { mergeDiscoveredModel } from "@oh-my-pi/pi-coding-agent/config/model-patch";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -94,6 +96,33 @@ describe("model merge reuse", () => {
 		expect(withExisting.compat.supportsDeveloperRole).toBe(current.compat.supportsDeveloperRole);
 		expect(withOverride.compat.supportsDeveloperRole).toBe(current.compat.supportsDeveloperRole);
 		expect(stale.compat.supportsDeveloperRole).toBe(!current.compat.supportsDeveloperRole);
+	});
+
+	test("an equivalent merge rechecks effective prices and the current runtime rules", () => {
+		const clock = spyOn(Date, "now").mockReturnValue(999);
+		spies.push(clock);
+		const model = fixtureModel();
+		model.provider = "merge-fixture-provider";
+		model.cost.timeBased = {
+			...NO_RECURRING_TARIFF,
+			effectiveRates: [
+				{ effectiveFrom: EARLIEST_EFFECTIVE_FROM, ...model.cost },
+				{ effectiveFrom: 1_000, ...model.cost, input: 7 },
+			],
+		};
+		const before = mergeDiscoveredModel(model, model);
+		const supportsDeveloperRole = !before.compat.supportsDeveloperRole;
+		setRuntimeProviderRule(model.provider, { "supports-developer-role": supportsDeveloperRole });
+		try {
+			clock.mockReturnValue(1_000);
+			const after = mergeDiscoveredModel(model, model);
+			expect(before.cost.input).toBe(0);
+			expect(after.cost.input).toBe(7);
+			expect(after.compat.supportsDeveloperRole).toBe(supportsDeveloperRole);
+			expect(model.cost.input).toBe(0);
+		} finally {
+			setRuntimeProviderRule(model.provider, undefined);
+		}
 	});
 
 	test("cached replacements inherit missing limits and flags without overwriting explicit false values", async () => {

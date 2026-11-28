@@ -3,6 +3,7 @@ import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { providerActiveNotice } from "@oh-my-pi/pi-catalog/compat/auth";
 import { jsx } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
 import { settings } from "../../config/settings";
@@ -21,6 +22,7 @@ import { groupedReadUsageCallIds, readArgsCollapseIntoGroup } from "../../sessio
 import { replyDisplayMessage, toolResultReplies } from "../../session/transcript/reply-write";
 import { ServedModelTracker } from "../../session/transcript/served-model-marker";
 import {
+	followsViewportOnly,
 	isSettledJobFrame,
 	parksAsBackground,
 	readMediaPath,
@@ -37,7 +39,7 @@ import {
 import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
 import { parseSlashCommand } from "../../slash-commands/helpers/parse";
 import type { Shell, TranscriptBlock } from "../../ui/shell";
-import { NoticeLine, StatusNotice, StrippedToolCalls } from "../../ui/transcript/messages/notices";
+import { NoticeLine, StatusBlock, StatusNotice, StrippedToolCalls } from "../../ui/transcript/messages/notices";
 import { ToolActivity } from "../../ui/transcript/messages/panel";
 import { normalizeBlobExtension } from "../../utils/image-format";
 import { imageAttachmentSource } from "../../utils/image-source";
@@ -83,7 +85,7 @@ export type ReplayTarget = Pick<
 	| "statusLine"
 	| "updateEditorBorderColor"
 	| "settings"
-	| "hideToolActivity"
+	| "toolActivity"
 	| "transcriptBlocks"
 	| "present"
 	| "presentAssistant"
@@ -248,6 +250,8 @@ export class UiHelpers {
 	#lastStatus: { readonly block: TranscriptBlock; readonly message: string } | undefined;
 	/** Status, warning and error lines: a keyed status updates in place only with these below it. */
 	readonly #notices = new WeakSet<TranscriptBlock>();
+	/** Session and model the last active-model notice named; cleared while no declaring provider serves. */
+	#activeModelNoticeKey: string | undefined;
 
 	constructor(private ctx: InteractiveModeContext) {}
 
@@ -605,7 +609,7 @@ export class UiHelpers {
 					if (renderToolName === "read" && readArgsCollapseIntoGroup(content.arguments)) {
 						if (errorMessage) {
 							const group = ensureReadGroup();
-							group.updateArgs(content.arguments, content.id);
+							group.updateArgs(content.arguments, content.id, message.timestamp);
 							group.updateResult(
 								{ content: [{ type: "text", text: errorMessage }], isError: true },
 								false,
@@ -613,7 +617,7 @@ export class UiHelpers {
 							);
 						} else if (afterToolSegment) {
 							const group = ensureReadGroup();
-							group.updateArgs(content.arguments, content.id);
+							group.updateArgs(content.arguments, content.id, message.timestamp);
 							ctx.pendingTools.set(content.id, group);
 							readToolCallAssistants.set(content.id, assistant);
 							if (ctx.viewSession.isStreaming)
@@ -647,6 +651,7 @@ export class UiHelpers {
 						tool,
 						id: content.id,
 						cwd: ctx.viewSession.sessionManager.getCwd(),
+						timestamp: message.timestamp,
 					});
 					// Persisted args are final: settle a reply's text now. Cards keep their own args-complete timing.
 					if (!partialJson && pending.reply) pending.setArgsComplete(content.id);
@@ -668,7 +673,7 @@ export class UiHelpers {
 				const strippedToolCalls = (message as AgentMessage & StrippedToolCallsMarker).strippedToolCalls ?? 0;
 				if (strippedToolCalls > 0) {
 					ctx.present(() =>
-						jsx(StrippedToolCalls, { count: strippedToolCalls, visible: () => !ctx.hideToolActivity }),
+						jsx(StrippedToolCalls, { count: strippedToolCalls, visible: () => ctx.toolActivity !== "hidden" }),
 					);
 				}
 				const turnSummary = turnUsage.add(message, turnStartedAt);
@@ -720,7 +725,8 @@ export class UiHelpers {
 					if (!pending) {
 						const group = ensureReadGroup();
 						const args = readToolCallArgs.get(message.toolCallId);
-						if (args) group.updateArgs(args, message.toolCallId);
+						// The read joins the group with its result: dated by the result.
+						if (args) group.updateArgs(args, message.toolCallId, message.timestamp);
 						pending = group;
 					}
 					pending.updateResult(message, false, message.toolCallId);
@@ -736,20 +742,23 @@ export class UiHelpers {
 					const frame = activeToolExecutionUpdates.find(
 						event => event.toolCallId === message.toolCallId,
 					)?.partialResult;
+					// A viewport-only card that froze in scrollback is redrawn from the job's latest frame too:
+					// the rebuild replays history, so no row of the old card remains to match.
 					const isBackground =
 						parksAsBackground(message.toolName, message.details, native) &&
 						(frame !== undefined || runningAsyncJobs.some(job => job.id === jobId));
 					const settled = isBackground && isSettledJobFrame(frame?.details);
+					const partial = isBackground && !followsViewportOnly(message.toolName, native);
 					// A background job call's persisted result is only its "still running"
 					// snapshot; the job's latest frame supersedes it. Until that frame
-					// settles, keep the card partial, parked, and in `pendingTools` so
-					// later live progress frames land on it (#10447).
+					// settles, keep the card parked and in `pendingTools` so later live
+					// progress frames land on it (#10447).
 					if (settled) {
 						settleWithJobFrame(pending, frame, message.toolCallId);
 					} else if (frame && isBackground) {
-						pending.updateResult(frame, true, message.toolCallId);
+						pending.updateResult(frame, partial, message.toolCallId);
 					} else {
-						pending.updateResult(message, isBackground, message.toolCallId);
+						pending.updateResult(message, partial, message.toolCallId);
 					}
 					if (isBackground && !settled) {
 						pending.parkAsBackground();
@@ -1066,11 +1075,37 @@ export class UiHelpers {
 		this.#presentNotice(() => jsx(NoticeLine, { tone: "error", message: errorMessage }));
 	}
 
+	/**
+	 * The line a provider declares for its models (`active-notice`), such as "Using your Acme Pro
+	 * plan · Acme 2", once per model the viewed session switches to or first runs.
+	 */
+	showActiveModelNotice(): void {
+		const session = this.ctx.viewSession;
+		const model = session.model;
+		const notice = model ? providerActiveNotice(model.provider) : undefined;
+		const key =
+			model && notice ? `${session.sessionManager.getSessionId()}\n${model.provider}/${model.id}` : undefined;
+		if (key === this.#activeModelNoticeKey) return;
+		this.#activeModelNoticeKey = key;
+		if (!model || !notice) return;
+		const text = `${notice} · ${model.name}`;
+		this.#presentNotice(() =>
+			jsx(StatusBlock, {
+				rows: [
+					{
+						parts: [{ text, color: "dim" }],
+						native: { tone: "info", icon: `provider:${model.provider}`, message: [{ t: text, s: "dim" }] },
+					},
+				],
+			}),
+		);
+	}
+
 	showWarning(warningMessage: string, options?: { hideWithToolActivity?: boolean }): void {
 		const line = () => jsx(NoticeLine, { tone: "warning", message: warningMessage });
 		this.#presentNotice(
 			options?.hideWithToolActivity
-				? () => jsx(ToolActivity, { visible: () => !this.ctx.hideToolActivity, children: line() })
+				? () => jsx(ToolActivity, { visible: () => this.ctx.toolActivity !== "hidden", children: line() })
 				: line,
 		);
 	}

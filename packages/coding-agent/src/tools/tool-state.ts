@@ -4,7 +4,7 @@
  *
  * Every field is created on first use by its accessor (`getEditStore`,
  * `getConflictHistory`, `getDiagnosticsLedger`, …). A session derived from
- * another — an advisor's, a speculative read's — sets its own `state` so it
+ * another — an advisor's, for example — sets its own `state` so it
  * never shares this with the session it was copied from.
  */
 import type { EditStore, SummaryResult } from "@oh-my-pi/pi-natives";

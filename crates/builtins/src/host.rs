@@ -3129,7 +3129,7 @@ mod testing {
 	use parking_lot::Mutex;
 
 	use super::{
-		Arc, AsyncStreams, AsyncUtility, AtomicBool, CommandCancel, GuardedStream, HashMap, Host, OpenFile,
+		Arc, AsyncStreams, AsyncUtility, AtomicBool, CancellationToken, CommandCancel, GuardedStream, HashMap, Host, OpenFile,
 		OsString, PathBuf, Read, ShellPaths, Sigpipe, SigpipeGuard, Spec, Stdin, StreamWriter, Utility, Write,
 		async_out_for, io, openfile, output_handle, run_caught, run_caught_async,
 	};
@@ -3484,6 +3484,18 @@ mod testing {
 		cwd: &std::path::Path,
 		env: &[(&str, &str)],
 	) -> (i32, Vec<u8>, Vec<u8>) {
+		run_extra_cancellable(argv, stdin, cwd, env, None).await
+	}
+
+	/// [`run_extra_bytes`] that `cancel` cancels, as the shell cancels a
+	/// command it kills.
+	pub(crate) async fn run_extra_cancellable(
+		argv: &[&str],
+		stdin: &[u8],
+		cwd: &std::path::Path,
+		env: &[(&str, &str)],
+		cancel: Option<CancellationToken>,
+	) -> (i32, Vec<u8>, Vec<u8>) {
 		use std::io::Seek;
 
 		let mut input = tempfile::tempfile().expect("stdin file");
@@ -3511,6 +3523,7 @@ mod testing {
 			crate::extras::Fd::File(error.try_clone().expect("stderr")),
 		];
 		invocation.commands = Some(Box::new(runner));
+		invocation.cancel = cancel;
 		let code = crate::extras::run(invocation).await;
 
 		let read = |mut file: std::fs::File| {
@@ -4371,7 +4384,7 @@ mod testing {
 #[cfg(test)]
 #[allow(unused_imports, reason = "used by utility test modules, which are feature-gated")]
 pub(crate) use testing::{
-	Capture, TestRunner, run_async_util, run_extra, run_extra_bytes, run_proc, run_util,
+	Capture, TestRunner, run_async_util, run_extra, run_extra_bytes, run_extra_cancellable, run_proc, run_util,
 };
 #[cfg(all(test, unix, feature = "util.grep"))]
 pub(crate) use testing::tree_with_sparse_file;

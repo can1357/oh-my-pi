@@ -128,14 +128,7 @@ describe("limitMatchesActiveAccount", () => {
 		).toBe(true);
 	});
 
-	test("a shared Google project or Team account id never stands in for a different email", () => {
-		const project = "aicode-consumers";
-		const alice = { email: "alice@example.com", projectId: project };
-		const antigravityReport = (email: string) =>
-			makeReport({ provider: "google-antigravity", metadata: { email, projectId: project } });
-		const sharedProjectLimit = makeLimit({ provider: "google-antigravity", projectId: project });
-		expect(limitMatchesActiveAccount(antigravityReport("bob@example.com"), sharedProjectLimit, alice)).toBe(false);
-		expect(limitMatchesActiveAccount(antigravityReport("alice@example.com"), sharedProjectLimit, alice)).toBe(true);
+	test("a shared Team account id never stands in for a different email", () => {
 		// Codex Team seats share the workspace account and org ids.
 		const seat = { email: "alice@example.com", accountId: "workspace", orgId: "workspace" };
 		const teammateReport = makeReport({
@@ -230,31 +223,6 @@ describe("toLogoutAccounts org scoping", () => {
 				oauthRow(2, "org-team", "Team Workspace", { email: "bob@example.com", accountId: "account-bob" }),
 			],
 			{ activeIdentity: { email: "alice@example.com", accountId: "account-alice", orgId: "org-team" } },
-		);
-		const activeIds = accounts.filter(account => account.active).map(account => account.credentialId);
-		expect(activeIds).toEqual([1]);
-	});
-
-	test("Antigravity accounts on one Google project: only the active email's row is marked active", () => {
-		const row = (id: number, email: string): StoredAuthCredential => ({
-			id,
-			provider: "google-antigravity",
-			credential: {
-				type: "oauth",
-				access: `access-${id}`,
-				refresh: `refresh-${id}`,
-				expires: Date.now() + 60_000,
-				email,
-				projectId: "aicode-consumers",
-			},
-			disabledCause: null,
-		});
-		const accounts = toLogoutAccounts(
-			"google-antigravity",
-			[row(1, "alice@example.com"), row(2, "bob@example.com")],
-			{
-				activeIdentity: { email: "alice@example.com", projectId: "aicode-consumers" },
-			},
 		);
 		const activeIds = accounts.filter(account => account.active).map(account => account.credentialId);
 		expect(activeIds).toEqual([1]);

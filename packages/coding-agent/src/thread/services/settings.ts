@@ -195,6 +195,8 @@ function replayWrite(target: Settings, write: SettingsMirrorWrite): void {
 			return target.clearProjectModelRole(write.role);
 		case "overrideModelRoles":
 			return target.overrideModelRoles(write.roles);
+		case "overrideModelRolesWhole":
+			return target.overrideModelRolesWhole(write.roles, { untrusted: write.untrusted });
 	}
 }
 

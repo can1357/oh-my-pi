@@ -9,6 +9,7 @@ import { Type } from "@oh-my-pi/omptype/typebox";
 import type { AgentMessage, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
+import { requestBodyText } from "@oh-my-pi/pi-ai/utils/request-body";
 import type { ImageContent, TextContent, TSchema } from "@oh-my-pi/pi-ai";
 import {
 	isPerCallContextMessage,
@@ -216,6 +217,49 @@ describe("ExtensionRunner", () => {
 		expect(runner.createContext().getContextUsage()).toEqual(usage);
 		await runner.createContext().compact("preserve current task");
 		expect(compact).toHaveBeenCalledWith("preserve current task");
+	});
+
+	it("does not abort a session_start handler that registers an autocomplete provider without UI", async () => {
+		// The registration runs first and unconditionally inside the try/catch that
+		// guards the whole init routine, as pi extensions commonly do.
+		const markerPath = path.join(tempDir.path(), "init-marker.txt");
+		fs.writeFileSync(
+			path.join(extensionsDir, "autocomplete-at-start.ts"),
+			`import * as fs from "node:fs";
+export default function (pi) {
+	pi.on("session_start", async (_event, ctx) => {
+		try {
+			ctx.ui.addAutocompleteProvider((current) => current);
+			fs.writeFileSync(${JSON.stringify(markerPath)}, "initialized");
+		} catch (error) {
+			fs.writeFileSync(
+				${JSON.stringify(markerPath)},
+				"failed: " + (error instanceof Error ? error.message : String(error)),
+			);
+		}
+	});
+}
+`,
+		);
+
+		const result = await loadTestExtensions();
+		expect(result.errors).toEqual([]);
+		const runner = new ExtensionRunner(
+			result.extensions,
+			result.runtime,
+			tempDir.path(),
+			sessionManager,
+			modelRegistry,
+		);
+		const surfaced: string[] = [];
+		runner.onError(error => {
+			surfaced.push(error.error);
+		});
+
+		await runner.emit({ type: "session_start" });
+
+		expect(surfaced).toEqual([]);
+		expect(fs.readFileSync(markerPath, "utf8")).toBe("initialized");
 	});
 
 	describe("shortcut conflicts", () => {
@@ -2037,6 +2081,91 @@ describe("ExtensionRunner", () => {
 				event: "session_shutdown",
 				error: "handler timed out after 10ms",
 			});
+		});
+
+		const writeHangingShutdownExtensions = (count: number): string[] => {
+			const paths: string[] = [];
+			for (let i = 0; i < count; i++) {
+				const hangExtensionPath = path.join(tempDir.path(), `hang-session-shutdown-${i}.ts`);
+				fs.writeFileSync(
+					hangExtensionPath,
+					`
+						export default function(pi) {
+							pi.on("session_shutdown", async () => {
+								await Promise.withResolvers().promise;
+							});
+						}
+					`,
+				);
+				paths.push(hangExtensionPath);
+			}
+			return paths;
+		};
+
+		it("runs multiple session_shutdown handlers within one cap", async () => {
+			const hangExtensionPaths = writeHangingShutdownExtensions(4);
+			const result = await loadTestExtensions(hangExtensionPaths);
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+			try {
+				testSetSessionShutdownHandlerTimeoutMs(100);
+
+				const startedAt = performance.now();
+				await runner.emit({ type: "session_shutdown" });
+				const elapsedMs = performance.now() - startedAt;
+
+				// Multiple hung shutdown handlers must share the cap. Sequential
+				// dispatch would consume roughly count × cap and keep `/exit` slow.
+				expect(elapsedMs).toBeLessThan(350);
+				for (const hangExtensionPath of hangExtensionPaths) {
+					expect(warnSpy).toHaveBeenCalledWith("Extension handler timed out", {
+						extensionPath: hangExtensionPath,
+						event: "session_shutdown",
+						timeoutMs: 100,
+					});
+				}
+			} finally {
+				warnSpy.mockRestore();
+			}
+		});
+
+		it("takes the session_shutdown cap independently from the generic handler cap", async () => {
+			const hangExtensionPaths = writeHangingShutdownExtensions(1);
+			const result = await loadTestExtensions(hangExtensionPaths);
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+			try {
+				// Raise the *generic* timeout to a value the test would never
+				// tolerate (10s) while leaving the shutdown cap at 50ms. If the
+				// dispatcher pulls from the wrong knob the test wall-clock balloons.
+				testSetExtensionHandlerTimeoutMs(10_000);
+				testSetSessionShutdownHandlerTimeoutMs(50);
+
+				const startedAt = performance.now();
+				await runner.emit({ type: "session_shutdown" });
+				const elapsedMs = performance.now() - startedAt;
+
+				expect(elapsedMs).toBeLessThan(500);
+				expect(warnSpy).toHaveBeenCalledWith("Extension handler timed out", {
+					extensionPath: hangExtensionPaths[0],
+					event: "session_shutdown",
+					timeoutMs: 50,
+				});
+			} finally {
+				warnSpy.mockRestore();
+			}
 		});
 
 		it("uses the configured tool_call timeout and fails closed so a hung extension cannot block execution (#3948)", async () => {
@@ -5840,7 +5969,7 @@ describe("ExtensionRunner", () => {
 			const transformed = await runner.emitContext(messages);
 			let body: MessageCreateParams | undefined;
 			const fetchMock = (async (_input: string | URL | Request, init?: RequestInit) => {
-				body = JSON.parse(String(init?.body ?? "{}")) as MessageCreateParams;
+				body = JSON.parse(requestBodyText(init) ?? "{}") as MessageCreateParams;
 				return new Response(
 					JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "captured" } }),
 					{ status: 400, headers: { "Content-Type": "application/json" } },
@@ -5933,7 +6062,7 @@ describe("ExtensionRunner", () => {
 			if (!model) throw new Error("Expected bundled Anthropic model to exist");
 			let body: MessageCreateParams | undefined;
 			const fetchMock = (async (_input: string | URL | Request, init?: RequestInit) => {
-				body = JSON.parse(String(init?.body ?? "{}")) as MessageCreateParams;
+				body = JSON.parse(requestBodyText(init) ?? "{}") as MessageCreateParams;
 				return new Response(
 					JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "captured" } }),
 					{ status: 400, headers: { "Content-Type": "application/json" } },

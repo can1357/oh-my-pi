@@ -39,7 +39,6 @@ import { fileToUri, uriToFile } from "./uri";
 
 const DIAGNOSTIC_MESSAGE_LIMIT = 50;
 export const SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS = 3000;
-export const BATCH_DIAGNOSTICS_WAIT_TIMEOUT_MS = 400;
 const DIAGNOSTICS_POLL_MS = 100;
 /** Build-status notifications for a document that did not change arrive ~10–90 ms apart. */
 const BUILD_STATUS_POLL_MS = 20;

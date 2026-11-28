@@ -3221,8 +3221,8 @@ export interface LineRange {
 }
 
 /**
- * Live processes (never the caller) whose environment contains exactly
- * `name=value`.
+ * Live processes (never the caller) whose environment sets `name` to a
+ * value starting with `prefix`, each with that value.
  *
  * Reads the environment each process was exec'd with: only
  * the caller's user's processes are readable, others are skipped. macOS
@@ -3230,7 +3230,7 @@ export interface LineRange {
  * `/bin/sleep`, …) even from the same user, so those never match there.
  * Empty on platforms without a readable process environment (Windows).
  */
-export declare function listProcessesWithEnv(name: string, value: string): Array<TaggedProcess>
+export declare function listProcessesWithEnvPrefix(name: string, prefix: string): Array<TaggedProcess>
 
 /**
  * Walk the workspace once and return tree entries plus AGENTS.md candidates.
@@ -4123,25 +4123,8 @@ export interface RenderHtmlOptions {
 export declare function renderMermaidAscii(text: string, options?: MermaidRenderOptions | undefined | null): string
 
 /**
- * Render one snapcompact frame on a libuv worker: print pre-normalized text
- * onto a `size`-wide bitmap and encode it as PNG.
- *
- * The bitmap height hugs the rows the text occupies
- * (`usedRows * lineRepeat * cellHeight`), with a 64px floor for vision
- * processors that reject smaller dimensions. The glyph grid holds
- * `floor(size/cellWidth) * floor(size/cellHeight/lineRepeat)` characters;
- * input beyond that is ignored.
- * Native-cell bitmap-font shapes encode as indexed PNG; stretched bitmap-font
- * shapes (target cell != font cell) encode as RGB. TrueType shapes encode RGB
- * directly from grayscale coverage.
- * `stretch: false` pins bitmap fonts to the indexed path, printing
- * natural-size glyphs on the requested cell box; `columns: 2` flows
- * pre-wrapped newline-separated lines down two newspaper columns.
- * `U+000E`/`U+000F` in `text` toggle dim-gray ink spans without occupying a
- * cell.
- * Returns a promise for the PNG encoded as base64, created as a one-byte
- * (Latin-1) JS string straight from native code — no `Uint8Array` hop or
- * JS-side re-encode.
+ * Render pre-normalized text on a worker and return its indexed PNG as base64.
+ * Height hugs used rows with a 64px floor. Overlong input clips to the grid.
  */
 export declare function renderSnapcompactPng(text: string, options: SnapcompactRenderOptions): Promise<string>
 
@@ -4154,6 +4137,12 @@ export declare function renderSnapcompactPng(text: string, options: SnapcompactR
  * through it.
  */
 export declare function repairHeredocContinuations(script: string): string | null
+
+/**
+ * Select one installed face covering every supplied printable character. The
+ * caller supplies distinct scalars, without synthetic markers or controls.
+ */
+export declare function resolveSnapcompactFont(chars: string): number | null
 
 /**
  * Put back a stdin console mode `enableConsoleVtInput` returned. False when
@@ -4838,56 +4827,48 @@ export declare function sliceWithWidth(line: string, startCol: number, length: n
 /** Shape options for one snapcompact frame. */
 export interface SnapcompactRenderOptions {
   /**
-   * Frame width in pixels; also bounds the grid rows
-   * (`floor(size/cellHeight/lineRepeat)`). Output height hugs the used rows
-   * with a 64px floor, rather than padding every frame to a square.
+   * Frame width in pixels; also bounds grid rows before the 64px height
+   * floor.
    */
   size: number
+  /** Process-local face returned by `resolveSnapcompactFont`. */
+  fontId: number
+  /** Fixed cell advance and pitch in pixels. */
+  cellWidth: number
+  cellHeight: number
+  /** Use two cells for East Asian wide glyphs (default true). */
+  wideCells?: boolean
   /**
-   * Bundled font: `"5x8"`, `"6x12"`, `"8x13"` (X.org BDF), `"8x8"`
-   * (unscii-8), or `"silver"` (embedded TrueType). Default `"5x8"`.
-   */
-  font?: string
-  /**
-   * Target cell advance in pixels. Differing from the font's natural cell
-   * triggers the Lanczos stretch path. Default: font natural width.
-   */
-  cellWidth?: number
-  /** Target cell pitch in pixels. Default: font natural height. */
-  cellHeight?: number
-  /**
-   * Ink variant: `"sent"` (six-hue sentence cycling) or `"bw"` (black).
-   * Default `"sent"`.
+   * Ink variant: `"sent"` (default, six-hue sentence cycling) or `"bw"`
+   * (black).
    */
   variant?: string
   /**
-   * Print each text line this many times; copies after the first sit on a
-   * pale highlight band. Default 1.
+   * Copies of each line; copies after the first have a highlight band
+   * (default 1).
    */
   lineRepeat?: number
-  /**
-   * Stretch behavior. Unset: auto — Lanczos-stretch whenever the target
-   * cell differs from the font's natural cell. `false`: never stretch —
-   * render indexed with glyphs at natural size on the requested cell box
-   * (e.g. 8x13 glyphs on an 8x16 pitch, the "8on16" shapes). `true`: force
-   * the stretch path (identical to auto; natural cells render indexed).
-   */
-  stretch?: boolean
-  /**
-   * Layout columns: `1` (default) row-major grid; `2` two newspaper "doc"
-   * columns of pre-wrapped newline-separated lines.
-   */
+  /** `1` (default) row-major grid, `2` two columns of pre-wrapped lines. */
   columns?: number
 }
 
 /**
- * Return the subset of `chars` that the named snapcompact font can render.
+ * Start a detached Windows process outside this process's job objects.
  *
- * The TypeScript normalizer uses this to keep Unicode text intact only when
- * the selected native font has a glyph for it; renderer control codes are
- * considered renderable because they are interpreted outside font lookup.
+ * Like Bun's `detached` spawn, the child gets no console (`DETACHED_PROCESS`),
+ * its own process group, and null stdio. Unlike it, the child also leaves
+ * every job this process belongs to (`CREATE_BREAKAWAY_FROM_JOB`), so a
+ * terminal host that terminates its job on close does not take the child
+ * down. A job that forbids breakaway makes `CreateProcessW` fail with
+ * `ERROR_ACCESS_DENIED`; the child is then started inside the job.
+ *
+ * Returns the child's pid.
+ *
+ * # Errors
+ * The spawn error, as a JS error whose `code` is errno-style; `ENOSYS` off
+ * Windows.
  */
-export declare function snapcompactSupportedChars(font: string, chars: string): string
+export declare function spawnBreakaway(options: SpawnRawOptions): number
 
 /**
  * Spawn in its own process group with three pipes; parent-side fds are
@@ -4895,7 +4876,7 @@ export declare function snapcompactSupportedChars(font: string, chars: string): 
  */
 export declare function spawnRaw(options: SpawnRawOptions): RawChild
 
-/** Options for `spawnRaw`. */
+/** Options for `spawnRaw` and `spawnBreakaway`. */
 export interface SpawnRawOptions {
   /** Executable name or path (resolved against `env.PATH`). */
   application: string
@@ -5000,7 +4981,7 @@ export interface SvgCell {
   heightPx: number
 }
 
-/** A live process whose environment carries a given `NAME=value` entry. */
+/** A live process, as an environment scan or a pid lookup found it. */
 export interface TaggedProcess {
   pid: number
   ppid: number
@@ -5011,6 +4992,11 @@ export interface TaggedProcess {
   /** SIGHUP is ignored (nohup) */
   ignoresHangup: boolean
   stopped: boolean
+  /**
+   * The scanned variable's value ([`list_processes_with_env_prefix`]);
+   * unset for a pid lookup.
+   */
+  envValue?: string
 }
 
 /** Options for [`TextPredictor::new`]. */

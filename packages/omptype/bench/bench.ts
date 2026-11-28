@@ -3,13 +3,12 @@
  * correctness, compile unique schemas, cold compile plus two calls, and hot calls.
  */
 import type { Candidate } from "./candidate";
-import { arktypeCandidate } from "./candidates/arktype";
 import { omptypeCandidate } from "./candidates/omptype";
 import { typeboxCandidate } from "./candidates/typebox";
 import { FIXTURES, generateUniqueDefs } from "./fixtures";
 import type { Def } from "./ir";
 
-const registry: Candidate[] = [omptypeCandidate, arktypeCandidate, typeboxCandidate];
+const registry: Candidate[] = [omptypeCandidate, typeboxCandidate];
 const filter = process.argv.slice(2);
 const candidates = filter.length ? registry.filter(candidate => filter.includes(candidate.name)) : registry;
 

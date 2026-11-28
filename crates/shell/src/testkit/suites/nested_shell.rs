@@ -72,13 +72,22 @@ fn nested_script_resolves_its_own_directory() {
 	);
 }
 
-/// The nested shell's exit status (after its EXIT trap) is the command's.
+/// The nested shell's exit status (after its EXIT trap) is the command's;
+/// the trap runs on `exit`, `set -e` and at the end of its input alike.
 #[test]
 fn exit_status_and_exit_trap() {
 	let (out, ..) = run("bash -c 'trap \"echo bye\" EXIT; exit 3'; echo $?");
 	assert_eq!(out, "bye\n3\n");
 	let (out, ..) = run("bash -e -c 'false; echo no'; echo $?");
 	assert_eq!(out, "1\n");
+	let (out, ..) = run("bash -c 'trap \"echo bye; exit 4\" EXIT; echo hi'; echo $?");
+	assert_eq!(out, "hi\nbye\n4\n");
+	let (out, ..) = run("echo 'trap \"echo bye\" EXIT; echo hi; false' | sh; echo $?");
+	assert_eq!(out, "hi\nbye\n1\n");
+	let fs = MemFs::new();
+	fs.add_file("/t.sh", b"trap 'echo bye' EXIT\necho hi\n", 0o644);
+	let out = run_script(FakeHost::new().with_fs(fs), b"bash /t.sh; echo $?", &[], Fault::None);
+	assert_eq!(String::from_utf8_lossy(&out.stdout), "hi\nbye\n0\n");
 }
 
 /// Invocation flags: set flags, inherited `SHELLOPTS`, `sh` is posix mode.

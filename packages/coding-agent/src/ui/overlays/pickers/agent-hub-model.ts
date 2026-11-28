@@ -8,6 +8,7 @@ import { formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
 import { type TspSpan, type TspTone, toolIntentLabel } from "@oh-my-pi/pi-wire";
 import { sanitizeDisplaySingleLine } from "../../../extensibility/inventory/display-text";
 import type { AgentActivityKind, AgentActivityRow } from "../../../modes/view-model/overlays/agent-activity";
+import type { HubRecentLine } from "../../styles/pickers/agent-hub";
 import type { AgentMetrics } from "../../../modes/view-model/overlays/agent-hub-projection";
 import { formatCost } from "../../../modes/view-model/overlays/agent-hub-renderer";
 import { type AgentRecordLike, type AgentStatus, MAIN_AGENT_ID } from "../../../registry/agent-hub-types";
@@ -297,7 +298,9 @@ export const ACTIVITY_KIND_ICON: Readonly<Record<AgentActivityKind, string>> = {
 };
 
 /** An activity row's glyph and its color: its outcome when it failed, stopped or runs, else its kind's mark. */
-export function activityGlyph(row: AgentActivityRow): { symbol?: string; text?: string; color: string } | undefined {
+export function activityGlyph(
+	row: Pick<AgentActivityRow, "kind" | "status">,
+): { symbol?: string; text?: string; color: string } | undefined {
 	if (row.status === "error") return { symbol: "status.error", color: "error" };
 	if (row.status === "aborted") return { symbol: "status.aborted", color: "warning" };
 	if (row.status === "pending") return { symbol: "status.running", color: "accent" };
@@ -315,12 +318,12 @@ export function activityGlyph(row: AgentActivityRow): { symbol?: string; text?: 
 }
 
 /** The activity's name: a tool's name, else its title. */
-export function activityTitle(row: AgentActivityRow): string {
+export function activityTitle(row: Pick<AgentActivityRow, "kind" | "title" | "toolName">): string {
 	return row.kind === "tool" ? (row.toolName ?? row.title) : row.title;
 }
 
 /** The activity's summary as shown: a tool intent's label, else the summary. */
-export function activitySummary(row: AgentActivityRow): string {
+export function activitySummary(row: Pick<AgentActivityRow, "summary" | "summaryIsToolIntent">): string {
 	return row.summaryIsToolIntent ? toolIntentLabel(row.summary) : row.summary;
 }
 
@@ -334,6 +337,25 @@ const CLOCK = new Intl.DateTimeFormat(undefined, {
 /** `21:59:20` in local time. */
 export function activityClock(timestamp: number): string {
 	return CLOCK.format(timestamp);
+}
+
+/** What a recent-activity line shows of an activity. */
+export type RecentActivitySource = Pick<
+	AgentActivityRow,
+	"timestamp" | "kind" | "status" | "title" | "toolName" | "summary" | "summaryIsToolIntent"
+>;
+
+/**
+ * An activity's recent-activity line (`21:59:20 ✓ bash Checking repo states`): the hub inspector's
+ * rows, and the transcript's tool calls under `display.toolActivity: concise`.
+ */
+export function recentActivityLine(row: RecentActivitySource): HubRecentLine {
+	return {
+		clock: activityClock(row.timestamp),
+		glyph: activityGlyph(row),
+		title: activityTitle(row),
+		summary: activitySummary(row),
+	};
 }
 
 /** `2023-11-14 21:13 +00:00`: local date and minute with the UTC offset. */

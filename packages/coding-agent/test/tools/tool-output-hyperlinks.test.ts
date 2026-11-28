@@ -24,6 +24,7 @@ import { UserMessage } from "../../src/ui/transcript/messages/user-message";
 import { ReadGroup, ReadGroupBlock } from "../../src/ui/transcript/read-group";
 import { ToolBlock } from "../../src/ui/transcript/tool-block";
 import { type ToolTextInput, toolCall } from "../helpers/tool-text";
+import { withLargeMetadata } from "../helpers/jpeg-metadata";
 import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { presetSymbols } from "@oh-my-pi/pi-tui/theme/symbols";
@@ -441,6 +442,17 @@ describe("transcript OSC 8 links", () => {
 			{ hyperlinks: true },
 		).join("\n");
 		expect(extractLinkUris(page)).toContain("https://example.com/app");
+		const local = printRows(
+			() =>
+				EmbedFigure({
+					embed: { kind: "iframe", src: "demo/index.html#B", label: "demo" },
+					showImages: false,
+					host,
+				}),
+			80,
+			{ hyperlinks: true },
+		).join("\n");
+		expect(extractLinkUris(local)).toContain(`${fileUri(path.join(PROJECT, "demo/index.html"))}#B`);
 	});
 });
 
@@ -474,6 +486,21 @@ describe("image placeholder OSC 8 links", () => {
 		const media = path.join(PROJECT, "shot.png");
 		expect(extractLinkUris(hiddenImageRows("custom_tool", { mediaPath: media }))).toContain(fileUri(media));
 		expect(extractLinkUris(hiddenImageRows("bash", undefined))).toContain(fileUri(blobPath));
+	});
+
+	it("links the sized placeholder of a JPEG whose SOF sits behind large metadata", async () => {
+		const png = Buffer.from(TINY_PNG_BASE64, "base64");
+		const jpeg = Buffer.from(await new Bun.Image(png).resize(1200, 600).jpeg().bytes());
+		const data = withLargeMetadata(jpeg).toString("base64");
+		const call = toolCall({
+			name: "custom_tool",
+			args: {},
+			result: { content: [{ type: "image", data, mimeType: "image/jpeg" }] } as never,
+			expanded: true,
+		});
+		const rows = printRows(() => ToolBlock({ call }), 120, { hyperlinks: true }).join("\n");
+		expect(rows).toContain("1200x600");
+		expect(extractLinkUris(rows)).toContain(fileUri(blobPath));
 	});
 
 	it("writes no blob and draws no link on a terminal without links", () => {

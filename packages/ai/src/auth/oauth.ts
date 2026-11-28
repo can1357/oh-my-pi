@@ -1,3 +1,4 @@
+import { providerAccessOff } from "@oh-my-pi/pi-catalog/compat/auth";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { getProviderDefinition, PASTE_CODE_LOGIN_PROVIDERS } from "../registry";
@@ -23,6 +24,8 @@ import type {
 	OAuthLoginController,
 	OAuthLoginIdentity,
 	OAuthRefreshByIdOptions,
+	OAuthSignOutOptions,
+	OAuthSignOutResult,
 	StoredOAuthRefreshOptions,
 	StoredOAuthRefreshResult,
 } from "./types";
@@ -121,8 +124,10 @@ export class OAuthAccounts implements OAuthApi {
 		// Any legacy api_key rows from older versions will be cleaned up so they do not
 		// shadow the new OAuth row, while preserving other active OAuth credentials.
 		await this.#deps.pool.upsertOAuth(def.storeCredentialsAs ?? provider, newCredential);
+		const storedAs = def.storeCredentialsAs ?? provider;
 		return {
 			type: "oauth",
+			...(providerAccessOff(storedAs, newCredential.scope) ? { accessOff: true } : {}),
 			email: newCredential.email,
 			accountId: newCredential.accountId,
 			orgId: newCredential.orgId,
@@ -147,6 +152,26 @@ export class OAuthAccounts implements OAuthApi {
 	 * Rejects with {@link AIError.OAuthRefreshUnavailableError} (transient,
 	 * retryable) when a retryable refresh failure left no usable credential.
 	 */
+	async signOut(
+		provider: string,
+		credentialId: number,
+		options: OAuthSignOutOptions = {},
+	): Promise<OAuthSignOutResult> {
+		const credential = this.#deps.pool.entries(provider).find(entry => entry.id === credentialId)?.credential;
+		if (!credential) return { removed: false };
+		const signOut = getProviderDefinition(provider)?.signOut;
+		let signOutError: string | undefined;
+		if (signOut && credential.type === "oauth") {
+			try {
+				await signOut(credential, { signal: options.signal });
+			} catch (error) {
+				signOutError = error instanceof Error ? error.message : String(error);
+			}
+		}
+		const removed = await this.#deps.pool.removeById(provider, credentialId);
+		return signOutError === undefined ? { removed } : { removed, signOutError };
+	}
+
 	async access(provider: string, sessionId?: string, options?: AuthApiKeyOptions): Promise<OAuthAccess | undefined> {
 		// Runtime / config overrides intentionally short-circuit OAuth: when the
 		// user has pinned an API key, they expect the OAuth identity to be

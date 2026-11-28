@@ -4,9 +4,17 @@
 //! Provides a stateful PTY session that supports streaming output and stdin
 //! passthrough while a command is running.
 
+#[cfg(windows)]
+mod conpty;
+mod env;
+#[cfg(unix)]
+mod unix;
+
 use std::{
 	collections::HashMap,
+	fs::File,
 	io::{Read, Write},
+	path::Path,
 	sync::{
 		Arc,
 		atomic::{AtomicBool, Ordering},
@@ -22,7 +30,6 @@ use napi::{
 use napi_derive::napi;
 use omp_shell::output_decode::OutputDecoder;
 use parking_lot::Mutex;
-use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 use crate::{
 	js::into_string,
@@ -111,6 +118,16 @@ enum PtyCommand {
 	Argv { application: String, args: Vec<String> },
 }
 
+/// A program to start on a fresh PTY.
+struct Spawn<'a> {
+	program: &'a str,
+	args:    &'a [String],
+	/// Its working directory; none, or one that is not a directory, falls
+	/// back to the home directory.
+	cwd:     Option<&'a Path>,
+	env:     &'a env::Env,
+}
+
 #[derive(Clone)]
 struct PtyRunConfig {
 	command: PtyCommand,
@@ -159,7 +176,7 @@ const POST_CANCEL_DRAIN_TIMEOUT: Duration = Duration::from_millis(300);
 const STUCK_SLAVE_IDLE: Duration = Duration::from_secs(2);
 /// Gap between the polite termination wave (TERM to the group/tree, HUP to the
 /// child) and SIGKILL, so a child with a TERM/HUP handler can clean up. Same
-/// grace portable-pty's `Child::kill` used to spend blocking the control loop.
+/// grace a blocking `Child::kill` would spend stalling the control loop.
 /// Windows has no polite signal: `TerminateProcess` is immediate.
 #[cfg(not(windows))]
 const KILL_GRACE: Duration = Duration::from_millis(200);
@@ -530,59 +547,32 @@ impl PtySession {
 	}
 }
 
-/// Master side of a PTY: one opened by portable-pty, or an adopted raw fd.
-enum PtyMaster {
-	Portable(Box<dyn MasterPty + Send>),
-	#[cfg(unix)]
-	Adopted(std::os::fd::OwnedFd),
-}
+/// Master side of a PTY: the pseudoterminal's master fd (Unix), or the
+/// pseudoconsole (Windows).
+#[cfg(unix)]
+struct PtyMaster(std::os::fd::OwnedFd);
+#[cfg(windows)]
+struct PtyMaster(conpty::Console);
 
 impl PtyMaster {
 	fn resize(&self, cols: u16, rows: u16) {
-		match self {
-			Self::Portable(master) => {
-				let _ = master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
-			},
-			#[cfg(unix)]
-			Self::Adopted(fd) => {
-				use std::os::fd::AsRawFd;
-				let size =
-					libc::winsize { ws_row: rows, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0 };
-				// SAFETY: TIOCSWINSZ reads one `winsize` from a valid pointer.
-				unsafe { libc::ioctl(fd.as_raw_fd(), libc::TIOCSWINSZ, &size) };
-			},
+		#[cfg(unix)]
+		{
+			use std::os::fd::AsRawFd;
+			let size = libc::winsize { ws_row: rows, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0 };
+			// SAFETY: TIOCSWINSZ reads one `winsize` from a valid pointer.
+			unsafe { libc::ioctl(self.0.as_raw_fd(), libc::TIOCSWINSZ, &size) };
 		}
+		#[cfg(windows)]
+		let _ = self.0.resize(cols, rows);
 	}
 
 	#[cfg(unix)]
 	fn process_group_leader(&self) -> Option<i32> {
-		match self {
-			Self::Portable(master) => master.process_group_leader(),
-			Self::Adopted(fd) => {
-				use std::os::fd::AsRawFd;
-				// SAFETY: tcgetpgrp on the owned master fd.
-				let pgid = unsafe { libc::tcgetpgrp(fd.as_raw_fd()) };
-				(pgid > 0).then_some(pgid)
-			},
-		}
-	}
-
-	#[cfg_attr(
-		not(unix),
-		allow(clippy::missing_const_for_fn, reason = "unix arms read the fd at runtime")
-	)]
-	fn raw_fd(&self) -> Option<i32> {
-		match self {
-			#[cfg(unix)]
-			Self::Portable(master) => master.as_raw_fd(),
-			#[cfg(not(unix))]
-			Self::Portable(_) => None,
-			#[cfg(unix)]
-			Self::Adopted(fd) => {
-				use std::os::fd::AsRawFd;
-				Some(fd.as_raw_fd())
-			},
-		}
+		use std::os::fd::AsRawFd;
+		// SAFETY: tcgetpgrp on the owned master fd.
+		let pgid = unsafe { libc::tcgetpgrp(self.0.as_raw_fd()) };
+		(pgid > 0).then_some(pgid)
 	}
 }
 
@@ -716,13 +706,6 @@ mod input_wait {
 		}
 	}
 }
-
-/// Output side of the master. Unix keeps the fd so the reader can poll it
-/// alongside the pause wakeup before each read.
-#[cfg(unix)]
-type PtyReader = std::fs::File;
-#[cfg(not(unix))]
-type PtyReader = Box<dyn Read + Send>;
 
 /// Pause control for the PTY output reader thread.
 ///
@@ -925,8 +908,10 @@ impl Drop for GateGuard<'_> {
 /// Everything [`drive_pty`] needs from a spawned or adopted PTY child.
 struct PtyIo {
 	master:    PtyMaster,
-	reader:    PtyReader,
-	writer:    Box<dyn Write + Send>,
+	/// Output side of the master. Unix polls it alongside the pause wakeup
+	/// before each read.
+	reader:    File,
+	writer:    File,
 	child_pid: Option<i32>,
 	/// Blocks until the child exits; returns its exit code.
 	wait:      Box<dyn FnOnce() -> std::io::Result<i32> + Send>,
@@ -945,23 +930,23 @@ fn run_adopted_sync(
 ) -> Result<PtyRunResult> {
 	let clone = |what: &str| {
 		fd.try_clone()
-			.map(std::fs::File::from)
+			.map(File::from)
 			.map_err(|err| Error::from_reason(format!("Failed to create PTY {what}: {err}")))
 	};
 	let reader = clone("reader")?;
 	let writer = clone("writer")?;
 	let io = PtyIo {
-		master: PtyMaster::Adopted(fd),
+		master: PtyMaster(fd),
 		reader,
-		writer: Box::new(writer),
+		writer,
 		child_pid: Some(pid),
 		wait: Box::new(move || wait_pid_exit_code(pid)),
 	};
 	drive_pty(io, on_chunk, control_tx, control_rx, ct, handles)
 }
 
-/// Blocking `waitpid` for `pid`; a signal death reports exit code 1 like
-/// portable-pty does.
+/// Blocking `waitpid` for `pid`; a signal death reports exit code 1, as a
+/// spawned child's does.
 #[cfg(unix)]
 fn wait_pid_exit_code(pid: i32) -> std::io::Result<i32> {
 	let mut status = 0;
@@ -991,154 +976,132 @@ fn run_pty_sync(
 	ct: task::CancelToken,
 	handles: &Mutex<PtyHandles>,
 ) -> Result<PtyRunResult> {
-	let pty_system = native_pty_system();
+	let (program, args) = match config.command {
+		PtyCommand::Shell { command, shell } => {
+			let shell = shell.unwrap_or_else(|| "sh".to_owned());
+			let lower = shell.to_lowercase();
+			let flag = if lower.ends_with("cmd.exe") || lower.ends_with("cmd") {
+				"/c"
+			} else if lower.contains("powershell") || lower.contains("pwsh") {
+				"-Command"
+			} else {
+				"-lc"
+			};
+			(shell, vec![flag.to_owned(), command])
+		},
+		PtyCommand::Argv { application, args } => (application, args),
+	};
+	// Drop repo-location overrides before the explicit env below is applied:
+	// the terminal's `git` rediscovers the repository from `cwd`, while a
+	// caller-supplied value still wins.
+	let mut env = env::Env::inherited();
+	env.remove(&omp_shell::shell::GIT_REPO_LOCATION_ENV_VARS);
+	for (key, value) in config.env.iter().flatten() {
+		env.set(key, value);
+	}
+	let spawn = Spawn {
+		program: &program,
+		args:    &args,
+		cwd:     config.cwd.as_deref().map(Path::new),
+		env:     &env,
+	};
 	ct.heartbeat()
 		.map_err(|err| Error::from_reason(format!("PTY setup cancelled before openpty: {err}")))?;
+	let spawn_failed =
+		|err: std::io::Error| Error::from_reason(format!("Failed to spawn PTY command: {err}"));
 
-	const PTY_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
-	let pair = if cfg!(windows) {
-		// Windows ConPTY openpty() can hang indefinitely when the console
-		// subsystem isn't properly initialized. Use a short startup timeout
-		// so the Promise rejects instead of hanging forever.
-		let (tx, rx) = flume::unbounded();
+	#[cfg(unix)]
+	let (master, mut child) = {
+		let size = omp_shell::bash::TtyInfo { rows: config.rows, cols: config.cols };
+		let (master, slave, _) = omp_shell::sys::tty::open_pty(Some(size))
+			.map_err(|err| Error::from_reason(format!("Failed to open PTY: {err}")))?;
+		ct.heartbeat()
+			.map_err(|err| Error::from_reason(format!("PTY setup cancelled before spawn: {err}")))?;
+		(master, unix::spawn(slave, &spawn).map_err(spawn_failed)?)
+	};
+	#[cfg(unix)]
+	let child_process_id = child.id();
+
+	#[cfg(windows)]
+	let (pty, process) = {
+		// Opening a pseudoconsole can hang indefinitely when the console
+		// subsystem isn't properly initialized. Use a short startup timeout so
+		// the Promise rejects instead of hanging forever.
+		const PTY_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
+		let (tx, rx) = flume::bounded(1);
+		let (cols, rows) = (config.cols, config.rows);
 		std::thread::spawn(move || {
-			let result = pty_system.openpty(PtySize {
-				rows:         config.rows,
-				cols:         config.cols,
-				pixel_width:  0,
-				pixel_height: 0,
-			});
-			let _ = tx.send(result);
+			let _ = tx.send(conpty::open(cols, rows));
 		});
-		match rx.recv_timeout(PTY_STARTUP_TIMEOUT) {
-			Ok(Ok(pair)) => pair,
+		let pty = match rx.recv_timeout(PTY_STARTUP_TIMEOUT) {
+			Ok(Ok(pty)) => pty,
 			Ok(Err(e)) => return Err(Error::from_reason(format!("Failed to open PTY: {e}"))),
 			Err(_) => {
 				return Err(Error::from_reason(
 					"PTY creation timed out (5s). ConPTY may be unavailable on this system.",
 				));
 			},
-		}
-	} else {
-		pty_system
-			.openpty(PtySize {
-				rows:         config.rows,
-				cols:         config.cols,
-				pixel_width:  0,
-				pixel_height: 0,
-			})
-			.map_err(|err| Error::from_reason(format!("Failed to open PTY: {err}")))?
+		};
+		ct.heartbeat()
+			.map_err(|err| Error::from_reason(format!("PTY setup cancelled before spawn: {err}")))?;
+		let process = conpty::launch(&pty.console, &spawn).map_err(spawn_failed)?;
+		(pty, process)
 	};
+	#[cfg(windows)]
+	let child_process_id = process.pid();
 
-	let mut cmd = match config.command {
-		PtyCommand::Shell { command, shell } => {
-			let shell = shell.as_deref().unwrap_or("sh");
-			let mut cmd = CommandBuilder::new(shell);
-			let lower = shell.to_lowercase();
-			if lower.ends_with("cmd.exe") || lower.ends_with("cmd") {
-				cmd.arg("/c");
-			} else if lower.contains("powershell") || lower.contains("pwsh") {
-				cmd.arg("-Command");
-			} else {
-				cmd.arg("-lc");
-			}
-			cmd.arg(command);
-			cmd
-		},
-		PtyCommand::Argv { application, args } => {
-			let mut cmd = CommandBuilder::new(application);
-			for arg in args {
-				cmd.arg(arg);
-			}
-			cmd
-		},
-	};
-	if let Some(cwd) = config.cwd.as_ref() {
-		cmd.cwd(cwd);
-	}
-	// `CommandBuilder` starts from this process's environment, so drop
-	// repo-location overrides before the explicit env below is applied: the
-	// terminal's `git` rediscovers the repository from `cwd`, while a
-	// caller-supplied value still wins.
-	for name in omp_shell::shell::GIT_REPO_LOCATION_ENV_VARS {
-		cmd.env_remove(name);
-	}
-	if let Some(env) = config.env.as_ref() {
-		for (key, value) in env {
-			cmd.env(key, value);
-		}
-	}
-	ct.heartbeat()
-		.map_err(|err| Error::from_reason(format!("PTY setup cancelled before spawn: {err}")))?;
-
-	let mut child = pair
-		.slave
-		.spawn_command(cmd)
-		.map_err(|err| Error::from_reason(format!("Failed to spawn PTY command: {err}")))?;
-	drop(pair.slave);
-	let child_process_id = child.process_id();
-	let child_pid = child_process_id.and_then(|value| i32::try_from(value).ok());
+	let child_pid = i32::try_from(child_process_id).ok();
 	if let Some(callback) = on_start.as_ref() {
-		callback.call(Ok(child_process_id.unwrap_or(0)), ThreadsafeFunctionCallMode::NonBlocking);
+		callback.call(Ok(child_process_id), ThreadsafeFunctionCallMode::NonBlocking);
 	}
-	// No heartbeat check here: `child` now owns a real, already-`exec`'d OS
-	// process, and bailing out via `?` at this point would drop `pair`
-	// (closing the pty master) without ever killing or reaping it — the
-	// master hangup delivers SIGHUP to the child (it's the pty's session
-	// leader), which kills it almost immediately, but nothing calls
-	// wait() afterward, so it leaks as a permanent zombie. A cancellation
-	// here is instead delivered by the cancel forwarder below (immediately,
-	// for an already-aborted token) and handled by the control loop, which
-	// kills, and whose waiter thread reaps, correctly.
+	// No heartbeat check here: the child is now a real, already-`exec`'d OS
+	// process, and bailing out via `?` at this point would drop the master
+	// without ever killing or reaping it — the master hangup delivers SIGHUP
+	// to the child (it's the pty's session leader), which kills it almost
+	// immediately, but nothing calls wait() afterward, so it leaks as a
+	// permanent zombie. A cancellation here is instead delivered by the
+	// cancel forwarder below (immediately, for an already-aborted token) and
+	// handled by the control loop, which kills, and whose waiter thread
+	// reaps, correctly.
 
-	let master = pair.master;
-	// Unix: plain dups of the master fd. portable-pty's writer writes `\n` and
-	// VEOF to the terminal when dropped; at teardown the child is gone, so the
-	// line discipline echoes that newline back into the output as a stray
-	// blank line.
+	// Unix: plain dups of the master fd, so teardown writes nothing to the
+	// terminal (a newline written there after the child is gone would be
+	// echoed back into the output as a stray blank line).
 	#[cfg(unix)]
-	let (reader, writer): (PtyReader, Box<dyn Write + Send>) = {
-		let fd = master
-			.as_raw_fd()
-			.ok_or_else(|| Error::from_reason("Failed to open PTY: no master fd"))?;
+	let io = {
 		let clone = |what: &str| {
-			// SAFETY: `master` owns `fd` and outlives this borrow; the dup (made
-			// CLOEXEC, like portable-pty's own clones) is owned separately.
-			unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) }
-				.try_clone_to_owned()
-				.map(std::fs::File::from)
+			master
+				.try_clone()
+				.map(File::from)
 				.map_err(|err| Error::from_reason(format!("Failed to create PTY {what}: {err}")))
 		};
-		(clone("reader")?, Box::new(clone("writer")?))
+		let (reader, writer) = (clone("reader")?, clone("writer")?);
+		PtyIo {
+			master: PtyMaster(master),
+			reader,
+			writer,
+			child_pid,
+			wait: Box::new(move || child.wait().map(|status| status.code().unwrap_or(1))),
+		}
 	};
-	#[cfg(not(unix))]
-	let (reader, writer) = {
-		#[cfg_attr(not(windows), allow(unused_mut, reason = "only ConPTY needs the startup reply"))]
-		let mut writer = master
-			.take_writer()
-			.map_err(|err| Error::from_reason(format!("Failed to create PTY writer: {err}")))?;
+	#[cfg(windows)]
+	let io = {
+		let conpty::Pty { console, input: mut writer, output: reader } = pty;
 		// ConPTY sends ESC[6n (cursor position query) and blocks until we reply.
 		// Reply with cursor at 1,1 so it unblocks the child spawn.
-		#[cfg(windows)]
-		{
-			let _ = writer.write_all(b"\x1b[1;1R");
-			let _ = writer.flush();
+		let _ = writer.write_all(b"\x1b[1;1R");
+		let _ = writer.flush();
+		PtyIo {
+			master: PtyMaster(console),
+			reader,
+			writer,
+			child_pid,
+			wait: Box::new(move || {
+				process
+					.wait()
+					.map(|code| i32::try_from(code).unwrap_or(i32::MAX))
+			}),
 		}
-		let reader = master
-			.try_clone_reader()
-			.map_err(|err| Error::from_reason(format!("Failed to create PTY reader: {err}")))?;
-		(reader, writer)
-	};
-	let io = PtyIo {
-		master: PtyMaster::Portable(master),
-		reader,
-		writer,
-		child_pid,
-		wait: Box::new(move || {
-			child
-				.wait()
-				.map(|status| i32::try_from(status.exit_code()).unwrap_or(i32::MAX))
-		}),
 	};
 	drive_pty(io, on_chunk, control_tx, control_rx, ct, handles)
 }
@@ -1161,10 +1124,11 @@ fn drive_pty(
 	);
 	{
 		let mut handles = handles.lock();
-		handles.master_fd = master.raw_fd();
 		handles.pid = child_pid;
 		#[cfg(unix)]
 		{
+			use std::os::fd::AsRawFd;
+			handles.master_fd = Some(master.0.as_raw_fd());
 			handles.output = Some(Arc::clone(&gate));
 		}
 	}
@@ -1247,7 +1211,7 @@ fn drive_pty(
 
 	// Pin the kill targets before the waiter thread can reap the child: after
 	// the reap its pid may be recycled, and a pid-only signal (a lookup at
-	// cancellation time, or portable-pty's `clone_killer`) would hit whatever
+	// cancellation time, or a cloned killer handle) would hit whatever
 	// process took it (#4605). The child is only ever signalled through
 	// `pinned_child`.
 	let mut targets = ps::TerminationTargets::new();

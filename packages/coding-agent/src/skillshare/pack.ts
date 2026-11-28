@@ -350,6 +350,9 @@ export async function packSkill(dir: string): Promise<PackResult> {
 		scanSecrets(file.path, content, secrets);
 	}
 	const tgz = Bun.gzipSync(writeTar(entries));
+	// The gzip header OS byte (RFC 1952 offset 9) reflects the host; pin it to 255 ("unknown")
+	// so the same files yield the same integrity on every platform.
+	tgz[9] = 255;
 	if (tgz.length > SKILL_LIMITS.tarballBytes) {
 		throw new Error(`skill package is ${tgz.length} bytes compressed; the limit is ${SKILL_LIMITS.tarballBytes}`);
 	}
