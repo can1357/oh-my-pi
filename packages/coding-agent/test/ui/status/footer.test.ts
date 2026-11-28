@@ -80,6 +80,41 @@ describe("footer symbols", () => {
 			}
 		});
 	});
+
+	test("shows session AI credits, marked as a lower bound once a call sent no billing frame", () => {
+		const theme = loadThemeSync("dark", { symbolPreset: "unicode" });
+		setCurrentTheme(theme);
+		const statsRow = (aiu?: { nano: number; unknownCalls: number }): string =>
+			createRoot(dispose => {
+				try {
+					const facts = footerFacts({
+						model: { id: "model", contextWindow: 200_000, thinking: true },
+						auto: false,
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							premiumRequests: 0,
+							cost: 0,
+							...(aiu ? { aiu } : {}),
+						},
+						sub: false,
+					});
+					const [footer] = resolveChildren(jsx(Footer, { facts: () => facts }))();
+					if (!footer) throw new Error("Expected the footer");
+					return Bun.stripANSI(paintNode(staticEnvironment(theme), footer, 100).rows[1] ?? "");
+				} finally {
+					dispose();
+				}
+			});
+
+		expect(statsRow({ nano: 436_590_000, unknownCalls: 0 })).toContain("0.437 cr");
+		expect(statsRow({ nano: 436_590_000, unknownCalls: 1 })).toContain("0.437+ cr");
+		// Every call missed its frame: the meter still shows, as a bare lower bound.
+		expect(statsRow({ nano: 0, unknownCalls: 2 })).toContain("0.000+ cr");
+		expect(statsRow()).not.toContain(" cr");
+	});
 });
 
 stagedSuite("composer/footer", corpusCase => {

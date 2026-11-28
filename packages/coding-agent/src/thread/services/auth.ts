@@ -287,6 +287,7 @@ function serveAuthStorage(state: PeerAuthState): RpcServe<AuthStorage, AuthStora
 			const usageProvider = storage.usage.providerFor(provider);
 			return usageProvider ? usageProviderView(usageProvider) : undefined;
 		},
+		"usage.authRejection": (storage, provider, credentialId) => storage.usage.authRejection(provider, credentialId),
 		"usage.reportingModelIds": (storage, provider, modelIds, reports) =>
 			storage.usage.reportingModelIds(provider, modelIds, reports),
 		"usage.setProvider": (storage, provider, usageProvider, apiKey) =>
@@ -377,7 +378,8 @@ function serveModelRegistry(state: PeerAuthState): RpcServe<ModelRegistry, Model
 		refreshDiscoverableProviders: (registry, providerIds, strategy) =>
 			registry.refreshDiscoverableProviders(providerIds, strategy),
 		refreshRuntimeProviders: (registry, strategy) => registry.refreshRuntimeProviders(strategy),
-		hydrateCredentialScopedModelCaches: registry => registry.hydrateCredentialScopedModelCaches(),
+		hydrateCredentialScopedModelCaches: (registry, providers) =>
+			registry.hydrateCredentialScopedModelCaches(providers === undefined ? undefined : new Set(providers)),
 		reapplyModelPolicies: registry => registry.reapplyModelPolicies(),
 		refreshInBackground: (registry, strategy) => registry.refreshInBackground(strategy),
 		isBackgroundRefreshPending: registry => registry.isBackgroundRefreshPending(),

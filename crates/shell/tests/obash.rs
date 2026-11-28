@@ -9,7 +9,7 @@ use std::{os::unix::process::CommandExt, time::UNIX_EPOCH};
 
 use omp_shell::testkit::golden;
 
-use crate::obash_support::{obash, output};
+use crate::obash_support::{command, obash, output};
 
 const LOOP: &str = "for i in 1 2; do echo $i; done";
 
@@ -276,6 +276,36 @@ fn print_flag_prints_declare_f_layout() {
 		String::from_utf8_lossy(&bad.stderr)
 			.contains("-c: line 1: syntax error near unexpected token `fi'")
 	);
+}
+
+/// pi's extras come before `PATH` unless `--no-extras`: `awk` (an extra
+/// that runs command lines, here `system()`) beats an `awk` on `PATH`, and
+/// an extra writing into a pipe whose reader left ends with `SIGPIPE`'s
+/// status instead of killing the shell.
+#[cfg(unix)]
+#[test]
+fn extras_come_before_path_unless_no_extras() {
+	use std::os::unix::fs::PermissionsExt;
+
+	let dir = tempfile::tempdir().unwrap();
+	let awk = dir.path().join("awk");
+	fs::write(&awk, "#!/bin/sh\necho path-awk\n").unwrap();
+	fs::set_permissions(&awk, fs::Permissions::from_mode(0o755)).unwrap();
+	let path = format!("{}:/usr/bin:/bin", dir.path().display());
+	let script = "type -t awk; awk 'BEGIN { system(\"echo ran\") }'; yes | /usr/bin/head -n 1; \
+	              echo \"${PIPESTATUS[*]}\"";
+	let run = |own: &[&str]| {
+		let out = output(
+			command(env!("CARGO_BIN_EXE_obash"))
+				.env("PATH", &path)
+				.args(own)
+				.args(["-c", script]),
+		);
+		assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+		String::from_utf8(out.stdout).unwrap()
+	};
+	assert_eq!(run(&[]), "builtin\nran\ny\n141 0\n");
+	assert_eq!(run(&["--no-extras"]), "file\npath-awk\ny\n141 0\n");
 }
 
 /// A stale lock that cannot be unlinked must report its error, not retry

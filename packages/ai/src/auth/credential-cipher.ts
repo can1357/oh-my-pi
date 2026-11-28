@@ -5,8 +5,9 @@
  * Credential Manager, a Secret Service keyring on Linux). Every sealed row
  * carries its own random salt; HKDF-SHA256 derives that row's AES-256-GCM key and
  * nonce from the master key and the salt, so no key/nonce pair repeats. Hosts
- * without a vault (headless Linux, WSL, containers) get no cipher, and their
- * credentials stay plaintext in the owner-only `agent.db`.
+ * without a vault (headless Linux, WSL, containers, macOS with `HOME` pointed away
+ * from the login keychain) and macOS builds without a Team ID signature get no
+ * cipher, and their credentials stay plaintext in the owner-only `agent.db`.
  *
  * Uses `node:crypto`: the SQLite store is synchronous and WebCrypto is not.
  *
@@ -17,7 +18,10 @@
  * const data = sealed && cipher?.open(sealed);
  * ```
  */
+import { dlopen, FFIType, ptr } from "bun:ffi";
 import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from "node:crypto";
+import * as os from "node:os";
+import * as path from "node:path";
 import { isBunTestRuntime, logger } from "@oh-my-pi/pi-utils";
 
 /** The master key's vault entry, shared by every agent dir and profile on this machine. */
@@ -29,6 +33,8 @@ const TAG_BYTES = 16;
 const HKDF_INFO = Buffer.from("omp credential v1");
 /** Tests and the CLIs they spawn (which inherit `NODE_ENV=test`) never reach the real vault. */
 const TEST_PROCESS = isBunTestRuntime() || Bun.env.NODE_ENV === "test" || Bun.env.BUN_ENV === "test";
+/** `CS_OPS_TEAMID`: the running process's signing Team ID; fails with `ENOENT` when the signature has none. */
+const CS_OPS_TEAMID = 14;
 
 /** A sealed `data` column and the per-row salt it was sealed with, both base64. */
 export interface SealedCredential {
@@ -77,6 +83,49 @@ export class CredentialCipher {
 }
 
 let unlocked: CredentialCipher | undefined;
+let trusted: boolean | undefined;
+
+/**
+ * Whether this process may reach the OS vault without a password dialog nobody
+ * asked for. macOS grants a keychain item to the signer of the program that
+ * stored it; an ad-hoc signed omp (every local build) has no signer, only a hash
+ * that changes with each build, so each build would ask for the login password
+ * again. Such builds leave the vault alone: they write credentials in plaintext
+ * and read rows a signed build sealed as unopenable. Source runs execute signed
+ * bun. Off macOS, or when the signature cannot be inspected, the vault is used.
+ */
+function vaultTrusted(): boolean {
+	trusted ??= process.platform !== "darwin" || teamSigned();
+	return trusted;
+}
+
+function teamSigned(): boolean {
+	try {
+		const libSystem = dlopen("libSystem.B.dylib", {
+			csops: { args: [FFIType.i32, FFIType.u32, FFIType.ptr, FFIType.u64], returns: FFIType.i32 },
+		});
+		try {
+			// An 8-byte blob header, then the NUL-terminated 10-character Team ID.
+			const blob = new Uint8Array(64);
+			return libSystem.symbols.csops(process.pid, CS_OPS_TEAMID, ptr(blob), blob.byteLength) === 0;
+		} finally {
+			libSystem.close();
+		}
+	} catch {
+		return true;
+	}
+}
+
+/**
+ * Whether storing a vault entry can land without a dialog. macOS resolves the
+ * user's keychains under `$HOME`; with HOME overridden (test harnesses spawning
+ * the CLI, sandboxes) there is no default keychain, reads quietly find nothing,
+ * and a store pops "Keychain Not Found" instead of failing.
+ */
+async function vaultWritable(): Promise<boolean> {
+	if (process.platform !== "darwin") return true;
+	return Bun.file(path.join(os.homedir(), "Library", "Keychains", "login.keychain-db")).exists();
+}
 
 /**
  * The cipher for the master key in the OS credential vault; with `create`, a
@@ -84,14 +133,15 @@ let unlocked: CredentialCipher | undefined;
  * when the vault is unavailable or, without `create`, holds no key. Callers that
  * create serialize across processes themselves (`SqliteAuthCredentialStore.unlock`
  * holds the database write lock), or two first runs could each seal rows under a
- * key the other overwrote. Test processes get no cipher.
+ * key the other overwrote. Test processes and {@link vaultTrusted untrusted}
+ * builds get no cipher.
  */
 export async function loadCredentialCipher(options: { create?: boolean } = {}): Promise<CredentialCipher | undefined> {
 	if (unlocked) return unlocked;
-	if (TEST_PROCESS) return undefined;
+	if (TEST_PROCESS || !vaultTrusted()) return undefined;
 	try {
 		let stored = await Bun.secrets.get(VAULT_ENTRY);
-		if (stored === null && options.create) {
+		if (stored === null && options.create && (await vaultWritable())) {
 			await Bun.secrets.set({ ...VAULT_ENTRY, value: randomBytes(KEY_BYTES).toString("base64") });
 			// Seal under what the vault returns, not what was handed to it.
 			stored = await Bun.secrets.get(VAULT_ENTRY);
@@ -116,15 +166,15 @@ export async function loadCredentialCipher(options: { create?: boolean } = {}): 
 /**
  * Whether this host's OS vault can hold the master key without asking anyone:
  * a read of the (possibly missing) entry, which never prompts, must succeed.
- * Headless hosts (SSH sessions, CI, Linux without a display) and tests answer
- * `false` without touching the vault.
+ * Headless hosts (SSH sessions, CI, Linux without a display), tests and
+ * {@link vaultTrusted untrusted} builds answer `false` without touching the vault.
  */
 export async function credentialVaultAvailable(): Promise<boolean> {
 	const env = Bun.env;
 	const headless =
 		Boolean(env.SSH_CONNECTION || env.SSH_TTY || env.SSH_CLIENT || env.CI) ||
 		(process.platform === "linux" && !env.DISPLAY && !env.WAYLAND_DISPLAY);
-	if (TEST_PROCESS || headless) return false;
+	if (TEST_PROCESS || headless || !vaultTrusted()) return false;
 	try {
 		await Bun.secrets.get(VAULT_ENTRY);
 		return true;

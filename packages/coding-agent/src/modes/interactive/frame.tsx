@@ -15,14 +15,13 @@ import {
 	computed,
 	type JSXNode,
 	nativeRendering,
-	type ScrollRequest,
 	type Signal,
 	signal,
 	type UiNode,
 } from "@oh-my-pi/pi-tui";
 import type { ResizeScrollback, TerminalDriverOptions } from "@oh-my-pi/pi-tui/driver/index";
-import { staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
-import type { ScreenMode } from "@oh-my-pi/pi-tui/term/backend";
+import { DEFAULT_SPINNER_INTERVAL_MS, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
+import type { ScreenMode, SelectionMotion, TranscriptScroll } from "@oh-my-pi/pi-tui/term/backend";
 import { renderBlock } from "@oh-my-pi/pi-tui/term/render";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { setSymbolPreset } from "../../ui/theme/service";
@@ -63,11 +62,27 @@ import { Welcome, WelcomeModel } from "../../ui/welcome/welcome";
 import type { DockModels, StatusLineView } from "../types";
 
 /** Fullscreen transcript scroll actions and the scroll each asks for. */
-const TRANSCRIPT_SCROLL_KEYS: readonly (readonly [Keybinding, ScrollRequest["by"]])[] = [
+const TRANSCRIPT_SCROLL_KEYS: readonly (readonly [Keybinding, TranscriptScroll])[] = [
 	["app.transcript.pageUp", "page-up"],
 	["app.transcript.pageDown", "page-down"],
+	["app.transcript.halfPageUp", "half-up"],
+	["app.transcript.halfPageDown", "half-down"],
+	["app.transcript.previousPrompt", "previous-prompt"],
+	["app.transcript.nextPrompt", "next-prompt"],
+	["app.transcript.lineUp", "line-up"],
+	["app.transcript.lineDown", "line-down"],
 	["app.transcript.top", "start"],
 	["app.transcript.bottom", "end"],
+];
+
+const TRANSCRIPT_SELECTION_KEYS: readonly (readonly [Keybinding, SelectionMotion])[] = [
+	["app.transcript.selectLeft", "left"],
+	["app.transcript.selectRight", "right"],
+	["app.transcript.selectUp", "up"],
+	["app.transcript.selectDown", "down"],
+	["app.transcript.selectLineStart", "line-start"],
+	["app.transcript.selectLineEnd", "line-end"],
+	["app.transcript.clearSelection", "clear"],
 ];
 
 /** How the frame starts. */
@@ -129,12 +144,21 @@ export class AppFrame {
 	#barRoutes: ReadonlyMap<string, (value?: string) => void> | undefined;
 	/** Shortest gap between terminal frames, ms (`1000 / tui.maxFps`). */
 	readonly frameInterval: Signal<number> = signal(16);
+	/** Milliseconds per terminal spinner frame (`tui.motion` / `tui.spinnerInterval`); 0 draws them still. */
+	readonly spinnerInterval: Signal<number> = signal(DEFAULT_SPINNER_INTERVAL_MS);
+	/** Decorative motion off in the terminal renderer (`tui.motion` reduced or none). */
+	readonly reduceMotion: Signal<boolean> = signal(false);
 	/** `tui.hyperlinks` as an override of the terminal's capability (`undefined` under `auto`). */
 	readonly hyperlinks: Signal<boolean | undefined> = signal(undefined);
 	/** `tui.textSizing`: sized headings where the terminal supports them. */
 	readonly textSizing: Signal<boolean> = signal(false);
 	/** `tui.screen`: where the terminal renderer draws the session. */
 	readonly screen: Signal<ScreenMode> = signal<ScreenMode>("inline");
+	readonly copyOnSelect: Signal<boolean> = signal(true);
+	readonly wheelLines: Signal<number> = signal(0);
+	readonly scrollbar: Signal<boolean> = signal(true);
+	readonly exitTranscript: Signal<boolean> = signal(true);
+	readonly fullscreenMouse: Signal<boolean> = signal(true);
 	readonly #shape: Signal<string>;
 	readonly #quiet: Signal<boolean>;
 	/** Tip rolls, latched when the frame is built so the tip stays put for the session. */
@@ -172,13 +196,18 @@ export class AppFrame {
 		// brings the transcript back to its live end.
 		this.composer.addKeyHandler(key => {
 			if (key.kind === "release" || this.composer.completing()) return false;
+			if (this.screen.peek() !== "fullscreen" || !this.shell.host || this.shell.host.native) return false;
 			const bindings = getKeybindings();
 			if (bindings.matches(key, "tui.input.submit")) {
 				this.shell.scrollTranscript("end");
 				return false;
 			}
+			if (bindings.matches(key, "app.transcript.search")) return this.shell.host?.openSearch() ?? false;
+			if (bindings.matches(key, "app.transcript.copySelection")) return this.shell.host?.copySelection() ?? false;
 			const by = TRANSCRIPT_SCROLL_KEYS.find(([action]) => bindings.matches(key, action))?.[1];
-			return by !== undefined && this.shell.scrollTranscript(by);
+			if (by !== undefined) return this.shell.scrollTranscript(by);
+			const motion = TRANSCRIPT_SELECTION_KEYS.find(([action]) => bindings.matches(key, action))?.[1];
+			return motion !== undefined && (this.shell.host?.extendSelection(motion) ?? false);
 		});
 		this.welcome = new WelcomeModel(options.version, { intro: options.intro === true });
 		const todo = new TodoHudModel();
@@ -217,9 +246,16 @@ export class AppFrame {
 				? {}
 				: { native: options.native ?? this.#terminal?.native }),
 			frameInterval: this.frameInterval,
+			spinnerInterval: this.spinnerInterval,
+			reduceMotion: this.reduceMotion,
 			hyperlinks: this.hyperlinks,
 			textSizing: this.textSizing,
 			screen: this.screen,
+			copyOnSelect: this.copyOnSelect,
+			wheelLines: this.wheelLines,
+			scrollbar: this.scrollbar,
+			exitTranscript: this.exitTranscript,
+			fullscreenMouse: this.fullscreenMouse,
 			...(this.#terminal?.clock ? { clock: this.#terminal.clock } : {}),
 		});
 		// A fresh screen is an inline concern: the fullscreen session leaves the shell's scrollback alone.
@@ -237,6 +273,11 @@ export class AppFrame {
 	/** `tui.imeSafeCursor`: move the box bottom border to its own row at the end of input. */
 	setImeSafeCursor(enabled: boolean): void {
 		this.composer.setImeSafeCursor(enabled);
+	}
+
+	/** `tui.resizeScrollback` changed: resizes that settle from now on follow `mode` (start takes the initial one). */
+	setResizeScrollback(mode: ResizeScrollback): void {
+		this.shell.host?.driver.setResizeScrollback(mode);
 	}
 
 	/** Draw the bar. A startup prediction has no session routes, so it advertises no click actions. */

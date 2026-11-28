@@ -3,6 +3,19 @@
 # addon.
 ignore-dev-dependencies = true
 
+# The targets the addon ships for (BUILD.bazel's _ADDONS): a crate only other
+# targets build never ships, so it is not credited.
+targets = [
+    "aarch64-apple-darwin",
+    "aarch64-pc-windows-msvc",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-unknown-linux-musl",
+    "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+]
+
 # cargo-about 0.8.2 resolves OR expressions in this priority order. The
 # generated notice therefore chooses a permissive branch where one exists,
 # while cargo-deny's clarifications retain every AND obligation.
@@ -14,7 +27,6 @@ accepted = [
     "BSD-3-Clause",
     "ISC",
     "Unicode-3.0",
-    "Unicode-DFS-2016",
     "Zlib",
     "0BSD",
     "BSL-1.0",
@@ -24,11 +36,5 @@ accepted = [
 ]
 
 # Package-scoped reviews. No copyleft license is globally accepted.
-[inferno]
-accepted = ["CDDL-1.0"]
-
-[terminfo]
-accepted = ["WTFPL"]
-
 [uluru]
 accepted = ["MPL-2.0"]

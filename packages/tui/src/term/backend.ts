@@ -23,6 +23,7 @@
  * focused kind's widget (an editor turns them into `edit` events); clicks
  * resolve through the last frame's hit regions.
  */
+import { segmentGraphemes } from "@oh-my-pi/pi-utils/graphemes";
 import type {
 	FramePlan,
 	HistoryRowMark,
@@ -31,8 +32,10 @@ import type {
 	TerminalCapabilities,
 	TerminalDriver,
 } from "../driver/contract";
-import { dropCutImages } from "../driver/images/anchor";
+import { dropCutImages, holdsImage } from "../driver/images/anchor";
 import { DEFAULT_CELL } from "../driver/images/fit";
+import { KITTY_PLACEHOLDER } from "../driver/images/kitty";
+import { clipViewportImages, maskOverlayImages } from "../driver/images/viewport";
 import { bubbleEvent, bubbleKey, bubblePaste, keypathOf, pathTo } from "../dispatch";
 import type { KeyEvent } from "../events";
 import type { ScrollRequest, UiNode } from "../node";
@@ -50,24 +53,25 @@ import {
 } from "../reactive";
 import { isSettled, type Surface } from "../surface";
 import type { Theme } from "../theme/contract";
-import { padTo, truncate, visibleWidth } from "../text/width";
+import { padTo, sliceColumns, truncate, visibleWidth } from "../text/width";
 import {
 	type Block,
 	type Cell,
+	DEFAULT_SPINNER_INTERVAL_MS,
 	type Hit,
 	type PaintEnvironment,
 	type PaintImages,
 	paintNode,
 	type PointerHover,
 } from "./paint";
+import { TranscriptSearch } from "./transcript-search";
+import { type TranscriptDocument, type TranscriptIndex, transcriptIndex } from "./transcript-document";
+import { TranscriptPointer } from "./transcript-pointer";
 import { type WidgetContext, widgetContext, widgetFor } from "./widgets";
 import "./painters";
 
 /** Tick of a block drawing smooth motion (a shimmer sweep), ms. */
 const SMOOTH_TICK_MS = 1000 / 20;
-
-/** Rows one wheel tick scrolls the fullscreen transcript window. */
-const WHEEL_ROWS = 3;
 
 /**
  * Where a session draws: `inline` on the normal screen (settled blocks retire into terminal
@@ -75,6 +79,18 @@ const WHEEL_ROWS = 3;
  * the pinned dock; history is written only by the shutdown flush).
  */
 export type ScreenMode = "inline" | "fullscreen";
+
+/** Adjust the active transcript selection from the keyboard. */
+export type SelectionMotion = "left" | "right" | "up" | "down" | "line-start" | "line-end" | "clear";
+
+/** A terminal-only viewport action, not a native node scroll request. */
+export type TranscriptScroll =
+	| ScrollRequest["by"]
+	| "half-up"
+	| "half-down"
+	| "previous-prompt"
+	| "next-prompt"
+	| number;
 
 /** The top of the fullscreen transcript window: a `main` node and a row of its entry (separator rows first). */
 interface ScrollAnchor {
@@ -118,8 +134,15 @@ export interface TermBackendOptions {
 	 * clock, advanced on every animation tick.
 	 */
 	readonly clock?: Accessor<number>;
-	/** Animation tick for terminal-clocked kinds, ms. Default 80. */
-	readonly tickInterval?: number;
+	/**
+	 * Milliseconds per spinner frame (may change at runtime); 0 draws spinners still. The animation
+	 * tick of terminal-clocked kinds runs at this interval when it is faster than
+	 * {@link DEFAULT_SPINNER_INTERVAL_MS}, else at the default, so a slow or still spinner never slows
+	 * other clock readers (pulses, strikes, progress slides). Default {@link DEFAULT_SPINNER_INTERVAL_MS}.
+	 */
+	readonly spinnerInterval?: Reactive<number>;
+	/** Decorative motion off (blink, fade, pulse, sweeps): such kinds draw their still frame. Default false. */
+	readonly reduceMotion?: Accessor<boolean>;
 	/**
 	 * Inline images painters draw (the process driver's `TerminalImages`).
 	 * Absent: `image` nodes show their text fallback. The frame loop settles
@@ -128,6 +151,18 @@ export interface TermBackendOptions {
 	readonly images?: PaintImages;
 	/** Where the session draws (may change at runtime: frames follow it). Default `inline`. */
 	readonly screen?: Accessor<ScreenMode>;
+	/** Copy plain transcript text through the host's clipboard service. */
+	readonly copySelection?: (text: string) => void;
+	/** Copy non-empty fullscreen selections on release (default true). */
+	readonly copyOnSelect?: Accessor<boolean>;
+	/** Fullscreen wheel rows per report; 0 (default) follows the terminal's input velocity. */
+	readonly wheelLines?: Accessor<number>;
+	/** Reserve a fullscreen transcript column and show a scrollbar on overflow (default true). */
+	readonly scrollbar?: Accessor<boolean>;
+	/** Append the transcript to normal-screen history on a graceful fullscreen exit (default true). */
+	readonly exitTranscript?: Accessor<boolean>;
+	/** Whether a transcript node starts a semantic prompt. */
+	readonly isPrompt?: (node: UiNode) => boolean;
 }
 
 /** A history batch offered to the driver until it acknowledges the id. */
@@ -137,12 +172,23 @@ interface PendingBatch {
 	readonly marked?: ReadonlyMap<object, HistoryRowMark>;
 	/** Live main nodes the batch writes whole (committed on acknowledgement). */
 	readonly nodes: readonly UiNode[];
+	/** The `main` list the batch was prepared from: a block added or removed prepares it again. */
+	readonly main: readonly UiNode[];
+	/**
+	 * Live blocks painted to decide the batch, indexed from the commit frontier (`nodes` first): any
+	 * repaint prepares it again, since a block that shrank or grew changes the pressure.
+	 */
+	readonly blocks: readonly (Block | undefined)[];
+	/** Nodes whose own rows the batch writes (not only a separator): see {@link TermBackend.contentInHistory}. */
+	readonly content: readonly UiNode[];
 	/** A streaming node's stable head moved into history: its emitted rows after this batch. */
 	readonly head?: { readonly node: UiNode; readonly rows: readonly string[]; readonly count: number };
 	/** The last non-empty block whose rows this batch writes. */
 	readonly last: UiNode | undefined;
 	/** Columns the rows were painted at: a batch still unwritten at another width is prepared again. */
 	readonly width: number;
+	/** Rows the live tail had: a dock or screen height change prepares the batch again. */
+	readonly capacity: number;
 }
 
 /**
@@ -201,8 +247,10 @@ export function driverImages(images: Pick<PaintImages, "rows">, capabilities: ()
 const FULLSCREEN_KINDS: ReadonlySet<string> = new Set(["picker", "prefs"]);
 
 function isFullscreen(node: UiNode): boolean {
+	const props = node.props();
+	if (node.kind === "picker") return !("modal" in props && props.modal === false);
 	if (FULLSCREEN_KINDS.has(node.kind)) return true;
-	return node.kind === "overlay" && (node.props() as { size?: string }).size === "full";
+	return node.kind === "overlay" && "size" in props && props.size === "full";
 }
 
 /**
@@ -232,7 +280,14 @@ function layerAnchor(node: UiNode): string {
 }
 
 /** Overlay `block` onto `rows` at (`top`, `left`), cutting the rows underneath. */
-function composite(rows: string[], block: Block, top: number, left: number, width: number): void {
+function composite(
+	rows: string[],
+	block: Block,
+	top: number,
+	left: number,
+	width: number,
+	fullscreenSession: boolean,
+): void {
 	for (let i = 0; i < block.rows.length; i++) {
 		const target = top + i;
 		if (target < 0 || target >= rows.length) continue;
@@ -245,7 +300,11 @@ function composite(rows: string[], block: Block, top: number, left: number, widt
 		let after = "";
 		if (afterStart < width) {
 			const full = padTo(base, width);
-			after = sliceAfter(full, afterStart);
+			// Placeholder colors and diacritics are image coordinates, not decoration.
+			after =
+				fullscreenSession && full.includes(KITTY_PLACEHOLDER)
+					? sliceColumns(full, afterStart, width)
+					: sliceAfter(full, afterStart);
 		}
 		rows[target] = `${before}\x1b[0m${cell}\x1b[0m${after}`;
 	}
@@ -255,18 +314,12 @@ function sliceAfter(text: string, column: number): string {
 	// Re-measured by the writer; styles of the cut prefix are reset above.
 	let col = 0;
 	let index = 0;
-	for (const { segment } of new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(Bun.stripANSI(text))) {
+	for (const { segment } of segmentGraphemes(Bun.stripANSI(text))) {
 		if (col >= column) break;
 		col += Bun.stringWidth(segment);
 		index += segment.length;
 	}
 	return Bun.stripANSI(text).slice(index);
-}
-
-/** Whether `batch` (never written) still writes the blocks right after the commit frontier `start`, in order. */
-function heads(batch: PendingBatch, main: readonly UiNode[], start: number): boolean {
-	for (let k = 0; k < batch.nodes.length; k++) if (main[start + k] !== batch.nodes[k]) return false;
-	return !batch.head || main[start + batch.nodes.length] === batch.head.node;
 }
 
 /** Whether `rows` start with the `count` rows of `emitted` in history. */
@@ -339,7 +392,6 @@ export class TermBackend {
 	// A content frame can absorb a tick in the same millisecond as the last sample. Clock readers
 	// still have to run to renew their request for ticks, even if the wall time hasn't changed.
 	readonly #clock: Signal<number> = signal(Date.now(), { equals: false });
-	readonly #reduceMotion: Signal<boolean> = signal(false);
 	/** The hit under the pointer, from the last mouse report. */
 	readonly #hover: Signal<PointerHover | null> = signal<PointerHover | null>(null);
 	readonly #hyperlinks: Signal<boolean>;
@@ -361,6 +413,8 @@ export class TermBackend {
 	#historyTail: UiNode | undefined;
 	/** Rows of live main nodes already moved into history (streaming heads), not repainted in the viewport. */
 	readonly #emitted = new Map<UiNode, Emitted>();
+	/** Main nodes with rows of their own in terminal history: a separator alone does not count. */
+	readonly #withContent = new Set<UiNode>();
 	/** The next frame is the shutdown flush (see {@link flush}). */
 	#flushing = false;
 	/**
@@ -379,8 +433,14 @@ export class TermBackend {
 	#replay = false;
 	/** Fullscreen transcript window top; undefined while it follows the tail. */
 	#anchor: ScrollAnchor | undefined;
+	#search: TranscriptSearch | undefined;
 	/** The fullscreen transcript window the last frame drew; undefined when none is on screen. */
 	#window: SessionWindow | undefined;
+	#index: TranscriptIndex | undefined;
+	#pointer: TranscriptPointer | undefined;
+	#pointerFocused = true;
+	/** Nonmodal sheets and toasts cover transcript cells even where they have no widget hit. */
+	readonly #pointerCovers: { top: number; bottom: number; left: number; right: number; firstHit: number }[] = [];
 	/** Indices of the unsettled `main` nodes, ascending (recomputed when `main` or a settle mark changes). */
 	readonly #unsettled: Accessor<readonly number[]>;
 	#unsubscribe: (() => void)[] = [];
@@ -415,7 +475,8 @@ export class TermBackend {
 				return (options.clock ?? this.#clock)();
 			},
 			focus: options.surface.focused,
-			reduceMotion: this.#reduceMotion,
+			reduceMotion: options.reduceMotion ?? (() => false),
+			spinnerInterval: () => read(options.spinnerInterval ?? DEFAULT_SPINNER_INTERVAL_MS),
 			hover: this.#hover,
 			hyperlinks,
 			...(allowTextSizing ? { textSizing: () => allowTextSizing() && terminalTextSizing() } : {}),
@@ -427,13 +488,12 @@ export class TermBackend {
 	start(): void {
 		if (this.#running) return;
 		this.#running = true;
+		this.#pointerFocused = true;
 		this.#clock.set(Date.now());
 		// Restarted (after a suspend): what the terminal holds is unknown, history is written again.
 		if (this.#committed.size > 0 || this.#emitted.size > 0) this.#requestReplay();
 		this.#unsubscribe.push(
-			this.#driver.onInput(event => {
-				if (!this.#options.intercept?.(event)) this.#onInput(event);
-			}),
+			this.#driver.onInput(event => this.#routeInput(event, true)),
 			this.#driver.onResize(() => this.requestRender()),
 			this.#driver.onCapabilities(capabilities => {
 				this.#hyperlinks.set(capabilities.hyperlinks);
@@ -454,6 +514,8 @@ export class TermBackend {
 	stop(): void {
 		if (!this.#running) return;
 		this.#running = false;
+		this.#leavePointerWindow();
+		this.#closeSearch();
 		clearTimeout(this.#frame);
 		clearTimeout(this.#tick);
 		this.#frame = undefined;
@@ -473,6 +535,7 @@ export class TermBackend {
 	 */
 	flush(): void {
 		if (!this.#running) return;
+		if (this.#options.screen?.() === "fullscreen" && this.#options.exitTranscript?.() === false) return;
 		// An unwritten batch was never written: the flush batch takes its rows (a replay stays owed).
 		this.#pending = undefined;
 		this.#flushing = true;
@@ -490,16 +553,38 @@ export class TermBackend {
 		return pending !== undefined && (pending.head?.node === node || pending.nodes.includes(node));
 	}
 
+	/** Whether the driver acknowledged rows of `node`'s own content in history, not only the separator above it. */
+	contentInHistory(node: UiNode): boolean {
+		return this.#withContent.has(node);
+	}
+
 	/**
 	 * Scroll the fullscreen transcript window: by `by` (a page is the window less one row), or by a
 	 * row count (negative: up). Scrolling to the end follows the tail again. False when no window is
 	 * on screen (inline mode, a fullscreen layer up): the caller's key goes elsewhere.
 	 */
-	scroll(by: ScrollRequest["by"] | number): boolean {
+	scroll(by: TranscriptScroll): boolean {
 		const view = this.#window;
 		if (!this.#running || !view) return false;
-		const main = untrack(() => this.#surface.main());
 		const page = Math.max(1, view.rows - 1);
+		if (by === "previous-prompt" || by === "next-prompt") {
+			const main = untrack(() => this.#surface.main());
+			const top = this.#anchor ?? view.top;
+			if (!top || !this.#options.isPrompt) return false;
+			const step = by === "next-prompt" ? 1 : -1;
+			let index = main.indexOf(top.node);
+			if (step > 0 || top.row === 0) index += step;
+			for (; index >= 0 && index < main.length; index += step) {
+				const node = main[index]!;
+				if (!this.#options.isPrompt(node)) continue;
+				this.#anchor = { node, row: 0 };
+				this.requestRender();
+				break;
+			}
+			return true;
+		}
+		if (by === "half-up" || by === "half-down")
+			by = (by === "half-up" ? -1 : 1) * Math.max(1, Math.floor(view.rows / 2));
 		const delta =
 			typeof by === "number"
 				? by
@@ -512,42 +597,78 @@ export class TermBackend {
 							: by === "line-down"
 								? 1
 								: 0;
-		if (by === "start") this.#anchor = main.length > 0 ? { node: main[0]!, row: 0 } : undefined;
-		else if (by === "end") this.#anchor = undefined;
-		else if (delta !== 0 && view.top && (delta < 0 || this.#anchor)) {
-			// From the position asked last (a frame may not have drawn it yet), else what is on screen.
-			const from = this.#anchor ?? view.top;
-			const size = untrack(() => this.#entrySizes(main, view.width));
-			let index = main.indexOf(from.node);
-			let row = from.row;
-			if (index < 0) return true;
-			if (delta < 0) {
-				for (let left = -delta; left > 0;) {
-					if (row >= left) {
-						row -= left;
-						break;
-					}
-					left -= row;
-					if (index === 0) {
-						row = 0;
-						break;
-					}
-					row = size(--index);
-				}
-				this.#anchor = { node: main[index]!, row };
-			} else {
-				for (let left = delta; left > 0 && index < main.length;) {
-					const rest = size(index) - row;
-					if (rest > left) {
-						row += left;
-						break;
-					}
-					left -= rest;
-					index++;
-					row = 0;
-				}
-				this.#anchor = index < main.length ? { node: main[index]!, row } : undefined;
-			}
+		const doc = this.#index!.read();
+		const maxTop = Math.max(0, doc.rows - view.rows);
+		const origin = this.#anchor && doc.entry(this.#anchor.node);
+		const from = origin ? origin.top + Math.min(this.#anchor!.row, origin.size - 1) : maxTop;
+		this.#seek(by === "start" ? 0 : by === "end" ? maxTop : from + delta, doc);
+		return true;
+	}
+
+	/** Open a terminal-local transcript search without moving focus or editing the composer's draft. */
+	openSearch(): boolean {
+		if (!this.#running || !this.#window || !this.#searchable()) return false;
+		if (!this.#search) {
+			this.#pointer?.reset();
+			this.#search = new TranscriptSearch(this.#anchor, this.#surface.focused(), this.#env, field =>
+				this.#widgetContext([field]),
+			);
+			this.requestRender();
+		}
+		return true;
+	}
+
+	#searchable(): boolean {
+		if (this.#options.screen?.() !== "fullscreen") return false;
+		if (this.#search && this.#search.owner !== this.#surface.focused()) return false;
+		return !this.#surface
+			.layer()
+			.some(
+				node =>
+					isFullscreen(node) || (node.kind === "overlay" && (node.props() as { modal?: boolean }).modal === true),
+			);
+	}
+
+	#closeSearch(accept = false): void {
+		const search = this.#search;
+		if (!search) return;
+		this.#anchor = (accept ? search.selectedAnchor : undefined) ?? search.savedAnchor;
+		search.dispose();
+		this.#search = undefined;
+	}
+
+	#searchInput(event: InputEvent): boolean {
+		const search = this.#search;
+		if (!search) return false;
+		if (!this.#searchable()) {
+			this.#closeSearch();
+			this.requestRender();
+			return false;
+		}
+		if (
+			event.type === "mouse" &&
+			event.mouse.action === "press" &&
+			event.mouse.row < (this.#window?.rows ?? 0) &&
+			(event.mouse.button === "wheel-up" || event.mouse.button === "wheel-down")
+		) {
+			search.browse();
+			this.#pointer?.input(event.mouse, event.mouse.row);
+			return true;
+		}
+		if (
+			event.type === "key" &&
+			event.key.kind !== "release" &&
+			(event.key.id === "pageUp" || event.key.id === "pageDown")
+		) {
+			search.browse();
+			return this.scroll(event.key.id === "pageUp" ? "page-up" : "page-down");
+		}
+		const action = search.input(event);
+		if (!action) return false;
+		if (action !== "handled") {
+			// The terminal may deliver the query, navigation and accept before a coalesced frame.
+			if (action === "accept" && this.#frameRequested) this.renderNow();
+			this.#closeSearch(action === "accept");
 		}
 		this.requestRender();
 		return true;
@@ -593,6 +714,8 @@ export class TermBackend {
 		if (pending && written === pending.history.id) {
 			const replay = pending.history.kind === "replay";
 			if (pending.marked) for (const key of pending.marked.keys()) this.#marked.add(key);
+			if (replay) this.#withContent.clear();
+			for (const node of pending.content) this.#withContent.add(node);
 			for (const node of pending.nodes) {
 				this.#committed.add(node);
 				this.#emitted.delete(node);
@@ -635,7 +758,9 @@ export class TermBackend {
 
 	#scheduleTick(smooth: boolean): void {
 		if (!this.#running || this.#options.clock) return;
-		const delay = smooth ? SMOOTH_TICK_MS : (this.#options.tickInterval ?? 80);
+		const delay = smooth
+			? SMOOTH_TICK_MS
+			: Math.min(untrack(this.#env.spinnerInterval) || DEFAULT_SPINNER_INTERVAL_MS, DEFAULT_SPINNER_INTERVAL_MS);
 		if (this.#tick !== undefined) {
 			if (this.#tickDelay <= delay) return;
 			clearTimeout(this.#tick);
@@ -787,6 +912,8 @@ export class TermBackend {
 
 		// The shutdown flush writes the transcript inline: transient layers are no part of it.
 		const layer = flush ? [] : this.#surface.layer();
+		if (this.#hitLayer !== layer) this.#pointer?.blur();
+		this.#pointerCovers.length = 0;
 		this.#hitLayer = layer;
 		/** Draw a layer node over `rows` (centered, or at its `top`/`bottom` anchor). */
 		const place = (rows: string[], node: UiNode): void => {
@@ -803,14 +930,29 @@ export class TermBackend {
 						? Math.max(0, rows.length - block.rows.length)
 						: Math.max(0, Math.floor((rows.length - block.rows.length) / 2));
 			const left = Math.max(0, Math.floor((width - overlayCols) / 2));
-			composite(rows, block, top, left, width);
+			if (this.#window)
+				this.#pointerCovers.push({
+					top,
+					bottom: top + block.rows.length,
+					left,
+					right: left + overlayCols,
+					firstHit: hits.length,
+				});
+			const fullscreenSession = !flush && screen === "fullscreen";
+			const restore =
+				fullscreenSession && this.#options.images
+					? maskOverlayImages(rows, top, block.rows.length, left, overlayCols, this.#options.images.cell().w)
+					: undefined;
+			composite(rows, block, top, left, width, fullscreenSession);
+			restore?.();
 			if (block.cursor) cursor = { row: top + block.cursor.row, col: left + block.cursor.col };
 			for (const hit of block.hits ?? []) hits.push({ hit, top, left });
 		};
 		const fullscreenAt = layer.findLastIndex(isFullscreen);
 		const screen = this.#options.screen?.() ?? "inline";
+		if (this.#search && (flush || !this.#searchable())) this.#closeSearch();
 		if (fullscreenAt !== -1) {
-			this.#window = undefined;
+			this.#leavePointerWindow();
 			const block = this.#paint(layer[fullscreenAt]!, width, height);
 			const rows = block.rows.slice(0, height);
 			while (rows.length < height) rows.push("");
@@ -827,6 +969,7 @@ export class TermBackend {
 			const modal = layer.some(
 				node => node.kind === "overlay" && (node.props() as { modal?: boolean }).modal === true,
 			);
+			if (modal) this.#pointer?.blur();
 			const session = this.#composeSession(width, height, hits, !modal);
 			cursor = session.cursor;
 			for (const node of layer) place(session.rows, node);
@@ -835,7 +978,7 @@ export class TermBackend {
 			this.#nextPin = this.#pin;
 			return { viewport: [], cursor, fullscreen: session.rows };
 		}
-		this.#window = undefined;
+		if (this.#window) this.#leavePointerWindow();
 		if (!flush) this.#anchor = undefined;
 
 		const dock: Placed[] = [];
@@ -858,14 +1001,26 @@ export class TermBackend {
 		// Whether a resize replays history at its new width (else blocks leave history whole: see below).
 		const rowWise = this.#driver.replaysOnResize?.() ?? true;
 		this.#checkEmitted(main, start, width, rowWise);
-		// A batch never written is prepared again when it no longer fits: another width, or blocks that
-		// moved under it (a replay it was stays owed).
+		const capacity = flush ? 0 : Math.max(0, height - dockRows + covering);
+		// An unwritten batch is prepared again when anything that decided it changed: the geometry, the
+		// blocks in `main`, or the rows of a block it painted (a replay it was stays owed).
 		const offered = this.#pending;
-		if (offered && (offered.width !== width || !heads(offered, main, start))) this.#pending = undefined;
+		if (
+			offered &&
+			(offered.width !== width ||
+				offered.capacity !== capacity ||
+				offered.main !== main ||
+				offered.blocks.some(
+					(block, i) => block !== undefined && this.#paint(main[start + i]!, width).rows !== block.rows,
+				))
+		) {
+			this.#pending = undefined;
+		}
 		// A lost display gets the committed ledger back under a fresh id, followed by whatever retires
 		// in the same frame; streaming heads start over (their stable rows go out again under pressure).
 		let ledger: string[] | undefined;
 		let ledgerLast: UiNode | undefined;
+		const ledgerContent: UiNode[] = [];
 		if (this.#replay && !this.#pending) {
 			this.#emitted.clear();
 			this.#committed = new Set(main.slice(0, start));
@@ -876,12 +1031,12 @@ export class TermBackend {
 				if (block.rows.length === 0) continue;
 				if (ledgerLast) for (let n = separator(ledgerLast, node); n > 0; n--) ledger.push("");
 				for (const row of block.rows) ledger.push(row);
+				ledgerContent.push(node);
 				ledgerLast = node;
 			}
 		}
 		const pending = this.#pending;
 		const pendingHead = pending?.head;
-		const capacity = flush ? 0 : Math.max(0, height - dockRows + covering);
 		// Live main nodes are `main[first + i]`, `i < count`. A batch still being written to history
 		// is not live; the blocks it writes are what the first live block is separated from.
 		let first = start;
@@ -891,10 +1046,10 @@ export class TermBackend {
 				? (pending.last ?? (pending.history.kind === "replay" ? undefined : this.#historyTail))
 				: this.#historyTail;
 		if (pending) {
-			const retiring = new Set(pending.nodes);
-			for (; first < main.length && retiring.has(main[first]!); first++) {
-				if (this.#paint(main[first]!, width).rows.length > 0) aboveLive = main[first];
+			for (let i = 0; i < pending.nodes.length; i++) {
+				if (pending.blocks[i]!.rows.length > 0) aboveLive = pending.nodes[i];
 			}
+			first += pending.nodes.length;
 		}
 		const count = main.length - first;
 		// Live blocks are painted (and so watched) only as the frame needs them: from the tail up
@@ -967,6 +1122,7 @@ export class TermBackend {
 			history = pending.history;
 		} else if (boundary >= 0 || ledger) {
 			const retired: UiNode[] = [];
+			const content = ledgerContent;
 			const rows: string[] = ledger ?? [];
 			let last = ledgerLast;
 			let marked: Map<object, HistoryRowMark> | undefined;
@@ -988,6 +1144,7 @@ export class TermBackend {
 				const skip = skipAt(live);
 				retired.push(node);
 				if (block.rows.length > skip) {
+					content.push(node);
 					// The separator may depend on whether the block above retires (it just did, in this batch).
 					leads[live] = undefined;
 					for (let i = leadAt(live); i > 0; i--) rows.push("");
@@ -1004,7 +1161,7 @@ export class TermBackend {
 			// block's rows are final, a streaming one offers its stable head. The rest stays live (a
 			// settled block still repaints them: a tool card collapses below the rows already in history).
 			// A driver that keeps history at its old width on a resize (`preserve`, in-place) gets whole
-			// blocks and whole stable heads instead, which map exactly to the new width.
+			// blocks and whole stable heads when content overflows, which map exactly to the new width.
 			let head: PendingBatch["head"];
 			if (!flush && live < count && live <= boundary) {
 				const node = main[first + live]!;
@@ -1018,12 +1175,14 @@ export class TermBackend {
 					// Only the pressure: the separator written with the first rows relieves it too (it may
 					// alone; the block's rows then stay live).
 					const lead = leadAt(live);
-					const take = rowWise ? Math.min(stable - skip, Math.max(0, liveRows - capacity - lead)) : stable - skip;
+					const overflow = Math.max(0, liveRows - capacity - lead);
+					const take = overflow === 0 ? 0 : rowWise ? Math.min(stable - skip, overflow) : stable - skip;
 					if (settled && skip + take >= block.rows.length) retireWhole();
 					else if (take > 0 || lead > 0) {
 						for (let i = lead; i > 0; i--) rows.push("");
 						const stop = Math.min(skip + take, block.rows.length);
 						appendRows(block, skip, stop);
+						if (stop > skip) content.push(node);
 						head = { node, rows: block.rows, count: stop };
 						skips[live] = stop;
 						leads[live] = 0;
@@ -1041,10 +1200,14 @@ export class TermBackend {
 				this.#pending = {
 					history,
 					nodes: retired,
+					main,
+					blocks,
+					content,
 					...(marked ? { marked } : {}),
 					...(head ? { head } : {}),
 					last,
 					width,
+					capacity,
 				};
 			} else {
 				// Nothing to write: the blocks stay live (committed with the next batch that has rows).
@@ -1153,30 +1316,64 @@ export class TermBackend {
 		return { ...(history ? { history } : {}), viewport, cursor };
 	}
 
-	/**
-	 * Rows each `main[i]` takes in the fullscreen transcript (its separator from the non-empty block
-	 * above, then its rows; none when it draws nothing), painted on demand at `width`.
-	 */
-	#entrySizes(main: readonly UiNode[], width: number): (i: number) => number {
-		const separator = this.#options.separator ?? (() => 1);
-		const rows: number[] = [];
-		const leads: number[] = [];
-		const rowsAt = (i: number): number => (rows[i] ??= this.#paint(main[i]!, width).rows.length);
-		return (i: number): number => {
-			if (rowsAt(i) === 0) return 0;
-			let lead = leads[i];
-			if (lead === undefined) {
-				lead = 0;
-				for (let j = i - 1; j >= 0; j--) {
-					if (rowsAt(j) > 0) {
-						lead = separator(main[j]!, main[i]!);
-						break;
-					}
-				}
-				leads[i] = lead;
-			}
-			return lead + rowsAt(i);
-		};
+	/** Copy selected fullscreen transcript text. False leaves the key available to the focused widget. */
+	copySelection(): boolean {
+		return this.#pointer?.copy() ?? false;
+	}
+
+	/** Adjust an existing selection without stealing navigation from the composer when none is active. */
+	extendSelection(direction: SelectionMotion): boolean {
+		if (!this.#pointer?.adjust(direction)) return false;
+		this.requestRender();
+		return true;
+	}
+
+	#leavePointerWindow(): void {
+		this.#window = undefined;
+		this.#pointer?.reset();
+		this.#pointer = undefined;
+		this.#index?.dispose();
+		this.#index = undefined;
+	}
+	#seek(offset: number, doc = this.#index?.read()): void {
+		if (!doc || !this.#window) return;
+		const target = Math.max(0, Math.trunc(offset));
+		const entry = target < doc.rows - this.#window.rows ? doc.at(target) : undefined;
+		this.#anchor = entry ? { node: entry.node, row: target - entry.top } : undefined;
+		this.requestRender();
+	}
+
+	#sessionPointer(): TranscriptPointer {
+		const options = this.#options;
+		return (this.#pointer ??= new TranscriptPointer({
+			available: () =>
+				this.#running &&
+				this.#pointerFocused &&
+				!!this.#window?.wheel &&
+				!this.#search &&
+				this.#surface.layer() === this.#hitLayer &&
+				this.#searchable(),
+			document: () => this.#index!.read(),
+			scroll: delta => this.scroll(delta),
+			scrollTo: offset => this.#seek(offset),
+			now: options.clock ?? (() => performance.now()),
+			wheelLines: options.wheelLines ?? (() => 0),
+			copyOnSelect: options.copyOnSelect ?? (() => true),
+			copy: options.copySelection,
+		}));
+	}
+
+	#document(width: number): TranscriptDocument {
+		if (this.#index?.width !== width) {
+			this.#index?.dispose();
+			this.#index = transcriptIndex(
+				width,
+				this.#surface.main,
+				node => this.#paint(node, width).rows,
+				this.#options.separator ?? (() => 1),
+			);
+		}
+		return this.#index.read();
 	}
 
 	/**
@@ -1185,52 +1382,55 @@ export class TermBackend {
 	 * transcript; one that reaches the tail follows it again) with a row counting what is below it.
 	 */
 	#composeSession(
-		width: number,
+		screenWidth: number,
 		height: number,
 		hits: { hit: Hit; top: number; left: number }[],
 		wheel: boolean,
 	): { rows: string[]; cursor: Cell | null } {
 		let cursor: Cell | null = null;
+		const search = this.#search;
 		const dock: Placed[] = [];
-		let dockRows = 0;
-		for (const node of this.#surface.dock()) {
-			const block = this.#paint(node, width);
-			dock.push({ block, top: dockRows, left: 0 });
-			dockRows += block.rows.length;
+		let dockRows = search ? 1 : 0;
+		for (const node of search ? [] : this.#surface.dock()) {
+			const block = this.#paint(node, screenWidth);
+			// Inline dock painters include breathing room between the ledger and controls.
+			// On the fixed screen give leading, purely decorative blank rows back to the transcript.
+			let skip = 0;
+			if (!dockRows && block.rows[0] === "" && !block.covering && !block.rows.some(holdsImage)) {
+				while (
+					block.rows[skip] === "" &&
+					block.cursor?.row !== skip &&
+					!block.hits?.some(hit => hit.row <= skip && skip < hit.row + hit.height)
+				)
+					skip++;
+			}
+			dock.push({ block, top: dockRows - skip, left: 0 });
+			dockRows += block.rows.length - skip;
 		}
 		const room = Math.max(0, height - dockRows);
 		const main = this.#surface.main();
-		const size = this.#entrySizes(main, width);
+		const lane = screenWidth > 1 && (this.#options.scrollbar?.() ?? true);
+		const width = lane ? screenWidth - 1 : screenWidth;
+		const doc = this.#document(width);
+		const size = (i: number): number => doc.entry(main[i]!)?.size ?? 0;
 
-		// The window's first entry and row in it, and the rows below the window (anchored only).
-		let index = 0;
-		let skip = 0;
-		let below = 0;
-		let anchor = this.#anchor;
-		let at = anchor ? main.indexOf(anchor.node) : -1;
-		if (anchor && at >= 0) {
-			skip = Math.max(0, Math.min(anchor.row, size(at) - 1));
-			let after = size(at) - skip;
-			for (let i = at + 1; i < main.length; i++) after += size(i);
-			// Everything from the anchor on fits: back to the tail.
-			if (after <= room || room === 0) at = -1;
-			else below = after - (room - 1);
+		if (search) {
+			this.#anchor = search.reveal(main, i => this.#paint(main[i]!, width).rows, size, this.#anchor, room);
 		}
-		if (at < 0) {
-			anchor = undefined;
-			let total = 0;
-			let i = main.length;
-			while (i > 0 && total < room) total += size(--i);
-			index = i;
-			skip = Math.max(0, total - room);
-		} else {
-			index = at;
-			anchor = { node: main[at]!, row: skip };
-		}
-		this.#anchor = anchor;
+
+		const maxTop = Math.max(0, doc.rows - room);
+		const anchored = this.#anchor && doc.entry(this.#anchor.node);
+		const offset =
+			room && anchored ? Math.min(maxTop, anchored.top + Math.min(this.#anchor!.row, anchored.size - 1)) : maxTop;
+		const first = doc.at(offset);
+		const index = first?.index ?? main.length;
+		const skip = first ? offset - first.top : 0;
+		const below = offset < maxTop ? maxTop - offset + 1 : 0; // The indicator replaces the last content row.
+		this.#anchor = below && first ? { node: first.node, row: skip } : undefined;
 
 		// The window: entry rows from the top down, the indicator taking its last row while anchored.
-		const content = below > 0 ? room - 1 : room;
+		const indicator = below > 0 && !lane && room > 1;
+		const content = indicator ? room - 1 : room;
 		const window: string[] = [];
 		for (let i = index; i < main.length && window.length < content; i++) {
 			const rows = size(i);
@@ -1241,7 +1441,13 @@ export class TermBackend {
 			// Window row of the block's first row (negative: cut above the window).
 			const top = window.length + lead - (i === index ? skip : 0);
 			for (let r = i === index ? skip : 0; r < rows && window.length < content; r++) {
-				window.push(r < lead ? "" : block.rows[r - lead]!);
+				const raw = r < lead ? "" : block.rows[r - lead]!;
+				window.push(search ? search.highlight(node, r, raw) : raw);
+			}
+			if (this.#options.images) {
+				const from = Math.max(0, -top);
+				const to = Math.min(block.rows.length, content - top);
+				clipViewportImages(window, top + from, block.rows, from, to, this.#options.images.cell().h);
 			}
 			if (block.cursor && this.#surface.focused()) {
 				const row = top + block.cursor.row;
@@ -1252,7 +1458,7 @@ export class TermBackend {
 			}
 		}
 		dropCutImages(window, 0);
-		if (below > 0) {
+		if (indicator) {
 			const theme = this.#options.theme();
 			window.push(truncate(theme.fg("dim", `↓ ${below} ${below === 1 ? "line" : "lines"} below`), width, ""));
 		}
@@ -1264,10 +1470,28 @@ export class TermBackend {
 			wheel,
 		};
 
+		this.#sessionPointer().update(
+			{
+				doc,
+				top: offset,
+				rows: room,
+				content: Math.min(content, doc.rows - offset),
+				width,
+				scrollbar: lane && room > 0 && doc.rows > room,
+			},
+			window,
+			this.#options.theme(),
+		);
 		const rows = window;
+		if (search) {
+			const bar = search.bar(this.#driver.columns, room);
+			rows.push(bar.text);
+			return { rows, cursor: { row: room, col: bar.col } };
+		}
 		const dockTop = rows.length;
 		for (const placed of dock) {
-			rows.push(...placed.block.rows);
+			for (let row = Math.max(0, -placed.top); row < placed.block.rows.length; row++)
+				rows.push(placed.block.rows[row]!);
 			if (placed.block.cursor)
 				cursor = { row: dockTop + placed.top + placed.block.cursor.row, col: placed.block.cursor.col };
 			for (const hit of placed.block.hits ?? []) hits.push({ hit, top: dockTop + placed.top, left: 0 });
@@ -1276,6 +1500,7 @@ export class TermBackend {
 		const over = rows.length - height;
 		if (over > 0) {
 			rows.splice(0, over);
+			dropCutImages(rows, 0);
 			if (cursor) cursor = cursor.row >= over ? { row: cursor.row - over, col: cursor.col } : null;
 			for (const entry of hits) entry.top -= over;
 		}
@@ -1295,7 +1520,22 @@ export class TermBackend {
 
 	/** Route `event` as if the terminal sent it (no interception). */
 	dispatch(event: InputEvent): void {
-		this.#onInput(event);
+		this.#routeInput(event, false);
+	}
+
+	#routeInput(event: InputEvent, intercept: boolean): void {
+		if (!this.#running && this.#options.screen?.() === "fullscreen") return;
+		if (event.type === "focus") {
+			// A focus-in can arrive over a page or during a live screen-mode switch.
+			this.#pointerFocused = event.focused;
+			if (!event.focused && this.#window) this.clearHover();
+		} else if (
+			event.type === "mouse" &&
+			this.#window &&
+			(!this.#pointerFocused || this.#options.screen?.() !== "fullscreen")
+		)
+			return;
+		if (!this.#searchInput(event) && !(intercept && this.#options.intercept?.(event))) this.#onInput(event);
 	}
 
 	#onInput(event: InputEvent): void {
@@ -1342,8 +1582,18 @@ export class TermBackend {
 			this.clearHover();
 			return;
 		}
-		this.#trackHover(viewportRow, mouse.col);
-		for (let i = this.#hits.length - 1; i >= 0; i--) {
+		const pointer =
+			this.#window?.wheel && (!this.#hitLayer?.length || this.#searchable()) ? this.#pointer : undefined;
+		if (pointer?.capture(mouse, viewportRow)) return;
+		const cover =
+			pointer &&
+			this.#pointerCovers.findLast(
+				rect =>
+					viewportRow >= rect.top && viewportRow < rect.bottom && mouse.col >= rect.left && mouse.col < rect.right,
+			);
+		const firstHit = cover ? cover.firstHit : 0;
+		this.#trackHover(viewportRow, mouse.col, firstHit);
+		for (let i = this.#hits.length - 1; i >= firstHit; i--) {
 			const { hit, top, left } = this.#hits[i]!;
 			const row = viewportRow - top - hit.row;
 			const col = mouse.col - left - hit.col;
@@ -1351,30 +1601,30 @@ export class TermBackend {
 			const path = pathTo(this.#regions(), hit.node);
 			if (path.length === 0) continue;
 			const widget = widgetFor(hit.node);
-			if (widget?.mouse?.(hit.node, mouse, { row, col }, this.#widgetContext(path), hit)) return;
+			if (widget?.mouse?.(hit.node, mouse, { row, col }, this.#widgetContext(path), hit)) {
+				if (mouse.action === "press" && mouse.button === "left") pointer?.reset();
+				return;
+			}
 			if (mouse.action === "press" && mouse.button === "left" && hit.act) {
+				pointer?.reset();
 				bubbleEvent(path, { type: "action", key: keypathOf(path), act: hit.act, mods: mouse.mods });
 				return;
 			}
 			if (mouse.action === "press" && mouse.button === "left" && hit.item !== undefined) {
+				pointer?.reset();
 				bubbleEvent(path, { type: "select", key: keypathOf(path), item: hit.item });
 				return;
 			}
 		}
-		// Nothing under the pointer took the wheel: it scrolls the fullscreen transcript.
-		if (
-			mouse.action === "press" &&
-			(mouse.button === "wheel-up" || mouse.button === "wheel-down") &&
-			this.#window?.wheel
-		) {
-			this.scroll(mouse.button === "wheel-up" ? -WHEEL_ROWS : WHEEL_ROWS);
+		if (pointer && !cover) {
+			pointer.input(mouse, viewportRow);
 		}
 	}
 
 	/** Point the hover state at the topmost hit under the pointer (painters band it via `cx.hovered`). */
-	#trackHover(viewportRow: number, column: number): void {
+	#trackHover(viewportRow: number, column: number, firstHit: number): void {
 		let next: PointerHover | null = null;
-		for (let i = this.#hits.length - 1; i >= 0; i--) {
+		for (let i = this.#hits.length - 1; i >= firstHit; i--) {
 			const { hit, top, left } = this.#hits[i]!;
 			const row = viewportRow - top - hit.row;
 			const col = column - left - hit.col;
@@ -1393,6 +1643,7 @@ export class TermBackend {
 
 	/** Forget the hit under the pointer (pointer tracking went off: no report would ever clear it). */
 	clearHover(): void {
+		if (this.#pointer?.blur()) this.requestRender();
 		if (this.#hover.peek() !== null) this.#hover.set(null);
 	}
 
@@ -1409,10 +1660,5 @@ export class TermBackend {
 	/** Whether a fullscreen transcript window is on screen and follows the tail (false while scrolled back). */
 	get following(): boolean {
 		return this.#window !== undefined && this.#anchor === undefined;
-	}
-
-	/** Set reduced motion (clocked kinds draw their still frame). */
-	setReduceMotion(reduce: boolean): void {
-		this.#reduceMotion.set(reduce);
 	}
 }

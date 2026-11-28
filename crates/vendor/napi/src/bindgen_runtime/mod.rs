@@ -3,7 +3,12 @@ use std::sync::{Arc, OnceLock};
 
 pub use callback_info::*;
 pub use class_accessor::*;
+pub(crate) use class_identity::{check_class_identity, class_id_of, ClassId};
 pub use env::*;
+pub use env_registration::{
+  env_teardown_class_refs_deleted, env_teardown_custom_gc_released,
+  env_teardown_reflect_refs_deleted,
+};
 pub use iterator::Generator;
 pub use js_values::*;
 pub use module_register::*;
@@ -19,7 +24,9 @@ pub mod async_iterator;
 pub use async_iterator::AsyncGenerator;
 mod callback_info;
 mod class_accessor;
+mod class_identity;
 mod env;
+pub(crate) mod env_registration;
 mod error;
 pub mod iterator;
 mod js_values;
@@ -75,7 +82,11 @@ pub(crate) unsafe extern "C" fn raw_finalize_unchecked<T: ObjectFinalize>(
     .with(|cell| cell.borrow_mut(|reference_map| reference_map.remove(&finalize_data)));
   let finalize_result = data.finalize(Env::from_raw(env));
 
-  if let Some((_, ref_val, finalize_callbacks_ptr)) = ref_entry {
+  if let Some(RefEntry {
+    info: (_, ref_val, finalize_callbacks_ptr),
+    ..
+  }) = ref_entry
+  {
     let finalize_callbacks_rc = unsafe { Arc::from_raw(finalize_callbacks_ptr) };
 
     #[cfg(all(debug_assertions, not(target_family = "wasm")))]
@@ -102,6 +113,10 @@ pub(crate) unsafe extern "C" fn raw_finalize_unchecked<T: ObjectFinalize>(
     let e: JsError = err.into();
     unsafe { e.throw_into(env) };
   }
+
+  // Released last so the address cannot be reused while the `REFERENCE_MAP`
+  // entry keyed on it is still being torn down.
+  unsafe { free_empty_class_placeholder::<T>(finalize_data) };
 }
 
 static EXTERNAL_RELEASE_HOOK: OnceLock<fn()> = OnceLock::new();

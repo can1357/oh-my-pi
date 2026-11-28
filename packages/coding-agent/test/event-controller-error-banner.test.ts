@@ -142,6 +142,33 @@ describe("EventController error banner", () => {
 		expect(setErrorPinned).toHaveBeenCalledWith(true);
 	});
 
+	it("shows the same Beijing-time quota reset in the banner and retry row", async () => {
+		setSystemTime(new Date("2026-01-05T00:00:00Z"));
+		const errorMessage = "Usage limit reached. Your limit will reset at 2026-01-05 09:00:00";
+		const message = makeAssistantMessage({
+			provider: "zai",
+			stopReason: "error",
+			errorId: AIError.create(AIError.Flag.UsageLimit),
+			errorMessage,
+		});
+		const { controller, ctx, showPinnedError } = createFixture(message);
+		await controller.handleEvent({ type: "message_end", message });
+		const label = "Zai account usage limit reached; resets in 1h";
+		expect(showPinnedError).toHaveBeenCalledWith(label);
+		await controller.handleEvent({
+			type: "auto_retry_start",
+			attempt: 1,
+			maxAttempts: 3,
+			delayMs: 3_600_000,
+			errorMessage,
+			errorId: message.errorId,
+		});
+		expect(ctx.showWorking).toHaveBeenCalledWith(
+			"retry",
+			expect.objectContaining({ variant: expect.objectContaining({ reason: label }) }),
+		);
+	});
+
 	it("suppresses a recoverable empty-output error while session continuation starts", async () => {
 		const message = makeAssistantMessage({
 			content: [{ type: "thinking", thinking: "Reasoning finished without final output." }],

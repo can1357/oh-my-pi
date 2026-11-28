@@ -1271,6 +1271,10 @@ def _build_push_branch(bindings: ToolBindings) -> HostTool[Any, Any]:
                     "type": "string",
                     "description": persona.host_tool_parameter_description("gh_push_branch", "branch"),
                 },
+                "base": {
+                    "type": "string",
+                    "description": persona.host_tool_parameter_description("gh_push_branch", "base"),
+                },
                 "skip_checks": {
                     "type": "boolean",
                     "description": persona.host_tool_parameter_description("gh_push_branch", "skip_checks"),

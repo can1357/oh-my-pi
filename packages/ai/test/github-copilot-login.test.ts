@@ -182,6 +182,7 @@ describe("loginGitHubCopilot", () => {
 					JSON.stringify({
 						copilot_plan: "business",
 						endpoints: { api: "https://api.business.githubcopilot.com/" },
+						token_based_billing: true,
 					}),
 					{ status: 200, headers: { "Content-Type": "application/json" } },
 				);
@@ -201,6 +202,8 @@ describe("loginGitHubCopilot", () => {
 		});
 
 		expect(credentials.apiEndpoint).toBe("https://api.business.githubcopilot.com");
+		// The same probe tells request-time billing which meter the account pays in.
+		expect(credentials.tokenBasedBilling).toBe(true);
 		expect(policyUrls.length).toBeGreaterThan(0);
 		expect(policyUrls.every(url => url.startsWith("https://api.business.githubcopilot.com/models/"))).toBe(true);
 	});

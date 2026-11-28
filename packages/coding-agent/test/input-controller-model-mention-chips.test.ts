@@ -41,7 +41,7 @@ function setup() {
 		submitted.push(text);
 	};
 	const term = attachTerminal(ctx);
-	const chip = `${currentTheme().symbols.symbol("icon.model")} Opus`;
+	const chip = `${currentTheme().symbols.symbol("mention.model")} Opus`;
 	return { ctx, term, submitted, chip };
 }
 

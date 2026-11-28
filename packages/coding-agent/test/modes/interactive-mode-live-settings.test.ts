@@ -14,6 +14,7 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 import { createModeTerminal, type ModeTerminal } from "../helpers/mode-terminal";
 
 import {
+	cfgGitChildRepoDiscovery,
 	cfgStatusLineContextLine,
 	cfgStatusLineLeftSegments,
 	cfgSymbolPreset,
@@ -93,6 +94,16 @@ describe("InteractiveMode live settings", () => {
 		expect(effective.leftSegments).toEqual(["time", "model"]);
 		expect(effective.contextLine).toBe("off");
 		expect(mode.hideThinkingBlock).toBe(true);
+	});
+
+	it("invalidates the idle checkout on both child discovery transitions", async () => {
+		const invalidate = vi.spyOn(mode.statusLine, "invalidateVcs");
+		cfgGitChildRepoDiscovery.set(session.settings, false);
+		await Promise.resolve();
+		expect(invalidate).toHaveBeenCalledTimes(1);
+		cfgGitChildRepoDiscovery.set(session.settings, true);
+		await Promise.resolve();
+		expect(invalidate).toHaveBeenCalledTimes(2);
 	});
 
 	it("coalesces restored agent registrations and renders their final state", async () => {

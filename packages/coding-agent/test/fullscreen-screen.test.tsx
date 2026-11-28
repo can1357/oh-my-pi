@@ -39,23 +39,51 @@ describe("fullscreen screen mode", () => {
 		expect(term.engine.isMainScreen).toBe(false);
 		const bottom = term.screen().at(-1);
 		term.press("pageup");
-		await term.waitFor(rows => rows.some(row => row.includes("lines below")));
+		await term.waitFor(rows => !rows.some(row => row.includes("line 39")));
 		expect(term.screen().some(row => row.includes("line 39"))).toBe(false);
 		// The dock did not move, and typing lands in the composer without leaving the scrolled view.
 		expect(term.screen().at(-1)).toBe(bottom);
 		term.type("draft");
 		await term.waitFor(() => term.frame.composer.text() === "draft");
-		expect(term.screen().some(row => row.includes("lines below"))).toBe(true);
+		expect(!term.screen().some(row => row.includes("line 39"))).toBe(true);
 		term.press("enter");
 		await term.waitFor(rows => rows.some(row => row.includes("line 39")));
 		expect(term.screen().some(row => row.includes("lines below"))).toBe(false);
 	});
 
+	it("finds older transcript text without editing or submitting the draft", async () => {
+		term.type("unsent");
+		term.feed("\x1b/");
+		term.type("line 12");
+		await term.waitFor(rows => rows.some(row => row.includes("line 12")) && rows.some(row => row.includes("1/1")));
+		expect(term.frame.composer.text()).toBe("unsent");
+		term.press("escape");
+		await term.waitFor(rows => rows.some(row => row.includes("line 39")));
+		term.type("!");
+		expect(term.frame.composer.text()).toBe("unsent!");
+	});
+
+	it("jumps between user prompts, skipping intervening output", async () => {
+		for (let i = 0; i < 3; i++) {
+			term.frame.shell.transcript.append(() => <text>{`prompt ${i}`}</text>, { prompt: true });
+			term.frame.shell.transcript.append(() => (
+				<rows lines={Array.from({ length: 20 }, (_, j) => `reply ${i}:${j}`)} />
+			));
+		}
+		await term.waitFor(rows => rows.some(row => row.includes("reply 2:19")));
+		term.press("alt+pageup");
+		await term.waitFor(rows => rows.slice(0, 2).some(row => row.includes("prompt 2")));
+		term.press("alt+pageup");
+		await term.waitFor(rows => rows.slice(0, 2).some(row => row.includes("prompt 1")));
+		term.press("alt+pagedown");
+		await term.waitFor(rows => rows.slice(0, 2).some(row => row.includes("prompt 2")));
+	});
+
 	it("reports the wheel and scrolls with it", async () => {
 		term.mouse({ x: 2, y: 2, button: "wheel-up" });
-		await term.waitFor(rows => rows.some(row => row.includes("lines below")));
+		await term.waitFor(rows => !rows.some(row => row.includes("line 39")));
 		term.mouse({ x: 2, y: 2, button: "wheel-down" });
-		await term.waitFor(rows => !rows.some(row => row.includes("lines below")));
+		await term.waitFor(rows => rows.some(row => row.includes("line 39")));
 	});
 
 	it("leaves the whole transcript on the normal screen at exit without erasing scrollback", async () => {

@@ -132,7 +132,7 @@ Core methods:
 - `getActiveTools`, `getAllTools`, `setActiveTools`
 - `getCommands`
 - `getSessionName`, `setSessionName`
-- `setModel`, `getThinkingLevel`, `setThinkingLevel`
+- `setModel`, `getThinkingLevel`, `setThinkingLevel` (`getThinkingLevel()` returns `undefined` when no concrete effort applies, e.g. a model limited to off/auto with `auto` selected — not only before the session is initialized)
 - `getServiceTiers`, `setServiceTier`
 - `registerProvider`, `unregisterProvider`
 - `registerFileWriteFallback`, `registerFileDeleteFallback`
@@ -244,13 +244,13 @@ Four fields let an extension replace parts of an existing provider without redef
 - `generateImage(model, request, options)`: handles image generation for the provider's image models.
 - `webSearch(params)`: runs the grounded search request for the provider's models. Availability checks and labels still come from the model's grounding backend.
 - `discoverModels({ accounts, baseUrl, fetch })`: fetches the provider's model list in place of its built-in discovery request. It runs once with all signed-in accounts (a configured key counts as one account). Return `null` to keep the cached catalog. The built-in discovery still caches the rows, merges them, and applies policy.
-- `rules`: KDL rule directives for every model of the provider, keyed by directive name, as a `provider "<id>" { … }` block would set them (`{ "prompt-perturbation": true }`). Unknown directives and invalid values fail `registerProvider`. A runtime rule wins ties with a bundled rule but still loses to a more specific one, such as a model-scoped rule.
+- `rules`: KDL rule directives for every model of the provider, keyed by directive name, as a `provider "<id>" { … }` block would set them (`{ "requires-native-tools": true }`). Unknown directives and invalid values fail `registerProvider`. A runtime rule wins ties with a bundled rule but still loses to a more specific one, such as a model-scoped rule.
 
 ```ts
 pi.registerProvider("google-generative-ai", {
 	stream: myGeminiStream,
 	generateImage: myImageGenerator,
-	rules: { "prompt-perturbation": true },
+	rules: { "requires-native-tools": true },
 });
 ```
 
@@ -354,8 +354,9 @@ export default function (pi: ExtensionAPI) {
 
 - **What.** The whole list after every committed change to the main session's list, never an operation; tasks carry `content` and `status` only. While a call runs, later lists collapse into the newest. Two calls are skipped: an unchanged list for the backend that just took it, and an empty list while omp has not called a backend yet (`/new` does not start that over).
 - **Sessions.** Key your store by `ctx.sessionManager.getSessionId()`, read before the first `await`. After `/new` the id is new and the empty list follows under it. Calls are not ordered against `session_*` events, and there is no per-session instance: release state on `session_shutdown`.
-- **Failure.** A backend cannot refuse a change and gets no abort signal. A throw, or no answer within the extension handler timeout, is reported as an extension error; omp's list stays as committed and the next change sends the whole list again. After a timeout that next call can start while the old one still runs: a late write must not overwrite a newer list. On exit omp waits for a call still running for as long as a `session_shutdown` handler may take.
-- **Selection.** `todo.backend` holds a registered `id` (letters, digits, `.`, `_`, `-`; `native` is reserved). When several extensions register the selected id, the first one loaded keeps it and the others are reported as extension errors. A selected id no enabled extension registers is reported once as an extension error (again if it is selected again after another id), and todos work as with `native`. A backend selected mid-session gets the list with the next change, or at once when picked in `/settings`.
+- **Failure.** `replace` cannot refuse a change and gets no abort signal. A throw, or no answer within the extension handler timeout, is reported as an extension error; omp's list stays as committed and the next change sends the whole list again. After a timeout that next call can start while the old one still runs: a late write must not overwrite a newer list. On exit omp waits for a call still running for as long as a `session_shutdown` handler may take.
+- **Refusing a `todo` call (`apply`).** The main session's `todo` calls are asked before they commit, eval cells included; `/todo`, RPC, Cursor's built-in todo sync and subagents are not. Return `{ block: true, reason }` to refuse: the call fails as `Todo backend "<id>" did not accept this change: <reason>`, list unchanged; the reason is shown on one line (newlines become spaces, control sequences are removed). A throw is an extension error, like a timeout, and fails the call without refusing it. Writes in `apply` are tolerated; once `apply` settles (on exit at the latest), omp resyncs through `replace`, unchanged list or not. omp commits only on an in-time accept (about 10 s) of an unchanged list in the same session; any other outcome (refusal, throw, timeout, late answer, list, session or backend changed, abort) leaves the list unchanged. A call made or still deciding once the session is closing fails.
+- **Selection.** `todo.backend` holds a registered `id` (letters, digits, `.`, `_`, `-`; `native` is reserved). A missing `replace` or an `apply` that is not a function throws at registration. When several extensions register the selected id, the first one loaded keeps it and the others are reported as extension errors. A selected id no enabled extension registers is reported once as an extension error (again if it is selected again after another id), and todos work as with `native`. A backend selected mid-session gets the list with the next change, or at once when picked in `/settings`.
 - **Scope.** Main session only: subagents and `/tan` clones are not mirrored.
 - **Settings.** `/settings` → Tools → Todos → "Todo Backend" lists `Native` and every backend an enabled extension registers, with its `label` (the `id` when omitted) and `description`. Both are optional; a blank one throws at registration.
 
@@ -438,6 +439,7 @@ Handlers and tool `execute` receive `ctx` with:
 - `localProtocolOptions` (optional calling-session `local://` root mapping for external tool bridges)
 - `getContextUsage()`
 - `getAsyncJobSnapshot()` returns the current session's read-only async-job snapshot, or `null` when no session owns the context
+- `cancelAsyncJob(id)` cancels a running async job (e.g. a background `task` worker) this session owns, like `/jobs kill <id>`; returns `false` when the session owns no running job by that id. To stop them all, loop over `getAsyncJobSnapshot()?.running`
 - `compact(instructionsOrOptions?)`: accepts summary focus text or `CompactOptions`, including one-off `mode: "soft" | "remote" | "snapcompact"`, `onComplete`, `onError`, and `suppressContinuation`
 - `isIdle()`, `hasPendingMessages()`, `abort()`
 - `shutdown()`
@@ -730,9 +732,13 @@ and `/new`. Commands retain their explicit prefill and session-transition action
 
 - `mode_changed` reports `{ previous, state }` (the `ctx.sessionModes.getState()` shape) after a built-in mode change commits, whatever caused it: `ctx.sessionModes.set()`, a slash command, the goal tool, automatic goal completion, or session restore. A session switch reports once, after it settles, with the destination's restored modes. Goal token/time accounting is not part of the state, so it never fires the event. A handler may call `ctx.sessionModes.set()`; a call made while another transition is still running returns `busy` instead of waiting.
 
+### Agent view lifecycle
+
+- `agent_view_changed` reports `{ agentId, previousAgentId, sessionId }` when the interactive TUI switches the session it shows: focusing a subagent, hopping to another one (including its parent), or returning to the main session (explicitly, or because the focused agent was parked, aborted, or removed). `agentId`/`previousAgentId` are `undefined` for the main session, and `sessionId` is the id of the session now shown. It fires on the main session's extensions once the new view is attached, never for a focus request that is superseded or fails, and only in the interactive TUI. Use it to re-scope `ctx.ui.setStatus` content to the agent on screen.
+
 ### Subagent lifecycle
 
-- `before_subagent_spawn` → `{ model?: string | string[]; block?: boolean; reason?: string; note?: string }`. Fires in the parent session exactly once per spawned child (`task`, eval `agent()`, workpool workers), at dispatch before the child resolves its model — never during a frontend's validation preflight, so stateful routers (round-robin, quota) advance once per child. The event carries `agent`, `invocationKind`, `modelRole` (the pre-expansion role alias, when any), the expanded `patterns` core would use, and an optional stable `spawnKey`. A returned `model` replaces the spawn's attempt-ordered patterns while keeping the role identity, so the remaining entries become the child's retry fallback chain; handlers run in extension order and the last returned `model` wins, along with its `note`, which the task UI shows as the spawn's routing reason on live, async, and settled rows. `block: true` refuses the spawn with `reason`. Cancelling the spawn releases an awaiting handler (its result is discarded and pending `ctx.ui` dialogs close) instead of holding the spawn until the handler timeout.
+- `before_subagent_spawn` → `{ model?: string | string[]; block?: boolean; reason?: string; note?: string }`. Fires in the parent session exactly once per spawned child (`task`, eval `agent()`, workpool workers), at dispatch before the child resolves its model — never during a frontend's validation preflight, so stateful routers (round-robin, quota) advance once per child. The event carries `agent`, `invocationKind`, `modelRole` (the pre-expansion role alias, when any), the expanded `patterns` core would use, and an optional stable `spawnKey`; children dispatched by the `task` tool also carry `parentToolCallId` (that `task` call's id) and `itemIndex` (the item's position in `tasks[]`, 0 for the flat shape), so a decision made in `tool_call` can be matched to exactly its spawn. A returned `model` replaces the spawn's attempt-ordered patterns while keeping the role identity, so the remaining entries become the child's retry fallback chain; handlers run in extension order and the last returned `model` wins, along with its `note`, which the task UI shows as the spawn's routing reason on live, async, and settled rows. `block: true` refuses the spawn with `reason`. Cancelling the spawn releases an awaiting handler (its result is discarded and pending `ctx.ui` dialogs close) instead of holding the spawn until the handler timeout.
 
 ### Reliability/runtime signals
 
@@ -1072,7 +1078,8 @@ to remove a widget; setting a key again replaces it in place.
 calls `done`: one root node (it takes focus, so handle keys with its `onKey`) or a
 rows object (keys and pastes arrive at its `handleInput` as raw input).
 `{ overlay: true }` draws it over the transcript, `fullscreen: true` on the
-alternate screen; `onHandle` receives `{ closed, close() }`. The factory's `ui`
+alternate screen; `onHandle` receives `{ closed, close(), isFocused() }`
+(`isFocused()` is true while keyboard focus is on the overlay or a node inside it). The factory's `ui`
 argument offers `requestRender()` (repaint rows objects), `size()` and
 `suspend(run)` (hand the terminal to an external editor while `run` settles).
 

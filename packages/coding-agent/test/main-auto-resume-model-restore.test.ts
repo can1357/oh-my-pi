@@ -162,6 +162,8 @@ async function runScenario(scenario: Scenario): Promise<Observation> {
 			WINDIR: process.env.WINDIR,
 			TZ: "Asia/Tokyo",
 			NO_COLOR: "1",
+			// Test runtime: keeps the child off the OS keychain.
+			PI_TEST_RUNTIME: "1",
 		},
 		stdin: "ignore",
 		stdout: "pipe",
@@ -268,6 +270,8 @@ describe("implicit auto-resume model restoration", () => {
 				OMP_TUI_NATIVE: "0",
 				PI_TUI_NATIVE: "0",
 				AWS_EC2_METADATA_DISABLED: "true",
+				// Test runtime: keeps the children off the OS keychain.
+				PI_TEST_RUNTIME: "1",
 			};
 			await Bun.write(
 				path.join(agentDir, "config.yml"),

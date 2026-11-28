@@ -1,4 +1,4 @@
-import type { Api, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
+import type { Api, AssistantMessage, ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { renderDemotedThinking } from "@oh-my-pi/pi-ai/dialect/demotion";
 import { isFactoryDroidGeminiWire, keepsFactoryGeminiReasoning } from "@oh-my-pi/pi-ai/providers/factory-droid/gemini";
 import { ollamaChatDropsOwnThinking } from "@oh-my-pi/pi-ai/providers/ollama";
@@ -17,7 +17,7 @@ import { replaysSignedReasoningText } from "@oh-my-pi/pi-ai/utils/reasoning-sour
 import { resolveThinkingReplayTokens, type ThinkingReplayTokens } from "@oh-my-pi/pi-catalog/compat/thinking-replay";
 import type { ModelTokenizer } from "@oh-my-pi/pi-catalog/types";
 import * as natives from "@oh-my-pi/pi-natives";
-import { materializeString, stringifyJson } from "@oh-my-pi/pi-utils";
+import { isRecord, materializeString, stringifyJson } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { isEstimateCacheable, messageEstimateVersion } from "./compaction/message-cache";
@@ -172,6 +172,11 @@ function byteLength(text: string): number {
 
 function sumFragments(text: string | string[], perFragment: (t: string) => number): number {
 	return Array.isArray(text) ? text.reduce((sum, t) => sum + perFragment(t), 0) : perFragment(text);
+}
+
+/** Whether `value`, a field of an app role read as data, is an image block a request can carry. */
+function isImageBlock(value: unknown): value is ImageContent {
+	return isRecord(value) && value.type === "image" && typeof value.data === "string";
 }
 
 interface NativeTokenCount {
@@ -417,6 +422,11 @@ export class Tokenizer {
 		return estimateImageTokens(size, detail, this.#frameBilling.rule);
 	}
 
+	/** {@link imageTokens} for an image block a request carries. */
+	#imageBlockTokens(image: ImageContent): number {
+		return this.imageTokens(base64ImageSize(image.data), image.detail);
+	}
+
 	/**
 	 * Whether `message`'s signed reasoning reaches this reader natively: from
 	 * the same model, host and wire, or from another Claude model on the same
@@ -469,25 +479,21 @@ export class Tokenizer {
 	}
 
 	#measureMessage(message: AgentMessage, excludeEncryptedReasoning: boolean, latestTurn: boolean): number {
+		const appTokens = this.#measureAppMessage(message);
+		if (appTokens !== undefined) return appTokens;
 		const fragments: string[] = [];
 		let extra = 0;
-		// Declaration-merged app roles (the coding-agent's bashExecution) are
-		// invisible to this package's union, so the discriminant is read as data.
-		const role: string = message.role;
-		if (role === "bashExecution") {
-			if ("command" in message && typeof message.command === "string") fragments.push(message.command);
-			if ("output" in message && typeof message.output === "string") fragments.push(message.output);
-			return fragments.length === 0 ? 0 : this.countTokens(fragments);
-		}
 
 		switch (message.role) {
 			case "user":
-			case "developer": {
-				// Both roles carry `string | (TextContent | ImageContent)[]` and both are
+			case "developer":
+			case "custom":
+			case "hookMessage": {
+				// All four roles carry `string | (TextContent | ImageContent)[]` and all are
 				// sent to the provider -- convertMessageToLlm handles developer alongside
-				// user -- so they are counted alike. Without the developer case the switch
-				// fell through to `default: return 0`, and the old annotation narrowed the
-				// blocks to text-only, hiding the image charge the toolResult arm applies.
+				// user -- so they are counted alike. Content that is neither (a malformed
+				// persisted custom message) is in no request: the coding-agent's
+				// `convertToLlm` drops it, and it counts 0.
 				const content = message.content;
 				if (typeof content === "string") {
 					fragments.push(content);
@@ -496,7 +502,7 @@ export class Tokenizer {
 						if (block.type === "text" && block.text) {
 							fragments.push(block.text);
 						} else if (block.type === "image") {
-							extra += this.imageTokens(base64ImageSize(block.data), block.detail);
+							extra += this.#imageBlockTokens(block);
 						}
 					}
 				}
@@ -637,8 +643,6 @@ export class Tokenizer {
 				}
 				break;
 			}
-			case "custom":
-			case "hookMessage":
 			case "toolResult": {
 				if (typeof message.content === "string") {
 					fragments.push(message.content);
@@ -647,7 +651,7 @@ export class Tokenizer {
 						if (block.type === "text" && block.text) {
 							fragments.push(block.text);
 						} else if (block.type === "image") {
-							extra += this.imageTokens(base64ImageSize(block.data), block.detail);
+							extra += this.#imageBlockTokens(block);
 						}
 					}
 				}
@@ -676,6 +680,52 @@ export class Tokenizer {
 
 		if (fragments.length === 0) return extra;
 		return extra + this.countTokens(fragments);
+	}
+
+	/**
+	 * Tokens the coding-agent's `convertToLlm` sends for one of its app roles,
+	 * or `undefined` for a role this package's union names. Declaration
+	 * merging keeps those roles out of that union, so the discriminant and
+	 * every field are read as data.
+	 *
+	 * - `bashExecution` and `pythonExecution` (`!` and `$`): one user message
+	 *   rendering the command or code and its output, beside a bash run's
+	 *   terminal images. A run excluded from context (`!!` and `$$`) is in no
+	 *   request and costs nothing.
+	 * - `fileMention` (`@file`): each file's path and content, and each
+	 *   attached image at the rate the user arm charges it.
+	 *
+	 * The rendering's fixed framing (the `Ran` lead-in, code fences, `<file>`
+	 * tags, exit and truncation notices) adds a few tokens per message that
+	 * this leaves out.
+	 */
+	#measureAppMessage(message: AgentMessage): number | undefined {
+		const role: string = message.role;
+		const execution = role === "bashExecution" || role === "pythonExecution";
+		if (!execution && role !== "fileMention") return undefined;
+		if (execution && "excludeFromContext" in message && message.excludeFromContext) return 0;
+		const fragments: string[] = [];
+		let extra = 0;
+		if (execution) {
+			if ("command" in message && typeof message.command === "string") fragments.push(message.command);
+			if ("code" in message && typeof message.code === "string") fragments.push(message.code);
+			if ("output" in message && typeof message.output === "string") fragments.push(message.output);
+			if (role === "bashExecution" && "images" in message && Array.isArray(message.images)) {
+				const images: readonly unknown[] = message.images;
+				for (const image of images) {
+					if (isImageBlock(image)) extra += this.#imageBlockTokens(image);
+				}
+			}
+		} else if ("files" in message && Array.isArray(message.files)) {
+			const files: readonly unknown[] = message.files;
+			for (const file of files) {
+				if (!isRecord(file)) continue;
+				if (typeof file.path === "string") fragments.push(file.path);
+				if (typeof file.content === "string") fragments.push(file.content);
+				if (isImageBlock(file.image)) extra += this.#imageBlockTokens(file.image);
+			}
+		}
+		return fragments.length === 0 ? extra : extra + this.countTokens(fragments);
 	}
 
 	/**

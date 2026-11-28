@@ -1424,7 +1424,9 @@ mod tests {
 		fn pending(p: FsPoll<Box<dyn File>>) -> Box<dyn crate::bash::FsPending<Box<dyn File>>> {
 			match p {
 				FsPoll::Pending(p) => p,
-				FsPoll::Ready(_) => panic!("a one-way FIFO open must not complete synchronously"),
+				FsPoll::Ready(_) => {
+					panic!("a one-way FIFO open with no other end must not complete synchronously")
+				},
 			}
 		}
 
@@ -1438,6 +1440,17 @@ mod tests {
 				}
 				assert!(Instant::now() < deadline, "open never completed");
 				thread::park_timeout(Duration::from_millis(100));
+			}
+		}
+
+		/// The file a write-only open of a FIFO whose reader's open is in
+		/// flight gives, now or once it completes. The reader counts once its
+		/// helper thread is inside `open(2)`; whether it got there first is up
+		/// to the scheduler, and either way the open does not wait.
+		fn opened(p: FsPoll<Box<dyn File>>) -> Box<dyn File> {
+			match p {
+				FsPoll::Ready(r) => r.unwrap(),
+				FsPoll::Pending(mut p) => finish(&mut p),
 			}
 		}
 
@@ -1496,9 +1509,8 @@ mod tests {
 		fn both_ends_of_a_fifo_on_one_thread_never_block() {
 			let path = fifo();
 			let mut r = pending(StdFs::default().open(path.as_bstr(), OpenFlags::READ, 0));
-			let mut w = pending(StdFs::default().open(path.as_bstr(), OpenFlags::WRITE, 0));
+			let mut writer = opened(StdFs::default().open(path.as_bstr(), OpenFlags::WRITE, 0));
 			let mut reader = finish(&mut r);
-			let mut writer = finish(&mut w);
 			assert_eq!(reader.kind(), FileKind::Pipe);
 			let flag = Arc::new(Flag::default());
 			let waker = Waker::from(Arc::clone(&flag));

@@ -89,7 +89,7 @@ Most FS/bash tools resolve these; path selectors: `read` docs.{{#has tools "read
 
 {{#if mountedCommands.length}}
 # Tool Commands
-The commands documented below (not the Tool Inventory above) run inside `{{toolRefs.bash}}`: `<tool> <positional> [--flag value]`; `<tool> --help` prints usage derived from its schema.
+The commands documented below (not the Tool Inventory above) run inside `{{toolRefs.bash}}`: `<tool-name> <positional> [--flag value]`; `<tool-name> --help` prints usage derived from its schema.
 Raw JSON arguments object: `-j '<json>'`, `@file`, or `-` (stdin); bad arguments exit 2 with a usage hint.
 {{toolCommandDocs}}
 {{/if}}
@@ -126,14 +126,14 @@ Every turn costs seconds: batch independent reads, searches, and edits into the 
 {{#if encourageEdits}}
 {{#has tools "edit"}}
 <critical>
-File edits: MUST use `{{toolRefs.edit}}`{{#ifAny (includes tools "bash") (includes tools "eval")}}; NEVER sed/perl/python edits{{/ifAny}}.
+Content-addressed file edits: MUST use `{{toolRefs.edit}}`{{#ifAny (includes tools "bash") (includes tools "eval")}}; NEVER sed/perl/python for them. Mechanical bulk or encoding transforms `{{toolRefs.edit}}` cannot express (one pattern across many files, line endings, encoding, whitespace): scripts allowed{{/ifAny}}.
 </critical>
 {{/has}}
 {{/if}}
 
 {{#if autoQaEnabled}}
 <critical>
-Automated QA: any tool output inconsistent with the described behavior for its parameters → run `report_issue '<tool>: <concise description>'`. False positives fine.
+Automated QA: any tool output inconsistent with the described behavior for its parameters → run `report_issue '<tool-name>: <concise description>'`. False positives fine.
 </critical>
 {{/if}}
 

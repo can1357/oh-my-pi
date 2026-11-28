@@ -38,7 +38,7 @@ import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMeta
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
 const EMPTY_STRING_ARRAYS_RECORD: Record<string, string[]> = {};
 const EMPTY_STRING_RECORD: Record<string, string> = {};
-const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["wait"];
+const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["wait", "vibe_wait"];
 
 /** Scope of the resume picker's current-folder list. */
 export const cfgSessionWorktreeScope = register({
@@ -379,7 +379,7 @@ export const cfgModelToolCallLoopGuardEnabled = register({
 		tab: "model",
 		group: "Thinking",
 		label: "Tool-Call Loop Guard",
-		description: "Detect consecutive identical tool calls across turns and inject a corrective steer",
+		description: "Detect repeated tool-call patterns across turns and inject a corrective steer",
 	},
 });
 
@@ -391,7 +391,7 @@ export const cfgModelToolCallLoopGuardThreshold = register({
 		tab: "model",
 		group: "Thinking",
 		label: "Tool-Call Loop Threshold",
-		description: "Consecutive identical tool calls required before the corrective steer is injected",
+		description: "Consecutive repeated tool-call patterns required before the corrective steer is injected",
 	},
 });
 
@@ -1614,6 +1614,19 @@ export const cfgCodexResetsSalvageHorizonHours = register({
 	},
 });
 
+export const cfgCodexResetsExpirySalvage = register({
+	id: "codexResets.expirySalvage",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "providers",
+		group: "Services",
+		label: "Codex Reset Expiry Salvage",
+		description:
+			"Spend saved Codex resets that are about to expire, even when no chat window is exhausted (a full reset forfeits any remaining weekly headroom and restarts the window). Off: auto-redeem only restores an exhausted, blocked account, and expiring credits are left to lapse, including the 5-minute last chance.",
+	},
+});
+
 /** Codex saved-reset auto-redeem policy (`codexResets.*`). */
 export const cfgCodexResets = combine({
 	autoRedeem5h: cfgCodexResetsAutoRedeem5h,
@@ -1621,6 +1634,7 @@ export const cfgCodexResets = combine({
 	minBlockedMinutes: cfgCodexResetsMinBlockedMinutes,
 	keepCredits: cfgCodexResetsKeepCredits,
 	salvageHorizonHours: cfgCodexResetsSalvageHorizonHours,
+	expirySalvage: cfgCodexResetsExpirySalvage,
 });
 
 /** Whether automatic reset redemption asks first, spends, or remains disabled. */

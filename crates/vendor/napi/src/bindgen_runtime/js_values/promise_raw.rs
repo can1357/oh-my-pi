@@ -406,6 +406,7 @@ where
   U: ToNapiValue,
   Cb: FnOnce(CallbackContext<T>) -> Result<U>,
 {
+  let _napi_native_borrow_barrier = crate::bindgen_runtime::NativeBorrowBarrier::new();
   let mut callback_values = [ptr::null_mut()];
   let mut rust_cb = ptr::null_mut();
   check_status!(
@@ -467,6 +468,7 @@ where
   U: ToNapiValue,
   Cb: FnOnce(CallbackContext<E>) -> Result<U>,
 {
+  let _napi_native_borrow_barrier = crate::bindgen_runtime::NativeBorrowBarrier::new();
   let mut callback_values = [ptr::null_mut(); 1];
   let mut rust_cb = ptr::null_mut();
   check_status!(
@@ -526,6 +528,7 @@ where
   U: ToNapiValue,
   Cb: FnOnce(Env) -> Result<U>,
 {
+  let _napi_native_borrow_barrier = crate::bindgen_runtime::NativeBorrowBarrier::new();
   let mut rust_cb = ptr::null_mut();
   check_status!(
     unsafe {

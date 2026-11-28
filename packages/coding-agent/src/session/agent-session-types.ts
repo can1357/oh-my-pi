@@ -599,6 +599,7 @@ export interface RoleModelCycleResult {
 
 import type { ResolvedRoleModel } from "../modes/view-model/overlays/model-picker";
 export type { ResolvedRoleModel } from "../modes/view-model/overlays/model-picker";
+import type { AiuTotals } from "./aiu-billing";
 
 /** Resolvable role models and the currently active index. */
 export interface RoleModelCycle {
@@ -643,6 +644,8 @@ export interface SessionStats {
 		committedCost: number;
 		acuCost: number;
 	};
+	/** Server-reported AI credits of the session and its subagent tree; absent until a call reported or missed one. */
+	aiu?: AiuTotals;
 	/** Concrete provider-routed model ids with finalized turn counts. */
 	routedModels?: Record<string, number>;
 	/** Failed edits by the engine's `errorKind`. */
