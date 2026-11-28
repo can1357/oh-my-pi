@@ -125,7 +125,7 @@ export interface FrameWriterOptions {
 	 * replays history instead of trusting the damaged copy.
 	 */
 	readonly growsBeforeResize?: () => boolean;
-	/** Default `preserve`. */
+	/** Initial {@link FrameWriter.setResizeScrollback} policy. Default `preserve`. */
 	readonly resizeScrollback?: ResizeScrollback;
 	/** Quiet window ending a resize burst, in ms. Default 100. */
 	readonly settleMs?: number;
@@ -268,12 +268,19 @@ export class FrameWriter {
 	#pushed: string[] = [];
 	/** Where the cursor report after that shrink must find the cursor for `#pushed` to hold; undefined once checked. */
 	#pushedCursor: number | undefined;
+	#resizeScrollback: ResizeScrollback;
 
 	constructor(options: FrameWriterOptions) {
 		this.#options = options;
 		this.#sink = options.sink;
 		this.#columns = Math.max(1, options.columns);
 		this.#rows = Math.max(1, options.rows);
+		this.#resizeScrollback = options.resizeScrollback ?? "preserve";
+	}
+
+	/** Retained-history policy for resizes that settle from now on (`tui.resizeScrollback`, changeable live). */
+	setResizeScrollback(mode: ResizeScrollback): void {
+		this.#resizeScrollback = mode;
 	}
 
 	get columns(): number {
@@ -391,7 +398,7 @@ export class FrameWriter {
 	/** Whether a settled width change replays history (the policy rebuilds or appends it, not in place). */
 	replaysOnWidthChange(): boolean {
 		if (this.#options.inPlaceResize?.() || !(this.#options.canReplay?.() ?? false)) return false;
-		return (this.#options.hostOwnsGrid?.() ?? false) || (this.#options.resizeScrollback ?? "preserve") !== "preserve";
+		return (this.#options.hostOwnsGrid?.() ?? false) || this.#resizeScrollback !== "preserve";
 	}
 
 	/** Write bytes that bypass frame diffing (protocol messages). */
@@ -874,7 +881,7 @@ export class FrameWriter {
 		const widthChanged = tx.columns !== this.#columns;
 		const ownsGrid = this.#options.hostOwnsGrid?.() ?? false;
 		const canReplay = this.#options.canReplay?.() ?? false;
-		const mode = this.#options.resizeScrollback ?? "preserve";
+		const mode = this.#resizeScrollback;
 		if (this.#alt && this.#fullscreen && !this.#inlineWritten) {
 			// Only fullscreen frames so far: nothing of ours on the normal screen to rebuild or re-anchor.
 			// The first inline frame (the shutdown flush) starts wherever the cursor is.
@@ -966,7 +973,7 @@ export class FrameWriter {
 			tx?.grew &&
 			tx.full &&
 			this.#topLo + stale < height &&
-			(this.#options.resizeScrollback ?? "preserve") === "rebuild" &&
+			this.#resizeScrollback === "rebuild" &&
 			(this.#options.canReplay?.() ?? false) &&
 			(this.#options.growsBeforeResize?.() ?? false)
 		) {

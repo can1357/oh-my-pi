@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import {
@@ -9,6 +9,8 @@ import {
 	TempDir,
 	VERSION,
 } from "@oh-my-pi/pi-utils";
+import * as utils from "@oh-my-pi/pi-utils";
+import * as discovery from "../../src/tools/browser/relay/discovery";
 import { syncRelayAfterVerifiedUpdate } from "../../src/cli/update-cli";
 import { findFreeCdpPort } from "../../src/tools/browser/attach";
 import {
@@ -48,6 +50,23 @@ afterEach(async () => {
 });
 
 describe("browser relay install registry", () => {
+	it("discovers a relay only when changed install files need a reload", async () => {
+		const defaultDir = home.join("extension");
+		const registry = spyOn(utils, "getBrowserRelayInstallRegistryFile").mockReturnValue(registryFile);
+		const discover = spyOn(discovery, "discoverRelayEndpoints").mockResolvedValue([]);
+		try {
+			expect(await syncRelayInstalls({ defaultDir, mode: "startup" })).toEqual([]);
+			expect(discover).not.toHaveBeenCalled();
+			await installRelayExtension(defaultDir, { defaultDir });
+			expect(discover).toHaveBeenCalledTimes(1);
+			await installRelayExtension(defaultDir, { defaultDir });
+			expect(discover).toHaveBeenCalledTimes(1);
+		} finally {
+			discover.mockRestore();
+			registry.mockRestore();
+		}
+	});
+
 	it("uses the same registry path across omp profiles", () => {
 		const previous = getActiveProfile();
 		try {

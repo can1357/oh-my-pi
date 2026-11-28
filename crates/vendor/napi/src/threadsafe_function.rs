@@ -512,6 +512,44 @@ impl<
   }
 }
 
+/// Boxes `data` and queues it on the threadsafe function behind `handle`.
+///
+/// Returns `None` without calling Node-API when the threadsafe function was aborted, otherwise the
+/// status of `napi_call_threadsafe_function`.
+///
+/// Node-API only takes ownership of the data pointer when the call succeeds. On any other
+/// status (`napi_queue_full`, `napi_closing`, ...) nothing was queued and the caller still owns
+/// the data, so it is reclaimed here instead of being leaked. Data that is not queued is dropped
+/// on the calling thread after the `aborted` read guard is released, because its destructors are
+/// user code that may lock the same handle again (for example by dropping a clone of this
+/// threadsafe function that calls `abort`).
+///
+/// # Safety
+///
+/// `handle` must belong to a threadsafe function whose `call_js_cb` reads its data as `Box<Data>`.
+unsafe fn call_threadsafe_function_with_data<Data>(
+  handle: &ThreadsafeFunctionHandle,
+  data: Data,
+  mode: ThreadsafeFunctionCallMode,
+) -> Option<sys::napi_status> {
+  let mut rejected = None;
+  let status = handle.with_read_aborted(|aborted| {
+    if aborted {
+      rejected = Some(data);
+      return None;
+    }
+    let data_ptr = Box::into_raw(Box::new(data));
+    let status =
+      unsafe { sys::napi_call_threadsafe_function(handle.get_raw(), data_ptr.cast(), mode.into()) };
+    if status != sys::Status::napi_ok {
+      rejected = Some(*unsafe { Box::from_raw(data_ptr) });
+    }
+    Some(status)
+  });
+  drop(rejected);
+  status
+}
+
 impl<
     T: 'static,
     Return: FromNapiValue,
@@ -524,27 +562,18 @@ impl<
   /// See [napi_call_threadsafe_function](https://nodejs.org/api/n-api.html#n_api_napi_call_threadsafe_function)
   /// for more information.
   pub fn call(&self, value: Result<T, ErrorStatus>, mode: ThreadsafeFunctionCallMode) -> Status {
-    self.handle.with_read_aborted(|aborted| {
-      if aborted {
-        return Status::Closing;
-      }
-
-      unsafe {
-        sys::napi_call_threadsafe_function(
-          self.handle.get_raw(),
-          Box::into_raw(Box::new(value.map(|data| {
-            ThreadsafeFunctionCallJsBackData {
-              data,
-              call_variant: ThreadsafeFunctionCallVariant::Direct,
-              callback: Box::new(|_d: Result<Return>, _| Ok(())),
-            }
-          })))
-          .cast(),
-          mode.into(),
-        )
-      }
-      .into()
-    })
+    unsafe {
+      call_threadsafe_function_with_data(
+        &self.handle,
+        value.map(|data| ThreadsafeFunctionCallJsBackData {
+          data,
+          call_variant: ThreadsafeFunctionCallVariant::Direct,
+          callback: Box::new(|_d: Result<Return>, _| Ok(())),
+        }),
+        mode,
+      )
+    }
+    .map_or(Status::Closing, Status::from)
   }
 
   /// Call the ThreadsafeFunction, and handle the return value with a callback
@@ -554,62 +583,43 @@ impl<
     mode: ThreadsafeFunctionCallMode,
     cb: F,
   ) -> Status {
-    self.handle.with_read_aborted(|aborted| {
-      if aborted {
-        return Status::Closing;
-      }
-
-      unsafe {
-        sys::napi_call_threadsafe_function(
-          self.handle.get_raw(),
-          Box::into_raw(Box::new(value.map(|data| {
-            ThreadsafeFunctionCallJsBackData {
-              data,
-              call_variant: ThreadsafeFunctionCallVariant::WithCallback,
-              callback: Box::new(move |d: Result<Return>, env: Env| cb(d, env)),
-            }
-          })))
-          .cast(),
-          mode.into(),
-        )
-      }
-      .into()
-    })
+    unsafe {
+      call_threadsafe_function_with_data(
+        &self.handle,
+        value.map(|data| ThreadsafeFunctionCallJsBackData {
+          data,
+          call_variant: ThreadsafeFunctionCallVariant::WithCallback,
+          callback: Box::new(move |d: Result<Return>, env: Env| cb(d, env)),
+        }),
+        mode,
+      )
+    }
+    .map_or(Status::Closing, Status::from)
   }
 
   /// Call the ThreadsafeFunction, and handle the return value with in `async` way
   pub async fn call_async(&self, value: Result<T, ErrorStatus>) -> Result<Return> {
     let (sender, receiver) = channel::<Result<Return>>();
 
-    self.handle.with_read_aborted(|aborted| {
-      if aborted {
-        return Err(crate::Error::from_status(Status::Closing));
-      }
-
-      check_status!(
-        unsafe {
-          sys::napi_call_threadsafe_function(
-            self.handle.get_raw(),
-            Box::into_raw(Box::new(value.map(|data| {
-              ThreadsafeFunctionCallJsBackData {
-                data,
-                call_variant: ThreadsafeFunctionCallVariant::WithCallback,
-                callback: Box::new(move |d: Result<Return>, _| {
-                  sender
-                    .send(d)
-                    // The only reason for send to return Err is if the receiver isn't listening
-                    // Not hiding the error would result in a napi_fatal_error call, it's safe to ignore it instead.
-                    .or(Ok(()))
-                }),
-              }
-            })))
-            .cast(),
-            ThreadsafeFunctionCallMode::NonBlocking.into(),
-          )
-        },
-        "Threadsafe function call_async failed"
+    let status = unsafe {
+      call_threadsafe_function_with_data(
+        &self.handle,
+        value.map(|data| ThreadsafeFunctionCallJsBackData {
+          data,
+          call_variant: ThreadsafeFunctionCallVariant::WithCallback,
+          callback: Box::new(move |d: Result<Return>, _| {
+            sender
+              .send(d)
+              // The only reason for send to return Err is if the receiver isn't listening
+              // Not hiding the error would result in a napi_fatal_error call, it's safe to ignore it instead.
+              .or(Ok(()))
+          }),
+        }),
+        ThreadsafeFunctionCallMode::NonBlocking,
       )
-    })?;
+    }
+    .ok_or_else(|| crate::Error::from_status(Status::Closing))?;
+    check_status!(status, "Threadsafe function call_async failed")?;
     receiver.await.map_err(|_| {
       crate::Error::new(
         Status::GenericFailure,
@@ -639,25 +649,18 @@ impl<
   /// See [napi_call_threadsafe_function](https://nodejs.org/api/n-api.html#n_api_napi_call_threadsafe_function)
   /// for more information.
   pub fn call(&self, value: T, mode: ThreadsafeFunctionCallMode) -> Status {
-    self.handle.with_read_aborted(|aborted| {
-      if aborted {
-        return Status::Closing;
-      }
-
-      unsafe {
-        sys::napi_call_threadsafe_function(
-          self.handle.get_raw(),
-          Box::into_raw(Box::new(ThreadsafeFunctionCallJsBackData {
-            data: value,
-            call_variant: ThreadsafeFunctionCallVariant::Direct,
-            callback: Box::new(|_d: Result<Return>, _: Env| Ok(())),
-          }))
-          .cast(),
-          mode.into(),
-        )
-      }
-      .into()
-    })
+    unsafe {
+      call_threadsafe_function_with_data(
+        &self.handle,
+        ThreadsafeFunctionCallJsBackData {
+          data: value,
+          call_variant: ThreadsafeFunctionCallVariant::Direct,
+          callback: Box::new(|_d: Result<Return>, _: Env| Ok(())),
+        },
+        mode,
+      )
+    }
+    .map_or(Status::Closing, Status::from)
   }
 
   /// Call the ThreadsafeFunction, and handle the return value with a callback
@@ -667,25 +670,18 @@ impl<
     mode: ThreadsafeFunctionCallMode,
     cb: F,
   ) -> Status {
-    self.handle.with_read_aborted(|aborted| {
-      if aborted {
-        return Status::Closing;
-      }
-
-      unsafe {
-        sys::napi_call_threadsafe_function(
-          self.handle.get_raw(),
-          Box::into_raw(Box::new(ThreadsafeFunctionCallJsBackData {
-            data: value,
-            call_variant: ThreadsafeFunctionCallVariant::WithCallback,
-            callback: Box::new(cb),
-          }))
-          .cast(),
-          mode.into(),
-        )
-      }
-      .into()
-    })
+    unsafe {
+      call_threadsafe_function_with_data(
+        &self.handle,
+        ThreadsafeFunctionCallJsBackData {
+          data: value,
+          call_variant: ThreadsafeFunctionCallVariant::WithCallback,
+          callback: Box::new(cb),
+        },
+        mode,
+      )
+    }
+    .map_or(Status::Closing, Status::from)
   }
 
   /// Call the ThreadsafeFunction in an `async` way and return the JavaScript
@@ -698,32 +694,27 @@ impl<
   pub async fn call_async(&self, value: T) -> Result<Return> {
     let (sender, receiver) = channel::<Return>();
 
-    self.handle.with_read_aborted(|aborted| {
-      if aborted {
-        return Err(crate::Error::from_status(Status::Closing));
-      }
-
-      check_status!(unsafe {
-        sys::napi_call_threadsafe_function(
-          self.handle.get_raw(),
-          Box::into_raw(Box::new(ThreadsafeFunctionCallJsBackData {
-            data: value,
-            call_variant: ThreadsafeFunctionCallVariant::WithCallback,
-            callback: Box::new(move |d, _| {
-              d.and_then(|d| {
-                sender
-                  .send(d)
-                  // The only reason for send to return Err is if the receiver isn't listening
-                  // Not hiding the error would result in a napi_fatal_error call, it's safe to ignore it instead.
-                  .or(Ok(()))
-              })
-            }),
-          }))
-          .cast(),
-          ThreadsafeFunctionCallMode::NonBlocking.into(),
-        )
-      })
-    })?;
+    let status = unsafe {
+      call_threadsafe_function_with_data(
+        &self.handle,
+        ThreadsafeFunctionCallJsBackData {
+          data: value,
+          call_variant: ThreadsafeFunctionCallVariant::WithCallback,
+          callback: Box::new(move |d, _| {
+            d.and_then(|d| {
+              sender
+                .send(d)
+                // The only reason for send to return Err is if the receiver isn't listening
+                // Not hiding the error would result in a napi_fatal_error call, it's safe to ignore it instead.
+                .or(Ok(()))
+            })
+          }),
+        },
+        ThreadsafeFunctionCallMode::NonBlocking,
+      )
+    }
+    .ok_or_else(|| crate::Error::from_status(Status::Closing))?;
+    check_status!(status)?;
 
     receiver
       .await
@@ -744,33 +735,25 @@ impl<
   pub async fn call_async_catch(&self, value: T) -> Result<Return> {
     let (sender, receiver) = channel::<Result<Return>>();
 
-    self.handle.with_read_aborted(|aborted| {
-      if aborted {
-        return Err(crate::Error::from_status(Status::Closing));
-      }
-
-      check_status!(
-        unsafe {
-          sys::napi_call_threadsafe_function(
-            self.handle.get_raw(),
-            Box::into_raw(Box::new(ThreadsafeFunctionCallJsBackData {
-              data: value,
-              call_variant: ThreadsafeFunctionCallVariant::WithCallback,
-              callback: Box::new(move |d: Result<Return>, _| {
-                sender
-                  .send(d)
-                  // The only reason for send to return Err is if the receiver isn't listening
-                  // Not hiding the error would result in a napi_fatal_error call, it's safe to ignore it instead.
-                  .or(Ok(()))
-              }),
-            }))
-            .cast(),
-            ThreadsafeFunctionCallMode::NonBlocking.into(),
-          )
+    let status = unsafe {
+      call_threadsafe_function_with_data(
+        &self.handle,
+        ThreadsafeFunctionCallJsBackData {
+          data: value,
+          call_variant: ThreadsafeFunctionCallVariant::WithCallback,
+          callback: Box::new(move |d: Result<Return>, _| {
+            sender
+              .send(d)
+              // The only reason for send to return Err is if the receiver isn't listening
+              // Not hiding the error would result in a napi_fatal_error call, it's safe to ignore it instead.
+              .or(Ok(()))
+          }),
         },
-        "Threadsafe function call_async_catch failed"
+        ThreadsafeFunctionCallMode::NonBlocking,
       )
-    })?;
+    }
+    .ok_or_else(|| crate::Error::from_status(Status::Closing))?;
+    check_status!(status, "Threadsafe function call_async_catch failed")?;
     receiver.await.map_err(|_| {
       crate::Error::new(
         Status::GenericFailure,
@@ -934,6 +917,7 @@ unsafe extern "C" fn call_js_cb<
     return;
   }
 
+  let _napi_native_borrow_barrier = crate::bindgen_runtime::NativeBorrowBarrier::new();
   let callback: &mut R = unsafe { Box::leak(Box::from_raw(context.cast())) };
   let val = unsafe {
     if CalleeHandled {

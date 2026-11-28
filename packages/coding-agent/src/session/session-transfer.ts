@@ -26,13 +26,7 @@ import {
 	TempDir,
 	VERSION,
 } from "@oh-my-pi/pi-utils";
-import {
-	type ArchiveMemberContent,
-	ArchiveError,
-	formatArchivePathForError,
-	readArchiveEntries,
-	writeArchive,
-} from "@oh-my-pi/pi-utils/ar";
+import type * as Archive from "@oh-my-pi/pi-utils/ar";
 import transferArrivedTemplate from "../prompts/session/transfer-arrived.md" with { type: "text" };
 import transferDepartedTemplate from "../prompts/session/transfer-departed.md" with { type: "text" };
 import transferStaleForkTemplate from "../prompts/session/transfer-stale-fork.md" with { type: "text" };
@@ -252,8 +246,9 @@ async function listFilesRecursive(dir: string): Promise<string[]> {
 /** Write a tar to a sibling staging file and rename it over `target`, so a failure leaves no partial archive. */
 async function writeArchiveAtomically(
 	target: string,
-	members: readonly (readonly [string, ArchiveMemberContent])[],
+	members: readonly (readonly [string, Archive.ArchiveMemberContent])[],
 ): Promise<void> {
+	const { writeArchive }: typeof Archive = require("@oh-my-pi/pi-utils/ar");
 	const staging = `${target}.${Snowflake.next()}.tmp`;
 	try {
 		await writeArchive(staging, "tar", members);
@@ -295,7 +290,7 @@ export async function packSession(sessionFile: string, outPath: string): Promise
 			cwd: header.cwd,
 			omp: VERSION,
 		};
-		const members: (readonly [string, ArchiveMemberContent])[] = [
+		const members: (readonly [string, Archive.ArchiveMemberContent])[] = [
 			[MANIFEST_MEMBER, `${JSON.stringify(manifest, null, 2)}\n`],
 			[SESSION_MEMBER, journal],
 		];
@@ -381,6 +376,7 @@ function parseManifest(bytes: Uint8Array, archive: string): SessionArchiveManife
  */
 async function readSessionArchive(archive: string): Promise<SessionArchiveContents> {
 	await requireFile(archive, "Archive");
+	const { readArchiveEntries, ArchiveError, formatArchivePathForError }: typeof Archive = require("@oh-my-pi/pi-utils/ar");
 	let members: Map<string, Uint8Array>;
 	try {
 		members = await readArchiveEntries(

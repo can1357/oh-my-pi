@@ -2,6 +2,10 @@
 
 use super::*;
 
+/// `SIGPIPE`'s number; libc spells it on Unix only, and perl's death
+/// status (128 + 13) is the same everywhere.
+pub(super) const SIGPIPE: i32 = 13;
+
 #[cfg(target_os = "macos")]
 const DEFAULT_INC: &[&str] = &[
 	"/Library/Perl/5.34/darwin-thread-multi-2level", "/Library/Perl/5.34",
@@ -70,13 +74,13 @@ impl<'h> Interp<'h> {
 			active_hints: Rc::new(default_hints.clone()), compile_hints: default_hints.clone(), default_hints,
 			parse_scopes: Vec::new(), compile_pads: Vec::new(), compile_pad_base: 0,
 			use_hints: FxHashMap::default(), captures: FxHashMap::default(), imported_symbols: FxHashSet::default(),
-			package: Rc::from("main"), loc, scopes: vec![Scope::default()], scope_pool: Vec::new(), scope_stacks: Vec::new(),
+			package: Rc::from("main"), loc, scopes: Scopes { slots: vec![Scope::default()], depth: 1 }, scope_base: 0,
 			lexicals: Default::default(), topics: Vec::new(), persistent: Rc::default(),
-			frames: Vec::new(), active_subs: Vec::new(), eval_contexts: Vec::new(), sub_depth: Default::default(),
+			frames: Vec::new(), active_subs: Vec::new(), prefix_arg: None, eval_contexts: Vec::new(), sub_depth: Default::default(),
 			perl_calls: Vec::new(), arg_arrays: Vec::new(),
 			tail_args: None, eval_serial: 0, in_given: 0, die_misc_warnings: false, given_value: None, given_cx: Cx::Void, in_when: 0,
 			hole: new_sv(Value::Undef), programs: Vec::new(), pending: None, depth: 0, compile_depth: 0, compile_failure: None, compile_interrupted: false, compile_status: 255,
-			in_die: false, in_warn: false, overloads: FxHashMap::default(), in_overload: 0, in_constant: false,
+			in_die: false, in_warn: false, in_sigpipe: false, vanished: false, overloads: FxHashMap::default(), in_overload: 0, in_constant: false,
 			objects: Default::default(), destroying: Default::default(), destroy_draining: false,
 			loading: FxHashSet::default(), unitchecks: Vec::new(), checks: Vec::new(), inits: Vec::new(), ends: Vec::new(), exit_hooks: Vec::new(),
 		};
@@ -313,12 +317,31 @@ impl<'h> Interp<'h> {
 		Some(io)
 	}
 
-	/// Flush open handles before starting a child process.
-	pub fn flush_outputs(&mut self) {
+	/// Flush open handles (before starting a child process, and at exit);
+	/// whether a flush found a pipe or socket nobody reads.
+	pub fn flush_outputs(&mut self) -> bool {
 		self.sync_selected();
+		let mut broken = false;
 		for io in self.handles.iter().filter_map(std::rc::Weak::upgrade) {
-			if let Ok(mut handle) = io.try_borrow_mut() { let _ = handle.flush(); }
+			if let Ok(mut handle) = io.try_borrow_mut() && let Err(err) = handle.flush() {
+				broken |= err.kind() == std::io::ErrorKind::BrokenPipe;
+			}
 		}
+		broken
+	}
+
+	/// Deliver `SIGPIPE` when the write that failed with `err` found a pipe
+	/// or socket nobody reads, as the kernel does to the writing process:
+	/// perl's default action ends the program (status 141), `IGNORE` leaves
+	/// the write's `EPIPE`, and a handler runs before the write returns.
+	/// While a handler runs the signal is blocked, so a write of its own to
+	/// the same pipe only fails.
+	pub fn broken_pipe(&mut self, err: &std::io::Error) -> PResult<()> {
+		if err.kind() != std::io::ErrorKind::BrokenPipe || self.in_sigpipe { return Ok(()); }
+		self.in_sigpipe = true;
+		let result = self.raise_signal("PIPE", SIGPIPE);
+		self.in_sigpipe = false;
+		result
 	}
 
 	/// Materialize `%ENV` as native byte pairs for a child process.
@@ -648,6 +671,7 @@ impl<'h> Interp<'h> {
 				Ok(())
 			} else {
 				if name == "ALRM" { self.put_stderr(&PStr::from_bytes(b"Alarm clock\n")); }
+				self.vanish();
 				Err(Flow::Exit(128i32.saturating_add(number)))
 			};
 		}
@@ -656,6 +680,17 @@ impl<'h> Interp<'h> {
 		let result = self.invoke_handler(handler, Value::str(name));
 		self.set_errno_code(errno);
 		result
+	}
+
+	/// End the program the way a process vanishes (killed by a signal,
+	/// replaced by `exec`, cancelled by the shell); the caller's flow carries
+	/// the status. No END block, destructor or exit hook runs, and output
+	/// still buffered is lost before any later close or drop can flush it.
+	pub fn vanish(&mut self) {
+		self.vanished = true;
+		for io in self.handles.iter().filter_map(std::rc::Weak::upgrade) {
+			if let Ok(mut handle) = io.try_borrow_mut() { handle.discard_output(); }
+		}
 	}
 
 	fn invoke_handler(&mut self, handler: Value, arg: Value) -> PResult<()> {

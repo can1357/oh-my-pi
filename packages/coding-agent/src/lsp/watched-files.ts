@@ -20,7 +20,7 @@ import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { DirectoryChangeAction, type DirectoryChanges, DirectoryWatcher } from "@oh-my-pi/pi-natives";
 import { hasFsCode, logger, relativePathWithinNormalizedRoot } from "@oh-my-pi/pi-utils";
-import { mapWithConcurrencyLimit } from "../task/parallel";
+import { mapWithConcurrencyLimit, Semaphore } from "../task/parallel";
 import { FileChangeType, type FileEvent } from "./types";
 import { fileToUri, uriToFile } from "./uri";
 
@@ -804,7 +804,6 @@ export class WatchedFilesForwarder {
 						wanted.add(foldCase(dir));
 						watchOne(dir);
 					},
-					files: false,
 				});
 				for (const [key, watcher] of watchers) {
 					if (wanted.has(key)) continue;
@@ -814,7 +813,7 @@ export class WatchedFilesForwarder {
 			},
 		};
 		watchOne(root);
-		return { watch, armed: this.#walk(root, true, { onDirectory: watchOne, files: false }).then(() => {}) };
+		return { watch, armed: this.#walk(root, true, { onDirectory: watchOne }) };
 	}
 
 	/** One `fs.watch` event of `dir`, part of the watch of `root`; `known`: the entry is a watched directory. */
@@ -858,9 +857,17 @@ export class WatchedFilesForwarder {
 			while (watch.lostSince !== undefined && !this.#closed) {
 				const from = watch.lostSince;
 				watch.lostSince = undefined;
-				await this.#rescan(dir, recursive, from).catch(error => {
-					logger.debug("LSP watched-files rescan failed", { dir, error: String(error) });
-				});
+				const started = Date.now();
+				await this.#rescan(dir, recursive, from).then(
+					({ walked, reported }) =>
+						logger.debug("LSP watched-files rescan finished", {
+							dir,
+							walked,
+							reported,
+							ms: Date.now() - started,
+						}),
+					error => logger.debug("LSP watched-files rescan failed", { dir, error: String(error) }),
+				);
 			}
 			watch.rescanning = false;
 		})();
@@ -870,69 +877,89 @@ export class WatchedFilesForwarder {
 	 * Report the files below `dir` modified since `since` (0: every file, as
 	 * created, without a stat). `renamedFrom`: `dir` was moved from there, so
 	 * each file's old path is reported deleted. `onDirectory` sees every
-	 * directory walked, before it is read.
+	 * directory walked, before it is read. Files are checked directory by
+	 * directory as the walk reads them: a base holding millions of files never
+	 * has their paths or stats in memory at once (#20853). Settles with how
+	 * many files were walked and how many of them were recorded as changed.
 	 */
 	async #rescan(
 		dir: string,
 		recursive: boolean,
 		since: number,
 		options: { renamedFrom?: string; onDirectory?: (dir: string) => void } = {},
-	): Promise<void> {
-		const files = await this.#walk(dir, recursive, { onDirectory: options.onDirectory });
-		if (this.#closed) return;
-		const { renamedFrom } = options;
-		if (since === 0) {
-			for (const target of files) {
-				if (renamedFrom) this.#record(path.join(renamedFrom, path.relative(dir, target)), true, false);
-				if (this.#wantedKinds(target) !== 0) this.#record(target, false, true, undefined, true);
+	): Promise<{ walked: number; reported: number }> {
+		const { renamedFrom, onDirectory } = options;
+		const stats = new Semaphore(RESCAN_STAT_CONCURRENCY);
+		let walked = 0;
+		let reported = 0;
+		const statChanged = async (target: string): Promise<void> => {
+			await stats.acquire();
+			let stat: fs.Stats | undefined;
+			try {
+				stat = await fs.promises.lstat(target);
+			} catch {
+				return;
+			} finally {
+				stats.release();
 			}
-			return;
-		}
-		const targets = files.filter(target => this.#wantedKinds(target) !== 0);
-		const { results: stats } = await mapWithConcurrencyLimit(targets, RESCAN_STAT_CONCURRENCY, target =>
-			fs.promises.lstat(target).catch(() => undefined),
-		);
-		if (this.#closed) return;
-		for (const [index, target] of targets.entries()) {
-			const stat = stats[index];
-			if (!stat || stat.mtimeMs < since) continue;
+			if (this.#closed || stat.mtimeMs < since) return;
 			// Without a birth time (some Linux file systems) the file may be new: report it as created,
 			// which a server handles for a file it already knew, unlike a change to one it never saw.
 			this.#record(target, stat.birthtimeMs > 0 ? stat.birthtimeMs < since : undefined, true, undefined, true);
-		}
+			reported++;
+		};
+		await this.#walk(dir, recursive, {
+			onDirectory,
+			onFiles: async files => {
+				walked += files.length;
+				if (since !== 0) {
+					await Promise.all(files.filter(target => this.#wantedKinds(target) !== 0).map(statChanged));
+					return;
+				}
+				for (const target of files) {
+					if (renamedFrom) this.#record(path.join(renamedFrom, path.relative(dir, target)), true, false);
+					if (this.#wantedKinds(target) === 0) continue;
+					this.#record(target, false, true, undefined, true);
+					reported++;
+				}
+			},
+		});
+		return { walked, reported };
 	}
 
 	/**
-	 * The files below `dir` (directly, unless `recursive`), skipping directories
-	 * no spec wants anything below. `onDirectory` sees each directory before it
-	 * is read. With `files: false` only directories are visited and nothing is
-	 * collected, as a tree walk needs on a large repository.
+	 * Walk the directories below `dir` (only `dir` itself, unless `recursive`),
+	 * skipping directories no spec wants anything below. `onDirectory` sees
+	 * each directory before it is read; `onFiles` gets each directory's files
+	 * as it is read, and the walk waits for it, so only the directories in
+	 * flight are held, however large the tree.
 	 */
 	async #walk(
 		dir: string,
 		recursive: boolean,
-		options: { onDirectory?: (dir: string) => void; files?: boolean } = {},
-	): Promise<string[]> {
-		const { onDirectory, files: collect = true } = options;
-		const files: string[] = [];
+		options: { onDirectory?: (dir: string) => void; onFiles?: (files: string[]) => Promise<void> } = {},
+	): Promise<void> {
+		const { onDirectory, onFiles } = options;
 		let level = [dir];
 		while (level.length > 0 && !this.#closed) {
 			if (onDirectory) for (const entry of level) onDirectory(entry);
-			const { results } = await mapWithConcurrencyLimit(level, WALK_CONCURRENCY, entry =>
-				fs.promises.readdir(entry, { withFileTypes: true }).catch(() => []),
-			);
-			const next: string[] = [];
-			for (const [index, entries] of results.entries()) {
-				for (const entry of entries ?? []) {
-					const target = path.join(level[index], entry.name);
+			const { results } = await mapWithConcurrencyLimit(level, WALK_CONCURRENCY, async parent => {
+				const entries = await fs.promises.readdir(parent, { withFileTypes: true }).catch(() => []);
+				const files: string[] = [];
+				const subdirectories: string[] = [];
+				for (const entry of entries) {
 					if (!entry.isDirectory()) {
-						if (collect) files.push(target);
-					} else if (recursive && this.#wantsBeneath(target)) next.push(target);
+						if (onFiles) files.push(path.join(parent, entry.name));
+						continue;
+					}
+					const target = path.join(parent, entry.name);
+					if (recursive && this.#wantsBeneath(target)) subdirectories.push(target);
 				}
-			}
-			level = next;
+				if (onFiles && files.length > 0 && !this.#closed) await onFiles(files);
+				return subdirectories;
+			});
+			level = results.flatMap(subdirectories => subdirectories ?? []);
 		}
-		return files;
 	}
 
 	/** Whether some spec watches paths below `dir`. */

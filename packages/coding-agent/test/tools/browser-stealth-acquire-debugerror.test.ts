@@ -1,6 +1,6 @@
 /**
  * Regression test for issue #5296: the stealth `puppeteer-core` patch
- * (`patches/puppeteer-core@25.3.0.patch`) re-implements world acquisition
+ * (`patches/puppeteer-core@25.18.1.patch`) re-implements world acquisition
  * without `Runtime.enable`. Its new catch handlers in `FrameManager` called the
  * bare `debugError` logger, which puppeteer leaves `undefined` when the
  * `puppeteer:error` debug channel is disabled (the default). A transient CDP
@@ -29,8 +29,10 @@ import { FrameManager } from "puppeteer-core/lib/puppeteer/cdp/FrameManager.js";
 import { MAIN_WORLD, PUPPETEER_WORLD } from "puppeteer-core/lib/puppeteer/cdp/IsolatedWorlds.js";
 import { EventEmitter } from "puppeteer-core/lib/puppeteer/common/EventEmitter.js";
 import { TimeoutSettings } from "puppeteer-core/lib/puppeteer/common/TimeoutSettings.js";
+import type { Logger } from "puppeteer-core";
 
 const ACQUIRE_TIMEOUT_MS = 40;
+const silentLogger: Logger = () => undefined;
 
 // A CDP session double whose every `send` rejects, modelling a navigation that
 // tears the target's execution contexts down mid-acquire.
@@ -57,7 +59,7 @@ function makeFrameManager(session: EventEmitter<Record<string, unknown>>): Frame
 	// The patched FrameManager only touches the members exercised here; the
 	// puppeteer-internal `CdpCDPSession` / `CdpPage` types are far wider than the
 	// acquire path needs, so the doubles cross the boundary with a cast.
-	return new FrameManager(session as never, page as never, timeoutSettings);
+	return new FrameManager(session as never, page as never, timeoutSettings, silentLogger);
 }
 
 describe("stealth FrameManager world acquire — issue #5296", () => {
@@ -76,7 +78,7 @@ describe("stealth FrameManager world acquire — issue #5296", () => {
 	it("does not emit an unhandled TypeError when acquire fails mid-flight", async () => {
 		const session = new RejectingSession("S1");
 		const frameManager = makeFrameManager(session);
-		const frame = new CdpFrame(frameManager, "F1", undefined, session as never);
+		const frame = new CdpFrame(frameManager, "F1", undefined, session as never, silentLogger);
 		frameManager._frameTree.addFrame(frame);
 
 		// Navigation installs the lazy context providers and invalidates the old
@@ -90,7 +92,7 @@ describe("stealth FrameManager world acquire — issue #5296", () => {
 		// Concurrent pulls on both worlds force the coalescing acquirer to
 		// re-run (`void this.#acquireWorlds` in its `finally`), which is the exact
 		// path where `#doAcquireWorlds`'s catch previously threw a bare
-		// `debugError(error)`.
+		// `debugError(error)`; it now logs through the optional instance logger.
 		const main = frame.worlds[MAIN_WORLD];
 		const util = frame.worlds[PUPPETEER_WORLD];
 		const results = await Promise.allSettled([main.evaluate(() => 1), util.evaluate(() => 1)]);
@@ -140,7 +142,7 @@ describe("stealth FrameManager world acquire across a superseding navigation", (
 	it("acquires the document that committed while the previous one was being probed", async () => {
 		const session = new ScriptedSession();
 		const frameManager = makeFrameManager(session);
-		const frame = new CdpFrame(frameManager, "F1", undefined, session as never);
+		const frame = new CdpFrame(frameManager, "F1", undefined, session as never, silentLogger);
 		frameManager._frameTree.addFrame(frame);
 		const navigate = (url: string): Promise<unknown> => {
 			const navigated = Promise.withResolvers<unknown>();

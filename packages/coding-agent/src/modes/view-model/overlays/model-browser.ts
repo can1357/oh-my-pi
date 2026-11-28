@@ -3,7 +3,7 @@
  * order, search ranking, and the price/mark facts every model list shows
  * (the alt+p picker, the /models hub, setup, RPC `get_model_picker`).
  */
-import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import type { Model } from "@oh-my-pi/pi-ai";
 import {
 	getEffectiveTokenCost,

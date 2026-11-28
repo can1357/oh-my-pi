@@ -253,12 +253,26 @@ fn on_abort_impl(
 
 impl<T: for<'task> ScopedTask<'task>> ToNapiValue for AsyncTask<T> {
   unsafe fn to_napi_value(env: sys::napi_env, val: Self) -> crate::Result<sys::napi_value> {
+    // Only the value actually converted into the JavaScript promise may claim a lease on
+    // the borrow scope that generated glue deferred for `&T`/`&self` arguments captured
+    // by the task. The glue arms the deferred stack while converting its return value —
+    // after the native call — so a conversion reaching this point is the one the scope
+    // was deferred for. Claiming upgrades the recorded borrows into `napi_ref` roots
+    // (idempotently: every element of a `Vec<AsyncTask>` takes its own lease on the
+    // same scope) and a conversion with no deferred scope (the task came from
+    // `Env::spawn`, `spawn_future`, user code) yields `None`.
+    let borrow_lease = crate::bindgen_runtime::claim_deferred_native_borrow_lease()?;
     if let Some(abort_signal) = val.abort_signal {
-      let async_promise = async_work::run(env, val.inner, Some(abort_signal.status.clone()))?;
+      let async_promise = async_work::run(
+        env,
+        val.inner,
+        Some(abort_signal.status.clone()),
+        borrow_lease,
+      )?;
       abort_signal.raw_work.set(async_promise.napi_async_work);
       Ok(async_promise.promise_object().inner)
     } else {
-      let async_promise = async_work::run(env, val.inner, None)?;
+      let async_promise = async_work::run(env, val.inner, None, borrow_lease)?;
       Ok(async_promise.promise_object().inner)
     }
   }

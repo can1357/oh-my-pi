@@ -20,6 +20,9 @@ const proxiedCanPlayType = new Window_Proxy(originalCanPlayType, {
 		if (!args || !args.length) {
 			return Reflect_apply(target, ctx, args);
 		}
+		// The IDL coerces its argument; only a string needs parsing, so anything else goes to the
+		// native method instead of throwing `trim is not a function`.
+		if (typeof args[0] !== "string") return Reflect_apply(target, ctx, args);
 		const { mime, codecs } = parseInput(args[0]);
 		if (mime === "video/mp4" && codecs.includes("avc1.42E01E")) {
 			return "probably";

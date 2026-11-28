@@ -272,10 +272,7 @@ function paintMentionTiles(
 	const short = shortOf(lit);
 	const about = `${short ? `${cx.theme.style("accent strong", short)}  ` : ""}${cx.theme.fg("muted", plain(lit.detail))}`;
 	return {
-		rows: [
-			truncate(`${indent}${strip}`, cx.width, ""),
-			truncate(`${indent}${about}`, cx.width, "…"),
-		],
+		rows: [truncate(`${indent}${strip}`, cx.width, ""), truncate(`${indent}${about}`, cx.width, "…")],
 	};
 }
 

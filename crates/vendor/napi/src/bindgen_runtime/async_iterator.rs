@@ -289,17 +289,22 @@ pub unsafe extern "C" fn symbol_async_generator<T: AsyncGenerator>(
   generator_object
 }
 
+fn throw_generator_error(env: sys::napi_env, err: crate::Error) -> sys::napi_value {
+  unsafe {
+    let js_error: JsError = err.into();
+    js_error.throw_into(env);
+  }
+  ptr::null_mut()
+}
+
 extern "C" fn generator_next<T: AsyncGenerator>(
   env: sys::napi_env,
   info: sys::napi_callback_info,
 ) -> sys::napi_value {
+  let _napi_native_borrow_barrier = crate::bindgen_runtime::NativeBorrowBarrier::new();
   match generator_next_fn::<T>(env, info) {
     Ok(value) => value,
-    Err(e) => unsafe {
-      let js_error: JsError = e.into();
-      js_error.throw_into(env);
-      ptr::null_mut()
-    },
+    Err(e) => throw_generator_error(env, e),
   }
 }
 
@@ -325,24 +330,13 @@ fn generator_next_fn<T: AsyncGenerator>(
     "Get callback info from generator function failed"
   )?;
 
-  let g = unsafe { Box::leak(Box::from_raw(generator_ptr as *mut T)) };
-  let item = if argc == 0 {
-    g.next(None)
+  let input = if argc == 0 {
+    None
   } else {
-    g.next(match unsafe { T::Next::from_napi_value(env, argv[0]) } {
-      Ok(input) => Some(input),
-      Err(e) => {
-        unsafe {
-          sys::napi_throw_error(
-            env,
-            format!("{}", e.status).as_ptr().cast(),
-            e.reason.as_ptr().cast(),
-          )
-        };
-        None
-      }
-    })
+    Some(unsafe { T::Next::from_napi_value(env, argv[0]) }?)
   };
+  let g = unsafe { Box::leak(Box::from_raw(generator_ptr as *mut T)) };
+  let item = g.next(input);
 
   let env = Env::from_raw(env);
   let promise = env.spawn_future_with_callback(item, |env, value| {
@@ -365,12 +359,22 @@ extern "C" fn generator_return<T: AsyncGenerator>(
   env: sys::napi_env,
   info: sys::napi_callback_info,
 ) -> sys::napi_value {
+  let _napi_native_borrow_barrier = crate::bindgen_runtime::NativeBorrowBarrier::new();
+  match generator_return_fn::<T>(env, info) {
+    Ok(value) => value,
+    Err(e) => throw_generator_error(env, e),
+  }
+}
+
+fn generator_return_fn<T: AsyncGenerator>(
+  env: sys::napi_env,
+  info: sys::napi_callback_info,
+) -> crate::Result<sys::napi_value> {
   let mut this = ptr::null_mut();
   let mut argv: [sys::napi_value; 1] = [ptr::null_mut()];
   let mut argc = 1;
   let mut generator_ptr = ptr::null_mut();
-  check_status_or_throw!(
-    env,
+  check_status!(
     unsafe {
       sys::napi_get_cb_info(
         env,
@@ -382,64 +386,50 @@ extern "C" fn generator_return<T: AsyncGenerator>(
       )
     },
     "Get callback info from generator function failed"
-  );
+  )?;
 
+  let input = if argc == 0 {
+    None
+  } else {
+    Some(unsafe { T::Return::from_napi_value(env, argv[0]) }?)
+  };
   let g = unsafe { Box::leak(Box::from_raw(generator_ptr as *mut T)) };
-  match Env::from_raw(env).spawn_future_with_callback(
-    g.complete(if argc == 0 {
-      None
+  let env = Env::from_raw(env);
+  let promise = env.spawn_future_with_callback(g.complete(input), |env, value| {
+    let mut obj = Object::new(env)?;
+    // Per async iterator protocol, return() must ALWAYS set done: true
+    // The value (if any) is the final value, but iteration is complete
+    if let Some(v) = value {
+      obj.set("value", v)?;
     } else {
-      Some(match unsafe { T::Return::from_napi_value(env, argv[0]) } {
-        Ok(input) => input,
-        Err(e) => {
-          unsafe {
-            sys::napi_throw_error(
-              env,
-              format!("{}", e.status).as_ptr().cast(),
-              e.reason.as_ptr().cast(),
-            )
-          };
-          return ptr::null_mut();
-        }
-      })
-    }),
-    |env, value| {
-      let mut obj = Object::new(env)?;
-      // Per async iterator protocol, return() must ALWAYS set done: true
-      // The value (if any) is the final value, but iteration is complete
-      if let Some(v) = value {
-        obj.set("value", v)?;
-      } else {
-        obj.set("value", ())?;
-      }
-      obj.set("done", true)?;
-      Ok(obj)
-    },
-  ) {
-    Ok(promise) => promise.inner,
-    Err(e) => {
-      unsafe {
-        sys::napi_throw_error(
-          env,
-          e.status.as_ref().as_ptr().cast(),
-          e.reason.as_ptr().cast(),
-        );
-      }
-      ptr::null_mut()
+      obj.set("value", ())?;
     }
-  }
+    obj.set("done", true)?;
+    Ok(obj)
+  })?;
+  Ok(promise.inner)
 }
 
 extern "C" fn generator_throw<T: AsyncGenerator>(
   env: sys::napi_env,
   info: sys::napi_callback_info,
 ) -> sys::napi_value {
+  let _napi_native_borrow_barrier = crate::bindgen_runtime::NativeBorrowBarrier::new();
+  match generator_throw_fn::<T>(env, info) {
+    Ok(value) => value,
+    Err(e) => throw_generator_error(env, e),
+  }
+}
+
+fn generator_throw_fn<T: AsyncGenerator>(
+  env: sys::napi_env,
+  info: sys::napi_callback_info,
+) -> crate::Result<sys::napi_value> {
   let mut this = ptr::null_mut();
   let mut argv: [sys::napi_value; 1] = [ptr::null_mut()];
   let mut argc = 1;
   let mut generator_ptr = ptr::null_mut();
-  check_status_or_throw!(
-    env,
+  check_status!(
     unsafe {
       sys::napi_get_cb_info(
         env,
@@ -451,56 +441,40 @@ extern "C" fn generator_throw<T: AsyncGenerator>(
       )
     },
     "Get callback info from generator function failed"
-  );
+  )?;
 
-  let g = unsafe { Box::leak(Box::from_raw(generator_ptr as *mut T)) };
-  let caught = if argc == 0 {
+  let arg = if argc == 0 {
     let mut undefined = ptr::null_mut();
-    check_status_or_throw!(
-      env,
+    check_status!(
       unsafe { sys::napi_get_undefined(env, &mut undefined) },
       "Get undefined failed"
-    );
-    g.catch(
-      Env(env),
-      Unknown(
-        Value {
-          env,
-          value: undefined,
-          value_type: crate::ValueType::Undefined,
-        },
-        std::marker::PhantomData,
-      ),
+    )?;
+    Unknown(
+      Value {
+        env,
+        value: undefined,
+        value_type: crate::ValueType::Undefined,
+      },
+      std::marker::PhantomData,
     )
   } else {
-    g.catch(
-      Env(env),
-      Unknown(
-        Value {
-          env,
-          value: argv[0],
-          value_type: crate::ValueType::Unknown,
-        },
-        std::marker::PhantomData,
-      ),
+    Unknown(
+      Value {
+        env,
+        value: argv[0],
+        value_type: crate::ValueType::Unknown,
+      },
+      std::marker::PhantomData,
     )
   };
-  match Env::from_raw(env).spawn_future_with_callback(caught, |env, value| {
+  let g = unsafe { Box::leak(Box::from_raw(generator_ptr as *mut T)) };
+  let caught = g.catch(Env(env), arg);
+  let env = Env::from_raw(env);
+  let promise = env.spawn_future_with_callback(caught, |env, value| {
     let mut obj = Object::new(env)?;
     obj.set("value", value)?;
     obj.set("done", false)?;
     Ok(obj)
-  }) {
-    Ok(promise) => promise.inner,
-    Err(e) => {
-      unsafe {
-        sys::napi_throw_error(
-          env,
-          e.status.as_ref().as_ptr().cast(),
-          e.reason.as_ptr().cast(),
-        );
-      }
-      ptr::null_mut()
-    }
-  }
+  })?;
+  Ok(promise.inner)
 }

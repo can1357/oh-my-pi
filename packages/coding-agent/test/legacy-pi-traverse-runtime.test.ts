@@ -28,11 +28,15 @@ async function runProbe(childPath: string): Promise<CacheProbeResult> {
 describe("legacy Pi Babel startup closure", () => {
 	test("detector observes a substantial traverse/types positive-control closure", async () => {
 		const result = await runProbe(positiveControlPath);
-		expect(result.modules, JSON.stringify(result)).toBeGreaterThanOrEqual(100);
-		expect(result.bytes, JSON.stringify(result)).toBeGreaterThanOrEqual(600_000);
+		// Babel 8 ships each package as one bundled `lib/index.js`.
+		expect(result.paths, JSON.stringify(result)).toEqual([
+			expect.stringMatching(/[\\/]node_modules[\\/]@babel[\\/]traverse[\\/]/),
+			expect.stringMatching(/[\\/]node_modules[\\/]@babel[\\/]types[\\/]/),
+		]);
+		expect(result.bytes, JSON.stringify(result)).toBeGreaterThanOrEqual(400_000);
 	}, 30_000);
 
-	test("static legacy compatibility import evaluates no traverse/types CommonJS modules", async () => {
+	test("static legacy compatibility import evaluates no traverse/types modules", async () => {
 		const result = await runProbe(probePath);
 		expect({ modules: result.modules, bytes: result.bytes }, JSON.stringify(result)).toEqual({
 			modules: 0,

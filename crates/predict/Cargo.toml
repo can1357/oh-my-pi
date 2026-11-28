@@ -26,6 +26,6 @@ candle-nn = { workspace = true, features = ["metal"] }
 # The `apple` engine and the process-wide AppKit spelling thread
 # (`apple::appkit`, shared with `pi_natives::spelling`).
 flume.workspace = true
-objc2 = "=0.6.4"
+objc2 = "=0.6.5"
 objc2-app-kit = "=0.3.2"
 objc2-foundation = "=0.3.2"

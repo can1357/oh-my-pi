@@ -504,7 +504,7 @@ export type AuthApiKeyOptions = {
 	 */
 	accountIds?: readonly string[];
 	/**
-	 * Service tier the request will ask for (`/fast`, `/fast ultra`). Selection
+	 * Service tier the request will ask for (`/fast`, `/ultrafast`). Selection
 	 * prefers a credential that offers it — an entitled OAuth account, kept even
 	 * on paid overage, else a stored or environment API key — and falls back to
 	 * ordinary balancing across the rest once those are blocked or refused the
@@ -1518,8 +1518,7 @@ export interface LimitsApi {
 	/**
 	 * Forget every recorded refusal of `serviceTier` on `modelId` for a provider
 	 * and drop its cached usage reports, so the next request probes each
-	 * credential for the tier again. For re-arming the tier (`/fast on`) once
-	 * the user has fixed what the provider refused.
+	 * credential for the tier again after the user fixes the reason for refusal.
 	 */
 	rearmServiceTier(provider: string, serviceTier: ServiceTier, modelId: string): Promise<void>;
 	/** Invalidate a credential matching an API key after authentication failure. */

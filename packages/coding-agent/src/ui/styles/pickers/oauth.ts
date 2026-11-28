@@ -5,6 +5,7 @@
  * search line (`Type to search` / `Search: query` with its caret), the empty
  * copy and the last activation's warning under it.
  */
+import { segmentGraphemes } from "@oh-my-pi/pi-utils/graphemes";
 import type { TspPickerProps } from "@oh-my-pi/pi-wire";
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import type { Block, Hit, PaintContext } from "@oh-my-pi/pi-tui/term/paint";
@@ -48,7 +49,7 @@ export type OAuthLookTerm = PickerTerm & {
 /** The query with an inverse caret cell (a space at the end). */
 function caretLine(text: string, cursor: number, invert: (s: string) => string): string {
 	const at = Math.max(0, Math.min(cursor, text.length));
-	const segment = [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(text.slice(at))][0]?.segment;
+	const segment = segmentGraphemes(text.slice(at)).containing(0)?.segment;
 	return `${text.slice(0, at)}${invert(segment ?? " ")}${segment ? text.slice(at + segment.length) : ""}`;
 }
 

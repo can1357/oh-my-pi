@@ -67,16 +67,15 @@ export interface HybridAuthCredentialStoreOptions {
 export class HybridAuthCredentialStore implements AuthCredentialStore {
 	readonly #broker: RemoteAuthCredentialStore;
 	readonly #local: SqliteAuthCredentialStore;
-	#localProviders: Set<string>;
+	#routes: Set<string> | undefined;
 
 	constructor(opts: HybridAuthCredentialStoreOptions) {
 		this.#broker = opts.broker;
 		this.#local = opts.local;
-		this.#localProviders = this.#readLocalProviders();
 	}
 
-	#readLocalProviders(): Set<string> {
-		return new Set([...DEVICE_BOUND_PROVIDERS, ...this.#local.listBrokerLocalProviders()]);
+	get #localProviders(): Set<string> {
+		return (this.#routes ??= new Set([...DEVICE_BOUND_PROVIDERS, ...this.#local.listBrokerLocalProviders()]));
 	}
 
 	close(): void {
@@ -89,7 +88,7 @@ export class HybridAuthCredentialStore implements AuthCredentialStore {
 		const broker = this.#broker.pollExternalChanges();
 		const local = this.#local.pollExternalChanges();
 		// Another process may have kept a login locally; it records the provider before saving the row.
-		if (local) this.#localProviders = this.#readLocalProviders();
+		if (local) this.#routes = undefined;
 		return broker || local;
 	}
 
@@ -102,6 +101,13 @@ export class HybridAuthCredentialStore implements AuthCredentialStore {
 			return this.#localProviders.has(provider)
 				? this.#local.listAuthCredentials(provider).map(toHybridRow)
 				: this.#broker.listAuthCredentials(provider);
+		}
+		if (!this.#routes) {
+			const { providers, credentials } = this.#local.readBrokerLocalSnapshot(DEVICE_BOUND_PROVIDERS);
+			this.#routes = providers;
+			const rows = this.#broker.listAuthCredentials().filter(row => !providers.has(row.provider));
+			for (const row of credentials) rows.push(toHybridRow(row));
+			return rows;
 		}
 		const rows = this.#broker.listAuthCredentials().filter(row => !this.#localProviders.has(row.provider));
 		for (const local of this.#localProviders) {

@@ -64,7 +64,10 @@ function assistantMessage(overrides: Partial<AssistantMessage>): AssistantMessag
 	};
 }
 
-function retryRecovery(recovery: AssistantRetryRecovery["recovery"], note: string): AssistantRetryRecovery {
+function retryRecovery(
+	recovery: AssistantRetryRecovery["recovery"],
+	note: string,
+): Extract<AssistantRetryRecovery, { status: "recovered" }> {
 	return {
 		kind: "auto-retry",
 		status: "recovered",
@@ -579,13 +582,20 @@ describe("AgentSession retry recovery", () => {
 		const fallback = `${fallbackModel.provider}/${fallbackModel.id}`;
 
 		const requestedModels: string[] = [];
-		const mock = createMockModel({ responses });
+		const script = responses.values();
+		const mock = createMockModel({ id: model.id, provider: model.provider, responses: script });
+		const mockFallback = createMockModel({
+			id: fallbackModel.id,
+			provider: fallbackModel.provider,
+			responses: script,
+		});
 		const agent = new Agent({
 			getApiKey: requestedModel => modelRegistry.resolver(requestedModel, agent.sessionId),
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
 			streamFn: (requestedModel, context, options) => {
-				requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
-				return mock.stream(requestedModel, context, options);
+				const route = `${requestedModel.provider}/${requestedModel.id}`;
+				requestedModels.push(route);
+				return (route === fallback ? mockFallback : mock).stream(requestedModel, context, options);
 			},
 		});
 		const settings = Settings.isolated({
@@ -676,6 +686,12 @@ describe("AgentSession retry recovery", () => {
 		const errors = assistantEntries(sessionManager).filter(candidate => candidate.message.stopReason === "error");
 		expect(errors).toHaveLength(1);
 		expect(errors[0].message.retryRecovery).toMatchObject({ recovery: "model" });
+		const presentation = resolveAssistantErrorPresentation(errors[0].message);
+		expect(presentation).toMatchObject({
+			kind: "compact-recovered",
+			text: expect.stringMatching(new RegExp(`^The socket connection.* — recovered on ${RegExp.escape(fallback)}$`)),
+			isError: false,
+		});
 	});
 
 	const codexModels = {
@@ -718,30 +734,51 @@ describe("AgentSession retry recovery", () => {
 		expect(fallbackEvents).toHaveLength(1);
 	});
 
-	it("maps assistant error presentation for recovered, unrecovered, and silent abort turns", () => {
-		const recoveredCases: Array<{
-			name: string;
-			recovery: AssistantRetryRecovery["recovery"];
-			note: string;
-		}> = [
-			{ name: "credential", recovery: "credential", note: "rate-limited; switched account; retried" },
-			{ name: "model", recovery: "model", note: "rate-limited; switched model; retried" },
-			{ name: "wait", recovery: "wait", note: "rate-limited; waited; retried" },
-			{ name: "plain", recovery: "plain", note: "error; retried" },
-		];
+	it("keeps the saved retry note when an older recovered entry has no reason or replacement model", () => {
+		const note = "rate-limited; switched model; retried";
+		expect(
+			resolveAssistantErrorPresentation(
+				assistantMessage({ stopReason: "error", retryRecovery: retryRecovery("model", note) }),
+			),
+		).toMatchObject({ kind: "compact-recovered", text: note, isError: false });
+	});
 
-		for (const testCase of recoveredCases) {
-			expect(
-				resolveAssistantErrorPresentation(
-					assistantMessage({
-						stopReason: "error",
-						errorMessage: `${testCase.name} retry was superseded`,
-						retryRecovery: retryRecovery(testCase.recovery, testCase.note),
-					}),
-				),
-			).toEqual({ kind: "compact-recovered", text: testCase.note, isError: false });
-		}
+	it("retains the saved reason for a model recovery without error text", () => {
+		const recovered = resolveAssistantErrorPresentation(
+			assistantMessage({
+				stopReason: "error",
+				retryRecovery: {
+					...retryRecovery("model", "rate-limited; switched model; retried"),
+					supersededBy: { timestamp: 2, provider: "test", model: "backup" },
+				},
+			}),
+		);
+		expect(recovered).toMatchObject({
+			kind: "compact-recovered",
+			text: "rate-limited; switched model; retried — recovered on test/backup",
+		});
+	});
 
+	it("keeps the error visible even when the model identifier needs truncation", () => {
+		const model = "backup-with-a-long-model-identifier-".repeat(4);
+		const recovered = resolveAssistantErrorPresentation(
+			assistantMessage({
+				stopReason: "error",
+				errorMessage: "503 upstream unavailable",
+				retryRecovery: {
+					...retryRecovery("model", "switched model; retried"),
+					supersededBy: { timestamp: 2, provider: "test", model },
+				},
+			}),
+		);
+		expect(recovered).toMatchObject({
+			kind: "compact-recovered",
+			text: expect.stringContaining("503 upstream unavailable — recovered on test/backup"),
+			outcome: `recovered on test/${model}`,
+		});
+	});
+
+	it("maps unrecovered errors and silent aborts", () => {
 		expect(
 			resolveAssistantErrorPresentation(
 				assistantMessage({ stopReason: "error", errorMessage: "503 service unavailable" }),

@@ -32,9 +32,6 @@ function isOfficialAnthropicBaseUrl(baseUrl: string): boolean {
 	}
 }
 
-/** OAuth scope a Claude subscription token needs for the Files API; the 1-year login is granted without it. */
-export const ANTHROPIC_FILES_OAUTH_SCOPE = "user:file_upload";
-
 function authHeaders(credential: string): Readonly<Record<string, string>> {
 	return isAnthropicOAuthToken(credential) ? { Authorization: `Bearer ${credential}` } : { "x-api-key": credential };
 }

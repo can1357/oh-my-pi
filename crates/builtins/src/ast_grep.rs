@@ -19,11 +19,6 @@ use ast_grep_config::{
 };
 use ast_grep_core::tree_sitter::LanguageExt;
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
-use codespan_reporting::{
-	diagnostic::{Diagnostic, Label as CodeLabel, Severity as CodeSeverity},
-	files::SimpleFile,
-	term::{self as codespan, DisplayStyle},
-};
 use futures::StreamExt;
 use omp_ast::{
 	SupportLang, debug, ops,
@@ -45,6 +40,7 @@ use crate::{
 /// ast-grep's spelling of the [`root_guard`] escape hatch; it has no depth cap.
 const ROOT_FLAGS: root_guard::Flags = root_guard::Flags { allow: "--allow-root", depth: None };
 
+mod report;
 mod scaffold;
 mod verify;
 
@@ -1898,50 +1894,46 @@ impl Scan {
 			}
 			return;
 		}
-		let file = SimpleFile::new(path.to_owned(), source);
 		let (before, after) = self.context();
-		let mut config = codespan::Config {
-			display_style: match self.report_style {
-				ReportStyle::Rich => DisplayStyle::Rich,
-				ReportStyle::Medium => DisplayStyle::Medium,
-				ReportStyle::Short => DisplayStyle::Short,
-			},
-			..codespan::Config::default()
+		let display_style = match self.report_style {
+			ReportStyle::Rich => report::DisplayStyle::Rich,
+			ReportStyle::Medium => report::DisplayStyle::Medium,
+			ReportStyle::Short => report::DisplayStyle::Short,
 		};
-		config.start_context_lines = before;
-		config.end_context_lines = after;
 		let mut fixed_until = 0;
 		for finding in findings {
 			let rule = finding.rule;
 			let note = rule.note.as_deref();
 			let Some(change) = &finding.change else {
 				let severity = match rule.severity {
-					Severity::Error => CodeSeverity::Error,
-					Severity::Warning => CodeSeverity::Warning,
-					Severity::Info => CodeSeverity::Note,
-					Severity::Hint | Severity::Off => CodeSeverity::Help,
+					Severity::Error => report::Severity::Error,
+					Severity::Warning => report::Severity::Warning,
+					Severity::Info => report::Severity::Note,
+					Severity::Hint | Severity::Off => report::Severity::Help,
 				};
-				let labels = finding
+				let labels: Vec<report::Label> = finding
 					.labels
 					.iter()
-					.map(|(range, primary, message)| {
-						let label = if *primary {
-							CodeLabel::primary((), range.clone())
-						} else {
-							CodeLabel::secondary((), range.clone())
-						};
-						match message {
-							Some(message) => label.with_message(message),
-							None => label,
-						}
+					.map(|(range, primary, message)| report::Label {
+						range: range.clone(),
+						primary: *primary,
+						message: message.clone().unwrap_or_default(),
 					})
 					.collect();
-				let diagnostic = Diagnostic::new(severity)
-					.with_code(&rule.id)
-					.with_message(&finding.message)
-					.with_notes(note.into_iter().map(str::to_owned).collect())
-					.with_labels(labels);
-				let _ = codespan::emit_to_io_write(out, &config, &file, &diagnostic);
+				let notes: Vec<String> = note.into_iter().map(str::to_owned).collect();
+				let diagnostic = report::Report {
+					file_name: path,
+					source,
+					severity,
+					code: &rule.id,
+					message: &finding.message,
+					notes: &notes,
+					labels: &labels,
+					display_style,
+					start_context_lines: before,
+					end_context_lines: after,
+				};
+				let _ = report::emit(out, &diagnostic);
 				continue;
 			};
 			// A rule with a fix shows the fix as a diff (ast-grep's `print_rule_diffs`).

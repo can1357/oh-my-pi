@@ -21,7 +21,6 @@ use std::{
 };
 
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser, value_parser};
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use omp_vfs::{
 	BlockingFs, CanonicalizeOptions, DirOptions, File, FileId, FileTime, Metadata, MissingHandling,
 	NodeKind, OpenOptions, Permissions, ResolveMode, SymlinkKind, child_path, decode_segment, file_name,
@@ -40,7 +39,6 @@ use uucore::{
 use crate::{
 	file_backup::{backup_display, backup_path, determine_backup_mode, determine_backup_suffix},
 	host::{Host, Utility, format_usage, matches_parser, strip_errno},
-	progress::stderr_draw_target,
 };
 
 /// Failure of one copy step.
@@ -230,8 +228,6 @@ struct Options {
 	debug:                  bool,
 	/// `-v`, `--verbose`
 	verbose:                bool,
-	/// `-g`, `--progress`
-	progress_bar:           bool,
 	/// `-Z`, `--context`: never copy the source's SELinux label.
 	set_selinux_context:    bool,
 	/// `mv` copying between filesystems: entries below a moved directory are
@@ -346,7 +342,6 @@ mod options {
 	pub const PARENT: &str = "parent";
 	pub const PARENTS: &str = "parents";
 	pub const PATHS: &str = "paths";
-	pub const PROGRESS_BAR: &str = "progress";
 	pub const PRESERVE: &str = "preserve";
 	pub const PRESERVE_DEFAULT_ATTRIBUTES: &str = "preserve-default-attributes";
 	pub const RECURSIVE: &str = "recursive";
@@ -373,9 +368,6 @@ const PRESERVE_DEFAULT_VALUES: &str =
 
 /// Chunk size of streamed copies.
 const COPY_BUFFER: usize = 128 * 1024;
-
-/// Progress bar over the bytes of the copied tree.
-const PROGRESS_TEMPLATE: &str = "{msg}: [{elapsed_precise}] {wide_bar} {bytes:>7}/{total_bytes:7}";
 
 /// Parsed `cp` invocation.
 pub(crate) struct Cp {
@@ -691,15 +683,6 @@ fn uu_app() -> Command {
 				.num_args(0..=1)
 				.require_equals(true)
 				.default_missing_value(""),
-		)
-		.arg(
-			// The 'g' short flag is modeled after advcpmv
-			// See this repo: https://github.com/jarun/advcpmv
-			Arg::new(options::PROGRESS_BAR)
-				.long(options::PROGRESS_BAR)
-				.short('g')
-				.action(ArgAction::SetTrue)
-				.help("Display a progress bar. Note: this feature is not supported by GNU coreutils."),
 		)
 		.arg(
 			Arg::new(options::COPY_CONTENTS)
@@ -1079,7 +1062,6 @@ impl Options {
 			attributes,
 			recursive,
 			target_dir,
-			progress_bar: matches.get_flag(options::PROGRESS_BAR),
 			set_selinux_context: set_selinux_context || context.is_some(),
 			move_mode: false,
 		})
@@ -1132,8 +1114,6 @@ struct CopyState {
 	copied_destinations: FxHashSet<PathBuf>,
 	/// Source identity to its first destination, for `--preserve=links`.
 	copied_files:        FxHashMap<FileId, PathBuf>,
-	/// `-g` progress over the total source size.
-	progress_bar:        Option<ProgressBar>,
 	/// Source devices whose filesystem refused to clone: later files from
 	/// them skip straight to copying the data.
 	#[cfg(any(target_os = "linux", target_os = "android", windows))]
@@ -1141,16 +1121,9 @@ struct CopyState {
 }
 
 impl CopyState {
-	/// Prints a line on stdout, keeping it clear of the progress bar.
+	/// Prints a line on stdout.
 	fn say(&self, host: &mut Host, line: impl fmt::Display) {
-		match &self.progress_bar {
-			Some(bar) => bar.suspend(|| {
-				let _ = writeln!(host.stdout, "{line}");
-			}),
-			None => {
-				let _ = writeln!(host.stdout, "{line}");
-			},
-		}
+		let _ = writeln!(host.stdout, "{line}");
 	}
 }
 
@@ -1189,7 +1162,6 @@ impl MoveCopier {
 				update: UpdateMode::All,
 				debug: false,
 				verbose,
-				progress_bar: false,
 				set_selinux_context: false,
 				move_mode: true,
 			},
@@ -1200,31 +1172,21 @@ impl MoveCopier {
 	/// Copies `source`, whose lstat is `metadata`, to the vacant `dest`. The
 	/// failures of entries below a directory are reported as they happen and
 	/// the copy goes on, as GNU's does; the result is then
-	/// [`CpError::NotAllFilesCopied`]. Under `display_manager` a directory's
-	/// copy shows its progress.
+	/// [`CpError::NotAllFilesCopied`].
 	pub(crate) fn copy(
 		&mut self,
 		host: &mut Host,
 		source: &Path,
 		dest: &Path,
 		metadata: Metadata,
-		display_manager: Option<&MultiProgress>,
 	) -> Result<(), CpError> {
 		if !metadata.is_dir() {
 			return copy_file(host, &mut self.state, source, dest, &self.options, true, Some(metadata));
 		}
 
-		self.state.progress_bar = display_manager.map(|display_manager| {
-			let total = disk_usage_directory(host, &host.resolve(source));
-			let style = ProgressStyle::with_template(PROGRESS_TEMPLATE).expect("valid progress template");
-			display_manager
-				.add(ProgressBar::new(total).with_style(style))
-				.with_message(source.to_string_lossy().into_owned())
-		});
 		let mut walk =
 			Walk { options: &self.options, root_dev: None, ancestors: Vec::new(), failed: false };
 		let copied = copy_entry(host, &mut self.state, &mut walk, source, dest, true);
-		self.state.progress_bar = None;
 		copied?;
 		if walk.failed { Err(CpError::NotAllFilesCopied) } else { Ok(()) }
 	}
@@ -1345,17 +1307,6 @@ fn copy(host: &mut Host, sources: &[PathBuf], target: &Path, options: &Options) 
 	let mut seen_sources = FxHashSet::default();
 	let mut state = CopyState::default();
 
-	if options.progress_bar
-		&& let Some(draw_target) = stderr_draw_target(host)
-	{
-		let total = disk_usage(host, sources, options.recursive);
-		let bar = ProgressBar::with_draw_target(Some(total), draw_target)
-			.with_style(ProgressStyle::with_template(PROGRESS_TEMPLATE).expect("valid progress template"))
-			.with_message("cp");
-		bar.tick();
-		state.progress_bar = Some(bar);
-	}
-
 	for source in sources {
 		if host.is_cancelled() {
 			non_fatal_errors = true;
@@ -1380,10 +1331,6 @@ fn copy(host: &mut Host, sources: &[PathBuf], target: &Path, options: &Options) 
 			}
 		}
 		seen_sources.insert(normalized_source);
-	}
-
-	if let Some(bar) = &state.progress_bar {
-		bar.finish();
 	}
 
 	if non_fatal_errors { Err(CpError::NotAllFilesCopied) } else { Ok(()) }
@@ -2617,10 +2564,6 @@ fn copy_file(
 		state.copied_files.insert(id, dest.to_path_buf());
 	}
 
-	if let Some(bar) = &state.progress_bar {
-		bar.inc(source_metadata.len());
-	}
-
 	Ok(())
 }
 
@@ -3053,48 +2996,6 @@ fn verify_target_type(host: &Host, target: &Path, target_type: TargetType) -> Co
 		))),
 		_ => Ok(()),
 	}
-}
-
-/// Get the total size of a slice of files and directories, like `du`.
-///
-/// Files are not deduplicated when appearing in multiple sources, and
-/// directories only count when copying recursively. Unreadable entries count
-/// as empty; the copy itself reports them.
-fn disk_usage(host: &Host, paths: &[PathBuf], recursive: bool) -> u64 {
-	let filesystem = host.fs();
-	paths
-		.iter()
-		.map(|path| {
-			let resolved = host.resolve(path);
-			match filesystem.metadata(&resolved) {
-				Ok(metadata) if metadata.is_dir() => {
-					if recursive { disk_usage_directory(host, &resolved) } else { 0 }
-				},
-				Ok(metadata) => metadata.len(),
-				Err(_) => 0,
-			}
-		})
-		.sum()
-}
-
-/// A helper for `disk_usage` specialized for directories.
-fn disk_usage_directory(host: &Host, path: &Path) -> u64 {
-	let Ok(entries) = host.fs().read_dir(path) else {
-		return 0;
-	};
-	entries
-		.flatten()
-		.map(|entry| {
-			if host.is_cancelled() {
-				return 0;
-			}
-			match entry.metadata() {
-				Ok(metadata) if metadata.is_dir() => disk_usage_directory(host, &entry.path()),
-				Ok(metadata) => metadata.len(),
-				Err(_) => 0,
-			}
-		})
-		.sum()
 }
 
 /// Traversal state of one `cp -r` operand.
