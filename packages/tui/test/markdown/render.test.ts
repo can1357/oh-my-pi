@@ -229,6 +229,65 @@ describe("code fences", () => {
 		}
 	});
 
+	describe("framed (codeFrame)", () => {
+		const frame = { codeFrame: true };
+
+		it("draws a dashed hairline carrying the language above the code and a bare one below, in place of the fence rows", () => {
+			const rows = plain("```ts\nconst a = 1;\n```", 20, frame);
+			expect(rows).toEqual([`╌╌ ts ${"╌".repeat(14)}`, "  const a = 1;", "╌".repeat(20)]);
+			// Unlabelled fences get a bare hairline; the draw never changes with the option off.
+			expect(plain("```\nx\n```", 20, frame)[0]).toBe("╌".repeat(20));
+			expect(plain("```ts\nconst a = 1;\n```", 20)).toEqual(["```ts", "  const a = 1;", "```"]);
+		});
+
+		it("keeps literal bodies at column zero, so the code rows copy byte-exact", () => {
+			const rows = plain("```sh\ncat <<'EOF'\nEOF\n```", 20, { ...frame, paddingX: 1, codeIndent: 0 });
+			expect(rows[0]).toBe(`╌╌ sh ${"╌".repeat(14)}`);
+			expect(rows.slice(1, 3)).toEqual(["cat <<'EOF'", "EOF"]);
+			expect(rows[3]).toBe("╌".repeat(20));
+		});
+
+		it("cuts a long label to fit, and draws bare hairlines where no label fits", () => {
+			const long = plain(`\`\`\`${"x".repeat(40)}\nbody\n\`\`\``, 20, frame);
+			expect(visibleWidth(long[0]!)).toBe(20);
+			expect(long[0]!.startsWith("╌╌ xxx")).toBe(true);
+			expect(long[0]!.includes("…")).toBe(true);
+			expect(plain("```ts\nx\n```", 5, frame)).toEqual(["╌".repeat(5), "  x", "╌".repeat(5)]);
+			expect(plain("```\nx\n```", 4, frame)).toEqual(["╌╌╌╌", "  x", "╌╌╌╌"]);
+		});
+
+		it("draws plain dashes under the ascii symbol preset", () => {
+			const ascii = loadThemeSync("dark", { symbolPreset: "ascii" });
+			expect(plain("```ts\nx\n```", 12, { theme: ascii, ...frame })).toEqual([
+				`-- ts ${"-".repeat(6)}`,
+				"  x",
+				"-".repeat(12),
+			]);
+		});
+
+		it("fits hairlines inside list and quote containers", () => {
+			for (const source of ["- item\n\n  ```ts\n  x\n  ```", "> ```ts\n> x\n> ```"]) {
+				const rows = plain(source, 24, frame);
+				expect(rows.filter(row => row.includes("╌"))).toHaveLength(2);
+				expect(rows.every(row => visibleWidth(row) <= 24)).toBe(true);
+				expect(rows.some(row => row.includes("```"))).toBe(false);
+			}
+		});
+
+		it("does not change a streaming fence's row count or settled prefix", () => {
+			for (const source of [
+				"Intro.\n\n```ts\nconst a = 1;\nconst b = 2;\nconst c",
+				"```ts\nconst a = 1;\nconst b",
+				"```ts",
+			]) {
+				const fence = renderMarkdownFrame(source, 30, { theme, stream: true });
+				const framed = renderMarkdownFrame(source, 30, { theme, stream: true, ...frame });
+				expect(framed.rows.length).toBe(fence.rows.length);
+				expect(framed.stable).toBe(fence.stable);
+			}
+		});
+	});
+
 	it("links every wrapped fragment of a URL in code only when hyperlinks are on", () => {
 		const url =
 			"https://example.com/very/long/path/segment-one/segment-two/segment-three/segment-four?query=value&another=value";
@@ -354,15 +413,15 @@ describe("inline", () => {
 });
 
 describe("host look", () => {
-	afterEach(() => setMarkdownLook({ colorful: true, mermaid: true, linkUrls: true }));
+	afterEach(() => setMarkdownLook({ colorful: true, mermaid: true, linkUrls: true, codeFrame: false }));
 
 	it("renders with the host's linkUrls when the caller leaves it unset", () => {
-		setMarkdownLook({ colorful: true, mermaid: true, linkUrls: false });
+		setMarkdownLook({ colorful: true, mermaid: true, linkUrls: false, codeFrame: false });
 		expect(plain("[docs](https://e.com/d)", 80, { hyperlinks: true })).toEqual(["docs"]);
 	});
 
 	it("lets an explicit linkUrls win over the host look", () => {
-		setMarkdownLook({ colorful: true, mermaid: true, linkUrls: false });
+		setMarkdownLook({ colorful: true, mermaid: true, linkUrls: false, codeFrame: false });
 		expect(plain("[docs](https://e.com/d)", 80, { hyperlinks: true, linkUrls: true })).toEqual([
 			"docs (https://e.com/d)",
 		]);

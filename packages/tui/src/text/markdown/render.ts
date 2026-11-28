@@ -86,6 +86,13 @@ export interface MarkdownOptions {
 	 * the code and copying the whole block yields its markdown.
 	 */
 	readonly codeIndent?: number;
+	/**
+	 * Draw code fences as a dashed hairline carrying the language above the code
+	 * and a bare one below, in place of the literal ``` rows (default: the host's
+	 * {@link markdownLook}). Body rows are drawn as without it, so copying them
+	 * still yields the code.
+	 */
+	readonly codeFrame?: boolean;
 }
 
 /** A code row drawn at column 0 of the full width, outside every container. */
@@ -316,6 +323,7 @@ function ruleChar(theme: Theme, source: string | undefined): string {
 			return ascii ? "=" : "═";
 		case "━":
 		case "─":
+		case "╌":
 		case "–":
 		case "—":
 			return ascii ? "-" : source;
@@ -331,6 +339,19 @@ function renderRule(r: Renderer, source: string | undefined, width: number): str
 function fenceLanguage(token: Tokens.Code): string | undefined {
 	const lang = token.lang?.trim().split(/\s+/)[0];
 	return lang ? lang : undefined;
+}
+
+/**
+ * A code frame's dashed hairline, `width` cells wide: with a `lang` it carries
+ * the language (`╌╌ lang ╌╌╌╌`), cut to fit; without one it is bare.
+ */
+function frameBar(theme: Theme, width: number, lang?: string): string {
+	const dash = ruleChar(theme, "╌");
+	// Two dashes and a space before the label, a space and at least one dash after it.
+	const room = width - 5;
+	if (!lang || room < 1) return dash.repeat(width);
+	const label = truncate(lang, room, "…");
+	return `${dash.repeat(2)} ${label} ${dash.repeat(width - 4 - visibleWidth(label))}`;
 }
 
 function renderCode(r: Renderer, token: Tokens.Code, width: number): Row[] {
@@ -349,7 +370,10 @@ function renderCode(r: Renderer, token: Tokens.Code, width: number): Row[] {
 		indent > 0
 			? wrap(styles.codeBorder(text), width)
 			: wrap(styles.codeBorder(text), r.fullWidth).map(literal => ({ literal }));
-	const out: Row[] = border(`\`\`\`${lang ?? ""}`);
+	// A frame's hairlines span what the fence rows would: the container's width, or the full row for a literal body.
+	const barWidth = indent > 0 ? width : r.fullWidth;
+	const framed = options.codeFrame === true;
+	const out: Row[] = border(framed ? frameBar(options.theme, barWidth, lang) : `\`\`\`${lang ?? ""}`);
 	const fence = r.fence?.token === token ? r.fence : undefined;
 	for (let i = 0; i < lines.length; i++) {
 		// Every line another line follows is final; the last one can still grow or become the closing fence.
@@ -359,7 +383,7 @@ function renderCode(r: Renderer, token: Tokens.Code, width: number): Row[] {
 		else if (line === "") out.push({ literal: "" });
 		else for (const literal of wrap(line, r.fullWidth)) out.push({ literal });
 	}
-	out.push(...border("```"));
+	out.push(...border(framed ? frameBar(options.theme, barWidth) : "```"));
 	return out;
 }
 
@@ -761,6 +785,7 @@ function blockKey(width: number, options: MarkdownOptions, links: string): strin
 		drawsLinkUrls(options),
 		options.textSizing ?? false,
 		options.mermaid ?? true,
+		options.codeFrame ?? false,
 		options.textStyle ?? "",
 		options.codeIndent ?? 2,
 		options.linkSchemes?.join(",") ?? "",
@@ -888,9 +913,14 @@ export function renderMarkdown(source: string, width: number, options: MarkdownO
 	return [...renderMarkdownFrame(source, width, options).rows];
 }
 
-/** `options` with the host's look where they leave `colorful`, `mermaid` or `linkUrls` unset. */
+/** `options` with the host's look where they leave `colorful`, `mermaid`, `linkUrls` or `codeFrame` unset. */
 function withHostLook(options: MarkdownOptions): MarkdownOptions {
-	if (options.colorful !== undefined && options.mermaid !== undefined && options.linkUrls !== undefined)
+	if (
+		options.colorful !== undefined &&
+		options.mermaid !== undefined &&
+		options.linkUrls !== undefined &&
+		options.codeFrame !== undefined
+	)
 		return options;
 	const look = markdownLook();
 	return {
@@ -898,6 +928,7 @@ function withHostLook(options: MarkdownOptions): MarkdownOptions {
 		colorful: options.colorful ?? look.colorful,
 		mermaid: options.mermaid ?? look.mermaid,
 		linkUrls: options.linkUrls ?? look.linkUrls,
+		codeFrame: options.codeFrame ?? look.codeFrame,
 	};
 }
 

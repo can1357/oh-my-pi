@@ -120,7 +120,7 @@ Invalid override keys are ignored and logged (`logger.debug`).
 
 All outlined chrome — tool-result frames, overlays, the editor, the welcome banner — draws with the `boxRound.*` tokens: rounded corners (`╭╮╰╯`) plus tee/cross junctions (`├┤┬┴┼`, which have no rounded Unicode form, so they are sourced from the `boxSharp.*` tokens). Markdown tables are the sole exception and keep the fully sharp `boxSharp.*` set (`┌┐└┘`).
 
-Markdown code fences are not framed: they render as their literal fence rows (` ```lang ` and ` ``` `) colored with `mdCodeBlockBorder`, with the body between them (indented two spaces in thinking blocks, flush left in assistant replies). No `boxRound.*` or `boxSharp.*` token affects them.
+Markdown code fences are not framed by default: they render as their literal fence rows (` ```lang ` and ` ``` `) colored with `mdCodeBlockBorder`, with the body between them (indented two spaces in thinking blocks, flush left in assistant replies). No `boxRound.*` or `boxSharp.*` token affects them. With the `tui.codeFrame` setting on (off by default), the fence rows are replaced by a dashed hairline carrying the language above the code (`╌╌ ts ╌╌╌╌╌╌╌╌╌`) and a bare one below it, colored with `mdCodeBlockBorder`; the hairline glyph is `╌` (`-` under the ascii symbol preset) and is not a themeable token. The body rows are unchanged and take no side rails, so selecting them in the terminal still copies the exact code. The setting applies to the plain terminal renderer only: Tern's native view is sent the Markdown without the host's Markdown look, so it does not frame code blocks.
 
 Override behavior follows from that split:
 

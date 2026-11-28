@@ -40,7 +40,7 @@ beforeEach(async () => {
 
 afterEach(() => {
 	resetSettingsForTest();
-	setMarkdownLook({ colorful: true, mermaid: true, linkUrls: true });
+	setMarkdownLook({ colorful: true, mermaid: true, linkUrls: true, codeFrame: false });
 });
 
 describe("assistant message link urls", () => {
@@ -60,7 +60,7 @@ describe("assistant message link urls", () => {
 						.join("\n");
 
 				expect(paint()).toContain("the docs (https://example.com)");
-				setMarkdownLook({ colorful: true, mermaid: true, linkUrls: false });
+				setMarkdownLook({ colorful: true, mermaid: true, linkUrls: false, codeFrame: false });
 				const hidden = paint();
 				expect(hidden).toContain("the docs");
 				expect(hidden).not.toContain("(https://example.com)");
