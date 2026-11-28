@@ -1810,6 +1810,57 @@ mod tests {
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
+	async fn trace_does_not_grow_with_a_sourced_library() {
+		use std::fmt::Write;
+
+		use crate::bash::trace::history::HistoryData;
+		let dir = tempfile::tempdir().unwrap();
+		let mut sizes = Vec::new();
+		for fillers in [4000, 8000] {
+			let lib = dir.path().join(format!("lib{fillers}.sh"));
+			let mut body = String::from("first() { echo first-body; }\n");
+			for i in 0..fillers {
+				writeln!(body, "filler_{i}=value_{i}").unwrap();
+			}
+			body.push_str("last() { echo last-body; }\ntail_var=set\n");
+			std::fs::write(&lib, &body).unwrap();
+			let script = format!(". '{}'; first; last; echo \"$tail_var\"", lib.display());
+			let (captured, trace) = trace_capture(&mut session(), &script).await;
+			// Execution is untouched: every library line ran.
+			assert_eq!(captured.stdout, "first-body\nlast-body\nset\n");
+			let snapshot = trace.snapshot();
+			let last = format!("filler_{}", fillers - 1);
+			assert!(
+				!snapshot.history.iter().any(|event| matches!(
+					&event.data,
+					HistoryData::Assign { name, .. } if name.as_slice() == last.as_bytes()
+				)),
+				"events of an elided unit are not journaled"
+			);
+			// A function the kept part defines is still traced; the output of
+			// the rest stays in the journal, unattributed.
+			assert!(
+				snapshot
+					.history
+					.iter()
+					.filter(|event| matches!(event.data, HistoryData::Output { .. }))
+					.any(|event| producer_source(&snapshot, event) == b"echo first-body")
+			);
+			assert_eq!(trace_output(&snapshot), captured.stdout);
+			// A stored copy still draws: the kept library part, not the rest.
+			let json = trace.snapshot_json();
+			let stored =
+				crate::bash::trace::viz::StoredVisualization::from_snapshot_json(&json).unwrap();
+			let drawn = stored.presentation_json(&Default::default()).unwrap();
+			assert!(drawn.contains("filler_1="), "kept part is drawn");
+			assert!(!drawn.contains(&format!("{last}=")), "elided part is not drawn");
+			sizes.push(json.len());
+		}
+		// Twice the library, the same trace (timestamps may gain a digit).
+		assert!(sizes[1] < sizes[0] * 11 / 10, "trace sizes {sizes:?}");
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
 	async fn trace_cancelled_run_detaches_its_observer_before_the_next_call() {
 		let mut session = session();
 		let trace = Arc::new(crate::bash::trace::RunTrace::new("/bin/sleep 30"));

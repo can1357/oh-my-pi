@@ -46,6 +46,11 @@ const ARG_BYTES: usize = 256;
 const ARG_ITEMS: usize = 64;
 /// Diagnostics kept (the newest).
 const DIAGS: usize = 8;
+/// Syntax nodes of runtime-read scripts (`.`/`source`, `eval`, a nested
+/// shell's file) whose units a trace keeps whole, about 250 lines. A unit
+/// read past it is elided: no source, syntax or nodes, and its events are not
+/// journaled, so a trace does not grow with the size of a sourced library.
+const SCRIPT_NODES: usize = 1024;
 
 /// A statement's state, derived at snapshot time.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -341,6 +346,12 @@ struct Inner {
 	by_id:        HashMap<Vpid, HashMap<(Option<u32>, UnitId), u32>>,
 	diags:        Vec<Diag>,
 	journal:      history::Journal,
+	/// [`SCRIPT_NODES`] left for runtime-read units.
+	script_room:  usize,
+	/// The one source-less unit every elided unit resolves to: a runtime-read
+	/// unit past [`SCRIPT_NODES`], or one defined in such a unit. Its events
+	/// are not journaled. Once set, every later runtime-read unit is elided.
+	elided:       Option<u32>,
 	segment:      Option<SegmentState>,
 	next_segment: u32,
 	viz_cache:    viz::printer::Cache,
@@ -428,6 +439,8 @@ impl RunTrace {
 				by_id:        HashMap::new(),
 				diags:        Vec::new(),
 				journal:      history::Journal::default(),
+				script_room:  SCRIPT_NODES,
+				elided:       None,
 				segment:      None,
 				next_segment: 0,
 				viz_cache:    viz::printer::Cache::default(),
@@ -725,7 +738,12 @@ impl Inner {
 			},
 			_ => self.fold_node(ev, t),
 		}
-		if let Some(data) = history::HistoryData::of(ev) {
+		let elided = self.elided.is_some()
+			&& ev
+				.node()
+				.and_then(|node| self.unit_index(ev.vpid, node.unit))
+				== self.elided;
+		if !elided && let Some(data) = history::HistoryData::of(ev) {
 			let mut node = ev
 				.node()
 				.and_then(|node| {
@@ -958,6 +976,7 @@ impl Inner {
 			.map(|u| u as usize)
 			.filter(|&u| {
 				self.units[u].placeholder
+					|| Some(u as u32) == self.elided
 					|| self.units[u]
 						.syntax
 						.as_ref()
@@ -976,6 +995,10 @@ impl Inner {
 				})
 			});
 		if let Some(u) = existing {
+			if Some(u as u32) == self.elided {
+				self.by_id.entry(vpid).or_default().insert(key, u as u32);
+				return;
+			}
 			let unit = &mut self.units[u];
 			if let Some(syntax) = syntax
 				&& unit.syntax.as_ref().is_none_or(|existing| {
@@ -1041,6 +1064,42 @@ impl Inner {
 			}
 			self.by_id.entry(vpid).or_default().insert(key, u as u32);
 			return;
+		}
+		// A script read at runtime is kept whole only within its budget; a
+		// function it defines goes with it.
+		let runtime = runner.is_some() && !callout;
+		let elided = self.elided.is_some()
+			&& (runtime
+				|| syntax
+					.as_ref()
+					.and_then(|syntax| syntax.parent)
+					.map(|parent| parent.unit)
+					== self.elided)
+			|| runtime && nodes.len() > self.script_room;
+		if elided {
+			let u = *self.elided.get_or_insert_with(|| {
+				self.units.push(UnitState {
+					segment,
+					family: None,
+					id: None,
+					at: None,
+					line,
+					source: BString::default(),
+					syntax: None,
+					projection: 0,
+					nodes: Vec::new(),
+					kids: Vec::new(),
+					placeholder: false,
+					callout: false,
+					runner: None,
+				});
+				self.units.len() as u32 - 1
+			});
+			self.by_id.entry(vpid).or_default().insert(key, u);
+			return;
+		}
+		if runtime {
+			self.script_room -= nodes.len();
 		}
 		// A script a command ran is not the command text, whatever it holds.
 		let at = exact_at.or_else(|| {
