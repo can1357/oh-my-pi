@@ -950,6 +950,8 @@ type TurnObservation = {
 	turnEnded: boolean;
 	closed: boolean;
 	turnError: unknown;
+	/** Resolves once {@link finish} has returned: the observer has reported the turn. */
+	settled: PromiseWithResolvers<void>;
 };
 
 type ActiveAgentContinue = {
@@ -1340,6 +1342,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#ircAwaitingAssignment = false;
 	/** The observation whose monitor is attached; at most one at a time. */
 	#openTurnObservation: TurnObservation | undefined;
+	/** Observations whose finish has not returned yet, open or closing; see {@link waitForTurnObservations}. */
+	readonly #unsettledTurnObservations = new Set<Promise<void>>();
 	// Agent identity (registry id) used for IRC routing and job ownership.
 	#agentId: string | undefined;
 	/** Registry recording this agent blocked on the user while a {@link waitForUser} dialog is open. */
@@ -2076,8 +2080,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			logger.warn("Turn observer failed to start", { error: String(error) });
 		}
 		if (!finish) return undefined;
-		const observation: TurnObservation = { finish, turnEnded: false, closed: false, turnError: undefined };
+		const observation: TurnObservation = {
+			finish,
+			turnEnded: false,
+			closed: false,
+			turnError: undefined,
+			settled: Promise.withResolvers<void>(),
+		};
 		this.#openTurnObservation = observation;
+		this.#unsettledTurnObservations.add(observation.settled.promise);
 		return observation;
 	}
 
@@ -2118,6 +2129,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		} catch (error) {
 			logger.warn("Turn observer failed to finish", { error: String(error) });
 		}
+		this.#unsettledTurnObservations.delete(observation.settled.promise);
+		observation.settled.resolve();
 	}
 
 	/** Remove advisor concern/blocker cards from the agent-core steer/follow-up
@@ -14435,6 +14448,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		observer: ((records: AgentMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined) | undefined,
 	): void {
 		this.#ircWakeTurnObserver = observer;
+	}
+
+	/**
+	 * Resolves once no turn observation is open or still finishing: every turn the
+	 * {@link setIrcWakeTurnObserver} observer started has been reported. An observer
+	 * finishes after its turn's run ends, so {@link waitForIdle} can return first.
+	 */
+	async waitForTurnObservations(): Promise<void> {
+		while (this.#unsettledTurnObservations.size > 0) {
+			await Promise.all(this.#unsettledTurnObservations);
+		}
 	}
 
 	/**

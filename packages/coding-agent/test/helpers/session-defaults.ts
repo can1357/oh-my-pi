@@ -13,6 +13,7 @@ export function createSessionDefaults() {
 		isRunActive: false,
 		wakeSources: undefined,
 		waitForRunEnd: async () => {},
+		waitForTurnObservations: async () => {},
 		abort: async () => {},
 		dispose: async () => {},
 		setIrcWakeTurnObserver: () => {},

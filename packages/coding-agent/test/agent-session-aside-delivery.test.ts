@@ -1715,6 +1715,55 @@ describe("AgentSession aside delivery", () => {
 		expect(JSON.stringify(mock.calls[1]!.context.messages)).toContain("build ok");
 	});
 
+	it("waits for a wake turn's observer to report after the session has gone idle", async () => {
+		const modelRegistry = new ModelRegistry(authStorage);
+		const mock = createMockModel({ provider: "openai", id: "gpt-test", responses: [{ content: ["all good"] }] });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const settings = Settings.isolated({ "compaction.enabled": false, "todo.enabled": false });
+		settings.setModelRole("default", `${mock.model.provider}/${mock.model.id}`);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			settings,
+			modelRegistry,
+			toolRegistry: new Map(),
+			agentId: "SubAgent",
+		});
+
+		const events: string[] = [];
+		const reporting = Promise.withResolvers<void>();
+		const artifactWritten = Promise.withResolvers<void>();
+		session.setIrcWakeTurnObserver(_records => async () => {
+			reporting.resolve();
+			// The task executor's observer writes the turn's artifact before it settles the agent.
+			await artifactWritten.promise;
+			events.push("reported");
+		});
+
+		await session.deliverIrcMessage({
+			id: "m1",
+			from: "peer",
+			to: "SubAgent",
+			body: "status?",
+			ts: Date.now(),
+		} as IrcMessage);
+		await reporting.promise;
+		await session.waitForIdle();
+		events.push("idle");
+
+		// A follow-up that lost the prompt race to this wake waits here before announcing its own turn.
+		const observed = session.waitForTurnObservations().then(() => events.push("observed"));
+		artifactWritten.resolve();
+		await observed;
+
+		expect(events).toEqual(["idle", "reported", "observed"]);
+	});
+
 	it("a mid-stream steer mention rides the hidden session-agent notice like an idle prompt (#14093)", async () => {
 		const modelRegistry = new ModelRegistry(authStorage);
 		const started = Promise.withResolvers<void>();

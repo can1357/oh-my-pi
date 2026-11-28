@@ -6,6 +6,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
+import { setImmediate } from "node:timers/promises";
 import type { AssistantMessage, ToolCall } from "@oh-my-pi/pi-ai";
 import { type CursorExecResolvedCarrier, kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
@@ -318,7 +319,7 @@ describe("runSubprocess result acceptance", () => {
 		expect(settled?.lifecycle?.terminalAt).toBeNumber();
 	});
 
-	it("reopens a follow-up in the observer after the wake that won its prompt race settles", async () => {
+	it("keeps a follow-up active in the observer when the wake that won its prompt race reports after going idle", async () => {
 		const harness = createHarness();
 		registerRunning(harness.session);
 		const eventBus = new EventBus();
@@ -327,29 +328,35 @@ describe("runSubprocess result acceptance", () => {
 		const session = harness.session as unknown as {
 			prompt: (text: string) => Promise<boolean>;
 			waitForIdle: () => Promise<void>;
+			waitForTurnObservations: () => Promise<void>;
 		};
 		const prompt = session.prompt;
+		const settled: SubagentLifecyclePayload = {
+			id: AGENT_ID,
+			index: 0,
+			agent: baseAgent.name,
+			agentSource: "bundled",
+			status: "completed",
+		};
+		// As in AgentSession: the wake's loop has ended once the session idles, but its observer
+		// settles this same id only afterwards, behind the turn's artifact write (fs I/O, a later
+		// macrotask than anything the follow-up does before it prompts again).
+		let wakeReported: Promise<void> | undefined;
+		session.waitForIdle = async () => {
+			wakeReported ??= setImmediate().then(() => eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, settled));
+		};
+		session.waitForTurnObservations = async () => {
+			await wakeReported;
+		};
 		let attempts = 0;
-		let statusAtRetry: string | undefined;
+		let statusDuringTurn: string | undefined;
 		session.prompt = async text => {
 			attempts += 1;
 			if (attempts === 1) throw new AgentBusyError();
-			statusAtRetry = observers.getSession(AGENT_ID)?.status;
+			// The follow-up turn outlasts the wake's report.
+			await wakeReported;
+			statusDuringTurn = observers.getSession(AGENT_ID)?.status;
 			return prompt(text);
-		};
-		let wakeSettled = false;
-		session.waitForIdle = async () => {
-			if (wakeSettled) return;
-			wakeSettled = true;
-			// The wake turn owning the session settles the same id while the follow-up waits.
-			const settled: SubagentLifecyclePayload = {
-				id: AGENT_ID,
-				index: 0,
-				agent: baseAgent.name,
-				agentSource: "bundled",
-				status: "completed",
-			};
-			eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, settled);
 		};
 
 		try {
@@ -362,8 +369,7 @@ describe("runSubprocess result acceptance", () => {
 
 			expect(result.exitCode).toBe(0);
 			expect(attempts).toBe(2);
-			expect(wakeSettled).toBe(true);
-			expect(statusAtRetry).toBe("active");
+			expect(statusDuringTurn).toBe("active");
 		} finally {
 			observers.dispose();
 		}

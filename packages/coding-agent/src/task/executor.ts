@@ -4314,16 +4314,16 @@ async function driveFollowUpTurn(
 					attemptUnsubscribe();
 					logger.debug("Subagent follow-up lost the prompt race to an IRC wake; backing off", { id });
 					await session.setWorkPoolYieldItems([]);
-					if (signal) {
-						await untilAborted(signal, () => session.waitForIdle());
-					} else {
+					// The wake reports its turn (settling this same id) only after the session idles.
+					await untilAborted(signal, async () => {
 						await session.waitForIdle();
-					}
+						await session.waitForTurnObservations();
+					});
 					resetYieldTurnState(session.getToolByName("yield"));
 					await session.setWorkPoolYieldItems(options.workPoolYieldItems ?? []);
 					attemptUnsubscribe = monitor.attach(session);
-					// The wake that won the race settles this same id while we wait; republish
-					// this turn's start so observers do not treat its progress as a straggler.
+					// The wake that won the race has settled this same id by now; republish this
+					// turn's start so observers do not treat its progress as a straggler.
 					// A fresh object: observers dedupe frames by identity across both buses.
 					emitSubagentFrame(options.eventBus, options.subagentEventBus, TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
 						...startedPayload,
