@@ -801,7 +801,11 @@ pub struct HeldProcess {
 /// their defaults for the run and restored after it.
 #[napi]
 pub fn run_shell_main(argv: Vec<String>) -> i32 {
-	let opts = omp_shell::process::ProcessOptions { embedded: true };
+	// On Windows pi's utilities stand in for the Unix tools `PATH` lacks.
+	let opts = omp_shell::process::ProcessOptions {
+		embedded: true,
+		extras:   cfg!(windows).then_some(omp_shell::process::ExtrasOrder::AfterPath),
+	};
 	std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| omp_shell::process::main(argv, opts)))
 		.unwrap_or(101)
 }

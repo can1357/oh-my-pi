@@ -23,7 +23,10 @@ describe("compact model catalog", () => {
 			openrouter: { [first.id]: first, [second.id]: second },
 		};
 		const catalog = openModelCatalog(JSON.parse(encodeModelCatalog(input)));
-		expect(getCatalogProvider(catalog, "openrouter")).toEqual(JSON.parse(JSON.stringify(input.openrouter)));
+		const decoded = getCatalogProvider(catalog, "openrouter")!;
+		expect(decoded).toEqual(JSON.parse(JSON.stringify(input.openrouter)));
+		const decodedHash = Bun.hash(JSON.stringify(Object.values(decoded))).toString(36);
+		expect(catalog.data.providerHashes?.openrouter).toBe(decodedHash);
 		expect(getCatalogProvider(catalog, "missing")).toBeUndefined();
 	});
 });

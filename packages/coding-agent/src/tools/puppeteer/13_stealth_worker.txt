@@ -78,7 +78,7 @@ const patchWorkerConstructor = (name, OriginalWorker) => {
 		return absoluteUrl.href;
 	};
 
-	const buildWorkerPrelude = () => {
+	const buildWorkerPrelude = (depth = 0) => {
 		const values = [];
 		const addNavigatorString = (prop) => {
 			try {
@@ -88,6 +88,19 @@ const patchWorkerConstructor = (name, OriginalWorker) => {
 		};
 		addNavigatorString("userAgent");
 		addNavigatorString("platform");
+		// Workers expose their own navigator: a page-level numeric patch (hardwareConcurrency) has to
+		// be mirrored here or the page and its workers disagree, which is its own tell.
+		const addNavigatorNumber = (prop) => {
+			try {
+				const value = navigator[prop];
+				if (typeof value === "number") values.push([prop, value]);
+			} catch {}
+		};
+		addNavigatorNumber("hardwareConcurrency");
+		try {
+			const languages = navigator.languages;
+			if (languages && typeof languages.length === "number") values.push(["languages", Array.prototype.slice.call(languages)]);
+		} catch {}
 		if (!values.length) return "";
 
 		return `(() => {
@@ -99,7 +112,39 @@ const patchWorkerConstructor = (name, OriginalWorker) => {
 		const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
 		const getPrototypeOf = Object.getPrototypeOf;
 		const Reflect_apply = Reflect.apply;
+		const Reflect_construct = Reflect.construct;
 		const nativeFunctionToString = Function.prototype.toString;
+		// Built as a value, so no newline escape has to survive the page-side template.
+		const NL = String.fromCharCode(10);
+		const SELF_PRELUDE = "";
+		// Nested workers get these same values. Built by concatenation so no nested template
+		// delimiters need escaping.
+		const CHILD_SOURCE =
+			SELF_PRELUDE ||
+			[
+				"(() => {",
+				"try {",
+				"const values = " + JSON.stringify(values) + ";",
+				"const nav = self.navigator;",
+				"if (!nav) return;",
+				"const sources = new WeakMap();",
+				"for (let i = 0; i < values.length; i += 1) {",
+				"const prop = values[i][0];",
+				"const value = values[i][1];",
+				"const getter = Object.getOwnPropertyDescriptor({ get [prop]() { return value; } }, prop).get;",
+				"sources.set(getter, 'function get ' + prop + '() { [native code] }');",
+				"let owner = nav;",
+				"while (owner && !Object.getOwnPropertyDescriptor(owner, prop)) owner = Object.getPrototypeOf(owner);",
+				"if (!owner) { Object.defineProperty(nav, prop, { get: getter, enumerable: true, configurable: true }); continue; }",
+				"try { Object.defineProperty(owner, prop, { get: getter, enumerable: true, configurable: true }); }",
+				"catch (_) { Object.defineProperty(nav, prop, { get: getter, enumerable: true, configurable: true }); }",
+				"}",
+				"const toString = new Proxy(Function.prototype.toString, { apply: (t, o, a) => sources.get(o) || Reflect.apply(t, o, a) });",
+				"sources.set(toString, 'function toString() { [native code] }');",
+				"Object.defineProperty(Function.prototype, 'toString', { value: toString, writable: true, configurable: true });",
+				"} catch (_) {}",
+				"})();",
+			].join("\\n");
 		const nativeSources = new WeakMap();
 		const WeakMap_get = WeakMap.prototype.get;
 		const WeakMap_has = WeakMap.prototype.has;
@@ -124,21 +169,69 @@ const patchWorkerConstructor = (name, OriginalWorker) => {
 			try {
 				if (nav[prop] === value) continue;
 			} catch (_) {}
-			const found = findDescriptor(prop);
-			const owner = found[0];
-			const descriptor = found[1];
-			if (!owner || (descriptor && descriptor.configurable === false)) continue;
 			const getterDescriptor = getOwnPropertyDescriptor({ get [prop]() { return value; } }, prop);
 			const getter = getterDescriptor && getterDescriptor.get;
 			if (typeof getter !== "function") continue;
 			rememberNative(getter, "function get " + prop + "() { [native code] }");
-			defineProperty(owner, prop, {
-				get: getter,
-				enumerable: descriptor ? descriptor.enumerable : true,
-				configurable: true,
-			});
+			const found = findDescriptor(prop);
+			const owner = found[0];
+			const descriptor = found[1];
+			// A worker's navigator slot can be non-configurable: fall back to an own property there
+			// rather than leave the worker disagreeing with its page, and fall back again if the
+			// prototype write throws.
+			try {
+				if (!owner || (descriptor && descriptor.configurable === false)) throw 0;
+				defineProperty(owner, prop, {
+					get: getter,
+					enumerable: descriptor ? descriptor.enumerable : true,
+					configurable: true,
+				});
+			} catch (_) {
+				defineProperty(nav, prop, { get: getter, enumerable: true, configurable: true });
+			}
 			patched = true;
 		}
+		// A worker can spawn workers of its own; they are separate realms and stay pristine unless
+		// they get this same prelude. SELF_PRELUDE is this source, embedded by the caller.
+		const wrapNestedWorker = (name) => {
+			const Original = self[name];
+			if (typeof Original !== "function") return;
+			const proxied = new Proxy(Original, {
+					construct(target, args, newTarget) {
+						try {
+							const first = args && args[0];
+							if (typeof first === "string" && CHILD_SOURCE) {
+								const resolved = new URL(first, globalThis.SELF_BASE || self.location.href);
+								const target_ = resolved.href;
+								const blob = new Blob(
+									[
+										CHILD_SOURCE +
+											NL +
+											"globalThis.SELF_BASE = " +
+											JSON.stringify(target_) +
+											";" +
+											NL +
+											"importScripts(" +
+											JSON.stringify(target_) +
+											");",
+									],
+									{ type: "application/javascript" },
+								);
+								const wrapped = URL.createObjectURL(blob);
+								const next = args.slice();
+								next[0] = wrapped;
+								return Reflect_construct(target, next, newTarget);
+							}
+						} catch (_) {}
+						return Reflect_construct(target, args, newTarget);
+					},
+				});
+			rememberNative(proxied, "function " + name + "() { [native code] }");
+			defineProperty(self, name, { value: proxied, writable: true, configurable: true });
+			patched = true;
+		};
+		wrapNestedWorker("Worker");
+		wrapNestedWorker("SharedWorker");
 		if (!patched) return;
 		const toStringDescriptor = getOwnPropertyDescriptor(Function.prototype, "toString");
 		if (toStringDescriptor && toStringDescriptor.configurable === false) return;
@@ -172,7 +265,11 @@ const patchWorkerConstructor = (name, OriginalWorker) => {
 
 		try {
 			const blob = new Window_Blob(
-				[prelude, "\n", `importScripts(${JSON.stringify(originalUrl)});`],
+				[
+					prelude,
+					"\nglobalThis.SELF_BASE = " + JSON.stringify(originalUrl) + ";",
+					`importScripts(${JSON.stringify(originalUrl)});`,
+				],
 				{ type: "application/javascript" },
 			);
 			const url = Reflect_apply(URL_createObjectURL, NativeURL, [blob]);

@@ -9,7 +9,7 @@
  * follows theme switches like the prose around it.
  */
 import { logger } from "@oh-my-pi/pi-utils";
-import { lexMarkdown, type Token, type Tokens } from "@oh-my-pi/pi-tui/text/markdown/lexer";
+import { lexMarkdown, linkDefinitions, type Token, type Tokens } from "@oh-my-pi/pi-tui/text/markdown/lexer";
 import { buildChart, type ChartPlan, planChart, shouldJudge, worthCharting } from "../../auto-graph/chart-plan";
 import { renderChartSvg } from "../../auto-graph/chart-svg";
 import { analyzeTable, type TableAnalysis } from "../../auto-graph/table-data";
@@ -89,14 +89,21 @@ export function hasChartTable(markdown: string): boolean {
 /**
  * Split `markdown` after each top-level table that has (or may get) a chart.
  * A table still streaming at the block's tail is left whole: rows may follow.
+ * Once finished, every prose run carries the block's reference-link definitions,
+ * so a reference on one side of a chart resolves against a definition on the other.
  */
 export function splitTableCharts(markdown: string, streaming: boolean): ChartSegment[] {
 	if (chartMode === "off") return [{ kind: "markdown", text: markdown }];
 	if (!streaming) {
-		const whole = walk(lexMarkdown(markdown), false, [], "");
+		const tokens = lexMarkdown(markdown);
+		const whole = walk(tokens, false, [], "");
 		const segments = whole.segments.slice();
 		if (whole.prose.trim() || segments.length === 0) segments.push({ kind: "markdown", text: whole.prose });
-		return segments;
+		const definitions = segments.length > 1 ? linkDefinitions(tokens) : "";
+		if (!definitions) return segments;
+		return segments.map(segment =>
+			segment.kind === "markdown" ? { kind: "markdown", text: `${definitions}\n\n${segment.text}` } : segment,
+		);
 	}
 	// Token `raw`s hold the source as the lexer reads it (line ends unified, tabs expanded): compare in that form.
 	const source = markdown.replace(/\r\n|\r/g, "\n").replaceAll("\t", "    ");

@@ -27,7 +27,7 @@ export type PredictedStatusFacts = Pick<
 	| "model"
 	| "thinkingLevel"
 	| "autoThinking"
-	| "fastMode"
+	| "fastTier"
 	| "usingSubscription"
 	| "autoCompact"
 	| "compaction"
@@ -45,8 +45,8 @@ export interface StatusPrediction {
 export interface FreshSession {
 	/** The occupancy a fresh session starts with (system prompt and tools). */
 	readonly context: StatusContext;
-	/** Whether the configured service tier makes the model fast. */
-	readonly fastMode: boolean;
+	/** The fast tier realized by the configured service tier, if any. */
+	readonly fastTier: StatusFacts["fastTier"];
 }
 
 /** The prediction a live bar makes for the next launch's fresh session. */
@@ -61,7 +61,7 @@ export function predictStatus(facts: StatusFacts, settings: StatusLineSettings, 
 			...(facts.profile !== undefined ? { profile: facts.profile } : {}),
 			usingSubscription: facts.usingSubscription,
 			autoCompact: facts.autoCompact,
-			fastMode: fresh.fastMode,
+			...(fresh.fastTier ? { fastTier: fresh.fastTier } : {}),
 			context: fresh.context,
 		},
 	};
@@ -76,7 +76,7 @@ export interface StartupDefaultStatus {
 }
 
 /**
- * `prediction` with the resolved default model in place of the cached one. Fast mode and the
+ * `prediction` with the resolved default model in place of the cached one. The fast tier and the
  * compaction boundaries belong to the cached model, so they drop when the model changes, and the
  * fresh session's occupancy is measured against the new model's window.
  */
@@ -84,7 +84,7 @@ export function withStartupDefault(prediction: StatusPrediction, update: Startup
 	const { model } = update;
 	const previous = prediction.facts.model;
 	const changed = previous?.id !== model.id || previous?.provider !== model.provider;
-	const { thinkingLevel: _level, compaction, fastMode, context, ...facts } = prediction.facts;
+	const { thinkingLevel: _level, compaction, fastTier, context, ...facts } = prediction.facts;
 	const window = model.contextWindow ?? 0;
 	return {
 		settings: prediction.settings,
@@ -100,7 +100,7 @@ export function withStartupDefault(prediction: StatusPrediction, update: Startup
 			...(update.thinkingLevel !== undefined ? { thinkingLevel: update.thinkingLevel } : {}),
 			autoThinking: update.autoThinking,
 			usingSubscription: update.usingSubscription,
-			...(!changed && fastMode !== undefined ? { fastMode } : {}),
+			...(!changed && fastTier ? { fastTier } : {}),
 			...(!changed && compaction ? { compaction } : {}),
 			context: changed
 				? { tokens: context.tokens, window, percent: window ? (context.tokens / window) * 100 : null }
@@ -197,7 +197,7 @@ function isFacts(value: unknown): value is PredictedStatusFacts {
 		isOptional(value.model, isModel) &&
 		isOptional(value.thinkingLevel, isString) &&
 		isOptional(value.autoThinking, isBoolean) &&
-		isOptional(value.fastMode, isBoolean) &&
+		(value.fastTier === undefined || value.fastTier === "priority" || value.fastTier === "ultrafast") &&
 		isOptional(value.compaction, isCompaction) &&
 		isOptional(value.profile, isString) &&
 		isBoolean(value.usingSubscription) &&

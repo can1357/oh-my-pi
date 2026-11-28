@@ -4,6 +4,7 @@
 //! `-after`, `-between` conditions.
 
 use bstr::{BString, ByteSlice};
+use xutf::{Utf8Decoder, Utf8Step};
 
 use super::{
 	Comp,
@@ -915,9 +916,9 @@ fn metacharlen(s: &[u8], i: usize, multibyte: bool) -> usize {
 	if is_tok(b) {
 		return 1;
 	}
-	let mut raw = Vec::with_capacity(4);
+	let mut decoder = Utf8Decoder::new();
 	let mut p = i;
-	while p < s.len() && raw.len() < 4 {
+	while p < s.len() {
 		let c = if s[p] == META {
 			p += 1;
 			s.get(p).map_or(0, |&c| c ^ 32)
@@ -927,11 +928,10 @@ fn metacharlen(s: &[u8], i: usize, multibyte: bool) -> usize {
 			s[p]
 		};
 		p += 1;
-		raw.push(c);
-		match std::str::from_utf8(&raw) {
-			Ok(_) => return p - i,
-			Err(e) if e.error_len().is_some() => break,
-			Err(_) => {},
+		match decoder.push(c) {
+			Utf8Step::Char(_) => return p - i,
+			Utf8Step::Pending => {},
+			Utf8Step::Reject => break,
 		}
 	}
 	1 + usize::from(b == META)

@@ -14,7 +14,7 @@ import { discoverRelayEndpoints } from "../../coding-agent/src/tools/browser/rel
 import type { Target } from "puppeteer-core";
 import puppeteer from "puppeteer-core";
 
-const relayUrl = Bun.argv[2] ?? discoverRelayEndpoints()[0];
+const relayUrl = Bun.argv[2] ?? (await discoverRelayEndpoints())[0];
 if (!relayUrl) throw new Error("No local omp browser relay found; supply the relay URL explicitly.");
 const matcher = Bun.argv[3] ?? "Relay Smoke Page";
 

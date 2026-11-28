@@ -17,16 +17,18 @@ export interface PrintRowsOptions {
 	readonly now?: number;
 	/** Emit OSC 8 links (default: whether stdout's terminal renders them). */
 	readonly hyperlinks?: boolean;
-	/** Paint spinners at the frame of `now` (a live board repainting on a timer) instead of still. */
+	/** Paint spinners and decorative motion at the clock of `now` (a live board repainting on a timer) instead of still. */
 	readonly motion?: boolean;
 }
 
 /** The rows of the nodes `view` builds at `width`, painted still unless `motion`. */
 export function printRows(view: () => JSXNode, width: number, options: PrintRowsOptions = {}): string[] {
 	ensureTheme();
+	const still = options.motion !== true;
 	const env = staticEnvironment(currentTheme(), {
 		now: options.now ?? Date.now(),
-		reduceMotion: options.motion !== true,
+		reduceMotion: still,
+		...(still ? { spinnerInterval: 0 } : {}),
 		hyperlinks:
 			options.hyperlinks ?? (process.stdout.isTTY === true && hyperlinksDefault(Bun.env, detectTerminalId(Bun.env))),
 	});

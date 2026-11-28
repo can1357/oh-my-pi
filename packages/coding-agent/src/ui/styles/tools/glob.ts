@@ -61,6 +61,7 @@ function paintGlob(node: UiNode, cx: PaintContext): Block {
 		const empty = `${searchGlyph(theme, "warning")} ${theme.fg("muted", term.empty)}`;
 		return {
 			rows: [...(term.headless ? [] : rows), ...wrap(empty, cx.width), ...noteRows(theme, term.notes, cx.width)],
+			...(term.headless ? {} : { heading: rows.length }),
 		};
 	}
 	const files = term.files ?? [];
@@ -75,6 +76,7 @@ function paintGlob(node: UiNode, cx: PaintContext): Block {
 	if (shown.length < files.length) items.push(moreItem(theme, files.length - shown.length, "files"));
 	return {
 		rows: [...rows, ...treeRows(theme, items, cx.width), ...noteRows(theme, term.notes, cx.width)],
+		heading: rows.length,
 	};
 }
 

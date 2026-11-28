@@ -17,7 +17,7 @@ import type { ModelHubSource } from "./view-model/overlays/model-hub";
  * Supply live model-overlay preferences and runtime resolution from the host.
  * @param settings - Settings backing preferences, roles, and model perf
  * @param sessionServiceTier - The live session's effective tier for a model
- *   (`/fast`, `/fast ultra`, `/slow`, resumed tiers). Omit only where no session
+ *   (`/fast`, `/ultrafast`, `/slow`, resumed tiers). Omit only where no session
  *   exists; the configured `tier.*` settings stand in then.
  */
 export function createModelBrowserSource(

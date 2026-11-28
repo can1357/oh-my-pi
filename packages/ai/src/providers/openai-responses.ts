@@ -694,6 +694,11 @@ interface ResponsesAttemptContext {
 	mode: ResponsesTransport | undefined;
 	/** Set once the server refused replayed encrypted reasoning; later attempts build without it. */
 	dropEncryptedReasoning: boolean;
+	/**
+	 * Provider session state the first attempt resolved. Retries reuse it: the host may have retired
+	 * the map entry since (a model switch), and a retry must not put a fresh one back under that key.
+	 */
+	providerSessionState?: OpenAIResponsesProviderSessionState;
 }
 
 function isPreSendTransportFallback(error: unknown, signal: AbortSignal): boolean {
@@ -810,7 +815,10 @@ const streamOpenAIResponsesOnce = (
 					parentSessionId: options?.parentSessionId,
 				});
 			const premiumRequestsTotal = copilotPremiumRequests;
-			const providerSessionState = getOpenAIResponsesProviderSessionState(model, options?.providerSessionState);
+			const providerSessionState = (attemptContext.providerSessionState ??= getOpenAIResponsesProviderSessionState(
+				model,
+				options?.providerSessionState,
+			));
 			const resolvedBaseUrl = (baseUrl ?? "https://api.openai.com/v1").replace(/\/+$/, "");
 			const requestUrl = `${resolvedBaseUrl}/responses`;
 			let transportSessions = providerSessionState?.transports;

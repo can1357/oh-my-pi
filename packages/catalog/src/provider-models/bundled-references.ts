@@ -17,14 +17,16 @@ export function toModelSpec<TApi extends Api>(model: Model<TApi>): ModelSpec<TAp
 		supportsComputerUseConfig,
 		...rest
 	} = model;
+	const spec: ModelSpec<TApi> = rest;
 	// Unverified thinking is derived output too: references must not carry it to
 	// another host as reasoning capability.
-	return {
-		...rest,
-		...(model.thinking?.unverified ? { reasoning: undefined, thinking: undefined } : {}),
-		...(supportsComputerUseConfig !== undefined ? { supportsComputerUse: supportsComputerUseConfig } : {}),
-		compat: compatConfig,
-	};
+	if (model.thinking?.unverified) {
+		spec.reasoning = undefined;
+		spec.thinking = undefined;
+	}
+	if (supportsComputerUseConfig !== undefined) spec.supportsComputerUse = supportsComputerUseConfig;
+	spec.compat = compatConfig;
+	return spec;
 }
 
 export function createBundledReferenceMap<TApi extends Api>(

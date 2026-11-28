@@ -8,7 +8,7 @@
 //! **/     leading: any (possibly empty) run of whole directories
 //! /**     trailing: '/' followed by anything
 //! /**/    '/' or '/…/'
-//! [a-z]   byte class; [!…] and [^…] negate (negated classes match '/')
+//! [a-z]   byte class; [!…] and [^…] negate; no class matches '/'
 //! {a,b}   alternatives (empty alternatives are dropped)
 //! \c      literal c
 //! ```
@@ -145,7 +145,7 @@ impl Glob {
 	}
 
 	/// The most `/`-separated components a matching path can have, or `None`
-	/// when a `**` or a class matching `/` makes it unbounded.
+	/// when a `**` makes it unbounded.
 	pub fn max_depth(&self) -> Option<usize> {
 		if self.all {
 			return None;
@@ -203,7 +203,7 @@ impl Tok {
 }
 
 const fn class_matches(neg: bool, set: &ByteSet, b: u8) -> bool {
-	set.has(b) != neg
+	b != b'/' && set.has(b) != neg
 }
 
 /// Port of globset's parser, including its handling of `**` inside
@@ -569,7 +569,6 @@ impl Alt {
 				for t in &self.toks {
 					match t {
 						Tok::Lit(lit) => depth += memchr::memchr_iter(b'/', lit).count(),
-						Tok::Class { neg, set } if class_matches(*neg, set, b'/') => return None,
 						Tok::RecPrefix | Tok::RecSuffix | Tok::RecMiddle => return None,
 						_ => {},
 					}
@@ -598,7 +597,6 @@ impl Alt {
 fn can_match_slash(toks: &[Tok]) -> bool {
 	toks.iter().any(|t| match t {
 		Tok::Lit(lit) => lit.contains(&b'/'),
-		Tok::Class { neg, set } => class_matches(*neg, set, b'/'),
 		Tok::RecPrefix | Tok::RecSuffix | Tok::RecMiddle => true,
 		_ => false,
 	})

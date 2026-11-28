@@ -15,7 +15,7 @@ default = ["wasm"]
 # Grammars outside the linked set load as WebAssembly (src/language/grammar.rs).
 # Pulls wasmtime + cranelift (and cmake at build time); off, such grammars report
 # `GrammarError::Invalid` and the 17 linked grammars work unchanged.
-wasm = ["tree-sitter/wasm", "dep:semver"]
+wasm = ["tree-sitter/wasm"]
 
 [dependencies]
 anyhow.workspace = true
@@ -25,8 +25,6 @@ phf.workspace = true
 omp-xfs.workspace = true
 omp-vfs.workspace = true
 serde.workspace = true
-# Match the host semver features used by wasmtime's build dependencies.
-semver = { version = "1", optional = true }
 tokio.workspace = true
 tokio-util.workspace = true
 tree-sitter.workspace = true

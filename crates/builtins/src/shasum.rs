@@ -460,7 +460,7 @@ fn looks_like_text(sample: &[u8]) -> bool {
 	if sample.is_empty() {
 		return true;
 	}
-	if !sample.is_ascii() && std::str::from_utf8(sample).map_or_else(|error| error.error_len().is_none(), |_| true) {
+	if !sample.is_ascii() && !matches!(xutf::decode(sample), Err(xutf::DecodeError::Invalid { .. })) {
 		return true;
 	}
 	if sample.contains(&0) {

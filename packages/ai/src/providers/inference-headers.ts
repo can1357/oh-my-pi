@@ -40,13 +40,19 @@ export interface InferenceHeaderOptions {
 	/**
 	 * Model compat. A session header it declares (KDL `session-header` or
 	 * `prompt-cache-session-header`) is the host's own affinity header, so the
-	 * generic `x-session-id` fallback stays off.
+	 * generic `x-session-id` fallback stays off. An `additive-session-header`
+	 * is sent next to the protocol's session headers instead.
 	 */
 	compat?: object;
 }
 
 /** Session header most gateways and proxies route on (bifrost, llmgateway, agentgateway, …). */
 const GENERIC_SESSION_HEADER = "x-session-id";
+
+function additiveSessionHeader(compat: object | undefined): string | undefined {
+	if (!compat || !("additiveSessionHeader" in compat)) return undefined;
+	return typeof compat.additiveSessionHeader === "string" ? compat.additiveSessionHeader : undefined;
+}
 
 function declaresSessionHeader(compat: object | undefined): boolean {
 	if (!compat) return false;
@@ -145,10 +151,6 @@ export function applyInferenceHeaders(headers: Record<string, string>, options: 
 		let hostHeader = isOpenCode || declaresSessionHeader(options.compat);
 		if (options.protocol === "anthropic") {
 			setHeader(headers, "X-Claude-Code-Session-Id", sessionId);
-			// Copilot's `/v1/messages` proxy needs the Copilot CLI's session header:
-			// without it text replies come back as a `msg_blocked` placeholder
-			// prefixed with "cached data for request … not found" (#20678).
-			if (backend === "github-copilot") setHeaderIfAbsent(headers, "X-Client-Session-Id", sessionId);
 			// Official Anthropic keeps Claude Code's exact header set.
 			hostHeader ||= backend === "anthropic";
 		} else if (options.protocol === "openai" && backend === "openai") {
@@ -165,6 +167,9 @@ export function applyInferenceHeaders(headers: Record<string, string>, options: 
 		if (!hostHeader && options.protocol !== "google") {
 			setHeaderIfAbsent(headers, GENERIC_SESSION_HEADER, options.parentSessionId ?? sessionId);
 		}
+		// e.g. Copilot's `/v1/messages` answers `msg_blocked` without `X-Client-Session-Id` (#20678).
+		const additive = additiveSessionHeader(options.compat);
+		if (additive) setHeaderIfAbsent(headers, additive, sessionId);
 	}
 
 	if (isOpenCode) {

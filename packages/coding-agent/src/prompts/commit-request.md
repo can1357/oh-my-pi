@@ -7,7 +7,6 @@ Commit the changes you and your subagents made, nothing else. Other agents and t
 ### Draft
 
 Every changed line of the repository, attributed from your edit journal:
-
 ```
 {{summary}}
 ```

@@ -8,6 +8,7 @@
  * `authStorage.getApiKey("anthropic", sessionId)` first, then pass the result
  * through {@link buildAnthropicAuthConfig} for header/URL shaping.
  */
+import type { AnthropicCompat } from "@oh-my-pi/pi-catalog/types";
 import { $env } from "@oh-my-pi/pi-utils";
 import {
 	buildAnthropicHeaders,
@@ -95,6 +96,8 @@ export interface AnthropicSearchHeaderOptions {
 	provider?: string;
 	/** The selected model's declared backend (`providerType`). */
 	providerType?: string;
+	/** The selected model's `compat.additiveSessionHeader`. */
+	additiveSessionHeader?: AnthropicCompat["additiveSessionHeader"];
 	/** Conversation id carried by the backend's session headers. */
 	sessionId?: string;
 }
@@ -126,6 +129,7 @@ export function buildAnthropicSearchHeaders(
 			providerType: options.providerType,
 			protocol: "anthropic",
 			sessionId: options.sessionId,
+			compat: { additiveSessionHeader: options.additiveSessionHeader },
 		});
 	}
 	return headers;
