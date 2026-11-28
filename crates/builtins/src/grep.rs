@@ -804,6 +804,12 @@ fn build_matcher(
 	ignore_case: bool,
 ) -> Result<Engine, String> {
 	if mode == MatchMode::Perl {
+		// In a UTF-8 locale, GNU grep 3.11 and 3.12 built against PCRE2 10.43 or
+		// later turn UCP on and set `PCRE2_EXTRA_ASCII_BSD`, so `\d` matches an
+		// ASCII digit alone while `\w`, `\b`, the POSIX classes and `-w` follow
+		// Unicode. Older builds run without UCP, and a locale that is not UTF-8
+		// reads `\d` as ASCII too. The builtin turns UCP on in every locale, so
+		// it sets that option in every locale.
 		let mut builder = PcreMatcherBuilder::new();
 		builder
 			.caseless(ignore_case)
@@ -811,6 +817,7 @@ fn build_matcher(
 			.whole_line(cli.line_regexp)
 			.utf(true)
 			.ucp(true)
+			.ascii_bsd(true)
 			.jit_if_available(pcre2_jit_enabled(host.var("OMP_PCRE2_JIT")));
 		return builder
 			.build_many(patterns)
@@ -2792,6 +2799,39 @@ mod tests {
 		let (code, out, err) = run(&["-P", "(?<=foo)bar"], "foobar\nbar\n").await;
 		assert_eq!(code, 0, "{err}");
 		assert_eq!(out, "foobar\n");
+	}
+
+	/// Under `-P`, `\d` matches an ASCII digit alone, as GNU grep 3.11 and 3.12
+	/// read it in every locale: in a UTF-8 locale, builds against PCRE2 10.43
+	/// or later turn UCP on and set `PCRE2_EXTRA_ASCII_BSD`, and the other
+	/// builds and locales read `\d` as ASCII. `٣` (an Arabic-Indic digit) is
+	/// no `\d` and is a `\D`, also where the pattern's own `)` closes the group
+	/// grep wraps it in. Failure mode: PCRE2's Unicode properties made `\d`
+	/// match `٣`. Each count and exit status is GNU grep 3.11's.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn perl_mode_matches_only_ascii_digits_with_d() {
+		for (args, stdin, expected) in [
+			(&["-Pc", r"\d"][..], "\u{663}\n", (1, "0\n")),
+			(&["-Pc", r"\D"], "\u{663}\n", (0, "1\n")),
+			(&["-Pc", r"[\d]"], "\u{663}\n", (1, "0\n")),
+			(&["-Pc", r"[^\d]"], "\u{663}\n", (0, "1\n")),
+			(&["-Po", r"\d+"], "1\u{663}2\n", (0, "1\n2\n")),
+			(&["-Pc", r"\d"], "7\n", (0, "1\n")),
+			(&["-Pcw", r"x)|(\d"], "\u{663}\n", (1, "0\n")),
+		] {
+			let (code, out, err) = run(args, stdin).await;
+			assert_eq!((code, out.as_str()), expected, "grep {args:?}: {err}");
+		}
+		// A compile error exits 2, as in GNU grep. The message is the builtin's
+		// own (GNU's names no offset): its offset counts the pattern and the
+		// `(?:` grep wraps it in, and nothing else.
+		for (pattern, message) in [
+			("a)", "offset 5: unmatched closing parenthesis"),
+			("(?<=a+)b", "offset 3: length of lookbehind assertion is not limited"),
+		] {
+			let err = format!("grep: PCRE2: error compiling pattern at {message}\n");
+			assert_eq!(run(&["-P", pattern], "a\n").await, (2, String::new(), err), "grep -P {pattern:?}");
+		}
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
