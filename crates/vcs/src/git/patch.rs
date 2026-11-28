@@ -156,6 +156,7 @@ impl GitRepo {
 		repo: &gix::Repository,
 		selection: &str,
 		hook_patch: &str,
+		parent_commit: Option<gix::hash::ObjectId>,
 	) -> Result<(gix::lock::File, Vec<String>)> {
 		let selection = parse_patch(selection).map_err(ApplyFailure::into_error)?;
 		let hook_patches = if hook_patch.is_empty() {
@@ -169,7 +170,13 @@ impl GitRepo {
 		let index = load_index_or_head(repo, "git commit read shared index")?;
 		super::mutate::reject_unmerged_index(&index, "git commit")?;
 		let mut state = index_state_map(&index);
+		// The locked index as read, untouched by this loop: rename evidence must
+		// come from it, not from entries this selection already applied.
+		let original = state.clone();
 		let mut kept = BTreeSet::new();
+		// Read only for a moved path: the parent commit holds the blob a
+		// staged `git mv` left under the new path.
+		let mut parent_tree = None;
 		for patch in selection.iter().chain(&hook_patches) {
 			let paths = [patch.old_path.as_deref(), patch.new_path.as_deref()];
 			if paths.iter().flatten().any(|path| kept.contains(path)) {
@@ -198,6 +205,72 @@ impl GitRepo {
 				Ok(()) => continue,
 				Err(Error::PatchFailed { .. } | Error::Conflict { .. }) => {},
 				Err(err) => return Err(err),
+			}
+			// A staged `git mv` of a selected path fails both tests: the
+			// forward patch sees the entry already at the new path, the
+			// reverse does not find the edited content there. When the
+			// original locked index holds only the staged rename — the new
+			// path carrying the parent commit's blob of a path this
+			// selection deletes, with that deleted path absent from the
+			// index — the commit includes that rename, so adopting the
+			// committed blob loses no one else's staged work. Any other
+			// shape, including a same-path conflict or an independently
+			// staged addition whose evidence does not line up, keeps the
+			// entry as it is (issue #20298).
+			let is_same_path_conflict = patch.old_path.is_some() && patch.old_path == patch.new_path;
+			if !is_same_path_conflict
+				&& let Some(new_path) = patch.new_path.as_deref()
+				&& let Some(parent) = parent_commit
+				&& let Some(staged) = original.get(new_path)
+				&& state.get(new_path) == Some(staged)
+			{
+				if parent_tree.is_none() {
+					let tree = super::mutate::commit_tree(repo, &parent)?;
+					parent_tree = Some(tree_map(repo, tree)?);
+				}
+				let old_tree = parent_tree.as_ref().expect("parent tree loaded");
+				let own_old = patch.old_path.as_deref();
+				let is_staged_rename = |path: &str| {
+					!original.contains_key(path)
+						&& old_tree
+							.get(path)
+							.is_some_and(|base| base.id == staged.id && base.mode == staged.mode)
+				};
+				// The moved path comes from the patch's own rename side or
+				// from a separate deletion patch the per-path selection emits.
+				let renamed = own_old.is_some_and(is_staged_rename)
+					|| (own_old.is_none()
+						&& selection
+							.iter()
+							.filter_map(|other| other.old_path.as_deref())
+							.any(is_staged_rename));
+				if renamed {
+					// Text patches carry no `index` line, so the committed blob
+					// is reconstructed by applying the patch to its parent
+					// preimage; this yields the same blob the commit tree holds.
+					let committed = (|| {
+						let mut probe = BTreeMap::new();
+						if let Some(old_path) = patch.old_path.as_deref()
+							&& let Some(base) = old_tree.get(old_path)
+						{
+							probe.insert(old_path.to_owned(), base.clone());
+						}
+						let forward = ApplyOptions { cached: true, ..Default::default() };
+						apply_patches_to_map(repo, &mut probe, std::slice::from_ref(patch), &forward)?;
+						Ok::<_, Error>(
+							patch
+								.new_path
+								.as_deref()
+								.and_then(|path| probe.get(path).cloned()),
+						)
+					})()
+					.ok()
+					.flatten();
+					if let Some(entry) = committed {
+						state.insert(new_path.to_owned(), entry);
+						continue;
+					}
+				}
 			}
 			kept.extend(paths.into_iter().flatten());
 		}

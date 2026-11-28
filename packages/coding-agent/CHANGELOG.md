@@ -369,6 +369,7 @@
 - Selective commits now leave HEAD and staging unchanged if the shared index stays locked. Retry once the lock is released ([#20252](https://github.com/can1357/oh-my-pi/issues/20252)).
 - Cache warming no longer sends a refresh after sleep or another timer delay leaves less than ten seconds before cache expiry ([#20366](https://github.com/can1357/oh-my-pi/issues/20366)).
 
+- A selective commit of a file moved with `git mv` and edited afterwards no longer leaves the moved path staged with the pre-edit content: the shared index now matches HEAD after the commit, so the next `git rebase` does not stop on it ([#20298](https://github.com/can1357/oh-my-pi/issues/20298))
 ## [19.2.1] - 2026-11-25
 
 ### Breaking Changes

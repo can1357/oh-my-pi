@@ -404,7 +404,7 @@ impl GitRepo {
 				},
 				_ => String::new(),
 			};
-			Some(Self::prepare_commit_index(&repo, selection, &hook_patch)?)
+			Some(Self::prepare_commit_index(&repo, selection, &hook_patch, old_commit)?)
 		} else {
 			None
 		};
@@ -1597,7 +1597,10 @@ fn mark_skipped_like(index: &mut gix::index::State, shared: &gix::index::State) 
 	}
 }
 
-fn commit_tree(repo: &gix::Repository, id: &gix::hash::ObjectId) -> Result<gix::hash::ObjectId> {
+pub(super) fn commit_tree(
+	repo: &gix::Repository,
+	id: &gix::hash::ObjectId,
+) -> Result<gix::hash::ObjectId> {
 	let commit = repo
 		.find_commit(*id)
 		.map_err(|e| Error::backend("git commit", e))?;
