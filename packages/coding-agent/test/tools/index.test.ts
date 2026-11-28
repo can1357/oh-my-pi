@@ -126,20 +126,21 @@ describe("createTools", () => {
 		{ mode: "off", toolNames: ["glob", "find"], expectedNames: ["glob"] },
 		{ mode: "auto", toolNames: ["glob"], expectedNames: ["glob"] },
 		{ mode: "auto", toolNames: undefined, expectedNames: [] },
-	])(
-		"does not probe auto-find for $mode with a restricted request of $toolNames",
-		async ({ mode, toolNames, expectedNames }) => {
-			const session = createTestSession({
-				restrictToolNames: true,
-				settings: createSettingsWithOverrides({ "find.enabled": mode }),
-			});
-			const resolveAutoFind = vi.fn(async () => false);
-			const tools = await createTools(session, toolNames && [...toolNames], { resolveAutoFind });
+	])("does not probe auto-find for $mode with a restricted request of $toolNames", async ({
+		mode,
+		toolNames,
+		expectedNames,
+	}) => {
+		const session = createTestSession({
+			restrictToolNames: true,
+			settings: createSettingsWithOverrides({ "find.enabled": mode }),
+		});
+		const resolveAutoFind = vi.fn(async () => false);
+		const tools = await createTools(session, toolNames && [...toolNames], { resolveAutoFind });
 
-			expect(tools.map(tool => tool.name)).toEqual([...expectedNames]);
-			expect(resolveAutoFind).not.toHaveBeenCalled();
-		},
-	);
+		expect(tools.map(tool => tool.name)).toEqual([...expectedNames]);
+		expect(resolveAutoFind).not.toHaveBeenCalled();
+	});
 
 	it("still exposes eval when only the js backend is allowed", async () => {
 		const session = createTestSession({

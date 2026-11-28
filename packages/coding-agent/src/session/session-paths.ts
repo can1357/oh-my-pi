@@ -359,13 +359,7 @@ export async function computeDefaultSessionDirAsync(
 }
 
 function* prepareProjectSessionDir(
-	{
-		encodedDirName,
-		hashedDirName,
-		shadowedHomeDirName,
-		shadowedHomeHashedDirName,
-		resolvedCwd,
-	}: DefaultSessionDirNames,
+	{ encodedDirName, hashedDirName, shadowedHomeDirName, shadowedHomeHashedDirName, resolvedCwd }: DefaultSessionDirNames,
 	storage: SessionStorage,
 	sessionsRoot: string,
 	requestedRoot: string,

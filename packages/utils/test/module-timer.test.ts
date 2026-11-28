@@ -18,30 +18,22 @@ test("the opt-in preload observes reads and top-level evaluation, not the gap be
 		mkdirSync(join(cwd, "jsx"));
 		write("jsx/jsx-runtime.js", "export const jsx = tag => tag;");
 		write("jsx/jsx-dev-runtime.js", "export const jsxDEV = tag => tag;");
-		write(
-			"leaf.ts",
-			`export const begin = performance.now();
+		write("leaf.ts", `export const begin = performance.now();
 await Bun.file(import.meta.path).text();
-export const end = performance.now();`,
-		);
-		write(
-			"root.tsx",
-			`#!/usr/bin/env bun
+export const end = performance.now();`);
+		write("root.tsx", `#!/usr/bin/env bun
 /** @jsxImportSource ./jsx */
 "use strict"
 import { begin, end } from "./leaf.ts";
 export const bounds = [begin, end];
 export const tag = <probe/>;
-`,
-		);
+`);
 		write("asset.d.ts", "declare const text: string;");
 		write("common.cts", "module.exports = 42;");
 		writeFileSync(join(root, "common.ts"), "module.exports = 99;");
 		write("after-stop.ts", "export const afterStop = true;");
 		write("later.ts", "export const later = performance.now();");
-		write(
-			"entry.mjs",
-			`
+		write("entry.mjs", `
 import { drainModuleLoadEvents, stopModuleLoadTiming } from "./timing-buffer.ts";
 import { bounds, tag } from "./root.tsx";
 import asset from "./asset.d.ts" with { type: "text" };
@@ -55,17 +47,14 @@ stopModuleLoadTiming();
 // Exercise the opt-out boundary; a static import would have already evaluated.
 const { afterStop } = await import("./after-stop.ts");
 console.log(JSON.stringify({ bounds, tag, common, commonTS, asset, first, later, second, afterStop, third: drainModuleLoadEvents() }));
-`,
-		);
+`);
 		for (const mode of ["x", "x,modules", "full"]) {
 			const run = Bun.spawnSync([process.execPath, "--preload", "./module-timer.ts", "entry.mjs"], {
 				cwd,
 				env: { ...process.env, PI_TIMING: mode },
 			});
 			expect(run.exitCode, run.stderr.toString()).toBe(0);
-			const { bounds, tag, common, commonTS, asset, first, later, second, afterStop, third } = JSON.parse(
-				run.stdout.toString(),
-			);
+			const { bounds, tag, common, commonTS, asset, first, later, second, afterStop, third } = JSON.parse(run.stdout.toString());
 			expect(third).toEqual([]);
 			expect(afterStop).toBe(true);
 			expect(commonTS).toBe(99);

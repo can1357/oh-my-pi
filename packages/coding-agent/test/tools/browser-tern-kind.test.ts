@@ -43,17 +43,9 @@ describe("resolveBrowserKind with Tern", () => {
 			kind: "connected",
 			cdpUrl: "http://127.0.0.1:9222",
 		});
-		expect((await resolveBrowserKind({ action: "open" }, session({ "browser.relay": true }), TERN_ENV)).kind).toBe(
-			"relay",
-		);
+		expect((await resolveBrowserKind({ action: "open" }, session({ "browser.relay": true }), TERN_ENV)).kind).toBe("relay");
 		expect(
-			(
-				await resolveBrowserKind(
-					{ action: "open" },
-					session({ "browser.cdpUrl": "http://127.0.0.1:9333" }),
-					TERN_ENV,
-				)
-			).kind,
+			(await resolveBrowserKind({ action: "open" }, session({ "browser.cdpUrl": "http://127.0.0.1:9333" }), TERN_ENV)).kind,
 		).toBe("connected");
 	});
 
@@ -63,9 +55,7 @@ describe("resolveBrowserKind with Tern", () => {
 
 	it('skips Tern for app: "own" and the setting, falling through to cmux only for the setting', async () => {
 		expect((await resolveBrowserKind({ action: "open", app: "own" }, session(), cmuxEnv)).kind).toBe("headless");
-		expect((await resolveBrowserKind({ action: "open" }, session({ "browser.tern": false }), cmuxEnv)).kind).toBe(
-			"cmux",
-		);
+		expect((await resolveBrowserKind({ action: "open" }, session({ "browser.tern": false }), cmuxEnv)).kind).toBe("cmux");
 	});
 
 	it('target adopts in Tern even with the browser.tern setting off, unless app: "own"', async () => {
@@ -96,27 +86,17 @@ describe("resolveBrowserKind in a terminal another omp owns", () => {
 	const otherOwner = { [TERMINAL_OWNER_ENV]: String(process.pid + 1) };
 
 	it("opens managed Chromium instead of a Tern PiP or a cmux surface", async () => {
-		expect((await resolveBrowserKind({ action: "open" }, session(), { ...paneEnv, ...otherOwner })).kind).toBe(
-			"headless",
-		);
+		expect((await resolveBrowserKind({ action: "open" }, session(), { ...paneEnv, ...otherOwner })).kind).toBe("headless");
 		expect(
-			(
-				await resolveBrowserKind({ action: "open" }, session(), {
-					CMUX_SOCKET_PATH: "/tmp/cmux.sock",
-					...otherOwner,
-				})
-			).kind,
+			(await resolveBrowserKind({ action: "open" }, session(), { CMUX_SOCKET_PATH: "/tmp/cmux.sock", ...otherOwner })).kind,
 		).toBe("headless");
 	});
 
 	it("still uses a configured relay or CDP URL, which come before Tern", async () => {
 		const env = { ...paneEnv, ...otherOwner };
-		expect((await resolveBrowserKind({ action: "open" }, session({ "browser.relay": true }), env)).kind).toBe(
-			"relay",
-		);
+		expect((await resolveBrowserKind({ action: "open" }, session({ "browser.relay": true }), env)).kind).toBe("relay");
 		expect(
-			(await resolveBrowserKind({ action: "open" }, session({ "browser.cdpUrl": "http://127.0.0.1:9333" }), env))
-				.kind,
+			(await resolveBrowserKind({ action: "open" }, session({ "browser.cdpUrl": "http://127.0.0.1:9333" }), env)).kind,
 		).toBe("connected");
 	});
 
@@ -132,13 +112,11 @@ describe("resolveBrowserKind in a terminal another omp owns", () => {
 		expect(await resolveBrowserKind({ action: "open", target: "github" }, session(), env)).toEqual(TERN);
 		expect(await resolveBrowserKind({ action: "open" }, session(), { ...env, PI_BROWSER_TERN: "1" })).toEqual(TERN);
 		expect(
-			(
-				await resolveBrowserKind({ action: "open" }, session(), {
-					CMUX_SOCKET_PATH: "/tmp/cmux.sock",
-					PI_BROWSER_CMUX: "1",
-					...otherOwner,
-				})
-			).kind,
+			(await resolveBrowserKind({ action: "open" }, session(), {
+				CMUX_SOCKET_PATH: "/tmp/cmux.sock",
+				PI_BROWSER_CMUX: "1",
+				...otherOwner,
+			})).kind,
 		).toBe("cmux");
 	});
 });
