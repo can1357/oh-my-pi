@@ -19,7 +19,7 @@ import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { AgentBusyError, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { IrcBridge, type IrcBridgeHost } from "@oh-my-pi/pi-coding-agent/session/irc-bridge";
 import {
@@ -27,6 +27,11 @@ import {
 	runSubagentFollowUpTurn,
 	runSubprocess,
 } from "@oh-my-pi/pi-coding-agent/task/executor";
+import {
+	SessionObserverRegistry,
+	type SubagentLifecyclePayload,
+	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
+} from "@oh-my-pi/pi-coding-agent/task/session-observer-registry";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
@@ -311,6 +316,57 @@ describe("runSubprocess result acceptance", () => {
 		expect(settled?.lifecycle?.responseAt).toBeNumber();
 		expect(settled?.lifecycle?.acceptedAt).toBeNumber();
 		expect(settled?.lifecycle?.terminalAt).toBeNumber();
+	});
+
+	it("reopens a follow-up in the observer after the wake that won its prompt race settles", async () => {
+		const harness = createHarness();
+		registerRunning(harness.session);
+		const eventBus = new EventBus();
+		const observers = new SessionObserverRegistry();
+		observers.subscribeToEventBus(eventBus, eventBus);
+		const session = harness.session as unknown as {
+			prompt: (text: string) => Promise<boolean>;
+			waitForIdle: () => Promise<void>;
+		};
+		const prompt = session.prompt;
+		let attempts = 0;
+		let statusAtRetry: string | undefined;
+		session.prompt = async text => {
+			attempts += 1;
+			if (attempts === 1) throw new AgentBusyError();
+			statusAtRetry = observers.getSession(AGENT_ID)?.status;
+			return prompt(text);
+		};
+		let wakeSettled = false;
+		session.waitForIdle = async () => {
+			if (wakeSettled) return;
+			wakeSettled = true;
+			// The wake turn owning the session settles the same id while the follow-up waits.
+			const settled: SubagentLifecyclePayload = {
+				id: AGENT_ID,
+				index: 0,
+				agent: baseAgent.name,
+				agentSource: "bundled",
+				status: "completed",
+			};
+			eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, settled);
+		};
+
+		try {
+			const result = await runSubagentFollowUpTurn({
+				id: AGENT_ID,
+				agent: baseAgent,
+				message: "continue",
+				eventBus,
+			});
+
+			expect(result.exitCode).toBe(0);
+			expect(attempts).toBe(2);
+			expect(wakeSettled).toBe(true);
+			expect(statusAtRetry).toBe("active");
+		} finally {
+			observers.dispose();
+		}
 	});
 
 	it("terminalizes the ref when an autonomous wake turn's yield is accepted", async () => {

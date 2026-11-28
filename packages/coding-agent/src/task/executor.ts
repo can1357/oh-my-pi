@@ -4322,6 +4322,12 @@ async function driveFollowUpTurn(
 					resetYieldTurnState(session.getToolByName("yield"));
 					await session.setWorkPoolYieldItems(options.workPoolYieldItems ?? []);
 					attemptUnsubscribe = monitor.attach(session);
+					// The wake that won the race settles this same id while we wait; republish
+					// this turn's start so observers do not treat its progress as a straggler.
+					// A fresh object: observers dedupe frames by identity across both buses.
+					emitSubagentFrame(options.eventBus, options.subagentEventBus, TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+						...startedPayload,
+					});
 				},
 			});
 			if (resultDelivered(outcome, monitor, structured)) {
