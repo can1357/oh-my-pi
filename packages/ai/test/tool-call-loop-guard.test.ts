@@ -682,3 +682,242 @@ describe("ToolCallLoopGuard unresolved tool calls (issue #10876)", () => {
 		}
 	});
 });
+
+describe("ToolCallLoopGuard cyclic polling detection", () => {
+	let nextId = 0;
+
+	function makeTurn(
+		calls: Array<{ name: string; args: Record<string, unknown> }>,
+		opts?: { useless?: boolean; injectedContext?: boolean; unresolved?: boolean; resultText?: string },
+	) {
+		const toolCalls: ToolCall[] = calls.map(({ name, args }) => ({
+			type: "toolCall",
+			id: `cyc_${nextId++}`,
+			name,
+			arguments: args,
+		}));
+		const message = {
+			role: "assistant",
+			content: toolCalls,
+			api: "openai-responses",
+			provider: "openai",
+			model: "test-model",
+			usage: zeroUsage,
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		} satisfies AssistantMessage;
+		const toolResults: ToolResultMessage[] = toolCalls.map(call => ({
+			role: "toolResult",
+			toolCallId: call.id,
+			toolName: call.name,
+			content: [{ type: "text", text: opts?.resultText ?? "ok" }],
+			isError: Boolean(opts?.unresolved),
+			...(opts?.useless ? { useless: true } : {}),
+			timestamp: Date.now(),
+		}));
+		return {
+			message,
+			toolResults,
+			...(opts?.injectedContext ? { injectedContext: true } : {}),
+			...(opts?.unresolved ? { unresolvedToolCallIds: toolCalls.map(c => c.id) } : {}),
+		};
+	}
+
+	test("detects a 2-turn alternating polling cycle at threshold and keeps reporting until broken", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 3, maxCycleLength: 3, exemptTools: ["wait"] });
+		const pollSleep = () => makeTurn([{ name: "bash", args: { command: "sleep 30" } }]);
+		const pollChecks = () =>
+			makeTurn([{ name: "bash", args: { command: "gh pr checks" } }], { resultText: "pending" });
+
+		// Cycles 1 and 2: below threshold
+		expect(guard.recordTurn(pollSleep())).toBeNull();
+		expect(guard.recordTurn(pollChecks())).toBeNull();
+		expect(guard.recordTurn(pollSleep())).toBeNull();
+		expect(guard.recordTurn(pollChecks())).toBeNull();
+		expect(guard.recordTurn(pollSleep())).toBeNull();
+
+		// Cycle 3 completes on pollChecks
+		const hit = guard.recordTurn(pollChecks());
+		expect(hit).toMatchObject({
+			kind: "repeated_tool_call",
+			toolName: "bash",
+			count: 3,
+			cycleLength: 2,
+			resultSummary: "pending",
+		});
+		expect(hit!.cycleSummary).toContain("sleep 30");
+		expect(hit!.cycleSummary).toContain("gh pr checks");
+
+		// Continuing the cycle keeps steering (count increments on full cycle completion)
+		expect(guard.recordTurn(pollSleep())).toMatchObject({ cycleLength: 2, count: 3 });
+		expect(guard.recordTurn(pollChecks())).toMatchObject({ cycleLength: 2, count: 4 });
+
+		// Breaking the cycle clears detection
+		expect(guard.recordTurn(makeTurn([{ name: "read", args: { path: "README.md" } }]))).toBeNull();
+		expect(guard.recordTurn(pollSleep())).toBeNull();
+	});
+
+	test("detects a 3-turn repeating cycle", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 2, maxCycleLength: 3, exemptTools: [] });
+		const a = () => makeTurn([{ name: "bash", args: { command: "step-a" } }]);
+		const b = () => makeTurn([{ name: "bash", args: { command: "step-b" } }]);
+		const c = () => makeTurn([{ name: "bash", args: { command: "step-c" } }]);
+		expect(guard.recordTurn(a())).toBeNull();
+		expect(guard.recordTurn(b())).toBeNull();
+		expect(guard.recordTurn(c())).toBeNull();
+		expect(guard.recordTurn(a())).toBeNull();
+		expect(guard.recordTurn(b())).toBeNull();
+		expect(guard.recordTurn(c())).toMatchObject({
+			kind: "repeated_tool_call",
+			count: 2,
+			cycleLength: 3,
+		});
+	});
+
+	test("preserves cycle counting across idle exempt polls, but resets on productive exempt polls", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 2, maxCycleLength: 3, exemptTools: ["wait"] });
+		const a = () => makeTurn([{ name: "bash", args: { command: "check-a" } }]);
+		const b = () => makeTurn([{ name: "bash", args: { command: "check-b" } }]);
+		const idleWait = () => makeTurn([{ name: "wait", args: {} }], { useless: true });
+		const activeWait = () => makeTurn([{ name: "wait", args: {} }], { useless: false });
+
+		expect(guard.recordTurn(a())).toBeNull();
+		expect(guard.recordTurn(idleWait())).toBeNull();
+		expect(guard.recordTurn(b())).toBeNull();
+		expect(guard.recordTurn(a())).toBeNull();
+		expect(guard.recordTurn(idleWait())).toBeNull();
+		expect(guard.recordTurn(b())).toMatchObject({ cycleLength: 2, count: 2 });
+
+		// Productive exempt poll resets the cycle completely
+		expect(guard.recordTurn(activeWait())).toBeNull();
+		expect(guard.recordTurn(a())).toBeNull();
+		expect(guard.recordTurn(b())).toBeNull();
+	});
+
+	test("reports primitive period only (never classifies period 1 as 2 or period 2 as 4)", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 2, maxCycleLength: 4, exemptTools: [] });
+		const a = () => makeTurn([{ name: "bash", args: { command: "same" } }]);
+		expect(guard.recordTurn(a())).toBeNull();
+		const hit1 = guard.recordTurn(a());
+		expect(hit1?.count).toBe(2);
+		expect(hit1?.cycleLength).toBeUndefined();
+		const hit2 = guard.recordTurn(a());
+		expect(hit2?.count).toBe(3);
+		expect(hit2?.cycleLength).toBeUndefined();
+
+		const guard2 = new ToolCallLoopGuard({ threshold: 2, maxCycleLength: 4, exemptTools: [] });
+		const x = () => makeTurn([{ name: "bash", args: { command: "x" } }]);
+		const y = () => makeTurn([{ name: "bash", args: { command: "y" } }]);
+		expect(guard2.recordTurn(x())).toBeNull();
+		expect(guard2.recordTurn(y())).toBeNull();
+		expect(guard2.recordTurn(x())).toBeNull();
+		expect(guard2.recordTurn(y())).toMatchObject({ cycleLength: 2, count: 2 });
+		// Even after 8 alternating turns (which looks like [x,y,x,y] x 2), period stays 2.
+		for (let i = 0; i < 4; i++) {
+			const res = guard2.recordTurn(i % 2 === 0 ? x() : y());
+			expect(res?.cycleLength).toBe(2);
+		}
+	});
+
+	test("clamps pathological maxCycleLength values safely", () => {
+		for (const badMax of [Number.NaN, -3, 0, 10_000]) {
+			const guard = new ToolCallLoopGuard({ threshold: 2, maxCycleLength: badMax, exemptTools: [] });
+			const a = () => makeTurn([{ name: "bash", args: { command: "a" } }]);
+			const b = () => makeTurn([{ name: "bash", args: { command: "b" } }]);
+			expect(guard.recordTurn(a())).toBeNull();
+			expect(guard.recordTurn(b())).toBeNull();
+			expect(guard.recordTurn(a())).toBeNull();
+			const res = guard.recordTurn(b());
+			if (badMax === 10_000) {
+				expect(res).toMatchObject({ cycleLength: 2, count: 2 });
+			} else {
+				expect(res).toBeNull();
+			}
+		}
+	});
+
+	test("seeded property/fuzz pass: state-machine invariants across 300 randomized sequences", () => {
+		let state = 0x9e3779b9;
+		const nextInt = (max: number) => {
+			state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+			return state % max;
+		};
+
+		const started = performance.now();
+		for (let trial = 0; trial < 300; trial++) {
+			const threshold = 2 + nextInt(3); // 2..4
+			const maxCycleLength = 1 + nextInt(4); // 1..4
+			const guard = new ToolCallLoopGuard({ threshold, maxCycleLength, exemptTools: ["wait"] });
+			const alphabet = ["a", "b", "c", "d"];
+			const observed: string[] = [];
+
+			const steps = 10 + nextInt(20);
+			for (let s = 0; s < steps; s++) {
+				const roll = nextInt(10);
+				if (roll === 0) {
+					// Idle exempt wait: skipped without resetting observed sequence
+					expect(guard.recordTurn(makeTurn([{ name: "wait", args: {} }], { useless: true }))).toBeNull();
+					continue;
+				}
+				if (roll === 1) {
+					// Non-idle exempt wait: resets everything
+					expect(guard.recordTurn(makeTurn([{ name: "wait", args: {} }], { useless: false }))).toBeNull();
+					observed.length = 0;
+					continue;
+				}
+				const sym = alphabet[nextInt(alphabet.length)]!;
+				observed.push(sym);
+				const det = guard.recordTurn(makeTurn([{ name: "bash", args: { command: sym } }]));
+
+				// Independent oracle: check whether `observed` ends in a repeating cycle of period 1..maxCycleLength.
+				let expectedPeriod: number | null = null;
+				for (let p = 1; p <= maxCycleLength; p++) {
+					const needed = p * threshold;
+					if (observed.length < needed) continue;
+					const tailStart = observed.length - p;
+					let matches = true;
+					for (let k = 0; k < needed; k++) {
+						if (observed[observed.length - needed + k] !== observed[tailStart + (k % p)]) {
+							matches = false;
+							break;
+						}
+					}
+					if (matches) {
+						expectedPeriod = p;
+						break;
+					}
+				}
+				if (expectedPeriod !== null) {
+					expect(det).not.toBeNull();
+					expect(det!.cycleLength ?? 1).toBe(expectedPeriod);
+				}
+
+				if (det) {
+					expect(det.kind).toBe("repeated_tool_call");
+					expect(det.count).toBeGreaterThanOrEqual(threshold);
+					const period = det.cycleLength ?? 1;
+					expect(period).toBeGreaterThanOrEqual(1);
+					expect(period).toBeLessThanOrEqual(maxCycleLength);
+					const needed = period * threshold;
+					expect(observed.length).toBeGreaterThanOrEqual(needed);
+					// Verify the last `period * threshold` observed symbols truly repeat the last `period` symbols
+					const tailStart = observed.length - period;
+					for (let k = 0; k < needed; k++) {
+						expect(observed[observed.length - needed + k]).toBe(observed[tailStart + (k % period)]);
+					}
+					// Verify primitivity for period > 1
+					if (period > 1) {
+						const tail = observed.slice(tailStart);
+						let hasSmallerPeriod = false;
+						for (let q = 1; q * 2 <= period; q++) {
+							if (period % q !== 0) continue;
+							if (tail.every((v, idx) => v === tail[idx % q])) hasSmallerPeriod = true;
+						}
+						expect(hasSmallerPeriod).toBe(false);
+					}
+				}
+			}
+		}
+		expect(performance.now() - started).toBeLessThan(2000);
+	});
+});

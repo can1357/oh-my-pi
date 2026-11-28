@@ -11,6 +11,9 @@ const PROGRESS_ARGUMENT_KEY =
 	/(?:^|[_-])(?:skip|offset|limit|page(?:num|index|size)?|cursor|since|before|after|start|from|first|take)(?:[_-]|$)/i;
 /** A whitespace-delimited token that names a distinct filesystem target. Digits inside it stay. */
 const PATH_LIKE_TOKEN = /[/\\]|\.[A-Za-z0-9_-]{1,8}$/;
+const CYCLE_STEP_SUMMARY_LIMIT = 80;
+const CYCLE_SUMMARY_LIMIT = 400;
+const MAX_CYCLE_LENGTH_CAP = 8;
 
 /** Runtime settings for cross-turn tool-call repetition detection. */
 export interface ToolCallLoopGuardOptions {
@@ -18,6 +21,12 @@ export interface ToolCallLoopGuardOptions {
 	readonly exemptTools: readonly string[];
 	/** Lets transport calls inherit an exemption from their dispatched tool without exempting the transport itself. */
 	readonly exemptionAlias?: (call: ToolCall) => string | undefined;
+	/**
+	 * Maximum repeating multi-turn cycle length to detect (default 1 = consecutive identical turns only).
+	 * Values > 1 also detect repeating sequences such as A, B, A, B, ... (cycle length 2)
+	 * or A, B, C, A, B, C, ... (cycle length 3), clamped to [1, 8].
+	 */
+	readonly maxCycleLength?: number;
 }
 
 /** A completed assistant turn plus the tool results it produced. */
@@ -33,7 +42,8 @@ export interface ToolCallLoopTurn {
 /**
  * Details needed to steer the model away from a tool-call loop.
  *
- * `repeated_tool_call`: the same calls repeated across consecutive turns.
+ * `repeated_tool_call`: the same calls (or a repeating multi-turn cycle when
+ * `cycleLength > 1`) repeated across consecutive turns.
  * `unresolved_tool_call`: consecutive turns called only tools that do not
  * exist, whatever their names or arguments; the reported call is the latest.
  */
@@ -41,8 +51,47 @@ export interface RepeatedToolCallDetection {
 	readonly kind: "repeated_tool_call" | "unresolved_tool_call";
 	readonly toolName: string;
 	readonly count: number;
+	/** Number of distinct turns in the detected repeating cycle (present when > 1). */
+	readonly cycleLength?: number;
+	/** Compact summary of the repeating sequence of turns (present when cycleLength > 1). */
+	readonly cycleSummary?: string;
 	readonly resultSummary: string;
 	readonly argumentsSummary: string;
+}
+
+interface TurnHistoryEntry {
+	readonly hash: string;
+	readonly label: string;
+}
+
+interface ActiveCycle {
+	readonly period: number;
+	readonly pattern: readonly string[];
+	turns: number;
+}
+
+function summarizeTurnStep(toolCalls: readonly ToolCall[]): string {
+	const parts = toolCalls.map(tc => {
+		const args = summarizeText(JSON.stringify(canonicalizeToolCallValue(tc.arguments)), CYCLE_STEP_SUMMARY_LIMIT);
+		return `${tc.name}(${args})`;
+	});
+	return summarizeText(parts.join(" + "), CYCLE_STEP_SUMMARY_LIMIT);
+}
+
+/** Returns true when `entries` of length `period` is not itself a repetition of a smaller divisor period. */
+function isPrimitiveCycle(entries: readonly TurnHistoryEntry[], period: number): boolean {
+	for (let q = 1; q * 2 <= period; q++) {
+		if (period % q !== 0) continue;
+		let periodic = true;
+		for (let i = q; i < period; i++) {
+			if (entries[i]!.hash !== entries[i % q]!.hash) {
+				periodic = false;
+				break;
+			}
+		}
+		if (periodic) return false;
+	}
+	return true;
 }
 
 function canonicalizeToolCallValue(value: unknown): unknown {
@@ -124,11 +173,13 @@ function summarizeToolResult(toolResults: readonly ToolResultMessage[], toolCall
 }
 
 /**
- * Detects tool-call loops across model turns: consecutive identical calls, and
+ * Detects tool-call loops across model turns: consecutive identical calls,
+ * short repeating multi-turn cycles (when `maxCycleLength > 1`), and
  * consecutive turns whose every call failed to resolve to a tool.
  */
 export class ToolCallLoopGuard {
 	#threshold: number;
+	#maxCycleLength: number;
 	#exemptTools: ReadonlySet<string>;
 	#exemptionAlias: ((call: ToolCall) => string | undefined) | undefined;
 	#lastHash: string | undefined;
@@ -136,12 +187,28 @@ export class ToolCallLoopGuard {
 	#lastNormalizedHash: string | undefined;
 	#lastAssistantText: string | undefined;
 	#unresolvedCount = 0;
+	#history: TurnHistoryEntry[] = [];
+	#activeCycle: ActiveCycle | undefined;
 
 	/** Keeps transport-specific exemption policy outside the shared repetition detector. */
 	constructor(options: ToolCallLoopGuardOptions) {
-		this.#threshold = Math.max(1, Math.trunc(options.threshold));
+		this.#threshold = Number.isFinite(options.threshold) ? Math.max(1, Math.trunc(options.threshold)) : 1;
+		this.#maxCycleLength =
+			options.maxCycleLength !== undefined && Number.isFinite(options.maxCycleLength)
+				? Math.min(MAX_CYCLE_LENGTH_CAP, Math.max(1, Math.trunc(options.maxCycleLength)))
+				: 1;
 		this.#exemptTools = new Set(options.exemptTools);
 		this.#exemptionAlias = options.exemptionAlias;
+	}
+
+	#reset(): void {
+		this.#lastHash = undefined;
+		this.#count = 0;
+		this.#lastNormalizedHash = undefined;
+		this.#lastAssistantText = undefined;
+		this.#unresolvedCount = 0;
+		this.#history = [];
+		this.#activeCycle = undefined;
 	}
 
 	/** Applies the same exemption policy when counting turns and choosing the reported call. */
@@ -155,11 +222,7 @@ export class ToolCallLoopGuard {
 	recordTurn(turn: ToolCallLoopTurn): RepeatedToolCallDetection | null {
 		const toolCalls = turn.message.content.filter((part): part is ToolCall => part.type === "toolCall");
 		if (toolCalls.length === 0) {
-			this.#lastHash = undefined;
-			this.#count = 0;
-			this.#lastNormalizedHash = undefined;
-			this.#lastAssistantText = undefined;
-			this.#unresolvedCount = 0;
+			this.#reset();
 			return null;
 		}
 		const unresolvedIds = turn.unresolvedToolCallIds;
@@ -178,11 +241,7 @@ export class ToolCallLoopGuard {
 				!turn.injectedContext &&
 				toolCalls.every(tc => turn.toolResults.find(result => result.toolCallId === tc.id)?.useless === true);
 			if (!idle) {
-				this.#lastHash = undefined;
-				this.#count = 0;
-				this.#lastNormalizedHash = undefined;
-				this.#lastAssistantText = undefined;
-				this.#unresolvedCount = 0;
+				this.#reset();
 			}
 			return null;
 		} else {
@@ -218,14 +277,84 @@ export class ToolCallLoopGuard {
 		this.#lastNormalizedHash = assistantText.length > 0 ? normalizedHash : undefined;
 		this.#lastAssistantText = assistantText.length > 0 ? assistantText : undefined;
 
+		if (this.#maxCycleLength > 1) {
+			this.#history.push({ hash: turnHash, label: summarizeTurnStep(toolCalls) });
+			const maxWindow = this.#threshold * this.#maxCycleLength;
+			if (this.#history.length > maxWindow) {
+				this.#history.splice(0, this.#history.length - maxWindow);
+			}
+			if (this.#activeCycle) {
+				const expected = this.#activeCycle.pattern[this.#activeCycle.turns % this.#activeCycle.period];
+				if (turnHash === expected) {
+					this.#activeCycle.turns++;
+				} else {
+					this.#activeCycle = undefined;
+				}
+			}
+		}
+
 		// The unresolved streak wins a tie: "that tool does not exist" is the
 		// corrective an identical miss needs, not "change the arguments".
 		if (this.#unresolvedCount >= this.#threshold) {
 			return this.#detection("unresolved_tool_call", toolCalls[toolCalls.length - 1]!, this.#unresolvedCount, turn);
 		}
-		if (this.#count < this.#threshold) return null;
-		const reportCall = toolCalls.find(tc => !this.#isExempt(tc)) ?? toolCalls[0]!;
-		return this.#detection("repeated_tool_call", reportCall, this.#count, turn);
+		if (this.#count >= this.#threshold) {
+			this.#activeCycle = undefined;
+			const reportCall = toolCalls.find(tc => !this.#isExempt(tc)) ?? toolCalls[0]!;
+			return this.#detection("repeated_tool_call", reportCall, this.#count, turn);
+		}
+		if (this.#maxCycleLength > 1) {
+			const cycleMatch = this.#detectCycle();
+			if (cycleMatch) {
+				const reportCall = toolCalls.find(tc => !this.#isExempt(tc)) ?? toolCalls[0]!;
+				return this.#detection("repeated_tool_call", reportCall, cycleMatch.count, turn, {
+					cycleLength: cycleMatch.period,
+					cycleSummary: cycleMatch.summary,
+				});
+			}
+		}
+		return null;
+	}
+
+	#detectCycle(): { period: number; count: number; summary: string } | null {
+		if (this.#activeCycle) {
+			const period = this.#activeCycle.period;
+			const tail = this.#history.slice(-period);
+			return {
+				period,
+				count: Math.floor(this.#activeCycle.turns / period),
+				summary: summarizeText(tail.map(entry => entry.label).join(" -> "), CYCLE_SUMMARY_LIMIT),
+			};
+		}
+
+		const len = this.#history.length;
+		for (let period = 2; period <= this.#maxCycleLength; period++) {
+			const needed = period * this.#threshold;
+			if (len < needed) continue;
+			const start = len - needed;
+			const tailStart = len - period;
+			let matches = true;
+			for (let offset = 0; offset < needed; offset++) {
+				if (this.#history[start + offset]!.hash !== this.#history[tailStart + (offset % period)]!.hash) {
+					matches = false;
+					break;
+				}
+			}
+			if (!matches) continue;
+			const cycleEntries = this.#history.slice(tailStart);
+			if (!isPrimitiveCycle(cycleEntries, period)) continue;
+			this.#activeCycle = {
+				period,
+				pattern: cycleEntries.map(entry => entry.hash),
+				turns: needed,
+			};
+			return {
+				period,
+				count: this.#threshold,
+				summary: summarizeText(cycleEntries.map(entry => entry.label).join(" -> "), CYCLE_SUMMARY_LIMIT),
+			};
+		}
+		return null;
 	}
 
 	#detection(
@@ -233,11 +362,13 @@ export class ToolCallLoopGuard {
 		reportCall: ToolCall,
 		count: number,
 		turn: ToolCallLoopTurn,
+		cycle?: { cycleLength: number; cycleSummary: string },
 	): RepeatedToolCallDetection {
 		return {
 			kind,
 			toolName: reportCall.name,
 			count,
+			...(cycle ? { cycleLength: cycle.cycleLength, cycleSummary: cycle.cycleSummary } : {}),
 			resultSummary: summarizeToolResult(turn.toolResults, reportCall.id),
 			argumentsSummary: summarizeText(
 				JSON.stringify(canonicalizeToolCallValue(reportCall.arguments)),
