@@ -144,6 +144,8 @@ export type AsyncJobManagerProtocol = {
 		string
 	>;
 	cancel: RpcMethod<[id: string, filter: AsyncJobFilter | undefined], boolean>;
+	/** Error text crosses the wire; main rebuilds it as the failed job's error. */
+	failEvalJob: RpcMethod<[jobId: string, errorText: string, filter: AsyncJobFilter | undefined], boolean>;
 	getJob: RpcMethod<[id: string], AsyncJobWire | undefined>;
 	getRunningJobs: RpcMethod<[filter: AsyncJobFilter | undefined], AsyncJobWire[]>;
 	getRecentJobs: RpcMethod<[limit: number | undefined, filter: AsyncJobFilter | undefined], AsyncJobWire[]>;

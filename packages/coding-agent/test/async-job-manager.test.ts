@@ -444,6 +444,35 @@ describe("AsyncJobManager", () => {
 		expect(manager.getJob(jobId)?.resultText).toBe("late result");
 	});
 
+	test("fails a dead-kernel eval job without settling its run before cleanup finishes", async () => {
+		const deliveries: Array<{ jobId: string; text: string }> = [];
+		const manager = new AsyncJobManager({});
+		manager.registerDeliverySink("owner", (jobId, text) => {
+			deliveries.push({ jobId, text });
+		});
+		const release = Promise.withResolvers<void>();
+		const jobId = manager.register("eval", "await work()", async () => {
+			await release.promise;
+			return "late result";
+		}, { ownerId: "owner" });
+
+		// killSession fails the job through the manager while the run body is
+		// still executing: the error is delivered, but the job's promise keeps
+		// holding owner reaping until the run settles (PR #13438 review).
+		expect(manager.failEvalJob(jobId, new Error("JS eval kernel died"), { ownerId: "owner" })).toBe(true);
+		expect(manager.failEvalJob(jobId, new Error("second failure"), { ownerId: "other" })).toBe(false);
+		expect(manager.getJob(jobId)?.status).toBe("failed");
+		expect(manager.getJob(jobId)?.errorText).toBe("JS eval kernel died");
+		expect(await manager.waitForOwnerJobs("owner", { timeoutMs: 50 })).toBe(false);
+		await manager.drainDeliveries({ filter: { ownerId: "owner" }, timeoutMs: 2_000 });
+		expect(deliveries).toEqual([{ jobId, text: "JS eval kernel died" }]);
+
+		release.resolve();
+		await manager.waitForOwnerJobs("owner");
+		expect(manager.getJob(jobId)?.status).toBe("failed");
+		await manager.dispose();
+	});
+
 	test.each(["single", "bulk"] as const)("keeps %s cancelled work reapable past retention", async kind => {
 		vi.useFakeTimers();
 		const manager = new AsyncJobManager({ retentionMs: 25 });

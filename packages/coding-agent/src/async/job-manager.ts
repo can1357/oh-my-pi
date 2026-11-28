@@ -410,6 +410,16 @@ export interface AsyncJobManagerApi {
 	): string;
 	/** Cancel one running job; a filter whose owner does not match reads as not-found. */
 	cancel(id: string, filter?: AsyncJobFilter): boolean;
+	/**
+	 * Fail a running eval job whose JS kernel died; `killSession` is the intended
+	 * caller. Marks the job failed, queues its failure delivery through the
+	 * ordinary async-result path, and aborts the job's controller. The job's own
+	 * promise stays open until the run body finishes cleaning up, so owner
+	 * reaping keeps reporting the work as live. A `filter` whose owner does not
+	 * match reads as not-found; returns false for unknown ids, non-eval jobs,
+	 * and jobs that already settled.
+	 */
+	failEvalJob(jobId: string, error: unknown, filter?: AsyncJobFilter): boolean;
 	getJob(id: string): AsyncJob | undefined;
 	/** Running background jobs; foreground-backed jobs stay hidden until promoted. */
 	getRunningJobs(filter?: AsyncJobFilter): AsyncJob[];
@@ -489,6 +499,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 	readonly #evictionTimers = new Map<string, NodeJS.Timeout>();
 	readonly #evicted = new Map<string, EvictedJob>();
 	readonly #releasedForegroundJobs = new Set<string>();
+	readonly #forcedEvalFailures = new Map<string, (error: unknown) => void>();
 	#nextAutoId = 1;
 	readonly #deliverySinks = new Map<string, AsyncJobDeliverySink>();
 	readonly #onJobComplete: AsyncJobManagerOptions["onJobComplete"];
@@ -645,9 +656,17 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 				});
 			}
 		};
+		const forcedFailure = type === "eval" ? Promise.withResolvers<never>() : undefined;
+		if (forcedFailure) {
+			this.#forcedEvalFailures.set(id, forcedFailure.reject);
+			// The race can settle via the run first, so a late forced failure must not
+			// surface as an unhandled rejection on the abandoned racer.
+			forcedFailure.promise.catch(() => {});
+		}
 		job.promise = (async () => {
+			let runPromise: Promise<string | AsyncJobRunResult> | undefined;
 			try {
-				const outcome = await run({
+				runPromise = run({
 					jobId: id,
 					signal: abortController.signal,
 					reportProgress,
@@ -657,7 +676,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 						this.#notifyJobsChanged(id);
 					},
 				});
-				job.endTime = Date.now();
+				const outcome = await (forcedFailure ? Promise.race([runPromise, forcedFailure.promise]) : runPromise);
 				const text = typeof outcome === "string" ? outcome : outcome.text;
 				const structured = typeof outcome === "string" ? undefined : outcome.structured;
 				if (structured) job.structured = structured;
@@ -665,24 +684,33 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 					job.agentOutputPublished = outcome.agentOutputPublished;
 				}
 				if (job.status === "cancelled") {
+					job.endTime = Date.now();
 					job.resultText = text;
-				} else {
+				} else if (job.status === "running") {
+					job.endTime = Date.now();
 					job.status = "completed";
 					job.resultText = text;
 					this.#recordAgentReply(job);
 					this.#enqueueDelivery(id, text);
 				}
 			} catch (error) {
-				job.endTime = Date.now();
-				if (error instanceof AsyncJobError && error.structured) job.structured = error.structured;
-				const errorText = error instanceof Error ? error.message : String(error);
-				job.errorText = errorText;
-				if (job.status !== "cancelled") {
-					job.status = "failed";
-					this.#recordAgentReply(job);
-					this.#enqueueDelivery(id, errorText);
+				if (job.status !== "failed") {
+					job.endTime = Date.now();
+					if (error instanceof AsyncJobError && error.structured) job.structured = error.structured;
+					const errorText = error instanceof Error ? error.message : String(error);
+					job.errorText = errorText;
+					if (job.status !== "cancelled") {
+						job.status = "failed";
+						this.#recordAgentReply(job);
+						this.#enqueueDelivery(id, errorText);
+					}
 				}
+				// A forced eval failure delivers the error above while the run body is
+				// still executing its cleanup. Owner reaping reads this promise as proof
+				// the owned work exited, so it stays open until the run settles.
+				if (runPromise) await runPromise.catch(() => {});
 			}
+			this.#forcedEvalFailures.delete(id);
 			if (this.#releasedForegroundJobs.has(id)) this.#discardForegroundJob(id);
 			else this.#scheduleEviction(id);
 			for (const listener of this.#settleListeners) {
@@ -702,6 +730,39 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 		this.#evicted.delete(id);
 		this.#notifyJobsChanged(id);
 		return id;
+	}
+
+	/**
+	 * Fail a running eval job whose JS kernel died; `killSession` is the intended
+	 * caller. Marks the job failed, queues its failure delivery through the
+	 * ordinary async-result path, and aborts the job's controller. The job's own
+	 * promise stays open until the run body finishes cleaning up, so owner
+	 * reaping keeps reporting the work as live. A `filter` whose owner does not
+	 * match reads as not-found; returns false for unknown ids, non-eval jobs,
+	 * and jobs that already settled.
+	 */
+	failEvalJob(jobId: string, error: unknown, filter?: AsyncJobFilter): boolean {
+		const job = this.#jobs.get(jobId);
+		if (
+			!job ||
+			job.type !== "eval" ||
+			job.status !== "running" ||
+			(filter?.ownerId && job.ownerId !== filter.ownerId)
+		)
+			return false;
+		const rejectFailure = this.#forcedEvalFailures.get(jobId);
+		if (!rejectFailure) return false;
+
+		if (error instanceof AsyncJobError && error.structured) job.structured = error.structured;
+		const errorText = error instanceof Error ? error.message : String(error);
+		job.endTime = Date.now();
+		job.errorText = errorText;
+		job.status = "failed";
+		this.#recordAgentReply(job);
+		this.#enqueueDelivery(jobId, errorText);
+		rejectFailure(error);
+		job.abortController.abort(error);
+		return true;
 	}
 
 	/**
@@ -1158,6 +1219,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 		// process exit, since dispose does not await these cleanups).
 		for (const job of this.#jobs.values()) this.#runRetainedArtifactsCleanup(job, { bypassGrace: true });
 		this.#jobs.clear();
+		this.#forcedEvalFailures.clear();
 		this.#deliveries.length = 0;
 		this.#notifyDeliveryQueueChanged();
 		this.#inFlightDeliveries.length = 0;

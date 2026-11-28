@@ -85,6 +85,8 @@ interface PendingRun {
 	runId: string;
 	runState: VmRunState;
 	toolSession: ToolSession;
+	asyncJobId?: string;
+	shadowCell?: EvalShadowCellSession;
 	/** The cell's `timeout` in ms, handed to prelude calls as their default budget. */
 	cellTimeoutMs?: number;
 	resolve(value: { value: unknown }): void;
@@ -175,6 +177,7 @@ export async function executeInVmContext(options: {
 	sessionId: string;
 	/** Logical owner identifier; scopes retained-worker cleanup via {@link disposeVmContextsByOwner}. */
 	ownerId?: string;
+	asyncJobId?: string;
 	cwd: string;
 	session: ToolSession;
 	localRoots?: Record<string, string>;
@@ -481,6 +484,7 @@ async function runOnce(
 	session: JsSession,
 	options: {
 		sessionId: string;
+		asyncJobId?: string;
 		cwd: string;
 		session: ToolSession;
 		localRoots?: Record<string, string>;
@@ -498,6 +502,8 @@ async function runOnce(
 		runId,
 		runState: options.runState,
 		toolSession: options.session,
+		asyncJobId: options.asyncJobId,
+		shadowCell: getActiveEvalShadowCell(),
 		cellTimeoutMs: options.timeoutMs ?? 0,
 		resolve,
 		reject,
@@ -852,6 +858,11 @@ async function killSession(session: JsSession, error: Error, options: { force: b
 		await session.worker.terminate().catch(() => undefined);
 	}
 	for (const pending of session.pending.values()) {
+		if (pending.asyncJobId) {
+			const manager = pending.toolSession.asyncJobManager;
+			const ownerId = pending.toolSession.getAgentId?.();
+			manager?.failEvalJob(pending.asyncJobId, error, ownerId ? { ownerId } : undefined);
+		}
 		if (pending.settled) continue;
 		pending.settled = true;
 		pending.reject(error);

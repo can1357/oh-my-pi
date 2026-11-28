@@ -418,6 +418,9 @@
 - Fixed idle follow-ups becoming stuck after extension messages or compaction summaries.
 - Fixed resuming goals whose token budget is exhausted so they remain budget-limited, and prevented incomplete-goal reminders from asking the agent to continue while budget-limited.
 - Assistant replies show SVG fences and HTML image and page embeds inline again on terminals that support graphics ([#20508](https://github.com/can1357/oh-my-pi/issues/20508)).
+### Fixed
+
+- A backgrounded eval cell no longer waits forever when its JS kernel dies or is reset: the job is marked failed and the kernel's error is delivered as its `async-result`, while owner job reaping still waits for the run's cleanup to finish ([#13438](https://github.com/can1357/oh-my-pi/pull/13438) by [@nick-maderight](https://github.com/nick-maderight))
 
 ## [19.2.0] - 2026-11-25
 

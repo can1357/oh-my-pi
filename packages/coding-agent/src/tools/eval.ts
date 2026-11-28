@@ -477,19 +477,41 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			runSignal: AbortSignal | undefined,
 			emitUpdate: ((text: string, details: EvalToolDetails) => void) | undefined,
 			foreground: () => boolean,
+			asyncJobId?: string,
 		): Promise<AgentToolResult<EvalToolDetails | undefined>> => {
-			const execution = this.#runCells({
-				session,
-				parentToolCallId: _toolCallId,
-				cells,
-				languages,
-				notice,
-				excludeWebP,
-				signal: runSignal,
-				sessionAbortController,
-				emitUpdate,
-				foreground,
-			});
+			// Re-check the retained namespace against the streamed planning snapshot:
+			// timers, background work, or concurrent session users may have changed
+			// it after the speculative children started. On mismatch the children
+			// were projected from stale state, so discard the session and run the
+			// cell without it (claims then miss and execution is ordinary).
+			let activeShadowCell = shadowCell;
+			const snapshotToken = shadowCell?.snapshotToken;
+			if (shadowCell && snapshotToken) {
+				const tokenIsPython = snapshotToken.language === "py";
+				let current = tokenIsPython === (cellLanguage === "python");
+				if (current) {
+					current = await shadowCell.verifySnapshotCurrent().catch(() => false);
+				}
+				if (!current) {
+					await shadowCell.discard("retained eval state changed after shadow planning").catch(() => undefined);
+					activeShadowCell = undefined;
+				}
+			}
+			const execution = runWithEvalShadowCell(activeShadowCell, () =>
+				this.#runCells({
+					session,
+					parentToolCallId: _toolCallId,
+					cells,
+					languages,
+					notice,
+					excludeWebP,
+					signal: runSignal,
+					sessionAbortController,
+					emitUpdate,
+					foreground,
+					asyncJobId,
+				}),
+			);
 			return session.trackEvalExecution?.(execution, sessionAbortController) ?? execution;
 		};
 
@@ -548,6 +570,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 							else emitToolUpdate?.(text, details);
 						},
 						() => !backgrounded,
+						jobId,
 					);
 					const finalText =
 						(result.content.find(block => block.type === "text")?.text ?? "") +
@@ -686,13 +709,24 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		notice: string | undefined;
 		excludeWebP: boolean | undefined;
 		signal: AbortSignal | undefined;
+		asyncJobId?: string;
 		sessionAbortController: AbortController;
 		emitUpdate?: (text: string, details: EvalToolDetails) => void;
 		/** Whether the call still waits on the cells; `out://` replies are drawn only then. */
 		foreground: () => boolean;
 	}): Promise<AgentToolResult<EvalToolDetails | undefined>> {
-		const { session, cells, languages, notice, excludeWebP, signal, sessionAbortController, emitUpdate, foreground } =
-			options;
+		const {
+			session,
+			cells,
+			languages,
+			notice,
+			excludeWebP,
+			signal,
+			sessionAbortController,
+			emitUpdate,
+			foreground,
+			asyncJobId,
+		} = options;
 		let outputSink: OutputSink | undefined;
 		let outputSummary: OutputSummary | undefined;
 		let outputDumped = false;
@@ -840,6 +874,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 						parentToolCallId: options.parentToolCallId,
 						sessionFile: sessionFile ?? undefined,
 						kernelOwnerId,
+						asyncJobId,
 						signal: combinedSignal,
 						session,
 						idleTimeoutMs,
