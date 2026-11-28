@@ -935,11 +935,11 @@ export class Draft {
 			lines.push(header, ...list.rows);
 			if (list.count > list.rows.length) lines.push(`  … ${list.count - list.rows.length} more`);
 		};
-		let leftOutHint = "take() to select";
+		let leftOutHint = "take(path) to select";
 		if (mixedLeftOut > 0) {
 			const mixedHint = "for mixed paths, show(path) then take(path, units)";
 			leftOutHint =
-				mixedLeftOut === leftOut.count ? mixedHint : `take() for paths without other edits; ${mixedHint}`;
+				mixedLeftOut === leftOut.count ? mixedHint : `take(path) for paths without other edits; ${mixedHint}`;
 		}
 		appendPaths(leftOut, `Left out: ${leftOut.count} path(s) with deselected agent edits; ${leftOutHint}.`);
 		appendPaths(

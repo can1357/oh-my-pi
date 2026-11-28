@@ -693,7 +693,7 @@ describe("selective commit flow", () => {
 
 		const [beforeUnrecorded, unrecorded] = draft.summary().split("\nUnrecorded:");
 		expect(beforeUnrecorded).toContain("Left out: 1 path(s)");
-		expect(beforeUnrecorded).toContain("take()");
+		expect(beforeUnrecorded).toContain("take(path) to select");
 		expect(beforeUnrecorded).toContain("  · second.txt  +1  [Main]");
 		expect(unrecorded).toContain("1 path(s)");
 		expect(unrecorded).toContain("  · unrecorded.txt  +1");
@@ -753,7 +753,7 @@ describe("selective commit flow", () => {
 		expect(row).toContain("pre-existing");
 		expect(row).toContain("Other");
 		expect(row).toContain("unrecorded (review)");
-		expect(summary).toContain("take() for paths without other edits");
+		expect(summary).toContain("take(path) for paths without other edits");
 		expect(summary).toContain("for mixed paths, show(path) then take(path, units)");
 	});
 
