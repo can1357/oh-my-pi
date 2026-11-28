@@ -2848,7 +2848,7 @@ describe("ModelRegistry runtime discovery", () => {
 		});
 		const bundled = getBundledModels("openai")[0];
 		writeModelCache(
-			`${provider}:proxy-v2-${advertisedReasoning ? "" : "advertised-off-"}context-v6`,
+			`${provider}:proxy-v2-${advertisedReasoning ? "" : "advertised-off-"}context-v7`,
 			Date.now(),
 			[{ ...bundled, provider, baseUrl, id: "offline-only" }],
 			true,
@@ -2915,6 +2915,64 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(registry.find("vllm-fast", "Fresh")?.contextWindow).toBe(262_144);
 		expect(registry.find("vllm-fast", "Stale")).toBeUndefined();
 	});
+
+	test.each([
+		["openai-models-list", "gw:openai-models-list-context-v8"],
+		["proxy", "gw:proxy-v2-context-v6"],
+		["lm-studio", "gw"],
+		["litellm", "gw:litellm-rich-v7"],
+	] as const)(
+		"%s discovery refetches rows cached before the reasoning object ladder was read",
+		async (type, retiredCacheProviderId) => {
+			writeRawModelsJson({
+				gw: { baseUrl: "https://gw.example/v1", auth: "none", api: "openai-completions", discovery: { type } },
+			});
+			// A pre-fix build ignored the object and cached the row without its ladder.
+			writeModelCache(
+				retiredCacheProviderId,
+				Date.now(),
+				[
+					buildModel({
+						id: "acme-object",
+						name: "acme-object",
+						provider: "gw",
+						api: "openai-completions",
+						baseUrl: "https://gw.example/v1",
+						contextWindow: 128_000,
+						maxTokens: 32_768,
+						reasoning: false,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					}),
+				],
+				true,
+				"",
+				cacheDbPath,
+			);
+			let modelListCalls = 0;
+			const fetchMock: FetchImpl = async input => {
+				if (String(input) !== "https://gw.example/v1/models") throw new Error(`Unexpected URL: ${String(input)}`);
+				modelListCalls++;
+				return Response.json({
+					data: [
+						{
+							id: "acme-object",
+							reasoning: { supported_efforts: ["none", "low", "high"], default_effort: "high" },
+						},
+					],
+				});
+			};
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+			await registry.refreshDiscoverableProviders(["gw"], "online-if-uncached");
+
+			expect(modelListCalls).toBe(1);
+			expect(registry.find("gw", "acme-object")?.thinking).toMatchObject({
+				mode: "effort",
+				efforts: [Effort.Low, Effort.High],
+				defaultLevel: Effort.High,
+			});
+		},
+	);
 
 	test("uses default vllm baseUrl override for built-in discovery", async () => {
 		writeRawModelsJson({ vllm: { baseUrl: "http://192.168.5.3:8085/v1", auth: "none" } });
@@ -3768,6 +3826,156 @@ describe("ModelRegistry runtime discovery", () => {
 			{ apiKey: "TEST_KEY", fetch: chatFetch, reasoning: "high" },
 		).result();
 		expect(requestPayload?.reasoning_effort).toBe("high");
+	});
+
+	test("openai-models-list discovery reads advertised reasoning ladders from the reasoning object shape", async () => {
+		// OpenRouter-style rows carry the ladder as `reasoning: { supported_efforts,
+		// default_effort }` rather than the flat `supported_reasoning_levels` dialect.
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url.endsWith("/v1/models")) {
+				return Response.json({
+					data: [
+						{
+							id: "acme-object",
+							reasoning: { supported_efforts: ["max", "none", "low", "high"], default_effort: "high" },
+						},
+						{
+							id: "acme-object-nested",
+							metadata: {
+								reasoning: {
+									supported_efforts: [{ effort: "low" }, { effort: "medium" }],
+									default_effort: "medium",
+								},
+							},
+						},
+						{
+							id: "acme-flat-and-object",
+							supported_reasoning_levels: ["low", "high"],
+							reasoning: { supported_efforts: ["medium", "high"], default_effort: "high" },
+						},
+						{
+							id: "acme-object-mandatory",
+							reasoning: { supported_efforts: ["low", "high"], mandatory: true },
+						},
+						{
+							id: "acme-object-mandatory-vetoed",
+							reasoning_required: false,
+							reasoning: { supported_efforts: ["low", "high"], mandatory: true },
+						},
+						{
+							id: "acme-object-thinking",
+							reasoning: { supported_efforts: ["low", "high"], mandatory: false },
+						},
+					],
+				});
+			}
+			return new Response(null, { status: 404 });
+		};
+		const models = await discoverOpenAIModelsList(
+			{
+				provider: "custom-discovery",
+				api: "openai-completions",
+				baseUrl: "https://custom.example/v1",
+				discovery: { type: "openai-models-list" },
+			},
+			{ fetch: fetchMock, getBearerApiKeyResolver: async () => undefined },
+		);
+		const find = (id: string) => models.find(model => model.id === id);
+		const object = find("acme-object");
+		expect(object?.reasoning).toBe(true);
+		// `none` is the wire off-switch, not an effort tier.
+		expect(object?.thinking).toMatchObject({
+			mode: "effort",
+			efforts: [Effort.Low, Effort.High, Effort.Max],
+			defaultLevel: Effort.High,
+		});
+		const compat = object?.compat;
+		expect(compat && "supportsReasoningEffort" in compat ? compat.supportsReasoningEffort : undefined).toBe(true);
+		expect(find("acme-object-nested")?.thinking).toMatchObject({
+			mode: "effort",
+			efforts: [Effort.Low, Effort.Medium],
+			defaultLevel: Effort.Medium,
+		});
+		// A row sending both shapes keeps the flat ladder and never borrows the
+		// object's `default_effort`, so the lowest tier stays the fallback default.
+		expect(find("acme-flat-and-object")?.thinking).toMatchObject({
+			efforts: [Effort.Low, Effort.High],
+			defaultLevel: Effort.Low,
+		});
+		// `mandatory: true` locks reasoning on unless a flat `reasoning_required` says otherwise,
+		// and `mandatory: false` leaves the identity lock of a `-thinking` id alone.
+		expect(find("acme-object-mandatory")?.thinking?.requiresEffort).toBe(true);
+		expect(find("acme-object-mandatory-vetoed")?.thinking?.requiresEffort).toBe(false);
+		expect(find("acme-object-thinking")?.thinking?.requiresEffort).toBe(true);
+		if (!object || object.api !== "openai-completions") {
+			throw new Error("expected the discovered model to use OpenAI Completions");
+		}
+		let requestPayload: Record<string, unknown> | undefined;
+		const chatFetch: FetchImpl = async (_input, init) => {
+			requestPayload = JSON.parse(typeof init?.body === "string" ? init.body : "{}") as Record<string, unknown>;
+			const events = [
+				{ id: "chatcmpl-object-fixture", choices: [{ index: 0, delta: { role: "assistant", content: "OK" } }] },
+				{ id: "chatcmpl-object-fixture", choices: [{ index: 0, finish_reason: "stop", delta: {} }] },
+			];
+			const body = `${events.map(event => `data: ${JSON.stringify(event)}`).join("\n\n")}\n\ndata: [DONE]\n\n`;
+			return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+		};
+		// A thinking-off request sends the `none` the object listed instead of the lowest tier.
+		await streamOpenAICompletions(
+			object as Model<"openai-completions">,
+			{ messages: [{ role: "user", content: "Reply with exactly OK.", timestamp: Date.now() }] },
+			{ apiKey: "TEST_KEY", fetch: chatFetch, disableReasoning: true },
+		).result();
+		expect(requestPayload?.reasoning_effort).toBe("none");
+	});
+
+	test("openai-models-list discovery locks reasoning on for a mandatory reasoning object without a ladder", async () => {
+		// Like the OpenRouter catalog mapper, `reasoning: { mandatory: true }` without
+		// `supported_efforts` keeps the ladder the row would otherwise get, locked on.
+		const discover = (rows: Record<string, unknown>[]) =>
+			discoverOpenAIModelsList(
+				{
+					provider: "custom-discovery",
+					api: "openai-completions",
+					baseUrl: "https://custom.example/v1",
+					discovery: { type: "openai-models-list" },
+				},
+				{
+					fetch: async input =>
+						String(input).endsWith("/v1/models")
+							? Response.json({ data: rows })
+							: new Response(null, { status: 404 }),
+					getBearerApiKeyResolver: async () => undefined,
+				},
+			);
+		const [silent] = await discover([{ id: "gpt-5" }]);
+		const [lockedSilent] = await discover([{ id: "gemini-3-pro" }]);
+		const models = await discover([
+			{ id: "gpt-5", reasoning: { mandatory: true } },
+			{ id: "acme-native", reasoning: true },
+			{ id: "acme-mandatory", reasoning: { mandatory: true } },
+			{ id: "acme-mandatory-vetoed", reasoning_required: false, reasoning: { mandatory: true } },
+			{ id: "gemini-3-pro", reasoning_required: false, reasoning: { mandatory: true } },
+		]);
+		const find = (id: string) => models.find(model => model.id === id);
+		// A referenced id keeps the bundled reference's ladder and gains the lock.
+		expect(silent?.thinking?.efforts?.length).toBeGreaterThan(0);
+		expect(silent?.thinking?.requiresEffort).not.toBe(true);
+		expect(find("gpt-5")?.thinking).toMatchObject({ efforts: silent?.thinking?.efforts, requiresEffort: true });
+		// Without a reference the row gets the ladder `reasoning: true` would, locked on.
+		const native = find("acme-native");
+		expect(native?.thinking?.efforts?.length).toBeGreaterThan(0);
+		expect(native?.thinking?.requiresEffort).not.toBe(true);
+		const mandatory = find("acme-mandatory");
+		expect(mandatory?.reasoning).toBe(true);
+		expect(mandatory?.thinking).toMatchObject({ efforts: native?.thinking?.efforts, requiresEffort: true });
+		expect(mandatory?.thinking?.unverified).not.toBe(true);
+		// A flat `reasoning_required: false` still outranks `mandatory`, and overrides the
+		// lock `gemini-3-pro` keeps from the catalog when its row is silent.
+		expect(lockedSilent?.thinking?.requiresEffort).toBe(true);
+		expect(find("gemini-3-pro")?.thinking?.requiresEffort).toBe(false);
+		expect(find("acme-mandatory-vetoed")?.thinking?.requiresEffort).toBe(false);
 	});
 
 	test("openai-models-list discovery carries advertised effort aliases and mandatory reasoning", async () => {
@@ -5512,7 +5720,10 @@ describe("ModelRegistry runtime discovery", () => {
 
 		await registry.hydrateCredentialScopedModelCaches(new Set(["CuRsOr"]));
 
-		expect(peek.mock.calls).toEqual([["cursor", undefined], ["cursor", { includeExpired: true }]]);
+		expect(peek.mock.calls).toEqual([
+			["cursor", undefined],
+			["cursor", { includeExpired: true }],
+		]);
 		expect(registry.find("cursor", "claude-opus-5-5-1m")?.contextWindow).toBe(1_000_000);
 	});
 

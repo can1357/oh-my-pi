@@ -5387,12 +5387,21 @@ export default function (pi) {
 	});
 
 	describe("input attachment transforms", () => {
-		const inputRunner = (handler: (event: InputEvent) => InputEventResult): ExtensionRunner => {
+		const inputRunner = (...handlers: Array<(event: InputEvent) => InputEventResult>): ExtensionRunner => {
 			const extensionPath = path.join(extensionsDir, "input-transform.ts");
 			const extension: Extension = {
 				path: extensionPath,
 				resolvedPath: extensionPath,
-				handlers: new Map([["input", [async (...args: unknown[]) => handler(args[0] as InputEvent)]]]),
+				handlers: new Map([
+					[
+						"input",
+						handlers.map(
+							handler =>
+								async (...args: unknown[]) =>
+									handler(args[0] as InputEvent),
+						),
+					],
+				]),
 				tools: new Map(),
 				assistantThinkingRenderers: [],
 				assistantTextRenderers: [],
@@ -5421,6 +5430,22 @@ export default function (pi) {
 			const image: ImageContent = { type: "image", mimeType: "image/png", data: "aW1hZ2U=" };
 
 			expect(await runner.emitInput("rewrite me", [image], "interactive")).toEqual({ text: "REWRITE ME" });
+		});
+
+		it("ignores null text and images returned by an input handler", async () => {
+			let nextEvent: InputEvent | undefined;
+			const runner = inputRunner(
+				() => ({ text: null, images: null }) as unknown as InputEventResult,
+				event => {
+					nextEvent = event;
+					return {};
+				},
+			);
+			const image: ImageContent = { type: "image", mimeType: "image/png", data: "aW1hZ2U=" };
+
+			expect(await runner.emitInput("original text", [image], "rpc")).toEqual({});
+			expect(nextEvent?.text).toBe("original text");
+			expect(nextEvent?.images).toEqual([image]);
 		});
 	});
 

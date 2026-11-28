@@ -34,6 +34,7 @@ import {
 	type Signal,
 	signal,
 	isUiNode,
+	nativeRendering,
 	type TextEdit,
 	type UiNode,
 	effect,
@@ -47,7 +48,7 @@ import {
 	layoutText,
 	rowOf,
 } from "@oh-my-pi/pi-tui/term/painters/editor";
-import { lineStart, nextBoundary } from "@oh-my-pi/pi-tui/term/widgets/editor";
+import { lineStart, nextBoundary, previousBoundary } from "@oh-my-pi/pi-tui/term/widgets/editor";
 import { flattenLine, stripControl } from "@oh-my-pi/pi-tui/text/sanitize";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { isSingleGrapheme } from "@oh-my-pi/pi-utils/graphemes";
@@ -55,8 +56,10 @@ import type { TspEditorDecoration, TspEffect, TspPickerLevel, TspSpan, TspText }
 import { terminalIdentity } from "@oh-my-pi/pi-tui/driver/session";
 import "../styles/composer";
 import type { UnifiedMentionSnapshot } from "../../autocomplete/mentions/engine";
+import { mentionTypedPart } from "../../autocomplete/mentions/parse";
+import { mentionScopeToken } from "../../autocomplete/mentions/scopes";
 import { MENTION_STYLES } from "../../autocomplete/mentions/style";
-import type { MentionItem } from "../../autocomplete/mentions/types";
+import type { MentionItem, MentionPaletteView, MentionScopeId } from "../../autocomplete/mentions/types";
 import {
 	extractAtFilePrefix,
 	isDirectoryCompletionValue,
@@ -250,11 +253,12 @@ function isMentionItem(item: unknown): item is MentionItem {
 	);
 }
 
-/** Whether `open` is the bare `@` category list, whose rows Tab cycles instead of accepting. */
-function isCategoryList(open: Completion): boolean {
-	return (
-		open.mention?.query === "" && open.items.every(item => isMentionItem(item) && item.isNamespaceShortcut === true)
-	);
+/**
+ * Whether nothing is typed after the `@` of a mention or its scope token: Tab and Shift+Tab then
+ * walk the scopes, and the popup stays open over a scope that lists nothing.
+ */
+function isScopeEntry(palette: MentionPaletteView): boolean {
+	return palette.trigger === "@" && palette.typed === "" && palette.scopes.length > 0;
 }
 
 /** A token of the draft that shows as a chip (`/skill:name` as `🧩 name`) and is sent as `expansion`. */
@@ -433,7 +437,7 @@ export class Composer {
 	readonly #completion: Signal<Completion | null> = signal<Completion | null>(null);
 	#completionRequest: AbortController | undefined;
 	#forceFiles = false;
-	/** Offset of the bare `@` whose Files tile the user picked: that token lists files until it ends. */
+	/** Offset of the `@` scoped to Files, the scope without a token: that mention lists files until it ends. */
 	#filesAt: number | undefined;
 
 	readonly #vimLayer: VimEditor;
@@ -1323,7 +1327,10 @@ export class Composer {
 				this.#completion.set(null);
 				return;
 			}
-			if (snapshot.items.length === 0) {
+			// A scope that lists nothing stays open while nothing is typed: Tab walks on from it. Drawn
+			// natively every mention stays open: its bar is where the query is typed, so it must not
+			// come and go with the matches.
+			if (snapshot.items.length === 0 && !isScopeEntry(snapshot.mention) && !nativeRendering()) {
 				if (isFinal && !snapshot.mention.loading) this.#completion.set(null);
 				return;
 			}
@@ -1345,6 +1352,8 @@ export class Composer {
 				open.selected === nextSelected &&
 				open.effortOverride === preservedEffort &&
 				open.mention.loading === snapshot.mention.loading &&
+				open.mention.scope === snapshot.mention.scope &&
+				open.mention.scopes.every((scope, i) => scope.count === snapshot.mention.scopes[i]?.count) &&
 				open.items.length === snapshot.items.length &&
 				open.items.every((prev, i) => prev.value === snapshot.items[i]?.value)
 			) {
@@ -1357,6 +1366,7 @@ export class Composer {
 				chosen: kept >= 0 && sameQuery ? open.chosen : false,
 				revision,
 				mention: snapshot.mention,
+				mentionStart: cursor - snapshot.prefix.length,
 				effortOverride: preservedEffort,
 				openedAt: sameQuery && open.openedAt !== undefined ? open.openedAt : Date.now(),
 			});
@@ -1520,13 +1530,6 @@ export class Composer {
 		}
 		const run = enter && name && value !== SKILL_NAMESPACE && this.#cursor() === this.#text().length;
 		const mentionItem = open.mention !== undefined && isMentionItem(item) ? item : undefined;
-		// The Files tile has no token: the `@` stays and lists files from here on.
-		if (mentionItem?.isNamespaceShortcut && mentionItem.category === "files") {
-			this.#closeCompletion();
-			this.#filesAt = this.#cursor() - open.prefix.length;
-			void this.#complete();
-			return;
-		}
 		const result =
 			mentionItem && provider.applyMentionCompletion
 				? provider.applyMentionCompletion(lines, line, col, mentionItem, open.prefix, open.effortOverride)
@@ -1548,36 +1551,80 @@ export class Composer {
 		}
 	}
 
+	/**
+	 * Put the mention at the caret in `scope` (none: unscoped), keeping what is typed after it: its
+	 * token is rewritten in one undo step, and Files, which has no token, pins the `@`. False when
+	 * `open` no longer describes the draft.
+	 */
+	#setMentionScope(open: Completion, scope: MentionScopeId | undefined): boolean {
+		const palette = open.mention;
+		const cursor = this.#cursor();
+		const from = cursor - open.prefix.length;
+		if (!palette || open.revision !== this.#revision || this.#text().slice(Math.max(0, from), cursor) !== open.prefix)
+			return false;
+		const token = mentionScopeToken(scope, palette.typed);
+		if (token !== open.prefix) this.#change(from, cursor, token, from + token.length, "edit");
+		this.#filesAt = scope === "files" ? from : undefined;
+		void this.#complete();
+		return true;
+	}
+
+	/**
+	 * What is typed for the open mention and where it sits in the draft (right after the trigger
+	 * character up to the caret), read from the draft as it is now (reactive) so the picker's search
+	 * follows a keystroke without waiting for its completion. The snapshot's while the draft from
+	 * the mention's start to the caret is no longer one token: the popup is closing then.
+	 */
+	#mentionQuery(open: Completion, palette: MentionPaletteView): { typed: string; range: [number, number] } {
+		const cursor = this.#cursor();
+		const start = open.mentionStart ?? cursor - open.prefix.length;
+		const shown = mentionTypedPart(palette.trigger, palette.prefix);
+		const draft = this.#text().slice(start, Math.max(start, cursor));
+		const live = mentionTypedPart(palette.trigger, draft);
+		const body = draft.slice(live.from);
+		// A quoted path (`@"my file`) is one token with its blanks.
+		const oneToken = body.startsWith('"') || !/\s/.test(body);
+		if (oneToken && draft.slice(0, live.from) === palette.prefix.slice(0, shown.from))
+			return { typed: live.typed, range: [start + live.from, cursor] };
+		return { typed: shown.typed, range: [start + shown.from, start + palette.prefix.length] };
+	}
+
+	/**
+	 * Delete what is typed for the open mention in one undo step, keeping its trigger character and
+	 * its scope (the token, or the Files pin). False when nothing is typed or `open` no longer
+	 * describes the draft.
+	 */
+	#clearMentionQuery(open: Completion): boolean {
+		const palette = open.mention;
+		const cursor = this.#cursor();
+		const from = cursor - open.prefix.length;
+		if (!palette || open.revision !== this.#revision || this.#text().slice(Math.max(0, from), cursor) !== open.prefix)
+			return false;
+		const { typed } = this.#mentionQuery(open, palette);
+		if (typed === "") return false;
+		const pinned = this.#filesAt === from;
+		this.#change(cursor - typed.length, cursor, "", cursor - typed.length, "edit");
+		this.#filesAt = pinned ? from : undefined;
+		void this.#complete();
+		return true;
+	}
+
+	/** Tab (`step` 1) or Shift+Tab (-1) on a mention with nothing typed: the next scope, around the ends. */
+	#cycleMentionScope(open: Completion, step: 1 | -1): boolean {
+		const palette = open.mention;
+		if (!palette || !isScopeEntry(palette)) return false;
+		const count = palette.scopes.length;
+		const at = palette.scopes.findIndex(scope => scope.id === palette.scope);
+		// From no scope Tab enters the first and Shift+Tab the last.
+		const next = at === -1 ? (step === 1 ? 0 : count - 1) : (at + step + count) % count;
+		return this.#setMentionScope(open, palette.scopes[next]!.id);
+	}
+
 	/** After an edit from the field: open, refresh or leave the popup. */
 	#afterEdit(insert: string, deleted: boolean, force = false, previous?: Completion | null): void {
 		const provider = this.#autocomplete;
 		if (!provider) return;
 		const at = this.#position();
-		// On the bare `@` category strip, Space picks the lit category as Enter does (the space is not
-		// kept), and typing after cycling to one enters it: `@` + `o` → `@m:o`.
-		const pick = insert === " ";
-		const entered =
-			!deleted && previous && isCategoryList(previous) && (pick || (previous.chosen && !/\s/.test(insert)))
-				? previous.items[previous.selected]
-				: undefined;
-		if (isMentionItem(entered) && at.before.endsWith(`@${insert}`)) {
-			const cursor = this.#cursor();
-			const from = cursor - insert.length - 1;
-			const typed = pick ? "" : insert;
-			if (entered.category === "files") {
-				// The user's keystroke already recorded this undo step.
-				if (pick) this.#change(from + 1, cursor, "", from + 1, "history");
-				this.#filesAt = from;
-				void this.#complete();
-				return;
-			}
-			const replacement = `${entered.insertText}${typed}`;
-			// The user's keystroke already recorded this undo step.
-			this.#change(from, cursor, replacement, from + replacement.length, "history");
-			this.#typingAt = -1;
-			void this.#complete();
-			return;
-		}
 		if (!deleted && insert.length === 1 && provider.trySyncInlineReplace) {
 			let replacement: { replaceLen: number; insert: string } | null = null;
 			try {
@@ -1628,6 +1675,17 @@ export class Composer {
 			this.#vim?.edited(before);
 			return;
 		}
+		// Backspace right after a scope with nothing typed drops the scope, not a character.
+		const open = this.#completion.peek();
+		if (
+			open?.mention?.scope !== undefined &&
+			isScopeEntry(open.mention) &&
+			event.text === "" &&
+			event.to === this.#cursor() &&
+			event.from === previousBoundary(text, event.to) &&
+			this.#setMentionScope(open, undefined)
+		)
+			return;
 		const typed =
 			!event.paste &&
 			event.from === event.to &&
@@ -1741,17 +1799,11 @@ export class Composer {
 				this.#closeCompletion();
 				return true;
 			}
-			// The bare `@` category strip: Tab/→ and Shift+Tab/← move the lit category (↑/↓ below too);
-			// Enter or typing picks it.
-			if (isCategoryList(open)) {
-				const back = key.id === "shift+tab" || bindings.matches(key, "tui.editor.cursorLeft");
-				if (back || tab || right) {
-					const count = open.items.length;
-					const selected = (open.selected + (back ? count - 1 : 1)) % count;
-					this.#completion.set({ ...open, selected, chosen: true, effortOverride: undefined });
-					return true;
-				}
-			}
+			// Nothing typed after a mention's `@` or scope token: Tab and Shift+Tab walk its scopes.
+			if ((tab || key.id === "shift+tab") && this.#cycleMentionScope(open, tab ? 1 : -1)) return true;
+		}
+		// A scope that lists nothing has no row to move to or accept: its other keys are the draft's.
+		if (open && open.items.length > 0) {
 			// Shift+Left/Right steps thinking effort on a highlighted model row.
 			if (open.mention && (key.id === "shift+left" || key.id === "shift+right")) {
 				const currentItem = open.items[open.selected];
@@ -2255,6 +2307,8 @@ export class Composer {
 					glyphs[item.pickerItem.id] = { t: plainLine(item.icon), s: tone ?? MENTION_STYLES[item.category].color };
 				}
 				const mentionTerm: MentionPopupTerm = { maxLines: this.#autocompleteMaxVisible(), glyphs };
+				const scopeLabel = palette.scopes.find(scope => scope.id === palette.scope)?.label;
+				const typed = this.#mentionQuery(open, palette);
 
 				const indexOfId = (id: string) => mentionItems.findIndex(item => item.pickerItem.id === id);
 
@@ -2265,15 +2319,20 @@ export class Composer {
 						modal={false}
 						size="md"
 						density="snug"
-						layout={isCategoryList(open) ? "tiles" : "rows"}
-						search="none"
+						layout="rows"
+						search="bar"
+						query={typed.typed}
+						placeholder={scopeLabel ?? "Search"}
+						scopes={palette.scopes}
+						scope={palette.scope}
 						preview="none"
-						anchor={{ caret: "line/input" }}
+						anchor={{ caret: "line/input", query: typed.range }}
 						columns={palette.columns}
 						items={renderedPickerItems}
 						order={palette.order}
 						selected={selectedItem?.pickerItem.id ?? null}
 						level={level}
+						state={mentionItems.length === 0 && palette.loading ? "loading" : undefined}
 						empty="No matching mentions"
 						term={mentionTerm}
 						onSelect={id => {
@@ -2297,10 +2356,19 @@ export class Composer {
 								this.#closeCompletion();
 								return;
 							}
+							// The empty state's Clear search: the query goes, the mention and its scope stay.
+							if (act === "clear") {
+								this.#clearMentionQuery(open);
+								return;
+							}
 							if (act === "level" && event.value !== undefined) {
 								const nextEffort = event.value as Effort | "auto";
 								this.#completion.set({ ...open, effortOverride: nextEffort, chosen: true });
+								return;
 							}
+							// A click on a scope of the bar enters it; on the active one, leaves it.
+							const scope = act === "scope" ? palette.scopes.find(view => view.id === event.value) : undefined;
+							if (scope) this.#setMentionScope(open, scope.id === palette.scope ? undefined : scope.id);
 						}}
 					/>
 				);

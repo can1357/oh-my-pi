@@ -8219,55 +8219,40 @@ fn flush_appends(output: &mut OutputBuffer, context: &mut ProcessingContext) -> 
 	Ok(())
 }
 
-/// List the passed pattern space in unambiguous form.
-fn list(output: &mut OutputBuffer, line: &IOChunk, max_width: usize, null_data: bool) -> SedResult<()> {
+/// List the passed pattern space in unambiguous form. As GNU sed does, in the
+/// C and the C.UTF-8 locale alike, each byte that is not printable ASCII is an
+/// escape: a character of several bytes is the octal escape of each (`é` is
+/// `\303\251`), and a newline of the pattern space is `\n`. Each folded piece
+/// and the final `$` end with the record separator. A `max_width` of 0 folds
+/// nothing.
+fn list(output: &mut OutputBuffer, line: &IOChunk, max_width: usize) -> SedResult<()> {
 	if line.is_empty() && !line.is_terminated() {
 		return Ok(());
 	}
 
 	let mut buffer = String::new();
 	let mut escape = String::new();
-	let mut push = |unit: Result<char, u8>| -> io::Result<()> {
-		if !null_data && unit == Ok('\n') {
-			buffer.push('$');
-			output.write_owned_content(buffer.as_bytes(), true)?;
-			buffer.clear();
-			return Ok(());
-		}
+	for &byte in line.as_bytes() {
 		escape.clear();
-		match unit {
-			Ok('\x07') => escape.push_str(r"\a"),
-			Ok('\x08') => escape.push_str(r"\b"),
-			Ok('\n') => escape.push_str(r"\n"),
-			Ok('\x0b') => escape.push_str(r"\v"),
-			Ok('\x0c') => escape.push_str(r"\f"),
-			Ok('\\') => escape.push_str(r"\\"),
-			Ok('\r') => escape.push_str(r"\r"),
-			Ok('\t') => escape.push_str(r"\t"),
-			Ok(ch) if ch.is_ascii_control() => write!(escape, "\\{:03o}", ch as u8).unwrap(),
-			Ok(ch) if ch.is_ascii() => escape.push(ch),
-			Ok(ch) if (ch as u32) <= 0xffff => write!(escape, "\\u{:04X}", ch as u32).unwrap(),
-			Ok(ch) => write!(escape, "\\U{:08X}", ch as u32).unwrap(),
-			Err(byte) => write!(escape, "\\{byte:03o}").unwrap(),
+		match byte {
+			b'\x07' => escape.push_str(r"\a"),
+			b'\x08' => escape.push_str(r"\b"),
+			b'\n' => escape.push_str(r"\n"),
+			b'\x0b' => escape.push_str(r"\v"),
+			b'\x0c' => escape.push_str(r"\f"),
+			b'\\' => escape.push_str(r"\\"),
+			b'\r' => escape.push_str(r"\r"),
+			b'\t' => escape.push_str(r"\t"),
+			b' '..=b'~' => escape.push(char::from(byte)),
+			_ => write!(escape, "\\{byte:03o}").unwrap(),
 		}
 
-		if buffer.len() + escape.len() + 1 > max_width {
+		if max_width > 0 && buffer.len() + escape.len() + 1 > max_width {
 			buffer.push('\\');
 			output.write_owned_content(buffer.as_bytes(), true)?;
 			buffer.clear();
 		}
 		buffer.push_str(&escape);
-		Ok(())
-	};
-
-	if let Some(text) = line.as_str() {
-		for ch in text.chars() {
-			push(Ok(ch))?;
-		}
-	} else {
-		for &byte in line.as_bytes() {
-			push(if byte.is_ascii() { Ok(char::from(byte)) } else { Err(byte) })?;
-		}
 	}
 	buffer.push('$');
 	output.write_owned_content(buffer.as_bytes(), true)?;
@@ -8455,7 +8440,7 @@ fn process_file(
 				},
 				'l' => {
 					let width = *extract_variant!(command, Number);
-					list(output, &pattern, width, context.null_data)?;
+					list(output, &pattern, width)?;
 				},
 				'n' => {
 					break;
@@ -10057,6 +10042,31 @@ mod tests {
 			let (code, capture) = crate::host::run_util::<Sed>(&["-z", script], "a\nA\0b\0tail", "/");
 			assert_eq!(code, 0, "{script}: {}", capture.err());
 			assert_eq!(capture.stdout(), expected.as_bytes(), "{script}");
+		}
+	}
+
+	#[test]
+	fn l_lists_the_bytes_of_a_character_in_octal() {
+		// As in GNU sed 4.9, in the C and the C.UTF-8 locale alike, `l` lists
+		// each byte of a character of several bytes as an octal escape, and a
+		// newline of the pattern space as `\n`. Folding parts the escapes but
+		// splits none, ends each piece with the record separator, and a width
+		// of 0 folds nothing.
+		for (args, stdin, expected) in [
+			(&["-n", "l"][..], "café ok\n", "caf\\303\\251 ok$\n"),
+			(&["-n", "l"], "\u{1f980}\n", "\\360\\237\\246\\200$\n"),
+			(&["-n", "l 5"], "café ok\n", "caf\\\n\\303\\\n\\251\\\n ok$\n"),
+			(&["-n", "l 0"], "café\n", "caf\\303\\251$\n"),
+			(&["-n", "N;l"], "x\ny\n", "x\\ny$\n"),
+			(&["-zn", "l 2"], "abc\0", "a\\\0b\\\0c$\0"),
+		] {
+			let (code, capture) = crate::host::run_util::<Sed>(args, stdin, "/");
+			assert_eq!(
+				(code, capture.stdout().as_slice()),
+				(0, expected.as_bytes()),
+				"{args:?}: {}",
+				capture.err()
+			);
 		}
 	}
 

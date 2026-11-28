@@ -136,7 +136,7 @@ export const signInScene: SetupScene = {
 					onManualCodeInput: PASTE_CODE_LOGIN_PROVIDERS.has(providerId)
 						? signal =>
 								state.showManualInput(
-									`Paste the authorization code (or full redirect URL), then press ${keyLabel(actionKeyId("tui.input.submit", "enter"))}:`,
+									`Paste the address from your browser (or the code it shows), then press ${keyLabel(actionKeyId("tui.input.submit", "enter"))}:`,
 									signal,
 								)
 						: undefined,

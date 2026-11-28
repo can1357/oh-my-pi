@@ -146,6 +146,8 @@ export class TanCommandController {
 		const toolNames = session.getEnabledToolNames();
 		const activeToolNames = session.getActiveToolNames();
 		const mountedToolNames = session.getMountedToolCommandNames();
+		// The clone renders its tools headless; it sends the owner's wording to keep the owner's cached prefix.
+		const ownerTools = session.agent.normalizedTools();
 		const modelRegistry = session.modelRegistry;
 		// Snapshot the parent's rebindable extensions and root policy at dispatch.
 		// The child rebinds these (skipping discovery) so it re-registers the
@@ -276,6 +278,7 @@ export class TanCommandController {
 							throw error;
 						}
 						mcpFollower?.bind(clone);
+						clone.agent.inheritToolDescriptions(ownerTools);
 						clone.sessionManager?.appendSessionInit?.({
 							systemPrompt: clone.systemPrompt ?? systemPrompt,
 							task: trimmedWork,

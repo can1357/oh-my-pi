@@ -14,9 +14,27 @@ import {
 	ThemeController,
 } from "@oh-my-pi/pi-tui/theme/index";
 
-const TRUECOLOR_DARK = { truecolor: true, colors: 16_777_216, dark: true, emoji: CONSERVATIVE_EMOJI } as const;
-const TRUECOLOR_LIGHT = { truecolor: true, colors: 16_777_216, dark: false, emoji: CONSERVATIVE_EMOJI } as const;
-const PALETTE_DARK = { truecolor: false, colors: 256, dark: true, emoji: CONSERVATIVE_EMOJI } as const;
+const TRUECOLOR_DARK = {
+	truecolor: true,
+	colors: 16_777_216,
+	dark: true,
+	emoji: CONSERVATIVE_EMOJI,
+	styledUnderlines: false,
+} as const;
+const TRUECOLOR_LIGHT = {
+	truecolor: true,
+	colors: 16_777_216,
+	dark: false,
+	emoji: CONSERVATIVE_EMOJI,
+	styledUnderlines: false,
+} as const;
+const PALETTE_DARK = {
+	truecolor: false,
+	colors: 256,
+	dark: true,
+	emoji: CONSERVATIVE_EMOJI,
+	styledUnderlines: false,
+} as const;
 
 const originalAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
 let tempAgentDir: string;

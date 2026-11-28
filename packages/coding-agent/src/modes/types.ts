@@ -67,6 +67,7 @@ import type {
 	TrayModel,
 	WorkingSpec,
 } from "../ui/dock";
+import type { ErrorBannerAction } from "../ui/overlays/panels/error-banner";
 import type { HookSelectorProps } from "../ui/overlays/pickers/hook-selector";
 import type {
 	BlockOptions,
@@ -806,7 +807,7 @@ export interface InteractiveModeContext {
 	/** Show the ctrl+p role chip track above the editor, `activeIndex` filled. */
 	showModelCycleTrack(segments: readonly TrackSegment[], activeIndex: number): void;
 	showError(message: string): void;
-	showPinnedError(message: string): void;
+	showPinnedError(message: string, actions?: readonly ErrorBannerAction[]): void;
 	clearPinnedError(): void;
 	showWarning(message: string, options?: { hideWithToolActivity?: boolean }): void;
 	/** The provider's `active-notice` line when the viewed session moves onto a new model of that provider. */
@@ -1104,16 +1105,19 @@ export interface InteractiveModeContext {
 	handleCleanseEscape(): boolean;
 	/**
 	 * Show a read-only command report outside the transcript: in the `report` slot above the
-	 * composer like `/btw` (a full-screen page when taller) in text mode, a `/usage`-style sheet
-	 * natively. `body` builds the report's content (runs once, in the report's root). Replaces the
-	 * report already shown.
+	 * composer like `/btw` (a full-screen page when taller, and always in fullscreen mode) in text
+	 * mode, a `/usage`-style sheet natively. `body` builds the report's content (runs once, in the
+	 * report's root). Replaces the report already shown.
 	 */
 	showCommandReport(options: { title: string; head?: TspText; body: () => JSXNode }): void;
 	/** The jobs sheet (the jobs pill's), on job `selected` when it lists it. */
 	showJobsSheet(selected?: string): void;
 	/** Clear the docked command report; false when none was shown (Esc falls through). */
 	dismissCommandReport(): boolean;
-	/** Screen rows a report above the editor may take (all of them but the editor and the chrome under it). */
+	/**
+	 * Screen rows a report above the editor may take: all of them but the editor and the chrome
+	 * under it, none in fullscreen mode; undefined natively.
+	 */
 	commandReportRows(): number | undefined;
 	cycleThinkingLevel(): void;
 	cycleRoleModel(direction?: "forward" | "backward"): Promise<void>;

@@ -145,7 +145,6 @@ impl FromNapiValue for AbortSignal {
       stack.0.push(abort_signal);
     } else {
       let stack_ptr = Box::into_raw(Box::new(AbortSignalStack(vec![abort_signal])));
-      let mut signal_ref = ptr::null_mut();
       let wrap_status = unsafe {
         sys::napi_wrap(
           env,
@@ -153,7 +152,7 @@ impl FromNapiValue for AbortSignal {
           stack_ptr.cast(),
           Some(async_task_abort_controller_finalize),
           ptr::null_mut(),
-          &mut signal_ref,
+          ptr::null_mut(),
         )
       };
       if wrap_status != sys::Status::napi_ok {

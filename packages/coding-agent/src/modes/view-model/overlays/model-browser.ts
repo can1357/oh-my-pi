@@ -5,6 +5,7 @@
  */
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import type { Model } from "@oh-my-pi/pi-ai";
+import { providerConnectedName } from "@oh-my-pi/pi-catalog/compat/auth";
 import {
 	getEffectiveTokenCost,
 	getFactoryDroidCreditRate,
@@ -443,11 +444,18 @@ function versionNumber(id: string): number {
 	return single ? Number.parseFloat(single[1]!) : 0;
 }
 
-/** The first built-in role each assigned model holds (lower = earlier), keyed by {@link modelIdentityKey}. */
+/**
+ * Roles whose model the session itself runs (startup, ctrl+p cycling, plan mode).
+ * Only these pin a row above recent use; background roles (tiny, memory, commit,
+ * vision, …) sort by recency like any other model.
+ */
+const SESSION_ROLE_IDS: readonly ModelRole[] = ["default", "smol", "slow", "plan"];
+
+/** The first session role each assigned model holds (lower = earlier), keyed by {@link modelIdentityKey}. */
 function roleRanks(roles: RoleAssignments): Map<string, number> {
 	const ranks = new Map<string, number>();
-	for (let i = MODEL_ROLE_IDS.length - 1; i >= 0; i--) {
-		const assigned = roles[MODEL_ROLE_IDS[i]!];
+	for (let i = SESSION_ROLE_IDS.length - 1; i >= 0; i--) {
+		const assigned = roles[SESSION_ROLE_IDS[i]!];
 		if (assigned) ranks.set(modelIdentityKey(assigned.model), i);
 	}
 	return ranks;
@@ -461,7 +469,7 @@ export interface SortModelItemsOptions {
 	skipRoleRank?: boolean;
 }
 
-/** Order models for display: role-assigned first, then most recently used, then per provider by priority, version and recency. */
+/** Order models for display: session-role models first, then most recently used, then per provider by priority, version and recency. */
 export function sortModelItems(items: ModelBrowserItem[], options: SortModelItemsOptions = {}): void {
 	const compare = modelItemComparator(items, options);
 	items.sort(compare);
@@ -501,7 +509,7 @@ function modelItemComparator(
 	const keys = new Map<ModelBrowserItem, OrderKeys>();
 	for (const item of items) {
 		keys.set(item, {
-			roleRank: ranks?.get(modelIdentityKey(item.model)) ?? MODEL_ROLE_IDS.length,
+			roleRank: ranks?.get(modelIdentityKey(item.model)) ?? SESSION_ROLE_IDS.length,
 			mru: mru.get(item.selector) ?? Number.MAX_SAFE_INTEGER,
 			provider: providerRank.get(item.provider)!,
 			priority: item.model.priority ?? Number.MAX_SAFE_INTEGER,
@@ -763,9 +771,11 @@ function searchTier(query: string, id: string, selector: string): number {
 	return 2;
 }
 
-/** The fuzzy haystack of a model row: `provider/id`, plus `free` for zero-cost models (the cost column's word). */
+/** Search by selector, connected provider name, or the `free` price label. */
 export function modelSearchText(item: ModelBrowserItem): string {
-	return `${item.provider}/${modelIdSearchText(item)}`;
+	const selector = `${item.provider}/${modelIdSearchText(item)}`;
+	const name = providerConnectedName(item.provider);
+	return name ? `${name} ${selector}` : selector;
 }
 
 /** {@link modelSearchText} without the provider: what the model part of a `provider/model` query searches. */

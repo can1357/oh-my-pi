@@ -93,6 +93,7 @@ const BASE_CAPABILITIES: TerminalCapabilities = {
 	textSizing: false,
 	tsp: false,
 	emoji: CONSERVATIVE_EMOJI,
+	styledUnderlines: false,
 };
 
 /** Printable text of a bare key id (`a`, `space`, `shift+a`), if it produces any. */

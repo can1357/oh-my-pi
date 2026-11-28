@@ -5,6 +5,7 @@ import {
 	compact,
 	DEFAULT_COMPACTION_SETTINGS,
 	generateHandoff,
+	generateSummary,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { AssistantMessage, Context, Model } from "@oh-my-pi/pi-ai";
@@ -95,14 +96,19 @@ function makeUserMessage(text: string, timestamp = Date.now()): AgentMessage {
 	return { role: "user", content: text, timestamp };
 }
 
+/** Text that only the history summary requests carry. */
+const HISTORY_TEXT = "history msg";
+/** Text that only the turn-prefix summary request carries. */
+const TURN_PREFIX_TEXT = "turn prefix msg";
+
 function makePreparation(overrides: Partial<CompactionPreparation> = {}): CompactionPreparation {
 	return {
 		firstKeptEntryId: "kept-1",
 		messagesToSummarize: [
-			makeUserMessage("history msg"),
+			makeUserMessage(HISTORY_TEXT),
 			makeAssistantStop([{ type: "text", text: "history reply" }]),
 		],
-		turnPrefixMessages: [makeUserMessage("turn prefix msg")],
+		turnPrefixMessages: [makeUserMessage(TURN_PREFIX_TEXT)],
 		recentMessages: [makeUserMessage("recent msg")],
 		isSplitTurn: true,
 		tokensBefore: 12_345,
@@ -121,11 +127,18 @@ function expectIncompleteSummaryError(error: unknown, prefix: string): void {
 	expect(AIError.is(AIError.classify(e.message), AIError.Flag.AuthFailed)).toBe(false);
 }
 
-/** Only the turn-prefix summary request carries this prompt line; the history summary request does not. */
-const TURN_PREFIX_PROMPT = "MUST summarize prefix for retained suffix:";
+type SummaryRequest = "history" | "prefix" | "short";
 
-function isTurnPrefixRequest(ctx: Context): boolean {
-	return JSON.stringify(ctx.messages).includes(TURN_PREFIX_PROMPT);
+/**
+ * Names a local summary request by the conversation it carries, never by prompt
+ * wording: each request carries only its own messages, and the mocks' answers
+ * never repeat the fixture text, so the short summary carries neither.
+ */
+function summaryRequestOf(ctx: Context): SummaryRequest {
+	const messages = JSON.stringify(ctx.messages);
+	if (messages.includes(TURN_PREFIX_TEXT)) return "prefix";
+	if (messages.includes(HISTORY_TEXT)) return "history";
+	return "short";
 }
 
 /**
@@ -138,6 +151,25 @@ function afterQueuedJobs(): Promise<void> {
 	const { promise, resolve } = Promise.withResolvers<void>();
 	setImmediate(resolve);
 	return promise;
+}
+
+/**
+ * Answers as a built-in provider does once its request is cancelled: it
+ * resolves with `stopReason: "aborted"` and the partial output, not a
+ * rejection. `release` ends a request that no abort reached, so a missing
+ * cancellation fails the test instead of hanging it.
+ */
+async function answerWhenAborted(signal: AbortSignal | undefined, release: Promise<void>): Promise<AssistantMessage> {
+	if (!signal?.aborted) {
+		const aborted = Promise.withResolvers<void>();
+		signal?.addEventListener("abort", () => aborted.resolve(), { once: true });
+		await Promise.race([aborted.promise, release]);
+	}
+	return {
+		...makeAssistantStop([{ type: "text", text: "Partial summ" }]),
+		stopReason: "aborted",
+		errorMessage: "Request was aborted",
+	};
 }
 
 type RequestState = "idle" | "running" | "stopped";
@@ -220,7 +252,7 @@ describe("incomplete local summaries", () => {
 	test("compact rejects a split-turn prefix summary that hit the output limit", async () => {
 		const error = await compact(makePreparation(), getAnthropicModel(), "key", undefined, undefined, {
 			completeImpl: async (_model, ctx) =>
-				isTurnPrefixRequest(ctx)
+				summaryRequestOf(ctx) === "prefix"
 					? makeAssistantLength([{ type: "thinking", thinking: "Preparing the summary" }])
 					: makeAssistantStop([{ type: "text", text: "Complete history summary." }]),
 		}).catch((caught: unknown) => caught);
@@ -271,7 +303,7 @@ describe("split-turn summary fan-out", () => {
 
 		const run = compact(makePreparation(), getAnthropicModel(), "key", undefined, undefined, {
 			completeImpl: (_model, ctx, options) => {
-				const request = isTurnPrefixRequest(ctx) ? failPrefix() : holdHistory(options.signal);
+				const request = summaryRequestOf(ctx) === "prefix" ? failPrefix() : holdHistory(options.signal);
 				requests.push(request);
 				return request;
 			},
@@ -315,6 +347,139 @@ describe("split-turn summary fan-out", () => {
 		}
 	});
 
+	test("starts no further history window once a turn-prefix failure aborts the fold", async () => {
+		const failure = new Error("turn prefix summary failed");
+		const prefixFails = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const started = { history: 0, prefix: 0 };
+		let firstWindow = "";
+		const requests: Promise<AssistantMessage>[] = [];
+		// More history than one summary window of a 40k-token model holds; step 1 checks it.
+		const messagesToSummarize = Array.from({ length: 12 }, (_, i) => [
+			makeUserMessage(`${HISTORY_TEXT} ${i} ${"work ".repeat(2_000)}`),
+			makeAssistantStop([{ type: "text", text: `history reply ${i}` }]),
+		]).flat();
+
+		const failPrefix = async (): Promise<AssistantMessage> => {
+			started.prefix++;
+			await prefixFails.promise;
+			throw failure;
+		};
+		const foldHistory = (ctx: Context, signal: AbortSignal | undefined): Promise<AssistantMessage> => {
+			started.history++;
+			firstWindow ||= JSON.stringify(ctx.messages);
+			return answerWhenAborted(signal, release.promise);
+		};
+
+		const run = compact(
+			makePreparation({ messagesToSummarize }),
+			{ ...getAnthropicModel(), contextWindow: 40_000 },
+			"key",
+			undefined,
+			undefined,
+			{
+				// A window can hold a lone assistant reply, which carries no fixture text: count it as history too.
+				completeImpl: (_model, ctx, options) => {
+					const request = summaryRequestOf(ctx) === "prefix" ? failPrefix() : foldHistory(ctx, options.signal);
+					requests.push(request);
+					return request;
+				},
+				oneshotRetry: false,
+			},
+		);
+		// Set in the job where compact() settles, so a lost abort fails step 2 instead of hanging on `settled`.
+		let compactionSettled = false;
+		const settled = run.then(
+			() => {
+				compactionSettled = true;
+			},
+			(error: unknown) => {
+				compactionSettled = true;
+				return error;
+			},
+		);
+
+		try {
+			// 1. The first history window and the turn-prefix request are in flight.
+			// The first window stops short of the last turn, so the fold has more windows to send.
+			await afterQueuedJobs();
+			expect(started).toEqual({ history: 1, prefix: 1 });
+			expect(firstWindow).toContain(`${HISTORY_TEXT} 0 `);
+			expect(firstWindow).not.toContain(`${HISTORY_TEXT} 11 `);
+
+			// 2. The turn-prefix request fails. Its abort resolves the first window as
+			// aborted, and the fold must end there instead of sending the next window.
+			// compact() settles through promise jobs alone, so by the next macrotask it
+			// has settled; if the abort is lost, this fails and `finally` releases the window.
+			prefixFails.resolve();
+			await afterQueuedJobs();
+			expect(compactionSettled).toBe(true);
+
+			expect(await settled).toBe(failure);
+			expect(started).toEqual({ history: 1, prefix: 1 });
+		} finally {
+			prefixFails.resolve();
+			release.resolve();
+			await Promise.allSettled([settled, ...requests]);
+		}
+	}, 15_000);
+
+	test("aborts both split summaries with the caller's own reason", async () => {
+		const controller = new AbortController();
+		const reason = new Error("caller cancelled compaction");
+		const release = Promise.withResolvers<void>();
+		const started: Record<SummaryRequest, number> = { history: 0, prefix: 0, short: 0 };
+		const observed: Partial<Record<SummaryRequest, unknown>> = {};
+		const requests: Promise<AssistantMessage>[] = [];
+
+		const hold = (request: SummaryRequest, signal: AbortSignal | undefined): Promise<AssistantMessage> => {
+			started[request]++;
+			signal?.addEventListener(
+				"abort",
+				() => {
+					observed[request] = signal?.reason;
+				},
+				{ once: true },
+			);
+			return answerWhenAborted(signal, release.promise);
+		};
+
+		const run = compact(makePreparation(), getAnthropicModel(), "key", undefined, controller.signal, {
+			completeImpl: (_model, ctx, options) => {
+				const request = hold(summaryRequestOf(ctx), options.signal);
+				requests.push(request);
+				return request;
+			},
+			oneshotRetry: false,
+		});
+		const settled = run.then(
+			() => undefined,
+			(error: unknown) => error,
+		);
+
+		try {
+			// 1. Both summary requests are in flight, and neither has answered.
+			await afterQueuedJobs();
+			expect(started).toEqual({ history: 1, prefix: 1, short: 0 });
+
+			// 2. The caller cancels. Each request sees the caller's own reason, not
+			// one compaction substituted.
+			controller.abort(reason);
+			await afterQueuedJobs();
+			expect(observed.history).toBe(reason);
+			expect(observed.prefix).toBe(reason);
+
+			// 3. Compaction reports a cancellation and starts no other request.
+			const error = await settled;
+			expect(error).toBeInstanceOf(Error);
+			expect((error as Error).name).toBe("AbortError");
+			expect(started).toEqual({ history: 1, prefix: 1, short: 0 });
+		} finally {
+			release.resolve();
+			await Promise.allSettled([settled, ...requests]);
+		}
+	}, 15_000);
+
 	test("runs both split summaries concurrently when both succeed", async () => {
 		const prefixAnswers = Promise.withResolvers<void>();
 		const historyAnswers = Promise.withResolvers<void>();
@@ -339,13 +504,10 @@ describe("split-turn summary fan-out", () => {
 		};
 
 		const run = compact(makePreparation(), getAnthropicModel(), "key", undefined, undefined, {
-			// The history request is the first without the turn-prefix prompt; the short summary follows both.
 			completeImpl: (_model, ctx, options) => {
-				const request = isTurnPrefixRequest(ctx)
-					? answerPrefix()
-					: started.history === 0
-						? answerHistory(options.signal)
-						: answerShort();
+				const kind = summaryRequestOf(ctx);
+				const request =
+					kind === "prefix" ? answerPrefix() : kind === "history" ? answerHistory(options.signal) : answerShort();
 				requests.push(request);
 				return request;
 			},
@@ -376,5 +538,28 @@ describe("split-turn summary fan-out", () => {
 			historyAnswers.resolve();
 			await Promise.allSettled([settled, ...requests]);
 		}
+	});
+});
+
+describe("history summary cancellation", () => {
+	test("generateSummary starts no window on an already-aborted signal", async () => {
+		const reason = new Error("caller cancelled compaction");
+		const controller = new AbortController();
+		controller.abort(reason);
+		const completeImpl = vi.fn(async () => makeAssistantStop([{ type: "text", text: "History summary." }]));
+
+		const error = await generateSummary(
+			[makeUserMessage(HISTORY_TEXT)],
+			getAnthropicModel(),
+			16_384,
+			"key",
+			controller.signal,
+			undefined,
+			undefined,
+			{ completeImpl, oneshotRetry: false },
+		).catch((caught: unknown) => caught);
+
+		expect(error).toBeInstanceOf(AIError.AbortError);
+		expect(completeImpl).not.toHaveBeenCalled();
 	});
 });

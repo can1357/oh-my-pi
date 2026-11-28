@@ -3,78 +3,12 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { COMPILED_EXTERNAL_DEPENDENCIES, compileCodingAgent } from "../packages/coding-agent/scripts/compile-binary";
-
-interface BinaryTarget {
-	id: string;
-	platform: string;
-	arch: string;
-	target: Bun.Build.CompileTarget;
-	outfile: string;
-}
+import { buildLinkedRuntime, type LinkedRuntimeTarget, linkedRuntimeTargets } from "./linked-runtime";
 
 const repoRoot = path.join(import.meta.dir, "..");
 const binariesDir = path.join(repoRoot, "packages", "coding-agent", "binaries");
 const entrypoint = path.join(repoRoot, "packages", "coding-agent", "src", "cli.ts");
-// Worker threads re-enter the binary's single CLI host entry.
 const isDryRun = process.argv.includes("--dry-run");
-const targets: BinaryTarget[] = [
-	{
-		id: "darwin-arm64",
-		platform: "darwin",
-		arch: "arm64",
-		target: "bun-darwin-arm64",
-		outfile: "packages/coding-agent/binaries/omp-darwin-arm64",
-	},
-	{
-		id: "darwin-x64",
-		platform: "darwin",
-		arch: "x64",
-		target: "bun-darwin-x64",
-		outfile: "packages/coding-agent/binaries/omp-darwin-x64",
-	},
-	{
-		id: "linux-x64",
-		platform: "linux",
-		arch: "x64",
-		target: "bun-linux-x64-baseline",
-		outfile: "packages/coding-agent/binaries/omp-linux-x64",
-	},
-	{
-		id: "linux-arm64",
-		platform: "linux",
-		arch: "arm64",
-		target: "bun-linux-arm64",
-		outfile: "packages/coding-agent/binaries/omp-linux-arm64",
-	},
-	{
-		id: "linux-musl-x64",
-		platform: "linux",
-		arch: "x64",
-		target: "bun-linux-x64-musl-baseline",
-		outfile: "packages/coding-agent/binaries/omp-linux-musl-x64",
-	},
-	{
-		id: "linux-musl-arm64",
-		platform: "linux",
-		arch: "arm64",
-		target: "bun-linux-arm64-musl",
-		outfile: "packages/coding-agent/binaries/omp-linux-musl-arm64",
-	},
-	{
-		id: "win32-x64",
-		platform: "win32",
-		arch: "x64",
-		target: "bun-windows-x64-baseline",
-		outfile: "packages/coding-agent/binaries/omp-windows-x64.exe",
-	},
-	{
-		id: "win32-arm64",
-		platform: "win32",
-		arch: "arm64",
-		target: "bun-windows-arm64",
-		outfile: "packages/coding-agent/binaries/omp-windows-arm64.exe",
-	},
-];
 
 function parseRequestedTargets(): Set<string> | null {
 	const flagIndex = process.argv.indexOf("--targets");
@@ -95,7 +29,7 @@ function parseRequestedTargets(): Set<string> | null {
 	);
 }
 
-function shouldAdhocSignDarwinBinary(target: BinaryTarget): boolean {
+function shouldAdhocSignDarwinBinary(target: LinkedRuntimeTarget): boolean {
 	return target.platform === "darwin" && process.platform === "darwin";
 }
 
@@ -111,11 +45,13 @@ async function runCommand(command: string[], cwd: string): Promise<void> {
 	}
 }
 
-async function buildBinary(target: BinaryTarget): Promise<void> {
-	console.log(`Building ${target.outfile}...`);
+async function buildBinary(target: LinkedRuntimeTarget): Promise<void> {
+	const name = target.platform === "win32" ? `omp-windows-${target.arch}.exe` : `omp-${target.id}`;
+	const outfile = path.join(binariesDir, name);
+	console.log(`Building ${outfile}...`);
 	if (isDryRun) {
 		console.log(
-			`DRY RUN Bun.build target=${target.target} outfile=${target.outfile} external=${COMPILED_EXTERNAL_DEPENDENCIES.join(",")}`,
+			`DRY RUN Bun.build target=${target.target} outfile=${outfile} external=${COMPILED_EXTERNAL_DEPENDENCIES.join(",")}`,
 		);
 		return;
 	}
@@ -123,8 +59,8 @@ async function buildBinary(target: BinaryTarget): Promise<void> {
 	await compileCodingAgent({
 		repoRoot,
 		entrypoint,
-		outfile: path.join(repoRoot, target.outfile),
-		native: target,
+		outfile,
+		executablePath: Bun.env.BUN_COMPILE_EXECUTABLE_PATH ?? (await buildLinkedRuntime(target.id)),
 		target: target.target,
 		minifyIdentifiers: true,
 		skipBuiltinCodesign: shouldAdhocSignDarwinBinary(target),
@@ -139,7 +75,7 @@ async function buildBinary(target: BinaryTarget): Promise<void> {
 				"-",
 				"--entitlements",
 				path.join(repoRoot, "scripts", "macos-entitlements.plist"),
-				path.join(repoRoot, target.outfile),
+				outfile,
 			],
 			repoRoot,
 		);
@@ -166,11 +102,16 @@ async function resetArtifacts(): Promise<void> {
 
 async function main(): Promise<void> {
 	const requestedTargets = parseRequestedTargets();
-	const selectedTargets = requestedTargets ? targets.filter(target => requestedTargets.has(target.id)) : targets;
+	const selectedTargets = requestedTargets
+		? linkedRuntimeTargets.filter(target => requestedTargets.has(target.id))
+		: linkedRuntimeTargets;
+	if (Bun.env.BUN_COMPILE_EXECUTABLE_PATH && selectedTargets.length > 1) {
+		throw new Error("A prebuilt runtime template can only be used with a single release target.");
+	}
 
 	if (requestedTargets) {
 		const unknownTargets = [...requestedTargets].filter(
-			requestedTarget => !targets.some(target => target.id === requestedTarget),
+			requestedTarget => !linkedRuntimeTargets.some(target => target.id === requestedTarget),
 		);
 		if (unknownTargets.length > 0) {
 			throw new Error(`Unknown release target(s): ${unknownTargets.join(", ")}`);

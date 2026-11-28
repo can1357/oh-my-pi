@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
 import packageJson from "../package.json" with { type: "json" };
-import { embeddedAddon } from "./embedded-addon.js";
+import { embeddedAddon, openLinkedAddon } from "./embedded-addon.js";
 import { bindingsHaveReleaseIdentity, bindingsReleaseVersion, containsVersionStamp } from "./version-sentinel.js";
 
 /**
@@ -12,9 +12,9 @@ import { bindingsHaveReleaseIdentity, bindingsReleaseVersion, containsVersionSta
  *
  * Owns every step between "Node imports `native/index.js`" and "the right
  * `pi_natives.<platform>-<arch>*.node` is required, validated, and returned":
- * platform/variant detection, candidate-path resolution, on-disk staging from
- * `node_modules` (Windows update safety), embedded-addon extraction (Bun
- * standalone binaries), release-stamp validation, and the aggregated error
+ * linked runtime registration, platform/variant detection, candidate-path resolution,
+ * on-disk staging from `node_modules` (Windows update safety), Nix embedded-addon
+ * extraction, release-stamp validation, and the aggregated error
  * surface for diagnostic-friendly failures.
  *
  * `native/index.js` is reduced to one `loadNative()` call plus the generated
@@ -26,9 +26,8 @@ import { bindingsHaveReleaseIdentity, bindingsReleaseVersion, containsVersionSta
  * substitutes the bare identifier `PI_COMPILED`, NOT `process.env.PI_COMPILED`,
  * so a runtime read of the env var returns `undefined`. Older CommonJS loader
  * code also saw the original build-host absolute path in `__filename`; ESM
- * `import.meta.url` is rewritten to the bunfs URL. The embedded-addon
- * presence (true iff the build pipeline ran `embed:native`, false in the
- * post-build `--reset` stub) is the authoritative compiled-mode signal.
+ * `import.meta.url` is rewritten to the bunfs URL. Linked builds bypass
+ * detection; on the file-backed path a populated manifest signals an embedded addon.
  */
 
 const SUPPORTED_PLATFORMS = [
@@ -1056,8 +1055,34 @@ export function openNativeAddon(candidate) {
 	return addonModule.exports;
 }
 
+/** @type {Record<string, unknown> | undefined} */
+let linkedBindings;
+
+/** @param {() => Record<string, unknown>} open */
+function loadLinkedNative(open) {
+	if (linkedBindings && loadedAddon) return linkedBindings;
+	// Initialization creates VM-local classes. Retrying setup must not register them a second time.
+	const bindings = (linkedBindings ??= open());
+	const addon = describeLoadedAddon(bindings, process.execPath, { packageVersion: packageJson.version });
+	if (addon.stale) {
+		throw new Error(
+			`Linked pi-natives reports ${addon.version ?? "no version"}; the bundled CLI expects ${addon.packageVersion}.`,
+		);
+	}
+	installNativeTokioRuntime(bindings);
+	configureGrammarDir(bindings, getNativesDir());
+	loadedAddon = addon;
+	return bindings;
+}
+
 export function loadNative() {
 	startupMarker("native:loadNative:start");
+	// A build-time module replacement, not an environment override. Never probe disk on a linked ABI mismatch.
+	if (openLinkedAddon) {
+		const bindings = loadLinkedNative(openLinkedAddon);
+		startupMarker("native:loadNative:done");
+		return bindings;
+	}
 	const ctx = initLoaderContext();
 
 	const errors = [];

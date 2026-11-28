@@ -22,7 +22,15 @@ const restoreTheme = currentTheme();
 
 beforeAll(() => {
 	// The glow assertions read truecolor SGR: pin the depth instead of following the runner's env.
-	initTheme({ capabilities: { truecolor: true, colors: 16_777_216, dark: true, emoji: CONSERVATIVE_EMOJI } });
+	initTheme({
+		capabilities: {
+			truecolor: true,
+			colors: 16_777_216,
+			dark: true,
+			emoji: CONSERVATIVE_EMOJI,
+			styledUnderlines: false,
+		},
+	});
 });
 
 afterAll(() => {

@@ -5,6 +5,8 @@
 ### Added
 
 - Added the TSP `meter` style `wave`: bars that swing with the value, animated by the host, for a live voice or audio level.
+- Added the TSP picker `search` mode `bar`: the search is a pill beside the list with the `scopes` as round buttons after it, and a click on one sends `action {act:"scope", value}`.
+- Added `query` to the TSP picker's caret `anchor`: the `[from, to]` range of the anchor editor's text the picker's `query` is typed as, which a `bar` search shows instead of the editor.
 
 ## [19.2.1] - 2026-11-25
 

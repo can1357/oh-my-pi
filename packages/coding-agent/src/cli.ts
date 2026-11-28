@@ -36,12 +36,14 @@ import {
 	SHELL_PROCESS_SELECTOR,
 } from "@oh-my-pi/pi-utils/worker-host";
 import { installSqliteLockShim } from "@oh-my-pi/pi-natives/sqlite-locks";
+import type * as LinkedNativesSmoke from "./cli/linked-natives-smoke";
 import { isNativeShell, runNativeShell } from "./cli/native-shell";
 import { extractProfileFlags } from "./cli/profile-bootstrap";
 import { scanPrepaintArgv } from "./cli/prepaint";
 import {
 	AUTO_UPDATE_WORKER_ARG,
 	COMPUTER_WORKER_ARG,
+	LINKED_NATIVE_WORKER_ARG,
 	PARENT_WATCHDOG_WORKER_ARG,
 	STATS_ACTIVITY_WORKER_ARG,
 	SUBAGENT_WORKER_ARG,
@@ -209,6 +211,11 @@ const STT_WORKER_ARG = "__omp_worker_stt";
 const TTS_WORKER_ARG = "__omp_worker_tts";
 
 async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
+	if (arg === LINKED_NATIVE_WORKER_ARG) {
+		const smoke: typeof LinkedNativesSmoke = require("./cli/linked-natives-smoke");
+		smoke.runLinkedNativeWorker();
+		return true;
+	}
 	if (arg === TINY_WORKER_ARG) {
 		await runTinyWorker();
 		return true;
@@ -535,6 +542,12 @@ export async function runCli(argv: string[]): Promise<void> {
 	// inherit the policy, so reads of cloud-only files download everywhere.
 	if (isProcessEntry) materializeDatalessFiles();
 
+	if (resolvedArgv[0] === "--smoke-test-linked-natives") {
+		const smoke: typeof LinkedNativesSmoke = require("./cli/linked-natives-smoke");
+		await smoke.smokeLinkedNatives();
+		process.stdout.write("linked-natives: ok\n");
+		return;
+	}
 	if (resolvedArgv[0] === "--license") {
 		// Command boundary: bundled notices are read only when requested.
 		const { formatLicenseOutput } = await import("./cli/license");

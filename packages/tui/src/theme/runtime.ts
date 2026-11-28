@@ -26,8 +26,11 @@ export function setCurrentTheme(theme: ResolvedTheme): void {
 	active.set(theme);
 }
 
-/** Terminal capabilities the theme follows: color support, the background's appearance, emoji drawing. */
-export type ThemeCapabilities = Pick<TerminalCapabilities, "truecolor" | "colors" | "dark" | "emoji">;
+/** Terminal capabilities the theme follows: color support, the background's appearance, emoji and underline drawing. */
+export type ThemeCapabilities = Pick<
+	TerminalCapabilities,
+	"truecolor" | "colors" | "dark" | "emoji" | "styledUnderlines"
+>;
 
 /** Theme settings the controller reads. */
 export interface ThemeSettings {
@@ -76,6 +79,7 @@ export class ThemeController {
 	#depth: ColorDepth = "truecolor";
 	#appearance: "dark" | "light" = "dark";
 	#emoji: EmojiSupport = CONSERVATIVE_EMOJI;
+	#styledUnderlines = false;
 	#auto = true;
 	#name: string;
 	#request = 0;
@@ -119,6 +123,7 @@ export class ThemeController {
 			symbolPreset: this.#symbolPreset,
 			colorBlindMode: this.#colorBlindMode,
 			emoji: this.#emoji,
+			styledUnderlines: this.#styledUnderlines,
 		};
 	}
 
@@ -140,7 +145,8 @@ export class ThemeController {
 
 	/**
 	 * Follow the terminal: depth from its color support, the auto slot from its
-	 * appearance, emoji glyph forms from its emoji support. Reloads only when one changed.
+	 * appearance, emoji glyph forms from its emoji support, the typo mark from its
+	 * underline styles. Reloads only when one changed.
 	 */
 	async applyCapabilities(capabilities: ThemeCapabilities): Promise<void> {
 		if (!this.#absorb(capabilities)) return;
@@ -150,15 +156,17 @@ export class ThemeController {
 	#absorb(capabilities: ThemeCapabilities): boolean {
 		const depth = depthOf(capabilities);
 		const appearance = capabilities.dark ? "dark" : "light";
-		const { emoji } = capabilities;
+		const { emoji, styledUnderlines } = capabilities;
 		const changed =
 			depth !== this.#depth ||
 			(this.#auto && appearance !== this.#appearance) ||
 			emoji.vs16Wide !== this.#emoji.vs16Wide ||
-			emoji.bareFits !== this.#emoji.bareFits;
+			emoji.bareFits !== this.#emoji.bareFits ||
+			styledUnderlines !== this.#styledUnderlines;
 		this.#depth = depth;
 		this.#appearance = appearance;
 		this.#emoji = emoji;
+		this.#styledUnderlines = styledUnderlines;
 		return changed;
 	}
 

@@ -19,6 +19,7 @@ import {
 	streamSimple,
 	type TextContent,
 	type ThinkingBudgets,
+	type Tool,
 	type ToolChoice,
 	type ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
@@ -45,6 +46,7 @@ import {
 import type { AppendOnlyContextManager } from "./append-only-context";
 import { agentPauseGate } from "./pause";
 import { filterProviderReplayMessages } from "./replay-policy";
+import { InheritedToolDescriptions } from "./inherited-tool-descriptions";
 import { SentToolDefinitions } from "./sent-tool-definitions";
 import { Tokenizer } from "./tokenizer";
 import {
@@ -510,6 +512,7 @@ export class Agent {
 	#intentTracing: boolean;
 	#intentDescription?: string;
 	#pruneToolDescriptions: boolean;
+	#inheritedToolDescriptions?: InheritedToolDescriptions;
 	#dialect?: Dialect;
 	#dialectResolver?: (model: Model) => Dialect | undefined;
 	#abortOnFabricatedToolResult?: boolean;
@@ -682,6 +685,36 @@ export class Agent {
 	 */
 	copySentToolDefinitions(keep?: (name: string) => boolean): SentToolDefinitions {
 		return this.#sentToolDefinitions.copy(keep);
+	}
+
+	/**
+	 * Provider-bound specs of the tools the next request to the active model declares, before the
+	 * provider-context transform; empty without a model or under an owned dialect. A fork passes
+	 * its owner's to {@link inheritToolDescriptions}.
+	 */
+	normalizedTools(): Tool[] {
+		const model = this.#state.model;
+		if (!model || this.#ownedDialect(model)) return [];
+		return normalizeTools(this.#toolsForModel(model), this.#toolOptions()) ?? [];
+	}
+
+	/**
+	 * Send `owner`'s wording for every current tool that differs from it only in description, so
+	 * this fork's requests open with the owner's cached prefix. Call once the fork's tool set is
+	 * final; see {@link InheritedToolDescriptions}.
+	 */
+	inheritToolDescriptions(owner: readonly Tool[]): void {
+		this.#inheritedToolDescriptions = undefined;
+		this.#inheritedToolDescriptions = new InheritedToolDescriptions(this.normalizedTools(), owner);
+	}
+
+	#toolOptions(): NormalizeToolsOptions {
+		return {
+			injectIntent: this.#intentTracing,
+			intentDescription: this.#intentDescription,
+			pruneDescriptions: this.#pruneToolDescriptions,
+			inheritedDescriptions: this.#inheritedToolDescriptions,
+		};
 	}
 
 	/**
@@ -1000,11 +1033,7 @@ export class Agent {
 		if (!model) throw new Error("No active model on agent");
 		const ownedDialect = this.#ownedDialect(model);
 		const messages = normalizeMessagesForProvider(llmMessages, model);
-		const toolOptions: NormalizeToolsOptions = {
-			injectIntent: this.#intentTracing,
-			intentDescription: this.#intentDescription,
-			pruneDescriptions: this.#pruneToolDescriptions,
-		};
+		const toolOptions = this.#toolOptions();
 		const tools = ownedDialect ? [] : (normalizeTools(this.#toolsForModel(model), toolOptions) ?? []);
 		const standby = ownedDialect ? undefined : normalizeTools(this.#standbyTools, toolOptions);
 		let context: Context = { systemPrompt, messages, tools };
@@ -2126,6 +2155,7 @@ export class Agent {
 			intentTracing: this.#intentTracing,
 			intentDescription: this.#intentDescription,
 			pruneToolDescriptions: this.#pruneToolDescriptions,
+			inheritedToolDescriptions: this.#inheritedToolDescriptions,
 			dialect: this.#dialect,
 			getDialect: this.#dialectResolver,
 			abortOnFabricatedToolResult: this.#abortOnFabricatedToolResult,

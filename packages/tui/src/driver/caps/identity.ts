@@ -30,6 +30,11 @@ export interface TerminalProfile {
 	readonly emojiVs16: "wide" | "narrow" | "probe";
 	/** Whether a bare text-default emoji is drawn inside its one cell (`fits`) or overflows into the next (`spills`). */
 	readonly emojiBare: "fits" | "spills";
+	/**
+	 * Draws colon-form styled underlines (`CSI 4:3 m` curly, `CSI 58` color). Unproven
+	 * hosts stay off: Apple Terminal paints `CSI 4:0 m` as a black bar to end of line.
+	 */
+	readonly styledUnderlines: boolean;
 }
 
 /** In-band notification sequence: a bare BEL, OSC 9 (one message line) or Kitty's OSC 99 (structured). */
@@ -59,6 +64,7 @@ interface ProfileQuirks {
 	readonly textSizing?: boolean;
 	readonly emojiVs16?: TerminalProfile["emojiVs16"];
 	readonly emojiBare?: TerminalProfile["emojiBare"];
+	readonly styledUnderlines?: boolean;
 }
 
 function profile(
@@ -82,6 +88,7 @@ function profile(
 		textSizing: quirks.textSizing ?? false,
 		emojiVs16: quirks.emojiVs16 ?? "probe",
 		emojiBare: quirks.emojiBare ?? "spills",
+		styledUnderlines: quirks.styledUnderlines ?? false,
 	};
 }
 
@@ -93,6 +100,7 @@ export const TERMINAL_PROFILES: Readonly<Record<TerminalId, TerminalProfile>> = 
 		textSizing: true,
 		emojiVs16: "wide",
 		emojiBare: "fits",
+		styledUnderlines: true,
 	}),
 	// libghostty draws compatibility jamo wide and drops OSC 9;4 progress without a heartbeat.
 	ghostty: profile("ghostty", "kitty", true, true, true, "osc9", {
@@ -100,11 +108,16 @@ export const TERMINAL_PROFILES: Readonly<Record<TerminalId, TerminalProfile>> = 
 		progressKeepalive: true,
 		emojiVs16: "wide",
 		emojiBare: "fits",
+		styledUnderlines: true,
 	}),
 	// U+FE0F advances one cell at WezTerm's default Unicode 9; the driver pushes Unicode 14 at start.
-	wezterm: profile("wezterm", "kitty", true, true, true, "osc9", { emojiVs16: "narrow", emojiBare: "fits" }),
+	wezterm: profile("wezterm", "kitty", true, true, true, "osc9", {
+		emojiVs16: "narrow",
+		emojiBare: "fits",
+		styledUnderlines: true,
+	}),
 	// VS16 stays narrow on iTerm2's alternate screen.
-	iterm2: profile("iterm2", "iterm", true, true, true, "osc9", { emojiVs16: "narrow" }),
+	iterm2: profile("iterm2", "iterm", true, true, true, "osc9", { emojiVs16: "narrow", styledUnderlines: true }),
 	vscode: profile("vscode", null, true, true, true, "bell", { emojiVs16: "narrow" }),
 	alacritty: profile("alacritty", null, true, true, true, "bell", { emojiVs16: "narrow" }),
 	// Warp: Kitty graphics (macOS/Linux), no OSC 8; sync output left to the DECRQM probe.
@@ -121,6 +134,7 @@ export const TERMINAL_PROFILES: Readonly<Record<TerminalId, TerminalProfile>> = 
 		progressKeepalive: true,
 		emojiVs16: "wide",
 		emojiBare: "fits",
+		styledUnderlines: true,
 	}),
 	// A local Windows Terminal session (see `isWindowsTerminal`): images come from its DA1 SIXEL bit.
 	windowsTerminal: profile("windowsTerminal", null, true, false, true, "bell", { emojiVs16: "wide" }),

@@ -46,6 +46,7 @@ export const KITTY: TerminalCapabilities = {
 	textSizing: false,
 	tsp: false,
 	emoji: CONSERVATIVE_EMOJI,
+	styledUnderlines: false,
 };
 
 /** A block under test and how its model moves through the stages. */

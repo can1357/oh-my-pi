@@ -55,6 +55,8 @@ export interface TerminalCapabilities {
 	readonly tsp: boolean;
 	/** How emoji-capable glyphs advance and draw (profile, refined by the DECRQM 2027 reply or a width probe). */
 	readonly emoji: EmojiSupport;
+	/** Draws colon-form styled underlines: `CSI 4:3 m` curly plus a `CSI 58` underline color. */
+	readonly styledUnderlines: boolean;
 }
 
 /** Control sequences that must bracket one newly committed history row in the same write. */
@@ -75,6 +77,8 @@ export interface FramePlan {
 		readonly id: number;
 		readonly rows: readonly string[];
 		readonly kind?: "append" | "replay";
+		/** Original strings at indexes where a cut image was replaced; lets the writer recognize rows a resize already pushed. */
+		readonly originalRows?: readonly (string | undefined)[];
 		/** Marks for new rows only; omitted from the portion that replays old history. */
 		readonly marks?: readonly HistoryRowMark[];
 	};
@@ -94,6 +98,9 @@ export interface FrameImageSettler {
 	 */
 	settle(): boolean;
 }
+
+/** A rebuilt normal screen may retain the dock position; an ordinary display reset starts fresh. */
+export type ReplayListener = (cause?: "resize-rebuild") => void;
 
 /** The terminal a backend renders to. */
 export interface TerminalDriver {
@@ -119,7 +126,7 @@ export interface TerminalDriver {
 	 * replaying policy): the next frame must carry a `replay` history batch
 	 * with the whole ledger at the current width, under a fresh id.
 	 */
-	onReplay(listener: () => void): () => void;
+	onReplay(listener: ReplayListener): () => void;
 	/** Inline images, when the driver draws them (painters reach the store through the driver's own type). */
 	readonly images?: FrameImageSettler;
 	/** Clear terminal history and the screen (explicit display resets only). */

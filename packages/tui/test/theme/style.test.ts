@@ -134,6 +134,20 @@ describe("style tokens", () => {
 		expect(dark.style("typo", "x")).toBe("\x1b[4mx\x1b[24m");
 		expect(dark.style("hide accent", "x")).toBe("");
 	});
+
+	it("curls typos in the error color where the terminal draws styled underlines", () => {
+		const truecolor = createTheme(builtinThemes().dark!, { styledUnderlines: true });
+		const rgb = truecolor
+			.hex("error")
+			.slice(1)
+			.match(/../g)!
+			.map(byte => Number.parseInt(byte, 16));
+		expect(truecolor.style("typo", "x")).toBe(`\x1b[4:3m\x1b[58:2::${rgb.join(":")}mx\x1b[24m\x1b[59m`);
+
+		const palette = createTheme(builtinThemes().dark!, { styledUnderlines: true, depth: "256" });
+		const slot = /^\x1b\[38;5;(\d+)m$/.exec(palette.fgSgr("error"))![1];
+		expect(palette.style("typo", "x")).toBe(`\x1b[4:3m\x1b[58:5:${slot}mx\x1b[24m\x1b[59m`);
+	});
 });
 
 describe("symbols", () => {

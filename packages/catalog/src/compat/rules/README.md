@@ -415,7 +415,7 @@ auth "anthropic" {
     callback-port 54545                          // defaults to the oauth-code callback port
     paste-code #true                             // defaults to #true for oauth-code logins
     device-bound #true                           // logins need a key only this machine holds: kept out of the auth broker
-    sign-out hook="name"                          // runs when a login is removed: revokes the grant upstream
+    sign-out hook="name" label="Disconnect Acme Account" // revokes the grant upstream; label adds a separate disconnect action
     api-key-format "structured"                  // bearer (default) | structured (JSON credential as API key)
     expiry "jwt-or-never"                        // session-JWT expiry policy
     result "api-key"                             // OAuth login persists only credentials.access as a plain API key
@@ -427,10 +427,11 @@ auth "anthropic" {
     show-in-login-list #false
     disabled "Why it is paused, shown to users"  // turns the provider off: no login, no credential reaches it
     login-warning "Account risk to accept"       // a new login asks the user to type "yes" first
+    login-group "Acme" "Acme (plan or API key)" order=1 // group related sign-in methods
     connected-name "Acme Pro plan"               // what linked-account surfaces call the provider; `name` stays the `/login` label
     active-notice "Using your Acme Pro plan"     // transcript line when a session starts using one of the provider's models
     login-notice "Requests follow Acme's terms"  // shown once after each successful sign-in
-    manage-url "https://acme.example/apps"       // the host page where the user turns this app's access on or off
+    manage-url "https://acme.example/apps" label="Acme Account Connections" // the host page for managing this app's access
     required-scope "acme.inference"              // a login without this scope stays signed in with the provider off
 }
 ```
@@ -443,9 +444,11 @@ auth "anthropic" {
 
 `login-warning "<text>"` keeps a provider usable but makes every new login accept a risk first: the login list marks it "(at your own risk)", and `login` shows the text and starts the flow only after the user types `yes`; any other answer or a cancel stores nothing. Stored logins, token refresh and requests are not asked again. An extension that registers its own OAuth login under the id owns that prompt instead.
 
+`login-group "<menu title>" "<parent row label>" order=<positive integer>` puts related sign-in methods under one row in the interactive picker. Members share the same menu title and parent label and appear in ascending `order`. A linked member uses its `connected-name`; before sign-in it uses `name`.
+
 `connected-name "<text>"` names the provider on every surface after an account is linked — login success lines, model picker provider scopes, logout and account rows, usage and status output — while `name` stays the pre-sign-in label in the `/login` list. Absent, those surfaces keep showing the provider id (title-cased where they already did). `active-notice "<text>"` adds one dim transcript line, `<text> · <model name>`, when the session switches to one of the provider's models or first runs a turn on one; it shows once per model per session.
 
-`login-notice "<text>"` adds a dim line under the login success line. `manage-url "<url>"` is the host's page where the user turns the app's access on or off: login and logout output link it, and the model picker's provider pane opens it (F6). `required-scope "<scope>"` names the OAuth scope a login must hold to serve requests; a login whose granted `scope` lacks it is kept, and login output, logout rows and the model picker show the provider as off instead of signing the user out.
+`login-notice "<text>"` adds a dim line under the login success line. `manage-url "<url>" label="<text>"` is the host's page where the user turns the app's access on or off; `label` is optional. Login output links it, and the model picker can open it. A `label` on `sign-out hook="…"` tells the account picker to offer two distinct actions: signing out on this device (without running the hook) and disconnecting the account (running the hook and removing the stored login). The same picker links to `manage-url`. Without a sign-out label, the existing sign-out action still runs the hook when present. `required-scope "<scope>"` names the OAuth scope a login must hold to serve requests; a login whose granted `scope` lacks it stays signed in, but the provider appears off.
 
 Login kinds:
 
@@ -471,6 +474,7 @@ provider "sakana" {
     allow-unauthenticated #true                   // runtime manager without a key
     skip-cross-provider-reference-fills #true     // generator never backfills from same-id rows elsewhere
     keep-bundled-names #true                      // discovery never renames a bundled row
+    use-model-names-in-picker #true              // model rows show display names, not model IDs
     discovery label="Sakana AI" oauth-provider="sakana" allow-unauthenticated=#true {
         env "SAKANA_GEN_KEY"                      // generation-time keys; defaults to the provider env
     }

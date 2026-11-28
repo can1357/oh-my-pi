@@ -128,7 +128,8 @@ authorization-code flow, and `github-copilot.kdl` for a custom flow.
 | `store-as "id"`                                           | Stores credentials under another provider ID.                                                                      |
 | `callback-port N`, `paste-code #true`                     | Coding-agent/broker callback metadata; OAuth-code flows derive these from their callback policy unless overridden. |
 | `device-bound #true`                                      | Logins depend on a key only this machine holds; they stay in the local `agent.db` and never reach the auth broker. |
-| `sign-out hook="…"`                                       | Runs when a login is removed: revokes the grant upstream.                                                                 |
+| `sign-out hook="…" label="…"`                             | Revokes the grant upstream. The optional label separates local sign-out and disconnect in the account picker.     |
+| `manage-url "https://…" label="…"`                       | Host page where the user manages the app's access, with an optional public link label.                             |
 | `oauth-token-env "VAR" …`                                 | Dedicated OAuth environment tokens; borrowed API-key aliases do not make this provider automatically available.    |
 | `org-scoped-identity #true`                               | Distinguishes stored accounts by organization as well as identity.                                                 |
 | `api-key-format "structured"`                             | Declares a transport-specific credential encoding rather than a plain bearer.                                      |

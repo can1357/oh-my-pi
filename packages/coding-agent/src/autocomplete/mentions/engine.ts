@@ -106,7 +106,7 @@ export class UnifiedMentionEngine {
 
 	/**
 	 * Parse the live mention token before the caret using live provider/dir hints. `lock` holds an
-	 * `@` token its syntax leaves open to one category (the Files tile chosen on a bare `@`).
+	 * `@` token its syntax leaves open to one category (the Files scope, which has no token).
 	 */
 	parse(textBeforeCursor: string, lock?: MentionCategoryId): MentionQuery | null {
 		const query = parseMentionQuery(textBeforeCursor, {

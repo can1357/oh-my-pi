@@ -26,13 +26,16 @@ smoke_cli() {
    local omp_bin="$1"
    local runtime_dir
    runtime_dir="$(mktemp -d "$WORK_DIR/compiled-runtime.XXXXXX")"
-   XDG_DATA_HOME="$runtime_dir/xdg" HOME="$runtime_dir/home" "$omp_bin" --version
+   if [ "${2:-}" = linked ]; then
+      # Same no-sidecar and main + Worker proof as the shipping binaries.
+      python3 "$ROOT_DIR/scripts/ci-smoke-release.py" "$omp_bin"
+   else
+      XDG_DATA_HOME="$runtime_dir/xdg" HOME="$runtime_dir/home" "$omp_bin" --version
+      # Spawns workers and serves the stats dashboard once (#1011/#1027).
+      XDG_DATA_HOME="$runtime_dir/xdg" HOME="$runtime_dir/home" "$omp_bin" --smoke-test
+   fi
    XDG_DATA_HOME="$runtime_dir/xdg" HOME="$runtime_dir/home" "$omp_bin" --help >/dev/null
    XDG_DATA_HOME="$runtime_dir/xdg" HOME="$runtime_dir/home" "$omp_bin" stats --summary >/dev/null
-   # Spawns bundled workers and serves the stats dashboard once. Regression
-   # probe for #1011/#1027 worker loading and for npm/compiled distributions
-   # missing the dashboard assets that `stats --summary` never touches.
-   XDG_DATA_HOME="$runtime_dir/xdg" HOME="$runtime_dir/home" "$omp_bin" --smoke-test
    bun "$ROOT_DIR/scripts/install-tests/settings-session.ts" "$omp_bin"
 }
 
@@ -86,15 +89,17 @@ section "Binary install smoke"
 if [ "${OMP_INSTALL_TEST_SKIP_NATIVE_BUILD:-0}" != "1" ]; then
    bun --cwd=packages/natives run build
 fi
-align_native_manifest
 bun --cwd=packages/coding-agent run build
 
 BINARY_DIR="$WORK_DIR/binary-bin"
 mkdir -p "$BINARY_DIR"
 cp packages/coding-agent/dist/omp "$BINARY_DIR/omp"
-smoke_cli "$BINARY_DIR/omp"
-
+smoke_cli "$BINARY_DIR/omp" linked
+ 
 section "Source install smoke"
+# PRs can test source/npm against an older cached .node. Align only those
+# installs; the linked runtime is stamped for this checkout's actual version.
+align_native_manifest
 SOURCE_BUN_HOME="$WORK_DIR/bun-source"
 (
    export BUN_INSTALL="$SOURCE_BUN_HOME"

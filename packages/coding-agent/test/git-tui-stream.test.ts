@@ -28,7 +28,13 @@ beforeAll(() => {
 	initTheme({
 		dark: "dark",
 		light: "dark",
-		capabilities: { truecolor: true, colors: 16_777_216, dark: true, emoji: CONSERVATIVE_EMOJI },
+		capabilities: {
+			truecolor: true,
+			colors: 16_777_216,
+			dark: true,
+			emoji: CONSERVATIVE_EMOJI,
+			styledUnderlines: false,
+		},
 	});
 });
 

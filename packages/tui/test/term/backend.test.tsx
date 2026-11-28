@@ -1,13 +1,21 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
 import { describe, expect, it, vi } from "bun:test";
 import { signal } from "@oh-my-pi/pi-tui";
-import type { FramePlan, InputEvent, TerminalCapabilities, TerminalDriver } from "@oh-my-pi/pi-tui/driver/contract";
+import type {
+	FramePlan,
+	InputEvent,
+	ReplayListener,
+	TerminalCapabilities,
+	TerminalDriver,
+} from "@oh-my-pi/pi-tui/driver/contract";
 import { anchoredRows, RESERVED_ROW } from "@oh-my-pi/pi-tui/driver/images/anchor";
 import { createSurface, settle } from "@oh-my-pi/pi-tui/surface";
 import { TermBackend } from "@oh-my-pi/pi-tui/term/backend";
 import { defineRolePainter } from "@oh-my-pi/pi-tui/term/paint";
 import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
 import { PLAIN_THEME } from "@oh-my-pi/pi-tui/theme/plain";
+
+import { Vt } from "../driver-output/vt";
 
 const CAPABILITIES: TerminalCapabilities = {
 	truecolor: true,
@@ -24,6 +32,7 @@ const CAPABILITIES: TerminalCapabilities = {
 	textSizing: false,
 	tsp: false,
 	emoji: { vs16Wide: false, bareFits: false },
+	styledUnderlines: false,
 };
 
 /** Records frames; acknowledges every history batch; history is the concatenation of acknowledged batches. */
@@ -33,7 +42,7 @@ class FakeDriver implements TerminalDriver {
 	capabilities = CAPABILITIES;
 	readonly frames: FramePlan[] = [];
 	history: string[] = [];
-	#replay = new Set<() => void>();
+	#replay = new Set<ReplayListener>();
 
 	async start(): Promise<void> {}
 	async stop(): Promise<void> {}
@@ -57,14 +66,16 @@ class FakeDriver implements TerminalDriver {
 	onCapabilities(): () => void {
 		return () => {};
 	}
-	onReplay(listener: () => void): () => void {
+	onReplay(listener: ReplayListener): () => void {
 		this.#replay.add(listener);
 		return () => this.#replay.delete(listener);
 	}
-	replay(): void {
-		for (const listener of this.#replay) listener();
+	replay(cause?: "resize-rebuild"): void {
+		for (const listener of this.#replay) listener(cause);
 	}
-	resetDisplay(): void {}
+	resetDisplay(): void {
+		this.replay();
+	}
 	setTitle(): void {}
 	get viewport(): string[] {
 		return this.frames.at(-1)!.viewport.map(row => stripEscapes(row).trimEnd());
@@ -234,6 +245,149 @@ describe("TermBackend main surface", () => {
 		backend.stop();
 	});
 
+	it.each(["internal", "compaction"])("keeps the dock on the last row after replay (%s)", replay => {
+		const driver = new FakeDriver();
+		const compacted = signal(false);
+		const tail = signal(["summary"]);
+		const surface = createSurface(() => ({
+			main: () =>
+				compacted() ? (
+					<rows key="summary" lines={tail} />
+				) : (
+					[<rows key="old" lines={lines("old", 7)} />, <rows key="live" lines={lines("live", 5)} />]
+				),
+			dock: <rows key="dock" lines={["dock"]} />,
+		}));
+		const backend = new TermBackend({ surface, driver, theme: () => PLAIN_THEME, separator: () => 0 });
+		try {
+			backend.start();
+			settle(surface.main()[0]!);
+			backend.renderNow();
+			expect(driver.history).toEqual(lines("old", 7));
+			expect(driver.viewport).toEqual([...lines("live", 5), "dock"]);
+
+			compacted.set(true);
+			// Removing a retired block triggers the backend's own replay on the next render.
+			if (replay === "compaction") {
+				// Both Transcript.retain and /compact request a replay of the same transcript.
+				backend.replayHistory({ preserveDock: true });
+				backend.replayHistory({ preserveDock: true });
+			}
+			backend.renderNow();
+			expect(driver.frames.at(-1)?.history?.kind).toBe("replay");
+			expect(driver.history).toEqual([]);
+			expect(driver.viewport).toEqual(["summary", "", "", "", "", "dock"]);
+
+			tail.set(["summary", "next"]);
+			backend.renderNow();
+			expect(driver.viewport).toEqual(["summary", "next", "", "", "", "dock"]);
+			expect(driver.history).toEqual([]);
+			driver.resetDisplay();
+			backend.renderNow();
+			expect(driver.viewport).toEqual(["summary", "next", "dock"]);
+		} finally {
+			backend.stop();
+			surface.dispose();
+		}
+	});
+
+	it("keeps a compacted inline dock on the resized screen after a ConPTY rebuild", async () => {
+		defineRolePainter("rows", "test.resize-dock", () => ({ rows: ["dock"], cursor: { row: 0, col: 2 } }));
+		const driver = new FakeDriver();
+		const vt = new Vt({
+			columns: driver.columns,
+			rows: driver.rows,
+			hostOwnsGrid: () => true,
+			canReplay: () => true,
+			onInvalidate: (request, cause) => {
+				if (request === "replay") driver.replay(cause);
+			},
+		});
+		driver.present = frame => vt.present(frame);
+		driver.resetDisplay = () => vt.writer.resetDisplay();
+		const retired = signal(false);
+		const tail = signal(["start"]);
+		const surface = createSurface(() => ({
+			main: () => [
+				...(retired() ? [<rows key="past" lines={lines("past", 9)} />] : []),
+				<text key="tail" text={() => tail().join("\n")} />,
+			],
+			dock: <rows key="dock" role="test.resize-dock" lines={[]} />,
+		}));
+		const backend = new TermBackend({ surface, driver, theme: () => PLAIN_THEME, separator: () => 0 });
+		const resize = async (cols: number, rows: number) => {
+			driver.columns = cols;
+			driver.rows = rows;
+			vt.resize(cols, rows);
+			backend.renderNow();
+			await vt.settle();
+			backend.renderNow();
+		};
+		try {
+			backend.start();
+			await resize(22, 8);
+			expect(vt.screen().slice(0, 3)).toEqual(["start", "dock", ""]);
+			// A drag can briefly fit only these two rows; borrowed frames do not pin a short session.
+			for (const rows of [2, 8]) {
+				driver.rows = rows;
+				vt.resize(driver.columns, rows);
+				backend.renderNow();
+			}
+			await vt.settle();
+			backend.renderNow();
+			expect(vt.screen().slice(0, 3)).toEqual(["start", "dock", ""]);
+			retired.set(true);
+			tail.set([...lines("live", 8), "long unbroken marker wrap"]);
+			backend.renderNow();
+			for (const node of surface.main()) settle(node);
+			backend.renderNow();
+			const text = [...lines("past", 9), ...tail(), "dock"].join(" ").replaceAll(" ", "");
+			for (const [cols, rows] of [
+				[12, 5],
+				[25, 10],
+			] as const) {
+				await resize(cols, rows);
+				expect(vt.transcript().join("").replaceAll(" ", "")).toBe(text);
+				expect(vt.screen().at(-1)).toBe("dock");
+			}
+
+			retired.set(false);
+			tail.set(["summary"]);
+			backend.replayHistory({ preserveDock: true });
+			backend.replayHistory({ preserveDock: true });
+			backend.renderNow();
+			expect(vt.screen().at(-1)).toBe("dock");
+
+			for (const [cols, rows] of [
+				[13, 5],
+				[13, 10],
+				[26, 7],
+				[18, 7],
+			] as const) {
+				await resize(cols, rows);
+				expect(vt.screen().at(-1)).toBe("dock");
+				expect(vt.term.cursor.y).toBe(rows - 1);
+				expect(vt.transcript().filter(Boolean)).toEqual(["summary", ...tail().slice(1), "dock"]);
+				tail.set(["summary", "next"]);
+				backend.renderNow();
+				expect(vt.screen().at(-1)).toBe("dock");
+			}
+			// A reset while the resize burst is settling also starts fresh.
+			driver.rows++;
+			vt.resize(driver.columns, driver.rows);
+			backend.replayHistory();
+			backend.renderNow();
+			await vt.settle();
+			backend.renderNow();
+			expect(vt.screen().slice(0, 4)).toEqual(["summary", "next", "dock", ""]);
+			await resize(17, 8);
+			expect(vt.screen().slice(0, 4)).toEqual(["summary", "next", "dock", ""]);
+		} finally {
+			backend.stop();
+			surface.dispose();
+		}
+	});
+
 	it("keeps the dock at the bottom once the viewport filled the screen", () => {
 		const driver = new FakeDriver();
 		const tool = signal(lines("t", 5));
@@ -269,7 +423,7 @@ describe("TermBackend main surface", () => {
 		backend.renderNow();
 		expect(driver.viewport).toEqual(["a0", "a1", "t0", "", "", "dock"]);
 
-		// A display replay lets the viewport shrink again; so does a resize.
+		// An explicit display reset releases the pin. This driver also resizes without rebuilding history.
 		driver.replay();
 		backend.renderNow();
 		expect(driver.viewport).toEqual(["a0", "a1", "t0", "dock"]);
@@ -381,6 +535,56 @@ describe("TermBackend main surface", () => {
 		tail.set(["t0"]);
 		backend.renderNow();
 		expect(driver.frames.at(-1)!.viewport).toEqual([RESERVED_ROW, RESERVED_ROW, "t0"]);
+		backend.stop();
+	});
+
+	it("leaves out an image cut across history batches when the rows after its head retire", () => {
+		defineRolePainter("rows", "test.streamed-image-grow", node => {
+			const props = node.props() as { lines: readonly string[] };
+			// A streaming head: all but its last three rows are final.
+			return { rows: props.lines, stable: props.lines.length - 3 };
+		});
+		const image = anchoredRows("\x1b]1337;File=inline=1;width=2;height=3:AA==\x07", 3);
+		const reply = signal(["h0", "h1", ...image, "t0", "t1", "t2"]);
+		const driver = new FakeDriver();
+		const surface = createSurface(() => ({
+			main: <rows key="reply" role="test.streamed-image-grow" lines={reply} />,
+			dock: <rows key="dock" lines={["dock"]} />,
+		}));
+		const backend = new TermBackend({ surface, driver, theme: () => PLAIN_THEME, separator: () => 0 });
+		backend.start();
+		// The stable head (through the image's first row) went to history over a full screen; the live
+		// copy of the image was left out because that row is off the screen.
+		expect(driver.frames.at(-1)!.history?.rows).toEqual(["h0", "h1", RESERVED_ROW]);
+		expect(driver.frames.at(-1)!.viewport).toEqual([RESERVED_ROW, RESERVED_ROW, "t0", "t1", "t2", "dock"]);
+		// The stream grows: the rows after the head retire into a batch written from the screen's top
+		// row, where the image's cursor-up would clamp and draw it over the rows below.
+		reply.set(["h0", "h1", ...image, "t0", "t1", "t2", "t3", "t4", "t5", "t6"]);
+		backend.renderNow();
+		expect(driver.frames.at(-1)!.history?.rows).toEqual([RESERVED_ROW, RESERVED_ROW, "t0", "t1"]);
+		backend.stop();
+	});
+
+	it("leaves out an image cut across history batches when the flush retires its block", () => {
+		defineRolePainter("rows", "test.streamed-image-flush", node => {
+			const props = node.props() as { lines: readonly string[] };
+			// A streaming head: its first three rows are final.
+			return { rows: props.lines, stable: 3 };
+		});
+		const image = anchoredRows("\x1b]1337;File=inline=1;width=2;height=3:AA==\x07", 3);
+		const driver = new FakeDriver();
+		const surface = createSurface(() => ({
+			main: <rows key="reply" role="test.streamed-image-flush" lines={["h0", "h1", ...image, "t0", "t1", "t2"]} />,
+			dock: <rows key="dock" lines={["dock"]} />,
+		}));
+		const backend = new TermBackend({ surface, driver, theme: () => PLAIN_THEME, separator: () => 0 });
+		backend.start();
+		expect(driver.frames.at(-1)!.history?.rows).toEqual(["h0", "h1", RESERVED_ROW]);
+		expect(driver.frames.at(-1)!.viewport).toEqual([RESERVED_ROW, RESERVED_ROW, "t0", "t1", "t2", "dock"]);
+		// The shutdown flush retires the rest of the block in one batch: the image's first row is
+		// still off the screen, so that batch leaves the image out as the viewport did.
+		backend.flush();
+		expect(driver.frames.at(-1)!.history?.rows).toEqual([RESERVED_ROW, RESERVED_ROW, "t0", "t1", "t2"]);
 		backend.stop();
 	});
 

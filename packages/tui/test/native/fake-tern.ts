@@ -267,6 +267,7 @@ const CAPABILITIES: TerminalCapabilities = {
 	textSizing: false,
 	tsp: true,
 	emoji: { vs16Wide: false, bareFits: false },
+	styledUnderlines: false,
 };
 
 /** See the module docs. */

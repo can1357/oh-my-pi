@@ -839,6 +839,29 @@ describe("native reconciler", () => {
 		expect(h.tern.errors).toEqual([]);
 	});
 
+	it("sends a picker's caret anchor with its query range, only the keypath resolved to a wire id", async () => {
+		const query = signal<[number, number]>([1, 1]);
+		const h = await mount(() => ({
+			dock: (
+				<col key="composer">
+					<row key="line">
+						<editor key="input" />
+					</row>
+					<picker key="mentions" anchor={() => ({ caret: "line/input", query: query() })} />
+				</col>
+			),
+		}));
+		const doc = h.tern.doc("s:t");
+		const field = doc.tree("dock/composer/line").c![0]!.id;
+		const sent = () => doc.tree("layer").c![0]!.p;
+		expect(sent()).toEqual({ anchor: { caret: field, query: [1, 1] } });
+
+		query.set([1, 3]);
+		h.settle();
+		expect(sent()).toEqual({ anchor: { caret: field, query: [1, 3] } });
+		expect(h.tern.errors).toEqual([]);
+	});
+
 	it("anchors to a node moved into the referenced path, not the id its new path would generate", async () => {
 		const active = signal(false);
 		const field = <input key="field" />;
