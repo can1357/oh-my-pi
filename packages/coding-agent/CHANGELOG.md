@@ -133,6 +133,10 @@
 - Status line keeps the auto indicator on an auto-resolved thinking effort (e.g. `⟳ high`) so it is distinguishable from a pinned level ([#5951](https://github.com/can1357/oh-my-pi/issues/5951))
 - A configured MCP `oauth.scope` now overrides scopes advertised by the server on initial authorization and `/mcp reauth`, so you can request a narrower (or different) scope set than discovery reports ([#7841](https://github.com/can1357/oh-my-pi/issues/7841))
 
+### Changed
+
+- In npm installs, named services, JS eval kernels and the omp daemon each use 60–260 MB less committed memory and 70–230 MB less resident memory; sessions use the same as before ([#20121](https://github.com/can1357/oh-my-pi/pull/20121) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+
 ### Fixed
 
 - `ask` forms now show controls wrapped by a `<label for>` that names them ([#20945](https://github.com/can1357/oh-my-pi/issues/20945)).

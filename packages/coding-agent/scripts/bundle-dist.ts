@@ -7,9 +7,13 @@ import { embeddedRelayExtensionFiles } from "./embed-relay-extension";
 import { buildDocsIndexPayload } from "./generate-docs-index";
 import { createJsonParsePlugin } from "./json-parse-plugin";
 import { createLegacyPiVirtualModulePlugin } from "./legacy-pi-virtual-module";
+import { buildGroupedBundle, profilePath } from "./bundle-groups";
 
 const packageDir = path.join(import.meta.dir, "..");
 const defaultOutDir = path.join(packageDir, "dist");
+// Chunks sit flat beside cli.js, so `import.meta.dir` stays `dist/` and chunk-relative asset URLs resolve.
+export const chunkNaming = "cli-[name]-[hash].[ext]";
+const chunkPattern = /^cli-.+\.js$/;
 const shebang = "#!/usr/bin/env bun\n";
 // Remove old inline-viewer sidecars left in an existing output directory.
 const obsoleteHtmlExportAssetPattern =
@@ -51,6 +55,20 @@ async function runCommand(command: string[]): Promise<void> {
 	if (exitCode !== 0) throw new Error(`Command failed with exit code ${exitCode}: ${command.join(" ")}`);
 }
 
+/**
+ * Runs `build` with the stats dashboard archive generated: the npm bundle ships no dashboard sources, so
+ * it embeds the archive the same way compiled binaries do (scripts/build-binary.ts). Resets the
+ * checked-in placeholder afterwards.
+ */
+export async function withEmbeddedStatsDashboard<T>(build: () => Promise<T>): Promise<T> {
+	await runCommand(["bun", "--cwd=../stats", "run", "gen:stats"]);
+	try {
+		return await build();
+	} finally {
+		await runCommand(["bun", "--cwd=../stats", "run", "gen:stats:reset"]);
+	}
+}
+
 async function ensureShebang(cliPath: string): Promise<void> {
 	const text = await Bun.file(cliPath).text();
 	if (text.startsWith(shebang)) return;
@@ -78,6 +96,7 @@ async function cleanBundleOutputs(outDir: string): Promise<void> {
 			.filter(
 				entry =>
 					entry === "cli.js" ||
+					chunkPattern.test(entry) ||
 					entry === "docs-index.generated.txt" ||
 					entry.endsWith(".node") ||
 					entry.endsWith(".js.map") ||
@@ -89,56 +108,75 @@ async function cleanBundleOutputs(outDir: string): Promise<void> {
 	);
 }
 
-/** Builds the npm CLI bundle into `outDir`; release scripts use the package `dist` directory by default. */
+/**
+ * The build of `src/cli.ts` every npm bundle shares; `scripts/bundle-profile.ts` traces this exact build.
+ * `docsEmbed` is the `PI_DOCS_EMBED` payload. Built in-process: that payload is far larger than Linux's
+ * 128KiB per-argv-string cap, so it can never be passed as a CLI `--define` (posix_spawn fails with E2BIG).
+ */
+export async function cliBuildConfig(docsEmbed: string) {
+	return {
+		entrypoints: [path.join(packageDir, "src/cli.ts")],
+		target: "bun",
+		// Also refreshes `src/.../extension.generated.json`, which SDK consumers of `src` read.
+		files: await embeddedRelayExtensionFiles(),
+		plugins: [createJsonParsePlugin(), await createLegacyPiVirtualModulePlugin(), inlineNativeNoticesPlugin],
+		external: [...ALWAYS_EXTERNAL, ...RUNTIME_EXTERNAL],
+		define: {
+			"process.env.PI_BUNDLED": JSON.stringify("true"),
+			"process.env.PI_DOCS_EMBED": JSON.stringify(docsEmbed),
+		},
+		minify: {
+			whitespace: true,
+			syntax: true,
+			identifiers: true,
+			keepNames: true,
+		},
+		throw: false,
+	} satisfies Bun.BuildConfig;
+}
+
+/**
+ * Builds the npm CLI bundle into `outDir`; release scripts use the package `dist` directory by default.
+ * The bundle is code-split with modules grouped by the processes that load them (see
+ * `scripts/bundle-groups.ts`).
+ */
 export async function bundleDist(outDir: string = defaultOutDir): Promise<void> {
 	const cliPath = path.join(outDir, "cli.js");
 	const start = Bun.nanoseconds();
 	await cleanBundleOutputs(outDir);
-	// The npm bundle ships no stats dashboard sources, so embed the dashboard
-	// archive the same way compiled binaries do (scripts/build-binary.ts). Reset
-	// afterwards to keep the checked-in placeholder empty.
-	await runCommand(["bun", "--cwd=../stats", "run", "gen:stats"]);
-	// One payload for both consumers: inlined into dist/cli.js via `--define` for
-	// the bundled CLI entrypoint, and written to dist/docs-index.generated.txt so
-	// SDK consumers importing `@oh-my-pi/pi-coding-agent/*` (TypeScript source, no
-	// build-time embed) can still resolve omp:// docs (see src/internal-urls/docs-index.ts).
-	try {
+	let scripts = 0;
+	let scriptBytes = 0;
+	await withEmbeddedStatsDashboard(async () => {
+		// One payload for both consumers: inlined into the CLI bundle via `define` for
+		// the bundled CLI entrypoint, and written to dist/docs-index.generated.txt so
+		// SDK consumers importing `@oh-my-pi/pi-coding-agent/*` (TypeScript source, no
+		// build-time embed) can still resolve omp:// docs (see src/internal-urls/docs-index.ts).
 		const docsPayload = await buildDocsIndexPayload();
-		// Build in-process: the docs embed payload is far larger than Linux's
-		// 128KiB per-argv-string cap, so it can never be passed as a CLI
-		// `--define` (posix_spawn fails with E2BIG).
-		const output = await Bun.build({
-			entrypoints: [path.join(packageDir, "src/cli.ts")],
-			outdir: outDir,
-			target: "bun",
-			// Also refreshes `src/.../extension.generated.json`, which SDK consumers of `src` read.
-			files: await embeddedRelayExtensionFiles(),
-			plugins: [createJsonParsePlugin(), await createLegacyPiVirtualModulePlugin(), inlineNativeNoticesPlugin],
-			external: [...ALWAYS_EXTERNAL, ...RUNTIME_EXTERNAL],
-			define: {
-				"process.env.PI_BUNDLED": JSON.stringify("true"),
-				"process.env.PI_DOCS_EMBED": JSON.stringify(docsPayload.payload),
+		const output = await buildGroupedBundle(
+			{
+				...(await cliBuildConfig(docsPayload.payload)),
+				outdir: outDir,
+				naming: { entry: "cli.js", chunk: chunkNaming },
 			},
-			minify: {
-				whitespace: true,
-				syntax: true,
-				identifiers: true,
-				keepNames: true,
-			},
-			throw: false,
-		});
+			await Bun.file(profilePath).json(),
+		);
 		if (!output.success) {
-			throw new Error(`CLI bundle failed:\n${output.logs.map(log => log.message).join("\n")}`);
+			const messages = output.logs.map(log =>
+				log.position ? `${log.position.file}:${log.position.line}: ${log.message}` : log.message,
+			);
+			throw new Error(`CLI bundle failed:\n${messages.join("\n")}`);
+		}
+		for (const artifact of output.outputs) {
+			if (artifact.kind !== "entry-point" && artifact.kind !== "chunk") continue;
+			scripts++;
+			scriptBytes += artifact.size;
 		}
 		await ensureShebang(cliPath);
 		await Bun.write(path.join(outDir, "docs-index.generated.txt"), docsPayload.payload);
-	} finally {
-		await runCommand(["bun", "--cwd=../stats", "run", "gen:stats:reset"]);
-	}
-	const stat = await fs.stat(cliPath);
+	});
 	const elapsedMs = (Bun.nanoseconds() - start) / 1_000_000;
 	process.stdout.write(
-		`Bundled coding-agent CLI to ${cliPath} (${formatBytes(stat.size)}) in ${elapsedMs.toFixed(0)}ms\n`,
+		`Bundled coding-agent CLI to ${cliPath} (${scripts} scripts, ${formatBytes(scriptBytes)}) in ${elapsedMs.toFixed(0)}ms\n`,
 	);
 }
 

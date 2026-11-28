@@ -941,11 +941,11 @@ const SOURCE_WORKER_ENTRY = new URL("./worker-entry.ts", import.meta.url);
 
 /**
  * Without a declared host (the CLI was not the process entry, e.g. an npm/nvm shim), source
- * checkouts start `worker-entry.ts` directly. A bundled `dist/cli.js` has no such sibling, but this
- * module is the CLI bundle itself, which dispatches the worker argv like the declared host.
+ * checkouts start `worker-entry.ts` directly. A bundled `dist/cli.js` has no such sibling; this
+ * module is a code-split chunk beside it, and `cli.js` dispatches the worker argv like the declared host.
  */
 function bundledHostEntry(): string | null {
-	return fs.existsSync(fileURLToPath(SOURCE_WORKER_ENTRY)) ? null : fileURLToPath(import.meta.url);
+	return fs.existsSync(fileURLToPath(SOURCE_WORKER_ENTRY)) ? null : path.join(import.meta.dir, "cli.js");
 }
 
 function spawnBunWorker(): JsEvalWorkerHandle {
