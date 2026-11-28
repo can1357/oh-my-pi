@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { type Api, type FetchImpl, type Model, type OAuthAccess, streamSimple } from "@oh-my-pi/pi-ai";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
+import { openaiCodexUsageProvider } from "@oh-my-pi/pi-ai/usage/openai-codex";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { type DryBalanceModelRegistry, runDryBalanceCommand } from "@oh-my-pi/pi-coding-agent/cli/dry-balance-cli";
@@ -129,6 +130,79 @@ test("dry-balance samples leave no session pins in the credential store", async 
 		for (const sessionId of sessionIds) {
 			expect(laterProcess.oauth.accounts("acme", sessionId).some(stored => stored.active)).toBe(false);
 		}
+	} finally {
+		store.close();
+	}
+});
+
+test.each([
+	["prefers the earlier weekly reset despite 85% usage", 604_800, 20, 57, "a"],
+	["demotes a 5-hour window at 85% usage despite its earlier reset", 18_000, 1, 4, "b"],
+])("dry-balance %s", async (_behavior, durationSeconds, nearResetHours, farResetHours, preferredAccount) => {
+	const provider = "openai-codex";
+	const model = getBundledModel(provider, "gpt-6.2-sol");
+	if (!model) throw new Error("expected bundled Codex model");
+	const store = await SqliteAuthCredentialStore.open(":memory:");
+	try {
+		const now = Date.now();
+		const authStorage = new AuthStorage(store, {
+			usageProviderResolver: id =>
+				id === provider
+					? {
+							id,
+							fetchUsage: params => {
+								const near = params.credential.accountId === "a";
+								return openaiCodexUsageProvider.fetchUsage(params, {
+									fetch: async url => {
+										if (!String(url).endsWith("/wham/usage")) return Response.json({});
+										return Response.json({
+											plan_type: "prolite",
+											rate_limit: {
+												allowed: true,
+												limit_reached: false,
+												primary_window: {
+													used_percent: near ? 85 : 80,
+													limit_window_seconds: durationSeconds,
+													reset_at: now + (near ? nearResetHours : farResetHours) * 3_600_000,
+												},
+												secondary_window: null,
+											},
+										});
+									},
+								});
+							},
+						}
+					: undefined,
+		});
+		await authStorage.credentials.set(
+			provider,
+			["a", "b"].map(accountId => ({
+				type: "oauth",
+				access: `access-${accountId}`,
+				refresh: `refresh-${accountId}`,
+				expires: now + 86_400_000,
+				accountId,
+				email: `${accountId}@example.com`,
+			})),
+		);
+		const modelRegistry: DryBalanceModelRegistry = {
+			authStorage,
+			getAll: () => [model],
+			getAvailable: () => [model],
+			getApiKey: async () => undefined,
+		};
+		const summary = await runDryBalanceCommand(
+			{ flags: { model: `${provider}/${model.id}`, count: 20, json: true } },
+			{
+				createRuntime: async () => ({ modelRegistry, settings: Settings.isolated() }),
+				writeStdout: () => {},
+				writeStderr: () => {},
+				setExitCode: () => {},
+			},
+		);
+		expect(summary.success.accounts.map(({ account, count }) => ({ account, count }))).toEqual([
+			{ account: `${preferredAccount}@example.com`, count: 20 },
+		]);
 	} finally {
 		store.close();
 	}
