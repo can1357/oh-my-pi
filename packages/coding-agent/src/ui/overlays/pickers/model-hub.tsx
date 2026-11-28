@@ -41,6 +41,9 @@ import {
 	MODEL_KIND_LABELS,
 	MODEL_KIND_TABS,
 	ModelHubState,
+	nativeJudgeRouteError,
+	type NativeRouteForm,
+	nativeRouteFieldView,
 	ROLE_TABS,
 	type RolesAction,
 	type RolesRow,
@@ -154,6 +157,17 @@ function pickerActions(hub: ModelHubState): TspPickerAction[] {
 	const strip = hub.strip;
 	const cancel = (label: string): TspPickerAction => closeAction(label);
 	if (hub.assignmentPending) return [closeAction()];
+	if (hub.nativeRouteForm) {
+		return [
+			pickerAction("nativeRouteSubmit", hub.nativeSubmitLabel(), "enter", { primary: true }),
+			hub.canTestNativeRoute() ? pickerAction("nativeRouteTest", "Test route", "ctrl+t") : undefined,
+			closeAction("Cancel"),
+		].filter((action): action is TspPickerAction => action !== undefined);
+	}
+	const route = hub.canEditNativeRoute() ? pickerAction("nativeRoute", "Native route", "ctrl+r") : undefined;
+	const create = hub.canCreateNativeJudge()
+		? pickerAction("nativeJudgeCreate", "Add native judge", "ctrl+n")
+		: undefined;
 	if (strip) {
 		const apply =
 			strip.kind === "name"
@@ -176,7 +190,9 @@ function pickerActions(hub: ModelHubState): TspPickerAction[] {
 						"enter",
 						{ primary: true },
 					);
-		return [apply, cancel(strip.kind === "thinking" ? "Keep" : "Cancel")];
+		return [apply, route, create, cancel(strip.kind === "thinking" ? "Keep" : "Cancel")].filter(
+			(action): action is TspPickerAction => action !== undefined,
+		);
 	}
 	const entry = hub.activeEntry();
 	const refresh =
@@ -190,9 +206,18 @@ function pickerActions(hub: ModelHubState): TspPickerAction[] {
 				: assigning.kind === "fallbackKey"
 					? "Pick protected model"
 					: "Assign";
-		return [pickerAction("assign", label, confirmKbd(), { primary: true }), refresh, cancel("Cancel")].filter(
-			(action): action is TspPickerAction => action !== undefined,
-		);
+		const selected = hub.browser.selected()?.model;
+		const invalid =
+			assigning.kind !== "fallbackKey" && assigning.role === "judge" && selected
+				? nativeJudgeRouteError(selected)
+				: undefined;
+		return [
+			pickerAction("assign", label, confirmKbd(), { primary: true, ...(invalid ? { disabled: invalid } : {}) }),
+			route,
+			create,
+			refresh,
+			cancel("Cancel"),
+		].filter((action): action is TspPickerAction => action !== undefined);
 	}
 	if (hub.rolesView()) {
 		const row = hub.rolesRows[hub.roleIndex];
@@ -247,7 +272,9 @@ function pickerActions(hub: ModelHubState): TspPickerAction[] {
 				actions.push(action("pick", "New role", "enter", true));
 				break;
 		}
-		return [...actions, closeAction()].filter((value): value is TspPickerAction => value !== undefined);
+		return [...actions, route, create, closeAction()].filter(
+			(value): value is TspPickerAction => value !== undefined,
+		);
 	}
 	if (hub.lockedView())
 		return entry.oauth
@@ -264,6 +291,33 @@ function pickerActions(hub: ModelHubState): TspPickerAction[] {
 		manage,
 		hub.browser.query.length > 0 ? cancel("Clear search") : closeAction(),
 	].filter((value): value is TspPickerAction => value !== undefined);
+}
+
+/** The open Ctrl+R / Ctrl+N step as the picker's strip: its choices as chips, or its field. */
+function nativeRouteStrip(hub: ModelHubState, form: NativeRouteForm): NonNullable<TspPickerProps["strip"]> {
+	const step = form.step;
+	if (step.choices) {
+		return {
+			label: [{ s: "muted", t: `${step.label} ` }],
+			items: step.choices.map((choice, index) => ({ id: String(index), label: choice.label })),
+			selected: String(step.index),
+		};
+	}
+	const preview = hub.nativeRoutePreview();
+	const note = step.error
+		? { s: "error", t: `  ${step.error}` }
+		: preview
+			? { s: "dim", t: `  ${preview}` }
+			: undefined;
+	return {
+		label: [
+			{ s: "muted", t: `${step.label} ` },
+			{ s: "mono", t: nativeRouteFieldView(step).text },
+			{ s: "accent", t: "▏" },
+			...(note ? [note] : []),
+		],
+		items: [],
+	};
 }
 
 /** The open strip as the picker's chip strip (or its name field). */
@@ -333,6 +387,9 @@ function pickerStrip(hub: ModelHubState, strip: StripState): NonNullable<TspPick
 	};
 }
 
+/** The badge of a Judge row whose native route its protocol cannot post to. */
+const INVALID_ROUTE_BADGE = { text: "invalid native route", tone: "error" as const };
+
 /** Roles-view rows as picker items. */
 function rolePickerItems(hub: ModelHubState): TspPickerItem[] {
 	const cycle = hub.cycleOrder();
@@ -352,7 +409,14 @@ function rolePickerItems(hub: ModelHubState): TspPickerItem[] {
 				items.push({ id, label: row.role, mono: true, icon: "git-branch", detail: "fallback chain" });
 				return;
 			case "fallback":
-				items.push({ id, label: row.selector, mono: true, depth: 1, detail: `fallback ${row.chainIndex + 1}` });
+				items.push({
+					id,
+					label: row.selector,
+					mono: true,
+					depth: 1,
+					detail: `fallback ${row.chainIndex + 1}`,
+					...(hub.judgeRowError(row) ? { badges: [INVALID_ROUTE_BADGE] } : {}),
+				});
 				return;
 			case "role":
 				break;
@@ -368,23 +432,25 @@ function rolePickerItems(hub: ModelHubState): TspPickerItem[] {
 				facts.thinking = getConfiguredThinkingLevelMetadata(assignment.thinkingLevel).label;
 		} else facts.model = "—";
 		const stop = cycle.indexOf(row.role);
+		const badges = [
+			...(hub.judgeRowError(row) ? [INVALID_ROUTE_BADGE] : []),
+			...(stop >= 0
+				? [
+						{
+							text: `cycle ${stop + 1}`,
+							tone: "accent" as const,
+							title: `Stop ${stop + 1} of the quick-switch cycle`,
+						},
+					]
+				: []),
+		];
 		items.push({
 			id,
 			label: tag,
 			...(info.name && info.name !== tag ? { detail: info.name } : {}),
 			facts,
 			...(assignment && !assignment.autoSelected ? {} : { tone: "muted" as const }),
-			...(stop >= 0
-				? {
-						badges: [
-							{
-								text: `cycle ${stop + 1}`,
-								tone: "accent" as const,
-								title: `Stop ${stop + 1} of the quick-switch cycle`,
-							},
-						],
-					}
-				: {}),
+			...(badges.length > 0 ? { badges } : {}),
 		});
 	});
 	return items;
@@ -510,7 +576,13 @@ function hubProps(hub: ModelHubState): TspPickerProps {
 	const rolesView = hub.rolesView();
 	const strip = hub.strip;
 	const subtitle = (): TspPickerProps["subtitle"] => {
-		if (hub.assignmentPending) return "Applying model…";
+		if (hub.assignmentPending) return hub.nativeRouteForm ? "Saving native route…" : "Applying model…";
+		if (hub.nativeRouteForm) {
+			const test = hub.nativeTestStatus();
+			return test ? [{ s: test.style, t: test.text }] : [{ s: "accent", t: hub.nativeRouteTitle() }];
+		}
+		const judge = hub.judgeStatus();
+		if (judge?.error) return [{ s: "error", t: judge.text }];
 		const assigning = hub.assigning;
 		if (assigning !== null) {
 			if (assigning.kind === "fallbackKey") return "New fallback chain — pick the model it protects";
@@ -521,8 +593,13 @@ function hubProps(hub: ModelHubState): TspPickerProps {
 					: assigning.index === null
 						? "Adding fallback for"
 						: "Replacing fallback of";
-			return [{ t: `${verb} ` }, { s: "strong", t: info.tag ?? info.name ?? assigning.role }];
+			return [
+				{ t: `${verb} ` },
+				{ s: "strong", t: info.tag ?? info.name ?? assigning.role },
+				...(judge ? [{ s: "muted", t: ` · ${judge.text}` }] : []),
+			];
 		}
+		if (judge) return [{ s: "muted", t: judge.text }];
 		if (hub.configError && entry.kind !== "provider") return [{ s: "error", t: hub.configError }];
 		if (entry.kind === "provider" && hub.isRefreshing(entry.providerId))
 			return `${entry.label} · refreshing model list…`;
@@ -560,8 +637,8 @@ function hubProps(hub: ModelHubState): TspPickerProps {
 		scopes: pickerScopes(hub),
 		scope: entry.id,
 		actions: pickerActions(hub),
-		strip: strip ? pickerStrip(hub, strip) : null,
-		focus: strip ? "strip" : hub.focus === "scope" ? "scopes" : "list",
+		strip: hub.nativeRouteForm ? nativeRouteStrip(hub, hub.nativeRouteForm) : strip ? pickerStrip(hub, strip) : null,
+		focus: strip || hub.nativeRouteForm ? "strip" : hub.focus === "scope" ? "scopes" : "list",
 	};
 	if (rolesView) {
 		const row = hub.rolesRows[hub.roleIndex];
@@ -631,9 +708,30 @@ function hubProps(hub: ModelHubState): TspPickerProps {
 	};
 }
 
+/** The open Ctrl+R / Ctrl+N form's preview: the step's help, its choices, the request preview and outcome. */
+function nativeRoutePreview(hub: ModelHubState, form: NativeRouteForm): JSXNode[] {
+	const step = form.step;
+	const children: JSXNode[] = [
+		<text role="omp.picker.title" text={hub.nativeRouteTitle()} />,
+		<text spans={[{ s: "strong", t: step.label }]} />,
+		<text spans={[{ s: "muted", t: step.description }]} wrap="word" />,
+	];
+	if (step.choices)
+		children.push(
+			<kv items={step.choices.map(choice => ({ k: [{ s: "muted", t: choice.label }], v: choice.description }))} />,
+		);
+	const preview = hub.nativeRoutePreview();
+	if (preview) children.push(<text spans={[{ s: "mono", t: preview }]} wrap="word" />);
+	if (step.error) children.push(<text spans={[{ s: "error", t: step.error }]} wrap="word" />);
+	const test = hub.nativeTestStatus();
+	if (test) children.push(<text spans={[{ s: test.style, t: test.text }]} wrap="word" />);
+	return children;
+}
+
 /** The side preview for the current view. */
 function hubPreview(hub: ModelHubState): JSXNode[] {
 	hub.version();
+	if (hub.nativeRouteForm) return nativeRoutePreview(hub, hub.nativeRouteForm);
 	if (hub.rolesView()) return rolePreview(hub, hub.rolesRows[hub.roleIndex]);
 	if (hub.lockedView()) return lockedPreview(hub);
 	const selected = hub.browser.selected();

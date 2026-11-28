@@ -45,6 +45,17 @@ describe("validateProviderConfiguration (models-config auth)", () => {
 			),
 		).not.toThrow();
 	});
+
+	test("native judges with their own baseUrl need no provider baseUrl or apiKey; a chat sibling still does", () => {
+		const native = { id: "judge", api: "typesafe" as const, baseUrl: "https://judge.example.invalid" };
+		expect(() => validateProviderConfiguration("judges", { models: [native] }, "models-config")).not.toThrow();
+		expect(() => validateProviderConfiguration("judges", { models: [native, ...models] }, "models-config")).toThrow(
+			'Provider judges: "baseUrl" is required when defining custom models.',
+		);
+		expect(() =>
+			validateProviderConfiguration("judges", { models: [{ ...native, baseUrl: undefined }] }, "models-config"),
+		).toThrow('Provider judges: "baseUrl" is required when defining custom models.');
+	});
 });
 
 describe("ModelsConfigSchema Bedrock compat overrides", () => {

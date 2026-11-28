@@ -1,9 +1,9 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { OmpErrors, type Type } from "@oh-my-pi/omptype";
-import { getAgentDir, isEnoent, logger, stringifyYamlConfig } from "@oh-my-pi/pi-utils";
+import { getAgentDir, isEnoent, logger, stringifyYamlConfig, withFileLock } from "@oh-my-pi/pi-utils";
 import { JSONC, YAML } from "bun";
-import { writeFileAtomicallySync } from "../utils/atomic-file";
+import { writeFileAtomically, writeFileAtomicallySync } from "../utils/atomic-file";
 
 /** Minimal subset of the AJV ConfigSchemaError shape this module actually relies on. */
 interface ConfigSchemaError {
@@ -357,7 +357,66 @@ export class ConfigFile<T> implements IConfigFile<T> {
 		return this.#resolveReadPath();
 	}
 
+	/**
+	 * Edit the raw document on disk under an exclusive file lock: `mutate` sees the parsed file (undeclared
+	 * fields included, defaults not applied), and the result is schema-checked, then written atomically. A
+	 * symlinked file is written through to its target. Throws, leaving the file untouched, when the current
+	 * file or the edited document fails validation; errors never quote the file's contents.
+	 */
+	async update(mutate: (value: T) => void): Promise<void> {
+		const readPath = this.#resolveReadPath();
+		const writePath = await resolveWriteTarget(readPath);
+		const json = readPath.endsWith(".json") || readPath.endsWith(".jsonc");
+		await withFileLock(writePath, async () => {
+			let content: string | undefined;
+			try {
+				content = await fs.promises.readFile(writePath, "utf-8");
+			} catch (error) {
+				if (!isEnoent(error)) throw new Error(`Cannot read ${readPath}; it was not changed.`);
+			}
+			let raw: T;
+			try {
+				raw = content?.trim() ? ((json ? JSONC.parse(content) : YAML.parse(content)) as T) : ({} as T);
+				this.#validateForWrite(raw);
+			} catch {
+				throw new Error(`${readPath} is invalid; correct it before saving.`);
+			}
+			mutate(raw);
+			try {
+				this.#validateForWrite(raw);
+			} catch {
+				throw new Error(`The edit would make ${readPath} invalid; it was not changed.`);
+			}
+			await writeFileAtomically(writePath, json ? `${JSON.stringify(raw, null, "\t")}\n` : stringifyYamlConfig(raw));
+			this.invalidate();
+		});
+	}
+
+	#validateForWrite(value: T): void {
+		const checked = this.schema(value);
+		if (checked instanceof OmpErrors) throw checked;
+		this.#auxValidate?.(checked as T);
+	}
+
 	invalidate() {
 		this.#cache = undefined;
 	}
+}
+
+/** The physical file a write to `filePath` must replace: a symlink's target, else the path itself. */
+async function resolveWriteTarget(filePath: string): Promise<string> {
+	try {
+		return await fs.promises.realpath(filePath);
+	} catch (error) {
+		if (!isEnoent(error)) throw error;
+	}
+	if (
+		await fs.promises.lstat(filePath).then(
+			() => true,
+			() => false,
+		)
+	) {
+		throw new Error(`${filePath} is a dangling symlink; repair it before saving.`);
+	}
+	return filePath;
 }

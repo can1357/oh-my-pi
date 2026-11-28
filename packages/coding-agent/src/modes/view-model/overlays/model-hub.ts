@@ -1,4 +1,5 @@
 import type { CredentialsApi, KeysApi, Model } from "@oh-my-pi/pi-ai";
+import type { JudgmentApi, NativeJudgeRouteDraft } from "@oh-my-pi/pi-ai/judgment/native";
 import { type ConfiguredThinkingLevel } from "../../../utils/render-utils";
 import type { ModelBrowserRegistry, ModelBrowserSource } from "./model-browser";
 
@@ -44,6 +45,15 @@ export interface ScopedModelItem {
 
 export type ModelRoleSelectionScope = "global" | "project";
 
+/** A native route as the open Ctrl+R or Ctrl+N form would save it, sent by its Test route action (Ctrl+T). */
+export interface NativeJudgeRouteTest {
+	route: NativeJudgeRouteDraft;
+	/** The catalog model Ctrl+R edits; absent for a Ctrl+N declaration. */
+	model?: Model;
+	/** The key typed into Ctrl+N's key step (with its Cloudflare account ID), not yet stored. */
+	credential?: { token: string; accountId?: string };
+}
+
 export interface ModelHubCallbacks {
 	/** Persist a role assignment. */
 	onAssign: (
@@ -57,6 +67,27 @@ export interface ModelHubCallbacks {
 	onUnassign: (role: string, scope?: ModelRoleSelectionScope) => void;
 	/** Persist a `retry.fallbackChains` entry — keyed by a role, `provider/model-id`, or `provider/*`; an empty chain clears the key. */
 	onFallbackChainChange?: (role: string, chain: string[]) => void;
+	/**
+	 * Declare `model` a native judge on `api` at the endpoint root `baseUrl` (models.yml metadata only; no
+	 * role, fallback or credential changes). Resolves to the reloaded model; a rejection keeps the form open.
+	 * Without it, the Judge screen offers no Ctrl+R.
+	 */
+	onSaveNativeRoute?: (model: Model, api: JudgmentApi, baseUrl: string) => Promise<Model>;
+	/** Declare a model the catalog does not list as a native judge (Ctrl+N); same contract as {@link onSaveNativeRoute}. */
+	onCreateNativeJudgeRoute?: (draft: NativeJudgeRouteDraft) => Promise<Model>;
+	/** Store an API key (with a Cloudflare account ID for Workers AI) for a model created with Ctrl+N. */
+	onSaveNativeJudgeCredential?: (model: Model, credential: { token: string; accountId?: string }) => Promise<void>;
+	/**
+	 * The key source a provider's requests use ahead of a stored API key (models.yml `apiKey`, an environment
+	 * variable, a login), described for display; `undefined` when a key stored by Ctrl+N would be used.
+	 */
+	nativeJudgeKeySource?: (provider: string) => string | undefined;
+	/**
+	 * Send one test judgment through the drafted route (Ctrl+T in the endpoint and key steps) and describe the
+	 * outcome; nothing is saved. `signal` aborts when the form closes or a newer test starts. A rejection shows
+	 * as a failed test. Without it, the forms offer no Ctrl+T.
+	 */
+	onTestNativeRoute?: (test: NativeJudgeRouteTest, signal: AbortSignal) => Promise<{ ok: boolean; message: string }>;
 	/** Locked provider activation: forward to the /login flow. */
 	onLoginRequest?: (providerId: string) => void;
 	/** Open a provider's `manage-url`, where the user turns its access on or off at the host. */

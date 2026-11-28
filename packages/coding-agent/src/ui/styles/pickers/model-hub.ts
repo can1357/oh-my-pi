@@ -11,7 +11,7 @@ import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import { defineRolePainter, type Hit, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { defineRoleWidget } from "@oh-my-pi/pi-tui/term/widgets";
-import { padTo, truncate, visibleWidth } from "@oh-my-pi/pi-tui/text/width";
+import { padTo, truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
@@ -20,6 +20,8 @@ import {
 	compactionConfirmPending,
 	MODEL_KIND_TABS,
 	type ModelHubState,
+	type NativeRouteForm,
+	nativeRouteFieldView,
 	ROLE_TABS,
 	type SidebarEntry,
 	type StripState,
@@ -89,7 +91,15 @@ function sidebarStyle(theme: Theme, hub: ModelHubState, entry: SidebarEntry, ind
 /** The body's status row. */
 function statusRow(theme: Theme, hub: ModelHubState, width: number): string {
 	const cut = (text: string): string => truncate(text, width, theme.symbols.ellipsis);
-	if (hub.assignmentPending) return cut(theme.style("accent", " Applying model…"));
+	if (hub.assignmentPending)
+		return cut(theme.style("accent", hub.nativeRouteForm ? " Saving native route…" : " Applying model…"));
+	if (hub.nativeRouteForm) {
+		const test = hub.nativeTestStatus();
+		return cut(test ? theme.style(test.style, ` ${test.text}`) : theme.style("accent", ` ${hub.nativeRouteTitle()}`));
+	}
+	const judge = hub.judgeStatus();
+	if (judge?.error) return cut(theme.style("error", ` ${judge.text}`));
+	if (judge && hub.assigning === null) return cut(theme.style("muted", ` ${judge.text}`));
 	const assigning = hub.assigning;
 	if (assigning !== null) {
 		const enter = keyLabel(theme, "enter");
@@ -202,7 +212,8 @@ function rolesView(theme: Theme, hub: ModelHubState, width: number, rows: number
 			case "fallback": {
 				const branch = theme.style("dim", `${"".padEnd(tagWidth + 3)}↳`);
 				const selector = theme.style(selected ? "accent" : "muted", row.selector);
-				lines.push(finishRow(theme, ` ${cursor} ${branch} ${selector}`, width, hovered));
+				const invalid = hub.judgeRowError(row) ? theme.style("error", " · invalid native route") : "";
+				lines.push(finishRow(theme, ` ${cursor} ${branch} ${selector}${invalid}`, width, hovered));
 				continue;
 			}
 			case "role":
@@ -236,6 +247,7 @@ function rolesView(theme: Theme, hub: ModelHubState, width: number, rows: number
 			.filter(part => part.length > 0)
 			.join("  ");
 		let line = ` ${cursor} ${dot} ${tagStyled}  ${value}`;
+		if (hub.judgeRowError(row)) line += theme.style("error", " · invalid native route");
 		const rightWidth = visibleWidth(right);
 		const lineWidth = visibleWidth(line);
 		if (rightWidth > 0 && lineWidth + rightWidth + 2 <= width)
@@ -300,11 +312,62 @@ function lockedView(theme: Theme, hub: ModelHubState, entry: SidebarEntry, width
 	return lines.slice(0, rows);
 }
 
+/**
+ * The open Ctrl+R / Ctrl+N step under the status row: its label and help, then its choices (the body row
+ * the first one takes is `choiceStart`) or its field with the error or the live request preview.
+ */
+function nativeRouteRows(
+	theme: Theme,
+	hub: ModelHubState,
+	form: NativeRouteForm,
+	width: number,
+): { lines: string[]; choiceStart: number } {
+	const cut = (text: string): string => truncate(text, width, theme.symbols.ellipsis);
+	const step = form.step;
+	const lines = ["", cut(theme.style("accent strong", ` ${step.label}`))];
+	for (const row of wrap(theme.style("muted", step.description), Math.max(1, width - 2))) lines.push(` ${row}`);
+	lines.push("");
+	const choiceStart = lines.length + 1;
+	if (step.choices) {
+		const labelWidth = Math.max(...step.choices.map(choice => visibleWidth(choice.label)));
+		step.choices.forEach((choice, index) => {
+			const selected = index === step.index;
+			const cursor = selected ? theme.style("accent", theme.symbols.symbol("nav.cursor")) : " ";
+			const label = theme.style(selected ? "accent" : "muted", padTo(choice.label, labelWidth));
+			lines.push(cut(` ${cursor} ${label}  ${theme.style("dim", choice.description)}`));
+		});
+	} else {
+		const view = nativeRouteFieldView(step);
+		lines.push(` ${caretField(theme, "> ", view.text, view.cursor, Math.max(4, width - 2))}`);
+		const preview = hub.nativeRoutePreview();
+		if (step.error)
+			for (const row of wrap(theme.style("error", step.error), Math.max(1, width - 3))) lines.push(`   ${row}`);
+		else if (preview) lines.push(cut(theme.style("dim", `   ${preview}`)));
+	}
+	return { lines, choiceStart };
+}
+
+/** The body row's choice index under body row `content` of a hub painted `width` wide (the open form's). */
+export function nativeRouteChoiceAt(
+	theme: Theme,
+	hub: ModelHubState,
+	width: number,
+	content: number,
+): number | undefined {
+	const form = hub.nativeRouteForm;
+	if (!form?.step.choices) return undefined;
+	const { choiceStart } = nativeRouteRows(theme, hub, form, hubGeometry(width, hub.entries).body);
+	const index = content - choiceStart;
+	return index >= 0 && index < form.step.choices.length ? index : undefined;
+}
+
 /** The body pane: status row, then the active view. */
 function bodyRows(theme: Theme, hub: ModelHubState, width: number, rows: number): string[] {
 	const lines = [statusRow(theme, hub, width)];
 	const entry = hub.activeEntry();
-	if (hub.rolesView()) lines.push(...rolesView(theme, hub, width, rows - 1));
+	const form = hub.nativeRouteForm;
+	if (form) lines.push(...nativeRouteRows(theme, hub, form, width).lines);
+	else if (hub.rolesView()) lines.push(...rolesView(theme, hub, width, rows - 1));
 	else if (hub.lockedView()) lines.push(...lockedView(theme, hub, entry, width, rows - 1));
 	else {
 		const kinds = segmentTrack(theme, MODEL_KIND_TABS, Math.max(0, MODEL_KIND_TABS.indexOf(hub.modelKindTab)));
@@ -327,8 +390,21 @@ function bodyRows(theme: Theme, hub: ModelHubState, width: number, rows: number)
 	return lines.slice(0, rows);
 }
 
-/** The footer's key hints for the current view. */
+/** The footer's key hints: the open form's, else the view's with the Judge's native-route keys. */
 export function footerHint(theme: Theme, hub: ModelHubState): string {
+	const cancel = bindingGlyph("tui.select.cancel", "escape", theme);
+	const test = hub.canTestNativeRoute() ? ` · ${keyLabel(theme, "ctrl+t")} test route` : "";
+	if (hub.nativeRouteForm) {
+		const move = hub.nativeRouteForm.step.choices ? `${selectNavGlyphs(theme)} choose · ` : "";
+		return `${move}${keyLabel(theme, "enter")} ${hub.nativeSubmitLabel().toLowerCase()}${test} · ${cancel} cancel`;
+	}
+	const route = hub.canEditNativeRoute() ? ` · ${keyLabel(theme, "ctrl+r")} native route` : "";
+	const create = hub.canCreateNativeJudge() ? ` · ${keyLabel(theme, "ctrl+n")} add native judge` : "";
+	return `${viewFooterHint(theme, hub)}${route}${create}`;
+}
+
+/** The footer's key hints for the current view. */
+function viewFooterHint(theme: Theme, hub: ModelHubState): string {
 	const enter = keyLabel(theme, "enter");
 	const cancel = bindingGlyph("tui.select.cancel", "escape", theme);
 	const upDown = selectNavGlyphs(theme);
@@ -470,7 +546,8 @@ function paintHub(node: UiNode, cx: PaintContext) {
 		(entry, index) => sidebarStyle(theme, hub, entry, index, now),
 	);
 	const pane = bodyRows(theme, hub, body, rows);
-	const strip = hub.strip;
+	// The open native-route form owns the footer: its hints, not a strip it was opened from.
+	const strip = hub.nativeRouteForm ? null : hub.strip;
 	const footer = strip
 		? stripRow(theme, hub, strip, width - 4).row
 		: truncate(theme.style("dim", footerHint(theme, hub)), width - 4, theme.symbols.ellipsis);
@@ -485,11 +562,16 @@ defineRoleWidget("picker", "omp.model-hub", {
 	mouse(node, mouse, at, _cx, hit) {
 		const hub = hubOf(node);
 		const strip = hub.strip;
-		hub.routeMouse({ row: at.row, col: at.col, button: mouse.button, action: mouse.action }, hit.width, col => {
-			if (!strip || strip.kind === "name") return undefined;
-			const { ranges } = stripRow(currentTheme(), hub, strip, hit.width - 4);
-			return ranges.find(range => col >= range.start && col < range.end)?.index;
-		});
+		hub.routeMouse(
+			{ row: at.row, col: at.col, button: mouse.button, action: mouse.action },
+			hit.width,
+			col => {
+				if (!strip || strip.kind === "name") return undefined;
+				const { ranges } = stripRow(currentTheme(), hub, strip, hit.width - 4);
+				return ranges.find(range => col >= range.start && col < range.end)?.index;
+			},
+			content => nativeRouteChoiceAt(currentTheme(), hub, hit.width, content),
+		);
 		return true;
 	},
 });
