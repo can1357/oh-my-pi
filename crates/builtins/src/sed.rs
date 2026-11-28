@@ -6581,12 +6581,12 @@ pub mod fast_regex {
 // For the full copyright and license information, please view the LICENSE
 // file that was distributed with this source code.
 
-use std::{borrow::Cow, cell::OnceCell, error::Error, ops::ControlFlow};
+use std::{borrow::Cow, cell::OnceCell, error::Error, io, ops::ControlFlow};
 
 use fancy_regex::{Captures as FancyCaptures, Regex as FancyRegex};
 use memchr::memmem;
 use onig::{EncodedBytes, MatchParam, RegexOptions, Region, SearchOptions, Syntax};
-use regex::{Captures as UnicodeCaptures, Regex as RustRegex};
+use regex::{Captures as UnicodeCaptures, Regex as RustRegex, RegexBuilder};
 use crate::sed::error_handling::{SedError, SedResult};
 
 use crate::sed::fast_io::IOChunk;
@@ -6751,7 +6751,7 @@ pub enum Regex {
 #[derive(Debug)]
 pub struct RawRegex {
 	pattern: Box<str>,
-	compiled: OnceCell<Result<onig::Regex, onig::Error>>,
+	compiled: OnceCell<Result<onig::Regex, String>>,
 }
 
 impl RawRegex {
@@ -6763,13 +6763,39 @@ impl RawRegex {
 		// Oniguruma's single-byte encoding works on arbitrary bytes and, unlike
 		// regex::bytes, also supports the backreferences sed accepts in a BRE.
 		self.compiled.get_or_init(|| {
-			onig::Regex::with_options_and_encoding(
-				EncodedBytes::ascii(self.pattern.as_bytes()),
-				RegexOptions::REGEX_OPTION_NONE,
-				Syntax::perl(),
-			)
+			let pattern = &*self.pattern;
+			let compile = || {
+				onig::Regex::with_options_and_encoding(
+					EncodedBytes::ascii(pattern.as_bytes()),
+					RegexOptions::REGEX_OPTION_NONE,
+					Syntax::perl(),
+				).map_err(|e| e.to_string())
+			};
+			compile_nested(pattern, compile).unwrap_or_else(|e| Err(e.to_string()))
 		}).as_ref().map_err(|e| SedError::new(4, e))
 	}
+}
+
+/// The deepest nesting a pattern may have, as the regex crate counts it: the
+/// parse depth limit oniguruma, which reads a line that is not UTF-8, keeps by
+/// default. GNU sed reads a pattern of groups nested 3,000 deep.
+const NEST_LIMIT: u32 = 4096;
+
+/// Run `compile`, which recurses once for each level a pattern nests: on this
+/// thread for a pattern too short to nest deeper than the regex crate's default
+/// limit of 250, else on a thread whose stack holds `NEST_LIMIT` levels.
+fn compile_nested<T: Send>(pattern: &str, compile: impl FnOnce() -> T + Send) -> io::Result<T> {
+	const SHALLOW_LEN: usize = 250;
+	const STACK_PER_LEVEL: usize = 16 * 1024;
+	if pattern.len() <= SHALLOW_LEN {
+		return Ok(compile());
+	}
+	std::thread::scope(|scope| {
+		let compiler = std::thread::Builder::new()
+			.stack_size(NEST_LIMIT as usize * STACK_PER_LEVEL)
+			.spawn_scoped(scope, compile)?;
+		Ok(compiler.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic)))
+	})
 }
 
 fn raw_search(
@@ -6816,7 +6842,10 @@ impl Regex {
 			Ok(Self::Fancy(FancyRegex::new(&pattern)?, RawRegex::new(pattern)))
 		} else if needs_regex(pattern) {
 			let pattern = ensure_dotall(pattern);
-			Ok(Self::Unicode(RustRegex::new(&pattern)?, RawRegex::new(pattern)))
+			let unicode = compile_nested(&pattern, || {
+				RegexBuilder::new(&pattern).nest_limit(NEST_LIMIT).build()
+			})??;
+			Ok(Self::Unicode(unicode, RawRegex::new(pattern)))
 		} else {
 			Ok(Self::Literal(LiteralMatcher::new(&remove_escapes(pattern))))
 		}
@@ -10013,6 +10042,24 @@ mod tests {
 			crate::host::run_util::<Sed>(&["-E", r"/\bfoo\b/d"], "foobar\nfoo\n", "/");
 		assert_eq!(code, 0, "{}", capture.err());
 		assert_eq!(capture.out(), "foobar\n");
+	}
+
+	#[test]
+	fn groups_nested_three_thousand_deep_answer_as_gnu() {
+		// GNU sed 4.9 matches a pattern of groups nested 3,000 deep.
+		let groups = format!("s/{}a{}/x/", "(".repeat(3_000), ")".repeat(3_000));
+		let (code, capture) = crate::host::run_util::<Sed>(&["-E", &groups], "a\n", "/");
+		assert_eq!((code, capture.out().as_str()), (0, "x\n"), "{}", capture.err());
+	}
+
+	#[test]
+	fn groups_nested_a_hundred_thousand_deep_are_refused_and_the_process_lives() {
+		// GNU sed 4.9 overflows its stack on such a pattern and dies; the
+		// builtin refuses it with exit 1, and the process lives on.
+		let groups = format!("s/{}a{}/x/", "(".repeat(100_000), ")".repeat(100_000));
+		let (code, capture) = crate::host::run_util::<Sed>(&["-E", &groups], "a\n", "/");
+		assert_eq!((code, capture.out().as_str()), (1, ""));
+		assert!(capture.err().starts_with("sed: "), "{}", capture.err());
 	}
 
 	#[test]
