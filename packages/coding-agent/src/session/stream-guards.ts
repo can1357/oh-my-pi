@@ -27,6 +27,7 @@ import {
 	cfgModelLoopGuardToolCallReminder,
 	cfgModelToolCallLoopGuardEnabled,
 	cfgModelToolCallLoopGuardExemptTools,
+	cfgModelToolCallLoopGuardMaxCycleLength,
 	cfgModelToolCallLoopGuardThreshold,
 } from "./settings";
 
@@ -250,13 +251,15 @@ export class LoopGuards {
 			return undefined;
 		}
 		const threshold = cfgModelToolCallLoopGuardThreshold.get(this.#host.settings);
+		const maxCycleLength = cfgModelToolCallLoopGuardMaxCycleLength.get(this.#host.settings);
 		const exemptTools = cfgModelToolCallLoopGuardExemptTools
 			.get(this.#host.settings)
 			.filter((tool): tool is string => typeof tool === "string" && tool.length > 0);
-		const settingsKey = `${threshold}:${JSON.stringify(exemptTools)}`;
+		const settingsKey = `${threshold}:${maxCycleLength}:${JSON.stringify(exemptTools)}`;
 		if (!this.#toolCallLoopGuard || this.#toolCallLoopGuardSettingsKey !== settingsKey) {
 			this.#toolCallLoopGuard = new ToolCallLoopGuard({
 				threshold,
+				maxCycleLength,
 				exemptTools,
 				exemptionAlias: toolCommandCallName,
 			});
@@ -270,6 +273,7 @@ export class LoopGuards {
 			kind: detection.kind,
 			toolName: detection.toolName,
 			count: detection.count,
+			...(detection.cycleLength !== undefined ? { cycleLength: detection.cycleLength } : {}),
 		});
 		const content = renderToolCallLoopRedirect(detection);
 		const details = toolCallLoopRedirectDetails(detection);

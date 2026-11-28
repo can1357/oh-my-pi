@@ -297,4 +297,66 @@ describe("AgentSession tool-call loop guard", () => {
 		expect(redirects[0]!.details).toMatchObject({ kind: "unresolved_tool_call", toolName: "ed", count: 2 });
 		expect(JSON.stringify(redirects[0]!.content)).toContain("tools that do not exist");
 	});
+
+	it("injects a cyclic redirect for a 2-turn alternating polling loop", async () => {
+		const bashTool: AgentTool = {
+			name: "bash",
+			label: "Bash",
+			description: "Mock bash tool",
+			parameters: type({ "command?": "string" }),
+			execute: async (_id, params) => ({
+				content: [{ type: "text", text: `ran ${(params as { command?: string }).command ?? ""}` }],
+			}),
+		};
+		const mock = createMockModel({
+			provider: "openai",
+			responses: [
+				{ content: [{ type: "toolCall", name: "bash", arguments: { command: "sleep 30" } }] },
+				{ content: [{ type: "toolCall", name: "bash", arguments: { command: "gh pr checks" } }] },
+				{ content: [{ type: "toolCall", name: "bash", arguments: { command: "sleep 30" } }] },
+				{ content: [{ type: "toolCall", name: "bash", arguments: { command: "gh pr checks" } }] },
+				{ content: ["Stopped polling loop."] },
+			],
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"todo.enabled": false,
+			"model.toolCallLoopGuard.enabled": true,
+			"model.toolCallLoopGuard.threshold": 2,
+			"model.toolCallLoopGuard.maxCycleLength": 3,
+			"model.toolCallLoopGuard.exemptTools": ["wait"],
+		});
+		settings.setModelRole("default", `${mock.provider}/${mock.id}`);
+		session = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model: mock, systemPrompt: ["Test"], tools: [bashTool], messages: [] },
+				convertToLlm,
+				streamFn: mock.stream,
+			}),
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage),
+			toolRegistry: new Map([["bash", bashTool]]),
+		});
+
+		await session.prompt("watch CI");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(5);
+		const redirects = session.agent.state.messages.filter(
+			(message): message is CustomMessage =>
+				message.role === "custom" && message.customType === "tool-call-loop-redirect",
+		);
+		expect(redirects).toHaveLength(1);
+		expect(redirects[0]!.details).toMatchObject({
+			kind: "repeated_tool_call",
+			toolName: "bash",
+			count: 2,
+			cycleLength: 2,
+		});
+		expect(String(redirects[0]!.content)).toContain("2-turn tool-call cycle");
+		expect(String(redirects[0]!.content)).toContain("sleep 30");
+		expect(String(redirects[0]!.content)).toContain("gh pr checks");
+	});
 });

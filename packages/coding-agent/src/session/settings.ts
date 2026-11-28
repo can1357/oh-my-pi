@@ -391,7 +391,21 @@ export const cfgModelToolCallLoopGuardThreshold = register({
 		tab: "model",
 		group: "Thinking",
 		label: "Tool-Call Loop Threshold",
-		description: "Consecutive repeated tool-call patterns required before the corrective steer is injected",
+		description:
+			"Consecutive repeated tool-call patterns (or repeating turn cycles) required before the corrective steer is injected",
+	},
+});
+
+export const cfgModelToolCallLoopGuardMaxCycleLength = register({
+	id: "model.toolCallLoopGuard.maxCycleLength",
+	type: "number",
+	default: 3,
+	ui: {
+		tab: "model",
+		group: "Thinking",
+		label: "Tool-Call Loop Max Cycle Length",
+		description:
+			"Maximum repeating turn-cycle length to detect (1 = identical consecutive turns only; 3 = also catches 2- and 3-turn alternating polling loops)",
 	},
 });
 

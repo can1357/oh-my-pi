@@ -1,5 +1,6 @@
 import type { RepeatedToolCallDetection } from "@oh-my-pi/pi-ai/utils/tool-call-loop-guard";
 import { prompt } from "@oh-my-pi/pi-utils";
+import cyclicToolCallLoopRedirectTemplate from "../prompts/system/cyclic-tool-call-loop-redirect.md" with { type: "text" };
 import toolCallLoopRedirectTemplate from "../prompts/system/tool-call-loop-redirect.md" with { type: "text" };
 import unresolvedToolCallLoopRedirectTemplate from "../prompts/system/unresolved-tool-call-loop-redirect.md" with { type: "text" };
 
@@ -10,6 +11,8 @@ export interface ToolCallLoopRedirectDetails {
 	kind: RepeatedToolCallDetection["kind"];
 	toolName: string;
 	count: number;
+	cycleLength?: number;
+	cycleSummary?: string;
 	argumentsSummary: string;
 	resultSummary: string;
 }
@@ -22,9 +25,25 @@ export interface ToolCallLoopRedirectDetails {
  * the default converter that keeps only LLM-native roles).
  */
 export function renderToolCallLoopRedirect(detection: RepeatedToolCallDetection): string {
-	const template =
-		detection.kind === "unresolved_tool_call" ? unresolvedToolCallLoopRedirectTemplate : toolCallLoopRedirectTemplate;
-	return prompt.render(template, {
+	if (detection.kind === "unresolved_tool_call") {
+		return prompt.render(unresolvedToolCallLoopRedirectTemplate, {
+			tool_name: detection.toolName,
+			count: detection.count,
+			arguments_summary: detection.argumentsSummary,
+			result_summary: detection.resultSummary || "(no text result)",
+		});
+	}
+	if (detection.cycleLength !== undefined && detection.cycleLength > 1) {
+		return prompt.render(cyclicToolCallLoopRedirectTemplate, {
+			tool_name: detection.toolName,
+			count: detection.count,
+			cycle_length: detection.cycleLength,
+			cycle_summary: detection.cycleSummary || `${detection.toolName}(${detection.argumentsSummary})`,
+			arguments_summary: detection.argumentsSummary,
+			result_summary: detection.resultSummary || "(no text result)",
+		});
+	}
+	return prompt.render(toolCallLoopRedirectTemplate, {
 		tool_name: detection.toolName,
 		count: detection.count,
 		arguments_summary: detection.argumentsSummary,
@@ -37,6 +56,8 @@ export function toolCallLoopRedirectDetails(detection: RepeatedToolCallDetection
 		kind: detection.kind,
 		toolName: detection.toolName,
 		count: detection.count,
+		...(detection.cycleLength !== undefined ? { cycleLength: detection.cycleLength } : {}),
+		...(detection.cycleSummary !== undefined ? { cycleSummary: detection.cycleSummary } : {}),
 		argumentsSummary: detection.argumentsSummary,
 		resultSummary: detection.resultSummary,
 	};

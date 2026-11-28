@@ -9,6 +9,7 @@ import { toolCommandCallName } from "../tools/tool-commands";
 import {
 	cfgModelToolCallLoopGuardEnabled,
 	cfgModelToolCallLoopGuardExemptTools,
+	cfgModelToolCallLoopGuardMaxCycleLength,
 	cfgModelToolCallLoopGuardThreshold,
 } from "../session/settings";
 
@@ -103,12 +104,18 @@ export class AdvisorLoopGuard {
 			return undefined;
 		}
 		const threshold = cfgModelToolCallLoopGuardThreshold.get(this.#host.settings);
+		const maxCycleLength = cfgModelToolCallLoopGuardMaxCycleLength.get(this.#host.settings);
 		const exemptTools = cfgModelToolCallLoopGuardExemptTools
 			.get(this.#host.settings)
 			.filter((tool): tool is string => typeof tool === "string" && tool.length > 0);
-		const settingsKey = `${threshold}:${JSON.stringify(exemptTools)}`;
+		const settingsKey = `${threshold}:${maxCycleLength}:${JSON.stringify(exemptTools)}`;
 		if (!this.#guard || this.#guardSettingsKey !== settingsKey) {
-			this.#guard = new ToolCallLoopGuard({ threshold, exemptTools, exemptionAlias: toolCommandCallName });
+			this.#guard = new ToolCallLoopGuard({
+				threshold,
+				maxCycleLength,
+				exemptTools,
+				exemptionAlias: toolCommandCallName,
+			});
 			this.#guardSettingsKey = settingsKey;
 		}
 		return this.#guard;
