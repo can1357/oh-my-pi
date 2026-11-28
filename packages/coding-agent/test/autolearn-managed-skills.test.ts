@@ -280,16 +280,50 @@ describe("managed-skills primitives", () => {
 			expect(parsed.body).toBe("# Foo\n\nSteps.");
 		});
 
-		it("falls back to the body frontmatter's description on update and keeps a leading horizontal rule", async () => {
-			await writeManagedSkill({ origin, action: "create", name: "foo", description: "Old.", body: "old" });
-			await writeManagedSkill({ origin, action: "update", name: "foo", body: "---\ndescription: New.\n---\nnew" });
+		it("falls back to the body frontmatter's description on create only", async () => {
+			await writeManagedSkill({ origin, action: "create", name: "foo", body: "---\ndescription: New.\n---\nnew" });
 			let parsed = parseFrontmatter(await Bun.file(skillFile("foo")).text(), { source: "test" });
 			expect(parsed.frontmatter.description).toBe("New.");
 			expect(parsed.body).toBe("new");
 
-			await writeManagedSkill({ origin, action: "update", name: "foo", body: "---\n\nAfter a rule." });
+			// A body-only update strips the block but keeps the stored description.
+			await writeManagedSkill({
+				origin,
+				action: "update",
+				name: "foo",
+				body: "---\nname: foo\ndescription: Replaced.\n---\nnewer",
+			});
 			parsed = parseFrontmatter(await Bun.file(skillFile("foo")).text(), { source: "test" });
+			expect(parsed.frontmatter.description).toBe("New.");
+			expect(parsed.body).toBe("newer");
+		});
+
+		it("keeps a leading horizontal rule, including one followed by a colon-bearing Setext heading", async () => {
+			await writeManagedSkill({ origin, action: "create", name: "foo", description: "Old.", body: "old" });
+			await writeManagedSkill({ origin, action: "update", name: "foo", body: "---\n\nAfter a rule." });
+			let parsed = parseFrontmatter(await Bun.file(skillFile("foo")).text(), { source: "test" });
 			expect(parsed.body).toBe("---\n\nAfter a rule.");
+
+			const setext = "---\n\nStatus: ready\n---\n\n# Steps";
+			await writeManagedSkill({ origin, action: "update", name: "foo", body: setext });
+			parsed = parseFrontmatter(await Bun.file(skillFile("foo")).text(), { source: "test" });
+			expect(parsed.frontmatter.description).toBe("Old.");
+			expect(parsed.body).toBe(setext);
+
+			await writeManagedSkill({ origin, action: "create", name: "bar", description: "Bar.", body: setext });
+			parsed = parseFrontmatter(await Bun.file(skillFile("bar")).text(), { source: "test" });
+			expect(parsed.body).toBe(setext);
+		});
+
+		it("a description-only update keeps the stored body's CRLF line endings", async () => {
+			const body = "# Foo\r\n\r\nStep one.\r\nStep two.";
+			await writeManagedSkill({ origin, action: "create", name: "foo", description: "Old.", body });
+			expect(await Bun.file(skillFile("foo")).text()).toEndWith(`\n${body}\n`);
+
+			await writeManagedSkill({ origin, action: "update", name: "foo", description: "New." });
+			const raw = await Bun.file(skillFile("foo")).text();
+			expect(raw).toEndWith(`\n${body}\n`);
+			expect(parseFrontmatter(raw, { source: "test" }).frontmatter.description).toBe("New.");
 		});
 
 		it("partial updates keep the stored field the call leaves out", async () => {

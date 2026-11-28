@@ -131,7 +131,7 @@
 
 ### Fixed
 
-- Fixed `manage_skill` (and `learn`'s skill payload) writing a skill with two frontmatter blocks when the body led with its own `---` block: a leading frontmatter block is stripped, the explicit `name`/`description` win, and the block's `description` is only a fallback ([#20923](https://github.com/can1357/oh-my-pi/pull/20923) by [@Xytronix](https://github.com/Xytronix))
+- Fixed `manage_skill` (and `learn`'s skill payload) writing a skill with two frontmatter blocks when the body led with its own `---` block: a leading frontmatter block is stripped, the explicit `name`/`description` win, and the block's `description` is only a fallback on `create` ([#20923](https://github.com/can1357/oh-my-pi/pull/20923) by [@Xytronix](https://github.com/Xytronix))
 - `manage_skill` `update` now takes `description`, `body`, or both; an omitted field keeps its stored value, so a one-line change no longer resends the whole skill ([#20923](https://github.com/can1357/oh-my-pi/pull/20923) by [@Xytronix](https://github.com/Xytronix))
 - `/resume` into a session without subagents no longer keeps showing the previous session's subagents above the composer
 - Fixed stealth injection registry to preserve native function source strings across frames

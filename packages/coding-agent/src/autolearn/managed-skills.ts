@@ -201,9 +201,11 @@ const LEADING_FRONTMATTER = /^\uFEFF?\s*---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?
 /**
  * Strip the `---` frontmatter blocks a body leads with. Callers often include one
  * although the tool generates it, which would leave the stored file with two.
- * Only a block that parses as a YAML mapping counts, so a body opening with a
- * horizontal rule keeps it. Returns the first stripped block's `description`
- * for the caller to fall back to; its `name` is ignored (the explicit name wins).
+ * Only a block that parses as a YAML mapping carrying a skill metadata key
+ * (`name`, `description`, or the provenance key) counts, so a body opening with
+ * a horizontal rule (even one followed by a `Key: value` Setext heading) keeps
+ * it. Returns the first stripped block's `description` for `create` to fall
+ * back to; its `name` is ignored (the explicit name wins).
  */
 export function stripBodyFrontmatter(raw: string): { body: string; description?: string } {
 	let body = raw;
@@ -218,6 +220,7 @@ export function stripBodyFrontmatter(raw: string): { body: string; description?:
 			break;
 		}
 		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) break;
+		if (!("name" in parsed || "description" in parsed || MANAGED_SKILL_PROVENANCE_KEY in parsed)) break;
 		if (description === undefined && "description" in parsed && typeof parsed.description === "string") {
 			description = parsed.description;
 		}
@@ -301,8 +304,10 @@ async function openManagedSkillFileForUpdate(name: string, file: string) {
 export async function writeManagedSkill(input: WriteManagedSkillInput): Promise<{ path: string }> {
 	const name = sanitizeSkillName(input.name);
 	const stripped = input.body === undefined ? undefined : stripBodyFrontmatter(input.body);
-	// An explicit description always wins over one the body's frontmatter carried.
-	const description = input.description ?? stripped?.description;
+	// An explicit description always wins. On `create` the body's frontmatter
+	// `description` is a fallback; on `update` an omitted description keeps the
+	// stored one, so a body-only update never touches discovery.
+	const description = input.description ?? (input.action === "create" ? stripped?.description : undefined);
 	if (input.action === "create" && (description === undefined || stripped === undefined)) {
 		throw new Error(`Creating managed skill "${name}" requires both a description and a body.`);
 	}
@@ -393,10 +398,13 @@ export async function writeManagedSkill(input: WriteManagedSkillInput): Promise<
 			// Carry the stored provenance forward (created date, contributing sessions/projects)
 			// and keep any field the call left out. Read through the checked handle so a path
 			// swap cannot feed it another file.
+			// `normalize: false` keeps the stored body's line endings byte-for-byte when
+			// it is carried forward unchanged.
 			const stored = parseFrontmatter(await handle.readFile({ encoding: "utf8" }), {
 				source: file,
 				rawKeys: true,
 				level: "off",
+				normalize: false,
 			});
 			const storedDescription = stored.frontmatter.description;
 			const content = render(
