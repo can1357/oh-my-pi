@@ -33,6 +33,7 @@
 - Fixed Mermaid flowcharts drawing edges into a top-rank node, such as two back edges into it, as a straight line through other nodes' boxes and labels with no arrowhead; those edges now route around the nodes ([#20781](https://github.com/can1357/oh-my-pi/pull/20781) by [@loishi](https://github.com/loishi))
 - Fixed the bash tool's built-in `grep -s` printing `Is a directory` for a directory operand, which GNU grep silences as it silences other unreadable inputs ([#20901](https://github.com/can1357/oh-my-pi/pull/20901) by [@sjawhar](https://github.com/sjawhar))
 - Fixed native memory growth for each new `AbortSignal` passed to a native call (each bash tool run, and grep, glob and the other calls that take a signal) ([#20895](https://github.com/can1357/oh-my-pi/pull/20895) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the `sed` builtin's `l` listing a character such as `é` as `\u00E9` instead of the octal escape of each byte (`\303\251`), a newline of the pattern space as a line break instead of `\n`, and folding before every character with `l 0` ([#20894](https://github.com/can1357/oh-my-pi/pull/20894) by [@sjawhar](https://github.com/sjawhar))
 
 ## [19.2.1] - 2026-11-25
 
