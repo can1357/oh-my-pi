@@ -1304,8 +1304,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		activity.isComposing = untrack(this.composer.text).trim() !== "";
 		activity.isReviewingPlan = this.#planReviewPick !== undefined;
 		target.enableIdleMaintenance({
-			isBlocked: () =>
-				!activity.ready || activity.target !== target || activity.isComposing || activity.isReviewingPlan,
+			// Idle compaction must not run while a submitted plan is awaiting review:
+			// compacting would destroy the exploration context needed to refine the plan.
+			// Only compaction is gated; the recap is an ephemeral side-channel turn and
+			// does not touch the context the review depends on.
+			isBlocked: () => !activity.ready || activity.target !== target || activity.isComposing,
+			isCompactionBlocked: () => this.#planReview !== undefined,
 			scheduledTurn: () => activity.scheduledTurn?.(target) === true,
 			// Delivered only while unblocked, so `target` is the session on screen.
 			onRecap: recap => activity.presentRecap?.(recap),
@@ -5246,7 +5250,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#planReview = model;
 		this.#planReviewOverlayHandle = showSheet(this.shell, planReviewSheet(model), () => jsx(PlanReview, { model }), {
 			mouse: "any",
+			// Runs however the sheet closes (a keybinding dismissal too, not only the
+			// model's finish): tear the review state down and re-sync idle maintenance.
+			onClose: () => this.#hidePlanReview(),
 		});
+		// Re-evaluate idle maintenance so in-flight idle timers pause while the review is open.
 		this.syncIdleMaintenanceView();
 		if (cfgCompletionNotify.get(settings) !== "off") {
 			notifyTerminal({
@@ -5271,6 +5279,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#planReview = undefined;
 		this.#planReviewOwner = undefined;
 		onHide?.();
+		// Re-evaluate idle maintenance now that the review is closed.
+		this.syncIdleMaintenanceView();
 	}
 
 	/** The open plan review awaiting an answer, as `plan_review_requested` reported it: backs `ctx.getPendingPlanReview`. */

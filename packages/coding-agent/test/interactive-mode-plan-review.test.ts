@@ -1349,6 +1349,42 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(report(0, 0)).toBe("");
 	});
 
+	it("pauses idle compaction, not the recap, while a plan review is open", async () => {
+		const viewSession = mode.viewSession as AgentSession;
+		const enable = vi.spyOn(viewSession, "enableIdleMaintenance");
+		const refresh = vi.spyOn(viewSession, "refreshIdleMaintenance");
+		await mode.init();
+		expect(enable).toHaveBeenCalled();
+		const initial = enable.mock.calls.at(-1)![0]!;
+		expect(initial.isBlocked?.()).toBe(false);
+		expect(initial.isCompactionBlocked?.()).toBe(false);
+
+		const choice = mode.showPlanReview("# Plan\n\nReady.", "Plan review", [{ id: "approve", label: "Approve" }]);
+		expect(mode.shell.overlays.open()).toBe(true);
+		// Opening the review re-syncs idle maintenance: only compaction is gated, the
+		// recap stays wanted (it is an ephemeral side-channel turn that never touches
+		// the context the review depends on).
+		const open = enable.mock.calls.at(-1)![0]!;
+		expect(open.isBlocked?.()).toBe(false);
+		expect(open.isCompactionBlocked?.()).toBe(true);
+
+		// A keybinding dismissal resolves but, as pinned elsewhere, the sheet stays
+		// mounted until its owner replaces it: the blocker must stay active so long.
+		pressKey(mode.shell, "escape");
+		await expect(choice).resolves.toBeUndefined();
+		await term.settle();
+		expect(mode.shell.overlays.open()).toBe(true);
+		expect(enable.mock.calls.at(-1)![0]!.isCompactionBlocked?.()).toBe(true);
+
+		// When the sheet does close (however it closes), the onClose wiring tears the
+		// review down and re-syncs idle maintenance so the owed compaction re-arms.
+		const refreshesBeforeClose = refresh.mock.calls.length;
+		mode.shell.overlays.closeAll();
+		await term.settle();
+		expect(enable.mock.calls.at(-1)![0]!.isCompactionBlocked?.()).toBe(false);
+		expect(refresh.mock.calls.length).toBeGreaterThan(refreshesBeforeClose);
+	});
+
 	it("dismisses Plan Review and restores input when a provider error is pinned", async () => {
 		mode.shell.focus(mode.composer.field);
 		const choice = mode.showPlanReview("# Plan\n\nReady for approval.", "Plan mode - next step", [
@@ -1390,6 +1426,7 @@ describe("InteractiveMode plan review rendering", () => {
 
 		pressKey(mode.shell, "escape");
 		await expect(choice).resolves.toBeUndefined();
+		await term.settle();
 		// showPlanReview no longer hides on settle: the plan-approval caller fuses
 		// #hidePlanReview() with the replacement paint to avoid stale-buffer flicker.
 		expect(mode.shell.overlays.open()).toBe(true);

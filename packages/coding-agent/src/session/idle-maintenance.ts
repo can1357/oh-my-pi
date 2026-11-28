@@ -29,6 +29,12 @@ import { isSessionSettled, type SessionSettleState } from "./session-settle";
 export interface IdleMaintenanceOptions {
 	/** True while the owner does not want autonomous work (a draft being composed, the view left, startup unfinished). */
 	isBlocked?: () => boolean;
+	/**
+	 * True while compaction must not start even though other idle work may (a submitted plan awaits review:
+	 * compacting would destroy the exploration context needed to refine it). Only consulted for compaction;
+	 * the recap is an ephemeral side-channel turn and stays wanted.
+	 */
+	isCompactionBlocked?: () => boolean;
 	/** True while the owner has decided to start a turn it has not yet admitted (for example a scheduled goal continuation). */
 	scheduledTurn?: () => boolean;
 	/** Receives each nonblank recap reply, after it has been journaled to the history database. */
@@ -164,6 +170,11 @@ export class IdleMaintenance {
 		return this.#options.isBlocked?.() === true || session.isCompacting || session.isSessionTransitioning;
 	}
 
+	/** Like {@link #isBlocked}, plus owner-specific reasons only compaction must respect. */
+	#isCompactionBlocked(): boolean {
+		return this.#isBlocked() || this.#options.isCompactionBlocked?.() === true;
+	}
+
 	/** No run is open, live, admitted, queued or scheduled. */
 	#isSettled(): boolean {
 		return isSessionSettled(this.#session, this.#options.scheduledTurn);
@@ -260,7 +271,7 @@ export class IdleMaintenance {
 		const pending = this.#pending;
 		if (!pending?.compaction) return;
 		// Blocked work stays owed: the owner's refresh re-arms it. Busy means the stretch is not over after all.
-		if (this.#isBlocked()) return;
+		if (this.#isCompactionBlocked()) return;
 		if (!this.#isSettled()) {
 			this.#schedule();
 			return;
