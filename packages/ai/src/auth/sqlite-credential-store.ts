@@ -1056,6 +1056,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		} else if (schemaVersion < AUTH_SCHEMA_VERSION) {
 			this.#migrateAuthSchema(schemaVersion);
 		}
+		this.#ensureAuthCredentialSaltColumn();
 
 		this.#createAuthCredentialIndexes();
 		this.#createAuthCredentialBlocksTable();
@@ -1390,9 +1391,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		if (fromVersion < 8) {
 			this.#migrateAuthSchemaV7ToV8();
 		}
-		if (fromVersion < 9) {
-			this.#migrateAuthSchemaV8ToV9();
-		}
+		// v8 → v9 (the `salt` column) runs on every open in #initializeSchema.
 	}
 
 	#migrateAuthSchemaV0ToV1(): void {
@@ -1605,10 +1604,13 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	/**
-	 * Add the per-row `salt` that marks a sealed `data` column. Tables rebuilt by the
-	 * v1–v4 migrations already have it (they use the current DDL).
+	 * Add the per-row `salt` that marks a sealed `data` column (auth schema v9).
+	 * Checked on every open, not gated on the recorded version: every credential
+	 * read selects `salt`, and stores exist that record v9 without the column,
+	 * which trusting the version row would leave unopenable. Tables rebuilt by
+	 * the v1–v4 migrations already have it (they use the current DDL).
 	 */
-	#migrateAuthSchemaV8ToV9(): void {
+	#ensureAuthCredentialSaltColumn(): void {
 		const columns = this.#db.query("PRAGMA table_info(auth_credentials)").all() as Array<{ name: string }>;
 		if (!columns.some(column => column.name === "salt")) {
 			this.#db.run("ALTER TABLE auth_credentials ADD COLUMN salt TEXT DEFAULT NULL");

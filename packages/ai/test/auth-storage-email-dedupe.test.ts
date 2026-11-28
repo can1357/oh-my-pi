@@ -555,6 +555,40 @@ describe("AuthStorage openai-codex email dedupe", () => {
 		}
 	});
 
+	it("opens a store that records v9 but lacks the salt column", async () => {
+		const stampedDb = new Database(":memory:");
+		stampedDb.run(`
+			CREATE TABLE auth_schema_version (
+				id INTEGER PRIMARY KEY CHECK (id = 1),
+				version INTEGER NOT NULL
+			);
+			INSERT INTO auth_schema_version(id, version) VALUES (1, 9);
+			CREATE TABLE auth_credentials (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				provider TEXT NOT NULL,
+				credential_type TEXT NOT NULL,
+				data TEXT NOT NULL,
+				disabled_cause TEXT DEFAULT NULL,
+				identity_key TEXT DEFAULT NULL,
+				created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+				updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+			);
+		`);
+		stampedDb
+			.query("INSERT INTO auth_credentials (provider, credential_type, data) VALUES (?, ?, ?)")
+			.run("openai", "api_key", JSON.stringify({ key: "sk-stamped-v9" }));
+
+		const reopenedStore = new SqliteAuthCredentialStore(stampedDb);
+		try {
+			// The stored row stays readable, and writes (which bind `salt`) succeed.
+			expect(reopenedStore.getApiKey("openai")).toBe("sk-stamped-v9");
+			await reopenedStore.saveApiKey("openai", "sk-after-repair");
+			expect(reopenedStore.getApiKey("openai")).toBe("sk-after-repair");
+		} finally {
+			reopenedStore.close();
+		}
+	});
+
 	it("reopens a current-schema db without issuing write transactions", async () => {
 		// File-backed: reopens persisted data and observes PRAGMA data_version from a second connection.
 		await withTempDir("pi-ai-auth-email-dedupe-", async tempDir => {
