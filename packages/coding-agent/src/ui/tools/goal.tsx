@@ -7,6 +7,7 @@
  * pending, then a card on the status background.
  */
 import type { TspSpan } from "@oh-my-pi/pi-wire";
+import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { replaceTabs } from "@oh-my-pi/pi-tui/text/width";
 import type { ToolPresenter, ToolView } from "./contract";
 import { resultText } from "./default";
@@ -91,11 +92,16 @@ function opLabel(op: string | undefined): string {
 	return op ? (OP_LABELS[op] ?? op) : "?";
 }
 
+/** One display line: model-written objectives can carry terminal controls and newlines. */
+function objectiveText(objective: string): string {
+	return replaceTabs(sanitizeText(objective)).replaceAll("\n", " ").trim();
+}
+
 export const goalPresenter: ToolPresenter<GoalArgs, GoalDetails> = {
 	merge: true,
 	call(args) {
 		const op = opLabel(args?.op);
-		const objective = args?.objective ? replaceTabs(args.objective.trim()) : undefined;
+		const objective = args?.objective ? objectiveText(args.objective) : undefined;
 		const budget = args?.token_budget !== undefined ? `budget ${tokens(args.token_budget)}` : undefined;
 		return {
 			label: head(
@@ -137,7 +143,7 @@ export const goalPresenter: ToolPresenter<GoalArgs, GoalDetails> = {
 		}
 		const status = goal.status ?? "active";
 		const statusStyle = STATUS_STYLE[status] ?? "muted strong";
-		const objective = replaceTabs((goal.objective ?? "").trim());
+		const objective = objectiveText(goal.objective ?? "");
 		const used = tokens(goal.tokensUsed ?? 0);
 		let usage =
 			goal.tokenBudget !== undefined

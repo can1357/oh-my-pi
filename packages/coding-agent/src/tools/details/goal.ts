@@ -15,7 +15,7 @@ export interface Goal {
 
 /** Goal operation outcome displayed in the transcript. */
 export interface GoalToolDetails {
-	op: "create" | "get" | "complete" | "pause" | "resume" | "drop";
+	op: "create" | "update" | "get" | "complete" | "pause" | "resume" | "drop";
 	goal?: Goal | null;
 	remainingTokens?: number | null;
 	completionBudgetReport?: string | null;

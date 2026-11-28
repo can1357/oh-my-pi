@@ -3,6 +3,7 @@ import { settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { loadHindsightConfig } from "@oh-my-pi/pi-coding-agent/hindsight/config";
 import { cfgHindsightApiToken } from "@oh-my-pi/pi-coding-agent/hindsight/settings";
 import { cfgMemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/settings";
+import { cfgGoalModelObjectiveUpdates } from "@oh-my-pi/pi-coding-agent/goals/settings";
 import type { TestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
 import { settingsScreen, setupSettingsWindow } from "../../helpers/settings-window";
 import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
@@ -170,5 +171,34 @@ describe("settings memory page and search", () => {
 
 		comp.press("escape");
 		expect(cancelCount).toBe(1);
+	});
+});
+
+describe("settings goal objective updates", () => {
+	it("selects confirmation, trusted user requests, and disabled permissions from the goal setting submenu", () => {
+		const comp = createSelector();
+
+		comp.type("goal objective updates");
+		comp.press("enter");
+		const options = settingsScreen(comp);
+		expect(options).toContain("Disabled");
+		expect(options).toContain("Confirm each edit");
+		expect(options).toContain("On user request");
+
+		comp.press("down");
+		comp.press("enter");
+		expect(cfgGoalModelObjectiveUpdates.get(settings)).toBe("confirm");
+
+		comp.press("enter");
+		comp.press("down");
+		comp.press("enter");
+		expect(cfgGoalModelObjectiveUpdates.get(settings)).toBe("on-request");
+
+		comp.press("enter");
+		comp.press("up");
+		comp.press("up");
+		comp.press("enter");
+		expect(cfgGoalModelObjectiveUpdates.get(settings)).toBe("disabled");
+		comp.dispose();
 	});
 });
