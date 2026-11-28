@@ -545,8 +545,10 @@ export class SessionTools {
 	 * (or the rebuilt base) on the agent, so a rebuild landing in the prompt
 	 * window (compaction/promotion, memory promotion, MCP/RPC tool refresh,
 	 * hindsight MM-TTL refresh) cannot silently drop it before the request.
-	 * Cleared when the turn ends; rebuilds between turns apply the prompt the
-	 * branch was last sent with on that base ({@link #applyAgentSystemPrompt}).
+	 * Cleared when the session's last run in flight ends (`AgentSession` calls
+	 * {@link clearTurnSystemPromptOverride}), whichever path started it; rebuilds
+	 * between turns apply the prompt the branch was last sent with on that base
+	 * ({@link #applyAgentSystemPrompt}).
 	 */
 	#turnSystemPromptOverride: string[] | null | undefined;
 	/** The latest hook prompt applied to the agent and the base its hooks were given; kept after the turn ends. */
@@ -1894,10 +1896,14 @@ export class SessionTools {
 
 	/**
 	 * Records `prompt` on the current branch unless it is already the branch's newest record: a hook prompt's
-	 * override record, then the digest that names it ({@link recordedPromptAt}).
+	 * override record, then the digest that names it ({@link recordedPromptAt}). The digest names the prompt, and an
+	 * override record also names the base that restores it, so the same hook prompt sent on another base is recorded
+	 * again.
 	 */
 	recordPrompt(prompt: RecordedSystemPrompt | undefined): void {
-		if (prompt === undefined || prompt.digest === this.recordedPrompt()?.digest) return;
+		if (prompt === undefined) return;
+		const newest = this.recordedPrompt();
+		if (newest?.digest === prompt.digest && newest.override?.base === prompt.override?.base) return;
 		if (prompt.override) {
 			this.#host.sessionManager.appendCustomEntry(SYSTEM_PROMPT_OVERRIDE_CUSTOM_TYPE, prompt.override);
 		}

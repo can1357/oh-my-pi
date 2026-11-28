@@ -851,7 +851,7 @@ interface BranchPromptCacheObservation {
 	refreshMissed: boolean;
 	/** A compaction follows the reply. */
 	compacted: boolean;
-	/** Digest of the base prompt the reply was produced under; undefined when none is recorded. */
+	/** Digest of the system prompt the reply was sent with; undefined when none is recorded. */
 	promptDigest: string | undefined;
 }
 
@@ -1647,6 +1647,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// finishing has its bracket reset by it and ends here.
 		if (epoch === this.#inFlightEpoch) this.#promptInFlightCount = Math.max(0, this.#promptInFlightCount - 1);
 		if (this.#promptInFlightCount !== 0) return;
+		// No run is in flight, whichever path started it (a prompt, a wake, a queued drain, an idle delivery):
+		// a prompt prepared for it no longer governs rebuilds, which now apply what the branch recorded.
+		this.#tools.clearTurnSystemPromptOverride();
 		this.yieldQueue.requestIdleFlush();
 		this.#releasePowerAssertion();
 		this.#endComputerTurn();
@@ -2197,6 +2200,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#resetInFlight(): void {
 		this.#inFlightEpoch++;
 		this.#promptInFlightCount = 0;
+		this.#tools.clearTurnSystemPromptOverride();
 		this.#clientPromptInFlightCount = 0;
 		this.yieldQueue.requestIdleFlush();
 		this.#releasePowerAssertion();
@@ -10378,8 +10382,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 			return true;
 		} finally {
-			// The per-turn before_agent_start override lives only for this turn.
-			this.#tools.clearTurnSystemPromptOverride();
 			this.#usagePreflightReadyForNextModelCall = false;
 			// Client ownership is released by #prompt's bracket, which settles
 			// after this frame returns; its wake re-checks parked steers
@@ -11347,8 +11349,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			await this.#waitForPostPromptRecovery();
 			return true;
 		} finally {
-			// The per-turn before_agent_start override lives only for this turn.
-			this.#tools.clearTurnSystemPromptOverride();
 			this.#usagePreflightReadyForNextModelCall = false;
 			this.#recovery.setAcceptTerminalEmptyStop(false);
 			this.#endInFlight(inFlightEpoch);

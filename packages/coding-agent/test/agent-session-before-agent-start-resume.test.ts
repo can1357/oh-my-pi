@@ -6,6 +6,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent/sdk";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -23,6 +24,13 @@ const addsGuidelines: ExtensionFactory = pi => {
 	pi.on("before_agent_start", event =>
 		event.systemPrompt.includes(GUIDELINES) ? undefined : { systemPrompt: [...event.systemPrompt, GUIDELINES] },
 	);
+};
+
+const FIXED_PROMPT = "You answer from the project's own documentation.";
+
+/** Replaces the system prompt with one that does not depend on the base. */
+const replacesPrompt: ExtensionFactory = pi => {
+	pi.on("before_agent_start", () => ({ systemPrompt: [FIXED_PROMPT] }));
 };
 
 /** A request as the provider reads it, one item per system block, then one per message. */
@@ -43,9 +51,12 @@ describe("before_agent_start system prompt across turn kinds", () => {
 		}
 	});
 
-	it("keeps each request a prefix of the next across --continue and an agent-started turn", async () => {
-		using tempDir = TempDir.createSync("@pi-before-agent-start-resume-");
-		const api = "test-before-agent-start-resume";
+	/**
+	 * A provider that records each request, and `open`, which builds a session over a transcript as each process
+	 * does, with `extension` and, when given, a base prompt read at every rebuild. A subagent session makes no side
+	 * requests.
+	 */
+	async function harness(tempDir: TempDir, api: string) {
 		const requests: string[][] = [];
 		registerCustomApi(api, (_model, context) => {
 			requests.push(wire(context));
@@ -56,7 +67,7 @@ describe("before_agent_start system prompt across turn kinds", () => {
 			return stream;
 		});
 		const model = buildModel({
-			id: "before-agent-start-resume",
+			id: api,
 			name: "Before agent start resume",
 			api,
 			provider: "managed-primary",
@@ -70,9 +81,7 @@ describe("before_agent_start system prompt across turn kinds", () => {
 		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
 		authStorage.keys.setRuntime(model.provider, "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
-		const sessionDir = tempDir.join("sessions");
-		// Each process builds a new session over the transcript; a subagent session makes no side requests.
-		const open = (sessionManager: SessionManager) =>
+		const open = (sessionManager: SessionManager, extension: ExtensionFactory, base?: () => string) =>
 			createAgentSession({
 				cwd: tempDir.path(),
 				agentDir: tempDir.path(),
@@ -81,8 +90,9 @@ describe("before_agent_start system prompt across turn kinds", () => {
 				modelRegistry,
 				settings: Settings.isolated({ "compaction.enabled": false }),
 				model,
+				...(base && { systemPrompt: () => [base()] }),
 				disableExtensionDiscovery: true,
-				extensions: [addsGuidelines],
+				extensions: [extension],
 				skills: [],
 				contextFiles: [],
 				promptTemplates: [],
@@ -93,9 +103,30 @@ describe("before_agent_start system prompt across turn kinds", () => {
 				taskDepth: 1,
 				agentId: "SubAgent",
 			});
+		return { requests, authStorage, open, sessionDir: tempDir.join("sessions") };
+	}
 
+	/** Hands the idle session a card, as a peer's message reaches it, and waits for the turn it starts. */
+	async function deliverCard(session: AgentSession): Promise<void> {
+		await session.sendCustomMessage(
+			{ customType: "card", content: "A card for you.", display: true, attribution: "agent" },
+			{ deliverAs: "aside", triggerTurn: true },
+		);
+		await session.waitForIdle();
+	}
+
+	function expectAppendOnly(requests: string[][]): void {
+		for (let index = 1; index < requests.length; index++) {
+			const previous = requests[index - 1]!;
+			expect(requests[index]!.slice(0, previous.length)).toEqual(previous);
+		}
+	}
+
+	it("keeps each request a prefix of the next across --continue and an agent-started turn", async () => {
+		using tempDir = TempDir.createSync("@pi-before-agent-start-resume-");
+		const { requests, authStorage, open, sessionDir } = await harness(tempDir, "test-before-agent-start-resume");
 		try {
-			const { session: first } = await open(SessionManager.create(tempDir.path(), sessionDir));
+			const { session: first } = await open(SessionManager.create(tempDir.path(), sessionDir), addsGuidelines);
 			const sessionFile = first.sessionManager.getSessionFile();
 			await first.prompt("first");
 			await first.waitForIdle();
@@ -103,22 +134,50 @@ describe("before_agent_start system prompt across turn kinds", () => {
 
 			const continued = await SessionManager.continueRecent(tempDir.path(), sessionDir);
 			expect(continued.getSessionFile()).toBe(sessionFile);
-			const { session: resumed } = await open(continued);
+			const { session: resumed } = await open(continued, addsGuidelines);
 			sessions.push(resumed);
-			await resumed.sendCustomMessage(
-				{ customType: "card", content: "A card for you.", display: true, attribution: "agent" },
-				{ deliverAs: "aside", triggerTurn: true },
-			);
-			await resumed.waitForIdle();
+			await deliverCard(resumed);
 			await resumed.prompt("second");
 			await resumed.waitForIdle();
 
 			expect(requests).toHaveLength(3);
 			expect(requests[0]).toContain(JSON.stringify(["system", GUIDELINES]));
-			for (let index = 1; index < requests.length; index++) {
-				const previous = requests[index - 1]!;
-				expect(requests[index]!.slice(0, previous.length)).toEqual(previous);
-			}
+			expectAppendOnly(requests);
+		} finally {
+			authStorage.close();
+		}
+	});
+
+	it("restores a hook prompt sent again on a changed base after --continue", async () => {
+		using tempDir = TempDir.createSync("@pi-before-agent-start-rebased-");
+		const { requests, authStorage, open, sessionDir } = await harness(tempDir, "test-before-agent-start-rebased");
+		let base = "First base.";
+		try {
+			const { session: first } = await open(
+				SessionManager.create(tempDir.path(), sessionDir),
+				replacesPrompt,
+				() => base,
+			);
+			await first.prompt("first");
+			await first.waitForIdle();
+			// The base changes between turns; the next user turn's hook returns the same prompt on it.
+			base = "Second base.";
+			await first.refreshBaseSystemPrompt();
+			await first.prompt("second");
+			await first.waitForIdle();
+			await first.dispose();
+
+			const { session: resumed } = await open(
+				await SessionManager.continueRecent(tempDir.path(), sessionDir),
+				replacesPrompt,
+				() => base,
+			);
+			sessions.push(resumed);
+			await deliverCard(resumed);
+
+			expect(requests).toHaveLength(3);
+			expect(requests[2]).toContain(JSON.stringify(["system", FIXED_PROMPT]));
+			expectAppendOnly(requests);
 		} finally {
 			authStorage.close();
 		}

@@ -131,7 +131,7 @@
 
 ### Fixed
 
-- A system prompt an extension returns from `before_agent_start` is now also sent on turns that do not run the hook (an agent-started wake, the first turn after a resume or a prompt rebuild) while the base prompt it was built on is unchanged, so those turns no longer drop it and lose the prompt cache; the recorded system prompt digest now covers the prompt sent, override included ([#20896](https://github.com/can1357/oh-my-pi/pull/20896) by [@sjawhar](https://github.com/sjawhar))
+- A system prompt an extension returns from `before_agent_start` is now also sent on turns that do not run the hook (an agent-started wake, the first turn after a resume or a prompt rebuild) while the base prompt it was built on is unchanged, so those turns no longer drop it and lose the prompt cache ([#20896](https://github.com/can1357/oh-my-pi/pull/20896) by [@sjawhar](https://github.com/sjawhar))
 - `/resume` into a session without subagents no longer keeps showing the previous session's subagents above the composer
 - Fixed stealth injection registry to preserve native function source strings across frames
 - In Tern, `/copy` and `/annotate session` share the same block picker on desktop and mobile. Clicking a side preview accepts the full item and closes the picker ([#20791](https://github.com/can1357/oh-my-pi/pull/20791) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
