@@ -443,11 +443,18 @@ function versionNumber(id: string): number {
 	return single ? Number.parseFloat(single[1]!) : 0;
 }
 
-/** The first built-in role each assigned model holds (lower = earlier), keyed by {@link modelIdentityKey}. */
+/**
+ * Roles whose model the session itself runs (startup, ctrl+p cycling, plan mode).
+ * Only these pin a row above recent use; background roles (tiny, memory, commit,
+ * vision, …) sort by recency like any other model.
+ */
+const SESSION_ROLE_IDS: readonly ModelRole[] = ["default", "smol", "slow", "plan"];
+
+/** The first session role each assigned model holds (lower = earlier), keyed by {@link modelIdentityKey}. */
 function roleRanks(roles: RoleAssignments): Map<string, number> {
 	const ranks = new Map<string, number>();
-	for (let i = MODEL_ROLE_IDS.length - 1; i >= 0; i--) {
-		const assigned = roles[MODEL_ROLE_IDS[i]!];
+	for (let i = SESSION_ROLE_IDS.length - 1; i >= 0; i--) {
+		const assigned = roles[SESSION_ROLE_IDS[i]!];
 		if (assigned) ranks.set(modelIdentityKey(assigned.model), i);
 	}
 	return ranks;
@@ -461,7 +468,7 @@ export interface SortModelItemsOptions {
 	skipRoleRank?: boolean;
 }
 
-/** Order models for display: role-assigned first, then most recently used, then per provider by priority, version and recency. */
+/** Order models for display: session-role models first, then most recently used, then per provider by priority, version and recency. */
 export function sortModelItems(items: ModelBrowserItem[], options: SortModelItemsOptions = {}): void {
 	const compare = modelItemComparator(items, options);
 	items.sort(compare);
@@ -501,7 +508,7 @@ function modelItemComparator(
 	const keys = new Map<ModelBrowserItem, OrderKeys>();
 	for (const item of items) {
 		keys.set(item, {
-			roleRank: ranks?.get(modelIdentityKey(item.model)) ?? MODEL_ROLE_IDS.length,
+			roleRank: ranks?.get(modelIdentityKey(item.model)) ?? SESSION_ROLE_IDS.length,
 			mru: mru.get(item.selector) ?? Number.MAX_SAFE_INTEGER,
 			provider: providerRank.get(item.provider)!,
 			priority: item.model.priority ?? Number.MAX_SAFE_INTEGER,
