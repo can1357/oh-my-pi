@@ -4788,6 +4788,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			kind: agentKind,
 			parentId: options.parentAgentId,
 			parentSessionKey: options.parentSessionKey,
+			rootSessionId: options.parentAgentId
+				? (agentRegistry.get(options.parentAgentId)?.rootSessionId ??
+					agentRegistry.get(options.parentAgentId)?.session?.sessionManager?.getSessionId?.())
+				: sessionManager.getSessionId(),
 			session: null,
 			sessionFile: sessionManager.getSessionFile() ?? null,
 			status: "running" as const,
@@ -6112,6 +6116,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			throw new Error(`Agent "${resolvedAgentId}" was replaced during session initialization.`);
 		}
 		hasRegistered = true;
+		agentRegistry.syncSessionStatus(resolvedAgentId, session);
 		// MCP notification bridge cleanup — assigned when the bridge is wired below,
 		// invoked from the dispose wrapper AND registered as a postmortem so both
 		// explicit-dispose (SDK embedders that reuse the process across sessions) and

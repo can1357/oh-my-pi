@@ -134,13 +134,13 @@ function createAsyncSession(
 		finishJob,
 	};
 
+	const defaults = createSessionDefaults();
 	const session = {
-		...createSessionDefaults(),
+		...defaults,
 		state,
 		agent: { state: { systemPrompt: ["test"] } },
 		model: undefined,
 		extensionRunner: undefined,
-		sessionManager: { appendSessionInit: () => {} },
 		getActiveToolNames: () => ["read", "yield"],
 		getEnabledToolNames: () => ["read", "yield"],
 		getMountedToolCommandNames: () => [],
@@ -177,7 +177,10 @@ function createAsyncSession(
 			abortCount += 1;
 			await options.abort?.();
 		},
-		dispose: options.dispose ?? (async () => {}),
+		dispose: async () => {
+			await defaults.dispose();
+			await options.dispose?.();
+		},
 	};
 	harness.session = session as unknown as AgentSession;
 	return harness;

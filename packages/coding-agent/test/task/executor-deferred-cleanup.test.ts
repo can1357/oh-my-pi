@@ -61,13 +61,13 @@ function mockSession(opts: {
 		// oxlint-disable-next-line unicorn/no-useless-spread -- listeners may change during dispatch
 		for (const l of [...listeners]) l(event);
 	};
+	const defaults = createSessionDefaults();
 	return {
-		...createSessionDefaults(),
+		...defaults,
 		state,
 		agent: { state: { systemPrompt: ["test"] } },
 		model: undefined,
 		extensionRunner: undefined,
-		sessionManager: { appendSessionInit: () => {} },
 		getActiveToolNames: () => ["read", "yield"],
 		getEnabledToolNames: () => ["read", "yield"],
 		subscribe: (l: (event: AgentSessionEvent) => void) => {
@@ -87,7 +87,10 @@ function mockSession(opts: {
 		getLastAssistantMessage: () => state.messages[state.messages.length - 1],
 		getAsyncJobSnapshot: () => ({ running: [], recent: [] }),
 		abort: opts.abort ?? (async () => {}),
-		dispose: opts.dispose ?? (async () => {}),
+		dispose: async () => {
+			await defaults.dispose();
+			await opts.dispose?.();
+		},
 	} as unknown as AgentSession;
 }
 

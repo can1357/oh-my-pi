@@ -86,13 +86,15 @@ function createMockSession(
 		for (const listener of [...listeners]) listener(event);
 	};
 
+	const defaults = createSessionDefaults();
+
 	const session: Partial<AgentSession> = {
-		...createSessionDefaults(),
+		...defaults,
 		state: { messages: [] } as never,
 		agent: { state: { systemPrompt: ["test"] } } as never,
+		baseSystemPrompt: ["test"],
 		model: { api: "anthropic-messages" } as never,
 		extensionRunner: undefined as never,
-		sessionManager: { appendSessionInit: () => {} } as never,
 		getActiveToolNames: () => ["read", "yield"],
 		getEnabledToolNames: () => ["read", "yield"],
 		subscribe: (listener: (event: AgentSessionEvent) => void) => {
@@ -162,6 +164,7 @@ function createMockSession(
 			await onAbort?.();
 		},
 		dispose: async () => {
+			await defaults.dispose();
 			disposeCount += 1;
 		},
 	};

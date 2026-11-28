@@ -182,6 +182,9 @@ class LazyFakeSession {
 		return undefined;
 	}
 	setPlanModeState(): void {}
+	holdStallReminderDelivery(): Disposable {
+		return { [Symbol.dispose]() {} };
+	}
 	async sendCustomMessage(): Promise<void> {}
 	async sendUserMessage(): Promise<void> {}
 	async compact(): Promise<void> {}

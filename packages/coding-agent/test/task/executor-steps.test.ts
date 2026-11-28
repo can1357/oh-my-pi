@@ -74,13 +74,16 @@ function stepSession(answer: (prompt: string, child: Child) => void, tools: stri
 			emit({ type: "message_end", message } as AgentSessionEvent);
 		},
 	};
+	const defaults = createSessionDefaults();
 	const session = {
-		...createSessionDefaults(),
+		...defaults,
 		state: { messages },
 		agent: { state: { systemPrompt: ["test"] } },
 		model: undefined,
 		extensionRunner: undefined,
 		sessionManager: {
+			getBranch: () => defaults.sessionManager.getBranch(),
+			getSessionId: () => defaults.sessionManager.getSessionId(),
 			appendSessionInit: () => {},
 			appendCustomEntry: (customType: string, data: unknown) => {
 				entries.push({ type: "custom", customType, data } as FileEntry);

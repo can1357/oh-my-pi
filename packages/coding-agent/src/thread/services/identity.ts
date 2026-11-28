@@ -99,6 +99,7 @@ interface RefSnapshot {
 	readonly kind: AgentRef["kind"];
 	readonly parentId: AgentRef["parentId"];
 	readonly parentSessionKey: AgentRef["parentSessionKey"];
+	readonly rootSessionId: AgentRef["rootSessionId"];
 	readonly status: AgentRef["status"];
 	readonly session: AgentSessionHandle | null;
 	readonly sessionFile: string | null;
@@ -107,6 +108,7 @@ interface RefSnapshot {
 	readonly activity: AgentRef["activity"];
 	readonly history: AgentRef["history"];
 	readonly lifecycle: AgentRef["lifecycle"];
+	readonly activeTime: AgentRef["activeTime"];
 }
 
 /** Worker → main: which ref generation the worker means. */
@@ -154,6 +156,7 @@ const mainRefCodec: RpcCodec<AgentRef> = {
 			kind: ref.kind,
 			parentId: ref.parentId,
 			parentSessionKey: ref.parentSessionKey,
+			rootSessionId: ref.rootSessionId,
 			status: ref.status,
 			session: ref.session,
 			sessionFile: ref.sessionFile,
@@ -162,6 +165,7 @@ const mainRefCodec: RpcCodec<AgentRef> = {
 			activity: ref.activity,
 			history: ref.history,
 			lifecycle: ref.lifecycle,
+			activeTime: ref.activeTime,
 		}) satisfies RefSnapshot,
 	decode: data => {
 		if (!isRefIdentity(data)) throw new Error("Malformed agent ref identity");
@@ -186,6 +190,7 @@ function refresh(ref: AgentRef, snapshot: RefSnapshot): AgentRef {
 	ref.kind = snapshot.kind;
 	ref.parentId = snapshot.parentId;
 	ref.parentSessionKey = snapshot.parentSessionKey;
+	ref.rootSessionId = snapshot.rootSessionId;
 	ref.status = snapshot.status;
 	ref.session = snapshot.session;
 	ref.sessionFile = snapshot.sessionFile;
@@ -194,6 +199,7 @@ function refresh(ref: AgentRef, snapshot: RefSnapshot): AgentRef {
 	ref.activity = snapshot.activity;
 	ref.history = snapshot.history;
 	ref.lifecycle = snapshot.lifecycle;
+	ref.activeTime = snapshot.activeTime;
 	return ref;
 }
 
