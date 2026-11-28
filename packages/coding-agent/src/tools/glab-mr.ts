@@ -5,14 +5,7 @@ import { gitlab } from "../utils/gitlab";
 import { type PrDiffPayload, parsePrUnifiedDiff } from "./gh-pr-diff";
 import type { ViewLookupResult } from "./gh-view";
 import type { GlMrApi } from "./gl-types";
-import {
-	GITLAB_TOKEN_ENV_VARS,
-	getGlabConfigPath,
-	getOrFetchView,
-	getRetainedGeneration,
-	retainCachedGeneration,
-	resolveGitlabCacheAuthKey,
-} from "./github-cache";
+import { GITLAB_TOKEN_ENV_VARS, getGlabConfigPath, getOrFetchView, resolveGitlabCacheAuthKey } from "./github-cache";
 import { ToolAbortError, ToolError } from "./tool-errors";
 
 /**
@@ -166,64 +159,6 @@ async function fetchMrDiffRevision(
 		throw new ToolError("GitLab MR diff is still being prepared; try again.");
 	}
 	return JSON.stringify([refs.base_sha, refs.head_sha, refs.start_sha ?? null]);
-}
-
-export interface MrDiffGenerationOptions {
-	/** `<host>/<namespace…>/<project>`. */
-	project: string;
-	iid: number;
-	fetchedAt: number;
-	rendered: string;
-	files: PrDiffPayload["files"];
-	/** `null` bypasses the cache; `undefined` derives the key from glab credentials. */
-	cacheAuthKey?: string | null;
-}
-
-/** Retain the exact MR patch selected for a review without replacing its live cache row. */
-export function retainMrDiffGeneration(options: MrDiffGenerationOptions): number | null {
-	const host = options.project.split("/")[0]!;
-	const authKey =
-		options.cacheAuthKey === undefined ? (resolveGitlabCacheAuthKey(host) ?? null) : options.cacheAuthKey;
-	if (authKey === null) return null;
-	return retainCachedGeneration<PrDiffPayload>({
-		authKey,
-		repo: options.project,
-		kind: "mr-diff",
-		number: options.iid,
-		includeComments: false,
-		payload: { unified: "", files: options.files },
-		rendered: options.rendered,
-		fetchedAt: options.fetchedAt,
-	});
-}
-
-/** Load one retained MR diff generation without refreshing the live row. */
-export function getPinnedMrDiff(
-	options: Pick<MrDiffGenerationOptions, "project" | "iid" | "fetchedAt" | "cacheAuthKey"> & {
-		settings?: Settings;
-	},
-): ViewLookupResult<PrDiffPayload> | undefined {
-	const host = options.project.split("/")[0]!;
-	const authKey =
-		options.cacheAuthKey === undefined ? (resolveGitlabCacheAuthKey(host) ?? null) : options.cacheAuthKey;
-	if (authKey === null) return undefined;
-	const row = getRetainedGeneration<PrDiffPayload>(
-		options.project,
-		"mr-diff",
-		options.iid,
-		false,
-		options.fetchedAt,
-		authKey,
-		options.settings,
-	);
-	if (!row) return undefined;
-	return {
-		rendered: row.rendered,
-		sourceUrl: row.sourceUrl,
-		payload: { unified: row.rendered, files: row.payload.files },
-		status: "fresh",
-		fetchedAt: row.fetchedAt,
-	};
 }
 
 export interface MrDiffLookupOptions {

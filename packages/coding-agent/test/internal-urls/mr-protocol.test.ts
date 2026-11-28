@@ -9,7 +9,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { fetchPrReviewTarget } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/bundled/review";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { resetDefaultGitlabProjectMemoForTests } from "@oh-my-pi/pi-coding-agent/tools/glab-mr";
 import { resetForTests as resetCacheForTests } from "@oh-my-pi/pi-coding-agent/tools/github-cache";
@@ -114,54 +113,30 @@ describe("mr:// diff family", () => {
 		expect(textSpy).toHaveBeenCalledTimes(1);
 	});
 
-	it("refreshes changed MR refs and keeps a pinned diff offline", async () => {
+	it("refreshes the patch when the live refs change", async () => {
 		const project = "gitlab.example.com/acme/api";
 		let metadata = {
 			sha: "head-a",
 			diff_refs: { base_sha: "base-a", head_sha: "head-a", start_sha: "start-a" },
 		};
-		const apiSpy = vi.spyOn(gitlab, "json").mockImplementation(async (_cwd, args) => {
+		vi.spyOn(gitlab, "json").mockImplementation(async (_cwd, args) => {
 			if (args.join(" ") !== "api --hostname gitlab.example.com projects/acme%2Fapi/merge_requests/7") {
 				throw new Error(`Unexpected glab json call: ${args.join(" ")}`);
 			}
 			return metadata as never;
 		});
-		const textSpy = vi.spyOn(gitlab, "text").mockResolvedValue(diffText);
+		const textSpy = vi.spyOn(gitlab, "text").mockResolvedValueOnce(diffText).mockResolvedValueOnce(updatedDiffText);
 		const router = InternalUrlRouter.instance();
 		const liveUrl = `mr://${project}/7/diff`;
-		const selected = await fetchPrReviewTarget(tempDir, {
-			forge: "gitlab",
-			repo: project,
-			number: 7,
-			raw: liveUrl,
-			kind: "mr-url",
-		});
-
-		metadata = {
-			sha: "head-b",
-			diff_refs: { base_sha: "base-b", head_sha: "head-a", start_sha: "start-b" },
-		};
-		await expect(router.resolve(liveUrl)).rejects.toThrow(/MR diff is still being prepared/);
-		expect(textSpy).toHaveBeenCalledTimes(1);
+		await router.resolve(liveUrl);
 
 		metadata = {
 			sha: "head-b",
 			diff_refs: { base_sha: "base-b", head_sha: "head-b", start_sha: "start-b" },
 		};
-		textSpy.mockResolvedValue(updatedDiffText);
 		const updated = await router.resolve(liveUrl);
-		expect(updated.content).toContain("src/current.ts");
-		expect(textSpy).toHaveBeenCalledTimes(2);
 
-		const metadataCalls = apiSpy.mock.calls.length;
-		const pinnedList = await router.resolve(`${selected.prDiffUrl}${selected.prDiffQuery}`);
-		const sliceUrl = `${liveUrl}/2${selected.prDiffQuery}`;
-		const allUrl = `${liveUrl}/all${selected.prDiffQuery}`;
-		expect(pinnedList.content).toContain(sliceUrl);
-		expect(pinnedList.content).toContain(allUrl);
-		expect((await router.resolve(sliceUrl)).content).toBe(secondSection);
-		expect((await router.resolve(allUrl)).content).toBe(diffText);
-		expect(apiSpy).toHaveBeenCalledTimes(metadataCalls);
+		expect(updated.content).toContain("src/current.ts");
 		expect(textSpy).toHaveBeenCalledTimes(2);
 	});
 

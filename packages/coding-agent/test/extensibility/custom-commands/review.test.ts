@@ -97,9 +97,9 @@ describe("ReviewCommand", () => {
 	});
 
 	beforeEach(() => {
-		// Keep retained snapshots in these prompt tests off the developer cache.
+		// PR review cases call the real generation writer. Keep that off the
+		// developer cache; the one case that resolves pinned links restores it.
 		retainGeneration = spyOn(gh, "retainPrDiffGeneration").mockReturnValue(1);
-		spyOn(glab, "retainMrDiffGeneration").mockReturnValue(1);
 	});
 
 	afterEach(() => {
@@ -947,9 +947,9 @@ describe("ReviewCommand", () => {
 				hasUI: false,
 			} as unknown as HookCommandContext);
 
-			expect(result!).toContain("`mr://gitlab.com/acme/app/5/diff/1?at=1`");
-			expect(result!).toContain("`mr://gitlab.com/acme/app/5/diff/21?at=1`");
-			expect(result!).toContain("`mr://gitlab.com/acme/app/5/diff/all?at=1`");
+			expect(result!).toContain("`mr://gitlab.com/acme/app/5/diff/1`");
+			expect(result!).toContain("`mr://gitlab.com/acme/app/5/diff/21`");
+			expect(result!).toContain("mr://gitlab.com/acme/app/5/diff/all");
 		});
 	});
 

@@ -189,7 +189,7 @@ describe("github-cache db layer", () => {
 		expect(getCached("gitlab.com/g/p", "mr-diff", 1, false)?.rendered).toBe("mr-diff-body");
 	});
 
-	it("adds mr-diff generations without dropping existing PR pins", () => {
+	it("adds revision to a v5 live cache without changing existing cache rows or PR pins", () => {
 		const legacy = new Database(process.env.OMP_GITHUB_CACHE_DB!);
 		legacy.run(`
 			CREATE TABLE github_view_cache (
@@ -207,6 +207,10 @@ describe("github-cache db layer", () => {
 				payload TEXT NOT NULL, rendered TEXT NOT NULL, source_url TEXT,
 				PRIMARY KEY (auth_key, repo, kind, number, include_comments, fetched_at)
 			);
+			INSERT INTO github_view_cache VALUES (
+				'test-auth', 'owner/example', 'pr-diff', 321, 0, 12345,
+				'{"files":[]}', 'live-pr-diff', NULL
+			);
 			INSERT INTO github_view_cache_generation VALUES (
 				'test-auth', 'owner/example', 'pr-diff', 321, 0, 12345, 12346,
 				'{"files":[]}', 'pinned-pr-diff', NULL
@@ -216,21 +220,12 @@ describe("github-cache db layer", () => {
 		legacy.close();
 		resetCacheForTests();
 
+		const live = getCached(TEST_REPO, "pr-diff", 321, false, TEST_AUTH_KEY);
+		expect(live?.rendered).toBe("live-pr-diff");
+		expect(live?.fetchedAt).toBe(12345);
+		expect(live?.revision).toBeUndefined();
 		expect(getCachedGeneration(TEST_REPO, "pr-diff", 321, false, 12345, TEST_AUTH_KEY)?.rendered).toBe(
 			"pinned-pr-diff",
-		);
-		const mrFetchedAt = retainCachedGeneration({
-			authKey: TEST_AUTH_KEY,
-			repo: TEST_REPO,
-			kind: "mr-diff",
-			number: 321,
-			includeComments: false,
-			payload: { files: [] },
-			rendered: "mr-diff",
-		});
-		expect(mrFetchedAt).not.toBeNull();
-		expect(getCachedGeneration(TEST_REPO, "mr-diff", 321, false, mrFetchedAt!, TEST_AUTH_KEY)?.rendered).toBe(
-			"mr-diff",
 		);
 	});
 

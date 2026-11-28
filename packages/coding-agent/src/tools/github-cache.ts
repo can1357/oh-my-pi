@@ -118,8 +118,6 @@ export function openDb(): Database | null {
 			PRAGMA synchronous=NORMAL;
 		`);
 		// Pre-v5 live rows used an obsolete kind constraint and are regenerable.
-		// Pinned generations are not: keep those rows while upgrading their
-		// constraint below so existing PR review URLs remain valid.
 		const userVersion = (db.query("PRAGMA user_version").get() as { user_version?: number } | undefined)
 			?.user_version;
 		if (userVersion !== undefined && userVersion < 5) {
@@ -139,6 +137,19 @@ export function openDb(): Database | null {
 				revision         TEXT,
 				PRIMARY KEY (auth_key, repo, kind, number, include_comments)
 			);
+			CREATE TABLE IF NOT EXISTS github_view_cache_generation (
+				auth_key        TEXT    NOT NULL,
+				repo             TEXT    NOT NULL,
+				kind             TEXT    NOT NULL CHECK (kind IN ('issue','pr','pr-diff')),
+				number           INTEGER NOT NULL,
+				include_comments INTEGER NOT NULL,
+				fetched_at       INTEGER NOT NULL,
+				retained_at      INTEGER NOT NULL,
+				payload          TEXT    NOT NULL,
+				rendered         TEXT    NOT NULL,
+				source_url       TEXT,
+				PRIMARY KEY (auth_key, repo, kind, number, include_comments, fetched_at)
+			);
 			CREATE TABLE IF NOT EXISTS github_forge_index (
 				auth_key   TEXT    NOT NULL,
 				repo       TEXT    NOT NULL,
@@ -156,36 +167,6 @@ export function openDb(): Database | null {
 			const viewColumns = db.query("PRAGMA table_info(github_view_cache)").all() as { name: string }[];
 			if (!viewColumns.some(column => column.name === "revision")) {
 				db.run("ALTER TABLE github_view_cache ADD COLUMN revision TEXT");
-			}
-			const generationSchema = db
-				.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?")
-				.get("github_view_cache_generation") as { sql: string | null } | undefined;
-			const needsGenerationMigration = !!generationSchema?.sql && !generationSchema.sql.includes("'mr-diff'");
-			if (needsGenerationMigration) {
-				db.run("ALTER TABLE github_view_cache_generation RENAME TO github_view_cache_generation_legacy");
-			}
-			db.run(`
-				CREATE TABLE IF NOT EXISTS github_view_cache_generation (
-					auth_key        TEXT    NOT NULL,
-					repo             TEXT    NOT NULL,
-					kind             TEXT    NOT NULL CHECK (kind IN ('issue','pr','pr-diff','mr-diff')),
-					number           INTEGER NOT NULL,
-					include_comments INTEGER NOT NULL,
-					fetched_at       INTEGER NOT NULL,
-					retained_at      INTEGER NOT NULL,
-					payload          TEXT    NOT NULL,
-					rendered         TEXT    NOT NULL,
-					source_url       TEXT,
-					PRIMARY KEY (auth_key, repo, kind, number, include_comments, fetched_at)
-				)
-			`);
-			if (needsGenerationMigration) {
-				db.run(`
-					INSERT INTO github_view_cache_generation
-					SELECT auth_key, repo, kind, number, include_comments, fetched_at, retained_at, payload, rendered, source_url
-					FROM github_view_cache_generation_legacy
-				`);
-				db.run("DROP TABLE github_view_cache_generation_legacy");
 			}
 		}).immediate();
 		db.run(`
