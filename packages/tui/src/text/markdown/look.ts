@@ -11,8 +11,8 @@ export interface MarkdownLook {
 	readonly colorful: boolean;
 	readonly mermaid: boolean;
 	readonly linkUrls: boolean;
-	/** Draw code fences as dashed hairlines instead of literal ``` rows. */
-	readonly codeFrame: boolean;
+	/** Draw code blocks (fenced and indented) as dashed hairlines instead of literal ``` rows (default off). */
+	readonly codeFrame?: boolean;
 }
 
 const look = signal<MarkdownLook>({ colorful: true, mermaid: true, linkUrls: true, codeFrame: false });
@@ -29,7 +29,7 @@ export function setMarkdownLook(next: MarkdownLook): void {
 		current.colorful !== next.colorful ||
 		current.mermaid !== next.mermaid ||
 		current.linkUrls !== next.linkUrls ||
-		current.codeFrame !== next.codeFrame
+		(current.codeFrame ?? false) !== (next.codeFrame ?? false)
 	)
 		look.set(next);
 }

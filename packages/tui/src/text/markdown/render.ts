@@ -16,6 +16,7 @@ import { highlightCode, supportsLanguage } from "../highlight";
 import { latexToUnicode } from "../latex";
 import { latexToBlock } from "../latex-block";
 import { textSized } from "../osc";
+import { flattenLine, stripControl } from "../sanitize";
 import { tokens as ansiTokens } from "../ansi";
 import { pieces, spaces, truncate, visibleWidth, wrap } from "../width";
 import { FORMATTING_TAGS, type InlineContext, type InlineEnvironment, PLAIN_CONTEXT, renderInline } from "./inline";
@@ -87,10 +88,10 @@ export interface MarkdownOptions {
 	 */
 	readonly codeIndent?: number;
 	/**
-	 * Draw code fences as a dashed hairline carrying the language above the code
-	 * and a bare one below, in place of the literal ``` rows (default: the host's
-	 * {@link markdownLook}). Body rows are drawn as without it, so copying them
-	 * still yields the code.
+	 * Draw code blocks, fenced and indented, as a dashed hairline carrying the
+	 * language above the code and a bare one below, in place of the literal ```
+	 * rows (default: the host's {@link markdownLook}). The frame adds no
+	 * characters to the body rows, so copying them yields the same text.
 	 */
 	readonly codeFrame?: boolean;
 }
@@ -343,14 +344,17 @@ function fenceLanguage(token: Tokens.Code): string | undefined {
 
 /**
  * A code frame's dashed hairline, `width` cells wide: with a `lang` it carries
- * the language (`╌╌ lang ╌╌╌╌`), cut to fit; without one it is bare.
+ * the language (`╌╌ lang ╌╌╌╌`), cut to fit; without one it is bare. The label is
+ * display text only: escapes and controls in an info string are dropped, since
+ * JS width and native truncation disagree on spans such as an out-of-range OSC 66 scale.
  */
 function frameBar(theme: Theme, width: number, lang?: string): string {
 	const dash = ruleChar(theme, "╌");
+	const text = lang === undefined ? "" : flattenLine(stripControl(lang));
 	// Two dashes and a space before the label, a space and at least one dash after it.
 	const room = width - 5;
-	if (!lang || room < 1) return dash.repeat(width);
-	const label = truncate(lang, room, "…");
+	if (!text || room < 1) return dash.repeat(width);
+	const label = truncate(text, room, "…");
 	return `${dash.repeat(2)} ${label} ${dash.repeat(width - 4 - visibleWidth(label))}`;
 }
 

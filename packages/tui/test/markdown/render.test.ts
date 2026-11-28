@@ -240,7 +240,7 @@ describe("code fences", () => {
 			expect(plain("```ts\nconst a = 1;\n```", 20)).toEqual(["```ts", "  const a = 1;", "```"]);
 		});
 
-		it("keeps literal bodies at column zero, so the code rows copy byte-exact", () => {
+		it("keeps literal bodies at column zero, so the frame adds no characters to the code rows", () => {
 			const rows = plain("```sh\ncat <<'EOF'\nEOF\n```", 20, { ...frame, paddingX: 1, codeIndent: 0 });
 			expect(rows[0]).toBe(`╌╌ sh ${"╌".repeat(14)}`);
 			expect(rows.slice(1, 3)).toEqual(["cat <<'EOF'", "EOF"]);
@@ -254,6 +254,25 @@ describe("code fences", () => {
 			expect(long[0]!.includes("…")).toBe(true);
 			expect(plain("```ts\nx\n```", 5, frame)).toEqual(["╌".repeat(5), "  x", "╌".repeat(5)]);
 			expect(plain("```\nx\n```", 4, frame)).toEqual(["╌╌╌╌", "  x", "╌╌╌╌"]);
+		});
+
+		it("measures the label as plain text, so an escape in the info string cannot overflow the hairline", () => {
+			// JS width honours any OSC 66 scale while native truncation accepts only 1-7, so the span measured
+			// wider than it was cut to and the fill count went negative.
+			const raw = renderMarkdown("```\x1b]66;s=99;ab\x07\ncode\n```", 20, { theme, ...frame });
+			// `plain()` strips escapes, so the raw first row is what shows whether one survived.
+			expect(raw[0]!.includes("\x1b]66;")).toBe(false);
+			const rows = plainRows(raw);
+			expect(visibleWidth(rows[0]!)).toBe(20);
+			expect(rows.at(-1)).toBe("╌".repeat(20));
+		});
+
+		it("frames indented code blocks like fences, since the renderer draws both the same way", () => {
+			const source = "Intro.\n\n    const a = 1;\n";
+			expect(plain(source, 20).filter(row => row === "```")).toHaveLength(2);
+			const rows = plain(source, 20, frame);
+			expect(rows.filter(row => row === "╌".repeat(20))).toHaveLength(2);
+			expect(rows.some(row => row.includes("```"))).toBe(false);
 		});
 
 		it("draws plain dashes under the ascii symbol preset", () => {
@@ -413,15 +432,15 @@ describe("inline", () => {
 });
 
 describe("host look", () => {
-	afterEach(() => setMarkdownLook({ colorful: true, mermaid: true, linkUrls: true, codeFrame: false }));
+	afterEach(() => setMarkdownLook({ colorful: true, mermaid: true, linkUrls: true }));
 
 	it("renders with the host's linkUrls when the caller leaves it unset", () => {
-		setMarkdownLook({ colorful: true, mermaid: true, linkUrls: false, codeFrame: false });
+		setMarkdownLook({ colorful: true, mermaid: true, linkUrls: false });
 		expect(plain("[docs](https://e.com/d)", 80, { hyperlinks: true })).toEqual(["docs"]);
 	});
 
 	it("lets an explicit linkUrls win over the host look", () => {
-		setMarkdownLook({ colorful: true, mermaid: true, linkUrls: false, codeFrame: false });
+		setMarkdownLook({ colorful: true, mermaid: true, linkUrls: false });
 		expect(plain("[docs](https://e.com/d)", 80, { hyperlinks: true, linkUrls: true })).toEqual([
 			"docs (https://e.com/d)",
 		]);
