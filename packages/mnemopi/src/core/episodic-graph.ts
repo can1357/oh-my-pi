@@ -165,6 +165,32 @@ function unique(values: Iterable<string>, limit = Number.MAX_SAFE_INTEGER): stri
 	return out;
 }
 
+/** A capitalized word or two-word name in any cased script; see {@link extractProperNouns}. */
+const PROPER_NOUN = /(?<![\p{L}\p{N}_])(\p{Lu}\p{Ll}+(?:\s+\p{Lu}\p{Ll}+)?)(?![\p{L}\p{N}_])/gu;
+/**
+ * Markers that may come before a sentence opener on its line: whitespace (never a line break), markdown and
+ * list markers, `1.` or `1)`, and a `[role: …]` tag. Anchored, so it reads only the run at the line start.
+ */
+const SENTENCE_MARKERS = /^(?:[^\S\n]|[#>*+_-]|\d+[.)]|\[[^\]\n]*\])*/;
+/** Sentence ends: the last non-space character before a sentence opener. */
+const SENTENCE_END = ".!?:;";
+
+/** Where the sentence markers that start the line at `lineStart` end. */
+function markerRunEnd(text: string, lineStart: number): number {
+	return lineStart + (SENTENCE_MARKERS.exec(text.slice(lineStart))?.[0].length ?? 0);
+}
+
+/**
+ * Whether the match at `index` opens a sentence on its line. Only markers come before it exactly when it starts
+ * where the marker run ends: a capital letter is no marker unless it sits inside a `[…]` tag, and a match
+ * inside a tag is before the run's end. `markerEnd` is read once per line, so the cost stays linear.
+ */
+function opensSentence(text: string, lineStart: number, markerEnd: number, index: number): boolean {
+	if (index === markerEnd) return true;
+	const last = text.slice(lineStart, index).trimEnd().at(-1);
+	return last !== undefined && SENTENCE_END.includes(last);
+}
+
 /**
  * Capitalized proper nouns of at most two words, in any cased script (Latin, Greek,
  * Cyrillic, Vietnamese, …), deduplicated case-insensitively. Gist participants are
@@ -174,12 +200,7 @@ function unique(values: Iterable<string>, limit = Number.MAX_SAFE_INTEGER): stri
  * and ASCII `\b`, which matched no non-English name (issues #7918, #16723).
  */
 export function extractProperNouns(text: string): string[] {
-	return unique(
-		Array.from(
-			text.matchAll(/(?<![\p{L}\p{N}_])(\p{Lu}\p{Ll}+(?:\s+\p{Lu}\p{Ll}+)?)(?![\p{L}\p{N}_])/gu),
-			match => match[1] ?? "",
-		),
-	);
+	return unique(Array.from(text.matchAll(PROPER_NOUN), match => match[1] ?? ""));
 }
 
 function parseJsonStringArray(value: string | null): string[] {
@@ -646,7 +667,33 @@ export class EpisodicGraph {
 			content.matchAll(/(?<![\p{L}\p{N}_])(I|you|we|they|he|she|it|me|us|them|him|her)(?![\p{L}\p{N}_])/giu),
 			match => match[1] ?? "",
 		);
-		return unique([...extractProperNouns(content), ...pronouns], 5);
+		// Sentence openers (`The`, `It`) are capitalized too, so text order alone lets them fill the cap
+		// before a name used later. A name used mid-sentence anywhere goes first; text order holds in each group.
+		// Matches come in ascending order, so each line's marker run is read once, when the line is reached:
+		// searching back from every match would rescan a long line for each capitalized word.
+		let lineStart = 0;
+		let markerEnd = markerRunEnd(content, 0);
+		let nextNewline = content.indexOf("\n");
+		const names = Array.from(content.matchAll(PROPER_NOUN), match => {
+			const index = match.index ?? 0;
+			while (nextNewline !== -1 && nextNewline < index) {
+				lineStart = nextNewline + 1;
+				markerEnd = markerRunEnd(content, lineStart);
+				nextNewline = content.indexOf("\n", lineStart);
+			}
+			const name = match[1] ?? "";
+			return {
+				name,
+				key: name.toLocaleLowerCase(),
+				midSentence: !opensSentence(content, lineStart, markerEnd, index),
+			};
+		});
+		const midSentenceKeys = new Set(names.filter(n => n.midSentence).map(n => n.key));
+		const ranked = [
+			...names.filter(n => midSentenceKeys.has(n.key)),
+			...names.filter(n => !midSentenceKeys.has(n.key)),
+		].map(n => n.name);
+		return unique([...ranked, ...pronouns], 5);
 	}
 
 	private extractTemporalScope(content: string): string | null {

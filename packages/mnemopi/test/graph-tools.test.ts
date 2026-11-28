@@ -135,7 +135,21 @@ describe("EpisodicGraph non-Latin participants", () => {
 	it("does not read the trailing letter of a non-ASCII word as the pronoun I (issue #16723)", () => {
 		withGraph(graph => {
 			expect(graph.extractGist("tôi đã sửa rồi, đi tiếp đi", "mem_vi").participants).toEqual([]);
-			expect(graph.extractGist("Chúng tôi gặp nhau ở Hà Nội.", "mem_hn").participants).toEqual(["Chúng", "Hà Nội"]);
+			expect(graph.extractGist("Chúng tôi gặp nhau ở Hà Nội.", "mem_hn").participants).toEqual(["Hà Nội", "Chúng"]);
+		});
+	});
+});
+
+describe("EpisodicGraph gist participants", () => {
+	it("keeps a name used mid-sentence when sentence openers would fill the cap (issue #16725)", () => {
+		withGraph(graph => {
+			const gist = graph.extractGist(
+				"The build is green. It passed on CI. To verify, run tests. We shipped it. Got it. Alice reviewed the patch with Bob.",
+				"mem_openers",
+			);
+			expect(gist.participants).toContain("Bob");
+			graph.storeGist(gist, "mem_openers");
+			expect(graph.findGistsByParticipant("Bob")).toHaveLength(1);
 		});
 	});
 });

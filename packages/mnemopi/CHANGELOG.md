@@ -11,6 +11,10 @@
 - Fixed local embedding rebuilds repeatedly timing out on large memory backlogs by splitting local requests into smaller batches ([#18559](https://github.com/can1357/oh-my-pi/issues/18559))
 - Fixed working memory growing past its configured limit and keeping expired memories in some recovered memory databases ([#20808](https://github.com/can1357/oh-my-pi/pull/20808) by [@sjawhar](https://github.com/sjawhar))
 
+### Fixed
+
+- Fixed gist participants leaving out names used mid-sentence when sentence openers like `The` or `It` filled the five slots first ([#16725](https://github.com/can1357/oh-my-pi/issues/16725), [#19979](https://github.com/can1357/oh-my-pi/pull/19979) by [@JamieJ5926](https://github.com/JamieJ5926))
+
 ## [19.1.0] - 2026-11-21
 
 ### Fixed
