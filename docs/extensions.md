@@ -1068,7 +1068,8 @@ Current no-op methods in this controller:
 - `setHeader`
 
 `ctx.ui.composer` holds the [composer hooks](#composer-hooks): key handlers,
-decorations, a submit transform and the shape. They replace the removed
+decorations, a submit transform, the shape, state observation (`observe`),
+text insertion, and word-completion sources. They replace the removed
 `setEditorComponent`/`getEditorComponent`.
 `setWidget` shows a widget above or below the editor (`placement: "aboveEditor" |
 "belowEditor"`): string arrays show up to 10 content lines plus a truncation notice;
@@ -1408,7 +1409,7 @@ The built-in shapes in `packages/coding-agent/src/ui/styles/composer/shapes.ts` 
 pi.on("session_start", (_event, ctx) => {
 	const composer = ctx.ui.composer;
 	if (!composer) return;
-	// Keys reach handlers before the composer's own bindings; true takes the key.
+	// Keys reach extension handlers before app shortcuts and draft bindings; true takes the key.
 	composer.addKeyHandler(key => {
 		if (key.id !== "ctrl+u") return false;
 		ctx.ui.setEditorText("");
@@ -1426,6 +1427,19 @@ pi.on("session_start", (_event, ctx) => {
 ```
 
 `addKeyHandler` and `addDecorator` return their removal. There is one submit transform: setting it replaces the previous one, `undefined` removes it.
+
+`observe(listener)` calls the listener immediately with a point-in-time snapshot (`ExtensionComposerSnapshot`) and again whenever a field of it changes; it returns the observation's removal:
+
+```ts
+const remove = composer.observe(state => {
+	// state.text: the collapsed draft (chips as their labels); state.cursor: the UTF-16 caret.
+	// state.focused, state.completing (popup open), state.vimMode (null without Vim),
+	// state.inlineHint (the ghost the host shows that is not a word completion), and
+	// state.protectedTokens (the draft's chip labels, in occurrence order).
+});
+```
+
+`insertText(text)` inserts text at the caret, replacing the selection. `addWordCompletionProvider(provider)` adds a prose word-completion source: while it is active, its ghost text replaces the native spelling's; removing the returned handle restores the source below. The provider answers `getWordCompletion(lines, line, col)` (the rest of the word ending at the caret) and hears `wordCompletionFeedback(lines, line, col, suggestion, accepted)` when the user accepts or types past a shown suggestion. The host owns the provider's revision: `handle.invalidate()` re-queries it.
 
 ## Custom message renderer
 

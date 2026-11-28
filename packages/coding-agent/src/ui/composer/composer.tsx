@@ -21,13 +21,17 @@
  * composer's own bindings), {@link Composer.addPasteHandler} (consulted
  * before a paste is typed or collapsed), {@link Composer.addDecorator}
  * (styled ranges over the draft), {@link Composer.setSubmitTransform}
- * (rewrite or cancel what is sent) and the shape ({@link Composer.setShape};
- * shapes are registered with `registerComposerShape`).
+ * (rewrite or cancel what is sent), the shape ({@link Composer.setShape};
+ * shapes are registered with `registerComposerShape`),
+ * {@link Composer.observe} (a reactive snapshot of the draft state) and
+ * {@link Composer.addWordCompletionProvider} (an extension's prose word
+ * completion above the app's).
  */
 import {
 	type Accessor,
 	batch,
 	computed,
+	createRoot,
 	type JSXNode,
 	type KeyEvent,
 	type PasteEvent,
@@ -241,6 +245,53 @@ export interface ComposerWordCompletion {
 	): void;
 }
 
+/**
+ * A point-in-time snapshot of the composer for an extension (see {@link Composer.observe}).
+ * `text` is the collapsed draft — chips stand as their labels; `cursor` is a UTF-16 offset
+ * into it. `protectedTokens` lists the draft's chip labels in occurrence order, so an
+ * extension rewriting the draft can keep them verbatim.
+ */
+export interface ComposerSnapshot {
+	/** The collapsed draft text. */
+	readonly text: string;
+	/** The caret, a UTF-16 offset into {@link text}. */
+	readonly cursor: number;
+	/** Whether the field has focus (supplied by the host; the composer itself does not track it). */
+	readonly focused: boolean;
+	/** Whether the completion popup is open. */
+	readonly completing: boolean;
+	/** The Vim mode, or null without Vim. */
+	readonly vimMode: string | null;
+	/** The inline hint shown at the caret's line end, if any; never a word completion. */
+	readonly inlineHint: string | null;
+	/** The labels of the draft's chips (only those present in the draft), in occurrence order. */
+	readonly protectedTokens: readonly string[];
+}
+
+/**
+ * A prose word-completion source an extension adds with {@link Composer.addWordCompletionProvider}:
+ * the rest of the word ending at the caret shows as ghost text when the caret ends its line; Tab
+ * inserts it and a space, Right just the word. The host owns the provider's revision.
+ */
+export interface ComposerWordCompletionProvider {
+	getWordCompletion(lines: readonly string[], line: number, col: number): string | null;
+	wordCompletionFeedback(
+		lines: readonly string[],
+		line: number,
+		col: number,
+		suggestion: string,
+		accepted: boolean,
+	): void;
+}
+
+/** A word-completion source added with {@link Composer.addWordCompletionProvider}. */
+export interface ComposerWordCompletionHandle {
+	/** Re-query the provider now (an answer the composer could not observe changed). */
+	invalidate(): void;
+	/** Remove the provider; the source below it (native spelling or an earlier extension) resumes. */
+	dispose(): void;
+}
+
 /** `[Image #N…]` / `[Video #N…]` reference markers in submitted text (with a legacy ` attachment://N` after them). */
 const VISION_MARKER = /\[(Image|Video) #([1-9]\d*)((?:,[^\]\n]*)?)\](?: attachment:\/\/\2(?!\d))?/g;
 
@@ -421,10 +472,14 @@ export class Composer {
 	onUpFromTop: (() => boolean) | undefined;
 	#atomizer: TokenAtomizer | undefined;
 	#autocomplete: AutocompleteProvider | undefined;
+	readonly #autocompleteRevision = signal(0);
 	readonly #actionHandlers: ComposerActionHandler[] = [];
 	#spaceHold: SpaceHoldGesture | undefined;
 	readonly #predictions = signal<ComposerPredictions | undefined>(undefined);
+	/** The app's prose word-completion engine (`spelling.autocomplete`); `undefined`: none. */
 	readonly #words = signal<ComposerWordCompletion | undefined>(undefined);
+	/** Extension word-completion sources stacked above the app's; the last one's ghost shows. */
+	readonly #extensionWords = signal<readonly ComposerWordCompletion[]>([]);
 	/** The draft a prediction insert produced: equal to one of several, Tab lists them instead. */
 	#insertedPrediction: string | undefined;
 	/** The open popup lists predictions (accepting replaces the whole draft). */
@@ -758,6 +813,7 @@ export class Composer {
 	/** The completion source (extensions stack theirs through the app); `undefined` turns completion off. */
 	setAutocomplete(provider: AutocompleteProvider | undefined): void {
 		this.#autocomplete = provider;
+		this.#autocompleteRevision.set(this.#autocompleteRevision.peek() + 1);
 		this.#closeCompletion();
 		// The startup composer can already contain a token when the live providers arrive.
 		if (provider && this.#text() && (!this.#vim || this.#vim.mode() === "insert")) this.#afterEdit("", false);
@@ -926,9 +982,74 @@ export class Composer {
 		this.#words.set(source);
 	}
 
+	/** The source answering word completion now: the newest extension's, then the app's. */
+	#activeWordSource(): ComposerWordCompletion | undefined {
+		return this.#extensionWords().at(-1) ?? this.#words();
+	}
+
+	/**
+	 * Add an extension's prose word-completion source above the app's: while it is active its
+	 * ghost text replaces the native spelling's, and removing it restores the source below (the
+	 * native spelling, or an earlier extension). The host owns the provider's revision —
+	 * {@link ComposerWordCompletionHandle.invalidate} re-queries it.
+	 */
+	addWordCompletionProvider(provider: ComposerWordCompletionProvider): ComposerWordCompletionHandle {
+		const revision = signal(0);
+		const source: ComposerWordCompletion = {
+			revision: () => revision(),
+			getWordCompletion: (lines, line, col) => provider.getWordCompletion(lines, line, col),
+			wordCompletionFeedback: (lines, line, col, suggestion, accepted) =>
+				provider.wordCompletionFeedback(lines, line, col, suggestion, accepted),
+		};
+		this.#extensionWords.set([...this.#extensionWords.peek(), source]);
+		let active = true;
+		return {
+			invalidate: () => {
+				if (active) revision.set(revision.peek() + 1);
+			},
+			dispose: () => {
+				if (!active) return;
+				active = false;
+				this.#extensionWords.set(this.#extensionWords.peek().filter(s => s !== source));
+			},
+		};
+	}
+
+	/**
+	 * Observe a point-in-time snapshot of the composer ({@link ComposerSnapshot}). The listener
+	 * runs immediately, untracked, and again whenever a state it reads changes. `focused` is a
+	 * reactive accessor supplying whether the field has focus (the composer itself does not track
+	 * focus; the app passes `() => shell.focused() === this.field`). Returns the observation's
+	 * removal.
+	 */
+	observe(listener: (state: ComposerSnapshot) => void, focused: () => boolean = () => false): () => void {
+		return createRoot(dispose => {
+			effect(() => {
+				const protectedTokens: string[] = [];
+				let covered = -1;
+				for (const { from, to, atom } of atomRanges(this.#text(), this.#atoms())) {
+					if (from < covered) continue;
+					protectedTokens.push(atom.label);
+					covered = to;
+				}
+				const state: ComposerSnapshot = {
+					text: this.#text(),
+					cursor: this.#cursor(),
+					focused: focused(),
+					completing: this.completing(),
+					vimMode: this.vimMode(),
+					inlineHint: this.#inlineHint() ?? null,
+					protectedTokens,
+				};
+				untrack(() => listener(state));
+			});
+			return dispose;
+		});
+	}
+
 	/** The word completion shown as ghost text at the end of the caret's line (never over a prediction). */
 	readonly #shownWord = computed((): string | undefined => {
-		const source = this.#words();
+		const source = this.#activeWordSource();
 		if (!source || this.#completion() !== null || this.#shownPrediction()) return undefined;
 		source.revision();
 		const at = this.#wordQuery();
@@ -952,17 +1073,18 @@ export class Composer {
 		const word = this.#shownWord();
 		const at = word && this.#wordQuery();
 		if (!word || !at) return false;
-		this.#words.peek()?.wordCompletionFeedback(at.lines, at.line, at.col, word, true);
+		this.#activeWordSource()?.wordCompletionFeedback(at.lines, at.line, at.col, word, true);
 		this.#insert(space ? `${word} ` : word);
 		return true;
 	}
 
 	/**
-	 * The dim ghost at the end of the caret's line, first that applies: the selected completion's
-	 * hint; the shown prediction; over a draft equal to one of several predictions, how many more
-	 * Tab lists; the provider's argument hint; the word completion.
+	 * The dim ghost at the end of the caret's line before word completion, first that applies:
+	 * the selected completion's hint; the shown prediction; over a draft equal to one of several
+	 * predictions, how many more Tab lists; the provider's argument hint.
 	 */
-	readonly #ghost = computed((): string | undefined => {
+	readonly #inlineHint = computed((): string | undefined => {
+		this.#autocompleteRevision();
 		const at = this.#wordQuery();
 		if (!at) return undefined;
 		const open = this.#completion();
@@ -977,7 +1099,15 @@ export class Composer {
 		}
 		const provider = this.#autocomplete;
 		const hint = provider?.getInlineHint && untrack(() => provider.getInlineHint!(at.lines, at.line, at.col));
-		return hint || this.#shownWord();
+		return hint ?? undefined;
+	});
+
+	/**
+	 * The dim ghost at the end of the caret's line: the inline hint ({@link #inlineHint}), or the
+	 * shown word completion.
+	 */
+	readonly #ghost = computed((): string | undefined => {
+		return this.#inlineHint() || this.#shownWord();
 	});
 
 	/** Whether Escape is Vim's (leave Insert/Visual mode, cancel a half-typed command) rather than the app's. */
@@ -1932,9 +2062,10 @@ export class Composer {
 
 	// ─── Extension hooks ────────────────────────────────────────────────────
 
-	/** Consult `handler` for every key before the composer's bindings; returns its removal. */
-	addKeyHandler(handler: ComposerKeyHandler): () => void {
-		this.#keyHandlers.push(handler);
+	/** Consult `handler` before draft bindings; `prepend` also puts it before app shortcut handlers. */
+	addKeyHandler(handler: ComposerKeyHandler, options?: { prepend?: boolean }): () => void {
+		if (options?.prepend) this.#keyHandlers.unshift(handler);
+		else this.#keyHandlers.push(handler);
 		return () => {
 			const at = this.#keyHandlers.indexOf(handler);
 			if (at !== -1) this.#keyHandlers.splice(at, 1);

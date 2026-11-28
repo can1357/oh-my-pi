@@ -82,10 +82,17 @@ import type { AutocompleteItem, AutocompleteProvider } from "../../autocomplete/
 import type { KeyId } from "../../config/keybindings/key-id";
 import type { logger as PiLogger } from "@oh-my-pi/pi-utils";
 import type { KeybindingsManager } from "../../config/keybindings/keybindings";
-import type { ComposerDecorator, SubmitTransform } from "../../ui/composer/composer";
+import type {
+	ComposerDecorator,
+	ComposerSnapshot as ExtensionComposerSnapshot,
+	ComposerWordCompletionHandle as ExtensionWordCompletionHandle,
+	ComposerWordCompletionProvider as ExtensionWordCompletionProvider,
+	SubmitTransform,
+} from "../../ui/composer/composer";
 import type { ComposerShape } from "../../ui/styles/composer/shapes";
 import type { CodeReviewAnnotation, TextReviewAnnotation } from "../custom-commands/bundled/annotate/annotation-types";
 export type { ComposerDecoration, ComposerDecorator, SubmitTransform } from "../../ui/composer/composer";
+export type { ExtensionComposerSnapshot, ExtensionWordCompletionHandle, ExtensionWordCompletionProvider };
 export type {
 	ComposerChromeContext,
 	ComposerRowContext,
@@ -341,6 +348,18 @@ export interface ExtensionComposerHooks {
 	 * `undefined` restores the user's configured shape.
 	 */
 	setShape(id: string | undefined, paddingX?: number): void;
+	/**
+	 * Observe a point-in-time snapshot of the composer (see {@link ExtensionComposerSnapshot}): the
+	 * listener runs immediately and again on every change of the state it reads. Returns its removal.
+	 */
+	observe(listener: (state: ExtensionComposerSnapshot) => void): () => void;
+	/** Insert `text` at the caret, replacing the selection (no paste collapse). */
+	insertText(text: string): void;
+	/**
+	 * Add a prose word-completion source whose ghost text replaces the native spelling's while it
+	 * is active; removing the returned handle restores the source below.
+	 */
+	addWordCompletionProvider(provider: ExtensionWordCompletionProvider): ExtensionWordCompletionHandle;
 }
 
 /** Wrap the current autocomplete provider with additional behavior (pi-compatible). */

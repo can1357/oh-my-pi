@@ -280,13 +280,16 @@ export class ExtensionUiController {
 				this.showCollabAwareEditor(title, prefill, dialogOptions, editorOptions),
 			addAutocompleteProvider: factory => this.ctx.addAutocompleteProvider(factory),
 			composer: {
-				addKeyHandler: handler => this.ctx.composer.addKeyHandler(key => handler(key)),
+				addKeyHandler: handler => this.ctx.composer.addKeyHandler(key => handler(key), { prepend: true }),
 				addDecorator: decorator => this.ctx.composer.addDecorator(decorator),
 				setSubmitTransform: transform => this.ctx.composer.setSubmitTransform(transform),
 				setShape: (id, paddingX) => {
 					if (id === undefined) this.ctx.syncComposerShape();
 					else this.ctx.composer.setShape(id, paddingX);
 				},
+				observe: listener => this.ctx.composer.observe(listener, () => this.#composerFocused()),
+				insertText: text => this.ctx.composer.insertText(text),
+				addWordCompletionProvider: provider => this.ctx.composer.addWordCompletionProvider(provider),
 			},
 			get theme() {
 				return extensionTheme(currentTheme());
