@@ -138,6 +138,7 @@
 - In fullscreen mode, the terminal can select and copy text in `/session` info, the background jobs sheet, and command reports (`/context`, `/changelog`, `/tools`, …), which there always open as a full-screen page instead of above the editor.
 - Scrolling a long command report (`/tools`, `/changelog`, …) past its end no longer stalls the next upward scroll.
 - Misspelled words in the prompt editor are marked with a red curly underline again in kitty, Ghostty, WezTerm and iTerm2, instead of a plain underline.
+- Restored provider logos in `/login` and `/logout` and made `/model` searchable by the name shown for a connected account.
 - `/tan` forks reuse the parent session's prompt cache: their first request no longer re-sends the whole conversation uncached, and Claude and GPT-6.2 keep the parent's earlier reasoning instead of dropping it.
 - `/resume` into a session without subagents no longer keeps showing the previous session's subagents above the composer
 - Fixed stealth injection registry to preserve native function source strings across frames

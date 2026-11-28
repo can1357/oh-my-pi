@@ -1,7 +1,9 @@
-import { describe, expect, setSystemTime, test } from "bun:test";
+import { describe, expect, setSystemTime, spyOn, test } from "bun:test";
 import { Agent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import * as authRules from "@oh-my-pi/pi-catalog/compat/auth";
+import * as catalog from "@oh-my-pi/pi-catalog/compat/providers";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import {
 	createModelMentionSource,
@@ -29,7 +31,7 @@ import { mountLayer } from "./helpers/layer-terminal";
 
 /** Optional presentation metadata a catalog or discovery source may attach. */
 type NativeMetadata = Pick<Model, "description" | "isNew" | "isBeta" | "isRecommended" | "int" | "tps"> &
-	Partial<Pick<Model, "cost" | "kind" | "pricingStatus">>;
+	Partial<Pick<Model, "cost" | "kind" | "name" | "pricingStatus">>;
 
 function makeModel(provider: string, id: string, metadata?: NativeMetadata): Model {
 	return buildModel({
@@ -225,6 +227,41 @@ describe("createModelMentionSource", () => {
 });
 
 describe("ModelBrowser search ranking", () => {
+	test("the picker uses an opted-in display name without changing the model selector", () => {
+		const id = "example-v4";
+		const model = makeModel("example", id, { name: "Example Four" });
+		const provider = spyOn(catalog, "providerEntry").mockImplementation(key =>
+			key === model.provider ? { id: model.provider, defaultModel: id, useModelNamesInPicker: true } : undefined,
+		);
+		try {
+			const browser = makeBrowser([model], []);
+			const item = browser.selected()!;
+			expect(item.selector).toBe(`example/${id}`);
+			const row = firstRow(browser, 120);
+			expect(row).toContain(model.name);
+			expect(row).not.toContain(model.id);
+		} finally {
+			provider.mockRestore();
+		}
+	});
+
+	test("searching a connected account name finds its model rather than the same ID on another provider", () => {
+		const id = "example-v4";
+		const name = "Example Cloud subscription";
+		const connected = spyOn(authRules, "providerConnectedName").mockImplementation(key =>
+			key === "example-cloud" ? name : undefined,
+		);
+		try {
+			const browser = makeBrowser([makeModel("example-key", id), makeModel("example-cloud", id)], []);
+			browser.setQuery(name);
+			expect(browser.visible.flatMap(row => (isSeparator(row) ? [] : [row.selector]))).toEqual([
+				`example-cloud/${id}`,
+			]);
+		} finally {
+			connected.mockRestore();
+		}
+	});
+
 	test("headless candidates preserve picker relevance and affinity ordering", () => {
 		const models = [makeModel("a", "example-2"), makeModel("b", "example-2"), makeModel("a", "other")];
 		const roles: RoleAssignments = {};

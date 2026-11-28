@@ -5,6 +5,7 @@
  */
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import type { Model } from "@oh-my-pi/pi-ai";
+import { providerConnectedName } from "@oh-my-pi/pi-catalog/compat/auth";
 import {
 	getEffectiveTokenCost,
 	getFactoryDroidCreditRate,
@@ -770,9 +771,11 @@ function searchTier(query: string, id: string, selector: string): number {
 	return 2;
 }
 
-/** The fuzzy haystack of a model row: `provider/id`, plus `free` for zero-cost models (the cost column's word). */
+/** Search by selector, connected provider name, or the `free` price label. */
 export function modelSearchText(item: ModelBrowserItem): string {
-	return `${item.provider}/${modelIdSearchText(item)}`;
+	const selector = `${item.provider}/${modelIdSearchText(item)}`;
+	const name = providerConnectedName(item.provider);
+	return name ? `${name} ${selector}` : selector;
 }
 
 /** {@link modelSearchText} without the provider: what the model part of a `provider/model` query searches. */

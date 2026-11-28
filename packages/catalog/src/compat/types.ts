@@ -749,6 +749,8 @@ export interface CompiledProvider {
 	skipCrossProviderReferenceFills?: boolean;
 	/** Runtime discovery keeps a bundled row's display name instead of the live one. */
 	keepBundledNames?: boolean;
+	/** Use the catalog display name instead of the model ID on model picker rows. */
+	useModelNamesInPicker?: boolean;
 	/** Present only for providers enrolled in `generate-models.ts` discovery. */
 	discovery?: CompiledProviderDiscovery;
 	/** Non-chat model kinds mapped to their runtime transport APIs. */

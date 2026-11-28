@@ -103,6 +103,17 @@ export function quotaTierFor(provider: string, model: string): string | undefine
 	return rule.defaultTier;
 }
 
+/** Every quota scope a provider's `quota-tiers` rule declares (tiers, fallbacks, default), in authored order. */
+export function quotaTierLabels(provider: string): readonly string[] {
+	const rule = behavior.quotaTiers.find(candidate => candidate.provider === provider);
+	if (!rule) return [];
+	const labels = new Set<string>();
+	for (const tier of rule.tiers) labels.add(tier.label);
+	for (const fallback of rule.fallbacks) labels.add(fallback.label);
+	if (rule.defaultTier !== undefined) labels.add(rule.defaultTier);
+	return [...labels];
+}
+
 /** UTC offset for a provider's timezone-naive reset stamps, including its declared upstream endpoint. */
 export function retryResetTimezoneOffsetFor(provider: string, baseUrl?: string): string | undefined {
 	const direct = behavior.retryResetTimezones.find(rule => rule.provider === provider);
