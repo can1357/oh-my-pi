@@ -211,6 +211,25 @@ describe("pruneSupersededToolResults: identical-result dedupe", () => {
 		expect(text(first[1])).toBe(STATUS_OUTPUT);
 	});
 
+	test("a call whose arguments do not serialize is never deduped and does not abort the pass", () => {
+		const cyclic: Record<string, unknown> = { path: "src" };
+		cyclic.self = cyclic;
+		// All share one shape bucket: same tool, same output.
+		const bigA = turn("lookup", { rowId: 9_007_199_254_740_993n }, STATUS_OUTPUT, T0);
+		const bigB = turn("lookup", { rowId: 9_007_199_254_740_993n }, STATUS_OUTPUT, T0 + 1_000);
+		const loopA = turn("lookup", cyclic, STATUS_OUTPUT, T0 + 2_000);
+		const loopB = turn("lookup", cyclic, STATUS_OUTPUT, T0 + 3_000);
+		// The decimal-string spelling history uses for that bigint.
+		const strA = turn("lookup", { rowId: "9007199254740993" }, STATUS_OUTPUT, T0 + 4_000);
+		const strB = turn("lookup", { rowId: "9007199254740993" }, STATUS_OUTPUT, T0 + 5_000);
+
+		const pruned = dedupe([...bigA, ...bigB, ...loopA, ...loopB, ...strA, ...strB]);
+
+		expect(pruned.prunedCount).toBe(1);
+		expect(text(strA[1])).toBe(dedupedNotice("lookup"));
+		for (const kept of [bigA, bigB, loopA, loopB, strB]) expect(text(kept[1])).toBe(STATUS_OUTPUT);
+	});
+
 	test("a schema replaced mid-session never strips `i` from calls its old schema owned", async () => {
 		// The MCP server first declares `i` (a page index); a `tools/list_changed`
 		// then replaces the same-named tool with a schema that does not.

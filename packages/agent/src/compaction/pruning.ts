@@ -540,7 +540,16 @@ function collectDuplicateResults(
 				const { [INTENT_FIELD]: _intent, ...rest } = args;
 				args = rest;
 			}
-			const identity = stableStringifyJson([args, occurrence.message.content]);
+			// Arguments from extension hooks or host integrations need not be
+			// JSON-shaped (a bigint, a cycle). A result whose identity cannot be
+			// serialized is never deduped: skipping it cannot abort this
+			// per-turn pass, and no lossy encoding can merge two distinct calls.
+			let identity: string;
+			try {
+				identity = stableStringifyJson([args, occurrence.message.content]);
+			} catch {
+				continue;
+			}
 			let group = byIdentity.get(identity);
 			if (!group) {
 				group = [];
